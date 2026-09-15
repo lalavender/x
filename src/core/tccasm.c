@@ -1,21 +1,19 @@
 /*
- *  GAS like assembler for TCC
+ *  TCC 的类 GAS 汇编器
  *
  *  Copyright (c) 2001-2004 Fabrice Bellard
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * 本库为自由软件；你可以遵照自由软件基金会发布的 GNU 宽通用公共许可证
+ * 的条款重新分发和/或修改它，无论是许可证的第 2 版，还是（由你选择的）
+ * 任何更新的版本。
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * 分发本库是希望它有用，但不提供任何担保；
+ * 甚至不提供对适销性或特定用途适用性的默示担保。
+ * 详见 GNU 宽通用公共许可证。
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * 你应当已经随本库收到一份 GNU 宽通用公共许可证的副本；
+ * 如果没有，请写信给自由软件基金会：
+ * 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "tcc.h"
@@ -43,24 +41,24 @@ static Sym *asm_label_find(int v) {
 }
 
 static Sym *asm_label_push(int v) {
-  /* We always add VT_EXTERN, for sym definition that's tentative
-     (for .set, removed for real defs), for mere references it's correct
-     as is.  */
+  /* 我们总是加上 VT_EXTERN，对符号定义而言这是暂定定义
+     （对 .set 而言如此，真正的定义会去掉它），对单纯的引用来说
+     这样本来就正确。  */
   Sym *sym = global_identifier_push(v, VT_ASM | VT_EXTERN | VT_STATIC, 0);
   sym->r = VT_CONST | VT_SYM;
   return sym;
 }
 
-/* Return a symbol we can use inside the assembler, having name NAME.
-   Symbols from asm and C source share a namespace.  If we generate
-   an asm symbol it's also a (file-global) C symbol, but it's
-   either not accessible by name (like "L.123"), or its type information
-   is such that it's not usable without a proper C declaration.
+/* 返回一个可在汇编器内部使用的符号，名字为 NAME。
+   来自 asm 和 C 源码的符号共用同一个命名空间。如果我们生成
+   一个 asm 符号，它同时也是一个（文件级的）C 符号，但它
+   要么不能按名字访问（如 "L.123"），要么其类型信息
+   使得它没有正确的 C 声明就无法使用。
 
-   Sometimes we need symbols accessible by name from asm, which
-   are anonymous in C, in this case CSYM can be used to transfer
-   all information from that symbol to the (possibly newly created)
-   asm symbol.  */
+   有时我们需要在 asm 中按名字访问、而在 C 中是匿名的
+   符号，这时可以用 CSYM 把该符号的所有信息转移到
+   （可能是新建的）asm 符号上。
+    */
 ST_FUNC Sym *get_asm_sym(int name, Sym *csym) {
   Sym *sym = asm_label_find(name);
   if (!sym) {
@@ -78,8 +76,8 @@ static Sym *asm_section_sym(TCCState *s1, Section *sec) {
   return sym ? sym : asm_new_label1(s1, label, 1, sec->sh_num, 0);
 }
 
-/* We do not use the C expression parser to handle symbols. Maybe the
-   C expression parser could be tweaked to do so. */
+/* 我们不用 C 表达式解析器来处理符号。也许可以
+   调整 C 表达式解析器让它来做这件事。 */
 
 static void asm_expr_unary(TCCState *s1, ExprValue *pe) {
   Sym *sym;
@@ -92,19 +90,19 @@ static void asm_expr_unary(TCCState *s1, ExprValue *pe) {
     p = tokc.str.data;
     n = strtoull(p, (char **)&p, 0);
     if (*p == 'b' || *p == 'f') {
-      /* backward or forward label */
+      /* 向后或向前标签 */
       label = asm_get_local_label_name(s1, n);
       sym = asm_label_find(label);
       if (*p == 'b') {
-        /* backward : find the last corresponding defined label */
+        /* 向后：找到最后一个对应且已定义的标签 */
         if (sym && (!sym->c || elfsym(sym)->st_shndx == SHN_UNDEF))
           sym = sym->prev_tok;
         if (!sym)
           tcc_error("local label '%d' not found backward", n);
       } else {
-        /* forward */
+        /* 向前 */
         if (!sym || (sym->c && elfsym(sym)->st_shndx != SHN_UNDEF)) {
-          /* if the last label is defined, then define a new one */
+          /* 如果最后一个标签已定义，则定义一个新的 */
           sym = asm_label_push(label);
         }
       }
@@ -157,11 +155,11 @@ static void asm_expr_unary(TCCState *s1, ExprValue *pe) {
   default:
     if (tok >= TOK_IDENT) {
       ElfSym *esym;
-      /* label case : if the label was not found, add one */
+      /* 标签情形：如果没找到该标签，就添加一个 */
       sym = get_asm_sym(tok, NULL);
       esym = elfsym(sym);
       if (esym && esym->st_shndx == SHN_ABS) {
-        /* if absolute symbol, no need to put a symbol value */
+        /* 如果是绝对符号，就不需要放入符号值 */
         pe->v = esym->st_value;
         pe->sym = NULL;
         pe->pcrel = 0;
@@ -265,25 +263,25 @@ static inline void asm_expr_sum(TCCState *s1, ExprValue *pe) {
         pe->sym = e2.sym;
     } else {
       pe->v -= e2.v;
-      /* NOTE: we are less powerful than gas in that case
-         because we store only one symbol in the expression */
+      /* 注意：这种情况下我们不如 gas 强大，
+         因为表达式中只保存一个符号 */
       if (!e2.sym) {
-        /* OK */
+        /* 可以 */
       } else if (pe->sym == e2.sym) {
-        /* OK */
-        pe->sym = NULL; /* same symbols can be subtracted to NULL */
+        /* 可以 */
+        pe->sym = NULL; /* 相同的符号相减可以得到 NULL */
       } else {
         ElfSym *esym1, *esym2;
         esym1 = elfsym(pe->sym);
         esym2 = elfsym(e2.sym);
         if (esym1 && esym1->st_shndx == esym2->st_shndx &&
             esym1->st_shndx != SHN_UNDEF) {
-          /* we also accept defined symbols in the same section */
+          /* 我们也接受同一段中已定义的符号 */
           pe->v += esym1->st_value - esym2->st_value;
           pe->sym = NULL;
         } else if (esym2->st_shndx == cur_text_section->sh_num) {
-          /* When subtracting a defined symbol in current section
-             this actually makes the value PC-relative.  */
+          /* 减去当前段中已定义的符号时，
+             这实际上使该值成为 PC 相对值。  */
           pe->v -= esym2->st_value - ind - 4;
           pe->pcrel = 1;
           e2.sym = NULL;
@@ -331,7 +329,7 @@ static inline void asm_expr_cmp(TCCState *s1, ExprValue *pe) {
     default:
       break;
     }
-    /* GAS compare results are -1/0 not 1/0.  */
+    /* GAS 的比较结果是 -1/0 而不是 1/0。  */
     pe->v = -(int64_t)pe->v;
   }
 }
@@ -354,11 +352,11 @@ static Sym *asm_new_label1(TCCState *s1, int label, int is_local, int sh_num,
   sym = asm_label_find(label);
   if (sym) {
     esym = elfsym(sym);
-    /* A VT_EXTERN symbol, even if it has a section is considered
-       overridable.  This is how we "define" .set targets.  Real
-       definitions won't have VT_EXTERN set.  */
+    /* 带 VT_EXTERN 的符号即使有段也被视为
+       可覆盖。我们就是这样“定义” .set 目标的。真正的
+       定义不会置 VT_EXTERN。  */
     if (esym && esym->st_shndx != SHN_UNDEF) {
-      /* the label is already defined */
+      /* 该标签已经定义 */
       if (IS_ASM_SYM(sym) && (is_local == 1 || (sym->type.t & VT_EXTERN)))
         goto new_label;
       if (!(sym->type.t & VT_EXTERN))
@@ -383,8 +381,8 @@ static Sym *asm_new_label(TCCState *s1, int label, int is_local) {
   return asm_new_label1(s1, label, is_local, cur_text_section->sh_num, ind);
 }
 
-/* Set the value of LABEL to that of some expression (possibly
-   involving other symbols).  LABEL can be overwritten later still.  */
+/* 把 LABEL 的值设为某个表达式（可能涉及其他符号）的值。
+   之后仍可以覆盖 LABEL。  */
 static Sym *set_symbol(TCCState *s1, int label) {
   long n;
   ExprValue e;
@@ -432,7 +430,7 @@ static void asm_parse_directive(TCCState *s1, int global) {
   Section *sec;
   uint8_t *ptr;
 
-  /* assembler directive */
+  /* 汇编器伪指令 */
   sec = cur_text_section;
   switch (tok) {
   case TOK_ASMDIR_align:
@@ -454,7 +452,7 @@ static void asm_parse_directive(TCCState *s1, int global) {
         tcc_error("alignment must be a positive power of two");
       offset = (ind + n - 1) & -n;
       size = offset - ind;
-      /* the section must have a compatible alignment */
+      /* 该段必须有兼容的对齐 */
       if (sec->sh_addralign < n)
         sec->sh_addralign = n;
     } else {
@@ -476,10 +474,6 @@ static void asm_parse_directive(TCCState *s1, int global) {
     ind += size;
     break;
   case TOK_ASMDIR_quad:
-#ifdef TCC_TARGET_X86_64
-    size = 8;
-    goto asm_data;
-#else
     next();
     for (;;) {
       uint64_t vl;
@@ -495,7 +489,7 @@ static void asm_parse_directive(TCCState *s1, int global) {
         goto error_constant;
       next();
       if (sec->sh_type != SHT_NOBITS) {
-        /* XXX: endianness */
+        /* XXX：字节序 */
         gen_le32(vl);
         gen_le32(vl >> 32);
       } else {
@@ -506,7 +500,6 @@ static void asm_parse_directive(TCCState *s1, int global) {
       next();
     }
     break;
-#endif
   case TOK_ASMDIR_byte:
     size = 1;
     goto asm_data;
@@ -525,10 +518,6 @@ static void asm_parse_directive(TCCState *s1, int global) {
       if (sec->sh_type != SHT_NOBITS) {
         if (size == 4) {
           gen_expr32(&e);
-#ifdef TCC_TARGET_X86_64
-        } else if (size == 8) {
-          gen_expr64(&e);
-#endif
         } else {
           if (e.sym)
             expect("constant");
@@ -570,7 +559,7 @@ static void asm_parse_directive(TCCState *s1, int global) {
         val = asm_int_expr(s1);
       }
     }
-    /* XXX: endianness */
+    /* XXX：字节序 */
     repeat_buf[0] = val;
     repeat_buf[1] = val >> 8;
     repeat_buf[2] = val >> 16;
@@ -630,8 +619,8 @@ static void asm_parse_directive(TCCState *s1, int global) {
     next();
     tok1 = tok;
     next();
-    /* Also accept '.set stuff', but don't do anything with this.
-       It's used in GAS to set various features like '.set mips16'.  */
+    /* 也接受 '.set stuff'，但不做任何处理。
+       在 GAS 中它用于设置各种特性，如 '.set mips16'。  */
     if (tok == ',')
       set_symbol(s1, tok1);
     break;
@@ -777,7 +766,7 @@ static void asm_parse_directive(TCCState *s1, int global) {
     int old_nb_section = s1->nb_sections;
 
     tok1 = tok;
-    /* XXX: support more options */
+    /* XXX：支持更多选项 */
     next();
     sname[0] = '\0';
     while (tok != ';' && tok != TOK_LINEFEED && tok != ',') {
@@ -788,7 +777,7 @@ static void asm_parse_directive(TCCState *s1, int global) {
       next();
     }
     if (tok == ',') {
-      /* skip section options */
+      /* 跳过段选项 */
       next();
       if (tok != TOK_STR)
         expect("string constant");
@@ -805,9 +794,9 @@ static void asm_parse_directive(TCCState *s1, int global) {
       use_section(s1, sname);
     else
       push_section(s1, sname);
-    /* If we just allocated a new section reset its alignment to
-       1.  new_section normally acts for GCC compatibility and
-       sets alignment to PTR_SIZE.  The assembler behaves different. */
+    /* 如果刚刚分配了新段，把它的对齐重置为
+       1。new_section 通常为了兼容 GCC 而
+       把对齐设为 PTR_SIZE。汇编器的行为不同。 */
     if (old_nb_section != s1->nb_sections)
       cur_text_section->sh_addralign = 1;
   } break;
@@ -824,29 +813,13 @@ static void asm_parse_directive(TCCState *s1, int global) {
     next();
     pop_section(s1);
     break;
-#ifdef TCC_TARGET_I386
-  case TOK_ASMDIR_code16: {
-    next();
-    s1->seg_size = 16;
-  } break;
-  case TOK_ASMDIR_code32: {
-    next();
-    s1->seg_size = 32;
-  } break;
-#endif
-#ifdef TCC_TARGET_X86_64
-  /* added for compatibility with GAS */
-  case TOK_ASMDIR_code64:
-    next();
-    break;
-#endif
   default:
     tcc_error("unknown assembler directive '.%s'", get_tok_str(tok, NULL));
     break;
   }
 }
 
-/* assemble a file */
+/* 汇编一个文件 */
 static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global) {
   int opcode;
   int saved_parse_flags = parse_flags;
@@ -858,13 +831,13 @@ static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global) {
     next();
     if (tok == TOK_EOF)
       break;
-    /* generate line number info */
+    /* 生成行号信息 */
     if (global && s1->do_debug)
       tcc_debug_line(s1);
-    parse_flags |= PARSE_FLAG_LINEFEED; /* XXX: suppress that hack */
+    parse_flags |= PARSE_FLAG_LINEFEED; /* XXX：去掉这个权宜之计 */
   redo:
     if (tok == '#') {
-      /* horrible gas comment */
+      /* 讨厌的 gas 注释 */
       while (tok != TOK_LINEFEED)
         next();
     } else if (tok >= TOK_ASMDIR_FIRST && tok <= TOK_ASMDIR_LAST) {
@@ -876,17 +849,17 @@ static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global) {
       n = strtoul(p, (char **)&p, 10);
       if (*p != '\0')
         expect("':'");
-      /* new local label */
+      /* 新的局部标签 */
       asm_new_label(s1, asm_get_local_label_name(s1, n), 1);
       next();
       skip(':');
       goto redo;
     } else if (tok >= TOK_IDENT) {
-      /* instruction or label */
+      /* 指令或标签 */
       opcode = tok;
       next();
       if (tok == ':') {
-        /* new label */
+        /* 新标签 */
         asm_new_label(s1, opcode, 0);
         next();
         goto redo;
@@ -897,21 +870,21 @@ static int tcc_assemble_internal(TCCState *s1, int do_preprocess, int global) {
         asm_opcode(s1, opcode);
       }
     }
-    /* end of line */
+    /* 行尾 */
     if (tok != ';' && tok != TOK_LINEFEED)
       expect("end of line");
-    parse_flags &= ~PARSE_FLAG_LINEFEED; /* XXX: suppress that hack */
+    parse_flags &= ~PARSE_FLAG_LINEFEED; /* XXX：去掉这个权宜之计 */
   }
 
   parse_flags = saved_parse_flags;
   return 0;
 }
 
-/* Assemble the current file */
+/* 汇编当前文件 */
 ST_FUNC int tcc_assemble(TCCState *s1, int do_preprocess) {
   int ret;
   tcc_debug_start(s1);
-  /* default section is text */
+  /* 默认段是代码段 */
   cur_text_section = text_section;
   ind = cur_text_section->data_offset;
   nocode_wanted = 0;
@@ -922,11 +895,11 @@ ST_FUNC int tcc_assemble(TCCState *s1, int do_preprocess) {
 }
 
 /********************************************************************/
-/* GCC inline asm support */
+/* GCC 内联 asm 支持 */
 
-/* assemble the string 'str' in the current C compilation unit without
-   C preprocessing. NOTE: str is modified by modifying the '\0' at the
-   end */
+/* 在当前 C 编译单元中汇编字符串 'str'，不做
+   C 预处理。注意：str 会被修改，方式是改动末尾的
+   '\0' */
 static void tcc_assemble_inline(TCCState *s1, char *str, int len, int global) {
   const int *saved_macro_ptr = macro_ptr;
   int dotid = set_idnum('.', IS_ID);
@@ -941,9 +914,9 @@ static void tcc_assemble_inline(TCCState *s1, char *str, int len, int global) {
   macro_ptr = saved_macro_ptr;
 }
 
-/* find a constraint by its number or id (gcc 3 extended
-   syntax). return -1 if not found. Return in *pp in char after the
-   constraint */
+/* 按编号或 id 查找约束（gcc 3 扩展
+   语法）。找不到时返回 -1。在 *pp 中返回约束之后的
+   字符 */
 ST_FUNC int find_constraint(ASMOperand *operands, int nb_operands,
                             const char *name, const char **pp) {
   int index;
@@ -1000,8 +973,8 @@ static void subst_asm_operands(ASMOperand *operands, int nb_operands,
       modifier = 0;
       if (*str == 'c' || *str == 'n' || *str == 'b' || *str == 'w' ||
           *str == 'h' || *str == 'k' || *str == 'q' ||
-          /* P in GCC would add "@PLT" to symbol refs in PIC mode,
-             and make literal operands not be decorated with '$'.  */
+          /* 在 GCC 中 P 会在 PIC 模式下给符号引用加上 "@PLT"，
+             并使字面量操作数不带 '$' 修饰。  */
           *str == 'P')
         modifier = *str++;
       index = find_constraint(operands, nb_operands, str, &str);
@@ -1055,10 +1028,10 @@ static void parse_asm_operands(ASMOperand *operands, int *nb_operands_ptr,
         if (!(vtop->type.t & VT_ARRAY))
           test_lvalue();
       } else {
-        /* we want to avoid LLOCAL case, except when the 'm'
-           constraint is used. Note that it may come from
-           register storage, so we need to convert (reg)
-           case */
+        /* 我们希望避免 LLOCAL 情形，除非使用了 'm'
+           约束。注意它可能来自寄存器存储，
+           所以需要转换 (reg)
+           情形 */
         if ((vtop->r & VT_LVAL) &&
             ((vtop->r & VT_VALMASK) == VT_LLOCAL ||
              (vtop->r & VT_VALMASK) < VT_CONST) &&
@@ -1078,7 +1051,7 @@ static void parse_asm_operands(ASMOperand *operands, int *nb_operands_ptr,
   }
 }
 
-/* parse the GCC asm() instruction */
+/* 解析 GCC 的 asm() 指令 */
 ST_FUNC void asm_instr(void) {
   CString astr, astr1;
   ASMOperand operands[MAX_ASM_OPERANDS];
@@ -1086,7 +1059,7 @@ ST_FUNC void asm_instr(void) {
   uint8_t clobber_regs[NB_ASM_REGS];
 
   next();
-  /* since we always generate the asm() instruction, we can ignore
+  /* 因为我们总是生成 asm() 指令，所以可以忽略
      volatile */
   if (tok == TOK_VOLATILE1 || tok == TOK_VOLATILE2 || tok == TOK_VOLATILE3) {
     next();
@@ -1099,17 +1072,17 @@ ST_FUNC void asm_instr(void) {
   if (tok == ':') {
     next();
     must_subst = 1;
-    /* output args */
+    /* 输出参数 */
     parse_asm_operands(operands, &nb_operands, 1);
     nb_outputs = nb_operands;
     if (tok == ':') {
       next();
       if (tok != ')') {
-        /* input args */
+        /* 输入参数 */
         parse_asm_operands(operands, &nb_operands, 0);
         if (tok == ':') {
-          /* clobber list */
-          /* XXX: handle registers */
+          /* 破坏列表 */
+          /* XXX：处理寄存器 */
           next();
           for (;;) {
             if (tok != TOK_STR)
@@ -1127,20 +1100,20 @@ ST_FUNC void asm_instr(void) {
     }
   }
   skip(')');
-  /* NOTE: we do not eat the ';' so that we can restore the current
-     token after the assembler parsing */
+  /* 注意：我们不吃掉 ';'，这样就能在汇编器解析之后
+     恢复当前词法单元 */
   if (tok != ';')
     expect("';'");
 
-  /* save all values in the memory */
+  /* 把所有值保存到内存中 */
   save_regs(0);
 
-  /* compute constraints */
+  /* 计算约束 */
   asm_compute_constraints(operands, nb_operands, nb_outputs, clobber_regs,
                           &out_reg);
 
-  /* substitute the operands in the asm string. No substitution is
-     done if no operands (GCC behaviour) */
+  /* 在 asm 字符串中替换操作数。如果没有操作数
+     就不做替换（GCC 的行为） */
 #ifdef ASM_DEBUG
   printf("asm: \"%s\"\n", (char *)astr.data);
 #endif
@@ -1154,19 +1127,19 @@ ST_FUNC void asm_instr(void) {
   printf("subst_asm: \"%s\"\n", (char *)astr1.data);
 #endif
 
-  /* generate loads */
+  /* 生成加载 */
   asm_gen_code(operands, nb_operands, nb_outputs, 0, clobber_regs, out_reg);
 
-  /* assemble the string with tcc internal assembler */
+  /* 用 tcc 内部汇编器汇编该字符串 */
   tcc_assemble_inline(tcc_state, astr1.data, astr1.size - 1, 0);
 
-  /* restore the current C token */
+  /* 恢复当前 C 词法单元 */
   next();
 
-  /* store the output values if needed */
+  /* 如需要则保存输出值 */
   asm_gen_code(operands, nb_operands, nb_outputs, 1, clobber_regs, out_reg);
 
-  /* free everything */
+  /* 释放所有内容 */
   for (i = 0; i < nb_operands; i++) {
     ASMOperand *op;
     op = &operands[i];
@@ -1180,13 +1153,13 @@ ST_FUNC void asm_global_instr(void) {
   CString astr;
   int saved_nocode_wanted = nocode_wanted;
 
-  /* Global asm blocks are always emitted.  */
+  /* 全局 asm 块总是会生成。  */
   nocode_wanted = 0;
   next();
   parse_asm_str(&astr);
   skip(')');
-  /* NOTE: we do not eat the ';' so that we can restore the current
-     token after the assembler parsing */
+  /* 注意：我们不吃掉 ';'，这样就能在汇编器解析之后
+     恢复当前词法单元 */
   if (tok != ';')
     expect("';'");
 
@@ -1196,12 +1169,12 @@ ST_FUNC void asm_global_instr(void) {
   cur_text_section = text_section;
   ind = cur_text_section->data_offset;
 
-  /* assemble the string with tcc internal assembler */
+  /* 用 tcc 内部汇编器汇编该字符串 */
   tcc_assemble_inline(tcc_state, astr.data, astr.size - 1, 1);
 
   cur_text_section->data_offset = ind;
 
-  /* restore the current C token */
+  /* 恢复当前 C 词法单元 */
   next();
 
   cstr_free(&astr);

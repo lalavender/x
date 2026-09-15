@@ -1,21 +1,19 @@
 /*
- *  TCC - Tiny C Compiler
+ *  TCC - Tiny C Compiler（微型 C 编译器）
  *
  *  Copyright (c) 2001-2004 Fabrice Bellard
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * 本库为自由软件；你可以遵照自由软件基金会发布的 GNU 宽通用公共许可证
+ * 的条款重新分发和/或修改它，无论是许可证的第 2 版，还是（由你选择的）
+ * 任何更新的版本。
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * 分发本库是希望它有用，但不提供任何担保；
+ * 甚至不提供对适销性或特定用途适用性的默示担保。
+ * 详见 GNU 宽通用公共许可证。
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * 你应当已经随本库收到一份 GNU 宽通用公共许可证的副本；
+ * 如果没有，请写信给自由软件基金会：
+ * 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "tcc.h"
@@ -127,9 +125,7 @@ static const char help2[] =
 
 static const char version[] = "tcc version " TCC_VERSION " ("
                               "AArch64"
-#if defined(TCC_TARGET_MACHO)
-                              " Darwin"
-#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+#if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
                               " FreeBSD"
 #else
                               " Linux"
@@ -145,7 +141,7 @@ static void print_dirs(const char *msg, char **paths, int nb_paths) {
 
 static void print_search_dirs(TCCState *s) {
   printf("install: %s\n", s->tcc_lib_path);
-  /* print_dirs("programs", NULL, 0); */
+  /* print_dirs("programs", NULL, 0); */  /* 打印程序目录 */
   print_dirs("include", s->sysinclude_paths, s->nb_sysinclude_paths);
   print_dirs("libraries", s->library_paths, s->nb_library_paths);
   printf("libtcc1:\n  %s/" TCC_LIBTCC1 "\n", s->tcc_lib_path);
@@ -216,7 +212,7 @@ redo:
     if (opt == OPT_HELP2)
       return printf(help2), 1;
     if (opt == OPT_M32 || opt == OPT_M64)
-      tcc_tool_cross(s, argv, opt); /* never returns */
+      tcc_tool_cross(s, argv, opt); /* 永不返回 */
     if (s->verbose)
       printf(version);
     if (opt == OPT_AR)
@@ -224,7 +220,7 @@ redo:
     if (opt == OPT_V)
       return 0;
     if (opt == OPT_PRINT_DIRS) {
-      /* initialize search dirs */
+      /* 初始化搜索目录 */
       set_environment(s);
       tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
       print_search_dirs(s);
@@ -266,7 +262,7 @@ redo:
       (s->dflag & 16))
     s->dflag |= t ? 32 : 0, s->run_test = ++t, n = s->nb_files;
 
-  /* compile or add each files or library */
+  /* 逐个编译或添加每个文件/库 */
   for (first_file = NULL, ret = 0;;) {
     struct filespec *f = s->files[s->nb_files - n];
     s->filetype = f->type;
@@ -311,9 +307,9 @@ redo:
     tcc_print_stats(s, getclock_ms() - start_time);
   tcc_delete(s);
   if (ret == 0 && n)
-    goto redo; /* compile more files with -c */
+    goto redo; /* 用 -c 继续编译更多文件 */
   if (t)
-    goto redo; /* run more tests with -dt -run */
+    goto redo; /* 用 -dt -run 继续运行更多测试 */
   if (ppfp && ppfp != stdout)
     fclose(ppfp);
   return ret;

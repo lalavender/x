@@ -1,32 +1,32 @@
 /*
- *  TCC - Tiny C Compiler
+ *  TCC - Tiny C Compiler（微型 C 编译器）
  * 
  *  Copyright (c) 2001-2004 Fabrice Bellard
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * 本库为自由软件；你可以遵照自由软件基金会发布的 GNU 宽通用公共
+ * 许可证的条款重新分发和/或修改它，无论是许可证的第 2 版，还是
+ * （由你选择的）任何更新的版本。
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * 分发本库是希望它有用，但不提供任何担保；
+ * 甚至不提供对适销性或特定用途适用性的默示担保。
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * 详见 GNU 宽通用公共许可证。
+ *
+ *
+ * 你应当已经随本库收到一份 GNU 宽通用公共许可证的副本；
+ * 如果没有，请写信给自由软件基金会：
+ * 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "tcc.h"
 
 /********************************************************/
-/* global variables */
+/* 全局变量 */
 
-/* loc : local variable index
-   ind : output code index
-   rsym: return symbol
-   anon_sym: anonymous symbol index
+/* loc : 局部变量索引
+   ind : 输出代码索引
+   rsym: 返回符号
+   anon_sym: 匿名符号索引
 */
 ST_DATA int rsym, anon_sym, ind, loc;
 
@@ -43,33 +43,44 @@ static int local_scope;
 static int in_sizeof;
 static int section_sym;
 
-ST_DATA int vlas_in_scope; /* number of VLAs that are currently in scope */
-ST_DATA int vla_sp_root_loc; /* vla_sp_loc for SP before any VLAs were pushed */
-ST_DATA int vla_sp_loc; /* Pointer to variable holding location to store stack pointer on the stack when modifying stack pointer */
+ST_DATA int vlas_in_scope; /* 当前在作用域中的 VLA 数量 */
+ST_DATA int vla_sp_root_loc; /* 压入任何 VLA 之前的 SP 所对应的 vla_sp_loc */
+ST_DATA int vla_sp_loc; /* 指向某个变量的指针，该变量保存修改栈指针时用于在栈上存放栈指针的位置 */
 
 ST_DATA SValue __vstack[1+VSTACK_SIZE], *vtop, *pvtop;
 
-ST_DATA int const_wanted; /* true if constant wanted */
-ST_DATA int nocode_wanted; /* no code generation wanted */
-#define NODATA_WANTED (nocode_wanted > 0) /* no static data output wanted either */
-#define STATIC_DATA_WANTED (nocode_wanted & 0xC0000000) /* only static data output */
-ST_DATA int global_expr;  /* true if compound literals must be allocated globally (used during initializers parsing */
-ST_DATA CType func_vt; /* current function return type (used by return instruction) */
-ST_DATA int func_var; /* true if current function is variadic (used by return instruction) */
+ST_DATA int const_wanted; /* 若需要常量则为真 */
+ST_DATA int nocode_wanted; /* 不需要代码生成 */
+#define NODATA_WANTED (nocode_wanted > 0) /* 也不需要输出静态数据 */
+#define STATIC_DATA_WANTED (nocode_wanted & 0xC0000000) /* 只输出静态数据 */
+ST_DATA int global_expr;  /* 若复合字面量必须在全局分配则为真（用于初始化器解析期间 */
+ST_DATA CType func_vt; /* 当前函数的返回类型（由 return 指令使用） */
+ST_DATA int func_var; /* 若当前函数是变参函数则为真（由 return 指令使用） */
 ST_DATA int func_vc;
-ST_DATA int last_line_num, last_ind, func_ind; /* debug last line number and pc */
+ST_DATA int last_line_num, last_ind, func_ind; /* 调试用的最后行号与 pc */
 ST_DATA const char *funcname;
 ST_DATA int g_debug;
 
 ST_DATA CType char_pointer_type, func_old_type, int_type, size_type, ptrdiff_type;
 
+/*
+ * switch_t / case_t —— 当前 switch 语句的 case 表（跳转表）
+ *
+ * 解析 switch 语句体时，cur_switch 指向本次 switch 的表，每遇到一个 case 就
+ * 追加一条 case_t；整段语句体生成完后再由 gcase() 用二分查找 + 区间比较把
+ * 各 case 分派出去（本后端不生成真正的跳转表，而是生成比较/分支序列）。
+ *   case_t.v1/v2  该 case 的值或取值区间（GNU 扩展 `case 1 ... 5`）；
+ *   case_t.sym    该 case 标签处的跳转目标（即 ind 的值），生成代码时回填；
+ *   p/n           case 指针数组及条数（dynarray_add 增长）；
+ *   def_sym       default 标签的跳转目标；未出现 default 时为 0。
+ */
 ST_DATA struct switch_t {
     struct case_t {
         int64_t v1, v2;
 	int sym;
-    } **p; int n; /* list of case ranges */
-    int def_sym; /* default symbol */
-} *cur_switch; /* current switch */
+    } **p; int n; /* case 范围列表 */
+    int def_sym; /* default 符号 */
+} *cur_switch; /* 当前 switch */
 
 /* ------------------------------------------------------------------------- */
 
@@ -106,9 +117,9 @@ ST_INLN int is_float(int t)
     return bt == VT_LDOUBLE || bt == VT_DOUBLE || bt == VT_FLOAT || bt == VT_QFLOAT;
 }
 
-/* we use our own 'finite' function to avoid potential problems with
-   non standard math libs */
-/* XXX: endianness dependent */
+/* 我们使用自己的 'finite' 函数，以避免与非标准数学库
+   相关的潜在问题 */
+/* XXX: 依赖字节序 */
 ST_FUNC int ieee_finite(double d)
 {
     int p[4];
@@ -129,7 +140,7 @@ ST_FUNC void check_vstack(void)
 }
 
 /* ------------------------------------------------------------------------- */
-/* vstack debugging aid */
+/* vstack 调试辅助 */
 
 #if 0
 void pv (const char *lbl, int a, int b)
@@ -144,13 +155,13 @@ void pv (const char *lbl, int a, int b)
 #endif
 
 /* ------------------------------------------------------------------------- */
-/* start of translation unit info */
+/* 翻译单元信息的开始 */
 ST_FUNC void tcc_debug_start(TCCState *s1)
 {
     if (s1->do_debug) {
         char buf[512];
 
-        /* file info: full path + filename */
+        /* 文件信息：完整路径 + 文件名 */
         section_sym = put_elf_sym(symtab_section, 0, 0,
                                   ELFW(ST_INFO)(STB_LOCAL, STT_SECTION), 0,
                                   text_section->sh_num, NULL);
@@ -167,14 +178,14 @@ ST_FUNC void tcc_debug_start(TCCState *s1)
         last_line_num = 0;
     }
 
-    /* an elf symbol of type STT_FILE must be put so that STB_LOCAL
-       symbols can be safely used */
+    /* 必须放入一个 STT_FILE 类型的 elf 符号，这样 STB_LOCAL
+       符号才能安全使用 */
     put_elf_sym(symtab_section, 0, 0,
                 ELFW(ST_INFO)(STB_LOCAL, STT_FILE), 0,
                 SHN_ABS, file->filename);
 }
 
-/* put end of translation unit info */
+/* 放入翻译单元信息的结束 */
 ST_FUNC void tcc_debug_end(TCCState *s1)
 {
     if (!s1->do_debug)
@@ -184,7 +195,7 @@ ST_FUNC void tcc_debug_end(TCCState *s1)
 
 }
 
-/* generate line number info */
+/* 生成行号信息 */
 ST_FUNC void tcc_debug_line(TCCState *s1)
 {
     if (!s1->do_debug)
@@ -196,7 +207,7 @@ ST_FUNC void tcc_debug_line(TCCState *s1)
     }
 }
 
-/* put function symbol */
+/* 放入函数符号 */
 ST_FUNC void tcc_debug_funcstart(TCCState *s1, Sym *sym)
 {
     char buf[512];
@@ -204,20 +215,20 @@ ST_FUNC void tcc_debug_funcstart(TCCState *s1, Sym *sym)
     if (!s1->do_debug)
         return;
 
-    /* stabs info */
-    /* XXX: we put here a dummy type */
+    /* stabs 信息 */
+    /* XXX: 这里放入一个哑类型 */
     snprintf(buf, sizeof(buf), "%s:%c1",
              funcname, sym->type.t & VT_STATIC ? 'f' : 'F');
     put_stabs_r(buf, N_FUN, 0, file->line_num, 0,
                 cur_text_section, sym->c);
-    /* //gr gdb wants a line at the function */
+    /* //gr gdb 希望在函数处有一行 */
     put_stabn(N_SLINE, 0, file->line_num, 0);
 
     last_ind = 0;
     last_line_num = 0;
 }
 
-/* put function size */
+/* 放入函数大小 */
 ST_FUNC void tcc_debug_funcend(TCCState *s1, int size)
 {
     if (!s1->do_debug)
@@ -235,7 +246,7 @@ ST_FUNC int tccgen_compile(TCCState *s1)
     const_wanted = 0;
     nocode_wanted = 0x80000000;
 
-    /* define some often used types */
+    /* 定义一些常用的类型 */
     int_type.t = VT_INT;
     char_pointer_type.t = VT_BYTE;
     mk_pointer(&char_pointer_type);
@@ -265,7 +276,7 @@ ST_FUNC int tccgen_compile(TCCState *s1)
     decl(VT_CONST);
     gen_inline_functions(s1);
     check_vstack();
-    /* end of translation unit info */
+    /* 翻译单元信息的结束 */
     tcc_debug_end(s1);
     return 0;
 }
@@ -278,7 +289,7 @@ ST_FUNC ElfSym *elfsym(Sym *s)
   return &((ElfSym *)symtab_section->data)[s->c];
 }
 
-/* apply storage attributes to Elf symbol */
+/* 把存储属性应用到 Elf 符号 */
 ST_FUNC void update_storage(Sym *sym)
 {
     ElfSym *esym;
@@ -315,8 +326,8 @@ ST_FUNC void update_storage(Sym *sym)
 }
 
 /* ------------------------------------------------------------------------- */
-/* update sym->c so that it points to an external symbol in section
-   'section' with value 'value' */
+/* 更新 sym->c，使其指向段
+   'section' 中值为 'value' 的外部符号 */
 
 ST_FUNC void put_extern_sym2(Sym *sym, int sh_num,
                             addr_t value, unsigned long size,
@@ -334,9 +345,9 @@ ST_FUNC void put_extern_sym2(Sym *sym, int sh_num,
         name = get_tok_str(sym->v, NULL);
 #ifdef CONFIG_TCC_BCHECK
         if (tcc_state->do_bounds_check) {
-            /* XXX: avoid doing that for statics ? */
-            /* if bound checking is activated, we change some function
-               names by adding the "__bound" prefix */
+            /* XXX: 对 static 是否应避免这样做？ */
+            /* 如果启用了边界检查，我们通过添加 "__bound" 前缀
+               来改变某些函数名 */
             switch(sym->v) {
             case TOK_memcpy:
             case TOK_memmove:
@@ -389,7 +400,7 @@ ST_FUNC void put_extern_sym(Sym *sym, Section *section,
     put_extern_sym2(sym, sh_num, value, size, 1);
 }
 
-/* add a new relocation entry to symbol 'sym' in section 's' */
+/* 为段 's' 中的符号 'sym' 添加一个新的重定位条目 */
 ST_FUNC void greloca(Section *s, Sym *sym, unsigned long offset, int type,
                      addr_t addend)
 {
@@ -404,7 +415,7 @@ ST_FUNC void greloca(Section *s, Sym *sym, unsigned long offset, int type,
         c = sym->c;
     }
 
-    /* now we can add ELF relocation info */
+    /* 现在可以添加 ELF 重定位信息 */
     put_elf_reloca(symtab_section, s, offset, type, c, addend);
 }
 
@@ -416,7 +427,7 @@ ST_FUNC void greloc(Section *s, Sym *sym, unsigned long offset, int type)
 #endif
 
 /* ------------------------------------------------------------------------- */
-/* symbol allocator */
+/* 符号分配器 */
 static Sym *__sym_malloc(void)
 {
     Sym *sym_pool, *sym, *last_sym;
@@ -461,7 +472,7 @@ ST_INLN void sym_free(Sym *sym)
 #endif
 }
 
-/* push, without hashing */
+/* 压入，不进行哈希 */
 ST_FUNC Sym *sym_push2(Sym **ps, int v, int t, int c)
 {
     Sym *s;
@@ -471,14 +482,14 @@ ST_FUNC Sym *sym_push2(Sym **ps, int v, int t, int c)
     s->v = v;
     s->type.t = t;
     s->c = c;
-    /* add in stack */
+    /* 加入栈中 */
     s->prev = *ps;
     *ps = s;
     return s;
 }
 
-/* find a symbol and return its associated structure. 's' is the top
-   of the symbol stack */
+/* 查找一个符号并返回其关联的结构体。's' 是
+   符号栈的顶部 */
 ST_FUNC Sym *sym_find2(Sym *s, int v)
 {
     while (s) {
@@ -491,7 +502,7 @@ ST_FUNC Sym *sym_find2(Sym *s, int v)
     return NULL;
 }
 
-/* structure lookup */
+/* 结构体查找 */
 ST_INLN Sym *struct_find(int v)
 {
     v -= TOK_IDENT;
@@ -500,7 +511,7 @@ ST_INLN Sym *struct_find(int v)
     return table_ident[v]->sym_struct;
 }
 
-/* find an identifier */
+/* 查找一个标识符 */
 ST_INLN Sym *sym_find(int v)
 {
     v -= TOK_IDENT;
@@ -509,7 +520,7 @@ ST_INLN Sym *sym_find(int v)
     return table_ident[v]->sym_identifier;
 }
 
-/* push a given symbol on the symbol stack */
+/* 把给定的符号压入符号栈 */
 ST_FUNC Sym *sym_push(int v, CType *type, int r, int c)
 {
     Sym *s, **ps;
@@ -522,10 +533,10 @@ ST_FUNC Sym *sym_push(int v, CType *type, int r, int c)
     s = sym_push2(ps, v, type->t, c);
     s->type.ref = type->ref;
     s->r = r;
-    /* don't record fields or anonymous symbols */
-    /* XXX: simplify */
+    /* 不记录字段或匿名符号 */
+    /* XXX: 简化 */
     if (!(v & SYM_FIELD) && (v & ~SYM_STRUCT) < SYM_FIRST_ANOM) {
-        /* record symbol in token array */
+        /* 在词法单元数组中记录符号 */
         ts = table_ident[(v & ~SYM_STRUCT) - TOK_IDENT];
         if (v & SYM_STRUCT)
             ps = &ts->sym_struct;
@@ -541,16 +552,16 @@ ST_FUNC Sym *sym_push(int v, CType *type, int r, int c)
     return s;
 }
 
-/* push a global identifier */
+/* 压入一个全局标识符 */
 ST_FUNC Sym *global_identifier_push(int v, int t, int c)
 {
     Sym *s, **ps;
     s = sym_push2(&global_stack, v, t, c);
-    /* don't record anonymous symbol */
+    /* 不记录匿名符号 */
     if (v < SYM_FIRST_ANOM) {
         ps = &table_ident[v - TOK_IDENT]->sym_identifier;
-        /* modify the top most local identifier, so that
-           sym_identifier will point to 's' when popped */
+        /* 修改最顶层的局部标识符，使得出栈时
+           sym_identifier 指向 's' */
         while (*ps != NULL && (*ps)->sym_scope)
             ps = &(*ps)->prev_tok;
         s->prev_tok = *ps;
@@ -559,8 +570,8 @@ ST_FUNC Sym *global_identifier_push(int v, int t, int c)
     return s;
 }
 
-/* pop symbols until top reaches 'b'.  If KEEP is non-zero don't really
-   pop them yet from the list, but do remove them from the token array.  */
+/* 弹出符号直到栈顶到达 'b'。若 KEEP 非零，则暂不真正从链表中
+   弹出它们，但仍从词法单元数组中移除。  */
 ST_FUNC void sym_pop(Sym **ptop, Sym *b, int keep)
 {
     Sym *s, *ss, **ps;
@@ -571,8 +582,8 @@ ST_FUNC void sym_pop(Sym **ptop, Sym *b, int keep)
     while(s != b) {
         ss = s->prev;
         v = s->v;
-        /* remove symbol in token array */
-        /* XXX: simplify */
+        /* 移除词法单元数组中的符号 */
+        /* XXX: 简化 */
         if (!(v & SYM_FIELD) && (v & ~SYM_STRUCT) < SYM_FIRST_ANOM) {
             ts = table_ident[(v & ~SYM_STRUCT) - TOK_IDENT];
             if (v & SYM_STRUCT)
@@ -597,19 +608,19 @@ static void vsetc(CType *type, int r, CValue *vc)
 
     if (vtop >= vstack + (VSTACK_SIZE - 1))
         tcc_error("memory full (vstack)");
-    /* cannot let cpu flags if other instruction are generated. Also
-       avoid leaving VT_JMP anywhere except on the top of the stack
-       because it would complicate the code generator.
+    /* 如果还要生成其它指令，就不能保留 cpu 标志位。同时
+       要避免把 VT_JMP 留在栈顶以外的任何位置，
+       因为那会使代码生成器变复杂。
 
-       Don't do this when nocode_wanted.  vtop might come from
-       !nocode_wanted regions (see 88_codeopt.c) and transforming
-       it to a register without actually generating code is wrong
-       as their value might still be used for real.  All values
-       we push under nocode_wanted will eventually be popped
-       again, so that the VT_CMP/VT_JMP value will be in vtop
-       when code is unsuppressed again.
+       在 nocode_wanted 时不要这样做。vtop 可能来自
+       !nocode_wanted 区域（见 88_codeopt.c），在并未真正
+       生成代码的情况下把它变换成寄存器是错误的，
+       因为它们的值可能仍会被真正使用。我们在 nocode_wanted
+       下压入的所有值最终都会被再次弹出，因此当代码
+       重新被放开时，VT_CMP/VT_JMP 值会位于
+       vtop。
 
-       Same logic below in vswap(); */
+       下面的 vswap() 中同理； */
     if (vtop >= vstack && !nocode_wanted) {
         v = vtop->r & VT_VALMASK;
         if (v == VT_CMP || (v & ~1) == VT_JMP)
@@ -627,7 +638,7 @@ static void vsetc(CType *type, int r, CValue *vc)
 ST_FUNC void vswap(void)
 {
     SValue tmp;
-    /* cannot vswap cpu flags. See comment at vsetc() above */
+    /* 不能交换 cpu 标志位。见上面 vsetc() 处的注释 */
     if (vtop >= vstack && !nocode_wanted) {
         int v = vtop->r & VT_VALMASK;
         if (v == VT_CMP || (v & ~1) == VT_JMP)
@@ -638,25 +649,25 @@ ST_FUNC void vswap(void)
     vtop[-1] = tmp;
 }
 
-/* pop stack value */
+/* 弹出栈值 */
 ST_FUNC void vpop(void)
 {
     int v;
     v = vtop->r & VT_VALMASK;
     if (v == VT_JMP || v == VT_JMPI) {
-        /* need to put correct jump if && or || without test */
+        /* 如果是没有测试的 && 或 ||，需要放入正确的跳转 */
         gsym(vtop->c.i);
     }
     vtop--;
 }
 
-/* push constant of type "type" with useless value */
+/* 压入类型为 "type"、值无用的常量 */
 ST_FUNC void vpush(CType *type)
 {
     vset(type, VT_CONST, 0);
 }
 
-/* push integer constant */
+/* 压入整型常量 */
 ST_FUNC void vpushi(int v)
 {
     CValue cval;
@@ -664,7 +675,7 @@ ST_FUNC void vpushi(int v)
     vsetc(&int_type, VT_CONST, &cval);
 }
 
-/* push a pointer sized constant */
+/* 压入指针大小的常量 */
 static void vpushs(addr_t v)
 {
   CValue cval;
@@ -672,7 +683,7 @@ static void vpushs(addr_t v)
   vsetc(&size_type, VT_CONST, &cval);
 }
 
-/* push arbitrary 64bit constant */
+/* 压入任意 64 位常量 */
 ST_FUNC void vpush64(int ty, unsigned long long v)
 {
     CValue cval;
@@ -683,7 +694,7 @@ ST_FUNC void vpush64(int ty, unsigned long long v)
     vsetc(&ctype, VT_CONST, &cval);
 }
 
-/* push long long constant */
+/* 压入 long long 常量 */
 static inline void vpushll(long long v)
 {
     vpush64(VT_LLONG, v);
@@ -718,8 +729,8 @@ static void vdup(void)
     vpushv(vtop);
 }
 
-/* rotate n first stack elements to the bottom
-   I1 ... In -> I2 ... In I1 [top is right]
+/* 把最前面的 n 个栈元素旋转到底部
+   I1 ... In -> I2 ... In I1 [栈顶在右]
 */
 ST_FUNC void vrotb(int n)
 {
@@ -732,8 +743,8 @@ ST_FUNC void vrotb(int n)
     vtop[0] = tmp;
 }
 
-/* rotate the n elements before entry e towards the top
-   I1 ... In ... -> In I1 ... I(n-1) ... [top is right]
+/* 把条目 e 之前的 n 个元素向栈顶方向旋转
+   I1 ... In ... -> In I1 ... I(n-1) ... [栈顶在右]
  */
 ST_FUNC void vrote(SValue *e, int n)
 {
@@ -746,15 +757,15 @@ ST_FUNC void vrote(SValue *e, int n)
     e[-n + 1] = tmp;
 }
 
-/* rotate n first stack elements to the top
-   I1 ... In -> In I1 ... I(n-1)  [top is right]
+/* 把最前面的 n 个栈元素旋转到顶部
+   I1 ... In -> In I1 ... I(n-1)  [栈顶在右]
  */
 ST_FUNC void vrott(int n)
 {
     vrote(vtop, n);
 }
 
-/* push a symbol value of TYPE */
+/* 压入一个类型为 TYPE 的符号值 */
 static inline void vpushsym(CType *type, Sym *sym)
 {
     CValue cval;
@@ -763,7 +774,7 @@ static inline void vpushsym(CType *type, Sym *sym)
     vtop->sym = sym;
 }
 
-/* Return a static symbol pointing to a section */
+/* 返回一个指向某个段的 static 符号 */
 ST_FUNC Sym *get_sym_ref(CType *type, Section *sec, unsigned long offset, unsigned long size)
 {
     int v;
@@ -777,20 +788,20 @@ ST_FUNC Sym *get_sym_ref(CType *type, Section *sec, unsigned long offset, unsign
     return sym;
 }
 
-/* push a reference to a section offset by adding a dummy symbol */
+/* 通过添加一个哑符号来压入某个段偏移处的引用 */
 static void vpush_ref(CType *type, Section *sec, unsigned long offset, unsigned long size)
 {
-    vpushsym(type, get_sym_ref(type, sec, offset, size));  
+    vpushsym(type, get_sym_ref(type, sec, offset, size));
 }
 
-/* define a new external reference to a symbol 'v' of type 'u' */
+/* 为类型为 'u' 的符号 'v' 定义一个新的外部引用 */
 ST_FUNC Sym *external_global_sym(int v, CType *type, int r)
 {
     Sym *s;
 
     s = sym_find(v);
     if (!s) {
-        /* push forward reference */
+        /* 压入前向引用 */
         s = global_identifier_push(v, type->t | VT_EXTERN, 0);
         s->type.ref = type->ref;
         s->r = r | VT_CONST | VT_SYM;
@@ -802,7 +813,7 @@ ST_FUNC Sym *external_global_sym(int v, CType *type, int r)
     return s;
 }
 
-/* Merge some type attributes.  */
+/* 合并一些类型属性。  */
 static void patch_type(Sym *sym, CType *type)
 {
     if (!(type->t & VT_EXTERN)) {
@@ -812,7 +823,7 @@ static void patch_type(Sym *sym, CType *type)
     }
 
     if (IS_ASM_SYM(sym)) {
-        /* stay static if both are static */
+        /* 如果两者都是 static，则保持 static */
         sym->type.t = type->t & (sym->type.t | ~VT_STATIC);
         sym->type.ref = type->ref;
     }
@@ -823,13 +834,13 @@ static void patch_type(Sym *sym, CType *type)
 
     } else if ((sym->type.t & VT_BTYPE) == VT_FUNC) {
         int static_proto = sym->type.t & VT_STATIC;
-        /* warn if static follows non-static function declaration */
+        /* 如果 static 出现在非 static 函数声明之后则告警 */
         if ((type->t & VT_STATIC) && !static_proto && !(type->t & VT_INLINE))
             tcc_warning("static storage ignored for redefinition of '%s'",
                 get_tok_str(sym->v, NULL));
 
         if (0 == (type->t & VT_EXTERN)) {
-            /* put complete type, use static from prototype */
+            /* 放入完整类型，static 沿用原型中的 */
             sym->type.t = (type->t & ~VT_STATIC) | static_proto;
             if (type->t & VT_INLINE)
                 sym->type.t = type->t;
@@ -838,7 +849,7 @@ static void patch_type(Sym *sym, CType *type)
 
     } else {
         if ((sym->type.t & VT_ARRAY) && type->ref->c >= 0) {
-            /* set array size if it was omitted in extern declaration */
+            /* 若 extern 声明中省略了数组大小，则设置它 */
             if (sym->type.ref->c < 0)
                 sym->type.ref->c = type->ref->c;
             else if (sym->type.ref->c != type->ref->c)
@@ -851,7 +862,7 @@ static void patch_type(Sym *sym, CType *type)
 }
 
 
-/* Merge some storage attributes.  */
+/* 合并一些存储属性。  */
 static void patch_storage(Sym *sym, AttributeDef *ad, CType *type)
 {
     if (type)
@@ -874,13 +885,13 @@ static void patch_storage(Sym *sym, AttributeDef *ad, CType *type)
     update_storage(sym);
 }
 
-/* define a new external reference to a symbol 'v' */
+/* 为符号 'v' 定义一个新的外部引用 */
 static Sym *external_sym(int v, CType *type, int r, AttributeDef *ad)
 {
     Sym *s;
     s = sym_find(v);
     if (!s) {
-        /* push forward reference */
+        /* 压入前向引用 */
         s = sym_push(v, type, r | VT_CONST | VT_SYM, 0);
         s->type.t |= VT_EXTERN;
         s->a = ad->a;
@@ -896,13 +907,13 @@ static Sym *external_sym(int v, CType *type, int r, AttributeDef *ad)
     return s;
 }
 
-/* push a reference to global symbol v */
+/* 压入对全局符号 v 的引用 */
 ST_FUNC void vpush_global_sym(CType *type, int v)
 {
     vpushsym(type, external_global_sym(v, type, 0));
 }
 
-/* save registers up to (vtop - n) stack entry */
+/* 保存寄存器直到（vtop - n）栈条目 */
 ST_FUNC void save_regs(int n)
 {
     SValue *p, *p1;
@@ -910,14 +921,14 @@ ST_FUNC void save_regs(int n)
         save_reg(p->r);
 }
 
-/* save r to the memory stack, and mark it as being free */
+/* 把 r 保存到内存栈，并标记其为空闲 */
 ST_FUNC void save_reg(int r)
 {
     save_reg_upstack(r, 0);
 }
 
-/* save r to the memory stack, and mark it as being free,
-   if seen up to (vtop - n) stack entry */
+/* 把 r 保存到内存栈，并标记其为空闲，
+   前提是在（vtop - n）栈条目之前见到过它 */
 ST_FUNC void save_reg_upstack(int r, int n)
 {
     int l, saved, size, align;
@@ -929,17 +940,17 @@ ST_FUNC void save_reg_upstack(int r, int n)
     if (nocode_wanted)
         return;
 
-    /* modify all stack values */
+    /* 修改所有栈值 */
     saved = 0;
     l = 0;
     for(p = vstack, p1 = vtop - n; p <= p1; p++) {
         if ((p->r & VT_VALMASK) == r ||
             ((p->type.t & VT_BTYPE) == VT_LLONG && (p->r2 & VT_VALMASK) == r)) {
-            /* must save value on stack if not already done */
+            /* 如果尚未保存，必须把值保存到栈上 */
             if (!saved) {
-                /* NOTE: must reload 'r' because r might be equal to r2 */
+                /* NOTE: 必须重新加载 'r'，因为 r 可能等于 r2 */
                 r = p->r & VT_VALMASK;
-                /* store register in the stack */
+                /* 把寄存器存入栈中 */
                 type = &p->type;
                 if ((p->r & VT_LVAL) ||
                     (!is_float(type->t) && (type->t & VT_BTYPE) != VT_LLONG))
@@ -955,7 +966,7 @@ ST_FUNC void save_reg_upstack(int r, int n)
                 sv.c.i = loc;
                 store(r, &sv);
 #if PTR_SIZE == 4
-                /* special long long case */
+                /* 特殊的 long long 情形 */
                 if ((type->t & VT_BTYPE) == VT_LLONG) {
                     sv.c.i += 4;
                     store(p->r2, &sv);
@@ -964,11 +975,11 @@ ST_FUNC void save_reg_upstack(int r, int n)
                 l = loc;
                 saved = 1;
             }
-            /* mark that stack entry as being saved on the stack */
+            /* 把该栈条目标记为已保存在栈上 */
             if (p->r & VT_LVAL) {
-                /* also clear the bounded flag because the
-                   relocation address of the function was stored in
-                   p->c.i */
+                /* 同时清除 bounded 标志，因为函数的
+                   重定位地址曾存放在
+                   p->c.i 中 */
                 p->r = (p->r & ~(VT_VALMASK | VT_BOUNDED)) | VT_LLOCAL;
             } else {
                 p->r = lvalue_type(p->type.t) | VT_LOCAL;
@@ -979,13 +990,13 @@ ST_FUNC void save_reg_upstack(int r, int n)
     }
 }
 
-/* find a free register of class 'rc'. If none, save one register */
+/* 查找类别 'rc' 的空闲寄存器。若没有，则保存一个寄存器 */
 ST_FUNC int get_reg(int rc)
 {
     int r;
     SValue *p;
 
-    /* find a free register */
+    /* 查找空闲寄存器 */
     for(r=0;r<NB_REGS;r++) {
         if (reg_classes[r] & rc) {
             if (nocode_wanted)
@@ -999,12 +1010,12 @@ ST_FUNC int get_reg(int rc)
         }
     notfound: ;
     }
-    
-    /* no register left : free the first one on the stack (VERY
-       IMPORTANT to start from the bottom to ensure that we don't
-       spill registers used in gen_opi()) */
+
+    /* 没有剩余寄存器：释放栈上的第一个（非常重要：
+       必须从底部开始，以确保我们不会
+       换出 gen_opi() 中使用的寄存器） */
     for(p=vstack;p<=vtop;p++) {
-        /* look at second register (if long long) */
+        /* 查看第二个寄存器（如果是 long long） */
         r = p->r2 & VT_VALMASK;
         if (r < VT_CONST && (reg_classes[r] & rc))
             goto save_found;
@@ -1015,12 +1026,12 @@ ST_FUNC int get_reg(int rc)
             return r;
         }
     }
-    /* Should never comes here */
+    /* 不应到达这里 */
     return -1;
 }
 
-/* move register 's' (of type 't') to 'r', and flush previous value of r to memory
-   if needed */
+/* 把寄存器 's'（类型为 't'）移到 'r'，必要时
+   把 r 先前的值写回内存 */
 static void move_reg(int r, int s, int t)
 {
     SValue sv;
@@ -1035,11 +1046,11 @@ static void move_reg(int r, int s, int t)
     }
 }
 
-/* get address of vtop (vtop MUST BE an lvalue) */
+/* 取 vtop 的地址（vtop 必须是左值） */
 ST_FUNC void gaddrof(void)
 {
     vtop->r &= ~VT_LVAL;
-    /* tricky: if saved lvalue, then we can go back to lvalue */
+    /* 棘手之处：如果保存的是左值，则可以回到左值 */
     if ((vtop->r & VT_VALMASK) == VT_LLOCAL)
         vtop->r = (vtop->r & ~(VT_VALMASK | VT_LVAL_TYPE)) | VT_LOCAL | VT_LVAL;
 
@@ -1047,19 +1058,19 @@ ST_FUNC void gaddrof(void)
 }
 
 #ifdef CONFIG_TCC_BCHECK
-/* generate lvalue bound code */
+/* 生成左值边界检查代码 */
 static void gbound(void)
 {
     int lval_type;
     CType type1;
 
     vtop->r &= ~VT_MUSTBOUND;
-    /* if lvalue, then use checking code before dereferencing */
+    /* 如果是左值，则在解引用前使用检查代码 */
     if (vtop->r & VT_LVAL) {
-        /* if not VT_BOUNDED value, then make one */
+        /* 如果不是 VT_BOUNDED 值，则构造一个 */
         if (!(vtop->r & VT_BOUNDED)) {
             lval_type = vtop->r & (VT_LVAL_TYPE | VT_LVAL);
-            /* must save type because we must set it to int to get pointer */
+            /* 必须保存类型，因为必须把它设为 int 才能取指针 */
             type1 = vtop->type;
             vtop->type.t = VT_PTR;
             gaddrof();
@@ -1068,7 +1079,7 @@ static void gbound(void)
             vtop->r |= lval_type;
             vtop->type = type1;
         }
-        /* then check for dereferencing */
+        /* 然后进行解引用检查 */
         gen_bounded_ptr_deref();
     }
 }
@@ -1086,7 +1097,7 @@ static void incr_bf_adr(int o)
         | (VT_LVAL_BYTE|VT_LVAL_UNSIGNED|VT_LVAL);
 }
 
-/* single-byte load mode for packed or otherwise unaligned bitfields */
+/* 用于紧凑或其他未对齐位域的单字节加载模式 */
 static void load_packed_bf(CType *type, int bit_pos, int bit_size)
 {
     int n, o, bits;
@@ -1119,7 +1130,7 @@ static void load_packed_bf(CType *type, int bit_pos, int bit_size)
     }
 }
 
-/* single-byte store mode for packed or otherwise unaligned bitfields */
+/* 用于紧凑或其他未对齐位域的单字节存储模式 */
 static void store_packed_bf(int bit_pos, int bit_size)
 {
     int bits, n, o, m, c;
@@ -1168,20 +1179,20 @@ static int adjust_bf(SValue *sv, int bit_pos, int bit_size)
     return t;
 }
 
-/* store vtop a register belonging to class 'rc'. lvalues are
-   converted to values. Cannot be used if cannot be converted to
-   register value (such as structures). */
+/* 把 vtop 存入属于类别 'rc' 的寄存器。左值会被
+   转换成值。如果无法转换成寄存器值
+   （例如结构体），则不能使用。 */
 ST_FUNC int gv(int rc)
 {
     int r, bit_pos, bit_size, size, align, rc2;
 
-    /* NOTE: get_reg can modify vstack[] */
+    /* NOTE: get_reg 可能修改 vstack[] */
     if (vtop->type.t & VT_BITFIELD) {
         CType type;
 
         bit_pos = BIT_POS(vtop->type.t);
         bit_size = BIT_SIZE(vtop->type.t);
-        /* remove bit field info to avoid loops */
+        /* 移除位域信息以避免死循环 */
         vtop->type.t &= ~VT_STRUCT_MASK;
 
         type.ref = NULL;
@@ -1200,22 +1211,22 @@ ST_FUNC int gv(int rc)
             load_packed_bf(&type, bit_pos, bit_size);
         } else {
             int bits = (type.t & VT_BTYPE) == VT_LLONG ? 64 : 32;
-            /* cast to int to propagate signedness in following ops */
+            /* 强制类型转换为 int，以便在后续运算中传播符号性 */
             gen_cast(&type);
-            /* generate shifts */
+            /* 生成移位 */
             vpushi(bits - (bit_pos + bit_size));
             gen_op(TOK_SHL);
             vpushi(bits - bit_size);
-            /* NOTE: transformed to SHR if unsigned */
+            /* NOTE: 若无符号则变换为 SHR */
             gen_op(TOK_SAR);
         }
         r = gv(rc);
     } else {
-        if (is_float(vtop->type.t) && 
+        if (is_float(vtop->type.t) &&
             (vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST) {
             unsigned long offset;
-            /* CPUs usually cannot use float constants, so we store them
-               generically in data segment */
+            /* CPU 通常不能使用浮点常量，因此我们以通用方式
+               把它们存放在数据段中 */
             size = type_size(&vtop->type, &align);
             if (NODATA_WANTED)
                 size = 0, align = 1;
@@ -1226,7 +1237,7 @@ ST_FUNC int gv(int rc)
 	    vtop->r |= VT_LVAL;
         }
 #ifdef CONFIG_TCC_BCHECK
-        if (vtop->r & VT_MUSTBOUND) 
+        if (vtop->r & VT_MUSTBOUND)
             gbound();
 #endif
 
@@ -1235,15 +1246,11 @@ ST_FUNC int gv(int rc)
 #ifndef TCC_TARGET_ARM64
         if (rc == RC_IRET)
             rc2 = RC_LRET;
-#ifdef TCC_TARGET_X86_64
-        else if (rc == RC_FRET)
-            rc2 = RC_QRET;
 #endif
-#endif
-        /* need to reload if:
-           - constant
-           - lvalue (need to dereference pointer)
-           - already a register, but not in the right class */
+        /* 在以下情况需要重新加载：
+           - 常量
+           - 左值（需要解引用指针）
+           - 已经是寄存器，但类别不对 */
         if (r >= VT_CONST
          || (vtop->r & VT_LVAL)
          || !(reg_classes[r] & rc)
@@ -1266,35 +1273,35 @@ ST_FUNC int gv(int rc)
 #endif
                 int r2, original_type;
                 original_type = vtop->type.t;
-                /* two register type load : expand to two words
-                   temporarily */
+                /* 两个寄存器类型加载：临时
+                   展开为两个字 */
 #if PTR_SIZE == 4
                 if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST) {
-                    /* load constant */
+                    /* 加载常量 */
                     ll = vtop->c.i;
-                    vtop->c.i = ll; /* first word */
+                    vtop->c.i = ll; /* 第一个字 */
                     load(r, vtop);
-                    vtop->r = r; /* save register value */
-                    vpushi(ll >> 32); /* second word */
+                    vtop->r = r; /* 保存寄存器值 */
+                    vpushi(ll >> 32); /* 第二个字 */
                 } else
 #endif
                 if (vtop->r & VT_LVAL) {
-                    /* We do not want to modifier the long long
-                       pointer here, so the safest (and less
-                       efficient) is to save all the other registers
-                       in the stack. XXX: totally inefficient. */
+                    /* 我们不想在这里修改 long long
+                       指针，因此最安全（也较低效）的做法是把
+                       所有其它寄存器保存
+                       到栈中。XXX: 完全低效。 */
                #if 0
                     save_regs(1);
                #else
-                    /* lvalue_save: save only if used further down the stack */
+                    /* lvalue_save: 仅当在栈更深处还会使用时才保存 */
                     save_reg_upstack(vtop->r, 1);
                #endif
-                    /* load from memory */
+                    /* 从内存加载 */
                     vtop->type.t = load_type;
                     load(r, vtop);
                     vdup();
-                    vtop[-1].r = r; /* save register value */
-                    /* increment pointer to get second word */
+                    vtop[-1].r = r; /* 保存寄存器值 */
+                    /* 递增指针以获得第二个字 */
                     vtop->type.t = addr_type;
                     gaddrof();
                     vpushi(load_size);
@@ -1302,27 +1309,27 @@ ST_FUNC int gv(int rc)
                     vtop->r |= VT_LVAL;
                     vtop->type.t = load_type;
                 } else {
-                    /* move registers */
+                    /* 移动寄存器 */
                     load(r, vtop);
                     vdup();
-                    vtop[-1].r = r; /* save register value */
+                    vtop[-1].r = r; /* 保存寄存器值 */
                     vtop->r = vtop[-1].r2;
                 }
-                /* Allocate second register. Here we rely on the fact that
-                   get_reg() tries first to free r2 of an SValue. */
+                /* 分配第二个寄存器。这里我们依赖这样的事实：
+                   get_reg() 会首先尝试释放某个 SValue 的 r2。 */
                 r2 = get_reg(rc2);
                 load(r2, vtop);
                 vpop();
-                /* write second register */
+                /* 写入第二个寄存器 */
                 vtop->r2 = r2;
                 vtop->type.t = original_type;
             } else if ((vtop->r & VT_LVAL) && !is_float(vtop->type.t)) {
                 int t1, t;
-                /* lvalue of scalar type : need to use lvalue type
-                   because of possible cast */
+                /* 标量类型的左值：必须使用左值类型，
+                   因为可能存在强制类型转换 */
                 t = vtop->type.t;
                 t1 = t;
-                /* compute memory access type */
+                /* 计算内存访问类型 */
                 if (vtop->r & VT_LVAL_BYTE)
                     t = VT_BYTE;
                 else if (vtop->r & VT_LVAL_SHORT)
@@ -1331,38 +1338,33 @@ ST_FUNC int gv(int rc)
                     t |= VT_UNSIGNED;
                 vtop->type.t = t;
                 load(r, vtop);
-                /* restore wanted type */
+                /* 恢复想要的类型 */
                 vtop->type.t = t1;
             } else {
-                /* one register type load */
+                /* 单寄存器类型加载 */
                 load(r, vtop);
             }
         }
         vtop->r = r;
-#ifdef TCC_TARGET_C67
-        /* uses register pairs for doubles */
-        if ((vtop->type.t & VT_BTYPE) == VT_DOUBLE) 
-            vtop->r2 = r+1;
-#endif
     }
     return r;
 }
 
-/* generate vtop[-1] and vtop[0] in resp. classes rc1 and rc2 */
+/* 分别在类别 rc1 和 rc2 中生成 vtop[-1] 和 vtop[0] */
 ST_FUNC void gv2(int rc1, int rc2)
 {
     int v;
 
-    /* generate more generic register first. But VT_JMP or VT_CMP
-       values must be generated first in all cases to avoid possible
-       reload errors */
+    /* 先生成更通用的寄存器。但 VT_JMP 或 VT_CMP
+       值在任何情况下都必须最先生成，以避免可能的
+       重新加载错误 */
     v = vtop[0].r & VT_VALMASK;
     if (v != VT_CMP && (v & ~1) != VT_JMP && rc1 <= rc2) {
         vswap();
         gv(rc1);
         vswap();
         gv(rc2);
-        /* test if reload is needed for first register */
+        /* 测试第一个寄存器是否需要重新加载 */
         if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
             vswap();
             gv(rc1);
@@ -1373,7 +1375,7 @@ ST_FUNC void gv2(int rc1, int rc2)
         vswap();
         gv(rc1);
         vswap();
-        /* test if reload is needed for first register */
+        /* 测试第一个寄存器是否需要重新加载 */
         if ((vtop[0].r & VT_VALMASK) >= VT_CONST) {
             gv(rc2);
         }
@@ -1381,31 +1383,21 @@ ST_FUNC void gv2(int rc1, int rc2)
 }
 
 #ifndef TCC_TARGET_ARM64
-/* wrapper around RC_FRET to return a register by type */
+/* 对 RC_FRET 的包装，用于按类型返回寄存器 */
 static int rc_fret(int t)
 {
-#ifdef TCC_TARGET_X86_64
-    if (t == VT_LDOUBLE) {
-        return RC_ST0;
-    }
-#endif
     return RC_FRET;
 }
 #endif
 
-/* wrapper around REG_FRET to return a register by type */
+/* 对 REG_FRET 的包装，用于按类型返回寄存器 */
 static int reg_fret(int t)
 {
-#ifdef TCC_TARGET_X86_64
-    if (t == VT_LDOUBLE) {
-        return TREG_ST0;
-    }
-#endif
     return REG_FRET;
 }
 
 #if PTR_SIZE == 4
-/* expand 64bit on stack in two ints */
+/* 在栈上把 64 位展开为两个 int */
 static void lexpand(void)
 {
     int u, v;
@@ -1427,36 +1419,9 @@ static void lexpand(void)
 }
 #endif
 
-#ifdef TCC_TARGET_ARM
-/* expand long long on stack */
-ST_FUNC void lexpand_nr(void)
-{
-    int u,v;
-
-    u = vtop->type.t & (VT_DEFSIGN | VT_UNSIGNED);
-    vdup();
-    vtop->r2 = VT_CONST;
-    vtop->type.t = VT_INT | u;
-    v=vtop[-1].r & (VT_VALMASK | VT_LVAL);
-    if (v == VT_CONST) {
-      vtop[-1].c.i = vtop->c.i;
-      vtop->c.i = vtop->c.i >> 32;
-      vtop->r = VT_CONST;
-    } else if (v == (VT_LVAL|VT_CONST) || v == (VT_LVAL|VT_LOCAL)) {
-      vtop->c.i += 4;
-      vtop->r = vtop[-1].r;
-    } else if (v > VT_CONST) {
-      vtop--;
-      lexpand();
-    } else
-      vtop->r = vtop[-1].r2;
-    vtop[-1].r2 = VT_CONST;
-    vtop[-1].type.t = VT_INT | u;
-}
-#endif
 
 #if PTR_SIZE == 4
-/* build a long long from two ints */
+/* 由两个 int 构造一个 long long */
 static void lbuild(int t)
 {
     gv2(RC_INT, RC_INT);
@@ -1466,8 +1431,8 @@ static void lbuild(int t)
 }
 #endif
 
-/* convert stack entry to register and duplicate its value in another
-   register */
+/* 把栈条目转换为寄存器，并在另一个寄存器中
+   复制它的值 */
 static void gv_dup(void)
 {
     int rc, t, r, r1;
@@ -1486,7 +1451,7 @@ static void gv_dup(void)
         vrotb(3);
         gv_dup();
         vrotb(4);
-        /* stack: H L L1 H1 */
+        /* 栈: H L L1 H1 */
         lbuild(t);
         vrotb(3);
         vrotb(3);
@@ -1496,33 +1461,28 @@ static void gv_dup(void)
     } else
 #endif
     {
-        /* duplicate value */
+        /* 复制值 */
         rc = RC_INT;
         sv.type.t = VT_INT;
         if (is_float(t)) {
             rc = RC_FLOAT;
-#ifdef TCC_TARGET_X86_64
-            if ((t & VT_BTYPE) == VT_LDOUBLE) {
-                rc = RC_ST0;
-            }
-#endif
             sv.type.t = t;
         }
         r = gv(rc);
         r1 = get_reg(rc);
         sv.r = r;
         sv.c.i = 0;
-        load(r1, &sv); /* move r to r1 */
+        load(r1, &sv); /* 把 r 移到 r1 */
         vdup();
-        /* duplicates value */
+        /* 复制值 */
         if (r != r1)
             vtop->r = r1;
     }
 }
 
-/* Generate value test
+/* 生成值测试
  *
- * Generate a test for any value (jump, comparison and integers) */
+ * 为任意值（跳转、比较和整数）生成测试 */
 ST_FUNC int gvtst(int inv, int t)
 {
     int v = vtop->r & VT_VALMASK;
@@ -1531,7 +1491,7 @@ ST_FUNC int gvtst(int inv, int t)
         gen_op(TOK_NE);
     }
     if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
-        /* constant jmp optimization */
+        /* 常量跳转优化 */
         if ((vtop->c.i != 0) != inv)
             t = gjmp(t);
         vtop--;
@@ -1541,7 +1501,7 @@ ST_FUNC int gvtst(int inv, int t)
 }
 
 #if PTR_SIZE == 4
-/* generate CPU independent (unsigned) long long operations */
+/* 生成与 CPU 无关的（无符号）long long 运算 */
 static void gen_opl(int op)
 {
     int t, a, b, op1, c, i;
@@ -1569,7 +1529,7 @@ static void gen_opl(int op)
         reg_lret = TREG_R3;
 #endif
     gen_func:
-        /* call generic long long function */
+        /* 调用通用的 long long 函数 */
         vpush_global_sym(&func_old_type, func);
         vrott(3);
         gfunc_call(2);
@@ -1589,7 +1549,7 @@ static void gen_opl(int op)
         lexpand();
         vrotb(3);
         lexpand();
-        /* stack: L1 H1 L2 H2 */
+        /* 栈: L1 H1 L2 H2 */
         tmp = vtop[0];
         vtop[0] = vtop[-3];
         vtop[-3] = tmp;
@@ -1597,49 +1557,49 @@ static void gen_opl(int op)
         vtop[-2] = vtop[-3];
         vtop[-3] = tmp;
         vswap();
-        /* stack: H1 H2 L1 L2 */
+        /* 栈: H1 H2 L1 L2 */
         //pv("gen_opl B",0,4);
         if (op == '*') {
             vpushv(vtop - 1);
             vpushv(vtop - 1);
             gen_op(TOK_UMULL);
             lexpand();
-            /* stack: H1 H2 L1 L2 ML MH */
+            /* 栈: H1 H2 L1 L2 ML MH */
             for(i=0;i<4;i++)
                 vrotb(6);
-            /* stack: ML MH H1 H2 L1 L2 */
+            /* 栈: ML MH H1 H2 L1 L2 */
             tmp = vtop[0];
             vtop[0] = vtop[-2];
             vtop[-2] = tmp;
-            /* stack: ML MH H1 L2 H2 L1 */
+            /* 栈: ML MH H1 L2 H2 L1 */
             gen_op('*');
             vrotb(3);
             vrotb(3);
             gen_op('*');
-            /* stack: ML MH M1 M2 */
+            /* 栈: ML MH M1 M2 */
             gen_op('+');
             gen_op('+');
         } else if (op == '+' || op == '-') {
-            /* XXX: add non carry method too (for MIPS or alpha) */
+            /* XXX: 也要添加非进位方法（用于 MIPS 或 alpha） */
             if (op == '+')
                 op1 = TOK_ADDC1;
             else
                 op1 = TOK_SUBC1;
             gen_op(op1);
-            /* stack: H1 H2 (L1 op L2) */
+            /* 栈: H1 H2 (L1 op L2) */
             vrotb(3);
             vrotb(3);
-            gen_op(op1 + 1); /* TOK_xxxC2 */
+            gen_op(op1 + 1); /* 词法单元 TOK_xxxC2 */
         } else {
             gen_op(op);
-            /* stack: H1 H2 (L1 op L2) */
+            /* 栈: H1 H2 (L1 op L2) */
             vrotb(3);
             vrotb(3);
-            /* stack: (L1 op L2) H1 H2 */
+            /* 栈: (L1 op L2) H1 H2 */
             gen_op(op);
-            /* stack: (L1 op L2) (H1 op H2) */
+            /* 栈: (L1 op L2) (H1 op H2) */
         }
-        /* stack: L H */
+        /* 栈: L H */
         lbuild(t);
         break;
     case TOK_SAR:
@@ -1650,16 +1610,16 @@ static void gen_opl(int op)
             vswap();
             lexpand();
             vrotb(3);
-            /* stack: L H shift */
+            /* 栈: L H shift */
             c = (int)vtop->c.i;
-            /* constant: simpler */
-            /* NOTE: all comments are for SHL. the other cases are
-               done by swapping words */
+            /* 常量：更简单 */
+            /* NOTE: 所有注释都是针对 SHL 的。其它情形
+               通过交换字来实现 */
             vpop();
             if (op != TOK_SHL)
                 vswap();
             if (c >= 32) {
-                /* stack: L H */
+                /* 栈: L H */
                 vpop();
                 if (c > 32) {
                     vpushi(c - 32);
@@ -1676,7 +1636,7 @@ static void gen_opl(int op)
             } else {
                 vswap();
                 gv_dup();
-                /* stack: H L L */
+                /* 栈: H L L */
                 vpushi(c);
                 gen_op(op);
                 vswap();
@@ -1686,7 +1646,7 @@ static void gen_opl(int op)
                 else
                     gen_op(TOK_SHL);
                 vrotb(3);
-                /* stack: L L H */
+                /* 栈: L L H */
                 vpushi(c);
                 if (op == TOK_SHL)
                     gen_op(TOK_SHL);
@@ -1698,7 +1658,7 @@ static void gen_opl(int op)
                 vswap();
             lbuild(t);
         } else {
-            /* XXX: should provide a faster fallback on x86 ? */
+            /* XXX: 是否应在 x86 上提供更快的回退实现？ */
             switch(op) {
             case TOK_SAR:
                 func = TOK___ashrdi3;
@@ -1713,21 +1673,21 @@ static void gen_opl(int op)
         }
         break;
     default:
-        /* compare operations */
+        /* 比较运算 */
         t = vtop->type.t;
         vswap();
         lexpand();
         vrotb(3);
         lexpand();
-        /* stack: L1 H1 L2 H2 */
+        /* 栈: L1 H1 L2 H2 */
         tmp = vtop[-1];
         vtop[-1] = vtop[-2];
         vtop[-2] = tmp;
-        /* stack: L1 L2 H1 H2 */
-        /* compare high */
+        /* 栈: L1 L2 H1 H2 */
+        /* 比较高字 */
         op1 = op;
-        /* when values are equal, we need to compare low words. since
-           the jump is inverted, we invert the test too. */
+        /* 当值相等时，我们需要比较低位字。由于
+           跳转是反向的，我们也把测试反过来。 */
         if (op1 == TOK_LT)
             op1 = TOK_LE;
         else if (op1 == TOK_GT)
@@ -1744,13 +1704,13 @@ static void gen_opl(int op)
         } else {
             a = gvtst(1, 0);
             if (op != TOK_EQ) {
-                /* generate non equal test */
+                /* 生成不等测试 */
                 vpushi(TOK_NE);
                 vtop->r = VT_CMP;
                 b = gvtst(0, 0);
             }
         }
-        /* compare low. Always unsigned */
+        /* 比较低位。始终按无符号 */
         op1 = op;
         if (op1 == TOK_LT)
             op1 = TOK_ULT;
@@ -1780,8 +1740,8 @@ static int gen_opic_lt(uint64_t a, uint64_t b)
     return (a ^ (uint64_t)1 << 63) < (b ^ (uint64_t)1 << 63);
 }
 
-/* handle integer constant optimizations and various machine
-   independent opt */
+/* 处理整型常量优化以及各种与机器无关的
+   优化 */
 static void gen_opic(int op)
 {
     SValue *v1 = vtop - 1;
@@ -1815,7 +1775,7 @@ static void gen_opic(int op)
         case '%':
         case TOK_UDIV:
         case TOK_UMOD:
-            /* if division by zero, generate explicit division */
+            /* 如果除以零，则生成显式的除法 */
             if (l2 == 0) {
                 if (const_wanted)
                     tcc_error("division by zero in constant");
@@ -1833,7 +1793,7 @@ static void gen_opic(int op)
         case TOK_SAR:
             l1 = (l1 >> 63) ? ~(~l1 >> (l2 & shm)) : l1 >> (l2 & shm);
             break;
-            /* tests */
+            /* 测试 */
         case TOK_ULT: l1 = l1 < l2; break;
         case TOK_UGE: l1 = l1 >= l2; break;
         case TOK_EQ: l1 = l1 == l2; break;
@@ -1844,7 +1804,7 @@ static void gen_opic(int op)
         case TOK_GE: l1 = !gen_opic_lt(l1, l2); break;
         case TOK_LE: l1 = !gen_opic_lt(l2, l1); break;
         case TOK_GT: l1 = gen_opic_lt(l2, l1); break;
-            /* logical */
+            /* 逻辑运算 */
         case TOK_LAND: l1 = l1 && l2; break;
         case TOK_LOR: l1 = l1 || l2; break;
         default:
@@ -1856,8 +1816,8 @@ static void gen_opic(int op)
         v1->c.i = l1;
         vtop--;
     } else {
-        /* if commutative ops, put c2 as constant */
-        if (c1 && (op == '+' || op == '&' || op == '^' || 
+        /* 如果是可交换运算，则把 c2 作为常量 */
+        if (c1 && (op == '+' || op == '&' || op == '^' ||
                    op == '|' || op == '*')) {
             vswap();
             c2 = c1; //c = c1, c1 = c2, c2 = c;
@@ -1867,14 +1827,14 @@ static void gen_opic(int op)
             c1 && ((l1 == 0 &&
                     (op == TOK_SHL || op == TOK_SHR || op == TOK_SAR)) ||
                    (l1 == -1 && op == TOK_SAR))) {
-            /* treat (0 << x), (0 >> x) and (-1 >> x) as constant */
+            /* 把 (0 << x)、(0 >> x) 和 (-1 >> x) 当作常量 */
             vtop--;
         } else if (!const_wanted &&
                    c2 && ((l2 == 0 && (op == '&' || op == '*')) ||
                           (op == '|' &&
                             (l2 == -1 || (l2 == 0xFFFFFFFF && t2 != VT_LLONG))) ||
                           (l2 == 1 && (op == '%' || op == TOK_UMOD)))) {
-            /* treat (x & 0), (x * 0), (x | -1) and (x % 1) as constant */
+            /* 把 (x & 0)、(x * 0)、(x | -1) 和 (x % 1) 当作常量 */
             if (l2 == 1)
                 vtop->c.i = 0;
             vswap();
@@ -1887,10 +1847,10 @@ static void gen_opic(int op)
                            l2 == 0) ||
                           (op == '&' &&
                             (l2 == -1 || (l2 == 0xFFFFFFFF && t2 != VT_LLONG))))) {
-            /* filter out NOP operations like x*1, x-0, x&-1... */
+            /* 过滤掉 x*1、x-0、x&-1 之类的空操作 */
             vtop--;
         } else if (c2 && (op == '*' || op == TOK_PDIV || op == TOK_UDIV)) {
-            /* try to use shifts instead of muls or divs */
+            /* 尝试用移位代替乘法或除法 */
             if (l2 > 0 && (l2 & (l2 - 1)) == 0) {
                 int n = -1;
                 while (l2) {
@@ -1909,19 +1869,19 @@ static void gen_opic(int op)
         } else if (c2 && (op == '+' || op == '-') &&
                    (((vtop[-1].r & (VT_VALMASK | VT_LVAL | VT_SYM)) == (VT_CONST | VT_SYM))
                     || (vtop[-1].r & (VT_VALMASK | VT_LVAL)) == VT_LOCAL)) {
-            /* symbol + constant case */
+            /* 符号 + 常量的情形 */
             if (op == '-')
                 l2 = -l2;
 	    l2 += vtop[-1].c.i;
-	    /* The backends can't always deal with addends to symbols
-	       larger than +-1<<31.  Don't construct such.  */
+	    /* 后端并不总能处理大于 +-1<<31 的符号加数。
+	       不要构造这种加数。  */
 	    if ((int)l2 != l2)
 	        goto general_case;
             vtop--;
             vtop->c.i = l2;
         } else {
         general_case:
-                /* call low level op generator */
+                /* 调用低层运算生成器 */
                 if (t1 == VT_LLONG || t2 == VT_LLONG ||
                     (PTR_SIZE == 8 && (t1 == VT_PTR || t2 == VT_PTR)))
                     gen_opl(op);
@@ -1931,20 +1891,20 @@ static void gen_opic(int op)
     }
 }
 
-/* generate a floating point operation with constant propagation */
+/* 生成带常量传播的浮点运算 */
 static void gen_opif(int op)
 {
     int c1, c2;
     SValue *v1, *v2;
 #if defined _MSC_VER && defined _AMD64_
-    /* avoid bad optimization with f1 -= f2 for f1:-0.0, f2:0.0 */
+    /* 避免对 f1:-0.0、f2:0.0 的 f1 -= f2 做不当优化 */
     volatile
 #endif
     long double f1, f2;
 
     v1 = vtop - 1;
     v2 = vtop;
-    /* currently, we cannot do computations with forward symbols */
+    /* 目前我们还不能对前向符号做运算 */
     c1 = (v1->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
     c2 = (v2->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
     if (c1 && c2) {
@@ -1959,8 +1919,8 @@ static void gen_opif(int op)
             f2 = v2->c.ld;
         }
 
-        /* NOTE: we only do constant propagation if finite number (not
-           NaN or infinity) (ANSI spec) */
+        /* NOTE: 只有当是有限数（不是 NaN 或无穷大）时
+           我们才做常量传播（ANSI 规范） */
         if (!ieee_finite(f1) || !ieee_finite(f2))
             goto general_case;
 
@@ -1968,19 +1928,19 @@ static void gen_opif(int op)
         case '+': f1 += f2; break;
         case '-': f1 -= f2; break;
         case '*': f1 *= f2; break;
-        case '/': 
+        case '/':
             if (f2 == 0.0) {
                 if (const_wanted)
                     tcc_error("division by zero in constant");
                 goto general_case;
             }
-            f1 /= f2; 
+            f1 /= f2;
             break;
-            /* XXX: also handles tests ? */
+            /* XXX: 是否也处理测试？ */
         default:
             goto general_case;
         }
-        /* XXX: overflow test ? */
+        /* XXX: 溢出测试？ */
         if (v1->type.t == VT_FLOAT) {
             v1->c.f = f1;
         } else if (v1->type.t == VT_DOUBLE) {
@@ -2019,43 +1979,43 @@ static inline int is_null_pointer(SValue *p)
 
 static inline int is_integer_btype(int bt)
 {
-    return (bt == VT_BYTE || bt == VT_SHORT || 
+    return (bt == VT_BYTE || bt == VT_SHORT ||
             bt == VT_INT || bt == VT_LLONG);
 }
 
-/* check types for comparison or subtraction of pointers */
+/* 检查指针比较或相减时的类型 */
 static void check_comparison_pointer_types(SValue *p1, SValue *p2, int op)
 {
     CType *type1, *type2, tmp_type1, tmp_type2;
     int bt1, bt2;
-    
-    /* null pointers are accepted for all comparisons as gcc */
+
+    /* 与 gcc 一样，所有比较都接受空指针 */
     if (is_null_pointer(p1) || is_null_pointer(p2))
         return;
     type1 = &p1->type;
     type2 = &p2->type;
     bt1 = type1->t & VT_BTYPE;
     bt2 = type2->t & VT_BTYPE;
-    /* accept comparison between pointer and integer with a warning */
+    /* 允许指针与整数比较，但给出告警 */
     if ((is_integer_btype(bt1) || is_integer_btype(bt2)) && op != '-') {
         if (op != TOK_LOR && op != TOK_LAND )
             tcc_warning("comparison between pointer and integer");
         return;
     }
 
-    /* both must be pointers or implicit function pointers */
+    /* 两者必须都是指针或隐式函数指针 */
     if (bt1 == VT_PTR) {
         type1 = pointed_type(type1);
-    } else if (bt1 != VT_FUNC) 
+    } else if (bt1 != VT_FUNC)
         goto invalid_operands;
 
     if (bt2 == VT_PTR) {
         type2 = pointed_type(type2);
-    } else if (bt2 != VT_FUNC) { 
+    } else if (bt2 != VT_FUNC) {
     invalid_operands:
         tcc_error("invalid operands to binary %s", get_tok_str(op, NULL));
     }
-    if ((type1->t & VT_BTYPE) == VT_VOID || 
+    if ((type1->t & VT_BTYPE) == VT_VOID ||
         (type2->t & VT_BTYPE) == VT_VOID)
         return;
     tmp_type1 = *type1;
@@ -2063,7 +2023,7 @@ static void check_comparison_pointer_types(SValue *p1, SValue *p2, int op)
     tmp_type1.t &= ~(VT_DEFSIGN | VT_UNSIGNED | VT_CONSTANT | VT_VOLATILE);
     tmp_type2.t &= ~(VT_DEFSIGN | VT_UNSIGNED | VT_CONSTANT | VT_VOLATILE);
     if (!is_compatible_types(&tmp_type1, &tmp_type2)) {
-        /* gcc-like error if '-' is used */
+        /* 若使用 '-' 则报出类似 gcc 的错误 */
         if (op == '-')
             goto invalid_operands;
         else
@@ -2071,7 +2031,7 @@ static void check_comparison_pointer_types(SValue *p1, SValue *p2, int op)
     }
 }
 
-/* generic gen_op: handles types problems */
+/* 通用的 gen_op：处理类型问题 */
 ST_FUNC void gen_op(int op)
 {
     int u, t1, t2, bt1, bt2, t;
@@ -2082,7 +2042,7 @@ redo:
     t2 = vtop[0].type.t;
     bt1 = t1 & VT_BTYPE;
     bt2 = t2 & VT_BTYPE;
-        
+
     if (bt1 == VT_STRUCT || bt2 == VT_STRUCT) {
         tcc_error("operation on a struct");
     } else if (bt1 == VT_FUNC || bt2 == VT_FUNC) {
@@ -2098,11 +2058,11 @@ redo:
 	}
 	goto redo;
     } else if (bt1 == VT_PTR || bt2 == VT_PTR) {
-        /* at least one operand is a pointer */
-        /* relational op: must be both pointers */
+        /* 至少有一个操作数是指针 */
+        /* 关系运算：必须两者都是指针 */
         if (op >= TOK_ULT && op <= TOK_LOR) {
             check_comparison_pointer_types(vtop - 1, vtop, op);
-            /* pointers are handled are unsigned */
+            /* 指针按无符号处理 */
 #if PTR_SIZE == 8
             t = VT_LLONG | VT_UNSIGNED;
 #else
@@ -2110,12 +2070,12 @@ redo:
 #endif
             goto std_op;
         }
-        /* if both pointers, then it must be the '-' op */
+        /* 如果两者都是指针，则必须是 '-' 运算 */
         if (bt1 == VT_PTR && bt2 == VT_PTR) {
             if (op != '-')
                 tcc_error("cannot use pointers here");
             check_comparison_pointer_types(vtop - 1, vtop, op);
-            /* XXX: check that types are compatible */
+            /* XXX: 检查类型是否兼容 */
             if (vtop[-1].type.t & VT_VLA) {
                 vla_runtime_pointed_size(&vtop[-1].type);
             } else {
@@ -2127,17 +2087,17 @@ redo:
             vswap();
             gen_op(TOK_PDIV);
         } else {
-            /* exactly one pointer : must be '+' or '-'. */
+            /* 恰好一个指针：必须是 '+' 或 '-'。 */
             if (op != '-' && op != '+')
                 tcc_error("cannot use pointers here");
-            /* Put pointer as first operand */
+            /* 把指针作为第一个操作数 */
             if (bt2 == VT_PTR) {
                 vswap();
                 t = t1, t1 = t2, t2 = t;
             }
 #if PTR_SIZE == 4
             if ((vtop[0].type.t & VT_BTYPE) == VT_LLONG)
-                /* XXX: truncate here because gen_opl can't handle ptr + long long */
+                /* XXX: 这里截断，因为 gen_opl 无法处理 ptr + long long */
                 gen_cast_s(VT_INT);
 #endif
             type1 = vtop[-1].type;
@@ -2151,14 +2111,14 @@ redo:
 #if PTR_SIZE == 8
                 vpushll(u);
 #else
-                /* XXX: cast to int ? (long long case) */
+                /* XXX: 是否强制类型转换为 int？（long long 情形） */
                 vpushi(u);
 #endif
             }
             gen_op('*');
 #if 0
 /* #ifdef CONFIG_TCC_BCHECK
-    The main reason to removing this code:
+    移除这段代码的主要理由：
 	#include <stdio.h>
 	int main ()
 	{
@@ -2168,15 +2128,15 @@ redo:
 	    fprintf(stderr, "v+i-j  = %p\n", v+i-j);
 	    fprintf(stderr, "v+(i-j)  = %p\n", v+(i-j));
 	}
-    When this code is on. then the output looks like 
+    当这段代码启用时，输出如下
 	v+i-j = 0xfffffffe
 	v+(i-j) = 0xbff84000
     */
-            /* if evaluating constant expression, no code should be
-               generated, so no bound check */
+            /* 如果是在求常量表达式，则不应生成任何代码，
+               所以不做边界检查 */
             if (tcc_state->do_bounds_check && !const_wanted) {
-                /* if bounded pointers, we generate a special code to
-                   test bounds */
+                /* 如果是带边界的指针，我们生成一段特殊代码来
+                   测试边界 */
                 if (op == '-') {
                     vpushi(0);
                     vswap();
@@ -2188,11 +2148,11 @@ redo:
             {
                 gen_opic(op);
             }
-            /* put again type if gen_opic() swaped operands */
+            /* 如果 gen_opic() 交换了操作数，则重新放入类型 */
             vtop->type = type1;
         }
     } else if (is_float(bt1) || is_float(bt2)) {
-        /* compute bigger type and do implicit casts */
+        /* 计算更大的类型并进行隐式强制类型转换 */
         if (bt1 == VT_LDOUBLE || bt2 == VT_LDOUBLE) {
             t = VT_LDOUBLE;
         } else if (bt1 == VT_DOUBLE || bt2 == VT_DOUBLE) {
@@ -2200,7 +2160,7 @@ redo:
         } else {
             t = VT_FLOAT;
         }
-        /* floats can only be used for a few operations */
+        /* 浮点数只能用于少数几种运算 */
         if (op != '+' && op != '-' && op != '*' && op != '/' &&
             (op < TOK_ULT || op > TOK_GT))
             tcc_error("invalid operands for binary operation");
@@ -2212,27 +2172,27 @@ redo:
         t |= (VT_LONG & t1);
         goto std_op;
     } else if (bt1 == VT_LLONG || bt2 == VT_LLONG) {
-        /* cast to biggest op */
+        /* 强制类型转换为最大的运算类型 */
         t = VT_LLONG | VT_LONG;
         if (bt1 == VT_LLONG)
             t &= t1;
         if (bt2 == VT_LLONG)
             t &= t2;
-        /* convert to unsigned if it does not fit in a long long */
+        /* 如果无法放入 long long 则转换为无符号 */
         if ((t1 & (VT_BTYPE | VT_UNSIGNED | VT_BITFIELD)) == (VT_LLONG | VT_UNSIGNED) ||
             (t2 & (VT_BTYPE | VT_UNSIGNED | VT_BITFIELD)) == (VT_LLONG | VT_UNSIGNED))
             t |= VT_UNSIGNED;
         goto std_op;
     } else {
-        /* integer operations */
+        /* 整型运算 */
         t = VT_INT | (VT_LONG & (t1 | t2));
-        /* convert to unsigned if it does not fit in an integer */
+        /* 如果无法放入整数则转换为无符号 */
         if ((t1 & (VT_BTYPE | VT_UNSIGNED | VT_BITFIELD)) == (VT_INT | VT_UNSIGNED) ||
             (t2 & (VT_BTYPE | VT_UNSIGNED | VT_BITFIELD)) == (VT_INT | VT_UNSIGNED))
             t |= VT_UNSIGNED;
     std_op:
-        /* XXX: currently, some unsigned operations are explicit, so
-           we modify them here */
+        /* XXX: 目前某些无符号运算是显式的，所以
+           我们在这里修改它们 */
         if (t & VT_UNSIGNED) {
             if (op == TOK_SAR)
                 op = TOK_SHR;
@@ -2254,8 +2214,8 @@ redo:
         type1.ref = NULL;
         gen_cast(&type1);
         vswap();
-        /* special case for shifts and long long: we keep the shift as
-           an integer */
+        /* 移位与 long long 的特殊情形：我们保持移位量为
+           整数 */
         if (op == TOK_SHR || op == TOK_SAR || op == TOK_SHL)
             type1.t = VT_INT;
         gen_cast(&type1);
@@ -2264,25 +2224,24 @@ redo:
         else
             gen_opic(op);
         if (op >= TOK_ULT && op <= TOK_GT) {
-            /* relational op: the result is an int */
+            /* 关系运算：结果是 int */
             vtop->type.t = VT_INT;
         } else {
             vtop->type.t = t;
         }
     }
-    // Make sure that we have converted to an rvalue:
+    // 确保我们已经转换为右值：
     if (vtop->r & VT_LVAL)
         gv(is_float(vtop->type.t & VT_BTYPE) ? RC_FLOAT : RC_INT);
 }
 
-#ifndef TCC_TARGET_ARM
-/* generic itof for unsigned long long case */
+/* 针对无符号 long long 情形的通用 itof */
 static void gen_cvt_itof1(int t)
 {
 #ifdef TCC_TARGET_ARM64
     gen_cvt_itof(t);
 #else
-    if ((vtop->type.t & (VT_BTYPE | VT_UNSIGNED)) == 
+    if ((vtop->type.t & (VT_BTYPE | VT_UNSIGNED)) ==
         (VT_LLONG | VT_UNSIGNED)) {
 
         if (t == VT_FLOAT)
@@ -2302,9 +2261,8 @@ static void gen_cvt_itof1(int t)
     }
 #endif
 }
-#endif
 
-/* generic ftoi for unsigned long long case */
+/* 针对无符号 long long 情形的通用 ftoi */
 static void gen_cvt_ftoi1(int t)
 {
 #ifdef TCC_TARGET_ARM64
@@ -2313,7 +2271,7 @@ static void gen_cvt_ftoi1(int t)
     int st;
 
     if (t == (VT_LLONG | VT_UNSIGNED)) {
-        /* not handled natively */
+        /* 非原生处理 */
         st = vtop->type.t & VT_BTYPE;
         if (st == VT_FLOAT)
             vpush_global_sym(&func_old_type, TOK___fixunssfdi);
@@ -2334,17 +2292,17 @@ static void gen_cvt_ftoi1(int t)
 #endif
 }
 
-/* force char or short cast */
+/* 强制进行 char 或 short 转换 */
 static void force_charshort_cast(int t)
 {
     int bits, dbt;
 
-    /* cannot cast static initializers */
+    /* 不能对静态初始化器做强制类型转换 */
     if (STATIC_DATA_WANTED)
 	return;
 
     dbt = t & VT_BTYPE;
-    /* XXX: add optimization if lvalue : just change type and offset */
+    /* XXX: 如果它是左值则添加优化：只改变类型和偏移 */
     if (dbt == VT_BYTE)
         bits = 8;
     else
@@ -2359,16 +2317,16 @@ static void force_charshort_cast(int t)
             bits = 32 - bits;
         vpushi(bits);
         gen_op(TOK_SHL);
-        /* result must be signed or the SAR is converted to an SHL
-           This was not the case when "t" was a signed short
-           and the last value on the stack was an unsigned int */
+        /* 结果必须有符号，否则 SAR 会被转换成 SHL
+           当 "t" 是有符号 short 且栈上最后一个值
+           是无符号 int 时就不是这样 */
         vtop->type.t &= ~VT_UNSIGNED;
         vpushi(bits);
         gen_op(TOK_SAR);
     }
 }
 
-/* cast 'vtop' to 'type'. Casting to bitfields is forbidden. */
+/* 把 'vtop' 强制类型转换为 'type'。禁止转换为位域。 */
 static void gen_cast_s(int t)
 {
     CType type;
@@ -2381,15 +2339,15 @@ static void gen_cast(CType *type)
 {
     int sbt, dbt, sf, df, c, p;
 
-    /* special delayed cast for char/short */
-    /* XXX: in some cases (multiple cascaded casts), it may still
-       be incorrect */
+    /* char/short 的特殊延迟转换 */
+    /* XXX: 在某些情况下（多次级联转换），它可能仍然
+       不正确 */
     if (vtop->r & VT_MUSTCAST) {
         vtop->r &= ~VT_MUSTCAST;
         force_charshort_cast(vtop->type.t);
     }
 
-    /* bitfields first get cast to ints */
+    /* 位域首先被强制类型转换为 int */
     if (vtop->type.t & VT_BITFIELD) {
         gv(RC_INT);
     }
@@ -2406,8 +2364,8 @@ static void gen_cast(CType *type)
         c &= dbt != VT_LDOUBLE;
 #endif
         if (c) {
-            /* constant case: we can do it now */
-            /* XXX: in ISOC, cannot do it if error in convert */
+            /* 常量情形：现在就可以做 */
+            /* XXX: 在 ISOC 中，如果转换出错就不能这样做 */
             if (sbt == VT_FLOAT)
                 vtop->c.ld = vtop->c.f;
             else if (sbt == VT_DOUBLE)
@@ -2470,27 +2428,27 @@ static void gen_cast(CType *type)
             vtop->r = VT_CONST;
             vtop->c.i = 1;
         } else {
-            /* non constant case: generate code */
+            /* 非常量情形：生成代码 */
             if (sf && df) {
-                /* convert from fp to fp */
+                /* 从 fp 转换到 fp */
                 gen_cvt_ftof(dbt);
             } else if (df) {
-                /* convert int to fp */
+                /* 把 int 转换成 fp */
                 gen_cvt_itof1(dbt);
             } else if (sf) {
-                /* convert fp to int */
+                /* 把 fp 转换成 int */
                 if (dbt == VT_BOOL) {
                      vpushi(0);
                      gen_op(TOK_NE);
                 } else {
-                    /* we handle char/short/etc... with generic code */
+                    /* char/short/等用通用代码处理 */
                     if (dbt != (VT_INT | VT_UNSIGNED) &&
                         dbt != (VT_LLONG | VT_UNSIGNED) &&
                         dbt != VT_LLONG)
                         dbt = VT_INT;
                     gen_cvt_ftoi1(dbt);
                     if (dbt == VT_INT && (type->t & (VT_BTYPE | VT_UNSIGNED)) != dbt) {
-                        /* additional cast for char/short... */
+                        /* char/short 的额外强制类型转换... */
                         vtop->type.t = dbt;
                         gen_cast(type);
                     }
@@ -2498,24 +2456,24 @@ static void gen_cast(CType *type)
 #if PTR_SIZE == 4
             } else if ((dbt & VT_BTYPE) == VT_LLONG) {
                 if ((sbt & VT_BTYPE) != VT_LLONG) {
-                    /* scalar to long long */
-                    /* machine independent conversion */
+                    /* 标量转换为 long long */
+                    /* 与机器无关的转换 */
                     gv(RC_INT);
-                    /* generate high word */
+                    /* 生成高位字 */
                     if (sbt == (VT_INT | VT_UNSIGNED)) {
                         vpushi(0);
                         gv(RC_INT);
                     } else {
                         if (sbt == VT_PTR) {
-                            /* cast from pointer to int before we apply
-                               shift operation, which pointers don't support*/
+                            /* 在应用指针不支持的
+                               移位运算之前，先把指针强制类型转换为 int*/
                             gen_cast_s(VT_INT);
                         }
                         gv_dup();
                         vpushi(31);
                         gen_op(TOK_SAR);
                     }
-                    /* patch second register */
+                    /* 修补第二个寄存器 */
                     vtop[-1].r2 = vtop->r;
                     vpop();
                 }
@@ -2526,27 +2484,17 @@ static void gen_cast(CType *type)
                 if ((sbt & VT_BTYPE) != VT_LLONG &&
                     (sbt & VT_BTYPE) != VT_PTR &&
                     (sbt & VT_BTYPE) != VT_FUNC) {
-                    /* need to convert from 32bit to 64bit */
+                    /* 需要从 32 位转换到 64 位 */
                     gv(RC_INT);
-                    if (sbt != (VT_INT | VT_UNSIGNED)) {
-#if defined(TCC_TARGET_ARM64)
+                    if (sbt != (VT_INT | VT_UNSIGNED))
                         gen_cvt_sxtw();
-#elif defined(TCC_TARGET_X86_64)
-                        int r = gv(RC_INT);
-                        /* x86_64 specific: movslq */
-                        o(0x6348);
-                        o(0xc0 + (REG_VALUE(r) << 3) + REG_VALUE(r));
-#else
-#error
-#endif
-                    }
                 }
 #endif
             } else if (dbt == VT_BOOL) {
-                /* scalar to bool */
+                /* 标量转换为 bool */
                 vpushi(0);
                 gen_op(TOK_NE);
-            } else if ((dbt & VT_BTYPE) == VT_BYTE || 
+            } else if ((dbt & VT_BTYPE) == VT_BYTE ||
                        (dbt & VT_BTYPE) == VT_SHORT) {
                 if (sbt == VT_PTR) {
                     vtop->type.t = VT_INT;
@@ -2555,28 +2503,28 @@ static void gen_cast(CType *type)
                 force_charshort_cast(dbt);
 #if PTR_SIZE == 4
             } else if ((dbt & VT_BTYPE) == VT_INT) {
-                /* scalar to int */
+                /* 标量转换为 int */
                 if ((sbt & VT_BTYPE) == VT_LLONG) {
-                    /* from long long: just take low order word */
+                    /* 来自 long long：只取低位字 */
                     lexpand();
                     vpop();
-                } 
-                /* if lvalue and single word type, nothing to do because
-                   the lvalue already contains the real type size (see
-                   VT_LVAL_xxx constants) */
+                }
+                /* 如果是左值且为单字类型，则无需处理，因为
+                   左值已经包含真实的类型大小（见
+                   VT_LVAL_xxx 常量） */
 #endif
             }
         }
     } else if ((dbt & VT_BTYPE) == VT_PTR && !(vtop->r & VT_LVAL)) {
-        /* if we are casting between pointer types,
-           we must update the VT_LVAL_xxx size */
+        /* 如果是在指针类型之间做强制类型转换，
+           就必须更新 VT_LVAL_xxx 大小 */
         vtop->r = (vtop->r & ~VT_LVAL_TYPE)
                   | (lvalue_type(type->ref->type.t) & VT_LVAL_TYPE);
     }
     vtop->type = *type;
 }
 
-/* return type size as known at compile time. Put alignment at 'a' */
+/* 返回编译期已知的类型大小。把对齐放到 'a' */
 ST_FUNC int type_size(CType *type, int *a)
 {
     Sym *s;
@@ -2584,7 +2532,7 @@ ST_FUNC int type_size(CType *type, int *a)
 
     bt = type->t & VT_BTYPE;
     if (bt == VT_STRUCT) {
-        /* struct/union */
+        /* 结构体/联合体 */
         s = type->ref;
         *a = s->r;
         return s->c;
@@ -2604,7 +2552,7 @@ ST_FUNC int type_size(CType *type, int *a)
             return PTR_SIZE;
         }
     } else if (IS_ENUM(type->t) && type->ref->c == -1) {
-        return -1; /* incomplete enum */
+        return -1; /* 不完整的枚举 */
     } else if (bt == VT_LDOUBLE) {
         *a = LDOUBLE_ALIGN;
         return LDOUBLE_SIZE;
@@ -2621,14 +2569,14 @@ ST_FUNC int type_size(CType *type, int *a)
         *a = 8;
         return 16;
     } else {
-        /* char, void, function, _Bool */
+        /* char, void, 函数, _Bool */
         *a = 1;
         return 1;
     }
 }
 
-/* push type size as known at runtime time on top of value stack. Put
-   alignment at 'a' */
+/* 把运行期已知的类型大小压入值栈顶部。
+   把对齐放到 'a' */
 ST_FUNC void vla_runtime_type_size(CType *type, int *a)
 {
     if (type->t & VT_VLA) {
@@ -2651,13 +2599,13 @@ static void vla_sp_restore_root(void) {
     }
 }
 
-/* return the pointed type of t */
+/* 返回 t 所指向的类型 */
 static inline CType *pointed_type(CType *type)
 {
     return &type->ref->type;
 }
 
-/* modify type so that its it is a pointer to type. */
+/* 修改类型，使其成为指向 type 的指针。 */
 ST_FUNC void mk_pointer(CType *type)
 {
     Sym *s;
@@ -2666,7 +2614,7 @@ ST_FUNC void mk_pointer(CType *type)
     type->ref = s;
 }
 
-/* compare function types. OLD functions match any new functions */
+/* 比较函数类型。OLD 函数匹配任何新函数 */
 static int is_compatible_func(CType *type1, CType *type2)
 {
     Sym *s1, *s2;
@@ -2675,10 +2623,10 @@ static int is_compatible_func(CType *type1, CType *type2)
     s2 = type2->ref;
     if (!is_compatible_types(&s1->type, &s2->type))
         return 0;
-    /* check func_call */
+    /* 检查 func_call */
     if (s1->f.func_call != s2->f.func_call)
         return 0;
-    /* XXX: not complete */
+    /* XXX: 不完整 */
     if (s1->f.func_type == FUNC_OLD || s2->f.func_type == FUNC_OLD)
         return 1;
     if (s1->f.func_type != s2->f.func_type)
@@ -2696,10 +2644,10 @@ static int is_compatible_func(CType *type1, CType *type2)
     return 1;
 }
 
-/* return true if type1 and type2 are the same.  If unqualified is
-   true, qualifiers on the types are ignored.
+/* 若 type1 与 type2 相同则返回真。若 unqualified 为
+   真，则忽略类型上的限定符。
 
-   - enums are not checked as gcc __builtin_types_compatible_p () 
+   - 与 gcc __builtin_types_compatible_p () 一样不检查枚举
  */
 static int compare_types(CType *type1, CType *type2, int unqualified)
 {
@@ -2708,20 +2656,20 @@ static int compare_types(CType *type1, CType *type2, int unqualified)
     t1 = type1->t & VT_TYPE;
     t2 = type2->t & VT_TYPE;
     if (unqualified) {
-        /* strip qualifiers before comparing */
+        /* 比较前去掉限定符 */
         t1 &= ~(VT_CONSTANT | VT_VOLATILE);
         t2 &= ~(VT_CONSTANT | VT_VOLATILE);
     }
 
-    /* Default Vs explicit signedness only matters for char */
+    /* 默认符号性与显式符号性的区别只对 char 有意义 */
     if ((t1 & VT_BTYPE) != VT_BYTE) {
         t1 &= ~VT_DEFSIGN;
         t2 &= ~VT_DEFSIGN;
     }
-    /* XXX: bitfields ? */
+    /* XXX: 位域呢？ */
     if (t1 != t2)
         return 0;
-    /* test more complicated cases */
+    /* 测试更复杂的情形 */
     bt1 = t1 & VT_BTYPE;
     if (bt1 == VT_PTR) {
         type1 = pointed_type(type1);
@@ -2736,26 +2684,26 @@ static int compare_types(CType *type1, CType *type2, int unqualified)
     }
 }
 
-/* return true if type1 and type2 are exactly the same (including
-   qualifiers). 
+/* 若 type1 与 type2 完全相同（包括限定符）
+   则返回真。
 */
 static int is_compatible_types(CType *type1, CType *type2)
 {
     return compare_types(type1,type2,0);
 }
 
-/* return true if type1 and type2 are the same (ignoring qualifiers).
+/* 若 type1 与 type2 相同（忽略限定符）则返回真。
 */
 static int is_compatible_unqualified_types(CType *type1, CType *type2)
 {
     return compare_types(type1,type2,1);
 }
 
-/* print a type. If 'varstr' is not NULL, then the variable is also
-   printed in the type */
-/* XXX: union */
-/* XXX: add array and function pointers */
-static void type_to_str(char *buf, int buf_size, 
+/* 打印一个类型。若 'varstr' 非 NULL，则在类型中
+   一并打印该变量 */
+/* XXX: 联合体 */
+/* XXX: 添加数组和函数指针 */
+static void type_to_str(char *buf, int buf_size,
                  CType *type, const char *varstr)
 {
     int bt, v, t;
@@ -2876,27 +2824,27 @@ static void type_to_str(char *buf, int buf_size,
  no_var: ;
 }
 
-/* verify type compatibility to store vtop in 'dt' type, and generate
-   casts if needed. */
+/* 验证把 vtop 存入 'dt' 类型的类型兼容性，
+   并在需要时生成强制类型转换。 */
 static void gen_assign_cast(CType *dt)
 {
     CType *st, *type1, *type2;
     char buf1[256], buf2[256];
     int dbt, sbt;
 
-    st = &vtop->type; /* source type */
+    st = &vtop->type; /* 源类型 */
     dbt = dt->t & VT_BTYPE;
     sbt = st->t & VT_BTYPE;
     if (sbt == VT_VOID || dbt == VT_VOID) {
 	if (sbt == VT_VOID && dbt == VT_VOID)
 	    ; /*
-	      It is Ok if both are void
-	      A test program:
+	      两者都是 void 也没问题
+	      一个测试程序：
 	        void func1() {}
 		void func2() {
 		  return func1();
 		}
-	      gcc accepts this program
+	      gcc 接受这个程序
 	      */
 	else
     	    tcc_error("cannot cast from/to void");
@@ -2905,17 +2853,17 @@ static void gen_assign_cast(CType *dt)
         tcc_warning("assignment of read-only location");
     switch(dbt) {
     case VT_PTR:
-        /* special cases for pointers */
-        /* '0' can also be a pointer */
+        /* 指针的特殊情形 */
+        /* '0' 也可以是指针 */
         if (is_null_pointer(vtop))
             goto type_ok;
-        /* accept implicit pointer to integer cast with warning */
+        /* 允许隐式的指针到整数转换，但给出告警 */
         if (is_integer_btype(sbt)) {
             tcc_warning("assignment makes pointer from integer without a cast");
             goto type_ok;
         }
         type1 = pointed_type(dt);
-        /* a function is implicitly a function pointer */
+        /* 函数隐式地是函数指针 */
         if (sbt == VT_FUNC) {
             if ((type1->t & VT_BTYPE) != VT_VOID &&
                 !is_compatible_types(pointed_type(dt), st))
@@ -2925,24 +2873,24 @@ static void gen_assign_cast(CType *dt)
         if (sbt != VT_PTR)
             goto error;
         type2 = pointed_type(st);
-        if ((type1->t & VT_BTYPE) == VT_VOID || 
+        if ((type1->t & VT_BTYPE) == VT_VOID ||
             (type2->t & VT_BTYPE) == VT_VOID) {
-            /* void * can match anything */
+            /* void * 可以匹配任何类型 */
         } else {
             //printf("types %08x %08x\n", type1->t, type2->t);
-            /* exact type match, except for qualifiers */
+            /* 除限定符外类型完全匹配 */
             if (!is_compatible_unqualified_types(type1, type2)) {
-		/* Like GCC don't warn by default for merely changes
-		   in pointer target signedness.  Do warn for different
-		   base types, though, in particular for unsigned enums
-		   and signed int targets.  */
+		/* 与 GCC 一样，默认不为指针目标符号性的
+		   改变而告警。但对于不同的
+		   基类型则要告警，尤其是无符号枚举
+		   与有符号 int 目标。  */
 		if ((type1->t & (VT_BTYPE|VT_LONG)) != (type2->t & (VT_BTYPE|VT_LONG))
                     || IS_ENUM(type1->t) || IS_ENUM(type2->t)
                     )
 		    tcc_warning("assignment from incompatible pointer type");
 	    }
         }
-        /* check const and volatile */
+        /* 检查 const 和 volatile */
         if ((!(type1->t & VT_CONSTANT) && (type2->t & VT_CONSTANT)) ||
             (!(type1->t & VT_VOLATILE) && (type2->t & VT_VOLATILE)))
             tcc_warning("assignment discards qualifiers from pointer target type");
@@ -2956,7 +2904,7 @@ static void gen_assign_cast(CType *dt)
         } else if (sbt == VT_STRUCT) {
             goto case_VT_STRUCT;
         }
-        /* XXX: more tests */
+        /* XXX: 更多测试 */
         break;
     case VT_STRUCT:
     case_VT_STRUCT:
@@ -2972,7 +2920,7 @@ static void gen_assign_cast(CType *dt)
     gen_cast(dt);
 }
 
-/* store vtop in lvalue pushed on stack */
+/* 把 vtop 存入压入栈中的左值 */
 ST_FUNC void vstore(void)
 {
     int sbt, dbt, ft, r, t, size, align, bit_size, bit_pos, rc, delayed_cast;
@@ -2983,10 +2931,10 @@ ST_FUNC void vstore(void)
     if ((((sbt == VT_INT || sbt == VT_SHORT) && dbt == VT_BYTE) ||
          (sbt == VT_INT && dbt == VT_SHORT))
 	&& !(vtop->type.t & VT_BITFIELD)) {
-        /* optimize char/short casts */
+        /* 优化 char/short 转换 */
         delayed_cast = VT_MUSTCAST;
         vtop->type.t = ft & VT_TYPE;
-        /* XXX: factorize */
+        /* XXX: 提取公共代码 */
         if (ft & VT_CONSTANT)
             tcc_warning("assignment of read-only location");
     } else {
@@ -2996,17 +2944,17 @@ ST_FUNC void vstore(void)
     }
 
     if (sbt == VT_STRUCT) {
-        /* if structure, only generate pointer */
-        /* structure assignment : generate memcpy */
-        /* XXX: optimize if small size */
+        /* 如果是结构体，只生成指针 */
+        /* 结构体赋值：生成 memcpy */
+        /* XXX: 若尺寸较小则优化 */
             size = type_size(&vtop->type, &align);
 
-            /* destination */
+            /* 目的地 */
             vswap();
             vtop->type.t = VT_PTR;
             gaddrof();
 
-            /* address of memcpy() */
+            /* memcpy() 的地址 */
 #ifdef TCC_ARM_EABI
             if(!(align & 7))
                 vpush_global_sym(&func_old_type, TOK_memcpy8);
@@ -3014,28 +2962,28 @@ ST_FUNC void vstore(void)
                 vpush_global_sym(&func_old_type, TOK_memcpy4);
             else
 #endif
-            /* Use memmove, rather than memcpy, as dest and src may be same: */
+            /* 使用 memmove 而不是 memcpy，因为 dest 与 src 可能相同： */
             vpush_global_sym(&func_old_type, TOK_memmove);
 
             vswap();
-            /* source */
+            /* 源 */
             vpushv(vtop - 2);
             vtop->type.t = VT_PTR;
             gaddrof();
-            /* type size */
+            /* 类型大小 */
             vpushi(size);
             gfunc_call(3);
 
-        /* leave source on stack */
+        /* 把源留在栈上 */
     } else if (ft & VT_BITFIELD) {
-        /* bitfield store handling */
+        /* 位域存储处理 */
 
-        /* save lvalue as expression result (example: s.b = s.a = n;) */
+        /* 把左值保存为表达式结果（例如：s.b = s.a = n;） */
         vdup(), vtop[-1] = vtop[-2];
 
         bit_pos = BIT_POS(ft);
         bit_size = BIT_SIZE(ft);
-        /* remove bit field info to avoid loops */
+        /* 移除位域信息以避免死循环 */
         vtop[-1].type.t = ft & ~VT_STRUCT_MASK;
 
         if ((ft & VT_BTYPE) == VT_BOOL) {
@@ -3050,37 +2998,37 @@ ST_FUNC void vstore(void)
         } else {
             unsigned long long mask = (1ULL << bit_size) - 1;
             if ((ft & VT_BTYPE) != VT_BOOL) {
-                /* mask source */
+                /* 屏蔽源 */
                 if ((vtop[-1].type.t & VT_BTYPE) == VT_LLONG)
                     vpushll(mask);
                 else
                     vpushi((unsigned)mask);
                 gen_op('&');
             }
-            /* shift source */
+            /* 移位源 */
             vpushi(bit_pos);
             gen_op(TOK_SHL);
             vswap();
-            /* duplicate destination */
+            /* 复制目的地 */
             vdup();
             vrott(3);
-            /* load destination, mask and or with source */
+            /* 加载目的地，屏蔽后与源做或运算 */
             if ((vtop->type.t & VT_BTYPE) == VT_LLONG)
                 vpushll(~(mask << bit_pos));
             else
                 vpushi(~((unsigned)mask << bit_pos));
             gen_op('&');
             gen_op('|');
-            /* store result */
+            /* 存储结果 */
             vstore();
-            /* ... and discard */
+            /* ... 并丢弃 */
             vpop();
         }
     } else if (dbt == VT_VOID) {
         --vtop;
     } else {
 #ifdef CONFIG_TCC_BCHECK
-            /* bound check case */
+            /* 边界检查情形 */
             if (vtop[-1].r & VT_MUSTBOUND) {
                 vswap();
                 gbound();
@@ -3090,16 +3038,9 @@ ST_FUNC void vstore(void)
             rc = RC_INT;
             if (is_float(ft)) {
                 rc = RC_FLOAT;
-#ifdef TCC_TARGET_X86_64
-                if ((ft & VT_BTYPE) == VT_LDOUBLE) {
-                    rc = RC_ST0;
-                } else if ((ft & VT_BTYPE) == VT_QFLOAT) {
-                    rc = RC_FRET;
-                }
-#endif
             }
-            r = gv(rc);  /* generate value */
-            /* if lvalue was saved on stack, must read it */
+            r = gv(rc);  /* 生成值 */
+            /* 如果左值已保存在栈上，则必须读取它 */
             if ((vtop[-1].r & VT_VALMASK) == VT_LLOCAL) {
                 SValue sv;
                 t = get_reg(RC_INT);
@@ -3113,7 +3054,7 @@ ST_FUNC void vstore(void)
                 load(t, &sv);
                 vtop[-1].r = t | VT_LVAL;
             }
-            /* two word case handling : store second register at word + 4 (or +8 for x86-64)  */
+            /* 双字情形处理：把第二个寄存器存到 word + 4 处（x86-64 为 +8）  */
 #if PTR_SIZE == 8
             if (((ft & VT_BTYPE) == VT_QLONG) || ((ft & VT_BTYPE) == VT_QFLOAT)) {
                 int addr_type = VT_LLONG, load_size = 8, load_type = ((vtop->type.t & VT_BTYPE) == VT_QLONG) ? VT_LLONG : VT_DOUBLE;
@@ -3124,7 +3065,7 @@ ST_FUNC void vstore(void)
                 vtop[-1].type.t = load_type;
                 store(r, vtop - 1);
                 vswap();
-                /* convert to int to increment easily */
+                /* 转换为 int 以便于递增 */
                 vtop->type.t = addr_type;
                 gaddrof();
                 vpushi(load_size);
@@ -3132,52 +3073,52 @@ ST_FUNC void vstore(void)
                 vtop->r |= VT_LVAL;
                 vswap();
                 vtop[-1].type.t = load_type;
-                /* XXX: it works because r2 is spilled last ! */
+                /* XXX: 它能工作是因为 r2 最后被换出！ */
                 store(vtop->r2, vtop - 1);
             } else {
                 store(r, vtop - 1);
             }
 
         vswap();
-        vtop--; /* NOT vpop() because on x86 it would flush the fp stack */
+        vtop--; /* 不能用 vpop()，因为在 x86 上它会清空 fp 栈 */
         vtop->r |= delayed_cast;
     }
 }
 
-/* post defines POST/PRE add. c is the token ++ or -- */
+/* post 区分后置/前置自增。c 是词法单元 ++ 或 -- */
 ST_FUNC void inc(int post, int c)
 {
     test_lvalue();
-    vdup(); /* save lvalue */
+    vdup(); /* 保存左值 */
     if (post) {
-        gv_dup(); /* duplicate value */
+        gv_dup(); /* 复制值 */
         vrotb(3);
         vrotb(3);
     }
-    /* add constant */
-    vpushi(c - TOK_MID); 
+    /* 加常量 */
+    vpushi(c - TOK_MID);
     gen_op('+');
-    vstore(); /* store value */
+    vstore(); /* 存储值 */
     if (post)
-        vpop(); /* if post op, return saved value */
+        vpop(); /* 如果是后置运算，返回保存的值 */
 }
 
 ST_FUNC void parse_mult_str (CString *astr, const char *msg)
 {
-    /* read the string */
+    /* 读取字符串 */
     if (tok != TOK_STR)
         expect(msg);
     cstr_new(astr);
     while (tok == TOK_STR) {
-        /* XXX: add \0 handling too ? */
+        /* XXX: 是否也处理 \0 ？ */
         cstr_cat(astr, tokc.str.data, -1);
         next();
     }
     cstr_ccat(astr, '\0');
 }
 
-/* If I is >= 1 and a power of two, returns log2(i)+1.
-   If I is 0 returns 0.  */
+/* 若 I >= 1 且为 2 的幂，返回 log2(i)+1。
+   若 I 为 0 则返回 0。  */
 static int exact_log2p1(int i)
 {
   int ret;
@@ -3194,12 +3135,12 @@ static int exact_log2p1(int i)
   return ret;
 }
 
-/* Parse __attribute__((...)) GNUC extension. */
+/* 解析 __attribute__((...)) GNUC 扩展。 */
 static void parse_attribute(AttributeDef *ad)
 {
     int t, n;
     CString astr;
-    
+
 redo:
     if (tok != TOK_ATTRIBUTE1 && tok != TOK_ATTRIBUTE2)
         return;
@@ -3224,7 +3165,7 @@ redo:
         case TOK_ALIAS2:
             skip('(');
 	    parse_mult_str(&astr, "alias(\"target\")");
-            ad->alias_target = /* save string as token, for later */
+            ad->alias_target = /* 把字符串保存为词法单元，供后续使用 */
               tok_alloc((char*)astr.data, astr.size-1)->tok;
             skip(')');
 	    cstr_free(&astr);
@@ -3252,7 +3193,7 @@ redo:
             if (tok == '(') {
                 next();
                 n = expr_const();
-                if (n <= 0 || (n & (n - 1)) != 0) 
+                if (n <= 0 || (n & (n - 1)) != 0)
                     tcc_error("alignment must be a positive power of two");
                 skip(')');
             } else {
@@ -3272,13 +3213,13 @@ redo:
             break;
         case TOK_UNUSED1:
         case TOK_UNUSED2:
-            /* currently, no need to handle it because tcc does not
-               track unused objects */
+            /* 目前无需处理它，因为 tcc 不跟踪
+               未使用的对象 */
             break;
         case TOK_NORETURN1:
         case TOK_NORETURN2:
-            /* currently, no need to handle it because tcc does not
-               track unused objects */
+            /* 目前无需处理它，因为 tcc 不跟踪
+               未使用的对象 */
             break;
         case TOK_CDECL1:
         case TOK_CDECL2:
@@ -3290,25 +3231,6 @@ redo:
         case TOK_STDCALL3:
             ad->f.func_call = FUNC_STDCALL;
             break;
-#ifdef TCC_TARGET_I386
-        case TOK_REGPARM1:
-        case TOK_REGPARM2:
-            skip('(');
-            n = expr_const();
-            if (n > 3) 
-                n = 3;
-            else if (n < 0)
-                n = 0;
-            if (n > 0)
-                ad->f.func_call = FUNC_FASTCALL1 + n - 1;
-            skip(')');
-            break;
-        case TOK_FASTCALL1:
-        case TOK_FASTCALL2:
-        case TOK_FASTCALL3:
-            ad->f.func_call = FUNC_FASTCALLW;
-            break;            
-#endif
         case TOK_MODE:
             skip('(');
             switch(tok) {
@@ -3341,13 +3263,13 @@ redo:
         default:
             if (tcc_state->warn_unsupported)
                 tcc_warning("'%s' attribute ignored", get_tok_str(t, NULL));
-            /* skip parameters */
+            /* 跳过参数 */
             if (tok == '(') {
                 int parenthesis = 0;
                 do {
-                    if (tok == '(') 
+                    if (tok == '(')
                         parenthesis++;
-                    else if (tok == ')') 
+                    else if (tok == ')')
                         parenthesis--;
                     next();
                 } while (parenthesis && tok != -1);
@@ -3405,7 +3327,7 @@ static void struct_layout(CType *type, AttributeDef *ad)
     offset = 0;
     c = 0;
     bit_pos = 0;
-    prevbt = VT_STRUCT; /* make it never match */
+    prevbt = VT_STRUCT; /* 使其永不匹配 */
     prev_bit_size = 0;
 
 //#define BF_DEBUG
@@ -3420,24 +3342,24 @@ static void struct_layout(CType *type, AttributeDef *ad)
         packed = 0;
 
         if (pcc && bit_size == 0) {
-            /* in pcc mode, packing does not affect zero-width bitfields */
+            /* 在 pcc 模式下，紧凑不会影响零宽度位域 */
 
         } else {
-            /* in pcc mode, attribute packed overrides if set. */
+            /* 在 pcc 模式下，若设置了 packed 属性则它优先。 */
             if (pcc && (f->a.packed || ad->a.packed))
                 align = packed = 1;
 
-            /* pragma pack overrides align if lesser and packs bitfields always */
+            /* pragma pack 在取值更小时覆盖 align，并且总是紧凑排列位域 */
             if (pragma_pack) {
                 packed = 1;
                 if (pragma_pack < align)
                     align = pragma_pack;
-                /* in pcc mode pragma pack also overrides individual align */
+                /* 在 pcc 模式下 pragma pack 也覆盖单独的 align */
                 if (pcc && pragma_pack < a)
                     a = 0;
             }
         }
-        /* some individual align was specified */
+        /* 指定了某个单独的 align */
         if (a)
             align = a;
 
@@ -3460,15 +3382,15 @@ static void struct_layout(CType *type, AttributeDef *ad)
 	    prev_bit_size = 0;
 
 	} else {
-	    /* A bit-field.  Layout is more complicated.  There are two
-	       options: PCC (GCC) compatible and MS compatible */
+	    /* 位域。布局更复杂。有两种
+	       方案：兼容 PCC (GCC) 与兼容 MS */
             if (pcc) {
-		/* In PCC layout a bit-field is placed adjacent to the
-                   preceding bit-fields, except if:
-                   - it has zero-width
-                   - an individual alignment was given
-                   - it would overflow its base type container and
-                     there is no packing */
+		/* 在 PCC 布局中，位域紧邻前一个
+                   位域放置，除非：
+                   - 它的宽度为零
+                   - 指定了单独的对齐
+                   - 它会溢出其基类型容器且
+                     没有做紧凑排列 */
                 if (bit_size == 0) {
             new_field:
 		    c = (c + ((bit_pos + 7) >> 3) + align - 1) & -align;
@@ -3482,7 +3404,7 @@ static void struct_layout(CType *type, AttributeDef *ad)
                         goto new_field;
                 }
 
-                /* in pcc mode, long long bitfields have type int if they fit */
+                /* 在 pcc 模式下，若能放下，long long 位域的类型为 int */
                 if (size == 8 && bit_size <= 32)
                     f->type.t = (f->type.t & ~VT_BTYPE) | VT_INT, size = 4;
 
@@ -3490,9 +3412,9 @@ static void struct_layout(CType *type, AttributeDef *ad)
                     c += align, bit_pos -= align * 8;
                 offset = c;
 
-		/* In PCC layout named bit-fields influence the alignment
-		   of the containing struct using the base types alignment,
-		   except for packed fields (which here have correct align).  */
+		/* 在 PCC 布局中，具名位域用基类型的对齐
+		   来影响所在结构体的对齐，
+		   紧凑排列的字段除外（这里它们的对齐是正确的）。  */
 		if (f->v & SYM_FIRST_ANOM
                     // && bit_size // ??? gcc on ARM/rpi does that
                     )
@@ -3506,17 +3428,17 @@ static void struct_layout(CType *type, AttributeDef *ad)
 		    c = (c + align - 1) & -align;
 		    offset = c;
 		    bit_pos = 0;
-		    /* In MS bitfield mode a bit-field run always uses
-		       at least as many bits as the underlying type.
-		       To start a new run it's also required that this
-		       or the last bit-field had non-zero width.  */
+		    /* 在 MS 位域模式下，一段位域总是至少
+		       占用与其底层类型相同的位数。
+		       要开始新的一段，还要求本字段
+		       或上一个位域的宽度非零。  */
 		    if (bit_size || prev_bit_size)
 		        c += size;
 		}
-		/* In MS layout the records alignment is normally
-		   influenced by the field, except for a zero-width
-		   field at the start of a run (but by further zero-width
-		   fields it is again).  */
+		/* 在 MS 布局中，记录的对齐通常
+		   受字段影响，但一段起始处的零宽度
+		   字段除外（其后的零宽度字段
+		   又会重新影响它）。  */
 		if (bit_size == 0 && prevbt != bt)
 		    align = 1;
 		prevbt = bt;
@@ -3544,22 +3466,22 @@ static void struct_layout(CType *type, AttributeDef *ad)
 
 	if (f->v & SYM_FIRST_ANOM && (f->type.t & VT_BTYPE) == VT_STRUCT) {
 	    Sym *ass;
-	    /* An anonymous struct/union.  Adjust member offsets
-	       to reflect the real offset of our containing struct.
-	       Also set the offset of this anon member inside
-	       the outer struct to be zero.  Via this it
-	       works when accessing the field offset directly
-	       (from base object), as well as when recursing
-	       members in initializer handling.  */
+	    /* 匿名结构体/联合体。调整成员偏移，以
+	       反映所在结构体的真实偏移。
+	       同时把这个匿名成员在外层结构体中的
+	       偏移设为 0。这样无论是直接访问字段偏移
+	       （从基对象出发），还是在初始化器处理中
+	       递归成员时，都能正确工作。
+	       */
 	    int v2 = f->type.ref->v;
 	    if (!(v2 & SYM_FIELD) &&
 		(v2 & ~SYM_STRUCT) < SYM_FIRST_ANOM) {
 		Sym **pps;
-		/* This happens only with MS extensions.  The
-		   anon member has a named struct type, so it
-		   potentially is shared with other references.
-		   We need to unshare members so we can modify
-		   them.  */
+		/* 这只在 MS 扩展下发生。该匿名
+		   成员具有具名的结构体类型，因此它
+		   可能与其他引用共享。
+		   我们需要解除成员的共享，才能修改
+		   它们。  */
 		ass = f->type.ref;
 		f->type.ref = sym_push(anon_sym++ | SYM_FIELD,
 				       &f->type.ref->type, 0,
@@ -3583,14 +3505,14 @@ static void struct_layout(CType *type, AttributeDef *ad)
     if (pcc)
         c += (bit_pos + 7) >> 3;
 
-    /* store size and alignment */
+    /* 保存大小和对齐 */
     a = bt = ad->a.aligned ? 1 << (ad->a.aligned - 1) : 1;
     if (a < maxalign)
         a = maxalign;
     type->ref->r = a;
     if (pragma_pack && pragma_pack < maxalign && 0 == pcc) {
-        /* can happen if individual align for some member was given.  In
-           this case MSVC ignores maxalign when aligning the size */
+        /* 若给某个成员指定了单独的对齐就可能发生。
+           此时 MSVC 在对齐大小时忽略 maxalign */
         a = pragma_pack;
         if (a < bt)
             a = bt;
@@ -3602,7 +3524,7 @@ static void struct_layout(CType *type, AttributeDef *ad)
     printf("struct size %-2d align %-2d\n\n", c, a), fflush(stdout);
 #endif
 
-    /* check whether we can access bitfields by their type */
+    /* 检查能否按其类型访问位域 */
     for (f = type->ref->next; f; f = f->next) {
         int s, px, cx, c0;
         CType t;
@@ -3619,7 +3541,7 @@ static void struct_layout(CType *type, AttributeDef *ad)
         if (bit_pos + bit_size <= size * 8 && f->c + size <= c)
             continue;
 
-        /* try to access the field using a different type */
+        /* 尝试用不同的类型访问该字段 */
         c0 = -1, s = align = 1;
         for (;;) {
             px = f->c * 8 + bit_pos;
@@ -3642,7 +3564,7 @@ static void struct_layout(CType *type, AttributeDef *ad)
         }
 
         if (px + bit_size <= s * 8 && cx + s <= c) {
-            /* update offset and bit position */
+            /* 更新偏移和位位置 */
             f->c = cx;
             bit_pos = px;
 	    f->type.t = (f->type.t & ~(0x3f << VT_STRUCT_SHIFT))
@@ -3656,7 +3578,7 @@ static void struct_layout(CType *type, AttributeDef *ad)
                 cx, s, align, px, bit_size);
 #endif
         } else {
-            /* fall back to load/store single-byte wise */
+            /* 回退为逐字节加载/存储 */
             f->auxtype = VT_STRUCT;
 #ifdef BF_DEBUG
             printf("FIX field %s : load byte-wise\n",
@@ -3666,7 +3588,7 @@ static void struct_layout(CType *type, AttributeDef *ad)
     }
 }
 
-/* enum/struct/union declaration. u is VT_ENUM/VT_STRUCT/VT_UNION */
+/* 枚举/结构体/联合体声明。u 为 VT_ENUM/VT_STRUCT/VT_UNION */
 static void struct_decl(CType *type, int u)
 {
     int v, c, size, align, flexible;
@@ -3681,7 +3603,7 @@ static void struct_decl(CType *type, int u)
     if (tok != '{') {
         v = tok;
         next();
-        /* struct already defined ? return it */
+        /* 结构体已定义？则返回它 */
         if (v < TOK_IDENT)
             expect("struct/union/enum name");
         s = struct_find(v);
@@ -3695,12 +3617,12 @@ static void struct_decl(CType *type, int u)
     } else {
         v = anon_sym++;
     }
-    /* Record the original enum/struct/union token.  */
+    /* 记录原始的 enum/struct/union 词法单元。  */
     type1.t = u == VT_ENUM ? u | VT_INT | VT_UNSIGNED : u;
     type1.ref = NULL;
-    /* we put an undefined size for struct/union */
+    /* 对结构体/联合体放入未定义的大小 */
     s = sym_push(v | SYM_STRUCT, &type1, 0, -1);
-    s->r = 0; /* default alignment is zero as gcc */
+    s->r = 0; /* 与 gcc 一样，默认对齐为零 */
 do_decl:
     type->t = s->type.t;
     type->ref = s;
@@ -3709,14 +3631,14 @@ do_decl:
         next();
         if (s->c != -1)
             tcc_error("struct/union/enum already defined");
-        /* cannot be empty */
-        /* non empty enums are not allowed */
+        /* 不能为空 */
+        /* 不允许非空的枚举 */
         ps = &s->next;
         if (u == VT_ENUM) {
             long long ll = 0, pl = 0, nl = 0;
 	    CType t;
             t.ref = s;
-            /* enum symbols have static storage */
+            /* 枚举符号具有 static 存储期 */
             t.t = VT_INT|VT_STATIC|VT_ENUM_VAL;
             for(;;) {
                 v = tok;
@@ -3742,12 +3664,12 @@ do_decl:
                     break;
                 next();
                 ll++;
-                /* NOTE: we accept a trailing comma */
+                /* NOTE: 我们接受尾随逗号 */
                 if (tok == '}')
                     break;
             }
             skip('}');
-            /* set integral type of the enum */
+            /* 设置枚举的整型类型 */
             t.t = VT_INT;
             if (nl >= 0) {
                 if (pl != (unsigned)pl)
@@ -3757,10 +3679,10 @@ do_decl:
                 t.t = (LONG_SIZE==8 ? VT_LLONG|VT_LONG : VT_LLONG);
             s->type.t = type->t = t.t | VT_ENUM;
             s->c = 0;
-            /* set type for enum members */
+            /* 为枚举成员设置类型 */
             for (ss = s->next; ss; ss = ss->next) {
                 ll = ss->enum_val;
-                if (ll == (int)ll) /* default is int if it fits */
+                if (ll == (int)ll) /* 若能放下，默认为 int */
                     continue;
                 if (t.t & VT_UNSIGNED) {
                     ss->type.t |= VT_UNSIGNED;
@@ -3808,26 +3730,26 @@ do_decl:
                         }
                         if ((type1.t & VT_BTYPE) == VT_FUNC ||
                             (type1.t & VT_STORAGE))
-                            tcc_error("invalid type for '%s'", 
+                            tcc_error("invalid type for '%s'",
                                   get_tok_str(v, NULL));
                     }
                     if (tok == ':') {
                         next();
                         bit_size = expr_const();
-                        /* XXX: handle v = 0 case for messages */
+                        /* XXX: 为消息处理 v = 0 的情形 */
                         if (bit_size < 0)
-                            tcc_error("negative width in bit-field '%s'", 
+                            tcc_error("negative width in bit-field '%s'",
                                   get_tok_str(v, NULL));
                         if (v && bit_size == 0)
-                            tcc_error("zero width for bit-field '%s'", 
+                            tcc_error("zero width for bit-field '%s'",
                                   get_tok_str(v, NULL));
 			parse_attribute(&ad1);
                     }
                     size = type_size(&type1, &align);
                     if (bit_size >= 0) {
                         bt = type1.t & VT_BTYPE;
-                        if (bt != VT_INT && 
-                            bt != VT_BYTE && 
+                        if (bt != VT_INT &&
+                            bt != VT_BYTE &&
                             bt != VT_SHORT &&
                             bt != VT_BOOL &&
                             bt != VT_LLONG)
@@ -3838,7 +3760,7 @@ do_decl:
                                   get_tok_str(v, NULL));
                         } else if (bit_size == bsize
                                     && !ad.a.packed && !ad1.a.packed) {
-                            /* no need for bit fields */
+                            /* 不需要位域 */
                             ;
                         } else if (bit_size == 64) {
                             tcc_error("field width 64 not implemented");
@@ -3849,12 +3771,12 @@ do_decl:
                         }
                     }
                     if (v != 0 || (type1.t & VT_BTYPE) == VT_STRUCT) {
-                        /* Remember we've seen a real field to check
-			   for placement of flexible array member. */
+                        /* 记住我们已见过真实字段，以便检查
+			   柔性数组成员的位置。 */
 			c = 1;
                     }
-		    /* If member is a struct or bit-field, enforce
-		       placing into the struct (as anonymous).  */
+		    /* 如果成员是结构体或位域，则强制
+		       放入该结构体中（作为匿名成员）。  */
                     if (v == 0 &&
 			((type1.t & VT_BTYPE) == VT_STRUCT ||
 			 bit_size >= 0)) {
@@ -3891,8 +3813,8 @@ static void sym_to_attr(AttributeDef *ad, Sym *s)
         ad->a.packed = 1;
 }
 
-/* Add type qualifiers to a type. If the type is an array then the qualifiers
-   are added to the element type, copied because it could be a typedef. */
+/* 给类型添加类型限定符。如果类型是数组，则把限定符
+   添加到元素类型上，并且要复制，因为它可能是 typedef。 */
 static void parse_btype_qualify(CType *type, int qualifiers)
 {
     while (type->t & VT_ARRAY) {
@@ -3902,8 +3824,8 @@ static void parse_btype_qualify(CType *type, int qualifiers)
     type->t |= qualifiers;
 }
 
-/* return 0 if no type declaration. otherwise, return the basic type
-   and skip it. 
+/* 若无类型声明则返回 0。否则返回基本类型
+   并跳过它。
  */
 static int parse_btype(CType *type, AttributeDef *ad)
 {
@@ -3921,11 +3843,11 @@ static int parse_btype(CType *type, AttributeDef *ad)
     while(1) {
         switch(tok) {
         case TOK_EXTENSION:
-            /* currently, we really ignore extension */
+            /* 目前我们确实会忽略该扩展 */
             next();
             continue;
 
-            /* basic types */
+            /* 基本类型 */
         case TOK_CHAR:
             u = VT_BYTE;
         basic_type:
@@ -3966,8 +3888,8 @@ static int parse_btype(CType *type, AttributeDef *ad)
             break;
 #ifdef TCC_TARGET_ARM64
         case TOK_UINT128:
-            /* GCC's __uint128_t appears in some Linux header files. Make it a
-               synonym for long double to get the size and alignment right. */
+            /* GCC 的 __uint128_t 出现在某些 Linux 头文件中。把它作为
+               long double 的同义词，以获得正确的大小和对齐。 */
             u = VT_LDOUBLE;
             goto basic_type;
 #endif
@@ -3999,7 +3921,7 @@ static int parse_btype(CType *type, AttributeDef *ad)
             struct_decl(&type1, VT_UNION);
             goto basic_type2;
 
-            /* type modifiers */
+            /* 类型修饰符 */
         case TOK_CONST1:
         case TOK_CONST2:
         case TOK_CONST3:
@@ -4040,7 +3962,7 @@ static int parse_btype(CType *type, AttributeDef *ad)
             typespec_found = 1;
             break;
 
-            /* storage */
+            /* 存储 */
         case TOK_EXTERN:
             g = VT_EXTERN;
             goto storage;
@@ -4063,7 +3985,7 @@ static int parse_btype(CType *type, AttributeDef *ad)
             next();
             break;
 
-            /* GNUC attribute */
+            /* GNUC 属性 */
         case TOK_ATTRIBUTE1:
         case TOK_ATTRIBUTE2:
             parse_attribute(ad);
@@ -4072,13 +3994,13 @@ static int parse_btype(CType *type, AttributeDef *ad)
                 t = (t & ~(VT_BTYPE|VT_LONG)) | u;
             }
             break;
-            /* GNUC typeof */
+            /* GNUC 的 typeof */
         case TOK_TYPEOF1:
         case TOK_TYPEOF2:
         case TOK_TYPEOF3:
             next();
             parse_expr_type(&type1);
-            /* remove all storage modifiers except typedef */
+            /* 移除除 typedef 之外的所有存储修饰符 */
             type1.t &= ~(VT_STORAGE&~VT_TYPEDEF);
 	    if (type1.ref)
                 sym_to_attr(ad, type1.ref);
@@ -4096,7 +4018,7 @@ static int parse_btype(CType *type, AttributeDef *ad)
             if (t)
                 parse_btype_qualify(type, t);
             t = type->t;
-            /* get attributes from typedef */
+            /* 从 typedef 获取属性 */
             sym_to_attr(ad, s);
             next();
             typespec_found = 1;
@@ -4110,7 +4032,7 @@ the_end:
         if ((t & (VT_DEFSIGN|VT_BTYPE)) == VT_BYTE)
             t |= VT_UNSIGNED;
     }
-    /* VT_LONG is used just as a modifier for VT_INT / VT_LLONG */
+    /* VT_LONG 仅作为 VT_INT / VT_LLONG 的修饰符使用 */
     bt = t & (VT_BTYPE|VT_LONG);
     if (bt == VT_LONG)
         t |= LONG_SIZE == 8 ? VT_LLONG : VT_INT;
@@ -4118,14 +4040,14 @@ the_end:
     return type_found;
 }
 
-/* convert a function parameter type (array to pointer and function to
-   function pointer) */
+/* 转换函数参数类型（数组转指针，函数转
+   函数指针） */
 static inline void convert_parameter_type(CType *pt)
 {
-    /* remove const and volatile qualifiers (XXX: const could be used
-       to indicate a const function parameter */
+    /* 移除 const 和 volatile 限定符（XXX: const 可以用来
+       表示常量函数参数 */
     pt->t &= ~(VT_CONSTANT | VT_VOLATILE);
-    /* array must be transformed to pointer according to ANSI C */
+    /* 按 ANSI C，数组必须转换成指针 */
     pt->t &= ~VT_ARRAY;
     if ((pt->t & VT_BTYPE) == VT_FUNC) {
         mk_pointer(pt);
@@ -4138,7 +4060,7 @@ ST_FUNC void parse_asm_str(CString *astr)
     parse_mult_str(astr, "string constant");
 }
 
-/* Parse an asm label and return the token */
+/* 解析 asm 标签并返回该词法单元 */
 static int asm_label_instr(void)
 {
     int v;
@@ -4163,7 +4085,7 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
     CType pt;
 
     if (tok == '(') {
-        /* function type, or recursive declarator (return if so) */
+        /* 函数类型，或递归声明符（若是则返回） */
         next();
 	if (td && !(td & TYPE_ABSTRACT))
 	  return 0;
@@ -4180,7 +4102,7 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
         arg_size = 0;
         if (l) {
             for(;;) {
-                /* read param name and compute offset */
+                /* 读取参数名并计算偏移 */
                 if (l != FUNC_OLD) {
                     if ((pt.t & VT_BTYPE) == VT_VOID && tok == ')')
                         break;
@@ -4192,7 +4114,7 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
                     n = tok;
                     if (n < TOK_UIDENT)
                         expect("identifier");
-                    pt.t = VT_VOID; /* invalid type */
+                    pt.t = VT_VOID; /* 无效类型 */
                     next();
                 }
                 convert_parameter_type(&pt);
@@ -4211,21 +4133,21 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
 		    tcc_error("invalid type");
             }
         } else
-            /* if no parameters, then old type prototype */
+            /* 若无参数，则是旧式类型原型 */
             l = FUNC_OLD;
         skip(')');
-        /* NOTE: const is ignored in returned type as it has a special
-           meaning in gcc / C++ */
-        type->t &= ~VT_CONSTANT; 
-        /* some ancient pre-K&R C allows a function to return an array
-           and the array brackets to be put after the arguments, such 
-           that "int c()[]" means something like "int[] c()" */
+        /* NOTE: 返回类型中的 const 被忽略，因为它在 gcc / C++ 中
+           有特殊含义 */
+        type->t &= ~VT_CONSTANT;
+        /* 某些古老的 K&R 之前的 C 允许函数返回数组，
+           并把数组方括号放在参数之后，
+           于是 "int c()[]" 的意思类似于 "int[] c()" */
         if (tok == '[') {
             next();
-            skip(']'); /* only handle simple "[]" */
+            skip(']'); /* 只处理简单的 "[]" */
             mk_pointer(type);
         }
-        /* we push a anonymous symbol which will contain the function prototype */
+        /* 我们压入一个匿名符号，其中将包含函数原型 */
         ad->f.func_args = arg_size;
         ad->f.func_type = l;
         s = sym_push(SYM_FIELD, type, 0, 0);
@@ -4236,7 +4158,7 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
         type->ref = s;
     } else if (tok == '[') {
 	int saved_nocode_wanted = nocode_wanted;
-        /* array definition */
+        /* 数组定义 */
         next();
         if (tok == TOK_RESTRICT1)
             next();
@@ -4246,10 +4168,10 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
             if (!local_stack || (storage & VT_STATIC))
                 vpushi(expr_const());
             else {
-		/* VLAs (which can only happen with local_stack && !VT_STATIC)
-		   length must always be evaluated, even under nocode_wanted,
-		   so that its size slot is initialized (e.g. under sizeof
-		   or typeof).  */
+		/* VLA（只可能出现在 local_stack && !VT_STATIC 时）
+		   的长度必须总是被求值，即使在 nocode_wanted 下也一样，
+		   这样它的大小槽才会被初始化（例如在 sizeof
+		   或 typeof 下）。  */
 		nocode_wanted = 0;
 		gexpr();
 	    }
@@ -4264,12 +4186,12 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
             }
         }
         skip(']');
-        /* parse next post type */
+        /* 解析下一个后缀类型 */
         post_type(type, ad, storage, 0);
         if (type->t == VT_FUNC)
             tcc_error("declaration of an array of functions");
         t1 |= type->t & VT_VLA;
-        
+
         if (t1 & VT_VLA) {
             loc -= type_size(&int_type, &align);
             loc &= -align;
@@ -4284,9 +4206,9 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
         if (n != -1)
             vpop();
 	nocode_wanted = saved_nocode_wanted;
-                
-        /* we push an anonymous symbol which will contain the array
-           element type */
+
+        /* 我们压入一个匿名符号，其中将包含数组的
+           元素类型 */
         s = sym_push(SYM_FIELD, type, 0, n);
         type->t = (t1 ? VT_VLA : VT_ARRAY) | VT_PTR;
         type->ref = s;
@@ -4294,19 +4216,19 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
     return 1;
 }
 
-/* Parse a type declarator (except basic type), and return the type
-   in 'type'. 'td' is a bitmask indicating which kind of type decl is
-   expected. 'type' should contain the basic type. 'ad' is the
-   attribute definition of the basic type. It can be modified by
-   type_decl().  If this (possibly abstract) declarator is a pointer chain
-   it returns the innermost pointed to type (equals *type, but is a different
-   pointer), otherwise returns type itself, that's used for recursive calls.  */
+/* 解析类型声明符（基本类型除外），并在 'type' 中返回该类型。
+   'td' 是一个位掩码，指明期望哪种类型声明。
+   'type' 应包含基本类型。'ad' 是基本类型的
+   属性定义。它可能被 type_decl() 修改。
+   如果这个（可能是抽象的）声明符是指针链，
+   则返回最内层所指向的类型（等于 *type，但是不同的
+   指针），否则返回 type 自身，这用于递归调用。  */
 static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td)
 {
     CType *post, *ret;
     int qualifiers, storage;
 
-    /* recursive type, remove storage bits first, apply them later again */
+    /* 递归类型，先移除存储位，稍后再应用它们 */
     storage = type->t & VT_STORAGE;
     type->t &= ~VT_STORAGE;
     post = ret = type;
@@ -4330,7 +4252,7 @@ static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td)
         case TOK_RESTRICT2:
         case TOK_RESTRICT3:
             goto redo;
-	/* XXX: clarify attribute handling */
+	/* XXX: 澄清属性处理 */
 	case TOK_ATTRIBUTE1:
 	case TOK_ATTRIBUTE2:
 	    parse_attribute(ad);
@@ -4339,24 +4261,24 @@ static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td)
         mk_pointer(type);
         type->t |= qualifiers;
 	if (ret == type)
-	    /* innermost pointed to type is the one for the first derivation */
+	    /* 最内层所指向的类型就是第一次派生得到的类型 */
 	    ret = pointed_type(type);
     }
 
     if (tok == '(') {
-	/* This is possibly a parameter type list for abstract declarators
-	   ('int ()'), use post_type for testing this.  */
+	/* 对抽象声明符（'int ()'）来说这可能是一个参数类型列表，
+	   用 post_type 来测试这一点。  */
 	if (!post_type(type, ad, 0, td)) {
-	    /* It's not, so it's a nested declarator, and the post operations
-	       apply to the innermost pointed to type (if any).  */
-	    /* XXX: this is not correct to modify 'ad' at this point, but
-	       the syntax is not clear */
+	    /* 并不是，因此这是一个嵌套声明符，后缀运算
+	       应用于最内层所指向的类型（如果有）。  */
+	    /* XXX: 此时修改 'ad' 并不正确，但
+	       语法并不明确 */
 	    parse_attribute(ad);
 	    post = type_decl(type, ad, v, td);
 	    skip(')');
 	}
     } else if (tok >= TOK_IDENT && (td & TYPE_DIRECT)) {
-	/* type identifier */
+	/* 类型标识符 */
 	*v = tok;
 	next();
     } else {
@@ -4370,7 +4292,7 @@ static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td)
     return ret;
 }
 
-/* compute the lvalue VT_LVAL_xxx needed to match type t. */
+/* 计算匹配类型 t 所需的左值 VT_LVAL_xxx。 */
 ST_FUNC int lvalue_type(int t)
 {
     int bt, r;
@@ -4387,7 +4309,7 @@ ST_FUNC int lvalue_type(int t)
     return r;
 }
 
-/* indirection with full error checking and bound check */
+/* 带完整错误检查和边界检查的间接寻址 */
 ST_FUNC void indir(void)
 {
     if ((vtop->type.t & VT_BTYPE) != VT_PTR) {
@@ -4398,11 +4320,11 @@ ST_FUNC void indir(void)
     if (vtop->r & VT_LVAL)
         gv(RC_INT);
     vtop->type = *pointed_type(&vtop->type);
-    /* Arrays and functions are never lvalues */
+    /* 数组和函数永远不是左值 */
     if (!(vtop->type.t & VT_ARRAY) && !(vtop->type.t & VT_VLA)
         && (vtop->type.t & VT_BTYPE) != VT_FUNC) {
         vtop->r |= lvalue_type(vtop->type.t);
-        /* if bound checking, the referenced pointer must be checked */
+        /* 如果启用边界检查，则被引用的指针必须被检查 */
 #ifdef CONFIG_TCC_BCHECK
         if (tcc_state->do_bounds_check)
             vtop->r |= VT_MUSTBOUND;
@@ -4410,7 +4332,7 @@ ST_FUNC void indir(void)
     }
 }
 
-/* pass a parameter to a function and do type checking and casting */
+/* 把参数传给函数，并进行类型检查和强制类型转换 */
 static void gfunc_param_typed(Sym *func, Sym *arg)
 {
     int func_type;
@@ -4419,7 +4341,7 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
     func_type = func->f.func_type;
     if (func_type == FUNC_OLD ||
         (func_type == FUNC_ELLIPSIS && arg == NULL)) {
-        /* default casting : only need to convert float to double */
+        /* 默认转换：只需把 float 转换为 double */
         if ((vtop->type.t & VT_BTYPE) == VT_FLOAT) {
             gen_cast_s(VT_DOUBLE);
         } else if (vtop->type.t & VT_BITFIELD) {
@@ -4431,12 +4353,12 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
         tcc_error("too many arguments to function");
     } else {
         type = arg->type;
-        type.t &= ~VT_CONSTANT; /* need to do that to avoid false warning */
+        type.t &= ~VT_CONSTANT; /* 必须这样做以避免误告警 */
         gen_assign_cast(&type);
     }
 }
 
-/* parse an expression and return its type without any side effect. */
+/* 解析一个表达式并返回其类型，不产生任何副作用。 */
 static void expr_type(CType *type, void (*expr_fn)(void))
 {
     nocode_wanted++;
@@ -4446,8 +4368,8 @@ static void expr_type(CType *type, void (*expr_fn)(void))
     nocode_wanted--;
 }
 
-/* parse an expression of the form '(type)' or '(expr)' and return its
-   type */
+/* 解析形如 '(type)' 或 '(expr)' 的表达式并返回其
+   类型 */
 static void parse_expr_type(CType *type)
 {
     int n;
@@ -4504,8 +4426,8 @@ ST_FUNC void unary(void)
     sizeof_caller = in_sizeof;
     in_sizeof = 0;
     type.ref = NULL;
-    /* XXX: GCC 2.95.3 does not generate a table although it should be
-       better here */
+    /* XXX: GCC 2.95.3 不生成跳转表，尽管这里那样
+       会更好 */
  tok_next:
     switch(tok) {
     case TOK_EXTENSION:
@@ -4513,7 +4435,7 @@ ST_FUNC void unary(void)
         goto tok_next;
     case TOK_LCHAR:
     case TOK_CINT:
-    case TOK_CCHAR: 
+    case TOK_CCHAR:
 	t = VT_INT;
  push_tokc:
 	type.t = t;
@@ -4547,14 +4469,14 @@ ST_FUNC void unary(void)
     case TOK___FUNCTION__:
         if (!gnu_ext)
             goto tok_identifier;
-        /* fall thru */
+        /* 向下贯穿 */
     case TOK___FUNC__:
         {
             void *ptr;
             int len;
-            /* special function name identifier */
+            /* 特殊函数名标识符 */
             len = strlen(funcname) + 1;
-            /* generate char[len] type */
+            /* 生成 char[len] 类型 */
             type.t = VT_BYTE;
             mk_pointer(&type);
             type.t |= VT_ARRAY;
@@ -4571,7 +4493,7 @@ ST_FUNC void unary(void)
         t = VT_INT;
         goto str_init;
     case TOK_STR:
-        /* string parsing */
+        /* 字符串解析 */
         t = VT_BYTE;
         if (tcc_state->char_is_unsigned)
             t = VT_BYTE | VT_UNSIGNED;
@@ -4586,18 +4508,18 @@ ST_FUNC void unary(void)
         break;
     case '(':
         next();
-        /* cast ? */
+        /* 强制类型转换？ */
         if (parse_btype(&type, &ad)) {
             type_decl(&type, &ad, &n, TYPE_ABSTRACT);
             skip(')');
-            /* check ISOC99 compound literal */
+            /* 检查 ISOC99 复合字面量 */
             if (tok == '{') {
-                    /* data is allocated locally by default */
+                    /* 数据默认在局部分配 */
                 if (global_expr)
                     r = VT_CONST;
                 else
                     r = VT_LOCAL;
-                /* all except arrays are lvalues */
+                /* 除数组外都是左值 */
                 if (!(type.t & VT_ARRAY))
                     r |= lvalue_type(type.t);
                 memset(&ad, 0, sizeof(AttributeDef));
@@ -4614,13 +4536,13 @@ ST_FUNC void unary(void)
 	    int saved_nocode_wanted = nocode_wanted;
             if (const_wanted)
                 tcc_error("expected constant");
-            /* save all registers */
+            /* 保存所有寄存器 */
             save_regs(0);
-            /* statement expression : we do not accept break/continue
-               inside as GCC does.  We do retain the nocode_wanted state,
-	       as statement expressions can't ever be entered from the
-	       outside, so any reactivation of code emission (from labels
-	       or loop heads) can be disabled again after the end of it. */
+            /* 语句表达式：我们不像 GCC 那样接受其中的
+               break/continue。我们保留 nocode_wanted 状态，
+	       因为语句表达式永远无法从外部进入，
+	       所以任何代码发射的重新激活（来自标签
+	       或循环头）都可以在它结束后再次被禁用。 */
             block(NULL, NULL, 1);
 	    nocode_wanted = saved_nocode_wanted;
             skip(')');
@@ -4637,11 +4559,11 @@ ST_FUNC void unary(void)
     case '&':
         next();
         unary();
-        /* functions names must be treated as function pointers,
-           except for unary '&' and sizeof. Since we consider that
-           functions are not lvalues, we only have to handle it
-           there and in function calls. */
-        /* arrays can also be used although they are not lvalues */
+        /* 函数名必须被当作函数指针，
+           一元 '&' 和 sizeof 除外。由于我们认为
+           函数不是左值，只需在那里以及函数调用中
+           处理它。 */
+        /* 数组虽然不是左值，但也可以使用 */
         if ((vtop->type.t & VT_BTYPE) != VT_FUNC &&
             !(vtop->type.t & VT_ARRAY))
             test_lvalue();
@@ -4672,9 +4594,9 @@ ST_FUNC void unary(void)
         unary();
         if ((vtop->type.t & VT_BTYPE) == VT_PTR)
             tcc_error("pointer not accepted for unary plus");
-        /* In order to force cast, we add zero, except for floating point
-	   where we really need an noop (otherwise -0.0 will be transformed
-	   into +0.0).  */
+        /* 为了强制转换，我们加上零，浮点除外，
+	   那里我们确实需要空操作（否则 -0.0 会被变换
+	   成 +0.0）。  */
 	if (!is_float(vtop->type.t)) {
 	    vpushi(0);
 	    gen_op('+');
@@ -4686,8 +4608,8 @@ ST_FUNC void unary(void)
         t = tok;
         next();
         in_sizeof++;
-        expr_type(&type, unary); /* Perform a in_sizeof = 0; */
-        s = vtop[1].sym; /* hack: accessing previous vtop */
+        expr_type(&type, unary); /* 执行 in_sizeof = 0; */
+        s = vtop[1].sym; /* 技巧：访问前一个 vtop */
         size = type_size(&type, &align);
         if (s && s->a.aligned)
             align = 1 << (s->a.aligned - 1);
@@ -4706,7 +4628,7 @@ ST_FUNC void unary(void)
         break;
 
     case TOK_builtin_expect:
-	/* __builtin_expect is a no-op for now */
+	/* 目前 __builtin_expect 是空操作 */
 	parse_builtin_params(0, "ee");
 	vpop();
         break;
@@ -4769,13 +4691,13 @@ ST_FUNC void unary(void)
             skip(')');
             type.t = VT_VOID;
             mk_pointer(&type);
-            vset(&type, VT_LOCAL, 0);       /* local frame */
+            vset(&type, VT_LOCAL, 0);       /* 局部栈帧 */
             while (level--) {
                 mk_pointer(&vtop->type);
-                indir();                    /* -> parent frame */
+                indir();                    /* -> 父栈帧 */
             }
             if (tok1 == TOK_builtin_return_address) {
-                // assume return address is just above frame pointer on stack
+                // 假设返回地址就在栈上帧指针的上方
                 vpushi(PTR_SIZE);
                 gen_op('+');
                 mk_pointer(&vtop->type);
@@ -4786,7 +4708,7 @@ ST_FUNC void unary(void)
 #ifdef TCC_TARGET_ARM64
     case TOK___va_start: {
 	parse_builtin_params(0, "ee");
-        //xx check types
+        //xx 检查类型
         gen_va_start();
         vpushi(0);
         vtop->type.t = VT_VOID;
@@ -4796,7 +4718,7 @@ ST_FUNC void unary(void)
 	parse_builtin_params(0, "et");
 	type = vtop->type;
 	vpop();
-        //xx check types
+        //xx 检查类型
         gen_va_arg(&type);
         vtop->type = type;
         break;
@@ -4809,7 +4731,7 @@ ST_FUNC void unary(void)
         break;
     }
 #endif
-    /* pre operations */
+    /* 前置运算 */
     case TOK_INC:
     case TOK_DEC:
         t = tok;
@@ -4822,8 +4744,8 @@ ST_FUNC void unary(void)
         unary();
         t = vtop->type.t & VT_BTYPE;
 	if (is_float(t)) {
-            /* In IEEE negate(x) isn't subtract(0,x), but rather
-	       subtract(-0, x).  */
+            /* 在 IEEE 中 negate(x) 不是 subtract(0,x)，而是
+	       subtract(-0, x)。  */
 	    vpush(&vtop->type);
 	    if (t == VT_FLOAT)
 	        vtop->c.f = -1.0 * 0.0;
@@ -4840,7 +4762,7 @@ ST_FUNC void unary(void)
         if (!gnu_ext)
             goto tok_identifier;
         next();
-        /* allow to take the address of a label */
+        /* 允许取标签的地址 */
         if (tok < TOK_UIDENT)
             expect("label identifier");
         s = label_find(tok);
@@ -4920,7 +4842,7 @@ ST_FUNC void unary(void)
         next();
 	break;
     }
-    // special qnan , snan and infinity values
+    // 特殊的 qnan、snan 和无穷大值
     case TOK___NAN__:
         vpush64(VT_DOUBLE, 0x7ff8000000000000ULL);
         next();
@@ -4945,23 +4867,23 @@ ST_FUNC void unary(void)
             const char *name = get_tok_str(t, NULL);
             if (tok != '(')
                 tcc_error("'%s' undeclared", name);
-            /* for simple function calls, we tolerate undeclared
-               external reference to int() function */
+            /* 对简单函数调用，我们容忍对 int() 函数的
+               未声明外部引用 */
             if (tcc_state->warn_implicit_function_declaration)
                 tcc_warning("implicit declaration of function '%s'", name);
-            s = external_global_sym(t, &func_old_type, 0); 
+            s = external_global_sym(t, &func_old_type, 0);
         }
 
         r = s->r;
-        /* A symbol that has a register is a local register variable,
-           which starts out as VT_LOCAL value.  */
+        /* 带有寄存器的符号是局部寄存器变量，
+           它初始时是 VT_LOCAL 值。  */
         if ((r & VT_VALMASK) < VT_CONST)
             r = (r & ~VT_VALMASK) | VT_LOCAL;
 
         vset(&s->type, r, s->c);
-        /* Point to s as backpointer (even without r&VT_SYM).
-	   Will be used by at least the x86 inline asm parser for
-	   regvars.  */
+        /* 用 s 作为反向指针（即使没有 r&VT_SYM）。
+	   至少会被 x86 内联汇编解析器用于
+	   regvars。  */
 	vtop->sym = s;
 
         if (r & VT_SYM) {
@@ -4971,21 +4893,21 @@ ST_FUNC void unary(void)
         }
         break;
     }
-    
-    /* post operations */
+
+    /* 后缀运算 */
     while (1) {
         if (tok == TOK_INC || tok == TOK_DEC) {
             inc(1, tok);
             next();
         } else if (tok == '.' || tok == TOK_ARROW || tok == TOK_CDOUBLE) {
             int qualifiers;
-            /* field */ 
-            if (tok == TOK_ARROW) 
+            /* 字段 */
+            if (tok == TOK_ARROW)
                 indir();
             qualifiers = vtop->type.t & (VT_CONSTANT | VT_VOLATILE);
             test_lvalue();
             gaddrof();
-            /* expect pointer on structure */
+            /* 期望结构体上的指针 */
             if ((vtop->type.t & VT_BTYPE) != VT_STRUCT)
                 expect("struct or union");
             if (tok == TOK_CDOUBLE)
@@ -4996,18 +4918,18 @@ ST_FUNC void unary(void)
 	    s = find_field(&vtop->type, tok);
             if (!s)
                 tcc_error("field not found: %s",  get_tok_str(tok & ~SYM_FIELD, &tokc));
-            /* add field offset to pointer */
-            vtop->type = char_pointer_type; /* change type to 'char *' */
+            /* 把字段偏移加到指针上 */
+            vtop->type = char_pointer_type; /* 把类型改为 'char *' */
             vpushi(s->c);
             gen_op('+');
-            /* change type to field type, and set to lvalue */
+            /* 把类型改为字段类型，并设为左值 */
             vtop->type = s->type;
             vtop->type.t |= qualifiers;
-            /* an array is never an lvalue */
+            /* 数组永远不是左值 */
             if (!(vtop->type.t & VT_ARRAY)) {
                 vtop->r |= lvalue_type(vtop->type.t);
 #ifdef CONFIG_TCC_BCHECK
-                /* if bound checking, the referenced pointer must be checked */
+                /* 如果启用边界检查，则被引用的指针必须被检查 */
                 if (tcc_state->do_bounds_check && (vtop->r & VT_VALMASK) != VT_LOCAL)
                     vtop->r |= VT_MUSTBOUND;
 #endif
@@ -5024,9 +4946,9 @@ ST_FUNC void unary(void)
             Sym *sa;
             int nb_args, ret_nregs, ret_align, regsize, variadic;
 
-            /* function call  */
+            /* 函数调用  */
             if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
-                /* pointer test (no array accepted) */
+                /* 指针测试（不接受数组） */
                 if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
                     vtop->type = *pointed_type(&vtop->type);
                     if ((vtop->type.t & VT_BTYPE) != VT_FUNC)
@@ -5036,27 +4958,27 @@ ST_FUNC void unary(void)
                     expect("function pointer");
                 }
             } else {
-                vtop->r &= ~VT_LVAL; /* no lvalue */
+                vtop->r &= ~VT_LVAL; /* 不是左值 */
             }
-            /* get return type */
+            /* 获取返回类型 */
             s = vtop->type.ref;
             next();
-            sa = s->next; /* first parameter */
+            sa = s->next; /* 第一个参数 */
             nb_args = regsize = 0;
             ret.r2 = VT_CONST;
-            /* compute first implicit argument if a structure is returned */
+            /* 若返回结构体，则计算第一个隐式参数 */
             if ((s->type.t & VT_BTYPE) == VT_STRUCT) {
                 variadic = (s->f.func_type == FUNC_ELLIPSIS);
                 ret_nregs = gfunc_sret(&s->type, variadic, &ret.type,
                                        &ret_align, &regsize);
                 if (!ret_nregs) {
-                    /* get some space for the returned structure */
+                    /* 为返回的结构体取得一些空间 */
                     size = type_size(&s->type, &align);
 #ifdef TCC_TARGET_ARM64
-                /* On arm64, a small struct is return in registers.
-                   It is much easier to write it to memory if we know
-                   that we are allowed to write some extra bytes, so
-                   round the allocated space up to a power of 2: */
+                /* 在 arm64 上，小结构体通过寄存器返回。
+                   如果我们知道可以多写几个字节，
+                   把它写入内存就容易得多，因此
+                   把分配的空间向上取整到 2 的幂： */
                 if (size < 16)
                     while (size & (size - 1))
                         size = (size | (size - 1)) + 1;
@@ -5064,8 +4986,8 @@ ST_FUNC void unary(void)
                     loc = (loc - size) & -align;
                     ret.type = s->type;
                     ret.r = VT_LOCAL | VT_LVAL;
-                    /* pass it as 'int' to avoid structure arg passing
-                       problems */
+                    /* 把它作为 'int' 传递，以避免结构体参数传递
+                       问题 */
                     vseti(VT_LOCAL, loc);
                     ret.c = vtop->c;
                     nb_args++;
@@ -5076,22 +4998,10 @@ ST_FUNC void unary(void)
             }
 
             if (ret_nregs) {
-                /* return in register */
+                /* 通过寄存器返回 */
                 if (is_float(ret.type.t)) {
                     ret.r = reg_fret(ret.type.t);
-#ifdef TCC_TARGET_X86_64
-                    if ((ret.type.t & VT_BTYPE) == VT_QFLOAT)
-                      ret.r2 = REG_QRET;
-#endif
                 } else {
-#ifndef TCC_TARGET_ARM64
-#ifdef TCC_TARGET_X86_64
-                    if ((ret.type.t & VT_BTYPE) == VT_QLONG)
-#else
-                    if ((ret.type.t & VT_BTYPE) == VT_LLONG)
-#endif
-                        ret.r2 = REG_LRET;
-#endif
                     ret.r = REG_IRET;
                 }
                 ret.c.i = 0;
@@ -5113,19 +5023,19 @@ ST_FUNC void unary(void)
             skip(')');
             gfunc_call(nb_args);
 
-            /* return value */
+            /* 返回值 */
             for (r = ret.r + ret_nregs + !ret_nregs; r-- > ret.r;) {
                 vsetc(&ret.type, r, &ret.c);
-                vtop->r2 = ret.r2; /* Loop only happens when r2 is VT_CONST */
+                vtop->r2 = ret.r2; /* 只有当 r2 是 VT_CONST 时才会循环 */
             }
 
-            /* handle packed struct return */
+            /* 处理紧凑结构体的返回 */
             if (((s->type.t & VT_BTYPE) == VT_STRUCT) && ret_nregs) {
                 int addr, offset;
 
                 size = type_size(&s->type, &align);
-		/* We're writing whole regs often, make sure there's enough
-		   space.  Assume register size is power of 2.  */
+		/* 我们经常写整个寄存器，确保有足够的
+		   空间。假设寄存器大小是 2 的幂。  */
 		if (regsize > align)
 		  align = regsize;
                 loc = (loc - size) & -align;
@@ -5326,9 +5236,9 @@ static void expr_lor(void)
     }
 }
 
-/* Assuming vtop is a value used in a conditional context
-   (i.e. compared with zero) return 0 if it's false, 1 if
-   true and -1 if it can't be statically determined.  */
+/* 假设 vtop 是用于条件上下文的值
+   （即与零比较）。若为假返回 0，为真返回 1，
+   若无法静态确定则返回 -1。  */
 static int condition_3way(void)
 {
     int c = -1;
@@ -5354,15 +5264,10 @@ static void expr_cond(void)
 	c = condition_3way();
         g = (tok == ':' && gnu_ext);
         if (c < 0) {
-            /* needed to avoid having different registers saved in
-               each branch */
+            /* 这是为了避免在每个分支中保存
+               不同的寄存器 */
             if (is_float(vtop->type.t)) {
                 rc = RC_FLOAT;
-#ifdef TCC_TARGET_X86_64
-                if ((vtop->type.t & VT_BTYPE) == VT_LDOUBLE) {
-                    rc = RC_ST0;
-                }
-#endif
             } else
                 rc = RC_INT;
             gv(rc);
@@ -5384,8 +5289,8 @@ static void expr_cond(void)
                 gexpr();
 
             type1 = vtop->type;
-            sv = *vtop; /* save value to handle it later */
-            vtop--; /* no vpop so that FP stack is not flushed */
+            sv = *vtop; /* 保存值以便稍后处理 */
+            vtop--; /* 不 vpop，以免清空 FP 栈 */
             skip(':');
 
             u = 0;
@@ -5408,7 +5313,7 @@ static void expr_cond(void)
             bt2 = t2 & VT_BTYPE;
             type.ref = NULL;
 
-            /* cast operands to correct type according to ISOC rules */
+            /* 按 ISOC 规则把操作数强制类型转换为正确的类型 */
             if (is_float(bt1) || is_float(bt2)) {
                 if (bt1 == VT_LDOUBLE || bt2 == VT_LDOUBLE) {
                     type.t = VT_LDOUBLE;
@@ -5419,50 +5324,50 @@ static void expr_cond(void)
                     type.t = VT_FLOAT;
                 }
             } else if (bt1 == VT_LLONG || bt2 == VT_LLONG) {
-                /* cast to biggest op */
+                /* 强制类型转换为最大的运算类型 */
                 type.t = VT_LLONG | VT_LONG;
                 if (bt1 == VT_LLONG)
                     type.t &= t1;
                 if (bt2 == VT_LLONG)
                     type.t &= t2;
-                /* convert to unsigned if it does not fit in a long long */
+                /* 如果无法放入 long long 则转换为无符号 */
                 if ((t1 & (VT_BTYPE | VT_UNSIGNED | VT_BITFIELD)) == (VT_LLONG | VT_UNSIGNED) ||
                     (t2 & (VT_BTYPE | VT_UNSIGNED | VT_BITFIELD)) == (VT_LLONG | VT_UNSIGNED))
                     type.t |= VT_UNSIGNED;
             } else if (bt1 == VT_PTR || bt2 == VT_PTR) {
-		/* If one is a null ptr constant the result type
-		   is the other.  */
+		/* 如果其中一个是空指针常量，结果类型
+		   就是另一个。  */
 		if (is_null_pointer (vtop))
 		  type = type1;
 		else if (is_null_pointer (&sv))
 		  type = type2;
-                /* XXX: test pointer compatibility, C99 has more elaborate
-		   rules here.  */
+                /* XXX: 测试指针兼容性，C99 在这里有更细致的
+		   规则。  */
 		else
 		  type = type1;
             } else if (bt1 == VT_FUNC || bt2 == VT_FUNC) {
-                /* XXX: test function pointer compatibility */
+                /* XXX: 测试函数指针兼容性 */
                 type = bt1 == VT_FUNC ? type1 : type2;
             } else if (bt1 == VT_STRUCT || bt2 == VT_STRUCT) {
-                /* XXX: test structure compatibility */
+                /* XXX: 测试结构体兼容性 */
                 type = bt1 == VT_STRUCT ? type1 : type2;
             } else if (bt1 == VT_VOID || bt2 == VT_VOID) {
-                /* NOTE: as an extension, we accept void on only one side */
+                /* NOTE: 作为扩展，我们允许只有一侧是 void */
                 type.t = VT_VOID;
             } else {
-                /* integer operations */
+                /* 整型运算 */
                 type.t = VT_INT | (VT_LONG & (t1 | t2));
-                /* convert to unsigned if it does not fit in an integer */
+                /* 如果无法放入整数则转换为无符号 */
                 if ((t1 & (VT_BTYPE | VT_UNSIGNED | VT_BITFIELD)) == (VT_INT | VT_UNSIGNED) ||
                     (t2 & (VT_BTYPE | VT_UNSIGNED | VT_BITFIELD)) == (VT_INT | VT_UNSIGNED))
                     type.t |= VT_UNSIGNED;
             }
-            /* keep structs lvalue by transforming `(expr ? a : b)` to `*(expr ? &a : &b)` so
-               that `(expr ? a : b).mem` does not error  with "lvalue expected" */
+            /* 通过把 `(expr ? a : b)` 变换为 `*(expr ? &a : &b)` 来保持结构体为左值，
+               这样 `(expr ? a : b).mem` 就不会报 "lvalue expected" 错误 */
             islv = (vtop->r & VT_LVAL) && (sv.r & VT_LVAL) && VT_STRUCT == (type.t & VT_BTYPE);
             islv &= c < 0;
 
-            /* now we convert second operand */
+            /* 现在我们转换第二个操作数 */
             if (c != 1) {
                 gen_cast(&type);
                 if (islv) {
@@ -5475,14 +5380,9 @@ static void expr_cond(void)
             rc = RC_INT;
             if (is_float(type.t)) {
                 rc = RC_FLOAT;
-#ifdef TCC_TARGET_X86_64
-                if ((type.t & VT_BTYPE) == VT_LDOUBLE) {
-                    rc = RC_ST0;
-                }
-#endif
             } else if ((type.t & VT_BTYPE) == VT_LLONG) {
-                /* for long longs, we use fixed registers to avoid having
-                   to handle a complicated move */
+                /* 对 long long，我们使用固定寄存器，以避免
+                   处理复杂的搬移 */
                 rc = RC_IRET;
             }
 
@@ -5493,8 +5393,8 @@ static void expr_cond(void)
             }
             gsym(u);
 
-            /* this is horrible, but we must also convert first
-               operand */
+            /* 这很糟糕，但我们也必须转换第一个
+               操作数 */
             if (c != 0) {
                 *vtop = sv;
                 gen_cast(&type);
@@ -5520,7 +5420,7 @@ static void expr_cond(void)
 static void expr_eq(void)
 {
     int t;
-    
+
     expr_cond();
     if (tok == '=' ||
         (tok >= TOK_A_MOD && tok <= TOK_A_DIV) ||
@@ -5551,7 +5451,7 @@ ST_FUNC void gexpr(void)
     }
 }
 
-/* parse a constant expression and return value in vtop.  */
+/* 解析一个常量表达式并把值返回在 vtop 中。  */
 static void expr_const1(void)
 {
     const_wanted++;
@@ -5561,7 +5461,7 @@ static void expr_const1(void)
     const_wanted--;
 }
 
-/* parse an integer constant and return its value. */
+/* 解析一个整型常量并返回其值。 */
 static inline int64_t expr_const64(void)
 {
     int64_t c;
@@ -5573,8 +5473,8 @@ static inline int64_t expr_const64(void)
     return c;
 }
 
-/* parse an integer constant and return its value.
-   Complain if it doesn't fit 32bit (signed or unsigned).  */
+/* 解析一个整型常量并返回其值。
+   如果它放不进 32 位（有符号或无符号）则报错。  */
 ST_FUNC int expr_const(void)
 {
     int c;
@@ -5585,16 +5485,16 @@ ST_FUNC int expr_const(void)
     return c;
 }
 
-/* return the label token if current token is a label, otherwise
-   return zero */
+/* 如果当前词法单元是标签，则返回该标签词法单元，
+   否则返回零 */
 static int is_label(void)
 {
     int last_tok;
 
-    /* fast test first */
+    /* 先做快速测试 */
     if (tok < TOK_UIDENT)
         return 0;
-    /* no need to save tokc because tok is an identifier */
+    /* 无需保存 tokc，因为 tok 是标识符 */
     last_tok = tok;
     next();
     if (tok == ':') {
@@ -5614,17 +5514,17 @@ static void gfunc_return(CType *func_type)
         ret_nregs = gfunc_sret(func_type, func_var, &ret_type,
                                &ret_align, &regsize);
         if (0 == ret_nregs) {
-            /* if returning structure, must copy it to implicit
-               first pointer arg location */
+            /* 如果返回结构体，必须把它复制到隐式的
+               第一个指针参数位置 */
             type = *func_type;
             mk_pointer(&type);
             vset(&type, VT_LOCAL | VT_LVAL, func_vc);
             indir();
             vswap();
-            /* copy structure value to pointer */
+            /* 把结构体值复制到指针处 */
             vstore();
         } else {
-            /* returning structure packed into registers */
+            /* 返回打包进寄存器的结构体 */
             int r, size, addr, align;
             size = type_size(func_type,&align);
             if ((vtop->r != (VT_LOCAL | VT_LVAL) ||
@@ -5654,9 +5554,9 @@ static void gfunc_return(CType *func_type)
                     vpop();
                     if (--ret_nregs == 0)
                       break;
-                    /* We assume that when a structure is returned in multiple
-                       registers, their classes are consecutive values of the
-                       suite s(n) = 2^n */
+                    /* 我们假设当结构体通过多个寄存器返回时，
+                       它们的类别是序列 s(n) = 2^n 的
+                       连续取值 */
                     r <<= 1;
                     vtop->c.i += regsize;
                 }
@@ -5667,7 +5567,7 @@ static void gfunc_return(CType *func_type)
     } else {
         gv(RC_IRET);
     }
-    vtop--; /* NOT vpop() because on x86 it would flush the fp stack */
+    vtop--; /* 不能用 vpop()，因为在 x86 上它会清空 fp 栈 */
 }
 #endif
 
@@ -5685,7 +5585,7 @@ static void gcase(struct case_t **base, int len, int *bsym)
     int ll = (vtop->type.t & VT_BTYPE) == VT_LLONG;
     gv(RC_INT);
     while (len > 4) {
-        /* binary search */
+        /* 二分查找 */
         p = base[len/2];
         vdup();
 	if (ll)
@@ -5712,7 +5612,7 @@ static void gcase(struct case_t **base, int len, int *bsym)
         e = len/2 + 1;
         base += e; len -= e;
     }
-    /* linear scan */
+    /* 线性扫描 */
     while (len--) {
         p = *base++;
         vdup();
@@ -5743,18 +5643,18 @@ static void block(int *bsym, int *csym, int is_expr)
     int a, b, c, d, cond;
     Sym *s;
 
-    /* generate line number info */
+    /* 生成行号信息 */
     if (tcc_state->do_debug)
         tcc_debug_line(tcc_state);
 
     if (is_expr) {
-        /* default return value is (void) */
+        /* 默认返回值是 (void) */
         vpushi(0);
         vtop->type.t = VT_VOID;
     }
 
     if (tok == TOK_IF) {
-        /* if test */
+        /* if 测试 */
 	int saved_nocode_wanted = nocode_wanted;
         next();
         skip('(');
@@ -5778,7 +5678,7 @@ static void block(int *bsym, int *csym, int is_expr)
 	    if (cond == 1)
 	        nocode_wanted |= 0x20000000;
             block(bsym, csym, 0);
-            gsym(d); /* patch else jmp */
+            gsym(d); /* 修补 else 跳转 */
 	    if (cond != 0)
 		nocode_wanted = saved_nocode_wanted;
         } else
@@ -5807,12 +5707,12 @@ static void block(int *bsym, int *csym, int is_expr)
         int block_vla_sp_loc = vla_sp_loc, saved_vlas_in_scope = vlas_in_scope;
 
         next();
-        /* record local declaration stack position */
+        /* 记录局部声明的栈位置 */
         s = local_stack;
         llabel = local_label_stack;
         ++local_scope;
-        
-        /* handle local labels declarations */
+
+        /* 处理局部标签声明 */
         if (tok == TOK_LABEL) {
             next();
             for(;;) {
@@ -5839,26 +5739,26 @@ static void block(int *bsym, int *csym, int is_expr)
                 block(bsym, csym, is_expr);
             }
         }
-        /* pop locally defined labels */
+        /* 弹出局部定义的标签 */
         label_pop(&local_label_stack, llabel, is_expr);
-        /* pop locally defined symbols */
+        /* 弹出局部定义的符号 */
         --local_scope;
-	/* In the is_expr case (a statement expression is finished here),
-	   vtop might refer to symbols on the local_stack.  Either via the
-	   type or via vtop->sym.  We can't pop those nor any that in turn
-	   might be referred to.  To make it easier we don't roll back
-	   any symbols in that case; some upper level call to block() will
-	   do that.  We do have to remove such symbols from the lookup
-	   tables, though.  sym_pop will do that.  */
+	/* 在 is_expr 情形下（这里一个语句表达式结束了），
+	   vtop 可能引用 local_stack 上的符号，无论是通过
+	   类型还是通过 vtop->sym。我们不能弹出这些符号，
+	   也不能弹出可能被它们引用的符号。为简化处理，
+	   在这种情形下我们不回滚任何符号；上层对 block()
+	   的某次调用会完成回滚。不过我们必须把这些符号
+	   从查找表中移除。sym_pop 会做这件事。  */
 	sym_pop(&local_stack, s, is_expr);
 
-        /* Pop VLA frames and restore stack pointer if required */
+        /* 弹出 VLA 栈帧，必要时恢复栈指针 */
         if (vlas_in_scope > saved_vlas_in_scope) {
             vla_sp_loc = saved_vlas_in_scope ? block_vla_sp_loc : vla_sp_root_loc;
             vla_sp_restore();
         }
         vlas_in_scope = saved_vlas_in_scope;
-        
+
         next();
     } else if (tok == TOK_RETURN) {
         next();
@@ -5871,12 +5771,12 @@ static void block(int *bsym, int *csym, int is_expr)
                 gfunc_return(&func_vt);
         }
         skip(';');
-        /* jump unless last stmt in top-level block */
+        /* 除非是顶层块中的最后一条语句，否则跳转 */
         if (tok != '}' || local_scope != 1)
             rsym = gjmp(rsym);
 	nocode_wanted |= 0x20000000;
     } else if (tok == TOK_BREAK) {
-        /* compute jump */
+        /* 计算跳转 */
         if (!bsym)
             tcc_error("cannot break");
         *bsym = gjmp(*bsym);
@@ -5884,7 +5784,7 @@ static void block(int *bsym, int *csym, int is_expr)
         skip(';');
 	nocode_wanted |= 0x20000000;
     } else if (tok == TOK_CONTINUE) {
-        /* compute jump */
+        /* 计算跳转 */
         if (!csym)
             tcc_error("cannot continue");
         vla_sp_restore_root();
@@ -5900,9 +5800,9 @@ static void block(int *bsym, int *csym, int is_expr)
         s = local_stack;
         ++local_scope;
         if (tok != ';') {
-            /* c99 for-loop init decl? */
+            /* 是 c99 的 for 循环初始化声明？ */
             if (!decl0(VT_LOCAL, 1, NULL)) {
-                /* no, regular for-loop init expr */
+                /* 不是，是普通的 for 循环初始化表达式 */
                 gexpr();
                 vpop();
             }
@@ -5937,7 +5837,7 @@ static void block(int *bsym, int *csym, int is_expr)
         --local_scope;
         sym_pop(&local_stack, s, 0);
 
-    } else 
+    } else
     if (tok == TOK_DO) {
 	int saved_nocode_wanted;
 	nocode_wanted &= ~0x20000000;
@@ -5969,21 +5869,21 @@ static void block(int *bsym, int *csym, int is_expr)
         skip(')');
 	switchval = *vtop--;
         a = 0;
-        b = gjmp(0); /* jump to first case */
+        b = gjmp(0); /* 跳转到第一个 case */
         sw.p = NULL; sw.n = 0; sw.def_sym = 0;
         saved = cur_switch;
         cur_switch = &sw;
         block(&a, csym, 0);
 	nocode_wanted = saved_nocode_wanted;
-        a = gjmp(a); /* add implicit break */
-        /* case lookup */
+        a = gjmp(a); /* 添加隐式 break */
+        /* case 查找 */
         gsym(b);
         qsort(sw.p, sw.n, sizeof(void*), case_cmp);
         for (b = 1; b < sw.n; b++)
             if (sw.p[b - 1]->v2 >= sw.p[b]->v1)
                 tcc_error("duplicate case value");
-        /* Our switch table sorting is signed, so the compared
-           value needs to be as well when it's 64bit.  */
+        /* 我们的 switch 表排序是有符号的，所以当被比较的值
+           是 64 位时它也必须是有符号的。  */
         if ((switchval.type.t & VT_BTYPE) == VT_LLONG)
             switchval.type.t &= ~VT_UNSIGNED;
         vpushv(&switchval);
@@ -5993,7 +5893,7 @@ static void block(int *bsym, int *csym, int is_expr)
           gjmp_addr(sw.def_sym);
         dynarray_reset(&sw.p, &sw.n);
         cur_switch = saved;
-        /* break label */
+        /* break 标签 */
         gsym(a);
     } else
     if (tok == TOK_CASE) {
@@ -6014,7 +5914,7 @@ static void block(int *bsym, int *csym, int is_expr)
         skip(':');
         is_expr = 0;
         goto block_after_label;
-    } else 
+    } else
     if (tok == TOK_DEFAULT) {
         next();
         skip(':');
@@ -6029,7 +5929,7 @@ static void block(int *bsym, int *csym, int is_expr)
     if (tok == TOK_GOTO) {
         next();
         if (tok == '*' && gnu_ext) {
-            /* computed goto */
+            /* 计算跳转 */
             next();
             gexpr();
             if ((vtop->type.t & VT_BTYPE) != VT_PTR)
@@ -6037,7 +5937,7 @@ static void block(int *bsym, int *csym, int is_expr)
             ggoto();
         } else if (tok >= TOK_UIDENT) {
             s = label_find(tok);
-            /* put forward definition if needed */
+            /* 需要时放入前向定义 */
             if (!s) {
                 s = label_push(&global_label_stack, tok, LABEL_FORWARD);
             } else {
@@ -6059,7 +5959,7 @@ static void block(int *bsym, int *csym, int is_expr)
     } else {
         b = is_label();
         if (b) {
-            /* label case */
+            /* 标签情形 */
 	    next();
             s = label_find(b);
             if (s) {
@@ -6072,7 +5972,7 @@ static void block(int *bsym, int *csym, int is_expr)
             }
             s->jnext = ind;
             vla_sp_restore();
-            /* we accept this, but it is a mistake */
+            /* 我们接受这种写法，但它是个错误 */
         block_after_label:
 	    nocode_wanted &= ~0x20000000;
             if (tok == '}') {
@@ -6083,7 +5983,7 @@ static void block(int *bsym, int *csym, int is_expr)
                 block(bsym, csym, is_expr);
             }
         } else {
-            /* expression case */
+            /* 表达式情形 */
             if (tok != ';') {
                 if (is_expr) {
                     vpop();
@@ -6098,11 +5998,11 @@ static void block(int *bsym, int *csym, int is_expr)
     }
 }
 
-/* This skips over a stream of tokens containing balanced {} and ()
-   pairs, stopping at outer ',' ';' and '}' (or matching '}' if we started
-   with a '{').  If STR then allocates and stores the skipped tokens
-   in *STR.  This doesn't check if () and {} are nested correctly,
-   i.e. "({)}" is accepted.  */
+/* 这段代码跳过一段包含配对 {} 和 () 的词法单元流，
+   在外层 ',' ';' 和 '}' 处停下（如果以 '{' 开始，则
+   停在与之匹配的 '}' 处）。若给出 STR，则分配空间并把
+   跳过的词法单元存入 *STR。它不检查 () 和 {} 是否
+   正确嵌套，即 "({)}" 也会被接受。  */
 static void skip_or_save_block(TokenString **str)
 {
     int braces = tok == '{';
@@ -6144,13 +6044,13 @@ static void parse_init_elem(int expr_type)
     int saved_global_expr;
     switch(expr_type) {
     case EXPR_CONST:
-        /* compound literals must be allocated globally in this case */
+        /* 这种情况下复合字面量必须在全局分配 */
         saved_global_expr = global_expr;
         global_expr = 1;
         expr_const1();
         global_expr = saved_global_expr;
-        /* NOTE: symbols are accepted, as well as lvalue for anon symbols
-	   (compound literals).  */
+        /* NOTE: 接受符号，也接受匿名符号（复合字面量）
+	   作为左值。  */
         if (((vtop->r & (VT_VALMASK | VT_LVAL)) != VT_CONST
 	     && ((vtop->r & (VT_SYM|VT_LVAL)) != (VT_SYM|VT_LVAL)
 		 || vtop->sym->v < SYM_FIRST_ANOM))
@@ -6163,11 +6063,11 @@ static void parse_init_elem(int expr_type)
     }
 }
 
-/* put zeros for variable based init */
+/* 为基于变量的初始化放入零 */
 static void init_putz(Section *sec, unsigned long c, int size)
 {
     if (sec) {
-        /* nothing to do because globals are already set to zero */
+        /* 无需处理，因为全局量已被置零 */
     } else {
         vpush_global_sym(&func_old_type, TOK_memset);
         vseti(VT_LOCAL, c);
@@ -6177,12 +6077,12 @@ static void init_putz(Section *sec, unsigned long c, int size)
     }
 }
 
-/* t is the array or struct type. c is the array or struct
-   address. cur_field is the pointer to the current
-   field, for arrays the 'c' member contains the current start
-   index.  'size_only' is true if only size info is needed (only used
-   in arrays).  al contains the already initialized length of the
-   current container (starting at c).  This returns the new length of that.  */
+/* t 是数组或结构体类型。c 是数组或结构体的
+   地址。cur_field 是指向当前字段的指针，
+   对数组而言，'c' 成员包含当前起始索引。
+   'size_only' 为真时只需要大小信息（仅用于
+   数组）。al 包含当前容器（从 c 开始）已初始化的
+   长度。本函数返回其新的长度。  */
 static int decl_designator(CType *type, Section *sec, unsigned long c,
                            Sym **cur_field, int size_only, int al)
 {
@@ -6194,7 +6094,7 @@ static int decl_designator(CType *type, Section *sec, unsigned long c,
     nb_elems = 1;
     if (gnu_ext && (l = is_label()) != 0)
         goto struct_field;
-    /* NOTE: we only support ranges for last designator */
+    /* NOTE: 我们只支持最后一个指派符使用范围 */
     while (nb_elems == 1 && (tok == '[' || tok == '.')) {
         if (tok == '[') {
             if (!(type->t & VT_ARRAY))
@@ -6256,13 +6156,13 @@ static int decl_designator(CType *type, Section *sec, unsigned long c,
             c += f->c;
         }
     }
-    /* must put zero in holes (note that doing it that way
-       ensures that it even works with designators) */
+    /* 必须在空洞处填零（注意这样做可以
+       保证即使有指派符也能正确工作） */
     if (!size_only && c - corig > al)
 	init_putz(sec, corig + al, c - corig - al);
     decl_initializer(type, sec, c, 0, size_only);
 
-    /* XXX: make it more general */
+    /* XXX: 让它更通用 */
     if (!size_only && nb_elems > 1) {
         unsigned long c_end;
         uint8_t *src, *dst;
@@ -6294,7 +6194,7 @@ static int decl_designator(CType *type, Section *sec, unsigned long c,
     return al;
 }
 
-/* store a value or an expression directly in global data or in local array */
+/* 把值或表达式直接存入全局数据或局部数组 */
 static void init_putv(CType *type, Section *sec, unsigned long c)
 {
     int bt;
@@ -6302,12 +6202,12 @@ static void init_putv(CType *type, Section *sec, unsigned long c)
     CType dtype;
 
     dtype = *type;
-    dtype.t &= ~VT_CONSTANT; /* need to do that to avoid false warning */
+    dtype.t &= ~VT_CONSTANT; /* 必须这样做以避免误告警 */
 
     if (sec) {
 	int size, align;
-        /* XXX: not portable */
-        /* XXX: generate error if incorrect relocation */
+        /* XXX: 不可移植 */
+        /* XXX: 如果重定位不正确则生成错误 */
         gen_assign_cast(&dtype);
         bt = type->t & VT_BTYPE;
 
@@ -6329,21 +6229,21 @@ static void init_putv(CType *type, Section *sec, unsigned long c)
 	section_reserve(sec, c + size);
         ptr = sec->data + c;
 
-        /* XXX: make code faster ? */
+        /* XXX: 让代码更快？ */
 	if ((vtop->r & (VT_SYM|VT_CONST)) == (VT_SYM|VT_CONST) &&
 	    vtop->sym->v >= SYM_FIRST_ANOM &&
-	    /* XXX This rejects compound literals like
-	       '(void *){ptr}'.  The problem is that '&sym' is
-	       represented the same way, which would be ruled out
-	       by the SYM_FIRST_ANOM check above, but also '"string"'
-	       in 'char *p = "string"' is represented the same
-	       with the type being VT_PTR and the symbol being an
-	       anonymous one.  That is, there's no difference in vtop
-	       between '(void *){x}' and '&(void *){x}'.  Ignore
-	       pointer typed entities here.  Hopefully no real code
-	       will every use compound literals with scalar type.  */
+	    /* XXX 这会拒绝像 '(void *){ptr}' 这样的复合
+	       字面量。问题在于 '&sym' 的表示方式相同，
+	       而它会被上面的 SYM_FIRST_ANOM 检查排除，
+	       但 'char *p = "string"' 中的 '"string"'
+	       表示方式也相同，类型是 VT_PTR 而符号是
+	       匿名符号。也就是说，在 vtop 中
+	       '(void *){x}' 与 '&(void *){x}' 没有区别。
+	       这里忽略指针类型的实体。希望不会有真实
+	       代码使用标量类型的复合字面量。
+	       */
 	    (vtop->type.t & VT_BTYPE) != VT_PTR) {
-	    /* These come from compound literals, memcpy stuff over.  */
+	    /* 这些来自复合字面量，把内容 memcpy 过去。  */
 	    Section *ssec;
 	    ElfSym *esym;
 	    ElfW_Rel *rel;
@@ -6351,10 +6251,10 @@ static void init_putv(CType *type, Section *sec, unsigned long c)
 	    ssec = tcc_state->sections[esym->st_shndx];
 	    memmove (ptr, ssec->data + esym->st_value, size);
 	    if (ssec->reloc) {
-		/* We need to copy over all memory contents, and that
-		   includes relocations.  Use the fact that relocs are
-		   created it order, so look from the end of relocs
-		   until we hit one before the copied region.  */
+		/* 我们需要复制全部内存内容，其中
+		   包括重定位。利用重定位是按顺序
+		   创建的这一事实，从重定位末尾往前查，
+		   直到遇到位于被复制区域之前的那一个。  */
 		int num_relocs = ssec->reloc->data_offset / sizeof(*rel);
 		rel = (ElfW_Rel*)(ssec->reloc->data + ssec->reloc->data_offset);
 		while (num_relocs--) {
@@ -6363,12 +6263,12 @@ static void init_putv(CType *type, Section *sec, unsigned long c)
 		      continue;
 		    if (rel->r_offset < esym->st_value)
 		      break;
-		    /* Note: if the same fields are initialized multiple
-		       times (possible with designators) then we possibly
-		       add multiple relocations for the same offset here.
-		       That would lead to wrong code, the last reloc needs
-		       to win.  We clean this up later after the whole
-		       initializer is parsed.  */
+		    /* 注意：如果同一字段被初始化多次
+		       （使用指派符时可能发生），我们可能在这里
+		       为同一偏移添加多个重定位。
+		       那会导致错误的代码，必须让最后一个重定位
+		       生效。我们在整个初始化器解析完之后
+		       再清理。  */
 		    put_elf_reloca(symtab_section, sec,
 				   c + rel->r_offset - esym->st_value,
 				   ELFW(R_TYPE)(rel->r_info),
@@ -6400,9 +6300,9 @@ static void init_putv(CType *type, Section *sec, unsigned long c)
                 }
             } else
             switch(bt) {
-		/* XXX: when cross-compiling we assume that each type has the
-		   same representation on host and target, which is likely to
-		   be wrong in the case of long double */
+		/* XXX: 交叉编译时我们假设每种类型在宿主机和目标机上
+		   表示方式相同，对 long double 而言这很可能
+		   是错的 */
 	    case VT_BOOL:
 		vtop->c.i = vtop->c.i != 0;
 	    case VT_BYTE:
@@ -6419,7 +6319,7 @@ static void init_putv(CType *type, Section *sec, unsigned long c)
 		break;
 	    case VT_LDOUBLE:
 #if defined TCC_IS_NATIVE_387
-                if (sizeof (long double) >= 10) /* zero pad ten-byte LD */
+                if (sizeof (long double) >= 10) /* 对十字节 LD 补零填充 */
                     memcpy(ptr, &vtop->c.ld, 10);
 #ifdef __TINYC__
                 else if (sizeof (long double) == sizeof (double))
@@ -6484,12 +6384,12 @@ static void init_putv(CType *type, Section *sec, unsigned long c)
     }
 }
 
-/* 't' contains the type and storage info. 'c' is the offset of the
-   object in section 'sec'. If 'sec' is NULL, it means stack based
-   allocation. 'first' is true if array '{' must be read (multi
-   dimension implicit array init handling). 'size_only' is true if
-   size only evaluation is wanted (only for arrays). */
-static void decl_initializer(CType *type, Section *sec, unsigned long c, 
+/* 't' 包含类型和存储信息。'c' 是对象在段 'sec' 中的偏移。
+   如果 'sec' 为 NULL，表示基于栈的分配。'first' 为真
+   表示必须读取数组的 '{'（多维隐式数组初始化的
+   处理）。'size_only' 为真表示只要求求值大小
+   （仅对数组）。 */
+static void decl_initializer(CType *type, Section *sec, unsigned long c,
                              int first, int size_only)
 {
     int len, n, no_oblock, nb, i;
@@ -6499,13 +6399,13 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
     Sym indexsym;
     CType *t1;
 
-    /* If we currently are at an '}' or ',' we have read an initializer
-       element in one of our callers, and not yet consumed it.  */
+    /* 如果我们当前位于 '}' 或 ','，说明我们在某个调用者中
+       已读取了一个初始化器元素但尚未消费它。  */
     have_elem = tok == '}' || tok == ',';
     if (!have_elem && tok != '{' &&
-	/* In case of strings we have special handling for arrays, so
-	   don't consume them as initializer value (which would commit them
-	   to some anonymous symbol).  */
+	/* 对字符串我们有为数组准备的特殊处理，所以
+	   不要把它们作为初始化器值消费掉（那会把它们
+	   绑定到某个匿名符号上）。  */
 	tok != TOK_LSTR && tok != TOK_STR &&
 	!size_only) {
 	parse_init_elem(!sec ? EXPR_ANY : EXPR_CONST);
@@ -6514,9 +6414,9 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
 
     if (have_elem &&
 	!(type->t & VT_ARRAY) &&
-	/* Use i_c_parameter_t, to strip toplevel qualifiers.
-	   The source type might have VT_CONSTANT set, which is
-	   of course assignable to non-const elements.  */
+	/* 使用 i_c_parameter_t，以去掉顶层的限定符。
+	   源类型可能设置了 VT_CONSTANT，它当然可以
+	   赋给非 const 的元素。  */
 	is_compatible_unqualified_types(type, &vtop->type)) {
         init_putv(type, sec, c);
     } else if (type->t & VT_ARRAY) {
@@ -6526,7 +6426,7 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
         size1 = type_size(t1, &align1);
 
         no_oblock = 1;
-        if ((first && tok != TOK_LSTR && tok != TOK_STR) || 
+        if ((first && tok != TOK_LSTR && tok != TOK_STR) ||
             tok == '{') {
             if (tok != '{')
                 tcc_error("character array initializer must be a literal,"
@@ -6535,16 +6435,16 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
             no_oblock = 0;
         }
 
-        /* only parse strings here if correct type (otherwise: handle
-           them as ((w)char *) expressions */
-        if ((tok == TOK_LSTR && 
+        /* 只有当类型正确时才在这里解析字符串（否则：
+           把它们当作 ((w)char *) 表达式处理 */
+        if ((tok == TOK_LSTR &&
              (t1->t & VT_BTYPE) == VT_INT
             ) || (tok == TOK_STR && (t1->t & VT_BTYPE) == VT_BYTE)) {
 	    len = 0;
             while (tok == TOK_STR || tok == TOK_LSTR) {
                 int cstr_len, ch;
 
-                /* compute maximum number of chars wanted */
+                /* 计算所需的最大字符数 */
                 if (tok == TOK_STR)
                     cstr_len = tokc.str.size;
                 else
@@ -6556,9 +6456,9 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
                 if (!size_only) {
                     if (cstr_len > nb)
                         tcc_warning("initializer-string for array is too long");
-                    /* in order to go faster for common case (char
-                       string in global variable, we handle it
-                       specifically */
+                    /* 为了在常见情形下更快（全局变量中的
+                       char 字符串），我们专门
+                       处理它 */
                     if (sec && tok == TOK_STR && size1 == 1) {
                         if (!NODATA_WANTED)
                             memcpy(sec->data + c + len, tokc.str.data, nb);
@@ -6576,8 +6476,8 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
                 len += nb;
                 next();
             }
-            /* only add trailing zero if enough storage (no
-               warning in this case since it is standard) */
+            /* 只有当存储空间足够时才添加尾随零（这种情况下
+               不告警，因为这是标准行为） */
             if (n < 0 || len < n) {
                 if (!size_only) {
 		    vpushi(0);
@@ -6597,9 +6497,9 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
 		have_elem = 0;
 		if (type->t & VT_ARRAY) {
 		    ++indexsym.c;
-		    /* special test for multi dimensional arrays (may not
-		       be strictly correct if designators are used at the
-		       same time) */
+		    /* 多维数组的特殊测试（如果同时使用
+		       指派符，可能并不严格
+		       正确） */
 		    if (no_oblock && len >= n*size1)
 		        break;
 		} else {
@@ -6616,12 +6516,12 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
 		skip(',');
 	    }
         }
-        /* put zeros at the end */
+        /* 在末尾放入零 */
 	if (!size_only && len < n*size1)
 	    init_putz(sec, c + len, n*size1 - len);
         if (!no_oblock)
             skip('}');
-        /* patch type size if needed, which happens only for array types */
+        /* 需要时修补类型大小，这只对数组类型发生 */
         if (n < 0)
             s->c = size1 == 1 ? len : ((len + size1 - 1)/size1);
     } else if ((type->t & VT_BTYPE) == VT_STRUCT) {
@@ -6640,19 +6540,19 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
         decl_initializer(type, sec, c, first, size_only);
         skip('}');
     } else if (size_only) {
-	/* If we supported only ISO C we wouldn't have to accept calling
-	   this on anything than an array size_only==1 (and even then
-	   only on the outermost level, so no recursion would be needed),
-	   because initializing a flex array member isn't supported.
-	   But GNU C supports it, so we need to recurse even into
-	   subfields of structs and arrays when size_only is set.  */
-        /* just skip expression */
+	/* 如果我们只支持 ISO C，就不必接受在数组且 size_only==1
+	   之外调用它（即便那样也只需在最外层，
+	   因此不需要递归），因为不支持初始化
+	   柔性数组成员。但 GNU C 支持它，所以当设置了
+	   size_only 时，我们甚至需要递归进结构体和数组的
+	   子字段。  */
+        /* 只跳过表达式 */
         skip_or_save_block(NULL);
     } else {
 	if (!have_elem) {
-	    /* This should happen only when we haven't parsed
-	       the init element above for fear of committing a
-	       string constant to memory too early.  */
+	    /* 这只应在我们因为担心过早把字符串常量
+	       提交到内存而没有在上面解析初始化
+	       元素时发生。  */
 	    if (tok != TOK_STR && tok != TOK_LSTR)
 	      expect("string constant");
 	    parse_init_elem(!sec ? EXPR_ANY : EXPR_CONST);
@@ -6661,14 +6561,14 @@ static void decl_initializer(CType *type, Section *sec, unsigned long c,
     }
 }
 
-/* parse an initializer for type 't' if 'has_init' is non zero, and
-   allocate space in local or global data space ('r' is either
-   VT_LOCAL or VT_CONST). If 'v' is non zero, then an associated
-   variable 'v' of scope 'scope' is declared before initializers
-   are parsed. If 'v' is zero, then a reference to the new object
-   is put in the value stack. If 'has_init' is 2, a special parsing
-   is done to handle string constants. */
-static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r, 
+/* 若 'has_init' 非零，则解析类型 't' 的初始化器，并在
+   局部或全局数据空间中分配空间（'r' 为
+   VT_LOCAL 或 VT_CONST）。若 'v' 非零，则在解析初始化器
+   之前先声明作用域为 'scope' 的关联变量 'v'。
+   若 'v' 为零，则把对新对象的引用放入值栈。
+   若 'has_init' 为 2，则做特殊解析
+   以处理字符串常量。 */
+static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
                                    int has_init, int v, int scope)
 {
     int size, align, addr;
@@ -6697,19 +6597,19 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
     }
 
     size = type_size(type, &align);
-    /* If unknown size, we must evaluate it before
-       evaluating initializers because
-       initializers can generate global data too
-       (e.g. string pointers or ISOC99 compound
-       literals). It also simplifies local
-       initializers handling */
+    /* 如果大小未知，我们必须在求值初始化器之前
+       先求值大小，因为初始化器也可能生成
+       全局数据（例如字符串指针或 ISOC99 复合
+       字面量）。这也简化了局部
+       初始化器的处理
+       */
     if (size < 0 || (flexible_array && has_init)) {
-        if (!has_init) 
+        if (!has_init)
             tcc_error("unknown type size");
-        /* get all init string */
+        /* 取出全部初始化字符串 */
         if (has_init == 2) {
 	    init_str = tok_str_alloc();
-            /* only get strings */
+            /* 只取字符串 */
             while (tok == TOK_STR || tok == TOK_LSTR) {
                 tok_str_add_tok(init_str);
                 next();
@@ -6721,26 +6621,26 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
         }
         unget_tok(0);
 
-        /* compute size */
+        /* 计算大小 */
         begin_macro(init_str, 1);
         next();
         decl_initializer(type, NULL, 0, 1, 1);
-        /* prepare second initializer parsing */
+        /* 准备第二次初始化器解析 */
         macro_ptr = init_str->str;
         next();
-        
-        /* if still unknown size, error */
+
+        /* 若大小仍未知，则报错 */
         size = type_size(type, &align);
-        if (size < 0) 
+        if (size < 0)
             tcc_error("unknown type size");
     }
-    /* If there's a flex member and it was used in the initializer
-       adjust size.  */
+    /* 如果有柔性成员且在初始化器中被用到，
+       则调整大小。  */
     if (flexible_array &&
 	flexible_array->type.ref->c > 0)
         size += flexible_array->type.ref->c
 	        * pointed_size(&flexible_array->type);
-    /* take into account specified alignment if bigger */
+    /* 如果指定的对齐更大，则考虑它 */
     if (ad->a.aligned) {
 	int speca = 1 << (ad->a.aligned - 1);
         if (speca > align)
@@ -6762,21 +6662,21 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
         loc = (loc - size) & -align;
         addr = loc;
 #ifdef CONFIG_TCC_BCHECK
-        /* handles bounds */
-        /* XXX: currently, since we do only one pass, we cannot track
-           '&' operators, so we add only arrays */
+        /* 处理边界 */
+        /* XXX: 目前由于我们只做一遍处理，无法跟踪
+           '&' 运算，所以我们只添加数组 */
         if (bcheck && (type->t & VT_ARRAY)) {
             addr_t *bounds_ptr;
-            /* add padding between regions */
+            /* 在区域之间添加填充 */
             loc--;
-            /* then add local bound info */
+            /* 然后添加局部边界信息 */
             bounds_ptr = section_ptr_add(lbounds_section, 2 * sizeof(addr_t));
             bounds_ptr[0] = addr;
             bounds_ptr[1] = size;
         }
 #endif
         if (v) {
-            /* local variable */
+            /* 局部变量 */
 #ifdef CONFIG_TCC_ASM
 	    if (ad->asm_label) {
 		int reg = asm_parse_regvar(ad->asm_label);
@@ -6787,22 +6687,22 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
             sym = sym_push(v, type, r, addr);
             sym->a = ad->a;
         } else {
-            /* push local reference */
+            /* 压入局部引用 */
             vset(type, r, addr);
         }
     } else {
         if (v && scope == VT_CONST) {
-            /* see if the symbol was already defined */
+            /* 查看该符号是否已被定义 */
             sym = sym_find(v);
             if (sym) {
                 patch_storage(sym, ad, type);
-                /* we accept several definitions of the same global variable. */
+                /* 我们接受同一个全局变量的多个定义。 */
                 if (!has_init && sym->c && elfsym(sym)->st_shndx != SHN_UNDEF)
                     goto no_alloc;
             }
         }
 
-        /* allocate symbol in corresponding section */
+        /* 在对应的段中分配符号 */
         sec = ad->section;
         if (!sec) {
             if (has_init)
@@ -6814,12 +6714,12 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
         if (sec) {
 	    addr = section_add(sec, size, align);
 #ifdef CONFIG_TCC_BCHECK
-            /* add padding if bound check */
+            /* 如果做边界检查则添加填充 */
             if (bcheck)
                 section_add(sec, 1, 1);
 #endif
         } else {
-            addr = align; /* SHN_COMMON is special, symbol value is align */
+            addr = align; /* SHN_COMMON 比较特殊，符号值就是对齐 */
 	    sec = common_section;
         }
 
@@ -6828,28 +6728,28 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
                 sym = sym_push(v, type, r | VT_SYM, 0);
                 patch_storage(sym, ad, NULL);
             }
-            /* Local statics have a scope until now (for
-               warnings), remove it here.  */
+            /* 局部 static 变量到此为止都有作用域（用于
+               告警），在这里移除它。  */
             sym->sym_scope = 0;
-            /* update symbol definition */
+            /* 更新符号定义 */
 	    put_extern_sym(sym, sec, addr, size);
         } else {
-            /* push global reference */
+            /* 压入全局引用 */
             sym = get_sym_ref(type, sec, addr, size);
 	    vpushsym(type, sym);
 	    vtop->r |= r;
         }
 
 #ifdef CONFIG_TCC_BCHECK
-        /* handles bounds now because the symbol must be defined
-           before for the relocation */
+        /* 现在处理边界，因为重定位之前
+           必须已定义该符号 */
         if (bcheck) {
             addr_t *bounds_ptr;
 
             greloca(bounds_section, sym, bounds_section->data_offset, R_DATA_PTR, 0);
-            /* then add global bound info */
+            /* 然后添加全局边界信息 */
             bounds_ptr = section_ptr_add(bounds_section, 2 * sizeof(addr_t));
-            bounds_ptr[0] = 0; /* relocated */
+            bounds_ptr[0] = 0; /* 已重定位 */
             bounds_ptr[1] = size;
         }
 #endif
@@ -6861,7 +6761,7 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
         if (NODATA_WANTED)
             goto no_alloc;
 
-        /* save current stack pointer */
+        /* 保存当前栈指针 */
         if (vlas_in_scope == 0) {
             if (vla_sp_root_loc == -1)
                 vla_sp_root_loc = (loc -= PTR_SIZE);
@@ -6881,14 +6781,14 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
         decl_initializer(type, sec, addr, 1, 0);
 	if (sec && sec->reloc)
 	  squeeze_multi_relocs(sec, oldreloc_offset);
-        /* patch flexible array member size back to -1, */
-        /* for possible subsequent similar declarations */
+        /* 把柔性数组成员大小修补回 -1， */
+        /* 以备后续可能的同类声明 */
         if (flexible_array)
             flexible_array->type.ref->c = -1;
     }
 
  no_alloc:
-    /* restore parse state if needed */
+    /* 需要时恢复解析状态 */
     if (init_str) {
         end_macro();
         next();
@@ -6897,24 +6797,24 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
     nocode_wanted = saved_nocode_wanted;
 }
 
-/* parse a function defined by symbol 'sym' and generate its code in
-   'cur_text_section' */
+/* 解析由符号 'sym' 定义的函数，并在
+   'cur_text_section' 中生成其代码 */
 static void gen_function(Sym *sym)
 {
     nocode_wanted = 0;
     ind = cur_text_section->data_offset;
-    /* NOTE: we patch the symbol size later */
+    /* NOTE: 稍后修补符号大小 */
     put_extern_sym(sym, cur_text_section, ind, 0);
     funcname = get_tok_str(sym->v, NULL);
     func_ind = ind;
-    /* Initialize VLA state */
+    /* 初始化 VLA 状态 */
     vla_sp_loc = -1;
     vla_sp_root_loc = -1;
-    /* put debug symbol */
+    /* 放入调试符号 */
     tcc_debug_funcstart(tcc_state, sym);
-    /* push a dummy symbol to enable local sym storage */
+    /* 压入一个哑符号以启用局部符号存储 */
     sym_push2(&local_stack, SYM_FIELD, 0, 0);
-    local_scope = 1; /* for function parameters */
+    local_scope = 1; /* 用于函数参数 */
     gfunc_prolog(&sym->type);
     local_scope = 0;
     rsym = 0;
@@ -6924,19 +6824,19 @@ static void gen_function(Sym *sym)
     gfunc_epilog();
     cur_text_section->data_offset = ind;
     label_pop(&global_label_stack, NULL, 0);
-    /* reset local stack */
+    /* 重置局部栈 */
     local_scope = 0;
     sym_pop(&local_stack, NULL, 0);
-    /* end of function */
-    /* patch symbol size */
+    /* 函数结束 */
+    /* 修补符号大小 */
     elfsym(sym)->st_size = ind - func_ind;
     tcc_debug_funcend(tcc_state, ind - func_ind);
-    /* It's better to crash than to generate wrong code */
+    /* 崩溃也比生成错误代码好 */
     cur_text_section = NULL;
-    funcname = ""; /* for safety */
-    func_vt.t = VT_VOID; /* for safety */
-    func_var = 0; /* for safety */
-    ind = 0; /* for safety */
+    funcname = ""; /* 为了安全 */
+    func_vt.t = VT_VOID; /* 为了安全 */
+    func_var = 0; /* 为了安全 */
+    ind = 0; /* 为了安全 */
     nocode_wanted = 0x80000000;
     check_vstack();
 }
@@ -6948,15 +6848,15 @@ static void gen_inline_functions(TCCState *s)
     struct InlineFunc *fn;
 
     ln = file->line_num;
-    /* iterate while inline function are referenced */
+    /* 迭代直到没有内联函数被引用 */
     do {
         inline_generated = 0;
         for (i = 0; i < s->nb_inline_fns; ++i) {
             fn = s->inline_fns[i];
             sym = fn->sym;
             if (sym && sym->c) {
-                /* the function was used: generate its code and
-                   convert it to a normal function */
+                /* 该函数被使用了：生成它的代码并
+                   把它转换为普通函数 */
                 fn->sym = NULL;
                 if (file)
                     pstrcpy(file->filename, sizeof file->filename, fn->filename);
@@ -6978,7 +6878,7 @@ static void gen_inline_functions(TCCState *s)
 ST_FUNC void free_inline_functions(TCCState *s)
 {
     int i;
-    /* free tokens of unused inline functions */
+    /* 释放未使用的内联函数的词法单元 */
     for (i = 0; i < s->nb_inline_fns; ++i) {
         struct InlineFunc *fn = s->inline_fns[i];
         if (fn->sym)
@@ -6987,8 +6887,8 @@ ST_FUNC void free_inline_functions(TCCState *s)
     dynarray_reset(&s->inline_fns, &s->nb_inline_fns);
 }
 
-/* 'l' is VT_LOCAL or VT_CONST to define default storage type, or VT_CMP
-   if parsing old style parameter decl list (and FUNC_SYM is set then) */
+/* 'l' 为 VT_LOCAL 或 VT_CONST 以定义默认存储类型，
+   若正在解析旧式参数声明列表则为 VT_CMP（此时设置了 FUNC_SYM） */
 static int decl0(int l, int is_for_loop_init, Sym *func_sym)
 {
     int v, has_init, r;
@@ -7000,7 +6900,7 @@ static int decl0(int l, int is_for_loop_init, Sym *func_sym)
         if (!parse_btype(&btype, &ad)) {
             if (is_for_loop_init)
                 return 0;
-            /* skip redundant ';' if not in old parameter decl scope */
+            /* 如果不在旧式参数声明作用域内，则跳过多余的 ';' */
             if (tok == ';' && l != VT_CMP) {
                 next();
                 continue;
@@ -7008,13 +6908,13 @@ static int decl0(int l, int is_for_loop_init, Sym *func_sym)
             if (l != VT_CONST)
                 break;
             if (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3) {
-                /* global asm block */
+                /* 全局 asm 块 */
                 asm_global_instr();
                 continue;
             }
             if (tok >= TOK_UIDENT) {
-               /* special test for old K&R protos without explicit int
-                  type. Only accepted when defining global data */
+               /* 对没有显式 int 类型的旧式 K&R 原型的特殊测试。
+                  只在定义全局数据时接受 */
                 btype.t = VT_INT;
             } else {
                 if (tok != TOK_EOF)
@@ -7035,13 +6935,13 @@ static int decl0(int l, int is_for_loop_init, Sym *func_sym)
                 continue;
             }
         }
-        while (1) { /* iterate thru each declaration */
+        while (1) { /* 遍历每个声明 */
             type = btype;
-	    /* If the base type itself was an array type of unspecified
-	       size (like in 'typedef int arr[]; arr x = {1};') then
-	       we will overwrite the unknown size by the real one for
-	       this decl.  We need to unshare the ref symbol holding
-	       that size.  */
+	    /* 如果基类型本身是大小未指定的数组类型
+	       （如 'typedef int arr[]; arr x = {1};'），那么
+	       我们会用此次声明的真实大小覆盖那个
+	       未知大小。我们需要解除持有该大小的
+	       引用符号的共享。  */
 	    if ((type.t & VT_ARRAY) && type.ref->c < 0) {
 		type.ref = sym_push(SYM_FIELD, &type.ref->type, 0, type.ref->c);
 	    }
@@ -7057,8 +6957,8 @@ static int decl0(int l, int is_for_loop_init, Sym *func_sym)
                 if ((type.t & VT_STATIC) && (l == VT_LOCAL)) {
                     tcc_error("function without file scope cannot be static");
                 }
-                /* if old style function prototype, we accept a
-                   declaration list */
+                /* 如果是旧式函数原型，我们接受一个
+                   声明列表 */
                 sym = type.ref;
                 if (sym->f.func_type == FUNC_OLD && l == VT_CONST)
                     decl0(VT_CMP, 0, sym);
@@ -7066,7 +6966,7 @@ static int decl0(int l, int is_for_loop_init, Sym *func_sym)
 
             if (gnu_ext && (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3)) {
                 ad.asm_label = asm_label_instr();
-                /* parse one last attribute list, after asm label */
+                /* 在 asm 标签之后再解析一个属性列表 */
                 parse_attribute(&ad);
                 if (tok == '{')
                     expect(";");
@@ -7078,8 +6978,8 @@ static int decl0(int l, int is_for_loop_init, Sym *func_sym)
                 if ((type.t & VT_BTYPE) != VT_FUNC)
                     expect("function definition");
 
-                /* reject abstract declarators in function definition
-		   make old style params without decl have int type */
+                /* 在函数定义中拒绝抽象声明符
+		   让没有声明的旧式参数具有 int 类型 */
                 sym = type.ref;
                 while ((sym = sym->next) != NULL) {
                     if (!(sym->v & ~SYM_FIELD))
@@ -7087,24 +6987,24 @@ static int decl0(int l, int is_for_loop_init, Sym *func_sym)
 		    if (sym->type.t == VT_VOID)
 		        sym->type = int_type;
 		}
-                
-                /* XXX: cannot do better now: convert extern line to static inline */
+
+                /* XXX: 目前无法做得更好：把 extern 行转换为 static inline */
                 if ((type.t & (VT_EXTERN | VT_INLINE)) == (VT_EXTERN | VT_INLINE))
                     type.t = (type.t & ~VT_EXTERN) | VT_STATIC;
 
-                /* put function symbol */
+                /* 放入函数符号 */
                 sym = external_global_sym(v, &type, 0);
                 type.t &= ~VT_EXTERN;
                 patch_storage(sym, &ad, &type);
 
-                /* static inline functions are just recorded as a kind
-                   of macro. Their code will be emitted at the end of
-                   the compilation unit only if they are used */
-                if ((type.t & (VT_INLINE | VT_STATIC)) == 
+                /* static inline 函数只作为一种宏被记录。
+                   只有当它们被使用时，其代码才会在
+                   编译单元末尾发射 */
+                if ((type.t & (VT_INLINE | VT_STATIC)) ==
                     (VT_INLINE | VT_STATIC)) {
                     struct InlineFunc *fn;
                     const char *filename;
-                           
+
                     filename = file ? file->filename : "";
                     fn = tcc_malloc(sizeof *fn + strlen(filename));
                     strcpy(fn->filename, filename);
@@ -7113,7 +7013,7 @@ static int decl0(int l, int is_for_loop_init, Sym *func_sym)
                     dynarray_add(&tcc_state->inline_fns,
 				 &tcc_state->nb_inline_fns, fn);
                 } else {
-                    /* compute text section */
+                    /* 计算 text 段 */
                     cur_text_section = ad.section;
                     if (!cur_text_section)
                         cur_text_section = text_section;
@@ -7122,14 +7022,14 @@ static int decl0(int l, int is_for_loop_init, Sym *func_sym)
                 break;
             } else {
 		if (l == VT_CMP) {
-		    /* find parameter in function parameter list */
+		    /* 在函数参数列表中查找参数 */
 		    for (sym = func_sym->next; sym; sym = sym->next)
 			if ((sym->v & ~SYM_FIELD) == v)
 			    goto found;
 		    tcc_error("declaration for parameter '%s' but no such parameter",
 			      get_tok_str(v, NULL));
 found:
-		    if (type.t & VT_STORAGE) /* 'register' is okay */
+		    if (type.t & VT_STORAGE) /* 'register' 是可以的 */
 		        tcc_error("storage class specified for '%s'",
 				  get_tok_str(v, NULL));
 		    if (sym->type.t != VT_VOID)
@@ -7138,8 +7038,8 @@ found:
 		    convert_parameter_type(&type);
 		    sym->type = type;
 		} else if (type.t & VT_TYPEDEF) {
-                    /* save typedefed type  */
-                    /* XXX: test storage specifiers ? */
+                    /* 保存 typedef 的类型  */
+                    /* XXX: 测试存储说明符？ */
                     sym = sym_find(v);
                     if (sym && sym->sym_scope == local_scope) {
                         if (!is_compatible_types(&sym->type, &type)
@@ -7155,11 +7055,11 @@ found:
                 } else {
                     r = 0;
                     if ((type.t & VT_BTYPE) == VT_FUNC) {
-                        /* external function definition */
-                        /* specific case for func_call attribute */
+                        /* 外部函数定义 */
+                        /* func_call 属性的特殊情形 */
                         type.ref->f = ad.f;
                     } else if (!(type.t & VT_ARRAY)) {
-                        /* not lvalue if array */
+                        /* 如果是数组则不是左值 */
                         r |= lvalue_type(type.t);
                     }
                     has_init = (tok == '=');
@@ -7169,9 +7069,9 @@ found:
 			((type.t & VT_BTYPE) == VT_FUNC) ||
                         ((type.t & VT_ARRAY) && (type.t & VT_STATIC) &&
                          !has_init && l == VT_CONST && type.ref->c < 0)) {
-                        /* external variable or function */
-                        /* NOTE: as GCC, uninitialized global static
-                           arrays of null size are considered as
+                        /* 外部变量或函数 */
+                        /* NOTE: 与 GCC 一样，未初始化的零长度全局
+                           static 数组被视为
                            extern */
                         type.t |= VT_EXTERN;
                         sym = external_sym(v, &type, r, &ad);
@@ -7182,8 +7082,8 @@ found:
                             esym = elfsym(alias_target);
                             if (!esym)
                                 tcc_error("unsupported forward __alias__ attribute");
-                            /* Local statics have a scope until now (for
-                               warnings), remove it here.  */
+                            /* 局部 static 变量到此为止都有作用域（用于
+                               告警），在这里移除它。  */
                             sym->sym_scope = 0;
                             put_extern_sym2(sym, esym->st_shndx, esym->st_value, esym->st_size, 0);
                         }
@@ -7195,7 +7095,7 @@ found:
                         if (has_init)
                             next();
                         else if (l == VT_CONST)
-                            /* uninitialized global variables may be overridden */
+                            /* 未初始化的全局变量可能被覆盖 */
                             type.t |= VT_EXTERN;
                         decl_initializer_alloc(&type, &ad, r, has_init, v, l);
                     }

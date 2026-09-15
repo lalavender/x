@@ -1,76 +1,74 @@
 /*
- *  ELF file handling for TCC
+ *  TCC 的 ELF 文件处理
  *
  *  Copyright (c) 2001-2004 Fabrice Bellard
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * 本库为自由软件；你可以遵照自由软件基金会发布的 GNU 宽通用公共许可证
+ * 的条款重新分发和/或修改它，无论是许可证的第 2 版，还是（由你选择的）
+ * 任何更新的版本。
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * 分发本库是希望它有用，但不提供任何担保；
+ * 甚至不提供对适销性或特定用途适用性的默示担保。
+ * 详见 GNU 宽通用公共许可证。
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * 你应当已经随本库收到一份 GNU 宽通用公共许可证的副本；
+ * 如果没有，请写信给自由软件基金会：
+ * 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "tcc.h"
 
-/* Define this to get some debug output during relocation processing.  */
+/* 定义它可以在重定位处理期间得到一些调试输出。  */
 #undef DEBUG_RELOC
 
 /********************************************************/
-/* global variables */
+/* 全局变量 */
 
-ST_DATA Section *text_section, *data_section, *bss_section; /* predefined sections */
+ST_DATA Section *text_section, *data_section, *bss_section; /* 预定义的段 */
 ST_DATA Section *common_section;
-ST_DATA Section *cur_text_section; /* current section where function code is generated */
+ST_DATA Section *cur_text_section; /* 生成函数代码的当前段 */
 #ifdef CONFIG_TCC_ASM
-ST_DATA Section *last_text_section; /* to handle .previous asm directive */
+ST_DATA Section *last_text_section; /* 用于处理 .previous 汇编伪指令 */
 #endif
 #ifdef CONFIG_TCC_BCHECK
-/* bound check related sections */
-ST_DATA Section *bounds_section; /* contains global data bound description */
-ST_DATA Section *lbounds_section; /* contains local data bound description */
+/* 边界检查相关的段 */
+ST_DATA Section *bounds_section; /* 包含全局数据的边界描述 */
+ST_DATA Section *lbounds_section; /* 包含局部数据的边界描述 */
 #endif
-/* symbol sections */
+/* 符号段 */
 ST_DATA Section *symtab_section;
-/* debug sections */
+/* 调试段 */
 ST_DATA Section *stab_section, *stabstr_section;
 
-/* XXX: avoid static variable */
-static int new_undef_sym = 0; /* Is there a new undefined sym since last new_undef_sym() */
+/* XXX：避免使用静态变量 */
+static int new_undef_sym = 0; /* 自上次调用 new_undef_sym() 以来是否有新的未定义符号 */
 
-/* special flag to indicate that the section should not be linked to the other ones */
+/* 特殊标志，表示该段不应与其他段链接在一起 */
 #define SHF_PRIVATE 0x80000000
-/* section is dynsymtab_section */
+/* 该段是 dynsymtab_section */
 #define SHF_DYNSYM 0x40000000
 
 /* ------------------------------------------------------------------------- */
 
 ST_FUNC void tccelf_new(TCCState *s)
 {
-    /* no section zero */
+    /* 没有零号段 */
     dynarray_add(&s->sections, &s->nb_sections, NULL);
 
-    /* create standard sections */
+    /* 创建标准段 */
     text_section = new_section(s, ".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR);
     data_section = new_section(s, ".data", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE);
     bss_section = new_section(s, ".bss", SHT_NOBITS, SHF_ALLOC | SHF_WRITE);
     common_section = new_section(s, ".common", SHT_NOBITS, SHF_PRIVATE);
     common_section->sh_num = SHN_COMMON;
 
-    /* symbols are always generated for linking stage */
+    /* 链接阶段总是生成符号 */
     symtab_section = new_symtab(s, ".symtab", SHT_SYMTAB, 0,
                                 ".strtab",
                                 ".hashtab", SHF_PRIVATE);
     s->symtab = symtab_section;
 
-    /* private symbol table for dynamic symbols */
+    /* 动态符号的私有符号表 */
     s->dynsymtab_section = new_symtab(s, ".dynsymtab", SHT_SYMTAB, SHF_PRIVATE|SHF_DYNSYM,
                                       ".dynstrtab",
                                       ".dynhashtab", SHF_PRIVATE);
@@ -80,7 +78,7 @@ ST_FUNC void tccelf_new(TCCState *s)
 #ifdef CONFIG_TCC_BCHECK
 ST_FUNC void tccelf_bounds_new(TCCState *s)
 {
-    /* create bounds sections */
+    /* 创建边界检查段 */
     bounds_section = new_section(s, ".bounds",
                                  SHT_PROGBITS, SHF_ALLOC);
     lbounds_section = new_section(s, ".lbounds",
@@ -95,7 +93,7 @@ ST_FUNC void tccelf_stab_new(TCCState *s)
     stabstr_section = new_section(s, ".stabstr", SHT_STRTAB, 0);
     put_elf_str(stabstr_section, "");
     stab_section->link = stabstr_section;
-    /* put first entry */
+    /* 放入第一个条目 */
     put_stabs("", 0, 0, 0, 0);
 }
 
@@ -108,7 +106,7 @@ ST_FUNC void tccelf_delete(TCCState *s1)
 {
     int i;
 
-    /* free all sections */
+    /* 释放所有段 */
     for(i = 1; i < s1->nb_sections; i++)
         free_section(s1->sections[i]);
     dynarray_reset(&s1->sections, &s1->nb_sections);
@@ -117,7 +115,7 @@ ST_FUNC void tccelf_delete(TCCState *s1)
         free_section(s1->priv_sections[i]);
     dynarray_reset(&s1->priv_sections, &s1->nb_priv_sections);
 
-    /* free any loaded DLLs */
+    /* 释放所有已加载的 DLL */
 #ifdef TCC_IS_NATIVE
     for ( i = 0; i < s1->nb_loaded_dlls; i++) {
         DLLReference *ref = s1->loaded_dlls[i];
@@ -129,14 +127,14 @@ ST_FUNC void tccelf_delete(TCCState *s1)
 # endif
     }
 #endif
-    /* free loaded dlls array */
+    /* 释放已加载 dll 的数组 */
     dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
     tcc_free(s1->sym_attrs);
 
-    symtab_section = NULL; /* for tccrun.c:rt_printline() */
+    symtab_section = NULL; /* 供 tccrun.c:rt_printline() 使用 */
 }
 
-/* save section data state */
+/* 保存段数据状态 */
 ST_FUNC void tccelf_begin_file(TCCState *s1)
 {
     Section *s; int i;
@@ -144,12 +142,12 @@ ST_FUNC void tccelf_begin_file(TCCState *s1)
         s = s1->sections[i];
         s->sh_offset = s->data_offset;
     }
-    /* disable symbol hashing during compilation */
+    /* 编译期间禁用符号哈希 */
     s = s1->symtab, s->reloc = s->hash, s->hash = NULL;
 }
 
-/* At the end of compilation, convert any UNDEF syms to global, and merge
-   with previously existing symbols */
+/* 编译结束时，把任何 UNDEF 符号转换为全局符号，并与之前
+   已有的符号合并 */
 ST_FUNC void tccelf_end_file(TCCState *s1)
 {
     Section *s = s1->symtab;
@@ -170,7 +168,7 @@ ST_FUNC void tccelf_end_file(TCCState *s1)
         tr[i] = set_elf_sym(s, sym->st_value, sym->st_size, sym->st_info,
             sym->st_other, sym->st_shndx, s->link->data + sym->st_name);
     }
-    /* now update relocations */
+    /* 现在更新重定位 */
     for (i = 1; i < s1->nb_sections; i++) {
         Section *sr = s1->sections[i];
         if (sr->sh_type == SHT_RELX && sr->link == s) {
@@ -207,7 +205,7 @@ ST_FUNC Section *new_section(TCCState *s1, const char *name, int sh_type, int sh
         sec->sh_addralign = 1;
         break;
     default:
-        sec->sh_addralign =  PTR_SIZE; /* gcc/pcc default alignment */
+        sec->sh_addralign =  PTR_SIZE; /* gcc/pcc 默认对齐 */
         break;
     }
 
@@ -250,7 +248,7 @@ ST_FUNC Section *new_symtab(TCCState *s1,
     return symtab;
 }
 
-/* realloc section and set its content to zero */
+/* 重新分配段并把其内容置零 */
 ST_FUNC void section_realloc(Section *sec, unsigned long new_size)
 {
     unsigned long size;
@@ -267,8 +265,8 @@ ST_FUNC void section_realloc(Section *sec, unsigned long new_size)
     sec->data_allocated = size;
 }
 
-/* reserve at least 'size' bytes aligned per 'align' in section
-   'sec' from current offset, and return the aligned offset */
+/* 在段 'sec' 中从当前偏移开始预留至少 'size' 字节、按 'align'
+   对齐的空间，并返回对齐后的偏移 */
 ST_FUNC size_t section_add(Section *sec, addr_t size, int align)
 {
     size_t offset, offset1;
@@ -283,15 +281,15 @@ ST_FUNC size_t section_add(Section *sec, addr_t size, int align)
     return offset;
 }
 
-/* reserve at least 'size' bytes in section 'sec' from
-   sec->data_offset. */
+/* 在段 'sec' 中从 sec->data_offset 开始预留至少
+   'size' 字节。 */
 ST_FUNC void *section_ptr_add(Section *sec, addr_t size)
 {
     size_t offset = section_add(sec, size, 1);
     return sec->data + offset;
 }
 
-/* reserve at least 'size' bytes from section start */
+/* 从段起始位置预留至少 'size' 字节 */
 ST_FUNC void section_reserve(Section *sec, unsigned long size)
 {
     if (size > sec->data_allocated)
@@ -300,8 +298,8 @@ ST_FUNC void section_reserve(Section *sec, unsigned long size)
         sec->data_offset = size;
 }
 
-/* return a reference to a section, and create it if it does not
-   exists */
+/* 返回对某个段的引用，如果它不存在
+   就创建它 */
 ST_FUNC Section *find_section(TCCState *s1, const char *name)
 {
     Section *sec;
@@ -311,7 +309,7 @@ ST_FUNC Section *find_section(TCCState *s1, const char *name)
         if (!strcmp(name, sec->name))
             return sec;
     }
-    /* sections are created as PROGBITS */
+    /* 段创建为 PROGBITS */
     return new_section(s1, name, SHT_PROGBITS, SHF_ALLOC);
 }
 
@@ -329,7 +327,7 @@ ST_FUNC int put_elf_str(Section *s, const char *sym)
     return offset;
 }
 
-/* elf symbol hashing function */
+/* elf 符号哈希函数 */
 static unsigned long elf_hash(const unsigned char *name)
 {
     unsigned long h = 0, g;
@@ -344,8 +342,8 @@ static unsigned long elf_hash(const unsigned char *name)
     return h;
 }
 
-/* rebuild hash table of section s */
-/* NOTE: we do factorize the hash table code to go faster */
+/* 重建段 s 的哈希表 */
+/* 注意：我们特意把哈希表代码展开以加快速度 */
 static void rebuild_hash(Section *s, unsigned int nb_buckets)
 {
     ElfW(Sym) *sym;
@@ -381,7 +379,7 @@ static void rebuild_hash(Section *s, unsigned int nb_buckets)
     }
 }
 
-/* return the symbol number */
+/* 返回符号编号 */
 ST_FUNC int put_elf_sym(Section *s, addr_t value, unsigned long size,
     int info, int other, int shndx, const char *name)
 {
@@ -395,7 +393,7 @@ ST_FUNC int put_elf_sym(Section *s, addr_t value, unsigned long size,
         name_offset = put_elf_str(s->link, name);
     else
         name_offset = 0;
-    /* XXX: endianness */
+    /* XXX：字节序 */
     sym->st_name = name_offset;
     sym->st_value = value;
     sym->st_size = size;
@@ -408,15 +406,15 @@ ST_FUNC int put_elf_sym(Section *s, addr_t value, unsigned long size,
         int *ptr, *base;
         ptr = section_ptr_add(hs, sizeof(int));
         base = (int *)hs->data;
-        /* only add global or weak symbols. */
+        /* 只添加全局符号或弱符号。 */
         if (ELFW(ST_BIND)(info) != STB_LOCAL) {
-            /* add another hashing entry */
+            /* 增加另一个哈希条目 */
             nbuckets = base[0];
             h = elf_hash((unsigned char *)s->link->data + name_offset) % nbuckets;
             *ptr = base[2 + h];
             base[2 + h] = sym_index;
             base[1]++;
-            /* we resize the hash table */
+            /* 我们调整哈希表的大小 */
             hs->nb_hashed_syms++;
             if (hs->nb_hashed_syms > 2 * nbuckets) {
                 rebuild_hash(s, 2 * nbuckets);
@@ -452,7 +450,7 @@ ST_FUNC int find_elf_sym(Section *s, const char *name)
     return 0;
 }
 
-/* return elf symbol value, signal error if 'err' is nonzero */
+/* 返回 elf 符号值，'err' 非零时报告错误 */
 ST_FUNC addr_t get_elf_sym_addr(TCCState *s, const char *name, int err)
 {
     int sym_index;
@@ -468,22 +466,22 @@ ST_FUNC addr_t get_elf_sym_addr(TCCState *s, const char *name, int err)
     return sym->st_value;
 }
 
-/* return elf symbol value */
+/* 返回 elf 符号值 */
 LIBTCCAPI void *tcc_get_symbol(TCCState *s, const char *name)
 {
     return (void*)(uintptr_t)get_elf_sym_addr(s, name, 0);
 }
 
 #if defined TCC_IS_NATIVE
-/* return elf symbol value or error */
+/* 返回 elf 符号值或错误 */
 ST_FUNC void* tcc_get_symbol_err(TCCState *s, const char *name)
 {
     return (void*)(uintptr_t)get_elf_sym_addr(s, name, 1);
 }
 #endif
 
-/* add an elf symbol : check if it is already defined and patch
-   it. Return symbol index. NOTE that sh_num can be SHN_UNDEF. */
+/* 添加一个 elf 符号：检查它是否已定义并打补丁。
+   返回符号索引。注意 sh_num 可以是 SHN_UNDEF。 */
 ST_FUNC int set_elf_sym(Section *s, addr_t value, unsigned long size,
                        int info, int other, int shndx, const char *name)
 {
@@ -496,7 +494,7 @@ ST_FUNC int set_elf_sym(Section *s, addr_t value, unsigned long size,
     sym_vis = ELFW(ST_VISIBILITY)(other);
 
     if (sym_bind != STB_LOCAL) {
-        /* we search global or weak symbols */
+        /* 我们搜索全局符号或弱符号 */
         sym_index = find_elf_sym(s, name);
         if (!sym_index)
             goto do_def;
@@ -506,7 +504,7 @@ ST_FUNC int set_elf_sym(Section *s, addr_t value, unsigned long size,
             return sym_index;
         if (esym->st_shndx != SHN_UNDEF) {
             esym_bind = ELFW(ST_BIND)(esym->st_info);
-            /* propagate the most constraining visibility */
+            /* 传播约束最强的可见性 */
             /* STV_DEFAULT(0)<STV_PROTECTED(3)<STV_HIDDEN(2)<STV_INTERNAL(1) */
             esym_vis = ELFW(ST_VISIBILITY)(esym->st_other);
             if (esym_vis == STV_DEFAULT) {
@@ -518,32 +516,32 @@ ST_FUNC int set_elf_sym(Section *s, addr_t value, unsigned long size,
             }
             esym->st_other = (esym->st_other & ~ELFW(ST_VISIBILITY)(-1))
                              | new_vis;
-            other = esym->st_other; /* in case we have to patch esym */
+            other = esym->st_other; /* 以防需要给 esym 打补丁 */
             if (shndx == SHN_UNDEF) {
-                /* ignore adding of undefined symbol if the
-                   corresponding symbol is already defined */
+                /* 如果对应的符号已经定义，则忽略添加
+                   未定义符号的操作 */
             } else if (sym_bind == STB_GLOBAL && esym_bind == STB_WEAK) {
-                /* global overrides weak, so patch */
+                /* 全局符号覆盖弱符号，所以打补丁 */
                 goto do_patch;
             } else if (sym_bind == STB_WEAK && esym_bind == STB_GLOBAL) {
-                /* weak is ignored if already global */
+                /* 如果已经是全局符号，则忽略弱符号 */
             } else if (sym_bind == STB_WEAK && esym_bind == STB_WEAK) {
-                /* keep first-found weak definition, ignore subsequents */
+                /* 保留最先找到的弱定义，忽略后续的 */
             } else if (sym_vis == STV_HIDDEN || sym_vis == STV_INTERNAL) {
-                /* ignore hidden symbols after */
+                /* 之后忽略隐藏符号 */
             } else if ((esym->st_shndx == SHN_COMMON
                             || esym->st_shndx == bss_section->sh_num)
                         && (shndx < SHN_LORESERVE
                             && shndx != bss_section->sh_num)) {
-                /* data symbol gets precedence over common/bss */
+                /* 数据符号优先于 common/bss */
                 goto do_patch;
             } else if (shndx == SHN_COMMON || shndx == bss_section->sh_num) {
-                /* data symbol keeps precedence over common/bss */
+                /* 数据符号保持优先于 common/bss */
             } else if (s->sh_flags & SHF_DYNSYM) {
-                /* we accept that two DLL define the same symbol */
+                /* 我们接受两个 DLL 定义同一个符号 */
 	    } else if (esym->st_other & ST_ASM_SET) {
-		/* If the existing symbol came from an asm .set
-		   we can override.  */
+		/* 如果已有的符号来自 asm .set，
+		   我们就可以覆盖它。  */
 		goto do_patch;
             } else {
 #if 0
@@ -570,7 +568,7 @@ ST_FUNC int set_elf_sym(Section *s, addr_t value, unsigned long size,
     return sym_index;
 }
 
-/* put relocation */
+/* 放入重定位 */
 ST_FUNC void put_elf_reloca(Section *symtab, Section *s, unsigned long offset,
                             int type, int symbol, addr_t addend)
 {
@@ -580,10 +578,10 @@ ST_FUNC void put_elf_reloca(Section *symtab, Section *s, unsigned long offset,
 
     sr = s->reloc;
     if (!sr) {
-        /* if no relocation section, create it */
+        /* 如果没有重定位段，就创建它 */
         snprintf(buf, sizeof(buf), REL_SECTION_FMT, s->name);
-        /* if the symtab is allocated, then we consider the relocation
-           are also */
+        /* 如果 symtab 已分配，那么我们认为重定位
+           也已分配 */
         sr = new_section(tcc_state, buf, SHT_RELX, symtab->sh_flags);
         sr->sh_entsize = sizeof(ElfW_Rel);
         sr->link = symtab;
@@ -607,9 +605,9 @@ ST_FUNC void put_elf_reloc(Section *symtab, Section *s, unsigned long offset,
     put_elf_reloca(symtab, s, offset, type, symbol, 0);
 }
 
-/* Remove relocations for section S->reloc starting at oldrelocoffset
-   that are to the same place, retaining the last of them.  As side effect
-   the relocations are sorted.  Possibly reduces the number of relocs.  */
+/* 删除段 S->reloc 中从 oldrelocoffset 开始、指向同一位置的重定位，
+   只保留其中最后一个。作为副作用，重定位会被排序。
+   这可能会减少重定位的数量。  */
 ST_FUNC void squeeze_multi_relocs(Section *s, size_t oldrelocoffset)
 {
     Section *sr = s->reloc;
@@ -619,10 +617,10 @@ ST_FUNC void squeeze_multi_relocs(Section *s, size_t oldrelocoffset)
 
     if (oldrelocoffset + sizeof(*r) >= sr->data_offset)
       return;
-    /* The relocs we're dealing with are the result of initializer parsing.
-       So they will be mostly in order and there aren't many of them.
-       Secondly we need a stable sort (which qsort isn't).  We use
-       a simple insertion sort.  */
+    /* 我们处理的重定位来自初始化器解析。
+       所以它们大多是有序的，而且数量不多。
+       其次我们需要稳定的排序（qsort 并不稳定）。我们使用
+       简单的插入排序。  */
     for (a = oldrelocoffset + sizeof(*r); a < sr->data_offset; a += sizeof(*r)) {
 	ssize_t i = a - sizeof(*r);
 	addr = ((ElfW_Rel*)(sr->data + a))->r_offset;
@@ -644,7 +642,7 @@ ST_FUNC void squeeze_multi_relocs(Section *s, size_t oldrelocoffset)
     sr->data_offset = (unsigned char*)dest - sr->data + sizeof(*r);
 }
 
-/* put stab debug information */
+/* 放入 stab 调试信息 */
 
 ST_FUNC void put_stabs(const char *str, int type, int other, int desc,
                       unsigned long value)
@@ -690,7 +688,7 @@ ST_FUNC struct sym_attr *get_sym_attr(TCCState *s1, int index, int alloc)
     if (index >= s1->nb_sym_attrs) {
         if (!alloc)
             return s1->sym_attrs;
-        /* find immediately bigger power of 2 and reallocate array */
+        /* 找到紧接着的更大的 2 的幂并重新分配数组 */
         n = 1;
         while (index >= n)
             n *= 2;
@@ -703,16 +701,16 @@ ST_FUNC struct sym_attr *get_sym_attr(TCCState *s1, int index, int alloc)
     return &s1->sym_attrs[index];
 }
 
-/* Browse each elem of type <type> in section <sec> starting at elem <startoff>
-   using variable <elem> */
+/* 在段 <sec> 中从元素 <startoff> 开始，用变量 <elem>
+   遍历类型为 <type> 的每个元素 */
 #define for_each_elem(sec, startoff, elem, type) \
     for (elem = (type *) sec->data + startoff; \
          elem < (type *) (sec->data + sec->data_offset); elem++)
 
-/* In an ELF file symbol table, the local symbols must appear below
-   the global and weak ones. Since TCC cannot sort it while generating
-   the code, we must do it after. All the relocation tables are also
-   modified to take into account the symbol table sorting */
+/* 在 ELF 文件符号表中，局部符号必须位于全局符号
+   和弱符号之前。由于 TCC 在生成代码时无法排序，我们必须在
+   之后做。所有重定位表也要被修改，以考虑符号表
+   排序 */
 static void sort_syms(TCCState *s1, Section *s)
 {
     int *old_to_new_syms;
@@ -727,7 +725,7 @@ static void sort_syms(TCCState *s1, Section *s)
     new_syms = tcc_malloc(nb_syms * sizeof(ElfW(Sym)));
     old_to_new_syms = tcc_malloc(nb_syms * sizeof(int));
 
-    /* first pass for local symbols */
+    /* 局部符号的第一遍 */
     p = (ElfW(Sym) *)s->data;
     q = new_syms;
     for(i = 0; i < nb_syms; i++) {
@@ -737,11 +735,11 @@ static void sort_syms(TCCState *s1, Section *s)
         }
         p++;
     }
-    /* save the number of local symbols in section header */
-    if( s->sh_size )    /* this 'if' makes IDA happy */
+    /* 把局部符号的个数保存在段头中 */
+    if( s->sh_size )    /* 这个 'if' 让 IDA 满意 */
         s->sh_info = q - new_syms;
 
-    /* then second pass for non local symbols */
+    /* 然后是非局部符号的第二遍 */
     p = (ElfW(Sym) *)s->data;
     for(i = 0; i < nb_syms; i++) {
         if (ELFW(ST_BIND)(p->st_info) != STB_LOCAL) {
@@ -751,11 +749,11 @@ static void sort_syms(TCCState *s1, Section *s)
         p++;
     }
 
-    /* we copy the new symbols to the old */
+    /* 我们把新符号复制到旧符号上 */
     memcpy(s->data, new_syms, nb_syms * sizeof(ElfW(Sym)));
     tcc_free(new_syms);
 
-    /* now we modify all the relocations */
+    /* 现在我们修改所有重定位 */
     for(i = 1; i < s1->nb_sections; i++) {
         sr = s1->sections[i];
         if (sr->sh_type == SHT_RELX && sr->link == s) {
@@ -771,8 +769,8 @@ static void sort_syms(TCCState *s1, Section *s)
     tcc_free(old_to_new_syms);
 }
 
-/* relocate symbol table, resolve undefined symbols if do_resolve is
-   true and output error if undefined symbol. */
+/* 重定位符号表，如果 do_resolve 为真则解析未定义符号，
+   并在符号未定义时输出错误。 */
 ST_FUNC void relocate_syms(TCCState *s1, Section *symtab, int do_resolve)
 {
     ElfW(Sym) *sym;
@@ -783,7 +781,7 @@ ST_FUNC void relocate_syms(TCCState *s1, Section *symtab, int do_resolve)
         sh_num = sym->st_shndx;
         if (sh_num == SHN_UNDEF) {
             name = (char *) s1->symtab->link->data + sym->st_name;
-            /* Use ld.so to resolve symbol for us (for tcc -run) */
+            /* 用 ld.so 为我们解析符号（用于 tcc -run） */
             if (do_resolve) {
 #if defined TCC_IS_NATIVE
                 void *addr = dlsym(RTLD_DEFAULT, name);
@@ -795,30 +793,30 @@ ST_FUNC void relocate_syms(TCCState *s1, Section *symtab, int do_resolve)
                     goto found;
                 }
 #endif
-            /* if dynamic symbol exist, it will be used in relocate_section */
+            /* 如果存在动态符号，它将在 relocate_section 中使用 */
             } else if (s1->dynsym && find_elf_sym(s1->dynsym, name))
                 goto found;
-            /* XXX: _fp_hw seems to be part of the ABI, so we ignore
-               it */
+            /* XXX：_fp_hw 似乎是 ABI 的一部分，所以我们忽略
+               它 */
             if (!strcmp(name, "_fp_hw"))
                 goto found;
-            /* only weak symbols are accepted to be undefined. Their
-               value is zero */
+            /* 只有弱符号允许未定义。它们的
+               值为零 */
             sym_bind = ELFW(ST_BIND)(sym->st_info);
             if (sym_bind == STB_WEAK)
                 sym->st_value = 0;
             else
                 tcc_error_noabort("undefined symbol '%s'", name);
         } else if (sh_num < SHN_LORESERVE) {
-            /* add section base */
+            /* 加上段基址 */
             sym->st_value += s1->sections[sym->st_shndx]->sh_addr;
         }
     found: ;
     }
 }
 
-/* relocate a given section (CPU dependent) by applying the relocations
-   in the associated relocation section */
+/* 重定位给定段（与 CPU 相关），方式是应用
+   关联重定位段中的重定位 */
 ST_FUNC void relocate_section(TCCState *s1, Section *s)
 {
     Section *sr = s->reloc;
@@ -842,12 +840,12 @@ ST_FUNC void relocate_section(TCCState *s1, Section *s)
         addr = s->sh_addr + rel->r_offset;
         relocate(s1, rel, type, ptr, addr, tgt);
     }
-    /* if the relocation is allocated, we change its symbol table */
+    /* 如果重定位已分配，我们改变它的符号表 */
     if (sr->sh_flags & SHF_ALLOC)
         sr->link = s1->dynsym;
 }
 
-/* relocate relocation table in 'sr' */
+/* 重定位 'sr' 中的重定位表 */
 static void relocate_rel(TCCState *s1, Section *sr)
 {
     Section *s;
@@ -858,8 +856,8 @@ static void relocate_rel(TCCState *s1, Section *sr)
         rel->r_offset += s->sh_addr;
 }
 
-/* count the number of dynamic relocations so that we can reserve
-   their space */
+/* 统计动态重定位的数量，以便为
+   它们预留空间 */
 static int prepare_dynamic_rel(TCCState *s1, Section *sr)
 {
     ElfW_Rel *rel;
@@ -870,26 +868,8 @@ static int prepare_dynamic_rel(TCCState *s1, Section *sr)
         sym_index = ELFW(R_SYM)(rel->r_info);
         type = ELFW(R_TYPE)(rel->r_info);
         switch(type) {
-#if defined(TCC_TARGET_I386)
-        case R_386_32:
-            if (!get_sym_attr(s1, sym_index, 0)->dyn_index
-                && ((ElfW(Sym)*)symtab_section->data + sym_index)->st_shndx == SHN_UNDEF) {
-                /* don't fixup unresolved (weak) symbols */
-                rel->r_info = ELFW(R_INFO)(sym_index, R_386_RELATIVE);
-                break;
-            }
-#elif defined(TCC_TARGET_X86_64)
-        case R_X86_64_32:
-        case R_X86_64_32S:
-        case R_X86_64_64:
-#endif
             count++;
             break;
-#if defined(TCC_TARGET_I386)
-        case R_386_PC32:
-#elif defined(TCC_TARGET_X86_64)
-        case R_X86_64_PC32:
-#endif
             if (get_sym_attr(s1, sym_index, 0)->dyn_index)
                 count++;
             break;
@@ -898,7 +878,7 @@ static int prepare_dynamic_rel(TCCState *s1, Section *sr)
         }
     }
     if (count) {
-        /* allocate the section */
+        /* 分配该段 */
         sr->sh_flags |= SHF_ALLOC;
         sr->sh_size = count * sizeof(ElfW_Rel);
     }
@@ -907,19 +887,19 @@ static int prepare_dynamic_rel(TCCState *s1, Section *sr)
 
 static void build_got(TCCState *s1)
 {
-    /* if no got, then create it */
+    /* 如果没有 got，就创建它 */
     s1->got = new_section(s1, ".got", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE);
     s1->got->sh_entsize = 4;
     set_elf_sym(symtab_section, 0, 4, ELFW(ST_INFO)(STB_GLOBAL, STT_OBJECT),
                 0, s1->got->sh_num, "_GLOBAL_OFFSET_TABLE_");
-    /* keep space for _DYNAMIC pointer and two dummy got entries */
+    /* 为 _DYNAMIC 指针和两个哑 got 条目保留空间 */
     section_ptr_add(s1->got, 3 * PTR_SIZE);
 }
 
-/* Create a GOT and (for function call) a PLT entry corresponding to a symbol
-   in s1->symtab. When creating the dynamic symbol table entry for the GOT
-   relocation, use 'size' and 'info' for the corresponding symbol metadata.
-   Returns the offset of the GOT or (if any) PLT entry. */
+/* 为 s1->symtab 中的某个符号创建 GOT 以及（用于函数调用时）PLT 条目。
+   为 GOT 重定位创建动态符号表条目时，用 'size' 和 'info' 作为对应
+   符号的元数据。
+   返回 GOT 条目的偏移，或者（如果有）PLT 条目的偏移。 */
 static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
                                        unsigned long size,
                                        int info, int sym_index)
@@ -935,43 +915,43 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
     need_plt_entry = (dyn_reloc_type == R_JMP_SLOT);
     attr = get_sym_attr(s1, sym_index, 1);
 
-    /* In case a function is both called and its address taken 2 GOT entries
-       are created, one for taking the address (GOT) and the other for the PLT
-       entry (PLTGOT).  */
+    /* 如果一个函数既被调用又取了地址，会创建 2 个 GOT 条目，
+       一个用于取地址（GOT），另一个用于 PLT
+       条目（PLTGOT）。  */
     if (need_plt_entry ? attr->plt_offset : attr->got_offset)
         return attr;
 
-    /* create the GOT entry */
+    /* 创建 GOT 条目 */
     got_offset = s1->got->data_offset;
     section_ptr_add(s1->got, PTR_SIZE);
 
-    /* Create the GOT relocation that will insert the address of the object or
-       function of interest in the GOT entry. This is a static relocation for
-       memory output (dlsym will give us the address of symbols) and dynamic
-       relocation otherwise (executable and DLLs). The relocation should be
-       done lazily for GOT entry with *_JUMP_SLOT relocation type (the one
-       associated to a PLT entry) but is currently done at load time for an
-       unknown reason. */
+    /* 创建把目标对象或函数的地址填入 GOT 条目的重定位。
+       对内存输出（dlsym 会把符号地址给我们）这是静态重定位，
+       否则（可执行文件和 DLL）是动态重定位。对于带
+       *_JUMP_SLOT 重定位类型的 GOT 条目（即与 PLT 条目
+       关联的那个）本应延迟完成重定位，但出于未知
+       原因目前在加载时
+       就完成了。 */
 
     sym = &((ElfW(Sym) *) symtab_section->data)[sym_index];
     name = (char *) symtab_section->link->data + sym->st_name;
 
     if (s1->dynsym) {
 	if (ELFW(ST_BIND)(sym->st_info) == STB_LOCAL) {
-	    /* Hack alarm.  We don't want to emit dynamic symbols
-	       and symbol based relocs for STB_LOCAL symbols, but rather
-	       want to resolve them directly.  At this point the symbol
-	       values aren't final yet, so we must defer this.  We will later
-	       have to create a RELATIVE reloc anyway, so we misuse the
-	       relocation slot to smuggle the symbol reference until
-	       fill_local_got_entries.  Not that the sym_index is
-	       relative to symtab_section, not s1->dynsym!  Nevertheless
-	       we use s1->dyn_sym so that if this is the first call
-	       that got->reloc is correctly created.  Also note that
-	       RELATIVE relocs are not normally created for the .got,
-	       so the types serves as a marker for later (and is retained
-	       also for the final output, which is okay because then the
-	       got is just normal data).  */
+	    /* 权宜之计警报。我们不想为 STB_LOCAL 符号生成动态符号
+	       和基于符号的重定位，而是想直接解析它们。此时符号
+	       值还不是最终值，所以必须推迟。之后我们无论如何都
+	       要创建一个 RELATIVE 重定位，所以我们滥用重定位槽
+	       来偷偷保存符号引用，直到
+	       fill_local_got_entries。
+	       注意 sym_index 是相对于 symtab_section 的，
+	       不是
+	       s1->dynsym！不过我们使用 s1->dyn_sym，这样如果这
+	       是第一次调用，got->reloc 会被正确创建。还要注意
+	       RELATIVE 重定位通常不会为 .got 创建，
+	       所以这里类型充当后续的标记（并且也保留到
+	       最终输出中，这没问题，因为那时
+	       got 只是普通数据）。  */
 	    put_elf_reloc(s1->dynsym, s1->got, got_offset, R_RELATIVE,
 			  sym_index);
 	} else {
@@ -995,7 +975,7 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
 
         attr->plt_offset = create_plt_entry(s1, got_offset, attr);
 
-        /* create a symbol 'sym@plt' for the PLT jump vector */
+        /* 为 PLT 跳转向量创建符号 'sym@plt' */
         len = strlen(name);
         if (len > sizeof plt_name - 5)
             len = sizeof plt_name - 5;
@@ -1011,7 +991,7 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
     return attr;
 }
 
-/* build GOT and PLT entries */
+/* 构建 GOT 和 PLT 条目 */
 ST_FUNC void build_got_entries(TCCState *s1)
 {
     Section *s;
@@ -1024,7 +1004,7 @@ ST_FUNC void build_got_entries(TCCState *s1)
         s = s1->sections[i];
         if (s->sh_type != SHT_RELX)
             continue;
-        /* no need to handle got relocations */
+        /* 不需要处理 got 重定位 */
         if (s->link != symtab_section)
             continue;
         for_each_elem(s, 0, rel, ElfW_Rel) {
@@ -1037,28 +1017,28 @@ ST_FUNC void build_got_entries(TCCState *s1)
                 continue;
             }
 
-            /* Automatically create PLT/GOT [entry] if it is an undefined
-	       reference (resolved at runtime), or the symbol is absolute,
-	       probably created by tcc_add_symbol, and thus on 64-bit
-	       targets might be too far from application code.  */
+            /* 如果是未定义引用（在运行时解析），或者符号是
+	       绝对的（可能由 tcc_add_symbol 创建，因此在 64 位
+	       目标上可能离应用程序代码太远），就自动创建
+	       PLT/GOT [条目]。  */
             if (gotplt_entry == AUTO_GOTPLT_ENTRY) {
                 if (sym->st_shndx == SHN_UNDEF) {
                     ElfW(Sym) *esym;
 		    int dynindex;
                     if (s1->output_type == TCC_OUTPUT_DLL && ! PCRELATIVE_DLLPLT)
                         continue;
-		    /* Relocations for UNDEF symbols would normally need
-		       to be transferred into the executable or shared object.
-		       If that were done AUTO_GOTPLT_ENTRY wouldn't exist.
-		       But TCC doesn't do that (at least for exes), so we
-		       need to resolve all such relocs locally.  And that
-		       means PLT slots for functions in DLLs and COPY relocs for
-		       data symbols.  COPY relocs were generated in
-		       bind_exe_dynsyms (and the symbol adjusted to be defined),
-		       and for functions we were generated a dynamic symbol
-		       of function type.  */
+		    /* UNDEF 符号的重定位通常需要
+		       转移到可执行文件或共享对象中。
+		       如果那样做，AUTO_GOTPLT_ENTRY 就不会存在。
+		       但 TCC 不这样做（至少对可执行文件不这样），所以我们
+		       需要在本地解析所有这类重定位。这
+		       意味着为 DLL 中的函数准备 PLT 槽，为
+		       数据符号准备 COPY 重定位。COPY 重定位在
+		       bind_exe_dynsyms 中生成（并且符号被调整为已定义），
+		       而为函数生成的是函数类型的
+		       动态符号。  */
 		    if (s1->dynsym) {
-			/* dynsym isn't set for -run :-/  */
+			/* 对 -run 而言 dynsym 没有设置 :-/  */
 			dynindex = get_sym_attr(s1, sym_index, 0)->dyn_index;
 			esym = (ElfW(Sym) *)s1->dynsym->data + dynindex;
 			if (dynindex
@@ -1094,7 +1074,7 @@ ST_FUNC void build_got_entries(TCCState *s1)
     }
 }
 
-/* put dynamic tag */
+/* 放入动态标签 */
 static void put_dt(Section *dynamic, int dt, addr_t val)
 {
     ElfW(Dyn) *dyn;
@@ -1146,18 +1126,18 @@ ST_FUNC void tcc_add_bcheck(TCCState *s1)
 
     if (0 == s1->do_bounds_check)
         return;
-    /* XXX: add an object file to do that */
+    /* XXX：添加一个目标文件来做这件事 */
     ptr = section_ptr_add(bounds_section, sizeof(*ptr));
     *ptr = 0;
     set_elf_sym(symtab_section, 0, 0,
                 ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0,
                 bounds_section->sh_num, "__bounds_start");
-    /* pull bcheck.o from libtcc1.a */
+    /* 从 libtcc1.a 中提取 bcheck.o */
     sym_index = set_elf_sym(symtab_section, 0, 0,
                 ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0,
                 SHN_UNDEF, "__bound_init");
     if (s1->output_type != TCC_OUTPUT_MEMORY) {
-        /* add 'call __bound_init()' in .init section */
+        /* 在 .init 段中添加 'call __bound_init()' */
         Section *init_section = find_section(s1, ".init");
         unsigned char *pinit = section_ptr_add(init_section, 5);
         pinit[0] = 0xe8;
@@ -1169,12 +1149,12 @@ ST_FUNC void tcc_add_bcheck(TCCState *s1)
 #endif
 }
 
-/* add tcc runtime libraries */
+/* 添加 tcc 运行时库 */
 ST_FUNC void tcc_add_runtime(TCCState *s1)
 {
     tcc_add_bcheck(s1);
     tcc_add_pragma_libs(s1);
-    /* add libc */
+    /* 添加 libc */
     if (!s1->nostdlib) {
         tcc_add_library_err(s1, "c");
 #ifdef TCC_LIBGCC
@@ -1186,15 +1166,15 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
         }
 #endif
         tcc_add_support(s1, TCC_LIBTCC1);
-        /* add crt end if not memory output */
+        /* 如果不是内存输出，则添加 crt end */
         if (s1->output_type != TCC_OUTPUT_MEMORY)
             tcc_add_crt(s1, "crtn.o");
     }
 }
 
-/* add various standard linker symbols (must be done after the
-   sections are filled (for example after allocating common
-   symbols)) */
+/* 添加各种标准链接器符号（必须在各段填入
+   之后再做（例如在分配 common
+   符号之后）） */
 static void tcc_add_linker_symbols(TCCState *s1)
 {
     char buf[1024];
@@ -1213,13 +1193,13 @@ static void tcc_add_linker_symbols(TCCState *s1)
                 bss_section->data_offset, 0,
                 ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0,
                 bss_section->sh_num, "_end");
-    /* horrible new standard ldscript defines */
+    /* 讨厌的新标准 ldscript 定义 */
     add_init_array_defines(s1, ".preinit_array");
     add_init_array_defines(s1, ".init_array");
     add_init_array_defines(s1, ".fini_array");
 
-    /* add start and stop symbols for sections whose name can be
-       expressed in C */
+    /* 为名字可以用 C 表达的段添加 start 和
+       stop 符号 */
     for(i = 1; i < s1->nb_sections; i++) {
         s = s1->sections[i];
         if (s->sh_type == SHT_PROGBITS &&
@@ -1227,7 +1207,7 @@ static void tcc_add_linker_symbols(TCCState *s1)
             const char *p;
             int ch;
 
-            /* check if section name can be expressed in C */
+            /* 检查段名是否可以用 C 表达 */
             p = s->name;
             for(;;) {
                 ch = *p;
@@ -1256,17 +1236,17 @@ ST_FUNC void resolve_common_syms(TCCState *s1)
 {
     ElfW(Sym) *sym;
 
-    /* Allocate common symbols in BSS.  */
+    /* 在 BSS 中分配 common 符号。  */
     for_each_elem(symtab_section, 1, sym, ElfW(Sym)) {
         if (sym->st_shndx == SHN_COMMON) {
-            /* symbol alignment is in st_value for SHN_COMMONs */
+            /* 对 SHN_COMMON 而言符号对齐在 st_value 中 */
 	    sym->st_value = section_add(bss_section, sym->st_size,
 					sym->st_value);
             sym->st_shndx = bss_section->sh_num;
         }
     }
 
-    /* Now assign linker provided symbols their value.  */
+    /* 现在把值赋给链接器提供的符号。  */
     tcc_add_linker_symbols(s1);
 }
 
@@ -1309,7 +1289,7 @@ ST_FUNC void fill_got_entry(TCCState *s1, ElfW_Rel *rel)
 #endif
 }
 
-/* Perform relocation to GOT or PLT entries */
+/* 对 GOT 或 PLT 条目执行重定位 */
 ST_FUNC void fill_got(TCCState *s1)
 {
     Section *s;
@@ -1320,7 +1300,7 @@ ST_FUNC void fill_got(TCCState *s1)
         s = s1->sections[i];
         if (s->sh_type != SHT_RELX)
             continue;
-        /* no need to handle got relocations */
+        /* 不需要处理 got 重定位 */
         if (s->link != symtab_section)
             continue;
         for_each_elem(s, 0, rel, ElfW_Rel) {
@@ -1337,8 +1317,8 @@ ST_FUNC void fill_got(TCCState *s1)
     }
 }
 
-/* See put_got_entry for a description.  This is the second stage
-   where GOT references to local defined symbols are rewritten.  */
+/* 参见 put_got_entry 中的说明。这是第二阶段，
+   在此把对局部已定义符号的 GOT 引用重写。  */
 static void fill_local_got_entries(TCCState *s1)
 {
     ElfW_Rel *rel;
@@ -1354,16 +1334,16 @@ static void fill_local_got_entries(TCCState *s1)
 #if SHT_RELX == SHT_RELA
 	    rel->r_addend = sym->st_value;
 #else
-	    /* All our REL architectures also happen to be 32bit LE.  */
+	    /* 我们所有的 REL 架构碰巧也是 32 位小端。  */
 	    write32le(s1->got->data + offset, sym->st_value);
 #endif
 	}
     }
 }
 
-/* Bind symbols of executable: resolve undefined symbols from exported symbols
-   in shared libraries and export non local defined symbols to shared libraries
-   if -rdynamic switch was given on command line */
+/* 绑定可执行文件的符号：从共享库导出的符号中解析未定义符号，
+   如果命令行给出了 -rdynamic 选项，则把非局部的已定义符号
+   导出到共享库 */
 static void bind_exe_dynsyms(TCCState *s1)
 {
     const char *name;
@@ -1371,9 +1351,9 @@ static void bind_exe_dynsyms(TCCState *s1)
     ElfW(Sym) *sym, *esym;
     int type;
 
-    /* Resolve undefined symbols from dynamic symbols. When there is a match:
-       - if STT_FUNC or STT_GNU_IFUNC symbol -> add it in PLT
-       - if STT_OBJECT symbol -> add it in .bss section with suitable reloc */
+    /* 从动态符号中解析未定义符号。当匹配时：
+       - 如果是 STT_FUNC 或 STT_GNU_IFUNC 符号 -> 加入 PLT
+       - 如果是 STT_OBJECT 符号 -> 用合适的重定位加入 .bss 段 */
     for_each_elem(symtab_section, 1, sym, ElfW(Sym)) {
         if (sym->st_shndx == SHN_UNDEF) {
             name = (char *) symtab_section->link->data + sym->st_name;
@@ -1382,13 +1362,13 @@ static void bind_exe_dynsyms(TCCState *s1)
                 esym = &((ElfW(Sym) *)s1->dynsymtab_section->data)[sym_index];
                 type = ELFW(ST_TYPE)(esym->st_info);
                 if ((type == STT_FUNC) || (type == STT_GNU_IFUNC)) {
-                    /* Indirect functions shall have STT_FUNC type in executable
-                     * dynsym section. Indeed, a dlsym call following a lazy
-                     * resolution would pick the symbol value from the
-                     * executable dynsym entry which would contain the address
-                     * of the function wanted by the caller of dlsym instead of
-                     * the address of the function that would return that
-                     * address */
+                    /* 间接函数在可执行文件的
+                     * dynsym 段中应具有 STT_FUNC 类型。确实，懒解析
+                     * 之后的 dlsym 调用会从
+                     * 可执行文件的 dynsym 条目中取符号值，而那里面
+                     * 会包含 dlsym 调用者想要的函数地址，而不是
+                     * 会返回该地址的函数
+                     * 的地址 */
                     int dynindex
 		      = put_elf_sym(s1->dynsym, 0, esym->st_size,
 				    ELFW(ST_INFO)(STB_GLOBAL,STT_FUNC), 0, 0,
@@ -1399,7 +1379,7 @@ static void bind_exe_dynsyms(TCCState *s1)
                     unsigned long offset;
                     ElfW(Sym) *dynsym;
                     offset = bss_section->data_offset;
-                    /* XXX: which alignment ? */
+                    /* XXX：用哪种对齐？ */
                     offset = (offset + 16 - 1) & -16;
                     set_elf_sym (s1->symtab, offset, esym->st_size,
                                  esym->st_info, 0, bss_section->sh_num, name);
@@ -1407,7 +1387,7 @@ static void bind_exe_dynsyms(TCCState *s1)
                                         esym->st_info, 0, bss_section->sh_num,
                                         name);
 
-                    /* Ensure R_COPY works for weak symbol aliases */
+                    /* 确保 R_COPY 对弱符号别名有效 */
                     if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK) {
                         for_each_elem(s1->dynsymtab_section, 1, dynsym, ElfW(Sym)) {
                             if ((dynsym->st_value == esym->st_value)
@@ -1428,8 +1408,8 @@ static void bind_exe_dynsyms(TCCState *s1)
                     bss_section->data_offset = offset;
                 }
             } else {
-                /* STB_WEAK undefined symbols are accepted */
-                /* XXX: _fp_hw seems to be part of the ABI, so we ignore it */
+                /* STB_WEAK 未定义符号是允许的 */
+                /* XXX：_fp_hw 似乎是 ABI 的一部分，所以我们忽略它 */
                 if (ELFW(ST_BIND)(sym->st_info) == STB_WEAK ||
                     !strcmp(name, "_fp_hw")) {
                 } else {
@@ -1437,7 +1417,7 @@ static void bind_exe_dynsyms(TCCState *s1)
                 }
             }
         } else if (s1->rdynamic && ELFW(ST_BIND)(sym->st_info) != STB_LOCAL) {
-            /* if -rdynamic option, then export all non local symbols */
+            /* 如果有 -rdynamic 选项，则导出所有非局部符号 */
             name = (char *) symtab_section->link->data + sym->st_name;
             set_elf_sym(s1->dynsym, sym->st_value, sym->st_size, sym->st_info,
                         0, sym->st_shndx, name);
@@ -1445,11 +1425,11 @@ static void bind_exe_dynsyms(TCCState *s1)
     }
 }
 
-/* Bind symbols of libraries: export all non local symbols of executable that
-   are referenced by shared libraries. The reason is that the dynamic loader
-   search symbol first in executable and then in libraries. Therefore a
-   reference to a symbol already defined by a library can still be resolved by
-   a symbol in the executable. */
+/* 绑定库的符号：导出可执行文件中被共享库引用的所有非局部符号。
+   原因是动态加载器先在可执行文件中搜索符号，然后在
+   库中搜索。因此对某个已由库定义的符号的引用仍然
+   可以由可执行文件中的符号
+   解析。 */
 static void bind_libs_dynsyms(TCCState *s1)
 {
     const char *name;
@@ -1465,17 +1445,17 @@ static void bind_libs_dynsyms(TCCState *s1)
             set_elf_sym(s1->dynsym, sym->st_value, sym->st_size,
                 sym->st_info, 0, sym->st_shndx, name);
         } else if (esym->st_shndx == SHN_UNDEF) {
-            /* weak symbols can stay undefined */
+            /* 弱符号可以保持未定义 */
             if (ELFW(ST_BIND)(esym->st_info) != STB_WEAK)
                 tcc_warning("undefined dynamic symbol '%s'", name);
         }
     }
 }
 
-/* Export all non local symbols. This is used by shared libraries so that the
-   non local symbols they define can resolve a reference in another shared
-   library or in the executable. Correspondingly, it allows undefined local
-   symbols to be resolved by other shared libraries or by the executable. */
+/* 导出所有非局部符号。共享库用它来让它们定义的非局部符号
+   能够解析另一个共享库或可执行文件中的引用。相应地，
+   它也允许未定义的局部符号由其他共享库或
+   可执行文件解析。 */
 static void export_global_syms(TCCState *s1)
 {
     int dynindex, index;
@@ -1493,20 +1473,20 @@ static void export_global_syms(TCCState *s1)
     }
 }
 
-/* Allocate strings for section names and decide if an unallocated section
-   should be output.
-   NOTE: the strsec section comes last, so its size is also correct ! */
+/* 为段名分配字符串，并判断某个未分配的段
+   是否应当输出。
+   注意：strsec 段排在最后，所以它的大小也是正确的！ */
 static int alloc_sec_names(TCCState *s1, int file_type, Section *strsec)
 {
     int i;
     Section *s;
     int textrel = 0;
 
-    /* Allocate strings for section names */
+    /* 为段名分配字符串 */
     for(i = 1; i < s1->nb_sections; i++) {
         s = s1->sections[i];
-        /* when generating a DLL, we include relocations but we may
-           patch them */
+        /* 生成 DLL 时，我们包含重定位，但可能会
+           对它们打补丁 */
         if (file_type == TCC_OUTPUT_DLL &&
             s->sh_type == SHT_RELX &&
             !(s->sh_flags & SHF_ALLOC) &&
@@ -1518,7 +1498,7 @@ static int alloc_sec_names(TCCState *s1, int file_type, Section *strsec)
             file_type == TCC_OUTPUT_OBJ ||
             (s->sh_flags & SHF_ALLOC) ||
 	    i == (s1->nb_sections - 1)) {
-            /* we output all sections if debug or object file */
+            /* 如果是调试或目标文件，我们输出所有段 */
             s->sh_size = s->data_offset;
         }
 	if (s->sh_size || (s->sh_flags & SHF_ALLOC))
@@ -1528,7 +1508,18 @@ static int alloc_sec_names(TCCState *s1, int file_type, Section *strsec)
     return textrel;
 }
 
-/* Info to be copied in dynamic section */
+/*
+ * dyn_inf —— 输出共享库/可执行文件时，填进 .dynamic 段的信息
+ *
+ * 由 tcc_output_file() 调用 set_elf_sections()（分配段地址的循环）时逐段累积，
+ * 最后交给 fill_dynamic() 生成 DT_* 条目：
+ *   dynamic      .dynamic 段本身；
+ *   dynstr       .dynstr 段（DT_STRTAB/DT_STRSZ 取自它）；
+ *   data_offset  保留字段；
+ *   rel_addr/rel_size  重定位表（.rela/.rel 或 PLT 重定位表）的地址与总大小，
+ *                用于 DT_RELA/DT_RELASZ、DT_REL/DT_RELSZ、DT_JMPREL/DT_PLTRELSZ；
+ *   bss_addr/bss_size  仅 FreeBSD 的 32 位路径使用，充当 DT_REL/DT_RELSZ。
+ */
 struct dyn_inf {
     Section *dynamic;
     Section *dynstr;
@@ -1541,8 +1532,8 @@ struct dyn_inf {
 #endif
 };
 
-/* Assign sections to segments and decide how are sections laid out when loaded
-   in memory. This function also fills corresponding program headers. */
+/* 把段分配给内存段（segment），并决定加载到内存时各段如何布局。
+   该函数还填充相应的程序头。 */
 static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr, int phnum,
                            Section *interp, Section* strsec,
                            struct dyn_inf *dyninf, int *sec_order)
@@ -1567,7 +1558,7 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr, int phnum,
         if (s1->has_text_addr) {
             int a_offset, p_offset;
             addr = s1->text_addr;
-            /* we ensure that (addr % ELF_PAGE_SIZE) == file_offset %
+            /* 我们确保 (addr % ELF_PAGE_SIZE) == file_offset %
                ELF_PAGE_SIZE */
             a_offset = (int) (addr & (s_align - 1));
             p_offset = file_offset & (s_align - 1);
@@ -1579,18 +1570,18 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr, int phnum,
                 addr = 0;
             else
                 addr = ELF_START_ADDR;
-            /* compute address after headers */
+            /* 计算各头部之后的地址 */
             addr += (file_offset & (s_align - 1));
         }
 
         ph = &phdr[0];
-        /* Leave one program headers for the program interpreter and one for
-           the program header table itself if needed. These are done later as
-           they require section layout to be done first. */
+        /* 如果需要，为程序解释器和程序头表各留一个
+           程序头。这些稍后再做，因为它们要求
+           先完成段布局。 */
         if (interp)
             ph += 2;
 
-        /* dynamic relocation table information, for .dynamic section */
+        /* .dynamic 段的动态重定位表信息 */
         dyninf->rel_addr = dyninf->rel_size = 0;
 #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
         dyninf->bss_addr = dyninf->bss_size = 0;
@@ -1604,15 +1595,15 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr, int phnum,
                 ph->p_flags = PF_R | PF_W;
             ph->p_align = s_align;
 
-            /* Decide the layout of sections loaded in memory. This must
-               be done before program headers are filled since they contain
-               info about the layout. We do the following ordering: interp,
-               symbol tables, relocations, progbits, nobits */
-            /* XXX: do faster and simpler sorting */
+            /* 决定加载到内存中的段如何布局。这必须在填充程序头
+               之前完成，因为程序头包含布局信息。我们按以下
+               顺序排列：interp、符号表、重定位、
+               progbits、nobits */
+            /* XXX：做更快更简单的排序 */
             for(k = 0; k < 5; k++) {
                 for(i = 1; i < s1->nb_sections; i++) {
                     s = s1->sections[i];
-                    /* compute if section should be included */
+                    /* 计算是否应包含该段 */
                     if (j == 0) {
                         if ((s->sh_flags & (SHF_ALLOC | SHF_WRITE)) !=
                             SHF_ALLOC)
@@ -1642,7 +1633,7 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr, int phnum,
                     }
                     sec_order[sh_order_index++] = i;
 
-                    /* section matches: we align it and add its size */
+                    /* 段匹配：我们对齐它并加上它的大小 */
                     tmp = addr;
                     addr = (addr + s->sh_addralign - 1) &
                         ~(s->sh_addralign - 1);
@@ -1650,22 +1641,22 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr, int phnum,
                     s->sh_offset = file_offset;
                     s->sh_addr = addr;
 
-                    /* update program header infos */
+                    /* 更新程序头信息 */
                     if (ph->p_offset == 0) {
                         ph->p_offset = file_offset;
                         ph->p_vaddr = addr;
                         ph->p_paddr = ph->p_vaddr;
                     }
-                    /* update dynamic relocation infos */
+                    /* 更新动态重定位信息 */
                     if (s->sh_type == SHT_RELX) {
 #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
                         if (!strcmp(strsec->data + s->sh_name, ".rel.got")) {
                             dyninf->rel_addr = addr;
-                            dyninf->rel_size += s->sh_size; /* XXX only first rel. */
+                            dyninf->rel_size += s->sh_size; /* XXX 只算第一个重定位。 */
                         }
                         if (!strcmp(strsec->data + s->sh_name, ".rel.bss")) {
                             dyninf->bss_addr = addr;
-                            dyninf->bss_size = s->sh_size; /* XXX only first rel. */
+                            dyninf->bss_size = s->sh_size; /* XXX 只算第一个重定位。 */
                         }
 #else
                         if (dyninf->rel_size == 0)
@@ -1679,10 +1670,10 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr, int phnum,
                 }
             }
 	    if (j == 0) {
-		/* Make the first PT_LOAD segment include the program
-		   headers itself (and the ELF header as well), it'll
-		   come out with same memory use but will make various
-		   tools like binutils strip work better.  */
+		/* 让第一个 PT_LOAD 内存段包含程序头
+		   自身（以及 ELF 头），这样内存占用相同，
+		   但能让 binutils strip 等各种工具
+		   更好地工作。  */
 		ph->p_offset &= ~(ph->p_align - 1);
 		ph->p_vaddr &= ~(ph->p_align - 1);
 		ph->p_paddr &= ~(ph->p_align - 1);
@@ -1692,8 +1683,8 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr, int phnum,
             ph++;
             if (j == 0) {
                 if (s1->output_format == TCC_OUTPUT_FORMAT_ELF) {
-                    /* if in the middle of a page, we duplicate the page in
-                       memory so that one copy is RX and the other is RW */
+                    /* 如果位于页中间，我们会在内存中
+                       复制该页，使一份副本是 RX，另一份是 RW */
                     if ((addr & (s_align - 1)) != 0)
                         addr += s_align;
                 } else {
@@ -1704,7 +1695,7 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr, int phnum,
         }
     }
 
-    /* all other sections come after */
+    /* 所有其他段排在后面 */
     for(i = 1; i < s1->nb_sections; i++) {
         s = s1->sections[i];
         if (phnum > 0 && (s->sh_flags & SHF_ALLOC))
@@ -1726,7 +1717,7 @@ static void fill_unloadable_phdr(ElfW(Phdr) *phdr, int phnum, Section *interp,
 {
     ElfW(Phdr) *ph;
 
-    /* if interpreter, then add corresponding program header */
+    /* 如果有解释器，则添加相应的程序头 */
     if (interp) {
         ph = &phdr[0];
 
@@ -1749,7 +1740,7 @@ static void fill_unloadable_phdr(ElfW(Phdr) *phdr, int phnum, Section *interp,
         ph->p_align = interp->sh_addralign;
     }
 
-    /* if dynamic section, then add corresponding program header */
+    /* 如果有动态段，则添加相应的程序头 */
     if (dynamic) {
         ph = &phdr[phnum - 1];
 
@@ -1764,13 +1755,13 @@ static void fill_unloadable_phdr(ElfW(Phdr) *phdr, int phnum, Section *interp,
     }
 }
 
-/* Fill the dynamic section with tags describing the address and size of
-   sections */
+/* 用描述各段地址和大小的标签填充动态段
+   */
 static void fill_dynamic(TCCState *s1, struct dyn_inf *dyninf)
 {
     Section *dynamic = dyninf->dynamic;
 
-    /* put dynamic section entries */
+    /* 放入动态段条目 */
     put_dt(dynamic, DT_HASH, s1->dynsym->hash->sh_addr);
     put_dt(dynamic, DT_STRTAB, dyninf->dynstr->sh_addr);
     put_dt(dynamic, DT_SYMTAB, s1->dynsym->sh_addr);
@@ -1799,8 +1790,8 @@ static void fill_dynamic(TCCState *s1, struct dyn_inf *dyninf)
     put_dt(dynamic, DT_NULL, 0);
 }
 
-/* Relocate remaining sections and symbols (that is those not related to
-   dynamic linking) */
+/* 重定位剩余的段和符号（即那些与动态链接
+   无关的） */
 static int final_sections_reloc(TCCState *s1)
 {
     int i;
@@ -1811,8 +1802,8 @@ static int final_sections_reloc(TCCState *s1)
     if (s1->nb_errors != 0)
         return -1;
 
-    /* relocate sections */
-    /* XXX: ignore sections with allocated relocations ? */
+    /* 重定位各段 */
+    /* XXX：忽略带已分配重定位的段？ */
     for(i = 1; i < s1->nb_sections; i++) {
         s = s1->sections[i];
 #if defined(TCC_MUSL)
@@ -1823,8 +1814,8 @@ static int final_sections_reloc(TCCState *s1)
             relocate_section(s1, s);
     }
 
-    /* relocate relocation entries if the relocation tables are
-       allocated in the executable */
+    /* 如果重定位表已分配在可执行文件中，
+       则重定位重定位条目 */
     for(i = 1; i < s1->nb_sections; i++) {
         s = s1->sections[i];
         if ((s->sh_flags & SHF_ALLOC) &&
@@ -1835,8 +1826,8 @@ static int final_sections_reloc(TCCState *s1)
     return 0;
 }
 
-/* Create an ELF file on disk.
-   This function handle ELF specific layout requirements */
+/* 在磁盘上创建 ELF 文件。
+   该函数处理 ELF 特有的布局要求 */
 static void tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr,
                            int file_offset, int *sec_order)
 {
@@ -1856,10 +1847,10 @@ static void tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr,
         ehdr.e_phoff = sizeof(ElfW(Ehdr));
     }
 
-    /* align to 4 */
+    /* 对齐到 4 */
     file_offset = (file_offset + 3) & -4;
 
-    /* fill header */
+    /* 填充头部 */
     ehdr.e_ident[0] = ELFMAG0;
     ehdr.e_ident[1] = ELFMAG1;
     ehdr.e_ident[2] = ELFMAG2;
@@ -1878,7 +1869,7 @@ static void tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr,
         break;
     case TCC_OUTPUT_DLL:
         ehdr.e_type = ET_DYN;
-        ehdr.e_entry = text_section->sh_addr; /* XXX: is it correct ? */
+        ehdr.e_entry = text_section->sh_addr; /* XXX：这样对吗？ */
         break;
     case TCC_OUTPUT_OBJ:
         ehdr.e_type = ET_REL;
@@ -1911,7 +1902,7 @@ static void tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr,
         }
     }
 
-    /* output section headers */
+    /* 输出段头 */
     while (offset < ehdr.e_shoff) {
         fputc(0, f);
         offset++;
@@ -1938,7 +1929,7 @@ static void tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr,
     }
 }
 
-/* Write an elf, coff or "binary" file */
+/* 写出 elf、coff 或 "binary" 文件 */
 static int tcc_write_elf_file(TCCState *s1, const char *filename, int phnum,
                               ElfW(Phdr) *phdr, int file_offset, int *sec_order)
 {
@@ -1969,8 +1960,8 @@ static int tcc_write_elf_file(TCCState *s1, const char *filename, int phnum,
     return 0;
 }
 
-/* Sort section headers by assigned sh_addr, remove sections
-   that we aren't going to output.  */
+/* 按分配到的 sh_addr 对段头排序，移除我们
+   不打算输出的段。  */
 static void tidy_section_headers(TCCState *s1, int *sec_order)
 {
     int i, nnew, l, *backmap;
@@ -2015,8 +2006,8 @@ static void tidy_section_headers(TCCState *s1, int *sec_order)
     tcc_free(backmap);
 }
 
-/* Output an elf, coff or binary file */
-/* XXX: suppress unneeded sections */
+/* 输出 elf、coff 或 binary 文件 */
+/* XXX：去掉不需要的段 */
 static int elf_output_file(TCCState *s1, const char *filename)
 {
     int i, ret, phnum, shnum, file_type, file_offset, *sec_order;
@@ -2031,35 +2022,35 @@ static int elf_output_file(TCCState *s1, const char *filename)
     ret = -1;
     phdr = NULL;
     sec_order = NULL;
-    interp = dynamic = dynstr = NULL; /* avoid warning */
+    interp = dynamic = dynstr = NULL; /* 避免警告 */
     textrel = 0;
 
     if (file_type != TCC_OUTPUT_OBJ) {
-        /* if linking, also link in runtime libraries (libc, libgcc, etc.) */
+        /* 如果是链接，还要链接运行时库（libc、libgcc 等） */
         tcc_add_runtime(s1);
 	resolve_common_syms(s1);
 
         if (!s1->static_link) {
             if (file_type == TCC_OUTPUT_EXE) {
                 char *ptr;
-                /* allow override the dynamic loader */
+                /* 允许覆盖动态加载器 */
                 const char *elfint = getenv("LD_SO");
                 if (elfint == NULL)
                     elfint = DEFAULT_ELFINTERP(s1);
-                /* add interpreter section only if executable */
+                /* 只在可执行文件时添加解释器段 */
                 interp = new_section(s1, ".interp", SHT_PROGBITS, SHF_ALLOC);
                 interp->sh_addralign = 1;
                 ptr = section_ptr_add(interp, 1 + strlen(elfint));
                 strcpy(ptr, elfint);
             }
 
-            /* add dynamic symbol table */
+            /* 添加动态符号表 */
             s1->dynsym = new_symtab(s1, ".dynsym", SHT_DYNSYM, SHF_ALLOC,
                                     ".dynstr",
                                     ".hash", SHF_ALLOC);
             dynstr = s1->dynsym->link;
 
-            /* add dynamic section */
+            /* 添加动态段 */
             dynamic = new_section(s1, ".dynamic", SHT_DYNAMIC,
                                   SHF_ALLOC | SHF_WRITE);
             dynamic->link = dynstr;
@@ -2073,22 +2064,22 @@ static int elf_output_file(TCCState *s1, const char *filename)
                     goto the_end;
                 bind_libs_dynsyms(s1);
             } else {
-                /* shared library case: simply export all global symbols */
+                /* 共享库情形：直接导出所有全局符号 */
                 export_global_syms(s1);
             }
         }
         build_got_entries(s1);
     }
 
-    /* we add a section for symbols */
+    /* 我们为符号添加一个段 */
     strsec = new_section(s1, ".shstrtab", SHT_STRTAB, 0);
     put_elf_str(strsec, "");
 
-    /* Allocate strings for section names */
+    /* 为段名分配字符串 */
     textrel = alloc_sec_names(s1, file_type, strsec);
 
     if (dynamic) {
-        /* add a list of needed dlls */
+        /* 添加所需 dll 的列表 */
         for(i = 0; i < s1->nb_loaded_dlls; i++) {
             DLLReference *dllref = s1->loaded_dlls[i];
             if (dllref->level == 0)
@@ -2102,8 +2093,8 @@ static int elf_output_file(TCCState *s1, const char *filename)
         if (file_type == TCC_OUTPUT_DLL) {
             if (s1->soname)
                 put_dt(dynamic, DT_SONAME, put_elf_str(dynstr, s1->soname));
-            /* XXX: currently, since we do not handle PIC code, we
-               must relocate the readonly segments */
+            /* XXX：目前由于我们不处理 PIC 代码，
+               必须重定位只读内存段 */
             if (textrel)
                 put_dt(dynamic, DT_TEXTREL, 0);
         }
@@ -2113,14 +2104,14 @@ static int elf_output_file(TCCState *s1, const char *filename)
 
         dyninf.dynamic = dynamic;
         dyninf.dynstr = dynstr;
-        /* remember offset and reserve space for 2nd call below */
+        /* 记住偏移并在下面第二次调用时预留空间 */
         dyninf.data_offset = dynamic->data_offset;
         fill_dynamic(s1, &dyninf);
         dynamic->sh_size = dynamic->data_offset;
         dynstr->sh_size = dynstr->data_offset;
     }
 
-    /* compute number of program headers */
+    /* 计算程序头的数量 */
     if (file_type == TCC_OUTPUT_OBJ)
         phnum = 0;
     else if (file_type == TCC_OUTPUT_DLL)
@@ -2130,58 +2121,58 @@ static int elf_output_file(TCCState *s1, const char *filename)
     else
         phnum = 5;
 
-    /* allocate program segment headers */
+    /* 分配程序内存段（segment）头 */
     phdr = tcc_mallocz(phnum * sizeof(ElfW(Phdr)));
 
-    /* compute number of sections */
+    /* 计算段的数量 */
     shnum = s1->nb_sections;
 
-    /* this array is used to reorder sections in the output file */
+    /* 该数组用于重排输出文件中的段 */
     sec_order = tcc_malloc(sizeof(int) * shnum);
     sec_order[0] = 0;
 
-    /* compute section to program header mapping */
+    /* 计算段到程序头的映射 */
     file_offset = layout_sections(s1, phdr, phnum, interp, strsec, &dyninf,
                                   sec_order);
 
-    /* Fill remaining program header and finalize relocation related to dynamic
-       linking. */
+    /* 填充剩余的程序头，并完成与动态链接相关的
+       重定位。 */
     if (file_type != TCC_OUTPUT_OBJ) {
         fill_unloadable_phdr(phdr, phnum, interp, dynamic);
         if (dynamic) {
             dynamic->data_offset = dyninf.data_offset;
             fill_dynamic(s1, &dyninf);
 
-            /* put in GOT the dynamic section address and relocate PLT */
+            /* 把动态段地址放入 GOT 并重定位 PLT */
             write32le(s1->got->data, dynamic->sh_addr);
             if (file_type == TCC_OUTPUT_EXE
                 || (RELOCATE_DLLPLT && file_type == TCC_OUTPUT_DLL))
                 relocate_plt(s1);
 
-            /* relocate symbols in .dynsym now that final addresses are known */
+            /* 既然最终地址已知，现在就重定位 .dynsym 中的符号 */
             for_each_elem(s1->dynsym, 1, sym, ElfW(Sym)) {
                 if (sym->st_shndx != SHN_UNDEF && sym->st_shndx < SHN_LORESERVE) {
-                    /* do symbol relocation */
+                    /* 做符号重定位 */
                     sym->st_value += s1->sections[sym->st_shndx]->sh_addr;
                 }
             }
         }
 
-        /* if building executable or DLL, then relocate each section
-           except the GOT which is already relocated */
+        /* 如果构建可执行文件或 DLL，则重定位每个段，
+           除了已经重定位过的 GOT */
         ret = final_sections_reloc(s1);
         if (ret)
             goto the_end;
 	tidy_section_headers(s1, sec_order);
 
-        /* Perform relocation to GOT or PLT entries */
+        /* 对 GOT 或 PLT 条目执行重定位 */
         if (file_type == TCC_OUTPUT_EXE && s1->static_link)
             fill_got(s1);
         else if (s1->got)
             fill_local_got_entries(s1);
     }
 
-    /* Create the ELF file with name 'filename' */
+    /* 创建名为 'filename' 的 ELF 文件 */
     ret = tcc_write_elf_file(s1, filename, phnum, phdr, file_offset, sec_order);
     s1->nb_sections = shnum;
  the_end:
@@ -2205,11 +2196,22 @@ static void *load_data(int fd, unsigned long file_offset, unsigned long size)
     return data;
 }
 
+/*
+ * SectionMergeInfo —— 读入目标文件时，记录“源段合并到哪个已有段、落在什么偏移”
+ *
+ * tcc_load_object_file() 逐段处理 .o：同名段（如都叫 .text）要合并进同一个段，
+ * 但各 .o 里符号/重定位记录的下标和偏移都以本文件为基准，因此需要用本结构
+ * 记录映射关系，之后再遍历重定位表按映射改写符号下标与偏移：
+ *   s           合并到的已有段（NULL 表示本次新建，见 new_section）；
+ *   offset      源段数据在已有段中的起始偏移（用于把重定位偏移平移过来）；
+ *   new_section 本结构对应的段是否是本次新建的；
+ *   link_once   是否为 link-once 段（重复出现时只保留第一份）。
+ */
 typedef struct SectionMergeInfo {
-    Section *s;            /* corresponding existing section */
-    unsigned long offset;  /* offset of the new section in the existing section */
-    uint8_t new_section;       /* true if section 's' was added */
-    uint8_t link_once;         /* true if link once section */
+    Section *s;            /* 对应的已有段 */
+    unsigned long offset;  /* 新段在已有段中的偏移 */
+    uint8_t new_section;       /* 如果添加了段 's' 则为真 */
+    uint8_t link_once;         /* 如果是 link once 段则为真 */
 } SectionMergeInfo;
 
 ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
@@ -2227,8 +2229,8 @@ ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
     return 0;
 }
 
-/* load an object file and merge it with current files */
-/* XXX: handle correctly stab (debug) info */
+/* 加载一个目标文件并与当前文件合并 */
+/* XXX：正确处理 stab（调试）信息 */
 ST_FUNC int tcc_load_object_file(TCCState *s1,
                                 int fd, unsigned long file_offset)
 {
@@ -2251,23 +2253,23 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
     lseek(fd, file_offset, SEEK_SET);
     if (tcc_object_type(fd, &ehdr) != AFF_BINTYPE_REL)
         goto fail1;
-    /* test CPU specific stuff */
+    /* 测试 CPU 相关的东西 */
     if (ehdr.e_ident[5] != ELFDATA2LSB ||
         ehdr.e_machine != EM_TCC_TARGET) {
     fail1:
         tcc_error_noabort("invalid object file");
         return -1;
     }
-    /* read sections */
+    /* 读取各段 */
     shdr = load_data(fd, file_offset + ehdr.e_shoff,
                      sizeof(ElfW(Shdr)) * ehdr.e_shnum);
     sm_table = tcc_mallocz(sizeof(SectionMergeInfo) * ehdr.e_shnum);
 
-    /* load section names */
+    /* 加载段名 */
     sh = &shdr[ehdr.e_shstrndx];
     strsec = load_data(fd, file_offset + sh->sh_offset, sh->sh_size);
 
-    /* load symtab and strtab */
+    /* 加载 symtab 和 strtab */
     old_to_new_syms = NULL;
     symtab = NULL;
     strtab = NULL;
@@ -2286,7 +2288,7 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
             symtab = load_data(fd, file_offset + sh->sh_offset, sh->sh_size);
             sm_table[i].s = symtab_section;
 
-            /* now load strtab */
+            /* 现在加载 strtab */
             sh = &shdr[sh->sh_link];
             strtab = load_data(fd, file_offset + sh->sh_offset, sh->sh_size);
         }
@@ -2294,15 +2296,15 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
 	    seencompressed = 1;
     }
 
-    /* now examine each section and try to merge its content with the
-       ones in memory */
+    /* 现在检查每个段，并尝试把它的内容与内存中的
+       内容合并 */
     for(i = 1; i < ehdr.e_shnum; i++) {
-        /* no need to examine section name strtab */
+        /* 不需要检查段名 strtab */
         if (i == ehdr.e_shstrndx)
             continue;
         sh = &shdr[i];
         sh_name = (char *) strsec + sh->sh_name;
-        /* ignore sections types we do not handle */
+        /* 忽略我们不处理的段类型 */
         if (sh->sh_type != SHT_PROGBITS &&
             sh->sh_type != SHT_RELX &&
 #ifdef TCC_ARM_EABI
@@ -2323,16 +2325,16 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
 	  continue;
         if (sh->sh_addralign < 1)
             sh->sh_addralign = 1;
-        /* find corresponding section, if any */
+        /* 查找对应的段（如果有） */
         for(j = 1; j < s1->nb_sections;j++) {
             s = s1->sections[j];
             if (!strcmp(s->name, sh_name)) {
                 if (!strncmp(sh_name, ".gnu.linkonce",
                              sizeof(".gnu.linkonce") - 1)) {
-                    /* if a 'linkonce' section is already present, we
-                       do not add it again. It is a little tricky as
-                       symbols can still be defined in
-                       it. */
+                    /* 如果 'linkonce' 段已经存在，我们
+                       就不再添加它。这有点棘手，因为
+                       符号仍然可能在其中
+                       定义。 */
                     sm_table[i].link_once = 1;
                     goto next;
                 } else {
@@ -2340,10 +2342,10 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
                 }
             }
         }
-        /* not found: create new section */
+        /* 没找到：创建新段 */
         s = new_section(s1, sh_name, sh->sh_type, sh->sh_flags & ~SHF_GROUP);
-        /* take as much info as possible from the section. sh_link and
-           sh_info will be updated later */
+        /* 尽可能多地从该段取信息。sh_link 和
+           sh_info 稍后会更新 */
         s->sh_addralign = sh->sh_addralign;
         s->sh_entsize = sh->sh_entsize;
         sm_table[i].new_section = 1;
@@ -2353,7 +2355,7 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
             goto fail;
         }
 
-        /* align start of section */
+        /* 对齐段的起始位置 */
         offset = s->data_offset;
 
         if (0 == strcmp(sh_name, ".stab")) {
@@ -2373,7 +2375,7 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
     no_align:
         sm_table[i].offset = offset;
         sm_table[i].s = s;
-        /* concatenate sections */
+        /* 拼接各段 */
         size = sh->sh_size;
         if (sh->sh_type != SHT_NOBITS) {
             unsigned char *ptr;
@@ -2386,7 +2388,7 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
     next: ;
     }
 
-    /* gr relocate stab strings */
+    /* gr 重定位 stab 字符串 */
     if (stab_index && stabstr_index) {
         Stab_Sym *a, *b;
         unsigned o;
@@ -2398,8 +2400,8 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
             a->n_strx += o, a++;
     }
 
-    /* second short pass to update sh_link and sh_info fields of new
-       sections */
+    /* 第二遍短遍历，更新新段的 sh_link 和 sh_info
+       字段 */
     for(i = 1; i < ehdr.e_shnum; i++) {
         s = sm_table[i].s;
         if (!s || !sm_table[i].new_section)
@@ -2409,13 +2411,13 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
             s->link = sm_table[sh->sh_link].s;
         if (sh->sh_type == SHT_RELX) {
             s->sh_info = sm_table[sh->sh_info].s->sh_num;
-            /* update backward link */
+            /* 更新反向链接 */
             s1->sections[s->sh_info]->reloc = s;
         }
     }
     sm = sm_table;
 
-    /* resolve symbols */
+    /* 解析符号 */
     old_to_new_syms = tcc_mallocz(nb_syms * sizeof(int));
 
     sym = symtab + 1;
@@ -2424,9 +2426,9 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
             sym->st_shndx < SHN_LORESERVE) {
             sm = &sm_table[sym->st_shndx];
             if (sm->link_once) {
-                /* if a symbol is in a link once section, we use the
-                   already defined symbol. It is very important to get
-                   correct relocations */
+                /* 如果某个符号位于 link once 段中，我们使用
+                   已经定义的符号。这对得到正确的重定位
+                   非常重要 */
                 if (ELFW(ST_BIND)(sym->st_info) != STB_LOCAL) {
                     name = (char *) strtab + sym->st_name;
                     sym_index = find_elf_sym(symtab_section, name);
@@ -2435,15 +2437,15 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
                 }
                 continue;
             }
-            /* if no corresponding section added, no need to add symbol */
+            /* 如果没有添加对应的段，就不需要添加符号 */
             if (!sm->s)
                 continue;
-            /* convert section number */
+            /* 转换段编号 */
             sym->st_shndx = sm->s->sh_num;
-            /* offset value */
+            /* 偏移值 */
             sym->st_value += sm->offset;
         }
-        /* add symbol */
+        /* 添加符号 */
         name = (char *) strtab + sym->st_name;
         sym_index = set_elf_sym(symtab_section, sym->st_value, sym->st_size,
                                 sym->st_info, sym->st_other,
@@ -2451,7 +2453,7 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
         old_to_new_syms[i] = sym_index;
     }
 
-    /* third pass to patch relocation entries */
+    /* 第三遍，给重定位条目打补丁 */
     for(i = 1; i < ehdr.e_shnum; i++) {
         s = sm_table[i].s;
         if (!s)
@@ -2460,19 +2462,19 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
         offset = sm_table[i].offset;
         switch(s->sh_type) {
         case SHT_RELX:
-            /* take relocation offset information */
+            /* 取出重定位偏移信息 */
             offseti = sm_table[sh->sh_info].offset;
             for_each_elem(s, (offset / sizeof(*rel)), rel, ElfW_Rel) {
                 int type;
                 unsigned sym_index;
-                /* convert symbol index */
+                /* 转换符号索引 */
                 type = ELFW(R_TYPE)(rel->r_info);
                 sym_index = ELFW(R_SYM)(rel->r_info);
-                /* NOTE: only one symtab assumed */
+                /* 注意：假定只有一个 symtab */
                 if (sym_index >= nb_syms)
                     goto invalid_reloc;
                 sym_index = old_to_new_syms[sym_index];
-                /* ignore link_once in rel section. */
+                /* 忽略 rel 段中的 link_once。 */
                 if (!sym_index && !sm->link_once) {
                 invalid_reloc:
                     tcc_error_noabort("Invalid relocation entry [%2d] '%s' @ %.8x",
@@ -2480,7 +2482,7 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
                     goto fail;
                 }
                 rel->r_info = ELFW(R_INFO)(sym_index, type);
-                /* offset the relocation offset */
+                /* 给重定位偏移加上偏移量 */
                 rel->r_offset += offseti;
             }
             break;
@@ -2500,14 +2502,22 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
     return ret;
 }
 
+/*
+ * ArchiveHeader —— ar 归档成员的 60 字节文件头（读归档时用）
+ *
+ * 与 tcctools.c 中写归档用的 ArHdr 是同一格式的两份定义（那里带演示性的初始化
+ * 字符串，这里用于读入解析）。字段都是 ASCII 文本：ar_size 需要转换后才知道
+ * 成员数据长度，ar_name 以 '/' 结尾表示名字结束（GNU 扩展中用 "/" 表示长名字
+ * 符串表内的偏移、用 "//" 表示字符串表本身，见 tcc_load_archive()）。
+ */
 typedef struct ArchiveHeader {
-    char ar_name[16];           /* name of this member */
-    char ar_date[12];           /* file mtime */
-    char ar_uid[6];             /* owner uid; printed as decimal */
-    char ar_gid[6];             /* owner gid; printed as decimal */
-    char ar_mode[8];            /* file mode, printed as octal   */
-    char ar_size[10];           /* file size, printed as decimal */
-    char ar_fmag[2];            /* should contain ARFMAG */
+    char ar_name[16];           /* 该成员的名字 */
+    char ar_date[12];           /* 文件修改时间 */
+    char ar_uid[6];             /* 属主 uid；以十进制打印 */
+    char ar_gid[6];             /* 属主 gid；以十进制打印 */
+    char ar_mode[8];            /* 文件模式，以八进制打印   */
+    char ar_size[10];           /* 文件大小，以十进制打印 */
+    char ar_fmag[2];            /* 应包含 ARFMAG */
 } ArchiveHeader;
 
 static int get_be32(const uint8_t *b)
@@ -2522,7 +2532,7 @@ static long get_be64(const uint8_t *b)
   return (long)ret;
 }
 
-/* load only the objects which resolve undefined symbols */
+/* 只加载能解析未定义符号的那些目标文件 */
 static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
 {
     long i, bound, nsyms, sym_index, off, ret;
@@ -2565,7 +2575,7 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
     return ret;
 }
 
-/* load a '.a' file */
+/* 加载一个 '.a' 文件 */
 ST_FUNC int tcc_load_archive(TCCState *s1, int fd)
 {
     ArchiveHeader hdr;
@@ -2575,7 +2585,7 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd)
     int size, len, i;
     unsigned long file_offset;
 
-    /* skip magic which was already checked */
+    /* 跳过已经检查过的魔数 */
     read(fd, magic, sizeof(magic));
 
     for(;;) {
@@ -2596,10 +2606,10 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd)
         }
         ar_name[i + 1] = '\0';
         file_offset = lseek(fd, 0, SEEK_CUR);
-        /* align to even */
+        /* 对齐到偶数 */
         size = (size + 1) & ~1;
         if (!strcmp(ar_name, "/")) {
-            /* coff symbol table : we handle it */
+            /* coff 符号表：我们处理它 */
             if(s1->alacarte_link)
                 return tcc_load_alacarte(s1, fd, size, 4);
 	} else if (!strcmp(ar_name, "/SYM64/")) {
@@ -2617,9 +2627,9 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd)
     return 0;
 }
 
-/* load a DLL and all referenced DLLs. 'level = 0' means that the DLL
-   is referenced by the user (so it should be added as DT_NEEDED in
-   the generated ELF file) */
+/* 加载一个 DLL 以及所有被引用的 DLL。'level = 0' 表示该 DLL
+   由用户引用（因此应作为 DT_NEEDED 加入
+   生成的 ELF 文件） */
 ST_FUNC int tcc_load_dll(TCCState *s1, int fd, const char *filename, int level)
 {
     ElfW(Ehdr) ehdr;
@@ -2633,22 +2643,22 @@ ST_FUNC int tcc_load_dll(TCCState *s1, int fd, const char *filename, int level)
 
     read(fd, &ehdr, sizeof(ehdr));
 
-    /* test CPU specific stuff */
+    /* 测试 CPU 相关的东西 */
     if (ehdr.e_ident[5] != ELFDATA2LSB ||
         ehdr.e_machine != EM_TCC_TARGET) {
         tcc_error_noabort("bad architecture");
         return -1;
     }
 
-    /* read sections */
+    /* 读取各段 */
     shdr = load_data(fd, ehdr.e_shoff, sizeof(ElfW(Shdr)) * ehdr.e_shnum);
 
-    /* load dynamic section and dynamic symbols */
+    /* 加载动态段和动态符号 */
     nb_syms = 0;
     nb_dts = 0;
     dynamic = NULL;
-    dynsym = NULL; /* avoid warning */
-    dynstr = NULL; /* avoid warning */
+    dynsym = NULL; /* 避免警告 */
+    dynstr = NULL; /* 避免警告 */
     for(i = 0, sh = shdr; i < ehdr.e_shnum; i++, sh++) {
         switch(sh->sh_type) {
         case SHT_DYNAMIC:
@@ -2666,7 +2676,7 @@ ST_FUNC int tcc_load_dll(TCCState *s1, int fd, const char *filename, int level)
         }
     }
 
-    /* compute the real library name */
+    /* 计算真实的库名 */
     soname = tcc_basename(filename);
 
     for(i = 0, dt = dynamic; i < nb_dts; i++, dt++) {
@@ -2675,11 +2685,11 @@ ST_FUNC int tcc_load_dll(TCCState *s1, int fd, const char *filename, int level)
         }
     }
 
-    /* if the dll is already loaded, do not load it */
+    /* 如果该 dll 已加载，就不再加载它 */
     for(i = 0; i < s1->nb_loaded_dlls; i++) {
         dllref = s1->loaded_dlls[i];
         if (!strcmp(soname, dllref->name)) {
-            /* but update level if needed */
+            /* 但如需要则更新 level */
             if (level < dllref->level)
                 dllref->level = level;
             ret = 0;
@@ -2687,13 +2697,13 @@ ST_FUNC int tcc_load_dll(TCCState *s1, int fd, const char *filename, int level)
         }
     }
 
-    /* add the dll and its level */
+    /* 添加该 dll 及其 level */
     dllref = tcc_mallocz(sizeof(DLLReference) + strlen(soname));
     dllref->level = level;
     strcpy(dllref->name, soname);
     dynarray_add(&s1->loaded_dlls, &s1->nb_loaded_dlls, dllref);
 
-    /* add dynamic symbols in dynsym_section */
+    /* 把动态符号加入 dynsym_section */
     for(i = 1, sym = dynsym + 1; i < nb_syms; i++, sym++) {
         sym_bind = ELFW(ST_BIND)(sym->st_info);
         if (sym_bind == STB_LOCAL)
@@ -2703,7 +2713,7 @@ ST_FUNC int tcc_load_dll(TCCState *s1, int fd, const char *filename, int level)
                     sym->st_info, sym->st_other, sym->st_shndx, name);
     }
 
-    /* load all referenced DLLs */
+    /* 加载所有被引用的 DLL */
     for(i = 0, dt = dynamic; i < nb_dts; i++, dt++) {
         switch(dt->d_tag) {
         case DT_NEEDED:
@@ -2734,7 +2744,7 @@ ST_FUNC int tcc_load_dll(TCCState *s1, int fd, const char *filename, int level)
 #define LD_TOK_NAME 256
 #define LD_TOK_EOF  (-1)
 
-/* return next ld script token */
+/* 返回下一个 ld 脚本词法单元 */
 static int ld_next(TCCState *s1, char *name, int name_size)
 {
     int c;
@@ -2766,8 +2776,8 @@ static int ld_next(TCCState *s1, char *name, int name_size)
         ch = handle_eob();
         if (ch != '\\')
             goto redo;
-        /* fall through */
-    /* case 'a' ... 'z': */
+        /* 继续向下执行 */
+    /* case 'a' ... 'z'： */
     case 'a':
        case 'b':
        case 'c':
@@ -2794,7 +2804,7 @@ static int ld_next(TCCState *s1, char *name, int name_size)
        case 'x':
        case 'y':
        case 'z':
-    /* case 'A' ... 'z': */
+    /* case 'A' ... 'z'： */
     case 'A':
        case 'B':
        case 'C':
@@ -2915,13 +2925,13 @@ static int ld_add_file_list(TCCState *s1, const char *cmd, int as_needed)
             if (ret)
                 goto lib_parse_error;
         } else {
-            /* TODO: Implement AS_NEEDED support. Ignore it for now */
+            /* TODO：实现 AS_NEEDED 支持。暂时忽略它 */
             if (!as_needed) {
                 ret = ld_add_file(s1, filename);
                 if (ret)
                     goto lib_parse_error;
                 if (group) {
-                    /* Add the filename *and* the libname to avoid future conversions */
+                    /* 同时添加文件名 *和* 库名，以免将来再做转换 */
                     dynarray_add(&libs, &nblibs, tcc_strdup(filename));
                     if (libname[0] != '\0')
                         dynarray_add(&libs, &nblibs, tcc_strdup(libname));
@@ -2946,8 +2956,8 @@ lib_parse_error:
     return ret;
 }
 
-/* interpret a subset of GNU ldscripts to handle the dummy libc.so
-   files */
+/* 解释 GNU ldscripts 的一个子集，以处理哑元 libc.so
+   文件 */
 ST_FUNC int tcc_load_ldscript(TCCState *s1)
 {
     char cmd[64];
@@ -2968,7 +2978,7 @@ ST_FUNC int tcc_load_ldscript(TCCState *s1)
                 return ret;
         } else if (!strcmp(cmd, "OUTPUT_FORMAT") ||
                    !strcmp(cmd, "TARGET")) {
-            /* ignore some commands */
+            /* 忽略一些命令 */
             t = ld_next(s1, cmd, sizeof(cmd));
             if (t != '(')
                 expect("(");
