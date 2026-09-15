@@ -1,307 +1,128 @@
 # --------------------------------------------------------------------------
+# Tiny C Compiler —— AArch64（arm64）专用精简构建
 #
-# Tiny C Compiler Makefile
+# 只用宿主机 C 编译器在 arm64 系统上构建 arm64 版 tcc：
+#   * 不再需要 ./configure：配置集中在 config.h 与本文件
+#   * 只保留 AArch64 后端，无交叉编译、无 PE/Windows、无文档生成
+#   * 源码按 ONE_SOURCE 方式“一次编译成一个可执行文件”，另外编译一份 libtcc.a
 #
+#   make            构建 tcc、libtcc.a、libtcc1.a
+#   make test       运行 tests2 与 pp 测试套件
+#   make test-all   运行 tests/ 下的完整测试矩阵（需要 libtcc.a）
+#   make install    安装到 $(PREFIX)（默认 /usr/local；DESTDIR 用作打包根）
+#   make uninstall  卸载
+#   make clean      清理
+#
+# 可在命令行覆盖：CC、AR、PREFIX、DESTDIR、CFLAGS、LIBS、VERSION
+# --------------------------------------------------------------------------
 
 ifndef TOP
  TOP = .
  INCLUDED = no
 endif
+TOPSRC = $(TOP)
+SRC = $(TOPSRC)/src
 
-include $(TOP)/config.mak
+VERSION ?= $(shell cat $(TOPSRC)/VERSION)
+ARCH = arm64
 
-ifeq (-$(CC)-$(GCC_MAJOR)-$(findstring $(GCC_MINOR),56789)-,-gcc-4--)
- CFLAGS += -D_FORTIFY_SOURCE=0
+CC ?= cc
+AR ?= ar
+INSTALL ?= install
+EXESUF =
+LIBSUF = .a
+DLLSUF = .so
+ifeq ($(shell uname -s),Darwin)
+ CONFIG_OSX = yes
+ DLLSUF = .dylib
 endif
+
+PREFIX ?= /usr/local
+BINDIR = $(DESTDIR)$(PREFIX)/bin
+TCCDIR = $(DESTDIR)$(PREFIX)/lib/tcc
+LIBDIR = $(DESTDIR)$(PREFIX)/lib
+INCLUDEDIR = $(DESTDIR)$(PREFIX)/include
+
+CFLAGS += -Wall -g -O2 -Wdeclaration-after-statement -fno-strict-aliasing \
+          -Wno-pointer-sign -Wno-sign-compare -Wno-unused-result
+CPPFLAGS += -I$(TOPSRC) -I$(SRC)/core -I$(SRC)/targets -I$(SRC)/formats \
+            -DTCC_VERSION="\"$(VERSION)\""
+LIBS ?= -lm
+
+# 用本目录的 tcc 编译/运行程序时的参数
+TCCFLAGS = -B$(TOPSRC) -I$(TOPSRC)/include -I$(TOPSRC) $(if $(CONFIG_OSX),-D_ANSI_SOURCE)
+TCC = $(TOP)/tcc$(EXESUF) $(TCCFLAGS)
+# tcc 的 -ar（内置归档器）必须是第一个参数，故单独调用
+XAR = $(TOP)/tcc$(EXESUF) -ar
 
 LIBTCC = libtcc.a
 LIBTCC1 = libtcc1.a
-LINK_LIBTCC =
-LIBS =
-CFLAGS += -I$(TOP)
-CFLAGS += -I$(TOPSRC)/src/core -I$(TOPSRC)/src/targets -I$(TOPSRC)/src/formats
-CFLAGS += $(CPPFLAGS)
-VPATH = $(TOPSRC) $(TOPSRC)/src/core $(TOPSRC)/src/targets $(TOPSRC)/src/formats
+NATIVE_DEFINES =
 
-LIBS=-lm
-ifneq ($(CONFIG_ldl),no)
- LIBS+=-ldl
-endif
-# make libtcc as static or dynamic library?
-ifeq ($(CONFIG_static),no)
- LIBTCC=libtcc$(DLLSUF)
- export LD_LIBRARY_PATH := $(CURDIR)/$(TOP)
- ifneq ($(CONFIG_rpath),no)
-  LINK_LIBTCC += -Wl,-rpath,"$(libdir)"
- endif
-endif
-NATIVE_TARGET = $(ARCH)
-ifdef CONFIG_OSX
- NATIVE_TARGET = $(ARCH)-osx
- LDFLAGS += -flat_namespace -undefined warning
- export MACOSX_DEPLOYMENT_TARGET := 10.2
-endif
+# libtcc1.a 的内容：本后端需要的运行时辅助函数（128 位 long double 软浮点等）
+LIBTCC1_SRC = $(TOPSRC)/lib/lib-arm64.c
 
-# run local version of tcc with local libraries and includes
-TCCFLAGS = -B$(TOP) -I$(TOPSRC)/include -I$(TOPSRC) -I$(TOP) -I$(TOPSRC)/src/core -I$(TOPSRC)/src/targets -I$(TOPSRC)/src/formats
-TCC = $(TOP)/tcc$(EXESUF) $(TCCFLAGS)
-ifdef CONFIG_OSX
- TCCFLAGS += -D_ANSI_SOURCE
-endif
-
-CFLAGS_P = $(CFLAGS) -pg -static -DCONFIG_TCC_STATIC -DTCC_PROFILE
-LIBS_P = $(LIBS)
-LDFLAGS_P = $(LDFLAGS)
-
-CONFIG_$(ARCH) = yes
-NATIVE_DEFINES_$(CONFIG_OSX) += -DTCC_TARGET_MACHO
-NATIVE_DEFINES_$(CONFIG_uClibc) += -DTCC_UCLIBC
-NATIVE_DEFINES_$(CONFIG_musl) += -DTCC_MUSL
-NATIVE_DEFINES_$(CONFIG_libgcc) += -DCONFIG_USE_LIBGCC
-NATIVE_DEFINES_$(CONFIG_selinux) += -DHAVE_SELINUX
-NATIVE_DEFINES_$(CONFIG_arm64) += -DTCC_TARGET_ARM64
-NATIVE_DEFINES += $(NATIVE_DEFINES_yes)
+HEADERS = $(wildcard $(SRC)/core/*.h $(SRC)/targets/*.h $(SRC)/formats/*.h) $(TOPSRC)/config.h
+SOURCES = $(wildcard $(SRC)/core/*.c $(SRC)/targets/*.c)
 
 ifeq ($(INCLUDED),no)
 # --------------------------------------------------------------------------
-# running top Makefile
+# 顶层构建规则
 
-PROGS = tcc$(EXESUF)
-TCCLIBS = $(LIBTCC1) $(LIBTCC) $(LIBTCCDEF)
-TCCDOCS = tcc.1 tcc-doc.html tcc-doc.info
+all: tcc$(EXESUF) $(LIBTCC) $(LIBTCC1)
 
-all: $(PROGS) $(TCCLIBS) $(TCCDOCS)
+# 编译器本体：src/core/tcc.c 在 ONE_SOURCE 下把各 .c 汇成一个编译单元，一条命令产出
+tcc$(EXESUF): $(SOURCES) $(HEADERS)
+	$(CC) -o $@ $(SRC)/core/tcc.c $(CPPFLAGS) $(CFLAGS) $(LIBS)
 
-# cross compiler targets to build
-TCC_X = arm64
-
-# cross libtcc1.a targets to build
-LIBTCC1_X = arm64
-
-PROGS_CROSS = $(foreach X,$(TCC_X),$X-tcc$(EXESUF))
-LIBTCC1_CROSS = $(foreach X,$(LIBTCC1_X),$X-libtcc1.a)
-
-# build cross compilers & libs
-cross: $(LIBTCC1_CROSS) $(PROGS_CROSS)
-
-# build specific cross compiler & lib
-cross-%: %-tcc$(EXESUF) %-libtcc1.a ;
-
-install: ; @$(MAKE) --no-print-directory install-unx
-install-strip: ; @$(MAKE) --no-print-directory install-unx CONFIG_strip=yes
-uninstall: ; @$(MAKE) --no-print-directory uninstall-unx
-
-ifdef CONFIG_cross
-all : cross
-endif
-
-# --------------------------------------------
-
-T = $(or $(CROSS_TARGET),$(NATIVE_TARGET),unknown)
-X = $(if $(CROSS_TARGET),$(CROSS_TARGET)-)
-
-DEF-arm64       = -DTCC_TARGET_ARM64
-DEF-$(NATIVE_TARGET) = $(NATIVE_DEFINES)
-
-DEFINES += $(DEF-$T) $(DEF-all)
-DEFINES += $(if $(ROOT-$T),-DCONFIG_SYSROOT="\"$(ROOT-$T)\"")
-DEFINES += $(if $(CRT-$T),-DCONFIG_TCC_CRTPREFIX="\"$(CRT-$T)\"")
-DEFINES += $(if $(LIB-$T),-DCONFIG_TCC_LIBPATHS="\"$(LIB-$T)\"")
-DEFINES += $(if $(INC-$T),-DCONFIG_TCC_SYSINCLUDEPATHS="\"$(INC-$T)\"")
-DEFINES += $(DEF-unx)
-
-ifneq ($(X),)
-DEF-all += -DTCC_LIBTCC1="\"$(X)libtcc1.a\""
-endif
-
-# include custom configuration (see make help)
--include config-extra.mak
-
-CORE_FILES = tcc.c tcctools.c libtcc.c tccpp.c tccgen.c tccelf.c tccasm.c tccrun.c
-CORE_FILES += tcc.h config.h libtcc.h tcctok.h
-arm64_FILES = $(CORE_FILES) arm64-gen.c arm64-link.c
-
-# libtcc sources
-LIBTCC_SRC = $(filter-out tcc.c tcctools.c,$(filter %.c,$($T_FILES)))
-
-ifeq ($(ONE_SOURCE),yes)
-LIBTCC_OBJ = $(X)libtcc.o
-LIBTCC_INC = $($T_FILES)
-TCC_FILES = $(X)tcc.o
-tcc.o : DEFINES += -DONE_SOURCE=0
-else
-LIBTCC_OBJ = $(patsubst %.c,$(X)%.o,$(LIBTCC_SRC))
-LIBTCC_INC = $(filter %.h %-gen.c %-link.c,$($T_FILES))
-TCC_FILES = $(X)tcc.o $(LIBTCC_OBJ)
-$(TCC_FILES) : DEFINES += -DONE_SOURCE=0
-endif
-
-# target specific object rule
-$(X)%.o : %.c $(LIBTCC_INC)
-	$(CC) -o $@ -c $< $(DEFINES) $(CFLAGS)
-
-# additional dependencies
-$(X)tcc.o : tcctools.c
-
-# Host Tiny C Compiler
-tcc$(EXESUF): tcc.o $(LIBTCC)
-	$(CC) -o $@ $^ $(LIBS) $(LDFLAGS) $(LINK_LIBTCC)
-
-# Cross Tiny C Compilers
-%-tcc$(EXESUF): FORCE
-	@$(MAKE) --no-print-directory $@ CROSS_TARGET=$* ONE_SOURCE=$(or $(ONE_SOURCE),yes)
-
-$(CROSS_TARGET)-tcc$(EXESUF): $(TCC_FILES)
-	$(CC) -o $@ $^ $(LIBS) $(LDFLAGS)
-
-# profiling version
-tcc_p$(EXESUF): $($T_FILES)
-	$(CC) -o $@ $< $(DEFINES) $(CFLAGS_P) $(LIBS_P) $(LDFLAGS_P)
-
-# static libtcc library
-libtcc.a: $(LIBTCC_OBJ)
+# 供外部程序链接的静态库：同样只编译 libtcc.c 一个文件
+$(LIBTCC): libtcc.o
 	$(AR) rcs $@ $^
+libtcc.o: $(SOURCES) $(HEADERS)
+	$(CC) -c -o $@ $(SRC)/core/libtcc.c $(CPPFLAGS) $(CFLAGS)
 
-# dynamic libtcc library
-libtcc.so: $(LIBTCC_OBJ)
-	$(CC) -shared -Wl,-soname,$@ -o $@ $^ $(LDFLAGS)
+# 运行时库：用刚构建出的 tcc 自己编译并打包（-ar 是 tcc 内置的归档器）
+$(LIBTCC1): tcc$(EXESUF)
+	$(TCC) -c $(LIBTCC1_SRC) -o libtcc1.o
+	$(XAR) rcs $@ libtcc1.o
 
-libtcc.so: CFLAGS+=-fPIC
-libtcc.so: LDFLAGS+=-fPIC
+install: all
+	$(INSTALL) -d $(BINDIR) $(TCCDIR)/include $(LIBDIR) $(INCLUDEDIR)
+	$(INSTALL) -m755 tcc$(EXESUF) $(BINDIR)
+	$(INSTALL) -m644 $(LIBTCC1) $(TCCDIR)
+	$(INSTALL) -m644 $(TOPSRC)/include/*.h $(TCCDIR)/include
+	$(INSTALL) -m644 $(LIBTCC) $(LIBDIR)
+	$(INSTALL) -m644 $(SRC)/core/libtcc.h $(INCLUDEDIR)
 
-# TinyCC runtime libraries
-libtcc1.a : tcc$(EXESUF) FORCE
-	@$(MAKE) -C lib DEFINES='$(DEF-$T)'
+uninstall:
+	rm -f $(BINDIR)/tcc$(EXESUF) $(INCLUDEDIR)/libtcc.h
+	rm -f $(LIBDIR)/$(LIBTCC)
+	rm -rf $(TCCDIR)
 
-# Cross libtcc1.a
-%-libtcc1.a : %-tcc$(EXESUF) FORCE
-	@$(MAKE) -C lib DEFINES='$(DEF-$*)' CROSS_TARGET=$*
+# tests2 用 -run 执行编译结果，需要 arm64 Linux 主机；
+# pp（预处理器）测试只用 -E，任何 arm64 主机都能跑。
+test: tcc$(EXESUF)
+ifdef CONFIG_OSX
+	@echo "注意：tests2 需要 arm64 Linux 主机（-run 无法调用 Apple 的可变参数 libc 函数），本机只跑 pp"
+else
+	$(MAKE) -C $(TOPSRC)/tests/tests2
+endif
+	$(MAKE) -C $(TOPSRC)/tests/pp
 
-.PRECIOUS: %-libtcc1.a
-FORCE:
+test-all: all
+	$(MAKE) -C $(TOPSRC)/tests
 
-# --------------------------------------------------------------------------
-# documentation and man page
-tcc-doc.html: $(TOPSRC)/docs/tcc-doc.texi
-	makeinfo --no-split --html --number-sections -I$(TOPSRC)/docs -I. -o $@ $< || true
-
-tcc.1: $(TOPSRC)/docs/tcc-doc.texi
-	$(TOPSRC)/docs/texi2pod.pl $< tcc.pod \
-	&& pod2man --section=1 --center="Tiny C Compiler" --release="$(VERSION)" tcc.pod >tmp.1 \
-	&& mv tmp.1 $@ || rm -f tmp.1
-
-tcc-doc.info: $(TOPSRC)/docs/tcc-doc.texi
-	makeinfo -I$(TOPSRC)/docs -I. $< || true
-
-# --------------------------------------------------------------------------
-# install
-
-INSTALL = install -m644
-INSTALLBIN = install -m755 $(STRIP_$(CONFIG_strip))
-STRIP_yes = -s
-
-IB = $(if $1,mkdir -p $2 && $(INSTALLBIN) $1 $2)
-IBw = $(call IB,$(wildcard $1),$2)
-IF = $(if $1,mkdir -p $2 && $(INSTALL) $1 $2)
-IFw = $(call IF,$(wildcard $1),$2)
-IR = mkdir -p $2 && cp -r $1/. $2
-
-# install progs & libs
-install-unx:
-	$(call IBw,$(PROGS) $(PROGS_CROSS),"$(bindir)")
-	$(call IFw,$(LIBTCC1) $(LIBTCC1_CROSS),"$(tccdir)")
-	$(call IF,$(TOPSRC)/include/*.h,"$(tccdir)/include")
-	$(call $(if $(findstring .so,$(LIBTCC)),IBw,IFw),$(LIBTCC),"$(libdir)")
-	$(call IF,$(TOPSRC)/src/core/libtcc.h,"$(includedir)")
-	$(call IFw,tcc.1,"$(mandir)/man1")
-	$(call IFw,tcc-doc.info,"$(infodir)")
-	$(call IFw,tcc-doc.html,"$(docdir)")
-
-# uninstall
-uninstall-unx:
-	@rm -fv $(foreach P,$(PROGS) $(PROGS_CROSS),"$(bindir)/$P")
-	@rm -fv "$(libdir)/libtcc.a" "$(libdir)/libtcc.so" "$(includedir)/libtcc.h"
-	@rm -fv "$(mandir)/man1/tcc.1" "$(infodir)/tcc-doc.info"
-	@rm -fv "$(docdir)/tcc-doc.html"
-	rm -r "$(tccdir)"
-
-# --------------------------------------------------------------------------
-# other stuff
-
-TAGFILES = src/core/*.[ch] src/targets/*.[ch] src/formats/*.[ch] include/*.h lib/*.[chS]
-tags : ; ctags $(TAGFILES)
-# cannot have both tags and TAGS on windows
-ETAGS : ; etags $(TAGFILES)
-
-# create release tarball from *current* git branch (including tcc-doc.html)
-TCC-VERSION = tcc-$(VERSION)
-tar:    tcc-doc.html
-	mkdir $(TCC-VERSION)
-	( cd $(TCC-VERSION) && git --git-dir ../.git checkout -f )
-	cp tcc-doc.html $(TCC-VERSION)
-	tar cjf $(TCC-VERSION).tar.bz2 $(TCC-VERSION)
-	rm -rf $(TCC-VERSION)
-	git reset
-
-config.mak:
-	$(if $(wildcard $@),,@echo "Please run ./configure." && exit 1)
-
-# run all tests
-test:
-	$(MAKE) -C tests
-# run test(s) from tests2 subdir (see make help)
-tests2.%:
-	$(MAKE) -C tests/tests2 $@
+tests2.%: tcc$(EXESUF)
+	$(MAKE) -C $(TOPSRC)/tests/tests2 $@
 
 clean:
-	rm -f tcc$(EXESUF) tcc_p$(EXESUF) *-tcc$(EXESUF) tcc.pod
-	rm -f  *~ *.o *.a *.so* *.out *.log lib*.def *.exe *.dll a.out tags TAGS
-	@$(MAKE) -C lib $@
-	@$(MAKE) -C tests $@
-
-distclean: clean
-	rm -f config.h config.mak config.texi tcc.1 tcc-doc.info tcc-doc.html
-
-.PHONY: all clean test tar tags ETAGS distclean install uninstall FORCE
+	rm -f tcc$(EXESUF) libtcc.o libtcc1.o $(LIBTCC) $(LIBTCC1)
+	-$(MAKE) -C $(TOPSRC)/tests/tests2 clean
+	-$(MAKE) -C $(TOPSRC)/tests/pp clean
 
 help:
-	@echo "make"
-	@echo "   build native compiler (from separate objects)"
-	@echo ""
-	@echo "make cross"
-	@echo "   build cross compilers (from one source)"
-	@echo ""
-	@echo "make ONE_SOURCE=yes / no"
-	@echo "   force building from one source / separate objects"
-	@echo ""
-	@echo "make cross-TARGET"
-	@echo "   build one specific cross compiler for 'TARGET', as in"
-	@echo "   $(TCC_X)"
-	@echo ""
-	@echo "Custom configuration:"
-	@echo "   The makefile includes a file 'config-extra.mak' if it is present."
-	@echo "   This file may contain some custom configuration.  For example:"
-	@echo ""
-	@echo "      NATIVE_DEFINES += -D..."
-	@echo ""
-	@echo "   Or for example to configure the search paths for a cross-compiler"
-	@echo "   that expects the linux files in <tccdir>/arm64-linux:"
-	@echo ""
-	@echo "      ROOT-arm64 = {B}/arm64-linux"
-	@echo "      CRT-arm64  = {B}/arm64-linux/usr/lib"
-	@echo "      LIB-arm64  = {B}/arm64-linux/lib:{B}/arm64-linux/usr/lib"
-	@echo "      INC-arm64  = {B}/lib/include:{B}/arm64-linux/usr/include"
-	@echo "      DEF-arm64  += -D__linux__"
-	@echo ""
-	@echo "make test"
-	@echo "   run all tests"
-	@echo ""
-	@echo "make tests2.all / make tests2.37 / make tests2.37+"
-	@echo "   run all/single test(s) from tests2, optionally update .expect"
-	@echo ""
-	@echo "Other supported make targets:"
-	@echo "   install install-strip tags ETAGS tar clean distclean help"
-	@echo ""
+	@sed -n '2,18p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-# --------------------------------------------------------------------------
+.PHONY: all install uninstall test test-all clean help
+
 endif # ($(INCLUDED),no)

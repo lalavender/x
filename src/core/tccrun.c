@@ -1,30 +1,45 @@
 /*
- *  TCC - Tiny C Compiler - Support for -run switch
+ *  TCC - Tiny C Compiler（微型 C 编译器）- 对 -run 开关的支持
  *
  *  Copyright (c) 2001-2004 Fabrice Bellard
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * 本库为自由软件；你可以遵照自由软件基金会发布的 GNU 宽通用公共许可证
+ * 的条款重新分发和/或修改它，无论是许可证的第 2 版，还是（由你选择的）
+ * 任何更新的版本。
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * 分发本库是希望它有用，但不提供任何担保；
+ * 甚至不提供对适销性或特定用途适用性的默示担保。
+ * 详见 GNU 宽通用公共许可证。
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * 你应当已经随本库收到一份 GNU 宽通用公共许可证的副本；
+ * 如果没有，请写信给自由软件基金会：
+ * 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include "tcc.h"
 
-/* only native compiler supports -run */
+/* 只有本机（原生）编译器才支持 -run */
 #ifdef TCC_IS_NATIVE
 
 #ifndef _WIN32
 # include <sys/mman.h>
+#endif
+
+/* macOS/arm64：普通内存不允许同时可写可执行（W^X），必须用 MAP_JIT 映射，
+ * 并在线程级切换“可写/可执行”状态。详见 tcc_relocate() 与 set_pages_executable()。 */
+#if defined(__APPLE__) && defined(__aarch64__)
+# define TCC_JIT_MEM
+# include <pthread.h>
+# ifndef MAP_JIT
+#  define MAP_JIT 0x800
+# endif
+/* 0 = 允许写入，1 = 允许执行 */
+static void tcc_jit_protect(int executable)
+{
+    pthread_jit_write_protect_np(executable);
+}
+#else
+# define tcc_jit_protect(x) do { } while (0)
 #endif
 
 #ifdef CONFIG_TCC_BACKTRACE
@@ -53,8 +68,8 @@ static void win64_del_function_table(void *);
 #endif
 
 /* ------------------------------------------------------------- */
-/* Do all relocations (needed before using tcc_get_symbol())
-   Returns -1 on error. */
+/* 执行所有重定位（在使用 tcc_get_symbol() 之前必须调用）
+   出错返回 -1。 */
 
 LIBTCCAPI int tcc_relocate(TCCState *s1, void *ptr)
 {
@@ -68,9 +83,17 @@ LIBTCCAPI int tcc_relocate(TCCState *s1, void *ptr)
     if (size < 0)
         return -1;
 
-#ifdef HAVE_SELINUX
+#ifdef TCC_JIT_MEM
+    /* MAP_JIT：一次映射即可写可执行，配合 tcc_jit_protect() 切换权限 */
+    ptr = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+               MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+    if (ptr == MAP_FAILED)
+        tcc_error("tccrun: could not map memory");
+    dynarray_add(&s1->runtime_mem, &s1->nb_runtime_mem, (void*)(addr_t)size);
+    tcc_jit_protect(0); /* 先允许写入：下面的重定位会写代码 */
+#elif defined(HAVE_SELINUX)
 {
-    /* Using mmap instead of malloc */
+    /* 使用 mmap 而非 malloc */
     void *prx;
     char tmpfname[] = "/tmp/.tccrunXXXXXX";
     int fd = mkstemp(tmpfname);
@@ -88,7 +111,8 @@ LIBTCCAPI int tcc_relocate(TCCState *s1, void *ptr)
 #else
     ptr = tcc_malloc(size);
 #endif
-    tcc_relocate_ex(s1, ptr, ptr_diff); /* no more errors expected */
+    tcc_relocate_ex(s1, ptr, ptr_diff); /* 不再预期出现错误 */
+    tcc_jit_protect(1); /* 代码已就位，切回可执行 */
     dynarray_add(&s1->runtime_mem, &s1->nb_runtime_mem, ptr);
     return 0;
 }
@@ -98,7 +122,10 @@ ST_FUNC void tcc_run_free(TCCState *s1)
     int i;
 
     for (i = 0; i < s1->nb_runtime_mem; ++i) {
-#ifdef HAVE_SELINUX
+#ifdef TCC_JIT_MEM
+        unsigned size = (unsigned)(addr_t)s1->runtime_mem[i++];
+        munmap(s1->runtime_mem[i], size);
+#elif defined(HAVE_SELINUX)
         unsigned size = (unsigned)(addr_t)s1->runtime_mem[i++];
         munmap(s1->runtime_mem[i++], size);
         munmap(s1->runtime_mem[i], size);
@@ -112,7 +139,7 @@ ST_FUNC void tcc_run_free(TCCState *s1)
     tcc_free(s1->runtime_mem);
 }
 
-/* launch the compiled program with the given arguments */
+/* 用给定参数启动编译好的程序 */
 LIBTCCAPI int tcc_run(TCCState *s1, int argc, char **argv)
 {
     int (*prog_main)(int, char **);
@@ -131,7 +158,7 @@ LIBTCCAPI int tcc_run(TCCState *s1, int argc, char **argv)
     }
 #endif
 
-    errno = 0; /* clean errno value */
+    errno = 0; /* 清除 errno 取值 */
 
 #ifdef CONFIG_TCC_BCHECK
     if (s1->do_bounds_check) {
@@ -141,23 +168,23 @@ LIBTCCAPI int tcc_run(TCCState *s1, int argc, char **argv)
         int  (*bound_delete_region)(void *p);
         int i, ret;
 
-        /* set error function */
+        /* 设置错误函数 */
         rt_bound_error_msg = tcc_get_symbol_err(s1, "__bound_error_msg");
-        /* XXX: use .init section so that it also work in binary ? */
+        /* XXX: 用 .init 段以便在二进制中也能工作？ */
         bound_init = tcc_get_symbol_err(s1, "__bound_init");
         bound_exit = tcc_get_symbol_err(s1, "__bound_exit");
         bound_new_region = tcc_get_symbol_err(s1, "__bound_new_region");
         bound_delete_region = tcc_get_symbol_err(s1, "__bound_delete_region");
 
         bound_init();
-        /* mark argv area as valid */
+        /* 把 argv 区域标记为有效 */
         bound_new_region(argv, argc*sizeof(argv[0]));
         for (i=0; i<argc; ++i)
             bound_new_region(argv[i], strlen(argv[i]) + 1);
 
         ret = (*prog_main)(argc, argv);
 
-        /* unmark argv area */
+        /* 取消 argv 区域的标记 */
         for (i=0; i<argc; ++i)
             bound_delete_region(argv[i]);
         bound_delete_region(argv);
@@ -168,14 +195,11 @@ LIBTCCAPI int tcc_run(TCCState *s1, int argc, char **argv)
     return (*prog_main)(argc, argv);
 }
 
-#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64
- #define RUN_SECTION_ALIGNMENT 63
-#else
- #define RUN_SECTION_ALIGNMENT 15
-#endif
+/* 可执行段只需最小对齐：本分支只生成 AArch64/ELF 代码 */
+#define RUN_SECTION_ALIGNMENT 15
 
-/* relocate code. Return -1 on error, required size if ptr is NULL,
-   otherwise copy code into buffer passed by the caller */
+/* 重定位代码。出错返回 -1；ptr 为 NULL 时返回所需大小，
+   否则把代码复制到调用者传入的缓冲区 */
 static int tcc_relocate_ex(TCCState *s1, void *ptr, addr_t ptr_diff)
 {
     Section *s;
@@ -219,14 +243,13 @@ static int tcc_relocate_ex(TCCState *s1, void *ptr, addr_t ptr_diff)
             fill = -(mem + offset) & 15;
         }
 #if RUN_SECTION_ALIGNMENT > 15
-        /* To avoid that x86 processors would reload cached instructions each time
-           when data is written in the near, we need to make sure that code and data
-           do not share the same 64 byte unit */
+        /* 为避免 x86 处理器在附近写入数据时每次都重新加载已缓存的指令，
+           需要保证代码和数据不共用同一个 64 字节单元 */
         fill = -(mem + offset) & RUN_SECTION_ALIGNMENT;
 #endif
     }
 
-    /* relocate symbols */
+    /* 重定位符号 */
     relocate_syms(s1, s1->symtab, 1);
     if (s1->nb_errors)
         return -1;
@@ -234,7 +257,7 @@ static int tcc_relocate_ex(TCCState *s1, void *ptr, addr_t ptr_diff)
     if (0 == mem)
         return offset + RUN_SECTION_ALIGNMENT;
 
-    /* relocate each section */
+    /* 重定位每个段 */
     for(i = 1; i < s1->nb_sections; i++) {
         s = s1->sections[i];
         if (s->reloc)
@@ -254,7 +277,7 @@ static int tcc_relocate_ex(TCCState *s1, void *ptr, addr_t ptr_diff)
             memset(ptr, 0, length);
         else
             memcpy(ptr, s->data, length);
-        /* mark executable sections as executable in memory */
+        /* 在内存中把可执行段标记为可执行 */
         if (s->sh_flags & SHF_EXECINSTR)
             set_pages_executable((char*)ptr + ptr_diff, length);
     }
@@ -267,7 +290,7 @@ static int tcc_relocate_ex(TCCState *s1, void *ptr, addr_t ptr_diff)
 }
 
 /* ------------------------------------------------------------- */
-/* allow to run code in memory */
+/* 允许在内存中运行代码 */
 
 static void set_pages_executable(void *ptr, unsigned long length)
 {
@@ -276,7 +299,7 @@ static void set_pages_executable(void *ptr, unsigned long length)
     VirtualProtect(ptr, length, PAGE_EXECUTE_READWRITE, &old_protect);
 #else
     void __clear_cache(void *beginning, void *end);
-# ifndef HAVE_SELINUX
+# if !defined(HAVE_SELINUX) && !defined(TCC_JIT_MEM)
     addr_t start, end;
 #  ifndef PAGESIZE
 #   define PAGESIZE 4096
@@ -287,9 +310,7 @@ static void set_pages_executable(void *ptr, unsigned long length)
     if (mprotect((void *)start, end - start, PROT_READ | PROT_WRITE | PROT_EXEC))
         tcc_error("mprotect failed: did you mean to configure --with-selinux?");
 # endif
-# if defined TCC_TARGET_ARM || defined TCC_TARGET_ARM64
     __clear_cache(ptr, (char *)ptr + length);
-# endif
 #endif
 }
 
@@ -325,8 +346,7 @@ ST_FUNC void tcc_set_num_callers(int n)
     rt_num_callers = n;
 }
 
-/* print the position in the source file of PC value 'pc' by reading
-   the stabs debug information */
+/* 通过读取 stabs 调试信息，打印 PC 取值 'pc' 在源文件中的位置 */
 static addr_t rt_printline(addr_t wanted_pc, const char *msg)
 {
     char func_name[128], last_func_name[128];
@@ -358,10 +378,10 @@ static addr_t rt_printline(addr_t wanted_pc, const char *msg)
     stab_sym_end = (Stab_Sym*)((char*)stab_sym + stab_len);
     for (sym = stab_sym + 1; sym < stab_sym_end; ++sym) {
         switch(sym->n_type) {
-            /* function start or end */
+            /* 函数的开始或结束 */
         case N_FUN:
             if (sym->n_strx == 0) {
-                /* we test if between last line and end of function */
+                /* 判断是否位于最后一行与函数结束之间 */
                 pc = sym->n_value + func_addr;
                 if (wanted_pc >= last_pc && wanted_pc < pc)
                     goto found;
@@ -382,17 +402,17 @@ static addr_t rt_printline(addr_t wanted_pc, const char *msg)
                 func_addr = sym->n_value;
             }
             break;
-            /* line number info */
+            /* 行号信息 */
         case N_SLINE:
             pc = sym->n_value + func_addr;
             if (wanted_pc >= last_pc && wanted_pc < pc)
                 goto found;
             last_pc = pc;
             last_line_num = sym->n_desc;
-            /* XXX: slow! */
+            /* XXX: 慢！ */
             strcpy(last_func_name, func_name);
             break;
-            /* include files */
+            /* 包含文件 */
         case N_BINCL:
             str = stab_str + sym->n_strx;
         add_incl:
@@ -406,10 +426,10 @@ static addr_t rt_printline(addr_t wanted_pc, const char *msg)
             break;
         case N_SO:
             if (sym->n_strx == 0) {
-                incl_index = 0; /* end of translation unit */
+                incl_index = 0; /* 编译单元结束 */
             } else {
                 str = stab_str + sym->n_strx;
-                /* do not add path */
+                /* 不添加路径 */
                 len = strlen(str);
                 if (len > 0 && str[len - 1] != '/')
                     goto add_incl;
@@ -419,7 +439,7 @@ static addr_t rt_printline(addr_t wanted_pc, const char *msg)
     }
 
 no_stabs:
-    /* second pass: we try symtab symbols (no line number info) */
+    /* 第二遍：尝试符号表符号（没有行号信息） */
     incl_index = 0;
     if (symtab_section)
     {
@@ -442,7 +462,7 @@ no_stabs:
             }
         }
     }
-    /* did not find any info: */
+    /* 没有找到任何信息： */
     fprintf(stderr, "%s %p ???\n", msg, (void*)wanted_pc);
     fflush(stderr);
     return 0;
@@ -468,7 +488,7 @@ no_stabs:
     return func_addr;
 }
 
-/* emit a run time error at position 'pc' */
+/* 在位置 'pc' 处发出运行时错误 */
 static void rt_error(ucontext_t *uc, const char *fmt, ...)
 {
     va_list ap;
@@ -493,7 +513,7 @@ static void rt_error(ucontext_t *uc, const char *fmt, ...)
 /* ------------------------------------------------------------- */
 #ifndef _WIN32
 
-/* signal handler for fatal errors */
+/* 致命错误的信号处理函数 */
 static void sig_error(int signum, siginfo_t *siginf, void *puc)
 {
     ucontext_t *uc = puc;
@@ -534,12 +554,11 @@ static void sig_error(int signum, siginfo_t *siginf, void *puc)
 # define SA_SIGINFO 0x00000004u
 #endif
 
-/* Generate a stack backtrace when a CPU exception occurs. */
+/* 在发生 CPU 异常时生成栈回溯。 */
 static void set_exception_handler(void)
 {
     struct sigaction sigact;
-    /* install TCC signal handlers to print debug info on fatal
-       runtime errors */
+    /* 安装 TCC 信号处理函数，以便在致命运行时错误时打印调试信息 */
     sigact.sa_flags = SA_SIGINFO | SA_RESETHAND;
     sigact.sa_sigaction = sig_error;
     sigemptyset(&sigact.sa_mask);
@@ -553,13 +572,13 @@ static void set_exception_handler(void)
 /* ------------------------------------------------------------- */
 #ifdef __i386__
 
-/* fix for glibc 2.1 */
+/* 针对 glibc 2.1 的修正 */
 #ifndef REG_EIP
 #define REG_EIP EIP
 #define REG_EBP EBP
 #endif
 
-/* return the PC at frame level 'level'. Return negative if not found */
+/* 返回栈帧层级 'level' 处的 PC。未找到时返回负数 */
 static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
 {
     addr_t fp;
@@ -595,7 +614,7 @@ static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
         fp = uc->uc_mcontext.gregs[REG_EBP];
 #endif
         for(i=1;i<level;i++) {
-            /* XXX: check address validity with program info */
+            /* XXX: 用程序信息检查地址有效性 */
             if (fp <= 0x1000 || fp >= 0xc0000000)
                 return -1;
             fp = ((addr_t *)fp)[0];
@@ -608,14 +627,14 @@ static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
 /* ------------------------------------------------------------- */
 #elif defined(__x86_64__)
 
-/* return the PC at frame level 'level'. Return negative if not found */
+/* 返回栈帧层级 'level' 处的 PC。未找到时返回负数 */
 static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
 {
     addr_t fp;
     int i;
 
     if (level == 0) {
-        /* XXX: only support linux */
+        /* XXX: 只支持 linux */
 #if defined(__APPLE__)
         *paddr = uc->uc_mcontext->__ss.__rip;
 #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__DragonFly__)
@@ -637,7 +656,7 @@ static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
         fp = uc->uc_mcontext.gregs[REG_RBP];
 #endif
         for(i=1;i<level;i++) {
-            /* XXX: check address validity with program info */
+            /* XXX: 用程序信息检查地址有效性 */
             if (fp <= 0x1000)
                 return -1;
             fp = ((addr_t *)fp)[0];
@@ -650,14 +669,14 @@ static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
 /* ------------------------------------------------------------- */
 #elif defined(__arm__)
 
-/* return the PC at frame level 'level'. Return negative if not found */
+/* 返回栈帧层级 'level' 处的 PC。未找到时返回负数 */
 static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
 {
     addr_t fp, sp;
     int i;
 
     if (level == 0) {
-        /* XXX: only supports linux */
+        /* XXX: 只支持 linux */
 #if defined(__linux__)
         *paddr = uc->uc_mcontext.arm_pc;
 #else
@@ -673,7 +692,7 @@ static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
 #else
         return -1;
 #endif
-        /* XXX: specific to tinycc stack frames */
+        /* XXX: 针对 tinycc 的栈帧 */
         if (fp < sp + 12 || fp & 3)
             return -1;
         for(i = 1; i < level; i++) {
@@ -684,7 +703,7 @@ static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
             if (fp <= sp || fp - sp < 12 || fp & 3)
                 return -1;
         }
-        /* XXX: check address validity with program info */
+        /* XXX: 用程序信息检查地址有效性 */
         *paddr = ((addr_t *)fp)[-1];
         return 0;
     }
@@ -693,16 +712,26 @@ static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
 /* ------------------------------------------------------------- */
 #elif defined(__aarch64__)
 
+/* AArch64 的机器上下文在 Linux 与 Darwin 上布局不同：
+   Linux 是 uc_mcontext.pc / regs[29]，Darwin 是 uc_mcontext->__ss.__pc / __fp。 */
+#if defined(__APPLE__)
+# define ARM64_UC_PC(uc)  ((uc)->uc_mcontext->__ss.__pc)
+# define ARM64_UC_FP(uc)  ((uc)->uc_mcontext->__ss.__fp)
+#else
+# define ARM64_UC_PC(uc)  ((uc)->uc_mcontext.pc)
+# define ARM64_UC_FP(uc)  ((uc)->uc_mcontext.regs[29])
+#endif
+
 static int rt_get_caller_pc(addr_t *paddr, ucontext_t *uc, int level)
 {
     if (level < 0)
         return -1;
     else if (level == 0) {
-        *paddr = uc->uc_mcontext.pc;
+        *paddr = ARM64_UC_PC(uc);
         return 0;
     }
     else {
-        addr_t *fp = (addr_t *)uc->uc_mcontext.regs[29];
+        addr_t *fp = (addr_t *)ARM64_UC_FP(uc);
         int i;
         for (i = 1; i < level; i++)
             fp = (addr_t *)fp[0];
@@ -749,13 +778,13 @@ static long __stdcall cpu_exception_handler(EXCEPTION_POINTERS *ex_info)
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
-/* Generate a stack backtrace when a CPU exception occurs. */
+/* 在发生 CPU 异常时生成栈回溯。 */
 static void set_exception_handler(void)
 {
     SetUnhandledExceptionFilter(cpu_exception_handler);
 }
 
-/* return the PC at frame level 'level'. Return non zero if not found */
+/* 返回栈帧层级 'level' 处的 PC。未找到时返回非零 */
 static int rt_get_caller_pc(addr_t *paddr, CONTEXT *uc, int level)
 {
     addr_t fp, pc;
@@ -769,7 +798,7 @@ static int rt_get_caller_pc(addr_t *paddr, CONTEXT *uc, int level)
 #endif
     if (level > 0) {
         for(i=1;i<level;i++) {
-	    /* XXX: check address validity with program info */
+	    /* XXX: 用程序信息检查地址有效性 */
 	    if (fp <= 0x1000 || fp >= 0xc0000000)
 		return -1;
 	    fp = ((addr_t*)fp)[0];
@@ -785,7 +814,7 @@ static int rt_get_caller_pc(addr_t *paddr, CONTEXT *uc, int level)
 /* ------------------------------------------------------------- */
 #ifdef CONFIG_TCC_STATIC
 
-/* dummy function for profiling */
+/* 用于性能分析的哑函数 */
 ST_FUNC void *dlopen(const char *filename, int flag)
 {
     return NULL;
@@ -800,13 +829,20 @@ ST_FUNC const char *dlerror(void)
     return "error";
 }
 
+/*
+ * TCCSyms —— 静态链接时可用符号的名字表项
+ *
+ * 仅在 CONFIG_TCC_STATIC（不依赖宿主 libdl/dlfcn）时使用：dlsym() 退化为在本表
+ * 中按名字线性查找，str 是符号名，ptr 是该符号的地址。
+ * 表以 { NULL, NULL } 结束，内容由下面的 tcc_syms[] 用 TCCSYM() 宏逐个登记。
+ */
 typedef struct TCCSyms {
     char *str;
     void *ptr;
 } TCCSyms;
 
 
-/* add the symbol you want here if no dynamic linking is done */
+/* 如果不做动态链接，就在这里加入你需要的符号 */
 static TCCSyms tcc_syms[] = {
 #if !defined(CONFIG_TCCBOOT)
 #define TCCSYM(a) { #a, &a, },
