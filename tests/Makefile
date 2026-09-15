@@ -4,7 +4,7 @@
 
 TOP = ..
 include $(TOP)/Makefile
-VPATH = $(TOPSRC)/tests $(TOPSRC) $(TOP)
+VPATH = $(TOPSRC)/tests $(TOPSRC) $(TOPSRC)/src/core $(TOP)
 CFLAGS := $(filter-out -W% -g% -O%,$(CFLAGS)) -I$(TOPSRC) $(LDFLAGS)
 
 # what tests to run
@@ -55,7 +55,7 @@ ifeq ($(OS),Windows_NT) # for libtcc_test to find libtcc.dll
  PATH := $(CURDIR)/$(TOP)$(if $(findstring :\,$(PATH)),;,:)$(PATH)
 endif
 
-RUN_TCC = $(NATIVE_DEFINES) -run $(TOPSRC)/tcc.c $(TCCFLAGS)
+RUN_TCC = $(NATIVE_DEFINES) -run $(TOPSRC)/src/core/tcc.c $(TCCFLAGS)
 DISAS = objdump -d
 DUMPTCC = (set -x; $(TOP)/tcc -vv; ldd $(TOP)/tcc; exit 1)
 
@@ -129,23 +129,23 @@ test4: tcctest.c test.ref
 # use tcc to create libtcc.so/.dll and the tcc(.exe) frontend and run them
 dlltest:
 	@echo ------------ $@ ------------
-	$(TCC) $(NATIVE_DEFINES) -DLIBTCC_AS_DLL $(TOPSRC)/libtcc.c $(LIBS) -shared -o libtcc2$(DLLSUF)
-	$(TCC) $(NATIVE_DEFINES) -DONE_SOURCE=0 $(TOPSRC)/tcc.c libtcc2$(DLLSUF) $(LIBS) -Wl,-rpath=. -o tcc2$(EXESUF)
+	$(TCC) $(NATIVE_DEFINES) -DLIBTCC_AS_DLL $(TOPSRC)/src/core/libtcc.c $(LIBS) -shared -o libtcc2$(DLLSUF)
+	$(TCC) $(NATIVE_DEFINES) -DONE_SOURCE=0 $(TOPSRC)/src/core/tcc.c libtcc2$(DLLSUF) $(LIBS) -Wl,-rpath=. -o tcc2$(EXESUF)
 	./tcc2$(EXESUF) $(TCCFLAGS) $(RUN_TCC) -run $(TOPSRC)/examples/ex1.c
 ifndef CONFIG_WIN32
 	@echo ------------ $@ with PIC ------------
-	$(CC) $(CFLAGS) -fPIC $(NATIVE_DEFINES) -DLIBTCC_AS_DLL -c $(TOPSRC)/libtcc.c
+	$(CC) $(CFLAGS) -fPIC $(NATIVE_DEFINES) -DLIBTCC_AS_DLL -c $(TOPSRC)/src/core/libtcc.c
 	$(TCC) libtcc.o $(LIBS) -shared -o libtcc2$(DLLSUF)
-	$(TCC) $(NATIVE_DEFINES) -DONE_SOURCE=0 $(TOPSRC)/tcc.c libtcc2$(DLLSUF) $(LIBS) -Wl,-rpath=. -o tcc2$(EXESUF)
+	$(TCC) $(NATIVE_DEFINES) -DONE_SOURCE=0 $(TOPSRC)/src/core/tcc.c libtcc2$(DLLSUF) $(LIBS) -Wl,-rpath=. -o tcc2$(EXESUF)
 	./tcc2$(EXESUF) $(TCCFLAGS) $(RUN_TCC) -run $(TOPSRC)/examples/ex1.c
 endif
 	@rm tcc2$(EXESUF) libtcc2$(DLLSUF)
 
 memtest:
 	@echo ------------ $@ ------------
-	$(CC) $(CFLAGS) $(NATIVE_DEFINES) -DMEM_DEBUG=2 $(TOPSRC)/tcc.c $(LIBS) -o memtest-tcc$(EXESUF)
-	./memtest-tcc$(EXESUF) $(TCCFLAGS) $(NATIVE_DEFINES) $(TOPSRC)/tcc.c $(LIBS)
-	./memtest-tcc$(EXESUF) $(TCCFLAGS) $(NATIVE_DEFINES) -run $(TOPSRC)/tcc.c $(TCCFLAGS) $(TOPSRC)/tests/tcctest.c
+	$(CC) $(CFLAGS) $(NATIVE_DEFINES) -DMEM_DEBUG=2 $(TOPSRC)/src/core/tcc.c $(LIBS) -o memtest-tcc$(EXESUF)
+	./memtest-tcc$(EXESUF) $(TCCFLAGS) $(NATIVE_DEFINES) $(TOPSRC)/src/core/tcc.c $(LIBS)
+	./memtest-tcc$(EXESUF) $(TCCFLAGS) $(NATIVE_DEFINES) -run $(TOPSRC)/src/core/tcc.c $(TCCFLAGS) $(TOPSRC)/tests/tcctest.c
 
 
 # memory and bound check auto test
@@ -248,17 +248,7 @@ asm-c-connect-test: asm-c-connect$(EXESUF) asm-c-connect-sep$(EXESUF)
 
 cross-test :
 	@echo ------------ $@ ------------
-	$(TOP)/i386-tcc$(EXESUF) $(TCCFLAGS-unx) -c $(TOPSRC)/examples/ex3.c && echo "ok"
-	$(TOP)/i386-win32-tcc$(EXESUF) $(TCCFLAGS-win) $(TOPSRC)/examples/ex3.c && echo "ok"
-	$(TOP)/x86_64-tcc$(EXESUF) $(TCCFLAGS-unx) -c $(TOPSRC)/examples/ex3.c && echo "ok"
-	$(TOP)/x86_64-win32-tcc$(EXESUF) $(TCCFLAGS-win) $(TOPSRC)/examples/ex3.c && echo "ok"
-	$(TOP)/arm-tcc$(EXESUF) $(TCCFLAGS-unx) -c $(TOPSRC)/examples/ex3.c && echo "ok"
-	$(TOP)/arm-wince-tcc$(EXESUF) $(TCCFLAGS-win) -c $(TOPSRC)/examples/ex3.c && echo "ok"
 	$(TOP)/arm64-tcc$(EXESUF) $(TCCFLAGS-unx) -c $(TOPSRC)/examples/ex3.c && echo "ok"
-	$(TOP)/c67-tcc$(EXESUF) $(TCCFLAGS-unx) -c $(TOPSRC)/examples/ex3.c && echo "ok"
-	$(TOP)/i386-win32-tcc$(EXESUF) $(TCCFLAGS-win) $(TOPSRC)/win32/examples/hello_win.c && echo "ok"
-	$(TOP)/x86_64-win32-tcc$(EXESUF) $(TCCFLAGS-win) $(TOPSRC)/win32/examples/hello_win.c && echo "ok"
-	$(TOP)/arm-wince-tcc$(EXESUF) $(TCCFLAGS-win) -c $(TOPSRC)/win32/examples/hello_win.c && echo "ok"
 
 # targets for development
 %.bin: %.c tcc

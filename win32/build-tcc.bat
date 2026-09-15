@@ -119,18 +119,17 @@ echo>> ..\config.h #endif
 for %%f in (*tcc.exe *tcc.dll) do @del %%f
 
 :compiler
-%CC% -o libtcc.dll -shared ..\libtcc.c %D% -DLIBTCC_AS_DLL
+%CC% -o libtcc.dll -shared ..\src\core\libtcc.c %D% -DLIBTCC_AS_DLL -I.. -I..\src\core -I..\src\targets -I..\src\formats
 @if errorlevel 1 goto :the_end
-%CC% -o tcc.exe ..\tcc.c libtcc.dll %D% -DONE_SOURCE"=0"
-%CC% -o %PX%-tcc.exe ..\tcc.c %DX%
+%CC% -o tcc.exe ..\src\core\tcc.c libtcc.dll %D% -DONE_SOURCE"=0" -I.. -I..\src\core -I..\src\targets -I..\src\formats
+%CC% -o %PX%-tcc.exe ..\src\core\tcc.c %DX% -I.. -I..\src\core -I..\src\targets -I..\src\formats
 
 @if (%EXES_ONLY%)==(yes) goto :files-done
 
 if not exist libtcc mkdir libtcc
 if not exist doc mkdir doc
 copy>nul ..\include\*.h include
-copy>nul ..\tcclib.h include
-copy>nul ..\libtcc.h libtcc
+copy>nul ..\src\core\libtcc.h libtcc
 copy>nul ..\tests\libtcc_test.c examples
 copy>nul tcc-win32.txt doc
 
@@ -169,7 +168,7 @@ copy>nul tcc-win32.txt doc
 :tcc-doc.html
 @if not (%DOC%)==(yes) goto :doc-done
 echo>..\config.texi @set VERSION %VERSION%
-cmd /c makeinfo --html --no-split ../tcc-doc.texi -o doc/tcc-doc.html
+cmd /c makeinfo --html --no-split ../docs/tcc-doc.texi -o doc/tcc-doc.html
 :doc-done
 
 :files-done
