@@ -23,39 +23,27 @@ CFLAGS += -I$(TOPSRC)/src/core -I$(TOPSRC)/src/targets -I$(TOPSRC)/src/formats
 CFLAGS += $(CPPFLAGS)
 VPATH = $(TOPSRC) $(TOPSRC)/src/core $(TOPSRC)/src/targets $(TOPSRC)/src/formats
 
-ifdef CONFIG_WIN32
- ifneq ($(CONFIG_static),yes)
-  LIBTCC = libtcc$(DLLSUF)
-  LIBTCCDEF = libtcc.def
+LIBS=-lm
+ifneq ($(CONFIG_ldl),no)
+ LIBS+=-ldl
+endif
+# make libtcc as static or dynamic library?
+ifeq ($(CONFIG_static),no)
+ LIBTCC=libtcc$(DLLSUF)
+ export LD_LIBRARY_PATH := $(CURDIR)/$(TOP)
+ ifneq ($(CONFIG_rpath),no)
+  LINK_LIBTCC += -Wl,-rpath,"$(libdir)"
  endif
- CFGWIN = -win
- NATIVE_TARGET = $(ARCH)-win$(if $(findstring arm,$(ARCH)),ce,32)
-else
- LIBS=-lm
- ifneq ($(CONFIG_ldl),no)
-  LIBS+=-ldl
- endif
- # make libtcc as static or dynamic library?
- ifeq ($(CONFIG_static),no)
-  LIBTCC=libtcc$(DLLSUF)
-  export LD_LIBRARY_PATH := $(CURDIR)/$(TOP)
-  ifneq ($(CONFIG_rpath),no)
-   LINK_LIBTCC += -Wl,-rpath,"$(libdir)"
-  endif
- endif
- CFGWIN =-unx
- NATIVE_TARGET = $(ARCH)
- ifdef CONFIG_OSX
-  NATIVE_TARGET = $(ARCH)-osx
-  LDFLAGS += -flat_namespace -undefined warning
-  export MACOSX_DEPLOYMENT_TARGET := 10.2
- endif
+endif
+NATIVE_TARGET = $(ARCH)
+ifdef CONFIG_OSX
+ NATIVE_TARGET = $(ARCH)-osx
+ LDFLAGS += -flat_namespace -undefined warning
+ export MACOSX_DEPLOYMENT_TARGET := 10.2
 endif
 
 # run local version of tcc with local libraries and includes
-TCCFLAGS-unx = -B$(TOP) -I$(TOPSRC)/include -I$(TOPSRC) -I$(TOP) -I$(TOPSRC)/src/core -I$(TOPSRC)/src/targets -I$(TOPSRC)/src/formats
-TCCFLAGS-win = -B$(TOPSRC)/win32 -I$(TOPSRC)/include -I$(TOPSRC) -I$(TOP) -I$(TOPSRC)/src/core -I$(TOPSRC)/src/targets -I$(TOPSRC)/src/formats -L$(TOP)
-TCCFLAGS = $(TCCFLAGS$(CFGWIN))
+TCCFLAGS = -B$(TOP) -I$(TOPSRC)/include -I$(TOPSRC) -I$(TOP) -I$(TOPSRC)/src/core -I$(TOPSRC)/src/targets -I$(TOPSRC)/src/formats
 TCC = $(TOP)/tcc$(EXESUF) $(TCCFLAGS)
 ifdef CONFIG_OSX
  TCCFLAGS += -D_ANSI_SOURCE
@@ -66,7 +54,6 @@ LIBS_P = $(LIBS)
 LDFLAGS_P = $(LDFLAGS)
 
 CONFIG_$(ARCH) = yes
-NATIVE_DEFINES_$(CONFIG_WIN32) += -DTCC_TARGET_PE
 NATIVE_DEFINES_$(CONFIG_OSX) += -DTCC_TARGET_MACHO
 NATIVE_DEFINES_$(CONFIG_uClibc) += -DTCC_UCLIBC
 NATIVE_DEFINES_$(CONFIG_musl) += -DTCC_MUSL
@@ -100,9 +87,9 @@ cross: $(LIBTCC1_CROSS) $(PROGS_CROSS)
 # build specific cross compiler & lib
 cross-%: %-tcc$(EXESUF) %-libtcc1.a ;
 
-install: ; @$(MAKE) --no-print-directory install$(CFGWIN)
-install-strip: ; @$(MAKE) --no-print-directory install$(CFGWIN) CONFIG_strip=yes
-uninstall: ; @$(MAKE) --no-print-directory uninstall$(CFGWIN)
+install: ; @$(MAKE) --no-print-directory install-unx
+install-strip: ; @$(MAKE) --no-print-directory install-unx CONFIG_strip=yes
+uninstall: ; @$(MAKE) --no-print-directory uninstall-unx
 
 ifdef CONFIG_cross
 all : cross
@@ -121,16 +108,10 @@ DEFINES += $(if $(ROOT-$T),-DCONFIG_SYSROOT="\"$(ROOT-$T)\"")
 DEFINES += $(if $(CRT-$T),-DCONFIG_TCC_CRTPREFIX="\"$(CRT-$T)\"")
 DEFINES += $(if $(LIB-$T),-DCONFIG_TCC_LIBPATHS="\"$(LIB-$T)\"")
 DEFINES += $(if $(INC-$T),-DCONFIG_TCC_SYSINCLUDEPATHS="\"$(INC-$T)\"")
-DEFINES += $(DEF-$(or $(findstring win,$T),unx))
+DEFINES += $(DEF-unx)
 
 ifneq ($(X),)
-ifeq ($(CONFIG_WIN32),yes)
-DEF-win += -DTCC_LIBTCC1="\"$(X)libtcc1.a\""
-DEF-unx += -DTCC_LIBTCC1="\"lib/$(X)libtcc1.a\""
-else
 DEF-all += -DTCC_LIBTCC1="\"$(X)libtcc1.a\""
-DEF-win += -DCONFIG_TCCDIR="\"$(tccdir)/win32\""
-endif
 endif
 
 # include custom configuration (see make help)
@@ -188,16 +169,6 @@ libtcc.so: $(LIBTCC_OBJ)
 libtcc.so: CFLAGS+=-fPIC
 libtcc.so: LDFLAGS+=-fPIC
 
-# windows dynamic libtcc library
-libtcc.dll : $(LIBTCC_OBJ)
-	$(CC) -shared -o $@ $^ $(LDFLAGS)
-libtcc.dll : DEFINES += -DLIBTCC_AS_DLL
-
-# import file for windows libtcc.dll
-libtcc.def : libtcc.dll tcc$(EXESUF)
-	$(XTCC) -impdef $< -o $@
-XTCC ?= ./tcc$(EXESUF)
-
 # TinyCC runtime libraries
 libtcc1.a : tcc$(EXESUF) FORCE
 	@$(MAKE) -C lib DEFINES='$(DEF-$T)'
@@ -229,8 +200,6 @@ INSTALL = install -m644
 INSTALLBIN = install -m755 $(STRIP_$(CONFIG_strip))
 STRIP_yes = -s
 
-LIBTCC1_W = $(filter %-win32-libtcc1.a %-wince-libtcc1.a,$(LIBTCC1_CROSS))
-LIBTCC1_U = $(filter-out $(LIBTCC1_W),$(LIBTCC1_CROSS))
 IB = $(if $1,mkdir -p $2 && $(INSTALLBIN) $1 $2)
 IBw = $(call IB,$(wildcard $1),$2)
 IF = $(if $1,mkdir -p $2 && $(INSTALL) $1 $2)
@@ -240,18 +209,13 @@ IR = mkdir -p $2 && cp -r $1/. $2
 # install progs & libs
 install-unx:
 	$(call IBw,$(PROGS) $(PROGS_CROSS),"$(bindir)")
-	$(call IFw,$(LIBTCC1) $(LIBTCC1_U),"$(tccdir)")
+	$(call IFw,$(LIBTCC1) $(LIBTCC1_CROSS),"$(tccdir)")
 	$(call IF,$(TOPSRC)/include/*.h,"$(tccdir)/include")
 	$(call $(if $(findstring .so,$(LIBTCC)),IBw,IFw),$(LIBTCC),"$(libdir)")
 	$(call IF,$(TOPSRC)/src/core/libtcc.h,"$(includedir)")
 	$(call IFw,tcc.1,"$(mandir)/man1")
 	$(call IFw,tcc-doc.info,"$(infodir)")
 	$(call IFw,tcc-doc.html,"$(docdir)")
-ifneq "$(wildcard $(LIBTCC1_W))" ""
-	$(call IFw,$(TOPSRC)/win32/lib/*.def $(LIBTCC1_W),"$(tccdir)/win32/lib")
-	$(call IR,$(TOPSRC)/win32/include,"$(tccdir)/win32/include")
-	$(call IF,$(TOPSRC)/include/*.h,"$(tccdir)/win32/include")
-endif
 
 # uninstall
 uninstall-unx:
@@ -259,35 +223,6 @@ uninstall-unx:
 	@rm -fv "$(libdir)/libtcc.a" "$(libdir)/libtcc.so" "$(includedir)/libtcc.h"
 	@rm -fv "$(mandir)/man1/tcc.1" "$(infodir)/tcc-doc.info"
 	@rm -fv "$(docdir)/tcc-doc.html"
-	rm -r "$(tccdir)"
-
-# install progs & libs on windows
-install-win:
-	$(call IBw,$(PROGS) $(PROGS_CROSS) $(subst libtcc.a,,$(LIBTCC)),"$(bindir)")
-	$(call IF,$(TOPSRC)/win32/lib/*.def,"$(tccdir)/lib")
-	$(call IFw,libtcc1.a $(LIBTCC1_W),"$(tccdir)/lib")
-	$(call IF,$(TOPSRC)/include/*.h,"$(tccdir)/include")
-	$(call IR,$(TOPSRC)/win32/include,"$(tccdir)/include")
-	$(call IR,$(TOPSRC)/win32/examples,"$(tccdir)/examples")
-	$(call IF,$(TOPSRC)/tests/libtcc_test.c,"$(tccdir)/examples")
-	$(call IFw,$(TOPSRC)/src/core/libtcc.h $(subst .dll,.def,$(LIBTCC)),"$(libdir)")
-	$(call IFw,$(TOPSRC)/win32/tcc-win32.txt tcc-doc.html,"$(docdir)")
-ifneq "$(wildcard $(LIBTCC1_U))" ""
-	$(call IFw,$(LIBTCC1_U),"$(tccdir)/lib")
-	$(call IF,$(TOPSRC)/include/*.h,"$(tccdir)/lib/include")
-endif
-
-# the msys-git shell works to configure && make except it does not have install
-ifeq "$(and $(CONFIG_WIN32),$(shell which install >/dev/null 2>&1 || echo no))" "no"
-install-win : INSTALL = cp
-install-win : INSTALLBIN = cp
-endif
-
-# uninstall on windows
-uninstall-win:
-	@rm -fv $(foreach P,$(PROGS) $(PROGS_CROSS) libtcc.dll,"$(bindir)/$P")
-	@rm -fv $(foreach F,tcc-doc.html tcc-win32.txt,"$(docdir)/$F")
-	@rm -fv $(foreach F,libtcc.h libtcc.def libtcc.a,"$(libdir)/$F")
 	rm -r "$(tccdir)"
 
 # --------------------------------------------------------------------------
@@ -298,16 +233,12 @@ tags : ; ctags $(TAGFILES)
 # cannot have both tags and TAGS on windows
 ETAGS : ; etags $(TAGFILES)
 
-# create release tarball from *current* git branch (including tcc-doc.html
-# and converting two files to CRLF)
+# create release tarball from *current* git branch (including tcc-doc.html)
 TCC-VERSION = tcc-$(VERSION)
 tar:    tcc-doc.html
 	mkdir $(TCC-VERSION)
 	( cd $(TCC-VERSION) && git --git-dir ../.git checkout -f )
 	cp tcc-doc.html $(TCC-VERSION)
-	for f in tcc-win32.txt build-tcc.bat ; do \
-	    cat win32/$$f | sed 's,\(.*\),\1\r,g' > $(TCC-VERSION)/win32/$$f ; \
-	done
 	tar cjf $(TCC-VERSION).tar.bz2 $(TCC-VERSION)
 	rm -rf $(TCC-VERSION)
 	git reset
@@ -354,13 +285,13 @@ help:
 	@echo "      NATIVE_DEFINES += -D..."
 	@echo ""
 	@echo "   Or for example to configure the search paths for a cross-compiler"
-	@echo "   that expects the linux files in <tccdir>/i386-linux:"
+	@echo "   that expects the linux files in <tccdir>/arm64-linux:"
 	@echo ""
-	@echo "      ROOT-i386 = {B}/i386-linux"
-	@echo "      CRT-i386  = {B}/i386-linux/usr/lib"
-	@echo "      LIB-i386  = {B}/i386-linux/lib:{B}/i386-linux/usr/lib"
-	@echo "      INC-i386  = {B}/lib/include:{B}/i386-linux/usr/include"
-	@echo "      DEF-i386  += -D__linux__"
+	@echo "      ROOT-arm64 = {B}/arm64-linux"
+	@echo "      CRT-arm64  = {B}/arm64-linux/usr/lib"
+	@echo "      LIB-arm64  = {B}/arm64-linux/lib:{B}/arm64-linux/usr/lib"
+	@echo "      INC-arm64  = {B}/lib/include:{B}/arm64-linux/usr/include"
+	@echo "      DEF-arm64  += -D__linux__"
 	@echo ""
 	@echo "make test"
 	@echo "   run all tests"

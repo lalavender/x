@@ -144,22 +144,15 @@ DEF(TOK_builtin_frame_address, "__builtin_frame_address")
 DEF(TOK_builtin_return_address, "__builtin_return_address")
 DEF(TOK_builtin_expect, "__builtin_expect")
 /*DEF(TOK_builtin_va_list, "__builtin_va_list")*/
-#if defined TCC_TARGET_PE && defined TCC_TARGET_X86_64
-DEF(TOK_builtin_va_start, "__builtin_va_start")
-#elif defined TCC_TARGET_X86_64
-DEF(TOK_builtin_va_arg_types, "__builtin_va_arg_types")
-#elif defined TCC_TARGET_ARM64
+#ifdef TCC_TARGET_ARM64
 DEF(TOK___va_start, "__va_start")
 DEF(TOK___va_arg, "__va_arg")
 #endif
 
 /* pragma */
 DEF(TOK_pack, "pack")
-#if !defined(TCC_TARGET_I386) && !defined(TCC_TARGET_X86_64)
-/* already defined for assembler */
 DEF(TOK_ASM_push, "push")
 DEF(TOK_ASM_pop, "pop")
-#endif
 DEF(TOK_comment, "comment")
 DEF(TOK_lib, "lib")
 DEF(TOK_push_macro, "push_macro")
@@ -247,13 +240,6 @@ DEF(TOK___fixdfdi, "__fixdfdi")
 DEF(TOK___fixxfdi, "__fixxfdi")
 #endif
 
-#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64
-DEF(TOK_alloca, "alloca")
-#endif
-
-#if defined TCC_TARGET_PE
-DEF(TOK___chkstk, "__chkstk")
-#endif
 #ifdef TCC_TARGET_ARM64
 DEF(TOK___arm64_clear_cache, "__arm64_clear_cache")
 DEF(TOK___addtf3, "__addtf3")
@@ -292,13 +278,6 @@ DEF(TOK___bound_ptr_indir16, "__bound_ptr_indir16")
 DEF(TOK___bound_main_arg, "__bound_main_arg")
 DEF(TOK___bound_local_new, "__bound_local_new")
 DEF(TOK___bound_local_delete, "__bound_local_delete")
-#ifdef TCC_TARGET_PE
-DEF(TOK_malloc, "malloc")
-DEF(TOK_free, "free")
-DEF(TOK_realloc, "realloc")
-DEF(TOK_memalign, "memalign")
-DEF(TOK_calloc, "calloc")
-#endif
 DEF(TOK_strlen, "strlen")
 DEF(TOK_strcpy, "strcpy")
 #endif

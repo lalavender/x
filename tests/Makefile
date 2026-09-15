@@ -26,13 +26,10 @@ BTESTS = test1b test3b btest
 
 # test4 -- problem with -static
 # asmtest / asmtest2 -- minor differences with gcc
-# btest -- works on i386 (including win32)
+# btest -- works on i386
 
 # bounds-checking is supported only on i386
 ifneq ($(ARCH),i386)
- TESTS := $(filter-out $(BTESTS),$(TESTS))
-endif
-ifdef CONFIG_WIN32
  TESTS := $(filter-out $(BTESTS),$(TESTS))
 endif
 ifdef CONFIG_OSX # -run only
@@ -49,10 +46,6 @@ ifeq (,$(filter i386 x86_64,$(ARCH)))
 endif
 ifndef CONFIG_cross
  TESTS := $(filter-out cross-%,$(TESTS))
-endif
-
-ifeq ($(OS),Windows_NT) # for libtcc_test to find libtcc.dll
- PATH := $(CURDIR)/$(TOP)$(if $(findstring :\,$(PATH)),;,:)$(PATH)
 endif
 
 RUN_TCC = $(NATIVE_DEFINES) -run $(TOPSRC)/src/core/tcc.c $(TCCFLAGS)
@@ -132,13 +125,11 @@ dlltest:
 	$(TCC) $(NATIVE_DEFINES) -DLIBTCC_AS_DLL $(TOPSRC)/src/core/libtcc.c $(LIBS) -shared -o libtcc2$(DLLSUF)
 	$(TCC) $(NATIVE_DEFINES) -DONE_SOURCE=0 $(TOPSRC)/src/core/tcc.c libtcc2$(DLLSUF) $(LIBS) -Wl,-rpath=. -o tcc2$(EXESUF)
 	./tcc2$(EXESUF) $(TCCFLAGS) $(RUN_TCC) -run $(TOPSRC)/examples/ex1.c
-ifndef CONFIG_WIN32
 	@echo ------------ $@ with PIC ------------
 	$(CC) $(CFLAGS) -fPIC $(NATIVE_DEFINES) -DLIBTCC_AS_DLL -c $(TOPSRC)/src/core/libtcc.c
 	$(TCC) libtcc.o $(LIBS) -shared -o libtcc2$(DLLSUF)
 	$(TCC) $(NATIVE_DEFINES) -DONE_SOURCE=0 $(TOPSRC)/src/core/tcc.c libtcc2$(DLLSUF) $(LIBS) -Wl,-rpath=. -o tcc2$(EXESUF)
 	./tcc2$(EXESUF) $(TCCFLAGS) $(RUN_TCC) -run $(TOPSRC)/examples/ex1.c
-endif
 	@rm tcc2$(EXESUF) libtcc2$(DLLSUF)
 
 memtest:
@@ -248,7 +239,7 @@ asm-c-connect-test: asm-c-connect$(EXESUF) asm-c-connect-sep$(EXESUF)
 
 cross-test :
 	@echo ------------ $@ ------------
-	$(TOP)/arm64-tcc$(EXESUF) $(TCCFLAGS-unx) -c $(TOPSRC)/examples/ex3.c && echo "ok"
+	$(TOP)/arm64-tcc$(EXESUF) $(TCCFLAGS) -c $(TOPSRC)/examples/ex3.c && echo "ok"
 
 # targets for development
 %.bin: %.c tcc

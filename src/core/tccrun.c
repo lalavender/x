@@ -184,13 +184,9 @@ static int tcc_relocate_ex(TCCState *s1, void *ptr, addr_t ptr_diff)
 
     if (NULL == ptr) {
         s1->nb_errors = 0;
-#ifdef TCC_TARGET_PE
-        pe_output_file(s1, NULL);
-#else
         tcc_add_runtime(s1);
 	resolve_common_syms(s1);
         build_got_entries(s1);
-#endif
         if (s1->nb_errors)
             return -1;
     }
@@ -237,10 +233,6 @@ static int tcc_relocate_ex(TCCState *s1, void *ptr, addr_t ptr_diff)
 
     if (0 == mem)
         return offset + RUN_SECTION_ALIGNMENT;
-
-#ifdef TCC_TARGET_PE
-    s1->pe_imagebase = mem;
-#endif
 
     /* relocate each section */
     for(i = 1; i < s1->nb_sections; i++) {
