@@ -1,27 +1,27 @@
 /*
- *  TCC - Tiny C Compiler
+ *  TCC - Tiny C Compiler（微型 C 编译器）
  * 
  *  Copyright (c) 2001-2004 Fabrice Bellard
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * 本库为自由软件；你可以遵照自由软件基金会发布的 GNU 宽通用
+ * 公共许可证的条款重新分发和/或修改它，无论是许可证的
+ * 第 2 版，还是（由你选择的）任何更新的版本。
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * 分发本库是希望它有用，但不提供任何担保；
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * 甚至不提供对适销性或特定用途适用性的默示担保。
+ * 详见 GNU 宽通用公共许可证。
+ *
+ * 你应当已经随本库收到一份 GNU 宽通用公共许可证的副本；
+ * 如果没有，请写信给自由软件基金会：
+ * 59 Temple Place, Suite 330, Boston, MA  02111-1307
+ * USA
  */
 
 #include "tcc.h"
 
 /********************************************************/
-/* global variables */
+/* 全局变量 */
 
 ST_DATA int tok_flags;
 ST_DATA int parse_flags;
@@ -30,9 +30,9 @@ ST_DATA struct BufferedFile *file;
 ST_DATA int ch, tok;
 ST_DATA CValue tokc;
 ST_DATA const int *macro_ptr;
-ST_DATA CString tokcstr; /* current parsed string, if any */
+ST_DATA CString tokcstr; /* 当前解析得到的字符串（如果有） */
 
-/* display benchmark infos */
+/* 显示基准测试信息 */
 ST_DATA int total_lines;
 ST_DATA int total_bytes;
 ST_DATA int tok_ident;
@@ -64,9 +64,9 @@ static const char tcc_keywords[] =
 #undef DEF
 ;
 
-/* WARNING: the content of this string encodes token numbers */
+/* WARNING: 这个字符串的内容编码了词法单元编号 */
 static const unsigned char tok_two_chars[] =
-/* outdated -- gr
+/* 已过时 -- gr
     "<=\236>=\235!=\225&&\240||\241++\244--\242==\224<<\1>>\2+=\253"
     "-=\255*=\252/=\257%=\245&=\246^=\336|=\374->\313..\250##\266";
 */{
@@ -109,7 +109,7 @@ ST_FUNC void expect(const char *msg)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Custom allocator for tiny objects */
+/* 用于微小对象的定制分配器 */
 
 #define USE_TAL
 
@@ -125,39 +125,59 @@ ST_FUNC void expect(const char *msg)
 #define TAL_DEBUG_PARAMS
 #else
 #define TAL_DEBUG 1
-//#define TAL_INFO 1 /* collect and dump allocators stats */
+//#define TAL_INFO 1 /* 收集并转储分配器统计信息 */
 #define tal_free(al, p) tal_free_impl(al, p, __FILE__, __LINE__)
 #define tal_realloc(al, p, size) tal_realloc_impl(&al, p, size, __FILE__, __LINE__)
 #define TAL_DEBUG_PARAMS , const char *file, int line
 #define TAL_DEBUG_FILE_LEN 40
 #endif
 
-#define TOKSYM_TAL_SIZE     (768 * 1024) /* allocator for tiny TokenSym in table_ident */
-#define TOKSTR_TAL_SIZE     (768 * 1024) /* allocator for tiny TokenString instances */
-#define CSTR_TAL_SIZE       (256 * 1024) /* allocator for tiny CString instances */
-#define TOKSYM_TAL_LIMIT    256 /* prefer unique limits to distinguish allocators debug msgs */
+#define TOKSYM_TAL_SIZE     (768 * 1024) /* 用于 table_ident 中微小 TokenSym 的分配器 */
+#define TOKSTR_TAL_SIZE     (768 * 1024) /* 用于微小 TokenString 实例的分配器 */
+#define CSTR_TAL_SIZE       (256 * 1024) /* 用于微小 CString 实例的分配器 */
+#define TOKSYM_TAL_LIMIT    256 /* 用唯一的限值区分各分配器的调试信息 */
 #define TOKSTR_TAL_LIMIT    128 /* 32 * sizeof(int) */
 #define CSTR_TAL_LIMIT      1024
 
+/*
+ * TinyAlloc —— 小对象批量分配器（tiny allocator）
+ *
+ * 预处理阶段会产生海量小而短命的对象（TokenSym、TokenString、CString），
+ * 逐个 malloc 既慢又浪费内存，因此改用这里的“碰撞指针”式分配：
+ * 每个 TinyAlloc 持有一整块连续缓冲（buffer，长度 size），分配就是向后移动 p，
+ * 不做逐块回收；只有当某分配器内所有对象都已释放（nb_allocs 归零）时，
+ * 才把 p 整体退回到 buffer 重新使用。
+ *
+ * 不同尺寸类别各有一个分配器（见 TOKSYM_TAL_* / TOKSTR_TAL_* / CSTR_TAL_*），
+ * 通过 next 串成链：释放时沿链判断指针落在哪个缓冲区间里（tal_free_impl()），
+ * 都不匹配才回落到 tcc_free()；top 指向该链的表头。
+ * 定义 TAL_INFO/TAL_DEBUG 时会附带统计与泄漏/重复释放诊断（见下面 tal_* 函数）。
+ */
 typedef struct TinyAlloc {
-    unsigned  limit;
-    unsigned  size;
-    uint8_t *buffer;
-    uint8_t *p;
-    unsigned  nb_allocs;
-    struct TinyAlloc *next, *top;
+    unsigned  limit;      /* 单个对象的大小上限（决定哪些对象走本分配器） */
+    unsigned  size;       /* 缓冲总字节数 */
+    uint8_t  *buffer;     /* 缓冲起始地址 */
+    uint8_t  *p;          /* 下一个可分配位置（碰撞指针） */
+    unsigned  nb_allocs;  /* 当前存活对象数，归零时缓冲可整体复用 */
+    struct TinyAlloc *next, *top; /* 链上的下一个分配器、链的表头 */
 #ifdef TAL_INFO
-    unsigned  nb_peak;
-    unsigned  nb_total;
-    unsigned  nb_missed;
-    uint8_t *peak_p;
+    unsigned  nb_peak;    /* 存活对象数峰值 */
+    unsigned  nb_total;   /* 累计分配次数 */
+    unsigned  nb_missed;  /* 未命中（对象过大而回落 tcc_malloc）次数 */
+    uint8_t  *peak_p;     /* 峰值时的 p，用于统计缓冲利用率 */
 #endif
 } TinyAlloc;
 
+/*
+ * tal_header_t —— TAL_DEBUG 模式下每个小对象前的调试头
+ *
+ * size 是对象字节数（分配时写入，也用于遍历缓冲）；line_num/file_name 记录
+ * 发起分配的位置，line_num 取负表示该块已释放（用于检测重复释放）。
+ */
 typedef struct tal_header_t {
     unsigned  size;
 #ifdef TAL_DEBUG
-    int     line_num; /* negative line_num used for double free check */
+    int     line_num; /* 负的 line_num 用于重复释放检查 */
     char    file_name[TAL_DEBUG_FILE_LEN + 1];
 #endif
 } tal_header_t;
@@ -321,21 +341,21 @@ tail_call:
 #endif /* USE_TAL */
 
 /* ------------------------------------------------------------------------- */
-/* CString handling */
+/* CString 处理 */
 static void cstr_realloc(CString *cstr, int new_size)
 {
     int size;
 
     size = cstr->size_allocated;
     if (size < 8)
-        size = 8; /* no need to allocate a too small first string */
+        size = 8; /* 无需为首个字符串分配得太小 */
     while (size < new_size)
         size = size * 2;
     cstr->data = tal_realloc(cstr_alloc, cstr->data, size);
     cstr->size_allocated = size;
 }
 
-/* add a byte */
+/* 添加一个字节 */
 ST_INLN void cstr_ccat(CString *cstr, int ch)
 {
     int size;
@@ -358,7 +378,7 @@ ST_FUNC void cstr_cat(CString *cstr, const char *str, int len)
     cstr->size = size;
 }
 
-/* add a wide char */
+/* 添加一个宽字符 */
 ST_FUNC void cstr_wccat(CString *cstr, int ch)
 {
     int size;
@@ -374,24 +394,24 @@ ST_FUNC void cstr_new(CString *cstr)
     memset(cstr, 0, sizeof(CString));
 }
 
-/* free string and reset it to NULL */
+/* 释放字符串并重置为 NULL */
 ST_FUNC void cstr_free(CString *cstr)
 {
     tal_free(cstr_alloc, cstr->data);
     cstr_new(cstr);
 }
 
-/* reset string to empty */
+/* 把字符串重置为空 */
 ST_FUNC void cstr_reset(CString *cstr)
 {
     cstr->size = 0;
 }
 
-/* XXX: unicode ? */
+/* XXX: unicode 呢？ */
 static void add_char(CString *cstr, int c)
 {
     if (c == '\'' || c == '\"' || c == '\\') {
-        /* XXX: could be more precise if char or string */
+        /* XXX: 如果知道是字符还是字符串可以更精确 */
         cstr_ccat(cstr, '\\');
     }
     if (c >= 32 && c <= 126) {
@@ -409,7 +429,7 @@ static void add_char(CString *cstr, int c)
 }
 
 /* ------------------------------------------------------------------------- */
-/* allocate a new token */
+/* 分配一个新的词法单元 */
 static TokenSym *tok_alloc_new(TokenSym **pts, const char *str, int len)
 {
     TokenSym *ts, **ptable;
@@ -418,7 +438,7 @@ static TokenSym *tok_alloc_new(TokenSym **pts, const char *str, int len)
     if (tok_ident >= SYM_FIRST_ANOM) 
         tcc_error("memory full (symbols)");
 
-    /* expand token table if needed */
+    /* 需要时扩展词法单元表 */
     i = tok_ident - TOK_IDENT;
     if ((i % TOK_ALLOC_INCR) == 0) {
         ptable = tcc_realloc(table_ident, (i + TOK_ALLOC_INCR) * sizeof(TokenSym *));
@@ -444,7 +464,7 @@ static TokenSym *tok_alloc_new(TokenSym **pts, const char *str, int len)
 #define TOK_HASH_FUNC(h, c) ((h) + ((h) << 5) + ((h) >> 27) + (c))
 
 
-/* find a token and add it if not found */
+/* 查找一个词法单元，找不到就添加它 */
 ST_FUNC TokenSym *tok_alloc(const char *str, int len)
 {
     TokenSym *ts, **pts;
@@ -468,8 +488,8 @@ ST_FUNC TokenSym *tok_alloc(const char *str, int len)
     return tok_alloc_new(pts, str, len);
 }
 
-/* XXX: buffer overflow */
-/* XXX: float tokens */
+/* XXX: 缓冲区溢出 */
+/* XXX: 浮点词法单元 */
 ST_FUNC const char *get_tok_str(int v, CValue *cv)
 {
     char *p;
@@ -485,7 +505,7 @@ ST_FUNC const char *get_tok_str(int v, CValue *cv)
     case TOK_CULONG:
     case TOK_CLLONG:
     case TOK_CULLONG:
-        /* XXX: not quite exact, but only useful for testing  */
+        /* XXX: 并不完全精确，但只用于测试  */
 #ifdef _WIN32
         sprintf(p, "%u", (unsigned)cv->i);
 #else
@@ -533,7 +553,7 @@ ST_FUNC const char *get_tok_str(int v, CValue *cv)
 	cstr_cat(&cstr_buf, "<linenumber>", 0);
 	break;
 
-    /* above tokens have value, the ones below don't */
+    /* 上面的词法单元有值，下面的没有 */
     case TOK_LT:
         v = '<';
         goto addv;
@@ -550,7 +570,7 @@ ST_FUNC const char *get_tok_str(int v, CValue *cv)
         return strcpy(p, "<eof>");
     default:
         if (v < TOK_IDENT) {
-            /* search in two bytes table */
+            /* 在两字节表中查找 */
             const unsigned char *q = tok_two_chars;
             while (*q) {
                 if (q[2] == v) {
@@ -571,10 +591,10 @@ ST_FUNC const char *get_tok_str(int v, CValue *cv)
         } else if (v < tok_ident) {
             return table_ident[v - TOK_IDENT]->str;
         } else if (v >= SYM_FIRST_ANOM) {
-            /* special name for anonymous symbol */
+            /* 匿名符号的特殊名字 */
             sprintf(p, "L.%u", v - SYM_FIRST_ANOM);
         } else {
-            /* should never happen */
+            /* 不应该发生 */
             return NULL;
         }
         break;
@@ -582,14 +602,14 @@ ST_FUNC const char *get_tok_str(int v, CValue *cv)
     return cstr_buf.data;
 }
 
-/* return the current character, handling end of block if necessary
-   (but not stray) */
+/* 返回当前字符，必要时处理块结束
+   （但不处理游离的结束标记） */
 ST_FUNC int handle_eob(void)
 {
     BufferedFile *bf = file;
     int len;
 
-    /* only tries to read if really end of buffer */
+    /* 只有真正到达缓冲区末尾时才尝试读取 */
     if (bf->buf_ptr >= bf->buf_end) {
         if (bf->fd >= 0) {
 #if defined(PARSE_DEBUG)
@@ -616,16 +636,16 @@ ST_FUNC int handle_eob(void)
     }
 }
 
-/* read next char from current input file and handle end of input buffer */
+/* 从当前输入文件读取下一个字符，并处理输入缓冲区结束 */
 ST_INLN void inp(void)
 {
     ch = *(++(file->buf_ptr));
-    /* end of buffer/file handling */
+    /* 缓冲区/文件结束处理 */
     if (ch == CH_EOB)
         ch = handle_eob();
 }
 
-/* handle '\[\r]\n' */
+/* 处理 '\[\r]\n' */
 static int handle_stray_noerror(void)
 {
     while (ch == '\\') {
@@ -653,8 +673,8 @@ static void handle_stray(void)
         tcc_error("stray '\\' in program");
 }
 
-/* skip the stray and handle the \\n case. Output an error if
-   incorrect char after the stray */
+/* 跳过游离的反斜杠并处理 \\n 情形。如果
+   游离的反斜杠后面字符不正确则报错 */
 static int handle_stray1(uint8_t *p)
 {
     int c;
@@ -677,7 +697,7 @@ static int handle_stray1(uint8_t *p)
     return c;
 }
 
-/* handle just the EOB case, but not stray */
+/* 只处理 EOB 情形，不处理游离的反斜杠 */
 #define PEEKC_EOB(c, p)\
 {\
     p++;\
@@ -689,7 +709,7 @@ static int handle_stray1(uint8_t *p)
     }\
 }
 
-/* handle the complicated stray case */
+/* 处理复杂的游离反斜杠情形 */
 #define PEEKC(c, p)\
 {\
     p++;\
@@ -700,9 +720,9 @@ static int handle_stray1(uint8_t *p)
     }\
 }
 
-/* input with '\[\r]\n' handling. Note that this function cannot
-   handle other characters after '\', so you cannot call it inside
-   strings or comments */
+/* 带 '\[\r]\n' 处理的输入。注意本函数无法
+   处理 '\' 之后的其他字符，所以不能在
+   字符串或注释内部调用它 */
 ST_FUNC void minp(void)
 {
     inp();
@@ -710,7 +730,7 @@ ST_FUNC void minp(void)
         handle_stray();
 }
 
-/* single line C++ comments */
+/* 单行 C++ 注释 */
 static uint8_t *parse_line_comment(uint8_t *p)
 {
     int c;
@@ -747,14 +767,14 @@ static uint8_t *parse_line_comment(uint8_t *p)
     return p;
 }
 
-/* C comments */
+/* C 注释 */
 ST_FUNC uint8_t *parse_comment(uint8_t *p)
 {
     int c;
 
     p++;
     for(;;) {
-        /* fast skip loop */
+        /* 快速跳过循环 */
         for(;;) {
             c = *p;
             if (c == '\n' || c == '*' || c == '\\')
@@ -765,7 +785,7 @@ ST_FUNC uint8_t *parse_comment(uint8_t *p)
                 break;
             p++;
         }
-        /* now we can handle all the cases */
+        /* 现在可以处理所有情形了 */
         if (c == '\n') {
             file->line_num++;
             p++;
@@ -784,7 +804,7 @@ ST_FUNC uint8_t *parse_comment(uint8_t *p)
                     if (c == CH_EOF)
                         tcc_error("unexpected end of file in comment");
                     if (c == '\\') {
-                        /* skip '\[\r]\n', otherwise just skip the stray */
+                        /* 跳过 '\[\r]\n'，否则只跳过游离的反斜杠 */
                         while (c == '\\') {
                             PEEKC_EOB(c, p);
                             if (c == '\n') {
@@ -807,7 +827,7 @@ ST_FUNC uint8_t *parse_comment(uint8_t *p)
             }
         after_star: ;
         } else {
-            /* stray, eob or eof */
+            /* 游离的反斜杠、eob 或 eof */
             file->buf_ptr = p;
             c = handle_eob();
             p = file->buf_ptr;
@@ -849,7 +869,7 @@ static inline int check_space(int t, int *spc)
     return 0;
 }
 
-/* parse a string without interpreting escapes */
+/* 解析字符串，不解释转义序列 */
 static uint8_t *parse_pp_string(uint8_t *p,
                                 int sep, CString *str)
 {
@@ -865,10 +885,10 @@ static uint8_t *parse_pp_string(uint8_t *p,
             p = file->buf_ptr;
             if (c == CH_EOF) {
             unterminated_string:
-                /* XXX: indicate line number of start of string */
+                /* XXX: 指出字符串起始处的行号 */
                 tcc_error("missing terminating %c character", sep);
             } else if (c == '\\') {
-                /* escape : just skip \[\r]\n */
+                /* 转义：只跳过 \[\r]\n */
                 PEEKC_EOB(c, p);
                 if (c == '\n') {
                     file->line_num++;
@@ -912,8 +932,8 @@ static uint8_t *parse_pp_string(uint8_t *p,
     return p;
 }
 
-/* skip block of text until #else, #elif or #endif. skip also pairs of
-   #if/#endif */
+/* 跳过文本块直到 #else、#elif 或 #endif。同时
+   跳过成对的 #if/#endif */
 static void preprocess_skip(void)
 {
     int a, start_of_line, c, in_warn_or_error;
@@ -950,14 +970,14 @@ redo_start:
             }
             p = file->buf_ptr;
             goto redo_no_start;
-        /* skip strings */
+        /* 跳过字符串 */
         case '\"':
         case '\'':
             if (in_warn_or_error)
                 goto _default;
             p = parse_pp_string(p, c, NULL);
             break;
-        /* skip comments */
+        /* 跳过注释 */
         case '/':
             if (in_warn_or_error)
                 goto _default;
@@ -1005,8 +1025,8 @@ _default:
 }
 
 #if 0
-/* return the number of additional 'ints' necessary to store the
-   token */
+/* 返回存储该词法单元所需的额外
+   'int' 个数 */
 static inline int tok_size(const int *p)
 {
     switch(*p) {
@@ -1038,7 +1058,7 @@ static inline int tok_size(const int *p)
 }
 #endif
 
-/* token string handling */
+/* 词法单元串处理 */
 ST_INLN void tok_str_new(TokenString *s)
 {
     s->str = NULL;
@@ -1120,7 +1140,7 @@ ST_FUNC void end_macro(void)
     macro_ptr = str->prev_ptr;
     file->line_num = str->save_line_num;
     if (str->alloc == 2) {
-        str->alloc = 3; /* just mark as finished */
+        str->alloc = 3; /* 仅标记为已结束 */
     } else {
         tok_str_free(str);
     }
@@ -1133,7 +1153,7 @@ static void tok_str_add2(TokenString *s, int t, CValue *cv)
     len = s->lastlen = s->len;
     str = s->str;
 
-    /* allocate space for worst case */
+    /* 按最坏情况分配空间 */
     if (len + TOK_MAX_SIZE >= s->allocated_len)
         str = tok_str_realloc(s, len + TOK_MAX_SIZE + 1);
     str[len++] = t;
@@ -1155,7 +1175,7 @@ static void tok_str_add2(TokenString *s, int t, CValue *cv)
     case TOK_STR:
     case TOK_LSTR:
         {
-            /* Insert the string into the int array. */
+            /* 把字符串插入 int 数组。 */
             size_t nb_words =
                 1 + (cv->str.size + sizeof(int) - 1) / sizeof(int);
             if (len + nb_words >= s->allocated_len)
@@ -1199,12 +1219,12 @@ static void tok_str_add2(TokenString *s, int t, CValue *cv)
     s->len = len;
 }
 
-/* add the current parse token in token string 's' */
+/* 把当前解析到的词法单元添加到词法单元串 's' */
 ST_FUNC void tok_str_add_tok(TokenString *s)
 {
     CValue cval;
 
-    /* save line number info */
+    /* 保存行号信息 */
     if (file->line_num != s->last_line_num) {
         s->last_line_num = file->line_num;
         cval.i = s->last_line_num;
@@ -1213,8 +1233,8 @@ ST_FUNC void tok_str_add_tok(TokenString *s)
     tok_str_add2(s, tok, &tokc);
 }
 
-/* get a token from an integer array and increment pointer
-   accordingly. we code it as a macro to avoid pointer aliasing. */
+/* 从整型数组中取出一个词法单元并相应地递增指针。
+   我们把它写成宏以避免指针别名问题。 */
 static inline void TOK_GET(int *t, const int **pp, CValue *cv)
 {
     const int *p = *pp;
@@ -1287,7 +1307,7 @@ static int macro_is_equal(const int *a, const int *b)
         return 1;
 
     while (*a && *b) {
-        /* first time preallocate macro_equal_buf, next time only reset position to start */
+        /* 第一次预分配 macro_equal_buf，之后只把位置重置到开头 */
         cstr_reset(&macro_equal_buf);
         TOK_GET(&t, &a, &cv);
         cstr_cat(&macro_equal_buf, get_tok_str(t, &cv), 0);
@@ -1298,7 +1318,7 @@ static int macro_is_equal(const int *a, const int *b)
     return !(*a || *b);
 }
 
-/* defines handling */
+/* define 处理 */
 ST_INLN void define_push(int v, int macro_type, int *str, Sym *first_arg)
 {
     Sym *s, *o;
@@ -1313,7 +1333,7 @@ ST_INLN void define_push(int v, int macro_type, int *str, Sym *first_arg)
 	tcc_warning("%s redefined", get_tok_str(v, NULL));
 }
 
-/* undefined a define symbol. Its name is just set to zero */
+/* 取消定义一个 define 符号。它的名字只是被置为零 */
 ST_FUNC void define_undef(Sym *s)
 {
     int v = s->v;
@@ -1329,7 +1349,7 @@ ST_INLN Sym *define_find(int v)
     return table_ident[v]->sym_define;
 }
 
-/* free define stack until top reaches 'b' */
+/* 释放 define 栈直到栈顶到达 'b' */
 ST_FUNC void free_defines(Sym *b)
 {
     while (define_stack != b) {
@@ -1340,8 +1360,8 @@ ST_FUNC void free_defines(Sym *b)
         sym_free(top);
     }
 
-    /* restore remaining (-D or predefined) symbols if they were
-       #undef'd in the file */
+    /* 如果剩余的（-D 或预定义）符号在文件中
+       被 #undef 过，则恢复它们 */
     while (b) {
         int v = b->v;
         if (v >= TOK_IDENT && v < tok_ident) {
@@ -1353,7 +1373,7 @@ ST_FUNC void free_defines(Sym *b)
     }
 }
 
-/* label lookup */
+/* 标号查找 */
 ST_FUNC Sym *label_find(int v)
 {
     v -= TOK_IDENT;
@@ -1369,8 +1389,8 @@ ST_FUNC Sym *label_push(Sym **ptop, int v, int flags)
     s->r = flags;
     ps = &table_ident[v - TOK_IDENT]->sym_label;
     if (ptop == &global_label_stack) {
-        /* modify the top most local identifier, so that
-           sym_identifier will point to 's' when popped */
+        /* 修改最顶层的本地标识符，使得弹出时
+           sym_identifier 指向 's' */
         while (*ps != NULL)
             ps = &(*ps)->prev_tok;
     }
@@ -1379,8 +1399,8 @@ ST_FUNC Sym *label_push(Sym **ptop, int v, int flags)
     return s;
 }
 
-/* pop labels until element last is reached. Look if any labels are
-   undefined. Define symbols if '&&label' was used. */
+/* 弹出标号直到到达元素 slast。检查是否有未定义的标号。
+   如果使用过 '&&label' 则定义符号。 */
 ST_FUNC void label_pop(Sym **ptop, Sym *slast, int keep)
 {
     Sym *s, *s1;
@@ -1393,12 +1413,12 @@ ST_FUNC void label_pop(Sym **ptop, Sym *slast, int keep)
                       get_tok_str(s->v, NULL));
         } else {
             if (s->c) {
-                /* define corresponding symbol. A size of
-                   1 is put. */
+                /* 定义对应的符号。大小置为
+                   1。 */
                 put_extern_sym(s, cur_text_section, s->jnext, 1);
             }
         }
-        /* remove label */
+        /* 移除标号 */
         table_ident[s->v - TOK_IDENT]->sym_label = s->prev_tok;
         if (!keep)
             sym_free(s);
@@ -1407,7 +1427,7 @@ ST_FUNC void label_pop(Sym **ptop, Sym *slast, int keep)
         *ptop = slast;
 }
 
-/* fake the nth "#if defined test_..." for tcc -dt -run */
+/* 为 tcc -dt -run 伪造第 n 个 "#if defined test_..." */
 static void maybe_run_test(TCCState *s)
 {
     const char *p;
@@ -1422,7 +1442,7 @@ static void maybe_run_test(TCCState *s)
     define_push(tok, MACRO_OBJ, NULL, NULL);
 }
 
-/* eval an expression for #if/#elif */
+/* 为 #if/#elif 求一个表达式的值 */
 static int expr_preprocess(void)
 {
     int c, t;
@@ -1431,7 +1451,7 @@ static int expr_preprocess(void)
     str = tok_str_alloc();
     pp_expr = 1;
     while (tok != TOK_LINEFEED && tok != TOK_EOF) {
-        next(); /* do macro subst */
+        next(); /* 做宏替换 */
         if (tok == TOK_DEFINED) {
             next_nomacro();
             t = tok;
@@ -1450,16 +1470,16 @@ static int expr_preprocess(void)
             tok = TOK_CINT;
             tokc.i = c;
         } else if (tok >= TOK_IDENT) {
-            /* if undefined macro */
+            /* 如果宏未定义 */
             tok = TOK_CINT;
             tokc.i = 0;
         }
         tok_str_add_tok(str);
     }
     pp_expr = 0;
-    tok_str_add(str, -1); /* simulate end of file */
+    tok_str_add(str, -1); /* 模拟文件结束 */
     tok_str_add(str, 0);
-    /* now evaluate C constant expression */
+    /* 现在求 C 常量表达式的值 */
     begin_macro(str, 1);
     next();
     c = expr_const();
@@ -1468,7 +1488,7 @@ static int expr_preprocess(void)
 }
 
 
-/* parse after #define */
+/* 解析 #define 之后的内容 */
 ST_FUNC void parse_define(void)
 {
     Sym *s, *first, **ps;
@@ -1478,15 +1498,15 @@ ST_FUNC void parse_define(void)
     v = tok;
     if (v < TOK_IDENT || v == TOK_DEFINED)
         tcc_error("invalid macro name '%s'", get_tok_str(tok, &tokc));
-    /* XXX: should check if same macro (ANSI) */
+    /* XXX: 应检查是否为同一个宏（ANSI） */
     first = NULL;
     t = MACRO_OBJ;
-    /* We have to parse the whole define as if not in asm mode, in particular
-       no line comment with '#' must be ignored.  Also for function
-       macros the argument list must be parsed without '.' being an ID
-       character.  */
+    /* 我们必须把整个 define 当作非 asm 模式来解析，特别
+       是不应把带 '#' 的行注释忽略掉。另外对于函数宏，
+       参数列表的解析中 '.' 不能是 ID 字符。
+        */
     parse_flags = ((parse_flags & ~PARSE_FLAG_ASM_FILE) | PARSE_FLAG_SPACES);
-    /* '(' must be just after macro definition for MACRO_FUNC */
+    /* 对于 MACRO_FUNC，'(' 必须紧跟在宏定义之后 */
     next_nomacro_spc();
     if (tok == '(') {
         int dotid = set_idnum('.', 0);
@@ -1523,13 +1543,13 @@ ST_FUNC void parse_define(void)
     tokstr_buf.len = 0;
     spc = 2;
     parse_flags |= PARSE_FLAG_ACCEPT_STRAYS | PARSE_FLAG_SPACES | PARSE_FLAG_LINEFEED;
-    /* The body of a macro definition should be parsed such that identifiers
-       are parsed like the file mode determines (i.e. with '.' being an
-       ID character in asm mode).  But '#' should be retained instead of
-       regarded as line comment leader, so still don't set ASM_FILE
-       in parse_flags. */
+    /* 宏定义体应当按文件模式决定的方式解析标识符（即 asm 模式
+       下 '.' 是 ID 字符）。但 '#' 应当被保留而不是当作行
+       注释引导符，所以仍然不在 parse_flags
+       中设置 ASM_FILE。
+        */
     while (tok != TOK_LINEFEED && tok != TOK_EOF) {
-        /* remove spaces around ## and after '#' */
+        /* 去掉 ## 周围以及 '#' 之后的空格 */
         if (TOK_TWOSHARPS == tok) {
             if (2 == spc)
                 goto bad_twosharp;
@@ -1549,7 +1569,7 @@ ST_FUNC void parse_define(void)
 
     parse_flags = saved_parse_flags;
     if (spc == 1)
-        --tokstr_buf.len; /* remove trailing space */
+        --tokstr_buf.len; /* 去掉末尾空格 */
     tok_str_add(&tokstr_buf, 0);
     if (3 == spc)
 bad_twosharp:
@@ -1592,7 +1612,7 @@ static CachedInclude *search_cached_include(TCCState *s1, const char *filename, 
     strcpy(e->filename, filename);
     e->ifndef_macro = e->once = 0;
     dynarray_add(&s1->cached_includes, &s1->nb_cached_includes, e);
-    /* add in hash table */
+    /* 加入哈希表 */
     e->hash_next = s1->cached_includes_hash[h];
     s1->cached_includes_hash[h] = s1->nb_cached_includes;
 #ifdef INC_DEBUG
@@ -1618,7 +1638,7 @@ static void pragma_parse(TCCState *s1)
         if (t == TOK_push_macro) {
             while (NULL == (s = define_find(v)))
                 define_push(v, 0, NULL, NULL);
-            s->type.ref = s; /* set push boundary */
+            s->type.ref = s; /* 设置 push 边界 */
         } else {
             for (s = define_stack; s; s = s->prev)
                 if (s->v == v && s->type.ref == s) {
@@ -1636,18 +1656,18 @@ static void pragma_parse(TCCState *s1)
         search_cached_include(s1, file->filename, 1)->once = pp_once;
 
     } else if (s1->output_type == TCC_OUTPUT_PREPROCESS) {
-        /* tcc -E: keep pragmas below unchanged */
+        /* tcc -E：以下 pragma 保持不变 */
         unget_tok(' ');
         unget_tok(TOK_PRAGMA);
         unget_tok('#');
         unget_tok(TOK_LINEFEED);
 
     } else if (tok == TOK_pack) {
-        /* This may be:
-           #pragma pack(1) // set
-           #pragma pack() // reset to default
-           #pragma pack(push,1) // push & set
-           #pragma pack(pop) // restore previous */
+        /* 可能是：
+           #pragma pack(1) // 设置
+           #pragma pack() // 重置为默认值
+           #pragma pack(push,1) // 压栈并设置
+           #pragma pack(pop) // 恢复之前的值 */
         next();
         skip('(');
         if (tok == TOK_ASM_pop) {
@@ -1710,7 +1730,7 @@ pragma_err:
     return;
 }
 
-/* is_bof is true if first non space token at beginning of file */
+/* is_bof 为真表示文件开头第一个非空白词法单元 */
 ST_FUNC void preprocess(int is_bof)
 {
     TCCState *s1 = tcc_state;
@@ -1740,14 +1760,14 @@ ST_FUNC void preprocess(int is_bof)
         next_nomacro();
         pp_debug_symv = tok;
         s = define_find(tok);
-        /* undefine symbol by putting an invalid name */
+        /* 通过设置一个非法名字来取消定义符号 */
         if (s)
             define_undef(s);
         break;
     case TOK_INCLUDE:
     case TOK_INCLUDE_NEXT:
         ch = file->buf_ptr[0];
-        /* XXX: incorrect if comments : use next_nomacro with a special mode */
+        /* XXX: 有注释时不正确：应使用带特殊模式的 next_nomacro */
         skip_spaces();
         if (ch == '<') {
             c = '>';
@@ -1769,16 +1789,16 @@ ST_FUNC void preprocess(int is_bof)
             *q = '\0';
             minp();
 #if 0
-            /* eat all spaces and comments after include */
-            /* XXX: slightly incorrect */
+            /* 吃掉 include 之后的所有空格和注释 */
+            /* XXX: 略有不准 */
             while (ch1 != '\n' && ch1 != CH_EOF)
                 inp();
 #endif
         } else {
 	    int len;
-            /* computed #include : concatenate everything up to linefeed,
-	       the result must be one of the two accepted forms.
-	       Don't convert pp-tokens to tokens here.  */
+            /* 计算得到的 #include：把直到换行符为止的内容全部连接起来，
+	       结果必须是两种可接受形式之一。
+	       此处不要把 pp 词法单元转换为词法单元。  */
 	    parse_flags = (PARSE_FLAG_PREPROCESS
 			   | PARSE_FLAG_LINEFEED
 			   | (parse_flags & PARSE_FLAG_ASM_FILE));
@@ -1789,7 +1809,7 @@ ST_FUNC void preprocess(int is_bof)
 		next();
 	    }
 	    len = strlen(buf);
-	    /* check syntax and remove '<>|""' */
+	    /* 检查语法并去掉 '<>|""' */
 	    if ((len < 2 || ((buf[0] != '"' || buf[len-1] != '"') &&
 			     (buf[0] != '<' || buf[len-1] != '>'))))
 	        tcc_error("'#include' expects \"FILENAME\" or <FILENAME>");
@@ -1800,7 +1820,7 @@ ST_FUNC void preprocess(int is_bof)
 
         if (s1->include_stack_ptr >= s1->include_stack + INCLUDE_STACK_SIZE)
             tcc_error("#include recursion too deep");
-        /* store current file in stack, but increment stack later below */
+        /* 把当前文件存入栈，但稍后在下面才递增栈指针 */
         *s1->include_stack_ptr = file;
         i = tok == TOK_INCLUDE_NEXT ? file->include_next_index : 0;
         n = 2 + s1->nb_include_paths + s1->nb_sysinclude_paths;
@@ -1810,13 +1830,13 @@ ST_FUNC void preprocess(int is_bof)
             const char *path;
 
             if (i == 0) {
-                /* check absolute include path */
+                /* 检查绝对 include 路径 */
                 if (!IS_ABSPATH(buf))
                     continue;
                 buf1[0] = 0;
 
             } else if (i == 1) {
-                /* search in file's dir if "header.h" */
+                /* 如果是 "header.h"，则在文件所在目录中查找 */
                 if (c != '\"')
                     continue;
                 /* https://savannah.nongnu.org/bugs/index.php?50847 */
@@ -1824,7 +1844,7 @@ ST_FUNC void preprocess(int is_bof)
                 pstrncpy(buf1, path, tcc_basename(path) - path);
 
             } else {
-                /* search in all the include paths */
+                /* 在所有 include 路径中查找 */
                 int j = i - 2, k = j - s1->nb_include_paths;
                 path = k < 0 ? s1->include_paths[j] : s1->sysinclude_paths[k];
                 pstrcpy(buf1, sizeof(buf1), path);
@@ -1834,8 +1854,8 @@ ST_FUNC void preprocess(int is_bof)
             pstrcat(buf1, sizeof(buf1), buf);
             e = search_cached_include(s1, buf1, 0);
             if (e && (define_find(e->ifndef_macro) || e->once == pp_once)) {
-                /* no need to parse the include because the 'ifndef macro'
-                   is defined (or had #pragma once) */
+                /* 无需解析该 include，因为 'ifndef 宏' 已定义
+                   （或该文件带 #pragma once） */
 #ifdef INC_DEBUG
                 printf("%s: skipping cached %s\n", file->filename, buf1);
 #endif
@@ -1849,12 +1869,12 @@ ST_FUNC void preprocess(int is_bof)
 #ifdef INC_DEBUG
             printf("%s: including %s\n", file->prev->filename, file->filename);
 #endif
-            /* update target deps */
+            /* 更新目标依赖 */
             dynarray_add(&s1->target_deps, &s1->nb_target_deps,
                     tcc_strdup(buf1));
-            /* push current file in stack */
+            /* 把当前文件压入栈 */
             ++s1->include_stack_ptr;
-            /* add include file debug info */
+            /* 添加 include 文件的调试信息 */
             if (s1->do_debug)
                 put_stabs(file->filename, N_BINCL, 0, 0, 0);
             tok_flags |= TOK_FLAG_BOF | TOK_FLAG_BOL;
@@ -1903,7 +1923,7 @@ include_done:
         c = s1->ifdef_stack_ptr[-1];
         if (c > 1)
             tcc_error("#elif after #else");
-        /* last #if/#elif expression was true: we skip */
+        /* 上一个 #if/#elif 表达式为真：我们跳过 */
         if (c == 1) {
             c = 0;
         } else {
@@ -1924,13 +1944,13 @@ include_done:
         if (s1->ifdef_stack_ptr <= file->ifdef_stack_ptr)
             tcc_error("#endif without matching #if");
         s1->ifdef_stack_ptr--;
-        /* '#ifndef macro' was at the start of file. Now we check if
-           an '#endif' is exactly at the end of file */
+        /* '#ifndef 宏' 位于文件开头。现在检查是否有一个 '#endif'
+           恰好位于文件末尾 */
         if (file->ifndef_macro &&
             s1->ifdef_stack_ptr == file->ifdef_stack_ptr) {
             file->ifndef_macro_saved = file->ifndef_macro;
-            /* need to set to zero to avoid false matches if another
-               #ifndef at middle of file */
+            /* 需要置零，以免文件中部的另一个
+               #ifndef 造成误匹配 */
             file->ifndef_macro = 0;
             while (tok != TOK_LINEFEED)
                 next_nomacro();
@@ -1993,25 +2013,25 @@ include_done:
     case TOK_LINEFEED:
         goto the_end;
     default:
-        /* ignore gas line comment in an 'S' file. */
+        /* 在 'S' 文件中忽略 gas 行注释。 */
         if (saved_parse_flags & PARSE_FLAG_ASM_FILE)
             goto ignore;
         if (tok == '!' && is_bof)
-            /* '!' is ignored at beginning to allow C scripts. */
+            /* 开头的 '!' 被忽略，以支持 C 脚本。 */
             goto ignore;
         tcc_warning("Ignoring unknown preprocessing directive #%s", get_tok_str(tok, &tokc));
     ignore:
         file->buf_ptr = parse_line_comment(file->buf_ptr - 1);
         goto the_end;
     }
-    /* ignore other preprocess commands or #! for C scripts */
+    /* 忽略其他预处理指令或 C 脚本的 #! */
     while (tok != TOK_LINEFEED)
         next_nomacro();
  the_end:
     parse_flags = saved_parse_flags;
 }
 
-/* evaluate escape codes in a string. */
+/* 对字符串中的转义编码求值。 */
 static void parse_escape_string(CString *outstr, const uint8_t *buf, int is_long)
 {
     int c, n;
@@ -2024,12 +2044,12 @@ static void parse_escape_string(CString *outstr, const uint8_t *buf, int is_long
             break;
         if (c == '\\') {
             p++;
-            /* escape */
+            /* 转义 */
             c = *p;
             switch(c) {
             case '0': case '1': case '2': case '3':
             case '4': case '5': case '6': case '7':
-                /* at most three octal digits */
+                /* 最多三个八进制数字 */
                 n = c - '0';
                 p++;
                 c = *p;
@@ -2104,14 +2124,14 @@ static void parse_escape_string(CString *outstr, const uint8_t *buf, int is_long
                 break;
             }
         } else if (is_long && c >= 0x80) {
-            /* assume we are processing UTF-8 sequence */
-            /* reference: The Unicode Standard, Version 10.0, ch3.9 */
+            /* 假定我们正在处理 UTF-8 序列 */
+            /* 参考：The Unicode Standard, Version 10.0, ch3.9 */
 
-            int cont; /* count of continuation bytes */
-            int skip; /* how many bytes should skip when error occurred */
+            int cont; /* 后续字节的个数 */
+            int skip; /* 出错时应跳过多少字节 */
             int i;
 
-            /* decode leading byte */
+            /* 解码首字节 */
             if (c < 0xC2) {
 	            skip = 1; goto invalid_utf8_sequence;
             } else if (c <= 0xDF) {
@@ -2124,11 +2144,11 @@ static void parse_escape_string(CString *outstr, const uint8_t *buf, int is_long
 	            skip = 1; goto invalid_utf8_sequence;
             }
 
-            /* decode continuation bytes */
+            /* 解码后续字节 */
             for (i = 1; i <= cont; i++) {
                 int l = 0x80, h = 0xBF;
 
-                /* adjust limit for second byte */
+                /* 调整第二个字节的上下限 */
                 if (i == 1) {
                     switch (c) {
                     case 0xE0: l = 0xA0; break;
@@ -2145,12 +2165,12 @@ static void parse_escape_string(CString *outstr, const uint8_t *buf, int is_long
                 n = (n << 6) | (p[i] & 0x3f);
             }
 
-            /* advance pointer */
+            /* 前移指针 */
             p += 1 + cont;
             c = n;
             goto add_char_nonext;
 
-            /* error handling */
+            /* 错误处理 */
         invalid_utf8_sequence:
             tcc_warning("ill-formed UTF-8 subsequence starting with: \'\\x%x\'", c);
             c = 0xFFFD;
@@ -2166,7 +2186,7 @@ static void parse_escape_string(CString *outstr, const uint8_t *buf, int is_long
             cstr_wccat(outstr, c);
         }
     }
-    /* add a trailing '\0' */
+    /* 追加结尾的 '\0' */
     if (!is_long)
         cstr_ccat(outstr, '\0');
     else
@@ -2194,7 +2214,7 @@ static void parse_string(const char *s, int len)
 
     if (sep == '\'') {
         int char_size, i, n, c;
-        /* XXX: make it portable */
+        /* XXX: 使其可移植 */
         if (!is_long)
             tok = TOK_CCHAR, char_size = 1;
         else
@@ -2221,7 +2241,7 @@ static void parse_string(const char *s, int len)
     }
 }
 
-/* we use 64 bit numbers */
+/* 我们使用 64 位数字 */
 #define BN_SIZE 2
 
 /* bn = (bn << shift) | or_val */
@@ -2244,8 +2264,8 @@ static void bn_zero(unsigned int *bn)
     }
 }
 
-/* parse number in null terminated string 'p' and return it in the
-   current token */
+/* 解析以 null 结尾的字符串 'p' 中的数字，并把它返回到
+   当前词法单元中 */
 static void parse_number(const char *p)
 {
     int b, t, shift, frac_bits, s, exp_val, ch;
@@ -2253,7 +2273,7 @@ static void parse_number(const char *p)
     unsigned int bn[BN_SIZE];
     double d;
 
-    /* number */
+    /* 数字 */
     q = token_buf;
     ch = *p++;
     t = ch;
@@ -2273,8 +2293,8 @@ static void parse_number(const char *p)
             b = 2;
         }
     }
-    /* parse all digits. cannot check octal numbers at this stage
-       because of floating point constants */
+    /* 解析所有数字位。此阶段无法检查八进制数，
+       因为还要考虑浮点常量 */
     while (1) {
         if (ch >= 'a' && ch <= 'f')
             t = ch - 'a' + 10;
@@ -2297,11 +2317,11 @@ static void parse_number(const char *p)
         ((ch == 'e' || ch == 'E') && b == 10) ||
         ((ch == 'p' || ch == 'P') && (b == 16 || b == 2))) {
         if (b != 10) {
-            /* NOTE: strtox should support that for hexa numbers, but
-               non ISOC99 libcs do not support it, so we prefer to do
-               it by hand */
-            /* hexadecimal or binary floats */
-            /* XXX: handle overflows */
+            /* NOTE: strtox 本应支持十六进制数，但非 ISOC99 的
+               libc 不支持，所以我们宁愿手工处理
+               它 */
+            /* 十六进制或二进制浮点数 */
+            /* XXX: 处理溢出 */
             *q = '\0';
             if (b == 16)
                 shift = 4;
@@ -2362,27 +2382,27 @@ static void parse_number(const char *p)
             }
             exp_val = exp_val * s;
             
-            /* now we can generate the number */
-            /* XXX: should patch directly float number */
+            /* 现在可以生成这个数了 */
+            /* XXX: 应直接改写浮点数 */
             d = (double)bn[1] * 4294967296.0 + (double)bn[0];
             d = ldexp(d, exp_val - frac_bits);
             t = toup(ch);
             if (t == 'F') {
                 ch = *p++;
                 tok = TOK_CFLOAT;
-                /* float : should handle overflow */
+                /* float：应处理溢出 */
                 tokc.f = (float)d;
             } else if (t == 'L') {
                 ch = *p++;
                 tok = TOK_CLDOUBLE;
-                /* XXX: not large enough */
+                /* XXX: 不够大 */
                 tokc.ld = (long double)d;
             } else {
                 tok = TOK_CDOUBLE;
                 tokc.d = d;
             }
         } else {
-            /* decimal floats */
+            /* 十进制浮点数 */
             if (ch == '.') {
                 if (q >= token_buf + STRING_MAX_SIZE)
                     goto num_too_long;
@@ -2437,7 +2457,7 @@ static void parse_number(const char *p)
         int lcount, ucount, ov = 0;
         const char *p1;
 
-        /* integer number */
+        /* 整数 */
         *q = '\0';
         q = token_buf;
         if (b == 10 && *q == '0') {
@@ -2447,7 +2467,7 @@ static void parse_number(const char *p)
         n = 0;
         while(1) {
             t = *q++;
-            /* no need for checks except for base 10 / 8 errors */
+            /* 除了 10 / 8 进制的错误外无需检查 */
             if (t == '\0')
                 break;
             else if (t >= 'a')
@@ -2460,13 +2480,13 @@ static void parse_number(const char *p)
                 tcc_error("invalid digit");
             n1 = n;
             n = n * b + t;
-            /* detect overflow */
+            /* 检测溢出 */
             if (n1 >= 0x1000000000000000ULL && n / b != n1)
                 ov = 1;
         }
 
-        /* Determine the characteristics (unsigned and/or 64bit) the type of
-           the constant must have according to the constant suffix(es) */
+        /* 根据常量的后缀确定该常量类型必须具有的特征
+           （无符号和/或 64 位） */
         lcount = ucount = 0;
         p1 = p;
         for(;;) {
@@ -2488,7 +2508,7 @@ static void parse_number(const char *p)
             }
         }
 
-        /* Determine if it needs 64 bits and/or unsigned in order to fit */
+        /* 判断是否需要 64 位和/或无符号才能容纳 */
         if (ucount == 0 && b == 10) {
             if (lcount <= (LONG_SIZE == 4)) {
                 if (n >= 0x80000000U)
@@ -2536,7 +2556,7 @@ static void parse_number(const char *p)
         }                                       \
         break;
 
-/* return next token without macro substitution */
+/* 返回下一个词法单元，不做宏替换 */
 static inline void next_nomacro1(void)
 {
     int t, c, is_long, len;
@@ -2563,7 +2583,7 @@ static inline void next_nomacro1(void)
         p++;
         goto redo_no_start;
     case '\\':
-        /* first look if it is in fact an end of buffer */
+        /* 首先检查它是否实际上是缓冲区结束 */
         c = handle_stray1(p);
         p = file->buf_ptr;
         if (c == '\\')
@@ -2582,14 +2602,14 @@ static inline void next_nomacro1(void)
             } else if (s1->ifdef_stack_ptr != file->ifdef_stack_ptr) {
                 tcc_error("missing #endif");
             } else if (s1->include_stack_ptr == s1->include_stack) {
-                /* no include left : end of file. */
+                /* 没有剩余的 include：文件结束。 */
                 tok = TOK_EOF;
             } else {
                 tok_flags &= ~TOK_FLAG_EOF;
-                /* pop include file */
+                /* 弹出 include 文件 */
                 
-                /* test if previous '#endif' was after a #ifdef at
-                   start of file */
+                /* 检查前一个 '#endif' 是否位于文件开头的
+                   #ifdef 之后 */
                 if (tok_flags & TOK_FLAG_ENDIF) {
 #ifdef INC_DEBUG
                     printf("#endif %s\n", get_tok_str(file->ifndef_macro_saved, NULL));
@@ -2599,11 +2619,11 @@ static inline void next_nomacro1(void)
                     tok_flags &= ~TOK_FLAG_ENDIF;
                 }
 
-                /* add end of include file debug info */
+                /* 添加 include 文件结束的调试信息 */
                 if (tcc_state->do_debug) {
                     put_stabd(N_EINCL, 0, 0);
                 }
-                /* pop include stack */
+                /* 弹出 include 栈 */
                 tcc_close();
                 s1->include_stack_ptr--;
                 p = file->buf_ptr;
@@ -2625,7 +2645,7 @@ maybe_newline:
         goto keep_tok_flags;
 
     case '#':
-        /* XXX: simplify */
+        /* XXX: 简化 */
         PEEKC(c, p);
         if ((tok_flags & TOK_FLAG_BOL) && 
             (parse_flags & PARSE_FLAG_PREPROCESS)) {
@@ -2648,7 +2668,7 @@ maybe_newline:
         }
         break;
     
-    /* dollar is allowed to start identifiers when not parsing asm */
+    /* 非 asm 解析时允许 '$' 作为标识符的起始字符 */
     case '$':
         if (!(isidnum_table[c - CH_EOF] & IS_ID)
          || (parse_flags & PARSE_FLAG_ASM_FILE))
@@ -2679,8 +2699,8 @@ maybe_newline:
         if (c != '\\') {
             TokenSym **pts;
 
-            /* fast case : no stray found, so we have the full token
-               and we have already hashed it */
+            /* 快速情形：没有遇到游离的反斜杠，因此已取得完整的词法单元
+               并且已经对它做了哈希 */
             h &= (TOK_HASH_SIZE - 1);
             pts = &hash_ident[h];
             for(;;) {
@@ -2694,7 +2714,7 @@ maybe_newline:
             ts = tok_alloc_new(pts, (char *) p1, len);
         token_found: ;
         } else {
-            /* slower case */
+            /* 较慢的情形 */
             cstr_reset(&tokcstr);
             cstr_cat(&tokcstr, (char *) p1, len);
             p--;
@@ -2712,7 +2732,7 @@ maybe_newline:
     case 'L':
         t = p[1];
         if (t != '\\' && t != '\'' && t != '\"') {
-            /* fast case */
+            /* 快速情形 */
             goto parse_ident_fast;
         } else {
             PEEKC(c, p);
@@ -2732,8 +2752,8 @@ maybe_newline:
     case '8': case '9':
         t = c;
         PEEKC(c, p);
-        /* after the first digit, accept digits, alpha, '.' or sign if
-           prefixed by 'eEpP' */
+        /* 在第一个数字之后，接受数字、字母、'.'，或者在以 'eEpP'
+           为前缀时接受符号 */
     parse_num:
         cstr_reset(&tokcstr);
         for(;;) {
@@ -2743,7 +2763,7 @@ maybe_newline:
                   || ((c == '+' || c == '-')
                       && (((t == 'e' || t == 'E')
                             && !(parse_flags & PARSE_FLAG_ASM_FILE
-                                /* 0xe+1 is 3 tokens in asm */
+                                /* 在 asm 中 0xe+1 是 3 个词法单元 */
                                 && ((char*)tokcstr.data)[0] == '0'
                                 && toup(((char*)tokcstr.data)[1]) == 'X'))
                           || t == 'p' || t == 'P'))))
@@ -2751,7 +2771,7 @@ maybe_newline:
             t = c;
             PEEKC(c, p);
         }
-        /* We add a trailing '\0' to ease parsing */
+        /* 我们追加一个结尾 '\0' 以便解析 */
         cstr_ccat(&tokcstr, '\0');
         tokc.str.size = tokcstr.size;
         tokc.str.data = tokcstr.data;
@@ -2759,7 +2779,7 @@ maybe_newline:
         break;
 
     case '.':
-        /* special dot handling because it can also start a number */
+        /* 对点号做特殊处理，因为它也可以开始一个数字 */
         PEEKC(c, p);
         if (isnum(c)) {
             t = '.';
@@ -2774,7 +2794,7 @@ maybe_newline:
                 p++;
                 tok = TOK_DOTS;
             } else {
-                *--p = '.'; /* may underflow into file->unget[] */
+                *--p = '.'; /* 可能下溢到 file->unget[] 中 */
                 tok = '.';
             }
         } else {
@@ -2893,12 +2913,12 @@ maybe_newline:
     PARSE2('%', '%', '=', TOK_A_MOD)
     PARSE2('^', '^', '=', TOK_A_XOR)
         
-        /* comments or operator */
+        /* 注释或运算符 */
     case '/':
         PEEKC(c, p);
         if (c == '*') {
             p = parse_comment(p);
-            /* comments replaced by a blank */
+            /* 注释被替换为一个空格 */
             tok = ' ';
             goto keep_tok_flags;
         } else if (c == '/') {
@@ -2913,7 +2933,7 @@ maybe_newline:
         }
         break;
         
-        /* simple tokens */
+        /* 简单词法单元 */
     case '(':
     case ')':
     case '[':
@@ -2925,13 +2945,13 @@ maybe_newline:
     case ':':
     case '?':
     case '~':
-    case '@': /* only used in assembler */
+    case '@': /* 仅在汇编器中使用 */
     parse_simple:
         tok = c;
         p++;
         break;
     default:
-        if (c >= 0x80 && c <= 0xFF) /* utf8 identifiers */
+        if (c >= 0x80 && c <= 0xFF) /* utf8 标识符 */
 	    goto parse_ident_fast;
         if (parse_flags & PARSE_FLAG_ASM_FILE)
             goto parse_simple;
@@ -2946,8 +2966,8 @@ keep_tok_flags:
 #endif
 }
 
-/* return next token without macro substitution. Can read input from
-   macro_ptr buffer */
+/* 返回下一个词法单元，不做宏替换。可以从
+   macro_ptr 缓冲区读取输入 */
 static void next_nomacro_spc(void)
 {
     if (macro_ptr) {
@@ -2980,8 +3000,8 @@ static void macro_subst(
     const int *macro_str
     );
 
-/* substitute arguments in replacement lists in macro_str by the values in
-   args (field d) and return allocated string */
+/* 把 macro_str 中替换列表里的参数用 args（字段 d）中的
+   值替换，并返回分配的字符串 */
 static int *macro_arg_subst(Sym **nested_list, const int *macro_str, Sym *args)
 {
     int t, t0, t1, spc;
@@ -2998,7 +3018,7 @@ static int *macro_arg_subst(Sym **nested_list, const int *macro_str, Sym *args)
         if (!t)
             break;
         if (t == '#') {
-            /* stringize */
+            /* 字符串化 */
             TOK_GET(&t, &macro_str, &cval);
             if (!t)
                 goto bad_stringy;
@@ -3029,7 +3049,7 @@ static int *macro_arg_subst(Sym **nested_list, const int *macro_str, Sym *args)
 #ifdef PP_DEBUG
                 printf("\nstringize: <%s>\n", (char *)cstr.data);
 #endif
-                /* add string */
+                /* 添加字符串 */
                 cval.str.size = cstr.size;
                 cval.str.data = cstr.data;
                 tok_str_add2(&str, TOK_PPSTR, &cval);
@@ -3043,16 +3063,16 @@ static int *macro_arg_subst(Sym **nested_list, const int *macro_str, Sym *args)
             if (s) {
                 int l0 = str.len;
                 st = s->d;
-                /* if '##' is present before or after, no arg substitution */
+                /* 如果前面或后面有 '##'，则不做参数替换 */
                 if (*macro_str == TOK_PPJOIN || t1 == TOK_PPJOIN) {
-                    /* special case for var arg macros : ## eats the ','
-                       if empty VA_ARGS variable. */
+                    /* 可变参数宏的特殊情形：如果 VA_ARGS 变量为空，
+                       ## 会吃掉 ','。 */
                     if (t1 == TOK_PPJOIN && t0 == ',' && gnu_ext && s->type.t) {
                         if (*st <= 0) {
-                            /* suppress ',' '##' */
+                            /* 去掉 ',' '##' */
                             str.len -= 2;
                         } else {
-                            /* suppress '##' and add variable */
+                            /* 去掉 '##' 并添加变量 */
                             str.len--;
                             goto add_var;
                         }
@@ -3060,10 +3080,10 @@ static int *macro_arg_subst(Sym **nested_list, const int *macro_str, Sym *args)
                 } else {
             add_var:
 		    if (!s->next) {
-			/* Expand arguments tokens and store them.  In most
-			   cases we could also re-expand each argument if
-			   used multiple times, but not if the argument
-			   contains the __COUNTER__ macro.  */
+			/* 展开参数词法单元并保存它们。 在大多数情况下，如果
+			   某个参数被多次使用，我们也可以重新展开它，
+			   但如果该参数包含 __COUNTER__ 宏就不行了。
+			    */
 			TokenString str2;
 			sym_push2(&s->next, s->v, s->type.t, 0);
 			tok_str_new(&str2);
@@ -3080,7 +3100,7 @@ static int *macro_arg_subst(Sym **nested_list, const int *macro_str, Sym *args)
                         break;
                     tok_str_add2(&str, t2, &cval);
                 }
-                if (str.len == l0) /* expanded to empty string */
+                if (str.len == l0) /* 展开为空字符串 */
                     tok_str_add(&str, TOK_PLCHLDR);
             } else {
                 tok_str_add(&str, t);
@@ -3133,8 +3153,8 @@ static int paste_tokens(int t1, CValue *v1, int t2, CValue *v2)
     return ret;
 }
 
-/* handle the '##' operator. Return NULL if no '##' seen. Otherwise
-   return the resulting string (which must be freed). */
+/* 处理 '##' 运算符。如果没遇到 '##' 则返回 NULL。
+   否则返回结果字符串（必须释放它）。 */
 static inline int *macro_twosharps(const int *ptr0)
 {
     int t;
@@ -3143,7 +3163,7 @@ static inline int *macro_twosharps(const int *ptr0)
     int start_of_nosubsts = -1;
     const int *ptr;
 
-    /* we search the first '##' */
+    /* 我们查找第一个 '##' */
     for (ptr = ptr0;;) {
         TOK_GET(&t, &ptr, &cval);
         if (t == TOK_PPJOIN)
@@ -3163,10 +3183,10 @@ static inline int *macro_twosharps(const int *ptr0)
             continue;
         while (*ptr == TOK_PPJOIN) {
             int t1; CValue cv1;
-            /* given 'a##b', remove nosubsts preceding 'a' */
+            /* 对于 'a##b'，去掉 'a' 之前的 nosubst */
             if (start_of_nosubsts >= 0)
                 macro_str1.len = start_of_nosubsts;
-            /* given 'a##b', remove nosubsts preceding 'b' */
+            /* 对于 'a##b'，去掉 'b' 之前的 nosubst */
             while ((t1 = *++ptr) == TOK_NOSUBST)
                 ;
             if (t1 && t1 != TOK_PPJOIN) {
@@ -3194,8 +3214,8 @@ static inline int *macro_twosharps(const int *ptr0)
     return macro_str1.str;
 }
 
-/* peek or read [ws_str == NULL] next token from function macro call,
-   walking up macro levels up to the file if necessary */
+/* 从函数宏调用中窥视或读取 [ws_str == NULL] 下一个词法单元，
+   必要时沿着宏层级向上走到文件 */
 static int next_argstream(Sym **nested_list, TokenString *ws_str)
 {
     int t;
@@ -3211,7 +3231,7 @@ static int next_argstream(Sym **nested_list, TokenString *ws_str)
             }
             if (t == 0) {
                 end_macro();
-                /* also, end of scope for nested defined symbol */
+                /* 同时，嵌套 defined 符号的作用域结束 */
                 sa = *nested_list;
                 while (sa && sa->v == 0)
                     sa = sa->prev;
@@ -3254,10 +3274,10 @@ static int next_argstream(Sym **nested_list, TokenString *ws_str)
     }
 }
 
-/* do macro substitution of current token with macro 's' and add
-   result to (tok_str,tok_len). 'nested_list' is the list of all
-   macros we got inside to avoid recursing. Return non zero if no
-   substitution needs to be done */
+/* 用宏 's' 对当前词法单元做宏替换，并把结果添加到
+   (tok_str,tok_len)。'nested_list' 是我们进入内部后遇到的所有宏，
+   用于避免递归。如果无需替换则返回非零值
+ */
 static int macro_subst_tok(
     TokenString *tok_str,
     Sym **nested_list,
@@ -3271,8 +3291,8 @@ static int macro_subst_tok(
     CString cstr;
     char buf[32];
 
-    /* if symbol is a macro, prepare substitution */
-    /* special macros */
+    /* 如果符号是宏，则准备替换 */
+    /* 特殊宏 */
     if (tok == TOK___LINE__ || tok == TOK___COUNTER__) {
         t = tok == TOK___LINE__ ? file->line_num : pp_counter++;
         snprintf(buf, sizeof(buf), "%d", t);
@@ -3311,7 +3331,7 @@ static int macro_subst_tok(
         int *mstr = s->d;
 
         if (s->type.t == MACRO_FUNC) {
-            /* whitespace between macro name and argument list */
+            /* 宏名与参数列表之间的空白 */
             TokenString ws_str;
             tok_str_new(&ws_str);
 
@@ -3319,13 +3339,13 @@ static int macro_subst_tok(
             parse_flags |= PARSE_FLAG_SPACES | PARSE_FLAG_LINEFEED
                 | PARSE_FLAG_ACCEPT_STRAYS;
 
-            /* get next token from argument stream */
+            /* 从参数流中获取下一个词法单元 */
             t = next_argstream(nested_list, &ws_str);
             if (t != '(') {
-                /* not a macro substitution after all, restore the
-                 * macro token plus all whitespace we've read.
-                 * whitespace is intentionally not merged to preserve
-                 * newlines. */
+                /* 终究不是宏替换，恢复该宏词法单元
+                 * 以及我们已读取的所有空白。空白刻意
+                 * 不合并，以保留换行。
+                 */
                 parse_flags = saved_parse_flags;
                 tok_str_add(tok_str, tok);
                 if (parse_flags & PARSE_FLAG_SPACES) {
@@ -3339,19 +3359,19 @@ static int macro_subst_tok(
                 tok_str_free_str(ws_str.str);
             }
 	    do {
-		next_nomacro(); /* eat '(' */
+		next_nomacro(); /* 吃掉 '(' */
 	    } while (tok == TOK_PLCHLDR);
 
-            /* argument macro */
+            /* 参数宏 */
             args = NULL;
             sa = s->next;
-            /* NOTE: empty args are allowed, except if no args */
+            /* NOTE: 允许空参数，除非根本没有参数 */
             for(;;) {
                 do {
                     next_argstream(nested_list, NULL);
                 } while (is_space(tok) || TOK_LINEFEED == tok);
     empty_arg:
-                /* handle '()' case */
+                /* 处理 '()' 情形 */
                 if (!args && !sa && tok == ')')
                     break;
                 if (!sa)
@@ -3359,7 +3379,7 @@ static int macro_subst_tok(
                           get_tok_str(s->v, 0));
                 tok_str_new(&str);
                 parlevel = spc = 0;
-                /* NOTE: non zero sa->t indicates VA_ARGS */
+                /* NOTE: 非零的 sa->t 表示 VA_ARGS */
                 while ((parlevel > 0 || 
                         (tok != ')' && 
                          (tok != ',' || sa->type.t)))) {
@@ -3384,8 +3404,8 @@ static int macro_subst_tok(
                 sa1->d = str.str;
                 sa = sa->next;
                 if (tok == ')') {
-                    /* special case for gcc var args: add an empty
-                       var arg argument if it is omitted */
+                    /* gcc 可变参数的特殊情形：如果省略了可变参数，
+                       则添加一个空的可变参数 */
                     if (sa && sa->type.t && gnu_ext)
                         goto empty_arg;
                     break;
@@ -3400,9 +3420,9 @@ static int macro_subst_tok(
 
             parse_flags = saved_parse_flags;
 
-            /* now subst each arg */
+            /* 现在替换每个参数 */
             mstr = macro_arg_subst(nested_list, mstr, args);
-            /* free memory */
+            /* 释放内存 */
             sa = args;
             while (sa) {
                 sa1 = sa->prev;
@@ -3421,7 +3441,7 @@ static int macro_subst_tok(
         joined_str = macro_twosharps(mstr);
         macro_subst(tok_str, nested_list, joined_str ? joined_str : mstr);
 
-        /* pop nested defined symbol */
+        /* 弹出嵌套的 defined 符号 */
         sa1 = *nested_list;
         *nested_list = sa1->prev;
         sym_free(sa1);
@@ -3433,9 +3453,9 @@ static int macro_subst_tok(
     return 0;
 }
 
-/* do macro substitution of macro_str and add result to
-   (tok_str,tok_len). 'nested_list' is the list of all macros we got
-   inside to avoid recursing. */
+/* 对 macro_str 做宏替换，并把结果添加到 (tok_str,tok_len)。
+   'nested_list' 是我们进入内部后遇到的所有宏，用于避免递归。
+ */
 static void macro_subst(
     TokenString *tok_str,
     Sym **nested_list,
@@ -3458,9 +3478,9 @@ static void macro_subst(
             if (s == NULL)
                 goto no_subst;
 
-            /* if nested substitution, do nothing */
+            /* 如果是嵌套替换，则什么也不做 */
             if (sym_find2(*nested_list, t)) {
-                /* and mark it as TOK_NOSUBST, so it doesn't get subst'd again */
+                /* 并把它标记为 TOK_NOSUBST，这样它不会再被替换 */
                 tok_str_add2(tok_str, TOK_NOSUBST, NULL);
                 goto no_subst;
             }
@@ -3474,7 +3494,7 @@ static void macro_subst(
                 macro_subst_tok(tok_str, nested_list, s);
 
                 if (str.alloc == 3) {
-                    /* already finished by reading function macro arguments */
+                    /* 读取函数宏参数时已经结束 */
                     break;
                 }
 
@@ -3498,13 +3518,13 @@ no_subst:
             if (t == TOK_NOSUBST)
                 nosubst = 1;
         }
-        /* GCC supports 'defined' as result of a macro substitution */
+        /* GCC 支持把 'defined' 作为宏替换的结果 */
         if (t == TOK_DEFINED && pp_expr)
             nosubst = 2;
     }
 }
 
-/* return next token with macro substitution */
+/* 返回下一个词法单元，并做宏替换 */
 ST_FUNC void next(void)
 {
  redo:
@@ -3515,16 +3535,16 @@ ST_FUNC void next(void)
 
     if (macro_ptr) {
         if (tok == TOK_NOSUBST || tok == TOK_PLCHLDR) {
-        /* discard preprocessor markers */
+        /* 丢弃预处理器标记 */
             goto redo;
         } else if (tok == 0) {
-            /* end of macro or unget token string */
+            /* 宏结束，或回退的词法单元串结束 */
             end_macro();
             goto redo;
         }
     } else if (tok >= TOK_IDENT && (parse_flags & PARSE_FLAG_PREPROCESS)) {
         Sym *s;
-        /* if reading from file, try to substitute macros */
+        /* 如果是从文件读取，则尝试替换宏 */
         s = define_find(tok);
         if (s) {
             Sym *nested_list = NULL;
@@ -3535,7 +3555,7 @@ ST_FUNC void next(void)
             goto redo;
         }
     }
-    /* convert preprocessor tokens into C tokens */
+    /* 把预处理器词法单元转换为 C 词法单元 */
     if (tok == TOK_PPNUM) {
         if  (parse_flags & PARSE_FLAG_TOK_NUM)
             parse_number((char *)tokc.str.data);
@@ -3545,8 +3565,8 @@ ST_FUNC void next(void)
     }
 }
 
-/* push back current token and set current token to 'last_tok'. Only
-   identifier case handled for labels. */
+/* 把当前词法单元回退，并把当前词法单元设为 'last_tok'。
+   标号只处理标识符这一情形。 */
 ST_INLN void unget_tok(int last_tok)
 {
 
@@ -3602,7 +3622,7 @@ ST_FUNC void preprocess_start(TCCState *s1, int is_asm)
     tok_flags = TOK_FLAG_BOL | TOK_FLAG_BOF;
 }
 
-/* cleanup from error/setjmp */
+/* 从 error/setjmp 中清理 */
 ST_FUNC void preprocess_end(TCCState *s1)
 {
     while (macro_stack)
@@ -3615,11 +3635,11 @@ ST_FUNC void tccpp_new(TCCState *s)
     int i, c;
     const char *p, *r;
 
-    /* might be used in error() before preprocess_start() */
+    /* 可能会在 preprocess_start() 之前的 error() 中使用 */
     s->include_stack_ptr = s->include_stack;
     s->ppfp = stdout;
 
-    /* init isid table */
+    /* 初始化 isid 表 */
     for(i = CH_EOF; i<128; i++)
         set_idnum(i,
             is_space(i) ? IS_SPC
@@ -3630,7 +3650,7 @@ ST_FUNC void tccpp_new(TCCState *s)
     for(i = 128; i<256; i++)
         set_idnum(i, IS_ID);
 
-    /* init allocators */
+    /* 初始化分配器 */
     tal_new(&toksym_alloc, TOKSYM_TAL_LIMIT, TOKSYM_TAL_SIZE);
     tal_new(&tokstr_alloc, TOKSTR_TAL_LIMIT, TOKSTR_TAL_SIZE);
     tal_new(&cstr_alloc, CSTR_TAL_LIMIT, CSTR_TAL_SIZE);
@@ -3659,23 +3679,23 @@ ST_FUNC void tccpp_delete(TCCState *s)
 {
     int i, n;
 
-    /* free -D and compiler defines */
+    /* 释放 -D 和编译器定义 */
     free_defines(NULL);
 
-    /* free tokens */
+    /* 释放词法单元 */
     n = tok_ident - TOK_IDENT;
     for(i = 0; i < n; i++)
         tal_free(toksym_alloc, table_ident[i]);
     tcc_free(table_ident);
     table_ident = NULL;
 
-    /* free static buffers */
+    /* 释放静态缓冲区 */
     cstr_free(&tokcstr);
     cstr_free(&cstr_buf);
     cstr_free(&macro_equal_buf);
     tok_str_free_str(tokstr_buf.str);
 
-    /* free allocators */
+    /* 释放分配器 */
     tal_delete(toksym_alloc);
     toksym_alloc = NULL;
     tal_delete(tokstr_alloc);
@@ -3685,7 +3705,7 @@ ST_FUNC void tccpp_delete(TCCState *s)
 }
 
 /* ------------------------------------------------------------------------- */
-/* tcc -E [-P[1]] [-dD} support */
+/* tcc -E [-P[1]] [-dD} 支持 */
 
 static void tok_print(const char *msg, const int *str)
 {
@@ -3787,7 +3807,7 @@ static void pp_debug_builtins(TCCState *s1)
         define_print(s1, v);
 }
 
-/* Add a space between tokens a and b to avoid unwanted textual pasting */
+/* 在词法单元 a 和 b 之间添加一个空格以避免粘连 */
 static int pp_need_space(int a, int b)
 {
     return 'E' == a ? '+' == b || '-' == b
@@ -3798,7 +3818,7 @@ static int pp_need_space(int a, int b)
         : 0;
 }
 
-/* maybe hex like 0x1e */
+/* 可能是 0x1e 这样的十六进制数 */
 static int pp_check_he0xE(int t, const char *p)
 {
     if (t == TOK_PPNUM && toup(strchr(p, 0)[-1]) == 'E')
@@ -3806,7 +3826,7 @@ static int pp_check_he0xE(int t, const char *p)
     return t;
 }
 
-/* Preprocess the current file */
+/* 预处理当前文件 */
 ST_FUNC int tcc_preprocess(TCCState *s1)
 {
     BufferedFile **iptr;
@@ -3820,14 +3840,14 @@ ST_FUNC int tcc_preprocess(TCCState *s1)
                 | PARSE_FLAG_SPACES
                 | PARSE_FLAG_ACCEPT_STRAYS
                 ;
-    /* Credits to Fabrice Bellard's initial revision to demonstrate its
-       capability to compile and run itself, provided all numbers are
-       given as decimals. tcc -E -P10 will do. */
+    /* 归功于 Fabrice Bellard 的初始版本展示了它能编译并
+       运行自身的能力，前提是所有数字都以十进制给出。
+       tcc -E -P10 即可做到。 */
     if (s1->Pflag == LINE_MACRO_OUTPUT_FORMAT_P10)
         parse_flags |= PARSE_FLAG_TOK_NUM, s1->Pflag = 1;
 
 #ifdef PP_BENCH
-    /* for PP benchmarks */
+    /* 用于 PP 基准测试 */
     do next(); while (tok != TOK_EOF);
     return 0;
 #endif

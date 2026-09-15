@@ -12,8 +12,8 @@ int x3(void)
     return 3;
 }
 
-/* That callx4 is defined globally (as if ".globl callx4")
-   is a TCC extension.  GCC doesn't behave like this.  */
+/* callx4 被定义为全局的（相当于 ".globl callx4"）
+   是 TCC 扩展。GCC 并非如此。  */
 void callx4(void);
 __asm__(_"callx4: call "_"x4; ret;"
 #ifndef __TINYC__

@@ -1,7 +1,7 @@
 #ifndef _STDBOOL_H
 #define _STDBOOL_H
 
-/* ISOC99 boolean */
+/* ISOC99 布尔类型 */
 
 #define bool	_Bool
 #define true	1

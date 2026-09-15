@@ -1,5 +1,5 @@
 #
-# credits: 01..13.c from the pcc cpp-tests suite
+# 致谢：01..13.c 来自 pcc cpp-tests 测试套件
 #
 
 TOP = ../..
@@ -14,7 +14,7 @@ all test : $(sort $(TESTS))
 
 DIFF_OPTS = -Nu -b -B
 
-# Filter source directory in warnings/errors (out-of-tree builds)
+# 在警告/错误信息中过滤源目录（用于源外构建）
 FILTER = 2>&1 | sed 's,$(SRC)/,,g'
 
 %.test: %.c %.expect
@@ -29,11 +29,11 @@ FILTER = 2>&1 | sed 's,$(SRC)/,,g'
 	    diff $(DIFF_OPTS) $(SRC)/$*.expect $*.output \
 	    && rm -f $*.output
 
-# automatically generate .expect files with gcc:
+# 用 gcc 自动生成 .expect 文件：
 %.expect: # %.c
 	gcc -E -P $*.[cS] >$*.expect 2>&1
 
-# tell make not to delete
+# 告诉 make 不要删除
 .PRECIOUS: %.expect
 
 clean:
@@ -42,8 +42,8 @@ clean:
 02.test : DIFF_OPTS += -w
 # 15.test : DIFF_OPTS += -I"^XXX:"
 
-# diff options:
-# -b ighore space changes
-# -w ighore all whitespace
-# -B ignore blank lines
-# -I <RE> ignore lines matching RE
+# diff 选项：
+# -b 忽略空白改动
+# -w 忽略所有空白
+# -B 忽略空行
+# -I <RE> 忽略匹配 RE 的行

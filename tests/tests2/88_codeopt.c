@@ -1,5 +1,5 @@
-/* Check some way in where code suppression caused various
-   miscompilations.  */
+/* 检查某种代码抑制导致各种
+   错误编译的情形。  */
 extern int printf (const char *, ...);
 typedef unsigned long size_t;
 
@@ -47,8 +47,8 @@ void bla(void)
 _Bool chk(unsigned long addr, unsigned long limit, unsigned long size)
 {
   _Bool ret;
-  /* This just needs to compile, no runtime test.  (And it doesn't compile
-     only with certain internal checking added that's not committed).  */
+  /* 这里只需要能编译，无需运行时测试。（而且只有加入某些
+     未提交的内部检查时它才无法编译）。  */
   if (0)
     ret = 0 != (!!(addr > limit - size));
 }

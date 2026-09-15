@@ -1,10 +1,10 @@
 /* $Id: lshift-type.c 53089 2012-07-06 11:18:26Z vinc17/ypig $
 
-Tests on left-shift type, written by Vincent Lefevre <vincent@vinc17.net>.
+关于左移类型的测试，作者 Vincent Lefevre <vincent@vinc17.net>。
 
-ISO C99 TC3 says: [6.5.7#3] "The integer promotions are performed on
-each of the operands. The type of the result is that of the promoted
-left operand."
+ISO C99 TC3 规定：[6.5.7#3] "对每个操作数执行
+整型提升。结果的类型就是提升后的左操作数
+的类型。"
 */
 
 #include <stdio.h>

@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-/* This test is a snippet from the J interpreter */
+/* 本测试用例是 J 解释器中的一段代码 */
 
 typedef long I;
 typedef struct{I c[4];I b,e,k;} PT;

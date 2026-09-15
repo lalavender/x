@@ -159,7 +159,7 @@ top = 0;
 
 #include <stdio.h>
 #include <string.h>
-/* some gcc headers #define __attribute__ to empty if it's not gcc */
+/* 某些 gcc 头文件在非 gcc 下把 __attribute__ 定义为空 */
 #undef __attribute__
 
 void dump(void *p, int s)

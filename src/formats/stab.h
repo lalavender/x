@@ -1,6 +1,6 @@
 #ifndef __GNU_STAB__
 
-/* Indicate the GNU stab.h is in use.  */
+/* 表示正在使用 GNU stab.h。  */
 
 #define __GNU_STAB__
 

@@ -4,8 +4,8 @@
 #ifdef __x86_64__
 #ifndef _WIN64
 
-//This should be in sync with the declaration on our lib/libtcc1.c
-/* GCC compatible definition of va_list. */
+//这应与我们 lib/libtcc1.c 中的声明保持同步
+/* 与 GCC 兼容的 va_list 定义。 */
 typedef struct {
     unsigned int gp_offset;
     unsigned int fp_offset;
@@ -27,7 +27,7 @@ void *__va_arg(__va_list_struct *ap, int arg_type, int size, int align);
 #define va_copy(dest, src) (*(dest) = *(src))
 #define va_end(ap)
 
-/* avoid conflicting definition for va_list on Macs. */
+/* 避免在 Mac 上出现 va_list 的冲突定义。 */
 #define _VA_LIST_T
 
 #else /* _WIN64 */
@@ -65,14 +65,14 @@ typedef struct {
 
 #else /* __i386__ */
 typedef char *va_list;
-/* only correct for i386 */
+/* 仅对 i386 正确 */
 #define va_start(ap,last) ap = ((char *)&(last)) + ((sizeof(last)+3)&~3)
 #define va_arg(ap,type) (ap += (sizeof(type)+3)&~3, *(type *)(ap - ((sizeof(type)+3)&~3)))
 #define va_copy(dest, src) (dest) = (src)
 #define va_end(ap)
 #endif
 
-/* fix a buggy dependency on GCC in libio.h */
+/* 修正 libio.h 中对 GCC 的有缺陷依赖 */
 typedef va_list __gnuc_va_list;
 #define _VA_LIST_DEFINED
 

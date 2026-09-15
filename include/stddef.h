@@ -38,13 +38,13 @@ void *alloca(size_t size);
 
 #endif
 
-/* Older glibc require a wint_t from <stddef.h> (when requested
-   by __need_wint_t, as otherwise stddef.h isn't allowed to
-   define this type).   Note that this must be outside the normal
-   _STDDEF_H guard, so that it works even when we've included the file
-   already (without requiring wint_t).  Some other libs define _WINT_T
-   if they've already provided that type, so we can use that as guard.
-   TCC defines __WINT_TYPE__ for us.  */
+/* 较老的 glibc 需要从 <stddef.h> 得到 wint_t（当通过
+   __need_wint_t 请求时，否则 stddef.h 不允许
+   定义该类型）。注意它必须位于常规的
+   _STDDEF_H 卫哨之外，这样即使我们已经包含过该文件
+   （当时并未要求 wint_t）它依然有效。其他一些库如果已经
+   提供了该类型就定义 _WINT_T，因此我们可以用它作为卫哨。
+   TCC 为我们定义了 __WINT_TYPE__。  */
 #if defined (__need_wint_t)
 #ifndef _WINT_T
 #define _WINT_T

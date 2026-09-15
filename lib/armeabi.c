@@ -1,23 +1,23 @@
-/* TCC ARM runtime EABI
+/* TCC ARM 运行时 EABI
    Copyright (C) 2013 Thomas Preud'homme
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+特此免费授予任何获得本软件及相关文档文件（以下称“本软件”）副本的人
+不受限制地处置本软件的权利，包括但不限于使用、复制、修改、合并、
+发布、分发、再许可和/或销售本软件副本的权利，并允许获得本软件的
+人这样做，但须满足以下条件：
+上述版权声明和本许可声明应包含在本软件的所有副本或主要部分中。
+本软件按“原样”提供，不附任何形式的担保，无论是明示的还是默示的，
 
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the software.
+包括但不限于对适销性的担保、特定用途适用性的担保
+和非侵权的担保。在任何情况下，作者或版权持有人
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
-THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.*/
+均不对任何索赔、损害或其他责任负责，无论基于合同、
+侵权行为还是其他理由，也无论是否已被告知此类损害的可能性，
+由本软件或本软件的使用或其他处置引起的或与之相关的，
+均不承担任何责任。
+无论是在合同诉讼、侵权行为还是其他方面，
+作者或版权持有人均不对任何索赔、损害或其他责任负责。
+本软件按“原样”提供，不附任何形式的担保。*/
 
 #ifdef __TINYC__
 #define INT_MIN (-2147483647 - 1)
@@ -33,9 +33,20 @@ THE SOFTWARE.*/
 #include <limits.h>
 #endif
 
-/* We rely on the little endianness and EABI calling convention for this to
-   work */
+/* 我们依赖小端字节序和 EABI 调用约定，本代码才能
+   正常工作 */
 
+/*
+ * double_unsigned_struct / unsigned_int_struct —— 按“低字/高字”访问 64 位值
+ *
+ * ARM EABI 下 double 与 long long 用一对寄存器（r0:r1）传递和返回，而结构体
+ * 的传递规则与标量不同：把 64 位值包成这两个结构体，就能借用 EABI 的结构体
+ * 传参/返回路径，在寄存器与内存之间搬运高低两个 32 位字（配合下面的
+ * REGS_RETURN/__aeabi_* 例程实现 __aeabi_dadd、__aeabi_ldivmod 等软浮点与
+ * 64 位整数辅助函数）。前提是小端字节序，且低字在前。
+ *   double_unsigned_struct 把 double 当作两个无符号 32 位字（位搬运用）；
+ *   unsigned_int_struct    把 64 位有符号数当作 low + 有符号 high（比较/移位用）。
+ */
 typedef struct double_unsigned_struct {
     unsigned low;
     unsigned high;
@@ -50,7 +61,7 @@ typedef struct unsigned_int_struct {
     void name ## _return(type ret) {}
 
 
-/* Float helper functions */
+/* 浮点辅助函数 */
 
 #define FLOAT_EXP_BITS 8
 #define FLOAT_FRAC_BITS 23
@@ -63,30 +74,30 @@ typedef struct unsigned_int_struct {
 REGS_RETURN(unsigned_int_struct, unsigned_int_struct)
 REGS_RETURN(double_unsigned_struct, double_unsigned_struct)
 
-/* float -> integer: (sign) 1.fraction x 2^(exponent - exp_for_one) */
+/* float -> integer：(符号) 1.尾数 x 2^(指数 - exp_for_one) */
 
 
-/* float to [unsigned] long long conversion */
+/* float 到 [无符号] long long 转换 */
 #define DEFINE__AEABI_F2XLZ(name, with_sign)                                 \
 void __aeabi_ ## name(unsigned val)                                          \
 {                                                                            \
     int exp, high_shift, sign;                                               \
     double_unsigned_struct ret;                                              \
                                                                              \
-    /* compute sign */                                                       \
+    /* 计算符号 */                                                           \
     sign = val >> 31;                                                        \
                                                                              \
-    /* compute real exponent */                                              \
+    /* 计算真实指数 */                                                       \
     exp = val >> FLOAT_FRAC_BITS;                                            \
     exp &= (1 << FLOAT_EXP_BITS) - 1;                                        \
     exp -= ONE_EXP(FLOAT);                                                   \
                                                                              \
-    /* undefined behavior if truncated value cannot be represented */        \
+    /* 若截断后的值无法表示则为未定义行为 */                                  \
     if (with_sign) {                                                         \
-        if (exp > 62) /* |val| too big, double cannot represent LLONG_MAX */ \
+        if (exp > 62) /* |val| 过大，double 无法表示 LLONG_MAX */             \
             return;                                                          \
     } else {                                                                 \
-        if ((sign && exp >= 0) || exp > 63) /* if val < 0 || val too big */  \
+        if ((sign && exp >= 0) || exp > 63) /* val < 0 或 val 过大 */         \
             return;                                                          \
     }                                                                        \
                                                                              \
@@ -110,7 +121,7 @@ void __aeabi_ ## name(unsigned val)                                          \
             ret.low |= val >> (FLOAT_FRAC_BITS - exp);                       \
     }                                                                        \
                                                                              \
-    /* encode negative integer using 2's complement */                       \
+    /* 用二进制补码编码负整数 */                                             \
     if (with_sign && sign) {                                                 \
         ret.low = ~ret.low;                                                  \
         ret.high = ~ret.high;                                                \
@@ -124,33 +135,33 @@ void __aeabi_ ## name(unsigned val)                                          \
     double_unsigned_struct_return(ret);                                      \
 }
 
-/* float to unsigned long long conversion */
+/* float 到无符号 long long 转换 */
 DEFINE__AEABI_F2XLZ(f2ulz, 0)
 
-/* float to long long conversion */
+/* float 到 long long 转换 */
 DEFINE__AEABI_F2XLZ(f2lz, 1)
 
-/* double to [unsigned] long long conversion */
+/* double 到 [无符号] long long 转换 */
 #define DEFINE__AEABI_D2XLZ(name, with_sign)                                 \
 void __aeabi_ ## name(double_unsigned_struct val)                            \
 {                                                                            \
     int exp, high_shift, sign;                                               \
     double_unsigned_struct ret;                                              \
                                                                              \
-    /* compute sign */                                                       \
+    /* 计算符号 */                                                           \
     sign = val.high >> 31;                                                   \
                                                                              \
-    /* compute real exponent */                                              \
+    /* 计算真实指数 */                                                       \
     exp = (val.high >> (DOUBLE_FRAC_BITS - 32));                             \
     exp &= (1 << DOUBLE_EXP_BITS) - 1;                                       \
     exp -= ONE_EXP(DOUBLE);                                                  \
                                                                              \
-    /* undefined behavior if truncated value cannot be represented */        \
+    /* 若截断后的值无法表示则为未定义行为 */                                  \
     if (with_sign) {                                                         \
-        if (exp > 62) /* |val| too big, double cannot represent LLONG_MAX */ \
+        if (exp > 62) /* |val| 过大，double 无法表示 LLONG_MAX */             \
             return;                                                          \
     } else {                                                                 \
-        if ((sign && exp >= 0) || exp > 63) /* if val < 0 || val too big */  \
+        if ((sign && exp >= 0) || exp > 63) /* val < 0 或 val 过大 */         \
             return;                                                          \
     }                                                                        \
                                                                              \
@@ -179,7 +190,7 @@ void __aeabi_ ## name(double_unsigned_struct val)                            \
             ret.low |= val.high >> (DOUBLE_FRAC_BITS - 32 - exp);            \
     }                                                                        \
                                                                              \
-    /* encode negative integer using 2's complement */                       \
+    /* 用二进制补码编码负整数 */                                             \
     if (with_sign && sign) {                                                 \
         ret.low = ~ret.low;                                                  \
         ret.high = ~ret.high;                                                \
@@ -193,28 +204,28 @@ void __aeabi_ ## name(double_unsigned_struct val)                            \
     double_unsigned_struct_return(ret);                                      \
 }
 
-/* double to unsigned long long conversion */
+/* double 到无符号 long long 转换 */
 DEFINE__AEABI_D2XLZ(d2ulz, 0)
 
-/* double to long long conversion */
+/* double 到 long long 转换 */
 DEFINE__AEABI_D2XLZ(d2lz, 1)
 
-/* long long to float conversion */
+/* long long 到 float 转换 */
 #define DEFINE__AEABI_XL2F(name, with_sign)                             \
 unsigned __aeabi_ ## name(unsigned long long v)                         \
 {                                                                       \
-    int s /* shift */, flb /* first lost bit */, sign = 0;              \
-    unsigned p = 0 /* power */, ret;                                    \
+    int s /* 移位量 */, flb /* 第一个丢失的位 */, sign = 0;             \
+    unsigned p = 0 /* 幂 */, ret;                                        \
     double_unsigned_struct val;                                         \
                                                                         \
-    /* fraction in negative float is encoded in 1's complement */       \
+    /* 负浮点数的尾数用反码编码 */                                      \
     if (with_sign && (v & (1ULL << 63))) {                              \
         sign = 1;                                                       \
         v = ~v + 1;                                                     \
     }                                                                   \
     val.low = v;                                                        \
     val.high = v >> 32;                                                 \
-    /* fill fraction bits */                                            \
+    /* 填充尾数位 */                                                    \
     for (s = 31, p = 1 << 31; p && !(val.high & p); s--, p >>= 1);      \
     if (p) {                                                            \
         ret = val.high & (p - 1);                                       \
@@ -244,30 +255,30 @@ unsigned __aeabi_ ## name(unsigned long long v)                         \
     if (flb)                                                            \
         ret++;                                                          \
                                                                         \
-    /* fill exponent bits */                                            \
+    /* 填充指数位 */                                                    \
     ret |= (s + ONE_EXP(FLOAT)) << FLOAT_FRAC_BITS;                     \
                                                                         \
-    /* fill sign bit */                                                 \
+    /* 填充符号位 */                                                    \
     ret |= sign << 31;                                                  \
                                                                         \
     return ret;                                                         \
 }
 
-/* unsigned long long to float conversion */
+/* 无符号 long long 到 float 转换 */
 DEFINE__AEABI_XL2F(ul2f, 0)
 
-/* long long to float conversion */
+/* long long 到 float 转换 */
 DEFINE__AEABI_XL2F(l2f, 1)
 
-/* long long to double conversion */
+/* long long 到 double 转换 */
 #define __AEABI_XL2D(name, with_sign)                                   \
 void __aeabi_ ## name(unsigned long long v)                             \
 {                                                                       \
-    int s /* shift */, high_shift, sign = 0;                            \
+    int s /* 移位量 */, high_shift, sign = 0;                           \
     unsigned tmp, p = 0;                                                \
     double_unsigned_struct val, ret;                                    \
                                                                         \
-    /* fraction in negative float is encoded in 1's complement */       \
+    /* 负浮点数的尾数用反码编码 */                                      \
     if (with_sign && (v & (1ULL << 63))) {                              \
         sign = 1;                                                       \
         v = ~v + 1;                                                     \
@@ -275,7 +286,7 @@ void __aeabi_ ## name(unsigned long long v)                             \
     val.low = v;                                                        \
     val.high = v >> 32;                                                 \
                                                                         \
-    /* fill fraction bits */                                            \
+    /* 填充尾数位 */                                                    \
     for (s = 31, p = 1 << 31; p && !(val.high & p); s--, p >>= 1);      \
     if (p) {                                                            \
         tmp = val.high & (p - 1);                                       \
@@ -317,25 +328,25 @@ void __aeabi_ ## name(unsigned long long v)                             \
         }                                                               \
     }                                                                   \
                                                                         \
-    /* fill exponent bits */                                            \
+    /* 填充指数位 */                                                    \
     ret.high |= (s + ONE_EXP(DOUBLE)) << (DOUBLE_FRAC_BITS - 32);       \
                                                                         \
-    /* fill sign bit */                                                 \
+    /* 填充符号位 */                                                    \
     ret.high |= sign << 31;                                             \
                                                                         \
     double_unsigned_struct_return(ret);                                 \
 }
 
-/* unsigned long long to double conversion */
+/* 无符号 long long 到 double 转换 */
 __AEABI_XL2D(ul2d, 0)
 
-/* long long to double conversion */
+/* long long 到 double 转换 */
 __AEABI_XL2D(l2d, 1)
 
 
-/* Long long helper functions */
+/* Long long 辅助函数 */
 
-/* TODO: add error in case of den == 0 (see §4.3.1 and §4.3.2) */
+/* TODO：在 den == 0 时补充错误处理（见 §4.3.1 和 §4.3.2） */
 
 #define define_aeabi_xdivmod_signed_type(basetype, type) \
 typedef struct type {                                    \
@@ -355,15 +366,15 @@ static inline rettype aeabi_ ## name (type num, type den)                 \
     rettype ret;                                                          \
     type quot = 0;                                                        \
                                                                           \
-    /* Increase quotient while it is less than numerator */               \
+    /* 在商小于被除数时不断增大商 */                                      \
     while (num >= den) {                                                  \
         type q = 1;                                                       \
                                                                           \
-        /* Find closest power of two */                                   \
+        /* 寻找最接近的 2 的幂 */                                         \
         while ((q << 1) * den <= num && q * den <= typemacro ## _MAX / 2) \
             q <<= 1;                                                      \
                                                                           \
-        /* Compute difference between current quotient and numerator */   \
+        /* 计算当前商与被除数之差 */                                      \
         num -= q * den;                                                   \
         quot += q;                                                        \
     }                                                                     \
@@ -388,7 +399,7 @@ void __aeabi_ ## name(type numerator, type denominator)                       \
     else                                                                      \
       den = 0 - denominator;                                                  \
     uxdiv_ret = aeabi_ ## uiname(num, den);                                   \
-    /* signs differ */                                                        \
+    /* 符号不同 */                                                          \
     if ((numerator & typemacro ## _MIN) != (denominator & typemacro ## _MIN)) \
         ret.quot = 0 - uxdiv_ret.quot;                                        \
     else                                                                      \
@@ -465,7 +476,7 @@ void __aeabi_lasr(unsigned_int_struct val, int shift)
 }
 
 
-/* Integer division functions */
+/* 整数除法函数 */
 
 AEABI_UXDIVMOD(uidivmod, unsigned, uidiv_t, UINT)
 
@@ -483,7 +494,7 @@ int __aeabi_idiv(int numerator, int denominator)
     else
         den = 0 - denominator;
     ret = aeabi_uidivmod(num, den);
-    if ((numerator & INT_MIN) != (denominator & INT_MIN)) /* signs differ */
+    if ((numerator & INT_MIN) != (denominator & INT_MIN)) /* 符号不同 */
         ret.quot *= -1;
     return ret.quot;
 }

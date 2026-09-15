@@ -1,3 +1,3 @@
-/* The following should warn */
+/* 下面这些应当产生警告 */
 #define A ...
 #define A <<=

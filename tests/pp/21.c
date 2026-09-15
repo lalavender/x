@@ -1,4 +1,4 @@
-/* accept 'defined' as result of substitution */
+/* 接受作为替换结果的 'defined' */
 
 ----- 1 ------
 #define AAA 2

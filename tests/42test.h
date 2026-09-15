@@ -1,6 +1,6 @@
-/* This file is to test compute #include directives.  It's named so
-   that it starts with a pre-processing number which isn't a valid
-   number (42test.h).  Including this must work.  */
+/* 本文件用于测试预处理 #include 指令。它的命名以预处理器
+   数字开头，而该数字并不是合法的数字（42test.h）。
+   包含它必须能正常工作。  */
 #ifndef INC42_FIRST
 int have_included_42test_h;
 #define INC42_FIRST

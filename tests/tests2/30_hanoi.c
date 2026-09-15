@@ -1,25 +1,25 @@
-/* example from http://barnyard.syr.edu/quickies/hanoi.c */
+/* 示例来自 http://barnyard.syr.edu/quickies/hanoi.c */
 
-/* hanoi.c: solves the tower of hanoi problem. (Programming exercise.) */
-/* By Terry R. McConnell (12/2/97) */
-/* Compile: cc -o hanoi hanoi.c */
+/* hanoi.c：解决汉诺塔问题。（编程练习。） */
+/* 作者 Terry R. McConnell (12/2/97) */
+/* 编译：cc -o hanoi hanoi.c */
 
-/* This program does no error checking. But then, if it's right, 
-   it's right ... right ? */
+/* 本程序不做错误检查。不过，如果它是对的， 
+   它就是对的 …… 对吧 ? */
 
 
-/* The original towers of hanoi problem seems to have been originally posed
-   by one M. Claus in 1883. There is a popular legend that goes along with
-   it that has been often repeated and paraphrased. It goes something like this:
-   In the great temple at Benares there are 3 golden spikes. On one of them,
-   God placed 64 disks increasing in size from bottom to top, at the beginning
-   of time. Since then, and to this day, the priest on duty constantly transfers
-   disks, one at a time, in such a way that no larger disk is ever put on top
-   of a smaller one. When the disks have been transferred entirely to another
-   spike the Universe will come to an end in a large thunderclap.
+/* 最初的汉诺塔问题似乎最早由一位 M. Claus 在 1883 年提出。与之相伴的
+   一个广为流传的传说被反复复述和改写。它大致是这样的：
+   在贝拿勒斯的伟大神庙里有 3 根金色的尖柱。在其中一根上面，
+   上帝在时间之初放置了 64 个从下到上依次增大的圆盘。从那时起直到今天，
+   值班的祭司不断地搬运圆盘，一次一个，
+   并且从不把较大的圆盘放在较小的圆盘上面。当圆盘全部被搬运到
+   另一根尖柱上时，
+   宇宙将在一阵巨大的霹雳中终结。
 
-   This paraphrases the original legend due to DeParville, La Nature, Paris 1884,
-   Part I, 285-286. For this and further information see: Mathematical 
+   这里转述的是 DeParville 记载的原始传说，见 La Nature, Paris 1884,
+   Part I, 285-286。关于此事及更多资料见：
+   Mathematical 
    Recreations & Essays, W.W. Rouse Ball, MacMillan, NewYork, 11th Ed. 1967,
    303-305.
  *
@@ -32,19 +32,19 @@
 #define TRUE 1
 #define FALSE 0
 
-/* This is the number of "disks" on tower A initially. Taken to be 64 in the
- * legend. The number of moves required, in general, is 2^N - 1. For N = 64,
- * this is 18,446,744,073,709,551,615 */
+/* 这是最初塔 A 上的"圆盘"数量。传说中取 64。
+ * 一般所需的移动次数为 2^N - 1。对于 N = 64，
+ * 结果就是 18,446,744,073,709,551,615 */
 #define N 4
 
-/* These are the three towers. For example if the state of A is 0,1,3,4, that
- * means that there are three discs on A of sizes 1, 3, and 4. (Think of right
- * as being the "down" direction.) */
+/* 这就是三座塔。例如若 A 的状态为 0,1,3,4，那
+ * 就表示 A 上有三个尺寸为 1、3 和 4 的圆盘。（把右侧
+ * 看作"向下"的方向。） */
 int A[N], B[N], C[N]; 
 
 void Hanoi(int,int*,int*,int*);
 
-/* Print the current configuration of A, B, and C to the screen */
+/* 把 A、B 和 C 的当前状态打印到屏幕上 */
 void PrintAll()
 {
    int i;
@@ -64,8 +64,8 @@ void PrintAll()
    return;
 }
 
-/* Move the leftmost nonzero element of source to dest, leave behind 0. */
-/* Returns the value moved (not used.) */
+/* 把 source 中最左边的非零元素移到 dest，原位置留下 0。 */
+/* 返回被移动的值（未被使用。） */
 int Move(int *source, int *dest)
 {
    int i = 0, j = 0;
@@ -75,13 +75,13 @@ int Move(int *source, int *dest)
 
    dest[j-1] = source[i];
    source[i] = 0;
-   PrintAll();       /* Print configuration after each move. */
+   PrintAll();       /* 每次移动后打印状态。 */
    return dest[j-1];
 }
 
 
-/* Moves first n nonzero numbers from source to dest using the rules of Hanoi.
-   Calls itself recursively.
+/* 按汉诺塔规则把 source 中前 n 个非零数字移到 dest。
+   递归调用自身。
    */
 void Hanoi(int n,int *source, int *dest, int *spare)
 {
@@ -101,19 +101,19 @@ int main()
 {
    int i;
 
-   /* initialize the towers */
+   /* 初始化各塔 */
    for(i=0;i<N;i++)A[i]=i+1;
    for(i=0;i<N;i++)B[i]=0;
    for(i=0;i<N;i++)C[i]=0;
 
    printf("Solution of Tower of Hanoi Problem with %d Disks\n\n",N);
 
-   /* Print the starting state */
+   /* 打印起始状态 */
    printf("Starting state:\n");
    PrintAll();
    printf("\n\nSubsequent states:\n\n");
 
-   /* Do it! Use A = Source, B = Destination, C = Spare */
+   /* 开始吧！用 A = Source，B = Destination，C = Spare */
    Hanoi(N,A,B,C);
 
    return 0;

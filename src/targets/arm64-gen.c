@@ -1,35 +1,35 @@
 /*
- *  A64 code generator for TCC
+ *  TCC 的 A64 代码生成器
  *
  *  Copyright (c) 2014-2015 Edmund Grimley Evans
  *
- * Copying and distribution of this file, with or without modification,
- * are permitted in any medium without royalty provided the copyright
- * notice and this notice are preserved.  This file is offered as-is,
- * without any warranty.
+ * 允许以任何介质复制和分发本文件，无论是否修改，
+ * 无需版税，前提是保留上述版权声明和本声明。
+ * 本文件按原样提供，不附带任何担保。
+ *
  */
 
 #ifdef TARGET_DEFS_ONLY
 
-// Number of registers available to allocator:
+// 可用于分配器的寄存器数量：
 #define NB_REGS 28 // x0-x18, x30, v0-v7
 
 #define TREG_R(x) (x) // x = 0..18
 #define TREG_R30 19
 #define TREG_F(x) (x + 20) // x = 0..7
 
-// Register classes sorted from more general to more precise:
+// 寄存器类，从更通用到更精确排序：
 #define RC_INT (1 << 0)
 #define RC_FLOAT (1 << 1)
 #define RC_R(x) (1 << (2 + (x))) // x = 0..18
 #define RC_R30 (1 << 21)
 #define RC_F(x) (1 << (22 + (x))) // x = 0..7
 
-#define RC_IRET (RC_R(0)) // int return register class
-#define RC_FRET (RC_F(0)) // float return register class
+#define RC_IRET (RC_R(0)) // int 返回寄存器类
+#define RC_FRET (RC_F(0)) // float 返回寄存器类
 
-#define REG_IRET (TREG_R(0)) // int return register number
-#define REG_FRET (TREG_F(0)) // float return register number
+#define REG_IRET (TREG_R(0)) // int 返回寄存器编号
+#define REG_FRET (TREG_F(0)) // float 返回寄存器编号
 
 #define PTR_SIZE 8
 
@@ -66,7 +66,7 @@ ST_DATA const int reg_classes[NB_REGS] = {
     RC_INT | RC_R(16),
     RC_INT | RC_R(17),
     RC_INT | RC_R(18),
-    RC_R30, // not in RC_INT as we make special use of x30
+    RC_R30, // 不在 RC_INT 中，因为我们要特殊使用 x30
     RC_FLOAT | RC_F(0),
     RC_FLOAT | RC_F(1),
     RC_FLOAT | RC_F(2),
@@ -88,7 +88,7 @@ static uint32_t fltr(int r) {
   return r - TREG_F(0);
 }
 
-// Add an instruction to text section:
+// 向 text 段添加一条指令：
 ST_FUNC void o(unsigned int c) {
   int ind1 = ind + 4;
   if (nocode_wanted)
@@ -196,9 +196,9 @@ static uint32_t arm64_movi(int r, uint64_t x) {
 static void arm64_movimm(int r, uint64_t x) {
   uint32_t i;
   if ((i = arm64_movi(r, x)))
-    o(i); // a single MOV
+    o(i); // 单条 MOV
   else {
-    // MOVZ/MOVN and 1-3 MOVKs
+    // MOVZ/MOVN 加 1-3 条 MOVK
     int z = 0, m = 0;
     uint32_t mov1 = 0xd2800000; // movz
     uint64_t x1 = x;
@@ -223,7 +223,7 @@ static void arm64_movimm(int r, uint64_t x) {
   }
 }
 
-// Patch all branches in list pointed to by t to branch to a:
+// 把 t 指向的链表中所有分支修补为跳转到 a：
 ST_FUNC void gsym_addr(int t_, int a_) {
   uint32_t t = t_;
   uint32_t a = a_;
@@ -238,7 +238,7 @@ ST_FUNC void gsym_addr(int t_, int a_) {
   }
 }
 
-// Patch all branches in list pointed to by t to branch to current location:
+// 把 t 指向的链表中所有分支修补为跳转到当前位置：
 ST_FUNC void gsym(int t) { gsym_addr(t, ind); }
 
 static int arm64_type_size(int t) {
@@ -276,7 +276,7 @@ static void arm64_spoff(int reg, uint64_t off) {
     o(0x910003e0 | sub << 30 | reg | off << 10);
   // (add|sub) x(reg),sp,#(off)
   else {
-    arm64_movimm(30, off);           // use x30 for offset
+    arm64_movimm(30, off);           // 用 x30 存放偏移
     o(0x8b3e63e0 | sub << 30 | reg); // (add|sub) x(reg),sp,x30
   }
 }
@@ -292,7 +292,7 @@ static void arm64_ldrx(int sg, int sz_, int dst, int bas, uint64_t off) {
     o(0x38400000 | dst | bas << 5 | (off & 511) << 12 | (uint32_t)!!sg << 23 |
       sz << 30); // ldur(*) x(dst),[x(bas),#(off)]
   else {
-    arm64_movimm(30, off); // use x30 for offset
+    arm64_movimm(30, off); // 用 x30 存放偏移
     o(0x38206800 | dst | bas << 5 | (uint32_t)30 << 16 |
       (uint32_t)(!!sg + 1) << 22 | sz << 30); // ldr(*) x(dst),[x(bas),x30]
   }
@@ -307,7 +307,7 @@ static void arm64_ldrv(int sz_, int dst, int bas, uint64_t off) {
     o(0x3c400000 | dst | bas << 5 | (off & 511) << 12 | (sz & 4) << 21 |
       (sz & 3) << 30); // ldur (s|d|q)(dst),[x(bas),#(off)]
   else {
-    arm64_movimm(30, off); // use x30 for offset
+    arm64_movimm(30, off); // 用 x30 存放偏移
     o(0x3c606800 | dst | bas << 5 | (uint32_t)30 << 16 | sz << 30 |
       (sz & 4) << 21); // ldr (s|d|q)(dst),[x(bas),x30]
   }
@@ -315,7 +315,7 @@ static void arm64_ldrv(int sz_, int dst, int bas, uint64_t off) {
 
 static void arm64_ldrs(int reg_, int size) {
   uint32_t reg = reg_;
-  // Use x30 for intermediate value in some cases.
+  // 某些情况下用 x30 存放中间值。
   switch (size) {
   default:
     assert(0);
@@ -401,7 +401,7 @@ static void arm64_strx(int sz_, int dst, int bas, uint64_t off) {
     o(0x38000000 | dst | bas << 5 | (off & 511) << 12 | sz << 30);
   // stur(*) x(dst),[x(bas],#(off)]
   else {
-    arm64_movimm(30, off); // use x30 for offset
+    arm64_movimm(30, off); // 用 x30 存放偏移
     o(0x38206800 | dst | bas << 5 | (uint32_t)30 << 16 | sz << 30);
     // str(*) x(dst),[x(bas),x30]
   }
@@ -416,22 +416,22 @@ static void arm64_strv(int sz_, int dst, int bas, uint64_t off) {
     o(0x3c000000 | dst | bas << 5 | (off & 511) << 12 | (sz & 4) << 21 |
       (sz & 3) << 30); // stur (s|d|q)(dst),[x(bas),#(off)]
   else {
-    arm64_movimm(30, off); // use x30 for offset
+    arm64_movimm(30, off); // 用 x30 存放偏移
     o(0x3c206800 | dst | bas << 5 | (uint32_t)30 << 16 | sz << 30 |
       (sz & 4) << 21); // str (s|d|q)(dst),[x(bas),x30]
   }
 }
 
 static void arm64_sym(int r, Sym *sym, unsigned long addend) {
-  // Currently TCC's linker does not generate COPY relocations for
-  // STT_OBJECTs when tcc is invoked with "-run". This typically
-  // results in "R_AARCH64_ADR_PREL_PG_HI21 relocation failed" when
-  // a program refers to stdin. A workaround is to avoid that
-  // relocation and use only relocations with unlimited range.
+  // 目前 TCC 的链接器在 tcc 以 "-run" 调用时不会为
+  // STT_OBJECT 生成 COPY 重定位。当程序引用 stdin 时，
+  // 这通常会导致 "R_AARCH64_ADR_PREL_PG_HI21 relocation failed"。
+  // 解决办法是避开那个重定位，只使用范围无限的
+  // 重定位。
   int avoid_adrp = 1;
 
   if (avoid_adrp || sym->a.weak) {
-    // (GCC uses a R_AARCH64_ABS64 in this case.)
+    // （GCC 在这种情况下使用 R_AARCH64_ABS64。）
     greloca(cur_text_section, sym, ind, R_AARCH64_MOVW_UABS_G0_NC, addend);
     o(0xd2800000 | r); // mov x(rt),#0,lsl #0
     greloca(cur_text_section, sym, ind, R_AARCH64_MOVW_UABS_G1_NC, addend);
@@ -474,7 +474,7 @@ ST_FUNC void load(int r, SValue *sv) {
   }
 
   if (svr == (VT_CONST | VT_LVAL | VT_SYM)) {
-    arm64_sym(30, sv->sym, svcul); // use x30 for address
+    arm64_sym(30, sv->sym, svcul); // 用 x30 存放地址
     if (IS_FREG(r))
       arm64_ldrv(arm64_type_size(svtt), fltr(r), 30, 0);
     else
@@ -512,7 +512,7 @@ ST_FUNC void load(int r, SValue *sv) {
     if (-svcul < 0x1000)
       o(0xd10003a0 | intr(r) | -svcul << 10); // sub x(r),x29,#...
     else {
-      arm64_movimm(30, -svcul);                     // use x30 for offset
+      arm64_movimm(30, -svcul);                     // 用 x30 存放偏移
       o(0xcb0003a0 | intr(r) | (uint32_t)30 << 16); // sub x(r),x29,x30
     }
     return;
@@ -528,7 +528,7 @@ ST_FUNC void load(int r, SValue *sv) {
   }
 
   if (svr == (VT_LLOCAL | VT_LVAL)) {
-    arm64_ldrx(0, 3, 30, 29, svcul); // use x30 for offset
+    arm64_ldrx(0, 3, 30, 29, svcul); // 用 x30 存放偏移
     if (IS_FREG(r))
       arm64_ldrv(arm64_type_size(svtt), fltr(r), 30, 0);
     else
@@ -564,7 +564,7 @@ ST_FUNC void store(int r, SValue *sv) {
   }
 
   if (svr == (VT_CONST | VT_LVAL | VT_SYM)) {
-    arm64_sym(30, sv->sym, svcul); // use x30 for address
+    arm64_sym(30, sv->sym, svcul); // 用 x30 存放地址
     if (IS_FREG(r))
       arm64_strv(arm64_type_size(svtt), fltr(r), 30, 0);
     else
@@ -593,7 +593,7 @@ static int arm64_hfa_aux(CType *type, int *fsize, int num) {
     *fsize = n;
     return num + 1;
   } else if ((type->t & VT_BTYPE) == VT_STRUCT) {
-    int is_struct = 0; // rather than union
+    int is_struct = 0; // 而不是用 union
     Sym *field;
     for (field = type->ref->next; field; field = field->next)
       if (field->c) {
@@ -653,9 +653,9 @@ static int arm64_hfa(CType *type, int *fsize) {
 }
 
 static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a) {
-  int nx = 0;            // next integer register
-  int nv = 0;            // next vector register
-  unsigned long ns = 32; // next stack offset
+  int nx = 0;            // 下一个整数寄存器
+  int nv = 0;            // 下一个向量寄存器
+  unsigned long ns = 32; // 下一个栈偏移
   int i;
 
   for (i = 0; i < n; i++) {
@@ -671,7 +671,7 @@ static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a) {
       // B.2
       ;
     else if (size > 16) {
-      // B.3: replace with pointer
+      // B.3：替换为指针
       if (nx < 8)
         a[i] = nx++ << 1 | 1;
       else {
@@ -773,7 +773,7 @@ static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a) {
 static unsigned long arm64_pcs(int n, CType **type, unsigned long *a) {
   unsigned long stack;
 
-  // Return type:
+  // 返回类型：
   if ((type[0]->t & VT_BTYPE) == VT_VOID)
     a[0] = -1;
   else {
@@ -781,7 +781,7 @@ static unsigned long arm64_pcs(int n, CType **type, unsigned long *a) {
     assert(a[0] == 0 || a[0] == 1 || a[0] == 16);
   }
 
-  // Argument types:
+  // 参数类型：
   stack = arm64_pcs_aux(n, type + 1, a + 1);
 
   if (0) {
@@ -828,7 +828,7 @@ ST_FUNC void gfunc_call(int nb_args) {
 
   stack = arm64_pcs(nb_args, t, a);
 
-  // Allocate space for structs replaced by pointer:
+  // 为被替换为指针的结构体分配空间：
   for (i = nb_args; i; i--)
     if (a[i] & 1) {
       SValue *arg = &vtop[i - nb_args];
@@ -845,25 +845,25 @@ ST_FUNC void gfunc_call(int nb_args) {
   if (stack)
     o(0xd10003ff | stack << 10); // sub sp,sp,#(n)
 
-  // First pass: set all values on stack
+  // 第一遍：把所有值放到栈上
   for (i = nb_args; i; i--) {
     vpushv(vtop - nb_args + i);
 
     if (a[i] & 1) {
-      // struct replaced by pointer
+      // 被替换为指针的结构体
       int r = get_reg(RC_INT);
       arm64_spoff(intr(r), a1[i]);
       vset(&vtop->type, r | VT_LVAL, 0);
       vswap();
       vstore();
       if (a[i] >= 32) {
-        // pointer on stack
+        // 栈上的指针
         r = get_reg(RC_INT);
         arm64_spoff(intr(r), a1[i]);
         arm64_strx(3, intr(r), 31, (a[i] - 32) >> 1 << 1);
       }
     } else if (a[i] >= 32) {
-      // value on stack
+      // 栈上的值
       if ((vtop->type.t & VT_BTYPE) == VT_STRUCT) {
         int r = get_reg(RC_INT);
         arm64_spoff(intr(r), a[i] - 32);
@@ -884,10 +884,10 @@ ST_FUNC void gfunc_call(int nb_args) {
     --vtop;
   }
 
-  // Second pass: assign values to registers
+  // 第二遍：把值分配到寄存器
   for (i = nb_args; i; i--, vtop--) {
     if (a[i] < 16 && !(a[i] & 1)) {
-      // value in general-purpose registers
+      // 通用寄存器中的值
       if ((vtop->type.t & VT_BTYPE) == VT_STRUCT) {
         int align, size = type_size(&vtop->type, &align);
         vtop->type.t = VT_PTR;
@@ -897,10 +897,10 @@ ST_FUNC void gfunc_call(int nb_args) {
       } else
         gv(RC_R(a[i] / 2));
     } else if (a[i] < 16)
-      // struct replaced by pointer in register
+      // 寄存器中被替换为指针的结构体
       arm64_spoff(a[i] / 2, a1[i]);
     else if (a[i] < 32) {
-      // value in floating-point registers
+      // 浮点寄存器中的值
       if ((vtop->type.t & VT_BTYPE) == VT_STRUCT) {
         uint32_t j, sz, n = arm64_hfa(&vtop->type, &sz);
         vtop->type.t = VT_PTR;
@@ -916,11 +916,11 @@ ST_FUNC void gfunc_call(int nb_args) {
 
   if ((return_type->t & VT_BTYPE) == VT_STRUCT) {
     if (a[0] == 1) {
-      // indirect return: set x8 and discard the stack value
+      // 间接返回：设置 x8 并丢弃栈上的值
       gv(RC_R(8));
       --vtop;
     } else
-      // return in registers: keep the address for after the call
+      // 寄存器返回：保留该地址供调用之后使用
       vswap();
   }
 
@@ -934,11 +934,11 @@ ST_FUNC void gfunc_call(int nb_args) {
     int rt = return_type->t;
     int bt = rt & VT_BTYPE;
     if (bt == VT_BYTE || bt == VT_SHORT)
-      // Promote small integers:
+      // 提升小整数：
       o(0x13001c00 | (bt == VT_SHORT) << 13 |
         (uint32_t)!!(rt & VT_UNSIGNED) << 30); // [su]xt[bh] w0,w0
     else if (bt == VT_STRUCT && !(a[0] & 1)) {
-      // A struct was returned in registers, so write it out:
+      // 结构体在寄存器中返回，因此把它写出去：
       gv(RC_R(8));
       --vtop;
       if (a[0] == 0) {
@@ -975,9 +975,9 @@ ST_FUNC void gfunc_prolog(CType *func_type) {
   CType **t;
   unsigned long *a;
 
-  // Why doesn't the caller (gen_function) set func_vt?
+  // 为什么调用方（gen_function）不设置 func_vt？
   func_vt = func_type->ref->type;
-  func_vc = 144; // offset of where x8 is stored
+  func_vc = 144; // 存放 x8 的位置的偏移
 
   for (sym = func_type->ref; sym; sym = sym->next)
     ++n;
@@ -1019,7 +1019,7 @@ ST_FUNC void gfunc_prolog(CType *func_type) {
       arm64_func_va_list_vr_offs = (a[i] / 2 - 16 + (hfa ? hfa : 1)) * 16;
     }
 
-    // HFAs of float and double need to be written differently:
+    // float 和 double 的 HFA 需要以不同方式写出：
     if (16 <= a[i] && a[i] < 32 && (sym->type.t & VT_BTYPE) == VT_STRUCT) {
       uint32_t j, sz, k = arm64_hfa(&sym->type, &sz);
       if (sz < 16)
@@ -1036,7 +1036,7 @@ ST_FUNC void gfunc_prolog(CType *func_type) {
 
   o(0x910003fd); // mov x29,sp
   arm64_func_sub_sp_offset = ind;
-  // In gfunc_epilog these will be replaced with code to decrement SP:
+  // 在 gfunc_epilog 中这些会被替换为递减 SP 的代码：
   o(0xd503201f); // nop
   o(0xd503201f); // nop
   loc = 0;
@@ -1044,12 +1044,12 @@ ST_FUNC void gfunc_prolog(CType *func_type) {
 
 ST_FUNC void gen_va_start(void) {
   int r;
-  --vtop; // we don't need the "arg"
+  --vtop; // 我们不需要 "arg"
   gaddrof();
   r = intr(gv(RC_INT));
 
   if (arm64_func_va_list_stack) {
-    // xx could use add (immediate) here
+    // xx 这里可以用 add（立即数）
     arm64_movimm(30, arm64_func_va_list_stack + 224);
     o(0x8b1e03be); // add x30,x29,x30
   } else
@@ -1096,7 +1096,7 @@ ST_FUNC void gen_va_arg(CType *t) {
     uint32_t n = size > 16 ? 8 : (size + 7) & -8;
     o(0xb940181e | r0 << 5); // ldr w30,[x(r0),#24] // __gr_offs
     if (align == 16) {
-      assert(0);     // this path untested but needed for __uint128_t
+      assert(0);     // 这条路径未测试，但 __uint128_t 需要它
       o(0x11003fde); // add w30,w30,#15
       o(0x121c6fde); // and w30,w30,#-16
     }
@@ -1135,8 +1135,8 @@ ST_FUNC void gen_va_arg(CType *t) {
     if (hfa == 1 || fsize == 16)
       o(0x8b3ec000 | r1 | r1 << 5); // add x(r1),x(r1),w30,sxtw
     else {
-      // We need to change the layout of this HFA.
-      // Get some space on the stack using global variable "loc":
+      // 我们需要改变这个 HFA 的布局。
+      // 用全局变量 "loc" 在栈上获取一些空间：
       loc = (loc - size) & -(uint32_t)align;
       o(0x8b3ec000 | 30 | r1 << 5); // add x30,x(r1),w30,sxtw
       arm64_movimm(r1, loc);
@@ -1201,7 +1201,7 @@ ST_FUNC void gfunc_return(CType *func_type) {
 
 ST_FUNC void gfunc_epilog(void) {
   if (loc) {
-    // Insert instructions to subtract size of stack frame from SP.
+    // 插入从 SP 中减去栈帧大小的指令。
     unsigned char *ptr = cur_text_section->data + arm64_func_sub_sp_offset;
     uint64_t diff = (-loc + 15) & ~15;
     if (!(diff >> 24)) {
@@ -1210,8 +1210,8 @@ ST_FUNC void gfunc_epilog(void) {
       if (diff >> 12) // sub sp,sp,#(diff >> 12),lsl #12
         write32le(ptr + 4, 0xd14003ff | (diff >> 12) << 10);
     } else {
-      // In this case we may subtract more than necessary,
-      // but always less than 17/16 of what we were aiming for.
+      // 这种情况下我们可能减去的比需要的多，
+      // 但总是少于目标值的 17/16。
       int i = 0;
       int j = 0;
       while (diff >> 20) {
@@ -1234,7 +1234,7 @@ ST_FUNC void gfunc_epilog(void) {
   o(0xd65f03c0); // ret
 }
 
-// Generate forward branch to label:
+// 生成到标签的前向分支：
 ST_FUNC int gjmp(int t) {
   int r = ind;
   if (nocode_wanted)
@@ -1243,7 +1243,7 @@ ST_FUNC int gjmp(int t) {
   return r;
 }
 
-// Generate branch to known address:
+// 生成到已知地址的分支：
 ST_FUNC void gjmp_addr(int a) {
   assert(a - ind + 0x8000000 < 0x10000000);
   o(0x14000000 | ((a - ind) >> 2 & 0x3ffffff));
@@ -1310,7 +1310,7 @@ static int arm64_gen_opic(int op, uint32_t l, int rev, uint64_t val, uint32_t x,
     else if (!(val & ~(uint64_t)0xfff000))
       o(0x11400000 | l << 31 | s << 30 | x | a << 5 | val >> 12 << 10);
     else {
-      arm64_movimm(30, val); // use x30
+      arm64_movimm(30, val); // 用 x30
       o(0x0b1e0000 | l << 31 | s << 30 | x | a << 5);
     }
     return 1;
@@ -1322,7 +1322,7 @@ static int arm64_gen_opic(int op, uint32_t l, int rev, uint64_t val, uint32_t x,
     else if (val == (l ? (uint64_t)-1 : (uint32_t)-1))
       o(0x2a2003e0 | l << 31 | x | a << 16); // mvn
     else {
-      arm64_movimm(30, val);                 // use x30
+      arm64_movimm(30, val);                 // 用 x30
       o(0x4b0003c0 | l << 31 | x | a << 16); // sub
     }
     return 1;
@@ -1332,7 +1332,7 @@ static int arm64_gen_opic(int op, uint32_t l, int rev, uint64_t val, uint32_t x,
       o(0x2a2003e0 | l << 31 | x | a << 16); // mvn
       return 1;
     }
-    // fall through
+    // 顺序执行
   case '&':
   case '|': {
     int e = arm64_encode_bimm64(l ? val : val | val << 32);
@@ -1369,7 +1369,7 @@ static int arm64_gen_opic(int op, uint32_t l, int rev, uint64_t val, uint32_t x,
 static void arm64_gen_opil(int op, uint32_t l) {
   uint32_t x, a, b;
 
-  // Special treatment for operations with a constant operand:
+  // 对含常量操作数的运算做特殊处理：
   {
     uint64_t val;
     int rev = 1;
@@ -1407,7 +1407,7 @@ static void arm64_gen_opil(int op, uint32_t l) {
 
   switch (op) {
   case '%':
-    // Use x30 for quotient:
+    // 用 x30 存放商：
     o(0x1ac00c00 | l << 31 | 30 | a << 5 | b << 16);                     // sdiv
     o(0x1b008000 | l << 31 | x | (uint32_t)30 << 5 | b << 16 | a << 10); // msub
     break;
@@ -1486,7 +1486,7 @@ static void arm64_gen_opil(int op, uint32_t l) {
     o(0x1a9f87e0 | x);                          // cset wA,ls
     break;
   case TOK_UMOD:
-    // Use x30 for quotient:
+    // 用 x30 存放商：
     o(0x1ac00800 | l << 31 | 30 | a << 5 | b << 16);                     // udiv
     o(0x1b008000 | l << 31 | x | (uint32_t)30 << 5 | b << 16 | a << 10); // msub
     break;
@@ -1629,7 +1629,7 @@ ST_FUNC void gen_opf(int op) {
   }
 }
 
-// Generate sign extension from 32 to 64 bits:
+// 生成从 32 位到 64 位的符号扩展：
 ST_FUNC void gen_cvt_sxtw(void) {
   uint32_t r = intr(gv(RC_INT));
   o(0x93407c00 | r | r << 5); // sxtw x(r),w(r)
@@ -1780,9 +1780,9 @@ ST_FUNC void gen_vla_sp_save(int addr) {
 }
 
 ST_FUNC void gen_vla_sp_restore(int addr) {
-  // Use x30 because this function can be called when there
-  // is a live return value in x0 but there is nothing on
-  // the value stack to prevent get_reg from returning x0.
+  // 使用 x30，因为调用这个函数时 x0 中可能有一个
+  // 尚未失效的返回值，而值栈上没有什么能阻止
+  // get_reg 返回 x0。
   uint32_t r = 30;
   arm64_ldrx(0, 3, r, 29, addr);
   o(0x9100001f | r << 5); // mov sp,x(r)
@@ -1796,7 +1796,7 @@ ST_FUNC void gen_vla_alloc(CType *type, int align) {
   vpop();
 }
 
-/* end of A64 code generator */
+/* A64 代码生成器结束 */
 /*************************************************************/
 #endif
 /*************************************************************/

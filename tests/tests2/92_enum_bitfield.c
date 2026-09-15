@@ -1,10 +1,10 @@
-/* This checks if enums needing 8 bit but only having positive
-   values are correctly zero extended (instead of sign extended)
-   when stored into/loaded from a 8 bit bit-field of enum type (which
-   itself is implementation defined, so isn't necessarily supported by all
-   other compilers).  */
+/* 这里检查需要 8 位但只有正值的枚举
+   在存入/取自枚举类型的 8 位位域时是否正确地进行
+   零扩展（而不是符号扩展）（这本身是
+   实现定义的，
+   因此未必被所有其他编译器支持）。  */
 enum tree_code {
-  SOME_CODE = 148, /* has bit 7 set, and hence all further enum values as well */
+  SOME_CODE = 148, /* 第 7 位被置位，因此后续所有枚举值也都如此 */
   LAST_AND_UNUSED_TREE_CODE
 };
 typedef union tree_node *tree;
@@ -37,9 +37,9 @@ int convert_like_real (tree convs)
 {
   switch (((enum tree_code) (convs)->common.code))
     {
-    case AMBIG_CONV: /* This has bit 7 set, which must not be the sign
-			bit in tree_common.code, i.e. the bitfield must
-			be somehow marked unsigned.  */
+    case AMBIG_CONV: /* 这里第 7 位被置位，它绝不能是
+			tree_common.code 的符号位，即该位域必须
+			以某种方式标记为无符号。  */
       return blah();
     default:
       break;

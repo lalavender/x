@@ -1,6 +1,6 @@
 /*
- * Test that allocating a variable length array in a loop
- * does not use up a linear amount of memory
+ * 测试在循环中分配变长数组
+ * 不会消耗线性增长的内存
  */
 
 #include <stdlib.h>
@@ -10,7 +10,7 @@
 #define LOOP_COUNT 1000
 #define ARRAY_SIZE 100
 
-/* Overwrite a VLA. This will overwrite the return address if SP is incorrect */
+/* 覆盖写入一个 VLA。如果 SP 不正确，这会覆盖返回地址 */
 void smash(char *p, int n) {
   memset(p, 0, n);
 }
@@ -28,7 +28,7 @@ int test1(int n) {
   return (array_ptrs[0]-array_ptrs[LOOP_COUNT-1] < n) ? 0 : 1;
 }
 
-/* ensure goto does not circumvent array free */
+/* 确保 goto 不会绕过数组释放 */
 int test2(int n) {
   char *array_ptrs[LOOP_COUNT];
 

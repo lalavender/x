@@ -1,4 +1,4 @@
-/* Various things I encountered while hacking the pre processor */
+/* 我在折腾预处理器时遇到的各种情况 */
 #define wrap(x) x
 #define pr_warning(fmt, ...) printk(KERN_WARNING fmt, ##__VA_ARGS__)
 #define pr_warn(x,y) pr_warning(x,y)

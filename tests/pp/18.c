@@ -6,9 +6,9 @@
 #define EX
 #define empty(x)
 #define fnlike(x) yeah x
-/* If the following macro is called with empty arg (X183), the use
-   of 'x' between fnlike and '(' doesn't hinder the recognition of this
-   being a further fnlike macro invocation.  */
+/* 如果下面的宏以空实参（X183）调用，那么 fnlike 与
+   '(' 之间的 'x' 不会妨碍识别这仍是一次
+   函数式宏调用。  */
 #define usefnlike(x) fnlike x (x)
 X181 M_EMPTYI_P_C1()
 X182 M_EMPTYI_P_C1(x)

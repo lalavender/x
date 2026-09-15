@@ -1,8 +1,8 @@
-/* Simple libc header for TCC 
+/* 供 TCC 使用的简单 libc 头文件
  * 
- * Add any function you want from the libc there. This file is here
- * only for your convenience so that you do not need to put the whole
- * glibc include files on your floppy disk 
+ * 在这里添加你想要的任何 libc 函数。本文件只是为了方便你，
+ * 这样你就不必把整个
+ * glibc 头文件都放到软盘上 
  */
 #ifndef _TCCLIB_H
 #define _TCCLIB_H

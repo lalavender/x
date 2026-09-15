@@ -2,7 +2,7 @@
 
 int array[16];
 
-//Swap integer values by array indexes
+//按数组下标交换整数值
 void swap(int a, int b)
 {
    int tmp  = array[a];
@@ -10,8 +10,8 @@ void swap(int a, int b)
    array[b] = tmp;
 }
 
-//Partition the array into two halves and return the
-//index about which the array is partitioned
+//将数组分成两半，并返回
+//数组划分所依据的下标
 int partition(int left, int right)
 {
    int pivotIndex = left;
@@ -33,7 +33,7 @@ int partition(int left, int right)
    return index;
 }
 
-//Quicksort the array
+//对数组进行快速排序
 void quicksort(int left, int right)
 {
    if(left >= right)

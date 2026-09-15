@@ -1,5 +1,5 @@
-// This program is designed to test some arm64-specific things, such as the
-// calling convention, but should give the same results on any architecture.
+// 本程序用于测试一些 arm64 特有的东西，例如
+// 调用约定，但在任何架构上都应给出相同的结果。
 
 #include <stdarg.h>
 #include <stdint.h>

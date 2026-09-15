@@ -1,4 +1,4 @@
-// this file contains BMP chars encoded in UTF-8
+// 本文件包含以 UTF-8 编码的 BMP 字符
 #include <stdio.h>
 #include <wchar.h>
 

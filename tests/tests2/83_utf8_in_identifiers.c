@@ -6,4 +6,4 @@ int main(){
     printf("Lefèvre=%d\n",Lefèvre);
     return 0;
 }
-// pcc & tcc only
+// 仅 pcc 与 tcc

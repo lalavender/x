@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-/* This test segfaults as of April 27, 2015. */
+/* 截至 2015 年 4 月 27 日，本测试会段错误。 */
 void f1(int argc)
 {
   char test[argc];
@@ -12,14 +12,14 @@ void f1(int argc)
   goto label;
 }
 
-/* This segfaulted on 2015-11-19. */
+/* 这在 2015-11-19 发生了段错误。 */
 void f2(void)
 {
     goto start;
     {
-        int a[1 && 1]; /* not a variable-length array */
-        int b[1 || 1]; /* not a variable-length array */
-        int c[1 ? 1 : 1]; /* not a variable-length array */
+        int a[1 && 1]; /* 不是变长数组 */
+        int b[1 || 1]; /* 不是变长数组 */
+        int c[1 ? 1 : 1]; /* 不是变长数组 */
     start:
         a[0] = 0;
         b[0] = 0;

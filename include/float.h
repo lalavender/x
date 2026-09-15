@@ -3,7 +3,7 @@
 
 #define FLT_RADIX 2
 
-/* IEEE float */
+/* IEEE 单精度浮点 */
 #define FLT_MANT_DIG 24
 #define FLT_DIG 6
 #define FLT_ROUNDS 1
@@ -15,7 +15,7 @@
 #define FLT_MAX 3.40282347e+38F
 #define FLT_MAX_10_EXP 38
 
-/* IEEE double */
+/* IEEE 双精度浮点 */
 #define DBL_MANT_DIG 53
 #define DBL_DIG 15
 #define DBL_EPSILON 2.2204460492503131e-16
@@ -26,7 +26,7 @@
 #define DBL_MAX 1.7976931348623157e+308
 #define DBL_MAX_10_EXP 308
 
-/* horrible intel long double */
+/* Intel 上糟糕的 long double */
 #if defined __i386__ || defined __x86_64__
 
 #define LDBL_MANT_DIG 64
@@ -41,7 +41,7 @@
 
 #else
 
-/* same as IEEE double */
+/* 与 IEEE 双精度浮点相同 */
 #define LDBL_MANT_DIG 53
 #define LDBL_DIG 15
 #define LDBL_EPSILON 2.2204460492503131e-16

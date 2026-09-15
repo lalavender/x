@@ -1,8 +1,8 @@
 /*
- *  Test 128-bit floating-point arithmetic on arm64:
- *  build with two different compilers and compare the output.
+ *  测试 arm64 上的 128 位浮点运算：
+ *  用两个不同的编译器构建并比较输出。
  *
- *  Copyright (c) 2015 Edmund Grimley Evans
+ *  版权所有 (c) 2015 Edmund Grimley Evans
  *
  * Copying and distribution of this file, with or without modification,
  * are permitted in any medium without royalty provided the copyright
@@ -167,7 +167,7 @@ void fdiv(long double a, long double b)
 
 void nanz(void)
 {
-    // Check NaNs:
+    // 检查 NaN：
     {
         long double x[7];
         int i, j, n = 0;
@@ -189,7 +189,7 @@ void nanz(void)
         }
     }
 
-    // Check infinities and zeroes:
+    // 检查无穷大和零：
     {
         long double x[6];
         int i, j, n = 0;
@@ -213,7 +213,7 @@ void nanz(void)
 
 void adds(void)
 {
-    // Check shifting and add/sub:
+    // 检查移位以及加/减：
     {
         int i;
         for (i = -130; i <= 130; i++) {
@@ -224,7 +224,7 @@ void adds(void)
         }
     }
 
-    // Check normalisation:
+    // 检查规格化：
     {
         uint64_t a0 = 0xc6bab0a6afbef5ed;
         uint64_t a1 = 0x4f84136c4a2e9b52;
@@ -242,7 +242,7 @@ void adds(void)
         }
     }
 
-    // Carry/overflow from rounding:
+    // 舍入产生的进位/溢出：
     {
         fadd(make(0, 114, -1, -1), make(0, 1, 0, 0));
         fadd(make(0, 32766, -1, -1), make(0, 32653, 0, 0));
@@ -267,9 +267,9 @@ void muls(void)
              make(i & 1, i, 0, 0));
 
     fmul(make(0, 16383, -1, -3), make(0, 16383, 0, 1));
-    // Round to next exponent:
+    // 舍入到下一个指数：
     fmul(make(0, 16383, -1, -2), make(0, 16383, 0, 1));
-    // Round from subnormal to normal:
+    // 从非规格化数舍入到规格化数：
     fmul(make(0, 1, -1, -1), make(0, 16382, 0, 0));
 
     for (i = 0; i < 2; i++)

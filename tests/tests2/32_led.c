@@ -1,28 +1,28 @@
-/* example from http://barnyard.syr.edu/quickies/led.c */
+/* 示例来自 http://barnyard.syr.edu/quickies/led.c */
 
-/* led.c: print out number as if on 7 line led display. I.e., write integer
-   given on command line like this:  
+/* led.c：像在 7 行 LED 显示器上一样打印数字。也就是说，把命令行上给出的
+   整数写成这样：  
       _   _       _  
    |  _|  _| |_| |_  
    | |_   _|   |  _| etc.
 
-   We assume the terminal behaves like a classical teletype. So the top
-   lines of all digits have to be printed first, then the middle lines of
-   all digits, etc.
+   我们假设终端的行为像经典的电传打字机。所以必须先打印所有数字的顶部
+   行，再打印所有数字的中间行，依此类推。
 
-   By Terry R. McConnell
 
-compile: cc -o led led.c
+   作者 Terry R. McConnell
 
-If you just want to link in the subroutine print_led that does all the
-work, compile with -DNO_MAIN, and declare the following in any source file
-that uses the call:
+编译：cc -o led led.c
+
+如果你只想链接完成全部工作的子程序 print_led，就用 -DNO_MAIN 编译，
+并在任何用到该调用的源文件中声明如下内容：
 
 extern void print_led(unsigned long x, char *buf);
 
-Bug: you cannot call repeatedly to print more than one number to a line.
-That would require curses or some other terminal API that allows moving the
-cursor to a previous line.
+
+缺陷：无法重复调用来把多个数字打印到同一行。那需要 curses 或其他允许把
+光标移到上一行的终端 API。
+
 
 */
 
@@ -35,15 +35,15 @@ cursor to a previous line.
 #define NO_MAIN
 
 
-/* Print the top line of the digit d into buffer. 
-   Does not null terminate buffer. */
+/* 把数字 d 的顶部行打印到 buffer 中。 
+   不会在 buffer 末尾加空字符终止。 */
 
 void topline(int d, char *p){
 
    *p++ = ' ';
    switch(d){
 
-      /* all these have _ on top line */
+      /* 这些数字的顶部行都有 _ */
 
       case 0:
       case 2:
@@ -61,14 +61,14 @@ void topline(int d, char *p){
    *p++=' ';
 }
 
-/* Print the middle line of the digit d into the buffer. 
-   Does not null terminate. */
+/* 把数字 d 的中间行打印到 buffer 中。 
+   不会在末尾加空字符终止。 */
 
 void midline(int d, char *p){
 
    switch(d){
 
-      /* those that have leading | on middle line */
+      /* 中间行开头为 | 的那些数字 */
 
       case 0:
       case 4:
@@ -83,7 +83,7 @@ void midline(int d, char *p){
    }
    switch(d){
 
-      /* those that have _ on middle line */
+      /* 中间行有 _ 的那些数字 */
 
       case 2:
       case 3:
@@ -100,7 +100,7 @@ void midline(int d, char *p){
    }
    switch(d){
 
-      /* those that have closing | on middle line */
+      /* 中间行结尾为 | 的那些数字 */
 
       case 0:
       case 1:
@@ -118,14 +118,14 @@ void midline(int d, char *p){
    }
 }
 
-/* Print the bottom line of the digit d. Does not null terminate. */
+/* 打印数字 d 的底部行。不会在末尾加空字符终止。 */
 
 void botline(int d, char *p){
 
 
    switch(d){
 
-      /* those that have leading | on bottom line */
+      /* 底部行开头为 | 的那些数字 */
 
       case 0:
       case 2:
@@ -138,7 +138,7 @@ void botline(int d, char *p){
    }
    switch(d){
 
-      /* those that have _ on bottom line */
+      /* 底部行有 _ 的那些数字 */
 
       case 0:
       case 2:
@@ -154,7 +154,7 @@ void botline(int d, char *p){
    }
    switch(d){
 
-      /* those that have closing | on bottom line */
+      /* 底部行结尾为 | 的那些数字 */
 
       case 0:
       case 1:
@@ -173,7 +173,7 @@ void botline(int d, char *p){
    }
 }
 
-/* Write the led representation of integer to string buffer. */
+/* 把整数的 led 表示写入字符串 buffer。 */
 
 void print_led(unsigned long x, char *buf)
 {
@@ -182,9 +182,9 @@ void print_led(unsigned long x, char *buf)
    static int d[MAX_DIGITS];
 
 
-   /* extract digits from x */
+   /* 从 x 中取出各位数字 */
 
-   n = ( x == 0L ? 1 : 0 );  /* 0 is a digit, hence a special case */
+   n = ( x == 0L ? 1 : 0 );  /* 0 也是一位数字，因此是特殊情况 */
 
    while(x){
       d[n++] = (int)(x%10L);
@@ -192,16 +192,16 @@ void print_led(unsigned long x, char *buf)
       x = x/10L;
    }
 
-   /* print top lines of all digits */
+   /* 打印所有数字的顶部行 */
 
    for(i=n-1;i>=0;i--){
       topline(d[i],buf);
       buf += 3;
       *buf++=' ';
    }
-   *buf++='\n'; /* move teletype to next line */
+   *buf++='\n'; /* 把电传打字机移到下一行 */
 
-   /* print middle lines of all digits */
+   /* 打印所有数字的中间行 */
 
    for(i=n-1;i>=0;i--){
       midline(d[i],buf);
@@ -210,7 +210,7 @@ void print_led(unsigned long x, char *buf)
    }
    *buf++='\n';
 
-   /* print bottom lines of all digits */
+   /* 打印所有数字的底部行 */
 
    for(i=n-1;i>=0;i--){
       botline(d[i],buf);
@@ -244,11 +244,11 @@ int main(int argc, char **argv)
       return 1;
    }
 
-   /* fetch argument from command line */
+   /* 从命令行取得参数 */
 
    x = atol(argv[1]);
 
-   /* sanity check */
+   /* 合理性检查 */
 
    if(x<0){
       fprintf(stderr,"led: %d must be non-negative\n",x);

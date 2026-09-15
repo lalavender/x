@@ -1,5 +1,5 @@
-/* The following are all valid decls, even though some subtypes
-   are incomplete.  */
+/* 以下都是合法的声明，即使某些子类型
+   是不完整的。  */
 enum E *e;
 const enum E *e1;
 enum E const *e2;
@@ -7,8 +7,8 @@ struct S *s;
 const struct S *s1;
 struct S const *s2;
 
-/* Various strangely looking declarators, which are all valid
-   and have to map to the same numbered typedefs. */
+/* 各种看起来奇怪的声明符，它们都是合法的，
+   并且必须映射到相同编号的 typedef。 */
 typedef int (*fptr1)();
 int f1 (int (), int);
 typedef int (*fptr2)(int x);

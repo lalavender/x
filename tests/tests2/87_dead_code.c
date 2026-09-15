@@ -1,17 +1,17 @@
-/* This checks various ways of dead code inside if statements
-   where there are non-obvious ways of how the code is actually
-   not dead due to reachable by labels.  */
+/* 这里检查 if 语句内部死代码的各种情形，
+   其中存在一些不明显的方式，使得这些代码实际上
+   由于可被标签到达而并非死代码。  */
 extern int printf (const char *, ...);
 static void kb_wait_1(void)
 {
   unsigned long timeout = 2;
   do {
-      /* Here the else arm is a statement expression that's supposed
-         to be suppressed.  The label inside the while would unsuppress
-	 code generation again if not handled correctly.  And that
-	 would wreak havoc to the cond-expression because there's no
-	 jump-around emitted, the whole statement expression really
-	 needs to not generate code (perhaps except useless forward jumps).  */
+      /* 这里的 else 分支是一个应当被抑制的语句表达式。
+         while 内部的标签如果处理不当会重新
+	 解除代码生成的抑制。而这会严重破坏
+	 条件表达式，因为没有发出跳转绕过的代码，
+	 整个语句表达式确实需要不生成代码
+	 （也许除了无用的前向跳转）。  */
       (1 ? 
        printf("timeout=%ld\n", timeout) :
        ({
@@ -31,7 +31,7 @@ int main (void)
   int i = 1;
   kb_wait_1();
 
-  /* Simple test of dead code at first sight which isn't actually dead. */
+  /* 简单的死代码测试，乍看是死代码，实际并非死代码。 */
   if (0) {
 yeah:
       printf ("yeah\n");
@@ -41,8 +41,8 @@ yeah:
   if (i--)
     goto yeah;
 
-  /* Some more non-obvious uses where the problems are loops, so that even
-     the first loop statements aren't actually dead.  */
+  /* 更多不明显的情形，问题出在循环上，因此即使
+     是第一个循环语句实际上也不是死代码。  */
   i = 1;
   if (0) {
       while (i--) {
@@ -54,10 +54,10 @@ enterloop:
   if (i >= 0)
     goto enterloop;
 
-  /* The same with statement expressions.  One might be tempted to
-     handle them specially by counting if inside statement exprs and
-     not unsuppressing code at loops at all then.
-     See kb_wait_1 for the other side of the medal where that wouldn't work.  */
+  /* 语句表达式也有同样的情况。人们可能倾向于
+     通过统计语句表达式内部的 if 来特殊处理它们，
+     并因此完全不解除循环处的代码抑制。
+     参见 kb_wait_1 中硬币的另一面，那样做并不可行。  */
   i = ({
       int j = 1;
       if (0) {
@@ -71,7 +71,7 @@ enterloop:
 	goto enterexprloop;
       j; });
 
-  /* The other two loop forms: */
+  /* 另外两种循环形式： */
   i = 1;
   if (0) {
       for (i = 1; i--;) {
@@ -94,8 +94,8 @@ enterloop3:
   if (i > 0)
     goto enterloop3;
 
-  /* And check that case and default labels have the same effect
-     of disabling code suppression.  */
+  /* 并检查 case 与 default 标签具有相同的
+     禁用代码抑制的效果。  */
   i = 41;
   switch (i) {
       if (0) {

@@ -4,7 +4,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-// MinGW has 80-bit rather than 64-bit long double which isn't compatible with TCC or MSVC
+// MinGW 的 long double 是 80 位而不是 64 位，与 TCC 或 MSVC 不兼容
 #if defined(_WIN32) && defined(__GNUC__)
 #define LONG_DOUBLE double
 #define LONG_DOUBLE_LITERAL(x) x
@@ -35,7 +35,7 @@ static void set_options(TCCState *s, int argc, char **argv)
 typedef int (*callback_type) (void*);
 
 /*
- * Compile source code and call a callback with a pointer to the symbol "f".
+ * 编译源代码，并用指向符号 "f" 的指针调用回调。
  */
 static int run_callback(const char *src, callback_type callback) {
   TCCState *s;
@@ -90,8 +90,8 @@ RET_PRIMITIVE_TEST(longdouble, LONG_DOUBLE, LONG_DOUBLE_LITERAL(378943892.0))
 /*
  * ret_2float_test:
  * 
- * On x86-64, a struct with 2 floats should be packed into a single
- * SSE register (VT_DOUBLE is used for this purpose).
+ * 在 x86-64 上，含 2 个 float 的结构体应被打包进单个 SSE 寄存器
+ * （为此使用了 VT_DOUBLE）。
  */
 typedef struct ret_2float_test_type_s {float x, y;} ret_2float_test_type;
 typedef ret_2float_test_type (*ret_2float_test_function_type) (ret_2float_test_type);
@@ -118,8 +118,8 @@ static int ret_2float_test(void) {
 /*
  * ret_2double_test:
  * 
- * On x86-64, a struct with 2 doubles should be passed in two SSE
- * registers.
+ * 在 x86-64 上，含 2 个 double 的结构体应通过两个 SSE
+ * 寄存器传递。
  */
 typedef struct ret_2double_test_type_s {double x, y;} ret_2double_test_type;
 typedef ret_2double_test_type (*ret_2double_test_function_type) (ret_2double_test_type);
@@ -146,14 +146,14 @@ static int ret_2double_test(void) {
 /*
  * ret_8plus2double_test:
  *
- * This catches a corner case in the x86_64 ABI code: the first 7
- * arguments fit into registers, the 8th doesn't, but the 9th argument
- * fits into the 8th XMM register.
+ * 这覆盖了 x86_64 ABI 代码中的一个边界情况：前 7 个参数可以
+ * 放进寄存器，第 8 个不行，但第 9 个参数可以放进第 8 个 XMM
+ * 寄存器。
  *
- * Note that the purpose of the 10th argument is to avoid a situation
- * in which gcc would accidentally put the double at the right
- * address, thus causing a success message even though TCC actually
- * generated incorrect code.
+ * 注意第 10 个参数的目的是避免出现这样的情况：gcc 偶然把那个
+ * double 放到了正确的地址上，从而即使 TCC 实际生成了错误的
+ * 代码也会输出成功消息。
+ *
  */
 typedef ret_2double_test_type (*ret_8plus2double_test_function_type) (double, double, double, double, double, double, double, ret_2double_test_type, double, double);
 
@@ -179,8 +179,8 @@ static int ret_8plus2double_test(void) {
 /*
  * ret_mixed_test:
  *
- * On x86-64, a struct with a double and a 64-bit integer should be
- * passed in one SSE register and one integer register.
+ * 在 x86-64 上，含一个 double 和一个 64 位整数的结构体应通过一个
+ * SSE 寄存器和一个整数寄存器传递。
  */
 typedef struct ret_mixed_test_type_s {double x; long long y;} ret_mixed_test_type;
 typedef ret_mixed_test_type (*ret_mixed_test_function_type) (ret_mixed_test_type);
@@ -207,8 +207,8 @@ static int ret_mixed_test(void) {
 /*
  * ret_mixed2_test:
  *
- * On x86-64, a struct with two floats and two 32-bit integers should
- * be passed in one SSE register and one integer register.
+ * 在 x86-64 上，含两个 float 和两个 32 位整数的结构体应通过一个
+ * SSE 寄存器和一个整数寄存器传递。
  */
 typedef struct ret_mixed2_test_type_s {float x,x2; int y,y2;} ret_mixed2_test_type;
 typedef ret_mixed2_test_type (*ret_mixed2_test_function_type) (ret_mixed2_test_type);
@@ -235,7 +235,7 @@ static int ret_mixed2_test(void) {
 /*
  * ret_mixed3_test:
  *
- * On x86-64, this struct should be passed in two integer registers.
+ * 在 x86-64 上，这个结构体应通过两个整数寄存器传递。
  */
 typedef struct ret_mixed3_test_type_s {float x; int y; float x2; int y2;} ret_mixed3_test_type;
 typedef ret_mixed3_test_type (*ret_mixed3_test_function_type) (ret_mixed3_test_type);
@@ -260,8 +260,8 @@ static int ret_mixed3_test(void) {
 }
 
 /*
- * reg_pack_test: return a small struct which should be packed into
- * registers (Win32) during return.
+ * reg_pack_test: 返回一个小结构体，它在返回时应被打包进
+ * 寄存器（Win32）。
  */
 typedef struct reg_pack_test_type_s {int x, y;} reg_pack_test_type;
 typedef reg_pack_test_type (*reg_pack_test_function_type) (reg_pack_test_type);
@@ -286,8 +286,8 @@ static int reg_pack_test(void) {
 }
 
 /*
- * reg_pack_longlong_test: return a small struct which should be packed into
- * registers (x86-64) during return.
+ * reg_pack_longlong_test: 返回一个小结构体，它在返回时应被打包进
+ * 寄存器（x86-64）。
  */
 typedef struct reg_pack_longlong_test_type_s {long long x, y;} reg_pack_longlong_test_type;
 typedef reg_pack_longlong_test_type (*reg_pack_longlong_test_function_type) (reg_pack_longlong_test_type);
@@ -314,14 +314,14 @@ static int reg_pack_longlong_test(void) {
 /*
  * ret_6plus2longlong_test:
  *
- * This catches a corner case in the x86_64 ABI code: the first 5
- * arguments fit into registers, the 6th doesn't, but the 7th argument
- * fits into the 6th argument integer register, %r9.
+ * 这覆盖了 x86_64 ABI 代码中的一个边界情况：前 5 个参数可以
+ * 放进寄存器，第 6 个不行，但第 7 个参数可以放进第 6 个参数
+ * 整数寄存器 %r9。
  *
- * Note that the purpose of the 10th argument is to avoid a situation
- * in which gcc would accidentally put the longlong at the right
- * address, thus causing a success message even though TCC actually
- * generated incorrect code.
+ * 注意第 10 个参数的目的是避免出现这样的情况：gcc 偶然把那个
+ * longlong 放到了正确的地址上，从而即使 TCC 实际生成了错误的
+ * 代码也会输出成功消息。
+ *
  */
 typedef reg_pack_longlong_test_type (*ret_6plus2longlong_test_function_type) (long long, long long, long long, long long, long long, reg_pack_longlong_test_type, long long, long long);
 
@@ -345,8 +345,8 @@ static int ret_6plus2longlong_test(void) {
 }
 
 /*
- * sret_test: Create a struct large enough to be returned via sret
- * (hidden pointer as first function argument)
+ * sret_test: 创建一个足够大的结构体，以便通过 sret
+ * （作为第一个函数参数的隐藏指针）返回
  */
 typedef struct sret_test_type_s {long long a, b, c;} sret_test_type;
 typedef sret_test_type (*sret_test_function_type) (sret_test_type);
@@ -372,8 +372,8 @@ static int sret_test(void) {
 /*
  * one_member_union_test:
  * 
- * In the x86-64 ABI a union should always be passed on the stack. However
- * it appears that a single member union is treated by GCC as its member.
+ * 在 x86-64 ABI 中，联合体应始终在栈上传递。然而看起来
+ * 单成员的联合体被 GCC 当作它的成员来处理。
  */
 typedef union one_member_union_test_type_u {int x;} one_member_union_test_type;
 typedef one_member_union_test_type (*one_member_union_test_function_type) (one_member_union_test_type);
@@ -400,7 +400,7 @@ static int one_member_union_test(void) {
 /*
  * two_member_union_test:
  * 
- * In the x86-64 ABI a union should always be passed on the stack.
+ * 在 x86-64 ABI 中，联合体应始终在栈上传递。
  */
 typedef union two_member_union_test_type_u {int x; long y;} two_member_union_test_type;
 typedef two_member_union_test_type (*two_member_union_test_function_type) (two_member_union_test_type);
@@ -425,7 +425,7 @@ static int two_member_union_test(void) {
 }
 
 /*
- * Win64 calling convention test.
+ * Win64 调用约定测试。
  */
 
 typedef struct many_struct_test_type_s {long long a, b, c;} many_struct_test_type;
@@ -452,7 +452,7 @@ static int many_struct_test(void) {
 }
 
 /*
- * Win64 calling convention test.
+ * Win64 调用约定测试。
  */
 
 typedef struct many_struct_test_2_type_s {int a, b;} many_struct_test_2_type;
@@ -478,7 +478,7 @@ static int many_struct_test_2(void) {
 }
 
 /*
- * Win64 calling convention test.
+ * Win64 调用约定测试。
  */
 
 typedef struct many_struct_test_3_type_s {int a, b;} many_struct_test_3_type;
@@ -514,7 +514,7 @@ static int many_struct_test_3(void) {
 }
 
 /*
- * stdarg_test: Test variable argument list ABI
+ * stdarg_test: 测试可变参数列表 ABI
  */
 
 typedef struct {long long a, b, c;} stdarg_test_struct_type;
@@ -589,8 +589,8 @@ static int stdarg_many_test(void)
 }
 
 /*
- * Test Win32 stdarg handling, since the calling convention will pass a pointer
- * to the struct and the stdarg pointer must point to that pointer initially.
+ * 测试 Win32 的 stdarg 处理，因为调用约定会传递一个指向该结构体的
+ * 指针，而 stdarg 指针最初必须指向那个指针。
  */
 
 typedef struct {long long a, b, c;} stdarg_struct_test_struct_type;
@@ -617,7 +617,7 @@ static int stdarg_struct_test(void) {
   return run_callback(src, stdarg_struct_test_callback);
 }
 
-/* Test that x86-64 arranges the stack correctly for arguments with alignment >8 bytes */
+/* 测试 x86-64 是否为对齐大于 8 字节的参数正确安排栈 */
 
 typedef LONG_DOUBLE (*arg_align_test_callback_type) (LONG_DOUBLE,int,LONG_DOUBLE,int,LONG_DOUBLE);
 
@@ -652,7 +652,7 @@ int main(int argc, char **argv) {
   const char *testname = NULL;
   int retval = EXIT_SUCCESS;
   
-  /* if tcclib.h and libtcc1.a are not installed, where can we find them */
+  /* 如果 tcclib.h 和 libtcc1.a 没有安装，我们在哪里能找到它们 */
   for (i = 1; i < argc; ++i) {
     if (!memcmp(argv[i], "run_test=", 9))
       testname = argv[i] + 9;
@@ -670,7 +670,7 @@ int main(int argc, char **argv) {
   RUN_TEST(ret_8plus2double_test);
   RUN_TEST(ret_6plus2longlong_test);
 #if !defined __x86_64__ || defined _WIN32
-  /* currently broken on x86_64 linux */
+  /* 目前在 x86_64 linux 上是坏的 */
   RUN_TEST(ret_mixed_test);
   RUN_TEST(ret_mixed2_test);
 #endif

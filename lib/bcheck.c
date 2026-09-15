@@ -1,21 +1,21 @@
 /*
- *  Tiny C Memory and bounds checker
+ *  Tiny C 内存与边界检查器
  * 
  *  Copyright (c) 2002 Fabrice Bellard
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * 本库为自由软件；你可以遵照自由软件基金会发布的 GNU 宽通用公共
+ * 许可证（GNU Lesser General Public License）的条款重新分发和/或
+ * 修改它，无论是许可证的第 2 版，还是（由你选择的）
+ * 任何更新的版本。
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * 分发本库是希望它有用，但不提供任何担保；
+ * 甚至不提供对适销性或特定用途适用性的默示担保。
+ * 详见 GNU 宽通用公共许可证。
+ * 详见 GNU 宽通用公共许可证以了解更多细节。
  *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * 你应当已经随本库收到一份 GNU 宽通用公共许可证的副本；
+ * 如果没有，请写信给自由软件基金会：
+ * 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #include <stdlib.h>
 #include <stdio.h>
@@ -42,11 +42,11 @@
  #define dprintf(a...)
 #endif
 
-/* define so that bound array is static (faster, but use memory if
-   bound checking not used) */
+/* 定义它可使边界数组为静态（更快，但不使用边界检查时
+   仍占用内存） */
 /* #define BOUND_STATIC */
 
-/* use malloc hooks. Currently the code cannot be reliable if no hooks */
+/* 使用 malloc 钩子。目前若无钩子，本代码无法保证可靠 */
 #define CONFIG_TCC_MALLOC_HOOKS
 #define HAVE_MEMALIGN
 
@@ -57,7 +57,7 @@
  || defined(__NetBSD__) \
  || defined(__dietlibc__) \
  || defined(_WIN32)
-//#warning Bound checking does not support malloc (etc.) in this environment.
+//#warning 边界检查在此环境中不支持 malloc（等函数）。
 #undef CONFIG_TCC_MALLOC_HOOKS
 #undef HAVE_MEMALIGN
 #endif
@@ -75,27 +75,38 @@
 #define BOUND_T23_SIZE ((size_t)1 << BOUND_T23_BITS)
 
 
-/* this pointer is generated when bound check is incorrect */
+/* 当边界检查不正确时生成该指针 */
 #define INVALID_POINTER ((void *)(-2))
-/* size of an empty region */
+/* 空区域的大小 */
 #define EMPTY_SIZE  ((size_t)(-1))
-/* size of an invalid region */
+/* 无效区域的大小 */
 #define INVALID_SIZE      0
 
+/*
+ * BoundEntry —— 边界检查运行时登记的一块内存区域
+ *
+ * 编译时带 -b 会把每个指针解引用变成对 __bound_ptr_add/__bound_ptr_indir* 的调用，
+ * 这些函数在本文件实现：它们在运行时用本结构的链表记录“哪块内存是合法的”。
+ *   start      区域起始地址；
+ *   size       区域字节数（EMPTY_SIZE/INVALID_SIZE 表示空区域/无效区域）；
+ *   next       按地址排序的区域链表中下一项；
+ *   is_invalid 为真表示越出该区域的指针一律视为无效（例如 malloc 返回的块，
+ *              越界访问应当报错），而非仅仅是“未登记”。
+ */
 typedef struct BoundEntry {
     size_t start;
     size_t size;
     struct BoundEntry *next;
-    size_t is_invalid; /* true if pointers outside region are invalid */
+    size_t is_invalid; /* 若区域外的指针无效则为真 */
 } BoundEntry;
 
-/* external interface */
+/* 外部接口 */
 void __bound_init(void);
 void __bound_new_region(void *p, size_t size);
 int __bound_delete_region(void *p);
 
 #ifdef __attribute__
-  /* an __attribute__ macro is defined in the system headers */
+  /* 系统头文件中定义了 __attribute__ 宏 */
   #undef __attribute__ 
 #endif
 #define FASTCALL __attribute__((regparm(3)))
@@ -116,21 +127,21 @@ static void *saved_realloc_hook;
 static void *saved_memalign_hook;
 #endif
 
-/* TCC definitions */
-extern char __bounds_start; /* start of static bounds table */
-/* error message, just for TCC */
+/* TCC 定义 */
+extern char __bounds_start; /* 静态边界表的起始位置 */
+/* 错误消息，仅供 TCC 使用 */
 const char *__bound_error_msg;
 
-/* runtime error output */
+/* 运行时错误输出 */
 extern void rt_error(size_t pc, const char *fmt, ...);
 
 #ifdef BOUND_STATIC
-static BoundEntry *__bound_t1[BOUND_T1_SIZE]; /* page table */
+static BoundEntry *__bound_t1[BOUND_T1_SIZE]; /* 页表 */
 #else
-static BoundEntry **__bound_t1; /* page table */
+static BoundEntry **__bound_t1; /* 页表 */
 #endif
-static BoundEntry *__bound_empty_t2;   /* empty page, for unused pages */
-static BoundEntry *__bound_invalid_t2; /* invalid page, for invalid pointers */
+static BoundEntry *__bound_empty_t2;   /* 空页，用于未使用的页 */
+static BoundEntry *__bound_invalid_t2; /* 无效页，用于无效指针 */
 
 static BoundEntry *__bound_find_region(BoundEntry *e1, void *p)
 {
@@ -142,7 +153,7 @@ static BoundEntry *__bound_find_region(BoundEntry *e1, void *p)
         addr = (size_t)p;
         addr -= e->start;
         if (addr <= e->size) {
-            /* put region at the head */
+            /* 把区域放到表头 */
             tmp = e1->start;
             e1->start = e->start;
             e->start = tmp;
@@ -153,19 +164,19 @@ static BoundEntry *__bound_find_region(BoundEntry *e1, void *p)
         }
         e = e->next;
     }
-    /* no entry found: return empty entry or invalid entry */
+    /* 未找到条目：返回空条目或无效条目 */
     if (e1->is_invalid)
         return __bound_invalid_t2;
     else
         return __bound_empty_t2;
 }
 
-/* print a bound error message */
+/* 打印边界错误消息 */
 static void bound_error(const char *fmt, ...)
 {
     __bound_error_msg = fmt;
     fprintf(stderr,"%s %s: %s\n", __FILE__, __FUNCTION__, fmt);
-    *(void **)0 = 0; /* force a runtime error */
+    *(void **)0 = 0; /* 强制产生运行时错误 */
 }
 
 static void bound_alloc_error(void)
@@ -173,8 +184,8 @@ static void bound_alloc_error(void)
     bound_error("not enough memory for bound checking code");
 }
 
-/* return '(p + offset)' for pointer arithmetic (a pointer can reach
-   the end of a region in this case */
+/* 用于指针算术时返回 '(p + offset)'（这种情况下指针可以到达
+   区域的末尾 */
 void * FASTCALL __bound_ptr_add(void *p, size_t offset)
 {
     size_t addr = (size_t)p;
@@ -198,13 +209,13 @@ void * FASTCALL __bound_ptr_add(void *p, size_t offset)
     if (addr >= e->size) {
 	fprintf(stderr,"%s %s: %p is outside of the region\n",
             __FILE__, __FUNCTION__, p + offset);
-        return INVALID_POINTER; /* return an invalid pointer */
+        return INVALID_POINTER; /* 返回一个无效指针 */
     }
     return p + offset;
 }
 
-/* return '(p + offset)' for pointer indirection (the resulting must
-   be strictly inside the region */
+/* 用于指针间接访问时返回 '(p + offset)'（结果必须
+   严格位于区域内部 */
 #define BOUND_PTR_INDIR(dsize)                                          \
 void * FASTCALL __bound_ptr_indir ## dsize (void *p, size_t offset)     \
 {                                                                       \
@@ -228,7 +239,7 @@ void * FASTCALL __bound_ptr_indir ## dsize (void *p, size_t offset)     \
     if (addr > e->size) {                                               \
 	fprintf(stderr,"%s %s: %p is outside of the region\n",          \
             __FILE__, __FUNCTION__, p + offset);                        \
-        return INVALID_POINTER; /* return an invalid pointer */         \
+        return INVALID_POINTER; /* 返回一个无效指针 */                  \
     }									\
     dprintf(stderr, "%s %s: return p+offset = %p\n",                    \
         __FILE__, __FUNCTION__, p + offset);                            \
@@ -244,20 +255,20 @@ BOUND_PTR_INDIR(16)
 
 #if defined(__GNUC__) && (__GNUC__ >= 6)
 /*
- * At least gcc 6.2 complains when __builtin_frame_address is used with
- * nonzero argument.
+ * 至少 gcc 6.2 在使用非零参数的 __builtin_frame_address 时会报错。
+ *
  */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wframe-address"
 #endif
 
-/* return the frame pointer of the caller */
+/* 返回调用者的帧指针 */
 #define GET_CALLER_FP(fp)\
 {\
     fp = (size_t)__builtin_frame_address(1);\
 }
 
-/* called when entering a function to add all the local regions */
+/* 进入函数时调用，用于添加所有局部区域 */
 void FASTCALL __bound_local_new(void *p1) 
 {
     size_t addr, size, fp, *p = p1;
@@ -276,7 +287,7 @@ void FASTCALL __bound_local_new(void *p1)
     dprintf(stderr, "%s, %s end\n", __FILE__, __FUNCTION__);
 }
 
-/* called when leaving a function to delete all the local regions */
+/* 离开函数时调用，用于删除所有局部区域 */
 void FASTCALL __bound_local_delete(void *p1) 
 {
     size_t addr, fp, *p = p1;
@@ -304,7 +315,7 @@ static BoundEntry *__bound_new_page(void)
     if (!page)
         bound_alloc_error();
     for(i=0;i<BOUND_T2_SIZE;i++) {
-        /* put empty entries */
+        /* 放入空条目 */
         page[i].start = 0;
         page[i].size = EMPTY_SIZE;
         page[i].next = NULL;
@@ -313,7 +324,7 @@ static BoundEntry *__bound_new_page(void)
     return page;
 }
 
-/* currently we use malloc(). Should use bound_new_page() */
+/* 目前我们使用 malloc()。应当使用 bound_new_page() */
 static BoundEntry *bound_new_entry(void)
 {
     BoundEntry *e;
@@ -331,14 +342,14 @@ static BoundEntry *get_page(size_t index)
     BoundEntry *page;
     page = __bound_t1[index];
     if (!page || page == __bound_empty_t2 || page == __bound_invalid_t2) {
-        /* create a new page if necessary */
+        /* 必要时新建一页 */
         page = __bound_new_page();
         __bound_t1[index] = page;
     }
     return page;
 }
 
-/* mark a region as being invalid (can only be used during init) */
+/* 把区域标记为无效（只能在初始化期间使用） */
 static void mark_invalid(size_t addr, size_t size)
 {
     size_t start, end;
@@ -358,7 +369,7 @@ static void mark_invalid(size_t addr, size_t size)
     dprintf(stderr, "mark_invalid: start = %x %x\n", t2_start, t2_end);
 #endif
     
-    /* first we handle full pages */
+    /* 先处理整页 */
     t1_start = (t2_start + BOUND_T2_SIZE - 1) >> BOUND_T2_BITS;
     t1_end = t2_end >> BOUND_T2_BITS;
 
@@ -407,7 +418,7 @@ void __bound_init(void)
 
     dprintf(stderr, "%s, %s() start\n", __FILE__, __FUNCTION__);
 
-    /* save malloc hooks and install bound check hooks */
+    /* 保存 malloc 钩子并安装边界检查钩子 */
     install_malloc_hooks();
 
 #ifndef BOUND_STATIC
@@ -422,7 +433,7 @@ void __bound_init(void)
 
     page = __bound_new_page();
     for(i=0;i<BOUND_T2_SIZE;i++) {
-        /* put invalid entries */
+        /* 放入无效条目 */
         page[i].start = 0;
         page[i].size = INVALID_SIZE;
         page[i].next = NULL;
@@ -430,44 +441,44 @@ void __bound_init(void)
     }
     __bound_invalid_t2 = page;
 
-    /* invalid pointer zone */
+    /* 无效指针区 */
     start = (size_t)INVALID_POINTER & ~(BOUND_T23_SIZE - 1);
     size = BOUND_T23_SIZE;
     mark_invalid(start, size);
 
 #if defined(CONFIG_TCC_MALLOC_HOOKS)
-    /* malloc zone is also marked invalid. can only use that with
-     * hooks because all libs should use the same malloc. The solution
-     * would be to build a new malloc for tcc.
+    /* malloc 区也被标记为无效。只能配合
+     * 钩子使用，因为所有库都应使用同一个 malloc。
+     * 解决办法是为 tcc 构建一个新的 malloc。
      *
-     * usually heap (= malloc zone) comes right after bss, i.e. after _end, but
-     * not always - either if we are running from under `tcc -b -run`, or if
-     * address space randomization is turned on(a), heap start will be separated
-     * from bss end.
+     * 通常堆（= malloc 区）紧跟在 bss 之后，即 _end 之后，但
+     * 并不总是如此——无论是运行在 `tcc -b -run` 之下，还是
+     * 开启了地址空间随机化(a)，堆起始位置都会与 bss 末尾分开。
      *
-     * So sbrk(0) will be a good approximation for start_brk:
+     * 所以 sbrk(0) 是 start_brk 的良好近似：
      *
-     *   - if we are a separately compiled program, __bound_init() runs early,
-     *     and sbrk(0) should be equal or very near to start_brk(b) (in case other
-     *     constructors malloc something), or
+     *   - 如果我们是一个单独编译的程序，__bound_init() 运行得很早，
+     *     此时 sbrk(0) 应等于或非常接近 start_brk(b)（若其他
+     *     构造函数分配了内存则不然），或者
      *
-     *   - if we are running from under `tcc -b -run`, sbrk(0) will return
-     *     start of heap portion which is under this program control, and not
-     *     mark as invalid earlier allocated memory.
+     *   - 如果我们运行在 `tcc -b -run` 之下，sbrk(0) 将返回
+     *     受本程序控制的堆部分的起始位置，而不会把更早分配的
+     *     内存标记为无效。
      *
      *
-     * (a) /proc/sys/kernel/randomize_va_space = 2, on Linux;
-     *     usually turned on by default.
+     * (a) Linux 上为 /proc/sys/kernel/randomize_va_space = 2；
+     *     通常默认开启。
      *
-     * (b) on Linux >= v3.3, the alternative is to read
-     *     start_brk from /proc/self/stat
+     * (b) 在 Linux >= v3.3 上，替代做法是从 /proc/self/stat
+     *     读取 start_brk
+     *
      */
     start = (size_t)sbrk(0);
     size = 128 * 0x100000;
     mark_invalid(start, size);
 #endif
 
-    /* add all static bound check values */
+    /* 添加所有静态边界检查值 */
     p = (size_t *)&__bounds_start;
     while (p[0] != 0) {
         __bound_new_region((void *)p[0], p[1]);
@@ -499,11 +510,11 @@ static inline void add_region(BoundEntry *e,
 {
     BoundEntry *e1;
     if (e->start == 0) {
-        /* no region : add it */
+        /* 没有区域：添加它 */
         e->start = start;
         e->size = size;
     } else {
-        /* already regions in the list: add it at the head */
+        /* 列表中已有区域：把它加到表头 */
         e1 = bound_new_entry();
         e1->start = e->start;
         e1->size = e->size;
@@ -514,7 +525,7 @@ static inline void add_region(BoundEntry *e,
     }
 }
 
-/* create a new region. It should not already exist in the region list */
+/* 新建一个区域。它不应已存在于区域列表中 */
 void __bound_new_region(void *p, size_t size)
 {
     size_t start, end;
@@ -531,7 +542,7 @@ void __bound_new_region(void *p, size_t size)
     t1_start = start >> (BOUND_T2_BITS + BOUND_T3_BITS);
     t1_end = end >> (BOUND_T2_BITS + BOUND_T3_BITS);
 
-    /* start */
+    /* 起始 */
     page = get_page(t1_start);
     t2_start = (start >> (BOUND_T3_BITS - BOUND_E_BITS)) & 
         ((BOUND_T2_SIZE - 1) << BOUND_E_BITS);
@@ -543,7 +554,7 @@ void __bound_new_region(void *p, size_t size)
     add_region(e, start, size);
 
     if (t1_end == t1_start) {
-        /* same ending page */
+        /* 结束页相同 */
         e2 = (BoundEntry *)((char *)page + t2_end);
         if (e2 > e) {
             e++;
@@ -554,14 +565,14 @@ void __bound_new_region(void *p, size_t size)
             add_region(e, start, size);
         }
     } else {
-        /* mark until end of page */
+        /* 标记到页尾 */
         e2 = page + BOUND_T2_SIZE;
         e++;
         for(;e<e2;e++) {
             e->start = start;
             e->size = size;
         }
-        /* mark intermediate pages, if any */
+        /* 标记中间的各页（如果有） */
         for(i=t1_start+1;i<t1_end;i++) {
             page = get_page(i);
             e2 = page + BOUND_T2_SIZE;
@@ -570,7 +581,7 @@ void __bound_new_region(void *p, size_t size)
                 e->size = size;
             }
         }
-        /* last page */
+        /* 最后一页 */
         page = get_page(t1_end);
         e2 = (BoundEntry *)((char *)page + t2_end);
         for(e=page;e<e2;e++) {
@@ -583,7 +594,7 @@ void __bound_new_region(void *p, size_t size)
     dprintf(stderr, "%s, %s end\n", __FILE__, __FUNCTION__);
 }
 
-/* delete a region */
+/* 删除一个区域 */
 static inline void delete_region(BoundEntry *e, void *p, size_t empty_size)
 {
     size_t addr;
@@ -592,30 +603,30 @@ static inline void delete_region(BoundEntry *e, void *p, size_t empty_size)
     addr = (size_t)p;
     addr -= e->start;
     if (addr <= e->size) {
-        /* region found is first one */
+        /* 找到的区域是第一个 */
         e1 = e->next;
         if (e1 == NULL) {
-            /* no more region: mark it empty */
+            /* 没有更多区域：把它标记为空 */
             e->start = 0;
             e->size = empty_size;
         } else {
-            /* copy next region in head */
+            /* 把下一个区域复制到表头 */
             e->start = e1->start;
             e->size = e1->size;
             e->next = e1->next;
             bound_free_entry(e1);
         }
     } else {
-        /* find the matching region */
+        /* 查找匹配的区域 */
         for(;;) {
             e1 = e;
             e = e->next;
-            /* region not found: do nothing */
+            /* 未找到区域：什么都不做 */
             if (e == NULL)
                 break;
             addr = (size_t)p - e->start;
             if (addr <= e->size) {
-                /* found: remove entry */
+                /* 已找到：删除条目 */
                 e1->next = e->next;
                 bound_free_entry(e);
                 break;
@@ -624,8 +635,8 @@ static inline void delete_region(BoundEntry *e, void *p, size_t empty_size)
     }
 }
 
-/* WARNING: 'p' must be the starting point of the region. */
-/* return non zero if error */
+/* 警告：'p' 必须是该区域的起始位置。 */
+/* 出错时返回非零 */
 int __bound_delete_region(void *p)
 {
     size_t start, end, addr, size, empty_size;
@@ -641,16 +652,16 @@ int __bound_delete_region(void *p)
     t2_start = (start >> (BOUND_T3_BITS - BOUND_E_BITS)) & 
         ((BOUND_T2_SIZE - 1) << BOUND_E_BITS);
     
-    /* find region size */
+    /* 查找区域大小 */
     page = __bound_t1[t1_start];
     e = (BoundEntry *)((char *)page + t2_start);
     addr = start - e->start;
     if (addr > e->size)
         e = __bound_find_region(e, p);
-    /* test if invalid region */
+    /* 测试是否为无效区域 */
     if (e->size == EMPTY_SIZE || (size_t)p != e->start) 
         return -1;
-    /* compute the size we put in invalid regions */
+    /* 计算我们填入无效区域的大小 */
     if (e->is_invalid)
         empty_size = INVALID_SIZE;
     else
@@ -658,14 +669,14 @@ int __bound_delete_region(void *p)
     size = e->size;
     end = start + size;
 
-    /* now we can free each entry */
+    /* 现在可以释放每个条目 */
     t1_end = end >> (BOUND_T2_BITS + BOUND_T3_BITS);
     t2_end = (end >> (BOUND_T3_BITS - BOUND_E_BITS)) & 
         ((BOUND_T2_SIZE - 1) << BOUND_E_BITS);
 
     delete_region(e, p, empty_size);
     if (t1_end == t1_start) {
-        /* same ending page */
+        /* 结束页相同 */
         e2 = (BoundEntry *)((char *)page + t2_end);
         if (e2 > e) {
             e++;
@@ -676,15 +687,15 @@ int __bound_delete_region(void *p)
             delete_region(e, p, empty_size);
         }
     } else {
-        /* mark until end of page */
+        /* 标记到页尾 */
         e2 = page + BOUND_T2_SIZE;
         e++;
         for(;e<e2;e++) {
             e->start = 0;
             e->size = empty_size;
         }
-        /* mark intermediate pages, if any */
-        /* XXX: should free them */
+        /* 标记中间的各页（如果有） */
+        /* XXX：应当释放它们 */
         for(i=t1_start+1;i<t1_end;i++) {
             page = get_page(i);
             e2 = page + BOUND_T2_SIZE;
@@ -693,7 +704,7 @@ int __bound_delete_region(void *p)
                 e->size = empty_size;
             }
         }
-        /* last page */
+        /* 最后一页 */
         page = get_page(t1_end);
         e2 = (BoundEntry *)((char *)page + t2_end);
         for(e=page;e<e2;e++) {
@@ -708,8 +719,8 @@ int __bound_delete_region(void *p)
     return 0;
 }
 
-/* return the size of the region starting at p, or EMPTY_SIZE if non
-   existent region. */
+/* 返回从 p 开始的区域的大小；若区域不存在则返回
+   EMPTY_SIZE。 */
 static size_t get_region_size(void *p)
 {
     size_t addr = (size_t)p;
@@ -727,9 +738,9 @@ static size_t get_region_size(void *p)
     return e->size;
 }
 
-/* patched memory functions */
+/* 被替换的内存函数 */
 
-/* force compiler to perform stores coded up to this point */
+/* 强制编译器完成到此为止已编码的存储操作 */
 #define barrier()   __asm__ __volatile__ ("": : : "memory")
 
 static void install_malloc_hooks(void)
@@ -776,16 +787,16 @@ static void libc_free(void *ptr)
     install_malloc_hooks();
 }
 
-/* XXX: we should use a malloc which ensure that it is unlikely that
-   two malloc'ed data have the same address if 'free' are made in
-   between. */
+/* XXX：我们应该使用一种 malloc，它能保证在中间有 'free' 发生时，
+   两块 malloc 出来的数据不太可能具有相同地址，
+   或在中间释放后重新分配时具有相同地址。 */
 void *__bound_malloc(size_t size, const void *caller)
 {
     void *ptr;
     
-    /* we allocate one more byte to ensure the regions will be
-       separated by at least one byte. With the glibc malloc, it may
-       be in fact not necessary */
+    /* 我们多分配一个字节，以确保各区域之间至少相隔
+       一个字节。使用 glibc 的 malloc 时，这实际上
+       可能并不必要 */
     ptr = libc_malloc(size + 1);
     
     if (!ptr)
@@ -806,16 +817,16 @@ void *__bound_memalign(size_t size, size_t align, const void *caller)
 
 #ifndef HAVE_MEMALIGN
     if (align > 4) {
-        /* XXX: handle it ? */
+        /* XXX：要处理它吗？ */
         ptr = NULL;
     } else {
-        /* we suppose that malloc aligns to at least four bytes */
+        /* 我们假定 malloc 至少按四字节对齐 */
         ptr = malloc(size + 1);
     }
 #else
-    /* we allocate one more byte to ensure the regions will be
-       separated by at least one byte. With the glibc malloc, it may
-       be in fact not necessary */
+    /* 我们多分配一个字节，以确保各区域之间至少相隔
+       一个字节。使用 glibc 的 malloc 时，这实际上
+       可能并不必要 */
     ptr = memalign(size + 1, align);
 #endif
     
@@ -886,7 +897,7 @@ static void bound_dump(void)
         page = __bound_t1[i];
         for(j=0;j<BOUND_T2_SIZE;j++) {
             e = page + j;
-            /* do not print invalid or empty entries */
+            /* 不打印无效或空的条目 */
             if (e->size != EMPTY_SIZE && e->start != 0) {
                 fprintf(stderr, "%08x:", 
                        (i << (BOUND_T2_BITS + BOUND_T3_BITS)) + 
@@ -902,9 +913,9 @@ static void bound_dump(void)
 }
 #endif
 
-/* some useful checked functions */
+/* 一些有用的带检查的函数 */
 
-/* check that (p ... p + size - 1) lies inside 'p' region, if any */
+/* 检查 (p ... p + size - 1) 是否位于 'p' 区域内部（若存在） */
 static void __bound_check(const void *p, size_t size)
 {
     if (size == 0)
@@ -923,7 +934,7 @@ void *__bound_memcpy(void *dst, const void *src, size_t size)
 
     __bound_check(dst, size);
     __bound_check(src, size);
-    /* check also region overlap */
+    /* 还要检查区域重叠 */
     if (src >= dst && src < dst + size)
         bound_error("overlapping regions in memcpy()");
 
@@ -946,7 +957,7 @@ void *__bound_memset(void *dst, int c, size_t size)
     return memset(dst, c, size);
 }
 
-/* XXX: could be optimized */
+/* XXX：可以优化 */
 int __bound_strlen(const char *s)
 {
     const char *p;

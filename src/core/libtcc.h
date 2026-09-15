@@ -1,3 +1,19 @@
+/*
+ * libtcc.h —— Tiny C Compiler 的嵌入式（libtcc）公共 API
+ *
+ * 通过本头文件，宿主程序可以把 TCC 当作库使用：创建编译上下文、
+ * 添加头文件/库搜索路径、定义宏、编译源文件或字符串、设置输出类型，
+ * 重定位到内存并调用生成的函数。
+ *
+ * 典型用法：
+ *   TCCState *s = tcc_new();
+ *   tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
+ *   tcc_add_file(s, "foo.c");
+ *   tcc_relocate(s, TCC_RELOCATE_AUTO);
+ *   fn = tcc_get_symbol(s, "main");
+ *   tcc_delete(s);
+ */
+
 #ifndef LIBTCC_H
 #define LIBTCC_H
 
@@ -9,90 +25,92 @@
 extern "C" {
 #endif
 
+/* TCCState 在 tcc.h 中完整定义，此处仅作前置声明，隐藏内部实现 */
 struct TCCState;
 
 typedef struct TCCState TCCState;
 
-/* create a new TCC compilation context */
+/* 创建一个新的 TCC 编译上下文 */
 LIBTCCAPI TCCState *tcc_new(void);
 
-/* free a TCC compilation context */
+/* 释放一个 TCC 编译上下文 */
 LIBTCCAPI void tcc_delete(TCCState *s);
 
-/* set CONFIG_TCCDIR at runtime */
+/* 运行时设置 CONFIG_TCCDIR（库/头文件安装目录） */
 LIBTCCAPI void tcc_set_lib_path(TCCState *s, const char *path);
 
-/* set error/warning display callback */
+/* 设置错误/警告的显示回调函数 */
 LIBTCCAPI void tcc_set_error_func(TCCState *s, void *error_opaque,
                                   void (*error_func)(void *opaque,
                                                      const char *msg));
 
-/* set options as from command line (multiple supported) */
+/* 像命令行一样设置选项（可多次调用） */
 LIBTCCAPI void tcc_set_options(TCCState *s, const char *str);
 
 /*****************************/
-/* preprocessor */
+/* 预处理器 */
 
-/* add include path */
+/* 添加头文件搜索路径 */
 LIBTCCAPI int tcc_add_include_path(TCCState *s, const char *pathname);
 
-/* add in system include path */
+/* 添加系统头文件搜索路径 */
 LIBTCCAPI int tcc_add_sysinclude_path(TCCState *s, const char *pathname);
 
-/* define preprocessor symbol 'sym'. Can put optional value */
+/* 定义预处理符号 'sym'，可选地提供取值 */
 LIBTCCAPI void tcc_define_symbol(TCCState *s, const char *sym,
                                  const char *value);
 
-/* undefine preprocess symbol 'sym' */
+/* 取消预处理符号 'sym' 的定义 */
 LIBTCCAPI void tcc_undefine_symbol(TCCState *s, const char *sym);
 
 /*****************************/
-/* compiling */
+/* 编译 */
 
-/* add a file (C file, dll, object, library, ld script). Return -1 if error. */
+/* 添加一个文件（C 文件、动态库、目标文件、静态库、链接脚本）。
+   出错返回 -1。 */
 LIBTCCAPI int tcc_add_file(TCCState *s, const char *filename);
 
-/* compile a string containing a C source. Return -1 if error. */
+/* 编译一段包含 C 源码的字符串。出错返回 -1。 */
 LIBTCCAPI int tcc_compile_string(TCCState *s, const char *buf);
 
 /*****************************/
-/* linking commands */
+/* 链接命令 */
 
-/* set output type. MUST BE CALLED before any compilation */
+/* 设置输出类型。必须在任何编译之前调用 */
 LIBTCCAPI int tcc_set_output_type(TCCState *s, int output_type);
-#define TCC_OUTPUT_MEMORY 1     /* output will be run in memory (default) */
-#define TCC_OUTPUT_EXE 2        /* executable file */
-#define TCC_OUTPUT_DLL 3        /* dynamic library */
-#define TCC_OUTPUT_OBJ 4        /* object file */
-#define TCC_OUTPUT_PREPROCESS 5 /* only preprocess (used internally) */
+#define TCC_OUTPUT_MEMORY 1     /* 输出到内存中直接运行（默认） */
+#define TCC_OUTPUT_EXE 2        /* 可执行文件 */
+#define TCC_OUTPUT_DLL 3        /* 动态库 */
+#define TCC_OUTPUT_OBJ 4        /* 目标文件 */
+#define TCC_OUTPUT_PREPROCESS 5 /* 仅预处理（内部使用） */
 
-/* equivalent to -Lpath option */
+/* 等价于命令行 -Lpath 选项 */
 LIBTCCAPI int tcc_add_library_path(TCCState *s, const char *pathname);
 
-/* the library name is the same as the argument of the '-l' option */
+/* 库名与 '-l' 选项的参数相同 */
 LIBTCCAPI int tcc_add_library(TCCState *s, const char *libraryname);
 
-/* add a symbol to the compiled program */
+/* 向编译后的程序添加一个符号（直接把地址传给编译产物） */
 LIBTCCAPI int tcc_add_symbol(TCCState *s, const char *name, const void *val);
 
-/* output an executable, library or object file. DO NOT call
-   tcc_relocate() before. */
+/* 输出可执行文件、库或目标文件。
+   在此之前不要调用 tcc_relocate()。 */
 LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename);
 
-/* link and run main() function and return its value. DO NOT call
-   tcc_relocate() before. */
+/* 链接并运行 main() 函数，返回其返回值。
+   在此之前不要调用 tcc_relocate()。 */
 LIBTCCAPI int tcc_run(TCCState *s, int argc, char **argv);
 
-/* do all relocations (needed before using tcc_get_symbol()) */
+/* 执行所有重定位（在使用 tcc_get_symbol() 之前必须调用） */
 LIBTCCAPI int tcc_relocate(TCCState *s1, void *ptr);
-/* possible values for 'ptr':
-   - TCC_RELOCATE_AUTO : Allocate and manage memory internally
-   - NULL              : return required memory size for the step below
-   - memory address    : copy code to memory passed by the caller
-   returns -1 if error. */
+/* 'ptr' 的可能取值：
+   - TCC_RELOCATE_AUTO : 在内部自动分配并管理内存
+   - NULL              : 返回下一步所需的内存大小
+   - 内存地址          : 把代码复制到调用者提供的内存中
+   出错返回 -1。 */
 #define TCC_RELOCATE_AUTO (void *)1
 
-/* return symbol value or NULL if not found */
+/* 返回符号的值，找不到返回 NULL */
 LIBTCCAPI void *tcc_get_symbol(TCCState *s, const char *name);
 
 #ifdef __cplusplus

@@ -1,7 +1,7 @@
 /*
- * Simple Test program for libtcc
+ * libtcc 的简单测试程序
  *
- * libtcc can be useful to use tcc as a "backend" for a code generator.
+ * libtcc 可用作代码生成器的“后端”。
  */
 #include <stdlib.h>
 #include <stdio.h>
@@ -9,19 +9,19 @@
 
 #include "libtcc.h"
 
-/* this function is called by the generated code */
+/* 此函数由生成的代码调用 */
 int add(int a, int b)
 {
     return a + b;
 }
 
-/* this strinc is referenced by the generated code */
+/* 此字符串被生成的代码引用 */
 const char hello[] = "Hello World!";
 
 char my_program[] =
-"#include <tcclib.h>\n" /* include the "Simple libc header for TCC" */
+"#include <tcclib.h>\n" /* 包含“TCC 的简单 libc 头文件” */
 "extern int add(int a, int b);\n"
-"#ifdef _WIN32\n" /* dynamically linked data needs 'dllimport' */
+"#ifdef _WIN32\n" /* 动态链接的数据需要 'dllimport' */
 " __attribute__((dllimport))\n"
 "#endif\n"
 "extern const char hello[];\n"
@@ -53,7 +53,7 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    /* if tcclib.h and libtcc1.a are not installed, where can we find them */
+    /* 如果 tcclib.h 和 libtcc1.a 未安装，我们在哪里可以找到它们 */
     for (i = 1; i < argc; ++i) {
         char *a = argv[i];
         if (a[0] == '-') {
@@ -66,30 +66,30 @@ int main(int argc, char **argv)
         }
     }
 
-    /* MUST BE CALLED before any compilation */
+    /* 必须在任何编译之前调用 */
     tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
 
     if (tcc_compile_string(s, my_program) == -1)
         return 1;
 
-    /* as a test, we add symbols that the compiled program can use.
-       You may also open a dll with tcc_add_dll() and use symbols from that */
+    /* 作为测试，我们添加编译后的程序可以使用的符号。
+       你也可以用 tcc_add_dll() 打开一个 dll 并使用其中的符号 */
     tcc_add_symbol(s, "add", add);
     tcc_add_symbol(s, "hello", hello);
 
-    /* relocate the code */
+    /* 重定位代码 */
     if (tcc_relocate(s, TCC_RELOCATE_AUTO) < 0)
         return 1;
 
-    /* get entry symbol */
+    /* 获取入口符号 */
     func = tcc_get_symbol(s, "foo");
     if (!func)
         return 1;
 
-    /* run the code */
+    /* 运行代码 */
     func(32);
 
-    /* delete the state */
+    /* 删除状态 */
     tcc_delete(s);
 
     return 0;

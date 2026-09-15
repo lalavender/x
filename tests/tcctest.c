@@ -1,17 +1,17 @@
 /*
- * TCC auto test program
+ * TCC 自动测试程序
  */
 #include "config.h"
 
 #if GCC_MAJOR >= 3
 
-/* Unfortunately, gcc version < 3 does not handle that! */
+/* 遗憾的是，gcc 版本 < 3 不处理这一点！ */
 #define ALL_ISOC99
 
-/* only gcc 3 handles _Bool correctly */
+/* 只有 gcc 3 正确处理 _Bool */
 #define BOOL_ISOC99
 
-/* gcc 2.95.3 does not handle correctly CR in strings or after strays */
+/* gcc 2.95.3 不能正确处理字符串中的 CR 或 stray 之后的 CR */
 #define CORRECT_CR_HANDLING
 
 #endif
@@ -24,7 +24,7 @@
 #define ULONG_LONG_FORMAT "%Lu"
 #endif
 
-// MinGW has 80-bit rather than 64-bit long double which isn't compatible with TCC or MSVC
+// MinGW 的 long double 是 80 位而非 64 位，与 TCC 或 MSVC 不兼容
 #if defined(_WIN32) && defined(__GNUC__)
 #define LONG_DOUBLE double
 #define LONG_DOUBLE_LITERAL(x) x
@@ -33,13 +33,13 @@
 #define LONG_DOUBLE_LITERAL(x) x ## L
 #endif
 
-/* deprecated and no longer supported in gcc 3.3 */
+/* 已废弃，gcc 3.3 中不再支持 */
 //#define ACCEPT_CR_IN_STRINGS
 
-/* __VA_ARGS__ and __func__ support */
+/* __VA_ARGS__ 和 __func__ 支持 */
 #define C99_MACROS
 
-/* test various include syntaxes */
+/* 测试各种 include 语法 */
 
 #define TCCLIB_INC <tcclib.h>
 #define TCCLIB_INC1 <tcclib
@@ -60,7 +60,7 @@
 
 #include "tcctest.h"
 
-/* Test two more ways to include a file named like a pp-number */
+/* 再测试两种包含名字像 pp-number 的文件的方式 */
 #define INC(name) <tests/name.h>
 #define funnyname 42test.h
 #define incdir tests/
@@ -128,8 +128,8 @@ void num(int n);
 void forward_ref(void);
 int isid(int c);
 
-/* Line joining happens before tokenization, so the following
-   must be parsed as ellipsis.  */
+/* 行拼接发生在词法分析之前，因此下面
+   必须被解析为省略号。  */
 void funny_line_continuation (int, ..\
 . );
 
@@ -157,7 +157,7 @@ static int onetwothree = 123;
 #define dprintf(level,...) printf(__VA_ARGS__)
 #endif
 
-/* gcc vararg macros */
+/* gcc 可变参数宏 */
 #define dprintf1(level, fmt, args...) printf(fmt, ## args)
 
 #define MACRO_NOARGS()
@@ -177,7 +177,7 @@ static int onetwothree = 123;
 #endif
 
 #ifdef __TINYC__
-/* We try to handle this syntax.  Make at least sure it doesn't segfault.  */
+/* 我们尝试处理这种语法。至少要确保它不会段错误。  */
 char invalid_function_def()[] {}
 #endif
 
@@ -352,7 +352,7 @@ void macro_test(void)
 #line 227 "tcctest.c"
 #endif
 
-    /* not strictly preprocessor, but we test it there */
+    /* 不严格属于预处理器，但我们在这里测试它 */
 #ifdef C99_MACROS
     printf("__func__ = %s\n", __func__);
     dprintf(1, "vaarg=%d\n", 1);
@@ -361,10 +361,10 @@ void macro_test(void)
     dprintf1(1, "vaarg1=%d\n", 2);
     dprintf1(1, "vaarg1=%d %d\n", 1, 2);
 
-    /* gcc extension */
+    /* gcc 扩展 */
     printf("func='%s'\n", __FUNCTION__);
 
-    /* complicated macros in glibc */
+    /* glibc 中复杂的宏 */
     printf("INT64_MIN=" LONG_LONG_FORMAT "\n", INT64_MIN);
     {
         int a;
@@ -375,7 +375,7 @@ void macro_test(void)
         printf("a=%d\n", a);
     }
     
-    /* macro function with argument outside the macro string */
+    /* 参数在宏字符串之外的宏函数 */
 #define MF_s MF_hello
 #define MF_hello(msg) printf("%s\n",msg)
 
@@ -384,36 +384,36 @@ void macro_test(void)
     MF_s("hi");
     MF_t("hi");
     
-    /* test macro substitution inside args (should not eat stream) */
+    /* 测试参数内部的宏替换（不应吃掉输入流） */
     printf("qq=%d\n", qq(qq)(2));
 
-    /* test zero argument case. NOTE: gcc 2.95.x does not accept a
-       null argument without a space. gcc 3.2 fixes that. */
+    /* 测试零参数的情况。注意：gcc 2.95.x 不接受
+       不带空格的空参数。gcc 3.2 修复了这一点。 */
 
 #define qq1(x) 1
     printf("qq1=%d\n", qq1( ));
 
-    /* comment with stray handling *\
+    /* 带有 stray 反斜杠处理的注释 *\
 /
-       /* this is a valid *\/ comment */
-       /* this is a valid comment *\*/
-    //  this is a valid\
+       /* 这是一个有效的 *\/ 注释 */
+       /* 这是一个有效的注释 *\*/
+    //  这是一个有效的\
 comment
 
-    /* test function macro substitution when the function name is
-       substituted */
+    /* 测试函数名被替换时的函数宏替换
+       （函数名本身被替换的情形） */
     TEST2();
 
-    /* And again when the name and parentheses are separated by a
-       comment.  */
-    TEST2 /* the comment */ ();
+    /* 再测试名字和括号被一个
+       注释分隔的情况。  */
+    TEST2 /* 该注释 */ ();
 
     printf("%s\n", get_basefile_from_header());
     printf("%s\n", __BASE_FILE__);
     printf("%s\n", get_file_from_header());
     printf("%s\n", __FILE__);
 
-    /* Check that funnily named include was in fact included */
+    /* 检查名字古怪的 include 确实被包含了 */
     have_included_42test_h = 1;
     have_included_42test_h_second = 1;
     have_included_42test_h_third = 1;
@@ -429,7 +429,7 @@ void recursive_macro_test(void)
 
 #define ELF32_ST_TYPE(val)              ((val) & 0xf)
 #define ELF32_ST_INFO(bind, type)       (((bind) << 4) + ((type) & 0xf))
-#define STB_WEAK        2               /* Weak symbol */
+#define STB_WEAK        2               /* 弱符号 */
 #define ELFW(type) ELF##32##_##type
     printf("%d\n", ELFW(ST_INFO)(STB_WEAK, ELFW(ST_TYPE)(123)));
 
@@ -482,7 +482,7 @@ void string_test()
 {
     unsigned int b;
     printf("string:\n");
-    printf("\141\1423\143\n");/* dezdez test */
+    printf("\141\1423\143\n");/* dezdez 测试 */
     printf("\x41\x42\x43\x3a\n");
     printf("c=%c\n", 'r');
     printf("wc=%C 0x%lx %C\n", L'a', L'\x1234', L'c');
@@ -524,12 +524,12 @@ void loop_test()
     printf("\n");
 
     char count = 123;
-    /* c99 for loop init test */
+    /* c99 for 循环初始化测试 */
     for (size_t count = 1; count < 3; count++)
         printf("count=%d\n", count);
     printf("count = %d\n", count);
 
-    /* break/continue tests */
+    /* break/continue 测试 */
     i = 0;
     while (1) {
         if (i == 6)
@@ -541,7 +541,7 @@ void loop_test()
     }
     printf("\n");
 
-    /* break/continue tests */
+    /* break/continue 测试 */
     i = 0;
     do {
         if (i == 6)
@@ -570,7 +570,7 @@ void goto_test()
 
     printf("goto:\n");
     i = 0;
-    /* This needs to parse as label, not as start of decl.  */
+    /* 这必须解析为标签，而不是声明的开始。  */
  typedef_and_label:
  s_loop:
     if (i >= 10) 
@@ -581,7 +581,7 @@ void goto_test()
  s_end:
     printf("\n");
 
-    /* we also test computed gotos (GCC extension) */
+    /* 我们还测试计算 goto（GCC 扩展） */
     for(i=0;i<3;i++) {
         goto *label_table[i];
     label1:
@@ -613,8 +613,8 @@ struct S_enum {
 };
 
 enum ELong {
-    /* This is either 0 on L32 machines, or a large number
-       on L64 machines.  We should be able to store this.  */
+    /* 在 L32 机器上这是 0，在 L64 机器上是一个大数。
+       我们应该能够存储它。  */
     EL_large = ((unsigned long)0xf000 << 31) << 1,
 };
 
@@ -632,7 +632,7 @@ static int getint(int i)
 void enum_test()
 {
     enum test b1;
-    /* The following should give no warning */
+    /* 下面不应产生任何警告 */
     unsigned *p = &b1;
     struct S_enum s = {E7};
     printf("enum: %d\n", s.e);
@@ -707,7 +707,7 @@ union union2 {
 struct struct1 st1, st2;
 
 struct empty_mem {
-    /* nothing */ ;
+    /* 什么都没有 */ ;
     int x;
 };
 
@@ -949,7 +949,7 @@ void expr_ptr_test()
     printf("add=%d\n", p + 3 - tab4);
     printf("add=%d\n", 3 + p - tab4);
 
-    /* check if 64bit support is ok */
+    /* 检查 64 位支持是否正常 */
     q = p = 0;
     q += i;
     printf("%p %p %ld\n", q, p, p-q);
@@ -1046,11 +1046,11 @@ struct aligntest7
 struct aligntest5 altest5[2];
 struct aligntest6 altest6[2];
 int pad1;
-/* altest7 is correctly aligned to 16 bytes also with TCC,
-   but __alignof__ returns the wrong result (4) because we
-   can't store the alignment yet when specified on symbols
-   directly (it's stored in the type so we'd need to make
-   a copy of it). -- FIXED */
+/* 在 TCC 中 altest7 也被正确对齐到 16 字节，
+   但 __alignof__ 返回错误的结果 (4)，因为直接写在符号上
+   指定对齐时我们还不能存储它（它存储在类型中，
+   所以我们需要复制一份）。
+   -- 已修复 */
 struct aligntest7 altest7[2] __attribute__((aligned(16)));
 
 struct aligntest8
@@ -1136,7 +1136,7 @@ void struct_test()
            s->f1, s->f2, s->f3);
     printf("str_addr=%x\n", (int)st1.str - (int)&st1.f1);
 
-    /* align / size tests */
+    /* 对齐/大小测试 */
     printf("aligntest1 sizeof=%d alignof=%d\n",
            sizeof(struct aligntest1), __alignof__(struct aligntest1));
     printf("aligntest2 sizeof=%d alignof=%d\n",
@@ -1164,7 +1164,7 @@ void struct_test()
     printf("altest7 sizeof=%d alignof=%d\n",
            sizeof(altest7), __alignof__(altest7));
            
-    /* empty structures (GCC extension) */
+    /* 空结构体（GCC 扩展） */
     printf("sizeof(struct empty) = %d\n", sizeof(struct empty));
     printf("alignof(struct empty) = %d\n", __alignof__(struct empty));
 
@@ -1174,7 +1174,7 @@ void struct_test()
     printf("Large: offsetof(compound_head)=%d\n", (int)((char*)&ls.compound_head - (char*)&ls));
 }
 
-/* XXX: depend on endianness */
+/* XXX: 依赖于字节序 */
 void char_short_test()
 {
     int var1, var2;
@@ -1224,7 +1224,7 @@ static int toupper1(int a)
 static unsigned int calc_vm_flags(unsigned int prot)
 {
   unsigned int prot_bits;
-  /* This used to segfault in some revisions: */
+  /* 在某些版本中这里曾经段错误： */
   prot_bits = ((0x1==0x00000001)?(prot&0x1):(prot&0x1)?0x00000001:0);
   return prot_bits;
 }
@@ -1260,21 +1260,21 @@ void bool_test()
     a = 4;
     printf("b=%d\n", a + (0 ? 1 : a / 2));
 
-    /* test register spilling */
+    /* 测试寄存器溢出 */
     a = 10;
     b = 10;
     a = (a + b) * ((a < b) ?
                    ((b - a) * (a - b)): a + b);
     printf("a=%d\n", a);
 
-    /* test complex || or && expressions */
+    /* 测试复杂的 || 或 && 表达式 */
     t = 1;
     f = 0;
     a = 32;
     printf("exp=%d\n", f == (32 <= a && a <= 3));
     printf("r=%d\n", (t || f) + (t && f));
 
-    /* test ? : cast */
+    /* 测试 ? : 转换 */
     {
         int aspect_on;
         int aspect_native = 65536;
@@ -1286,17 +1286,17 @@ void bool_test()
         }
     }
 
-    /* test ? : GCC extension */
+    /* 测试 ? : GCC 扩展 */
     {
-        static int v1 = 34 ? : -1; /* constant case */
-        static int v2 = 0 ? : -1; /* constant case */
+        static int v1 = 34 ? : -1; /* 常量情况 */
+        static int v2 = 0 ? : -1; /* 常量情况 */
         int a = 30;
         
         printf("%d %d\n", v1, v2);
         printf("%d %d\n", a - 30 ? : a * 2, a + 1 ? : a * 2);
     }
 
-    /* again complex expression */
+    /* 又是复杂表达式 */
     for(i=0;i<256;i++) {
         if (toupper1 (i) != TOUPPER (i))
             printf("error %d\n", i);
@@ -1332,16 +1332,16 @@ void optimize_out(void)
       printf("oow:%d\n", undefined_function());
   }
   j = 1;
-  /* Following is a switch without {} block intentionally.  */
+  /* 下面故意是一个没有 {} 块的 switch。  */
   switch (j)
     case 1: break;
   printf ("oos:%d\n", defined_function());
-  /* The following break shouldn't lead to disabled code after
-     the while.  */
+  /* 下面的 break 不应导致 while 之后的代码
+     被禁用。  */
   while (1)
     break;
   printf ("ool1:%d\n", defined_function());
-  /* Same for the other types of loops.  */
+  /* 其他类型的循环也一样。  */
   do
     break;
   while (1);
@@ -1349,8 +1349,8 @@ void optimize_out(void)
   for (;;)
     break;
   printf ("ool3:%d\n", defined_function());
-  /* Normal {} blocks without controlling statements
-     shouldn't reactivate code emission */
+  /* 不带控制语句的普通 {} 块不应
+     重新激活代码生成 */
   while (1) {
 	{
 	  break;
@@ -1360,7 +1360,7 @@ void optimize_out(void)
   j = 1;
   while (j) {
       if (j == 0)
-	break; /* this break shouldn't disable code outside the if. */
+	break; /* 这个 break 不应禁用 if 之外的代码。 */
       printf("ool5:%d\n", defined_function());
       j--;
   }
@@ -1375,7 +1375,7 @@ void optimize_out(void)
       goto breakhere;
   }
 
-  /* Test that constants in logical && are optimized: */
+  /* 测试逻辑 && 中的常量被优化： */
   i = 0 && undefined_function();
   i = defined_function() && 0 && undefined_function();
   if (0 && undefined_function())
@@ -1386,7 +1386,7 @@ void optimize_out(void)
     undefined_function();
   if (defined_function() && 0 && undefined_function())
     undefined_function();
-  /* The same for || : */
+  /* || 也一样： */
   i = 1 || undefined_function();
   i = defined_function() || 1 || undefined_function();
   if (1 || undefined_function())
@@ -1417,7 +1417,7 @@ void optimize_out(void)
       undefined_function();
   }
 
-  /* Leave the "if(1)return; printf()" in this order and last in the function */
+  /* 让 "if(1)return; printf()" 保持这个顺序并位于函数的最后 */
   if (1)
     return;
   printf ("oor:%d\n", undefined_function());
@@ -1429,11 +1429,11 @@ int defined_function(void)
   return i++;
 }
 
-/* GCC accepts that */
+/* GCC 接受这一点 */
 static int tab_reinit[];
 static int tab_reinit[10];
 
-//int cinit1; /* a global variable can be defined several times without error ! */
+//int cinit1; /* 全局变量可以多次定义而不报错！ */
 int cinit1; 
 int cinit1; 
 int cinit1 = 0;
@@ -1483,7 +1483,7 @@ void compound_literal_test(void)
 #endif
 }
 
-/* K & R protos */
+/* K & R 原型 */
 
 kr_func1(a, b)
 {
@@ -1523,7 +1523,7 @@ void num(int n)
     free(tab);
 }
 
-/* structure assignment tests */
+/* 结构体赋值测试 */
 struct structa1 {
     int f1;
     char f2;
@@ -1573,13 +1573,13 @@ void struct_assign_test(void)
     static struct {
         void (*elem)();
     } t[] = {
-        /* XXX: we should allow this even without braces */
+        /* XXX: 即使没有花括号我们也应该允许这样 */
         { struct_assign_test }
     };
     printf("%d\n", struct_assign_test == t[0].elem);
 }
 
-/* casts to short/char */
+/* 到 short/char 的转换 */
 
 void cast1(char a, short b, unsigned char c, unsigned short d)
 {
@@ -1621,7 +1621,7 @@ void cast_test()
     
     printf("sizeof(c) = %d, sizeof((int)c) = %d\n", sizeof(c), sizeof((int)c));
     
-    /* test cast from unsigned to signed short to int */
+    /* 测试从无符号到有符号 short 再到 int 的转换 */
     b = 0xf000;
     d = (short)b;
     printf("((unsigned)(short)0x%08x) = 0x%08x\n", b, d);
@@ -1629,29 +1629,29 @@ void cast_test()
     d = (char)b;
     printf("((unsigned)(char)0x%08x) = 0x%08x\n", b, d);
     
-    /* test implicit int casting for array accesses */
+    /* 测试数组访问的隐式 int 转换 */
     c = 0;
     tab[1] = 2;
     tab[c] = 1;
     printf("%d %d\n", tab[0], tab[1]);
 
-    /* test implicit casting on some operators */
+    /* 测试某些运算符上的隐式转换 */
     printf("sizeof(+(char)'a') = %d\n", sizeof(+(char)'a'));
     printf("sizeof(-(char)'a') = %d\n", sizeof(-(char)'a'));
     printf("sizeof(~(char)'a') = %d\n", sizeof(-(char)'a'));
 
-    /* from pointer to integer types */
+    /* 从指针到整数类型 */
     printf("%d %d %ld %ld %lld %lld\n",
            (int)p, (unsigned int)p,
            (long)p, (unsigned long)p,
            (long long)p, (unsigned long long)p);
 
-    /* from integers to pointers */
+    /* 从整数到指针 */
     printf("%p %p %p %p\n",
            (void *)a, (void *)b, (void *)c, (void *)d);
 }
 
-/* initializers tests */
+/* 初始化器测试 */
 struct structinit1 {
     int f1;
     char f2;
@@ -1748,7 +1748,7 @@ typedef int arrtype2[3];
 arrtype2 sinit21 = {4};
 arrtype2 sinit22 = {5,6,7};
 
-/* Address comparisons of non-weak symbols with zero can be const-folded */
+/* 非弱符号的地址与零的比较可以被常量折叠 */
 int sinit23[2] = { "astring" ? sizeof("astring") : -1,
 		   &sinit23 ? 42 : -1 };
 
@@ -1769,7 +1769,7 @@ void init_test(void)
     struct linit16 { int a1, a2, a3, a4; } linit16 = { 1, .a3 = 2 };
     int linit17 = sizeof(linit17);
     int zero = 0;
-    /* Addresses on non-weak symbols are non-zero, but not the access itself */
+    /* 非弱符号的地址非零，但访问本身不是 */
     int linit18[2] = {&zero ? 1 : -1, zero ? -1 : 1 };
     
     printf("init_test:\n");
@@ -1839,7 +1839,7 @@ void init_test(void)
            linit16.a2,
            linit16.a3,
            linit16.a4);
-    /* test that initialisation is done after variable declare */
+    /* 测试初始化在变量声明之后完成 */
     printf("linit17=%d\n", linit17);
     printf("sinit15=%d\n", sinit15[0]);
     printf("sinit16=%d %d\n", sinit16[0].a[0], sinit16[1].a[0]);
@@ -1849,7 +1849,7 @@ void init_test(void)
     for(i=0;i<10;i++)
         printf("%x ", sinit18[i]);
     printf("\n");
-    /* complex init check */
+    /* 复杂初始化检查 */
     printf("cix: %d %d %d %d %d %d %d\n",
 	cix[0].a,
 	cix[0].b[0].a, cix[0].b[0].b,
@@ -1986,7 +1986,7 @@ void switch_test()
     }
 }
 
-/* ISOC99 _Bool type */
+/* ISOC99 _Bool 类型 */
 void c99_bool_test(void)
 {
 #ifdef BOOL_ISOC99
@@ -2094,11 +2094,11 @@ void bitfield_test(void)
 #ifdef __x86_64__
 #define FLOAT_FMT "%f\n"
 #else
-/* x86's float isn't compatible with GCC */
+/* x86 的 float 与 GCC 不兼容 */
 #define FLOAT_FMT "%.5f\n"
 #endif
 
-/* declare strto* functions as they are C99 */
+/* 声明 strto* 函数，因为它们是 C99 的 */
 double strtod(const char *nptr, char **endptr);
 
 #if defined(_WIN32)
@@ -2283,7 +2283,7 @@ void funcptr_test()
     a = 1;
     a = 1;
     func(12345);
-    /* more complicated pointer computation */
+    /* 更复杂的指针运算 */
     st1.func = num;
     st1.func(12346);
     printf("sizeof1 = %d\n", sizeof(funcptr_test));
@@ -2304,7 +2304,7 @@ void lloptest(long long a, long long b)
 
     ua = a;
     ub = b;
-    /* arith */
+    /* 算术 */
     printf("arith: " LONG_LONG_FORMAT " " LONG_LONG_FORMAT " " LONG_LONG_FORMAT "\n",
            a + b,
            a - b,
@@ -2316,13 +2316,13 @@ void lloptest(long long a, long long b)
            a % b);
     }
 
-    /* binary */
+    /* 二进制位运算 */
     printf("bin: " LONG_LONG_FORMAT " " LONG_LONG_FORMAT " " LONG_LONG_FORMAT "\n",
            a & b,
            a | b,
            a ^ b);
 
-    /* tests */
+    /* 比较 */
     printf("test: %d %d %d %d %d %d\n",
            a == b,
            a != b,
@@ -2339,7 +2339,7 @@ void lloptest(long long a, long long b)
            ua >= ub,
            ua <= ub);
 
-    /* arith2 */
+    /* 算术2 */
     a++;
     b++;
     printf("arith2: " LONG_LONG_FORMAT " " LONG_LONG_FORMAT "\n", a, b);
@@ -2457,7 +2457,7 @@ void longlong_test(void)
     printf("%Lx\n", c);
 #endif
 
-    /* long long reg spill test */
+    /* long long 寄存器溢出测试 */
     {
           struct S a;
 
@@ -2483,7 +2483,7 @@ void longlong_test(void)
 
     printf(LONG_LONG_FORMAT "\n", 0x123456789LLU);
 
-    /* long long pointer deref in argument passing test */
+    /* 参数传递中 long long 指针解引用测试 */
     a = 0x123;
     long long *p = &a;
     llshift(*p, 5);
@@ -2654,7 +2654,8 @@ void whitespace_test(void)
 {
     char *str;
 
-#if 1
+
+#if 1
     pri\
 ntf("whitspace:\n");
 #endif
@@ -2677,7 +2678,8 @@ ntf("min=%d\n", 4);
 ";
     printf("len1=%d str[0]=%d\n", strlen(str), str[0]);
 #endif
-    printf("len1=%d\n", strlen("a
+    printf("len1=%d\n", strlen("
+a
 "));
 #endif /* ACCEPT_CR_IN_STRINGS */
 }
@@ -2698,11 +2700,11 @@ void getmyaddress(void)
 #ifdef __LP64__
 long __pa_symbol(void)
 {
-    /* This 64bit constant was handled incorrectly, it was used as addend
-       (which can hold 64bit just fine) in connection with a symbol,
-       and TCC generates wrong code for that (displacements are 32bit only).
-       This effectively is "+ 0x80000000", and if addresses of globals
-       are below 2GB the result should be a number without high 32 bits set.  */
+    /* 这个 64 位常量曾被错误处理，它被当作加数
+       （加数完全可以容纳 64 位）与一个符号关联使用，
+       而 TCC 为此生成了错误的代码（位移只能是 32 位）。
+       它实际上相当于 "+ 0x80000000"，如果全局变量的地址
+       低于 2GB，结果应该是一个高 32 位未置位的数。  */
        return ((long)(((unsigned long)(&rel1))) - (0xffffffff80000000UL));
 }
 #endif
@@ -2752,7 +2754,7 @@ void alloca_test()
     strcpy(p,"123456789012345");
     printf("alloca: p is %s\n", p);
     char *demo = "This is only a test.\n";
-    /* Test alloca embedded in a larger expression */
+    /* 测试 alloca 嵌入在更大的表达式中 */
     printf("alloca: %s\n", strcpy(alloca(strlen(demo)+1),demo) );
 #endif
 }
@@ -2772,8 +2774,8 @@ void c99_vla_test(int size1, int size2)
     int tab1[size][2], tab2[10][2];
     void *tab1_ptr, *tab2_ptr, *bad_ptr;
 
-    /* "size" should have been 'captured' at tab1 declaration, 
-        so modifying it should have no effect on VLA behaviour. */
+    /* "size" 应该在 tab1 声明时就被 '捕获'， 
+        因此修改它不应对 VLA 行为有影响。 */
     size = size-1;
     
     printf("Test C99 VLA 1 (sizeof): ");
@@ -2840,21 +2842,21 @@ void sizeof_test(void)
     ptr = NULL;
     printf("sizeof(**ptr) = %d\n", sizeof (**ptr));
 
-    /* The type of sizeof should be as large as a pointer, actually
-       it should be size_t.  */
+    /* sizeof 的类型应该和一个指针一样大，实际上
+       它应该是 size_t。  */
     printf("sizeof(sizeof(int) = %d\n", sizeof(sizeof(int)));
     uintptr_t t = 1;
     uintptr_t t2;
-    /* Effectively <<32, but defined also on 32bit machines.  */
+    /* 实际上相当于 <<32，但在 32 位机器上也有定义。  */
     t <<= 16;
     t <<= 16;
     t++;
-    /* This checks that sizeof really can be used to manipulate 
-       uintptr_t objects, without truncation.  */
+    /* 这检查 sizeof 确实可以用来操作 
+       uintptr_t 对象，而不会截断。  */
     t2 = t & -sizeof(uintptr_t);
     printf ("%lu %lu\n", t, t2);
 
-    /* some alignof tests */
+    /* 一些 alignof 测试 */
     printf("__alignof__(int) = %d\n", __alignof__(int));
     printf("__alignof__(unsigned int) = %d\n", __alignof__(unsigned int));
     printf("__alignof__(short) = %d\n", __alignof__(short));
@@ -2863,18 +2865,18 @@ void sizeof_test(void)
     printf("__alignof__(unsigned char) = %d\n", __alignof__(unsigned char));
     printf("__alignof__(func) = %d\n", __alignof__ sizeof_test());
 
-    /* sizes of VLAs need to be evaluated even inside sizeof: */
+    /* VLA 的大小即使在 sizeof 内部也需要求值： */
     a = 2;
     printf("sizeof(char[1+2*a]) = %d\n", sizeof(char[1+2*a]));
-    /* And checking if sizeof compound literal works.  Parenthesized: */
+    /* 并检查 sizeof 复合字面量是否可用。加括号： */
     printf("sizeof( (struct {int i; int j;}){4,5} ) = %d\n",
 	   sizeof( (struct {int i; int j;}){4,5} ));
-    /* And as direct sizeof argument (as unary expression): */
+    /* 以及作为 sizeof 的直接参数（作为一元表达式）： */
     printf("sizeof (struct {short i; short j;}){4,5} = %d\n",
 	   sizeof (struct {short i; short j;}){4,5} );
 
-    /* sizeof(x && y) should be sizeof(int), even if constant
-       evaluating is possible. */
+    /* sizeof(x && y) 应该是 sizeof(int)，即使
+       常量求值是可能的。 */
     printf("sizeof(t && 0) = %d\n", sizeof(t && 0));
     printf("sizeof(1 && 1) = %d\n", sizeof(1 && 1));
     printf("sizeof(t || 1) = %d\n", sizeof(t || 1));
@@ -2908,7 +2910,7 @@ void statement_expr_test(void)
 {
     int a, i;
 
-    /* Basic stmt expr test */
+    /* 基本语句表达式测试 */
     a = 0;
     for(i=0;i<10;i++) {
         a += 1 + 
@@ -2920,10 +2922,10 @@ void statement_expr_test(void)
     }
     printf("a=%d\n", a);
     
-    /* Test that symbols aren't freed prematurely.
-       With SYM_DEBUG valgrind will show a read from a freed
-       symbol, and tcc will show an (invalid) warning on the initialization
-       of 'ptr' below, if symbols are popped after the stmt expr.  */
+    /* 测试符号不会被过早释放。
+       如果符号在语句表达式之后被弹出，使用 SYM_DEBUG 时 valgrind 会显示
+       读取已释放的符号，tcc 会对下面 'ptr' 的初始化
+       显示一个（无效的）警告。  */
     void *v = (void*)39;
     typeof(({
 	    (struct hlist_node *)v;
@@ -2931,9 +2933,9 @@ void statement_expr_test(void)
     typeof (x)
 	ptr = (struct hlist_node *)v;
 
-    /* This part used to segfault when symbols were popped prematurely.
-       The symbols for the static local would be overwritten with
-       helper symbols from the pre-processor expansions in between.  */
+    /* 当符号被过早弹出时，这部分曾经段错误。
+       静态局部变量的符号会被中间的
+       预处理器展开产生的辅助符号覆盖。  */
 #define some_attr     __attribute__((aligned(1)))
 #define tps(str) ({                  \
             static const char *t some_attr = str; \
@@ -2943,12 +2945,12 @@ void statement_expr_test(void)
 	    tps("somerandomlongstring"),
 	    tps("anotherlongstring"));
 
-    /* Test that the three decls of 't' don't interact.  */
+    /* 测试 't' 的三个声明互不影响。  */
     int t = 40;
     int b = ({ int t = 41; t; });
     int c = ({ int t = 42; t; });
 
-    /* Test that aggregate return values work.  */
+    /* 测试聚合返回值可用。  */
     struct hlist_head h
 	= ({
 	   typedef struct hlist_head T;
@@ -2960,7 +2962,7 @@ void statement_expr_test(void)
     printf ("stmtexpr: %d %d %d\n", t, b, c);
     printf ("stmtexpr: %ld %ld\n", (long)h.first, (long)h.last);
 
-    /* Test that we can give out addresses of local labels.  */
+    /* 测试我们可以给出局部标签的地址。  */
     consume_ulong(({ __label__ __here; __here: (unsigned long)&&__here; }));
 }
 
@@ -2994,10 +2996,10 @@ void local_label_test(void)
     goto l4;
 }
 
-/* inline assembler test */
+/* 内联汇编测试 */
 #if defined(__i386__) || defined(__x86_64__)
 
-/* from linux kernel */
+/* 来自 linux 内核 */
 static char * strncat1(char * dest,const char * src,size_t count)
 {
 long d0, d1, d2, d3;
@@ -3024,7 +3026,7 @@ static char * strncat2(char * dest,const char * src,size_t count)
 {
 long d0, d1, d2, d3;
 __asm__ __volatile__(
-	"repne scasb\n\t" /* one-line repne prefix + string op */
+	"repne scasb\n\t" /* 单行 repne 前缀 + 字符串操作 */
 	"dec %1\n\t"
 	"mov %8,%3\n"
 	"1:\tdec %3\n\t"
@@ -3063,7 +3065,7 @@ static inline void * memcpy2(void * to, const void * from, size_t n)
 {
 long d0, d1, d2;
 __asm__ __volatile__(
-	"rep movsl\n\t"  /* one-line rep prefix + string op */
+	"rep movsl\n\t"  /* 单行 rep 前缀 + 字符串操作 */
 	"testb $2,%b4\n\t"
 	"je 1f\n\t"
 	"movsw\n"
@@ -3089,9 +3091,9 @@ static __inline__ void sigdelset1(unsigned int *set, int _sig)
 
 static __inline__ __const__ unsigned int swab32(unsigned int x)
 {
-	__asm__("xchgb %b0,%h0\n\t"	/* swap lower bytes	*/
-		"rorl $16,%0\n\t"	/* swap words		*/
-		"xchgb %b0,%h0"		/* swap higher bytes	*/
+	__asm__("xchgb %b0,%h0\n\t"	/* 交换低位字节	*/
+		"rorl $16,%0\n\t"	/* 交换字		*/
+		"xchgb %b0,%h0"		/* 交换高位字节	*/
 		:"=" "q" (x)
 		: "0" (x));
 	return x;
@@ -3101,8 +3103,8 @@ static __inline__ unsigned long long mul64(unsigned int a, unsigned int b)
 {
     unsigned long long res;
 #ifdef __x86_64__
-    /* Using the A constraint is wrong (it means rdx:rax, which is too large)
-       but still test the 32bit->64bit mull.  */
+    /* 使用 A 约束是错误的（它表示 rdx:rax，太大了）
+       但仍测试 32 位到 64 位的 mull。  */
     unsigned int resh, resl;
     __asm__("mull %2" : "=a" (resl), "=d" (resh) : "a" (a), "r" (b));
     res = ((unsigned long long)resh << 32) | resl;
@@ -3116,8 +3118,8 @@ static __inline__ unsigned long long inc64(unsigned long long a)
 {
     unsigned long long res;
 #ifdef __x86_64__
-    /* Using the A constraint is wrong, and increments are tested
-       elsewhere.  */
+    /* 使用 A 约束是错误的，而且自增测试在
+       其他地方进行。  */
     res = a + 1;
 #else
     __asm__("addl $1, %%eax ; adcl $0, %%edx" : "=A" (res) : "A" (a));
@@ -3166,7 +3168,7 @@ void other_constraints_test(void)
 }
 
 #ifndef _WIN32
-/* Test global asm blocks playing with aliases.  */
+/* 测试使用别名的全局 asm 块。  */
 void base_func(void)
 {
   printf ("asmc: base\n");
@@ -3184,8 +3186,8 @@ void override_func2 (void)
   printf ("asmc: override2\n");
 }
 
-/* This checks a construct used by the linux kernel to encode
-   references to strings by PC relative references.  */
+/* 这检查 linux 内核用来通过 PC 相对引用
+   编码字符串引用的一种构造。  */
 extern int bug_table[] __attribute__((section("__bug_table")));
 char * get_asm_string (void)
 {
@@ -3197,16 +3199,16 @@ char * get_asm_string (void)
 		".pushsection __bug_table, \"a\"\n"
 		".globl bug_table\n"
 		"bug_table:\n"
-		/* The first entry (1b-2b) is unused in this test,
-		   but we include it to check if cross-section
-		   PC-relative references work.  */
+		/* 第一个条目 (1b-2b) 在此测试中未使用，
+		   但我们包含它来检查跨段的
+		   PC 相对引用是否可用。  */
 		"2:\t.long 1b - 2b, %c0 - 2b\n"
 		".popsection\n" : : "i" ("A string"));
   char * str = ((char*)bug_table) + bug_table[1];
   return str;
 }
 
-/* This checks another constructs with local labels.  */
+/* 这检查另一种使用局部标签的构造。  */
 extern unsigned char alld_stuff[];
 asm(".data\n"
     ".byte 41\n"
@@ -3215,18 +3217,18 @@ asm(".data\n"
     ".byte 42\n"
     "662:\n"
     ".pushsection .data.ignore\n"
-    ".long 661b - .\n" /* This reference to 661 generates an external sym
-                          which shouldn't somehow overwrite the offset that's
-                          already determined for it.  */
+    ".long 661b - .\n" /* 这个对 661 的引用会生成一个外部符号，
+                          它不应以任何方式覆盖已经为它
+                          确定的偏移。  */
     ".popsection\n"
-    ".byte 662b - 661b\n"  /* So that this value is undeniably 1.  */);
+    ".byte 662b - 661b\n"  /* 这样这个值就毫无疑问是 1。  */);
 
 void asm_local_label_diff (void)
 {
   printf ("asm_local_label_diff: %d %d\n", alld_stuff[0], alld_stuff[1]);
 }
 
-/* This checks that static local variables are available from assembler.  */
+/* 这检查静态局部变量可以从汇编中访问。  */
 void asm_local_statics (void)
 {
   static int localint = 41;
@@ -3260,10 +3262,10 @@ void test_high_clobbers(void)
 #if defined __x86_64__ && !defined _WIN64
     register long val asm("r12");
     long val2;
-    /* This tests if asm clobbers correctly save/restore callee saved
-       registers if they are clobbered and if it's the high 8 x86-64
-       registers.  This is fragile for GCC as the constraints do not
-       correctly capture the data flow, but good enough for us.  */
+    /* 这测试当被调用者保存的寄存器被破坏时，asm clobber 是否正确
+       保存/恢复它们，以及是否针对高 8 个 x86-64
+       寄存器。对 GCC 来说这很脆弱，因为约束没有
+       正确捕获数据流，但对我们来说足够了。  */
     asm volatile("mov $0x4542, %%r12" : "=r" (val):: "memory");
     clobber_r12();
     asm volatile("mov %%r12, %0" : "=r" (val2) : "r" (val): "memory");
@@ -3275,19 +3277,19 @@ static long cpu_number;
 void trace_console(long len, long len2)
 {
 #ifdef __x86_64__
-    /* This generated invalid code when the emission of the switch
-       table isn't disabled.  The asms are necessary to show the bug,
-       normal statements don't work (they need to generate some code
-       even under nocode_wanted, which normal statements don't do,
-       but asms do).  Also at least these number of cases is necessary
-       to generate enough "random" bytes.  They ultimately are enough
-       to create invalid instruction patterns to which the first
-       skip-to-decision-table jump jumps.  If decision table emission
-       is disabled all of this is no problem.
+    /* 当 switch 表的生成未被禁用时，这生成了无效代码。
+       这些 asm 是暴露这个 bug 所必需的，
+       普通语句不行（它们即使在 nocode_wanted 下也需要
+       生成一些代码，普通语句不会这样，
+       但 asm 会）。另外至少需要这么多 case
+       才能生成足够多的 "随机" 字节。它们最终足以
+       构造出无效的指令模式，第一个
+       跳到决策表的跳转会跳到那里。如果决策表生成
+       被禁用，这一切都没有问题。
 
-       It also is necessary that the switches are in a statement expression
-       (which has the property of not being enterable from outside. no
-       matter what).  */
+       另外还要求这些 switch 位于语句表达式中
+       （该表达式具有无论如何都不能从外部进入的
+       性质）。  */
     if (0
         &&
             ({
@@ -3327,19 +3329,19 @@ void trace_console(long len, long len2)
 void test_asm_dead_code(void)
 {
   long rdi;
-  /* Try to make sure that xdi contains a zero, and hence will
-     lead to a segfault if the next asm is evaluated without
-     arguments being set up.  */
+  /* 尽量确保 xdi 包含零，因此如果下一个 asm 在没有
+     设置好参数的情况下被求值，就会
+     导致段错误。  */
   asm volatile ("" : "=D" (rdi) : "0" (0));
   (void)sizeof (({
       int var;
-      /* This shouldn't trigger a segfault, either the argument
-         registers need to be set up and the asm emitted despite
-	 this being in an unevaluated context, or both the argument
-	 setup _and_ the asm emission need to be suppressed.  The latter
-	 is better.  Disabling asm code gen when suppression is on
-	 also fixes the above trace_console bug, but that came earlier
-	 than asm suppression.  */
+      /* 这不应触发段错误：要么需要设置好参数寄存器
+         并生成 asm，尽管这处于
+	 未求值的上下文中，要么参数设置
+	 _和_ asm 生成都需要被抑制。后者
+	 更好。在抑制开启时禁用 asm 代码生成
+	 也修复了上面的 trace_console bug，但那个出现得
+	 比 asm 抑制更早。  */
       asm volatile ("movl $0,(%0)" : : "D" (&var) : "memory");
       var;
   }));
@@ -3350,14 +3352,14 @@ void test_asm_call(void)
 #if defined __x86_64__ && !defined _WIN64
   static char str[] = "PATH";
   char *s;
-  /* This tests if a reference to an undefined symbol from an asm
-     block, which isn't otherwise referenced in this file, is correctly
-     regarded as global symbol, so that it's resolved by other object files
-     or libraries.  We chose getenv here, which isn't used anywhere else
-     in this file.  (If we used e.g. printf, which is used we already
-     would have a global symbol entry, not triggering the bug which is
-     tested here).  */
-  /* two pushes so stack remains aligned */
+  /* 这测试 asm 块中对未定义符号的引用（该符号在本文件中
+     没有其他引用）是否被正确视为全局符号，
+     从而由其他目标文件或库来解析它。我们这里
+     选择 getenv，它在本文件中其他地方都没用到。
+     （如果我们用例如 printf，它已被使用，我们就已经有
+     全局符号条目了，也就不会触发这里测试的
+     bug）。  */
+  /* 两次 push 以便栈保持对齐 */
   asm volatile ("push %%rdi; push %%rdi; mov %0, %%rdi;"
 #if 1 && !defined(__TINYC__) && (defined(__PIC__) || defined(__PIE__))
 		"call getenv@plt;"
@@ -3407,8 +3409,8 @@ void asm_test(void)
     unsigned int val, val2;
     struct struct123 s1;
     struct struct1231 s2 = { (unsigned long)&s1 };
-    /* Hide the outer base_func, but check later that the inline
-       asm block gets the outer one.  */
+    /* 隐藏外层的 base_func，但稍后检查内联
+       asm 块得到的是外层那个。  */
     int base_func = 42;
     void override_func3 (void);
     unsigned long asmret;
@@ -3419,10 +3421,10 @@ void asm_test(void)
 
     printf("inline asm:\n");
 
-    // parse 0x1E-1 as 3 tokens in asm mode
+    // 在 asm 模式下把 0x1E-1 解析为 3 个词法单元
     asm volatile ("mov $0x1E-1,%eax");
 
-    /* test the no operand case */
+    /* 测试无操作数的情况 */
     asm volatile ("xorl %eax, %eax");
 
     memcpy1(buf, "hello", 6);
@@ -3433,7 +3435,7 @@ void asm_test(void)
     strncat2(buf, " worldXXXXX", 3);
     printf("%s\n", buf);
 
-    /* 'A' constraint test */
+    /* 'A' 约束测试 */
     printf("mul64=0x%Lx\n", mul64(0x12345678, 0xabcd1234));
     printf("inc64=0x%Lx\n", inc64(0x12345678ffffffff));
 
@@ -3445,8 +3447,8 @@ void asm_test(void)
     set = 0xff;
     sigdelset1(&set, 2);
     sigaddset1(&set, 16);
-    /* NOTE: we test here if C labels are correctly restored after the
-       asm statement */
+    /* 注意：我们在这里测试 asm 语句之后 C 标签是否被
+       正确恢复 */
     goto label1;
  label2:
     __asm__("btsl %1,%0" : "=m"(set) : "Ir"(20) : "cc");
@@ -3456,22 +3458,22 @@ void asm_test(void)
 #ifndef _WIN32
     override_func1();
     override_func2();
-    /* The base_func ref from the following inline asm should find
-       the global one, not the local decl from this function.  */
+    /* 下面内联 asm 中对 base_func 的引用应该找到
+       全局的那个，而不是本函数中的局部声明。  */
     asm volatile(".weak override_func3\n.set override_func3, base_func");
     override_func3();
     printf("asmstr: %s\n", get_asm_string());
     asm_local_label_diff();
     asm_local_statics();
 #endif
-    /* Check that we can also load structs of appropriate layout
-       into registers.  */
+    /* 检查我们也能把布局合适的结构体
+       加载到寄存器中。  */
     asm volatile("" : "=r" (asmret) : "0"(s2));
     if (asmret != s2.addr)
       printf("asmstr: failed\n");
 #ifdef BOOL_ISOC99
-    /* Check that the typesize correctly sets the register size to
-       8 bit.  */
+    /* 检查类型大小正确地把寄存器大小设为
+       8 位。  */
     asm volatile("cmp %1,%2; sete %0" : "=a"(somebool) : "r"(1), "r"(2));
     if (!somebool)
       printf("asmbool: failed\n");
@@ -3527,7 +3529,7 @@ void builtin_test(void)
     COMPAT_TYPE(char *, unsigned char *);
     COMPAT_TYPE(char *, signed char *);
     COMPAT_TYPE(char *, char *);
-/* space is needed because tcc preprocessor introduces a space between each token */
+/* 需要空格，因为 tcc 预处理器会在每个词法单元之间插入一个空格 */
     COMPAT_TYPE(char * *, void *); 
 #endif
     printf("res = %d\n", __builtin_constant_p(1));
@@ -3705,11 +3707,11 @@ void math_cmp_test(void)
   int comp = 0;
 #define bug(a,b,op,iop,part) printf("Test broken: %s %s %s %s %d\n", #a, #b, #op, #iop, part)
 
-  /* This asserts that "a op b" is _not_ true, but "a iop b" is true.
-     And it does this in various ways so that all code generation paths
-     are checked (generating inverted tests, or non-inverted tests, or
-     producing a 0/1 value without jumps (that's done in the fcompare
-     function).  */
+  /* 这断言 "a op b" _不_ 为真，但 "a iop b" 为真。
+     并且它以多种方式这样做，以便检查所有代码生成路径
+     （生成取反的测试，或不取反的测试，或
+     不使用跳转产生 0/1 值（这在 fcompare
+     函数中完成）。  */
 #define FCMP(a,b,op,iop,code) \
   if (fcompare (a,b,code))    \
     bug (a,b,op,iop,1); \
@@ -3726,23 +3728,23 @@ void math_cmp_test(void)
   else \
     bug (a,b,op,iop,5);
 
-  /* Equality tests.  */
+  /* 相等性测试。  */
   FCMP(nan, nan, ==, !=, 0);
   FCMP(one, two, ==, !=, 0);
   FCMP(one, one, !=, ==, 1);
-  /* Non-equality is a bit special.  */
+  /* 不相等有点特殊。  */
   if (!fcompare (nan, nan, 1))
     bug (nan, nan, !=, ==, 6);
 
-  /* Relational tests on numbers.  */
+  /* 数值上的关系测试。  */
   FCMP(two, one, <, >=, 2);
   FCMP(one, two, >=, <, 3);
   FCMP(one, two, >, <=, 4);
   FCMP(two, one, <=, >, 5);
 
-  /* Relational tests on NaNs.  Note that the inverse op here is
-     always !=, there's no operator in C that is equivalent to !(a < b),
-     when NaNs are involved, same for the other relational ops.  */
+  /* NaN 上的关系测试。注意这里的逆运算
+     总是 !=，当涉及 NaN 时，C 中没有运算符
+     等价于 !(a < b)，其他关系运算符也一样。  */
   FCMP(nan, nan, <, !=, 2);
   FCMP(nan, nan, >=, !=, 3);
   FCMP(nan, nan, >, !=, 4);
@@ -3759,11 +3761,11 @@ void callsave_test(void)
   printf ("callsavetest: %d\n", s);
   d = alloca (sizeof(double));
   d[0] = 10.0;
-  /* x86-64 had a bug were the next call to get100 would evict
-     the lvalue &d[0] as VT_LLOCAL, and the reload would be done
-     in int type, not pointer type.  When alloca returns a pointer
-     with the high 32 bit set (which is likely on x86-64) the access
-     generates a segfault.  */
+  /* x86-64 曾有一个 bug：下一次调用 get100 会把
+     左值 &d[0] 驱逐为 VT_LLOCAL，而重载会以
+     int 类型而不是指针类型进行。当 alloca 返回一个
+     高 32 位置位的指针时（在 x86-64 上很可能）该访问
+     会生成段错误。  */
   i = d[0] > get100 ();
   printf ("%d\n", i);
 #endif
@@ -3787,7 +3789,7 @@ void bfa1(ptrdiff_t str_offset)
 
 void builtin_frame_address_test(void)
 {
-/* builtin_frame_address fails on ARM with gcc which make test3 fail */
+/* 在 ARM 上使用 gcc 时 builtin_frame_address 失败，导致 test3 失败 */
 #ifndef __arm__
     char str[] = "__builtin_frame_address";
     char *fp0 = __builtin_frame_address(0);
@@ -3849,22 +3851,22 @@ void * __attribute__((__unused__)) get_void_ptr (void *a)
   return a;
 }
 
-/* This part checks for a bug in TOK_GET (used for inline expansion),
-   where the large long long constant left the the high bits set for
-   the integer constant token.  */
+/* 这部分检查 TOK_GET（用于内联展开）中的一个 bug，
+   其中大的 long long 常量让整数常量词法单元
+   的高位保持置位。  */
 static inline
 int __get_order(unsigned long long size)
 {
   int order;
-  size -= 0xffff880000000000ULL; // this const left high bits set in the token
+  size -= 0xffff880000000000ULL; // 这个常量让词法单元中的高位保持置位
     {
-      struct S { int i : 1; } s; // constructed for this '1'
+      struct S { int i : 1; } s; // 为这个 '1' 构造的
     }
   order = size;
   return order;
 }
 
-/* This just forces the above inline function to be actually emitted.  */
+/* 这只是强制上面的内联函数被实际生成。  */
 int force_get_order(unsigned long s)
 {
     return __get_order(s);

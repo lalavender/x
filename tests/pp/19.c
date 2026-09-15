@@ -71,16 +71,16 @@
   TEST1(TEST2(op))
 #define KO(a) ((void)1)
 
-/* This checks that the various expansions that ultimately lead to
-   something like 'KO(arg,arg)', where 'KO' comes from a macro
-   expansion reducing from a large macro chain do not are regarded
-   as funclike macro invocation of KO.  E.g. X93 and X94 expand to 'KO',
-   but X95 must not consume the (a,b) arguments outside the M_IF()
-   invocation to reduce the 'KO' macro to an invocation.  Instead
-   X95 should reduce via M_IF(KO)(a,b) to 'a'. 
+/* 这里检查的是：各种最终产生类似 'KO(arg,arg)' 的展开，
+   其中 'KO' 来自一个很长宏链的缩减展开，
+   都不会被视为 KO 的函数式宏调用。
+   例如 X93 和 X94 展开为 'KO'，
+   但 X95 绝不能消耗 M_IF() 调用之外的 (a,b) 实参，
+   从而把 'KO' 宏缩减为一次调用。相反，
+   X95 应通过 M_IF(KO)(a,b) 缩减为 'a'。 
    
-   The other lines here are variations on this scheme, with X1 to
-   X6 coming from the bug report at
+   此处其余各行是这一方案的各种变体，
+   X1 到 X6 来自以下缺陷报告：
    http://lists.nongnu.org/archive/html/tinycc-devel/2017-07/msg00017.html */
 X92 M_IF(KO)
 X93 M_GET_METHOD(INIT, 0, INIT(KO))
@@ -90,12 +90,12 @@ X96 M_IF(M_GET_METHOD(INIT, 0, M_FLAT (INIT(KO))))
 X97 M_IF(M_GET_METHOD(INIT, 0, M_FLAT (INIT(KO))))(ok,nok)
 X98 (M_TEST_METHOD_P(INIT, (INIT(KO))))(ok, nok)
 X99 M_IF(M_TEST_METHOD_P(INIT, (INIT(KO))))(ok, nok)
-// test begins
-X1 TEST1(TRUE)          // ==> expect ok, get ok
-// First test with a token which is not a macro
-X2 TEST2((INIT(ok)))    // ==> expect 1, get 1
-X3 TEST3((INIT(ok)))    // ==> expect ok, get ok
-// Then test with a token which is a macro, but should not be expanded.
-X4 TEST2((INIT(KO)))    // ==> expect 1, get 1
+// 测试开始
+X1 TEST1(TRUE)          // ==> 期望 ok，得到 ok
+// 先用一个不是宏的词法单元测试
+X2 TEST2((INIT(ok)))    // ==> 期望 1，得到 1
+X3 TEST3((INIT(ok)))    // ==> 期望 ok，得到 ok
+// 再用一个本身是宏、但不该被展开的词法单元测试。
+X4 TEST2((INIT(KO)))    // ==> 期望 1，得到 1
 X5 TEST4(INIT(KO))
-X6 TEST3((INIT(KO)))    // ==> expect ok, get "error: macro 'KO' used with too many args"
+X6 TEST3((INIT(KO)))    // ==> 期望 ok，得到 "error: macro 'KO' used with too many args"

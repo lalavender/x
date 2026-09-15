@@ -12,12 +12,12 @@
 #endif
 
 /////////////////////////////////////////////////////////////////////////
-//////////                TRAP FRAMEWORK
+//////////                TRAP 框架
 /////////////////////////////////////////////////////////////////////////
-// if you cast 'TRAP' to a function pointer and call it,
-//   it will save all 8 registers,
-//   and jump into C-code (previously set using 'SET_TRAP_HANDLER(x)'),
-//   in C-code you can pop DWORDs from stack and modify registers
+// 如果你把 'TRAP' 强制转换为函数指针并调用它，
+//   它将保存全部 8 个寄存器，
+//   并跳入 C 代码（此前用 'SET_TRAP_HANDLER(x)' 设置），
+//   在 C 代码中你可以从栈中弹出 DWORD 并修改寄存器
 //
 
 void *SYMBOL(trap_handler);
@@ -87,12 +87,12 @@ struct trapframe {
 
 
 /////////////////////////////////////////////////////////////////////////
-//////////                SAFECALL FRAMEWORK
+//////////                SAFECALL 框架
 /////////////////////////////////////////////////////////////////////////
-// this framework will convert any calling convention to cdecl
-// usage: first set call target with 'SET_SAFECALL_TARGET(x)'
-//        then cast 'SAFECALL' to target function pointer type and invoke it
-//        after calling, 'ESPDIFF' is the difference of old and new esp
+// 此框架会把任何调用约定转换为 cdecl
+// 用法：先用 'SET_SAFECALL_TARGET(x)' 设置调用目标
+//        然后把 'SAFECALL' 强制转换为目标函数指针类型并调用它
+//        调用之后，'ESPDIFF' 是旧 esp 与新 esp 的差值
 
 void *SYMBOL(sc_call_target);
 unsigned SYMBOL(sc_retn_addr);
@@ -117,7 +117,7 @@ asm (
 
 
 /////////////////////////////////////////////////////////////////////////
-//////////                TEST FASTCALL INVOKE
+//////////                测试 FASTCALL 调用
 /////////////////////////////////////////////////////////////////////////
 
 void check_fastcall_invoke_0(struct trapframe *tf)
@@ -191,7 +191,7 @@ void test_fastcall_invoke()
 
 
 /////////////////////////////////////////////////////////////////////////
-//////////                TEST FUNCTION CODE GENERATION
+//////////                测试函数代码生成
 /////////////////////////////////////////////////////////////////////////
 
 int __fastcall check_fastcall_espdiff_0(void)

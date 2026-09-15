@@ -3,22 +3,22 @@
 
 int main()
 {
-   // variables
+   // 变量
    float a = 12.34 + 56.78;
    printf("%f\n", a);
 
-   // infix operators
+   // 中缀运算符
    printf("%f\n", 12.34 + 56.78);
    printf("%f\n", 12.34 - 56.78);
    printf("%f\n", 12.34 * 56.78);
    printf("%f\n", 12.34 / 56.78);
 
-   // comparison operators
+   // 比较运算符
    printf("%d %d %d %d %d %d\n", 12.34 < 56.78, 12.34 <= 56.78, 12.34 == 56.78, 12.34 >= 56.78, 12.34 > 56.78, 12.34 != 56.78);
    printf("%d %d %d %d %d %d\n", 12.34 < 12.34, 12.34 <= 12.34, 12.34 == 12.34, 12.34 >= 12.34, 12.34 > 12.34, 12.34 != 12.34);
    printf("%d %d %d %d %d %d\n", 56.78 < 12.34, 56.78 <= 12.34, 56.78 == 12.34, 56.78 >= 12.34, 56.78 > 12.34, 56.78 != 12.34);
 
-   // assignment operators
+   // 赋值运算符
    a = 12.34;
    a += 56.78;
    printf("%f\n", a);
@@ -35,11 +35,11 @@ int main()
    a /= 56.78;
    printf("%f\n", a);
 
-   // prefix operators
+   // 前缀运算符
    printf("%f\n", +12.34);
    printf("%f\n", -12.34);
 
-   // type coercion
+   // 类型强制转换
    a = 2;
    printf("%f\n", a);
    printf("%f\n", sin(2));

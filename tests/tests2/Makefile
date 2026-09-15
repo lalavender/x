@@ -5,9 +5,9 @@ VPATH = $(SRC)
 
 TESTS = $(patsubst %.c,%.test,$(sort $(notdir $(wildcard $(SRC)/*.c))))
 
-# some tests do not pass on all platforms, remove them for now
-SKIP = 34_array_assignment.test # array assignment is not in C standard
-ifeq ($(CONFIG_arm_eabi),yes) # not ARM soft-float
+# 某些测试并非在所有平台上都通过，暂时移除它们
+SKIP = 34_array_assignment.test # 数组赋值不在 C 标准中
+ifeq ($(CONFIG_arm_eabi),yes) # 不是 ARM 软浮点
  SKIP += 22_floating_point.test
 endif
 ifdef CONFIG_OSX
@@ -27,36 +27,36 @@ ifeq (-$(findstring gcc,$(CC))-,--)
  SKIP += $(patsubst %.expect,%.test,$(GEN-ALWAYS))
 endif
 ifeq (-$(CONFIG_WIN32)-$(CONFIG_i386)$(CONFIG_arm)-,--yes-)
- SKIP += 95_bitfields%.test # type_align is different on 32bit-non-windows
+ SKIP += 95_bitfields%.test # 在 32 位非 Windows 平台上 type_align 不同
 endif
 
-# Some tests might need arguments
+# 某些测试可能需要参数
 ARGS =
 31_args.test : ARGS = arg1 arg2 arg3 arg4 arg5
 46_grep.test : ARGS = '[^* ]*[:a:d: ]+\:\*-/: $$' $(SRC)/46_grep.c
 
-# And some tests don't test the right thing with -run
+# 还有些测试在 -run 下测不到正确的东西
 NORUN =
 42_function_pointer.test : NORUN = true
 
-# Some tests might need different flags
+# 某些测试可能需要不同的选项
 FLAGS =
 76_dollars_in_identifiers.test : FLAGS += -fdollars-in-identifiers
 
-# These tests run several snippets from the same file one by one
+# 这些测试会逐个运行同一文件中的多个片段
 60_errors_and_warnings.test : FLAGS += -dt
 96_nodata_wanted.test : FLAGS += -dt
 
-# Always generate certain .expects (don't put these in the GIT),
+# 总是生成某些 .expect（不要把它们放进 GIT），
 GEN-ALWAYS =
-# GEN-ALWAYS += 95_bitfields.expect # does not work
+# GEN-ALWAYS += 95_bitfields.expect # 无法工作
 
-# using the ms compiler for the really ms-compatible bitfields
+# 使用 ms 编译器生成真正兼容 ms 的位域
 95_bitfields_ms.test : GEN = $(GEN-MSC)
 
-# Filter source directory in warnings/errors (out-of-tree builds)
+# 在警告/错误信息中过滤源目录（用于源外构建）
 FILTER = 2>&1 | sed 's,$(SRC)/,,g'
-# Filter some always-warning
+# 过滤某些总是出现的警告
 ifeq (-$(findstring arm,$(ARCH))-,-arm-)
 FILTER += 2>&1 | grep -v 'warning: soft float ABI currently not supported'
 endif
@@ -73,38 +73,38 @@ T3 = $(FILTER) >$*.output 2>&1 || true \
      && diff -Nbu $(filter %.expect,$^) $*.output \
      && rm -f $*.output $(filter $*.expect,$(GEN-ALWAYS))
 
-# run single test and update .expect file, e.g. "make tests2.37+"
+# 运行单个测试并更新 .expect 文件，例如 "make tests2.37+"
 tests2.%+:
 	@$(MAKE) $(call F2,$(call F1,$*)) --no-print-directory
 
-# just run tcc to see the output, e.g. "make tests2.37-"
+# 只运行 tcc 查看输出，例如 "make tests2.37-"
 tests2.%-:
 	@$(MAKE) $(call F1,$*) NODIFF=true --no-print-directory
 
-# run single test, e.g. "make tests2.37"
+# 运行单个测试，例如 "make tests2.37"
 tests2.%:
 	@$(MAKE) $(call F1,$*) --no-print-directory
 
 F1 = $(or $(filter $1_%,$(TESTS)),$1_???.test)
 F2 = $1 UPDATE="$(patsubst %.test,%.expect,$1)"
 
-# automatically generate .expect files with gcc:
+# 用 gcc 自动生成 .expect 文件：
 %.expect :
 	@echo Generating: $@
 	@$(call GEN,$(SRC)/$*.c) $(FILTER) >$@ 2>&1
 	@rm -f *.exe *.obj *.pdb
 
-# using TCC for .expect if -dt in FLAGS
+# 若 FLAGS 中有 -dt，则用 TCC 生成 .expect
 GEN = $(if $(filter -dt,$(FLAGS)),$(GEN-TCC),$(GEN-CC))
 GEN-CC = $(CC) -w -std=gnu99 $(FLAGS) $1 -o a.exe && ./a.exe $(ARGS)
 GEN-TCC = $(TCC) $(FLAGS) -run $1 $(ARGS)
 GEN-MSC = $(MS-CC) $1 && ./$(basename $@).exe
 MS-CC = cl
 
-# tell make not to delete
+# 告诉 make 不要删除
 .PRECIOUS: %.expect
 
-# force .expect generation for these files
+# 强制为这些文件生成 .expect
 $(sort $(GEN-ALWAYS) $(UPDATE)) : force
 force:
 

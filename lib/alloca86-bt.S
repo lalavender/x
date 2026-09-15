@@ -40,7 +40,7 @@ p6:
     push    %edx
     ret
 
-/* mark stack as nonexecutable */
+/* 将栈标记为不可执行 */
 #if defined __ELF__ && defined __linux__
     .section    .note.GNU-stack,"",@progbits
 #endif

@@ -2,7 +2,7 @@
 
 int main()
 {
-    /* decimal floating constant */
+    /* 十进制浮点常量 */
     float fa0 = .123f;
     float fa1 = .123E12F;
     float fa2 = .123e-12f;
@@ -27,7 +27,7 @@ int main()
     printf("%f\n%f\n%f\n\n", fd0, fd1, fd2);
     printf("\n");
 
-    /* hexadecimal floating constant */
+    /* 十六进制浮点常量 */
     double da0 = 0X.1ACP12;
     double da1 = 0x.1acp-12;
     double da2 = 0x.1acp+12;
@@ -50,8 +50,8 @@ int main()
     printf("\n");
 
 #ifdef __TINYC__
-    /* TCC extension
-       binary floating constant */
+    /* TCC 扩展
+       二进制浮点常量 */
     long double la0 = 0B.110101100P12L;
     long double la1 = 0b.110101100p-12l;
     long double la2 = 0b.110101100p+12l;

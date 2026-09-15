@@ -19,7 +19,7 @@ int test1(void)
     return sum;
 }
 
-/* error */
+/* 错误 */
 int test2(void)
 {
     int i, sum = 0;
@@ -29,7 +29,7 @@ int test2(void)
     return sum;
 }
 
-/* actually, profiling test */
+/* 实际上，是性能分析测试 */
 int test3(void)
 {
     int sum;
@@ -44,7 +44,7 @@ int test3(void)
     return sum;
 }
 
-/* ok */
+/* 通过 */
 int test4(void)
 {
     int i, sum = 0;
@@ -62,7 +62,7 @@ int test4(void)
     return sum;
 }
 
-/* error */
+/* 错误 */
 int test5(void)
 {
     int i, sum = 0;
@@ -80,8 +80,8 @@ int test5(void)
     return sum;
 }
 
-/* error */
-/* XXX: currently: bug */
+/* 错误 */
+/* XXX：目前是 bug */
 int test6(void)
 {
     int i, sum = 0;
@@ -96,7 +96,7 @@ int test6(void)
     return sum;
 }
 
-/* error */
+/* 错误 */
 int test7(void)
 {
     int i, sum = 0;
@@ -111,7 +111,7 @@ int test7(void)
     return sum;
 }
 
-/* ok */
+/* 通过 */
 int test8(void)
 {
     int i, sum = 0;
@@ -123,7 +123,7 @@ int test8(void)
     return sum;
 }
 
-/* error */
+/* 错误 */
 int test9(void)
 {
     int i, sum = 0;
@@ -135,7 +135,7 @@ int test9(void)
     return sum;
 }
 
-/* ok */
+/* 通过 */
 int test10(void)
 {
     char tab[10];
@@ -147,7 +147,7 @@ int test10(void)
     return 0;
 }
 
-/* error */
+/* 错误 */
 int test11(void)
 {
     char tab[10];
@@ -156,7 +156,7 @@ int test11(void)
     return 0;
 }
 
-/* error */
+/* 错误 */
 int test12(void)
 {
     void *ptr;
@@ -166,7 +166,7 @@ int test12(void)
     return 0;
 }
 
-/* error */
+/* 错误 */
 int test13(void)
 {
     char pad1 = 0;
@@ -184,7 +184,7 @@ int test14(void)
     return strlen(p);
 }
 
-/* error */
+/* 错误 */
 int test15(void)
 {
     char *p = alloca(TAB_SIZE-1);
@@ -193,7 +193,7 @@ int test15(void)
     return strlen(p);
 }
 
-/* ok */
+/* 通过 */
 int test16()
 {
     char *demo = "This is only a test.";
@@ -205,13 +205,13 @@ int test16()
     strcpy(p,"12345678901234");
     printf("alloca: p is %s\n", p);
 
-    /* Test alloca embedded in a larger expression */
+    /* 测试嵌入在更大表达式中的 alloca */
     printf("alloca: %s\n", strcpy(alloca(strlen(demo)+1),demo) );
 
     fprintf(stderr, "%s end\n", __FUNCTION__);
 }
 
-/* error */
+/* 错误 */
 int test17()
 {
     char *demo = "This is only a test.";
@@ -223,7 +223,7 @@ int test17()
     strcpy(p,"12345678901234");
     printf("alloca: p is %s\n", p);
 
-    /* Test alloca embedded in a larger expression */
+    /* 测试嵌入在更大表达式中的 alloca */
     printf("alloca: %s\n", strcpy(alloca(strlen(demo)),demo) );
 
     fprintf(stderr, "%s end\n", __FUNCTION__);
@@ -272,7 +272,7 @@ int main(int argc, char **argv)
         exit(2);
     }
 
-    /* well, we also use bounds on this ! */
+    /* 嗯，这里我们也用到了边界 ! */
     ftest = table_test[index];
     ftest();
 
@@ -280,6 +280,6 @@ int main(int argc, char **argv)
 }
 
 /*
- * without bound   0.77 s
- * with bounds    4.73
+ * 无边界检查   0.77 s
+ * 有边界检查   4.73
  */  

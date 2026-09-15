@@ -8,8 +8,8 @@ int fred(int p)
 
 int (*f)(int) = &fred;
 
-/* To test what this is supposed to test the destination function
-   (fprint here) must not be called directly anywhere in the test.  */
+/* 要测试这里本该测试的内容，目标函数
+   （这里是 fprint）就不能在测试中被直接调用。  */
 int (*fprintfptr)(FILE *, const char *, ...) = &fprintf;
 
 int main()

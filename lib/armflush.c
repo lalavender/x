@@ -1,15 +1,15 @@
-/* armflush.c - flush the instruction cache
+/* armflush.c - 刷新指令缓存
 
-   __clear_cache is used in tccrun.c,  It is a built-in
-   intrinsic with gcc.  However tcc in order to compile
-   itself needs this function */
+   __clear_cache 在 tccrun.c 中使用。它是 gcc 的内建
+   函数。但 tcc 为了编译
+   自身需要这个函数 */
 
 #ifdef __TINYC__
 
-/* syscall wrapper */
+/* 系统调用包装 */
 unsigned syscall(unsigned syscall_nr, ...);
 
-/* arm-tcc supports only fake asm currently */
+/* arm-tcc 目前只支持伪汇编 */
 __asm__(
     ".global syscall\n"
     "syscall:\n"
@@ -22,7 +22,7 @@ __asm__(
     ".int 0xe8bd8080\n"  // pop     {r7, pc}
     );
 
-/* from unistd.h: */
+/* 来自 unistd.h： */
 #if defined(__thumb__) || defined(__ARM_EABI__)
 # define __NR_SYSCALL_BASE      0x0
 #else
@@ -40,11 +40,11 @@ __asm__(
 
 #endif
 
-/* Flushing for tccrun */
+/* 供 tccrun 使用的刷新 */
 void __clear_cache(void *beginning, void *end)
 {
-/* __ARM_NR_cacheflush is kernel private and should not be used in user space.
- * However, there is no ARM asm parser in tcc so we use it for now */
+/* __ARM_NR_cacheflush 是内核私有的，不应在用户空间使用。
+ * 但是 tcc 中没有 ARM 汇编解析器，所以目前我们使用它 */
 #if 1
     syscall(__ARM_NR_cacheflush, beginning, end, 0);
 #else

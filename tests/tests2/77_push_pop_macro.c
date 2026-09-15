@@ -2,10 +2,10 @@
 
 int main()
 {
-    /* must not affect how #pragma ppop_macro works */
+    /* 不得影响 #pragma ppop_macro 的工作方式 */
     #define pop_macro foobar1
 
-    /* must not affect how #pragma push_macro works */
+    /* 不得影响 #pragma push_macro 的工作方式 */
     #define push_macro foobar2
 
     #undef abort

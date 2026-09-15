@@ -1,31 +1,31 @@
-/* TCC runtime library. 
-   Parts of this code are (c) 2002 Fabrice Bellard 
+/* TCC 运行时库。 
+   本代码部分版权归 (c) 2002 Fabrice Bellard 所有 
 
    Copyright (C) 1987, 1988, 1992, 1994, 1995 Free Software Foundation, Inc.
 
-This file is free software; you can redistribute it and/or modify it
-under the terms of the GNU General Public License as published by the
-Free Software Foundation; either version 2, or (at your option) any
-later version.
+本文件为自由软件；你可以遵照自由软件基金会发布的 GNU 通用公共许可证
+的条款重新分发和/或修改它，无论是许可证的第 2 版，
+还是（由你选择的）任何更新的版本。
+任何更新的版本。
 
-In addition to the permissions in the GNU General Public License, the
-Free Software Foundation gives you unlimited permission to link the
-compiled version of this file into combinations with other programs,
-and to distribute those combinations without any restriction coming
-from the use of this file.  (The General Public License restrictions
-do apply in other respects; for example, they cover modification of
-the file, and distribution when not linked into a combine
-executable.)
+除 GNU 通用公共许可证中的许可外，自由软件基金会还额外授予你
+无限制的许可，允许把本文件编译后的版本链接进其他程序的组合中，
+并分发这些组合，而不受任何来自本文件使用的限制。（GNU 通用公共
+许可证的限制在其他方面仍然适用；例如它们涵盖对本文件的修改，
+以及在未链接成组合可执行文件时
+分发本文件。）
+链接后的组合不再受本文件使用方式的限制。
+（GNU 通用公共许可证的限制在其他方面仍然适用。）
 
-This file is distributed in the hope that it will be useful, but
-WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-General Public License for more details.
+分发本文件是希望它有用，但不提供任何担保；
+甚至不提供对适销性或特定用途适用性的默示担保。
+详见 GNU 通用公共许可证。
+详见 GNU 通用公共许可证的更多细节。
 
-You should have received a copy of the GNU General Public License
-along with this program; see the file COPYING.  If not, write to
-the Free Software Foundation, 59 Temple Place - Suite 330,
-Boston, MA 02111-1307, USA.  
+你应当已经随本程序收到一份 GNU 通用公共许可证的副本；
+如果没有，请参阅文件 COPYING。
+如果没有，请写信给自由软件基金会：
+59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.  
 */
 
 #define W_TYPE_SIZE   32
@@ -37,6 +37,14 @@ typedef unsigned int USItype;
 typedef long long DWtype;
 typedef unsigned long long UDWtype;
 
+/*
+ * DWstruct / DWunion —— 双字（double word）整数的两种视图
+ *
+ * 64 位整数既可以整体访问（ll），也可以拆成低字/高字分别访问（s.low/s.high），
+ * 32 位目标上的 64 位乘除、移位、比较等辅助例程（__udivdi3、__ashldi3 等）
+ * 都基于这种拆字方式实现。本分支目标是 64 位 AArch64，多数运算有原生指令，
+ * 但这些通用例程仍随 libtcc1.a 一起编译以保持 ABI 完整。
+ */
 struct DWstruct {
     Wtype low, high;
 };
@@ -51,7 +59,7 @@ typedef long double XFtype;
 #define WORD_SIZE (sizeof (Wtype) * BITS_PER_UNIT)
 #define HIGH_WORD_COEFF (((UDWtype) 1) << WORD_SIZE)
 
-/* the following deal with IEEE single-precision numbers */
+/* 以下内容处理 IEEE 单精度数 */
 #define EXCESS		126
 #define SIGNBIT		0x80000000
 #define HIDDEN		(1 << 23)
@@ -60,7 +68,7 @@ typedef long double XFtype;
 #define MANT(fp)	(((fp) & 0x7FFFFF) | HIDDEN)
 #define PACK(s,e,m)	((s) | ((e) << 23) | (m))
 
-/* the following deal with IEEE double-precision numbers */
+/* 以下内容处理 IEEE 双精度数 */
 #define EXCESSD		1022
 #define HIDDEND		(1 << 20)
 #define EXPD(fp)	(((fp.l.upper) >> 20) & 0x7FF)
@@ -71,12 +79,12 @@ typedef long double XFtype;
 #define MANTD_LL(fp)	((fp.ll & (HIDDEND_LL-1)) | HIDDEND_LL)
 #define PACKD_LL(s,e,m)	(((long long)((s)+((e)<<20))<<32)|(m))
 
-/* the following deal with x86 long double-precision numbers */
+/* 以下内容处理 x86 long double 扩展精度数 */
 #define EXCESSLD	16382
 #define EXPLD(fp)	(fp.l.upper & 0x7fff)
 #define SIGNLD(fp)	((fp.l.upper) & 0x8000)
 
-/* only for x86 */
+/* 仅用于 x86 */
 union ldouble_long {
     long double ld;
     struct {
@@ -106,10 +114,10 @@ union float_long {
     unsigned int l;
 };
 
-/* XXX: we don't support several builtin supports for now */
+/* XXX：目前我们还不支持若干内建支持函数 */
 #if !defined __x86_64__ && !defined __arm__
 
-/* XXX: use gcc/tcc intrinsic ? */
+/* XXX：改用 gcc/tcc 内建函数？ */
 #if defined __i386__
 #define sub_ddmmss(sh, sl, ah, al, bh, bl) \
   __asm__ ("subl %5,%1\n\tsbbl %3,%0"					\
@@ -143,7 +151,7 @@ union float_long {
 #error unsupported CPU type
 #endif
 
-/* most of this code is taken from libgcc2.c from gcc */
+/* 本代码大部分取自 gcc 的 libgcc2.c */
 
 static UDWtype __udivmoddi4 (UDWtype n, UDWtype d, UDWtype *rp)
 {
@@ -172,19 +180,19 @@ static UDWtype __udivmoddi4 (UDWtype n, UDWtype d, UDWtype *rp)
 	  udiv_qrnnd (q0, n0, n1, n0, d0);
 	  q1 = 0;
 
-	  /* Remainder in n0.  */
+	  /* 余数在 n0 中。  */
 	}
       else
 	{
 	  /* qq = NN / 0d */
 
 	  if (d0 == 0)
-	    d0 = 1 / d0;	/* Divide intentionally by zero.  */
+	    d0 = 1 / d0;	/* 故意除以零。  */
 
 	  udiv_qrnnd (q1, n1, 0, n1, d0);
 	  udiv_qrnnd (q0, n0, n1, n0, d0);
 
-	  /* Remainder in n0.  */
+	  /* 余数在 n0 中。  */
 	}
 
       if (rp != 0)
@@ -207,8 +215,8 @@ static UDWtype __udivmoddi4 (UDWtype n, UDWtype d, UDWtype *rp)
 
 	  if (bm != 0)
 	    {
-	      /* Normalize, i.e. make the most significant bit of the
-		 denominator set.  */
+	      /* 规格化，即让除数的最高位
+		 被置 1。  */
 
 	      d0 = d0 << bm;
 	      n1 = (n1 << bm) | (n0 >> (W_TYPE_SIZE - bm));
@@ -218,32 +226,32 @@ static UDWtype __udivmoddi4 (UDWtype n, UDWtype d, UDWtype *rp)
 	  udiv_qrnnd (q0, n0, n1, n0, d0);
 	  q1 = 0;
 
-	  /* Remainder in n0 >> bm.  */
+	  /* 余数在 n0 >> bm 中。  */
 	}
       else
 	{
 	  /* qq = NN / 0d */
 
 	  if (d0 == 0)
-	    d0 = 1 / d0;	/* Divide intentionally by zero.  */
+	    d0 = 1 / d0;	/* 故意除以零。  */
 
 	  count_leading_zeros (bm, d0);
 
 	  if (bm == 0)
 	    {
-	      /* From (n1 >= d0) /\ (the most significant bit of d0 is set),
-		 conclude (the most significant bit of n1 is set) /\ (the
-		 leading quotient digit q1 = 1).
+	      /* 由 (n1 >= d0) 且（d0 的最高位已置 1）
+		 推出（n1 的最高位已置 1）且（首位商位 q1 = 1）。
 
-		 This special case is necessary, not an optimization.
-		 (Shifts counts of W_TYPE_SIZE are undefined.)  */
+		 这个特殊情况是必需的，不是优化。
+		 （W_TYPE_SIZE 的位移量是未定义的。）  */
+
 
 	      n1 -= d0;
 	      q1 = 1;
 	    }
 	  else
 	    {
-	      /* Normalize.  */
+	      /* 规格化。  */
 
 	      b = W_TYPE_SIZE - bm;
 
@@ -259,7 +267,7 @@ static UDWtype __udivmoddi4 (UDWtype n, UDWtype d, UDWtype *rp)
 
 	  udiv_qrnnd (q0, n0, n1, n0, d0);
 
-	  /* Remainder in n0 >> bm.  */
+	  /* 余数在 n0 >> bm 中。  */
 	}
 
       if (rp != 0)
@@ -280,7 +288,7 @@ static UDWtype __udivmoddi4 (UDWtype n, UDWtype d, UDWtype *rp)
 	  q0 = 0;
 	  q1 = 0;
 
-	  /* Remainder in n1n0.  */
+	  /* 余数在 n1n0 中。  */
 	  if (rp != 0)
 	    {
 	      rr.s.low = n0;
@@ -295,14 +303,14 @@ static UDWtype __udivmoddi4 (UDWtype n, UDWtype d, UDWtype *rp)
 	  count_leading_zeros (bm, d1);
 	  if (bm == 0)
 	    {
-	      /* From (n1 >= d1) /\ (the most significant bit of d1 is set),
-		 conclude (the most significant bit of n1 is set) /\ (the
-		 quotient digit q0 = 0 or 1).
+	      /* 由 (n1 >= d1) 且（d1 的最高位已置 1）
+		 推出（n1 的最高位已置 1）且（商位 q0 = 0 或 1）。
 
-		 This special case is necessary, not an optimization.  */
+		 这个特殊情况是必需的，不是优化。  */
 
-	      /* The condition on the next line takes advantage of that
-		 n1 >= d1 (true due to program flow).  */
+
+	      /* 下一行的条件利用了 n1 >= d1
+		 （由程序流程可知其为真）。  */
 	      if (n1 > d1 || n0 >= d0)
 		{
 		  q0 = 1;
@@ -323,7 +331,7 @@ static UDWtype __udivmoddi4 (UDWtype n, UDWtype d, UDWtype *rp)
 	  else
 	    {
 	      UWtype m1, m0;
-	      /* Normalize.  */
+	      /* 规格化。  */
 
 	      b = W_TYPE_SIZE - bm;
 
@@ -344,7 +352,7 @@ static UDWtype __udivmoddi4 (UDWtype n, UDWtype d, UDWtype *rp)
 
 	      q1 = 0;
 
-	      /* Remainder in (n1n0 - m1m0) >> bm.  */
+	      /* 余数在 (n1n0 - m1m0) >> bm 中。  */
 	      if (rp != 0)
 		{
 		  sub_ddmmss (n1, n0, n1, n0, m1, m0);
@@ -421,7 +429,7 @@ unsigned long long __umoddi3(unsigned long long u, unsigned long long v)
     return w;
 }
 
-/* XXX: fix tcc's code generator to do this instead */
+/* XXX：修正 tcc 的代码生成器，让它改为直接做这件事 */
 long long __ashrdi3(long long a, int b)
 {
 #ifdef __TINYC__
@@ -440,7 +448,7 @@ long long __ashrdi3(long long a, int b)
 #endif
 }
 
-/* XXX: fix tcc's code generator to do this instead */
+/* XXX：修正 tcc 的代码生成器，让它改为直接做这件事 */
 unsigned long long __lshrdi3(unsigned long long a, int b)
 {
 #ifdef __TINYC__
@@ -459,7 +467,7 @@ unsigned long long __lshrdi3(unsigned long long a, int b)
 #endif
 }
 
-/* XXX: fix tcc's code generator to do this instead */
+/* XXX：修正 tcc 的代码生成器，让它改为直接做这件事 */
 long long __ashldi3(long long a, int b)
 {
 #ifdef __TINYC__
@@ -480,7 +488,7 @@ long long __ashldi3(long long a, int b)
 
 #endif /* !__x86_64__ */
 
-/* XXX: fix tcc's code generator to do this instead */
+/* XXX：修正 tcc 的代码生成器，让它改为直接做这件事 */
 float __floatundisf(unsigned long long a)
 {
     DWunion uu; 
@@ -619,4 +627,4 @@ long long __fixxfdi (long double a1)
     ret = __fixunsxfdi((s = a1 >= 0) ? a1 : -a1);
     return s ? ret : -ret;
 }
-#endif /* !ARM */
+#endif /* 非 ARM */

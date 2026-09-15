@@ -28,8 +28,8 @@ int main()
    return 0;
 }
 
-/* "If the specification of an array type includes any type qualifiers,
-   the element type is so-qualified, not the array type." */
+/* "如果数组类型的说明中包含任何类型限定符，
+   则元素类型被如此限定，而不是数组类型。" */
 
 typedef int A[3];
 extern A const ca;
@@ -44,7 +44,7 @@ extern const int cb[1][2][3];
 extern B b;
 extern int b[1][2][3];
 
-/* Funny but valid function declaration.  */
+/* 奇怪但合法的函数声明。  */
 typedef int functype (int);
 extern functype func;
 int func(int i)
@@ -52,7 +52,7 @@ int func(int i)
    return i + 1;
 }
 
-/* Even funnier function decl and definition using typeof.  */
+/* 使用 typeof 的更奇怪的函数声明与定义。  */
 int set_anon_super(void);
 int set_anon_super(void)
 {

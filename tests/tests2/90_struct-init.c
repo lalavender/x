@@ -6,10 +6,10 @@ struct contains_empty {
     u8 b;
 };
 struct contains_empty ce = { { (1) }, (empty_s){}, 022, };
-/* The following decl of 'q' would demonstrate the TCC bug in init_putv when
-   handling copying compound literals.  (Compound literals
-   aren't acceptable constant initializers in isoc99, but
-   we accept them like gcc, except for this case)
+/* 下面 'q' 的声明会暴露 TCC 在 init_putv 中处理
+   复制复合字面量时的 bug。（复合字面量
+   在 isoc99 中不是可接受的常量初始化器，但
+   我们像 gcc 一样接受它们，除了这一情形）
 //char *q = (char *){ "trara" }; */
 struct SS {u8 a[3], b; };
 struct SS sinit16[] = { { 1 }, 2 };
@@ -51,20 +51,20 @@ struct S gs2 = {1, 2, {3, 4}};
 struct T gt = {"hello", 42};
 struct U gu = {3, 5,6,7,8, 4, "huhu", 43};
 struct U gu2 = {3, {5,6,7,8}, 4, {"huhu", 43}};
-/* Optional braces around scalar initializers.  Accepted, but with
-   a warning.  */
+/* 标量初始化器周围的可选花括号。可以接受，但
+   会产生一个警告。  */
 struct U gu3 = { {3}, {5,6,7,8,}, 4, {"huhu", 43}};
-/* Many superfluous braces and leaving out one initializer for U.s.c[1] */
+/* 许多多余的花括号，并且为 U.s.c[1] 漏掉了一个初始化器 */
 struct U gu4 = { 3, {5,6,7,},  5, { "bla", {44}} };
-/* Superfluous braces and useless parens around values */
+/* 多余的花括号以及值周围无用的圆括号 */
 struct S gs3 = { (1), {(2)}, {(((3))), {4}}};
-/* Superfluous braces, and leaving out braces for V.t, plus cast */
+/* 多余的花括号，为 V.t 漏掉花括号，外加强制转换 */
 struct V gv = {{{3},4,{5,6}}, "haha", (u8)45, 46};
-/* Compound literal */
+/* 复合字面量 */
 struct V gv2 = {(struct S){7,8,{9,10}}, {"hihi", 47}, 48};
-/* Parens around compound literal */
+/* 复合字面量周围的圆括号 */
 struct V gv3 = {((struct S){7,8,{9,10}}), {"hoho", 49}, 50};
-/* Initialization of a flex array member (warns in GCC) */
+/* 柔性数组成员初始化（在 GCC 中会警告） */
 struct W gw = {{1,2,3,4}, {1,2,3,4,5}};
 
 union UU {
@@ -77,8 +77,8 @@ struct SU {
 };
 struct SU gsu = {5,6};
 
-/* Unnamed struct/union members aren't ISO C, but it's a widely accepted
-   extension.  See below for further extensions to that under -fms-extension.*/
+/* 未命名的结构体/联合体成员不是 ISO C，但它是广泛接受的
+   扩展。关于 -fms-extension 下对此的更多扩展，见下文。*/
 union UV {
     struct {u8 a,b;};
     struct S s;
@@ -87,13 +87,13 @@ union UV guv = {{6,5}};
 union UV guv2 = {{.b = 7, .a = 8}};
 union UV guv3 = {.b = 8, .a = 7};
 
-/* Under -fms-extensions also the following is valid:
+/* 在 -fms-extensions 下以下内容也是合法的：
 union UV2 {
-    struct Anon {u8 a,b;};    // unnamed member, but tagged struct, ...
+    struct Anon {u8 a,b;};    // 未命名成员，但结构体带标签，...
     struct S s;
 };
-struct Anon gan = { 10, 11 }; // ... which makes it available here.
-union UV2 guv4 = {{4,3}};     // and the other inits from above as well
+struct Anon gan = { 10, 11 }; // ... 这使得它在此处可用。
+union UV2 guv4 = {{4,3}};     // 上面的其他初始化器也同样如此
 */
 
 struct in6_addr {
@@ -146,25 +146,25 @@ void foo (struct W *w, struct pkthdr *phdr_)
   const struct S *pls = &ls;
   struct S ls21 = *pls;
   struct U lu22 = {3, *pls, 4, {"huhu", 43}};
-  /* Incomplete bracing.  */
+  /* 不完整的花括号。  */
   struct U lu21 = {3, ls, 4, "huhu", 43};
-  /* Optional braces around scalar initializers.  Accepted, but with
-     a warning.  */
+  /* 标量初始化器周围的可选花括号。可以接受，但
+     会产生一个警告。  */
   struct U lu3 = { 3, {5,6,7,8,}, 4, {"huhu", 43}};
-  /* Many superfluous braces and leaving out one initializer for U.s.c[1] */
+  /* 许多多余的花括号，并且为 U.s.c[1] 漏掉了一个初始化器 */
   struct U lu4 = { 3, {5,6,7,},  5, { "bla", 44} };
-  /* Superfluous braces and useless parens around values */
+  /* 多余的花括号以及值周围无用的圆括号 */
   struct S ls3 = { (1), (2), {(((3))), 4}};
-  /* Superfluous braces, and leaving out braces for V.t, plus cast */
+  /* 多余的花括号，为 V.t 漏掉花括号，外加强制转换 */
   struct V lv = {{3,4,{5,6}}, "haha", (u8)45, 46};
-  /* Compound literal */
+  /* 复合字面量 */
   struct V lv2 = {(struct S)w->t.s, {"hihi", 47}, 48};
-  /* Parens around compound literal */
+  /* 复合字面量周围的圆括号 */
   struct V lv3 = {((struct S){7,8,{9,10}}), ((const struct W *)w)->t.t, 50};
   const struct pkthdr *phdr = phdr_;
   struct flowi6 flow = { .daddr = phdr->daddr, .saddr = phdr->saddr };
   int elt = 0x42;
-  /* Range init, overlapping */
+  /* 范围初始化，相互重叠 */
   struct T lt2 = { { [1 ... 5] = 9, [6 ... 10] = elt, [4 ... 7] = elt+1 }, 1 };
   print(ls);
   print(ls2);
@@ -218,7 +218,7 @@ void test_multi_relocs(void)
     table[i]();
 }
 
-/* Following is from GCC gcc.c-torture/execute/20050613-1.c.  */
+/* 以下内容来自 GCC gcc.c-torture/execute/20050613-1.c。  */
 
 struct SEA { int i; int j; int k; int l; };
 struct SEB { struct SEA a; int r[1]; };
@@ -239,9 +239,9 @@ test_correct_filling (struct SEA *x)
 int
 test_zero_init (void)
 {
-  /* The peculiarity here is that only a.j is initialized.  That
-     means that all other members must be zero initialized.  TCC
-     once didn't do that for sub-level designators.  */
+  /* 这里的特殊之处在于只有 a.j 被初始化。这意味着
+     所有其他成员都必须被零初始化。TCC
+     曾经对子层级的指派初始化器没有这样做。  */
   struct SEB b = { .a.j = 5 };
   struct SEC c = { .a.j = 5 };
   struct SED d = { .a.j = 5 };

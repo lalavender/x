@@ -1,28 +1,28 @@
 /*****************************************************************************/
-/* test 'nodata_wanted' data output suppression */
+/* 测试 'nodata_wanted' 数据输出抑制 */
 
 #if defined test_static_data_error
 void foo() {
     if (1) {
-	static short w = (int)&foo; /* initializer not computable */
+	static short w = (int)&foo; /* 初始化器不可计算 */
     }
 }
 
 #elif defined test_static_nodata_error
 void foo() {
     if (0) {
-	static short w = (int)&foo; /* initializer not computable */
+	static short w = (int)&foo; /* 初始化器不可计算 */
     }
 }
 
 #elif defined test_global_data_error
 void foo();
-static short w = (int)&foo; /* initializer not computable */
+static short w = (int)&foo; /* 初始化器不可计算 */
 
 
 #elif defined test_local_data_noerror
 void foo() {
-    short w = &foo; /* 2 cast warnings */
+    short w = &foo; /* 2 个强制转换警告 */
 }
 
 #elif defined test_data_suppression_off || defined test_data_suppression_on
@@ -34,7 +34,7 @@ void foo() {
 #endif
 
 #include <stdio.h>
-/* some gcc headers #define __attribute__ to empty if it's not gcc */
+/* 某些 gcc 头文件在非 gcc 下把 __attribute__ 定义为空 */
 #undef __attribute__
 
 int main()
@@ -44,14 +44,14 @@ int main()
 
     static char ds0 = 0;
     static char de0 = 0;
-    /* get reference size of empty jmp */
+    /* 获取空 jmp 的参考大小 */
 ts0:;
     if (!SKIP) {}
 te0:;
     dl = -(&de0 - &ds0);
     tl = -(&&te0 - &&ts0);
 
-    /* test data and code suppression */
+    /* 测试数据与代码抑制 */
     static char ds1 = 0;
 ts1:;
     if (!SKIP) {

@@ -5,7 +5,7 @@
 __bound_alloca:
 
 #ifdef _WIN32
-    # bound checking is not implemented
+    # 未实现边界检查
     pop     %rdx
     mov     %rcx,%rax
     add     $15,%rax
@@ -31,7 +31,7 @@ p3:
 #else
     pop     %rdx
     mov     %rdi,%rax
-    mov     %rax,%rsi	# size, a second parm to the __bound_new_region
+    mov     %rax,%rsi	# size，即传给 __bound_new_region 的第二个参数
 
     add     $15,%rax
     and     $-16,%rax
@@ -39,7 +39,7 @@ p3:
 
 
     sub     %rax,%rsp
-    mov     %rsp,%rdi	# pointer, a first parm to the __bound_new_region
+    mov     %rsp,%rdi	# pointer，即传给 __bound_new_region 的第一个参数
     mov     %rsp,%rax
 
     push    %rdx

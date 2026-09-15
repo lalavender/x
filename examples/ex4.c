@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <X11/Xlib.h>
 
-/* Yes, TCC can use X11 too ! */
+/* 是的，TCC 也能使用 X11 ！ */
 
 int main(int argc, char **argv)
 {

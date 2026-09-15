@@ -1,18 +1,18 @@
 /*
- * The  information  in  this  document  is  subject  to  change
- * without  notice  and  should not be construed as a commitment
- * by Digital Equipment Corporation or by DECUS.
+ * 本文件中的信息可能会变更，不应被解释为
+ * Digital Equipment Corporation 或 DECUS 的承诺。
  *
- * Neither Digital Equipment Corporation, DECUS, nor the authors
- * assume any responsibility for the use or reliability of  this
- * document or the described software.
+ * Digital Equipment Corporation、DECUS 以及作者均不对
+ * 本文件或所述软件的使用或可靠性承担任何责任。
  *
  *      Copyright (C) 1980, DECUS
  *
- * General permission to copy or modify, but not for profit,  is
- * hereby  granted,  provided that the above copyright notice is
- * included and reference made to  the  fact  that  reproduction
- * privileges were granted by DECUS.
+ * 特此授予复制或修改的通用许可（但不得用于盈利），
+ * 条件是包含上述版权声明，并说明
+ * 复制权限由 DECUS 授予。
+ *
+ *
+ *
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,10 +21,10 @@
 /*
  * grep
  *
- * Runs on the Decus compiler or on vms, On vms, define as:
+ * 运行在 Decus 编译器或 vms 上，在 vms 上定义如下：
  *      grep :== "$disk:[account]grep"      (native)
  *      grep :== "$disk:[account]grep grep" (Decus)
- * See below for more information.
+ * 更多信息见下文。
  */
 
 char    *documentation[] = {
@@ -103,19 +103,19 @@ void badpat(char *, char *, char *);
 int match(void);
 
 
-/*** Display a file name *******************************/
+/*** 显示文件名 ***********************************/
 void file(char *s)
 {
    printf("File %s:\n", s);
 }
 
-/*** Report unopenable file ****************************/
+/*** 报告无法打开的文件 ***********************/
 void cant(char *s)
 {
    fprintf(stderr, "%s: cannot open\n", s);
 }
 
-/*** Give good help ************************************/
+/*** 提供良好的帮助 *****************************/
 void help(char **hp)
 {
    char   **dp;
@@ -124,7 +124,7 @@ void help(char **hp)
       printf("%s\n", *dp);
 }
 
-/*** Display usage summary *****************************/
+/*** 显示用法摘要 ********************************/
 void usage(char *s)
 {
    fprintf(stderr, "?GREP-E-%s\n", s);
@@ -133,14 +133,14 @@ void usage(char *s)
    exit(1);
 }
 
-/*** Compile the pattern into global pbuf[] ************/
+/*** 把模式编译到全局 pbuf[] 中 ***************/
 void compile(char *source)
 {
-   char  *s;         /* Source string pointer     */
-   char  *lp;        /* Last pattern pointer      */
-   int   c;          /* Current character         */
-   int            o;          /* Temp                      */
-   char           *spp;       /* Save beginning of pattern */
+   char  *s;         /* 源字符串指针              */
+   char  *lp;        /* 上一个模式指针            */
+   int   c;          /* 当前字符                  */
+   int            o;          /* 临时变量                  */
+   char           *spp;       /* 保存模式的起始位置        */
 
    s = source;
    if (debug)
@@ -148,7 +148,7 @@ void compile(char *source)
    pp = pbuf;
    while (c = *s++) {
       /*
-       * STAR, PLUS and MINUS are special.
+       * STAR、PLUS 和 MINUS 是特殊的。
        */
       if (c == '*' || c == '+' || c == '-') {
          if (pp == pbuf ||
@@ -160,18 +160,18 @@ void compile(char *source)
             badpat("Illegal occurrence op.", source, s);
          store(ENDPAT);
          store(ENDPAT);
-         spp = pp;               /* Save pattern end     */
-         while (--pp > lp)       /* Move pattern down    */
-            *pp = pp[-1];        /* one byte             */
+         spp = pp;               /* 保存模式末尾         */
+         while (--pp > lp)       /* 把模式后移           */
+            *pp = pp[-1];        /* 一个字节             */
          *pp =   (c == '*') ? STAR :
             (c == '-') ? MINUS : PLUS;
-         pp = spp;               /* Restore pattern end  */
+         pp = spp;               /* 恢复模式末尾         */
          continue;
       }
       /*
-       * All the rest.
+       * 其余全部。
        */
-      lp = pp;         /* Remember start       */
+      lp = pp;         /* 记住起始位置         */
       switch(c) {
 
          case '^':
@@ -231,7 +231,7 @@ void compile(char *source)
       }
    }
    store(ENDPAT);
-   store(0);                /* Terminate string     */
+   store(0);                /* 终止字符串           */
    if (debug) {
       for (lp = pbuf; lp < pp;) {
          if ((c = (*lp++ & 0377)) < ' ')
@@ -242,15 +242,15 @@ void compile(char *source)
    }
 }
 
-/*** Compile a class (within []) ***********************/
+/*** 编译一个字符类（在 [] 内） *************/
 char *cclass(char *source, char *src)
-   /* char       *source;   // Pattern start -- for error msg. */
-   /* char       *src;      // Class start */
+   /* char       *source;   // 模式起始位置 —— 用于错误信息 */
+   /* char       *src;      // 字符类起始位置 */
 {
-   char   *s;        /* Source pointer    */
-   char   *cp;       /* Pattern start     */
-   int    c;         /* Current character */
-   int             o;         /* Temp              */
+   char   *s;        /* 源指针            */
+   char   *cp;       /* 模式起始位置      */
+   int    c;         /* 当前字符          */
+   int             o;         /* 临时变量          */
 
    s = src;
    o = CLASS;
@@ -260,23 +260,23 @@ char *cclass(char *source, char *src)
    }
    store(o);
    cp = pp;
-   store(0);                          /* Byte count      */
+   store(0);                          /* 字节计数        */
    while ((c = *s++) && c!=']') {
-      if (c == '\\') {                /* Store quoted char    */
-         if ((c = *s++) == '\0')      /* Gotta get something  */
+      if (c == '\\') {                /* 存储被引用的字符     */
+         if ((c = *s++) == '\0')      /* 必须取到某个字符     */
             badpat("Class terminates badly", source, s);
          else    store(tolower(c));
       }
       else if (c == '-' &&
             (pp - cp) > 1 && *s != ']' && *s != '\0') {
-         c = pp[-1];             /* Range start     */
-         pp[-1] = RANGE;         /* Range signal    */
-         store(c);               /* Re-store start  */
-         c = *s++;               /* Get end char and*/
-         store(tolower(c));      /* Store it        */
+         c = pp[-1];             /* 范围起始        */
+         pp[-1] = RANGE;         /* 范围标志        */
+         store(c);               /* 重新存储起始    */
+         c = *s++;               /* 取结束字符，并   */
+         store(tolower(c));      /* 存储它          */
       }
       else {
-         store(tolower(c));      /* Store normal char */
+         store(tolower(c));      /* 存储普通字符      */
       }
    }
    if (c != ']')
@@ -289,7 +289,7 @@ char *cclass(char *source, char *src)
    return(s);
 }
 
-/*** Store an entry in the pattern buffer **************/
+/*** 在模式缓冲区中存储一个条目 ***********/
 void store(int op)
 {
    if (pp >= &pbuf[PMAX])
@@ -297,11 +297,11 @@ void store(int op)
    *pp++ = op;
 }
 
-/*** Report a bad pattern specification ****************/
+/*** 报告错误的模式规格 ***********************/
 void badpat(char *message, char *source, char *stop)
-   /* char  *message;       // Error message */
-   /* char  *source;        // Pattern start */
-   /* char  *stop;          // Pattern end   */
+   /* char  *message;       // 错误信息 */
+   /* char  *source;        // 模式起始位置 */
+   /* char  *stop;          // 模式结束位置 */
 {
    fprintf(stderr, "-GREP-E-%s, pattern is\"%s\"\n", message, source);
    fprintf(stderr, "-GREP-E-Stopped at byte %ld, '%c'\n",
@@ -309,10 +309,10 @@ void badpat(char *message, char *source, char *stop)
    error("?GREP-E-Bad pattern\n");
 }
 
-/*** Scan the file for the pattern in pbuf[] ***********/
+/*** 在文件中扫描 pbuf[] 里的模式 ************/
 void grep(FILE *fp, char *fn)
-   /* FILE       *fp;       // File to process            */
-   /* char       *fn;       // File name (for -f option)  */
+   /* FILE       *fp;       // 要处理的文件               */
+   /* char       *fn;       // 文件名（用于 -f 选项）     */
 {
    int lno, count, m;
 
@@ -341,10 +341,10 @@ void grep(FILE *fp, char *fn)
    }
 }
 
-/*** Match line (lbuf) with pattern (pbuf) return 1 if match ***/
+/*** 用模式 (pbuf) 匹配行 (lbuf)，匹配则返回 1 *****/
 int match()
 {
-   char   *l;        /* Line pointer       */
+   char   *l;        /* 行指针             */
 
    for (l = lbuf; *l; ++l) {
       if (pmatch(l, pbuf))
@@ -353,18 +353,18 @@ int match()
    return(0);
 }
 
-/*** Match partial line with pattern *******************/
+/*** 用模式匹配部分行 **************************/
 char *pmatch(char *line, char *pattern)
-   /* char               *line;     // (partial) line to match      */
-   /* char               *pattern;  // (partial) pattern to match   */
+   /* char               *line;     // 要匹配的（部分）行           */
+   /* char               *pattern;  // 要匹配的（部分）模式         */
 {
-   char   *l;        /* Current line pointer         */
-   char   *p;        /* Current pattern pointer      */
-   char   c;         /* Current character            */
-   char            *e;        /* End for STAR and PLUS match  */
-   int             op;        /* Pattern operation            */
-   int             n;         /* Class counter                */
-   char            *are;      /* Start of STAR match          */
+   char   *l;        /* 当前行指针                   */
+   char   *p;        /* 当前模式指针                 */
+   char   c;         /* 当前字符                     */
+   char            *e;        /* STAR 和 PLUS 匹配的结束位置  */
+   int             op;        /* 模式操作                      */
+   int             n;         /* 字符类计数器                  */
+   char            *are;      /* STAR 匹配的起始位置          */
 
    l = line;
    if (debug > 1)
@@ -442,26 +442,26 @@ char *pmatch(char *line, char *pattern)
             break;
 
          case MINUS:
-            e = pmatch(l, p);       /* Look for a match    */
-            while (*p++ != ENDPAT); /* Skip over pattern   */
-            if (e)                  /* Got a match?        */
-               l = e;               /* Yes, update string  */
-            break;                  /* Always succeeds     */
+            e = pmatch(l, p);       /* 寻找匹配             */
+            while (*p++ != ENDPAT); /* 跳过模式             */
+            if (e)                  /* 匹配上了吗？         */
+               l = e;               /* 是，更新字符串       */
+            break;                  /* 总是成功             */
 
-         case PLUS:                 /* One or more ...     */
+         case PLUS:                 /* 一个或多个 ...       */
             if ((l = pmatch(l, p)) == 0)
-               return(0);           /* Gotta have a match  */
-         case STAR:                 /* Zero or more ...    */
-            are = l;                /* Remember line start */
+               return(0);           /* 必须有一个匹配       */
+         case STAR:                 /* 零或多个 ...         */
+            are = l;                /* 记住行起始位置       */
             while (*l && (e = pmatch(l, p)))
-               l = e;               /* Get longest match   */
-            while (*p++ != ENDPAT); /* Skip over pattern   */
-            while (l >= are) {      /* Try to match rest   */
+               l = e;               /* 取得最长的匹配       */
+            while (*p++ != ENDPAT); /* 跳过模式             */
+            while (l >= are) {      /* 尝试匹配剩余部分     */
                if (e = pmatch(l, p))
                   return(e);
-               --l;                 /* Nope, try earlier   */
+               --l;                 /* 否，试更早的位置     */
             }
-            return(0);              /* Nothing else worked */
+            return(0);              /* 其他都不行了         */
 
          default:
             printf("Bad op code %d\n", op);
@@ -471,14 +471,14 @@ char *pmatch(char *line, char *pattern)
    return(l);
 }
 
-/*** Report an error ***********************************/
+/*** 报告一个错误 ********************************/
 void error(char *s)
 {
    fprintf(stderr, "%s", s);
    exit(1);
 }
 
-/*** Main program - parse arguments & grep *************/
+/*** 主程序 —— 解析参数并执行 grep *******/
 int main(int argc, char **argv)
 {
    char   *p;

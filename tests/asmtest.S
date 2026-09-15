@@ -1,6 +1,6 @@
-# gas comment with ``gnu'' style quotes
+# gas 注释，使用 ``gnu'' 风格引号
 
-/* some directive tests */
+/* 一些指令测试 */
 
    .byte 0xff
    .byte 1, 2, 3
@@ -10,23 +10,23 @@
    .int 1, 2, 3
    .align 8
    .byte 1
-/* .align 16, 0x90 gas is too clever for us with 0x90 fill */
+/* .align 16, 0x90 gas 对 0x90 填充太自作聪明了 */
    .balign 4, 0x92
-   .align 16, 0x91 /* 0x91 tests the non-clever behaviour */
+   .align 16, 0x91 /* 0x91 测试非自作聪明的行为 */
    .skip 3
    .skip 15, 0x90
    .string "hello\0world"
-/* Macro expansion should work like with C, the #n shouldn't be parsed
-   as asm line comment */
+/* 宏展开应当像 C 一样工作，#n 不应被解析
+   为 asm 行注释 */
 #define __stringify(n) #n
 #define stringify(n) __stringify(n)
    .skip 8,0x90
    .asciz stringify(BLA)
    .skip 8,0x90
 
-# 28 "asmtest.S"        # a line directive (and a line comment)
-        movl %eax, %ebx # some more asm comment
-/* some label tests */
+# 28 "asmtest.S"        # 一条 line 指令（同时也是一行注释）
+        movl %eax, %ebx # 又一条 asm 注释
+/* 一些标签测试 */
 L1:
         movl %eax, %ebx
         mov 0x10000, %eax
@@ -37,7 +37,7 @@ var1:
 
         mov var1, %eax
 
-/* instruction tests */
+/* 指令测试 */
 movl %eax, %ebx
 mov 0x10000, %eax
 mov 0x10000, %ax
@@ -177,7 +177,7 @@ notl %r15d
   out %ax, $100                       
   out %eax, $100                       
 
-  /* NOTE: gas is bugged here, so size must be added */
+  /* 注意：gas 在这里有 bug，所以必须加上尺寸后缀 */
   outb %al, %dx                       
   outw %ax, %dx                       
   outl %eax, %dx                       
@@ -593,8 +593,8 @@ int $0x10
     pusha
     popa
 #endif
-    clc # another comment
-    cld # a comment with embedded ' tick
+    clc # 另一条注释
+    cld # 内嵌 ' 勾号的注释
     cli
     clts
     cmc
@@ -637,7 +637,7 @@ int $0x10
     wait
     nop
 
-    /* XXX: handle prefixes */
+    /* XXX：处理前缀 */
 #if 0
     aword
     addr16
@@ -658,7 +658,7 @@ int $0x10
     repne;movsb
     repnz;outsb
 
-    /* handle one-line prefix + ops */
+    /* 处理单行前缀 + 操作码 */
     lock  negl (%eax)
     wait  pushf
     rep   stosb
@@ -899,9 +899,9 @@ overrideme:
     movq %rcx, %mm1
     movq %rdx, %xmm2
     movq %r13, %xmm3
-    /* movq mem64->xmm is encoded as f30f7e by GAS, but as
-       660f6e by tcc (which really is a movd and would need 
-       a REX.W prefix to be movq).  */
+    /* movq mem64->xmm 被 GAS 编码为 f30f7e，但被
+       tcc 编码为 660f6e（它实际上是一条 movd，需要 
+       REX.W 前缀才是 movq）。  */
     movq (%rsi), %xmm3
     movq %mm1, %rdx
     movq %xmm3, %rcx

@@ -21,8 +21,8 @@
 
 #include "tcc.h"
 
-/* Returns 1 for a code relocation, 0 for a data relocation. For unknown
-   relocations, returns -1. */
+/* 代码重定位返回 1，数据重定位返回 0。
+   对于未知的重定位，返回 -1。 */
 int code_reloc(int reloc_type) {
   switch (reloc_type) {
   case R_AARCH64_ABS32:
@@ -50,9 +50,9 @@ int code_reloc(int reloc_type) {
   return -1;
 }
 
-/* Returns an enumerator to describe whether and when the relocation needs a
-   GOT and/or PLT entry to be created. See tcc.h for a description of the
-   different values. */
+/* 返回一个枚举值，描述该重定位是否需要创建 GOT 和/或 PLT 条目
+   以及何时需要。不同取值的
+   说明见 tcc.h */
 int gotplt_entry_type(int reloc_type) {
   switch (reloc_type) {
   case R_AARCH64_PREL32:
@@ -102,8 +102,8 @@ ST_FUNC unsigned create_plt_entry(TCCState *s1, unsigned got_offset,
   return plt_offset;
 }
 
-/* relocate the PLT: compute addresses and offsets in the PLT now that final
-   address for PLT and GOT are known (see fill_program_header) */
+/* 重定位 PLT：既然 PLT 和 GOT 的最终地址已知
+   （见 fill_program_header），现在计算 PLT 中的地址和偏移 */
 ST_FUNC void relocate_plt(TCCState *s1) {
   uint8_t *p, *p_end;
 
@@ -226,7 +226,7 @@ void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
     return;
   case R_AARCH64_GLOB_DAT:
   case R_AARCH64_JUMP_SLOT:
-    /* They don't need addend */
+    /* 它们不需要加数 */
 #ifdef DEBUG_RELOC
     printf("reloc %d @ 0x%lx: val=0x%lx name=%s\n", type, addr,
            val - rel->r_addend,
@@ -235,7 +235,7 @@ void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
     write64le(ptr, val - rel->r_addend);
     return;
   case R_AARCH64_RELATIVE:
-    /* do nothing */
+    /* 什么都不做 */
     return;
   default:
     fprintf(stderr, "FIXME: handle reloc type %x at %x [%p] to %x\n", type,
