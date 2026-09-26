@@ -10,11 +10,15 @@ grammar yh;
  *   - 无预处理：没有 `#` 指令、没有宏、没有条件编译；
  *   - 无头文件：没有 `#include`，外部符号由编译器内置 prelude 声明；
  *   - 无 C 兼容：`.yh` 是唯一输入，C 语法分支已移除；
- *   - 简单语句以 `;` 结尾（块结尾的语句不写）；`if` 条件必须带括号，
- *     `for` / `switch` 不带；返回类型后置。
+ *   - 简单语句以 `;` 结尾；以块收尾的语句（if / for / switch / 裸块，
+ *     以及 fn / struct / union / enum 声明）整体不带尾分号；`if` 条件
+ *     必须带括号，`for` / `switch` 不带；返回类型后置；
+ *   - 标识符位置严格区分保留字；成员位置（字段声明 / 字面量字段 /
+ *     成员访问）放开保留字，见 memberName。
  *
  * 语句边界由显式的 `;` 钉死，因此本参考语法**不存在**「一条语句 vs
  * 两条相邻语句」的歧义。NL 仍放隐藏通道，只用于保留位置信息。
+ * 注意：`return` 会吞掉下一行开头的表达式（见 returnStmt）。
  */
 
 /*
@@ -53,9 +57,9 @@ topLevelDeclBody
  * 语句终结规则：
  *   - **简单语句必须以 `;` 结尾**：let / const / type / return / break /
  *     continue / goto / 表达式语句，以及 struct/union 字段与 enum 成员；
- *   - **以块结尾的语句不写 `;`**：if / for / switch / 裸块，以及 fn /
- *     struct / union / enum 声明；
- *   - **标签 `L:` 不带 `;`**，后面紧跟被标记的语句；
+ *   - **以块收尾的语句整体不写 `;`**：if / for / switch / 裸块，以及 fn /
+ *     struct / union / enum 声明（即 `}` 之后不再跟分号）；
+ *   - **标签 `L:` 必须后随被标记的语句**，不能悬空到块尾；
  *   - **空语句不存在**：`;` 只作一次语句终结符，不单独构成语句
  *     （因此没有 semicolonStmt）。
  *
@@ -79,6 +83,9 @@ commentStmt
  * 本规则不被任何产生式引用——它的存在只为把这些词注册进词法表，
  * 使其优先于 IDENT 匹配。手写 parser 应在此处给出可读提示，
  * 例如「while 已移除，请改用 for」。
+ *
+ * 保留字仅排除「标识符位置」；成员位置（字段声明 / 字面量字段 /
+ * 成员访问）允许使用保留字，见 memberName。
  */
 removedKeyword
     : 'while' | 'do'
@@ -98,6 +105,7 @@ removedKeyword
 // let 定义可变变量：`let a int = 32`。局部与全局同形。
 // 每个 binding 必须显式声明类型，因此可写 `let a int = 1, b int = 2`，
 // 但 `let a, b int = 1, 2` 不合法（类型不共享）。
+// 绑定列表为行内列表，不允许尾逗号（见 structInitBody 的列表策略）。
 letDecl
     : 'let' binding (',' binding)* ';'
     ;
@@ -123,18 +131,18 @@ fnDecl
     : 'fn' IDENT '(' paramList? ')' typeRef? block
     ;
 
-// 参数表：逗号分隔的参数列表。
+// 参数表：逗号分隔的参数列表（行内列表，不允许尾逗号）。
 paramList
     : param (',' param)*
     ;
 
 // 参数：`name Type`（普通）或 `name ... Type`（类型化变参）。
-// 裸 `...` 是仅供内置 prelude（printf 类异质变参）使用的逃生舱，
+// 裸 `...`（ELLIPSIS）是仅供内置 prelude（printf 类异质变参）使用的逃生舱，
 // 内部走传统 va_list 机制，用户代码不应使用。
 param
-    : IDENT '...' typeRef      // 类型化变参：`a ... int`，体内为 `[]int`
+    : IDENT ELLIPSIS typeRef   // 类型化变参：`a ... int`，体内为 `[]int`
     | IDENT typeRef            // 普通参数：`a int`
-    | '...'                    // 无类型变参（仅 prelude）
+    | ELLIPSIS                 // 无类型变参（仅 prelude）
     ;
 
 // --- type 声明（类型别名）---
@@ -148,6 +156,7 @@ typeDecl
 
 // struct：字段按「名字 类型」逐行书写，与 let 同形。
 // 字段顺序即内存布局顺序；不支持位域、packed、自定义对齐。
+// 字段名允许保留字（memberName）——union 的标签域 `type int;` 因此可用。
 structDecl
     : 'struct' IDENT '{' fieldDecl* '}'
     ;
@@ -157,8 +166,9 @@ unionDecl
     : 'union' IDENT '{' fieldDecl* '}'
     ;
 
+// 字段声明。字段名放开保留字（见 memberName）。
 fieldDecl
-    : IDENT typeRef ';'
+    : memberName typeRef ';'
     ;
 
 // --- enum 声明 ---
@@ -168,6 +178,7 @@ enumDecl
     : 'enum' IDENT '{' enumItem* '}'
     ;
 
+// enum 成员名是普通标识符（与 let/const 同一命名空间），不允许保留字。
 enumItem
     : IDENT ('=' expr)? ';'
     ;
@@ -198,9 +209,11 @@ stmt
     | exprStmt
     ;
 
-// 标签语句：`label:` 用于 goto。标签是前缀，不带 `;`。
+// 标签语句：`label:` 用于 goto。标签是前缀，必须后随被标记的语句——
+// 悬空标签 `L: }` 非法（同 C 的约束）。标签名属标识符位置，不允许保留字。
+// 嵌套书写 `L1: L2: stmt` 合法，解析为标签的嵌套包裹。
 labelStmt
-    : IDENT ':'
+    : IDENT ':' stmt
     ;
 
 // goto 语句。
@@ -214,13 +227,16 @@ branchStmt
     ;
 
 // return 语句：可返回单个表达式；无值 return 用于 void 函数。
+// 注意：NL 在隐藏通道（同 C），`return` 会吞掉下一行开头的表达式——
+// `return` 换行 `x;` 即 `return x;`。无值 return 必须显式写 `return;`。
 returnStmt
     : 'return' expr? ';'
     ;
 
-// 表达式语句或赋值语句。
+// 表达式语句或单目标赋值语句。
+// v0.1 不支持元组赋值：`a, b = 1, 2;` 非法；逗号仅用于调用实参（exprList）。
 exprStmt
-    : exprList (assignOp exprList)? ';'
+    : expr (assignOp expr)? ';'
     ;
 
 /*
@@ -229,7 +245,8 @@ exprStmt
  * ============================================================================
  */
 
-// if 语句：**条件必须带括号**；`else` 后可直接跟 if 形成 else-if 链。
+// if 语句：**条件必须带括号**（因此不存在 structInit 与块的头部分歧）；
+// `else` 后可直接跟 if 形成 else-if 链。
 ifStmt
     : 'if' '(' expr ')' block ('else' (ifStmt | block))?
     ;
@@ -239,6 +256,8 @@ switchStmt
     : 'switch' expr '{' switchCase* '}'
     ;
 
+// case 块之间无 fallthrough，default 的书写位置因此无语义；
+// default 至多出现一次，唯一性由语义检查保证（语法不限制位置）。
 switchCase
     : 'case' expr (',' expr)* block    // `case 1 { ... }` / `case 2, 3 { ... }`
     | 'default' block                  // `default { ... }`
@@ -263,7 +282,7 @@ forStmt
 //   `for i, v in arr`     → 同时取下标与元素
 //   `for i in 0..n`       → 区间遍历（左闭右开）
 forInParts
-    : IDENT (',' IDENT)? 'in' expr ('..' expr)?
+    : IDENT (',' IDENT)? 'in' expr (RANGE expr)?
     ;
 
 /*
@@ -292,7 +311,7 @@ assignOp
  * ============================================================================
  */
 
-// 表达式列表：逗号分隔（用于调用实参、表达式语句）。
+// 表达式列表：逗号分隔（用于调用实参与函数类型参数表）。
 exprList
     : expr (',' expr)*
     ;
@@ -344,12 +363,7 @@ additiveExpr
     ;
 
 multiplicativeExpr
-    : castExpr (('*' | '/' | '%') castExpr)*
-    ;
-
-// 类型转换：`x as T`（替代 C 的 `(T)x`）。可链式书写。
-castExpr
-    : unaryExpr ('as' typeRef)*
+    : unaryExpr (('*' | '/' | '%') unaryExpr)*
     ;
 
 // 一元运算：算术/逻辑/位取反、取地址 `&x`、解引用 `*p`。
@@ -359,7 +373,16 @@ unaryExpr
     | postfixExpr
     ;
 
-// 后缀链：调用、下标、成员访问。`.` 对指针自动解引用（无 `->`）。
+/*
+ * 后缀链：调用、下标、成员访问与类型转换。普通成员访问的 `.` 对指针
+ * 自动解引用（无 `->`）；`.to_type(T)` 直接转换当前表达式，不解引用。
+ * `x.to_type(T)` 的参数是 typeRef，不是表达式；可链式写为
+ * `x.to_type(i64).to_type(int)`，也可直接接下标/成员。
+ * 后缀优先于一元：`-x.to_type(int)` 是 `-(x.to_type(int))`；
+ * 转换 `-x` 须写 `(-x).to_type(int)`。
+ * `to_type` 是专用保留字，不能作为普通成员名；旧 `as` 不能作普通标识符，
+ * 但仍可作成员名。
+ */
 postfixExpr
     : primaryExpr postfixPart*
     ;
@@ -367,7 +390,8 @@ postfixExpr
 postfixPart
     : '(' callArgs? ')'     // 函数调用
     | '[' expr ']'          // 下标
-    | '.' IDENT             // 成员访问（指针自动解引用）
+    | '.' 'to_type' '(' typeRef ')'  // 类型转换，目标必须是类型
+    | '.' memberName        // 成员访问（指针自动解引用）
     ;
 
 callArgs
@@ -394,6 +418,9 @@ literal
     ;
 
 // sizeof：`sizeof(T)`，作用于类型。
+// `sizeof(x)` 中 x 按类型名解析；表达式形式不支持——取元素个数用 len，
+// 取元素大小请改写（如对指针类型 `sizeof(*p)`）。避免 C 的
+// 「类型/表达式同名」二义性进入语法。
 sizeofExpr
     : 'sizeof' '(' typeRef ')'
     ;
@@ -405,28 +432,62 @@ lenExpr
 
 /*
  * 结构体字面量：命名式 `Point{ x: 1, y: 2 }`（域顺序无关）或位置式
- * `Point{ 1, 2 }`（按声明顺序）。
+ * `Point{ 1, 2 }`（按声明顺序）。空字面量不支持：`Point{}` 非法——
+ * 这同时保证 `switch flag {}` / `for flag {}` 的 `{}` 永远解析为块
+ * （if 因条件强制括号，无此问题）。
  *
- * structInitBody 强制非空：这样 `if flag {}` 不会把 `flag {` 误判成
- * 结构体字面量，而会正确解析为「条件 flag + 块 {}」。空字面量 `Point{}`
- * 不支持，写 `Point{ }` 时请补一个字段。
+ * for/switch 头部 `IDENT {` 的边界消歧（贪心取字面量，与 ANTLR ALL(*)
+ * 的判定结果一致）：
+ *   对 `{` 做花括号配对——若组内内容能解析为 structInitBody 且配对
+ *   `}` 之后紧跟 `{`（块的开始），则取字面量分支；否则该 `{` 一律
+ *   视为块/case 体。手写 parser 只需一次花括号扫描，无需回溯。
+ *   条件末尾需要位置式字面量时请加括号：`switch (Point{1,2}) { ... }`。
  *
- * 残余歧义：若条件本身是「具名类型 + 位置式字面量」且紧跟块，仍可能歧义。
- * 消歧规则同 Go——条件中若需字面量请加括号：
- * `if (Point{1,2}.x == 1) {}`。手写 parser 用「首元素是否为 IDENT ':'」
- * 做一次前瞻即可区分命名式与位置式。
+ * 命名式 vs 位置式：首元素第二个 token 为 `:` 即命名式，否则位置式。
  */
 structInit
     : IDENT '{' structInitBody '}'
     ;
 
+/*
+ * structInitBody 强制非空（见 structInit 注释）。
+ *
+ * 尾逗号策略：逐行列表（本规则，按字段逐行书写）允许尾逗号；
+ * 行内列表（调用实参、参数表、let 绑定）不允许。
+ */
 structInitBody
     : structInitField (',' structInitField)* ','?   // 命名式
     | expr (',' expr)* ','?                          // 位置式
     ;
 
+// 字面量字段名放开保留字（见 memberName）。
 structInitField
-    : IDENT ':' expr
+    : memberName ':' expr
+    ;
+
+/*
+ * 成员名：仅在「字段声明（fieldDecl）/ 字面量字段（structInitField）/
+ * 成员访问（postfixPart 的 `.` 之后）」三处放开保留字，对齐
+ * JavaScript 的属性名规则；专用后缀 `to_type` 除外。
+ *
+ * 动机：union 的标签域 `type int;`、与 JSON/C 交互时的高频字段名
+ * `len` / `type` / `default` 若被保留字挡住，数据建模将非常别扭。
+ * 局部/全局标识符位置（let / const / fn / enum 成员 / 标签）仍然严格：
+ * `let len int = 1;` 非法。
+ */
+memberName
+    : IDENT
+    | 'pub' | 'let' | 'const' | 'fn' | 'type' | 'struct' | 'union' | 'enum'
+    | 'if' | 'else' | 'switch' | 'case' | 'default' | 'for' | 'in' | 'as'
+    | 'return' | 'break' | 'continue' | 'goto'
+    | 'true' | 'false' | 'sizeof' | 'len'
+    | 'int' | 'i8' | 'i16' | 'i32' | 'i64'
+    | 'u8' | 'u16' | 'u32' | 'u64'
+    | 'f32' | 'f64' | 'bool' | 'char' | 'void'
+    | 'while' | 'do'
+    | 'unsigned' | 'signed' | 'short' | 'long' | 'float' | 'double'
+    | 'typedef' | 'extern' | 'static' | 'register' | 'auto'
+    | 'inline' | 'volatile' | 'restrict'
     ;
 
 /*
@@ -500,25 +561,52 @@ COMMENT
       ) -> channel(HIDDEN)
     ;
 
-// 字符串字面量：双引号，支持反斜杠转义。语义为 NUL 结尾的 *char。
+/*
+ * 转义收敛为已知集合：\n \r \t \0 \a \b \f \v \' \" \\，
+ * 外加 \xNN 十六进制（两个数字）。未知转义（如 \q）不匹配任何分支，
+ * 直接词法报错——不再静默吞掉（旧规则 `'\\' .` 会把 `\q` 当成 `q`）。
+ * STRING 与 CHAR 使用同一转义集合。
+ */
+fragment ESC
+    : '\\' [nrt0abfv'"\\]
+    ;
+
+fragment ESC_HEX
+    : '\\x' [0-9a-fA-F] [0-9a-fA-F]
+    ;
+
+// 字符串字面量：双引号，语义为 NUL 结尾的 *char。
 STRING
-    : '"' ( '\\' . | ~["\\\r\n] )* '"'
+    : '"' ( ESC | ESC_HEX | ~["\\\r\n] )* '"'
     ;
 
-// 字符字面量：单引号，支持转义。
+// 字符字面量：单引号，单字符或单转义。
 CHAR
-    : '\'' ( '\\' . | ~['\\\r\n] ) '\''
+    : '\'' ( ESC | ESC_HEX | ~['\\\r\n] ) '\''
     ;
 
-// 数字字面量：十六进制、二进制、八进制、十进制（整数/浮点数）。
+/*
+ * 数字字面量：十六进制、二进制、八进制、十进制（整数/浮点数）。
+ * 下划线作分组分隔符，但必须夹在两个数字之间：
+ *   合法：1_000、0xFF_00、0b1010_1010、1.5、1e9
+ *   非法：1_（尾下划线）、1__0（连续下划线）、0b_1（前导下划线）——
+ *   这些输入中的下划线段会落回 IDENT，得到明确的语法错误。
+ * 注意 `.` 后必须紧跟数字，因此 `0..n` 中的 `0` 不会被误读为浮点数。
+ */
 NUMBER
-    : '0' [xX] [0-9a-fA-F_]+                              // 0xFF
-    | '0' [bB] [01_]+                                      // 0b1010
-    | '0' [oO] [0-7_]+                                     // 0o17
-    | [0-9] [0-9_]* ('.' [0-9_]+)? ([eE] [+-]? [0-9_]+)?   // 42、3.14、1e9
+    : '0' [xX] [0-9a-fA-F] ([_]? [0-9a-fA-F])*                              // 0xFF
+    | '0' [bB] [01] ([_]? [01])*                                            // 0b1010
+    | '0' [oO] [0-7] ([_]? [0-7])*                                          // 0o17
+    | [0-9] ([_]? [0-9])* ('.' [0-9] ([_]? [0-9])*)? ([eE] [+-]? [0-9] ([_]? [0-9])*)?   // 42、3.14、1e9
     ;
+
+// 区间 `..`（for-in 左闭右开）与变参 `...`：显式成词，
+// 手写 lexer 有明确对照；`..` 与 NUMBER 小数点靠「`.` 后必须跟数字」区分。
+RANGE    : '..' ;
+ELLIPSIS : '...' ;
 
 // 标识符：字母或下划线开头，后跟字母、数字或下划线。
+// 保留字（parser 规则中的字符串字面量）优先于本规则匹配。
 IDENT
     : [A-Za-z_] [A-Za-z0-9_]*
     ;
@@ -528,7 +616,8 @@ NL
     : '\r'? '\n' -> channel(HIDDEN)
     ;
 
-// 空白字符（跳过）。
+// 空白字符（跳过）。吸收 \r \f \v：CR-only、表单符文件不再词法报错；
+// CRLF 不受影响——NL 的 '\r'? '\n' 按最长匹配仍整体成词。
 WS
-    : [ \t]+ -> skip
+    : [ \t\r\f\u000B]+ -> skip
     ;

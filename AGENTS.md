@@ -44,7 +44,7 @@ GRAPHIFY_OUT=graphify-out graphify god-nodes
 结构体和函数都要有详细注释说明
 每个文件尽量保持在 500-1000 行
 修改完代码都要构建验证
-每次修改代码完成之后都要在tests目录中生成.ws测试用例，并确保测试通过
+每次修改代码完成之后都要在tests目录中生成.yh测试用例，并确保测试通过
 Windows平台执行切换到wsl进行运行
 安装ripgrep，使用ripgrep进行搜索
 必须执行
