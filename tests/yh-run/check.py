@@ -3,16 +3,20 @@
 
 对 tests/yh-run/ 下三组 .yh 用例做「编译 + 运行 + 比对」的端到端验收：
 
-    run/   编译 ./yh <file> -o work/<name> 后运行，比对标准输出与退出码。
-           期望写在源文件注释里：
+    run/   编译 <compiler> <file> -o <workdir>/<name> 后运行，比对标准输出
+           与退出码。期望写在源文件注释里：
                // expect: 第一行输出          （首行，必须有）
                // expect-more: 后续行输出      （按出现顺序逐行比对）
                // exit: N                     （期望退出码，缺省 0）
+               // stdin-hex: <十六进制>        （可选，注入进程标准输入）
+               // argv: a b c                 （可选，附加命令行参数）
     fail/  编译必须失败。首行写 `// fail: 原因` 说明预期拒绝的理由；
            编译器若因信号崩溃（ICE）同样算 FAIL 并保留诊断。
     pass/  编译必须成功，不运行。
 
-产物统一放 work/（已加入 .gitignore）。--cross 模式额外用
+产物统一放 <workdir>（缺省 tmp/yh-run-work，在仓库 tmp/ 下，已被
+gitignore）。并发运行多套校验时用 --workdir 指定不同目录，避免多个
+进程同时读写同一批产物文件。--cross 模式额外用
 -Wl,-oformat=elf64-aarch64 -sysroot -B 交叉编译成 Linux ELF，经
 `docker exec yh-build` 在 aarch64 Linux 容器内运行并比对；
 docker 或 sysroot 不可用时全部打印 SKIP，不算失败。
@@ -21,6 +25,8 @@ docker 或 sysroot 不可用时全部打印 SKIP，不算失败。
     python3 tests/yh-run/check.py           # 本机 Darwin/Mach-O 全量校验
     python3 tests/yh-run/check.py --quiet   # 只打印失败项与汇总
     python3 tests/yh-run/check.py --cross   # 交叉 ELF + 容器运行对比
+    python3 tests/yh-run/check.py --compiler ./stage1 --workdir tmp/w1
+                                            # 指定编译器与产物目录（自举差分）
 
 退出码：全部通过（SKIP 不算失败）0；有 FAIL 1。
 """
@@ -33,8 +39,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent          # tests/yh-run
 ROOT = HERE.parent.parent                        # 仓库根
-YH_BIN = ROOT / "yh"                             # 编译器
-WORK = HERE / "work"                             # 产物目录（gitignore）
+DEFAULT_COMPILER = ROOT / "yh"                   # 缺省编译器
+DEFAULT_WORK = ROOT / "tmp" / "yh-run-work"      # 缺省产物目录（tmp/ 下）
 RUN_DIR = HERE / "run"
 FAIL_DIR = HERE / "fail"
 PASS_DIR = HERE / "pass"
@@ -46,11 +52,14 @@ CROSS_CONTAINER = "yh-build"
 COMPILE_TIMEOUT = 60     # 编译超时（秒）
 RUN_TIMEOUT = 15         # 运行超时（秒）
 
-# 期望注释的三种标记；行内容在第一个空格之后原样保留（允许行内空格/制表符）。
+# 期望注释的标记；行内容在第一个空格之后原样保留（允许行内空格/制表符）。
 EXPECT_RE = re.compile(r"^//\s*expect:\s?(.*)$")
 MORE_RE = re.compile(r"^//\s*expect-more:\s?(.*)$")
 EXIT_RE = re.compile(r"^//\s*exit:\s*(-?\d+)\s*$")
 FAIL_RE = re.compile(r"^//\s*fail:\s?(.*)$")
+# 标准输入注入（十六进制字节串，可为空）与附加命令行参数。
+STDIN_HEX_RE = re.compile(r"^//\s*stdin-hex:\s?([0-9a-fA-F]*)\s*$")
+ARGV_RE = re.compile(r"^//\s*argv:\s?(.*)$")
 
 # 汇总里每种状态的打印标签。
 LABELS = {"PASS": "PASS", "FAIL": "FAIL", "SKIP": "SKIP"}
@@ -68,12 +77,13 @@ def signal_name(returncode):
     return f"信号 {-returncode}"
 
 
-def compile_src(src, out, cross=False):
+def compile_src(src, out, cross=False, compiler=None):
     """编译一个用例，返回 (proc, timed_out)。
 
     cross=True 时追加交叉编译参数，产物为 Linux aarch64 ELF。
+    compiler 缺省用仓库根的 yh。
     """
-    cmd = [str(YH_BIN), str(src), "-o", str(out)]
+    cmd = [str(compiler or YH_BIN), str(src), "-o", str(out)]
     if cross:
         cmd += [
             "-Wl,-oformat=elf64-aarch64",
@@ -125,11 +135,36 @@ def diff_output(expected, actual_stdout):
     return diffs
 
 
-def run_program(argv, timeout=RUN_TIMEOUT):
-    """运行一个可执行文件/容器命令，返回 (proc, timed_out)。"""
+def parse_stdin_argv(path):
+    """解析 run/ 用例的 stdin-hex 与 argv 注释，返回 (输入字节串, 参数列表)。
+
+    没有相应注释时返回 (None, [])——进程标准输入保持继承，参数为空。
+    """
+    stdin_bytes = None
+    argv_extra = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = STDIN_HEX_RE.match(line)
+        if m:
+            stdin_bytes = bytes.fromhex(m.group(1))
+            continue
+        m = ARGV_RE.match(line)
+        if m:
+            argv_extra = m.group(1).split()
+    return stdin_bytes, argv_extra
+
+
+def run_program(argv, timeout=RUN_TIMEOUT, input_bytes=None):
+    """运行一个可执行文件/容器命令，返回 (proc, timed_out)。
+
+    input_bytes 非 None 时以二进制模式经管道注入标准输入（覆盖现有
+    用例不注入的旧行为），输出按 UTF-8 解码（非法字节替换），
+    保证 NUL 等二进制数据不破坏文本比对。
+    """
     try:
         proc = subprocess.run([str(a) for a in argv], capture_output=True,
-                              text=True, timeout=timeout)
+                              timeout=timeout, input=input_bytes)
+        proc.stdout = (proc.stdout or b"").decode("utf-8", "replace")
+        proc.stderr = (proc.stderr or b"").decode("utf-8", "replace")
         return proc, False
     except subprocess.TimeoutExpired:
         return None, True
@@ -173,7 +208,13 @@ def check_run_case(path, cross):
         argv = ["docker", "exec", CROSS_CONTAINER, container_path]
     else:
         argv = [out]
-    run, run_timeout = run_program(argv)
+    stdin_bytes, argv_extra = parse_stdin_argv(path)
+    if argv_extra:
+        argv = argv + argv_extra
+    if stdin_bytes is not None and cross:
+        # docker exec 缺省不转发宿主 stdin，注入输入时必须 -i。
+        argv.insert(2, "-i")
+    run, run_timeout = run_program(argv, input_bytes=stdin_bytes)
     if run_timeout:
         return "FAIL", "运行超时"
     if run.returncode < 0:
@@ -228,11 +269,19 @@ def list_cases(directory):
 
 
 def main():
+    global YH_BIN, WORK
     parser = argparse.ArgumentParser(description="tests/yh-run 运行语义校验")
     parser.add_argument("--quiet", action="store_true", help="只打印失败项与汇总")
     parser.add_argument("--cross", action="store_true",
                         help="交叉编译为 Linux ELF 并在 docker 容器内运行对比")
+    parser.add_argument("--compiler", default=str(DEFAULT_COMPILER),
+                        help="yh 编译器路径（缺省仓库根 yh；自举时指向 stage1/stage2）")
+    parser.add_argument("--workdir", default=str(DEFAULT_WORK),
+                        help="产物目录（缺省 tmp/yh-run-work；并发运行时各自指定）")
     args = parser.parse_args()
+
+    YH_BIN = Path(args.compiler)
+    WORK = Path(args.workdir)
 
     # 全局环境检查：编译器缺失或交叉环境不可用时，全部用例 SKIP。
     global_skip = None
@@ -245,7 +294,7 @@ def main():
             global_skip = note
         cross_note = f"（sysroot：{SYSROOT}，容器：{CROSS_CONTAINER}）"
 
-    WORK.mkdir(exist_ok=True)
+    WORK.mkdir(parents=True, exist_ok=True)
 
     groups = [
         ("run", RUN_DIR, check_run_case),

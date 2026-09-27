@@ -122,5 +122,10 @@ ST_FUNC int yh_brace_group_is_literal(void);
 ST_FUNC int yh_implicit_conv(CType *dst, CType *src);
 /* 显式 to_type 检查：返回 1 允许（结果为右值）。 */
 ST_FUNC int yh_explicit_conv(CType *dst, CType *src);
+/* 整数字面量值是否可被目标整型表示（§4.1 可表示则隐式允许）。
+ * yh_expr.c 实现；全局标量初始化（yh_decl.c）共用该范围检查。 */
+ST_FUNC int yh_const_fits(long long v, CType *dst);
+/* 数组类型比较：元素类型与长度都相同（yh_type.c，包装登记/还原共用） */
+ST_FUNC int yh_arr_same(CType *a, CType *b);
 
 #endif /* YH_H */

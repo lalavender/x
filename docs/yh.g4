@@ -542,6 +542,8 @@ builtinType
  *     pub fn strlen(s *char) u64
  *     pub fn exit(code int) void
  *     pub fn open(path *char, flags int, ...) int   // 无类型变参（mode 可选）
+ *     pub fn close(fd int) int
+ *     pub fn read(fd int, buf *void, count u64) i64
  *     pub fn write(fd int, buf *void, count u64) i64
  *
  * 实现位置：src/core/yh_builtin.c 按上表直接创建 extern Sym 并绑定 libc

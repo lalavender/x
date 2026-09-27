@@ -190,9 +190,32 @@ static int yh_is_float_bt(int bt)
     return bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE;
 }
 
+/* fn 签名结构相等：返回类型与参数链逐一比较（同型标量），
+ * 变参形态（CDECL/ELLIPSIS）与类型化变参 packed 标志一并比较。 */
+static int yh_func_sig_equal(Sym *a, Sym *b)
+{
+    if (!a || !b)
+        return 0;
+    if (a->f.func_type != b->f.func_type)
+        return 0;
+    if (!yh_same_scalar(&a->type, &b->type))
+        return 0;
+    a = a->next;
+    b = b->next;
+    while (a && b) {
+        if (a->a.packed != b->a.packed)
+            return 0;
+        if (!yh_same_scalar(&a->type, &b->type))
+            return 0;
+        a = a->next;
+        b = b->next;
+    }
+    return !a && !b;
+}
+
 /* 隐式转换判定（§4.1）：
  *   同型/透明别名 → 1；
- *   整数字面量 0 → 数据指针/bool → 1（由调用方保证是字面量，这里放行 int→bool）；
+ *   函数值 → 同签名 fn 类型 → 1（函数名取值，剥 VT_STATIC）；
  *   整数→更大整数（含符号差异按范围判断：有符号→同宽无符号拒绝）、
  *   f32→f64 → 1；其余 → 0（须显式 to_type）。 */
 ST_FUNC int yh_implicit_conv(CType *dst, CType *src)
@@ -204,6 +227,9 @@ ST_FUNC int yh_implicit_conv(CType *dst, CType *src)
 
     if (yh_same_scalar(dst, src))
         return 1;
+    /* 函数名 → fn 类型：签名结构相等即同型（yh 的 fn 值即函数地址） */
+    if (bd == VT_FUNC && bs == VT_FUNC)
+        return yh_func_sig_equal(dst->ref, src->ref);
     /* 指针：*T → *void 隐式；void→数据指针拒绝 */
     if (bd == VT_PTR && bs == VT_PTR) {
         CType *pd = pointed_type(dst);
@@ -254,11 +280,34 @@ ST_FUNC int yh_explicit_conv(CType *dst, CType *src)
     return 0;
 }
 
+/* 整数字面量值是否可被目标整型表示（§4.1：可表示时隐式允许）。
+ * vt 为目标类型（不含 bool）；v 为折叠负号后的常量值。 */
+ST_FUNC int yh_const_fits(long long v, CType *dst)
+{
+    int sz, al, us = dst->t & VT_UNSIGNED;
+    sz = type_size(dst, &al);
+    switch (sz) {
+    case 1: return us ? (v >= 0 && v <= 255) : (v >= -128 && v <= 127);
+    case 2: return us ? (v >= 0 && v <= 65535)
+                      : (v >= -32768 && v <= 32767);
+    case 4: return us ? (v >= 0 && v <= 4294967295LL)
+                      : (v >= -2147483648LL && v <= 2147483647LL);
+    default: return us ? v >= 0 : 1; /* 64 位 */
+    }
+}
+
 /* 赋值/传参/返回的转换：先 yh 检查再 gen_assign_cast。 */
 ST_FUNC void yh_assign_cast_to(CType *dst, int explicit_ok)
 {
     if (yh_syntax_only())
         return;
+    /* 数组 → 数据指针：先做左值退化（同下标路径）；数据指针之间按
+       同型标量处理（yh_same_scalar 不区分所指元素类型） */
+    if ((dst->t & VT_BTYPE) == VT_PTR && (vtop->type.t & VT_ARRAY)) {
+        vtop->type.t &= ~VT_ARRAY;
+        if (vtop->r & VT_LVAL)
+            gaddrof();
+    }
     if (!yh_implicit_conv(dst, &vtop->type)) {
         char b1[120], b2[120];
         /* 整数字面量 0 → 数据指针（空指针） */
@@ -267,6 +316,19 @@ ST_FUNC void yh_assign_cast_to(CType *dst, int explicit_ok)
             && (dst->t & VT_BTYPE) == VT_PTR
             && yh_is_int_bt(vtop->type.t & VT_BTYPE))
             goto allow;
+        /* 整数字面量 → 目标整型可表示（§4.1）；bool 目标仍拒绝
+           （整数→bool 一律须 to_type 或 true/false） */
+        if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST
+            && yh_is_int_bt(vtop->type.t & VT_BTYPE)
+            && yh_is_int_bt(dst->t & VT_BTYPE)
+            && (dst->t & VT_BTYPE) != VT_BOOL
+            && yh_const_fits(vtop->c.i, dst))
+            goto allow;
+        /* 浮点字面量 → f32/f64（§4.1：f32 目标按 f32 舍入） */
+        if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST
+            && yh_is_float_bt(vtop->type.t & VT_BTYPE)
+            && yh_is_float_bt(dst->t & VT_BTYPE))
+            goto allow;
         /* 数组 → 同布局包装结构体（调用/返回边界，仅改类型字） */
         if ((dst->t & VT_BTYPE) == VT_STRUCT
             && (vtop->type.t & VT_ARRAY)) {
@@ -274,6 +336,18 @@ ST_FUNC void yh_assign_cast_to(CType *dst, int explicit_ok)
             yh_array_wrap(&vtop->type, &st);
             if (st.ref == dst->ref) {
                 vtop->type = *dst;
+                goto allow;
+            }
+        }
+        /* 包装结构体 → 数组：调用结果/包装形参赋回裸数组变量
+           （布局相同）。把目标左值的类型字对齐为包装结构体（仅当前
+           语句的栈上类型），vstore 才能走结构体块拷贝而非标量拷贝 */
+        if ((dst->t & VT_ARRAY)
+            && (vtop->type.t & VT_BTYPE) == VT_STRUCT) {
+            CType at;
+            if (yh_wrap_array_of(&vtop->type, &at)
+                && yh_arr_same(&at, dst)) {
+                *dst = vtop->type;
                 goto allow;
             }
         }
@@ -540,6 +614,7 @@ static void yh_parse_postfix(void)
             int pack_off = 0;
             int n_pack = 0, elem_sz = 0, elem_al = 1;
             int pack_base = 0;
+            int sret_loc = 0;
             Sym *fs = NULL;
             Sym *va = NULL;
             CType va_et;
@@ -553,6 +628,21 @@ static void yh_parse_postfix(void)
                 }
             }
             next();
+            /* 结构体（含包装数组）返回：调用方在实参之前压入返回临时
+               地址作为隐藏参数（tccgen 同款协议；arm64 gfunc_call 里
+               寄存器可返回的结构体也会把 x0/x1 写回该临时） */
+            if (!yh_syntax_only() && fs
+                && (fs->type.t & VT_BTYPE) == VT_STRUCT) {
+                int ralign, rsize = type_size(&fs->type, &ralign);
+                /* 小结构体向上取整到 2 的幂，便于 stp 整块写出 */
+                if (rsize < 16)
+                    while (rsize & (rsize - 1))
+                        rsize = (rsize | (rsize - 1)) + 1;
+                loc = (loc - rsize) & -ralign;
+                vseti(VT_LOCAL, loc);
+                nb_args++;
+                sret_loc = loc;
+            }
             if (tok != ')') {
                 Sym *pa = fs ? fs->next : NULL; /* 第一个形参 */
                 int in_va = 0;
@@ -600,6 +690,14 @@ static void yh_parse_postfix(void)
                                 dt.t = VT_DOUBLE;
                                 dt.ref = NULL;
                                 gen_cast(&dt);
+                            } else if (bt == VT_BYTE || bt == VT_SHORT
+                                       || bt == VT_BOOL) {
+                                /* C 默认提升（§7）：i8/i16/u8/u16/bool → int，
+                                   否则 i8 的符号扩展与寄存器上 32 位读取不一致 */
+                                CType it;
+                                it.t = VT_INT;
+                                it.ref = NULL;
+                                gen_cast(&it);
                             }
                         }
                     }
@@ -667,9 +765,17 @@ static void yh_parse_postfix(void)
                 gfunc_call(nb_args); /* 弹出被调者与实参，结果在返回寄存器 */
                 if ((rt.t & VT_BTYPE) == VT_VOID) {
                     /* void 调用无结果值 */
+                } else if ((rt.t & VT_BTYPE) == VT_STRUCT) {
+                    /* 结构体返回：结果 = 调用方临时（gfunc_call 已把
+                       寄存器返回值写回该临时，或被调者经 x8 直写） */
+                    vset(&rt, VT_LOCAL | VT_LVAL, sret_loc);
                 } else {
+                    int ret_reg = REG_IRET;
+                    /* 浮点返回值在 v0（REG_FRET），整型在 x0 */
+                    if (yh_is_float_bt(rt.t & VT_BTYPE))
+                        ret_reg = REG_FRET;
                     memset(&cval, 0, sizeof cval);
-                    vsetc(&rt, REG_IRET, &cval); /* 结果入值栈（x0/v0） */
+                    vsetc(&rt, ret_reg, &cval); /* 结果入值栈 */
                 }
             }
         } else if (tok == '[') {
@@ -959,8 +1065,16 @@ static void yh_parse_primary(void)
         }
         return;
     case TOK_TRUE: case TOK_FALSE:
-        if (!yh_syntax_only())
-            vpushi(tok == TOK_TRUE); /* bool 常量 0/1 */
+        if (!yh_syntax_only()) {
+            /* bool 字面量类型必须是 bool（§4.1）：int 会令
+               let b bool = true; 被转换检查拒绝 */
+            CType bt;
+            CValue cv;
+            bt.t = VT_BOOL;
+            bt.ref = NULL;
+            cv.i = (tok == TOK_TRUE);
+            vsetc(&bt, VT_CONST, &cv);
+        }
         next();
         return;
     case '(':

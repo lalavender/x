@@ -380,12 +380,13 @@ struct yh_wrap {
     int is_slice;
 };
 
-#define YH_MAX_WRAPS 128
+/* 包装类型登记上限（B2-3：为自举源码留量；超限干净报错不静默截断） */
+#define YH_MAX_WRAPS 512
 static struct yh_wrap yh_wraps[YH_MAX_WRAPS];
 static int yh_nb_wraps;
 
-/* 数组类型比较：元素类型与长度都相同 */
-static int yh_arr_same(CType *a, CType *b)
+/* 数组类型比较：元素类型与长度都相同（包装登记/调用边界还原共用） */
+ST_FUNC int yh_arr_same(CType *a, CType *b)
 {
     if (!(a->t & VT_ARRAY) || !(b->t & VT_ARRAY))
         return 0;

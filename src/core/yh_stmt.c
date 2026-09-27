@@ -443,10 +443,10 @@ ST_FUNC void yh_parse_stmt(void)
     case TOK_SWITCH: {
         CType sw_type;
         int sw_slot = 0, pdef = 0, saved_bsym;
-        int trues[128], nt = 0;    /* 各 case 比较 cbnz（真→块入口，imm19 回填） */
-        int falses[128], nf = 0;   /* 各 case 比较 b（假→下一比较/no-match） */
-        int cmp_start[128], ncs = 0; /* 各比较的起始地址（假路径目标） */
-        int ends[128], ne = 0;     /* 各块尾跳转（统一到出口） */
+        int trues[512], nt = 0;    /* 各 case 比较 cbnz（真→块入口，imm19 回填） */
+        int falses[512], nf = 0;   /* 各 case 比较 b（假→下一比较/no-match） */
+        int cmp_start[512], ncs = 0; /* 各比较的起始地址（假路径目标） */
+        int ends[512], ne = 0;     /* 各块尾跳转（统一到出口） */
         int default_at = 0;        /* default 块入口（出现后记录） */
         nocode_wanted &= ~0x20000000;
         next();
@@ -474,8 +474,13 @@ ST_FUNC void yh_parse_stmt(void)
             if (tok == TOK_CASE) {
                 next();
                 for (;;) {
-                    if (!yh_syntax_only() && ncs < 128)
+                    if (!yh_syntax_only()) {
+                        /* 超限干净报错而非静默截断（B2-3 容量边界） */
+                        if (ncs >= 512 || nt >= 512 || nf >= 512)
+                            tcc_error("switch 分支过多"
+                                      "（上限 512 个 case 值）");
                         cmp_start[ncs++] = ind; /* 本比较起始（假路径目标） */
+                    }
                     yh_parse_expr();
                     if (!yh_syntax_only()) {
                         yh_assign_cast_to(&sw_type, 0);
@@ -484,12 +489,10 @@ ST_FUNC void yh_parse_stmt(void)
                         gen_op(TOK_EQ);
                         gv(RC_INT);
                         /* 真 → 块入口（cbnz，块地址稍后回填） */
-                        if (nt < 128)
-                            trues[nt++] = ind;
+                        trues[nt++] = ind;
                         o(0x35000000 | intr(vtop->r)); /* cbnz w, #0 */
                         /* 假 → 下一比较 / no-match（b，稍后回填） */
-                        if (nf < 128)
-                            falses[nf++] = ind;
+                        falses[nf++] = ind;
                         o(0x14000000); /* b #0 */
                         vpop();
                     }
@@ -506,8 +509,11 @@ ST_FUNC void yh_parse_stmt(void)
                     nt = 0;
                 }
                 yh_parse_block();
-                if (!yh_syntax_only() && ne < 128)
+                if (!yh_syntax_only()) {
+                    if (ne >= 512)
+                        tcc_error("switch 分支过多（上限 512 个分支块）");
                     ends[ne++] = gjmp(0); /* 块尾隐式跳出口（无 fallthrough） */
+                }
             } else if (tok == TOK_DEFAULT) {
                 next();
                 if (!yh_syntax_only()) {
@@ -517,8 +523,11 @@ ST_FUNC void yh_parse_stmt(void)
                     default_at = ind;
                 }
                 yh_parse_block();
-                if (!yh_syntax_only() && ne < 128)
+                if (!yh_syntax_only()) {
+                    if (ne >= 512)
+                        tcc_error("switch 分支过多（上限 512 个分支块）");
                     ends[ne++] = gjmp(0);
+                }
             } else {
                 expect("'case' 或 'default'");
             }

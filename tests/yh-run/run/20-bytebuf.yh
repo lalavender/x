@@ -1,0 +1,86 @@
+// expect: head=65 z0=0 len=3 cap=4
+// expect-more: big-ok len=1048579 zeros=4096
+// expect-more: oom-ok
+// 最小字节缓冲（0.0.2 B1-2）：malloc/memcpy/free 扩容，len/cap 用 u64。
+// 覆盖：1 字节分配、逐次扩容边界、NUL 字节、1 MiB 逐字节一致、
+// 分配失败返回 0（明确错误，不越界不静默截断）。
+struct ByteBuf {
+    data *u8;
+    len u64;
+    cap u64;
+}
+
+/* 扩容到至少 want 字节（倍增策略）：成功 1，分配失败 0 */
+fn buf_reserve(b *ByteBuf, want u64) int {
+    if (b.cap >= want) {
+        return 1;
+    }
+    let ncap u64 = b.cap * 2;
+    if (ncap < want) {
+        ncap = want;
+    }
+    let nd *u8 = malloc(ncap).to_type(*u8);
+    if (nd == 0) {
+        return 0;
+    }
+    if (b.len > 0) {
+        memcpy(nd, b.data, b.len);
+    }
+    free(b.data);
+    b.data = nd;
+    b.cap = ncap;
+    return 1;
+}
+
+/* 追加一个字节：成功 1，分配失败 0 */
+fn buf_push(b *ByteBuf, c u8) int {
+    if (b.len >= b.cap) {
+        if (buf_reserve(b, b.len + 1) == 0) {
+            return 0;
+        }
+    }
+    b.data[b.len] = c;
+    b.len += 1;
+    return 1;
+}
+
+fn main() int {
+    /* 1 字节起分配 + 跨扩容边界 + NUL 原样存储 */
+    let b ByteBuf = ByteBuf{data: 0, len: 0, cap: 0};
+    buf_push(&b, 65);
+    buf_push(&b, 0);
+    buf_push(&b, 66);
+    printf("head=%d z0=%d len=%d cap=%d\n", b.data[0], b.data[1], b.len, b.cap);
+
+    /* 1 MiB 模式数据逐字节校验；模式 (31i+7)&255 恰含 4096 个零字节 */
+    let i u64 = 0;
+    let n u64 = 1048576;
+    for i < n {
+        buf_push(&b, ((i * 31 + 7) & 255).to_type(u8));
+        i += 1;
+    }
+    let z u64 = 0;
+    i = 3; /* 前 3 个元素是上方手工推送的 65/0/66 */
+    for i < b.len {
+        let want u8 = (((i - 3) * 31 + 7) & 255).to_type(u8);
+        if (b.data[i] != want) {
+            printf("mismatch at %d\n", i);
+            return 1;
+        }
+        if (want == 0) {
+            z += 1;
+        }
+        i += 1;
+    }
+    printf("big-ok len=%d zeros=%d\n", b.len, z);
+
+    /* 2^63 字节分配必然失败：返回 0 而不是越界 */
+    let b2 ByteBuf = ByteBuf{data: 0, len: 0, cap: 0};
+    let huge u64 = 1;
+    huge = huge << 63;
+    if (buf_reserve(&b2, huge) == 0) {
+        printf("oom-ok\n");
+    }
+    free(b.data);
+    return 0;
+}

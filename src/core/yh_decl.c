@@ -87,9 +87,12 @@ ST_FUNC void yh_commit_global_var(CType *type)
             greloca(sec, vtop->sym, addr, R_DATA_PTR, 0);
             vpop();
         } else {
-            /* 标量常量：按类型宽度写入节数据（小端） */
+            /* 标量常量：按类型宽度写入节数据（小端）。
+               整数先做范围检查（§4.1）：越界字面量报错而非静默截断 */
             int bt = type->t & VT_BTYPE;
             unsigned char *p = sec->data + addr;
+            unsigned long long u;
+            int n, k;
             if (bt == VT_FLOAT) {
                 float f = vtop->c.f;
                 memcpy(p, &f, 4);
@@ -97,8 +100,11 @@ ST_FUNC void yh_commit_global_var(CType *type)
                 double dd = vtop->c.d;
                 memcpy(p, &dd, 8);
             } else {
-                unsigned long long u = (unsigned long long)vtop->c.i;
-                int n = size < 8 ? size : 8, k;
+                if (!yh_const_fits(vtop->c.i, type))
+                    tcc_error("初始化值 %lld 超出类型范围",
+                              (long long)vtop->c.i);
+                u = (unsigned long long)vtop->c.i;
+                n = size < 8 ? size : 8;
                 for (k = 0; k < n; k++)
                     p[k] = (unsigned char)(u >> (8 * k));
             }
@@ -463,8 +469,28 @@ ST_FUNC void yh_gen_function(int v)
     if (!sym || (sym->type.t & VT_BTYPE) != VT_FUNC)
         tcc_error("函数 '%s' 未在第一遍登记", get_tok_str(v, NULL));
     if (!strcmp(get_tok_str(v, NULL), "main")) {
-        if (sym->type.ref->next)
-            tcc_error("main 不能带参数");
+        Sym *pa = sym->type.ref->next;
+        if (pa) {
+            /* 0.0.2 B1：允许第二种签名 (argc int, argv **char)，
+               与 C 运行时传入的 x0/x1 (argc/argv) 对齐；其余拒绝 */
+            int ok = 0;
+            Sym *pb = pa->next;
+            if (pb && !pb->next
+                && (pa->type.t & VT_BTYPE) == VT_INT
+                && !(pa->type.t & VT_UNSIGNED)
+                && (pb->type.t & VT_BTYPE) == VT_PTR) {
+                CType *pp = pointed_type(&pb->type);
+                if ((pp->t & VT_BTYPE) == VT_PTR) {
+                    CType *pc = pointed_type(pp);
+                    if ((pc->t & VT_BTYPE) == VT_BYTE
+                        && (pc->t & VT_UNSIGNED))
+                        ok = 1; /* **char */
+                }
+            }
+            if (!ok)
+                tcc_error("main 签名必须为 main() 或 "
+                          "main(argc int, argv **char)");
+        }
         if ((sym->type.ref->type.t & VT_BTYPE) == VT_VOID)
             tcc_warning("main 建议返回 int（void 时退出码恒为 0）");
     }

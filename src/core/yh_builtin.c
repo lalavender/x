@@ -33,6 +33,8 @@ static const struct yh_prelude_fn yh_prelude[] = {
     {"strlen", TOK_U64, 0, {PTR_CHAR, -1}, 0},
     {"exit", TOK_VOID, 0, {TOK_INT, -1}, 0},
     {"open", TOK_INT, 0, {PTR_CHAR, TOK_INT, -1}, 1},
+    {"close", TOK_INT, 0, {TOK_INT, -1}, 0},
+    {"read", TOK_I64, 0, {TOK_INT, PTR_VOID, TOK_U64, -1}, 0},
     {"write", TOK_I64, 0, {TOK_INT, PTR_VOID, TOK_U64, -1}, 0},
     {NULL, 0, 0, {0}, 0}};
 
@@ -50,7 +52,7 @@ static void yh_prelude_ctype(int spec, CType* t) {
   }
 }
 
-/* 在当前编译单元登记 prelude 的 8 个 extern 函数 Sym。
+/* 在当前编译单元登记 prelude 的 10 个 extern 函数 Sym。
  * 必须在两遍解析开始前调用一次。 */
 ST_FUNC void yh_register_prelude(void) {
   const struct yh_prelude_fn* pf;

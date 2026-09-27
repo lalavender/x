@@ -403,7 +403,8 @@ ST_FUNC int tcc_output_macho(TCCState *s1, const char *filename)
         pstrcpy(objfile, sizeof objfile, filename);
         pstrcat(objfile, sizeof objfile, ".yh-macho.o");
         if (rename(filename, objfile) != 0)
-            tcc_error("无法暂存目标文件 '%s'", objfile);
+            tcc_error("无法暂存目标文件 '%s'（%s）；多进程并发写同一 -o 路径"
+                      "也会触发本错误", objfile, strerror(errno));
         snprintf(cmd, sizeof cmd, "cc \"%s\" -o \"%s\"", objfile, filename);
         rc = system(cmd);
         unlink(objfile);

@@ -13,7 +13,12 @@ tests/yh/ 下全部 .yh 语料，要求每个文件都满足：零词法错误 +
     python3 tests/yh/check.py              # ANTLR 模式校验全部语料
     python3 tests/yh/check.py --coverage   # ANTLR 模式 + 规则覆盖自检
     python3 tests/yh/check.py --compiler   # yh 编译器模式（--syntax-check）
+    python3 tests/yh/check.py --compiler --compiler-path ./stage1
+                                           # 指定编译器路径（自举差分）
     python3 tests/yh/check.py --quiet      # 只打印失败项与汇总
+
+ANTLR 模式的 parser 生成目录缺省在仓库 tmp/ 下（用 --workdir 覆盖），
+用完即删。
 
 退出码：全部通过 0；有失败或覆盖缺口 1。
 """
@@ -117,9 +122,14 @@ def pick_version():
     return versions[-1]
 
 
-def generate_parser(tool, version):
-    """在临时目录生成 Python3 parser，返回该目录。"""
-    work = Path(tempfile.mkdtemp(prefix="yh-g4-"))
+def generate_parser(tool, version, workdir=None):
+    """在临时目录生成 Python3 parser，返回该目录。
+
+    workdir 缺省为仓库 tmp/ 下（生成物统一落在 tmp/，结束后删除）。
+    """
+    base = Path(workdir) if workdir else ROOT / "tmp"
+    base.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="yh-g4-", dir=base))
     shutil.copy(GRAMMAR, work / GRAMMAR.name)
     proc = subprocess.run(
         [str(tool), "-v", version, "-Dlanguage=Python3", "-no-listener", GRAMMAR.name],
@@ -240,10 +250,15 @@ def run_coverage(api, corpus_files):
 YH_BIN = ROOT / "yh"
 
 
-def run_compiler_mode(quiet):
-    """编译器模式：yh --syntax-check 接受全部正例、拒绝全部反例。"""
-    if not YH_BIN.exists():
-        die(f"找不到编译器 {YH_BIN}，请先 make")
+def run_compiler_mode(quiet, compiler=None):
+    """编译器模式：yh --syntax-check 接受全部正例、拒绝全部反例。
+
+    compiler 可指定编译器路径（自举差分时指向 stage1/stage2），
+    缺省用仓库根的 yh。
+    """
+    yh_bin = Path(compiler) if compiler else YH_BIN
+    if not yh_bin.exists():
+        die(f"找不到编译器 {yh_bin}，请先 make")
     corpus_dir = HERE
     all_files = sorted(p for p in corpus_dir.rglob("*.yh") if p.is_file())
     rejected_root = corpus_dir / REJECTED_DIR
@@ -252,13 +267,13 @@ def run_compiler_mode(quiet):
     if not all_files:
         die(f"{corpus_dir} 下没有任何 .yh 语料。")
     if not quiet:
-        print(f"编译器：{YH_BIN}（--syntax-check）")
+        print(f"编译器：{yh_bin}（--syntax-check）")
         print(f"语料目录：{corpus_dir}")
         print(f"  正例 {len(positive)} 个 / 反例 {len(negative)} 个\n")
 
     pos_fail, neg_fail = [], []
     for path in positive:
-        proc = subprocess.run([str(YH_BIN), "--syntax-check", str(path)],
+        proc = subprocess.run([str(yh_bin), "--syntax-check", str(path)],
                               capture_output=True, text=True)
         rel = path.relative_to(corpus_dir)
         if proc.returncode == 0:
@@ -268,7 +283,7 @@ def run_compiler_mode(quiet):
             pos_fail.append((rel, proc.stderr.strip() or proc.stdout.strip()))
             print(f"FAIL {rel}")
     for path in negative:
-        proc = subprocess.run([str(YH_BIN), "--syntax-check", str(path)],
+        proc = subprocess.run([str(yh_bin), "--syntax-check", str(path)],
                               capture_output=True, text=True)
         rel = path.relative_to(corpus_dir)
         if proc.returncode != 0:
@@ -294,11 +309,15 @@ def main():
     parser = argparse.ArgumentParser(description="tests/yh 语法语料校验")
     parser.add_argument("--coverage", action="store_true", help="额外做规则覆盖自检（仅 ANTLR 模式）")
     parser.add_argument("--compiler", action="store_true", help="用 yh --syntax-check 跑语料（编译器模式）")
+    parser.add_argument("--compiler-path", default=None,
+                        help="编译器模式下指定编译器路径（缺省仓库根 yh；自举时指向 stage1/stage2）")
+    parser.add_argument("--workdir", default=None,
+                        help="ANTLR 模式生成 parser 的临时目录位置（缺省仓库 tmp/ 下）")
     parser.add_argument("--quiet", action="store_true", help="只打印失败项与汇总")
     args = parser.parse_args()
 
     if args.compiler:
-        sys.exit(run_compiler_mode(args.quiet))
+        sys.exit(run_compiler_mode(args.quiet, args.compiler_path))
 
     ensure_runtime()
 
@@ -320,7 +339,7 @@ def main():
         print(f"语料目录：{corpus_dir}")
         print(f"  正例 {len(positive)} 个 / 反例 {len(negative)} 个\n")
 
-    work = generate_parser(tool, version)
+    work = generate_parser(tool, version, args.workdir)
     try:
         api = load_parser(work)
 

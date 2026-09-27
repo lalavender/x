@@ -11,7 +11,10 @@
 | `run/`  | 编译并运行，比对标准输出与退出码 |
 | `fail/` | 编译必须失败（首行 `// fail: 预期拒绝的原因`） |
 | `pass/` | 编译必须成功，不运行 |
-| `work/` | 产物目录（已 gitignore，随时可删） |
+
+产物目录缺省为仓库 `tmp/yh-run-work/`（gitignore，随时可删）；并发运行
+多套校验时用 `--workdir` 各自指定，避免多进程同时读写同一批产物
+（Mach-O 链接流程含 rename 暂存步骤，并发共用目录会互相踩踏）。
 
 ## 期望注释格式（run/）
 
@@ -19,6 +22,8 @@
 // expect: 第一行输出
 // expect-more: 后续每一行输出
 // exit: 42        ← 可选，期望退出码，缺省 0
+// stdin-hex: 6869 ← 可选，十六进制注入进程标准输入（可含 NUL）
+// argv: a b c     ← 可选，附加命令行参数（空格分隔）
 fn main() int {
     printf("第一行输出\n");
     return 42;
@@ -35,6 +40,8 @@ fn main() int {
 python3 tests/yh-run/check.py            # 本机 Darwin/Mach-O 全量校验
 python3 tests/yh-run/check.py --quiet    # 只打印失败项与汇总
 python3 tests/yh-run/check.py --cross    # 交叉编译 Linux ELF，容器内运行对比
+python3 tests/yh-run/check.py --compiler ./stage1 --workdir tmp/w1
+                                         # 指定编译器与产物目录（自举差分）
 ```
 
 `--cross` 追加 `-Wl,-oformat=elf64-aarch64 -sysroot tmp/sysroot -B tmp/sysroot`
@@ -44,54 +51,27 @@ SKIP，不算失败。汇总全过（SKIP 允许）退出 0，否则退出 1。
 
 ## 当前结果（快照）
 
-记录时间：2026-09-27。编译器 `./yh` 正被主会话持续开发中（M4 数组/切片
-落地期间），以下只是当日构建上的快照；复跑以上命令即得最新状态。
+记录时间：2026-09-28（0.0.2 B2 完成）。以下为当日构建 `./yh` 的结果；
+复跑以上命令即得最新状态。
 
 ```
-python3 tests/yh-run/check.py
-run:  通过 9/15，失败 6
-fail: 通过 6/6
-pass: 通过 2/3，失败 1
-总计：通过 17/24（Darwin Mach-O）
+python3 tests/yh-run/check.py            → 总计：通过 44/44（Darwin Mach-O）
+python3 tests/yh-run/check.py --cross    → 总计：通过 44/44（交叉 ELF）
 ```
 
-`--cross` 结果与本机一致：通过 17/24，失败集合相同（同一 AArch64 后端，
-ELF 在容器内运行输出一致）。
+早期快照中记录的 run/05/06/07/08/09/11、pass/03 失败（普通 `=` 赋值
+SIGABRT、switch/goto/递归返回值问题等）已在 0.0.1 的 M4/M5 阶段修复。
+历史上一次 22/24（07-goto-label「无法暂存目标文件」、08-recursion
+信号 9）经 B0 复盘定性为**并发运行共享产物目录导致的 rename 竞态**与
+一次未复现的环境性 kill：单进程 150 次压力与交叉路径均全绿；产物目录
+按 `--workdir` 隔离后并发 4 实例亦全绿。
 
-### 通过项
+B2 补齐了 struct/union/enum、数组按值、切片、for-in、类型化变参、
+函数指针、浮点、位移、read/close、main(argc,argv) 与容量边界的运行
+覆盖（run/16-29、fail/07-12），并修复了期间发现的编译器缺陷
+（清单见 `docs/02-plan/yh-运行覆盖缺口矩阵.md` §4）。
 
-- run/01-hello、02-arithmetic（四则优先级、负数除法/取模向零截断）、
-  03-short-circuit（&&/|| 短路副作用计数正确）、04-if-else、
-  10-strings（%d/%s/%c、\n \t \\ \" \xNN、strlen）、12-sizeof、
-  13-exit-code（`// exit: 42`）、14-many-args（12 参，超出 8 寄存器部分走栈）、
-  15-compound-assign（+= -= *= /= %= &= |= ^= <<= >>= 全对）
-- fail/ 全部 6 项按预期被拒绝（未声明名、跨型初始化、未知类型、裸变参、
-  重复 fn、main 带参）
-- pass/01-empty-main、02-pub-fn
+### 未建用例的语法（运行覆盖缺口）
 
-### 失败项（编译器待修复，均附最小复现）
-
-| 用例 | 现象 | 归类 |
-| --- | --- | --- |
-| run/05-loop | `break 不在循环或 switch 内`：裸 `for { break; }`、`for cond { if (...) { break; } }` 均误报 | 待修复：循环上下文跟踪未覆盖裸 for 与 if 块 |
-| run/06-switch | `internal compiler error: vstack leak (3)`，编译期 ICE；泄漏数 = case 值个数 | 待修复：switch 代码目标值栈失衡 |
-| run/07-goto-label | `label 'loop' used but not defined`，同函数内已有 `loop:` 标签 | 待修复：labelStmt 未登记标签 |
-| run/08-recursion | `fact(5)`/`fib(10)` 输出 `0 0`，递归调用返回值丢失（非递归调用正常） | 待修复：递归调用返回值传递 |
-| run/09-globals | 编译器 SIGABRT：`arm64-gen.c` store 断言，触发于全局普通赋值 `counter = 20;` | 待修复：普通 `=` 赋值的 store 路径 |
-| run/11-pointers | 编译器 SIGABRT：同上，触发于解引用写 `*p = 42;`（读 `*p` 正常） | 待修复：同上 |
-| pass/03-void-fn | `internal compiler error: vstack leak (-1)`：void 函数调用作表达式语句（`nothing();`）触发 ICE | 待修复：void 调用语句的值栈处理 |
-
-普通 `=` 赋值问题影响面最广（局部 `x = 5;`、全局赋值、`*p = ...` 全部
-SIGABRT）；复合赋值（`+=` 等）与指针解引用读均正常，run/03/05/15 因此得以
-绕开 `=` 设计。
-
-### 探测中发现的其他问题（未建用例，待定后补）
-
-- `let r bool = false && bump(&c);` 报"类型不匹配：无法把 'int' 用作
-  '_Bool'"——`&&`/`||` 结果当前是 int，无法绑定到 bool（if 条件里可用）。
-  属语义边界待定项：逻辑运算结果类型应为 bool 或允许到 bool 的隐式转换。
-
-### 未建用例的语法（编译器尚未支持，等 M4 落地后补）
-
-数组 `[N]T`、切片 `[]T`、for-in、类型化变参、struct/union/enum 构造与
-成员访问。语义依据 `docs/03-design/00-语义边界-0.0.1.md`。
+无——缺口矩阵 G01-G17 已全部补齐（同目录 `docs/02-plan/
+yh-运行覆盖缺口矩阵.md`）。
