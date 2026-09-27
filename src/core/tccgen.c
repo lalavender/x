@@ -106,7 +106,6 @@ static inline int64_t expr_const64(void);
 static void vpush64(int ty, unsigned long long v);
 static void vpush(CType *type);
 static int gvtst(int inv, int t);
-static void gen_inline_functions(TCCState *s);
 static void skip_or_save_block(TokenString **str);
 static void gv_dup(void);
 
@@ -237,49 +236,6 @@ ST_FUNC void tcc_debug_funcend(TCCState *s1, int size)
 }
 
 /* ------------------------------------------------------------------------- */
-ST_FUNC int tccgen_compile(TCCState *s1)
-{
-    cur_text_section = NULL;
-    funcname = "";
-    anon_sym = SYM_FIRST_ANOM;
-    section_sym = 0;
-    const_wanted = 0;
-    nocode_wanted = 0x80000000;
-
-    /* 定义一些常用的类型 */
-    int_type.t = VT_INT;
-    char_pointer_type.t = VT_BYTE;
-    mk_pointer(&char_pointer_type);
-#if PTR_SIZE == 4
-    size_type.t = VT_INT | VT_UNSIGNED;
-    ptrdiff_type.t = VT_INT;
-#elif LONG_SIZE == 4
-    size_type.t = VT_LLONG | VT_UNSIGNED;
-    ptrdiff_type.t = VT_LLONG;
-#else
-    size_type.t = VT_LONG | VT_LLONG | VT_UNSIGNED;
-    ptrdiff_type.t = VT_LONG | VT_LLONG;
-#endif
-    func_old_type.t = VT_FUNC;
-    func_old_type.ref = sym_push(SYM_FIELD, &int_type, 0, 0);
-    func_old_type.ref->f.func_call = FUNC_CDECL;
-    func_old_type.ref->f.func_type = FUNC_OLD;
-
-    tcc_debug_start(s1);
-
-#ifdef INC_DEBUG
-    printf("%s: **** new file\n", file->filename);
-#endif
-
-    parse_flags = PARSE_FLAG_PREPROCESS | PARSE_FLAG_TOK_NUM | PARSE_FLAG_TOK_STR;
-    next();
-    decl(VT_CONST);
-    gen_inline_functions(s1);
-    check_vstack();
-    /* 翻译单元信息的结束 */
-    tcc_debug_end(s1);
-    return 0;
-}
 
 /* ------------------------------------------------------------------------- */
 ST_FUNC ElfSym *elfsym(Sym *s)
@@ -6841,51 +6797,7 @@ static void gen_function(Sym *sym)
     check_vstack();
 }
 
-static void gen_inline_functions(TCCState *s)
-{
-    Sym *sym;
-    int inline_generated, i, ln;
-    struct InlineFunc *fn;
 
-    ln = file->line_num;
-    /* 迭代直到没有内联函数被引用 */
-    do {
-        inline_generated = 0;
-        for (i = 0; i < s->nb_inline_fns; ++i) {
-            fn = s->inline_fns[i];
-            sym = fn->sym;
-            if (sym && sym->c) {
-                /* 该函数被使用了：生成它的代码并
-                   把它转换为普通函数 */
-                fn->sym = NULL;
-                if (file)
-                    pstrcpy(file->filename, sizeof file->filename, fn->filename);
-                sym->type.t &= ~VT_INLINE;
-
-                begin_macro(fn->func_str, 1);
-                next();
-                cur_text_section = text_section;
-                gen_function(sym);
-                end_macro();
-
-                inline_generated = 1;
-            }
-        }
-    } while (inline_generated);
-    file->line_num = ln;
-}
-
-ST_FUNC void free_inline_functions(TCCState *s)
-{
-    int i;
-    /* 释放未使用的内联函数的词法单元 */
-    for (i = 0; i < s->nb_inline_fns; ++i) {
-        struct InlineFunc *fn = s->inline_fns[i];
-        if (fn->sym)
-            tok_str_free(fn->func_str);
-    }
-    dynarray_reset(&s->inline_fns, &s->nb_inline_fns);
-}
 
 /* 'l' 为 VT_LOCAL 或 VT_CONST 以定义默认存储类型，
    若正在解析旧式参数声明列表则为 VT_CMP（此时设置了 FUNC_SYM） */

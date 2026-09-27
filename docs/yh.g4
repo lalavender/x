@@ -531,8 +531,9 @@ builtinType
  *  内置 prelude（替代头文件）
  * ============================================================================
  *
- * 没有 `#include`，也没有模块系统。编译器内置一段玉衡声明，在编译用户
- * 代码前自动编译一次，因此下列符号开箱可用（无需任何 import）：
+ * 没有 `#include`，也没有模块系统。编译器为下列符号在每个编译单元开始时
+ * 直接登记 extern 函数 Sym（不经过 yh 源码解析——yh 的 fnDecl 必须带函数体，
+ * 用户源码不允许函数原型），因此下列符号开箱可用（无需任何 import）：
  *
  *     pub fn printf(fmt *char, ...) int      // 无类型变参，内部走 va_list
  *     pub fn malloc(size u64) *void
@@ -540,9 +541,12 @@ builtinType
  *     pub fn memcpy(dst *void, src *void, n u64) *void
  *     pub fn strlen(s *char) u64
  *     pub fn exit(code int) void
+ *     pub fn open(path *char, flags int, ...) int   // 无类型变参（mode 可选）
+ *     pub fn write(fd int, buf *void, count u64) i64
  *
- * 实现位置：src/core/yh_builtin.c 的 builtin_prelude[]，经 tcc_compile_string()
- * 注入。该段文本每行一条声明，避免被 ASI 误伤。
+ * 实现位置：src/core/yh_builtin.c 按上表直接创建 extern Sym 并绑定 libc
+ * 符号名；裸 `...` 仅允许出现在本 prelude，用户源码书写裸 `...` 报错。
+ * 语义细节（提升规则等）见 docs/03-design/00-语义边界-0.0.1.md §7。
  */
 
 /*

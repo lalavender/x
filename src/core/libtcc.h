@@ -83,6 +83,7 @@ LIBTCCAPI int tcc_set_output_type(TCCState *s, int output_type);
 #define TCC_OUTPUT_DLL 3        /* 动态库 */
 #define TCC_OUTPUT_OBJ 4        /* 目标文件 */
 #define TCC_OUTPUT_PREPROCESS 5 /* 仅预处理（内部使用） */
+#define TCC_OUTPUT_SYNTAX 6     /* 仅词法/语法检查（--syntax-check，不生成代码） */
 
 /* 等价于命令行 -Lpath 选项 */
 LIBTCCAPI int tcc_add_library_path(TCCState *s, const char *pathname);

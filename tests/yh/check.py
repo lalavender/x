@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """tests/yh 语法语料校验。
 
-用语法文件 yh.g4 在临时目录生成 ANTLR parser，遍历 tests/yh/ 下全部 .yh 语料，
-要求每个文件都满足：零词法错误 + 零语法错误 + 解析消费到 EOF。
+默认（ANTLR 模式）：用语法文件 yh.g4 在临时目录生成 ANTLR parser，遍历
+tests/yh/ 下全部 .yh 语料，要求每个文件都满足：零词法错误 + 零语法错误 +
+解析消费到 EOF。
+
+--compiler 模式：用本仓库构建的 yh 编译器（yh --syntax-check）跑同一批
+语料。正例必须被接受，rejected/ 下的反例必须被拒绝。该模式不要求 Java
+与 antlr4 运行时。
 
 用法：
-    python3 tests/yh/check.py              # 校验全部语料
-    python3 tests/yh/check.py --coverage   # 额外做「规则覆盖」自检
+    python3 tests/yh/check.py              # ANTLR 模式校验全部语料
+    python3 tests/yh/check.py --coverage   # ANTLR 模式 + 规则覆盖自检
+    python3 tests/yh/check.py --compiler   # yh 编译器模式（--syntax-check）
     python3 tests/yh/check.py --quiet      # 只打印失败项与汇总
 
 退出码：全部通过 0；有失败或覆盖缺口 1。
@@ -231,11 +237,68 @@ def run_coverage(api, corpus_files):
     return False
 
 
+YH_BIN = ROOT / "yh"
+
+
+def run_compiler_mode(quiet):
+    """编译器模式：yh --syntax-check 接受全部正例、拒绝全部反例。"""
+    if not YH_BIN.exists():
+        die(f"找不到编译器 {YH_BIN}，请先 make")
+    corpus_dir = HERE
+    all_files = sorted(p for p in corpus_dir.rglob("*.yh") if p.is_file())
+    rejected_root = corpus_dir / REJECTED_DIR
+    positive = [p for p in all_files if rejected_root not in p.parents]
+    negative = [p for p in all_files if rejected_root in p.parents]
+    if not all_files:
+        die(f"{corpus_dir} 下没有任何 .yh 语料。")
+    if not quiet:
+        print(f"编译器：{YH_BIN}（--syntax-check）")
+        print(f"语料目录：{corpus_dir}")
+        print(f"  正例 {len(positive)} 个 / 反例 {len(negative)} 个\n")
+
+    pos_fail, neg_fail = [], []
+    for path in positive:
+        proc = subprocess.run([str(YH_BIN), "--syntax-check", str(path)],
+                              capture_output=True, text=True)
+        rel = path.relative_to(corpus_dir)
+        if proc.returncode == 0:
+            if not quiet:
+                print(f"OK   {rel}")
+        else:
+            pos_fail.append((rel, proc.stderr.strip() or proc.stdout.strip()))
+            print(f"FAIL {rel}")
+    for path in negative:
+        proc = subprocess.run([str(YH_BIN), "--syntax-check", str(path)],
+                              capture_output=True, text=True)
+        rel = path.relative_to(corpus_dir)
+        if proc.returncode != 0:
+            if not quiet:
+                print(f"OK   {rel}（已按预期被拒）")
+        else:
+            neg_fail.append((rel, "预期被拒绝，实际通过"))
+            print(f"FAIL {rel}（预期被拒绝，实际通过）")
+
+    for rel, out in pos_fail:
+        print(f"\n{rel}:")
+        for line in out.splitlines()[:3]:
+            print(f"    {line}")
+    for rel, why in neg_fail:
+        print(f"\n{rel}: {why}")
+
+    print(f"\n正例：通过 {len(positive) - len(pos_fail)}/{len(positive)}")
+    print(f"反例：通过 {len(negative) - len(neg_fail)}/{len(negative)}")
+    return 1 if (pos_fail or neg_fail) else 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="tests/yh 语法语料校验")
-    parser.add_argument("--coverage", action="store_true", help="额外做规则覆盖自检")
+    parser.add_argument("--coverage", action="store_true", help="额外做规则覆盖自检（仅 ANTLR 模式）")
+    parser.add_argument("--compiler", action="store_true", help="用 yh --syntax-check 跑语料（编译器模式）")
     parser.add_argument("--quiet", action="store_true", help="只打印失败项与汇总")
     args = parser.parse_args()
+
+    if args.compiler:
+        sys.exit(run_compiler_mode(args.quiet))
 
     ensure_runtime()
 

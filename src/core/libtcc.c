@@ -36,6 +36,7 @@ static int nb_states;
 
 #if ONE_SOURCE
 #include "tccelf.c"
+#include "macho-out.c"
 #include "tccgen.c"
 #include "tccpp.c"
 #include "tccrun.c"
@@ -43,9 +44,14 @@ static int nb_states;
 #include "arm64-gen.c"
 #include "arm64-link.c"
 #endif
-#ifdef CONFIG_TCC_ASM
-#include "tccasm.c"
-#endif
+/* tccasm.c（CONFIG_TCC_ASM）未启用，不再包含；
+   yh 语言解析器（依赖 tccgen/tccpp 的词法与值栈机制） */
+#include "yh.h"
+#include "yh_builtin.c"
+#include "yh_type.c"
+#include "yh_expr.c"
+#include "yh_stmt.c"
+#include "yh_decl.c"
 #endif /* ONE_SOURCE */
 
 /********************************************************/
@@ -539,6 +545,7 @@ static int tcc_compile(TCCState* s1) {
   Sym* define_start;
   int filetype, is_asm;
 
+  s1->yh_mode = 0; /* C/汇编路径关闭 yh 词法规则 */
   define_start = define_stack;
   filetype = s1->filetype;
   is_asm = filetype == AFF_TYPE_ASM || filetype == AFF_TYPE_ASMPP;
@@ -557,14 +564,15 @@ static int tcc_compile(TCCState* s1) {
 #else
       tcc_error_noabort("asm not supported");
 #endif
+    } else if (s1->yh_mode || filetype == AFF_TYPE_YH) {
+      tcc_error_noabort("内部错误：yh 路径不应到达 tccgen_compile");
     } else {
-      tccgen_compile(s1);
+      tcc_error_noabort("yh 编译器不支持 C 源文件（.yh 是唯一输入）");
     }
   }
   s1->error_set_jmp_enabled = 0;
 
   preprocess_end(s1);
-  free_inline_functions(s1);
   /* 重置 define 栈，但保留 -D 和内置定义 */
   free_defines(define_start);
   sym_pop(&global_stack, NULL, 0);
@@ -789,15 +797,38 @@ LIBTCCAPI void tcc_delete(TCCState* s1) {
 LIBTCCAPI int tcc_set_output_type(TCCState* s, int output_type) {
   s->output_type = output_type;
 
-  /* 目标文件一律用 elf */
-  if (output_type == TCC_OUTPUT_OBJ) s->output_format = TCC_OUTPUT_FORMAT_ELF;
+  /* 目标文件格式：Darwin 本机默认 Mach-O（-sysroot 交叉 Linux 时保持 ELF，
+     显式 -Wl,-oformat= 时尊重用户选择） */
+  if ((output_type == TCC_OUTPUT_EXE || output_type == TCC_OUTPUT_OBJ) &&
+      !s->output_format_explicit) {
+#ifdef __APPLE__
+    if (!s->sysroot)
+      s->output_format = TCC_OUTPUT_FORMAT_MACHO;
+    else
+      s->output_format = TCC_OUTPUT_FORMAT_ELF;
+#else
+    s->output_format = TCC_OUTPUT_FORMAT_ELF;
+#endif
+  } else if (output_type == TCC_OUTPUT_OBJ) {
+    s->output_format = TCC_OUTPUT_FORMAT_ELF;
+  }
+  /* Mach-O 符号名带前导下划线（Darwin 惯例），编译期统一生效 */
+  if (s->output_format == TCC_OUTPUT_FORMAT_MACHO)
+    s->leading_underscore = 1;
 
   if (s->char_is_unsigned) tcc_define_symbol(s, "__CHAR_UNSIGNED__", NULL);
 
   if (!s->nostdinc) {
-    /* 默认头文件路径 */
+    /* 默认头文件路径；-sysroot 时前缀到 sysroot */
     /* -isystem 路径已经处理过了 */
-    tcc_add_sysinclude_path(s, CONFIG_TCC_SYSINCLUDEPATHS);
+    if (s->sysroot) {
+      char buf[1024];
+      snprintf(buf, sizeof buf, "%s/usr/local/include:%s/usr/include",
+               s->sysroot, s->sysroot);
+      tcc_add_sysinclude_path(s, buf);
+    } else {
+      tcc_add_sysinclude_path(s, CONFIG_TCC_SYSINCLUDEPATHS);
+    }
   }
 
 #ifdef CONFIG_TCC_BCHECK
@@ -813,15 +844,33 @@ LIBTCCAPI int tcc_set_output_type(TCCState* s, int output_type) {
     tccelf_stab_new(s);
   }
 
-  tcc_add_library_path(s, CONFIG_TCC_LIBPATHS);
-
-  /* crt 目标文件的路径 */
-  tcc_split_path(s, &s->crt_paths, &s->nb_crt_paths, CONFIG_TCC_CRTPREFIX);
-  /* 加入 libc 的 crt1/crti 目标文件 */
+  if (s->output_format == TCC_OUTPUT_FORMAT_MACHO) {
+    /* 本机输出：crt/libc 由 Apple 链接器（cc）负责，这里不找 sysroot */
+    return 0;
+  }
+  if (s->sysroot) {
+    char buf[2048];
+    /* 兼容通用布局与 Ubuntu 的 multiarch 子目录 */
+    snprintf(buf, sizeof buf,
+             "%s/usr/lib:%s/lib:%s/usr/lib/aarch64-linux-gnu:"
+             "%s/lib/aarch64-linux-gnu",
+             s->sysroot, s->sysroot, s->sysroot, s->sysroot);
+    tcc_add_library_path(s, buf);
+    /* crt 目标文件的路径 */
+    tcc_split_path(s, &s->crt_paths, &s->nb_crt_paths, buf);
+  } else {
+    tcc_add_library_path(s, CONFIG_TCC_LIBPATHS);
+    /* crt 目标文件的路径 */
+    tcc_split_path(s, &s->crt_paths, &s->nb_crt_paths, CONFIG_TCC_CRTPREFIX);
+  }
+  /* 加入 libc 的 crt1/crti 目标文件；缺失即致命（链接无法进行） */
   if ((output_type == TCC_OUTPUT_EXE || output_type == TCC_OUTPUT_DLL) &&
       !s->nostdlib) {
-    if (output_type != TCC_OUTPUT_DLL) tcc_add_crt(s, "crt1.o");
-    tcc_add_crt(s, "crti.o");
+    if (output_type != TCC_OUTPUT_DLL && s->nb_crt_paths &&
+        tcc_add_crt(s, "crt1.o"))
+      return -1;
+    if (s->nb_crt_paths && tcc_add_crt(s, "crti.o"))
+      return -1;
   }
   return 0;
 }
@@ -884,6 +933,9 @@ ST_FUNC int tcc_add_file_internal(TCCState* s1, const char* filename,
         if (ret < 0) tcc_error_noabort("unrecognized file type");
         break;
     }
+  } else if (s1->filetype == AFF_TYPE_YH) {
+    /* yh 用户源文件：进入 yh 解析路径（yh_decl.c 的 yh_compile） */
+    ret = yh_compile(s1);
   } else {
     ret = tcc_compile(s1);
   }
@@ -903,6 +955,8 @@ LIBTCCAPI int tcc_add_file(TCCState* s, const char* filename) {
         filetype = AFF_TYPE_ASMPP;
       else if (!strcmp(ext, "s"))
         filetype = AFF_TYPE_ASM;
+      else if (!PATHCMP(ext, "yh"))
+        filetype = AFF_TYPE_YH; /* yh 用户源文件 */
       else if (!PATHCMP(ext, "c") || !PATHCMP(ext, "i"))
         filetype = AFF_TYPE_C;
       else
@@ -942,8 +996,11 @@ ST_FUNC int tcc_add_dll(TCCState* s, const char* filename, int flags) {
 
 ST_FUNC int tcc_add_crt(TCCState* s, const char* filename) {
   if (-1 == tcc_add_library_internal(s, "%s/%s", filename, 0, s->crt_paths,
-                                     s->nb_crt_paths))
-    tcc_error_noabort("file '%s' not found", filename);
+                                     s->nb_crt_paths)) {
+    tcc_error_noabort("file '%s' not found（-sysroot 指定含 crt 的 sysroot）",
+                      filename);
+    return -1;
+  }
   return 0;
 }
 
@@ -1139,8 +1196,11 @@ static int tcc_set_linker(TCCState* s, const char* option) {
         s->output_format = TCC_OUTPUT_FORMAT_ELF;
       } else if (!strcmp(p, "binary")) {
         s->output_format = TCC_OUTPUT_FORMAT_BINARY;
+      } else if (!strcmp(p, "macho64")) {
+        s->output_format = TCC_OUTPUT_FORMAT_MACHO;
       } else
         goto err;
+      s->output_format_explicit = 1;
 
     } else if (link_option(option, "as-needed", &p)) {
       ignoring = 1;
@@ -1238,6 +1298,8 @@ enum {
   TCC_OPTION_MF,
   TCC_OPTION_x,
   TCC_OPTION_ar,
+  TCC_OPTION_syntax_check,
+  TCC_OPTION_sysroot,
   TCC_OPTION_impdef
 };
 
@@ -1299,6 +1361,8 @@ static const TCCOption tcc_options[] = {
     {"MF", TCC_OPTION_MF, TCC_OPTION_HAS_ARG},
     {"x", TCC_OPTION_x, TCC_OPTION_HAS_ARG},
     {"ar", TCC_OPTION_ar, 0},
+    {"syntax-check", TCC_OPTION_syntax_check, 0},
+    {"sysroot", TCC_OPTION_sysroot, TCC_OPTION_HAS_ARG},
     {NULL, 0, 0},
 };
 
@@ -1433,6 +1497,9 @@ PUB_FUNC int tcc_parse_args(TCCState* s, int* pargc, char*** pargv,
       }
       continue;
     }
+    /* 长选项的 '--' 前缀等价于 '-'（"--" 本身除外，仍按选项表报错） */
+    if (r[0] == '-' && r[1] == '-' && r[2] != '\0')
+      ++r;
 
     /* 在表中查找选项 */
     for (popt = tcc_options;; ++popt) {
@@ -1621,6 +1688,15 @@ PUB_FUNC int tcc_parse_args(TCCState* s, int* pargc, char*** pargv,
           s->filetype = AFF_TYPE_NONE;
         else
           tcc_warning("unsupported language '%s'", optarg);
+        break;
+      case TCC_OPTION_syntax_check:
+        /* 仅词法/语法检查：容许未定义符号、类型错误与缺少 main */
+        x = TCC_OUTPUT_SYNTAX;
+        goto set_output_type;
+      case TCC_OPTION_sysroot:
+        /* 链接期 sysroot：crt/lib/头文件均在其下查找 */
+        tcc_free(s->sysroot);
+        s->sysroot = tcc_strdup(optarg);
         break;
       case TCC_OPTION_O:
         last_o = atoi(optarg);

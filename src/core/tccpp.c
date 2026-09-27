@@ -1438,7 +1438,7 @@ static void maybe_run_test(TCCState *s)
         return;
     if (0 != --s->run_test)
         return;
-    fprintf(s->ppfp, "\n[%s]\n" + !(s->dflag & 32), p), fflush(s->ppfp);
+    fprintf(s->ppfp, &"\n[%s]\n"[!(s->dflag & 32)], p), fflush(s->ppfp);
     define_push(tok, MACRO_OBJ, NULL, NULL);
 }
 
@@ -2046,6 +2046,49 @@ static void parse_escape_string(CString *outstr, const uint8_t *buf, int is_long
             p++;
             /* 转义 */
             c = *p;
+            if (tcc_state->yh_mode) {
+                /* yh 转义集合收敛：\n \r \t \0 \a \b \f \v \' \" \\ 与
+                 * \xNN（恰好两位十六进制）；未知转义词法报错 */
+                switch(c) {
+                case 'n': c = '\n'; p++; break;
+                case 'r': c = '\r'; p++; break;
+                case 't': c = '\t'; p++; break;
+                case '0': c = 0; p++; break;
+                case 'a': c = '\a'; p++; break;
+                case 'b': c = '\b'; p++; break;
+                case 'f': c = '\f'; p++; break;
+                case 'v': c = '\v'; p++; break;
+                case '\'':
+                case '\"':
+                case '\\':
+                    p++;
+                    break;
+                case 'x': {
+                    int hi, lo;
+                    p++;
+                    hi = isnum(*p) ? *p - '0'
+                       : ((*p|32) >= 'a' && (*p|32) <= 'f') ? ((*p|32) - 'a' + 10)
+                       : -1;
+                    if (hi < 0)
+                        tcc_error("\\x 转义需要两位十六进制数字");
+                    p++;
+                    lo = isnum(*p) ? *p - '0'
+                       : ((*p|32) >= 'a' && (*p|32) <= 'f') ? ((*p|32) - 'a' + 10)
+                       : -1;
+                    if (lo < 0)
+                        tcc_error("\\x 转义需要两位十六进制数字");
+                    p++;
+                    c = hi * 16 + lo;
+                    break;
+                }
+                default:
+                    if (c >= '!' && c <= '~')
+                        tcc_error("未知转义 '\\%c'", c);
+                    else
+                        tcc_error("未知转义 '\\x%x'", c);
+                }
+                goto add_char_nonext;
+            }
             switch(c) {
             case '0': case '1': case '2': case '3':
             case '4': case '5': case '6': case '7':
@@ -2222,8 +2265,11 @@ static void parse_string(const char *s, int len)
         n = tokcstr.size / char_size - 1;
         if (n < 1)
             tcc_error("empty character constant");
-        if (n > 1)
+        if (n > 1) {
+            if (tcc_state->yh_mode)
+                tcc_error("字符字面量只能含单个字符");
             tcc_warning("multi-character character constant");
+        }
         for (c = i = 0; i < n; ++i) {
             if (is_long)
                 c = ((nwchar_t *)tokcstr.data)[i];
@@ -2272,6 +2318,89 @@ static void parse_number(const char *p)
     char *q;
     unsigned int bn[BN_SIZE];
     double d;
+
+    /* yh 数字常量：下划线剔除后按进制转换。
+     * 整数按数量级选择 i32/u32/i64/u64；带 '.' 或指数即 f64；无任何后缀。 */
+    if (tcc_state->yh_mode) {
+        unsigned long long n, n1;
+        int ov = 0, is_float = 0;
+
+        q = token_buf;
+        ch = *p++;
+        /* 剔除下划线并校验进制 */
+        while (ch) {
+            if (ch == '_') {
+                ch = *p++;
+                continue;
+            }
+            if (q >= token_buf + STRING_MAX_SIZE)
+                tcc_error("number too long");
+            *q++ = ch;
+            ch = *p++;
+        }
+        *q = '\0';
+        q = token_buf;
+        b = 10;
+        if (q[0] == '0' && (q[1] == 'x' || q[1] == 'X')) {
+            b = 16; q += 2;
+            if (!*q) tcc_error("invalid number");
+        } else if (q[0] == '0' && (q[1] == 'b' || q[1] == 'B')) {
+            b = 2; q += 2;
+            if (!*q) tcc_error("invalid number");
+        } else if (q[0] == '0' && (q[1] == 'o' || q[1] == 'O')) {
+            b = 8; q += 2;
+            if (!*q) tcc_error("invalid number");
+        }
+        /* 校验数字属于当前进制；记录是否存在浮点成分 */
+        for (t = 0; q[t]; t++) {
+            int c2 = q[t];
+            int prev2 = t > 0 ? q[t-1] : 0;
+            if (b == 16 && ((c2|32) >= 'a' && (c2|32) <= 'f')) continue;
+            if (b == 10 && c2 == '.') { is_float = 1; continue; }
+            if (b != 16 && (c2 == 'e' || c2 == 'E')) { is_float = 1; continue; }
+            /* 指数符号：仅允许紧跟 e/E */
+            if (b == 10 && (c2 == '+' || c2 == '-')
+                && (prev2 == 'e' || prev2 == 'E')) continue;
+            if (!isnum(c2) || (c2 - '0') >= b)
+                tcc_error("invalid digit in number");
+        }
+        if (b != 10 && token_buf[2] == '\0')
+            tcc_error("invalid number");
+        if (is_float) {
+            if (b != 10)
+                tcc_error("invalid digit in number");
+            errno = 0;
+            tokc.d = strtod(token_buf, NULL);
+            tok = TOK_CDOUBLE;
+            return;
+        }
+        /* 整数按进制累加（tcc 的 strtoull 不认识 0b/0o 前缀，手动算） */
+        n = 0;
+        while (*q) {
+            int c2 = *q++;
+            if ((c2|32) >= 'a' && (c2|32) <= 'f')
+                c2 = (c2|32) - 'a' + 10;
+            else
+                c2 = c2 - '0';
+            n1 = n;
+            n = n * b + (unsigned)c2;
+            if (n1 >= 0x1000000000000000ULL && n / b != n1)
+                ov = 1;
+        }
+        if (ov)
+            tcc_warning("integer constant overflow");
+        /* 无后缀：按数量级落在最窄的 yh 整数类型 */
+        if (n <= 0x7FFFFFFFULL)
+            tok = TOK_CINT;
+        else if (n <= 0xFFFFFFFFULL)
+            tok = TOK_CUINT;
+        else if (n <= 0x7FFFFFFFFFFFFFFFULL)
+            tok = TOK_CLLONG;
+        else
+            tok = TOK_CULLONG;
+        tokc.i = n;
+        return;
+    }
 
     /* 数字 */
     q = token_buf;
@@ -2556,6 +2685,67 @@ static void parse_number(const char *p)
         }                                       \
         break;
 
+/* yh 数字扫描：判断已积累的数字 buf（len 字节）之后能否继续接受字符 c。
+ * next 指向紧随 c 的输入字节，用于校验 '_' 和 '.' 的后继。
+ * 规则（与 docs/yh.g4 的 NUMBER 一致）：
+ *   - 0x/0b/0o 前缀决定进制；无前缀即十进制（不存在 C 的旧式八进制）；
+ *   - 下划线必须夹在当前进制的两个数字之间；
+ *   - '.' 只在后跟十进制数字时吞入（因此 0..n 的 0 不会被读成浮点）；
+ *   - e/E 仅当构成合法指数起点（后跟数字或符号+数字）时吞入；
+ *   - 不接受任何整型/浮点后缀（42L、1.5f 非法，落回语法错误）。
+ */
+static int yh_num_char(const char *buf, int len, int c, const char *next)
+{
+    int base = 10;
+    int is_dig;
+
+    /* 进制前缀：缓冲恰为 "0" 时接受 x/b/o（含大写），此后按前缀定进制 */
+    if (len == 1 && buf[0] == '0'
+        && ((c|32) == 'x' || (c|32) == 'b' || (c|32) == 'o'))
+        return 1;
+    if (len >= 2 && buf[0] == '0') {
+        int pfx = buf[1] | 32;
+        if (pfx == 'x') base = 16;
+        else if (pfx == 'b') base = 2;
+        else if (pfx == 'o') base = 8;
+    }
+    is_dig = (base == 10 && isnum(c))
+          || (base == 16 && (isnum(c) || ((c|32) >= 'a' && (c|32) <= 'f')))
+          || (base == 2 && (c == '0' || c == '1'))
+          || (base == 8 && c >= '0' && c <= '7');
+
+    if (is_dig)
+        return 1;
+    if (c == '_') {
+        /* 前一字符须是本进制数字，后一字符也须是本进制数字 */
+        int prev = len > 0 ? (unsigned char)buf[len-1] : 0;
+        int nx = (unsigned char)*next;
+        int ok_prev = (base == 10 && isnum(prev))
+            || (base == 16 && (isnum(prev) || ((prev|32) >= 'a' && (prev|32) <= 'f')))
+            || (base == 2 && (prev == '0' || prev == '1'))
+            || (base == 8 && prev >= '0' && prev <= '7');
+        int ok_next = (base == 10 && isnum(nx))
+            || (base == 16 && (isnum(nx) || ((nx|32) >= 'a' && (nx|32) <= 'f')))
+            || (base == 2 && (nx == '0' || nx == '1'))
+            || (base == 8 && nx >= '0' && nx <= '7');
+        return ok_prev && ok_next;
+    }
+    if (base != 10)
+        return 0;
+    if (c == '.')
+        return isnum(*next);
+    if (c == 'e' || c == 'E') {
+        if (isnum(*next))
+            return 1;
+        if (*next == '+' || *next == '-')
+            return isnum(next[1]);
+        return 0;
+    }
+    if ((c == '+' || c == '-') && (buf[len-1]|32) == 'e')
+        return isnum(*next);
+    return 0;
+}
+
 /* 返回下一个词法单元，不做宏替换 */
 static inline void next_nomacro1(void)
 {
@@ -2645,9 +2835,12 @@ maybe_newline:
         goto keep_tok_flags;
 
     case '#':
+        /* yh 无预处理：'#' 与 '##' 一律词法报错 */
+        if (tcc_state->yh_mode)
+            tcc_error("yh 无预处理：不接受 '#'（也没有宏与头文件）");
         /* XXX: 简化 */
         PEEKC(c, p);
-        if ((tok_flags & TOK_FLAG_BOL) && 
+        if ((tok_flags & TOK_FLAG_BOL) &&
             (parse_flags & PARSE_FLAG_PREPROCESS)) {
             file->buf_ptr = p;
             preprocess(tok_flags & TOK_FLAG_BOF);
@@ -2731,6 +2924,10 @@ maybe_newline:
         break;
     case 'L':
         t = p[1];
+        if (tcc_state->yh_mode) {
+            /* yh 无宽字符/宽字符串前缀：L 就是普通标识符开头 */
+            goto parse_ident_fast;
+        }
         if (t != '\\' && t != '\'' && t != '\"') {
             /* 快速情形 */
             goto parse_ident_fast;
@@ -2758,6 +2955,15 @@ maybe_newline:
         cstr_reset(&tokcstr);
         for(;;) {
             cstr_ccat(&tokcstr, t);
+            if (tcc_state->yh_mode) {
+                /* yh 数字：进制前缀 + 下划线/小数点/指数的严格规则
+                 * （PEEKC 后 p 指向 c 本身，故前瞻是 p+1） */
+                if (!yh_num_char(tokcstr.data, tokcstr.size, c, (char *)(p + 1)))
+                    break;
+                t = c;
+                PEEKC(c, p);
+                continue;
+            }
             if (!((isidnum_table[c - CH_EOF] & (IS_ID|IS_NUM))
                   || c == '.'
                   || ((c == '+' || c == '-')
@@ -2781,6 +2987,22 @@ maybe_newline:
     case '.':
         /* 对点号做特殊处理，因为它也可以开始一个数字 */
         PEEKC(c, p);
+        if (tcc_state->yh_mode) {
+            /* yh：'..' 进区间、'...' 进变参；'.' 后跟数字仍是成员点
+               （前导点浮点 '.5' 由 parser 按语法拒绝），其余即成员访问 */
+            if (c == '.') {
+                PEEKC(c, p);
+                if (c == '.') {
+                    p++;
+                    tok = TOK_DOTS;
+                } else {
+                    tok = TOK_RANGE;
+                }
+            } else {
+                tok = '.';
+            }
+            break;
+        }
         if (isnum(c)) {
             t = '.';
             goto parse_num;
@@ -3719,7 +3941,7 @@ static void tok_print(const char *msg, const int *str)
 	TOK_GET(&t, &str, &cval);
 	if (!t)
 	    break;
-	fprintf(fp, " %s" + s, get_tok_str(t, &cval)), s = 1;
+	fprintf(fp, &" %s"[s], get_tok_str(t, &cval)), s = 1;
     }
     fprintf(fp, "\n");
 }

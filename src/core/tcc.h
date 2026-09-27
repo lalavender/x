@@ -747,6 +747,15 @@ struct TCCState {
     int output_type;
     /* 输出格式，见 TCC_OUTPUT_FORMAT_xxx */
     int output_format;
+    int output_format_explicit; /* 用户显式指定过 -Wl,-oformat */
+
+    /* 链接期 sysroot（-sysroot 选项）：替代编译期 CONFIG_SYSROOT */
+    char *sysroot;
+
+    /* yh 模式：编译 .yh 源文件时为真。
+     * 词法按 yh 规则工作（RANGE、yh 数字/转义、拒绝 '#'），
+     * 由 yh_compile() 置 1、tcc_compile() 置 0。 */
+    int yh_mode;
 
     /* C 语言相关选项 */
     int char_is_unsigned;             /* 默认 char 是否为无符号 */
@@ -1027,6 +1036,7 @@ struct filespec {
 #define TOK_PPJOIN   0xcd /* 处于可拼接位置的 '##' */
 #define TOK_CLONG    0xce /* long 常量 */
 #define TOK_CULONG   0xcf /* unsigned long 常量 */
+#define TOK_RANGE    0xd0 /* yh 的 ".." 区间（for-in 左闭右开） */
 
 #define TOK_SHL   0x01 /* 左移 */
 #define TOK_SAR   0x02 /* 算术（有符号）右移 */
@@ -1146,6 +1156,7 @@ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
 #define AFF_TYPE_ASM    2
 #define AFF_TYPE_ASMPP  3
 #define AFF_TYPE_LIB    4
+#define AFF_TYPE_YH     5 /* yh 用户源文件（.yh） */
 /* tcc_object_type(...) 的返回值 */
 #define AFF_BINTYPE_REL 1
 #define AFF_BINTYPE_DYN 2
@@ -1287,8 +1298,7 @@ ST_FUNC void tcc_debug_funcstart(TCCState *s1, Sym *sym);
 ST_FUNC void tcc_debug_funcend(TCCState *s1, int size);
 ST_FUNC void tcc_debug_line(TCCState *s1);
 
-ST_FUNC int tccgen_compile(TCCState *s1);
-ST_FUNC void free_inline_functions(TCCState *s);
+
 ST_FUNC void check_vstack(void);
 
 ST_INLN int is_float(int t);
@@ -1332,6 +1342,7 @@ ST_FUNC int expr_const(void);
 
 #define TCC_OUTPUT_FORMAT_ELF    0 /* 默认输出格式：ELF */
 #define TCC_OUTPUT_FORMAT_BINARY 1 /* 纯二进制镜像输出 */
+#define TCC_OUTPUT_FORMAT_MACHO  2 /* Mach-O 目标文件（Darwin 本机输出） */
 
 #define ARMAG  "!<arch>\012"    /* COFF 与 a.out 归档文件的魔数 */
 
@@ -1379,6 +1390,7 @@ ST_FUNC Section *new_symtab(TCCState *s1, const char *symtab_name, int sh_type, 
 
 ST_FUNC void put_extern_sym2(Sym *sym, int sh_num, addr_t value, unsigned long size, int can_add_underscore);
 ST_FUNC void put_extern_sym(Sym *sym, Section *section, addr_t value, unsigned long size);
+ST_FUNC int tcc_output_macho(TCCState *s1, const char *filename);
 #if PTR_SIZE == 4
 ST_FUNC void greloc(Section *s, Sym *sym, unsigned long offset, int type);
 #endif

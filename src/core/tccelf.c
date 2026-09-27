@@ -2183,6 +2183,9 @@ static int elf_output_file(TCCState *s1, const char *filename)
 
 LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
 {
+    if (s->output_format == TCC_OUTPUT_FORMAT_MACHO)
+        return tcc_output_macho(s, filename);
+
     return elf_output_file(s, filename);
 }
 

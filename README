@@ -1,97 +1,109 @@
-Tiny C Compiler - C Scripting Everywhere - The Smallest ANSI C compiler
------------------------------------------------------------------------
+# yh（玉衡）编译器
 
-Features:
---------
+极简静态类型语言 yh 的编译器。由 TCC 0.9.27（AArch64/ELF 后端）改造而来：
+单遍编译、无优化、无 AST；目标平台 AArch64 Linux ELF，开发宿主 macOS arm64
+可产出本机 Mach-O 可执行文件。
 
-- SMALL! You can compile and execute C code everywhere, for example on
-  rescue disks.
+## 快速上手
 
-- FAST! tcc generates optimized x86 code. No byte code
-  overhead. Compile, assemble and link about 7 times faster than 'gcc
-  -O0'.
+```sh
+make            # 产出 yh、libtcc.a、libtcc1.a（零警告）
+./yh hello.yh -o hello   # macOS 本机：Mach-O arm64 可执行文件（经系统 cc 链接）
+./hello
+```
 
-- UNLIMITED! Any C dynamic library can be used directly. TCC is
-  heading torward full ISOC99 compliance. TCC can of course compile
-  itself.
+交叉 AArch64 Linux（需要 `tmp/sysroot/`，用 `-Wl,-oformat=elf64-aarch64`
+切换 ELF 输出）：
 
-- SAFE! tcc includes an optional memory and bound checker. Bound
-  checked code can be mixed freely with standard code.
+```sh
+./yh -Wl,-oformat=elf64-aarch64 -sysroot tmp/sysroot -B tmp/sysroot hello.yh -o hello.linux
+# 产物在 AArch64 Linux（或 docker 容器）中运行
+```
 
-- Compile and execute C source directly. No linking or assembly
-  necessary. Full C preprocessor included. 
+其他常用命令：
 
-- C script supported : just add '#!/usr/local/bin/tcc -run' at the first
-  line of your C source, and execute it directly from the command
-  line.
+```sh
+./yh --syntax-check f.yh   # 只做词法/语法检查（容许未定义符号/类型错误）
+./yh -c f.yh -o f.o        # 只生成目标文件
+make test                  # 三层回归（见下）
+```
 
-Documentation:
--------------
+## 语言速览（语法基准 docs/yh.g4）
 
-1) Installation on an aarch64 (arm64) host
+```yh
+struct Point { x int; y int; }
 
-   make
-   make test
-   make install
+fn scale(p Point, k int) int {
+    return (p.x + p.y) * k;
+}
 
-   Only an arm64 host C compiler is needed: there is no configure script and
-   no cross compilation. This fork supports only the ARMv8 (AArch64) target,
-   and the output format is ELF (so linking/running executables requires an
-   arm64 Linux host; -c/-ar and the libtcc API work anywhere).
+fn sum(nums ... int) int {       // 类型化变参：体内是 []int 切片
+    let acc int = 0;
+    for v in nums { acc += v; }  // for-in 遍历（数组/切片/区间 0..n）
+    return acc;
+}
 
-   On an arm64 macOS host tcc builds and -run executes plain code, but calling
-   Apple's variadic libc functions (printf with arguments, sprintf, ...) cannot
-   work: Apple's arm64 ABI passes variadic arguments on the stack, while this
-   backend follows AAPCS64 and passes them in registers.
+pub fn main() int {
+    let p Point = Point{ x: 1, y: 2 };   // 命名式；位置式 Point{1, 2}
+    let s []int = [4]int 视图见下;        // 切片类型 []T
+    if (p.x > 0 && p.y > 0) {
+        printf("%d %d\n", p.x, p.y);
+    }
+    switch p.x {
+    case 1, 2 { printf("small\n"); }
+    default { printf("other\n"); }
+    }
+    return 0;
+}
+```
 
-   Useful variables: PREFIX (default /usr/local), DESTDIR, CC, CFLAGS.
+- 类型后置：`let x int = 1;`、`let s *char = "hi";`（指针 `*T`，无 `->`，
+  `.` 对指针自动解引用）。
+- 内建类型：int/i8/i16/i32/i64/u8/u16/u32/u64/f32/f64/bool/char/void。
+- 显式转换 `x.to_type(T)`；旧 C 关键字（while/do/typedef 等）保留为报错
+  保留字并给出迁移提示。
+- 数组 `[N]T` 按值传给 yh 函数（拷贝独立）；`[]T` 切片 = {len, data} 视图。
+- 无预处理、无头文件；内置 prelude：printf/malloc/free/memcpy/strlen/
+  exit/open/write（签名见 docs/03-design/00-语义边界-0.0.1.md §7）。
 
+## 测试
 
-2) Introduction
+```sh
+make test
+```
 
-We assume here that you know ANSI C. Look at the example ex1.c to know
-what the programs look like.
+三层回归（全部通过退出码 0）：
 
-The include file <tcclib.h> can be used if you want a small basic libc
-include support (especially useful for floppy disks). Of course, you
-can also use standard headers, although they are slower to compile.
+1. `tests/yh/check.py` —— ANTLR 参考语法语料（正例接受/反例拒绝）；
+2. `tests/yh/check.py --compiler` —— yh 编译器 `--syntax-check` 跑同一批语料；
+3. `tests/yh-run/check.py` —— 语义/运行测试（run=编译+运行比对输出与退出码、
+   fail=必须编译失败、pass=必须编译成功）；`--cross` 附加交叉 ELF + 容器运行。
 
-You can begin your C script with '#!/usr/local/bin/tcc -run' on the first
-line and set its execute bits (chmod a+x your_script). Then, you can
-launch the C code as a shell or perl script :-) The command line
-arguments are put in 'argc' and 'argv' of the main functions, as in
-ANSI C.
+## 输出格式
 
-3) Examples
+| 命令 | 产物 | 运行环境 |
+| --- | --- | --- |
+| `yh f.yh -o prog`（Darwin 默认） | Mach-O arm64 | 本机 macOS |
+| `-Wl,-oformat=elf64-aarch64`（可加 `-sysroot`） | AArch64 Linux ELF | Linux/容器 |
+| `-Wl,-oformat=macho64` | Mach-O（显式） | 本机 |
 
-ex1.c: simplest example (hello world). Can also be launched directly
-as a script: './ex1.c'.
+环境变量：`YH_SYSROOT`（等价 -sysroot）、`YH_LIBDIR`（等价 -B，指定
+libtcc1.a 目录）；空串视为未设置。
 
-ex2.c: more complicated example: find a number with the four
-operations given a list of numbers (benchmark).
+## 目录结构
 
-ex3.c: compute fibonacci numbers (benchmark).
+- `src/core/` —— 编译器核心；`yh_*.c/h` 为 yh 前端（词法规则改造在
+  tccpp.c/tcctok.h），`macho-out.c` 为 Mach-O 输出器
+- `src/targets/` —— AArch64 后端与 ELF/Mach-O 链接辅助
+- `lib/lib-arm64.c` —— 运行时辅助（long double 软浮点等），由独立目标
+  C 工具链构建（Makefile 自动探测 clang/gcc）
+- `docs/` —— 语法参考（yh.g4）、改造方案、ADR、设计文档
+- `tests/yh/` —— 语法语料；`tests/yh-run/` —— 语义/运行测试
 
-ex4.c: more complicated: X11 program. Very complicated test in fact
-because standard headers are being used ! As for ex1.c, can also be launched
-directly as a script: './ex4.c'.
+## 当前状态与限制
 
-ex5.c: 'hello world' with standard glibc headers.
-
-tcc.c: TCC can of course compile itself. Used to check the code
-generator.
-
-tcctest.c: auto test for TCC which tests many subtle possible bugs. Used
-when doing 'make test'.
-
-4) Full Documentation
-
-Please read tcc-doc.html to have all the features of TCC.
-
-License:
--------
-
-TCC is distributed under the GNU Lesser General Public License (see
-COPYING file).
-
-Fabrice Bellard.
+- 已支持：标量/数组/切片/结构体全语言闭环（函数、递归、全局、控制流、
+  指针、for-in、类型化变参、structInit、to_type、prelude 八函数）。
+- 进行中/限制：`-run` 仅 Linux；本机输出依赖 Xcode Command Line Tools
+  的 `cc`；切片不做边界检查；数组转切片不做生命周期证明（详见
+  docs/03-design/00-语义边界-0.0.1.md）。

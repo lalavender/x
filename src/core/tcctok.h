@@ -1,4 +1,38 @@
-/* 关键字 */
+/* 关键字
+ *
+ * yh 的保留字全部位于 TOK_UIDENT（= TOK_DEFINE）边界之前：
+ *   - yh 新增关键字（下表前段）：yh 中不可作普通标识符；
+ *   - 复用 C 同名关键字的 token：if/else/for/switch/case/default/return/
+ *     break/continue/goto/struct/union/enum/sizeof/int/void/char/const；
+ *   - 已移除的 C 关键字（while/do/short/…/restrict 与 gcc 变体）：
+ *     保留注册为「报错保留字」，yh parser 遇到时给出定向提示，
+ *     成员位置（fieldDecl/字面量字段/成员访问）按 memberName 放开。
+ *
+ * 边界之后的 DEF（define/include/…）不是关键字：这些 token 值 >= TOK_UIDENT，
+ * 在 yh 中可作普通标识符使用。
+ */
+DEF(TOK_LET, "let")
+DEF(TOK_FN, "fn")
+DEF(TOK_IN, "in")
+DEF(TOK_PUB, "pub")
+DEF(TOK_TRUE, "true")
+DEF(TOK_FALSE, "false")
+DEF(TOK_LEN, "len")
+DEF(TOK_TO_TYPE, "to_type") /* 类型转换专用后缀关键字 */
+DEF(TOK_TYPE, "type")
+DEF(TOK_AS, "as")           /* 旧转换写法，yh 中保留报错，仅成员位可用 */
+DEF(TOK_I8, "i8")
+DEF(TOK_I16, "i16")
+DEF(TOK_I32, "i32")
+DEF(TOK_I64, "i64")
+DEF(TOK_U8, "u8")
+DEF(TOK_U16, "u16")
+DEF(TOK_U32, "u32")
+DEF(TOK_U64, "u64")
+DEF(TOK_F32, "f32")
+DEF(TOK_F64, "f64")
+DEF(TOK_YBOOL, "bool")
+
 DEF(TOK_INT, "int")
 DEF(TOK_VOID, "void")
 DEF(TOK_CHAR, "char")

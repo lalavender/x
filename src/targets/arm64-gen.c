@@ -264,6 +264,7 @@ static int arm64_type_size(int t) {
   case VT_LLONG:
     return 3;
   }
+  fprintf(stderr, "[yh] type_size assert t=0x%x\n", t);
   assert(0);
   return 0;
 }
@@ -428,7 +429,10 @@ static void arm64_sym(int r, Sym *sym, unsigned long addend) {
   // 这通常会导致 "R_AARCH64_ADR_PREL_PG_HI21 relocation failed"。
   // 解决办法是避开那个重定位，只使用范围无限的
   // 重定位。
-  int avoid_adrp = 1;
+  // Mach-O（Darwin 本机输出）：必须用 adrp+add（ld64 不接受
+  // movw/movk 上的 UNSIGNED 重定位），由 ADDEND 重定位携带偏移。
+  int avoid_adrp =
+      tcc_state->output_format != TCC_OUTPUT_FORMAT_MACHO;
 
   if (avoid_adrp || sym->a.weak) {
     // （GCC 在这种情况下使用 R_AARCH64_ABS64。）
@@ -572,7 +576,8 @@ ST_FUNC void store(int r, SValue *sv) {
     return;
   }
 
-  printf("store(%x, (%x, %x, %llx))\n", r, svtt, sv->r, (long long)svcul);
+  fprintf(stderr, "store(%x, (%x, %x, %llx))\n", r, svtt, sv->r,
+          (long long)svcul);
   assert(0);
 }
 
@@ -652,7 +657,8 @@ static int arm64_hfa(CType *type, int *fsize) {
   return 0;
 }
 
-static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a) {
+static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a,
+                                   int n_named) {
   int nx = 0;            // 下一个整数寄存器
   int nv = 0;            // 下一个向量寄存器
   unsigned long ns = 32; // 下一个栈偏移
@@ -666,6 +672,17 @@ static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a) {
       size = align = 8;
     else
       size = type_size(type[i], &align);
+
+    // Darwin 变参约定：可变参数一律按 8 字节对齐放栈上（AAPCS 变体），
+    // 命名参数照常分配寄存器。仅 Mach-O 本机输出启用。
+    if (i >= n_named) {
+      ns = (ns + 7) & ~7;
+      if (align > 8)
+        ns = (ns + align - 1) & -align;
+      a[i] = ns;
+      ns += size < 8 ? 8 : size;
+      continue;
+    }
 
     if (hfa)
       // B.2
@@ -770,19 +787,20 @@ static unsigned long arm64_pcs_aux(int n, CType **type, unsigned long *a) {
   return ns - 32;
 }
 
-static unsigned long arm64_pcs(int n, CType **type, unsigned long *a) {
+static unsigned long arm64_pcs(int n, CType **type, unsigned long *a,
+                               int n_named) {
   unsigned long stack;
 
   // 返回类型：
   if ((type[0]->t & VT_BTYPE) == VT_VOID)
     a[0] = -1;
   else {
-    arm64_pcs_aux(1, type, a);
+    arm64_pcs_aux(1, type, a, 1);
     assert(a[0] == 0 || a[0] == 1 || a[0] == 16);
   }
 
   // 参数类型：
-  stack = arm64_pcs_aux(n, type + 1, a + 1);
+  stack = arm64_pcs_aux(n, type + 1, a + 1, n_named);
 
   if (0) {
     int i;
@@ -826,7 +844,20 @@ ST_FUNC void gfunc_call(int nb_args) {
   for (i = 0; i < nb_args; i++)
     t[nb_args - i] = &vtop[-i].type;
 
-  stack = arm64_pcs(nb_args, t, a);
+  // 变参函数：Darwin 约定下可变参数放栈上（命名参数个数 = 参数链长度）
+  {
+    CType *ft = &vtop[-nb_args].type;
+    int n_named = nb_args;
+    if (tcc_state->output_format == TCC_OUTPUT_FORMAT_MACHO &&
+        (ft->t & VT_BTYPE) == VT_FUNC &&
+        ft->ref->f.func_type == FUNC_ELLIPSIS) {
+      Sym *p;
+      n_named = 0;
+      for (p = ft->ref->next; p; p = p->next)
+        n_named++;
+    }
+    stack = arm64_pcs(nb_args, t, a, n_named);
+  }
 
   // 为被替换为指针的结构体分配空间：
   for (i = nb_args; i; i--)
@@ -987,7 +1018,7 @@ ST_FUNC void gfunc_prolog(CType *func_type) {
   for (sym = func_type->ref; sym; sym = sym->next)
     t[i++] = &sym->type;
 
-  arm64_func_va_list_stack = arm64_pcs(n - 1, t, a);
+  arm64_func_va_list_stack = arm64_pcs(n - 1, t, a, n - 1);
 
   o(0xa9b27bfd); // stp x29,x30,[sp,#-224]!
   o(0xad0087e0); // stp q0,q1,[sp,#16]
@@ -1160,7 +1191,7 @@ ST_FUNC void gfunc_return(CType *func_type) {
   CType *t = func_type;
   unsigned long a;
 
-  arm64_pcs(0, &t, &a);
+  arm64_pcs(0, &t, &a, 0);
   switch (a) {
   case -1:
     break;

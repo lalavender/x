@@ -23,107 +23,51 @@
 #include "tcctools.c"
 
 static const char help[] =
-    "Tiny C Compiler " TCC_VERSION
-    " - Copyright (C) 2001-2006 Fabrice Bellard\n"
-    "Usage: tcc [options...] [-o outfile] [-c] infile(s)...\n"
-    "       tcc [options...] -run infile [arguments...]\n"
+    "yh（玉衡）编译器 " TCC_VERSION " - AArch64 Linux\n"
+    "Usage: yh [options...] [-o outfile] infile.yh...\n"
+    "       yh [options...] -run infile.yh [arguments...]\n"
+    "       yh --syntax-check infile.yh      只做词法/语法检查\n"
     "General options:\n"
     "  -c          compile only - generate an object file\n"
     "  -o outfile  set output filename\n"
     "  -run        run compiled source\n"
-    "  -fflag      set or reset (with 'no-' prefix) 'flag' (see tcc -hh)\n"
-    "  -Wwarning   set or reset (with 'no-' prefix) 'warning' (see tcc -hh)\n"
+    "  --syntax-check  only check lexer/parser errors, no codegen\n"
     "  -w          disable all warnings\n"
     "  -v -vv      show version, show search paths or loaded files\n"
     "  -h -hh      show this, show more help\n"
     "  -bench      show compilation statistics\n"
     "  -           use stdin pipe as infile\n"
     "  @listfile   read arguments from listfile\n"
-    "Preprocessor options:\n"
-    "  -Idir       add include path 'dir'\n"
-    "  -Dsym[=val] define 'sym' with value 'val'\n"
-    "  -Usym       undefine 'sym'\n"
-    "  -E          preprocess only\n"
     "Linker options:\n"
     "  -Ldir       add library path 'dir'\n"
     "  -llib       link with dynamic or static library 'lib'\n"
     "  -r          generate (relocatable) object file\n"
     "  -shared     generate a shared library/dll\n"
-    "  -rdynamic   export all global symbols to dynamic linker\n"
-    "  -soname     set name for shared library to be used at runtime\n"
-    "  -Wl,-opt[=val]  set linker option (see tcc -hh)\n"
-    "Debugger options:\n"
-    "  -g          generate runtime debug info\n"
-#ifdef CONFIG_TCC_BCHECK
-    "  -b          compile with built-in memory and bounds checker (implies "
-    "-g)\n"
-#endif
-#ifdef CONFIG_TCC_BACKTRACE
-    "  -bt N       show N callers in stack traces\n"
-#endif
+    "  -static     link to static libraries\n"
     "Misc. options:\n"
-    "  -x[c|a|n]   specify type of the next infile\n"
-    "  -nostdinc   do not use standard system include paths\n"
     "  -nostdlib   do not link with standard crt and libraries\n"
-    "  -Bdir       set tcc's private include/library dir\n"
-    "  -MD         generate dependency file for make\n"
-    "  -MF file    specify dependency file name\n"
-    "  -m32/64     defer to i386/x86_64 cross compiler\n"
+    "  -Bdir       set yh's private lib dir (libtcc1.a)\n"
+    "  -sysrootdir link-time Linux sysroot (crt/libc; or env YH_SYSROOT)\n"
     "Tools:\n"
-    "  create library  : tcc -ar [rcsv] lib.a files\n"
+    "  create library  : yh -ar [rcsv] lib.a files\n"
     ;
 
 static const char help2[] =
-    "Tiny C Compiler " TCC_VERSION " - More Options\n"
+    "yh（玉衡）编译器 " TCC_VERSION " - More Options\n"
     "Special options:\n"
-    "  -P -P1                        with -E: no/alternative #line output\n"
-    "  -dD -dM                       with -E: output #define directives\n"
-    "  -pthread                      same as -D_REENTRANT and -lpthread\n"
-    "  -On                           same as -D__OPTIMIZE__ for n > 0\n"
-    "  -Wp,-opt                      same as -opt\n"
-    "  -include file                 include 'file' above each input file\n"
-    "  -isystem dir                  add 'dir' to system include path\n"
-    "  -static                       link to static libraries (not "
-    "recommended)\n"
-    "  -dumpversion                  print version\n"
-    "  -print-search-dirs            print search paths\n"
-    "  -dt                           with -run/-E: auto-define 'test_...' "
-    "macros\n"
+    "  -static                     link to static libraries (not recommended)\n"
+    "  -dumpversion                print version\n"
+    "  -print-search-dirs          print search paths\n"
     "Ignored options:\n"
     "  --param  -pedantic  -pipe  -s  -std  -traditional\n"
-    "-W... warnings:\n"
-    "  all                           turn on some (*) warnings\n"
-    "  error                         stop after first warning\n"
-    "  unsupported                   warn about ignored options, pragmas, "
-    "etc.\n"
-    "  write-strings                 strings are const\n"
-    "  implicit-function-declaration warn for missing prototype (*)\n"
-    "-f[no-]... flags:\n"
-    "  unsigned-char                 default char is unsigned\n"
-    "  signed-char                   default char is signed\n"
-    "  common                        use common section instead of bss\n"
-    "  leading-underscore            decorate extern symbols\n"
-    "  ms-extensions                 allow anonymous struct in struct\n"
-    "  dollars-in-identifiers        allow '$' in C symbols\n"
-    "-m... target specific options:\n"
-    "  ms-bitfields                  use MSVC bitfield layout\n"
     "-Wl,... linker options:\n"
-    "  -nostdlib                     do not link with standard crt/libs\n"
-    "  -[no-]whole-archive           load lib(s) fully/only as needed\n"
-    "  -export-all-symbols           same as -rdynamic\n"
-    "  -image-base= -Ttext=          set base address of executable\n"
-    "  -section-alignment=           set section alignment in executable\n"
-    "  -rpath=                       set dynamic library search path\n"
-    "  -enable-new-dtags             set DT_RUNPATH instead of DT_RPATH\n"
-    "  -soname=                      set DT_SONAME elf tag\n"
-    "  -Bsymbolic                    set DT_SYMBOLIC elf tag\n"
-    "  -oformat=[elf64-* binary]     set executable output format\n"
-    "  -init= -fini= -as-needed -O   (ignored)\n"
-    "Predefined macros:\n"
-    "  tcc -E -dM - < /dev/null\n"
+    "  -nostdlib                   do not link with standard crt/libs\n"
+    "  -rpath=                     set dynamic library search path\n"
+    "  -soname=                    set DT_SONAME elf tag\n"
+    "  -oformat=[elf64-* binary]   set executable output format\n"
     "See also the manual for more details.\n";
 
-static const char version[] = "tcc version " TCC_VERSION " ("
+static const char version[] = "yh version " TCC_VERSION " ("
                               "AArch64"
 #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
                               " FreeBSD"
@@ -182,6 +126,26 @@ static char *default_outputfile(TCCState *s, const char *first_file) {
   return tcc_strdup(buf);
 }
 
+/* yh 只接受 .yh 用户源文件；对象/库等二进制输入不受限。
+   返回 0 通过，否则已打印诊断并返回 -1。 */
+static int check_input_files(TCCState *s) {
+  int i;
+  for (i = 0; i < s->nb_files; i++) {
+    struct filespec *f = s->files[i];
+    const char *ext;
+    if (f->type == AFF_TYPE_LIB || (f->type & AFF_TYPE_BIN))
+      continue; /* -l 库与显式二进制输入 */
+    ext = tcc_fileextension(f->name);
+    if (!strcmp(ext, ".yh"))
+      continue;
+    if (!strcmp(ext, ".o") || !strcmp(ext, ".a") || !strcmp(ext, ".so"))
+      continue; /* 二进制输入由内容探测分派 */
+    tcc_error_noabort("'%s': yh 的用户源文件必须是 .yh 后缀", f->name);
+    return -1;
+  }
+  return 0;
+}
+
 static unsigned getclock_ms(void) {
 #ifdef _WIN32
   return GetTickCount();
@@ -230,6 +194,8 @@ redo:
     n = s->nb_files;
     if (n == 0)
       tcc_error("no input files\n");
+    if (check_input_files(s))
+      exit(1);
 
     if (s->output_type == TCC_OUTPUT_PREPROCESS) {
       if (s->outfile) {
@@ -237,6 +203,8 @@ redo:
         if (!ppfp)
           tcc_error("could not write '%s'", s->outfile);
       }
+    } else if (s->output_type == TCC_OUTPUT_SYNTAX) {
+      /* --syntax-check：只做词法/语法检查，之后不输出不运行 */
     } else if (s->output_type == TCC_OUTPUT_OBJ && !s->option_r) {
       if (s->nb_libraries)
         tcc_error("cannot specify libraries with -c");
@@ -251,10 +219,21 @@ redo:
       start_time = getclock_ms();
   }
 
+  /* 环境变量默认值：YH_SYSROOT/-sysroot、YH_LIBDIR/-B（开发期跨系统 -o） */
+  {
+    const char *e = getenv("YH_SYSROOT");
+    const char *b = getenv("YH_LIBDIR");
+    /* 空串视为未设置（默认走本机 Mach-O） */
+    if (!s->sysroot && e != NULL && e[0] != '\0')
+      s->sysroot = tcc_strdup(e);
+    if (b != NULL && b[0] != '\0') /* YH_LIBDIR：libtcc1.a 所在目录（等价 -B） */
+      tcc_set_lib_path(s, b);
+  }
   set_environment(s);
   if (s->output_type == 0)
     s->output_type = TCC_OUTPUT_EXE;
-  tcc_set_output_type(s, s->output_type);
+  if (tcc_set_output_type(s, s->output_type) < 0)
+    return 1; /* crt 等链接前置缺失：已给出可读诊断 */
   s->ppfp = ppfp;
 
   if ((s->output_type == TCC_OUTPUT_MEMORY ||
@@ -287,6 +266,8 @@ redo:
   if (s->run_test) {
     t = 0;
   } else if (s->output_type == TCC_OUTPUT_PREPROCESS) {
+    ;
+  } else if (s->output_type == TCC_OUTPUT_SYNTAX) {
     ;
   } else if (0 == ret) {
     if (s->output_type == TCC_OUTPUT_MEMORY) {
