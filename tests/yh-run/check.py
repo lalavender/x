@@ -278,10 +278,18 @@ def main():
                         help="yh 编译器路径（缺省仓库根 yh；自举时指向 stage1/stage2）")
     parser.add_argument("--workdir", default=str(DEFAULT_WORK),
                         help="产物目录（缺省 tmp/yh-run-work；并发运行时各自指定）")
+    parser.add_argument("--filter", default="",
+                        help="只跑相对路径含任一子串的用例（逗号分隔；自举差分子集用）")
     args = parser.parse_args()
 
     YH_BIN = Path(args.compiler)
     WORK = Path(args.workdir)
+    filters = [f for f in args.filter.split(",") if f]
+
+    def case_allowed(rel: str) -> bool:
+        if not filters:
+            return True
+        return any(f in rel for f in filters)
 
     # 全局环境检查：编译器缺失或交叉环境不可用时，全部用例 SKIP。
     global_skip = None
@@ -306,6 +314,8 @@ def main():
     for name, directory, checker in groups:
         for path in list_cases(directory):
             rel = f"{name}/{path.name}"
+            if not case_allowed(rel):
+                continue
             if global_skip:
                 results.append((name, rel, "SKIP", global_skip))
                 continue

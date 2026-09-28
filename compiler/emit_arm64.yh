@@ -1,0 +1,872 @@
+// ============================================================================
+// emit_arm64.yh —— AArch64（GNU 汇编方言）指令发射器
+//
+// 多平台接入缝之二：本文件实现前端（symbols.yh / sem.yh / parse_*.yh）
+// 依赖的全部 em_* 「抽象机原语」。换目标 = 提供新 target.yh 数据模型 +
+// 新 emit_<isa>.yh（同名原语），前端零改动。
+//
+// 原语契约（前端可见的抽象机）：
+//   值表达     所有「产生值」的原语结果一律留在 x0；
+//   值栈       em_push 把 x0 压栈（16 字节槽，保持 sp 16 对齐），
+//              em_pop 弹出到指定寄存器；
+//   二元运算   x9 = 左操作数，x0 = 右操作数，结果回 x0；
+//   地址       地址型原语（取地址/退化/成员/下标）把地址留在 x0；
+//   标签       em_new_label 取号，em_label 定义，em_jmp/em_jz 跳转；
+//   调用       实参经值栈搬运（前 8 个进 x0..x7，其余进调用点栈区）；
+//   过程       em_prologue/em_alloc_local/em_finish_fn 管理栈帧。
+//
+// 栈帧模型：无静态帧大小——prologue 只保存 fp/lr（16 字节）；每个局部/
+// 参数/临时在声明点 sub sp 一个 16 字节对齐的槽，用 fp 负偏移访问；
+// 值栈在 sp 之下动态生长，任何调用点 sp 保持 16 对齐。
+//
+// 输出组织：.text 进入 o_out；全局初始化与字符串进入 o_dat（.data 段）；
+// 零初始化全局进入 o_bss（.bss 段）。编译成功后由 flush_output 一次写出。
+// ============================================================================
+
+// —— 行发射（frag = 无换行片段；ins = 完整指令行） ——
+
+// em_frag：向 .text 追加字符串片段。
+fn em_frag(s *char) int {
+    return em_puts(s);
+}
+
+// em_ins：完整指令行。
+fn em_ins(s *char) int {
+    if (em_frag("\t") != 0) { return -1; }
+    if (em_frag(s) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_new_label：分配一个局部标签号。
+fn em_new_label() int {
+    c_lbl_n += 1;
+    return c_lbl_n - 1;
+}
+
+// em_put_lbl：输出 ".L<n>" 标签名。
+fn em_put_lbl(n int) int {
+    if (em_frag(".L") != 0) { return -1; }
+    return em_puti(n);
+}
+
+// em_label：定义局部标签。
+fn em_label(n int) int {
+    if (em_put_lbl(n) != 0) { return -1; }
+    return em_frag(":\n");
+}
+
+// em_jmp：无条件跳转。
+fn em_jmp(n int) int {
+    if (em_frag("\tb\t") != 0) { return -1; }
+    if (em_put_lbl(n) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_jz：x0 为零跳转（条件为假）。
+fn em_jz(n int) int {
+    if (em_frag("\tcbz\tx0, ") != 0) { return -1; }
+    if (em_put_lbl(n) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_jnz：x0 非零跳转（条件为真）。
+fn em_jnz(n int) int {
+    if (em_frag("\tcbnz\tx0, ") != 0) { return -1; }
+    if (em_put_lbl(n) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_beq：相等条件跳转（cmp 之后的 Z 标志）。
+fn em_beq(n int) int {
+    if (em_frag("\tbeq\t") != 0) { return -1; }
+    if (em_put_lbl(n) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_scale_index：把 x0 中的下标按元素类型大小缩放（地址算术用）。
+fn em_scale_index(elem_tid int) int {
+    let esz int = t_types[elem_tid].size;
+    if (esz == 1) {
+        return 0;
+    }
+    if (esz == 2) {
+        return em_ins("lsl\tx0, x0, #1");
+    }
+    if (esz == 4) {
+        return em_ins("lsl\tx0, x0, #2");
+    }
+    return em_ins("lsl\tx0, x0, #3");
+}
+
+// em_mov_imm：装载 64 位立即数到寄存器（movz/movk 组合）。
+fn em_mov_imm(reg *char, v i64) int {
+    if (v == 0) {
+        if (em_frag("\tmov\t") != 0) { return -1; }
+        if (em_frag(reg) != 0) { return -1; }
+        return em_frag(", xzr\n");
+    }
+    let h0 int = (v & 0xFFFF).to_type(int);
+    let h1 int = ((v >> 16) & 0xFFFF).to_type(int);
+    let h2 int = ((v >> 32) & 0xFFFF).to_type(int);
+    let h3 int = ((v >> 48) & 0xFFFF).to_type(int);
+    let hs [3]int;
+    hs[0] = h1;
+    hs[1] = h2;
+    hs[2] = h3;
+    if (em_frag("\tmovz\t") != 0) { return -1; }
+    if (em_frag(reg) != 0) { return -1; }
+    if (em_frag(", #") != 0) { return -1; }
+    if (em_puti(h0) != 0) { return -1; }
+    if (em_frag("\n") != 0) { return -1; }
+    let shift int = 16;
+    let i int = 0;
+    for i < 3 {
+        if (hs[i] != 0) {
+            if (em_frag("\tmovk\t") != 0) { return -1; }
+            if (em_frag(reg) != 0) { return -1; }
+            if (em_frag(", #") != 0) { return -1; }
+            if (em_puti(hs[i]) != 0) { return -1; }
+            if (em_frag(", lsl #") != 0) { return -1; }
+            if (em_puti(shift) != 0) { return -1; }
+            if (em_frag("\n") != 0) { return -1; }
+        }
+        shift += 16;
+        i += 1;
+    }
+    return 0;
+}
+
+// em_push：x0 压值栈。
+fn em_push() int {
+    return em_ins("str\tx0, [sp, #-16]!");
+}
+
+// em_pop：值栈弹出到寄存器。
+fn em_pop(reg *char) int {
+    if (em_frag("\tldr\t") != 0) { return -1; }
+    if (em_frag(reg) != 0) { return -1; }
+    return em_frag(", [sp], #16\n");
+}
+
+// em_load_sized：按类型从 x10 地址装入 x0（有符号小类型符号扩展）。
+fn em_load_sized(tid int) int {
+    let size int = t_types[tid].size;
+    if (size == 8) {
+        return em_ins("ldr\tx0, [x10]");
+    }
+    if (size == 4) {
+        if (ty_is_signed(tid) != 0) {
+            return em_ins("ldrsw\tx0, [x10]");
+        }
+        return em_ins("ldr\tw0, [x10]");
+    }
+    if (size == 2) {
+        if (ty_is_signed(tid) != 0) {
+            return em_ins("ldrsh\tx0, [x10]");
+        }
+        return em_ins("ldrh\tw0, [x10]");
+    }
+    if (ty_is_signed(tid) != 0) {
+        return em_ins("ldrsb\tx0, [x10]");
+    }
+    return em_ins("ldrb\tw0, [x10]");
+}
+
+// em_store_sized：x0 → [x10] 按类型存（低字节自然截断）。
+fn em_store_sized(tid int) int {
+    let size int = t_types[tid].size;
+    if (size == 8) {
+        return em_ins("str\tx0, [x10]");
+    }
+    if (size == 4) {
+        return em_ins("str\tw0, [x10]");
+    }
+    if (size == 2) {
+        return em_ins("strh\tw0, [x10]");
+    }
+    return em_ins("strb\tw0, [x10]");
+}
+
+// ---- 局部变量（fp 负偏移） ----
+
+// em_lea_local：局部/临时槽地址 → x0。off ≥ 0 为 fp 之下的局部
+//（fp - off）；off < 0 为调用方栈区参数（fp - off = fp + |off|）。
+fn em_lea_local(off int) int {
+    if (off >= 0) {
+        return em_lea_local_down(off);
+    }
+    let up int = 0 - off;
+    if (up <= 255) {
+        if (em_frag("\tadd\tx0, x29, #") != 0) { return -1; }
+        if (em_puti(up) != 0) { return -1; }
+        return em_frag("\n");
+    }
+    if (em_mov_imm("x10", up.to_type(i64)) != 0) { return -1; }
+    return em_ins("add\tx0, x29, x10");
+}
+
+// em_lea_local_down：fp 之下槽的地址（fp - off）→ x0。
+fn em_lea_local_down(off int) int {
+    if (off <= 255) {
+        if (em_frag("\tsub\tx0, x29, #") != 0) { return -1; }
+        if (em_puti(off) != 0) { return -1; }
+        return em_frag("\n");
+    }
+    if (em_mov_imm("x10", off.to_type(i64)) != 0) { return -1; }
+    return em_ins("sub\tx0, x29, x10");
+}
+
+// em_lea_local_to：局部槽地址 → x10（不触碰 x0，保存值用）。
+fn em_lea_local_to(off int) int {
+    if (off >= 0) {
+        return em_lea_local_to_down(off);
+    }
+    let up int = 0 - off;
+    if (up <= 255) {
+        if (em_frag("\tadd\tx10, x29, #") != 0) { return -1; }
+        if (em_puti(up) != 0) { return -1; }
+        return em_frag("\n");
+    }
+    if (em_mov_imm("x9", up.to_type(i64)) != 0) { return -1; }
+    return em_ins("add\tx10, x29, x9");
+}
+
+// em_lea_local_to_down：fp 之下槽的地址 → x10。
+fn em_lea_local_to_down(off int) int {
+    if (off <= 255) {
+        if (em_frag("\tsub\tx10, x29, #") != 0) { return -1; }
+        if (em_puti(off) != 0) { return -1; }
+        return em_frag("\n");
+    }
+    if (em_mov_imm("x9", off.to_type(i64)) != 0) { return -1; }
+    return em_ins("sub\tx10, x29, x9");
+}
+
+// em_spill_reg_name：第 n 个参数寄存器名。
+fn em_spill_reg_name(n int) *char {
+    if (n == 0) { return "x0"; }
+    if (n == 1) { return "x1"; }
+    if (n == 2) { return "x2"; }
+    if (n == 3) { return "x3"; }
+    if (n == 4) { return "x4"; }
+    if (n == 5) { return "x5"; }
+    if (n == 6) { return "x6"; }
+    return "x7";
+}
+
+// em_load_local：装入局部标量（x10 暂存地址）。
+fn em_load_local(off int, tid int) int {
+    if (em_lea_local(off) != 0) { return -1; }
+    if (em_ins("mov\tx10, x0") != 0) { return -1; }
+    return em_load_sized(tid);
+}
+
+// em_store_local：值栈顶弹出存入局部（x10 暂存地址，值在栈顶）。
+fn em_store_local(off int, tid int) int {
+    if (em_lea_local(off) != 0) { return -1; }
+    if (em_ins("mov\tx10, x0") != 0) { return -1; }
+    if (em_pop("x0") != 0) { return -1; }
+    return em_store_sized(tid);
+}
+
+// ---- 符号名与全局地址 ----
+
+// em_put_sym_name：输出符号汇编名到 .text（名字池逐字节）。
+fn em_put_sym_name(idx int) int {
+    let n int = c_syms[idx].name_len;
+    let off int = c_syms[idx].name_off;
+    let i int = 0;
+    for i < n {
+        if (em_put(np_data[off + i]) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// dat_put_sym_name：输出符号汇编名到 .data/.bss 缓冲。
+fn dat_put_sym_name(idx int) int {
+    let n int = c_syms[idx].name_len;
+    let off int = c_syms[idx].name_off;
+    let i int = 0;
+    for i < n {
+        if (dat_put(np_data[off + i]) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// em_lea_global：全局符号地址 → x0（adrp + add :lo12:）。
+fn em_lea_global(idx int) int {
+    if (em_frag("\tadrp\tx0, ") != 0) { return -1; }
+    if (em_put_sym_name(idx) != 0) { return -1; }
+    if (em_frag("\n\tadd\tx0, x0, :lo12:") != 0) { return -1; }
+    if (em_put_sym_name(idx) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_load_global：装入全局标量。
+fn em_load_global(idx int, tid int) int {
+    if (em_lea_global(idx) != 0) { return -1; }
+    if (em_ins("mov\tx10, x0") != 0) { return -1; }
+    return em_load_sized(tid);
+}
+
+// em_store_global：值栈顶弹出存入全局。
+fn em_store_global(idx int, tid int) int {
+    if (em_lea_global(idx) != 0) { return -1; }
+    if (em_ins("mov\tx10, x0") != 0) { return -1; }
+    if (em_pop("x0") != 0) { return -1; }
+    return em_store_sized(tid);
+}
+
+// em_load_data_label：数据标签地址 → x0（字符串/指针常量用）。
+fn em_load_data_label(lbl int) int {
+    if (em_frag("\tadrp\tx0, .LD") != 0) { return -1; }
+    if (em_puti(lbl) != 0) { return -1; }
+    if (em_frag("\n\tadd\tx0, x0, :lo12:.LD") != 0) { return -1; }
+    if (em_puti(lbl) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// ---- 聚合按值原语（调用点拷贝 + 指针传递） ----
+//
+// 约定：聚合值在 x0 中是一个地址（指向调用方/被调用方持有的存储）。
+// 传递时按指针进寄存器/栈；被调用方把指针存进参数槽，访问字段时先
+// 装入指针再加偏移（语义等价于独立的数组/结构体值）。
+
+// em_copy_block：把 x0 指向的 n 字节拷到 x1 指向处（不重叠即可，
+// 实现用简单字节循环；x9/x10/x11 为临时）。
+fn em_copy_block(n int) int {
+    if (em_mov_imm("x9", n.to_type(i64)) != 0) { return -1; }
+    let lloop int = em_new_label();
+    let ldone int = em_new_label();
+    if (em_label(lloop) != 0) { return -1; }
+    if (em_frag("\tcbz\tx9, ") != 0) { return -1; }
+    if (em_put_lbl(ldone) != 0) { return -1; }
+    if (em_frag("\n") != 0) { return -1; }
+    if (em_ins("ldrb\tw10, [x0], #1") != 0) { return -1; }
+    if (em_ins("strb\tw10, [x1], #1") != 0) { return -1; }
+    if (em_ins("sub\tx9, x9, #1") != 0) { return -1; }
+    if (em_jmp(lloop) != 0) { return -1; }
+    if (em_label(ldone) != 0) { return -1; }
+    return 0;
+}
+
+// em_lea_scratch：为聚合临时分配一个 16 字节对齐的槽，返回 fp 距离。
+fn em_lea_scratch(size int) int {
+    return em_alloc_local(size);
+}
+
+// em_agg_arg_copy：x0 = 聚合源地址；拷贝 size 字节到新临时，返回新地址。
+fn em_agg_arg_copy(size int) int {
+    if (em_push() != 0) { return -1; }
+    let off int = em_alloc_local(size);
+    if (em_lea_local(off) != 0) { return -1; }
+    if (em_ins("mov\tx1, x0") != 0) { return -1; }
+    if (em_pop("x0") != 0) { return -1; }
+    if (em_copy_block(size) != 0) { return -1; }
+    return em_lea_local(off);
+}
+
+// em_push_agg_ptr：把 x0 中的聚合地址按指针压值栈。
+fn em_push_agg_ptr() int {
+    return em_push();
+}
+
+// em_save_hidden_ret：函数入口把 x8（聚合返回缓冲）存入槽 off。
+fn em_save_hidden_ret(off int) int {
+    if (em_lea_local_to(off) != 0) { return -1; }
+    if (em_ins("str\tx8, [x10]") != 0) { return -1; }
+    return 0;
+}
+
+// em_load_hidden_ret：把聚合返回缓冲地址装入 x0。
+fn em_load_hidden_ret(off int) int {
+    if (em_lea_local_to(off) != 0) { return -1; }
+    if (em_ins("ldr\tx0, [x10]") != 0) { return -1; }
+    return 0;
+}
+
+// ---- 浮点原语（f32/f64；AArch64 浮点寄存器 s0-s31 / d0-d31） ----
+//
+// 约定：浮点值在 d0（f64）或 s0（f32）；二元运算左操作数在 d1、右在 d0，
+// 结果回 d0；与整型/指针共用值栈（每个槽 16 字节，浮点占用低 8 字节）。
+
+// em_fp_name：按类型返回浮点寄存器名（f64→d0/d1，f32→s0/s1）。
+fn em_fp_name(tid int, which int) *char {
+    let is64 int = (t_types[tid].size == 8).to_type(int);
+    if (which == 0) {
+        if (is64 != 0) { return "d0"; }
+        return "s0";
+    }
+    if (is64 != 0) { return "d1"; }
+    return "s1";
+}
+
+// em_push_fp：把浮点结果寄存器压值栈。
+fn em_push_fp(tid int) int {
+    if (em_frag("\tstr\t") != 0) { return -1; }
+    if (em_frag(em_fp_name(tid, 0)) != 0) { return -1; }
+    return em_frag(", [sp, #-16]!\n");
+}
+
+// em_pop_fp：弹出到指定浮点寄存器。
+fn em_pop_fp(tid int, which int) int {
+    if (em_frag("\tldr\t") != 0) { return -1; }
+    if (em_frag(em_fp_name(tid, which)) != 0) { return -1; }
+    return em_frag(", [sp], #16\n");
+}
+
+// em_fp_binop：d1 与 d0 的浮点二元运算（结果 d0）。op 为 TK_*。
+// GNU as 用操作数寄存器名区分宽度（d0/s0），助记符本身无 .d/.s 后缀。
+fn em_fp_binop(op int, tid int) int {
+    let mnem *char = "fadd";
+    if (op == TK_MINUS) { mnem = "fsub"; }
+    if (op == TK_STAR) { mnem = "fmul"; }
+    if (op == TK_SLASH) { mnem = "fdiv"; }
+    if (em_frag("\t") != 0) { return -1; }
+    if (em_frag(mnem) != 0) { return -1; }
+    if (em_frag("\t") != 0) { return -1; }
+    if (em_frag(em_fp_name(tid, 0)) != 0) { return -1; }
+    if (em_frag(", ") != 0) { return -1; }
+    if (em_frag(em_fp_name(tid, 1)) != 0) { return -1; }
+    if (em_frag(", ") != 0) { return -1; }
+    if (em_frag(em_fp_name(tid, 0)) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_fp_compare：d1 与 d0 的比较 → x0 = 0/1（bool）。
+fn em_fp_compare(op int, tid int) int {
+    if (em_frag("\tfcmp\t") != 0) { return -1; }
+    if (em_frag(em_fp_name(tid, 1)) != 0) { return -1; }
+    if (em_frag(", ") != 0) { return -1; }
+    if (em_frag(em_fp_name(tid, 0)) != 0) { return -1; }
+    if (em_frag("\n") != 0) { return -1; }
+    // 条件码：eq/ne/gt/ge/lt/le 直接用浮点语义
+    let cc *char = "eq";
+    if (op == TK_EQEQ) { cc = "eq"; }
+    if (op == TK_NEQ) { cc = "ne"; }
+    if (op == TK_LT) { cc = "lt"; }
+    if (op == TK_LEQ) { cc = "le"; }
+    if (op == TK_GT) { cc = "gt"; }
+    if (op == TK_GEQ) { cc = "ge"; }
+    if (em_frag("\tcset\tx0, ") != 0) { return -1; }
+    if (em_frag(cc) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_fp_neg：d0 取负。
+fn em_fp_neg(tid int) int {
+    if (em_frag("\tfneg\t") != 0) { return -1; }
+    if (em_frag(em_fp_name(tid, 0)) != 0) { return -1; }
+    if (em_frag(", ") != 0) { return -1; }
+    if (em_frag(em_fp_name(tid, 0)) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_fp_load_local：从 fp-off 装入浮点值到 d0/s0。
+fn em_fp_load_local(off int, tid int) int {
+    if (em_lea_local_to(off) != 0) { return -1; }
+    let suffix *char = "d";
+    if (t_types[tid].size == 4) { suffix = "s"; }
+    if (em_frag("\tldr\t") != 0) { return -1; }
+    if (em_frag(suffix) != 0) { return -1; }
+    if (em_frag("0, [x10]") != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_fp_store_local：d0/s0 存入 fp-off。
+fn em_fp_store_local(off int, tid int) int {
+    if (em_lea_local_to(off) != 0) { return -1; }
+    let suffix *char = "d";
+    if (t_types[tid].size == 4) { suffix = "s"; }
+    if (em_frag("\tstr\t") != 0) { return -1; }
+    if (em_frag(suffix) != 0) { return -1; }
+    if (em_frag("0, [x10]") != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_int_to_fp：x0 中的整型 → 浮点 d0/s0（宽度由目标寄存器名区分）。
+fn em_int_to_fp(tid int, src_signed int) int {
+    let mnem *char = "scvtf";
+    if (src_signed == 0) { mnem = "ucvtf"; }
+    if (em_frag("\t") != 0) { return -1; }
+    if (em_frag(mnem) != 0) { return -1; }
+    if (em_frag("\t") != 0) { return -1; }
+    if (em_frag(em_fp_name(tid, 0)) != 0) { return -1; }
+    return em_frag(", x0\n");
+}
+
+// em_fp_to_int：d0/s0 → x0（向零截断，有符号）。
+fn em_fp_to_int(src_tid int, dst_signed int) int {
+    let mnem *char = "fcvtzs";
+    if (dst_signed == 0) { mnem = "fcvtzu"; }
+    if (em_frag("\t") != 0) { return -1; }
+    if (em_frag(mnem) != 0) { return -1; }
+    if (em_frag("\tx0, ") != 0) { return -1; }
+    if (em_frag(em_fp_name(src_tid, 0)) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// ---- 二元与一元运算 ----
+
+// em_binop：x9 = 左，x0 = 右 → x0。tid 为公共结果类型。
+fn em_binop(op int, tid int) int {
+    if (op == TK_PLUS) { return em_ins("add\tx0, x9, x0"); }
+    if (op == TK_MINUS) { return em_ins("sub\tx0, x9, x0"); }
+    if (op == TK_STAR) { return em_ins("mul\tx0, x9, x0"); }
+    if (op == TK_SLASH) {
+        if (ty_is_signed(tid) != 0) {
+            return em_ins("sdiv\tx0, x9, x0");
+        }
+        return em_ins("udiv\tx0, x9, x0");
+    }
+    if (op == TK_PERCENT) {
+        // 商用 x11（不与调用约定中的间接目标 x10 冲突——复合赋值经
+        // x10 持有目标地址，取模的商若写 x10 会破坏它）
+        if (ty_is_signed(tid) != 0) {
+            if (em_ins("sdiv\tx11, x9, x0") != 0) { return -1; }
+        } else {
+            if (em_ins("udiv\tx11, x9, x0") != 0) { return -1; }
+        }
+        return em_ins("msub\tx0, x11, x0, x9");
+    }
+    if (op == TK_AMP) { return em_ins("and\tx0, x9, x0"); }
+    if (op == TK_PIPE) { return em_ins("orr\tx0, x9, x0"); }
+    if (op == TK_CARET) { return em_ins("eor\tx0, x9, x0"); }
+    if (op == TK_LSHIFT) { return em_ins("lslv\tx0, x9, x0"); }
+    if (op == TK_RSHIFT) {
+        if (ty_is_signed(tid) != 0) {
+            return em_ins("asrv\tx0, x9, x0");
+        }
+        return em_ins("lsrv\tx0, x9, x0");
+    }
+    return sem_err("内部错误：未知二元运算");
+}
+
+// em_compare：x9 = 左，x0 = 右 → x0 = 0/1（bool）。
+fn em_compare(op int, tid int) int {
+    if (em_ins("cmp\tx9, x0") != 0) { return -1; }
+    let cc *char = "ne";
+    if (op == TK_EQEQ) { cc = "eq"; }
+    if (op == TK_NEQ) { cc = "ne"; }
+    if (op == TK_LT) {
+        if (ty_is_signed(tid) != 0) { cc = "lt"; } else { cc = "lo"; }
+    }
+    if (op == TK_LEQ) {
+        if (ty_is_signed(tid) != 0) { cc = "le"; } else { cc = "ls"; }
+    }
+    if (op == TK_GT) {
+        if (ty_is_signed(tid) != 0) { cc = "gt"; } else { cc = "hi"; }
+    }
+    if (op == TK_GEQ) {
+        if (ty_is_signed(tid) != 0) { cc = "ge"; } else { cc = "hs"; }
+    }
+    if (em_frag("\tcset\tx0, ") != 0) { return -1; }
+    if (em_frag(cc) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_unary：一元运算（操作数在 x0）。
+fn em_unary(op int, tid int) int {
+    if (op == TK_MINUS) { return em_ins("neg\tx0, x0"); }
+    if (op == TK_PLUS) { return 0; }
+    if (op == TK_TILDE) { return em_ins("mvn\tx0, x0"); }
+    if (op == TK_BANG) {
+        if (em_ins("cmp\tx0, 0") != 0) { return -1; }
+        return em_ins("cset\tx0, eq");
+    }
+    return sem_err("内部错误：未知一元运算");
+}
+
+// ---- 过程与调用 ----
+
+// em_prologue：装配函数开头（函数体已在缓冲中，帧大小确定后调用）。
+// pub 修饰为 .globl；帧大小一次 sub；随后溢出寄存器实参。
+fn em_prologue(idx int) int {
+    if ((c_syms[idx].flags & F_PUB) != 0) {
+        if (em_frag("\t.globl\t") != 0) { return -1; }
+        if (em_put_sym_name(idx) != 0) { return -1; }
+        if (em_frag("\n") != 0) { return -1; }
+    }
+    if (em_put_sym_name(idx) != 0) { return -1; }
+    if (em_frag(":\n") != 0) { return -1; }
+    if (em_ins("stp\tx29, x30, [sp, #-16]!") != 0) { return -1; }
+    if (em_ins("mov\tx29, sp") != 0) { return -1; }
+    if (c_fp_off > 0) {
+        if (c_fp_off <= 4095) {
+            if (em_frag("\tsub\tsp, sp, #") != 0) { return -1; }
+            if (em_puti(c_fp_off) != 0) { return -1; }
+            if (em_frag("\n") != 0) { return -1; }
+        } else {
+            if (em_mov_imm("x9", c_fp_off.to_type(i64)) != 0) { return -1; }
+            if (em_ins("sub\tsp, sp, x9") != 0) { return -1; }
+        }
+    }
+    // 溢出寄存器实参到各自槽位（负数标记 = 浮点寄存器）
+    let i int = 0;
+    for i < c_spill_n {
+        if (em_lea_local_to_down(c_spill_off[i]) != 0) { return -1; }
+        if (c_spill_reg[i] < 0) {
+            let tid int = c_spill_size[i];
+            let suffix *char = "d";
+            if (t_types[tid].size == 4) { suffix = "s"; }
+            let regno int = 0 - c_spill_reg[i] - 1;
+            if (em_frag("\tstr\t") != 0) { return -1; }
+            if (em_frag(suffix) != 0) { return -1; }
+            if (em_puti(regno) != 0) { return -1; }
+            if (em_frag(", [x10]\n") != 0) { return -1; }
+        } else {
+            if (em_frag("\tstr\t") != 0) { return -1; }
+            if (em_frag(em_spill_reg_name(c_spill_reg[i])) != 0) { return -1; }
+            if (em_frag(", [x10]\n") != 0) { return -1; }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// em_copy_body：体缓冲逐字节转入 .text。
+fn em_copy_body() int {
+    let i int = 0;
+    for i < o_body_len {
+        if (out_grow(&o_out, o_len, &o_cap, o_len + 1) != 0) {
+            return -1;
+        }
+        o_out[o_len] = o_body[i];
+        o_len += 1;
+        i += 1;
+    }
+    return 0;
+}
+
+// em_epilogue：共享收尾。sp 恢复必须在标签之后——显式 return 与
+// 落底路径都汇聚到标签，二者都需要恢复 sp。
+fn em_epilogue() int {
+    if (em_label(c_fn_lbl) != 0) { return -1; }
+    if (em_ins("mov\tsp, x29") != 0) { return -1; }
+    if (em_ins("ldp\tx29, x30, [sp], #16") != 0) { return -1; }
+    if (em_ins("ret") != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_alloc_local：登记一个 16 字节对齐的槽（静态帧，不发射代码），
+// 返回距 fp 的字节距离（地址 = fp - off）。
+fn em_alloc_local(size int) int {
+    let n int = (size + TG_STACK_ALIGN - 1) / TG_STACK_ALIGN * TG_STACK_ALIGN;
+    if (n == 0) {
+        n = TG_STACK_ALIGN;
+    }
+    c_fp_off += n;
+    return c_fp_off;
+}
+
+// em_call_direct：直接调用。
+fn em_call_direct(idx int) int {
+    if (em_frag("\tbl\t") != 0) { return -1; }
+    if (em_put_sym_name(idx) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_call_indirect：间接调用（目标在 x10）。
+fn em_call_indirect() int {
+    return em_ins("blr\tx10");
+}
+
+// em_call_arg_to_reg：值栈顶实参弹入第 n 个参数寄存器（n = 0..7 → x0..x7）。
+fn em_call_arg_to_reg(n int) int {
+    let reg *char = "x0";
+    if (n == 1) { reg = "x1"; }
+    if (n == 2) { reg = "x2"; }
+    if (n == 3) { reg = "x3"; }
+    if (n == 4) { reg = "x4"; }
+    if (n == 5) { reg = "x5"; }
+    if (n == 6) { reg = "x6"; }
+    if (n == 7) { reg = "x7"; }
+    return em_pop(reg);
+}
+
+// em_call_stack_area：为栈传实参（超过 8 个的部分）保留区域。
+fn em_call_stack_area(count int) int {
+    if (count <= 0) {
+        return 0;
+    }
+    if (em_frag("\tsub\tsp, sp, #") != 0) { return -1; }
+    if (em_puti(count * TG_STACK_ALIGN) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_call_stack_store：x0 存入栈实参区第 k 槽。
+fn em_call_stack_store(k int) int {
+    if (em_frag("\tstr\tx0, [sp, #") != 0) { return -1; }
+    if (em_puti(k * TG_STACK_ALIGN) != 0) { return -1; }
+    return em_frag("]\n");
+}
+
+// em_call_cleanup：调用后回收栈实参区。
+fn em_call_cleanup(count int) int {
+    if (count <= 0) {
+        return 0;
+    }
+    if (em_frag("\tadd\tsp, sp, #") != 0) { return -1; }
+    if (em_puti(count * TG_STACK_ALIGN) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// ---- 数据段发射 ----
+
+// hexval：单个十六进制字符 → 数值。
+fn hexval(b u8) int {
+    if (b >= '0' && b <= '9') {
+        return (b - '0').to_type(int);
+    }
+    if (b >= 'a' && b <= 'f') {
+        return ((b - 'a') + 10).to_type(int);
+    }
+    return ((b - 'A') + 10).to_type(int);
+}
+
+// dat_puthex：以 0x 十六进制输出 i64 位型值（任意宽度数据单元通用）。
+fn dat_puthex(v i64) int {
+    let digits [16]u8;
+    let i int = 0;
+    for i < 16 {
+        digits[i] = '0';
+        i += 1;
+    }
+    let hv u64 = 0;
+    if (v < 0) {
+        hv = v.to_type(u64);
+    } else {
+        hv = v.to_type(u64);
+    }
+    let pos int = 15;
+    for pos >= 0 {
+        let d int = (hv & 0xF).to_type(int);
+        let ch u8 = '0';
+        if (d < 10) {
+            ch = (d + 48).to_type(u8);
+        } else {
+            ch = ((d - 10) + 97).to_type(u8);
+        }
+        digits[pos] = ch;
+        hv = hv >> 4;
+        pos -= 1;
+    }
+    if (dat_puts("0x") != 0) { return -1; }
+    i = 0;
+    for i < 16 {
+        if (dat_put(digits[i]) != 0) { return -1; }
+        i += 1;
+    }
+    return 0;
+}
+
+// em_data_string：解码字符串字面量写入 .data（NUL 结尾），返回标签号。
+// 数据标签用独立前缀 .LD 与独立计数器，避免与代码标签同名冲突。
+fn em_data_string(start int, slen int) int {
+    let lbl int = c_data_n;
+    c_data_n += 1;
+    if (dat_puts(".LD") != 0) { return -1; }
+    if (dat_puti(lbl) != 0) { return -1; }
+    if (dat_put(':') != 0) { return -1; }
+    if (dat_put('\n') != 0) { return -1; }
+    let i int = start + 1;
+    let end int = start + slen - 1;
+    for i < end {
+        let b u8 = c_src[i];
+        if (b == '\\') {
+            let e u8 = c_src[i + 1];
+            let out int = 0;
+            if (e == 'n') { out = 10; }
+            if (e == 'r') { out = 13; }
+            if (e == 't') { out = 9; }
+            if (e == '0') { out = 0; }
+            if (e == 'a') { out = 7; }
+            if (e == 'b') { out = 8; }
+            if (e == 'f') { out = 12; }
+            if (e == 'v') { out = 11; }
+            if (e == '\'') { out = 39; }
+            if (e == '"') { out = 34; }
+            if (e == '\\') { out = 92; }
+            if (e == 'x') {
+                out = hexval(c_src[i + 2]) * 16 + hexval(c_src[i + 3]);
+                i += 4;
+            } else {
+                i += 2;
+            }
+            if (dat_puts(".byte\t") != 0) { return -1; }
+            if (dat_puthex(out.to_type(i64)) != 0) { return -1; }
+            if (dat_put('\n') != 0) { return -1; }
+            continue;
+        }
+        i += 1;
+        if (dat_puts(".byte\t") != 0) { return -1; }
+        if (dat_puthex(b.to_type(i64)) != 0) { return -1; }
+        if (dat_put('\n') != 0) { return -1; }
+    }
+    if (dat_puts(".byte\t0\n") != 0) {
+        return -1;
+    }
+    return lbl;
+}
+
+// em_data_scalar：常量值按类型写入 .data。
+fn em_data_scalar(tid int, v i64) int {
+    let size int = t_types[tid].size;
+    let unit *char = ".byte\t";
+    if (size == 8) { unit = ".xword\t"; }
+    if (size == 4) { unit = ".word\t"; }
+    if (size == 2) { unit = ".hword\t"; }
+    if (dat_puts(unit) != 0) { return -1; }
+    if (dat_puthex(v) != 0) { return -1; }
+    return dat_put('\n');
+}
+
+// em_data_symbol_header：全局数据符号头（.data 段内：对齐 + pub + 标签）。
+fn em_data_symbol_header(idx int, align int) int {
+    if (dat_puts(".balign\t") != 0) { return -1; }
+    if (dat_puti(align) != 0) { return -1; }
+    if (dat_put('\n') != 0) { return -1; }
+    if ((c_syms[idx].flags & F_PUB) != 0) {
+        if (dat_puts(".globl\t") != 0) { return -1; }
+        if (dat_put_sym_name(idx) != 0) { return -1; }
+        if (dat_put('\n') != 0) { return -1; }
+    }
+    if (dat_put_sym_name(idx) != 0) { return -1; }
+    return dat_puts(":\n");
+}
+
+// bss_put_sym_name：.bss 缓冲输出符号名。
+fn bss_put_sym_name(idx int) int {
+    let n int = c_syms[idx].name_len;
+    let off int = c_syms[idx].name_off;
+    let i int = 0;
+    for i < n {
+        if (bss_put(np_data[off + i]) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// em_bss_symbol：.bss 输出零初始化全局（.balign + 标签 + .skip size）。
+fn em_bss_symbol(idx int, size int, align int) int {
+    if (bss_puts(".balign\t") != 0) { return -1; }
+    if (bss_puti(align) != 0) { return -1; }
+    if (bss_put('\n') != 0) { return -1; }
+    if ((c_syms[idx].flags & F_PUB) != 0) {
+        if (bss_puts(".globl\t") != 0) { return -1; }
+        if (bss_put_sym_name(idx) != 0) { return -1; }
+        if (bss_put('\n') != 0) { return -1; }
+    }
+    if (bss_put_sym_name(idx) != 0) { return -1; }
+    if (bss_puts(":\n.skip\t") != 0) { return -1; }
+    if (bss_puti(size) != 0) { return -1; }
+    return bss_put('\n');
+}

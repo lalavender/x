@@ -8,6 +8,8 @@
 #
 #   make            构建 yh、libtcc.a、libtcc1.a
 #   make test       运行 tests/yh 语法语料与编译器模式回归
+#   make bootstrap  自举验证门（G1 语法 + G2 三代闭环 + 全量固定点，需容器）
+#   make selfhost-native  本机（Darwin）等价自举差分，无需容器
 #   make install    安装到 $(PREFIX)（默认 /usr/local；DESTDIR 用作打包根）
 #   make uninstall  卸载
 #   make clean      清理
@@ -143,16 +145,115 @@ test: yh$(EXESUF)
 	python3 $(TOPSRC)/tests/yh/check.py --compiler
 	python3 $(TOPSRC)/tests/yh-run/check.py
 
+# selfhost-native：本机（Darwin/arm64）自举差分验证，无需 docker。
+# 与 make bootstrap 的三代闭环等价（stage1→stage2→stage3、自解析、语法
+# 语料、汇编固定点），但把发射的 Linux 汇编改写为 Mach-O 后本机链接。
+# 用途：容器不可用或需要快速定位自举缺陷时的日常回归。
+selfhost-native: yh$(EXESUF)
+	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py
+
+# --------------------------------------------------------------------------
+# 自举（docs/02-plan/yh-自举实施方案-v2.md）
+#
+# compiler/ 下的 .yh 新编译器按显式顺序拼接为 tmp/bootstrap/compiler.yh；
+# stage0 交叉编译得到 AArch64 Linux ELF 的 stage1；语法门（G1）经容器
+# 包装器在 Linux 容器内执行 stage1 完成自解析与全量语料差分。
+# 拼接只连接完整顶层声明、保留换行，不做任何条件替换。
+# --------------------------------------------------------------------------
+
+SELFHOST_DIR = $(TOPSRC)/compiler
+SELFHOST_SOURCES = $(SELFHOST_DIR)/model.yh \
+                   $(SELFHOST_DIR)/buffer.yh \
+                   $(SELFHOST_DIR)/lexer.yh \
+                   $(SELFHOST_DIR)/target.yh \
+                   $(SELFHOST_DIR)/parse_type.yh \
+                   $(SELFHOST_DIR)/symbols.yh \
+                   $(SELFHOST_DIR)/emit_arm64.yh \
+                   $(SELFHOST_DIR)/sem.yh \
+                   $(SELFHOST_DIR)/parse_expr.yh \
+                   $(SELFHOST_DIR)/parse_stmt.yh \
+                   $(SELFHOST_DIR)/parse_decl.yh \
+                   $(SELFHOST_DIR)/driver.yh
+
+BOOTSTRAP_DIR = $(TOP)/tmp/bootstrap
+BOOTSTRAP_SYSROOT = $(TOP)/tmp/sysroot
+# 容器包装器统一入口：YH_STAGE 指向容器内 stage 路径
+BOOTSTRAP_WRAPPER = $(TOPSRC)/tests/yh/container-yh.sh
+# 运行语义包装器：把 --emit-asm + gcc 伪装成 stage0 的 <file> -o <out> 接口
+BOOTSTRAP_CC = $(TOPSRC)/tests/yh/container-yh-cc.sh
+# G2 门复验的运行语料：run/ 全量（B7 浮点常量缺陷已修复，见 docs/finish.md）。
+BOOTSTRAP_RUN = $(shell for f in $(TOPSRC)/tests/yh-run/run/*.yh; do \
+	 basename $$f; done | paste -sd, -)
+
+$(BOOTSTRAP_DIR)/compiler.yh: $(SELFHOST_SOURCES)
+	@mkdir -p $(BOOTSTRAP_DIR)
+	cat $(SELFHOST_SOURCES) > $@
+
+# stage1：stage0 交叉编译拼接源码（AArch64 Linux ELF），在容器内运行
+$(BOOTSTRAP_DIR)/stage1: $(BOOTSTRAP_DIR)/compiler.yh yh$(EXESUF)
+	./yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh -o $@ \
+	    -Wl,-oformat=elf64-aarch64 -sysroot $(BOOTSTRAP_SYSROOT) -B $(BOOTSTRAP_SYSROOT)
+
+# bootstrap：自举验证门（G1 语法 + G2 三代闭环 + 全量运行语料 + 全量固定点）。
+#   1) 拼接确定性：两次拼接逐字节一致（cmp，避开 make 3.81 的变量展开缺陷）；
+#   2) 容器前置检查：docker 容器 yh-build 必须可用，缺则直接失败不 SKIP；
+#   3) G1：stage1 自解析 + 全部语法正反例差分；
+#   4) G2：stage1 编译自身 → stage2；stage2 自解析 + 语法差分 + 全量运行语料；
+#   5) G2+：stage2 编译自身 → stage3；stage2.s 与 stage3.s 逐字节比较（固定点），
+#      stage3 自解析。
+# 每个阶段失败即中止；产出的 .s 保留在 tmp/bootstrap/ 供人工核对。
+# 容器不可用时可改用本机等价差分：make selfhost-native。
+bootstrap: yh$(EXESUF) $(BOOTSTRAP_DIR)/stage1
+	@cat $(SELFHOST_SOURCES) > $(BOOTSTRAP_DIR)/compiler.yh.recheck
+	@cmp -s $(BOOTSTRAP_DIR)/compiler.yh $(BOOTSTRAP_DIR)/compiler.yh.recheck || \
+	 { echo "自举失败：两次拼接逐字节不一致（拼接不确定）"; exit 1; }
+	@rm -f $(BOOTSTRAP_DIR)/compiler.yh.recheck
+	@echo "拼接确定性 OK，拼接产物 SHA-256："
+	@shasum -a 256 $(BOOTSTRAP_DIR)/compiler.yh
+	@docker exec yh-build true 2>/dev/null || \
+	 { echo "自举失败：需要运行中的 docker 容器 yh-build（仓库挂载于 /work）"; exit 1; }
+	@echo "== G1：stage1 自解析自身拼接源码 =="
+	@YH_STAGE=/work/tmp/bootstrap/stage1 $(BOOTSTRAP_WRAPPER) --syntax-check $(CURDIR)/$(BOOTSTRAP_DIR)/compiler.yh \
+	 || { echo "自举失败：stage1 未通过自解析"; exit 1; }
+	@echo "== G1：stage1 全量语法语料差分（容器内执行） =="
+	@YH_STAGE=/work/tmp/bootstrap/stage1 python3 $(TOPSRC)/tests/yh/check.py --compiler --compiler-path $(BOOTSTRAP_WRAPPER) --quiet \
+	 || { echo "自举失败：stage1 未通过语法语料差分"; exit 1; }
+	@echo "G1 语法自举通过"
+	@echo "== G2：stage1 编译自身 → stage2 =="
+	@docker exec yh-build sh -c 'cd /work/tmp/bootstrap && ./stage1 --emit-asm compiler.yh > stage2.s' \
+	 || { echo "自举失败：stage1 编译自身失败"; exit 1; }
+	@docker exec yh-build sh -c 'gcc -no-pie -o /work/tmp/bootstrap/stage2 /work/tmp/bootstrap/stage2.s' \
+	 || { echo "自举失败：stage2 链接失败"; exit 1; }
+	@docker exec yh-build sh -c 'cd /work/tmp/bootstrap && ./stage2 --syntax-check compiler.yh' \
+	 || { echo "自举失败：stage2 未通过自解析"; exit 1; }
+	@YH_STAGE=/work/tmp/bootstrap/stage2 python3 $(TOPSRC)/tests/yh/check.py --compiler --compiler-path $(BOOTSTRAP_WRAPPER) --quiet \
+	 || { echo "自举失败：stage2 未通过语法语料差分"; exit 1; }
+	@echo "== G2：stage2 全量运行语义语料（run/ 全部） =="
+	@YH_STAGE=/work/tmp/bootstrap/stage2 python3 $(TOPSRC)/tests/yh-run/check.py \
+	 --compiler $(BOOTSTRAP_CC) --cross --workdir $(CURDIR)/$(BOOTSTRAP_DIR)/run --quiet \
+	 --filter $(BOOTSTRAP_RUN) \
+	 || { echo "自举失败：stage2 未通过全量运行语义语料"; exit 1; }
+	@echo "== G2+：stage2 编译自身 → stage3，stage3 自解析 =="
+	@docker exec yh-build sh -c 'cd /work/tmp/bootstrap && ./stage2 --emit-asm compiler.yh > stage3.s' \
+	 || { echo "自举失败：stage2 编译自身失败"; exit 1; }
+	@docker exec yh-build sh -c 'gcc -no-pie -o /work/tmp/bootstrap/stage3 /work/tmp/bootstrap/stage3.s && cd /work/tmp/bootstrap && ./stage3 --syntax-check compiler.yh && ./stage3 --syntax-check /work/tests/yh-run/run/01-hello.yh' \
+	 || { echo "自举失败：stage3 构建或自解析失败"; exit 1; }
+	@echo "== G2+：汇编固定点比较（stage2/stage3 对自身拼接源码逐字节一致） =="
+	@docker exec yh-build sh -c 'cmp /work/tmp/bootstrap/stage2.s /work/tmp/bootstrap/stage3.s' \
+	 || { echo "自举失败：stage2.s 与 stage3.s 不逐字节一致（未达固定点）"; exit 1; }
+	@echo "自举门通过：G1 语法 + G2 三代闭环 + stage3 自解析 + 全量汇编固定点"
+
 test-all: test
 
 tests.%: ;
 
 clean:
 	rm -f yh$(EXESUF) libtcc.o libtcc1.o $(LIBTCC) $(LIBTCC1)
+	rm -rf $(TOP)/tmp/bootstrap
 
 help:
 	@sed -n '2,20p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all clean help
+.PHONY: all install uninstall test test-all bootstrap selfhost-native clean help
 
 endif # ($(INCLUDED),no)

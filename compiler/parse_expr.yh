@@ -1,0 +1,630 @@
+// ============================================================================
+// parse_expr.yh —— 自举编译器：表达式解析（语义钩子集成）
+//
+// 覆盖 docs/yh.g4 表达式优先级链（低 → 高）：
+//   三元 ?: → || → && → | → ^ → & → ==/!= → 比较 → 移位 → 加减
+//   → 乘除模 → 一元 → 后缀（调用/下标/.to_type/.成员） → 基本表达式。
+//
+// 语义协议：每个解析函数把结果通过 *Res 出参返回（类型/常量性/字面量
+// 标记）；编译模式同时发码（结果留 x0）。c_fold>0 时只折叠。
+// &&/|| 与三元由解析器配合 sem_* 钩子用标签短路实现。
+//
+// 「结构体字面量 vs 块」消解与 G1 相同：块跟随上下文（for/switch/case
+// 头部）先试探 structInitBody 且配对 '}' 后必须紧跟 '{'，否则回退为块；
+// 编译模式中结构体字面量作为值使用统一拒绝（B5 仅支持 let 直接初始化）。
+// ============================================================================
+
+// parse_expr：表达式入口（= 条件表达式层）。
+fn parse_expr(res *Res) int {
+    return parse_ternary(res);
+}
+
+// parse_expr_iso：隔离上下文——「IDENT {」恒按结构体字面量处理。
+fn parse_expr_iso(res *Res) int {
+    let save int = c_ctx_block;
+    c_ctx_block = 0;
+    let r int = parse_expr(res);
+    c_ctx_block = save;
+    return r;
+}
+
+// parse_expr_blockctx：块跟随上下文——for/switch/case 头部表达式。
+fn parse_expr_blockctx(res *Res) int {
+    let save int = c_ctx_block;
+    c_ctx_block = 1;
+    let r int = parse_expr(res);
+    c_ctx_block = save;
+    return r;
+}
+
+// parse_ternary：cond ? a : b（右结合；两支经值栈汇合）。
+fn parse_ternary(res *Res) int {
+    if (parse_logical_or(res) != 0) {
+        return -1;
+    }
+    if (p_cur() == TK_QUEST) {
+        p_adv();
+        if (sem_ternary_cond(res) != 0) {
+            return -1;
+        }
+        let mid Res;
+        if (parse_expr(&mid) != 0) {
+            return -1;
+        }
+        if (p_expect(TK_COLON, "期望 ':'") != 0) {
+            return -1;
+        }
+        if (sem_ternary_mid(res) != 0) {
+            return -1;
+        }
+        if (parse_expr(res) != 0) {
+            return -1;
+        }
+        if (sem_ternary_end(res) != 0) {
+            return -1;
+        }
+        sem_res_copy(res, &mid);
+        c_res_is_addr = 0;
+    }
+    return 0;
+}
+
+// parse_logical_or：a || b（短路）。
+fn parse_logical_or(res *Res) int {
+    if (parse_logical_and(res) != 0) {
+        return -1;
+    }
+    for p_cur() == TK_OROR {
+        p_adv();
+        if (sem_shortcircuit(TK_OROR, res) != 0) {
+            return -1;
+        }
+        if (parse_logical_and(res) != 0) {
+            return -1;
+        }
+        if (sem_shortcircuit_end(TK_OROR, res) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_logical_and：a && b（短路）。
+fn parse_logical_and(res *Res) int {
+    if (parse_bit_or(res) != 0) {
+        return -1;
+    }
+    for p_cur() == TK_ANDAND {
+        p_adv();
+        if (sem_shortcircuit(TK_ANDAND, res) != 0) {
+            return -1;
+        }
+        if (parse_bit_or(res) != 0) {
+            return -1;
+        }
+        if (sem_shortcircuit_end(TK_ANDAND, res) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_bit_or：a | b。
+fn parse_bit_or(res *Res) int {
+    if (parse_bit_xor(res) != 0) {
+        return -1;
+    }
+    for p_cur() == TK_PIPE {
+        p_adv();
+        let rhs Res;
+        if (sem_push_value(res) != 0) { return -1; }
+        if (parse_bit_xor(&rhs) != 0) {
+            return -1;
+        }
+        if (sem_binop(TK_PIPE, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_bit_xor：a ^ b。
+fn parse_bit_xor(res *Res) int {
+    if (parse_bit_and(res) != 0) {
+        return -1;
+    }
+    for p_cur() == TK_CARET {
+        p_adv();
+        let rhs Res;
+        if (sem_push_value(res) != 0) { return -1; }
+        if (parse_bit_and(&rhs) != 0) {
+            return -1;
+        }
+        if (sem_binop(TK_CARET, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_bit_and：a & b。
+fn parse_bit_and(res *Res) int {
+    if (parse_equality(res) != 0) {
+        return -1;
+    }
+    for p_cur() == TK_AMP {
+        p_adv();
+        let rhs Res;
+        if (sem_push_value(res) != 0) { return -1; }
+        if (parse_equality(&rhs) != 0) {
+            return -1;
+        }
+        if (sem_binop(TK_AMP, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_equality：a == b、a != b。
+fn parse_equality(res *Res) int {
+    if (parse_relational(res) != 0) {
+        return -1;
+    }
+    for p_cur() == TK_EQEQ || p_cur() == TK_NEQ {
+        let op int = p_cur();
+        p_adv();
+        let rhs Res;
+        if (sem_push_value(res) != 0) { return -1; }
+        if (parse_relational(&rhs) != 0) {
+            return -1;
+        }
+        if (sem_binop(op, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_relational：a < b、<=、>、>=。
+fn parse_relational(res *Res) int {
+    if (parse_shift(res) != 0) {
+        return -1;
+    }
+    for p_cur() == TK_LT || p_cur() == TK_LEQ || p_cur() == TK_GT || p_cur() == TK_GEQ {
+        let op int = p_cur();
+        p_adv();
+        let rhs Res;
+        if (sem_push_value(res) != 0) { return -1; }
+        if (parse_shift(&rhs) != 0) {
+            return -1;
+        }
+        if (sem_binop(op, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_shift：a << b、a >> b。
+fn parse_shift(res *Res) int {
+    if (parse_additive(res) != 0) {
+        return -1;
+    }
+    for p_cur() == TK_LSHIFT || p_cur() == TK_RSHIFT {
+        let op int = p_cur();
+        p_adv();
+        let rhs Res;
+        if (sem_push_value(res) != 0) { return -1; }
+        if (parse_additive(&rhs) != 0) {
+            return -1;
+        }
+        if (sem_binop(op, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_additive：a + b、a - b（含指针 ± 整数）。
+fn parse_additive(res *Res) int {
+    if (parse_multiplicative(res) != 0) {
+        return -1;
+    }
+    for p_cur() == TK_PLUS || p_cur() == TK_MINUS {
+        let op int = p_cur();
+        p_adv();
+        let rhs Res;
+        if (sem_push_value(res) != 0) { return -1; }
+        if (parse_multiplicative(&rhs) != 0) {
+            return -1;
+        }
+        if (sem_binop(op, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_multiplicative：a * b、a / b、a % b。
+fn parse_multiplicative(res *Res) int {
+    if (parse_unary(res) != 0) {
+        return -1;
+    }
+    for p_cur() == TK_STAR || p_cur() == TK_SLASH || p_cur() == TK_PERCENT {
+        let op int = p_cur();
+        p_adv();
+        let rhs Res;
+        if (sem_push_value(res) != 0) { return -1; }
+        if (parse_unary(&rhs) != 0) {
+            return -1;
+        }
+        if (sem_binop(op, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_unary：一元运算（可嵌套；后缀优先于一元）。
+// AMP 取地址：操作数按 lvalue 解析出地址；STAR 解引用：操作数恒按值
+// 解析（得到指针值），结果作为地址参与外层（c_lvalue 语义由钩子处理）。
+fn parse_unary(res *Res) int {
+    let k int = p_cur();
+    if (k == TK_MINUS || k == TK_PLUS || k == TK_BANG || k == TK_TILDE) {
+        p_adv();
+        if (parse_unary(res) != 0) {
+            return -1;
+        }
+        return sem_unary(k, res);
+    }
+    if (k == TK_STAR) {
+        p_adv();
+        let save int = c_lvalue;
+        c_lvalue = 0;
+        let r int = parse_unary(res);
+        c_lvalue = save;
+        if (r != 0) {
+            return -1;
+        }
+        return sem_unary(TK_STAR, res);
+    }
+    if (k == TK_AMP) {
+        p_adv();
+        let save2 int = c_lvalue;
+        c_lvalue += 1;
+        let r2 int = parse_unary(res);
+        c_lvalue = save2;
+        if (r2 != 0) {
+            return -1;
+        }
+        return sem_unary(TK_AMP, res);
+    }
+    return parse_postfix(res);
+}
+
+// parse_postfix：后缀链：调用、下标、.to_type(T)、.成员。
+fn parse_postfix(res *Res) int {
+    if (parse_primary(res) != 0) {
+        return -1;
+    }
+    for 1 {
+        let k int = p_cur();
+        if (k == TK_LPAREN) {
+            // 调用：实参表为行内列表，不允许尾逗号
+            p_adv();
+            let direct int = sem_call_begin(res);
+            if (direct < 0) {
+                return -1;
+            }
+            if (p_cur() != TK_RPAREN) {
+                for 1 {
+                    let arg Res;
+                    if (parse_expr_iso(&arg) != 0) {
+                        return -1;
+                    }
+                    if (sem_push_arg(&arg) != 0) {
+                        return -1;
+                    }
+                    if (p_cur() == TK_COMMA) {
+                        p_adv();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            if (p_expect(TK_RPAREN, "期望 ')'") != 0) {
+                return -1;
+            }
+            if (sem_call(res, res) != 0) {
+                return -1;
+            }
+            continue;
+        }
+        if (k == TK_LBRACKET) {
+            // 下标：基址压栈 → 下标表达式（恒为值，清 c_lvalue）→ 求地址/取值
+            p_adv();
+            if (sem_push_value(res) != 0) { return -1; }
+            let idx Res;
+            let save_lv int = c_lvalue;
+            c_lvalue = 0;
+            let ir int = parse_expr(&idx);
+            c_lvalue = save_lv;
+            if (ir != 0) {
+                return -1;
+            }
+            if (p_expect(TK_RBRACKET, "期望 ']'") != 0) {
+                return -1;
+            }
+            if (sem_index(res, &idx) != 0) {
+                return -1;
+            }
+            continue;
+        }
+        if (k == TK_DOT) {
+            p_adv();
+            if (p_cur() == TK_TO_TYPE) {
+                // .to_type(T)：参数是类型引用而非表达式
+                p_adv();
+                if (p_expect(TK_LPAREN, "期望 '('") != 0) {
+                    return -1;
+                }
+                let tid int = parse_type_ref();
+                if (tid < 0) {
+                    return -1;
+                }
+                if (p_expect(TK_RPAREN, "期望 ')'") != 0) {
+                    return -1;
+                }
+                if (sem_cast(res, tid) != 0) {
+                    return -1;
+                }
+                continue;
+            }
+            if (is_member_name(p_cur()) != 0) {
+                let start int = c_toks[c_pos].start;
+                let n int = c_toks[c_pos].len;
+                p_adv();
+                if (sem_member(res, start, n) != 0) {
+                    return -1;
+                }
+                continue;
+            }
+            return err_tok("'.' 之后需要一个成员名");
+        }
+        break;
+    }
+    return 0;
+}
+
+// parse_primary：基本表达式。进入时重置地址标记。
+fn parse_primary(res *Res) int {
+    c_res_is_addr = 0;
+    let k int = p_cur();
+    // 当前 token 的源区间（各字面量分支共用；stage0 同级块禁同名局部）
+    let start int = c_toks[c_pos].start;
+    let n int = c_toks[c_pos].len;
+    if (k == TOK_NUMBER) {
+        p_adv();
+        return sem_number(start, n, res);
+    }
+    if (k == TOK_STRING) {
+        p_adv();
+        return sem_string(start, n, res);
+    }
+    if (k == TOK_CHAR) {
+        p_adv();
+        return sem_char(start, n, res);
+    }
+    if (k == TK_TRUE) {
+        p_adv();
+        return sem_bool(1, res);
+    }
+    if (k == TK_FALSE) {
+        p_adv();
+        return sem_bool(0, res);
+    }
+    if (k == TK_LPAREN) {
+        p_adv();
+        if (parse_expr_iso(res) != 0) {
+            return -1;
+        }
+        return p_expect(TK_RPAREN, "期望 ')'");
+    }
+    if (k == TK_SIZEOF) {
+        p_adv();
+        if (p_expect(TK_LPAREN, "期望 '('") != 0) {
+            return -1;
+        }
+        let tid int = parse_type_ref();
+        if (tid < 0) {
+            return -1;
+        }
+        if (p_expect(TK_RPAREN, "期望 ')'") != 0) {
+            return -1;
+        }
+        return sem_sizeof(tid, res);
+    }
+    if (k == TK_LEN) {
+        p_adv();
+        if (p_expect(TK_LPAREN, "期望 '('") != 0) {
+            return -1;
+        }
+        if (parse_expr_iso(res) != 0) {
+            return -1;
+        }
+        if (p_expect(TK_RPAREN, "期望 ')'") != 0) {
+            return -1;
+        }
+        return sem_len(res);
+    }
+    if (k == TOK_IDENT) {
+        return parse_ident_primary(res);
+    }
+    return err_tok("此处需要一个表达式");
+}
+
+// parse_ident_primary：标识符作为基本表达式（含结构体字面量决策）。
+fn parse_ident_primary(res *Res) int {
+    // 注意：stage0 中 if/while 体不开新词法作用域，同名局部必须提升到函数级
+    let istart int = c_toks[c_pos].start;
+    let ilen int = c_toks[c_pos].len;
+    if (p_peek(1) == TK_LBRACE) {
+        if (c_ctx_block != 0) {
+            if (try_struct_init() == 0) {
+                return parse_struct_init_forced(res);
+            }
+            // 回退：该 '{' 是 for/switch/case 体，标识符保持裸形式
+            p_adv();
+            return sem_ident(istart, ilen, res);
+        }
+        return parse_struct_init_forced(res);
+    }
+    p_adv();
+    return sem_ident(istart, ilen, res);
+}
+
+// try_struct_init：试探「IDENT { structInitBody }」成立且其后紧跟 '{'。
+fn try_struct_init() int {
+    let save int = c_pos;
+    let save_fold int = c_fold;
+    let save_lit_off int = c_lit_off;
+    let save_fp int = c_fp_off;
+    c_spec += 1;
+    // 试探期只做语法判定：禁发码、禁分配槽（c_fold>0 让语义钩子短路）
+    if (c_compile != 0) {
+        c_fold += 1;
+    }
+    let dummy Res;
+    let r int = parse_struct_init_forced(&dummy);
+    let ok int = 0;
+    if (r == 0 && p_cur() == TK_LBRACE) {
+        ok = 1;
+    }
+    if (c_compile != 0) {
+        c_fold -= 1;
+    }
+    c_spec -= 1;
+    c_pos = save;
+    c_fold = save_fold;
+    c_lit_off = save_lit_off;
+    c_fp_off = save_fp;
+    if (ok == 1) {
+        return 0;
+    }
+    return -1;
+}
+
+// parse_struct_init_forced：结构体字面量：IDENT '{' body '}'。
+// 编译模式：作为值使用统一拒绝（B5 只支持 let 直接初始化路径）。
+fn parse_struct_init_forced(res *Res) int {
+    // 结构体字面量：IDENT '{' body '}'
+    // 语法模式只消费 token；编译模式在临时槽构造聚合值，地址留 x0。
+    let start int = c_toks[c_pos].start;
+    let nlen int = c_toks[c_pos].len;
+    p_adv();
+    let tid int = 0;
+    if (c_compile != 0) {
+        if (c_fold != 0) {
+            return sem_err("结构体字面量不是编译期常量");
+        }
+        tid = ty_lookup_name(start, nlen);
+        if (tid < 0) {
+            return sem_err("未知类型（结构体字面量）");
+        }
+        let tk int = t_types[tid].kind;
+        if (tk != TY_STRUCT && tk != TY_UNION) {
+            return sem_err("结构体字面量需要一个 struct/union 类型名");
+        }
+    }
+    if (p_expect(TK_LBRACE, "期望 '{'") != 0) {
+        return -1;
+    }
+    if (c_compile != 0) {
+        let named int = 0;
+        if (is_member_name(p_cur()) != 0 && p_peek(1) == TK_COLON) {
+            named = 1;
+        }
+        if (sem_struct_lit_begin(tid, named) < 0) {
+            return -1;
+        }
+    }
+    if (parse_struct_init_body() != 0) {
+        return -1;
+    }
+    if (p_expect(TK_RBRACE, "期望 '}'") != 0) {
+        return -1;
+    }
+    if (c_compile != 0) {
+        if (sem_struct_lit_end(tid) != 0) {
+            return -1;
+        }
+        sem_res_reset(res, tid);
+    }
+    return 0;
+}
+
+// parse_struct_init_body：字面量体（'{' 与 '}' 由调用方处理）。
+// 强制非空；首元素第二个 token 为 ':' 即命名式；不得混写；允许尾逗号。
+fn parse_struct_init_body() int {
+    if (p_cur() == TK_RBRACE) {
+        return err_tok("结构体字面量不能为空");
+    }
+    let named int = 0;
+    if (is_member_name(p_cur()) != 0 && p_peek(1) == TK_COLON) {
+        named = 1;
+    }
+    let fv Res;
+    let fpos int = 0;
+    for 1 {
+        let fidx int = -1;
+        if (named != 0) {
+            if (is_member_name(p_cur()) == 0) {
+                return err_tok("命名式字面量需要字段名");
+            }
+            if (c_compile != 0 && c_fold == 0) {
+                let fs int = c_toks[c_pos].start;
+                let fl int = c_toks[c_pos].len;
+                fidx = sem_lit_field_lookup(c_lit_tid, fs, fl);
+                if (fidx < 0) {
+                    return sem_err("结构体没有该字段");
+                }
+            }
+            p_adv();
+            if (p_expect(TK_COLON, "期望 ':'") != 0) {
+                return -1;
+            }
+            if (parse_expr_iso(&fv) != 0) {
+                return -1;
+            }
+        } else {
+            if (c_compile != 0 && c_fold == 0) {
+                if (fpos >= t_types[c_lit_tid].len) {
+                    return sem_err("位置式字面量字段过多");
+                }
+                fidx = t_types[c_lit_tid].sub + fpos;
+                fpos += 1;
+            }
+            if (parse_expr_iso(&fv) != 0) {
+                return -1;
+            }
+        }
+        if (c_compile != 0 && c_fold == 0) {
+            c_lit_last_type = fv.type_id;
+            c_lit_last_lit = fv.is_lit;
+            c_lit_last_ival = fv.ival;
+            if (sem_struct_lit_field(c_lit_tid, fidx) != 0) {
+                return -1;
+            }
+        }
+        if (p_cur() == TK_COMMA) {
+            p_adv();
+            if (p_cur() == TK_RBRACE) {
+                break;
+            }
+            continue;
+        }
+        break;
+    }
+    return 0;
+}

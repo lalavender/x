@@ -120,18 +120,51 @@ ANTLR 原有语法回归仍通过。
 
 ### yh 自举
 
-详细范围、源文件组织、阶段任务与验证门见
-[yh 语法与编译器自举实施方案](02-plan/yh-语法与编译器自举方案.md)，
-能力边界见[自举能力边界](03-design/yh-自举能力边界.md)。
+自举定义、能力边界、源码组织、阶段任务与验证门统一见
+[yh 语法与编译器自举统一方案](02-plan/yh-自举实施方案-v2.md)。
 
 - [x] B0：定位当前 `make test` 的 goto/递归失败，冻结可靠 stage0 和差分测试口径
   （缺口矩阵见[运行覆盖缺口矩阵](02-plan/yh-运行覆盖缺口矩阵.md)）。
 - [x] B1：增加 `read`（推荐同时增加 `close`）及带 `argc/argv` 的 `main` 语义；用 `.yh` 运行用例验证。
 - [x] B2：验证编译器工作负载所需的类型、指针、递归、ABI 和容量边界，修复实际发现的问题。
-- [ ] B3：完成 `.yh` 词法/语法检查器解析自身与全部语法语料，达到语法自举门。
-- [ ] B4：完成 AArch64 Linux 汇编输出与 stage1→stage2 自编，达到自身子集闭环。
-- [ ] B5：补齐现有 yh 语法与语义的运行覆盖和实现，stage1/stage2 全量回归通过。
-- [ ] B6：执行 stage0→stage1→stage2→stage3、固定输出比较和干净环境复验。
+- [x] B3：建立 `compiler/` 源码拼接与驱动，完成 yh 词法器和字节输入探针
+  （拼接清单在 Makefile `SELFHOST_SOURCES`；1 MiB、NUL、未终结串等边界
+  探针见 `docs/finish.md`；源码目录按用户指示用 `compiler/` 替代方案的 `src/yh/`）。
+- [x] B4：完成 yh 纯语法解析器，解析自身并通过全部语法语料（G1）。
+  stage0 交叉编译 stage1（AArch64 Linux ELF），容器内自解析拼接源码到
+  EOF，`tests/yh/check.py --compiler --compiler-path tests/yh/container-yh.sh`
+  差分 66/66 正例、29/29 反例；验证入口 `make bootstrap`。
+  已知偏差：自编源码用 `for 1 { }` 替代无限 `for { }`——stage0 的
+  continue 在无条件 for 内不识别为循环内（探针 `tmp/probe-continue.yh`），
+  待单独修 stage0 后可改回。
+- [x] B5：完成语义检查与编译器自身所用子集的 AArch64 Linux 汇编输出。
+  分层：前端语义（symbols/sem/parse_*）→ 目标数据模型（target.yh）→
+  指令发射（emit_arm64.yh）；`--emit-asm` 产出 GNU 汇编，经容器 gcc
+  `-no-pie` 链接为 ELF。运行语料 40/44（余 4 项为 B7 边界：按值聚合、
+  数组按值、浮点/类型化变参，均显式拒绝并有 `fail/` 或 `run/25..29`
+  用例钉住）。架构与换平台契约见
+  [自举后端架构](03-design/yh-自举后端架构.md)。
+- [x] B6：执行 stage0→stage1→stage2→stage3 的自身子集闭环（G2）。
+  `make bootstrap` 逐门验证：拼接确定性、G1（自解析 + 66/66 + 29/29）、
+  G2（stage1 编译自身得 stage2；stage2 自解析、语法差分 66/29、
+  运行子集 25/25）、G2+（stage2 编译自身得 stage3，stage2.s 与
+  stage3.s 逐字节相同，stage3 自解析）。**G2 达成**。
+- [x] B7：补齐现有 yh 全语言语义与运行覆盖。
+  已实现：聚合按值（参数/返回/嵌套字面量）、切片（视图/len/下标/实参）、
+  for-in（数组/切片/区间）、类型化变参、浮点 f32/f64（传参/返回/运算/
+  转换）、structInit 作值。**stage1 全量通过**：语法 66/66+29/29、
+  运行全量通过。
+  **自举缺陷已修复**：stage2 浮点字面量常量编码错误（根因：`sem_push_arg`
+  对浮点实参压 x0 而非 d0）与连带的整数窄化转换缺失（`sem_cast` 缺
+  「整数→整数」分支）。修复后 stage2 浮点常量正确、**stage2.s 与 stage3.s
+  逐字节一致（全量固定点）**，`make bootstrap` 恢复全量运行语料与全量
+  固定点比较。定位手段：新增本机自举差分探针 `make selfhost-native`
+  （`tests/selfhost/native-selfhost.py`，无需容器）。详见
+  [自举后端架构](03-design/yh-自举后端架构.md) §6。
+  **仍未实现**：全局聚合变量初始化。
+- [ ] B8：固定三代构建、逐字节汇编比较与干净环境复验（G3）。
+  前置条件已达成：stage2.s 与 stage3.s 对自身拼接源码逐字节一致
+  （本机探针验证）；`make bootstrap` 的 G2+ 固定点比较已恢复为全量。
 
 - [ ] 多平台后端支持（linux/darwin/windows × arm64/x64，共 6 目标）：
   现状梳理、差距矩阵、分阶段方案与决策点见

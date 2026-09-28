@@ -1,0 +1,90 @@
+// ============================================================================
+// driver.yh —— 自举编译器：命令行入口
+//
+// 输出接口（docs/02-plan/yh-自举实施方案-v2.md §3）：
+//     yh-new --syntax-check <file.yh>   纯语法检查：合法静默退出 0，
+//                                       非法输出诊断并以非零码退出
+//     yh-new --emit-asm <file.yh>       发射 AArch64 Linux 汇编到标准输出
+//                                       （GNU 语法，经 as/gcc 生成可执行）
+//
+// 退出码：0 成功；1 源文件语法/语义错误或读入失败；2 用法错误。
+// 诊断一律写文件描述符 2；汇编只写缓冲、编译成功后一次性写标准输出，
+// 错误不会留下看似成功的部分产物。
+// ============================================================================
+
+// usage：输出用法说明（文件描述符 2）。
+fn usage() void {
+    let buf [256]u8;
+    let n int = 0;
+    n = append_str(buf, n, "用法: yh-new --syntax-check <file.yh> | --emit-asm <file.yh>\n");
+    write_all(2, buf, n);
+}
+
+// run_syntax_check：--syntax-check 路径（纯语法，G1 行为）。
+fn run_syntax_check() int {
+    if (lex_all() != 0) {
+        return 1;
+    }
+    if (parse_source() != 0) {
+        return 1;
+    }
+    if (c_errors > 0) {
+        return 1;
+    }
+    return 0;
+}
+
+// run_emit_asm：--emit-asm 路径（两遍语义 + AArch64 发射）。
+fn run_emit_asm() int {
+    if (lex_all() != 0) {
+        return 1;
+    }
+    c_compile = 1;
+    ty_register_builtins();
+    // 全局作用域（第 0 层），随后登记 prelude 外部函数
+    scope_push();
+    if (sem_register_prelude() != 0) {
+        return 1;
+    }
+    if (sem_compile() != 0) {
+        return 1;
+    }
+    if (c_errors > 0) {
+        return 1;
+    }
+    if (flush_output() != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+// main：解析命令行并驱动「读源 → 词法 → （语法 | 编译）」流水线。
+fn main(argc int, argv **char) int {
+    if (argc != 3) {
+        usage();
+        return 2;
+    }
+    let mode int = 0;
+    if (cstr_eq(argv[1], "--syntax-check") != 0) {
+        mode = 1;
+    }
+    if (cstr_eq(argv[1], "--emit-asm") != 0) {
+        mode = 2;
+    }
+    if (mode == 0) {
+        usage();
+        return 2;
+    }
+    c_path = argv[2];
+    if (read_source(c_path) != 0) {
+        return 1;
+    }
+    // 两种模式都会用到堆分配的全局表（作用域栈等）
+    if (sem_init_tables() != 0) {
+        return 1;
+    }
+    if (mode == 1) {
+        return run_syntax_check();
+    }
+    return run_emit_asm();
+}

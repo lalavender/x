@@ -1,5 +1,223 @@
 # finish
 
+## 2026-09-28 自举 B7 收尾：修复两处自举缺陷，达成全量固定点（stage3 汇编逐字节一致）
+
+上一轮 B7 遗留「stage2 编译浮点字面量时常量位型被编码为 `fp64_bits`
+函数地址」的已知缺陷。本轮定位并修复其**根因**，并顺带修掉同源的另一处
+转换缺陷；`make bootstrap` 门因此恢复为**全量运行语料 + 全量汇编固定点**。
+
+**修复 1：浮点实参压栈走错通路（`sem_push_arg`）**
+
+`sem_push_arg` 无条件调用 `em_push()`（压 x0），但浮点实参的值在 d0。
+在 `fp64_bits(mant)` 这类「先 `adrp` 装入 callee 地址、再以浮点值调用」
+的序列里，x0 恰好是 callee 地址，于是被当成实参压栈，`fp64_bits` 收到
+函数地址而非 f64 值，返回位型即成代码地址（旧记录中的 `0x4160676`）。
+修复：改走 `sem_push_value`（浮点压 d0）。调用点的混合搬运路径同步改为
+**按元素类型分别弹出 x0/d0**。
+
+**修复 2：缺少「整数 → 整数」窄化转换（`sem_cast`）**
+
+`sem_cast` 只处理了浮点相关的四类转换，整数→整数（如 `i64 → int`）**完全
+未发码**。x0 中按源类型已扩展，窄化到更小宽度或改变符号性时必须重新
+扩展，否则比较/运算会读到高位的残留值：`0x3ff0000000000000.to_type(int)`
+被当成 64 位整体与 0 比较，恒为真。修复：按目标宽度与符号性补
+`sxtw/sxth/sxtb`（有符号）与写 w0/`uxth`/`uxtb`（无符号）。
+
+两处缺陷都由同一现象牵出：修复 1 后浮点常量恢复正确，才暴露出修复 2。
+
+**本机自举差分探针（新增，容器不可用/快速定位时用）**
+
+正式自举门需 aarch64 Linux 容器（docker + tmp/sysroot）。本轮新增
+`tests/selfhost/native-selfhost.py` 与 `make selfhost-native`：用同一套
+`compiler/` 源码在本机（Darwin/arm64）跑等价三代闭环——stage0 → stage1 →
+stage2 → stage3，发射的 GNU/Linux AArch64 汇编经 macho.py 改写为
+Mach-O 可汇编形态（`@PAGE/@PAGEOFF` + 符号 `_` 前缀）后本机链接。
+校验：三 stage 自解析、三 stage 全量语法语料、stage2 运行不含 printf 的
+语义用例（macOS 变参 ABI 与 Linux 不同，含 printf 的用例在本机不可判，
+脚本如实跳过）、**stage2.s 与 stage3.s 逐字节一致**。
+
+**验证**：
+- `make selfhost-native` 全绿：三 stage 自解析；三 stage 语法 66/66 + 29/29；
+  stage2 运行 run/13、16、31、32、33、34 全部符合期望；**汇编固定点一致**。
+- `make test`：stage0 零回归 **49/49**（run 34 + fail 12 + pass 3），
+  语法 66/66 + 29/29 两遍。
+- `make bootstrap` 门已恢复：G2 运行语料改为 **run/ 全量**（不再排除 28），
+  G2+ 固定点比较改为**直接 `cmp stage2.s stage3.s`**（stage2/stage3 对
+  自身拼接源码的完整发射逐字节一致）。
+
+**新增回归用例**（均带 `// exit:` 断言，可在任意平台运行）：
+- `run/31-float-bits.yh`：浮点字面量位型（1.0/2.5/0.0）与浮点实参/返回；
+- `run/32-int-narrow.yh`：整数窄化（i64→int、负值截断、u32/i8/u8 往返）；
+- `run/33-u32-zeroext.yh`：无符号窄化零扩展（u32/u16/u8）；
+- `run/34-cast-matrix.yh`：i8/u8/i32/u32/i64 全组合的转换矩阵与算术参与；
+- `run/30-float-arg.yh`：浮点实参 + 浮点返回 + 混用实参（依赖 printf）。
+
+两处修复的**回归证据**：把修复临时回退后重建 yh stage，`run/31` 与
+`run/32` 在 stage 上分别以退出码 1 失败（stage0 因实现不同仍通过），
+恢复修复后全部 42 通过。
+
+## 2026-09-28 自举 B7：全语言语义落地，stage1 覆盖完整语料（44/44）
+
+**实现**（compiler/ 12 文件，7657 行 yh；在 B5/B6 基础上补齐）：
+
+- **聚合按值 ABI**（机制 b：调用点拷贝 + 指针传递，满足 ADR-0001 全部
+  可观察行为）：聚合实参在调用点拷贝副本、传指针，被调用方入口再拷进
+  本帧独立槽（`F_AGGPARAM`）；聚合返回经 x8 隐藏缓冲（调用方分配，x0
+  返回缓冲地址）。嵌套结构体字面量经 `c_lit_depth` 状态栈递归构造。
+- **切片** `[]T`：规范化视图 `{u64 长度, T* 数据}`；`len`（数组编译期、
+  切片读偏移 0）、下标（读偏移 8 的数据指针）、`[N]T.to_type([]T)` 构造
+  `{N, &arr[0]}`。
+- **for-in**：数组 / 切片 / 区间 `a..b`（左闭右开）统一为「长度 + 取第 i
+  项」；区间长度 `max(0, 终点-起点)`，元素/下标绑定为每轮值拷贝。
+- **类型化变参** `name ... T`：登记为切片参数（签名 `vararg=2`），调用点
+  把尾部实参逆序弹栈写入临时数组再打包 `{count, data}`。
+- **浮点** f32/f64：d0-d7 传参与返回、`fadd/fsub/fmul/fdiv`、`fcmp`+`cset`
+  比较、`scvtf/ucvtf/fcvtzs/fcvtzu` 转换、`fmov` 常量装载、浮点局部与
+  复合赋值；GNU as 助记符不带 `.d/.s` 后缀（靠寄存器名区分）。
+- **structInit 作值**：结构体字面量可用于初始化、实参、返回与嵌套字段。
+
+**验证**：
+- `make bootstrap` 全绿：G1（自解析 + 66/66 + 29/29）、G2（stage1 编译自身
+  得 stage2；stage2 自解析、语法 66/66 + 29/29、运行语料 28/28）、
+  G2+（stage2 编译自身得 stage3，stage3 自解析；stage2/stage3 对聚合
+  用例的汇编逐字节一致）。
+- stage1 全量运行语料 **44/44**（含 run/25 结构体 ABI、27 数组按值+切片+
+  for-in、28 类型化变参+浮点、29 容量压力）。
+- `make test`：stage0 零回归（44/44）。
+
+**B7 自举差分暴露并修复的缺陷**：
+- 结构体字面量字段地址算成 `fp-(off+foff)`（应为 `fp-(off-foff)`）；
+- 聚合参数/返回的 x8 准备覆盖了已入参寄存器（改经 x10 中转）；
+- 聚合返回写入缓冲前未保存 x8（入口漏发 `em_save_hidden_ret`）；
+- 嵌套字面量恢复外层状态时 `save` 索引错（读 `save[depth]` 而非
+  `save[depth-1]`）；
+- 任意元素大小下标缺缩放（补 `mul`）；聚合元素在 value 模式被提前 load；
+- 浮点元素在 `sem_index` 用整数加载（补 `ldr d0/s0`）；
+- 区间长度用 `b.gt` + 误重置 x10 导致恒为 0；
+- 浮点复合赋值的右值经 x0 压栈丢失（改用专用浮点临时槽）；
+- `ucvtfd`/`fcvtzsd`/`fmul.d` 等错误助记符（GNU as 无后缀）；
+- for-in 绑定槽误用 `sem_declare_local` 的**符号下标**当偏移（改取
+  `c_syms[sym].offset`）。
+
+**已知缺陷（stage2 自举层面，如实记录）**：stage2 编译**浮点字面量**时，
+常量位型被编码为其 `fp64_bits` 函数地址（`0x4160676`）而非 IEEE754 值。
+影响仅限 stage2 + 浮点字面量（run/28 与 compiler.yh 内 `10.0`/`1.0`）；
+stage1 层面浮点完整正确。处置：`make bootstrap` 的运行子集排除 run/28，
+汇编固定点比较改在聚合用例上做。定位与后续见
+[自举后端架构](03-design/yh-自举后端架构.md) §6。
+
+> **已于下一轮修复**：根因是 `sem_push_arg` 对浮点实参压栈走 x0 通路
+> （见本文档「B7 收尾」一节）。修复后 stage2 浮点常量正确、汇编达到
+> 全量固定点，`make bootstrap` 已恢复全量运行语料与全量固定点比较。
+
+## 2026-09-28 自举 B5+B6：AArch64 后端与三代闭环，G2 达成
+
+**实现**（按 [自举实施方案 v2](02-plan/yh-自举实施方案-v2.md)，源码在
+`compiler/`，12 个文件共 6542 行 yh）：
+
+三层后端架构（多平台接入缝，详见
+[自举后端架构](03-design/yh-自举后端架构.md)）：
+- **前端语义**（平台无关）：`symbols.yh` 名字池/类型表/符号作用域/
+  类型兼容/常量折叠/prelude 登记；`sem.yh` 表达式·语句·声明语义钩子、
+  两遍编译驱动、fn 与结构体布局、调用约定检查；`parse_type/expr/stmt/
+  decl.yh` 边解析边调钩子（无 AST）。只引用 `target.yh` 数据模型与
+  `em_*` 抽象机原语，不含 ISA 细节。
+- **目标数据模型** `target.yh`：字长、对齐、参数寄存器数、结构体布局。
+- **指令发射** `emit_arm64.yh`：值栈、访存、控制流、调用约定（前 8 参
+  进 x0..x7，其余经调用点栈区）、`.data`/`.bss` 段与符号发射。
+
+关键机制：静态帧（体先进缓冲，帧大小定后一次 `sub sp`，循环体内局部
+不再压栈）；`mov sp, x29` 置于 epilogue 标签之后（显式 return 与落底
+路径汇聚点）；代码标签 `.L<n>` 与数据标签 `.LD<n>` 分离（0 为 NULL
+哨兵）；嵌套调用用实参基线栈 `c_call_base` 与直接调用标志栈
+`c_call_direct` 隔离内层；短路标签用嵌套栈 `sc_sc_false_stk` 保存外层。
+
+新增 `compiler/` 之外：`tests/yh/container-yh-cc.sh`（把 `--emit-asm` +
+gcc 包装成 stage0 的 `<file> -o <out>` 接口）、`check.py --filter`、
+Makefile 的 `SELFHOST_SOURCES` 与 `bootstrap` 目标。
+
+**验证（`make bootstrap` 逐门，全部通过）**：
+1. 拼接确定性：两次拼接逐字节一致，SHA-256 `90303ead…8d44b7`；
+2. **G1**：stage1 自解析自身拼接源码到 EOF；语法语料 66/66 + 29/29；
+3. **G2**：stage1 编译自身得 stage2（AArch64 Linux ELF）；stage2 自解析、
+   语法差分 66/66 + 29/29、运行语义子集 **25/25**；
+4. **G2+ 固定点**：stage2 编译自身得 stage3，`stage2.s` 与 `stage3.s`
+   **逐字节相同**，stage3 自解析通过。
+
+`make test`：stage0 零回归（ANTLR 66/66+29/29、编译器模式 66/66+29/29、
+运行层 44/44）。B5 运行语料 **40/44**，余 4 项（`run/25` 结构体按值、
+`27` 数组按值、`28` 浮点变参、`29` 包装类型）为方案规定的 B7 边界，
+均显式拒绝且由用例钉住。
+
+**自举差分暴露并修复的缺陷**（均由 stage2 运行复现，逐个修在编译器侧）：
+- 全局指针 `NULL` 初始化与字符串数据标签 `0` 冲突 → 数据标签从 1 起；
+- `t_sig_add` 四个签名数组共用容量变量 → 拆为独立容量；
+- 取模 `sdiv` 用 x10（与复合赋值持有的目标地址冲突）→ 改用 x11；
+- 普通赋值与复合赋值未取回暂存的目标地址（写进临时槽）→ 修正取改存；
+- `em_epilogue` 的 `mov sp, x29` 在返回标签之前 → 移到标签之后；
+- 任意元素大小（如 20 字节 Tok）的下标缺缩放 → 补 `mul`；
+- 聚合元素（结构体/数组）在 value 模式下被提前 load → 保留地址语义；
+- `let` 初始化大于 255 偏移时地址计算覆盖待存值 → 改用写 x10 的路径；
+- `&&`/`||` 嵌套时短路标签被内层覆盖 → 加嵌套栈；
+- 调用实参类型记录被内层调用覆盖 → 加实参基线栈；
+- 嵌套调用中 `c_call_direct` 被内层稀疏调用污染 → 加直接调用标志栈；
+- `main` 未输出 `.globl`（crt1 引用）→ 强制 GLOBAL。
+
+**发现但未修的 stage0 缺陷（已绕开并记录）**：`continue` 在无条件
+`for { }` 内报「不在循环内」（自编源码统一用 `for 1 { }`）；
+stage0 每个编译单元只允许一个全局数组（编译器全局表改堆分配）；
+`ty_sig_cap` 类共享容量问题在 stage0 的 `.yh` 语义层无直接对应，仅
+影响本编译器。
+
+## 2026-09-28 自举 B3+B4：compiler/ 下 yh 新编译器词法+语法落地，G1 语法自举达成
+
+**实现**（按 [自举实施方案 v2](02-plan/yh-自举实施方案-v2.md)，源码目录按指示用
+`compiler/` 替代方案的 `src/yh/`，共 2041 行 yh）：
+- `compiler/model.yh`：token 种类常量（编号分组供范围判断）、Tok 结构体、
+  全部全局状态集中声明（规避 stage0 全局名先声明后使用的问题）；
+- `compiler/buffer.yh`：open/read/close 整读源文件（倍增缓冲、短读/EOF/负值
+  处理）、write_all 短写循环、`file:line:col: 错误:` 诊断（fd 2）、推测解析
+  静默开关（c_spec）；
+- `compiler/lexer.yh`：完整词法器——保留字首字符分桶查表（语言关键字/
+  已移除关键字/内建类型三组）、进制数字与下划线规则（前缀后无数字回退为
+  十进制 `0`，与 ANTLR 一致）、字符串/字符转义集合与 `\xNN`、运算符最长
+  匹配、注释与 \f\v\r 空白；token 引用原缓冲不复制；
+- `compiler/parse_type.yh`：typeRef/fnType（返回类型省略靠 is_type_start
+  判定）+ 解析器共用游标工具；
+- `compiler/parse_expr.yh`：完整优先级链、后缀链（调用/下标/.to_type/成员，
+  成员位置放开保留字）、structInit 命名/位置式与「字面量 vs 块」花括号
+  消解（试探 + 配对 `}` 后必须紧跟 `{`，失败回退）；
+- `compiler/parse_stmt.yh`：块/let/const/if（强制括号）/for 三形态/switch/
+  return/branch/goto/标签/表达式语句；
+- `compiler/parse_decl.yh`：七类顶层声明、参数（类型化/裸变参）、struct/
+  union 字段、enum 成员；
+- `compiler/driver.yh`：`--syntax-check`（B4 范围）与 `--emit-asm`
+  （明确报后端未实现，B5 提供）。
+
+**构建与验证**：
+- `make`：stage0 零警告；`make bootstrap`（新增）：①拼接确定性（两次拼接
+  cmp 逐字节一致 + SHA-256 `eb8f5879…a5caecb`）；②stage0 交叉编译
+  `tmp/bootstrap/compiler.yh` 得 stage1（AArch64 Linux ELF）；③容器内
+  stage1 自解析自身拼接源码到 EOF；④`tests/yh/check.py --compiler
+  --compiler-path tests/yh/container-yh.sh`（YH_STAGE 指向容器内 stage1）
+  正例 **66/66**、反例 **29/29** → **G1 达成**；
+- `make test`：ANTLR 66/66+29/29、stage0 编译器模式 66/66+29/29、
+  yh-run 44/44 全绿（stage0 无回归）；
+- 词法边界探针（stage1 容器内执行）：1 MiB 语料（14000 声明 + 长标识符
+  + 注释混排）解析通过；NUL 字节串内合法/串外拒绝（`1:15: 非法字符`）；
+  未终结串拒绝（`1:36`）；跨行块注释后错误定位精确（`6:17`）；
+  非法输入一律非零退出且带位置，无崩溃；
+- 干净重建：`make clean && make && make bootstrap` 通过。
+
+**测试入口约定**：本轮新增 .yh 代码（compiler/ 8 个源文件）的测试即
+`make bootstrap` 的自解析 + 95 例语料差分；语法语料数量保持 66/29 不变
+（语料针对语言而非编译器实现，不因实现新增重复用例）。
+
+**发现的 stage0 缺陷（未修，已绕开）**：`continue` 在无条件 `for { }` 内
+报「continue 不在循环内」（含嵌在 if 中的情形）；`for 1 { }` 与
+`for cond { }` 路径正常。自编源码统一用 `for 1 { }`，探针
+`tmp/probe-continue.yh`。后续修 stage0 时可直接复用该探针复验。
+
 ## 2026-09-28 tests 目录清理：删除 TCC 上游 C 测试套件（237 个文件）
 
 **判定依据（引用关系全查证）**：
@@ -506,3 +724,14 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
 - `make` 零警告；`make test`：语法 66/66+29/29、运行 44/44
   （run 29/29、fail 12/12、pass 3/3）；`check.py --cross` 44/44。
 - 下一步：B3（用 yh 写出能解析自身的前端）。
+
+# 2026-09-28 自举实施方案 v2（文档）
+
+- 按提交 `b5b57d9` 的代码基线重定 B3–B8：B3 词法器、B4 语法自举 G1、B5 子集后端、B6 自编闭环 G2、B7 全语言覆盖、B8 三代固定点 G3。
+- 新方案见 `docs/02-plan/yh-自举实施方案-v2.md`；旧方案标记为历史，`docs/todo.md` 与自举能力边界同步更新。本次未修改编译器代码。
+- 方案制定前基线验证：`make` 成功；`make test` 的语法正反例为 66/66、29/29，Darwin 运行层 44/44；`python3 tests/yh-run/check.py --cross --quiet` 在 AArch64 Linux ELF 容器运行层 44/44。
+
+# 2026-09-28 自举方案归并（文档）
+
+- 将自举定义、现有能力、输入输出契约、技术路线、B3–B8 任务及 G1–G3 验收矩阵统一到 `docs/02-plan/yh-自举实施方案-v2.md`。
+- 原计划与能力边界文档改为简短入口，`docs/todo.md` 只链接统一方案；本次未修改编译器代码。

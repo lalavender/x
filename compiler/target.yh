@@ -1,0 +1,100 @@
+// ============================================================================
+// target.yh —— 目标数据模型（多平台接入缝之一）
+//
+// 多平台架构（docs/03-design/yh-自举后端架构.md）把后端拆成三层：
+//
+//   前端语义 symbols.yh（平台无关）
+//        │  只引用本文件的常量/布局函数，以及 emit 层的「抽象机原语」
+//        ▼
+//   目标数据模型 target.yh（本文件：字长/对齐/布局规则）
+//        │  换平台第一步：提供新目标的数据模型
+//        ▼
+//   指令发射 emit_<isa>.yh（每目标一个文件：寄存器、栈帧、ABI、指令）
+//
+// 换目标平台需要提供的东西（契约）：
+//   1. 数据模型：TG_* 常量 + tg_align_scalar/tg_layout_struct（本文件）；
+//   2. 指令发射：emit_<isa>.yh 实现 symbols.yh 调用的全部 em_* 原语
+//      （原语清单见 emit_arm64.yh 文件头）；
+//   3. 段/符号/重定位方言与驱动汇编器的调用方式（构建脚本侧）。
+// 当前目标：AArch64 Linux（GNU 汇编方言，LP64，小端）。
+// ============================================================================
+
+// —— 标量数据模型（字节） ——
+const TG_PTR_SIZE int = 8;      // 指针 8 字节（LP64）
+const TG_INT_SIZE int = 4;      // yh 的 int / i32 = 4 字节（默认整数类型）
+const TG_CHAR_SIZE int = 1;     // char / bool / i8 / u8 = 1 字节
+const TG_SHORT_SIZE int = 2;    // i16 / u16
+const TG_LONG_SIZE int = 8;     // i64 / u64
+const TG_ENUM_SIZE int = 4;     // enum 底层为 4 字节有符号整数
+
+// —— 栈与调用约定（前端在几处需要知道的量化约束） ——
+const TG_STACK_ALIGN int = 16;  // sp 在调用点必须 16 字节对齐
+const TG_ARG_REGS int = 8;      // 整型/指针参数的寄存器个数（x0..x7）
+const TG_VALUE_SLOT int = 16;   // 值栈一个槽的字节数（保持 sp 对齐）
+
+// —— 判型辅助（平台无关的位型事实，由数据模型推导） ——
+// tg_is_2byte：2 字节标量。
+fn tg_is_2byte(size int) int {
+    return (size == TG_SHORT_SIZE).to_type(int);
+}
+
+// tg_is_8byte：8 字节标量（指针一律 8 字节）。
+fn tg_is_8byte(size int) int {
+    return (size == TG_LONG_SIZE).to_type(int);
+}
+
+// tg_align_scalar：标量对齐 = 大小（AArch64 基本类型规则）。
+fn tg_align_scalar(size int) int {
+    return size;
+}
+
+// tg_layout_struct：计算一个 struct/union 的字段布局。
+// fields 是已登记的字段（type_id 已填），填写 offset 并把结果写入
+// c_layout_size / c_layout_align（模型约定：多值返回走专用全局出参）。
+// 规则：字段对齐 = 标量对齐 / 聚合对齐（递归查类型表）；
+// union 所有字段 offset 为 0；struct 大小向上取整到自身对齐。
+fn tg_layout_struct(first int, n int, is_union int) int {
+    let off int = 0;
+    let maxal int = 1;
+    let maxsz int = 0;
+    let i int = 0;
+    for i < n {
+        let ftid int = t_fields[first + i].type_id;
+        let fsz int = t_types[ftid].size;
+        let fal int = t_types[ftid].align;
+        if (fal > maxal) {
+            maxal = fal;
+        }
+        if (is_union != 0) {
+            t_fields[first + i].offset = 0;
+        } else {
+            // 向上取整到字段对齐
+            let pad int = (0 - off) % fal;
+            if (pad < 0) {
+                pad += fal;
+            }
+            off += pad;
+            t_fields[first + i].offset = off;
+            off += fsz;
+        }
+        if (fsz > maxsz) {
+            maxsz = fsz;
+        }
+        i += 1;
+    }
+    let size int = 0;
+    if (is_union != 0) {
+        size = maxsz;
+    } else {
+        size = off;
+    }
+    // 结构体大小向上取整到自身对齐
+    let rpad int = (0 - size) % maxal;
+    if (rpad < 0) {
+        rpad += maxal;
+    }
+    size += rpad;
+    c_layout_size = size;
+    c_layout_align = maxal;
+    return 0;
+}
