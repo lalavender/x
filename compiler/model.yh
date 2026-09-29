@@ -20,6 +20,7 @@
 //   16..40  语言关键字；TK_AS=39、TK_TO_TYPE=40 恰为组尾——
 //           「成员名」判断使用 16..39（to_type 不放开学成员名）
 //   41      已移除的 C 关键字（保留字，仅成员位置放开）
+//   42..43  模块关键字 module/import（MOD-U1，仅文件头，不作成员名）
 //   50..63  内建类型名（连续区间，is_type_start 依赖）
 //   64..    运算符：算术/位运算、逻辑、移位、比较、赋值（含复合）、区间、变参
 // ---------------------------------------------------------------------------
@@ -76,6 +77,12 @@ const TK_TO_TYPE int = 40;      // 后缀转换专用字；不作成员名
 // register auto inline volatile restrict
 // 它们不能作标识符（rejected/05），但成员位置放开（memberName）。
 const TK_RESERVED int = 41;
+
+// ---- 模块关键字（42..43，MOD-U1） ----
+// 仅在文件头（module 声明 → import 声明 → 业务声明）出现；不作标识符、
+// 不放开成员名（is_member_name 的区间判断不覆盖 42..43）。
+const TK_MODULE int = 42;   // module —— 文件头模块归属声明
+const TK_IMPORT int = 43;   // import —— 文件头导入声明
 
 // ---- 内建类型名（50..63，连续区间） ----
 const TK_INT int = 50;
@@ -257,6 +264,7 @@ struct SField {
     name_len int;
     type_id int;
     offset int;         // 相对结构体起始的字节偏移
+    is_pub int;         // 1 = pub 字段（MOD-U1 语法登记；跨模块检查在 MOD-U3）
 }
 let t_fields *SField = 0;
 let t_field_n int = 0;
@@ -281,6 +289,10 @@ struct TName {
     name_off int;       // 名字池偏移
     name_len int;
     type_id int;
+    is_pub int;         // 1 = pub 类型（接口导出）
+    form int;           // 0=type 别名 1=struct 2=union 3=enum（接口再发射用）
+    def_line int;       // 声明点行号（重定义诊断用）
+    def_col int;
 }
 let t_names *TName = 0;
 let t_name_n int = 0;
@@ -296,6 +308,8 @@ struct CSym {
                         // 全局：bss 清单下标（数据见 flags）
     flags int;          // F_*
     cval i64;           // 常量值位型；指针常量存数据标签号
+    def_line int;       // 声明点行号（模块模式重复声明诊断用）
+    def_col int;        // 声明点列号
 }
 let c_syms *CSym = 0;
 let c_sym_n int = 0;
@@ -379,6 +393,7 @@ let c_aggparam_size *int = 0; // 字节数（堆分配 64 项）
 let c_cur_struct int = 0;   // 正在解析的 struct/union 类型编号
 let t_cur_enum int = 0;     // 正在解析的 enum 类型编号
 let c_decl_pub int = 0;     // 当前顶层声明是否带 pub
+let c_name_form int = 0;    // 当前类型登记形态：0=type 别名 1=struct 2=union 3=enum
 
 // —— 名字池（symbols.yh 使用；名字统一 intern 到此池） ——
 let np_data *u8 = 0;
@@ -407,6 +422,128 @@ struct GLabel {
 }
 let c_glabels *GLabel = 0;  // goto 标签表（堆分配 128 项）
 let c_glabel_n int = 0;
+
+// —— 模块头（MOD-U1：文件身份与导入表） ——
+// 单文件形态下的 FileID 就是 c_path 本身；多文件/项目身份在 MOD-U2/U3
+// 引入模块索引时再扩展，这里只记录当前文件解析出的归属与导入。
+struct ImportEnt {
+    name_off int;       // 导入名名字池偏移
+    name_len int;
+    line int;           // 1 基行号（诊断用）
+    col int;            // 1 基列号
+}
+let mod_has_module int = 0;     // 1 = 文件带 module 归属声明（模块模式）
+let mod_name_off int = -1;      // 模块名名字池偏移（mod_has_module 时有效）
+let mod_name_len int = 0;
+let mod_imports *ImportEnt = 0; // 本文件导入表（堆分配，mod_import_push 扩容）
+let mod_import_n int = 0;
+let mod_import_cap int = 0;
+
+// ---------------------------------------------------------------------------
+// 模块与项目（MOD-U2..U4）：编译期状态
+//
+// 分工：project.yh 负责清单/发现/索引/三层解析（构建器视角，字符串均
+// intern 到名字池）；iface.yh 负责模块接口发射与加载；前端（sem/parse_*）
+// 通过下面的 c_mods（已加载接口的命名空间）做限定名解析与 pub 检查。
+// ---------------------------------------------------------------------------
+
+// 导出接口的一个名字条目（iface.yh 加载接口时填写）。
+struct ModNsEnt {
+    name_off int;       // 短名（源码名）名字池偏移
+    name_len int;
+    sym int;            // 值/函数/常量符号下标；纯类型名为 -1
+    tid int;            // 类型编号（类型名条目）；值条目 -1
+}
+
+// 一个已绑定导入模块（每份接口一条）。
+struct ModInfo {
+    bind_off int;       // 绑定名（=模块名）池偏移
+    bind_len int;
+    prefix_off int;     // 接口头宣布的符号后缀（__proj__mod）池偏移
+    prefix_len int;
+    home int;           // 模块编号（t_home 归属标记用）
+    ns *ModNsEnt;       // 导出名字表（堆分配）
+    ns_n int;
+    ns_cap int;
+}
+let c_mods *ModInfo = 0;        // 当前编译单元已加载的导入模块
+let c_mod_n int = 0;
+let c_mod_cap int = 0;
+let c_mod_home_next int = 0;    // 下一个模块编号（home 分配计数）
+
+// —— 模块模式编译开关 ——
+let c_module_mode int = 0;      // 1 = 模块模式（--emit-module）；单文件恒 0
+let c_iface_load int = 0;       // 1 = 正在加载接口文件（登记不发射、不进 bss）
+let c_is_entry_mod int = 0;     // 1 = 当前编译入口模块（main 不加后缀、须存在）
+let c_sym_sfx_off int = -1;     // 本模块符号后缀（__proj__mod）池偏移；单文件 -1
+let c_sym_sfx_len int = 0;
+let mod_import_mod *int = 0;    // 与 mod_imports 平行：导入绑定的 ModInfo 下标
+let mod_import_used *int = 0;   // 与 mod_imports 平行：本文件是否用到该导入
+
+// —— 类型归属（跨模块 pub 字段检查） ——
+// 与 t_types 平行：>=0 = 该具名类型来自对应模块编号；-1 = 本地。
+let t_home *int = 0;
+let t_home_cap int = 0;
+
+// —— 项目模型（project.yh；构建器视角，进程内一次构建共用） ——
+struct PFile {
+    path_off int;       // 源文件绝对（或相对根）路径池偏移
+    path_len int;
+    mod int;            // 所属模块（p_mods 下标）
+    line int;           // 保留：文件在清单/扫描中的出现序
+}
+struct PMod {
+    name_off int;       // 模块名池偏移
+    name_len int;
+    proj int;           // 提供方项目（p_projs 下标）
+    files *int;         // 文件下标表（p_files 下标，堆分配）
+    file_n int;
+    file_cap int;
+    is_entry int;       // 1 = 该项目 entry 指定的入口模块
+}
+struct PDep {
+    key_off int;        // 依赖键池偏移（诊断用）
+    key_len int;
+    proj int;           // 依赖项目（p_projs 下标）；-1 装载失败
+    line int;           // mod.toml 中声明行
+}
+struct PProj {
+    root_off int;       // mod.toml 所在目录池偏移
+    root_len int;
+    name_off int;       // project.name 池偏移
+    name_len int;
+    src_off int;        // 源码根目录池偏移（root + source）
+    src_len int;
+    entry_off int;      // project.entry 池偏移；-1 = 库项目
+    entry_len int;
+    deps *PDep;         // 直接依赖（堆分配）
+    dep_n int;
+    dep_cap int;
+    mods *int;          // 本项目模块（p_mods 下标，堆分配）
+    mod_n int;
+    mod_cap int;
+}
+let p_projs *PProj = 0;
+let p_proj_n int = 0;
+let p_proj_cap int = 0;
+let p_mods *PMod = 0;
+let p_mod_n int = 0;
+let p_mod_cap int = 0;
+let p_files *PFile = 0;
+let p_file_n int = 0;
+let p_file_cap int = 0;
+
+// —— 每文件导入的平铺清单（扫描期登记，绑定期解析） ——
+let p_imp_file *int = 0;        // 所属文件下标
+let p_imp_off *int = 0;         // 导入名池偏移
+let p_imp_len *int = 0;
+let p_imp_line *int = 0;        // 导入声明位置（源文件内）
+let p_imp_col *int = 0;
+let p_imp_mod *int = 0;         // 解析结果模块下标；-1 未解析
+let p_imp_n int = 0;
+let p_imp_cap int = 0;
+let p_stdlib int = -1;          // 标准库项目下标（YH_STDLIB；-1 未设置）
+let p_state *int = 0;           // 项目装载状态（0 未装载 1 装载中 2 完成）
 
 // —— 循环 break/continue 目标栈（堆分配各 64 项） ——
 // —— for-in 迭代状态（每循环一层） ——

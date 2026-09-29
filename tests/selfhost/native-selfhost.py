@@ -45,7 +45,9 @@ SOURCES = [
     "compiler/model.yh", "compiler/buffer.yh", "compiler/lexer.yh",
     "compiler/target.yh", "compiler/parse_type.yh", "compiler/symbols.yh",
     "compiler/emit_arm64.yh", "compiler/sem.yh", "compiler/parse_expr.yh",
-    "compiler/parse_stmt.yh", "compiler/parse_decl.yh", "compiler/driver.yh",
+    "compiler/parse_stmt.yh", "compiler/parse_decl.yh",
+    "compiler/parse_module.yh", "compiler/toml.yh", "compiler/project.yh",
+    "compiler/iface.yh", "compiler/module_build.yh", "compiler/driver.yh",
 ]
 
 
@@ -171,6 +173,19 @@ def main() -> int:
     for name, st in (("stage1", s1), ("stage2", s2), ("stage3", s3)):
         sys.stdout.write("语法语料 %s：\n" % name)
         ok = syntax_corpus(st) and ok
+
+    # 3a) 逐 stage 模块语法语料（MOD-U5 三代验证：module/import 语法
+    #     与文件头诊断在三代一致）
+    for name, st in (("stage1", s1), ("stage2", s2), ("stage3", s3)):
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "tests" / "modules" / "check.py"),
+             "--compiler-path", str(st), "--quiet"],
+            cwd=ROOT, capture_output=True, text=True)
+        good = r.returncode == 0
+        ok = ok and good
+        sys.stdout.write("模块语料 %s：%s\n"
+                         % (name, r.stdout.strip().splitlines()[-1]
+                            if r.stdout.strip() else ("OK" if good else "FAIL")))
 
     # 3b) stage2 运行不含 printf 的语义用例（真正执行，验证运行时语义）
     sys.stdout.write("stage2 运行语义（不含 printf 的用例）：\n")

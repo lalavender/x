@@ -1,5 +1,131 @@
 # finish
 
+## 2026-09-30 模块与项目管理 MOD-U2..U5 全部交付（mod.toml 项目、三层解析、独立对象/接口、缓存与自举验证）
+
+接上条 MOD-U0/U1。设计方案 §4–§12 的本地三层完整交付；按 ADR-0006 全部
+在自举侧 `compiler/` 实现，stage0 冻结未动（除种子即所用 prelude 的既有
+函数，无任何扩展）。新增 5 个源文件（约 2200 行 yh）：
+
+- **`toml.yh`**（最小 TOML 1.0 子集）：节/裸键/基本与字面量字符串/整数/
+  内联表/注释；多行字符串、数组、点键等显式拒绝。schema 校验在装载层
+  （必填 name、未知字段、依赖表形状、行尾规则），诊断带 mod.toml 行号。
+- **`project.yh`**：自 cwd 向上发现最近 mod.toml（≤32 层）；路径规范化
+  （段栈消解 . / .. / //，依赖根去重、装载态防依赖环）；递归 `ls -1p`
+  扫描源码根建索引（嵌套 mod.toml 目录属另一项目不进入；两阶段收集——
+  目录条目名先入名字池再递归，规避共享 ls 缓冲被递归覆盖）；绑定层实现
+  本项目→标准库（YH_STDLIB 指向一个标准库项目）→直接依赖的三层搜索，
+  入口模块不可被导入、第三方同名歧义报两个提供方、缺失报已搜索层次、
+  不回退；导入图 DFS topo（依赖序）+ 环路完整链诊断；`yh list
+  [--resolve name]` 列出模块/文件与绑定来源。
+- **`iface.yh`**：模块稳定接口 `<模块>.s.i`（`// yh-iface v1 arch=arm64
+  suffix=…` 头行 + pub 类型（含字段 pub 标记）/fn 签名/const 折叠值/pub
+  let 声明，正文即 yh 源码）；加载 = 头校验 + pass1 登记 + pass2a 折叠
+  （c_iface_load 抑制发射与 bss 登记），随后把新增符号/类型名改写为
+  「短名+后缀」并登记进 ModInfo.ns；类型归属 t_home 平行数组支撑跨模块
+  pub 字段检查。边界：pub 签名引用其他模块的类型与 pub 指针（字符串）
+  常量干净拒绝（类型闭包内联留待按需）。
+- **`module_build.yh`**：`yh build [-o out] [module]` / `yh run` /
+  内部 `--emit-module <mod> <提供方根> <主根> -o <out.s>`。每模块独立
+  子进程（argv[0] 再入）加载依赖接口后两遍编译该模块全部文件 → 独立
+  .s + 接口 .s.i；符号带 `__<sanitized-proj>__<mod>_` 后缀（pub→GLOBAL、
+  私有→LOCAL、入口模块 main 裸名 GLOBAL），gcc/clang 一次链接全部 .s。
+  U5 对象缓存：manifest = FNV-1a(后缀+entry+各源文件内容+各依赖接口
+  内容+版本标记)，命中且产物齐全跳过重编译；解析不缓存，重绑定由
+  构造保证（新增本地同名模块→绑定变化→依赖接口路径变化→hash 变化→
+  重编译），冷热一致由发射确定性保证。
+- **`driver.yh`**：项目命令分派（单文件三种旧形态不变）。
+
+前端语义（U3）：限定名 `m.f`/`m.T`/`m.T { … }`（局部作用域遮蔽导入）；
+未使用导入、导入名与顶层声明冲突、同模块重复顶层声明（报首次位置，
+fn 路径的消息同步补齐）检查；跨模块私有字段读写、私有符号、位置式
+构造含私有字段拒绝，命名式构造只可填 pub 字段。
+
+**过程中修复的缺陷（含 3 个既有编译器缺陷 + 语料盲区）**：
+1. `ty_push` 新增 t_home 平行数组扩容时**遗漏 `t_type_cap = ncap`**——
+   自举编译器编译自身在类型表第二次扩容后堆越界（SIGSEGV in
+   malloc/free），连带暴露 native-selfhost.py SOURCES 与 Makefile
+   双清单需人工同步的老问题（本次两处已同步）。
+2. **`em_store_sized`/`em_load_sized` 对 f64/f32 误用 x0**（值在
+   d0/s0）：f64 字段命名字面量写坏、成员读取错值、跨模块聚合传参/返回
+   值错（stage0 一直正确，自举侧与差分语料均未覆盖「浮点字段聚合」）。
+   修复为按 tid 分派 s0/d0。
+3. **浮点复合赋值 x10 保护压/弹不成对**（弹空栈，d1 从垃圾地址装入，
+   段错误）：重写为两次「压栈保护 → lea 用 x10 → 弹回」的成对序列。
+4. 类型化变参的**浮点元素误从 x 栈弹出**：补 FP 栈弹出路径（与
+   sem_call 栈实参的浮点弹出同法）。
+5. `lex_all` 不复位 lx_line/lx_lstart：多文件/接口加载后行号累计错。
+6. 诊断消息拼接曾用「数组.to_type(*char)」（数组接收者语义与指针不同，
+   传参退化才正确）：统一改为 intern 进名字池后经 np_cstr 取 *char，
+   新增 `arr_cstr` 辅助。
+
+**验证**：`make test` **63/63**（run 48/48 含新增 2 例、fail 12、pass 3）；
+`make selfhost-native` 全绿（三代语法 66/66+29/29 ×3、run 全量、固定点
+一致、modules 语法语料 **17/17**、项目验收 **21/21**）；`make bootstrap`
+通过（G1 + G2 run 48/48 + stage3 自解析 + 固定点）；`make g3` **通过**（容器分代全量语料、stage2.s==stage3.s 密码学固定点、发射洁净度、诊断质量、SHA-256 归档全项通过）。三代 stage 的模块语法语料验证（17/17 ×3）已挂进 selfhost-native 门。
+项目验收覆盖：两项目真实链接运行（含跨模块聚合/浮点/类型化变参/函数
+指针/限定字面量）、TOML 语法与未知字段错误、传递依赖拒绝、双依赖同名
+歧义、本地遮蔽标准库与标准库兜底、导入环、入口模块不可导入、私有字段/
+私有符号/位置式私有构造拒绝、同模块重复声明、未使用导入、导入名冲突、
+接口头损坏拒绝重建、缓存命中、重绑定后重编译与结果一致。
+新增语料：`tests/yh-run/run/47-float-struct-fields.yh`、
+`run/48-float-compound-assign.yh`（stage0 与自举双侧通过）；模块语料
+`tests/modules/`（语法 17 + 项目 21，runner 均已挂进 selfhost-native 门）。
+
+**边界与后续（MOD-U6）**：本地三层（当前项目/标准库/直接依赖）已完整；
+远程获取、版本规则、锁文件、工作区按方案明示「按实际需求另定」，需求
+出现时另立设计与验收用例，不沿用旧 Go 方案承诺。已知工程边界：目录与
+环境访问经 system+ls/printenv（stage0 prelude 冻结无 opendir/getenv），
+路径含空格/引号不受支持；接口不携带类型闭包（pub 签名引用他模块类型
+干净拒绝）。
+
+## 2026-09-29 模块与项目管理 MOD-U0 + MOD-U1（自举侧 module/import 语法）
+
+[设计方案](03-design/yh-模块与项目管理设计.md) /
+[实施方案](02-plan/yh-模块与项目管理实施方案.md) /
+[ADR-0005](adr/0005-yh-mod-toml与按名称导入.md) 的首个代码阶段。
+按 ADR-0006 冻结规则，实现只在自举侧 `compiler/`（stage0 不识别新语法，
+语法方案 §3 的「不直接改写 yh.g4」继续成立，ANTLR/stage0 语料不进新语法）。
+
+- **MOD-U0 基线**：`make test` 61/61（run 46/46、fail 12/12、pass 3/3）、
+  `make selfhost-native` 全绿（语法 66/66+29/29、run 全量、固定点一致）。
+  兼容边界确认：旧单文件形态（无 module）必须保持不变。
+- **词法**：`compiler/model.yh` 新增 TK_MODULE=42、TK_IMPORT=43（仅文件头
+  使用，不放开成员名；42..43 落在 is_member_name 区间之外，无回归），
+  `compiler/lexer.yh` kw_kind 识别 `module`/`import`。语料与编译器源码
+  均未占用这两个标识符（已全仓核查）。
+- **模块头解析**（新文件 `compiler/parse_module.yh`，约 170 行）：
+  `mod_parse_head` 在 parse_source 开头消费「module IDENT; → import IDENT;*」，
+  固定顺序、单次 module、`_` 不作模块/导入名、同文件重复导入报错、
+  import 脱离 module 报错、错位 module/import 给出位置诊断；
+  导入表（ImportEnt，名字 intern 到名字池）随解析登记——单文件形态的
+  FileID 即 c_path，多文件模块索引按方案留给 MOD-U2。
+  `mod_skip_head` 供 pass 2a/2b 子遍跳过头部 token。
+- **限定类型**：`compiler/parse_type.yh` parse_type_ref 接受 `m.T`（含
+  更长链）点号段；纯语法模式接受（未知模块不是语法错误），编译模式
+  给出「限定类型需要模块语义（尚未实现）」的明确诊断（此前是
+  「期望 ';'」）。
+- **pub 字段**：struct/union 字段接受 `pub` 前缀；SField 新增 is_pub
+  登记（布局与访问不变，跨模块检查按方案在 MOD-U3）。注意 `pub`自此
+  不能再作字段名（原本 pathological 场景，无语料依赖）。
+- **测试**：新 runner `tests/modules/check.py` + 语料 accept/ 7 例、
+  reject/ 10 例（17/17）。该 runner 只跑自举产物（yh-new
+  --syntax-check），已挂进 `make selfhost-native` 门；不与 stage0 语料
+  混跑。
+- **修一处基建遗漏**：`tests/selfhost/native-selfhost.py` 的 SOURCES
+  清单与 Makefile SELFHOST_SOURCES 是两份人工同步的列表，本次新增
+  parse_module.yh 时漏改前者，stage0 编译拼接源报
+  `'mod_parse_head' 未声明`（自举侧支持顶层前向调用，但文件必须真的
+  拼进来）。已同步，并在后续阶段考虑收敛为单一清单来源。
+- **验证门**：`make` 零警告；`make test` 61/61；`make selfhost-native`
+  全绿（三代语法 66/66+29/29 ×3、run 全量、汇编固定点一致、modules
+  17/17）；`make bootstrap` 通过（G1 + G2 三代闭环 + stage3 自解析 +
+  全量固定点）；`make g3` **通过**（首次运行的 run/39 报容器内
+  permission denied 为 B8 已记录的 macOS Docker 挂载元数据瞬时假失败，
+  重跑全绿，归档见 tmp/bootstrap/artifacts/）。
+- **后续（MOD-U2，未实施）**：TOML 清单与 schema、模块头索引、
+  本项目→标准库→直接依赖三层搜索、导入者上下文、歧义与不回退诊断；
+  未使用导入/导入名与声明重名的语义检查连同模块作用域在 MOD-U3。
+
 ## 2026-09-29 GitHub Actions 发布流水线：tag 触发归档 yh/yh-new 到 Release
 
 - 新增 `.github/workflows/release.yml`：推送任意 tag 触发，双平台构建

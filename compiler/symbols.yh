@@ -13,6 +13,11 @@
 // 到各表，表内只存池偏移与长度），extern 符号与用户符号同池同比较。
 // ============================================================================
 
+// np_cstr：名字池内偏移 → NUL 结尾 C 字符串（池内字节本就带 NUL）。
+fn np_cstr(off int) *char {
+    return (np_data + off).to_type(*char);
+}
+
 // name_intern：把 [start,len) 的名字字节复制进名字池，返回池内偏移。
 // 池里字节带 NUL 结尾（便于调试，不参与比较）。
 fn name_intern(start int, n int) int {
@@ -114,6 +119,7 @@ fn intvec_grow(vec **int, n int, cap *int) int {
 }
 
 // ty_push：向类型表追加条目，返回新类型编号。
+// t_home 平行数组同步增长（类型归属：-1 本地 / >=0 模块编号）。
 fn ty_push(kind int, size int, align int, elem int, n int, sub int) int {
     if (t_type_n == t_type_cap) {
         let ncap int = t_type_cap * 2;
@@ -130,6 +136,24 @@ fn ty_push(kind int, size int, align int, elem int, n int, sub int) int {
         }
         free(t_types);
         t_types = nd;
+        let nh *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
+        if (nh == 0) {
+            return fail("内存分配失败");
+        }
+        if (t_home_cap > 0) {
+            memcpy(nh, t_home, (t_home_cap * sizeof(int)).to_type(u64));
+        }
+        if (t_home_cap > 0) {
+            free(t_home);
+        }
+        t_home = nh;
+        // 新扩容区间填 -1（本地）
+        let hi int = t_home_cap;
+        for hi < ncap {
+            t_home[hi] = -1;
+            hi += 1;
+        }
+        t_home_cap = ncap;
         t_type_cap = ncap;
     }
     t_types[t_type_n].kind = kind;
@@ -357,9 +381,45 @@ fn ty_lookup_name(start int, n int) int {
     return -1;
 }
 
-// ty_declare_name：登记类型名字（重复定义报错）。
+// ty_declare_name：登记类型名字（重复定义报错，含首次声明位置）。
+// is_pub/form 取自调用方设置的全局（c_decl_pub / c_name_form）。
 fn ty_declare_name(off int, n int, tid int) int {
-    if (ty_lookup_name_off(off, n) >= 0) {
+    let prev int = ty_lookup_name_off(off, n);
+    if (prev >= 0) {
+        // 找到先前登记项的位置一并报告
+        let pi int = t_name_n - 1;
+        for pi >= 0 {
+            if (t_names[pi].name_len == n
+                && np_data[t_names[pi].name_off] == np_data[off]) {
+                let match int = 1;
+                let j int = 1;
+                for j < n {
+                    if (np_data[t_names[pi].name_off + j] != np_data[off + j]) {
+                        match = 0;
+                        break;
+                    }
+                    j += 1;
+                }
+                if (match != 0) {
+                    break;
+                }
+            }
+            pi -= 1;
+        }
+        if (pi >= 0 && c_spec == 0) {
+            let buf [128]u8;
+            let bn int = 0;
+            bn = append_str(buf, bn, "类型重定义（首次声明于 ");
+            bn = append_int(buf, bn, t_names[pi].def_line);
+            bn = append_byte(buf, bn, ':');
+            bn = append_int(buf, bn, t_names[pi].def_col);
+            bn = append_str(buf, bn, "）");
+            let mo int = tml_intern_str(buf, 0, bn);
+            if (mo < 0) {
+                return -1;
+            }
+            return err_tok(np_cstr(mo));
+        }
         return err_tok("类型重定义");
     }
     if (t_name_n == t_name_cap) {
@@ -381,6 +441,10 @@ fn ty_declare_name(off int, n int, tid int) int {
     t_names[t_name_n].name_off = off;
     t_names[t_name_n].name_len = n;
     t_names[t_name_n].type_id = tid;
+    t_names[t_name_n].is_pub = c_decl_pub;
+    t_names[t_name_n].form = c_name_form;
+    t_names[t_name_n].def_line = c_toks[c_pos].line;
+    t_names[t_name_n].def_col = c_toks[c_pos].col;
     t_name_n += 1;
     return 0;
 }
@@ -409,10 +473,48 @@ fn ty_lookup_name_off(off int, n int) int {
 }
 
 // sym_push：登记符号（名字先 intern 进池）。返回符号下标。
+// 模块模式下对全局声明做重复检查（同模块重复顶层声明报两个位置）；
+// 单文件模式行为不变（不检查）。
 fn sym_push(start int, n int, kind int, tid int, flags int) int {
     let off int = name_intern(start, n);
     if (off < 0) {
         return -1;
+    }
+    if (c_module_mode != 0 && (flags & F_GLOBAL) != 0 && (flags & F_EXTERN) == 0) {
+        // 模块模式：全局（含 enum 成员）重名报错；首次位置一并报告
+        let di int = 0;
+        for di < c_sym_n {
+            if ((c_syms[di].flags & F_GLOBAL) != 0 && c_syms[di].name_len == n
+                && np_data[c_syms[di].name_off] == np_data[off]) {
+                let match int = 1;
+                let j int = 1;
+                for j < n {
+                    if (np_data[c_syms[di].name_off + j] != np_data[off + j]) {
+                        match = 0;
+                        break;
+                    }
+                    j += 1;
+                }
+                if (match != 0) {
+                    if (c_spec == 0) {
+                        let buf [128]u8;
+                        let bn int = 0;
+                        bn = append_str(buf, bn, "重复的顶层声明（首次声明于 ");
+                        bn = append_int(buf, bn, c_syms[di].def_line);
+                        bn = append_byte(buf, bn, ':');
+                        bn = append_int(buf, bn, c_syms[di].def_col);
+                        bn = append_str(buf, bn, "）");
+                        let mo int = tml_intern_str(buf, 0, bn);
+                        if (mo < 0) {
+                            return -1;
+                        }
+                        return err_tok(np_cstr(mo));
+                    }
+                    return -1;
+                }
+            }
+            di += 1;
+        }
     }
     if (c_sym_n == c_sym_cap) {
         let ncap int = c_sym_cap * 2;
@@ -438,6 +540,8 @@ fn sym_push(start int, n int, kind int, tid int, flags int) int {
     c_syms[c_sym_n].offset = 0;
     c_syms[c_sym_n].flags = flags;
     c_syms[c_sym_n].cval = 0;
+    c_syms[c_sym_n].def_line = c_toks[c_pos].line;
+    c_syms[c_sym_n].def_col = c_toks[c_pos].col;
     c_sym_n += 1;
     return c_sym_n - 1;
 }
@@ -452,6 +556,30 @@ fn sym_push_lit(off int, n int, kind int, tid int, flags int) int {
     c_syms[idx].name_off = off;
     c_syms[idx].name_len = n;
     return idx;
+}
+
+// sym_lookup_off：按名字池偏移查符号（池对池比较，供构建器诊断用）。
+// 只查全局层（c_scope_start[0] 以下）。找不到返回 -1。
+fn sym_lookup_off(off int, n int) int {
+    let i int = c_sym_n - 1;
+    for i >= 0 {
+        if (c_syms[i].name_len == n) {
+            let match int = 1;
+            let j int = 0;
+            for j < n {
+                if (np_data[c_syms[i].name_off + j] != np_data[off + j]) {
+                    match = 0;
+                    break;
+                }
+                j += 1;
+            }
+            if (match != 0) {
+                return i;
+            }
+        }
+        i -= 1;
+    }
+    return -1;
 }
 
 // sym_lookup：当前作用域链内查找（符号按名字池比较）。找不到返回 -1。

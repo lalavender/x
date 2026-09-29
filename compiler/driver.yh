@@ -101,7 +101,7 @@ fn run_emit_asm_to(asm_path *char, obj_path *char) int {
         return fail("内存分配失败");
     }
     drv_build_cmd(cmd, cap, obj_path, asm_path);
-    let rc int = system(cmd.to_type(*char));
+    let rc int = system(arr_cstr(cmd));
     free(cmd);
     unlink(asm_path);
     if (rc != 0) {
@@ -113,11 +113,14 @@ fn run_emit_asm_to(asm_path *char, obj_path *char) int {
 
 // usage：输出用法说明（文件描述符 2）。
 fn usage() void {
-    let buf [256]u8;
+    let buf [512]u8;
     let n int = 0;
     n = append_str(buf, n, "用法: yh --syntax-check <file.yh>\n");
     n = append_str(buf, n, "      yh --emit-asm <file.yh>\n");
     n = append_str(buf, n, "      yh -o <out> <file.yh>\n");
+    n = append_str(buf, n, "      yh build [-o out] [module]   项目构建（mod.toml）\n");
+    n = append_str(buf, n, "      yh run                       构建并运行清单 entry\n");
+    n = append_str(buf, n, "      yh list [--resolve name]     列出模块/解释导入绑定\n");
     write_all(2, buf, n);
 }
 
@@ -196,6 +199,8 @@ fn drv_scan_target(argc int, argv **char, out **char) int {
 //   yh --emit-asm <file.yh>
 //   yh [-target darwin] -o <out> <file.yh>
 fn main(argc int, argv **char) int {
+    // 自身路径（项目构建的子进程再入用）
+    c_argv0 = argv[0];
     // 先摘除 -target，得到规整后的参数序列（av[0..n-1]）。用固定容量栈数组：
     // 命令行参数个数有上限（64 足够）。
     let av [64]*char;
@@ -210,6 +215,29 @@ fn main(argc int, argv **char) int {
         } else {
             c_dialect = TG_DIALECT_GNU;
         }
+    }
+    // —— 项目命令（MOD-U2..U5，在单文件分派之前） ——
+    if (n >= 1 && cstr_eq(av[0], "build") != 0) {
+        return mb_cmd_build(av, n);
+    }
+    if (n >= 1 && cstr_eq(av[0], "run") != 0) {
+        return mb_cmd_run();
+    }
+    if (n >= 1 && cstr_eq(av[0], "list") != 0) {
+        return mb_cmd_list(av, n);
+    }
+    if (n == 6 && cstr_eq(av[0], "--emit-module") != 0 && cstr_eq(av[4], "-o") != 0) {
+        // 内部子命令：--emit-module <mod> <提供方根> <主根> -o <out.s>
+        let mlen int = 0;
+        let rlen int = 0;
+        let blen int = 0;
+        let mo int = mb_intern_arg(av[1], &mlen);
+        let ro int = mb_intern_arg(av[2], &rlen);
+        let bo int = mb_intern_arg(av[3], &blen);
+        if (mo < 0 || ro < 0 || bo < 0) {
+            return 1;
+        }
+        return mb_emit_module(mo, mlen, ro, rlen, bo, blen, av[5]);
     }
     let src_idx int = 1;
     let out_idx int = 1;

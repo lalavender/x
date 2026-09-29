@@ -173,6 +173,8 @@ test: yh$(EXESUF)
 # 用途：容器不可用或需要快速定位自举缺陷时的日常回归。
 selfhost-native: yh$(EXESUF)
 	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py
+	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(TOPSRC)/yh-new
+	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(TOPSRC)/yh-new
 
 # g3：B8 / G3 正式验收。先跑 make bootstrap 得到 stage1..stage3，再在容器
 # 内做分代全量语料复验、汇编固定点（compiler.yh + 全部代表程序）、确定性
@@ -201,6 +203,11 @@ SELFHOST_SOURCES = $(SELFHOST_DIR)/model.yh \
                    $(SELFHOST_DIR)/parse_expr.yh \
                    $(SELFHOST_DIR)/parse_stmt.yh \
                    $(SELFHOST_DIR)/parse_decl.yh \
+                   $(SELFHOST_DIR)/parse_module.yh \
+                   $(SELFHOST_DIR)/toml.yh \
+                   $(SELFHOST_DIR)/project.yh \
+                   $(SELFHOST_DIR)/iface.yh \
+                   $(SELFHOST_DIR)/module_build.yh \
                    $(SELFHOST_DIR)/driver.yh
 
 BOOTSTRAP_DIR = $(TOP)/tmp/bootstrap

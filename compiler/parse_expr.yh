@@ -643,11 +643,26 @@ fn parse_primary(res *Res) int {
     return err_tok("此处需要一个表达式");
 }
 
-// parse_ident_primary：标识符作为基本表达式（含结构体字面量决策）。
+// parse_ident_primary：标识符作为基本表达式（含结构体字面量决策与
+// 模块限定名分派）。
 fn parse_ident_primary(res *Res) int {
     // 注意：stage0 中 if/while 体不开新词法作用域，同名局部必须提升到函数级
     let istart int = c_toks[c_pos].start;
     let ilen int = c_toks[c_pos].len;
+    // 模块限定名（编译模式）：名字解析失败且是当前文件的导入绑定
+    //（局部声明按词法作用域遮蔽导入）。语法模式不解析（U1 行为）。
+    if (c_compile != 0 && c_module_mode != 0 && p_peek(1) == TK_DOT && p_peek(2) == TOK_IDENT) {
+        if (sym_lookup(istart, ilen) < 0) {
+            let b int = mod_file_binding(istart, ilen);
+            if (b >= 0) {
+                // m.T { …：限定结构体字面量（仅非块跟随上下文）
+                if (p_peek(3) == TK_LBRACE && c_ctx_block == 0) {
+                    return parse_module_struct_lit(res, b);
+                }
+                return parse_module_qualified(res, b, 0);
+            }
+        }
+    }
     if (p_peek(1) == TK_LBRACE) {
         if (c_ctx_block != 0) {
             if (try_struct_init() == 0) {
@@ -661,6 +676,85 @@ fn parse_ident_primary(res *Res) int {
     }
     p_adv();
     return sem_ident(istart, ilen, res);
+}
+
+// mod_file_binding：当前文件导入表中查绑定名，返回 ModInfo 下标；无 -1。
+fn mod_file_binding(start int, n int) int {
+    if (mod_import_mod == 0) {
+        return -1;
+    }
+    let i int = 0;
+    for i < mod_import_n {
+        if (mod_import_mod[i] >= 0 && mod_imports[i].name_len == n) {
+            let match int = 1;
+            let j int = 0;
+            for j < n {
+                if (np_data[mod_imports[i].name_off + j] != c_src[start + j]) {
+                    match = 0;
+                    break;
+                }
+                j += 1;
+            }
+            if (match != 0) {
+                return mod_import_mod[i];
+            }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// parse_module_qualified：m.member 的模块成员访问（消费 m . member）。
+// 命名空间命中后按普通名字求值（跨模块符号已带后缀且为外部引用）；
+// 未使用的导入在此标记。want_type=0。
+fn parse_module_qualified(res *Res, mi int, unused int) int {
+    p_adv(); // 绑定名
+    p_adv(); // '.'
+    let mstart int = c_toks[c_pos].start;
+    let mlen int = c_toks[c_pos].len;
+    let mline int = c_toks[c_pos].line;
+    let mcol int = c_toks[c_pos].col;
+    p_adv();
+    let e int = mod_ns_lookup(mi, mstart, mlen, 0);
+    if (e < 0) {
+        return err_lc(mline, mcol, "模块没有导出该名字（或它是类型名不能作值）");
+    }
+    // 标记导入已使用（未使用导入检查在文件编译完后做）
+    let i int = 0;
+    for i < mod_import_n {
+        if (mod_import_mod[i] == mi) {
+            mod_import_used[i] = 1;
+            break;
+        }
+        i += 1;
+    }
+    return sem_ident_val(c_mods[mi].ns[e].sym, res);
+}
+
+// parse_module_struct_lit：m.T { … } 限定结构体字面量（消费 m . T）。
+// tid 来自接口命名空间；构造检查与本地类型一致（跨模块私有字段拒绝）。
+fn parse_module_struct_lit(res *Res, mi int) int {
+    p_adv();
+    p_adv();
+    let tstart int = c_toks[c_pos].start;
+    let tlen int = c_toks[c_pos].len;
+    let tline int = c_toks[c_pos].line;
+    let tcol int = c_toks[c_pos].col;
+    p_adv();
+    let e int = mod_ns_lookup(mi, tstart, tlen, 1);
+    if (e < 0) {
+        return err_lc(tline, tcol, "模块没有导出该类型");
+    }
+    let tid int = c_mods[mi].ns[e].tid;
+    let i int = 0;
+    for i < mod_import_n {
+        if (mod_import_mod[i] == mi) {
+            mod_import_used[i] = 1;
+            break;
+        }
+        i += 1;
+    }
+    return parse_struct_init_tid(tid, res);
 }
 
 // try_struct_init：试探「IDENT { structInitBody }」成立且其后紧跟 '{'。
@@ -716,6 +810,12 @@ fn parse_struct_init_forced(res *Res) int {
             return sem_err("结构体字面量需要一个 struct/union 类型名");
         }
     }
+    return parse_struct_init_tid(tid, res);
+}
+
+// parse_struct_init_tid：按给定类型构造结构体字面量（'{ … }' 由本函数
+// 消费；本地路径与模块限定路径共用）。
+fn parse_struct_init_tid(tid int, res *Res) int {
     if (p_expect(TK_LBRACE, "期望 '{'") != 0) {
         return -1;
     }
@@ -767,6 +867,10 @@ fn parse_struct_init_body() int {
                 fidx = sem_lit_field_lookup(c_lit_tid, fs, fl);
                 if (fidx < 0) {
                     return sem_err("结构体没有该字段");
+                }
+                // 跨模块命名式构造只可填写 pub 字段（省略的按零初始化）
+                if (c_module_mode != 0 && t_home[c_lit_tid] >= 0 && t_fields[fidx].is_pub == 0) {
+                    return sem_err("跨模块不能初始化私有字段（声明处未加 pub）");
                 }
             }
             p_adv();

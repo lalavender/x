@@ -1,0 +1,220 @@
+// ============================================================================
+// parse_module.yh —— 自举编译器：模块头解析（MOD-U1）
+//
+// 实现「模块与项目管理」设计（docs/03-design/yh-模块与项目管理设计.md §3）
+// 的文件头语法：注释与空白之后依次是 module 归属声明、import 声明，
+// 然后才是顶层业务声明。本阶段只做语法与文件身份：
+//   * 记录文件归属（module 名）与本文件导入表（ImportEnt，model.yh）；
+//   * 重复导入在解析期报错；未使用导入、导入名与声明重名等语义检查
+//     在 MOD-U3 引入模块作用域时实施；
+//   * 纯语法检查不解析 mod.toml、不搜索依赖：未知模块不是语法错误。
+// 单文件旧形态（无 module 声明）保持不变；import 不允许脱离 module 出现。
+// ============================================================================
+
+// mod_valid_name：当前 token 是否可作模块/导入名——单个标识符，
+// 且不恰为 "_"（设计 §1：_ 不能作模块名）。是返回 1。
+fn mod_valid_name() int {
+    if (p_cur() != TOK_IDENT) {
+        return 0;
+    }
+    if (c_toks[c_pos].len == 1 && c_src[c_toks[c_pos].start] == '_') {
+        return 0;
+    }
+    return 1;
+}
+
+// mod_import_find：按源码区间 [start,start+n) 查本文件导入表。
+// 返回表内下标；未导入返回 -1（重复导入检查用）。
+fn mod_import_find(start int, n int) int {
+    let i int = 0;
+    for i < mod_import_n {
+        if (mod_imports[i].name_len == n) {
+            let match int = 1;
+            let j int = 0;
+            for j < n {
+                if (np_data[mod_imports[i].name_off + j] != c_src[start + j]) {
+                    match = 0;
+                    break;
+                }
+                j += 1;
+            }
+            if (match != 0) {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// mod_import_push：向本文件导入表追加一条（名字 intern 进名字池）。
+// 平行的绑定/使用数组随表一起扩容（mod_bind_current_file / 未使用检查用）。
+// 返回 0 成功；内存分配失败输出诊断并返回 -1。
+fn mod_import_push(start int, n int, line int, col int) int {
+    if (mod_import_n == mod_import_cap) {
+        let ncap int = mod_import_cap * 2;
+        if (ncap == 0) {
+            ncap = 8;
+        }
+        let nd *ImportEnt = malloc((ncap * sizeof(ImportEnt)).to_type(u64)).to_type(*ImportEnt);
+        if (nd == 0) {
+            return fail("内存分配失败");
+        }
+        if (mod_import_n > 0) {
+            memcpy(nd, mod_imports, (mod_import_n * sizeof(ImportEnt)).to_type(u64));
+        }
+        free(mod_imports);
+        mod_imports = nd;
+        let ndm *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
+        if (ndm == 0) {
+            return fail("内存分配失败");
+        }
+        if (mod_import_n > 0) {
+            memcpy(ndm, mod_import_mod, (mod_import_n * sizeof(int)).to_type(u64));
+        }
+        free(mod_import_mod);
+        mod_import_mod = ndm;
+        let ndu *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
+        if (ndu == 0) {
+            return fail("内存分配失败");
+        }
+        if (mod_import_n > 0) {
+            memcpy(ndu, mod_import_used, (mod_import_n * sizeof(int)).to_type(u64));
+        }
+        free(mod_import_used);
+        mod_import_used = ndu;
+        mod_import_cap = ncap;
+    }
+    let off int = name_intern(start, n);
+    if (off < 0) {
+        return -1;
+    }
+    mod_imports[mod_import_n].name_off = off;
+    mod_imports[mod_import_n].name_len = n;
+    mod_imports[mod_import_n].line = line;
+    mod_imports[mod_import_n].col = col;
+    mod_import_mod[mod_import_n] = -1;
+    mod_import_used[mod_import_n] = 0;
+    mod_import_n += 1;
+    return 0;
+}
+
+// mod_reset_file：开始解析一个新源文件前重置文件级模块状态。
+fn mod_reset_file() void {
+    mod_import_n = 0;
+    mod_has_module = 0;
+    mod_name_off = -1;
+    mod_name_len = 0;
+}
+
+// mod_bind_current_file：把当前文件的每条导入绑定到已加载接口（ModInfo）。
+// 模块模式下由驱动在解析文件头后调用；单文件/接口加载路径不调用。
+// 绑定失败（导入没有对应接口）视为内部错误并报错。
+fn mod_bind_current_file() int {
+    if (c_module_mode == 0) {
+        return 0;
+    }
+    let i int = 0;
+    for i < mod_import_n {
+        let found int = -1;
+        let mi int = 0;
+        for mi < c_mod_n {
+            if (c_mods[mi].bind_len == mod_imports[i].name_len
+                && np_data[c_mods[mi].bind_off] == np_data[mod_imports[i].name_off]) {
+                let match int = 1;
+                let j int = 1;
+                for j < mod_imports[i].name_len {
+                    if (np_data[c_mods[mi].bind_off + j] != np_data[mod_imports[i].name_off + j]) {
+                        match = 0;
+                        break;
+                    }
+                    j += 1;
+                }
+                if (match != 0) {
+                    found = mi;
+                    break;
+                }
+            }
+            mi += 1;
+        }
+        if (found < 0) {
+            return err_lc(mod_imports[i].line, mod_imports[i].col,
+                "内部错误：导入未解析到已加载接口");
+        }
+        mod_import_mod[i] = found;
+        mod_import_used[i] = 0;
+        i += 1;
+    }
+    return 0;
+}
+
+// mod_parse_head：解析文件头（module 声明 → import 声明）。
+// 由 parse_source 开头调用（语法模式与编译 pass 1 共用），消费到的
+// token 之后交给业务声明主循环。规则（设计 §3）：
+//   * module 声明必须是文件第一个 token；import 只能出现在 module 之后；
+//   * 模块名/导入名为单个标识符（"_" 除外）；
+//   * 同一文件重复导入同一模块名报错。
+// 返回 0 成功；失败 -1（诊断已输出）。
+fn mod_parse_head() int {
+    if (p_cur() != TK_MODULE) {
+        // 旧单文件形态：无模块头；import 不允许脱离 module 出现
+        if (p_cur() == TK_IMPORT) {
+            return err_tok("import 声明前必须有 module 声明");
+        }
+        return 0;
+    }
+    p_adv();
+    if (mod_valid_name() == 0) {
+        return err_tok("此处需要一个模块名（单个标识符，_ 除外）");
+    }
+    let nstart int = c_toks[c_pos].start;
+    let nlen int = c_toks[c_pos].len;
+    p_adv();
+    if (p_expect(TK_SEMI, "期望 module 声明结尾 ';'") != 0) {
+        return -1;
+    }
+    let off int = name_intern(nstart, nlen);
+    if (off < 0) {
+        return -1;
+    }
+    mod_has_module = 1;
+    mod_name_off = off;
+    mod_name_len = nlen;
+    for p_cur() == TK_IMPORT {
+        p_adv();
+        if (mod_valid_name() == 0) {
+            return err_tok("此处需要一个导入模块名（单个标识符，_ 除外）");
+        }
+        let istart int = c_toks[c_pos].start;
+        let ilen int = c_toks[c_pos].len;
+        let iline int = c_toks[c_pos].line;
+        let icol int = c_toks[c_pos].col;
+        if (mod_import_find(istart, ilen) >= 0) {
+            return err_lc(iline, icol, "重复导入同一模块");
+        }
+        if (mod_import_push(istart, ilen, iline, icol) != 0) {
+            return -1;
+        }
+        p_adv();
+        if (p_expect(TK_SEMI, "期望 import 声明结尾 ';'") != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// mod_skip_head：pass 2 子遍（globals/fns）跳过文件头 token。
+// 调用前提：pass 1 已通过 mod_parse_head 校验，形态必然合法，此处不再
+// 诊断，只把游标推进到第一个业务声明。
+fn mod_skip_head() void {
+    if (p_cur() == TK_MODULE) {
+        p_adv();
+        p_adv();
+        p_adv();
+    }
+    for p_cur() == TK_IMPORT {
+        p_adv();
+        p_adv();
+        p_adv();
+    }
+}

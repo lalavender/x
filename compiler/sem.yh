@@ -253,6 +253,12 @@ fn sem_ident(start int, n int, r *Res) int {
     if (idx < 0) {
         return sem_err("引用了未声明的名字");
     }
+    return sem_ident_val(idx, r);
+}
+
+// sem_ident_val：按符号下标完成名字引用的求值（sem_ident 与模块限定名
+// 共用；idx 的名字解析已完成）。
+fn sem_ident_val(idx int, r *Res) int {
     r.sym = idx;
     r.type_id = c_syms[idx].type_id;
     let kind int = c_syms[idx].kind;
@@ -839,6 +845,10 @@ fn sem_member(base *Res, name_start int, name_len int) int {
     if (found < 0) {
         return sem_err("结构体没有该字段");
     }
+    // 跨模块 pub 检查（U3）：外部模块类型的私有字段不可访问
+    if (c_module_mode != 0 && t_home[stid] >= 0 && t_fields[found].is_pub == 0) {
+        return sem_err("跨模块不能访问私有字段（声明处未加 pub）");
+    }
     if (c_fold != 0) {
         return sem_err("字段访问不是编译期常量");
     }
@@ -1152,6 +1162,20 @@ fn sem_call(callee *Res, r *Res) int {
         // 值栈顶是最后一个实参：逐个弹出并按倒序写入数组（元素 0 在最低地址）
         let vi int = vcount - 1;
         for vi >= 0 {
+            // 浮点实参在 FP 栈（em_push_fp 压入），弹出与存储都走 d0/s0
+            if (ty_is_float(velem) != 0) {
+                let vfx *char = "d";
+                if (esz == 4) { vfx = "s"; }
+                if (em_frag("\tldr\t") != 0) { return -1; }
+                if (em_frag(vfx) != 0) { return -1; }
+                if (em_frag("0, [sp], #16\n") != 0) { return -1; }
+                if (em_lea_local_to(arr_off - vi * esz) != 0) { return -1; }
+                if (em_frag("\tstr\t") != 0) { return -1; }
+                if (em_frag(vfx) != 0) { return -1; }
+                if (em_frag("0, [x10]\n") != 0) { return -1; }
+                vi -= 1;
+                continue;
+            }
             if (em_pop("x0") != 0) { return -1; }
             // 元素 vi 的地址：向下偏移 = arr_off - vi*esz
             if (em_lea_local_to(arr_off - vi * esz) != 0) { return -1; }
@@ -1406,6 +1430,19 @@ fn sem_lit_field_lookup(tid int, start int, n int) int {
 fn sem_struct_lit_begin(tid int, named int) int {
     if (c_compile == 0 || c_fold != 0) {
         return 0;
+    }
+    // 跨模块构造检查（U3）：位置式写全部字段——含私有字段即拒绝；
+    // 命名式在字段名解析处逐字段检查（省略字段按零初始化）。
+    if (c_module_mode != 0 && t_home[tid] >= 0 && named == 0) {
+        let st int = t_types[tid].sub;
+        let nf int = t_types[tid].len;
+        let i int = 0;
+        for i < nf {
+            if (t_fields[st + i].is_pub == 0) {
+                return sem_err("跨模块不允许位置式构造含私有字段的类型");
+            }
+            i += 1;
+        }
     }
     if (c_lit_depth >= 32) {
         return sem_err("结构体字面量嵌套过深");
@@ -1720,13 +1757,15 @@ fn sem_assign(op int, lres *Res, rres *Res) int {
             if (em_frag("0, [x10]\n") != 0) { return -1; }
             return 0;
         }
-        // 复合赋值：右值（d0）存入专用临时槽；目标地址进 x10；旧值读入 d1；
-        // 右值弹回 d0；运算后经 x10 存回。
+        // 复合赋值：右值（d0）存入专用临时槽；目标地址进出 x10 各两次
+        //（每次 em_lea_local_to 都会覆盖 x10，目标地址先压栈保护、用后
+        // 弹回；压/弹必须成对，此前弹空栈导致 d1 从垃圾地址装入）。
         let fs2 *char = "d";
         if (t_types[lres.type_id].size == 4) { fs2 = "s"; }
         if (c_fp_tmp_off == 0) {
             c_fp_tmp_off = em_alloc_local(8);
         }
+        if (em_ins("str\tx10, [sp, #-16]!") != 0) { return -1; }
         if (em_lea_local_to(c_fp_tmp_off) != 0) { return -1; }
         if (em_frag("\tstr\t") != 0) { return -1; }
         if (em_frag(fs2) != 0) { return -1; }
@@ -2186,7 +2225,8 @@ fn sem_fn_end() int {
 }
 
 // sem_add_field：为当前 struct/union 追加字段（pass 1）。
-fn sem_add_field(stid int, start int, n int, ftid int) int {
+// is_pub：pub 字段标记（MOD-U1 语法登记；跨模块访问检查在 MOD-U3）。
+fn sem_add_field(stid int, start int, n int, ftid int, is_pub int) int {
     let fk int = t_types[ftid].kind;
     if ((fk == TY_STRUCT || fk == TY_UNION) && t_types[ftid].size == 0) {
         return sem_err("字段使用了不完整的类型");
@@ -2215,6 +2255,7 @@ fn sem_add_field(stid int, start int, n int, ftid int) int {
     t_fields[t_field_n].name_len = n;
     t_fields[t_field_n].type_id = ftid;
     t_fields[t_field_n].offset = 0;
+    t_fields[t_field_n].is_pub = is_pub;
     t_field_n += 1;
     t_types[stid].len = t_field_n - t_types[stid].sub;
     return 0;

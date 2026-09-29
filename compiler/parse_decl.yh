@@ -67,8 +67,18 @@ fn skip_init() int {
 }
 
 // parse_source：全量解析（语法模式与 pass 1 用）。
+// 先解析文件头（module/import，MOD-U1），再按顶层声明循环到 EOF。
 fn parse_source() int {
+    if (mod_parse_head() != 0) {
+        return -1;
+    }
     for p_cur() != TOK_EOF {
+        if (p_cur() == TK_MODULE) {
+            return err_tok("module 声明必须在文件头部且只能出现一次");
+        }
+        if (p_cur() == TK_IMPORT) {
+            return err_tok("import 声明必须在文件头部（module 之后、业务声明之前）");
+        }
         if (parse_top_decl() != 0) {
             return -1;
         }
@@ -117,6 +127,7 @@ fn skip_top_decl() int {
 
 // parse_source_globals：pass 2a——只处理顶层 let/const（源码顺序）。
 fn parse_source_globals() int {
+    mod_skip_head();
     for p_cur() != TOK_EOF {
         if (p_cur() == TK_PUB) {
             c_decl_pub = 1;
@@ -163,6 +174,7 @@ fn parse_source_globals() int {
 
 // parse_source_fns：pass 2b——只处理 fn（源码顺序）。
 fn parse_source_fns() int {
+    mod_skip_head();
     for p_cur() != TOK_EOF {
         if (p_cur() == TK_PUB) {
             c_decl_pub = 1;
@@ -390,7 +402,11 @@ fn parse_global_init(idx int, tid int, kind int) int {
 }
 
 // sem_global_zero：零初始化全局登记进 .bss 清单。
+// 接口加载路径（c_iface_load）只登记不发射——存储由提供方模块的 .s 给出。
 fn sem_global_zero(idx int, tid int) int {
+    if (c_iface_load != 0) {
+        return 0;
+    }
     if (c_bss_n >= 4096) {
         return sem_err("零初始化全局过多");
     }
@@ -938,9 +954,21 @@ fn parse_fn_decl() int {
     }
     // 编译模式
     if (c_pass == 1) {
-        // 登记函数符号与签名
-        if (sym_lookup(start, n) >= 0) {
-            return sem_err("顶层符号重定义");
+        // 登记函数符号与签名（重复时报告首次声明位置）
+        let prev int = sym_lookup(start, n);
+        if (prev >= 0) {
+            let buf [128]u8;
+            let bn int = 0;
+            bn = append_str(buf, bn, "顶层符号重定义（首次声明于 ");
+            bn = append_int(buf, bn, c_syms[prev].def_line);
+            bn = append_byte(buf, bn, ':');
+            bn = append_int(buf, bn, c_syms[prev].def_col);
+            bn = append_str(buf, bn, "）");
+            let mo int = tml_intern_str(buf, 0, bn);
+            if (mo < 0) {
+                return -1;
+            }
+            return sem_err(np_cstr(mo));
         }
         let first int = t_sigparam_n;
         let i int = 0;
@@ -963,9 +991,12 @@ fn parse_fn_decl() int {
         if (idx < 0) {
             return -1;
         }
-        // main 的 ELF 符号保持 GLOBAL（crt1 引用），无论是否书写 pub
+        // main 的 ELF 符号保持 GLOBAL（crt1 引用），无论是否书写 pub。
+        // 模块模式下仅入口模块的 main 裸名导出；其他模块的 main 是
+        // 普通符号（按 pub 修饰决定绑定，符号名带模块后缀）。
         if (n == 4 && c_src[start] == 'm' && c_src[start + 1] == 'a'
-            && c_src[start + 2] == 'i' && c_src[start + 3] == 'n') {
+            && c_src[start + 2] == 'i' && c_src[start + 3] == 'n'
+            && (c_module_mode == 0 || c_is_entry_mod != 0)) {
             c_syms[idx].flags |= F_PUB;
         }
         // 跳过函数体
@@ -1037,6 +1068,7 @@ fn parse_type_decl() int {
         if (off < 0) {
             return -1;
         }
+        c_name_form = 0;
         return ty_declare_name(off, n, tid);
     }
     return 0;
@@ -1065,6 +1097,7 @@ fn parse_struct_decl() int {
         if (off < 0) {
             return -1;
         }
+        c_name_form = is_union + 1;
         if (ty_declare_name(off, n, stid) != 0) {
             return -1;
         }
@@ -1074,6 +1107,12 @@ fn parse_struct_decl() int {
         return -1;
     }
     for p_cur() != TK_RBRACE && p_cur() != TOK_EOF {
+        // pub 字段前缀（MOD-U1）：可见性登记，布局与访问不做区分
+        let fpub int = 0;
+        if (p_cur() == TK_PUB) {
+            fpub = 1;
+            p_adv();
+        }
         if (is_member_name(p_cur()) == 0) {
             return err_tok("此处需要一个字段名");
         }
@@ -1088,7 +1127,7 @@ fn parse_struct_decl() int {
             return -1;
         }
         if (c_compile != 0 && (c_pass == 1 || c_nested_type != 0)) {
-            if (sem_add_field(c_cur_struct, fstart, fn2, ftid) != 0) {
+            if (sem_add_field(c_cur_struct, fstart, fn2, ftid, fpub) != 0) {
                 return -1;
             }
         }
@@ -1121,6 +1160,7 @@ fn parse_enum_decl() int {
         if (off < 0) {
             return -1;
         }
+        c_name_form = 3;
         if (ty_declare_name(off, n, etid) != 0) {
             return -1;
         }

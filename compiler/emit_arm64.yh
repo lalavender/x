@@ -150,6 +150,13 @@ fn em_pop(reg *char) int {
 
 // em_load_sized：按类型从 x10 地址装入 x0（有符号小类型符号扩展）。
 fn em_load_sized(tid int) int {
+    // 浮点装入 d0/s0（消费方按浮点值约定使用）
+    if (ty_is_float(tid) != 0) {
+        if (t_types[tid].size == 4) {
+            return em_ins("ldr\ts0, [x10]");
+        }
+        return em_ins("ldr\td0, [x10]");
+    }
     let size int = t_types[tid].size;
     if (size == 8) {
         return em_ins("ldr\tx0, [x10]");
@@ -174,6 +181,13 @@ fn em_load_sized(tid int) int {
 
 // em_store_sized：x0 → [x10] 按类型存（低字节自然截断）。
 fn em_store_sized(tid int) int {
+    // 浮点值在 s0/d0（与值栈约定一致），不能用 x0 存
+    if (ty_is_float(tid) != 0) {
+        if (t_types[tid].size == 4) {
+            return em_ins("str\ts0, [x10]");
+        }
+        return em_ins("str\td0, [x10]");
+    }
     let size int = t_types[tid].size;
     if (size == 8) {
         return em_ins("str\tx0, [x10]");
@@ -279,6 +293,76 @@ fn em_store_local(off int, tid int) int {
 
 // em_put_sym_name：输出符号汇编名到 .text（名字池逐字节）。
 // Darwin 方言先写 "_" 前缀（C 符号约定），GNU 无前缀。
+// em_sym_qualify：模块模式下把符号后缀（__proj__mod）追加到名字之后。
+// 豁免：extern 符号（prelude/libc 与已带后缀的导入符号）；入口模块的
+// main（crt 引用裸名）。单文件模式恒不追加。
+fn em_sym_qualify(idx int) int {
+    if (c_module_mode == 0 || c_sym_sfx_len == 0) {
+        return 0;
+    }
+    if ((c_syms[idx].flags & F_EXTERN) != 0) {
+        return 0;
+    }
+    if (c_is_entry_mod != 0 && c_syms[idx].name_len == 4
+        && np_data[c_syms[idx].name_off] == 'm' && np_data[c_syms[idx].name_off + 1] == 'a'
+        && np_data[c_syms[idx].name_off + 2] == 'i' && np_data[c_syms[idx].name_off + 3] == 'n') {
+        return 0;
+    }
+    let i int = 0;
+    for i < c_sym_sfx_len {
+        if (em_put(np_data[c_sym_sfx_off + i]) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// dat_sym_qualify / bss_sym_qualify：同 em_sym_qualify，写 .data/.bss 缓冲。
+fn dat_sym_qualify(idx int) int {
+    if (c_module_mode == 0 || c_sym_sfx_len == 0) {
+        return 0;
+    }
+    if ((c_syms[idx].flags & F_EXTERN) != 0) {
+        return 0;
+    }
+    if (c_is_entry_mod != 0 && c_syms[idx].name_len == 4
+        && np_data[c_syms[idx].name_off] == 'm' && np_data[c_syms[idx].name_off + 1] == 'a'
+        && np_data[c_syms[idx].name_off + 2] == 'i' && np_data[c_syms[idx].name_off + 3] == 'n') {
+        return 0;
+    }
+    let i int = 0;
+    for i < c_sym_sfx_len {
+        if (dat_put(np_data[c_sym_sfx_off + i]) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+fn bss_sym_qualify(idx int) int {
+    if (c_module_mode == 0 || c_sym_sfx_len == 0) {
+        return 0;
+    }
+    if ((c_syms[idx].flags & F_EXTERN) != 0) {
+        return 0;
+    }
+    if (c_is_entry_mod != 0 && c_syms[idx].name_len == 4
+        && np_data[c_syms[idx].name_off] == 'm' && np_data[c_syms[idx].name_off + 1] == 'a'
+        && np_data[c_syms[idx].name_off + 2] == 'i' && np_data[c_syms[idx].name_off + 3] == 'n') {
+        return 0;
+    }
+    let i int = 0;
+    for i < c_sym_sfx_len {
+        if (bss_put(np_data[c_sym_sfx_off + i]) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
 fn em_put_sym_name(idx int) int {
     if (em_frag(tg_sym_prefix()) != 0) { return -1; }
     let n int = c_syms[idx].name_len;
@@ -290,7 +374,7 @@ fn em_put_sym_name(idx int) int {
         }
         i += 1;
     }
-    return 0;
+    return em_sym_qualify(idx);
 }
 
 // dat_put_sym_name：输出符号汇编名到 .data/.bss 缓冲。
@@ -305,7 +389,7 @@ fn dat_put_sym_name(idx int) int {
         }
         i += 1;
     }
-    return 0;
+    return dat_sym_qualify(idx);
 }
 
 // em_lea_global：全局符号地址 → x0。
@@ -910,7 +994,7 @@ fn bss_put_sym_name(idx int) int {
         }
         i += 1;
     }
-    return 0;
+    return bss_sym_qualify(idx);
 }
 
 // em_bss_symbol：.bss 输出零初始化全局（.balign + 标签 + .skip size）。
