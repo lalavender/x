@@ -1,320 +1,107 @@
 # --------------------------------------------------------------------------
-# yh（玉衡）编译器 —— AArch64/ELF 专用构建
+# yh（玉衡）编译器 —— 自举构建
 #
-# 宿主 C 编译器构建 yh 编译器本体；libtcc1.a 由独立的目标 C 工具链
-# （AArch64 Linux）生成，不使用 yh 自身编译 C：
-#   * 配置集中在 config.h 与本文件，不需要 ./configure
-#   * 只保留 AArch64 后端，源码以 ONE_SOURCE 方式一次编译成可执行文件
+# 编译器就是 yh：由入库种子 bin/yh（上一版编译器二进制）对 compiler/
+# 四模块项目 yh build 产出，形态随宿主（Darwin → Mach-O，Linux → ELF）。
+# 每个版本直接用上一个版本的二进制编译（无 C 编译步骤、无 stage0）：
+#   * make            构建 yh（主编译器，项目根目录）
+#   * make seed       滚种子：验证过的 yh 覆盖入库种子 bin/yh 并记 SHA-256
+#   * make test       运行 tests/yh 语法语料与编译器模式回归
+#   * make selfhost-native  本机全套门（两代固定点 + 全量语料，无需容器）
+#   * make install    安装到 $(PREFIX)（默认 /usr/local；DESTDIR 用作打包根）
+#   * make uninstall  卸载
+#   * make explorer   启动 yh Compiler Explorer（本地浏览器图形界面）
+#   * make clean      清理
 #
-#   make            构建 yh（stage0 种子）、libtcc.a、libtcc1.a 与
-#                   yh-new（自举编译器本机二进制，项目根目录）
-#   make test       运行 tests/yh 语法语料与编译器模式回归
-#   make bootstrap  自举验证门（G1 语法 + G2 三代闭环 + 全量固定点，需容器）
-#   make g3         B8/G3 正式验收（bootstrap + 分代全量复验 + 归档，需容器）
-#   make selfhost-native  本机（Darwin）等价自举差分，无需容器
-#   make install    安装到 $(PREFIX)（默认 /usr/local；DESTDIR 用作打包根）
-#   make uninstall  卸载
-#   make clean      清理
-#
-# 可在命令行覆盖：CC、AR、TARGET_CC、TARGET_CFLAGS、PREFIX、DESTDIR、
-#                 CFLAGS、LIBS、VERSION
+# 可在命令行覆盖：SEED（编译种子路径，CI Linux 用上一版 Release 的
+#                 linux-arm64 资产解包出的 ELF 种子）
 # --------------------------------------------------------------------------
 
 ifndef TOP
  TOP = .
  INCLUDED = no
-endif
 TOPSRC = $(TOP)
-SRC = $(TOPSRC)/src
 
 VERSION ?= $(shell cat $(TOPSRC)/VERSION)
-ARCH = arm64
-
-CC ?= cc
-AR ?= ar
-INSTALL ?= install
 EXESUF =
-LIBSUF = .a
-DLLSUF = .so
 ifeq ($(shell uname -s),Darwin)
  CONFIG_OSX = yes
- DLLSUF = .dylib
 endif
 
 PREFIX ?= /usr/local
 BINDIR = $(DESTDIR)$(PREFIX)/bin
-LIBDIR = $(DESTDIR)$(PREFIX)/lib
 
-CFLAGS += -Wall -g -O2 -Wdeclaration-after-statement -fno-strict-aliasing \
-          -Wno-pointer-sign -Wno-sign-compare -Wno-unused-result
-CPPFLAGS += -I$(TOPSRC) -I$(SRC)/core -I$(SRC)/targets -I$(SRC)/formats \
-            -DTCC_VERSION="\"$(VERSION)\""
-LIBS ?= -lm
-
-# 构建 yh 后可执行 ./yh --syntax-check f.yh 做纯语法检查（不需要目标库）
-YH = $(TOP)/yh$(EXESUF)
-
-LIBTCC = libtcc.a
-LIBTCC1 = libtcc1.a
-NATIVE_DEFINES =
-
-# libtcc1.a 的内容：本后端需要的运行时辅助函数（128 位 long double 软浮点等）。
-# 必须由独立的目标 C 工具链产出 AArch64 Linux ELF，禁止用 yh 自举。
-LIBTCC1_SRC = $(TOPSRC)/lib/lib-arm64.c
-
-# 目标 C 工具链自动探测：
-#   1) aarch64 Linux 交叉/本机 gcc；
-#   2) 任意 clang（宿主非 AArch64 Linux 时自动加 -target）；
-#   3) AArch64 Linux 本机的 cc。
-TARGET_CC ?=
-TARGET_CFLAGS ?=
-ifeq ($(TARGET_CC),)
- TARGET_CC := $(shell command -v aarch64-linux-gnu-gcc 2>/dev/null || \
-                command -v aarch64-none-linux-gnu-gcc 2>/dev/null)
-endif
-ifeq ($(TARGET_CC),)
- HOST_OS := $(shell uname -s)
- HOST_ARCH := $(shell uname -m)
- ifeq ($(HOST_OS)-$(HOST_ARCH),Linux-aarch64)
-  TARGET_CC := cc
- endif
-endif
-ifeq ($(TARGET_CC),)
- TARGET_CC := $(shell command -v clang 2>/dev/null || \
-                command -v /opt/homebrew/opt/llvm/bin/clang 2>/dev/null || \
-                command -v /usr/local/opt/llvm/bin/clang 2>/dev/null)
- ifneq ($(TARGET_CC),)
-  ifneq ($(HOST_OS)-$(HOST_ARCH),Linux-aarch64)
-   TARGET_CFLAGS += -target aarch64-linux-gnu
-  endif
- endif
-endif
-
-# 宿主系统探测（上面 TARGET_CC 分支里是条件赋值，这里补全为无条件）。
-HOST_OS ?= $(shell uname -s)
-HOST_ARCH ?= $(shell uname -m)
-
-# 原生 AArch64 Linux 构建需要 multiarch 路径：Debian/Ubuntu 的 crt1.o、
-# libc.so、bits/ 头文件位于 /usr/lib/aarch64-linux-gnu，而 tcc 的默认
-# crt/库路径只有 /usr/lib。编译期注入 CONFIG_TRIPLET 后，tcc.h 的
-# USE_TRIPLET/ALSO_TRIPLET 会给 crt、库与头文件路径自动带上 multiarch
-# 段，容器/本机原生 make 与发布产物开箱即用。仅影响 Linux 原生构建：
-# Darwin（Mach-O）不走 crt 路径，交叉路径（stage1 的 -sysroot/-B）自带
-# 显式 sysroot，均不受影响。
-ifeq ($(HOST_OS)-$(HOST_ARCH),Linux-aarch64)
- CPPFLAGS += -DCONFIG_TRIPLET=\"aarch64-linux-gnu\"
-endif
-
-# 归档 AArch64 Linux ELF 成员需要 ELF 归档器：
-# macOS 的 BSD ar 会拒绝非 Mach-O 成员，clang 同目录的 llvm-ar 可用。
-TARGET_AR ?=
-ifeq ($(TARGET_AR),)
- ifeq ($(shell $(TARGET_CC) --version 2>/dev/null | head -1 | grep -ci clang),1)
-  TARGET_AR := $(shell command -v $(dir $(TARGET_CC))llvm-ar 2>/dev/null || \
-                  command -v llvm-ar 2>/dev/null || command -v ar 2>/dev/null)
- else
-  TARGET_AR := $(AR)
- endif
-endif
-
-HEADERS = $(wildcard $(SRC)/core/*.h $(SRC)/targets/*.h $(SRC)/formats/*.h) $(TOPSRC)/config.h
-SOURCES = $(wildcard $(SRC)/core/*.c $(SRC)/targets/*.c)
-
-ifeq ($(INCLUDED),no)
 # --------------------------------------------------------------------------
 # 顶层构建规则
+# --------------------------------------------------------------------------
 
-# yh-new：自举编译器本机二进制（ADR-0006 的主要开发编译器）。自 0.0.2
-# 起由项目构建两步链产出（stage0 编 bootstrap/seed 得 seed 编译器，
-# seed 编译器对 compiler/ 项目 yh build），形态随宿主（Darwin → Mach-O，
-# Linux → ELF）。默认 make 即产出，位于项目根目录。
-YHNEW = $(TOP)/yh-new$(EXESUF)
-
-# bin/ 入库副本：每个版本把 yh-new 保留一份在 bin/ 并提交进仓库，作为
-# 下一版本「直接用上个版本二进制编译」的种子（0.0.3 起删除 src/ 的
-# stage0 与 bootstrap/seed 后，构建只依赖这个副本或上一版 Release 资产，
-# 见 docs/todo.md「0.0.3 脱离 stage0」）。clean 不清理 bin/——它是仓库
-# 内容物，不是构建产物；发版时随常规提交更新。
+YH = $(TOP)/yh$(EXESUF)
 REPO_BIN = $(TOP)/bin
-BIN_SEED = $(REPO_BIN)/yh-new$(EXESUF)
+BIN_SEED = $(REPO_BIN)/yh$(EXESUF)
 
-all: yh$(EXESUF) $(LIBTCC) $(LIBTCC1) $(YHNEW) $(BIN_SEED)
-
-$(BIN_SEED): $(YHNEW)
-	@mkdir -p $(REPO_BIN)
-	cp -f $(YHNEW) $@
-
-# 编译器本体：src/core/tcc.c 在 ONE_SOURCE 下把各 .c 汇成一个编译单元，一条命令产出
-yh$(EXESUF): $(SOURCES) $(HEADERS)
-	$(CC) -o $@ $(SRC)/core/tcc.c $(CPPFLAGS) $(CFLAGS) $(LIBS)
-
-# 供外部程序链接的静态库：同样只编译 libtcc.c 一个文件
-$(LIBTCC): libtcc.o
-	$(AR) rcs $@ $^
-libtcc.o: $(SOURCES) $(HEADERS)
-	$(CC) -c -o $@ $(SRC)/core/libtcc.c $(CPPFLAGS) $(CFLAGS)
-
-# 运行时库：用独立目标 C 工具链编译打包（成员必须是 AArch64 Linux ELF）
-$(LIBTCC1): $(LIBTCC1_SRC)
-ifeq ($(TARGET_CC),)
-	$(error 找不到目标 C 工具链：无法产出 AArch64 Linux ELF 的 libtcc1.a。\
-请安装 llvm clang 或 aarch64-linux-gnu-gcc，或用 make TARGET_CC=/路径/工具链 指定)
+# 编译种子：缺省用入库 bin/yh（宿主形态）；命令行可覆盖——CI 的 Linux
+# 作业传入上一版 Release 的 linux-arm64 资产解包出的 ELF 种子（Mach-O
+# 种子无法在 Linux 运行）。种子路径以绝对路径传给 yh build。
+SEED ?=
+ifeq ($(SEED),)
+ SEED = $(BIN_SEED)
+ YH_PREREQ = $(BIN_SEED)
 endif
-	$(TARGET_CC) $(TARGET_CFLAGS) -c $(LIBTCC1_SRC) -o libtcc1.o
-	$(TARGET_AR) rcs $@ libtcc1.o
+
+all: $(YH)
+
+# 一步链：种子（上一版编译器）对活跃四模块项目 yh build。
+# 每次冷编（compiler/tmp/yh-build 缓存键不含编译器身份，滚动代次下
+# 冷编才安全）；产物形态随宿主（Darwin → Mach-O，Linux → ELF）。
+$(YH): $(YH_PREREQ) $(wildcard compiler/*.yh) $(wildcard compiler/*/*.yh) $(TOPSRC)/compiler/mod.toml
+	rm -rf compiler/tmp/yh-build
+	cd compiler && $(abspath $(SEED)) build -o ../yh
+
+# seed：滚种子——把刚构建并验证过的 yh 覆盖入库种子。
+# 只应在 make test 与 make selfhost-native 全绿后执行（不作为依赖，
+# 防止未验证产物污染种子）。
+seed:
+	@cp -f $(YH) $(BIN_SEED).tmp
+	@mv -f $(BIN_SEED).tmp $(BIN_SEED)
+	@codesign -s - -f $(BIN_SEED) 2>/dev/null || true
+	@shasum -a 256 $(BIN_SEED) > $(REPO_BIN)/yh.sha256
+	@echo "种子已更新：$(BIN_SEED)"
 
 install: all
-	$(INSTALL) -d $(BINDIR) $(LIBDIR)
+	$(INSTALL) -d $(BINDIR)
 	$(INSTALL) -m755 yh$(EXESUF) $(BINDIR)
-	$(INSTALL) -m644 $(LIBTCC) $(LIBDIR)
-	$(INSTALL) -m644 $(LIBTCC1) $(LIBDIR)
 
 uninstall:
-	rm -f $(BINDIR)/yh$(EXESUF) $(LIBDIR)/$(LIBTCC) $(LIBDIR)/$(LIBTCC1)
+	rm -f $(BINDIR)/yh$(EXESUF)
 
-# yh 三层回归：ANTLR 参考语法 + yh 编译器语法模式 + yh 语义/运行测试。
-# tests/yh-run 的运行用例在本机（Mach-O）执行；交叉 ELF 用例经 --cross 在
-# Linux 容器执行（不可用时其内部打印 SKIP，不计失败）。
-test: yh$(EXESUF)
+# yh 三层回归：ANTLR 参考语法 + 编译器语法模式 + 运行语义语料。
+test: $(YH)
 	python3 $(TOPSRC)/tests/yh/check.py
 	python3 $(TOPSRC)/tests/yh/check.py --compiler
-	python3 $(TOPSRC)/tests/yh-run/check.py
+	python3 $(TOPSRC)/tests/yh-run/check.py --compiler $(TOPSRC)/yh$(EXESUF)
 
-# selfhost-native：本机（Darwin/arm64）自举差分验证，无需 docker。
-# 与 make bootstrap 的三代闭环等价（stage1→stage2→stage3、自解析、语法
-# 语料、汇编固定点），但把发射的 Linux 汇编改写为 Mach-O 后本机链接。
-# 用途：容器不可用或需要快速定位自举缺陷时的日常回归。
-selfhost-native: yh$(EXESUF)
+# selfhost-native：本机全套门（无需容器、无 stage0）。
+# 两代固定点 + 自解析 + 全量语法/运行语料 + 模块语料 + 项目验收。
+selfhost-native: $(YH)
 	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py
-	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(TOPSRC)/yh-new
-	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(TOPSRC)/yh-new
-	python3 $(TOPSRC)/tools/selfbuild-gate.py
-
-# g3：B8 / G3 正式验收。先跑 make bootstrap 得到 stage1..stage3，再在容器
-# 内做分代全量语料复验、汇编固定点（compiler.yh + 全部代表程序）、确定性
-# 检查与产物/SHA-256 归档，输出归档到 tmp/bootstrap/artifacts/。
-g3: bootstrap
-	python3 $(TOPSRC)/tests/selfhost/g3-acceptance.py
-
-# --------------------------------------------------------------------------
-# 自举（docs/02-plan/yh-自举实施方案-v2.md）
-#
-# compiler/ 下的 .yh 新编译器按显式顺序拼接为 tmp/bootstrap/compiler.yh；
-# stage0 交叉编译得到 AArch64 Linux ELF 的 stage1；语法门（G1）经容器
-# 包装器在 Linux 容器内执行 stage1 完成自解析与全量语料差分。
-# 拼接只连接完整顶层声明、保留换行，不做任何条件替换。
-# --------------------------------------------------------------------------
-
-SELFHOST_DIR = $(TOPSRC)/compiler
-# 目录即分类（gen/lex/parse/cmd），文件内声明顺序仍按本清单；
-# 冻结 seed（ADR-0007）：stage0 只编译此快照。seed 为单文件扁平化产物
-# （tools/flatten.py 生成：剥模块头/去限定名/剥字段 pub；正确性由 P5
-# 四代模块 .s/.s.i 固定点保证），SHA-256 见 MANIFEST.sha256。
-SEED_DIR = $(TOPSRC)/bootstrap/seed
-# seed 为单文件扁平化产物（tools/flatten.py 生成，SHA-256 见 MANIFEST.sha256）
-SEED_SOURCES = $(SEED_DIR)/compiler.yh
-
-BOOTSTRAP_DIR = $(TOP)/tmp/bootstrap
-BOOTSTRAP_SYSROOT = $(TOP)/tmp/sysroot
-# 容器包装器统一入口：YH_STAGE 指向容器内 stage 路径
-BOOTSTRAP_WRAPPER = $(TOPSRC)/tests/yh/container-yh.sh
-# 运行语义包装器：把 --emit-asm + gcc 伪装成 stage0 的 <file> -o <out> 接口
-BOOTSTRAP_CC = $(TOPSRC)/tests/yh/container-yh-cc.sh
-# G2 门复验的运行语料：run/ 全量（B7 浮点常量缺陷已修复，见 docs/finish.md）。
-BOOTSTRAP_RUN = $(shell for f in $(TOPSRC)/tests/yh-run/run/*.yh; do \
-	 basename $$f; done | paste -sd, -)
-
-$(BOOTSTRAP_DIR)/compiler.yh: $(SEED_SOURCES)
-	@mkdir -p $(BOOTSTRAP_DIR)
-	cat $(SEED_SOURCES) > $@
-
-# 自举编译器：stage0 种子编译 compiler/ 拼接源码，产出宿主本机形态
-# （Darwin → Mach-O，Linux → ELF）。规则须在 BOOTSTRAP_DIR 定义之后：
-# make 的前置条件列表是即时展开的。
-# -B $(TOP)：Linux ELF 链接必需 libtcc1.a（tcc_add_runtime 仅 ELF 路径
-# 调用），指向仓库根刚构建的副本，原生 make 开箱即用；Darwin 的 Mach-O
-# 路径不读它，行为不变。$(LIBTCC1) 同时列为前置条件，消除 -j 并行竞态。
-# 两步链（ADR-0007 P5）：stage0 编 seed 得「seed 编译器」（支持模块系统
-# 的单文件形态），再由它对本活跃项目 yh build —— 日常 yh-new 由项目构建
-# 产出；各代缓存独立（这里每次冷编，见 compiler/tmp/yh-build）。
-$(BOOTSTRAP_DIR)/seed-compiler: yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh $(LIBTCC1)
-	./yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh -o $@ -B $(TOP)
-
-$(YHNEW): $(BOOTSTRAP_DIR)/seed-compiler
-	rm -rf compiler/tmp/yh-build
-	cd compiler && ../tmp/bootstrap/seed-compiler build -o ../yh-new
-
-# stage1：stage0 交叉编译拼接源码（AArch64 Linux ELF），在容器内运行
-$(BOOTSTRAP_DIR)/stage1: $(BOOTSTRAP_DIR)/compiler.yh yh$(EXESUF)
-	./yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh -o $@ \
-	    -Wl,-oformat=elf64-aarch64 -sysroot $(BOOTSTRAP_SYSROOT) -B $(BOOTSTRAP_SYSROOT)
-
-# bootstrap：自举验证门（G1 语法 + G2 三代闭环 + 全量运行语料 + 全量固定点）。
-#   1) 拼接确定性：两次拼接逐字节一致（cmp，避开 make 3.81 的变量展开缺陷）；
-#   2) 容器前置检查：docker 容器 yh-build 必须可用，缺则直接失败不 SKIP；
-#   3) G1：stage1 自解析 + 全部语法正反例差分；
-#   4) G2：stage1 编译自身 → stage2；stage2 自解析 + 语法差分 + 全量运行语料；
-#   5) G2+：stage2 编译自身 → stage3；stage2.s 与 stage3.s 逐字节比较（固定点），
-#      stage3 自解析。
-# 每个阶段失败即中止；产出的 .s 保留在 tmp/bootstrap/ 供人工核对。
-# 容器不可用时可改用本机等价差分：make selfhost-native。
-bootstrap: yh$(EXESUF) $(BOOTSTRAP_DIR)/stage1
-	@cat $(SEED_SOURCES) > $(BOOTSTRAP_DIR)/compiler.yh.recheck
-	@cmp -s $(BOOTSTRAP_DIR)/compiler.yh $(BOOTSTRAP_DIR)/compiler.yh.recheck || \
-	 { echo "自举失败：两次拼接逐字节不一致（拼接不确定）"; exit 1; }
-	@rm -f $(BOOTSTRAP_DIR)/compiler.yh.recheck
-	@echo "拼接确定性 OK，拼接产物 SHA-256："
-	@shasum -a 256 $(BOOTSTRAP_DIR)/compiler.yh
-	@docker exec yh-build true 2>/dev/null || \
-	 { echo "自举失败：需要运行中的 docker 容器 yh-build（仓库挂载于 /work）"; exit 1; }
-	@echo "== G1：stage1 自解析自身拼接源码 =="
-	@YH_STAGE=/work/tmp/bootstrap/stage1 $(BOOTSTRAP_WRAPPER) --syntax-check $(CURDIR)/$(BOOTSTRAP_DIR)/compiler.yh \
-	 || { echo "自举失败：stage1 未通过自解析"; exit 1; }
-	@echo "== G1：stage1 全量语法语料差分（容器内执行） =="
-	@YH_STAGE=/work/tmp/bootstrap/stage1 python3 $(TOPSRC)/tests/yh/check.py --compiler --compiler-path $(BOOTSTRAP_WRAPPER) --quiet \
-	 || { echo "自举失败：stage1 未通过语法语料差分"; exit 1; }
-	@echo "G1 语法自举通过"
-	@echo "== G2：stage1 编译自身 → stage2 =="
-	@docker exec yh-build sh -c 'cd /work/tmp/bootstrap && ./stage1 --emit-asm compiler.yh > stage2.s' \
-	 || { echo "自举失败：stage1 编译自身失败"; exit 1; }
-	@docker exec yh-build sh -c 'gcc -no-pie -o /work/tmp/bootstrap/stage2 /work/tmp/bootstrap/stage2.s' \
-	 || { echo "自举失败：stage2 链接失败"; exit 1; }
-	@docker exec yh-build sh -c 'cd /work/tmp/bootstrap && ./stage2 --syntax-check compiler.yh' \
-	 || { echo "自举失败：stage2 未通过自解析"; exit 1; }
-	@YH_STAGE=/work/tmp/bootstrap/stage2 python3 $(TOPSRC)/tests/yh/check.py --compiler --compiler-path $(BOOTSTRAP_WRAPPER) --quiet \
-	 || { echo "自举失败：stage2 未通过语法语料差分"; exit 1; }
-	@echo "== G2：stage2 全量运行语义语料（run/ 全部） =="
-	@YH_STAGE=/work/tmp/bootstrap/stage2 python3 $(TOPSRC)/tests/yh-run/check.py \
-	 --compiler $(BOOTSTRAP_CC) --cross --workdir $(CURDIR)/$(BOOTSTRAP_DIR)/run --quiet \
-	 --filter $(BOOTSTRAP_RUN) \
-	 || { echo "自举失败：stage2 未通过全量运行语义语料"; exit 1; }
-	@echo "== G2+：stage2 编译自身 → stage3，stage3 自解析 =="
-	@docker exec yh-build sh -c 'cd /work/tmp/bootstrap && ./stage2 --emit-asm compiler.yh > stage3.s' \
-	 || { echo "自举失败：stage2 编译自身失败"; exit 1; }
-	@docker exec yh-build sh -c 'gcc -no-pie -o /work/tmp/bootstrap/stage3 /work/tmp/bootstrap/stage3.s && cd /work/tmp/bootstrap && ./stage3 --syntax-check compiler.yh && ./stage3 --syntax-check /work/tests/yh-run/run/01-hello.yh' \
-	 || { echo "自举失败：stage3 构建或自解析失败"; exit 1; }
-	@echo "== G2+：汇编固定点比较（stage2/stage3 对自身拼接源码逐字节一致） =="
-	@docker exec yh-build sh -c 'cmp /work/tmp/bootstrap/stage2.s /work/tmp/bootstrap/stage3.s' \
-	 || { echo "自举失败：stage2.s 与 stage3.s 不逐字节一致（未达固定点）"; exit 1; }
-	@echo "自举门通过：G1 语法 + G2 三代闭环 + stage3 自解析 + 全量汇编固定点"
+	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(TOPSRC)/yh
+	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(TOPSRC)/yh
 
 test-all: test
 
 # explorer：启动 yh Compiler Explorer（本地浏览器图形界面）。
-# 左侧 yh 源码编辑器、右侧 AArch64 汇编视图、Run 编译运行按钮；
-# 后端自动调用仓库根 yh-new（可切换 yh / 自定义路径），仅监听 127.0.0.1。
 explorer:
 	python3 $(TOPSRC)/tools/yh-explorer.py
 
 tests.%: ;
 
 clean:
-	rm -f yh$(EXESUF) yh-new$(EXESUF) libtcc.o libtcc1.o $(LIBTCC) $(LIBTCC1)
-	rm -rf $(TOP)/tmp/bootstrap
+	rm -f yh$(EXESUF)
+	rm -rf compiler/tmp/yh-build tmp/selfbuild-gate tmp/modcheck
 
 help:
-	@sed -n '2,20p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,26p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all explorer bootstrap selfhost-native g3 clean help
+.PHONY: all install uninstall test test-all explorer seed selfhost-native clean help
 
 endif # ($(INCLUDED),no)

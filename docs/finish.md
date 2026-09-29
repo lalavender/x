@@ -1,5 +1,64 @@
 # finish
 
+## 2026-09-30 主编译器二进制更名：yh-new → yh（编译器就是 yh）
+
+- **改名映射**：主编译器二进制 `yh-new` → `yh`（项目根产物与 Release
+  资产名）；入库种子 `bin/yh-new` → `bin/yh`（+ `bin/yh.sha256`，已用
+  当前源码产物滚种）。stage0 名义上的 `yh` 名额让给主编译器；stage0
+  本体已随 0.0.3 删除，无命名冲突。
+- **Makefile**：`YHNEW` → `YH`；一步链规则改 `$(YH)`；新增 `SEED`
+  覆盖变量（缺省 = `bin/yh`，命令行可指定其他种子路径——CI Linux 用
+  上一版 Release 的 ELF 种子；覆盖时免去 bin 种子前置，路径以 abspath
+  传给 yh build）；`seed` 目标、install/uninstall、clean、help 同步。
+- **脚本与工具**：tests/yh/check.py、tests/yh-run/check.py、
+  tests/modules/{check,build-check}.py、tests/selfhost/native-selfhost.py、
+  tools/selfbuild-gate.py、tools/yh-explorer.{py,html}（下拉仅剩
+  yh 一项）。当前状态文档同步：AGENTS.md、README、compiler/README.md
+  （陈旧的 bootstrap/g3 容器门描述替换为 native-selfhost 两代门实况）、
+  docs/todo.md（0.0.3 两节合并，D1–D5 由并行工作落地后本节补 CI 项）、
+  ADR-0006/0007 更新注记。历史记录（docs/01-finished、02-plan、
+  03-design、finish.md 旧条目）保留原名不动。
+- **发布流水线滚动自举化**（release.yml 重写）：linux 作业下载上一版
+  Release 的 linux-arm64 资产，取其中主编译器作种子（0.0.2 包内叫
+  yh-new、之后叫 yh，自动探测）经 `make SEED=…` 构建当前源码，
+  libtcc1.a 随包转发（src/ 已删无法重建）；darwin 作业直接用入库
+  bin/yh 构建；双平台冒烟后归档 tar.gz + sha256。Release 说明同步。
+- 清理：并行工作遗留的根目录 `ex1` 编译产物加入 .gitignore 不入库。
+- **验证**：`make`（bin/yh 种子一步链）+ 冒烟 ✓；`make test` 63/63 ✓；
+  `make selfhost-native` 全绿（两代固定点 + 语法/运行语料 + modules
+  17/17 + 项目验收 23/23）✓；`make seed` 滚种 + bin/yh 冒烟 ✓；
+  arm64 ubuntu:24.04 容器以 0.0.2 linux 资产为种子（SEED=/prevseed/
+  yh-new + 转发 libtcc1.a）构建出可用 ELF `yh` 并冒烟通过——发布
+  配方与滚动自举链兼容。VERSION 0.0.2 → 0.0.3。
+
+## 2026-09-30 脱离 stage0：删除 C 实现与 bootstrap，切换滚动自举（0.0.3）
+
+分析确认 bin/yh-new（入库种子，含完整模块系统）可直接构建当前四模块
+源码（产物模块 .s/.s.i 固定点验证 + run 语料 63/63），据此执行删除：
+
+- **删除**：src/（C 版 stage0）、include/、lib/lib-arm64.c、config.h、
+  libtcc.a/libtcc1.a 及目标文件、bootstrap/（seed 快照）、
+  tools/flatten.py、tests/yh/container-yh*.sh（容器包装）、
+  tests/selfhost/g3-acceptance.py 与 probe-main.c/macho.py（stage0
+  容器验收链随 stage0 终结）。
+- **构建切换**：Makefile 重写——`make` = `bin/yh-new build`（compiler/
+  项目，一步链、冷编）产出 yh-new；`make seed` 滚种子（验证全绿后
+  覆盖 bin/yh-new + 更新 SHA-256；macOS 下 cp 覆盖会触发 provenance
+  拦截 SIGKILL，Makefile 内 tmp+mv+codesign 重签处理）。
+- **验证门重组**：`make test` = ANTLR 语法 66/66+29/29 + 编译器语法
+  模式 + run 语料 63/63（全部跑 yh-new；tests/yh/check.py 与
+  tests/yh-run/check.py 的缺省编译器与相对路径改绝对，修复
+  Path('./yh-new') 规范化成裸名后按 PATH 查找的 FileNotFoundError）。
+  `make selfhost-native` = 重写后的 native-selfhost.py（bin/yh-new →
+  cc2 → cc3 两代冷编，模块固定点一致 + cc3 自解析 25 源文件 + 全量
+  语法/运行语料）+ modules 17/17 + 项目验收 23/23。
+  tools/selfbuild-gate.py（四代链固定点，stage1=bin/yh-new）保留。
+- **种子滚动**：bin/yh-new 已覆盖为当前源码产物
+  （6e204dea841d508bf8879bdd895ec41c9055c396e3b369e6c44abb3d7d594fef）。
+- **边界**（AGENTS.md/todo 已记）：滚动自举下源码不能在仓库内独立
+  重建编译器（git 历史保留每代种子兜底）；stage0 差分参照、-run、
+  交叉 ELF、g3 容器门终结；Linux 版含模块系统 yh-new 归档后另立
+  Linux 开发/CI 流程。
 ## 2026-09-30 0.0.2 发布：bin/ 入库编译种子 + tag 触发 Release 归档
 
 - **bin/ 入库副本**：Makefile 新增 `$(BIN_SEED)` 规则（挂进 `all`）——

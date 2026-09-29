@@ -381,12 +381,35 @@ Makefile 旧路径导致构建中断，不能勾选成模任务。
 - [x] **P5 新自举门**（2026-09-30）：tools/selfbuild-gate.py 固化
   四代链（stage0→seed 编译器→cc2→cc3→cc4，每代冷编）——cc2/3/4 两两
   全部模块 .s/.s.i 逐字节一致（固定点），cc4 冒烟与 modules 语料通过；
-  已挂进 make selfhost-native。日常 yh-new 改由项目构建产出
+  已挂进 make selfhost-native。日常 yh 改由项目构建产出
   （Makefile 两步链：stage0 编 seed 得 seed 编译器 → seed 编译器对
   活跃项目 yh build）。容器 make bootstrap 与 make g3 通过。
 
 后续代码修改仍须新增 tests/ 中 `.yh` 用例并构建。
 多文件项目用专门 fixture runner 验证；临时产物放 tmp/。
+
+## 0.0.3 脱离 stage0（2026-09-30 完成，滚动自举）
+
+- [x] **删除 src/（C 版 stage0）、include/、lib/、bootstrap/（seed）**
+  与 libtcc*、容器包装脚本、g3-acceptance：构建不再依赖 C 工具链。
+- [x] **构建切换**：`make` = 入库种子 `bin/yh` 对 compiler/ 项目
+  `yh build`（一步链，冷编）；种子滚动 = `make seed`（验证全绿后
+  覆盖 bin/yh 并更新 SHA-256；cp 后 macOS 需重签名，已在
+  Makefile 处理）。
+- [x] **验证门重组**：`make test`（ANTLR + 语法 + run 语料，全部跑
+  yh）；`make selfhost-native`（native-selfhost：两代模块固定点
+  + 自解析 25 文件 + 全量语料 + modules 17 + 项目验收 23）；
+  tools/selfbuild-gate.py（四代链固定点）保留。
+- [x] **种子滚动**：bin/yh 已更新为当前源码产物
+  （run 语料 63/63 验证后覆盖）。
+- [x] **CI 发布流水线改造**（2026-09-30，随主编译器改名 yh 落地）：
+  release.yml 的 linux 作业下载上一版 Release 的 linux-arm64 资产，
+  取其中主编译器作种子（`make SEED=…`）+ 转发 libtcc1.a（src/ 已删
+  无法重建），QEMU 容器内构建当前源码；darwin 作业直接用入库
+  `bin/yh`（Mach-O）构建；产物归档到 GitHub Release 逐版滚动。
+- 已知边界：源码无法在仓库内独立重建编译器（滚动自举，git 历史兜底）；
+  stage0 差分参照与 -run/交叉 ELF 能力终结；Linux 开发依赖 Release
+  归档的 linux-arm64 资产滚动。
 
 ## 玉衡 VS Code 扩展（2026-09-30 方案，尚未实施）
 
@@ -394,35 +417,7 @@ Makefile 旧路径导致构建中断，不能勾选成模任务。
 独立 TypeScript 语言服务器；源码调试待编译器生成调试信息后实施。
 
 - [ ] **VS-U0**：最小扩展、`.yh` 高亮、独立 LSP 进程、构建/运行命令。
-- [ ] **VS-U1**：基于现有 `yh-new` CLI 的保存后诊断与进程取消。
+- [ ] **VS-U1**：基于现有 `yh` CLI 的保存后诊断与进程取消。
 - [ ] **VS-U2**：自举编译器分析接口、未保存缓冲区、精确跨文件定义跳转。
 - [ ] **VS-U3**：源码调试信息与 DAP 接入。
 - [ ] **VS-U4**：扩展集成测试、VSIX、发布与 CI。
-
-## 0.0.3 脱离 stage0：每个版本直接用上一版二进制编译（2026-09-30 计划，尚未实施）
-
-自 0.0.2 起构建种子已双轨可用：`bin/yh-new`（入库副本，Darwin Mach-O，
-`make` 自动刷新）与上一版 Release 资产（服务器归档，含 linux-arm64
-ELF 形态，Linux 构建用）。0.0.3 据此删除 C 代码与 bootstrap 代码：
-
-- [ ] **D1 删除 stage0**：删 `src/`（C 版编译器）与 `lib/` 中仅被
-  stage0 使用的部分；`make` 的 `yh`/`libtcc.a`/`libtcc1.a` 目标移除
-  （libtcc1.a 改为仓库内预生成产物或随 Release 分发）；`make test`
-  中 stage0 回归门移除或改用 yh-new 跑。
-- [ ] **D2 删除 bootstrap**：删 `bootstrap/seed/`（ADR-0007 冻结种子）
-  与 `tools/flatten.py`、Makefile 的 seed/stage1/bootstrap/g3 目标、
-  `tests/selfhost/` 中依赖 stage0 的差分脚本；ADR-0006/0007 标记
-  seed 机制退役。
-- [ ] **D3 构建链改造**：`make` 改为「种子二进制 → 对 compiler/ 项目
-  `yh build` → 新 yh-new」一步链；种子解析顺序：`bin/yh-new` →
-  环境变量 `YH_SEED` → 上一版 Release 资产（linux 上用 linux-arm64
-  tar.gz）；每次发版把新 yh-new 刷新进 `bin/` 并提交，打 tag 触发
-  Release 归档（服务器留档）。
-- [ ] **D4 CI 发布流水线改造**：release.yml 的 linux 作业改为下载
-  上一版 Release 的 linux-arm64 yh-new（QEMU 容器内可执行）编译当前
-  源码；darwin 作业用 `bin/yh-new`；首版（D4 落地时的第一个 tag）
-  允许回退用 0.0.2 资产。
-- [ ] **D5 验证门重建**：`make selfhost-native` 的三代闭环改为
-  「bin/yh-new 编出新 yh-new → 两者各自再编 compiler/ → 产物逐字节
-  一致」的两代固定点；modules/run/fail/pass 语料与项目验收不变；
-  g3 容器验收按新链调整。

@@ -33,13 +33,11 @@ def run(cmd, cwd=None):
 def main() -> int:
     ok = True
     WORK.mkdir(parents=True, exist_ok=True)
-    seed_cc = WORK / "seed-compiler"
-    r = run(["./yh", "bootstrap/seed/compiler.yh", "-o", str(seed_cc),
-             "-B", str(ROOT)])
-    if r.returncode != 0:
-        print("FAIL seed 编译器构建:", r.stderr[-300:])
+    seed_cc = ROOT / "bin/yh"
+    if not seed_cc.exists():
+        print("FAIL 缺少入库种子 bin/yh")
         return 1
-    print("stage1（seed 编译器）构建完成")
+    print("stage1 = 入库种子 bin/yh")
 
     prev = seed_cc
     gens = []

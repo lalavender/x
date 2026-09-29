@@ -4,9 +4,9 @@
 浏览器页面无法直接执行本地二进制，本服务器只做三件事：
 
     GET  /               返回同目录下的 yh-explorer.html
-    GET  /api/defaults   探测仓库根的 yh-new / yh，返回缺省编译器路径
-    POST /api/compile    调 `yh-new --emit-asm <file.yh>`，汇编写到 stdout
-    POST /api/run        `yh-new -o <exe> <file.yh>` 编译链接后运行，比对输出
+    GET  /api/defaults   探测仓库根的 yh，返回缺省编译器路径
+    POST /api/compile    调 `yh --emit-asm <file.yh>`，汇编写到 stdout
+    POST /api/run        `yh -o <exe> <file.yh>` 编译链接后运行，比对输出
 
 仅监听 127.0.0.1（本机开发工具，无鉴权，切勿暴露到公网）。
 仅依赖 Python 标准库；临时产物一律放在仓库 tmp/yh-explorer-work/ 下。
@@ -39,12 +39,12 @@ RUN_TIMEOUT = 15       # 运行超时（秒）
 
 
 def default_compiler():
-    """缺省编译器：优先自举产物 yh-new（主要开发编译器），退回 stage0 种子 yh。"""
-    for name in ("yh-new", "yh"):
+    """缺省编译器：仓库根的 yh（自举编译器，主要开发编译器）。"""
+    for name in ("yh",):
         p = ROOT / name
         if p.exists() and os.access(p, os.X_OK):
             return str(p)
-    return str(ROOT / "yh-new")  # 都不存在时仍返回预期路径，由前端报“未找到”
+    return str(ROOT / "yh")  # 都不存在时仍返回预期路径，由前端报“未找到”
 
 
 def ensure_work():
@@ -56,7 +56,7 @@ def ensure_work():
 def probe_candidates():
     """探测两个候选编译器是否存在，供前端下拉框显示。"""
     out = {}
-    for name in ("yh-new", "yh"):
+    for name in ("yh",):
         p = ROOT / name
         out[name] = str(p) if p.exists() else None
     return out

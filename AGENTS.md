@@ -4,23 +4,21 @@
 
 ## 开发策略（必须遵守）
 
-**后续所有功能开发与 bug 修复一律在 `compiler/`（yh 自举源码）实现；
-`src/` 下的 C 版 stage0 已冻结——不新增功能、不修复其已知缺陷**。
-stage0 仅保留两个角色：①bootstrap 种子（交叉编译 stage1）；②语料差分
-对照（其失败需对照「stage0 自身缺陷清单」人工甄别，不自动判为自举侧
-错误）。唯一例外：stage0 崩溃**阻断**种子构建或测试基建时允许最小修复，
-且必须记录在 docs/finish.md。决策依据见
-[ADR-0006](docs/adr/0006-yh自举产物为主要开发编译器.md)。
+**0.0.3 起仓库已删除 src/（C 版 stage0）与 bootstrap/，进入滚动自举**：
+编译器源码在 `compiler/`（gen/lex/parse/cmd 四模块的 mod.toml 项目），
+构建只依赖入库种子 `bin/yh`（上一版自举编译器二进制，SHA-256 见
+`bin/yh.sha256`）。
 
-日常验证以自举产物为准：`make selfhost-native`（本机三代闭环 + 全量
-run 用例 + 汇编固定点）与 `make g3`（容器正式验收）为主门；`make test`
-是 stage0 种子的回归保障。`make` 在项目根目录产出两个二进制：`yh`
-（stage0 种子）与 `yh-new`（自举编译器本机形态，主要开发编译器，0.0.2
-起由项目构建两步链产出）；另在 `bin/` 入库保留 `yh-new` 副本，作为
-版本间的编译种子（0.0.3 起删除 src/ 与 bootstrap/，各版本直接用上一版
-二进制编译，见 docs/todo.md）。自举侧新增/修改行为时，须在 `tests/yh-run/`
-新增 `.yh` 用例（stage0 与自举产物都要通过；涉及 stage0 已知缺陷的
-形态除外）。
+- 日常构建：`make`（= `bin/yh` 对 `compiler/` 项目 `yh build`，冷编，
+  产出根目录 `yh`）；日常验证以 `make selfhost-native` 为主门
+  （两代模块固定点 + 自解析 + 全量语法/运行语料 + modules/项目验收）。
+- 滚种子：`make test` 与 `make selfhost-native` 全绿后执行 `make seed`
+  （把新 yh 覆盖 bin/yh 并更新哈希）。源码无法在仓库内独立
+  重建编译器，正确性由固定点与语料门保证，git 历史保留每一代种子。
+- stage0 的差分参照与 `-run`/交叉 ELF 能力随删除终结；Linux CI/开发
+  需另行建立（Linux 版含模块系统的 yh 待发布归档）。
+- 自举侧新增/修改行为时，须在 `tests/yh-run/` 或 `tests/modules/`
+  新增 `.yh` 用例并运行 `make`。决策依据见 ADR-0006/0007。
 
 ## 目录
 

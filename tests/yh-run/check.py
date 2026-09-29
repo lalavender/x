@@ -39,7 +39,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent          # tests/yh-run
 ROOT = HERE.parent.parent                        # 仓库根
-DEFAULT_COMPILER = ROOT / "yh"                   # 缺省编译器
+DEFAULT_COMPILER = ROOT / "yh"
 DEFAULT_WORK = ROOT / "tmp" / "yh-run-work"      # 缺省产物目录（tmp/ 下）
 RUN_DIR = HERE / "run"
 FAIL_DIR = HERE / "fail"
@@ -282,7 +282,7 @@ def main():
                         help="只跑相对路径含任一子串的用例（逗号分隔；自举差分子集用）")
     args = parser.parse_args()
 
-    YH_BIN = Path(args.compiler)
+    YH_BIN = Path(args.compiler).resolve()
     WORK = Path(args.workdir)
     filters = [f for f in args.filter.split(",") if f]
 

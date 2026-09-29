@@ -11,7 +11,7 @@
     iface   用例+方法  构建成功后破坏依赖接口，再构建必须拒绝
     rebind  用例+方法  构建后新增本地同名模块，必须重绑定并重编译
 
-usage: python3 tests/modules/build-check.py [--compiler-path ./yh-new]
+usage: python3 tests/modules/build-check.py [--compiler-path ./yh]
 退出码：全部通过 0；有失败 1。
 """
 
@@ -71,7 +71,7 @@ def copy_proj(src, dst):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--compiler-path", default=str(ROOT / "yh-new"))
+    ap.add_argument("--compiler-path", default=str(ROOT / "yh"))
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
     compiler = str(Path(args.compiler_path).resolve())

@@ -310,7 +310,7 @@ def main():
     parser.add_argument("--coverage", action="store_true", help="额外做规则覆盖自检（仅 ANTLR 模式）")
     parser.add_argument("--compiler", action="store_true", help="用 yh --syntax-check 跑语料（编译器模式）")
     parser.add_argument("--compiler-path", default=None,
-                        help="编译器模式下指定编译器路径（缺省仓库根 yh；自举时指向 stage1/stage2）")
+                        help="编译器模式下指定编译器路径（缺省仓库根 yh）")
     parser.add_argument("--workdir", default=None,
                         help="ANTLR 模式生成 parser 的临时目录位置（缺省仓库 tmp/ 下）")
     parser.add_argument("--quiet", action="store_true", help="只打印失败项与汇总")

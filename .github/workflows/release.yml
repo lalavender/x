@@ -1,8 +1,11 @@
 name: Release
 
-# 标签推送时构建 yh（stage0 种子）与 yh-new（自举编译器，ADR-0006 的
-# 主要开发编译器），冒烟验证后归档到 GitHub Release 供下载。
-# 产物形态随宿主：AArch64 Linux → ELF；Darwin arm64 → Mach-O。
+# 滚动自举发布：编译器就是 yh，由上一版二进制编译当前源码。
+#  - linux 作业：种子取上一版 Release 的 linux-arm64 资产（bin/ 入库种子
+#    是宿主 Mach-O，Linux 无法执行；libtcc1.a 同样从上一版资产转发，
+#    src/ 已删除无法重建），QEMU 容器内 make SEED=… 构建并冒烟；
+#  - darwin 作业：直接用入库 bin/yh（Mach-O）构建并冒烟；
+#  - release 作业：tar.gz + sha256 归档到 GitHub Release（下一版的种子）。
 on:
   push:
     tags: ['*']
@@ -24,7 +27,29 @@ jobs:
         with:
           platforms: arm64
 
-      - name: 容器内 make 与冒烟（ubuntu:24.04，与 make g3 验收环境同版）
+      - name: 下载上一版 Release 的 linux-arm64 资产（编译种子 + libtcc1.a）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          CUR="${GITHUB_REF_NAME}"
+          PREV=""
+          for t in $(gh api "releases?per_page=10" -q '.[].tag_name'); do
+            if [ "$t" != "$CUR" ]; then PREV="$t"; break; fi
+          done
+          if [ -z "$PREV" ]; then
+            echo "找不到上一版 Release（滚动自举需要它的 linux-arm64 资产作种子）"
+            exit 1
+          fi
+          echo "上一版 Release：$PREV"
+          gh release download "$PREV" -p 'yh-*-linux-arm64.tar.gz' -O prev.tgz
+          mkdir prevseed && tar xzf prev.tgz -C prevseed
+          # 0.0.2 及以前的包内主编译器叫 yh-new，之后叫 yh
+          if [ -x prevseed/yh-new ]; then SEED_BIN=yh-new; else SEED_BIN=yh; fi
+          echo "SEED_BIN=$SEED_BIN" >> "$GITHUB_ENV"
+          test -f prevseed/libtcc1.a
+
+      - name: 容器内 make 与冒烟（ubuntu:24.04）
         run: |
           cat > /tmp/smoke.yh <<'EOF'
           fn main() int {
@@ -34,6 +59,7 @@ jobs:
           EOF
           docker run --rm --platform linux/arm64 \
             -v "$PWD":/repo:ro \
+            -e SEED_BIN \
             -v "$PWD/out":/out \
             -v /tmp/smoke.yh:/smoke.yh:ro \
             ubuntu:24.04 bash -ec '
@@ -42,20 +68,19 @@ jobs:
               apt-get install -y -qq build-essential >/dev/null
               cp -r /repo /build
               cd /build
-              make -j4
-              # Linux ELF 链接需要 libtcc1.a（tcc_add_runtime 只在 ELF 路径
-              # 调用；Darwin Mach-O 不需要）。按开箱状态验证：YH_LIBDIR
-              # 指向解压目录（tarball 里就带着 libtcc1.a）。
-              YH_LIBDIR=/build ./yh-new /smoke.yh -o /tmp/smoke && /tmp/smoke
-              YH_LIBDIR=/build ./yh /smoke.yh -o /tmp/smoke0 && /tmp/smoke0
-              cp yh yh-new libtcc1.a /out/
+              make SEED=/repo/prevseed/$SEED_BIN
+              # libtcc1.a 仅 ELF 链接需要（Mach-O 不需要）；按开箱状态冒烟：
+              # YH_LIBDIR 指向上一版资产解包目录（libtcc1.a 随包转发）
+              YH_LIBDIR=/repo/prevseed ./yh /smoke.yh -o /tmp/smoke && /tmp/smoke
+              cp yh /out/
             '
 
       - name: 打包
         run: |
-          file out/yh out/yh-new
+          file out/yh prevseed/libtcc1.a
           TAG="${GITHUB_REF_NAME}"
-          tar czf "yh-${TAG}-linux-arm64.tar.gz" -C out yh yh-new libtcc1.a
+          cp prevseed/libtcc1.a out/
+          tar czf "yh-${TAG}-linux-arm64.tar.gz" -C out yh libtcc1.a
           sha256sum "yh-${TAG}-linux-arm64.tar.gz" > "yh-${TAG}-linux-arm64.sha256"
 
       - uses: actions/upload-artifact@v4
@@ -74,7 +99,7 @@ jobs:
       - name: make
         run: make
 
-      - name: 冒烟（yh-new 与 yh 各编译运行一遍）
+      - name: 冒烟
         run: |
           cat > /tmp/smoke.yh <<'EOF'
           fn main() int {
@@ -82,14 +107,13 @@ jobs:
               return 0;
           }
           EOF
-          ./yh-new /tmp/smoke.yh -o /tmp/smoke && /tmp/smoke
-          ./yh /tmp/smoke.yh -o /tmp/smoke0 && /tmp/smoke0
+          ./yh /tmp/smoke.yh -o /tmp/smoke && /tmp/smoke
 
       - name: 打包
         run: |
-          file yh yh-new
+          file yh
           TAG="${GITHUB_REF_NAME}"
-          tar czf "yh-${TAG}-darwin-arm64.tar.gz" yh yh-new
+          tar czf "yh-${TAG}-darwin-arm64.tar.gz" yh
           shasum -a 256 "yh-${TAG}-darwin-arm64.tar.gz" > "yh-${TAG}-darwin-arm64.sha256"
 
       - uses: actions/upload-artifact@v4
@@ -121,14 +145,14 @@ jobs:
           ## 产物说明
 
           - `*-darwin-arm64.tar.gz`：macOS（Apple Silicon）Mach-O，解压即用：
-            `./yh-new hello.yh -o hello`
+            `./yh hello.yh -o hello`
           - `*-linux-arm64.tar.gz`：AArch64 Linux ELF（含运行时库 libtcc1.a，
             仅 ELF 链接需要，Mach-O 不需要）。Linux 下指到解压目录即可：
-            `YH_LIBDIR=$(pwd) ./yh-new hello.yh -o hello`
-            或安装到系统路径：`mkdir -p /usr/local/lib/tcc && cp libtcc1.a /usr/local/lib/tcc/`
+            `YH_LIBDIR=$(pwd) ./yh hello.yh -o hello`
 
-          - `yh`：stage0 种子编译器（C 版，已冻结，作自举种子与差分参照，
-            见 ADR-0006）；`yh-new`：自举编译器（主要开发编译器）。
+          - `yh`：自举编译器（主编译器）。滚动自举：本 Release 的
+            linux-arm64 资产是下一版本 CI 的编译种子；仓库 `bin/yh` 为
+            Darwin 入库种子。
           - `.sha256` 为对应 tar.gz 的 SHA-256 校验和。
           EOF
           sed -i 's/^          //' notes.md

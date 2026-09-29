@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tests/modules 模块语法语料校验（MOD-U1）。
 
-遍历 tests/modules/ 下的 .yh 语料，用自举编译器（yh-new）--syntax-check
+遍历 tests/modules/ 下的 .yh 语料，用自举编译器（yh）--syntax-check
 验证模块头语法：
 
     accept/*.yh  必须被接受（退出码 0）
@@ -13,7 +13,7 @@ stage0 种子（src/ 冻结）不识别，因此不进 tests/yh 的 stage0 语�
 
 用法：
     python3 tests/modules/check.py
-    python3 tests/modules/check.py --compiler-path ./yh-new
+    python3 tests/modules/check.py --compiler-path ./yh
     python3 tests/modules/check.py --quiet
 
 退出码：全部通过 0；有失败 1。
@@ -56,8 +56,8 @@ def run_batch(compiler: Path, subdir: str, expect_ok: bool, quiet: bool) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="yh 模块语法语料校验")
-    ap.add_argument("--compiler-path", default=str(ROOT / "yh-new"),
-                    help="自举编译器路径（默认 ./yh-new）")
+    ap.add_argument("--compiler-path", default=str(ROOT / "yh"),
+                    help="自举编译器路径（默认 ./yh）")
     ap.add_argument("--quiet", action="store_true", help="只打印失败项")
     args = ap.parse_args()
 

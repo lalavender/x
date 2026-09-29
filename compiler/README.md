@@ -11,62 +11,38 @@
 变参、浮点、structInit 作值；并已跑通**三代闭环**：
 
 ```
-stage0（C 版 yh）──编译──▶ stage1 ──编译──▶ stage2 ──编译──▶ stage3
-                              │                │
-                              └─ 自解析 ✓      └─ stage2.s 与 stage3.s 逐字节相同（固定点）
+bin/yh（入库种子）──编译──▶ yh ──自编──▶ yh'（固定点：.s/.s.i 逐字节相同）
 ```
 
-> **本目录是主要开发编译器（ADR-0006）**：后续新功能与 bug 修复一律在
-> 此实现；`src/` 的 C 版 stage0 已冻结为种子（交叉编译 stage1）与差分
-> 对照，不再修改。自举产物可直接本机使用（宿主自动方言探测、
+> **本目录是主要开发编译器（ADR-0006/0007）**：0.0.3 起仓库已删除
+> C 版 stage0 与 bootstrap，构建只依赖入库种子 `bin/yh`（上一版编译器
+> 二进制）。自举产物可直接本机使用（宿主自动方言探测、
 > `yh file -o out` 双形态 CLI），日常验证以
-> `make selfhost-native` 与 `make g3` 为主门。
+> `make selfhost-native` 为主门。
 
 ## 构建与验证
 
 ```bash
-make             # 产出 yh（stage0 种子）与 yh-new（本目录源码的本机二进制）
-make bootstrap   # G1 语法 + G2 三代闭环 + G2+ 全量固定点
-make g3          # B8/G3 正式验收（bootstrap + 分代全量复验 + 归档）
+make             # 产出 yh（本目录源码的本机二进制，主编译器）
+make test        # 三层回归
+make selfhost-native  # 本机全套门（两代固定点 + 全量语料）
 ```
 
-`make` 的 `yh-new` 由 stage0 种子编译本目录拼接源码，形态随宿主
-（Darwin → Mach-O，Linux → ELF），可直接用于编译 .yh 程序与跑语料：
-`python3 tests/yh-run/check.py --compiler $PWD/yh-new`。
+`make` 的 `yh` 由入库种子 `bin/yh`（上一版编译器）对本目录 mod.toml
+项目 `yh build` 产出，形态随宿主（Darwin → Mach-O，Linux → ELF），
+可直接用于编译 .yh 程序与跑语料：
+`python3 tests/yh-run/check.py --compiler $PWD/yh`。
 
-`make bootstrap` 按 Makefile 中 `SELFHOST_SOURCES` 的显式顺序把本目录
-拼接为 `tmp/bootstrap/compiler.yh`（只连接完整顶层声明、保留换行），
-然后逐门验证：
+`make selfhost-native` 由 `tests/selfhost/native-selfhost.py` 执行
+本机全套自举门（0.0.3 滚动自举，无 stage0；种子 = 入库的 `bin/yh`）：
 
-1. **拼接确定性**：两次拼接逐字节一致；
-2. **G1 语法自举**：stage1 自解析自身拼接源码到 EOF；全量语法语料差分
-   66 正例接受 / 29 反例拒绝；
-3. **G2 三代闭环**：stage1 编译自身得 stage2；stage2 自解析、语法差分、
-   全量运行语义语料（`tests/yh-run/run/` 全部用例）全过；
-4. **G2+ 固定点**：stage2 编译自身得 stage3；stage2.s 与 stage3.s
-   （对自身拼接源码的完整发射）逐字节相同；stage3 自解析通过。
+    bin/yh build compiler/  → cc2（冷编）
+    cc2     build compiler/     → cc3（冷编）
 
-`make g3` 在 `bootstrap` 之后由 `tests/selfhost/g3-acceptance.py` 完成
-**G3 正式验收**：stage1/2/3 三代各自跑全量语法与运行语料、stage3 自解析、
-stage2 与 stage3 对 35 个代表程序逐字节一致的汇编、重复发射确定性、
-53 个反例的诊断质量，并把源码/汇编/ELF/工具链版本/SHA-256 归档到
-`tmp/bootstrap/artifacts/`。验收报告见
-`docs/01-finished/G3-自举验收报告.md`。
-
-前置条件：运行中的 docker 容器 `yh-build`（仓库挂载于 `/work`）、
-`tmp/sysroot`。任一前置缺失直接失败，不 SKIP。
-
-容器不可用时，可用本机（Darwin/arm64）等价差分：
-
-```bash
-make selfhost-native
-```
-
-`tests/selfhost/native-selfhost.py` 用同一套源码在本机跑 stage0 → stage1
-→ stage2 → stage3，把发射的 GNU/Linux AArch64 汇编改写为 Mach-O 形态后
-本机链接；校验三 stage 自解析、全量语法语料、汇编固定点，并运行不含
-`printf` 的运行语料（macOS 变参 ABI 与 Linux 不同，含 `printf` 的用例在
-本机不可判）。该目标用于日常回归与自举缺陷定位。
+门：①固定点——cc2/cc3 全部模块 .s/.s.i 逐字节一致；②cc3 自解析
+compiler/ 全部源文件；③cc3 语法语料（tests/yh 正例全过、反例全拒）；
+④cc3 运行语料（tests/yh-run 全量 run/fail/pass）。该目标用于日常
+回归验证；滚种子（`make seed`）前必须全绿。
 
 ## 文件与职责
 
