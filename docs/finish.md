@@ -1,5 +1,25 @@
 # finish
 
+## 2026-09-30 0.0.3 发布：滚动自举首次端到端跑通（CI 以 0.0.2 资产为种子）
+
+- tag `0.0.3` 推送触发新发布流水线，两次失败后全绿：
+  ①`gh api "releases?…"` 相对路径 404，错误 JSON 被词法拆分成假标签——
+  改完整路径 `repos/$GITHUB_REPOSITORY/releases` + `--jq` + 显式错误
+  检查；②容器 root 写出的 `out/` 目录外层步骤无写权限——产物（yh 与
+  转发的 libtcc1.a）全部改在容器内写入。
+- **运行结果**：[run 36636909702](https://github.com/lalavender/x/actions/runs/36636909702)
+  全绿；Release [yh 0.0.3](https://github.com/lalavender/x/releases/tag/0.0.3)
+  归档 4 资产（linux 包 yh + libtcc1.a、darwin 包 yh，各带 sha256）。
+- **滚动自举链验证**：CI linux 作业下载 0.0.2 Release 资产，取其中
+  yh-new（ELF）作种子 `make SEED=…` 构建出当前源码的 yh 并冒烟通过；
+  darwin 作业用入库 bin/yh 构建。
+- **端到端用户视角验收**：实际下载 Release 资产——linux 包解压后
+  `YH_LIBDIR=<目录> ./yh hello.yh -o hello` 在 arm64 容器运行通过；
+  darwin 包解压后本机直接运行通过；两包 SHA-256 与 .sha256 资产一致
+  （linux 08f1c470…27e8a）。
+- 至此逐版滚动闭环：每版 bin/yh（Darwin 种子）+ Release linux 资产
+  （Linux 种子）→ 下一版构建。
+
 ## 2026-09-30 主编译器二进制更名：yh-new → yh（编译器就是 yh）
 
 - **改名映射**：主编译器二进制 `yh-new` → `yh`（项目根产物与 Release
