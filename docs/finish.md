@@ -26,8 +26,15 @@
   （stage1 自带 -sysroot/-B）不受影响。
 - 本地验证（推 tag 前）：arm64 ubuntu:24.04 容器 `make -j4` 成功，
   yh-new 与 yh 冒烟通过（YH_LIBDIR=/build，file 确认 AArch64 ELF）；
-  Darwin 本机 make + 冒烟通过。发布链路以 tag 推送后的 Actions 实际
-  运行为准。
+  Darwin 本机 make + 冒烟通过。
+- 实际运行结果：tag `0.0.1` 首次运行两构建作业全绿、release 作业失败
+  （gh 无 .git 无法推断仓库，release 作业无 checkout）——修复为显式
+  `GH_REPO` 环境变量后重打标签重跑，**全绿**：
+  [run 36549353118](https://github.com/lalavender/x/actions/runs/36549353118)。
+  Release [yh 0.0.1](https://github.com/lalavender/x/releases/tag/0.0.1)
+  归档 4 个资产（darwin/linux 各 tar.gz + sha256）；端到端验收：下载
+  linux tar.gz，内容为 yh / yh-new / libtcc1.a，SHA-256 与 .sha256
+  资产一致（e5d7b269…d4d1a961）。
 
 ## 2026-09-29 explorer 两项：Ctrl+C 退出修复 + 复制按钮
 
