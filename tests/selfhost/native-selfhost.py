@@ -11,7 +11,9 @@ docker 与 tmp/sysroot。当容器不可用时，本脚本用同一套 compiler/
               └─stage2 编译自身 → stage3
 
 差异点只有「汇编可汇编形态」：自举后端发射的是 GNU/Linux AArch64 汇编
-（`adrp`+`:lo12:`、libc 裸名符号），本脚本经 macho.py 改写为 Mach-O 可
+（`adrp`+`:lo12:`、libc 裸名符号）。自举编译器已内置宿主方言探测，
+Darwin 宿主直接发射可汇编的 Mach-O 形态，macho.py 仅作 GNU 输出的
+兼容路径。原注释：本脚本经 macho.py 改写为 Mach-O 可
 接受的 `@PAGE/@PAGEOFF` 与 `_` 前缀符号后交给 clang 链接。
 
 校验项：
@@ -58,15 +60,32 @@ def concat_compiler(dst: Path) -> None:
     dst.write_text(text)
 
 
+def asm_to_binary(asm: Path, binary: Path) -> None:
+    """把 stage 发射的汇编变为本机 Mach-O 可执行。
+
+    自举编译器已内置宿主方言探测（Darwin 宿主直接发射 `@PAGE/@PAGEOFF`
+    与 `_` 符号前缀），clang 可直接汇编链接，无需 macho.py 转换与
+    probe-main.c 入口转发。保留 macho.py 路径仅作 GNU 方言输出的兼容
+    （编译器显式 -target gnu 时）。
+    """
+    text = asm.read_text()
+    obj = asm.with_suffix(".o")
+    # Darwin 方言直出：main 符号带 `_` 前缀（编译器宿主探测自动启用）
+    if "\t.globl\t_main" in text or "\n_main:" in text:
+        run(["clang", "-c", "-o", str(obj), str(asm)])
+        run(["clang", "-o", str(binary), str(obj)])
+        return
+    converted = asm.with_suffix(".macho.s")
+    run([sys.executable, str(HERE / "macho.py"), str(asm), str(converted)])
+    run(["clang", "-c", "-o", str(obj), str(converted)])
+    run(["clang", "-o", str(binary), str(obj), str(HERE / "probe-main.c")])
+
+
 def emit_and_link(stage: Path, asm: Path, binary: Path) -> None:
     """用 stage 编译 compiler.yh → Mach-O 可执行二进制。"""
     with asm.open("w") as f:
         run([str(stage), "--emit-asm", str(WORK / "compiler.yh")], stdout=f)
-    converted = asm.with_suffix(".macho.s")
-    run([sys.executable, str(HERE / "macho.py"), str(asm), str(converted)])
-    obj = asm.with_suffix(".o")
-    run(["clang", "-c", "-o", str(obj), str(converted)])
-    run(["clang", "-o", str(binary), str(obj), str(HERE / "probe-main.c")])
+    asm_to_binary(asm, binary)
 
 
 def stage_binary(path: Path, flag: str, arg: Path):
@@ -90,21 +109,17 @@ def syntax_corpus(stage: Path) -> bool:
     return r.returncode == 0
 
 
-def printf_free_run_tests(stage: Path) -> bool:
-    """用 stage 编译并运行 tests/yh-run/run 下不依赖 printf 的用例。
+def run_all_semantics(stage: Path) -> bool:
+    """用 stage 编译并运行 tests/yh-run/run 全部用例（退出码断言）。
 
-    macOS 的变参 ABI 与 Linux 不同，含 printf 的用例在本机不可判；
-    不含 printf 的用例可以真正跑起来，从而验证运行时语义（含浮点位型）。
+    自举编译器已实现 Darwin 变参约定（命名参数进寄存器、可变实参
+    8 字节槽走栈，与 stage0 一致），含 printf 的用例在本机也可判，
+    不再过滤。
     """
     import re
     ok = True
     for src in sorted((ROOT / "tests" / "yh-run" / "run").glob("*.yh")):
         text = src.read_text()
-        # 只在代码本体（去掉 // 之外的行内注释与整行注释）里找 printf，
-        # 避免把注释里提到的 "printf" 当成真实调用。
-        code = "\n".join(re.sub(r"//.*$", "", ln) for ln in text.splitlines())
-        if "printf" in code:
-            continue
         head = re.search(r"^//\s*exit:\s*(-?\d+)", text, re.M)
         want = int(head.group(1)) if head else 0
         out = WORK / (src.stem + ".bin")
@@ -112,11 +127,7 @@ def printf_free_run_tests(stage: Path) -> bool:
         try:
             with asm.open("w") as f:
                 run([str(stage), "--emit-asm", str(src)], stdout=f)
-            converted = asm.with_suffix(".macho.s")
-            run([sys.executable, str(HERE / "macho.py"), str(asm), str(converted)])
-            obj = asm.with_suffix(".o")
-            run(["clang", "-c", "-o", str(obj), str(converted)])
-            run(["clang", "-o", str(out), str(obj), str(HERE / "probe-main.c")])
+            asm_to_binary(asm, out)
             r = subprocess.run([str(out)], capture_output=True)
             got = r.returncode
         except subprocess.CalledProcessError as e:
@@ -163,7 +174,7 @@ def main() -> int:
 
     # 3b) stage2 运行不含 printf 的语义用例（真正执行，验证运行时语义）
     sys.stdout.write("stage2 运行语义（不含 printf 的用例）：\n")
-    ok = printf_free_run_tests(s2) and ok
+    ok = run_all_semantics(s2) and ok
 
     # 4) 汇编固定点：s2 与 s3 对 compiler.yh 的发射逐字节一致
     run([str(s2), "--emit-asm", str(WORK / "compiler.yh")], stdout=(WORK / "fix2.s").open("w"))

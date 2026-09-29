@@ -1185,25 +1185,42 @@ fn sem_call(callee *Res, r *Res) int {
     } else if (na2 > TG_ARG_REGS) {
         nstack = na2 - TG_ARG_REGS;
     }
-    if (em_call_stack_area(nstack) != 0) { return -1; }
-    if (darwin_var != 0) {
-        // Darwin 变参：逆序把可变实参写入栈槽（值栈顶是最后一个实参）。
-        // 可变实参只有整型/指针（浮点实参已在调用前提升为 f64 压整型通路）。
-        let dv int = na2 - 1;
-        for dv >= np {
-            if (em_pop("x9") != 0) { return -1; }
-            if (em_call_stack_store_reg("x9", dv - np) != 0) { return -1; }
-            dv -= 1;
-        }
-    } else {
-        // GNU/Linux（全部调用）与 Darwin 非变参调用：第 9 个起的实参
-        // 走调用点栈区。值栈顶是最后一个实参，逆序弹出到第 0 槽。
-        // 注意 stage0 的 if/else 体不做块级作用域，循环变量须避开
-        // 本函数后续使用的 j/k/tb 等名字。
+    // 栈实参搬运（两段式）：值栈顶是最后一个实参，栈实参恰为顶部
+    // nstack 项。第一段：弹入帧内暂存槽（fp 负偏移固定槽，不受值栈
+    // 弹压影响）；第二段在寄存器实参装载完成后、bl 之前回压进调用点
+    // 栈区（8 字节间距 = AAPCS64 与 stage0，被调方按
+    // [fp+16+(k-8)*8] 读取）。不能先 sub sp 开区再弹：弹到的是栈区
+    // 槽而非实参；也不能边弹边压：寄存器装载的弹栈会把已压栈区弹穿
+    // （2026-09-29 参数错位缺陷，被加法交换律语料掩盖）。
+    let area_bytes int = (nstack * 8 + 15) / 16 * 16;
+    let stk_off int = 0;
+    if (nstack > 0) {
+        stk_off = em_alloc_local(8 * nstack);
+        let stk_lo int = na2 - nstack;
         let saj int = na2 - 1;
-        for saj >= TG_ARG_REGS {
-            if (em_pop("x9") != 0) { return -1; }
-            if (em_call_stack_store(saj - TG_ARG_REGS) != 0) { return -1; }
+        for saj >= stk_lo {
+            let rel int = 8 * (saj - stk_lo);
+            if (ty_is_float(c_args[base + saj].type_id) != 0) {
+                // 浮点实参值在浮点通路（sem_push_value → em_push_fp），
+                // 弹出须走浮点寄存器
+                let fsfx *char = "d";
+                if (t_types[c_args[base + saj].type_id].size == 4) {
+                    fsfx = "s";
+                }
+                if (em_frag("\tldr\t") != 0) { return -1; }
+                if (em_frag(fsfx) != 0) { return -1; }
+                if (em_frag("0, [sp], #16\n") != 0) { return -1; }
+                if (em_lea_local_to(stk_off - rel) != 0) { return -1; }
+                if (em_frag("\tstr\t") != 0) { return -1; }
+                if (em_frag(fsfx) != 0) { return -1; }
+                if (em_frag("0, [x10]\n") != 0) { return -1; }
+            } else {
+                // 弹到 x11：em_lea_local_to 偏移超 255 时用 movz x9 拼址，
+                // 会覆盖 x9（2026-09-29 深帧下暂存槽写入立即数的根因）
+                if (em_pop("x11") != 0) { return -1; }
+                if (em_lea_local_to(stk_off - rel) != 0) { return -1; }
+                if (em_ins("str\tx11, [x10]") != 0) { return -1; }
+            }
             saj -= 1;
         }
     }
@@ -1285,6 +1302,44 @@ fn sem_call(callee *Res, r *Res) int {
             tf += 1;
         }
     }
+    // 间接调用的目标地址在值栈顶：必须在开调用点栈区之前弹出（否则弹到
+    // 栈区槽而非实参），暂存帧内槽，bl 前再装回 x10。
+    let callee_off int = 0;
+    if (direct == 0) {
+        callee_off = em_alloc_local(TG_PTR_SIZE);
+        if (em_pop("x9") != 0) { return -1; }
+        if (em_lea_local_to(callee_off) != 0) { return -1; }
+        if (em_ins("str\tx9, [x10]") != 0) { return -1; }
+    }
+    // 栈实参第二段：bl 之前把暂存槽写进调用点栈区。整块开区（area_bytes
+    // 为 16 的倍数，sp 全程保持 16 字节对齐）后按 8 字节偏移写入——第 9 参
+    // （Darwin 变参为第一个可变实参）在 [sp+0]，其后每参 +8，与 AAPCS64 及
+    // stage0（arm64-gen.c 的 C.14：size < 8 补足 8 字节槽）一致。写入用
+    // x9/d0 中转，不碰已装载的 x0..x7/d0..d7。
+    if (nstack > 0) {
+        if (em_call_stack_alloc(area_bytes) != 0) { return -1; }
+        let stk_lo2 int = na2 - nstack;
+        let pb int = na2 - 1;
+        for pb >= stk_lo2 {
+            let rel2 int = 8 * (pb - stk_lo2);
+            if (ty_is_float(c_args[base + pb].type_id) != 0) {
+                let pfsfx *char = "d";
+                if (t_types[c_args[base + pb].type_id].size == 4) {
+                    pfsfx = "s";
+                }
+                if (em_lea_local_to(stk_off - rel2) != 0) { return -1; }
+                if (em_frag("\tldr\t") != 0) { return -1; }
+                if (em_frag(pfsfx) != 0) { return -1; }
+                if (em_frag("0, [x10]\n") != 0) { return -1; }
+                if (em_call_stack_store_fp(pfsfx, rel2) != 0) { return -1; }
+            } else {
+                if (em_lea_local_to(stk_off - rel2) != 0) { return -1; }
+                if (em_ins("ldr\tx9, [x10]") != 0) { return -1; }
+                if (em_call_stack_store(rel2) != 0) { return -1; }
+            }
+            pb -= 1;
+        }
+    }
     // 聚合返回：把调用方缓冲地址放进 x8（隐藏返回指针，AAPCS64）
     let retk int = t_types[ret].kind;
     if (retk == TY_STRUCT || retk == TY_UNION || retk == TY_ARRAY || retk == TY_SLICE) {
@@ -1297,10 +1352,11 @@ fn sem_call(callee *Res, r *Res) int {
     if (direct != 0) {
         if (em_call_direct(callee.sym) != 0) { return -1; }
     } else {
-        if (em_pop("x10") != 0) { return -1; }
+        if (em_lea_local_to(callee_off) != 0) { return -1; }
+        if (em_ins("ldr\tx10, [x10]") != 0) { return -1; }
         if (em_call_indirect() != 0) { return -1; }
     }
-    if (em_call_cleanup(nstack) != 0) { return -1; }
+    if (em_call_cleanup_bytes(area_bytes) != 0) { return -1; }
     c_arg_n = base;
     sem_res_reset(r, ret);
     if (ty_is_float(ret) != 0) {
@@ -1435,25 +1491,30 @@ fn sem_forin_begin(it *Res, is_range int, end_res *Res) int {
         // x0 = 起点。先存 data 槽（起点），再与终点比较定步长与长度。
         if (em_lea_local_to(c_fi_data_off[d]) != 0) { return -1; }
         if (em_ins("str\tx0, [x10]") != 0) { return -1; }
-        // x9 = 终点（从临时槽）
+        // x11 = 终点（从临时槽）。用 x11 而非 x9：深帧下
+        // em_lea_local_to 拼地址走 movz x9，会覆盖 x9 里的终点，
+        // 区间长度被算成「槽偏移 - 起点」（run/27：长度 287 而非 4，
+        // range_sum 累加成 37128——小帧时 lea 走 sub x10 不触雷，
+        // 故 mini 复现全过）
         if (em_lea_local_to(c_end_tmp_off) != 0) { return -1; }
-        if (em_ins("ldr\tx9, [x10]") != 0) { return -1; }
+        if (em_ins("ldr\tx11, [x10]") != 0) { return -1; }
         // x0 = 起点
         if (em_lea_local_to(c_fi_data_off[d]) != 0) { return -1; }
         if (em_ins("ldr\tx0, [x10]") != 0) { return -1; }
-        // 长度 = max(0, 终点 - 起点)：x9 = 终点-起点；若 <0 置 0
-        if (em_ins("sub\tx9, x9, x0") != 0) { return -1; }
+        // 长度 = max(0, 终点 - 起点)：x11 = 终点-起点；若 <0 置 0
+        if (em_ins("sub\tx11, x11, x0") != 0) { return -1; }
         let l_pos int = em_new_label();
-        if (em_frag("\tcbnz\tx9, ") != 0) { return -1; }
+        if (em_frag("\tcbnz\tx11, ") != 0) { return -1; }
         if (em_put_lbl(l_pos) != 0) { return -1; }
         if (em_frag("\n") != 0) { return -1; }
-        // x9 == 0：空区间，长度 0（保持 x9=0 即可）
+        // x11 == 0：空区间，长度 0（保持 x11=0 即可）
         if (em_label(l_pos) != 0) { return -1; }
         if (em_lea_local_to(c_fi_len_off[d]) != 0) { return -1; }
-        if (em_ins("str\tx9, [x10]") != 0) { return -1; }
-        // 步长恒 +1（左闭右开区间）
-        if (em_ins("mov\tx9, #1") != 0) { return -1; }
+        if (em_ins("str\tx11, [x10]") != 0) { return -1; }
+        // 步长恒 +1（左闭右开区间）。先取地址再装常量：深帧 lea 的
+        // movz x9 不能落在步长已入 x9 之后（同数组 len 的教训）
         if (em_lea_local_to(c_fi_step_off[d]) != 0) { return -1; }
+        if (em_ins("mov\tx9, #1") != 0) { return -1; }
         if (em_ins("str\tx9, [x10]") != 0) { return -1; }
         if (em_lea_local_to(c_fi_cnt_off[d]) != 0) { return -1; }
         if (em_ins("str\txzr, [x10]") != 0) { return -1; }
@@ -1466,8 +1527,9 @@ fn sem_forin_begin(it *Res, is_range int, end_res *Res) int {
     if (k == TY_ARRAY) {
         if (em_lea_local_to(c_fi_data_off[d]) != 0) { return -1; }
         if (em_ins("str\tx0, [x10]") != 0) { return -1; }
-        if (em_mov_imm("x9", t_types[it.type_id].len.to_type(i64)) != 0) { return -1; }
+        // 先取地址再装 len：深帧 lea 的 movz x9 不能落在 len 已入 x9 之后
         if (em_lea_local_to(c_fi_len_off[d]) != 0) { return -1; }
+        if (em_mov_imm("x9", t_types[it.type_id].len.to_type(i64)) != 0) { return -1; }
         if (em_ins("str\tx9, [x10]") != 0) { return -1; }
     } else if (k == TY_SLICE) {
         if (em_ins("mov\tx8, x0") != 0) { return -1; }
@@ -1574,16 +1636,18 @@ fn sem_forin_load(it *Res, is_range int) int {
     if (em_ins("ldr\tx9, [x10]") != 0) { return -1; }
     if (em_ins("add\tx0, x9, x0") != 0) { return -1; }
     if (c_fi_elem_off[d] >= 0) {
-        if (em_frag("\tmov\tx9, x0\n") != 0) { return -1; }
-        if (em_ins("mov\tx10, x0") != 0) { return -1; }
         let ek int = t_types[elem].kind;
         if (ek == TY_STRUCT || ek == TY_UNION || ek == TY_ARRAY || ek == TY_SLICE) {
-            // 聚合元素：块拷贝进绑定槽
+            // 聚合元素：块拷贝进绑定槽。x0 = 元素地址（add 的结果），
+            // 先取绑定槽地址（x10）再拷贝——深帧 lea 的 movz x9 不碰
+            // x0，此序天然安全；原「mov x9, x0 保地址」会被 lea 覆盖
+            // （copy_block 源错）
             if (em_lea_local_to(c_fi_elem_off[d]) != 0) { return -1; }
             if (em_ins("mov\tx1, x10") != 0) { return -1; }
-            if (em_ins("mov\tx0, x9") != 0) { return -1; }
             if (em_copy_block(t_types[elem].size) != 0) { return -1; }
         } else {
+            // 标量元素：x10 = 元素地址，load 到 x0 后存绑定槽
+            if (em_ins("mov\tx10, x0") != 0) { return -1; }
             if (em_load_sized(elem) != 0) { return -1; }
             if (em_lea_local_to(c_fi_elem_off[d]) != 0) { return -1; }
             if (em_store_sized(elem) != 0) { return -1; }
@@ -1750,12 +1814,13 @@ fn sem_declare_local(start int, n int, tid int) int {
         if (em_ins(zk) != 0) { return -1; }
         return idx;
     }
-    // 聚合清零循环：x9 = 剩余字节，x10 = 游标
+    // 聚合清零循环：x9 = 剩余字节，x10 = 游标。先取槽地址再装计数器：
+    // 深帧 lea 的 movz x9 会覆盖计数器（清零长度错/死循环）
     let lz int = em_new_label();
     let ld int = em_new_label();
-    if (em_mov_imm("x9", size.to_type(i64)) != 0) { return -1; }
     if (em_lea_local(off) != 0) { return -1; }
     if (em_ins("mov\tx10, x0") != 0) { return -1; }
+    if (em_mov_imm("x9", size.to_type(i64)) != 0) { return -1; }
     if (em_label(lz) != 0) { return -1; }
     if (em_frag("\tcbz\tx9, ") != 0) { return -1; }
     if (em_put_lbl(ld) != 0) { return -1; }
@@ -2009,8 +2074,9 @@ fn sem_fn_begin(idx int) int {
 }
 
 // sem_declare_param：声明参数。前 8 个记入溢出表（prologue 统一发射）；
-// 更多参数位于调用方栈区（地址 = fp + 16 + 16*(regidx-8)），编码为
-// 负偏移（em_lea_local 以 add 处理）。
+// 更多参数位于调用方栈区（地址 = fp + 16 + 8*(regidx-8)，AAPCS64 栈实参
+// 8 字节槽，与 stage0 的 arm64-gen.c C.14 一致），编码为负偏移
+// （em_lea_local 以 add 处理）。
 fn sem_declare_param(start int, n int, tid int, regidx int) int {
     let pk int = t_types[tid].kind;
     let is_agg int = ((pk == TY_ARRAY) || (pk == TY_STRUCT) || (pk == TY_UNION)
@@ -2033,7 +2099,8 @@ fn sem_declare_param(start int, n int, tid int, regidx int) int {
             c_spill_n += 1;
         } else {
             // 栈实参第 (regidx-8) 个槽存指针
-            pslot = 0 - (16 + 16 * (regidx - TG_ARG_REGS));
+            // 栈实参 8 字节间距（AAPCS64/调用方回压一致）
+            pslot = 0 - (16 + 8 * (regidx - TG_ARG_REGS));
         }
         let body int = em_alloc_local(size);
         c_syms[idx].offset = body;
@@ -2069,8 +2136,9 @@ fn sem_declare_param(start int, n int, tid int, regidx int) int {
         c_spill_n += 1;
         return 0;
     }
-    // AAPCS：调用方栈实参区在 sp_at_call+0 起；callee 的 fp = sp_at_call-16
-    c_syms[idx].offset = 0 - (16 + 16 * (regidx - TG_ARG_REGS));
+    // AAPCS：调用方栈实参区在 sp_at_call+0 起（每参 8 字节槽）；
+    // callee 的 fp = sp_at_call-16
+    c_syms[idx].offset = 0 - (16 + 8 * (regidx - TG_ARG_REGS));
     return 0;
 }
 

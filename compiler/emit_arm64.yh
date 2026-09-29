@@ -188,6 +188,12 @@ fn em_store_sized(tid int) int {
 }
 
 // ---- 局部变量（fp 负偏移） ----
+//
+// 深帧（偏移 > 255）寻址需一条寄存器装立即数。该临时**专用 x12**：
+// x9/x10/x11 在调用方常持有活跃值（lea_local_to 的结果、栈实参暂存、
+// copy_block 源），曾被临时借用导致一族「小帧正常、深帧即坏」的缺陷
+// （区间长度算成槽偏移、切片 data 写错等，2026-09-29 差分压测定位）。
+// 调用方任何地方都不得依赖 x12 跨 lea 存活。
 
 // em_lea_local：局部/临时槽地址 → x0。off ≥ 0 为 fp 之下的局部
 //（fp - off）；off < 0 为调用方栈区参数（fp - off = fp + |off|）。
@@ -201,8 +207,8 @@ fn em_lea_local(off int) int {
         if (em_puti(up) != 0) { return -1; }
         return em_frag("\n");
     }
-    if (em_mov_imm("x10", up.to_type(i64)) != 0) { return -1; }
-    return em_ins("add\tx0, x29, x10");
+    if (em_mov_imm("x12", up.to_type(i64)) != 0) { return -1; }
+    return em_ins("add\tx0, x29, x12");
 }
 
 // em_lea_local_down：fp 之下槽的地址（fp - off）→ x0。
@@ -212,8 +218,8 @@ fn em_lea_local_down(off int) int {
         if (em_puti(off) != 0) { return -1; }
         return em_frag("\n");
     }
-    if (em_mov_imm("x10", off.to_type(i64)) != 0) { return -1; }
-    return em_ins("sub\tx0, x29, x10");
+    if (em_mov_imm("x12", off.to_type(i64)) != 0) { return -1; }
+    return em_ins("sub\tx0, x29, x12");
 }
 
 // em_lea_local_to：局部槽地址 → x10（不触碰 x0，保存值用）。
@@ -227,8 +233,8 @@ fn em_lea_local_to(off int) int {
         if (em_puti(up) != 0) { return -1; }
         return em_frag("\n");
     }
-    if (em_mov_imm("x9", up.to_type(i64)) != 0) { return -1; }
-    return em_ins("add\tx10, x29, x9");
+    if (em_mov_imm("x12", up.to_type(i64)) != 0) { return -1; }
+    return em_ins("add\tx10, x29, x12");
 }
 
 // em_lea_local_to_down：fp 之下槽的地址 → x10。
@@ -238,8 +244,8 @@ fn em_lea_local_to_down(off int) int {
         if (em_puti(off) != 0) { return -1; }
         return em_frag("\n");
     }
-    if (em_mov_imm("x9", off.to_type(i64)) != 0) { return -1; }
-    return em_ins("sub\tx10, x29, x9");
+    if (em_mov_imm("x12", off.to_type(i64)) != 0) { return -1; }
+    return em_ins("sub\tx10, x29, x12");
 }
 
 // em_spill_reg_name：第 n 个参数寄存器名。
@@ -721,40 +727,44 @@ fn em_call_arg_to_reg(n int) int {
     return em_pop(reg);
 }
 
-// em_call_stack_area：为栈传实参（超过 8 个的部分）保留区域。
-fn em_call_stack_area(count int) int {
-    if (count <= 0) {
-        return 0;
-    }
-    if (em_frag("\tsub\tsp, sp, #") != 0) { return -1; }
-    if (em_puti(count * TG_STACK_ALIGN) != 0) { return -1; }
-    return em_frag("\n");
-}
-
-// em_call_stack_store：x0 存入栈实参区第 k 槽。
-fn em_call_stack_store(k int) int {
-    if (em_frag("\tstr\tx0, [sp, #") != 0) { return -1; }
-    if (em_puti(k * TG_STACK_ALIGN) != 0) { return -1; }
-    return em_frag("]\n");
-}
-
-// em_call_stack_store_reg：把指定寄存器存入栈实参区第 k 槽（Darwin 变参用）。
-fn em_call_stack_store_reg(reg *char, k int) int {
-    if (em_frag("\tstr\t") != 0) { return -1; }
-    if (em_frag(reg) != 0) { return -1; }
-    if (em_frag(", [sp, #") != 0) { return -1; }
-    if (em_puti(k * TG_STACK_ALIGN) != 0) { return -1; }
-    return em_frag("]\n");
-}
-
-// em_call_cleanup：调用后回收栈实参区。
-fn em_call_cleanup(count int) int {
-    if (count <= 0) {
+// em_call_cleanup_bytes：调用后回收调用点栈区（area_bytes 字节，
+// 已按 16 对齐取整）。调用点栈区由「弹栈-回压」直接形成，无需先开区。
+fn em_call_cleanup_bytes(bytes int) int {
+    if (bytes <= 0) {
         return 0;
     }
     if (em_frag("\tadd\tsp, sp, #") != 0) { return -1; }
-    if (em_puti(count * TG_STACK_ALIGN) != 0) { return -1; }
+    if (em_puti(bytes) != 0) { return -1; }
     return em_frag("\n");
+}
+
+// em_call_stack_alloc：调用点栈区一次性开足 bytes 字节（须为 16 的倍数）。
+// 必须「整块开区 + 偏移写入」，不能逐槽 8 字节 pre-index 压栈：AArch64 要求
+// sp 参与访存时 16 字节对齐，逐槽压栈会让 sp 变成 8 字节对齐并触发
+// alignment fault（Linux/Darwin 均报 SIGBUS）。
+fn em_call_stack_alloc(bytes int) int {
+    if (bytes <= 0) {
+        return 0;
+    }
+    if (em_frag("\tsub\tsp, sp, #") != 0) { return -1; }
+    if (em_puti(bytes) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+// em_call_stack_store：x9 写入调用点栈区第 off 字节（8 的倍数；sp 保持对齐）。
+fn em_call_stack_store(off int) int {
+    if (em_frag("\tstr\tx9, [sp, #") != 0) { return -1; }
+    if (em_puti(off) != 0) { return -1; }
+    return em_frag("]\n");
+}
+
+// em_call_stack_store_fp：浮点寄存器（sfx = "s"/"d"）写入调用点栈区第 off 字节。
+fn em_call_stack_store_fp(sfx *char, off int) int {
+    if (em_frag("\tstr\t") != 0) { return -1; }
+    if (em_frag(sfx) != 0) { return -1; }
+    if (em_frag("0, [sp, #") != 0) { return -1; }
+    if (em_puti(off) != 0) { return -1; }
+    return em_frag("]\n");
 }
 
 // ---- 数据段发射 ----
