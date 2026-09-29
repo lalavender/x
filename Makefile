@@ -6,7 +6,8 @@
 #   * 配置集中在 config.h 与本文件，不需要 ./configure
 #   * 只保留 AArch64 后端，源码以 ONE_SOURCE 方式一次编译成可执行文件
 #
-#   make            构建 yh、libtcc.a、libtcc1.a
+#   make            构建 yh（stage0 种子）、libtcc.a、libtcc1.a 与
+#                   yh-new（自举编译器本机二进制，项目根目录）
 #   make test       运行 tests/yh 语法语料与编译器模式回归
 #   make bootstrap  自举验证门（G1 语法 + G2 三代闭环 + 全量固定点，需容器）
 #   make g3         B8/G3 正式验收（bootstrap + 分代全量复验 + 归档，需容器）
@@ -108,7 +109,12 @@ ifeq ($(INCLUDED),no)
 # --------------------------------------------------------------------------
 # 顶层构建规则
 
-all: yh$(EXESUF) $(LIBTCC) $(LIBTCC1)
+# yh-new：自举编译器本机二进制（ADR-0006 的主要开发编译器）。由 stage0
+# 种子（yh）编译 compiler/ 拼接源码产出，形态随宿主（Darwin → Mach-O，
+# Linux → ELF）。默认 make 即产出，位于项目根目录。
+YHNEW = $(TOP)/yh-new$(EXESUF)
+
+all: yh$(EXESUF) $(LIBTCC) $(LIBTCC1) $(YHNEW)
 
 # 编译器本体：src/core/tcc.c 在 ONE_SOURCE 下把各 .c 汇成一个编译单元，一条命令产出
 yh$(EXESUF): $(SOURCES) $(HEADERS)
@@ -196,6 +202,12 @@ $(BOOTSTRAP_DIR)/compiler.yh: $(SELFHOST_SOURCES)
 	@mkdir -p $(BOOTSTRAP_DIR)
 	cat $(SELFHOST_SOURCES) > $@
 
+# 自举编译器：stage0 种子编译 compiler/ 拼接源码，产出宿主本机形态
+# （Darwin → Mach-O，Linux → ELF）。规则须在 BOOTSTRAP_DIR 定义之后：
+# make 的前置条件列表是即时展开的。
+$(YHNEW): yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh
+	./yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh -o $@
+
 # stage1：stage0 交叉编译拼接源码（AArch64 Linux ELF），在容器内运行
 $(BOOTSTRAP_DIR)/stage1: $(BOOTSTRAP_DIR)/compiler.yh yh$(EXESUF)
 	./yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh -o $@ \
@@ -252,15 +264,21 @@ bootstrap: yh$(EXESUF) $(BOOTSTRAP_DIR)/stage1
 
 test-all: test
 
+# explorer：启动 yh Compiler Explorer（本地浏览器图形界面）。
+# 左侧 yh 源码编辑器、右侧 AArch64 汇编视图、Run 编译运行按钮；
+# 后端自动调用仓库根 yh-new（可切换 yh / 自定义路径），仅监听 127.0.0.1。
+explorer:
+	python3 $(TOPSRC)/tools/yh-explorer.py
+
 tests.%: ;
 
 clean:
-	rm -f yh$(EXESUF) libtcc.o libtcc1.o $(LIBTCC) $(LIBTCC1)
+	rm -f yh$(EXESUF) yh-new$(EXESUF) libtcc.o libtcc1.o $(LIBTCC) $(LIBTCC1)
 	rm -rf $(TOP)/tmp/bootstrap
 
 help:
 	@sed -n '2,20p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all bootstrap selfhost-native g3 clean help
+.PHONY: all install uninstall test test-all explorer bootstrap selfhost-native g3 clean help
 
 endif # ($(INCLUDED),no)

@@ -1,6 +1,63 @@
 # finish
 
-## 2026-09-29 深帧寻址根因根除（x12 专用临时）+ 差分压测框架，自举 80/80 达标
+## 2026-09-29 explorer 两项：Ctrl+C 退出修复 + 复制按钮
+
+- **Ctrl+C 无法退出（根因：Python 3.14 默认 SIGINT 处理器的延迟抛出
+  机制）**：主线程阻塞在 `serve_forever`/`time.sleep` 这类 syscall 时，
+  Ctrl+C 打断 syscall 后只恢复重试、不抛 KeyboardInterrupt（最小复现
+  确认，连裸 `time.sleep(30)` 也不被默认 handler 打断）。修复：显式
+  安装「抛 KeyboardInterrupt」的 SIGINT handler + `serve_forever` 移入
+  daemon 线程 + 主线程 `join(0.3)` 短等待循环双保险；顺带把启动打印
+  加 `flush=True`（重定向时缓冲导致看不到输出）。实测 SIGINT 后干净
+  退出。
+- **编辑器复制功能**：左栏头部新增「复制」（复制 yh 源码全文），右栏
+  头部新增「复制」（复制汇编原文，取高亮层 `textContent`，保留编译器
+  原始 tab 缩进）。`navigator.clipboard.writeText` 优先、隐藏 textarea
+  + `execCommand` 降级，成功后按钮闪现「已复制 ✓」1.2 秒。浏览器实测
+  剪贴板读回与源内容一致。
+
+## 2026-09-29 浏览器图形界面 yh Compiler Explorer（tools/）
+
+新增本地浏览器版编译器浏览器（仿 Compiler Explorer / godbolt 布局）：
+左侧 yh 源码编辑器（语法高亮、行号、自动缩进、示例加载、localStorage
+自动保存），右侧 AArch64 汇编视图（编辑防抖 700ms 自动刷新），绿色
+Run 按钮编译链接并运行，底部控制台展示程序 stdout/stderr/退出码与
+编译诊断；中间分栏可拖拽。
+
+- `tools/yh-explorer.html`：自包含单文件界面（无外部依赖，One Dark
+  配色）。浏览器不能直接执行本地二进制，页面经三个接口与本地服务器
+  通信：`GET /api/defaults`（探测仓库根 yh-new/yh）、`POST /api/compile`
+  （`--emit-asm` 发射汇编）、`POST /api/run`（`-o` 编译链接后运行，
+  崩溃/超时才算失败，故意非零退出码原样展示）。
+- `tools/yh-explorer.py`：仅标准库的本地服务器，监听 127.0.0.1（缺省
+  端口 8765，`--port`/`--no-browser` 可调），临时产物在
+  `tmp/yh-explorer-work/`。编译器支持下拉快捷切换（yh-new 自举 /
+  yh stage0 / 自定义路径）并叠加编译选项（如 `-target`）。
+- 入口：`make explorer`（新增 Makefile 目标）。
+- 本次未修改编译器本体，按约定不新增 tests .yh 用例；工具链路以
+  浏览器端到端验收替代（hello 示例 Run 输出 `hello, yh!` 退出码 0、
+  square 示例自动编译通过、非法源码诊断正确显示）。stage0 `yh` 只支持
+  全量编译运行（下拉标注「仅 Run」，API 实测 Run 正常），不支持
+  `--emit-asm` 汇编发射，汇编视图仅自举侧可用。
+
+## 2026-09-29 `make` 默认产出自举编译器二进制 `yh-new`（项目根目录）
+
+落实 ADR-0006 的构建侧：`make` 现在在项目根目录产出**两个**二进制——
+
+- `yh`：stage0 种子（C 版，冻结），bootstrap 交叉编译 stage1 的种子；
+- `yh-new`：**自举编译器本机形态**（stage0 种子编译 compiler/ 拼接源码
+  产出；Darwin → Mach-O，Linux → ELF），即 ADR-0006 的主要开发编译器。
+
+要点与坑：
+- `$(YHNEW)` 规则必须放在 `BOOTSTRAP_DIR` 定义**之后**——make 的规则
+  前置条件列表是**即时展开**的，先定义后引用才不会展开成空；
+- `clean` 同步清理 `yh-new`；help 文本更新；
+- 验证：`make clean && make` 周期正常、二次 `make` 幂等；make 产出的
+  `yh-new` 直跑全量语料——运行 **61/61**、语法 **66/66 + 29/29**（绝对
+  路径传给 check.py；相对路径在其内部 cwd 处理会失配）；四门不受影响
+  （bootstrap/g3 仍以 `./yh` 为种子）。
+
+## 2026-09-29 深帧寻址根因根除（x12 专用临时）+ 差分压测框架，自举 80/80 达标## 2026-09-29 深帧寻址根因根除（x12 专用临时）+ 差分压测框架，自举 80/80 达标
 
 接上节 for-in 区间修复后的继续探索，两件事：
 

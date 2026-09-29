@@ -11,12 +11,23 @@ stage0（C 版 yh）──编译──▶ stage1 ──编译──▶ stage2 �
                               └─ 自解析 ✓      └─ stage2.s 与 stage3.s 逐字节相同（固定点）
 ```
 
+> **本目录是主要开发编译器（ADR-0006）**：后续新功能与 bug 修复一律在
+> 此实现；`src/` 的 C 版 stage0 已冻结为种子（交叉编译 stage1）与差分
+> 对照，不再修改。自举产物可直接本机使用（宿主自动方言探测、
+> `yh file -o out` 双形态 CLI），日常验证以
+> `make selfhost-native` 与 `make g3` 为主门。
+
 ## 构建与验证
 
 ```bash
+make             # 产出 yh（stage0 种子）与 yh-new（本目录源码的本机二进制）
 make bootstrap   # G1 语法 + G2 三代闭环 + G2+ 全量固定点
 make g3          # B8/G3 正式验收（bootstrap + 分代全量复验 + 归档）
 ```
+
+`make` 的 `yh-new` 由 stage0 种子编译本目录拼接源码，形态随宿主
+（Darwin → Mach-O，Linux → ELF），可直接用于编译 .yh 程序与跑语料：
+`python3 tests/yh-run/check.py --compiler $PWD/yh-new`。
 
 `make bootstrap` 按 Makefile 中 `SELFHOST_SOURCES` 的显式顺序把本目录
 拼接为 `tmp/bootstrap/compiler.yh`（只连接完整顶层声明、保留换行），

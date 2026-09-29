@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<!-- ==========================================================================
+  yh Compiler Explorer —— 本地 yh 编译器的在线 IDE 页面
+
+  界面仿 Compiler Explorer（godbolt）：左侧 yh 源码编辑器，右侧 AArch64
+  汇编视图，绿 Run 按钮编译运行；底部为运行输出控制台。
+
+  本文件只是界面：浏览器无法直接执行本地二进制，必须配合
+  tools/yh-explorer.py 使用（python3 tools/yh-explorer.py 后访问
+  http://127.0.0.1:8765）。页面通过 /api/defaults、/api/compile、/api/run
+  三个接口与该服务器通信；直接以 file:// 打开时会提示启动方法。
+=========================================================================== -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yh Compiler Explorer</title>
+<style>
+/* ---------- 主题变量（One Dark 风格，仿截图配色） ---------- */
+:root {
+  --bg: #282c34;          /* 编辑器背景 */
+  --bg-panel: #21252b;    /* 面板头 / 行号槽背景 */
+  --bg-input: #1b1d23;    /* 输入框背景 */
+  --border: #181a1f;      /* 分隔线 */
+  --text: #abb2bf;        /* 正文文字 */
+  --text-dim: #6b7280;    /* 次要文字 */
+  --gutter-text: #495162; /* 行号 */
+  --kw: #e06c75;          /* 关键字 / 类型（红） */
+  --num: #d19a66;         /* 数字 / 寄存器（橙） */
+  --str: #98c379;         /* 字符串（绿） */
+  --com: #5c6370;         /* 注释（灰，斜体） */
+  --fn: #61afef;          /* 函数名 / 助记符（蓝） */
+  --label: #d7dae0;       /* 汇编标签（亮白，粗体） */
+  --dir: #c678dd;         /* 汇编伪指令（紫） */
+  --ok: #2ea043;          /* 成功绿 */
+  --err: #f14c4c;         /* 失败红 */
+  --mono: "SF Mono", ui-monospace, Menlo, Consolas, "Courier New", monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; display: flex; flex-direction: column;
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px; overflow: hidden;
+}
+
+/* ---------- 顶部横幅（仅 file:// 直开时出现） ---------- */
+#banner {
+  display: none; padding: 8px 14px; background: #5a2d2d; color: #f2c4c4;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---------- 主区：左右双栏 + 中间拖拽条 ---------- */
+#main { flex: 1; display: flex; min-height: 0; }
+.pane { display: flex; flex-direction: column; min-width: 200px; }
+#left  { flex: 0 0 46%; }
+#right { flex: 1; }
+
+/* 面板头（仿截图：左栏标题+按钮，右栏编译器选择） */
+.pane-header {
+  display: flex; align-items: center; gap: 8px;
+  height: 40px; padding: 0 10px; flex: none;
+  background: var(--bg-panel); border-bottom: 1px solid var(--border);
+  white-space: nowrap; overflow-x: auto; overflow-y: hidden;
+}
+.pane-header::-webkit-scrollbar { display: none; }
+.pane-title { font-weight: 600; color: #c8cdd6; }
+.pane-title small { color: var(--text-dim); font-weight: 400; margin-left: 6px; }
+.spacer { flex: 1; }
+
+/* 输入控件统一样式 */
+select, input[type=text] {
+  background: var(--bg-input); color: var(--text); border: 1px solid #33363d;
+  border-radius: 6px; padding: 4px 8px; font-size: 12.5px; outline: none;
+}
+select:focus, input[type=text]:focus { border-color: var(--fn); }
+#compiler-path { width: 240px; font-family: var(--mono); font-size: 11.5px; }
+#compiler-opts { width: 130px; font-family: var(--mono); font-size: 11.5px; }
+
+/* Run 按钮（绿色主按钮）与普通按钮 */
+#btn-run {
+  background: var(--ok); color: #fff; border: none; border-radius: 6px;
+  padding: 6px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+#btn-run:hover { background: #38b84f; }
+#btn-run:disabled { opacity: .5; cursor: default; }
+.ghost {
+  background: transparent; color: var(--text); border: 1px solid #33363d;
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+}
+.ghost:hover { border-color: var(--fn); color: #d7dae0; }
+
+/* 编译状态圆点（绿✓ / 红✕，仿截图右上角） */
+#status-dot {
+  width: 20px; height: 20px; border-radius: 50%; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: #fff; background: #3a3f4b; cursor: default;
+}
+#status-dot.ok { background: var(--ok); }
+#status-dot.err { background: var(--err); }
+
+/* ---------- 编辑器（行号槽 + 高亮层 + 透明 textarea 三层叠加） ---------- */
+.editor-wrap { position: relative; flex: 1; min-height: 0; background: var(--bg); }
+.gutter {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 52px; z-index: 3;
+  overflow: hidden; background: var(--bg-panel); border-right: 1px solid var(--border);
+}
+.gutter-inner { padding: 8px 0; will-change: transform; }
+.gutter-inner div {
+  text-align: right; padding-right: 10px; color: var(--gutter-text);
+  font: 14px/21px var(--mono);
+}
+#active-line {
+  position: absolute; left: 0; right: 0; height: 21px; z-index: 1;
+  background: rgba(255,255,255,.045); pointer-events: none; display: none;
+}
+.highlight, textarea.code {
+  position: absolute; inset: 0; margin: 0; border: none;
+  padding: 8px 12px 8px 64px;
+  font: 14px/21px var(--mono); white-space: pre; overflow: auto;
+  tab-size: 4;
+}
+.highlight { z-index: 2; pointer-events: none; color: var(--text); }
+.highlight code { font: inherit; }
+textarea.code {
+  z-index: 4; background: transparent; color: transparent;
+  caret-color: #f0f0f0; resize: none; outline: none;
+}
+textarea.code::selection { background: rgba(97,175,239,.25); }
+
+/* ---------- 汇编视图（只读，同样行号 + 高亮） ---------- */
+.asm-wrap { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
+.asm-inner { display: flex; min-height: 100%; }
+.asm-gutter {
+  flex: none; width: 52px; background: var(--bg-panel);
+  border-right: 1px solid var(--border); padding: 8px 0;
+  position: sticky; left: 0;
+}
+.asm-gutter div { text-align: right; padding-right: 10px; color: var(--gutter-text); font: 14px/21px var(--mono); }
+pre.asm-code { margin: 0; padding: 8px 12px; font: 14px/21px var(--mono); white-space: pre; color: var(--text); }
+
+/* ---------- 语法高亮配色 ---------- */
+.t-kw  { color: var(--kw); }
+.t-num { color: var(--num); }
+.t-str { color: var(--str); }
+.t-com { color: var(--com); font-style: italic; }
+.t-fn  { color: var(--fn); }
+.t-lab { color: var(--label); font-weight: 700; }
+.t-dir { color: var(--dir); }
+
+/* ---------- 底部控制台 ---------- */
+#console {
+  flex: none; height: 170px; display: flex; flex-direction: column;
+  background: var(--bg-panel); border-top: 1px solid var(--border);
+}
+#console.folded { height: 34px; }
+#console.folded .console-body { display: none; }
+.console-header {
+  display: flex; align-items: center; gap: 10px; height: 34px;
+  padding: 0 10px; flex: none; background: var(--bg-panel);
+}
+.console-body { flex: 1; overflow: auto; margin: 0; padding: 4px 14px 10px; font: 12.5px/19px var(--mono); white-space: pre-wrap; }
+.o-sec { color: #c8cdd6; font-weight: 700; }   /* 段标题 */
+.o-err { color: var(--err); }                  /* 编译错误 */
+.o-out { color: #b5bd68; }                     /* 程序 stdout */
+.o-sys { color: var(--err); }                  /* 程序 stderr */
+.o-dim { color: var(--text-dim); }
+
+/* ---------- 中间拖拽条 ---------- */
+#split { flex: none; width: 5px; cursor: col-resize; background: var(--border); }
+#split:hover, #split.drag { background: #3a3f4b; }
+</style>
+</head>
+<body>
+
+<div id="banner">浏览器不能直接运行本地二进制：请先执行 <code>python3 tools/yh-explorer.py</code>，然后访问 <code>http://127.0.0.1:8765</code></div>
+
+<div id="main">
+  <!-- ============ 左栏：yh 源码编辑器 ============ -->
+  <div class="pane" id="left">
+    <div class="pane-header">
+      <span class="pane-title">yh 源码 <small>#1</small></span>
+      <select id="example-sel" title="加载示例">
+        <option value="">示例…</option>
+        <option value="hello">hello, yh!</option>
+        <option value="square">square / main（仿截图）</option>
+        <option value="fib">递归：阶乘与斐波那契</option>
+        <option value="loop">循环与 continue</option>
+      </select>
+      <span class="spacer"></span>
+      <button class="ghost" id="btn-copy-src" title="复制 yh 源码到剪贴板">复制</button>
+      <button id="btn-run" title="编译并运行（Ctrl/Cmd+Enter）">▶ Run</button>
+    </div>
+    <div class="editor-wrap">
+      <div id="active-line"></div>
+      <div class="gutter"><div class="gutter-inner" id="src-gutter"></div></div>
+      <pre class="highlight" aria-hidden="true"><code id="src-hl"></code></pre>
+      <textarea class="code" id="src" spellcheck="false" autocomplete="off"
+                placeholder="/* 在这里输入 yh 代码，或从「示例…」加载 */"></textarea>
+    </div>
+  </div>
+
+  <div id="split" title="拖拽调整宽度"></div>
+
+  <!-- ============ 右栏：汇编视图 ============ -->
+  <div class="pane" id="right">
+    <div class="pane-header">
+      <select id="compiler-sel" title="选择编译器（stage0 种子不支持汇编发射，仅 Run 可用）">
+        <option value="yh-new">yh-new（自举编译器）</option>
+        <option value="yh">yh（stage0 种子，仅 Run）</option>
+        <option value="custom">自定义路径…</option>
+      </select>
+      <input type="text" id="compiler-path" title="编译器可执行文件路径" placeholder="/path/to/yh-new">
+      <input type="text" id="compiler-opts" title="附加编译器选项（如 -target darwin）" placeholder="编译选项…">
+      <span class="spacer"></span>
+      <button class="ghost" id="btn-copy-asm" title="复制汇编代码到剪贴板">复制</button>
+      <div id="status-dot" title="尚未编译">·</div>
+    </div>
+    <div class="asm-wrap" id="asm-wrap">
+      <div class="asm-inner">
+        <div class="asm-gutter" id="asm-gutter"></div>
+        <pre class="asm-code"><code id="asm-hl"></code></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 底部：运行输出控制台 ============ -->
+<div id="console">
+  <div class="console-header">
+    <span class="pane-title">输出</span>
+    <span id="console-hint" class="o-dim"></span>
+    <span class="spacer"></span>
+    <button class="ghost" id="btn-clear">清空</button>
+    <button class="ghost" id="btn-fold">收起</button>
+  </div>
+  <pre class="console-body" id="console-body">等待运行…</pre>
+</div>
+
+<script>
+"use strict";
+/* ==========================================================================
+   yh Compiler Explorer 前端逻辑
+   三层叠加编辑器（行号/高亮/textarea）+ 两个后端接口（compile/run）。
+   ========================================================================== */
+
+const $ = id => document.getElementById(id);
+const src = $("src"), srcHl = $("src-hl"), srcGutter = $("src-gutter");
+const asmHl = $("asm-hl"), asmGutter = $("asm-gutter"), asmWrap = $("asm-wrap");
+const dot = $("status-dot"), consoleBody = $("console-body");
+const LINE_H = 21;                       // 与 CSS 的 14px/21px 保持一致
+let compilerPath = "";                   // 当前生效的编译器路径
+let compileTimer = null;                 // 自动汇编的防抖计时器
+let runSeq = 0;                          // 运行请求序号，丢弃过期响应
+
+/* ---------- 通用工具 ---------- */
+function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function save() {                        // 会话内自动保存，刷新不丢
+  try {
+    localStorage.setItem("yh-explorer.code", src.value);
+    localStorage.setItem("yh-explorer.compiler", compilerPath);
+    localStorage.setItem("yh-explorer.opts", $("compiler-opts").value);
+  } catch (e) { /* 隐私模式等场景下静默降级 */ }
+}
+
+/* ==========================================================================
+   yh 语法高亮：先整体 HTML 转义，再按「注释/字符串/数字/关键字/类型/
+   函数名」顺序做正则替换。关键字表取自 compiler/lexer.yh 的 kw_kind。
+   ========================================================================== */
+const YH_RULES = [
+  [/(\/\*[\s\S]*?\*\/|\/\/[^\n]*)/g, "t-com"],                                   // 注释
+  [/("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')/g, "t-str"],                       // 字符串/字符
+  [/\b(0[xX][0-9a-fA-F]+|\d+\.?\d*(?:[eE][+-]?\d+)?)\b/g, "t-num"],              // 数字
+  [/\b(fn|let|if|else|for|while|switch|case|default|break|continue|goto|return|in|as|to_type|sizeof|len|pub|type|const|struct|enum|union|true|false)\b/g, "t-kw"],   // 语句关键字
+  [/\b(void|bool|char|i8|i16|i32|i64|int|u8|u16|u32|u64|usize|f32|f64)\b/g, "t-kw"], // 类型关键字
+  [/\b([A-Za-z_]\w*)(?=\s*\()/g, "t-fn"],                                        // 函数调用名
+];
+function hlYh(text) {
+  let out = esc(text);
+  for (const [re, cls] of YH_RULES) {
+    out = out.replace(re, `<span class="${cls}">$1</span>`);
+  }
+  return out + "\n";
+}
+
+/* ==========================================================================
+   AArch64 汇编高亮：逐行处理。
+   标签（xxx:）亮白粗体；伪指令（.globl 等）紫色；每条指令首词视为
+   助记符蓝色；寄存器与数字橙色；#注释 绿色（#紧跟数字视为立即数）。
+   ========================================================================== */
+const ASM_REG = /\b([xwshbdqvb][0-9]+\b|xzr|wzr|sp|fp|lr|pc)\b/g;
+function hlAsmLine(line) {
+  let s = esc(line);
+  // 标签：行首任意空白后的「名字:」
+  const label = s.match(/^(\s*)([A-Za-z_.$][\w.$]*):(.*)$/);
+  if (label) {
+    return `${label[1]}<span class="t-lab">${label[2]}:</span>${asmTail(label[3])}`;
+  }
+  // 伪指令：.globl / .data / .byte / .Lxxx 等
+  const dir = s.match(/^(\s*)(\.[\w.]+)(.*)$/);
+  if (dir) {
+    return `${dir[1]}<span class="t-dir">${dir[2]}</span>${asmTail(dir[3])}`;
+  }
+  return asmTail(s, true);
+}
+// 行尾注释：# 注释绿色；#紧跟数字是立即数（#16 / #-8），整行原样保留
+function asmSplitComment(s) {
+  const m = s.match(/(^|[^&#])(#|\/\/)(.*)$/);
+  if (!m) return [s, null];
+  const idx = s.indexOf(m[2], m[1].length);
+  const tail = s.slice(idx);
+  const imm = /^#[0-9\-]/.test(tail);    // #16 / #-8 → 立即数，不是注释
+  return imm ? [s, null] : [s.slice(0, idx), tail];
+}
+// 指令体高亮：firstWord 为真时把首个词当助记符
+function asmTail(s, firstWord) {
+  const [head, comment] = asmSplitComment(s);
+  let out = head;
+  if (firstWord) {
+    const m = out.match(/^(\s*)([A-Za-z][\w.]*)((?:\.[\w.]+)?)(\s|$)/);
+    if (m) {
+      // m[4] 是助记符与操作数间的空白，必须原样补回，否则粘成一个词
+      out = `${m[1]}<span class="t-fn">${m[2]}${m[3]}</span>${m[4]}` + out.slice(m[0].length);
+    }
+  }
+  out = out
+    .replace(ASM_REG, `<span class="t-num">$1</span>`)                             // 寄存器
+    .replace(/(^|[^#\w-])(-?(?:0[xX][0-9a-fA-F]+|\d+))(?![\w])/g,
+             `$1<span class="t-num">$2</span>`)                                    // 数字/立即数值
+    .replace(/#-?(?:0[xX][0-9a-fA-F]+|\d+)/g,
+             m => `<span class="t-num">${m}</span>`)                               // #16 / #-8 立即数
+    .replace(/#\s*@[\w.]+/g, m => `<span class="t-com">${m}</span>`);              // # @main 标注
+  if (comment) out += `<span class="t-com">${comment}</span>`;
+  return out;
+}
+function hlAsm(text) {
+  return text.split("\n").map(hlAsmLine).join("\n");
+}
+
+/* ---------- 行号槽 ---------- */
+function fillGutter(el, n) {
+  let html = "";
+  for (let i = 1; i <= n; i++) html += `<div>${i}</div>`;
+  el.innerHTML = html;
+}
+
+/* ---------- 编辑器：高亮 / 行号 / 滚动同步 / 当前行 ---------- */
+function renderSrc() {
+  const lines = src.value.split("\n").length;
+  srcHl.innerHTML = hlYh(src.value);
+  fillGutter(srcGutter, lines);
+  syncScroll();
+}
+function syncScroll() {
+  // pre 与 textarea 内容完全同构，直接同步滚动偏移即可
+  srcHl.parentElement.scrollTop = src.scrollTop;
+  srcHl.parentElement.scrollLeft = src.scrollLeft;
+  srcGutter.style.transform = `translateY(${-src.scrollTop}px)`;
+  updateActiveLine();
+}
+function updateActiveLine() {
+  const el = $("active-line");
+  const before = src.value.slice(0, src.selectionStart);
+  const line = before.split("\n").length;
+  el.style.display = "block";
+  el.style.top = (8 + (line - 1) * LINE_H - src.scrollTop) + "px";
+}
+src.addEventListener("input", () => {
+  renderSrc();
+  save();
+  scheduleCompile();                     // 编辑停顿后自动刷新汇编
+});
+src.addEventListener("scroll", syncScroll);
+["keyup", "click"].forEach(ev => src.addEventListener(ev, updateActiveLine));
+
+/* 编辑辅助：Tab 插入 4 空格；Enter 自动缩进（{ 后多一层） */
+src.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.isComposing) {
+    const pos = src.selectionStart;
+    const lineStart = src.value.lastIndexOf("\n", pos - 1) + 1;
+    const cur = src.value.slice(lineStart, pos);
+    let indent = (cur.match(/^\s*/) || [""])[0];
+    if (/\{\s*$/.test(cur)) indent += "    ";
+    const ins = "\n" + indent;
+    src.setRangeText(ins, pos, src.selectionEnd, "end");
+    e.preventDefault();
+    renderSrc(); save(); scheduleCompile();
+  } else if (e.key === "Tab") {
+    src.setRangeText("    ", src.selectionStart, src.selectionEnd, "end");
+    e.preventDefault();
+    renderSrc(); save(); scheduleCompile();
+  } else if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    e.preventDefault(); runCode();
+  } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+    e.preventDefault(); save();          // 内容本来就自动保存，这里只拦浏览器对话框
+  }
+});
+
+/* ==========================================================================
+   后端通信
+   ========================================================================== */
+async function apiPost(path, body) {
+  const res = await fetch(path, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function setDot(state, tip) {
+  dot.className = state;                  // "" | "ok" | "err"
+  dot.textContent = state === "ok" ? "✓" : state === "err" ? "✕" : "·";
+  dot.title = tip;
+}
+
+/* ---------- 汇编视图刷新（编辑防抖 700ms，仿 godbolt 自动编译） ---------- */
+function scheduleCompile() {
+  clearTimeout(compileTimer);
+  compileTimer = setTimeout(compileAsm, 700);
+}
+async function compileAsm() {
+  if (!compilerPath) return;
+  try {
+    const r = await apiPost("/api/compile", {
+      compiler: compilerPath, source: src.value, options: $("compiler-opts").value,
+    });
+    const ok = r.ok && !r.stderr;
+    setDot(ok ? "ok" : "err",
+           ok ? `编译成功（退出码 ${r.exit}）` : `编译失败（退出码 ${r.exit ?? "?"}）`);
+    if (r.asm) {
+      asmHl.innerHTML = hlAsm(r.asm.replace(/\n+$/, "\n"));
+      fillGutter(asmGutter, r.asm.split("\n").length);
+    } else {
+      asmHl.innerHTML = `<span class="t-com">${
+        esc(r.stderr || "（无输出）")}</span>`;
+      fillGutter(asmGutter, 1);
+    }
+    if (r.stderr) consoleShow([["编译诊断", r.stderr, "o-err"]], "编译失败");
+  } catch (e) {
+    serverDown(e);
+  }
+}
+
+/* ---------- Run：编译链接并运行，输出进控制台 ---------- */
+async function runCode() {
+  if (!compilerPath) return;
+  const btn = $("btn-run");
+  btn.disabled = true;
+  $("console-hint").textContent = "运行中…";
+  const seq = ++runSeq;
+  try {
+    const r = await apiPost("/api/run", {
+      compiler: compilerPath, source: src.value,
+      options: $("compiler-opts").value,
+    });
+    if (seq !== runSeq) return;          // 已有更新的请求，丢弃旧响应
+    const secs = [];
+    if (r.compileStderr) secs.push(["编译诊断", r.compileStderr, "o-err"]);
+    if (r.stdout) secs.push(["程序输出", r.stdout, "o-out"]);
+    if (r.stderr) secs.push(["程序 stderr", r.stderr, "o-sys"]);
+    const code = r.exit === null ? "超时/未运行" : r.exit;
+    secs.push(["退出码", String(code), r.exit === 0 ? "o-out" : "o-err"]);
+    consoleShow(secs, r.ok ? "运行完成" : "运行出错");
+    setDot(r.ok ? "ok" : "err", r.ok ? "编译并运行成功" : "编译或运行失败");
+  } catch (e) {
+    serverDown(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("btn-run").addEventListener("click", runCode);
+
+/* ---------- 控制台渲染：secs 为 [标题, 内容, 样式类] 数组 ---------- */
+function consoleShow(secs, hint) {
+  consoleBody.innerHTML = secs.map(([t, c, cls]) =>
+    `<span class="o-sec">── ${esc(t)} ──</span>\n<span class="${cls}">${esc(c)}</span>\n`
+  ).join("\n");
+  $("console-hint").textContent = hint;
+  unfoldConsole(true);
+}
+function unfoldConsole(open) {
+  const el = $("console");
+  if (open !== undefined) el.classList.remove("folded");
+}
+$("btn-clear").addEventListener("click", () => {
+  consoleBody.textContent = "等待运行…";
+  $("console-hint").textContent = "";
+});
+$("btn-fold").addEventListener("click", () => {
+  const el = $("console");
+  el.classList.toggle("folded");
+  $("btn-fold").textContent = el.classList.contains("folded") ? "展开" : "收起";
+});
+
+/* ==========================================================================
+   复制功能：左栏复制 yh 源码，右栏复制汇编代码。
+   优先 navigator.clipboard（127.0.0.1 与 file:// 都属安全上下文）；
+   失败时降级为隐藏 textarea + execCommand。成功后按钮闪现「已复制 ✓」。
+   ========================================================================== */
+async function copyText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+  const old = btn.textContent;
+  btn.textContent = "已复制 ✓";
+  setTimeout(() => { btn.textContent = old; }, 1200);
+}
+// 汇编原文直接取高亮层的 textContent（span 剥离后即为编译器原始输出）
+$("btn-copy-src").addEventListener("click",
+  () => copyText(src.value, $("btn-copy-src")));
+$("btn-copy-asm").addEventListener("click",
+  () => copyText(asmHl.textContent, $("btn-copy-asm")));
+
+/* ---------- 编译器选择：下拉快捷项 + 可编辑路径 ---------- */
+$("compiler-sel").addEventListener("change", () => {
+  const v = $("compiler-sel").value;
+  const cand = window.__defaults && window.__defaults.candidates || {};
+  if (v === "custom") {
+    $("compiler-path").focus();
+    return;                              // 保留当前输入值由用户编辑
+  }
+  if (cand[v]) setCompiler(cand[v]);
+});
+$("compiler-path").addEventListener("change", () => setCompiler($("compiler-path").value.trim()));
+$("compiler-opts").addEventListener("change", () => { save(); scheduleCompile(); });
+
+function setCompiler(path) {
+  if (!path) return;
+  compilerPath = path;
+  $("compiler-path").value = path;
+  // 让下拉框与路径保持一致（匹配不到就落在自定义上）
+  const cand = (window.__defaults && window.__defaults.candidates) || {};
+  const match = Object.entries(cand).find(([, p]) => p === path);
+  $("compiler-sel").value = match ? match[0] : "custom";
+  setDot("", "尚未编译");
+  save();
+  scheduleCompile();
+}
+
+/* ---------- 示例加载 ---------- */
+const EXAMPLES = {
+  hello: `fn main() int {
+    printf("hello, yh!\\n");
+    return 0;
+}
+`,
+  square: `fn square(num int) int {
+    return num * num;
+}
+
+fn main() int {
+    printf("square(10) = %d\\n", square(10));
+    return 0;
+}
+`,
+  fib: `fn fact(n int) int {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * fact(n - 1);
+}
+
+fn fib(n int) int {
+    if (n < 2) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn main() int {
+    printf("%d %d\\n", fact(5), fib(10));
+    return 0;
+}
+`,
+  loop: `fn main() int {
+    let i int = 0;
+    for i < 5 {
+        printf("%d\\n", i);
+        i += 1;
+    }
+    return 0;
+}
+`,
+};
+$("example-sel").addEventListener("change", () => {
+  const v = $("example-sel").value;
+  if (!v || !EXAMPLES[v]) return;
+  src.value = EXAMPLES[v];
+  $("example-sel").value = "";           // 允许重复选择同一示例
+  renderSrc(); save(); scheduleCompile();
+});
+
+/* ---------- 左右栏拖拽分割 ---------- */
+(() => {
+  const split = $("split"), left = $("left");
+  let dragging = false;
+  split.addEventListener("mousedown", e => { dragging = true; split.classList.add("drag"); e.preventDefault(); });
+  window.addEventListener("mousemove", e => {
+    if (!dragging) return;
+    const pct = Math.min(75, Math.max(15, e.clientX / window.innerWidth * 100));
+    left.style.flexBasis = pct + "%";
+  });
+  window.addEventListener("mouseup", () => { dragging = false; split.classList.remove("drag"); });
+})();
+
+/* ---------- 服务器不可达时的降级提示 ---------- */
+function serverDown(e) {
+  $("banner").style.display = "block";
+  consoleBody.innerHTML =
+    `<span class="o-err">无法连接本地服务器（${esc(e.message)}）。</span>\n` +
+    `<span class="o-dim">请先启动：python3 tools/yh-explorer.py，然后访问 http://127.0.0.1:8765</span>`;
+  $("console-hint").textContent = "连接失败";
+  unfoldConsole(true);
+}
+
+/* ---------- 初始化：探测后端 → 恢复现场 → 首次编译 ---------- */
+async function init() {
+  renderSrc();
+  try {
+    const d = await (await fetch("/api/defaults")).json();
+    window.__defaults = d;
+    compilerPath = localStorage.getItem("yh-explorer.compiler") || d.default;
+    setCompiler(compilerPath);
+    const saved = localStorage.getItem("yh-explorer.code");
+    const savedOpts = localStorage.getItem("yh-explorer.opts");
+    if (savedOpts) $("compiler-opts").value = savedOpts;
+    // 首次使用默认加载 hello 示例，避免空白页直接报「缺少 main」
+    src.value = (saved !== null && saved.trim()) ? saved : EXAMPLES.hello;
+    renderSrc();
+    compileAsm();
+  } catch (e) {
+    serverDown(e);
+  }
+}
+init();
+</script>
+</body>
+</html>
