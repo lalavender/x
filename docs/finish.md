@@ -17,7 +17,14 @@
   Linux 种子、验证门重建为两代固定点。
 - 本地验证：make（两步链 + bin 副本）幂等、bin/yh-new 冒烟通过；
   arm64 ubuntu:24.04 容器 make -j4 + 双冒烟 + bin/yh-new（ELF）冒烟
-  通过——发布配方与新构建链兼容。发布结果以 tag 推送后 Actions 为准。
+  通过——发布配方与新构建链兼容。
+- **实际运行结果**：tag `0.0.2` 流水线
+  [36630090430](https://github.com/lalavender/x/actions/runs/36630090430)
+  一次全绿；Release
+  [yh 0.0.2](https://github.com/lalavender/x/releases/tag/0.0.2)
+  归档 4 资产（darwin/linux 各 tar.gz+sha256）；端到端验收：下载
+  linux 包（内容 yh/yh-new/libtcc1.a）SHA-256 与 .sha256 资产一致
+  （e6b8b3ca…381e），darwin 包内容 yh/yh-new。
 
 ## 2026-09-30 编译器源码四模块化完成（ADR-0007 P1–P5）：compiler/ 成为 mod.toml 项目，四代自举固定点达成
 
