@@ -12,7 +12,7 @@ import re
 import sys
 
 LIBC = {'write', 'open', 'read', 'close', 'malloc', 'free',
-        'memcpy', 'strlen', 'printf', 'exit'}
+        'memcpy', 'strlen', 'printf', 'exit', 'system', 'unlink'}
 
 
 def convert(src: str, dst: str) -> None:

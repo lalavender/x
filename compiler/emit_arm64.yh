@@ -272,7 +272,9 @@ fn em_store_local(off int, tid int) int {
 // ---- 符号名与全局地址 ----
 
 // em_put_sym_name：输出符号汇编名到 .text（名字池逐字节）。
+// Darwin 方言先写 "_" 前缀（C 符号约定），GNU 无前缀。
 fn em_put_sym_name(idx int) int {
+    if (em_frag(tg_sym_prefix()) != 0) { return -1; }
     let n int = c_syms[idx].name_len;
     let off int = c_syms[idx].name_off;
     let i int = 0;
@@ -287,6 +289,7 @@ fn em_put_sym_name(idx int) int {
 
 // dat_put_sym_name：输出符号汇编名到 .data/.bss 缓冲。
 fn dat_put_sym_name(idx int) int {
+    if (dat_puts(tg_sym_prefix()) != 0) { return -1; }
     let n int = c_syms[idx].name_len;
     let off int = c_syms[idx].name_off;
     let i int = 0;
@@ -299,8 +302,27 @@ fn dat_put_sym_name(idx int) int {
     return 0;
 }
 
-// em_lea_global：全局符号地址 → x0（adrp + add :lo12:）。
+// em_lea_global：全局符号地址 → x0。
+//   GNU/Linux：`adrp x0, sym` + `add x0, x0, :lo12:sym`（静态链接，直接取址）。
+//   Darwin：外部（prelude/libc）符号必须经 GOT（Mach-O 不支持外部符号直接
+//   页偏移寻址），写 `adrp x0, sym@GOTPAGE` + `ldr x0, [x0, sym@GOTPAGEOFF]`；
+//   本编译单元内定义的符号用 `adrp/add @PAGE/@PAGEOFF`。
+//   prelude 符号的标志位含 F_EXTERN（见 symbols.yh），据此区分。
 fn em_lea_global(idx int) int {
+    if (tg_darwin() != 0) {
+        if ((c_syms[idx].flags & F_EXTERN) != 0) {
+            if (em_frag("\tadrp\tx0, ") != 0) { return -1; }
+            if (em_put_sym_name(idx) != 0) { return -1; }
+            if (em_frag("@GOTPAGE\n\tldr\tx0, [x0, ") != 0) { return -1; }
+            if (em_put_sym_name(idx) != 0) { return -1; }
+            return em_frag("@GOTPAGEOFF]\n");
+        }
+        if (em_frag("\tadrp\tx0, ") != 0) { return -1; }
+        if (em_put_sym_name(idx) != 0) { return -1; }
+        if (em_frag("@PAGE\n\tadd\tx0, x0, ") != 0) { return -1; }
+        if (em_put_sym_name(idx) != 0) { return -1; }
+        return em_frag("@PAGEOFF\n");
+    }
     if (em_frag("\tadrp\tx0, ") != 0) { return -1; }
     if (em_put_sym_name(idx) != 0) { return -1; }
     if (em_frag("\n\tadd\tx0, x0, :lo12:") != 0) { return -1; }
@@ -324,7 +346,16 @@ fn em_store_global(idx int, tid int) int {
 }
 
 // em_load_data_label：数据标签地址 → x0（字符串/指针常量用）。
+// GNU 用 `adrp/add :lo12:.LD<n>`；Darwin 用 `adrp/add @PAGE/@PAGEOFF`。
 fn em_load_data_label(lbl int) int {
+    if (tg_darwin() != 0) {
+        if (em_frag("\tadrp\tx0, .LD") != 0) { return -1; }
+        if (em_puti(lbl) != 0) { return -1; }
+        if (em_frag("@PAGE\n\tadd\tx0, x0, .LD") != 0) { return -1; }
+        if (em_puti(lbl) != 0) { return -1; }
+        if (em_frag("@PAGEOFF\n") != 0) { return -1; }
+        return 0;
+    }
     if (em_frag("\tadrp\tx0, .LD") != 0) { return -1; }
     if (em_puti(lbl) != 0) { return -1; }
     if (em_frag("\n\tadd\tx0, x0, :lo12:.LD") != 0) { return -1; }
@@ -707,6 +738,15 @@ fn em_call_stack_store(k int) int {
     return em_frag("]\n");
 }
 
+// em_call_stack_store_reg：把指定寄存器存入栈实参区第 k 槽（Darwin 变参用）。
+fn em_call_stack_store_reg(reg *char, k int) int {
+    if (em_frag("\tstr\t") != 0) { return -1; }
+    if (em_frag(reg) != 0) { return -1; }
+    if (em_frag(", [sp, #") != 0) { return -1; }
+    if (em_puti(k * TG_STACK_ALIGN) != 0) { return -1; }
+    return em_frag("]\n");
+}
+
 // em_call_cleanup：调用后回收栈实参区。
 fn em_call_cleanup(count int) int {
     if (count <= 0) {
@@ -771,6 +811,13 @@ fn dat_puthex(v i64) int {
 fn em_data_string(start int, slen int) int {
     let lbl int = c_data_n;
     c_data_n += 1;
+    return em_data_string_body(start, slen, lbl);
+}
+
+// em_data_string_body：以预分配标签号发射字符串内容（.LD<lbl>: + 逐字节
+// .byte）。供 em_data_string 与全局聚合初始化（先领号发指针引用、后补
+// 内容，保证变量数据布局不被字符串内容打断）共用。
+fn em_data_string_body(start int, slen int, lbl int) int {
     if (dat_puts(".LD") != 0) { return -1; }
     if (dat_puti(lbl) != 0) { return -1; }
     if (dat_put(':') != 0) { return -1; }
@@ -841,8 +888,9 @@ fn em_data_symbol_header(idx int, align int) int {
     return dat_puts(":\n");
 }
 
-// bss_put_sym_name：.bss 缓冲输出符号名。
+// bss_put_sym_name：.bss 缓冲输出符号名（Darwin 加 "_" 前缀）。
 fn bss_put_sym_name(idx int) int {
+    if (bss_puts(tg_sym_prefix()) != 0) { return -1; }
     let n int = c_syms[idx].name_len;
     let off int = c_syms[idx].name_off;
     let i int = 0;

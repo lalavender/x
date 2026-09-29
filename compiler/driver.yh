@@ -2,21 +2,101 @@
 // driver.yh —— 自举编译器：命令行入口
 //
 // 输出接口（docs/02-plan/yh-自举实施方案-v2.md §3）：
-//     yh-new --syntax-check <file.yh>   纯语法检查：合法静默退出 0，
-//                                       非法输出诊断并以非零码退出
-//     yh-new --emit-asm <file.yh>       发射 AArch64 Linux 汇编到标准输出
-//                                       （GNU 语法，经 as/gcc 生成可执行）
+//     yh --syntax-check <file.yh>   纯语法检查：合法静默退出 0，
+//                                   非法输出诊断并以非零码退出
+//     yh --emit-asm <file.yh>       发射 AArch64 Linux 汇编到标准输出
+//                                   （GNU 语法，经 as/gcc 生成可执行）
+//     yh -o <out> <file.yh>         编译并链接为可执行文件（兼容 stage0
+//                                   的命令行形态）。实现方式：把汇编写到
+//                                   临时文件，调用外部 gcc 汇编/链接，成功后
+//                                   删除临时文件。
 //
 // 退出码：0 成功；1 源文件语法/语义错误或读入失败；2 用法错误。
-// 诊断一律写文件描述符 2；汇编只写缓冲、编译成功后一次性写标准输出，
+// 诊断一律写文件描述符 2；汇编只写缓冲、编译成功后一次性写目标，
 // 错误不会留下看似成功的部分产物。
 // ============================================================================
+
+// drv_build_cmd：拼装「汇编器/链接器」命令行到 buf，返回长度。
+//   GNU/Linux：gcc -no-pie -o <out> <asm>
+//   Darwin   ：clang -o <out> <asm>   （Mach-O 必须 PIE，不加 -no-pie）
+// 调用者保证 buf 足够大（路径长度受限）。
+fn drv_build_cmd(buf *u8, cap int, out_path *char, asm_path *char) int {
+    let n int = 0;
+    if (tg_darwin() != 0) {
+        n = append_str(buf, n, "clang -o ");
+    } else {
+        n = append_str(buf, n, "gcc -no-pie -o ");
+    }
+    n = append_str(buf, n, out_path);
+    n = append_str(buf, n, " ");
+    n = append_str(buf, n, asm_path);
+    buf[n] = 0;
+    return n;
+}
+
+// drv_write_asm：把已发射的汇编写入 asm_path（O_WRONLY|O_CREAT|O_TRUNC，
+// 权限 0644）。返回 0 成功。
+fn drv_write_asm(asm_path *char) int {
+    let fd int = open(asm_path, 0x241, 0x1a4);
+    if (fd < 0) {
+        return fail("无法创建临时汇编文件");
+    }
+    if (flush_output_fd(fd) != 0) {
+        close(fd);
+        return -1;
+    }
+    if (close(fd) != 0) {
+        return fail("写临时汇编文件失败");
+    }
+    return 0;
+}
+
+// run_emit_asm_to：发射汇编到指定文件，再调用外部工具链链接为可执行。
+// obj_path 为最终输出文件，asm_path 为临时汇编文件（调用后删除）。
+fn run_emit_asm_to(asm_path *char, obj_path *char) int {
+    if (lex_all() != 0) {
+        return 1;
+    }
+    c_compile = 1;
+    ty_register_builtins();
+    scope_push();
+    if (sem_register_prelude() != 0) {
+        return 1;
+    }
+    if (sem_compile() != 0) {
+        return 1;
+    }
+    if (c_errors > 0) {
+        return 1;
+    }
+    if (drv_write_asm(asm_path) != 0) {
+        return 1;
+    }
+    // 命令行缓冲：两倍路径长度足够（"gcc -no-pie -o " + out + " " + asm + NUL）
+    let cap int = 256;
+    let cmd *u8 = malloc(cap.to_type(u64)).to_type(*u8);
+    if (cmd == 0) {
+        unlink(asm_path);
+        return fail("内存分配失败");
+    }
+    drv_build_cmd(cmd, cap, obj_path, asm_path);
+    let rc int = system(cmd.to_type(*char));
+    free(cmd);
+    unlink(asm_path);
+    if (rc != 0) {
+        return fail_path("链接失败: ", obj_path);
+    }
+    return 0;
+}
+
 
 // usage：输出用法说明（文件描述符 2）。
 fn usage() void {
     let buf [256]u8;
     let n int = 0;
-    n = append_str(buf, n, "用法: yh-new --syntax-check <file.yh> | --emit-asm <file.yh>\n");
+    n = append_str(buf, n, "用法: yh --syntax-check <file.yh>\n");
+    n = append_str(buf, n, "      yh --emit-asm <file.yh>\n");
+    n = append_str(buf, n, "      yh -o <out> <file.yh>\n");
     write_all(2, buf, n);
 }
 
@@ -59,32 +139,95 @@ fn run_emit_asm() int {
 }
 
 // main：解析命令行并驱动「读源 → 词法 → （语法 | 编译）」流水线。
+// 形态：
+//   yh --syntax-check <file.yh>      （argc==3）
+//   yh --emit-asm <file.yh>          （argc==3）
+// drv_scan_target：扫描 `-target <dialect>` 选项（可出现在任意位置），
+// 设置 c_dialect 并把其余参数紧凑写入 out（调用方保证容量 ≥ argc）。
+// 返回剩余参数个数（不含程序名占位）。
+// 支持 darwin/macho/macos → TG_DIALECT_DARWIN；gnu/linux/elf → GNU。
+fn drv_scan_target(argc int, argv **char, out **char) int {
+    let n int = 0;
+    let i int = 1;
+    for i < argc {
+        if (cstr_eq(argv[i], "-target") != 0 && i + 1 < argc) {
+            if (cstr_eq(argv[i + 1], "darwin") != 0
+                || cstr_eq(argv[i + 1], "macho") != 0
+                || cstr_eq(argv[i + 1], "macos") != 0) {
+                c_dialect = TG_DIALECT_DARWIN;
+            } else {
+                c_dialect = TG_DIALECT_GNU;
+            }
+            i += 2;
+        } else {
+            out[n] = argv[i];
+            n += 1;
+            i += 1;
+        }
+    }
+    return n;
+}
+
+// main：解析命令行并驱动「读源 → 词法 → （语法 | 编译）」流水线。
+// 形态（-target <dialect> 可出现在任意位置，默认 gnu）：
+//   yh --syntax-check <file.yh>
+//   yh --emit-asm <file.yh>
+//   yh [-target darwin] -o <out> <file.yh>
 fn main(argc int, argv **char) int {
-    if (argc != 3) {
-        usage();
-        return 2;
-    }
+    // 先摘除 -target，得到规整后的参数序列（av[0..n-1]）。用固定容量栈数组：
+    // 命令行参数个数有上限（64 足够）。
+    let av [64]*char;
+    let n int = drv_scan_target(argc, argv, av);
     let mode int = 0;
-    if (cstr_eq(argv[1], "--syntax-check") != 0) {
-        mode = 1;
+    let needs_o int = 0;
+    // -o 形态：av = ["-o", <out>, <src>]，共 3 个
+    if (n == 3 && cstr_eq(av[0], "-o") != 0) {
+        mode = 3;
+        needs_o = 1;
     }
-    if (cstr_eq(argv[1], "--emit-asm") != 0) {
-        mode = 2;
+    if (needs_o == 0) {
+        if (n != 2) {
+            usage();
+            return 2;
+        }
+        if (cstr_eq(av[0], "--syntax-check") != 0) {
+            mode = 1;
+        }
+        if (cstr_eq(av[0], "--emit-asm") != 0) {
+            mode = 2;
+        }
+        if (mode == 0) {
+            usage();
+            return 2;
+        }
     }
-    if (mode == 0) {
-        usage();
-        return 2;
+    let src_idx int = 1;
+    let out_idx int = 1;
+    if (mode == 3) {
+        src_idx = 2;
+        out_idx = 1;
     }
-    c_path = argv[2];
+    c_path = av[src_idx];
     if (read_source(c_path) != 0) {
         return 1;
     }
-    // 两种模式都会用到堆分配的全局表（作用域栈等）
+    // 各模式都会用到堆分配的全局表（作用域栈等）
     if (sem_init_tables() != 0) {
         return 1;
     }
     if (mode == 1) {
         return run_syntax_check();
+    }
+    if (mode == 3) {
+        // 临时汇编文件：<out>.yh-tmp.s（与输出同目录，避免跨文件系统）
+        let abuf *u8 = malloc(512.to_type(u64)).to_type(*u8);
+        if (abuf == 0) {
+            return fail("内存分配失败");
+        }
+        let an int = 0;
+        an = append_str(abuf, an, av[out_idx]);
+        an = append_str(abuf, an, ".yh-tmp.s");
+        return run_emit_asm_to(abuf.to_type(*char), av[out_idx]);
     }
     return run_emit_asm();
 }

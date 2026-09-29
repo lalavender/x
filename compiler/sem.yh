@@ -731,6 +731,69 @@ fn sem_index(base *Res, idx *Res) int {
     return 0;
 }
 
+// sem_slice：切片表达式 base[start..end]（左闭右开）→ []T 视图。
+// 值栈：base（先压）、start（后压）；x0 = end。无边界检查（ADR-0001）：
+// 长度 = max(0, end - start)，数据 = 基址 + start*元素大小，不拷贝元素。
+// 结果为 {len, data} 16 字节临时切片（值语义即地址，与 to_type([]T) 一致）。
+fn sem_slice(base *Res, sres *Res, eres *Res) int {
+    if (c_compile == 0) {
+        base.type_id = 0;
+        return 0;
+    }
+    if (c_fold != 0) {
+        return sem_err("切片表达式不是编译期常量");
+    }
+    let bk int = t_types[base.type_id].kind;
+    if (bk != TY_ARRAY && bk != TY_SLICE) {
+        return sem_err("切片表达式需要数组或切片");
+    }
+    if (ty_is_integer(sres.type_id) == 0 || ty_is_integer(eres.type_id) == 0) {
+        return sem_err("切片下标必须是整数");
+    }
+    let elem int = t_types[base.type_id].elem;
+    let esz int = t_types[elem].size;
+    // x0 = end → x11 暂存；弹 start → x0；弹 base → x10
+    if (em_ins("mov\tx11, x0") != 0) { return -1; }
+    if (em_pop("x0") != 0) { return -1; }
+    if (em_pop("x10") != 0) { return -1; }
+    // 切片基址取 data 字段（{len, data} 的偏移 8）
+    if (bk == TY_SLICE) {
+        if (em_ins("add\tx10, x10, #8") != 0) { return -1; }
+        if (em_ins("ldr\tx10, [x10]") != 0) { return -1; }
+    }
+    // x9 = max(0, end - start)
+    if (em_ins("sub\tx9, x11, x0") != 0) { return -1; }
+    let l_pos int = em_new_label();
+    if (em_frag("\tcmp\tx9, xzr\n\tb.gt\t") != 0) { return -1; }
+    if (em_put_lbl(l_pos) != 0) { return -1; }
+    if (em_frag("\n\tmov\tx9, xzr\n") != 0) { return -1; }
+    if (em_label(l_pos) != 0) { return -1; }
+    // x0 = start * 元素大小
+    if (esz == 2) {
+        if (em_ins("lsl\tx0, x0, #1") != 0) { return -1; }
+    } else if (esz == 4) {
+        if (em_ins("lsl\tx0, x0, #2") != 0) { return -1; }
+    } else if (esz == 8) {
+        if (em_ins("lsl\tx0, x0, #3") != 0) { return -1; }
+    } else if (esz != 1) {
+        if (em_mov_imm("x11", esz.to_type(i64)) != 0) { return -1; }
+        if (em_ins("mul\tx0, x0, x11") != 0) { return -1; }
+    }
+    // x0 = 数据指针 = 基址 + start*esz
+    if (em_ins("add\tx0, x10, x0") != 0) { return -1; }
+    // 构造 {len, data} 临时切片
+    let soff int = em_alloc_local(TG_LONG_SIZE * 2);
+    if (em_lea_local_to(soff) != 0) { return -1; }
+    if (em_ins("str\tx9, [x10]") != 0) { return -1; }
+    if (em_ins("str\tx0, [x10, #8]") != 0) { return -1; }
+    if (em_lea_local_down(soff) != 0) { return -1; }
+    base.type_id = ty_slice(elem);
+    base.is_lit = 0;
+    base.is_const = 0;
+    c_res_is_addr = 1;
+    return 0;
+}
+
 // sem_member：成员访问 base.name（指针自动解引用）。
 fn sem_member(base *Res, name_start int, name_len int) int {
     if (c_compile == 0) {
@@ -835,7 +898,16 @@ fn sem_len(r *Res) int {
     }
     let k int = t_types[r.type_id].kind;
     if (k == TY_ARRAY) {
-        return sem_res_const(r, TY_I32, t_types[r.type_id].len.to_type(i64));
+        // 编译期折叠为常量并直接装 x0（同 sem_sizeof：折叠出的常量由
+        // 这里物化，消费端不负责）。必须清 c_res_is_addr——实参（数组
+        // 标识符）的聚合地址语义会残留，否则 x0 里的数组地址被当成
+        // 结果（曾致 return len(arr) 返回地址而非长度）。
+        c_res_is_addr = 0;
+        sem_res_const(r, TY_I32, t_types[r.type_id].len.to_type(i64));
+        if (c_fold == 0) {
+            return em_mov_imm("x0", r.ival);
+        }
+        return 0;
     }
     if (k == TY_SLICE) {
         if (c_fold != 0) {
@@ -1098,17 +1170,42 @@ fn sem_call(callee *Res, r *Res) int {
         na2 = np + 1;
     }
     // 发射：栈实参 → 寄存器实参 → callee → bl/blr → 清理
+    // Darwin 变参约定（Mach-O/AAPCS 变体）：裸 C 变参函数（prelude 的
+    // printf/open，vararg==1）的**可变部分一律按 8 字节对齐放在栈上**
+    // （[sp+0], [sp+8], …），不占用 x1..x7；命名参数照常进寄存器。
+    // 与 stage0（src/targets/arm64-gen.c 的 arm64_pcs_aux）保持一致。
+    let darwin_var int = 0;
+    if (tg_darwin() != 0 && vararg == 1 && na2 > np) {
+        darwin_var = 1;
+    }
     let nstack int = 0;
-    if (na2 > TG_ARG_REGS) {
+    if (darwin_var != 0) {
+        // 命名参数之外的实参全部走栈
+        nstack = na2 - np;
+    } else if (na2 > TG_ARG_REGS) {
         nstack = na2 - TG_ARG_REGS;
     }
     if (em_call_stack_area(nstack) != 0) { return -1; }
-    // 栈实参：最顶上是最后一个实参
-    let j int = na2 - 1;
-    for j >= TG_ARG_REGS {
-        if (em_pop("x9") != 0) { return -1; }
-        if (em_call_stack_store(j - TG_ARG_REGS) != 0) { return -1; }
-        j -= 1;
+    if (darwin_var != 0) {
+        // Darwin 变参：逆序把可变实参写入栈槽（值栈顶是最后一个实参）。
+        // 可变实参只有整型/指针（浮点实参已在调用前提升为 f64 压整型通路）。
+        let dv int = na2 - 1;
+        for dv >= np {
+            if (em_pop("x9") != 0) { return -1; }
+            if (em_call_stack_store_reg("x9", dv - np) != 0) { return -1; }
+            dv -= 1;
+        }
+    } else {
+        // GNU/Linux（全部调用）与 Darwin 非变参调用：第 9 个起的实参
+        // 走调用点栈区。值栈顶是最后一个实参，逆序弹出到第 0 槽。
+        // 注意 stage0 的 if/else 体不做块级作用域，循环变量须避开
+        // 本函数后续使用的 j/k/tb 等名字。
+        let saj int = na2 - 1;
+        for saj >= TG_ARG_REGS {
+            if (em_pop("x9") != 0) { return -1; }
+            if (em_call_stack_store(saj - TG_ARG_REGS) != 0) { return -1; }
+            saj -= 1;
+        }
     }
     // 寄存器实参：整型 a8→x7…a1→x0；浮点独立计数进 d0..d7
     // 注意：值栈顶是最后一个实参，浮点与整型需分别按各自序号搬运。
@@ -1116,18 +1213,24 @@ fn sem_call(callee *Res, r *Res) int {
     // 由于浮点与整型寄存器独立，正确做法是先按顺序取各自第 k 个。
     // 简化且正确的实现：逐个弹出到临时数组，再按类型分配到寄存器。
     // —— 为控制改动面，这里要求「浮点实参全部位于尾部」时用专用路径。
+    // 进寄存器的实参个数：Darwin 变参时只有命名参数进寄存器，可变部分已上栈。
+    let regn int = na2;
+    if (darwin_var != 0) {
+        regn = np;
+    }
+    // 计算寄存器实参中的浮点个数
     let nfp int = 0;
     let k int = base;
-    for k < base + na2 {
+    for k < base + regn {
         if (ty_is_float(c_args[k].type_id) != 0) {
             nfp += 1;
         }
         k += 1;
     }
     if (nfp == 0) {
-        j = TG_ARG_REGS - 1;
+        let j int = TG_ARG_REGS - 1;
         for j >= 0 {
-            if (j < na2) {
+            if (j < regn) {
                 if (em_call_arg_to_reg(j) != 0) { return -1; }
             }
             j -= 1;
@@ -1135,8 +1238,8 @@ fn sem_call(callee *Res, r *Res) int {
     } else {
         // 混合：弹出到临时槽（逆序），再按各自序号装寄存器。
         // 浮点实参压栈时值在 d0，弹出必须按元素类型选 x0 或 d0。
-        let tmp_off int = em_alloc_local(16 * na2);
-        let tb int = na2 - 1;
+        let tmp_off int = em_alloc_local(16 * regn);
+        let tb int = regn - 1;
         for tb >= 0 {
             if (em_lea_local_to(tmp_off - 16 * tb) != 0) { return -1; }
             if (ty_is_float(c_args[base + tb].type_id) != 0) {
@@ -1157,7 +1260,7 @@ fn sem_call(callee *Res, r *Res) int {
         let xi int = 0;
         let di int = 0;
         let tf int = 0;
-        for tf < na2 {
+        for tf < regn {
             let at int = c_args[base + tf].type_id;
             if (ty_is_float(at) != 0) {
                 if (di < TG_ARG_REGS) {
@@ -1589,6 +1692,14 @@ fn sem_assign(op int, lres *Res, rres *Res) int {
         if (em_pop("x0") != 0) { return -1; }
         // x10 先取回暂存的目标地址再存（临时槽里存的是地址，不是目标）
         if (em_ins("ldr\tx10, [x10]") != 0) { return -1; }
+        // 聚合同型赋值 = 逐字节块拷贝（语义边界 §：数组同型赋值为值
+        // 复制）。聚合的值语义即对象地址：x0 是源对象地址，x10 是目标
+        // 地址；此前误走标量 store 只写前 8 字节。
+        let lk int = t_types[lres.type_id].kind;
+        if (lk == TY_STRUCT || lk == TY_UNION || lk == TY_ARRAY || lk == TY_SLICE) {
+            if (em_ins("mov\tx1, x10") != 0) { return -1; }
+            return em_copy_block(t_types[lres.type_id].size);
+        }
         return em_store_sized(lres.type_id);
     }
     // 复合赋值：x10 先取回暂存的左值地址，再读值运算后经 x10 存回

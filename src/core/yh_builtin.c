@@ -36,6 +36,8 @@ static const struct yh_prelude_fn yh_prelude[] = {
     {"close", TOK_INT, 0, {TOK_INT, -1}, 0},
     {"read", TOK_I64, 0, {TOK_INT, PTR_VOID, TOK_U64, -1}, 0},
     {"write", TOK_I64, 0, {TOK_INT, PTR_VOID, TOK_U64, -1}, 0},
+    {"system", TOK_INT, 0, {PTR_CHAR, -1}, 0},
+    {"unlink", TOK_INT, 0, {PTR_CHAR, -1}, 0},
     {NULL, 0, 0, {0}, 0}};
 
 /* 由类型说明构造 CType（供参数与返回） */

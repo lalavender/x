@@ -123,14 +123,28 @@ stage1 对全部运行语料与语法语料通过，三代闭环成立；早期 
   **逐字节一致**（全量固定点），`make bootstrap` 门恢复全量运行语料
   （含 run/28）与全量固定点比较。
 
-**本机自举差分探针**：`tests/selfhost/native-selfhost.py`（`make
-selfhost-native`）在同一套源码上于本机跑等价三代闭环，把 GNU/Linux
-AArch64 汇编改写为 Mach-O 形态后本机链接。它不含容器依赖，用于日常
-回归与缺陷定位；注意 macOS 变参 ABI 与 Linux 不同，含 `printf` 的用例
-在本机不可判（脚本只运行并断言不含 printf 的用例）。
+**第三处（B8 全量执行时暴露）**：混合整型/浮点形参的寄存器分配。AAPCS64
+的整型参数寄存器 x0..x7 与浮点参数寄存器 d0..d7 **各自独立计数**，但
+`parse_decl.yh` 曾把形参在参数表中的位置下标当寄存器序号，使
+`scale(v f64, k int)` 的 `k` 错读 x1（应为 x0）。修复：参数循环为整型/
+浮点各维护独立计数器（`ipos`/`fpos`），按类型递增后传「本类型内序号」。
+见 `tests/yh-run/run/35-mixed-args.yh`。
+
+**验收门与探针**：
+
+- 官方门：`make bootstrap`（G1/G2/G2+）与 `make g3`（B8/G3 正式验收，
+  见 `docs/01-finished/G3-自举验收报告.md`），需容器 `yh-build`。
+- `tests/selfhost/native-selfhost.py`（`make selfhost-native`）：同一套
+  源码在本机（Darwin/arm64）跑等价三代闭环，把 GNU/Linux AArch64 汇编
+  改写为 Mach-O 形态后本机链接。它不含容器依赖，用于日常回归与缺陷定位；
+  注意 macOS 变参 ABI 与 Linux 不同，含 `printf` 的用例在本机不可判
+  （脚本只运行并断言不含 printf 的用例）。
 
 ## 7. 已知边界
 
 slice/聚合按值与 for-in 已实现；以下仍未实现或无静态检查：切片越界、
 切片生命周期证明（ADR-0001 既定，0.0.1 不做防护）、全局聚合变量初始化、
 过多的浮点参数（>8 个）与裸变参的浮点实参。
+
+AArch64 后端已按 B8/G3 在真实 Linux 环境验证：三代各自通过全量语料，
+stage2 与 stage3 对 `compiler.yh` 与 35 个代表程序的发射逐字节一致。

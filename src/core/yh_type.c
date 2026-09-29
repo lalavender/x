@@ -157,6 +157,54 @@ static Sym *yh_named_type(int v)
     return s;
 }
 
+/* sizeof( 后判定「类型」形态：区分 sizeof(T) 与 sizeof(expr)。
+ * 内建类型 / '[' / TOK_FN 直接判定；IDENT 仅当已登记为类型名
+ * （否则是表达式，如 sizeof(x)）。'*' 用星号链前瞻判定（见下）。
+ * 语法模式不登记类型，IDENT 走表达式路径（两种路径的 token 消费
+ * 形态一致，无影响）。 */
+static int yh_star_chain_is_type(void);
+
+ST_FUNC int yh_sizeof_starts_type(int t)
+{
+    CType tmp;
+    if (t == '[' || t == TOK_FN)
+        return 1;
+    if (yh_builtin_ctype(t, &tmp))
+        return 1;
+    if (t == '*')
+        return yh_star_chain_is_type();
+    if (t >= TOK_UIDENT && !yh_syntax_only())
+        return yh_named_type(t) != NULL;
+    return 0;
+}
+
+/* tok == '*' 时判定「*X / **X …」是类型还是解引用表达式：捕获并
+ * 重放 token 流（与 yh_peek_next_token 同族机制），跳过连续 '*'
+ * 后检查其后 token 是否为内建类型 / '[' / TOK_FN / 已登记类型名。
+ * sizeof(*p)（解引用）与 sizeof(*void)（指针类型）由此区分。 */
+static int yh_star_chain_is_type(void)
+{
+    TokenString *str;
+    CType tmp;
+    int t, is_type;
+
+    str = tok_str_alloc();
+    for (;;) {
+        tok_str_add_tok(str); /* 捕获当前 token（含连续 '*'） */
+        if (tok != '*')
+            break;
+        next(); /* 真实前进到下一 token */
+    }
+    t = tok; /* 星号链后的第一个 token */
+    tok_str_add(str, 0);
+    begin_macro(str, 1);
+    next(); /* 切回重放层：tok 恢复为最初的 '*' */
+    is_type = (t == '[' || t == TOK_FN || yh_builtin_ctype(t, &tmp)
+               || (t >= TOK_UIDENT && !yh_syntax_only()
+                   && yh_named_type(t) != NULL));
+    return is_type;
+}
+
 /* typeRef：类型自身的组合（前缀书写），结果写入 *type。 */
 ST_FUNC void yh_parse_type_ref(CType *type)
 {

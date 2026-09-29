@@ -1,5 +1,179 @@
 # finish
 
+## 2026-09-29 自举回归修复 + 六项语言缺口双侧落地 + 三个 stage0 缺陷修复，G3 复验通过
+
+**起点**：分析进度时发现最新未提交改动（Darwin 方言 + `-o` 兼容层）引入
+自举回归——G2 运行语料 run/14 段错误，`make bootstrap` 红。本轮修复回归、
+清掉 todo 盘点 B/C/D 三节全部账目，四道验证门全绿。
+
+### 1. 自举回归修复（sem_call 栈实参）
+
+Darwin 变参改造误删 GNU/Linux 路径的栈实参写入循环：新代码只在
+`darwin_var == 1` 时写栈槽，无 else——超过 8 个整型参数的调用不写
+调用点栈区，stage2 编译 run/14 段错误。修复：补 else 分支恢复
+`for j >= TG_ARG_REGS { pop x9; em_call_stack_store(...) }`（循环变量
+改名 `saj` 避开 stage0 的 if/else 无块级作用域重声明）。新增
+run/37-many-args-noprintf（无 printf 的超 8 参用例，本机 native 门
+也能执行——此前 run/14 含 printf，native 门按约定跳过，拦不住这类回归）。
+
+### 2. stage0 缺陷修复（三个）
+
+- **零初始化全局 `-o` 误报 redeclaration**：pass 1 对零初始化全局提前
+  落地符号，pass 2 重复登记触发 `sym_push` 报错。修复：pass 1 统一
+  不落地全局变量（`yh_parse_binding` 早退），与带初始化路径一致。
+  用例 run/38-zero-init-global。
+- **Mach-O 重定位记账缺陷**（新发现）：节头 `nreloc` 按 ELF 条数记账，
+  但非零 addend 的重定位会多写一条前置 ADDEND 条目，ld64 按声明数
+  截断尾部条目——悬空 ADDEND 触发「relocation not supported」（全局
+  数组下标直接链接失败），或 printf 的 CALL26 丢失使懒绑定桩悬空
+  （程序运行挂起、反汇编显示全局字段读写偏移错位）。修复：
+  `macho-out.c` 按 Mach-O 实际条目数记账（新增 `nreloc_elf` 供写出
+  循环遍历 ELF 重定位；统计与写出规则一致：非零 addend 的
+  UNSIGNED/PAGE21/PAGEOFF12 各补一条 ADDEND 前置条目）。修复后
+  `make test` 从 51/51 隐性损失恢复全绿，全局数组/结构体用例可用。
+- **语法模式全局表未初始化崩溃**（新发现，native 自举差分门暴露）：
+  `ty_register_builtins` 只在 `--emit-asm` 路径调用，语法模式
+  `t_types` 为 NULL；自举编译器新加的实参预期类型代码在语法模式读
+  `t_types[res.type_id].sub` 段错误（compiler.yh 自解析靠未初始化栈
+  垃圾侥幸通过，语料用例稳定崩溃，lldb 定位崩溃地址 0x14 = offsetof
+  (CType, sub)）。修复：调用实参分支限定 `c_compile != 0` 且校验
+  `TY_FN` 类型（非函数被调者的 sub 是字段表起点，会误当签名号）。
+
+### 3. 语言缺口六项落地（stage0 与自举双侧，均有 run 用例钉住）
+
+| 特性 | 自举侧 | stage0 侧 | 用例 |
+| --- | --- | --- | --- |
+| 全局聚合初始化 | `parse_global_struct_init`（命名/位置/嵌套/字符串） | 字节镜像 + 节内 R_DATA_PTR 重定位 | run/40 |
+| 全局数组/切片零初始化 | 移除 pass 1 拒绝，`.bss` 发射泛化 | 已有（`.bss`） | run/39 |
+| 数组/切片字面量 | `parse_array_literal` + 预期类型管道（let 初始化/赋值 RHS/调用实参） | primary `'['` + `yh_expect_type` 管道 + 全局数组字面量字节镜像 | run/43 |
+| 切片表达式 `a[s..e]` | `sem_slice`（无分支钳制 + 视图临时） | 后缀链 RANGE 分支（`vdup` + 位技巧钳制） | run/42 |
+| 嵌套类型声明 | `c_nested_type` 旗标（pass 2 也登记） | 块语句分派直接复用顶层解析 | run/44 |
+| `sizeof(expr)` | `em_put` 处 `c_em_suppress` 发射闸门 + 类型名判定 | `nocode_wanted` 抑制 + 星号链捕获重放前瞻（区分 `sizeof(*p)` 与 `sizeof(*T)`） | run/41 |
+
+边界（如实记录）：stage0 全局切片字面量暂不支持（干净拒绝）；全局
+f32 字段/元素初始化暂不支持（要求 f64）；stage0 全局数组字面量字符串
+元素拒绝；自举侧 `parse_global_array_init` 元素上限 64。
+
+### 4. 顺带修复的自举编译器既有缺陷（新特性开发牵出）
+
+- `len(数组)` 编译期折叠不物化：`sem_len` 数组分支只设常量 Res 未发
+  `mov x0, len`，且实参聚合地址语义残留（`c_res_is_addr` 未清）——
+  `return len(arr)` 返回数组地址。此前运行语料从未覆盖 `len(数组)`
+  表达式（run/28 只测切片）。
+- 聚合整体赋值只拷 8 字节：`sem_assign` 的 TK_ASSIGN 分支误走标量
+  store。修复：聚合按块拷贝（`em_copy_block`），兑现「数组同型赋值 =
+  值复制」语义（语义边界 §，M0-04 定案）。
+- `macho.py` LIBC 集合补 `system`/`unlink`（driver `-o` 兼容层新引用），
+  `tests/selfhost/probe-main.c` 补两个桩（native 门不真调链接器）。
+
+### 5. 验证门（全部通过）
+
+| 门 | 结果 |
+| --- | --- |
+| `make test`（stage0 本机） | **59/59**（run 44 + fail 12 + pass 3） |
+| `make selfhost-native`（Mach-O 三代差分） | 全绿：三 stage 自解析、语法 66/66+29/29、stage2 运行语义、**汇编固定点一致** |
+| `make bootstrap`（容器官方门） | 全绿：G1 66/66+29/29、G2 三代闭环 + run 语料 44/44、G2+ 固定点 |
+| `make g3`（G3 正式验收） | **通过**（19 项检查；stage1/2/3 分代全量 59/59；44 个代表程序固定点；诊断质量 53 反例；产物归档） |
+
+**新固定点**：`stage2.s == stage3.s`，SHA-256
+`9c5cfc78529b00e9aa7ab4315463e8583e0f15d15719400dc279b75996413fa8`
+（compiler.yh `6ff49c39…b40a`，8678 行）。
+
+### 6. G3 验收脚本增强
+
+- 分代运行语料失败自动重试一次：macOS Docker（VirtioFS）挂载偶发
+  元数据延迟，ELF 刚写完权限位短暂不可见，曾致 run/16 与本轮 stage3
+  语料「permission denied」假失败；重试仍失败才是真回归。
+- `-o` 兼容层冒烟检查（stage1/2/3 直出可执行、临时文件清理、错误源
+  非零退出）已在验收清单中。
+
+### 7. 文档同步
+
+- `docs/todo.md` 盘点节改写：A 无阻塞、B 六项勾选（两项设计决定如实
+  标注）、C 三项修复、D 文档账目清零。
+- `docs/02-plan/yh-自举实施方案-v2.md` B3–B7 的 14 个任务项 checkbox
+  全部勾选。
+- 本文件记录本轮全部改动。自举编译器源码 7952 → 8678 行。
+
+## 2026-09-28 自举 B8 完成：新增 `make g3` 正式验收，G3 达成
+
+在上一节的 `make bootstrap` 全绿基础上，补齐 B8 的全部验收项并脚本化。
+
+**新增**：
+
+- `tests/selfhost/g3-acceptance.py` 与 `make g3`（`= make bootstrap` +
+  验收脚本）：在 Ubuntu 24.04/aarch64 容器内做
+  1. 前置检查（容器 / sysroot / stage1..3）；
+  2. **分代全量复验**：stage1、stage2、stage3 各自跑全部语法（66/66 +
+     29/29）与运行语料（50/50，交叉 ELF 在容器内执行），要求无崩溃、
+     超时或 SKIP；
+  3. stage3 自解析 + 自编；
+  4. **汇编固定点**：`stage2.s == stage3.s`（compiler.yh）**且 35 个代表
+     程序全部逐字节一致**；同一 stage 重复发射一致（无时间戳/随机）；
+  5. 发射内容不含宿主绝对路径/日期；**诊断质量**：53 个反例全部非零退出、
+     带 `文件:行:列: 错误:` 诊断、不把汇编泄漏到 stdout；
+  6. 归档源码/汇编/ELF/工具链版本/SHA-256 到 `tmp/bootstrap/artifacts/`。
+- `tests/yh-run/run/35-mixed-args.yh`：混合整型/浮点形参回归用例
+  （免 printf，退出码断言）。
+- `docs/01-finished/G3-自举验收报告.md`：正式验收报告（判据、证据、
+  SHA-256、G3 语言验收表逐行核对、边界与后续）。
+
+**本轮修复的第三个自举缺陷**
+
+- **混合整型/浮点形参的寄存器分配**：AAPCS64 的整型参数寄存器 x0..x7 与
+  浮点参数寄存器 d0..d7 各自独立计数，但 `parse_decl.yh` 把形参在参数表
+  中的**位置下标**当寄存器序号传给 `sem_declare_param`，使
+  `scale(v f64, k int)` 的 `k`（第 2 个形参）错读 **x1**（应为 **x0**），
+  浮点+整型混用的调用算出垃圾值。修复：参数循环为整型/浮点各维护独立
+  计数器（`ipos`/`fpos`），按类型递增后传「本类型内序号」。
+- **回归证据**：回退修复后 stage1 编译 `run/35` 退出码 1（失败），修复后
+  42（通过）。
+
+**验收结果**：`make g3` 全绿（19 项检查）；关键点——`stage2.s` 与
+`stage3.s` 的 SHA-256 同为
+`e442b52eacfc1e84a3b5b32855360d44c41119d7d381ae62b848b1d94d686402`。
+
+**结论**：**G3 达成**（完整编译器自举）。B7、B8 均完成。唯一未实现的
+语言特性仍是全局聚合变量初始化（不阻塞 G3）；是否替换默认 `yh` 另立验收。
+
+## 2026-09-28 自举 B8：`make bootstrap` 全绿，达成 G3
+
+**环境更正**：此前误判「docker 不可用」——实际 docker CLI 位于
+`/opt/homebrew/bin/docker`（Homebrew 安装，context=colima），只是当前
+shell 的 `PATH` 被精简为 `/usr/bin:/bin:/usr/sbin:/sbin` 而找不到它；
+容器 `yh-build`（ubuntu:24.04，aarch64）一直运行中，`/work` 挂载与
+`tmp/sysroot` 均正常。加上 PATH 后官方自举门可正常执行。
+
+**本轮修复（B8 门首次全量执行时暴露的第三个自举缺陷）**
+
+- **缺陷**：混合整型/浮点形参的寄存器分配错误。AAPCS64 规定整型参数寄存
+  器 x0..x7 与浮点参数寄存器 d0..d7 **各自独立计数**；但 `parse_decl.yh`
+  把形参在参数表中的**位置下标**当作寄存器序号传给 `sem_declare_param`。
+  于是 `scale(v f64, k int)` 的 `k`（第 2 个形参）被错读为 **x1**，正确
+  应为 **x0**（它是第 1 个整型参数），导致浮点+整型混用的调用算出垃圾值。
+- **修复**：在 pass 2 的参数循环中为整型/浮点各维护独立计数器
+  （`ipos`/`fpos`），按类型递增后把「本类型内序号」传给
+  `sem_declare_param`；聚合形参走整型寄存器序列，同用 `ipos`。
+- **回归用例**：`tests/yh-run/run/35-mixed-args.yh`（免 printf，退出码
+  断言）覆盖 1 浮点+1 整型、整型在前、以及 `f0 i0 f1 i1` 交错四种形态。
+  证据：回退修复后 stage1 编译 run/35 退出码 1（失败），修复后 42（通过）。
+
+**`make bootstrap` 结果（Linux 容器内，官方门）**
+
+| 门 | 内容 | 结果 |
+| --- | --- | --- |
+| 拼接确定性 | 两次拼接逐字节一致 | ✅ |
+| G1 | stage1 自解析 + 全量语法语料差分 | ✅ 66/66 + 29/29 |
+| G2 | stage1→stage2；stage2 自解析 + 语法差分 | ✅ 66/66 + 29/29 |
+| G2 | stage2 全量运行语料（run/ 全部） | ✅ **34/34**（含 run/28 浮点、30–34） |
+| G2+ | stage2→stage3；stage3 自解析 | ✅ |
+| G2+ | **stage2.s 与 stage3.s 对自身拼接源码逐字节一致** | ✅ **固定点** |
+
+**结论**：B7 完成；G3 的硬判据（stage1/stage2 同样通过全量语料 + 两代
+对固定输入发出逐字节相同汇编）在真实 aarch64 Linux 环境达成。B8 剩余项
+（stage1/2/3 全量分代跑、代表程序固定点、产物与哈希归档、G3 验收表逐行
+核对）见后续条目。
+
 ## 2026-09-28 自举 B7 收尾：修复两处自举缺陷，达成全量固定点（stage3 汇编逐字节一致）
 
 上一轮 B7 遗留「stage2 编译浮点字面量时常量位型被编码为 `fp64_bits`

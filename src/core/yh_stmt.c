@@ -283,7 +283,13 @@ static void yh_parse_expr_stmt(void)
         if (!yh_syntax_only())
             test_lvalue(); /* 此时 vtop 正是左侧左值 */
         next();
+        /* 数组/切片字面量的目标类型：左值类型 */
+        if (!yh_syntax_only()) {
+            yh_expect_type = vtop->type;
+            yh_expect_valid = 1;
+        }
         yh_parse_expr();
+        yh_expect_valid = 0;
         if (!yh_syntax_only()) {
             if (op == '=') {
                 /* 数组整体赋值：同型 [N]T 转包装结构体走块拷贝 */
@@ -353,6 +359,17 @@ ST_FUNC void yh_parse_stmt(void)
         return;
     case TOK_LET:
         yh_parse_let_decl(1);
+        return;
+    case TOK_STRUCT:
+    case TOK_UNION:
+        /* 函数体内嵌套类型声明：登记布局与顶层一致（类型表全局可见） */
+        yh_parse_struct_decl(tok == TOK_UNION);
+        return;
+    case TOK_ENUM:
+        yh_parse_enum_decl();
+        return;
+    case TOK_TYPE:
+        yh_parse_type_decl();
         return;
     case TOK_CONST1:
         yh_parse_const_decl();

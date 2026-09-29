@@ -662,7 +662,15 @@ static void yh_parse_postfix(void)
                 }
                 for (;;) {
                     in_va = is_ell && va != NULL && pa == va;
+                    /* 数组/切片字面量的目标类型：当前形参类型 */
+                    if (fs && pa && !in_va && !yh_syntax_only()) {
+                        yh_expect_type = pa->type;
+                        yh_expect_valid = 1;
+                    } else {
+                        yh_expect_valid = 0;
+                    }
                     yh_parse_expr();
+                    yh_expect_valid = 0;
                     nb_args++;
                     if (!yh_syntax_only()) {
                         if (pa && !in_va) {
@@ -779,16 +787,32 @@ static void yh_parse_postfix(void)
                 }
             }
         } else if (tok == '[') {
+            CType bt = vtop->type, et;
+            int is_range = 0;
+            int base_kind = 0; /* 1=数组 2=切片 3=指针 */
             if (!yh_syntax_only()) {
+                /* 基址规范化（下标与切片表达式共用）：
+                   切片 → data 指针值；
+                   包装结构体（数组形参）透明还原为数组类型字：
+                   首字段 a 位于偏移 0，左值地址即数组地址；
+                   数组退化：类型转裸指针，左值地址即数组首地址 */
                 CType at;
-                /* 切片 → data 指针值 */
-                if (yh_is_slice(&vtop->type, NULL))
+                struct yh_wrap *w = NULL;
+                if (yh_is_slice(&bt, &w)) {
+                    et = w->elem;
+                    base_kind = 2;
                     yh_slice_data(&vtop->type);
-                /* 包装结构体（数组形参）透明还原为数组类型字：
-                   首字段 a 位于偏移 0，左值地址即数组地址 */
-                else if (yh_wrap_array_of(&vtop->type, &at))
+                } else if (yh_wrap_array_of(&bt, &at)) {
+                    et = at.ref->type;
+                    base_kind = 1;
                     vtop->type = at;
-                /* 数组退化：类型转裸指针，左值地址即数组首地址 */
+                } else if (bt.t & VT_ARRAY) {
+                    et = bt.ref->type;
+                    base_kind = 1;
+                } else if ((bt.t & VT_BTYPE) == VT_PTR) {
+                    et = *pointed_type(&bt);
+                    base_kind = 3;
+                }
                 if (vtop->type.t & VT_ARRAY) {
                     vtop->type.t &= ~VT_ARRAY;
                     if (vtop->r & VT_LVAL)
@@ -797,11 +821,75 @@ static void yh_parse_postfix(void)
             }
             next();
             yh_parse_expr();
+            if (tok == TOK_RANGE) {
+                is_range = 1;
+                next();
+                yh_parse_expr();
+            }
             skip(']');
-            if (!yh_syntax_only()) {
+            if (yh_syntax_only()) {
+                /* 纯语法模式：token 已消费，无代码生成 */
+            } else if (is_range && base_kind == 0) {
+                tcc_error("切片表达式需要数组或切片");
+            } else if (!is_range) {
                 /* 指针/数组下标：*(p + i) */
                 gen_op('+');
                 indir();
+            } else {
+                /* base[start..end]：左闭右开切片视图（不拷贝元素，无边界
+                   检查）。len = max(0, end-start)，data = 基址+start*esz，
+                   落成 16 字节 {len, data} 临时切片左值（ADR-0002 视图）。 */
+                CType u64t, sl;
+                int align, esz, h_start, h_end, h_len, h_data, h_view;
+                u64t.t = VT_LLONG | VT_UNSIGNED;
+                u64t.ref = NULL;
+                esz = type_size(&et, &align);
+                /* [base, start, end]：end、start 依次存槽 */
+                loc = (loc - 8) & -8; h_end = loc;
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_end);
+                vswap(); vstore(); vpop();
+                loc = (loc - 8) & -8; h_start = loc;
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_start);
+                vswap(); vstore(); vpop();
+                /* [base] → data = base + start*esz */
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_start);
+                gv(RC_INT);
+                /* 基址是元素指针：gen_op('+') 按所指类型自动缩放 start */
+                gen_op('+');
+                loc = (loc - 8) & -8; h_data = loc;
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_data);
+                vswap(); vstore(); vpop();
+                /* len = max(0, end - start) */
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_end);
+                gv(RC_INT);
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_start);
+                gv(RC_INT);
+                gen_op('-');
+                /* len = d & ~(（d > 0） - 1)：无分支钳制负长度。
+                   掩码：d>0 → ~(0) = -1（保留 d）；d<=0 → ~(-1) = 0。 */
+                vdup();
+                vpushi(0);
+                gen_op(TOK_GT);
+                vpushi(1);
+                gen_op('-');
+                vpushi(-1);
+                gen_op('^');
+                gen_op('&');
+                loc = (loc - 8) & -8; h_len = loc;
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_len);
+                vswap(); vstore(); vpop();
+                /* 视图临时 {len, data}，结果为切片类型左值 */
+                yh_slice_wrap(&et, &sl);
+                loc = (loc - 16) & -8; h_view = loc;
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_len);
+                gv(RC_INT);
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_view);
+                vswap(); vstore(); vpop();
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_data);
+                gv(RC_INT);
+                vset(&u64t, VT_LOCAL | VT_LVAL, h_view + 8);
+                vswap(); vstore(); vpop();
+                vset(&sl, VT_LOCAL | VT_LVAL, h_view);
             }
         } else if (tok == '.') {
             next();
@@ -1082,17 +1170,132 @@ static void yh_parse_primary(void)
         yh_parse_expr();
         skip(')');
         return;
+    case '[': {
+        /* 数组/切片字面量 [e1, e2, ...]：目标类型来自 let 初始化
+           上下文（yh_expect_*，yh_parse_binding 设置）。元素逐个求值
+           压栈，再逆序存入临时数组；数组目标产出包装结构体值（vstore
+           块拷贝路径，与函数返回数组的赋值路径一致）；切片目标产出
+           {n, &tmp} 16 字节视图。 */
+        CType tt, et, u64t;
+        int count = 0, esz, align, tmp, vtmp, i;
+        int is_slice = 0;
+        struct yh_wrap *w = NULL;
+        if (yh_syntax_only()) {
+            next();
+            if (tok != ']') {
+                for (;;) {
+                    yh_parse_expr();
+                    count++;
+                    if (tok == ',') {
+                        next();
+                        if (tok == ']') break;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            skip(']');
+            return;
+        }
+        if (!yh_expect_valid)
+            tcc_error("数组/切片字面量需要目标类型上下文（let 初始化）");
+        tt = yh_expect_type;
+        yh_expect_valid = 0;
+        if (yh_is_slice(&tt, &w)) {
+            et = w->elem;
+            is_slice = 1;
+        } else if (tt.t & VT_ARRAY) {
+            et = tt.ref->type;
+        } else {
+            tcc_error("数组/切片字面量的目标必须是数组或切片类型");
+        }
+        next();
+        if (tok != ']') {
+            for (;;) {
+                yh_parse_expr();
+                count++;
+                if (tok == ',') {
+                    next();
+                    if (tok == ']') break;
+                    continue;
+                }
+                break;
+            }
+        }
+        skip(']');
+        if (!is_slice && count != tt.ref->c)
+            tcc_error("数组字面量元素个数与数组长度不一致");
+        esz = type_size(&et, &align);
+        u64t.t = VT_LLONG | VT_UNSIGNED;
+        u64t.ref = NULL;
+        /* 临时数组：元素逆序弹出写入（值栈顶是最后一个元素） */
+        loc = (loc - esz * count) & -align; tmp = loc;
+        for (i = count - 1; i >= 0; i--) {
+            CType dt = et;
+            /* loc 为负偏移：元素 i 在 tmp + i*esz（向 fp 方向回移） */
+            vset(&dt, VT_LOCAL | VT_LVAL, tmp + i * esz);
+            vswap();
+            vstore();
+            vpop();
+        }
+        if (!is_slice) {
+            /* 包装结构体值：let 初始化走包装→数组块拷贝 */
+            CType wrap;
+            yh_array_wrap(&tt, &wrap);
+            vset(&wrap, VT_LOCAL | VT_LVAL, tmp);
+        } else {
+            CType sl;
+            loc = (loc - 16) & -8; vtmp = loc;
+            {
+                CValue cv;
+                cv.i = count;
+                vsetc(&u64t, VT_CONST, &cv);
+            }
+            vset(&u64t, VT_LOCAL | VT_LVAL, vtmp);
+            vswap(); vstore(); vpop();
+            vset(&u64t, VT_LOCAL, tmp); /* 栈地址作为 64 位值 */
+            vset(&u64t, VT_LOCAL | VT_LVAL, vtmp + 8);
+            vswap(); vstore(); vpop();
+            yh_slice_wrap(&et, &sl);
+            vset(&sl, VT_LOCAL | VT_LVAL, vtmp);
+        }
+        return;
+    }
     case TOK_SIZEOF: {
         int align;
         next();
         skip('(');
-        yh_parse_type_ref(&t);
-        skip(')');
-        if (!yh_syntax_only()) {
-            int sz = type_size(&t, &align);
-            if (sz < 0)
-                tcc_error("sizeof：类型大小未知");
-            vpushi(sz);
+        if (yh_sizeof_starts_type(tok)) {
+            /* sizeof(T)：编译期类型大小 */
+            yh_parse_type_ref(&t);
+            skip(')');
+            if (!yh_syntax_only()) {
+                int sz = type_size(&t, &align);
+                if (sz < 0)
+                    tcc_error("sizeof：类型大小未知");
+                vpushi(sz);
+            }
+            return;
+        }
+        /* sizeof(expr)：nocode_wanted 抑制发射，只取表达式类型的
+           大小；表达式不求值（与 C 常量上下文一致）。语法模式不
+           触碰值栈（表达式路径本就不压值）。 */
+        {
+            int saved_nocode = nocode_wanted;
+            int sz;
+            CType et;
+            nocode_wanted++;
+            yh_parse_expr();
+            nocode_wanted = saved_nocode;
+            skip(')');
+            if (!yh_syntax_only()) {
+                et = vtop->type;
+                sz = type_size(&et, &align);
+                vpop();
+                if (sz < 0)
+                    tcc_error("sizeof：类型大小未知");
+                vpushi(sz);
+            }
         }
         return;
     }

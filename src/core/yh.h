@@ -46,6 +46,8 @@ ST_FUNC void yh_register_prelude(void);
 
 /* ---- yh_decl.c ---- */
 extern int yh_pass;   /* 1=扫描登记 2=编译生成（编译模式） */
+extern int yh_expect_valid;      /* 数组/切片字面量的目标类型上下文有效 */
+extern CType yh_expect_type;     /* 上述上下文的目标类型（数组/切片） */
 extern int yh_bsym;   /* break 跳转链 */
 extern int yh_csym;   /* continue 跳转链 */
 extern int yh_break_depth; /* break 可用深度 */
@@ -70,12 +72,14 @@ ST_FUNC void yh_parse_translation_unit(void);
 ST_FUNC void yh_parse_type_ref(CType *type);
 /* struct/union 声明：('struct'|'union') IDENT '{' fieldDecl* '}' */
 ST_FUNC void yh_parse_struct_decl(int is_union);
+ST_FUNC void yh_parse_type_decl(void);
 /* enum 声明：'enum' IDENT '{' enumItem* '}' */
 ST_FUNC void yh_parse_enum_decl(void);
 /* 成员名判定：IDENT 或任意保留字（to_type 除外），见 docs/yh.g4 memberName */
 ST_FUNC int yh_tok_is_member_name(int t);
 /* token 是否能开始 typeRef（返回类型省略判定用） */
 ST_FUNC int yh_tok_starts_type_ref(int t);
+ST_FUNC int yh_sizeof_starts_type(int t);
 /* yh 类型 token → CType；非内建返回 0 */
 ST_FUNC int yh_builtin_ctype(int t, CType *type);
 /* [N]T → 匿名 struct { T a[N]; }（登记表缓存，ADR-0002 机制 a） */

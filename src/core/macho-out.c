@@ -78,7 +78,8 @@ struct macho_sect {
     uint64_t size;       /* 段大小（bss 为内存大小） */
     unsigned offset;     /* 文件内偏移（bss 为 0） */
     unsigned reloff;     /* 重定位表文件偏移 */
-    unsigned nreloc;     /* 重定位条数 */
+    unsigned nreloc;     /* Mach-O 重定位条目数（含 ADDEND 前置条目） */
+    unsigned nreloc_elf; /* ELF 重定位条数（写出循环的遍历上限） */
     int nsect;           /* 1 起算的节序号（n_sect 用） */
     int shndx;           /* tcc 的 ELF 节索引（映射 st_shndx） */
 };
@@ -110,6 +111,7 @@ static int macho_collect_sections(TCCState *s1, struct macho_sect *out)
         out[n].offset = 0;
         out[n].reloff = 0;
         out[n].nreloc = 0;
+        out[n].nreloc_elf = 0;
         n++;
     }
     return n;
@@ -177,10 +179,32 @@ ST_FUNC int tcc_output_macho(TCCState *s1, const char *filename)
     if (nsects == 0)
         tcc_error("没有可输出的代码（源文件缺少 main 或内容为空）");
 
-    /* 统计各节重定位数 */
+    /* 统计各节重定位数。Mach-O 每条 ELF 重定位映射 1 条条目，另对
+       UNSIGNED/PAGE21/PAGEOFF12 且 addend 非零的补 1 条前置 ADDEND
+       （与下方写出循环的规则一致）。节头 nreloc 必须等于实际写出
+       条目数：曾按 ELF 条数记账，导致 ld64 截断尾部条目——悬空
+       ADDEND 触发「relocation not supported」，或 printf 的 CALL26
+       丢失使懒绑定桩悬空、程序挂起。 */
     for (i = 0; i < nsects; i++) {
         Section *sr = ms[i].sec->reloc;
-        ms[i].nreloc = sr ? sr->data_offset / sizeof(ElfW_Rel) : 0;
+        int j, n, total;
+        n = sr ? (int)(sr->data_offset / sizeof(ElfW_Rel)) : 0;
+        total = 0;
+        for (j = 0; j < n; j++) {
+            ElfW_Rel *rel = &((ElfW_Rel *)sr->data)[j];
+            int mtype, mlen, mpcrel;
+            total += 1;
+            if (macho_map_reloc(ELFW(R_TYPE)(rel->r_info), &mtype, &mlen,
+                                &mpcrel) == 0
+                && (mtype == ARM64_RELOC_UNSIGNED
+                    || mtype == ARM64_RELOC_PAGE21
+                    || mtype == ARM64_RELOC_PAGEOFF12)
+                && rel->r_addend != 0) {
+                total += 1; /* ADDEND 前置条目 */
+            }
+        }
+        ms[i].nreloc = total;
+        ms[i].nreloc_elf = n;
     }
 
     /* ELF 符号表概览 */
@@ -319,7 +343,7 @@ ST_FUNC int tcc_output_macho(TCCState *s1, const char *filename)
         if (!ms[i].nreloc)
             continue;
         fseek(f, ms[i].reloff, SEEK_SET);
-        for (j = 0; j < (int)ms[i].nreloc; j++) {
+        for (j = 0; j < (int)ms[i].nreloc_elf; j++) {
             ElfW_Rel *rel = &((ElfW_Rel *)sr->data)[j];
             int sym_index = ELFW(R_SYM)(rel->r_info);
             int type = ELFW(R_TYPE)(rel->r_info);

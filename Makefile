@@ -9,6 +9,7 @@
 #   make            构建 yh、libtcc.a、libtcc1.a
 #   make test       运行 tests/yh 语法语料与编译器模式回归
 #   make bootstrap  自举验证门（G1 语法 + G2 三代闭环 + 全量固定点，需容器）
+#   make g3         B8/G3 正式验收（bootstrap + 分代全量复验 + 归档，需容器）
 #   make selfhost-native  本机（Darwin）等价自举差分，无需容器
 #   make install    安装到 $(PREFIX)（默认 /usr/local；DESTDIR 用作打包根）
 #   make uninstall  卸载
@@ -152,6 +153,12 @@ test: yh$(EXESUF)
 selfhost-native: yh$(EXESUF)
 	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py
 
+# g3：B8 / G3 正式验收。先跑 make bootstrap 得到 stage1..stage3，再在容器
+# 内做分代全量语料复验、汇编固定点（compiler.yh + 全部代表程序）、确定性
+# 检查与产物/SHA-256 归档，输出归档到 tmp/bootstrap/artifacts/。
+g3: bootstrap
+	python3 $(TOPSRC)/tests/selfhost/g3-acceptance.py
+
 # --------------------------------------------------------------------------
 # 自举（docs/02-plan/yh-自举实施方案-v2.md）
 #
@@ -254,6 +261,6 @@ clean:
 help:
 	@sed -n '2,20p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all bootstrap selfhost-native clean help
+.PHONY: all install uninstall test test-all bootstrap selfhost-native g3 clean help
 
 endif # ($(INCLUDED),no)

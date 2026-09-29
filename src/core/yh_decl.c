@@ -28,6 +28,8 @@ int yh_cont_depth;          /* continue 可用深度（循环内 >0） */
 int yh_has_init_flag;       /* binding 是否带初值 */
 int yh_bind_name;           /* 当前绑定名 token */
 int yh_at_global_scope;     /* 当前绑定是否在顶层（全局 let/const） */
+int yh_expect_valid;        /* 数组/切片字面量的目标类型上下文有效 */
+CType yh_expect_type;       /* 上述上下文的目标类型（数组/切片） */
 
 /* ---- 前向声明 ---- */
 static void yh_parse_fn_decl(void);
@@ -39,6 +41,240 @@ ST_FUNC void yh_register_const(int v, CType *type);
 /* ------------------------------------------------------------------ */
 /* 变量与常量落地                                                       */
 /* ------------------------------------------------------------------ */
+
+/* 全局数组字面量待写缓冲（binding 解析时收集，commit 时写入 data 节） */
+static unsigned char yh_garr_buf[4096];
+static int yh_garr_n;
+static int yh_garr_pending;
+
+/* 全局结构体字面量的字符串字段重定位项：commit 时按字段偏移写
+   R_DATA_PTR（Sym 指针在 decl_initializer_alloc 落地后保持有效） */
+#define YH_GREL_MAX 64
+static int yh_grel_n;
+static struct { int off; Sym *sym; } yh_grel[YH_GREL_MAX];
+
+static void yh_global_struct_body(CType *type, int base);
+static void yh_skip_init(void);
+static void yh_global_array_literal(CType *type);
+
+/* yh_garr_emit：向字节镜像追加 n 个字节 */
+static void yh_garr_emit(const void *p, int n)
+{
+    memcpy(yh_garr_buf + yh_garr_n, p, n);
+    yh_garr_n += n;
+}
+
+/* yh_garr_pad：把字节镜像补零到 to（结构体内绝对偏移） */
+static void yh_garr_pad(int to)
+{
+    while (yh_garr_n < to)
+        yh_garr_buf[yh_garr_n++] = 0;
+}
+
+/* yh_global_struct_field：解析一个字段初始化并写入镜像。ft 为字段
+   类型，foff 为字段在结构体内的绝对偏移。 */
+static void yh_global_struct_field(CType *ft, int foff)
+{
+    int fsz, fal;
+    struct yh_wrap *w = NULL;
+
+    fsz = type_size(ft, &fal);
+    if (yh_is_slice(ft, &w))
+        tcc_error("结构体字面量的切片字段暂不支持");
+    if (tok == TOK_STR && (ft->t & VT_BTYPE) == VT_PTR) {
+        /* 字符串字段：匿名 char 数组落地，记重定位项（commit 写） */
+        CType st;
+        AttributeDef ad;
+        st.t = VT_BYTE | VT_ARRAY;
+        mk_pointer(&st);
+        st.t |= VT_ARRAY;
+        memset(&ad, 0, sizeof ad);
+        decl_initializer_alloc(&st, &ad, VT_CONST, 2, 0, 0);
+        if (yh_grel_n >= YH_GREL_MAX)
+            tcc_error("全局结构体字面量字符串字段过多");
+        yh_grel[yh_grel_n].off = foff;
+        yh_grel[yh_grel_n].sym = vtop->sym;
+        yh_grel_n++;
+        vpop();
+        return;
+    }
+    if ((ft->t & VT_BTYPE) == VT_STRUCT) {
+        /* 嵌套结构体字面量：IDENT '{' body '}' */
+        if (tok >= TOK_UIDENT)
+            next();
+        skip('{');
+        yh_global_struct_body(ft, foff);
+        skip('}');
+        return;
+    }
+    {
+        /* 标量常量 */
+        const_wanted = 1;
+        expr_const1();
+        const_wanted = 0;
+        if ((ft->t & VT_BTYPE) == VT_FLOAT) {
+            float f = vtop->c.f;
+            yh_garr_emit(&f, 4);
+        } else if ((ft->t & VT_BTYPE) == VT_DOUBLE
+                   || (ft->t & VT_BTYPE) == VT_LDOUBLE) {
+            double d = vtop->c.d;
+            yh_garr_emit(&d, 8);
+        } else {
+            int k;
+            unsigned long long u;
+            if (!yh_const_fits(vtop->c.i, ft))
+                tcc_error("初始化值 %lld 超出类型范围", (long long)vtop->c.i);
+            u = (unsigned long long)vtop->c.i;
+            for (k = 0; k < fsz; k++)
+                yh_garr_buf[yh_garr_n + k] =
+                    (unsigned char)(u >> (8 * k));
+            yh_garr_n += fsz;
+        }
+        vpop();
+    }
+}
+
+/* yh_global_struct_body：字面量体（'{' 与 '}' 由调用方处理）。
+   命名式/位置式不混写；字段间隙与尾部补零到结构体全长。 */
+static void yh_global_struct_body(CType *type, int base)
+{
+    Sym *tag = type->ref;
+    Sym *f;
+    int named, fpos = 0, fsz, fal;
+
+    if (tok == '}')
+        tcc_error("结构体字面量不能为空");
+    named = (tok >= TOK_UIDENT && yh_peek_next_token() == ':');
+    for (;;) {
+        int foff = -1;
+        Sym *fd = NULL;
+        CType *ft;
+        if (named) {
+            int v = tok;
+            for (f = tag->next; f; f = f->next) {
+                if ((f->v & ~SYM_FIELD) == (v & ~SYM_FIELD)) {
+                    fd = f;
+                    break;
+                }
+            }
+            if (!fd)
+                tcc_error("结构体没有该字段");
+            next();
+            skip(':');
+        } else {
+            for (f = tag->next; f; f = f->next) {
+                if (fpos == 0) {
+                    fd = f;
+                    break;
+                }
+                fpos--;
+            }
+            if (!fd)
+                tcc_error("位置式字面量字段过多");
+        }
+        foff = fd->c;
+        ft = &fd->type;
+        yh_garr_pad(base + foff);
+        yh_global_struct_field(ft, base + foff);
+        fpos++;
+        if (tok == ',') {
+            next();
+            if (tok == '}') break;
+            continue;
+        }
+        break;
+    }
+    fsz = type_size(type, &fal);
+    yh_garr_pad(base + fsz);
+}
+
+/* yh_global_struct_literal：全局结构体初始化入口。
+   当前 token 为类型名 IDENT：镜像收集后交 yh_commit_global_var 写节。 */
+static void yh_global_struct_literal(CType *type)
+{
+    int al;
+
+    next(); /* 类型名 IDENT */
+    skip('{');
+    yh_garr_n = 0;
+    yh_grel_n = 0;
+    /* 不预填整块：字段间隙与尾部由 body/commit 补零 */
+    yh_global_struct_body(type, 0);
+    skip('}');
+    yh_garr_pad(type_size(type, &al));
+    yh_garr_pending = 1;
+}
+
+/* yh_skip_init：第一遍跳过绑定初始化表达式。括号（()[]{}）配对计入
+   深度，停在深度 0 的 ',' 或 ';' 且不消费——skip_or_save_block 不把
+   '[' 计入深度，数组字面量内的逗号会被误当绑定分隔符。 */
+static void yh_skip_init(void)
+{
+    int depth = 0;
+    while (tok != TOK_EOF) {
+        if (tok == '(' || tok == '[' || tok == '{')
+            depth++;
+        if (tok == ')' || tok == ']' || tok == '}')
+            depth--;
+        if (depth == 0 && (tok == ',' || tok == ';'))
+            return;
+        next();
+    }
+}
+
+/* yh_global_array_literal：全局数组字面量 [e1, ...]（仅标量/f64 元素）。
+   元素常量逐个收集进字节镜像，yh_commit_global_var 写入 data 节并
+   补零到类型全长。 */
+static void yh_global_array_literal(CType *type)
+{
+    CType et;
+    int esz, align2, count = 0, cap;
+
+    et = type->ref->type;
+    esz = type_size(&et, &align2);
+    cap = type->ref->c;
+    yh_garr_n = 0;
+    yh_garr_pending = 0;
+    next(); /* '[' */
+    if (tok != ']') {
+        for (;;) {
+            long long v;
+            int k;
+            if (count >= cap)
+                tcc_error("数组字面量元素个数与数组长度不一致");
+            const_wanted = 1;
+            expr_const1();
+            const_wanted = 0;
+            v = vtop->c.i;
+            if ((et.t & VT_BTYPE) == VT_DOUBLE
+                || (et.t & VT_BTYPE) == VT_LDOUBLE) {
+                double d = vtop->c.d;
+                yh_garr_emit(&d, 8);
+            } else if ((et.t & VT_BTYPE) == VT_FLOAT) {
+                tcc_error("f32 元素的全局初始化暂不支持（请用 f64）");
+            } else {
+                if (!yh_const_fits(vtop->c.i, &et))
+                    tcc_error("初始化值 %lld 超出类型范围", (long long)vtop->c.i);
+                for (k = 0; k < esz; k++)
+                    yh_garr_buf[yh_garr_n + k] =
+                        (unsigned char)((unsigned long long)v >> (8 * k));
+                yh_garr_n += esz;
+            }
+            vpop();
+            count++;
+            if (tok == ',') {
+                next();
+                if (tok == ']') break;
+                continue;
+            }
+            break;
+        }
+    }
+    skip(']');
+    if (count != cap)
+        tcc_error("数组字面量元素个数与数组长度不一致");
+    yh_garr_pending = 1;
+}
 
 /* 局部变量落地：分配栈槽、登记 Sym；值栈顶是初始化值（或无）。
  * 由 binding 解析路径调用（编译模式）。 */
@@ -65,7 +301,8 @@ ST_FUNC void yh_commit_local_var(CType *type)
 
 /* 顶层变量落地：在 data/bss 节分配并登记 ELF 符号。
  * pub→GLOBAL，非 pub→VT_STATIC（LOCAL）；初始化值为编译期常量
- * （标量直接写字节）或字符串符号引用（写 R_DATA_PTR 重定位）。 */
+ * （标量直接写字节）、字符串符号引用（R_DATA_PTR 重定位），或
+ * 数组/结构体字面量的整块字节镜像（yh_garr_buf，含字段重定位）。 */
 ST_FUNC void yh_commit_global_var(CType *type)
 {
     int v = yh_bind_name, size, align, has_init = yh_has_init_flag;
@@ -86,6 +323,21 @@ ST_FUNC void yh_commit_global_var(CType *type)
             /* 字符串地址：写 8 字节重定位 */
             greloca(sec, vtop->sym, addr, R_DATA_PTR, 0);
             vpop();
+        } else if (yh_garr_pending) {
+            /* 全局数组/结构体字面量：整块字节写入并补零到类型全长；
+               字符串字段按记录偏移补 R_DATA_PTR 重定位 */
+            int k, rl;
+            unsigned char *p = sec->data + addr;
+            if (size < yh_garr_n)
+                tcc_error("全局数组初始化越界");
+            memcpy(p, yh_garr_buf, yh_garr_n);
+            for (k = yh_garr_n; k < size; k++)
+                p[k] = 0;
+            for (rl = 0; rl < yh_grel_n; rl++)
+                greloca(sec, yh_grel[rl].sym, addr + yh_grel[rl].off,
+                        R_DATA_PTR, 0);
+            yh_garr_pending = 0;
+            yh_grel_n = 0;
         } else {
             /* 标量常量：按类型宽度写入节数据（小端）。
                整数先做范围检查（§4.1）：越界字面量报错而非静默截断 */
@@ -101,8 +353,7 @@ ST_FUNC void yh_commit_global_var(CType *type)
                 memcpy(p, &dd, 8);
             } else {
                 if (!yh_const_fits(vtop->c.i, type))
-                    tcc_error("初始化值 %lld 超出类型范围",
-                              (long long)vtop->c.i);
+                    tcc_error("初始化值 %lld 超出类型范围", (long long)vtop->c.i);
                 u = (unsigned long long)vtop->c.i;
                 n = size < 8 ? size : 8;
                 for (k = 0; k < n; k++)
@@ -123,10 +374,6 @@ ST_FUNC void yh_register_const(int v, CType *type)
     s->enum_val = vtop->c.i; /* 常量值存 enum_val（64 位） */
     vpop();
 }
-
-/* ------------------------------------------------------------------ */
-/* 声明解析                                                            */
-/* ------------------------------------------------------------------ */
 
 /* binding：IDENT typeRef ('=' expr)?。类型必写，不允许省略。 */
 static void yh_parse_binding(void)
@@ -149,13 +396,22 @@ static void yh_parse_binding(void)
     if (has_init) {
         next();
         if (yh_pass == 1) {
-            /* 第一遍只登记名字与类型：初始化器按括号配对跳过
-               （skip_or_save_block 停在顶层 ',' 或 ';' 且不消费） */
-            skip_or_save_block(NULL);
+            /* 第一遍只登记名字与类型：初始化器按括号配对跳过 */
+            yh_skip_init();
             return;
         }
         if (yh_at_global_scope && !yh_syntax_only()) {
-            if (tok == TOK_STR) {
+            if (tok >= TOK_UIDENT && yh_peek_next_token() == '{'
+                && yh_named_type(tok)) {
+                /* 结构体字面量直初始化：P { ... } */
+                yh_global_struct_literal(&type);
+            } else if (tok == '[' && yh_is_slice(&type, NULL)) {
+                tcc_error("全局切片字面量暂不支持（请用局部字面量或逐元素赋值）");
+            } else if (tok == '[' && (type.t & VT_ARRAY)) {
+                yh_garr_n = 0;
+                yh_garr_pending = 0;
+                yh_global_array_literal(&type);
+            } else if (tok == TOK_STR) {
                 /* 字符串字面量：落地为匿名 char 数组，压入符号引用 */
                 CType st;
                 AttributeDef ad;
@@ -171,11 +427,22 @@ static void yh_parse_binding(void)
                 const_wanted = 0;
             }
         } else {
+            /* 数组/切片字面量消费目标类型上下文（yh_expr primary '['） */
+            yh_expect_type = type;
+            yh_expect_valid = 1;
             yh_parse_expr();
+            yh_expect_valid = 0;
         }
     }
     if (yh_syntax_only())
         return;
+    if (yh_pass == 1 && yh_at_global_scope) {
+        /* 第一遍只登记类型与函数签名（见文件头两遍编译设计）。
+           零初始化全局此前会在这里提前落地符号，第二遍重解析时
+           同名符号仍在标识符表中，触发 sym_push 的 redeclaration
+           误报——统一留给第二遍 yh_commit_global_var 落地。 */
+        return;
+    }
     if (yh_at_global_scope) {
         yh_has_init_flag = has_init;
         yh_bind_name = v;
@@ -220,7 +487,7 @@ ST_FUNC void yh_parse_const_decl(void)
     if (yh_syntax_only()) {
         yh_parse_expr();
     } else if (yh_pass == 1) {
-        skip_or_save_block(NULL); /* 第一遍不做常量求值 */
+        yh_skip_init(); /* 第一遍不做常量求值 */
     } else {
         const_wanted = 1;
         expr_const1();
