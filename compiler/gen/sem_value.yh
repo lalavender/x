@@ -1,0 +1,331 @@
+module gen;
+
+// ============================================================================
+// sem_value.yh
+// 自 gen/sem.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
+// ============================================================================
+
+pub fn sem_res_reset(r *Res, tid int) int {
+    r.type_id = tid;
+    r.is_const = 0;
+    r.ival = 0;
+    r.sym = -1;
+    r.is_lit = 0;
+    r.lit_big = 0;
+    r.fval_bits = 0;
+    return 0;
+}
+
+pub fn sem_res_const(r *Res, tid int, v i64) int {
+    r.type_id = tid;
+    r.is_const = 1;
+    r.ival = v;
+    r.sym = -1;
+    r.is_lit = 0;
+    r.lit_big = 0;
+    return 0;
+}
+
+pub fn sem_res_copy(dst *Res, src *Res) int {
+    dst.type_id = src.type_id;
+    dst.is_const = src.is_const;
+    dst.ival = src.ival;
+    dst.sym = src.sym;
+    dst.is_lit = src.is_lit;
+    dst.lit_big = src.lit_big;
+    dst.fval_bits = src.fval_bits;
+    return 0;
+}
+
+pub fn sem_number(start int, n int, r *Res) int {
+    sem_res_reset(r, TY_I32);
+    if (c_compile == 0) {
+        return 0;
+    }
+    r.is_lit = 1;
+    r.is_const = 1;
+    // 浮点字面量（含 '.' 或指数）按 f64 处理
+    if (sem_num_is_float(start, n) != 0) {
+        r.type_id = TY_F64;
+        let bits i64 = sem_parse_float_bits(start, n);
+        r.fval_bits = bits;
+        if (c_fold == 0) {
+            if (em_mov_imm("x0", bits) != 0) { return -1; }
+            if (em_ins("fmov\td0, x0") != 0) { return -1; }
+        }
+        return 0;
+    }
+    if (sem_parse_number(start, n) != 0) {
+        return -1;
+    }
+    r.ival = c_fold_ival;
+    r.lit_big = c_fold_big;
+    if (c_fold == 0) {
+        // 作为运行时值使用：装入 x0（常量传播留给后续优化）
+        if (em_mov_imm("x0", r.ival) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+pub fn fp64_bits(v f64) i64 {
+    let holder *f64 = malloc(8).to_type(*f64);
+    holder[0] = v;
+    let pb *i64 = holder.to_type(*i64);
+    let r i64 = pb[0];
+    free(holder.to_type(*void));
+    return r;
+}
+
+pub fn sem_num_is_float(start int, n int) int {
+    let i int = 0;
+    for i < n {
+        let b u8 = c_src[start + i];
+        if (b == '.' || b == 'e' || b == 'E') {
+            // 前缀 0x/0o/0b 中的 x/o/b 不算
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+pub fn sem_parse_float_bits(start int, n int) i64 {
+    let i int = start;
+    let end int = start + n;
+    let mant f64 = 0.0;
+    let frac_scale f64 = 1.0;
+    let in_frac int = 0;
+    let exp int = 0;
+    let exp_neg int = 0;
+    for i < end {
+        let b u8 = c_src[i];
+        if (b == '_') {
+            i += 1;
+            continue;
+        }
+        if (b >= '0' && b <= '9') {
+            if (in_frac == 0) {
+                mant = mant * 10.0 + (b - '0').to_type(f64);
+            } else {
+                frac_scale = frac_scale * 10.0;
+                mant = mant + (b - '0').to_type(f64) / frac_scale;
+            }
+            i += 1;
+            continue;
+        }
+        if (b == '.') {
+            in_frac = 1;
+            i += 1;
+            continue;
+        }
+        if (b == 'e' || b == 'E') {
+            i += 1;
+            if (i < end && c_src[i] == '-') {
+                exp_neg = 1;
+                i += 1;
+            } else if (i < end && c_src[i] == '+') {
+                i += 1;
+            }
+            for i < end && c_src[i] >= '0' && c_src[i] <= '9' {
+                exp = exp * 10 + (c_src[i] - '0').to_type(int);
+                i += 1;
+            }
+            break;
+        }
+        i += 1;
+    }
+    let k int = 0;
+    let factor f64 = 1.0;
+    for k < exp {
+        factor = factor * 10.0;
+        k += 1;
+    }
+    if (exp_neg != 0) {
+        mant = mant / factor;
+    } else {
+        mant = mant * factor;
+    }
+    return fp64_bits(mant);
+}
+
+pub fn sem_string(start int, slen int, r *Res) int {
+    sem_res_reset(r, ty_ptr(TY_CHAR));
+    if (c_compile == 0) {
+        return 0;
+    }
+    let lbl int = em_data_string(start, slen);
+    if (lbl < 0) {
+        return -1;
+    }
+    r.is_const = 1;
+    r.ival = lbl.to_type(i64);
+    if (c_fold == 0) {
+        // 作为值使用：装入字符串地址
+        if (em_load_data_label(lbl) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+pub fn sem_char(start int, clen int, r *Res) int {
+    sem_res_reset(r, TY_CHAR);
+    if (c_compile == 0) {
+        return 0;
+    }
+    // 解码单一字符/转义单元（start+1 起）
+    let b u8 = c_src[start + 1];
+    let v int = b.to_type(int);
+    if (b == '\\') {
+        let e u8 = c_src[start + 2];
+        v = 0;
+        if (e == 'n') { v = 10; }
+        if (e == 'r') { v = 13; }
+        if (e == 't') { v = 9; }
+        if (e == '0') { v = 0; }
+        if (e == 'a') { v = 7; }
+        if (e == 'b') { v = 8; }
+        if (e == 'f') { v = 12; }
+        if (e == 'v') { v = 11; }
+        if (e == '\'') { v = 39; }
+        if (e == '"') { v = 34; }
+        if (e == '\\') { v = 92; }
+        if (e == 'x') {
+            v = hexval(c_src[start + 3]) * 16 + hexval(c_src[start + 4]);
+        }
+    }
+    r.is_const = 1;
+    r.is_lit = 1;
+    r.ival = v.to_type(i64);
+    if (c_fold == 0) {
+        if (em_mov_imm("x0", r.ival) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+pub fn sem_bool(v int, r *Res) int {
+    sem_res_const(r, TY_BOOL, v.to_type(i64));
+    if (c_compile == 0) {
+        return 0;
+    }
+    if (c_fold == 0) {
+        if (em_mov_imm("x0", r.ival) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+pub fn sem_ident(start int, n int, r *Res) int {
+    sem_res_reset(r, 0);
+    if (c_compile == 0) {
+        return 0;
+    }
+    let idx int = sym_lookup(start, n);
+    if (idx < 0) {
+        return sem_err("引用了未声明的名字");
+    }
+    return sem_ident_val(idx, r);
+}
+
+pub fn sem_ident_val(idx int, r *Res) int {
+    r.sym = idx;
+    r.type_id = c_syms[idx].type_id;
+    let kind int = c_syms[idx].kind;
+    if (kind == SYM_CONST) {
+        r.is_const = 1;
+        r.ival = c_syms[idx].cval;
+        if ((c_syms[idx].flags & F_ADDR) != 0) {
+            // 指针常量：值是数据标签
+            if (c_fold == 0) {
+                if (em_load_data_label(c_syms[idx].cval.to_type(int)) != 0) {
+                    return -1;
+                }
+            }
+            return 0;
+        }
+        if (c_fold == 0) {
+            if (em_mov_imm("x0", c_syms[idx].cval) != 0) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+    if (kind == SYM_FN) {
+        if (c_fold != 0) {
+            return sem_err("函数引用不是编译期常量");
+        }
+        if (c_lvalue == 0) {
+            if (em_lea_global(idx) != 0) {
+                return -1;
+            }
+        }
+        c_res_is_addr = 1;
+        return 0;
+    }
+    // 变量
+    if (c_fold != 0) {
+        return sem_err("变量不是编译期常量");
+    }
+    let tid int = c_syms[idx].type_id;
+    let k int = t_types[tid].kind;
+    let global int = ((c_syms[idx].flags & F_GLOBAL) != 0).to_type(int);
+    if (k == TY_ARRAY || k == TY_STRUCT || k == TY_UNION || k == TY_SLICE) {
+        // 聚合：值语义即地址（数组退化 / 结构体以地址使用）
+        if (global != 0) {
+            if (em_lea_global(idx) != 0) {
+                return -1;
+            }
+        } else {
+            if (em_lea_local(c_syms[idx].offset) != 0) {
+                return -1;
+            }
+        }
+        c_res_is_addr = 1;
+        return 0;
+    }
+    if (c_lvalue != 0) {
+        if (global != 0) {
+            if (em_lea_global(idx) != 0) {
+                return -1;
+            }
+        } else {
+            if (em_lea_local(c_syms[idx].offset) != 0) {
+                return -1;
+            }
+        }
+        c_res_is_addr = 1;
+        return 0;
+    }
+    if (ty_is_float(tid) != 0) {
+        if (global != 0) {
+            if (em_lea_global(idx) != 0) { return -1; }
+            if (em_ins("mov\tx10, x0") != 0) { return -1; }
+            if (t_types[tid].size == 4) {
+                if (em_ins("ldr\ts0, [x10]") != 0) { return -1; }
+            } else {
+                if (em_ins("ldr\td0, [x10]") != 0) { return -1; }
+            }
+        } else {
+            if (em_fp_load_local(c_syms[idx].offset, tid) != 0) { return -1; }
+        }
+        c_res_is_addr = 0;
+        return 0;
+    }
+    if (global != 0) {
+        if (em_load_global(idx, tid) != 0) {
+            return -1;
+        }
+    } else {
+        if (em_load_local(c_syms[idx].offset, tid) != 0) {
+            return -1;
+        }
+    }
+    c_res_is_addr = 0;
+    return 0;
+}
+

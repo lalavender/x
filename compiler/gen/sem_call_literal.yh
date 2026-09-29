@@ -1,0 +1,463 @@
+module gen;
+
+// ============================================================================
+// sem_call_literal.yh
+// 自 gen/sem.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
+// ============================================================================
+
+pub fn sem_call_begin(callee *Res) int {
+    if (c_compile == 0) {
+        return 1;
+    }
+    // 嵌套调用：记录本层实参基线与直接调用标志（内层不污染外层）
+    if (c_call_depth >= 64) {
+        return sem_err("调用嵌套过深");
+    }
+    c_call_base[c_call_depth] = c_arg_n;
+    c_call_direct[c_call_depth] = 0;
+    c_call_depth += 1;
+    if (callee.sym >= 0) {
+        if (c_syms[callee.sym].kind == SYM_FN) {
+            c_call_direct[c_call_depth - 1] = 1;
+            return 1;
+        }
+    }
+    if (c_fold != 0) {
+        return sem_err("函数调用不是编译期常量");
+    }
+    if (em_push() != 0) { return -1; }
+    return 0;
+}
+
+pub fn sem_push_arg(r *Res) int {
+    if (c_compile == 0) {
+        return 0;
+    }
+    if (c_arg_n >= 256) {
+        return sem_err("实参过多");
+    }
+    sem_res_copy(&c_args[c_arg_n], r);
+    c_argtys[c_arg_n] = r.type_id;
+    c_arg_n += 1;
+    if (c_fold != 0) {
+        return 0;
+    }
+    return sem_push_value(r);
+}
+
+pub fn sem_call(callee *Res, r *Res) int {
+    if (c_compile == 0) {
+        sem_res_reset(r, 0);
+        return 0;
+    }
+    if (t_types[callee.type_id].kind != TY_FN) {
+        return sem_err("被调用的表达式不是函数");
+    }
+    c_call_depth -= 1;
+    let base int = c_call_base[c_call_depth];
+    let direct int = c_call_direct[c_call_depth];
+    let sig int = t_types[callee.type_id].sub;
+    let np int = t_sig_np[sig];
+    let vararg int = t_sig_vararg[sig];
+    let ret int = t_sig_ret[sig];
+    let na int = c_arg_n - base;
+    // vararg==2：类型化变参（末尾打包为切片）；==1：裸 C 变参（仅 prelude）
+    if (vararg == 2) {
+        if (na < np) {
+            return sem_err("实参个数少于固定参数");
+        }
+    } else if (na < np || (na > np && vararg == 0)) {
+        return sem_err("实参个数与函数签名不符");
+    }
+    // 实参类型检查
+    let first int = t_sig_first[sig];
+    let i int = 0;
+    for i < na {
+        let want int = 0;
+        if (i < np) {
+            want = t_sig_params[first + i];
+        } else {
+            want = -1;
+        }
+        if (want >= 0) {
+            // 数组实参按指针形参退化
+            let wat int = c_args[base + i].type_id;
+            if (t_types[wat].kind == TY_ARRAY && t_types[want].kind == TY_PTR) {
+                if (t_types[wat].elem != t_types[want].elem && t_types[want].elem != TY_VOID) {
+                    return sem_err("数组元素类型与指针形参不匹配");
+                }
+                i += 1;
+                continue;
+            }
+            // 切片实参按切片形参（同元素类型；长度不参与相容判断）
+            if (t_types[wat].kind == TY_SLICE && t_types[want].kind == TY_SLICE) {
+                if (t_types[wat].elem != t_types[want].elem && t_types[want].elem != TY_VOID) {
+                    return sem_err("切片元素类型不匹配");
+                }
+                i += 1;
+                continue;
+            }
+            if (sem_can_assign(want, wat, c_args[base + i].is_lit, c_args[base + i].ival, c_args[base + i].lit_big) != 0) {
+                return -1;
+            }
+        } else if (vararg == 2) {
+            // 类型化变参：尾部实参类型须与元素类型相容
+            let velem_t int = t_types[t_sig_params[first + np]].elem;
+            if (sem_can_assign(velem_t, c_args[base + i].type_id, c_args[base + i].is_lit, c_args[base + i].ival, c_args[base + i].lit_big) != 0) {
+                return -1;
+            }
+        } else {
+            // 裸变参位置：整数/指针按 C 提升进寄存器
+            let at2 int = c_args[base + i].type_id;
+            let k2 int = t_types[at2].kind;
+            if (ty_is_float(at2) != 0) {
+                return sem_err("裸变参的浮点实参将在 B7 支持");
+            }
+            if (k2 == TY_STRUCT || k2 == TY_UNION || k2 == TY_ARRAY || k2 == TY_SLICE) {
+                return sem_err("聚合类型不能传给裸变参");
+            }
+        }
+        i += 1;
+    }
+    if (c_fold != 0) {
+        return sem_err("函数调用不是编译期常量");
+    }
+    // 类型化变参：把尾部实参（已逐个压栈）打包为一个切片参数
+    let na2 int = na;
+    if (vararg == 2) {
+        let velem int = t_types[t_sig_params[first + np]].elem;
+        let vslice int = t_sig_params[first + np];
+        let vcount int = na - np;
+        // 值栈上从底到顶依次是 a0..a_{na-1}；尾部 vcount 个是变参。
+        // 先把尾部逐个弹出写入临时数组（逆序弹出，正序写入）。
+        let esz int = t_types[velem].size;
+        let arr_off int = em_alloc_local(esz * vcount);
+        // 值栈顶是最后一个实参：逐个弹出并按倒序写入数组（元素 0 在最低地址）
+        let vi int = vcount - 1;
+        for vi >= 0 {
+            // 浮点实参在 FP 栈（em_push_fp 压入），弹出与存储都走 d0/s0
+            if (ty_is_float(velem) != 0) {
+                let vfx *char = "d";
+                if (esz == 4) { vfx = "s"; }
+                if (em_frag("\tldr\t") != 0) { return -1; }
+                if (em_frag(vfx) != 0) { return -1; }
+                if (em_frag("0, [sp], #16\n") != 0) { return -1; }
+                if (em_lea_local_to(arr_off - vi * esz) != 0) { return -1; }
+                if (em_frag("\tstr\t") != 0) { return -1; }
+                if (em_frag(vfx) != 0) { return -1; }
+                if (em_frag("0, [x10]\n") != 0) { return -1; }
+                vi -= 1;
+                continue;
+            }
+            if (em_pop("x0") != 0) { return -1; }
+            // 元素 vi 的地址：向下偏移 = arr_off - vi*esz
+            if (em_lea_local_to(arr_off - vi * esz) != 0) { return -1; }
+            if (em_store_sized(velem) != 0) { return -1; }
+            vi -= 1;
+        }
+        // 构造切片 {len, data} 于临时槽
+        let sl_off int = em_alloc_local(TG_LONG_SIZE * 2);
+        if (em_lea_local_to(sl_off) != 0) { return -1; }
+        if (em_mov_imm("x9", vcount.to_type(i64)) != 0) { return -1; }
+        if (em_ins("str\tx9, [x10]") != 0) { return -1; }
+        if (em_lea_local_down(arr_off) != 0) { return -1; }
+        if (em_ins("str\tx0, [x10, #8]") != 0) { return -1; }
+        if (em_lea_local_down(sl_off) != 0) { return -1; }
+        if (em_push() != 0) { return -1; }
+        na2 = np + 1;
+    }
+    // 发射：栈实参 → 寄存器实参 → callee → bl/blr → 清理
+    // Darwin 变参约定（Mach-O/AAPCS 变体）：裸 C 变参函数（prelude 的
+    // printf/open，vararg==1）的**可变部分一律按 8 字节对齐放在栈上**
+    // （[sp+0], [sp+8], …），不占用 x1..x7；命名参数照常进寄存器。
+    // 与 stage0（src/targets/arm64-gen.c 的 arm64_pcs_aux）保持一致。
+    let darwin_var int = 0;
+    if (tg_darwin() != 0 && vararg == 1 && na2 > np) {
+        darwin_var = 1;
+    }
+    let nstack int = 0;
+    if (darwin_var != 0) {
+        // 命名参数之外的实参全部走栈
+        nstack = na2 - np;
+    } else if (na2 > TG_ARG_REGS) {
+        nstack = na2 - TG_ARG_REGS;
+    }
+    // 栈实参搬运（两段式）：值栈顶是最后一个实参，栈实参恰为顶部
+    // nstack 项。第一段：弹入帧内暂存槽（fp 负偏移固定槽，不受值栈
+    // 弹压影响）；第二段在寄存器实参装载完成后、bl 之前回压进调用点
+    // 栈区（8 字节间距 = AAPCS64 与 stage0，被调方按
+    // [fp+16+(k-8)*8] 读取）。不能先 sub sp 开区再弹：弹到的是栈区
+    // 槽而非实参；也不能边弹边压：寄存器装载的弹栈会把已压栈区弹穿
+    // （2026-09-29 参数错位缺陷，被加法交换律语料掩盖）。
+    let area_bytes int = (nstack * 8 + 15) / 16 * 16;
+    let stk_off int = 0;
+    if (nstack > 0) {
+        stk_off = em_alloc_local(8 * nstack);
+        let stk_lo int = na2 - nstack;
+        let saj int = na2 - 1;
+        for saj >= stk_lo {
+            let rel int = 8 * (saj - stk_lo);
+            if (ty_is_float(c_args[base + saj].type_id) != 0) {
+                // 浮点实参值在浮点通路（sem_push_value → em_push_fp），
+                // 弹出须走浮点寄存器
+                let fsfx *char = "d";
+                if (t_types[c_args[base + saj].type_id].size == 4) {
+                    fsfx = "s";
+                }
+                if (em_frag("\tldr\t") != 0) { return -1; }
+                if (em_frag(fsfx) != 0) { return -1; }
+                if (em_frag("0, [sp], #16\n") != 0) { return -1; }
+                if (em_lea_local_to(stk_off - rel) != 0) { return -1; }
+                if (em_frag("\tstr\t") != 0) { return -1; }
+                if (em_frag(fsfx) != 0) { return -1; }
+                if (em_frag("0, [x10]\n") != 0) { return -1; }
+            } else {
+                // 弹到 x11：em_lea_local_to 偏移超 255 时用 movz x9 拼址，
+                // 会覆盖 x9（2026-09-29 深帧下暂存槽写入立即数的根因）
+                if (em_pop("x11") != 0) { return -1; }
+                if (em_lea_local_to(stk_off - rel) != 0) { return -1; }
+                if (em_ins("str\tx11, [x10]") != 0) { return -1; }
+            }
+            saj -= 1;
+        }
+    }
+    // 寄存器实参：整型 a8→x7…a1→x0；浮点独立计数进 d0..d7
+    // 注意：值栈顶是最后一个实参，浮点与整型需分别按各自序号搬运。
+    // 这里按「从后往前」弹出：先整型（逆序到 x7..x0），再浮点。
+    // 由于浮点与整型寄存器独立，正确做法是先按顺序取各自第 k 个。
+    // 简化且正确的实现：逐个弹出到临时数组，再按类型分配到寄存器。
+    // —— 为控制改动面，这里要求「浮点实参全部位于尾部」时用专用路径。
+    // 进寄存器的实参个数：Darwin 变参时只有命名参数进寄存器，可变部分已上栈。
+    let regn int = na2;
+    if (darwin_var != 0) {
+        regn = np;
+    }
+    // 计算寄存器实参中的浮点个数
+    let nfp int = 0;
+    let k int = base;
+    for k < base + regn {
+        if (ty_is_float(c_args[k].type_id) != 0) {
+            nfp += 1;
+        }
+        k += 1;
+    }
+    if (nfp == 0) {
+        let j int = TG_ARG_REGS - 1;
+        for j >= 0 {
+            if (j < regn) {
+                if (em_call_arg_to_reg(j) != 0) { return -1; }
+            }
+            j -= 1;
+        }
+    } else {
+        // 混合：弹出到临时槽（逆序），再按各自序号装寄存器。
+        // 浮点实参压栈时值在 d0，弹出必须按元素类型选 x0 或 d0。
+        let tmp_off int = em_alloc_local(16 * regn);
+        let tb int = regn - 1;
+        for tb >= 0 {
+            if (em_lea_local_to(tmp_off - 16 * tb) != 0) { return -1; }
+            if (ty_is_float(c_args[base + tb].type_id) != 0) {
+                let psfx *char = "d";
+                if (t_types[c_args[base + tb].type_id].size == 4) { psfx = "s"; }
+                if (em_frag("\tldr\t") != 0) { return -1; }
+                if (em_frag(psfx) != 0) { return -1; }
+                if (em_frag("0, [sp], #16\n") != 0) { return -1; }
+                if (em_frag("\tstr\t") != 0) { return -1; }
+                if (em_frag(psfx) != 0) { return -1; }
+                if (em_frag("0, [x10]\n") != 0) { return -1; }
+            } else {
+                if (em_pop("x0") != 0) { return -1; }
+                if (em_ins("str\tx0, [x10]") != 0) { return -1; }
+            }
+            tb -= 1;
+        }
+        let xi int = 0;
+        let di int = 0;
+        let tf int = 0;
+        for tf < regn {
+            let at int = c_args[base + tf].type_id;
+            if (ty_is_float(at) != 0) {
+                if (di < TG_ARG_REGS) {
+                    let fsuffix *char = "d";
+                    if (t_types[at].size == 4) { fsuffix = "s"; }
+                    if (em_lea_local_to(tmp_off - 16 * tf) != 0) { return -1; }
+                    if (em_frag("\tldr\t") != 0) { return -1; }
+                    if (em_frag(fsuffix) != 0) { return -1; }
+                    if (em_puti(di) != 0) { return -1; }
+                    if (em_frag(", [x10]\n") != 0) { return -1; }
+                }
+                di += 1;
+            } else {
+                if (xi < TG_ARG_REGS) {
+                    if (em_lea_local_to(tmp_off - 16 * tf) != 0) { return -1; }
+                    if (em_frag("\tldr\t") != 0) { return -1; }
+                    if (em_frag(em_spill_reg_name(xi)) != 0) { return -1; }
+                    if (em_frag(", [x10]\n") != 0) { return -1; }
+                }
+                xi += 1;
+            }
+            tf += 1;
+        }
+    }
+    // 间接调用的目标地址在值栈顶：必须在开调用点栈区之前弹出（否则弹到
+    // 栈区槽而非实参），暂存帧内槽，bl 前再装回 x10。
+    let callee_off int = 0;
+    if (direct == 0) {
+        callee_off = em_alloc_local(TG_PTR_SIZE);
+        if (em_pop("x9") != 0) { return -1; }
+        if (em_lea_local_to(callee_off) != 0) { return -1; }
+        if (em_ins("str\tx9, [x10]") != 0) { return -1; }
+    }
+    // 栈实参第二段：bl 之前把暂存槽写进调用点栈区。整块开区（area_bytes
+    // 为 16 的倍数，sp 全程保持 16 字节对齐）后按 8 字节偏移写入——第 9 参
+    // （Darwin 变参为第一个可变实参）在 [sp+0]，其后每参 +8，与 AAPCS64 及
+    // stage0（arm64-gen.c 的 C.14：size < 8 补足 8 字节槽）一致。写入用
+    // x9/d0 中转，不碰已装载的 x0..x7/d0..d7。
+    if (nstack > 0) {
+        if (em_call_stack_alloc(area_bytes) != 0) { return -1; }
+        let stk_lo2 int = na2 - nstack;
+        let pb int = na2 - 1;
+        for pb >= stk_lo2 {
+            let rel2 int = 8 * (pb - stk_lo2);
+            if (ty_is_float(c_args[base + pb].type_id) != 0) {
+                let pfsfx *char = "d";
+                if (t_types[c_args[base + pb].type_id].size == 4) {
+                    pfsfx = "s";
+                }
+                if (em_lea_local_to(stk_off - rel2) != 0) { return -1; }
+                if (em_frag("\tldr\t") != 0) { return -1; }
+                if (em_frag(pfsfx) != 0) { return -1; }
+                if (em_frag("0, [x10]\n") != 0) { return -1; }
+                if (em_call_stack_store_fp(pfsfx, rel2) != 0) { return -1; }
+            } else {
+                if (em_lea_local_to(stk_off - rel2) != 0) { return -1; }
+                if (em_ins("ldr\tx9, [x10]") != 0) { return -1; }
+                if (em_call_stack_store(rel2) != 0) { return -1; }
+            }
+            pb -= 1;
+        }
+    }
+    // 聚合返回：把调用方缓冲地址放进 x8（隐藏返回指针，AAPCS64）
+    let retk int = t_types[ret].kind;
+    if (retk == TY_STRUCT || retk == TY_UNION || retk == TY_ARRAY || retk == TY_SLICE) {
+        // 经 x10 中转，避免覆盖已搬运到 x0..x7 的实参
+        let buf int = em_alloc_local(t_types[ret].size);
+        if (em_lea_local_to(buf) != 0) { return -1; }
+        if (em_ins("mov\tx8, x10") != 0) { return -1; }
+        c_ret_tmp_off = buf;
+    }
+    if (direct != 0) {
+        if (em_call_direct(callee.sym) != 0) { return -1; }
+    } else {
+        if (em_lea_local_to(callee_off) != 0) { return -1; }
+        if (em_ins("ldr\tx10, [x10]") != 0) { return -1; }
+        if (em_call_indirect() != 0) { return -1; }
+    }
+    if (em_call_cleanup_bytes(area_bytes) != 0) { return -1; }
+    c_arg_n = base;
+    sem_res_reset(r, ret);
+    if (ty_is_float(ret) != 0) {
+        // 浮点返回已在 d0/s0
+        c_res_is_addr = 0;
+        return 0;
+    }
+    if (retk == TY_STRUCT || retk == TY_UNION || retk == TY_ARRAY || retk == TY_SLICE) {
+        // 聚合返回：结果地址 = 调用方缓冲
+        if (em_lea_local_down(c_ret_tmp_off) != 0) { return -1; }
+        c_res_is_addr = 1;
+        return 0;
+    }
+    c_res_is_addr = 0;
+    return 0;
+}
+
+pub fn sem_return_value(r *Res) int {
+    if (c_compile == 0 || c_fold != 0) {
+        return 0;
+    }
+    if (c_ret_agg != 0) {
+        // x0 = 聚合源地址；x1 = x8 缓冲；拷贝 size 字节
+        if (em_push() != 0) { return -1; }
+        if (em_load_hidden_ret(c_ret_ptr_off) != 0) { return -1; }
+        if (em_ins("mov\tx1, x0") != 0) { return -1; }
+        if (em_pop("x0") != 0) { return -1; }
+        if (em_copy_block(t_types[c_fn_ret].size) != 0) { return -1; }
+        if (em_load_hidden_ret(c_ret_ptr_off) != 0) { return -1; }
+        c_ret_agg_val = 1;
+    }
+    if (em_jmp(c_fn_lbl) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+pub fn sem_lit_field_lookup(tid int, start int, n int) int {
+    return sem_field_lookup(tid, start, n);
+}
+
+pub fn sem_struct_lit_begin(tid int, named int) int {
+    if (c_compile == 0 || c_fold != 0) {
+        return 0;
+    }
+    // 跨模块构造检查（U3）：位置式写全部字段——含私有字段即拒绝；
+    // 命名式在字段名解析处逐字段检查（省略字段按零初始化）。
+    if (c_module_mode != 0 && t_home[tid] >= 0 && named == 0) {
+        let st int = t_types[tid].sub;
+        let nf int = t_types[tid].len;
+        let i int = 0;
+        for i < nf {
+            if (t_fields[st + i].is_pub == 0) {
+                return sem_err("跨模块不允许位置式构造含私有字段的类型");
+            }
+            i += 1;
+        }
+    }
+    if (c_lit_depth >= 32) {
+        return sem_err("结构体字面量嵌套过深");
+    }
+    let off int = em_alloc_local(t_types[tid].size);
+    // 保存外层字面量的定位状态，供嵌套字面量结束后恢复
+    c_lit_save_off[c_lit_depth] = c_lit_off;
+    c_lit_save_tid[c_lit_depth] = c_lit_tid;
+    c_lit_depth += 1;
+    c_lit_off = off;
+    c_lit_tid = tid;
+    return off;
+}
+
+pub fn sem_struct_lit_field(tid int, fidx int) int {
+    if (c_compile == 0 || c_fold != 0) {
+        return 0;
+    }
+    let ftid int = t_fields[fidx].type_id;
+    let foff int = t_fields[fidx].offset;
+    let fk int = t_types[ftid].kind;
+    if (sem_can_assign(ftid, c_lit_last_type, c_lit_last_lit, c_lit_last_ival, 0) != 0) {
+        return -1;
+    }
+    if (fk == TY_STRUCT || fk == TY_UNION || fk == TY_ARRAY || fk == TY_SLICE) {
+        // 聚合字段：x0 = 源聚合地址 → 块拷贝进字段位置
+        if (em_push() != 0) { return -1; }
+        if (em_lea_local_to(c_lit_off - foff) != 0) { return -1; }
+        if (em_ins("mov\tx1, x10") != 0) { return -1; }
+        if (em_pop("x0") != 0) { return -1; }
+        return em_copy_block(t_types[ftid].size);
+    }
+    // 槽起点 = fp - c_lit_off；字段地址 = 起点 + foff → 向下偏移 = off - foff
+    if (em_lea_local_to(c_lit_off - foff) != 0) { return -1; }
+    return em_store_sized(ftid);
+}
+
+pub fn sem_struct_lit_end(tid int) int {
+    if (c_compile == 0 || c_fold != 0) {
+        return 0;
+    }
+    // 把本层槽地址留在 x0，并恢复外层字面量的定位状态。
+    // begin 时 save[d] 记录的是「进入本层前的值」，end 读 save[d] 恢复。
+    let my_off int = c_lit_off;
+    c_lit_depth -= 1;
+    c_lit_off = c_lit_save_off[c_lit_depth];
+    c_lit_tid = c_lit_save_tid[c_lit_depth];
+    return em_lea_local(my_off);
+}
+

@@ -1,0 +1,597 @@
+module lex;
+import gen;
+
+// ============================================================================
+// lexer.yh —— 自举编译器：字节词法器
+//
+// 把 c_src 一次性扫描为 token 表（c_toks）。对齐 docs/yh.g4 的词法规则：
+//   * 注释（// 与块注释）与空白直接跳过，不产生 token；
+//   * 标识符 [A-Za-z_][A-Za-z0-9_]*，命中保留字表则给对应关键字种类；
+//   * 数字：0x/0X 十六进制、0b/0B 二进制、0o/0O 八进制、十进制（可带
+//     小数与指数）；下划线必须夹在两个数字之间，前缀后无数字时按
+//     ANTLR 参考回退为十进制 '0'（后续字节重新分词）；
+//   * 字符串/字符字面量：转义集合 \n \r \t \0 \a \b \f \v \' \" \\ 与
+//     \xNN；未知转义、未终结、字符串内换行都是词法错误；
+//   * 运算符最长匹配（<<= >>= ... 优先于 <<= 之前的两字符与单字符）；
+//     不存在 ++ -- -> 等token（rejected/15/16 依赖）。
+//
+// token 不复制字符串，start/len 引用 c_src；行号列号由主循环维护
+//（只有主循环跨越换行），token 扫描内部不会遇到换行（字符串/字符中
+// 出现换行直接报错）。
+// ============================================================================
+
+// is_ident_start：标识符首字符（字母或下划线）。
+pub fn is_ident_start(b u8) int {
+    if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_') {
+        return 1;
+    }
+    return 0;
+}
+
+// is_digit：十进制数字。
+pub fn is_digit(b u8) int {
+    return (b >= '0' && b <= '9').to_type(int);
+}
+
+// is_hex_digit：十六进制数字。
+pub fn is_hex_digit(b u8) int {
+    if (is_digit(b)) {
+        return 1;
+    }
+    if (b >= 'a' && b <= 'f') {
+        return 1;
+    }
+    if (b >= 'A' && b <= 'F') {
+        return 1;
+    }
+    return 0;
+}
+
+// lex_bytes_eq：比较 c_src[start..start+n) 与字面量 lit 的前 n 个字节。
+// 保留字识别用；lit 是编译进本编译器的短字面量。
+pub fn lex_bytes_eq(start int, lit *char, n int) int {
+    let i int = 0;
+    for i < n {
+        if (gen.c_src[start + i] != lit[i].to_type(u8)) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// err_here：以字节下标 i 换算行列（行号由主循环维护）报告词法错误。
+// 返回 -1 便于调用方链式返回。
+pub fn err_here(i int, msg *char) int {
+    return gen.err_lc(gen.lx_line, i - gen.lx_lstart + 1, msg);
+}
+
+// kw_kind：保留字查表。参数是标识符在 c_src 中的区间。
+// 按首字符分桶 + 定长字节比较；返回 token 种类，非保留字返回 0。
+// 三组：语言关键字（TK_PUB..TK_TO_TYPE）、已移除关键字（TK_RESERVED）、
+// 内建类型名（TK_INT..TK_VOID）。
+pub fn kw_kind(start int, n int) int {
+    let b u8 = gen.c_src[start];
+    if (b == 'a') {
+        if (n == 2 && lex_bytes_eq(start, "as", 2)) { return gen.TK_AS; }
+        if (n == 4 && lex_bytes_eq(start, "auto", 4)) { return gen.TK_RESERVED; }
+        return 0;
+    }
+    if (b == 'b') {
+        if (n == 4 && lex_bytes_eq(start, "bool", 4)) { return gen.TK_BOOL; }
+        if (n == 5 && lex_bytes_eq(start, "break", 5)) { return gen.TK_BREAK; }
+        return 0;
+    }
+    if (b == 'c') {
+        if (n == 4 && lex_bytes_eq(start, "case", 4)) { return gen.TK_CASE; }
+        if (n == 4 && lex_bytes_eq(start, "char", 4)) { return gen.TK_CHAR; }
+        if (n == 5 && lex_bytes_eq(start, "const", 5)) { return gen.TK_CONST; }
+        if (n == 8 && lex_bytes_eq(start, "continue", 8)) { return gen.TK_CONTINUE; }
+        return 0;
+    }
+    if (b == 'd') {
+        if (n == 2 && lex_bytes_eq(start, "do", 2)) { return gen.TK_RESERVED; }
+        if (n == 6 && lex_bytes_eq(start, "double", 6)) { return gen.TK_RESERVED; }
+        if (n == 7 && lex_bytes_eq(start, "default", 7)) { return gen.TK_DEFAULT; }
+        return 0;
+    }
+    if (b == 'e') {
+        if (n == 4 && lex_bytes_eq(start, "else", 4)) { return gen.TK_ELSE; }
+        if (n == 4 && lex_bytes_eq(start, "enum", 4)) { return gen.TK_ENUM; }
+        if (n == 6 && lex_bytes_eq(start, "extern", 6)) { return gen.TK_RESERVED; }
+        return 0;
+    }
+    if (b == 'f') {
+        if (n == 2 && lex_bytes_eq(start, "fn", 2)) { return gen.TK_FN; }
+        if (n == 3 && lex_bytes_eq(start, "f32", 3)) { return gen.TK_F32; }
+        if (n == 3 && lex_bytes_eq(start, "f64", 3)) { return gen.TK_F64; }
+        if (n == 3 && lex_bytes_eq(start, "for", 3)) { return gen.TK_FOR; }
+        if (n == 5 && lex_bytes_eq(start, "false", 5)) { return gen.TK_FALSE; }
+        if (n == 5 && lex_bytes_eq(start, "float", 5)) { return gen.TK_RESERVED; }
+        return 0;
+    }
+    if (b == 'g') {
+        if (n == 4 && lex_bytes_eq(start, "goto", 4)) { return gen.TK_GOTO; }
+        return 0;
+    }
+    if (b == 'i') {
+        if (n == 6 && lex_bytes_eq(start, "import", 6)) { return gen.TK_IMPORT; }
+        if (n == 2) {
+            if (lex_bytes_eq(start, "i8", 2)) { return gen.TK_I8; }
+            if (lex_bytes_eq(start, "if", 2)) { return gen.TK_IF; }
+            if (lex_bytes_eq(start, "in", 2)) { return gen.TK_IN; }
+            return 0;
+        }
+        if (n == 3) {
+            if (lex_bytes_eq(start, "i16", 3)) { return gen.TK_I16; }
+            if (lex_bytes_eq(start, "i32", 3)) { return gen.TK_I32; }
+            if (lex_bytes_eq(start, "i64", 3)) { return gen.TK_I64; }
+            if (lex_bytes_eq(start, "int", 3)) { return gen.TK_INT; }
+            return 0;
+        }
+        if (n == 6 && lex_bytes_eq(start, "inline", 6)) { return gen.TK_RESERVED; }
+        return 0;
+    }
+    if (b == 'l') {
+        if (n == 3) {
+            if (lex_bytes_eq(start, "let", 3)) { return gen.TK_LET; }
+            if (lex_bytes_eq(start, "len", 3)) { return gen.TK_LEN; }
+            return 0;
+        }
+        if (n == 4 && lex_bytes_eq(start, "long", 4)) { return gen.TK_RESERVED; }
+        return 0;
+    }
+    if (b == 'm') {
+        if (n == 6 && lex_bytes_eq(start, "module", 6)) { return gen.TK_MODULE; }
+        return 0;
+    }
+    if (b == 'p') {
+        if (n == 3 && lex_bytes_eq(start, "pub", 3)) { return gen.TK_PUB; }
+        return 0;
+    }
+    if (b == 'r') {
+        if (n == 6 && lex_bytes_eq(start, "return", 6)) { return gen.TK_RETURN; }
+        if (n == 8 && lex_bytes_eq(start, "register", 8)) { return gen.TK_RESERVED; }
+        if (n == 8 && lex_bytes_eq(start, "restrict", 8)) { return gen.TK_RESERVED; }
+        return 0;
+    }
+    if (b == 's') {
+        if (n == 5 && lex_bytes_eq(start, "short", 5)) { return gen.TK_RESERVED; }
+        if (n == 6) {
+            if (lex_bytes_eq(start, "signed", 6)) { return gen.TK_RESERVED; }
+            if (lex_bytes_eq(start, "sizeof", 6)) { return gen.TK_SIZEOF; }
+            if (lex_bytes_eq(start, "static", 6)) { return gen.TK_RESERVED; }
+            if (lex_bytes_eq(start, "struct", 6)) { return gen.TK_STRUCT; }
+            if (lex_bytes_eq(start, "switch", 6)) { return gen.TK_SWITCH; }
+            return 0;
+        }
+        return 0;
+    }
+    if (b == 't') {
+        if (n == 4) {
+            if (lex_bytes_eq(start, "true", 4)) { return gen.TK_TRUE; }
+            if (lex_bytes_eq(start, "type", 4)) { return gen.TK_TYPE; }
+            return 0;
+        }
+        if (n == 7) {
+            if (lex_bytes_eq(start, "to_type", 7)) { return gen.TK_TO_TYPE; }
+            if (lex_bytes_eq(start, "typedef", 7)) { return gen.TK_RESERVED; }
+            return 0;
+        }
+        return 0;
+    }
+    if (b == 'u') {
+        if (n == 2) {
+            if (lex_bytes_eq(start, "u8", 2)) { return gen.TK_U8; }
+            return 0;
+        }
+        if (n == 3) {
+            if (lex_bytes_eq(start, "u16", 3)) { return gen.TK_U16; }
+            if (lex_bytes_eq(start, "u32", 3)) { return gen.TK_U32; }
+            if (lex_bytes_eq(start, "u64", 3)) { return gen.TK_U64; }
+            return 0;
+        }
+        if (n == 5 && lex_bytes_eq(start, "union", 5)) { return gen.TK_UNION; }
+        if (n == 8 && lex_bytes_eq(start, "unsigned", 8)) { return gen.TK_RESERVED; }
+        return 0;
+    }
+    if (b == 'v') {
+        if (n == 4 && lex_bytes_eq(start, "void", 4)) { return gen.TK_VOID; }
+        if (n == 8 && lex_bytes_eq(start, "volatile", 8)) { return gen.TK_RESERVED; }
+        return 0;
+    }
+    if (b == 'w') {
+        if (n == 5 && lex_bytes_eq(start, "while", 5)) { return gen.TK_RESERVED; }
+        return 0;
+    }
+    return 0;
+}
+
+// tok_push：向 token 表追加一个 token，必要时倍增扩容。
+// 成功返回 0，内存分配失败输出诊断并返回 -1。
+pub fn tok_push(kind int, start int, n int, line int, col int) int {
+    if (gen.c_tok_n == gen.c_tok_cap) {
+        let ncap int = gen.c_tok_cap * 2;
+        if (ncap == 0) {
+            ncap = 1024;
+        }
+        let nd *gen.Tok = malloc((ncap * sizeof(gen.Tok)).to_type(u64)).to_type(*gen.Tok);
+        if (nd == 0) {
+            return gen.fail("内存分配失败");
+        }
+        if (gen.c_tok_n > 0) {
+            memcpy(nd, gen.c_toks, (gen.c_tok_n * sizeof(gen.Tok)).to_type(u64));
+        }
+        free(gen.c_toks);
+        gen.c_toks = nd;
+        gen.c_tok_cap = ncap;
+    }
+    gen.c_toks[gen.c_tok_n].kind = kind;
+    gen.c_toks[gen.c_tok_n].start = start;
+    gen.c_toks[gen.c_tok_n].len = n;
+    gen.c_toks[gen.c_tok_n].line = line;
+    gen.c_toks[gen.c_tok_n].col = col;
+    gen.c_tok_n += 1;
+    return 0;
+}
+
+// lex_ident：扫描标识符（首字符已验证），查保留字表后入表。
+// 返回扫描结束下标；token 表满失败返回 -1。
+pub fn lex_ident(i int) int {
+    let start int = i;
+    i += 1;
+    for i < gen.c_src_len {
+        let b u8 = gen.c_src[i];
+        if (is_ident_start(b) || is_digit(b)) {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    let kind int = kw_kind(start, i - start);
+    if (kind == 0) {
+        kind = gen.TOK_IDENT;
+    }
+    if (tok_push(kind, start, i - start, gen.lx_line, start - gen.lx_lstart + 1) != 0) {
+        return -1;
+    }
+    return i;
+}
+
+// radix_ok：b 是否是 mode（16/2/8）进制下的合法数字。
+pub fn radix_ok(b u8, mode int) int {
+    if (mode == 16) {
+        return is_hex_digit(b);
+    }
+    if (mode == 2) {
+        return (b == '0' || b == '1').to_type(int);
+    }
+    return (b >= '0' && b <= '7').to_type(int);
+}
+
+// radix_scan：扫描带前缀的进制数字序列：digit ([_]? digit)*。
+// pos 指向第一个数字位；无数字返回 -1（调用方回退为十进制 '0'）。
+// 返回序列结束下标。
+pub fn radix_scan(pos int, mode int) int {
+    if (pos >= gen.c_src_len || radix_ok(gen.c_src[pos], mode) == 0) {
+        return -1;
+    }
+    pos += 1;
+    for pos < gen.c_src_len {
+        let b u8 = gen.c_src[pos];
+        if (radix_ok(b, mode) != 0) {
+            pos += 1;
+            continue;
+        }
+        // 下划线必须夹在两个数字之间，否则终止（后续按 IDENT 等分词）
+        if (b == '_' && pos + 1 < gen.c_src_len && radix_ok(gen.c_src[pos + 1], mode) != 0) {
+            pos += 2;
+            continue;
+        }
+        break;
+    }
+    return pos;
+}
+
+// dec_scan：扫描十进制数字序列 [0-9] ([_]? [0-9])*。
+// pos 指向第一个数字；返回序列结束下标（不含未匹配的后缀）。
+pub fn dec_scan(pos int) int {
+    pos += 1;
+    for pos < gen.c_src_len {
+        let b u8 = gen.c_src[pos];
+        if (is_digit(b)) {
+            pos += 1;
+            continue;
+        }
+        if (b == '_' && pos + 1 < gen.c_src_len && is_digit(gen.c_src[pos + 1])) {
+            pos += 2;
+            continue;
+        }
+        break;
+    }
+    return pos;
+}
+
+// lex_number：扫描数字字面量（首字符已验证是数字）。
+// 形态：0x/0X/0b/0B/0o/0O 前缀进制；十进制整数，可带小数（'.' 后必须
+// 紧跟数字，因此 0..n 的 '0' 不会被误读为浮点）与指数（e/E [+-]? 数字）。
+// 前缀后无数字时回退为只取 '0'（与 ANTLR 参考一致）。
+// 返回扫描结束下标；失败返回 -1。
+pub fn lex_number(i int) int {
+    let start int = i;
+    let b u8 = gen.c_src[i];
+    if (b == '0' && i + 1 < gen.c_src_len) {
+        let p2 u8 = gen.c_src[i + 1];
+        let mode int = 0;
+        if (p2 == 'x' || p2 == 'X') { mode = 16; }
+        if (p2 == 'b' || p2 == 'B') { mode = 2; }
+        if (p2 == 'o' || p2 == 'O') { mode = 8; }
+        if (mode != 0) {
+            let j int = radix_scan(i + 2, mode);
+            if (j < 0) {
+                // 0x/0b/0o 后无数字：只取 '0'，其余字节下轮重新分词
+                if (tok_push(gen.TOK_NUMBER, start, 1, gen.lx_line, start - gen.lx_lstart + 1) != 0) {
+                    return -1;
+                }
+                return start + 1;
+            }
+            if (tok_push(gen.TOK_NUMBER, start, j - start, gen.lx_line, start - gen.lx_lstart + 1) != 0) {
+                return -1;
+            }
+            return j;
+        }
+    }
+    // 十进制：整数部分（首字符保证是数字）
+    let j2 int = dec_scan(i);
+    // 小数部分：'.' 后必须紧跟数字
+    if (j2 < gen.c_src_len && gen.c_src[j2] == '.' && j2 + 1 < gen.c_src_len && is_digit(gen.c_src[j2 + 1])) {
+        j2 = dec_scan(j2 + 1);
+    }
+    // 指数部分：e/E 后（可选正负号）必须紧跟数字，否则不消费
+    if (j2 < gen.c_src_len && (gen.c_src[j2] == 'e' || gen.c_src[j2] == 'E')) {
+        let k int = j2 + 1;
+        if (k < gen.c_src_len && (gen.c_src[k] == '+' || gen.c_src[k] == '-')) {
+            k += 1;
+        }
+        if (k < gen.c_src_len && is_digit(gen.c_src[k])) {
+            j2 = dec_scan(k);
+        }
+    }
+    if (tok_push(gen.TOK_NUMBER, start, j2 - start, gen.lx_line, start - gen.lx_lstart + 1) != 0) {
+        return -1;
+    }
+    return j2;
+}
+
+// lex_escape：扫描 c_src[i] 处的转义序列（i 指向反斜杠）。
+// 合法集合：\n \r \t \0 \a \b \f \v \' \" \\ 与 \xNN（两位十六进制）。
+// 返回序列之后的下标；未知/不完整转义报告词法错误并返回 -1。
+pub fn lex_escape(i int) int {
+    if (i + 1 >= gen.c_src_len) {
+        return err_here(i, "转义序列不完整");
+    }
+    let b u8 = gen.c_src[i + 1];
+    if (b == 'n' || b == 'r' || b == 't' || b == '0' || b == 'a' || b == 'b'
+        || b == 'f' || b == 'v' || b == '\'' || b == '"' || b == '\\') {
+        return i + 2;
+    }
+    if (b == 'x' && i + 3 < gen.c_src_len && is_hex_digit(gen.c_src[i + 2]) && is_hex_digit(gen.c_src[i + 3])) {
+        return i + 4;
+    }
+    return err_here(i, "未知转义序列");
+}
+
+// lex_string：扫描字符串字面量（i 指向开头双引号）。
+// 内部不允许裸换行（\n 与 \r），转义交给 lex_escape。
+// 返回结束下标（闭引号之后）；失败返回 -1。
+pub fn lex_string(i int) int {
+    let start int = i;
+    i += 1;
+    for 1 {
+        if (i >= gen.c_src_len) {
+            return err_here(start, "字符串未终结");
+        }
+        let b u8 = gen.c_src[i];
+        if (b == '"') {
+            if (tok_push(gen.TOK_STRING, start, i + 1 - start, gen.lx_line, start - gen.lx_lstart + 1) != 0) {
+                return -1;
+            }
+            return i + 1;
+        }
+        if (b == '\\') {
+            let r int = lex_escape(i);
+            if (r < 0) {
+                return -1;
+            }
+            i = r;
+            continue;
+        }
+        if (b == '\n' || b == '\r') {
+            return err_here(i, "字符串中不允许换行");
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// lex_char：扫描字符字面量（i 指向开头单引号）。
+// 引号内恰好一个「字符或一个转义单元」；其余情形报错。
+// 返回结束下标（闭引号之后）；失败返回 -1。
+pub fn lex_char(i int) int {
+    let start int = i;
+    i += 1;
+    if (i >= gen.c_src_len) {
+        return err_here(start, "字符字面量未终结");
+    }
+    let b u8 = gen.c_src[i];
+    if (b == '\\') {
+        let r int = lex_escape(i);
+        if (r < 0) {
+            return -1;
+        }
+        i = r;
+    } else {
+        if (b == '\'' || b == '\n' || b == '\r') {
+            return err_here(i, "非法的字符字面量");
+        }
+        i += 1;
+    }
+    if (i >= gen.c_src_len || gen.c_src[i] != '\'') {
+        return err_here(start, "字符字面量只能包含单个字符");
+    }
+    if (tok_push(gen.TOK_CHAR, start, i + 1 - start, gen.lx_line, start - gen.lx_lstart + 1) != 0) {
+        return -1;
+    }
+    return i + 1;
+}
+
+// lex_op：扫描运算符/标点（注释已在主循环处理，注释前缀不会进入此处）。
+// 最长匹配：先试三字符（<<= >>= ...），再两字符，最后单字符。
+// 返回结束下标；无匹配（非法字符，如 #）报告词法错误并返回 -1。
+pub fn lex_op(i int) int {
+    let start int = i;
+    let b u8 = gen.c_src[i];
+    let b1 u8 = 0;
+    if (i + 1 < gen.c_src_len) {
+        b1 = gen.c_src[i + 1];
+    }
+    let b2 u8 = 0;
+    if (i + 2 < gen.c_src_len) {
+        b2 = gen.c_src[i + 2];
+    }
+    let kind int = 0;
+    let n int = 0;
+    if (b == '<' && b1 == '<' && b2 == '=') { kind = gen.TK_LSHIFTEQ; n = 3; }
+    else if (b == '>' && b1 == '>' && b2 == '=') { kind = gen.TK_RSHIFTEQ; n = 3; }
+    else if (b == '.' && b1 == '.' && b2 == '.') { kind = gen.TK_ELLIPSIS; n = 3; }
+    else if (b == '=' && b1 == '=') { kind = gen.TK_EQEQ; n = 2; }
+    else if (b == '!' && b1 == '=') { kind = gen.TK_NEQ; n = 2; }
+    else if (b == '<' && b1 == '=') { kind = gen.TK_LEQ; n = 2; }
+    else if (b == '>' && b1 == '=') { kind = gen.TK_GEQ; n = 2; }
+    else if (b == '&' && b1 == '&') { kind = gen.TK_ANDAND; n = 2; }
+    else if (b == '|' && b1 == '|') { kind = gen.TK_OROR; n = 2; }
+    else if (b == '<' && b1 == '<') { kind = gen.TK_LSHIFT; n = 2; }
+    else if (b == '>' && b1 == '>') { kind = gen.TK_RSHIFT; n = 2; }
+    else if (b == '+' && b1 == '=') { kind = gen.TK_PLUSEQ; n = 2; }
+    else if (b == '-' && b1 == '=') { kind = gen.TK_MINUSEQ; n = 2; }
+    else if (b == '*' && b1 == '=') { kind = gen.TK_STAREQ; n = 2; }
+    else if (b == '/' && b1 == '=') { kind = gen.TK_SLASHEQ; n = 2; }
+    else if (b == '%' && b1 == '=') { kind = gen.TK_PERCENTEQ; n = 2; }
+    else if (b == '&' && b1 == '=') { kind = gen.TK_AMPEQ; n = 2; }
+    else if (b == '|' && b1 == '=') { kind = gen.TK_PIPEEQ; n = 2; }
+    else if (b == '^' && b1 == '=') { kind = gen.TK_CARETEQ; n = 2; }
+    else if (b == '.' && b1 == '.') { kind = gen.TK_RANGE; n = 2; }
+    else if (b == '+') { kind = gen.TK_PLUS; n = 1; }
+    else if (b == '-') { kind = gen.TK_MINUS; n = 1; }
+    else if (b == '*') { kind = gen.TK_STAR; n = 1; }
+    else if (b == '/') { kind = gen.TK_SLASH; n = 1; }
+    else if (b == '%') { kind = gen.TK_PERCENT; n = 1; }
+    else if (b == '&') { kind = gen.TK_AMP; n = 1; }
+    else if (b == '|') { kind = gen.TK_PIPE; n = 1; }
+    else if (b == '^') { kind = gen.TK_CARET; n = 1; }
+    else if (b == '~') { kind = gen.TK_TILDE; n = 1; }
+    else if (b == '!') { kind = gen.TK_BANG; n = 1; }
+    else if (b == '<') { kind = gen.TK_LT; n = 1; }
+    else if (b == '>') { kind = gen.TK_GT; n = 1; }
+    else if (b == '=') { kind = gen.TK_ASSIGN; n = 1; }
+    else if (b == '?') { kind = gen.TK_QUEST; n = 1; }
+    else if (b == ':') { kind = gen.TK_COLON; n = 1; }
+    else if (b == ';') { kind = gen.TK_SEMI; n = 1; }
+    else if (b == ',') { kind = gen.TK_COMMA; n = 1; }
+    else if (b == '.') { kind = gen.TK_DOT; n = 1; }
+    else if (b == '(') { kind = gen.TK_LPAREN; n = 1; }
+    else if (b == ')') { kind = gen.TK_RPAREN; n = 1; }
+    else if (b == '[') { kind = gen.TK_LBRACKET; n = 1; }
+    else if (b == ']') { kind = gen.TK_RBRACKET; n = 1; }
+    else if (b == '{') { kind = gen.TK_LBRACE; n = 1; }
+    else if (b == '}') { kind = gen.TK_RBRACE; n = 1; }
+    else {
+        return err_here(i, "非法字符");
+    }
+    if (tok_push(kind, start, n, gen.lx_line, start - gen.lx_lstart + 1) != 0) {
+        return -1;
+    }
+    return start + n;
+}
+
+// lex_all：主循环。逐字节跳过空白与注释（跨行时维护行号/行首下标），
+// 按首字符分发到各扫描器；最后补一个 EOF token（位置指向源尾）。
+// 成功返回 0；任何词法错误返回 -1（诊断已输出）。
+pub fn lex_all() int {
+    // 行号复位：一次进程可能多次词法（接口加载/多文件编译）
+    gen.lx_line = 1;
+    gen.lx_lstart = 0;
+    let i int = 0;
+    for 1 {
+        // —— 空白与注释 ——
+        for i < gen.c_src_len {
+            let b u8 = gen.c_src[i];
+            // WS：空格、\t、\r、\f、\v（\f=12、\v=11）
+            if (b == ' ' || b == '\t' || b == '\r' || b == 12 || b == 11) {
+                i += 1;
+                continue;
+            }
+            if (b == '\n') {
+                i += 1;
+                gen.lx_line += 1;
+                gen.lx_lstart = i;
+                continue;
+            }
+            // 行注释：到行尾为止（不消费换行，交由上方分支统一处理）
+            if (b == '/' && i + 1 < gen.c_src_len && gen.c_src[i + 1] == '/') {
+                for i < gen.c_src_len && gen.c_src[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            // 块注释：非嵌套，扫描到 '*/'；内部换行维护行号
+            if (b == '/' && i + 1 < gen.c_src_len && gen.c_src[i + 1] == '*') {
+                i += 2;
+                let closed int = 0;
+                for i < gen.c_src_len {
+                    if (gen.c_src[i] == '\n') {
+                        i += 1;
+                        gen.lx_line += 1;
+                        gen.lx_lstart = i;
+                        continue;
+                    }
+                    if (gen.c_src[i] == '*' && i + 1 < gen.c_src_len && gen.c_src[i + 1] == '/') {
+                        i += 2;
+                        closed = 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                if (closed == 0) {
+                    return err_here(i, "块注释未终结");
+                }
+                continue;
+            }
+            break;
+        }
+        if (i >= gen.c_src_len) {
+            break;
+        }
+        // —— token 分发 ——
+        let b2 u8 = gen.c_src[i];
+        if (is_ident_start(b2)) {
+            i = lex_ident(i);
+        } else if (is_digit(b2)) {
+            i = lex_number(i);
+        } else if (b2 == '"') {
+            i = lex_string(i);
+        } else if (b2 == '\'') {
+            i = lex_char(i);
+        } else {
+            i = lex_op(i);
+        }
+        if (i < 0) {
+            return -1;
+        }
+    }
+    // 文件尾 EOF token：kind/位置固定，供解析器判定「消费到 EOF」
+    if (tok_push(gen.TOK_EOF, gen.c_src_len, 0, gen.lx_line, gen.c_src_len - gen.lx_lstart + 1) != 0) {
+        return -1;
+    }
+    return 0;
+}

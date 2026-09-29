@@ -1,0 +1,295 @@
+module parse;
+import gen;
+
+// ============================================================================
+// parse_type.yh —— 自举编译器：类型引用解析与解析器共用工具
+//
+// 覆盖 docs/yh.g4 的 typeRef / fnType / typeRefList / builtinType。
+// 语法模式（c_compile == 0）只消费 token 并返回 0（G1 行为不变）；
+// 编译模式返回类型表编号（≥0，错误 -1），并按需构建/去重类型条目。
+//
+// fn 类型的参数类型先收集到本帧局部数组再统一入池——嵌套 fn 类型
+//（fn(fn(int) int) int）各自入池互不串扰。
+// ============================================================================
+
+// p_cur：当前 token 种类。
+pub fn p_cur() int {
+    return gen.c_toks[gen.c_pos].kind;
+}
+
+// p_peek：向前看第 k 个 token 的种类；越过表尾按 EOF 处理。
+pub fn p_peek(k int) int {
+    if (gen.c_pos + k < gen.c_tok_n) {
+        return gen.c_toks[gen.c_pos + k].kind;
+    }
+    return gen.TOK_EOF;
+}
+
+// p_adv：游标前进一个 token；EOF 处不动。
+pub fn p_adv() void {
+    if (gen.c_toks[gen.c_pos].kind != gen.TOK_EOF) {
+        gen.c_pos += 1;
+    }
+}
+
+// p_expect：当前 token 必须是 kind，是则消费并返回 0，否则报错返回 -1。
+pub fn p_expect(kind int, what *char) int {
+    if (p_cur() == kind) {
+        p_adv();
+        return 0;
+    }
+    return gen.err_tok(what);
+}
+
+// is_assign_op：k 是否为赋值运算符（TK_ASSIGN..TK_RSHIFTEQ 连号）。
+pub fn is_assign_op(k int) int {
+    return (k >= gen.TK_ASSIGN && k <= gen.TK_RSHIFTEQ).to_type(int);
+}
+
+// is_member_name：k 是否可作「成员名」（成员位置放开保留字，to_type 除外）。
+pub fn is_member_name(k int) int {
+    if (k == gen.TOK_IDENT) {
+        return 1;
+    }
+    if (k >= gen.TK_PUB && k <= gen.TK_AS) {
+        return 1;
+    }
+    if (k == gen.TK_RESERVED) {
+        return 1;
+    }
+    if (k >= gen.TK_INT && k <= gen.TK_VOID) {
+        return 1;
+    }
+    return 0;
+}
+
+// is_type_start：k 是否可作为类型引用起始（返回类型省略判定用）。
+pub fn is_type_start(k int) int {
+    if (k == gen.TK_STAR || k == gen.TK_LBRACKET || k == gen.TK_FN || k == gen.TOK_IDENT) {
+        return 1;
+    }
+    return (k >= gen.TK_INT && k <= gen.TK_VOID).to_type(int);
+}
+
+// sizeof_starts_type：sizeof('(' 后当前 token 是否为「类型」形态。
+// 用于区分 sizeof(T) 与 sizeof(expr)：内建类型、[、fn 直接判定；
+// 连续 * 后跟已登记类型名判为指针类型（如 sizeof(*P)）；IDENT 仅当
+// 已登记为类型名才走类型路径（否则是表达式，如 sizeof(x)、sizeof(*p)）。
+pub fn sizeof_starts_type() int {
+    let k int = p_cur();
+    let off int = 0;
+    for k == gen.TK_STAR {
+        off += 1;
+        k = p_peek(off);
+    }
+    if (k == gen.TK_LBRACKET || k == gen.TK_FN) {
+        return 1;
+    }
+    if (k >= gen.TK_INT && k <= gen.TK_VOID) {
+        return 1;
+    }
+    if (k == gen.TOK_IDENT) {
+        let tid int = gen.ty_lookup_name(gen.c_toks[gen.c_pos].start, gen.c_toks[gen.c_pos].len);
+        if (tid >= 0) {
+            return 1;
+        }
+        // 模块限定类型 m.T（P3）：绑定名在导入表且命名空间导出该类型名
+        if (p_peek(1) == gen.TK_DOT && p_peek(2) == gen.TOK_IDENT) {
+            let qb int = gen.mod_file_binding(gen.c_toks[gen.c_pos].start, gen.c_toks[gen.c_pos].len);
+            if (qb >= 0 && gen.mod_ns_lookup(qb, gen.c_toks[gen.c_pos + 2].start,
+                gen.c_toks[gen.c_pos + 2].len, 1) >= 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// tk_to_builtin：内建类型 token → 类型编号（编译模式）。
+pub fn tk_to_builtin(k int) int {
+    if (k == gen.TK_INT) { return gen.TY_I32; }
+    if (k == gen.TK_I8) { return gen.TY_I8; }
+    if (k == gen.TK_I16) { return gen.TY_I16; }
+    if (k == gen.TK_I32) { return gen.TY_I32; }
+    if (k == gen.TK_I64) { return gen.TY_I64; }
+    if (k == gen.TK_U8) { return gen.TY_U8; }
+    if (k == gen.TK_U16) { return gen.TY_U16; }
+    if (k == gen.TK_U32) { return gen.TY_U32; }
+    if (k == gen.TK_U64) { return gen.TY_U64; }
+    if (k == gen.TK_F32) { return gen.TY_F32; }
+    if (k == gen.TK_F64) { return gen.TY_F64; }
+    if (k == gen.TK_BOOL) { return gen.TY_BOOL; }
+    if (k == gen.TK_CHAR) { return gen.TY_CHAR; }
+    return gen.TY_VOID;
+}
+
+// parse_type_ref：类型引用。返回类型编号（语法模式返回 0），错误 -1。
+//   '*' typeRef | '[' expr? ']' typeRef | 'fn' '(' typeRefList? ')' typeRef?
+//   | builtinType | IDENT
+pub fn parse_type_ref() int {
+    let k int = p_cur();
+    if (k == gen.TK_STAR) {
+        p_adv();
+        let e int = parse_type_ref();
+        if (e < 0) {
+            return -1;
+        }
+        if (gen.c_compile == 0) {
+            return 0;
+        }
+        return gen.ty_ptr(e);
+    }
+    if (k == gen.TK_LBRACKET) {
+        p_adv();
+        let alen int = -1;
+        if (p_cur() != gen.TK_RBRACKET) {
+            let r gen.Res;
+            if (gen.c_compile != 0) {
+                gen.c_fold += 1;
+                let rr int = parse_expr(&r);
+                gen.c_fold -= 1;
+                if (rr != 0) {
+                    return -1;
+                }
+                if (r.is_const == 0) {
+                    return gen.sem_err("数组长度必须是编译期常量");
+                }
+                if (r.ival <= 0) {
+                    return gen.sem_err("数组长度必须为正");
+                }
+                if (r.ival > 2147483647) {
+                    return gen.sem_err("数组长度超出限制");
+                }
+                alen = r.ival.to_type(int);
+            } else {
+                if (parse_expr(&r) != 0) {
+                    return -1;
+                }
+            }
+        }
+        if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) {
+            return -1;
+        }
+        let e2 int = parse_type_ref();
+        if (e2 < 0) {
+            return -1;
+        }
+        if (gen.c_compile == 0) {
+            return 0;
+        }
+        if (alen < 0) {
+            return gen.ty_slice(e2);
+        }
+        return gen.ty_array(e2, alen);
+    }
+    if (k == gen.TK_FN) {
+        p_adv();
+        if (p_expect(gen.TK_LPAREN, "期望 '('") != 0) {
+            return -1;
+        }
+        // 参数类型收集到本帧数组（递归安全），全部解析后统一入池
+        let pts [32]int;
+        let np int = 0;
+        if (p_cur() != gen.TK_RPAREN) {
+            for 1 {
+                let pt int = parse_type_ref();
+                if (pt < 0) {
+                    return -1;
+                }
+                if (gen.c_compile != 0) {
+                    if (np >= 32) {
+                        return gen.sem_err("fn 类型参数过多");
+                    }
+                    pts[np] = pt;
+                    np += 1;
+                }
+                if (p_cur() == gen.TK_COMMA) {
+                    p_adv();
+                    continue;
+                }
+                break;
+            }
+        }
+        if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+            return -1;
+        }
+        let ret int = gen.TY_VOID;
+        if (is_type_start(p_cur()) != 0) {
+            let rt int = parse_type_ref();
+            if (rt < 0) {
+                return -1;
+            }
+            ret = rt;
+        }
+        if (gen.c_compile == 0) {
+            return 0;
+        }
+        let first int = gen.t_sigparam_n;
+        let i int = 0;
+        for i < np {
+            gen.ty_sig_param(pts[i]);
+            i += 1;
+        }
+        return gen.ty_fn(ret, first, np, 0);
+    }
+    if (k >= gen.TK_INT && k <= gen.TK_VOID) {
+        p_adv();
+        if (gen.c_compile == 0) {
+            return 0;
+        }
+        return tk_to_builtin(k);
+    }
+    if (k == gen.TOK_IDENT) {
+        let start int = gen.c_toks[gen.c_pos].start;
+        let n int = gen.c_toks[gen.c_pos].len;
+        p_adv();
+        // 限定类型 m.T（U3/U4）：编译模式查导入绑定的模块命名空间；
+        // 单段点链（更长链不支持，干净拒绝）；语法模式仅消费。
+        if (p_cur() == gen.TK_DOT) {
+            p_adv();
+            if (p_cur() != gen.TOK_IDENT) {
+                return gen.err_tok("限定类型 '.' 后需要一个类型名");
+            }
+            let tstart int = gen.c_toks[gen.c_pos].start;
+            let tlen int = gen.c_toks[gen.c_pos].len;
+            let tline int = gen.c_toks[gen.c_pos].line;
+            let tcol int = gen.c_toks[gen.c_pos].col;
+            p_adv();
+            if (p_cur() == gen.TK_DOT) {
+                return gen.err_tok("限定类型只支持一层（m.T）");
+            }
+            if (gen.c_compile == 0) {
+                return 0;
+            }
+            if (gen.c_module_mode == 0) {
+                return gen.sem_err("限定类型只在模块模式可用");
+            }
+            let qb int = gen.mod_file_binding(start, n);
+            if (qb < 0) {
+                return gen.err_lc(tline, tcol, "点号左侧不是导入的模块名");
+            }
+            let qe int = gen.mod_ns_lookup(qb, tstart, tlen, 1);
+            if (qe < 0) {
+                return gen.err_lc(tline, tcol, "模块没有导出该类型");
+            }
+            let qi int = 0;
+            for qi < gen.mod_import_n {
+                if (gen.mod_import_mod[qi] == qb) {
+                    gen.mod_import_used[qi] = 1;
+                    break;
+                }
+                qi += 1;
+            }
+            return gen.c_mods[qb].ns[qe].tid;
+        }
+        if (gen.c_compile == 0) {
+            return 0;
+        }
+        let tid int = gen.ty_lookup_name(start, n);
+        if (tid < 0) {
+            return gen.sem_err("未知类型（类型必须先定义）");
+        }
+        return tid;
+    }
+    return gen.err_tok("此处需要一个类型");
+}

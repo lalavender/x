@@ -15,7 +15,10 @@ stage0 仅保留两个角色：①bootstrap 种子（交叉编译 stage1）；�
 日常验证以自举产物为准：`make selfhost-native`（本机三代闭环 + 全量
 run 用例 + 汇编固定点）与 `make g3`（容器正式验收）为主门；`make test`
 是 stage0 种子的回归保障。`make` 在项目根目录产出两个二进制：`yh`
-（stage0 种子）与 `yh-new`（自举编译器本机形态，主要开发编译器）。自举侧新增/修改行为时，须在 `tests/yh-run/`
+（stage0 种子）与 `yh-new`（自举编译器本机形态，主要开发编译器，0.0.2
+起由项目构建两步链产出）；另在 `bin/` 入库保留 `yh-new` 副本，作为
+版本间的编译种子（0.0.3 起删除 src/ 与 bootstrap/，各版本直接用上一版
+二进制编译，见 docs/todo.md）。自举侧新增/修改行为时，须在 `tests/yh-run/`
 新增 `.yh` 用例（stage0 与自举产物都要通过；涉及 stage0 已知缺陷的
 形态除外）。
 

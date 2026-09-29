@@ -293,7 +293,7 @@ ANTLR 原有语法回归仍通过。
   `_` 前缀、@PAGE/@PAGEOFF、外部符号 GOT 寻址）已在 `compiler/
   target.yh`/`emit_arm64.yh`/`driver.yh` 就位。
 
-## yh 模块与项目管理（2026-09-29 修订方案，尚未实施）
+## yh 模块与项目管理（本地阶段 MOD-U0–U5 已完成；U6 待需求）
 
 用户确定 mod.toml、module、名称 import，以及“本项目 → 标准库 →
 第三方”的搜索顺序；没有 internal 特殊机制。当前设计见
@@ -308,7 +308,6 @@ ANTLR 原有语法回归仍通过。
 - [x] **MOD-U0**：复核最新单文件、ABI、自举与 CLI 基线，确认项目模式兼容边界
   （2026-09-29：`make test` 61/61、`make selfhost-native` 全绿；按 ADR-0006
   冻结规则确定 MOD-U1 起只在自举侧 `compiler/` 实施，stage0 语料不进新语法）。
-- [ ] **MOD-U0**：复核最新单文件、ABI、自举与 CLI 基线，确认项目模式兼容边界。
 - [x] **MOD-U1**：同步 grammar 与两套前端的 module/import、限定类型／值、pub 字段、FileID／导入表
   （2026-09-29，按 ADR-0006 调整为**仅自举侧**实施：`compiler/parse_module.yh`
   文件头解析与导入表、词法 TK_MODULE/TK_IMPORT、限定类型语法、pub 字段登记；
@@ -338,7 +337,55 @@ ANTLR 原有语法回归仍通过。
   （2026-09-29 明确：本地三层交付不含远程来源；需求出现时另立设计与验收，
   见 finish.md 同日条目末尾的边界记录）。
 
-首个里程碑为 MOD-U1–U4；每次代码修改新增 tests/ 中 `.yh` 用例并构建。
+## 编译器自身模块化（2026-09-30，待实施）
+
+现行[详细实施方案](02-plan/yh-编译器模块化详细方案.md)与
+[架构设计](03-design/yh-编译器源码模块化设计.md)以用户已建立的
+cmd/gen/lex/parse 四目录为四个模块；根目录其余四个 .yh 文件有明确
+归属。旧[13 模块草案](02-plan/yh-编译器自身模块化方案.md)仅存档。
+目前目录移动已发生，但 compiler/mod.toml 为空，文件无 module 头，
+Makefile 旧路径导致构建中断，不能勾选成模任务。
+
+- [x] **CM-DOC**：复核当前目录、17 文件与实际函数调用；修订四目录
+  模块图、解环函数、热点文件拆分与四代自举验收方案。未改正式源码。
+- [x] **P0 恢复构建**（2026-09-30）：Makefile SELFHOST_SOURCES 与
+  native-selfhost.py SOURCES 已切到用户当前路径（拆分后的 25 个文件）；
+  make、make test 63/63、make selfhost-native 全绿（三代模块语料
+  17/17 ×3、项目验收 21/21、固定点一致）、容器 bootstrap 通过。
+- [x] **P1 冻结 seed**（2026-09-30）：seed 为 tools/flatten.py 生成的
+  单文件扁平化产物 bootstrap/seed/compiler.yh（剥模块头/去限定名/剥
+  字段 pub），SHA-256 见 MANIFEST.sha256；Makefile 与 native-selfhost
+  共用同一来源。扁平化正确性由 P5 四代固定点验证（ADR-0007 对「剥离
+  作长期种子」的保留成立：本 seed 随活跃源升级需重新生成）。
+- [x] **P2 接口探针**（2026-09-30）：tests/modules/projects/fourdir
+  （gen 公开 Tok/counter/bump 等、lex/parse 限定调用、cmd 入口）+
+  fourdirbad（私有字段拒绝），纳入 build-check（p2- 前缀 3 例，
+  项目验收共 23/23）。探针暴露并修复 pj_canon 空段返回契约 bug。
+- [x] **P3 真正成模**（2026-09-30）：compiler/mod.toml（yh/compiler，
+  source="."，entry="cmd"）；25 文件全部 module 声明（gen 10 / lex 1 /
+  parse 7 / cmd 7，含 model/buffer/symbols→gen、iface→parse 归位）；
+  解环迁移 err_tok、tml_intern_str、mod_ns_lookup、mod_file_binding
+  四函数入 gen；约 3800 处脚本化限定名改写（状态机跳过注释/字符串，
+  723 符号零跨模块冲突）；import 按实际使用收敛（未使用导入被自家
+  构建器拒绝）；构建迭代修复 sizeof(m.T) 判定与 if_emit_type 跨模块
+  具名类型全表查询。四模块独立 .s/.s.i 生成、链接运行成功。
+- [x] **P4 热点拆分**（2026-09-30，先于 P1–P3 完成；纯函数边界移动，
+  行为不变，回归由既有语料覆盖——run 48 中的全局初始化/聚合/变参用例
+  正好压住三簇被移动的函数）：gen/sem.yh(2403) → sem_value/sem_expr/
+  sem_call_literal/sem_flow/sem_decl（329/656/461/539/262），
+  sem_compile(50) 迁 cmd/compile.yh；cmd/project.yh(1390) →
+  project_state/project_index/project_resolve（459/408/471）；
+  parse/parse_decl.yh(1215) → parse_decl(640) + parse_global_init(542)。
+  全部文件回到 500±行建议带；拆分中曾随头部丢失 pj_scratch/pj_ls_cap
+  两个文件级全局，已找回并补注释。
+- [x] **P5 新自举门**（2026-09-30）：tools/selfbuild-gate.py 固化
+  四代链（stage0→seed 编译器→cc2→cc3→cc4，每代冷编）——cc2/3/4 两两
+  全部模块 .s/.s.i 逐字节一致（固定点），cc4 冒烟与 modules 语料通过；
+  已挂进 make selfhost-native。日常 yh-new 改由项目构建产出
+  （Makefile 两步链：stage0 编 seed 得 seed 编译器 → seed 编译器对
+  活跃项目 yh build）。容器 make bootstrap 与 make g3 通过。
+
+后续代码修改仍须新增 tests/ 中 `.yh` 用例并构建。
 多文件项目用专门 fixture runner 验证；临时产物放 tmp/。
 
 ## 玉衡 VS Code 扩展（2026-09-30 方案，尚未实施）
@@ -351,3 +398,31 @@ ANTLR 原有语法回归仍通过。
 - [ ] **VS-U2**：自举编译器分析接口、未保存缓冲区、精确跨文件定义跳转。
 - [ ] **VS-U3**：源码调试信息与 DAP 接入。
 - [ ] **VS-U4**：扩展集成测试、VSIX、发布与 CI。
+
+## 0.0.3 脱离 stage0：每个版本直接用上一版二进制编译（2026-09-30 计划，尚未实施）
+
+自 0.0.2 起构建种子已双轨可用：`bin/yh-new`（入库副本，Darwin Mach-O，
+`make` 自动刷新）与上一版 Release 资产（服务器归档，含 linux-arm64
+ELF 形态，Linux 构建用）。0.0.3 据此删除 C 代码与 bootstrap 代码：
+
+- [ ] **D1 删除 stage0**：删 `src/`（C 版编译器）与 `lib/` 中仅被
+  stage0 使用的部分；`make` 的 `yh`/`libtcc.a`/`libtcc1.a` 目标移除
+  （libtcc1.a 改为仓库内预生成产物或随 Release 分发）；`make test`
+  中 stage0 回归门移除或改用 yh-new 跑。
+- [ ] **D2 删除 bootstrap**：删 `bootstrap/seed/`（ADR-0007 冻结种子）
+  与 `tools/flatten.py`、Makefile 的 seed/stage1/bootstrap/g3 目标、
+  `tests/selfhost/` 中依赖 stage0 的差分脚本；ADR-0006/0007 标记
+  seed 机制退役。
+- [ ] **D3 构建链改造**：`make` 改为「种子二进制 → 对 compiler/ 项目
+  `yh build` → 新 yh-new」一步链；种子解析顺序：`bin/yh-new` →
+  环境变量 `YH_SEED` → 上一版 Release 资产（linux 上用 linux-arm64
+  tar.gz）；每次发版把新 yh-new 刷新进 `bin/` 并提交，打 tag 触发
+  Release 归档（服务器留档）。
+- [ ] **D4 CI 发布流水线改造**：release.yml 的 linux 作业改为下载
+  上一版 Release 的 linux-arm64 yh-new（QEMU 容器内可执行）编译当前
+  源码；darwin 作业用 `bin/yh-new`；首版（D4 落地时的第一个 tag）
+  允许回退用 0.0.2 资产。
+- [ ] **D5 验证门重建**：`make selfhost-native` 的三代闭环改为
+  「bin/yh-new 编出新 yh-new → 两者各自再编 compiler/ → 产物逐字节
+  一致」的两代固定点；modules/run/fail/pass 语料与项目验收不变；
+  g3 容器验收按新链调整。

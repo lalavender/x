@@ -124,12 +124,25 @@ ifeq ($(INCLUDED),no)
 # --------------------------------------------------------------------------
 # 顶层构建规则
 
-# yh-new：自举编译器本机二进制（ADR-0006 的主要开发编译器）。由 stage0
-# 种子（yh）编译 compiler/ 拼接源码产出，形态随宿主（Darwin → Mach-O，
+# yh-new：自举编译器本机二进制（ADR-0006 的主要开发编译器）。自 0.0.2
+# 起由项目构建两步链产出（stage0 编 bootstrap/seed 得 seed 编译器，
+# seed 编译器对 compiler/ 项目 yh build），形态随宿主（Darwin → Mach-O，
 # Linux → ELF）。默认 make 即产出，位于项目根目录。
 YHNEW = $(TOP)/yh-new$(EXESUF)
 
-all: yh$(EXESUF) $(LIBTCC) $(LIBTCC1) $(YHNEW)
+# bin/ 入库副本：每个版本把 yh-new 保留一份在 bin/ 并提交进仓库，作为
+# 下一版本「直接用上个版本二进制编译」的种子（0.0.3 起删除 src/ 的
+# stage0 与 bootstrap/seed 后，构建只依赖这个副本或上一版 Release 资产，
+# 见 docs/todo.md「0.0.3 脱离 stage0」）。clean 不清理 bin/——它是仓库
+# 内容物，不是构建产物；发版时随常规提交更新。
+REPO_BIN = $(TOP)/bin
+BIN_SEED = $(REPO_BIN)/yh-new$(EXESUF)
+
+all: yh$(EXESUF) $(LIBTCC) $(LIBTCC1) $(YHNEW) $(BIN_SEED)
+
+$(BIN_SEED): $(YHNEW)
+	@mkdir -p $(REPO_BIN)
+	cp -f $(YHNEW) $@
 
 # 编译器本体：src/core/tcc.c 在 ONE_SOURCE 下把各 .c 汇成一个编译单元，一条命令产出
 yh$(EXESUF): $(SOURCES) $(HEADERS)
@@ -175,6 +188,7 @@ selfhost-native: yh$(EXESUF)
 	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py
 	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(TOPSRC)/yh-new
 	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(TOPSRC)/yh-new
+	python3 $(TOPSRC)/tools/selfbuild-gate.py
 
 # g3：B8 / G3 正式验收。先跑 make bootstrap 得到 stage1..stage3，再在容器
 # 内做分代全量语料复验、汇编固定点（compiler.yh + 全部代表程序）、确定性
@@ -192,23 +206,13 @@ g3: bootstrap
 # --------------------------------------------------------------------------
 
 SELFHOST_DIR = $(TOPSRC)/compiler
-SELFHOST_SOURCES = $(SELFHOST_DIR)/model.yh \
-                   $(SELFHOST_DIR)/buffer.yh \
-                   $(SELFHOST_DIR)/lexer.yh \
-                   $(SELFHOST_DIR)/target.yh \
-                   $(SELFHOST_DIR)/parse_type.yh \
-                   $(SELFHOST_DIR)/symbols.yh \
-                   $(SELFHOST_DIR)/emit_arm64.yh \
-                   $(SELFHOST_DIR)/sem.yh \
-                   $(SELFHOST_DIR)/parse_expr.yh \
-                   $(SELFHOST_DIR)/parse_stmt.yh \
-                   $(SELFHOST_DIR)/parse_decl.yh \
-                   $(SELFHOST_DIR)/parse_module.yh \
-                   $(SELFHOST_DIR)/toml.yh \
-                   $(SELFHOST_DIR)/project.yh \
-                   $(SELFHOST_DIR)/iface.yh \
-                   $(SELFHOST_DIR)/module_build.yh \
-                   $(SELFHOST_DIR)/driver.yh
+# 目录即分类（gen/lex/parse/cmd），文件内声明顺序仍按本清单；
+# 冻结 seed（ADR-0007）：stage0 只编译此快照。seed 为单文件扁平化产物
+# （tools/flatten.py 生成：剥模块头/去限定名/剥字段 pub；正确性由 P5
+# 四代模块 .s/.s.i 固定点保证），SHA-256 见 MANIFEST.sha256。
+SEED_DIR = $(TOPSRC)/bootstrap/seed
+# seed 为单文件扁平化产物（tools/flatten.py 生成，SHA-256 见 MANIFEST.sha256）
+SEED_SOURCES = $(SEED_DIR)/compiler.yh
 
 BOOTSTRAP_DIR = $(TOP)/tmp/bootstrap
 BOOTSTRAP_SYSROOT = $(TOP)/tmp/sysroot
@@ -220,9 +224,9 @@ BOOTSTRAP_CC = $(TOPSRC)/tests/yh/container-yh-cc.sh
 BOOTSTRAP_RUN = $(shell for f in $(TOPSRC)/tests/yh-run/run/*.yh; do \
 	 basename $$f; done | paste -sd, -)
 
-$(BOOTSTRAP_DIR)/compiler.yh: $(SELFHOST_SOURCES)
+$(BOOTSTRAP_DIR)/compiler.yh: $(SEED_SOURCES)
 	@mkdir -p $(BOOTSTRAP_DIR)
-	cat $(SELFHOST_SOURCES) > $@
+	cat $(SEED_SOURCES) > $@
 
 # 自举编译器：stage0 种子编译 compiler/ 拼接源码，产出宿主本机形态
 # （Darwin → Mach-O，Linux → ELF）。规则须在 BOOTSTRAP_DIR 定义之后：
@@ -230,8 +234,15 @@ $(BOOTSTRAP_DIR)/compiler.yh: $(SELFHOST_SOURCES)
 # -B $(TOP)：Linux ELF 链接必需 libtcc1.a（tcc_add_runtime 仅 ELF 路径
 # 调用），指向仓库根刚构建的副本，原生 make 开箱即用；Darwin 的 Mach-O
 # 路径不读它，行为不变。$(LIBTCC1) 同时列为前置条件，消除 -j 并行竞态。
-$(YHNEW): yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh $(LIBTCC1)
+# 两步链（ADR-0007 P5）：stage0 编 seed 得「seed 编译器」（支持模块系统
+# 的单文件形态），再由它对本活跃项目 yh build —— 日常 yh-new 由项目构建
+# 产出；各代缓存独立（这里每次冷编，见 compiler/tmp/yh-build）。
+$(BOOTSTRAP_DIR)/seed-compiler: yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh $(LIBTCC1)
 	./yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh -o $@ -B $(TOP)
+
+$(YHNEW): $(BOOTSTRAP_DIR)/seed-compiler
+	rm -rf compiler/tmp/yh-build
+	cd compiler && ../tmp/bootstrap/seed-compiler build -o ../yh-new
 
 # stage1：stage0 交叉编译拼接源码（AArch64 Linux ELF），在容器内运行
 $(BOOTSTRAP_DIR)/stage1: $(BOOTSTRAP_DIR)/compiler.yh yh$(EXESUF)
@@ -248,7 +259,7 @@ $(BOOTSTRAP_DIR)/stage1: $(BOOTSTRAP_DIR)/compiler.yh yh$(EXESUF)
 # 每个阶段失败即中止；产出的 .s 保留在 tmp/bootstrap/ 供人工核对。
 # 容器不可用时可改用本机等价差分：make selfhost-native。
 bootstrap: yh$(EXESUF) $(BOOTSTRAP_DIR)/stage1
-	@cat $(SELFHOST_SOURCES) > $(BOOTSTRAP_DIR)/compiler.yh.recheck
+	@cat $(SEED_SOURCES) > $(BOOTSTRAP_DIR)/compiler.yh.recheck
 	@cmp -s $(BOOTSTRAP_DIR)/compiler.yh $(BOOTSTRAP_DIR)/compiler.yh.recheck || \
 	 { echo "自举失败：两次拼接逐字节不一致（拼接不确定）"; exit 1; }
 	@rm -f $(BOOTSTRAP_DIR)/compiler.yh.recheck

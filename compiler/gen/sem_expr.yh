@@ -1,0 +1,658 @@
+module gen;
+
+// ============================================================================
+// sem_expr.yh
+// 自 gen/sem.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
+// ============================================================================
+
+pub fn sem_push_value(r *Res) int {
+    if (c_compile == 0 || c_fold != 0) {
+        return 0;
+    }
+    if (ty_is_float(r.type_id) != 0) {
+        return em_push_fp(r.type_id);
+    }
+    return em_push();
+}
+
+pub fn sem_binop(op int, lhs *Res, rhs *Res) int {
+    let tid int = 0;
+    if (c_compile == 0) {
+        lhs.type_id = 0;
+        return 0;
+    }
+    // 运算数检查
+    if (op == TK_EQEQ || op == TK_NEQ || op == TK_LT || op == TK_LEQ
+        || op == TK_GT || op == TK_GEQ) {
+        // 指针只参与 ==/!=（与 0 或同型）
+        if (t_types[lhs.type_id].kind == TY_PTR || t_types[rhs.type_id].kind == TY_PTR) {
+            if (op != TK_EQEQ && op != TK_NEQ) {
+                return sem_err("指针只支持 == / != 比较");
+            }
+            let ok int = 0;
+            if (lhs.type_id == rhs.type_id) { ok = 1; }
+            if (t_types[lhs.type_id].elem == TY_VOID) { ok = 1; }
+            if (t_types[rhs.type_id].elem == TY_VOID) { ok = 1; }
+            if (rhs.is_lit != 0 && rhs.is_const != 0 && rhs.ival == 0) { ok = 1; }
+            if (lhs.is_lit != 0 && lhs.is_const != 0 && lhs.ival == 0) { ok = 1; }
+            if (ok == 0) {
+                return sem_err("指针比较类型不匹配");
+            }
+            sem_res_const(lhs, TY_BOOL, 0);
+            if (c_fold == 0) {
+                if (em_pop("x9") != 0) { return -1; }
+                if (em_compare(op, TY_I64) != 0) { return -1; }
+            }
+            c_res_is_addr = 0;
+            return 0;
+        }
+    }
+    // 字面量适配：一侧是字面量时借用另一侧类型
+    if (rhs.is_lit != 0 && ty_is_scalar(lhs.type_id) != 0
+        && ty_is_integer(lhs.type_id) != 0 && ty_is_integer(rhs.type_id) != 0) {
+        if (sem_lit_fits(lhs.type_id, rhs.ival) != 0) {
+            rhs.type_id = lhs.type_id;
+        }
+    }
+    if (lhs.is_lit != 0 && ty_is_scalar(rhs.type_id) != 0
+        && ty_is_integer(lhs.type_id) != 0 && ty_is_integer(rhs.type_id) != 0) {
+        if (sem_lit_fits(rhs.type_id, lhs.ival) != 0) {
+            lhs.type_id = rhs.type_id;
+        }
+    }
+    // 指针算术：p + i / p - i（按元素大小缩放下标）；指针比较另走分支
+    let lk int = t_types[lhs.type_id].kind;
+    let rk int = t_types[rhs.type_id].kind;
+    if ((lk == TY_PTR && rk == TY_PTR) || lk == TY_ARRAY || rk == TY_ARRAY) {
+        return sem_err("指针/数组不参与该运算");
+    }
+    if (lk == TY_PTR && ty_is_integer(rhs.type_id) != 0) {
+        if (op == TK_PLUS || op == TK_MINUS) {
+            if (c_fold != 0) {
+                return sem_err("指针运算不是编译期常量");
+            }
+            if (em_pop("x9") != 0) { return -1; }
+            if (em_scale_index(t_types[lhs.type_id].elem) != 0) { return -1; }
+            if (em_ins("add\tx0, x9, x0") != 0) { return -1; }
+            c_res_is_addr = 1;   // 结果是地址（可再解引用/下标）
+            return 0;
+        }
+        return sem_err("指针只支持 + / - 整数");
+    }
+    if (rk == TY_PTR && ty_is_integer(lhs.type_id) != 0 && op == TK_PLUS) {
+        if (c_fold != 0) {
+            return sem_err("指针运算不是编译期常量");
+        }
+        if (em_pop("x9") != 0) { return -1; }
+        // x9 = 整数，x0 = 指针：交换后缩放
+        if (em_ins("mov\tx10, x0") != 0) { return -1; }
+        if (em_ins("mov\tx0, x9") != 0) { return -1; }
+        if (em_ins("mov\tx9, x10") != 0) { return -1; }
+        if (em_scale_index(t_types[rhs.type_id].elem) != 0) { return -1; }
+        if (em_ins("add\tx0, x9, x0") != 0) { return -1; }
+        c_res_is_addr = 1;
+        return 0;
+    }
+    tid = sem_promote(lhs.type_id, rhs.type_id);
+    if (ty_is_float(tid) != 0) {
+        // 浮点二元/比较：左 d1、右 d0（值栈已按序压入）
+        if (c_fold != 0) {
+            return sem_err("浮点常量折叠暂不支持");
+        }
+        let iscmp int = (op == TK_EQEQ || op == TK_NEQ || op == TK_LT
+                         || op == TK_LEQ || op == TK_GT || op == TK_GEQ).to_type(int);
+        if (op != TK_PLUS && op != TK_MINUS && op != TK_STAR && op != TK_SLASH
+            && iscmp == 0) {
+            return sem_err("浮点不支持该运算");
+        }
+        if (iscmp != 0) {
+            if (em_pop_fp(tid, 1) != 0) { return -1; }
+            if (em_fp_compare(op, tid) != 0) { return -1; }
+            sem_res_const(lhs, TY_BOOL, 0);
+        } else {
+            if (em_pop_fp(tid, 1) != 0) { return -1; }
+            if (em_fp_binop(op, tid) != 0) { return -1; }
+            sem_res_reset(lhs, tid);
+        }
+        lhs.is_const = 0;
+        c_res_is_addr = 0;
+        return 0;
+    }
+    if (ty_is_scalar(tid) == 0) {
+        return sem_err("该类型不支持算术运算");
+    }
+    let is_cmp int = 0;
+    if (op == TK_EQEQ || op == TK_NEQ || op == TK_LT || op == TK_LEQ
+        || op == TK_GT || op == TK_GEQ) {
+        is_cmp = 1;
+    }
+    if (c_fold != 0) {
+        if (lhs.is_const == 0 || rhs.is_const == 0) {
+            return sem_err("这里需要编译期常量");
+        }
+        if (is_cmp != 0) {
+            let v i64 = fold_binop(op, lhs.ival, rhs.ival);
+            sem_res_const(lhs, TY_BOOL, v);
+        } else {
+            let v2 i64 = fold_binop(op, lhs.ival, rhs.ival);
+            sem_res_const(lhs, tid, v2);
+        }
+        return 0;
+    }
+    if (is_cmp != 0) {
+        if (em_pop("x9") != 0) { return -1; }
+        if (em_compare(op, tid) != 0) { return -1; }
+        sem_res_const(lhs, TY_BOOL, 0);
+    } else {
+        if (em_pop("x9") != 0) { return -1; }
+        if (em_binop(op, tid) != 0) { return -1; }
+        sem_res_reset(lhs, tid);
+    }
+    lhs.is_const = 0;
+    c_res_is_addr = 0;
+    return 0;
+}
+
+pub fn sem_shortcircuit(op int, lhs *Res) int {
+    if (c_compile == 0) {
+        lhs.type_id = 0;
+        return 0;
+    }
+    if (c_fold != 0) {
+        return sem_err("逻辑运算不支持编译期折叠");
+    }
+    // 保存外层短路标签（嵌套 a&&b||c&&d 时内层不破坏外层）
+    sc_sc_false_stk[sc_sc_depth] = sc_lbl_false;
+    sc_sc_end_stk[sc_sc_depth] = sc_lbl_end;
+    sc_sc_depth += 1;
+    sc_lbl_false = em_new_label();
+    sc_lbl_end = em_new_label();
+    if (op == TK_ANDAND) {
+        if (em_jz(sc_lbl_false) != 0) { return -1; }
+    } else {
+        if (em_jnz(sc_lbl_false) != 0) { return -1; }
+    }
+    sem_res_reset(lhs, TY_BOOL);
+    c_res_is_addr = 0;
+    return 0;
+}
+
+pub fn sem_shortcircuit_end(op int, lhs *Res) int {
+    if (c_compile == 0) {
+        return 0;
+    }
+    if (op == TK_ANDAND) {
+        // 左真且右真 → 结果 1
+        if (em_jz(sc_lbl_false) != 0) { return -1; }
+        if (em_ins("movz\tx0, #1") != 0) { return -1; }
+        if (em_jmp(sc_lbl_end) != 0) { return -1; }
+        if (em_label(sc_lbl_false) != 0) { return -1; }
+        if (em_ins("mov\tx0, xzr") != 0) { return -1; }
+        if (em_label(sc_lbl_end) != 0) { return -1; }
+    } else {
+        // || ：左或右为真 → 结果 1
+        if (em_jnz(sc_lbl_false) != 0) { return -1; }
+        if (em_ins("mov\tx0, xzr") != 0) { return -1; }
+        if (em_jmp(sc_lbl_end) != 0) { return -1; }
+        if (em_label(sc_lbl_false) != 0) { return -1; }
+        if (em_ins("movz\tx0, #1") != 0) { return -1; }
+        if (em_label(sc_lbl_end) != 0) { return -1; }
+    }
+    lhs.is_const = 0;
+    c_res_is_addr = 0;
+    // 恢复外层短路标签（嵌套 a&&b||c&&d：内层用完即还）
+    sc_sc_depth -= 1;
+    sc_lbl_false = sc_sc_false_stk[sc_sc_depth];
+    sc_lbl_end = sc_sc_end_stk[sc_sc_depth];
+    return 0;
+}
+
+pub fn sem_ternary_cond(lhs *Res) int {
+    if (c_compile == 0) {
+        lhs.type_id = 0;
+        return 0;
+    }
+    if (c_fold != 0) {
+        return sem_err("三元不支持编译期折叠");
+    }
+    tn_lbl_else = em_new_label();
+    tn_lbl_end = em_new_label();
+    if (em_jz(tn_lbl_else) != 0) { return -1; }
+    return 0;
+}
+
+pub fn sem_ternary_mid(lhs *Res) int {
+    if (c_compile == 0) {
+        return 0;
+    }
+    if (em_push() != 0) { return -1; }
+    if (em_jmp(tn_lbl_end) != 0) { return -1; }
+    if (em_label(tn_lbl_else) != 0) { return -1; }
+    return 0;
+}
+
+pub fn sem_ternary_end(lhs *Res) int {
+    if (c_compile == 0) {
+        return 0;
+    }
+    if (em_push() != 0) { return -1; }
+    if (em_label(tn_lbl_end) != 0) { return -1; }
+    if (em_pop("x0") != 0) { return -1; }
+    c_res_is_addr = 0;
+    return 0;
+}
+
+pub fn sem_unary(op int, operand *Res) int {
+    if (c_compile == 0) {
+        operand.type_id = 0;
+        return 0;
+    }
+    if (op == TK_STAR) {
+        if (t_types[operand.type_id].kind != TY_PTR) {
+            return sem_err("解引用的操作数必须是指针");
+        }
+        if (c_lvalue == 0 && c_fold == 0) {
+            // x0 = 指针值（地址）→ 装入点值
+            if (em_ins("mov\tx10, x0") != 0) { return -1; }
+            if (em_load_sized(t_types[operand.type_id].elem) != 0) { return -1; }
+        }
+        c_res_is_addr = 1;
+        sem_res_reset(operand, t_types[operand.type_id].elem);
+        operand.is_const = 0;
+        return 0;
+    }
+    if (op == TK_AMP) {
+        if (c_res_is_addr == 0) {
+            return sem_err("取地址的操作数必须是左值");
+        }
+        let pt int = ty_ptr(operand.type_id);
+        sem_res_reset(operand, pt);
+        c_res_is_addr = 1;
+        return 0;
+    }
+    if (operand.is_const != 0) {
+        // 常量（含字面量）：折叠求值并保留字面量性（如 let n i8 = -100）
+        operand.ival = fold_unary(op, operand.ival);
+        operand.type_id = TY_I32;
+        if (c_fold == 0) {
+            if (em_mov_imm("x0", operand.ival) != 0) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+    let tid int = operand.type_id;
+    if (ty_is_float(tid) != 0) {
+        if (op == TK_MINUS) {
+            if (em_fp_neg(tid) != 0) { return -1; }
+            sem_res_reset(operand, tid);
+            c_res_is_addr = 0;
+            return 0;
+        }
+        if (op == TK_PLUS) {
+            return 0;
+        }
+        return sem_err("浮点只支持一元 +/-");
+    }
+    if (t_types[tid].kind == TY_BOOL) {
+        tid = TY_I32;
+    }
+    if (ty_is_scalar(tid) == 0) {
+        return sem_err("该类型不支持一元运算");
+    }
+    if (em_unary(op, tid) != 0) { return -1; }
+    sem_res_reset(operand, tid);
+    c_res_is_addr = 0;
+    return 0;
+}
+
+pub fn sem_index(base *Res, idx *Res) int {
+    if (c_compile == 0) {
+        base.type_id = 0;
+        return 0;
+    }
+    if (ty_is_integer(idx.type_id) == 0) {
+        return sem_err("下标必须是整数");
+    }
+    let bk int = t_types[base.type_id].kind;
+    let elem int = 0;
+    if (bk == TY_PTR) {
+        elem = t_types[base.type_id].elem;
+    } else if (bk == TY_ARRAY) {
+        elem = t_types[base.type_id].elem;
+    } else if (bk == TY_SLICE) {
+        elem = t_types[base.type_id].elem;
+    } else {
+        return sem_err("该类型不支持下标访问");
+    }
+    if (c_fold != 0) {
+        return sem_err("下标访问不是编译期常量");
+    }
+    if (em_pop("x9") != 0) { return -1; }
+    // lvalue 模式下指针变量的基址是「变量的地址」——先装入指针值
+    if (bk == TY_PTR && c_lvalue != 0) {
+        if (em_ins("mov\tx10, x9") != 0) { return -1; }
+        if (em_ins("ldr\tx9, [x10]") != 0) { return -1; }
+    }
+    // 切片：基址是切片数据指针（槽内偏移 8），需先取 data 字段
+    if (bk == TY_SLICE) {
+        if (em_ins("add\tx9, x9, #8") != 0) { return -1; }
+        if (em_ins("ldr\tx9, [x9]") != 0) { return -1; }
+    }
+    // 地址 = 基址(x9) + 下标(x0) * 元素大小
+    let esz int = t_types[elem].size;
+    if (esz == 2) {
+        if (em_ins("lsl\tx0, x0, #1") != 0) { return -1; }
+    } else if (esz == 4) {
+        if (em_ins("lsl\tx0, x0, #2") != 0) { return -1; }
+    } else if (esz == 8) {
+        if (em_ins("lsl\tx0, x0, #3") != 0) { return -1; }
+    } else if (esz != 1) {
+        // 任意大小的聚合元素（如 20 字节的 Tok）：乘法缩放
+        if (em_mov_imm("x11", esz.to_type(i64)) != 0) { return -1; }
+        if (em_ins("mul\tx0, x0, x11") != 0) { return -1; }
+    }
+    if (em_ins("add\tx0, x9, x0") != 0) { return -1; }
+    let ek int = t_types[elem].kind;
+    if (ek == TY_STRUCT || ek == TY_UNION || ek == TY_ARRAY || ek == TY_SLICE) {
+        // 聚合元素：保留地址语义（成员/下标链后续再加偏移）
+        c_res_is_addr = 1;
+    } else if (c_lvalue == 0) {
+        if (em_ins("mov\tx10, x0") != 0) { return -1; }
+        if (ty_is_float(elem) != 0) {
+            // 浮点元素：装入浮点寄存器
+            let fsfx *char = "d";
+            if (t_types[elem].size == 4) { fsfx = "s"; }
+            if (em_frag("\tldr\t") != 0) { return -1; }
+            if (em_frag(fsfx) != 0) { return -1; }
+            if (em_frag("0, [x10]\n") != 0) { return -1; }
+        } else {
+            if (em_load_sized(elem) != 0) { return -1; }
+        }
+        c_res_is_addr = 0;
+    } else {
+        c_res_is_addr = 1;
+    }
+    sem_res_reset(base, elem);
+    return 0;
+}
+
+pub fn sem_slice(base *Res, sres *Res, eres *Res) int {
+    if (c_compile == 0) {
+        base.type_id = 0;
+        return 0;
+    }
+    if (c_fold != 0) {
+        return sem_err("切片表达式不是编译期常量");
+    }
+    let bk int = t_types[base.type_id].kind;
+    if (bk != TY_ARRAY && bk != TY_SLICE) {
+        return sem_err("切片表达式需要数组或切片");
+    }
+    if (ty_is_integer(sres.type_id) == 0 || ty_is_integer(eres.type_id) == 0) {
+        return sem_err("切片下标必须是整数");
+    }
+    let elem int = t_types[base.type_id].elem;
+    let esz int = t_types[elem].size;
+    // x0 = end → x11 暂存；弹 start → x0；弹 base → x10
+    if (em_ins("mov\tx11, x0") != 0) { return -1; }
+    if (em_pop("x0") != 0) { return -1; }
+    if (em_pop("x10") != 0) { return -1; }
+    // 切片基址取 data 字段（{len, data} 的偏移 8）
+    if (bk == TY_SLICE) {
+        if (em_ins("add\tx10, x10, #8") != 0) { return -1; }
+        if (em_ins("ldr\tx10, [x10]") != 0) { return -1; }
+    }
+    // x9 = max(0, end - start)
+    if (em_ins("sub\tx9, x11, x0") != 0) { return -1; }
+    let l_pos int = em_new_label();
+    if (em_frag("\tcmp\tx9, xzr\n\tb.gt\t") != 0) { return -1; }
+    if (em_put_lbl(l_pos) != 0) { return -1; }
+    if (em_frag("\n\tmov\tx9, xzr\n") != 0) { return -1; }
+    if (em_label(l_pos) != 0) { return -1; }
+    // x0 = start * 元素大小
+    if (esz == 2) {
+        if (em_ins("lsl\tx0, x0, #1") != 0) { return -1; }
+    } else if (esz == 4) {
+        if (em_ins("lsl\tx0, x0, #2") != 0) { return -1; }
+    } else if (esz == 8) {
+        if (em_ins("lsl\tx0, x0, #3") != 0) { return -1; }
+    } else if (esz != 1) {
+        if (em_mov_imm("x11", esz.to_type(i64)) != 0) { return -1; }
+        if (em_ins("mul\tx0, x0, x11") != 0) { return -1; }
+    }
+    // x0 = 数据指针 = 基址 + start*esz
+    if (em_ins("add\tx0, x10, x0") != 0) { return -1; }
+    // 构造 {len, data} 临时切片
+    let soff int = em_alloc_local(TG_LONG_SIZE * 2);
+    if (em_lea_local_to(soff) != 0) { return -1; }
+    if (em_ins("str\tx9, [x10]") != 0) { return -1; }
+    if (em_ins("str\tx0, [x10, #8]") != 0) { return -1; }
+    if (em_lea_local_down(soff) != 0) { return -1; }
+    base.type_id = ty_slice(elem);
+    base.is_lit = 0;
+    base.is_const = 0;
+    c_res_is_addr = 1;
+    return 0;
+}
+
+pub fn sem_member(base *Res, name_start int, name_len int) int {
+    if (c_compile == 0) {
+        base.type_id = 0;
+        return 0;
+    }
+    let bk int = t_types[base.type_id].kind;
+    let stid int = 0;
+    if (bk == TY_PTR) {
+        stid = t_types[base.type_id].elem;
+        if (t_types[stid].kind != TY_STRUCT && t_types[stid].kind != TY_UNION) {
+            return sem_err("『.』的左侧不是结构体或结构体指针");
+        }
+    } else if (bk == TY_STRUCT || bk == TY_UNION) {
+        stid = base.type_id;
+    } else {
+        return sem_err("『.』的左侧不是结构体或结构体指针");
+    }
+    // 字段查找
+    let st int = t_types[stid].sub;
+    let nf int = t_types[stid].len;
+    let found int = -1;
+    let i int = 0;
+    for i < nf {
+        let f int = st + i;
+        if (t_fields[f].name_len == name_len) {
+            let match int = 1;
+            let j int = 0;
+            for j < name_len {
+                if (np_data[t_fields[f].name_off + j] != c_src[name_start + j]) {
+                    match = 0;
+                    break;
+                }
+                j += 1;
+            }
+            if (match != 0) {
+                found = f;
+                break;
+            }
+        }
+        i += 1;
+    }
+    if (found < 0) {
+        return sem_err("结构体没有该字段");
+    }
+    // 跨模块 pub 检查（U3）：外部模块类型的私有字段不可访问
+    if (c_module_mode != 0 && t_home[stid] >= 0 && t_fields[found].is_pub == 0) {
+        return sem_err("跨模块不能访问私有字段（声明处未加 pub）");
+    }
+    if (c_fold != 0) {
+        return sem_err("字段访问不是编译期常量");
+    }
+    let off int = t_fields[found].offset;
+    if (bk == TY_PTR) {
+        if (c_lvalue != 0) {
+            // x0 = 指针变量的地址 → 装入指针值
+            if (em_ins("ldr\tx0, [x0]") != 0) { return -1; }
+        }
+        // x0 = 结构体地址；加字段偏移
+    }
+    if (off > 0) {
+        if (em_frag("\tadd\tx0, x0, #") != 0) { return -1; }
+        if (em_puti(off) != 0) { return -1; }
+        if (em_frag("\n") != 0) { return -1; }
+    }
+    let ftid int = t_fields[found].type_id;
+    if (c_lvalue == 0) {
+        let fk int = t_types[ftid].kind;
+        if (fk != TY_STRUCT && fk != TY_UNION && fk != TY_ARRAY && fk != TY_SLICE) {
+            if (em_ins("mov\tx10, x0") != 0) { return -1; }
+            if (em_load_sized(ftid) != 0) { return -1; }
+            c_res_is_addr = 0;
+        } else {
+            // 聚合字段：保持地址语义
+            c_res_is_addr = 1;
+        }
+    } else {
+        c_res_is_addr = 1;
+    }
+    sem_res_reset(base, ftid);
+    return 0;
+}
+
+pub fn sem_sizeof(tid int, r *Res) int {
+    sem_res_reset(r, TY_I32);
+    if (c_compile == 0) {
+        return 0;
+    }
+    r.is_const = 1;
+    r.is_lit = 0;
+    r.ival = t_types[tid].size.to_type(i64);
+    if (c_fold == 0) {
+        if (em_mov_imm("x0", r.ival) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+pub fn sem_len(r *Res) int {
+    if (c_compile == 0) {
+        r.type_id = 0;
+        return 0;
+    }
+    let k int = t_types[r.type_id].kind;
+    if (k == TY_ARRAY) {
+        // 编译期折叠为常量并直接装 x0（同 sem_sizeof：折叠出的常量由
+        // 这里物化，消费端不负责）。必须清 c_res_is_addr——实参（数组
+        // 标识符）的聚合地址语义会残留，否则 x0 里的数组地址被当成
+        // 结果（曾致 return len(arr) 返回地址而非长度）。
+        c_res_is_addr = 0;
+        sem_res_const(r, TY_I32, t_types[r.type_id].len.to_type(i64));
+        if (c_fold == 0) {
+            return em_mov_imm("x0", r.ival);
+        }
+        return 0;
+    }
+    if (k == TY_SLICE) {
+        if (c_fold != 0) {
+            return sem_err("切片长度不是编译期常量");
+        }
+        // 切片值在 x0（地址）；读 [x0] 的长度
+        if (em_ins("ldr\tx0, [x0]") != 0) { return -1; }
+        sem_res_reset(r, TY_I32);
+        c_res_is_addr = 0;
+        return 0;
+    }
+    return sem_err("len 需要一个数组或切片");
+}
+
+pub fn sem_cast(operand *Res, tid int) int {
+    if (c_compile == 0) {
+        operand.type_id = 0;
+        return 0;
+    }
+    let ok int = t_types[tid].kind;
+    if (ok == TY_VOID) {
+        return sem_err("不能转换为 void");
+    }
+    let sk int = t_types[operand.type_id].kind;
+    let scalar_to_scalar int = 0;
+    if (ty_is_scalar(tid) != 0 && ty_is_scalar(operand.type_id) != 0) {
+        scalar_to_scalar = 1;
+    }
+    // 数组 → 切片视图：构造 {len, data} 临时聚合（ADR-0002 的规范化视图）
+    if (sk == TY_ARRAY && ok == TY_SLICE) {
+        if (t_types[operand.type_id].elem != t_types[tid].elem) {
+            return sem_err("数组元素类型与目标切片不一致");
+        }
+        if (c_fold != 0) {
+            return sem_err("数组转切片不是编译期常量");
+        }
+        let arrlen int = t_types[operand.type_id].len;
+        // x0 = 数组地址（数组值即地址）
+        let soff int = em_alloc_local(TG_LONG_SIZE * 2);
+        if (em_lea_local_to(soff) != 0) { return -1; }
+        if (em_mov_imm("x9", arrlen.to_type(i64)) != 0) { return -1; }
+        if (em_ins("str\tx9, [x10]") != 0) { return -1; }
+        if (em_ins("str\tx0, [x10, #8]") != 0) { return -1; }
+        if (em_lea_local_down(soff) != 0) { return -1; }
+        operand.type_id = tid;
+        operand.is_lit = 0;
+        operand.is_const = 0;
+        c_res_is_addr = 1;
+        return 0;
+    }
+    if (scalar_to_scalar == 0) {
+        return sem_err("该转换不支持（标量之间或指针/整数）");
+    }
+    if (c_fold == 0 && c_res_is_addr == 0) {
+        // 运行时转换
+        let from_fp int = ty_is_float(operand.type_id);
+        let to_fp int = ty_is_float(tid);
+        if (to_fp != 0 && from_fp == 0) {
+            let src_signed int = ty_is_signed(operand.type_id);
+            if (em_int_to_fp(tid, src_signed) != 0) { return -1; }
+        } else if (to_fp != 0 && from_fp != 0) {
+            // 浮点宽度转换：f32<->f64（d0/s0 互转）
+            if (t_types[operand.type_id].size != t_types[tid].size) {
+                if (t_types[tid].size == 4) {
+                    if (em_ins("fcvt\ts0, d0") != 0) { return -1; }
+                } else {
+                    if (em_ins("fcvt\td0, s0") != 0) { return -1; }
+                }
+            }
+        } else if (to_fp == 0 && from_fp != 0) {
+            let dst_signed int = ty_is_signed(tid);
+            if (em_fp_to_int(operand.type_id, dst_signed) != 0) { return -1; }
+        } else if (t_types[operand.type_id].size != t_types[tid].size
+                   || ty_is_signed(operand.type_id) != ty_is_signed(tid)) {
+            // 整数 → 整数：x0 中按源类型已扩展，需按目标宽度/符号性重新扩展。
+            // 例如 i64 → int 必须截断到低 32 位并符号扩展，否则比较/运算会用
+            // 到高位的残留值（曾导致 i64 的 int 视图比较结果错误）。
+            let tsz int = t_types[tid].size;
+            if (ty_is_signed(tid) != 0) {
+                if (tsz == 4) {
+                    if (em_ins("sxtw\tx0, w0") != 0) { return -1; }
+                } else if (tsz == 2) {
+                    if (em_ins("sxth\tx0, w0") != 0) { return -1; }
+                } else if (tsz == 1) {
+                    if (em_ins("sxtb\tx0, w0") != 0) { return -1; }
+                }
+            } else {
+                if (tsz == 4) {
+                    // 零扩展：写 w0 即清零高 32 位
+                    if (em_ins("mov\tw0, w0") != 0) { return -1; }
+                } else if (tsz == 2) {
+                    if (em_ins("uxth\tx0, w0") != 0) { return -1; }
+                } else if (tsz == 1) {
+                    if (em_ins("uxtb\tx0, w0") != 0) { return -1; }
+                }
+            }
+        }
+        // 其余整数→整数（更宽或同宽同符号）已在 x0 中正确扩展，无需发码。
+    }
+    operand.type_id = tid;
+    operand.is_lit = 0;
+    c_res_is_addr = 0;
+    return 0;
+}
+

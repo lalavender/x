@@ -129,6 +129,26 @@ def main():
                    "u4-iface-corrupt",
                    f"破坏接口后未被拒绝: {r2.returncode} {(r2.stderr + r2.stdout)[-300:]}")
 
+    # —— ADR-0007 P2：四模块接口探针（gen/lex/parse/cmd） ——
+    dst = WORK / "fourdir"
+    copy_proj(PROJ / "fourdir", dst)
+    r = sh([compiler, "build"], cwd=dst)
+    if r.returncode != 0:
+        report(False, "p2-fourdir-probe", f"构建失败: {r.stderr[-400:]}")
+    else:
+        mods = sorted(p.name for p in dst.rglob("*.s.i"))
+        report(mods == ["cmd.s.i", "gen.s.i", "lex.s.i", "parse.s.i"],
+               "p2-fourdir-iface", f"接口文件: {mods}")
+        r2 = sh([str(dst / "tmp/yh-build/app.bin")], cwd=dst)
+        report(r2.returncode == 118, "p2-fourdir-run",
+               f"退出码 {r2.returncode} 期望 118 (bump1+touch3+scan7+with_tok6+via101)")
+
+    dst = WORK / "fourdirbad"
+    copy_proj(PROJ / "fourdirbad", dst)
+    r = sh([compiler, "build"], cwd=dst)
+    report(r.returncode != 0 and "私有字段" in (r.stderr + r.stdout),
+           "p2-fourdir-private", f"私有字段未被拒绝: {(r.stderr + r.stdout)[-300:]}")
+
     # —— MOD-U5：重绑定与冷热一致 ——
     dst = WORK / "u5_rebind"
     copy_proj(PROJ / "basic", dst)
@@ -150,7 +170,7 @@ def main():
     report(r4.returncode == 255, "u5-rebind-run-same",
            f"重绑定后运行退出码 {r4.returncode} 期望 255")
 
-    total = len(CASES) + 6
+    total = len(CASES) + 8
     print(f"project cases: 通过 {total - failed}/{total}")
     return 1 if failed else 0
 

@@ -1,5 +1,147 @@
 # finish
 
+## 2026-09-30 0.0.2 发布：bin/ 入库编译种子 + tag 触发 Release 归档
+
+- **bin/ 入库副本**：Makefile 新增 `$(BIN_SEED)` 规则（挂进 `all`）——
+  每次构建把 yh-new 复制到 `bin/yh-new` 并提交进仓库；clean 不清理
+  （仓库内容物，非构建产物）。作为版本间编译种子：0.0.3 起删除
+  src/（stage0）与 bootstrap/（seed）后，各版本直接用上一版二进制
+  编译（Darwin 用 bin/ 副本，Linux 用上一版 Release 的 linux-arm64
+  资产）。AGENTS.md 同步说明。
+- **VERSION 0.0.1 → 0.0.2**；tag `0.0.2` 推送触发既有 release.yml
+  流水线（双平台构建 + 冒烟 + tar.gz/sha256 归档到 GitHub Release，
+  即"服务器保存一份"）。
+- 顺手清理：Makefile 重构遗留的重复 `BOOTSTRAP_DIR` 定义去掉一处。
+- **0.0.3 计划**（docs/todo.md「0.0.3 脱离 stage0」D1–D5）：删 src/ 与
+  bootstrap/、构建链改为种子一步链、CI 改用上一版 Release 资产作
+  Linux 种子、验证门重建为两代固定点。
+- 本地验证：make（两步链 + bin 副本）幂等、bin/yh-new 冒烟通过；
+  arm64 ubuntu:24.04 容器 make -j4 + 双冒烟 + bin/yh-new（ELF）冒烟
+  通过——发布配方与新构建链兼容。发布结果以 tag 推送后 Actions 为准。
+
+## 2026-09-30 编译器源码四模块化完成（ADR-0007 P1–P5）：compiler/ 成为 mod.toml 项目，四代自举固定点达成
+
+接上条（P0 恢复构建 / P4 热点拆分）。compiler/ 现在是真实的四模块
+yh 项目（[ADR-0007](adr/0007-yh编译器使用源码模块.md)），自举编译器
+用自身模块系统构建自身：
+
+- **项目形态**：compiler/mod.toml（name="yh/compiler"，source="."，
+  entry="cmd"）；gen（model/buffer/symbols/target/emit_arm64/sem_value/
+  sem_expr/sem_call_literal/sem_flow/sem_decl，10 文件）、lex（lexer）、
+  parse（parse_type/parse_expr/parse_stmt/parse_decl/parse_global_init/
+  parse_module/iface，7 文件）、cmd（toml/project_state/project_index/
+  project_resolve/module_build/compile/driver，7 文件）共 25 文件，
+  全部 module 声明，依赖单向 gen←lex←parse←cmd（自家 topo 拒环）。
+- **解环迁移**（四个函数入 gen）：sem_compile→cmd/compile.yh（P4 已做）、
+  err_tok→gen/buffer.yh、tml_intern_str→gen/symbols.yh、
+  mod_ns_lookup 与 mod_file_binding→gen/symbols.yh。
+- **限定名改写**：约 3800 处脚本化（tools 内联脚本，符号表 723 项，
+  状态机跳过注释/字符串/字符字面量，前导非 [.A-Za-z0-9_] 才改写），
+  零跨模块同名冲突。pub 从宽（顶层+字段全 pub），收缩留后续。
+- **P1 seed**：bootstrap/seed/compiler.yh = tools/flatten.py 扁平化
+  产物（剥 module/import、剥字段 pub、去限定前缀——仅代码态），供
+  stage0 编出「seed 编译器」。ADR-0007 对剥离式种子的保留意见成立：
+  它是派生产物而非手工快照，正确性靠 P5 固定点背书，活跃源升级后
+  需重新生成。
+- **P2 探针**：fourdir/fourdirbad fixture（gen 公开状态与类型、
+  lex/parse 限定调用、cmd 入口；私有字段跨模块拒绝），项目验收
+  扩至 23/23。探针暴露 pj_canon 空段返回契约 bug（"." 折叠返回
+  偏移被误判失败）——修复。
+- **P3 构建迭代修复**：sizeof(m.T) 识别（sizeof_starts_type 限定
+  判定）；if_emit_type 具名类型全表查询（pub 签名引用跨模块类型
+  原样输出 mangle 名）；未使用导入被自家构建器拒绝后按实际使用
+  收敛各文件 import。
+- **P5 四代链**：tools/selfbuild-gate.py 固化——stage0→seed 编译器
+  →cc2→cc3→cc4（每代冷编），cc2/3/4 两两 gen/lex/parse/cmd 全部
+  .s/.s.i 逐字节一致（固定点），cc4 冒烟与 modules 17/17 通过；
+  挂进 make selfhost-native。**日常 yh-new 切换为项目构建产出**
+  （Makefile 两步链：stage0 编 seed → seed 编译器对活跃项目
+  yh build，每次冷编避免缓存键缺编译器身份的问题）。
+- **验证**：make（两步链）✓；make test 63/63 ✓；make selfhost-native
+  全绿（seed 链三代自举、语法 66/66+29/29 ×3、模块语料 17/17 ×3、
+  项目验收 23/23、selfbuild 四代固定点）✓；容器 make bootstrap ✓、
+  make g3 通过 ✓；python3 tools/selfbuild-gate.py 全过 ✓。
+- **过渡桥说明**：P3 迭代期曾用扁平化源编出一次性过渡编译器
+  （yh-trans）打通四模块构建；P5 链建成后已由 seed 链取代，
+  tools/flatten.py 保留为 seed 生成器。
+## 2026-09-30 编译器源码按四目录布局恢复构建 + 热点文件拆分（ADR-0007 P0/P4）
+
+用户已将 17 个编译器源文件归入 cmd/gen/lex/parse 四目录（另 model/
+buffer/symbols/iface 暂留根部），旧路径使 Makefile 构建中断。本轮：
+
+- **P0 恢复构建**：Makefile `SELFHOST_SOURCES` 与
+  `tests/selfhost/native-selfhost.py` SOURCES 切到当前布局，并直接
+  采用拆分后的文件清单（25 项）。`make`、`make test` 63/63、
+  `make selfhost-native` 全绿（三代语法 66/66+29/29 ×3、三代模块语料
+  17/17 ×3、项目验收 21/21、s2.s==s3.s 固定点一致）、容器
+  `make bootstrap` 通过（G1+G2+固定点）、`make g3` **通过**
+  （首次运行遇 B8 已记录的容器挂载瞬时问题，重跑全绿，全量日志
+  /tmp/g3.log）。
+- **P4 热点拆分**（按[详细方案](02-plan/yh-编译器模块化详细方案.md) §5
+  的完整函数边界，纯移动不含语义改动）：
+  - gen/sem.yh（2403 行）→ `sem_value`(329)/`sem_expr`(656)/
+    `sem_call_literal`(461)/`sem_flow`(539)/`sem_decl`(262)；
+    `sem_compile`(50) 迁 cmd/compile.yh（P3 解环预置）；
+  - cmd/project.yh（1390 行）→ `project_state`(459)/`project_index`(408)/
+    `project_resolve`(471)；
+  - parse/parse_decl.yh（1215 行）→ `parse_decl`(640) +
+    `parse_global_init`(542)。
+  拆分按「前导注释块 + fn 到列 0 `}`」为单元脚本执行；恢复构建时
+  发现 project.yh 头部的 `pj_scratch`/`pj_ls_cap` 两个文件级全局随
+  头注释丢失，已补回（附边界注释）。所有文件回到 500±行建议带；
+  gen/emit_arm64.yh（1014）按方案明确不拆。
+- 回归说明：拆分为行为不变移动，回归由既有语料覆盖（run 48 的
+  全局初始化/聚合/浮点/变参用例正好压住三簇被移动函数；语法 66+29；
+  模块 17；项目 21），未新增语义用例。gen/sem_*.yh 与 cmd/project_*.yh
+  等新文件均为原文件内容的逐字节子集（仅新增文件头注释与找回的全局块）。
+
+## 2026-09-30 按用户现有 cmd/gen/lex/parse 目录修订编译器模块化方案
+
+本轮重新核查用户已经移动的 13 个文件：内容与原 Git 版本逐字节
+相同；compiler/mod.toml 为空，全部 17 个正式 .yh 文件仍无
+module/import 声明。当前 `make -n yh-new` 失败，报旧依赖
+`compiler/lexer.yh` 不存在；此前文档记录的构建成功是目录移动
+发生**之前**的基线，不能用于当前工作区。
+
+将现行[实施方案](02-plan/yh-编译器模块化详细方案.md)、
+[架构设计](03-design/yh-编译器源码模块化设计.md)、
+[ADR-0007](adr/0007-yh编译器使用源码模块.md)按既有目录重写；
+旧 13 模块分类草案标为历史。具体调查、解环函数、文件拆分与
+未运行代码验证的范围见
+[本次修订记录](01-finished/yh-编译器按目录模块化方案修订-2026-09-30.md)。
+本轮没有修改正式编译器源码或构建脚本。
+
+## 2026-09-30 yh 编译器源码模块化方案与可行性探针
+
+本轮交付[架构设计](03-design/yh-编译器源码模块化设计.md)、
+[分阶段实施方案](02-plan/yh-编译器模块化详细方案.md)、
+[ADR-0007](adr/0007-yh编译器使用源码模块.md)与
+[完成记录](01-finished/yh-编译器模块化方案-2026-09-30.md)。
+范围仅为调查、设计及 `tmp/` 探针，未移动正式编译器源码。
+
+- 核对当前 17 个自举源码文件约 13,004 行、Makefile 和
+  `tests/selfhost/native-selfhost.py` 双份固定拼接顺序；C stage0
+  依 ADR-0006 冻结，不能编译带 `module/import` 的活跃源码。
+- 检查 `compiler/iface.yh`：公开签名引用外模块具名类型时无法导出，
+  所以旧 13 模块分类草案的批量 `pub` 不能直接成为执行步骤。
+- 在 `tmp/compiler-modularization/probe/` 中，按当前顺序复制 17
+  源文件并加 `module compiler;`，由现有 `yh-new build` 成功
+  产出可执行编译器；该产物再次冷编同一项目，模块汇编 SHA-256
+  均为 `4bd4ba108cd7a2b70e9825375ac3f443e40bfe65e13bd3c078ed8ca41d370730`。
+  此探针仅证明单模块项目迁移入口可行。
+- `GRAPHIFY_OUT=tmp/compiler-modularization/graphify graphify update .`
+  得到 1510 节点、4432 边，但跳过 `.yh`，不能据此判定自举源码
+  依赖；`graphify god-nodes` 的核心结果仍为 C 版。
+- `make` 成功（已有目标无需重建）；`make test` 通过：
+  语法正例 66/66、反例 29/29，运行/拒绝/接受语料 63/63；
+  `make selfhost-native` 通过：
+  三代语法、模块语法、运行语料和旧单文件固定点均通过，项目构建
+  用例 21/21。本轮未运行容器 `make g3`。
+
+结论：先冻结无模块 seed，使活跃编译器作为根 `mod.toml` 项目构建；
+再更新四代冷编自举门、建立四个稳定职责模块。13 模块细拆需先过
+跨模块具名类型接口和全局状态所有权门；本轮未实施这些代码阶段。
+
 ## 2026-09-30 模块与项目管理 MOD-U2..U5 全部交付（mod.toml 项目、三层解析、独立对象/接口、缓存与自举验证）
 
 接上条 MOD-U0/U1。设计方案 §4–§12 的本地三层完整交付；按 ADR-0006 全部

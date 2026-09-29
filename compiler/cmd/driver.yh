@@ -1,0 +1,303 @@
+module cmd;
+import gen;
+import lex;
+import parse;
+
+// ============================================================================
+// driver.yh —— 自举编译器：命令行入口
+//
+// 输出接口（docs/02-plan/yh-自举实施方案-v2.md §3）：
+//     yh --syntax-check <file.yh>   纯语法检查：合法静默退出 0，
+//                                   非法输出诊断并以非零码退出
+//     yh --emit-asm <file.yh>       发射 AArch64 Linux 汇编到标准输出
+//                                   （GNU 语法，经 as/gcc 生成可执行）
+//     yh -o <out> <file.yh>         编译并链接为可执行文件（兼容 stage0
+//                                   的命令行形态）。实现方式：把汇编写到
+//                                   临时文件，调用外部 gcc 汇编/链接，成功后
+//                                   删除临时文件。
+//
+// 退出码：0 成功；1 源文件语法/语义错误或读入失败；2 用法错误。
+// 诊断一律写文件描述符 2；汇编只写缓冲、编译成功后一次性写目标，
+// 错误不会留下看似成功的部分产物。
+// ============================================================================
+
+// drv_build_cmd：拼装「汇编器/链接器」命令行到 buf，返回长度。
+//   GNU/Linux：gcc -no-pie -o <out> <asm>
+//   Darwin   ：clang -o <out> <asm>   （Mach-O 必须 PIE，不加 -no-pie）
+// 调用者保证 buf 足够大（路径长度受限）。
+pub fn drv_build_cmd(buf *u8, cap int, out_path *char, asm_path *char) int {
+    let n int = 0;
+    if (gen.tg_darwin() != 0) {
+        n = gen.append_str(buf, n, "clang -o ");
+    } else {
+        n = gen.append_str(buf, n, "gcc -no-pie -o ");
+    }
+    n = gen.append_str(buf, n, out_path);
+    n = gen.append_str(buf, n, " ");
+    n = gen.append_str(buf, n, asm_path);
+    buf[n] = 0;
+    return n;
+}
+
+// drv_write_asm：把已发射的汇编写入 asm_path（O_WRONLY|O_CREAT|O_TRUNC，
+// 权限 0644）。返回 0 成功。open 旗标随平台不同（Linux 与 macOS 的
+// O_CREAT/O_TRUNC 位不同），由 tg_darwin 判定。
+// drv_host_darwin：宿主平台探测——macOS 独有的系统 plist（Linux 无此
+// 路径；libSystem.B.dylib 在新版 macOS 已入 dyld 共享缓存，磁盘不可见，
+// 不能用作探针）。用于无 -target 时的默认方言选择（与 stage0 在
+// Darwin 宿主默认 Mach-O 的行为一致）；显式 -target 永远覆盖探测。
+pub fn drv_host_darwin() int {
+    let fd int = open("/System/Library/CoreServices/SystemVersion.plist", 0);
+    if (fd >= 0) {
+        close(fd);
+        return 1;
+    }
+    return 0;
+}
+
+// c_target_explicit：用户是否显式给出 -target（显式则不自动探测）。
+pub let c_target_explicit int = 0;
+
+pub fn drv_write_asm(asm_path *char) int {
+    let fl int = 0x241;
+    if (gen.tg_darwin() != 0) {
+        fl = 0x601;
+    }
+    let fd int = open(asm_path, fl, 0x1a4);
+    if (fd < 0) {
+        return gen.fail("无法创建临时汇编文件");
+    }
+    if (gen.flush_output_fd(fd) != 0) {
+        close(fd);
+        return -1;
+    }
+    if (close(fd) != 0) {
+        return gen.fail("写临时汇编文件失败");
+    }
+    return 0;
+}
+
+// run_emit_asm_to：发射汇编到指定文件，再调用外部工具链链接为可执行。
+// obj_path 为最终输出文件，asm_path 为临时汇编文件（调用后删除）。
+pub fn run_emit_asm_to(asm_path *char, obj_path *char) int {
+    if (lex.lex_all() != 0) {
+        return 1;
+    }
+    gen.c_compile = 1;
+    gen.ty_register_builtins();
+    gen.scope_push();
+    if (gen.sem_register_prelude() != 0) {
+        return 1;
+    }
+    if (sem_compile() != 0) {
+        return 1;
+    }
+    if (gen.c_errors > 0) {
+        return 1;
+    }
+    if (drv_write_asm(asm_path) != 0) {
+        return 1;
+    }
+    // 命令行缓冲：两倍路径长度足够（"gcc -no-pie -o " + out + " " + asm + NUL）
+    let cap int = 256;
+    let cmd *u8 = malloc(cap.to_type(u64)).to_type(*u8);
+    if (cmd == 0) {
+        unlink(asm_path);
+        return gen.fail("内存分配失败");
+    }
+    drv_build_cmd(cmd, cap, obj_path, asm_path);
+    let rc int = system(gen.arr_cstr(cmd));
+    free(cmd);
+    unlink(asm_path);
+    if (rc != 0) {
+        return gen.fail_path("链接失败: ", obj_path);
+    }
+    return 0;
+}
+
+
+// usage：输出用法说明（文件描述符 2）。
+pub fn usage() void {
+    let buf [512]u8;
+    let n int = 0;
+    n = gen.append_str(buf, n, "用法: yh --syntax-check <file.yh>\n");
+    n = gen.append_str(buf, n, "      yh --emit-asm <file.yh>\n");
+    n = gen.append_str(buf, n, "      yh -o <out> <file.yh>\n");
+    n = gen.append_str(buf, n, "      yh build [-o out] [module]   项目构建（mod.toml）\n");
+    n = gen.append_str(buf, n, "      yh run                       构建并运行清单 entry\n");
+    n = gen.append_str(buf, n, "      yh list [--resolve name]     列出模块/解释导入绑定\n");
+    gen.write_all(2, buf, n);
+}
+
+// run_syntax_check：--syntax-check 路径（纯语法，G1 行为）。
+pub fn run_syntax_check() int {
+    if (lex.lex_all() != 0) {
+        return 1;
+    }
+    if (parse.parse_source() != 0) {
+        return 1;
+    }
+    if (gen.c_errors > 0) {
+        return 1;
+    }
+    return 0;
+}
+
+// run_emit_asm：--emit-asm 路径（两遍语义 + AArch64 发射）。
+pub fn run_emit_asm() int {
+    if (lex.lex_all() != 0) {
+        return 1;
+    }
+    gen.c_compile = 1;
+    gen.ty_register_builtins();
+    // 全局作用域（第 0 层），随后登记 prelude 外部函数
+    gen.scope_push();
+    if (gen.sem_register_prelude() != 0) {
+        return 1;
+    }
+    if (sem_compile() != 0) {
+        return 1;
+    }
+    if (gen.c_errors > 0) {
+        return 1;
+    }
+    if (gen.flush_output() != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+// main：解析命令行并驱动「读源 → 词法 → （语法 | 编译）」流水线。
+// 形态：
+//   yh --syntax-check <file.yh>      （argc==3）
+//   yh --emit-asm <file.yh>          （argc==3）
+// drv_scan_target：扫描 `-target <dialect>` 选项（可出现在任意位置），
+// 设置 c_dialect 并把其余参数紧凑写入 out（调用方保证容量 ≥ argc）。
+// 返回剩余参数个数（不含程序名占位）。
+// 支持 darwin/macho/macos → TG_DIALECT_DARWIN；gnu/linux/elf → GNU。
+pub fn drv_scan_target(argc int, argv **char, out **char) int {
+    let n int = 0;
+    let i int = 1;
+    for i < argc {
+        if (gen.cstr_eq(argv[i], "-target") != 0 && i + 1 < argc) {
+            c_target_explicit = 1;
+            if (gen.cstr_eq(argv[i + 1], "darwin") != 0
+                || gen.cstr_eq(argv[i + 1], "macho") != 0
+                || gen.cstr_eq(argv[i + 1], "macos") != 0) {
+                gen.c_dialect = gen.TG_DIALECT_DARWIN;
+            } else {
+                gen.c_dialect = gen.TG_DIALECT_GNU;
+            }
+            i += 2;
+        } else {
+            out[n] = argv[i];
+            n += 1;
+            i += 1;
+        }
+    }
+    return n;
+}
+
+// main：解析命令行并驱动「读源 → 词法 → （语法 | 编译）」流水线。
+// 形态（-target <dialect> 可出现在任意位置，默认 gnu）：
+//   yh --syntax-check <file.yh>
+//   yh --emit-asm <file.yh>
+//   yh [-target darwin] -o <out> <file.yh>
+pub fn main(argc int, argv **char) int {
+    // 自身路径（项目构建的子进程再入用）
+    c_argv0 = argv[0];
+    // 先摘除 -target，得到规整后的参数序列（av[0..n-1]）。用固定容量栈数组：
+    // 命令行参数个数有上限（64 足够）。
+    let av [64]*char;
+    let n int = drv_scan_target(argc, argv, av);
+    let mode int = 0;
+    let needs_o int = 0;
+    // 无显式 -target：按宿主平台选默认方言（Darwin 宿主 → Mach-O 方言，
+    // 与 stage0 行为一致；Linux 容器 → GNU）
+    if (c_target_explicit == 0) {
+        if (drv_host_darwin() != 0) {
+            gen.c_dialect = gen.TG_DIALECT_DARWIN;
+        } else {
+            gen.c_dialect = gen.TG_DIALECT_GNU;
+        }
+    }
+    // —— 项目命令（MOD-U2..U5，在单文件分派之前） ——
+    if (n >= 1 && gen.cstr_eq(av[0], "build") != 0) {
+        return mb_cmd_build(av, n);
+    }
+    if (n >= 1 && gen.cstr_eq(av[0], "run") != 0) {
+        return mb_cmd_run();
+    }
+    if (n >= 1 && gen.cstr_eq(av[0], "list") != 0) {
+        return mb_cmd_list(av, n);
+    }
+    if (n == 6 && gen.cstr_eq(av[0], "--emit-module") != 0 && gen.cstr_eq(av[4], "-o") != 0) {
+        // 内部子命令：--emit-module <mod> <提供方根> <主根> -o <out.s>
+        let mlen int = 0;
+        let rlen int = 0;
+        let blen int = 0;
+        let mo int = mb_intern_arg(av[1], &mlen);
+        let ro int = mb_intern_arg(av[2], &rlen);
+        let bo int = mb_intern_arg(av[3], &blen);
+        if (mo < 0 || ro < 0 || bo < 0) {
+            return 1;
+        }
+        return mb_emit_module(mo, mlen, ro, rlen, bo, blen, av[5]);
+    }
+    let src_idx int = 1;
+    let out_idx int = 1;
+    // -o 两种形态（后者与 stage0 的 `yh <file> -o <out>` 接口一致，
+    // tests/yh-run/check.py 按该顺序调用）：
+    //   av = ["-o", <out>, <src>]  或  av = [<src>, "-o", <out>]，共 3 个
+    if (n == 3 && gen.cstr_eq(av[0], "-o") != 0) {
+        mode = 3;
+        needs_o = 1;
+        src_idx = 2;
+        out_idx = 1;
+    }
+    if (needs_o == 0 && n == 3 && gen.cstr_eq(av[1], "-o") != 0) {
+        mode = 3;
+        needs_o = 1;
+        src_idx = 0;
+        out_idx = 2;
+    }
+    if (needs_o == 0) {
+        if (n != 2) {
+            usage();
+            return 2;
+        }
+        if (gen.cstr_eq(av[0], "--syntax-check") != 0) {
+            mode = 1;
+        }
+        if (gen.cstr_eq(av[0], "--emit-asm") != 0) {
+            mode = 2;
+        }
+        if (mode == 0) {
+            usage();
+            return 2;
+        }
+    }
+    gen.c_path = av[src_idx];
+    if (gen.read_source(gen.c_path) != 0) {
+        return 1;
+    }
+    // 各模式都会用到堆分配的全局表（作用域栈等）
+    if (gen.sem_init_tables() != 0) {
+        return 1;
+    }
+    if (mode == 1) {
+        return run_syntax_check();
+    }
+    if (mode == 3) {
+        // 临时汇编文件：<out>.yh-tmp.s（与输出同目录，避免跨文件系统）
+        let abuf *u8 = malloc(512.to_type(u64)).to_type(*u8);
+        if (abuf == 0) {
+            return gen.fail("内存分配失败");
+        }
+        let an int = 0;
+        an = gen.append_str(abuf, an, av[out_idx]);
+        an = gen.append_str(abuf, an, ".yh-tmp.s");
+        return run_emit_asm_to(abuf.to_type(*char), av[out_idx]);
+    }
+    return run_emit_asm();
+}

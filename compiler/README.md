@@ -1,5 +1,10 @@
 # compiler —— yh 自举编译器（.yh 源码）
 
+> 2026-09-30：源码已按 cmd/gen/lex/parse 目录移动，但 Makefile 与
+> 本机自举清单尚未更新，当前构建因此中断；本文件下方描述的是移动前
+> 的已验证构建。恢复构建、填充 mod.toml 与文件拆分的现行步骤见
+> [按目录模块化实施方案](../docs/02-plan/yh-编译器模块化详细方案.md)。
+
 用 yh 语言写成的 yh 编译器，目标 **AArch64 Linux ELF**（GNU 汇编方言）。
 当前完成到实施方案 v2 的 B7：词法、纯语法解析、完整语义与 AArch64 后端
 （`--syntax-check` + `--emit-asm`），覆盖聚合按值、切片、for-in、类型化

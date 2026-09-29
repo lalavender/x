@@ -41,14 +41,19 @@ ROOT = HERE.parent.parent                  # 仓库根
 WORK = ROOT / "tmp" / "selfhost"           # 中间产物（tmp/ 下）
 
 # 与 Makefile 的 SELFHOST_SOURCES 保持一致的拼接顺序。
-SOURCES = [
-    "compiler/model.yh", "compiler/buffer.yh", "compiler/lexer.yh",
-    "compiler/target.yh", "compiler/parse_type.yh", "compiler/symbols.yh",
-    "compiler/emit_arm64.yh", "compiler/sem.yh", "compiler/parse_expr.yh",
-    "compiler/parse_stmt.yh", "compiler/parse_decl.yh",
-    "compiler/parse_module.yh", "compiler/toml.yh", "compiler/project.yh",
-    "compiler/iface.yh", "compiler/module_build.yh", "compiler/driver.yh",
-]
+# 与 Makefile 的 SELFHOST_SOURCES 保持一致（gen/lex/parse/cmd 目录布局）。
+# 与 Makefile 同源：按 seed/MANIFEST.sha256 的声明序
+def seed_sources():
+    # MANIFEST.sha256 行格式：<sha256>  <path>（shasum -a 256）
+    out = []
+    for line in (ROOT / "bootstrap/seed/MANIFEST.sha256").read_text().splitlines():
+        parts = line.split()
+        if len(parts) == 2 and len(parts[0]) == 64:
+            out.append(parts[1].lstrip("./"))
+    return out
+
+
+SOURCES = seed_sources()
 
 
 def run(cmd, **kw):
