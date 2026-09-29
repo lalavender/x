@@ -1,5 +1,34 @@
 # finish
 
+## 2026-09-29 GitHub Actions 发布流水线：tag 触发归档 yh/yh-new 到 Release
+
+- 新增 `.github/workflows/release.yml`：推送任意 tag 触发，双平台构建
+  `yh`（stage0 种子）与 `yh-new`（自举编译器），冒烟验证后用
+  `gh release create` 归档 tar.gz + sha256 到 GitHub Release：
+  - `linux-arm64`：ubuntu-latest + QEMU 仿真 arm64 容器（ubuntu:24.04，
+    与 `make g3` 验收环境同版；免费私有仓库无 arm64 原生 runner），
+    产物 AArch64 Linux ELF；
+  - `darwin-arm64`：macos-14（M1）本机构建，产物 Mach-O；
+  - 冒烟 = yh-new 与 yh 各编译运行一遍 hello。libtcc1.a 仅 ELF 链接需要
+    （tcc_add_runtime 只在 ELF 输出路径调用；本机 Darwin 无
+    /usr/local/lib/tcc 亦一切正常），Linux 冒烟用 `YH_LIBDIR=/build`
+    按开箱状态验证，Linux tarball 因此多带一个 libtcc1.a（make 产物）。
+- 修复原生 AArch64 Linux 构建找不到 crt1.o（容器实测暴露）：Debian/
+  Ubuntu 的 crt1.o/crtn.o/libc.so 在 multiarch 目录
+  （/usr/lib/aarch64-linux-gnu），tcc 默认只搜 /usr/lib。Makefile 在
+  `HOST_OS-HOST_ARCH = Linux-aarch64` 时给 CPPFLAGS 注入
+  `-DCONFIG_TRIPLET="aarch64-linux-gnu"`（tcc.h 的 USE_TRIPLET/
+  ALSO_TRIPLET 使 crt/库/头文件路径带上 multiarch 段）。同时 YHNEW
+  规则加 `-B $(TOP)` 并把 `$(LIBTCC1)` 列为前置条件：Linux ELF 链接
+  必需 libtcc1.a，指向仓库根刚构建的副本（顺带消除 -j 并行竞态）。
+  仅构建配置，不触碰冻结的 stage0 源码；Darwin 的 Mach-O 路径不读
+  libtcc1 与 crt（本机无 /usr/local/lib/tcc 亦一切正常），交叉路径
+  （stage1 自带 -sysroot/-B）不受影响。
+- 本地验证（推 tag 前）：arm64 ubuntu:24.04 容器 `make -j4` 成功，
+  yh-new 与 yh 冒烟通过（YH_LIBDIR=/build，file 确认 AArch64 ELF）；
+  Darwin 本机 make + 冒烟通过。发布链路以 tag 推送后的 Actions 实际
+  运行为准。
+
 ## 2026-09-29 explorer 两项：Ctrl+C 退出修复 + 复制按钮
 
 - **Ctrl+C 无法退出（根因：Python 3.14 默认 SIGINT 处理器的延迟抛出

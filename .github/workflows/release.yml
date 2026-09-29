@@ -1,0 +1,135 @@
+name: Release
+
+# 标签推送时构建 yh（stage0 种子）与 yh-new（自举编译器，ADR-0006 的
+# 主要开发编译器），冒烟验证后归档到 GitHub Release 供下载。
+# 产物形态随宿主：AArch64 Linux → ELF；Darwin arm64 → Mach-O。
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: write
+
+jobs:
+  linux-arm64:
+    name: 构建 AArch64 Linux（ELF）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 免费私有仓库没有 arm64 原生 runner，用 QEMU 在 x86_64 runner 上
+      # 仿真 arm64 容器；产物是货真价实的 AArch64 Linux ELF。
+      - name: 准备 QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: 容器内 make 与冒烟（ubuntu:24.04，与 make g3 验收环境同版）
+        run: |
+          cat > /tmp/smoke.yh <<'EOF'
+          fn main() int {
+              printf("hello, yh!\n");
+              return 0;
+          }
+          EOF
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD":/repo:ro \
+            -v "$PWD/out":/out \
+            -v /tmp/smoke.yh:/smoke.yh:ro \
+            ubuntu:24.04 bash -ec '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq >/dev/null
+              apt-get install -y -qq build-essential >/dev/null
+              cp -r /repo /build
+              cd /build
+              make -j4
+              # Linux ELF 链接需要 libtcc1.a（tcc_add_runtime 只在 ELF 路径
+              # 调用；Darwin Mach-O 不需要）。按开箱状态验证：YH_LIBDIR
+              # 指向解压目录（tarball 里就带着 libtcc1.a）。
+              YH_LIBDIR=/build ./yh-new /smoke.yh -o /tmp/smoke && /tmp/smoke
+              YH_LIBDIR=/build ./yh /smoke.yh -o /tmp/smoke0 && /tmp/smoke0
+              cp yh yh-new libtcc1.a /out/
+            '
+
+      - name: 打包
+        run: |
+          file out/yh out/yh-new
+          TAG="${GITHUB_REF_NAME}"
+          tar czf "yh-${TAG}-linux-arm64.tar.gz" -C out yh yh-new libtcc1.a
+          sha256sum "yh-${TAG}-linux-arm64.tar.gz" > "yh-${TAG}-linux-arm64.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: |
+            yh-*-linux-arm64.tar.gz
+            yh-*-linux-arm64.sha256
+
+  darwin-arm64:
+    name: 构建 Darwin arm64（Mach-O）
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: make
+        run: make
+
+      - name: 冒烟（yh-new 与 yh 各编译运行一遍）
+        run: |
+          cat > /tmp/smoke.yh <<'EOF'
+          fn main() int {
+              printf("hello, yh!\n");
+              return 0;
+          }
+          EOF
+          ./yh-new /tmp/smoke.yh -o /tmp/smoke && /tmp/smoke
+          ./yh /tmp/smoke.yh -o /tmp/smoke0 && /tmp/smoke0
+
+      - name: 打包
+        run: |
+          file yh yh-new
+          TAG="${GITHUB_REF_NAME}"
+          tar czf "yh-${TAG}-darwin-arm64.tar.gz" yh yh-new
+          shasum -a 256 "yh-${TAG}-darwin-arm64.tar.gz" > "yh-${TAG}-darwin-arm64.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64
+          path: |
+            yh-*-darwin-arm64.tar.gz
+            yh-*-darwin-arm64.sha256
+
+  release:
+    name: 发布 Release
+    needs: [linux-arm64, darwin-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: 创建 Release 并归档
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist
+          cat > notes.md <<'EOF'
+          ## 产物说明
+
+          - `*-darwin-arm64.tar.gz`：macOS（Apple Silicon）Mach-O，解压即用：
+            `./yh-new hello.yh -o hello`
+          - `*-linux-arm64.tar.gz`：AArch64 Linux ELF（含运行时库 libtcc1.a，
+            仅 ELF 链接需要，Mach-O 不需要）。Linux 下指到解压目录即可：
+            `YH_LIBDIR=$(pwd) ./yh-new hello.yh -o hello`
+            或安装到系统路径：`mkdir -p /usr/local/lib/tcc && cp libtcc1.a /usr/local/lib/tcc/`
+
+          - `yh`：stage0 种子编译器（C 版，已冻结，作自举种子与差分参照，
+            见 ADR-0006）；`yh-new`：自举编译器（主要开发编译器）。
+          - `.sha256` 为对应 tar.gz 的 SHA-256 校验和。
+          EOF
+          sed -i 's/^          //' notes.md
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "yh ${GITHUB_REF_NAME}" \
+            --notes-file notes.md

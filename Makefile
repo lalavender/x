@@ -90,6 +90,21 @@ ifeq ($(TARGET_CC),)
  endif
 endif
 
+# 宿主系统探测（上面 TARGET_CC 分支里是条件赋值，这里补全为无条件）。
+HOST_OS ?= $(shell uname -s)
+HOST_ARCH ?= $(shell uname -m)
+
+# 原生 AArch64 Linux 构建需要 multiarch 路径：Debian/Ubuntu 的 crt1.o、
+# libc.so、bits/ 头文件位于 /usr/lib/aarch64-linux-gnu，而 tcc 的默认
+# crt/库路径只有 /usr/lib。编译期注入 CONFIG_TRIPLET 后，tcc.h 的
+# USE_TRIPLET/ALSO_TRIPLET 会给 crt、库与头文件路径自动带上 multiarch
+# 段，容器/本机原生 make 与发布产物开箱即用。仅影响 Linux 原生构建：
+# Darwin（Mach-O）不走 crt 路径，交叉路径（stage1 的 -sysroot/-B）自带
+# 显式 sysroot，均不受影响。
+ifeq ($(HOST_OS)-$(HOST_ARCH),Linux-aarch64)
+ CPPFLAGS += -DCONFIG_TRIPLET=\"aarch64-linux-gnu\"
+endif
+
 # 归档 AArch64 Linux ELF 成员需要 ELF 归档器：
 # macOS 的 BSD ar 会拒绝非 Mach-O 成员，clang 同目录的 llvm-ar 可用。
 TARGET_AR ?=
@@ -205,8 +220,11 @@ $(BOOTSTRAP_DIR)/compiler.yh: $(SELFHOST_SOURCES)
 # 自举编译器：stage0 种子编译 compiler/ 拼接源码，产出宿主本机形态
 # （Darwin → Mach-O，Linux → ELF）。规则须在 BOOTSTRAP_DIR 定义之后：
 # make 的前置条件列表是即时展开的。
-$(YHNEW): yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh
-	./yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh -o $@
+# -B $(TOP)：Linux ELF 链接必需 libtcc1.a（tcc_add_runtime 仅 ELF 路径
+# 调用），指向仓库根刚构建的副本，原生 make 开箱即用；Darwin 的 Mach-O
+# 路径不读它，行为不变。$(LIBTCC1) 同时列为前置条件，消除 -j 并行竞态。
+$(YHNEW): yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh $(LIBTCC1)
+	./yh$(EXESUF) $(BOOTSTRAP_DIR)/compiler.yh -o $@ -B $(TOP)
 
 # stage1：stage0 交叉编译拼接源码（AArch64 Linux ELF），在容器内运行
 $(BOOTSTRAP_DIR)/stage1: $(BOOTSTRAP_DIR)/compiler.yh yh$(EXESUF)
