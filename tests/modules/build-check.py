@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tests/modules 项目级验收（MOD-U2..U5）。
 
-用 tests/modules/projects/ 下的真实 mod.toml 项目 fixture，把自举编译器
+用 tests/modules/projects/ 下的真实 project.toml 项目 fixture，把自举编译器
 的「发现 → 索引 → 三层解析 → 模块语义 → 独立对象/接口 → 链接运行 →
 对象缓存」整条管线过一遍。每个用例复制到 tmp/modcheck/ 后执行：
 
@@ -48,8 +48,10 @@ case("u4-basic-run", "run", "basic", "app", 255)
 case("u4-iso-run", "run", "iso", "host", 15)
 case("u4-aggfloat-run", "run", "aggfloat", "host", 29)
 # —— MOD-U2：清单与三层解析 ——
-case("u2-toml-syntax", "fail", "tomlbad", ".", msg="mod.toml")
+case("u2-toml-syntax", "fail", "tomlbad", ".", msg="project.toml")
 case("u2-toml-unknown-field", "fail", "tomlunknown", ".", msg="未知字段")
+# —— 清单精简（2026-09-30）：name 必须标识符、author 放行、入口 = main 模块 ——
+case("p1-name-not-identifier", "fail", "tomlnamebad", ".", msg="project.name")
 case("u2-transitive-rejected", "fail", "transitive", "host", msg="模块不存在")
 case("u2-ambiguous-deps", "fail", "ambiguity", "host", msg="歧义")
 # —— MOD-U3：模块语义 ——
@@ -118,7 +120,7 @@ def main():
     else:
         # 找到 geom 的接口文件并破坏头行
         bad = None
-        for p in dst.rglob("geom.s.i"):
+        for p in dst.rglob("*geom*.s.i"):
             bad = p
         if bad is None:
             report(False, "u4-iface-corrupt", "未找到 geom.s.i")
@@ -137,9 +139,10 @@ def main():
         report(False, "p2-fourdir-probe", f"构建失败: {r.stderr[-400:]}")
     else:
         mods = sorted(p.name for p in dst.rglob("*.s.i"))
-        report(mods == ["cmd.s.i", "gen.s.i", "lex.s.i", "parse.s.i"],
+        report(mods == ["example_fourdir-gen.s.i", "example_fourdir-lex.s.i",
+                        "example_fourdir-main.s.i", "example_fourdir-parse.s.i"],
                "p2-fourdir-iface", f"接口文件: {mods}")
-        r2 = sh([str(dst / "tmp/yh-build/app.bin")], cwd=dst)
+        r2 = sh([str(dst / ".build/example_fourdir")], cwd=dst)
         report(r2.returncode == 118, "p2-fourdir-run",
                f"退出码 {r2.returncode} 期望 118 (bump1+touch3+scan7+with_tok6+via101)")
 
@@ -148,6 +151,33 @@ def main():
     r = sh([compiler, "build"], cwd=dst)
     report(r.returncode != 0 and "私有字段" in (r.stderr + r.stdout),
            "p2-fourdir-private", f"私有字段未被拒绝: {(r.stderr + r.stdout)[-300:]}")
+
+    # —— project.toml 增强：as 别名 + KEY.MOD 跨项目导入 + 目录唯一模块 ——
+    dst = WORK / "keyimp"
+    copy_proj(PROJ / "keyimp", dst)
+    r = sh([compiler, "build"], cwd=dst / "host")
+    if r.returncode != 0:
+        report(False, "u6-keyimp-run", f"构建失败: {r.stderr[-300:]}")
+    else:
+        r2 = sh([str(dst / "host" / ".build/example_keyimp")], cwd=dst / "host")
+        report(r2.returncode == 34, "u6-keyimp-run",
+               f"退出码 {r2.returncode} 期望 34")
+
+    dst = WORK / "alias"
+    copy_proj(PROJ / "alias", dst)
+    r = sh([compiler, "build"], cwd=dst / "host")
+    if r.returncode != 0:
+        report(False, "u6-alias-run", f"构建失败: {r.stderr[-300:]}")
+    else:
+        r2 = sh([str(dst / "host" / ".build/example_alias")], cwd=dst / "host")
+        report(r2.returncode == 7, "u6-alias-run",
+               f"退出码 {r2.returncode} 期望 7")
+
+    dst = WORK / "dirconflict"
+    copy_proj(PROJ / "dirconflict", dst)
+    r = sh([compiler, "build"], cwd=dst / "host")
+    report(r.returncode != 0 and "每目录一个模块" in (r.stderr + r.stdout),
+           "u6-dir-conflict", f"目录冲突未被拒绝: {(r.stderr + r.stdout)[-300:]}")
 
     # —— MOD-U5：重绑定与冷热一致 ——
     dst = WORK / "u5_rebind"
@@ -158,7 +188,7 @@ def main():
     r2 = sh([compiler, "build"], cwd=dst / "app")
     report(r2.returncode == 0 and "[缓存]" in r2.stdout and "[编译]" not in r2.stdout,
            "u5-hot-cache-hits", f"二次构建未全部命中缓存: {r2.stdout[-200:]}")
-    # 新增本地 json（与第三方同源码、不带 mod.toml）→ json/main 必须重编译
+    # 新增本地 json（与第三方同源码、不带 project.toml）→ json/main 必须重编译
     (dst / "app" / "src" / "json").mkdir(parents=True, exist_ok=True)
     shutil.copy(dst / "json" / "src" / "codec.yh", dst / "app" / "src" / "json" / "codec.yh")
     r3 = sh([compiler, "build"], cwd=dst / "app")
@@ -170,7 +200,21 @@ def main():
     report(r4.returncode == 255, "u5-rebind-run-same",
            f"重绑定后运行退出码 {r4.returncode} 期望 255")
 
-    total = len(CASES) + 8
+    # —— 清单精简：yh version 读 version + author 放行 + 产物名取 name ——
+    dst = WORK / "authorproj"
+    copy_proj(PROJ / "authorproj", dst)
+    r = sh([compiler, "version"], cwd=dst)
+    report(r.returncode == 0 and r.stdout.strip() == "authorproj 1.2.3",
+           "p1-version-cmd", f"yh version 输出 {r.stdout.strip()!r} 期望 'authorproj 1.2.3'")
+    r = sh([compiler, "build"], cwd=dst)
+    report(r.returncode == 0 and (dst / ".build" / "authorproj").exists(),
+           "p1-outname-from-name", f"产物名未取 project.name: {r.stdout[-200:]}")
+    if (dst / ".build" / "authorproj").exists():
+        r2 = sh([str(dst / ".build" / "authorproj")], cwd=dst)
+        report(r2.returncode == 42, "p1-outname-runs",
+               f"产物退出码 {r2.returncode} 期望 42")
+
+    total = len(CASES) + 15
     print(f"project cases: 通过 {total - failed}/{total}")
     return 1 if failed else 0
 

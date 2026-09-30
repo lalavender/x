@@ -42,7 +42,7 @@ def main() -> int:
     prev = seed_cc
     gens = []
     for name in ("cc2", "cc3", "cc4"):
-        bdir = COMPILER / "tmp/yh-build"
+        bdir = COMPILER / ".build"
         if bdir.exists():
             shutil.rmtree(bdir)
         out = WORK / name
@@ -54,16 +54,25 @@ def main() -> int:
         prev = out
         print(f"{name} 构建完成")
 
-    # 固定点：相邻两代全部模块产物逐字节一致
-    for (n1, d1, _), (n2, d2, _) in zip(gens, gens[1:]):
-        for mod in ("gen", "lex", "parse", "cmd"):
-            for ext in (".s", ".s.i"):
-                a, b = d1 / (mod + ext), d2 / (mod + ext)
-                if a.read_bytes() != b.read_bytes():
-                    print(f"FAIL 固定点 {n1}→{n2} {mod}{ext} 不一致")
-                    ok = False
-        if ok:
-            print(f"固定点 {n1}→{n2}：gen/lex/parse/cmd 全部 .s/.s.i 逐字节一致")
+    # 固定点：相邻两代全部模块产物逐字节一致（asm/iface 两目录全产物）
+    def snapshot(bdir: Path):
+        return {str(p.relative_to(bdir)): p.read_bytes()
+                for sub in ("asm", "iface")
+                for p in sorted((bdir / sub).glob("*.s*"))}
+    snaps = [(n, snapshot(d)) for n, d, _ in gens]
+    for (n1, s1), (n2, s2) in zip(snaps, snaps[1:]):
+        same = (s1 == s2)
+        if not same:
+            print(f"FAIL 固定点 {n1}→{n2} 不一致")
+            only = set(s1) ^ set(s2)
+            if only:
+                print("  产物集合差异:", sorted(only))
+            for k in sorted(set(s1) & set(s2)):
+                if s1[k] != s2[k]:
+                    print("  内容差异:", k)
+            ok = False
+        else:
+            print(f"固定点 {n1}→{n2}：全部 .s/.s.i（{len(s1)} 个）逐字节一致")
 
     # stage4 冒烟 + 语料
     hello = WORK / "hello.yh"

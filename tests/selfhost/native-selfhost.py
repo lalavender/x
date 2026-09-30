@@ -32,7 +32,7 @@ def run(cmd, cwd=None):
 
 
 def build(cc, out) -> Path:
-    bdir = COMPILER / "tmp/yh-build"
+    bdir = COMPILER / ".build"
     if bdir.exists():
         shutil.rmtree(bdir)
     r = run([str(cc), "build", "-o", str(out)], cwd=COMPILER)
@@ -57,10 +57,22 @@ def main() -> int:
     d3 = build(WORK / "cc2", WORK / "cc3")
     print("cc2/cc3 构建完成（种子 = bin/yh）")
 
-    # 1) 固定点
-    same = all((d2 / f"{m}{ext}").read_bytes() == (d3 / f"{m}{ext}").read_bytes()
-               for m in MODS for ext in (".s", ".s.i"))
-    print("模块固定点（cc2 == cc3 的 .s/.s.i）：%s" % ("一致" if same else "不一致"))
+    # 1) 固定点：.build/asm/*.s 与 .build/iface/*.s.i 逐字节一致
+    def snapshot(bdir: Path):
+        return {str(p.relative_to(bdir)): p.read_bytes()
+                for sub in ("asm", "iface")
+                for p in sorted((bdir / sub).glob("*.s*"))}
+    s2, s3 = snapshot(d2), snapshot(d3)
+    same = (s2 == s3)
+    print("模块固定点（cc2 == cc3 的 .s/.s.i，%d 个产物）：%s"
+          % (len(s2), "一致" if same else "不一致"))
+    if not same:
+        only = set(s2) ^ set(s3)
+        if only:
+            print("  产物集合差异:", sorted(only))
+        for k in sorted(set(s2) & set(s3)):
+            if s2[k] != s3[k]:
+                print("  内容差异:", k)
     ok = ok and same
 
     cc3 = str(WORK / "cc3")

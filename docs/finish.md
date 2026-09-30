@@ -1,5 +1,86 @@
 # finish
 
+## 2026-09-30 清单精简：name 产物名 + version 命令 + 入口 = main 模块（用户项目规划落地）
+
+按 docs/todo.md「项目规划」（该节实施后按文件约定移出，历史在此）：
+
+- **schema**（`compiler/cmd/project_index.yh`）：`name` 必须是标识符
+  （首字符字母/下划线，其余字母数字下划线），否则诊断「project.name
+  必须是标识符」/「只能是字母、数字与下划线」；新增放行 `author`
+  （只接受不存）；**删除 `entry` 字段**（旧字段会命中未知字段检查）；
+  `version` 不再解析后丢弃，存入 `PProj.ver_off/ver_len`。
+- **入口 = 模块名 `main`**：pj_load_project 扫描源码根时标记
+  `is_entry`；模块名唯一（同名模块跨目录合并），故至多命中一次——
+  先写的「多个 main」歧义分支不可达，已删除。模块名与目录名无关
+  （编译器自身 `compiler/cmd/*.yh` 即 `module main;`，目录仍叫 cmd）。
+  新增 `pj_entry_mod(proj)`（`project_resolve.yh`）供 build/run/query 用；
+  `PProj.entry_off/entry_len` 删除。
+- **产物名**：`yh build` 无 `-o` 时取 `project.name`（原固定 `.build/yh`）；
+  `yh run` 用同名二进制。`name` 合法标识符约束正是为了让文件名无需 sanitize。
+- **`yh version`**：打印当前项目 `<name> <version>`（version 缺省时标注
+  「未声明 version」）；裸 `yh` 的用法说明后附同一行，不在项目内静默跳过
+  （`pj_find_root(quiet)` 加参数，非静默时保持原诊断）。
+- **顺带修**：`build` 的库模式完成信息用 `pj_canon_len`（已被后续 canon
+  覆写）打印目录，改为 `build_len`。
+- **清单批量更新**：26 个 project.toml 删 `entry` 行、name 去斜杠
+  （`yh/compiler` → `yh_compiler`、`example/xxx` → `example_xxx`、
+  `yh/std` → `yh_std`）；`tests/modules/projects/fourdir{'',bad}/cmd/main.yh`
+  改 `module main;`（目录名保留 cmd，覆盖「模块名≠目录名」）。
+- **新语料**：`tests/modules/projects/tomlnamebad`（name 含 `/` 必须拒绝）、
+  `authorproj`（name/version/author 三字段齐备）；build-check.py 增
+  `p1-name-not-identifier`、`p1-version-cmd`、`p1-outname-from-name`、
+  `p1-outname-runs`，并把 fourdir 接口名断言改为 `example_fourdir-main.s.i`、
+  keyimp/alias 产物路径改为按 name。项目验收 31/31。
+- **滚动自举桥**：删 `entry` 后旧种子（按 entry 选入口）不再认识新清单，
+  首次 `make` 会把编译器当库项目且不链接。按既有做法桥接——临时给
+  compiler/project.toml 加 `entry = "main"` → 旧种子构建出新 `yh` →
+  删临时行 → 新编译器自举构建 → `make seed` 滚种子。
+- **验证**：`make` ✓（删产物冷编）；`make test` 63/63 ✓；
+  `python3 tests/modules/check.py` 17/17 ✓；`make selfhost-native` 全绿
+  （两代固定点 8 产物一致、cc3 自解析 25 文件、语法 66/66+29/29、
+  run 63/63、项目 31/31）✓；种子已滚动（`bin/yh.sha256` 更新）。
+- **设计文档**：`docs/03-design/yh-模块与项目管理设计.md` 的示例清单、
+  字段表、入口规则、命令表同步（该文档仍通篇写 mod.toml，属既有欠账，
+  本轮未动）。
+
+## 2026-09-30 project.toml 改名 + import as/跨项目导入 + .build 缓存布局（用户项目规划落地）
+
+按 docs/todo.md「项目规划」实施（方案见
+[project.toml与模块增强方案](02-plan/yh-project.toml与模块增强方案.md)）：
+
+- **import 语法扩展**：`import NAME (as ALIAS)?;` 与
+  `import KEY.MOD (as ALIAS)?;`。ImportEnt 扩展 proj_key/alias 字段
+  （model.yh），mod_parse_head 解析别名与两段点分（多于两段拒绝），
+  重复绑定名报错（同模块不同来源用 as 区分）。
+- **限定调用按别名**：mod_file_binding 改按 alias 匹配（原按查找名）。
+- **绑定架构重构**：删除 gen 侧按名匹配的 mod_bind_current_file，改为
+  cmd 侧 mb_file_head_bind(fi) 直绑——child 编译时按扫描期 p_imp 记录
+  （file+line+col 对应）把解析结果写入 mod_import_mod，天然支持别名与
+  跨项目（解析结果与名字解耦）。
+- **KEY.MOD 限定解析**（pj_bind_imports）：键在 [dependencies] 查找，
+  键缺失/依赖项目无可导入模块显式报错；不走三层搜索。
+- **目录唯一模块**：pj_index_file 登记文件时检查同目录是否已有其他
+  模块的文件，违反报两个模块名（新增 pj_dir_prefix_len/pj_same_np）。
+- **mod.toml → project.toml**：pj_load_project/pj_find_root/pj_proj_diag
+  与全部 fixtures（31 个）、编译器自身清单同步改名。
+- **.build 缓存布局**：.build/asm（每模块 .s）、.build/obj（每模块 .o）、
+  .build/iface（<tag>.s.i）、.build/manifest；产物名用
+  `<sanitize(proj)>-<module>` tag（KEY.MOD 下同名模块防冲突）；
+  两步链接（gcc -c 逐模块 → 链接全部 .o）；默认产物 = .build/yh。
+- **缓存键补编译器身份**：manifest FNV 哈希加入编译器二进制自身内容
+  （c_argv0 文件），滚动代次下热缓存安全。
+- **修复**：pj_imp_push 重写时漏带 p_imp_mod 数组分配（首写空指针
+  段错误，lldb 定位后补 nd9）；mod_skip_head 的 while 语法错误；
+  pj_dir_prefix_len 参数用了关键字 len；pj_imp_push 扩容计数 cnt 缺
+  类型声明；mod_skip_head/parse_module 的旧式 while 全部改 for 条件式。
+- **种子滚动**：因清单改名触发一次 bootstrap bump（旧种子只认
+  mod.toml）——临时 mod.toml 副本 + 旧种子构建 → 新编译器
+  （支持 project.toml）→ 删副本、滚种子。迭代桥接 asm/*.s.i →
+  iface/ 解决新旧 iface 写读路径差异。
+- **验证**：make ✓；make test 63/63 ✓；make selfhost-native 全绿
+  （两代固定点 8 产物一致、自解析 25 文件、语法 66+29、run 63、
+  modules 17、项目验收 26/26 含新增 alias/keyimp/dirconflict）✓；
+  tools/selfbuild-gate.py（cc2→cc3→cc4 固定点）✓。
 ## 2026-09-30 0.0.3 发布：滚动自举首次端到端跑通（CI 以 0.0.2 资产为种子）
 
 - tag `0.0.3` 推送触发新发布流水线，两次失败后全绿：

@@ -47,10 +47,10 @@ demo/
 
 ```toml
 [project]
-name = "example/demo"
+name = "demo"
 version = "0.1.0"
+author = "lavender"
 source = "src"
-entry = "main"
 
 [dependencies]
 json = { path = "../json" }
@@ -109,17 +109,28 @@ fn main() int {
 ## 3. module 和 import 语法
 
 模块模式文件顺序固定：注释与空白 → module 声明 → import 声明 →
-顶层业务声明。
+顶层业务声明。**每个文件的第一行（注释除外）必须是 module 声明**；
+**每个目录有且只有一个模块**（违反报错）；源码模块导入图禁止循环
+（报完整环链）。
 
 ```yh
 module app;
 
 import os;
-import json;
+import libs.os as l;
 ```
 
-简单语句沿用 yh 的分号规则。首版只支持 `import IDENT;`，默认绑定名
-就是这个 IDENT。不需要字符串导入路径、网络地址、文件后缀或相对路径。
+简单语句沿用 yh 的分号规则。import 形式（2026-09-30 已实施）：
+
+| 形式 | 查找 | 绑定名 |
+| --- | --- | --- |
+| `import os;` | 三层搜索（本项目→标准库→直接依赖） | os |
+| `import os as os1;` | 三层搜索 | os1 |
+| `import libs.os;` | 直接解析到依赖键 libs 的项目的 os 模块 | os |
+| `import libs.os as l;` | 同上 | l |
+
+第一段为 [dependencies] 依赖键时走跨项目直解析（不走三层，键缺失或
+依赖无可导入模块显式报错）；绑定名重复报错（这正是 as 的用途）。
 导入只允许出现在文件头，不允许出现在函数体或业务声明之后。
 
 拟议 grammar 增量如下，不直接改写当前 `docs/yh.g4`：
@@ -161,10 +172,10 @@ import 的绑定属于文件，不能被同模块其他文件借用。重复导�
 
 | 字段 | 类型 | 规则 |
 | --- | --- | --- |
-| project.name | 字符串 | 必填，非空，项目的稳定身份；不是下载地址 |
-| project.version | 字符串 | 本地阶段可选，发布时必填；具体版本规则另行确定 |
+| project.name | 字符串 | 必填，标识符（字母或下划线开头，其余字母数字下划线）；项目的稳定身份，`yh build` 无 `-o` 时产物名取它 |
+| project.version | 字符串 | 可选，`yh version` 读取显示；具体版本规则另行确定 |
+| project.author | 字符串 | 可选，仅接受不解释 |
 | project.source | 字符串 | 可选，默认 src；相对 mod.toml 所在目录的源码根 |
-| project.entry | 字符串 | 可选，当前项目的入口模块名；缺省时为库项目 |
 | dependencies | 表 | 可选，记录当前项目直接依赖的项目 |
 | dependencies.<依赖键>.path | 字符串 | 本地阶段必填，相对声明它的 mod.toml 定位依赖项目 |
 
@@ -190,7 +201,8 @@ source、依赖 path 均相对各自清单解析，不受运行命令的工作�
 文件属于一个候选，不是多个同名模块。
 
 索引只负责发现文件头；可达模块再执行完整词法、语法和语义检查。
-入口项目构建从 entry 出发，库项目构建以其库模块为根。临时产物放在
+入口项目构建从 `module main;` 的模块出发（模块名与目录名无关），
+库项目（无 main 模块）构建以其库模块为根。临时产物放在
 tmp/，不放进 source；目前不增加测试后缀和平台文件名的特殊筛选规则。
 
 对 `import os;`，按以下顺序查找：
@@ -305,7 +317,7 @@ enum 沿用当前枚举项登记规则，不借模块化引入另一套枚举命
 同模块文件之间没有 import 边，拆文件不会凭空创造模块循环。
 源码图与后续版本需求图分别管理。
 
-project.entry 指定本项目入口模块。仅该模块的 main 按已确定的 yh
+模块名为 `main` 的模块即本项目入口（清单不另设入口字段）。仅该模块的 main 按已确定的 yh
 入口签名生成最终程序入口；main 不需要 pub。库模块不要求 main。
 其他模块里名为 main 的函数仍按普通模块符号处理。
 
@@ -352,9 +364,10 @@ m.value 都要查询已绑定的模块接口；模块名字不是运行时对象
 
 | 命令 | 行为 |
 | --- | --- |
-| yh build | 查找 mod.toml；有 entry 则构建程序，无 entry 则构建项目库模块 |
+| yh build | 查找 mod.toml；有 `module main;` 则构建程序（产物默认 `.build/<name>`），否则构建项目库模块 |
 | yh build math | 只选择当前项目 math 为构建根，再构建其依赖 |
-| yh run | 构建并运行清单 entry；库项目报告未指定入口 |
+| yh run | 构建并运行 `module main;`；库项目报告无入口模块 |
+| yh version | 打印当前项目的 name 与 version；裸 `yh` 用法后附同一行 |
 | yh list | 列出当前项目的模块名和实现文件 |
 | yh list --resolve os | 解释该项目 import os 的匹配来源与优先级 |
 

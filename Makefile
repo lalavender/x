@@ -53,7 +53,7 @@ all: $(YH)
 # 一步链：种子（上一版编译器）对活跃四模块项目 yh build。
 # 每次冷编（compiler/tmp/yh-build 缓存键不含编译器身份，滚动代次下
 # 冷编才安全）；产物形态随宿主（Darwin → Mach-O，Linux → ELF）。
-$(YH): $(YH_PREREQ) $(wildcard compiler/*.yh) $(wildcard compiler/*/*.yh) $(TOPSRC)/compiler/mod.toml
+$(YH): $(YH_PREREQ) $(wildcard compiler/*.yh) $(wildcard compiler/*/*.yh) $(TOPSRC)/compiler/project.toml
 	rm -rf compiler/tmp/yh-build
 	cd compiler && $(abspath $(SEED)) build -o ../yh
 
@@ -105,3 +105,4 @@ help:
 .PHONY: all install uninstall test test-all explorer seed selfhost-native clean help
 
 endif # ($(INCLUDED),no)
+

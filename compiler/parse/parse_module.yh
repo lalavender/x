@@ -2,16 +2,18 @@ module parse;
 import gen;
 
 // ============================================================================
-// parse_module.yh —— 自举编译器：模块头解析（MOD-U1）
+// parse_module.yh —— 自举编译器：模块头解析（MOD-U1 + project.toml 增强）
 //
-// 实现「模块与项目管理」设计（docs/03-design/yh-模块与项目管理设计.md §3）
-// 的文件头语法：注释与空白之后依次是 module 归属声明、import 声明，
-// 然后才是顶层业务声明。本阶段只做语法与文件身份：
-//   * 记录文件归属（module 名）与本文件导入表（ImportEnt，model.yh）；
-//   * 重复导入在解析期报错；未使用导入、导入名与声明重名等语义检查
-//     在 MOD-U3 引入模块作用域时实施；
-//   * 纯语法检查不解析 mod.toml、不搜索依赖：未知模块不是语法错误。
-// 单文件旧形态（无 module 声明）保持不变；import 不允许脱离 module 出现。
+// 文件头语法（注释与空白之后）：module 归属声明 → import 声明 → 业务声明。
+//   * module IDENT;（项目模式强制首声明；旧单文件 CLI 不要求）
+//   * import NAME;                  同项目/标准库/三层解析，绑定名 NAME
+//   * import NAME as ALIAS;         同上，绑定名 ALIAS
+//   * import KEY.MOD;               跨项目：依赖键 KEY 项目的 MOD 模块，
+//                                   绑定名 MOD（不走三层搜索）
+//   * import KEY.MOD as ALIAS;      同上，绑定名 ALIAS
+// 记录文件归属（module 名）与本文件导入表（ImportEnt：查找名/别名/
+// 依赖键）。重复绑定名解析期报错；未使用导入在文件编译完后检查；
+// 纯语法检查不解析 project.toml、不搜索依赖：未知模块不是语法错误。
 // ============================================================================
 
 // mod_valid_name：当前 token 是否可作模块/导入名——单个标识符，
@@ -26,16 +28,16 @@ pub fn mod_valid_name() int {
     return 1;
 }
 
-// mod_import_find：按源码区间 [start,start+n) 查本文件导入表。
-// 返回表内下标；未导入返回 -1（重复导入检查用）。
+// mod_import_find：按绑定名（别名）源码区间查本文件导入表。
+// 返回表内下标；未导入返回 -1（同绑定名重复检查用）。
 pub fn mod_import_find(start int, n int) int {
     let i int = 0;
     for i < gen.mod_import_n {
-        if (gen.mod_imports[i].name_len == n) {
+        if (gen.mod_imports[i].alias_len == n) {
             let match int = 1;
             let j int = 0;
             for j < n {
-                if (gen.np_data[gen.mod_imports[i].name_off + j] != gen.c_src[start + j]) {
+                if (gen.np_data[gen.mod_imports[i].alias_off + j] != gen.c_src[start + j]) {
                     match = 0;
                     break;
                 }
@@ -51,9 +53,12 @@ pub fn mod_import_find(start int, n int) int {
 }
 
 // mod_import_push：向本文件导入表追加一条（名字 intern 进名字池）。
-// 平行的绑定/使用数组随表一起扩容（mod_bind_current_file / 未使用检查用）。
+// name=查找名（模块名，点分导入取 MOD 段），alias=绑定名，
+// proj_key=跨项目依赖键（同项目传 -1/0）。
+// 平行的绑定/使用数组随表一起扩容（cmd 侧绑定 / 未使用检查用）。
 // 返回 0 成功；内存分配失败输出诊断并返回 -1。
-pub fn mod_import_push(start int, n int, line int, col int) int {
+pub fn mod_import_push(start int, n int, astart int, alen int,
+    kstart int, klen int, line int, col int) int {
     if (gen.mod_import_n == gen.mod_import_cap) {
         let ncap int = gen.mod_import_cap * 2;
         if (ncap == 0) {
@@ -92,8 +97,25 @@ pub fn mod_import_push(start int, n int, line int, col int) int {
     if (off < 0) {
         return -1;
     }
+    let aoff int = gen.name_intern(astart, alen);
+    if (aoff < 0) {
+        return -1;
+    }
     gen.mod_imports[gen.mod_import_n].name_off = off;
     gen.mod_imports[gen.mod_import_n].name_len = n;
+    if (klen > 0) {
+        let koff int = gen.name_intern(kstart, klen);
+        if (koff < 0) {
+            return -1;
+        }
+        gen.mod_imports[gen.mod_import_n].proj_key_off = koff;
+        gen.mod_imports[gen.mod_import_n].proj_key_len = klen;
+    } else {
+        gen.mod_imports[gen.mod_import_n].proj_key_off = -1;
+        gen.mod_imports[gen.mod_import_n].proj_key_len = 0;
+    }
+    gen.mod_imports[gen.mod_import_n].alias_off = aoff;
+    gen.mod_imports[gen.mod_import_n].alias_len = alen;
     gen.mod_imports[gen.mod_import_n].line = line;
     gen.mod_imports[gen.mod_import_n].col = col;
     gen.mod_import_mod[gen.mod_import_n] = -1;
@@ -110,53 +132,32 @@ pub fn mod_reset_file() void {
     gen.mod_name_len = 0;
 }
 
-// mod_bind_current_file：把当前文件的每条导入绑定到已加载接口（ModInfo）。
-// 模块模式下由驱动在解析文件头后调用；单文件/接口加载路径不调用。
-// 绑定失败（导入没有对应接口）视为内部错误并报错。
-pub fn mod_bind_current_file() int {
-    if (gen.c_module_mode == 0) {
+
+// mod_parse_alias：解析可选的 `as ALIAS`（无别名时绑定名 = 查找名）。
+// 输入查找名源码区间 [dstart,dstart+dlen)；出参别名区间。
+// 消费 `as IDENT`（若有）。返回 0；别名非法或重复报错返回 -1。
+fn mod_parse_alias(dstart int, dlen int, astart *int, alen *int) int {
+    astart[0] = dstart;
+    alen[0] = dlen;
+    if (p_cur() != gen.TK_AS) {
         return 0;
     }
-    let i int = 0;
-    for i < gen.mod_import_n {
-        let found int = -1;
-        let mi int = 0;
-        for mi < gen.c_mod_n {
-            if (gen.c_mods[mi].bind_len == gen.mod_imports[i].name_len
-                && gen.np_data[gen.c_mods[mi].bind_off] == gen.np_data[gen.mod_imports[i].name_off]) {
-                let match int = 1;
-                let j int = 1;
-                for j < gen.mod_imports[i].name_len {
-                    if (gen.np_data[gen.c_mods[mi].bind_off + j] != gen.np_data[gen.mod_imports[i].name_off + j]) {
-                        match = 0;
-                        break;
-                    }
-                    j += 1;
-                }
-                if (match != 0) {
-                    found = mi;
-                    break;
-                }
-            }
-            mi += 1;
-        }
-        if (found < 0) {
-            return gen.err_lc(gen.mod_imports[i].line, gen.mod_imports[i].col,
-                "内部错误：导入未解析到已加载接口");
-        }
-        gen.mod_import_mod[i] = found;
-        gen.mod_import_used[i] = 0;
-        i += 1;
+    p_adv();
+    if (mod_valid_name() == 0) {
+        return gen.err_tok("此处需要一个导入别名（单个标识符，_ 除外）");
     }
+    astart[0] = gen.c_toks[gen.c_pos].start;
+    alen[0] = gen.c_toks[gen.c_pos].len;
+    p_adv();
     return 0;
 }
 
 // mod_parse_head：解析文件头（module 声明 → import 声明）。
 // 由 parse_source 开头调用（语法模式与编译 pass 1 共用），消费到的
-// token 之后交给业务声明主循环。规则（设计 §3）：
+// token 之后交给业务声明主循环。规则：
 //   * module 声明必须是文件第一个 token；import 只能出现在 module 之后；
-//   * 模块名/导入名为单个标识符（"_" 除外）；
-//   * 同一文件重复导入同一模块名报错。
+//   * 模块名为单个标识符（"_" 除外）；import 目标为 NAME 或 KEY.MOD；
+//   * 同一文件重复绑定名报错（同模块用不同别名导入合法）。
 // 返回 0 成功；失败 -1（诊断已输出）。
 pub fn mod_parse_head() int {
     if (p_cur() != gen.TK_MODULE) {
@@ -188,17 +189,45 @@ pub fn mod_parse_head() int {
         if (mod_valid_name() == 0) {
             return gen.err_tok("此处需要一个导入模块名（单个标识符，_ 除外）");
         }
-        let istart int = gen.c_toks[gen.c_pos].start;
-        let ilen int = gen.c_toks[gen.c_pos].len;
+        // 第一段：NAME 或 KEY（点分导入的项目键）
+        let s1 int = gen.c_toks[gen.c_pos].start;
+        let l1 int = gen.c_toks[gen.c_pos].len;
         let iline int = gen.c_toks[gen.c_pos].line;
         let icol int = gen.c_toks[gen.c_pos].col;
-        if (mod_import_find(istart, ilen) >= 0) {
-            return gen.err_lc(iline, icol, "重复导入同一模块");
+        p_adv();
+        // 点分：KEY.MOD（仅两段；查找名 = MOD，依赖键 = KEY）
+        let tstart int = s1;
+        let tlen int = l1;
+        let kstart int = -1;
+        let klen int = 0;
+        if (p_cur() == gen.TK_DOT) {
+            p_adv();
+            if (mod_valid_name() == 0) {
+                return gen.err_tok("'.' 后需要一个模块名");
+            }
+            if (p_peek(1) == gen.TK_DOT) {
+                return gen.err_tok("跨项目导入只支持两段（依赖键.模块名）");
+            }
+            kstart = s1;
+            klen = l1;
+            tstart = gen.c_toks[gen.c_pos].start;
+            tlen = gen.c_toks[gen.c_pos].len;
+            p_adv();
         }
-        if (mod_import_push(istart, ilen, iline, icol) != 0) {
+        // 别名
+        let astart int = 0;
+        let alen int = 0;
+        if (mod_parse_alias(tstart, tlen, &astart, &alen) != 0) {
             return -1;
         }
-        p_adv();
+        // 同绑定名重复检查（不同查找名的同别名也冲突）
+        if (mod_import_find(astart, alen) >= 0) {
+            return gen.err_lc(iline, icol, "重复的导入绑定名（同模块不同来源请用 as 区分）");
+        }
+        if (mod_import_push(tstart, tlen, astart, alen, kstart, klen,
+            iline, icol) != 0) {
+            return -1;
+        }
         if (p_expect(gen.TK_SEMI, "期望 import 声明结尾 ';'") != 0) {
             return -1;
         }
@@ -216,8 +245,10 @@ pub fn mod_skip_head() void {
         p_adv();
     }
     for p_cur() == gen.TK_IMPORT {
-        p_adv();
-        p_adv();
+        // import 头 token 数不定（点分/别名），扫到本声明的 ';'
+        for p_cur() != gen.TK_SEMI {
+            p_adv();
+        }
         p_adv();
     }
 }

@@ -5,7 +5,7 @@
 ## 开发策略（必须遵守）
 
 **0.0.3 起仓库已删除 src/（C 版 stage0）与 bootstrap/，进入滚动自举**：
-编译器源码在 `compiler/`（gen/lex/parse/cmd 四模块的 mod.toml 项目），
+编译器源码在 `compiler/`（gen/lex/parse/cmd 四模块的 project.toml 项目），
 构建只依赖入库种子 `bin/yh`（上一版自举编译器二进制，SHA-256 见
 `bin/yh.sha256`）。
 
@@ -22,12 +22,17 @@
 
 ## 目录
 
+## 修改语法规则
+
+1. 修改docs/yh.g4 分析语法的合理性，不允许存在歧义
+2. 制定修改计划
+3. tests目录添加测试用例
+4. 开发确保测试用例全部通过
+5. 刷新docs 下的所有文档
+
 
 
 ## 编译流程
-
-
-## 方法接收器
 
 
 

@@ -1,4 +1,4 @@
-module cmd;
+module main;
 import gen;
 
 // ============================================================================
@@ -57,7 +57,7 @@ pub fn pj_run_ls(dir *char) int {
     if (gen.read_source(pj_scratch) != 0) {
         return -1;
     }
-    // 拷出独立缓冲：后续 read_source（读 .yh/mod.toml）会覆盖 c_src
+    // 拷出独立缓冲：后续 read_source（读 .yh/project.toml）会覆盖 c_src
     if (gen.out_grow(&pj_ls_buf, pj_ls_len, &pj_ls_cap, gen.c_src_len + 1) != 0) {
         return -1;
     }
@@ -253,8 +253,8 @@ pub fn pj_proj_push(root_off int, root_len int) int {
     gen.p_projs[gen.p_proj_n].name_len = 0;
     gen.p_projs[gen.p_proj_n].src_off = -1;
     gen.p_projs[gen.p_proj_n].src_len = 0;
-    gen.p_projs[gen.p_proj_n].entry_off = -1;
-    gen.p_projs[gen.p_proj_n].entry_len = 0;
+    gen.p_projs[gen.p_proj_n].ver_off = -1;
+    gen.p_projs[gen.p_proj_n].ver_len = 0;
     gen.p_projs[gen.p_proj_n].deps = 0;
     gen.p_projs[gen.p_proj_n].dep_n = 0;
     gen.p_projs[gen.p_proj_n].dep_cap = 0;
@@ -386,72 +386,93 @@ pub fn pj_file_push(path_off int, path_len int, mod int) int {
     return gen.p_file_n - 1;
 }
 
-pub fn pj_imp_push(file int, off int, olen int, line int, col int) int {
+// pj_imp_push：登记一条文件导入（绑定期解析）。
+// name=查找名（模块名，点分导入取 MOD 段），key=跨项目依赖键（-1/0 同项目），
+// alias=绑定名。平铺数组按块扩容。
+pub fn pj_imp_push(file int, off int, olen int, koff int, klen int,
+    aoff int, alen int, line int, col int) int {
     if (gen.p_imp_n == gen.p_imp_cap) {
         let ncap int = gen.p_imp_cap * 2;
         if (ncap == 0) {
             ncap = 32;
         }
-        let base int = ncap;
-        let nd *int = malloc((base * sizeof(int)).to_type(u64)).to_type(*int);
-        if (nd == 0) {
+        let old [9]*int;
+        old[0] = gen.p_imp_file; old[1] = gen.p_imp_off; old[2] = gen.p_imp_len;
+        old[3] = gen.p_imp_key_off; old[4] = gen.p_imp_key_len;
+        old[5] = gen.p_imp_alias_off; old[6] = gen.p_imp_alias_len;
+        old[7] = gen.p_imp_line; old[8] = gen.p_imp_col;
+        let nd0 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
+        if (nd0 == 0) {
             return gen.fail("内存分配失败");
         }
-        if (gen.p_imp_n > 0) {
-            memcpy(nd, gen.p_imp_file, (gen.p_imp_n * sizeof(int)).to_type(u64));
+        let nd1 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
+        if (nd1 == 0) {
+            return gen.fail("内存分配失败");
         }
-        free(gen.p_imp_file);
-        gen.p_imp_file = nd;
-        let nd2 *int = malloc((base * sizeof(int)).to_type(u64)).to_type(*int);
+        let nd2 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
         if (nd2 == 0) {
             return gen.fail("内存分配失败");
         }
-        if (gen.p_imp_n > 0) {
-            memcpy(nd2, gen.p_imp_off, (gen.p_imp_n * sizeof(int)).to_type(u64));
-        }
-        free(gen.p_imp_off);
-        gen.p_imp_off = nd2;
-        let nd3 *int = malloc((base * sizeof(int)).to_type(u64)).to_type(*int);
+        let nd3 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
         if (nd3 == 0) {
             return gen.fail("内存分配失败");
         }
-        if (gen.p_imp_n > 0) {
-            memcpy(nd3, gen.p_imp_len, (gen.p_imp_n * sizeof(int)).to_type(u64));
-        }
-        free(gen.p_imp_len);
-        gen.p_imp_len = nd3;
-        let nd4 *int = malloc((base * sizeof(int)).to_type(u64)).to_type(*int);
+        let nd4 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
         if (nd4 == 0) {
             return gen.fail("内存分配失败");
         }
-        if (gen.p_imp_n > 0) {
-            memcpy(nd4, gen.p_imp_line, (gen.p_imp_n * sizeof(int)).to_type(u64));
-        }
-        free(gen.p_imp_line);
-        gen.p_imp_line = nd4;
-        let nd5 *int = malloc((base * sizeof(int)).to_type(u64)).to_type(*int);
+        let nd5 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
         if (nd5 == 0) {
             return gen.fail("内存分配失败");
         }
-        if (gen.p_imp_n > 0) {
-            memcpy(nd5, gen.p_imp_col, (gen.p_imp_n * sizeof(int)).to_type(u64));
-        }
-        free(gen.p_imp_col);
-        gen.p_imp_col = nd5;
-        let nd6 *int = malloc((base * sizeof(int)).to_type(u64)).to_type(*int);
+        let nd6 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
         if (nd6 == 0) {
             return gen.fail("内存分配失败");
         }
-        if (gen.p_imp_n > 0) {
-            memcpy(nd6, gen.p_imp_mod, (gen.p_imp_n * sizeof(int)).to_type(u64));
+        let nd7 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
+        if (nd7 == 0) {
+            return gen.fail("内存分配失败");
         }
-        free(gen.p_imp_mod);
-        gen.p_imp_mod = nd6;
+        let nd8 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
+        if (nd8 == 0) {
+            return gen.fail("内存分配失败");
+        }
+        let nd9 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
+        if (nd9 == 0) {
+            return gen.fail("内存分配失败");
+        }
+        if (gen.p_imp_n > 0) {
+            let cnt u64 = (gen.p_imp_n * sizeof(int)).to_type(u64);
+            memcpy(nd0, gen.p_imp_file, cnt);
+            memcpy(nd1, gen.p_imp_off, cnt);
+            memcpy(nd2, gen.p_imp_len, cnt);
+            memcpy(nd3, gen.p_imp_key_off, cnt);
+            memcpy(nd4, gen.p_imp_key_len, cnt);
+            memcpy(nd5, gen.p_imp_alias_off, cnt);
+            memcpy(nd6, gen.p_imp_alias_len, cnt);
+            memcpy(nd7, gen.p_imp_line, cnt);
+            memcpy(nd8, gen.p_imp_col, cnt);
+            memcpy(nd9, gen.p_imp_mod, cnt);
+        }
+        free(gen.p_imp_file); gen.p_imp_file = nd0;
+        free(gen.p_imp_off); gen.p_imp_off = nd1;
+        free(gen.p_imp_len); gen.p_imp_len = nd2;
+        free(gen.p_imp_key_off); gen.p_imp_key_off = nd3;
+        free(gen.p_imp_key_len); gen.p_imp_key_len = nd4;
+        free(gen.p_imp_alias_off); gen.p_imp_alias_off = nd5;
+        free(gen.p_imp_alias_len); gen.p_imp_alias_len = nd6;
+        free(gen.p_imp_line); gen.p_imp_line = nd7;
+        free(gen.p_imp_col); gen.p_imp_col = nd8;
+        free(gen.p_imp_mod); gen.p_imp_mod = nd9;
         gen.p_imp_cap = ncap;
     }
     gen.p_imp_file[gen.p_imp_n] = file;
     gen.p_imp_off[gen.p_imp_n] = off;
     gen.p_imp_len[gen.p_imp_n] = olen;
+    gen.p_imp_key_off[gen.p_imp_n] = koff;
+    gen.p_imp_key_len[gen.p_imp_n] = klen;
+    gen.p_imp_alias_off[gen.p_imp_n] = aoff;
+    gen.p_imp_alias_len[gen.p_imp_n] = alen;
     gen.p_imp_line[gen.p_imp_n] = line;
     gen.p_imp_col[gen.p_imp_n] = col;
     gen.p_imp_mod[gen.p_imp_n] = -1;
@@ -463,7 +484,7 @@ pub fn pj_proj_diag(root_off int, line int, msg *char) int {
     let buf [1024]u8;
     let n int = 0;
     n = gen.append_str(buf, n, pj_pool_str(root_off));
-    n = gen.append_str(buf, n, "/mod.toml:");
+    n = gen.append_str(buf, n, "/project.toml:");
     n = gen.append_int(buf, n, line);
     n = gen.append_str(buf, n, ": 错误: ");
     n = gen.append_str(buf, n, msg);

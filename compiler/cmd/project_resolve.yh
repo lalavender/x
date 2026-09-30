@@ -1,4 +1,4 @@
-module cmd;
+module main;
 import gen;
 
 // ============================================================================
@@ -30,6 +30,20 @@ pub fn pj_mod_in_proj(proj int, off int, olen int) int {
     return -1;
 }
 
+// pj_entry_mod：项目的入口模块下标（模块名 main，pj_load_project 已标记
+// is_entry 并保证至多一个）；无 main 模块即库项目，返回 -1。
+pub fn pj_entry_mod(proj int) int {
+    let i int = 0;
+    for i < gen.p_projs[proj].mod_n {
+        let m int = gen.p_projs[proj].mods[i];
+        if (gen.p_mods[m].is_entry != 0) {
+            return m;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
 pub fn pj_bind_imports() int {
     let i int = 0;
     for i < gen.p_imp_n {
@@ -37,6 +51,47 @@ pub fn pj_bind_imports() int {
         let proj int = gen.p_mods[gen.p_files[f].mod].proj;
         let off int = gen.p_imp_off[i];
         let olen int = gen.p_imp_len[i];
+        // 跨项目限定导入 KEY.MOD：直接解析到依赖键对应项目，不走三层
+        if (gen.p_imp_key_off[i] >= 0) {
+            let koff int = gen.p_imp_key_off[i];
+            let klen int = gen.p_imp_key_len[i];
+            let dk int = -1;
+            let di int = 0;
+            for di < gen.p_projs[proj].dep_n {
+                if (pj_same_np(gen.p_projs[proj].deps[di].key_off,
+                    gen.p_projs[proj].deps[di].key_len, koff, klen) != 0) {
+                    dk = gen.p_projs[proj].deps[di].proj;
+                    break;
+                }
+                di += 1;
+            }
+            if (dk < 0) {
+                let kbuf [128]u8;
+                let kn int = 0;
+                kn = gen.append_str(kbuf, kn, "依赖键不存在: ");
+                kn = append_bytes_np(kbuf, kn, koff, klen);
+                let kmo int = gen.tml_intern_str(kbuf, 0, kn);
+                if (kmo < 0) {
+                    return -1;
+                }
+                return imp_diag(i, gen.np_cstr(kmo));
+            }
+            let km int = pj_mod_in_proj(dk, off, olen);
+            if (km < 0 || gen.p_mods[km].is_entry != 0) {
+                let kbuf2 [160]u8;
+                let kn2 int = 0;
+                kn2 = gen.append_str(kbuf2, kn2, "依赖项目没有可导入的该模块: ");
+                kn2 = append_bytes_np(kbuf2, kn2, off, olen);
+                let kmo2 int = gen.tml_intern_str(kbuf2, 0, kn2);
+                if (kmo2 < 0) {
+                    return -1;
+                }
+                return imp_diag(i, gen.np_cstr(kmo2));
+            }
+            gen.p_imp_mod[i] = km;
+            i += 1;
+            continue;
+        }
         // 第 1 层：本项目
         let m int = pj_mod_in_proj(proj, off, olen);
         if (m >= 0) {
@@ -432,10 +487,12 @@ pub fn pj_cmd_list(root int, resolve_off int, resolve_len int, has_resolve int) 
     return 0;
 }
 
-pub fn pj_find_root() int {
+// pj_find_root：从当前目录向上最多 32 层找 project.toml，结果写入
+// pj_canon_off/pj_canon_len。quiet=1 时找不到不报诊断（usage 顺手显示版本用）。
+pub fn pj_find_root(quiet int) int {
     let depth int = 0;
     for depth <= 32 {
-        // 组装候选路径：depth 个 "../" + "mod.toml"
+        // 组装候选路径：depth 个 "../" + "project.toml"
         let cand [512]u8;
         let n int = 0;
         let rootb [512]u8;
@@ -454,7 +511,7 @@ pub fn pj_find_root() int {
         }
         rootb[rn] = 0;
         n = gen.append_str(cand, n, gen.arr_cstr(rootb));
-        n = gen.append_str(cand, n, "/mod.toml");
+        n = gen.append_str(cand, n, "/project.toml");
         cand[n] = 0;
         if (pj_file_exists(gen.arr_cstr(cand)) != 0) {
             // 根直接入池（相对前缀本身已规范）
@@ -468,7 +525,9 @@ pub fn pj_find_root() int {
         }
         depth += 1;
     }
-    gen.fail("未找到 mod.toml（自当前目录向上 32 层）");
+    if (quiet == 0) {
+        gen.fail("未找到 project.toml（自当前目录向上 32 层）");
+    }
     return -1;
 }
 

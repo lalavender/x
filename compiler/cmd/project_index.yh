@@ -1,4 +1,4 @@
-module cmd;
+module main;
 import gen;
 import lex;
 import parse;
@@ -37,7 +37,7 @@ pub fn pj_load_project(root_off int, root_len int) int {
     let mpath [1024]u8;
     let mn int = 0;
     mn = gen.append_str(mpath, mn, pj_pool_str(root_off));
-    mn = gen.append_str(mpath, mn, "/mod.toml");
+    mn = gen.append_str(mpath, mn, "/project.toml");
     mpath[mn] = 0;
     if (gen.read_source(gen.arr_cstr(mpath)) != 0) {
         return -1;
@@ -65,6 +65,22 @@ pub fn pj_load_project(root_off int, root_len int) int {
     if (got == 0 || sl == 0) {
         return pj_proj_diag(root_off, toml_secs[sec].line, "project.name 必填且非空");
     }
+    // name 必须是标识符：产物名与接口 tag 都由它派生，不允许分隔符
+    let nb0 u8 = gen.np_data[so];
+    if (!((nb0 >= 'a' && nb0 <= 'z') || (nb0 >= 'A' && nb0 <= 'Z') || nb0 == '_')) {
+        return pj_proj_diag(root_off, toml_secs[sec].line,
+            "project.name 必须是标识符（字母或下划线开头）");
+    }
+    let nk int = 0;
+    for nk < sl {
+        let cb u8 = gen.np_data[so + nk];
+        if (!((cb >= 'a' && cb <= 'z') || (cb >= 'A' && cb <= 'Z')
+            || (cb >= '0' && cb <= '9') || cb == '_')) {
+            return pj_proj_diag(root_off, toml_secs[sec].line,
+                "project.name 只能是字母、数字与下划线");
+        }
+        nk += 1;
+    }
     gen.p_projs[me].name_off = so;
     gen.p_projs[me].name_len = sl;
     // source（默认 src）
@@ -81,18 +97,14 @@ pub fn pj_load_project(root_off int, root_len int) int {
     }
     gen.p_projs[me].src_off = pj_canon_off;
     gen.p_projs[me].src_len = pj_canon_len;
-    // entry（可省 = 库项目）
-    got = toml_sec_str(sec, "entry", &so, &sl);
+    // version（可选，仅供 yh version 展示）
+    got = toml_sec_str(sec, "version", &so, &sl);
     if (got < 0) {
         return -1;
     }
     if (got == 1) {
-        gen.p_projs[me].entry_off = so;
-        gen.p_projs[me].entry_len = sl;
-    }
-    got = toml_sec_str(sec, "version", &so, &sl);
-    if (got < 0) {
-        return -1;
+        gen.p_projs[me].ver_off = so;
+        gen.p_projs[me].ver_len = sl;
     }
     // [project] 未知字段检查
     let vi int = 0;
@@ -109,9 +121,9 @@ pub fn pj_load_project(root_off int, root_len int) int {
         if (vl == 6 && gen.np_data[vo] == 's' && gen.np_data[vo + 1] == 'o'
             && gen.np_data[vo + 2] == 'u' && gen.np_data[vo + 3] == 'r'
             && gen.np_data[vo + 4] == 'c' && gen.np_data[vo + 5] == 'e') { okf = 1; }
-        if (vl == 5 && gen.np_data[vo] == 'e' && gen.np_data[vo + 1] == 'n'
-            && gen.np_data[vo + 2] == 't' && gen.np_data[vo + 3] == 'r'
-            && gen.np_data[vo + 4] == 'y') { okf = 1; }
+        if (vl == 6 && gen.np_data[vo] == 'a' && gen.np_data[vo + 1] == 'u'
+            && gen.np_data[vo + 2] == 't' && gen.np_data[vo + 3] == 'h'
+            && gen.np_data[vo + 4] == 'o' && gen.np_data[vo + 5] == 'r') { okf = 1; }
         if (okf == 0) {
             let buf [64]u8;
             let bn int = 0;
@@ -195,28 +207,20 @@ pub fn pj_load_project(root_off int, root_len int) int {
     if (pj_scan_source(gen.p_projs[me].src_off, gen.p_projs[me].src_len, me) != 0) {
         return -1;
     }
-    // 入口模块标记
-    if (gen.p_projs[me].entry_off >= 0) {
-        let mi int = 0;
-        for mi < gen.p_projs[me].mod_n {
-            let um int = gen.p_projs[me].mods[mi];
-            if (gen.p_mods[um].name_len == gen.p_projs[me].entry_len
-                && gen.np_data[gen.p_mods[um].name_off] == gen.np_data[gen.p_projs[me].entry_off]) {
-                let match2 int = 1;
-                let j2 int = 1;
-                for j2 < gen.p_projs[me].entry_len {
-                    if (gen.np_data[gen.p_mods[um].name_off + j2] != gen.np_data[gen.p_projs[me].entry_off + j2]) {
-                        match2 = 0;
-                        break;
-                    }
-                    j2 += 1;
-                }
-                if (match2 != 0) {
-                    gen.p_mods[um].is_entry = 1;
-                }
-            }
-            mi += 1;
+    // 入口模块：模块名为 main 的那个（模块名与目录名无关；同名模块跨目录
+    // 合并为一个，故至多命中一次）
+    let mi int = 0;
+    for mi < gen.p_projs[me].mod_n {
+        let um int = gen.p_projs[me].mods[mi];
+        if (gen.p_mods[um].name_len == 4
+            && gen.np_data[gen.p_mods[um].name_off] == 'm'
+            && gen.np_data[gen.p_mods[um].name_off + 1] == 'a'
+            && gen.np_data[gen.p_mods[um].name_off + 2] == 'i'
+            && gen.np_data[gen.p_mods[um].name_off + 3] == 'n') {
+            gen.p_mods[um].is_entry = 1;
+            break;
         }
+        mi += 1;
     }
     gen.p_state[me] = 2;
     return me;
@@ -294,7 +298,7 @@ pub fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_
         let probe [1100]u8;
         let pn int = 0;
         pn = gen.append_str(probe, pn, pj_pool_str(sub_off));
-        pn = gen.append_str(probe, pn, "/mod.toml");
+        pn = gen.append_str(probe, pn, "/project.toml");
         probe[pn] = 0;
         if (pj_file_exists(gen.arr_cstr(probe)) != 0) {
             return 0;
@@ -398,15 +402,77 @@ pub fn pj_index_file(path *char, proj int) int {
     if (pj_mod_add_file(mod, fidx) != 0) {
         return -1;
     }
+    // 目录唯一模块检查：同目录内只允许一个模块（用户规划）
+    let di int = 0;
+    for di < gen.p_file_n {
+        let dn int = gen.p_files[di].path_len;
+        let dl int = pj_dir_prefix_len(gen.p_files[di].path_off, dn);
+        let nl int = pj_dir_prefix_len(poff, plen);
+        if (dl == nl && pj_same_np(gen.p_files[di].path_off, dl, poff, dl)
+            && gen.p_files[di].mod != mod) {
+            let buf [512]u8;
+            let bn int = 0;
+            bn = gen.append_str(buf, bn, "同目录存在另一个模块（每目录一个模块）: ");
+            bn = append_bytes_np(buf, bn, gen.p_mods[mod].name_off, gen.p_mods[mod].name_len);
+            bn = gen.append_str(buf, bn, " 与 ");
+            bn = append_bytes_np(buf, bn, gen.p_mods[gen.p_files[di].mod].name_off,
+                gen.p_mods[gen.p_files[di].mod].name_len);
+            let mo int = gen.tml_intern_str(buf, 0, bn);
+            if (mo < 0) {
+                return -1;
+            }
+            gen.c_errors += 1;
+            let out [600]u8;
+            let on int = 0;
+            on = gen.append_str(out, on, gen.np_cstr(mo));
+            on = gen.append_byte(out, on, '\n');
+            gen.write_all(2, out, on);
+            return -1;
+        }
+        di += 1;
+    }
     // 导入记录
     let ii int = 0;
     for ii < gen.mod_import_n {
         if (pj_imp_push(fidx, gen.mod_imports[ii].name_off, gen.mod_imports[ii].name_len,
+            gen.mod_imports[ii].proj_key_off, gen.mod_imports[ii].proj_key_len,
+            gen.mod_imports[ii].alias_off, gen.mod_imports[ii].alias_len,
             gen.mod_imports[ii].line, gen.mod_imports[ii].col) != 0) {
             return -1;
         }
         ii += 1;
     }
     return 0;
+}
+
+// pj_dir_prefix_len：路径的目录前缀长度（最后一个 '/' 之前；无 '/' 为 0）。
+pub fn pj_dir_prefix_len(off int, plen int) int {
+    let last int = -1;
+    let i int = 0;
+    for i < plen {
+        if (gen.np_data[off + i] == '/') {
+            last = i;
+        }
+        i += 1;
+    }
+    if (last < 0) {
+        return 0;
+    }
+    return last;
+}
+
+// pj_same_np：名字池两段字节相等。
+pub fn pj_same_np(o1 int, l1 int, o2 int, l2 int) int {
+    if (l1 != l2) {
+        return 0;
+    }
+    let j int = 0;
+    for j < l1 {
+        if (gen.np_data[o1 + j] != gen.np_data[o2 + j]) {
+            return 0;
+        }
+        j += 1;
+    }
+    return 1;
 }
 

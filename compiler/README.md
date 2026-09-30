@@ -2,7 +2,7 @@
 
 > 2026-09-30：源码已按 cmd/gen/lex/parse 目录移动，但 Makefile 与
 > 本机自举清单尚未更新，当前构建因此中断；本文件下方描述的是移动前
-> 的已验证构建。恢复构建、填充 mod.toml 与文件拆分的现行步骤见
+> 的已验证构建。恢复构建、填充 project.toml 与文件拆分的现行步骤见
 > [按目录模块化实施方案](../docs/02-plan/yh-编译器模块化详细方案.md)。
 
 用 yh 语言写成的 yh 编译器，目标 **AArch64 Linux ELF**（GNU 汇编方言）。
@@ -28,7 +28,7 @@ make test        # 三层回归
 make selfhost-native  # 本机全套门（两代固定点 + 全量语料）
 ```
 
-`make` 的 `yh` 由入库种子 `bin/yh`（上一版编译器）对本目录 mod.toml
+`make` 的 `yh` 由入库种子 `bin/yh`（上一版编译器）对本目录 project.toml
 项目 `yh build` 产出，形态随宿主（Darwin → Mach-O，Linux → ELF），
 可直接用于编译 .yh 程序与跑语料：
 `python3 tests/yh-run/check.py --compiler $PWD/yh`。

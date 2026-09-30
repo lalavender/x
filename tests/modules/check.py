@@ -9,7 +9,7 @@
 
 本 runner 只跑自举产物：module/import 是 ADR-0006 之后的新语法，
 stage0 种子（src/ 冻结）不识别，因此不进 tests/yh 的 stage0 语料。
-纯语法检查不解析 mod.toml、不搜索依赖：未知模块不是语法错误。
+纯语法检查不解析 project.toml、不搜索依赖：未知模块不是语法错误。
 
 用法：
     python3 tests/modules/check.py
