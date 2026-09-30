@@ -20,8 +20,6 @@
 - 自举侧新增/修改行为时，须在 `tests/yh-run/` 或 `tests/modules/`
   新增 `.yh` 用例并运行 `make`。决策依据见 ADR-0006/0007。
 
-## 目录
-
 ## 修改语法规则
 
 1. 修改docs/yh.g4 分析语法的合理性，不允许存在歧义
@@ -30,11 +28,22 @@
 4. 开发确保测试用例全部通过
 5. 刷新docs 下的所有文档
 
+## 目录
 
+- `compiler/` —— 编译器源码（gen/lex/parse/cmd 四模块的 project.toml 项目）
+- `bin/yh` + `bin/yh.sha256` —— 入库种子与哈希
+- `docs/03-design/` 语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
+  `docs/adr/` 决策、`docs/finish.md` 完成流水、`docs/todo.md` 待办
+- `tests/yh/` 语法语料、`tests/yh-run/` 语义运行语料、
+  `tests/modules/` 模块语料与项目验收、`tests/selfhost/` 自举探针
+- `tools/` 门禁脚本与 yh-explorer
+- `tmp/` 全部临时产物（已 gitignore）
 
 ## 编译流程
 
-
+1. `bin/yh`（上一代编译器）对 `compiler/` 执行 `yh build`，冷编产出根 `yh`；
+2. 新 `yh` 再自编一次，两次产物的模块 `.s`/`.s.i` 必须逐字节相同（固定点）；
+3. `make seed` 把验证过的 `yh` 覆盖回 `bin/yh`，进入下一代。
 
 ## 使用
 
@@ -44,12 +53,22 @@ make
 
 常用命令：
 
-
+```bash
+./yh build                 # 构建当前项目（产物名取 project.name）
+./yh run                   # 构建并运行 main 模块
+./yh version               # 项目名与版本
+./yh list [--resolve name] # 列出模块/解释导入绑定
+./yh --syntax-check f.yh   # 只做词法/语法检查
+./yh --emit-asm f.yh       # 发射汇编
+./yh f.yh -o out           # 单文件编译并链接
+```
 
 ## 构建与测试
 
 ```bash
-make test
+make test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
+make selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
+make seed               # 滚种子（仅在全绿后）
 ```
 
 

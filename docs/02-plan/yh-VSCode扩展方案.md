@@ -10,7 +10,7 @@
   诊断、跳转，以及项目构建/运行。源码断点和变量查看留到后续阶段。
 - 语言服务器通过 LSP 连接扩展宿主。编译器仍是语义规则的唯一来源；
   语言服务器负责文档同步、请求调度、结果缓存和位置转换。
-- 仓库目前没有 VS Code 扩展；主要编译器为 `yh-new`。已有
+- 仓库目前没有 VS Code 扩展；主要编译器为仓库根目录的 `yh`（种子 `bin/yh`）。已有
   `--syntax-check`（仅语法）、`--emit-asm`（语义编译，成功时写汇编）、
   `-o`、`build` 和 `run` 命令；错误一般写入 stderr，格式为
   `路径:行:列: 错误: 内容`。`compiler/` 无 AST，当前后端未发现 DWARF
@@ -25,8 +25,8 @@ VS Code (.yh) ──TextMate 语法着色
        ├── 扩展宿主：启动 LSP 客户端、注册“构建/运行”命令
        │          └── Node.js 语言服务器（独立进程）
        │                    ├── 内存文档、取消/防抖、工作区索引
-       │                    └── 调用 yh-new 获取语义诊断/定义关系
-       └── 可信工作区中的 yh-new build / run
+       │                    └── 调用 ./yh 获取语义诊断/定义关系
+       └── 可信工作区中的 yh build / run
 ```
 
 语法着色使用 TextMate JSON 和 `language-configuration.json`，以实际词法器
@@ -43,22 +43,22 @@ Web 端保留声明式语法着色，编译与运行不可用。
 
 | 阶段 | 内容 | 验证 |
 | --- | --- | --- |
-| VS-U0 | 建 `editors/vscode-yh/` TypeScript 扩展、独立 LSP 进程；注册 `.yh`、TextMate、括号/注释；构建/运行命令调用 `yh-new` | Extension Development Host 中高亮和命令可用；构建失败可见且不阻塞扩展宿主 |
+| VS-U0 | 建 `editors/vscode-yh/` TypeScript 扩展、独立 LSP 进程；注册 `.yh`、TextMate、括号/注释；构建/运行命令调用 `yh` | Extension Development Host 中高亮和命令可用；构建失败可见且不阻塞扩展宿主 |
 | VS-U1 | 保存后诊断：单文件用现有 `--emit-asm` 丢弃 stdout；项目按当时已验收的 `build` CLI 获取诊断。按文件归并，1 基行列转 LSP 0 基位置 | 正反例位置准确；新一轮检查取消旧进程；关闭文件清理诊断；错误输出不可误写成汇编 |
-| VS-U2 | 在 `compiler/` 设计并实现无代码生成的项目分析接口，输出稳定的机器可读诊断和引用/声明位置；服务器支持未保存缓冲区、跨文件定义跳转 | 未保存修改、作用域遮蔽、同名模块、跨文件 import、重复声明的跳转/诊断正确；`make selfhost-native`、`make g3` 通过 |
+| VS-U2 | 在 `compiler/` 设计并实现无代码生成的项目分析接口，输出稳定的机器可读诊断和引用/声明位置；服务器支持未保存缓冲区、跨文件定义跳转 | 未保存修改、作用域遮蔽、同名模块、跨文件 import、重复声明的跳转/诊断正确；`make selfhost-native` 通过 |
 | VS-U3 | 在 `compiler/` 增加目标平台源码行号/符号调试信息，再选择现成原生调试器适配器或自有 DAP；支持源码断点、栈帧、变量 | 本机与容器分别做断点、单步、局部变量和行号映射验收；无映射时明确报不可调试 |
 | VS-U4 | VSIX、Marketplace/Open VSX 发布与 CI | 集成测试、打包内容审查、干净环境安装、发布凭据管理通过 |
 
 每次修改 `compiler/` 都只改自举源码，补 `tests/yh-run/` 的 `.yh` 用例，
-执行 `make`、`make selfhost-native`，正式验收执行 `make g3`；`make test`
-只用于 stage0 回归。扩展 TypeScript 测试用 `@vscode/test-cli` 与
+执行 `make`、`make test`、`make selfhost-native`（后者即正式验收门；
+`make g3` 与 stage0 回归已随 0.0.3 终结）。扩展 TypeScript 测试用 `@vscode/test-cli` 与
 `@vscode/test-electron` 在 Extension Development Host 中验证诊断和跳转。
 
 ## 4. 首版扩展契约
 
 - 语言 ID：`yh`；文件后缀：`.yh`；语法 scope：`source.yh`。
 - 命令 ID：`yh.build`、`yh.run`；设置：`yh.compilerPath`（空串表示工作区
-  根目录的 `yh-new`）。执行时用 `spawn` 参数数组，不通过 shell 拼接。
+  根目录的 `yh`）。执行时用 `spawn` 参数数组，不通过 shell 拼接。
 - 构建和运行只在可信的本地文件工作区启用；工作区配置不能在不可信
   状态下改变可执行文件路径。对子进程设置超时、取消与输出上限。
 - 工作区多根时从活动文档所属根选项目；无根目录时拒绝项目命令并给出
@@ -77,11 +77,11 @@ Web 端保留声明式语法着色，编译与运行不可用。
    LLDB/GDB 不会让 `.yh` 断点可靠命中；先产出和验证调试信息，再定 DAP。
 4. **发布范围**：先桌面本地；Remote 需在远端安装可运行的编译器与
    工具链，Windows 原生需要编译器目标支持。Web 端无法直接启动本地
-   `yh-new`，需要未来单独的浏览器/WASM 方案。
+   `yh`，需要未来单独的浏览器/WASM 方案。
 
 ## 6. 待实现时确定
 
-- `yh-new` 分析接口的命令名、请求格式与版本字段；这里未把提议接口写成
+- `yh` 分析接口的命令名、请求格式与版本字段；这里未把提议接口写成
   已有 CLI。
 - 首发是否随 VSIX 附带编译器，或要求用户自行安装。暂按后者设计，
   避免将不同平台二进制和工具链混入首版包。

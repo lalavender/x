@@ -1,13 +1,16 @@
-# yh 模块与 mod.toml 项目管理设计
+# yh 模块与 project.toml 项目管理设计
 
-日期：2026-09-29。状态：按本轮用户要求修订的设计，尚未实施。
+日期：2026-09-29。状态：**已实施**（MOD-U0–U5 于 2026-09-29/30 交付，
+`make selfhost-native` 全绿；清单文件 2026-09-30 由 `mod.toml` 改名为
+`project.toml` 并删除 `entry` 字段，入口改为模块名 `main`）。
+本文是现行设计的权威描述；交付记录见 [finish.md](../finish.md)。
 
 本文件替代上一版 Go 风格模块与包方案。用户已确定四项规则：项目管理
-文件使用 `mod.toml`；源码归属声明使用 `module`；没有 `internal` 特殊
+文件使用 `project.toml`；源码归属声明使用 `module`；没有 `internal` 特殊
 机制；`import os;` 按当前项目、标准库、第三方库的顺序搜索。
 
 下文将这些要求补充为可实现、可验证的语义。同模块多文件、清单字段和
-同名诊断是本轮建议的配套规则，不代表编译器已经支持。
+同名诊断是配套规则，均已实现并由 `tests/modules/` 语料钉住。
 实施步骤见 [实施方案](../02-plan/yh-模块与项目管理实施方案.md)，
 取舍见 [ADR-0005](../adr/0005-yh-mod-toml与按名称导入.md)。
 
@@ -15,7 +18,7 @@
 
 | 概念 | 职责 | 身份 |
 | --- | --- | --- |
-| 项目 Project | 源码根、依赖、版本和入口，由 mod.toml 管理 | project.name |
+| 项目 Project | 源码根、依赖、版本和入口，由 project.toml 管理 | project.name |
 | 模块 Module | 命名空间、可见性与源码组织 | 解析后的项目身份 + module 名 |
 | 文件 SourceFile | 实现模块，保留源码位置与自己的导入表 | FileID |
 
@@ -33,7 +36,7 @@
 
 ```text
 demo/
-  mod.toml
+  project.toml
   src/
     main.yh
     math/
@@ -161,10 +164,10 @@ import 的绑定属于文件，不能被同模块其他文件借用。重复导�
 导入报错；导入名与本模块顶层声明重名也报错。局部声明的遮蔽沿用既有
 词法作用域规则。
 
-纯语法检查只判断文件形态，不读取 mod.toml、不搜索依赖。未知 os
+纯语法检查只判断文件形态，不读取 project.toml、不搜索依赖。未知 os
 不构成语法错误，项目构建阶段才决定它是否存在。
 
-## 4. mod.toml 最小清单
+## 4. project.toml 最小清单
 
 清单采用 [TOML 1.0](https://toml.io/en/v1.0.0) 格式。使用标准 TOML
 语法和错误诊断，不把它当作 yh 源码，也不以字符串按行切割代替 TOML
@@ -175,9 +178,9 @@ import 的绑定属于文件，不能被同模块其他文件借用。重复导�
 | project.name | 字符串 | 必填，标识符（字母或下划线开头，其余字母数字下划线）；项目的稳定身份，`yh build` 无 `-o` 时产物名取它 |
 | project.version | 字符串 | 可选，`yh version` 读取显示；具体版本规则另行确定 |
 | project.author | 字符串 | 可选，仅接受不解释 |
-| project.source | 字符串 | 可选，默认 src；相对 mod.toml 所在目录的源码根 |
+| project.source | 字符串 | 可选，默认 src；相对 project.toml 所在目录的源码根 |
 | dependencies | 表 | 可选，记录当前项目直接依赖的项目 |
-| dependencies.<依赖键>.path | 字符串 | 本地阶段必填，相对声明它的 mod.toml 定位依赖项目 |
+| dependencies.<依赖键>.path | 字符串 | 本地阶段必填，相对声明它的 project.toml 定位依赖项目 |
 
 源码根必须位于本项目内；依赖 path 可以指向外部本地项目。依赖键用于
 清单管理和错误定位，不充当源码导入别名。源码仍以依赖提供的 module
@@ -186,9 +189,9 @@ import 的绑定属于文件，不能被同模块其他文件借用。重复导�
 允许一个依赖项目提供多个非入口模块。构建器从直接依赖项目的模块索引
 查找名字，而不是只导入依赖键或依赖项目根文件。
 
-从当前工作目录向上查找最近的 mod.toml，确定命令所属项目。项目的
+从当前工作目录向上查找最近的 project.toml，确定命令所属项目。项目的
 source、依赖 path 均相对各自清单解析，不受运行命令的工作目录影响。
-源码根内遇到嵌套 mod.toml 时停止进入，该目录属于另一个项目。
+源码根内遇到嵌套 project.toml 时停止进入，该目录属于另一个项目。
 
 无效 TOML、字段类型错误、未知字段和不可用源根要有清晰诊断。
 不接受旧清单作为隐式替代，也不扫描未列入 dependencies 的任意库目录。
@@ -328,7 +331,7 @@ enum 沿用当前枚举项登记规则，不借模块化引入另一套枚举命
 
 ```mermaid
 flowchart LR
-    A[读取 mod.toml] --> B[索引 module 文件头]
+    A[读取 project.toml] --> B[索引 module 文件头]
     B --> C[按三层优先级解析 import]
     C --> D[检查身份与模块导入环]
     D --> E[登记同模块声明并检查权限]
@@ -346,9 +349,10 @@ flowchart LR
 | ImportBinding | 导入名称、源位置、解析后的 ModuleID 和来源 |
 | ExportInterface | 可访问名字、类型闭包、常量、签名、ABI 与机器符号 |
 
-stage0 的接入点在 src/core/ 的词法、yh_decl/yh_type/yh_expr、驱动；
-自举侧在 compiler/model/lexer/parse_*、symbols/sem/driver。
-当前目录结构已使用 src/core，不沿用旧计划中的根目录 C 文件路径。
+0.0.3 起仓库已无 C 版 stage0（`src/core/` 已删除），只有自举侧实现：
+词法 `compiler/lex/lexer.yh`、语法 `compiler/parse/parse_*.yh`、
+语义与符号 `compiler/gen/symbols.yh` 与 `compiler/gen/sem_*.yh`、
+入口 `compiler/cmd/driver.yh`。换 C 后端的接入点已随删除终结。
 
 现有 pub 的机器链接绑定不能代替语言权限检查。限定名 m.T、m.f 和
 m.value 都要查询已绑定的模块接口；模块名字不是运行时对象。
@@ -364,7 +368,7 @@ m.value 都要查询已绑定的模块接口；模块名字不是运行时对象
 
 | 命令 | 行为 |
 | --- | --- |
-| yh build | 查找 mod.toml；有 `module main;` 则构建程序（产物默认 `.build/<name>`），否则构建项目库模块 |
+| yh build | 查找 project.toml；有 `module main;` 则构建程序（产物默认 `.build/<name>`），否则构建项目库模块 |
 | yh build math | 只选择当前项目 math 为构建根，再构建其依赖 |
 | yh run | 构建并运行 `module main;`；库项目报告无入口模块 |
 | yh version | 打印当前项目的 name 与 version；裸 `yh` 用法后附同一行 |
@@ -382,7 +386,7 @@ m.value 都要查询已绑定的模块接口；模块名字不是运行时对象
 
 缓存要记录模块实际提供方，而非仅记录短名称。项目新增本地 os 后，
 原先绑定到标准库 os 的导入必须重新解析，即使导入源码没有变化。
-mod.toml、模块索引、直接依赖来源和标准库身份均参与绑定有效性判断。
+project.toml、模块索引、直接依赖来源和标准库身份均参与绑定有效性判断。
 
 对象缓存还包含实现内容、接口、依赖接口、编译器／ABI／target／选项。
 冷构建与热构建结果应一致；失败产物不得发布为可复用接口与对象配对。

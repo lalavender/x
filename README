@@ -12,21 +12,29 @@ make            # 用入库种子 bin/yh 编译 compiler/ 项目，产出 yh
 ./hello
 ```
 
-交叉 AArch64 Linux（需要 `tmp/sysroot/`，用 `-Wl,-oformat=elf64-aarch64`
-切换 ELF 输出）：
+项目模式（仓库内有 `project.toml` 时）：
 
 ```sh
-./yh -Wl,-oformat=elf64-aarch64 -sysroot tmp/sysroot -B tmp/sysroot hello.yh -o hello.linux
-# 产物在 AArch64 Linux（或 docker 容器）中运行
+./yh build                 # 构建当前项目（产物名取 project.name）
+./yh build -o out [module] # 指定产物名或只构建某个模块
+./yh run                   # 构建并运行 main 模块
+./yh version               # 显示当前项目名与版本
+./yh list [--resolve name] # 列出模块/解释导入绑定
 ```
 
 其他常用命令：
 
 ```sh
 ./yh --syntax-check f.yh   # 只做词法/语法检查（容许未定义符号/类型错误）
-./yh -c f.yh -o f.o        # 只生成目标文件
+./yh --emit-asm f.yh       # 发射汇编（GNU AArch64 方言）
+./yh f.yh -o out           # 单文件编译并链接
 make test                  # 三层回归（见下）
+make selfhost-native       # 本机主门（两代固定点 + 全量语料 + 模块/项目验收）
 ```
+
+> 0.0.3 起 `-c`、`-run`、`-sysroot`、`-Wl,-oformat=...` 等交叉选项已随
+> C 版 stage0 一并删除。产物形态由宿主自动决定（Darwin → Mach-O，
+> Linux → ELF），交叉编译需在 Linux 上用 Linux 版 yh 构建。
 
 ## 语言速览（语法基准 docs/yh.g4）
 
@@ -45,10 +53,9 @@ fn sum(nums ... int) int {       // 类型化变参：体内是 []int 切片
 
 pub fn main() int {
     let p Point = Point{ x: 1, y: 2 };   // 命名式；位置式 Point{1, 2}
-    let s []int = [4]int 视图见下;        // 切片类型 []T
-    if (p.x > 0 && p.y > 0) {
-        printf("%d %d\n", p.x, p.y);
-    }
+    let a [4]int = [1, 2, 3, 4];          // 数组字面量不带类型前缀
+    let s []int = a.to_type([]int);      // 切片视图：{长度, 数据}
+    printf("%d %d %d\n", p.x, p.y, s[0]);
     switch p.x {
     case 1, 2 { printf("small\n"); }
     default { printf("other\n"); }
@@ -77,15 +84,19 @@ make test
 1. `tests/yh/check.py` —— ANTLR 参考语法语料（正例接受/反例拒绝）；
 2. `tests/yh/check.py --compiler` —— yh 编译器 `--syntax-check` 跑同一批语料；
 3. `tests/yh-run/check.py` —— 语义/运行测试（run=编译+运行比对输出与退出码、
-   fail=必须编译失败、pass=必须编译成功）；`--cross` 附加交叉 ELF + 容器运行。
+   fail=必须编译失败、pass=必须编译成功）。
+
+另有模块系统语料：`tests/modules/check.py`（17 例）与
+`tests/modules/build-check.py`（31 例），已并入 `make selfhost-native`。
 
 ## 输出格式
 
-| 命令 | 产物 | 运行环境 |
+产物形态由宿主自动决定，无输出格式开关：
+
+| 宿主 | 产物 | 运行环境 |
 | --- | --- | --- |
-| `yh f.yh -o prog`（Darwin 默认） | Mach-O arm64 | 本机 macOS |
-| `-Wl,-oformat=elf64-aarch64`（可加 `-sysroot`） | AArch64 Linux ELF | Linux/容器 |
-| `-Wl,-oformat=macho64` | Mach-O（显式） | 本机 |
+| macOS (Darwin) | Mach-O arm64 | 本机 macOS |
+| Linux | ELF arm64 | 本机 Linux |
 
 链接由系统 gcc/clang 完成，不需要运行时库或额外环境变量。
 
@@ -102,7 +113,10 @@ make test
 ## 当前状态与限制
 
 - 已支持：标量/数组/切片/结构体全语言闭环（函数、递归、全局、控制流、
-  指针、for-in、类型化变参、structInit、to_type、prelude 八函数）。
-- 进行中/限制：`-run` 仅 Linux；本机输出依赖 Xcode Command Line Tools
-  的 `cc`；切片不做边界检查；数组转切片不做生命周期证明（详见
-  docs/03-design/00-语义边界-0.0.1.md）。
+  指针、for-in、类型化变参、structInit、to_type、prelude 八函数），
+  以及项目清单与模块系统（`project.toml`、三层导入解析、`import as`、
+  独立对象与接口文件、构建缓存）。
+- 进行中/限制：本机编译依赖 Xcode Command Line Tools 的 `cc`；切片不做
+  边界检查；数组转切片不做生命周期证明（详见
+  docs/03-design/00-语义边界-0.0.1.md）。仅 arm64 后端（GNU/Linux 与
+  Darwin/Mach-O 双方言），x64 与 Windows 目标未实施。

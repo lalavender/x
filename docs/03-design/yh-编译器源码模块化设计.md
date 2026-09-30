@@ -1,22 +1,27 @@
 # yh 自举编译器按目录模块化设计
 
-日期：2026-09-30。状态：按当前工作区目录修订；尚未把源码编成四个 yh 模块。
+日期：2026-09-30。状态：**已实施**（2026-09-30 完成四模块成模，
+`make` 由入库种子 `bin/yh` 冷编 `compiler/` 项目产出根 `yh`；
+清单为 `compiler/project.toml`，`make selfhost-native` 全绿）。
 实施步骤见[详细方案](../02-plan/yh-编译器模块化详细方案.md)，
 架构决定见 [ADR-0007](../adr/0007-yh编译器使用源码模块.md)。
 
 ## 1. 现状与边界
 
-用户已将 13 个原有文件移动到 compiler/cmd、gen、lex、parse 四个目录，
-剩余 model.yh、buffer.yh、symbols.yh、iface.yh 在 compiler 根目录。
-这 17 个文件共 13,004 行；移动前后的文件内容相同。当前
-compiler/mod.toml 为空，源码无 module/import 头；Makefile 与本机
-自举脚本仍指向旧路径，所以 make -n yh-new 会因缺少
-compiler/lexer.yh 失败。目录分类是已完成的准备工作，语言模块迁移
-和构建恢复尚未完成。
+编译器源码已按 **lex / parse / gen / cmd** 四模块成模，共 25 个 `.yh`
+文件、约 1.3 万行：`lex/lexer.yh`；`parse/{parse_type,parse_expr,parse_stmt,
+parse_decl,parse_global_init,parse_module,iface}.yh`；
+`gen/{model,buffer,symbols,target,sem_value,sem_expr,sem_decl,sem_flow,
+sem_call_literal,emit_arm64}.yh`；
+`cmd/{driver,compile,toml,project_state,project_index,project_resolve,
+module_build}.yh`。清单 `compiler/project.toml`（name = `yh`，
+version = `0.0.3`，source = `.`），无 `entry` 字段——入口是
+`cmd/*.yh` 中的 `module main;`。
 
-C stage0 按 [ADR-0006](../adr/0006-yh自举产物为主要开发编译器.md)
-冻结。编译器项目仍使用用户确定的 mod.toml、module、按短名 import
-及本项目→标准库→第三方的搜索顺序；没有 internal 特例。
+0.0.3 起仓库已无 C 版 stage0（[ADR-0006](../adr/0006-yh自举产物为主要开发编译器.md)
+的冻结对象随 `src/` 一并删除），也没有 `bootstrap/`；构建种子是入库的
+`bin/yh`（哈希见 `bin/yh.sha256`）。项目使用 `project.toml`、`module`、
+按短名 import 及本项目→标准库→直接依赖的搜索顺序；没有 internal 特例。
 
 先前在 tmp/compiler-modularization/probe/ 进行的“17 文件同属一个
 module compiler”实验成功，也生成可自编译的可执行文件。它证明现有
@@ -52,15 +57,16 @@ driver 及编译编排。模块内可以继续分多个文件，不靠每个文�
 
 ~~~toml
 [project]
-name = "yh/compiler"
+name = "yh"
+version = "0.0.3"
 source = "."
-entry = "cmd"
 ~~~
 
-清单保留在已有 compiler/mod.toml。由于 source 是 compiler 当前
-目录，冻结的无模块 seed 必须放在其扫描范围外（计划使用仓库级
-bootstrap/seed/），不能直接在 compiler 下放一批无 module 头的
-.yh 文件。make 构建活跃项目时要在 compiler 目录寻找此清单。
+清单保留在已有 `compiler/project.toml`。清单**没有 `entry` 字段**：入口
+由源码中的 `module main;` 决定（`compiler/cmd/*.yh` 声明
+`module main;`），与目录名无关。`source` 是 compiler 当前目录，构建时
+在 compiler 目录内寻找此清单；构建种子在仓库根的 `bin/yh`，本就在
+扫描范围之外（无 `bootstrap/`）。
 
 ## 3. 为无环图移动的具体函数
 
@@ -125,23 +131,24 @@ gen 模块中的模型声明必须先于引用它的文件读取。给 model 文
 
 ## 6. 种子、自举与正式验收
 
-stage0 不懂 module/import。先按当前无模块源码冻结种子快照，生成的
-拼接文件进入 tmp/；活跃 compiler/ 四目录可继续独立演进。种子
-快照不使用正则移除 module/import/限定名的扁平化器，以免在字符串、
-注释、同名符号和可见性上产生不可证明的差异。
+0.0.3 起没有 stage0：种子是入库的上一代编译器二进制 `bin/yh`（哈希
+`bin/yh.sha256`），构建时对 `compiler/` 项目执行一次 `yh build`。不需要
+扁平化器剥离 module/import。
 
 ~~~text
-stage0 C → seed 编译器 stage1
-         → 四模块项目 stage2
-         → 四模块项目 stage3
-         → 四模块项目 stage4
+bin/yh ──yh build──▶ cc2（冷编）
+cc2   ──yh build──▶ cc3（冷编）
 ~~~
 
-每代冷编或独立缓存。比较 stage2 构建 stage3 和 stage3 构建 stage4
-产出的全部模块 .s/.s.i；另让各代运行语法、运行、模块项目及诊断
-语料。链接后二进制需要可运行，不默认要求跨链接器逐字节相同。
-make selfhost-native、make bootstrap、make g3 的旧单文件固定点
-脚本要更新，不能把旧 stage2.s == stage3.s 报成新项目固定点。
+每代冷编（`compiler/tmp/yh-build` 缓存键不含编译器身份，滚动代次下冷编
+才安全）。比较 cc2 构建 cc3 产出的全部模块 `.s`/`.s.i` 是否逐字节一致；
+另让各代运行语法、运行、模块项目及诊断语料。链接后二进制需要可运行，
+不默认要求跨链接器逐字节相同。
+
+日常主门 `make selfhost-native`（两代模块固定点 + 自解析 + 全量语法/运行
+语料 + 模块语料 + 项目验收），实现见 `tests/selfhost/native-selfhost.py`
+与 `tools/selfbuild-gate.py`；旧的单文件固定点脚本 `make bootstrap` /
+`make g3` 已随 stage0 删除而移除。全绿后 `make seed` 滚种子。
 
 正式代码修改的每一步都新增 tests/ 里的 .yh 正反或运行用例，
 运行 make 和相关门；Windows 在 WSL 内执行。计划状态写

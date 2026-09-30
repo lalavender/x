@@ -9,25 +9,25 @@
 后端拆成三层，边界即多平台接入缝：
 
 ```
-  前端语义（平台无关）
-    symbols.yh   名字池、类型表、符号/作用域、类型兼容、常量折叠
-    sem.yh       表达式/语句/声明语义钩子、两遍编译驱动、调用约定检查
-    parse_*.yh   递归下降解析，边解析边调 sem_* 钩子（无 AST）
-        │   只引用 target.yh 的数据模型常量 + emit 层的 em_* 抽象机原语
+  前端语义（平台无关，位于 compiler/gen 与 compiler/parse）
+    gen/symbols.yh     名字池、类型表、符号/作用域、类型兼容、常量折叠
+    gen/sem_*.yh       表达式/语句/声明语义钩子、两遍编译驱动、调用约定检查
+    parse/parse_*.yh   递归下降解析，边解析边调 sem_* 钩子（无 AST）
+        │   只引用 gen/target.yh 的数据模型常量 + emit 层的 em_* 抽象机原语
         ▼
   目标数据模型
-    target.yh    字长、对齐、类型布局规则（换目标第一步）
+    gen/target.yh    字长、对齐、类型布局规则（换目标第一步）
         ▼
   目标指令发射（每目标一个文件）
-    emit_arm64.yh  AArch64 GNU 汇编：寄存器、栈帧、ABI、段与符号发射
+    gen/emit_arm64.yh  AArch64 GNU 汇编：寄存器、栈帧、ABI、段与符号发射
 ```
 
-- **前端**：`symbols.yh` 到 `parse_decl.yh`，不出现任何 ISA/汇编字样；
+- **前端**：`gen/symbols.yh` 到 `parse/parse_decl.yh`，不出现任何 ISA/汇编字样；
   类型大小、对齐、参数寄存器个数等全部经 `tg_*` 常量与 `tg_layout_struct`
   获得。
-- **数据模型**：`target.yh` 定义 `TG_PTR_SIZE`/`TG_INT_SIZE`/`TG_ARG_REGS`/
+- **数据模型**：`gen/target.yh` 定义 `TG_PTR_SIZE`/`TG_INT_SIZE`/`TG_ARG_REGS`/
   `TG_STACK_ALIGN` 等常量与 `tg_align_scalar`/`tg_layout_struct`。
-- **指令发射**：`emit_arm64.yh` 实现全部 `em_*` 原语；前端只调用原语，
+- **指令发射**：`gen/emit_arm64.yh` 实现全部 `em_*` 原语；前端只调用原语，
   不感知寄存器名与汇编方言。
 
 ## 2. 换目标平台需要提供什么（契约）
@@ -35,8 +35,9 @@
 1. **数据模型**：新建 `target_<isa>.yh`，给出标量大小/对齐、栈对齐、
    参数寄存器个数、结构体布局规则。
 2. **指令发射**：新建 `emit_<isa>.yh`，实现下表全部 `em_*` 原语。
-3. **构建脚本**：目标汇编/链接命令（当前为 `gcc -no-pie`，经
-   `tests/yh/container-yh-cc.sh` 包装）。
+3. **构建脚本**：目标汇编/链接命令（当前直接调用系统编译器：
+   Darwin 用 clang，Linux 用 `gcc -no-pie`；0.0.3 起不再有
+   libtcc/libtcc1 与 YH_SYSROOT/YH_LIBDIR）。
 
 ### em_* 抽象机原语清单（当前唯一实现：AArch64）
 
@@ -130,21 +131,23 @@ stage1 对全部运行语料与语法语料通过，三代闭环成立；早期 
 浮点各维护独立计数器（`ipos`/`fpos`），按类型递增后传「本类型内序号」。
 见 `tests/yh-run/run/35-mixed-args.yh`。
 
-**验收门与探针**：
+**验收门与探针**（0.0.3 后）：
 
-- 官方门：`make bootstrap`（G1/G2/G2+）与 `make g3`（B8/G3 正式验收，
-  见 `docs/01-finished/G3-自举验收报告.md`），需容器 `yh-build`。
-- `tests/selfhost/native-selfhost.py`（`make selfhost-native`）：同一套
-  源码在本机（Darwin/arm64）跑等价三代闭环，把 GNU/Linux AArch64 汇编
-  改写为 Mach-O 形态后本机链接。它不含容器依赖，用于日常回归与缺陷定位；
-  注意 macOS 变参 ABI 与 Linux 不同，含 `printf` 的用例在本机不可判
-  （脚本只运行并断言不含 printf 的用例）。
+- 官方门：`make selfhost-native`。以入库种子 `bin/yh` 为起点跑两代闭环
+  （`bin/yh build compiler/` → cc2 → cc3），校验模块 `.s`/`.s.i` 逐字节
+  固定点、cc3 自解析、全量语法与运行语料、模块语料与项目验收。
+  本机执行，无需容器。
+- `tests/selfhost/native-selfhost.py` 是上述门的实现；把 GNU/Linux AArch64
+  汇编改写为 Mach-O 形态后在本机链接。注意 macOS 变参 ABI 与 Linux 不同，
+  含 `printf` 的用例在本机不可判（脚本只运行并断言不含 printf 的用例）。
+- 容器门 `make bootstrap` / `make g3` 随 stage0 删除而移除；其历史验收结论
+  见 [G3-自举验收报告](../01-finished/G3-自举验收报告.md)。
 
 ## 7. 已知边界
 
-slice/聚合按值与 for-in 已实现；以下仍未实现或无静态检查：切片越界、
-切片生命周期证明（ADR-0001 既定，0.0.1 不做防护）、全局聚合变量初始化、
-过多的浮点参数（>8 个）与裸变参的浮点实参。
+slice/聚合按值与 for-in、全局聚合变量初始化均已实现；以下仍未实现或
+无静态检查：切片越界、切片生命周期证明（ADR-0001 既定，0.0.1 不做防护）、
+过多的浮点参数（>8 个，超出 d0-d7）、裸变参的浮点实参。
 
 AArch64 后端已按 B8/G3 在真实 Linux 环境验证：三代各自通过全量语料，
 stage2 与 stage3 对 `compiler.yh` 与 35 个代表程序的发射逐字节一致。

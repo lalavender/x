@@ -1,5 +1,8 @@
 # yh 编译器按现有目录模块化实施方案
 
+> **已被实施取代**：P0–P5 已完成（2026-09-30）。文中 mod.toml、`entry = "cmd"`、
+> 冻结无模块 seed、`bootstrap/`、四代 stage 链与 `make g3` 均已随 0.0.3 终结。
+> 现行设计见 [编译器源码模块化设计](../03-design/yh-编译器源码模块化设计.md)。
 日期：2026-09-30。状态：设计与执行清单；本轮未修改正式编译器源码。
 
 本方案以用户已经建立的 compiler/cmd、compiler/gen、compiler/lex、
