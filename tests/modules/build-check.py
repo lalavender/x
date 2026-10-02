@@ -75,6 +75,25 @@ def count_ir_op(path, wanted):
                for i in range(inst_count))
 
 
+def has_ir_term(path, wanted):
+    """检查 SSA 缓存是否含有指定的基本块终结符。"""
+    data = path.read_bytes()
+    if len(data) < 120 or struct.unpack_from("<Q", data, 16)[0] != 0x3141535352494859:
+        return False
+    _, _, type_count, inst_count, phi_count, input_count, call_count, arg_count, symbol_size, block_count, _ = \
+        struct.unpack_from("<11q", data, 32)
+    offset = (120 + type_count * 24 + inst_count * 56 + phi_count * 16
+              + input_count * 16 + call_count * 32 + arg_count * 16
+              + ((symbol_size + 7) // 8) * 8)
+    if min(type_count, inst_count, phi_count, input_count, call_count,
+           arg_count, symbol_size, block_count) < 0:
+        return False
+    if offset + block_count * 56 > len(data):
+        return False
+    return any(struct.unpack_from("<q", data, offset + i * 56 + 24)[0] == wanted
+               for i in range(block_count))
+
+
 CASES = []
 
 
@@ -88,6 +107,9 @@ case("u4-basic-run", "run", "basic", "app", 255)
 case("u4-iso-run", "run", "iso", "host", 15)
 case("u4-aggfloat-run", "run", "aggfloat", "host", 29)
 case("u4-enumexp-run", "run", "enumexp", "host", 10)
+case("u1-extern-abs-module", "run", "externabs", "host", 0)
+case("u3-c-source-object-library-mix", "run", "cinterop", ".", 0)
+case("i1-inline-ssa-and-fallback", "inline", "inline", ".")
 case("r1-token-replay-run", "run", "tokenreplay", ".", 42)
 case("r2a-ssa-phi-verifier", "run", "irverify", ".", 0)
 case("r2c-build-lowers-ssa-cfg", "ir", "irfront", ".", 230)
@@ -169,6 +191,43 @@ def main():
             report(run.returncode == 0, c["name"],
                    f"main(argc, argv, envp) 未收到进程环境: rc={run.returncode}\n"
                    f"{run.stderr[-400:]} {run.stdout[-200:]}")
+            continue
+        if c["kind"] == "inline":
+            built = sh([compiler, "build", "--stats"], cwd=dst)
+            asm_path = dst / ".build" / "asm" / "example_inline-main.s"
+            asm = asm_path.read_text() if asm_path.exists() else ""
+            calls = [line for line in asm.splitlines()
+                     if line.startswith("\tbl\t")]
+            expanded = not any("plus_three" in line for line in calls)
+            fallback = any("conditional" in line for line in calls)
+            binary = dst / ".build" / "example_inline"
+            run = sh([str(binary)], cwd=dst) if binary.exists() else None
+            report(built.returncode == 0 and expanded and fallback
+                   and any("public_plus_two" in line for line in calls)
+                   and run is not None and run.returncode == 0 and run.stdout == "A",
+                   c["name"],
+                   f"private 标量未展开、复杂/导出函数未回退或实参副作用次数错误: "
+                   f"expanded={expanded}, fallback={fallback}, "
+                   f"public_fallback={any('public_plus_two' in line for line in calls)}, "
+                   f"run={run.returncode if run else None}, "
+                   f"stdout={run.stdout if run else ''!r}\n"
+                   f"{built.stderr[-400:]}\n{asm[-800:]}")
+            source = dst / "src" / "main.yh"
+            original = source.read_text()
+            source.write_text(original.replace("value + 3", "value + 4", 1))
+            changed = sh([compiler, "build", "--stats"], cwd=dst)
+            changed_lines = [line for line in changed.stderr.splitlines()
+                             if line.startswith("yh-stats ")]
+            changed_stats = changed_lines[-1] if changed_lines else ""
+            rerun = sh([str(binary)], cwd=dst) if binary.exists() else None
+            report(changed.returncode == 0
+                   and stat_value(changed_stats, "link") == 1
+                   and rerun is not None and rerun.returncode == 1,
+                   "i1-inline-callee-invalidates-caller-cache",
+                   f"被内联函数体变化后调用方仍复用旧 SSA: "
+                   f"link={stat_value(changed_stats, 'link')}, "
+                   f"run={rerun.returncode if rerun else None}\n"
+                   f"{changed.stderr[-400:]}")
             continue
         if c["kind"] == "ir-call":
             built = sh([compiler, "build", "--stats"], cwd=dst)
@@ -500,6 +559,10 @@ def main():
                    "r2b-session-interface-commit",
                    f"持久接口提交或本轮临时接口清理失败: "
                    f"persistent={len(persisted)}, session={len(session_files)}")
+            plain_v1 = all(p.read_text().startswith(
+                "// yh-iface v1 arch=arm64 suffix=") for p in persisted)
+            report(plain_v1, "u1-attribute-free-iface-keeps-v1",
+                   "无属性公开接口没有保持 v1 头行")
             if built.exists():
                 run = sh([str(built)], cwd=dst)
                 report(run.returncode == 42, "r2b-scheduled-program-runs",
@@ -563,11 +626,166 @@ def main():
             else:
                 report(False, "r2b-diamond-program-runs", "菱形调度后没有生成程序")
             continue
+        if c["name"] == "u3-c-source-object-library-mix":
+            cc = "clang" if sys.platform == "darwin" else "gcc"
+            obj = dst / "vendor" / "prebuilt.o"
+            obj.parent.mkdir(parents=True, exist_ok=True)
+            prepared = sh([cc, "-c", "vendor/prebuilt.c", "-o",
+                           "vendor/prebuilt.o"], cwd=dst)
+            if prepared.returncode != 0:
+                report(False, c["name"],
+                       f"测试预编译对象失败: {prepared.stderr[-400:]}")
+                continue
         r = sh([compiler, "run"] if c["kind"] == "run" else [compiler, "build"],
                cwd=dst / c["sub"])
         if c["kind"] == "run":
             report(r.returncode == c["expect"], c["name"],
                    f"退出码 {r.returncode} 期望 {c['expect']}\n{r.stderr[-400:]}")
+            if c["name"] == "u3-c-source-object-library-mix":
+                c_source = dst / "cdep" / "c" / "mathshim.c"
+                original_c = c_source.read_text()
+                before_objects = {p.name: p.read_bytes()
+                                  for p in (dst / ".build" / "obj").glob("c-*.o")}
+                changed_c = original_c.replace("lrint(value)", "lrint(value + 1.0)")
+                c_source.write_text(changed_c)
+                changed_build = sh([compiler, "build", "--stats"], cwd=dst)
+                changed_objects = [p.name for p in (dst / ".build" / "obj").glob("c-*.o")
+                                   if before_objects.get(p.name) != p.read_bytes()]
+                changed_stats = [line for line in changed_build.stderr.splitlines()
+                                 if line.startswith("yh-stats ")]
+                changed_stats = changed_stats[-1] if changed_stats else ""
+                c_binary = dst / ".build" / "example_cinterop"
+                changed_run = sh([str(c_binary)], cwd=dst) if c_binary.exists() else None
+                report(changed_c != original_c and changed_build.returncode == 0
+                       and stat_value(changed_stats, "link") == 1
+                       and changed_run is not None and changed_run.returncode == 1,
+                       "u3-c-source-invalidates-link-cache",
+                       f"依赖 C 源变化未重编译并重新链接: changed={changed_c != original_c}, "
+                       f"objects={changed_objects}, link={stat_value(changed_stats, 'link')}, "
+                       f"run={changed_run.returncode if changed_run else None}\n"
+                       f"{changed_build.stdout[-200:]} {changed_build.stderr[-400:]}")
+                c_source.write_text(original_c)
+                restored = sh([compiler, "run"], cwd=dst)
+                report(restored.returncode == 0, "u3-c-source-restore-build",
+                       f"恢复依赖 C 源后构建/运行失败: rc={restored.returncode}\n"
+                       f"{restored.stderr[-400:]}")
+
+                c_header = dst / "cdep" / "c" / "value.h"
+                original_header = c_header.read_text()
+                c_header.write_text("#define CDEP_BIAS 1\n")
+                header_build = sh([compiler, "build", "--stats"], cwd=dst)
+                header_stats = [line for line in header_build.stderr.splitlines()
+                                if line.startswith("yh-stats ")]
+                header_stats = header_stats[-1] if header_stats else ""
+                header_run = sh([str(c_binary)], cwd=dst) if c_binary.exists() else None
+                report(header_build.returncode == 0
+                       and stat_value(header_stats, "link") == 1
+                       and header_run is not None and header_run.returncode == 1,
+                       "u3-c-header-invalidates-link-cache",
+                       f"依赖头文件变化未触发 C 重编译和链接: "
+                       f"link={stat_value(header_stats, 'link')}, "
+                       f"run={header_run.returncode if header_run else None}\n"
+                       f"{header_build.stderr[-400:]}")
+                c_header.write_text(original_header)
+                header_restored = sh([compiler, "run"], cwd=dst)
+                report(header_restored.returncode == 0,
+                       "u3-c-header-restore-build",
+                       f"恢复依赖头文件后构建/运行失败: "
+                       f"rc={header_restored.returncode}\n{header_restored.stderr[-400:]}")
+
+                prebuilt_source = dst / "vendor" / "prebuilt.c"
+                original_prebuilt_source = prebuilt_source.read_text()
+                prebuilt_source.write_text(original_prebuilt_source.replace("return 42;", "return 41;"))
+                changed_object = sh([cc, "-c", "vendor/prebuilt.c", "-o",
+                                     "vendor/prebuilt.o"], cwd=dst)
+                object_build = sh([compiler, "build", "--stats"], cwd=dst)
+                object_stats = [line for line in object_build.stderr.splitlines()
+                                if line.startswith("yh-stats ")]
+                object_stats = object_stats[-1] if object_stats else ""
+                object_run = sh([str(c_binary)], cwd=dst) if c_binary.exists() else None
+                report(changed_object.returncode == 0 and object_build.returncode == 0
+                       and stat_value(object_stats, "link") == 1
+                       and object_run is not None and object_run.returncode == 3,
+                       "u3-c-object-content-invalidates-link-cache",
+                       f"预编译对象内容变化未触发重新链接: "
+                       f"link={stat_value(object_stats, 'link')}, "
+                       f"run={object_run.returncode if object_run else None}\n"
+                       f"{changed_object.stderr[-300:]} {object_build.stderr[-400:]}")
+                prebuilt_source.write_text(original_prebuilt_source)
+                restored_object = sh([cc, "-c", "vendor/prebuilt.c", "-o",
+                                      "vendor/prebuilt.o"], cwd=dst)
+                object_restored = sh([compiler, "run"], cwd=dst)
+                report(restored_object.returncode == 0 and object_restored.returncode == 0,
+                       "u3-c-object-restore-build",
+                       f"恢复预编译对象后构建/运行失败: "
+                       f"rc={object_restored.returncode}\n{object_restored.stderr[-400:]}")
+
+                c_source.write_text("int broken( {\n")
+                broken = sh([compiler, "build"], cwd=dst)
+                report(broken.returncode != 0,
+                       "u3-c-source-failure-does-not-use-stale-object",
+                       f"无效 C 源意外复用了旧对象: rc={broken.returncode}\n"
+                       f"{broken.stderr[-400:]}")
+                c_source.write_text(original_c)
+                recovered = sh([compiler, "run"], cwd=dst)
+                report(recovered.returncode == 0, "u3-c-source-recovery",
+                       f"C 编译失败后恢复构建失败: rc={recovered.returncode}\n"
+                       f"{recovered.stderr[-400:]}")
+
+                spaced = WORK / "cinterop argv with spaces"
+                copy_proj(PROJ / "cinterop", spaced)
+                space_obj = spaced / "vendor" / "prebuilt.o"
+                space_obj.parent.mkdir(parents=True, exist_ok=True)
+                prepared_space = sh([cc, "-c", "vendor/prebuilt.c", "-o",
+                                     "vendor/prebuilt.o"], cwd=spaced)
+                space_run = sh([compiler, "run"], cwd=spaced) \
+                    if prepared_space.returncode == 0 else None
+                report(space_run is not None and space_run.returncode == 0,
+                       "u3-c-paths-with-spaces-use-argv",
+                       f"含空格项目路径未能编译/链接: "
+                       f"run={space_run.returncode if space_run else None}\n"
+                       f"{prepared_space.stderr[-300:]} "
+                       f"{space_run.stderr[-400:] if space_run else ''}")
+            if c["name"] == "u1-extern-abs-module":
+                ir_files = list((dst / c["sub"] / ".build" / "ir").glob("*.ir"))
+                asm_file = dst / c["sub"] / ".build" / "asm" / \
+                    "example_externabs_lib-lib.s"
+                asm = asm_file.read_text() if asm_file.exists() else ""
+                report(any(has_ir_term(path, 4) for path in ir_files)
+                       and "brk\t#0" in asm,
+                       "u2-noreturn-ssa-and-trap",
+                       "接口 noreturn 未形成 SSA unreachable 或返回陷阱")
+                iface = dst / c["sub"] / ".build" / "iface" / \
+                    "example_externabs_lib-lib.s.i"
+                iface_text = iface.read_text() if iface.exists() else ""
+                report(iface_text.startswith("// yh-iface v2 arch=arm64 suffix=")
+                       and "@[extern, noreturn]\npub fn _Exit" in iface_text
+                       and "@[inline]\npub fn plus_two" in iface_text,
+                       "u1-attribute-iface-v2",
+                       f"属性接口未升级 v2 或未按固定顺序归一化: {iface_text[:240]!r}")
+                lib_source = dst / "lib" / "src" / "l.yh"
+                original_lib = lib_source.read_text()
+                old_stop_attr = "@[noreturn]\npub fn stop"
+                changed_lib = original_lib.replace(old_stop_attr, "pub fn stop", 1)
+                lib_source.write_text(changed_lib)
+                attr_build = sh([compiler, "build", "--stats"], cwd=dst / "host")
+                attr_iface = iface.read_text() if iface.exists() else ""
+                host_asm = (dst / "host" / ".build" / "asm" /
+                            "example_externabs_host-main.s")
+                attr_asm = host_asm.read_text() if host_asm.exists() else ""
+                report(changed_lib != original_lib and attr_build.returncode == 0
+                       and "@[noreturn]\npub fn stop" not in attr_iface
+                       and "\tbrk\t#0" not in attr_asm
+                       and "movz\tx0, #5" in attr_asm,
+                       "u2-attribute-interface-invalidates-caller-ir",
+                       f"noreturn 属性变化未更新接口与调用方控制流:\n"
+                       f"{attr_build.stderr[-500:]}\n{attr_asm[-500:]}")
+                lib_source.write_text(original_lib)
+                attr_restored = sh([compiler, "run"], cwd=dst / "host")
+                report(attr_restored.returncode == 0,
+                       "u2-attribute-interface-restore",
+                       f"恢复 noreturn 属性后构建/运行失败: "
+                       f"rc={attr_restored.returncode}\n{attr_restored.stderr[-400:]}")
         else:
             ok = r.returncode != 0 and c["msg"] in (r.stderr + r.stdout)
             if c["name"] == "u3-unused-import":
@@ -695,7 +913,7 @@ def main():
         report(r2.returncode == 42, "p1-outname-runs",
                f"产物退出码 {r2.returncode} 期望 42")
 
-    total = len(CASES) + 22
+    total = len(CASES) + 38
     print(f"project cases: 通过 {total - failed}/{total}")
     return 1 if failed else 0
 

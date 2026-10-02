@@ -27,7 +27,7 @@ fn ast_ir_call_release(out *AstIRCalls) void {
 fn ast_ir_call_has_suffix(base *AstExpr) int {
     let gs *gen.GenState = gen.G();
     if (gs.c_module_mode == 0 || gs.c_sym_sfx_len == 0
-        || (base.sym_flags & gen.F_EXTERN) != 0) { return 0; }
+        || (base.sym_flags & (gen.F_EXTERN | gen.F_CABI)) != 0) { return 0; }
     if (gs.c_is_entry_mod != 0 && base.sym_name_len == 4
         && gs.np_data[base.sym_name_off] == 'm'
         && gs.np_data[base.sym_name_off + 1] == 'a'
@@ -214,10 +214,19 @@ fn ast_ir_lower_call_expr(b *AstIRBuilder, ctx *AstFunctionContext,
     if (heap_values != 0) { free(values); }
     if (call_id < 0) { return -1; }
     let result_type int = ast_ir_type(node.type_id);
+    let no_return int = (base.sym_flags & gen.F_NORETURN) != 0 ? 1 : 0;
     if (result_type < 0) {
         // void 调用不定义 SSA 值；支持检查已排除其余不可映射的返回类型。
-        return ast_ir_b_add_call(b, call_id, -1);
+        let call_inst int = ast_ir_b_add_call(b, call_id, -1);
+        if (call_inst < 0) { return call_inst; }
+        if (no_return != 0) {
+            if (ast_ir_b_close_term(b, b.cur_block, ir.IR_TERM_UNREACHABLE,
+                -1, -1, -1) != 0) { return -1; }
+            return -3;
+        }
+        return call_inst;
     }
+    if (no_return != 0) { return -2; }
     return ast_ir_b_add_call(b, call_id, result_type);
 }
 
@@ -247,5 +256,6 @@ fn ast_ir_lower_expr_stmt(b *AstIRBuilder, ctx *AstFunctionContext,
     let expr_id int = ast_stmt_exprs[stmt.first_expr].expr_id;
     let value int = ast_ir_lower_call_expr(b, ctx, expr_id);
     if (value == -2) { return 0; }
+    if (value == -3) { return -3; }
     return value;
 }

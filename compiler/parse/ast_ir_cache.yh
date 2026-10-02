@@ -81,12 +81,59 @@ fn ast_ir_hash_expr(hash *u64, ctx *AstFunctionContext, expr_id int) void {
     }
 }
 
+// ast_ir_hash_inline_dependencies：把本模块私有 inline 目标的完整声明源码
+// 纳入调用方缓存键；接口函数没有函数体时仍按普通调用处理。
+fn ast_ir_hash_inline_dependencies(hash *u64, ctx *AstFunctionContext) void {
+    let gs *gen.GenState = gen.G();
+    let expr_id int = ctx.expr_first;
+    for expr_id < ctx.expr_after {
+        let expr AstExpr = ast_expr_nodes[expr_id];
+        if (expr.kind == AST_EXPR_CALL && expr.child0 >= ctx.expr_first
+            && expr.child0 < ctx.expr_after) {
+            let base AstExpr = ast_expr_nodes[expr.child0];
+            if (base.sym_kind == gen.SYM_FN
+                && (base.sym_flags & gen.F_INLINE) != 0
+                && (base.sym_flags & gen.F_PUB) == 0) {
+                let fi int = 0;
+                for fi < ast_function_count {
+                    let target AstFunctionContext = ast_function_nodes[fi];
+                    if (target.decl_row >= 0 && target.decl_row < ast_decl_count
+                        && ast_decl_nodes[target.decl_row].sym_id == base.sym_id) {
+                        let decl AstDecl = ast_decl_nodes[target.decl_row];
+                        if (target.file_id >= 0 && target.file_id < gs.p_file_n
+                            && gs.p_files[target.file_id].source != 0
+                            && gs.p_files[target.file_id].tokens != 0
+                            && decl.first >= 0 && decl.after > decl.first
+                            && decl.after <= gs.p_files[target.file_id].token_n) {
+                            let file gen.PFile = gs.p_files[target.file_id];
+                            let first gen.Tok = file.tokens[decl.first];
+                            let last gen.Tok = file.tokens[decl.after - 1];
+                            let start int = first.start;
+                            let end int = last.start + last.len;
+                            ast_ir_hash_byte(hash, 'I');
+                            ast_ir_hash_int(hash, (end - start).to_type(i64));
+                            let byte int = start;
+                            for byte < end {
+                                ast_ir_hash_byte(hash, file.source[byte]);
+                                byte += 1;
+                            }
+                        }
+                        break;
+                    }
+                    fi += 1;
+                }
+            }
+        }
+        expr_id += 1;
+    }
+}
+
 // ast_ir_cache_key：混入编译器、目标、函数源码与受检类型事实。
 fn ast_ir_cache_key(ctx *AstFunctionContext, decl *AstDecl, sig int,
     ret_type int, compiler_salt u64) u64 {
     let gs *gen.GenState = gen.G();
     let hash u64 = ast_ir_hash_init();
-    let version *char = "yh-ssa-function-cache-v8";
+    let version *char = "yh-ssa-function-cache-v9";
     let vi int = 0;
     for version[vi] != 0 {
         ast_ir_hash_byte(&hash, version[vi].to_type(u8));
@@ -143,6 +190,7 @@ fn ast_ir_cache_key(ctx *AstFunctionContext, decl *AstDecl, sig int,
         ast_ir_hash_expr(&hash, ctx, expr_i);
         expr_i += 1;
     }
+    ast_ir_hash_inline_dependencies(&hash, ctx);
     let binding_i int = ctx.binding_first;
     for binding_i < ctx.binding_after {
         let binding AstBinding = ast_bindings[binding_i];
@@ -297,4 +345,3 @@ fn ast_ir_cache_write(path *char, key u64, f *ir.IRFunction) void {
     }
     free(data);
 }
-

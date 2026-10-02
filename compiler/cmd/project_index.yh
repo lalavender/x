@@ -8,6 +8,166 @@ import parse;
 // 自 parse_decl.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
 // ============================================================================
 
+// pj_input_push：追加一个 project.toml C 输入，按所属项目保留稳定顺序。
+fn pj_input_push(items **gen.PInput, count *int, capacity *int,
+    off int, n int) int {
+    if (count[0] == capacity[0]) {
+        let ncap int = capacity[0] * 2;
+        if (ncap == 0) { ncap = 8; }
+        let next *gen.PInput = malloc(
+            (ncap * sizeof(gen.PInput)).to_type(u64)).to_type(*gen.PInput);
+        if (next == 0) { return gen.fail("C 项目输入表内存分配失败"); }
+        if (count[0] > 0) {
+            memcpy(next, items[0], (count[0] * sizeof(gen.PInput)).to_type(u64));
+        }
+        if (items[0] != 0) { free(items[0].to_type(*void)); }
+        items[0] = next;
+        capacity[0] = ncap;
+    }
+    items[0][count[0]].path_off = off;
+    items[0][count[0]].path_len = n;
+    count[0] += 1;
+    return 0;
+}
+
+// pj_c_path：验证项目相对路径、扩展名和文件存在性，返回规范化路径。
+fn pj_c_path(proj int, item_off int, item_len int, suffix *char,
+    line int) int {
+    let gs *gen.GenState = gen.G();
+    if (item_len == 0 || gs.np_data[item_off] == '/') {
+        return pj_proj_diag(gs.p_projs[proj].root_off, line,
+            "[c] 路径必须是非空的项目相对路径");
+    }
+    let seg_start int = 0;
+    let path_i int = 0;
+    for path_i <= item_len {
+        if (path_i == item_len || gs.np_data[item_off + path_i] == '/') {
+            if (path_i - seg_start == 2
+                && gs.np_data[item_off + seg_start] == '.'
+                && gs.np_data[item_off + seg_start + 1] == '.') {
+                return pj_proj_diag(gs.p_projs[proj].root_off, line,
+                    "[c] 路径不能含 .. 目录段");
+            }
+            seg_start = path_i + 1;
+        }
+        path_i += 1;
+    }
+    let suffix_len int = 0;
+    for suffix[suffix_len] != 0 { suffix_len += 1; }
+    if (item_len <= suffix_len) {
+        return pj_proj_diag(gs.p_projs[proj].root_off, line,
+            "[c] 路径扩展名不符合 sources/objects 要求");
+    }
+    let i int = 0;
+    for i < suffix_len {
+        if (gs.np_data[item_off + item_len - suffix_len + i]
+            != suffix[i].to_type(u8)) {
+            return pj_proj_diag(gs.p_projs[proj].root_off, line,
+                "[c] 路径扩展名不符合 sources/objects 要求");
+        }
+        i += 1;
+    }
+    let rel [1024]u8;
+    if (item_len >= 1024) {
+        return pj_proj_diag(gs.p_projs[proj].root_off, line, "[c] 路径过长");
+    }
+    i = 0;
+    for i < item_len {
+        rel[i] = gs.np_data[item_off + i];
+        i += 1;
+    }
+    rel[item_len] = 0;
+    if (pj_canon(gs.p_projs[proj].root_off,
+        gs.p_projs[proj].root_len, gen.arr_cstr(rel)) != 0) { return -1; }
+    if (pj_file_exists(pj_pool_str(pj_canon_off)) == 0) {
+        return pj_proj_diag(gs.p_projs[proj].root_off, line,
+            "[c] 配置路径对应的文件不存在");
+    }
+    return 0;
+}
+
+// pj_c_lib_name：限制系统库名为普通名字，避免把链接器选项当作库名传入。
+fn pj_c_lib_name(off int, n int) int {
+    let gs *gen.GenState = gen.G();
+    if (n == 0) { return 0; }
+    let i int = 0;
+    for i < n {
+        let b u8 = gs.np_data[off + i];
+        if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+            || (b >= '0' && b <= '9') || b == '_' || b == '-')) { return 0; }
+        i += 1;
+    }
+    return 1;
+}
+
+// pj_load_c_config：在递归依赖装载前快照并验证 [c] 的三个字符串数组。
+fn pj_load_c_config(proj int, sec int) int {
+    let gs *gen.GenState = gen.G();
+    if (sec < 0) { return 0; }
+    let vi int = 0;
+    for vi < toml_secs[sec].val_n {
+        let val TomlVal = toml_secs[sec].vals[vi];
+        let kind int = 0;
+        if (val.key_len == 7 && gs.np_data[val.key_off] == 's'
+            && gs.np_data[val.key_off + 1] == 'o'
+            && gs.np_data[val.key_off + 2] == 'u'
+            && gs.np_data[val.key_off + 3] == 'r'
+            && gs.np_data[val.key_off + 4] == 'c'
+            && gs.np_data[val.key_off + 5] == 'e'
+            && gs.np_data[val.key_off + 6] == 's') { kind = 1; }
+        if (val.key_len == 7 && gs.np_data[val.key_off] == 'o'
+            && gs.np_data[val.key_off + 1] == 'b'
+            && gs.np_data[val.key_off + 2] == 'j'
+            && gs.np_data[val.key_off + 3] == 'e'
+            && gs.np_data[val.key_off + 4] == 'c'
+            && gs.np_data[val.key_off + 5] == 't'
+            && gs.np_data[val.key_off + 6] == 's') { kind = 2; }
+        if (val.key_len == 4 && gs.np_data[val.key_off] == 'l'
+            && gs.np_data[val.key_off + 1] == 'i'
+            && gs.np_data[val.key_off + 2] == 'b'
+            && gs.np_data[val.key_off + 3] == 's') { kind = 3; }
+        if (kind == 0) {
+            return pj_proj_diag(gs.p_projs[proj].root_off, val.line,
+                "[c] 未知字段（仅支持 sources、objects、libs）");
+        }
+        if (val.kind != 4 || val.arr_first < 0 || val.arr_count < 0
+            || val.arr_first + val.arr_count > toml_array_n) {
+            return pj_proj_diag(gs.p_projs[proj].root_off, val.line,
+                "[c] sources、objects、libs 必须是字符串数组");
+        }
+        let ai int = 0;
+        for ai < val.arr_count {
+            let item TomlArrayItem = toml_array_items[val.arr_first + ai];
+            let off int = item.sval_off;
+            let n int = item.sval_len;
+            if (kind == 1 || kind == 2) {
+                let suffix *char = kind == 1 ? ".c" : ".o";
+                if (pj_c_path(proj, off, n, suffix, val.line) != 0) { return -1; }
+                let path_off int = pj_canon_off;
+                let path_len int = pj_canon_len;
+                if (kind == 1) {
+                    if (pj_input_push(&gs.p_projs[proj].c_sources,
+                        &gs.p_projs[proj].c_source_n,
+                        &gs.p_projs[proj].c_source_cap, path_off, path_len) != 0) { return -1; }
+                } else if (pj_input_push(&gs.p_projs[proj].c_objects,
+                    &gs.p_projs[proj].c_object_n,
+                    &gs.p_projs[proj].c_object_cap, path_off, path_len) != 0) { return -1; }
+            } else {
+                if (pj_c_lib_name(off, n) == 0) {
+                    return pj_proj_diag(gs.p_projs[proj].root_off, val.line,
+                        "[c] libs 元素必须是普通系统库名");
+                }
+                if (pj_input_push(&gs.p_projs[proj].c_libs,
+                    &gs.p_projs[proj].c_lib_n, &gs.p_projs[proj].c_lib_cap,
+                    off, n) != 0) { return -1; }
+            }
+            ai += 1;
+        }
+        vi += 1;
+    }
+    return 0;
+}
+
 pub fn pj_load_project(root_off int, root_len int) int {
     let gs *gen.GenState = gen.G();
     // 依赖环 / 重复装载
@@ -143,6 +303,7 @@ pub fn pj_load_project(root_off int, root_len int) int {
         }
         vi += 1;
     }
+    if (pj_load_c_config(me, toml_find_sec("c")) != 0) { return -1; }
     // [dependencies]：先整表快照——递归装载会重置 toml_secs（全局解析区）
     let dsec int = toml_find_sec("dependencies");
     let snap_key_off [64]int;

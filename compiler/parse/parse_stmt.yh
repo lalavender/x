@@ -136,7 +136,7 @@ pub fn parse_stmt_capture() int {
 }
 
 // parse_stmt：按首 token 分派语句并调用现有语义钩子。
-pub fn parse_stmt() int {
+fn parse_stmt_inner() int {
     let gs *gen.GenState = gen.G();
     let k int = p_cur();
     if (k == gen.TK_LBRACE) {
@@ -258,11 +258,32 @@ pub fn parse_stmt() int {
     return p_expect(gen.TK_SEMI, "期望 ';'");
 }
 
+// parse_stmt：隔离当前语句的调用效果，并更新函数顺序落底状态。
+pub fn parse_stmt() int {
+    let gs *gen.GenState = gen.G();
+    let first_kind int = p_cur();
+    gs.c_expr_noreturn = 0;
+    let status int = parse_stmt_inner();
+    if (status != 0 || gs.c_compile == 0) { return status; }
+    if (first_kind == gen.TK_RETURN || first_kind == gen.TK_BREAK
+        || first_kind == gen.TK_CONTINUE) {
+        gs.c_fn_falls = 0;
+    } else if (first_kind != gen.TK_IF && first_kind != gen.TK_FOR
+        && first_kind != gen.TK_SWITCH && first_kind != gen.TK_LBRACE
+        && gs.c_expr_noreturn != 0) {
+        gs.c_fn_falls = 0;
+    }
+    return 0;
+}
+
 // parse_return：'return' expr? ';'。返回类型检查与收尾跳转由 sem 层管理。
 pub fn parse_return() int {
     let gs *gen.GenState = gen.G();
     p_adv();
     if (gs.c_compile != 0) {
+        if ((gs.c_fn_flags & gen.F_NORETURN) != 0) {
+            return gen.sem_err("noreturn 函数定义不能包含 return");
+        }
         if (gs.c_fn_ret == gen.TY_VOID && p_cur() != gen.TK_SEMI) {
             return gen.sem_err("void 函数不能返回值");
         }
@@ -296,6 +317,7 @@ pub fn parse_return() int {
 // parse_if：'if' '(' expr ')' block ('else' (ifStmt | block))?。
 pub fn parse_if() int {
     let gs *gen.GenState = gen.G();
+    let parent_falls int = gs.c_fn_falls;
     p_adv();
     if (p_expect(gen.TK_LPAREN, "if 条件必须带括号") != 0) {
         return -1;
@@ -318,9 +340,11 @@ pub fn parse_if() int {
             return -1;
         }
     }
+    gs.c_fn_falls = 1;
     if (parse_block() != 0) {
         return -1;
     }
+    let then_falls int = gs.c_fn_falls;
     if (p_cur() == gen.TK_ELSE) {
         p_adv();
         if (gs.c_compile != 0) {
@@ -332,6 +356,7 @@ pub fn parse_if() int {
                 return -1;
             }
         }
+        gs.c_fn_falls = 1;
         if (p_cur() == gen.TK_IF) {
             let nested_if_result int = 0;
             if (gs.c_ast_capture != 0) {
@@ -352,8 +377,12 @@ pub fn parse_if() int {
                 return -1;
             }
         }
+        let else_falls int = gs.c_fn_falls;
+        gs.c_fn_falls = parent_falls != 0
+            && (then_falls != 0 || else_falls != 0) ? 1 : 0;
         return 0;
     }
+    gs.c_fn_falls = parent_falls != 0 ? 1 : 0;
     if (gs.c_compile != 0) {
         if (gen.em_label(lbl_else) != 0) {
             return -1;
@@ -365,6 +394,7 @@ pub fn parse_if() int {
 // parse_for：三种形态（无限 / 条件 / for-in）。
 pub fn parse_for() int {
     let gs *gen.GenState = gen.G();
+    let parent_falls int = gs.c_fn_falls;
     p_adv();
     if (p_cur() == gen.TK_LBRACE) {
         // 无限循环
@@ -378,9 +408,14 @@ pub fn parse_for() int {
                 return -1;
             }
         }
+        gs.c_fn_falls = 1;
         if (parse_block() != 0) {
             return -1;
         }
+        let loop_depth int = gs.c_loop_depth;
+        let has_break int = loop_depth > 0
+            ? gs.c_loop_break_seen[loop_depth - 1] : 0;
+        gs.c_fn_falls = parent_falls != 0 && has_break != 0 ? 1 : 0;
         if (gs.c_compile != 0) {
             if (gen.em_jmp(ibrk) != 0) {
                 return -1;
@@ -497,7 +532,9 @@ pub fn parse_for() int {
             if (gen.em_label(lcond) != 0) { return -1; }
             if (gen.sem_forin_check(lend) != 0) { return -1; }
             if (gen.sem_forin_load(&it, is_range) != 0) { return -1; }
+            gs.c_fn_falls = 1;
             if (parse_block() != 0) { return -1; }
+            gs.c_fn_falls = parent_falls;
             if (gen.sem_forin_step(lcond) != 0) { return -1; }
             if (gen.em_label(lend) != 0) { return -1; }
             gen.scope_pop();
@@ -529,9 +566,11 @@ pub fn parse_for() int {
             return -1;
         }
     }
+    gs.c_fn_falls = 1;
     if (parse_block() != 0) {
         return -1;
     }
+    gs.c_fn_falls = parent_falls;
     if (gs.c_compile != 0) {
         if (gen.em_jmp(lbl_cond) != 0) {
             return -1;

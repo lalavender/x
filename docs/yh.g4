@@ -8,7 +8,8 @@ grammar yh;
  *
  * 玉衡的设计前提：
  *   - 无预处理：没有 `#` 指令、没有宏、没有条件编译；
- *   - 无头文件：没有 `#include`，外部符号由编译器内置 prelude 声明；
+ *   - 无头文件：没有 `#include`，运行时符号由 prelude 提供，C 函数可用
+ *     顶层 `@[extern]` 声明；
  *   - 无 C 兼容：`.yh` 是唯一输入，C 语法分支已移除；
  *   - 简单语句以 `;` 结尾；以块收尾的语句（if / for / switch / 裸块，
  *     以及 fn / struct / union / enum 声明）整体不带尾分号；`if` 条件
@@ -40,6 +41,23 @@ sourceFile
 topLevelDecl
     : 'pub' exportedDeclBody
     | plainDeclBody
+    | attributeGroup attributedDecl
+    ;
+
+// 单组属性前缀只修饰一个紧随其后的顶层声明；属性名逗号分隔，不允许空组或尾逗号。
+attributeGroup
+    : '@' '[' attributeName (',' attributeName)* ']'
+    ;
+
+// extern / inline 是保留字 token；noreturn 与将来未知属性保持普通标识符，
+// 由语义检查负责识别名称及其适用范围。
+attributeName
+    : IDENT | 'extern' | 'inline'
+    ;
+
+attributedDecl
+    : 'pub'? attributedFnDecl
+    | 'pub' (structDecl | unionDecl | enumDecl)
     ;
 
 exportedDeclBody
@@ -140,7 +158,18 @@ constDecl
 // 函数：`fn demo() void {}`、`fn add(a int, b int) int {}`。
 // 返回类型省略即 void。不支持局部函数（与 TCC 的 "cannot use local functions" 一致）。
 fnDecl
-    : 'fn' IDENT '(' paramList? ')' typeRef? block
+    : fnSignature block
+    ;
+
+// 函数签名独立成规则，供普通定义与属性声明共用。
+fnSignature
+    : 'fn' IDENT '(' paramList? ')' typeRef?
+    ;
+
+// 属性函数允许函数体定义，也允许以分号结尾的外部声明；是否允许无体
+// 以及属性组合是否合法由语义检查决定。
+attributedFnDecl
+    : fnSignature (block | ';')
     ;
 
 // 参数表：逗号分隔的参数列表（行内列表，不允许尾逗号）。
@@ -552,8 +581,8 @@ builtinType
  * ============================================================================
  *
  * 没有 `#include`，也没有模块系统。编译器为下列符号在每个编译单元开始时
- * 直接登记 extern 函数 Sym（不经过 yh 源码解析——yh 的 fnDecl 必须带函数体，
- * 用户源码不允许函数原型），因此下列符号开箱可用（无需任何 import）：
+ * 直接登记运行时函数 Sym（不经过 yh 源码解析），因此下列符号开箱可用
+ * （无需任何 import）。用户的固定参数 C 函数另用 `@[extern] fn ...;` 声明：
  *
  *     pub fn printf(fmt *char, ...) int      // 无类型变参，内部走 va_list
  *     pub fn malloc(size u64) *void
@@ -566,8 +595,8 @@ builtinType
  *     pub fn read(fd int, buf *void, count u64) i64
  *     pub fn write(fd int, buf *void, count u64) i64
  *
- * 实现位置：src/core/yh_builtin.c 按上表直接创建 extern Sym 并绑定 libc
- * 符号名；裸 `...` 仅允许出现在本 prelude，用户源码书写裸 `...` 报错。
+ * 实现位置：compiler/gen/symbols.yh 直接登记运行时入口；裸 `...` 仅允许
+ * 出现在本 prelude，用户源码书写裸 `...` 报错。
  * 语义细节（提升规则等）见 docs/03-design/00-语义边界-0.0.1.md §7。
  */
 

@@ -6,10 +6,9 @@ import gen;
 //
 // 覆盖清单 schema（设计 §4）所需的 TOML 1.0 子集：
 //   * 节头 [name]；裸键 [A-Za-z0-9_-]+；
-//   * 值：基本字符串 "…"（转义 \\ \" \n \r \t）、字面量字符串 '…'、
-//     整数、内联表 { k = v, ... }（值限字符串）；
+//   * 值：基本字符串、字面量字符串、整数、字符串数组及字符串内联表；
 //   * 注释 # 到行尾；空白含换行。
-// 其余 TOML 形态（多行字符串、数组、日期、点键、[[数组表]]）一律
+// 其余 TOML 形态（多行字符串、日期、点键、[[数组表]]）一律
 // 语法报错——清单用不到，报错比静默误读安全。
 //
 // 解析结果存入 toml_secs（节 → 键值表）；schema 校验（允许键、类型、
@@ -22,13 +21,19 @@ import gen;
 pub struct TomlVal {
     key_off int;        // 键名池偏移
     key_len int;
-    kind int;           // 1=字符串 2=内联表 3=整数
+    kind int;           // 1=字符串 2=内联表 3=整数 4=字符串数组
     sval_off int;       // 字符串值池偏移（kind==1）
     sval_len int;
     ival int;           // 整数值（kind==3）
     path_off int;       // 内联表内 path 键的值池偏移（kind==2，-1 无）
     path_len int;
+    arr_first int;      // 全局字符串数组元素表起点（kind==4）
+    arr_count int;
     line int;           // 键所在行（1 基）
+}
+pub struct TomlArrayItem {
+    sval_off int;       // 数组元素的字符串池偏移
+    sval_len int;
 }
 pub struct TomlSec {
     name_off int;       // 节名池偏移
@@ -41,6 +46,9 @@ pub struct TomlSec {
 let toml_secs *TomlSec = 0;
 let toml_sec_n int = 0;
 let toml_sec_cap int = 0;
+let toml_array_items *TomlArrayItem = 0;
+let toml_array_n int = 0;
+let toml_array_cap int = 0;
 
 // —— 解析游标与诊断上下文 ——
 let t_src *u8 = 0;          // project.toml 字节
@@ -217,6 +225,8 @@ pub fn tml_val_push(sec int, v *TomlVal) int {
     toml_secs[sec].vals[dst].ival = v.ival;
     toml_secs[sec].vals[dst].path_off = v.path_off;
     toml_secs[sec].vals[dst].path_len = v.path_len;
+    toml_secs[sec].vals[dst].arr_first = v.arr_first;
+    toml_secs[sec].vals[dst].arr_count = v.arr_count;
     toml_secs[sec].vals[dst].line = v.line;
     toml_secs[sec].val_n += 1;
     return 0;
@@ -340,7 +350,67 @@ pub fn tml_inline_table(v *TomlVal) int {
     return 0;
 }
 
-// tml_value：解析一个值（字符串 / 内联表 / 整数）。
+// tml_array_push：保存一个字符串数组元素，索引在当前清单解析期内稳定。
+fn tml_array_push(off int, n int) int {
+    if (toml_array_n == toml_array_cap) {
+        let ncap int = toml_array_cap * 2;
+        if (ncap == 0) { ncap = 16; }
+        let next *TomlArrayItem = malloc(
+            (ncap * sizeof(TomlArrayItem)).to_type(u64)).to_type(*TomlArrayItem);
+        if (next == 0) { return gen.fail("TOML 字符串数组内存分配失败"); }
+        if (toml_array_n > 0) {
+            memcpy(next, toml_array_items,
+                (toml_array_n * sizeof(TomlArrayItem)).to_type(u64));
+        }
+        if (toml_array_items != 0) { free(toml_array_items.to_type(*void)); }
+        toml_array_items = next;
+        toml_array_cap = ncap;
+    }
+    toml_array_items[toml_array_n].sval_off = off;
+    toml_array_items[toml_array_n].sval_len = n;
+    toml_array_n += 1;
+    return 0;
+}
+
+// tml_array：解析 TOML 字符串数组；允许空数组与末尾逗号，不接受嵌套值。
+fn tml_array(v *TomlVal) int {
+    t_pos += 1;
+    v.kind = 4;
+    v.arr_first = toml_array_n;
+    v.arr_count = 0;
+    tml_ws();
+    if (t_pos < t_len && t_src[t_pos] == ']') {
+        t_pos += 1;
+        return 0;
+    }
+    for 1 {
+        if (t_pos >= t_len || (t_src[t_pos] != '"' && t_src[t_pos] != '\'')) {
+            return tml_err(v.line, "数组只接受字符串元素");
+        }
+        let item TomlVal;
+        item.line = t_line;
+        if (tml_string(&item) != 0
+            || tml_array_push(item.sval_off, item.sval_len) != 0) { return -1; }
+        v.arr_count += 1;
+        tml_ws();
+        if (t_pos < t_len && t_src[t_pos] == ']') {
+            t_pos += 1;
+            return 0;
+        }
+        if (t_pos >= t_len || t_src[t_pos] != ',') {
+            return tml_err(v.line, "期望 ',' 或 ']'");
+        }
+        t_pos += 1;
+        tml_ws();
+        if (t_pos < t_len && t_src[t_pos] == ']') {
+            t_pos += 1;
+            return 0;
+        }
+    }
+    return 0;
+}
+
+// tml_value：解析一个值（字符串 / 内联表 / 整数 / 字符串数组）。
 pub fn tml_value(v *TomlVal) int {
     let b u8 = t_src[t_pos];
     if (b == '"' || b == '\'') {
@@ -348,6 +418,9 @@ pub fn tml_value(v *TomlVal) int {
     }
     if (b == '{') {
         return tml_inline_table(v);
+    }
+    if (b == '[') {
+        return tml_array(v);
     }
     if (b == '+' || b == '-' || (b >= '0' && b <= '9')) {
         let neg int = 0;
@@ -371,13 +444,14 @@ pub fn tml_value(v *TomlVal) int {
         v.ival = (0 - val) * neg + val * (1 - neg);
         return 0;
     }
-    return tml_err(v.line, "不支持的值类型（仅字符串/内联表/整数）");
+    return tml_err(v.line, "不支持的值类型（仅字符串/内联表/整数/字符串数组）");
 }
 
 // tml_parse：解析整个清单。成功 0；语法错误 -1（诊断已输出）。
 // t_src/t_len/t_file 由调用方设置。
 pub fn tml_parse() int {
     let cur int = -1;
+    toml_array_n = 0;
     for 1 {
         tml_ws();
         if (t_pos >= t_len) {
@@ -431,6 +505,8 @@ pub fn tml_parse() int {
         v.sval_off = -1;
         v.sval_len = 0;
         v.path_off = -1;
+        v.arr_first = -1;
+        v.arr_count = 0;
         v.ival = 0;
         if (tml_value(&v) != 0) {
             return -1;

@@ -7,6 +7,9 @@ module gen;
 
 pub fn sem_fn_begin(idx int) int {
     g_state.c_fn_sym = idx;
+    g_state.c_fn_flags = g_state.c_syms[idx].flags;
+    g_state.c_fn_falls = 1;
+    g_state.c_expr_noreturn = 0;
     g_state.c_fn_ret = g_state.t_types[g_state.c_syms[idx].type_id].elem;
     g_state.c_fn_lbl = em_new_label();
     g_state.c_temp_off = 0;
@@ -36,6 +39,9 @@ pub fn sem_fn_begin(idx int) int {
 }
 
 pub fn sem_declare_param(start int, n int, tid int, regidx int) int {
+    if (ty_has_opaque_value(tid) != 0) {
+        return sem_err("不透明 C 类型只能通过指针传递");
+    }
     let pk int = g_state.t_types[tid].kind;
     let is_agg int = ((pk == TY_ARRAY) || (pk == TY_STRUCT) || (pk == TY_UNION)
                       || (pk == TY_SLICE)).to_type(int);
@@ -104,6 +110,14 @@ pub fn sem_fn_end() int {
     if (sem_glabels_verify() != 0) {
         return -1;
     }
+    if ((g_state.c_fn_flags & F_NORETURN) != 0) {
+        if (g_state.c_fn_ret != TY_VOID) {
+            return sem_err("noreturn 函数必须返回 void");
+        }
+        if (g_state.c_fn_falls != 0) {
+            return sem_err("noreturn 函数存在正常落底路径");
+        }
+    }
     // 落底返回：聚合返回函数以 x0 = 聚合地址（调用方缓冲或本帧临时）；
     // 标量返回 0。显式 return 已在各分支把值放好。
     if (g_state.c_ret_agg != 0) {
@@ -144,7 +158,13 @@ pub fn sem_fn_end() int {
 // sem_add_field：为 struct/union 登记一个字段（pass 1）。
 // pub struct 一等化后字段一律公开，is_pub 恒 1（.s.i 接口按此发射）。
 pub fn sem_add_field(stid int, start int, n int, ftid int) int {
+    if (ty_has_opaque_value(ftid) != 0) {
+        return sem_err("不透明 C 类型只能通过指针使用");
+    }
     let fk int = g_state.t_types[ftid].kind;
+    if ((ty_name_attrs(stid) & ATTR_EXTERN) != 0 && ty_c_layout(ftid) == 0) {
+        return sem_err("extern struct/union 字段不是 C 兼容布局类型");
+    }
     if ((fk == TY_STRUCT || fk == TY_UNION) && g_state.t_types[ftid].size == 0) {
         return sem_err("字段使用了不完整的类型");
     }

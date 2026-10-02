@@ -3,6 +3,12 @@ import gen;
 import ir;
 import backend;
 
+// ast_ir_release_built：释放 builder 转移后的堆表；types 指向当前栈内固定表。
+fn ast_ir_release_built(f *ir.IRFunction) void {
+    if (f == 0) { return; }
+    f.types = 0;
+    ir.ir_function_release(f);
+}
 // AstIRBuilder：单个函数 lowering 的全部可变状态。
 pub struct AstIRBuilder {
     insts *ir.IRInst;          // 指令表（跨块连续存放）
@@ -493,6 +499,7 @@ fn ast_ir_b_stmts(b *AstIRBuilder, ctx *AstFunctionContext, stmt_id int) int {
         } else if (stmt.kind == AST_STMT_EXPR) {
             let emitted int = ast_ir_lower_expr_stmt(b, ctx, stmt_id,
                 b.param_count, b.binding_count);
+            if (emitted == -3) { return 0; }
             if (emitted == -2) { return -2; }
             if (emitted < 0) { return emitted; }
             if (emitted == 0) { return -2; }
@@ -1109,6 +1116,12 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
         let cache_hit int = ast_ir_cache_read(gen.arr_cstr(cache_path), cache_key, &cached);
         if (cache_hit != 0
             && cached.ret_type == ret_type) {
+            let flags int = gs.c_syms[decl.sym_id].flags;
+            if ((flags & gen.F_INLINE) != 0 && (flags & gen.F_PUB) == 0
+                && ast_ir_inline_register(decl.sym_id, &cached) != 0) {
+                ir.ir_function_release(&cached);
+                return gen.fail("inline SSA 候选登记失败");
+            }
             if (gs.c_check_only == 0) {
                 let delta int = 0;
                 let emitted int = backend.arm64_emit_replace(&cached,
@@ -1235,13 +1248,36 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     f.blocks = b.blocks;
     f.block_count = b.block_count;
     f.value_count = b.inst_count;
+    // f 接管 builder 的 SSA 数组；后续内联可能替换其中的多张表。
+    b.insts = 0;
+    b.blocks = 0;
+    b.phis = 0;
+    b.phi_inputs = 0;
+    b.calls.calls = 0;
+    b.calls.args = 0;
+    b.calls.symbols = 0;
+    let inline_status int = ast_ir_inline_apply(ctx, &f);
+    if (inline_status < 0) {
+        ast_ir_release_built(&f);
+        ast_ir_b_release(&b);
+        return inline_status;
+    }
     let verified int = ir.ir_simplify(&f);
+    let fn_flags int = gs.c_syms[decl.sym_id].flags;
+    if (verified == 0 && (fn_flags & gen.F_INLINE) != 0
+        && (fn_flags & gen.F_PUB) == 0
+        && ast_ir_inline_register(decl.sym_id, &f) != 0) {
+        ast_ir_release_built(&f);
+        ast_ir_b_release(&b);
+        return gen.fail("inline SSA 候选登记失败");
+    }
     if (verified == 0 && gs.c_check_only == 0) {
         let delta int = 0;
         let emitted int = backend.arm64_emit_replace(&f, decl.sym_id,
             ctx.asm_first + asm_shift[0], ctx.asm_after + asm_shift[0],
             asm_shift, &delta);
         if (emitted < 0) {
+            ast_ir_release_built(&f);
             ast_ir_b_release(&b);
             return -1;
         }
@@ -1249,7 +1285,12 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     if (verified == 0 && cache_enabled != 0) {
         ast_ir_cache_write(gen.arr_cstr(cache_path), cache_key, &f);
     }
-    if (verified != 0) { return gen.fail("内部错误：SSA 函数校验失败"); }
+    if (verified != 0) {
+        ast_ir_release_built(&f);
+        ast_ir_b_release(&b);
+        return gen.fail("内部错误：SSA 函数校验失败");
+    }
+    ast_ir_release_built(&f);
     ast_ir_b_release(&b);
     return 1;
 }

@@ -445,9 +445,95 @@ pub fn ty_declare_name(off int, n int, tid int) int {
     g_state.t_names[g_state.t_name_n].type_id = tid;
     g_state.t_names[g_state.t_name_n].is_pub = g_state.c_decl_pub;
     g_state.t_names[g_state.t_name_n].form = g_state.c_name_form;
+    g_state.t_names[g_state.t_name_n].attrs = g_state.c_decl_attrs;
     g_state.t_names[g_state.t_name_n].def_line = g_state.c_toks[g_state.c_pos].line;
     g_state.t_names[g_state.t_name_n].def_col = g_state.c_toks[g_state.c_pos].col;
     g_state.t_name_n += 1;
+    return 0;
+}
+
+// ty_name_attrs：合并同一底层类型的具名别名属性，保留 C/opaque 类型身份。
+pub fn ty_name_attrs(tid int) int {
+    let attrs int = 0;
+    let i int = 0;
+    for i < g_state.t_name_n {
+        if (g_state.t_names[i].type_id == tid) {
+            attrs |= g_state.t_names[i].attrs;
+        }
+        i += 1;
+    }
+    return attrs;
+}
+
+// ty_add_name_attrs：为刚登记的具名类型补充解析结束后才能确定的属性。
+pub fn ty_add_name_attrs(tid int, attrs int) int {
+    let found int = 0;
+    let i int = 0;
+    for i < g_state.t_name_n {
+        if (g_state.t_names[i].type_id == tid) {
+            g_state.t_names[i].attrs |= attrs;
+            found = 1;
+        }
+        i += 1;
+    }
+    if (found == 0) { return fail("内部错误：类型属性找不到具名类型"); }
+    return 0;
+}
+
+// ty_is_opaque：判断底层类型是否由 extern 空 struct/union 声明为不透明类型。
+pub fn ty_is_opaque(tid int) int {
+    return ((ty_name_attrs(tid) & ATTR_OPAQUE) != 0).to_type(int);
+}
+
+// ty_has_opaque_value：数组/切片等复合值不得把不透明 C 对象按值存储。
+pub fn ty_has_opaque_value(tid int) int {
+    if (ty_is_opaque(tid) != 0) { return 1; }
+    let kind int = g_state.t_types[tid].kind;
+    if (kind == TY_ARRAY || kind == TY_SLICE) {
+        return ty_has_opaque_value(g_state.t_types[tid].elem);
+    }
+    return 0;
+}
+
+// ty_cabi_scalar：可在 C ABI 固定参数与返回值中按值传递的标量。
+pub fn ty_cabi_scalar(tid int) int {
+    let kind int = g_state.t_types[tid].kind;
+    if (kind >= TY_BOOL && kind <= TY_F64) { return 1; }
+    if (kind == TY_PTR) { return 1; }
+    if (kind == TY_ENUM && (ty_name_attrs(tid) & ATTR_EXTERN) != 0) { return 1; }
+    return 0;
+}
+
+// ty_cabi_param：检查 C ABI 固定参数类型，回调只允许一层固定标量签名。
+pub fn ty_cabi_param(tid int) int {
+    if (ty_cabi_scalar(tid) != 0) { return 1; }
+    if (g_state.t_types[tid].kind != TY_FN) { return 0; }
+    let sig int = g_state.t_types[tid].sub;
+    if (g_state.t_sig_vararg[sig] != 0) { return 0; }
+    let ret int = g_state.t_sig_ret[sig];
+    if (ret != TY_VOID && ty_cabi_scalar(ret) == 0) { return 0; }
+    let first int = g_state.t_sig_first[sig];
+    let n int = g_state.t_sig_np[sig];
+    let i int = 0;
+    for i < n {
+        if (ty_cabi_scalar(g_state.t_sig_params[first + i]) == 0) { return 0; }
+        i += 1;
+    }
+    return 1;
+}
+
+// ty_c_layout：判断值布局可否直接嵌入 extern struct/union 的 C 共享布局。
+pub fn ty_c_layout(tid int) int {
+    let kind int = g_state.t_types[tid].kind;
+    if (kind >= TY_BOOL && kind <= TY_F64) { return 1; }
+    if (kind == TY_PTR || kind == TY_FN) { return 1; }
+    if (kind == TY_ARRAY) { return ty_c_layout(g_state.t_types[tid].elem); }
+    if (kind == TY_ENUM) {
+        return ((ty_name_attrs(tid) & ATTR_EXTERN) != 0).to_type(int);
+    }
+    if (kind == TY_STRUCT || kind == TY_UNION) {
+        return ((ty_name_attrs(tid) & (ATTR_EXTERN | ATTR_OPAQUE)) == ATTR_EXTERN).to_type(int);
+    }
     return 0;
 }
 
@@ -877,6 +963,7 @@ pub fn sem_init_tables() int {
     g_state.c_scope_start = malloc(n4).to_type(*int);
     g_state.c_brk_stk = malloc(n4).to_type(*int);
     g_state.c_cnt_stk = malloc(n4).to_type(*int);
+    g_state.c_loop_break_seen = malloc(n4).to_type(*int);
     g_state.c_glabels = malloc((sizeof(GLabel) * 128).to_type(u64)).to_type(*GLabel);
     g_state.c_args = malloc((sizeof(Res) * 256).to_type(u64)).to_type(*Res);
     g_state.c_argtys = malloc((4 * 256).to_type(u64)).to_type(*int);
@@ -902,6 +989,7 @@ pub fn sem_init_tables() int {
     g_state.sc_sc_false_stk = malloc((4 * 64).to_type(u64)).to_type(*int);
     g_state.sc_sc_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int);
     if (g_state.c_scope_start == 0 || g_state.c_brk_stk == 0 || g_state.c_cnt_stk == 0
+        || g_state.c_loop_break_seen == 0
         || g_state.c_glabels == 0 || g_state.c_args == 0 || g_state.c_argtys == 0
         || g_state.c_spill_reg == 0 || g_state.c_spill_off == 0 || g_state.c_spill_size == 0
         || g_state.c_call_base == 0

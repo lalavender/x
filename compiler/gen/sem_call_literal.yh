@@ -61,6 +61,11 @@ pub fn sem_call(callee *Res, r *Res) int {
     let vararg int = g_state.t_sig_vararg[sig];
     let ret int = g_state.t_sig_ret[sig];
     let na int = g_state.c_arg_n - base;
+    let noreturn int = 0;
+    if (direct != 0 && callee.sym >= 0
+        && (g_state.c_syms[callee.sym].flags & F_NORETURN) != 0) {
+        noreturn = 1;
+    }
     // vararg==2：类型化变参（末尾打包为切片）；==1：裸 C 变参（仅 prelude）
     if (vararg == 2) {
         if (na < np) {
@@ -80,6 +85,17 @@ pub fn sem_call(callee *Res, r *Res) int {
             want = -1;
         }
         if (want >= 0) {
+            // C ABI 回调必须是直接可识别的 extern 函数，防止普通 yh 函数
+            // 或 ABI 信息已丢失的函数指针被误当成 C 可调用入口。
+            if (g_state.t_types[want].kind == TY_FN && direct != 0
+                && callee.sym >= 0
+                && (g_state.c_syms[callee.sym].flags & F_CABI) != 0) {
+                let arg_sym int = g_state.c_args[base + i].sym;
+                if (arg_sym < 0 || g_state.c_syms[arg_sym].kind != SYM_FN
+                    || (g_state.c_syms[arg_sym].flags & F_CABI) == 0) {
+                    return sem_err("C ABI 回调实参必须是 extern 函数");
+                }
+            }
             // 数组实参按指针形参退化
             let wat int = g_state.c_args[base + i].type_id;
             if (g_state.t_types[wat].kind == TY_ARRAY && g_state.t_types[want].kind == TY_PTR) {
@@ -353,6 +369,11 @@ pub fn sem_call(callee *Res, r *Res) int {
         if (em_ins("ldr\tx10, [x10]") != 0) { return -1; }
         if (em_call_indirect() != 0) { return -1; }
     }
+    if (noreturn != 0) {
+        // 若外部实现违反 noreturn 契约，立刻陷阱，绝不执行调用点后续代码。
+        g_state.c_expr_noreturn = 1;
+        if (em_ins("brk\t#0") != 0) { return -1; }
+    }
     if (em_call_cleanup_bytes(area_bytes) != 0) { return -1; }
     g_state.c_arg_n = base;
     sem_res_reset(r, ret);
@@ -398,6 +419,9 @@ pub fn sem_lit_field_lookup(tid int, start int, n int) int {
 pub fn sem_struct_lit_begin(tid int) int {
     if (g_state.c_compile == 0 || g_state.c_fold != 0) {
         return 0;
+    }
+    if (ty_is_opaque(tid) != 0) {
+        return sem_err("不透明 C 类型不能构造实例");
     }
     // pub struct 一等化：字段一律公开，跨模块位置式构造不再检查字段 pub。
     if (g_state.c_lit_depth >= 32) {
@@ -448,4 +472,3 @@ pub fn sem_struct_lit_end(tid int) int {
     g_state.c_lit_tid = g_state.c_lit_save_tid[g_state.c_lit_depth];
     return em_lea_local(my_off);
 }
-

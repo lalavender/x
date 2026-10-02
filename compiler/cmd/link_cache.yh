@@ -32,8 +32,113 @@ pub fn mb_write_manifest(path *char, data *u8, data_len int) int {
     return 0;
 }
 
-// mb_link：把模块汇编转对象并链接；对象与最终程序按内容校验缓存。
-pub fn mb_link(out_path *char, build_off int, build_len int, count int) int {
+// mb_c_project_order：前序收集根项目及其本地依赖，去重并保持清单顺序。
+fn mb_c_project_order(proj int, projects *int, count *int, capacity int) int {
+    let gs *gen.GenState = gen.G();
+    if (proj < 0 || proj >= gs.p_proj_n) { return -1; }
+    let i int = 0;
+    for i < count[0] {
+        if (projects[i] == proj) { return 0; }
+        i += 1;
+    }
+    if (count[0] >= capacity) { return gen.fail("C 项目依赖数量超出限制"); }
+    projects[count[0]] = proj;
+    count[0] += 1;
+    let dep int = 0;
+    for dep < gs.p_projs[proj].dep_n {
+        let child int = gs.p_projs[proj].deps[dep].proj;
+        if (mb_c_project_order(child, projects, count, capacity) != 0) { return -1; }
+        dep += 1;
+    }
+    return 0;
+}
+
+// mb_c_obj_path：生成当前 build 目录下某个 C 源文件对应的对象路径。
+fn mb_c_obj_path(build_off int, project int, source_index int, out *u8) int {
+    let n int = 0;
+    n = gen.append_str(out, n, pj_pool_str(build_off));
+    n = gen.append_str(out, n, "/obj/c-");
+    n = gen.append_int(out, n, project);
+    n = gen.append_byte(out, n, '-');
+    n = gen.append_int(out, n, source_index);
+    n = gen.append_str(out, n, ".o");
+    out[n] = 0;
+    return n;
+}
+
+// mb_c_compile_sources：每次 build/run 重编可达项目的 C 源，避免漏掉头文件变化。
+fn mb_c_compile_sources(projects *int, project_count int,
+    build_off int, cc *char) int {
+    let gs *gen.GenState = gen.G();
+    let pi int = 0;
+    for pi < project_count {
+        let proj int = projects[pi];
+        let si int = 0;
+        for si < gs.p_projs[proj].c_source_n {
+            let out [700]u8;
+            mb_c_obj_path(build_off, proj, si, out);
+            unlink(gen.arr_cstr(out));
+            let args [6]*char;
+            args[0] = cc;
+            args[1] = "-c";
+            args[2] = pj_pool_str(gs.p_projs[proj].c_sources[si].path_off);
+            args[3] = "-o";
+            args[4] = gen.arr_cstr(out);
+            args[5] = 0.to_type(*char);
+            if (cmd_process_run(&args[0]) != 0) {
+                return gen.fail_path("C 源文件编译失败: ", args[2]);
+            }
+            si += 1;
+        }
+        pi += 1;
+    }
+    return 0;
+}
+
+// mb_c_input_hash：把 C 对象内容、输入路径和系统库名纳入最终链接缓存键。
+fn mb_c_input_hash(hash *u64, projects *int, project_count int,
+    build_off int) int {
+    let gs *gen.GenState = gen.G();
+    let pi int = 0;
+    for pi < project_count {
+        let proj int = projects[pi];
+        let si int = 0;
+        for si < gs.p_projs[proj].c_source_n {
+            let object [700]u8;
+            mb_c_obj_path(build_off, proj, si, object);
+            if (mb_hash_file(hash, gen.arr_cstr(object)) != 0) { return -1; }
+            let path_off int = gs.p_projs[proj].c_sources[si].path_off;
+            let path_len int = gs.p_projs[proj].c_sources[si].path_len;
+            let j int = 0;
+            for j < path_len { mb_fnv(hash, gs.np_data[path_off + j]); j += 1; }
+            mb_fnv(hash, 0);
+            si += 1;
+        }
+        let oi int = 0;
+        for oi < gs.p_projs[proj].c_object_n {
+            let input gen.PInput = gs.p_projs[proj].c_objects[oi];
+            if (mb_hash_file(hash, pj_pool_str(input.path_off)) != 0) { return -1; }
+            let j2 int = 0;
+            for j2 < input.path_len { mb_fnv(hash, gs.np_data[input.path_off + j2]); j2 += 1; }
+            mb_fnv(hash, 0);
+            oi += 1;
+        }
+        let li int = 0;
+        for li < gs.p_projs[proj].c_lib_n {
+            let lib gen.PInput = gs.p_projs[proj].c_libs[li];
+            let j3 int = 0;
+            for j3 < lib.path_len { mb_fnv(hash, gs.np_data[lib.path_off + j3]); j3 += 1; }
+            mb_fnv(hash, 255);
+            li += 1;
+        }
+        pi += 1;
+    }
+    return 0;
+}
+
+// mb_link：把模块汇编与可达项目 C 输入转对象并链接，缓存键覆盖全部对象。
+pub fn mb_link(out_path *char, build_off int, build_len int,
+    count int, root_proj int) int {
     let gs *gen.GenState = gen.G();
     let object_start_ns u64 = 0;
     if (gs.c_stats_enabled != 0) {
@@ -43,6 +148,25 @@ pub fn mb_link(out_path *char, build_off int, build_len int, count int) int {
     let cc *char = "gcc";
     if (gen.tg_darwin() != 0) {
         cc = "clang";
+    }
+    let project_capacity int = gs.p_proj_n > 0 ? gs.p_proj_n : 1;
+    let c_projects *int = malloc((project_capacity * sizeof(int)).to_type(u64))
+        .to_type(*int);
+    if (c_projects == 0) { return gen.fail("C 项目顺序表内存分配失败"); }
+    let c_project_n int = 0;
+    if (mb_c_project_order(root_proj, c_projects, &c_project_n,
+        project_capacity) != 0) { return -1; }
+    let c_object_n int = 0;
+    let c_lib_n int = 0;
+    let cpi int = 0;
+    for cpi < c_project_n {
+        let cproj int = c_projects[cpi];
+        c_object_n += gs.p_projs[cproj].c_source_n + gs.p_projs[cproj].c_object_n;
+        c_lib_n += gs.p_projs[cproj].c_lib_n;
+        cpi += 1;
+    }
+    if (mb_c_compile_sources(c_projects, c_project_n, build_off, cc) != 0) {
+        return -1;
     }
     // 步骤 1：逐模块汇编为 .o
     let i int = 0;
@@ -211,6 +335,9 @@ pub fn mb_link(out_path *char, build_off int, build_len int, count int) int {
         }
         i += 1;
     }
+    if (mb_c_input_hash(&hlink, c_projects, c_project_n, build_off) != 0) {
+        return -1;
+    }
     let link_want [16]u8;
     mb_hash_hex(hlink, link_want);
     let link_manifest [620]u8;
@@ -260,12 +387,16 @@ pub fn mb_link(out_path *char, build_off int, build_len int, count int) int {
     }
     unlink(gen.arr_cstr(link_manifest));
     // 步骤 2：链接全部 .o
-    let argc int = count + 5;
+    let argc int = count + c_object_n + c_lib_n + 8;
     let args **char = malloc((argc * sizeof(*char)).to_type(u64)).to_type(**char);
-    let paths *u8 = malloc((count * 620).to_type(u64)).to_type(*u8);
-    if (args == 0 || paths == 0) {
+    let paths *u8 = malloc(((count > 0 ? count : 1) * 620).to_type(u64)).to_type(*u8);
+    let cpaths *u8 = malloc(((c_object_n > 0 ? c_object_n : 1) * 700).to_type(u64)).to_type(*u8);
+    let libpaths *u8 = malloc(((c_lib_n > 0 ? c_lib_n : 1) * 128).to_type(u64)).to_type(*u8);
+    if (args == 0 || paths == 0 || cpaths == 0 || libpaths == 0) {
         if (args != 0) { free(args.to_type(*void)); }
         if (paths != 0) { free(paths.to_type(*void)); }
+        if (cpaths != 0) { free(cpaths.to_type(*void)); }
+        if (libpaths != 0) { free(libpaths.to_type(*void)); }
         return gen.fail("链接 argv 缓冲分配失败");
     }
     let next_arg int = 0;
@@ -285,6 +416,8 @@ pub fn mb_link(out_path *char, build_off int, build_len int, count int) int {
         if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
             free(args.to_type(*void));
             free(paths.to_type(*void));
+            free(cpaths.to_type(*void));
+            free(libpaths.to_type(*void));
             return -1;
         }
         let row *u8 = paths + (i * 620);
@@ -298,6 +431,45 @@ pub fn mb_link(out_path *char, build_off int, build_len int, count int) int {
         next_arg += 1;
         i += 1;
     }
+    let cp int = 0;
+    let cpath_i int = 0;
+    for cp < c_project_n {
+        let cproj int = c_projects[cp];
+        let si2 int = 0;
+        for si2 < gs.p_projs[cproj].c_source_n {
+            let row2 *u8 = cpaths + (cpath_i * 700);
+            mb_c_obj_path(build_off, cproj, si2, row2);
+            args[next_arg] = row2.to_type(*char);
+            next_arg += 1;
+            cpath_i += 1;
+            si2 += 1;
+        }
+        let oi2 int = 0;
+        for oi2 < gs.p_projs[cproj].c_object_n {
+            args[next_arg] = pj_pool_str(gs.p_projs[cproj].c_objects[oi2].path_off);
+            next_arg += 1;
+            oi2 += 1;
+        }
+        cp += 1;
+    }
+    cp = 0;
+    let libpath_i int = 0;
+    for cp < c_project_n {
+        let cproj2 int = c_projects[cp];
+        let li2 int = 0;
+        for li2 < gs.p_projs[cproj2].c_lib_n {
+            let lib gen.PInput = gs.p_projs[cproj2].c_libs[li2];
+            let row3 *u8 = libpaths + (libpath_i * 128);
+            let ln int = gen.append_str(row3, 0, "-l");
+            ln = append_bytes_np(row3, ln, lib.path_off, lib.path_len);
+            row3[ln] = 0;
+            args[next_arg] = row3.to_type(*char);
+            next_arg += 1;
+            libpath_i += 1;
+            li2 += 1;
+        }
+        cp += 1;
+    }
     args[next_arg] = 0.to_type(*char);
     if (gs.c_stats_enabled != 0) {
         gs.c_stats_link += 1;
@@ -305,6 +477,8 @@ pub fn mb_link(out_path *char, build_off int, build_len int, count int) int {
     let link_rc int = cmd_process_run(&args[0]);
     free(args.to_type(*void));
     free(paths.to_type(*void));
+    free(cpaths.to_type(*void));
+    free(libpaths.to_type(*void));
     if (link_rc != 0) {
         return gen.fail_path("链接失败: ", out_path);
     }

@@ -89,10 +89,84 @@ pub fn parse_source() int {
 
 pub fn at_top_decl_start(k int) int {
     if (k == gen.TK_PUB || k == gen.TK_LET || k == gen.TK_CONST || k == gen.TK_FN || k == gen.TK_TYPE
-        || k == gen.TK_STRUCT || k == gen.TK_UNION || k == gen.TK_ENUM) {
+        || k == gen.TK_STRUCT || k == gen.TK_UNION || k == gen.TK_ENUM || k == gen.TK_AT) {
         return 1;
     }
     return 0;
+}
+
+// p_tok_text_is：比较当前 token 的源字节，用于识别属性名而不保留新关键字。
+pub fn p_tok_text_is(text *char, n int) int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_pos < 0 || gs.c_pos >= gs.c_tok_n || gs.c_toks[gs.c_pos].len != n) {
+        return 0;
+    }
+    let i int = 0;
+    for i < n {
+        if (gs.c_src[gs.c_toks[gs.c_pos].start + i] != text[i].to_type(u8)) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// parse_attr_list：消费一个非空、无尾逗号的属性列表并返回识别出的属性位。
+pub fn parse_attr_list(attrs *int) int {
+    *attrs = 0;
+    if (p_expect(gen.TK_AT, "期望 '@'") != 0
+        || p_expect(gen.TK_LBRACKET, "属性列表期望 '['") != 0) {
+        return -1;
+    }
+    if (p_cur() == gen.TK_RBRACKET) {
+        return gen.err_tok("属性列表不能为空");
+    }
+    let bits int = 0;
+    for 1 {
+        let bit int = 0;
+        if (p_tok_text_is("extern", 6) != 0) {
+            bit = gen.ATTR_EXTERN;
+        } else if (p_tok_text_is("inline", 6) != 0) {
+            bit = gen.ATTR_INLINE;
+        } else if (p_tok_text_is("noreturn", 8) != 0) {
+            bit = gen.ATTR_NORETURN;
+        } else {
+            return gen.err_tok("未知属性（仅支持 extern、inline、noreturn）");
+        }
+        if ((bits & bit) != 0) {
+            return gen.err_tok("属性列表中存在重复属性");
+        }
+        bits |= bit;
+        p_adv();
+        if (p_cur() != gen.TK_COMMA) { break; }
+        p_adv();
+        if (p_cur() == gen.TK_RBRACKET) {
+            return gen.err_tok("属性列表不允许尾逗号");
+        }
+    }
+    if (p_expect(gen.TK_RBRACKET, "属性列表期望 ']' ") != 0) {
+        return -1;
+    }
+    *attrs = bits;
+    return 0;
+}
+
+// p_top_decl_kind：查看属性列表与 pub 之后的声明种类，不改变解析游标。
+pub fn p_top_decl_kind() int {
+    let gs *gen.GenState = gen.G();
+    let pos int = gs.c_pos;
+    if (p_cur() == gen.TK_AT) {
+        p_adv();
+        if (p_cur() == gen.TK_LBRACKET) {
+            p_adv();
+            for p_cur() != gen.TK_RBRACKET && p_cur() != gen.TOK_EOF { p_adv(); }
+            if (p_cur() == gen.TK_RBRACKET) { p_adv(); }
+        }
+    }
+    if (p_cur() == gen.TK_PUB) { p_adv(); }
+    let kind int = p_cur();
+    gs.c_pos = pos;
+    return kind;
 }
 
 pub fn skip_top_decl() int {
@@ -138,9 +212,15 @@ pub fn decl_index_file(fi int) int {
         let start int = gs.c_pos;
         let line int = gs.c_toks[start].line;
         let col int = gs.c_toks[start].col;
+        let attrs int = 0;
+        if (p_cur() == gen.TK_AT && parse_attr_list(&attrs) != 0) {
+            free(nodes);
+            return -1;
+        }
         if (p_cur() == gen.TK_PUB) {
             p_adv();
         }
+        let keyword int = gs.c_pos;
         let kind int = p_cur();
         if (p_cur() != gen.TOK_EOF) {
             p_adv();
@@ -164,6 +244,7 @@ pub fn decl_index_file(fi int) int {
         nodes[count].start = start;
         nodes[count].end = gs.c_pos;
         nodes[count].kind = kind;
+        nodes[count].keyword = keyword;
         nodes[count].line = line;
         nodes[count].col = col;
         count += 1;
@@ -222,40 +303,9 @@ pub fn parse_source_globals() int {
     }
     mod_skip_head();
     for p_cur() != gen.TOK_EOF {
-        if (p_cur() == gen.TK_PUB) {
-            gs.c_decl_pub = 1;
-            p_adv();
-            if (p_cur() == gen.TK_LET) {
-                if (parse_let_decl(1) != 0) {
-                    return -1;
-                }
-                gs.c_decl_pub = 0;
-                continue;
-            }
-            if (p_cur() == gen.TK_CONST) {
-                if (parse_const_decl(1) != 0) {
-                    return -1;
-                }
-                gs.c_decl_pub = 0;
-                continue;
-            }
-            // pub + 其他：回退处理
-            if (skip_top_decl() != 0) {
-                return -1;
-            }
-            continue;
-        }
-        gs.c_decl_pub = 0;
-        if (p_cur() == gen.TK_LET) {
-            if (parse_let_decl(1) != 0) {
-                return -1;
-            }
-            continue;
-        }
-        if (p_cur() == gen.TK_CONST) {
-            if (parse_const_decl(1) != 0) {
-                return -1;
-            }
+        let kind int = p_top_decl_kind();
+        if (kind == gen.TK_LET || kind == gen.TK_CONST) {
+            if (parse_top_decl() != 0) { return -1; }
             continue;
         }
         if (skip_top_decl() != 0) {
@@ -272,26 +322,9 @@ pub fn parse_source_fns() int {
     }
     mod_skip_head();
     for p_cur() != gen.TOK_EOF {
-        if (p_cur() == gen.TK_PUB) {
-            gs.c_decl_pub = 1;
-            p_adv();
-            if (p_cur() == gen.TK_FN) {
-                if (parse_fn_decl() != 0) {
-                    return -1;
-                }
-                gs.c_decl_pub = 0;
-                continue;
-            }
-            if (skip_top_decl() != 0) {
-                return -1;
-            }
-            continue;
-        }
-        gs.c_decl_pub = 0;
-        if (p_cur() == gen.TK_FN) {
-            if (parse_fn_decl() != 0) {
-                return -1;
-            }
+        let kind int = p_top_decl_kind();
+        if (kind == gen.TK_FN) {
+            if (parse_top_decl() != 0) { return -1; }
             continue;
         }
         if (skip_top_decl() != 0) {
@@ -301,13 +334,9 @@ pub fn parse_source_fns() int {
     return 0;
 }
 
-pub fn parse_top_decl() int {
+// parse_top_decl_body：消费已由 parse_top_decl 解析前缀后的声明主体。
+pub fn parse_top_decl_body() int {
     let gs *gen.GenState = gen.G();
-    gs.c_decl_pub = 0;
-    if (p_cur() == gen.TK_PUB) {
-        gs.c_decl_pub = 1;
-        p_adv();
-    }
     let k int = p_cur();
     if (k == gen.TK_LET) {
         // 2026-10-02「let 不导出」：let 只能是模块变量或函数局部变量，
@@ -346,6 +375,42 @@ pub fn parse_top_decl() int {
         return parse_enum_decl();
     }
     return gen.err_tok("此处需要一个顶层声明");
+}
+
+// parse_top_decl：消费可选的单组属性、pub 与一条顶层声明，并清理属性状态。
+pub fn parse_top_decl() int {
+    let gs *gen.GenState = gen.G();
+    let attr_pos int = gs.c_pos;
+    gs.c_decl_pub = 0;
+    gs.c_decl_attrs = 0;
+    if (p_cur() == gen.TK_AT && parse_attr_list(&gs.c_decl_attrs) != 0) {
+        gs.c_decl_attrs = 0;
+        return -1;
+    }
+    if (p_cur() == gen.TK_PUB) {
+        gs.c_decl_pub = 1;
+        p_adv();
+    }
+    let kind int = p_cur();
+    if (gs.c_decl_attrs != 0) {
+        if (kind == gen.TK_STRUCT || kind == gen.TK_UNION || kind == gen.TK_ENUM) {
+            if ((gs.c_decl_attrs & (gen.ATTR_INLINE | gen.ATTR_NORETURN)) != 0) {
+                gs.c_pos = attr_pos;
+                gs.c_decl_pub = 0;
+                gs.c_decl_attrs = 0;
+                return gen.err_tok("inline/noreturn 只能修饰函数");
+            }
+        } else if (kind != gen.TK_FN) {
+            gs.c_pos = attr_pos;
+            gs.c_decl_pub = 0;
+            gs.c_decl_attrs = 0;
+            return gen.err_tok("属性只适用于 fn/struct/union/enum，不适用于此声明");
+        }
+    }
+    let result int = parse_top_decl_body();
+    gs.c_decl_pub = 0;
+    gs.c_decl_attrs = 0;
+    return result;
 }
 
 pub fn parse_local_init(idx int, tid int, kind int) int {
@@ -499,9 +564,50 @@ pub fn parse_fn_decl() int {
         }
         ret = rt;
     }
+    if ((gs.c_decl_attrs & gen.ATTR_NORETURN) != 0 && ret != gen.TY_VOID) {
+        return gen.sem_err("noreturn 函数必须返回 void");
+    }
+    if (gs.c_compile != 0) {
+        if (gen.ty_has_opaque_value(ret) != 0) {
+            return gen.sem_err("不透明 C 类型不能按值返回");
+        }
+        let pi_check int = 0;
+        for pi_check < np {
+            if (gen.ty_has_opaque_value(ptypes[pi_check]) != 0) {
+                return gen.sem_err("不透明 C 类型只能通过指针传递");
+            }
+            pi_check += 1;
+        }
+        if ((gs.c_decl_attrs & gen.ATTR_EXTERN) != 0) {
+            if (vararg != 0 || is_variadic_seen != 0) {
+                return gen.sem_err("C ABI v1 不支持 yh 变参");
+            }
+            if (ret != gen.TY_VOID && gen.ty_cabi_scalar(ret) == 0) {
+                return gen.sem_err("C ABI 不支持该返回类型");
+            }
+            let ci int = 0;
+            for ci < np {
+                if (gen.ty_cabi_param(ptypes[ci]) == 0) {
+                    return gen.sem_err("C ABI 不支持该参数类型");
+                }
+                ci += 1;
+            }
+        }
+    }
+    let has_body int = (p_cur() == gen.TK_LBRACE).to_type(int);
+    if (has_body == 0 && (gs.c_decl_attrs & gen.ATTR_EXTERN) == 0) {
+        return gen.err_tok("无函数体声明需要 extern 属性");
+    }
+    if (has_body == 0 && (gs.c_decl_attrs & gen.ATTR_INLINE) != 0) {
+        return gen.err_tok("inline 函数必须提供函数体");
+    }
+    if (has_body == 0 && p_expect(gen.TK_SEMI, "期望 ';'") != 0) {
+        return -1;
+    }
     if (gs.c_compile == 0) {
-        // 语法模式：必须带函数体（rejected/12）
-        return parse_block();
+        // 语法模式：普通函数必须带体；extern 声明以分号收尾。
+        if (has_body != 0) { return parse_block(); }
+        return 0;
     }
     // 编译模式
     if (gs.c_pass == 1) {
@@ -538,6 +644,12 @@ pub fn parse_fn_decl() int {
         if (gs.c_decl_pub != 0) {
             fl |= gen.F_PUB;
         }
+        if ((gs.c_decl_attrs & gen.ATTR_EXTERN) != 0) {
+            fl |= gen.F_CABI;
+            if (has_body == 0) { fl |= gen.F_EXTERN; }
+        }
+        if ((gs.c_decl_attrs & gen.ATTR_NORETURN) != 0) { fl |= gen.F_NORETURN; }
+        if ((gs.c_decl_attrs & gen.ATTR_INLINE) != 0) { fl |= gen.F_INLINE; }
         let idx int = gen.sym_push(start, n, gen.SYM_FN, ftid, fl);
         if (idx < 0) {
             return -1;
@@ -550,10 +662,8 @@ pub fn parse_fn_decl() int {
             && (gs.c_module_mode == 0 || gs.c_is_entry_mod != 0)) {
             gs.c_syms[idx].flags |= gen.F_PUB;
         }
-        // 跳过函数体
-        if (p_cur() != gen.TK_LBRACE) {
-            return gen.err_tok("fn 必须带函数体");
-        }
+        // 有体定义跳过函数体；extern 引用已在上方消费分号。
+        if (has_body == 0) { return 0; }
         if (gs.c_file_indexed != 0 && gs.c_file_decl_i >= 0) {
             gs.c_pos = gs.c_file_decls[gs.c_file_decl_i].end;
             return 0;
@@ -561,6 +671,7 @@ pub fn parse_fn_decl() int {
         return skip_to_decl_end();
     }
     // pass 2：编译函数体
+    if (has_body == 0) { return 0; }
     let fidx int = gen.sym_lookup(start, n);
     if (fidx < 0) {
         return gen.sem_err("内部错误：函数符号丢失");
@@ -706,7 +817,13 @@ pub fn parse_struct_decl() int {
         return -1;
     }
     if (gs.c_compile != 0 && gs.c_pass == 1) {
-        return gen.sem_struct_finish(gs.c_cur_struct, is_union);
+        if (gen.sem_struct_finish(gs.c_cur_struct, is_union) != 0) {
+            return -1;
+        }
+        if ((gs.c_decl_attrs & gen.ATTR_EXTERN) != 0 && gs.t_types[gs.c_cur_struct].len == 0) {
+            return gen.ty_add_name_attrs(gs.c_cur_struct, gen.ATTR_OPAQUE);
+        }
+        return 0;
     }
     return 0;
 }
@@ -736,6 +853,7 @@ pub fn parse_enum_decl() int {
         }
         gs.c_enum_next = 0;
     }
+    let item_count int = 0;
     if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
         return -1;
     }
@@ -765,6 +883,7 @@ pub fn parse_enum_decl() int {
         if (p_expect(gen.TK_SEMI, "期望 ';'") != 0) {
             return -1;
         }
+        item_count += 1;
         if (gs.c_compile != 0 && gs.c_pass == 1) {
             let val i64 = gs.c_enum_next.to_type(i64);
             if (has_val != 0) {
@@ -772,6 +891,10 @@ pub fn parse_enum_decl() int {
                     return gen.sem_err("枚举判别值必须是编译期常量");
                 }
                 val = v.ival;
+            }
+            if ((gs.c_decl_attrs & gen.ATTR_EXTERN) != 0
+                && (val < -2147483648 || val > 2147483647)) {
+                return gen.sem_err("extern enum 判别值必须可用 i32 表示");
             }
             // pub enum 一等化：成员常量随枚举导出（F_PUB 进入接口名字表），
             // 跨模块以 `模块名.成员` 引用；接口加载侧按 pub enum 重新登记。
@@ -787,5 +910,10 @@ pub fn parse_enum_decl() int {
             gs.c_enum_next = val.to_type(int) + 1;
         }
     }
-    return p_expect(gen.TK_RBRACE, "期望 '}'");
+    if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) { return -1; }
+    if (gs.c_compile != 0 && gs.c_pass == 1
+        && (gs.c_decl_attrs & gen.ATTR_EXTERN) != 0 && item_count == 0) {
+        return gen.sem_err("extern enum 必须至少包含一个成员");
+    }
+    return 0;
 }
