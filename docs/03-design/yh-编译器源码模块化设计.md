@@ -8,13 +8,13 @@
 
 ## 1. 现状与边界
 
-编译器源码已按 **lex / parse / gen / cmd** 四模块成模，共 25 个 `.yh`
-文件、约 1.3 万行：`lex/lexer.yh`；`parse/{parse_type,parse_expr,parse_stmt,
-parse_decl,parse_global_init,parse_module,iface}.yh`；
+编译器源码已按 **lex / parse / gen / cmd** 四模块成模，共 29 个 `.yh`
+文件、约 1.5 万行：`lex/lexer.yh`；`parse/{parse_type,parse_expr,ast_expr,
+ast_stmt,ast_decl,parse_stmt,parse_decl,parse_global_init,parse_module,iface}.yh`；
 `gen/{model,buffer,symbols,target,sem_value,sem_expr,sem_decl,sem_flow,
 sem_call_literal,emit_arm64}.yh`；
 `cmd/{driver,compile,toml,project_state,project_index,project_resolve,
-module_build}.yh`。清单 `compiler/project.toml`（name = `yh`，
+module_build,link_cache}.yh`。清单 `compiler/project.toml`（name = `yh`，
 version = `0.0.3`，source = `.`），无 `entry` 字段——入口是
 `cmd/*.yh` 中的 `module main;`。
 
@@ -52,7 +52,7 @@ flowchart LR
 
 gen 拥有 model、buffer、symbols、sem、target、emit；lex 拥有 lexer；
 parse 拥有 parse_*、iface；cmd 拥有 toml、project、module_build、
-driver 及编译编排。模块内可以继续分多个文件，不靠每个文件建模块
+link_cache、driver 及编译编排。模块内可以继续分多个文件，不靠每个文件建模块
 取得“模块化”名义。
 
 ~~~toml
@@ -112,8 +112,9 @@ gen/model 中有大量可变全局表，lex、parse、cmd 暂时会读写部分�
 
 每模块独立子进程编译，错误诊断仍指向源文件；项目绑定身份从
 cmd 的索引传到 parse/gen，不在模块边界重新搜索同名提供方。
-.s 与 .s.i 必须成对发布，失败不能留可命中的半成品。当前缓存键
-不包含编译器二进制身份，自举代次必须隔离缓存。
+.s 与 .s.i 必须成对发布，失败不能留可命中的半成品。模块缓存键已包含编译器
+二进制身份；过渡对象/链接缓存按汇编、对象、参数和目标配置校验，但尚未包含
+外部工具版本，自举代次仍须隔离缓存。
 
 ## 5. 文件拆分与顺序
 
@@ -122,7 +123,8 @@ cmd 的索引传到 parse/gen，不在模块边界重新搜索同名提供方。
 parse_decl.yh（1215 行）；具体文件名、原函数范围和每步测试见
 [实施方案 §5](../02-plan/yh-编译器模块化详细方案.md)。
 emit_arm64.yh 为 1014 行，只略超建议上限，先保留；symbols.yh
-981 行、parse_expr.yh 913 行、module_build.yh 868 行均先保留。
+981 行、parse_expr.yh 913 行先保留。`module_build.yh` 当前 1183 行，
+新拆出的 `link_cache.yh` 290 行独立管理对象与链接缓存。
 
 gen 模块中的模型声明必须先于引用它的文件读取。给 model 文件稳定
 序号前缀，并检查项目构建器实际扫描顺序；不要以“文件系统通常排序”

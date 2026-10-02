@@ -1,0 +1,447 @@
+module parse;
+import gen;
+
+// ============================================================================
+// ast_stmt.yh —— check worker 的语句树与表达式根关联
+//
+// 语句节点在进入旧解析器前建立，解析完后补齐 token 终点；父节点通过
+// 首子/末子/兄弟索引关联，表达式通过独立链表关联。这样语法结构与旧
+// 语义钩子并行记录，后续迁移可逐类替换消费方，而不依赖汇编发射结果。
+// ============================================================================
+
+// 语句 AST 节点类别。
+pub const AST_STMT_BLOCK int = 1;
+pub const AST_STMT_DECL int = 2;
+pub const AST_STMT_TYPE int = 3;
+pub const AST_STMT_IF int = 4;
+pub const AST_STMT_FOR int = 5;
+pub const AST_STMT_SWITCH int = 6;
+pub const AST_STMT_RETURN int = 7;
+pub const AST_STMT_BREAK int = 8;
+pub const AST_STMT_CONTINUE int = 9;
+pub const AST_STMT_GOTO int = 10;
+pub const AST_STMT_LABEL int = 11;
+pub const AST_STMT_ASSIGN int = 12;
+pub const AST_STMT_EXPR int = 13;
+pub const AST_STMT_CASE int = 14;
+
+// AstStmt：token 范围节点及其语句/表达式边。
+pub struct AstStmt {
+    pub kind int;            // AST_STMT_* 节点类别
+    pub op int;              // 源语法 token，例如 let、if 或赋值符
+    pub first int;           // 当前文件 token 半开区间起点
+    pub after int;           // 解析结束后的 token 游标
+    pub token_count int;     // 创建节点时的文件 token 数
+    pub file_id int;         // 项目源码文件编号
+    pub parent int;          // 父语句节点；顶层函数体为 -1
+    pub first_child int;     // 第一个直接语句子节点
+    pub last_child int;      // 最后一个直接语句子节点
+    pub next_sibling int;    // 同一父节点下的下一个语句
+    pub root_next int;       // 无父节点语句根的下一个根
+    pub first_expr int;      // 首个关联表达式边
+    pub last_expr int;       // 最后一个关联表达式边
+    pub first_binding int;   // 首个声明绑定表行
+    pub last_binding int;    // 最后一个声明绑定表行
+}
+
+// AstStmtExpr：将一条语句引用到其直接解析的完整表达式根。
+pub struct AstStmtExpr {
+    pub expr_id int;         // compiler/parse 的表达式节点编号
+    pub next int;            // 同一语句的下一条表达式边
+}
+
+// AstBinding：函数参数或局部声明的稳定语义身份与符号布局快照。
+pub struct AstBinding {
+    pub id int;              // 函数内稳定编号，作为后续 IR 局部值键
+    pub sym_id int;          // 解析时符号槽，仅作诊断，不作持久身份
+    pub sym_type_id int;     // 声明时类型表编号
+    pub sym_kind int;        // SYM_VAR 或 SYM_CONST
+    pub sym_flags int;       // 参数等声明属性
+    pub sym_offset int;      // 旧后端局部槽偏移，便于迁移对照
+    pub file_id int;         // 所属 SourceStore 文件
+    pub owner_decl int;      // 所属函数在文件内的声明索引
+    pub stmt_id int;         // 声明语句节点；参数为 -1
+    pub name_token int;      // 声明名字 token 索引
+    pub is_param int;        // 1 表示参数，0 表示函数体内声明
+    pub next int;            // 同一语句关联的下一行；参数不入语句链
+}
+
+pub let ast_stmt_nodes *AstStmt = 0;
+pub let ast_stmt_count int = 0;
+pub let ast_stmt_cap int = 0;
+pub let ast_stmt_exprs *AstStmtExpr = 0;
+pub let ast_stmt_expr_count int = 0;
+pub let ast_stmt_expr_cap int = 0;
+pub let ast_bindings *AstBinding = 0;
+pub let ast_binding_count int = 0;
+pub let ast_binding_cap int = 0;
+pub let ast_binding_local_next int = 0;
+pub let ast_stmt_current int = -1;
+pub let ast_stmt_root_first int = -1;
+pub let ast_stmt_root_last int = -1;
+
+// ast_stmt_reset：清空当前 worker 的语句节点、表达式边与解析游标。
+pub fn ast_stmt_reset() void {
+    if (ast_stmt_nodes != 0) {
+        free(ast_stmt_nodes.to_type(*void));
+    }
+    if (ast_stmt_exprs != 0) {
+        free(ast_stmt_exprs.to_type(*void));
+    }
+    if (ast_bindings != 0) {
+        free(ast_bindings.to_type(*void));
+    }
+    ast_stmt_nodes = 0;
+    ast_stmt_count = 0;
+    ast_stmt_cap = 0;
+    ast_stmt_exprs = 0;
+    ast_stmt_expr_count = 0;
+    ast_stmt_expr_cap = 0;
+    ast_bindings = 0;
+    ast_binding_count = 0;
+    ast_binding_cap = 0;
+    ast_binding_local_next = 0;
+    ast_stmt_current = -1;
+    ast_stmt_root_first = -1;
+    ast_stmt_root_last = -1;
+    gen.c_stats_stmt_nodes = 0;
+    gen.c_stats_ast_bindings = 0;
+}
+
+// ast_binding_begin_function：重置函数内编号，保证相同函数语料获得稳定局部键。
+pub fn ast_binding_begin_function() void {
+    ast_binding_local_next = 0;
+}
+
+// ast_binding_add：捕获参数或局部声明，并建立稳定的函数内绑定编号。
+pub fn ast_binding_add(sym_id int, name_token int, is_param int) int {
+    if (gen.c_ast_capture == 0) {
+        return 0;
+    }
+    if (sym_id < 0 || sym_id >= gen.c_sym_n || name_token < 0
+        || name_token >= gen.c_tok_n || gen.c_toks[name_token].kind != gen.TOK_IDENT
+        || (is_param != 0 && is_param != 1) || gen.c_file_decl_i < 0
+        || gen.c_active_file < 0 || (ast_stmt_current < 0 && is_param == 0)) {
+        return gen.fail("内部错误：局部绑定声明上下文无效");
+    }
+    if (ast_binding_count == ast_binding_cap) {
+        let ncap int = ast_binding_cap * 2;
+        if (ncap == 0) { ncap = 64; }
+        let next *AstBinding = malloc((ncap * sizeof(AstBinding)).to_type(u64)).to_type(*AstBinding);
+        if (next == 0) {
+            return gen.fail("局部绑定 AST 内存分配失败");
+        }
+        if (ast_binding_count > 0) {
+            memcpy(next, ast_bindings, (ast_binding_count * sizeof(AstBinding)).to_type(u64));
+        }
+        if (ast_bindings != 0) {
+            free(ast_bindings.to_type(*void));
+        }
+        ast_bindings = next;
+        ast_binding_cap = ncap;
+    }
+    let row int = ast_binding_count;
+    ast_bindings[row].id = ast_binding_local_next;
+    ast_bindings[row].sym_id = sym_id;
+    ast_bindings[row].sym_type_id = gen.c_syms[sym_id].type_id;
+    ast_bindings[row].sym_kind = gen.c_syms[sym_id].kind;
+    ast_bindings[row].sym_flags = gen.c_syms[sym_id].flags;
+    ast_bindings[row].sym_offset = gen.c_syms[sym_id].offset;
+    ast_bindings[row].file_id = gen.c_active_file;
+    ast_bindings[row].owner_decl = gen.c_file_decl_i;
+    ast_bindings[row].stmt_id = -1;
+    ast_bindings[row].name_token = name_token;
+    ast_bindings[row].is_param = is_param;
+    ast_bindings[row].next = -1;
+    if (is_param == 0) {
+        let stmt int = ast_stmt_current;
+        ast_bindings[row].stmt_id = stmt;
+        if (ast_stmt_nodes[stmt].last_binding < 0) {
+            ast_stmt_nodes[stmt].first_binding = row;
+        } else {
+            ast_bindings[ast_stmt_nodes[stmt].last_binding].next = row;
+        }
+        ast_stmt_nodes[stmt].last_binding = row;
+    }
+    ast_binding_local_next += 1;
+    ast_binding_count += 1;
+    gen.c_syms[sym_id].ast_binding_row = row;
+    gen.c_stats_ast_bindings += 1;
+    return 0;
+}
+
+// ast_stmt_grow_nodes：扩容语句节点连续表并保留现有节点索引。
+pub fn ast_stmt_grow_nodes() int {
+    let ncap int = ast_stmt_cap * 2;
+    if (ncap == 0) { ncap = 64; }
+    let next *AstStmt = malloc((ncap * sizeof(AstStmt)).to_type(u64)).to_type(*AstStmt);
+    if (next == 0) {
+        return gen.fail("语句 AST 内存分配失败");
+    }
+    if (ast_stmt_count > 0) {
+        memcpy(next, ast_stmt_nodes, (ast_stmt_count * sizeof(AstStmt)).to_type(u64));
+    }
+    if (ast_stmt_nodes != 0) {
+        free(ast_stmt_nodes.to_type(*void));
+    }
+    ast_stmt_nodes = next;
+    ast_stmt_cap = ncap;
+    return 0;
+}
+
+// ast_stmt_grow_exprs：扩容语句到表达式的边表并保留边编号。
+pub fn ast_stmt_grow_exprs() int {
+    let ncap int = ast_stmt_expr_cap * 2;
+    if (ncap == 0) { ncap = 64; }
+    let next *AstStmtExpr = malloc((ncap * sizeof(AstStmtExpr)).to_type(u64)).to_type(*AstStmtExpr);
+    if (next == 0) {
+        return gen.fail("语句表达式边内存分配失败");
+    }
+    if (ast_stmt_expr_count > 0) {
+        memcpy(next, ast_stmt_exprs,
+            (ast_stmt_expr_count * sizeof(AstStmtExpr)).to_type(u64));
+    }
+    if (ast_stmt_exprs != 0) {
+        free(ast_stmt_exprs.to_type(*void));
+    }
+    ast_stmt_exprs = next;
+    ast_stmt_expr_cap = ncap;
+    return 0;
+}
+
+// ast_stmt_begin：预留语句节点，并接到当前父节点或函数体根链。
+pub fn ast_stmt_begin(kind int, op int, first int) int {
+    if (gen.c_ast_capture == 0) {
+        return -1;
+    }
+    if (gen.c_active_file < 0 || first < 0 || first >= gen.c_tok_n
+        || kind < AST_STMT_BLOCK || kind > AST_STMT_CASE) {
+        return gen.fail("内部错误：语句 AST 起点、文件或类别无效");
+    }
+    if (ast_stmt_count == ast_stmt_cap && ast_stmt_grow_nodes() != 0) {
+        return -1;
+    }
+    let id int = ast_stmt_count;
+    let parent int = ast_stmt_current;
+    ast_stmt_nodes[id].kind = kind;
+    ast_stmt_nodes[id].op = op;
+    ast_stmt_nodes[id].first = first;
+    ast_stmt_nodes[id].after = first;
+    ast_stmt_nodes[id].token_count = gen.c_tok_n;
+    ast_stmt_nodes[id].file_id = gen.c_active_file;
+    ast_stmt_nodes[id].parent = parent;
+    ast_stmt_nodes[id].first_child = -1;
+    ast_stmt_nodes[id].last_child = -1;
+    ast_stmt_nodes[id].next_sibling = -1;
+    ast_stmt_nodes[id].root_next = -1;
+    ast_stmt_nodes[id].first_expr = -1;
+    ast_stmt_nodes[id].last_expr = -1;
+    ast_stmt_nodes[id].first_binding = -1;
+    ast_stmt_nodes[id].last_binding = -1;
+    ast_stmt_count += 1;
+    if (parent >= 0) {
+        if (ast_stmt_nodes[parent].last_child < 0) {
+            ast_stmt_nodes[parent].first_child = id;
+        } else {
+            ast_stmt_nodes[ast_stmt_nodes[parent].last_child].next_sibling = id;
+        }
+        ast_stmt_nodes[parent].last_child = id;
+    } else if (ast_stmt_root_last < 0) {
+        ast_stmt_root_first = id;
+        ast_stmt_root_last = id;
+    } else {
+        ast_stmt_nodes[ast_stmt_root_last].root_next = id;
+        ast_stmt_root_last = id;
+    }
+    ast_stmt_current = id;
+    gen.c_stats_stmt_nodes += 1;
+    return id;
+}
+
+// ast_stmt_end：补齐语句 token 终点并恢复父节点为当前解析上下文。
+pub fn ast_stmt_end(id int, after int) int {
+    if (gen.c_ast_capture == 0) {
+        return 0;
+    }
+    if (id < 0 || id != ast_stmt_current || after < ast_stmt_nodes[id].first
+        || after > gen.c_tok_n || ast_stmt_nodes[id].file_id != gen.c_active_file) {
+        return gen.fail("内部错误：语句 AST 结束位置或嵌套次序无效");
+    }
+    ast_stmt_nodes[id].after = after;
+    ast_stmt_current = ast_stmt_nodes[id].parent;
+    return 0;
+}
+
+// ast_stmt_add_expr：把 parse_expr 的完整根挂到当前语句，忽略模块级表达式。
+pub fn ast_stmt_add_expr(expr_id int) int {
+    if (gen.c_ast_capture == 0 || ast_stmt_current < 0) {
+        return 0;
+    }
+    if (expr_id < 0 || expr_id >= ast_expr_count
+        || ast_expr_nodes[expr_id].file_id != gen.c_active_file) {
+        return gen.fail("内部错误：语句 AST 引用了无效表达式根");
+    }
+    if (ast_stmt_expr_count == ast_stmt_expr_cap && ast_stmt_grow_exprs() != 0) {
+        return -1;
+    }
+    let edge int = ast_stmt_expr_count;
+    ast_stmt_exprs[edge].expr_id = expr_id;
+    ast_stmt_exprs[edge].next = -1;
+    ast_stmt_expr_count += 1;
+    if (ast_stmt_nodes[ast_stmt_current].last_expr < 0) {
+        ast_stmt_nodes[ast_stmt_current].first_expr = edge;
+    } else {
+        ast_stmt_exprs[ast_stmt_nodes[ast_stmt_current].last_expr].next = edge;
+    }
+    ast_stmt_nodes[ast_stmt_current].last_expr = edge;
+    return 0;
+}
+
+// ast_stmt_verify：检查父子树、根链、表达式边与源码区间的一致性。
+pub fn ast_stmt_verify() int {
+    if (gen.c_ast_capture == 0) {
+        return 0;
+    }
+    if (ast_stmt_current != -1 || ast_expr_parse_depth != 0) {
+        return gen.fail("内部错误：语句 AST 解析栈未归零");
+    }
+    let i int = 0;
+    for i < ast_stmt_count {
+        let node AstStmt = ast_stmt_nodes[i];
+        if (node.kind < AST_STMT_BLOCK || node.kind > AST_STMT_CASE
+            || node.file_id < 0 || node.first < 0 || node.after < node.first
+            || node.after > node.token_count || node.token_count <= 0
+            || node.parent >= i || node.parent < -1) {
+            return gen.fail("内部错误：语句 AST 节点或父节点无效");
+        }
+        if (node.kind == AST_STMT_ASSIGN && is_assign_op(node.op) == 0) {
+            return gen.fail("内部错误：赋值 AST 未保存赋值运算符");
+        }
+        if (node.parent >= 0 && (ast_stmt_nodes[node.parent].file_id != node.file_id
+            || node.first < ast_stmt_nodes[node.parent].first
+            || node.after > ast_stmt_nodes[node.parent].after)) {
+            return gen.fail("内部错误：语句 AST 子节点超出父节点范围");
+        }
+        let child int = node.first_child;
+        let previous int = -1;
+        let last int = -1;
+        let seen int = 0;
+        for child >= 0 {
+            if (child >= ast_stmt_count || ast_stmt_nodes[child].parent != i
+                || child <= previous || ast_stmt_nodes[child].file_id != node.file_id) {
+                return gen.fail("内部错误：语句 AST 子节点链损坏");
+            }
+            previous = child;
+            last = child;
+            child = ast_stmt_nodes[child].next_sibling;
+            seen += 1;
+            if (seen > ast_stmt_count) { return gen.fail("内部错误：语句 AST 子节点环"); }
+        }
+        if (last != node.last_child || ((node.first_child < 0) != (node.last_child < 0))) {
+            return gen.fail("内部错误：语句 AST 首末子节点不匹配");
+        }
+        let edge int = node.first_expr;
+        let prior_edge int = -1;
+        let edge_last int = -1;
+        let edge_seen int = 0;
+        for edge >= 0 {
+            if (edge >= ast_stmt_expr_count || edge <= prior_edge) {
+                return gen.fail("内部错误：语句 AST 表达式边链损坏");
+            }
+            let expr_id int = ast_stmt_exprs[edge].expr_id;
+            if (expr_id < 0 || expr_id >= ast_expr_count
+                || ast_expr_nodes[expr_id].file_id != node.file_id
+                || ast_expr_nodes[expr_id].first < node.first
+                || ast_expr_nodes[expr_id].after > node.after) {
+                return gen.fail("内部错误：语句 AST 表达式不在语句范围内");
+            }
+            prior_edge = edge;
+            edge_last = edge;
+            edge = ast_stmt_exprs[edge].next;
+            edge_seen += 1;
+            if (edge_seen > ast_stmt_expr_count) {
+                return gen.fail("内部错误：语句 AST 表达式边环");
+            }
+        }
+        if (edge_last != node.last_expr || ((node.first_expr < 0) != (node.last_expr < 0))) {
+            return gen.fail("内部错误：语句 AST 首末表达式边不匹配");
+        }
+        edge = node.first_binding;
+        prior_edge = -1;
+        edge_last = -1;
+        edge_seen = 0;
+        for edge >= 0 {
+            if (edge >= ast_binding_count || edge <= prior_edge
+                || ast_bindings[edge].stmt_id != i
+                || ast_bindings[edge].file_id != node.file_id
+                || ast_bindings[edge].name_token < node.first
+                || ast_bindings[edge].name_token >= node.after) {
+                return gen.fail("内部错误：语句 AST 绑定边链损坏");
+            }
+            prior_edge = edge;
+            edge_last = edge;
+            edge = ast_bindings[edge].next;
+            edge_seen += 1;
+            if (edge_seen > ast_binding_count) {
+                return gen.fail("内部错误：语句 AST 绑定边成环");
+            }
+        }
+        if (edge_last != node.last_binding
+            || ((node.first_binding < 0) != (node.last_binding < 0))) {
+            return gen.fail("内部错误：语句 AST 首末绑定边不匹配");
+        }
+        i += 1;
+    }
+    let root int = ast_stmt_root_first;
+    let prior_root int = -1;
+    let roots int = 0;
+    for root >= 0 {
+        if (root >= ast_stmt_count || ast_stmt_nodes[root].parent != -1 || root <= prior_root) {
+            return gen.fail("内部错误：语句 AST 根链损坏");
+        }
+        prior_root = root;
+        root = ast_stmt_nodes[root].root_next;
+        roots += 1;
+        if (roots > ast_stmt_count) { return gen.fail("内部错误：语句 AST 根链成环"); }
+    }
+    if ((ast_stmt_root_first < 0) != (ast_stmt_root_last < 0)
+        || prior_root != ast_stmt_root_last) {
+        return gen.fail("内部错误：语句 AST 首末根节点不匹配");
+    }
+    let bi int = 0;
+    let previous_file int = -1;
+    let previous_decl int = -1;
+    let previous_id int = -1;
+    for bi < ast_binding_count {
+        let binding AstBinding = ast_bindings[bi];
+        if (binding.id < 0 || binding.sym_id < 0 || binding.sym_type_id < 0
+            || binding.sym_type_id >= gen.t_type_n
+            || (binding.sym_kind != gen.SYM_VAR && binding.sym_kind != gen.SYM_CONST)
+            || binding.file_id < 0 || binding.file_id >= gen.p_file_n
+            || binding.owner_decl < 0
+            || binding.owner_decl >= gen.p_files[binding.file_id].decl_n
+            || gen.p_files[binding.file_id].decls[binding.owner_decl].kind != gen.TK_FN
+            || binding.name_token < gen.p_files[binding.file_id].decls[binding.owner_decl].start
+            || binding.name_token >= gen.p_files[binding.file_id].decls[binding.owner_decl].end
+            || gen.p_files[binding.file_id].tokens[binding.name_token].kind != gen.TOK_IDENT
+            || (binding.is_param != 0 && binding.is_param != 1)
+            || (binding.is_param != 0 && (binding.stmt_id != -1
+                || (binding.sym_flags & gen.F_PARAM) == 0))
+            || (binding.is_param == 0 && (binding.stmt_id < 0
+                || binding.stmt_id >= ast_stmt_count))) {
+            return gen.fail("内部错误：函数局部绑定 AST 行无效");
+        }
+        if (binding.file_id == previous_file && binding.owner_decl == previous_decl) {
+            if (binding.id != previous_id + 1) {
+                return gen.fail("内部错误：函数局部绑定编号不连续");
+            }
+        } else if (binding.id != 0) {
+            return gen.fail("内部错误：函数局部绑定编号未从零开始");
+        }
+        previous_file = binding.file_id;
+        previous_decl = binding.owner_decl;
+        previous_id = binding.id;
+        bi += 1;
+    }
+    return 0;
+}

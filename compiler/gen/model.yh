@@ -152,6 +152,16 @@ pub struct Tok {
     pub col int;        // 1 基列号（字节偏移）
 }
 
+// PDecl：单个顶层声明的紧凑语法索引，范围为 token 下标 [start,end)。
+// 仅提供跳转边界与声明种类，不包含表达式树或语义绑定。
+pub struct PDecl {
+    pub start int;      // 可选 pub 修饰符或声明关键字的 token 下标
+    pub end int;        // 声明结束后的第一个 token 下标
+    pub kind int;       // let/const/fn/type/struct/union/enum 等关键字 token
+    pub line int;       // 声明首 token 的 1 基源行
+    pub col int;        // 声明首 token 的 1 基源列
+}
+
 // ---------------------------------------------------------------------------
 // 全局状态
 //
@@ -169,6 +179,22 @@ pub let lx_lstart int = 0;      // 当前行首字节下标（用于换算列号
 pub let c_toks *Tok = 0;        // token 数组首址（malloc）
 pub let c_tok_n int = 0;        // 已存 token 数
 pub let c_tok_cap int = 0;      // 已分配槽位数
+pub let c_stats_enabled int = 0; // 1 = 输出构建阶段计数（仅开发验收）
+pub let c_front_cache int = 0;  // 1 = worker 保存项目源与 token 快照
+pub let c_stats_lex int = 0;     // 本进程实际词法扫描次数
+pub let c_stats_syntax int = 0;  // worker 声明索引中的顶层声明数量
+pub let c_stats_index int = 0;   // 项目文件索引次数
+pub let c_stats_pass1 int = 0;   // 模块声明遍历的文件数
+pub let c_stats_globals int = 0; // 模块全局初始化遍历的文件数
+pub let c_stats_functions int = 0; // 模块函数体遍历的文件数
+pub let c_stats_ir_functions int = 0; // 本次构建实际生成并校验的 SSA 函数数
+pub let c_stats_ir_cache_hits int = 0; // 通过输入键和校验器复用的函数 IR 数
+pub let c_stats_ir_cache_misses int = 0; // 本次重新降低并验证的函数 IR 数
+pub let c_ir_cache_salt u64 = 0; // 父构建器传入的编译器二进制指纹
+pub let c_stats_workers int = 0; // 父构建器启动的模块 worker 数
+pub let c_stats_asm int = 0;    // 实际调用外部汇编器的次数
+pub let c_stats_link int = 0;   // 实际调用外部链接器的次数
+pub let c_stats_compiler_hashes int = 0; // 实际读取编译器二进制计算指纹的次数
 
 // —— 解析器 ——
 pub let c_pos int = 0;          // 当前 token 下标（解析游标）
@@ -177,10 +203,15 @@ pub let c_spec int = 0;         // 推测解析深度：>0 时诊断静默且不
 pub let c_ctx_block int = 0;    // 表达式块上下文：1 表示该表达式之后可能紧跟
                             // 「{ 块」（for 头部条件/迭代对象、switch 表达式、
                             // case 值）；此时「IDENT {」需先试探字面量分支
+pub let c_file_decls *PDecl = 0; // 当前文件只读顶层声明索引（项目 worker）
+pub let c_file_decl_n int = 0;   // 当前文件声明索引数量
+pub let c_file_decl_i int = -1;  // 当前正解析声明的索引（函数签名跳过函数体用）
+pub let c_file_indexed int = 0;  // 1 = 当前 token 表带项目扫描期声明索引
 
 // —— 诊断 ——
 pub let c_errors int = 0;       // 已报告的错误数（推测解析不计入）
 pub let c_path *char = 0;       // 当前源文件路径（借自 argv，不复制不释放）
+pub let c_path_buffer [1024]u8; // worker 路径快照，避免名字池扩容后诊断指针失效
 
 // ---------------------------------------------------------------------------
 // B5 扩充：类型与符号常量（原 symbols.yh，先声明后使用）
@@ -218,6 +249,14 @@ pub const F_PUB int = 4;        // pub（GLOBAL 绑定）
 pub const F_EXTERN int = 8;     // prelude 外部符号
 pub const F_ADDR int = 16;      // 常量的值是数据标签号（cval）
 pub const F_AGGPARAM int = 32;  // 聚合参数：槽内是指向调用方副本的指针
+pub const F_INTRINSIC int = 64; // 由目标后端直接发射的内建调用
+pub const F_LINUX_SYSCALL int = 128; // Linux AArch64 svc 内建
+pub const F_RUNTIME_MEMCPY int = 256; // 本地字节复制运行时入口
+pub const F_RUNTIME_STRLEN int = 512; // 本地 C 字符串长度运行时入口
+pub const F_RUNTIME_MALLOC int = 1024; // 本地 OS 映射分配运行时入口
+pub const F_RUNTIME_FREE int = 2048; // 本地 OS 映射释放运行时入口
+pub const F_RUNTIME_PRINTF int = 4096; // 本地格式化输出运行时入口
+pub const F_RUNTIME_USED int = 8192; // 在本模块被调用或取址的运行时入口
 
 // ---------------------------------------------------------------------------
 // B5 扩充：编译模式、类型/符号表、作用域、常量折叠与代码发射状态
@@ -244,6 +283,7 @@ pub struct Res {
     pub is_lit int;         // 1 = 文本字面量（参与隐式窄化范围检查）
     pub lit_big int;        // 1 = 字面量超出 i64 正数域（仅 u64 目标可接受）
     pub fval_bits i64;      // 浮点常量位型（IEEE754，f64 为 64 位）
+    pub ast_id int;         // 本次 check 生成的表达式 AST 节点编号；未记录为 -1
 }
 
 // —— 类型表 ——
@@ -312,6 +352,7 @@ pub struct CSym {
     pub cval i64;           // 常量值位型；指针常量存数据标签号
     pub def_line int;       // 声明点行号（模块模式重复声明诊断用）
     pub def_col int;        // 声明点列号
+    pub ast_binding_row int; // check AST 中对应的函数内绑定行；普通构建或全局为 -1
 }
 pub let c_syms *CSym = 0;
 pub let c_sym_n int = 0;
@@ -323,6 +364,16 @@ pub let c_scope_n int = 0;
 // —— 常量折叠与数据段 ——
 pub let c_fold int = 0;         // >0：表达式只做常量折叠，不发射代码
 pub let c_em_suppress int = 0;  // >0：发射层整体静默（sizeof(expr) 求型用）
+pub let c_check_only int = 0;   // 1：项目 check 模式，只做语义检查，不生成后端缓冲
+pub let c_legacy_system int = 0; // 1：兼容配置显式开放 system；默认独立配置不登记它
+pub let c_ast_capture int = 0;  // 1：worker 同遍历记录表达式、语句和声明 AST
+pub let c_active_file int = -1; // 当前前端快照文件编号，AST 源映射使用
+pub let c_stats_ast_nodes int = 0; // 当前 worker 构造的表达式 AST 节点数
+pub let c_stats_ast_refs int = 0; // 当前 worker 保存的表达式符号引用数
+pub let c_stats_stmt_nodes int = 0; // 当前 worker 构造的语句 AST 节点数
+pub let c_stats_ast_bindings int = 0; // 当前 worker 捕获的参数与局部绑定数
+pub let c_stats_ast_functions int = 0; // 当前 worker 封存的函数级 AST 上下文数
+pub let c_stats_decl_nodes int = 0; // 当前 worker 构造的文件级声明 AST 节点数
 pub let c_expect_tid int = -1;  // 数组/切片字面量的目标类型（let 初始化/赋值上下文）
 pub let c_nested_type int = 0;  // >0：正在解析函数体内嵌套的类型声明（pass 2 也登记）
 pub let c_data_n int = 1;       // 匿名数据标签计数（字符串字面量）；0 保留为 NULL
@@ -492,11 +543,19 @@ pub let t_home *int = 0;
 pub let t_home_cap int = 0;
 
 // —— 项目模型（project.yh；构建器视角，进程内一次构建共用） ——
+// PFile 保存项目发现到的一个源文件。父构建进程只填路径和归属；模块
+// worker 可选择保存本进程拥有的源字节/token 快照，后续解析遍历只读重放。
 pub struct PFile {
-    pub path_off int;       // 源文件绝对（或相对根）路径池偏移
-    pub path_len int;
-    pub mod int;            // 所属模块（p_mods 下标）
-    pub line int;           // 保留：文件在清单/扫描中的出现序
+    pub path_off int;        // 路径在名字池中的起始字节；由项目扫描登记
+    pub path_len int;        // 路径字节数，不含名字池终止符
+    pub mod int;             // 所属模块在 p_mods 中的下标
+    pub line int;            // 保留：文件在清单/扫描中的出现序
+    pub source *u8;          // worker 持有的只读源字节；父进程中为 null
+    pub source_len int;      // 源字节长度，不含额外终止符
+    pub tokens *Tok;         // worker 持有的只读 token 数组；父进程中为 null
+    pub token_n int;         // token 数，包含 EOF 项
+    pub decls *PDecl;        // worker 持有的只读顶层声明索引；父进程中为 null
+    pub decl_n int;          // 顶层声明数
 }
 pub struct PMod {
     pub name_off int;       // 模块名池偏移

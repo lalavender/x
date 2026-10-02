@@ -5,7 +5,7 @@
 ## 开发策略（必须遵守）
 
 **0.0.3 起仓库已删除 src/（C 版 stage0）与 bootstrap/，进入滚动自举**：
-编译器源码在 `compiler/`（gen/lex/parse/cmd 四模块的 project.toml 项目），
+编译器源码在 `compiler/`（gen/lex/parse/cmd/ir/backend 多模块的 project.toml 项目），
 构建只依赖入库种子 `bin/yh`（上一版自举编译器二进制，SHA-256 见
 `bin/yh.sha256`）。
 
@@ -30,7 +30,7 @@
 
 ## 目录
 
-- `compiler/` —— 编译器源码（gen/lex/parse/cmd 四模块的 project.toml 项目）
+- `compiler/` —— 编译器源码（gen/lex/parse/cmd/ir/backend 多模块的 project.toml 项目）
 - `bin/yh` + `bin/yh.sha256` —— 入库种子与哈希
 - `docs/03-design/` 语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
   `docs/adr/` 决策、`docs/finish.md` 完成流水、`docs/todo.md` 待办

@@ -1,0 +1,92 @@
+module main;
+import gen;
+
+// process.yh —— 编译器用显式 argv 启动宿主进程，不经过命令解释器。
+
+// cmd_mkdir_if_missing：调用宿主 mkdir API；若目录已存在则确认它确为目录。
+pub fn cmd_mkdir_if_missing(path *char) int {
+    if (path == 0) {
+        return -1;
+    }
+    if (mkdir(path, 493) == 0) {
+        return 0;
+    }
+    let n int = strlen(path).to_type(int);
+    if (n < 0 || n > 1096) {
+        return -1;
+    }
+    let probe [1100]u8;
+    let i int = 0;
+    for i < n {
+        probe[i] = path[i].to_type(u8);
+        i += 1;
+    }
+    probe[n] = '/';
+    probe[n + 1] = '.';
+    probe[n + 2] = 0;
+    let fd int = open(gen.arr_cstr(probe), 0);
+    if (fd < 0) {
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
+// cmd_mkdirs：按路径分隔符逐段创建目录，实现构建所需的 mkdir -p 行为。
+pub fn cmd_mkdirs(path *char) int {
+    if (path == 0) {
+        return -1;
+    }
+    let n int = strlen(path).to_type(int);
+    if (n <= 0 || n > 1096) {
+        return -1;
+    }
+    let buf [1100]u8;
+    let i int = 0;
+    for i < n {
+        buf[i] = path[i].to_type(u8);
+        i += 1;
+    }
+    buf[n] = 0;
+    i = 1;
+    for i <= n {
+        if (i == n || buf[i] == '/') {
+            let saved u8 = buf[i];
+            buf[i] = 0;
+            if (i > 0 && cmd_mkdir_if_missing(gen.arr_cstr(buf)) != 0) {
+                return -1;
+            }
+            buf[i] = saved;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// cmd_process_status：把 waitpid 的状态字转换为普通退出码或信号退出码。
+pub fn cmd_process_status(pid int) int {
+    let status int = 0;
+    if (pid <= 0 || waitpid(pid, &status, 0) != pid) {
+        return -1;
+    }
+    if ((status & 127) == 0) {
+        return (status >> 8) & 255;
+    }
+    return 128 + (status & 127);
+}
+
+// cmd_process_run：用 argv 直接执行程序并等待它结束；失败返回 -1。
+pub fn cmd_process_run(argv **char) int {
+    if (argv == 0 || argv[0] == 0) {
+        return -1;
+    }
+    let pid int = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        execvp(argv[0], argv);
+        exit(127);
+    }
+    return cmd_process_status(pid);
+}

@@ -370,6 +370,8 @@ m.value 都要查询已绑定的模块接口；模块名字不是运行时对象
 | --- | --- |
 | yh build | 查找 project.toml；有 `module main;` 则构建程序（产物默认 `.build/<name>`），否则构建项目库模块 |
 | yh build math | 只选择当前项目 math 为构建根，再构建其依赖 |
+| yh check | 检查当前项目全部模块的语义，不生成汇编、对象或可执行文件 |
+| yh check math | 检查 math 及其依赖，不生成后端产物 |
 | yh run | 构建并运行 `module main;`；库项目报告无入口模块 |
 | yh version | 打印当前项目的 name 与 version；裸 `yh` 用法后附同一行 |
 | yh list | 列出当前项目的模块名和实现文件 |

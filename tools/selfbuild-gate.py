@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""tools/selfbuild-gate.py —— ADR-0007 P5 验收：四代自举链与模块固定点。
+"""tools/selfbuild-gate.py —— 验收连续自举代的模块固定点。
 
 链路：
-    stage0(yh, C) → seed 编译器（bootstrap/seed 扁平化快照，stage1）
-                 → yh build 活跃项目（compiler/，-o cc2）
-                 → cc2 build -o cc3
-                 → cc3 build -o cc4
+    平台入库种子 → yh build compiler/（cc2）→ cc2 build compiler/（cc3）
+            → cc3 build compiler/（cc4）
 门：
-    1. 各代构建成功；
-    2. cc2/cc3/cc4 两两之间全部模块 .s 与 .s.i 逐字节一致（固定点）；
-    3. cc4 冒烟（编译 hello 返回正确退出码）与 modules 语法语料通过。
+    1. 每代保存独立、非空且完整的模块汇编/接口快照；
+    2. 最终候选 cc3/cc4 快照逐字节一致；
+    3. cc4 编译并运行固定点探针，modules 项目语料通过。
 
 用法：python3 tools/selfbuild-gate.py
 退出码：全部通过 0。
 """
 
+import argparse
 import shutil
 import subprocess
 import sys
@@ -23,6 +22,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "tmp" / "selfbuild-gate"
 COMPILER = ROOT / "compiler"
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / "tools"))
+from selfhost_snapshot_gate import default_seed, expected_artifacts, save_snapshot
+from selfhost_snapshot_gate import self_test, snapshot_errors, verify_seed
+
+PROBE = ROOT / "tests" / "selfhost" / "fixedpoint-probe.yh"
 
 
 def run(cmd, cwd=None):
@@ -31,13 +36,23 @@ def run(cmd, cwd=None):
 
 
 def main() -> int:
-    ok = True
-    WORK.mkdir(parents=True, exist_ok=True)
-    seed_cc = ROOT / "bin/yh"
-    if not seed_cc.exists():
-        print("FAIL 缺少入库种子 bin/yh")
+    """执行三代固定点、语言探针及 modules 语料门。"""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=Path, default=default_seed(ROOT))
+    args = ap.parse_args()
+    if not self_test():
+        print("FAIL 自举快照门自检")
         return 1
-    print("stage1 = 入库种子 bin/yh")
+    print("自举快照门自检：OK")
+    WORK.mkdir(parents=True, exist_ok=True)
+    expected = expected_artifacts(COMPILER)
+    seed_cc = args.seed.resolve()
+    try:
+        seed_hash = verify_seed(seed_cc)
+    except (OSError, ValueError) as error:
+        print(f"FAIL 自举种子：{error}")
+        return 1
+    print(f"stage1 = {seed_cc}（SHA-256 {seed_hash}）")
 
     prev = seed_cc
     gens = []
@@ -46,58 +61,55 @@ def main() -> int:
         if bdir.exists():
             shutil.rmtree(bdir)
         out = WORK / name
-        r = run([str(prev), "build", "-o", str(out)], cwd=COMPILER)
+        command = [str(prev), "build"]
+        command.extend(("-o", str(out)))
+        r = run(command, cwd=COMPILER)
         if r.returncode != 0:
             print(f"FAIL {name} 构建:", r.stderr[-400:])
             return 1
-        gens.append((name, bdir, out))
+        snapshot = save_snapshot(bdir, WORK / "snapshots" / name)
+        errors = snapshot_errors([(name, snapshot)], expected)
+        if errors:
+            print(f"FAIL {name} 产物：", "；".join(errors))
+            return 1
+        gens.append((name, snapshot, out))
         prev = out
         print(f"{name} 构建完成")
 
-    # 固定点：相邻两代全部模块产物逐字节一致（asm/iface 两目录全产物）
-    def snapshot(bdir: Path):
-        return {str(p.relative_to(bdir)): p.read_bytes()
-                for sub in ("asm", "iface")
-                for p in sorted((bdir / sub).glob("*.s*"))}
-    snaps = [(n, snapshot(d)) for n, d, _ in gens]
-    for (n1, s1), (n2, s2) in zip(snaps, snaps[1:]):
-        same = (s1 == s2)
-        if not same:
-            print(f"FAIL 固定点 {n1}→{n2} 不一致")
-            only = set(s1) ^ set(s2)
-            if only:
-                print("  产物集合差异:", sorted(only))
-            for k in sorted(set(s1) & set(s2)):
-                if s1[k] != s2[k]:
-                    print("  内容差异:", k)
-            ok = False
-        else:
-            print(f"固定点 {n1}→{n2}：全部 .s/.s.i（{len(s1)} 个）逐字节一致")
+    # 快照在对应代构建后立即保存，不会随 compiler/.build 被覆盖。
+    snaps = [(name, artifacts) for name, artifacts, _ in gens]
+    transition = snapshot_errors(snaps[:2], expected)
+    if transition:
+        print(f"种子迁移后续跑验证：cc2→cc3 有 {len(transition)} 项内容变化")
+    errors = snapshot_errors(snaps[-2:], expected)
+    if errors:
+        print("FAIL 模块固定点：", "；".join(errors))
+        return 1
+    for (n1, _), (n2, _) in zip(snaps[-2:], snaps[-1:]):
+        print(f"模块固定点 {n1}→{n2}：全部 {len(expected)} 个产物逐字节一致")
 
-    # stage4 冒烟 + 语料
-    hello = WORK / "hello.yh"
-    hello.write_text("fn main() int {\n    return 42;\n}\n")
-    binp = WORK / "hello.bin"
-    r = run([str(WORK / "cc4"), str(hello), "-o", str(binp)])
+    # 运行覆盖前向调用、聚合浮点和循环的固定点探针。
+    binp = WORK / "fixedpoint-probe"
+    r = run([str(WORK / "cc4"), str(PROBE), "-o", str(binp)])
     if r.returncode != 0:
-        print("FAIL cc4 编译 hello:", r.stderr[-300:])
-        ok = False
+        print("FAIL cc4 编译固定点探针：", r.stderr[-300:])
+        return 1
     else:
         r2 = subprocess.run([str(binp)], capture_output=True)
-        if r2.returncode != 42:
-            print(f"FAIL cc4 hello 退出码 {r2.returncode} 期望 42")
-            ok = False
+        if r2.returncode != 0:
+            print(f"FAIL 固定点探针退出码 {r2.returncode} 期望 0")
+            return 1
         else:
-            print("cc4 冒烟：hello 退出码 42 ✓")
+            print("cc4 固定点探针：OK")
 
     r = run(["python3", "tests/modules/check.py",
              "--compiler-path", str(WORK / "cc4")])
     print(r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "modules runner 无输出")
     if r.returncode != 0:
-        ok = False
+        return 1
 
-    print("总计：%s" % ("全部通过" if ok else "存在失败"))
-    return 0 if ok else 1
+    print("总计：全部通过")
+    return 0
 
 
 if __name__ == "__main__":

@@ -1,0 +1,60 @@
+module parse;
+import gen;
+
+// ast_ir_control.yh —— builder 共用的语句级校验与降低辅助。
+
+// ast_ir_let_supported：验证顺序出现、单绑定且已初始化的标量 let。
+fn ast_ir_let_supported(ctx *AstFunctionContext, stmt_id int,
+    param_count int, local_count int) int {
+    if (stmt_id < ctx.stmt_first || stmt_id >= ctx.stmt_after) { return 0; }
+    let stmt AstStmt = ast_stmt_nodes[stmt_id];
+    if (stmt.kind != AST_STMT_DECL || stmt.op != gen.TK_LET
+        || stmt.first_binding < ctx.binding_first
+        || stmt.first_binding >= ctx.binding_after
+        || stmt.first_binding != stmt.last_binding
+        || ast_bindings[stmt.first_binding].next >= 0
+        || ast_bindings[stmt.first_binding].stmt_id != stmt_id
+        || ast_bindings[stmt.first_binding].is_param != 0
+        || ast_bindings[stmt.first_binding].sym_kind != gen.SYM_VAR
+        || ast_bindings[stmt.first_binding].id != param_count + local_count
+        || stmt.first_expr < ctx.edge_first || stmt.first_expr >= ctx.edge_after
+        || stmt.first_expr != stmt.last_expr
+        || ast_stmt_exprs[stmt.first_expr].next >= 0) {
+        return 0;
+    }
+    let init_expr int = ast_stmt_exprs[stmt.first_expr].expr_id;
+    let binding AstBinding = ast_bindings[stmt.first_binding];
+    return ast_ir_expr_supported(ctx, init_expr, param_count,
+        param_count + local_count) != 0
+        && ast_ir_type(binding.sym_type_id)
+            == ast_ir_type(ast_expr_nodes[init_expr].type_id) ? 1 : 0;
+}
+
+// ast_ir_lower_assign_stmt：降低一个已检查的标量变量赋值并更新当前 SSA 绑定。
+fn ast_ir_lower_assign_stmt(b *AstIRBuilder, ctx *AstFunctionContext,
+    stmt_id int, binding_count int) int {
+    let binding_row int = ast_ir_assign_binding(ctx, stmt_id,
+        b.param_count, binding_count);
+    if (binding_row < 0) { return 0; }
+    let stmt AstStmt = ast_stmt_nodes[stmt_id];
+    let binding AstBinding = ast_bindings[binding_row];
+    let rhs_edge int = ast_stmt_exprs[stmt.first_expr].next;
+    let rhs_expr int = ast_stmt_exprs[rhs_edge].expr_id;
+    let value int = ast_ir_lower_expr(b, ctx, rhs_expr);
+    if (value == -2) { return 0; }
+    if (value < 0 || value >= b.inst_count) {
+        return gen.fail("内部错误：SSA 赋值右值降低失败");
+    }
+    if (b.insts[value].result_type != ast_ir_type(binding.sym_type_id)) { return 0; }
+    let assign_op int = ast_ir_assign_op(stmt.op);
+    if (assign_op != 0) {
+        let previous int = b.local_values[binding.id];
+        if (previous < 0 || previous >= b.inst_count) { return 0; }
+        let updated int = ast_ir_b_add_inst(b, assign_op,
+            ast_ir_type(binding.sym_type_id), previous, value, 0);
+        if (updated < 0) { return gen.fail("内部错误：SSA 复合赋值降低失败"); }
+        value = updated;
+    }
+    b.local_values[binding.id] = value;
+    return 1;
+}

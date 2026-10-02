@@ -1,5 +1,675 @@
 # finish
 
+靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
+
+## 2026-10-02 修复裸调用 SIGBUS：usage() 栈缓冲区溢出
+
+- 缺陷：`cmd/driver.yh` 的 `usage()` 把 10 行用法（566 字节）拼进 512 字节
+  栈缓冲，溢出 54 字节砸坏返回地址，函数返回时 PC 未对齐触发 SIGBUS
+  （退出码 138）。裸调用、坏参数及全部 4 个 usage 调用点均崩；缺陷已随
+  上一版滚入种子 bin/yh，主门从未执行该路径故未发现。
+- 修复：`usage()` 改为逐行写入（复用 256 字节缓冲，单行最长约 80 字节），
+  消灭"文本总量超过固定缓冲"一类问题，注释标明不可改回整段拼接。
+- 回归防护：主门 `native-selfhost.py` 新增 CLI 冒烟探针——裸调用与坏参数
+  必须打印完整用法（含末行）并以用法错误码 2 退出。
+- 验证：`make` 通过；裸调用/坏参数 exit=2；`make selfhost-native` 通过
+  （固定点 12 产物一致、自解析 49 文件、CLI 冒烟 OK、语法反例 29/29、
+  运行语料 63/63、modules 17/17、项目用例 54/54）。未滚种子。
+
+## 2026-10-02 IR 并入编译器根项目普通模块
+
+- `compiler/ir/` 取消独立清单：删除 `ir/project.toml`，移除根
+  `compiler/project.toml` 的 `[dependencies] ir = { path = "ir" }`；
+  `ir` 与 gen/lex/parse/cmd/backend 同为根项目普通模块，`import ir` 由
+  本项目层直接解析。原独立项目对「ir 不依赖 gen/parse/backend/cmd」的
+  机器强制分层改为约定维持（各设计文档已同步）。
+- `tests/modules/build-check.py`：`irverify`/`irfront` fixture 拷入
+  `compiler/ir` 源码后合成最小清单（name = `yh_ir`），跨项目依赖解析
+  用例保持有效。
+- 文档同步：README、compiler/README.md（模块列表与源码规模）、AGENTS.md、
+  Makefile 头注释、编译流程重规划（设计/实施方案）、Nanopass 架构。
+- 验证：`make` 通过；`make selfhost-native` 通过（cc3→cc4 12 个模块产物
+  固定点一致、自解析 49 文件、语法反例 29/29、运行语料 63/63、
+  modules 17/17、项目用例 54/54）。未滚种子（bin/yh 保持上一版）。
+
+## 2026-10-02 编译流程重规划 R2a：短路求值切片
+
+- typed SSA 与 arm64 后端接入逻辑或/与/非：`a || b`、`a && b` 降为
+  条件块 + 右臂块 + 合流块三段 CFG，短路常量定义在条件块内，合流点
+  双前驱 phi；嵌套短路的 phi 第二前驱取降低右臂后的实际汇入块。
+  表达式降低（`ast_ir_lower_expr`/`ast_ir_lower_call_expr`/
+  `ast_ir_lower_assign_stmt`）改为直接接收 builder，使表达式可以
+  创建条件块；新增 `ast_ir_b_cond` 统一条件归一化（整数按非零为真），
+  `if`/`for` 条件与短路操作数共用；`!x` 降为与 false 常量的相等比较，
+  旧语义层把 bool 结果升为 i32 的差异在 IR 层归一。
+- verifier 值编号唯一性检查由前缀扫描改为位图标记：构造器允许块区间
+  与编号顺序不同后，前缀扫描在乱序布局下会把当前指令误判为重复。
+- 过程中发现并修复三处缺陷（均有语料或自举佐证）：嵌套短路 phi 前驱
+  错误（verifier 拒绝 `irfront` 逻辑用例）；循环发现趟 builder 未挂
+  类型表导致 fork worker 静默 SIGSEGV（单文件模式不受影响，曾长期
+  误导定位）；`b_if` 条件归一化补丁静默未落盘致自举 cc3 的
+  `is_hex_digit` 校验失败。另修正语料初版一处测试期望错误
+  （`logic_guard(0,1,0)` 应为 100）。
+- `irfront` 新增 `logic_guard`（短路/混合优先级/逻辑非 4 组断言）：
+  56 个 AST 函数上下文 54 个进入 SSA，仅 call_tick（全局赋值）与
+  unsigned_score（负数字面量实参）回退；自举 cc3→cc4 自源函数进入
+  SSA 的数量由 5 增至 8 并通过固定点。
+- 滚种子前 `make`、`make test`、`make selfhost-native` 通过：语法
+  66/66+29/29、运行 63/63、12 个模块产物固定点一致、自解析 49 个
+  文件、模块 17/17、项目 54/54。种子后 `make` 与 `make selfhost-native`
+  再次通过。种子 SHA-256
+  `0a28dd5e89d660bd9b215e78504ff54cb9531c6df6f232a6df1f06503b361864`，
+  根 `yh` SHA-256
+  `17b5afcdde2cd04da259147d5b6f89fa58e2c412e926a50a514ce3a3dffbbf5c`。
+  Linux arm64 汇编交叉组装通过，原生链接/运行尚未验收。
+- Apple M1 冻结 25 文件语料各测 20 轮，中位数/p95：无改动 40.8/49.5ms、
+  单函数修改 743.5/817.8ms、冷编 2203.0/2765.1ms；汇编/链接调用为
+  0/0、1/1、4/1。被修改函数本身进入 SSA（ir=1），冷编进入 SSA 的
+  自编函数 5→8；端到端与上一轮噪声范围内持平，未证明提速；无改动
+  50ms 中位数目标保持达标，200ms/1s 目标未达到。嵌套循环、for-in、
+  switch、goto、负数字面量实参、浮点、聚合与间接调用仍走旧发射路径，
+  R2a/R2b 整体未完成。
+  详见[短路求值报告](01-finished/yh-编译流程R2a-短路求值-2026-10-02.md)。
+
+## 2026-10-02 Nanopass 风格优化架构方案交付
+
+- 用户确认优化扩展与自举稳定优先；核对当前 SSA、verifier、缓存、lowering 与后端源码，并参考 Nanopass 官方介绍与手册。
+- 交付[架构设计](03-design/yh-Nanopass风格优化架构.md)、[分期实施方案](02-plan/yh-Nanopass风格优化架构实施方案.md)及[ADR-0011 草案](adr/0011-yh采用Nanopass风格优化阶段契约.md)；提议复用 typed SSA、建立小 pass/阶段契约，随后迁移 Checked/Core 与机器 IR。
+- NP0–NP5 已登记 todo，设计状态为待评审，全部实现任务仍未完成。新增文档的本地链接、代码围栏和空白检查通过。本次只改文档，没有修改编译器、用例或种子，没有执行构建/运行回归。
+
+## 2026-10-02 编译流程重规划 R2a：通用构造器与 break/continue 切片
+
+- 受限的固定形态匹配 lowering 替换为通用递归构造器（新文件
+  `compiler/parse/ast_ir_build.yh`）：块表动态增长、合流块先分配后填充、
+  `ir_verify` 块指令区间改为「互不重叠且恰好覆盖」的覆盖检查。if/else
+  任意嵌套与 else-if 链、条件循环、break/continue、return 与顺序语句
+  任意组合进入 typed SSA 并由 arm64 后端发射。
+- 循环采用两趟协议：发现趟直接在主 builder 上降低体并回滚指令/phi/块/
+  调用计数，收集携带绑定、continue/break 站点数与是否贯穿；真实趟按
+  事实预留 header phi 输入（入口 + continue×N + 回边），continue 站点
+  回填边输入，break 站点值与条件假边在退出块建合流 phi。发现与真实
+  降低执行同一份代码，保证结构精确一致。
+- 过程中发现并修复三处缺陷（均有运行语料佐证）：if 臂遍历越界把 else
+  与后续语句降入同一块；发现趟独立值编号与主 builder 冲突导致含循环
+  函数整体回退；发现趟 local_count 泄漏使体内 let 校验失败。
+- `irfront` 新增守卫 break 与 continue 用例：55 个 AST 上下文 53 个进入
+  SSA（仅全局赋值 call_tick 与含 `||` 的 unsigned_score 回退），
+  `loop_break_guard(10)=3`、`(2)=1`、`loop_skip_odd(5)=13`、`(2)=1` 验证
+  break/continue 语义与 phi 合流；函数 IR 缓存精确失效断言改为按
+  「修改函数 1 + 已知回退数」计期望。
+- 滚种子前 `make`、`make test`、`make selfhost-native` 通过：语法 66/66+29/29、
+  运行 63/63、12 个模块产物固定点一致、自解析 49 个文件、模块 17/17、项目 54/54。
+  种子后 `make` 与 `make selfhost-native` 再次通过。种子 SHA-256
+  `96ef0e6c565de0accdf40b71a1748abb91a7c2e97c4d39d6f2fa9d70718be252`，根 `yh`
+  SHA-256 `f02b0eac39467c4c09c37561fa65f84c157adec5c201c876149577d81ff22d82`。
+- Apple M1 冻结 25 文件语料各测 20 轮，中位数/p95：无改动 42.4/48.5ms、
+  单函数修改 671.7/757.4ms、冷编 1890.7/2132.8ms；与上一轮噪声范围内持平，
+  未证明提速；无改动 50ms 中位数目标保持达标，200ms/1s 目标未达到。
+  嵌套循环、for-in、switch、goto、`||`/`&&`、浮点、聚合与间接调用仍走旧
+  发射路径，R2a/R2b 整体未完成。
+  详见[通用构造器报告](01-finished/yh-编译流程R2a-通用构造器与break-continue-2026-10-02.md)。
+
+## 2026-10-02 编译流程重规划 R2a：条件循环切片
+
+- typed SSA 与 arm64 后端接入条件循环 `for cond { 顺序体 }`：四块 CFG
+  为「入口→循环头（携带值 phi + 条件）→体（顺序语句 + 回边）→退出」；
+  体内被赋值的外部绑定在循环头建双前驱 phi，入口输入创建时填写、回边
+  输入在体降低后回填，循环后视角恢复为 header phi 值。体内 `let` 每次迭代
+  重新定义不参与携带；携带绑定去重上限 16。顺序语句检查/降低抽取为
+  `ast_ir_straight_scan`/`ast_ir_straight_emit` 共享辅助，直线行为逐字保持；
+  void 函数的循环（裸 return 或隐式结束）同样受支持。体内嵌套控制流、
+  break/continue、for-in 与 `for {}` 仍回退旧发射器。
+- `irfront` 新增 5 个循环函数：53 个 AST 上下文 51 个进入 SSA，运行结果
+  验证计数累加（10）、体内 let（6）、尾随语句继续使用携带值（108）与
+  循环调用驱动（3）；汇编断言 `bl log_unit` 三次，`yh check` 仍为 0 个
+  IR 函数。
+- 滚种子前 `make`、`make test`、`make selfhost-native` 通过：语法 66/66+29/29、
+  运行 63/63、12 个模块产物固定点一致、自解析 48 个文件、模块 17/17、项目 54/54。
+  种子后 `make` 与 `make selfhost-native` 再次通过。种子 SHA-256
+  `fcd79c9f81ec3478e8f448f5e8f180318f3d54b34ef169f7c05f4ad6e584665a`，根 `yh`
+  SHA-256 `77c4f336a025a11d6b91d337d306176f77f87ec9add79d4da07c903c44d53447`。
+  Linux arm64 汇编交叉组装通过，原生链接/运行尚未验收。
+- Apple M1 冻结 25 文件语料各测 20 轮，中位数/p95：无改动 40.0/47.0ms、
+  单函数修改 706.4/760.7ms、冷编 1880.1/2151.9ms；汇编/链接调用为 0/0、1/1、4/1。
+  与上一轮在噪声范围内持平，本切片未证明编译提速；无改动 50ms 中位数目标
+  保持达标，200ms/1s 目标未达到。循环体内嵌套控制流与 break/continue 需要
+  动态块构造器，R2a/R2b 整体未完成。
+  详见[条件循环报告](01-finished/yh-编译流程R2a-条件循环-2026-10-02.md)。
+
+## 2026-10-02 编译流程重规划 R2a：void 调用与语句级调用切片
+
+- typed SSA、verifier 与 arm64 后端接入 void 返回调用与语句级调用：表达式语句
+  （顺序路径与 if/else 分支块）接受已检查的直接调用，void 返回发射无结果 CALL
+  并保留副作用与求值顺序，标量返回可被语句丢弃；verifier 值编号改为允许稀疏
+  （定义数不超过上界，逐指令范围与唯一性检查不变）。void 函数本身支持裸
+  `return;` 与隐式结束，空函数为单块零指令 CFG，后端允许 void 返回与零指令函数。
+- `irfront` 新增 5 个函数：48 个 AST 上下文 46 个进入 SSA，运行结果覆盖裸
+  return、隐式结束、丢弃标量结果、顺序双调用与分支块「调用 + 赋值」phi 合流；
+  汇编断言 `bl log_unit` 两次、`bl log_noop`/`bl discarded_result` 各一次，
+  `yh check` 仍为 0 个 IR 函数。`ircallmodule` 的 api 新增公开 void 函数，
+  覆盖跨模块 void 调用（SSA 函数数 3→4）、精确重链接与退出码 41。
+- 滚种子前 `make`、`make test`、`make selfhost-native` 通过：语法 66/66+29/29、
+  运行 63/63、12 个模块产物固定点一致、自解析 48 个文件、模块 17/17、项目 54/54。
+  种子后 `make` 与 `make selfhost-native` 再次通过。种子 SHA-256
+  `ab1f229f2395a69c7c9e52f9d517b54e64bd8f65c121e81d1b764a9b4baf0ea7`，根 `yh`
+  SHA-256 `d261e9b24bfb33cfac4b1662956d67e6492a5316ea63d084eca72eaf79727911`。
+  Linux arm64 汇编交叉组装通过，原生链接/运行尚未验收。
+- Apple M1 冻结 25 文件语料各测 20 轮，中位数/p95：无改动 40.3/51.3ms、
+  单函数修改 748.5/808.6ms、冷编 1963.9/2135.9ms；汇编/链接调用为 0/0、1/1、4/1。
+  与上一轮在噪声范围内持平，本切片未证明编译提速；无改动 50ms 中位数目标保持
+  达标，200ms/1s 目标未达到。void 分支合流、循环、switch、goto 与间接/浮点/
+  聚合/变参调用仍走旧发射路径，R2a/R2b 整体未完成。
+  详见[void 调用报告](01-finished/yh-编译流程R2a-void调用与语句级调用-2026-10-02.md)。
+
+## 2026-10-02 编译流程重规划 R2a：直接调用 SSA 切片
+
+- typed SSA、verifier、稳定序列化及双 arm64 后端接通固定参数整数/布尔直接调用；`irfront` 覆盖嵌套、零/九参和副作用顺序，`ircallmodule` 覆盖跨模块实现修改后的精确汇编/重链接。`irverify` 覆盖错型、支配关系与损坏缓存反例。
+- 滚种子前 `make`、`make test`、`make selfhost-native` 通过：语法 66/66+29/29、运行 63/63、12 个模块产物固定点一致、自解析 48 个文件、模块 17/17、项目 54/54。种子后 `make` 与 `make selfhost-native` 再次通过；种子 SHA-256 `2232b0ada585e24967d60416e10e6809464f9a67970e307d9a49f43f2d685892`，根 `yh` SHA-256 `4cf8e26837dc5c8625f83b30e01a9c764bc866e06ea7706454c4d631c9c9b47d`。Linux arm64 汇编交叉组装通过，原生链接/运行尚未验收。
+- Apple M1 冻结 25 文件语料各测 20 轮，含汇编/链接，中位数/p95：无改动 37.7/54.4ms、单函数修改 728.3/1112.2ms、冷编 2029.0/2371.4ms。旧种子同轮基线分别为 38.9/46.0ms、636.2/711.9ms、1686.0/1776.4ms，本切片未带来可证实的提速；200ms/1s 目标仍未达到。自编项目 528 个函数 AST 上下文仅 5 个进入 SSA，R2a/R2b 整体仍未完成。详见[直接调用 SSA 报告](01-finished/yh-编译流程R2a直接调用SSA-2026-10-02.md)。
+
+## 2026-10-02 编译流程重规划 R2a：整数二元运算切片
+
+- typed SSA 和 arm64 后端新增同类型整数除法、取模、位与/或/异或、左右移位；按有符号性选择指令，默认简化器仅折叠非异常常量表达式。IR 序列化升至 v3、函数缓存键升至 v7；未支持的函数仍走旧发射器。
+- `irfront` `.yh` 项目运行用例覆盖负数除法与余数、无符号边界、左右移位、零除数、常量折叠；`irverify` `.yh` 项目拒绝错型运算。项目验收 53/53，`make test` 语法正例 66/66、反例 29/29、运行 63/63，滚种子前后 `make selfhost-native` 均通过（12 个产物固定点、44 个源码自解析、模块 17/17、项目 53/53）；种子后 `make` 通过。
+- Apple M1 冻结 25 文件、13,338 行语料 20 轮中位数/p95：无改动 34.3/42.1ms，单函数修改 640.7/718.8ms，冷编 1,695.9/1,976.5ms。无改动低于 50ms，单函数 200ms 与冷编 1s 目标未达。编译器自编项目的 512 个函数 AST 上下文仅 1 个进入 SSA；这次扩展不构成对编译速度提升的证明。
+- Darwin arm64 种子 SHA-256：`d47bfeeba494fb12a447736e945f6e377d490b23ab841158e62ae358bdecf113`；根 `yh` SHA-256：`8d981521a9260302091f49ae63711e665ef1c12f20c5457172780d014945573f`。R2a、R2b 及 R0–R6 总体验收继续进行。详见[整数二元运算报告](01-finished/yh-编译流程R2a整数二元运算-2026-10-02.md)。
+
+## 2026-10-02 编译流程重规划 R1：单文件 yh check
+
+- 新增 `yh check <file.yh>`，执行词法和完整单文件语义检查，允许库文件没有 `main`；未声明标识符返回失败。原有 `yh check [module]` 项目入口保持不变。
+- 在 `tests/modules/fixtures/` 增加有效/无效 `.yh` 语料；自举门验证检查不产生文件、也不调用 PATH 中的 gcc/clang。修正初始化顺序，保证单文件入口先读源、分配语义表，再词法分析。
+- 验证：`make test`（语法正例 66/66、反例 29/29、运行 63/63）、滚种子前后 `make selfhost-native`（12 个产物固定点、44 个源码自解析、模块 17/17、项目 53/53）、种子后 `make` 与 `git diff --check` 全通过。Darwin arm64 种子 SHA-256：`268513c5cfff1af60a16754e0d957ae0e3aadb99cc3758b686e39d21e2ae2f22`；根 `yh` SHA-256：`2fcffbb90d8be4713796ccdb8da713ee549b3ba343cfcaceb3b1a190bcd61040`。
+- 本条记录不代表 R1 完成；完整 AST/CheckedFunction 分离、一次解析与任务私有上下文仍待实现。详见[单文件 check 报告](01-finished/yh-编译流程R1单文件check-2026-10-02.md)。
+
+## 2026-10-01 编译流程重规划 R2a：SSA arm64 比较运算切片
+
+- SSA 指令表新增不等及有符号/无符号顺序比较，序列化格式与函数 IR 缓存键升版；arm64 后端从操作数类型选择条件码，默认简化器折叠整数常量比较。`irfront` 覆盖六种比较真假、`u32` 最大值边界及常量比较折叠；20 个 lowering 函数均由 SSA 后端输出，程序退出码为 230。SSA 值临时各占独立栈槽；不支持的函数回退到旧 emitter。
+- 修复 fork worker 诊断路径悬空：路径原指向可扩容名字池，池增长后偶发 SIGSEGV。现在 worker 解析前把路径复制到固定缓冲；模块 `.yh` 回归重复构建 8 次，额外 100 次独立构建均保留预期源位置诊断。
+- 验证：`make test` 通过（语法正例 66/66、反例 29/29、运行 63/63）；滚种子前后 `make selfhost-native` 通过（12 个模块产物固定点、44 个源文件自解析、模块 17/17、项目 53/53）；种子后 `make` 通过。
+- Apple M1 冻结语料 20 轮（中位数/p95）：无改动 36.2/44.3ms，单函数变化 669.5/708.7ms，冷编 1,851.3/2,107.0ms；汇编/链接调用为 0/0、1/1、4/1。无改动目标 50ms 达标；单函数目标 200ms 和冷编目标 1s 未达标。冷编 378 个函数上下文只有 1 个进入 SSA 子集，单函数变化为 0 个。
+- Darwin arm64 种子 SHA-256：`27ed8a4c2168076c3e713bf3cd3cae63a96709748acfb514813ab508dbea84a4`；根 `yh` SHA-256：`6870f27cf8afcb95963220ad7a427d3ecc812a3ff0985c41c8113961d0eb8a2a`。
+- R2a 与 R2b 整体仍未完成：当前只接通项目模块的窄 lowering 子集；还需完整受检函数、更多 CFG/调用/内存语义、单文件共用后端、平台 ABI 验收、真正线程池与完整函数级缓存。
+
+## 2026-10-01 编译流程重规划 R3：自有运行时与固定点迁移
+
+- arm64 的 `malloc/free/memcpy/strlen` 使用自有汇编入口；Darwin 映射调用审核后的 `mmap/munmap`，Linux arm64 发射对应 syscall。`printf` 已支持 `%%`、整数、字符串和字符，使用分块缓冲及 OS `write`，尚未支持宽度、精度、浮点和 locale。运行时入口只按模块内调用/取址发射，纯程序不会带入映射或输出 OS API。`.yh` 用例覆盖分配、字节函数值、精确格式化输出、长字符串刷新与无运行时调用的导入裁剪。
+- 滚种子前后 `make test`、`make selfhost-native` 通过；语法 66/66、反例 29/29、运行 63/63、自解析 43 个文件、模块 17/17、项目 52/52，候选 cc3→cc4 的 10 项产物固定点一致。`tests/selfhost/runtime-memory.py` 确认普通程序与自编编译器不导入 `malloc/free/memcpy/strlen/printf`；Linux arm64 汇编交叉组装无未定义符号。
+- Apple M1 冻结语料 25 文件、13,338 行，20 轮中位数/p95：无改动 32.2/37.9ms、函数修改 610.8/643.4ms、冷编 1,686.0/1,824.0ms；汇编/链接调用为 0/0、1/1、4/1。50ms 无改动目标达到；200ms 函数修改和 1s 冷编目标仍未达到。新编译器 SHA-256 `e7ab60114f66b44208abd0aab1bdc037501df15600cac070466deb0e73ef8afd`。
+- Darwin arm64 种子 SHA-256：`6498b7282a0d00115912e573a08823de3371024d25c0496b2260bd27a40ce344`。Linux 原生运行、线程 API 和完整导入验收尚未完成；外部汇编/链接仍未替换，R3 与 R0–R6 总体验收继续进行。详见[自有运行时与性能报告](01-finished/yh-编译流程R3自有分配器与性能-2026-10-01.md)。
+
+## 2026-10-01 编译流程重规划 R2b：缓存指纹分块与阶段计时
+
+- 缓存内容指纹改为固定小端 8 字节块混合并升版本，使旧 manifest 自动失效；改用对齐的原生 64 位读取后，`tokenreplay` 新增尾部余数为 7 的 `.yh` 回归源。`yh build --stats` 增加项目装载、模块调度、对象缓存/汇编、最终链接决策和构建内总耗时。Darwin 计时通过允许清单中的 libSystem `clock_gettime` OS API，Linux arm64 使用 syscall；普通构建输出不变。
+- Apple M1 冻结 25 文件语料 20 轮中位数/p95：无改动 32.8/37.3ms、单函数体变化 663.2/753.4ms、冷编 1,734.1/1,900.6ms，含真实汇编/链接。无改动内部阶段合计 27.2ms，已达到 50ms 目标；单函数 200ms 与冷编 1s 目标仍未达到。
+- `make test` 全过：语法 66/66、反例 29/29、运行语料 63/63；滚种子前后 `make selfhost-native` 均全过：固定点 10 个模块产物一致、自解析 43 个源文件、模块 17/17、项目 52/52。`make seed` 后再次 `make` 与自举门通过；`git diff --check` 和文档本地链接检查通过。
+- 根 `yh` SHA-256：`c2fe874ad0dc324135e1441224e4095e64eb1c1f3a865ed6b0e18dd05bf4450d`；Darwin arm64 种子 SHA-256：`8ac9b924fcad79450b4c2dab8bc003d71b554a866f77ccdb597db9c2c01085ee`。
+- 完整阶段数据见[缓存指纹与阶段计时报告](01-finished/yh-编译流程R2b缓存指纹分块与阶段计时-2026-10-01.md)。R2b 线程池/函数级完整 check-IR 缓存、自有汇编链接及 R0–R6 总验收仍在实施。
+
+## 2026-10-01 编译流程重规划 R2b：fork/COW 前端快照复用
+
+- 模块 worker 改为 fork 父进程中已验证的项目与词法快照，通过写时复制隔离可变语义状态；worker 不再 exec 后重载项目和重做全项目词法分析。声明索引延迟至待重建模块，缓存命中构建不再执行声明解析。
+- 更新 `.yh` 计数回归：首轮只建立一次项目索引，热缓存构建确认语法/声明索引次数为 0、无 worker；provider/consumer 与菱形 DAG、失败无链接等原有并行语料继续通过。
+- 验证：`make`、`make test`、`make selfhost-native` 通过；语法 66/66、反例 29/29、运行 63/63、模块 17/17、项目 52/52、固定点 10 个模块产物、41 个源文件自解析。
+- Apple M1 冻结 25 文件语料 20 轮（中位数/p95）：无改动 109.6/140.7ms、函数体变化 757.0/903.1ms、冷编 1,812.6/1,878.1ms；汇编/链接调用 0/0、1/1、4/1。速度目标 50/200/1,000ms 均未达到；函数修改仍捕获 80 个 AST 函数上下文，真正线程池与完整函数级 check/IR 缓存待完成。
+- 详见[fork 快照复用报告](01-finished/yh-编译流程R2b-fork快照并行worker-2026-10-01.md)。R0–R6 继续实施。
+
+## 2026-10-01 编译流程重规划 R3：自有 memcpy/strlen
+
+- arm64 后端为 `memcpy` 与 `strlen` 发射本地运行时入口，支持直接及函数值调用；新增 `.yh` 用例覆盖零长、块边界、返回指针、UTF-8 字节长度和非对齐字符串。普通程序与自编编译器均不再导入这两个 C 服务，Linux arm64 对象交叉组装成功且无未定义符号。
+- 验证：`make -B`、`make test` 与 `make selfhost-native` 通过；语法 66/66、反例 29/29、运行 63/63、模块 17/17、项目 52/52。根 `yh` SHA-256 `78e36cb3d64d2c81a21ef26ccdb21135fbf164fd22517240d56d980e4cba28c7`；Darwin arm64 种子 SHA-256 `40f4ae0bd8120068deb374d8dde30f90d4b86431210aff5b9be40cb978d47f48`。
+- M1 冻结语料 20 轮中位数/p95：无改动 105.9/129.8ms，改单函数 774.5/878.5ms，冷编 1,952.6/2,173.9ms；50/200/1,000ms 目标均未达成。详细数据见[自有字节字符串运行时报告](01-finished/yh-编译流程R3自有字节字符串运行时-2026-10-01.md)。`malloc/free`、格式化/I/O/退出、线程 API、Linux 原生验证与自有汇编/链接仍未完成，R3 和 R0–R6 整体继续实施。
+
+## 2026-10-01 编译流程重规划 R3：项目目录枚举 OS API
+
+- 项目扫描移除 `/bin/ls`。Darwin arm64 通过 `getattrlistbulk` 读取目录项；Linux arm64 通过目标专属 `linux_syscall6` intrinsic 调用 `openat/getdents64/close`，并为函数指针保留本地 syscall stub。公共扫描器复制本轮拥有的文件名与类型、按字节序排序，再递归扫描。
+- `.yh` 项目矩阵覆盖空格、引号、非 ASCII 与换行文件名、隐藏项过滤及超过 512 项的目录；并验证 Darwin API 和 Linux syscall 的目标隔离、直接调用与函数值调用。
+- 滚种子前后 `make test`（语法正例 66/66、反例 29/29、Darwin 运行 63/63）和 `make selfhost-native` 全通过；相邻两代 10 个模块产物一致、39 个源码自解析、模块 17/17、项目 52/52。`make -B` 与 `git diff --check` 通过。
+- Darwin 宿主完成 Linux arm64 目标语义构建；生成汇编经 `clang -target aarch64-linux-gnu` 组装为 ELF，`nm` 确认 syscall 函数符号为本地定义。当前宿主不是 Linux，尚未做 Linux 原生运行验收。
+- `make seed` 更新 Darwin arm64 种子 SHA-256 为 `8f4e34b1db3a7922f63a424fa3972011bb352e1a41bc6945dbd5b643879713ea`；滚种子后根 `yh` SHA-256 为 `693d454c7cb6cdd9682b4bd5db52532072a0dd89a28da5cbf8660cdde8b9a1bf`。
+- 20 轮 Apple M1 阶段测量（目录 API 完成后、清理无用 helper 前；中位数/p95）：无改动 106.4/117.7 ms、函数体变化 756.1/826.3 ms、冷编 2,051.9/2,287.8 ms。50/200/1,000 ms 目标均未达成，此数据作为阶段基线。
+- 详见[目录枚举 OS API 报告](01-finished/yh-编译流程R3目录枚举OSAPI-2026-10-01.md)。Linux 原生运行、线程 API、自有 runtime 与通用 C 导入审计未完成；汇编和链接仍调用系统工具，R3 与 R0–R6 整体仍在实施中。
+
+## 2026-10-01 编译流程重规划 R3：直接从入口读取环境向量
+
+- 编译器入口扩展为 `main(argc, argv, envp)`，并在启动时保存只读的 OS 环境向量；`PATH` 与 `YH_STDLIB` 直接从 `envp` 查找，删除 `/usr/bin/printenv` 子进程。普通 yh 程序的入口语义也接受第三个 `envp **char` 参数。
+- 新增 `envp-api` `.yh` 项目用例检查普通程序收到 `YH_ENV_TEST=present`；既有 PATH worker 定位与 YH_STDLIB 回归验证编译器自身读取环境的路径。
+- 验证：滚种子前后 `make test` 与 `make selfhost-native` 全通过；语法 66/66、反例 29/29、运行 63/63、模块 17/17、项目 48/48，固定点 10 个模块产物一致、自解析 36 个源文件。`make seed` 后 `make -B` 与滚种子后主门通过。
+- Darwin arm64 种子 SHA-256：`a99fceeb2cc4e8483a7871d6b7406f8a62de666d3dfc87d43701da7aac3252ae`；根 `yh` SHA-256：`c588cd670c344d4135080992ab2cf9d8a0f53b21662087ce7b64eb42f14a3609`。
+- 当前仍由 `/bin/ls` 枚举项目目录，最终汇编/链接依赖系统工具。`nm -u yh` 仍列出 `_malloc`、`_free`、`_memcpy`、`_strlen` 等通用 C 服务；完整导入清单、R3 自有 runtime 与 Linux arm64 验证仍待完成。本次只在 Darwin arm64 宿主验证。
+- 详见[环境向量迁移报告](01-finished/yh-编译流程R3环境向量-2026-10-01.md)。R3 与 R0–R6 整体仍在实施中。
+
+## 2026-10-01 编译流程重规划 R3：输出捕获、目录 OS API 与严格自举
+
+- 项目目录与环境查询从 shell 重定向迁到 `fork/execvp`、`open/dup2` 和 argv；捕获文件标志按宿主 OS 选择，不受 `-target` 影响。项目/临时目录创建改用 `mkdir` OS API 和逐段 `mkdir -p` helper。
+- 自举脚本不再主动传 `--legacy-system`，新种子按默认隐藏 `system` 的配置编译；旧种子仍以其旧默认行为构建。
+- 新增 `mkdir-api` `.yh` 用例，覆盖首次创建与重复创建；交叉目标项目检查覆盖宿主文件标志。目录枚举与环境查询仍依赖外部 `ls` / `printenv`，系统汇编器、链接器和 runtime 导入审计仍未完成。
+- 验证：滚种子前后 `make test`（语法 66/66、反例 29/29、运行 63/63）与 `make selfhost-native` 全通过；固定点 10 个模块产物一致、自解析 36 个源码、模块 17/17、项目 47/47。`make seed` 后 `make -B` 成功；`git diff --check` 通过。
+- Apple M1 冻结语料 20 轮（中位数/p95）：无改动 135.1/161.4 ms、函数体变化 790.3/845.6 ms、冷编 2,035.9/2,275.0 ms。50/200/1,000 ms 目标仍未达成；完整计数和旧语料兼容配置说明见[实施方案 §6](02-plan/yh-编译流程重规划实施方案.md)。
+- Darwin arm64 种子 SHA-256：`fadc3f00bc57528e1aa9f3ed7aebda34ce0b48636de257a3c362a2c076d0989c`；强制重建根 `yh` SHA-256：`ddbf9823389d66c340819d5bc19377b3e007f99a9de0517133a225fb4dfc4ed8`。
+- 详见[输出捕获与 OS 目录 API 报告](01-finished/yh-编译流程R3输出捕获与目录OSAPI-2026-10-01.md)。R3 与 R0–R6 总体仍在实施中。
+
+## 2026-10-01 编译流程重规划 R3：兼容配置与显式进程调用切片
+
+- 默认 prelude 不再隐式登记 `system(cmd)`，`--legacy-system` 显式开放迁移期兼容接口；配置身份加入模块、IR 与链接缓存键。`.yh` 项目覆盖默认拒绝、兼容 build/check/run 和模式切换缓存隔离。
+- 编译器调用汇编器、链接器、构建目录创建和运行目标程序改为 `fork/execvp/waitpid` 显式 argv；自举启动器识别新旧种子。目录/环境查询仍依赖 shell，R3 尚未完成。
+- 验证：`make`、`make -B`、`make test`（66/66、29/29、63/63）和滚种子后的 `make selfhost-native`（固定点、36 源文件自解析、并发/缓存/check 隔离、模块 17/17、项目 44/44）通过；`git diff --check` 通过。
+- Darwin arm64 种子 SHA-256：`853fda71a1b1be87e70590ffc38b5be3bae673d7bcd2e8ff5f02fd6600ca5a78`；根 `yh` SHA-256：`25cd492e39b41662d3ca0bdcd4596500dfe6a725f965b0bbad9d59ce7750ed4f`。
+- 详见[兼容配置与显式进程调用报告](01-finished/yh-编译流程R3兼容配置与显式进程调用-2026-10-01.md)。目录枚举、环境 API、自有 runtime、线程服务与自有汇编/链接仍未完成。
+
+## 2026-10-01 编译流程重规划 R2a：分支赋值与 phi 合流
+
+- SSA 新增受限四块分支 lowering：分支前初始化的标量 `let` 可与参数一起在 `if/else` 块内赋值；合流块对变化绑定生成双前驱 phi。原有分支直接 return 路径保留。语句 lowering/phi 缓冲辅助代码拆入 `compiler/parse/ast_ir_control.yh`；函数缓存键升至 v5。
+- `.yh` 项目用 `branch_update` 验证一侧修改、一侧沿用参数，用 `branch_local` 验证局部变量两侧写入；缓存中两函数均有四块 CFG 和双输入 phi，运行退出码 219。build/check 函数上下文、IR 缓存命中/精确失效/损坏重建通过。
+- 验证：`make test`（66/66、29/29、63/63）、`make selfhost-native`（10 个固定点产物、35 个源文件自解析、模块 17/17、项目 42/42）；滚种子后 `make -B` 与再次 `make selfhost-native` 通过，`git diff --check` 通过。
+- Apple M1 冻结 25 文件语料 20 轮：无改动 187.9/233.0 ms、函数变化 903.0/953.1 ms、冷编 2,233.2/2,297.0 ms（中位数/p95）；汇编/链接 0/0、1/1、4/1；峰值 RSS 15.1/51.0/50.9 MiB。50/200/1,000 ms 暂定目标均未达到，详见[分支赋值与 phi 报告](01-finished/yh-编译流程R2a分支赋值phi-2026-10-01.md)。
+- 根 `yh` SHA-256：`8f69a0f745cde11076b446c1e97e9732b5a5bcb8948bd11a3c4a951e34b013f7`；Darwin arm64 种子 SHA-256：`778c2b5ef3d91c18a52e4255333b7976b8d6a8b810744e25581fccafed80d36b`。
+- 当前 lowering 仍不驱动后端；循环、嵌套控制流、复杂赋值、完整函数级 check、真正线程池、平台后端和自有汇编/链接待实施。
+
+## 2026-10-01 编译流程重规划 R2a：顺序局部定义与赋值
+
+- SSA lowering 新增按声明顺序处理的单绑定、有初值标量 `let` 和同类型 `=`/`+=`/`-=`/`*=`；参数与局部通过函数私有映射读取当前 SSA 值，赋值产生新定义并更新映射。其他复合/聚合赋值、前向引用与复杂局部控制流仍走旧发射器。
+- 函数 IR 缓存键升至 v4，包含函数所有表达式节点语义事实与绑定类型/布局。`.yh` 项目验证参数/局部读写、连续复合赋值、局部间读取、同名绑定隔离、局部实现变化只失效一个缓存及损坏缓存重建；生成程序运行结果为 115。
+- 验证：`make test`（语法 66/66、反例 29/29、运行 63/63）、模块项目矩阵 42/42、`make selfhost-native`（10 个固定点产物、34 个源文件自解析、模块 17/17、项目 42/42）通过；`make seed` 后 `make -B` 和再次 `make selfhost-native` 通过。
+- Apple M1 冻结语料 5 轮测试：无改动、函数体变化、冷编中位数/p95 为 188.1/213.8、873.0/942.3、2,222.9/2,384.1 ms；汇编/链接调用为 0/0、1/1、4/1。样本少于正式 20 轮，不能作为性能目标验收，三项中位数目前均高于暂定目标。
+- Darwin arm64 种子 SHA-256：`4fe6932658f0d8279f39491b824acb64a9fd4f661a8f4bcadfd266d4a0b73715`；强制重建后的根 `yh` SHA-256：`1bf1917315604fccc9ccfcb2bff2f991945d0de2dd6bc35013a12bdb36965b35`。
+- IR 仍只覆盖受限函数子集且不驱动汇编后端；复合/聚合赋值、分支/循环局部、调用、函数 check 缓存、真正线程池、双 arm64 后端和自有工具链仍未完成。
+
+详见[顺序局部定义与赋值报告](01-finished/yh-编译流程R2a顺序局部SSA定义-2026-10-01.md)。
+
+## 2026-10-01 编译流程重规划 R1：函数 AST 上下文范围切片
+
+- 新增函数级只读 `AstFunctionContext`，保存 AST 四类 arena 范围和源声明身份；模块声明建立文件基址索引，避免上下文构造逐函数线性搜索。
+- 上下文 verifier 检查表达式、语句、边和绑定没有跨函数引用。SSA lowering 与参数检查改为消费函数切片，指令临时容量按函数表达式规模计算，IR 缓存语义键版本升到 v3。
+- `irfront` `.yh` 项目新增两个同名局部绑定函数，build/check 都捕获 10 个函数上下文；check 保持 `ir_functions=0`，程序结果不变。
+- `make`、`make test`（66/66、29/29、63/63）、模块项目矩阵 42/42、`make selfhost-native`（34 个源文件自解析、10 个模块产物固定点）及滚种子后的 `make -B` / 自举门均通过；`git diff --check` 通过。
+- 两轮 Apple M1 初测中位数/p95：无改动 199.5/200.8 ms、函数体变化 933.3/935.4 ms、冷编 2,225.6/2,233.4 ms；样本过少，不据此判断速度变化。详见[函数 AST 上下文报告](01-finished/yh-编译流程R1函数AST上下文范围-2026-10-01.md)。
+- 根 `yh` SHA-256：`e9a2f94203fe12f04239417e2b6d3166214e337125d1469f7bb0cb3be9a544e4`；Darwin 种子 SHA-256：`504005f98f0666f02d7ced0faa0dcac00bafe77cb8c8f4a0a115a59275208635`。
+- 此描述符尚未隔离 parser/semantic 全局，也没有让函数任务线程安全；线程池与完整任务私有状态仍未完成。
+
+## 2026-10-01 编译流程重规划 R2b：接口就绪并行调度过渡切片
+
+- 构建协调器以显式 argv 启动最多四个进程 worker。构建会话接口使用进程专属后缀并原子发布，依赖方可在 provider 私有函数/汇编结束前开工；缓存命中读取已验证的持久接口。
+- worker 全部成功后才原子提交持久接口与 manifest；失败停止派发、回收 worker、清理会话文件并跳过最终链接。统计输出 `workers_peak`、`iface_early`。
+- 新增 `.yh` scheduler 项目语料，覆盖 provider/consumer 与菱形依赖 DAG、接口提前推进、失败无链接、PATH 启动及含空格/单引号的路径；实测调度峰值分别为 2 与 3，接口提前推进计数分别为 1 与 3。
+- 验证：`make`、`make test`（66/66、29/29、63/63）、模块项目门 42/42、`make selfhost-native`、滚种子后的 `make` 和再次自举门、Python 语法检查与 `git diff --check` 通过。
+- Apple M1 冻结语料 20 轮（中位数/p95）：无改动 196/354 ms、函数体变化 905/975 ms、冷编 2,278/2,642 ms；汇编/链接调用 0/0、1/1、4/1。50/200/1,000 ms 目标仍未达成。根 `yh` SHA-256：`26a7838a6727492288223bba448ea9a1b03243f07c905d5dca1c51c7a5e19687`；macOS arm64 种子：`51204b7025f7269428c046738d79f344107944006b5c7250a51602eff59b3f36`。
+- 这是进程 worker 迁移桥。线程池、完整任务私有状态、函数级 check/IR、文件对象及同项目并发提交仍未完成；系统依赖和自有工具链目标也仍待实施。
+
+详见[接口就绪并行调度报告](01-finished/yh-编译流程R2b接口就绪并行调度-2026-10-01.md)。
+
+## 2026-10-01 编译流程重规划 R2a：标量参数 SSA 定义与读取
+
+- `compiler/ir/ssa.yh` 新增 `IR_OP_PARAM`。函数参数由入口块中 phi 后、其他指令前的连续
+  `PARAM` 定义表示，参数序号必须从零连续；verifier 拒绝错序、越出入口前导区及伪造操作数。
+  序列化仍使用既有指令字段，无需扩张 IR 文件格式。
+- `ast_ir.yh` 现在可将标量参数引用降低为对应 SSA 值，覆盖受限直接 return、`+ - * ==` 表达式
+  和既有双臂 if/else return；缓存键版本升级，并加入函数签名参数数量、类型及目标布局事实。
+- 新增 `.yh` 参数函数 `from_param`，由入口实际调用并验证返回 58；IR verifier 用例检查有效定义、
+  非连续序号和非法操作数字段。项目验收现含 7 个 SSA 缓存函数，覆盖冷写、无关入口修改全命中、
+  单函数失效和损坏缓存重建。
+- 验证：`make`、`make test`（语法 66/66、反例 29/29、运行 63/63）、
+  `make selfhost-native`（10 个模块产物固定点、32 文件自解析、模块 17/17、项目 36/36）通过；
+  更新种子后 `make -B` 与再次 `make selfhost-native` 通过。`git diff --check` 和 Python 语法检查通过。
+- 根 `yh` SHA-256：`bac264cdd78be400907136cc6fbaa1b0aefdce088930255bcabec8fd08aa4f5f`；
+  macOS 种子 SHA-256：`6f03b306a525e86463c8e6eeaa4978632cf5057fbbe961064443f2eeefe96bbf`。
+- 当前参数 IR 只供 verifier/缓存迁移验证，尚不驱动目标后端；局部变量赋值、调用 lowering、完整
+  check 缓存、线程池、接口就绪调度、自有汇编/链接及最终速度目标仍未完成。
+
+详见[标量参数 SSA 切片报告](01-finished/yh-编译流程R2a标量参数SSA-2026-10-01.md)。
+
+## 2026-10-01 编译流程重规划 R2b：受限函数 SSA IR 缓存
+
+- `ast_ir.yh` 为当前受限 lowering 子集增加持久 IR 缓存。键包含正在运行的编译器二进制指纹、
+  目标方言、函数源码和 lowering 读取的表达式类型事实；缓存包络校验键与内容校验值，
+  IR 解码再执行 verifier。内部模块 worker 显式继承父构建的 `-target`，交叉目标不会借用宿主默认值。
+- `irfront` `.yh` 项目回归覆盖首次缓存写入、修改不进入 IR 的入口函数后六函数全命中、
+  修改 `sum` 后只有一个 IR miss、损坏缓存拒绝并重建；`yh check` 仍 `ir_functions=0`，
+  不读取或写入常规 IR 缓存。
+- 验证：`make`、`make test`（语法 66/66、反例 29/29、运行 63/63）、
+  `make selfhost-native`（固定点 10 个产物、32 文件自解析、并发/check/缓存/项目门 36/36）、
+  滚种子后的 `make -B` 与再次 `make selfhost-native` 通过。`git diff --check` 与 Python 语法检查通过。
+- Apple M1 冻结语料 20 轮：无改动 192/223 ms、单函数体变化 980/1,104 ms、冷编
+  2,345/2,507 ms（中位数/p95）；汇编/链接调用 0/0、1/1、4/1。当前冻结语料没有受限
+  lowering 可处理的函数（`ir_functions=0`），这些测量不证明函数 IR 缓存提升端到端速度，
+  总目标 50/200/1,000 ms 仍未达到。根编译器 SHA-256 为
+  `fe9a44ddc9b074f838710a3c2990a9a324a879cc0b6cc877e5b12e0c2bba70f2`，Darwin 种子 SHA-256 为
+  `36ab04c1e61c21ef1c8c12ce2be3e79dd56534af72d05c4240de08742c336c1e`。
+- 这只是少量函数 lowering 的 IR 缓存，不包含函数 check 结果，也不驱动汇编；完整受检语义键、
+  线程池、接口就绪并行、文件级对象、原子提交和自有工具链仍在 R1/R2b–R6 待办。
+
+详见[函数 IR 缓存切片报告](01-finished/yh-编译流程R2b函数IR缓存切片-2026-10-01.md)。
+
+## 2026-10-01 编译流程重规划 R2a：首个分支 CFG 接入 AST→SSA
+
+- 扩展 `compiler/parse/ast_ir.yh`，在已有常量单 return lowering 外接入无参数双臂
+  `if/else` 函数：条件表达式进入入口块，then/else 各形成独立返回块，运行 SSA 简化和
+  verifier。范围刻意限制为每个分支块只有一个直接 `return`；其他函数仍由旧发射器负责。
+- `tests/modules/projects/irfront/main/main.yh` 增加比较条件和 true/false 分支函数，并由
+  程序入口实际执行两条路径；项目门要求至少 6 个 lowering 函数、`yh check` 的
+  `ir_functions=0`，结果退出码为 50。
+- 验证：`make`、`make test`（语法 66/66、反例 29/29、运行 63/63）、
+  `make selfhost-native`（10 个模块产物固定点、32 文件自解析、所有模块与项目门 36/36）、
+  滚种子后的 `make -B` 与再次 `make selfhost-native` 全通过；`git diff --check` 通过。
+- Apple M1 冻结语料 20 轮：无改动 190/225 ms、单函数体变化 985/1,079 ms、冷编
+  2,353/2,550 ms（中位数/p95）；对应汇编/链接次数为 0/0、1/1、4/1。目标 50/200/1,000 ms
+  尚未达到。详见[分支 CFG 接入报告](01-finished/yh-编译流程R2a分支CFG-2026-10-01.md)。
+- 新种子 SHA-256：`3ab21aa7fb74448cfd4f0dcf5563f6ae60643581de01fa6c8c129cac25a6d0e2`；
+  当前根 `yh` SHA-256：`7e3f780b89cbe201997032730cff4ebb50ad967ad92a1f6f96c2cf23277e7eb6`。
+- 这仍是窄迁移探针：IR 不持久化、不驱动后端，局部变量、循环、合流 phi、调用、线程池、
+  函数级缓存与自有汇编/链接仍未实现。
+
+## 2026-10-01 编译流程重规划 R2a：首条 AST→SSA 主路径
+
+- 根 compiler 项目显式依赖独立 `compiler/ir` 子项目。普通 build 与 `yh check` 都在解析
+  期间收集并校验表达式/语句/声明 AST；pass1 后绑定函数签名，确保 lowering 使用稳定声明身份。
+- 普通 build 在 AST 校验后，将无参数、单个直接 `return` 的常量整数/布尔表达式构造成目标隔离
+  的 typed SSA 函数，并运行低成本简化及 verifier。首批 lowering 覆盖整型/布尔/字符常量与
+  `+`、`-`、`*`、`==`；不符合该结构的函数仍由旧发射器输出。SSA 暂不持久化，也未驱动平台后端。
+- `tests/modules/projects/irfront/` 覆盖四种运算；项目回归要求普通 build 至少校验 4 个 IR 函数、
+  `yh check` 的 `ir_functions=0`，最终程序返回 42。快照门现在会把清单声明的本地 path 依赖
+  子项目纳入固定点，词法统计与性能脚本兼容新增 stats 字段。
+- Apple M1、冻结 25 文件语料、20 轮端到端复测（含汇编/链接）：无改动 185/220 ms、单函数体变化
+  957/1,023 ms、冷编 2,317/2,374 ms（中位数/p95）。汇编/链接调用分别为 0/0、1/1、4/1；
+  函数修改与冷编较上一 20 轮缓存切片基线略慢，性能目标仍未达到。当前 IR 切片主要验证管线接线，
+  还没有函数级缓存或并行带来的收益。完整报告见
+  [AST→SSA 主路径报告](01-finished/yh-编译流程R2a首条主路径-2026-10-01.md)。
+- 验证：`make -B`、`make test`（语法 66/66、反例 29/29、运行 63/63）、
+  `make selfhost-native`（cc2/cc3 的 10 个模块产物固定点、32 文件自解析、全量语料、并发扫描、
+  check/cache、模块 17/17、项目 36/36）通过。按门禁滚动种子后 SHA-256 为
+  `cb2f690417488225e3916086c3a029ed1df4a7a94765c90e2428af1dbfd99b08`；新种子冷重建与自举门通过。
+- R1 独立语义/check、任务私有状态、InterfaceReady 和函数级缓存，以及完整 SSA、线程池、平台后端、
+  自有汇编/链接和 R3–R6 仍未完成。
+
+## 2026-10-01 编译流程重规划 R2a 第四个切片：指令字段规范校验
+
+- `ir_verify_inst` 现在检查当前 IR 指令的保留字段：CONST 不得携带 `a/b/aux`；PHI 不得
+  携带普通操作数；非 CONST 的 `imm` 必须为零；非 phi 指令的 `aux` 必须为 -1；LOAD
+  的 `b` 与 STORE 的附加字段不得伪造输入。IR 结构注释同步说明这些编码约束。
+- 扩展 `irverify` `.yh` 反例：CONST 引用先前已定义值、PHI 带 immediate、ADD 带 aux、
+  LOAD 携带多余 `b/aux`、STORE 携带多余 `aux/immediate`。首个反例在旧 verifier 下形成
+  RED（退出码 16），收紧校验后通过；既有常量简化、phi、序列化与损坏 CFG 测试继续通过。
+- 验证：`make`、`make test`（语法 66/66、反例 29/29、运行 63/63）、项目矩阵 33/33、
+  `make selfhost-native`（固定点、自解析 31 文件、并发扫描 8/8、check/cache、模块 17/17、
+  项目 33/33）通过；`git diff --check` 通过。
+- R2a verifier 仍是部分操作集：调用、转换、switch、全局地址等指令和完整 SSA lowering
+  尚未实现；独立 IR 也未接入编译主路径。详见
+  [指令字段校验报告](01-finished/yh-编译流程R2a指令字段校验-2026-10-01.md)。
+
+## 2026-10-01 编译流程重规划 R2a 第三个切片：稳定 IR 序列化
+
+- 新增 `compiler/ir/ssa_serialize.yh`，采用固定字段顺序的 little-endian 64 位格式；
+  包含 magic、格式版本、目标编号、类型/指令/phi/CFG 表和 SSA 值数，不写结构体填充或地址。
+- 解码要求调用方提供空输出，检查目标、版本、精确长度与 64 MiB 规模上限；分配后运行
+  `ir_verify`，失败释放所有部分数组。`ir_function_release` 释放解码结果。缓存校验和提交
+  仍由后续缓存层负责。
+- 扩展 `irverify` `.yh` 用例，验证负 immediate、round-trip 逐字节相同、缓冲不足、错目标、
+  错版本、截断数据和损坏 terminator；损坏 IR 被 verifier 拒绝并释放分配。
+- 验证：`make test`（语法 66/66、反例 29/29、运行 63/63）、`make selfhost-native`
+  （固定点、自解析 31 文件、并发扫描 8/8、check/cache、模块 17/17、项目 33/33）通过；
+  最后一次变更后又运行 `make`、项目矩阵 33/33 与 `make selfhost-native` 均通过。
+  按仓库门禁执行 `make seed` 并冷重建；Darwin 种子 SHA-256 为
+  `8d658d975e0501c7fe49ef07fcb6d5a838466ae24f2f73d449688f43e6facb42`。
+- IR 仍未接入主编译路径；AST→SSA、完整指令校验、函数级 IR 缓存、线程池和两个 arm64
+  后端未完成，R2a/R2b 仍进行中。详情见
+  [稳定 IR 序列化报告](01-finished/yh-编译流程R2a稳定IR序列化-2026-10-01.md)。
+
+## 2026-10-01 编译流程重规划 R2a 第二个切片：默认低成本 SSA 简化
+
+- `compiler/ir/` 新增 `IR_OP_COPY` 与独立 `ir_simplify`：对整数/布尔常量做定宽归一化，
+  折叠整数加减乘和整数相等比较；把所有非自环 phi 输入相同的 phi 替换为别名/拷贝，
+  并重写指令、phi 边和终结值引用。优化前后调用 `ir_verify`。
+- 扩展 `irverify` 的 `.yh` 项目：先验收 `10 + 20` 折叠为 30，再验收两分支同值合流的
+  phi 消除及 return 值替换；错误 CFG/类型/支配用例继续保留。
+- 验证：`make`、`make test`（语法 66/66、反例 29/29、运行 63/63）、
+  `make selfhost-native`（固定点、自解析、并发扫描、check、缓存、模块 17/17、项目 33/33）
+  通过。`make seed` 已按门禁执行，SHA-256 仍为
+  `8d658d975e0501c7fe49ef07fcb6d5a838466ae24f2f73d449688f43e6facb42`；随后冷构建、
+  种子核验和项目矩阵 33/33 通过。
+- 此优化还未接入主编译路径，IR 没有从 CheckedFunction/AST 构造，也没有持久化或目标后端；
+  R2a、R2b 和 R3–R6 均未完成。
+
+## 2026-10-01 编译流程重规划 R1 第七个切片：函数内稳定绑定
+
+- check AST 新增函数内稳定绑定编号与 arena 行，捕获参数、局部变量/常量及 for-in
+  隐式变量；表达式叶节点指向具体绑定行，语句节点关联一条或多条声明绑定。旧
+  `sym_id` 只保留为解析时符号槽快照，遮蔽块退出并复用槽位后仍能区分变量身份。
+- 赋值语句 AST 现在记录真实赋值 token；此前节点把 LHS 首 token 当作 `op`，无法供
+  后续 SSA lowering 区分普通赋值与复合赋值。
+- 扩展 `tokenreplay` `.yh` 用例覆盖函数参数、多绑定声明、局部常量、同名嵌套遮蔽、
+  复合赋值和 for-in 隐式绑定；运行语义保持预期，`yh check --stats` 要求绑定数非零。
+- 验证：`make test` 的语法 66/66、反例 29/29、运行 63/63 通过；模块项目矩阵 33/33，
+  有效/无效 check、check 产物隔离、无外部工具回归通过。修复 `lex-stats.py` 与性能
+  脚本对 `ast_bindings` 字段的解析后，`make selfhost-native` 全绿：两代 8 个模块
+  固定点、自解析 30 个源文件、并发扫描 8/8、模块 17/17、项目 33/33。按仓库规则
+  执行 `make seed`，新 Darwin 种子 SHA-256 为
+  `8d658d975e0501c7fe49ef07fcb6d5a838466ae24f2f73d449688f43e6facb42`；随后冷重建、
+  种子校验、`check-command.py` 与 `git diff --check` 通过。
+- 这仍是 AST/check 迁移切片，不是独立语义阶段或 SSA lowering；任务私有上下文、
+  InterfaceReady 调度与函数级缓存仍待 R1，R2a/R2b 尚未完成。
+
+## 2026-10-01 编译流程重规划 R1 第六个切片：表达式绑定与常量事实
+
+- typed 表达式节点现保存解析到的符号索引、符号类型/类别/标志/偏移，以及整型/指针
+  常量位型、浮点位型和整数字面量标记。`ast_refs` 统计可复用的解析符号引用，
+  `yh check --stats` 可直接观测。
+- 符号索引按 `(file_id, owner_decl, sym_id)` 解释，并在捕获时复制符号元数据。旧
+  `scope_pop` 会回收并复用函数局部符号槽，因此 AST verifier 不依赖函数结束后的
+  `c_syms`；它验证声明归属、符号快照类型类别，以及标识符叶节点的类型一致性。
+- 扩展 token replay `.yh` 用例，覆盖跨文件函数调用、参数/局部变量和私有常量引用；
+  `check-command.py` 要求 `ast_refs` 非零。真实运行仍返回 42，项目 check 不生成后端
+  产物，也不调用汇编器或链接器。
+- 验证：`make`、`make test`（语法 66/66、反例 29/29、运行 63/63）、
+  `make selfhost-native`（8 个模块产物固定点、自解析 30 个文件）、
+  `python3 tools/selfbuild-gate.py`（两段三代固定点）、模块 17/17、项目 33/33 通过。
+  滚动 Darwin 种子 SHA-256：`5c913f74733925f04dc4122d1765f4610d27a8d74934af8bc0ffeddafd9ba0eb`。
+- AST 仍由旧语义遍历同步生成，尚未成为独立语法阶段产物；完整 `CheckedFunction`、
+  任务私有上下文、接口就绪推进、函数级缓存和 SSA lowering 仍未完成。
+
+## 2026-10-01 编译流程重规划 R1 第五个切片：语句与声明 AST
+
+- 新增 `compiler/parse/ast_stmt.yh`，在 `yh check` worker 的现有解析遍历中记录块、
+  声明、类型、if、for、switch/case、return、break/continue、goto/label、赋值与表达式
+  语句。节点用文件内 token 半开区间、父/子/兄弟索引和表达式根引用表示，不改变普通
+  build 路径的解析行为。
+- 新增 `compiler/parse/ast_decl.yh`，复用已生成的 PDecl 范围建立文件级声明节点；函数
+  体解析后连接到所属声明。worker 收尾验证语句树、根链、表达式范围、声明范围与函数体
+  引用；`--stats` 增加 `stmt_nodes`、`decl_nodes`。
+- 扩展 token replay 项目的 `.yh` 回归，执行 if/else、循环、continue、switch、赋值和
+  return；`yh check --stats` 同时要求表达式、语句、声明节点非零。运行结果仍为 42，
+  有效/无效 check、独立 check 缓存保护和无外部工具检查均通过。
+- 本切片仍由旧 parser 的语义遍历同步建立 AST。没有独立 `CheckedFunction`、任务私有
+  上下文、接口就绪调度、函数级缓存，也没有把 AST 接入 SSA builder；R1 与 R2a 未完成。
+- 固定语料做了 3 轮速度冒烟测量：无改动中位数 209ms、单函数体变化 980ms、冷编 2,343ms；
+  对应汇编/链接次数为 0/0、1/1、4/1。该小样本只作当前参考，不能代替 20 轮正式基线；
+  50/200/1,000ms 验收目标仍未达到。
+- 验证：`make`、`make test`、`make selfhost-native`、
+  `python3 tools/selfbuild-gate.py`、check/阶段计数脚本、模块矩阵 17/17、项目矩阵 33/33
+  全绿。两代主门固定点为 8 个模块产物一致，自解析 30 个源文件通过。滚动 Darwin 种子
+  SHA-256：`af601fdab18b41092b716ec2ecd4835e324ee3b153739115ffbaea96ee9896e8`。
+
+## 2026-10-01 编译流程重规划 R1 第四个切片：check 专用表达式 AST
+
+- 新增 `compiler/parse/ast_expr.yh` 连续节点表，保存节点种类、运算符、语义类型、
+  token 半开区间、token 数、项目文件 ID 和最多三个子节点。`Res.ast_id` 让当前解析
+  遍历把已有类型结果关联到 AST；只在 `yh check` worker 启用，普通构建没有 AST 分配。
+- 同步记录基本表达式、一元/二元/三元运算、调用和实参链、索引/切片、成员、
+  `.to_type` 转换及数组字面量。模块 worker 完成函数遍历后校验节点范围、类型、
+  后序编号、子节点包含关系和文件归属；`--stats` 增加 `ast_nodes` 计数。
+- 扩展 token replay 的 `.yh` 项目函数，包含数组字面量、数组到切片转换、切片与索引、
+  短路运算、三元与一元表达式；`tests/selfhost/check-command.py` 要求有效项目实际
+  生成非零 AST 节点，并保留非法项目、产物清理和未调用外部工具的检查。
+- 这是 R1 的表达式 AST 迁移切片，不是完整 AST：语句/声明节点、独立语义与 check
+  遍历、任务私有上下文、InterfaceReady 调度及函数级缓存仍未实现。现有 parser 仍
+  会在遍历时运行语义钩子，check 仍靠模式位抑制发射缓冲。
+- 验证：`make`、`make test`、`make selfhost-native`、
+  `python3 tools/selfbuild-gate.py` 全绿；自举固定点、模块 17/17、项目 33/33，
+  compiler 项目的 `yh check --stats` 成功生成 4 个 worker 的 AST 且无汇编/链接。
+  按滚动自举规则更新 `bin/yh`，SHA-256 为
+  `a7b7fb039923dcb1d216b5ddce010e502d883e11fcbbea0759ca46df47b75905`。
+
+## 2026-10-01 编译流程重规划 R2a 首个切片：typed SSA 模型
+
+- 新增独立 `compiler/ir/` 项目，定义目标编号、函数私有类型表、typed 指令、
+  SSA 值编号、基本块终结信息与 phi 前驱输入。数组连续存放，指令操作数只
+  使用值/块索引；模块不依赖旧 `gen`、解析器或平台发射器。
+- `ir_verify` 检查类型宽度、结果定义唯一性、操作数支配与内存操作类型、
+  CFG 终结形式、指令块范围，以及 phi 是否覆盖每个真实前驱且无重复/错型。
+- 新增 `tests/modules/projects/irverify/`，构造 if/else 合流的 phi `.yh` 正例，
+  并确认重复前驱、错误类型和从另一分支引用未支配值会被拒绝；接入模块项目回归。
+- 新 IR 作为 `compiler/` 下的嵌套项目后，固定点产物发现门曾把它误算入主项目；
+  已按子目录 `project.toml` 设置边界，并给发现器增加嵌套项目反例自检。
+- 验证：`python3 tests/modules/build-check.py --compiler-path ./yh` 通过（33/33 项目用例）。
+  `make`、`make test`、`make selfhost-native` 与
+  `python3 tools/selfbuild-gate.py` 全绿；滚动 Darwin 种子 SHA-256 为
+  `c3e14e957539c6b57cffcb0aae14228c6a76ee25f1f01b570651f36d30924e4e`。
+  尚未实现完整 SSA builder、稳定序列化和后端；该 IR 项目也尚未
+  接入编译器主流水线，因此 R1 与 R2a 均未完成。源码见
+  [ssa.yh](../compiler/ir/ssa.yh)。
+
+## 2026-10-01 编译流程重规划切片：模块对象与链接内容缓存
+
+- 为现有模块汇编增加对象缓存，为每个链接输出增加结果缓存；缓存键使用 64 位
+  FNV-1a，并校验对象和最终程序内容。删除/损坏对象会重汇编；最终程序缺失或被
+  覆盖会重链。
+- `--stats` 增加 `asm` 与 `link` 实际调用次数。新增
+  `tests/selfhost/link-cache.py` 覆盖冷/热构建、对象损坏、程序损坏与函数实现变化：
+  热构建 0 汇编/0 链接，损坏对象 1/0，损坏程序 0/1，单模块函数变化 1/1。
+- 编译器二进制指纹现在每个构建进程只读一次；对象/链接缓存逻辑拆入
+  `compiler/cmd/link_cache.yh`，保留四个既有顶层模块。
+- M1 冻结语料 20 轮中位数/p95：无改动 186/223 ms、单函数体变化 894/958 ms、
+  冷编 2,199/2,287 ms。无改动较前一切片快约 89%，函数体变化快约 52%，冷编快约 0.8%；
+  离 50/200/1,000 ms 目标仍有差距。
+- 缓存仍按模块汇编，且没有纳入外部工具版本；全局扫描、整模块 check/IR、文件级
+  对象、线程池、接口提前推进及自有工具链均未完成。详情见
+  [对象与链接缓存测量报告](01-finished/yh-编译流程对象链接缓存-2026-10-01.md)。
+- 最终门：`make -B`、`make test`、`make selfhost-native` 与
+  `python3 tools/selfbuild-gate.py` 均通过；滚动 Darwin 种子 SHA-256 为
+  `c3e14e957539c6b57cffcb0aae14228c6a76ee25f1f01b570651f36d30924e4e`。
+
+## 2026-10-01 编译流程重规划 R1 第三个切片：项目级 yh check
+
+- 新增 `yh check [module]`，对入口模块或显式模块及其依赖执行完整的现有
+  语义遍历。合法项目通过；类型不匹配的 `.yh` 项目诊断并失败。
+- check-only 子进程跳过汇编写文件，文本/数据段写入缓冲被屏蔽；不运行汇编器
+  或链接器。依赖接口写入独立 `.build/check/iface/`，检查结束或失败时清除，
+  保留正式 `.build` 缓存。
+- 新增 `tests/modules/projects/checkbad/` 与 `tests/selfhost/check-command.py`，
+  并接入 `make selfhost-native`。测试递归检查 `.build` 下没有汇编、对象、
+  接口或 manifest 文件，并用 PATH 包装器确认没有调用 gcc/clang。
+- 该实现是阶段性 CLI 和产物契约：语义仍由旧 parser pass 执行，靠全局模式位
+  抑制发射缓冲；完整 AST、独立语义/check 遍历、任务私有状态和函数缓存仍在 R1。
+
+## 2026-10-01 编译流程重规划 R1 第二个切片：顶层声明范围索引
+
+## 2026-10-01 编译流程重规划 R1 第二个切片：顶层声明范围索引
+
+- worker 项目索引为每个源文件记录顶层声明的 token 起止、关键字与源位置。
+  声明 pass 按范围跳过函数体，globals/functions pass 跳过无关声明；索引
+  没有表达式/语句节点，尚不能作为完整 AST 或独立语义检查结果复用。
+- 修复了公开声明边界：相邻声明的 `pub` 原先会被前一声明范围吞掉，导致后续
+  函数按私有符号处理。项目矩阵 32/32 通过，覆盖 `pub struct` 后接 `pub fn`。
+- 固定语料每场景 20 轮，中位数/p95：无改动 1.717/1.889 秒，单函数体变化
+  1.869/1.998 秒，冷编 2.217/2.319 秒。词法次数仍为 25/53/131；函数体
+  变化索引 736 个顶层声明，冷编索引 2,944 个。相较 R1 首切片中位数分别
+  下降约 14%、11%、7%；各场景仍汇编 4 次、链接 1 次。当前编译器 SHA-256
+  `6cc3f94995d148d554d6d3e1e84898452b6ea81480e1179be65e9c51ae5f57b6`。
+  详见[声明索引测量报告](01-finished/yh-编译流程R1顶层声明索引-2026-10-01.md)。
+- 这一步的建立索引仍是额外顶层 token 遍历；端到端结果来自冻结语料实测，不能
+  推广为所有项目加速保证。完整 AST、check 与任务缓存仍未完成。
+
+## 2026-10-01 编译流程重规划 R1 首个切片：worker 词法快照复用
+
+- 模块 worker 在项目索引时为发现的 `.yh` 文件保留只读源字节与 token
+  数组；pass1、全局初始化 pass 与函数 pass 从同一 token 快照重放，不再
+  对模块文件重复读取和词法分析。父构建器的项目索引与 worker 项目发现
+  仍分别发生，完整 AST 和跨构建文件缓存尚未实现。
+- 新增显式 `yh build --stats` 诊断计数器和 token replay 多模块 `.yh` 回归：
+  覆盖私有跨文件类型、前向函数调用、跨模块导入与运行结果 42；索引 3 个
+  文件共词法 3 次，两个 worker 的 pass1/global/function 文件遍历合计各 3 次。
+- M1 固定 25 文件语料每种场景测 20 轮：无改动中位数/p95 为
+  2.002/2.185 秒，函数体变化 2.099/2.452 秒，冷编 2.378/2.710 秒；词法
+  扫描次数分别 25、53、131，四次汇编和一次链接保持不变。函数体变化和
+  冷编的旧流程复核数分别为 74、206；耗时尚无稳定改善，50/200/1000 ms
+  目标远未达到。测量及边界见
+  [R1 切片报告](01-finished/yh-编译流程R1词法快照复用-2026-10-01.md)。
+- 验收：`make -B`、`make test`、`make selfhost-native`、
+  `python3 tools/selfbuild-gate.py` 通过；滚动 Darwin 种子 SHA-256 为
+  `802f47daff273bceaeeb2857ab409f910dc16ab383534bc93f10ca5533cc8a4b`。
+  R1 整体仍未完成。
+
+## 2026-10-01 R0 第二个实施切片：宿主种子与扫描临时状态隔离
+
+- Makefile、两套自举门和 `make seed` 统一使用按宿主系统/架构选择的
+  种子路径与旁置 SHA-256；显式 `SEED` 也会校验哈希。Linux arm64
+  目标解析为 `bin/yh-linux-arm64`，不覆盖 macOS 的 `bin/yh`。
+- 项目索引不再把所有编译器进程的目录列表写进固定 `/tmp` 文件，改为
+  `tmp/` 下每进程独立的随机路径，读完即删除。新增并发 `.yh` 项目构建
+  回归；旧实现 8 路并发时出现崩溃和交叉目录读取，修复后 8/8 通过。
+- 验收：`make -B`、`make test`、`make selfhost-native`、
+  `python3 tools/selfbuild-gate.py` 通过；Linux arm64 种子路由 dry-run
+  与当前 Darwin 种子 SHA-256 校验通过。
+- R0 仍待冻结可重复性能语料、阶段计数/工具调用/峰值内存，并记录
+  状态归属与就绪事件契约。线程 worker 的临时路径需随任务私有上下文
+  落地；本切片完成的是进程间隔离。
+
+## 2026-10-01 R0 完成：冻结性能基线与流水线状态契约
+
+- 固定提交 `8e17bdb` 的 25 文件/13,338 行 compiler 输入，保存每个源文件
+  与 project.toml 的 SHA-256。新增可重复测量脚本，函数体变化会实际改变
+  编译器运行结果并由脚本验证。
+- Apple M1 上每种负载测 20 个独立进程：无改动 1.985 秒中位数、2.403 秒
+  p95；单函数体变化 2.075/2.751 秒；热 OS 缓存下冷编 2.455/2.741 秒。
+  峰值单进程 RSS 为 50.63/50.83/50.86 MiB。所有场景仍调用 4 次 clang 汇编
+  与一次链接。详细阶段访问数和限制见 R0 报告。
+- 旧 pass2 将语义与发射混合，无法提供独立阶段计数；已记录实际模块/文件
+  访问次数，R1 将引入分开的前端、check 与代码生成计数器。SourceStore、
+  ModuleEnv、FunctionContext、TargetContext 及三个就绪事件契约已落设计。
+- R0 全部检查通过：`make -B`、`make test`、`make selfhost-native`、
+  `python3 tools/selfbuild-gate.py`；滚动种子 SHA-256 为
+  `0b3c43a7595288841ca9277cc7084154bc2f8235bff1bc2d017655f48a8d28c8`。
+
+## 2026-10-01 R0 首个实施切片：可信固定点门
+
+- 修复 `native-selfhost.py` 与 `selfbuild-gate.py` 构建下一代前会覆盖
+  前代 `.build`，导致延迟快照把同一路径当成各代比较的错误。每代现在
+  立即保存到独立的 `tmp/` 快照目录。
+- 从 project.toml 项目名与源码 module 声明动态推导应有的 `.s/.s.i`；
+  两个自举门拒绝空快照、缺失或多余产物及代间字节差异。新增门自检
+  验证固定点通过、空集/漏产物/内容变化被拒绝。
+- 新增 `tests/selfhost/fixedpoint-probe.yh`，覆盖前向调用、结构体浮点
+  字段、按值调用与循环。两套门都编译并运行该探针。
+- Makefile 的冷编和 clean 路径改为实际 `compiler/.build`。
+- 验收：`make -B` 成功；`make test` 语法 66/66、反例 29/29、
+  运行 63/63；`make selfhost-native` 固定点 8 项、探针和全量门通过；
+  `python3 tools/selfbuild-gate.py` 三代固定点两组、modules 17/17 通过。
+- R0 仍在进行：各平台种子路径统一、项目索引临时路径隔离与性能
+  基线/阶段计数待做。未滚动 `bin/yh`，因为本切片没有修改编译器源码。
+
+## 2026-10-01 编译流程重规划（GrillMe，规划已确认）
+
+- 用户已确认增量优先、完整 check 的逻辑阶段/命令、产品取消外部
+  工具/shell/libc/CRT 的边界，以及首批双 arm64、Linux 先闭环。
+- 已记录[ADR-0009](adr/0009-yh采用check与IR及早期并行.md)与
+  [设计决策树](03-design/yh-编译流程设计决策树.md)，补 glossary，
+  标记旧方案撤回并更新 todo。第二轮确认 SSA、线程池、接口就绪
+  后提前推进，以及文件解析/函数 check-IR/文件对象的增量粒度。
+- 第三、四轮确认 macOS 审核 OS API/libSystem/dyld 边界、Linux 静态
+  ELF 自有工具链首版范围、默认低成本优化、目标隔离 check/IR、
+  M1 固定语料 50ms/200ms/1s 待达成目标，以及内部模块重组和 system
+  仅保留过渡兼容配置的取舍。
+- 完成只读事实调查：重复词法路径、串行模块链、提前接口与共享
+  状态障碍，以及工具/shell/运行时/OS/开发测试依赖分层。静态计数
+  不当作性能结果。另在独立副本测旧流程 3 冷/3 热/3 函数体注释
+  修改构建，端到端中位数 3.211/2.420/2.389 秒；9 次构建成功，
+  波动明显且注释修改不是新函数级增量负载。
+- 已重写[设计](03-design/yh-编译流程重规划.md)与
+  [实施方案](02-plan/yh-编译流程重规划实施方案.md)，明确阶段契约、
+  SSA、状态归属、就绪调度、缓存/提交、平台运行时与 R0–R6 验收。
+- 完整方案已由用户确认，答案为“确认规划，不开始编码”。仅更新
+  文档，未修改编译器、测试或种子；git diff --check 与本地链接检查通过。
+  本条记录完成的调查与草案，不代表代码或性能目标已经完成。
+  详见[规划交付记录](01-finished/yh-编译流程重规划草案交付-2026-10-01.md)。
+
 ## 2026-09-30 全仓库文档同步：修正 40 处事实错误，11 份历史文档加抬头
 
 以实测为基准（CLI 选项逐一验证、目录与 Makefile 目标枚举、示例实跑）

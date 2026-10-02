@@ -401,6 +401,10 @@ pub fn dat_put_sym_name(idx int) int {
 //   本编译单元内定义的符号用 `adrp/add @PAGE/@PAGEOFF`。
 //   prelude 符号的标志位含 F_EXTERN（见 symbols.yh），据此区分。
 pub fn em_lea_global(idx int) int {
+    if ((c_syms[idx].flags & (F_RUNTIME_MEMCPY | F_RUNTIME_STRLEN
+        | F_RUNTIME_MALLOC | F_RUNTIME_FREE | F_RUNTIME_PRINTF)) != 0) {
+        c_syms[idx].flags = c_syms[idx].flags | F_RUNTIME_USED;
+    }
     if (tg_darwin() != 0) {
         if ((c_syms[idx].flags & F_EXTERN) != 0) {
             if (em_frag("\tadrp\tx0, ") != 0) { return -1; }
@@ -789,7 +793,49 @@ pub fn em_alloc_local(size int) int {
 }
 
 // em_call_direct：直接调用。
+// em_emit_linux_syscall_stub：为 Linux syscall intrinsic 的函数值生成 ABI 入口。
+// 直接调用仍内联 svc；该入口保证取函数地址时不会留下未定义符号。
+pub fn em_emit_linux_syscall_stub(idx int) int {
+    if (em_frag("\t.globl\t") != 0) { return -1; }
+    if (em_put_sym_name(idx) != 0) { return -1; }
+    if (em_frag("\n") != 0) { return -1; }
+    if (em_put_sym_name(idx) != 0) { return -1; }
+    if (em_frag(":\n") != 0) { return -1; }
+    if (em_ins("mov\tx8, x0") != 0) { return -1; }
+    if (em_ins("mov\tx0, x1") != 0) { return -1; }
+    if (em_ins("mov\tx1, x2") != 0) { return -1; }
+    if (em_ins("mov\tx2, x3") != 0) { return -1; }
+    if (em_ins("mov\tx3, x4") != 0) { return -1; }
+    if (em_ins("mov\tx4, x5") != 0) { return -1; }
+    if (em_ins("mov\tx5, x6") != 0) { return -1; }
+    if (em_ins("svc\t#0") != 0) { return -1; }
+    return em_ins("ret");
+}
+
 pub fn em_call_direct(idx int) int {
+    if ((c_syms[idx].flags & F_LINUX_SYSCALL) != 0) {
+        if (tg_darwin() != 0) {
+            return fail("Linux 系统调用 intrinsic 不能用于 Darwin 目标");
+        }
+        if (em_ins("mov\tx8, x0") != 0) { return -1; }
+        if (em_ins("mov\tx0, x1") != 0) { return -1; }
+        if (em_ins("mov\tx1, x2") != 0) { return -1; }
+        if (em_ins("mov\tx2, x3") != 0) { return -1; }
+        if (em_ins("mov\tx3, x4") != 0) { return -1; }
+        if (em_ins("mov\tx4, x5") != 0) { return -1; }
+        if (em_ins("mov\tx5, x6") != 0) { return -1; }
+        return em_ins("svc\t#0");
+    }
+    if ((c_syms[idx].flags & (F_RUNTIME_MEMCPY | F_RUNTIME_STRLEN
+        | F_RUNTIME_MALLOC | F_RUNTIME_FREE | F_RUNTIME_PRINTF)) != 0) {
+        c_syms[idx].flags = c_syms[idx].flags | F_RUNTIME_USED;
+        if (em_frag("\tbl\t") != 0) { return -1; }
+        if (em_put_sym_name(idx) != 0) { return -1; }
+        return em_frag("\n");
+    }
+    if ((c_syms[idx].flags & F_INTRINSIC) != 0) {
+        return fail("内部错误：目标内建调用没有后端实现");
+    }
     if (em_frag("\tbl\t") != 0) { return -1; }
     if (em_put_sym_name(idx) != 0) { return -1; }
     return em_frag("\n");

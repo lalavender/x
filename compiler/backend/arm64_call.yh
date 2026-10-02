@@ -1,0 +1,85 @@
+module backend;
+import gen;
+import ir;
+
+// arm64_call_supported：固定参数直接调用仅接受整数/布尔值及可为空的返回值。
+fn arm64_call_supported(f *ir.IRFunction, inst *ir.IRInst) int {
+    if (inst.aux < 0 || inst.aux >= f.call_count) { return 0; }
+    if (inst.result_id >= 0 && arm64_type_supported(f, inst.result_type) == 0) { return 0; }
+    let call ir.IRCall = f.calls[inst.aux];
+    let i int = 0;
+    for i < call.arg_count {
+        if (arm64_type_supported(f, f.call_args[call.arg_first + i].type_id) == 0) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// arm64_call_adjust_sp：按 16 字节对齐的大小开辟或回收调用点栈实参区。
+fn arm64_call_adjust_sp(bytes int, restore int) int {
+    if (bytes == 0) { return 0; }
+    let op *char = restore != 0 ? "add" : "sub";
+    if (bytes <= 4095) {
+        if (gen.em_frag("\t") != 0 || gen.em_frag(op) != 0
+            || gen.em_frag("\tsp, sp, #") != 0 || gen.em_puti(bytes) != 0) {
+            return -1;
+        }
+        return gen.em_frag("\n");
+    }
+    if (gen.em_mov_imm("x9", bytes.to_type(i64)) != 0
+        || gen.em_frag("\t") != 0 || gen.em_frag(op) != 0
+        || gen.em_frag("\tsp, sp, x9\n") != 0) { return -1; }
+    return 0;
+}
+
+// arm64_call_store_stack：把 x9 放到调用点第 offset 字节的实参槽。
+fn arm64_call_store_stack(offset int) int {
+    if (offset <= 32760) {
+        if (gen.em_frag("\tstr\tx9, [sp, #") != 0
+            || gen.em_puti(offset) != 0 || gen.em_frag("]\n") != 0) { return -1; }
+        return 0;
+    }
+    if (gen.em_mov_imm("x11", offset.to_type(i64)) != 0
+        || gen.em_ins("add\tx11, sp, x11") != 0
+        || gen.em_ins("str\tx9, [x11]") != 0) { return -1; }
+    return 0;
+}
+
+// arm64_emit_call：按两平台固定整数参数 ABI 装载 x0..x7 和八字节栈槽。
+// SSA 值先前已保存在帧槽，因此嵌套调用不会覆盖尚未搬运的实参。
+fn arm64_emit_call(f *ir.IRFunction, inst *ir.IRInst) int {
+    let call ir.IRCall = f.calls[inst.aux];
+    let stack_count int = call.arg_count - 8;
+    if (stack_count < 0) { stack_count = 0; }
+    let stack_bytes int = (stack_count * 8 + 15) / 16 * 16;
+    if (arm64_call_adjust_sp(stack_bytes, 0) != 0) { return -1; }
+    let i int = 8;
+    for i < call.arg_count {
+        let value int = f.call_args[call.arg_first + i].value;
+        if (arm64_load_value(f, value, "x9") != 0
+            || arm64_call_store_stack((i - 8) * 8) != 0) { return -1; }
+        i += 1;
+    }
+    i = 0;
+    for i < call.arg_count && i < 8 {
+        let value2 int = f.call_args[call.arg_first + i].value;
+        if (arm64_load_value(f, value2, "x9") != 0
+            || gen.em_frag("\tmov\tx") != 0 || gen.em_puti(i) != 0
+            || gen.em_frag(", x9\n") != 0) { return -1; }
+        i += 1;
+    }
+    if (gen.em_frag("\tbl\t") != 0) { return -1; }
+    i = 0;
+    for i < call.symbol_len {
+        if (gen.em_put(f.call_symbols[call.symbol_first + i]) != 0) { return -1; }
+        i += 1;
+    }
+    if (gen.em_frag("\n") != 0 || arm64_call_adjust_sp(stack_bytes, 1) != 0) { return -1; }
+    if (inst.result_id >= 0) {
+        if (arm64_normalize(f, inst.result_type) != 0
+            || arm64_store_value(f, inst.result_id, "x0") != 0) { return -1; }
+    }
+    return 0;
+}

@@ -1,0 +1,890 @@
+module parse;
+import gen;
+
+// ============================================================================
+// parse_expr.yh —— 自举编译器：表达式解析（语义钩子集成）
+//
+// 覆盖 docs/yh.g4 表达式优先级链（低 → 高）：
+//   三元 ?: → || → && → | → ^ → & → ==/!= → 比较 → 移位 → 加减
+//   → 乘除模 → 一元 → 后缀（调用/下标/.to_type/.成员） → 基本表达式。
+//
+// 语义协议：每个解析函数把结果通过 *Res 出参返回（类型/常量性/字面量
+// 标记）；编译模式同时发码（结果留 x0）。c_fold>0 时只折叠。
+// &&/|| 与三元由解析器配合 sem_* 钩子用标签短路实现。
+//
+// 「结构体字面量 vs 块」消解与 G1 相同：块跟随上下文（for/switch/case
+// 头部）先试探 structInitBody 且配对 '}' 后必须紧跟 '{'，否则回退为块；
+// 编译模式中结构体字面量作为值使用统一拒绝（B5 仅支持 let 直接初始化）。
+// ============================================================================
+
+// parse_expr：表达式入口（= 条件表达式层）。
+pub fn parse_expr(res *gen.Res) int {
+    return parse_ternary(res);
+}
+
+// parse_array_literal：数组/切片字面量 '[' e1, e2, ... ']'。
+// 目标类型取自 c_expect_tid（let 初始化/赋值上下文预先设置）；无上下文
+// 干净拒绝。数组要求元素个数与长度一致；切片按元素个数建 {len, data}
+// 视图。元素先逐个求值压栈，再逆序弹入临时数组（与类型化变参打包同法）。
+pub fn parse_array_literal(res *gen.Res) int {
+    let tid int = gen.c_expect_tid;
+    gen.c_expect_tid = -1;
+    if (gen.c_compile == 0) {
+        // 语法模式：只消费元素 token
+        if (p_cur() != gen.TK_RBRACKET) {
+            for 1 {
+                let d gen.Res;
+                if (parse_expr_iso(&d) != 0) {
+                    return -1;
+                }
+                if (p_cur() == gen.TK_COMMA) {
+                    p_adv();
+                    if (p_cur() == gen.TK_RBRACKET) { break; }
+                    continue;
+                }
+                break;
+            }
+        }
+        return p_expect(gen.TK_RBRACKET, "期望 ']'");
+    }
+    if (tid < 0) {
+        return gen.sem_err("数组/切片字面量需要目标类型上下文（let 初始化或同型赋值）");
+    }
+    let fk int = gen.t_types[tid].kind;
+    if (fk != gen.TY_ARRAY && fk != gen.TY_SLICE) {
+        return gen.sem_err("数组/切片字面量的目标必须是数组或切片类型");
+    }
+    let elem int = gen.t_types[tid].elem;
+    let esz int = gen.t_types[elem].size;
+    // 解析元素并逐个压栈
+    let count int = 0;
+    if (p_cur() != gen.TK_RBRACKET) {
+        for 1 {
+            let e gen.Res;
+            let save_lv int = gen.c_lvalue;
+            gen.c_lvalue = 0;
+            let er int = parse_expr_iso(&e);
+            gen.c_lvalue = save_lv;
+            if (er != 0) {
+                return -1;
+            }
+            if (gen.sem_can_assign(elem, e.type_id, e.is_lit, e.ival, e.lit_big) != 0) {
+                return -1;
+            }
+            if (gen.sem_push_value(&e) != 0) {
+                return -1;
+            }
+            count += 1;
+            if (p_cur() == gen.TK_COMMA) {
+                p_adv();
+                if (p_cur() == gen.TK_RBRACKET) { break; }
+                continue;
+            }
+            break;
+        }
+    }
+    if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) {
+        return -1;
+    }
+    if (fk == gen.TY_ARRAY && count != gen.t_types[tid].len) {
+        return gen.sem_err("数组字面量元素个数与数组长度不一致");
+    }
+    if (gen.c_fold != 0) {
+        return gen.sem_err("数组/切片字面量不是编译期常量");
+    }
+    // 临时数组：逆序弹栈写入（值栈顶是最后一个元素）
+    let asize int = esz * count;
+    let aoff int = 0;
+    if (asize > 0) {
+        aoff = gen.em_alloc_local(asize);
+        let i int = count - 1;
+        for i >= 0 {
+            // 弹出第 i 个元素并写入 aoff + i*esz
+            if (gen.ty_is_float(elem) != 0) {
+                let fsfx *char = "d";
+                if (esz == 4) { fsfx = "s"; }
+                if (gen.em_frag("\tldr\t") != 0) { return -1; }
+                if (gen.em_frag(fsfx) != 0) { return -1; }
+                if (gen.em_frag("0, [sp], #16\n") != 0) { return -1; }
+                if (gen.em_lea_local_to(aoff - i * esz) != 0) { return -1; }
+                if (gen.em_frag("\tstr\t") != 0) { return -1; }
+                if (gen.em_frag(fsfx) != 0) { return -1; }
+                if (gen.em_frag("0, [x10]\n") != 0) { return -1; }
+            } else {
+                if (gen.em_pop("x0") != 0) { return -1; }
+                if (gen.em_lea_local_to(aoff - i * esz) != 0) { return -1; }
+                if (gen.em_store_sized(elem) != 0) { return -1; }
+            }
+            i -= 1;
+        }
+    }
+    // 结果：数组 → 临时数组地址（数组值语义即地址）；
+    //       切片 → {count, &临时} 视图（16 字节临时）
+    if (fk == gen.TY_ARRAY) {
+        if (gen.em_lea_local(aoff) != 0) {
+            return -1;
+        }
+    } else {
+        let voff int = gen.em_alloc_local(gen.TG_LONG_SIZE * 2);
+        if (gen.em_lea_local_to(voff) != 0) { return -1; }
+        if (gen.em_mov_imm("x9", count.to_type(i64)) != 0) { return -1; }
+        if (gen.em_ins("str\tx9, [x10]") != 0) { return -1; }
+        if (gen.em_lea_local(aoff) != 0) { return -1; }
+        if (gen.em_ins("str\tx0, [x10, #8]") != 0) { return -1; }
+        if (gen.em_lea_local_down(voff) != 0) { return -1; }
+    }
+    gen.sem_res_reset(res, tid);
+    res.is_lit = 0;
+    res.is_const = 0;
+    gen.c_res_is_addr = 1;
+    return 0;
+}
+
+// parse_expr_iso：隔离上下文——「IDENT {」恒按结构体字面量处理。
+pub fn parse_expr_iso(res *gen.Res) int {
+    let save int = gen.c_ctx_block;
+    gen.c_ctx_block = 0;
+    let r int = parse_expr(res);
+    gen.c_ctx_block = save;
+    return r;
+}
+
+// parse_expr_blockctx：块跟随上下文——for/switch/case 头部表达式。
+pub fn parse_expr_blockctx(res *gen.Res) int {
+    let save int = gen.c_ctx_block;
+    gen.c_ctx_block = 1;
+    let r int = parse_expr(res);
+    gen.c_ctx_block = save;
+    return r;
+}
+
+// parse_ternary：cond ? a : b（右结合；两支经值栈汇合）。
+pub fn parse_ternary(res *gen.Res) int {
+    if (parse_logical_or(res) != 0) {
+        return -1;
+    }
+    if (p_cur() == gen.TK_QUEST) {
+        p_adv();
+        if (gen.sem_ternary_cond(res) != 0) {
+            return -1;
+        }
+        let mid gen.Res;
+        if (parse_expr(&mid) != 0) {
+            return -1;
+        }
+        if (p_expect(gen.TK_COLON, "期望 ':'") != 0) {
+            return -1;
+        }
+        if (gen.sem_ternary_mid(res) != 0) {
+            return -1;
+        }
+        if (parse_expr(res) != 0) {
+            return -1;
+        }
+        if (gen.sem_ternary_end(res) != 0) {
+            return -1;
+        }
+        gen.sem_res_copy(res, &mid);
+        gen.c_res_is_addr = 0;
+    }
+    return 0;
+}
+
+// parse_logical_or：a || b（短路）。
+pub fn parse_logical_or(res *gen.Res) int {
+    if (parse_logical_and(res) != 0) {
+        return -1;
+    }
+    for p_cur() == gen.TK_OROR {
+        p_adv();
+        if (gen.sem_shortcircuit(gen.TK_OROR, res) != 0) {
+            return -1;
+        }
+        if (parse_logical_and(res) != 0) {
+            return -1;
+        }
+        if (gen.sem_shortcircuit_end(gen.TK_OROR, res) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_logical_and：a && b（短路）。
+pub fn parse_logical_and(res *gen.Res) int {
+    if (parse_bit_or(res) != 0) {
+        return -1;
+    }
+    for p_cur() == gen.TK_ANDAND {
+        p_adv();
+        if (gen.sem_shortcircuit(gen.TK_ANDAND, res) != 0) {
+            return -1;
+        }
+        if (parse_bit_or(res) != 0) {
+            return -1;
+        }
+        if (gen.sem_shortcircuit_end(gen.TK_ANDAND, res) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_bit_or：a | b。
+pub fn parse_bit_or(res *gen.Res) int {
+    if (parse_bit_xor(res) != 0) {
+        return -1;
+    }
+    for p_cur() == gen.TK_PIPE {
+        p_adv();
+        let rhs gen.Res;
+        if (gen.sem_push_value(res) != 0) { return -1; }
+        if (parse_bit_xor(&rhs) != 0) {
+            return -1;
+        }
+        if (gen.sem_binop(gen.TK_PIPE, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_bit_xor：a ^ b。
+pub fn parse_bit_xor(res *gen.Res) int {
+    if (parse_bit_and(res) != 0) {
+        return -1;
+    }
+    for p_cur() == gen.TK_CARET {
+        p_adv();
+        let rhs gen.Res;
+        if (gen.sem_push_value(res) != 0) { return -1; }
+        if (parse_bit_and(&rhs) != 0) {
+            return -1;
+        }
+        if (gen.sem_binop(gen.TK_CARET, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_bit_and：a & b。
+pub fn parse_bit_and(res *gen.Res) int {
+    if (parse_equality(res) != 0) {
+        return -1;
+    }
+    for p_cur() == gen.TK_AMP {
+        p_adv();
+        let rhs gen.Res;
+        if (gen.sem_push_value(res) != 0) { return -1; }
+        if (parse_equality(&rhs) != 0) {
+            return -1;
+        }
+        if (gen.sem_binop(gen.TK_AMP, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_equality：a == b、a != b。
+pub fn parse_equality(res *gen.Res) int {
+    if (parse_relational(res) != 0) {
+        return -1;
+    }
+    for p_cur() == gen.TK_EQEQ || p_cur() == gen.TK_NEQ {
+        let op int = p_cur();
+        p_adv();
+        let rhs gen.Res;
+        if (gen.sem_push_value(res) != 0) { return -1; }
+        if (parse_relational(&rhs) != 0) {
+            return -1;
+        }
+        if (gen.sem_binop(op, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_relational：a < b、<=、>、>=。
+pub fn parse_relational(res *gen.Res) int {
+    if (parse_shift(res) != 0) {
+        return -1;
+    }
+    for p_cur() == gen.TK_LT || p_cur() == gen.TK_LEQ || p_cur() == gen.TK_GT || p_cur() == gen.TK_GEQ {
+        let op int = p_cur();
+        p_adv();
+        let rhs gen.Res;
+        if (gen.sem_push_value(res) != 0) { return -1; }
+        if (parse_shift(&rhs) != 0) {
+            return -1;
+        }
+        if (gen.sem_binop(op, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_shift：a << b、a >> b。
+pub fn parse_shift(res *gen.Res) int {
+    if (parse_additive(res) != 0) {
+        return -1;
+    }
+    for p_cur() == gen.TK_LSHIFT || p_cur() == gen.TK_RSHIFT {
+        let op int = p_cur();
+        p_adv();
+        let rhs gen.Res;
+        if (gen.sem_push_value(res) != 0) { return -1; }
+        if (parse_additive(&rhs) != 0) {
+            return -1;
+        }
+        if (gen.sem_binop(op, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_additive：a + b、a - b（含指针 ± 整数）。
+pub fn parse_additive(res *gen.Res) int {
+    if (parse_multiplicative(res) != 0) {
+        return -1;
+    }
+    for p_cur() == gen.TK_PLUS || p_cur() == gen.TK_MINUS {
+        let op int = p_cur();
+        p_adv();
+        let rhs gen.Res;
+        if (gen.sem_push_value(res) != 0) { return -1; }
+        if (parse_multiplicative(&rhs) != 0) {
+            return -1;
+        }
+        if (gen.sem_binop(op, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_multiplicative：a * b、a / b、a % b。
+pub fn parse_multiplicative(res *gen.Res) int {
+    if (parse_unary(res) != 0) {
+        return -1;
+    }
+    for p_cur() == gen.TK_STAR || p_cur() == gen.TK_SLASH || p_cur() == gen.TK_PERCENT {
+        let op int = p_cur();
+        p_adv();
+        let rhs gen.Res;
+        if (gen.sem_push_value(res) != 0) { return -1; }
+        if (parse_unary(&rhs) != 0) {
+            return -1;
+        }
+        if (gen.sem_binop(op, res, &rhs) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// parse_unary：一元运算（可嵌套；后缀优先于一元）。
+// AMP 取地址：操作数按 lvalue 解析出地址；STAR 解引用：操作数恒按值
+// 解析（得到指针值），结果作为地址参与外层（c_lvalue 语义由钩子处理）。
+pub fn parse_unary(res *gen.Res) int {
+    let k int = p_cur();
+    if (k == gen.TK_MINUS || k == gen.TK_PLUS || k == gen.TK_BANG || k == gen.TK_TILDE) {
+        p_adv();
+        if (parse_unary(res) != 0) {
+            return -1;
+        }
+        return gen.sem_unary(k, res);
+    }
+    if (k == gen.TK_STAR) {
+        p_adv();
+        let save int = gen.c_lvalue;
+        gen.c_lvalue = 0;
+        let r int = parse_unary(res);
+        gen.c_lvalue = save;
+        if (r != 0) {
+            return -1;
+        }
+        return gen.sem_unary(gen.TK_STAR, res);
+    }
+    if (k == gen.TK_AMP) {
+        p_adv();
+        let save2 int = gen.c_lvalue;
+        gen.c_lvalue += 1;
+        let r2 int = parse_unary(res);
+        gen.c_lvalue = save2;
+        if (r2 != 0) {
+            return -1;
+        }
+        return gen.sem_unary(gen.TK_AMP, res);
+    }
+    return parse_postfix(res);
+}
+
+// parse_postfix：后缀链：调用、下标、.to_type(T)、.成员。
+pub fn parse_postfix(res *gen.Res) int {
+    if (parse_primary(res) != 0) {
+        return -1;
+    }
+    for 1 {
+        let k int = p_cur();
+        if (k == gen.TK_LPAREN) {
+            // 调用：实参表为行内列表，不允许尾逗号
+            p_adv();
+            let direct int = gen.sem_call_begin(res);
+            if (direct < 0) {
+                return -1;
+            }
+            // 直接调用：以形参类型作为实参数组/切片字面量的目标上下文。
+            // 仅编译模式：语法模式 t_types 未初始化（NULL），不可访问；
+            // 且须校验 FN 类型，否则非函数被调者的 sub（字段表起点）
+            // 会被误当签名号。
+            let sig int = -1;
+            let np int = 0;
+            if (direct == 1 && gen.c_compile != 0 && res.type_id >= 0) {
+                if (gen.t_types[res.type_id].kind == gen.TY_FN) {
+                    sig = gen.t_types[res.type_id].sub;
+                    np = gen.t_sig_np[sig];
+                }
+            }
+            let argi int = 0;
+            if (p_cur() != gen.TK_RPAREN) {
+                for 1 {
+                    let arg gen.Res;
+                    let save_exp2 int = gen.c_expect_tid;
+                    if (sig >= 0 && argi < np) {
+                        gen.c_expect_tid = gen.t_sig_params[gen.t_sig_first[sig] + argi];
+                    }
+                    let pr int = parse_expr_iso(&arg);
+                    gen.c_expect_tid = save_exp2;
+                    if (pr != 0) {
+                        return -1;
+                    }
+                    argi += 1;
+                    if (gen.sem_push_arg(&arg) != 0) {
+                        return -1;
+                    }
+                    if (p_cur() == gen.TK_COMMA) {
+                        p_adv();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+                return -1;
+            }
+            if (gen.sem_call(res, res) != 0) {
+                return -1;
+            }
+            continue;
+        }
+        if (k == gen.TK_LBRACKET) {
+            // 下标 / 切片表达式：基址压栈 → 首个下标表达式（恒为值，
+            // 清 c_lvalue）→ 遇 '..' 为切片形态（再解析终点），否则普通下标
+            p_adv();
+            if (gen.sem_push_value(res) != 0) { return -1; }
+            let idx gen.Res;
+            let save_lv int = gen.c_lvalue;
+            gen.c_lvalue = 0;
+            let ir int = parse_expr(&idx);
+            gen.c_lvalue = save_lv;
+            if (ir != 0) {
+                return -1;
+            }
+            if (p_cur() == gen.TK_RANGE) {
+                // base[start..end]：start 压栈后解析 end（值在 x0）
+                p_adv();
+                if (gen.sem_push_value(&idx) != 0) { return -1; }
+                let eidx gen.Res;
+                gen.c_lvalue = 0;
+                let er int = parse_expr(&eidx);
+                gen.c_lvalue = save_lv;
+                if (er != 0) {
+                    return -1;
+                }
+                if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) {
+                    return -1;
+                }
+                if (gen.sem_slice(res, &idx, &eidx) != 0) {
+                    return -1;
+                }
+                continue;
+            }
+            if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) {
+                return -1;
+            }
+            if (gen.sem_index(res, &idx) != 0) {
+                return -1;
+            }
+            continue;
+        }
+        if (k == gen.TK_DOT) {
+            p_adv();
+            if (p_cur() == gen.TK_TO_TYPE) {
+                // .to_type(T)：参数是类型引用而非表达式
+                p_adv();
+                if (p_expect(gen.TK_LPAREN, "期望 '('") != 0) {
+                    return -1;
+                }
+                let tid int = parse_type_ref();
+                if (tid < 0) {
+                    return -1;
+                }
+                if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+                    return -1;
+                }
+                if (gen.sem_cast(res, tid) != 0) {
+                    return -1;
+                }
+                continue;
+            }
+            if (is_member_name(p_cur()) != 0) {
+                let start int = gen.c_toks[gen.c_pos].start;
+                let n int = gen.c_toks[gen.c_pos].len;
+                p_adv();
+                if (gen.sem_member(res, start, n) != 0) {
+                    return -1;
+                }
+                continue;
+            }
+            return gen.err_tok("'.' 之后需要一个成员名");
+        }
+        break;
+    }
+    return 0;
+}
+
+// parse_primary：基本表达式。进入时重置地址标记。
+pub fn parse_primary(res *gen.Res) int {
+    gen.c_res_is_addr = 0;
+    let k int = p_cur();
+    // 当前 token 的源区间（各字面量分支共用；stage0 同级块禁同名局部）
+    let start int = gen.c_toks[gen.c_pos].start;
+    let n int = gen.c_toks[gen.c_pos].len;
+    if (k == gen.TOK_NUMBER) {
+        p_adv();
+        return gen.sem_number(start, n, res);
+    }
+    if (k == gen.TOK_STRING) {
+        p_adv();
+        return gen.sem_string(start, n, res);
+    }
+    if (k == gen.TOK_CHAR) {
+        p_adv();
+        return gen.sem_char(start, n, res);
+    }
+    if (k == gen.TK_TRUE) {
+        p_adv();
+        return gen.sem_bool(1, res);
+    }
+    if (k == gen.TK_FALSE) {
+        p_adv();
+        return gen.sem_bool(0, res);
+    }
+    if (k == gen.TK_LPAREN) {
+        p_adv();
+        if (parse_expr_iso(res) != 0) {
+            return -1;
+        }
+        return p_expect(gen.TK_RPAREN, "期望 ')'");
+    }
+    if (k == gen.TK_SIZEOF) {
+        p_adv();
+        if (p_expect(gen.TK_LPAREN, "期望 '('") != 0) {
+            return -1;
+        }
+        if (sizeof_starts_type() != 0) {
+            // sizeof(T)：编译期类型大小
+            let tid int = parse_type_ref();
+            if (tid < 0) {
+                return -1;
+            }
+            if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+                return -1;
+            }
+            return gen.sem_sizeof(tid, res);
+        }
+        // sizeof(expr)：发射层静默求型（表达式不求值、不发码），
+        // 取结果类型的大小。同型名的场景类型优先。
+        gen.c_em_suppress += 1;
+        let er gen.Res;
+        let ererr int = parse_expr_iso(&er);
+        gen.c_em_suppress -= 1;
+        if (ererr != 0) {
+            return -1;
+        }
+        if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+            return -1;
+        }
+        return gen.sem_sizeof(er.type_id, res);
+    }
+    if (k == gen.TK_LEN) {
+        p_adv();
+        if (p_expect(gen.TK_LPAREN, "期望 '('") != 0) {
+            return -1;
+        }
+        if (parse_expr_iso(res) != 0) {
+            return -1;
+        }
+        if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+            return -1;
+        }
+        return gen.sem_len(res);
+    }
+    if (k == gen.TK_LBRACKET) {
+        // 数组/切片字面量（目标类型来自 let 初始化/赋值上下文）
+        p_adv();
+        return parse_array_literal(res);
+    }
+    if (k == gen.TOK_IDENT) {
+        return parse_ident_primary(res);
+    }
+    return gen.err_tok("此处需要一个表达式");
+}
+
+// parse_ident_primary：标识符作为基本表达式（含结构体字面量决策与
+// 模块限定名分派）。
+pub fn parse_ident_primary(res *gen.Res) int {
+    // 注意：stage0 中 if/while 体不开新词法作用域，同名局部必须提升到函数级
+    let istart int = gen.c_toks[gen.c_pos].start;
+    let ilen int = gen.c_toks[gen.c_pos].len;
+    // 模块限定名（编译模式）：名字解析失败且是当前文件的导入绑定
+    //（局部声明按词法作用域遮蔽导入）。语法模式不解析（U1 行为）。
+    if (gen.c_compile != 0 && gen.c_module_mode != 0 && p_peek(1) == gen.TK_DOT && p_peek(2) == gen.TOK_IDENT) {
+        if (gen.sym_lookup(istart, ilen) < 0) {
+            let b int = gen.mod_file_binding(istart, ilen);
+            if (b >= 0) {
+                // m.T { …：限定结构体字面量（仅非块跟随上下文）
+                if (p_peek(3) == gen.TK_LBRACE && gen.c_ctx_block == 0) {
+                    return parse_module_struct_lit(res, b);
+                }
+                return parse_module_qualified(res, b, 0);
+            }
+        }
+    }
+    if (p_peek(1) == gen.TK_LBRACE) {
+        if (gen.c_ctx_block != 0) {
+            if (try_struct_init() == 0) {
+                return parse_struct_init_forced(res);
+            }
+            // 回退：该 '{' 是 for/switch/case 体，标识符保持裸形式
+            p_adv();
+            return gen.sem_ident(istart, ilen, res);
+        }
+        return parse_struct_init_forced(res);
+    }
+    p_adv();
+    return gen.sem_ident(istart, ilen, res);
+}
+
+// parse_module_qualified：m.member 的模块成员访问（消费 m . member）。
+// 命名空间命中后按普通名字求值（跨模块符号已带后缀且为外部引用）；
+// 未使用的导入在此标记。want_type=0。
+pub fn parse_module_qualified(res *gen.Res, mi int, unused int) int {
+    p_adv(); // 绑定名
+    p_adv(); // '.'
+    let mstart int = gen.c_toks[gen.c_pos].start;
+    let mlen int = gen.c_toks[gen.c_pos].len;
+    let mline int = gen.c_toks[gen.c_pos].line;
+    let mcol int = gen.c_toks[gen.c_pos].col;
+    p_adv();
+    let e int = gen.mod_ns_lookup(mi, mstart, mlen, 0);
+    if (e < 0) {
+        return gen.err_lc(mline, mcol, "模块没有导出该名字（或它是类型名不能作值）");
+    }
+    // 标记导入已使用（未使用导入检查在文件编译完后做）
+    let i int = 0;
+    for i < gen.mod_import_n {
+        if (gen.mod_import_mod[i] == mi) {
+            gen.mod_import_used[i] = 1;
+            break;
+        }
+        i += 1;
+    }
+    return gen.sem_ident_val(gen.c_mods[mi].ns[e].sym, res);
+}
+
+// parse_module_struct_lit：m.T { … } 限定结构体字面量（消费 m . T）。
+// tid 来自接口命名空间；构造检查与本地类型一致（跨模块私有字段拒绝）。
+pub fn parse_module_struct_lit(res *gen.Res, mi int) int {
+    p_adv();
+    p_adv();
+    let tstart int = gen.c_toks[gen.c_pos].start;
+    let tlen int = gen.c_toks[gen.c_pos].len;
+    let tline int = gen.c_toks[gen.c_pos].line;
+    let tcol int = gen.c_toks[gen.c_pos].col;
+    p_adv();
+    let e int = gen.mod_ns_lookup(mi, tstart, tlen, 1);
+    if (e < 0) {
+        return gen.err_lc(tline, tcol, "模块没有导出该类型");
+    }
+    let tid int = gen.c_mods[mi].ns[e].tid;
+    let i int = 0;
+    for i < gen.mod_import_n {
+        if (gen.mod_import_mod[i] == mi) {
+            gen.mod_import_used[i] = 1;
+            break;
+        }
+        i += 1;
+    }
+    return parse_struct_init_tid(tid, res);
+}
+
+// try_struct_init：试探「IDENT { structInitBody }」成立且其后紧跟 '{'。
+pub fn try_struct_init() int {
+    let save int = gen.c_pos;
+    let save_fold int = gen.c_fold;
+    let save_lit_off int = gen.c_lit_off;
+    let save_fp int = gen.c_fp_off;
+    gen.c_spec += 1;
+    // 试探期只做语法判定：禁发码、禁分配槽（c_fold>0 让语义钩子短路）
+    if (gen.c_compile != 0) {
+        gen.c_fold += 1;
+    }
+    let dummy gen.Res;
+    let r int = parse_struct_init_forced(&dummy);
+    let ok int = 0;
+    if (r == 0 && p_cur() == gen.TK_LBRACE) {
+        ok = 1;
+    }
+    if (gen.c_compile != 0) {
+        gen.c_fold -= 1;
+    }
+    gen.c_spec -= 1;
+    gen.c_pos = save;
+    gen.c_fold = save_fold;
+    gen.c_lit_off = save_lit_off;
+    gen.c_fp_off = save_fp;
+    if (ok == 1) {
+        return 0;
+    }
+    return -1;
+}
+
+// parse_struct_init_forced：结构体字面量：IDENT '{' body '}'。
+// 编译模式：作为值使用统一拒绝（B5 只支持 let 直接初始化路径）。
+pub fn parse_struct_init_forced(res *gen.Res) int {
+    // 结构体字面量：IDENT '{' body '}'
+    // 语法模式只消费 token；编译模式在临时槽构造聚合值，地址留 x0。
+    let start int = gen.c_toks[gen.c_pos].start;
+    let nlen int = gen.c_toks[gen.c_pos].len;
+    p_adv();
+    let tid int = 0;
+    if (gen.c_compile != 0) {
+        if (gen.c_fold != 0) {
+            return gen.sem_err("结构体字面量不是编译期常量");
+        }
+        tid = gen.ty_lookup_name(start, nlen);
+        if (tid < 0) {
+            return gen.sem_err("未知类型（结构体字面量）");
+        }
+        let tk int = gen.t_types[tid].kind;
+        if (tk != gen.TY_STRUCT && tk != gen.TY_UNION) {
+            return gen.sem_err("结构体字面量需要一个 struct/union 类型名");
+        }
+    }
+    return parse_struct_init_tid(tid, res);
+}
+
+// parse_struct_init_tid：按给定类型构造结构体字面量（'{ … }' 由本函数
+// 消费；本地路径与模块限定路径共用）。
+pub fn parse_struct_init_tid(tid int, res *gen.Res) int {
+    if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
+        return -1;
+    }
+    if (gen.c_compile != 0) {
+        let named int = 0;
+        if (is_member_name(p_cur()) != 0 && p_peek(1) == gen.TK_COLON) {
+            named = 1;
+        }
+        if (gen.sem_struct_lit_begin(tid, named) < 0) {
+            return -1;
+        }
+    }
+    if (parse_struct_init_body() != 0) {
+        return -1;
+    }
+    if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
+        return -1;
+    }
+    if (gen.c_compile != 0) {
+        if (gen.sem_struct_lit_end(tid) != 0) {
+            return -1;
+        }
+        gen.sem_res_reset(res, tid);
+    }
+    return 0;
+}
+
+// parse_struct_init_body：字面量体（'{' 与 '}' 由调用方处理）。
+// 强制非空；首元素第二个 token 为 ':' 即命名式；不得混写；允许尾逗号。
+pub fn parse_struct_init_body() int {
+    if (p_cur() == gen.TK_RBRACE) {
+        return gen.err_tok("结构体字面量不能为空");
+    }
+    let named int = 0;
+    if (is_member_name(p_cur()) != 0 && p_peek(1) == gen.TK_COLON) {
+        named = 1;
+    }
+    let fv gen.Res;
+    let fpos int = 0;
+    for 1 {
+        let fidx int = -1;
+        if (named != 0) {
+            if (is_member_name(p_cur()) == 0) {
+                return gen.err_tok("命名式字面量需要字段名");
+            }
+            if (gen.c_compile != 0 && gen.c_fold == 0) {
+                let fs int = gen.c_toks[gen.c_pos].start;
+                let fl int = gen.c_toks[gen.c_pos].len;
+                fidx = gen.sem_lit_field_lookup(gen.c_lit_tid, fs, fl);
+                if (fidx < 0) {
+                    return gen.sem_err("结构体没有该字段");
+                }
+                // 跨模块命名式构造只可填写 pub 字段（省略的按零初始化）
+                if (gen.c_module_mode != 0 && gen.t_home[gen.c_lit_tid] >= 0 && gen.t_fields[fidx].is_pub == 0) {
+                    return gen.sem_err("跨模块不能初始化私有字段（声明处未加 pub）");
+                }
+            }
+            p_adv();
+            if (p_expect(gen.TK_COLON, "期望 ':'") != 0) {
+                return -1;
+            }
+            if (parse_expr_iso(&fv) != 0) {
+                return -1;
+            }
+        } else {
+            if (gen.c_compile != 0 && gen.c_fold == 0) {
+                if (fpos >= gen.t_types[gen.c_lit_tid].len) {
+                    return gen.sem_err("位置式字面量字段过多");
+                }
+                fidx = gen.t_types[gen.c_lit_tid].sub + fpos;
+                fpos += 1;
+            }
+            if (parse_expr_iso(&fv) != 0) {
+                return -1;
+            }
+        }
+        if (gen.c_compile != 0 && gen.c_fold == 0) {
+            gen.c_lit_last_type = fv.type_id;
+            gen.c_lit_last_lit = fv.is_lit;
+            gen.c_lit_last_ival = fv.ival;
+            if (gen.sem_struct_lit_field(gen.c_lit_tid, fidx) != 0) {
+                return -1;
+            }
+        }
+        if (p_cur() == gen.TK_COMMA) {
+            p_adv();
+            if (p_cur() == gen.TK_RBRACE) {
+                break;
+            }
+            continue;
+        }
+        break;
+    }
+    return 0;
+}

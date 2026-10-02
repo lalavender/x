@@ -57,12 +57,30 @@ pub fn sem_check_cond(r *gen.Res) int {
 
 // parse_block：'{' stmt* '}'。
 pub fn parse_block() int {
+    let own_ast int = 0;
+    let block_ast int = -1;
+    let top_root int = 0;
+    if (gen.c_ast_capture != 0) {
+        if (ast_stmt_current < 0 || ast_stmt_nodes[ast_stmt_current].kind != AST_STMT_BLOCK
+            || ast_stmt_nodes[ast_stmt_current].first != gen.c_pos) {
+            own_ast = 1;
+            if (ast_stmt_current < 0) { top_root = 1; }
+            block_ast = ast_stmt_begin(AST_STMT_BLOCK, gen.TK_LBRACE, gen.c_pos);
+            if (block_ast < 0) { return -1; }
+        }
+    }
     if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
         return -1;
     }
     gen.scope_push();
     for p_cur() != gen.TK_RBRACE && p_cur() != gen.TOK_EOF {
-        if (parse_stmt() != 0) {
+        let stmt_result int = 0;
+        if (gen.c_ast_capture != 0) {
+            stmt_result = parse_stmt_capture();
+        } else {
+            stmt_result = parse_stmt();
+        }
+        if (stmt_result != 0) {
             return -1;
         }
     }
@@ -70,10 +88,50 @@ pub fn parse_block() int {
         return -1;
     }
     gen.scope_pop();
+    if (own_ast != 0 && ast_stmt_end(block_ast, gen.c_pos) != 0) {
+        return -1;
+    }
+    if (own_ast != 0 && top_root != 0 && gen.c_file_decl_i >= 0
+        && ast_decl_attach_body(gen.c_active_file, gen.c_file_decl_i, block_ast) != 0) {
+        return -1;
+    }
     return 0;
 }
 
-// parse_stmt：语句分发。
+// parse_stmt_capture：仅供 check worker 包装一条语句并记录 AST 范围。
+pub fn parse_stmt_capture() int {
+    let first int = gen.c_pos;
+    let op int = p_cur();
+    let kind int = AST_STMT_EXPR;
+    if (op == gen.TK_LBRACE) { kind = AST_STMT_BLOCK; }
+    if (op == gen.TK_LET || op == gen.TK_CONST) { kind = AST_STMT_DECL; }
+    if (op == gen.TK_STRUCT || op == gen.TK_UNION || op == gen.TK_ENUM
+        || op == gen.TK_TYPE) { kind = AST_STMT_TYPE; }
+    if (op == gen.TK_IF) { kind = AST_STMT_IF; }
+    if (op == gen.TK_FOR) { kind = AST_STMT_FOR; }
+    if (op == gen.TK_SWITCH) { kind = AST_STMT_SWITCH; }
+    if (op == gen.TK_RETURN) { kind = AST_STMT_RETURN; }
+    if (op == gen.TK_BREAK) { kind = AST_STMT_BREAK; }
+    if (op == gen.TK_CONTINUE) { kind = AST_STMT_CONTINUE; }
+    if (op == gen.TK_GOTO) { kind = AST_STMT_GOTO; }
+    if (op == gen.TOK_IDENT && p_peek(1) == gen.TK_COLON) {
+        kind = AST_STMT_LABEL;
+    } else if (kind == AST_STMT_EXPR) {
+        let assign_op int = scan_assign_ahead();
+        if (assign_op != 0) {
+            kind = AST_STMT_ASSIGN;
+            op = assign_op;
+        }
+    }
+    let id int = ast_stmt_begin(kind, op, first);
+    if (id < 0) { return -1; }
+    if (parse_stmt() != 0) {
+        return -1;
+    }
+    return ast_stmt_end(id, gen.c_pos);
+}
+
+// parse_stmt：按首 token 分派语句并调用现有语义钩子。
 pub fn parse_stmt() int {
     let k int = p_cur();
     if (k == gen.TK_LBRACE) {
@@ -145,6 +203,9 @@ pub fn parse_stmt() int {
         p_adv();
         if (gen.sem_deflabel(lstart, llen) != 0) {
             return -1;
+        }
+        if (gen.c_ast_capture != 0) {
+            return parse_stmt_capture();
         }
         return parse_stmt();
     }
@@ -274,7 +335,13 @@ pub fn parse_if() int {
             }
         }
         if (p_cur() == gen.TK_IF) {
-            if (parse_if() != 0) {
+            let nested_if_result int = 0;
+            if (gen.c_ast_capture != 0) {
+                nested_if_result = parse_stmt_capture();
+            } else {
+                nested_if_result = parse_stmt();
+            }
+            if (nested_if_result != 0) {
                 return -1;
             }
         } else {
@@ -339,20 +406,25 @@ pub fn parse_for() int {
             // 解析绑定：for v in ...  或 for i, v in ...
             let idx_start int = -1;
             let idx_len int = -1;
+            let idx_token int = -1;
             let elem_start int = -1;
             let elem_len int = -1;
+            let elem_token int = -1;
             if (p_peek(1) == gen.TK_IN) {
                 // 只有元素绑定
+                elem_token = gen.c_pos;
                 elem_start = gen.c_toks[gen.c_pos].start;
                 elem_len = gen.c_toks[gen.c_pos].len;
                 p_adv();
                 p_adv();
             } else {
                 // 下标 + 元素绑定
+                idx_token = gen.c_pos;
                 idx_start = gen.c_toks[gen.c_pos].start;
                 idx_len = gen.c_toks[gen.c_pos].len;
                 p_adv();
                 p_adv();
+                elem_token = gen.c_pos;
                 elem_start = gen.c_toks[gen.c_pos].start;
                 elem_len = gen.c_toks[gen.c_pos].len;
                 p_adv();
@@ -409,11 +481,17 @@ pub fn parse_for() int {
                 let etid int = gen.sem_forin_elem_type(&it, is_range);
                 let esym int = gen.sem_declare_local(elem_start, elem_len, etid);
                 if (esym < 0) { return -1; }
+                if (gen.c_ast_capture != 0 && ast_binding_add(esym, elem_token, 0) != 0) {
+                    return -1;
+                }
                 eoff = gen.c_syms[esym].offset;
             }
             if (idx_start >= 0) {
                 let isym int = gen.sem_declare_local(idx_start, idx_len, gen.TY_I32);
                 if (isym < 0) { return -1; }
+                if (gen.c_ast_capture != 0 && ast_binding_add(isym, idx_token, 0) != 0) {
+                    return -1;
+                }
                 ioff = gen.c_syms[isym].offset;
             }
             if (gen.sem_forin_set_bind(eoff, ioff) != 0) { return -1; }
@@ -499,6 +577,11 @@ pub fn parse_switch() int {
     let lbl_end int = gen.em_new_label();
     let ncases int = 0;
     for p_cur() == gen.TK_CASE || p_cur() == gen.TK_DEFAULT {
+        let case_ast int = -1;
+        if (gen.c_ast_capture != 0) {
+            case_ast = ast_stmt_begin(AST_STMT_CASE, p_cur(), gen.c_pos);
+            if (case_ast < 0) { return -1; }
+        }
         let body_lbl int = gen.em_new_label();
         let skip_lbl int = gen.em_new_label();
         let is_case int = (p_cur() == gen.TK_CASE).to_type(int);
@@ -584,6 +667,9 @@ pub fn parse_switch() int {
                     return -1;
                 }
             }
+        }
+        if (gen.c_ast_capture != 0 && ast_stmt_end(case_ast, gen.c_pos) != 0) {
+            return -1;
         }
     }
     if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {

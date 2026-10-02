@@ -1,0 +1,524 @@
+module main;
+import gen;
+
+// ============================================================================
+// toml.yh —— project.toml 最小 TOML 解析器（MOD-U2）
+//
+// 覆盖清单 schema（设计 §4）所需的 TOML 1.0 子集：
+//   * 节头 [name]；裸键 [A-Za-z0-9_-]+；
+//   * 值：基本字符串 "…"（转义 \\ \" \n \r \t）、字面量字符串 '…'、
+//     整数、内联表 { k = v, ... }（值限字符串）；
+//   * 注释 # 到行尾；空白含换行。
+// 其余 TOML 形态（多行字符串、数组、日期、点键、[[数组表]]）一律
+// 语法报错——清单用不到，报错比静默误读安全。
+//
+// 解析结果存入 toml_secs（节 → 键值表）；schema 校验（允许键、类型、
+// 必填）由 project.yh 负责，本文件只做语法与「值形态」判定。
+// 诊断格式 <toml路径>:<line>: 错误: <msg>，由 tml_err 输出（project.toml
+// 不是 yh 源码，不走 err_lc/c_path）。
+// ============================================================================
+
+// —— 解析结果表（进程内一次构建共用，不释放） ——
+pub struct TomlVal {
+    pub key_off int;        // 键名池偏移
+    pub key_len int;
+    pub kind int;           // 1=字符串 2=内联表 3=整数
+    pub sval_off int;       // 字符串值池偏移（kind==1）
+    pub sval_len int;
+    pub ival int;           // 整数值（kind==3）
+    pub path_off int;       // 内联表内 path 键的值池偏移（kind==2，-1 无）
+    pub path_len int;
+    pub line int;           // 键所在行（1 基）
+}
+pub struct TomlSec {
+    pub name_off int;       // 节名池偏移
+    pub name_len int;
+    pub vals *TomlVal;      // 键值表（堆分配）
+    pub val_n int;
+    pub val_cap int;
+    pub line int;           // 节头行
+}
+pub let toml_secs *TomlSec = 0;
+pub let toml_sec_n int = 0;
+pub let toml_sec_cap int = 0;
+
+// —— 解析游标与诊断上下文 ——
+pub let t_src *u8 = 0;          // project.toml 字节
+pub let t_len int = 0;
+pub let t_pos int = 0;          // 当前字节下标
+pub let t_line int = 1;         // 当前行号
+pub let t_file *char = 0;       // 诊断用清单路径（借调用方，不复制）
+
+// tml_err：project.toml 诊断（带行号，无列——TOML 错误按行报告足够定位）。
+pub fn tml_err(line int, msg *char) int {
+    let buf [512]u8;
+    let n int = 0;
+    n = gen.append_str(buf, n, t_file);
+    n = gen.append_byte(buf, n, ':');
+    n = gen.append_int(buf, n, line);
+    n = gen.append_str(buf, n, ": 错误: ");
+    n = gen.append_str(buf, n, msg);
+    n = gen.append_byte(buf, n, '\n');
+    gen.write_all(2, buf, n);
+    return -1;
+}
+
+// tml_intern：把 [start,start+n) 字节 intern 进名字池并带 NUL（调试用）。
+pub fn tml_intern(start int, n int) int {
+    let off int = gen.np_len;
+    let i int = 0;
+    // name_intern 从 c_src 取字节；project.toml 不在 c_src，手工入池
+    let need int = gen.np_len + n + 1;
+    if (need > gen.np_cap) {
+        let ncap int = gen.np_cap * 2;
+        if (ncap < need) {
+            ncap = need;
+        }
+        let nd *u8 = malloc(ncap.to_type(u64)).to_type(*u8);
+        if (nd == 0) {
+            gen.fail("内存分配失败");
+            return -1;
+        }
+        if (gen.np_len > 0) {
+            memcpy(nd, gen.np_data, gen.np_len.to_type(u64));
+        }
+        free(gen.np_data);
+        gen.np_data = nd;
+        gen.np_cap = ncap;
+    }
+    for i < n {
+        gen.np_data[gen.np_len] = t_src[start + i];
+        gen.np_len += 1;
+        i += 1;
+    }
+    gen.np_data[gen.np_len] = 0;
+    gen.np_len += 1;
+    return off;
+}
+
+// tml_ws：跳过空白、注释与换行（维护行号）。
+pub fn tml_ws() void {
+    for t_pos < t_len {
+        let b u8 = t_src[t_pos];
+        if (b == ' ' || b == '\t' || b == '\r') {
+            t_pos += 1;
+            continue;
+        }
+        if (b == '\n') {
+            t_pos += 1;
+            t_line += 1;
+            continue;
+        }
+        if (b == '#') {
+            for t_pos < t_len && t_src[t_pos] != '\n' {
+                t_pos += 1;
+            }
+            continue;
+        }
+        break;
+    }
+}
+
+// tml_is_bare：裸键字节。
+pub fn tml_is_bare(b u8) int {
+    if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+        || (b >= '0' && b <= '9') || b == '_' || b == '-') {
+        return 1;
+    }
+    return 0;
+}
+
+// tml_sec_find：按名查节；没有返回 -1。
+pub fn tml_sec_find(name_off int, name_len int) int {
+    let i int = 0;
+    for i < toml_sec_n {
+        if (toml_secs[i].name_len == name_len
+            && gen.np_data[toml_secs[i].name_off] == gen.np_data[name_off]) {
+            // 节名较短，逐字节比较
+            let match int = 1;
+            let j int = 1;
+            for j < name_len {
+                if (gen.np_data[toml_secs[i].name_off + j] != gen.np_data[name_off + j]) {
+                    match = 0;
+                    break;
+                }
+                j += 1;
+            }
+            if (match != 0) {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// tml_sec_push：追加一个节（同名节重复报错）。
+pub fn tml_sec_push(name_start int, name_len int) int {
+    let off int = tml_intern(name_start, name_len);
+    if (off < 0) {
+        return -1;
+    }
+    if (tml_sec_find(off, name_len) >= 0) {
+        return tml_err(t_line, "重复的节");
+    }
+    if (toml_sec_n == toml_sec_cap) {
+        let ncap int = toml_sec_cap * 2;
+        if (ncap == 0) {
+            ncap = 8;
+        }
+        let nd *TomlSec = malloc((ncap * sizeof(TomlSec)).to_type(u64)).to_type(*TomlSec);
+        if (nd == 0) {
+            return gen.fail("内存分配失败");
+        }
+        if (toml_sec_n > 0) {
+            memcpy(nd, toml_secs, (toml_sec_n * sizeof(TomlSec)).to_type(u64));
+        }
+        free(toml_secs);
+        toml_secs = nd;
+        toml_sec_cap = ncap;
+    }
+    toml_secs[toml_sec_n].name_off = off;
+    toml_secs[toml_sec_n].name_len = name_len;
+    toml_secs[toml_sec_n].vals = 0;
+    toml_secs[toml_sec_n].val_n = 0;
+    toml_secs[toml_sec_n].val_cap = 0;
+    toml_secs[toml_sec_n].line = t_line;
+    toml_sec_n += 1;
+    return toml_sec_n - 1;
+}
+
+// tml_val_push：向节追加键值。
+pub fn tml_val_push(sec int, v *TomlVal) int {
+    if (toml_secs[sec].val_n == toml_secs[sec].val_cap) {
+        let ncap int = toml_secs[sec].val_cap * 2;
+        if (ncap == 0) {
+            ncap = 8;
+        }
+        let nd *TomlVal = malloc((ncap * sizeof(TomlVal)).to_type(u64)).to_type(*TomlVal);
+        if (nd == 0) {
+            return gen.fail("内存分配失败");
+        }
+        if (toml_secs[sec].val_n > 0) {
+            memcpy(nd, toml_secs[sec].vals, (toml_secs[sec].val_n * sizeof(TomlVal)).to_type(u64));
+        }
+        free(toml_secs[sec].vals);
+        toml_secs[sec].vals = nd;
+        toml_secs[sec].val_cap = ncap;
+    }
+    let dst int = toml_secs[sec].val_n;
+    toml_secs[sec].vals[dst].key_off = v.key_off;
+    toml_secs[sec].vals[dst].key_len = v.key_len;
+    toml_secs[sec].vals[dst].kind = v.kind;
+    toml_secs[sec].vals[dst].sval_off = v.sval_off;
+    toml_secs[sec].vals[dst].sval_len = v.sval_len;
+    toml_secs[sec].vals[dst].ival = v.ival;
+    toml_secs[sec].vals[dst].path_off = v.path_off;
+    toml_secs[sec].vals[dst].path_len = v.path_len;
+    toml_secs[sec].vals[dst].line = v.line;
+    toml_secs[sec].val_n += 1;
+    return 0;
+}
+
+// tml_string：解析一个字符串值（基本或字面量），intern 后写 out 偏移。
+// 返回 0 成功；语法错误 -1。
+pub fn tml_string(v *TomlVal) int {
+    let q u8 = t_src[t_pos];
+    let start int = t_pos + 1;
+    t_pos += 1;
+    if (q == '\'') {
+        // 字面量字符串：无转义，到下一个 '
+        for t_pos < t_len && t_src[t_pos] != '\'' {
+            if (t_src[t_pos] == '\n') {
+                return tml_err(v.line, "字符串未终结");
+            }
+            t_pos += 1;
+        }
+        if (t_pos >= t_len) {
+            return tml_err(v.line, "字符串未终结");
+        }
+        v.kind = 1;
+        v.sval_off = gen.tml_intern_str(t_src, start, t_pos - start);
+        v.sval_len = t_pos - start;
+        t_pos += 1;
+        return 0;
+    }
+    // 基本字符串：转义处理进小缓冲再入池（清单字符串都很短）
+    let tmp [512]u8;
+    let n int = 0;
+    for t_pos < t_len {
+        let b u8 = t_src[t_pos];
+        if (b == '"') {
+            v.kind = 1;
+            v.sval_off = gen.tml_intern_str(tmp, 0, n);
+            v.sval_len = n;
+            t_pos += 1;
+            return 0;
+        }
+        if (b == '\n') {
+            return tml_err(v.line, "字符串未终结");
+        }
+        if (b == '\\') {
+            if (t_pos + 1 >= t_len) {
+                return tml_err(v.line, "转义序列不完整");
+            }
+            let e u8 = t_src[t_pos + 1];
+            t_pos += 2;
+            if (e == 'n') { tmp[n] = 10; n += 1; continue; }
+            if (e == 't') { tmp[n] = 9; n += 1; continue; }
+            if (e == 'r') { tmp[n] = 13; n += 1; continue; }
+            if (e == '"') { tmp[n] = '"'; n += 1; continue; }
+            if (e == '\\') { tmp[n] = '\\'; n += 1; continue; }
+            return tml_err(v.line, "不支持的转义序列");
+        }
+        if (n >= 511) {
+            return tml_err(v.line, "字符串过长");
+        }
+        tmp[n] = b;
+        n += 1;
+        t_pos += 1;
+    }
+    return tml_err(v.line, "字符串未终结");
+}
+
+// tml_inline_table：解析 { k = v, ... }（v 限字符串）。填写 v.path_*。
+pub fn tml_inline_table(v *TomlVal) int {
+    t_pos += 1; // '{'
+    v.kind = 2;
+    v.path_off = -1;
+    v.path_len = 0;
+    tml_ws();
+    if (t_pos < t_len && t_src[t_pos] == '}') {
+        t_pos += 1;
+        return tml_err(v.line, "依赖必须提供 path");
+    }
+    for 1 {
+        tml_ws();
+        if (t_pos >= t_len) {
+            return tml_err(v.line, "内联表未终结");
+        }
+        // 键
+        let ks int = t_pos;
+        for t_pos < t_len && tml_is_bare(t_src[t_pos]) {
+            t_pos += 1;
+        }
+        let kn int = t_pos - ks;
+        if (kn == 0) {
+            return tml_err(t_line, "内联表需要一个键");
+        }
+        tml_ws();
+        if (t_pos >= t_len || t_src[t_pos] != '=') {
+            return tml_err(t_line, "期望 '='");
+        }
+        t_pos += 1;
+        tml_ws();
+        let line int = tml_string(v);
+        if (line != 0) {
+            return -1;
+        }
+        // 目前只关心 path 键；其余键报未知（schema 简单性）
+        if (kn == 4 && t_src[ks] == 'p' && t_src[ks + 1] == 'a'
+            && t_src[ks + 2] == 't' && t_src[ks + 3] == 'h') {
+            v.path_off = v.sval_off;
+            v.path_len = v.sval_len;
+        } else {
+            return tml_err(v.line, "依赖表只支持 path 键");
+        }
+        tml_ws();
+        if (t_pos < t_len && t_src[t_pos] == ',') {
+            t_pos += 1;
+            continue;
+        }
+        if (t_pos < t_len && t_src[t_pos] == '}') {
+            t_pos += 1;
+            return 0;
+        }
+        return tml_err(t_line, "期望 ',' 或 '}'");
+    }
+    return 0;
+}
+
+// tml_value：解析一个值（字符串 / 内联表 / 整数）。
+pub fn tml_value(v *TomlVal) int {
+    let b u8 = t_src[t_pos];
+    if (b == '"' || b == '\'') {
+        return tml_string(v);
+    }
+    if (b == '{') {
+        return tml_inline_table(v);
+    }
+    if (b == '+' || b == '-' || (b >= '0' && b <= '9')) {
+        let neg int = 0;
+        if (b == '+' || b == '-') {
+            if (b == '-') {
+                neg = 1;
+            }
+            t_pos += 1;
+        }
+        let val int = 0;
+        let digits int = 0;
+        for t_pos < t_len && t_src[t_pos] >= '0' && t_src[t_pos] <= '9' {
+            val = val * 10 + (t_src[t_pos] - '0').to_type(int);
+            digits += 1;
+            t_pos += 1;
+        }
+        if (digits == 0) {
+            return tml_err(v.line, "不支持的值类型");
+        }
+        v.kind = 3;
+        v.ival = (0 - val) * neg + val * (1 - neg);
+        return 0;
+    }
+    return tml_err(v.line, "不支持的值类型（仅字符串/内联表/整数）");
+}
+
+// tml_parse：解析整个清单。成功 0；语法错误 -1（诊断已输出）。
+// t_src/t_len/t_file 由调用方设置。
+pub fn tml_parse() int {
+    let cur int = -1;
+    for 1 {
+        tml_ws();
+        if (t_pos >= t_len) {
+            return 0;
+        }
+        if (t_src[t_pos] == '[') {
+            t_pos += 1;
+            let ks int = t_pos;
+            for t_pos < t_len && tml_is_bare(t_src[t_pos]) {
+                t_pos += 1;
+            }
+            let kn int = t_pos - ks;
+            if (kn == 0) {
+                return tml_err(t_line, "节名不能为空");
+            }
+            if (t_pos >= t_len || t_src[t_pos] != ']') {
+                return tml_err(t_line, "期望 ']'");
+            }
+            t_pos += 1;
+            cur = tml_sec_push(ks, kn);
+            if (cur < 0) {
+                return -1;
+            }
+            continue;
+        }
+        // 键值行（必须在节内）
+        if (cur < 0) {
+            return tml_err(t_line, "键值必须位于节内（先写 [project]）");
+        }
+        let ks2 int = t_pos;
+        for t_pos < t_len && tml_is_bare(t_src[t_pos]) {
+            t_pos += 1;
+        }
+        let kn2 int = t_pos - ks2;
+        if (kn2 == 0) {
+            return tml_err(t_line, "此处需要一个键");
+        }
+        tml_ws();
+        if (t_pos >= t_len || t_src[t_pos] != '=') {
+            return tml_err(t_line, "期望 '='");
+        }
+        t_pos += 1;
+        tml_ws();
+        let v TomlVal;
+        v.key_off = tml_intern(ks2, kn2);
+        if (v.key_off < 0) {
+            return -1;
+        }
+        v.key_len = kn2;
+        v.line = t_line;
+        v.sval_off = -1;
+        v.sval_len = 0;
+        v.path_off = -1;
+        v.ival = 0;
+        if (tml_value(&v) != 0) {
+            return -1;
+        }
+        if (tml_val_push(cur, &v) != 0) {
+            return -1;
+        }
+        // 行尾：行内空白与注释后必须换行或 EOF（跨行跳过交回主循环）
+        for t_pos < t_len && (t_src[t_pos] == ' ' || t_src[t_pos] == '\t' || t_src[t_pos] == '\r') {
+            t_pos += 1;
+        }
+        if (t_pos < t_len && t_src[t_pos] == '#') {
+            for t_pos < t_len && t_src[t_pos] != '\n' {
+                t_pos += 1;
+            }
+        }
+        if (t_pos < t_len && t_src[t_pos] != '\n') {
+            return tml_err(t_line, "一行只能有一个键值（期望换行）");
+        }
+    }
+    return 0;
+}
+
+// toml_find_sec：按名查节，返回下标；无 -1。
+pub fn toml_find_sec(name *char) int {
+    let n int = 0;
+    for name[n] != 0 {
+        n += 1;
+    }
+    let i int = 0;
+    for i < toml_sec_n {
+        if (toml_secs[i].name_len == n) {
+            let match int = 1;
+            let j int = 0;
+            for j < n {
+                if (gen.np_data[toml_secs[i].name_off + j] != name[j].to_type(u8)) {
+                    match = 0;
+                    break;
+                }
+                j += 1;
+            }
+            if (match != 0) {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// toml_sec_str：节内取字符串键值（intern 偏移出参）。
+// 找到返回 1（off/len 有效）；节或键不存在返回 0；类型错误返回 -1（诊断）。
+pub fn toml_sec_str(sec int, key *char, off *int, olen *int) int {
+    if (sec < 0) {
+        return 0;
+    }
+    let n int = 0;
+    for key[n] != 0 {
+        n += 1;
+    }
+    let i int = 0;
+    for i < toml_secs[sec].val_n {
+        if (toml_secs[sec].vals[i].key_len == n) {
+            let match int = 1;
+            let j int = 0;
+            for j < n {
+                if (gen.np_data[toml_secs[sec].vals[i].key_off + j] != key[j].to_type(u8)) {
+                    match = 0;
+                    break;
+                }
+                j += 1;
+            }
+            if (match != 0) {
+                if (toml_secs[sec].vals[i].kind != 1) {
+                    let buf [64]u8;
+                    let m int = 0;
+                    m = gen.append_str(buf, m, "字段必须是字符串: ");
+                    m = gen.append_str(buf, m, key);
+                    let mo int = gen.tml_intern_str(buf, 0, m);
+                    if (mo < 0) {
+                        return -1;
+                    }
+                    return tml_err(toml_secs[sec].vals[i].line, gen.np_cstr(mo));
+                }
+                off[0] = toml_secs[sec].vals[i].sval_off;
+                olen[0] = toml_secs[sec].vals[i].sval_len;
+                return 1;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}

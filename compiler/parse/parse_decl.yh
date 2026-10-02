@@ -88,7 +88,7 @@ pub fn parse_source() int {
 }
 
 pub fn at_top_decl_start(k int) int {
-    if (k == gen.TK_LET || k == gen.TK_CONST || k == gen.TK_FN || k == gen.TK_TYPE
+    if (k == gen.TK_PUB || k == gen.TK_LET || k == gen.TK_CONST || k == gen.TK_FN || k == gen.TK_TYPE
         || k == gen.TK_STRUCT || k == gen.TK_UNION || k == gen.TK_ENUM) {
         return 1;
     }
@@ -122,7 +122,101 @@ pub fn skip_top_decl() int {
     return 0;
 }
 
+// decl_index_file：根据已经词法分析的 token 为项目文件建立顶层声明范围表。
+// 该索引只记录声明种类和 token 范围，不构造表达式树，不执行名称/类型解析；
+// pass1 可用结束位置 O(1) 跳过函数体，后续 pass 只访问自己负责的声明。
+pub fn decl_index_file(fi int) int {
+    let head int = gen.c_pos;
+    let count int = 0;
+    let cap int = 8;
+    let nodes *gen.PDecl = malloc((cap * sizeof(gen.PDecl)).to_type(u64)).to_type(*gen.PDecl);
+    if (nodes == 0) {
+        return gen.fail("内存分配失败");
+    }
+    for p_cur() != gen.TOK_EOF {
+        let start int = gen.c_pos;
+        let line int = gen.c_toks[start].line;
+        let col int = gen.c_toks[start].col;
+        if (p_cur() == gen.TK_PUB) {
+            p_adv();
+        }
+        let kind int = p_cur();
+        if (p_cur() != gen.TOK_EOF) {
+            p_adv();
+        }
+        if (skip_top_decl() != 0) {
+            free(nodes);
+            return -1;
+        }
+        if (count == cap) {
+            let ncap int = cap * 2;
+            let nd *gen.PDecl = malloc((ncap * sizeof(gen.PDecl)).to_type(u64)).to_type(*gen.PDecl);
+            if (nd == 0) {
+                free(nodes);
+                return gen.fail("内存分配失败");
+            }
+            memcpy(nd, nodes, (count * sizeof(gen.PDecl)).to_type(u64));
+            free(nodes);
+            nodes = nd;
+            cap = ncap;
+        }
+        nodes[count].start = start;
+        nodes[count].end = gen.c_pos;
+        nodes[count].kind = kind;
+        nodes[count].line = line;
+        nodes[count].col = col;
+        count += 1;
+    }
+    gen.c_pos = head;
+    gen.p_files[fi].decls = nodes;
+    gen.p_files[fi].decl_n = count;
+    if (gen.c_stats_enabled != 0) {
+        gen.c_stats_syntax += count;
+    }
+    return 0;
+}
+
+// parse_indexed_decls：按文件声明索引执行 pass1/global/function 子遍。
+// mode=0 处理全部声明，1 仅全局 let/const，2 仅 fn；未选中的节点直接跳转。
+pub fn parse_indexed_decls(mode int) int {
+    let i int = 0;
+    for i < gen.c_file_decl_n {
+        let node gen.PDecl = gen.c_file_decls[i];
+        let selected int = 0;
+        if (mode == 0) {
+            selected = 1;
+        }
+        if (mode == 1 && (node.kind == gen.TK_LET || node.kind == gen.TK_CONST)) {
+            selected = 1;
+        }
+        if (mode == 2 && node.kind == gen.TK_FN) {
+            selected = 1;
+        }
+        gen.c_file_decl_i = i;
+        if (selected != 0) {
+            gen.c_pos = node.start;
+            if (parse_top_decl() != 0) {
+                gen.c_file_decl_i = -1;
+                return -1;
+            }
+            if (gen.c_pos > node.end) {
+                gen.c_file_decl_i = -1;
+                return gen.err_lc(node.line, node.col, "内部错误：解析越过顶层声明范围");
+            }
+        }
+        gen.c_pos = node.end;
+        i += 1;
+    }
+    gen.c_file_decl_i = -1;
+    gen.c_decl_pub = 0;
+    gen.c_pos = gen.c_tok_n - 1;
+    return 0;
+}
+
 pub fn parse_source_globals() int {
+    if (gen.c_file_indexed != 0) {
+        return parse_indexed_decls(1);
+    }
     mod_skip_head();
     for p_cur() != gen.TOK_EOF {
         if (p_cur() == gen.TK_PUB) {
@@ -169,6 +263,9 @@ pub fn parse_source_globals() int {
 }
 
 pub fn parse_source_fns() int {
+    if (gen.c_file_indexed != 0) {
+        return parse_indexed_decls(2);
+    }
     mod_skip_head();
     for p_cur() != gen.TOK_EOF {
         if (p_cur() == gen.TK_PUB) {
@@ -316,6 +413,7 @@ pub fn parse_fn_decl() int {
     let is_variadic_seen int = 0;
     let pnames [64]int;
     let pname_lens [64]int;
+    let pname_tokens [64]int;
     if (p_cur() != gen.TK_RPAREN) {
         for 1 {
             if (p_cur() == gen.TK_ELLIPSIS) {
@@ -331,6 +429,7 @@ pub fn parse_fn_decl() int {
             }
             let ps int = gen.c_toks[gen.c_pos].start;
             let pn int = gen.c_toks[gen.c_pos].len;
+            let ptoken int = gen.c_pos;
             p_adv();
             let ptid int = 0;
             if (p_cur() == gen.TK_ELLIPSIS) {
@@ -358,6 +457,7 @@ pub fn parse_fn_decl() int {
             }
             pnames[np] = ps;
             pname_lens[np] = pn;
+            pname_tokens[np] = ptoken;
             ptypes[np] = ptid;
             np += 1;
             if (p_cur() == gen.TK_COMMA) {
@@ -433,6 +533,10 @@ pub fn parse_fn_decl() int {
         if (p_cur() != gen.TK_LBRACE) {
             return gen.err_tok("fn 必须带函数体");
         }
+        if (gen.c_file_indexed != 0 && gen.c_file_decl_i >= 0) {
+            gen.c_pos = gen.c_file_decls[gen.c_file_decl_i].end;
+            return 0;
+        }
         return skip_to_decl_end();
     }
     // pass 2：编译函数体
@@ -443,6 +547,10 @@ pub fn parse_fn_decl() int {
     if (gen.sem_fn_begin(fidx) != 0) {
         return -1;
     }
+    if (ast_function_begin(gen.c_active_file, gen.c_file_decl_i) != 0) {
+        return -1;
+    }
+    ast_binding_begin_function();
     let fi int = 0;
     // AAPCS64 整型与浮点参数寄存器各自独立计数：整型进 x0..x7、浮点进
     // d0..d7。因此给每个参数定位寄存器时，必须用「它在本类型中的序号」
@@ -463,12 +571,19 @@ pub fn parse_fn_decl() int {
         if (gen.sem_declare_param(pnames[fi], pname_lens[fi], ptypes[fi], apos) != 0) {
             return -1;
         }
+        if (gen.c_ast_capture != 0
+            && ast_binding_add(gen.c_sym_n - 1, pname_tokens[fi], 1) != 0) {
+            return -1;
+        }
         fi += 1;
     }
     if (parse_block() != 0) {
         return -1;
     }
     if (gen.sem_fn_end() != 0) {
+        return -1;
+    }
+    if (ast_function_end() != 0) {
         return -1;
     }
     return 0;
@@ -640,4 +755,3 @@ pub fn parse_enum_decl() int {
     }
     return p_expect(gen.TK_RBRACE, "期望 '}'");
 }
-

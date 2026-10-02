@@ -1,0 +1,220 @@
+module parse;
+import gen;
+
+// ============================================================================
+// ast_decl.yh —— 从已建顶层声明索引发布文件级声明 AST
+//
+// PDecl 已提供单文件内稳定的 token 范围。此处把它提升为项目 worker 的
+// 只读 AST 节点，并在函数体解析后补上 body_stmt；不再次扫描源码 token。
+// ============================================================================
+
+// AstDecl：一个文件级声明的语法范围及函数体链接。
+pub struct AstDecl {
+    pub kind int;            // gen.TK_* 顶层声明类别
+    pub first int;           // 声明 token 范围起点，含可选 pub
+    pub after int;           // 声明 token 范围终点
+    pub token_count int;     // 所属文件 token 数
+    pub file_id int;         // 项目文件编号
+    pub decl_index int;      // 该文件 PDecl 索引
+    pub line int;            // 首 token 行号
+    pub col int;             // 首 token 列号
+    pub name_token int;      // 首个声明名字 token；不适用时为 -1
+    pub is_pub int;           // 1 表示声明前带 pub
+    pub body_stmt int;        // 函数体根语句节点；非函数为 -1
+    pub sym_id int;           // pass1 后绑定的模块级符号编号
+    pub type_id int;          // pass1 后绑定的函数签名类型编号
+}
+
+pub let ast_decl_nodes *AstDecl = 0;
+pub let ast_decl_count int = 0;
+pub let ast_decl_cap int = 0;
+pub let ast_decl_file_first *int = 0;
+pub let ast_decl_file_cap int = 0;
+
+// ast_decl_reset：释放本模块 worker 的声明节点并清零计数。
+pub fn ast_decl_reset() void {
+    if (ast_decl_nodes != 0) {
+        free(ast_decl_nodes.to_type(*void));
+    }
+    ast_decl_nodes = 0;
+    ast_decl_count = 0;
+    ast_decl_cap = 0;
+    if (ast_decl_file_first != 0) {
+        free(ast_decl_file_first.to_type(*void));
+    }
+    ast_decl_file_first = 0;
+    ast_decl_file_cap = 0;
+    gen.c_stats_decl_nodes = 0;
+}
+
+// ast_decl_add_file：把该文件现成的 PDecl 范围映射为只读声明节点。
+pub fn ast_decl_add_file(fi int) int {
+    if (gen.c_ast_capture == 0) {
+        return 0;
+    }
+    if (fi < 0 || fi >= gen.p_file_n || gen.c_active_file != fi
+        || gen.c_file_decls != gen.p_files[fi].decls) {
+        return gen.fail("内部错误：文件声明 AST 缺少对应的 PDecl 索引");
+    }
+    if (fi >= ast_decl_file_cap) {
+        let ncap int = ast_decl_file_cap * 2;
+        if (ncap == 0) { ncap = 32; }
+        for ncap <= fi { ncap = ncap * 2; }
+        let next *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
+        if (next == 0) { return gen.fail("文件声明 AST 索引分配失败"); }
+        let old int = 0;
+        for old < ast_decl_file_cap {
+            next[old] = ast_decl_file_first[old];
+            old += 1;
+        }
+        for old < ncap {
+            next[old] = -1;
+            old += 1;
+        }
+        if (ast_decl_file_first != 0) {
+            free(ast_decl_file_first.to_type(*void));
+        }
+        ast_decl_file_first = next;
+        ast_decl_file_cap = ncap;
+    }
+    if (ast_decl_file_first[fi] >= 0) {
+        return gen.fail("内部错误：同一文件重复加入声明 AST");
+    }
+    ast_decl_file_first[fi] = ast_decl_count;
+    let i int = 0;
+    for i < gen.c_file_decl_n {
+        let src gen.PDecl = gen.c_file_decls[i];
+        if (ast_decl_count == ast_decl_cap) {
+            let ncap int = ast_decl_cap * 2;
+            if (ncap == 0) { ncap = 32; }
+            let next *AstDecl = malloc((ncap * sizeof(AstDecl)).to_type(u64)).to_type(*AstDecl);
+            if (next == 0) {
+                return gen.fail("声明 AST 内存分配失败");
+            }
+            if (ast_decl_count > 0) {
+                memcpy(next, ast_decl_nodes,
+                    (ast_decl_count * sizeof(AstDecl)).to_type(u64));
+            }
+            if (ast_decl_nodes != 0) {
+                free(ast_decl_nodes.to_type(*void));
+            }
+            ast_decl_nodes = next;
+            ast_decl_cap = ncap;
+        }
+        let keyword int = src.start;
+        let is_pub int = 0;
+        if (keyword < gen.c_tok_n && gen.c_toks[keyword].kind == gen.TK_PUB) {
+            is_pub = 1;
+            keyword += 1;
+        }
+        let name_token int = keyword + 1;
+        if (name_token >= src.end || gen.c_toks[name_token].kind != gen.TOK_IDENT) {
+            name_token = -1;
+        }
+        let id int = ast_decl_count;
+        ast_decl_nodes[id].kind = src.kind;
+        ast_decl_nodes[id].first = src.start;
+        ast_decl_nodes[id].after = src.end;
+        ast_decl_nodes[id].token_count = gen.c_tok_n;
+        ast_decl_nodes[id].file_id = fi;
+        ast_decl_nodes[id].decl_index = i;
+        ast_decl_nodes[id].line = src.line;
+        ast_decl_nodes[id].col = src.col;
+        ast_decl_nodes[id].name_token = name_token;
+        ast_decl_nodes[id].is_pub = is_pub;
+        ast_decl_nodes[id].body_stmt = -1;
+        ast_decl_nodes[id].sym_id = -1;
+        ast_decl_nodes[id].type_id = -1;
+        ast_decl_count += 1;
+        gen.c_stats_decl_nodes += 1;
+        i += 1;
+    }
+    return 0;
+}
+
+// ast_decl_bind_file：声明登记完成后绑定函数符号与签名类型，供 IR 降低读取。
+pub fn ast_decl_bind_file(fi int) int {
+    if (gen.c_ast_capture == 0) { return 0; }
+    if (fi < 0 || fi >= gen.p_file_n || gen.c_active_file != fi
+        || gen.c_toks == 0 || gen.c_file_decls != gen.p_files[fi].decls) {
+        return gen.fail("内部错误：函数声明绑定缺少当前文件 token 快照");
+    }
+    let i int = 0;
+    for i < ast_decl_count {
+        let node *AstDecl = &ast_decl_nodes[i];
+        if (node.file_id == fi && node.kind == gen.TK_FN) {
+            if (node.name_token < 0 || node.name_token >= gen.c_tok_n
+                || node.decl_index < 0 || node.decl_index >= gen.c_file_decl_n) {
+                return gen.fail("内部错误：函数声明绑定名字范围无效");
+            }
+            let tok gen.Tok = gen.c_toks[node.name_token];
+            let sym int = gen.sym_lookup(tok.start, tok.len);
+            if (sym < 0 || gen.c_syms[sym].kind != gen.SYM_FN) {
+                return gen.fail("内部错误：函数声明未绑定到函数符号");
+            }
+            node.sym_id = sym;
+            node.type_id = gen.c_syms[sym].type_id;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// ast_decl_attach_body：将刚解析的函数体根连接到其文件级函数声明。
+pub fn ast_decl_attach_body(fi int, decl_index int, stmt_id int) int {
+    if (gen.c_ast_capture == 0) {
+        return 0;
+    }
+    let i int = 0;
+    for i < ast_decl_count {
+        if (ast_decl_nodes[i].file_id == fi && ast_decl_nodes[i].decl_index == decl_index) {
+            if (ast_decl_nodes[i].kind != gen.TK_FN || ast_decl_nodes[i].body_stmt >= 0
+                || stmt_id < 0 || stmt_id >= ast_stmt_count
+                || ast_stmt_nodes[stmt_id].kind != AST_STMT_BLOCK
+                || ast_stmt_nodes[stmt_id].file_id != fi) {
+                return gen.fail("内部错误：函数声明与 AST 函数体不匹配");
+            }
+            ast_decl_nodes[i].body_stmt = stmt_id;
+            return 0;
+        }
+        i += 1;
+    }
+    return gen.fail("内部错误：找不到函数 AST 声明节点");
+}
+
+// ast_decl_verify：检查声明范围、名字 token 及函数体根引用。
+pub fn ast_decl_verify() int {
+    if (gen.c_ast_capture == 0) {
+        return 0;
+    }
+    let i int = 0;
+    for i < ast_decl_count {
+        let node AstDecl = ast_decl_nodes[i];
+        if (node.file_id < 0 || node.first < 0 || node.after <= node.first
+            || node.after > node.token_count || node.token_count <= 0
+            || node.decl_index < 0 || (node.is_pub != 0 && node.is_pub != 1)) {
+            return gen.fail("内部错误：顶层声明 AST 范围无效");
+        }
+        if (node.name_token >= 0 && (node.name_token < node.first
+            || node.name_token >= node.after)) {
+            return gen.fail("内部错误：顶层声明 AST 名字 token 越界");
+        }
+        if (node.kind == gen.TK_FN) {
+            if (node.sym_id < 0 || node.sym_id >= gen.c_sym_n
+                || node.type_id < 0 || node.type_id >= gen.t_type_n
+                || gen.c_syms[node.sym_id].kind != gen.SYM_FN
+                || gen.c_syms[node.sym_id].type_id != node.type_id
+                || node.body_stmt < 0 || node.body_stmt >= ast_stmt_count
+                || ast_stmt_nodes[node.body_stmt].kind != AST_STMT_BLOCK
+                || ast_stmt_nodes[node.body_stmt].file_id != node.file_id
+                || ast_stmt_nodes[node.body_stmt].first < node.first
+                || ast_stmt_nodes[node.body_stmt].after > node.after) {
+                return gen.fail("内部错误：函数声明 AST 缺少函数体根");
+            }
+        } else if (node.body_stmt != -1) {
+            return gen.fail("内部错误：非函数声明 AST 带有函数体");
+        }
+        i += 1;
+    }
+    return 0;
+}

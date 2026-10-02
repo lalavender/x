@@ -1,0 +1,78 @@
+module main;
+import gen;
+
+// pj_os_dir_list：用 Darwin getattrlistbulk 批量读取目录名和对象类型。
+// OS 返回的 attrBuffer 只在本次调用内有效，目录项名称复制后才返回。
+pub fn pj_os_dir_list(dir *char, entries **PJDirEntry,
+    count *int, cap *int) int {
+    let fd int = open(dir, 0);
+    if (fd < 0) {
+        return gen.fail_path("无法打开目录: ", dir);
+    }
+    // attrlist 的 bitmapcount=5，commonattr 请求 NAME/OBJTYPE/RETURNED_ATTRS。
+    let attrs [24]u8;
+    attrs[0] = 5;
+    attrs[4] = 9;
+    attrs[7] = 128;
+    let buf [16384]u8;
+    let bufp *u8 = &buf[0];
+    let attrp *u8 = &attrs[0];
+    let failed int = 0;
+    for 1 == 1 {
+        let n int = getattrlistbulk(fd, attrp.to_type(*void), bufp.to_type(*void),
+            16384.to_type(u64), 0.to_type(u64));
+        if (n < 0) {
+            failed = 1;
+            break;
+        }
+        if (n == 0) {
+            break;
+        }
+        let pos int = 0;
+        let i int = 0;
+        for i < n {
+            let rec_len int = bufp[pos].to_type(int)
+                | (bufp[pos + 1].to_type(int) << 8)
+                | (bufp[pos + 2].to_type(int) << 16)
+                | (bufp[pos + 3].to_type(int) << 24);
+            if (rec_len < 36 || rec_len > 16384 - pos) {
+                failed = 1;
+                break;
+            }
+            let name_delta int = bufp[pos + 24].to_type(int)
+                | (bufp[pos + 25].to_type(int) << 8)
+                | (bufp[pos + 26].to_type(int) << 16)
+                | (bufp[pos + 27].to_type(int) << 24);
+            let name_bytes int = bufp[pos + 28].to_type(int)
+                | (bufp[pos + 29].to_type(int) << 8)
+                | (bufp[pos + 30].to_type(int) << 16)
+                | (bufp[pos + 31].to_type(int) << 24);
+            let objtype int = bufp[pos + 32].to_type(int)
+                | (bufp[pos + 33].to_type(int) << 8)
+                | (bufp[pos + 34].to_type(int) << 16)
+                | (bufp[pos + 35].to_type(int) << 24);
+            if (name_delta < 0 || name_bytes <= 0
+                || name_delta + name_bytes > rec_len - 24) {
+                failed = 1;
+                break;
+            }
+            let name_len int = name_bytes - 1;
+            let name *u8 = (bufp + pos + 24 + name_delta).to_type(*u8);
+            if (pj_dir_add(entries, count, cap, name, name_len,
+                (objtype == 2).to_type(int)) != 0) {
+                failed = 1;
+                break;
+            }
+            pos += rec_len;
+            i += 1;
+        }
+        if (failed != 0) {
+            break;
+        }
+    }
+    close(fd);
+    if (failed != 0) {
+        return gen.fail_path("无法读取目录: ", dir);
+    }
+    return 0;
+}

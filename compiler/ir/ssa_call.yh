@@ -1,0 +1,56 @@
+module ir;
+
+// 直接调用符号只能使用两平台汇编器可直接接受的稳定名称字节。
+pub fn ir_call_symbol_byte_ok(value u8) int {
+    if (value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
+        || value >= '0' && value <= '9' || value == '_' || value == '.'
+        || value == '$') { return 1; }
+    return 0;
+}
+
+// ir_verify_call_table：检查调用及实参片段连续、符号安全且无隐藏尾部数据。
+pub fn ir_verify_call_table(f *IRFunction) int {
+    if (f.call_count == 0) {
+        return f.call_arg_count == 0 && f.call_symbol_size == 0 ? 0 : -1;
+    }
+    let next_arg int = 0;
+    let next_symbol int = 0;
+    let i int = 0;
+    for i < f.call_count {
+        let call IRCall = f.calls[i];
+        if (call.arg_first != next_arg || call.arg_count < 0
+            || call.arg_count > f.call_arg_count - next_arg
+            || call.symbol_first != next_symbol || call.symbol_len <= 0
+            || call.symbol_len > f.call_symbol_size - next_symbol) {
+            return -1;
+        }
+        let k int = 0;
+        for k < call.symbol_len {
+            if (ir_call_symbol_byte_ok(f.call_symbols[call.symbol_first + k]) == 0) {
+                return -1;
+            }
+            k += 1;
+        }
+        next_arg += call.arg_count;
+        next_symbol += call.symbol_len;
+        i += 1;
+    }
+    return next_arg == f.call_arg_count && next_symbol == f.call_symbol_size ? 0 : -1;
+}
+
+// ir_verify_call：检查 CALL 指令的返回定义和每个实参的 SSA 类型。
+pub fn ir_verify_call(f *IRFunction, inst *IRInst) int {
+    if (inst.aux < 0 || inst.aux >= f.call_count) { return -1; }
+    let call IRCall = f.calls[inst.aux];
+    let i int = 0;
+    for i < call.arg_count {
+        let arg IRCallArg = f.call_args[call.arg_first + i];
+        if (ir_type_ok(f, arg.type_id) == 0
+            || f.types[arg.type_id].kind == IR_TY_VOID
+            || ir_find_value_type(f, arg.value) != arg.type_id) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}

@@ -1,0 +1,324 @@
+module main;
+import gen;
+
+// mb_hash_hex：把 64 位内容指纹格式化为固定长度十六进制串。
+pub fn mb_hash_hex(h u64, out *u8) int {
+    let digits *char = "0123456789abcdef";
+    let n int = 0;
+    let shift int = 60;
+    for shift >= 0 {
+        out[n] = digits[((h >> shift) & 15).to_type(int)].to_type(u8);
+        n += 1;
+        shift -= 4;
+    }
+    return n;
+}
+
+// mb_write_manifest：写缓存键；写失败时不保留可被误认的旧键。
+pub fn mb_write_manifest(path *char, data *u8, data_len int) int {
+    let fd int = mb_open_out(path);
+    if (fd < 0) {
+        return gen.fail_path("无法写缓存 manifest: ", path);
+    }
+    if (gen.write_all(fd, data, data_len) != 0) {
+        close(fd);
+        unlink(path);
+        return -1;
+    }
+    if (close(fd) != 0) {
+        unlink(path);
+        return gen.fail_path("关闭缓存 manifest 失败: ", path);
+    }
+    return 0;
+}
+
+// mb_link：把模块汇编转对象并链接；对象与最终程序按内容校验缓存。
+pub fn mb_link(out_path *char, build_off int, build_len int, count int) int {
+    let object_start_ns u64 = 0;
+    if (gen.c_stats_enabled != 0) {
+        object_start_ns = cmd_clock_ns();
+    }
+    // 两步链接（用户规划：.build/asm → .build/obj → 链接）
+    let cc *char = "gcc";
+    if (gen.tg_darwin() != 0) {
+        cc = "clang";
+    }
+    // 步骤 1：逐模块汇编为 .o
+    let i int = 0;
+    for i < count {
+        let m int = pj_order[i];
+        if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
+            return -1;
+        }
+        let spath [600]u8;
+        let sn int = 0;
+        sn = gen.append_str(spath, sn, pj_pool_str(build_off));
+        sn = gen.append_str(spath, sn, "/asm/");
+        sn = gen.append_str(spath, sn, pj_pool_str(pj_canon_off));
+        sn = gen.append_str(spath, sn, ".s");
+        spath[sn] = 0;
+        let opath [600]u8;
+        let on2 int = 0;
+        on2 = gen.append_str(opath, on2, pj_pool_str(build_off));
+        on2 = gen.append_str(opath, on2, "/obj/");
+        on2 = gen.append_str(opath, on2, pj_pool_str(pj_canon_off));
+        on2 = gen.append_str(opath, on2, ".o");
+        opath[on2] = 0;
+        let obj_manifest [620]u8;
+        let omn int = 0;
+        omn = gen.append_str(obj_manifest, omn, pj_pool_str(build_off));
+        omn = gen.append_str(obj_manifest, omn, "/obj/");
+        omn = gen.append_str(obj_manifest, omn, pj_pool_str(pj_canon_off));
+        omn = gen.append_str(obj_manifest, omn, ".manifest");
+        obj_manifest[omn] = 0;
+        let h u64 = mb_hash_init();
+        if (mb_hash_file(&h, gen.arr_cstr(spath)) != 0) {
+            return -1;
+        }
+        let ci int = 0;
+        for cc[ci] != 0 {
+            mb_fnv(&h, cc[ci].to_type(u8));
+            ci += 1;
+        }
+        let flags *char = " -c";
+        let fi int = 0;
+        for flags[fi] != 0 {
+            mb_fnv(&h, flags[fi].to_type(u8));
+            fi += 1;
+        }
+        if (gen.tg_darwin() != 0) {
+            mb_fnv(&h, 'D');
+        } else {
+            mb_fnv(&h, 'L');
+        }
+        let want [16]u8;
+        mb_hash_hex(h, want);
+        let object_hit int = 0;
+        if (pj_file_exists(gen.arr_cstr(opath)) != 0
+            && pj_file_exists(gen.arr_cstr(obj_manifest)) != 0
+            && gen.read_source(gen.arr_cstr(obj_manifest)) == 0 && gen.c_src_len == 32) {
+            let key_matches int = 1;
+            let k int = 0;
+            for k < 16 {
+                if (gen.c_src[k] != want[k]) {
+                    key_matches = 0;
+                    break;
+                }
+                k += 1;
+            }
+            let saved_object [16]u8;
+            let k2 int = 0;
+            for k2 < 16 {
+                saved_object[k2] = gen.c_src[16 + k2];
+                k2 += 1;
+            }
+            let hobj u64 = mb_hash_init();
+            if (key_matches != 0 && mb_hash_file(&hobj, gen.arr_cstr(opath)) == 0) {
+                let object_key [16]u8;
+                mb_hash_hex(hobj, object_key);
+                object_hit = 1;
+                let k3 int = 0;
+                for k3 < 16 {
+                    if (saved_object[k3] != object_key[k3]) {
+                        object_hit = 0;
+                        break;
+                    }
+                    k3 += 1;
+                }
+            }
+        }
+        if (object_hit == 0) {
+            unlink(gen.arr_cstr(obj_manifest));
+            let args [6]*char;
+            args[0] = cc;
+            args[1] = "-c";
+            args[2] = gen.arr_cstr(spath);
+            args[3] = "-o";
+            args[4] = gen.arr_cstr(opath);
+            args[5] = 0.to_type(*char);
+            if (gen.c_stats_enabled != 0) {
+                gen.c_stats_asm += 1;
+            }
+            if (cmd_process_run(&args[0]) != 0) {
+                return gen.fail_path("汇编失败: ", gen.arr_cstr(spath));
+            }
+            let object_hash u64 = mb_hash_init();
+            if (mb_hash_file(&object_hash, gen.arr_cstr(opath)) != 0) {
+                return -1;
+            }
+            let object_saved [32]u8;
+            mb_hash_hex(h, object_saved);
+            mb_hash_hex(object_hash, &object_saved[16]);
+            if (mb_write_manifest(gen.arr_cstr(obj_manifest), object_saved, 32) != 0) {
+                return -1;
+            }
+        }
+        i += 1;
+    }
+    let link_start_ns u64 = 0;
+    if (gen.c_stats_enabled != 0) {
+        mb_stats_object_ns = cmd_clock_ns() - object_start_ns;
+        link_start_ns = cmd_clock_ns();
+    }
+    // 最终链接键包括目标、参数、输出路径、模块顺序与全部对象内容。
+    let hlink u64 = mb_hash_init();
+    let cci int = 0;
+    for cc[cci] != 0 {
+        mb_fnv(&hlink, cc[cci].to_type(u8));
+        cci += 1;
+    }
+    let link_flags *char = " -no-pie -o";
+    if (gen.tg_darwin() != 0) {
+        link_flags = " -o";
+        mb_fnv(&hlink, 'D');
+    } else {
+        mb_fnv(&hlink, 'L');
+    }
+    mb_fnv(&hlink, ('0' + gen.c_legacy_system).to_type(u8));
+    let lfi int = 0;
+    for link_flags[lfi] != 0 {
+        mb_fnv(&hlink, link_flags[lfi].to_type(u8));
+        lfi += 1;
+    }
+    let oi int = 0;
+    for out_path[oi] != 0 {
+        mb_fnv(&hlink, out_path[oi].to_type(u8));
+        oi += 1;
+    }
+    i = 0;
+    for i < count {
+        let m int = pj_order[i];
+        if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
+            return -1;
+        }
+        let tagoff int = pj_canon_off;
+        let taglen int = pj_canon_len;
+        let ti int = 0;
+        for ti < taglen {
+            mb_fnv(&hlink, gen.np_data[tagoff + ti]);
+            ti += 1;
+        }
+        let opath [600]u8;
+        let on3 int = 0;
+        on3 = gen.append_str(opath, on3, pj_pool_str(build_off));
+        on3 = gen.append_str(opath, on3, "/obj/");
+        on3 = gen.append_str(opath, on3, pj_pool_str(tagoff));
+        on3 = gen.append_str(opath, on3, ".o");
+        opath[on3] = 0;
+        if (mb_hash_file(&hlink, gen.arr_cstr(opath)) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    let link_want [16]u8;
+    mb_hash_hex(hlink, link_want);
+    let link_manifest [620]u8;
+    let lmn int = 0;
+    lmn = gen.append_str(link_manifest, lmn, pj_pool_str(build_off));
+    lmn = gen.append_str(link_manifest, lmn, "/manifest/link.manifest");
+    link_manifest[lmn] = 0;
+    // manifest 同时校验输出文件内容，避免跳过被用户覆盖的产物。
+    let link_hit int = 0;
+    if (pj_file_exists(out_path) != 0 && pj_file_exists(gen.arr_cstr(link_manifest)) != 0
+        && gen.read_source(gen.arr_cstr(link_manifest)) == 0 && gen.c_src_len == 32) {
+        let key_matches int = 1;
+        let sk int = 0;
+        for sk < 16 {
+            if (gen.c_src[sk] != link_want[sk]) {
+                key_matches = 0;
+                break;
+            }
+            sk += 1;
+        }
+        let saved_output [16]u8;
+        let sk2 int = 0;
+        for sk2 < 16 {
+            saved_output[sk2] = gen.c_src[16 + sk2];
+            sk2 += 1;
+        }
+        let hout u64 = mb_hash_init();
+        if (key_matches != 0 && mb_hash_file(&hout, out_path) == 0) {
+            let output_key [16]u8;
+            mb_hash_hex(hout, output_key);
+            let j int = 0;
+            link_hit = 1;
+            for j < 16 {
+                if (saved_output[j] != output_key[j]) {
+                    link_hit = 0;
+                    break;
+                }
+                j += 1;
+            }
+        }
+    }
+    if (link_hit != 0) {
+        if (gen.c_stats_enabled != 0) {
+            mb_stats_link_ns = cmd_clock_ns() - link_start_ns;
+        }
+        return 0;
+    }
+    unlink(gen.arr_cstr(link_manifest));
+    // 步骤 2：链接全部 .o
+    let argc int = count + 5;
+    let args **char = malloc((argc * sizeof(*char)).to_type(u64)).to_type(**char);
+    let paths *u8 = malloc((count * 620).to_type(u64)).to_type(*u8);
+    if (args == 0 || paths == 0) {
+        if (args != 0) { free(args.to_type(*void)); }
+        if (paths != 0) { free(paths.to_type(*void)); }
+        return gen.fail("链接 argv 缓冲分配失败");
+    }
+    let next_arg int = 0;
+    args[next_arg] = cc;
+    next_arg += 1;
+    if (gen.tg_darwin() == 0) {
+        args[next_arg] = "-no-pie";
+        next_arg += 1;
+    }
+    args[next_arg] = "-o";
+    next_arg += 1;
+    args[next_arg] = out_path;
+    next_arg += 1;
+    i = 0;
+    for i < count {
+        let m int = pj_order[i];
+        if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
+            free(args.to_type(*void));
+            free(paths.to_type(*void));
+            return -1;
+        }
+        let row *u8 = paths + (i * 620);
+        let n int = 0;
+        n = gen.append_str(row, n, pj_pool_str(build_off));
+        n = gen.append_str(row, n, "/obj/");
+        n = gen.append_str(row, n, pj_pool_str(pj_canon_off));
+        n = gen.append_str(row, n, ".o");
+        row[n] = 0;
+        args[next_arg] = row.to_type(*char);
+        next_arg += 1;
+        i += 1;
+    }
+    args[next_arg] = 0.to_type(*char);
+    if (gen.c_stats_enabled != 0) {
+        gen.c_stats_link += 1;
+    }
+    let link_rc int = cmd_process_run(&args[0]);
+    free(args.to_type(*void));
+    free(paths.to_type(*void));
+    if (link_rc != 0) {
+        return gen.fail_path("链接失败: ", out_path);
+    }
+    let final_hash u64 = mb_hash_init();
+    if (mb_hash_file(&final_hash, out_path) != 0) {
+        return -1;
+    }
+    let link_saved [32]u8;
+    mb_hash_hex(hlink, link_saved);
+    mb_hash_hex(final_hash, &link_saved[16]);
+    if (mb_write_manifest(gen.arr_cstr(link_manifest), link_saved, 32) != 0) {
+        return -1;
+    }
+    if (gen.c_stats_enabled != 0) {
+        mb_stats_link_ns = cmd_clock_ns() - link_start_ns;
+    }
+    return 0;
+}

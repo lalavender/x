@@ -1,20 +1,20 @@
 module main;
 import gen;
-import lex;
 import parse;
 
 // ============================================================================
 // module_build.yh —— 项目构建管线（MOD-U4/U5）
 //
 // 命令（设计 §11）：
-//   yh build [-o out] [module]   构建项目（有 entry 构建程序，否则库模块）
+//   yh build [-o out] [module] [--stats] 项目构建；stats 只输出阶段计数
+//   yh check [module]           项目语义检查，不生成后端产物
 //   yh run                       构建并运行清单 entry
 //   yh list [--resolve name]     列出模块/解释导入绑定（project.yh）
 //   yh --emit-module M ROOT -o S （内部）把模块 M 编译为独立汇编 S
 //
 // 构建流程：装载项目与依赖 → 绑定导入 → topo 排序（环报完整链）→
-// 依赖序逐模块编译。每个模块一次独立子进程（--emit-module，自身
-// argv[0] 再入）：加载其导入的接口 → 两遍编译模块全部文件 → 产出
+// 依赖就绪时由有界 fork worker 并行编译；worker 继承父进程只读项目快照，
+// 再加载已发布接口 → 两遍编译模块文件 → 产出
 // 独立 .s 与接口 .s.i（pub 符号 GLOBAL、私有 LOCAL、符号带
 // __proj__mod 后缀）→ 最后 gcc/clang 一次链接全部 .s。
 //
@@ -24,28 +24,95 @@ import parse;
 // 冷热构建一致。接口加载时校验头行（版本/架构），损坏或不兼容的
 // 接口干净拒绝，不回退低层。
 //
-// ponytail: 经 system+ls/printenv 访问目录与环境（stage0 prelude 冻结，
-// 无 opendir/getenv）；路径含空格/引号不受支持，fixture 路径保持简单。
+// 过渡宿主能力：外部进程都通过显式 argv 启动；目录枚举和环境读取
+// 暂时调用独立宿主工具，R3 后续会迁入自有 OS 适配层。
 // ============================================================================
 
-// c_argv0：自身可执行路径（argv[0] 借用，不复制）——子进程再入用。
+// c_argv0：自身可执行路径（argv[0] 借用，不复制），用于编译器指纹。
 pub let c_argv0 *char = 0;
+pub let mb_iface_suffix *char = 0;
+pub let mb_compiler_fingerprint u64 = 0;
+pub let mb_compiler_fingerprint_ready int = 0;
+pub let mb_stats_build_start_ns u64 = 0;
+pub let mb_stats_project_ns u64 = 0;
+pub let mb_stats_schedule_ns u64 = 0;
+pub let mb_stats_object_ns u64 = 0;
+pub let mb_stats_link_ns u64 = 0;
 
-// mb_fnv：FNV-1a 32 位增量哈希（用 u64 运算，每步掩码到 32 位——
-// 自编子集没有 u32）。
-pub fn mb_fnv(h *u64, b u8) void {
-    h[0] = h[0] ^ b.to_type(u64);
-    h[0] = (h[0] * 16777619) & 0xFFFFFFFF;
+// mb_mix_compiler_fingerprint：每进程读取一次编译器二进制，后续模块只混入指纹。
+pub fn mb_mix_compiler_fingerprint(h *u64) int {
+    if (mb_compiler_fingerprint_ready == 0) {
+        mb_compiler_fingerprint = mb_hash_init();
+        let binary *char = c_argv0;
+        if (mb_self_path != 0) {
+            binary = mb_self_path;
+        }
+        if (mb_hash_file(&mb_compiler_fingerprint, binary) != 0) {
+            return -1;
+        }
+        mb_compiler_fingerprint_ready = 1;
+        if (gen.c_stats_enabled != 0) {
+            gen.c_stats_compiler_hashes += 1;
+        }
+    }
+    let shift int = 0;
+    for shift < 64 {
+        mb_fnv(h, ((mb_compiler_fingerprint >> shift) & 255).to_type(u8));
+        shift += 8;
+    }
+    return 0;
 }
 
-// mb_hash_file：把文件内容混入哈希（read_source 读入；失败 -1）。
+// mb_parse_hex：把恰好 16 位十六进制指纹解析为 u64；非法输入返回 -1。
+pub fn mb_parse_hex(text *char, value *u64) int {
+    let result u64 = 0;
+    let i int = 0;
+    for i < 16 {
+        let c u8 = text[i].to_type(u8);
+        let digit int = -1;
+        if (c >= '0' && c <= '9') { digit = c - '0'; }
+        if (c >= 'a' && c <= 'f') { digit = c - 'a' + 10; }
+        if (c >= 'A' && c <= 'F') { digit = c - 'A' + 10; }
+        if (digit < 0) { return -1; }
+        result = (result << 4) | digit.to_type(u64);
+        i += 1;
+    }
+    if (text[16] != 0) { return -1; }
+    value[0] = result;
+    return 0;
+}
+
+// mb_hash_init：返回缓存指纹 v2 的 FNV 初始值，使旧版缓存自然失效。
+pub fn mb_hash_init() u64 {
+    let hi u64 = 3421674725;
+    let lo u64 = 2216829733;
+    return (hi << 32) | lo;
+}
+
+// mb_fnv：把一个字节混入 FNV-1a 64 位哈希。
+pub fn mb_fnv(h *u64, b u8) void {
+    h[0] = h[0] ^ b.to_type(u64);
+    h[0] = h[0] * 1099511628211;
+}
+
+// mb_hash_file：按对齐的 64 位读取混入文件内容，尾部不足八字节按字节处理。
+// read_source 使用 malloc 对齐缓冲；支持的 Darwin/Linux arm64 与 x64 主机均为小端。
+// 读取失败返回 -1。
 pub fn mb_hash_file(h *u64, path *char) int {
     if (gen.read_source(path) != 0) {
         return -1;
     }
     let i int = 0;
+    let words *u64 = gen.c_src.to_type(*u64);
+    for i + 8 <= gen.c_src_len {
+        let word u64 = words[i / 8];
+        h[0] = h[0] ^ word;
+        h[0] = h[0] * 1099511628211;
+        i += 8;
+    }
     for i < gen.c_src_len {
-        mb_fnv(h, gen.c_src[i]);
+        h[0] = h[0] ^ gen.c_src[i].to_type(u64);
+        h[0] = h[0] * 1099511628211;
         i += 1;
     }
     return 0;
@@ -53,7 +120,11 @@ pub fn mb_hash_file(h *u64, path *char) int {
 
 // mb_build_dir：构建目录 = <root>/.build（返回池内偏移；用户规划）。
 pub fn mb_build_dir(root_off int, root_len int) int {
-    if (pj_canon(root_off, root_len, ".build") != 0) {
+    let rel *char = ".build";
+    if (gen.c_check_only != 0) {
+        rel = ".build/check";
+    }
+    if (pj_canon(root_off, root_len, rel) != 0) {
         return -1;
     }
     return pj_canon_off;
@@ -70,21 +141,23 @@ pub fn mb_sub_dir(build_off int, build_len int, sub *char) int {
 // mb_mkdir：确保构建目录存在。
 pub fn mb_mkdir(dir *char) int {
     // 建 .build 四子目录（asm/obj/iface/manifest）
-    let subs [4]*char;
+    let subs [5]*char;
     subs[0] = "asm";
     subs[1] = "obj";
     subs[2] = "iface";
     subs[3] = "manifest";
+    subs[4] = "ir";
+    if (cmd_mkdirs(dir) != 0) {
+        return gen.fail_path("无法创建构建目录: ", dir);
+    }
     let k int = 0;
-    for k < 4 {
-        let cmd [1100]u8;
-        let n int = 0;
-        n = gen.append_str(cmd, n, "/bin/mkdir -p ");
-        n = pj_shell_quote(cmd, n, dir);
-        n = gen.append_byte(cmd, n, '/');
-        n = gen.append_str(cmd, n, subs[k]);
-        cmd[n] = 0;
-        if (system(gen.arr_cstr(cmd)) != 0) {
+    for k < 5 {
+        let path [1100]u8;
+        let n int = gen.append_str(path, 0, dir);
+        n = gen.append_byte(path, n, '/');
+        n = gen.append_str(path, n, subs[k]);
+        path[n] = 0;
+        if (cmd_mkdirs(gen.arr_cstr(path)) != 0) {
             return gen.fail_path("无法创建构建目录: ", dir);
         }
         k += 1;
@@ -140,6 +213,24 @@ pub fn mb_mod_tag(m int, off *int, olen *int) int {
         return -1;
     }
     return 0;
+}
+
+// mb_check_clear_ifaces：删除本轮 check 生成的临时模块接口。
+// check 使用独立构建目录，不覆盖正式构建缓存；依赖接口保留到全部模块检查结束。
+pub fn mb_check_clear_ifaces(build_off int, build_len int, count int) void {
+    let ci int = 0;
+    for ci < count {
+        let m int = pj_order[ci];
+        let path [700]u8;
+        if (mb_module_iface_path(m, build_off, build_len, path) == 0) {
+            unlink(gen.arr_cstr(path));
+        }
+        // 清除升级前留下的无后缀 check 接口。
+        if (mb_module_iface_plain_path(m, build_off, build_len, path) == 0) {
+            unlink(gen.arr_cstr(path));
+        }
+        ci += 1;
+    }
 }
 
 // mb_module_iface_deps：收集模块 M 的全部导入（按解析结果模块下标去重），
@@ -223,22 +314,39 @@ pub fn mb_module_iface_deps(m int, build_off int, build_len int) int {
                 mb_dep_bindlen[mb_dep_n] = gen.p_imp_len[ii];
                 mb_dep_mod[mb_dep_n] = target;
                 mb_dep_mi[mb_dep_n] = -1;
-                // 接口路径 = <build>/iface/<tag>.s.i
-                if (mb_mod_tag(target, &pj_canon_off, &pj_canon_len) != 0) {
-                    return -1;
+            // 本轮新接口优先于持久缓存接口；缓存命中模块无须复制文件。
+            if (mb_mod_tag(target, &pj_canon_off, &pj_canon_len) != 0) {
+                return -1;
+            }
+            let pbuf [760]u8;
+            let pn int = 0;
+            pn = gen.append_str(pbuf, pn, pj_pool_str(build_off));
+            pn = gen.append_str(pbuf, pn, "/iface/");
+            pn = gen.append_str(pbuf, pn, pj_pool_str(pj_canon_off));
+            pn = gen.append_str(pbuf, pn, ".s.i");
+            pbuf[pn] = 0;
+            let chosen *char = gen.arr_cstr(pbuf);
+            if (mb_iface_suffix != 0) {
+                let session [760]u8;
+                let sn int = 0;
+                sn = gen.append_str(session, sn, gen.arr_cstr(pbuf));
+                sn = gen.append_str(session, sn, mb_iface_suffix);
+                session[sn] = 0;
+                if (pj_file_exists(gen.arr_cstr(session)) != 0) {
+                    pn = sn;
+                    let k int = 0;
+                    for k <= sn {
+                        pbuf[k] = session[k];
+                        k += 1;
+                    }
                 }
-                let pbuf [600]u8;
-                let pn int = 0;
-                pn = gen.append_str(pbuf, pn, pj_pool_str(build_off));
-                pn = gen.append_str(pbuf, pn, "/iface/");
-                pn = gen.append_str(pbuf, pn, pj_pool_str(pj_canon_off));
-                pn = gen.append_str(pbuf, pn, ".s.i");
-                let po int = gen.tml_intern_str(pbuf, 0, pn);
-                if (po < 0) {
-                    return -1;
-                }
-                mb_dep_ifoff[mb_dep_n] = po;
-                mb_dep_n += 1;
+            }
+            let po int = gen.tml_intern_str(chosen.to_type(*u8), 0, pn);
+            if (po < 0) {
+                return -1;
+            }
+            mb_dep_ifoff[mb_dep_n] = po;
+            mb_dep_n += 1;
             }
             ii += 1;
         }
@@ -256,10 +364,11 @@ pub fn mb_open_out(path *char) int {
     return open(path, flg, 0x1a4);
 }
 
-// mb_compile_one：编译单个模块（含 U5 对象缓存判断）。返回 0 成功。
+// mb_compile_start：检查模块缓存；命中返回 1，否则启动 worker 并返回 0。
 // root_off/len：项目根（调用方捕获的池偏移；函数内部 canon 会改写全局
 // 游标，故由调用方先取好）。
-pub fn mb_compile_one(m int, root_off int, root_len int, build_off int, build_len int) int {
+pub fn mb_compile_start(m int, root_off int, root_len int, build_off int,
+    build_len int, pid_out *int, key_out *u8) int {
     let sfx_off int = -1;
     let sfx_len int = 0;
     if (pj_mod_suffix(gen.p_mods[m].proj, m, &sfx_off, &sfx_len) != 0) {
@@ -271,7 +380,6 @@ pub fn mb_compile_one(m int, root_off int, root_len int, build_off int, build_le
         return -1;
     }
     let tag_off int = pj_canon_off;
-    let tag_len int = pj_canon_len;
     if (pj_canon(build_off, build_len, "asm") != 0) {
         return -1;
     }
@@ -292,6 +400,11 @@ pub fn mb_compile_one(m int, root_off int, root_len int, build_off int, build_le
     in2 = gen.append_str(ipath, in2, pj_pool_str(tag_off));
     in2 = gen.append_str(ipath, in2, ".s.i");
     ipath[in2] = 0;
+    let session_ipath [700]u8;
+    if (mb_module_iface_path(m, build_off, build_len, session_ipath) != 0) {
+        return -1;
+    }
+    unlink(gen.arr_cstr(session_ipath));
     if (pj_canon(build_off, build_len, "manifest") != 0) {
         return -1;
     }
@@ -302,14 +415,25 @@ pub fn mb_compile_one(m int, root_off int, root_len int, build_off int, build_le
     mn = gen.append_str(mpath, mn, pj_pool_str(tag_off));
     mn = gen.append_str(mpath, mn, ".manifest");
     mpath[mn] = 0;
+    // check 不读取或更新正式构建 manifest 与缓存。
+    if (gen.c_check_only != 0) {
+        if (mb_spawn_indexed_module(m, root_off, root_len,
+                gen.arr_cstr(spath), 0, pid_out) != 0) {
+            return gen.fail("无法启动项目检查 worker");
+        }
+        gen.c_stats_workers += 1;
+        return 0;
+    }
     // —— manifest 哈希（U5）——
-    let h u64 = 2166136261;
+    let h u64 = mb_hash_init();
     let hi int = 0;
     for hi < sfx_len {
         mb_fnv(&h, gen.np_data[sfx_off + hi]);
         hi += 1;
     }
     mb_fnv(&h, ('0' + is_entry).to_type(u8));
+    mb_fnv(&h, '\n');
+    mb_fnv(&h, ('0' + gen.c_legacy_system).to_type(u8));
     mb_fnv(&h, '\n');
     let fi int = 0;
     for fi < gen.p_mods[m].file_n {
@@ -339,11 +463,11 @@ pub fn mb_compile_one(m int, root_off int, root_len int, build_off int, build_le
         deps_ok = 0;
     }
     // 编译器身份：对自身二进制 FNV（滚动代次下热缓存必需）
-    if (mb_hash_file(&h, c_argv0) != 0) {
+    if (mb_mix_compiler_fingerprint(&h) != 0) {
         return -1;
     }
     // 版本标记
-    let tag *char = "yh-iface-cache-1";
+    let tag *char = "yh-iface-cache-2";
     let ti int = 0;
     for tag[ti] != 0 {
         mb_fnv(&h, tag[ti].to_type(u8));
@@ -353,7 +477,7 @@ pub fn mb_compile_one(m int, root_off int, root_len int, build_off int, build_le
     let want [16]u8;
     let wn int = 0;
     let digits *char = "0123456789abcdef";
-    let shift int = 28;
+    let shift int = 60;
     for shift >= 0 {
         want[wn] = digits[((h >> shift) & 15).to_type(int)].to_type(u8);
         wn += 1;
@@ -377,45 +501,115 @@ pub fn mb_compile_one(m int, root_off int, root_len int, build_off int, build_le
                 pj_out_s("  [缓存] ");
                 pj_out_np(gen.p_mods[m].name_off, gen.p_mods[m].name_len);
                 pj_out_s("\n");
-                return 0;
+                return 1;
             }
         }
     }
-    // —— 子进程编译（提供方项目根 + 主项目根） ——
-    let prov int = gen.p_mods[m].proj;
-    let cmd [2200]u8;
-    let cn int = 0;
-    cn = mb_self_cmd(cmd, cn);
-    cn = gen.append_str(cmd, cn, " --emit-module ");
-    cn = pj_shell_quote(cmd, cn, pj_pool_str(gen.p_mods[m].name_off));
-    cn = gen.append_str(cmd, cn, " ");
-    cn = pj_shell_quote(cmd, cn, pj_pool_str(gen.p_projs[prov].root_off));
-    cn = gen.append_str(cmd, cn, " ");
-    cn = pj_shell_quote(cmd, cn, pj_pool_str(root_off));
-    cn = gen.append_str(cmd, cn, " -o ");
-    cn = pj_shell_quote(cmd, cn, gen.arr_cstr(spath));
-    cmd[cn] = 0;
-    if (system(gen.arr_cstr(cmd)) != 0) {
-        let buf [128]u8;
-        let bn int = 0;
-        bn = gen.append_str(buf, bn, "模块编译失败: ");
-        bn = append_bytes_np(buf, bn, gen.p_mods[m].name_off, gen.p_mods[m].name_len);
-        let mo int = gen.tml_intern_str(buf, 0, bn);
-        if (mo < 0) {
-            return -1;
-        }
-        return gen.fail(gen.np_cstr(mo));
+    // 缓存键随 worker 状态保存，只有完整编译成功后父进程才提交 manifest。
+    let ki int = 0;
+    for ki < wn {
+        key_out[ki] = want[ki];
+        ki += 1;
     }
-    // 写 manifest
-    let fd int = mb_open_out(gen.arr_cstr(mpath));
+    // —— 子进程编译（提供方项目根 + 主项目根） ——
+    if (mb_spawn_indexed_module(m, root_off, root_len, gen.arr_cstr(spath),
+            mb_compiler_fingerprint, pid_out) != 0) {
+        return gen.fail("无法启动模块编译 worker");
+    }
+    gen.c_stats_workers += 1;
+    return 0;
+}
+
+// mb_manifest_commit：worker 完整成功后原子提交模块缓存键。
+pub fn mb_manifest_commit(m int, build_off int, build_len int, key *u8) int {
+    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
+        return -1;
+    }
+    let tag_off int = pj_canon_off;
+    if (pj_canon(build_off, build_len, "manifest") != 0) {
+        return -1;
+    }
+    let mpath [600]u8;
+    let mn int = 0;
+    mn = gen.append_str(mpath, mn, pj_pool_str(pj_canon_off));
+    mn = gen.append_byte(mpath, mn, '/');
+    mn = gen.append_str(mpath, mn, pj_pool_str(tag_off));
+    mn = gen.append_str(mpath, mn, ".manifest");
+    mpath[mn] = 0;
+    let tmp [700]u8;
+    let tn int = 0;
+    tn = gen.append_str(tmp, tn, gen.arr_cstr(mpath));
+    tn = gen.append_str(tmp, tn, ".tmp.");
+    tn = gen.append_int(tmp, tn, getpid());
+    tmp[tn] = 0;
+    let fd int = mb_open_out(gen.arr_cstr(tmp));
     if (fd < 0) {
         return gen.fail_path("无法写 manifest: ", gen.arr_cstr(mpath));
     }
-    gen.write_all(fd, want, wn);
+    let rc int = gen.write_all(fd, key, 16);
     close(fd);
-    pj_out_s("  [编译] ");
-    pj_out_np(gen.p_mods[m].name_off, gen.p_mods[m].name_len);
-    pj_out_s("\n");
+    if (rc != 0 || rename(gen.arr_cstr(tmp), gen.arr_cstr(mpath)) != 0) {
+        unlink(gen.arr_cstr(tmp));
+        return gen.fail_path("无法提交 manifest: ", gen.arr_cstr(mpath));
+    }
+    return 0;
+}
+
+// mb_module_iface_plain_path：返回持久接口路径，不附加本轮后缀。
+pub fn mb_module_iface_plain_path(m int, build_off int, build_len int,
+    out *u8) int {
+    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
+        return -1;
+    }
+    let tag_off int = pj_canon_off;
+    if (pj_canon(build_off, build_len, "iface") != 0) {
+        return -1;
+    }
+    let n int = 0;
+    n = gen.append_str(out, n, pj_pool_str(pj_canon_off));
+    n = gen.append_byte(out, n, '/');
+    n = gen.append_str(out, n, pj_pool_str(tag_off));
+    n = gen.append_str(out, n, ".s.i");
+    out[n] = 0;
+    return 0;
+}
+
+// mb_module_iface_path：返回本轮接口路径；后缀隔离并发构建会话。
+pub fn mb_module_iface_path(m int, build_off int, build_len int, out *u8) int {
+    let plain [700]u8;
+    if (mb_module_iface_plain_path(m, build_off, build_len, plain) != 0) {
+        return -1;
+    }
+    let n int = 0;
+    n = gen.append_str(out, n, gen.arr_cstr(plain));
+    if (mb_iface_suffix != 0) {
+        n = gen.append_str(out, n, mb_iface_suffix);
+    }
+    out[n] = 0;
+    return 0;
+}
+
+// mb_iface_copy_file：完整读取源接口，经同目录暂存后原子发布到目标路径。
+pub fn mb_iface_copy_file(src *char, dst *char) int {
+    if (gen.read_source(src) != 0) {
+        return -1;
+    }
+    let tmp [800]u8;
+    let n int = 0;
+    n = gen.append_str(tmp, n, dst);
+    n = gen.append_str(tmp, n, ".tmp.");
+    n = gen.append_int(tmp, n, getpid());
+    tmp[n] = 0;
+    let fd int = mb_open_out(gen.arr_cstr(tmp));
+    if (fd < 0) {
+        return -1;
+    }
+    let wr int = gen.write_all(fd, gen.c_src, gen.c_src_len);
+    let cr int = close(fd);
+    if (wr != 0 || cr != 0 || rename(gen.arr_cstr(tmp), dst) != 0) {
+        unlink(gen.arr_cstr(tmp));
+        return -1;
+    }
     return 0;
 }
 
@@ -469,38 +663,55 @@ pub fn mb_file_head_bind(fi int) int {
     return 0;
 }
 
-// mb_pass1_file：pass 1 读入并登记一个源文件（含头解析与绑定）。
+// mb_pass1_file：pass 1 从只读词法快照登记一个源文件（含头解析与绑定）。
 pub fn mb_pass1_file(path *char, fi int) int {
-    if (gen.read_source(path) != 0) {
-        return -1;
+    if (gen.c_stats_enabled != 0) {
+        gen.c_stats_pass1 += 1;
     }
-    gen.c_tok_n = 0;
-    gen.c_pos = 0;
-    gen.c_path = path;
-    if (lex.lex_all() != 0) {
+    if (mb_restore_front_file(path, fi) != 0) {
         return -1;
     }
     if (mb_file_head_bind(fi) != 0) {
         return -1;
     }
-    for parse.p_cur() != gen.TOK_EOF {
-        if (parse.parse_top_decl() != 0) {
-            return -1;
-        }
+    return parse.parse_indexed_decls(0);
+}
+
+// mb_restore_front_file：将当前解析器切换到项目索引时保存的只读快照。
+pub fn mb_restore_front_file(path *char, fi int) int {
+    if (gen.c_front_cache == 0 || gen.p_files[fi].source == 0
+        || gen.p_files[fi].tokens == 0) {
+        return gen.fail("内部错误：模块 worker 缺少前端文件快照");
     }
+    gen.c_src = gen.p_files[fi].source;
+    gen.c_src_len = gen.p_files[fi].source_len;
+    gen.c_toks = gen.p_files[fi].tokens;
+    gen.c_tok_n = gen.p_files[fi].token_n;
+    gen.c_tok_cap = gen.p_files[fi].token_n;
+    gen.c_file_decls = gen.p_files[fi].decls;
+    gen.c_file_decl_n = gen.p_files[fi].decl_n;
+    gen.c_file_decl_i = -1;
+    gen.c_file_indexed = 1;
+    gen.c_active_file = fi;
+    gen.c_pos = 0;
+    if (gen.set_source_path(path) != 0) {
+        return -1;
+    }
+    gen.c_spec = 0;
+    gen.c_ctx_block = 0;
     return 0;
 }
 
 // mb_globals_or_fns：pass 2a/2b 复用现有子遍（头已消费，头解析在先）。
 // is_globals=1 走 parse_source_globals，否则 parse_source_fns。
 pub fn mb_pass2_file(path *char, fi int, is_globals int) int {
-    if (gen.read_source(path) != 0) {
-        return -1;
+    if (is_globals != 0 && gen.c_stats_enabled != 0) {
+        gen.c_stats_globals += 1;
     }
-    gen.c_tok_n = 0;
-    gen.c_pos = 0;
-    gen.c_path = path;
-    if (lex.lex_all() != 0) {
+    if (is_globals == 0 && gen.c_stats_enabled != 0) {
+        gen.c_stats_functions += 1;
+    }
+    if (mb_restore_front_file(path, fi) != 0) {
         return -1;
     }
     if (mb_file_head_bind(fi) != 0) {
@@ -571,10 +782,15 @@ pub fn mb_check_binding_clash(m int) int {
     return 0;
 }
 
-// mb_emit_module：子进程入口——编译一个模块为独立汇编 + 接口。
+// mb_emit_module：子进程入口——编译一个模块为汇编 + 接口；check-only
+// 复用语义遍历并只写本轮依赖需要的临时接口。
 // prov_root：模块提供方项目根（在其中查找模块）；main_root：主项目根
 // （构建目录基准，接口路径与父进程一致）。
-pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int, main_off int, main_len int, out_s *char) int {
+pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
+    main_off int, main_len int, out_s *char, ir_cache_salt u64) int {
+    gen.c_front_cache = 1;
+    gen.c_ast_capture = 0;
+    gen.c_ir_cache_salt = ir_cache_salt;
     if (mb_load_stdlib() != 0) {
         return -1;
     }
@@ -589,130 +805,79 @@ pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int, main
     if (m < 0) {
         return gen.fail("内部错误：模块不在索引中");
     }
-    let sfx_off int = -1;
-    let sfx_len int = 0;
-    if (pj_mod_suffix(gen.p_mods[m].proj, m, &sfx_off, &sfx_len) != 0) {
-        return -1;
-    }
-    gen.c_module_mode = 1;
-    gen.c_is_entry_mod = gen.p_mods[m].is_entry;
-    gen.c_sym_sfx_off = sfx_off;
-    gen.c_sym_sfx_len = sfx_len;
-    if (gen.sem_init_tables() != 0) {
-        return -1;
-    }
-    gen.ty_register_builtins();
-    gen.scope_push();
-    if (gen.sem_register_prelude() != 0) {
-        return -1;
-    }
-    // 加载导入接口（确定序；构建目录以主项目根为基准）
-    let build_off int = mb_build_dir(main_off, main_len);
-    if (build_off < 0) {
-        return -1;
-    }
-    let build_len int = pj_canon_len;
-    if (mb_module_iface_deps(m, build_off, build_len) < 0) {
-        return -1;
-    }
-    let di int = 0;
-    for di < mb_dep_n {
-            if (parse.iface_load(pj_pool_str(mb_dep_ifoff[di]), mb_dep_bind[di], mb_dep_bindlen[di]) < 0) {
-            return -1;
-        }
-        di += 1;
-    }
-    // 登记基线（接口之后、本模块声明之前）
-    let sym_base int = gen.c_sym_n;
-    let tname_base int = gen.t_name_n;
-    // pass 1：全部源文件（接口加载把 c_pass 留在了 2，必须复位）
-    gen.c_compile = 1;
-    gen.c_pass = 1;
-    let fi int = 0;
-    for fi < gen.p_mods[m].file_n {
-        if (mb_pass1_file(pj_pool_str(gen.p_files[gen.p_mods[m].files[fi]].path_off), gen.p_mods[m].files[fi]) != 0) {
-            return -1;
-        }
-        fi += 1;
-    }
-    if (gen.c_errors > 0) {
-        return -1;
-    }
-    if (mb_check_binding_clash(m) != 0) {
-        return -1;
-    }
-    // 入口模块才要求 main
-    if (gen.c_is_entry_mod != 0 && gen.sem_check_main() != 0) {
-        return -1;
-    }
-    // pass 2a/2b：函数体与全局初始化（c_pass=2）
-    gen.c_pass = 2;
-    let fi2 int = 0;
-    for fi2 < gen.p_mods[m].file_n {
-        if (mb_pass2_file(pj_pool_str(gen.p_files[gen.p_mods[m].files[fi2]].path_off), gen.p_mods[m].files[fi2], 1) != 0) {
-            return -1;
-        }
-        fi2 += 1;
-    }
-    if (gen.c_errors > 0) {
-        return -1;
-    }
-    // 接口发射到 .build/iface/<tag>.s.i（与 mb_module_iface_deps 的
-    // 查找路径一致；tag 由提供方项目 + 模块名构成）
-    let build_off2 int = mb_build_dir(main_off, main_len);
-    if (build_off2 < 0) {
-        return -1;
-    }
-    let build_len2 int = pj_canon_len;
-    if (pj_canon(build_off2, build_len2, "iface") != 0) {
-        return -1;
-    }
-    let iface_dir_off int = pj_canon_off;
-    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
-        return -1;
-    }
-    let ipath [620]u8;
-    let in2 int = 0;
-    in2 = gen.append_str(ipath, in2, pj_pool_str(iface_dir_off));
-    in2 = gen.append_byte(ipath, in2, '/');
-    in2 = gen.append_str(ipath, in2, pj_pool_str(pj_canon_off));
-    in2 = gen.append_str(ipath, in2, ".s.i");
-    ipath[in2] = 0;
-    if (parse.iface_emit(gen.arr_cstr(ipath), sym_base, tname_base) != 0) {
-        return -1;
-    }
-    // pass 2b：函数体
-    let fi3 int = 0;
-    for fi3 < gen.p_mods[m].file_n {
-        if (mb_pass2_file(pj_pool_str(gen.p_files[gen.p_mods[m].files[fi3]].path_off), gen.p_mods[m].files[fi3], 0) != 0) {
-            return -1;
-        }
-        fi3 += 1;
-    }
-    if (gen.c_errors > 0) {
-        return -1;
-    }
-    // .bss
-    let bi int = 0;
-    for bi < gen.c_bss_n {
-        let bidx int = gen.c_bss_syms[bi];
-        if (gen.em_bss_symbol(bidx, gen.t_types[gen.c_syms[bidx].type_id].size, gen.t_types[gen.c_syms[bidx].type_id].align) != 0) {
-            return -1;
-        }
-        bi += 1;
-    }
-    // 写汇编
-    if (drv_write_asm(out_s) != 0) {
-        return -1;
-    }
-    return 0;
+    return mb_emit_indexed_module(m, main_off, main_len, out_s, ir_cache_salt);
 }
 
 // —— 父进程：build / run ——
 
-// mb_self_cmd：把自身路径以引号写入命令缓冲。
-pub fn mb_self_cmd(buf *u8, n int) int {
-    return pj_shell_quote(buf, n, c_argv0);
+// mb_print_stats：开发验收时输出当前进程的阶段计数；默认构建保持静默。
+pub fn mb_print_stats() void {
+    if (gen.c_stats_enabled == 0) {
+        return;
+    }
+    let buf [420]u8;
+    let n int = 0;
+    n = gen.append_str(buf, n, "yh-stats lex=");
+    n = gen.append_int(buf, n, gen.c_stats_lex);
+    n = gen.append_str(buf, n, " syntax=");
+    n = gen.append_int(buf, n, gen.c_stats_syntax);
+    n = gen.append_str(buf, n, " index=");
+    n = gen.append_int(buf, n, gen.c_stats_index);
+    n = gen.append_str(buf, n, " pass1=");
+    n = gen.append_int(buf, n, gen.c_stats_pass1);
+    n = gen.append_str(buf, n, " globals=");
+    n = gen.append_int(buf, n, gen.c_stats_globals);
+    n = gen.append_str(buf, n, " functions=");
+    n = gen.append_int(buf, n, gen.c_stats_functions);
+    n = gen.append_str(buf, n, " ir_functions=");
+    n = gen.append_int(buf, n, gen.c_stats_ir_functions);
+    n = gen.append_str(buf, n, " ir_cache_hits=");
+    n = gen.append_int(buf, n, gen.c_stats_ir_cache_hits);
+    n = gen.append_str(buf, n, " ir_cache_misses=");
+    n = gen.append_int(buf, n, gen.c_stats_ir_cache_misses);
+    n = gen.append_str(buf, n, " ast_nodes=");
+    n = gen.append_int(buf, n, gen.c_stats_ast_nodes);
+    n = gen.append_str(buf, n, " stmt_nodes=");
+    n = gen.append_int(buf, n, gen.c_stats_stmt_nodes);
+    n = gen.append_str(buf, n, " decl_nodes=");
+    n = gen.append_int(buf, n, gen.c_stats_decl_nodes);
+    n = gen.append_str(buf, n, " ast_refs=");
+    n = gen.append_int(buf, n, gen.c_stats_ast_refs);
+    n = gen.append_str(buf, n, " ast_bindings=");
+    n = gen.append_int(buf, n, gen.c_stats_ast_bindings);
+    n = gen.append_str(buf, n, " ast_functions=");
+    n = gen.append_int(buf, n, gen.c_stats_ast_functions);
+    n = gen.append_str(buf, n, " workers=");
+    n = gen.append_int(buf, n, gen.c_stats_workers);
+    n = gen.append_str(buf, n, " workers_peak=");
+    n = gen.append_int(buf, n, mb_sched_peak);
+    n = gen.append_str(buf, n, " iface_early=");
+    n = gen.append_int(buf, n, mb_sched_iface_early);
+    n = gen.append_str(buf, n, " asm=");
+    n = gen.append_int(buf, n, gen.c_stats_asm);
+    n = gen.append_str(buf, n, " link=");
+    n = gen.append_int(buf, n, gen.c_stats_link);
+    n = gen.append_str(buf, n, " compiler_hashes=");
+    n = gen.append_int(buf, n, gen.c_stats_compiler_hashes);
+    n = gen.append_str(buf, n, " time_project_ns=");
+    n = gen.append_int(buf, n, mb_stats_project_ns.to_type(int));
+    n = gen.append_str(buf, n, " time_schedule_ns=");
+    n = gen.append_int(buf, n, mb_stats_schedule_ns.to_type(int));
+    n = gen.append_str(buf, n, " time_object_ns=");
+    n = gen.append_int(buf, n, mb_stats_object_ns.to_type(int));
+    n = gen.append_str(buf, n, " time_link_ns=");
+    n = gen.append_int(buf, n, mb_stats_link_ns.to_type(int));
+    n = gen.append_str(buf, n, " time_total_ns=");
+    let total_ns u64 = 0;
+    if (mb_stats_build_start_ns != 0) {
+        let now u64 = cmd_clock_ns();
+        if (now >= mb_stats_build_start_ns) {
+            total_ns = now - mb_stats_build_start_ns;
+        }
+    }
+    n = gen.append_int(buf, n, total_ns.to_type(int));
+    n = gen.append_byte(buf, n, '\n');
+    gen.write_all(2, buf, n);
 }
 
 // mb_intern_arg：命令行参数字符串入名字池，返回偏移（长度出参）。
@@ -767,84 +932,22 @@ pub fn pj_topo_multi(proj int) int {
     return pj_order_n;
 }
 
-// mb_link：把全部模块 .s 链接为可执行（GNU: gcc -no-pie；Darwin: clang）。
-pub fn mb_link(out_path *char, build_off int, build_len int, count int) int {
-    // 两步链接（用户规划：.build/asm → .build/obj → 链接）
-    let cc *char = "gcc";
-    if (gen.tg_darwin() != 0) {
-        cc = "clang";
-    }
-    // 步骤 1：逐模块汇编为 .o
-    let i int = 0;
-    for i < count {
-        let m int = pj_order[i];
-        if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
-            return -1;
-        }
-        let spath [600]u8;
-        let sn int = 0;
-        sn = gen.append_str(spath, sn, pj_pool_str(build_off));
-        sn = gen.append_str(spath, sn, "/asm/");
-        sn = gen.append_str(spath, sn, pj_pool_str(pj_canon_off));
-        sn = gen.append_str(spath, sn, ".s");
-        spath[sn] = 0;
-        let opath [600]u8;
-        let on2 int = 0;
-        on2 = gen.append_str(opath, on2, pj_pool_str(build_off));
-        on2 = gen.append_str(opath, on2, "/obj/");
-        on2 = gen.append_str(opath, on2, pj_pool_str(pj_canon_off));
-        on2 = gen.append_str(opath, on2, ".o");
-        opath[on2] = 0;
-        let cmd [2200]u8;
-        let cn int = 0;
-        cn = gen.append_str(cmd, cn, cc);
-        cn = gen.append_str(cmd, cn, " -c ");
-        cn = pj_shell_quote(cmd, cn, gen.arr_cstr(spath));
-        cn = gen.append_str(cmd, cn, " -o ");
-        cn = pj_shell_quote(cmd, cn, gen.arr_cstr(opath));
-        cmd[cn] = 0;
-        if (system(gen.arr_cstr(cmd)) != 0) {
-            return gen.fail_path("汇编失败: ", gen.arr_cstr(spath));
-        }
-        i += 1;
-    }
-    // 步骤 2：链接全部 .o
-    let cmd2 [4096]u8;
-    let n int = 0;
-    if (gen.tg_darwin() != 0) {
-        n = gen.append_str(cmd2, n, "clang -o ");
-    } else {
-        n = gen.append_str(cmd2, n, "gcc -no-pie -o ");
-    }
-    n = pj_shell_quote(cmd2, n, out_path);
-    i = 0;
-    for i < count {
-        let m int = pj_order[i];
-        if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
-            return -1;
-        }
-        n = gen.append_str(cmd2, n, " ");
-        n = gen.append_str(cmd2, n, pj_pool_str(build_off));
-        n = gen.append_str(cmd2, n, "/obj/");
-        n = gen.append_str(cmd2, n, pj_pool_str(pj_canon_off));
-        n = gen.append_str(cmd2, n, ".o");
-        i += 1;
-    }
-    cmd2[n] = 0;
-    if (system(gen.arr_cstr(cmd2)) != 0) {
-        return gen.fail_path("链接失败: ", out_path);
-    }
-    return 0;
-}
-
-// mb_cmd_build：yh build [-o out] [module]。
-// argc/argv 已剥离程序名；av[0]=="build"。
+// mb_cmd_build：构建项目；可选 --stats 输出当前构建与模块 worker 计数。
+// argc/argv 已剥离程序名；由 build/check 命令共用。
 pub fn mb_cmd_build(av **char, an int) int {
+    if (mb_resolve_self_path() != 0) {
+        return 1;
+    }
     let out_arg *char = 0;
     let mod_arg_off int = -1;
     let mod_arg_len int = 0;
     let i int = 1;
     for i < an {
+        if (gen.cstr_eq(av[i], "--stats") != 0) {
+            gen.c_stats_enabled = 1;
+            i += 1;
+            continue;
+        }
         if (gen.cstr_eq(av[i], "-o") != 0 && i + 1 < an) {
             out_arg = av[i + 1];
             i += 2;
@@ -863,7 +966,17 @@ pub fn mb_cmd_build(av **char, an int) int {
         mod_arg_len = sl;
         i += 1;
     }
+    mb_stats_build_start_ns = 0;
+    mb_stats_project_ns = 0;
+    mb_stats_schedule_ns = 0;
+    mb_stats_object_ns = 0;
+    mb_stats_link_ns = 0;
+    if (gen.c_stats_enabled != 0) {
+        mb_stats_build_start_ns = cmd_clock_ns();
+    }
     gen.c_path = "yh";
+    // 父进程建立可继承的只读前端快照，fork worker 不再重扫项目源码。
+    gen.c_front_cache = 1;
     if (mb_load_stdlib() != 0) {
         return 1;
     }
@@ -921,13 +1034,29 @@ pub fn mb_cmd_build(av **char, an int) int {
     if (mb_mkdir(pj_pool_str(build_off)) != 0) {
         return 1;
     }
-    // 逐模块编译（依赖序）
-    let ci int = 0;
-    for ci < count {
-        if (mb_compile_one(pj_order[ci], root_off, root_len, build_off, build_len) != 0) {
-            return 1;
+    if (gen.c_stats_enabled != 0) {
+        mb_stats_project_ns = cmd_clock_ns() - mb_stats_build_start_ns;
+    }
+    let schedule_start_ns u64 = 0;
+    if (gen.c_stats_enabled != 0) {
+        schedule_start_ns = cmd_clock_ns();
+    }
+    if (mb_schedule_modules(count, root_off, root_len, build_off, build_len) != 0) {
+        if (gen.c_check_only != 0) {
+            mb_check_clear_ifaces(build_off, build_len, count);
         }
-        ci += 1;
+        return 1;
+    }
+    if (gen.c_stats_enabled != 0) {
+        mb_stats_schedule_ns = cmd_clock_ns() - schedule_start_ns;
+    }
+    if (gen.c_check_only != 0) {
+        mb_check_clear_ifaces(build_off, build_len, count);
+        pj_out_s("检查通过: ");
+        pj_out_np(gen.p_projs[proj].name_off, gen.p_projs[proj].name_len);
+        pj_out_s("\n");
+        mb_print_stats();
+        return 0;
     }
     // 链接（有入口时）
     if (rootmod >= 0) {
@@ -949,17 +1078,23 @@ pub fn mb_cmd_build(av **char, an int) int {
         pj_out_s("构建完成: ");
         pj_out_s(gen.arr_cstr(outbuf));
         pj_out_s("\n");
+        mb_print_stats();
         return 0;
     }
     pj_out_s("库构建完成（模块对象与接口在 ");
     pj_out_np(build_off, build_len);
     pj_out_s("）\n");
+    mb_print_stats();
     return 0;
 }
 
 // mb_cmd_run：yh run——构建清单 entry 并运行，返回程序退出码。
 pub fn mb_cmd_run() int {
+    if (mb_resolve_self_path() != 0) {
+        return 1;
+    }
     gen.c_path = "yh";
+    gen.c_front_cache = 1;
     if (mb_load_stdlib() != 0) {
         return 1;
     }
@@ -992,12 +1127,8 @@ pub fn mb_cmd_run() int {
     if (mb_mkdir(pj_pool_str(build_off)) != 0) {
         return 1;
     }
-    let ci int = 0;
-    for ci < count {
-        if (mb_compile_one(pj_order[ci], root_off, root_len, build_off, build_len) != 0) {
-            return 1;
-        }
-        ci += 1;
+    if (mb_schedule_modules(count, root_off, root_len, build_off, build_len) != 0) {
+        return 1;
     }
     let binbuf [620]u8;
     let bn int = 0;
@@ -1008,21 +1139,12 @@ pub fn mb_cmd_run() int {
     if (mb_link(gen.arr_cstr(binbuf), build_off, build_len, count) != 0) {
         return 1;
     }
-    // 运行（继承 stdout/stderr；退出码 = 程序退出码）
-    let rcmd [700]u8;
-    let rn int = 0;
-    rn = pj_shell_quote(rcmd, rn, gen.arr_cstr(binbuf));
-    rcmd[rn] = 0;
-    let rc int = system(gen.arr_cstr(rcmd));
-    if (rc == 0) {
-        return 0;
-    }
-    // wait 状态：正常退出在高 8 位；信号退出按 128+sig 近似报告
-    let code int = ((rc >> 8) & 255);
-    if (code == 0) {
-        code = 130;
-    }
-    return code;
+    // 运行（继承 stdout/stderr；退出码由 waitpid 状态字解码）。
+    let args [2]*char;
+    args[0] = gen.arr_cstr(binbuf);
+    args[1] = 0.to_type(*char);
+    let rc int = cmd_process_run(&args[0]);
+    return rc < 0 ? 1 : rc;
 }
 
 // mb_print_version：打印当前项目的 name 与 version（清单 project.version

@@ -227,52 +227,54 @@ pub fn pj_load_project(root_off int, root_len int) int {
 }
 
 pub fn pj_scan_source(dir_off int, dir_len int, proj int) int {
-    if (pj_run_ls(pj_pool_str(dir_off)) != 0) {
+    let entries *PJDirEntry = 0.to_type(*PJDirEntry);
+    let es_n int = 0;
+    let es_cap int = 0;
+    if (pj_os_dir_list(pj_pool_str(dir_off), &entries, &es_n, &es_cap) != 0) {
+        if (entries != 0) { free(entries.to_type(*void)); }
         return -1;
     }
-    // 两阶段：先收集本目录条目，再逐条处理——子目录递归会重用共享
-    // ls 缓冲（pj_run_ls 覆盖 pj_ls_buf），不能边迭代边递归。
-    let es_off [512]int;
-    let es_len [512]int;
-    let es_dir [512]int;
-    let es_n int = 0;
-    let i int = 0;
-    let line_start int = 0;
-    for i <= pj_ls_len {
-        if (i == pj_ls_len || pj_ls_buf[i] == '\n') {
-            let n int = i - line_start;
-            if (n > 0 && pj_ls_buf[line_start + n - 1] == '\r') {
-                n -= 1;
-            }
-            if (n > 0) {
-                let is_dir int = 0;
-                if (pj_ls_buf[line_start + n - 1] == '/') {
-                    is_dir = 1;
-                    n -= 1;
-                }
-                if (n > 0 && es_n < 512) {
-                    // 名字立即入名字池：后续递归会覆盖 pj_ls_buf
-                    let no int = gen.tml_intern_str(pj_ls_buf, line_start, n);
-                    if (no < 0) {
-                        return -1;
-                    }
-                    es_off[es_n] = no;
-                    es_len[es_n] = n;
-                    es_dir[es_n] = is_dir;
-                    es_n += 1;
-                }
-            }
-            line_start = i + 1;
-        }
-        i += 1;
-    }
+    pj_dir_sort(entries, es_n);
     let e int = 0;
     for e < es_n {
-            let r int = pj_scan_entry(dir_off, dir_len, es_off[e], es_len[e], es_dir[e], proj);
-        if (r != 0) {
+        if (pj_scan_entry(dir_off, dir_len, entries[e].name_off,
+            entries[e].name_len, entries[e].is_dir, proj) != 0) {
+            free(entries.to_type(*void));
             return -1;
         }
         e += 1;
+    }
+    if (entries != 0) { free(entries.to_type(*void)); }
+    return 0;
+}
+
+// pj_dir_less：按文件名字节序排序，保证跨宿主扫描与构建顺序稳定。
+pub fn pj_dir_less(a PJDirEntry, b PJDirEntry) int {
+    let n int = a.name_len;
+    if (b.name_len < n) { n = b.name_len; }
+    let i int = 0;
+    for i < n {
+        let av int = gen.np_data[a.name_off + i].to_type(int);
+        let bv int = gen.np_data[b.name_off + i].to_type(int);
+        if (av < bv) { return 1; }
+        if (av > bv) { return 0; }
+        i += 1;
+    }
+    return (a.name_len < b.name_len).to_type(int);
+}
+
+// pj_dir_sort：按小目录常见情况原地插入排序，不另申请排序缓冲。
+pub fn pj_dir_sort(entries *PJDirEntry, n int) int {
+    let i int = 1;
+    for i < n {
+        let item PJDirEntry = entries[i];
+        let j int = i;
+        for j > 0 && pj_dir_less(item, entries[j - 1]) != 0 {
+            entries[j] = entries[j - 1];
+            j -= 1;
+        }
+        entries[j] = item;
+        i += 1;
     }
     return 0;
 }
@@ -305,6 +307,9 @@ pub fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_
         }
         return pj_scan_source(sub_off, sub_len, proj);
     }
+    if (pj_source_target_match(name_start, name_len) == 0) {
+        return 0;
+    }
     // .yh 后缀检查
     if (name_len < 3 || gen.np_data[name_start + name_len - 3] != '.'
         || gen.np_data[name_start + name_len - 2] != 'y' || gen.np_data[name_start + name_len - 1] != 'h') {
@@ -331,7 +336,36 @@ pub fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_
     return r;
 }
 
+// pj_source_target_match：平台文件仍使用唯一的 .yh 后缀；仅当当前输出目标
+// 与文件名中的 .darwin.yh/.linux.yh 匹配时纳入项目。普通 .yh 不受影响。
+pub fn pj_source_target_match(name_start int, name_len int) int {
+    if (name_len >= 10) {
+        let off int = name_start + name_len - 10;
+        if (gen.np_data[off] == '.' && gen.np_data[off + 1] == 'd'
+            && gen.np_data[off + 2] == 'a' && gen.np_data[off + 3] == 'r'
+            && gen.np_data[off + 4] == 'w' && gen.np_data[off + 5] == 'i'
+            && gen.np_data[off + 6] == 'n' && gen.np_data[off + 7] == '.'
+            && gen.np_data[off + 8] == 'y' && gen.np_data[off + 9] == 'h') {
+            return gen.tg_darwin();
+        }
+    }
+    if (name_len >= 9) {
+        let off int = name_start + name_len - 9;
+        if (gen.np_data[off] == '.' && gen.np_data[off + 1] == 'l'
+            && gen.np_data[off + 2] == 'i' && gen.np_data[off + 3] == 'n'
+            && gen.np_data[off + 4] == 'u' && gen.np_data[off + 5] == 'x'
+            && gen.np_data[off + 6] == '.' && gen.np_data[off + 7] == 'y'
+            && gen.np_data[off + 8] == 'h') {
+            return 1 - gen.tg_darwin();
+        }
+    }
+    return 1;
+}
+
 pub fn pj_index_file(path *char, proj int) int {
+    if (gen.c_stats_enabled != 0) {
+        gen.c_stats_index += 1;
+    }
     if (gen.read_source(path) != 0) {
         return -1;
     }
@@ -398,6 +432,17 @@ pub fn pj_index_file(path *char, proj int) int {
     let fidx int = pj_file_push(poff, plen, mod);
     if (fidx < 0) {
         return -1;
+    }
+    if (gen.c_front_cache != 0) {
+        let toks *gen.Tok = malloc((gen.c_tok_n * sizeof(gen.Tok)).to_type(u64)).to_type(*gen.Tok);
+        if (toks == 0) {
+            return gen.fail("内存分配失败");
+        }
+        memcpy(toks, gen.c_toks, (gen.c_tok_n * sizeof(gen.Tok)).to_type(u64));
+        gen.p_files[fidx].source = gen.c_src;
+        gen.p_files[fidx].source_len = gen.c_src_len;
+        gen.p_files[fidx].tokens = toks;
+        gen.p_files[fidx].token_n = gen.c_tok_n;
     }
     if (pj_mod_add_file(mod, fidx) != 0) {
         return -1;
@@ -475,4 +520,3 @@ pub fn pj_same_np(o1 int, l1 int, o2 int, l2 int) int {
     }
     return 1;
 }
-

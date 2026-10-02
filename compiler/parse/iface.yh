@@ -279,19 +279,31 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
         }
         si2 += 1;
     }
-    // 一次性写出（O_WRONLY|O_CREAT|O_TRUNC；旗标随平台不同）
+    // 先写同目录临时文件，再 rename 发布完整接口；依赖调度器以文件出现
+    // 作为 InterfaceReady 信号，不能让读取方看到半份接口。
     let flg int = 0x241;
     if (gen.tg_darwin() != 0) {
         flg = 0x601;
     }
-    let fd int = open(path, flg, 0x1a4);
+    let tmp [700]u8;
+    let tn int = 0;
+    tn = gen.append_str(tmp, tn, path);
+    tn = gen.append_str(tmp, tn, ".tmp.");
+    tn = gen.append_int(tmp, tn, getpid());
+    tmp[tn] = 0;
+    let fd int = open(gen.arr_cstr(tmp), flg, 0x1a4);
     if (fd < 0) {
         return gen.fail_path("无法创建接口文件: ", path);
     }
-    let w int = write(fd, if_buf, if_len.to_type(u64)).to_type(int);
-    close(fd);
-    if (w != if_len) {
+    let write_rc int = gen.write_all(fd, if_buf, if_len);
+    let close_rc int = close(fd);
+    if (write_rc != 0 || close_rc != 0) {
+        unlink(gen.arr_cstr(tmp));
         return gen.fail_path("写接口文件失败: ", path);
+    }
+    if (rename(gen.arr_cstr(tmp), path) != 0) {
+        unlink(gen.arr_cstr(tmp));
+        return gen.fail_path("发布接口文件失败: ", path);
     }
     return 0;
 }
