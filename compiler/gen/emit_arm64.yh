@@ -21,8 +21,8 @@ module gen;
 // 参数/临时在声明点 sub sp 一个 16 字节对齐的槽，用 fp 负偏移访问；
 // 值栈在 sp 之下动态生长，任何调用点 sp 保持 16 对齐。
 //
-// 输出组织：.text 进入 o_out；全局初始化与字符串进入 o_dat（.data 段）；
-// 零初始化全局进入 o_bss（.bss 段）。编译成功后由 flush_output 一次写出。
+// 输出组织：.text 进入 g_state.o_out；全局初始化与字符串进入 g_state.o_dat（.data 段）；
+// 零初始化全局进入 g_state.o_bss（.bss 段）。编译成功后由 flush_output 一次写出。
 // ============================================================================
 
 // —— 行发射（frag = 无换行片段；ins = 完整指令行） ——
@@ -41,8 +41,8 @@ pub fn em_ins(s *char) int {
 
 // em_new_label：分配一个局部标签号。
 pub fn em_new_label() int {
-    c_lbl_n += 1;
-    return c_lbl_n - 1;
+    g_state.c_lbl_n += 1;
+    return g_state.c_lbl_n - 1;
 }
 
 // em_put_lbl：输出 ".L<n>" 标签名。
@@ -87,7 +87,7 @@ pub fn em_beq(n int) int {
 
 // em_scale_index：把 x0 中的下标按元素类型大小缩放（地址算术用）。
 pub fn em_scale_index(elem_tid int) int {
-    let esz int = t_types[elem_tid].size;
+    let esz int = g_state.t_types[elem_tid].size;
     if (esz == 1) {
         return 0;
     }
@@ -154,12 +154,12 @@ pub fn em_pop(reg *char) int {
 pub fn em_load_sized(tid int) int {
     // 浮点装入 d0/s0（消费方按浮点值约定使用）
     if (ty_is_float(tid) != 0) {
-        if (t_types[tid].size == 4) {
+        if (g_state.t_types[tid].size == 4) {
             return em_ins("ldr\ts0, [x10]");
         }
         return em_ins("ldr\td0, [x10]");
     }
-    let size int = t_types[tid].size;
+    let size int = g_state.t_types[tid].size;
     if (size == 8) {
         return em_ins("ldr\tx0, [x10]");
     }
@@ -185,12 +185,12 @@ pub fn em_load_sized(tid int) int {
 pub fn em_store_sized(tid int) int {
     // 浮点值在 s0/d0（与值栈约定一致），不能用 x0 存
     if (ty_is_float(tid) != 0) {
-        if (t_types[tid].size == 4) {
+        if (g_state.t_types[tid].size == 4) {
             return em_ins("str\ts0, [x10]");
         }
         return em_ins("str\td0, [x10]");
     }
-    let size int = t_types[tid].size;
+    let size int = g_state.t_types[tid].size;
     if (size == 8) {
         return em_ins("str\tx0, [x10]");
     }
@@ -299,20 +299,20 @@ pub fn em_store_local(off int, tid int) int {
 // 豁免：extern 符号（prelude/libc 与已带后缀的导入符号）；入口模块的
 // main（crt 引用裸名）。单文件模式恒不追加。
 pub fn em_sym_qualify(idx int) int {
-    if (c_module_mode == 0 || c_sym_sfx_len == 0) {
+    if (g_state.c_module_mode == 0 || g_state.c_sym_sfx_len == 0) {
         return 0;
     }
-    if ((c_syms[idx].flags & F_EXTERN) != 0) {
+    if ((g_state.c_syms[idx].flags & F_EXTERN) != 0) {
         return 0;
     }
-    if (c_is_entry_mod != 0 && c_syms[idx].name_len == 4
-        && np_data[c_syms[idx].name_off] == 'm' && np_data[c_syms[idx].name_off + 1] == 'a'
-        && np_data[c_syms[idx].name_off + 2] == 'i' && np_data[c_syms[idx].name_off + 3] == 'n') {
+    if (g_state.c_is_entry_mod != 0 && g_state.c_syms[idx].name_len == 4
+        && g_state.np_data[g_state.c_syms[idx].name_off] == 'm' && g_state.np_data[g_state.c_syms[idx].name_off + 1] == 'a'
+        && g_state.np_data[g_state.c_syms[idx].name_off + 2] == 'i' && g_state.np_data[g_state.c_syms[idx].name_off + 3] == 'n') {
         return 0;
     }
     let i int = 0;
-    for i < c_sym_sfx_len {
-        if (em_put(np_data[c_sym_sfx_off + i]) != 0) {
+    for i < g_state.c_sym_sfx_len {
+        if (em_put(g_state.np_data[g_state.c_sym_sfx_off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -322,20 +322,20 @@ pub fn em_sym_qualify(idx int) int {
 
 // dat_sym_qualify / bss_sym_qualify：同 em_sym_qualify，写 .data/.bss 缓冲。
 pub fn dat_sym_qualify(idx int) int {
-    if (c_module_mode == 0 || c_sym_sfx_len == 0) {
+    if (g_state.c_module_mode == 0 || g_state.c_sym_sfx_len == 0) {
         return 0;
     }
-    if ((c_syms[idx].flags & F_EXTERN) != 0) {
+    if ((g_state.c_syms[idx].flags & F_EXTERN) != 0) {
         return 0;
     }
-    if (c_is_entry_mod != 0 && c_syms[idx].name_len == 4
-        && np_data[c_syms[idx].name_off] == 'm' && np_data[c_syms[idx].name_off + 1] == 'a'
-        && np_data[c_syms[idx].name_off + 2] == 'i' && np_data[c_syms[idx].name_off + 3] == 'n') {
+    if (g_state.c_is_entry_mod != 0 && g_state.c_syms[idx].name_len == 4
+        && g_state.np_data[g_state.c_syms[idx].name_off] == 'm' && g_state.np_data[g_state.c_syms[idx].name_off + 1] == 'a'
+        && g_state.np_data[g_state.c_syms[idx].name_off + 2] == 'i' && g_state.np_data[g_state.c_syms[idx].name_off + 3] == 'n') {
         return 0;
     }
     let i int = 0;
-    for i < c_sym_sfx_len {
-        if (dat_put(np_data[c_sym_sfx_off + i]) != 0) {
+    for i < g_state.c_sym_sfx_len {
+        if (dat_put(g_state.np_data[g_state.c_sym_sfx_off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -344,20 +344,20 @@ pub fn dat_sym_qualify(idx int) int {
 }
 
 pub fn bss_sym_qualify(idx int) int {
-    if (c_module_mode == 0 || c_sym_sfx_len == 0) {
+    if (g_state.c_module_mode == 0 || g_state.c_sym_sfx_len == 0) {
         return 0;
     }
-    if ((c_syms[idx].flags & F_EXTERN) != 0) {
+    if ((g_state.c_syms[idx].flags & F_EXTERN) != 0) {
         return 0;
     }
-    if (c_is_entry_mod != 0 && c_syms[idx].name_len == 4
-        && np_data[c_syms[idx].name_off] == 'm' && np_data[c_syms[idx].name_off + 1] == 'a'
-        && np_data[c_syms[idx].name_off + 2] == 'i' && np_data[c_syms[idx].name_off + 3] == 'n') {
+    if (g_state.c_is_entry_mod != 0 && g_state.c_syms[idx].name_len == 4
+        && g_state.np_data[g_state.c_syms[idx].name_off] == 'm' && g_state.np_data[g_state.c_syms[idx].name_off + 1] == 'a'
+        && g_state.np_data[g_state.c_syms[idx].name_off + 2] == 'i' && g_state.np_data[g_state.c_syms[idx].name_off + 3] == 'n') {
         return 0;
     }
     let i int = 0;
-    for i < c_sym_sfx_len {
-        if (bss_put(np_data[c_sym_sfx_off + i]) != 0) {
+    for i < g_state.c_sym_sfx_len {
+        if (bss_put(g_state.np_data[g_state.c_sym_sfx_off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -367,11 +367,11 @@ pub fn bss_sym_qualify(idx int) int {
 
 pub fn em_put_sym_name(idx int) int {
     if (em_frag(tg_sym_prefix()) != 0) { return -1; }
-    let n int = c_syms[idx].name_len;
-    let off int = c_syms[idx].name_off;
+    let n int = g_state.c_syms[idx].name_len;
+    let off int = g_state.c_syms[idx].name_off;
     let i int = 0;
     for i < n {
-        if (em_put(np_data[off + i]) != 0) {
+        if (em_put(g_state.np_data[off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -382,11 +382,11 @@ pub fn em_put_sym_name(idx int) int {
 // dat_put_sym_name：输出符号汇编名到 .data/.bss 缓冲。
 pub fn dat_put_sym_name(idx int) int {
     if (dat_puts(tg_sym_prefix()) != 0) { return -1; }
-    let n int = c_syms[idx].name_len;
-    let off int = c_syms[idx].name_off;
+    let n int = g_state.c_syms[idx].name_len;
+    let off int = g_state.c_syms[idx].name_off;
     let i int = 0;
     for i < n {
-        if (dat_put(np_data[off + i]) != 0) {
+        if (dat_put(g_state.np_data[off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -401,12 +401,12 @@ pub fn dat_put_sym_name(idx int) int {
 //   本编译单元内定义的符号用 `adrp/add @PAGE/@PAGEOFF`。
 //   prelude 符号的标志位含 F_EXTERN（见 symbols.yh），据此区分。
 pub fn em_lea_global(idx int) int {
-    if ((c_syms[idx].flags & (F_RUNTIME_MEMCPY | F_RUNTIME_STRLEN
+    if ((g_state.c_syms[idx].flags & (F_RUNTIME_MEMCPY | F_RUNTIME_STRLEN
         | F_RUNTIME_MALLOC | F_RUNTIME_FREE | F_RUNTIME_PRINTF)) != 0) {
-        c_syms[idx].flags = c_syms[idx].flags | F_RUNTIME_USED;
+        g_state.c_syms[idx].flags = g_state.c_syms[idx].flags | F_RUNTIME_USED;
     }
     if (tg_darwin() != 0) {
-        if ((c_syms[idx].flags & F_EXTERN) != 0) {
+        if ((g_state.c_syms[idx].flags & F_EXTERN) != 0) {
             if (em_frag("\tadrp\tx0, ") != 0) { return -1; }
             if (em_put_sym_name(idx) != 0) { return -1; }
             if (em_frag("@GOTPAGE\n\tldr\tx0, [x0, ") != 0) { return -1; }
@@ -525,7 +525,7 @@ pub fn em_load_hidden_ret(off int) int {
 
 // em_fp_name：按类型返回浮点寄存器名（f64→d0/d1，f32→s0/s1）。
 pub fn em_fp_name(tid int, which int) *char {
-    let is64 int = (t_types[tid].size == 8).to_type(int);
+    let is64 int = (g_state.t_types[tid].size == 8).to_type(int);
     if (which == 0) {
         if (is64 != 0) { return "d0"; }
         return "s0";
@@ -599,7 +599,7 @@ pub fn em_fp_neg(tid int) int {
 pub fn em_fp_load_local(off int, tid int) int {
     if (em_lea_local_to(off) != 0) { return -1; }
     let suffix *char = "d";
-    if (t_types[tid].size == 4) { suffix = "s"; }
+    if (g_state.t_types[tid].size == 4) { suffix = "s"; }
     if (em_frag("\tldr\t") != 0) { return -1; }
     if (em_frag(suffix) != 0) { return -1; }
     if (em_frag("0, [x10]") != 0) { return -1; }
@@ -610,7 +610,7 @@ pub fn em_fp_load_local(off int, tid int) int {
 pub fn em_fp_store_local(off int, tid int) int {
     if (em_lea_local_to(off) != 0) { return -1; }
     let suffix *char = "d";
-    if (t_types[tid].size == 4) { suffix = "s"; }
+    if (g_state.t_types[tid].size == 4) { suffix = "s"; }
     if (em_frag("\tstr\t") != 0) { return -1; }
     if (em_frag(suffix) != 0) { return -1; }
     if (em_frag("0, [x10]") != 0) { return -1; }
@@ -715,7 +715,7 @@ pub fn em_unary(op int, tid int) int {
 // em_prologue：装配函数开头（函数体已在缓冲中，帧大小确定后调用）。
 // pub 修饰为 .globl；帧大小一次 sub；随后溢出寄存器实参。
 pub fn em_prologue(idx int) int {
-    if ((c_syms[idx].flags & F_PUB) != 0) {
+    if ((g_state.c_syms[idx].flags & F_PUB) != 0) {
         if (em_frag("\t.globl\t") != 0) { return -1; }
         if (em_put_sym_name(idx) != 0) { return -1; }
         if (em_frag("\n") != 0) { return -1; }
@@ -724,32 +724,32 @@ pub fn em_prologue(idx int) int {
     if (em_frag(":\n") != 0) { return -1; }
     if (em_ins("stp\tx29, x30, [sp, #-16]!") != 0) { return -1; }
     if (em_ins("mov\tx29, sp") != 0) { return -1; }
-    if (c_fp_off > 0) {
-        if (c_fp_off <= 4095) {
+    if (g_state.c_fp_off > 0) {
+        if (g_state.c_fp_off <= 4095) {
             if (em_frag("\tsub\tsp, sp, #") != 0) { return -1; }
-            if (em_puti(c_fp_off) != 0) { return -1; }
+            if (em_puti(g_state.c_fp_off) != 0) { return -1; }
             if (em_frag("\n") != 0) { return -1; }
         } else {
-            if (em_mov_imm("x9", c_fp_off.to_type(i64)) != 0) { return -1; }
+            if (em_mov_imm("x9", g_state.c_fp_off.to_type(i64)) != 0) { return -1; }
             if (em_ins("sub\tsp, sp, x9") != 0) { return -1; }
         }
     }
     // 溢出寄存器实参到各自槽位（负数标记 = 浮点寄存器）
     let i int = 0;
-    for i < c_spill_n {
-        if (em_lea_local_to_down(c_spill_off[i]) != 0) { return -1; }
-        if (c_spill_reg[i] < 0) {
-            let tid int = c_spill_size[i];
+    for i < g_state.c_spill_n {
+        if (em_lea_local_to_down(g_state.c_spill_off[i]) != 0) { return -1; }
+        if (g_state.c_spill_reg[i] < 0) {
+            let tid int = g_state.c_spill_size[i];
             let suffix *char = "d";
-            if (t_types[tid].size == 4) { suffix = "s"; }
-            let regno int = 0 - c_spill_reg[i] - 1;
+            if (g_state.t_types[tid].size == 4) { suffix = "s"; }
+            let regno int = 0 - g_state.c_spill_reg[i] - 1;
             if (em_frag("\tstr\t") != 0) { return -1; }
             if (em_frag(suffix) != 0) { return -1; }
             if (em_puti(regno) != 0) { return -1; }
             if (em_frag(", [x10]\n") != 0) { return -1; }
         } else {
             if (em_frag("\tstr\t") != 0) { return -1; }
-            if (em_frag(em_spill_reg_name(c_spill_reg[i])) != 0) { return -1; }
+            if (em_frag(em_spill_reg_name(g_state.c_spill_reg[i])) != 0) { return -1; }
             if (em_frag(", [x10]\n") != 0) { return -1; }
         }
         i += 1;
@@ -760,12 +760,12 @@ pub fn em_prologue(idx int) int {
 // em_copy_body：体缓冲逐字节转入 .text。
 pub fn em_copy_body() int {
     let i int = 0;
-    for i < o_body_len {
-        if (out_grow(&o_out, o_len, &o_cap, o_len + 1) != 0) {
+    for i < g_state.o_body_len {
+        if (out_grow(&g_state.o_out, g_state.o_len, &g_state.o_cap, g_state.o_len + 1) != 0) {
             return -1;
         }
-        o_out[o_len] = o_body[i];
-        o_len += 1;
+        g_state.o_out[g_state.o_len] = g_state.o_body[i];
+        g_state.o_len += 1;
         i += 1;
     }
     return 0;
@@ -774,7 +774,7 @@ pub fn em_copy_body() int {
 // em_epilogue：共享收尾。sp 恢复必须在标签之后——显式 return 与
 // 落底路径都汇聚到标签，二者都需要恢复 sp。
 pub fn em_epilogue() int {
-    if (em_label(c_fn_lbl) != 0) { return -1; }
+    if (em_label(g_state.c_fn_lbl) != 0) { return -1; }
     if (em_ins("mov\tsp, x29") != 0) { return -1; }
     if (em_ins("ldp\tx29, x30, [sp], #16") != 0) { return -1; }
     if (em_ins("ret") != 0) { return -1; }
@@ -788,8 +788,8 @@ pub fn em_alloc_local(size int) int {
     if (n == 0) {
         n = TG_STACK_ALIGN;
     }
-    c_fp_off += n;
-    return c_fp_off;
+    g_state.c_fp_off += n;
+    return g_state.c_fp_off;
 }
 
 // em_call_direct：直接调用。
@@ -813,7 +813,7 @@ pub fn em_emit_linux_syscall_stub(idx int) int {
 }
 
 pub fn em_call_direct(idx int) int {
-    if ((c_syms[idx].flags & F_LINUX_SYSCALL) != 0) {
+    if ((g_state.c_syms[idx].flags & F_LINUX_SYSCALL) != 0) {
         if (tg_darwin() != 0) {
             return fail("Linux 系统调用 intrinsic 不能用于 Darwin 目标");
         }
@@ -826,14 +826,14 @@ pub fn em_call_direct(idx int) int {
         if (em_ins("mov\tx5, x6") != 0) { return -1; }
         return em_ins("svc\t#0");
     }
-    if ((c_syms[idx].flags & (F_RUNTIME_MEMCPY | F_RUNTIME_STRLEN
+    if ((g_state.c_syms[idx].flags & (F_RUNTIME_MEMCPY | F_RUNTIME_STRLEN
         | F_RUNTIME_MALLOC | F_RUNTIME_FREE | F_RUNTIME_PRINTF)) != 0) {
-        c_syms[idx].flags = c_syms[idx].flags | F_RUNTIME_USED;
+        g_state.c_syms[idx].flags = g_state.c_syms[idx].flags | F_RUNTIME_USED;
         if (em_frag("\tbl\t") != 0) { return -1; }
         if (em_put_sym_name(idx) != 0) { return -1; }
         return em_frag("\n");
     }
-    if ((c_syms[idx].flags & F_INTRINSIC) != 0) {
+    if ((g_state.c_syms[idx].flags & F_INTRINSIC) != 0) {
         return fail("内部错误：目标内建调用没有后端实现");
     }
     if (em_frag("\tbl\t") != 0) { return -1; }
@@ -951,8 +951,8 @@ pub fn dat_puthex(v i64) int {
 // em_data_string：解码字符串字面量写入 .data（NUL 结尾），返回标签号。
 // 数据标签用独立前缀 .LD 与独立计数器，避免与代码标签同名冲突。
 pub fn em_data_string(start int, slen int) int {
-    let lbl int = c_data_n;
-    c_data_n += 1;
+    let lbl int = g_state.c_data_n;
+    g_state.c_data_n += 1;
     return em_data_string_body(start, slen, lbl);
 }
 
@@ -967,9 +967,9 @@ pub fn em_data_string_body(start int, slen int, lbl int) int {
     let i int = start + 1;
     let end int = start + slen - 1;
     for i < end {
-        let b u8 = c_src[i];
+        let b u8 = g_state.c_src[i];
         if (b == '\\') {
-            let e u8 = c_src[i + 1];
+            let e u8 = g_state.c_src[i + 1];
             let out int = 0;
             if (e == 'n') { out = 10; }
             if (e == 'r') { out = 13; }
@@ -983,7 +983,7 @@ pub fn em_data_string_body(start int, slen int, lbl int) int {
             if (e == '"') { out = 34; }
             if (e == '\\') { out = 92; }
             if (e == 'x') {
-                out = hexval(c_src[i + 2]) * 16 + hexval(c_src[i + 3]);
+                out = hexval(g_state.c_src[i + 2]) * 16 + hexval(g_state.c_src[i + 3]);
                 i += 4;
             } else {
                 i += 2;
@@ -1006,7 +1006,7 @@ pub fn em_data_string_body(start int, slen int, lbl int) int {
 
 // em_data_scalar：常量值按类型写入 .data。
 pub fn em_data_scalar(tid int, v i64) int {
-    let size int = t_types[tid].size;
+    let size int = g_state.t_types[tid].size;
     let unit *char = ".byte\t";
     if (size == 8) { unit = ".xword\t"; }
     if (size == 4) { unit = ".word\t"; }
@@ -1021,7 +1021,7 @@ pub fn em_data_symbol_header(idx int, align int) int {
     if (dat_puts(".balign\t") != 0) { return -1; }
     if (dat_puti(align) != 0) { return -1; }
     if (dat_put('\n') != 0) { return -1; }
-    if ((c_syms[idx].flags & F_PUB) != 0) {
+    if ((g_state.c_syms[idx].flags & F_PUB) != 0) {
         if (dat_puts(".globl\t") != 0) { return -1; }
         if (dat_put_sym_name(idx) != 0) { return -1; }
         if (dat_put('\n') != 0) { return -1; }
@@ -1033,11 +1033,11 @@ pub fn em_data_symbol_header(idx int, align int) int {
 // bss_put_sym_name：.bss 缓冲输出符号名（Darwin 加 "_" 前缀）。
 pub fn bss_put_sym_name(idx int) int {
     if (bss_puts(tg_sym_prefix()) != 0) { return -1; }
-    let n int = c_syms[idx].name_len;
-    let off int = c_syms[idx].name_off;
+    let n int = g_state.c_syms[idx].name_len;
+    let off int = g_state.c_syms[idx].name_off;
     let i int = 0;
     for i < n {
-        if (bss_put(np_data[off + i]) != 0) {
+        if (bss_put(g_state.np_data[off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -1050,7 +1050,7 @@ pub fn em_bss_symbol(idx int, size int, align int) int {
     if (bss_puts(".balign\t") != 0) { return -1; }
     if (bss_puti(align) != 0) { return -1; }
     if (bss_put('\n') != 0) { return -1; }
-    if ((c_syms[idx].flags & F_PUB) != 0) {
+    if ((g_state.c_syms[idx].flags & F_PUB) != 0) {
         if (bss_puts(".globl\t") != 0) { return -1; }
         if (bss_put_sym_name(idx) != 0) { return -1; }
         if (bss_put('\n') != 0) { return -1; }

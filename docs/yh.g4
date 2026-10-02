@@ -32,19 +32,31 @@ sourceFile
     : topLevelDecl* EOF
     ;
 
-// 顶层声明：可带 `pub` 导出标记；默认仅本文件可见。
+// 顶层声明：`pub` 导出标记。struct/union/enum **必须**经 `pub` 声明
+// （`pub struct` / `pub union` / `pub enum`；struct/union 全部字段公开，
+// enum 成员常量随枚举导出）；let/const/fn/type 的 pub 可选，默认仅本
+// 模块可见。**let 不支持导出**：`pub let` 非法（见 plainDeclBody 注释）。
+// 类型声明不允许嵌套：struct/union/enum/type 只能出现在顶层。
 topLevelDecl
-    : 'pub'? topLevelDeclBody
+    : 'pub' exportedDeclBody
+    | plainDeclBody
     ;
 
-topLevelDeclBody
-    : letDecl
-    | constDecl
+exportedDeclBody
+    : constDecl
     | fnDecl
     | typeDecl
     | structDecl
     | unionDecl
     | enumDecl
+    ;
+
+// 不带 pub 的顶层声明：struct/union/enum 不在其中——裸写即语法错误。
+plainDeclBody
+    : letDecl
+    | constDecl
+    | fnDecl
+    | typeDecl
     ;
 
 /*
@@ -154,26 +166,34 @@ typeDecl
 
 // --- struct / union 声明 ---
 
-// struct：字段按「名字 类型」逐行书写，与 let 同形。
+// struct/union 只能以 `pub struct` / `pub union` 形式声明（'pub' 由
+// topLevelDecl 消费）：类型必然导出，且**全部字段公开**——字段不再接受
+// pub 前缀，也没有私有字段；跨模块可见性只由类型本身的 pub 决定。
+// 类型声明禁止嵌套（见 topLevelDecl 注释）。
+// struct 字段按「名字 类型」逐行书写，与 let 同形。
 // 字段顺序即内存布局顺序；不支持位域、packed、自定义对齐。
 // 字段名允许保留字（memberName）——union 的标签域 `type int;` 因此可用。
 structDecl
     : 'struct' IDENT '{' fieldDecl* '}'
     ;
 
-// union：同一块内存的互斥视图。
+// union：同一块内存的互斥视图。与 struct 同规则：必须 `pub union`，
+// 全部字段公开。
 unionDecl
     : 'union' IDENT '{' fieldDecl* '}'
     ;
 
-// 字段声明。字段名放开保留字（见 memberName）。
+// 字段声明。字段名放开保留字（见 memberName）；不写 pub 前缀
+// （`pub struct` 的字段一律公开），`pub` 仅可作为字段名出现。
 fieldDecl
     : memberName typeRef ';'
     ;
 
 // --- enum 声明 ---
 
-// enum：成员逐个书写，可带显式判别值；未指定时从 0 递增。
+// enum：必须以 `pub enum` 声明（'pub' 由 topLevelDecl 消费）；成员常量
+// 随枚举导出（F_PUB），跨模块以 `模块名.成员` 引用。成员逐个书写，
+// 可带显式判别值；未指定时从 0 递增。
 enumDecl
     : 'enum' IDENT '{' enumItem* '}'
     ;

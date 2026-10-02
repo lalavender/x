@@ -21,7 +21,6 @@ ifndef TOP
  INCLUDED = no
 TOPSRC = $(TOP)
 
-VERSION ?= $(shell cat $(TOPSRC)/VERSION)
 EXESUF =
 ifeq ($(shell uname -s),Darwin)
  CONFIG_OSX = yes

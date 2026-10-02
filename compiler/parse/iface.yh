@@ -20,9 +20,9 @@ import lex;
 // ============================================================================
 
 // —— 接口发射缓冲（独立于汇编缓冲；成功后一次写出） ——
-pub let if_buf *u8 = 0;
-pub let if_len int = 0;
-pub let if_cap int = 0;
+let if_buf *u8 = 0;
+let if_len int = 0;
+let if_cap int = 0;
 
 // if_put / if_puts / if_puti / if_puti64：接口文本写入。
 pub fn if_put(b u8) int {
@@ -78,9 +78,10 @@ pub fn if_puti(v int) int {
 
 // if_put_np：写名字池字节区间。
 pub fn if_put_np(off int, olen int) int {
+    let gs *gen.GenState = gen.G();
     let i int = 0;
     for i < olen {
-        if (if_put(gen.np_data[off + i]) != 0) {
+        if (if_put(gs.np_data[off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -91,7 +92,8 @@ pub fn if_put_np(off int, olen int) int {
 // if_emit_type：把类型编号渲染为 yh 类型引用文本。
 // own_name_base：本模块类型名的 t_names 起始下标（跨模块引用拒绝）。
 pub fn if_emit_type(tid int, own_name_base int) int {
-    let k int = gen.t_types[tid].kind;
+    let gs *gen.GenState = gen.G();
+    let k int = gs.t_types[tid].kind;
     if (k == gen.TY_VOID) { return if_puts("void"); }
     if (k == gen.TY_BOOL) { return if_puts("bool"); }
     if (k == gen.TY_CHAR) { return if_puts("char"); }
@@ -107,42 +109,42 @@ pub fn if_emit_type(tid int, own_name_base int) int {
     if (k == gen.TY_F64) { return if_puts("f64"); }
     if (k == gen.TY_PTR) {
         if (if_put('*') != 0) { return -1; }
-        return if_emit_type(gen.t_types[tid].elem, own_name_base);
+        return if_emit_type(gs.t_types[tid].elem, own_name_base);
     }
     if (k == gen.TY_ARRAY) {
         if (if_put('[') != 0) { return -1; }
-        if (if_puti(gen.t_types[tid].len) != 0) { return -1; }
+        if (if_puti(gs.t_types[tid].len) != 0) { return -1; }
         if (if_put(']') != 0) { return -1; }
-        return if_emit_type(gen.t_types[tid].elem, own_name_base);
+        return if_emit_type(gs.t_types[tid].elem, own_name_base);
     }
     if (k == gen.TY_SLICE) {
         if (if_puts("[]") != 0) { return -1; }
-        return if_emit_type(gen.t_types[tid].elem, own_name_base);
+        return if_emit_type(gs.t_types[tid].elem, own_name_base);
     }
     if (k == gen.TY_FN) {
         if (if_puts("fn(") != 0) { return -1; }
-        let sig int = gen.t_types[tid].sub;
-        let np2 int = gen.t_sig_np[sig];
+        let sig int = gs.t_types[tid].sub;
+        let np2 int = gs.t_sig_np[sig];
         let i int = 0;
         for i < np2 {
             if (i > 0) {
                 if (if_puts(", ") != 0) { return -1; }
             }
-            if (if_emit_type(gen.t_sig_params[gen.t_sig_first[sig] + i], own_name_base) != 0) {
+            if (if_emit_type(gs.t_sig_params[gs.t_sig_first[sig] + i], own_name_base) != 0) {
                 return -1;
             }
             i += 1;
         }
         if (if_puts(")") != 0) { return -1; }
-        return if_emit_type(gen.t_sig_ret[sig], own_name_base);
+        return if_emit_type(gs.t_sig_ret[sig], own_name_base);
     }
     // 具名类型（struct/union/enum/别名目标）：全表查询——pub 签名可引用
     // 本模块类型，也可引用已加载接口带来的跨模块类型（mangle 名原样
     // 写出，下游加载时作为普通类型名登记）
     let found int = -1;
     let i2 int = 0;
-    for i2 < gen.t_name_n {
-        if (gen.t_names[i2].type_id == tid) {
+    for i2 < gs.t_name_n {
+        if (gs.t_names[i2].type_id == tid) {
             found = i2;
             break;
         }
@@ -151,66 +153,67 @@ pub fn if_emit_type(tid int, own_name_base int) int {
     if (found < 0) {
         return gen.sem_err("pub 接口引用了非具名类型（无法导出）");
     }
-    if (gen.t_names[found].is_pub == 0) {
+    if (gs.t_names[found].is_pub == 0) {
         return gen.sem_err("pub 接口引用了非 pub 类型（请将该类型声明为 pub）");
     }
-    return if_put_np(gen.t_names[found].name_off, gen.t_names[found].name_len);
+    return if_put_np(gs.t_names[found].name_off, gs.t_names[found].name_len);
 }
 
 // iface_emit：把本模块 pub 接口写到 path。
 // sym_base/tname_base：本模块登记起点（此前是 prelude 与已加载接口）。
 pub fn iface_emit(path *char, sym_base int, tname_base int) int {
+    let gs *gen.GenState = gen.G();
     if_len = 0;
     // 头行
     if (if_puts("// yh-iface v1 arch=arm64 suffix=") != 0) { return -1; }
-    if (if_put_np(gen.c_sym_sfx_off, gen.c_sym_sfx_len) != 0) { return -1; }
+    if (if_put_np(gs.c_sym_sfx_off, gs.c_sym_sfx_len) != 0) { return -1; }
     if (if_put('\n') != 0) { return -1; }
     // 类型（声明序）
     let ti int = tname_base;
-    for ti < gen.t_name_n {
-        if (gen.t_names[ti].is_pub == 0) {
+    for ti < gs.t_name_n {
+        if (gs.t_names[ti].is_pub == 0) {
             ti += 1;
             continue;
         }
-        let tid int = gen.t_names[ti].type_id;
-        if (gen.t_names[ti].form == 1 || gen.t_names[ti].form == 2) {
+        let tid int = gs.t_names[ti].type_id;
+        if (gs.t_names[ti].form == 1 || gs.t_names[ti].form == 2) {
             if (if_puts("pub ") != 0) { return -1; }
-            if (gen.t_names[ti].form == 1) {
+            if (gs.t_names[ti].form == 1) {
                 if (if_puts("struct ") != 0) { return -1; }
             } else {
                 if (if_puts("union ") != 0) { return -1; }
             }
-            if (if_put_np(gen.t_names[ti].name_off, gen.t_names[ti].name_len) != 0) { return -1; }
+            if (if_put_np(gs.t_names[ti].name_off, gs.t_names[ti].name_len) != 0) { return -1; }
             if (if_puts(" {\n") != 0) { return -1; }
-            let st int = gen.t_types[tid].sub;
-            let nf int = gen.t_types[tid].len;
+            let st int = gs.t_types[tid].sub;
+            let nf int = gs.t_types[tid].len;
             let fi int = 0;
             for fi < nf {
-                if (gen.t_fields[st + fi].is_pub != 0) {
+                if (gs.t_fields[st + fi].is_pub != 0) {
                     if (if_puts("    pub ") != 0) { return -1; }
                 } else {
                     if (if_puts("    ") != 0) { return -1; }
                 }
-                if (if_put_np(gen.t_fields[st + fi].name_off, gen.t_fields[st + fi].name_len) != 0) { return -1; }
+                if (if_put_np(gs.t_fields[st + fi].name_off, gs.t_fields[st + fi].name_len) != 0) { return -1; }
                 if (if_put(' ') != 0) { return -1; }
-                if (if_emit_type(gen.t_fields[st + fi].type_id, tname_base) != 0) { return -1; }
+                if (if_emit_type(gs.t_fields[st + fi].type_id, tname_base) != 0) { return -1; }
                 if (if_puts(";\n") != 0) { return -1; }
                 fi += 1;
             }
             if (if_puts("}\n") != 0) { return -1; }
-        } else if (gen.t_names[ti].form == 3) {
+        } else if (gs.t_names[ti].form == 3) {
             if (if_puts("pub enum ") != 0) { return -1; }
-            if (if_put_np(gen.t_names[ti].name_off, gen.t_names[ti].name_len) != 0) { return -1; }
+            if (if_put_np(gs.t_names[ti].name_off, gs.t_names[ti].name_len) != 0) { return -1; }
             if (if_puts(" {\n") != 0) { return -1; }
             // 成员 = 类型为该枚举的全局常量（本模块登记的）
             let si int = sym_base;
-            for si < gen.c_sym_n {
-                if (gen.c_syms[si].kind == gen.SYM_CONST && gen.c_syms[si].type_id == tid
-                    && (gen.c_syms[si].flags & gen.F_EXTERN) == 0) {
+            for si < gs.c_sym_n {
+                if (gs.c_syms[si].kind == gen.SYM_CONST && gs.c_syms[si].type_id == tid
+                    && (gs.c_syms[si].flags & gen.F_EXTERN) == 0) {
                     if (if_puts("    ") != 0) { return -1; }
-                    if (if_put_np(gen.c_syms[si].name_off, gen.c_syms[si].name_len) != 0) { return -1; }
+                    if (if_put_np(gs.c_syms[si].name_off, gs.c_syms[si].name_len) != 0) { return -1; }
                     if (if_puts(" = ") != 0) { return -1; }
-                    if (if_puti(gen.c_syms[si].cval.to_type(int)) != 0) { return -1; }
+                    if (if_puti(gs.c_syms[si].cval.to_type(int)) != 0) { return -1; }
                     if (if_puts(";\n") != 0) { return -1; }
                 }
                 si += 1;
@@ -219,7 +222,7 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
         } else {
             // type 别名
             if (if_puts("pub type ") != 0) { return -1; }
-            if (if_put_np(gen.t_names[ti].name_off, gen.t_names[ti].name_len) != 0) { return -1; }
+            if (if_put_np(gs.t_names[ti].name_off, gs.t_names[ti].name_len) != 0) { return -1; }
             if (if_puts(" = ") != 0) { return -1; }
             if (if_emit_type(tid, tname_base) != 0) { return -1; }
             if (if_puts(";\n") != 0) { return -1; }
@@ -228,23 +231,23 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
     }
     // 值符号：fn / const / let
     let si2 int = sym_base;
-    for si2 < gen.c_sym_n {
-        let fl int = gen.c_syms[si2].flags;
+    for si2 < gs.c_sym_n {
+        let fl int = gs.c_syms[si2].flags;
         if ((fl & gen.F_PUB) == 0 || (fl & gen.F_EXTERN) != 0) {
             si2 += 1;
             continue;
         }
-        if (gen.c_syms[si2].kind == gen.SYM_FN) {
+        if (gs.c_syms[si2].kind == gen.SYM_FN) {
             // 类型化变参/裸变参不导出（前者为模块私有便利，后者仅 prelude）
-            let ftid int = gen.c_syms[si2].type_id;
-            let sig int = gen.t_types[ftid].sub;
-            if (gen.t_sig_vararg[sig] != 0) {
+            let ftid int = gs.c_syms[si2].type_id;
+            let sig int = gs.t_types[ftid].sub;
+            if (gs.t_sig_vararg[sig] != 0) {
                 return gen.sem_err("变参函数不能导出为 pub");
             }
             if (if_puts("pub fn ") != 0) { return -1; }
-            if (if_put_np(gen.c_syms[si2].name_off, gen.c_syms[si2].name_len) != 0) { return -1; }
+            if (if_put_np(gs.c_syms[si2].name_off, gs.c_syms[si2].name_len) != 0) { return -1; }
             if (if_put('(') != 0) { return -1; }
-            let np2 int = gen.t_sig_np[sig];
+            let np2 int = gs.t_sig_np[sig];
             let i int = 0;
             for i < np2 {
                 if (i > 0) {
@@ -253,29 +256,32 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
                 if (if_puts("p") != 0) { return -1; }
                 if (if_puti(i) != 0) { return -1; }
                 if (if_put(' ') != 0) { return -1; }
-                if (if_emit_type(gen.t_sig_params[gen.t_sig_first[sig] + i], tname_base) != 0) { return -1; }
+                if (if_emit_type(gs.t_sig_params[gs.t_sig_first[sig] + i], tname_base) != 0) { return -1; }
                 i += 1;
             }
             if (if_puts(") ") != 0) { return -1; }
-            if (if_emit_type(gen.t_sig_ret[sig], tname_base) != 0) { return -1; }
+            if (if_emit_type(gs.t_sig_ret[sig], tname_base) != 0) { return -1; }
             if (if_puts(" { }\n") != 0) { return -1; }
-        } else if (gen.c_syms[si2].kind == gen.SYM_CONST) {
+        } else if (gs.c_syms[si2].kind == gen.SYM_CONST) {
+            // enum 成员常量已随 pub enum 体导出（成员行），这里跳过——
+            // 否则接口里重复登记，加载侧报重定义。
+            if (gs.t_types[gs.c_syms[si2].type_id].kind == gen.TY_ENUM) {
+                si2 += 1;
+                continue;
+            }
             if ((fl & gen.F_ADDR) != 0) {
                 return gen.sem_err("pub 指针常量（字符串）暂不支持跨模块导出");
             }
             if (if_puts("pub const ") != 0) { return -1; }
-            if (if_put_np(gen.c_syms[si2].name_off, gen.c_syms[si2].name_len) != 0) { return -1; }
+            if (if_put_np(gs.c_syms[si2].name_off, gs.c_syms[si2].name_len) != 0) { return -1; }
             if (if_put(' ') != 0) { return -1; }
-            if (if_emit_type(gen.c_syms[si2].type_id, tname_base) != 0) { return -1; }
+            if (if_emit_type(gs.c_syms[si2].type_id, tname_base) != 0) { return -1; }
             if (if_puts(" = ") != 0) { return -1; }
-            if (if_puti(gen.c_syms[si2].cval.to_type(int)) != 0) { return -1; }
+            if (if_puti(gs.c_syms[si2].cval.to_type(int)) != 0) { return -1; }
             if (if_puts(";\n") != 0) { return -1; }
-        } else if (gen.c_syms[si2].kind == gen.SYM_VAR) {
-            if (if_puts("pub let ") != 0) { return -1; }
-            if (if_put_np(gen.c_syms[si2].name_off, gen.c_syms[si2].name_len) != 0) { return -1; }
-            if (if_put(' ') != 0) { return -1; }
-            if (if_emit_type(gen.c_syms[si2].type_id, tname_base) != 0) { return -1; }
-            if (if_puts(";\n") != 0) { return -1; }
+        } else if (gs.c_syms[si2].kind == gen.SYM_VAR) {
+            // 2026-10-02「let 不导出」：可变全局不再跨模块导出，接口停发
+            // pub let 行；编译器状态经 GenState + gen.G() 指针访问。
         }
         si2 += 1;
     }
@@ -313,18 +319,19 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
 // iface_header_suffix：校验头行并提取 suffix 到出参（入名字池）。
 // c_src/c_src_len 为接口文件内容。成功 0；格式不符 -1（带诊断）。
 pub fn iface_header_suffix(path *char, off *int, olen *int) int {
+    let gs *gen.GenState = gen.G();
     let magic *char = "// yh-iface v1 arch=arm64 suffix=";
     let mlen int = 33;
     let i int = 0;
     for i < mlen {
-        if (i >= gen.c_src_len || gen.c_src[i] != magic[i].to_type(u8)) {
+        if (i >= gs.c_src_len || gs.c_src[i] != magic[i].to_type(u8)) {
             let buf [320]u8;
             let n int = 0;
             n = gen.append_str(buf, n, "yh: 接口不兼容（头行不是 yh-iface v1 arch=arm64）: ");
             n = gen.append_str(buf, n, path);
             n = gen.append_byte(buf, n, '\n');
             gen.write_all(2, buf, n);
-            gen.c_errors += 1;
+            gs.c_errors += 1;
             return -1;
         }
         i += 1;
@@ -332,11 +339,11 @@ pub fn iface_header_suffix(path *char, off *int, olen *int) int {
     // suffix 到行尾
     let s int = mlen;
     let e int = s;
-    for e < gen.c_src_len && gen.c_src[e] != '\n' {
+    for e < gs.c_src_len && gs.c_src[e] != '\n' {
         e += 1;
     }
     if (e == s) {
-        gen.c_errors += 1;
+        gs.c_errors += 1;
         let out2 [340]u8;
         let on2 int = 0;
         on2 = gen.append_str(out2, on2, "yh: 接口头缺少 suffix: ");
@@ -345,7 +352,7 @@ pub fn iface_header_suffix(path *char, off *int, olen *int) int {
         gen.write_all(2, out2, on2);
         return -1;
     }
-    let o int = gen.tml_intern_str(gen.c_src, s, e - s);
+    let o int = gen.tml_intern_str(gs.c_src, s, e - s);
     if (o < 0) {
         return -1;
     }
@@ -357,6 +364,7 @@ pub fn iface_header_suffix(path *char, off *int, olen *int) int {
 // iface_load：加载一份接口并登记为当前编译单元的导入模块。
 // bind_off/len：导入绑定名（=模块名）。返回 ModInfo 下标；失败 -1。
 pub fn iface_load(path *char, bind_off int, bind_len int) int {
+    let gs *gen.GenState = gen.G();
     if (gen.read_source(path) != 0) {
         return -1;
     }
@@ -365,11 +373,11 @@ pub fn iface_load(path *char, bind_off int, bind_len int) int {
     if (iface_header_suffix(path, &sfx_off, &sfx_len) != 0) {
         return -1;
     }
-    let home int = gen.c_mod_home_next;
-    gen.c_mod_home_next += 1;
+    let home int = gs.c_mod_home_next;
+    gs.c_mod_home_next += 1;
     // 登记 ModInfo（ns 随后填充）
-    if (gen.c_mod_n == gen.c_mod_cap) {
-        let ncap int = gen.c_mod_cap * 2;
+    if (gs.c_mod_n == gs.c_mod_cap) {
+        let ncap int = gs.c_mod_cap * 2;
         if (ncap == 0) {
             ncap = 8;
         }
@@ -377,80 +385,80 @@ pub fn iface_load(path *char, bind_off int, bind_len int) int {
         if (nd == 0) {
             return gen.fail("内存分配失败");
         }
-        if (gen.c_mod_n > 0) {
-            memcpy(nd, gen.c_mods, (gen.c_mod_n * sizeof(gen.ModInfo)).to_type(u64));
+        if (gs.c_mod_n > 0) {
+            memcpy(nd, gs.c_mods, (gs.c_mod_n * sizeof(gen.ModInfo)).to_type(u64));
         }
-        free(gen.c_mods);
-        gen.c_mods = nd;
-        gen.c_mod_cap = ncap;
+        free(gs.c_mods);
+        gs.c_mods = nd;
+        gs.c_mod_cap = ncap;
     }
-    let mi int = gen.c_mod_n;
-    gen.c_mods[mi].bind_off = bind_off;
-    gen.c_mods[mi].bind_len = bind_len;
-    gen.c_mods[mi].prefix_off = sfx_off;
-    gen.c_mods[mi].prefix_len = sfx_len;
-    gen.c_mods[mi].home = home;
-    gen.c_mods[mi].ns = 0;
-    gen.c_mods[mi].ns_n = 0;
-    gen.c_mods[mi].ns_cap = 0;
-    gen.c_mod_n += 1;
+    let mi int = gs.c_mod_n;
+    gs.c_mods[mi].bind_off = bind_off;
+    gs.c_mods[mi].bind_len = bind_len;
+    gs.c_mods[mi].prefix_off = sfx_off;
+    gs.c_mods[mi].prefix_len = sfx_len;
+    gs.c_mods[mi].home = home;
+    gs.c_mods[mi].ns = 0;
+    gs.c_mods[mi].ns_n = 0;
+    gs.c_mods[mi].ns_cap = 0;
+    gs.c_mod_n += 1;
     // 正文按 yh 源码登记：pass1 + pass2a（折叠常量；c_iface_load 抑制发射）
-    gen.c_tok_n = 0;
-    gen.c_pos = 0;
-    gen.c_compile = 1;
-    gen.c_pass = 1;
-    gen.c_iface_load = 1;
-    let sym_base int = gen.c_sym_n;
-    let tname_base int = gen.t_name_n;
+    gs.c_tok_n = 0;
+    gs.c_pos = 0;
+    gs.c_compile = 1;
+    gs.c_pass = 1;
+    gs.c_iface_load = 1;
+    let sym_base int = gs.c_sym_n;
+    let tname_base int = gs.t_name_n;
     if (lex.lex_all() != 0) {
-        gen.c_iface_load = 0;
+        gs.c_iface_load = 0;
         return -1;
     }
     if (mod_parse_head() != 0) {
-        gen.c_iface_load = 0;
+        gs.c_iface_load = 0;
         return -1;
     }
     if (parse_source() != 0) {
-        gen.c_iface_load = 0;
+        gs.c_iface_load = 0;
         return -1;
     }
-    if (gen.c_errors > 0) {
-        gen.c_iface_load = 0;
+    if (gs.c_errors > 0) {
+        gs.c_iface_load = 0;
         return -1;
     }
-    gen.c_pos = 0;
-    gen.c_pass = 2;
+    gs.c_pos = 0;
+    gs.c_pass = 2;
     if (parse_source_globals() != 0) {
-        gen.c_iface_load = 0;
+        gs.c_iface_load = 0;
         return -1;
     }
-    if (gen.c_errors > 0) {
-        gen.c_iface_load = 0;
+    if (gs.c_errors > 0) {
+        gs.c_iface_load = 0;
         return -1;
     }
-    gen.c_iface_load = 0;
+    gs.c_iface_load = 0;
     // ns 登记 + 名字改写（短名 → 短名+后缀；类型名同样改写避免冲突）
     let si int = sym_base;
-    for si < gen.c_sym_n {
-        if ((gen.c_syms[si].flags & gen.F_PUB) == 0) {
+    for si < gs.c_sym_n {
+        if ((gs.c_syms[si].flags & gen.F_PUB) == 0) {
             si += 1;
             continue;
         }
-        if (mod_ns_add(mi, gen.c_syms[si].name_off, gen.c_syms[si].name_len, si, -1) != 0) {
+        if (mod_ns_add(mi, gs.c_syms[si].name_off, gs.c_syms[si].name_len, si, -1) != 0) {
             return -1;
         }
         if (sym_mangle(si, sfx_off, sfx_len) != 0) {
             return -1;
         }
-        gen.c_syms[si].flags |= gen.F_EXTERN;
+        gs.c_syms[si].flags |= gen.F_EXTERN;
         si += 1;
     }
     let ti int = tname_base;
-    for ti < gen.t_name_n {
-        if (gen.t_home[gen.t_names[ti].type_id] < 0) {
-            gen.t_home[gen.t_names[ti].type_id] = home;
+    for ti < gs.t_name_n {
+        if (gs.t_home[gs.t_names[ti].type_id] < 0) {
+            gs.t_home[gs.t_names[ti].type_id] = home;
         }
-        if (mod_ns_add(mi, gen.t_names[ti].name_off, gen.t_names[ti].name_len, -1, gen.t_names[ti].type_id) != 0) {
+        if (mod_ns_add(mi, gs.t_names[ti].name_off, gs.t_names[ti].name_len, -1, gs.t_names[ti].type_id) != 0) {
             return -1;
         }
         if (tname_mangle(ti, sfx_off, sfx_len) != 0) {
@@ -459,15 +467,16 @@ pub fn iface_load(path *char, bind_off int, bind_len int) int {
         ti += 1;
     }
     // 恢复编译状态（调用方继续编译本模块源文件）
-    gen.c_tok_n = 0;
-    gen.c_pos = 0;
+    gs.c_tok_n = 0;
+    gs.c_pos = 0;
     return mi;
 }
 
 // mod_ns_add：向 ModInfo 追加导出名条目。
 pub fn mod_ns_add(mi int, name_off int, name_len int, sym int, tid int) int {
-    if (gen.c_mods[mi].ns_n == gen.c_mods[mi].ns_cap) {
-        let ncap int = gen.c_mods[mi].ns_cap * 2;
+    let gs *gen.GenState = gen.G();
+    if (gs.c_mods[mi].ns_n == gs.c_mods[mi].ns_cap) {
+        let ncap int = gs.c_mods[mi].ns_cap * 2;
         if (ncap == 0) {
             ncap = 16;
         }
@@ -475,39 +484,40 @@ pub fn mod_ns_add(mi int, name_off int, name_len int, sym int, tid int) int {
         if (nd == 0) {
             return gen.fail("内存分配失败");
         }
-        if (gen.c_mods[mi].ns_n > 0) {
-            memcpy(nd, gen.c_mods[mi].ns, (gen.c_mods[mi].ns_n * sizeof(gen.ModNsEnt)).to_type(u64));
+        if (gs.c_mods[mi].ns_n > 0) {
+            memcpy(nd, gs.c_mods[mi].ns, (gs.c_mods[mi].ns_n * sizeof(gen.ModNsEnt)).to_type(u64));
         }
-        free(gen.c_mods[mi].ns);
-        gen.c_mods[mi].ns = nd;
-        gen.c_mods[mi].ns_cap = ncap;
+        free(gs.c_mods[mi].ns);
+        gs.c_mods[mi].ns = nd;
+        gs.c_mods[mi].ns_cap = ncap;
     }
-    let e int = gen.c_mods[mi].ns_n;
-    gen.c_mods[mi].ns[e].name_off = name_off;
-    gen.c_mods[mi].ns[e].name_len = name_len;
-    gen.c_mods[mi].ns[e].sym = sym;
-    gen.c_mods[mi].ns[e].tid = tid;
-    gen.c_mods[mi].ns_n += 1;
+    let e int = gs.c_mods[mi].ns_n;
+    gs.c_mods[mi].ns[e].name_off = name_off;
+    gs.c_mods[mi].ns[e].name_len = name_len;
+    gs.c_mods[mi].ns[e].sym = sym;
+    gs.c_mods[mi].ns[e].tid = tid;
+    gs.c_mods[mi].ns_n += 1;
     return 0;
 }
 
 // sym_mangle：把符号名改写为「短名+后缀」。
 pub fn sym_mangle(si int, sfx_off int, sfx_len int) int {
-    let nlen int = gen.c_syms[si].name_len + sfx_len;
+    let gs *gen.GenState = gen.G();
+    let nlen int = gs.c_syms[si].name_len + sfx_len;
     let tmp [512]u8;
     if (nlen > 500) {
         return gen.fail("符号名过长");
     }
     let n int = 0;
     let i int = 0;
-    for i < gen.c_syms[si].name_len {
-        tmp[n] = gen.np_data[gen.c_syms[si].name_off + i];
+    for i < gs.c_syms[si].name_len {
+        tmp[n] = gs.np_data[gs.c_syms[si].name_off + i];
         n += 1;
         i += 1;
     }
     i = 0;
     for i < sfx_len {
-        tmp[n] = gen.np_data[sfx_off + i];
+        tmp[n] = gs.np_data[sfx_off + i];
         n += 1;
         i += 1;
     }
@@ -515,28 +525,29 @@ pub fn sym_mangle(si int, sfx_off int, sfx_len int) int {
     if (off < 0) {
         return -1;
     }
-    gen.c_syms[si].name_off = off;
-    gen.c_syms[si].name_len = n;
+    gs.c_syms[si].name_off = off;
+    gs.c_syms[si].name_len = n;
     return 0;
 }
 
 // tname_mangle：类型名同样改写（避免与使用者同名类型冲突）。
 pub fn tname_mangle(ti int, sfx_off int, sfx_len int) int {
-    let nlen int = gen.t_names[ti].name_len + sfx_len;
+    let gs *gen.GenState = gen.G();
+    let nlen int = gs.t_names[ti].name_len + sfx_len;
     let tmp [512]u8;
     if (nlen > 500) {
         return gen.fail("类型名过长");
     }
     let n int = 0;
     let i int = 0;
-    for i < gen.t_names[ti].name_len {
-        tmp[n] = gen.np_data[gen.t_names[ti].name_off + i];
+    for i < gs.t_names[ti].name_len {
+        tmp[n] = gs.np_data[gs.t_names[ti].name_off + i];
         n += 1;
         i += 1;
     }
     i = 0;
     for i < sfx_len {
-        tmp[n] = gen.np_data[sfx_off + i];
+        tmp[n] = gs.np_data[sfx_off + i];
         n += 1;
         i += 1;
     }
@@ -544,7 +555,7 @@ pub fn tname_mangle(ti int, sfx_off int, sfx_len int) int {
     if (off < 0) {
         return -1;
     }
-    gen.t_names[ti].name_off = off;
-    gen.t_names[ti].name_len = n;
+    gs.t_names[ti].name_off = off;
+    gs.t_names[ti].name_len = n;
     return 0;
 }

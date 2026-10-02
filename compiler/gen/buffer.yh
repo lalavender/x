@@ -9,7 +9,7 @@ module gen;
 //   * write_all：write 循环处理短写；诊断一律写文件描述符 2。
 //   * err_lc / fail：带位置与不带位置的诊断。诊断格式
 //         <path>:<line>:<col>: 错误: <msg>
-//     推测解析期间（c_spec > 0）诊断静默且不计数——试探失败由返回值
+//     推测解析期间（g_state.c_spec > 0）诊断静默且不计数——试探失败由返回值
 //     传递，真正失败由回退路径重新解析后报告。
 // ============================================================================
 
@@ -38,14 +38,14 @@ pub fn set_source_path(path *char) int {
     }
     let n int = 0;
     for path[n] != 0 && n < 1023 {
-        c_path_buffer[n] = path[n].to_type(u8);
+        g_state.c_path_buffer[n] = path[n].to_type(u8);
         n += 1;
     }
     if (path[n] != 0) {
         return fail("源文件路径过长");
     }
-    c_path_buffer[n] = 0;
-    c_path = (&c_path_buffer[0]).to_type(*char);
+    g_state.c_path_buffer[n] = 0;
+    g_state.c_path = (&g_state.c_path_buffer[0]).to_type(*char);
     return 0;
 }
 
@@ -94,14 +94,14 @@ pub fn write_all(fd int, buf *u8, n int) int {
 // err_lc：报告一条带位置的错误（1 基行列），计一次错误并返回 -1。
 // 推测解析期间静默：不打印、不计数，仅以返回值示意失败。
 pub fn err_lc(line int, col int, msg *char) int {
-    if (c_spec > 0) {
+    if (g_state.c_spec > 0) {
         return -1;
     }
-    c_errors += 1;
+    g_state.c_errors += 1;
     // 单缓冲拼装后一次写出，避免多条 write 交错
     let buf [512]u8;
     let n int = 0;
-    n = append_str(buf, n, c_path);
+    n = append_str(buf, n, g_state.c_path);
     n = append_byte(buf, n, ':');
     n = append_int(buf, n, line);
     n = append_byte(buf, n, ':');
@@ -160,7 +160,7 @@ pub fn arr_cstr(buf *u8) *char {
 }
 
 // ---------------------------------------------------------------------------
-// 汇编输出缓冲：.text（o_out/o_len/o_cap）与 .data（o_dat/o_dlen/o_dcap）。
+// 汇编输出缓冲：.text（g_state.o_out/g_state.o_len/g_state.o_cap）与 .data（g_state.o_dat/g_state.o_dlen/g_state.o_dcap）。
 // 全部汇编先写入缓冲，编译成功后由 flush_output 一次性写到标准输出——
 // 错误不会留下看似成功的部分汇编。
 // ---------------------------------------------------------------------------
@@ -195,23 +195,23 @@ pub fn out_grow(data **u8, n int, cap *int, need int) int {
 // 标签号）都汇聚于此：sizeof 求型或项目 check-only 模式下整体静默，
 // 单点闸门即可抑制整棵表达式求值的指令输出。
 pub fn em_put(b u8) int {
-    if (c_em_suppress > 0 || c_check_only != 0) {
+    if (g_state.c_em_suppress > 0 || g_state.c_check_only != 0) {
         return 0;
     }
     // 函数体发射期间先进体缓冲（帧大小确定后再与 prologue 装配）
-    if (c_in_body != 0) {
-        if (out_grow(&o_body, o_body_len, &o_body_cap, o_body_len + 1) != 0) {
+    if (g_state.c_in_body != 0) {
+        if (out_grow(&g_state.o_body, g_state.o_body_len, &g_state.o_body_cap, g_state.o_body_len + 1) != 0) {
             return -1;
         }
-        o_body[o_body_len] = b;
-        o_body_len += 1;
+        g_state.o_body[g_state.o_body_len] = b;
+        g_state.o_body_len += 1;
         return 0;
     }
-    if (out_grow(&o_out, o_len, &o_cap, o_len + 1) != 0) {
+    if (out_grow(&g_state.o_out, g_state.o_len, &g_state.o_cap, g_state.o_len + 1) != 0) {
         return -1;
     }
-    o_out[o_len] = b;
-    o_len += 1;
+    g_state.o_out[g_state.o_len] = b;
+    g_state.o_len += 1;
     return 0;
 }
 
@@ -261,14 +261,14 @@ pub fn em_puti(v int) int {
 
 // dat_put / dat_puts：向 .data 缓冲追加（全局数据发射用）。
 pub fn dat_put(b u8) int {
-    if (c_check_only != 0) {
+    if (g_state.c_check_only != 0) {
         return 0;
     }
-    if (out_grow(&o_dat, o_dlen, &o_dcap, o_dlen + 1) != 0) {
+    if (out_grow(&g_state.o_dat, g_state.o_dlen, &g_state.o_dcap, g_state.o_dlen + 1) != 0) {
         return -1;
     }
-    o_dat[o_dlen] = b;
-    o_dlen += 1;
+    g_state.o_dat[g_state.o_dlen] = b;
+    g_state.o_dlen += 1;
     return 0;
 }
 
@@ -318,14 +318,14 @@ pub fn dat_puti(v int) int {
 
 // bss_put / bss_puts / bss_puti：向 .bss 缓冲追加。
 pub fn bss_put(b u8) int {
-    if (c_check_only != 0) {
+    if (g_state.c_check_only != 0) {
         return 0;
     }
-    if (out_grow(&o_bss, o_blen, &o_bcap, o_blen + 1) != 0) {
+    if (out_grow(&g_state.o_bss, g_state.o_blen, &g_state.o_bcap, g_state.o_blen + 1) != 0) {
         return -1;
     }
-    o_bss[o_blen] = b;
-    o_blen += 1;
+    g_state.o_bss[g_state.o_blen] = b;
+    g_state.o_blen += 1;
     return 0;
 }
 
@@ -370,31 +370,31 @@ pub fn flush_output() int {
 // flush_output_fd：把已发射的 .text/.data/.bss 写入指定文件描述符。
 // 供 --emit-asm（fd=1，标准输出）与 -o（fd=临时汇编文件）共用。
 pub fn flush_output_fd(fd int) int {
-    if (write_all(fd, o_out, o_len) != 0) {
+    if (write_all(fd, g_state.o_out, g_state.o_len) != 0) {
         return -1;
     }
     let hdr_data *char = "\n.data\n";
     let hdr_bss *char = "\n.bss\n";
-    if (o_dlen > 0) {
+    if (g_state.o_dlen > 0) {
         if (write_all(fd, hdr_data.to_type(*u8), 7) != 0) {
             return -1;
         }
-        if (write_all(fd, o_dat, o_dlen) != 0) {
+        if (write_all(fd, g_state.o_dat, g_state.o_dlen) != 0) {
             return -1;
         }
     }
-    if (o_blen > 0) {
+    if (g_state.o_blen > 0) {
         if (write_all(fd, hdr_bss.to_type(*u8), 6) != 0) {
             return -1;
         }
-        if (write_all(fd, o_bss, o_blen) != 0) {
+        if (write_all(fd, g_state.o_bss, g_state.o_blen) != 0) {
             return -1;
         }
     }
     return 0;
 }
 
-// read_source：读取完整源文件到 c_src / c_src_len。
+// read_source：读取完整源文件到 g_state.c_src / g_state.c_src_len。
 // 流程：open（O_RDONLY=0）→ 循环 read 到倍增缓冲（read 返回 0 即 EOF，
 // 负数即错误）→ close。缓冲初始 64 KiB，每次翻倍并整体拷贝；
 // NUL 字节按普通字节保留，长度以累计字节数为准。
@@ -438,8 +438,8 @@ pub fn read_source(path *char) int {
         blen += n.to_type(int);
     }
     close(fd);
-    c_src = data;
-    c_src_len = blen;
+    g_state.c_src = data;
+    g_state.c_src_len = blen;
     return 0;
 }
 
@@ -448,5 +448,5 @@ pub fn read_source(path *char) int {
 
 // err_tok：以当前 token 的行列位置报错，返回 -1。
 pub fn err_tok(msg *char) int {
-    return err_lc(c_toks[c_pos].line, c_toks[c_pos].col, msg);
+    return err_lc(g_state.c_toks[g_state.c_pos].line, g_state.c_toks[g_state.c_pos].col, msg);
 }

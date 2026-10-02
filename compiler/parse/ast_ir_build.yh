@@ -4,7 +4,7 @@ import ir;
 import backend;
 
 // AstIRBuilder：单个函数 lowering 的全部可变状态。
-struct AstIRBuilder {
+pub struct AstIRBuilder {
     insts *ir.IRInst;          // 指令表（跨块连续存放）
     inst_count int;
     inst_cap int;
@@ -1060,30 +1060,31 @@ fn ast_ir_lower_expr(b *AstIRBuilder, ctx *AstFunctionContext,
 // ast_ir_lower_function：生成/复用 SSA，并让后端替换该函数的旧汇编片段。
 fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     compiler_salt u64, asm_shift *int) int {
+    let gs *gen.GenState = gen.G();
     if (ctx.decl_row < 0 || ctx.decl_row >= ast_decl_count) { return 0; }
     let decl *AstDecl = &ast_decl_nodes[ctx.decl_row];
     if (decl.kind != gen.TK_FN || decl.body_stmt < ctx.stmt_first
         || decl.body_stmt >= ctx.stmt_after || decl.sym_id < 0
-        || decl.sym_id >= gen.c_sym_n || decl.type_id < 0
-        || decl.type_id >= gen.t_type_n) {
+        || decl.sym_id >= gs.c_sym_n || decl.type_id < 0
+        || decl.type_id >= gs.t_type_n) {
         return 0;
     }
-    let fn_type gen.CType = gen.t_types[decl.type_id];
-    if (fn_type.kind != gen.TY_FN || fn_type.sub < 0 || fn_type.sub >= gen.t_sig_n) {
+    let fn_type gen.CType = gs.t_types[decl.type_id];
+    if (fn_type.kind != gen.TY_FN || fn_type.sub < 0 || fn_type.sub >= gs.t_sig_n) {
         return 0;
     }
     let sig int = fn_type.sub;
     if (ast_ir_bindings_supported(ctx, sig) == 0) {
         return 0;
     }
-    let param_count int = gen.t_sig_np[sig];
+    let param_count int = gs.t_sig_np[sig];
     let binding_count int = ctx.binding_after - ctx.binding_first;
     if (binding_count < param_count) { return 0; }
-    let ret_type int = ast_ir_type(gen.t_sig_ret[sig]);
+    let ret_type int = ast_ir_type(gs.t_sig_ret[sig]);
     let is_void_ret int = 0;
     if (ret_type < 0) {
         // void 函数使用固定类型表下标 0（IR_TY_VOID）；其余不可映射类型仍拒绝。
-        if (ast_ir_void_type(gen.t_sig_ret[sig]) == 0) { return 0; }
+        if (ast_ir_void_type(gs.t_sig_ret[sig]) == 0) { return 0; }
         is_void_ret = 1;
         ret_type = ir.IR_TY_VOID;
     }
@@ -1108,7 +1109,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
         let cache_hit int = ast_ir_cache_read(gen.arr_cstr(cache_path), cache_key, &cached);
         if (cache_hit != 0
             && cached.ret_type == ret_type) {
-            if (gen.c_check_only == 0) {
+            if (gs.c_check_only == 0) {
                 let delta int = 0;
                 let emitted int = backend.arm64_emit_replace(&cached,
                     decl.sym_id, ctx.asm_first + asm_shift[0],
@@ -1119,11 +1120,11 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
                 }
             }
             ir.ir_function_release(&cached);
-            gen.c_stats_ir_cache_hits += 1;
+            gs.c_stats_ir_cache_hits += 1;
             return 1;
         }
         ir.ir_function_release(&cached);
-        gen.c_stats_ir_cache_misses += 1;
+        gs.c_stats_ir_cache_misses += 1;
     }
     // 通用构造器：递归降低受支持的语句序列，形态之外整体回退旧发射器。
     let capacity int = ctx.expr_after - ctx.expr_first + param_count
@@ -1185,7 +1186,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     ast_ir_b_enter_block(&b, entry);
     let pi int = 0;
     for pi < param_count {
-        let type_id int = ast_ir_type(gen.t_sig_params[gen.t_sig_first[sig] + pi]);
+        let type_id int = ast_ir_type(gs.t_sig_params[gs.t_sig_first[sig] + pi]);
         let param_value int = ast_ir_b_add_inst(&b, ir.IR_OP_PARAM, type_id,
             -1, -1, pi.to_type(i64));
         if (type_id < 0 || param_value < 0) {
@@ -1215,7 +1216,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
 
 
     let f ir.IRFunction;
-    f.target_id = gen.c_dialect + 1;
+    f.target_id = gs.c_dialect + 1;
     f.ret_type = ret_type;
     f.types = &types[0];
     f.type_count = 13;
@@ -1235,7 +1236,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     f.block_count = b.block_count;
     f.value_count = b.inst_count;
     let verified int = ir.ir_simplify(&f);
-    if (verified == 0 && gen.c_check_only == 0) {
+    if (verified == 0 && gs.c_check_only == 0) {
         let delta int = 0;
         let emitted int = backend.arm64_emit_replace(&f, decl.sym_id,
             ctx.asm_first + asm_shift[0], ctx.asm_after + asm_shift[0],

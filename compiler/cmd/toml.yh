@@ -20,34 +20,34 @@ import gen;
 
 // —— 解析结果表（进程内一次构建共用，不释放） ——
 pub struct TomlVal {
-    pub key_off int;        // 键名池偏移
-    pub key_len int;
-    pub kind int;           // 1=字符串 2=内联表 3=整数
-    pub sval_off int;       // 字符串值池偏移（kind==1）
-    pub sval_len int;
-    pub ival int;           // 整数值（kind==3）
-    pub path_off int;       // 内联表内 path 键的值池偏移（kind==2，-1 无）
-    pub path_len int;
-    pub line int;           // 键所在行（1 基）
+    key_off int;        // 键名池偏移
+    key_len int;
+    kind int;           // 1=字符串 2=内联表 3=整数
+    sval_off int;       // 字符串值池偏移（kind==1）
+    sval_len int;
+    ival int;           // 整数值（kind==3）
+    path_off int;       // 内联表内 path 键的值池偏移（kind==2，-1 无）
+    path_len int;
+    line int;           // 键所在行（1 基）
 }
 pub struct TomlSec {
-    pub name_off int;       // 节名池偏移
-    pub name_len int;
-    pub vals *TomlVal;      // 键值表（堆分配）
-    pub val_n int;
-    pub val_cap int;
-    pub line int;           // 节头行
+    name_off int;       // 节名池偏移
+    name_len int;
+    vals *TomlVal;      // 键值表（堆分配）
+    val_n int;
+    val_cap int;
+    line int;           // 节头行
 }
-pub let toml_secs *TomlSec = 0;
-pub let toml_sec_n int = 0;
-pub let toml_sec_cap int = 0;
+let toml_secs *TomlSec = 0;
+let toml_sec_n int = 0;
+let toml_sec_cap int = 0;
 
 // —— 解析游标与诊断上下文 ——
-pub let t_src *u8 = 0;          // project.toml 字节
-pub let t_len int = 0;
-pub let t_pos int = 0;          // 当前字节下标
-pub let t_line int = 1;         // 当前行号
-pub let t_file *char = 0;       // 诊断用清单路径（借调用方，不复制）
+let t_src *u8 = 0;          // project.toml 字节
+let t_len int = 0;
+let t_pos int = 0;          // 当前字节下标
+let t_line int = 1;         // 当前行号
+let t_file *char = 0;       // 诊断用清单路径（借调用方，不复制）
 
 // tml_err：project.toml 诊断（带行号，无列——TOML 错误按行报告足够定位）。
 pub fn tml_err(line int, msg *char) int {
@@ -65,12 +65,13 @@ pub fn tml_err(line int, msg *char) int {
 
 // tml_intern：把 [start,start+n) 字节 intern 进名字池并带 NUL（调试用）。
 pub fn tml_intern(start int, n int) int {
-    let off int = gen.np_len;
+    let gs *gen.GenState = gen.G();
+    let off int = gs.np_len;
     let i int = 0;
     // name_intern 从 c_src 取字节；project.toml 不在 c_src，手工入池
-    let need int = gen.np_len + n + 1;
-    if (need > gen.np_cap) {
-        let ncap int = gen.np_cap * 2;
+    let need int = gs.np_len + n + 1;
+    if (need > gs.np_cap) {
+        let ncap int = gs.np_cap * 2;
         if (ncap < need) {
             ncap = need;
         }
@@ -79,20 +80,20 @@ pub fn tml_intern(start int, n int) int {
             gen.fail("内存分配失败");
             return -1;
         }
-        if (gen.np_len > 0) {
-            memcpy(nd, gen.np_data, gen.np_len.to_type(u64));
+        if (gs.np_len > 0) {
+            memcpy(nd, gs.np_data, gs.np_len.to_type(u64));
         }
-        free(gen.np_data);
-        gen.np_data = nd;
-        gen.np_cap = ncap;
+        free(gs.np_data);
+        gs.np_data = nd;
+        gs.np_cap = ncap;
     }
     for i < n {
-        gen.np_data[gen.np_len] = t_src[start + i];
-        gen.np_len += 1;
+        gs.np_data[gs.np_len] = t_src[start + i];
+        gs.np_len += 1;
         i += 1;
     }
-    gen.np_data[gen.np_len] = 0;
-    gen.np_len += 1;
+    gs.np_data[gs.np_len] = 0;
+    gs.np_len += 1;
     return off;
 }
 
@@ -130,15 +131,16 @@ pub fn tml_is_bare(b u8) int {
 
 // tml_sec_find：按名查节；没有返回 -1。
 pub fn tml_sec_find(name_off int, name_len int) int {
+    let gs *gen.GenState = gen.G();
     let i int = 0;
     for i < toml_sec_n {
         if (toml_secs[i].name_len == name_len
-            && gen.np_data[toml_secs[i].name_off] == gen.np_data[name_off]) {
+            && gs.np_data[toml_secs[i].name_off] == gs.np_data[name_off]) {
             // 节名较短，逐字节比较
             let match int = 1;
             let j int = 1;
             for j < name_len {
-                if (gen.np_data[toml_secs[i].name_off + j] != gen.np_data[name_off + j]) {
+                if (gs.np_data[toml_secs[i].name_off + j] != gs.np_data[name_off + j]) {
                     match = 0;
                     break;
                 }
@@ -454,6 +456,7 @@ pub fn tml_parse() int {
 
 // toml_find_sec：按名查节，返回下标；无 -1。
 pub fn toml_find_sec(name *char) int {
+    let gs *gen.GenState = gen.G();
     let n int = 0;
     for name[n] != 0 {
         n += 1;
@@ -464,7 +467,7 @@ pub fn toml_find_sec(name *char) int {
             let match int = 1;
             let j int = 0;
             for j < n {
-                if (gen.np_data[toml_secs[i].name_off + j] != name[j].to_type(u8)) {
+                if (gs.np_data[toml_secs[i].name_off + j] != name[j].to_type(u8)) {
                     match = 0;
                     break;
                 }
@@ -482,6 +485,7 @@ pub fn toml_find_sec(name *char) int {
 // toml_sec_str：节内取字符串键值（intern 偏移出参）。
 // 找到返回 1（off/len 有效）；节或键不存在返回 0；类型错误返回 -1（诊断）。
 pub fn toml_sec_str(sec int, key *char, off *int, olen *int) int {
+    let gs *gen.GenState = gen.G();
     if (sec < 0) {
         return 0;
     }
@@ -495,7 +499,7 @@ pub fn toml_sec_str(sec int, key *char, off *int, olen *int) int {
             let match int = 1;
             let j int = 0;
             for j < n {
-                if (gen.np_data[toml_secs[sec].vals[i].key_off + j] != key[j].to_type(u8)) {
+                if (gs.np_data[toml_secs[sec].vals[i].key_off + j] != key[j].to_type(u8)) {
                     match = 0;
                     break;
                 }

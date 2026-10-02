@@ -14,21 +14,24 @@ import gen;
 
 // p_cur：当前 token 种类。
 pub fn p_cur() int {
-    return gen.c_toks[gen.c_pos].kind;
+    let gs *gen.GenState = gen.G();
+    return gs.c_toks[gs.c_pos].kind;
 }
 
 // p_peek：向前看第 k 个 token 的种类；越过表尾按 EOF 处理。
 pub fn p_peek(k int) int {
-    if (gen.c_pos + k < gen.c_tok_n) {
-        return gen.c_toks[gen.c_pos + k].kind;
+    let gs *gen.GenState = gen.G();
+    if (gs.c_pos + k < gs.c_tok_n) {
+        return gs.c_toks[gs.c_pos + k].kind;
     }
     return gen.TOK_EOF;
 }
 
 // p_adv：游标前进一个 token；EOF 处不动。
 pub fn p_adv() void {
-    if (gen.c_toks[gen.c_pos].kind != gen.TOK_EOF) {
-        gen.c_pos += 1;
+    let gs *gen.GenState = gen.G();
+    if (gs.c_toks[gs.c_pos].kind != gen.TOK_EOF) {
+        gs.c_pos += 1;
     }
 }
 
@@ -76,6 +79,7 @@ pub fn is_type_start(k int) int {
 // 连续 * 后跟已登记类型名判为指针类型（如 sizeof(*P)）；IDENT 仅当
 // 已登记为类型名才走类型路径（否则是表达式，如 sizeof(x)、sizeof(*p)）。
 pub fn sizeof_starts_type() int {
+    let gs *gen.GenState = gen.G();
     let k int = p_cur();
     let off int = 0;
     for k == gen.TK_STAR {
@@ -89,15 +93,15 @@ pub fn sizeof_starts_type() int {
         return 1;
     }
     if (k == gen.TOK_IDENT) {
-        let tid int = gen.ty_lookup_name(gen.c_toks[gen.c_pos].start, gen.c_toks[gen.c_pos].len);
+        let tid int = gen.ty_lookup_name(gs.c_toks[gs.c_pos].start, gs.c_toks[gs.c_pos].len);
         if (tid >= 0) {
             return 1;
         }
         // 模块限定类型 m.T（P3）：绑定名在导入表且命名空间导出该类型名
         if (p_peek(1) == gen.TK_DOT && p_peek(2) == gen.TOK_IDENT) {
-            let qb int = gen.mod_file_binding(gen.c_toks[gen.c_pos].start, gen.c_toks[gen.c_pos].len);
-            if (qb >= 0 && gen.mod_ns_lookup(qb, gen.c_toks[gen.c_pos + 2].start,
-                gen.c_toks[gen.c_pos + 2].len, 1) >= 0) {
+            let qb int = gen.mod_file_binding(gs.c_toks[gs.c_pos].start, gs.c_toks[gs.c_pos].len);
+            if (qb >= 0 && gen.mod_ns_lookup(qb, gs.c_toks[gs.c_pos + 2].start,
+                gs.c_toks[gs.c_pos + 2].len, 1) >= 0) {
                 return 1;
             }
         }
@@ -127,6 +131,7 @@ pub fn tk_to_builtin(k int) int {
 //   '*' typeRef | '[' expr? ']' typeRef | 'fn' '(' typeRefList? ')' typeRef?
 //   | builtinType | IDENT
 pub fn parse_type_ref() int {
+    let gs *gen.GenState = gen.G();
     let k int = p_cur();
     if (k == gen.TK_STAR) {
         p_adv();
@@ -134,7 +139,7 @@ pub fn parse_type_ref() int {
         if (e < 0) {
             return -1;
         }
-        if (gen.c_compile == 0) {
+        if (gs.c_compile == 0) {
             return 0;
         }
         return gen.ty_ptr(e);
@@ -144,10 +149,10 @@ pub fn parse_type_ref() int {
         let alen int = -1;
         if (p_cur() != gen.TK_RBRACKET) {
             let r gen.Res;
-            if (gen.c_compile != 0) {
-                gen.c_fold += 1;
+            if (gs.c_compile != 0) {
+                gs.c_fold += 1;
                 let rr int = parse_expr(&r);
-                gen.c_fold -= 1;
+                gs.c_fold -= 1;
                 if (rr != 0) {
                     return -1;
                 }
@@ -174,7 +179,7 @@ pub fn parse_type_ref() int {
         if (e2 < 0) {
             return -1;
         }
-        if (gen.c_compile == 0) {
+        if (gs.c_compile == 0) {
             return 0;
         }
         if (alen < 0) {
@@ -196,7 +201,7 @@ pub fn parse_type_ref() int {
                 if (pt < 0) {
                     return -1;
                 }
-                if (gen.c_compile != 0) {
+                if (gs.c_compile != 0) {
                     if (np >= 32) {
                         return gen.sem_err("fn 类型参数过多");
                     }
@@ -221,10 +226,10 @@ pub fn parse_type_ref() int {
             }
             ret = rt;
         }
-        if (gen.c_compile == 0) {
+        if (gs.c_compile == 0) {
             return 0;
         }
-        let first int = gen.t_sigparam_n;
+        let first int = gs.t_sigparam_n;
         let i int = 0;
         for i < np {
             gen.ty_sig_param(pts[i]);
@@ -234,14 +239,14 @@ pub fn parse_type_ref() int {
     }
     if (k >= gen.TK_INT && k <= gen.TK_VOID) {
         p_adv();
-        if (gen.c_compile == 0) {
+        if (gs.c_compile == 0) {
             return 0;
         }
         return tk_to_builtin(k);
     }
     if (k == gen.TOK_IDENT) {
-        let start int = gen.c_toks[gen.c_pos].start;
-        let n int = gen.c_toks[gen.c_pos].len;
+        let start int = gs.c_toks[gs.c_pos].start;
+        let n int = gs.c_toks[gs.c_pos].len;
         p_adv();
         // 限定类型 m.T（U3/U4）：编译模式查导入绑定的模块命名空间；
         // 单段点链（更长链不支持，干净拒绝）；语法模式仅消费。
@@ -250,18 +255,18 @@ pub fn parse_type_ref() int {
             if (p_cur() != gen.TOK_IDENT) {
                 return gen.err_tok("限定类型 '.' 后需要一个类型名");
             }
-            let tstart int = gen.c_toks[gen.c_pos].start;
-            let tlen int = gen.c_toks[gen.c_pos].len;
-            let tline int = gen.c_toks[gen.c_pos].line;
-            let tcol int = gen.c_toks[gen.c_pos].col;
+            let tstart int = gs.c_toks[gs.c_pos].start;
+            let tlen int = gs.c_toks[gs.c_pos].len;
+            let tline int = gs.c_toks[gs.c_pos].line;
+            let tcol int = gs.c_toks[gs.c_pos].col;
             p_adv();
             if (p_cur() == gen.TK_DOT) {
                 return gen.err_tok("限定类型只支持一层（m.T）");
             }
-            if (gen.c_compile == 0) {
+            if (gs.c_compile == 0) {
                 return 0;
             }
-            if (gen.c_module_mode == 0) {
+            if (gs.c_module_mode == 0) {
                 return gen.sem_err("限定类型只在模块模式可用");
             }
             let qb int = gen.mod_file_binding(start, n);
@@ -273,16 +278,16 @@ pub fn parse_type_ref() int {
                 return gen.err_lc(tline, tcol, "模块没有导出该类型");
             }
             let qi int = 0;
-            for qi < gen.mod_import_n {
-                if (gen.mod_import_mod[qi] == qb) {
-                    gen.mod_import_used[qi] = 1;
+            for qi < gs.mod_import_n {
+                if (gs.mod_import_mod[qi] == qb) {
+                    gs.mod_import_used[qi] = 1;
                     break;
                 }
                 qi += 1;
             }
-            return gen.c_mods[qb].ns[qe].tid;
+            return gs.c_mods[qb].ns[qe].tid;
         }
-        if (gen.c_compile == 0) {
+        if (gs.c_compile == 0) {
             return 0;
         }
         let tid int = gen.ty_lookup_name(start, n);

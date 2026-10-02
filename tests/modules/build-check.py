@@ -87,6 +87,7 @@ def case(name, kind, fixture, sub, expect=None, msg=None):
 case("u4-basic-run", "run", "basic", "app", 255)
 case("u4-iso-run", "run", "iso", "host", 15)
 case("u4-aggfloat-run", "run", "aggfloat", "host", 29)
+case("u4-enumexp-run", "run", "enumexp", "host", 10)
 case("r1-token-replay-run", "run", "tokenreplay", ".", 42)
 case("r2a-ssa-phi-verifier", "run", "irverify", ".", 0)
 case("r2c-build-lowers-ssa-cfg", "ir", "irfront", ".", 230)
@@ -111,11 +112,13 @@ case("p1-name-not-identifier", "fail", "tomlnamebad", ".", msg="project.name")
 case("u2-transitive-rejected", "fail", "transitive", "host", msg="模块不存在")
 case("u2-ambiguous-deps", "fail", "ambiguity", "host", msg="歧义")
 # —— MOD-U3：模块语义 ——
+# 2026-10-02 pub struct 一等化：字段一律公开，跨模块字段访问与位置式构造
+# 由 fail 用例转为 run 正向用例；符号级可见性（非 pub fn）仍被拒绝。
 case("u3-import-cycle", "fail", "cycle", "a", msg="环")
 case("u3-entry-not-importable", "fail", "cycleentry", "host", msg="入口模块不可")
-case("u3-private-field", "fail", "pubpriv", "host", msg="私有字段")
+case("u3-pub-field-access", "run", "pubpriv", "host", 2)
 case("u3-private-fn", "fail", "pubpriv", "host2", msg="导出")
-case("u3-positional-private", "fail", "pubpriv", "host3", msg="私有")
+case("u3-positional-pub-construct", "run", "pubpriv", "host3", 1)
 case("u3-duplicate-decl", "fail", "dupdecl", "host", msg="重定义")
 case("u3-unused-import", "fail", "unusedimp", "host", msg="导入未使用")
 case("u3-import-clash", "fail", "clashname", "host", msg="导入名冲突")
@@ -625,8 +628,10 @@ def main():
     dst = WORK / "fourdirbad"
     copy_proj(PROJ / "fourdirbad", dst)
     r = sh([compiler, "build"], cwd=dst)
-    report(r.returncode != 0 and "私有字段" in (r.stderr + r.stdout),
-           "p2-fourdir-private", f"私有字段未被拒绝: {(r.stderr + r.stdout)[-300:]}")
+    # 2026-10-02 pub struct 一等化：字段全公开后，四目录布局改验
+    # 非导出函数（gen.hidden）跨模块调用被拒。
+    report(r.returncode != 0 and "导出" in (r.stderr + r.stdout),
+           "p2-fourdir-nonpub-symbol", f"非导出符号未被拒绝: {(r.stderr + r.stdout)[-300:]}")
 
     # —— project.toml 增强：as 别名 + KEY.MOD 跨项目导入 + 目录唯一模块 ——
     dst = WORK / "keyimp"

@@ -2,6 +2,125 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-02 let 不导出：GenState 打包重构 + pub let 废除（两代滚种）
+
+语言规则（用户决策）：let 变量只能是模块变量或函数局部变量，**不支持
+导出**（`pub let` 非法）。该规则与编译器自举现实冲突：gen 模块 208 个
+跨模块可变全局（c_pos/t_types/p_mods 等）被引用 3054 处。用户在
+AskUserQuestion 中选择「GenState 打包（彻底）」路径。
+
+- **方案**：208 个 pub let 收进 `pub struct GenState`（字段一律公开——
+  与 struct 一等化规则吻合），gen 私有实例 `g_state` + 导出
+  `pub fn G() *GenState { return &g_state; }`（实测 `&全局` + 函数返回
+  指针现有机制完全支持，**零新语言特性**；对比 pub const 指针导出方案
+  免去「取全局地址作编译期常量 + 数据槽重定位」新机制与接口格式变更）。
+- **替换**：gen 内部 1185 处裸引用 → `g_state.x`；跨模块 1869 处
+  `gen.x` → `gen.G().x`；cmd/parse 66 个同模块 pub let 直接去 pub；
+  9 个非零初始化器迁入 `gen.state_init()`（driver main 入口调用，
+  worker fork 继承）；接口发射器停发 SYM_VAR（pub let 行）。
+- **暴露既有发射器 bug**：`f().field = v`（函数返回指针接字段写）在
+  `sem_member` 的 LVALUE 分支无条件 `ldr x0,[x0]` 多一次间接——该形态
+  GenState 之前从未被语言使用，实测最小复现（读写探针 gftest exit=139）
+  确认为**既有缺陷**而非重构引入。修复：按进入时的 `c_res_is_addr`
+  （基底形态）判据决定是否装载——变量引用/未装载解引用（is_addr=1）
+  需 ldr，函数返回的指针（is_addr=0）不得再间接；读路径不变。
+- **过渡期源码避让**：v1（旧种子生成）的 cmd 代码含 bug 形态无法运行，
+  源码改写为**函数级局部指针**形态（`let gs *gen.GenState = gen.G();`
+  + `gs.field`）——186 处函数、覆盖全部原 LVALUE 写与同函数读；脚本
+  两次失败（字符字面量 `'{'` 破坏朴素大括号配对、跨行签名插绑定错位）
+  后改用「逐行向上找 fn + 感知签名结束行」方案稳定落地。修复后固定点
+  通过（源码无 bug 形态，两代产物一致）。
+- **语料迁移**：fourdir/fourdirbad 的 `pub let counter` 改为私有
+  counter + `pub fn counter_value/set_counter`（跨模块可变状态改函数
+  封装的示范）；runtimebytes 的 pub let 仅同模块使用直接去 pub；
+  02_pub_export 的 pub let 改 pub const；新增 rejected/35_pub_let；
+  g4 重构 topLevelDecl → exportedDeclBody + plainDeclBody（pub 不可修饰
+  letDecl）。
+- **Gen N-b**：`parse_top_decl` 拒 `pub let`（报错「let 变量不支持
+  导出」），接口加载（c_iface_load=1）容忍旧格式 pub let 行以兼容
+  持久缓存。
+- 验证：每代 `make` + `make test`（正例 66/66、反例 35/35、运行语料
+  62/62）+ `make selfhost-native`（固定点、modules 17/17、project
+  55/55）全绿后 `make seed`；种子哈希 Gen N-a → eb37868c…、Gen N-b →
+  c4168844…。
+- 语义边界补充：`&全局` 表达式与函数返回模块内全局地址为现役机制
+  （实测 exit=9 验证），GenState 即依赖此实现跨模块状态共享。
+
+## 2026-10-02 enum 同步一等化：pub enum 与成员导出（审计后补齐）
+
+用户要求核查 union/enum 是否与 struct 同步、跨模块 pub 检查是否完备。
+审计结论：union 已同步；跨模块 fn/const/struct 检查完备（parse_global_init
+置 F_PUB、iface_load 改写符号、引用侧 mod_ns_lookup 校验，实测
+`lib.hidden()` 正确拒绝）；**enum 有两处缺口**，本条目补齐：
+
+- **裸 enum 未同步**：struct/union 已强制 pub 而 enum 仍可裸写。
+  `parse_top_decl` 补 enum 分支校验（报错「enum 必须带 pub」）；语料
+  3 文件裸 enum 迁移为 `pub enum`；新增 rejected/34_bare_enum；
+  docs/yh.g4 的 plainDeclBody 移除 enumDecl（enum 只能经 pub 进入）。
+- **pub enum 成员不导出**：`parse_enum_decl` 成员常量只登记 F_GLOBAL，
+  跨模块 `lib.red` 报「模块没有导出该名字」。成员按枚举的 pub 置 F_PUB
+  进入接口名字表；`iface.yh` 常量发射循环跳过 TY_ENUM 常量——成员已随
+  pub enum 体导出，否则接口重复登记、加载侧报重定义。
+- 新增 `tests/modules/projects/enumexp/` fixture（lib：pub enum Color/
+  pub const/pub struct/pub fn；host：跨模块成员引用、判别值断言、字段
+  访问），build-check 注册 `u4-enumexp-run`（退出码 10）。临时探针实测
+  全链路：`lib.red`/`lib.green`/`lib.PI2`/`b.w` 引用通过，
+  `lib.hidden()` 构建期拒绝。
+- compiler 源码无 enum 声明、无字段 pub，滚种固定点不受本条目影响。
+- 验证：`make` + `make test`（正例 66/66、反例 34/34、运行语料 62/62）
+  + `make selfhost-native`（modules 17/17、project cases 55/55 含
+  enumexp）全绿后 `make seed`（bin/yh → 964db00a…）。
+
+## 2026-10-02 struct 语法收紧：pub struct 一等化（三代滚种）
+
+规则（用户决策）：① 裸 `struct`/`union` 非法，必须写 `pub struct` /
+`pub union`；② `pub struct` 字段一律公开（用户示例 `pub struct IRType {
+kind int; ... }` 为唯一正确形式），字段级 `pub` 前缀在用户源码中报错；
+③ 类型声明禁止嵌套——fn 体内 struct/union/enum/type 声明特性移除，
+`c_nested_type` 机制删除。enum/type 的顶层 pub 可选性不变。
+
+- **接口传递闭包（先行一代）**：`pub struct` 一等化后接口正文首次出现
+  「字段引用外模块类型」的 mangle 名（如 AstIRBuilder 字段 `*ir.IRInst`），
+  而构建器原先只加载直接 import 的接口，stage1 必卡死。重写
+  `cmd/module_build.yh` 的 `mb_module_iface_deps` 为四步：直接导入 →
+  传递闭包（绑定名取 mangle 后缀，不与源码别名冲突）→ 按 `pj_order`
+  拓扑排序 → 统一构造会话接口路径；抽出 `mb_dep_push` 去重追加。单独
+  全绿后滚种（bin/yh → 0b8b85a3…）。
+- **语法收紧一代**：`parse_top_decl` 拒裸 struct/union；`parse_stmt`
+  拒 fn 内类型声明；`sem_add_field` 去 is_pub 参数（is_pub 恒 1），
+  删 `sem_expr`/`sem_call_literal`/`parse_expr` 三处跨模块字段 pub 检查
+  与 `sem_struct_lit_begin` 的 named 参数；删 `c_nested_type`；
+  docs/yh.g4 重构 topLevelDecl（struct/union 只能经 pub 进入）；compiler
+  源码 4 处裸 struct 转 pub struct 并为 ast_ir/ast_ir_build/project/clock
+  字段补前缀（旧种子发射器按 is_pub 过滤，前缀是固定点一致的前提）；
+  语料 31 文件裸 struct→pub struct、14 文件字段前缀删除；
+  run/44-nested-decl 移除并新增 rejected/30_bare_struct、
+  31_bare_union、32_nested_type_decl；pubpriv host/host3 由 fail 转 run
+  正向用例（u3-pub-field-access=2、u3-positional-pub-construct=1），
+  fourdirbad 改验非导出函数（p2-fourdir-nonpub-symbol）。全绿后滚种
+  （bin/yh → 0b4212ca…）。
+- **前缀移除一代**：`parse_struct_decl` 字段位 TK_PUB 在用户源码报错
+  「字段一律公开，不接受 pub 前缀」；接口加载（c_iface_load=1）仍按
+  yh-iface v1 格式跳过字段 pub 标记——接口格式零变动，cc3/cc4 产物
+  才能逐字节一致；compiler 源码 248 处字段前缀全删；新增
+  rejected/33_field_pub_prefix。全绿后滚种（bin/yh → 762d3ce5…）。
+- 文档同步：docs/yh.g4（topLevelDecl/plainDeclBody/structDecl/unionDecl/
+  fieldDecl）、03-design/模块与项目管理设计 §可见性、03-design/00-语义边界
+  §3、compiler/README 无需改动；历史方案文档（02-plan 模块实施方案、
+  03-design/Go风格模块与包设计）自带"已被替代"抬头，保留原状。
+- 验证：每代 `make` + `make test`（ANTLR 正例 66/66、反例 33/33，
+  编译器语法门同，运行语料 62/62）+ `make selfhost-native`（含固定点、
+  模块/项目验收 54/54）全绿后 `make seed`；三代种子哈希如上，git 历史
+  保留各代产物。
+
+## 2026-10-02 Makefile 清理失效的 VERSION 引用
+
+- VERSION 文件已随清单精简删除（c5eccf0，版本改由 project.toml 提供），
+  Makefile 头部 `VERSION ?= $(shell cat $(TOPSRC)/VERSION)` 成为无效
+  引用（每次 make 触发一次失败的 cat），已删除该行；全仓库确认
+  tools/tests/CI 无其他 VERSION 文件引用。
+- 验证：`make` 通过，`make test` 运行语料 63/63。
+
 ## 2026-10-02 修复裸调用 SIGBUS：usage() 栈缓冲区溢出
 
 - 缺陷：`cmd/driver.yh` 的 `usage()` 把 10 行用法（566 字节）拼进 512 字节

@@ -25,33 +25,35 @@ fn ast_ir_call_release(out *AstIRCalls) void {
 
 // ast_ir_call_has_suffix：复用普通发射器的模块符号限定规则。
 fn ast_ir_call_has_suffix(base *AstExpr) int {
-    if (gen.c_module_mode == 0 || gen.c_sym_sfx_len == 0
+    let gs *gen.GenState = gen.G();
+    if (gs.c_module_mode == 0 || gs.c_sym_sfx_len == 0
         || (base.sym_flags & gen.F_EXTERN) != 0) { return 0; }
-    if (gen.c_is_entry_mod != 0 && base.sym_name_len == 4
-        && gen.np_data[base.sym_name_off] == 'm'
-        && gen.np_data[base.sym_name_off + 1] == 'a'
-        && gen.np_data[base.sym_name_off + 2] == 'i'
-        && gen.np_data[base.sym_name_off + 3] == 'n') { return 0; }
+    if (gs.c_is_entry_mod != 0 && base.sym_name_len == 4
+        && gs.np_data[base.sym_name_off] == 'm'
+        && gs.np_data[base.sym_name_off + 1] == 'a'
+        && gs.np_data[base.sym_name_off + 2] == 'i'
+        && gs.np_data[base.sym_name_off + 3] == 'n') { return 0; }
     return 1;
 }
 
 // ast_ir_call_name_supported：确认缓存中的目标名能由汇编器安全直接读取。
 fn ast_ir_call_name_supported(base *AstExpr) int {
+    let gs *gen.GenState = gen.G();
     if (base.sym_name_off < 0 || base.sym_name_len <= 0
-        || base.sym_name_off + base.sym_name_len > gen.np_len) { return 0; }
-    if (gen.c_sym_sfx_len > 0 && (gen.c_sym_sfx_off < 0
-        || gen.c_sym_sfx_off + gen.c_sym_sfx_len > gen.np_len)) { return 0; }
+        || base.sym_name_off + base.sym_name_len > gs.np_len) { return 0; }
+    if (gs.c_sym_sfx_len > 0 && (gs.c_sym_sfx_off < 0
+        || gs.c_sym_sfx_off + gs.c_sym_sfx_len > gs.np_len)) { return 0; }
     let i int = 0;
     for i < base.sym_name_len {
-        if (ir.ir_call_symbol_byte_ok(gen.np_data[base.sym_name_off + i]) == 0) {
+        if (ir.ir_call_symbol_byte_ok(gs.np_data[base.sym_name_off + i]) == 0) {
             return 0;
         }
         i += 1;
     }
     if (ast_ir_call_has_suffix(base) != 0) {
         i = 0;
-        for i < gen.c_sym_sfx_len {
-            if (ir.ir_call_symbol_byte_ok(gen.np_data[gen.c_sym_sfx_off + i]) == 0) {
+        for i < gs.c_sym_sfx_len {
+            if (ir.ir_call_symbol_byte_ok(gs.np_data[gs.c_sym_sfx_off + i]) == 0) {
                 return 0;
             }
             i += 1;
@@ -64,20 +66,21 @@ fn ast_ir_call_name_supported(base *AstExpr) int {
 // 返回值须是可映射标量，或与签名一致的 void（语句级调用使用）。
 fn ast_ir_call_supported(ctx *AstFunctionContext, node *AstExpr,
     param_count int, binding_limit int) int {
+    let gs *gen.GenState = gen.G();
     if (node.child0 < ctx.expr_first || node.child0 >= ctx.expr_after) { return 0; }
     let result_type int = ast_ir_type(node.type_id);
     if (result_type < 0 && ast_ir_void_type(node.type_id) == 0) { return 0; }
     let base *AstExpr = &ast_expr_nodes[node.child0];
     if (base.kind != AST_EXPR_PRIMARY || base.child0 >= 0
         || base.sym_kind != gen.SYM_FN || base.sym_type_id < 0
-        || base.sym_type_id >= gen.t_type_n
+        || base.sym_type_id >= gs.t_type_n
         || (base.sym_flags & (gen.F_INTRINSIC | gen.F_LINUX_SYSCALL)) != 0
-        || gen.t_types[base.sym_type_id].kind != gen.TY_FN
+        || gs.t_types[base.sym_type_id].kind != gen.TY_FN
         || ast_ir_call_name_supported(base) == 0) { return 0; }
-    let sig int = gen.t_types[base.sym_type_id].sub;
-    if (sig < 0 || sig >= gen.t_sig_n || gen.t_sig_vararg[sig] != 0
-        || ast_ir_type(gen.t_sig_ret[sig]) != ast_ir_type(node.type_id)) { return 0; }
-    let arg_i int = gen.t_sig_np[sig] - 1;
+    let sig int = gs.t_types[base.sym_type_id].sub;
+    if (sig < 0 || sig >= gs.t_sig_n || gs.t_sig_vararg[sig] != 0
+        || ast_ir_type(gs.t_sig_ret[sig]) != ast_ir_type(node.type_id)) { return 0; }
+    let arg_i int = gs.t_sig_np[sig] - 1;
     let link int = node.child1;
     for link >= 0 {
         if (link < ctx.expr_first || link >= ctx.expr_after || arg_i < 0) { return 0; }
@@ -85,7 +88,7 @@ fn ast_ir_call_supported(ctx *AstFunctionContext, node *AstExpr,
         if (arg_link.kind != AST_EXPR_ARG_LIST || arg_link.child1 < ctx.expr_first
             || arg_link.child1 >= ctx.expr_after
             || ast_ir_type(ast_expr_nodes[arg_link.child1].type_id)
-                != ast_ir_type(gen.t_sig_params[gen.t_sig_first[sig] + arg_i])
+                != ast_ir_type(gs.t_sig_params[gs.t_sig_first[sig] + arg_i])
             || ast_ir_expr_supported(ctx, arg_link.child1,
                 param_count, binding_limit) == 0) { return 0; }
         arg_i -= 1;
@@ -133,7 +136,8 @@ fn ast_ir_call_reserve(out *AstIRCalls, need_calls int, need_args int,
 // ast_ir_call_append：在所有嵌套实参调用完成后，原子追加当前调用的连续片段。
 fn ast_ir_call_append(out *AstIRCalls, base *AstExpr,
     values *ir.IRCallArg, count int) int {
-    let suffix_len int = ast_ir_call_has_suffix(base) != 0 ? gen.c_sym_sfx_len : 0;
+    let gs *gen.GenState = gen.G();
+    let suffix_len int = ast_ir_call_has_suffix(base) != 0 ? gs.c_sym_sfx_len : 0;
     let prefix_len int = gen.tg_darwin() != 0 ? 1 : 0;
     let name_len int = prefix_len + base.sym_name_len + suffix_len;
     if (ast_ir_call_reserve(out, out.call_count + 1,
@@ -149,13 +153,13 @@ fn ast_ir_call_append(out *AstIRCalls, base *AstExpr,
     }
     let i int = 0;
     for i < base.sym_name_len {
-        out.symbols[out.symbol_size] = gen.np_data[base.sym_name_off + i];
+        out.symbols[out.symbol_size] = gs.np_data[base.sym_name_off + i];
         out.symbol_size += 1;
         i += 1;
     }
     i = 0;
     for i < suffix_len {
-        out.symbols[out.symbol_size] = gen.np_data[gen.c_sym_sfx_off + i];
+        out.symbols[out.symbol_size] = gs.np_data[gs.c_sym_sfx_off + i];
         out.symbol_size += 1;
         i += 1;
     }
@@ -187,10 +191,11 @@ fn ast_ir_lower_call_args(b *AstIRBuilder, ctx *AstFunctionContext, link int,
 // ast_ir_lower_call_expr：构造保留副作用的 CALL 指令与稳定的目标/实参元数据。
 fn ast_ir_lower_call_expr(b *AstIRBuilder, ctx *AstFunctionContext,
     expr_id int) int {
+    let gs *gen.GenState = gen.G();
     let node AstExpr = ast_expr_nodes[expr_id];
     let base *AstExpr = &ast_expr_nodes[node.child0];
-    let sig int = gen.t_types[base.sym_type_id].sub;
-    let count int = gen.t_sig_np[sig];
+    let sig int = gs.t_types[base.sym_type_id].sub;
+    let count int = gs.t_sig_np[sig];
     let inline_values [8]ir.IRCallArg;
     let values *ir.IRCallArg = &inline_values[0];
     let heap_values int = 0;
