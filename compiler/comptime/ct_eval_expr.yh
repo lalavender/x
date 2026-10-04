@@ -1,0 +1,181 @@
+module comptime;
+import gen;
+
+// ct_kind：读取函数体快照中的当前 token，越界统一视为 EOF。
+pub fn ct_kind(r *CtReader) int {
+    if (r.pos < 0 || r.pos >= r.target.body_n) { return gen.TOK_EOF; }
+    return r.target.body[r.pos].kind;
+}
+
+// ct_advance：推进编译期表达式游标。
+pub fn ct_advance(r *CtReader) void {
+    if (r.pos < r.target.body_n) { r.pos += 1; }
+}
+
+// ct_digit：把数字字符转为当前进制的值；非法字符返回 -1。
+pub fn ct_digit(b u8, base int) int {
+    let d int = -1;
+    if (b >= '0' && b <= '9') { d = (b - '0').to_type(int); }
+    else if (b >= 'a' && b <= 'f') { d = ((b - 'a') + 10).to_type(int); }
+    else if (b >= 'A' && b <= 'F') { d = ((b - 'A') + 10).to_type(int); }
+    if (d < 0 || d >= base) { return -1; }
+    return d;
+}
+
+// ct_number：解析已由词法器确认的整数文本，支持 yh 的进制前缀与下划线。
+pub fn ct_number(src *u8, start int, n int, out *CtValue) int {
+    let i int = start;
+    let end int = start + n;
+    let base int = 10;
+    if (n >= 2 && src[start] == '0') {
+        let p u8 = src[start + 1];
+        if (p == 'x' || p == 'X') { base = 16; i += 2; }
+        else if (p == 'b' || p == 'B') { base = 2; i += 2; }
+        else if (p == 'o' || p == 'O') { base = 8; i += 2; }
+    }
+    let v i64 = 0;
+    let big int = 0;
+    for i < end {
+        if (src[i] != '_') {
+            let d int = ct_digit(src[i], base);
+            if (d < 0) { return gen.sem_err("首版编译期函数仅支持整数表达式"); }
+            v = v * base.to_type(i64) + d.to_type(i64);
+            if (v < 0) { big = 1; }
+        }
+        i += 1;
+    }
+    out.type_id = gen.TY_I32;
+    out.value = v;
+    out.is_lit = 1;
+    out.lit_big = big;
+    return 0;
+}
+
+// ct_name_eq：比较快照源中的标识符与某个已绑定形参名。
+pub fn ct_name_eq(item *CtFunction, token *CtToken, param *CtParam) int {
+    if (token.len != param.name_len) { return 0; }
+    let i int = 0;
+    for i < token.len {
+        if (item.src[token.start + i] != item.src[param.name_start + i]) { return 0; }
+        i += 1;
+    }
+    return 1;
+}
+
+// ct_atom：解析整数、形参引用或括号表达式。
+pub fn ct_atom(r *CtReader, out *CtValue) int {
+    let k int = ct_kind(r);
+    if (k == gen.TK_LPAREN) {
+        ct_advance(r);
+        if (ct_add(r, out) != 0) { return -1; }
+        if (ct_kind(r) != gen.TK_RPAREN) { return gen.sem_err("编译期表达式缺少 ')'"); }
+        ct_advance(r);
+        return 0;
+    }
+    if (k == gen.TOK_NUMBER) {
+        let tok CtToken = r.target.body[r.pos];
+        ct_advance(r);
+        return ct_number(r.target.src, tok.start, tok.len, out);
+    }
+    if (k == gen.TOK_IDENT) {
+        let tok2 CtToken = r.target.body[r.pos];
+        let i int = 0;
+        for i < r.target.param_n {
+            if (ct_name_eq(&r.target, &tok2, &r.target.params[i]) != 0) {
+                *out = r.values[i];
+                ct_advance(r);
+                return 0;
+            }
+            i += 1;
+        }
+        return gen.sem_err("首版编译期函数表达式只能引用形参");
+    }
+    return gen.sem_err("首版编译期函数仅支持整数 return 表达式");
+}
+
+// ct_unary：解析一元正负号并拒绝首版不支持的其他一元运算。
+pub fn ct_unary(r *CtReader, out *CtValue) int {
+    let k int = ct_kind(r);
+    if (k == gen.TK_PLUS || k == gen.TK_MINUS) {
+        ct_advance(r);
+        if (ct_unary(r, out) != 0) { return -1; }
+        if (gen.ty_is_integer(out.type_id) == 0) { return gen.sem_err("编译期一元运算要求整数"); }
+        if (k == gen.TK_MINUS) { out.value = 0 - out.value; }
+        return 0;
+    }
+    return ct_atom(r, out);
+}
+
+// ct_merge_numeric：确定整数运算结果类型并检查非字面量操作数类型一致。
+pub fn ct_merge_numeric(lhs *CtValue, rhs *CtValue, out *CtValue) int {
+    if (gen.ty_is_integer(lhs.type_id) == 0 || gen.ty_is_integer(rhs.type_id) == 0) {
+        return gen.sem_err("编译期算术运算要求整数");
+    }
+    if (lhs.is_lit == 0 && rhs.is_lit == 0 && lhs.type_id != rhs.type_id) {
+        return gen.sem_err("首版编译期算术不支持不同宽度的整数混算");
+    }
+    out.type_id = lhs.type_id;
+    if (lhs.is_lit != 0 && rhs.is_lit == 0) { out.type_id = rhs.type_id; }
+    out.is_lit = (lhs.is_lit != 0 && rhs.is_lit != 0).to_type(int);
+    out.lit_big = lhs.lit_big | rhs.lit_big;
+    return 0;
+}
+
+// ct_mul：解析乘除模并执行带除零检查的整数折叠。
+pub fn ct_mul(r *CtReader, out *CtValue) int {
+    if (ct_unary(r, out) != 0) { return -1; }
+    for ct_kind(r) == gen.TK_STAR || ct_kind(r) == gen.TK_SLASH || ct_kind(r) == gen.TK_PERCENT {
+        let op int = ct_kind(r);
+        ct_advance(r);
+        let rhs CtValue;
+        if (ct_unary(r, &rhs) != 0) { return -1; }
+        let merged CtValue;
+        if (ct_merge_numeric(out, &rhs, &merged) != 0) { return -1; }
+        if (op == gen.TK_STAR) { merged.value = out.value * rhs.value; }
+        else {
+            if (rhs.value == 0) { return gen.sem_err("编译期除数不能为零"); }
+            if (op == gen.TK_SLASH) { merged.value = out.value / rhs.value; }
+            else { merged.value = out.value % rhs.value; }
+        }
+        *out = merged;
+    }
+    return 0;
+}
+
+// ct_add：解析加减表达式，保持 yh 整数常量的左结合规则。
+pub fn ct_add(r *CtReader, out *CtValue) int {
+    if (ct_mul(r, out) != 0) { return -1; }
+    for ct_kind(r) == gen.TK_PLUS || ct_kind(r) == gen.TK_MINUS {
+        let op int = ct_kind(r);
+        ct_advance(r);
+        let rhs CtValue;
+        if (ct_mul(r, &rhs) != 0) { return -1; }
+        let merged CtValue;
+        if (ct_merge_numeric(out, &rhs, &merged) != 0) { return -1; }
+        if (op == gen.TK_PLUS) { merged.value = out.value + rhs.value; }
+        else { merged.value = out.value - rhs.value; }
+        *out = merged;
+    }
+    return 0;
+}
+
+// ct_eval_body：首版执行一个只有单条 return 的编译期函数体。
+pub fn ct_eval_body(item CtFunction, values *CtValue, out *CtValue) int {
+    let r CtReader;
+    r.target = item;
+    r.values = values;
+    r.pos = 0;
+    if (ct_kind(&r) != gen.TK_LBRACE) { return gen.sem_err("编译期函数缺少函数体"); }
+    ct_advance(&r);
+    if (ct_kind(&r) != gen.TK_RETURN) {
+        return gen.sem_err("首版编译期函数体只支持 return 整数表达式;");
+    }
+    ct_advance(&r);
+    if (ct_add(&r, out) != 0) { return -1; }
+    if (ct_kind(&r) != gen.TK_SEMI) { return gen.sem_err("编译期 return 表达式期望 ';'"); }
+    ct_advance(&r);
+    if (ct_kind(&r) != gen.TK_RBRACE || r.pos + 1 != item.body_n) {
+        return gen.sem_err("首版编译期函数体只支持单条 return 语句");
+    }
+    return 0;
+}

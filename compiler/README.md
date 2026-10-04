@@ -7,8 +7,8 @@
 > `make selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
-version = `0.0.3`，source = `.`），按 **gen / lex / parse / cmd / ir / backend
-多模块**组织，编译器源码共 49 个 `.yh` 文件、约 2.1 万行；`ir`（目标隔离
+version = `0.0.3`，source = `.`），按 **gen / lex / parse / comptime / cmd / ir / backend
+多模块**组织，编译器源码共 58 个 `.yh` 文件；`ir`（目标隔离
 SSA）与其它模块同为根项目普通模块，共同进入编译器构建与自举固定点。
 
 ```
@@ -42,7 +42,7 @@ python3 tests/yh-run/check.py --compiler $PWD/../yh
 compiler/ 全部源文件；③cc3 语法语料（`tests/yh` 正例全过、反例全拒）；
 ④cc3 运行语料（`tests/yh-run` 全量 run/fail/pass）；⑤模块语料
 （`tests/modules/check.py` 17 例）；⑥项目验收
-（`tests/modules/build-check.py` 54 例）。滚种子前必须全绿。
+（`tests/modules/build-check.py` 80 例）。滚种子前必须全绿。
 
 ## 模块与文件职责
 
@@ -70,6 +70,18 @@ compiler/ 全部源文件；③cc3 语法语料（`tests/yh` 正例全过、反�
 | `parse/parse_global_init.yh` | 全局聚合变量初始化（命名/位置/嵌套/字符串字面量） |
 | `parse/parse_module.yh` | 模块头解析：`module` 声明、`import NAME (as ALIAS)?;` |
 | `parse/iface.yh` | 模块接口与私有性：跨模块可见边界 |
+
+**comptime** —— 编译期函数登记与受限求值
+
+| 文件 | 职责 |
+| --- | --- |
+| `comptime/ct_00_model.yh` | 编译期 token、函数、整数值与求值游标模型 |
+| `comptime/ct_registry.yh` | 编译期函数正文快照、按符号登记/查询与展开预算 |
+| `comptime/ct_eval_expr.yh` | 首版单条整数 return 表达式求值 |
+
+函数体 `$if/$for` 的解析和作用域接缝位于 `parse/parse_comptime.yh`；
+编译期函数当前只支持整数形参/返回值、常量实参和单条整数 return 表达式，
+完整语句解释器仍在待办中。
 
 **gen** —— 语义与后端
 

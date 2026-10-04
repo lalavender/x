@@ -1,5 +1,6 @@
 module parse;
 import gen;
+import comptime;
 
 // ============================================================================
 // parse_decl.yh —— 自举编译器：顶层声明与源文件入口（两遍驱动）
@@ -130,8 +131,10 @@ pub fn parse_attr_list(attrs *int) int {
             bit = gen.ATTR_INLINE;
         } else if (p_tok_text_is("noreturn", 8) != 0) {
             bit = gen.ATTR_NORETURN;
+        } else if (p_tok_text_is("comptime", 8) != 0) {
+            bit = gen.ATTR_COMPTIME;
         } else {
-            return gen.err_tok("未知属性（仅支持 extern、inline、noreturn）");
+            return gen.err_tok("未知属性（仅支持 extern、inline、noreturn、comptime）");
         }
         if ((bits & bit) != 0) {
             return gen.err_tok("属性列表中存在重复属性");
@@ -398,6 +401,13 @@ pub fn parse_top_decl() int {
         p_adv();
     }
     let kind int = p_cur();
+    if ((gs.c_decl_attrs & gen.ATTR_COMPTIME) != 0
+        && (kind != gen.TK_FN || gs.c_decl_attrs != gen.ATTR_COMPTIME || gs.c_decl_pub != 0)) {
+        gs.c_pos = attr_pos;
+        gs.c_decl_pub = 0;
+        gs.c_decl_attrs = 0;
+        return gen.err_tok("comptime 首版仅支持修饰私有 fn，且不能与其他属性组合");
+    }
     if (gs.c_decl_attrs != 0) {
         if (kind == gen.TK_STRUCT || kind == gen.TK_UNION || kind == gen.TK_ENUM) {
             if ((gs.c_decl_attrs & (gen.ATTR_INLINE | gen.ATTR_NORETURN)) != 0) {
@@ -494,6 +504,11 @@ pub fn parse_fn_decl() int {
     }
     let start int = gs.c_toks[gs.c_pos].start;
     let n int = gs.c_toks[gs.c_pos].len;
+    if ((gs.c_decl_attrs & gen.ATTR_COMPTIME) != 0 && n == 4
+        && gs.c_src[start] == 'm' && gs.c_src[start + 1] == 'a'
+        && gs.c_src[start + 2] == 'i' && gs.c_src[start + 3] == 'n') {
+        return gen.sem_err("main 不能标记为 comptime");
+    }
     p_adv();
     if (p_expect(gen.TK_LPAREN, "期望 '('") != 0) {
         return -1;
@@ -571,6 +586,18 @@ pub fn parse_fn_decl() int {
             return -1;
         }
         ret = rt;
+    }
+    if (gs.c_compile != 0 && (gs.c_decl_attrs & gen.ATTR_COMPTIME) != 0) {
+        if (vararg != 0 || is_variadic_seen != 0 || gen.ty_is_integer(ret) == 0) {
+            return gen.sem_err("首版 comptime 函数要求固定整数参数和整数返回值");
+        }
+        let ci_ct int = 0;
+        for ci_ct < np {
+            if (gen.ty_is_integer(ptypes[ci_ct]) == 0) {
+                return gen.sem_err("首版 comptime 函数只支持整数形参");
+            }
+            ci_ct += 1;
+        }
     }
     gs.c_type_abi = saved_type_abi;
     if ((gs.c_decl_attrs & gen.ATTR_NORETURN) != 0 && ret != gen.TY_VOID) {
@@ -660,6 +687,7 @@ pub fn parse_fn_decl() int {
         }
         if ((gs.c_decl_attrs & gen.ATTR_NORETURN) != 0) { fl |= gen.F_NORETURN; }
         if ((gs.c_decl_attrs & gen.ATTR_INLINE) != 0) { fl |= gen.F_INLINE; }
+        if ((gs.c_decl_attrs & gen.ATTR_COMPTIME) != 0) { fl |= gen.F_COMPTIME; }
         let idx int = gen.sym_push(start, n, gen.SYM_FN, ftid, fl);
         if (idx < 0) {
             return -1;
@@ -672,13 +700,23 @@ pub fn parse_fn_decl() int {
             && (gs.c_module_mode == 0 || gs.c_is_entry_mod != 0)) {
             gs.c_syms[idx].flags |= gen.F_PUB;
         }
-        // 有体定义跳过函数体；extern 引用已在上方消费分号。
+        // 有体定义跳过函数体；编译期函数另外保存正文快照，供全局常量求值。
         if (has_body == 0) { return 0; }
+        let body_first int = gs.c_pos;
+        let body_after int = 0;
         if (gs.c_file_indexed != 0 && gs.c_file_decl_i >= 0) {
+            body_after = gs.c_file_decls[gs.c_file_decl_i].end;
             gs.c_pos = gs.c_file_decls[gs.c_file_decl_i].end;
-            return 0;
+        } else {
+            if (skip_to_decl_end() != 0) { return -1; }
+            body_after = gs.c_pos;
         }
-        return skip_to_decl_end();
+        if ((gs.c_decl_attrs & gen.ATTR_COMPTIME) != 0
+            && comptime.ct_register(idx, &pnames[0], &pname_lens[0], &ptypes[0],
+                np, ret, body_first, body_after) != 0) {
+            return -1;
+        }
+        return 0;
     }
     // pass 2：编译函数体
     if (has_body == 0) { return 0; }
@@ -686,6 +724,8 @@ pub fn parse_fn_decl() int {
     if (fidx < 0) {
         return gen.sem_err("内部错误：函数符号丢失");
     }
+    let compile_only int = ((gs.c_syms[fidx].flags & gen.F_COMPTIME) != 0).to_type(int);
+    if (compile_only != 0) { gs.c_em_suppress += 1; }
     if (gen.sem_fn_begin(fidx) != 0) {
         return -1;
     }
@@ -729,6 +769,7 @@ pub fn parse_fn_decl() int {
     if (ast_function_end() != 0) {
         return -1;
     }
+    if (compile_only != 0) { gs.c_em_suppress -= 1; }
     return 0;
 }
 

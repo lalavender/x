@@ -1,0 +1,159 @@
+module parse;
+import gen;
+import comptime;
+
+// parse_comptime_block_end：查找从指定左花括号开始的匹配右花括号位置。
+pub fn parse_comptime_block_end(first int) int {
+    let gs *gen.GenState = gen.G();
+    if (first < 0 || first >= gs.c_tok_n || gs.c_toks[first].kind != gen.TK_LBRACE) {
+        return -1;
+    }
+    let depth int = 0;
+    let i int = first;
+    for i < gs.c_tok_n {
+        let kind int = gs.c_toks[i].kind;
+        if (kind == gen.TK_LBRACE) { depth += 1; }
+        if (kind == gen.TK_RBRACE) {
+            depth -= 1;
+            if (depth == 0) { return i + 1; }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// parse_comptime_branch：选中分支正常检查/发码，未选分支只做语法检查。
+pub fn parse_comptime_branch(selected int) int {
+    let gs *gen.GenState = gen.G();
+    let saved_compile int = gs.c_compile;
+    let saved_capture int = gs.c_ast_capture;
+    let saved_falls int = gs.c_fn_falls;
+    if (selected != 1 || saved_compile == 0) {
+        gs.c_compile = 0;
+    }
+    // 展开结构由旧语句发射器负责；这些子树不进入普通函数 SSA 缓存。
+    gs.c_ast_capture = 0;
+    let status int = 0;
+    if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_IF) {
+        status = parse_comptime_if();
+    } else {
+        status = parse_block();
+    }
+    gs.c_compile = saved_compile;
+    gs.c_ast_capture = saved_capture;
+    if (selected != 1 || saved_compile == 0) { gs.c_fn_falls = saved_falls; }
+    return status;
+}
+
+// parse_comptime_if：在函数体内按已就绪常量选择一个语句块，不发条件跳转。
+pub fn parse_comptime_if() int {
+    let gs *gen.GenState = gen.G();
+    let parent_falls int = gs.c_fn_falls;
+    p_adv();
+    if (p_expect(gen.TK_IF, "$ 后需要 if") != 0
+        || p_expect(gen.TK_LPAREN, "$if 条件必须带括号") != 0) { return -1; }
+    let cond gen.Res;
+    if (gs.c_compile != 0) { gs.c_fold += 1; }
+    let cr int = parse_expr_iso(&cond);
+    if (gs.c_compile != 0) { gs.c_fold -= 1; }
+    if (cr != 0 || p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1; }
+    let selected int = -1;
+    if (gs.c_compile != 0) {
+        if (cond.is_const == 0) { return gen.sem_err("$if 条件必须是编译期常量"); }
+        if (sem_check_cond(&cond) != 0) { return -1; }
+        selected = (cond.ival != 0).to_type(int);
+    }
+    if (parse_comptime_branch(selected) != 0) { return -1; }
+    let then_falls int = gs.c_fn_falls;
+    let has_else int = 0;
+    let else_falls int = parent_falls;
+    if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_ELSE) {
+        has_else = 1;
+        p_adv();
+        p_adv();
+        let else_selected int = 0;
+        if (selected == 0) { else_selected = 1; }
+        if (selected < 0) { else_selected = -1; }
+        if (parse_comptime_branch(else_selected) != 0) { return -1; }
+        else_falls = gs.c_fn_falls;
+    }
+    if (gs.c_compile != 0) {
+        if (selected == 1) { gs.c_fn_falls = then_falls; }
+        else if (selected == 0 && has_else != 0) { gs.c_fn_falls = else_falls; }
+        else { gs.c_fn_falls = parent_falls; }
+    }
+    return 0;
+}
+
+// parse_comptime_for：按半开整数区间重复解析语句块，并为每次展开建立常量绑定。
+pub fn parse_comptime_for() int {
+    let gs *gen.GenState = gen.G();
+    p_adv();
+    if (p_expect(gen.TK_FOR, "$ 后需要 for") != 0 || p_cur() != gen.TOK_IDENT) {
+        return gen.err_tok("$for 需要循环变量名");
+    }
+    let name_start int = gs.c_toks[gs.c_pos].start;
+    let name_len int = gs.c_toks[gs.c_pos].len;
+    p_adv();
+    if (p_expect(gen.TK_IN, "$for 变量后需要 in") != 0
+        || p_expect(gen.TK_LPAREN, "$for 区间必须带括号") != 0) { return -1; }
+    let lo gen.Res;
+    if (gs.c_compile != 0) { gs.c_fold += 1; }
+    let lr int = parse_expr_blockctx(&lo);
+    if (gs.c_compile != 0) { gs.c_fold -= 1; }
+    if (lr != 0 || p_expect(gen.TK_RANGE, "$for 区间需要 '..'") != 0) { return -1; }
+    let hi gen.Res;
+    if (gs.c_compile != 0) { gs.c_fold += 1; }
+    let hr int = parse_expr_blockctx(&hi);
+    if (gs.c_compile != 0) { gs.c_fold -= 1; }
+    if (hr != 0 || p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1; }
+    if (p_cur() != gen.TK_LBRACE) { return gen.err_tok("$for 区间后需要块"); }
+    let body_first int = gs.c_pos;
+    let body_after int = parse_comptime_block_end(body_first);
+    if (body_after < 0) { return gen.err_tok("$for 函数体缺少 '}'"); }
+    if (gs.c_compile == 0) { return parse_comptime_branch(-1); }
+    if (lo.is_const == 0 || hi.is_const == 0) {
+        return gen.sem_err("$for 区间边界必须是编译期常量");
+    }
+    if (gen.ty_is_integer(lo.type_id) == 0 || gen.ty_is_integer(hi.type_id) == 0) {
+        return gen.sem_err("$for 区间边界必须是整数");
+    }
+    if (gen.sem_can_assign(gen.TY_I32, lo.type_id, lo.is_lit, lo.ival, lo.lit_big) != 0
+        || gen.sem_can_assign(gen.TY_I32, hi.type_id, hi.is_lit, hi.ival, hi.lit_big) != 0) {
+        return -1;
+    }
+    let count int = 0;
+    let probe i64 = lo.ival;
+    for probe < hi.ival {
+        count += 1;
+        if (count > 1024) { return gen.sem_err("单个 $for 区间超过 1024 次"); }
+        probe += 1;
+    }
+    if (count == 0) {
+        return parse_comptime_branch(0);
+    }
+    let value i64 = lo.ival;
+    for value < hi.ival {
+        if (comptime.ct_charge_expansion() != 0) { return -1; }
+        gs.c_pos = body_first;
+        gen.scope_push();
+        let sym int = gen.sym_push(name_start, name_len, gen.SYM_CONST, gen.TY_I32, 0);
+        if (sym < 0) { return -1; }
+        gs.c_syms[sym].cval = value;
+        if (parse_comptime_branch(1) != 0) { return -1; }
+        if (gs.c_pos != body_after) {
+            return gen.err_tok("内部错误：$for 展开没有消费完整函数体");
+        }
+        gen.scope_pop();
+        value += 1;
+    }
+    gs.c_pos = body_after;
+    return 0;
+}
+
+// parse_comptime_control：分派函数体内的 $if 与 $for。
+pub fn parse_comptime_control() int {
+    if (p_peek(1) == gen.TK_IF) { return parse_comptime_if(); }
+    if (p_peek(1) == gen.TK_FOR) { return parse_comptime_for(); }
+    return gen.err_tok("语句位置的 $ 只支持 if 和 for");
+}

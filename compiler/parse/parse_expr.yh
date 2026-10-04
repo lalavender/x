@@ -1,5 +1,6 @@
 module parse;
 import gen;
+import comptime;
 
 // ============================================================================
 // parse_expr.yh —— 自举编译器：表达式解析（语义钩子集成）
@@ -614,6 +615,11 @@ pub fn parse_postfix(res *gen.Res) int {
     for 1 {
         let k int = p_cur();
         if (k == gen.TK_LPAREN) {
+            if (gs.c_compile != 0 && res.sym >= 0 && res.sym < gs.c_sym_n
+                && gs.c_syms[res.sym].kind == gen.SYM_FN
+                && (gs.c_syms[res.sym].flags & gen.F_COMPTIME) != 0) {
+                return gen.sem_err("编译期函数必须使用 $函数(...) 调用");
+            }
             let base_ast int = -1;
             let first int = gs.c_pos;
             if (gs.c_ast_capture != 0) {
@@ -814,6 +820,56 @@ pub fn parse_primary(res *gen.Res) int {
     return 0;
 }
 
+// parse_comptime_call：解析 $fn(args)，只接受已登记的编译期函数与常量实参。
+pub fn parse_comptime_call(res *gen.Res) int {
+    let gs *gen.GenState = gen.G();
+    p_adv();
+    if (p_cur() != gen.TOK_IDENT) { return gen.err_tok("$ 后需要编译期函数名"); }
+    let start int = gs.c_toks[gs.c_pos].start;
+    let n int = gs.c_toks[gs.c_pos].len;
+    let sym int = -1;
+    let sig int = -1;
+    let np int = 0;
+    if (gs.c_compile != 0) {
+        sym = gen.sym_lookup(start, n);
+        if (sym < 0 || gs.c_syms[sym].kind != gen.SYM_FN) {
+            return gen.sem_err("$ 调用目标必须是编译期函数");
+        }
+        if ((gs.c_syms[sym].flags & gen.F_COMPTIME) == 0) {
+            return gen.sem_err("$ 调用目标缺少 @[comptime] 属性");
+        }
+        sig = gs.t_types[gs.c_syms[sym].type_id].sub;
+        np = gs.t_sig_np[sig];
+    }
+    p_adv();
+    if (p_expect(gen.TK_LPAREN, "编译期调用期望 '('") != 0) { return -1; }
+    let args [64]gen.Res;
+    let arg_n int = 0;
+    if (p_cur() != gen.TK_RPAREN) {
+        for 1 {
+            if (arg_n >= 64) { return gen.err_tok("编译期调用实参过多"); }
+            let save_exp int = gs.c_expect_tid;
+            if (sig >= 0 && arg_n < np) {
+                gs.c_expect_tid = gs.t_sig_params[gs.t_sig_first[sig] + arg_n];
+            }
+            gs.c_fold += 1;
+            let ar int = parse_expr_iso(&args[arg_n]);
+            gs.c_fold -= 1;
+            gs.c_expect_tid = save_exp;
+            if (ar != 0) { return -1; }
+            arg_n += 1;
+            if (p_cur() != gen.TK_COMMA) { break; }
+            p_adv();
+        }
+    }
+    if (p_expect(gen.TK_RPAREN, "编译期调用期望 ')' ") != 0) { return -1; }
+    if (gs.c_compile == 0) {
+        gen.sem_res_reset(res, 0);
+        return 0;
+    }
+    return comptime.ct_call(sym, &args[0], arg_n, res);
+}
+
 // parse_primary_impl：解析基本表达式；外层统一记录源范围和类型。
 pub fn parse_primary_impl(res *gen.Res, first int) int {
     let gs *gen.GenState = gen.G();
@@ -822,6 +878,9 @@ pub fn parse_primary_impl(res *gen.Res, first int) int {
     // 当前 token 的源区间（各字面量分支共用；stage0 同级块禁同名局部）
     let start int = gs.c_toks[gs.c_pos].start;
     let n int = gs.c_toks[gs.c_pos].len;
+    if (k == gen.TK_DOLLAR) {
+        return parse_comptime_call(res);
+    }
     if (k == gen.TOK_NUMBER) {
         p_adv();
         return gen.sem_number(start, n, res);
@@ -910,6 +969,13 @@ pub fn parse_ident_primary(res *gen.Res) int {
     // 注意：stage0 中 if/while 体不开新词法作用域，同名局部必须提升到函数级
     let istart int = gs.c_toks[gs.c_pos].start;
     let ilen int = gs.c_toks[gs.c_pos].len;
+    if (gs.c_compile != 0 && p_peek(1) != gen.TK_LPAREN) {
+        let direct_sym int = gen.sym_lookup(istart, ilen);
+        if (direct_sym >= 0 && gs.c_syms[direct_sym].kind == gen.SYM_FN
+            && (gs.c_syms[direct_sym].flags & gen.F_COMPTIME) != 0) {
+            return gen.sem_err("编译期函数不能作为运行时函数值使用");
+        }
+    }
     // 模块限定名（编译模式）：名字解析失败且是当前文件的导入绑定
     //（局部声明按词法作用域遮蔽导入）。语法模式不解析（U1 行为）。
     if (gs.c_compile != 0 && gs.c_module_mode != 0 && p_peek(1) == gen.TK_DOT && p_peek(2) == gen.TOK_IDENT) {
