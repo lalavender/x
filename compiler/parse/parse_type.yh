@@ -68,7 +68,7 @@ pub fn is_member_name(k int) int {
 
 // is_type_start：k 是否可作为类型引用起始（返回类型省略判定用）。
 pub fn is_type_start(k int) int {
-    if (k == gen.TK_STAR || k == gen.TK_LBRACKET || k == gen.TK_FN || k == gen.TOK_IDENT) {
+    if (k == gen.TK_AT || k == gen.TK_STAR || k == gen.TK_LBRACKET || k == gen.TK_FN || k == gen.TOK_IDENT) {
         return 1;
     }
     return (k >= gen.TK_INT && k <= gen.TK_VOID).to_type(int);
@@ -86,7 +86,7 @@ pub fn sizeof_starts_type() int {
         off += 1;
         k = p_peek(off);
     }
-    if (k == gen.TK_LBRACKET || k == gen.TK_FN) {
+    if (k == gen.TK_AT || k == gen.TK_LBRACKET || k == gen.TK_FN) {
         return 1;
     }
     if (k >= gen.TK_INT && k <= gen.TK_VOID) {
@@ -129,8 +129,23 @@ pub fn tk_to_builtin(k int) int {
 
 // parse_type_ref：类型引用。返回类型编号（语法模式返回 0），错误 -1。
 //   '*' typeRef | '[' expr? ']' typeRef | 'fn' '(' typeRefList? ')' typeRef?
-//   | builtinType | IDENT
+//   | '@' '[' 'extern' ']' fnType | builtinType | IDENT
 pub fn parse_type_ref() int {
+    // 类型属性只有精确的 @[extern] fn 分支，作用范围限定为该函数类型。
+    if (p_cur() == gen.TK_AT) {
+        p_adv();
+        if (p_expect(gen.TK_LBRACKET, "C 函数类型需要 '['") != 0) { return -1; }
+        if (p_tok_text_is("extern", 6) == 0) { return gen.err_tok("函数类型属性只允许 extern"); }
+        p_adv();
+        if (p_expect(gen.TK_RBRACKET, "C 函数类型属性只允许单个 extern") != 0) { return -1; }
+        if (p_cur() != gen.TK_FN) { return gen.err_tok("类型属性只能修饰 fn 类型"); }
+        let gs0 *gen.GenState = gen.G();
+        let saved int = gs0.c_type_abi;
+        gs0.c_type_abi = gen.ABI_C;
+        let result int = parse_type_ref();
+        gs0.c_type_abi = saved;
+        return result;
+    }
     let gs *gen.GenState = gen.G();
     let k int = p_cur();
     if (k == gen.TK_STAR) {
@@ -235,7 +250,12 @@ pub fn parse_type_ref() int {
             gen.ty_sig_param(pts[i]);
             i += 1;
         }
-        return gen.ty_fn(ret, first, np, 0);
+        let ftid int = gen.ty_fn_abi(ret, first, np, 0, gs.c_type_abi);
+        // 显式 C 类型、别名与字段同样检查签名，不能绕过 extern 声明检查。
+        if (ftid >= 0 && gs.c_type_abi == gen.ABI_C && gen.ty_cabi_param(ftid) == 0) {
+            return gen.sem_err("C ABI 不支持该函数类型");
+        }
+        return ftid;
     }
     if (k >= gen.TK_INT && k <= gen.TK_VOID) {
         p_adv();

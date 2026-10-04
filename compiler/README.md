@@ -84,6 +84,8 @@ compiler/ 全部源文件；③cc3 语法语料（`tests/yh` 正例全过、反�
 | `gen/sem_decl.yh` | 声明语义：局部/全局符号登记、结构体与函数布局 |
 | `gen/sem_flow.yh` | 控制流语义：if/for/for-in/switch 的跳转与出口 |
 | `gen/sem_call_literal.yh` | 调用点实参搬运：聚合按值拷贝、混合 x0/d0 弹出、变参打包 |
+| `gen/abi_c.yh` | 共享 AArch64 C ABI 分类：值描述、HFA、寄存器与目标栈布局 |
+| `gen/sem_cabi.yh` | 固定参数 C 调用、入口与返回转换，聚合在函数体内保持地址表示 |
 | `gen/emit_arm64.yh` | AArch64 指令发射：值栈、访存、控制流、调用约定、段与符号 |
 | `gen/emit_runtime_memory.yh` | 自有 arm64 `memcpy`/`strlen` 运行时入口发射 |
 

@@ -137,6 +137,107 @@ fn mb_c_input_hash(hash *u64, projects *int, project_count int,
 }
 
 // mb_link：把模块汇编与可达项目 C 输入转对象并链接，缓存键覆盖全部对象。
+// mb_asm_tool：决定把模块 .s 变成 .o 用哪个工具。
+//
+// 返回 1 表示用自研汇编器 yh_link，并把它的路径写进 candidate（调用方给的
+// 定长缓冲）；返回 0 表示回落系统 cc（darwin 上 clang，其余 gcc）。
+//
+// 查找顺序：
+//   1. 环境变量 YH_LINK——显式指定，优先级最高。
+//   2. PATH 上的 yh_link——把两个可执行文件都装进 bin 目录时自然命中；
+//      门禁脚本也靠这一条把 wrapper 插到 PATH 前面来观测真实进程调用。
+//   3. 编译器可执行文件同目录下的 yh_link——`yh` 与 `yh_link` 放在一起但
+//      目录不在 PATH 上时仍然能自动用上。
+//
+// yh_link 的汇编子集与本编译器的发射方言一一对应（@PAGE/@PAGEOFF、_ 前缀
+// 符号），所以两边可以互换；对不上时应该让 yh_link 报错而不是静默用 cc，
+// 因此这里只按「文件在不在」判断，不做能力探测。
+pub fn mb_asm_tool(candidate *u8) int {
+    let gs *gen.GenState = gen.G();
+    let env_off int = -1;
+    let env_len int = 0;
+    if (pj_env_fetch("YH_LINK", &env_off, &env_len) != 0) {
+        return 0;
+    }
+    if (env_len > 0 && gs.np_data[env_off] != 0) {
+        let n int = 0;
+        let k int = 0;
+        for k < env_len {
+            candidate[n] = gs.np_data[env_off + k];
+            n += 1;
+            k += 1;
+        }
+        candidate[n] = 0;
+        if (pj_file_exists(gen.arr_cstr(candidate)) != 0) {
+            return 1;
+        }
+        return 0;
+    }
+    if (mb_path_find("yh_link", candidate) != 0) {
+        return 1;
+    }
+    // 与 c_argv0 同目录的 yh_link
+    let slash int = -1;
+    let i int = 0;
+    for c_argv0[i] != 0 {
+        if (c_argv0[i] == '/') {
+            slash = i;
+        }
+        i += 1;
+    }
+    let n int = 0;
+    let k int = 0;
+    for k <= slash {
+        candidate[n] = c_argv0[k].to_type(u8);
+        n += 1;
+        k += 1;
+    }
+    n = gen.append_str(candidate, n, "yh_link");
+    candidate[n] = 0;
+    if (pj_file_exists(gen.arr_cstr(candidate)) != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+// mb_path_find：在 PATH 上查找名为 name 的文件。找到返回 1 并把**绝对路径**
+// 写进 candidate（调用方给的定长缓冲）；找不到返回 0。
+// 空目录项按 POSIX 惯例解释为当前目录。
+pub fn mb_path_find(name *char, candidate *u8) int {
+    let gs *gen.GenState = gen.G();
+    let path_off int = -1;
+    let path_len int = 0;
+    if (pj_env_fetch("PATH", &path_off, &path_len) != 0) {
+        return 0;
+    }
+    let start int = 0;
+    let end int = 0;
+    for end <= path_len {
+        if (end == path_len || gs.np_data[path_off + end] == ':') {
+            let n int = 0;
+            if (end == start) {
+                n = gen.append_str(candidate, n, ".");
+            } else {
+                let k int = start;
+                for k < end {
+                    candidate[n] = gs.np_data[path_off + k];
+                    n += 1;
+                    k += 1;
+                }
+            }
+            n = gen.append_byte(candidate, n, '/');
+            n = gen.append_str(candidate, n, name);
+            candidate[n] = 0;
+            if (pj_file_exists(gen.arr_cstr(candidate)) != 0) {
+                return 1;
+            }
+            start = end + 1;
+        }
+        end += 1;
+    }
+    return 0;
+}
+
 pub fn mb_link(out_path *char, build_off int, build_len int,
     count int, root_proj int) int {
     let gs *gen.GenState = gen.G();
@@ -205,7 +306,24 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
             mb_fnv(&h, cc[ci].to_type(u8));
             ci += 1;
         }
+        // 键里带上真实命令前缀：换工具链（cc ↔ yh_link）必然换键，
+        // 否则会拿 cc 产出的旧对象当命中。
+        let tool_buf [1200]u8;
+        tool_buf[0] = 0;
+        let use_yh int = mb_asm_tool(&tool_buf[0]);
+        let cmd0 *char = cc;
+        if (use_yh != 0) {
+            cmd0 = gen.arr_cstr(&tool_buf[0]);
+        }
+        let ci2 int = 0;
+        for cmd0[ci2] != 0 {
+            mb_fnv(&h, cmd0[ci2].to_type(u8));
+            ci2 += 1;
+        }
         let flags *char = " -c";
+        if (use_yh != 0) {
+            flags = " asm";
+        }
         let fi int = 0;
         for flags[fi] != 0 {
             mb_fnv(&h, flags[fi].to_type(u8));
@@ -254,13 +372,33 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
         }
         if (object_hit == 0) {
             unlink(gen.arr_cstr(obj_manifest));
-            let args [6]*char;
-            args[0] = cc;
-            args[1] = "-c";
-            args[2] = gen.arr_cstr(spath);
-            args[3] = "-o";
-            args[4] = gen.arr_cstr(opath);
-            args[5] = 0.to_type(*char);
+            let args [8]*char;
+            if (use_yh != 0) {
+                // yh_link asm -t darwin -o <obj> <src>（Linux 目标不带 -t，
+                // yh_link 的默认目标就是 ELF64）
+                args[0] = gen.arr_cstr(&tool_buf[0]);
+                args[1] = "asm";
+                if (gen.tg_darwin() != 0) {
+                    args[2] = "-t";
+                    args[3] = "darwin";
+                    args[4] = "-o";
+                    args[5] = gen.arr_cstr(opath);
+                    args[6] = gen.arr_cstr(spath);
+                    args[7] = 0.to_type(*char);
+                } else {
+                    args[2] = "-o";
+                    args[3] = gen.arr_cstr(opath);
+                    args[4] = gen.arr_cstr(spath);
+                    args[5] = 0.to_type(*char);
+                }
+            } else {
+                args[0] = cc;
+                args[1] = "-c";
+                args[2] = gen.arr_cstr(spath);
+                args[3] = "-o";
+                args[4] = gen.arr_cstr(opath);
+                args[5] = 0.to_type(*char);
+            }
             if (gs.c_stats_enabled != 0) {
                 gs.c_stats_asm += 1;
             }

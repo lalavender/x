@@ -252,6 +252,8 @@ pub fn ty_sig_add(ret int, np int, vararg int) int {
     if (intvec_grow(&g_state.t_sig_np, g_state.t_sig_n, &g_state.t_sig_ncap) != 0) { return -1; }
     if (intvec_grow(&g_state.t_sig_vararg, g_state.t_sig_n, &g_state.t_sig_vcap) != 0) { return -1; }
     if (intvec_grow(&g_state.t_sig_first, g_state.t_sig_n, &g_state.t_sig_fcap) != 0) { return -1; }
+    if (intvec_grow(&g_state.t_sig_abi, g_state.t_sig_n, &g_state.t_sig_acap) != 0) { return -1; }
+    g_state.t_sig_abi[g_state.t_sig_n] = ABI_YH;
     g_state.t_sig_ret[g_state.t_sig_n] = ret;
     g_state.t_sig_np[g_state.t_sig_n] = np;
     g_state.t_sig_vararg[g_state.t_sig_n] = vararg;
@@ -270,12 +272,13 @@ pub fn ty_sig_param(tid int) int {
 }
 
 // ty_fn：函数类型（签名按内容去重：返回 + 参数个数 + 逐个参数类型）。
-pub fn ty_fn(ret int, first int, np int, vararg int) int {
+// ty_fn_abi：按调用约定、返回与完整参数签名去重，禁止 C/yh 函数值混用。
+pub fn ty_fn_abi(ret int, first int, np int, vararg int, abi int) int {
     let i int = 0;
     for i < g_state.t_type_n {
         if (g_state.t_types[i].kind == TY_FN) {
             let s int = g_state.t_types[i].sub;
-            if (g_state.t_sig_ret[s] == ret && g_state.t_sig_np[s] == np && g_state.t_sig_vararg[s] == vararg) {
+            if (g_state.t_sig_abi[s] == abi && g_state.t_sig_ret[s] == ret && g_state.t_sig_np[s] == np && g_state.t_sig_vararg[s] == vararg) {
                 let match int = 1;
                 let j int = 0;
                 for j < np {
@@ -293,8 +296,15 @@ pub fn ty_fn(ret int, first int, np int, vararg int) int {
         i += 1;
     }
     let ns int = ty_sig_add(ret, np, vararg);
+    if (ns < 0) { return -1; }
+    g_state.t_sig_abi[ns] = abi;
     g_state.t_sig_first[ns] = first;
     return ty_push(TY_FN, TG_PTR_SIZE, TG_PTR_SIZE, ret, np, ns);
+}
+
+// ty_fn：构造普通 yh 函数类型，保留原有内部调用接口。
+pub fn ty_fn(ret int, first int, np int, vararg int) int {
+    return ty_fn_abi(ret, first, np, vararg, ABI_YH);
 }
 
 // ty_is_integer：整数类（含 bool/char/enum）。
@@ -504,19 +514,20 @@ pub fn ty_cabi_scalar(tid int) int {
     return 0;
 }
 
-// ty_cabi_param：检查 C ABI 固定参数类型，回调只允许一层固定标量签名。
+// ty_cabi_param：允许 C 标量、具备共享布局的聚合及完整 C 函数指针。
+// 顶层数组不按值传递；切片和不透明值始终拒绝，数组仅可作为聚合字段。
 pub fn ty_cabi_param(tid int) int {
     if (ty_cabi_scalar(tid) != 0) { return 1; }
-    if (g_state.t_types[tid].kind != TY_FN) { return 0; }
+    let kind int = g_state.t_types[tid].kind;
+    if (kind == TY_STRUCT || kind == TY_UNION) { return ty_c_layout(tid); }
+    if (kind != TY_FN) { return 0; }
     let sig int = g_state.t_types[tid].sub;
-    if (g_state.t_sig_vararg[sig] != 0) { return 0; }
+    if (g_state.t_sig_abi[sig] != ABI_C || g_state.t_sig_vararg[sig] != 0) { return 0; }
     let ret int = g_state.t_sig_ret[sig];
-    if (ret != TY_VOID && ty_cabi_scalar(ret) == 0) { return 0; }
-    let first int = g_state.t_sig_first[sig];
-    let n int = g_state.t_sig_np[sig];
+    if (ret != TY_VOID && ty_cabi_param(ret) == 0) { return 0; }
     let i int = 0;
-    for i < n {
-        if (ty_cabi_scalar(g_state.t_sig_params[first + i]) == 0) { return 0; }
+    for i < g_state.t_sig_np[sig] {
+        if (ty_cabi_param(g_state.t_sig_params[g_state.t_sig_first[sig] + i]) == 0) { return 0; }
         i += 1;
     }
     return 1;
@@ -526,7 +537,8 @@ pub fn ty_cabi_param(tid int) int {
 pub fn ty_c_layout(tid int) int {
     let kind int = g_state.t_types[tid].kind;
     if (kind >= TY_BOOL && kind <= TY_F64) { return 1; }
-    if (kind == TY_PTR || kind == TY_FN) { return 1; }
+    if (kind == TY_PTR) { return 1; }
+    if (kind == TY_FN) { return ty_cabi_param(tid); }
     if (kind == TY_ARRAY) { return ty_c_layout(g_state.t_types[tid].elem); }
     if (kind == TY_ENUM) {
         return ((ty_name_attrs(tid) & ATTR_EXTERN) != 0).to_type(int);
@@ -971,8 +983,10 @@ pub fn sem_init_tables() int {
     g_state.c_spill_off = malloc((4 * 16).to_type(u64)).to_type(*int);
     g_state.c_spill_size = malloc((4 * 16).to_type(u64)).to_type(*int);
     g_state.c_call_base = malloc((4 * 64).to_type(u64)).to_type(*int);
+    g_state.c_call_abi = malloc((4 * 64).to_type(u64)).to_type(*int);
     g_state.c_call_direct = malloc((4 * 64).to_type(u64)).to_type(*int);
     g_state.c_arg_agg = malloc((4 * 256).to_type(u64)).to_type(*int);
+    g_state.c_aggparam_indirect = malloc((4 * 64).to_type(u64)).to_type(*int);
     g_state.c_aggparam_src = malloc((4 * 64).to_type(u64)).to_type(*int);
     g_state.c_aggparam_dst = malloc((4 * 64).to_type(u64)).to_type(*int);
     g_state.c_aggparam_size = malloc((4 * 64).to_type(u64)).to_type(*int);
@@ -993,8 +1007,8 @@ pub fn sem_init_tables() int {
         || g_state.c_glabels == 0 || g_state.c_args == 0 || g_state.c_argtys == 0
         || g_state.c_spill_reg == 0 || g_state.c_spill_off == 0 || g_state.c_spill_size == 0
         || g_state.c_call_base == 0
-        || g_state.c_call_direct == 0 || g_state.c_arg_agg == 0
-        || g_state.c_aggparam_src == 0 || g_state.c_aggparam_dst == 0 || g_state.c_aggparam_size == 0
+        || g_state.c_call_abi == 0 || g_state.c_call_direct == 0 || g_state.c_arg_agg == 0
+        || g_state.c_aggparam_indirect == 0 || g_state.c_aggparam_src == 0 || g_state.c_aggparam_dst == 0 || g_state.c_aggparam_size == 0
         || g_state.c_lit_save_off == 0 || g_state.c_lit_save_tid == 0
         || g_state.c_fi_kind == 0 || g_state.c_fi_cnt_off == 0 || g_state.c_fi_len_off == 0
         || g_state.c_fi_data_off == 0 || g_state.c_fi_step_off == 0

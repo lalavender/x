@@ -1,7 +1,7 @@
 module ir;
 
 // IR 序列化格式版本。格式只写逻辑字段，不依赖宿主结构体布局或指针。
-pub const IR_SERIAL_VERSION int = 4;
+pub const IR_SERIAL_VERSION int = 5;
 const IR_SERIAL_MAGIC u64 = 0x3141535352494859;
 const IR_SERIAL_MAX_ITEMS int = 1048576;
 const IR_SERIAL_MAX_BLOCKS int = 4096;
@@ -53,8 +53,8 @@ fn ir_serial_size_counts(type_count int, inst_count int, phi_count int,
         || block_count > IR_SERIAL_MAX_BLOCKS || value_count < 0 || value_count > IR_SERIAL_MAX_ITEMS) {
         return -1;
     }
-    let words int = 13 + type_count * 3 + inst_count * 7 + phi_count * 2
-        + phi_input_count * 2 + call_count * 4 + call_arg_count * 2
+    let words int = 14 + type_count * 3 + inst_count * 7 + phi_count * 2
+        + phi_input_count * 2 + call_count * 5 + call_arg_count * 2
         + (call_symbol_size + 7) / 8 + block_count * 7;
     if (words > IR_SERIAL_MAX_BYTES / 8) { return -1; }
     return words * 8;
@@ -90,6 +90,7 @@ pub fn ir_serialize(f *IRFunction, out *u8, capacity int) int {
     ir_serial_put_int(out, &cursor, f.call_symbol_size);
     ir_serial_put_int(out, &cursor, f.block_count);
     ir_serial_put_int(out, &cursor, f.value_count);
+    ir_serial_put_int(out, &cursor, f.abi);
 
     let i int = 0;
     for i < f.type_count {
@@ -128,6 +129,7 @@ pub fn ir_serialize(f *IRFunction, out *u8, capacity int) int {
         ir_serial_put_int(out, &cursor, f.calls[i].symbol_len);
         ir_serial_put_int(out, &cursor, f.calls[i].arg_first);
         ir_serial_put_int(out, &cursor, f.calls[i].arg_count);
+        ir_serial_put_int(out, &cursor, f.calls[i].abi);
         i += 1;
     }
     i = 0;
@@ -172,6 +174,7 @@ pub fn ir_function_release(f *IRFunction) void {
     if (f.call_args != 0) { free(f.call_args); }
     if (f.call_symbols != 0) { free(f.call_symbols); }
     if (f.blocks != 0) { free(f.blocks); }
+    f.abi = 0;
     f.target_id = -1;
     f.ret_type = -1;
     f.types = 0;
@@ -201,7 +204,7 @@ fn ir_serial_header_int_ok(value u64) int {
 // 从指定目标的稳定字节流创建 IR；失败时释放部分分配并重置 out。
 // out 的指针字段必须为零；成功后由 ir_function_release 释放。
 pub fn ir_deserialize(out *IRFunction, data *u8, length int, expected_target int) int {
-    if (out == 0 || data == 0 || length < 104 || expected_target < 0
+    if (out == 0 || data == 0 || length < 112 || expected_target < 0
         || out.types != 0 || out.insts != 0 || out.phis != 0
         || out.phi_inputs != 0 || out.calls != 0 || out.call_args != 0
         || out.call_symbols != 0 || out.blocks != 0) {
@@ -224,6 +227,8 @@ pub fn ir_deserialize(out *IRFunction, data *u8, length int, expected_target int
     let symbols_raw u64 = ir_serial_get_u64(data, &cursor);
     let blocks_raw u64 = ir_serial_get_u64(data, &cursor);
     let values_raw u64 = ir_serial_get_u64(data, &cursor);
+    let abi_raw u64 = ir_serial_get_u64(data, &cursor);
+    if (abi_raw > 1) { return -1; }
     if (ir_serial_header_int_ok(target_raw) == 0 || ir_serial_header_int_ok(ret_raw) == 0
         || ir_serial_header_int_ok(types_raw) == 0 || ir_serial_header_int_ok(insts_raw) == 0
         || ir_serial_header_int_ok(phis_raw) == 0 || ir_serial_header_int_ok(inputs_raw) == 0
@@ -248,6 +253,7 @@ pub fn ir_deserialize(out *IRFunction, data *u8, length int, expected_target int
         block_count, value_count);
     if (target != expected_target || size != length) { return -1; }
 
+    out.abi = abi_raw.to_type(int);
     out.target_id = target;
     out.ret_type = ret_type;
     out.type_count = type_count;
@@ -324,6 +330,7 @@ pub fn ir_deserialize(out *IRFunction, data *u8, length int, expected_target int
         out.calls[i].symbol_len = ir_serial_get_int(data, &cursor);
         out.calls[i].arg_first = ir_serial_get_int(data, &cursor);
         out.calls[i].arg_count = ir_serial_get_int(data, &cursor);
+        out.calls[i].abi = ir_serial_get_int(data, &cursor);
         i += 1;
     }
     i = 0;

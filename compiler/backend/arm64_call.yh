@@ -7,6 +7,7 @@ fn arm64_call_supported(f *ir.IRFunction, inst *ir.IRInst) int {
     if (inst.aux < 0 || inst.aux >= f.call_count) { return 0; }
     if (inst.result_id >= 0 && arm64_type_supported(f, inst.result_type) == 0) { return 0; }
     let call ir.IRCall = f.calls[inst.aux];
+    if (call.arg_count > 64) { return 0; }
     let i int = 0;
     for i < call.arg_count {
         if (arm64_type_supported(f, f.call_args[call.arg_first + i].type_id) == 0) {
@@ -34,39 +35,68 @@ fn arm64_call_adjust_sp(bytes int, restore int) int {
     return 0;
 }
 
-// arm64_call_store_stack：把 x9 放到调用点第 offset 字节的实参槽。
-fn arm64_call_store_stack(offset int) int {
-    if (offset <= 32760) {
-        if (gen.em_frag("\tstr\tx9, [sp, #") != 0
-            || gen.em_puti(offset) != 0 || gen.em_frag("]\n") != 0) { return -1; }
-        return 0;
-    }
-    if (gen.em_mov_imm("x11", offset.to_type(i64)) != 0
-        || gen.em_ins("add\tx11, sp, x11") != 0
-        || gen.em_ins("str\tx9, [x11]") != 0) { return -1; }
+// arm64_call_store_stack：按已分类的宽度把 x9 写入调用区，不覆盖 Darwin 的邻槽。
+fn arm64_call_store_stack(offset int, size int) int {
+    let op *char = "str";
+    let reg *char = size == 8 ? "x9" : "w9";
+    if (size == 1) { op = "strb"; }
+    if (size == 2) { op = "strh"; }
+    if (gen.em_mov_imm("x12", offset.to_type(i64)) != 0
+        || gen.em_ins("add\tx12, sp, x12") != 0
+        || gen.em_frag("\t") != 0 || gen.em_frag(op) != 0
+        || gen.em_frag("\t") != 0 || gen.em_frag(reg) != 0
+        || gen.em_frag(", [x12]\n") != 0) { return -1; }
     return 0;
 }
 
-// arm64_emit_call：按两平台固定整数参数 ABI 装载 x0..x7 和八字节栈槽。
+// arm64_abi_value：把当前 SSA 支持的整数/布尔类型转换为共享分类器输入。
+// yh ABI 保持八字节槽；C ABI 按目标类型宽度与对齐分类。
+fn arm64_abi_value(f *ir.IRFunction, tid int, abi int, out *gen.ABIValue) void {
+    let size int = (f.types[tid].bits + 7) / 8;
+    if (abi == gen.ABI_YH) { size = 8; }
+    out.size = size;
+    out.align = size;
+    out.aggregate = 0;
+    out.fp_size = 0;
+    out.fp_count = 0;
+}
+
+// arm64_call_plan：SSA 的固定整数调用与直接发射器共用参数分类规则。
+fn arm64_call_plan(f *ir.IRFunction, call *ir.IRCall, args *gen.ABIArg) int {
+    let cursor gen.ABICursor;
+    gen.abi_c_cursor_init(&cursor,
+        (call.abi == gen.ABI_C && f.target_id == gen.TG_DIALECT_DARWIN + 1).to_type(int));
+    let i int = 0;
+    for i < call.arg_count {
+        let value gen.ABIValue;
+        arm64_abi_value(f, f.call_args[call.arg_first + i].type_id, call.abi, &value);
+        gen.abi_c_place(&value, &cursor, &args[i]);
+        i += 1;
+    }
+    return (cursor.stack + 15) / 16 * 16;
+}
+
+// arm64_emit_call：按共享参数计划装载整数寄存器与目标平台栈槽。
 // SSA 值先前已保存在帧槽，因此嵌套调用不会覆盖尚未搬运的实参。
 fn arm64_emit_call(f *ir.IRFunction, inst *ir.IRInst) int {
     let call ir.IRCall = f.calls[inst.aux];
-    let stack_count int = call.arg_count - 8;
-    if (stack_count < 0) { stack_count = 0; }
-    let stack_bytes int = (stack_count * 8 + 15) / 16 * 16;
+    let args [64]gen.ABIArg;
+    let stack_bytes int = arm64_call_plan(f, &call, &args[0]);
     if (arm64_call_adjust_sp(stack_bytes, 0) != 0) { return -1; }
-    let i int = 8;
+    let i int = 0;
     for i < call.arg_count {
-        let value int = f.call_args[call.arg_first + i].value;
-        if (arm64_load_value(f, value, "x9") != 0
-            || arm64_call_store_stack((i - 8) * 8) != 0) { return -1; }
+        if (args[i].kind == gen.CABI_STACK) {
+            let value int = f.call_args[call.arg_first + i].value;
+            if (arm64_load_value(f, value, "x9") != 0
+                || arm64_call_store_stack(args[i].stack, args[i].size) != 0) { return -1; }
+        }
         i += 1;
     }
     i = 0;
     for i < call.arg_count && i < 8 {
         let value2 int = f.call_args[call.arg_first + i].value;
         if (arm64_load_value(f, value2, "x9") != 0
-            || gen.em_frag("\tmov\tx") != 0 || gen.em_puti(i) != 0
+            || gen.em_frag("\tmov\tx") != 0 || gen.em_puti(args[i].reg) != 0
             || gen.em_frag(", x9\n") != 0) { return -1; }
         i += 1;
     }

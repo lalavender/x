@@ -132,6 +132,40 @@ fn arm64_emit_param(f *ir.IRFunction, inst *ir.IRInst) int {
         }
     } else {
         let offset int = 16 + (index - 8) * 8;
+        if (f.abi == gen.ABI_C) {
+            // 前导 PARAM 指令就是完整签名，按共享分类器累计到当前参数。
+            let cursor gen.ABICursor;
+            gen.abi_c_cursor_init(&cursor, (f.target_id == gen.TG_DIALECT_DARWIN + 1).to_type(int));
+            let pi int = 0;
+            let loc gen.ABIArg;
+            for pi <= index {
+                let value gen.ABIValue;
+                arm64_abi_value(f, f.insts[pi].result_type, gen.ABI_C, &value);
+                gen.abi_c_place(&value, &cursor, &loc);
+                pi += 1;
+            }
+            offset = 16 + loc.stack;
+            let size int = loc.size;
+            let kind int = f.types[inst.result_type].kind;
+            let signed_value int = (kind >= ir.IR_TY_I8 && kind <= ir.IR_TY_I64).to_type(int);
+            let op *char = "ldr";
+            let suffix *char = size == 8 ? "x0" : "w0";
+            if (size == 1) { op = "ldrb"; }
+            if (size == 2) { op = "ldrh"; }
+            if (signed_value != 0 && size < 8) {
+                suffix = "x0";
+                if (size == 1) { op = "ldrsb"; }
+                if (size == 2) { op = "ldrsh"; }
+                if (size == 4) { op = "ldrsw"; }
+            }
+            if (gen.em_mov_imm("x11", offset.to_type(i64)) != 0
+                || gen.em_ins("add\tx11, x29, x11") != 0
+                || gen.em_frag("\t") != 0 || gen.em_frag(op) != 0
+                || gen.em_frag("\t") != 0 || gen.em_frag(suffix) != 0
+                || gen.em_frag(", [x11]\n") != 0) { return -1; }
+            if (arm64_normalize(f, inst.result_type) != 0) { return -1; }
+            return arm64_store_value(f, inst.result_id, "x0");
+        }
         if (offset <= 32760) {
             if (gen.em_frag("\tldr\tx0, [x29, #") != 0
                 || gen.em_puti(offset) != 0 || gen.em_frag("]\n") != 0) {

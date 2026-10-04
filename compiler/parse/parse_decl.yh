@@ -175,7 +175,13 @@ pub fn skip_top_decl() int {
     for p_cur() != gen.TOK_EOF {
         let k int = p_cur();
         if (consumed > 0 && depth == 0 && at_top_decl_start(k) != 0) {
-            return 0;
+            // 返回类型中的 fn(...) 与 @[extern] fn(...) 不是下一条顶层声明。
+            // 声明的 fn 后必须是名字，类型的 fn 后则是左括号。
+            let fn_type int = (k == gen.TK_FN && p_peek(1) == gen.TK_LPAREN).to_type(int);
+            let attr_type int = (k == gen.TK_AT && p_peek(1) == gen.TK_LBRACKET
+                && p_peek(3) == gen.TK_RBRACKET && p_peek(4) == gen.TK_FN
+                && p_peek(5) == gen.TK_LPAREN).to_type(int);
+            if (fn_type == 0 && attr_type == 0) { return 0; }
         }
         p_adv();
         consumed = 1;
@@ -492,6 +498,8 @@ pub fn parse_fn_decl() int {
     if (p_expect(gen.TK_LPAREN, "期望 '('") != 0) {
         return -1;
     }
+    let saved_type_abi int = gs.c_type_abi;
+    gs.c_type_abi = (gs.c_decl_attrs & gen.ATTR_EXTERN) != 0 ? gen.ABI_C : gen.ABI_YH;
     // 参数类型收集（两遍都要）
     let ptypes [64]int;
     let np int = 0;
@@ -564,6 +572,7 @@ pub fn parse_fn_decl() int {
         }
         ret = rt;
     }
+    gs.c_type_abi = saved_type_abi;
     if ((gs.c_decl_attrs & gen.ATTR_NORETURN) != 0 && ret != gen.TY_VOID) {
         return gen.sem_err("noreturn 函数必须返回 void");
     }
@@ -582,7 +591,7 @@ pub fn parse_fn_decl() int {
             if (vararg != 0 || is_variadic_seen != 0) {
                 return gen.sem_err("C ABI v1 不支持 yh 变参");
             }
-            if (ret != gen.TY_VOID && gen.ty_cabi_scalar(ret) == 0) {
+            if (ret != gen.TY_VOID && gen.ty_cabi_param(ret) == 0) {
                 return gen.sem_err("C ABI 不支持该返回类型");
             }
             let ci int = 0;
@@ -639,7 +648,8 @@ pub fn parse_fn_decl() int {
             sig_np = np - 1;
             sig_va = 2;
         }
-        let ftid int = gen.ty_fn(ret, first, sig_np, sig_va);
+        let fn_abi int = (gs.c_decl_attrs & gen.ATTR_EXTERN) != 0 ? gen.ABI_C : gen.ABI_YH;
+        let ftid int = gen.ty_fn_abi(ret, first, sig_np, sig_va, fn_abi);
         let fl int = gen.F_GLOBAL;
         if (gs.c_decl_pub != 0) {
             fl |= gen.F_PUB;
@@ -700,6 +710,7 @@ pub fn parse_fn_decl() int {
         } else {
             ipos += 1;
         }
+        if ((gs.c_fn_flags & gen.F_CABI) != 0) { apos = fi; }
         if (gen.sem_declare_param(pnames[fi], pname_lens[fi], ptypes[fi], apos) != 0) {
             return -1;
         }
@@ -753,6 +764,9 @@ pub fn parse_type_decl() int {
 
 pub fn parse_struct_decl() int {
     let gs *gen.GenState = gen.G();
+    let saved_type_abi int = gs.c_type_abi;
+    // extern 共享布局中的回调字段默认采用 C ABI；类型别名仍保持自身约定。
+    gs.c_type_abi = (gs.c_decl_attrs & gen.ATTR_EXTERN) != 0 ? gen.ABI_C : gen.ABI_YH;
     let is_union int = (p_cur() == gen.TK_UNION).to_type(int);
     p_adv();
     if (p_cur() != gen.TOK_IDENT) {
@@ -816,6 +830,7 @@ pub fn parse_struct_decl() int {
     if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
         return -1;
     }
+    gs.c_type_abi = saved_type_abi;
     if (gs.c_compile != 0 && gs.c_pass == 1) {
         if (gen.sem_struct_finish(gs.c_cur_struct, is_union) != 0) {
             return -1;

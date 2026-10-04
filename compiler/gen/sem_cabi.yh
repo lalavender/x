@@ -1,0 +1,246 @@
+module gen;
+
+// cabi_gpr_piece：从 x12 的聚合存储读取一个整数寄存器片。尾片逐字节组合，
+// 不越过对象边界；x9 为临时，寄存器内未覆盖的高位填零。
+fn cabi_gpr_piece(reg int, offset int, bytes int) int {
+    if (bytes >= 8) {
+        if (em_frag("\tldr\tx") != 0 || em_puti(reg) != 0
+            || em_frag(", [x12, #") != 0 || em_puti(offset) != 0
+            || em_frag("]\n") != 0) { return -1; }
+        return 0;
+    }
+    if (em_frag("\tmov\tx") != 0 || em_puti(reg) != 0
+        || em_frag(", xzr\n") != 0) { return -1; }
+    let i int = 0;
+    for i < bytes {
+        if (em_frag("\tldrb\tw9, [x12, #") != 0 || em_puti(offset + i) != 0
+            || em_frag("]\n\torr\tx") != 0 || em_puti(reg) != 0
+            || em_frag(", x") != 0 || em_puti(reg) != 0
+            || em_frag(", x9, lsl #") != 0 || em_puti(i * 8)
+            != 0 || em_frag("\n") != 0) { return -1; }
+        i += 1;
+    }
+    return 0;
+}
+
+// cabi_fp_piece：在 x12 指向的聚合/标量存储与指定浮点寄存器间搬运一片。
+fn cabi_fp_piece(reg int, offset int, size int, store int) int {
+    let op *char = store != 0 ? "str" : "ldr";
+    let suffix *char = size == 4 ? "s" : "d";
+    if (em_frag("\t") != 0 || em_frag(op) != 0 || em_frag("\t") != 0
+        || em_frag(suffix) != 0 || em_puti(reg) != 0
+        || em_frag(", [x12, #") != 0 || em_puti(offset) != 0
+        || em_frag("]\n") != 0) { return -1; }
+    return 0;
+}
+
+// cabi_scalar_load：从 x10 按已声明的 C 标量宽度载入目标寄存器。
+// 窄整数显式扩展，满足 Darwin 调用方扩展约定，也使 yh 的运算值规范化。
+pub fn cabi_scalar_load(tid int, reg int) int {
+    let size int = g_state.t_types[tid].size;
+    let op *char = "ldr";
+    let suffix *char = "x";
+    if (size < 8) {
+        suffix = "w";
+        if (size == 1) { op = "ldrb"; }
+        if (size == 2) { op = "ldrh"; }
+        if (ty_is_signed(tid) != 0) {
+            suffix = "x";
+            if (size == 1) { op = "ldrsb"; }
+            if (size == 2) { op = "ldrsh"; }
+            if (size == 4) { op = "ldrsw"; }
+        }
+    }
+    if (em_frag("\t") != 0 || em_frag(op) != 0 || em_frag("\t") != 0
+        || em_frag(suffix) != 0 || em_puti(reg) != 0
+        || em_frag(", [x10]\n") != 0) { return -1; }
+    return 0;
+}
+
+// cabi_spill：登记入口的一个寄存器片。prologue 保存所有片后才执行聚合复制。
+fn cabi_spill(reg int, off int, tid int, fp int) void {
+    let i int = g_state.c_spill_n;
+    g_state.c_spill_reg[i] = fp != 0 ? 0 - reg - 1 : reg;
+    g_state.c_spill_off[i] = off;
+    g_state.c_spill_size[i] = tid;
+    g_state.c_spill_n += 1;
+}
+
+// cabi_entry_copy：记录从指针槽或调用方栈内聚合到本帧独立副本的入口任务。
+fn cabi_entry_copy(src int, dst int, size int, indirect int) void {
+    let i int = g_state.c_aggparam_n;
+    g_state.c_aggparam_src[i] = src;
+    g_state.c_aggparam_dst[i] = dst;
+    g_state.c_aggparam_size[i] = size;
+    g_state.c_aggparam_indirect[i] = indirect;
+    g_state.c_aggparam_n += 1;
+}
+
+// sem_cabi_param：按共享分类器接收一个 C 参数，聚合在函数体内仍用地址表示。
+pub fn sem_cabi_param(start int, n int, tid int) int {
+    let value ABIValue;
+    abi_c_describe(tid, &value);
+    let loc ABIArg;
+    abi_c_place(&value, &g_state.c_cabi_cursor, &loc);
+    let idx int = sym_push(start, n, SYM_VAR, tid, F_PARAM);
+    if (idx < 0) { return -1; }
+    if (value.aggregate == 0 && loc.kind == CABI_STACK) {
+        g_state.c_syms[idx].offset = 0 - 16 - loc.stack;
+        return 0;
+    }
+    let body int = em_alloc_local(value.size);
+    g_state.c_syms[idx].offset = body;
+    if (value.aggregate != 0) { g_state.c_syms[idx].flags |= F_AGGPARAM; }
+    if (loc.indirect != 0) {
+        let source int = 0 - 16 - loc.stack;
+        if (loc.kind == CABI_GPR) {
+            source = em_alloc_local(8);
+            cabi_spill(loc.reg, source, 0, 0);
+        }
+        cabi_entry_copy(source, body, value.size, 1);
+    } else if (loc.kind == CABI_STACK) {
+        cabi_entry_copy(0 - 16 - loc.stack, body, value.size, 0);
+    } else {
+        let i int = 0;
+        for i < loc.count {
+            let step int = loc.kind == CABI_FPR ? loc.fp_size : 8;
+            let fp_tid int = step == 4 ? TY_F32 : TY_F64;
+            cabi_spill(loc.reg + i, body - i * step, fp_tid,
+                (loc.kind == CABI_FPR).to_type(int));
+            i += 1;
+        }
+    }
+    return 0;
+}
+
+// cabi_register_value：x12 指向完整的按值存储，按照位置计划装载参数/返回片。
+fn cabi_register_value(loc *ABIArg) int {
+    let j int = 0;
+    for j < loc.count {
+        if (loc.kind == CABI_FPR) {
+            if (cabi_fp_piece(loc.reg + j, j * loc.fp_size, loc.fp_size, 0) != 0) { return -1; }
+        } else {
+            let bytes int = loc.size - j * 8;
+            if (cabi_gpr_piece(loc.reg + j, j * 8, bytes) != 0) { return -1; }
+        }
+        j += 1;
+    }
+    return 0;
+}
+
+// cabi_save_result：把 C 返回寄存器中的聚合保存进调用方临时槽。
+// 该临时槽按十六字节分配，最后一个 GPR 的填充字节不会覆盖其他对象。
+fn cabi_save_result(loc *ABIArg, off int) int {
+    if (em_lea_local_to(off) != 0 || em_ins("mov\tx12, x10") != 0) { return -1; }
+    let i int = 0;
+    for i < loc.count {
+        if (loc.kind == CABI_FPR) {
+            if (cabi_fp_piece(i, i * loc.fp_size, loc.fp_size, 1) != 0) { return -1; }
+        } else {
+            if (em_frag("\tstr\tx") != 0 || em_puti(i) != 0
+                || em_frag(", [x12, #") != 0 || em_puti(i * 8) != 0
+                || em_frag("]\n") != 0) { return -1; }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// sem_cabi_call：固定参数 C 调用。值栈只消费一次，先回填栈参数，再装载全部
+// 寄存器，避免块复制与间接调用目标破坏已装载参数；聚合返回还原为 yh 地址值。
+pub fn sem_cabi_call(callee *Res, r *Res, base int, direct int,
+    sig int, count int, noreturn int) int {
+    let locations [64]ABIArg;
+    let result ABIArg;
+    let stack_bytes int = abi_c_signature(sig, &locations[0], &result);
+    let staged int = em_alloc_local(count * 16);
+    let i int = count - 1;
+    for i >= 0 {
+        // 浮点与整数的值栈都占十六字节，只保存低八字节位型。
+        if (em_pop("x9") != 0 || em_lea_local_to(staged - i * 16) != 0
+            || em_ins("str\tx9, [x10]") != 0) { return -1; }
+        i -= 1;
+    }
+    let target int = 0;
+    if (direct == 0) {
+        target = em_alloc_local(8);
+        if (em_pop("x9") != 0 || em_lea_local_to(target) != 0
+            || em_ins("str\tx9, [x10]") != 0) { return -1; }
+    }
+    let ret int = g_state.t_sig_ret[sig];
+    let ret_agg int = (g_state.t_types[ret].kind == TY_STRUCT
+        || g_state.t_types[ret].kind == TY_UNION).to_type(int);
+    let buffer int = 0;
+    if (ret_agg != 0) { buffer = em_alloc_local(g_state.t_types[ret].size); }
+    if (em_call_stack_alloc(stack_bytes) != 0) { return -1; }
+    i = 0;
+    for i < count {
+        let loc *ABIArg = &locations[i];
+        if (loc.kind == CABI_STACK) {
+            let tid int = g_state.t_sig_params[g_state.t_sig_first[sig] + i];
+            let agg int = (g_state.t_types[tid].kind == TY_STRUCT
+                || g_state.t_types[tid].kind == TY_UNION).to_type(int);
+            if (em_lea_local_to(staged - i * 16) != 0) { return -1; }
+            if (agg != 0 && loc.indirect == 0) {
+                if (em_ins("ldr\tx0, [x10]") != 0) { return -1; }
+            } else if (em_ins("mov\tx0, x10") != 0) { return -1; }
+            if (em_mov_imm("x1", loc.stack.to_type(i64)) != 0
+                || em_ins("add\tx1, sp, x1") != 0
+                || em_copy_block(loc.indirect != 0 ? 8 : loc.size) != 0) { return -1; }
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < count {
+        let loc2 *ABIArg = &locations[i];
+        if (loc2.kind != CABI_STACK) {
+            let tid2 int = g_state.t_sig_params[g_state.t_sig_first[sig] + i];
+            let agg2 int = (g_state.t_types[tid2].kind == TY_STRUCT
+                || g_state.t_types[tid2].kind == TY_UNION).to_type(int);
+            if (em_lea_local_to(staged - i * 16) != 0) { return -1; }
+            if (agg2 != 0 && loc2.indirect == 0) {
+                if (em_ins("ldr\tx12, [x10]") != 0
+                    || cabi_register_value(loc2) != 0) { return -1; }
+            } else if (loc2.kind == CABI_FPR) {
+                if (em_ins("mov\tx12, x10") != 0
+                    || cabi_fp_piece(loc2.reg, 0, loc2.fp_size, 0) != 0) { return -1; }
+            } else if (cabi_scalar_load(loc2.indirect != 0 ? TY_U64 : tid2, loc2.reg) != 0) { return -1; }
+        }
+        i += 1;
+    }
+    if (result.indirect != 0) {
+        if (em_lea_local_to(buffer) != 0 || em_ins("mov\tx8, x10") != 0) { return -1; }
+    }
+    if (direct != 0) {
+        if (em_call_direct(callee.sym) != 0) { return -1; }
+    } else if (em_lea_local_to(target) != 0 || em_ins("ldr\tx10, [x10]") != 0
+        || em_call_indirect() != 0) { return -1; }
+    if (noreturn != 0) {
+        g_state.c_expr_noreturn = 1;
+        if (em_ins("brk\t#0") != 0) { return -1; }
+    }
+    if (em_call_cleanup_bytes(stack_bytes) != 0) { return -1; }
+    if (ret_agg != 0) {
+        if (result.indirect == 0 && cabi_save_result(&result, buffer) != 0) { return -1; }
+        if (em_lea_local_down(buffer) != 0) { return -1; }
+    } else if (ty_is_integer(ret) != 0 && g_state.t_types[ret].size < 8) {
+        // C 的 32 位返回寄存器高位不能直接作为 yh 的扩展整数值使用。
+        let bits int = g_state.t_types[ret].size * 8;
+        let op *char = ty_is_signed(ret) != 0 ? "sbfx" : "ubfx";
+        if (em_frag("\t") != 0 || em_frag(op) != 0 || em_frag("\tx0, x0, #0, #") != 0
+            || em_puti(bits) != 0 || em_frag("\n") != 0) { return -1; }
+    }
+    g_state.c_arg_n = base;
+    sem_res_reset(r, ret);
+    g_state.c_res_is_addr = ret_agg;
+    return 0;
+}
+
+// sem_cabi_return：把函数体的聚合地址转换为 C 返回寄存器。普通大聚合交给
+// 已保存 x8 的现有复制路径；小聚合与 HFA 不分配隐藏返回指针。
+pub fn sem_cabi_return(tid int) int {
+    let loc ABIArg;
+    abi_c_result(tid, &loc);
+    if (em_ins("mov\tx12, x0") != 0) { return -1; }
+    return cabi_register_value(&loc);
+}
