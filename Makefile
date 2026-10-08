@@ -11,6 +11,8 @@
 #   * make install    安装到 $(PREFIX)（默认 /usr/local；DESTDIR 用作打包根）
 #   * make uninstall  卸载
 #   * make explorer   启动 yh Compiler Explorer（本地浏览器图形界面）
+#   * make yh-asm     构建 asm/ 汇编器项目，产出根目录 yh_asm
+#   * make yh-link    过渡别名：同一份 yh_asm 再复制成 yh_link（编译器现役对接）
 #   * make clean      清理
 #
 # 可在命令行覆盖：SEED（编译种子路径）。Linux CI 用匹配架构的 ELF 种子。
@@ -77,6 +79,33 @@ $(YH): $(YH_PREREQ) $(wildcard compiler/*.yh) $(wildcard compiler/*/*.yh) $(TOPS
 	rm -rf compiler/.build
 	python3 "$(TOPSRC)/tools/seed-build.py" --compiler "$(abspath $(SEED))" --project "$(TOPSRC)/compiler" --output "$(TOPSRC)/yh"
 
+# yh-asm：用刚构建出的 $(YH) 冷编 asm/（汇编器项目），产出 yh_asm。
+# 刻意不依赖 $(SEED)：asm/ 用到了新语言特性，上一代种子编不了，必须等 $(YH) 就位。
+#
+# yh_asm 与 yh 放在同一目录后，编译器会优先用它做模块汇编（找不到才回落
+# clang/gcc），所以 `make yh-asm` 之后 `./yh` 就默认走自研工具链。
+#
+# 过渡期：编译器侧 mb_asm_tool 仍按 yh_link 名字查找（compiler/cmd/link_cache.yh），
+# yh-link 目标把同一份产物再复制一份成 yh_link 供现役对接；查找名切到 yh_asm
+# 之后删除该别名目标（见 docs/todo.md）。
+YH_ASM = $(TOP)/yh_asm$(EXESUF)
+YH_LINK = $(TOP)/yh_link$(EXESUF)
+
+.PHONY: yh-asm
+yh-asm: $(YH)
+	rm -rf $(TOPSRC)/asm/.build
+	cd $(TOPSRC)/asm && "$(abspath $(YH))" build
+	cp -f "$(TOPSRC)/asm/.build/yh_asm$(EXESUF)" "$(YH_ASM).tmp"
+	mv -f "$(YH_ASM).tmp" "$(YH_ASM)"
+ifeq ($(HOST_SYSTEM),Darwin)
+	@codesign -s - -f "$(YH_ASM)" 2>/dev/null || true
+endif
+
+.PHONY: yh-link
+yh-link: yh-asm
+	cp -f "$(YH_ASM)" "$(YH_LINK).tmp"
+	mv -f "$(YH_LINK).tmp" "$(YH_LINK)"
+
 # seed：滚种子——把刚构建并验证过的 yh 覆盖入库种子。
 # 只应在 make test 与 make selfhost-native 全绿后执行（不作为依赖，
 # 防止未验证产物污染种子）。
@@ -130,6 +159,6 @@ clean:
 help:
 	@sed -n '2,26p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all explorer seed selfhost-native clean help
+.PHONY: all install uninstall test test-all explorer seed selfhost-native clean help yh-asm yh-link
 
 endif # ($(INCLUDED),no)

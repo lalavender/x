@@ -1,0 +1,138 @@
+module api;
+
+// 与 C 侧独立声明的类型共享自然布局，覆盖整数片尾部和 HFA。
+@[extern]
+pub struct Tiny3 { a u8; b u8; c u8; }
+@[extern]
+pub struct Tiny1 { a u8; }
+@[extern]
+pub struct Pair { a int; b int; }
+@[extern]
+pub struct Two { a i64; b i64; }
+@[extern]
+pub struct Three { a int; b int; c int; }
+@[extern]
+pub struct Wide { a i64; b i64; c i64; }
+@[extern]
+pub struct Float2 { a f64; b f64; }
+@[extern]
+pub struct Float3 { pair Float2; c f64; }
+@[extern]
+pub struct Float4 { values [4]f32; }
+@[extern]
+pub union Bits { integer i64; floating f64; }
+@[extern]
+pub union FloatUnion { scalar f64; values [2]f64; }
+@[extern]
+pub struct CallbackBox { callback fn(Pair) Pair; }
+
+// 导出 C 入口，参数在函数体内保持独立的可修改值。
+@[extern]
+pub fn yh_tiny(v Tiny3) Tiny3 { v.b += 2; return v; }
+@[extern]
+pub fn yh_tiny_one(v Tiny1) Tiny1 { v.a += 1; return v; }
+@[extern]
+pub fn yh_pair(v Pair) Pair { v.b += 3; return v; }
+// 与标准 div 的整数参数/八字节聚合返回形状一致，覆盖负数商与余数。
+@[extern]
+pub fn yh_div(a int, b int) Pair { return Pair{a / b, a % b}; }
+@[extern]
+pub fn yh_two(v Two) Two { v.b += 4; return v; }
+@[extern]
+pub fn yh_three(v Three) Three { v.c += 5; return v; }
+@[extern]
+pub fn yh_wide(v Wide) Wide { v.c += 6; return v; }
+@[extern]
+pub fn yh_float(v Float3) Float3 { v.c += 7.0; return v; }
+@[extern]
+pub fn yh_four(v Float4) Float4 { v.values[2] += 8.0.to_type(f32); return v; }
+@[extern]
+pub fn yh_bits(v Bits) Bits { v.integer += 9; return v; }
+@[extern]
+pub fn yh_float_union(v FloatUnion) FloatUnion { v.values[1] += 2.0; return v; }
+// 九个 f32 后接 f64，覆盖纯浮点栈溢出和 Darwin 的对齐空隙。
+@[extern]
+pub fn yh_fp_stack(a f32, b f32, c f32, d f32, e f32, f f32, g f32, h f32,
+    i f32, tail f64, mark int) f64 { return i.to_type(f64) + tail + mark.to_type(f64); }
+// 单纯返回窄参数确保入口进入 SSA，区分第九/第十个紧凑栈参数。
+@[extern]
+pub fn yh_i8_args(a i8, b i8, c i8, d i8, e i8, f i8, g i8, h i8, i i8, j i8) i8 { return j; }
+// 同时确保 C 调用进入 SSA 后端，不能因其他节点回退掩盖调用布局错误。
+@[extern]
+pub fn yh_i8_call(a i8, b i8, c i8, d i8, e i8, f i8, g i8, h i8, i i8, j i8) i8 {
+    return c_i8_args(a, b, c, d, e, f, g, h, i, j);
+}
+
+// 同构聚合放不进剩余浮点寄存器时整体上栈，后续浮点也上栈。
+@[extern]
+pub fn yh_hfa_stack(a f64, b f64, c f64, d f64, e f64, f f64, g f64,
+    v Float3, tail f64, k i64) f64 {
+    return a + b + c + d + e + f + g + v.pair.a + v.pair.b + v.c + tail + k.to_type(f64);
+}
+// 整数寄存器只剩一个时，十六字节聚合整体上栈，尾部窄整数按目标规则布局。
+@[extern]
+pub fn yh_gpr_stack(a i64, b i64, c i64, d i64, e i64, f i64, g i64,
+    v Two, tail i16, fp f64) i64 {
+    return a + b + c + d + e + f + g + v.a + v.b + tail + fp.to_type(i64);
+}
+// 专门覆盖窄整数栈布局，并进入整数 SSA 路径。
+@[extern]
+pub fn yh_narrow(a i64, b i64, c i64, d i64, e i64, f i64, g i64, h i64,
+    i i8, j u8, k i16, l u16, m int, n u32) i64 {
+    return a + b + c + d + e + f + g + h + i + j.to_type(i64) + k + l.to_type(i64) + m + n.to_type(i64);
+}
+// C 回调返回聚合，函数类型须通过模块接口保存 C ABI。
+@[extern]
+pub fn yh_choose() fn(Pair) Pair { return yh_pair; }
+@[extern]
+pub fn yh_box(box CallbackBox, v Pair) Pair { return box.callback(v); }
+
+@[extern]
+pub fn c_tiny(v Tiny3) Tiny3;
+@[extern]
+pub fn c_tiny_one(v Tiny1) Tiny1;
+@[extern]
+pub fn c_pair(v Pair) Pair;
+@[extern]
+pub fn c_two(v Two) Two;
+@[extern]
+pub fn c_three(v Three) Three;
+@[extern]
+pub fn c_wide(v Wide) Wide;
+@[extern]
+pub fn c_float(v Float3) Float3;
+@[extern]
+pub fn c_four(v Float4) Float4;
+@[extern]
+pub fn c_make_four() Float4;
+@[extern]
+pub fn c_bits(v Bits) Bits;
+@[extern]
+pub fn c_float_union(v FloatUnion) FloatUnion;
+@[extern]
+pub fn c_fp_stack(a f32, b f32, c f32, d f32, e f32, f f32, g f32, h f32,
+    i f32, tail f64, mark int) f64;
+@[extern]
+pub fn c_i8_args(a i8, b i8, c i8, d i8, e i8, f i8, g i8, h i8, i i8, j i8) i8;
+@[extern]
+pub fn c_hfa_stack(a f64, b f64, c f64, d f64, e f64, f f64, g f64,
+    v Float3, tail f64, k i64) f64;
+@[extern]
+pub fn c_gpr_stack(a i64, b i64, c i64, d i64, e i64, f i64, g i64,
+    v Two, tail i16, fp f64) i64;
+@[extern]
+pub fn c_narrow(a i64, b i64, c i64, d i64, e i64, f i64, g i64, h i64,
+    i i8, j u8, k i16, l u16, m int, n u32) i64;
+@[extern]
+pub fn c_choose() fn(Pair) Pair;
+@[extern]
+pub fn c_apply(callback fn(Pair) Pair, v Pair) Pair;
+@[extern]
+pub fn c_check() int;
+@[extern]
+pub fn c_box(box CallbackBox, v Pair) Pair;
+
+// 普通 yh 函数接收显式 C 函数类型，验证跨模块接口不能丢掉 ABI。
+pub fn apply(callback @[extern] fn(Pair) Pair, v Pair) Pair { return callback(v); }
+// 普通 yh 入口内调用共享结构体字段中的 C 函数值，检查接口传播。
+pub fn apply_box(box CallbackBox, v Pair) Pair { return box.callback(v); }

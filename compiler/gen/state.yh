@@ -45,6 +45,11 @@ pub struct GenState {
     c_errors int; // 已报告的错误数（推测解析不计入）
     c_path *char; // 当前源文件路径（借自 argv，不复制不释放）
     c_path_buffer [1024]u8; // worker 路径快照，避免名字池扩容后诊断指针失效
+    c_ct_iface_mode int; // 1 = 正在读取 .s.ct，允许识别生成的来源映射注释
+    c_ct_origin_active int; // 1 = 当前声明从 .s.ct 来源映射切换到定义源码
+    c_ct_origin_line int; // 当前 CT 函数定义源码体起始行
+    c_ct_origin_path_buffer [1024]u8; // .s.ct 来源映射解码后的路径，独立于 sidecar 路径
+    c_diag_line_bias int; // err_lc/warn_lc 当前行号映射偏移
     c_compile int; // 0 = 纯语法模式（--syntax-check）；1 = 编译模式
     c_pass int; // 1 = 顶层扫描登记；2 = 函数体编译与全局初始化
     t_types *CType;
@@ -77,6 +82,12 @@ pub struct GenState {
     c_scope_start *int; // 每层作用域进入时的符号表下标（64 层）
     c_scope_n int;
     c_fold int; // >0：表达式只做常量折叠，不发射代码
+    c_ct_target_ctx int; // >0：当前正解析 $if 条件，目标标记按内建常量解析
+    c_ct_diag_stmt int; // >0：当前完整表达式语句可消费编译期诊断结果
+    c_ct_prepare_active int; // >0：当前正在 pass2a 前捕获 comptime 函数 typed IR
+    c_ct_prepare_first int; // 当前待捕获编译期函数在文件 token 表中的起点
+    c_ct_expand_depth int; // 当前错误/警告所在的编译期 for 展开深度
+    c_ct_expand_values [32]int; // 外层到内层的编译期 for 当前迭代值
     c_em_suppress int; // >0：发射层整体静默（sizeof(expr) 求型用）
     c_check_only int; // 1：项目 check 模式，只做语义检查，不生成后端缓冲
     c_legacy_system int; // 1：兼容配置显式开放 system；默认独立配置不登记它
@@ -170,7 +181,7 @@ pub struct GenState {
     c_fold_big int; // 1 = 字面量超出 i64 正数域
     sc_lbl_false int;
     sc_lbl_end int;
-    sc_sc_false_stk *int; // 嵌套短路标签保存栈（堆分配 64 项）
+    sc_sc_false_stk *int; // 嵌套短路标签或折叠左值保存栈（堆分配 64 项）
     sc_sc_end_stk *int;
     sc_sc_depth int;
     tn_lbl_else int;
@@ -241,6 +252,114 @@ pub fn G() *GenState {
     return &g_state;
 }
 
+// 字符串字面量的数据标签 → 原样字节（intern 池）映射：顶层或普通函数里的编译期
+// 调用实参由前端直接求值，只剩数据标签号，编译期过程据此反查字面量字节。
+// 独立全局表而非 GenState 字段：GenState 已大到让后端单条 add 的字段偏移越界。
+// 上限 128 项，超出后新字面量不再登记（退化为旧的拒绝路径）。
+let c_data_str_n int = 0;
+let c_data_str_lbl [128]int;
+let c_data_str_off [128]int;
+let c_data_str_len [128]int;
+
+// data_str_add：登记字符串字面量的数据标签与原样字节，返回非零表示表满或分配失败。
+// 字节 intern 进名字池（np_data），消费侧（ct_pool_adopt_label）按同一个池取字节。
+pub fn data_str_add(lbl int, start int, slen int) int {
+    if (c_data_str_n >= 128) { return -1; }
+    let off int = name_intern(start, slen);
+    if (off < 0) { return -1; }
+    c_data_str_lbl[c_data_str_n] = lbl;
+    c_data_str_off[c_data_str_n] = off;
+    c_data_str_len[c_data_str_n] = slen;
+    c_data_str_n += 1;
+    return 0;
+}
+
+// data_str_lookup：按数据标签号查登记项；**命中返回非零**并写出名字池偏移与字节长度，
+// 未命中返回 0（调用方 `if (data_str_lookup(...) != 0)` 以非零为命中）。
+pub fn data_str_lookup(lbl int, off *int, slen *int) int {
+    let i int = 0;
+    for i < c_data_str_n {
+        if (c_data_str_lbl[i] == lbl) {
+            *off = c_data_str_off[i];
+            *slen = c_data_str_len[i];
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// 枚举成员登记表：模块 worker 会二次解析编译期正文，那时名字表里可能查不到枚举成员
+// 符号（实测）。登记时快照名字池偏移与值，反查不经过符号表，绕开符号可见性问题。
+// 独立全局数组（与 c_data_str_* 同理，避免撑大 GenState 字段偏移）。
+let em_n int = 0;
+let em_name_off [512]int;
+let em_name_len [512]int;
+let em_val [512]i64;
+let em_ready [512]int;
+
+// em_add：登记一个枚举成员（必须在成员的值与就绪位写完之后调用，否则快照到 0）。
+pub fn em_add(sym int) int {
+    if (em_n >= 512) { return -1; }
+    em_name_off[em_n] = g_state.c_syms[sym].name_off;
+    em_name_len[em_n] = g_state.c_syms[sym].name_len;
+    em_val[em_n] = g_state.c_syms[sym].cval;
+    em_ready[em_n] = g_state.c_syms[sym].const_ready;
+    em_n += 1;
+    return 0;
+}
+
+// em_update_value：延迟回填枚举成员值时同步表内快照（按名字池偏移匹配，不依赖符号下标）。
+pub fn em_update_value(name_off int, val i64) void {
+    let i int = 0;
+    for i < em_n {
+        if (em_name_off[i] == name_off) {
+            em_val[i] = val;
+            em_ready[i] = 1;
+        }
+        i += 1;
+    }
+}
+
+// em_name_eq：比较登记项名字（名字池字节）与源码缓冲字节 [start,start+n)。
+fn em_name_eq(idx int, src *u8, start int, n int) int {
+    if (em_name_len[idx] != n) { return 0; }
+    let off int = em_name_off[idx];
+    let i int = 0;
+    for i < n {
+        let a int = g_state.np_data[off + i].to_type(int);
+        let b int = src[start + i].to_type(int);
+        if (a != b) { return 0; }
+        i += 1;
+    }
+    return 1;
+}
+
+// em_find_src：按给定源码缓冲的名字字节反查登记项下标，找不到返回 -1。
+// 编译期目标另有一份源码缓冲（frame.target.src），与前端 c_src 不一定同一个。
+pub fn em_find_src(src *u8, start int, n int) int {
+    let i int = 0;
+    for i < em_n {
+        if (em_name_eq(i, src, start, n) != 0) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+
+// em_find：按前端当前源文件（c_src）的名字字节反查登记项下标。
+pub fn em_find(start int, n int) int {
+    return em_find_src(g_state.c_src, start, n);
+}
+
+// em_get_val / em_get_ready：读取登记项的值与就绪位。
+pub fn em_get_val(idx int) i64 {
+    return em_val[idx];
+}
+
+pub fn em_get_ready(idx int) int {
+    return em_ready[idx];
+}
+
 // state_init：恢复非零初始值（原 pub let 声明初始化器迁移而来）。
 // 在每次编译会话开始（driver 入口与 worker 初始化）调用。
 pub fn state_init() void {
@@ -249,6 +368,10 @@ pub fn state_init() void {
     g_state.c_active_file = -1;
     g_state.c_expect_tid = -1;
     g_state.c_data_n = 1;
+    c_data_str_n = 0;
+    em_n = 0;
+    g_state.c_ct_target_ctx = 0;
+    g_state.c_ct_diag_stmt = 0;
     g_state.mod_name_off = -1;
     g_state.c_sym_sfx_off = -1;
     g_state.p_stdlib = -1;

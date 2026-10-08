@@ -640,6 +640,10 @@ pub fn sym_push(start int, n int, kind int, tid int, flags int) int {
     g_state.c_syms[g_state.c_sym_n].offset = 0;
     g_state.c_syms[g_state.c_sym_n].flags = flags;
     g_state.c_syms[g_state.c_sym_n].cval = 0;
+    g_state.c_syms[g_state.c_sym_n].const_ready = 0;
+    g_state.c_syms[g_state.c_sym_n].const_expr_off = -1;
+    g_state.c_syms[g_state.c_sym_n].const_expr_len = 0;
+    g_state.c_syms[g_state.c_sym_n].const_expr_kind = 0;
     g_state.c_syms[g_state.c_sym_n].def_line = g_state.c_toks[g_state.c_pos].line;
     g_state.c_syms[g_state.c_sym_n].def_col = g_state.c_toks[g_state.c_pos].col;
     g_state.c_syms[g_state.c_sym_n].ast_binding_row = -1;
@@ -661,6 +665,35 @@ pub fn sym_push_lit(off int, n int, kind int, tid int, flags int) int {
 
 // sym_lookup_off：按名字池偏移查符号（池对池比较，供构建器诊断用）。
 // 只查全局层（g_state.c_scope_start[0] 以下）。找不到返回 -1。
+// sym_ct_lit_text：把「字符串指针常量」沿引用链追到最终的字面式初始化文本。引用式
+// （`const A *char = B;`，kind 3）逐跳跟进，直到找到 kind 2 的字面式 —— 消费者看不到提供方的
+// 私有常量名，重放引用本身会在导入侧解析失败。跳数上限 16 兼作环与超深链的兜底
+// （`A -> B -> A` 这类环不会死循环）。成功填 out_off/out_len 返回 0，否则返回 1。
+pub fn sym_ct_lit_text(sym_id int, out_off *int, out_len *int) int {
+    if (sym_id < 0 || sym_id >= g_state.c_sym_n) { return 1; }
+    let cur int = sym_id;
+    let hops int = 0;
+    for hops < 16 {
+        let kind int = g_state.c_syms[cur].const_expr_kind;
+        if (kind == 2) {
+            *out_off = g_state.c_syms[cur].const_expr_off;
+            *out_len = g_state.c_syms[cur].const_expr_len;
+            return 0;
+        }
+        if (kind != 3) { return 1; }
+        let nxt int = sym_lookup_off(g_state.c_syms[cur].const_expr_off,
+            g_state.c_syms[cur].const_expr_len);
+        if (nxt < 0 || nxt >= g_state.c_sym_n || nxt == cur) { return 1; }
+        if (g_state.c_syms[nxt].kind != SYM_CONST
+            || (g_state.c_syms[nxt].flags & F_ADDR) == 0) {
+            return 1;
+        }
+        cur = nxt;
+        hops += 1;
+    }
+    return 1;
+}
+
 pub fn sym_lookup_off(off int, n int) int {
     let i int = g_state.c_sym_n - 1;
     for i >= 0 {
@@ -842,6 +875,13 @@ pub fn sem_can_assign(dst int, src int, is_lit int, ival i64, big int) int {
     // 聚合：同型已在上面通过；不同类型（含长度不同）一律拒绝
     if ((dk == TY_STRUCT || dk == TY_UNION || dk == TY_ARRAY || dk == TY_SLICE)
         && (sk == TY_STRUCT || sk == TY_UNION || sk == TY_ARRAY || sk == TY_SLICE)) {
+        // 数组是结构化类型：编译期布局会为延迟长度表达式建立独立类型项，
+        // 与同元素类型、同长度的既有数组项完全等价，按内容放行。
+        if (dk == TY_ARRAY && sk == TY_ARRAY
+            && g_state.t_types[dst].elem == g_state.t_types[src].elem
+            && g_state.t_types[dst].len == g_state.t_types[src].len) {
+            return 0;
+        }
         return sem_err("聚合类型不匹配（长度或元素类型不同）");
     }
     if (dk == TY_PTR) {

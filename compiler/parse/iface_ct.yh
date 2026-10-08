@@ -1,0 +1,1073 @@
+module parse;
+import gen;
+import comptime;
+import lex;
+
+// iface_ct_name：生成仅供编译期调用的模块私有名字。
+// 同一模块内所有闭包函数共用稳定后缀，避免与运行期符号或其他模块碰撞。
+pub fn iface_ct_name(sym_id int, suffix_off int, suffix_len int,
+    name_off *int, name_len *int) int {
+    let gs *gen.GenState = gen.G();
+    if (sym_id < 0 || sym_id >= gs.c_sym_n || suffix_off < 0
+        || suffix_len < 0) {
+        return gen.fail("内部错误：CT 接口函数身份无效");
+    }
+    let sym gen.CSym = gs.c_syms[sym_id];
+    if (sym.name_len >= 7
+        && gs.np_data[sym.name_off] == '_'
+        && gs.np_data[sym.name_off + 1] == '_'
+        && gs.np_data[sym.name_off + 2] == 'y'
+        && gs.np_data[sym.name_off + 3] == 'h'
+        && gs.np_data[sym.name_off + 4] == 'c'
+        && gs.np_data[sym.name_off + 5] == 't'
+        && gs.np_data[sym.name_off + 6] == '_') {
+        name_off[0] = sym.name_off;
+        name_len[0] = sym.name_len;
+        return 0;
+    }
+    let buf [1200]u8;
+    let n int = 0;
+    n = gen.append_str(buf, n, "__yhct_");
+    let i int = 0;
+    for i < sym.name_len {
+        buf[n] = gs.np_data[sym.name_off + i];
+        n += 1;
+        i += 1;
+    }
+    i = 0;
+    for i < suffix_len {
+        buf[n] = gs.np_data[suffix_off + i];
+        n += 1;
+        i += 1;
+    }
+    let off int = gen.tml_intern_str(buf, 0, n);
+    if (off < 0) { return -1; }
+    name_off[0] = off;
+    name_len[0] = n;
+    return 0;
+}
+
+// iface_ct_export_name：由公开短名与提供方后缀推导对应隐藏正文名。
+pub fn iface_ct_export_name(mi int, ns_row int, name_off *int,
+    name_len *int) int {
+    let gs *gen.GenState = gen.G();
+    if (mi < 0 || mi >= gs.c_mod_n || ns_row < 0
+        || ns_row >= gs.c_mods[mi].ns_n) {
+        return gen.fail("内部错误：公开 CT 接口条目无效");
+    }
+    let ent gen.ModNsEnt = gs.c_mods[mi].ns[ns_row];
+    let modinfo gen.ModInfo = gs.c_mods[mi];
+    let buf [1200]u8;
+    let n int = 0;
+    n = gen.append_str(buf, n, "__yhct_");
+    let i int = 0;
+    for i < ent.name_len {
+        buf[n] = gs.np_data[ent.name_off + i];
+        n += 1;
+        i += 1;
+    }
+    i = 0;
+    for i < modinfo.prefix_len {
+        buf[n] = gs.np_data[modinfo.prefix_off + i];
+        n += 1;
+        i += 1;
+    }
+    let off int = gen.tml_intern_str(buf, 0, n);
+    if (off < 0) { return -1; }
+    name_off[0] = off;
+    name_len[0] = n;
+    return 0;
+}
+
+// iface_ct_emit_type：发出 CT 正文签名使用的规范类型名。
+// 本地公开类型追加当前模块后缀；导入类型已经带提供方后缀。
+pub fn iface_ct_emit_type(tid int, suffix_off int, suffix_len int) int {
+    let gs *gen.GenState = gen.G();
+    if (tid < 0 || tid >= gs.t_type_n) {
+        return gen.sem_err("编译期正文引用了无效类型");
+    }
+    let kind int = gs.t_types[tid].kind;
+    if (kind == gen.TY_VOID) { return if_puts("void"); }
+    if (kind == gen.TY_BOOL) { return if_puts("bool"); }
+    if (kind == gen.TY_CHAR) { return if_puts("char"); }
+    if (kind == gen.TY_I8) { return if_puts("i8"); }
+    if (kind == gen.TY_I16) { return if_puts("i16"); }
+    if (kind == gen.TY_I32) { return if_puts("int"); }
+    if (kind == gen.TY_I64) { return if_puts("i64"); }
+    if (kind == gen.TY_U8) { return if_puts("u8"); }
+    if (kind == gen.TY_U16) { return if_puts("u16"); }
+    if (kind == gen.TY_U32) { return if_puts("u32"); }
+    if (kind == gen.TY_U64) { return if_puts("u64"); }
+    if (kind == gen.TY_F32) { return if_puts("f32"); }
+    if (kind == gen.TY_F64) { return if_puts("f64"); }
+    if (kind == gen.TY_PTR) {
+        if (if_put('*') != 0) { return -1; }
+        return iface_ct_emit_type(gs.t_types[tid].elem, suffix_off,
+            suffix_len);
+    }
+    if (kind == gen.TY_ARRAY) {
+        if (if_put('[') != 0 || if_puti(gs.t_types[tid].len) != 0
+            || if_put(']') != 0) { return -1; }
+        return iface_ct_emit_type(gs.t_types[tid].elem, suffix_off,
+            suffix_len);
+    }
+    if (kind == gen.TY_SLICE) {
+        if (if_puts("[]") != 0) { return -1; }
+        return iface_ct_emit_type(gs.t_types[tid].elem, suffix_off,
+            suffix_len);
+    }
+    if (kind == gen.TY_FN) {
+        let sig int = gs.t_types[tid].sub;
+        if (gs.t_sig_abi[sig] == gen.ABI_C
+            && if_puts("@[extern] ") != 0) { return -1; }
+        if (if_puts("fn(") != 0) { return -1; }
+        let i int = 0;
+        for i < gs.t_sig_np[sig] {
+            if (i > 0 && if_puts(", ") != 0) { return -1; }
+            if (iface_ct_emit_type(
+                    gs.t_sig_params[gs.t_sig_first[sig] + i],
+                    suffix_off, suffix_len) != 0) { return -1; }
+            i += 1;
+        }
+        if (if_put(')') != 0) { return -1; }
+        return iface_ct_emit_type(gs.t_sig_ret[sig], suffix_off,
+            suffix_len);
+    }
+    let found int = -1;
+    let alias_found int = -1;
+    let i2 int = 0;
+    for i2 < gs.t_name_n {
+        if (gs.t_names[i2].type_id == tid) {
+            if (gs.t_names[i2].form != 0) { found = i2; break; }
+            if (alias_found < 0) { alias_found = i2; }
+        }
+        i2 += 1;
+    }
+    if (found < 0) { found = alias_found; }
+    if (found < 0) { return gen.sem_err("CT 正文引用了未命名类型"); }
+    if (gs.t_home[tid] < 0) {
+        if (gs.t_names[found].is_pub == 0) {
+            return gen.sem_err("跨模块 CT 正文暂不支持模块私有具名类型");
+        }
+        if (if_put_np(gs.t_names[found].name_off,
+                gs.t_names[found].name_len) != 0) { return -1; }
+        let i3 int = 0;
+        for i3 < suffix_len {
+            if (if_put(gs.np_data[suffix_off + i3]) != 0) { return -1; }
+            i3 += 1;
+        }
+        return 0;
+    }
+    return if_put_np(gs.t_names[found].name_off,
+        gs.t_names[found].name_len);
+}
+
+// iface_ct_source_type_id：按正文 token 名查找同模块具名类型，未命中返回 -1。
+fn iface_ct_source_type_id(src *u8, start int, token_len int) int {
+    let gs *gen.GenState = gen.G();
+    let row int = 0;
+    for row < gs.t_name_n {
+        let name gen.TName = gs.t_names[row];
+        if (name.name_len == token_len) {
+            let i int = 0;
+            for i < token_len {
+                if (src[start + i] != gs.np_data[name.name_off + i]) {
+                    break;
+                }
+                i += 1;
+            }
+            if (i == token_len) { return name.type_id; }
+        }
+        row += 1;
+    }
+    return -1;
+}
+
+// iface_ct_qualified_type_target：按函数注册时的导入快照解析 alias.Type。
+fn iface_ct_qualified_type_target(item *comptime.CtFunction,
+    alias_token int) int {
+    let gs *gen.GenState = gen.G();
+    if (alias_token < 0 || alias_token + 2 >= item.body_n
+        || item.body[alias_token].kind != gen.TOK_IDENT
+        || item.body[alias_token + 1].kind != gen.TK_DOT
+        || item.body[alias_token + 2].kind != gen.TOK_IDENT) { return -1; }
+    let alias_start int = item.body[alias_token].start;
+    let alias_len int = item.body[alias_token].len;
+    let import_row int = 0;
+    for import_row < item.import_n {
+        let imp comptime.CtImport = item.imports[import_row];
+        if (imp.alias_len == alias_len) {
+            let same int = 1;
+            let j int = 0;
+            for j < alias_len {
+                if (item.src[alias_start + j]
+                    != gs.np_data[imp.alias_off + j]) {
+                    same = 0;
+                    break;
+                }
+                j += 1;
+            }
+            if (same != 0 && imp.module_id >= 0
+                && imp.module_id < gs.c_mod_n) {
+                let type_token int = alias_token + 2;
+                let type_start int = item.body[type_token].start;
+                let type_len int = item.body[type_token].len;
+                let ns_row int = 0;
+                for ns_row < gs.c_mods[imp.module_id].ns_n {
+                    let ent gen.ModNsEnt = gs.c_mods[imp.module_id].ns[ns_row];
+                    if (ent.tid >= 0 && ent.name_len == type_len) {
+                        let type_same int = 1;
+                        let k int = 0;
+                        for k < type_len {
+                            if (item.src[type_start + k]
+                                != gs.np_data[ent.name_off + k]) {
+                                type_same = 0;
+                                break;
+                            }
+                            k += 1;
+                        }
+                        if (type_same != 0) { return ent.tid; }
+                    }
+                    ns_row += 1;
+                }
+            }
+        }
+        import_row += 1;
+    }
+    return -1;
+}
+
+// iface_ct_local_type_end：找出局部声明类型后的顶层初始化等号。
+// 数组长度和函数类型中的括号会被跳过，返回等号 token 下标。
+fn iface_ct_local_type_end(item *comptime.CtFunction, start int) int {
+    let round int = 0;
+    let square int = 0;
+    let brace int = 0;
+    let i int = start;
+    for i < item.body_n {
+        let kind int = item.body[i].kind;
+        if (kind == gen.TK_ASSIGN && round == 0 && square == 0
+            && brace == 0) { return i; }
+        if (kind == gen.TK_LPAREN) { round += 1; }
+        else if (kind == gen.TK_RPAREN) { round -= 1; }
+        else if (kind == gen.TK_LBRACKET) { square += 1; }
+        else if (kind == gen.TK_RBRACKET) { square -= 1; }
+        else if (kind == gen.TK_LBRACE) { brace += 1; }
+        else if (kind == gen.TK_RBRACE) { brace -= 1; }
+        if (round < 0 || square < 0 || brace < 0) { return -1; }
+        i += 1;
+    }
+    return -1;
+}
+
+// iface_ct_is_sizeof_type：识别 sizeof 中的具名类型，允许其前有连续指针星号。
+fn iface_ct_is_sizeof_type(item *comptime.CtFunction, token_index int) int {
+    let before int = token_index - 1;
+    for before >= 0 && item.body[before].kind == gen.TK_STAR {
+        before -= 1;
+    }
+    if (before >= 1 && item.body[before].kind == gen.TK_LPAREN
+        && item.body[before - 1].kind == gen.TK_SIZEOF) { return 1; }
+    return 0;
+}
+
+// iface_ct_hex_value：把来源映射中的十六进制路径字节转换为 0..15。
+fn iface_ct_hex_value(byte u8) int {
+    if (byte >= '0' && byte <= '9') { return (byte - '0').to_type(int); }
+    if (byte >= 'a' && byte <= 'f') { return (byte - 'a' + 10).to_type(int); }
+    if (byte >= 'A' && byte <= 'F') { return (byte - 'A' + 10).to_type(int); }
+    return -1;
+}
+
+// iface_ct_origin_begin：按声明前的 sidecar 注释切换到函数定义源码路径与行号。
+pub fn iface_ct_origin_begin(token_index int) int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_ct_iface_mode == 0) { return 0; }
+    gs.c_path = (&gs.c_path_buffer[0]).to_type(*char);
+    gs.c_ct_origin_active = 0;
+    gs.c_diag_line_bias = 0;
+    if (token_index < 0 || token_index >= gs.c_tok_n) {
+        return gen.fail("内部错误：CT 来源映射声明 token 越界");
+    }
+    let fn_token int = token_index;
+    for fn_token < gs.c_tok_n && gs.c_toks[fn_token].kind != gen.TK_FN {
+        fn_token += 1;
+    }
+    if (fn_token >= gs.c_tok_n) {
+        return gen.fail_path("CT 来源映射缺少函数签名: ", gs.c_path);
+    }
+    let body_token int = fn_token + 1;
+    for body_token < gs.c_tok_n
+        && gs.c_toks[body_token].kind != gen.TK_LBRACE {
+        body_token += 1;
+    }
+    if (body_token >= gs.c_tok_n) {
+        return gen.fail_path("CT 来源映射缺少函数体: ", gs.c_path);
+    }
+    let line_start int = gs.c_toks[token_index].start;
+    for line_start > 0 && gs.c_src[line_start - 1] != '\n' {
+        line_start -= 1;
+    }
+    if (line_start <= 0) { return 0; }
+    let marker_end int = line_start - 1;
+    let marker_start int = marker_end;
+    for marker_start > 0 && gs.c_src[marker_start - 1] != '\n' {
+        marker_start -= 1;
+    }
+    let prefix *char = "// yh-ctloc v1 ";
+    let prefix_len int = 15;
+    if (marker_end - marker_start < prefix_len) { return 0; }
+    let i int = 0;
+    for i < prefix_len {
+        if (gs.c_src[marker_start + i] != prefix[i].to_type(u8)) {
+            return 0;
+        }
+        i += 1;
+    }
+    let number_start int = marker_start + prefix_len;
+    let number_end int = number_start;
+    for number_end < marker_end && gs.c_src[number_end] != ' ' {
+        number_end += 1;
+    }
+    if (number_end == number_start || number_end >= marker_end) {
+        return gen.fail_path("CT 接口来源映射格式无效: ", gs.c_path);
+    }
+    let origin_line int = 0;
+    i = number_start;
+    for i < number_end {
+        let digit int = (gs.c_src[i] - '0').to_type(int);
+        if (digit < 0 || digit > 9 || origin_line > 100000000) {
+            return gen.fail_path("CT 接口来源映射行号无效: ", gs.c_path);
+        }
+        origin_line = origin_line * 10 + digit;
+        i += 1;
+    }
+    let hex_start int = number_end + 1;
+    let hex_len int = marker_end - hex_start;
+    if (origin_line <= 0 || hex_len <= 0 || (hex_len & 1) != 0
+        || hex_len / 2 >= 1024) {
+        return gen.fail_path("CT 接口来源映射范围无效: ", gs.c_path);
+    }
+    let path_len int = hex_len / 2;
+    i = 0;
+    for i < path_len {
+        let high int = iface_ct_hex_value(gs.c_src[hex_start + i * 2]);
+        let low int = iface_ct_hex_value(gs.c_src[hex_start + i * 2 + 1]);
+        if (high < 0 || low < 0) {
+            return gen.fail_path("CT 接口来源映射路径无效: ", gs.c_path);
+        }
+        let value u8 = (high * 16 + low).to_type(u8);
+        if (value == 0 || value == '\n' || value == '\r') {
+            return gen.fail_path("CT 接口来源映射路径无效: ", gs.c_path);
+        }
+        gs.c_ct_origin_path_buffer[i] = value;
+        i += 1;
+    }
+    gs.c_ct_origin_path_buffer[path_len] = 0;
+    // 精确列映射是可选扩展；旧 sidecar 只有 ctloc 行号映射仍可导入。
+    let col_end int = marker_start - 1;
+    let col_start int = col_end;
+    for col_start > 0 && gs.c_src[col_start - 1] != '\n' {
+        col_start -= 1;
+    }
+    let col_status int = iface_ct_col_parse(gs, col_start, col_end);
+    if (col_status < 0) { return -1; }
+    let body_after int = body_token;
+    let brace_depth int = 0;
+    for body_after < gs.c_tok_n {
+        if (gs.c_toks[body_after].kind == gen.TK_LBRACE) {
+            brace_depth += 1;
+        } else if (gs.c_toks[body_after].kind == gen.TK_RBRACE) {
+            brace_depth -= 1;
+            if (brace_depth == 0) { body_after += 1; break; }
+        }
+        body_after += 1;
+    }
+    if (brace_depth != 0) {
+        iface_ct_col_reset();
+        return gen.fail_path("CT 来源映射函数体不闭合: ", gs.c_path);
+    }
+    gs.c_ct_origin_active = 1;
+    gs.c_ct_origin_line = origin_line;
+    gs.c_diag_line_bias = origin_line - gs.c_toks[body_token].line;
+    gs.c_path = (&gs.c_ct_origin_path_buffer[0]).to_type(*char);
+    if (col_status > 0
+        && iface_ct_col_apply(gs, body_token, body_after, origin_line) != 0) {
+        iface_ct_col_restore(gs);
+        gs.c_ct_origin_active = 0;
+        gs.c_diag_line_bias = 0;
+        gs.c_path = (&gs.c_path_buffer[0]).to_type(*char);
+        return -1;
+    }
+    return 0;
+}
+
+// iface_ct_origin_end：恢复 sidecar 文件上下文，避免来源映射泄漏到下一声明。
+pub fn iface_ct_origin_end() void {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_ct_iface_mode == 0) { return; }
+    iface_ct_col_restore(gs);
+    gs.c_path = (&gs.c_path_buffer[0]).to_type(*char);
+    gs.c_ct_origin_active = 0;
+    gs.c_diag_line_bias = 0;
+}
+
+// iface_ct_emit_origin：把原始文件路径编码为十六进制，写入函数前的映射注释。
+fn iface_ct_emit_origin(item *comptime.CtFunction) int {
+    if (item.src_path == 0 || item.src_path_len <= 0
+        || item.src_body_line <= 0) { return 0; }
+    if (iface_ct_col_emit(item) != 0
+        || if_puts("// yh-ctloc v1 ") != 0
+        || if_puti(item.src_body_line) != 0 || if_put(' ') != 0) {
+        return -1;
+    }
+    let digits *char = "0123456789abcdef";
+    let i int = 0;
+    for i < item.src_path_len {
+        let byte int = item.src_path[i].to_type(int);
+        if (if_put(digits[byte / 16].to_type(u8)) != 0
+            || if_put(digits[byte % 16].to_type(u8)) != 0) { return -1; }
+        i += 1;
+    }
+    return if_put('\n');
+}
+
+// iface_ct_emit_newlines：重写 token 范围时保留换行数，稳定来源行号映射。
+fn iface_ct_emit_newlines(item *comptime.CtFunction, start int, after int) int {
+    let i int = start;
+    for i < after {
+        if (item.src[i] == '\n' && if_put('\n') != 0) { return -1; }
+        i += 1;
+    }
+    return 0;
+}
+
+// iface_ct_emit_body：复制函数体并把显式 CT 调用重写到闭包私有符号。
+pub fn iface_ct_emit_body(row int, item *comptime.CtFunction) int {
+    if (item.body_n <= 0) { return gen.sem_err("CT 正文为空"); }
+    let start int = item.body[0].start;
+    let after int = item.body[item.body_n - 1].start
+        + item.body[item.body_n - 1].len;
+    let cursor int = start;
+    let i int = 0;
+    for i < item.body_n {
+        if (item.body[i].kind == gen.TK_DOLLAR
+            && i + 1 < item.body_n
+            && item.body[i + 1].kind == gen.TOK_IDENT) {
+            let target int = comptime.ct_iface_call_target(row,
+                item.body_token_first + i);
+            if (target >= 0) {
+                let dollar_start int = item.body[i].start;
+                let call_name_token int = i + 1;
+                let ident_after int = item.body[i + 1].start
+                    + item.body[i + 1].len;
+                let token_after int = i + 2;
+                if (i + 3 < item.body_n
+                    && item.body[i + 2].kind == gen.TK_DOT
+                    && item.body[i + 3].kind == gen.TOK_IDENT) {
+                    ident_after = item.body[i + 3].start
+                        + item.body[i + 3].len;
+                    token_after = i + 4;
+                    call_name_token = i + 3;
+                }
+                let copy int = cursor;
+                for copy < dollar_start {
+                    if (if_put(item.src[copy]) != 0) { return -1; }
+                    copy += 1;
+                }
+                if (if_put('$') != 0) { return -1; }
+                let map_gen_start int = if_len;
+                let name_off int = -1;
+                let name_len int = 0;
+                let gs *gen.GenState = gen.G();
+                if (iface_ct_name(target, gs.c_sym_sfx_off,
+                        gs.c_sym_sfx_len, &name_off, &name_len) != 0
+                    || if_put_np(name_off, name_len) != 0) { return -1; }
+                let map_gen_end int = if_len;
+                if (iface_ct_emit_newlines(item, dollar_start,
+                        ident_after) != 0) { return -1; }
+                if (iface_ct_col_note(item, map_gen_start, map_gen_end,
+                        if_len, call_name_token, call_name_token, 1) != 0) {
+                    return -1;
+                }
+                cursor = ident_after;
+                i = token_after;
+                continue;
+            }
+        }
+        // 局部声明从类型引用起点整体重发语义类型；这样 `[N]Alias`、`*Alias`
+        // 等复合类型不会把私有别名名留在消费者正文中。
+        let local_type int = comptime.ct_iface_local_type_target(row,
+            item.body_token_first + i);
+        if (local_type >= 0) {
+            let type_after int = iface_ct_local_type_end(item, i);
+            if (type_after <= i) {
+                return gen.sem_err("无法确定 CT 局部声明的类型范围");
+            }
+            let type_start int = item.body[i].start;
+            let copy_type int = cursor;
+            for copy_type < type_start {
+                if (if_put(item.src[copy_type]) != 0) { return -1; }
+                copy_type += 1;
+            }
+            let gs_type *gen.GenState = gen.G();
+            let map_gen_start int = if_len;
+            if (iface_ct_emit_type(local_type, gs_type.c_sym_sfx_off,
+                    gs_type.c_sym_sfx_len) != 0) {
+                return -1;
+            }
+            let map_gen_end int = if_len;
+            if (if_put(' ') != 0
+                || iface_ct_emit_newlines(item, type_start,
+                    item.body[type_after].start) != 0
+                || iface_ct_col_note(item, map_gen_start, map_gen_end,
+                    if_len, i, type_after, 0) != 0) { return -1; }
+            cursor = item.body[type_after].start;
+            i = type_after;
+            continue;
+        }
+        if (item.body[i].kind == gen.TOK_IDENT) {
+            let qualified_type int = iface_ct_qualified_type_target(item, i);
+            if (qualified_type >= 0 && i + 3 < item.body_n) {
+                let qualified_name int = i + 2;
+                let is_literal int = (item.body[i + 3].kind
+                    == gen.TK_LBRACE).to_type(int);
+                let is_cast int = (i >= 2
+                    && item.body[i - 1].kind == gen.TK_LPAREN
+                    && item.body[i - 2].kind == gen.TK_TO_TYPE).to_type(int);
+                let is_sizeof int = iface_ct_is_sizeof_type(item, i);
+                if (is_literal != 0 || is_cast != 0 || is_sizeof != 0) {
+                    let qualified_start int = item.body[i].start;
+                    let qualified_after int = item.body[qualified_name].start
+                        + item.body[qualified_name].len;
+                    let copy_qualified int = cursor;
+                    for copy_qualified < qualified_start {
+                        if (if_put(item.src[copy_qualified]) != 0) {
+                            return -1;
+                    }
+                    copy_qualified += 1;
+                }
+                let map_gen_start int = if_len;
+                let gs_type *gen.GenState = gen.G();
+                if (iface_ct_emit_type(qualified_type,
+                        gs_type.c_sym_sfx_off,
+                        gs_type.c_sym_sfx_len) != 0) { return -1; }
+                let map_gen_end int = if_len;
+                if (iface_ct_emit_newlines(item, qualified_start,
+                        qualified_after) != 0
+                    || iface_ct_col_note(item, map_gen_start, map_gen_end,
+                        if_len, i, qualified_name, 1) != 0) { return -1; }
+                    cursor = qualified_after;
+                    i += 3;
+                    continue;
+                }
+            }
+            let target_const int = comptime.ct_iface_const_target(row,
+                item.body_token_first + i);
+            if (target_const >= 0) {
+                let ident_start int = item.body[i].start;
+                let ident_after int = ident_start + item.body[i].len;
+                let copy_const int = cursor;
+                for copy_const < ident_start {
+                    if (if_put(item.src[copy_const]) != 0) { return -1; }
+                    copy_const += 1;
+                }
+                let name_off_const int = -1;
+                let name_len_const int = 0;
+                let gs_const *gen.GenState = gen.G();
+                let map_gen_start int = if_len;
+                if (iface_ct_name(target_const, gs_const.c_sym_sfx_off,
+                        gs_const.c_sym_sfx_len, &name_off_const,
+                        &name_len_const) != 0
+                    || if_put_np(name_off_const, name_len_const) != 0) {
+                    return -1;
+                }
+                if (iface_ct_col_note(item, map_gen_start, if_len, if_len,
+                        i, i, 1) != 0) { return -1; }
+                cursor = ident_after;
+                i += 1;
+                continue;
+            }
+            let target_type int = comptime.ct_iface_local_type_target(row,
+                item.body_token_first + i);
+            let type_start int = item.body[i].start;
+            let source_type int = iface_ct_source_type_id(item.src,
+                type_start, item.body[i].len);
+            if (target_type < 0 && i + 1 < item.body_n
+                && item.body[i + 1].kind == gen.TK_LBRACE) {
+                target_type = source_type;
+            }
+            // .to_type(T) 与 sizeof(T) 中的具名类型也需映射到闭包类型名。
+            if (target_type < 0 && i >= 2
+                && item.body[i - 1].kind == gen.TK_LPAREN
+                && item.body[i - 2].kind == gen.TK_TO_TYPE) {
+                target_type = source_type;
+            }
+            if (target_type < 0
+                && iface_ct_is_sizeof_type(item, i) != 0) {
+                target_type = source_type;
+            }
+            if (target_type >= 0 && source_type == target_type) {
+                let type_after int = type_start + item.body[i].len;
+                let copy_type int = cursor;
+                for copy_type < type_start {
+                    if (if_put(item.src[copy_type]) != 0) { return -1; }
+                    copy_type += 1;
+                }
+                let gs_type *gen.GenState = gen.G();
+                let map_gen_start int = if_len;
+                if (iface_ct_emit_type(target_type,
+                        gs_type.c_sym_sfx_off, gs_type.c_sym_sfx_len) != 0) {
+                    return -1;
+                }
+                if (iface_ct_col_note(item, map_gen_start, if_len, if_len,
+                        i, i, 1) != 0) { return -1; }
+                cursor = type_after;
+                i += 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    for cursor < after {
+        if (if_put(item.src[cursor]) != 0) { return -1; }
+        cursor += 1;
+    }
+    return 0;
+}
+
+// iface_ct_emit_i64：以十进制输出有符号常量，避免窄化为宿主 int。
+fn iface_ct_emit_i64(value i64) int {
+    let digits [24]u8;
+    let count int = 0;
+    let negative int = (value < 0).to_type(int);
+    let magnitude u64 = value.to_type(u64);
+    if (negative != 0) { magnitude = 0 - magnitude; }
+    if (magnitude == 0) {
+        digits[count] = '0';
+        count += 1;
+    }
+    for magnitude > 0 {
+        digits[count] = ((magnitude % 10) + 48).to_type(u8);
+        count += 1;
+        magnitude = magnitude / 10;
+    }
+    if (negative != 0 && if_put('-') != 0) { return -1; }
+    for count > 0 {
+        count -= 1;
+        if (if_put(digits[count]) != 0) { return -1; }
+    }
+    return 0;
+}
+
+// iface_ct_emit_u64_hex：十六进制保留 u64 高位常量的原始位型。
+fn iface_ct_emit_u64_hex(value i64) int {
+    let bits u64 = value.to_type(u64);
+    if (if_puts("0x") != 0) { return -1; }
+    let shift int = 60;
+    for shift >= 0 {
+        let digit int = ((bits >> shift) & 15).to_type(int);
+        let byte u8 = 0;
+        if (digit < 10) { byte = (digit + 48).to_type(u8); }
+        else { byte = (digit + 87).to_type(u8); }
+        if (if_put(byte) != 0) { return -1; }
+        shift -= 4;
+    }
+    return 0;
+}
+
+// iface_ct_emit_const：把闭包读取的受支持常量写为稳定隐藏名字和值。
+pub fn iface_ct_emit_const(sym_id int, suffix_off int,
+    suffix_len int) int {
+    let gs *gen.GenState = gen.G();
+    let type_id int = -1;
+    if (sym_id < 0 || sym_id >= gs.c_sym_n
+        || gs.c_syms[sym_id].kind != gen.SYM_CONST
+        || gs.c_syms[sym_id].const_ready == 0) {
+        return gen.sem_err("跨模块 CT 正文引用了不支持的模块常量");
+    }
+    let sym gen.CSym = gs.c_syms[sym_id];
+    type_id = sym.type_id;
+    let type_kind int = gs.t_types[type_id].kind;
+    let string_ptr int = (type_kind == gen.TY_PTR
+        && gs.t_types[type_id].elem == gen.TY_CHAR
+        && (sym.flags & gen.F_ADDR) != 0).to_type(int);
+    // 聚合常量（kind 4）：重放初始化式源文本，导入侧按模块模式重新解析（私有聚合常量
+    // 在第 47 轮已放行，所以导入侧能接受）。
+    let agg_src int = (string_ptr == 0 && sym.const_expr_kind == 4
+        && sym.const_expr_len > 0
+        && (type_kind == gen.TY_ARRAY || type_kind == gen.TY_STRUCT)).to_type(int);
+    if (gen.ty_is_integer(type_id) == 0
+        && gen.ty_is_float(type_id) == 0 && string_ptr == 0 && agg_src == 0) {
+        if (type_kind == gen.TY_PTR) {
+            return gen.sem_err("跨模块 CT 闭包暂只支持直接字符串字面量指针常量");
+        }
+        return gen.sem_err("跨模块 CT 正文引用了不支持的模块常量类型");
+    }
+    if (if_puts("const ") != 0) { return -1; }
+    let name_off int = -1;
+    let name_len int = 0;
+    if (iface_ct_name(sym_id, suffix_off, suffix_len,
+            &name_off, &name_len) != 0
+        || if_put_np(name_off, name_len) != 0 || if_put(' ') != 0
+        || iface_ct_emit_type(sym.type_id, suffix_off, suffix_len) != 0
+        || if_puts(" = ") != 0) { return -1; }
+    let kind int = gs.t_types[sym.type_id].kind;
+    if (gen.ty_is_float(type_id) != 0) {
+        if (sym.const_expr_kind != 1 || sym.const_expr_off < 0
+            || sym.const_expr_len <= 0) {
+            return gen.sem_err("跨模块 CT 闭包暂只支持浮点字面式常量");
+        }
+        if (if_put_np(sym.const_expr_off, sym.const_expr_len) != 0) {
+            return -1;
+        }
+        return if_puts(";\n");
+    }
+    if (agg_src != 0) {
+        if (if_put_np(sym.const_expr_off, sym.const_expr_len) != 0) { return -1; }
+        return if_puts(";\n");
+    }
+    if (string_ptr != 0) {
+        let lit_off int = 0;
+        let lit_len int = 0;
+        if (gen.sym_ct_lit_text(sym_id, &lit_off, &lit_len) != 0 || lit_len < 2) {
+            return gen.sem_err("跨模块 CT 闭包暂只支持直接或引用式的字符串字面量指针常量");
+        }
+        if (if_put_np(lit_off, lit_len) != 0) {
+            return -1;
+        }
+        return if_puts(";\n");
+    }
+    if (kind == gen.TY_BOOL) {
+        if (sym.cval == 0) {
+            if (if_puts("false") != 0) { return -1; }
+        } else if (if_puts("true") != 0) { return -1; }
+    } else if (kind == gen.TY_U64 && sym.cval < 0) {
+        if (iface_ct_emit_u64_hex(sym.cval) != 0) { return -1; }
+    } else if (iface_ct_emit_i64(sym.cval) != 0) {
+        return -1;
+    }
+    return if_puts(";\n");
+}
+
+// iface_ct_emit_function：发出闭包中的一个 private @[comptime] 定义。
+pub fn iface_ct_emit_function(row int, suffix_off int,
+    suffix_len int) int {
+    let item comptime.CtFunction = comptime.ct_iface_function(row);
+    let gs *gen.GenState = gen.G();
+    if (item.sym_id < 0 || item.sym_id >= gs.c_sym_n) {
+        return gen.fail("内部错误：CT 接口函数符号越界");
+    }
+    // 先在独立缓冲中完成正文改写，收集的列映射再写到函数声明之前。
+    iface_ct_col_reset();
+    let saved_buf *u8 = if_buf;
+    let saved_len int = if_len;
+    let saved_cap int = if_cap;
+    if_buf = 0;
+    if_len = 0;
+    if_cap = 0;
+    let body_status int = iface_ct_emit_body(row, &item);
+    let body_buf *u8 = if_buf;
+    let body_len int = if_len;
+    if_buf = saved_buf;
+    if_len = saved_len;
+    if_cap = saved_cap;
+    if (body_status != 0) {
+        if (body_buf != 0) { free(body_buf); }
+        iface_ct_col_reset();
+        return -1;
+    }
+    let status int = iface_ct_emit_origin(&item);
+    if (status == 0 && if_puts("@[comptime]\nfn ") != 0) { status = -1; }
+    let name_off int = -1;
+    let name_len int = 0;
+    if (status == 0 && (iface_ct_name(item.sym_id, suffix_off, suffix_len,
+            &name_off, &name_len) != 0
+        || if_put_np(name_off, name_len) != 0 || if_put('(') != 0)) {
+        status = -1;
+    }
+    let i int = 0;
+    for i < item.param_n && status == 0 {
+        if (i > 0 && if_puts(", ") != 0) { status = -1; break; }
+        let param comptime.CtParam = item.params[i];
+        let j int = 0;
+        for j < param.name_len && status == 0 {
+            if (if_put(item.src[param.name_start + j]) != 0) {
+                status = -1;
+                break;
+            }
+            j += 1;
+        }
+        if (status == 0 && (if_put(' ') != 0
+            || iface_ct_emit_type(param.type_id, suffix_off,
+                suffix_len) != 0)) { status = -1; }
+        i += 1;
+    }
+    if (status == 0 && (if_puts(") ") != 0
+        || iface_ct_emit_type(item.ret_type, suffix_off, suffix_len) != 0
+        || if_put(' ') != 0)) { status = -1; }
+    i = 0;
+    for i < body_len && status == 0 {
+        if (if_put(body_buf[i]) != 0) { status = -1; break; }
+        i += 1;
+    }
+    if (status == 0 && if_put('\n') != 0) { status = -1; }
+    if (body_buf != 0) { free(body_buf); }
+    iface_ct_col_reset();
+    return status;
+}
+
+// iface_ct_write：原子写出当前 if_buf，避免消费者看到半份 .s.ct。
+pub fn iface_ct_write(path *char) int {
+    let tmp [900]u8;
+    let tn int = 0;
+    tn = gen.append_str(tmp, tn, path);
+    tn = gen.append_str(tmp, tn, ".tmp.");
+    tn = gen.append_int(tmp, tn, getpid());
+    tmp[tn] = 0;
+    let flags int = 0x241;
+    if (gen.tg_darwin() != 0) { flags = 0x601; }
+    let fd int = open(gen.arr_cstr(tmp), flags, 0x1a4);
+    if (fd < 0) { return gen.fail_path("无法创建 CT 接口: ", path); }
+    let wr int = gen.write_all(fd, if_buf, if_len);
+    let cr int = close(fd);
+    if (wr != 0 || cr != 0 || rename(gen.arr_cstr(tmp), path) != 0) {
+        unlink(gen.arr_cstr(tmp));
+        return gen.fail_path("无法发布 CT 接口: ", path);
+    }
+    return 0;
+}
+
+// iface_ct_emit：导出公开 CT 函数可达的本模块闭包并写入版本化 .s.ct。
+pub fn iface_ct_emit(path *char, sym_base int) int {
+    let gs *gen.GenState = gen.G();
+    if_len = 0;
+    if (if_puts("// yh-ctiface v1 arch=arm64 suffix=") != 0
+        || if_put_np(gs.c_sym_sfx_off, gs.c_sym_sfx_len) != 0
+        || if_put('\n') != 0) { return -1; }
+    let count int = comptime.ct_iface_count();
+    let reachable *int = malloc(((count + 1) * sizeof(int)).to_type(u64))
+        .to_type(*int);
+    if (reachable == 0) { return gen.fail("CT 接口闭包分配失败"); }
+    let i int = 0;
+    for i < count { reachable[i] = 0; i += 1; }
+    i = 0;
+    for i < count {
+        let item comptime.CtFunction = comptime.ct_iface_function(i);
+        if (item.sym_id >= sym_base && item.sym_id < gs.c_sym_n
+            && (gs.c_syms[item.sym_id].flags
+                & (gen.F_COMPTIME | gen.F_PUB))
+                == (gen.F_COMPTIME | gen.F_PUB)) {
+            reachable[i] = 1;
+        }
+        i += 1;
+    }
+    let changed int = 1;
+    for changed != 0 {
+        changed = 0;
+        i = 0;
+        for i < count {
+            if (reachable[i] == 0) { i += 1; continue; }
+            let calls int = comptime.ct_iface_call_count(i);
+            let ci int = 0;
+            for ci < calls {
+                let target int = comptime.ct_iface_call_at(i, ci);
+                let row int = comptime.ct_find(target);
+                if (row >= 0 && row < count
+                    && reachable[row] == 0) {
+                    let target_item comptime.CtFunction
+                        = comptime.ct_iface_function(row);
+                    if (target_item.sym_id >= sym_base) {
+                        reachable[row] = 1;
+                        changed = 1;
+                    }
+                }
+                ci += 1;
+            }
+            i += 1;
+        }
+    }
+    let const_cap int = 0;
+    i = 0;
+    for i < count {
+        if (reachable[i] != 0) {
+            const_cap += comptime.ct_iface_const_count(i);
+        }
+        i += 1;
+    }
+    let closure_consts *int = 0;
+    if (const_cap > 0) {
+        closure_consts = malloc(((const_cap + 1) * sizeof(int)).to_type(u64))
+            .to_type(*int);
+        if (closure_consts == 0) {
+            free(reachable.to_type(*void));
+            return gen.fail("CT 接口常量闭包分配失败");
+        }
+    }
+    let const_n int = 0;
+    i = 0;
+    for i < count {
+        if (reachable[i] != 0) {
+            let refs int = comptime.ct_iface_const_count(i);
+            let ci int = 0;
+            for ci < refs {
+                let target_const int = comptime.ct_iface_const_at(i, ci);
+                let found int = 0;
+                let cj int = 0;
+                for cj < const_n {
+                    if (closure_consts[cj] == target_const) {
+                        found = 1;
+                        break;
+                    }
+                    cj += 1;
+                }
+                if (found == 0) {
+                    closure_consts[const_n] = target_const;
+                    const_n += 1;
+                }
+                ci += 1;
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < const_n {
+        if (iface_ct_emit_const(closure_consts[i], gs.c_sym_sfx_off,
+                gs.c_sym_sfx_len) != 0) {
+            if (closure_consts != 0) { free(closure_consts.to_type(*void)); }
+            free(reachable.to_type(*void));
+            return -1;
+        }
+        i += 1;
+    }
+    if (closure_consts != 0) { free(closure_consts.to_type(*void)); }
+    i = 0;
+    for i < count {
+        if (reachable[i] != 0
+            && iface_ct_emit_function(i, gs.c_sym_sfx_off,
+                gs.c_sym_sfx_len) != 0) {
+            free(reachable.to_type(*void));
+            return -1;
+        }
+        i += 1;
+    }
+    free(reachable.to_type(*void));
+    return iface_ct_write(path);
+}
+
+// iface_ct_header_valid：校验 .s.ct 版本/目标及其模块后缀身份。
+fn iface_ct_header_valid(path *char, mi int) int {
+    let gs *gen.GenState = gen.G();
+    let magic *char = "// yh-ctiface v1 arch=arm64 suffix=";
+    let prefix_len int = 35;
+    let i int = 0;
+    for i < prefix_len {
+        if (i >= gs.c_src_len
+            || gs.c_src[i] != magic[i].to_type(u8)) {
+            return gen.fail_path("CT 接口版本或目标不兼容: ", path);
+        }
+        i += 1;
+    }
+    let end int = prefix_len;
+    for end < gs.c_src_len && gs.c_src[end] != '\n' { end += 1; }
+    if (end - prefix_len != gs.c_mods[mi].prefix_len) {
+        return gen.fail_path("CT 接口模块后缀与 .s.i 不匹配: ", path);
+    }
+    i = 0;
+    for i < end - prefix_len {
+        if (gs.c_src[prefix_len + i]
+            != gs.np_data[gs.c_mods[mi].prefix_off + i]) {
+            return gen.fail_path("CT 接口模块后缀与 .s.i 不匹配: ", path);
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// iface_ct_load：恢复一个依赖模块的 typed CT 闭包，不改变调用方解析状态。
+pub fn iface_ct_load(path *char, mi int) int {
+    let gs *gen.GenState = gen.G();
+    let old_compile int = gs.c_compile;
+    let old_pass int = gs.c_pass;
+    let old_iface int = gs.c_iface_load;
+    let old_indexed int = gs.c_file_indexed;
+    let old_file int = gs.c_active_file;
+    let old_decl int = gs.c_file_decl_i;
+    let old_ct_iface int = gs.c_ct_iface_mode;
+    let old_data_len int = gs.o_dlen;
+    let old_data_count int = gs.c_data_n;
+    if (mi < 0 || mi >= gs.c_mod_n || gen.read_source(path) != 0
+        || iface_ct_header_valid(path, mi) != 0) { return -1; }
+    gs.c_tok_n = 0;
+    gs.c_pos = 0;
+    gs.c_compile = 1;
+    gs.c_pass = 1;
+    gs.c_iface_load = 0;
+    gs.c_file_indexed = 0;
+    gs.c_active_file = 0;
+    gs.c_file_decl_i = 0;
+    gs.c_ct_iface_mode = 1;
+    if (lex.lex_all() != 0 || parse_source() != 0
+        || gs.c_errors > 0) {
+        gs.c_ct_iface_mode = old_ct_iface;
+        return -1;
+    }
+    gs.c_pass = 2;
+    gs.c_pos = 0;
+    // .s.ct 中的隐藏常量先折叠并就绪；c_iface_load 仅抑制数据段发射，
+    // 随后恢复为普通前端状态以捕获 CT 函数正文。
+    gs.c_iface_load = 1;
+    if (parse_source_globals() != 0 || gs.c_errors > 0) {
+        gs.c_iface_load = old_iface;
+        gs.c_ct_iface_mode = old_ct_iface;
+        gs.o_dlen = old_data_len;
+        gs.c_data_n = old_data_count;
+        return -1;
+    }
+    gs.c_iface_load = old_iface;
+    // 闭包常量只供 typed 正文解析；字符串字面量不属于消费者运行期数据。
+    gs.o_dlen = old_data_len;
+    gs.c_data_n = old_data_count;
+    // 全局 pass 已扫描至 EOF；函数 pass 必须从文件头重新遍历。
+    gs.c_pos = 0;
+    if (parse_source_ct_fns() != 0 || gs.c_errors > 0) {
+        gs.c_ct_iface_mode = old_ct_iface;
+        return -1;
+    }
+    let ns int = 0;
+    for ns < gs.c_mods[mi].ns_n {
+        let public_sym int = gs.c_mods[mi].ns[ns].sym;
+        if (public_sym >= 0 && public_sym < gs.c_sym_n
+            && (gs.c_syms[public_sym].flags & gen.F_COMPTIME) != 0) {
+            let hidden_off int = -1;
+            let hidden_len int = 0;
+            if (iface_ct_export_name(mi, ns, &hidden_off, &hidden_len) != 0) {
+                gs.c_ct_iface_mode = old_ct_iface;
+                return -1;
+            }
+            let body_sym int = gen.sym_lookup_off(hidden_off, hidden_len);
+            if (body_sym < 0 || comptime.ct_find(body_sym) < 0
+                || gs.c_syms[body_sym].type_id
+                    != gs.c_syms[public_sym].type_id) {
+                gs.c_ct_iface_mode = old_ct_iface;
+                return gen.fail_path("公开 CT 函数与 .s.ct 正文签名不匹配: ",
+                    path);
+            }
+        }
+        ns += 1;
+    }
+    // CT IR 已复制到 comptime arena；清空临时 AST，避免其合成文件身份
+    // 混入当前模块的普通源码 AST 校验。
+    ast_expr_reset();
+    ast_stmt_reset();
+    ast_decl_reset();
+    ast_function_reset();
+    gs.c_compile = old_compile;
+    gs.c_pass = old_pass;
+    gs.c_iface_load = old_iface;
+    gs.c_file_indexed = old_indexed;
+    gs.c_active_file = old_file;
+    gs.c_file_decl_i = old_decl;
+    gs.c_ct_iface_mode = old_ct_iface;
+    return 0;
+}

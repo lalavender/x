@@ -7,7 +7,7 @@ grammar yh;
  * 本文件不作为运行时依赖。
  *
  * 玉衡的设计前提：
- *   - 无预处理：没有 `#` 指令、没有宏、没有条件编译；
+ *   - 无文本预处理与宏；函数体内支持 `$if/$for` 编译期控制，不提供顶层条件编译；
  *   - 无头文件：没有 `#include`，运行时符号由 prelude 提供，C 函数可用
  *     顶层 `@[extern]` 声明；
  *   - 无 C 兼容：`.yh` 是唯一输入，C 语法分支已移除；
@@ -49,8 +49,8 @@ attributeGroup
     : '@' '[' attributeName (',' attributeName)* ']'
     ;
 
-// extern / inline 是保留字 token；noreturn 与将来未知属性保持普通标识符，
-// 由语义检查负责识别名称及其适用范围。
+// comptime、noreturn 与将来未知属性均保持普通标识符；extern / inline
+// 是保留字 token。由语义检查负责识别属性名称及适用范围。
 attributeName
     : IDENT | 'extern' | 'inline'
     ;
@@ -248,6 +248,8 @@ stmt
     : block
     | letDecl
     | constDecl
+    | comptimeIfStmt
+    | comptimeForStmt
     | ifStmt
     | forStmt
     | switchStmt
@@ -256,6 +258,15 @@ stmt
     | gotoStmt
     | labelStmt
     | exprStmt
+    ;
+
+// 编译期分支和整数区间展开只允许出现在函数体语句位置，不提供顶层形式。
+comptimeIfStmt
+    : '$' 'if' '(' expr ')' block ('$' 'else' (comptimeIfStmt | block))?
+    ;
+
+comptimeForStmt
+    : '$' 'for' IDENT 'in' ('(' expr '..' expr ')' | IDENT '.' IDENT) block
     ;
 
 // 标签语句：`label:` 用于 goto。标签是前缀，必须后随被标记的语句——
@@ -449,12 +460,24 @@ callArgs
 
 // 基本表达式。
 primaryExpr
-    : literal
+    : comptimeCall
+    | literal
     | IDENT
     | '(' expr ')'
     | structInit
     | sizeofExpr
     | lenExpr
+    ;
+
+// 编译期调用支持同模块 $IDENT(...) 与导入模块 $module.IDENT(...)；
+// 诊断内建仍使用未限定形式，与普通运行时调用保持词法区分。
+// assert/compile_error/compile_warn 由语义检查限制为函数内独立语句，不能作值。
+comptimeCall
+    : '$' comptimeTarget '(' callArgs? ')'
+    ;
+
+comptimeTarget
+    : IDENT ('.' IDENT)?
     ;
 
 // 字面量。
@@ -548,7 +571,8 @@ memberName
 // 类型引用：指针 / 数组 / 切片 / 函数类型 / 内建类型 / 具名类型。
 // 玉衡一律「类型后置」：声明里类型写在名字之后，但类型自身的组合仍前缀书写。
 typeRef
-    : '*' typeRef                // 指针：`*int`、`**void`
+    : '@' '[' 'extern' ']' fnType  // C 函数类型，独立首 token，无歧义
+    | '*' typeRef                // 指针：`*int`、`**void`
     | '[' expr? ']' typeRef      // 数组 `[5]int` / 切片 `[]int`
     | fnType                     // 函数类型
     | builtinType
@@ -556,6 +580,7 @@ typeRef
     ;
 
 // 函数类型：`fn(int, int) int`；返回类型省略即 void。
+// `@[extern] fn(...)` 指定 C ABI；extern 签名与共享数据字段的 fn 默认 C ABI。
 fnType
     : 'fn' '(' typeRefList? ')' typeRef?
     ;

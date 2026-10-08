@@ -23,6 +23,59 @@ pub fn sem_compile() int {
     if (gs.c_check_only == 0 && gen.sem_check_main() != 0) {
         return -1;
     }
+    // 编译期函数先完成 typed IR 捕获，供紧随其后的全局常量初始化调用。
+    let saved_capture int = gs.c_ast_capture;
+    if (gs.c_ast_capture == 0) {
+        parse.ast_expr_reset();
+        parse.ast_stmt_reset();
+        parse.ast_decl_reset();
+        parse.ast_function_reset();
+        gs.c_ast_capture = 1;
+    }
+    gs.c_pass = 2;
+    gs.c_pos = 0;
+    if (parse.parse_source_ct_fns() != 0 || gs.c_errors > 0) {
+        gs.c_ast_capture = saved_capture;
+        return -1;
+    }
+    if (saved_capture == 0) {
+        gs.c_ast_capture = 0;
+        parse.ast_expr_reset();
+        parse.ast_stmt_reset();
+        parse.ast_decl_reset();
+        parse.ast_function_reset();
+    }
+    if (parse.parse_source_ct_layout_register() != 0) {
+        return -1;
+    }
+    for 1 {
+        let pending_before int = comptime.ct_value_pending_count()
+            + comptime.ct_layout_expr_pending_count()
+            + comptime.ct_layout_pending_count();
+        if (pending_before == 0) { break; }
+        if (parse.parse_source_ct_layout_consts() != 0) { return -1; }
+        if (parse.parse_source_ct_layout_exprs() != 0) { return -1; }
+        if (comptime.ct_layout_advance() < 0) { return -1; }
+        let pending_after int = comptime.ct_value_pending_count()
+            + comptime.ct_layout_expr_pending_count()
+            + comptime.ct_layout_pending_count();
+        if (pending_after == 0) { break; }
+        if (pending_after >= pending_before) {
+            if (comptime.ct_layout_pending_count() > 0) {
+                comptime.ct_layout_stuck_diagnostic();
+            } else {
+                comptime.ct_value_stuck_diagnostic();
+            }
+            return -1;
+        }
+    }
+    if (comptime.ct_layout_resolve() != 0 || gs.c_errors > 0) {
+        return -1;
+    }
+    // 延迟的枚举判别值：此时编译期函数正文已捕获，可以真实求值。
+    if (parse.ct_enum_pending_run() != 0) {
+        return -1;
+    }
     // pass 2a：全局 let/const 初始化（引用先声明规则由此保证）
     gs.c_pos = 0;
     gs.c_pass = 2;

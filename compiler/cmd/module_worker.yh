@@ -57,6 +57,15 @@ pub fn mb_emit_indexed_module(m int, main_off int, main_len int,
     parse.ast_stmt_reset();
     parse.ast_decl_reset();
     parse.ast_function_reset();
+    let cti int = 0;
+    for cti < mb_dep_n {
+        if (gen.set_source_path(pj_pool_str(mb_dep_ctoff[cti])) != 0
+            || parse.iface_ct_load(pj_pool_str(mb_dep_ctoff[cti]),
+                mb_dep_base + cti) != 0) {
+            return -1;
+        }
+        cti += 1;
+    }
     let afi int = 0;
     for afi < gs.p_mods[m].file_n {
         let decl_fi int = gs.p_mods[m].files[afi];
@@ -101,6 +110,53 @@ pub fn mb_emit_indexed_module(m int, main_off int, main_len int,
         return -1;
     }
     gs.c_pass = 2;
+    let fi_ct int = 0;
+    for fi_ct < gs.p_mods[m].file_n {
+        let file_ct int = gs.p_mods[m].files[fi_ct];
+        if (mb_pass2_file(pj_pool_str(gs.p_files[file_ct].path_off),
+                file_ct, 2) != 0) { return -1; }
+        fi_ct += 1;
+    }
+    if (gs.c_errors > 0) { return -1; }
+    let fi_ct_layout int = 0;
+    for fi_ct_layout < gs.p_mods[m].file_n {
+        let file_id int = gs.p_mods[m].files[fi_ct_layout];
+        if (mb_pass2_file(pj_pool_str(gs.p_files[file_id].path_off),
+                file_id, 3) != 0) { return -1; }
+        fi_ct_layout += 1;
+    }
+    for 1 {
+        let pending_before int = comptime.ct_value_pending_count()
+            + comptime.ct_layout_expr_pending_count()
+            + comptime.ct_layout_pending_count();
+        if (pending_before == 0) { break; }
+        let fi_layout_eval int = 0;
+        for fi_layout_eval < gs.p_mods[m].file_n {
+            let file_id int = gs.p_mods[m].files[fi_layout_eval];
+            if (mb_pass2_file(pj_pool_str(gs.p_files[file_id].path_off),
+                    file_id, 4) != 0) { return -1; }
+            if (mb_restore_front_file(pj_pool_str(gs.p_files[file_id].path_off),
+                    file_id) != 0 || mb_file_head_bind(file_id) != 0
+                || parse.parse_source_ct_layout_exprs() != 0) { return -1; }
+            fi_layout_eval += 1;
+        }
+        if (comptime.ct_layout_advance() < 0) { return -1; }
+        let pending_after int = comptime.ct_value_pending_count()
+            + comptime.ct_layout_expr_pending_count()
+            + comptime.ct_layout_pending_count();
+        if (pending_after == 0) { break; }
+        if (pending_after >= pending_before) {
+            if (comptime.ct_layout_pending_count() > 0) {
+                comptime.ct_layout_stuck_diagnostic();
+            } else {
+                comptime.ct_value_stuck_diagnostic();
+            }
+            return -1;
+        }
+    }
+    if (comptime.ct_layout_resolve() != 0 || gs.c_errors > 0) { return -1; }
+    // 延迟的枚举判别值：此时编译期函数正文已捕获，可以真实求值。
+    if (parse.ct_enum_pending_run() != 0) { return -1; }
     let fi2 int = 0;
     for fi2 < gs.p_mods[m].file_n {
         let file_id int = gs.p_mods[m].files[fi2];
@@ -113,8 +169,11 @@ pub fn mb_emit_indexed_module(m int, main_off int, main_len int,
     if (gs.c_errors > 0) {
         return -1;
     }
+    let ctpath [700]u8;
     let ipath [700]u8;
-    if (mb_module_iface_path(m, build_off, build_len, ipath) != 0
+    if (mb_module_ctiface_path(m, build_off, build_len, ctpath) != 0
+        || parse.iface_ct_emit(gen.arr_cstr(ctpath), sym_base) != 0
+        || mb_module_iface_path(m, build_off, build_len, ipath) != 0
         || parse.iface_emit(gen.arr_cstr(ipath), sym_base, tname_base) != 0) {
         return -1;
     }

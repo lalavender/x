@@ -8,7 +8,7 @@
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
 version = `0.0.3`，source = `.`），按 **gen / lex / parse / comptime / cmd / ir / backend
-多模块**组织，编译器源码共 58 个 `.yh` 文件；`ir`（目标隔离
+多模块**组织，编译器源码共 65 个 `.yh` 文件；`ir`（目标隔离
 SSA）与其它模块同为根项目普通模块，共同进入编译器构建与自举固定点。
 
 ```
@@ -36,13 +36,14 @@ python3 tests/yh-run/check.py --compiler $PWD/../yh
 自举门（滚动自举，无 stage0；种子 = 入库的 `bin/yh`）：
 
     bin/yh build compiler/  → cc2（冷编；旧种子隐式兼容）
-    cc2     build compiler/ → cc3（冷编，默认配置）
+    cc2     build compiler/ → cc3（冷编）
+    cc3     build compiler/ → cc4（冷编，固定点对比）
 
-门：①固定点——cc2/cc3 全部模块 `.s`/`.s.i` 逐字节一致；②cc3 自解析
-compiler/ 全部源文件；③cc3 语法语料（`tests/yh` 正例全过、反例全拒）；
-④cc3 运行语料（`tests/yh-run` 全量 run/fail/pass）；⑤模块语料
+门：①固定点——cc3/cc4 全部模块 `.s`/`.s.i` 逐字节一致；②cc4 自解析
+compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反例全拒）；
+④cc4 运行语料（`tests/yh-run` 全量 run/fail/pass）；⑤模块语料
 （`tests/modules/check.py` 17 例）；⑥项目验收
-（`tests/modules/build-check.py` 80 例）。滚种子前必须全绿。
+（`tests/modules/build-check.py` 82 例）。滚种子前必须全绿。
 
 ## 模块与文件职责
 
@@ -59,12 +60,13 @@ compiler/ 全部源文件；③cc3 语法语料（`tests/yh` 正例全过、反�
 | `parse/parse_type.yh` | 类型引用解析 + 解析器共用游标工具 |
 | `parse/parse_expr.yh` | 表达式优先级链、后缀链、structInit 与「字面量 vs 块」消解 |
 | `parse/ast_expr.yh` | `yh check` typed 表达式 AST、绑定/常量快照与结构校验 |
-| `parse/ast_stmt.yh` | `yh check` 迁移期语句树、表达式根关联与父子/源范围校验 |
+| `parse/ast_stmt.yh` | `yh check` 迁移期语句树、绑定关联、编译期 `$for` 模板目录与源范围校验 |
 | `parse/ast_decl.yh` | 从 PDecl 索引建立文件级声明节点并关联函数体 |
 | `parse/ast_ir.yh` | 函数级 typed SSA 构造与旧后端迁移接线 |
 | `parse/ast_ir_cache.yh` | 目标隔离的函数 IR 内容键、缓存读取与写入 |
 | `parse/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
 | `parse/ast_ir_control.yh` | 局部赋值、受限分支 CFG/phi 与 SSA 临时缓冲管理 |
+| `parse/ast_ir_template.yh` | 普通函数编译期 `$for` typed AST 模板的 SSA 区间实例化 |
 | `parse/parse_stmt.yh` | 语句：块/if/for/switch/return/goto/标签/赋值 |
 | `parse/parse_decl.yh` | 顶层声明两遍处理：let/const/fn/type/struct/union/enum |
 | `parse/parse_global_init.yh` | 全局聚合变量初始化（命名/位置/嵌套/字符串字面量） |
@@ -77,11 +79,20 @@ compiler/ 全部源文件；③cc3 语法语料（`tests/yh` 正例全过、反�
 | --- | --- |
 | `comptime/ct_00_model.yh` | 编译期 token、函数、整数值与求值游标模型 |
 | `comptime/ct_registry.yh` | 编译期函数正文快照、按符号登记/查询与展开预算 |
-| `comptime/ct_eval_expr.yh` | 首版单条整数 return 表达式求值 |
+| `comptime/ct_enum.yh` | 枚举成员按声明顺序查询，供编译期 `values` 展开 |
+| `comptime/ct_diag.yh` | 编译期诊断发出与来源位置 |
+| `comptime/ct_ir.yh` | typed IR 表达式与语句执行、调用帧和预算 |
+| `comptime/ct_ir_place.yh` | 编译期数组/切片/结构体位置、值复制、视图与别名规则 |
+| `comptime/ct_ir_data.yh` | 受支持编译期聚合的目标布局序列化与延迟切片 backing 发射 |
 
 函数体 `$if/$for` 的解析和作用域接缝位于 `parse/parse_comptime.yh`；
-编译期函数当前只支持整数形参/返回值、常量实参和单条整数 return 表达式，
-完整语句解释器仍在待办中。
+typed 执行器覆盖标量（含浮点）、指针（取址、解引用、算术与下标）、整型/浮点/结构体元素
+数组与切片、受支持结构体/联合体值，分支、循环、诊断、整数 `switch`、递归调用及共享执行预算。
+早期 token 求值器（`ct_eval_expr.yh`、`ct_eval_bool.yh`）与数组长度 token 探测链已删除：
+typed IR 是唯一执行器，正文不在支持子集内的编译期函数直接报
+「编译期函数正文不在受支持的 typed IR 子集内」。顶层整数常量与数组长度的编译期调用
+统一交给 pass2a 之后的 typed 布局常量依赖调度（早期快路径只在 `ct_is_prepared` 已就绪时生效）。
+单文件入口与函数 AST 的统一仍在待办中。
 
 **gen** —— 语义与后端
 
@@ -105,7 +116,7 @@ compiler/ 全部源文件；③cc3 语法语料（`tests/yh` 正例全过、反�
 
 | 文件 | 职责 |
 | --- | --- |
-| `ir/ssa.yh`、`ir/ssa_call.yh` | typed SSA、CFG/verifier 与直接调用契约 |
+| `ir/ssa.yh`、`ir/ssa_call.yh` | typed SSA、整数转换、CFG/verifier 与直接调用契约 |
 | `ir/ssa_serialize.yh` | 含调用目标与实参的稳定 IR 编码 |
 | `backend/arm64.yh`、`backend/arm64_call.yh` | SSA arm64 发射、寄存器/栈调用约定 |
 
@@ -135,7 +146,7 @@ compiler/ 全部源文件；③cc3 语法语料（`tests/yh` 正例全过、反�
 
 `compiler/ir/` 是独立的 typed SSA 子项目，由 `compiler/project.toml` 以本地 path
 依赖引入，也由 `tests/modules/projects/irverify/` 直接依赖并运行验收。build 在 AST
-校验后会把有限的标量参数、顺序单绑定 `let` 初始化、同类型标量赋值（`=`、`+=`、`-=`、`*=`）、
+校验后会把有限的标量参数、顺序单绑定 `let` 初始化、整数 `to_type` 和公共整数类型提升、同类型标量赋值（`=`、`+=`、`-=`、`*=`）、
 表达式 return、双臂 if/else return、单层分支中更新参数或分支前初始化的局部值并在合流点 return，
 以及固定参数整数/布尔直接调用降低为 SSA 并校验。合流时发生变化的绑定用双前驱 phi 表示；
 受支持函数由 arm64 SSA 后端发射，其余函数仍由旧发射器生成汇编。当前自编项目

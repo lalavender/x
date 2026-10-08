@@ -2,6 +2,521 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-07 汇编器与链接器项目归位（asm/ 与 link/）
+
+- **两个项目按职责分开**：`asm/`（yh_asm）= 汇编器，`link/`（yh_link）= 链接器。
+  整理前 `link/` 里寄放着汇编器实现（`src/obj` 对象模型与出口 + `src/asm`
+  编码解析），自己的链接器职责一行未写；`asm/` 里是上一代较弱的实现。
+- **汇编器实现整体迁到 `asm/`**：`link/src/{obj,asm,main}` → `asm/src/`，
+  `link/tests/*` → `asm/tests/`；工具名与所有引用从 `yh_link` 改 `yh_asm`
+  （`main.yh` 用法、脚本默认产物路径、`YH_LINK` → `YH_ASM`、README）。
+  现役实现 19 个 `.yh`/7065 行，能力到 TC3+TC8（ELF64 与 Mach-O 对象出口、
+  标量浮点、GOT 重定位）。上一代 asm 实现（11 个 `.yh`/5528 行 + 123 项内嵌
+  测试）归档到 `tmp/removed-2026-10-07/asm-legacy/`。
+- **`link/` 清空为链接器骨架**：保留 `project.toml`，新写 `src/main/main.yh`
+  入口（`--version` 返回 0，`link` 子命令与无参调用报「尚未实现」并返回 2），
+  新增门 `tests/check.py`（冷编 + 入口行为），README 重写为链接器定位
+  （TC4/TC9/TC10/TC11）。
+- **恢复上一轮误删的 17 个无调用点函数**：`mul_chk`、`buf_clear`、`buf_align`、
+  `rd_u16le`、`rd_u64le`、`is_pow2`、`ts_equal`、`sec_file_size`、`es_shndx_of`、
+  `sh_ok`、`cond_alias_len`、`mem_size_bytes`、`lex_tok`、`e_testbr`、
+  `p_err_at`、`p_txt_len`、`p_is_imm_start`——项目仍在开发阶段，未接线的能力
+  不是冗余。未恢复 `src/ln/` 的 SHA-256（无生产调用点，TC10 再取回）。
+- **保留 `e_nop` 符号扩展修复**（`asm/src/asm/33_enc_br.yh`）：
+  `0xd503201f.to_type(i64)` 按 i32 折叠成负数再符号扩展，`nop` 写成
+  `0xffffffffd503201f` 被越界检查拒绝；改为 `.to_type(u32).to_type(i64)` 后
+  自检 rc 103 → 0，语料 `04-ldst-modes.s` / `06-sysops.s` 恢复汇编。
+- **Makefile**：新增 `make yh-asm`（冷编 `asm/`，产出根目录 `yh_asm`）；
+  `make yh-link` 变成过渡别名（把同一份产物复制成 `yh_link`），因为编译器
+  `mb_asm_tool` 仍按 `yh_link` 查找；查找名切换后删除该别名。
+- 验证（本机 darwin/arm64）：`python3 asm/tests/check.py --full` 通过——自检
+  rc=0、134 编码向量 0 不一致、编译器全量语料 61/61 逐字节一致、61 个对象
+  0 问题 0 非确定；Mach-O 全量 61/61 一致；`python3 link/tests/check.py` 通过；
+  `make yh-asm` / `make yh-link` 产物 `--dump-enc` 各 134 条；
+  编译器汇编步集成门 `tests/selfhost/link-cache.py` 通过。
+- 未动 `compiler/` 与 `bin/yh` 种子，不触发滚种子。
+- 遗留：编译器汇编步查找名切换、指令级负例门迁移（19 条负例未随实现迁移），
+  已记入 [todo.md](todo.md)；链接器实现从 TC4 开始。
+  详见[完成记录](01-finished/yh汇编器与链接器项目归位-2026-10-07.md)。
+
+## 2026-10-07 yh 编译期跨模块函数来源精确列映射
+
+- `.s.ct v1` 为每处正文改写序列化 sidecar 生成范围到原函数源码范围的映射。导入解析时临时映射 token
+  行列，`ct_register` 捕获映射后恢复原 sidecar token 位置，使两遍解析彼此独立。跨模块调用名、常量名和
+  类型名改写后的语义错误与 `$assert/$compile_error/$compile_warn` 诊断均回到定义源码。
+- `comptimecross` 在同一行先改写 `OFFSET` 和 `$point_size()`、再触发 `$compile_error`，检查精确原始列；
+  同时检查改写常量引用的语义类型错误和损坏列映射拒绝。
+- `make -B` 与 `make test` 通过：语法 73/73、44/44；运行语料 217/217。滚种子前后
+  `make selfhost-native` 均通过：固定点 21/21、自解析 71 个源文件、模块语法 17/17、项目 84/84，附加探针通过。
+- `make seed` 后 SHA-256：`6e413b729407a1a8c7ddc23b6b20eb0d96ac33d3fe959ecb551482c408b1f0ed`。
+  详见[完成记录](01-finished/yh-编译期跨模块函数来源精确列映射-2026-10-07.md)与
+  [CT5B 实施方案](02-plan/yh-编译期跨模块函数正文传递实施方案.md)。
+
+## 2026-10-07 yh 编译期跨模块字符串指针常量闭包
+
+- `.s.ct v1` 现在为可达私有 `*char` 常量保留直接字符串 token，导入方重新解析后供 CT 正文类型检查。
+  其他指针常量表达式、指针求值和解引用仍拒绝；执行路径实际读取指针常量时报“不支持指针常量”。导入 sidecar 会回收解析期间暂存的数据输出，不把闭包
+  字符串写入消费者运行期 `.data`。
+- `comptimecross` 验收 `.s.ct` 中的隐藏字符串常量、消费者汇编不含该字符串、非字面量指针常量被拒绝，
+  以及执行路径读取指针常量时拒绝求值。
+  `make -B`、`make test` 全绿（语法 73/73、44/44；运行 217/217）；滚种子前后 `make selfhost-native`
+  均通过：固定点 21/21、自解析 70 个源文件、运行语料 217/217、模块语法 17/17、项目 84/84，附加探针通过。
+- `make seed` 后 SHA-256：`c05e91ba769ee35fee055684197e3b5483ef464ed41395c79fb57d9923657270`。
+  详见[完成记录](01-finished/yh-编译期跨模块字符串指针常量闭包-2026-10-07.md)与
+  [CT5B 实施方案](02-plan/yh-编译期跨模块函数正文传递实施方案.md)。
+
+## 2026-10-06 yh 编译期跨模块 CT 函数来源映射
+
+- `.s.ct v1` 为每个隐藏 CT 函数保存定义源码路径和函数体起始行。导入时，函数体语义错误与执行期
+  `$assert`、`$compile_error`、`$compile_warn` 诊断映射回定义文件；列映射在 2026-10-07 后续片补齐。
+  旧 sidecar 无来源注释时仍报告 sidecar 位置。
+- `comptimecross` 增加语义错误与 `$compile_error` 来源映射回归。`make -B`、`make test` 全绿
+  （217/217）；滚种子前后 `make selfhost-native` 均通过：固定点 21/21、自解析 70 个源文件、运行
+  语料 217/217、模块语法 17/17、项目 84/84，附加自举探针通过。
+- `make seed` 后 SHA-256：`3db8d25b73478c1433ea08b12d233a7aef34aa1ae7cc12014e2156540f180e85`。
+  在该次交付后，精确列映射及直接字符串字面量指针常量闭包已完成；其他指针常量边界仍待处理。详见
+  [完成记录](01-finished/yh-编译期跨模块CT函数来源映射-2026-10-06.md)与
+  [CT5B 实施方案](02-plan/yh-编译期跨模块函数正文传递实施方案.md)。
+
+## 2026-10-06 yh 编译期跨模块浮点字面量闭包
+
+- `.s.ct v1` 为可达正文引用的直接浮点全局常量保留原始字面式并导出隐藏 `const`；导入方重新解析，
+  仅供 CT 正文类型检查，不开放浮点评估。`comptimecross` 验收隐藏常量和重写引用。
+- `make -B` 冷编通过；`make test` 全绿（语法 73/73、44/44；运行 108/108、拒绝 101/101、仅编译 8/8，
+  共 217/217）。滚种子前后 `make selfhost-native` 均全绿：固定点 21/21、自解析 70 个源文件、语料
+  217/217、模块语法 17/17、项目 84/84；附加自举探针通过。
+- `make seed` 后 SHA-256：`82349b80fc77b9cdc2a2e29e0fe7bc2b8c459ffeae4d7158f14999dd9e016791`；
+  滚种子后的自举主门复验通过。
+- 浮点评估、指针/字符串常量闭包和原始定义位置映射仍待处理。详见
+  [完成记录](01-finished/yh-编译期跨模块浮点字面量闭包-2026-10-06.md)与
+  [CT5B 实施方案](02-plan/yh-编译期跨模块函数正文传递实施方案.md)。
+
+## 2026-10-06 yh 编译期跨模块公共类型引用
+
+- `@[comptime]` 函数注册时保存定义文件的已绑定导入别名和模块编号。导出 `.s.ct` 时，结构体字面量、
+  `.to_type`、`sizeof`（含指针层级）中的 `alias.Type` 被解析为公开接口类型并规范化输出，导入方无需
+  继承定义文件的别名。
+- `comptimecross` 新增 `types` 模块与第二个 `base` 源文件，分别以 `geometry`、`dimensions` 引用同一
+  类型，覆盖不同文件导入别名快照、结构体构造、标量别名 cast、`sizeof` 及私有辅助函数闭包。
+- `make test`：语法正例 73/73、反例 44/44；运行 108/108、拒绝 101/101、仅编译 8/8，共 217/217。
+  模块项目门 84/84。`make selfhost-native`：21 个固定点产物一致、自解析 70 个源码文件、
+  运行语料 217/217、模块语法 17/17、项目 84/84，隔离/缓存/运行时探针通过。
+- `make seed` 后 SHA-256：`91168ae5cadd893ffecd44a86dd19c541e4c7004b915024bcb3b17f6437a5b47`；
+  滚种子后的 `make selfhost-native` 再次通过。
+- CT5B 剩余模块常量闭包只支持整数；原始 `.s.ct` 定义位置映射待实现。
+  详见[实施方案](02-plan/yh-编译期跨模块函数正文传递实施方案.md)。
+
+## 2026-10-06 yh 编译期跨模块私有别名复合类型擦除
+
+- `.s.ct` 现在按语义类型发射完整局部类型，覆盖 `[N]Alias` 和 `*Alias`；结构体字面量、
+  直接具名 `.to_type(Alias)` 与 `sizeof(Alias)`、`sizeof(*Alias)`、`sizeof(**Alias)` 也会改写为提供方可见的底层类型名。
+- `sizeof_starts_type` 现在从跳过的连续星号后查找类型名；运行回归验证 `sizeof(*Type)` 与
+  `sizeof(**Type)` 都按类型解析。
+- `comptimecross` 使用私有 `Offset`/`Scalar` 别名并在消费者声明同名别名，覆盖结构体数组、指针
+  局部值、cast、`sizeof`、别名不泄漏、跨模块执行及依赖变更后的重求值。
+- `make test`：语法正例 73/73、反例 44/44；运行 108/108、拒绝 101/101、仅编译 8/8，共 217/217。模块项目门 84/84。
+  `make selfhost-native`：21 个固定点产物一致、自解析 70 个源文件、语法 44/44、运行语料 217/217，
+  模块 17/17 与 84/84 及附加探针通过；滚种子后复验也通过。
+- `make seed` 后 SHA-256：`66d0dc4f614e57ddf2f67e2dd8d566f736ab86b4dc1abb71d040569b3fb83c43`。
+  模块限定类型、非整数常量闭包和原始位置映射仍待处理。
+  详见[完成记录](01-finished/yh-编译期跨模块私有别名复合类型擦除-2026-10-06.md)。
+
+## 2026-10-06 yh 编译期跨模块整数常量闭包
+
+- `.s.ct v1` 现在导出可达 CT 正文引用的已就绪整数常量：常量值以隐藏 `const` 写入伴随文件，
+  函数正文中的标识符同步重写为隐藏名。导入方先解析并折叠隐藏常量，再重新捕获函数 typed IR。
+- 修正 `iface_ct_load` 的 pass2 游标：新增全局常量扫描会到达 EOF，捕获 CT 函数正文前现在会
+  重新从文件开头遍历；`comptimecross` 覆盖私有 `OFFSET`，并验证常量从 1 改成 2 后消费者重新求值。
+- `make test`：语法正例 73/73、反例 44/44；运行、拒绝和仅编译语料共 216/216。
+  `make selfhost-native`：cc3→cc4 的 21 个 `.s/.s.i/.s.ct` 产物逐字节一致，自解析 70 个源文件，
+  模块语法 17/17、项目 84/84 及附加探针通过。滚种子后再次运行主门也全绿。
+- `make seed` 后 SHA-256：`e3ce622f8cd82823d1e27ce1883f72dff034e2877daa5dd1b0a627b7618e5542`。
+  私有具名类型、非整数常量和原始定义位置映射仍属 CT5B 后续范围。
+  详见[完成记录](01-finished/yh-编译期跨模块整数常量闭包-2026-10-06.md)。
+
+## 2026-10-06 yh 编译期跨模块正文传递：两层闭包首片
+
+- `.s.ct` 的公开正文闭包现在可跨模块调用另一公开 `@[comptime]` 函数。导出器将
+  `$alias.function(...)` 重写为提供方隐藏符号；typed IR 导入器把函数节点追加到当前 arena，
+  并重定位表达式、语句、边和局部绑定索引，避免不同 sidecar/local AST 从编号 0 开始时冲突。
+- `comptimecross` 覆盖 host → math.api → math.base 的调用链：公开 `double_after_bump(20)` 得到
+  42，隐藏函数名未进入运行期汇编；修改最底层 `plus_one` 后消费者重建并得到 44（进程退出码 2）。
+- `make test` 全绿：ANTLR 与编译器语法各正例 73/73、反例 44/44；运行语料 107/107，拒绝语料
+  101/101，仅编译语料 8/8，共 216/216。模块项目验收 84/84。
+- `make selfhost-native` 全绿：cc3→cc4 的 21 个 `.s/.s.i/.s.ct` 产物逐字节一致，cc4 自解析
+  70 个源码文件，模块语法 17/17、项目 84/84 和附加探针通过。
+- `make seed` 后种子 SHA-256 为
+  `9c7285a7720429a2307d22e31808ebe5006c0ebe20d78504a3da6b902e949698`。来源映射、模块私有具名类型、
+  编译期常量闭包和损坏 `.s.ct` 专项正反例仍属于 CT5B 后续工作。详见[完成记录](01-finished/yh-编译期跨模块正文两层闭包-2026-10-06.md)。
+
+## 2026-10-06 yh 编译期结构体整数切片字段
+
+- typed 执行器支持结构体中的整数切片字段。普通结构体副本复制视图描述并共享 backing elements；嵌套返回递归复制切片可见元素到调用方帧；最外层静态数据物化覆盖切片描述和元素。
+- 新增 run/96 覆盖副本/形参别名、返回生命周期和全局初始化；新增 fail/129 锁定浮点切片字段拒绝，并更新 fail/102、fail/103 的诊断断言。
+- `make test` 全绿：语法两层各 72/72 正例、44/44 反例，运行 106/106、拒绝 101/101、仅编译 8/8，总计 215/215。
+- `make selfhost-native` 全绿：固定点 14/14、自解析 68 个源文件、模块 17/17、项目 83/83 及其余探针。
+- `make seed` 后新种子冷编 `make` 成功。种子 SHA-256：`203487af71b909fb06e058c23b9bedecf8da8ef3504df573dda0c642f89e407c`。详见[完成记录](01-finished/yh-编译期结构体整数切片字段-2026-10-06.md)。
+
+## 2026-10-06 yh 编译期复合数组 for-in 值语义
+
+- typed CT `for-in` 遍历受支持定长数组的结构体或嵌套数组元素时按值深复制；循环体写入迭代绑定不会修改源数组。切片元素仍限整数。
+- 新增 `tests/yh-run/run/95-comptime-forin-struct-values.yh`，覆盖结构体字段与嵌套数组修改隔离，输出 `comptime-forin-values=14613 rows=1404`。
+- `make test` 全绿（语法 72/72 + 44/44，运行 105/105、100/100、pass 8/8，共 213/213）；`make selfhost-native` 全绿（14 个产物固定点、68 个源文件自解析、模块 17/17、项目 83/83）。
+- `make seed` 后冷编 `make` 与 `git diff --check` 通过。新种子 SHA-256：`4891cbc4ca8827565b8864042c3ad11a1c290be3d72bef70161aee8f679d3862`。详见[完成记录](01-finished/yh-编译期结构体数组for-in值语义-2026-10-06.md)。
+
+## 2026-10-06 yh 编译期布局常量依赖调度
+
+- typed 布局阶段现在登记整数 CT 常量的未就绪依赖；单文件与同模块多文件按 READY 依赖
+  多轮求值，普通全局 const 的顺序初始化保持原规则。
+- 依赖无进展时报告常量名闭环；新增 run/122、fail/123 和
+  `comptimelayoutdeps`，分别锁定前向依赖求值、环链诊断及跨源文件调度。
+- `make test` 全绿：语法 72/72 + 44/44，运行 101/101、拒绝 97/97、通过 8/8，共
+  206/206。`make selfhost-native` 全绿：固定点 14 个产物一致、自解析 67 个源文件、
+  模块 17/17、项目 83/83 和所有探针通过。
+- `git diff --check`、`make seed` 与新种子冷编 `make` 全部通过；种子 SHA-256：
+  `2d1ca124e9366244e2907ee59244e9e5eb4e5fd8da291130a99d183cd0663e55`。完成记录：[布局常量依赖调度](01-finished/yh-编译期布局常量依赖调度-2026-10-06.md)。
+
+## 2026-10-06 yh 编译期 typed 递归布局求值
+
+- typed 布局请求现在按实际执行路径处理递归 CT 调用；到达基例的递归可产生数组/字段长度，无限互递归由既有 64 层深度预算拒绝。旧 token 早期探测仍只处理无环调用图。
+- 新增 run/121 验证递归结果 4 决定结构体字段和全局数组；更新 fail/112 验证预算诊断。移除 `ct_layout` 中只用于静态递归扫描的调用图代码和状态。
+- 主要实现位于 `compiler/parse/parse_ct_layout.yh` 与 `compiler/comptime/ct_layout.yh`；边界见[方案](02-plan/yh-编译期typed递归布局求值方案.md)、[编译期设计](03-design/yh-编译期过程设计.md)和[完成记录](01-finished/yh-编译期typed递归布局求值-2026-10-06.md)。
+- `make test`：语法 72/72 + 44/44，运行 100/100、拒绝 96/96、通过 8/8，共 204/204；`make selfhost-native`：固定点 14 个产物一致、自解析 67 个源文件、模块 17/17、项目 82/82 和全部探针通过。
+- `git diff --check`、`make seed`、新种子冷编 `make` 全部通过；种子 SHA-256：`2a195f471a7c2ee06898a0c42181dc3827f3f8e2440f5aac7fb296325da72164`。
+
+## 2026-10-06 yh 编译期 typed 布局请求
+
+- pass1 将字段/文件级数组中引用先行未就绪整数 const 的布局记为 pending；首片要求 typed `@[comptime]` 调用图无环，后续递归阶段已放开到达基例的递归。布局常量可补齐数组和嵌套结构体布局，并使用已支持的局部赋值、分支局部值与循环。
+- 新增 run/117 和跨源文件 `comptimelocal` 覆盖；旧 fail/108、114、116 改为 run 正例；新增 fail/118–120 锁定前向 const、pending `sizeof` 与无返回路径。
+- 主要实现位于 `compiler/comptime/ct_layout.yh`、`ct_00_model.yh`、`ct_registry.yh`、`compiler/parse/parse_ct_layout.yh` 和 pass 调度代码；范围见[方案](02-plan/yh-编译期typed布局请求实施方案.md)、[设计](03-design/yh-编译期过程设计.md)及[完成记录](01-finished/yh-编译期typed布局请求-2026-10-06.md)。
+- `make test` 全绿：语法 72/72 + 44/44，运行 99/99、拒绝 96/96、通过 8/8，共 203/203。`make selfhost-native` 全绿：固定点 14 个产物一致、自解析 67 个源文件、模块 17/17、项目 82/82 和全部探针通过。
+- `git diff --check`、`make seed`、基于新种子的冷编 `make` 均通过；新种子 SHA-256：`56f709edb6f2dfdeb2b6cab8403d53c167a12e66e7cfbb27114e8b850019fe14`。
+
+## 2026-10-06 yh 编译期数组长度局部值早期探测
+
+- CT5A 早期执行器为每个调用帧保存局部值，安全探测现在允许显式内建整数类型的顶层已初始化 `let`，供后续条件与返回表达式读取；嵌套函数各自拥有独立局部值表。
+- 局部声明只允许出现在函数最外层，且不能赋值；分支内声明、循环和其他不支持语句不会提前执行。更新 `fail/108` 锁定分支局部拒绝，新增 run/115、fail/116 覆盖多层调用局部值与赋值拒绝。
+- 实现位于 `compiler/comptime/ct_00_model.yh`、`ct_eval_expr.yh`、`ct_registry.yh`；边界见[阶段方案](02-plan/yh-编译期数组长度函数求值实施方案.md)和[设计](03-design/yh-编译期过程设计.md)。
+- `make test` 通过：语法 72/72 + 44/44，运行 95/95、拒绝 96/96、通过 8/8，共 199/199。
+- `make selfhost-native` 全绿：固定点 14 个产物一致、自解析 65 个源文件、运行语料 199/199、模块 17/17、项目 82/82 和全部探针通过。
+- `make seed` 后冷编 `make` 通过；新种子 SHA-256：`26c44323f9cf1ee5083a2db2bba6bf9e821ec6110145e9706bd35cd2bc60f1c7`。
+
+## 2026-10-06 yh 编译期数组长度条件分支早期探测
+
+- CT5A 的全局布局早期安全探测扩展到只含 `if/else` 与 `return` 的整数 CT 函数；支持穷尽分支、后置默认 return 与无环嵌套调用，仍拒绝局部变量、循环及非穷尽路径。
+- 新增 `tests/yh-run/run/113-comptime-array-length-conditional-call.yh` 与 `fail/114-comptime-array-length-nonexhaustive.yh`；旧环检测、复杂正文和前向常量失败用例继续通过。
+- 主要实现位于 `compiler/comptime/ct_registry.yh`，设计边界及后续 typed 布局请求见[阶段方案](02-plan/yh-编译期数组长度函数求值实施方案.md)与[设计](03-design/yh-编译期过程设计.md)。
+- `make test` 通过：语法 72/72 + 44/44，运行 94/94、拒绝 95/95、通过 8/8，共 197/197。
+- `make selfhost-native` 全绿：模块固定点 14 个产物一致、自解析 65 个源文件、语法/运行语料全绿、模块 17/17、项目 82/82 与所有自举探针通过。
+- `make seed` 后冷编 `make` 通过；新种子 SHA-256：`0e8c74d168f0b10fe6529974d7f1489ab81ff5667b3fd22160d15bd8faa98064`。
+
+## 2026-10-06 yh 编译期数组长度函数求值首片
+
+- pass1 早期折叠以单 return 整数表达式为正文的已登记 CT 函数，支持以该结果初始化全局整数 const，并在后续结构体字段/全局数组长度中读取。
+- 新增 run/91–92 与 fail/108；复杂函数、前向布局依赖和环仍保持“编译期常量尚未就绪”，不把占位值作为长度。
+- 实现位于 `compiler/comptime/ct_registry.yh` 与 `compiler/parse/parse_global_init.yh`；下一阶段请求/依赖求解见[实施方案](02-plan/yh-编译期数组长度函数求值实施方案.md)和[首片记录](01-finished/yh-编译期数组长度函数求值首片-2026-10-06.md)。
+- `make test` 通过（语法 71/71 + 44/44；运行 91/91、拒绝 91/91、通过 8/8，共 190/190）；`make selfhost-native` 通过（固定点 14/14、自解析 64 个源文件、模块 17/17、项目 82/82 与所有探针）。
+- 滚种子后冷编 `make` 通过；新种子 SHA-256：`d79dfec88153413ff936cf523a60541b5edf7f45c61da5fde6080cac3384d6b5`。
+
+## 2026-10-06 yh 编译期 typed 顶层聚合结果
+
+- 最外层 `$f(...)` 支持受支持的数组、结构体和整数切片返回：普通运行期路径按类型布局物化为静态数据，编译期外层调用保留 `CtAggregate`；局部和全局可变 `let` 均可初始化。
+- 新增 run/89、run/90，并扩展 `comptimelocal` 跨源文件模块项目；拒绝反例继续锁定指针返回和非整数元素切片。
+- 实现位于 `compiler/comptime/ct_registry.yh`、`ct_ir_place.yh` 和 `compiler/parse/parse_global_init.yh`；范围与取舍见[方案](02-plan/yh-编译期typed顶层聚合结果实施方案.md)，验收见[完成记录](01-finished/yh-编译期typed顶层聚合结果-2026-10-06.md)。
+- `make test` 通过（语法 71/71 + 44/44；运行 89/89、拒绝 90/90、通过 8/8，共 187/187）；`make selfhost-native` 通过（固定点 14/14、自解析 64 个源文件、模块 17/17、项目 82/82 与全部探针）。滚种子后冷编 `make` 通过；SHA-256：`bc994fcdf0a6ee7f5c6c689da7c39a46b4fb0021e4e75a860622adf599879a6d`。
+
+## 2026-10-06 yh 编译期 typed 整数切片返回
+
+- 编译期函数可在嵌套 typed 调用中返回整数切片；被调帧退出前将视图可见元素复制到调用方帧，调用方可安全读写并继续传给嵌套函数。顶层切片结果、非整数切片元素仍拒绝。
+- 新增 `run/88` 覆盖局部数组切片返回、后续聚合分配、嵌套切片形参写入；`fail/105` 改为拒绝 `[]Point`，新增 `fail/107` 锁定顶层切片结果拒绝；`comptimelocal` 增加跨源文件用例。
+- 执行逻辑位于 `compiler/comptime/ct_ir_place.yh`、`ct_ir.yh` 与 `ct_registry.yh`，签名检查位于 `compiler/parse/parse_decl.yh`；设计范围见[实施方案](02-plan/yh-编译期typed切片返回实施方案.md)。
+- `make test` 通过：语法 71/71、44/44，运行 87/87、拒绝 90/90、通过 8/8，共 185/185；`make selfhost-native` 通过，固定点 14/14、自解析 64 个源文件、模块 17/17、项目 82/82 及全部探针。
+- `make seed` 后冷编 `make` 成功；新种子 SHA-256：`0993d792fb5f7eea3b64bba81b31e891539d74886ddf95bf4e948b0ac4dcb5ed`。
+
+## 2026-10-06 yh 编译期 typed `len`
+
+- typed IR 捕获并执行 `len`，读取当前调用帧中的定长数组或切片长度；切片使用视图长度，空切片返回 0。普通运行期语义保持原路径。
+- 新增 run/87，覆盖整型数组、结构体数组、切片视图和空切片，输出 322；`comptimelocal` 跨文件项目增加 `len` 断言 320。
+- 实现接缝位于 `compiler/parse/parse_expr.yh`，执行位于 `compiler/comptime/ct_ir.yh`；详情见[方案](02-plan/yh-编译期typed-len实施方案.md)和[完成记录](01-finished/yh-编译期typed-len-2026-10-06.md)。
+- `make test` 通过（语法 71/71 + 44/44，运行 183/183）；`make selfhost-native` 通过（固定点 14/14、自解析 64 个源文件、模块 17/17、项目 82/82 及全部探针）。
+- `make seed` 后冷编 `make` 成功。种子 SHA-256：`d9675dcded01a675eba65e4c08e274523cbb2f258c076364cf5608332f988501`。
+
+## 2026-10-06 yh 编译期 typed 结构体数组元素
+
+- CT3 定长数组元素扩展为整型或执行器支持的结构体。数组字面量、结构体内数组字段、数组形参及嵌套返回均递归深复制；数组下标后的结构体成员写入落在局部帧值上。
+- 新增 `tests/yh-run/run/86-comptime-struct-array-values.yh` 和 `comptimelocal` 跨源文件项目回归，运行期结果为 1422，验证数组形参、返回、字段副本和成员变更之间互不污染。
+- 实现位于 `compiler/comptime/ct_ir_place.yh`、`ct_ir.yh`；方案和范围见[实施方案](02-plan/yh-编译期typed结构体数组元素实施方案.md)，详细证据见[完成记录](01-finished/yh-编译期typed结构体数组元素-2026-10-06.md)。
+- `make test`：语法正例 71/71、反例 44/44；运行语料 182/182。`make selfhost-native`：14 个产物固定点、64 个源文件自解析、模块 17/17、项目 82/82 及其余探针通过。
+- `make seed` 后冷编 `make` 成功。种子 SHA-256：`ccba81ebca3396f674794cac3b3aa30a61f3a7c49463b5da0b51f98d0affdae4`。
+
+## 2026-10-06 编译期 typed 聚合返回
+
+- 嵌套 typed 调用可返回受支持的定长整数数组/结构体，并在被调帧释放前深复制到调用方帧；顶层 `$` 结果仍限标量，切片返回拒绝。
+- 新增 run/85、fail/105–106，扩展 `comptimelocal` 跨源文件验收。
+- `make test` 语法 71/71、44/44，运行 84/84、拒绝 89/89、通过 8/8，共 181/181；`make selfhost-native` 固定点 14/14、自解析 64 个源文件、模块 17/17、项目 82/82 与全部探针通过。
+- `make seed` 后冷编 `make` 成功。种子 SHA-256：`cf5c272d3a0cb1d96773940c5fe2f0ef354575bb087e8d07de526c3b21be83d1`。详见[完成记录](01-finished/yh-编译期typed聚合返回-2026-10-06.md)。
+
+## 2026-10-06 编译期 typed 聚合形参
+
+- 编译期函数支持受限整数数组/结构体形参按值深复制、整数切片形参共享视图；返回仍限整数。
+- 新增 run/84、fail/104，并为 `comptimelocal` 增加跨源文件回归。
+- `make test` 语法 71/71、44/44，运行语料 178/178；`make selfhost-native` 固定点 14/14、自解析 64 个源文件、模块 17/17、项目 82/82 和所有探针通过。
+- 滚种子并冷编 `make` 成功。SHA-256：`0b2882e28c7d1d45e3fb0ed6ea69114bb2287c070cc02c66f4b465915e99ab4b`。详见[完成记录](01-finished/yh-编译期typed聚合形参-2026-10-06.md)。
+
+## 2026-10-06 编译期 typed 结构体嵌套定长数组字段
+
+- 结构体字段支持最多 32 层、叶元素为整数的定长数组；嵌套初始化、结构体/数组递归按值复制和多级成员下标读写均通过。
+- 新增 run/83、fail/103，并扩展 `comptimelocal` 跨源文件项目，验证复制隔离与非整数叶元素拒绝。
+- `make test` 通过 176/176；`make selfhost-native` 固定点 14/14、自解析 64 个源文件、模块 17/17、项目 82/82 与所有探针通过。
+- `make seed` 后冷编 `make` 成功。新种子 SHA-256：`f66c692a933826f4eb345aa2687deb1bc2af4341f4fde6ff1dbc1b5b5413b243`。详见[完成记录](01-finished/yh-编译期typed结构体嵌套定长数组字段-2026-10-06.md)。
+
+## 2026-10-06 编译期 typed 结构体定长整型数组字段
+
+- `@[comptime]` 本地具名结构体可持有定长整型数组字段；字段初始化、局部数组复制、嵌套结构体复制与成员下标写入均按值隔离。
+- 新增 run/82 与 `comptimelocal` 跨源文件用例；修复 typed IR arena 导入对函数 AST 切片必须连续的假设，保留原节点编号并允许合法空洞。
+- `make test` 通过 174/174；`make selfhost-native` 固定点 14/14、自解析 64 个源文件、语法/运行语料、模块 17/17、项目 82/82 全通过。种子滚动与冷编结果见[完成记录](01-finished/yh-编译期typed结构体定长数组字段-2026-10-06.md)。
+
+## 2026-10-06 typed SSA 整数转换与 C ABI 项目门修复
+
+- typed SSA 增加整数 `CAST`、常量规范化与 ARM64 发射；混合宽度整数运算按前端 `sem_promote` 插入转换，窄整数 C ABI 函数进入 SSA。
+- 新增 run/81，C ABI 项目门检查至少 3 个 SSA 函数和至少 3 条转换指令；不降低原项目门槛。
+- `make test` 通过 173/173；`make selfhost-native` 固定点 14/14、自解析 64 个文件、模块 17/17、项目 82/82 全通过。种子未修改，未执行 `make seed`。
+- 设计与测试范围见[实施方案](02-plan/yh-typed-IR整数转换首片实施方案.md)和[完成报告](01-finished/yh-typed-IR整数转换首片-2026-10-06.md)。
+
+## 2026-10-05 `@[comptime]` typed `switch` 执行
+
+- typed 执行器复用已绑定 case AST，支持多值 case、default、无匹配时继续执行后续语句；case 块间不 fallthrough，`return/break/continue` 按现有循环 flow 规则传播。
+- 新增 run/80 覆盖匹配/default、无 default、return 和外层循环 break/continue；`make` 与 `make test` 通过，语法 71/71 + 44/44，运行语义 172/172。
+- `make selfhost-native` 固定点 14/14、自解析 64 个文件、模块 17/17 均通过，项目门 81/82；唯一失败为 C ABI 项目已有 `ir_functions >= 3` 断言实际得到 2。未滚种子。详见[实施方案](02-plan/yh-编译期typed-switch实施方案.md)。
+
+## 2026-10-05 普通函数编译期 `$for` typed AST 模板首片（后续已修复）
+
+- 普通函数中兼容 `$for` 循环体由 SSA 按编译期区间复用单份 typed AST，预算按逻辑实例节点计费；`make`、`make test` 和模板项目通过。`make selfhost-native` 为 81/82，唯一失败是 C ABI 项目原有 `ir_functions >= 3` 断言实际得到 2。
+- 曾在主门未全绿时误执行 `make seed`，当前种子哈希为 `0e6088ab94183149d84d3683baf01e733dd9ced71f9ed3c3b6d3bafd78609b3e`；任务开始时 `72c31036fba6e180e9aa4bda0935408055c8740f19e9bf7c1ad29a60bf1fe5ee` 的文件副本未能恢复。此处记录为未完成验收，不声称种子滚动有效。详见[实施记录](01-finished/yh-普通函数编译期for-typed-AST模板首片-2026-10-05.md)与[后续方案](02-plan/yh-普通函数编译期for-typed-AST模板实例化方案.md)。
+
+## 2026-10-05 普通函数编译期展开 typed AST 首片
+
+- 模块 worker 将普通 `$if/$for` 的实际选中展开结果保存在 typed AST；SSA flatten 其编译期包装语句，`$for` 每轮的只读常量获得独立稳定绑定编号。
+- AST 捕获路径按新增表达式、语句和绑定节点累计限制 100000；单文件暂时保留 token 预算。此首片仍逐轮重解析，尚未完成 AST 模板克隆与所有入口统一。
+- 新增 run/79、`comptimeexpanded` SSA 项目，以及 `comptimeexpandedfail` 精确节点预算检查。`make test` 通过（语法 71/71 + 44/44，运行 171/171）；`make selfhost-native` 通过（14 项固定点一致、自解析 63 个文件、模块 17/17、项目 82/82）。滚种子后冷编与种子校验通过。
+- 新种子 SHA-256：`72c31036fba6e180e9aa4bda0935408055c8740f19e9bf7c1ad29a60bf1fe5ee`。完整边界见[首片记录](01-finished/yh-普通函数编译期展开typed-AST首片-2026-10-05.md)。
+
+## 2026-10-05 编译期 typed 嵌套整型结构体字段完成
+
+- 本地结构体字段可再包含具名结构体；typed IR 支持嵌套字面量、链式整型成员读写和递归按值复制，复制后的嵌套修改不会串回原值。
+- 新增 run/78，扩展 `comptimelocal` 跨源文件用例；数组/切片、指针和联合体字段仍被拒绝。
+- 验证：`make test`（语法正例 71/71、反例 44/44，运行 170/170）；`make selfhost-native`（固定点 14 项一致、自解析 63 个源文件、模块 17/17、项目 80/80）；滚种子、冷编与 SHA-256 校验通过。
+- 新种子 SHA-256：`10234e48c8aa64ae727aa9415db96882633ca304701d7509c82c2c9f579c8ac8`。详见[完成记录](01-finished/yh-编译期typed嵌套结构体字段-2026-10-05.md)与[方案](02-plan/yh-编译期typed嵌套结构体字段方案.md)。
+
+## 2026-10-05 编译期 typed 本地整型字段结构体值完成
+
+- typed IR 支持本地具名结构体的命名/位置式字面量初始化、整型成员读取和写入，以及复制后的独立值语义；字段初始化表达式按源码顺序求值。
+- 新增 run/77、fail/102，并扩展 `comptimelocal` 跨文件结构体调用；联合体、嵌套聚合、非整数字段、聚合参数/返回及成员取址仍未开放。
+- 验证：`make test`（语法正例 71/71、反例 44/44，运行 169/169）；`make selfhost-native`（固定点 14 项一致、自解析 63 个源文件、模块 17/17、项目 80/80）；滚种子、冷编与 SHA-256 校验通过。
+- 新种子 SHA-256：`b0284f3481cfeb97e10d6bbcd8db62707d9f81945375cf0edcd457b2f6eb8905`。详见[完成记录](01-finished/yh-编译期typed结构体字段-2026-10-05.md)与[方案](02-plan/yh-编译期typed结构体字段方案.md)。
+
+## 2026-10-05 编译期 typed 数组/切片表达式完成
+
+- typed IR 支持本地整型数组/切片的 `base[start..end]` 共享存储视图，校验两端边界，支持嵌套视图、别名写入、for-in 和反向空范围。
+- 新增 run/76、fail/101，并扩展 `comptimelocal` 跨文件切片视图回读；指针、全局聚合和非整型元素仍未开放。
+- 验证：`make test`（语法 71/71 + 44/44，运行 167/167）；`make selfhost-native`（固定点 14 项一致、自解析 63 个源文件、模块 17/17、项目 80/80）；滚种子后冷编、SHA-256 和 `git diff --check` 通过。
+- 新种子 SHA-256：`f1b30a172396387e59d055d47c2dd960dd71749fc378aaeebfd71610f66ff452`。详见[完成记录](01-finished/yh-编译期typed数组切片表达式-2026-10-05.md)与[方案](02-plan/yh-编译期typed数组切片表达式方案.md)。
+
+## 2026-10-05 编译期 typed 数组/切片下标写入完成
+
+- typed IR 为赋值目标增加局部槽/聚合元素位置；本地整型数组/切片支持下标 `=` 与整数复合赋值，读取和写入共用基址、元素类型及边界检查。
+- 新增 run/75、fail/100，并扩展 `comptimelocal` 跨文件数组元素写入回读；不支持指针、切片表达式、聚合参数/返回及其他聚合值。
+- 验证：`make test`（语法 71/71 + 44/44，运行 165/165）；`make selfhost-native`（固定点 14 项一致、自解析 63 个源文件、模块 17/17、项目 80/80）；滚种子后冷编、SHA-256 和 `git diff --check` 通过。
+- 新种子 SHA-256：`0668cce1cc7708c026e3cace56d43de8979a26769fb75a5d0ce0de13fd3d9220`。详见[完成记录](01-finished/yh-编译期typed数组切片下标写入-2026-10-05.md)与[方案](02-plan/yh-编译期typed数组切片下标写入方案.md)。
+
+## 2026-10-05 编译期 typed 数组/切片下标读取完成
+
+- typed IR 支持从本地整型数组/切片读取元素，可使用局部整数下标；负下标及上下界之外的下标在执行时拒绝，并验证聚合长度和元素类型。
+- 新增 run/74、fail/98、fail/99，并扩展 `comptimelocal` 跨文件下标读取回归；下标写入、指针、切片表达式及其他聚合仍未开放。
+- 验证：`make test`（语法 71/71 + 44/44，运行 163/163）；`make selfhost-native`（固定点 14 项一致、自解析 62 个源文件、模块 17/17、项目 80/80）；滚种子后冷编、SHA-256 和 `git diff --check` 通过。
+- 新种子 SHA-256：`662df8951522bfc6df4e217b6a22003eb76cbe83a7f91ce3d110eab8b63ff4a5`。详见[完成记录](01-finished/yh-编译期typed数组切片下标读取-2026-10-05.md)与[方案](02-plan/yh-编译期typed数组切片下标读取方案.md)。
+
+## 2026-10-05 编译期 typed 整型数组/切片 for-in 完成
+
+- typed IR 在调用帧内存储整型数组/切片字面量，支持普通 for-in 元素与可选下标绑定、空切片和循环跳转，并在帧退出时释放聚合临时值。
+- 修正声明解释器选择初始化器的方式：固定数组类型的长度表达式 `[N]` 不会再被误认作局部变量初值；数组元素链改为迭代遍历。
+- 新增 run/73 与 `comptimelocal` 跨文件固定数组回归。聚合参数/返回、索引读写、结构体/联合体和浮点元素仍未开放。
+- 验证：`make test`（语法正例 71/71、反例 44/44，运行 160/160）；`make selfhost-native`（固定点 14 项一致、自解析 62 个源文件、模块 17/17、项目 80/80）；滚种子后冷编 `make`、SHA-256 和 `git diff --check` 通过。
+- 新种子 SHA-256：`d5e022bcfdf5db7fd3cba122ece8f2cb74a7d0ec5735a2fbddcccea1561478ce`。详见[完成记录](01-finished/yh-编译期typed整型聚合for-in-2026-10-05.md)与[方案](02-plan/yh-编译期typed整型聚合与for-in方案.md)。
+
+## 2026-10-05 编译期函数 typed 整数区间 for-in 完成
+
+- typed IR 执行普通整数区间 for-in，支持元素/零起始下标绑定、空范围、break/continue/return，并共用解释器步预算；前端仍负责边界表达式的解析、类型检查和绑定。
+- 新增 run/72，扩展 `comptimelocal` 跨文件项目；数组/切片 for-in 和聚合值仍待 CT3 后续阶段。
+- 验证：`make test` 语法 71/71 + 44/44、运行 159/159；`make selfhost-native` 固定点 14 项一致、自解析 62 个文件、模块 17/17、项目 80/80 及其余探针通过；滚种子后冷编与哈希校验通过。
+- 新种子 SHA-256：`eba461e71044ff9a22bdbf7f9c14e4a753d1232decb1969ab25f02ccb0c24d91`。详见[完成记录](01-finished/yh-编译期函数typed区间for-in-2026-10-05.md)与[实施方案](02-plan/yh-编译期函数typed区间for-in实施方案.md)。
+
+## 2026-10-05 编译期结构展开规模预算首片完成
+
+- 普通函数 `$for` 的展开保护除总轮数外，现在还按每轮主体 token 数累计展开规模；超 100000 时在继续解析/发射该轮前拒绝。单区间 1024 轮及全单元 100000 轮限制保留。
+- 新增 fail/97；旧版会错误编译通过，新版按规模预算拒绝。该 token 上界在嵌套循环中可能超计，精确 typed AST 实例节点预算仍待迁移阶段。
+- 验证：`make test` 语法 71/71 + 44/44、运行 158/158；`make selfhost-native` 固定点 14 项一致、自解析 62 个文件、模块 17/17、项目 80/80 及其余探针通过；`make seed` 后冷编及哈希校验通过。
+- 新种子 SHA-256：`8b2a0fb5215ded91141386d2fb823c424c0cdf510d0bd5e3b1c0d841e3b59850`。详见[结构展开规模预算首片记录](01-finished/yh-编译期结构展开规模预算首片-2026-10-05.md)与[typed AST 后续方案](02-plan/yh-编译期结构展开规模预算首片方案.md)。
+
+## 2026-10-05 编译期 typed 函数调用表达式语句完成
+
+- 修复 typed IR 将 `AST_STMT_EXPR` 当作空操作的问题。现在会求值表达式语句，因此丢弃结果的 `$g(...)` 仍执行被调函数里的 `$assert/$compile_error/$compile_warn`，并遵从当前分支和短路路径。
+- 新增 fail/96：`@[comptime]` 函数通过表达式语句调用另一编译期函数，断言失败必须使外层常量求值失败。
+- 验证：定向复现从意外成功转为预期诊断；`make test` 语法 71/71 + 44/44、语义 157/157；`make selfhost-native` 通过（14 个模块产物固定点一致、自解析 62 个文件、模块 17/17、项目 80/80）；`make seed` 后冷编 `make` 与 SHA-256 校验通过。
+- 新种子 SHA-256：`6cc4db26bfca8d0409d8ca717736b54ade5f119b1456908ee3ff56b5cc8ad894`。
+- 详见[typed 函数表达式语句完成记录](01-finished/yh-编译期typed-函数表达式语句-2026-10-05.md)。
+
+## 2026-10-05 编译期 typed 函数内 `$for` 完成
+
+- `@[comptime]` 函数准备期保存两个边界、只读 `i32` 迭代绑定和一次解析的循环体；执行器按当前调用帧
+  的边界逐轮执行 `[lo..hi)`，可嵌套 typed `$for`、读取外层迭代绑定并执行循环体中的 typed `$if`。
+  空范围不执行循环体，普通函数 `$for` 静态展开规则保持不变。
+- 新增 run/71，覆盖参数/局部边界、累加、嵌套区间、空范围、未选诊断和恰好 1024 次；fail/94 验证只读绑定，fail/95
+  验证超过单区间 1024 次时拒绝；`comptimelocal` 增加跨文件编译期函数动态区间调用。
+- 验证：`make test` 语法 71/71 + 44/44、语义 156/156；模块项目 80/80；`make selfhost-native`
+  两代固定点 14 项一致、自解析 62 个文件、模块语法 17/17、项目 80/80 及其余探针全通过。
+  随后 `make seed` 与冷编通过，种子 SHA-256 为
+  `13e3505c907bd6077e460e154a243c70fc20d196357bde51256c5aeeb8f0927e`。
+- 详见[typed 函数内 `$for` 实施方案](02-plan/yh-编译期typed-函数内for实施方案.md)与
+  [完成记录](01-finished/yh-编译期typed-函数内for-2026-10-05.md)。
+
+## 2026-10-05 编译期 typed 函数内 `$if` 完成
+
+- `@[comptime]` 函数准备期保存 `$if/$else` 双支 typed 节点，调用时按本次参数或局部值选择；
+  两支均做名字/类型检查，未选分支诊断不触发，无 `$else` 时假分支继续执行后续语句。
+  普通函数常量 `$if` 与顶层控制规则保持不变。
+- 新增 run/70、fail/93 及同模块多文件选支回归，覆盖参数条件、局部条件、无 `$else`、
+  未选分支错误和两支名字检查。
+- 验证：`make test` 语法 71/71 + 44/44、语义 153/153；`make selfhost-native` 两代固定点
+  14 项一致、自解析 62 个文件、模块语法 17/17、项目验收 80/80，其余探针通过；滚动种子
+  冷编和 SHA-256 检查通过。
+- 详见[typed 函数内 `$if` 记录](01-finished/yh-编译期typed-函数内if-2026-10-05.md)。
+
+## 2026-10-05 编译期 typed IR 诊断语句完成
+
+- typed IR 支持的 `@[comptime]` 函数现在直接执行 `$assert/$compile_error/$compile_warn`；
+  `$assert` 条件连到 typed 表达式边并读取局部帧，消息和位置来自函数源码快照，诊断只在
+  实际执行路径上触发。前端语句节点登记诊断类别，结构化 `$if/$for` 仍走既有编译规则。
+- 新增 run/69、fail/92 和跨文件模块局部值断言；新增用例验证局部循环后成功/失败断言、
+  未选分支错误不触发及警告位置。
+- 验证：`make test` 语法 71/71 + 44/44、语义 151/151；`make selfhost-native` 两代固定点
+  14 项一致、自解析 62 个文件、模块 17/17、项目 80/80，其余探针通过；滚动种子冷编及
+  哈希校验通过。
+- 详见[typed IR 诊断语句记录](01-finished/yh-编译期typed-IR诊断语句-2026-10-05.md)。
+
+## 2026-10-05 编译期 typed IR 与局部循环首片完成
+
+- 单文件与模块 worker 均在全局初始化前准备 `@[comptime]` 正文，并将前端类型化表达式、
+  语句、控制流边和稳定局部绑定复制到 comptime 私有 arena。typed 执行器覆盖局部标量、
+  直接赋值、if/条件 for、跳转、返回、嵌套编译期调用和共享执行预算。
+- 新增 run/68 局部循环用例和 `comptimelocal` 跨文件模块项目；诊断、结构化 `$if/$for`、
+  for-in、一般左值及剩余节点仍待迁入 typed IR，CT3 总体未完成。
+- 验证：`make`、`make test`（71/71 + 44/44 语法、149/149 语义）、模块项目 80/80；
+  `make selfhost-native` 两代固定点 14 项一致、自解析 62 个源文件、模块 17/17、项目
+  80/80 及其余探针全通过。随后 `make seed` 和滚动种子冷编/哈希检查通过。
+- 详见[首片完成记录](01-finished/yh-编译期typed-IR与局部循环首片-2026-10-05.md)。
+
+## 2026-10-03 sys 标准库系统调用封装规划交付
+
+- 实现位置指定为 `libs/sys/`，交付
+  [模块 README](../libs/sys/README.md)、
+  [设计](03-design/yh-sys系统调用封装设计.md)与
+  [SYS0–SYS7 实施方案](02-plan/yh-sys系统调用封装实施方案.md)。
+  首期 Linux/arm64 直接 syscall，明确 `-errno`、21 个具名原语、
+  文件/目录、内存/时间、进程及消费者迁移和独立自举门；Darwin OS 桥后续实施。
+- 同步标准库设计与 TC6 工具链方案，todo 记录未实施阶段。旧 prelude、
+  自有入口和静态链接的剩余工作单独列明，不把导入 sys 当作已经脱离全部依赖。
+- 文档链接/围栏/空白/阶段及 diff 检查通过；源码基线未变更。
+  本轮仅文档规划，未新增 `.yh` 实现或测试，未执行构建/运行门，未滚种子。
+  详见[规划完成记录](01-finished/yh-sys系统调用封装规划交付-2026-10-03.md)。
+
+## 2026-10-03 extern 自动 C ABI 完成
+
+- `@[extern]` 函数自动分类固定参数、入口和返回，支持现有 C 标量、非空
+  extern struct/union、小聚合/HFA、大聚合、浮点/窄参数栈溢出与函数指针返回。
+  共享分类器区分 Linux 与 Darwin 栈布局，普通 yh ABI 保持现状。
+- 函数类型保存调用约定，新增 `@[extern] fn(...)`；回调变量、共享字段及
+  跨模块接口均保持 ABI，C/yh 函数类型互赋与改变约定的函数类型转换拒绝。
+  IR 序列化版本升为 5，前端缓存键版本升为 10，SSA 整数路径共用分类器。
+- 修复双向探针发现的浮点赋值临时槽跨帧复用崩溃，新增复现用例。标准库
+  清单中的未支持规划字段保留为注释，使标准库项目验收恢复通过。
+- 验证：`make` 成功；`make test` 语法各 68/68+42/42、语义 100/100；
+  `make selfhost-native` 退出 0，12 个模块产物固定点一致、54 个源文件自解析
+  通过、模块 17/17、项目 79/79。Darwin 与静态 Linux/AArch64 的独立 C
+  双向调用退出 0；ELF 无动态解释器、动态依赖或未解析符号。
+- 完成记录：[extern 自动 C ABI](01-finished/yh-extern自动C-ABI-2026-10-03.md)。
+  C 变参、C 数据符号、Linux 原生种子与 libc 主体仍按独立方案推进；未滚种子。
+
+## 2026-10-03 yh-asm 独立项目 TC1–TC2 竖切片完成
+
+- 按用户决定，yh-asm/yh-link 工具链在仓库根 `asm/` 独立立项（模块与
+  实施方案的 compiler/obj|asm|link 对应）。交付 TC1 obj 二进制模型
+  （小端读写/增长缓冲/名字池/节/符号/重定位）与 TC2 竖切片：扫描器、
+  解析器、AArch64 整数/访存/分支编码、回填收尾与符号落表；ELF 出口（TC3）
+  未实现。详见当时的 asm/README.md（那一代实现在 2026-10-07 项目归位时被
+  现役实现取代，副本见 `tmp/removed-2026-10-07/asm-legacy/`）与
+  [完成记录](01-finished/yh-asm独立项目TC1-TC2竖切片-2026-10-03.md)。
+- 测试：94 正例（期望机器字经 clang aarch64 独立汇编器提取，oracle 证据
+  在 tmp/yh-toolchain/oracle/）+ 20 负例 + 1 端到端共 115 项全绿；
+  独立验收门 `python3 asm/tests/check.py`（当时的驱动，随之归档）。
+- 修复阻塞开发的编译器缺陷：十六进制字面量含 E/e 误判浮点
+  （compiler/gen/sem_value.yh），补 tests/yh 与 tests/yh-run/55 语料。
+- 发现并登记四项编译器缺陷（项目模式 SSA 混合宽度、结构体指针加法
+  缩放、局部数组变量下标取址、跨模块字段类型不计导入使用）于 todo.md，
+  asm/ 内按约定规避。
+- 门禁：`make` 成功；`make test` 全绿（68+42 语法、99/99 运行）；
+  `make selfhost-native` 其余门全绿，模块项目 76/79——3 项失败经对照
+  复测确认为工作区既有问题（未跟踪 libs/ 的 TOML `//` 注释 ×2、
+  r2a-ssa-direct-call-abi 第九参数进行中工作），与本轮无关。未滚种子。
+
+## 2026-10-02 yh-asm 与 yh-link 详细规划交付
+
+- 用户确认 Linux/AArch64 优先、macOS/arm64 随后。新增
+  [设计](03-design/yh-asm与yh-link设计.md)、
+  [实施方案](02-plan/yh-asm与yh-link实施方案.md)与
+  [规划交付记录](01-finished/yh-asm与yh-link规划交付-2026-10-02.md)，
+  TC0–TC10 未实施，已登记 todo；既有 R4/R5 添加详细方案入口。
+- 明确标准 `.s → .o → 映像`、内部 API/独立命令共用实现，Linux 静态 ELF、
+  OS 桥/原生种子/连续自编门、有限 C 对象与归档分支，以及 Mach-O 装载/导入/签名。
+- 59 个运行/通过用例分别在 Linux、Darwin 发射成功，各 59/59；记录当前
+  自编汇编缓存与源码审计，并识别宿主 I/O 与目标方言混用的前置问题。
+- 本轮只修改规划文档；`make` 成功并校验种子哈希，现有产物已是最新状态，
+  未冷编、未重跑 test/selfhost-native、未滚种子。文档检查见规划交付记录。
+
+## 2026-10-02 yh 混合参数调用修复完成
+
+- 修复 libc 分析发现的十个交错参数 yh → C 调用错误，按整数与浮点
+  独立寄存器分类；混合实参只弹栈一次，整数溢出栈槽按整数顺序回填。
+  实施见[修复方案](02-plan/yh-混合参数调用修复方案.md)与
+  [完成记录](01-finished/yh-混合参数调用修复-2026-10-02.md)。
+- 新增 `.yh` 回归覆盖十个交错参数、三个非连续整数栈参数、函数指针、
+  嵌套调用与浮点类型化变参；第九个浮点实参明确拒绝。C 混编项目补
+  十参数/十四参数双向调用，以不同权重验证顺序。
+- 原探针和正式 C 回归均交叉静态链接后在 Linux/AArch64 容器原生运行，
+  旧编译器返回 41，新编译器返回 0；ELF 无解释器、动态依赖或未定义符号。
+- `make` 冷编成功；`make test` 两层语法 67/67、39/39，语义 92/92；
+  `make selfhost-native` 返回 0，12 个模块产物固定点、52 个源文件
+  自解析、模块语法 17/17、项目验收 78/78 及其他自举探针全部通过。
+  本轮未执行 `make seed`。
+
+## 2026-10-02 yh libc 可行性与阻塞点分析完成
+
+- 用户确认目标为 Linux/AArch64 独立链接、兼容 C ABI；交付
+  [分析报告](01-finished/yh-libc可行性与阻塞点分析-2026-10-02.md)与
+  [分阶段候选方案](02-plan/yh-libc分阶段候选方案.md)，实施项记录在 todo。
+- 对照 musl 1.2.6（`9fa28ece75d8a2191de7c5bb53bed224c5947417`）源码，
+  区分已具备的固定标量/原始 syscall/自有字节运行时，以及变参、聚合、
+  数据符号、TP/原子/上下文、binary128、库交付和动态装载缺口。
+- 临时 C 调用方通过 yh 导出的字符串、九整数参数和混合浮点函数；使用
+  自编最小汇编入口、Zig cc `-nostdlib -static` 链接，在现有 Linux/AArch64
+  Ubuntu 容器中输出 `libc-probe\n`、退出 0。ELF 无解释器、动态依赖和未定义符号。
+- 另复现十个交错整数/浮点实参的 yh → C 调用错误：编译/链接成功，C → yh
+  通过，反向得到错误结果并返回 41；定位调用点按总实参数计算栈槽，尚未修复。
+- 探针确认 C 裸变参、结构体返回、pub let 与 f128 被拒绝；无 main 的库项目
+  可生成 `.s/.s.i`。源码镜像和所有临时产物均在 `tmp/libc-analysis/`。
+- `make` 成功且种子哈希验证通过，产物已是最新状态；本轮仅新增分析文档，
+  未修改编译器/语法/入库种子，未重新冷编或重跑全量自举门。
+
 ## 2026-10-02 属性系统与 C 互操作统一实施完成
 
 按用户授权完成[统一实施方案](02-plan/yh-属性系统与C互操作统一实施方案.md)：
@@ -27,6 +542,29 @@
   退出码 0；cc3→cc4 的 12 个模块产物固定点一致、52 个源文件自解析通过，
   模块语法 17/17，其他固定点和自有运行时探针通过。仅在当前 Darwin/Mach-O 主机完成原生运行；
   Linux AArch64 原生验收需对应种子和环境。依照方案，本轮未运行 `make seed`。
+
+## 2026-10-02 标准库首期 `libs/io` 实施完成
+
+- 在仓库 `libs/` 初始化 `yh_libs` 项目，新增 `io.write_all`、`io.print` 与
+  `io.println`。短写会循环推进；负长度、底层失败或零写入返回 -1。
+- 新增 `tests/modules/projects/libsio/` 并接入项目验收，通过
+  `YH_STDLIB` 加载仓库真实 `libs` 项目。覆盖实际 stdout、坏 fd、零长度与负长度。
+- 跨模块公开类型闭包另有 typeclosure 项目用例；标准库首期使用内建类型，无需
+  libc 变参。未实现工具链默认发现路径，仍需显式设置 `YH_STDLIB`。
+- 验证：`make test`、`make selfhost-native`、模块项目验收 77/77 与
+  `git diff --check` 全绿；未运行 `make seed`。
+
+## 2026-10-02 标准库基础模块扩展完成
+
+- 依用户要求移除标准库项目的 `src/` 布局，`libs/project.toml` 使用 `source = "."`；
+  六个模块直接位于 `libs/<模块>/<模块>.yh`。
+- 在 `io` 之外新增 `memory`（显式分配、释放、复制）、`string`（长度、相等、字节序比较）、
+  `os`（文件描述符、路径和进程接口）、`math`（固定参数 C 数学接口）与 `time`
+  （单调时钟）。`printf` 继续走 yh runtime，未开放 C 裸变参。
+- 新增 `libsbase` 项目验收，检查模块调用、文件系统副作用清理、错误返回及输出。
+- 验证：`make test` 通过（语法 67/67、39/39；运行/失败/通过 50/32/8），模块项目
+  验收 78/78，`make selfhost-native` 通过（12 个产物固定点、52 个源文件自解析），
+  `git diff --check` 通过。暂不验收跨平台行为；未运行 `make seed`。
 
 ## 2026-10-02 属性系统统一方案修订（单组多属性，删除 heap；未实施）
 
@@ -2453,3 +2991,1275 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
 
 - 将自举定义、现有能力、输入输出契约、技术路线、B3–B8 任务及 G1–G3 验收矩阵统一到 `docs/02-plan/yh-自举实施方案-v2.md`。
 - 原计划与能力边界文档改为简短入口，`docs/todo.md` 只链接统一方案；本次未修改编译器代码。
+
+# 2026-10-03 yh-link 独立项目 TC1–TC3：ELF 对象出口贯通
+
+- 按用户要求在仓库根 `link/` 独立立项（`project.toml`，`name = "yh_link"`），
+  模块结构对应实施方案的 `compiler/obj|asm|link`。上一轮的 `asm/` 未改动。
+- 交付 TC1（二进制模型/上下文）+ TC2（AArch64 整数子集编码）+ TC3（ELF64
+  `ET_REL` 出口）：`yh_link asm -o out.o in.s` 可产出结构完整的可重定位对象。
+- 关键修正：重定位类型号按 llvm-mc 实测纠正三处（`ADD_ABS_LO12_NC` 277、
+  `CONDBR19` 280、`cbz/cbnz` 用 CONDBR19）；补 LDST8/16/32/64 lo12；
+  `sp` 参与的 64 位加减改扩展寄存器形式（原先会编成 `sub xzr, xzr, x9`）；
+  `adrp` 回填掩码保留 bit31；`uxtw x,w` 改 UBFM 规范编码；点号符号一律局部；
+  代码节对齐填 NOP；`memcpy` 返回值误用导致 `.rela.<sec>` 节名退化。
+- 验证：`cd link && ../yh run` 通过；`./.build/yh_link` 自检退出码 0
+  （编码器 107 + 公共层 36 + 端到端 15）；`tests/check_corpus.py` 61 个语料
+  汇编成功 44 个、与 llvm-mc **逐字节不一致 0**、跳过 17（10 个浮点 + 7 个 GOT）；
+  `tests/check_obj.py` 44 个对象结构问题 0、非确定 0。
+- 自检有变异测试证据：改回 `adrp` 掩码返 19，改回访存 lo12 的 addend 用法返 21。
+- 未做：浮点标量编码、GOT 重定位（311/312）、静态链接（本机无 AArch64 ELF
+  链接器）。已登记 `docs/todo.md`。
+
+# 2026-10-03 yh-link 容器链接门与平台矩阵规划
+
+- 加了容器链接门 `link/tests/elf_link_check.py`：宿主汇编，容器里用 GNU
+  交叉 `ld` 链成静态可执行并真跑，判定是差分的（本工具对象与 llvm-mc 参照
+  对象退出码与标准输出必须一致）。镜像 `link/tests/docker/Dockerfile`
+  （binutils 双架构 + qemu-user-static），构建 `docker build -t yh-link-elf:latest`。
+- **门抓出一个真 bug 并已修**：「目标符号已定义且同节」原本触发汇编期回填，
+  但 `adrp`/`@PAGEOFF`/`.xword` 这几类值依赖节的最终地址——GNU `ld` 把
+  `.text` 放在 0x400078 这类非 4KiB 对齐处时，汇编期算出的 `(S & 0xFFF)` 就是
+  错的，语料里 3 个对象因此段错误或执行非法指令。旧门看不见是因为
+  `check_corpus.py` 只比未定义符号的重定位，而局部回填的迷你链接器跟汇编器
+  犯了同一个错，自洽通过。
+- 修正为只有「局部符号 + 同节 + 分支」能在汇编期定；其余一律出重定位。
+  随之删除 `fx_pg_hi21`/`fx_lo12`/`fx_lo12_ldst`/`fx_put64` 与 `ctx_get_sym`。
+- 符号绑定改合 GNU as：无 `.globl` 的标签一律局部（原来非点号名字默认全局），
+  引用时 `SYM_UNDEF` 占位、定义时定局部；判定看绑定不看节号。
+- `check_corpus.py` 改为**重定位全量比对**，目标按（节名 + 符号值 + addend）
+  归一化，迷你链接器改用 4KiB 对齐的合成节基址。
+- 顺带修系统指令：`nop/brk/svc/hlt/dsb/dmb/isb` 原本用 `p_is_mn` 查已被
+  消费的助记符而全部失败；屏障域会吃掉下一条语句；ISB 少 bit6。新增定向语料
+  `tests/asm/06-sysops.s`。
+- 验证：`./.build/yh_link` 退出 0；`check_enc.py` 107/107；`check_corpus.py`
+  44/44 重定位全量一致；`check_obj.py` 44/44 结构+确定性干净；
+  `elf_link_check.py` 44/44 行为与参照一致。
+- 规划 Linux/macOS × arm64/x64 矩阵：见
+  [平台与架构矩阵方案](02-plan/yh-link平台与架构矩阵方案.md)。
+  关键结论：macOS/arm64 可增量做（出口增量，解析与编码全复用，验收用宿主
+  Xcode 的 `ld64`）；**x64 必须先有编译器 x64 后端**（`compiler/backend/`
+  目前只有 arm64），否则 x64 汇编器没有输入方，待确认。
+- 环境事实：colima `docker build --platform linux/amd64` 会静默产出 arm64
+  镜像；colima 不共享宿主 `/tmp`，容器产物放仓库内 `tmp/linkbox/`。
+
+# 2026-10-03 yh-link 标量浮点与 GOT 重定位：语料全覆盖
+
+- P1-2 GOT 重定位：`@GOTPAGE` → `R_AARCH64_LD64_GOTPAGE_LO21`(311)，
+  `@GOTPAGEOFF` → `R_AARCH64_LD64_GOT_LO12_NC`(312)。这两类永远只出重定位，
+  因为 GOT 项本身是链接器建的。LP64 下只有 64 位形态——llvm-mc 对更窄的 GOT
+  访存直接拒绝，本工具同样报诊断而不是凑近似编码。
+- P1-1 标量浮点：`fadd/fsub/fmul/fdiv`、`fcmp`、`fcvt`(s↔d)、`fcvtzs`、
+  `scvtf`、`fmov`(通用→浮点)，加 `s`/`d` 寄存器解析。位布局全部由
+  `llvm-mc --show-encoding` 固定一个寄存器只变一个的方式逐条反推，
+  不凭记忆写手册位域：Rd 在 4:0、Rn 在 9:5、Rm 在 20:16。
+- 浮点访存没另写一套编码：`ldr/str` 带 s/d 寄存器 = 同宽整数访存或上
+  V 位（bit26），所以在 `p_mem_insn` 加一个 `vbit`、宽度由寄存器类别决定即可。
+  这也说明浮点访存的重定位类型跟整数完全一样。
+- 结果：`check_corpus.py` 61 个语料**全部汇编成功、逐字节比对 0 不一致、
+  跳过数 10 → 0**。契约覆盖追上了编译器实际发射的 AArch64 汇编。
+- 修掉容器门自身的缺陷：静态链接阶段两侧的标记写进了同一个变量，参照侧失败
+  会被算成本工具失败。改成两级各自独立判定，「两边都失败」按差分语义跳过，
+  只在两边结果不同时报错。
+- `check_obj.py` 重定位白名单补 311/312。
+- 编码器向量 107 → 129（含 22 条浮点）；新增定向语料 `tests/asm/07-got.s`、
+  `tests/asm/08-float.s`；端到端自检加了 GOT 两条。
+- 验证：`./.build/yh_link` 退出 0；`check_enc.py` 129/129；`check_corpus.py`
+  61/61 不一致 0 跳过 0；定向语料 8/8；`check_obj.py` 61 对象结构 0 非确定 0；
+  `elf_link_check.py` 行为一致 54、不一致 0、7 个两边同样链不上而跳过。
+- 容器门剩余 7 个跳过：yh 运行时外部符号（`__Exit`/`_strtoul`/`_open`/
+  `_close`/`_abs`）在 `tests/elf/yhr.s` 里没桩，补桩后可进入运行比对。
+- 契约 §3 补标量浮点族与浮点访存规则、§6 补 311/312；
+  `link/README.md` 同步范围、目录、测试表与已知边界。
+- 记录见 [完成记录](01-finished/yh-link标量浮点与GOT重定位-2026-10-03.md)。
+
+# 2026-10-04 yh-link Mach-O 出口与编译器汇编步替换
+
+- `link/` 新增 Mach-O arm64 `MH_OBJECT` 写出器（`src/obj/50_macho.yh`、
+  `src/obj/51_macho_emit.yh`），`yh_link asm -t darwin` 产出 clang 可替代的
+  可重定位对象。节映射、重定位映射全部实测自 clang；**PAGEOFF12 的 length
+  一律 2**（Mach-O 的 length 是立即数字段字节数，与访问宽度无关）。
+- 补子集缺口 `ucvtf`（编译器浮点窄化用无符号版）：新增 `e_ucvtf`、5 条编码器
+  向量、定向语料 `tests/asm/09-ucvtf.s`。
+- `compiler/cmd/link_cache.yh` 的 `mb_asm_tool` 按 `YH_LINK` → `PATH` →
+  编译器同目录的顺序找 `yh_link`，找到就用它做逐模块汇编，找不到回落
+  `clang`/`gcc`；命令前缀进对象缓存键。
+- 新增 `make yh-link`：用刚构建的 `$(YH)` 冷编 `link/` 并产出根目录
+  `yh_link`（macOS 上 codesign）。`yh` 与 `yh_link` 同目录即自动生效。
+- `tests/selfhost/link-cache.py` 改为与汇编器无关：wrapper 同时覆盖
+  `gcc`/`clang`/`yh_link`，计数按 assemble/link 两类统计。
+- 新增门 `tests/macho_corpus_check.py`（对 clang 语义差分）与
+  `tests/macho_link_run.py`（链成可执行后比运行行为）。
+- 修掉一个致命错误：**同节分支在 Mach-O 里不发重定位，但汇编期必须回填
+  偏移**。原先照 ELF 规则留了重定位却没回填立即数，指令字节为 0，链出来
+  直接跑飞（结构差分却全对）。判定改为按目标格式分派，与 `mo_reloc_kept`
+  共用 `obj.mo_sym_in_sec`。
+- 验证：自检退出 0；`check_enc.py` 134 条不一致 0；ELF `check_corpus.py`
+  61/61 与 9/9 不一致 0 跳过 0；`macho_corpus_check.py` 70 个一致 69 跳过 1
+  不一致 0；`macho_link_run.py ../tmp/inv` 61/61 一致；两代固定点（均用
+  yh_link 汇编）`.s`/`.s.i` 逐字节相同；`make selfhost-native` 退出 0 零失败，
+  期间 `yh_link` 真实调用 **106 次**。
+- 顺带记录未修问题：`pub const` 整数字面量按 32 位有符号折叠
+  （`0x80000000` 折不出来）；上一代种子 `bin/yh` 在含 `e`/`E` 的十六进制
+  字面量上报浮点/整数转换错，因此 `link/` 只能由 `$(YH)` 冷编。
+- **最终链接步仍是 `clang -o`**：替换它需要 Mach-O 可执行文件链接器
+  （分段、stub 与惰性绑定、chained fixups、ad-hoc 签名），属 TC8–TC10。
+- 详情见 [完成记录](01-finished/yh-linkMach-O出口与编译器汇编步替换-2026-10-04.md)。
+
+# 2026-10-04 yh-link Mach-O 可执行文件链接器调研
+
+- 探明静态路线不可行：`ld -o out -e _main obj.o`（不带 `-lSystem`）直接报
+  `dynamic executables or dylibs must link with libSystem.dylib`。macOS 没有
+  静态 libc，自带 OS 层也不现实——编译器真正未定义的外部符号有 18 个，含
+  `_getattrlistbulk` 与 `_execvp`。
+- 解析并实测了 `ld` 产出的最小可执行文件：`__PAGEZERO`/`__TEXT`/`__DATA`/
+  `__LINKEDIT` 四段、16 个 load commands、`LC_MAIN` 入口指向 `__text` 内
+  `_main` 的文件偏移。
+- **实测出 ad-hoc 签名布局并逐字段核对**：SuperBlob + CodeDirectory
+  v=0x20400（88 字节头 + identifier + nCode×32 页哈希），`ld` 自动做
+  `flags=0x20002(adhoc,linker-signed)`。页哈希与 `hashlib` 逐字节一致；
+  `codeLimit` 是**签名 blob 的文件偏移**（不是 `__LINKEDIT` 起点），所以末页是
+  短的。
+- **关键发现：codesign blob 内部是大端**（`CS_SuperBlob`/`CS_CodeDirectory`
+  的整数用网络字节序），与 Mach-O 其余部分相反。按小端读会把 `0xfade0cc0`
+  读成 `0xc00cdefa`，一路错到底。解析与写出都要用大端。
+- 链接器自带 SHA-256（`link/src/ln/10_sha256.yh`），6 个向量对 `shasum -a 256`
+  一致，覆盖 55/56 字节这个补齐分界。
+- 修掉一个自造 bug：压缩循环漏了 `t += 1`，轮数靠 `t` 残留值被跳过，摘要
+  静默算错而无任何报错（后来加 `t = 0;` 复位反而变成死循环，才暴露出来）。
+- 决策文档见 [Mach-O 可执行文件链接器设计](03-design/yh-linkMach-O可执行文件链接器设计.md)，
+  TC9/TC10/TC11 已拆入 [todo](todo.md)。本轮只做调研与 SHA-256，**尚未开始
+  写链接器**。
+
+# 2026-10-04 yh 编译期过程：V 实现调研与规划交付
+
+- 交付 [设计](03-design/yh-编译期过程设计.md)与
+  [实施方案](02-plan/yh-编译期过程实施方案.md)，推荐 `@[comptime] fn` 和受限
+  typed AST 求值器；CT0–CT2 为首版，全局类型位置、跨模块正文、条件编译和
+  反射分别分期。**本次是规划交付，编译器尚未实现新属性。**
+- 核对 V 固定提交的解析器、类型检查和反射展开，区分内建编译期操作、
+  条件选择与用户函数求值；方案包含源码诊断、整数边界、共享预算、
+  常量就绪、缓存依赖和滚动自举接入。
+- 当前探针确认函数 const 调用/未知属性被拒；发现全局数组与前向 const
+  读取占位零的既有缺口，记录于设计 §5，本次未修复。
+- `make`、`make test` 通过：两套语法门各 68 正例/42 反例，运行语义 100/100。
+  完成详情见 [交付记录](01-finished/yh-编译期过程规划交付-2026-10-04.md)；
+  未修改源码/活跃语法、未滚种子，未重跑 selfhost-native。
+
+# 2026-10-04 yh 编译期首版语法分析与计划修订
+
+- 按用户选择改为 `$if/$for` 控制形式，保留 `@[comptime]` 函数属性；
+  建议首版加入条件选择、区间展开、标量函数求值与 assert/error/warn。
+- 新增[首版语法分析](03-design/yh-编译期首版语法分析.md)，同步过程设计、
+  实施方案与 todo；首版现行阶段为 CT0–CT3，反射/布局/跨模块与高阶能力后续。
+- 临时参考语法：22 个新增 .yh 正反例全部符合预期，正例精确歧义报告 0；
+  原有 110 个语法用例保持原判定。未将未实现功能接入默认回归。
+- make 退出 0（产物已是最新，复核种子哈希）；本次只交付分析，
+  未改编译器/活跃语法、未重跑完整主门、未滚种子。
+- 详情见[完成记录](01-finished/yh-编译期首版语法分析-2026-10-04.md)。
+
+# 2026-10-04 yh 编译期语法收敛到函数体
+
+- 按用户要求删除顶层 $if；建议控制与诊断 $... 均限函数内语句，
+  @[comptime] 保持函数属性。顶层声明和模块依赖登记沿用现状。
+- 删除声明选择预处理与两个顶层参考产生式，统一函数内常量条件契约；
+  同步首版语法分析、过程设计、实施方案和 todo。
+- 修订参考语法 30/30，新增正例精确歧义报告 0，原语法语料 110/110；
+  make 退出 0（复核种子哈希），文档与 diff 检查通过。
+- 本次是设计修订，未修改编译器/活跃语法、未重跑完整主门、未滚种子。
+  详情见[收敛记录](01-finished/yh-编译期函数内语法收敛-2026-10-04.md)。
+
+# 2026-10-04 yh 编译期函数显式调用分析
+
+- 分析 $函数名(实参) 调用 @[comptime] 函数的可行性，
+  推荐 $f 统一用于普通/CT 函数体内及常量值位置；属性定义身份，$ 表示求值请求。
+- 新增[显式调用分析](03-design/yh-编译期函数显式调用分析.md)，
+  同步首版设计、求值设计、实施方案与 todo；顶层控制仍不加入。
+- 实验证实独立诊断语句叠加调用表达式有 4 处精确歧义；
+  统一 primaryExpr 入口后为 0，34 个结构判定与原语法语料 110/110 符合预期。
+  其中 10 个形态须在正式语义门拒绝，未宣称已实现。
+- make 退出 0（种子哈希复核）、本次编译期文档/diff 检查通过；
+  未改编译器/活跃语法、未重跑主门、未滚种子。
+  详情见[交付记录](01-finished/yh-编译期显式调用分析-2026-10-04.md)。
+
+# 2026-10-04 AGENTS.md 新增 Linux 环境验证（容器方案）
+
+- 按用户要求在 AGENTS.md 增补《Linux 环境验证（容器方案）》章节：
+  需要 Linux 测试时优先用容器（docker/podman，arm64 镜像）而非虚拟机；
+  写明前提事实（bin/yh 为 darwin/arm64 Mach-O、Linux ELF 种子待入库、
+  Makefile 按宿主选种子）、挂载仓库的操作示例、容器内自举的预期用法
+  （SEED=bin/yh-linux-arm64）与约束（临时产物放 tmp/、不滚种子、
+  结论记 finish.md）。开发策略中"Linux CI/开发需另行建立"一句指向该章节。
+- 纯文档变更，未改编译器/语法/测试，未重跑主门、未滚种子。
+
+# 2026-10-04 容器方案改用 macOS 系统 container 并实测验证
+
+- 按用户要求把 AGENTS.md《Linux 环境验证（容器方案）》的运行时从
+  docker 改为 macOS 系统自带 `container`（Apple Container 1.5.0）：
+  `container run --rm -it -v "$PWD":/work -w /work alpine:latest sh`。
+- 实测通过：重启 apiserver 后 1 秒级启动，容器内 `uname -m`=aarch64、
+  仓库正确挂载 /work。途中发现本机服务曾卡 "Starting container" 约
+  5 分钟后报 `XPC timeout ... containerCreate`，`container system
+  stop && start` 重启后恢复——该故障处理已写入 AGENTS.md。
+- 编译器/语法/测试未改动，未重跑主门、未滚种子。
+
+# 2026-10-05 yh 编译期过程首个竖切片
+
+- 实现 `@[comptime]` 私有整数函数与 `$f(...)` 显式调用，当前求值范围为单条
+  整数 return 表达式；结果能进入全局 const、嵌套调用实参和普通函数运行期初始化。
+- 接入函数体 `$if/$for`，无顶层形式；条件分支按常量选择，整数 `[lo..hi)` 区间
+  按轮绑定并静态展开；单区间 1024 次、编译单元合计 100000 次预算。
+- 编译期求值和登记主要放在 `compiler/comptime/`；语法接缝位于
+  `compiler/parse/parse_comptime.yh`。新增运行、失败、语法和同模块多文件验收。
+- 验证：`make`、`make test`、`python3 tests/yh/check.py --coverage --quiet`、
+  `make selfhost-native` 全绿；语法 71/71+44/44，运行 109/109，固定点 14 个产物，
+  自解析 58 源文件，模块 17/17、项目 80/80。
+- 主门通过后已执行 `make seed`，新种子 SHA-256 为
+  `ac8806b63e7843c3dedd330feb0a02f463db3bf2b858bbb748c174757676e43a`；
+  用新种子冷编 `compiler/` 并复核哈希成功。
+- 完整语句解释、诊断指令、typed CT IR、跨模块正文、目标标记与全局类型布局求值
+  继续列在 `docs/todo.md`。
+
+# 2026-10-05 yh 编译期 `$if` 输出目标标记
+
+- 在 `$if` 条件上下文中将 `linux`、`darwin`、`arm64` 解析为输出目标布尔常量；
+  `linux/darwin` 取自 `-target` 设置的输出方言，`arm64` 表示当前受支持后端。
+- 目标标记不成为全局保留字；同名局部变量在 `$if` 外照常解析，条件内的内建标记
+  不受局部遮蔽。逻辑 `&&/||` 增加编译期常量折叠，以支持组合目标条件。
+- 实现位于 `compiler/comptime/ct_target.yh`，解析器只在 `$if` 条件期间打开目标
+  标记上下文；新增 `tests/yh-run/run/58-comptime-target.yh` 覆盖目标分支、布尔
+  组合及同名局部变量。
+- 验证：`make`、`make test`、`make selfhost-native` 与目标 Linux/Darwin 汇编检查通过；
+  主门通过后滚动种子并冷编复核。门禁计数、哈希与剩余工作见
+  [本轮交付记录](01-finished/yh-编译期目标标记-2026-10-05.md)。
+
+# 2026-10-05 yh 编译期诊断指令
+
+- 普通函数内接入独立语句 `$assert/$compile_error/$compile_warn`：断言验证常量 bool，
+  错误/警告接受字符串字面量，诊断限制在语句位置；未选 `$if` 分支不触发。
+- 诊断代码主要在 `compiler/comptime/ct_diag.yh`，调用类型检查与语句执行接缝位于
+  `compiler/parse/`。增加单文件正反例及模块 AST 路径回归；`@[comptime]` 函数内
+  按调用实参触发诊断仍待 CT3 完整求值器。
+- 验证：`make test`、`make selfhost-native`、滚种子后的冷编 `make` 均通过；运行语料
+  119/119、模块项目 80/80，14 个产物固定点一致。新种子 SHA-256：
+  `ce7124a054ab94e35750c8d5ab4ce06504e59302a91895248cca3e2c5d26666f`。详见
+  [诊断指令完成记录](01-finished/yh-编译期诊断指令-2026-10-05.md)。
+
+# 2026-10-05 yh 编译期整数边界与常量就绪
+
+- 常量折叠按目标整数宽度和符号执行；检查一元负号、加减乘溢出、除零/模零、
+  最小负数除 `-1` 和移位边界，无符号比较/除法/右移按无符号语义执行。
+  受限 `@[comptime]` 单条 return 求值器复用同一边界实现。
+- 新增 `CSym.const_ready`，禁止前向全局 const 和 pass1 数组长度读取占位零；
+  有序全局标量初始化不变。全局数组长度布局求值仍待 CT5A。就绪状态独立于符号
+  flags，避免破坏模块 AST 局部绑定快照。
+- 增加 `fail-contains` 诊断子串断言及 `tests/yh-run/fail/71–79`、`run/60–61`。
+  `make test` 全绿：运行语料 130/130；`make selfhost-native` 全绿：14 个产物固定点、
+  60 个源文件自解析、模块 17/17、项目 80/80；滚种子后冷编 `make` 成功。
+- 新种子 SHA-256：`5070e9be14e95ee034248ac78d2504595ddccc259e373409ee971c89fa32a07d`。
+  详见[整数边界与常量就绪完成记录](01-finished/yh-编译期整数边界与常量就绪-2026-10-05.md)。
+
+# 2026-10-05 yh 编译期结构嵌套深度限制
+
+- `$if` 与 `$for` 共用 32 层结构嵌套计数，超限时在过深控制结构处报告语义诊断；
+  解析入口统一进入/退出计数，确保正常返回与解析错误路径恢复状态，模块重置也清零计数。
+- 新增 `tests/yh-run/fail/80-comptime-control-depth.yh`、
+  `fail/81-comptime-for-control-depth.yh` 与 `run/62-comptime-control-depth-limit.yh`，
+  覆盖 33 层拒绝、空 `$for` 与 `$if` 混合计深，以及上限 32 层可运行。
+- 实现位于 `compiler/comptime/ct_00_model.yh`、`ct_registry.yh` 和
+  `compiler/parse/parse_comptime.yh`。typed AST 展开新增节点 100000 上限尚未实现，
+  留待实际 AST 展开模型接入；展开来源诊断和编译期函数内诊断仍属后续 CT1/CT3 工作。
+- 验证：`make test` 通过（语法 71/71 + 44/44，运行语义 133/133）；
+  `make selfhost-native` 通过（14 个产物固定点、60 个源文件自解析、模块 17/17、
+  项目 80/80）；`make seed` 后冷编 `make` 成功。种子 SHA-256：
+  `adb00cf2da3698e51ad5dafd6431db685911ec013f2fc8bb7d73187fc393b4a2`。
+
+# 2026-10-05 yh 编译期 for 展开跳转边界
+
+- 修复 `$for` 展开体内的 `break/continue` 错误跳出到外层运行期循环的问题。`comptime`
+  记录每层 `$for` 开始时的运行期循环深度；只有展开体内新建的普通循环可以接收跳转。
+- 新增 `tests/yh-run/fail/82-comptime-for-break-escape.yh`、
+  `fail/83-comptime-for-continue-escape.yh` 作为拒绝反例，及
+  `run/63-comptime-for-inner-runtime-loop.yh` 验证展开体内普通循环仍可使用 `break`。
+- 实现位于 `compiler/comptime/ct_00_model.yh`、`ct_registry.yh`，以及
+  `compiler/parse/parse_comptime.yh`、`parse_stmt.yh`。
+- 循环绑定约束已有语义拒绝赋值和取地址；新增 `fail/84–85` 正反映射这两个诊断。
+- 验证：`make test` 通过（语法 71/71 + 44/44，运行语义 138/138）；
+  `make selfhost-native` 通过（14 个产物固定点、60 个源文件自解析、模块 17/17、
+  项目 80/80）；`make seed` 后冷编 `make` 成功。种子 SHA-256：
+  `e0ad233806894cf0e752ccfffa42b443a4dce4d13515c8aa819d2743232846c8`。
+
+# 2026-10-05 yh 编译期展开来源诊断
+
+- 嵌套 `$for` 体中的错误和警告现在附带从外层到内层的迭代值链，例如
+  `编译期展开值: 2 -> 5`。尚未开始迭代的内层区间不加入来源链。
+- 新增 `tests/yh-run/fail/86-comptime-expansion-trace.yh` 锁定双层展开错误来源；
+  诊断缓冲区按有界追加处理长路径和消息。
+- 实现位于 `compiler/gen/buffer.yh`、`compiler/gen/state.yh` 与
+  `compiler/comptime/ct_registry.yh`、`compiler/parse/parse_comptime.yh`。
+  CT 函数内诊断按实际调用路径执行仍属于 CT3。
+- 定向运行语料 run 1/1、fail 4/4 通过；`make test` 通过（语法 71/71 + 44/44，
+  运行语义 139/139）。`make selfhost-native` 通过（14 个产物固定点、60 个源文件
+  自解析、模块 17/17、项目 80/80）；`make seed` 后冷编 `make` 成功。
+- 新种子 SHA-256：`6eb93755f1af8a4944c7f7921dd3a91ba8daeb315122f93debb28034c333e626`。
+  详见[编译期展开来源诊断完成记录](01-finished/yh-编译期展开来源诊断-2026-10-05.md)。
+
+# 2026-10-05 yh 编译期函数调用链首片
+
+- `@[comptime]` 函数的单条整数 `return` 表达式支持显式 `$g(...)`，可前向引用、
+  嵌套实参并跨同模块多个源文件执行。定义检查只校验调用签名/参数，不提前执行形参值。
+- 统一调用器在实际执行时验证 typed 实参并限制 64 层共享调用帧；无条件递归超限会
+  正常报错，不耗尽宿主栈。新增 run/64 与 fail/87–89；扩展 `comptimelocal` 项目用例。
+- 实现位于 `compiler/comptime/ct_eval_expr.yh`、`ct_registry.yh` 与
+  `compiler/parse/parse_expr.yh`。语句级 CT 执行器、typed AST、局部值、普通控制流、
+  短路、共享步数预算和 CT 函数诊断仍未完成。
+- 验证：`make test` 通过（语法 71/71 + 44/44，运行语义 143/143）；
+  `make selfhost-native` 通过（14 个产物固定点、60 个源文件自解析、模块 17/17、
+  项目 80/80）；`make seed` 后冷编 `make` 成功。
+- 新种子 SHA-256：`c07078874e874cfa54230d3a0cb9ffd562ee2251dd7d3e11bb781ab713e8dd50`。
+  详见[编译期函数调用链首片完成记录](01-finished/yh-编译期函数调用链首片-2026-10-05.md)。
+
+# 2026-10-05 yh 编译期条件递归
+
+- 编译期函数执行器支持整数比较条件、普通 `if/else` 和 `return`；按当前参数值只执行
+  选中分支，另一支只在普通函数体检查阶段做语义检查。条件递归沿用共用 64 层调用帧限制。
+- 新增 `tests/yh-run/run/65-comptime-conditional-recursion.yh`，阶乘结果为 720，且未选
+  分支中的 `$compile_error` 不触发。
+- 实现位于 `compiler/comptime/ct_eval_expr.yh`。局部声明、赋值、普通 for、短路、步数
+  预算和 CT 函数诊断的实际调用路径仍待后续 CT3。
+- 验证：`make test` 通过（语法 71/71 + 44/44，运行语义 144/144）；
+  `make selfhost-native` 通过（14 个产物固定点、60 个源文件自解析、模块 17/17、
+  项目 80/80）；`make seed` 后冷编 `make` 成功。
+- 新种子 SHA-256：`f5c155fc6479ada60022ce8e961ed919401b65bdc90236398fe03ba978757f5e`。
+  详见[编译期条件递归完成记录](01-finished/yh-编译期条件递归-2026-10-05.md)。
+
+# 2026-10-05 yh 编译期函数诊断调用路径
+
+- 编译期函数中的 `$assert/$compile_error/$compile_warn` 现在在实际执行到语句时触发；
+  `$if` 未选分支中的诊断不触发。断言使用整数比较条件，错误/警告消息要求字符串文字量。
+- CT 诊断从登记的函数源码快照解码消息，避免读取后续解析文件的源码缓冲区。新增
+  `tests/yh-run/run/66`、`fail/90–91` 覆盖警告路径、未选错误路径、主动错误和失败断言。
+- 实现位于 `compiler/comptime/ct_eval_expr.yh` 和 `ct_diag.yh`；局部值、赋值、普通循环、
+  短路、typed CT IR 与执行步数预算仍待后续 CT3。
+- 验证：`make test` 通过（语法正例 71/71、反例 44/44，运行 run 65/65、fail 74/74、
+  pass 8/8，共 147/147）；`make selfhost-native` 通过（14 个产物固定点、60 个源文件
+  自解析、模块 17/17、项目 80/80）；`make seed` 后冷编 `make` 成功。警告内容由独立
+  编译命令确认输出。
+- 新种子 SHA-256：`c38aac40bdeec230fbe36dfe814cd97e335739c1c5c3cd304171d9776f0721fb`。
+  详见[编译期函数诊断调用路径完成记录](01-finished/yh-编译期函数诊断调用路径-2026-10-05.md)。
+
+# 2026-10-05 yh 编译期函数布尔短路
+
+- 编译期函数的 `if` 与 `$assert` 条件支持 `&&/||` 短路，`&&` 优先级高于 `||`；被跳过的右侧不执行除法或编译期函数调用。
+- 新增 `tests/yh-run/run/67-comptime-short-circuit.yh`，覆盖短路方向、零除保护、分组、优先级、断言及跳过的错误调用。
+- 实现位于 `compiler/comptime/ct_eval_bool.yh`、`ct_eval_expr.yh` 和 `ct_00_model.yh`。
+- `make test` 通过（语法 71/71 + 44/44，运行 148/148）；`make selfhost-native` 通过（14 个产物固定点、61 个源文件自解析、模块 17/17、项目 80/80）；滚种子后冷编 `make` 成功。
+- 新种子 SHA-256：`9b784e530a81678e705e0ab48515d8e2e321b39491d5d9e26078374cf7e65531`。详见[编译期函数短路逻辑完成记录](01-finished/yh-编译期函数短路逻辑-2026-10-05.md)。
+
+# 2026-10-06 yh 编译期枚举 values 首片
+
+- 支持函数体内 `$for item in Enum.values`，按声明顺序展开，提供只读 `item.name` 与 `item.value`；保留重复判别值，空枚举零轮执行。typed `@[comptime]` 函数按展开后的语句块解释执行。
+- 新增 run/93、fail/109–110、语法正例 72，并扩展 `comptimelocal` 项目验证模块 AST 路径。
+- 实现位于 `compiler/comptime/ct_enum.yh`、`compiler/parse/parse_comptime.yh`，元信息语义/静态名称发射位于 `compiler/gen/sem_value.yh` 与 `emit_arm64.yh`。CT4 的字段反射仍待规划。
+- `make test` 全绿（语法 72/72 + 44/44，运行 193/193）；`make selfhost-native` 全绿（14 项固定点、65 个源文件自解析、模块 17/17、项目 82/82）；滚种子后冷编 `make` 成功。
+- 新种子 SHA-256：`1257f1b7126819c845e2bd315725993001d63784f2191def8b6e4550c5b9908f`。详见[编译期枚举 values 首片完成记录](01-finished/yh-编译期枚举values-2026-10-06.md)。
+
+# 2026-10-06 yh 编译期全局数组长度嵌套调用
+
+- CT5A 早期安全探测支持无环的简单单 `return` 整数 CT 调用树；全局整数常量可由
+  嵌套 `$helper(...)` 求值得到，并用于后续数组和结构体字段长度。互递归图不会进入执行，
+  仍报告常量未就绪。typed 函数体和布局请求/依赖环仍待后续阶段。
+- 新增 `tests/yh-run/run/111-comptime-array-length-nested-call.yh` 与
+  `tests/yh-run/fail/112-comptime-array-length-call-cycle.yh`。
+- `make test` 全绿（语法 72/72 + 44/44，运行 93/93、拒绝 94/94、通过 8/8，共 195/195）；
+  `make selfhost-native` 全绿（14 项固定点、65 个源文件自解析、模块 17/17、项目 82/82）；
+  `make seed` 后冷编 `make` 成功。
+- 新种子 SHA-256：`36022fd2fd605cc81de4e31b356efbcc0bcfd8662815a14b031ffebca884a484`。
+  详见[编译期全局数组长度嵌套调用完成记录](01-finished/yh-编译期全局数组长度嵌套调用-2026-10-06.md)。
+
+# 2026-10-06 yh 编译期类型表达式依赖求解
+
+- 数组长度支持保存并延迟求值的整数表达式、显式 `$f(...)` 和 pending `sizeof(T)`；
+  调度器按 READY 依赖推进数组与结构体布局，pending sizeof 依赖可穿过嵌套 typed CT 调用。
+- 新增 run/124–125、更新 fail/119，并扩展 `comptimelayoutdeps` 模块项目覆盖跨文件前向
+  const 与表达式长度。普通前向全局 const 仍拒绝；值/布局环诊断报告环类别，完整混合路径
+  后续再补。
+- `make test` 全绿（语法 72/72 + 44/44，run 103/103、fail 97/97、pass 8/8，共 208/208）；
+  `make selfhost-native` 全绿（14 项模块固定点、67 个源文件自解析、模块 17/17、项目 83/83）。
+- `git diff --check`、`make seed` 与新种子冷编 `make` 均通过。
+- 新种子 SHA-256：`ab66e3385286f312fe9c05999cbd405a3cfe4b05fb20645fce9c1f2142f56175`。
+  详见[编译期类型表达式依赖求解完成记录](01-finished/yh-编译期类型表达式依赖求解-2026-10-06.md)。
+
+# 2026-10-06 yh 编译期混合布局依赖环诊断
+
+- CT5A 布局调度现在为编译期整数值和数组/结构体布局建立混合依赖图，并沿 typed CT 函数
+  的直接、嵌套调用收集常量读取和 `sizeof` 布局关系。停滞时输出闭合节点路径；纯常量环
+  保留原名称链，无法确认闭环时继续给出原未完成依赖诊断。
+- fail/119 覆盖 `ITEM_COUNT` 经嵌套 CT `sizeof(PendingLayoutPacket)` 和字段数组长度回到自身；
+  fail/126 覆盖数组长度经嵌套 CT 函数读自身 `sizeof`，fail/127 覆盖数组长度直接读自身
+  `sizeof`。三例均断言完整闭链。
+- `make test` 全绿：ANTLR 语法正例 72/72、反例 44/44；运行正例 103/103、负例 99/99、
+  pass 8/8，共 210/210。`make selfhost-native` 全绿：14 个模块产物固定点一致、68 个源文件
+  自解析、语料 210/210、模块语法 17/17、项目验收 83/83；并发扫描、前端缓存、运行时内存、
+  命令及链接缓存检查通过。
+- `git diff --check` 通过；`make seed` 与种子冷编 `make` 通过。
+- 新种子 SHA-256：`bc0680ac4aff9d98de9e846d183285f964de4000180aed48816cdfdd928792a1`。
+  详见[编译期混合布局依赖环诊断完成记录](01-finished/yh-编译期混合布局依赖环诊断-2026-10-06.md)。
+
+# 2026-10-06 yh 编译期临时聚合下标读取
+
+- typed CT 函数可读取函数返回定长数组的多级下标，以及函数返回结构体中的数组字段下标；下标写入仍限当前帧的可变局部值。
+- 新增 `tests/yh-run/run/94-comptime-index-aggregate-expression.yh` 和 `fail/128-comptime-temporary-index-write.yh`，覆盖返回二维数组/结构体数组字段读取及拒绝临时数组写入；结果为 29。
+- `make test` 全绿（语法 72/72 + 44/44，运行 104/104、100/100、pass 8/8，共 212/212）；`make selfhost-native` 全绿（14 个产物固定点、68 个源文件自解析、语料 212/212、模块 17/17、项目 83/83）。
+- `make seed`、种子冷编 `make` 与 `git diff --check` 通过。新种子 SHA-256：`66d431a0764c69eb21ca59a59aac4bd25441fdd61f2f3173144cd0ffb493b81e`。详见[编译期临时聚合下标读取完成记录](01-finished/yh-编译期临时聚合下标读取-2026-10-06.md)。
+
+# 2026-10-06 yh 编译期结构体元素切片
+
+- typed 编译期执行器支持整数或受支持结构体元素切片的视图、形参别名、成员写入、for-in 按值复制和嵌套返回；顶层结果可用于局部/全局静态物化。切片 backing 延后输出，确保嵌套切片字段不打断父结构或结构体数组布局。
+- 新增 `tests/yh-run/run/97-comptime-struct-slice-elements.yh`，扩展 `comptimelocal` 跨源文件项目，并保留浮点、指针和浮点切片字段拒绝用例。
+- `make test` 全绿（语法 72/72 + 44/44，运行 107/107、拒绝 101/101、pass 8/8，共 216/216）；`make selfhost-native` 全绿（14 项固定点、69 个源文件自解析、语料 216/216、模块语法 17/17、项目 83/83 和其余自举探针）。
+- `git diff --check`、`make seed` 与种子冷编 `make` 通过。新种子 SHA-256：`89cad9428eb4b85395490a8a4425883e866016f4a61246de00608df69428192a`。详见[编译期结构体元素切片完成记录](01-finished/yh-编译期结构体元素切片-2026-10-06.md)。
+
+# 2026-10-07 yh 编译期 typed 局部指针读写
+
+- typed 编译期函数支持当前帧整数局部槽的 `&` 取址、`*` 读取与写回。解释器指针只引用局部槽；指针参数/返回、聚合逃逸、算术、成员/下标取址、全局/字符串指针求值及空指针解引用均拒绝，其中空指针解引用有明确诊断。
+- 新增 run/131 正例及 fail/130–131 边界用例。旧入库种子对新行为的定向用例失败，当前实现三例全过。
+- `make test` 全绿：语法正例 73/73、反例 44/44；运行 109/109、拒绝 103/103、pass 8/8，共 220/220。`make selfhost-native` 全绿：21 个模块固定点产物、71 个源文件自解析，模块语法 17/17、项目验收 84/84。
+- `git diff --check`、`make seed`、新种子冷编 `make` 与滚种子后 `make selfhost-native` 全部通过；后者再次确认 21 个固定点产物、71 个自解析源文件、220/220 语料、17/17 模块语法及 84/84 项目验收。新种子 SHA-256：`a37e309a604d52290b13e413e907da254d041e3b4337bb2f581c3feeb7d11fee`。详见[完成记录](01-finished/yh-编译期typed局部指针读写-2026-10-07.md)。
+
+# 2026-10-07 yh 编译期 typed 指针形参
+
+- typed 编译期函数的 `*T`（整数 `T`）形参可别名调用方帧的整数局部槽：被调方 `*param` 读写该槽，
+  也可继续向下传递；`comptimelocal` 新增跨源文件指针形参写回断言。
+- 新增存活调用帧链（`CtFrame.live_next` + `ct_live_frames`，统一经 `ct_ir_frame_release` 收缩帧）
+  与 `ct_ir_pointer_target`：解引用和指针形参绑定都必须先验证地址落在存活帧局部槽区间内。
+  **附带修复**：`let text *char = "abc"; return *text;` 此前让编译器段错误（字符串标签值被当作宿主
+  `CtValue` 地址），现在报「编译期指针必须指向当前存活调用帧的整数局部值」。
+- 仍拒绝：指向指针/浮点/聚合的指针形参、指针返回与聚合逃逸、指针算术、成员/下标取址、全局与字符串
+  指针常量求值；空指针解引用保留专有诊断。`fail/104` 改为指向浮点的指针形参，`fail/129` 诊断片段随声明消息更新。
+- 新增 run/132 与 fail/132–134。改动前：正例因形参类型不受支持而失败、fail/133 编译器崩溃（信号 11）、
+  fail/134 诊断不符；改动后四例全部按预期通过。
+- `make test` 全绿：语法正例 73/73、反例 44/44；运行 110/110、拒绝 106/106、pass 8/8，共 224/224。
+  `make selfhost-native` 全绿：21 个模块固定点产物、71 个源文件自解析、语料 224/224、模块语法 17/17、
+  项目验收 84/84。
+- `git diff --check`、`make seed`、新种子冷编 `make` 与滚种子后 `make selfhost-native` 全部通过。
+  新种子 SHA-256：`c572a1e1355f77e0828f1f8913e66b4b2624d5b1c3e70658fdb24adc9ba0be0c`。
+  详见[完成记录](01-finished/yh-编译期typed指针形参-2026-10-07.md)。
+
+# 2026-10-07 yh 编译期 typed 聚合元素取址
+
+- typed 编译期函数可对当前帧内的整数聚合元素取址：`&array[i]`、`&slice[i]`（含切片视图元素）
+  与 `&struct.field`；所得指针与局部变量指针同权，可解引用读写、可作为整数指针形参传给更深的调用。
+- 指针目标校验从局部槽区间扩展到「局部槽 + 存活帧拥有的聚合元素块」（含非拥有视图块），
+  按该位置元素的实际类型校验；非整数元素/字段取址、临时值取址、`&*p` 重取址仍拒绝。
+- 新增 run/133，反例 fail/135（非整数元素）与 fail/136（临时值）；改动前正例失败、两条反例已按预期拒绝。
+- `make test` 全绿：语法正例 73/73、反例 44/44；运行 111/111、拒绝 108/108、pass 8/8，共 227/227。
+  `make selfhost-native` 全绿：21 个模块固定点产物、71 个源文件自解析、语料 227/227、模块语法 17/17、
+  项目验收 84/84。
+- `git diff --check`、`make seed`、新种子冷编 `make` 与滚种子后 `make selfhost-native` 全部通过。
+  新种子 SHA-256：`da65b795242c2c446acf9ce3cce046eeeb19bc576594b807655991e9d00c0ef8`。
+  详见[完成记录](01-finished/yh-编译期typed聚合元素取址-2026-10-07.md)。
+
+# 2026-10-07 yh 编译期 typed 浮点标量
+
+- typed 编译期执行器支持 f32/f64 标量：字面量、局部值、`+ - * /` 与一元正负号、比较、
+  显式转换（整数↔浮点、浮点↔浮点、f32 窄化）以及浮点形参与浮点返回。
+- 浮点值以 IEEE754 位模式保存在 `CtValue.value`（类型由 `type_id` 区分），顶层常量物化
+  同时写入 `Res.ival`/`Res.fval_bits` 并按浮点寄存器装载；f32 在写入与物化时窄化。
+- 新增 `compiler/comptime/ct_ir_float.yh`，接入常量、一元、二元、转换、赋值与局部声明路径。
+- 顺带修复三处既有缺口：const 引用从不填 `fval_bits`/不按浮点装载；编译期局部声明初始化
+  对 f32 走整数截断损坏位模式；单精度判定误用 `TY_F32` 常量而非类型表 kind。
+- 一元负号改符号位翻转、浮点转整数统一有符号截断，避免生成冻结子集外的 `fneg`/`fcvtzu`
+  （自编导入审计构建曾因此失败）。
+- 新增 run/134、fail/137–138，`comptimelocal` 增加跨源文件浮点形参/返回与整数折算断言。
+- `make test` 230/230；`make selfhost-native` 全绿（21 固定点、72 自解析、语料 230/230、
+  模块 17/17、项目 84/84，含自编导入审计构建）；滚种子后冷编与主门复核通过。
+  新种子 SHA-256：`e47a63fb61c89f1e3f4586342081d7691ebf2890e6add3501ed7bf53721ce423`。
+  详见[完成记录](01-finished/yh-编译期typed浮点标量-2026-10-07.md)。
+
+# 2026-10-07 yh 前端浮点常量折叠
+
+- 前端常量折叠支持浮点：算术、比较、一元正负、显式转换（整数↔浮点、浮点↔浮点、f32 窄化），
+  普通函数里的 `$assert` 可直接比较浮点常量。
+- 浮点常量值统一把 IEEE754 位模式写入 `Res.ival` 与 `Res.fval_bits`（字面量、折叠结果、
+  编译期函数物化三处一致）；修复 `const A f64 = 1.5;` 引用读到 0，以及浮点常量一元负号
+  落入整数分支并被改写成 `int` 的缺陷。
+- 新增 `fp64_from_bits`/`fp64_norm_bits`（gen）、`sem_fold_float_binop`、`sem_fold_float_convert`
+  与 `sem_fold_const_unary` 浮点分支；一元负号走符号位翻转、浮点转无符号整数按有符号截断，
+  不生成冻结子集外的 `fneg`/`fcvtzu`。
+- 新增 run/135、fail/139，`comptimelocal` 增加浮点常量折叠与浮点常量物化断言。
+- `make test` 232/232；`make selfhost-native` 全绿（21 固定点、72 自解析、语料 232/232、
+  模块 17/17、项目 84/84）；滚种子后冷编与主门复核通过。
+  新种子 SHA-256：`5f6f072a7520057716d4975d5e2b91560bb7b24c03b0d919280e54c5cacc08c7`。
+  详见[完成记录](01-finished/yh-前端浮点常量折叠-2026-10-07.md)。
+
+# 2026-10-07 yh 编译期 typed 浮点聚合元素
+
+- 浮点聚合元素在编译期可用：定长数组元素、切片元素、结构体浮点字段（含嵌套数组字段）
+  可构造、下标读写、切片视图别名写回、for-in 迭代、作为聚合形参/返回值，并可静态物化为
+  顶层常量；f64 发位模式，f32 先经 `ct_ir_fp32_bits` 取单精度位模式。
+- 支持门从「整数叶」放宽为「整数或浮点叶」；新增 `ct_ir_norm_scalar` 统一元素/字段/局部/
+  赋值的标量归一；诊断文本改为「整数、浮点」。
+- 新增 run/136；`fail/103`、`fail/105`、`fail/129` 改造为指针元素数组/切片字段与指针元素
+  切片返回仍拒绝，`fail/137` 改为浮点元素取址仍拒绝；`comptimelocal` 增加浮点数组形参、
+  浮点切片返回与顶层浮点切片物化断言。
+- `make test` 233/233；`make selfhost-native` 全绿（21 固定点、72 自解析、语料 233/233、
+  模块 17/17、项目 84/84）；滚种子后冷编与主门复核通过。
+  新种子 SHA-256：`9f47cde4d02c1f578fec2b727848e65969a11ea545044c8d1ad71ee62747fb83`。
+  详见[完成记录](01-finished/yh-编译期typed浮点聚合元素-2026-10-07.md)。
+
+# 2026-10-07 yh 编译期 typed 浮点指针
+
+- 编译期指针目标从整数槽放宽到标量槽：`&` 取址、`*p` 解引用读写与 `*f64`/`*f32`
+  形参跨帧写回、二次转发都支持浮点；类型仍须逐类型相等，存活帧校验不变。
+- 解引用读写直接搬运 `CtValue`（位模式），无需浮点特判；浮点赋值/复合赋值沿用 STORE
+  路径的浮点归一。诊断文本从「整数局部变量/整数聚合元素/整数局部值」改为「标量…」。
+- 新增 run/137；`fail/104` 改为指向指针的指针仍拒绝，`fail/137` 改为浮点指针返回仍拒绝，
+  `fail/138` 改为结构体浮点指针字段仍拒绝，`fail/135` 更新为「非标量聚合元素取址」；
+  `comptimelocal` 增加跨源文件 `*f64` 形参写回断言。
+- `make test` 234/234；`make selfhost-native` 全绿（21 固定点、72 自解析、语料 234/234、
+  模块 17/17、项目 84/84）；滚种子后冷编与主门复核通过。
+  新种子 SHA-256：`55ed0dab8478e6985fe5f10fc5939602129d634cc6531712e115503b3500f280`。
+  详见[完成记录](01-finished/yh-编译期typed浮点指针-2026-10-07.md)。
+
+# 2026-10-07 yh 编译期 typed 指针算术与指针下标
+
+- 编译期指针算术可用：`p + i`、`i + p`、`p - i` 按 `CtValue` 槽步进（编译期聚合元素
+  即槽，等价语言上按元素下标前进，f32 元素同样只占一槽），`p[i]` 支持读取与写入。
+- 解引用与下标写入统一由存活帧校验（`ct_ir_pointer_target`）解析目标槽，越界地址被拒绝；
+  步数绝对值超 100000 直接报错；指针之间的算术、乘除与大小比较仍拒绝。
+- 顺带修复：前端 `sem_binop` 的「整数 + 指针」分支漏设结果类型（`let q *T = 1 + p;`
+  曾报「不能把非指针值赋给指针」）；`ct_ir_index_read` 改用逐字段复制，
+  规避「`*dst = *src;` 整体结构体解引用赋值让编译器段错误」的后端缺陷（已记入 todo）。
+- 新增 run/138、fail/140–141；`comptimelocal` 增加跨源文件指针下标累加与指针算术断言。
+- `make test` 237/237；`make selfhost-native` 全绿（21 固定点、72 自解析、语料 237/237、
+  模块 17/17、项目 84/84）；滚种子后冷编与主门复核通过。
+  新种子 SHA-256：`43f3301b1a9d53258ad124e222cd17d3c18e64c37d9fc861847ab894cd3f027e`。
+  详见[完成记录](01-finished/yh-编译期typed指针算术与下标-2026-10-07.md)。
+
+# 2026-10-07 yh 编译期 typed 联合体
+
+- 编译期支持整数叶联合体：字面量构造（只初始化一个字段）、成员读写、按值复制、
+  形参按值传入与返回值复制到调用方帧。
+- 共享存储模拟：每个字段各占一个 `CtValue` 槽，写入后按其他字段类型广播重解释
+  （小端整数截断/零扩展）——写 `int` 读 `u8` 取低位、写 `u8` 读 `int` 零扩展，
+  与运行期一致；未写入字节在编译期固定为 0。
+- 明确边界：联合体字段取址（`&v.field`，共享槽无法保持别名语义）、浮点/指针/聚合
+  字段、联合体作数组/切片元素或结构体字段、顶层静态物化一律拒绝并给出诊断。
+- 顺带修复模块模式缺陷：`parse/ast_expr.yh` 的 `ast_expr_verify` 要求 `STRUCT_INIT`
+  节点类型必须是 `TY_STRUCT`，导致模块代码里任何 union 字面量都报
+  「内部错误：表达式 AST 校验失败」；现在同时接受 `TY_UNION`。
+- 新增 run/139、fail/142–144；`comptimelocal` 增加跨源文件联合体共享存储断言。
+- `make test` 241/241；`make selfhost-native` 全绿（21 固定点、72 自解析、语料 241/241、
+  模块 17/17、项目 84/84）；滚种子后冷编与主门复核通过。
+  新种子 SHA-256：`b7eb33f1f13a93346923d1102679b6555e08a7bf51ee2bc3f3fe5fa2ec813d2c`。
+  详见[完成记录](01-finished/yh-编译期typed联合体-2026-10-07.md)。
+
+# 2026-10-07 yh 编译期单一执行器收敛
+
+- typed IR 成为编译期唯一执行器：删除早期 token 求值器 `ct_eval_expr.yh`、
+  `ct_eval_bool.yh`、registry 内的数组长度 token 探测链（`ct_array_length_probe_*`、`ct_find_name`）
+  以及 `ct_00_model.yh` 的 `CtReader`/`CtLocal`；`ct_invoke_in_frame` 的回退分支改为
+  诊断「编译期函数正文不在受支持的 typed IR 子集内」。`comptime/` 由 5480 行降至 4593 行。
+- 根因修法：`parse_global_ct_const_probe` 的准入条件从「token 探测支持该调用树」改为
+  `comptime.ct_is_prepared(sym) != 0`。pass1 期间的顶层 `const`/数组长度求值因此让位给
+  pass2a 之后的 typed 布局常量依赖调度；受影响的 9 个用例（fail/76、79、88，run/64、92、111、113、115）
+  改由 typed 执行器求值，诊断文本不变。
+- 过程中的失误与纠正：第一次只改回退分支导致 9 个用例失败，并误删了未提交的
+  `ct_eval_expr.yh`（557 行）与 `ct_eval_bool.yh`（git 仅能恢复到 181 行旧骨架）；
+  最终通过修根因而不是恢复遗留代码解决。教训记入实施方案。
+- `make test` 242/242（run 118/118、fail 116/116、pass 8/8）；`make selfhost-native` 全绿（21 固定点、70 个源文件自解析、
+  语料 242/242、模块 17/17、项目 84/84）；滚种子后冷编与主门复核通过。
+  新种子 SHA-256：`24ae276e652efc4fd97bf53e7fa7f16bd58bb5bccb3ceece3c835fc38bbcd105`。
+  详见[完成记录](01-finished/yh-编译期单一执行器收敛-2026-10-07.md)。
+
+# 2026-10-07 yh 编译期不受支持正文的具体诊断
+
+- `ct_ir_is_supported` 改为 `ct_ir_support_code`，返回首个不受支持构造的原因码
+  （100 类型声明、200 goto、300 标签、400 编译期语句、500 其他语句、600 未知表达式种类、
+  700 表达式缺少类型），`CtFunction` 增加 `ir_unsupported` 字段随捕获记录。
+- `ct_invoke_in_frame` 的回退分支改调 `ct_unsupported_diagnostic(code)`：不在 typed IR
+  子集内的编译期函数现在报「…的 goto 语句不在受支持的 typed IR 子集内」这类具体文本，
+  而不是统一的「编译期函数正文不在受支持的 typed IR 子集内」；诊断仍延迟到实际调用，
+  位置沿用调用处 `file:line:col`；函数体内行列留给后续按需补。
+- 新增 fail/145（goto）、fail/146（标签）；`make test` 244/244；`make selfhost-native`
+  全绿（21 固定点、70 源文件自解析、语料 244/244、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`cf1cbe8212a4ba1cf0dca8f5883463580cc4373d64d43d2476d4e94d4213028b`。
+- 顺带把 `docs/todo.md` 里 CT5A 的「受限 token 早期探测」描述改为 typed 布局调度
+  （该探测链已在[单一执行器收敛](01-finished/yh-编译期单一执行器收敛-2026-10-07.md)中删除）。
+
+# 2026-10-07 yh 编译期字符串字面量指针常量只读访问
+
+- 编译期字符串字面量现在可以解引用与下标读取：捕获期把字面量字节解码成只读
+  `CtValue` 槽池（每字节一槽 + 末尾 0 槽），指针直接指向池首槽，既有的解引用、下标、
+  指针算术路径全部复用。新增 `CtPoolSpan` 池表、`ct_pool_register`（转义解码与槽分配）、
+  `ct_ir_register_string_pool`（随 `ct_ir_import` 登记同批次字面量）与并行地址表
+  `ct_ir_expr_pool`（`ct_ir_grow` 第 5 类 arena）。
+- 读：`ct_ir_pointer_target` 在存活帧链后追加池区间查询；写：赋值语句拒绝写入池
+  （读与写共用 `ct_ir_lvalue`，保护落在赋值处）。`ct_pool_reset` 随 `ct_reset` 释放。
+- 新增 run/141（解引用、下标、NUL、指针算术、转义、形参传递，结果 304）与
+  fail/147（写入拒绝）；原 fail/133（解引用被拒）语义已变，删除并由 run/141 取代。
+- 边界：顶层/普通函数里的 CT 调用实参仍不支持字符串字面量指针常量（不经 typed IR 捕获）；
+  跨模块转发正文按 `token_count` 判据跳过；全局数组地址等其他指针常量仍未支持。
+- `make test` 245/245；`make selfhost-native` 全绿（21 固定点、70 源文件自解析、
+  语料 245/245、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`d212909322cf42fc582216c1db0607a4fde352697229f1c275e5c9581227b559`。
+  详见[完成记录](01-finished/yh-编译期字符串字面量指针常量只读访问-2026-10-07.md)。
+
+# 2026-10-07 编译期消费者位置收尾与跨模块字符串字面量锁定
+
+- 跨模块正文里的字符串字面量指针常量解引用经实测**已可用**（导入方重新解析正文，
+  自己的 `c_src`/`c_toks` 满足池登记的同批次判据），上一轮文档中「跨模块转发正文不登记池」
+  的边界描述已更正；`tests/modules/projects/comptimecross` 新增
+  `math.first_letter` 与 host 断言锁定该行为（项目门 84/84）。
+- 新增 `tests/yh-run/run/142-comptime-consumer-positions.yh`：编译期调用作为常量的
+  各消费者位置（切片范围上界、类型别名长度、结构体字段长度、函数返回数组长度、
+  全局数组长度、结构体字面量字段值）统一锁定，结果 29。
+- 消费者位置探针结论：数组/切片/结构体字段/返回类型/全局数组长度与聚合字面量字段值
+  均支持 CT 调用；`case` 值位置语法上不接受 `$`（语言限制），枚举判别值用 CT 调用
+  仍不支持（调度重放未覆盖 `enum`，需求弱未立项）。
+- 新发现两个缺陷并立项到 `docs/todo.md`：类型别名长度用 CT 调用与同文件函数返回同长度
+  定长数组冲突（最小复现 8 行，边界已探明）；`sizeof` 对定长数组返回 `长度 × 4`（既存行为）。
+- `make test` 246/246（run 120/120、fail 118/118、pass 8/8）；`make selfhost-native` 全绿。
+  本轮未改编译器源码，种子保持
+  `d212909322cf42fc582216c1db0607a4fde352697229f1c275e5c9581227b559`。
+
+# 2026-10-07 编译期延迟数组类型的结构性兼容修复
+
+- 修上一轮立项的缺陷：`type Pair = [$f()]int;`（长度来自编译期调用）与同文件同长度
+  定长数组（返回类型、局部变量、形参）冲突，`return v;` 报「聚合类型不匹配」。
+- 根因：长度表达式走 `ct_layout_array_expr` 建立延迟布局的独立数组类型项 A，pass1 里
+  `let v [2]int` 只能建立规范项 B，别名布局完成后 pass2 的返回类型命中 A，
+  两侧 type_id 不同但 `kind`/`size`/`align`/`elem`/`len`/`sub` 全同。
+  定位手段：在 `sem_can_assign` 聚合分支临时分段比较各字段。
+- 修复：`compiler/gen/symbols.yh` 的 `sem_can_assign` 聚合分支对 `TY_ARRAY` 增加
+  按内容（元素类型 + 长度）的兼容判定；结构体/联合体保持名义类型严格比较。
+  选择内容判定而非合并类型项，避免让 pass1 的类型项预知后续延迟布局结果。
+- 新增 `tests/yh-run/run/143-comptime-alias-length-array.yh`（结果 18）；负例保持拒绝：
+  长度不同、元素不同、同字段结构体互赋。
+- `make test` 247/247（run 121/121、fail 118/118、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 247/247、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`8d7fbbe0ed542a15f88aa8367982d67e11b3a69d6177efe56a1b5b65aef9e1da`。
+  详见[完成记录](01-finished/yh-编译期延迟数组类型结构兼容修复-2026-10-07.md)。
+
+# 2026-10-07 编译期全局字符串指针常量与跨模块导出
+
+- 全局字符串字面量指针常量现在可在编译期求值：`ct_ir.yh` 的 `SYM_CONST` + `F_ADDR`
+  分支按常量保存的 `const_expr_off/len` 原样字节登记只读池并返回池地址；
+  `CtPoolSpan` 增加来源键 `key`，`ct_pool_register` 按键复用池段（循环内反复引用
+  同一常量不会耗尽 64 段上限）。
+- 顶层/普通函数里的编译期调用实参：新增 `ct_pool_adopt_label`，在调用入口按
+  `cval == value && F_ADDR && const_expr_kind == 2` 反查常量表，把仍是数据标签号的
+  字符串指针实参换成池地址（改的是实参副本，不动调用方数组）。
+- `pub const NAME *char = "..."` 可跨模块导出：`iface.yh` 原样重放声明，导入方解析时
+  走与用户源码相同的登记路径；`comptimecross` 项目新增 `TEXT`/`base.letter`/
+  `api.exported_letter` 覆盖整条链路。
+- 新增 `tests/yh-run/run/144-comptime-global-string-const.yh`（结果 388）；
+  `build-check.py` 的 `ct5b-pointer-constant-not-evaluable` 语义已变，改造为
+  `ct5b-string-pointer-constant-evaluable`。
+- 边界：只支持 `char`/`u8`/`i8` 元素（实际形态 `*char`）；直接写字的顶层实参
+  `$f("abc")` 仍不支持（字面量实参不产生符号）；非字符串指针常量仍拒绝。
+- `make test` 248/248（run 122/122、fail 118/118、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 248/248、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`35dbee3c1031c3c70eea9ea1b9f87d7f42ae0b3c82912b06840870105e89477e`。
+  详见[完成记录](01-finished/yh-编译期全局字符串指针常量与跨模块导出-2026-10-07.md)。
+
+# 2026-10-07 编译期调用实参里的直接字符串字面量
+
+- 直接写在编译期调用实参里的字面量（`const A int = $f("A");`）此前无法使用：实参由前端
+  直接求值成数据标签号，不经过 typed IR 捕获，也没有符号可反查。
+- 修复：`gen/state.yh` 新增独立全局映射表 `c_data_str_lbl/off/len`（上限 128）与
+  `data_str_add`/`data_str_lookup`，`sem_string` 求值时登记标签 → intern 原样字节；
+  `ct_pool_adopt_label` 在符号反查失败后按标签号查表，命中即登记只读池并换成池地址。
+- 映射表**不放 `GenState`**：`GenState` 已大到让后端单条 `add` 的字段偏移越界
+  （`add x0, x0, #6528` 超出 12 位立即数范围，汇编失败），加 3 个数组立刻踩坑。
+- 新增 `tests/yh-run/run/145-comptime-literal-arg-positions.yh`：顶层 const、全局变量
+  初始化、普通函数体三处字面量实参（含多实参混合标量），结果 713。
+- 边界：映射上限 128 项（超出静默降级）；跨模块的直接字面量实参仍拒绝（用导出常量）；
+  非字符串指针常量仍拒绝。
+- `make test` 249/249（run 123/123、fail 118/118、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 249/249、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`55013f50022512263e42b97f84595a6198bd5db0770acc8bdd59f6ddf28c54c2`。
+  详见[完成记录](01-finished/yh-编译期直接字面量实参-2026-10-07.md)。
+
+# 2026-10-07 编译期成员名字段修复与表达式/语句覆盖审计
+
+- 修缺陷：结构体字段名使用被语言用作关键字的文本（如 `in`）时，编译期成员访问报
+  「内部错误：编译期成员名 token 无效」。根因是编译期路径额外要求 `member.kind ==
+  TOK_IDENT`，而字段匹配本来就按源文本进行；删掉类别校验后即可用。
+- 覆盖审计：用探针过了一遍编译期表达式与语句种类，结论是当前**全部支持**
+  （算术/位/比较/逻辑/一元/三元/成员/下标/取址与解引用写回/sizeof/转换/len/切片视图/
+  浮点/字面量；if-else、区间 for-in、条件 for、continue/break、switch、for-in 双绑定、
+  嵌套块、$if/$for、诊断语句）。仍在拒绝路径的是 goto/标签、正文内类型声明、
+  `case` 值位置的 `$`（语法不接受）与枚举判别值用编译期调用。
+- 撤销上一轮的误判立项：`sizeof(int) == 4`（`int` 即 4 字节），`[3]int`=12、
+  `struct { [3]int; int }`=16 都是正确值。
+- 新增 `tests/yh-run/run/146-comptime-expression-matrix.yh`（815，含关键字文本字段名）
+  与 `run/147-comptime-statement-matrix.yh`（47）。
+- `make test` 251/251（run 125/125、fail 118/118、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 251/251、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`1c2939f7080072cb46eca9aa7a9403fb0cef5e4ed94aa3d8f8a8443dc448e786`。
+  详见[完成记录](01-finished/yh-编译期成员名与覆盖审计-2026-10-07.md)。
+
+# 2026-10-07 深结构体字段偏移越界修复
+
+- 修缺陷：`sem_expr.yh` 的成员访问无条件发 `add x0, x0, #off`，字段偏移超过 4095
+  （AArch64 `add` 立即数 12 位无符号上限）时汇编失败；标量字段走 `ldr/str [xN, #imm]`
+  所以只有聚合字段（数组/结构体/切片）的地址计算会踩到。
+- 修法：偏移 > 4095 时借 `x12` 装载偏移再 `add x0, x0, x12`，与 `em_lea_local*` 的
+  深帧约定一致。
+- 新增 `tests/yh-run/run/148-deep-struct-field-offset.yh`（4096/4112/8192/8208 四种深度，
+  结果 5678）；修复前汇编失败，修复后通过。
+- 附带确认：编译器自身 `GenState` 的字段偏移已越过 4095 —— 往 `GenState` 追加 512 个
+  `int` 后，用修复前的种子构建编译器会报 634 处 `add x0, x0, #47xx`；滚种子后用新种子
+  重做同一实验构建成功，阻塞解除（探针字段已撤销）。
+- `make test` 252/252（run 126/126、fail 118/118、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 252/252、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`498543a7e5b9483e0ca6877accf54854926fdc6b91b72a3856fc07e42c164cf1`。
+  详见[完成记录](01-finished/yh-深结构体字段偏移越界修复-2026-10-07.md)。
+
+# 2026-10-07 跨模块编译期调用直接字面量实参的静默错值修复
+
+- 缺陷：`$math.head_of("Z")` 不报错但返回 104（'h'）—— 跨模块调用的实参在提供方
+  编译单元求值，拿到那边的数据标签号，编译期侧按标签号在本地只读池映射里反查时
+  命中本地无关字面量。上一轮为直接字面量实参加的标签反查没有区分标签号来源编译单元。
+- 修复（保守）：`parse_expr.yh` 在解析编译期调用实参时，若调用是模块限定形式、
+  实参是字符串字面量、对应形参是单字节指针，直接报
+  「跨模块编译期调用不支持直接字符串字面量实参，请改用模块导出的 pub const 指针常量」。
+- `comptimecross` 新增 `math/api.yh` 的 `pub fn head_of(text *char) int`；
+  `build-check.py` 新增 `ct5b-crossmodule-literal-arg-rejected`（注入字面量实参后必须
+  构建失败并带该诊断）。
+- 遗留：支持该写法需把字面量字节来源跨编译单元传递，已记入 `docs/todo.md` CT5B。
+- `make test` 252/252（run 126/126、fail 118/118、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 252/252、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`c0e13a4bf63d147a1d7f9a4f26acaf9029fada0909f4615b92b832a5c7fc2791`。
+  详见[完成记录](01-finished/yh-跨模块字面量实参静默错值修复-2026-10-07.md)。
+
+# 2026-10-07 跨模块编译期单字节指针形参的错值修复
+
+- 上一条修复只按「字面量实参」拒绝，本轮实测发现同一根因还影响非字面量写法：
+  `const MINE *char = "AB"; $math.head_of(MINE)` 同样返回 104105（`"hi"` 的字节）。
+  实测三种写法（`head_of("Z")`→104、`head_of("AB")`→104105、`head_of(MINE)`→104105）
+  都读到同一段无关字节；同项目 `*int` 形参的跨模块写回正常，因为整数指针不走字节池。
+- 修法：拒绝范围按**形参类型**判定 —— 编译期调用为模块限定形式且形参是单字节指针
+  （`char`/`u8`/`i8`）时直接报「跨模块编译期调用不支持单字节指针形参（char/u8/i8）：
+  实参的字符串来源无法跨编译单元解析，请改用模块导出的 pub const 指针常量」。
+- `build-check.py` 拆成 `ct5b-crossmodule-literal-arg-rejected` 与
+  `ct5b-crossmodule-pointer-arg-rejected` 两个检查，两种写法都要求被拒绝。
+- 遗留：支持该写法需让实参字节来源随调用跨编译单元传递，已记入 `docs/todo.md` CT5B。
+- `make test` 252/252（run 126/126、fail 118/118、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 252/252、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`7943d6f4418278254cb27c2884dacdacc5cf763e609aadf5fa462f427ffe81f4`。
+  详见[完成记录](01-finished/yh-跨模块单字节指针形参错值修复-2026-10-07.md)。
+
+# 2026-10-07 跨模块编译期调用直接字面量实参支持
+
+- 排查结论：临时把本地字面量编号后移（host 顶部加 `const PAD *char = "PAD";`）后
+  `head_of("AB")` 从 104 变成 65，证明实参值是**提供方编译单元分配的标签号**，
+  被调用方 worker 用自己的编号解释 → 按标签号反查本地表这条路不可靠。
+  但直接写在实参位置的字符串字面量不受影响：字节就在调用方源码里，可就地登记只读池。
+- 实现：`parse_expr.yh` 在解析实参前记下是否为字符串字面量，解析后按形参类型处理 ——
+  字面量就地登记池并覆盖实参值为池地址；非字面量的跨模块调用保持拒绝；同模块调用放行
+  （继续走 `ct_pool_adopt_label`）。新增 `ct_pool_register_src` 标量参数包装。
+- 实现细节：覆盖放在 `parse_expr_iso` 之后、不改控制流；早先用 `continue` 跳过解析的写法
+  会让编译器报出「模块没有导出该名字」这种与代码无关的诊断（行号落在 `gen.TOK_COMMA`）。
+- 验证：`comptimecross` host 新增 `const HEAD int = $math.head_of("AB");` + `HEAD - 65` 断言；
+  `build-check.py` 保留 `ct5b-crossmodule-pointer-arg-rejected`（非字面量跨模块实参必须被拒）。
+- `make test` 252/252（run 126/126、fail 118/118、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 252/252、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`2adc5b5d79ffd6a58241304d3b99a269e14b5cefee2aeaa1c4dd283b89e90d2b`。
+  详见[完成记录](01-finished/yh-跨模块字面量实参支持-2026-10-07.md)。
+
+# 2026-10-07 编译期顶层聚合实参诊断与聚合能力探针
+
+- 探针结论：编译期聚合值/左值常见形态**全部支持** —— 结构体与定长数组按值复制后改写
+  保持隔离、结构体数组字段的切片视图别名写回、`for-in` 遍历结构体数组字段与切片字段。
+  前几轮记的「CT3 剩余：其他聚合值与一般左值」在常见形态上已无缺口。
+- 探针发现的缺口：顶层/普通函数里的编译期调用不能写聚合字面量实参
+  （`$take(Point{ x: 1 })`），因为顶层实参必须在 pass1 折叠成常量。
+- 改动：`parse_expr.yh` 对「聚合形参 + 聚合字面量实参 + 非编译期函数正文」给出可读诊断
+  「编译期调用实参里的聚合值需要在编译期函数体内构造（顶层实参必须是编译期常量）」，
+  替代原先的「结构体字面量不是编译期常量」。
+- 新增 `tests/yh-run/fail/148-comptime-top-aggregate-arg.yh`。
+- `make test` 253/253（run 126/126、fail 119/119、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 253/253、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`ee3c396a1d204811eeb5dc305075356f92a8c2d0c0df7e7de430ebb5a1f834a4`。
+  详见[完成记录](01-finished/yh-编译期顶层聚合实参诊断与聚合探针-2026-10-07.md)。
+
+# 2026-10-07 枚举判别值里编译期调用的可读诊断
+
+- 缺陷（诊断质量）：`pub enum Palette { red = $two() + 1; green; }` 报
+  「编译期函数正文不在受支持的 typed IR 子集内」，但 `two` 的正文完全在子集内 ——
+  真实原因是求值时机（判别值在 pass1 折叠，typed 正文要 pass2 才捕获），
+  该措辞会让用户去检查函数体，方向完全错。
+- 改动：`parse_decl.yh` 的枚举成员判别值解析在求值前扫描判别值 token 区间
+  （到 `;` 或 `}` 为止），出现 `$` 即报
+  「枚举判别值里的编译期调用暂不支持（需要延迟到正文捕获之后求值），请改用纯常量表达式」。
+- 新增 `tests/yh-run/fail/149-comptime-enum-discriminant.yh`。
+- 边界确认：隐式递增枚举在编译期函数体内引用成员正常（run/93：green:7、blue:8）；
+  顶层 `const V int = Palette.green.to_type(int);` 报「引用了未声明的名字」，
+  是另一个缺口（已立项）。
+- `make test` 254/254（run 126/126、fail 120/120、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 254/254、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`62c2eb2857e1fbbac6d89b05c3dd7a050c10fe3835ca5bbbaa3efdf605878aea`。
+  详见[完成记录](01-finished/yh-枚举判别值编译期调用诊断-2026-10-07.md)。
+
+# 2026-10-07 枚举成员限定引用 EnumName.member
+
+- 缺口：枚举成员只能裸名引用；`Palette.green` 在顶层、普通函数体、编译期函数体内
+  都报「引用了未声明的名字」，因为 `Palette` 是类型名、符号表里没有对应值符号。
+- 实现：`parse_expr.yh` 的标识符解析在模块限定名分支之前加枚举成员分支 —— 基名不是
+  任何符号时用 `ty_lookup_name` 查类型，命中 `TY_ENUM` 再查成员符号，要求
+  `F_ENUM_MEMBER` + `const_ready` + `type_id` 等于该枚举，命中即消费三个 token 走
+  `sem_ident_val`，与裸名引用同路径。
+- 新增 `tests/yh-run/run/149-enum-member-qualified.yh`：顶层、普通函数体、编译期函数体
+  三处限定引用，结果 22。
+- `make test` 255/255（run 127/127、fail 120/120、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 255/255、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`584b8b406b5cbb9b2f3f373a22fb7c96821e78cf13fb13d4e405581175b851a8`。
+  详见[完成记录](01-finished/yh-枚举成员限定引用-2026-10-07.md)。
+
+# 2026-10-07 枚举判别值里的编译期调用（延迟求值）
+
+- 实现：枚举判别值含 `$` 时 pass1 不解析表达式，只登记 token 区间（该成员及其后所有成员
+  含隐式都待回填）；`parse_ct_layout.yh` 新增延迟表（上限 64，独立全局数组），
+  `ct_enum_pending_run` 在 `ct_layout_resolve()` 之后、pass2a 之前按序回填 —— 显式成员
+  重解析表达式（正文此时已捕获），隐式成员取前一成员 `cval + 1`。
+- 配套：`parse_expr.yh` 的枚举成员限定引用不再要求 `const_ready != 0`，未就绪交给
+  `sem_ident_val` 报「编译期常量尚未就绪」。
+- 新增 `tests/yh-run/run/150-comptime-deferred-enum.yh`（a=3 b=4 c=20 d=21 v=21）；
+  原 fail/149 语义已变（现在成功）按既有做法删除。
+- 边界：模块模式里编译期正文引用延迟枚举成员仍不可用（模块模式标识符解析走另一条路径，
+  `Level.mid` 落到字段访问）；已记入 todo。
+- `make test` 255/255（run 128/128、fail 119/119、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 255/255、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`545378b49a159c8b7415a8816c3d833bff5d42ede50da9569db9143b58c651bd`。
+  详见[完成记录](01-finished/yh-枚举判别值延迟求值-2026-10-07.md)。
+
+# 2026-10-07 模块模式枚举成员引用的边界定位与锁定
+
+- 上一轮记的模块模式边界过宽，本轮测准：模块模式下**顶层常量**引用延迟判别值的枚举成员
+  是可用的（`pub const MID int = Level.mid;` 得到 `low=4`→`mid=5`），编译期函数读该常量、
+  跨模块转发也都正常；真正不可用的只有「编译期函数**正文里直接**引用枚举成员」
+  （报「『.』的左侧不是结构体或结构体指针」，准备期的表达式解析没走到新增的枚举成员分支）。
+- 本轮只改测试与文档：`comptimecross` 新增 `Level`（判别值来自编译期调用）、
+  `MID = Level.mid`、`mid_ct`、api 的 `level_mid` 转发与 host 的 `+ MID - 5` 断言。
+- `make test` 255/255（run 128/128、fail 119/119、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 255/255、模块 17/17、项目 84/84）。
+- 未改 `compiler/` 源码，种子未滚动。详见[完成记录](01-finished/yh-模块模式枚举成员边界定位-2026-10-07.md)。
+
+# 2026-10-07 模块模式枚举成员限定引用：失败路径定位（排除假说）
+
+- 尝试修「模块模式编译期正文直接引用枚举成员」，两条放宽假设都被实验否定，**不做改动、已回退**：
+  1) 在标识符入口加阶段化诊断，准备期打印结果只有一次 `DBG enum-qual: MATCH`（`Level`），
+     但同一次编译仍在 `.mid` 处报「『.』的左侧不是结构体或结构体指针」→ 该写法还被**另一条**
+     解析路径处理，且不经过 `parse_expr` 的标识符入口分支；
+  2) 依次去掉 `sym_lookup(...) < 0` 与类型可见性要求，结果**都不变** → 问题不在分支条件。
+- 两条放宽都无收益却各带一点误判风险，按「只动该动的」全部回退，`parse_expr.yh` 恢复第 22 轮状态。
+- 推荐写法（模块模式下可用，`comptimecross` 已锁定）：顶层常量中转 ——
+  `pub const MID int = Level.mid;` + 编译期函数读 `MID`。
+- 回退后 `make test` 255/255（run 128/128、fail 119/119、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 255/255、模块 17/17、项目 84/84）。未改 `compiler/` 源码，种子未滚动。
+  详见[完成记录](01-finished/yh-模块模式枚举成员失败路径定位-2026-10-07.md)。
+
+# 2026-10-07 模块模式枚举成员：根因定位到「成员符号在第二次解析不可见」
+
+- 三次插桩夹逼：① `sem_member` 失败分支分档 → `prepare + base TY_ENUM`（枚举类型名走了
+  **值路径**，基底求值成功再落到字段访问）；② `parse_ident_primary` 基名符号分档 → 同一行
+  `Level.mid` 在一次编译里被解析**两次**：第一次 `base has no symbol`（枚举成员分支命中），
+  第二次 `base symbol is CONST`（被 `sym_lookup(...) < 0` 挡住 → 值路径）；
+  ③ 加「`SYM_CONST` 且 `type_id` 是 `TY_ENUM`」第二形态判据仍失败（该常量符号的 type_id
+  不是枚举），改在 `sem_member` 兜底 → `DBG enum-base: member symbol not found`：
+  **第二次解析时枚举成员符号在名字表里查不到**。
+- 根因：模块 worker 第二次解析 CT 正文时枚举成员符号不可见；`parse_expr` 分支（那时基名已有
+  符号）与 `sem_member` 兜底（成员符号查不到）都救不了。真正支持需让第二次解析带上枚举成员
+  符号，或让枚举类型项自带成员表（`ty_push(TY_ENUM, ...)` 当前不存成员）。
+- 本轮交付：`sem_member` 新增枚举基底分支，给出准确可操作诊断（模块模式提示用顶层常量中转，
+  替代误导性的「『.』的左侧不是结构体或结构体指针」）；新增 `fail/149-enum-value-member-access.yh`
+  锁定该分支；`parse_expr.yh` 保持第 22 轮单形态（第二形态判据无收益，不留）。
+- `make test` 256/256（run 128/128、fail 120/120、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 256/256、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`1393ec390f8becd4b3573ada8a0096699f5d4790166a6d5df94c38dc4f8b981d`。
+  详见[完成记录](01-finished/yh-模块模式枚举成员根因定位-2026-10-07.md)。
+
+# 2026-10-07 枚举成员表尝试（回退）与 data_str 返回值约定修复
+
+- 尝试方向 ②「枚举自带成员表」实现模块模式编译期正文引用枚举成员：新增独立全局登记表
+  （快照名字池偏移与值，不依赖符号表），逐步排除了「类型 id 反查」「符号下标」「登记早于
+  const_ready」三个问题 —— 成员能命中，但**期间误删的 `data_str_*` 先报错**，且其重写版
+  返回值约定写反，故整体回退 `em_*`（四个文件还原到第 26 轮状态）。
+- 回归与修复：文本切片删 `em_*` 时误删 `state.yh` 的 `c_data_str_lbl/off/len` 与
+  `data_str_add`/`data_str_lookup`；重写时把「命中返回非零」写成「命中返回 0」，而消费侧
+  `ct_ir.yh` 用 `if (data_str_lookup(...) != 0)` 判命中 → 未命中分支照样进入、`off/slen` 全 0
+  →「编译期字符串字面量为空」（`comptimecross` 的 `$math.head_of("AB")` 编译失败，门红 82/84）。
+  改为命中返回 1、未命中返回 0 后门恢复 84/84。
+- 教训写入 todo：删代码先确认切片边界覆盖范围；重写被误删函数前先读消费侧调用约定。
+- `make test` 256/256（run 128/128、fail 120/120、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 256/256、模块 17/17、项目 84/84）。
+  种子因重写 `data_str_*` 而变化（行为等价，双门+固定点全绿）：`4002ff202018232db3e1bddccddc92963646b113d70bc2489f87963b29570bb7`。
+  详见[完成记录](01-finished/yh-枚举成员表尝试与data_str约定修复-2026-10-07.md)。
+
+# 2026-10-07 枚举成员表重做（解析期已通，执行器侧待补）
+
+- 按第 27 轮总结的两个坑重做成员表：`state.yh` 独立全局表在登记时**快照名字池偏移与值**
+  （避开「符号下标在二次解析后失效」）；`parse_decl.yh` 的 `em_add` 放在 `cval`/`const_ready`
+  赋值**之后**（避开「快照到 ready = 0」）；`parse_ct_layout.yh` 延迟回填同步表内快照；
+  `sem_expr.yh` 的 `sem_member` 在 `sym_lookup` 失败后按名字反查登记表。
+- 实测：插桩确认兜底**命中**（`DBG em: hit` 两次），但编译仍失败 —— 报错来自另一条路径
+  `comptime/ct_ir_place.yh:819` 的 `ct_ir_member_place`（「编译期成员访问只支持本地结构体或
+  联合体值」）：同一正文的第二次解析把 `EnumName.member` 当成员访问表达式送进执行器。
+- 因此本轮**无用户可见行为变化**（模块模式仍报第 26 轮的可操作诊断），也**没有新增用例**
+  （无行为变化即无可锁定场景）；门全绿无回归。
+- 下一步（已写 todo，勿重复走）：在 `ct_ir_member_place` 加枚举基底分支，用已有的
+  `member_rel` 取成员名 token + `gen.em_find`/`em_get_ready`/`em_get_val` 取值。
+- `make test` 256/256（run 128/128、fail 120/120、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 256/256、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`34a6832e96662cb43bba35367fb524c732eb8da795e549da9015edce1d771379`。详见[完成记录](01-finished/yh-枚举成员表重做-2026-10-07.md)。
+
+# 2026-10-07 模块模式编译期正文直接引用枚举成员（打通）
+
+- 承接第 26 轮根因（同一段编译期正文被解析两次，第二次 `EnumName` 已求值成常量符号、
+  成员符号又查不到 → 被当成员访问表达式送进执行器，在 `ct_ir_member_place` 报「编译期成员
+  访问只支持本地结构体或联合体值」）、第 27 轮回退、第 28 轮重做，本轮补上执行器侧：
+  `comptime/ct_ir_place.yh` 的 `ct_ir_member_read` 在结构体路径之前先判基底类型，`TY_ENUM`
+  时用该表达式已有的成员名 token 位置（`expr.after - frame.target.body_token_first - 1`）
+  经新增的 `gen.em_find_src(frame.target.src, ...)` 查枚举成员表，命中且就绪即返回成员常量值。
+- `gen/state.yh` 把成员名比较泛化为可接受任意源码缓冲（编译期目标另有一份 `frame.target.src`，
+  与前端 `c_src` 不一定是同一个缓冲），`em_find` 成为它的薄封装。
+- 改动规模：1 个新函数 + 1 个分支；不动前端解析路径，也不影响结构体字段访问（只有基底本来
+  就是 `TY_ENUM` 这条此前必然报错的路径才走新分支）。
+- 用例：`tests/modules/projects/comptimecross` 新增 `pub enum Simple { one = 1; two; }`、
+  `simple_ct()`（普通成员）、`low_ct()`（延迟判别值成员）与 api 侧转发、host 侧断言
+  （`PS = 2`、`PL = 4`）。**反向验证**：把期望改成 `PS - 99` 后报
+  `FAIL ct5b-cross-module-body ... run=159`、83/84；还原后 84/84 —— 证明断言确实覆盖这两条路径。
+- 效果：模块模式下枚举成员三种写法全通（顶层常量中转、跨模块转发、编译期正文**直接**引用）；
+  单文件模式无变化。
+- `make test` 256/256（run 128/128、fail 120/120、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 256/256、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`bbc5456053566db8fcb84ee41bd9dd8ff5ed5a2da70047cc584cf195e4e70e84`。详见[完成记录](01-finished/yh-模块模式编译期正文枚举成员-2026-10-07.md)。
+
+# 2026-10-07 编译期顶层聚合实参诊断与 CT1/CT2 收尾定位
+
+- 顶层聚合实参：旧诊断给的是走不通的出路（「顶层实参必须是编译期常量」），而实测
+  `const P Point = Point{ x: 1 };` 直接报「const 不支持聚合类型」，即没有任何中转写法。
+  本轮把 `parse_expr.yh` 的拒绝诊断改成可操作表述（写明缺少捕获通道、无法在 pass1 折叠、
+  `const` 也不支持聚合类型），并同步 `fail/148` 的 `fail:`/`fail-contains:` 注释。
+- CT1/CT2 收尾定位：实测两条入口结构 —— 单文件 `compile.yh` 27–42 捕获正文、45 登记延迟区间、
+  **47–71 固定点循环**、72 `ct_layout_resolve`、76 `ct_enum_pending_run`；模块
+  `module_worker.yh` 15/55/157/159 同构。**「逐轮重解析」= 47–71 的固定点循环**（每轮重解析
+  `ct_layout_*` 登记的全部表达式），第 26 轮那个「同一段正文被解析两次」就是它的副作用。
+- 产出[收尾方案](02-plan/yh-编译期收尾方案.md)：拆成互相独立的「去重解析」与「统一入口」两件，
+  第一步定为**先插桩量化白跑占比**再改循环，验收看语料与两代自编产物逐字节不变；并记录
+  `gen/state.yh:150` 的 `c_arg_agg` 是预留字段（无使用点），不能当现成通道。
+- `docs/todo.md` 两条相关条目已按上述结论改写。
+- `make test` 256/256（run 128/128、fail 120/120、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 256/256、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`9140521337d9c5348698da561447e49c8a6369fec9fc819af3037729ef2affd5`。详见[完成记录](01-finished/yh-编译期顶层聚合实参诊断与收尾定位-2026-10-07.md)。
+
+# 2026-10-07 编译期收尾方案实测修正（撤销「去重解析」、修正「统一入口」）
+
+- **实测撤销方案①**：`parse_source_ct_layout_exprs()`（`parse_ct_layout.yh:337`）第 345–349 行
+  **已经**跳过已就绪项，可运行项一次即成功并置回非 pending，所以固定点循环里**每个请求最多被
+  真正解析一次**，不存在「白跑的重解析」；剩余的 O(轮数 × 请求数) 只是计数扫描，且 `pending == 0`
+  时函数开头直接返回。结论：不值得改，方案与 todo 均已标注撤销（避免后续做无用功）。
+- **修正方案②**：`parse_source_ct_fns()` 三个调用点不是同一段代码的复制 —— `compile.yh:37`
+  是单文件完整流程（捕获 → 布局登记 → 固定点 → `ct_layout_resolve` → `ct_enum_pending_run`）、
+  `module_build.yh:943` 是构建侧捕获、`iface_ct.yh:1023` 是**加载 `.s.ct` 接口**（多出
+  `c_iface_load` 隐藏常量折叠、数据段抑制与公开 CT 符号签名校验）。「统一入口」因此先要做**调用图
+  普查**（check-only / build / SSA 各缺哪一步），不能直接抽共用函数。
+- **顶层聚合实参可行性**：编译期函数体内的实参走 typed IR（`ct_ir_args_fill`）在执行器 arena 里
+  构造聚合；顶层/普通函数里的实参由前端直接求值成 `args [64]gen.Res`，而 `Res` 没有聚合值表示 ——
+  所以真修要先给常量聚合值找一处表示（首选独立聚合常量池，避免动 `gen.Res` 布局），约 2–3 轮。
+  这也解释了 `gen/state.yh:150` 的 `c_arg_agg` 为何一直没有使用点。
+- 本轮**无源码改动**，故未滚种子（`bin/yh.sha256` 不变）；`git diff --check` 干净，
+  `find compiler -name "*.yh" -newer bin/yh` 为空。
+  详见[收尾方案](02-plan/yh-编译期收尾方案.md)与[上轮完成记录](01-finished/yh-编译期顶层聚合实参诊断与收尾定位-2026-10-07.md)。
+
+# 2026-10-07 顶层 const 结构体聚合常量（CT3 最小切片）
+
+- `const P Point = Point{ x: 1 };` 此前报「const 不支持聚合类型」（`fail/148` 的上游障碍）。
+  实测两条替代路都不通：`const` 报该错、全局 `let` 变量报「变量不是编译期常量」。
+- 改动两处（约 15 行）：① `parse_global_init.yh` 的 `TY_STRUCT` 分支只在**模块模式**保留拒绝
+  （接口导出未覆盖聚合常量），单文件走与全局变量同一条 `parse_global_struct_init` 发射路径，
+  并在发射后标记符号已就绪；② `sem_value.yh` 的 `sem_ident_val` 把**类型是聚合**的 `SYM_CONST`
+  降级为变量语义（这类常量没有可用标量 `cval`，必须按符号地址访问 —— 不加这步运行期段错误，
+  会把 `cval = 0` 当地址用）。
+- 用例 `tests/yh-run/run/151-const-aggregate-global.yh`（`// exit: 0`）：标量字段 const、
+  嵌套结构体字段 const、全局 `let` 变量对照，三者字段求和减 23 得 0。
+- 边界：模块模式仍拒绝；数组/切片 `const` 仍拒绝（本轮只放宽结构体）；`const` 聚合的只读性
+  未强制（可写入不报错），是本轮接受的简化。
+- `make test` 257/257（run 129/129、fail 120/120、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 257/257、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`4db4301fe8426591f2becafc7016fa86ab191066f520f6e59b44e74368574f06`。详见[完成记录](01-finished/yh-顶层const结构体聚合常量-2026-10-07.md)。
+
+# 2026-10-07 顶层 const 数组/切片聚合常量
+
+- 承接上一轮的结构体切片：`parse_global_init.yh` 的 `TY_ARRAY || TY_SLICE` 分支把 `const` 拒绝
+  **只在模块模式保留**，单文件走与全局变量同一条 `parse_global_array_init` 发射路径并在发射后
+  标记符号已就绪；`sem_value.yh` 的降级判据上一轮已覆盖 `TY_ARRAY`/`TY_SLICE`，无需再改。
+- 用例 `tests/yh-run/run/152-const-array-global.yh`（`// exit: 0`）：`const TABLE [4]int` 循环索引
+  读取 + 全局 `let NUMS` 对照，求和减 106 得 0。
+- 顺带实测到**既有前端限制**（非本轮引入）：嵌套数组字面量 `[[1,2],[3,4]]` 对 const 与变量都报
+  「数组/切片字面量需要目标类型上下文（let 初始化或同型赋值）」，已记入 todo。
+- 已知缺口：`const` 聚合的只读性仍未强制（降级为变量语义后写入路径不再拦截），已记 todo。
+- `make test` 258/258（run 130/130、fail 120/120、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 258/258、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`9e2f92d6d2d5c04bec5e4ed90dd689f5b2f98e595afae02c85af19ada71dc232`。详见[完成记录](01-finished/yh-顶层const数组聚合常量-2026-10-07.md)。
+
+# 2026-10-07 const 聚合常量只读性（补第 32/33 轮缺口）
+
+- 实测确认缺口：第 32 轮把聚合 `SYM_CONST` 在取值路径降级为变量语义后，写入路径不再拦截，
+  `P0.x = 6;`（`const P0 P = P{ x: 5 };`）**编译通过且真的改了值**（返回 0）；对照的标量 const
+  本来就被拦（`C = 6;` 报「赋值目标必须是可寻址的表达式」），两种 const 的只读语义不一致。
+- 改动一处 5 行：`gen/sem_value.yh` 的 `sem_ident_val` 在聚合 `SYM_CONST` 降级分支前加
+  `if (g_state.c_lvalue != 0) { return sem_err("不能给 const 聚合常量赋值或取地址"); }`
+  —— 降级只为按符号地址读取，不放开可写性；取地址同样被拒。
+- 用例 `tests/yh-run/fail/150-const-aggregate-write.yh`（`fail-contains: 不能给 const 聚合常量赋值或取地址`）。
+- 回归：标量 const 诊断不变；`run/151`、`run/152` 读取路径均 `rc=0`。
+- `make test` 259/259（run 130/130、fail 121/121、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 259/259、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`6c3c34fe7e9d5cd200559d8619f2b27ea1cfab090534edce54a076f4747be1d5`。详见[完成记录](01-finished/yh-const聚合常量只读性-2026-10-07.md)。
+
+# 2026-10-07 顶层编译期调用的聚合实参（CT3 主体）
+
+- 关键观察：执行器本来就把**聚合实参的 `CtValue.value` 当对象指针**用，`ct_call` 也无条件把
+  `args[i].ival` 写进 `values[i].value` —— 所以只要前端能给出一个「字段值区」对象指针并写进
+  `Res.ival`（`is_const = 1`），聚合与标量就走同一条赋值，**`ct_call` 一行都不用改**。
+- 改动：① `comptime/ct_ir.yh` 新增顶层聚合实参**临时构造区**（独立全局 `CtFrame` +
+  `ct_arg_pool_reset` + `ct_arg_pool_struct`，参数用扁平标量数组 —— 第一版传 `CtValue` 数组时
+  报「模块没有导出该类型」，因为调用方在 parse 侧拿不到 comptime 私有类型；区只增不减，
+  借用对象可能被结果池 keep，主动释放有悬空风险，总量由 100000 元素上限兜住）；
+  ② `parse/parse_expr.yh` 新增 `p_ct_arg_struct_literal` 折叠字面量（字段按声明顺序填位、
+  可乱序、逐字段 `sem_can_assign`、`c_fold += 1` 折叠），并让实参循环在折叠成功后**跳过**
+  `parse_expr_iso`（不跳过会报「此处需要一个表达式」）；剩余形态保留拒绝但诊断改为可操作表述。
+- 用例：新增 `run/153-comptime-top-aggregate-arg.yh`（基本 34、字段乱序 25、标量与聚合混排 19、
+  字段值常量表达式 54）；`fail/148` 改成仍不支持的数组实参形态并同步 `fail-contains`。
+- 边界：数组/切片/联合体实参与嵌套聚合字段仍拒绝；**模块模式未验证**（本轮只在单文件模式实测）。
+- `make test` 260/260（run 131/131、fail 121/121、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 260/260、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`3df40c9b588bf7c80a2ee9709bce239234bc5e5894819429b09ab7c02b6fd3a3`。详见[完成记录](01-finished/yh-顶层聚合实参-2026-10-07.md)。
+
+# 2026-10-07 顶层聚合实参：嵌套结构体字段 + 模块模式验证
+
+- **嵌套结构体字段**：把 `p_ct_arg_struct_literal` 里「聚合字段直接返回 1」的分支改成**递归**
+  （`Box{ lo: Point{...} }`），没有新增任何 comptime 接口 —— `ct_arg_pool_struct` 造出的对象指针
+  本身就能当聚合字段的值，与执行器对聚合字段的表示一致。用例 `run/154`（嵌套 + 字段乱序 = 23；
+  标量与嵌套聚合混排 = 121）。
+- **模块模式验证**（补第 35 轮未验证项）：在既有 84 用例项目 `comptimecross` 里加自包含验收 ——
+  `extra.yh` 的 `pub struct Pair` + `weigh` + `pub const TOP int = $weigh(Pair{ x: 3, y: 4 });`
+  + `top_ct()`，`api.yh` 的 `probe_top()` 转发，`host` 顶层 `const PT int = $math.probe_top();`
+  并断言 `PT - 34`。结果**模块模式可用**，项目门 84/84。踩坑：`struct` 必须写 `pub struct`。
+- **删死代码**：第 35 轮加的 `ct_arg_pool_reset()` 没有任何调用点（全局结构体落 BSS，
+  静态零初始化即够，每次编译是一个进程），本轮删除。
+- `make test` 261/261（run 132/132、fail 121/121、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 261/261、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`a3eddad0f1992eb6406defb0bc2dba6e9e67d4ed8f3cd6489e5866396eb593d2`。详见[完成记录](01-finished/yh-顶层聚合实参嵌套与模块验证-2026-10-07.md)。
+
+# 2026-10-07 顶层聚合实参：数组与嵌套数组
+
+- **泛化而非新增**：数组与结构体在 `ct_ir_aggregate_new` 里只差一个参数（结构体传自身类型、
+  数组传元素类型），所以把 `ct_arg_pool_struct` 改名为 `ct_arg_pool_agg(elem_type, ...)`，
+  没有加第二个同形函数。
+- **新增 `p_ct_arg_array_literal`**（`parse/parse_expr.yh`，约 45 行）：标量元素 `c_fold` 折常量 +
+  `sem_can_assign`；数组元素递归（顺带让**嵌套数组** `[[1,2],[3,4]]` 可用 —— 折叠路径自己解析，
+  绕开了前端「嵌套数组字面量需要目标类型上下文」的既有判定）；结构体元素递归；
+  切片/联合体元素返回 1。接线两处：结构体的 `TY_ARRAY` 字段、顶层实参的 `pk == TY_ARRAY`。
+- **诊断措辞更新**：原措辞说数组与嵌套聚合仍需在函数体内构造，现已支持；改为
+  「暂时只支持结构体与数组字面量（字段/元素可递归嵌套标量、结构体、数组）；切片与联合体仍需…」。
+  `fail/148` 从数组实参改为**切片实参**并同步 `fail-contains`。
+- 用例 `run/155`（数组实参 60、结构体数组字段 10、嵌套数组 4）。
+- `make test` 262/262（run 133/133、fail 121/121、pass 8/8）；`make selfhost-native` 全绿
+  （自解析 70 文件、语料 262/262、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`58387b3faa99ee3b34eea81fb139a62d8be93a1effaa584142a878db64cd3d4c`。详见[完成记录](01-finished/yh-顶层聚合实参数组-2026-10-07.md)。
+
+# 2026-10-07 编译期收尾：调用图普查结论（撤销「统一入口」）+ 三条边界实测
+
+本轮无源码改动（`find compiler -name "*.yh" -newer bin/yh` 为空），故未滚种子、未重跑门。
+
+- **「统一入口」撤销**：普查确认编译期步骤在单文件与模块两条路径上**已经对齐**，没有功能缺口 ——
+  `c_check_only` 只抑制后端缓冲、不跳过任何编译期步骤；`module_worker.yh:121-168` 的顺序
+  （布局登记 → 固定点循环 → `ct_layout_resolve` → `ct_enum_pending_run` → pass1）与单文件同构；
+  模块侧 `parse_source_ct_layout_consts()` 在 `module_build.yh:947`；`iface_ct.yh:1023` 是读 `.s.ct`
+  接口的另一条路，本就不该合并。剩下的只有代码重复 ⇒ 纯重构、无功能收益 ⇒ 撤销。
+  至此 **CT1/CT2 两个子项（去重解析、统一入口）都已撤销**，条目关闭。
+- **联合体实参不适用**：`union` 不是 yh 关键字（`pub union Val { ... }` 报「此处需要一个类型」），
+  源码无法构造联合体字面量 —— 从 todo 里去掉，而不是留着。
+- **切片实参的难点定位**：`ct_registry.yh:472` 要求切片实参是「有效的本地数组或切片视图」
+  （地址须落在存活调用帧槽区间内），且切片是「地址 + 长度」、`CtValue` 单 i64 装不下
+  ⇒ 需要先设计顶层切片的视图表示。
+- **`*dst = *src;` 缺陷表现变化**：不再段错误，改为**静默算错**（最小复现得 230，应为 0），
+  编译链接均成功；todo 条目描述已按实测更新，并注明编译期路径走不到（`@[comptime]` 不支持结构体
+  指针形参）。
+- 文档：更新 `docs/todo.md`（关闭 CT1/CT2、修正两条过时描述）、
+  [收尾方案](02-plan/yh-编译期收尾方案.md)（补普查结论表与三条边界实测）。
+
+# 2026-10-07 跨模块非字面量指针实参：根因链定位与诊断修正
+
+- **根因链实测**：① 单文件 `$first(TEXT)`（`*char` 形参 + 指针常量实参）本来就 `rc=0`，
+  问题只在 `qualified != 0` 的跨模块分支；② `.s.ct` 确实用**源字面式**重放 `*char` 常量
+  （`iface_ct.yh:722-730`），导入侧重新解析后有**本地**标签号，所以拒绝条件看着过度保守 ——
+  按 `SYM_CONST + F_ADDR + is_const` 放宽后，却**构造不出用例**：`math.TEXT` 报「模块没有导出
+  该名字」，改用 `pub const TEXT_PTR *char = base.TEXT;` 转发报 **「pub 指针常量（字符串）暂不支持
+  跨模块导出」**（`iface.yh:339`）。③ 即提供方根本导不出字符串指针常量，`.s.ct` 重放又只覆盖
+  「可达 CT 正文引用的常量」，实参位置不触发 ⇒ 整条路要先扩展闭包收集范围。**放宽已回退**。
+- **本轮交付诊断修正**：原诊断让用户「改用模块导出的 pub const 指针常量」——实测该写法本身不被支持，
+  属误导。新诊断指出「非字面量的跨模块指针实参需要让字节来源随调用跨编译单元传递，尚未支持
+  （`pub const *char` 常量本身也不能跨模块导出…）」，`build-check.py:337` 的期望字符串同步更新。
+- `make test` 262/262；`make selfhost-native` 全绿（自解析 70 文件、语料 262/262、模块 17/17、
+  项目 84/84）。新种子 SHA-256：`6ddea04f8c46524654431ba598c3109f0c36bc52e83b014e0baaf44843ea8012`。
+  详见[完成记录](01-finished/yh-跨模块非字面量指针实参根因与诊断修正-2026-10-07.md)。
+
+# 2026-10-07 跨模块编译期调用的单字节指针常量实参（CT5B 切片）
+
+- **先纠正上一轮的误判**：第 39 轮判定「前置切片 = 扩展 CT 闭包收集」，但两次失败都不是真正的
+  阻塞 —— `iface.yh:334-348` 的 `SYM_CONST + F_ADDR` 分支**本来就支持**字符串字面量指针常量导出，
+  唯一条件是初始化式必须是**直接字符串字面量**（`const_expr_kind == 2`），接口「原样重放」后导入方
+  按同样规则重新登记只读字节池。`base.TEXT` 转发失败只是因为初始化式是引用而非字面量。
+  换成 `pub const TEXT_PTR *char = "AB";` 即通。**闭包收集不需要扩。**
+- **改动一处放宽**：`parse/parse_expr.yh` 的单字节指针形参实参检查，除直接字面量外，
+  也接受 `SYM_CONST + F_ADDR + is_const` 的指针常量（其标签号是**本地**的，与直接字面量同路径）；
+  诊断同步为「只接受直接字符串字面量实参，或导入模块里以字符串字面量初始化的 pub const 指针常量」。
+- **用例**：新增 `run/156`（直接字面量 90、公开常量 65、私有常量 67）；`comptimecross` 加
+  `api.yh` 的 `pub const TEXT_PTR *char = "AB";` + host 顶层 `$math.head_of(math.TEXT_PTR)`
+  断言 65（跨模块 + 导入常量的最强覆盖，值错则 main 非零）；`build-check.py` 的
+  `ct5b-crossmodule-pointer-arg-rejected`（旧行为：`head_of(MINE)` 读到 104105 = `"hi"`）
+  改为 `ct5b-crossmodule-pointer-arg-accepted`。
+- `make test` 263/263（run 134/134、fail 121/121、pass 8/8）；`build-check.py` 84/84；
+  `make selfhost-native` 全绿（自解析 70 文件、语料 263/263、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`263a10549c56628ea7b5ee01fe8a3dca8d2cb5c9fe3efb8c13b625df7df4c02f`。详见[完成记录](01-finished/yh-跨模块指针常量实参-2026-10-07.md)。
+
+# 2026-10-07 const 聚合常量取地址：修掉第 34 轮引入的误拒
+
+- **发现方式**：三个探针摸编译期边界 —— A `$first(&TABLE[0])` 报「不能给 const 聚合常量赋值
+  **或取地址**」；B `pub const ALIAS *char = TEXT;`（引用式常量，单文件）`rc=0` 可用；
+  C 正文里读全局指针常量 `rc=0` 可用。
+- **根因**：第 34 轮用 `c_lvalue != 0` 判「在写 const」，但 `c_lvalue` 同时表示"赋值目标"
+  与"取地址" —— 赋值（`parse_stmt.yh:238`）和取地址（`parse_expr.yh:602`）都是 `+= 1`（0→1），
+  值域相同无法区分，于是 `&const_agg.field`、`&const_arr[i]` 这类**只读引用**被误拒。
+- **改动**：取地址处改 `+= 2`（其余 `!= 0` 判断语义不变），只读检查改判 `c_lvalue == 1`，
+  诊断去掉「或取地址」。效果：赋值仍拒；`&const_agg.f` / `let p *int = &const_arr[0]` 由**误拒**变可用。
+  探针 A 的诊断变成「变量不是编译期常量」—— 这是正确边界（运行期地址本就不能作编译期实参），
+  与只读性无关。
+- **用例**：新增 `run/157`（`&TABLE[0]`、`&TABLE[2]`、`&ORIGIN.y` 取地址后读取）；
+  `fail/150` 的 `fail-contains` 同步为新诊断。
+- `make test` 264/264（run 135/135、fail 121/121、pass 8/8）；`make selfhost-native` 全绿。
+  新种子 SHA-256：`a9db7ad6a1c12fe8f55a68286a75a41bb57ff95b2bf80356969f502c2405fa64`。详见[完成记录](01-finished/yh-const聚合取地址误拒修复-2026-10-07.md)。
+
+# 2026-10-07 跨模块引用式指针常量实参（接口追链重放）
+
+- **探针先行**：D `$weigh($make(1,2))`、E `Point{ y: $two() }`、F `const P Point = $make(3,4)`、
+  G CT 正文 `len(a)` 与 `a[0..3]` 视图 —— 四个探针全 `rc=0`，这些能力都已在。（切片语法是
+  `[start..end]`。）
+- **本轮交付 `pub const A *char = B;` 跨模块可用**：`parse_global_init.yh` 新增与 `TOK_STRING`
+  （kind 2）对称的 **kind 3** —— 初始化式是单个 `TOK_IDENT` 时记下该标识符；`iface.yh` 的
+  `F_ADDR` 分支按 kind 3 用 `sym_lookup_off` 追**一层**到最终字面式常量并重放**那个**字面式
+  （消费者看不到提供方的私有常量名，重放引用本身会在导入侧解析失败）。
+- **用例**：`comptimecross` 的 `api.yh` 私有 `const TEXT_ALIAS_BASE *char = "hi";` +
+  `pub const TEXT_ALIAS *char = TEXT_ALIAS_BASE;`，host 顶层 `$math.head_of(math.TEXT_ALIAS)`
+  断言 104；新增单文件回归 `run/158`。
+- **边界**：只追一层（`A = B = 字面量` 两级链、`= base.TEXT` 跨子模块限定名仍拒绝）；
+  `iface_ct.yh:695` 的 `string_ptr` 判断仍只认 kind 2，故 `.s.ct` **正文闭包**侧不认引用式常量
+  （已记 todo，与实参侧同构的独立小项）。
+- `make test` 265/265（run 136/136、fail 121/121、pass 8/8）；`build-check.py` 84/84；
+  `make selfhost-native` 全绿（自解析 70 文件、语料 265/265、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`10cefe083ad281afb17e492fe2368c4bf8840b04672f08e47633af95e560129e`。详见[完成记录](01-finished/yh-跨模块引用式指针常量实参-2026-10-07.md)。
+
+# 2026-10-07 `.s.ct` 正文闭包认引用式指针常量（提取共用追链函数）
+
+- **交付**：`iface_ct_emit_const` 的 `string_ptr` 不再要求 `const_expr_kind == 2`，改用新的 pub
+  函数 **`iface_ct_lit_text(sym_id, out_off, out_len)`** 取字面文本 —— 该函数就是第 42 轮内联在
+  `iface.yh` 里的追链，提出来给 `.s.i` 导出与 `.s.ct` 发射**两处共用**（不写第二份拷贝）；
+  `iface.yh` 的 30 行内联缩成 4 行调用。诊断改为「跨模块 CT 闭包暂只支持**直接或引用式**的字符串
+  字面量指针常量」，`build-check.py:303` 的断言同步。
+- **用例**：`comptimecross` 的 `api.yh` 增 `@[comptime] pub fn alias_head() int { return (*TEXT_ALIAS).to_type(int); }`
+  （**正文里**引用引用式常量），host 顶层 `const ALIAS_BODY int = $math.alias_head();` 断言 104。
+- **边界（试出来的）**：单文件一侧做不了同类用例 —— `const ALIAS *char = BASE;` 在**单文件** CT
+  正文里引用会报「编译期求值不支持指针常量」（字面式 `pub const T *char = "hi"` 可用）。原打算加的
+  `run/159` 因此删除，本项只有跨模块覆盖。
+- **踩坑**：`len` 是 yh 内置名不能作参数名，首版签名 `off *int, len *int` 报「此处需要一个参数名」，
+  改名 `out_off`/`out_len`。
+- `make test` 265/265（run 136/136、fail 121/121、pass 8/8）；`build-check.py` 84/84；
+  `make selfhost-native` 全绿（自解析 70 文件、语料 265/265、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`7a47c3ab8095e0c80a34f8872207f168fe818202b4e2d95dc44f27a5b6a56644`。详见[完成记录](01-finished/yh-正文闭包引用式指针常量-2026-10-07.md)。
+
+# 2026-10-07 单文件 CT 正文也认引用式指针常量（追链函数下沉到 gen）
+
+- **约束驱动的重构**：`comptime/ct_ir.yh` **只** `import gen;`，不能调 `parse` 里的
+  `iface_ct_lit_text` —— 所以第 43 轮的「共用函数」不能留在 `parse/`，下沉到公共底层：
+  `compiler/gen/symbols.yh` 的 **`gen.sym_ct_lit_text`**（同模块直接用 `g_state`）。
+  三个调用侧共用一份实现：`.s.i` 导出（`iface.yh`）、`.s.ct` 发射（`iface_ct.yh`）、
+  单文件 CT 求值（`ct_ir.yh`）。
+- **单文件侧改动**：`ct_ir.yh:313` 的只读池登记由「要求 `const_expr_kind == 2`」改为
+  `gen.sym_ct_lit_text` 追链取文本；`ct_pool_register` 的去重键跟着改用**追链后**的偏移，
+  否则 `ALIAS` 与 `BASE` 会因不同偏移重复登记同一份字节。
+- **用例**：恢复 `tests/yh-run/run/159-comptime-body-pointer-const-alias.yh`
+  （第 43 轮曾因单文件不支持而删除，本轮真正支持）；`comptimecross` 的 `ALIAS_BODY` 继续覆盖跨模块。
+  第 43 轮文档里「单文件做不了」的说法已就地更正。
+- `make test` 266/266（run 137/137、fail 121/121、pass 8/8）；`build-check.py` 84/84；
+  `make selfhost-native` 全绿（自解析 70 文件、语料 266/266、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`120d737157fca21b948b43cb58008cb3b5fd5b163bb8f75190d753bba3a13e72`。详见[完成记录](01-finished/yh-单文件正文引用式指针常量-2026-10-07.md)。
+
+# 2026-10-07 多级引用链的指针常量（追链由一层改为循环）
+
+- **实测先行的两个发现**：① **单文件**侧多级链本来就可用（前端折叠后 `cval` 直接可用，
+  `F_ADDR` 路径不一定被走到），所以 todo 里「两级链仍拒绝」只对**跨模块**成立；
+  ② **跨模块**三级链确实失败：`api.yh:86: 错误: pub 指针常量（字符串）暂不支持跨模块导出`
+  —— `gen/sym_ct_lit_text` 只追一层，`CHAIN_3 → CHAIN_2` 追到了但后者也是 kind 3。
+- **改动**：该函数由「一层」改为**逐跳循环**，16 跳上限兼作**环**（`A -> B -> A` 不会死循环）
+  与超深链兜底；每跳仍要求被引用者是 `SYM_CONST + F_ADDR`。`.s.i` 导出、`.s.ct` 发射、单文件 CT
+  求值三处同时受益。
+- **用例**：`comptimecross` 加三级链（`CHAIN_1/2/3`）断言 104；新增单文件回归 `run/160`
+  （一级/二级/三级链）。
+- **仍拒绝**：`= base.TEXT` 这类**模块限定名**（名字池里查不到限定名，追链只能跟裸标识符）。
+- `make test` 267/267（run 138/138、fail 121/121、pass 8/8）；`build-check.py` 84/84；
+  `make selfhost-native` 全绿（自解析 70 文件、语料 267/267、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`714b5b9d7ca8a360d05e11e167f60a592883e6a2d4e2c2562ec4024ebad1876b`。详见[完成记录](01-finished/yh-多级引用链指针常量-2026-10-07.md)。
+
+# 2026-10-07 全局聚合常量的编译期下标：内部错误改为明确诊断
+
+- **发现**：编译期正文里 `TABLE[0]` 或 `&TABLE[0]`（TABLE 是全局 `const` 数组）报
+  **「内部错误：编译期数组/切片存储无效」** —— 用户能写出的代码不该报内部错误。
+- **根因**：`comptime/ct_ir_place.yh:64` 把下标的基础值当作 `CtAggregate` 对象指针校验；局部
+  `const` 聚合在编译期确实被建模成 `CtAggregate`，而**全局** `const` 聚合的 `cval` 是**数据段
+  标签**，于是 `aggregate == 0` 落进内部一致性检查。
+- **改动**：内部检查前先判 `aggregate == 0` 给明确诊断「编译期不支持下标访问全局聚合常量
+  （其存储尚未在编译期建模）」，其余情况保留内部错误语义（那才是真的不该发生）。
+- **用例**：新增 `fail/151-comptime-global-aggregate-index.yh`，`fail-contains` 锁定新诊断。
+- **留下的**：诊断只说清「不支持」，没说「做到」—— 全局 `const` 聚合的值在前端已知，
+  理论上可建模成 `CtAggregate`（局部已可用），属独立中等切片，已记 todo。
+- `make test` 268/268（run 138/138、fail 122/122、pass 8/8）；`build-check.py` 84/84；
+  `make selfhost-native` 全绿（自解析 70 文件、语料 268/268、模块 17/17、项目 84/84）。
+  新种子 SHA-256：`794f6ced0d95616dbfc37823ee81d72d911ef6c8d37a60fa0d1fddd3fb6b5ad1`。详见[完成记录](01-finished/yh-全局聚合常量下标诊断-2026-10-07.md)。
+
+# 2026-10-07 模块模式的私有聚合常量（补单文件/模块一致性缺口）
+
+- **探针先行**：递归 `$fact`、`switch`+`enum`、结构体数组 for-in 双绑定三个探针全 `rc=0`
+  —— 编译期能力已相当完整，转向 todo 里的真实缺口。
+- **缺口**：第 34–37 轮只让**单文件**支持全局 `const` 聚合常量，模块模式**一律拒绝**
+  （`const 不支持聚合类型`）。但拒绝理由「接口导出尚未覆盖聚合」只对 **pub** 成立 ——
+  接口把标量 `cval` 打成字面量，聚合的 `cval` 是数据段标签；**私有**常量不走接口。
+- **改动**：`parse_global_init.yh` 的两处守卫改为「模块模式**且 pub** 才拒绝」，诊断改为
+  「pub const 聚合常量暂不支持跨模块导出」。
+- **三层实测**：① 私有聚合 + CT 正文引用 → `const 不支持聚合类型`（守卫太宽）；
+  ② 放宽后 → `跨模块 CT 正文引用了不支持的模块常量类型`（`.s.ct` 闭包不携带聚合常量）；
+  ③ 私有聚合 + **运行期**读 → **通过**。
+- **用例**：`comptimecross` 的 `api.yh` 加私有 `PRIV_TBL [3]int = [1,2,3]` 与
+  `priv_tbl_sum()`，host 的 main 加 `math.priv_tbl_sum() - 6`（跨模块运行期调用）。
+- `make test` 268/268（run 138/138、fail 122/122、pass 8/8）；`build-check.py` 84/84；
+  `make selfhost-native` 全绿。新种子 SHA-256：`dce204c12728f42af0cfca3848a62fa6d5b6a33505657f9fa455e018cfde9ca2`。
+  详见[完成记录](01-finished/yh-模块模式私有聚合常量-2026-10-07.md)。
+
+# 2026-10-07 `.s.ct` 携带聚合常量源文本（并暴露真正的阻塞点）
+
+- **探针**：编译期除零 / 下标越界 / 传运行期变量 / 递归过深 —— 四个诊断都清晰，无可修。
+- **交付**：新增 `const_expr_kind = 4`（聚合常量初始化式源文本）。`parse_global_init.yh` 用
+  `record_aggregate_const_src` 记录（结构体与数组两分支），`iface_ct_emit_const` 新增 `agg_src`
+  分支把它重放进 `.s.ct`。**传输这一步是通的**，跨模块不再报「不支持的模块常量类型」。
+- **暴露的真阻塞点**：导入侧 CT 执行报「内部错误：编译期定长数组源值无效」—— 与第 46 轮同根因：
+  全局聚合常量的 `cval` 是**数据段标签**，数据在发射阶段才写出，而 CT 执行在语义阶段。
+  `.s.ct` 能否重放源文本不是关键，关键是让全局聚合常量在编译期有值。已改为明确诊断
+  （`ct_ir_place.yh` 的 `ct_ir_array_clone_mode`）。
+- **两次撞同一根因**：第 46 轮（单文件下标）与第 48 轮（跨模块闭包）指向同一条：语义阶段把全局
+  聚合常量建模成 `CtAggregate`。已记 todo。
+- `make test` 268/268；`build-check.py` 84/84；`make selfhost-native` 全绿。
+  新种子 SHA-256：`2e15073268de58c2371c13d1c413b681fa315185f13070c816b4f42dd38fbd8a`。详见[完成记录](01-finished/yh-跨模块CT聚合常量源文本重放-2026-10-07.md)。

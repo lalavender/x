@@ -1,0 +1,357 @@
+module asm;
+
+import obj;
+
+// ============================================================================
+// asm/parse_ins.yh —— 指令操作数解析与编码分派
+//
+// 分派按操作数形态走，不按助记符逐个 if：先读目的寄存器，再看第二个操作数
+// 是寄存器、立即数还是寻址方括号，形态确定后助记符只用来在表里选一个操作码。
+// 这样「同一形态的不同助记符」共用一份代码，助记符白名单由 p_instruction
+// 的入口判断兜住。
+// ============================================================================
+
+// p_shift：解析可选的移位或扩展修饰；没有时 kind = SHF_NONE。
+fn p_shift(p *Parser, s *Shift) int {
+    s.kind = SHF_NONE;
+    s.amount = 0;
+    if (p_peek(p) != TK_IDENT) {
+        return 0;
+    }
+    let off int = p_txt_off(p);
+    let e int = p_tok(p, p.i).end;
+    let k int = SHF_NONE;
+    if (obj.tok_eq(p.src, off, e, "lsl") != 0) { k = SH_LSL; }
+    if (obj.tok_eq(p.src, off, e, "lsr") != 0) { k = SH_LSR; }
+    if (obj.tok_eq(p.src, off, e, "asr") != 0) { k = SH_ASR; }
+    if (obj.tok_eq(p.src, off, e, "ror") != 0) { k = SH_ROR; }
+    if (k == SHF_NONE) {
+        let x int = ext_code(p.src, off, e);
+        if (x < 0) {
+            return 0;
+        }
+        k = SHF_EXT + x;
+    }
+    p_adv(p);
+    if (p_peek(p) == TK_HASH || p_peek(p) == TK_NUM) {
+        let v i64 = 0;
+        if (p_expr_num(p, &v) != 0) { return -1; }
+        s.amount = v;
+    }
+    s.kind = k;
+    return 0;
+}
+
+// p_need_shift：已经确认后面要跟修饰（调用方看到逗号），解析失败即报错。
+fn p_need_shift(p *Parser, s *Shift) int {
+    if (p_shift(p, s) != 0) { return -1; }
+    if (s.kind == SHF_NONE) {
+        return p_err(p, "此处需要 lsl/lsr/asr 等移位或扩展说明");
+    }
+    return 0;
+}
+
+// p_mem：解析一个完整的寻址操作数。
+fn p_mem(p *Parser, m *MemOp) int {
+    m.base = 0;
+    m.base_k = RK_X;
+    m.disp = 0;
+    m.exkind = EX_NUM;
+    m.sym = 0;
+    m.index = -1;
+    m.index_k = RK_X;
+    m.ext = EXT_UXTX;
+    m.shift = 0;
+    m.wb = 0;
+    if (p_peek(p) != TK_LBRACKET) {
+        return p_err(p, "此处需要一个 [ 开头的寻址操作数");
+    }
+    p_adv(p);
+    let br Reg;
+    if (p_reg(p, &br) != 0) { return -1; }
+    m.base = br.num;
+    m.base_k = br.k;
+    if (p_peek(p) == TK_COMMA) {
+        p_adv(p);
+        if (p_peek(p) == TK_REG) {
+            let ir Reg;
+            if (p_reg(p, &ir) != 0) { return -1; }
+            m.index = ir.num;
+            m.index_k = ir.k;
+            if (reg_is64(&ir) != 0) {
+                m.ext = EXT_UXTX;
+            } else {
+                m.ext = EXT_UXTW;
+            }
+            if (p_peek(p) == TK_COMMA) {
+                p_adv(p);
+                let s Shift;
+                if (p_need_shift(p, &s) != 0) { return -1; }
+                if (s.kind >= SHF_EXT) {
+                    m.ext = s.kind - SHF_EXT;
+                } else if (s.kind == SH_LSL) {
+                    m.ext = EXT_UXTX;
+                    if (reg_is64(&ir) == 0) { m.ext = EXT_UXTW; }
+                } else {
+                    return p_err(p, "索引寄存器只支持 lsl 或扩展写法");
+                }
+                m.shift = s.amount;
+            }
+        } else {
+            let e Expr;
+            if (p_expr(p, &e) != 0) { return -1; }
+            m.exkind = e.kind;
+            m.sym = e.sym;
+            if (e.kind == EX_NUM) {
+                m.disp = e.val;
+                if (e.neg != 0) { m.disp = -e.val; }
+            }
+        }
+    }
+    if (p_peek(p) != TK_RBRACKET) {
+        return p_err(p, "寻址操作数缺少 ]");
+    }
+    p_adv(p);
+    if (p_peek(p) == TK_BANG) {
+        p_adv(p);
+        m.wb = 2;
+        return 0;
+    }
+    if (p_peek(p) == TK_COMMA) {
+        p_adv(p);
+        let e Expr;
+        if (p_expr(p, &e) != 0) { return -1; }
+        if (e.kind != EX_NUM) {
+            return p_err(p, "后索引位移只能是数字");
+        }
+        m.disp = e.val;
+        if (e.neg != 0) { m.disp = -e.val; }
+        m.wb = 1;
+    }
+    return 0;
+}
+
+// —— 条件码 ——
+
+// p_cond：解析一个条件名（eq/ne/...），返回 0..15，失败返回 -1。
+fn p_cond(p *Parser) int {
+    if (p_peek(p) != TK_IDENT) {
+        return -1;
+    }
+    let c int = cond_code(p.src, p_txt_off(p), p_tok(p, p.i).end);
+    if (c < 0) {
+        return -1;
+    }
+    p_adv(p);
+    return c;
+}
+
+// p_is_bcond：当前助记符是否是条件分支（b.eq 或 beq），是则返回条件码。
+// 返回 -2 表示不是条件分支。
+fn p_is_bcond(p *Parser) int {
+    if (p_peek(p) != TK_IDENT) {
+        return -2;
+    }
+    let off int = p_txt_off(p);
+    let e int = p_tok(p, p.i).end;
+    if (p.src[off] != 'b') {
+        return -2;
+    }
+    if (e - off > 3 && p.src[off + 1] == '.') {
+        return cond_code(p.src, off + 2, e);
+    }
+    if (e - off >= 3) {
+        return cond_code(p.src, off + 1, e);
+    }
+    return -2;
+}
+
+// —— 分支与系统指令 ——
+
+// p_branch：b / bl，目标是数字或符号。
+fn p_branch(p *Parser, link int) int {
+    let e Expr;
+    if (p_expr(p, &e) != 0) { return -1; }
+    if (e.kind == EX_SYM && e.neg == 0) {
+        // 占位字保留操作码与 opcode 位，只把 imm26 留给回填
+        let off int = p_emit32(p, e_branch(link, 0));
+        if (off < 0) { return -1; }
+        return p_push_fix(p, FIX_BR26, off, e.sym, link.to_type(i64));
+    }
+    let v i64 = e.val;
+    if (e.neg != 0) { v = -e.val; }
+    let w i64 = e_branch(link, v);
+    if (w < 0) {
+        return p_err(p, "分支目标超出范围");
+    }
+    return p_write32(p, w);
+}
+
+// p_condbr：条件分支，b.eq / beq 等。
+fn p_condbr(p *Parser, c int) int {
+    let e Expr;
+    if (p_expr(p, &e) != 0) { return -1; }
+    if (e.kind == EX_SYM && e.neg == 0) {
+        let off int = p_emit32(p, e_condbr(c, 0));
+        if (off < 0) { return -1; }
+        return p_push_fix(p, FIX_CONDBR19, off, e.sym, c.to_type(i64));
+    }
+    let v i64 = e.val;
+    if (e.neg != 0) { v = -e.val; }
+    let w i64 = e_condbr(c, v);
+    if (w < 0) {
+        return p_err(p, "条件分支目标超出范围");
+    }
+    return p_write32(p, w);
+}
+
+// p_cmpbr：cbz / cbnz。
+fn p_cmpbr(p *Parser, nz int) int {
+    let r Reg;
+    if (p_reg(p, &r) != 0) { return -1; }
+    if (r.k == RK_SP || r.k == RK_WSP) {
+        return p_err(p, "cbz/cbnz 不接受 sp");
+    }
+    if (p_comma(p) != 0) { return -1; }
+    let e Expr;
+    if (p_expr(p, &e) != 0) { return -1; }
+    let sf int = reg_is64(&r);
+    if (e.kind == EX_SYM && e.neg == 0) {
+        let off int = p_emit32(p, e_cmpbr(sf, nz, reg_field(&r), 0));
+        if (off < 0) { return -1; }
+        return p_push_fix(p, FIX_TSTBR14, off, e.sym, nz.to_type(i64));
+    }
+    let v i64 = e.val;
+    if (e.neg != 0) { v = -e.val; }
+    let w i64 = e_cmpbr(sf, nz, reg_field(&r), v);
+    if (w < 0) {
+        return p_err(p, "cbz/cbnz 目标超出范围");
+    }
+    return p_write32(p, w);
+}
+
+// p_branch_reg：br / blr / ret。
+fn p_branch_reg(p *Parser, kind int) int {
+    let rn int = 30;
+    if (p_peek(p) == TK_REG) {
+        let r Reg;
+        if (p_reg(p, &r) != 0) { return -1; }
+        rn = reg_field(&r);
+    } else if (kind != 2) {
+        return p_err(p, "br/blr 需要一个寄存器");
+    }
+    let w i64 = e_branch_reg(kind, rn);
+    if (w < 0) {
+        return p_err(p, "寄存器编号非法");
+    }
+    return p_write32(p, w);
+}
+
+// p_system：nop / brk / hlt / svc / dsb / dmb / isb。
+// 助记符已经被 p_instruction 消费掉了，这里不能再 p_adv 跳过它——多跳一次
+// 会把下一条语句的第一个记号吞掉（`nop` 后面跟 `brk #1` 时尤其明显）。
+fn p_system(p *Parser) int {
+    if (p_mn_is(p, "nop") != 0) {
+        return p_write32(p, e_nop());
+    }
+    if (p_mn_is(p, "brk") != 0 || p_mn_is(p, "hlt") != 0) {
+        let kind int = 2;
+        if (p_mn_is(p, "hlt") != 0) { kind = 3; }
+        let v i64 = 0;
+        if (p_expr_num(p, &v) != 0) { return -1; }
+        let w i64 = e_system(kind, v);
+        if (w < 0) {
+            return p_err(p, "系统指令立即数超出范围");
+        }
+        return p_write32(p, w);
+    }
+    if (p_mn_is(p, "svc") != 0) {
+        let v i64 = 0;
+        if (p_expr_num(p, &v) != 0) { return -1; }
+        let w i64 = e_system(1, v);
+        if (w < 0) {
+            return p_err(p, "svc 立即数超出范围");
+        }
+        return p_write32(p, w);
+    }
+    if (p_mn_is(p, "dsb") != 0 || p_mn_is(p, "dmb") != 0 ||
+        p_mn_is(p, "isb") != 0) {
+        let kind int = 0;
+        if (p_mn_is(p, "dmb") != 0) { kind = 1; }
+        let isb int = 0;
+        if (p_mn_is(p, "isb") != 0) { isb = 1; }
+        let crm i64 = 15;
+        // 屏障域是可选的；只有「同一行的记号」才算屏障域，否则会把下一条
+        // 语句的助记符当屏障域吃掉。isb 不带屏障域。
+        if (isb == 0 && p_peek(p) == TK_IDENT &&
+            p_tok(p, p.i).line == p_tok(p, p.i - 1).line) {
+            crm = barrier_opt(p.src, p_txt_off(p), p_tok(p, p.i).end).to_type(i64);
+            if (crm < 0) {
+                return p_err(p, "未知的屏障域");
+            }
+            p_adv(p);
+        }
+        if (isb != 0) {
+            // ISB 不接受屏障域，CRm 固定 0b1111，编码基址比 DSB 还多 bit6
+            kind = 2;
+            crm = 15;
+        }
+        let w i64 = e_barrier(kind, crm);
+        if (w < 0) {
+            return p_err(p, "屏障编码失败");
+        }
+        return p_write32(p, w);
+    }
+    return p_err(p, "未知的指令");
+}
+
+// —— 地址 ——
+
+// p_adr：adr / adrp。
+fn p_adr(p *Parser, is_page int) int {
+    let rd Reg;
+    if (p_reg(p, &rd) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let e Expr;
+    if (p_expr(p, &e) != 0) { return -1; }
+    if (e.kind == EX_GOTPAGE && is_page != 0) {
+        // GOT 项所在页；页号由链接器在建立 GOT 之后才知道
+        let goff int = p_emit32(p, e_adr(1, reg_field(&rd), 0));
+        if (goff < 0) { return -1; }
+        return p_push_fix(p, FIX_GOT_PG_HI21, goff, e.sym, 0);
+    }
+    if (e.kind == EX_PAGE && is_page != 0) {
+        let off int = p_emit32(p, e_adr(1, reg_field(&rd), 0));
+        if (off < 0) { return -1; }
+        return p_push_fix(p, FIX_ADR_PG_HI21, off, e.sym, 0);
+    }
+    if (e.kind == EX_SYM && is_page == 0) {
+        let off int = p_emit32(p, e_adr(0, reg_field(&rd), 0));
+        if (off < 0) { return -1; }
+        return p_push_fix(p, FIX_ADR_PG_HI21, off, e.sym, 0);
+    }
+    if (e.kind == EX_PAGEOFF || e.kind == EX_GOTPAGEOFF) {
+        return p_err(p, "adrp 需要 sym@PAGE 或 sym@GOTPAGE");
+    }
+    if (e.kind != EX_NUM) {
+        return p_err(p, "adrp 需要 sym@PAGE，adr 需要符号或数字");
+    }
+    let v i64 = e.val;
+    if (e.neg != 0) { v = -e.val; }
+    let w i64 = e_adr(is_page, reg_field(&rd), v);
+    if (w < 0) {
+        return p_err(p, "地址偏移超出范围");
+    }
+    return p_write32(p, w);
+}
+
+// p_write32：编码成功后把机器字写进当前节。
+fn p_write32(p *Parser, w i64) int {
+    if (w < 0) {
+        return p_err(p, "指令编码失败");
+    }
+    if (p_emit32(p, w) < 0) {
+        return -1;
+    }
+    return 0;
+}

@@ -4,10 +4,13 @@
 语料只做**词法 + 语法**层面的验证，不参与类型检查与代码生成，因此文件里可以出现
 未定义符号、无 `main`、类型不正确等情形。
 
-> 玉衡编译器本体（`src/`）目前仍是改造中的 TCC，**尚无 `.yh` 解析实现**。
-> 因此本语料当前的校验基准是 `yh.g4` 本身（见「如何校验」），
-> 而不是某个编译器二进制。等玉衡的 parser 落地后，改为走编译器自带的语法检查入口即可。
-> 本语料已与 2026-09-27 的「无歧义修订版」`yh.g4` 全量同步（修订记录见 `docs/finish.md`）。
+2026-10-05 当前 ANTLR 与编译器语法模式各校验正例 71/71、反例 44/44；新增
+编译期显式调用、函数体 `$if/$for` 及 `comptime` 普通标识符边界。自动 C ABI 的
+语义与运行结果由 `tests/yh-run/` 和 `tests/modules/projects/autoabi/` 验证。
+
+> 当前编译器源码位于 `compiler/`，由 `bin/yh` 滚动自举构建。
+> `make test` 同时以 `yh.g4` 的 ANTLR 解析器和编译器语法模式校验语料；
+> 两条路径都须接受正例、拒绝反例。
 
 ## 目录与命名
 
@@ -15,7 +18,7 @@
 
 | # | yh.g4 章节 | 目录 | 文件数 |
 | --- | --- | --- | --- |
-| 1 | 顶层结构 | `01-toplevel/` | 3 |
+| 1 | 顶层结构 | `01-toplevel/` | 4 |
 | 2 | 基础规则 | `02-basic/` | 3 |
 | 3 | 声明 | `03-decl/` | 9 |
 | 4 | 语句 | `04-stmt/` | 9 |
@@ -26,9 +29,12 @@
 | 9 | 类型系统 | `09-types/` | 5 |
 | 10 | 内置 prelude | `10-prelude/` | 2 |
 | 11 | 词法规则 | `11-lex/` | 8 |
-| — | **反例** | `rejected/` | 29 |
+| 12 | 扩展语法 | `12-exp/` | 1 |
+| — | 扩展正例（C 函数类型、编译期语法与标识符） | `positive/` | 4 |
+| — | **反例** | `rejected/` | 44 |
 
-合计 **94 个 `.yh` 文件**（正例 65 + 反例 29）。文件命名格式为 `NN_<topic>.yh`（两位数字 + 下划线 + snake_case）。
+合计 **115 个 `.yh` 文件**（正例 71 + 反例 44）。分区文件使用 `NN_<topic>.yh`，
+独立新增正例和反例也使用序号加短横线的命名。
 
 **反例区 `rejected/`**：该目录下的文件**必须解析失败**才算通过，用来钉住「哪些写法不许出现」。
 首行注释头格式不同，写的是期望与原因：
@@ -116,7 +122,8 @@ Python parser（产物落临时目录，不污染仓库）→ 遍历 `tests/yh/*
 
 ## 覆盖对照表
 
-共 68 条规则（parser 59 + lexer 9），全部有语料覆盖。
+语法共 77 条规则（parser 68 + lexer 9），包括由
+`comptimeIfStmt`、`comptimeForStmt` 与 `comptimeCall` 覆盖的编译期扩展。
 
 ### 顶层结构
 
@@ -125,6 +132,8 @@ Python parser（产物落临时目录，不污染仓库）→ 遍历 `tests/yh/*
 | `sourceFile` | 01-toplevel/01_toplevel_decls.yh、01-toplevel/03_empty_file.yh |
 | `topLevelDecl` | 01-toplevel/01_toplevel_decls.yh、01-toplevel/02_pub_export.yh |
 | `topLevelDeclBody` | 01-toplevel/01_toplevel_decls.yh、01-toplevel/02_pub_export.yh |
+| `plainDeclBody` | 01-toplevel/01_toplevel_decls.yh |
+| `exportedDeclBody` | 01-toplevel/02_pub_export.yh |
 
 ### 基础规则
 
@@ -158,7 +167,9 @@ Python parser（产物落临时目录，不污染仓库）→ 遍历 `tests/yh/*
 | 规则 | 文件 |
 | --- | --- |
 | `block` | 04-stmt/01_block.yh |
-| `stmt` | 03-decl/09_local_decl.yh、04-stmt/02_stmt_dispatch.yh |
+| `stmt` | 03-decl/09_local_decl.yh、04-stmt/02_stmt_dispatch.yh、positive/70-comptime-control.yh |
+| `comptimeIfStmt` | positive/70-comptime-control.yh |
+| `comptimeForStmt` | positive/70-comptime-control.yh |
 | `labelStmt` | 04-stmt/03_label_goto.yh、04-stmt/08_label_no_semi.yh、04-stmt/09_label_wraps_stmt.yh |
 | `gotoStmt` | 04-stmt/03_label_goto.yh |
 | `branchStmt` | 04-stmt/04_branch_return.yh |
@@ -207,7 +218,8 @@ Python parser（产物落临时目录，不污染仓库）→ 遍历 `tests/yh/*
 | `postfixExpr` | 08-expr/08_postfix.yh、08-expr/15_to_type_postfix.yh |
 | `postfixPart` | 08-expr/01_expr_list.yh、08-expr/06_cast.yh、08-expr/08_postfix.yh、08-expr/14_member_names.yh、08-expr/15_to_type_postfix.yh、10-prelude/02_prelude_usage.yh |
 | `callArgs` | 08-expr/01_expr_list.yh、10-prelude/02_prelude_usage.yh |
-| `primaryExpr` | 08-expr/09_primary_literal.yh |
+| `primaryExpr` | 08-expr/09_primary_literal.yh、positive/69-comptime-call.yh |
+| `comptimeCall` | positive/69-comptime-call.yh |
 | `literal` | 08-expr/09_primary_literal.yh |
 | `sizeofExpr` | 08-expr/10_sizeof_len.yh |
 | `lenExpr` | 03-decl/05_fn_variadic.yh、08-expr/10_sizeof_len.yh |

@@ -1,0 +1,602 @@
+module obj;
+
+// ============================================================================
+// obj/macho_emit.yh —— Mach-O 对象写出
+//
+// 文件布局（与 clang 的 MH_OBJECT 产物同形；差分门只比对语义不比对字节）：
+//
+//     0                       mach_header_64
+//     32                      LC_SEGMENT_64（一个无名段，nsects 个节）
+//                             LC_BUILD_VERSION
+//                             LC_SYMTAB
+//                             LC_DYSYMTAB
+//                             ← 各节内容（各按 1<<align 对齐；ZEROFILL 不占文件）
+//                             ← 各节重定位表（按 4 字节对齐）
+//                             ← 符号表（按 8 字节对齐）
+//                             ← 字符串表
+//
+// 节的 addr 是「各节从 0 起连续累加」的段内偏移；符号的 n_value 是所在节的
+// addr 加节内偏移。两者都与 clang 的产物对齐，差分门据此逐符号比地址。
+//
+// 符号表顺序：local → 已定义的 global → 未定义的 global。LC_DYSYMTAB 的三个
+// 区间靠这个顺序表达，所以不能随意排。
+// ============================================================================
+
+// MoSec：一个待输出节的规划。文件偏移与大小在布局阶段填好，写出阶段只搬运。
+pub struct MoSec {
+    src int;      // 上下文节下标
+    seg *char;    // 目标段名（"__TEXT" / "__DATA"）
+    name *char;   // 节名（"__text" / "__data" / ...）
+    addr int;     // 段内偏移：各节从 0 起连续累加
+    size int;     // 节字节数（ZEROFILL 只占内存）
+    align int;    // 2 的幂
+    flags u64;    // section_64.flags
+    off int;      // 文件偏移（ZEROFILL 为 0）
+    reloff int;   // 重定位表文件偏移（无重定位为 0）
+    nreloc int;   // 重定位条数
+}
+
+// MachOState：一次写出的全部中间状态。没有跨调用的全局状态。
+pub struct MachOState {
+    c *Ctx;
+    out *Buf;
+    nsec int;       // 输出节数
+    secs *MoSec;    // 输出节数组
+    secmap *int;    // 上下文节下标 → 输出节下标（-1 表示该节不输出）
+    symmap *int;    // 上下文符号下标 → 符号表下标（-1 表示不输出）
+    ord *int;       // 符号表下标 → 上下文符号下标（写出时的正向表）
+    strx *int;      // 上下文符号下标 → 字符串表偏移
+    nsym int;       // 输出的符号数
+    nlocal int;     // 其中的 local 数
+    nextdef int;    // 其中的已定义 global 数
+    nundef int;     // 其中的未定义 global 数
+    strtab Buf;     // 字符串表内容
+    symoff int;
+    stroff int;
+    roff *int;      // 每个输出节的重定位在输出缓冲里的偏移
+}
+
+// mo_seg_of：把上下文的节名映射成 Mach-O 的（段名, 节名, 节标志）。
+// 返回 0 成功；未映射的节名返回 -1。
+pub fn mo_seg_of(name *char, seg **char, sect **char, flags *u64) int {
+    if (cstr_eq(name, ".text")) {
+        seg[0] = "__TEXT".to_type(*char);
+        sect[0] = "__text".to_type(*char);
+        flags[0] = mo_attr_pure_instructions() | MO_S_ATTR_SOME_INSTRUCTIONS;
+        return 0;
+    }
+    if (cstr_eq(name, ".rodata")) {
+        seg[0] = "__TEXT".to_type(*char);
+        sect[0] = "__const".to_type(*char);
+        flags[0] = 0;
+        return 0;
+    }
+    if (cstr_eq(name, ".data")) {
+        seg[0] = "__DATA".to_type(*char);
+        sect[0] = "__data".to_type(*char);
+        flags[0] = 0;
+        return 0;
+    }
+    if (cstr_eq(name, ".bss")) {
+        seg[0] = "__DATA".to_type(*char);
+        sect[0] = "__bss".to_type(*char);
+        flags[0] = MO_S_ZEROFILL;
+        return 0;
+    }
+    return -1;
+}
+
+// mo_log2：把字节对齐换成 Mach-O section_64.align 存的 2 的幂次数。
+pub fn mo_log2(a int) int {
+    if (a < 1) {
+        return 0;
+    }
+    let n int = 0;
+    let v int = 1;
+    for v < a {
+        v *= 2;
+        n += 1;
+    }
+    return n;
+}
+
+// mo_sec_size：该节实际占的字节数。NOBITS（.bss）看 memsz，其余看文件字节数
+// —— 上下文的 PROGBITS 节不维护 memsz，只认 data.len，ELF 侧同样规则。
+pub fn mo_sec_size(s *Section) int {
+    if (sec_is_nobits(s) != 0) {
+        return s.memsz;
+    }
+    return s.data.len;
+}
+
+// mo_sec_live：该上下文节是否需要输出（有内容或有内存尺寸）。
+pub fn mo_sec_live(s *Section) int {
+    if (s.memsz != 0 || s.data.len != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+// mo_plan：建输出节列表，分配段内偏移，并统计每个节的重定位条数。
+pub fn mo_plan(e *MachOState) int {
+    let c *Ctx = e.c;
+    e.nsec = 0;
+    let i int = 1;
+    for i < c.nsec {
+        if (mo_sec_live(&c.secs[i]) != 0) {
+            e.nsec += 1;
+        }
+        i += 1;
+    }
+    e.secmap = malloc(((c.nsec + 1) * sizeof(int)).to_type(u64)).to_type(*int);
+    e.roff = malloc(((c.nsec + 1) * sizeof(int)).to_type(u64)).to_type(*int);
+    if (e.secmap == 0 || e.roff == 0) {
+        return diag_plain(c, "内存不足");
+    }
+    i = 0;
+    for i <= c.nsec {
+        e.secmap[i] = -1;
+        e.roff[i] = 0;
+        i += 1;
+    }
+    if (e.nsec == 0) {
+        return 0;
+    }
+    e.secs = malloc((e.nsec * sizeof(MoSec)).to_type(u64)).to_type(*MoSec);
+    if (e.secs == 0) {
+        return diag_plain(c, "内存不足");
+    }
+    let k int = 0;
+    let addr int = 0;
+    i = 1;
+    for i < c.nsec {
+        let s *Section = &c.secs[i];
+        if (mo_sec_live(s) != 0) {
+            let segp *char = "".to_type(*char);
+            let sectp *char = "".to_type(*char);
+            let fl u64 = 0;
+            if (mo_seg_of(names_get(&c.names, s.name_id), &segp, &sectp,
+                          &fl) != 0) {
+                return diag_plain(c, "Mach-O 目标不支持该节名");
+            }
+            addr = align_up(addr, s.align);
+            e.secs[k].src = i;
+            e.secs[k].seg = segp;
+            e.secs[k].name = sectp;
+            e.secs[k].addr = addr;
+            e.secs[k].size = mo_sec_size(s);
+            e.secs[k].align = s.align;
+            e.secs[k].flags = fl;
+            e.secs[k].off = 0;
+            e.secs[k].reloff = 0;
+            e.secs[k].nreloc = 0;
+            e.secmap[i] = k;
+            addr += mo_sec_size(s);
+            k += 1;
+        }
+        i += 1;
+    }
+    // 统计每节的重定位条数
+    let r int = 0;
+    for r < c.nrel {
+        let m int = e.secmap[c.rels[r].sec];
+        if (m >= 0 && mo_reloc_kept(c, &c.rels[r]) != 0) {
+            e.secs[m].nreloc += 1;
+        }
+        r += 1;
+    }
+    return 0;
+}
+
+// mo_symtab：排符号表顺序并建「上下文下标 → 符号表下标」映射。
+// 顺序固定为 local、已定义 global、未定义 global。
+pub fn mo_symtab(e *MachOState) int {
+    let c *Ctx = e.c;
+    e.symmap = malloc(((c.nsym + 1) * sizeof(int)).to_type(u64)).to_type(*int);
+    e.strx = malloc(((c.nsym + 1) * sizeof(int)).to_type(u64)).to_type(*int);
+    e.ord = malloc(((c.nsym + 1) * sizeof(int)).to_type(u64)).to_type(*int);
+    if (e.symmap == 0 || e.strx == 0 || e.ord == 0) {
+        return diag_plain(c, "内存不足");
+    }
+    let i int = 0;
+    for i <= c.nsym {
+        e.symmap[i] = -1;
+        e.strx[i] = 0;
+        e.ord[i] = -1;
+        i += 1;
+    }
+    let at int = 0;
+    i = 1;
+    for i < c.nsym {
+        if (c.syms[i].binding == SYM_LOCAL && sym_is_defined(&c.syms[i]) != 0) {
+            e.symmap[i] = at;
+            e.ord[at] = i;
+            at += 1;
+        }
+        i += 1;
+    }
+    e.nlocal = at;
+    i = 1;
+    for i < c.nsym {
+        if (c.syms[i].binding == SYM_GLOBAL && sym_is_defined(&c.syms[i]) != 0) {
+            e.symmap[i] = at;
+            e.ord[at] = i;
+            at += 1;
+        }
+        i += 1;
+    }
+    e.nextdef = at - e.nlocal;
+    i = 1;
+    for i < c.nsym {
+        if (sym_is_defined(&c.syms[i]) == 0) {
+            e.symmap[i] = at;
+            e.ord[at] = i;
+            at += 1;
+        }
+        i += 1;
+    }
+    e.nundef = at - e.nlocal - e.nextdef;
+    e.nsym = at;
+    return 0;
+}
+
+// mo_strtab：建字符串表（第 0 字节固定为 0），并记下每个符号名的偏移。
+pub fn mo_strtab(e *MachOState) int {
+    let c *Ctx = e.c;
+    if (buf_init(&e.strtab) != 0) {
+        return diag_plain(c, "内存不足");
+    }
+    if (buf_put(&e.strtab, 0.to_type(u8)) != 0) {
+        return diag_plain(c, "内存不足");
+    }
+    let i int = 1;
+    for i < c.nsym {
+        e.strx[i] = e.strtab.len;
+        let nm *char = names_get(&c.names, c.syms[i].name_id);
+        if (buf_put_bytes(&e.strtab, nm.to_type(*u8),
+                          cstr_len(nm) + 1) != 0) {
+            return diag_plain(c, "内存不足");
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// mo_file_offsets：按「节内容 → 重定位 → 符号表 → 字符串表」排文件偏移。
+// cur 是进出的游标。ZEROFILL 不占文件字节，但仍然占用段内空间。
+pub fn mo_file_offsets(e *MachOState, cur *int) int {
+    let c *Ctx = e.c;
+    let k int = 0;
+    for k < e.nsec {
+        let src int = e.secs[k].src;
+        if (sec_is_nobits(&c.secs[src]) != 0) {
+            e.secs[k].off = 0;
+        } else {
+            cur[0] = align_up(cur[0], e.secs[k].align);
+            e.secs[k].off = cur[0];
+            cur[0] += c.secs[src].data.len;
+        }
+        k += 1;
+    }
+    k = 0;
+    for k < e.nsec {
+        if (e.secs[k].nreloc == 0) {
+            e.roff[k] = 0;
+            k += 1;
+            continue;
+        }
+        cur[0] = align_up(cur[0], 4);
+        e.roff[k] = cur[0];
+        e.secs[k].reloff = cur[0];
+        cur[0] += e.secs[k].nreloc * MO_RELOC_SIZE;
+        k += 1;
+    }
+    cur[0] = align_up(cur[0], 8);
+    e.symoff = cur[0];
+    cur[0] += e.nsym * MO_NLIST_SIZE;
+    e.stroff = cur[0];
+    cur[0] += e.strtab.len;
+    return 0;
+}
+
+// mo_put_name：写一个定长名称字段（不足补 0）。
+pub fn mo_put_name(b *Buf, s *char, n int) int {
+    let ln int = cstr_len(s);
+    if (ln > n) {
+        ln = n;
+    }
+    let i int = 0;
+    for i < ln {
+        if (buf_put(b, s[i].to_type(u8)) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    for i < n {
+        if (buf_put(b, 0.to_type(u8)) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// mo_write_hdr：写 mach_header_64 与四个 load command。
+pub fn mo_write_hdr(e *MachOState, sizeofcmds int, datasize int, vmsize int) int {
+    let b *Buf = e.out;
+    let c *Ctx = e.c;
+    // mach_header_64
+    buf_put_u32le(b, mo_magic());
+    buf_put_u32le(b, MO_CPU_ARM64);
+    buf_put_u32le(b, MO_CPUSUB_ARM64_ALL);
+    buf_put_u32le(b, MO_FILETYPE_OBJECT);
+    buf_put_u32le(b, 4.to_type(u32));               // ncmds
+    buf_put_u32le(b, sizeofcmds.to_type(u32));
+    buf_put_u32le(b, MO_FLAGS_NONE);
+    buf_put_u32le(b, 0.to_type(u32));               // reserved
+    // LC_SEGMENT_64：一个无名段，挂全部节
+    buf_put_u32le(b, MO_LC_SEGMENT_64);
+    buf_put_u32le(b, (MO_SEGCMD_SIZE + MO_SECT_SIZE * e.nsec).to_type(u32));
+    mo_put_name(b, "".to_type(*char), 16);          // segname 全 0
+    buf_put_u64le(b, 0.to_type(u64));               // vmaddr
+    buf_put_u64le(b, vmsize.to_type(u64));
+    buf_put_u64le(b, (MO_MACHO_HDR_SIZE + sizeofcmds).to_type(u64));
+    buf_put_u64le(b, datasize.to_type(u64));
+    buf_put_u32le(b, 7.to_type(u32));               // maxprot = rwx
+    buf_put_u32le(b, 7.to_type(u32));               // initprot = rwx
+    buf_put_u32le(b, e.nsec.to_type(u32));
+    buf_put_u32le(b, 0.to_type(u32));               // flags
+    let k int = 0;
+    for k < e.nsec {
+        mo_put_name(b, e.secs[k].name, 16);
+        mo_put_name(b, e.secs[k].seg, 16);
+        buf_put_u64le(b, e.secs[k].addr.to_type(u64));
+        buf_put_u64le(b, e.secs[k].size.to_type(u64));
+        buf_put_u32le(b, e.secs[k].off.to_type(u32));
+        buf_put_u32le(b, mo_log2(e.secs[k].align).to_type(u32));
+        buf_put_u32le(b, e.secs[k].reloff.to_type(u32));
+        buf_put_u32le(b, e.secs[k].nreloc.to_type(u32));
+        buf_put_u32le(b, e.secs[k].flags.to_type(u32));
+        buf_put_u32le(b, 0.to_type(u32));           // reserved1
+        buf_put_u32le(b, 0.to_type(u32));           // reserved2
+        buf_put_u32le(b, 0.to_type(u32));           // reserved3
+        k += 1;
+    }
+    // LC_BUILD_VERSION：platform=macOS(1)，最低版本 11.0，SDK 11.0，无工具项
+    buf_put_u32le(b, MO_LC_BUILD_VERSION);
+    buf_put_u32le(b, MO_BUILDVER_CMD_SIZE.to_type(u32));
+    buf_put_u32le(b, 1.to_type(u32));               // PLATFORM_MACOS
+    buf_put_u32le(b, 0x000b0000.to_type(u32));      // minos 11.0
+    buf_put_u32le(b, 0x000b0000.to_type(u32));      // sdk 11.0
+    buf_put_u32le(b, 0.to_type(u32));               // ntools
+    // LC_SYMTAB
+    buf_put_u32le(b, MO_LC_SYMTAB);
+    buf_put_u32le(b, MO_SYMTAB_CMD_SIZE.to_type(u32));
+    buf_put_u32le(b, e.symoff.to_type(u32));
+    buf_put_u32le(b, e.nsym.to_type(u32));
+    buf_put_u32le(b, e.stroff.to_type(u32));
+    buf_put_u32le(b, e.strtab.len.to_type(u32));
+    // LC_DYSYMTAB：只填三个符号区间，其余（toc/modtab/extref/indirect/reloc）
+    // 对可重定位对象不适用，留 0。
+    buf_put_u32le(b, MO_LC_DYSYMTAB);
+    buf_put_u32le(b, MO_DYSYMTAB_CMD_SIZE.to_type(u32));
+    buf_put_u32le(b, 0.to_type(u32));                       // ilocalsym
+    buf_put_u32le(b, e.nlocal.to_type(u32));
+    buf_put_u32le(b, e.nlocal.to_type(u32));                // iextdefsym
+    buf_put_u32le(b, e.nextdef.to_type(u32));
+    buf_put_u32le(b, (e.nlocal + e.nextdef).to_type(u32));  // iundefsym
+    buf_put_u32le(b, e.nundef.to_type(u32));
+    let z int = 0;
+    for z < 12 {
+        buf_put_u32le(b, 0.to_type(u32));
+        z += 1;
+    }
+    return 0;
+}
+
+// mo_write_rels：写全部节的重定位表，节内按地址降序。
+pub fn mo_write_rels(e *MachOState) int {
+    let c *Ctx = e.c;
+    let k int = 0;
+    for k < e.nsec {
+        if (e.secs[k].nreloc == 0) {
+            k += 1;
+            continue;
+        }
+        buf_put_n(e.out, 0.to_type(u8), e.roff[k] - e.out.len);
+        // 收集本节的上下文重定位下标，按作用偏移降序插入
+        let cnt int = e.secs[k].nreloc;
+        let ids *int = malloc(((cnt + 1) * sizeof(int)).to_type(u64)).to_type(*int);
+        if (ids == 0) {
+            return diag_plain(c, "内存不足");
+        }
+        let got int = 0;
+        let r int = 0;
+        for r < c.nrel {
+            if (c.rels[r].sec != e.secs[k].src) {
+                r += 1;
+                continue;
+            }
+            if (mo_reloc_kept(c, &c.rels[r]) == 0) {
+                r += 1;
+                continue;
+            }
+            let pos int = got;
+            for pos > 0 {
+                if (c.rels[ids[pos - 1]].offset < c.rels[r].offset) {
+                    ids[pos] = ids[pos - 1];
+                    pos -= 1;
+                } else {
+                    break;
+                }
+            }
+            ids[pos] = r;
+            got += 1;
+            r += 1;
+        }
+        let n int = 0;
+        for n < cnt {
+            let rl *Reloc = &c.rels[ids[n]];
+            let mtype u32 = 0;
+            let pcrel int = 0;
+            let length int = 0;
+            if (mo_kind_of(rl.kind.to_type(int), &mtype, &pcrel, &length) != 0) {
+                free(ids.to_type(*void));
+                return mo_diag_line(c, rl.line, "Mach-O 目标不支持该重定位");
+            }
+            let sn int = e.symmap[rl.sym];
+            if (sn < 0) {
+                free(ids.to_type(*void));
+                return mo_diag_line(c, rl.line, "重定位目标符号缺失");
+            }
+            let word u32 = (mtype << 28)
+                | (1.to_type(u32) << 27)
+                | (length.to_type(u32) << 25)
+                | (pcrel.to_type(u32) << 24)
+                | (sn.to_type(u32) & 0xffffff);
+            buf_put_u32le(e.out, rl.offset.to_type(u32));
+            buf_put_u32le(e.out, word);
+            n += 1;
+        }
+        free(ids.to_type(*void));
+        k += 1;
+    }
+    return 0;
+}
+
+// mo_write_syms：写 nlist_64 符号表。
+pub fn mo_write_syms(e *MachOState) int {
+    let c *Ctx = e.c;
+    let k int = 0;
+    for k < e.nsym {
+        let i int = e.ord[k];
+        if (i < 0) {
+            k += 1;
+            continue;
+        }
+        let s *Symbol = &c.syms[i];
+        buf_put_u32le(e.out, e.strx[i].to_type(u32));
+        if (sym_is_defined(s) == 0) {
+            buf_put(e.out, MO_N_UNDF | MO_N_EXT);
+            buf_put(e.out, 0.to_type(u8));
+            buf_put_u16le(e.out, 0.to_type(u16));
+            buf_put_u64le(e.out, 0.to_type(u64));
+        } else {
+            let se int = e.secmap[s.shndx];
+            if (se < 0) {
+                return mo_diag_line(c, s.line, "符号所在节不参与输出");
+            }
+            let ty u8 = MO_N_SECT;
+            if (s.binding == SYM_GLOBAL) {
+                ty = MO_N_SECT | MO_N_EXT;
+            }
+            buf_put(e.out, ty);
+            buf_put(e.out, (se + 1).to_type(u8));
+            buf_put_u16le(e.out, 0.to_type(u16));
+            buf_put_u64le(e.out, (e.secs[se].addr + s.value).to_type(u64));
+        }
+        k += 1;
+    }
+    return 0;
+}
+
+// macho_write：Mach-O 对象出口。成功后对象字节在 out 里，返回 0。
+pub fn macho_write(c *Ctx, out *Buf) int {
+    let e *MachOState = malloc(sizeof(MachOState).to_type(u64)).to_type(*MachOState);
+    if (e == 0) {
+        return diag_plain(c, "内存不足");
+    }
+    e.c = c;
+    e.out = out;
+    e.nsec = 0;
+    e.secs = 0;
+    e.secmap = 0;
+    e.symmap = 0;
+    e.strx = 0;
+    e.ord = 0;
+    e.nsym = 0;
+    e.nlocal = 0;
+    e.nextdef = 0;
+    e.nundef = 0;
+    e.symoff = 0;
+    e.stroff = 0;
+    e.roff = 0;
+    buf_init(&e.strtab);
+    if (mo_plan(e) != 0 || mo_symtab(e) != 0 || mo_strtab(e) != 0) {
+        macho_free(e);
+        return -1;
+    }
+    let sizeofcmds int = MO_SEGCMD_SIZE + MO_SECT_SIZE * e.nsec
+        + MO_BUILDVER_CMD_SIZE + MO_SYMTAB_CMD_SIZE + MO_DYSYMTAB_CMD_SIZE;
+    let cur *int = malloc(8).to_type(*int);
+    if (cur == 0) {
+        macho_free(e);
+        return diag_plain(c, "内存不足");
+    }
+    cur[0] = MO_MACHO_HDR_SIZE + sizeofcmds;
+    let dataoff int = cur[0];
+    if (mo_file_offsets(e, cur) != 0) {
+        free(cur.to_type(*void));
+        macho_free(e);
+        return -1;
+    }
+    let filesize int = 0;
+    let vmsize int = 0;
+    let k int = 0;
+    for k < e.nsec {
+        if (e.secs[k].off != 0) {
+            let endp int = e.secs[k].off + mo_sec_size(&c.secs[e.secs[k].src]);
+            if (endp - dataoff > filesize) {
+                filesize = endp - dataoff;
+            }
+        }
+        if (e.secs[k].addr + e.secs[k].size > vmsize) {
+            vmsize = e.secs[k].addr + e.secs[k].size;
+        }
+        k += 1;
+    }
+                        if (mo_write_hdr(e, sizeofcmds, filesize, vmsize) != 0) {
+        free(cur.to_type(*void));
+        macho_free(e);
+        return -1;
+    }
+        // 节内容
+    k = 0;
+    for k < e.nsec {
+                                        if (e.secs[k].off != 0) {
+            buf_put_n(out, 0.to_type(u8), e.secs[k].off - out.len);
+            let s *Section = &c.secs[e.secs[k].src];
+            buf_put_bytes(out, s.data.data, s.data.len);
+        }
+        k += 1;
+    }
+        if (mo_write_rels(e) != 0) {
+        free(cur.to_type(*void));
+        macho_free(e);
+        return -1;
+    }
+        buf_put_n(out, 0.to_type(u8), e.symoff - out.len);
+    if (mo_write_syms(e) != 0) {
+        free(cur.to_type(*void));
+        macho_free(e);
+        return -1;
+    }
+    buf_put_n(out, 0.to_type(u8), e.stroff - out.len);
+    buf_put_bytes(out, e.strtab.data, e.strtab.len);
+    free(cur.to_type(*void));
+    macho_free(e);
+    return 0;
+}
+
+// macho_free：释放写出过程占用的全部缓冲。失败路径也要走到，避免泄漏。
+pub fn macho_free(e *MachOState) int {
+    if (e.secs != 0) { free(e.secs.to_type(*void)); }
+    if (e.secmap != 0) { free(e.secmap.to_type(*void)); }
+    if (e.symmap != 0) { free(e.symmap.to_type(*void)); }
+    if (e.ord != 0) { free(e.ord.to_type(*void)); }
+    if (e.strx != 0) { free(e.strx.to_type(*void)); }
+    if (e.roff != 0) { free(e.roff.to_type(*void)); }
+    buf_free(&e.strtab);
+    free(e.to_type(*void));
+    return 0;
+}

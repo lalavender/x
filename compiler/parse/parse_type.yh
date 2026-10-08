@@ -1,5 +1,6 @@
 module parse;
 import gen;
+import comptime;
 
 // ============================================================================
 // parse_type.yh —— 自举编译器：类型引用解析与解析器共用工具
@@ -93,15 +94,21 @@ pub fn sizeof_starts_type() int {
         return 1;
     }
     if (k == gen.TOK_IDENT) {
-        let tid int = gen.ty_lookup_name(gs.c_toks[gs.c_pos].start, gs.c_toks[gs.c_pos].len);
+        // 跳过的星号是当前形态前缀；类型名字位于 c_pos + off。
+        let type_pos int = gs.c_pos + off;
+        let tid int = gen.ty_lookup_name(gs.c_toks[type_pos].start,
+            gs.c_toks[type_pos].len);
         if (tid >= 0) {
             return 1;
         }
         // 模块限定类型 m.T（P3）：绑定名在导入表且命名空间导出该类型名
-        if (p_peek(1) == gen.TK_DOT && p_peek(2) == gen.TOK_IDENT) {
-            let qb int = gen.mod_file_binding(gs.c_toks[gs.c_pos].start, gs.c_toks[gs.c_pos].len);
-            if (qb >= 0 && gen.mod_ns_lookup(qb, gs.c_toks[gs.c_pos + 2].start,
-                gs.c_toks[gs.c_pos + 2].len, 1) >= 0) {
+        if (p_peek(off + 1) == gen.TK_DOT
+            && p_peek(off + 2) == gen.TOK_IDENT) {
+            let qb int = gen.mod_file_binding(gs.c_toks[type_pos].start,
+                gs.c_toks[type_pos].len);
+            if (qb >= 0 && gen.mod_ns_lookup(qb,
+                gs.c_toks[type_pos + 2].start,
+                gs.c_toks[type_pos + 2].len, 1) >= 0) {
                 return 1;
             }
         }
@@ -160,27 +167,65 @@ pub fn parse_type_ref() int {
         return gen.ty_ptr(e);
     }
     if (k == gen.TK_LBRACKET) {
+        let array_line int = gs.c_toks[gs.c_pos].line;
+        let array_col int = gs.c_toks[gs.c_pos].col;
         p_adv();
         let alen int = -1;
+        let deferred_sym int = -1;
+        let deferred_line int = 0;
+        let deferred_col int = 0;
+        let deferred_expr int = 0;
+        let deferred_expr_first int = -1;
+        let deferred_expr_after int = -1;
         if (p_cur() != gen.TK_RBRACKET) {
             let r gen.Res;
             if (gs.c_compile != 0) {
-                gs.c_fold += 1;
-                let rr int = parse_expr(&r);
-                gs.c_fold -= 1;
-                if (rr != 0) {
-                    return -1;
+                // 简单的前向 const 保持符号请求；一般表达式在 pass1 保存 token 范围，
+                // 待 typed CT 函数与其全局常量依赖登记完成后再求值。
+                if (gs.c_pass == 1 && p_cur() == gen.TOK_IDENT
+                    && p_peek(1) == gen.TK_RBRACKET) {
+                    let token int = gs.c_pos;
+                    let sym int = gen.sym_lookup(gs.c_toks[token].start,
+                        gs.c_toks[token].len);
+                    if (sym >= 0 && gs.c_syms[sym].kind == gen.SYM_CONST
+                        && gs.c_syms[sym].const_ready == 0
+                        && gen.ty_is_integer(gs.c_syms[sym].type_id) != 0) {
+                        deferred_sym = sym;
+                        deferred_line = gs.c_toks[token].line;
+                        deferred_col = gs.c_toks[token].col;
+                        p_adv();
+                    }
                 }
-                if (r.is_const == 0) {
-                    return gen.sem_err("数组长度必须是编译期常量");
+                if (gs.c_pass == 1 && deferred_sym < 0) {
+                    let close int = p_ct_layout_array_close(gs.c_pos);
+                    if (close > gs.c_pos
+                        && p_ct_layout_expr_needs_defer(gs.c_pos, close) != 0) {
+                        deferred_expr = 1;
+                        deferred_expr_first = gs.c_pos;
+                        deferred_expr_after = close;
+                        gs.c_pos = close;
+                    }
                 }
-                if (r.ival <= 0) {
-                    return gen.sem_err("数组长度必须为正");
+                if (deferred_sym < 0) {
+                    if (deferred_expr == 0) {
+                        gs.c_fold += 1;
+                        let rr int = parse_expr(&r);
+                        gs.c_fold -= 1;
+                        if (rr != 0) {
+                            return -1;
+                        }
+                        if (r.is_const == 0) {
+                            return gen.sem_err("数组长度必须是编译期常量");
+                        }
+                        if (r.ival <= 0) {
+                            return gen.sem_err("数组长度必须为正");
+                        }
+                        if (r.ival > 2147483647) {
+                            return gen.sem_err("数组长度超出限制");
+                        }
+                        alen = r.ival.to_type(int);
+                    }
                 }
-                if (r.ival > 2147483647) {
-                    return gen.sem_err("数组长度超出限制");
-                }
-                alen = r.ival.to_type(int);
             } else {
                 if (parse_expr(&r) != 0) {
                     return -1;
@@ -198,7 +243,20 @@ pub fn parse_type_ref() int {
             return 0;
         }
         if (alen < 0) {
+            if (deferred_expr != 0) {
+                return comptime.ct_layout_array_expr(e2, gs.c_active_file,
+                    deferred_expr_first, deferred_expr_after,
+                    array_line, array_col);
+            }
+            if (deferred_sym >= 0) {
+                return comptime.ct_layout_array(e2, -1, deferred_sym,
+                    deferred_line, deferred_col);
+            }
             return gen.ty_slice(e2);
+        }
+        if (gs.c_pass == 1 && gs.t_types[e2].size < 0) {
+            return comptime.ct_layout_array(e2, alen, -1,
+                array_line, array_col);
         }
         return gen.ty_array(e2, alen);
     }

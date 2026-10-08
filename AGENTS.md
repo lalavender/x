@@ -16,7 +16,8 @@
   （把新 yh 覆盖 bin/yh 并更新哈希）。源码无法在仓库内独立
   重建编译器，正确性由固定点与语料门保证，git 历史保留每一代种子。
 - stage0 的差分参照与 `-run`/交叉 ELF 能力随删除终结；Linux CI/开发
-  需另行建立（Linux 版含模块系统的 yh 待发布归档）。
+  需另行建立（Linux 版含模块系统的 yh 待发布归档）。需要 Linux 环境
+  验证时优先用容器而非虚拟机，见下文《Linux 环境验证（容器方案）》。
 - 自举侧新增/修改行为时，须在 `tests/yh-run/` 或 `tests/modules/`
   新增 `.yh` 用例并运行 `make`。决策依据见 ADR-0006/0007。
 
@@ -71,6 +72,62 @@ make selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 
 make seed               # 滚种子（仅在全绿后）
 ```
 
+
+## Linux 环境验证（容器方案）
+
+需要 Linux 环境做测试/验证时（如验证 ELF 产物、预演 Linux CI、
+将来用 ELF 种子在 Linux 上自举），**优先使用容器，不搭完整虚拟机**：
+容器秒级启停、可直接挂载本仓库，日常验证不需要 VM 的完整内核与桌面。
+
+### 前提事实（先读再动手）
+
+- 当前入库种子 `bin/yh` 是 **darwin/arm64（Mach-O）二进制，不能在
+  Linux 容器内运行**。在 Linux ELF 种子（`bin/yh-linux-arm64`，
+  待发布归档）入库之前，容器内无法跑 `yh build`/自举门，只能做
+  产物级验证（汇编/ELF 检查、运行已交叉产出的测试程序等）。
+- Makefile 按宿主自动选种子：Linux 宿主取 `bin/yh-linux-$(SEED_ARCH)`；
+  产物形态随宿主（Darwin → Mach-O，Linux → ELF）。平台矩阵见
+  `docs/02-plan/yh-link平台与架构矩阵方案.md`。
+- 宿主是 Apple Silicon（darwin/arm64），系统 container 默认
+  arch=arm64 / os=linux，直接用 alpine/debian 等多架构 OCI 镜像即可，
+  原生 arm64 无模拟、性能接近原生；不要切 x86_64 走 Rosetta/qemu。
+
+### 操作方式
+
+容器运行时用 **macOS 系统自带 `container`（Apple Container），
+不用 docker**（下述命令已实测通过）：
+
+```bash
+# 服务未运行时先启动；若 run 长时间卡在 "Starting container"
+# 后报 XPC timeout，先 stop 再 start 重启服务（实测有效）
+container system start
+
+# 进入一次性 arm64 Linux 容器，仓库整体挂载到 /work（首次拉取镜像需网络）
+container run --rm -it -v "$PWD":/work -w /work alpine:latest sh
+
+# 容器内一次性装齐门禁所需工具（python3 跑门禁脚本，cc/ld 供链接）
+apk add python3 build-base        # alpine；用 debian 镜像则：
+apt-get update && apt-get install -y python3 build-essential
+```
+
+故障处理：卡死的容器用 `container ls -a` 查看、
+`container rm --force <id>` 清理；服务异常看 `container system logs`。
+
+有 Linux ELF 种子后的容器内自举验证（预期用法）：
+
+```bash
+SEED=bin/yh-linux-arm64 make test
+SEED=bin/yh-linux-arm64 make selfhost-native
+```
+
+### 容器内验证的约束
+
+- 挂载目录的文件属主是宿主用户：容器内只做构建/测试，不做
+  `chown`/权限改写；容器内生成的临时产物一律放 `tmp/`，验证完清理。
+- **不要**把容器内编出的 yh 覆盖回 `bin/` 种子；滚种子只在本机
+  `make test` 与 `make selfhost-native` 全绿后执行 `make seed`。
+- 容器内验证结论（命令、镜像、结果）记入 `docs/finish.md`；
+  若发现 Linux 特有问题，先在 `docs/todo.md` 立项再修。
 
 ## graphify
 

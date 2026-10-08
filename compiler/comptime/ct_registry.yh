@@ -3,26 +3,152 @@ import gen;
 
 // ct_reset：释放当前编译单元登记的函数体快照，防止模块 worker 交叉污染。
 pub fn ct_reset() void {
+    let gs *gen.GenState = gen.G();
+    ct_layout_reset();
+    ct_ir_result_pool_clear();
+    ct_pool_reset();
     let i int = 0;
     for i < ct_function_n {
         if (ct_functions[i].params != 0) { free(ct_functions[i].params.to_type(*void)); }
+        if (ct_functions[i].imports != 0) { free(ct_functions[i].imports.to_type(*void)); }
         if (ct_functions[i].src != 0) { free(ct_functions[i].src.to_type(*void)); }
+        if (ct_functions[i].src_path != 0) { free(ct_functions[i].src_path.to_type(*void)); }
         if (ct_functions[i].body != 0) { free(ct_functions[i].body.to_type(*void)); }
         i += 1;
     }
     if (ct_functions != 0) { free(ct_functions.to_type(*void)); }
+    if (ct_ir_exprs != 0) { free(ct_ir_exprs.to_type(*void)); }
+    if (ct_ir_stmts != 0) { free(ct_ir_stmts.to_type(*void)); }
+    if (ct_ir_edges != 0) { free(ct_ir_edges.to_type(*void)); }
+    if (ct_ir_bindings != 0) { free(ct_ir_bindings.to_type(*void)); }
     ct_functions = 0;
     ct_function_n = 0;
     ct_function_cap = 0;
+    ct_ir_exprs = 0;
+    ct_ir_expr_n = 0;
+    ct_ir_expr_cap = 0;
+    ct_ir_stmts = 0;
+    ct_ir_stmt_n = 0;
+    ct_ir_stmt_cap = 0;
+    ct_ir_edges = 0;
+    ct_ir_edge_n = 0;
+    ct_ir_edge_cap = 0;
+    ct_ir_bindings = 0;
+    ct_ir_binding_n = 0;
+    ct_ir_binding_cap = 0;
+    ct_ir_steps = 0;
     ct_expansion_count = 0;
+    ct_expansion_size = 0;
+    ct_expansion_ast_depth = 0;
+    ct_eval_depth = 0;
+    ct_control_depth = 0;
+    ct_for_boundary_depth = 0;
+    gs.c_ct_expand_depth = 0;
 }
 
-// ct_charge_expansion：限制嵌套展开的总实例数，避免输入导致指数级代码膨胀。
-pub fn ct_charge_expansion() int {
+// ct_enter_control：进入一层编译期结构控制，并限制嵌套深度为 32。
+pub fn ct_enter_control() int {
+    ct_control_depth += 1;
+    if (ct_control_depth > 32) {
+        ct_control_depth -= 1;
+        return gen.sem_err("编译期结构嵌套超过 32 层");
+    }
+    return 0;
+}
+
+// ct_leave_control：退出一层编译期结构控制，供解析器在所有返回路径恢复深度。
+pub fn ct_leave_control() void {
+    if (ct_control_depth > 0) { ct_control_depth -= 1; }
+}
+
+// ct_for_boundary_enter：记录展开开始时的运行期循环深度，阻止跳转逃出展开体。
+pub fn ct_for_boundary_enter(loop_depth int) int {
+    let gs *gen.GenState = gen.G();
+    if (ct_for_boundary_depth >= 32) {
+        return gen.sem_err("编译期 for 嵌套超过 32 层");
+    }
+    ct_for_boundary_bases[ct_for_boundary_depth] = loop_depth;
+    ct_for_trace_bases[ct_for_boundary_depth] = gs.c_ct_expand_depth;
+    ct_for_boundary_depth += 1;
+    gs.c_ct_expand_values[ct_for_boundary_depth - 1] = 0;
+    return 0;
+}
+
+// ct_for_boundary_value：记录当前展开层的迭代值，供诊断输出展开来源。
+pub fn ct_for_boundary_value(value i64) int {
+    let gs *gen.GenState = gen.G();
+    if (ct_for_boundary_depth <= 0 || ct_for_boundary_depth > 32) {
+        return gen.fail("内部错误：编译期 for 展开值没有对应边界");
+    }
+    gs.c_ct_expand_values[ct_for_boundary_depth - 1] = value.to_type(int);
+    gs.c_ct_expand_depth = ct_for_boundary_depth;
+    return 0;
+}
+
+// ct_for_boundary_leave：退出一层区间展开边界。
+pub fn ct_for_boundary_leave() void {
+    let gs *gen.GenState = gen.G();
+    if (ct_for_boundary_depth > 0) {
+        gs.c_ct_expand_depth = ct_for_trace_bases[ct_for_boundary_depth - 1];
+        ct_for_boundary_depth -= 1;
+    }
+}
+
+// ct_validate_loop_exit：保证 break/continue 不跳出最内层编译期展开体。
+pub fn ct_validate_loop_exit(loop_depth int, kind int) int {
+    if (ct_for_boundary_depth == 0
+        || loop_depth > ct_for_boundary_bases[ct_for_boundary_depth - 1]) { return 0; }
+    if (kind == gen.TK_BREAK) {
+        return gen.sem_err("编译期 $for 不能跨出展开边界执行 break");
+    }
+    return gen.sem_err("编译期 $for 不能跨出展开边界执行 continue");
+}
+
+// ct_expansion_capture_enter：标记所选普通函数展开体正在生成稳定 AST 节点。
+pub fn ct_expansion_capture_enter() void {
+    ct_expansion_ast_depth += 1;
+}
+
+// ct_expansion_capture_leave：恢复嵌套展开捕获深度，避免影响后续普通语句。
+pub fn ct_expansion_capture_leave() void {
+    if (ct_expansion_ast_depth > 0) { ct_expansion_ast_depth -= 1; }
+}
+
+// ct_charge_expansion_ast_node：按实际捕获的表达式、语句和绑定节点收费。
+pub fn ct_charge_expansion_ast_node() int {
+    if (ct_expansion_ast_depth <= 0) { return 0; }
+    if (ct_expansion_size >= 100000) {
+        return gen.sem_err("编译期 for 展开 AST 节点超过 100000");
+    }
+    ct_expansion_size += 1;
+    return 0;
+}
+
+// ct_charge_expansion_ast_nodes：按已捕获模板的逻辑实例数批量计入 AST 预算。
+pub fn ct_charge_expansion_ast_nodes(count int) int {
+    if (count < 0) { return gen.fail("内部错误：编译期 AST 模板节点数无效"); }
+    if (count > 100000 - ct_expansion_size) {
+        return gen.sem_err("编译期 for 展开 AST 节点超过 100000");
+    }
+    ct_expansion_size += count;
+    return 0;
+}
+
+// ct_charge_expansion：限制展开轮数；无 AST 捕获时兼用保守 token 规模预算。
+pub fn ct_charge_expansion(body_token_count int) int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_ast_capture == 0
+        && (body_token_count < 0 || body_token_count > 100000)) {
+        return gen.sem_err("编译期 for 展开语法规模超过 100000");
+    }
     ct_expansion_count += 1;
     if (ct_expansion_count > 100000) {
         return gen.sem_err("编译期 for 总展开次数超过 100000");
     }
+    if (gs.c_ast_capture == 0 && body_token_count > 100000 - ct_expansion_size) {
+        return gen.sem_err("编译期 for 展开语法规模超过 100000");
+    }
+    if (gs.c_ast_capture == 0) { ct_expansion_size += body_token_count; }
     return 0;
 }
 
@@ -55,18 +181,46 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     let src *u8 = malloc(nbytes.to_type(u64)).to_type(*u8);
     let body_n int = body_after - body_first;
     let body *CtToken = malloc((body_n * sizeof(CtToken)).to_type(u64)).to_type(*CtToken);
+    let path_len int = 0;
+    if (gs.c_path != 0) {
+        for gs.c_path[path_len] != 0 { path_len += 1; }
+    }
+    let src_path *u8 = 0;
+    if (path_len > 0) {
+        src_path = malloc((path_len + 1).to_type(u64)).to_type(*u8);
+    }
     let params *CtParam = 0;
+    let imports *CtImport = 0;
     if (param_n > 0) {
         params = malloc((param_n * sizeof(CtParam)).to_type(u64)).to_type(*CtParam);
     }
-    if (src == 0 || body == 0 || (param_n > 0 && params == 0)) {
+    let import_n int = 0;
+    let ii int = 0;
+    for ii < gs.mod_import_n {
+        if (gs.mod_import_mod[ii] >= 0) { import_n += 1; }
+        ii += 1;
+    }
+    if (import_n > 0) {
+        imports = malloc((import_n * sizeof(CtImport)).to_type(u64)).to_type(*CtImport);
+    }
+    if (src == 0 || body == 0 || (path_len > 0 && src_path == 0)
+        || (param_n > 0 && params == 0)
+        || (import_n > 0 && imports == 0)) {
         if (src != 0) { free(src.to_type(*void)); }
         if (body != 0) { free(body.to_type(*void)); }
+        if (src_path != 0) { free(src_path.to_type(*void)); }
         if (params != 0) { free(params.to_type(*void)); }
+        if (imports != 0) { free(imports.to_type(*void)); }
         return gen.fail("编译期函数快照分配失败");
     }
     memcpy(src, gs.c_src, gs.c_src_len.to_type(u64));
     src[gs.c_src_len] = 0;
+    let path_i int = 0;
+    for path_i < path_len {
+        src_path[path_i] = gs.c_path[path_i].to_type(u8);
+        path_i += 1;
+    }
+    if (src_path != 0) { src_path[path_len] = 0; }
     let ti int = 0;
     for ti < body_n {
         let token gen.Tok = gs.c_toks[body_first + ti];
@@ -84,13 +238,47 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
         params[i].type_id = types[i];
         i += 1;
     }
+    ii = 0;
+    let import_row int = 0;
+    for ii < gs.mod_import_n {
+        let module_id int = gs.mod_import_mod[ii];
+        if (module_id >= 0) {
+            imports[import_row].alias_off = gs.mod_imports[ii].alias_off;
+            imports[import_row].alias_len = gs.mod_imports[ii].alias_len;
+            imports[import_row].module_id = module_id;
+            import_row += 1;
+        }
+        ii += 1;
+    }
     ct_functions[row].sym_id = sym_id;
     ct_functions[row].ret_type = ret_type;
     ct_functions[row].param_n = param_n;
     ct_functions[row].params = params;
+    ct_functions[row].import_n = import_n;
+    ct_functions[row].imports = imports;
     ct_functions[row].src = src;
+    ct_functions[row].src_path = src_path;
+    ct_functions[row].src_path_len = path_len;
+    ct_functions[row].src_body_line = gs.c_toks[body_first].line;
+    if (gs.c_ct_origin_active != 0) {
+        ct_functions[row].src_body_line = gs.c_ct_origin_line;
+    }
+    ct_functions[row].src_line_bias = gs.c_diag_line_bias;
     ct_functions[row].body = body;
     ct_functions[row].body_n = body_n;
+    ct_functions[row].body_token_first = body_first;
+    ct_functions[row].ir_ready = 0;
+    ct_functions[row].ir_supported = 0;
+    ct_functions[row].ir_unsupported = 0;
+    ct_functions[row].ir_expr_first = 0;
+    ct_functions[row].ir_expr_after = 0;
+    ct_functions[row].ir_stmt_first = 0;
+    ct_functions[row].ir_stmt_after = 0;
+    ct_functions[row].ir_edge_first = 0;
+    ct_functions[row].ir_edge_after = 0;
+    ct_functions[row].ir_binding_first = 0;
+    ct_functions[row].ir_binding_after = 0;
+    ct_functions[row].ir_body_stmt = -1;
     ct_function_n += 1;
     return 0;
 }
@@ -105,37 +293,298 @@ pub fn ct_find(sym_id int) int {
     return -1;
 }
 
-// ct_call：校验常量实参与签名，并在编译期执行登记过的标量函数。
-pub fn ct_call(sym_id int, args *gen.Res, arg_n int, out *gen.Res) int {
-    let gs *gen.GenState = gen.G();
+// ct_iface_count：返回当前编译单元已登记的 CT 函数数量，供接口闭包导出使用。
+pub fn ct_iface_count() int {
+    return ct_function_n;
+}
+
+// ct_iface_function：返回一条 CT 函数的只读快照；越界返回零初始化记录。
+pub fn ct_iface_function(row int) CtFunction {
+    let empty CtFunction;
+    empty.sym_id = -1;
+    if (row < 0 || row >= ct_function_n) { return empty; }
+    return ct_functions[row];
+}
+
+// ct_iface_call_target：读取一个函数体内指定调用 token 对应的显式 CT 目标。
+// token_index 是原始 token 表编号，未命中返回 -1。
+pub fn ct_iface_call_target(row int, token_index int) int {
+    if (row < 0 || row >= ct_function_n) { return -1; }
+    let item CtFunction = ct_functions[row];
+    let i int = item.ir_expr_first;
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i];
+        if (expr.kind == 5 && expr.op == gen.TK_DOLLAR
+            && expr.first == token_index) {
+            return expr.sym_id;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// ct_iface_const_target：查找函数体指定 token 对应的模块级常量符号。
+// 局部 const 已有函数绑定行，不能作为跨模块闭包常量重复导出。
+pub fn ct_iface_const_target(row int, token_index int) int {
+    if (row < 0 || row >= ct_function_n) { return -1; }
+    let item CtFunction = ct_functions[row];
+    let i int = item.ir_expr_first;
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i];
+        if (expr.kind == 1 && expr.sym_kind == gen.SYM_CONST
+            && expr.sym_id >= 0 && expr.first == token_index
+            && (expr.binding_row < item.ir_binding_first
+                || expr.binding_row >= item.ir_binding_after)) {
+            return expr.sym_id;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// ct_iface_const_count：统计函数 typed IR 中的模块级常量引用。
+pub fn ct_iface_const_count(row int) int {
+    if (row < 0 || row >= ct_function_n) { return 0; }
+    let item CtFunction = ct_functions[row];
+    let count int = 0;
+    let i int = item.ir_expr_first;
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i];
+        if (expr.kind == 1 && expr.sym_kind == gen.SYM_CONST
+            && expr.sym_id >= 0
+            && (expr.binding_row < item.ir_binding_first
+                || expr.binding_row >= item.ir_binding_after)) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+// ct_iface_const_at：返回函数第 ordinal 个模块级常量引用的符号编号。
+pub fn ct_iface_const_at(row int, ordinal int) int {
+    if (row < 0 || row >= ct_function_n || ordinal < 0) { return -1; }
+    let item CtFunction = ct_functions[row];
+    let seen int = 0;
+    let i int = item.ir_expr_first;
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i];
+        if (expr.kind == 1 && expr.sym_kind == gen.SYM_CONST
+            && expr.sym_id >= 0
+            && (expr.binding_row < item.ir_binding_first
+                || expr.binding_row >= item.ir_binding_after)) {
+            if (seen == ordinal) { return expr.sym_id; }
+            seen += 1;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// ct_iface_local_type_target：返回局部声明类型 token 对应的语义类型编号。
+pub fn ct_iface_local_type_target(row int, token_index int) int {
+    if (row < 0 || row >= ct_function_n) { return -1; }
+    let item CtFunction = ct_functions[row];
+    let i int = item.ir_binding_first;
+    for i < item.ir_binding_after {
+        let binding CtBinding = ct_ir_bindings[i];
+        if (binding.is_param == 0 && binding.name_token + 1 == token_index) {
+            return binding.sym_type_id;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// ct_iface_call_count：返回已捕获正文中显式 CT 调用的数量。
+pub fn ct_iface_call_count(row int) int {
+    if (row < 0 || row >= ct_function_n) { return 0; }
+    let item CtFunction = ct_functions[row];
+    let count int = 0;
+    let i int = item.ir_expr_first;
+    for i < item.ir_expr_after {
+        if (ct_ir_exprs[i].kind == 5 && ct_ir_exprs[i].op == gen.TK_DOLLAR) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+// ct_iface_call_at：返回正文第 ordinal 个显式 CT 调用的目标符号编号。
+pub fn ct_iface_call_at(row int, ordinal int) int {
+    if (row < 0 || row >= ct_function_n || ordinal < 0) { return -1; }
+    let item CtFunction = ct_functions[row];
+    let seen int = 0;
+    let i int = item.ir_expr_first;
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i];
+        if (expr.kind == 5 && expr.op == gen.TK_DOLLAR) {
+            if (seen == ordinal) { return expr.sym_id; }
+            seen += 1;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// ct_is_prepared：查询函数是否已有 pass2a 前捕获的 typed IR 正文。
+pub fn ct_is_prepared(sym_id int) int {
+    let row int = ct_find(sym_id);
+    if (row < 0) { return 0; }
+    return ct_functions[row].ir_ready;
+}
+
+// ct_invoke_in_frame：验证实参并执行函数，将聚合结果限制在调用方帧生命周期内。
+pub fn ct_invoke_in_frame(caller *CtFrame, sym_id int, args *CtValue,
+    arg_n int, out *CtValue) int {
     let row int = ct_find(sym_id);
     if (row < 0) { return gen.sem_err("编译期函数正文不在当前编译单元中"); }
     let target CtFunction = ct_functions[row];
-    if (arg_n != target.param_n) { return gen.sem_err("编译期调用实参数量与函数签名不符"); }
-    if (gen.ty_is_integer(target.ret_type) == 0) {
-        return gen.sem_err("首版编译期函数只支持整数返回类型");
+    if (ct_layout_function_sym_pending(sym_id) != 0) {
+        return gen.sem_err("编译期函数引用了尚未完成布局的类型");
     }
+    if (arg_n != target.param_n) { return gen.sem_err("编译期调用实参数量与函数签名不符"); }
+    if (ct_ir_return_supported(target.ret_type) == 0) {
+        return gen.sem_err("编译期函数返回值类型不受支持");
+    }
+    let typed int = (target.ir_ready != 0 && target.ir_supported != 0).to_type(int);
+    let return_kind int = gen.G().t_types[target.ret_type].kind;
+    let aggregate_return int = ((return_kind == gen.TY_ARRAY
+        || return_kind == gen.TY_STRUCT || return_kind == gen.TY_SLICE
+        || return_kind == gen.TY_UNION).to_type(int));
+    if (aggregate_return != 0 && (caller == 0 || typed == 0)) {
+        return gen.sem_err("编译期聚合返回只支持嵌套 typed IR 调用");
+    }
+    let call_values [64]CtValue;
+    let i int = 0;
+    for i < arg_n {
+        let param_type int = target.params[i].type_id;
+        if (ct_ir_param_supported(param_type) == 0) {
+            return gen.sem_err("编译期函数形参类型不受支持");
+        }
+        if (gen.ty_is_integer(param_type) == 0 && gen.ty_is_float(param_type) == 0
+            && typed == 0) {
+            return gen.sem_err("编译期聚合或指针形参要求函数具有受支持的 typed IR 正文");
+        }
+        if (gen.sem_can_assign(param_type, args[i].type_id,
+                args[i].is_lit, args[i].value, args[i].lit_big) != 0) { return -1; }
+        if (gen.G().t_types[param_type].kind == gen.TY_SLICE
+            && ct_ir_slice_param_valid(param_type, &args[i]) == 0) {
+            return gen.sem_err("编译期切片形参需要有效的本地数组或切片视图");
+        }
+        call_values[i] = args[i];
+        if (ct_pool_adopt_label(&call_values[i]) != 0) { return -1; }
+        call_values[i].type_id = param_type;
+        call_values[i].is_lit = 0;
+        call_values[i].lit_big = 0;
+        i += 1;
+    }
+    if (ct_eval_depth >= 64) {
+        return gen.sem_err("编译期函数调用深度超过 64 层");
+    }
+    ct_eval_depth += 1;
+    let value CtValue;
+    let status int = 0;
+    if (target.ir_ready != 0 && target.ir_supported != 0) {
+        status = ct_eval_ir_body(target, &call_values[0], &value, caller);
+    } else {
+        // typed IR 是唯一执行器：正文不在支持子集内的函数不再回退 token 解释，
+        // 按捕获时记录的原因码指出具体构造，便于在源码快照中定位。
+        return ct_unsupported_diagnostic(target.ir_unsupported);
+    }
+    ct_eval_depth -= 1;
+    if (status != 0) { return -1; }
+    if (gen.sem_can_assign(target.ret_type, value.type_id, value.is_lit,
+            value.value, value.lit_big) != 0) { return -1; }
+    *out = value;
+    out.type_id = target.ret_type;
+    return 0;
+}
+
+// ct_invoke：执行没有 typed 调用方帧的编译期请求，只允许常量系统可保存的标量返回。
+pub fn ct_invoke(sym_id int, args *CtValue, arg_n int, out *CtValue) int {
+    return ct_invoke_in_frame(0, sym_id, args, arg_n, out);
+}
+
+// ct_call：校验常量实参并执行 CT 函数，将最外层聚合结果保留或物化。
+pub fn ct_call(sym_id int, args *gen.Res, arg_n int, out *gen.Res) int {
+    let gs *gen.GenState = gen.G();
     let values [64]CtValue;
+    if (arg_n < 0 || arg_n > 64) { return gen.sem_err("编译期调用实参数量无效"); }
     let i int = 0;
     for i < arg_n {
         if (args[i].is_const == 0) { return gen.sem_err("编译期调用的实参必须是常量"); }
-        if (gen.ty_is_integer(target.params[i].type_id) == 0) {
-            return gen.sem_err("首版编译期函数只支持整数形参");
-        }
-        if (gen.sem_can_assign(target.params[i].type_id, args[i].type_id,
-                args[i].is_lit, args[i].ival, args[i].lit_big) != 0) { return -1; }
-        values[i].type_id = target.params[i].type_id;
+        values[i].type_id = args[i].type_id;
         values[i].value = args[i].ival;
-        values[i].is_lit = 0;
-        values[i].lit_big = 0;
+        values[i].is_lit = args[i].is_lit;
+        values[i].lit_big = args[i].lit_big;
         i += 1;
     }
     let value CtValue;
-    if (ct_eval_body(target, &values[0], &value) != 0) { return -1; }
-    if (gen.sem_can_assign(target.ret_type, value.type_id, value.is_lit,
-            value.value, value.lit_big) != 0) { return -1; }
-    gen.sem_res_const(out, target.ret_type, value.value);
+    let result_frame CtFrame;
+    result_frame.aggregates = 0;
+    result_frame.aggregate_element_count = 0;
+    ct_eval_depth = 0;
+    ct_ir_steps = 0;
+    if (ct_invoke_in_frame(&result_frame, sym_id, &values[0], arg_n,
+            &value) != 0) {
+        ct_ir_aggregate_free_all(&result_frame);
+        return -1;
+    }
+    let result_kind int = gs.t_types[value.type_id].kind;
+    if (result_kind == gen.TY_ARRAY || result_kind == gen.TY_STRUCT
+        || result_kind == gen.TY_SLICE || result_kind == gen.TY_UNION) {
+        ct_ir_result_pool_keep(&result_frame);
+        if (gs.c_fold != 0) {
+            gen.sem_res_const(out, value.type_id, value.value);
+            gs.c_res_is_addr = 1;
+            return 0;
+        }
+        let label int = ct_ir_data_emit_temp(value.type_id, &value);
+        if (label < 0) { return -1; }
+        gen.sem_res_const(out, value.type_id, label.to_type(i64));
+        if (gen.em_load_data_label(label) != 0) { return -1; }
+        gs.c_res_is_addr = 1;
+        return 0;
+    }
+    ct_ir_aggregate_free_all(&result_frame);
+    gen.sem_res_const(out, value.type_id, value.value);
+    if (gen.ty_is_float(value.type_id) != 0) {
+        // 浮点常量以 IEEE754 位模式同时写入 ival 与 fval_bits。
+        out.fval_bits = value.value;
+        if (gs.c_fold == 0 && gen.em_mov_imm("x0", value.value) != 0) { return -1; }
+        if (gs.c_fold == 0 && gen.em_ins("fmov\td0, x0") != 0) { return -1; }
+        gs.c_res_is_addr = 0;
+        return 0;
+    }
     if (gs.c_fold == 0 && gen.em_mov_imm("x0", value.value) != 0) { return -1; }
     gs.c_res_is_addr = 0;
     return 0;
+}
+
+// ct_unsupported_diagnostic：按捕获时记录的原因码报告不受支持的正文构造。
+fn ct_unsupported_diagnostic(code int) int {
+    if (code == 100) {
+        return gen.sem_err("编译期函数正文的类型声明不在受支持的 typed IR 子集内");
+    }
+    if (code == 200) {
+        return gen.sem_err("编译期函数正文的 goto 语句不在受支持的 typed IR 子集内");
+    }
+    if (code == 300) {
+        return gen.sem_err("编译期函数正文的标签语句不在受支持的 typed IR 子集内");
+    }
+    if (code == 400) {
+        return gen.sem_err("编译期函数正文的编译期语句不在受支持的 typed IR 子集内");
+    }
+    if (code == 500) {
+        return gen.sem_err("编译期函数正文含不在受支持的 typed IR 子集内的语句");
+    }
+    if (code == 600) {
+        return gen.sem_err("编译期函数正文含不在受支持的 typed IR 子集内的表达式");
+    }
+    if (code == 700) {
+        return gen.sem_err("编译期函数正文含缺少类型的表达式（typed IR 子集要求完整类型）");
+    }
+    return gen.sem_err("编译期函数正文不在受支持的 typed IR 子集内");
 }

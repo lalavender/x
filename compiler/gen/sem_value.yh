@@ -14,6 +14,13 @@ pub fn sem_res_reset(r *Res, tid int) int {
     r.lit_big = 0;
     r.fval_bits = 0;
     r.ast_id = -1;
+    r.layout_type_id = -1;
+    r.ct_diag = 0;
+    r.ct_diag_expr = -1;
+    r.ct_diag_line = 0;
+    r.ct_diag_col = 0;
+    r.ct_diag_msg_start = -1;
+    r.ct_diag_msg_len = 0;
     return 0;
 }
 
@@ -25,6 +32,13 @@ pub fn sem_res_const(r *Res, tid int, v i64) int {
     r.is_lit = 0;
     r.lit_big = 0;
     r.ast_id = -1;
+    r.layout_type_id = -1;
+    r.ct_diag = 0;
+    r.ct_diag_expr = -1;
+    r.ct_diag_line = 0;
+    r.ct_diag_col = 0;
+    r.ct_diag_msg_start = -1;
+    r.ct_diag_msg_len = 0;
     return 0;
 }
 
@@ -37,6 +51,13 @@ pub fn sem_res_copy(dst *Res, src *Res) int {
     dst.lit_big = src.lit_big;
     dst.fval_bits = src.fval_bits;
     dst.ast_id = src.ast_id;
+    dst.layout_type_id = src.layout_type_id;
+    dst.ct_diag = src.ct_diag;
+    dst.ct_diag_expr = src.ct_diag_expr;
+    dst.ct_diag_line = src.ct_diag_line;
+    dst.ct_diag_col = src.ct_diag_col;
+    dst.ct_diag_msg_start = src.ct_diag_msg_start;
+    dst.ct_diag_msg_len = src.ct_diag_msg_len;
     return 0;
 }
 
@@ -51,6 +72,9 @@ pub fn sem_number(start int, n int, r *Res) int {
     if (sem_num_is_float(start, n) != 0) {
         r.type_id = TY_F64;
         let bits i64 = sem_parse_float_bits(start, n);
+        // 位模式同时写入 ival 与 fval_bits：const 初始化按 ival 保存常量值，
+        // 浮点使用点读 fval_bits，两者必须一致。
+        r.ival = bits;
         r.fval_bits = bits;
         if (g_state.c_fold == 0) {
             if (em_mov_imm("x0", bits) != 0) { return -1; }
@@ -79,6 +103,24 @@ pub fn fp64_bits(v f64) i64 {
     let r i64 = pb[0];
     free(holder.to_type(*void));
     return r;
+}
+
+// fp64_from_bits：把 IEEE754 位模式还原为宿主 f64，供常量折叠使用。
+pub fn fp64_from_bits(bits i64) f64 {
+    let holder *i64 = malloc(8).to_type(*i64);
+    holder[0] = bits;
+    let view *f64 = holder.to_type(*f64);
+    let value f64 = view[0];
+    free(holder.to_type(*void));
+    return value;
+}
+
+// fp64_norm_bits：按目标浮点类型规范化位模式；f32 经一次往返窄化到单精度。
+pub fn fp64_norm_bits(tid int, value f64) i64 {
+    if (g_state.t_types[tid].kind == TY_F32) {
+        return fp64_bits(value.to_type(f32).to_type(f64));
+    }
+    return fp64_bits(value);
 }
 
 pub fn sem_num_is_float(start int, n int) int {
@@ -171,6 +213,10 @@ pub fn sem_string(start int, slen int, r *Res) int {
     if (lbl < 0) {
         return -1;
     }
+    // 登记标签 → 原样字节，供编译期过程按标签号反查（表满时静默降级为旧行为）。
+    if (data_str_add(lbl, start, slen) != 0 && c_data_str_n < 128) {
+        return -1;
+    }
     r.is_const = 1;
     r.ival = lbl.to_type(i64);
     if (g_state.c_fold == 0) {
@@ -249,7 +295,34 @@ pub fn sem_ident_val(idx int, r *Res) int {
     r.sym = idx;
     r.type_id = g_state.c_syms[idx].type_id;
     let kind int = g_state.c_syms[idx].kind;
+    // 聚合常量（结构体/数组/切片/联合体）没有标量值：数据已发射到数据段，
+    // 与全局变量同路径按符号地址访问，不能走下面的立即数取值分支。
     if (kind == SYM_CONST) {
+        let ck int = g_state.t_types[g_state.c_syms[idx].type_id].kind;
+        if (ck == TY_STRUCT || ck == TY_ARRAY || ck == TY_SLICE || ck == TY_UNION) {
+            // 聚合常量只读：**赋值目标**（c_lvalue == 1）直接拒绝。降级为变量语义只是
+            // 为了按符号地址读取，不能连可写性一起放开；取地址（c_lvalue >= 2）是合法的
+            // 只读引用，放行 —— 否则 `$f(&TABLE[0])` 这类编译期实参会被误拒。
+            if (g_state.c_lvalue == 1) {
+                return sem_err("不能给 const 聚合常量赋值");
+            }
+            kind = SYM_VAR;
+        }
+    }
+    if (kind == SYM_CONST) {
+        if ((g_state.c_syms[idx].flags & F_ENUM_META) != 0) {
+            if (g_state.c_syms[idx].const_ready == 0) {
+                return sem_err("枚举 values 元信息尚未就绪");
+            }
+            return 0;
+        }
+        if (g_state.c_syms[idx].const_ready == 0) {
+            if (g_state.c_ct_prepare_active != 0
+                && (g_state.c_fn_flags & F_COMPTIME) != 0) {
+                return 0;
+            }
+            return sem_err("编译期常量尚未就绪");
+        }
         r.is_const = 1;
         r.ival = g_state.c_syms[idx].cval;
         if ((g_state.c_syms[idx].flags & F_ADDR) != 0) {
@@ -265,6 +338,15 @@ pub fn sem_ident_val(idx int, r *Res) int {
             if (em_mov_imm("x0", g_state.c_syms[idx].cval) != 0) {
                 return -1;
             }
+            // 浮点常量以 IEEE754 位模式保存，引用时按浮点寄存器装载。
+            if (ty_is_float(r.type_id) != 0) {
+                if (em_ins("fmov\td0, x0") != 0) {
+                    return -1;
+                }
+            }
+        }
+        if (ty_is_float(r.type_id) != 0) {
+            r.fval_bits = g_state.c_syms[idx].cval;
         }
         return 0;
     }
@@ -339,5 +421,54 @@ pub fn sem_ident_val(idx int, r *Res) int {
         }
     }
     g_state.c_res_is_addr = 0;
+    return 0;
+}
+
+// sem_enum_meta_value：把枚举 values 迭代绑定的 value 投影为只读枚举常量。
+pub fn sem_enum_meta_value(meta *Res) int {
+    if (meta.sym < 0 || meta.sym >= g_state.c_sym_n
+        || (g_state.c_syms[meta.sym].flags & F_ENUM_META) == 0) {
+        return sem_err("枚举 values 元信息绑定无效");
+    }
+    if (g_state.c_lvalue != 0) {
+        return sem_err("枚举 values 成员只读");
+    }
+    let member int = g_state.c_syms[meta.sym].offset;
+    if (member < 0 || member >= g_state.c_sym_n
+        || (g_state.c_syms[member].flags & F_ENUM_MEMBER) == 0
+        || g_state.c_syms[member].const_ready == 0) {
+        return sem_err("枚举 values 成员索引无效");
+    }
+    let tid int = g_state.c_syms[member].type_id;
+    let value i64 = g_state.c_syms[member].cval;
+    sem_res_const(meta, tid, value);
+    if (g_state.c_compile != 0 && g_state.c_fold == 0
+        && em_mov_imm("x0", value) != 0) { return -1; }
+    return 0;
+}
+
+// sem_enum_meta_name：把枚举 values 迭代绑定的 name 投影为静态 C 字符串。
+pub fn sem_enum_meta_name(meta *Res) int {
+    if (meta.sym < 0 || meta.sym >= g_state.c_sym_n
+        || (g_state.c_syms[meta.sym].flags & F_ENUM_META) == 0) {
+        return sem_err("枚举 values 元信息绑定无效");
+    }
+    if (g_state.c_lvalue != 0) {
+        return sem_err("枚举 values 成员只读");
+    }
+    let member int = g_state.c_syms[meta.sym].offset;
+    if (member < 0 || member >= g_state.c_sym_n
+        || (g_state.c_syms[member].flags & F_ENUM_MEMBER) == 0
+        || g_state.c_syms[member].const_ready == 0) {
+        return sem_err("枚举 values 成员索引无效");
+    }
+    let lbl int = em_data_name_string(g_state.c_syms[member].name_off,
+        g_state.c_syms[member].name_len);
+    if (lbl < 0) { return -1; }
+    sem_res_reset(meta, ty_ptr(TY_CHAR));
+    meta.is_const = 1;
+    meta.ival = lbl.to_type(i64);
+    if (g_state.c_compile != 0 && g_state.c_fold == 0
+        && em_load_data_label(lbl) != 0) { return -1; }
     return 0;
 }

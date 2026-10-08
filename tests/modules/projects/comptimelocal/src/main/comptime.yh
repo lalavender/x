@@ -1,0 +1,375 @@
+module main;
+
+pub enum CtMode {
+    first;
+    second = 5;
+}
+
+@[comptime] fn combine(a int, b int) int {
+    return a * 2 + b;
+}
+
+@[comptime] fn increment(value int) int {
+    return value + 1;
+}
+
+@[comptime] fn select_by_sign(value int) int {
+    $if (value > 0) {
+        return 1;
+    } $else {
+        return 0;
+    }
+}
+
+@[comptime] fn sum_to(limit int) int {
+    let index int = 0;
+    let total int = 0;
+    for index < limit {
+        total += index;
+        index += 1;
+    }
+    $assert(total == 15, "跨文件 typed IR 局部值断言");
+    return total;
+}
+
+// sum_even：跨文件导出调用所需的编译期区间偶数求和函数。
+@[comptime] fn sum_even(start int, end int) int {
+    let lower int = start;
+    let total int = 0;
+    $for index in (lower..end) {
+        $if (index % 2 == 0) {
+            total += index;
+        }
+    }
+    return total;
+}
+
+// sum_range_forin：从另一模块源文件导出的编译期函数体执行范围 for-in。
+@[comptime] fn sum_range_forin(start int, end int) int {
+    let total int = 0;
+    for value in start..end {
+        total += value;
+    }
+    return total;
+}
+
+// sum_array_forin：在另一源文件触发的编译期调用中迭代本地固定数组。
+@[comptime] fn sum_array_forin() int {
+    let values [3]int = [4, 6, 8];
+    let total int = 0;
+    for value in values {
+        total += value;
+    }
+    return total;
+}
+
+// sum_enum_values：typed 编译期函数按枚举声明顺序累计 values 判别值。
+@[comptime] fn sum_enum_values() int {
+    let total int = 0;
+    $for item in CtMode.values {
+        let member_name *char = item.name;
+        total += item.value;
+    }
+    return total;
+}
+
+// array_middle：跨文件编译期读取固定数组的中间元素。
+@[comptime] fn array_middle() int {
+    let values [3]int = [2, 6, 10];
+    return values[1];
+}
+
+// update_array_middle：跨文件编译期写入并回读数组元素。
+@[comptime] fn update_array_middle() int {
+    let values [3]int = [2, 6, 10];
+    values[1] += 3;
+    return values[1];
+}
+
+// slice_middle：跨文件建立切片视图并经视图写入原数组。
+@[comptime] fn slice_middle() int {
+    let values [4]int = [1, 2, 3, 4];
+    let view []int = values[1..3];
+    view[0] = 20;
+    return values[1] + view[1];
+}
+
+// make_return_slice：从局部数组返回整数切片，调用方帧接管其元素副本。
+@[comptime] fn make_return_slice(seed int) []int {
+    let values [3]int = [seed, seed + 1, seed + 2];
+    return values[1..3];
+}
+
+// edit_return_slice：接收跨调用帧返回的切片并验证可写别名与有效长度。
+@[comptime] fn edit_return_slice(view []int) int {
+    view[0] = 40;
+    return len(view) * 100 + view[0] * 10 + view[1];
+}
+
+// nested_return_slice：把返回切片传入第二次跨源文件编译期调用。
+@[comptime] fn nested_return_slice() int {
+    let view []int = $make_return_slice(4);
+    return $edit_return_slice(view);
+}
+
+pub struct Point {
+    x int;
+    y int;
+}
+
+// make_point_slice：跨源文件从局部结构体数组返回切片视图。
+@[comptime] fn make_point_slice(seed int) []Point {
+    let points [2]Point = [
+        Point{ x: seed, y: seed + 1 },
+        Point{ x: seed + 2, y: seed + 3 },
+    ];
+    return points[0..2];
+}
+
+// edit_point_slice：写切片字段，并验证 for-in 结构体绑定为按值副本。
+@[comptime] fn edit_point_slice(points []Point) int {
+    points[0].x += 10;
+    points[1].y += 20;
+    let sum int = 0;
+    for point in points {
+        point.x = 100;
+        sum += point.x + point.y;
+    }
+    return points[0].x * 100 + points[1].y * 10 + sum;
+}
+
+// point_slice_roundtrip：把返回切片传给另一个跨文件编译期过程。
+@[comptime] fn point_slice_roundtrip(seed int) int {
+    let points []Point = $make_point_slice(seed);
+    let edited int = $edit_point_slice(points);
+    return edited + points[0].x + points[1].y;
+}
+
+pub struct TaggedPoint {
+    point Point;
+    tag int;
+}
+
+// ArrayTable：为编译期函数验证定长整型数组字段的独立值语义。
+pub struct ArrayTable {
+    values [2]int;
+}
+
+// ArrayGrid：为跨源文件编译期执行验证多维整型数组字段的深复制。
+pub struct ArrayGrid {
+    rows [2][2]int;
+}
+
+// ParamGrid：跨源文件聚合形参测试用结构体。
+pub struct ParamGrid {
+    cells [2][2]int;
+}
+
+// ReturnPacket：跨源文件聚合返回值测试用结构体。
+pub struct ReturnPacket {
+    rows [2][2]int;
+}
+
+// struct_middle：跨文件编译期函数创建本地结构体并修改字段。
+@[comptime] fn struct_middle() int {
+    let point Point = Point{ x: 4, y: 6 };
+    point.x += 5;
+    return point.x + point.y;
+}
+
+// nested_struct_middle：跨源文件初始化嵌套结构体并链式修改整数字段。
+@[comptime] fn nested_struct_middle() int {
+    let item TaggedPoint = TaggedPoint{
+        point: Point{ x: 2, y: 3 },
+        tag: 7,
+    };
+    item.point.x += item.point.y;
+    return item.point.x * 10 + item.tag;
+}
+
+// struct_array_copy：验证跨源文件的结构体数组字段按值复制和下标写入。
+@[comptime] fn struct_array_copy() int {
+    let values [2]int = [4, 9];
+    let values_copy [2]int = values;
+    values[1] = 100;
+    let original ArrayTable = ArrayTable{ values: values_copy };
+    values_copy[1] = 99;
+    let duplicate ArrayTable = original;
+    duplicate.values[1] = 12;
+    return original.values[1] * 10 + duplicate.values[1];
+}
+
+// nested_struct_array_copy：跨源文件复制多维数组字段并修改深层元素。
+@[comptime] fn nested_struct_array_copy() int {
+    let original ArrayGrid = ArrayGrid{ rows: [[1, 2], [3, 4]] };
+    let duplicate ArrayGrid = original;
+    duplicate.rows[1][0] = 9;
+    return original.rows[1][0] * 10 + duplicate.rows[1][0];
+}
+
+// edit_param_grid：跨源文件修改结构体形参副本中的嵌套数组。
+@[comptime] fn edit_param_grid(grid ParamGrid) int {
+    grid.cells[0][1] += 8;
+    return grid.cells[0][1] + grid.cells[1][0];
+}
+
+// edit_param_array：跨源文件修改数组形参副本。
+@[comptime] fn edit_param_array(values [2]int) int {
+    values[0] = 20;
+    return values[0] + values[1];
+}
+
+// edit_param_slice：跨源文件经切片视图形参写回调用方数组。
+@[comptime] fn edit_param_slice(values []int) int {
+    values[0] = 60;
+    return values[0] + values[1];
+}
+
+// aggregate_params：经跨源文件编译期函数验证数组/结构体深复制与切片别名。
+@[comptime] fn aggregate_params() int {
+    let grid ParamGrid = ParamGrid{ cells: [[1, 2], [3, 4]] };
+    let grid_result int = $edit_param_grid(grid) + grid.cells[0][1] * 100;
+    let array [2]int = [3, 4];
+    let array_result int = $edit_param_array(array) + array[0] * 10;
+    let data [3]int = [5, 6, 7];
+    let view []int = data[1..3];
+    let slice_result int = $edit_param_slice(view) + data[1];
+    return grid_result + array_result + slice_result;
+}
+
+// make_return_packet：跨文件生成含嵌套数组字段的结构体返回值。
+@[comptime] fn make_return_packet(seed int) ReturnPacket {
+    let packet ReturnPacket = ReturnPacket{
+        rows: [[seed, seed + 1], [seed + 2, seed + 3]],
+    };
+    return packet;
+}
+
+// copy_return_packet：验证跨文件聚合形参可直接作为聚合返回值。
+@[comptime] fn copy_return_packet(packet ReturnPacket) ReturnPacket {
+    return packet;
+}
+
+// make_return_array：跨文件返回定长整数数组。
+@[comptime] fn make_return_array(seed int) [2]int {
+    let values [2]int = [seed, seed + 1];
+    return values;
+}
+
+// aggregate_returns：消费跨文件数组/结构体返回并验证调用方拥有独立副本。
+@[comptime] fn aggregate_returns() int {
+    let original ReturnPacket = $make_return_packet(1);
+    let duplicate ReturnPacket = $copy_return_packet(original);
+    duplicate.rows[1][0] = 9;
+    let values [2]int = $make_return_array(7);
+    values[1] += 10;
+    return original.rows[1][0] * 100
+        + duplicate.rows[1][0] * 10 + values[1];
+}
+
+// bump_through：跨源文件经指针形参写回调用方帧的局部整数槽。
+@[comptime] fn bump_through(target *int, delta int) int {
+    *target += delta;
+    return *target;
+}
+
+// pointer_param：在调用方帧构造局部值，把地址交给跨文件编译期过程写回。
+@[comptime] fn pointer_param() int {
+    let seed int = 5;
+    let result int = $bump_through(&seed, 6);
+    return seed * 10 + result;
+}
+
+// float_scale：跨源文件编译期浮点形参、浮点运算与浮点返回。
+@[comptime] fn float_scale(value f64, factor f64) f64 {
+    let scaled f64 = value * factor;
+    $assert(scaled == 3.0, "跨源文件 typed 浮点运算");
+    return scaled + 0.25;
+}
+
+// float_total：跨源文件组合浮点局部值、整数截断与整数回升转换。
+@[comptime] fn float_total() f64 {
+    let base f64 = $float_scale(1.5, 2.0);
+    let whole int = base.to_type(int);
+    return whole.to_type(f64) + 1.0;
+}
+
+// float_check：把跨源文件浮点结果折算成整数，供普通函数断言
+// （前端自身的浮点常量折叠尚不支持）。
+@[comptime] fn float_check() int {
+    let total f64 = $float_total();
+    $assert(total == 4.0 && total > 3.0, "跨源文件 typed 浮点比较");
+    return (total * 100.0).to_type(int);
+}
+
+// float_array_total：跨源文件编译期接收浮点定长数组并累加元素。
+@[comptime] fn float_array_total(values [3]f64) f64 {
+    let total f64 = 0.0;
+    for value in values {
+        total += value;
+    }
+    return total;
+}
+
+// float_slice_view：跨源文件返回浮点元素切片，调用方帧接管可见元素副本。
+@[comptime] fn float_slice_view(seed f64) []f64 {
+    let values [2]f64 = [seed, seed + 0.5];
+    return values[0..2];
+}
+
+// float_array_call：在编译期函数体内构造浮点数组后经聚合形参传给跨文件函数。
+@[comptime] fn float_array_call() f64 {
+    let values [3]f64 = [1.5, 2.0, 0.25];
+    return $float_array_total(values);
+}
+
+// float_slice_pick：消费跨源文件返回的浮点元素切片并取出第二个元素。
+@[comptime] fn float_slice_pick(seed f64) f64 {
+    let view []f64 = $float_slice_view(seed);
+    return view[1];
+}
+
+// float_pointer_bump：跨源文件通过 *f64 形参写回调用方帧的浮点槽。
+@[comptime] fn float_pointer_bump(pointer *f64) f64 {
+    *pointer += 0.25;
+    return *pointer;
+}
+
+// float_pointer_drive：在本文件取浮点局部地址后跨文件传递并读回结果。
+@[comptime] fn float_pointer_drive() f64 {
+    let value f64 = 1.75;
+    return $float_pointer_bump(&value);
+}
+
+// float_pointer_scan：跨源文件用指针下标累加调用方帧数组元素。
+@[comptime] fn float_pointer_scan(base *f64, count int) f64 {
+    let total f64 = 0.0;
+    let i int = 0;
+    for i < count {
+        total += base[i];
+        i += 1;
+    }
+    return total;
+}
+
+// float_pointer_arith：取址、指针算术与跨文件指针下标读取。
+@[comptime] fn float_pointer_arith() f64 {
+    let values [3]f64 = [1.0, 2.0, 4.0];
+    let base *f64 = &values[0];
+    let last *f64 = base + 2;
+    return $float_pointer_scan(base, 3) + *last;
+}
+
+// CtUnion：跨源文件验证编译期联合体共享存储的最小整数联合体。
+pub union CtUnion {
+    as_int int;
+    as_byte u8;
+}
+
+// union_round：字面量构造后双向重解释共享存储（300 → 低字节 44；写 5 → as_int 5）。
+@[comptime] fn union_round() int {
+    let v CtUnion = CtUnion{ as_int: 300 };
+    let low u8 = v.as_byte;
+    v.as_byte = 5;
+    return v.as_int * 100 + low.to_type(int);
+}

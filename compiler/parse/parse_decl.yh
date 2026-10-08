@@ -81,7 +81,17 @@ pub fn parse_source() int {
         if (p_cur() == gen.TK_IMPORT) {
             return gen.err_tok("import 声明必须在文件头部（module 之后、业务声明之前）");
         }
-        if (parse_top_decl() != 0) {
+        let first int = gen.G().c_pos;
+        let kind int = p_top_decl_kind();
+        let mapped int = 0;
+        if (kind == gen.TK_FN && p_decl_is_comptime(first) != 0
+            && gen.G().c_ct_iface_mode != 0) {
+            if (iface_ct_origin_begin(first) != 0) { return -1; }
+            mapped = 1;
+        }
+        let status int = parse_top_decl();
+        if (mapped != 0) { iface_ct_origin_end(); }
+        if (status != 0) {
             return -1;
         }
     }
@@ -170,6 +180,24 @@ pub fn p_top_decl_kind() int {
     let kind int = p_cur();
     gs.c_pos = pos;
     return kind;
+}
+
+// p_decl_is_comptime：检查指定顶层声明是否由 comptime 属性修饰。
+pub fn p_decl_is_comptime(start int) int {
+    let gs *gen.GenState = gen.G();
+    let saved int = gs.c_pos;
+    if (start < 0 || start >= gs.c_tok_n) { return 0; }
+    gs.c_pos = start;
+    let found int = 0;
+    if (p_cur() == gen.TK_AT) {
+        p_adv();
+        if (p_cur() == gen.TK_LBRACKET) {
+            p_adv();
+            found = p_tok_text_is("comptime", 8);
+        }
+    }
+    gs.c_pos = saved;
+    return found;
 }
 
 pub fn skip_top_decl() int {
@@ -268,7 +296,7 @@ pub fn decl_index_file(fi int) int {
 }
 
 // parse_indexed_decls：按文件声明索引执行 pass1/global/function 子遍。
-// mode=0 处理全部声明，1 仅全局 let/const，2 仅 fn；未选中的节点直接跳转。
+// mode=0 全部，1 全局 let/const，2 fn，3 comptime fn，4 可执行布局 const。
 pub fn parse_indexed_decls(mode int) int {
     let gs *gen.GenState = gen.G();
     let i int = 0;
@@ -284,13 +312,23 @@ pub fn parse_indexed_decls(mode int) int {
         if (mode == 2 && node.kind == gen.TK_FN) {
             selected = 1;
         }
+        if (mode == 3 && node.kind == gen.TK_FN
+            && p_decl_is_comptime(node.start) != 0) { selected = 1; }
+        if (mode == 4 && node.kind == gen.TK_CONST
+            && p_decl_ct_layout_eval_runnable(node.start) != 0) { selected = 1; }
         gs.c_file_decl_i = i;
         if (selected != 0) {
             gs.c_pos = node.start;
+            if (mode == 3) {
+                gs.c_ct_prepare_active = 1;
+                gs.c_ct_prepare_first = node.start;
+            }
             if (parse_top_decl() != 0) {
+                gs.c_ct_prepare_active = 0;
                 gs.c_file_decl_i = -1;
                 return -1;
             }
+            gs.c_ct_prepare_active = 0;
             if (gs.c_pos > node.end) {
                 gs.c_file_decl_i = -1;
                 return gen.err_lc(node.line, node.col, "内部错误：解析越过顶层声明范围");
@@ -340,6 +378,56 @@ pub fn parse_source_fns() int {
             return -1;
         }
     }
+    return 0;
+}
+
+// parse_source_ct_fns：pass2a 前只解析、类型检查并捕获编译期函数正文。
+pub fn parse_source_ct_fns() int {
+    let gs *gen.GenState = gen.G();
+    let saved_flags int = gs.c_fn_flags;
+    if (gs.c_file_indexed != 0) {
+        let indexed_status int = parse_indexed_decls(3);
+        gs.c_fn_flags = saved_flags;
+        return indexed_status;
+    }
+    let saved_file int = gs.c_active_file;
+    let saved_decl int = gs.c_file_decl_i;
+    gs.c_active_file = 0;
+    gs.c_file_decl_i = 0;
+    mod_skip_head();
+    for p_cur() != gen.TOK_EOF {
+        let first int = gs.c_pos;
+        let kind int = p_top_decl_kind();
+        if (kind == gen.TK_FN && p_decl_is_comptime(first) != 0) {
+            if (gs.c_ct_iface_mode != 0
+                && iface_ct_origin_begin(first) != 0) {
+                gs.c_active_file = saved_file;
+                gs.c_file_decl_i = saved_decl;
+                gs.c_fn_flags = saved_flags;
+                return -1;
+            }
+            gs.c_ct_prepare_active = 1;
+            gs.c_ct_prepare_first = first;
+            if (parse_top_decl() != 0) {
+                gs.c_ct_prepare_active = 0;
+                if (gs.c_ct_iface_mode != 0) { iface_ct_origin_end(); }
+                gs.c_active_file = saved_file;
+                gs.c_file_decl_i = saved_decl;
+                gs.c_fn_flags = saved_flags;
+                return -1;
+            }
+            gs.c_ct_prepare_active = 0;
+            if (gs.c_ct_iface_mode != 0) { iface_ct_origin_end(); }
+        } else if (skip_top_decl() != 0) {
+            gs.c_active_file = saved_file;
+            gs.c_file_decl_i = saved_decl;
+            gs.c_fn_flags = saved_flags;
+            return -1;
+        }
+    }
+    gs.c_active_file = saved_file;
+    gs.c_file_decl_i = saved_decl;
+    gs.c_fn_flags = saved_flags;
     return 0;
 }
 
@@ -402,11 +490,11 @@ pub fn parse_top_decl() int {
     }
     let kind int = p_cur();
     if ((gs.c_decl_attrs & gen.ATTR_COMPTIME) != 0
-        && (kind != gen.TK_FN || gs.c_decl_attrs != gen.ATTR_COMPTIME || gs.c_decl_pub != 0)) {
+        && (kind != gen.TK_FN || gs.c_decl_attrs != gen.ATTR_COMPTIME)) {
         gs.c_pos = attr_pos;
         gs.c_decl_pub = 0;
         gs.c_decl_attrs = 0;
-        return gen.err_tok("comptime 首版仅支持修饰私有 fn，且不能与其他属性组合");
+        return gen.err_tok("comptime 仅支持单独修饰 fn");
     }
     if (gs.c_decl_attrs != 0) {
         if (kind == gen.TK_STRUCT || kind == gen.TK_UNION || kind == gen.TK_ENUM) {
@@ -449,6 +537,7 @@ pub fn parse_local_init(idx int, tid int, kind int) int {
         if (gs.t_types[tid].kind == gen.TY_PTR) {
             gs.c_syms[idx].flags |= gen.F_ADDR;
         }
+        gs.c_syms[idx].const_ready = 1;
         return 0;
     }
     let r gen.Res;
@@ -504,6 +593,10 @@ pub fn parse_fn_decl() int {
     }
     let start int = gs.c_toks[gs.c_pos].start;
     let n int = gs.c_toks[gs.c_pos].len;
+    if ((gs.c_decl_attrs & gen.ATTR_COMPTIME) != 0
+        && parse_comptime_diag_kind() != 0) {
+        return gen.sem_err("编译期诊断内建名不能用于 @[comptime] 函数");
+    }
     if ((gs.c_decl_attrs & gen.ATTR_COMPTIME) != 0 && n == 4
         && gs.c_src[start] == 'm' && gs.c_src[start + 1] == 'a'
         && gs.c_src[start + 2] == 'i' && gs.c_src[start + 3] == 'n') {
@@ -588,13 +681,14 @@ pub fn parse_fn_decl() int {
         ret = rt;
     }
     if (gs.c_compile != 0 && (gs.c_decl_attrs & gen.ATTR_COMPTIME) != 0) {
-        if (vararg != 0 || is_variadic_seen != 0 || gen.ty_is_integer(ret) == 0) {
-            return gen.sem_err("首版 comptime 函数要求固定整数参数和整数返回值");
+        if (vararg != 0 || is_variadic_seen != 0
+            || comptime.ct_ir_return_supported(ret) == 0) {
+            return gen.sem_err("comptime 函数要求固定参数，且返回值须为标量、受支持定长数组/结构体/联合体或受支持元素切片");
         }
         let ci_ct int = 0;
         for ci_ct < np {
-            if (gen.ty_is_integer(ptypes[ci_ct]) == 0) {
-                return gen.sem_err("首版 comptime 函数只支持整数形参");
+            if (comptime.ct_ir_param_supported(ptypes[ci_ct]) == 0) {
+                return gen.sem_err("comptime 函数形参只支持整数、浮点、当前帧标量指针、标量叶定长数组、受支持结构体/联合体、标量元素切片或受支持结构体元素切片");
             }
             ci_ct += 1;
         }
@@ -712,6 +806,7 @@ pub fn parse_fn_decl() int {
             body_after = gs.c_pos;
         }
         if ((gs.c_decl_attrs & gen.ATTR_COMPTIME) != 0
+            && gs.c_iface_load == 0
             && comptime.ct_register(idx, &pnames[0], &pname_lens[0], &ptypes[0],
                 np, ret, body_first, body_after) != 0) {
             return -1;
@@ -725,6 +820,16 @@ pub fn parse_fn_decl() int {
         return gen.sem_err("内部错误：函数符号丢失");
     }
     let compile_only int = ((gs.c_syms[fidx].flags & gen.F_COMPTIME) != 0).to_type(int);
+    if (compile_only != 0 && gs.c_ct_prepare_active == 0) {
+        if (comptime.ct_is_prepared(fidx) != 0) {
+            if (gs.c_file_indexed != 0 && gs.c_file_decl_i >= 0) {
+                gs.c_pos = gs.c_file_decls[gs.c_file_decl_i].end;
+            } else if (skip_to_decl_end() != 0) {
+                return -1;
+            }
+            return 0;
+        }
+    }
     if (compile_only != 0) { gs.c_em_suppress += 1; }
     if (gen.sem_fn_begin(fidx) != 0) {
         return -1;
@@ -769,6 +874,8 @@ pub fn parse_fn_decl() int {
     if (ast_function_end() != 0) {
         return -1;
     }
+    if (compile_only != 0 && gs.c_ct_prepare_active != 0
+        && ast_function_ct_export(fidx) != 0) { return -1; }
     if (compile_only != 0) { gs.c_em_suppress -= 1; }
     return 0;
 }
@@ -816,6 +923,8 @@ pub fn parse_struct_decl() int {
     let start int = gs.c_toks[gs.c_pos].start;
     let n int = gs.c_toks[gs.c_pos].len;
     p_adv();
+    let struct_line int = gs.c_toks[gs.c_pos - 1].line;
+    let struct_col int = gs.c_toks[gs.c_pos - 1].col;
     if (gs.c_compile != 0 && gs.c_pass == 1) {
         // 预登记名字（自引用指针字段需要）
         let stid int = gen.ty_push(gen.TY_STRUCT, 0, 0, -1, 0, gs.t_field_n);
@@ -873,8 +982,13 @@ pub fn parse_struct_decl() int {
     }
     gs.c_type_abi = saved_type_abi;
     if (gs.c_compile != 0 && gs.c_pass == 1) {
-        if (gen.sem_struct_finish(gs.c_cur_struct, is_union) != 0) {
-            return -1;
+        if (comptime.ct_layout_struct_pending(gs.c_cur_struct) != 0) {
+            if (comptime.ct_layout_defer_struct(gs.c_cur_struct, is_union,
+                    struct_line, struct_col) != 0) { return -1; }
+        } else {
+            if (gen.sem_struct_finish(gs.c_cur_struct, is_union) != 0) {
+                return -1;
+            }
         }
         if ((gs.c_decl_attrs & gen.ATTR_EXTERN) != 0 && gs.t_types[gs.c_cur_struct].len == 0) {
             return gen.ty_add_name_attrs(gs.c_cur_struct, gen.ATTR_OPAQUE);
@@ -910,6 +1024,8 @@ pub fn parse_enum_decl() int {
         gs.c_enum_next = 0;
     }
     let item_count int = 0;
+    let forced_pending int = 0;
+    let prev_member_sym int = -1;
     if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
         return -1;
     }
@@ -922,39 +1038,68 @@ pub fn parse_enum_decl() int {
         p_adv();
         let has_val int = 0;
         let v gen.Res;
+        let pend_expr int = 0;
+        let pend_first int = -1;
+        let pend_after int = -1;
         if (p_cur() == gen.TK_ASSIGN) {
             p_adv();
             has_val = 1;
+            // 判别值必须在 pass1 折叠成常量；含编译期调用时要等 typed 正文捕获
+            // （pass2）之后才能求值，这里登记为延迟项，由调度阶段回填。
             if (gs.c_compile != 0) {
-                gs.c_fold += 1;
+                let scan int = gs.c_pos;
+                for scan < gs.c_tok_n {
+                    let sk int = gs.c_toks[scan].kind;
+                    if (sk == gen.TK_SEMI || sk == gen.TK_RBRACE) { break; }
+                    if (sk == gen.TK_DOLLAR) { pend_expr = 1; break; }
+                    scan += 1;
+                }
             }
-            let r int = parse_expr_iso(&v);
-            if (gs.c_compile != 0) {
-                gs.c_fold -= 1;
-            }
-            if (r != 0) {
-                return -1;
+            if (pend_expr != 0 || forced_pending != 0) {
+                pend_first = gs.c_pos;
+                let scan2 int = gs.c_pos;
+                for scan2 < gs.c_tok_n {
+                    if (gs.c_toks[scan2].kind == gen.TK_SEMI) { break; }
+                    scan2 += 1;
+                }
+                pend_after = scan2;
+                gs.c_pos = scan2;
+            } else {
+                if (gs.c_compile != 0) {
+                    gs.c_fold += 1;
+                }
+                let r int = parse_expr_iso(&v);
+                if (gs.c_compile != 0) {
+                    gs.c_fold -= 1;
+                }
+                if (r != 0) {
+                    return -1;
+                }
             }
         }
+        if (has_val == 0 && forced_pending != 0) { pend_expr = 1; }
         if (p_expect(gen.TK_SEMI, "期望 ';'") != 0) {
             return -1;
         }
         item_count += 1;
         if (gs.c_compile != 0 && gs.c_pass == 1) {
             let val i64 = gs.c_enum_next.to_type(i64);
-            if (has_val != 0) {
+            if (pend_expr == 0 && has_val != 0) {
                 if (v.is_const == 0) {
                     return gen.sem_err("枚举判别值必须是编译期常量");
                 }
                 val = v.ival;
             }
-            if ((gs.c_decl_attrs & gen.ATTR_EXTERN) != 0
+            if ((gs.c_decl_attrs & gen.ATTR_EXTERN) != 0 && pend_expr == 0
                 && (val < -2147483648 || val > 2147483647)) {
                 return gen.sem_err("extern enum 判别值必须可用 i32 表示");
             }
+            if ((gs.c_decl_attrs & gen.ATTR_EXTERN) != 0 && pend_expr != 0) {
+                return gen.sem_err("extern enum 判别值必须是编译期常量");
+            }
             // pub enum 一等化：成员常量随枚举导出（F_PUB 进入接口名字表），
             // 跨模块以 `模块名.成员` 引用；接口加载侧按 pub enum 重新登记。
-            let mfl int = gen.F_GLOBAL;
+            let mfl int = gen.F_GLOBAL | gen.F_ENUM_MEMBER;
             if (gs.c_decl_pub != 0) {
                 mfl |= gen.F_PUB;
             }
@@ -962,8 +1107,25 @@ pub fn parse_enum_decl() int {
             if (idx < 0) {
                 return -1;
             }
-            gs.c_syms[idx].cval = val;
-            gs.c_enum_next = val.to_type(int) + 1;
+            if (pend_expr != 0) {
+                // 延迟：值待调度阶段回填，隐式成员记前一个成员。
+                if (ct_enum_pending_add(idx, pend_first, pend_after,
+                        prev_member_sym) != 0) {
+                    return gen.sem_err("延迟求值的枚举判别值超过 64 个");
+                }
+                forced_pending = 1;
+                gs.c_syms[idx].cval = 0;
+                gs.c_syms[idx].const_ready = 0;
+            } else {
+                gs.c_syms[idx].cval = val;
+                gs.c_syms[idx].const_ready = 1;
+                gs.c_enum_next = val.to_type(int) + 1;
+            }
+            // 成员登记进枚举成员表（必须在本成员的值与就绪位写完之后：登记时快照）。
+            if (gen.em_add(idx) != 0) {
+                return gen.sem_err("枚举成员总数超过 512，无法登记");
+            }
+            prev_member_sym = idx;
         }
     }
     if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) { return -1; }

@@ -54,7 +54,7 @@ Nanopass 官方将其定位为以小 pass 和多个中间表示组织编译器�
 | 现有入口 | 已有能力 | 与本方案相关的限制 |
 | --- | --- | --- |
 | `compiler/ir/ssa.yh` | typed 值、CFG、phi、调用表、支配校验、`ir_simplify` | 模型/校验/简化同文件约 983 行；值类型与定义位置存在逐次全表查找 |
-| `compiler/ir/ssa_serialize.yh` | 格式版本 4、逻辑字段编码、读回校验 | 暂无独立阶段身份与优化管线身份 |
+| `compiler/ir/ssa_serialize.yh` | 格式版本 5、函数/调用 ABI、逻辑字段编码、读回校验 | 暂无独立阶段身份与优化管线身份 |
 | `compiler/parse/ast_ir_build.yh` | 标量、直接调用、递归 if、条件循环、break/continue 的构造器 | 约 1263 行；混合支持判断、构造、缓存、简化及后端替换；仍读取 gen 全局 |
 | `compiler/parse/ast_ir_cache.yh` | 函数源码/受检事实/编译器/目标隔离的 SSA 缓存 | 存的是简化后的 SSA；生成前仍需旧前端遍历，不等于完整函数级增量 |
 | `compiler/backend/arm64.yh` | 整数/布尔 SSA 发射、直接调用、phi 边处理 | 每个值独立 16 字节栈槽；没有机器 IR 与寄存器分配；依赖 gen 输出/标签状态 |

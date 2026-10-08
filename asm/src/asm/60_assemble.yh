@@ -1,0 +1,178 @@
+module asm;
+
+// ============================================================================
+// asm/assemble.yh —— 待回填记录处理
+//
+// 解析阶段把符号相关位段留成占位值，这里按「值与最终布局是否有关」分流：
+//
+//   * 同节的 PC 相对分支：位移只跟节内两个偏移有关，节最终放在哪里都一样，
+//     汇编期直接写回机器字，不产生重定位；
+//   * 其余一律记 R_AARCH64_* 重定位，位域留 0，交给链接器填。
+//
+// 页寻址（ADRP）、低 12 位（@PAGEOFF）与绝对地址看起来「同节就能算」，
+// 其实都依赖节的最终地址：链接器把 .text 放在 0x400078 这样的非 4KiB 对齐
+// 地址时，S 的低 12 位会变，(S & 0xFFF) 这类汇编期算出来的值就是错的。
+// 所以这三类必须留重定位，哪怕目标符号已经定义——llvm-mc 也是这么做的。
+// ============================================================================
+
+import obj;
+
+// R_AARCH64_* 白名单常量（契约 §6）。数值由 llvm-mc 实测确定，
+// 见 tests/check_corpus.py：同一条指令在两边的类型号必须相同。
+pub const RA_ABS64 int = 257;
+pub const RA_ADR_PG_HI21 int = 275;
+pub const RA_ADD_ABS_LO12_NC int = 277;
+pub const RA_LDST8_ABS_LO12_NC int = 278;
+pub const RA_LDST16_ABS_LO12_NC int = 284;
+pub const RA_LDST32_ABS_LO12_NC int = 285;
+pub const RA_LDST64_ABS_LO12_NC int = 286;
+pub const RA_CONDBR19 int = 280;
+pub const RA_JUMP26 int = 282;
+pub const RA_CALL26 int = 283;
+pub const RA_LD64_GOTPAGE_LO21 int = 311;
+pub const RA_LD64_GOT_LO12_NC int = 312;
+
+// ra_ldst：访存立即数按访问宽度选 LDST*_ABS_LO12_NC。
+fn ra_ldst(size int) int {
+    if (size == 0) { return RA_LDST8_ABS_LO12_NC; }
+    if (size == 1) { return RA_LDST16_ABS_LO12_NC; }
+    if (size == 2) { return RA_LDST32_ABS_LO12_NC; }
+    return RA_LDST64_ABS_LO12_NC;
+}
+
+// fx_word：读出一个 32 位机器字；越界返回 0 并报错。
+fn fx_word(c *obj.Ctx, sec int, off int) u32 {
+    if (off < 0 || off + 4 > c.secs[sec].data.len) {
+        return 0;
+    }
+    return obj.rd_u32le(c.secs[sec].data.data, off);
+}
+
+// fx_put：把 32 位机器字写回节内偏移。
+fn fx_put(c *obj.Ctx, sec int, off int, w u32) int {
+    if (obj.sec_is_nobits(&c.secs[sec]) != 0) {
+        return 0;
+    }
+    return obj.buf_patch32(&c.secs[sec].data, off, w);
+}
+
+
+// fx_branch：回填 PC 相对分支位移。
+// bits=26 是 b/bl（imm26 在位 25:0），bits=19 是 b.cond/cbz/cbnz
+// （imm19 在位 23:5）。两者都按「字节位移 >> 2」取低若干位。
+fn fx_branch(c *obj.Ctx, sec int, off int, base u32, d i64, bits int) int {
+    let r i64 = d >> 2;
+    let sh int = 5;
+    let mask u64 = 0x7ffff;
+    let lim i64 = 262144;
+    if (bits == 26) {
+        sh = 0;
+        mask = 0x3ffffff;
+        lim = 33554432;
+    }
+    if (r >= lim || r < -lim) {
+        return obj.diag_plain(c, "分支目标超出范围");
+    }
+    let v u32 = (r.to_type(u64) & mask).to_type(u32);
+    return fx_put(c, sec, off, base | (v << sh.to_type(u32)));
+}
+
+
+
+
+// fix_kind_to_reloc：把待回填种类翻译成 R_AARCH64_*。
+// 返回 -1 表示该种类在 v1 白名单内无法表达。
+fn fix_kind_to_reloc(kind int, addend i64) int {
+    if (kind == FIX_BR26) {
+        if (addend != 0) { return RA_CALL26; }
+        return RA_JUMP26;
+    }
+    if (kind == FIX_CONDBR19) { return RA_CONDBR19; }
+    if (kind == FIX_TSTBR14) { return RA_CONDBR19; }
+    if (kind == FIX_ADR_PG_HI21) { return RA_ADR_PG_HI21; }
+    if (kind == FIX_ADD_LO12) { return RA_ADD_ABS_LO12_NC; }
+    if (kind == FIX_ABS64) { return RA_ABS64; }
+    if (kind == FIX_GOT_PG_HI21) { return RA_LD64_GOTPAGE_LO21; }
+    if (kind == FIX_GOT_LO12) { return RA_LD64_GOT_LO12_NC; }
+    return -1;
+}
+
+// fx_reloc_only：这一类位域的值依赖节的最终地址，只能留给链接器。
+// GOT 两类还要更晚——连 GOT 项本身都是链接器建的，汇编期无从谈起。
+fn fx_reloc_only(kind int) int {
+    if (kind == FIX_BR26) { return 0; }
+    if (kind == FIX_CONDBR19) { return 0; }
+    if (kind == FIX_TSTBR14) { return 0; }
+    return 1;
+}
+
+// asm_assemble：处理全部待回填记录。成功返回 0。
+pub fn asm_assemble(c *obj.Ctx) int {
+    if (c.fixups == 0) {
+        return 0;
+    }
+    let fx *Fixup = c.fixups.to_type(*Fixup);
+    let i int = 0;
+    for i < c.nfixups {
+        let f Fixup = fx[i];
+        let s obj.Symbol = c.syms[f.sym];
+        // 能在汇编期定下来的只有「同节 + 分支」：位移只跟节内两个偏移有关。
+        // 目标符号还得满足格式相关的一条：
+        //   ELF    额外要求 LOCAL——全局符号可能被链接器预置到别的目标文件，
+        //          所以 ELF 对同节分支也照发 CALL26/JUMP26。
+        //   Mach-O 不要求——分支重定位本来就只给外部与跨节符号用，同节一律
+        //          汇编期定死（obj.mo_reloc_kept 依据同一条规则过滤）。
+        let local int = 0;
+        if (fx_reloc_only(f.kind) == 0
+            && obj.mo_sym_in_sec(c, f.sym, f.sec) != 0) {
+            if (c.tgt.fmt == obj.TS_FMT_MACHO64) {
+                local = 1;
+            } else if (s.binding == obj.SYM_LOCAL) {
+                local = 1;
+            }
+        }
+        if (local == 0) {
+            if (fx_reloc(c, &f) != 0) {
+                return -1;
+            }
+            i += 1;
+            continue;
+        }
+        let base u32 = fx_word(c, f.sec, f.off);
+        let d i64 = (s.value.to_type(i64)) - (f.off.to_type(i64));
+        if (f.kind == FIX_BR26) {
+            let b u32 = base & 0xfc000000;
+            if (fx_branch(c, f.sec, f.off, b, d, 26) != 0) { return -1; }
+        } else if (f.kind == FIX_CONDBR19) {
+            if (fx_branch(c, f.sec, f.off, base, d, 19) != 0) { return -1; }
+        } else if (fx_branch(c, f.sec, f.off, base, d, 19) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// fx_reloc：把一条待回填记录转成重定位；白名单外的种类直接报错。
+fn fx_reloc(c *obj.Ctx, f *Fixup) int {
+    let r int = 0;
+    if (f.kind == FIX_LDST_LO12) {
+        // addend 里存的是访存编码 kind，其中高 4 位就是访问宽度
+        let sz int = ((f.addend >> 8.to_type(i64)) & 3).to_type(int);
+        r = ra_ldst(sz.to_type(int));
+    } else {
+        r = fix_kind_to_reloc(f.kind, f.addend);
+    }
+    if (r < 0) {
+        return obj.diag_plain(c, "该位域在 v1 重定位白名单内没有对应类型");
+    }
+    let add i64 = 0;
+    if (f.kind == FIX_ADR_PG_HI21 || f.kind == FIX_ADD_LO12 ||
+        f.kind == FIX_ABS64) {
+        add = f.addend;
+    }
+    if (obj.ctx_add_reloc(c, f.sec, f.off, f.sym, r.to_type(u32), add) != 0) {
+        return obj.diag_plain(c, "重定位记录过多");
+    }
+    return 0;
+}

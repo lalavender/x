@@ -1,5 +1,6 @@
 module parse;
 import gen;
+import comptime;
 
 // ============================================================================
 // ast_stmt.yh —— check worker 的语句树与表达式根关联
@@ -67,6 +68,17 @@ pub struct AstBinding {
     next int;            // 同一语句关联的下一行；参数不入语句链
 }
 
+// AstComptimeFor：普通函数 `$for` 的单份语句模板及其静态展开边界。
+pub struct AstComptimeFor {
+    stmt_id int;         // AST_STMT_COMPTIME wrapper
+    binding_row int;     // 只读迭代变量的稳定绑定行
+    binding_after int;   // 模板内声明绑定范围终点
+    body_stmt int;       // 唯一模板 block
+    low i64;             // 半开区间起点
+    high i64;            // 半开区间终点
+    node_cost int;       // 每份模板实例的语句、表达式和绑定节点数
+}
+
 let ast_stmt_nodes *AstStmt = 0;
 let ast_stmt_count int = 0;
 let ast_stmt_cap int = 0;
@@ -76,6 +88,9 @@ let ast_stmt_expr_cap int = 0;
 let ast_bindings *AstBinding = 0;
 let ast_binding_count int = 0;
 let ast_binding_cap int = 0;
+let ast_comptime_fors *AstComptimeFor = 0;
+let ast_comptime_for_count int = 0;
+let ast_comptime_for_cap int = 0;
 let ast_binding_local_next int = 0;
 let ast_stmt_current int = -1;
 let ast_stmt_root_first int = -1;
@@ -93,6 +108,9 @@ pub fn ast_stmt_reset() void {
     if (ast_bindings != 0) {
         free(ast_bindings.to_type(*void));
     }
+    if (ast_comptime_fors != 0) {
+        free(ast_comptime_fors.to_type(*void));
+    }
     ast_stmt_nodes = 0;
     ast_stmt_count = 0;
     ast_stmt_cap = 0;
@@ -102,12 +120,98 @@ pub fn ast_stmt_reset() void {
     ast_bindings = 0;
     ast_binding_count = 0;
     ast_binding_cap = 0;
+    ast_comptime_fors = 0;
+    ast_comptime_for_count = 0;
+    ast_comptime_for_cap = 0;
     ast_binding_local_next = 0;
     ast_stmt_current = -1;
     ast_stmt_root_first = -1;
     ast_stmt_root_last = -1;
     gs.c_stats_stmt_nodes = 0;
     gs.c_stats_ast_bindings = 0;
+}
+
+// ast_comptime_for_add：登记普通 `$for` 的一份 AST 模板并标记 wrapper。
+pub fn ast_comptime_for_add(stmt_id int, binding_row int, binding_after int,
+    body_stmt int, low i64, high i64, node_cost int) int {
+    let gs *gen.GenState = gen.G();
+    if (stmt_id < 0 || stmt_id >= ast_stmt_count || binding_row < 0
+        || binding_row >= ast_binding_count || binding_after <= binding_row
+        || binding_after > ast_binding_count || body_stmt < 0
+        || body_stmt >= ast_stmt_count || low >= high || node_cost <= 0
+        || ast_stmt_nodes[stmt_id].kind != AST_STMT_COMPTIME
+        || ast_stmt_nodes[body_stmt].kind != AST_STMT_BLOCK
+        || ast_stmt_nodes[body_stmt].parent != stmt_id
+        || ast_bindings[binding_row].stmt_id != stmt_id
+        || ast_bindings[binding_row].sym_kind != gen.SYM_CONST
+        || ast_bindings[binding_row].sym_type_id < 0
+        || ast_bindings[binding_row].sym_type_id >= gs.t_type_n
+        || gs.t_types[ast_bindings[binding_row].sym_type_id].kind != gen.TY_I32) {
+        return gen.fail("内部错误：编译期 `$for` 模板元数据无效");
+    }
+    if (ast_comptime_for_find_stmt(stmt_id) >= 0) {
+        return gen.fail("内部错误：编译期 `$for` 模板重复登记");
+    }
+    if (ast_comptime_for_count == ast_comptime_for_cap) {
+        let ncap int = ast_comptime_for_cap * 2;
+        if (ncap == 0) { ncap = 16; }
+        let next *AstComptimeFor = malloc(
+            (ncap * sizeof(AstComptimeFor)).to_type(u64)).to_type(*AstComptimeFor);
+        if (next == 0) { return gen.fail("编译期 AST 模板目录分配失败"); }
+        if (ast_comptime_for_count > 0) {
+            memcpy(next, ast_comptime_fors,
+                (ast_comptime_for_count * sizeof(AstComptimeFor)).to_type(u64));
+        }
+        if (ast_comptime_fors != 0) { free(ast_comptime_fors.to_type(*void)); }
+        ast_comptime_fors = next;
+        ast_comptime_for_cap = ncap;
+    }
+    let row int = ast_comptime_for_count;
+    ast_comptime_fors[row].stmt_id = stmt_id;
+    ast_comptime_fors[row].binding_row = binding_row;
+    ast_comptime_fors[row].binding_after = binding_after;
+    ast_comptime_fors[row].body_stmt = body_stmt;
+    ast_comptime_fors[row].low = low;
+    ast_comptime_fors[row].high = high;
+    ast_comptime_fors[row].node_cost = node_cost;
+    ast_comptime_for_count += 1;
+    ast_stmt_nodes[stmt_id].op = gen.TK_FOR;
+    return row;
+}
+
+// ast_comptime_for_find_stmt：按语句 wrapper 查找区间模板，缺失返回 -1。
+pub fn ast_comptime_for_find_stmt(stmt_id int) int {
+    let i int = 0;
+    for i < ast_comptime_for_count {
+        if (ast_comptime_fors[i].stmt_id == stmt_id) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+
+// ast_comptime_for_find_binding：确认表达式绑定是否为模板迭代变量。
+pub fn ast_comptime_for_find_binding(binding_row int) int {
+    let i int = 0;
+    for i < ast_comptime_for_count {
+        if (ast_comptime_fors[i].binding_row == binding_row) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+
+// ast_comptime_for_info：把模板元数据按标量字段提供给 SSA lowering。
+pub fn ast_comptime_for_info(row int, binding_row *int, binding_after *int,
+    body_stmt *int, low *i64, high *i64) int {
+    if (row < 0 || row >= ast_comptime_for_count || binding_row == 0
+        || binding_after == 0 || body_stmt == 0 || low == 0 || high == 0) {
+        return -1;
+    }
+    binding_row[0] = ast_comptime_fors[row].binding_row;
+    binding_after[0] = ast_comptime_fors[row].binding_after;
+    body_stmt[0] = ast_comptime_fors[row].body_stmt;
+    low[0] = ast_comptime_fors[row].low;
+    high[0] = ast_comptime_fors[row].high;
+    return 0;
 }
 
 // ast_binding_begin_function：重置函数内编号，保证相同函数语料获得稳定局部键。
@@ -121,6 +225,7 @@ pub fn ast_binding_add(sym_id int, name_token int, is_param int) int {
     if (gs.c_ast_capture == 0) {
         return 0;
     }
+    if (comptime.ct_charge_expansion_ast_node() != 0) { return -1; }
     if (sym_id < 0 || sym_id >= gs.c_sym_n || name_token < 0
         || name_token >= gs.c_tok_n || gs.c_toks[name_token].kind != gen.TOK_IDENT
         || (is_param != 0 && is_param != 1) || gs.c_file_decl_i < 0
@@ -222,6 +327,7 @@ pub fn ast_stmt_begin(kind int, op int, first int) int {
         || kind < AST_STMT_BLOCK || kind > AST_STMT_COMPTIME) {
         return gen.fail("内部错误：语句 AST 起点、文件或类别无效");
     }
+    if (comptime.ct_charge_expansion_ast_node() != 0) { return -1; }
     if (ast_stmt_count == ast_stmt_cap && ast_stmt_grow_nodes() != 0) {
         return -1;
     }
@@ -449,6 +555,27 @@ pub fn ast_stmt_verify() int {
         previous_decl = binding.owner_decl;
         previous_id = binding.id;
         bi += 1;
+    }
+    let ci int = 0;
+    for ci < ast_comptime_for_count {
+        let item AstComptimeFor = ast_comptime_fors[ci];
+        if (item.stmt_id < 0 || item.stmt_id >= ast_stmt_count
+            || item.binding_row < 0 || item.binding_row >= ast_binding_count
+            || item.binding_after <= item.binding_row
+            || item.binding_after > ast_binding_count
+            || item.body_stmt < 0 || item.body_stmt >= ast_stmt_count
+            || item.low >= item.high || item.node_cost < item.binding_after - item.binding_row) {
+            return gen.fail("内部错误：编译期 `$for` AST 模板范围损坏");
+        }
+        let wrapper AstStmt = ast_stmt_nodes[item.stmt_id];
+        if (wrapper.kind != AST_STMT_COMPTIME || wrapper.op != gen.TK_FOR
+            || wrapper.first_child != item.body_stmt || wrapper.last_child != item.body_stmt
+            || ast_stmt_nodes[item.body_stmt].parent != item.stmt_id
+            || ast_bindings[item.binding_row].stmt_id != item.stmt_id
+            || ast_bindings[item.binding_row].sym_kind != gen.SYM_CONST) {
+            return gen.fail("内部错误：编译期 `$for` AST 模板关联损坏");
+        }
+        ci += 1;
     }
     return 0;
 }

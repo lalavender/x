@@ -1,0 +1,529 @@
+module obj;
+
+// ============================================================================
+// obj/model.yh —— 对象模型：TargetSpec / Section / Symbol / Relocation / 上下文
+//
+// 契约（docs/03-design/yh-link独立项目与首版汇编子集契约.md §7）：
+//   * 记录先在实际使用处定义，不先建通用插件系统；
+//   * 每次调用拥有独立上下文，禁止复用任何进程级全局缓冲；
+//   * 诊断带来源（文件/行/列或节偏移），失败统一返回 -1。
+//
+// obj 不依赖 asm/parse/ir/backend：link/ 内部依赖方向 asm → obj。
+//
+// fixups 是待回填记录的裸指针：asm 层把「节内偏移 + 位域种类 + 目标符号」
+// 的数组交给 assemble 阶段，obj 只负责持有并在 ctx_free 时释放，字段布局
+// 由 asm 侧解释。这样依赖方向不必倒过来。
+// ============================================================================
+
+// bytes.yh 与 model.yh 同属 obj 模块（src/obj/ 目录），无需 import。
+
+// —— 目标描述 ——
+
+pub const TS_ISA_AARCH64 int = 1;   // 仅支持 AArch64
+pub const TS_OS_LINUX int = 1;      // Linux 方言
+pub const TS_OS_DARWIN int = 2;     // Darwin/macOS 方言
+pub const TS_FMT_ELF64 int = 1;     // ELF64
+pub const TS_FMT_MACHO64 int = 2;   // Mach-O 64
+pub const TS_ENDIAN_LE int = 1;     // 首版只发小端
+
+pub const TS_PTR_SIZE int = 8;      // 指针 8 字节
+pub const TS_PAGE_SIZE int = 4096;  // ADRP 页大小（编码常量，非运行时页大小）
+
+// TargetSpec：输出的目标契约。宿主平台不在此记录——本项目首版只发
+// ELF64/AArch64/Linux，宿主 I/O 走自身调用，不随目标变化（见设计 §2.1）。
+pub struct TargetSpec {
+    isa int;             // TS_ISA_*
+    os int;              // TS_OS_*
+    fmt int;             // TS_FMT_*
+    endian int;          // TS_ENDIAN_*
+    ptr_size int;        // 字节
+    page_size int;       // ADRP 页对齐
+}
+
+// ts_default：返回默认目标记录（Linux/ELF64）。自检与全部现有门都用它。
+pub fn ts_default() TargetSpec {
+    return ts_make(TS_OS_LINUX, TS_FMT_ELF64);
+}
+
+// ts_darwin：macOS 目标。宿主就在 macOS 上，编译器实际发射的方言也是 Darwin
+// 的 @PAGE/@PAGEOFF，所以这是替换编译器工具链时真正要用的那条记录。
+pub fn ts_darwin() TargetSpec {
+    return ts_make(TS_OS_DARWIN, TS_FMT_MACHO64);
+}
+
+// ts_make：构造一个目标记录。ISA 与端序首版固定，只有 OS 与对象格式可选。
+pub fn ts_make(os int, fmt int) TargetSpec {
+    let t TargetSpec;
+    t.isa = TS_ISA_AARCH64;
+    t.os = os;
+    t.fmt = fmt;
+    t.endian = TS_ENDIAN_LE;
+    t.ptr_size = TS_PTR_SIZE;
+    t.page_size = TS_PAGE_SIZE;
+    return t;
+}
+
+// ts_equal：两个目标记录是否完全一致（缓存键用）。
+pub fn ts_equal(a *TargetSpec, b *TargetSpec) int {
+    if (a.isa != b.isa || a.os != b.os || a.fmt != b.fmt || a.endian != b.endian) {
+        return 0;
+    }
+    if (a.ptr_size != b.ptr_size || a.page_size != b.page_size) {
+        return 0;
+    }
+    return 1;
+}
+
+// —— 节 ——
+//
+// sh_type / sh_flags 使用 ELF 常量（见 elf.yh），此处只承载记录。
+// NOBITS（.bss）只增长 memsz，不占用文件字节。
+
+pub struct Section {
+    name_id int;   // 名称池槽位
+    sh_type u32;   // SHT_*
+    sh_flags u64;  // SHF_*
+    align int;     // 2 的幂
+    memsz int;     // 内存尺寸（NOBITS 的全部内容）
+    data Buf;      // 文件字节（NOBITS 恒空）
+}
+
+// sec_is_nobits：该节是否只占内存尺寸（NOBITS 只增长 memsz）。
+// SHT_NOBITS 是格式层常量，定义在 elf.yh；这里比较其稳定数值 8。
+pub fn sec_is_nobits(s *Section) int {
+    return (s.sh_type == 8).to_type(int);
+}
+
+// —— 符号 ——
+
+pub const SYM_LOCAL int = 0;     // STB_LOCAL
+pub const SYM_GLOBAL int = 1;    // STB_GLOBAL
+pub const SYM_UNDEF int = 2;     // 未定义（外部）引用
+
+pub const SYM_NOTYPE int = 0;    // STT_NOTYPE
+pub const SYM_OBJECT int = 1;    // STT_OBJECT
+pub const SYM_FUNC int = 2;      // STT_FUNC
+pub const SYM_SECTION int = 3;   // STT_SECTION
+pub const SYM_FILE int = 4;      // STT_FILE
+
+pub const SHN_UNDEF int = 0;     // 未定义
+
+pub struct Symbol {
+    name_id int;    // 名称池槽位
+    binding int;    // SYM_LOCAL / SYM_GLOBAL / SYM_UNDEF
+    symtype int;    // SYM_*
+    shndx int;      // 定义所在节的上下文下标；SHN_UNDEF = 未定义
+    value int;      // 节内偏移；未定义为 0
+    size int;       // 字节；未知为 0
+    line int;       // 首次出现的源码行（诊断用）
+}
+
+// sym_is_defined：符号是否在本对象内有定义。
+pub fn sym_is_defined(s *Symbol) int {
+    return (s.shndx != SHN_UNDEF).to_type(int);
+}
+
+// —— 重定位 ——
+//
+// 采用标准 RELA：addend 显式随重定位记录保存，不预先折进指令字节。
+// 目标符号用上下文局部下标，不用名字，保证写出顺序确定。
+
+pub struct Reloc {
+    sec int;      // 作用节在上下文中的下标
+    offset int;   // 作用节内字节偏移
+    sym int;      // 目标符号在上下文中的下标
+    kind u32;     // R_AARCH64_* 常量
+    addend i64;   // 显式有符号 addend
+    line int;     // 源码行（诊断用）
+}
+
+// —— 上下文 ——
+//
+// 一次 asm_assemble 调用的全部状态。调用方持有指针，成功后取出 out 缓冲，
+// 失败后调用 obj_ctx_free 释放。没有任何跨调用的全局可变状态。
+
+pub struct Ctx {
+    tgt TargetSpec;
+    names Names;     // 节名与符号名池
+    secs *Section;   // 节数组（索引 0 保留为 SHT_NULL 占位）
+    nsec int;
+    capsec int;
+    syms *Symbol;    // 符号数组（索引 0 保留为 null 项）
+    nsym int;
+    capsym int;
+    rels *Reloc;     // 重定位数组
+    nrel int;
+    caprel int;
+    out Buf;         // 最终对象字节（成功时移交调用方）
+    errors int;      // 已报告错误数
+    fixups *u8;      // 待回填记录数组（asm 层解释布局，obj 只持有并释放）
+    strtab Buf;      // 符号名缓冲（输出 .strtab 的内容）
+    nfixups int;
+    path *char;      // 源文件路径（诊断前缀；借自调用方，不复制）
+    line int;        // 当前源码行（1 基）
+    col int;         // 当前源码列（1 基）
+}
+
+// ctx_init：初始化上下文并登记空占位节/符号（ELF 约定下标 0 必须存在）。
+// 返回 0 成功，-1 失败。
+pub fn ctx_init(c *Ctx, t *TargetSpec, path *char) int {
+    // yh 的 `*p` 对结构体不解引用（只有标量可解引用），结构体按值取回用 p[0]。
+    let tv TargetSpec = t[0];
+    c.tgt = tv;
+    c.path = path;
+    c.line = 0;
+    c.col = 0;
+    c.errors = 0;
+    c.fixups = 0;
+    c.nfixups = 0;
+    buf_init(&c.strtab);
+    names_init(&c.names);
+    buf_init(&c.out);
+    c.secs = 0;
+    c.nsec = 0;
+    c.capsec = 0;
+    c.syms = 0;
+    c.nsym = 0;
+    c.capsym = 0;
+    c.rels = 0;
+    c.nrel = 0;
+    c.caprel = 0;
+    if (ctx_grow_secs(c, 8) != 0) { return -1; }
+    if (ctx_grow_syms(c, 16) != 0) { return -1; }
+    // 下标 0：null 节与 null 符号，字段全零即所需内容。
+    c.nsec = 1;
+    c.nsym = 1;
+    return 0;
+}
+
+// ctx_free：释放上下文占用的全部内存（幂等）。
+pub fn ctx_free(c *Ctx) int {
+    names_free(&c.names);
+    buf_free(&c.out);
+    let i int = 0;
+    for i < c.nsec {
+        buf_free(&c.secs[i].data);
+        i += 1;
+    }
+    if (c.secs != 0) { free(c.secs); }
+    if (c.syms != 0) { free(c.syms); }
+    if (c.rels != 0) { free(c.rels); }
+    buf_free(&c.strtab);
+    if (c.fixups != 0) { free(c.fixups); }
+    c.fixups = 0;
+    c.nfixups = 0;
+    c.secs = 0;
+    c.syms = 0;
+    c.rels = 0;
+    c.nsec = 0;
+    c.nsym = 0;
+    c.nrel = 0;
+    c.capsec = 0;
+    c.capsym = 0;
+    c.caprel = 0;
+    return 0;
+}
+
+// ctx_grow_secs：确保节数组至少能放 n 项。
+pub fn ctx_grow_secs(c *Ctx, n int) int {
+    if (n <= c.capsec) {
+        return 0;
+    }
+    let ncap int = c.capsec * 2;
+    if (ncap < n) { ncap = n; }
+    if (ncap < 8) { ncap = 8; }
+    let p *Section = malloc((ncap * sizeof(Section)).to_type(u64)).to_type(*Section);
+    if (p == 0) {
+        return -1;
+    }
+    if (c.nsec > 0) {
+        memcpy(p, c.secs, (c.nsec * sizeof(Section)).to_type(u64));
+    }
+    if (c.secs != 0) { free(c.secs); }
+    c.secs = p;
+    c.capsec = ncap;
+    return 0;
+}
+
+// ctx_grow_syms：确保符号数组至少能放 n 项。
+pub fn ctx_grow_syms(c *Ctx, n int) int {
+    if (n <= c.capsym) {
+        return 0;
+    }
+    let ncap int = c.capsym * 2;
+    if (ncap < n) { ncap = n; }
+    if (ncap < 16) { ncap = 16; }
+    let p *Symbol = malloc((ncap * sizeof(Symbol)).to_type(u64)).to_type(*Symbol);
+    if (p == 0) {
+        return -1;
+    }
+    if (c.nsym > 0) {
+        memcpy(p, c.syms, (c.nsym * sizeof(Symbol)).to_type(u64));
+    }
+    if (c.syms != 0) { free(c.syms); }
+    c.syms = p;
+    c.capsym = ncap;
+    return 0;
+}
+
+// ctx_grow_rels：确保重定位数组至少能放 n 项。
+pub fn ctx_grow_rels(c *Ctx, n int) int {
+    if (n <= c.caprel) {
+        return 0;
+    }
+    let ncap int = c.caprel * 2;
+    if (ncap < n) { ncap = n; }
+    if (ncap < 16) { ncap = 16; }
+    let p *Reloc = malloc((ncap * sizeof(Reloc)).to_type(u64)).to_type(*Reloc);
+    if (p == 0) {
+        return -1;
+    }
+    if (c.nrel > 0) {
+        memcpy(p, c.rels, (c.nrel * sizeof(Reloc)).to_type(u64));
+    }
+    if (c.rels != 0) { free(c.rels); }
+    c.rels = p;
+    c.caprel = ncap;
+    return 0;
+}
+
+// —— 节的建立与查找 ——
+
+// ctx_add_sec：新建一节并返回其上下文下标；失败返回 -1。
+// name 只读入名字池，不保存指针。同名节不合并（由调用方决定）。
+pub fn ctx_add_sec(c *Ctx, name *char, sh_type u32, sh_flags u64, align int) int {
+    let id int = names_add(&c.names, name);
+    if (id < 0) { return -1; }
+    if (ctx_grow_secs(c, c.nsec + 1) != 0) { return -1; }
+    let i int = c.nsec;
+    c.secs[i].name_id = id;
+    c.secs[i].sh_type = sh_type;
+    c.secs[i].sh_flags = sh_flags;
+    c.secs[i].align = align;
+    c.secs[i].memsz = 0;
+    buf_init(&c.secs[i].data);
+    c.nsec += 1;
+    return i;
+}
+
+// ctx_find_sec：按名字找节，找到返回下标，不存在返回 -1。
+pub fn ctx_find_sec(c *Ctx, name *char) int {
+    let i int = 1;
+    for i < c.nsec {
+        if (cstr_eq(names_get(&c.names, c.secs[i].name_id), name) != 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// sec_name：取节名的 C 字符串指针。
+pub fn sec_name(c *Ctx, i int) *char {
+    if (i <= 0 || i >= c.nsec) {
+        return 0;
+    }
+    return names_get(&c.names, c.secs[i].name_id);
+}
+
+// sec_push：向节追加一个字节，返回新的节内偏移。
+pub fn sec_push(c *Ctx, i int, v u8) int {
+    if (i <= 0 || i >= c.nsec) {
+        return -1;
+    }
+    if (buf_put(&c.secs[i].data, v) != 0) {
+        return -1;
+    }
+    return c.secs[i].data.len - 1;
+}
+
+// sec_push_u32：向节追加小端 4 字节，返回写入起始偏移。
+pub fn sec_push_u32(c *Ctx, i int, v u32) int {
+    if (i <= 0 || i >= c.nsec) {
+        return -1;
+    }
+    let off int = c.secs[i].data.len;
+    if (buf_put_u32le(&c.secs[i].data, v) != 0) {
+        return -1;
+    }
+    return off;
+}
+
+// sec_grow_memsz：只增长内存尺寸（NOBITS 的 .bss 用），返回新的 memsz。
+pub fn sec_grow_memsz(c *Ctx, i int, n int) int {
+    if (i <= 0 || i >= c.nsec) {
+        return -1;
+    }
+    let want int = add_chk(c.secs[i].memsz, n);
+    if (want < 0) {
+        return -1;
+    }
+    c.secs[i].memsz = want;
+    return want;
+}
+
+// sec_pad_to：对齐节内容到 n 字节（代码节用 nop 填充），返回填充起点。
+pub fn sec_pad_to(c *Ctx, i int, n int, fill u8) int {
+    if (i <= 0 || i >= c.nsec) {
+        return -1;
+    }
+    let off int = c.secs[i].data.len;
+    let want int = align_up(off, n);
+    if (want < 0) {
+        return -1;
+    }
+    if (buf_put_n(&c.secs[i].data, fill, want - off) != 0) {
+        return -1;
+    }
+    return off;
+}
+
+// sec_file_size：节占用的文件字节数（NOBITS 为 0）。
+pub fn sec_file_size(c *Ctx, i int) int {
+    if (i <= 0 || i >= c.nsec) {
+        return 0;
+    }
+    return c.secs[i].data.len;
+}
+
+// —— 符号与重定位 ——
+
+// ctx_find_sym：按名字查符号，找到返回下标，不存在返回 -1。
+pub fn ctx_find_sym(c *Ctx, name *char) int {
+    let i int = 1;
+    for i < c.nsym {
+        if (cstr_eq(names_get(&c.names, c.syms[i].name_id), name) != 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// ctx_add_sym：登记一个新符号（不查重），返回下标或 -1。
+// 字段由调用方在返回后填写。
+pub fn ctx_add_sym(c *Ctx, name *char, binding int, symtype int) int {
+    let id int = names_add(&c.names, name);
+    if (id < 0) { return -1; }
+    if (ctx_grow_syms(c, c.nsym + 1) != 0) { return -1; }
+    let i int = c.nsym;
+    c.syms[i].name_id = id;
+    c.syms[i].binding = binding;
+    c.syms[i].symtype = symtype;
+    c.syms[i].shndx = SHN_UNDEF;
+    c.syms[i].value = 0;
+    c.syms[i].size = 0;
+    c.syms[i].line = c.line;
+    c.nsym += 1;
+    return i;
+}
+
+
+// sym_name：取符号名的 C 字符串指针。
+pub fn sym_name(c *Ctx, i int) *char {
+    if (i <= 0 || i >= c.nsym) {
+        return 0;
+    }
+    return names_get(&c.names, c.syms[i].name_id);
+}
+
+// ctx_add_reloc：登记一条重定位，返回 0 成功或 -1。
+pub fn ctx_add_reloc(c *Ctx, sec int, offset int, sym int, kind u32, addend i64) int {
+    if (ctx_grow_rels(c, c.nrel + 1) != 0) { return -1; }
+    let i int = c.nrel;
+    c.rels[i].sec = sec;
+    c.rels[i].offset = offset;
+    c.rels[i].sym = sym;
+    c.rels[i].kind = kind;
+    c.rels[i].addend = addend;
+    c.rels[i].line = c.line;
+    c.nrel += 1;
+    return 0;
+}
+
+// —— 诊断 ——
+//
+// 所有诊断写标准错误（fd 2），格式 <path>:<line>:<col>: 错误: <msg>。
+// 只做最小格式化：整数与常量字符串，避免自举期引入完整诊断框架。
+
+// diag：报告一条带位置的错误，返回 -1（便于 `return obj.diag(...)`）。
+pub fn diag(c *Ctx, msg *char) int {
+    c.errors += 1;
+    let buf [512]u8;
+    let n int = 0;
+    n = dcopy(buf, n, c.path);
+    n = dcopy(buf, n, ":");
+    n = dint(buf, n, c.line);
+    n = dcopy(buf, n, ":");
+    n = dint(buf, n, c.col);
+    n = dcopy(buf, n, ": 错误: ");
+    n = dcopy(buf, n, msg);
+    n = dcopy(buf, n, "\n");
+    dwrite(2, buf, n);
+    return -1;
+}
+
+// diag_plain：报告一条无位置的错误（编码/格式层用）。
+pub fn diag_plain(c *Ctx, msg *char) int {
+    c.errors += 1;
+    let buf [512]u8;
+    let n int = 0;
+    n = dcopy(buf, n, c.path);
+    n = dcopy(buf, n, ": 错误: ");
+    n = dcopy(buf, n, msg);
+    n = dcopy(buf, n, "\n");
+    dwrite(2, buf, n);
+    return -1;
+}
+
+// dcopy：向诊断缓冲追加 NUL 结尾字符串，返回新长度。
+fn dcopy(buf *u8, n int, s *char) int {
+    let i int = 0;
+    for (s[i] != 0) {
+        if (n >= 510) { break; }
+        buf[n] = s[i].to_type(u8);
+        n += 1;
+        i += 1;
+    }
+    return n;
+}
+
+// dint：向诊断缓冲追加十进制整数，返回新长度。
+fn dint(buf *u8, n int, v int) int {
+    let tmp [16]u8;
+    let k int = 0;
+    if (v < 0) {
+        if (n < 510) { buf[n] = '-'; n += 1; }
+        v = -v;
+    }
+    if (v == 0) {
+        tmp[0] = '0';
+        k = 1;
+    }
+    for v > 0 {
+        tmp[k] = ((v % 10) + 48).to_type(u8);
+        k += 1;
+        v = v / 10;
+    }
+    for k > 0 {
+        k -= 1;
+        if (n < 510) {
+            buf[n] = tmp[k];
+            n += 1;
+        }
+    }
+    return n;
+}
+
+// dwrite：把诊断写到 fd，处理短写。
+fn dwrite(fd int, buf *u8, n int) int {
+    let done int = 0;
+    for done < n {
+        let w i64 = write(fd, buf + done, (n - done).to_type(u64));
+        if (w <= 0) {
+            return -1;
+        }
+        done += w.to_type(int);
+    }
+    return 0;
+}

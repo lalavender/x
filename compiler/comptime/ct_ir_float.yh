@@ -1,0 +1,104 @@
+module comptime;
+import gen;
+
+// ============================================================================
+// ct_ir_float.yh
+// 编译期浮点标量求值辅助。CtValue 用 value 字段保存 IEEE754 位模式，
+// 类型由 type_id 区分；f32 在内部按 f64 计算后窄化回单精度精度。
+// ============================================================================
+
+// ct_fp_from_bits：把 IEEE754 位模式还原为宿主 f64，供编译期运算使用。
+pub fn ct_fp_from_bits(bits i64) f64 {
+    let holder *i64 = malloc(8).to_type(*i64);
+    if (holder == 0) { return 0.0; }
+    holder[0] = bits;
+    let view *f64 = holder.to_type(*f64);
+    let value f64 = view[0];
+    free(holder.to_type(*void));
+    return value;
+}
+
+// ct_fp_norm：按目标浮点类型规范化位模式；f32 经一次往返窄化到单精度。
+pub fn ct_fp_norm(type_id int, bits i64) i64 {
+    let gs *gen.GenState = gen.G();
+    // type_id 是类型表索引，单精度要靠 kind 判断，不能与 TY_F32 常量直接比较。
+    if (type_id < 0 || type_id >= gs.t_type_n
+        || gs.t_types[type_id].kind != gen.TY_F32) { return bits; }
+    let narrowed f32 = ct_fp_from_bits(bits).to_type(f32);
+    return gen.fp64_bits(narrowed.to_type(f64));
+}
+
+// ct_fp_neg：浮点一元负号，通过翻转符号位实现，保持 -0.0 与 NaN 语义，
+// 同时避免生成 yh-link 冻结子集之外的 fneg 指令。
+pub fn ct_fp_neg(bits i64) i64 {
+    return bits ^ (1.to_type(i64) << 63);
+}
+
+// ct_fp_convert：执行显式浮点转换，覆盖整数↔浮点与浮点↔浮点。
+// 浮点转整数按向零截断后按目标宽度归一。
+// ponytail: 无符号目标不单独走 fcvtzu（该指令在 yh-link 冻结子集之外），
+// 需要超出 i64 范围的 u64 浮点常量时再扩汇编器子集。
+pub fn ct_fp_convert(src_type int, dst_type int, value i64) i64 {
+    let src_float int = gen.ty_is_float(src_type);
+    let dst_float int = gen.ty_is_float(dst_type);
+    if (src_float != 0) {
+        let source f64 = ct_fp_from_bits(value);
+        if (dst_float != 0) {
+            return ct_fp_norm(dst_type, gen.fp64_bits(source));
+        }
+        return gen.sem_fold_norm(dst_type, source.to_type(i64));
+    }
+    if (dst_float == 0) { return value; }
+    let widened f64 = 0.0;
+    if (gen.ty_is_signed(src_type) != 0) {
+        widened = value.to_type(f64);
+    } else {
+        widened = value.to_type(u64).to_type(f64);
+    }
+    return ct_fp_norm(dst_type, gen.fp64_bits(widened));
+}
+
+// ct_ir_norm_scalar：按目标标量类型归一值；浮点按宽度窄化，整数按宽度与符号截断。
+pub fn ct_ir_norm_scalar(type_id int, value i64) i64 {
+    if (gen.ty_is_float(type_id) != 0) { return ct_fp_norm(type_id, value); }
+    return gen.sem_fold_norm(type_id, value);
+}
+
+// ct_ir_fp32_bits：把编译期浮点值取出为单精度 32 位模式，供静态数据发射使用。
+pub fn ct_ir_fp32_bits(value i64) i64 {
+    let holder *f32 = malloc(4).to_type(*f32);
+    if (holder == 0) { return 0; }
+    holder[0] = ct_fp_from_bits(value).to_type(f32);
+    let view *i32 = holder.to_type(*i32);
+    let bits i64 = view[0].to_type(i64);
+    free(holder.to_type(*void));
+    return bits;
+}
+
+// ct_fp_binop：执行浮点算术或比较；比较结果写入 0/1，算术结果按目标类型窄化。
+pub fn ct_fp_binop(op int, type_id int, left i64, right i64, result *i64) int {
+    let a f64 = ct_fp_from_bits(left);
+    let b f64 = ct_fp_from_bits(right);
+    if (op == gen.TK_PLUS) { *result = gen.fp64_bits(a + b); return 0; }
+    if (op == gen.TK_MINUS) { *result = gen.fp64_bits(a - b); return 0; }
+    if (op == gen.TK_STAR) { *result = gen.fp64_bits(a * b); return 0; }
+    if (op == gen.TK_SLASH) { *result = gen.fp64_bits(a / b); return 0; }
+    if (op == gen.TK_EQEQ) { *result = (a == b).to_type(i64); return 0; }
+    if (op == gen.TK_NEQ) { *result = (a != b).to_type(i64); return 0; }
+    if (op == gen.TK_LT) { *result = (a < b).to_type(i64); return 0; }
+    if (op == gen.TK_LEQ) { *result = (a <= b).to_type(i64); return 0; }
+    if (op == gen.TK_GT) { *result = (a > b).to_type(i64); return 0; }
+    if (op == gen.TK_GEQ) { *result = (a >= b).to_type(i64); return 0; }
+    return gen.sem_err("编译期浮点只支持算术与比较运算");
+}
+
+// ct_fp_binop_norm：按目标类型规范化浮点二元运算结果（比较结果不窄化）。
+pub fn ct_fp_binop_norm(op int, type_id int, left i64, right i64,
+    result *i64) int {
+    if (ct_fp_binop(op, type_id, left, right, result) != 0) { return -1; }
+    if (op != gen.TK_EQEQ && op != gen.TK_NEQ && op != gen.TK_LT
+        && op != gen.TK_LEQ && op != gen.TK_GT && op != gen.TK_GEQ) {
+        *result = ct_fp_norm(type_id, *result);
+    }
+    return 0;
+}

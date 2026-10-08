@@ -15,6 +15,227 @@ pub fn sem_push_value(r *Res) int {
     return em_push();
 }
 
+// sem_fold_norm：把常量按目标整数类型截断，并对有符号值做符号扩展。
+pub fn sem_fold_norm(tid int, value i64) i64 {
+    let bits int = g_state.t_types[tid].size * 8;
+    if (bits >= 64) { return value; }
+    let mask u64 = (1.to_type(u64) << bits) - 1.to_type(u64);
+    let raw u64 = value.to_type(u64) & mask;
+    if (ty_is_signed(tid) != 0) {
+        let sign u64 = 1.to_type(u64) << (bits - 1);
+        if ((raw & sign) != 0) { return (raw | ~mask).to_type(i64); }
+    }
+    return raw.to_type(i64);
+}
+
+// sem_fold_float_convert：常量浮点转换（整数↔浮点、浮点↔浮点），结果写位模式。
+// ponytail: 无符号整数目标按有符号截断，避免生成冻结子集之外的 fcvtzu；
+// 需要超出 i64 范围的 u64 浮点常量时再扩汇编器子集。
+pub fn sem_fold_float_convert(src_tid int, dst_tid int, bits i64) i64 {
+    let src_fp int = ty_is_float(src_tid);
+    let dst_fp int = ty_is_float(dst_tid);
+    if (src_fp != 0) {
+        let source f64 = fp64_from_bits(bits);
+        if (dst_fp != 0) { return fp64_norm_bits(dst_tid, source); }
+        return sem_fold_norm(dst_tid, source.to_type(i64));
+    }
+    if (dst_fp == 0) { return bits; }
+    let widened f64 = 0.0;
+    if (ty_is_signed(src_tid) != 0) {
+        widened = bits.to_type(f64);
+    } else {
+        widened = bits.to_type(u64).to_type(f64);
+    }
+    return fp64_norm_bits(dst_tid, widened);
+}
+
+// sem_fold_float_binop：常量浮点算术与比较；值为 IEEE754 位模式，
+// 算术结果按目标类型窄化，比较结果写 0/1。
+pub fn sem_fold_float_binop(op int, tid int, left i64, right i64, result *i64) int {
+    let a f64 = fp64_from_bits(left);
+    let b f64 = fp64_from_bits(right);
+    if (op == TK_EQEQ) { *result = (a == b).to_type(i64); return 0; }
+    if (op == TK_NEQ) { *result = (a != b).to_type(i64); return 0; }
+    if (op == TK_LT) { *result = (a < b).to_type(i64); return 0; }
+    if (op == TK_LEQ) { *result = (a <= b).to_type(i64); return 0; }
+    if (op == TK_GT) { *result = (a > b).to_type(i64); return 0; }
+    if (op == TK_GEQ) { *result = (a >= b).to_type(i64); return 0; }
+    let value f64 = 0.0;
+    if (op == TK_PLUS) { value = a + b; }
+    else if (op == TK_MINUS) { value = a - b; }
+    else if (op == TK_STAR) { value = a * b; }
+    else if (op == TK_SLASH) { value = a / b; }
+    else { return sem_err("浮点不支持该运算"); }
+    *result = fp64_norm_bits(tid, value);
+    return 0;
+}
+
+// sem_fold_const_binop：按 yh 整数类型执行有边界的常量二元运算。
+pub fn sem_fold_const_binop(op int, tid int, left i64, right i64, result *i64) int {
+    if (ty_is_float(tid) != 0) {
+        return sem_fold_float_binop(op, tid, left, right, result);
+    }
+    if (ty_is_integer(tid) == 0) { return sem_err("编译期算术运算要求整数"); }
+    let bits int = g_state.t_types[tid].size * 8;
+    let is_signed_ty int = ty_is_signed(tid);
+    let a i64 = sem_fold_norm(tid, left);
+    let b i64 = sem_fold_norm(tid, right);
+    let is_cmp int = (op == TK_EQEQ || op == TK_NEQ || op == TK_LT || op == TK_LEQ
+        || op == TK_GT || op == TK_GEQ).to_type(int);
+    if (is_cmp != 0) {
+        let yes int = 0;
+        if (op == TK_EQEQ) { yes = (a == b).to_type(int); }
+        else if (op == TK_NEQ) { yes = (a != b).to_type(int); }
+        else if (is_signed_ty != 0 && op == TK_LT) { yes = (a < b).to_type(int); }
+        else if (is_signed_ty != 0 && op == TK_LEQ) { yes = (a <= b).to_type(int); }
+        else if (is_signed_ty != 0 && op == TK_GT) { yes = (a > b).to_type(int); }
+        else if (is_signed_ty != 0 && op == TK_GEQ) { yes = (a >= b).to_type(int); }
+        else {
+            let ua u64 = a.to_type(u64);
+            let ub u64 = b.to_type(u64);
+            if (op == TK_LT) { yes = (ua < ub).to_type(int); }
+            else if (op == TK_LEQ) { yes = (ua <= ub).to_type(int); }
+            else if (op == TK_GT) { yes = (ua > ub).to_type(int); }
+            else if (op == TK_GEQ) { yes = (ua >= ub).to_type(int); }
+        }
+        *result = yes.to_type(i64);
+        return 0;
+    }
+    if (op == TK_LSHIFT || op == TK_RSHIFT) {
+        if (right < 0 || right >= bits.to_type(i64)) {
+            return sem_err("编译期移位超出位宽");
+        }
+        let count int = right.to_type(int);
+        if (op == TK_RSHIFT) {
+            if (is_signed_ty != 0) { *result = a >> count; }
+            else { *result = (a.to_type(u64) >> count).to_type(i64); }
+            return 0;
+        }
+        if (is_signed_ty != 0) {
+            if (a < 0) { return sem_err("编译期整数运算溢出"); }
+            let max_s i64 = 9223372036854775807;
+            if (bits == 8) { max_s = 127; }
+            else if (bits == 16) { max_s = 32767; }
+            else if (bits == 32) { max_s = 2147483647; }
+            if (a > (max_s >> count)) { return sem_err("编译期整数运算溢出"); }
+            *result = a << count;
+            return 0;
+        }
+        let max_u u64 = (-1).to_type(u64);
+        if (bits == 8) { max_u = 255; }
+        else if (bits == 16) { max_u = 65535; }
+        else if (bits == 32) { max_u = 4294967295; }
+        let ua u64 = a.to_type(u64);
+        if (ua > (max_u >> count)) { return sem_err("编译期整数运算溢出"); }
+        *result = sem_fold_norm(tid, (ua << count).to_type(i64));
+        return 0;
+    }
+    if (op == TK_AMP || op == TK_PIPE || op == TK_CARET) {
+        *result = sem_fold_norm(tid, fold_binop(op, a, b));
+        return 0;
+    }
+    if (is_signed_ty != 0) {
+        let max_s i64 = 9223372036854775807;
+        if (bits == 8) { max_s = 127; }
+        else if (bits == 16) { max_s = 32767; }
+        else if (bits == 32) { max_s = 2147483647; }
+        let min_s i64 = 0 - max_s - 1;
+        if (op == TK_PLUS) {
+            if ((b > 0 && a > max_s - b) || (b < 0 && a < min_s - b)) {
+                return sem_err("编译期整数运算溢出");
+            }
+            *result = a + b;
+        } else if (op == TK_MINUS) {
+            if ((b < 0 && a > max_s + b) || (b > 0 && a < min_s + b)) {
+                return sem_err("编译期整数运算溢出");
+            }
+            *result = a - b;
+        } else if (op == TK_STAR) {
+            if (a > 0 && ((b > 0 && a > max_s / b) || (b < 0 && b < min_s / a))) {
+                return sem_err("编译期整数运算溢出");
+            }
+            if (a < 0 && ((b > 0 && a < min_s / b) || (b < 0 && a < max_s / b))) {
+                return sem_err("编译期整数运算溢出");
+            }
+            *result = a * b;
+        } else if (op == TK_SLASH || op == TK_PERCENT) {
+            if (b == 0) { return sem_err("编译期除数不能为零"); }
+            if (a == min_s && b == -1) { return sem_err("编译期整数运算溢出"); }
+            if (op == TK_SLASH) { *result = a / b; }
+            else { *result = a % b; }
+        } else {
+            return sem_err("编译期不支持该整数运算");
+        }
+        return 0;
+    }
+    let max_u u64 = (-1).to_type(u64);
+    if (bits == 8) { max_u = 255; }
+    else if (bits == 16) { max_u = 65535; }
+    else if (bits == 32) { max_u = 4294967295; }
+    let ua u64 = a.to_type(u64);
+    let ub u64 = b.to_type(u64);
+    if (op == TK_PLUS) {
+        if (ua > max_u - ub) { return sem_err("编译期整数运算溢出"); }
+        *result = sem_fold_norm(tid, (ua + ub).to_type(i64));
+    } else if (op == TK_MINUS) {
+        if (ua < ub) { return sem_err("编译期整数运算溢出"); }
+        *result = sem_fold_norm(tid, (ua - ub).to_type(i64));
+    } else if (op == TK_STAR) {
+        if (ub != 0 && ua > max_u / ub) { return sem_err("编译期整数运算溢出"); }
+        *result = sem_fold_norm(tid, (ua * ub).to_type(i64));
+    } else if (op == TK_SLASH || op == TK_PERCENT) {
+        if (ub == 0) { return sem_err("编译期除数不能为零"); }
+        if (op == TK_SLASH) { *result = (ua / ub).to_type(i64); }
+        else { *result = (ua % ub).to_type(i64); }
+    } else {
+        return sem_err("编译期不支持该整数运算");
+    }
+    return 0;
+}
+
+// sem_fold_const_unary：按目标类型执行常量一元运算，并允许最小值的直接负数字面量。
+// 浮点取负走符号位翻转，避免生成冻结子集之外的 fneg。
+pub fn sem_fold_const_unary(op int, tid int, value i64, is_lit int, result *i64) int {
+    if (ty_is_float(tid) != 0) {
+        if (op == TK_MINUS) {
+            *result = value ^ (1.to_type(i64) << 63);
+            return 0;
+        }
+        if (op == TK_PLUS) { *result = value; return 0; }
+        return sem_err("浮点只支持一元 +/-");
+    }
+    if (ty_is_integer(tid) == 0) { return sem_err("编译期一元运算要求整数"); }
+    let bits int = g_state.t_types[tid].size * 8;
+    let is_signed_ty int = ty_is_signed(tid);
+    let a i64 = sem_fold_norm(tid, value);
+    if (op == TK_MINUS) {
+        if (is_signed_ty != 0) {
+            let max_s i64 = 9223372036854775807;
+            if (bits == 8) { max_s = 127; }
+            else if (bits == 16) { max_s = 32767; }
+            else if (bits == 32) { max_s = 2147483647; }
+            let min_s i64 = 0 - max_s - 1;
+            if (a == min_s) {
+                if (is_lit != 0 && bits < 64 && value == max_s + 1) {
+                    *result = min_s;
+                    return 0;
+                }
+                return sem_err("编译期整数运算溢出");
+            }
+            *result = 0 - a;
+            return 0;
+        }
+        if (a != 0) { return sem_err("编译期整数运算溢出"); }
+        *result = 0;
+        return 0;
+    }
+    if (op == TK_PLUS) { *result = a; return 0; }
+    if (op == TK_TILDE) { *result = sem_fold_norm(tid, ~a); return 0; }
+    if (op == TK_BANG) { *result = (a == 0).to_type(i64); return 0; }
+    *result = a;
+    return 0;
+}
+
 pub fn sem_binop(op int, lhs *Res, rhs *Res) int {
     let tid int = 0;
     if (g_state.c_compile == 0) {
@@ -90,14 +311,31 @@ pub fn sem_binop(op int, lhs *Res, rhs *Res) int {
         if (em_ins("mov\tx9, x10") != 0) { return -1; }
         if (em_scale_index(g_state.t_types[rhs.type_id].elem) != 0) { return -1; }
         if (em_ins("add\tx0, x9, x0") != 0) { return -1; }
+        // 结果类型取指针一侧（此前漏设会让 `i + p` 被当成整数）
+        lhs.type_id = rhs.type_id;
         g_state.c_res_is_addr = 1;
         return 0;
     }
     tid = sem_promote(lhs.type_id, rhs.type_id);
     if (ty_is_float(tid) != 0) {
-        // 浮点二元/比较：左 d1、右 d0（值栈已按序压入）
+        // 浮点二元/比较：折叠时直接按位模式求值，运行期左 d1、右 d0（值栈已按序压入）
         if (g_state.c_fold != 0) {
-            return sem_err("浮点常量折叠暂不支持");
+            if (lhs.is_const == 0 || rhs.is_const == 0) {
+                return sem_err("这里需要编译期常量");
+            }
+            let value i64 = 0;
+            if (sem_fold_const_binop(op, tid, lhs.ival, rhs.ival, &value) != 0) {
+                return -1;
+            }
+            let fp_cmp int = (op == TK_EQEQ || op == TK_NEQ || op == TK_LT
+                || op == TK_LEQ || op == TK_GT || op == TK_GEQ).to_type(int);
+            if (fp_cmp != 0) {
+                sem_res_const(lhs, TY_BOOL, value);
+            } else {
+                sem_res_const(lhs, tid, value);
+                lhs.fval_bits = value;
+            }
+            return 0;
         }
         let iscmp int = (op == TK_EQEQ || op == TK_NEQ || op == TK_LT
                          || op == TK_LEQ || op == TK_GT || op == TK_GEQ).to_type(int);
@@ -130,12 +368,14 @@ pub fn sem_binop(op int, lhs *Res, rhs *Res) int {
         if (lhs.is_const == 0 || rhs.is_const == 0) {
             return sem_err("这里需要编译期常量");
         }
+        let value i64 = 0;
+        if (sem_fold_const_binop(op, tid, lhs.ival, rhs.ival, &value) != 0) { return -1; }
         if (is_cmp != 0) {
-            let v i64 = fold_binop(op, lhs.ival, rhs.ival);
-            sem_res_const(lhs, TY_BOOL, v);
+            sem_res_const(lhs, TY_BOOL, value);
         } else {
-            let v2 i64 = fold_binop(op, lhs.ival, rhs.ival);
-            sem_res_const(lhs, tid, v2);
+            sem_res_const(lhs, tid, value);
+            // 浮点常量同时保留位模式，供 const 初始化与浮点装载使用。
+            if (ty_is_float(tid) != 0) { lhs.fval_bits = value; }
         }
         return 0;
     }
@@ -153,13 +393,26 @@ pub fn sem_binop(op int, lhs *Res, rhs *Res) int {
     return 0;
 }
 
+// sem_shortcircuit：检查逻辑左值；折叠时保存真值，运行时发射短路跳转。
 pub fn sem_shortcircuit(op int, lhs *Res) int {
     if (g_state.c_compile == 0) {
         lhs.type_id = 0;
         return 0;
     }
     if (g_state.c_fold != 0) {
-        return sem_err("逻辑运算不支持编译期折叠");
+        if (ty_is_scalar(lhs.type_id) == 0 || ty_is_float(lhs.type_id) != 0) {
+            return sem_err("逻辑运算要求非浮点标量");
+        }
+        if (lhs.is_const == 0) {
+            return sem_err("逻辑运算要求编译期常量");
+        }
+        if (g_state.sc_sc_depth >= 64) {
+            return sem_err("逻辑运算嵌套超过 64 层");
+        }
+        g_state.sc_sc_false_stk[g_state.sc_sc_depth] = (lhs.ival != 0).to_type(int);
+        g_state.sc_sc_depth += 1;
+        g_state.c_res_is_addr = 0;
+        return sem_res_reset(lhs, TY_BOOL);
     }
     // 保存外层短路标签（嵌套 a&&b||c&&d 时内层不破坏外层）
     g_state.sc_sc_false_stk[g_state.sc_sc_depth] = g_state.sc_lbl_false;
@@ -177,9 +430,26 @@ pub fn sem_shortcircuit(op int, lhs *Res) int {
     return 0;
 }
 
+// sem_shortcircuit_end：合并折叠的左右真值，或补齐运行时短路分支并恢复外层标签。
 pub fn sem_shortcircuit_end(op int, lhs *Res) int {
     if (g_state.c_compile == 0) {
         return 0;
+    }
+    if (g_state.c_fold != 0) {
+        if (ty_is_scalar(lhs.type_id) == 0 || ty_is_float(lhs.type_id) != 0) {
+            return sem_err("逻辑运算要求非浮点标量");
+        }
+        if (lhs.is_const == 0) {
+            return sem_err("逻辑运算要求编译期常量");
+        }
+        g_state.sc_sc_depth -= 1;
+        let left int = g_state.sc_sc_false_stk[g_state.sc_sc_depth];
+        let right int = (lhs.ival != 0).to_type(int);
+        let value int = 0;
+        if (op == TK_ANDAND) { value = (left != 0 && right != 0).to_type(int); }
+        else { value = (left != 0 || right != 0).to_type(int); }
+        g_state.c_res_is_addr = 0;
+        return sem_res_const(lhs, TY_BOOL, value.to_type(i64));
     }
     if (op == TK_ANDAND) {
         // 左真且右真 → 结果 1
@@ -272,7 +542,26 @@ pub fn sem_unary(op int, operand *Res) int {
     }
     if (operand.is_const != 0) {
         // 常量（含字面量）：折叠求值并保留字面量性（如 let n i8 = -100）
-        operand.ival = fold_unary(op, operand.ival);
+        if (ty_is_float(operand.type_id) != 0) {
+            let fp_value i64 = 0;
+            if (sem_fold_const_unary(op, operand.type_id, operand.ival,
+                    operand.is_lit, &fp_value) != 0) { return -1; }
+            operand.ival = fp_value;
+            operand.fval_bits = fp_value;
+            if (g_state.c_fold == 0) {
+                if (em_mov_imm("x0", fp_value) != 0) { return -1; }
+                if (em_ins("fmov\td0, x0") != 0) { return -1; }
+            }
+            return 0;
+        }
+        if (ty_is_integer(operand.type_id) != 0) {
+            let value i64 = 0;
+            if (sem_fold_const_unary(op, operand.type_id, operand.ival,
+                    operand.is_lit, &value) != 0) { return -1; }
+            operand.ival = value;
+        } else {
+            operand.ival = fold_unary(op, operand.ival);
+        }
         operand.type_id = TY_I32;
         if (g_state.c_fold == 0) {
             if (em_mov_imm("x0", operand.ival) != 0) {
@@ -446,6 +735,43 @@ pub fn sem_member(base *Res, name_start int, name_len int) int {
     //     解引用未装载的 *p），指针基底需先 ldr 装入结构地址；
     // 0 = x0 已是基底值本身（函数调用返回的指针、RVALUE 已装载的变量），
     //     不得再间接一次——否则多解一层，字段访问落在野地址上。
+    // 枚举基底：`EnumName.member` 里枚举类型名在模块模式下会被求值成枚举值
+    //（类型名登记成常量符号，形态随 pass 变化），此时按成员名查符号表取成员常量。
+    if (base.type_id >= 0 && g_state.t_types[base.type_id].kind == TY_ENUM) {
+        let msym int = sym_lookup(name_start, name_len);
+        if (msym < 0) {
+            // 名字表里查不到时按名字反查枚举成员表（登记时快照名字与值，不经过符号表）：
+            // 模块 worker 二次解析编译期正文时枚举成员符号不可见（实测）。
+            let eidx int = em_find(name_start, name_len);
+            if (eidx >= 0 && em_get_ready(eidx) != 0) {
+                let evalue i64 = em_get_val(eidx);
+                sem_res_const(base, base.type_id, evalue);
+                if (g_state.c_compile != 0 && g_state.c_fold == 0
+                    && em_mov_imm("x0", evalue) != 0) { return -1; }
+                return 0;
+            }
+        }
+
+        // 不校验成员符号的 type_id：模块模式下枚举成员登记时的类型上下文与基底
+        // 枚举类型 id 不总一致；枚举成员注册在全局名字表里，同名成员本就不能共存。
+        if (msym < 0 || (g_state.c_syms[msym].flags & F_ENUM_MEMBER) == 0) {
+            // 模块模式：枚举类型名会被求值成枚举值，而此时成员符号在当前编译单元的
+            // 名字表里已经查不到（实测），因此这里只能给出可操作的诊断。同模块顶层
+            // 常量引用同一成员是正常的，推荐用常量中转。
+            if (g_state.c_module_mode != 0) {
+                return sem_err("模块模式下编译期正文里直接引用枚举成员暂不支持；请在同模块顶层用 `pub const X int = 枚举名.成员;` 中转后再引用");
+            }
+            return sem_err("枚举没有这个成员");
+        }
+        if (g_state.c_syms[msym].const_ready == 0) {
+            return sem_err("编译期常量尚未就绪");
+        }
+        let value i64 = g_state.c_syms[msym].cval;
+        sem_res_const(base, base.type_id, value);
+        if (g_state.c_compile != 0 && g_state.c_fold == 0
+            && em_mov_imm("x0", value) != 0) { return -1; }
+        return 0;
+    }
     let base_indirect int = g_state.c_res_is_addr;
     let bk int = g_state.t_types[base.type_id].kind;
     let stid int = 0;
@@ -503,9 +829,16 @@ pub fn sem_member(base *Res, name_start int, name_len int) int {
         // x0 = 结构体地址；加字段偏移
     }
     if (off > 0) {
-        if (em_frag("\tadd\tx0, x0, #") != 0) { return -1; }
-        if (em_puti(off) != 0) { return -1; }
-        if (em_frag("\n") != 0) { return -1; }
+        if (off <= 4095) {
+            if (em_frag("\tadd\tx0, x0, #") != 0) { return -1; }
+            if (em_puti(off) != 0) { return -1; }
+            if (em_frag("\n") != 0) { return -1; }
+        } else {
+            // 深结构体的字段偏移超出 add 的 12 位无符号立即数范围，借 x12 装偏移
+            // （与 em_lea_local* 的深帧约定一致：调用方不依赖 x12 跨 lea 存活）。
+            if (em_mov_imm("x12", off.to_type(i64)) != 0) { return -1; }
+            if (em_ins("add\tx0, x0, x12") != 0) { return -1; }
+        }
     }
     let ftid int = g_state.t_fields[found].type_id;
     if (g_state.c_lvalue == 0) {
@@ -532,6 +865,14 @@ pub fn sem_sizeof(tid int, r *Res) int {
     }
     if (ty_is_opaque(tid) != 0) {
         return sem_err("不透明 C 类型不能用于 sizeof");
+    }
+    if (g_state.t_types[tid].size < 0) {
+        // typed CT 函数先保存 sizeof 的目标类型，等布局调度器完成依赖后再执行。
+        if (g_state.c_ast_capture != 0 && g_state.c_pass == 2) {
+            r.layout_type_id = tid;
+            return 0;
+        }
+        return sem_err("sizeof 的类型布局尚未就绪");
     }
     r.is_const = 1;
     r.is_lit = 0;
@@ -617,6 +958,19 @@ pub fn sem_cast(operand *Res, tid int) int {
     }
     if (scalar_to_scalar == 0) {
         return sem_err("该转换不支持（标量之间或指针/整数）");
+    }
+    // 编译期常量转换：浮点参与的转换写位模式，整数转换按目标宽度归一。
+    if (g_state.c_fold != 0 && operand.is_const != 0) {
+        if (ty_is_float(operand.type_id) != 0 || ty_is_float(tid) != 0) {
+            let value i64 = sem_fold_float_convert(operand.type_id, tid, operand.ival);
+            operand.ival = value;
+            operand.fval_bits = value;
+        } else {
+            operand.ival = sem_fold_norm(tid, operand.ival);
+        }
+        operand.type_id = tid;
+        g_state.c_res_is_addr = 0;
+        return 0;
     }
     if (g_state.c_fold == 0 && g_state.c_res_is_addr == 0) {
         // 运行时转换

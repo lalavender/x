@@ -57,6 +57,7 @@ EXPECT_RE = re.compile(r"^//\s*expect:\s?(.*)$")
 MORE_RE = re.compile(r"^//\s*expect-more:\s?(.*)$")
 EXIT_RE = re.compile(r"^//\s*exit:\s*(-?\d+)\s*$")
 FAIL_RE = re.compile(r"^//\s*fail:\s?(.*)$")
+FAIL_CONTAINS_RE = re.compile(r"^//\s*fail-contains:\s?(.*)$")
 # 标准输入注入（十六进制字节串，可为空）与附加命令行参数。
 STDIN_HEX_RE = re.compile(r"^//\s*stdin-hex:\s?([0-9a-fA-F]*)\s*$")
 ARGV_RE = re.compile(r"^//\s*argv:\s?(.*)$")
@@ -228,7 +229,7 @@ def check_run_case(path, cross):
 
 
 def check_fail_case(path, cross):
-    """fail/ 用例：编译必须被干净地拒绝（崩溃/超时都算编译器问题）。"""
+    """fail/ 用例：编译须干净拒绝；可选 fail-contains 约束诊断类别。"""
     out = WORK / (stem_linux(path) if cross else path.stem)
     proc, timed_out = compile_src(path, out, cross)
     if timed_out:
@@ -238,6 +239,15 @@ def check_fail_case(path, cross):
             + "\n    ".join(diag_tail(proc))
     if proc.returncode == 0:
         return "FAIL", "预期编译被拒绝，实际编译通过"
+    expected = ""
+    for line in path.read_text().splitlines():
+        match = FAIL_CONTAINS_RE.match(line)
+        if match:
+            expected = match.group(1)
+            break
+    if expected and expected not in proc.stderr:
+        return "FAIL", f"诊断未包含预期文本 {expected!r}\n    " \
+            + "\n    ".join(diag_tail(proc))
     return "PASS", ""
 
 

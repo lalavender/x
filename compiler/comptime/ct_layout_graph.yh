@@ -1,0 +1,307 @@
+module comptime;
+import gen;
+
+const CT_DEP_VALUE int = 1;
+const CT_DEP_LAYOUT int = 2;
+
+// ct_dependency_reset：释放当前编译单元的混合值/布局依赖边。
+pub fn ct_dependency_reset() void {
+    if (ct_dependency_edges != 0) { free(ct_dependency_edges); }
+    ct_dependency_edges = 0;
+    ct_dependency_edge_n = 0;
+    ct_dependency_edge_cap = 0;
+}
+
+// ct_dependency_edge_grow：扩容混合依赖边表并保留已有边。
+fn ct_dependency_edge_grow() int {
+    if (ct_dependency_edge_n < ct_dependency_edge_cap) { return 0; }
+    let next_cap int = ct_dependency_edge_cap * 2;
+    if (next_cap == 0) { next_cap = 32; }
+    let next *CtDependencyEdge = malloc(
+        (next_cap * sizeof(CtDependencyEdge)).to_type(u64)).to_type(*CtDependencyEdge);
+    if (next == 0) { return gen.fail("内存分配失败"); }
+    if (ct_dependency_edge_n > 0) {
+        memcpy(next, ct_dependency_edges,
+            (ct_dependency_edge_n * sizeof(CtDependencyEdge)).to_type(u64));
+    }
+    if (ct_dependency_edges != 0) { free(ct_dependency_edges); }
+    ct_dependency_edges = next;
+    ct_dependency_edge_cap = next_cap;
+    return 0;
+}
+
+// ct_dependency_add：登记值常量或类型布局节点之间的一条依赖边。
+fn ct_dependency_add(owner_kind int, owner_id int, dep_kind int, dep_id int) int {
+    let i int = 0;
+    for i < ct_dependency_edge_n {
+        let edge CtDependencyEdge = ct_dependency_edges[i];
+        if (edge.owner_kind == owner_kind && edge.owner_id == owner_id
+            && edge.dep_kind == dep_kind && edge.dep_id == dep_id) { return 0; }
+        i += 1;
+    }
+    if (ct_dependency_edge_grow() != 0) { return -1; }
+    ct_dependency_edges[ct_dependency_edge_n].owner_kind = owner_kind;
+    ct_dependency_edges[ct_dependency_edge_n].owner_id = owner_id;
+    ct_dependency_edges[ct_dependency_edge_n].dep_kind = dep_kind;
+    ct_dependency_edges[ct_dependency_edge_n].dep_id = dep_id;
+    ct_dependency_edge_n += 1;
+    return 0;
+}
+
+// ct_dependency_layout_row：按类型编号查布局请求；不存在时返回 -1。
+fn ct_dependency_layout_row(type_id int) int {
+    let i int = 0;
+    for i < ct_layout_request_n {
+        if (ct_layout_requests[i].type_id == type_id) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+
+// ct_dependency_pending：判断值/布局节点是否仍等待本轮依赖调度。
+fn ct_dependency_pending(kind int, id int) int {
+    let gs *gen.GenState = gen.G();
+    if (kind == CT_DEP_VALUE) {
+        let row int = ct_value_find(id);
+        if (row < 0 || id < 0 || id >= gs.c_sym_n) { return 0; }
+        return (gs.c_syms[id].const_ready == 0).to_type(int);
+    }
+    if (kind == CT_DEP_LAYOUT) { return ct_layout_type_pending(id); }
+    return 0;
+}
+
+// ct_dependency_visit：读写依赖节点的 DFS 状态。
+fn ct_dependency_visit(kind int, id int, state int, set_state int) int {
+    if (kind == CT_DEP_VALUE) {
+        let row int = ct_value_find(id);
+        if (row < 0) { return 0; }
+        if (set_state != 0) { ct_value_requests[row].visit = state; }
+        return ct_value_requests[row].visit;
+    }
+    if (kind == CT_DEP_LAYOUT) {
+        let row int = ct_dependency_layout_row(id);
+        if (row < 0) { return 0; }
+        if (set_state != 0) { ct_layout_requests[row].visit = state; }
+        return ct_layout_requests[row].visit;
+    }
+    return 0;
+}
+
+// ct_dependency_append_label：向诊断追加值符号或类型布局节点的可读名称。
+fn ct_dependency_append_label(kind int, id int, message *u8, message_n *int) void {
+    let gs *gen.GenState = gen.G();
+    if (kind == CT_DEP_VALUE) {
+        if (id >= 0 && id < gs.c_sym_n) {
+            *message_n = gen.append_str_limit(message, *message_n, 900,
+                gen.np_cstr(gs.c_syms[id].name_off));
+        } else {
+            *message_n = gen.append_str_limit(message, *message_n, 900,
+                "未知常量");
+        }
+        return;
+    }
+    let i int = gs.t_name_n - 1;
+    for i >= 0 {
+        if (gs.t_names[i].type_id == id) {
+            *message_n = gen.append_str_limit(message, *message_n, 900,
+                gen.np_cstr(gs.t_names[i].name_off));
+            return;
+        }
+        i -= 1;
+    }
+    if (id >= 0 && id < gs.t_type_n && gs.t_types[id].kind == gen.TY_ARRAY) {
+        let row int = ct_dependency_layout_row(id);
+        *message_n = gen.append_str_limit(message, *message_n, 900,
+            "数组长度(");
+        if (row >= 0 && ct_layout_requests[row].const_sym >= 0
+            && ct_layout_requests[row].const_sym < gs.c_sym_n) {
+            let sym int = ct_layout_requests[row].const_sym;
+            *message_n = gen.append_str_limit(message, *message_n, 900,
+                gen.np_cstr(gs.c_syms[sym].name_off));
+        } else {
+            *message_n = gen.append_str_limit(message, *message_n, 900,
+                "表达式");
+        }
+        *message_n = gen.append_str_limit(message, *message_n, 900, ")");
+        return;
+    }
+    *message_n = gen.append_str_limit(message, *message_n, 900, "匿名布局");
+}
+
+// ct_dependency_cycle_visit：深度优先查找并输出混合值/布局依赖图中的闭环。
+fn ct_dependency_cycle_visit(kind int, id int, stack *CtDependencyNode,
+    depth int, root_line int, root_col int, message *u8,
+    message_n *int) int {
+    ct_dependency_visit(kind, id, 1, 1);
+    stack[depth].kind = kind;
+    stack[depth].id = id;
+    let i int = 0;
+    for i < ct_dependency_edge_n {
+        let edge CtDependencyEdge = ct_dependency_edges[i];
+        if (edge.owner_kind == kind && edge.owner_id == id
+            && ct_dependency_pending(edge.dep_kind, edge.dep_id) != 0) {
+            let state int = ct_dependency_visit(edge.dep_kind, edge.dep_id, 0, 0);
+            if (state == 1) {
+                let first int = 0;
+                for first <= depth {
+                    if (stack[first].kind == edge.dep_kind
+                        && stack[first].id == edge.dep_id) { break; }
+                    first += 1;
+                }
+                *message_n = gen.append_str_limit(message, *message_n, 900,
+                    "编译期依赖环: ");
+                let at int = first;
+                for at <= depth {
+                    if (at > first) {
+                        *message_n = gen.append_str_limit(message, *message_n,
+                            900, " -> ");
+                    }
+                    ct_dependency_append_label(stack[at].kind,
+                        stack[at].id, message, message_n);
+                    at += 1;
+                }
+                *message_n = gen.append_str_limit(message, *message_n, 900,
+                    " -> ");
+                ct_dependency_append_label(edge.dep_kind, edge.dep_id,
+                    message, message_n);
+                message[*message_n] = 0;
+                return gen.err_lc(root_line, root_col, gen.arr_cstr(message));
+            }
+            if (state == 0 && ct_dependency_cycle_visit(edge.dep_kind,
+                    edge.dep_id, stack, depth + 1, root_line, root_col,
+                    message, message_n) != 0) { return -1; }
+        }
+        i += 1;
+    }
+    ct_dependency_visit(kind, id, 2, 1);
+    return 0;
+}
+
+// ct_dependency_cycle_diagnostic：无纯值环时查找并报告值/布局混合闭环。
+pub fn ct_dependency_cycle_diagnostic() int {
+    let gs *gen.GenState = gen.G();
+    let capacity int = ct_value_request_n + ct_layout_request_n;
+    if (capacity <= 0) { return 0; }
+    let stack *CtDependencyNode = malloc(
+        (capacity * sizeof(CtDependencyNode)).to_type(u64)).to_type(*CtDependencyNode);
+    if (stack == 0) { return gen.fail("内存分配失败"); }
+    let message *u8 = malloc(1024.to_type(u64)).to_type(*u8);
+    if (message == 0) {
+        free(stack);
+        return gen.fail("内存分配失败");
+    }
+    let i int = 0;
+    for i < ct_value_request_n { ct_value_requests[i].visit = 0; i += 1; }
+    i = 0;
+    for i < ct_layout_request_n { ct_layout_requests[i].visit = 0; i += 1; }
+    i = 0;
+    for i < ct_value_request_n {
+        let sym int = ct_value_requests[i].sym_id;
+        if (ct_dependency_pending(CT_DEP_VALUE, sym) != 0
+            && ct_dependency_visit(CT_DEP_VALUE, sym, 0, 0) == 0) {
+            let message_n int = 0;
+            if (ct_dependency_cycle_visit(CT_DEP_VALUE, sym, stack, 0,
+                    ct_value_requests[i].line, ct_value_requests[i].col,
+                    message, &message_n) != 0) {
+                free(stack);
+                free(message.to_type(*void));
+                return -1;
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < ct_layout_request_n {
+        let type_id int = ct_layout_requests[i].type_id;
+        if (ct_dependency_pending(CT_DEP_LAYOUT, type_id) != 0
+            && ct_dependency_visit(CT_DEP_LAYOUT, type_id, 0, 0) == 0) {
+            let message_n int = 0;
+            if (ct_dependency_cycle_visit(CT_DEP_LAYOUT, type_id, stack,
+                    0, ct_layout_requests[i].line, ct_layout_requests[i].col,
+                    message, &message_n) != 0) {
+                free(stack);
+                free(message.to_type(*void));
+                return -1;
+            }
+        }
+        i += 1;
+    }
+    free(stack);
+    free(message.to_type(*void));
+    return 0;
+}
+
+// ct_value_function_dependency_add：把常量初始化器调用的 CT 函数闭包接到值节点。
+pub fn ct_value_function_dependency_add(owner_sym int, function_sym int) int {
+    let path [64]int;
+    return ct_layout_function_dependencies_walk(CT_DEP_VALUE, owner_sym,
+        function_sym, &path[0], 0);
+}
+
+// ct_layout_expr_value_dependency_add：把数组长度中的全局常量接到数组布局节点。
+pub fn ct_layout_expr_value_dependency_add(row int, sym_id int) int {
+    if (row < 0 || row >= ct_layout_request_n) { return 0; }
+    return ct_dependency_add(CT_DEP_LAYOUT, ct_layout_requests[row].type_id,
+        CT_DEP_VALUE, sym_id);
+}
+
+// ct_layout_expr_type_dependency_add：把数组长度 sizeof 的目标类型接到数组布局节点。
+pub fn ct_layout_expr_type_dependency_add(row int, type_id int) int {
+    if (row < 0 || row >= ct_layout_request_n) { return 0; }
+    return ct_dependency_add(CT_DEP_LAYOUT, ct_layout_requests[row].type_id,
+        CT_DEP_LAYOUT, type_id);
+}
+
+// ct_layout_expr_function_dependency_add：把数组长度调用的 CT 闭包接到数组布局节点。
+pub fn ct_layout_expr_function_dependency_add(row int, function_sym int) int {
+    if (row < 0 || row >= ct_layout_request_n) { return 0; }
+    let path [64]int;
+    return ct_layout_function_dependencies_walk(CT_DEP_LAYOUT,
+        ct_layout_requests[row].type_id, function_sym, &path[0], 0);
+}
+
+// ct_layout_function_dependencies_walk：沿 CT 调用闭包收集值、签名和表达式布局依赖。
+fn ct_layout_function_dependencies_walk(owner_kind int, owner_id int,
+    sym_id int, path *int, depth int) int {
+    if (depth >= 64) { return 0; }
+    let i int = 0;
+    for i < depth {
+        if (path[i] == sym_id) { return 0; }
+        i += 1;
+    }
+    let row int = ct_find(sym_id);
+    if (row < 0) { return 0; }
+    path[depth] = sym_id;
+    let item CtFunction = ct_functions[row];
+    if (item.ret_type >= 0 && ct_dependency_add(owner_kind, owner_id,
+            CT_DEP_LAYOUT, item.ret_type) != 0) { return -1; }
+    i = 0;
+    for i < item.param_n {
+        if (ct_dependency_add(owner_kind, owner_id, CT_DEP_LAYOUT,
+                item.params[i].type_id) != 0) { return -1; }
+        i += 1;
+    }
+    if (item.ir_ready == 0) { return 0; }
+    i = item.ir_expr_first;
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i];
+        if (expr.type_id >= 0 && ct_dependency_add(owner_kind, owner_id,
+                CT_DEP_LAYOUT, expr.type_id) != 0) { return -1; }
+        if (expr.layout_type_id >= 0 && ct_dependency_add(owner_kind,
+                owner_id, CT_DEP_LAYOUT, expr.layout_type_id) != 0) { return -1; }
+        if (expr.sym_kind == gen.SYM_CONST && expr.sym_id >= 0
+            && ct_dependency_add(owner_kind, owner_id, CT_DEP_VALUE,
+                expr.sym_id) != 0) { return -1; }
+        if (expr.kind == 5 && expr.op == gen.TK_DOLLAR && expr.sym_id >= 0
+            && ct_layout_function_dependencies_walk(owner_kind, owner_id,
+                expr.sym_id, path, depth + 1) != 0) { return -1; }
+        i += 1;
+    }
+    i = item.ir_binding_first;
+    for i < item.ir_binding_after {
+        if (ct_dependency_add(owner_kind, owner_id, CT_DEP_LAYOUT,
+                ct_ir_bindings[i].sym_type_id) != 0) { return -1; }
+        i += 1;
+    }
+    return 0;
+}

@@ -6,7 +6,7 @@ import lex;
 // iface.yh —— 模块接口的发射与加载（MOD-U4）
 //
 // 接口文件（<模块>.yh.i）是编译器为每个模块生成的「稳定接口」：
-//   * 头行：// yh-iface v1 arch=arm64 suffix=<符号后缀>
+//   * 头行：// yh-iface v1/v2/v3 arch=arm64 suffix=<符号后缀>
 //   * 正文：pub 类型（struct/union/enum/type 别名，字段带 pub 标记）、
 //     pub fn 签名（空体）、pub const（折叠后的字面量值）、pub let（无
 //     初始化——存储由模块自己的 .s 提供）。
@@ -166,13 +166,13 @@ pub fn if_emit_type(tid int, own_name_base int) int {
 pub fn iface_emit(path *char, sym_base int, tname_base int) int {
     let gs *gen.GenState = gen.G();
     if_len = 0;
-    // 无属性接口保持 v1；外部 ABI 或函数效果/优化提示使用 v2。
+    // 无属性接口保持 v1；已有函数属性使用 v2；公开 comptime 签名使用 v3。
     let iface_version int = 1;
     let ti0 int = tname_base;
     for ti0 < gs.t_name_n {
         if (gs.t_names[ti0].is_pub != 0
             && (gs.t_names[ti0].attrs & gen.ATTR_EXTERN) != 0) {
-            iface_version = 2;
+            if (iface_version < 2) { iface_version = 2; }
         }
         ti0 += 1;
     }
@@ -181,12 +181,19 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
         let flags int = gs.c_syms[si0].flags;
         if ((flags & gen.F_PUB) != 0
             && ((flags & gen.F_EXTERN) == 0 || (flags & gen.F_CABI) != 0)
-            && (flags & (gen.F_CABI | gen.F_INLINE | gen.F_NORETURN)) != 0) {
+            && (flags & gen.F_COMPTIME) != 0) {
+            iface_version = 3;
+        } else if ((flags & gen.F_PUB) != 0
+            && ((flags & gen.F_EXTERN) == 0 || (flags & gen.F_CABI) != 0)
+            && (flags & (gen.F_CABI | gen.F_INLINE | gen.F_NORETURN)) != 0
+            && iface_version < 2) {
             iface_version = 2;
         }
         si0 += 1;
     }
-    if (iface_version == 2) {
+    if (iface_version == 3) {
+        if (if_puts("// yh-iface v3 arch=arm64 suffix=") != 0) { return -1; }
+    } else if (iface_version == 2) {
         if (if_puts("// yh-iface v2 arch=arm64 suffix=") != 0) { return -1; }
     } else if (if_puts("// yh-iface v1 arch=arm64 suffix=") != 0) { return -1; }
     if (if_put_np(gs.c_sym_sfx_off, gs.c_sym_sfx_len) != 0) { return -1; }
@@ -273,7 +280,8 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
                 return gen.sem_err("变参函数不能导出为 pub");
             }
             let has_cabi int = ((fl & gen.F_CABI) != 0).to_type(int);
-            if ((fl & (gen.F_CABI | gen.F_INLINE | gen.F_NORETURN)) != 0) {
+            if ((fl & (gen.F_CABI | gen.F_INLINE | gen.F_NORETURN
+                    | gen.F_COMPTIME)) != 0) {
                 if (if_puts("@[") != 0) { return -1; }
                 let wrote int = 0;
                 if (has_cabi != 0) {
@@ -288,6 +296,11 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
                 if ((fl & gen.F_NORETURN) != 0) {
                     if (wrote != 0 && if_puts(", ") != 0) { return -1; }
                     if (if_puts("noreturn") != 0) { return -1; }
+                    wrote = 1;
+                }
+                if ((fl & gen.F_COMPTIME) != 0) {
+                    if (wrote != 0 && if_puts(", ") != 0) { return -1; }
+                    if (if_puts("comptime") != 0) { return -1; }
                 }
                 if (if_puts("]\n") != 0) { return -1; }
             }
@@ -319,7 +332,24 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
                 continue;
             }
             if ((fl & gen.F_ADDR) != 0) {
-                return gen.sem_err("pub 指针常量（字符串）暂不支持跨模块导出");
+                // 字符串字面量指针常量：原样重放声明（含引号与转义），导入方按
+                // 与函数体内字面量相同的规则重新登记只读字节池。
+                // 引用式（`pub const A *char = B;`）由共用追链函数追到最终字面式。
+                let lit_off int = 0;
+                let lit_len int = 0;
+                if (gen.sym_ct_lit_text(si2, &lit_off, &lit_len) != 0 || lit_len < 2) {
+                    return gen.sem_err("pub 指针常量（字符串）暂不支持跨模块导出");
+                }
+                if (if_puts("pub const ") != 0) { return -1; }
+                if (if_put_np(gs.c_syms[si2].name_off,
+                        gs.c_syms[si2].name_len) != 0) { return -1; }
+                if (if_put(' ') != 0) { return -1; }
+                if (if_emit_type(gs.c_syms[si2].type_id, tname_base) != 0) { return -1; }
+                if (if_puts(" = ") != 0) { return -1; }
+                if (if_put_np(lit_off, lit_len) != 0) { return -1; }
+                if (if_puts(";\n") != 0) { return -1; }
+                si2 += 1;
+                continue;
             }
             if (if_puts("pub const ") != 0) { return -1; }
             if (if_put_np(gs.c_syms[si2].name_off, gs.c_syms[si2].name_len) != 0) { return -1; }
@@ -371,19 +401,22 @@ pub fn iface_header_suffix(path *char, off *int, olen *int) int {
     let gs *gen.GenState = gen.G();
     let magic1 *char = "// yh-iface v1 arch=arm64 suffix=";
     let magic2 *char = "// yh-iface v2 arch=arm64 suffix=";
+    let magic3 *char = "// yh-iface v3 arch=arm64 suffix=";
     let mlen int = 33;
     let i int = 0;
     let is_v1 int = 1;
     let is_v2 int = 1;
+    let is_v3 int = 1;
     for i < mlen {
         if (i >= gs.c_src_len || gs.c_src[i] != magic1[i].to_type(u8)) { is_v1 = 0; }
         if (i >= gs.c_src_len || gs.c_src[i] != magic2[i].to_type(u8)) { is_v2 = 0; }
+        if (i >= gs.c_src_len || gs.c_src[i] != magic3[i].to_type(u8)) { is_v3 = 0; }
         i += 1;
     }
-    if (is_v1 == 0 && is_v2 == 0) {
+    if (is_v1 == 0 && is_v2 == 0 && is_v3 == 0) {
         let buf [320]u8;
         let n int = 0;
-        n = gen.append_str(buf, n, "yh: 接口不兼容（头行不是 yh-iface v1/v2 arch=arm64）: ");
+        n = gen.append_str(buf, n, "yh: 接口不兼容（头行不是 yh-iface v1/v2/v3 arch=arm64）: ");
         n = gen.append_str(buf, n, path);
         n = gen.append_byte(buf, n, '\n');
         gen.write_all(2, buf, n);

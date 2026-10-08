@@ -1,5 +1,6 @@
 module parse;
 import gen;
+import comptime;
 
 // ============================================================================
 // ast_expr.yh —— 前端表达式 AST arena 与一致性检查
@@ -22,6 +23,8 @@ pub const AST_EXPR_SLICE int = 8;
 pub const AST_EXPR_MEMBER int = 9;
 pub const AST_EXPR_CAST int = 10;
 pub const AST_EXPR_ARRAY int = 11;
+pub const AST_EXPR_STRUCT_FIELD int = 12;
+pub const AST_EXPR_STRUCT_INIT int = 13;
 
 // AstExpr：单个带类型表达式及其子节点索引。
 pub struct AstExpr {
@@ -46,6 +49,7 @@ pub struct AstExpr {
     is_lit int;         // 1 表示源整数文字量，供窄化规则和 lowering 使用
     lit_big int;        // 1 表示正整数文字量超出 i64 正数域
     fval_bits i64;      // 浮点常量 IEEE754 位型；非浮点常量为 0
+    layout_type_id int; // sizeof 的布局依赖类型；普通表达式为 -1
     child0 int;         // 左操作数、基础表达式或前一段参数列表
     child1 int;         // 右操作数或当前参数表达式
     child2 int;         // 三元表达式第三支；其他节点为 -1
@@ -86,8 +90,9 @@ pub fn ast_expr_add(kind int, op int, first int, after int, type_id int,
     if (gs.c_ast_capture == 0) {
         return -1;
     }
+    if (comptime.ct_charge_expansion_ast_node() != 0) { return -1; }
     if (gs.c_active_file < 0 || first < 0 || after < first || after > gs.c_tok_n
-        || kind < AST_EXPR_PRIMARY || kind > AST_EXPR_ARRAY) {
+        || kind < AST_EXPR_PRIMARY || kind > AST_EXPR_STRUCT_INIT) {
         let buf [192]u8;
         let n int = 0;
         n = gen.append_str(buf, n, "内部错误：表达式 AST 范围无效 file=");
@@ -104,7 +109,7 @@ pub fn ast_expr_add(kind int, op int, first int, after int, type_id int,
         if (mo < 0) { return -1; }
         return gen.fail(gen.np_cstr(mo));
     }
-    if (kind == AST_EXPR_ARG_LIST) {
+    if (kind == AST_EXPR_ARG_LIST || kind == AST_EXPR_STRUCT_FIELD) {
         if (type_id != -1) { return -1; }
     } else if (type_id < 0) {
         return gen.fail("内部错误：表达式 AST 缺少语义类型");
@@ -164,6 +169,7 @@ pub fn ast_expr_add(kind int, op int, first int, after int, type_id int,
     ast_expr_nodes[id].is_lit = 0;
     ast_expr_nodes[id].lit_big = 0;
     ast_expr_nodes[id].fval_bits = 0;
+    ast_expr_nodes[id].layout_type_id = -1;
     ast_expr_nodes[id].child0 = child0;
     ast_expr_nodes[id].child1 = child1;
     ast_expr_nodes[id].child2 = child2;
@@ -198,6 +204,15 @@ pub fn ast_expr_set_semantics(id int, res *gen.Res) int {
     ast_expr_nodes[id].is_lit = res.is_lit;
     ast_expr_nodes[id].lit_big = res.lit_big;
     ast_expr_nodes[id].fval_bits = res.fval_bits;
+    ast_expr_nodes[id].layout_type_id = -1;
+    if (ast_expr_nodes[id].kind == AST_EXPR_PRIMARY
+        && ast_expr_nodes[id].op == gen.TK_SIZEOF
+        && res.layout_type_id >= 0) {
+        if (res.layout_type_id >= gs.t_type_n) {
+            return gen.fail("内部错误：sizeof 目标类型编号无效");
+        }
+        ast_expr_nodes[id].layout_type_id = res.layout_type_id;
+    }
     if (res.sym >= 0) {
         gs.c_stats_ast_refs += 1;
     }
@@ -254,12 +269,13 @@ pub fn ast_expr_verify() int {
     let i int = 0;
     for i < ast_expr_count {
         let node AstExpr = ast_expr_nodes[i];
-        if (node.kind < AST_EXPR_PRIMARY || node.kind > AST_EXPR_ARRAY
+        if (node.kind < AST_EXPR_PRIMARY || node.kind > AST_EXPR_STRUCT_INIT
             || node.file_id < 0 || node.first < 0 || node.after < node.first
             || node.after > node.token_count || node.token_count <= 0) {
             return -1;
         }
-        if (node.kind != AST_EXPR_ARG_LIST && node.type_id < 0) {
+        if (node.kind != AST_EXPR_ARG_LIST && node.kind != AST_EXPR_STRUCT_FIELD
+            && (node.type_id < 0 || node.type_id >= gs.t_type_n)) {
             return -1;
         }
         if (node.file_id >= gs.p_file_n || node.owner_decl < 0
@@ -268,6 +284,11 @@ pub fn ast_expr_verify() int {
             || (node.is_lit != 0 && node.is_lit != 1)
             || (node.lit_big != 0 && node.lit_big != 1)) {
             return gen.fail("内部错误：表达式 AST 绑定或常量事实无效");
+        }
+        if (node.layout_type_id < -1 || node.layout_type_id >= gs.t_type_n
+            || (node.layout_type_id >= 0
+                && (node.kind != AST_EXPR_PRIMARY || node.op != gen.TK_SIZEOF))) {
+            return gen.fail("内部错误：表达式 AST sizeof 布局依赖无效");
         }
         if (node.sym_id < -1 || node.binding_row < -1
             || (node.sym_id == -1
@@ -297,15 +318,27 @@ pub fn ast_expr_verify() int {
             && node.sym_type_id != node.type_id) {
             return gen.fail("内部错误：基本表达式绑定类型与符号类型不匹配");
         }
-        if (node.kind == AST_EXPR_ARG_LIST && node.type_id != -1) {
+        if ((node.kind == AST_EXPR_ARG_LIST || node.kind == AST_EXPR_STRUCT_FIELD)
+            && node.type_id != -1) {
             return -1;
         }
-        if (node.kind == AST_EXPR_ARG_LIST
+        if ((node.kind == AST_EXPR_ARG_LIST || node.kind == AST_EXPR_STRUCT_FIELD)
             && (node.sym_id != -1 || node.sym_type_id != -1 || node.sym_kind != -1
                 || node.sym_flags != 0 || node.sym_offset != 0 || node.binding_row != -1
                 || node.is_const != 0 || node.const_bits != 0
-                || node.is_lit != 0 || node.lit_big != 0 || node.fval_bits != 0)) {
-            return gen.fail("内部错误：实参链 AST 带有表达式语义事实");
+                || node.is_lit != 0 || node.lit_big != 0 || node.fval_bits != 0
+                || node.layout_type_id != -1)) {
+            return gen.fail("内部错误：复合表达式链 AST 带有不应存在的语义事实");
+        }
+        if (node.kind == AST_EXPR_STRUCT_FIELD
+            && (node.op < 0 || node.child1 < 0 || node.child2 >= 0)) {
+            return gen.fail("内部错误：结构体字段初始化 AST 形态无效");
+        }
+        if (node.kind == AST_EXPR_STRUCT_INIT
+            && (node.child0 < 0 || node.child1 >= 0 || node.child2 >= 0
+                || (gs.t_types[node.type_id].kind != gen.TY_STRUCT
+                    && gs.t_types[node.type_id].kind != gen.TY_UNION))) {
+            return gen.fail("内部错误：结构体/联合体初始化 AST 形态无效");
         }
         let j int = 0;
         for j < 3 {

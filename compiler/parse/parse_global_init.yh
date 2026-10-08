@@ -1,5 +1,6 @@
 module parse;
 import gen;
+import comptime;
 
 // ============================================================================
 // parse_global_init.yh —— 绑定与全局初始化
@@ -81,6 +82,12 @@ pub fn parse_binding(global int, kind int) int {
     if (p_cur() == gen.TK_ASSIGN) {
         p_adv();
         if (gs.c_pass == 1) {
+            if (global != 0 && kind == gen.SYM_CONST
+                && gen.ty_is_integer(tid) != 0) {
+                let probe int = parse_global_ct_const_probe(idx, tid);
+                if (probe < 0) { return -1; }
+                if (probe > 0) { return 0; }
+            }
             return skip_init();
         }
         if (global != 0) {
@@ -99,31 +106,83 @@ pub fn parse_binding(global int, kind int) int {
     return 0;
 }
 
+// record_aggregate_const_src：为聚合（结构体/数组）常量记下**初始化式源文本**
+// （const_expr_kind = 4）。聚合常量的值在编译期不可得（数据在发射阶段才写出），
+// 所以跨模块 CT 闭包改为重放源文本、由导入侧重新解析。范围由首尾 token 求得。
+fn record_aggregate_const_src(idx int, first int, after int) int {
+    let gs *gen.GenState = gen.G();
+    if (after <= first) { return 0; }
+    let start int = gs.c_toks[first].start;
+    let last int = after - 1;
+    let span int = gs.c_toks[last].start + gs.c_toks[last].len - start;
+    if (span <= 0) { return 0; }
+    let off int = gen.tml_intern_str(gs.c_src, start, span);
+    if (off < 0) { return -1; }
+    gs.c_syms[idx].const_expr_off = off;
+    gs.c_syms[idx].const_expr_len = span;
+    gs.c_syms[idx].const_expr_kind = 4;
+    return 0;
+}
+
 pub fn parse_global_init(idx int, tid int, kind int) int {
     let gs *gen.GenState = gen.G();
+    // 初始化式的起始 token：聚合常量要按这个位置记下源文本（见 record_aggregate_const_src）。
+    let init_pos int = gs.c_pos;
     let fk int = gs.t_types[tid].kind;
     if (fk == gen.TY_STRUCT) {
-        if (kind == gen.SYM_CONST) {
-            return gen.sem_err("const 不支持聚合类型");
+        // const 聚合常量：与全局变量走同一条初始化路径（发射到数据段，运行期只读）。
+        // 模块模式只拒绝 **pub** 的：接口（.s.i）的常量导出只能传标量 cval，覆盖不了聚合，
+        // 私有常量不经过接口，可安全放行。
+        if (kind == gen.SYM_CONST && gs.c_module_mode != 0
+            && (gs.c_syms[idx].flags & gen.F_PUB) != 0) {
+            return gen.sem_err("pub const 聚合常量暂不支持跨模块导出");
         }
-        return parse_global_struct_init(idx, tid);
+        if (p_cur() == gen.TK_DOLLAR) {
+            return parse_global_comptime_aggregate(idx, tid);
+        }
+        if (parse_global_struct_init(idx, tid) != 0) { return -1; }
+        // 聚合常量没有标量值，但数据已发射到数据段：标记为已就绪，避免读取时
+        // 被「编译期常量尚未就绪」拦下（运行期按全局符号地址访问字段）。
+        if (kind == gen.SYM_CONST) {
+            if (record_aggregate_const_src(idx, init_pos, gs.c_pos) != 0) {
+                return -1;
+            }
+            gs.c_syms[idx].const_ready = 1;
+        }
+        return 0;
     }
     if (fk == gen.TY_UNION) {
         return gen.sem_err("union 全局初始化暂不支持");
     }
     if (fk == gen.TY_ARRAY || fk == gen.TY_SLICE) {
+        // const 数组/切片常量：与结构体同理，单文件走变量同一条发射路径；
+        // 模块模式同样只拒绝 **pub** 的（理由见上）。
+        if (kind == gen.SYM_CONST && gs.c_module_mode != 0
+            && (gs.c_syms[idx].flags & gen.F_PUB) != 0) {
+            return gen.sem_err("pub const 聚合常量暂不支持跨模块导出");
+        }
+        if (p_cur() == gen.TK_DOLLAR) {
+            return parse_global_comptime_aggregate(idx, tid);
+        }
         if (p_cur() != gen.TK_LBRACKET) {
             return gen.sem_err("全局数组/切片初始化仅支持字面量（零初始化可用）");
         }
+        if (parse_global_array_init(idx, tid, fk) != 0) { return -1; }
+        // 聚合常量：数据已发射，标记已就绪供运行期按符号地址读取。
         if (kind == gen.SYM_CONST) {
-            return gen.sem_err("const 不支持聚合类型");
+            if (record_aggregate_const_src(idx, init_pos, gs.c_pos) != 0) {
+                return -1;
+            }
+            gs.c_syms[idx].const_ready = 1;
         }
-        return parse_global_array_init(idx, tid, fk);
+        return 0;
     }
+    let init_token_first int = gs.c_pos;
     gs.c_fold += 1;
     let r gen.Res;
     let rr int = parse_expr_iso(&r);
     gs.c_fold -= 1;
+    let init_token_after int = gs.c_pos;
     if (rr != 0) {
         return -1;
     }
@@ -135,9 +194,48 @@ pub fn parse_global_init(idx int, tid int, kind int) int {
     }
     if (kind == gen.SYM_CONST) {
         gs.c_syms[idx].cval = r.ival;
+        // 跨模块 CT 闭包需要重放浮点字面值；保存字节以避免十进制/IEEE 位转换丢精度。
+        if (gen.ty_is_float(tid) != 0 && init_token_after == init_token_first + 1
+            && gs.c_toks[init_token_first].kind == gen.TOK_NUMBER
+            && gen.sem_num_is_float(gs.c_toks[init_token_first].start,
+                gs.c_toks[init_token_first].len) != 0) {
+            let expr_start int = gs.c_toks[init_token_first].start;
+            let expr_len int = gs.c_toks[init_token_first].len;
+            let expr_off int = gen.tml_intern_str(gs.c_src, expr_start,
+                expr_len);
+            if (expr_off < 0) { return -1; }
+            gs.c_syms[idx].const_expr_off = expr_off;
+            gs.c_syms[idx].const_expr_len = expr_len;
+            gs.c_syms[idx].const_expr_kind = 1;
+        }
+        // 只保存单个字符串 token；跨模块闭包重放原字节，不传递提供方数据标签。
+        if (fk == gen.TY_PTR && init_token_after == init_token_first + 1
+            && gs.c_toks[init_token_first].kind == gen.TOK_STRING) {
+            let expr_start int = gs.c_toks[init_token_first].start;
+            let expr_len int = gs.c_toks[init_token_first].len;
+            let expr_off int = gen.tml_intern_str(gs.c_src, expr_start,
+                expr_len);
+            if (expr_off < 0) { return -1; }
+            gs.c_syms[idx].const_expr_off = expr_off;
+            gs.c_syms[idx].const_expr_len = expr_len;
+            gs.c_syms[idx].const_expr_kind = 2;
+        }
+        // 指针常量的初始化式是单个标识符（引用另一个指针常量）：记下该名字，
+        // 供接口导出时追链到最终字面式（消费者看不到提供方的私有常量名）。
+        if (fk == gen.TY_PTR && init_token_after == init_token_first + 1
+            && gs.c_toks[init_token_first].kind == gen.TOK_IDENT) {
+            let rid_start int = gs.c_toks[init_token_first].start;
+            let rid_len int = gs.c_toks[init_token_first].len;
+            let rid_off int = gen.tml_intern_str(gs.c_src, rid_start, rid_len);
+            if (rid_off < 0) { return -1; }
+            gs.c_syms[idx].const_expr_off = rid_off;
+            gs.c_syms[idx].const_expr_len = rid_len;
+            gs.c_syms[idx].const_expr_kind = 3;
+        }
         if (fk == gen.TY_PTR) {
             gs.c_syms[idx].flags |= gen.F_ADDR;
         }
+        gs.c_syms[idx].const_ready = 1;
         return 0;
     }
     // 全局变量：指针的 0 是 NULL（.xword 0）；标签号 ≥ 1 才是字符串地址
@@ -175,6 +273,83 @@ pub fn parse_global_init(idx int, tid int, kind int) int {
         return -1;
     }
     return gen.em_data_scalar(tid, r.ival);
+}
+
+// parse_global_comptime_aggregate：折叠顶层 CT 聚合结果并写入全局数据符号。
+pub fn parse_global_comptime_aggregate(idx int, tid int) int {
+    let gs *gen.GenState = gen.G();
+    gs.c_fold += 1;
+    let result gen.Res;
+    let status int = parse_expr_iso(&result);
+    gs.c_fold -= 1;
+    if (status != 0) { return -1; }
+    if (result.is_const == 0) {
+        return gen.sem_err("全局聚合初始化必须是编译期聚合结果");
+    }
+    if (gen.sem_can_assign(tid, result.type_id, result.is_lit,
+            result.ival, result.lit_big) != 0) { return -1; }
+    let value comptime.CtValue;
+    value.type_id = tid;
+    value.value = result.ival;
+    value.is_lit = result.is_lit;
+    value.lit_big = result.lit_big;
+    return comptime.ct_ir_data_emit_global(idx, tid, &value);
+}
+
+// parse_global_ct_const_probe：提前折叠已登记的简单 CT 整数常量供后续数组布局使用。
+pub fn parse_global_ct_const_probe(idx int, tid int) int {
+    let gs *gen.GenState = gen.G();
+    if (p_cur() != gen.TK_DOLLAR || p_peek(1) != gen.TOK_IDENT) { return 0; }
+    // 早期 token 探测只接受当前可解析的名字；可能前向引用的 CT 初始化器
+    // 留给全部声明登记后的 typed 布局常量依赖调度。
+    if (parse_global_ct_const_has_unready_name() != 0) { return 0; }
+    let token int = gs.c_pos + 1;
+    let sym int = gen.sym_lookup(gs.c_toks[token].start, gs.c_toks[token].len);
+    if (sym < 0 || gs.c_syms[sym].kind != gen.SYM_FN
+        || (gs.c_syms[sym].flags & gen.F_COMPTIME) == 0
+        // 只在目标编译期函数已捕获 typed IR 时才提前折叠：pass1 期间一律让位给
+        // pass2a 之后的 typed 布局常量依赖调度，避免使用第二套 token 解释器。
+        || comptime.ct_is_prepared(sym) == 0) { return 0; }
+    gs.c_fold += 1;
+    let value gen.Res;
+    let status int = parse_expr_iso(&value);
+    gs.c_fold -= 1;
+    if (status != 0) { return -1; }
+    if (value.is_const == 0) {
+        return gen.sem_err("全局整数常量初始化必须是编译期常量");
+    }
+    if (gen.sem_can_assign(tid, value.type_id, value.is_lit,
+            value.ival, value.lit_big) != 0) { return -1; }
+    gs.c_syms[idx].cval = value.ival;
+    gs.c_syms[idx].const_ready = 1;
+    return 1;
+}
+
+// parse_global_ct_const_has_unready_name：检查简单早期探测是否会碰到未知或未就绪全局名。
+fn parse_global_ct_const_has_unready_name() int {
+    let gs *gen.GenState = gen.G();
+    let i int = gs.c_pos;
+    let depth int = 0;
+    for i < gs.c_tok_n {
+        let kind int = gs.c_toks[i].kind;
+        if (kind == gen.TK_SEMI && depth == 0) { break; }
+        if (kind == gen.TK_LPAREN || kind == gen.TK_LBRACKET || kind == gen.TK_LBRACE) {
+            depth += 1;
+        } else if (kind == gen.TK_RPAREN || kind == gen.TK_RBRACKET
+            || kind == gen.TK_RBRACE) {
+            depth -= 1;
+        }
+        if (kind == gen.TOK_IDENT
+            && (i == 0 || (gs.c_toks[i - 1].kind != gen.TK_DOT
+                && gs.c_toks[i - 1].kind != gen.TK_DOLLAR))) {
+            let sym int = gen.sym_lookup(gs.c_toks[i].start, gs.c_toks[i].len);
+            if (sym < 0) { return 1; }
+            if (gs.c_syms[sym].kind == gen.SYM_CONST
+                && gs.c_syms[sym].const_ready == 0) { return 1; }
+        }
+        i += 1;
+    }
+    return 0;
 }
 
 pub fn sem_global_zero(idx int, tid int) int {

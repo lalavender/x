@@ -1,0 +1,261 @@
+module obj;
+
+// ============================================================================
+// obj/elf_emit.yh —— ELF 节布局与逐字节写出
+//
+// 分三步：先规划（elf.yh 的 es_layout 定下节集合与符号编号），再算偏移，
+// 最后按偏移依次搬运字节。所有偏移都由前面的规模计算得出，没有任何依赖
+// 分配顺序或哈希表遍历顺序的量，因此同一输入产出逐字节相同的对象。
+//
+// 节布局顺序固定：
+//   ELF 头 64 字节 → 各内容节 → 各 .rela 节 → .symtab → .strtab
+//   → .shstrtab → 8 字节对齐 → 节头表
+// ============================================================================
+
+// es_hdr_size：按节类型与上下文算出该节的字节数。
+fn es_hdr_size(e *ElfState, i int) u64 {
+    let c *Ctx = e.c;
+    let s *SecPlan = &e.secs[i];
+    if (s.shtype == SHT_NOBITS.to_type(u32)) {
+        return c.secs[s.src].memsz.to_type(u64);
+    }
+    if (s.shtype == SHT_RELA.to_type(u32)) {
+        return (es_count_rel(c, s.relfor).to_type(u64))
+            * RELA_SIZE.to_type(u64);
+    }
+    if (s.shtype == SHT_SYMTAB.to_type(u32)) {
+        return e.nsym.to_type(u64) * SYM_SIZE.to_type(u64);
+    }
+    if (s.shtype == SHT_STRTAB.to_type(u32)) {
+        // .strtab 的内容来自 c.strtab；.shstrtab 的内容在布局前就填好 s.size
+        if (s.src == -2) {
+            return c.strtab.len.to_type(u64);
+        }
+        return s.size;
+    }
+    if (s.src < 0) {
+        return 0;
+    }
+    return c.secs[s.src].data.len.to_type(u64);
+}
+
+// es_push_meta：追加三个合成节并返回它们的起点下标。
+// src = -1 表示 .symtab/.shstrtab；src = -2 表示 .strtab（内容在 c.strtab）。
+fn es_push_meta(e *ElfState) int {
+    let a int = es_push_sec(e, ".symtab", SHT_SYMTAB.to_type(u32), 0, 8,
+                            SYM_SIZE.to_type(u64), -1, -1);
+    if (a < 0) { return -1; }
+    let b int = es_push_sec(e, ".strtab", SHT_STRTAB.to_type(u32), 0, 1, 0,
+                            -2, -1);
+    if (b < 0) { return -1; }
+    let d int = es_push_sec(e, ".shstrtab", SHT_STRTAB.to_type(u32), 0, 1, 0,
+                            -1, -1);
+    if (d < 0) { return -1; }
+    return a;
+}
+
+// es_place：按当前顺序给每个非 NOBITS 节算偏移与字节数。
+fn es_place(e *ElfState) int {
+    let off u64 = EHDR_SIZE.to_type(u64);
+    let i int = 0;
+    for i < e.nsec {
+        let s *SecPlan = &e.secs[i];
+        s.size = es_hdr_size(e, i);
+        if (s.shtype == SHT_NOBITS.to_type(u32)) {
+            i += 1;
+            continue;
+        }
+        let a u64 = s.align;
+        if (a < 1) { a = 1; }
+        if (align_up(off.to_type(int), a.to_type(int)) < 0) {
+            return diag_plain(e.c, "节对齐失败");
+        }
+        off = align_up(off.to_type(int), a.to_type(int)).to_type(u64);
+        s.off = off;
+        off = off + s.size;
+        i += 1;
+    }
+    e.shoff = align_up(off.to_type(int), 8).to_type(u64);
+    return 0;
+}
+
+// es_write_hdr：写 64 字节 ELF 头。
+fn es_write_hdr(e *ElfState, shstr int) int {
+    let o *Buf = e.out;
+    if (buf_put(o, 0x7f) != 0) { return -1; }
+    if (buf_put(o, 'E') != 0) { return -1; }
+    if (buf_put(o, 'L') != 0) { return -1; }
+    if (buf_put(o, 'F') != 0) { return -1; }
+    if (buf_put(o, 2) != 0) { return -1; }
+    if (buf_put(o, 1) != 0) { return -1; }
+    if (buf_put(o, 1) != 0) { return -1; }
+    if (buf_put(o, 0) != 0) { return -1; }
+    let z int = 0;
+    for z < 8 {
+        if (buf_put(o, 0) != 0) { return -1; }
+        z += 1;
+    }
+    if (buf_put_u16le(o, 1.to_type(u16)) != 0) { return -1; }
+    if (buf_put_u16le(o, 183.to_type(u16)) != 0) { return -1; }
+    if (buf_put_u32le(o, 1.to_type(u32)) != 0) { return -1; }
+    if (buf_put_u64le(o, 0) != 0) { return -1; }
+    if (buf_put_u64le(o, 0) != 0) { return -1; }
+    if (buf_put_u64le(o, e.shoff) != 0) { return -1; }
+    if (buf_put_u32le(o, 0) != 0) { return -1; }
+    if (buf_put_u16le(o, EHDR_SIZE.to_type(u16)) != 0) { return -1; }
+    if (buf_put_u16le(o, 0) != 0) { return -1; }
+    if (buf_put_u16le(o, 0) != 0) { return -1; }
+    if (buf_put_u16le(o, SHDR_SIZE.to_type(u16)) != 0) { return -1; }
+    if (buf_put_u16le(o, e.nsec.to_type(u16)) != 0) { return -1; }
+    if (buf_put_u16le(o, shstr.to_type(u16)) != 0) { return -1; }
+    return 0;
+}
+
+// es_write_shdr：写一条 64 字节节头。
+fn es_write_shdr(e *ElfState, nameoff int, i int, shstr int, symtab int,
+    strtab int) int {
+    let o *Buf = e.out;
+    let s *SecPlan = &e.secs[i];
+    let link u32 = 0;
+    let info u32 = 0;
+    if (s.shtype == SHT_RELA.to_type(u32)) {
+        link = symtab.to_type(u32);
+        info = e.secmap[s.relfor].to_type(u32);
+    } else if (s.shtype == SHT_SYMTAB.to_type(u32)) {
+        link = strtab.to_type(u32);
+        info = e.nlocal.to_type(u32);
+    }
+    if (buf_put_u32le(o, nameoff.to_type(u32)) != 0) { return -1; }
+    if (buf_put_u32le(o, s.shtype) != 0) { return -1; }
+    if (buf_put_u64le(o, s.flags) != 0) { return -1; }
+    if (buf_put_u64le(o, 0) != 0) { return -1; }
+    if (buf_put_u64le(o, s.off) != 0) { return -1; }
+    if (buf_put_u64le(o, s.size) != 0) { return -1; }
+    if (buf_put_u32le(o, link) != 0) { return -1; }
+    if (buf_put_u32le(o, info) != 0) { return -1; }
+    if (buf_put_u64le(o, s.align) != 0) { return -1; }
+    if (buf_put_u64le(o, s.entsize) != 0) { return -1; }
+    return 0;
+}
+
+// es_pad_to：把输出缓冲补零到目标长度（用于对齐）。
+fn es_pad_to(o *Buf, n int) int {
+    for o.len < n {
+        if (buf_put(o, 0) != 0) { return -1; }
+    }
+    return 0;
+}
+
+// elf_emit：布局 + 写出。成功返回 0。
+pub fn elf_emit(e *ElfState) int {
+    let c *Ctx = e.c;
+    let base int = es_push_meta(e);
+    if (base < 0) {
+        return diag_plain(c, "内存不足");
+    }
+    let symtab int = base;
+    let strtab int = base + 1;
+    let shstr int = base + 2;
+
+    // 映射符号名先落进 strtab，节大小才有确定值
+    let mapoff [4]int;
+    let k int = 0;
+    for k < 4 {
+        mapoff[k] = -1;
+        k += 1;
+    }
+    let m int = 0;
+    for m < 4 {
+        let si int = ctx_find_sec(c, es_map_name(m));
+        if (si >= 0 && e.secmap[si] > 0) {
+            let nm *char = "$d";
+            if (m == 0) { nm = "$x"; }
+            mapoff[m] = es_append_str(&c.strtab, nm);
+            if (mapoff[m] < 0) {
+                return diag_plain(c, "字符串池溢出");
+            }
+        }
+        m += 1;
+    }
+    let stroffs *int = malloc((e.nsym * sizeof(int)).to_type(u64)).to_type(*int);
+    if (stroffs == 0) {
+        return diag_plain(c, "内存不足");
+    }
+    if (es_pick_syms(e, stroffs) != 0) {
+        free(stroffs);
+        return diag_plain(c, "符号表编号失败");
+    }
+    // .shstrtab 的内容：每个节的节名。必须在布局前填好，节的大小由它决定。
+    let sh Buf;
+    buf_init(&sh);
+    let nameoff *int = malloc((e.nsec * sizeof(int)).to_type(u64)).to_type(*int);
+    if (nameoff == 0) {
+        free(stroffs);
+        return diag_plain(c, "内存不足");
+    }
+    let i int = 0;
+    for i < e.nsec {
+        nameoff[i] = es_append_str(&sh, e.secs[i].name);
+        i += 1;
+    }
+    e.secs[shstr].size = sh.len.to_type(u64);
+    if (es_place(e) != 0) {
+        free(stroffs);
+        free(nameoff);
+        buf_free(&sh);
+        return diag_plain(c, "节布局失败");
+    }
+
+    let rc int = 0;
+    if (es_write_hdr(e, shstr) != 0) {
+        rc = diag_plain(c, "写 ELF 头失败");
+    }
+    let j int = 1;
+    for rc == 0 && j < e.nsec {
+        if (es_pad_to(e.out, e.secs[j].off.to_type(int)) != 0) {
+            rc = diag_plain(c, "节对齐填充失败");
+            break;
+        }
+        if (e.secs[j].shtype == SHT_NOBITS.to_type(u32)) {
+            j += 1;
+            continue;
+        }
+        if (e.secs[j].shtype == SHT_RELA.to_type(u32)) {
+            rc = es_write_rela(e, e.secs[j].relfor, symtab);
+        } else if (e.secs[j].shtype == SHT_SYMTAB.to_type(u32)) {
+            rc = es_write_symtab(e, stroffs, &mapoff[0]);
+        } else if (e.secs[j].shtype == SHT_STRTAB.to_type(u32)) {
+            if (e.secs[j].src == -2) {
+                rc = buf_put_bytes(e.out, c.strtab.data,
+                                   c.strtab.len);
+            } else {
+                rc = buf_put_bytes(e.out, sh.data, sh.len);
+            }
+        } else {
+            let src int = e.secs[j].src;
+            rc = buf_put_bytes(e.out, c.secs[src].data.data,
+                               c.secs[src].data.len);
+        }
+        if (rc != 0) {
+            rc = diag_plain(c, "搬运节内容失败");
+        }
+        j += 1;
+    }
+    if (rc == 0) {
+        if (es_pad_to(e.out, e.shoff.to_type(int)) != 0) {
+            rc = diag_plain(c, "节头表对齐填充失败");
+        }
+    }
+    let h int = 0;
+    for rc == 0 && h < e.nsec {
+        if (es_write_shdr(e, nameoff[h], h, shstr, symtab, strtab) != 0) {
+            rc = diag_plain(c, "写节头失败");
+            break;
+        }
+        h += 1;
+    }
+    free(stroffs);
+    free(nameoff);
+    buf_free(&sh);
+    return rc;
+}

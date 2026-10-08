@@ -30,9 +30,10 @@ pub fn parse_comptime_branch(selected int) int {
     let saved_falls int = gs.c_fn_falls;
     if (selected != 1 || saved_compile == 0) {
         gs.c_compile = 0;
+        gs.c_ast_capture = 0;
+    } else if (saved_capture != 0 && gs.c_ct_prepare_active == 0) {
+        comptime.ct_expansion_capture_enter();
     }
-    // 展开结构由旧语句发射器负责；这些子树不进入普通函数 SSA 缓存。
-    gs.c_ast_capture = 0;
     let status int = 0;
     if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_IF) {
         status = parse_comptime_if();
@@ -41,27 +42,76 @@ pub fn parse_comptime_branch(selected int) int {
     }
     gs.c_compile = saved_compile;
     gs.c_ast_capture = saved_capture;
+    if (selected == 1 && saved_compile != 0 && saved_capture != 0
+        && gs.c_ct_prepare_active == 0) {
+        comptime.ct_expansion_capture_leave();
+    }
     if (selected != 1 || saved_compile == 0) { gs.c_fn_falls = saved_falls; }
     return status;
 }
 
 // parse_comptime_if：在函数体内按已就绪常量选择一个语句块，不发条件跳转。
 pub fn parse_comptime_if() int {
+    if (comptime.ct_enter_control() != 0) { return -1; }
+    let status int = parse_comptime_if_body();
+    comptime.ct_leave_control();
+    return status;
+}
+
+// parse_comptime_if_body：解析一层编译期条件选择的语法和选中分支。
+fn parse_comptime_if_body() int {
     let gs *gen.GenState = gen.G();
+    let typed_if int = (gs.c_ct_prepare_active != 0
+        && gs.c_ast_capture != 0).to_type(int);
     let parent_falls int = gs.c_fn_falls;
     p_adv();
     if (p_expect(gen.TK_IF, "$ 后需要 if") != 0
         || p_expect(gen.TK_LPAREN, "$if 条件必须带括号") != 0) { return -1; }
     let cond gen.Res;
-    if (gs.c_compile != 0) { gs.c_fold += 1; }
+    let saved_target_ctx int = gs.c_ct_target_ctx;
+    if (gs.c_compile != 0 && typed_if == 0) {
+        gs.c_fold += 1;
+        gs.c_ct_target_ctx = 1;
+    } else if (gs.c_compile != 0) {
+        gs.c_ct_target_ctx = 1;
+    }
     let cr int = parse_expr_iso(&cond);
-    if (gs.c_compile != 0) { gs.c_fold -= 1; }
+    if (gs.c_compile != 0 && typed_if == 0) {
+        gs.c_fold -= 1;
+        gs.c_ct_target_ctx = saved_target_ctx;
+    } else if (gs.c_compile != 0) {
+        gs.c_ct_target_ctx = saved_target_ctx;
+    }
     if (cr != 0 || p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1; }
     let selected int = -1;
     if (gs.c_compile != 0) {
-        if (cond.is_const == 0) { return gen.sem_err("$if 条件必须是编译期常量"); }
         if (sem_check_cond(&cond) != 0) { return -1; }
-        selected = (cond.ival != 0).to_type(int);
+        if (typed_if == 0) {
+            if (cond.is_const == 0) { return gen.sem_err("$if 条件必须是编译期常量"); }
+            selected = (cond.ival != 0).to_type(int);
+        }
+    }
+    if (typed_if != 0) {
+        gs.c_fn_falls = 1;
+        if (parse_block() != 0) { return -1; }
+        let then_falls int = gs.c_fn_falls;
+        let has_else int = 0;
+        let else_falls int = parent_falls;
+        if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_ELSE) {
+            has_else = 1;
+            p_adv();
+            p_adv();
+            gs.c_fn_falls = 1;
+            if (parse_block() != 0) { return -1; }
+            else_falls = gs.c_fn_falls;
+        }
+        if (has_else != 0) {
+            gs.c_fn_falls = (parent_falls != 0
+                && (then_falls != 0 || else_falls != 0)).to_type(int);
+        } else {
+            gs.c_fn_falls = parent_falls;
+        }
+        return 0;
     }
     if (parse_comptime_branch(selected) != 0) { return -1; }
     let then_falls int = gs.c_fn_falls;
@@ -87,32 +137,137 @@ pub fn parse_comptime_if() int {
 
 // parse_comptime_for：按半开整数区间重复解析语句块，并为每次展开建立常量绑定。
 pub fn parse_comptime_for() int {
+    if (comptime.ct_enter_control() != 0) { return -1; }
     let gs *gen.GenState = gen.G();
+    if (comptime.ct_for_boundary_enter(gs.c_loop_depth) != 0) {
+        comptime.ct_leave_control();
+        return -1;
+    }
+    let status int = parse_comptime_for_body();
+    comptime.ct_for_boundary_leave();
+    comptime.ct_leave_control();
+    return status;
+}
+
+// parse_comptime_enum_for：按枚举成员声明顺序展开 `E.values`。
+fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
+    typed_for int) int {
+    let gs *gen.GenState = gen.G();
+    let enum_start int = gs.c_toks[gs.c_pos].start;
+    let enum_len int = gs.c_toks[gs.c_pos].len;
+    p_adv();
+    if (p_expect(gen.TK_DOT, "枚举 values 需要 '.'") != 0
+        || p_cur() != gen.TOK_IDENT || p_tok_text_is("values", 6) == 0) {
+        return gen.err_tok("$for 目前只支持 `枚举名.values` 元信息源");
+    }
+    p_adv();
+    if (p_cur() != gen.TK_LBRACE) { return gen.err_tok("枚举 values 后需要块"); }
+    let body_first int = gs.c_pos;
+    let body_after int = parse_comptime_block_end(body_first);
+    if (body_after < 0) { return gen.err_tok("$for 函数体缺少 '}'"); }
+    if (gs.c_compile == 0) { return parse_comptime_branch(-1); }
+
+    let enum_type int = gen.ty_lookup_name(enum_start, enum_len);
+    if (enum_type < 0) { return gen.sem_err("$for values 来源不是已声明的类型"); }
+    if (gs.t_types[enum_type].kind != gen.TY_ENUM) {
+        return gen.sem_err("$for values 来源必须是枚举类型");
+    }
+    let member_count int = comptime.ct_enum_member_count(enum_type);
+    if (member_count < 0) { return gen.fail("内部错误：枚举 values 成员表无效"); }
+    if (member_count > 1024) { return gen.sem_err("单个枚举 values 展开超过 1024 次"); }
+    if (typed_for != 0 && ast_stmt_current >= 0) {
+        // typed comptime 函数将每个枚举成员保存为 wrapper 下的独立块，
+        // 供编译期 IR 依次解释，而不是创建动态区间循环模板。
+        ast_stmt_nodes[ast_stmt_current].op = 0;
+    }
+    if (member_count == 0) { return parse_comptime_branch(0); }
+
+    let parent_falls int = gs.c_fn_falls;
+    let ordinal int = 0;
+    for ordinal < member_count {
+        let member int = comptime.ct_enum_member_at(enum_type, ordinal);
+        if (member < 0) { return gen.fail("内部错误：枚举 values 成员序号失效"); }
+        if (comptime.ct_charge_expansion(body_after - body_first) != 0
+            || comptime.ct_for_boundary_value(ordinal.to_type(i64)) != 0) { return -1; }
+        if (typed_for != 0 && gs.c_ast_capture != 0
+            && comptime.ct_charge_expansion_ast_nodes(body_after - body_first) != 0) {
+            return -1;
+        }
+        gs.c_pos = body_first;
+        gen.scope_push();
+        let binding int = gen.sym_push(name_start, name_len,
+            gen.SYM_CONST, enum_type, gen.F_ENUM_META);
+        if (binding < 0) { return -1; }
+        gs.c_syms[binding].offset = member;
+        gs.c_syms[binding].cval = gs.c_syms[member].cval;
+        gs.c_syms[binding].const_ready = 1;
+        if (gs.c_ast_capture != 0
+            && ast_binding_add(binding, name_token, 0) != 0) { return -1; }
+        if (typed_for != 0) { gs.c_fn_falls = 1; }
+        if (parse_block() != 0) { return -1; }
+        if (gs.c_pos != body_after) {
+            return gen.err_tok("内部错误：枚举 values 展开没有消费完整函数体");
+        }
+        if (typed_for != 0) { gs.c_fn_falls = parent_falls; }
+        gen.scope_pop();
+        ordinal += 1;
+    }
+    gs.c_pos = body_after;
+    return 0;
+}
+
+// parse_comptime_template_safe：限制模板首片不跨越逐轮语义变化的编译期结构。
+fn parse_comptime_template_safe(first int, after int) int {
+    let gs *gen.GenState = gen.G();
+    let i int = first;
+    for i < after {
+        let kind int = gs.c_toks[i].kind;
+        if (kind == gen.TK_DOLLAR || kind == gen.TK_CONST || kind == gen.TK_TYPE
+            || kind == gen.TK_STRUCT || kind == gen.TK_UNION || kind == gen.TK_ENUM) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// parse_comptime_for_body：解析一层编译期区间展开及其迭代绑定。
+fn parse_comptime_for_body() int {
+    let gs *gen.GenState = gen.G();
+    let typed_for int = (gs.c_ct_prepare_active != 0
+        && gs.c_ast_capture != 0).to_type(int);
     p_adv();
     if (p_expect(gen.TK_FOR, "$ 后需要 for") != 0 || p_cur() != gen.TOK_IDENT) {
         return gen.err_tok("$for 需要循环变量名");
     }
     let name_start int = gs.c_toks[gs.c_pos].start;
     let name_len int = gs.c_toks[gs.c_pos].len;
+    let name_token int = gs.c_pos;
     p_adv();
-    if (p_expect(gen.TK_IN, "$for 变量后需要 in") != 0
-        || p_expect(gen.TK_LPAREN, "$for 区间必须带括号") != 0) { return -1; }
+    if (p_expect(gen.TK_IN, "$for 变量后需要 in") != 0) { return -1; }
+    if (p_cur() == gen.TOK_IDENT && p_peek(1) == gen.TK_DOT) {
+        return parse_comptime_enum_for(name_start, name_len, name_token, typed_for);
+    }
+    if (p_expect(gen.TK_LPAREN, "$for 区间必须带括号") != 0) { return -1; }
     let lo gen.Res;
-    if (gs.c_compile != 0) { gs.c_fold += 1; }
+    if (gs.c_compile != 0 && typed_for == 0) { gs.c_fold += 1; }
     let lr int = parse_expr_blockctx(&lo);
-    if (gs.c_compile != 0) { gs.c_fold -= 1; }
+    if (gs.c_compile != 0 && typed_for == 0) { gs.c_fold -= 1; }
     if (lr != 0 || p_expect(gen.TK_RANGE, "$for 区间需要 '..'") != 0) { return -1; }
     let hi gen.Res;
-    if (gs.c_compile != 0) { gs.c_fold += 1; }
+    if (gs.c_compile != 0 && typed_for == 0) { gs.c_fold += 1; }
     let hr int = parse_expr_blockctx(&hi);
-    if (gs.c_compile != 0) { gs.c_fold -= 1; }
+    if (gs.c_compile != 0 && typed_for == 0) { gs.c_fold -= 1; }
     if (hr != 0 || p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1; }
     if (p_cur() != gen.TK_LBRACE) { return gen.err_tok("$for 区间后需要块"); }
     let body_first int = gs.c_pos;
     let body_after int = parse_comptime_block_end(body_first);
     if (body_after < 0) { return gen.err_tok("$for 函数体缺少 '}'"); }
+    let use_template int = (gs.c_ast_capture != 0 && typed_for == 0
+        && parse_comptime_template_safe(body_first, body_after) != 0).to_type(int);
+    let template_stmt int = ast_stmt_current;
     if (gs.c_compile == 0) { return parse_comptime_branch(-1); }
-    if (lo.is_const == 0 || hi.is_const == 0) {
+    if (typed_for == 0 && (lo.is_const == 0 || hi.is_const == 0)) {
         return gen.sem_err("$for 区间边界必须是编译期常量");
     }
     if (gen.ty_is_integer(lo.type_id) == 0 || gen.ty_is_integer(hi.type_id) == 0) {
@@ -121,6 +276,22 @@ pub fn parse_comptime_for() int {
     if (gen.sem_can_assign(gen.TY_I32, lo.type_id, lo.is_lit, lo.ival, lo.lit_big) != 0
         || gen.sem_can_assign(gen.TY_I32, hi.type_id, hi.is_lit, hi.ival, hi.lit_big) != 0) {
         return -1;
+    }
+    if (typed_for != 0) {
+        let parent_falls int = gs.c_fn_falls;
+        gen.scope_push();
+        let sym int = gen.sym_push(name_start, name_len, gen.SYM_CONST, gen.TY_I32, 0);
+        if (sym < 0) { return -1; }
+        gs.c_syms[sym].const_ready = 0;
+        if (ast_binding_add(sym, name_token, 0) != 0) { return -1; }
+        gs.c_fn_falls = 1;
+        if (parse_block() != 0) { return -1; }
+        if (gs.c_pos != body_after) {
+            return gen.err_tok("内部错误：编译期 typed $for 没有消费完整函数体");
+        }
+        gs.c_fn_falls = parent_falls;
+        gen.scope_pop();
+        return 0;
     }
     let count int = 0;
     let probe i64 = lo.ival;
@@ -132,21 +303,54 @@ pub fn parse_comptime_for() int {
     if (count == 0) {
         return parse_comptime_branch(0);
     }
+    let template_stmt_base int = ast_stmt_count;
+    let template_expr_base int = ast_expr_count;
+    let template_binding_base int = ast_binding_count;
+    let template_binding_after int = template_binding_base;
+    let template_node_cost int = 0;
+    let template_body_stmt int = -1;
     let value i64 = lo.ival;
     for value < hi.ival {
-        if (comptime.ct_charge_expansion() != 0) { return -1; }
+        if (comptime.ct_charge_expansion(body_after - body_first) != 0) { return -1; }
+        if (comptime.ct_for_boundary_value(value) != 0) { return -1; }
+        if (use_template != 0 && value > lo.ival
+            && comptime.ct_charge_expansion_ast_nodes(template_node_cost) != 0) {
+            return -1;
+        }
         gs.c_pos = body_first;
         gen.scope_push();
         let sym int = gen.sym_push(name_start, name_len, gen.SYM_CONST, gen.TY_I32, 0);
         if (sym < 0) { return -1; }
         gs.c_syms[sym].cval = value;
-        if (parse_comptime_branch(1) != 0) { return -1; }
+        gs.c_syms[sym].const_ready = 1;
+        let saved_capture int = gs.c_ast_capture;
+        if (use_template != 0 && value > lo.ival) { gs.c_ast_capture = 0; }
+        if (gs.c_ast_capture != 0 && ast_binding_add(sym, name_token, 0) != 0) {
+            gs.c_ast_capture = saved_capture;
+            return -1;
+        }
+        let branch_status int = parse_comptime_branch(1);
+        gs.c_ast_capture = saved_capture;
+        if (branch_status != 0) { return -1; }
         if (gs.c_pos != body_after) {
             return gen.err_tok("内部错误：$for 展开没有消费完整函数体");
+        }
+        if (use_template != 0 && value == lo.ival) {
+            template_node_cost = (ast_stmt_count - template_stmt_base)
+                + (ast_expr_count - template_expr_base)
+                + (ast_binding_count - template_binding_base);
+            template_binding_after = ast_binding_count;
+            template_body_stmt = ast_stmt_nodes[template_stmt].first_child;
+            if (template_node_cost <= 0 || template_body_stmt < 0) {
+                return gen.fail("内部错误：编译期 `$for` typed AST 模板为空");
+            }
         }
         gen.scope_pop();
         value += 1;
     }
+    if (use_template != 0 && ast_comptime_for_add(template_stmt,
+        template_binding_base, template_binding_after, template_body_stmt,
+        lo.ival, hi.ival, template_node_cost) < 0) { return -1; }
     gs.c_pos = body_after;
     return 0;
 }
@@ -156,4 +360,86 @@ pub fn parse_comptime_control() int {
     if (p_peek(1) == gen.TK_IF) { return parse_comptime_if(); }
     if (p_peek(1) == gen.TK_FOR) { return parse_comptime_for(); }
     return gen.err_tok("语句位置的 $ 只支持 if 和 for");
+}
+
+// parse_comptime_diag_kind：将当前诊断内建名映射为固定类别，不新增词法关键字。
+pub fn parse_comptime_diag_kind() int {
+    if (p_tok_text_is("assert", 6) != 0) { return gen.CT_DIAG_ASSERT; }
+    if (p_tok_text_is("compile_error", 13) != 0) { return gen.CT_DIAG_ERROR; }
+    if (p_tok_text_is("compile_warn", 12) != 0) { return gen.CT_DIAG_WARN; }
+    return 0;
+}
+
+// parse_comptime_diag_kind_at：检查指定语句起点是否为诊断调用，并恢复解析游标。
+pub fn parse_comptime_diag_kind_at(first int) int {
+    let gs *gen.GenState = gen.G();
+    if (first < 0 || first + 1 >= gs.c_tok_n
+        || gs.c_toks[first].kind != gen.TK_DOLLAR
+        || gs.c_toks[first + 1].kind != gen.TOK_IDENT) {
+        return 0;
+    }
+    let saved int = gs.c_pos;
+    gs.c_pos = first + 1;
+    let kind int = parse_comptime_diag_kind();
+    gs.c_pos = saved;
+    return kind;
+}
+
+// parse_comptime_diag_call：解析诊断实参并返回待独立语句消费的 void 标记结果。
+pub fn parse_comptime_diag_call(res *gen.Res, kind int, line int, col int) int {
+    let gs *gen.GenState = gen.G();
+    p_adv(); // 诊断名
+    if (p_expect(gen.TK_LPAREN, "编译期诊断调用期望 '('") != 0) { return -1; }
+    let condition gen.Res;
+    let msg_start int = -1;
+    let msg_len int = 0;
+    if (kind == gen.CT_DIAG_ASSERT) {
+        let saved_fold int = gs.c_fold;
+        let ct_body int = (gs.c_fn_flags & gen.F_COMPTIME) != 0;
+        if (gs.c_compile != 0 && ct_body == 0) { gs.c_fold += 1; }
+        let cr int = parse_expr_iso(&condition);
+        gs.c_fold = saved_fold;
+        if (cr != 0) { return -1; }
+        if (gs.c_compile != 0) {
+            if (condition.ct_diag != 0) {
+                return gen.sem_err("编译期诊断不能嵌套使用");
+            }
+            if (condition.type_id != gen.TY_BOOL) {
+                return gen.sem_err("$assert 条件必须是 bool");
+            }
+            if (ct_body == 0 && condition.is_const == 0) {
+                return gen.sem_err("$assert 条件必须是编译期常量");
+            }
+        }
+        if (gs.c_ast_capture != 0 && condition.ast_id >= 0
+            && ast_stmt_add_expr(condition.ast_id) != 0) { return -1; }
+        if (p_cur() == gen.TK_COMMA) {
+            p_adv();
+            if (p_cur() != gen.TOK_STRING) {
+                return gen.err_tok("$assert 消息必须是字符串文字量");
+            }
+            msg_start = gs.c_toks[gs.c_pos].start;
+            msg_len = gs.c_toks[gs.c_pos].len;
+            p_adv();
+        }
+    } else {
+        if (p_cur() != gen.TOK_STRING) {
+            return gen.err_tok("编译期诊断需要一个字符串文字量");
+        }
+        msg_start = gs.c_toks[gs.c_pos].start;
+        msg_len = gs.c_toks[gs.c_pos].len;
+        p_adv();
+    }
+    if (p_expect(gen.TK_RPAREN, "编译期诊断调用期望 ')'") != 0) { return -1; }
+    gen.sem_res_reset(res, gen.TY_VOID);
+    res.ct_diag = kind;
+    res.ct_diag_expr = kind == gen.CT_DIAG_ASSERT ? condition.ast_id : -1;
+    res.ct_diag_line = line;
+    res.ct_diag_col = col;
+    res.ct_diag_msg_start = msg_start;
+    res.ct_diag_msg_len = msg_len;
+    if (kind == gen.CT_DIAG_ASSERT && gs.c_compile != 0) {
+        res.ival = (condition.ival != 0).to_type(i64);
+    }
+    return 0;
 }

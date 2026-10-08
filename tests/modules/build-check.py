@@ -47,9 +47,9 @@ def stat_value(line, name, default=-1):
 def has_two_edge_phi(path):
     """读取 yh SSA 缓存头，确认存在四块 CFG 中的双前驱 phi。"""
     data = path.read_bytes()
-    if len(data) < 120 or struct.unpack_from("<Q", data, 16)[0] != 0x3141535352494859:
+    if len(data) < 128 or struct.unpack_from("<Q", data, 16)[0] != 0x3141535352494859:
         return False
-    if struct.unpack_from("<Q", data, 24)[0] != 4:
+    if struct.unpack_from("<Q", data, 24)[0] != 5:
         return False
     _, _, type_count, inst_count, phi_count, input_count, call_count, arg_count, symbol_size, block_count, _ = \
         struct.unpack_from("<11q", data, 32)
@@ -57,7 +57,7 @@ def has_two_edge_phi(path):
             or call_count != 0 or arg_count != 0 or symbol_size != 0
             or block_count != 4):
         return False
-    inst_offset = 120 + type_count * 24
+    inst_offset = 128 + type_count * 24
     return any(struct.unpack_from("<q", data, inst_offset + i * 56)[0] == 6
                for i in range(inst_count))
 
@@ -65,10 +65,10 @@ def has_two_edge_phi(path):
 def count_ir_op(path, wanted):
     """统计一个已生成 SSA 缓存中的指定操作码。"""
     data = path.read_bytes()
-    if len(data) < 120 or struct.unpack_from("<Q", data, 16)[0] != 0x3141535352494859:
+    if len(data) < 128 or struct.unpack_from("<Q", data, 16)[0] != 0x3141535352494859:
         return -1
     _, _, type_count, inst_count, _, _, _, _, _, _, _ = struct.unpack_from("<11q", data, 32)
-    inst_offset = 120 + type_count * 24
+    inst_offset = 128 + type_count * 24
     if type_count < 0 or inst_count < 0 or inst_offset + inst_count * 56 > len(data):
         return -1
     return sum(struct.unpack_from("<q", data, inst_offset + i * 56)[0] == wanted
@@ -78,12 +78,12 @@ def count_ir_op(path, wanted):
 def has_ir_term(path, wanted):
     """检查 SSA 缓存是否含有指定的基本块终结符。"""
     data = path.read_bytes()
-    if len(data) < 120 or struct.unpack_from("<Q", data, 16)[0] != 0x3141535352494859:
+    if len(data) < 128 or struct.unpack_from("<Q", data, 16)[0] != 0x3141535352494859:
         return False
     _, _, type_count, inst_count, phi_count, input_count, call_count, arg_count, symbol_size, block_count, _ = \
         struct.unpack_from("<11q", data, 32)
-    offset = (120 + type_count * 24 + inst_count * 56 + phi_count * 16
-              + input_count * 16 + call_count * 32 + arg_count * 16
+    offset = (128 + type_count * 24 + inst_count * 56 + phi_count * 16
+              + input_count * 16 + call_count * 40 + arg_count * 16
               + ((symbol_size + 7) // 8) * 8)
     if min(type_count, inst_count, phi_count, input_count, call_count,
            arg_count, symbol_size, block_count) < 0:
@@ -97,18 +97,31 @@ def has_ir_term(path, wanted):
 CASES = []
 
 
-def case(name, kind, fixture, sub, expect=None, msg=None):
+def case(name, kind, fixture, sub, expect=None, msg=None, stdout=None):
     CASES.append(dict(name=name, kind=kind, fixture=fixture, sub=sub,
-                      expect=expect, msg=msg))
+                      expect=expect, msg=msg, stdout=stdout))
 
 
 # —— MOD-U4：两项目真实链接运行（含跨模块聚合/浮点/间接调用/限定字面量） ——
 case("u4-basic-run", "run", "basic", "app", 255)
+case("ct3-same-module-multifile", "comptime-local", "comptimelocal", ".")
+case("ct5a-layout-const-deps", "comptime-layout-deps", "comptimelayoutdeps", ".")
+case("ct5b-cross-module-body", "comptime-cross-module", "comptimecross", ".")
+case("ct2-expanded-ast-ssa", "comptime-expanded-ast", "comptimeexpanded", ".", 0)
+case("ct2-expanded-ast-node-budget", "comptime-expanded-budget", "comptimeexpandedfail", ".",
+     msg="编译期 for 展开 AST 节点超过 100000")
 case("u4-iso-run", "run", "iso", "host", 15)
 case("u4-aggfloat-run", "run", "aggfloat", "host", 29)
 case("u4-enumexp-run", "run", "enumexp", "host", 10)
+case("u4-pub-signature-type-closure", "run", "typeclosure", "signature-host", 23)
+case("u4-pub-field-type-closure", "run", "typeclosure", "field-host", 23)
+case("s1-libs-io-write", "stdlib-run", "libsio", ".", 23,
+     stdout="yh libs io ok\n")
+case("s2-libs-core-modules", "stdlib-run", "libsbase", ".", 0,
+     stdout="yh libs base ok\n")
 case("u1-extern-abs-module", "run", "externabs", "host", 0)
 case("u3-c-source-object-library-mix", "run", "cinterop", ".", 0)
+case("cabi-automatic-values-and-callbacks", "cabi-run", "autoabi", ".", 0)
 case("i1-inline-ssa-and-fallback", "inline", "inline", ".")
 case("r1-token-replay-run", "run", "tokenreplay", ".", 42)
 case("r2a-ssa-phi-verifier", "run", "irverify", ".", 0)
@@ -178,12 +191,314 @@ def main():
     for c in CASES:
         dst = WORK / c["fixture"].replace("/", "_")
         copy_proj(PROJ / c["fixture"], dst)
+        if c["kind"] == "cabi-run":
+            # 两个窄参数探针和整数转换都必须进入 SSA，避免回退旧发射器掩盖问题。
+            built = sh([compiler, "build", "--stats"], cwd=dst)
+            lines = [line for line in built.stderr.splitlines()
+                     if line.startswith("yh-stats ")]
+            lowered = sum(stat_value(line, "ir_functions", 0) for line in lines)
+            ir_files = list((dst / ".build" / "ir").glob("*.ir"))
+            casts = sum(count_ir_op(path, 24) for path in ir_files)
+            program = dst / ".build" / "autoabi"
+            run = sh([str(program)], cwd=dst) if program.exists() else None
+            report(built.returncode == 0 and lowered >= 3 and casts >= 3
+                   and run is not None and run.returncode == c["expect"],
+                   c["name"],
+                   f"C 双向调用或 SSA 覆盖失败: rc={built.returncode}, "
+                   f"ir_functions={lowered}, cast_ops={casts}, "
+                   f"run={run.returncode if run else None}\n"
+                   f"{built.stderr[-400:]}")
+            continue
+        if c["kind"] == "comptime-local":
+            built = sh([compiler, "build"], cwd=dst)
+            asm_files = list((dst / ".build" / "asm").glob("*.s"))
+            asm = "\n".join(path.read_text() for path in asm_files)
+            program = dst / ".build" / "comptimelocal"
+            run = sh([str(program)], cwd=dst) if program.exists() else None
+            report(built.returncode == 0 and "combine" not in asm
+                   and run is not None and run.returncode == 0
+                   and "模块编译期警告" in built.stderr
+                   and "未选中的编译警告" not in built.stderr,
+                   c["name"],
+                   f"跨文件编译期求值、独立诊断、未选分支或无发码失败: "
+                   f"build={built.returncode}, run={run.returncode if run else None}\n"
+                   f"{built.stderr[-500:]}\n"
+                   f"{asm[-600:]}")
+            continue
+        if c["kind"] == "comptime-cross-module":
+            host = dst / "host"
+            built = sh([compiler, "build"], cwd=host)
+            program = host / ".build" / "comptimecross_host"
+            run = sh([str(program)], cwd=host) if program.exists() else None
+            iface_dir = host / ".build" / "iface"
+            public_iface = iface_dir / "ctmath-api.s.i"
+            body_iface = iface_dir / "ctmath-api.s.ct"
+            base_body_iface = iface_dir / "ctmath-base.s.ct"
+            asm_files = list((host / ".build" / "asm").glob("*.s"))
+            asm = "\n".join(path.read_text() for path in asm_files)
+            base_body = base_body_iface.read_text() if base_body_iface.exists() else ""
+            iface_ok = (public_iface.exists() and body_iface.exists()
+                        and base_body_iface.exists()
+                        and "yh-iface v3" in public_iface.read_text()
+                        and "@[comptime]\npub fn double_after_bump" in public_iface.read_text()
+                        and "__yhct_bump" in body_iface.read_text()
+                        and "__yhct_double_after_bump" in body_iface.read_text()
+                        and "const __yhct_OFFSET__ctmath__base_ int = 1;" in base_body
+                        and "const __yhct_FACTOR__ctmath__base_ f64 = 1.25;"
+                            in base_body
+                        and 'const __yhct_LABEL__ctmath__base_ *char = '
+                            '"CT5B_STRING_CLOSURE";' in base_body
+                        and "let factor f64 = __yhct_FACTOR__ctmath__base_;"
+                            in base_body
+                        and "let offset BaseOffset__ctmath__base_ = "
+                            "BaseOffset__ctmath__base_{amount: "
+                            "__yhct_OFFSET__ctmath__base_};" in base_body
+                        and "let offsets [2]BaseOffset__ctmath__base_ = "
+                            "[offset, BaseOffset__ctmath__base_{amount: 0}];"
+                            in base_body
+                        and "let pointer *BaseOffset__ctmath__base_ = 0;"
+                            in base_body
+                        and "let converted int = value.to_type(int);" in base_body
+                        and "geometry." not in base_body
+                        and "dimensions." not in base_body
+                        and "Point__ctmath__types_" in base_body
+                        and "sizeof(Point__ctmath__types_)" in base_body
+                        and "let typed int = value.to_type(int);" in base_body
+                        and "sizeof(BaseOffset__ctmath__base_)" in base_body
+                        and "sizeof(*BaseOffset__ctmath__base_)" in base_body
+                        and "sizeof(**BaseOffset__ctmath__base_)" in base_body
+                        and "CT5B_STRING_CLOSURE" not in asm
+                        and "let offset Offset =" not in base_body
+                        and "Offset" not in base_body.replace(
+                            "BaseOffset__ctmath__base_", "")
+                        and "Scalar" not in base_body
+                        and "Offset{" not in base_body
+                        and "__yhct_" not in asm)
+            report(built.returncode == 0 and run is not None
+                   and run.returncode == 0 and iface_ok,
+                   c["name"],
+                   f"跨模块编译期函数正文/私有闭包未执行: build={built.returncode}, "
+                   f"run={run.returncode if run else None}, interface={iface_ok}\n"
+                   f"{built.stderr[-500:]}")
+            string_closure_ok = (
+                'const __yhct_LABEL__ctmath__base_ *char = '
+                '"CT5B_STRING_CLOSURE";' in base_body
+                and "CT5B_STRING_CLOSURE" not in asm)
+            report(built.returncode == 0 and string_closure_ok,
+                   "ct5b-string-pointer-constant-closure",
+                   f"字符串指针常量闭包或 .data 隔离失败: build={built.returncode}, "
+                   f"sidecar={string_closure_ok}\n{built.stderr[-500:]}\n"
+                   f"{asm[-400:]}")
+            if built.returncode == 0 and run is not None and run.returncode == 0:
+                source = dst / "math" / "src" / "base" / "base.yh"
+                original = source.read_text()
+                source.write_text(original.replace(
+                    'const LABEL *char = "CT5B_STRING_CLOSURE";',
+                    "const LABEL *char = 0;", 1))
+                try:
+                    unsupported_pointer = sh([compiler, "build"], cwd=host)
+                finally:
+                    source.write_text(original)
+                report(unsupported_pointer.returncode != 0
+                       and "跨模块 CT 闭包暂只支持直接或引用式的字符串字面量指针常量"
+                           in unsupported_pointer.stderr,
+                       "ct5b-nonliteral-pointer-constant-rejected",
+                       f"非字面量指针常量未按阶段边界拒绝: "
+                       f"build={unsupported_pointer.returncode}\n"
+                       f"{unsupported_pointer.stderr[-500:]}")
+                host_main = host / "src" / "main" / "main.yh"
+                original_host_main = host_main.read_text()
+                host_main.write_text(original_host_main.replace(
+                    "$math.double_after_bump(20)",
+                    "$math.double_after_bump(0)", 1))
+                try:
+                    pointer_eval = sh([compiler, "build"], cwd=host)
+                finally:
+                    host_main.write_text(original_host_main)
+                # 2026-10-07 起字符串字面量指针常量可在编译期正文里求值
+                # （按来源字节登记只读池），该路径必须构建成功。
+                report(pointer_eval.returncode == 0,
+                       "ct5b-string-pointer-constant-evaluable",
+                       f"字符串指针常量在编译期正文里求值失败: "
+                       f"build={pointer_eval.returncode}\n"
+                       f"{pointer_eval.stderr[-500:]}")
+                # 跨模块编译期调用的单字节指针形参：直接字面量与「以字符串字面量初始化的
+                # 本地/导入 pub const 指针常量」都就地登记只读池，标签号是**本地**的。
+                # 后者 2026-10-07 起放行（此前实测会读到无关字面量 head_of(MINE) 得 104105
+                # = "hi"）；值正确性由 comptimecross 的 `TEXT_ARG - 65` 断言覆盖（main 非零
+                # 即 FAIL），这里只锁构建成功。
+                host_main.write_text(original_host_main.replace(
+                    "const ANSWER int = $math.double_after_bump(20);",
+                    'const MINE *char = "AB";\n'
+                    "const ANSWER int = $math.head_of(MINE);", 1))
+                try:
+                    pointer_arg = sh([compiler, "build"], cwd=host)
+                finally:
+                    host_main.write_text(original_host_main)
+                report(pointer_arg.returncode == 0,
+                       "ct5b-crossmodule-pointer-arg-accepted",
+                       f"跨模块单字节指针实参（本地字面量初始化常量）未被接受: "
+                       f"build={pointer_arg.returncode}\n"
+                       f"{pointer_arg.stderr[-500:]}")
+                original_ct = body_iface.read_text()
+                corrupt_ct = original_ct.replace(
+                    "fn __yhct_double_after_bump__ctmath__api_(value int) int",
+                    "fn __yhct_double_after_bump__ctmath__api_(value int) i64", 1)
+                if corrupt_ct == original_ct:
+                    report(False, "ct5b-corrupt-body-signature-rejected",
+                           "找不到待破坏的公开 CT 隐藏正文签名")
+                else:
+                    body_iface.write_text(corrupt_ct)
+                    try:
+                        corrupt = sh([compiler, "build"], cwd=host)
+                    finally:
+                        body_iface.write_text(original_ct)
+                    report(corrupt.returncode != 0
+                           and "公开 CT 函数与 .s.ct 正文签名不匹配" in corrupt.stderr,
+                           "ct5b-corrupt-body-signature-rejected",
+                           f"损坏的 .s.ct 签名未被拒绝: build={corrupt.returncode}\n"
+                           f"{corrupt.stderr[-500:]}")
+                header = original_ct.split("\n", 1)[0]
+                corruptions = [
+                    ("ct5b-corrupt-body-version-rejected",
+                     original_ct.replace("// yh-ctiface v1",
+                                         "// yh-ctiface v9", 1),
+                     "CT 接口版本或目标不兼容"),
+                    ("ct5b-truncated-body-rejected", header + "\n",
+                     "公开 CT 函数与 .s.ct 正文签名不匹配"),
+                    ("ct5b-malformed-body-rejected",
+                     header + "\n@[comptime]\nfn broken(",
+                     "ctmath-api.s.ct"),
+                    ("ct5b-corrupt-column-map-rejected",
+                     original_ct.replace("// yh-ctcol v1 ",
+                                         "// yh-ctcol v1 8193 ", 1),
+                     "CT 列映射格式无效"),
+                ]
+                for corrupt_name, corrupt_text, expected_error in corruptions:
+                    if corrupt_text == original_ct:
+                        report(False, corrupt_name,
+                               "损坏输入与有效 .s.ct 内容相同")
+                        continue
+                    body_iface.write_text(corrupt_text)
+                    try:
+                        corrupt = sh([compiler, "build"], cwd=host)
+                    finally:
+                        body_iface.write_text(original_ct)
+                    report(corrupt.returncode != 0
+                           and expected_error in corrupt.stderr,
+                           corrupt_name,
+                           f"损坏的 .s.ct 未按预期拒绝: build={corrupt.returncode}\n"
+                           f"{corrupt.stderr[-500:]}")
+                source_text = source.read_text()
+                source_line = next(i for i, line in enumerate(
+                    source_text.splitlines(), 1)
+                    if "let factor f64 = FACTOR;" in line)
+                source_col = (source_text.splitlines()[source_line - 1]
+                              .index("FACTOR") + 1)
+                original_base_ct = base_body_iface.read_text()
+                invalid_base_ct = original_base_ct.replace(
+                    "let factor f64 = __yhct_FACTOR__ctmath__base_;",
+                    'let factor f64 = "not a float";', 1)
+                if invalid_base_ct == original_base_ct:
+                    report(False, "ct5b-source-map-semantic-diagnostic",
+                           "找不到待破坏的浮点常量引用")
+                else:
+                    base_body_iface.write_text(invalid_base_ct)
+                    try:
+                        mapped = sh([compiler, "build"], cwd=host)
+                    finally:
+                        base_body_iface.write_text(original_base_ct)
+                    expected_location = (
+                        f"math/src/base/base.yh:{source_line}:{source_col}:")
+                    report(mapped.returncode != 0
+                           and expected_location in mapped.stderr,
+                           "ct5b-source-map-semantic-diagnostic",
+                           f"导入正文诊断未映射回定义源码: expected={expected_location}\n"
+                           f"{mapped.stderr[-500:]}")
+                host_main = host / "src" / "main" / "main.yh"
+                original_host_main = host_main.read_text()
+                host_main.write_text(original_host_main.replace(
+                    "$math.double_after_bump(20)",
+                    "$math.double_after_bump(21)", 1))
+                try:
+                    compile_error = sh([compiler, "build"], cwd=host)
+                finally:
+                    host_main.write_text(original_host_main)
+                diag_line = next(i for i, line in enumerate(
+                    source_text.splitlines(), 1)
+                    if "$compile_error(\"CT5B_SOURCE_MAP\")" in line)
+                diag_col = (source_text.splitlines()[diag_line - 1]
+                            .index("$compile_error") + 1)
+                expected_diag_location = (
+                    f"math/src/base/base.yh:{diag_line}:{diag_col}:")
+                report(compile_error.returncode != 0
+                       and expected_diag_location in compile_error.stderr
+                       and "CT5B_SOURCE_MAP" in compile_error.stderr,
+                       "ct5b-source-map-compile-error",
+                       f"跨模块编译期诊断未映射回定义源码: "
+                       f"expected={expected_diag_location}\n"
+                       f"{compile_error.stderr[-500:]}")
+                original = source.read_text()
+                source.write_text(original.replace("const OFFSET int = 1;",
+                                                   "const OFFSET int = 2;", 1))
+                changed = sh([compiler, "build"], cwd=host)
+                rerun = sh([str(program)], cwd=host) if program.exists() else None
+                report(changed.returncode == 0 and rerun is not None
+                       and rerun.returncode == 2,
+                       "ct5b-transitive-body-invalidates-importer",
+                       f"私有闭包函数变化后导入方仍复用了旧 CT 结果: "
+                       f"build={changed.returncode}, run={rerun.returncode if rerun else None}\n"
+                       f"{changed.stderr[-500:]}")
+            continue
+        if c["kind"] == "comptime-layout-deps":
+            built = sh([compiler, "build"], cwd=dst)
+            program = dst / ".build" / "comptimelayoutdeps"
+            run = sh([str(program)], cwd=dst) if program.exists() else None
+            report(built.returncode == 0 and run is not None
+                   and run.returncode == 0,
+                   c["name"],
+                   f"同模块跨源文件 typed CT 布局依赖未按值依赖完成: "
+                   f"build={built.returncode}, run={run.returncode if run else None}\n"
+                   f"{built.stderr[-500:]}")
+            continue
+        if c["kind"] == "comptime-expanded-ast":
+            built = sh([compiler, "build", "--stats"], cwd=dst)
+            lines = [line for line in built.stderr.splitlines()
+                     if line.startswith("yh-stats ")]
+            lowered = sum(stat_value(line, "ir_functions", 0) for line in lines)
+            program = dst / ".build" / "comptimeexpanded"
+            run = sh([str(program)], cwd=dst) if program.exists() else None
+            report(built.returncode == 0 and lowered >= 3
+                   and run is not None and run.returncode == c["expect"],
+                   c["name"],
+                   f"普通函数展开未进入稳定 SSA: build={built.returncode}, "
+                   f"ir_functions={lowered}, run={run.returncode if run else None}\n"
+                   f"{built.stderr[-500:]}")
+            continue
+        if c["kind"] == "comptime-expanded-budget":
+            checked = sh([compiler, "check"], cwd=dst / c["sub"])
+            report(checked.returncode != 0
+                   and c["msg"] in (checked.stderr + checked.stdout),
+                   c["name"],
+                   f"实际展开 AST 节点越界未被精确拒绝: rc={checked.returncode}\n"
+                   f"{(checked.stderr + checked.stdout)[-500:]}")
+            continue
         if c["kind"] == "host-capture":
             target = "linux" if sys.platform == "darwin" else "darwin"
             checked = sh([compiler, "-target", target, "check"], cwd=dst)
             report(checked.returncode == 0, c["name"],
                    f"交叉目标不应改变宿主文件标志: rc={checked.returncode}\n"
                    f"{checked.stderr[-400:]} {checked.stdout[-200:]}")
+            continue
+        if c["kind"] == "stdlib-run":
+            run = sh([compiler, "run"], cwd=dst / c["sub"],
+                     env={"YH_STDLIB": str(ROOT / "libs")})
+            report(run.returncode == c["expect"]
+                   and run.stdout.endswith(c["stdout"]),
+                   c["name"],
+                   f"退出码 {run.returncode} 期望 {c['expect']}，"
+                   f"输出结尾 {run.stdout[-120:]!r} 期望 {c['stdout']!r}\n"
+                   f"{run.stderr[-400:]}")
             continue
         if c["kind"] == "envp-run":
             run = sh([compiler, "run"], cwd=dst,
@@ -415,7 +730,6 @@ def main():
             symbol_prefix = "_" if sys.platform == "darwin" else ""
             report(call_ops == 36
                    and f"\tbl\t{symbol_prefix}call_nine__irfront__main_" in asm
-                   and "\tstr\tx9, [sp, #0]" in asm
                    and asm.count(f"\tbl\t{symbol_prefix}call_tick__irfront__main_") == 2
                    and asm.count(f"\tbl\t{symbol_prefix}log_unit__irfront__main_") == 3
                    and f"\tbl\t{symbol_prefix}log_noop__irfront__main_" in asm

@@ -53,7 +53,8 @@
 | 过程 | `em_prologue` / `em_alloc_local` / `em_epilogue` | 静态帧：体先发射到缓冲，帧大小确定后一次减栈 |
 | 调用 | `em_call_direct` / `em_call_indirect` / `em_call_arg_to_reg` / `em_call_stack_area` / `em_call_stack_store` / `em_call_cleanup` | 前 8 参进 x0..x7，其余经调用点栈区 |
 | 数据 | `em_data_string` / `em_data_scalar` / `em_data_symbol_header` / `em_bss_symbol` | 发射 `.data`/`.bss` 项 |
-| 聚合按值 | `em_agg_arg_copy` / `em_copy_block` / `em_save_hidden_ret` / `em_load_hidden_ret` | 调用点拷贝 + 指针传参；>16B 返回经 x8 |
+| yh 聚合按值 | `em_agg_arg_copy` / `em_copy_block` / `em_save_hidden_ret` / `em_load_hidden_ret` | 调用点拷贝 + 指针传参；所有聚合返回经 x8 |
+| C 固定参数 ABI | `abi_c.yh` / `sem_cabi.yh` | 共享位置分类；小聚合/HFA 寄存器、大聚合副本指针与 x8；区分 Linux/Darwin 栈布局 |
 | 浮点 | `em_push_fp` / `em_pop_fp` / `em_fp_binop` / `em_fp_compare` / `em_fp_neg` / `em_int_to_fp` / `em_fp_to_int` / `em_fp_load_local` / `em_fp_store_local` | d0/d1 值约定，s0/s1 为 f32；助记符无 .d/.s 后缀 |
 
 ## 3. 当前 AArch64 Linux 目标实现要点
@@ -86,7 +87,11 @@
   （`c_layout_size`/`c_layout_align`）传递，避免为一次性二元组引入
   结构体按值返回。
 
-## 5. 聚合按值 ABI（B7 采用机制 b）
+## 5. yh 聚合按值 ABI（B7 采用机制 b）
+
+本节是普通 yh 函数约定。`@[extern]` 的参数、入口和返回由独立的
+[C ABI 分类器](yh-extern自动C-ABI设计.md)转换，小聚合与 HFA 使用 C 寄存器
+规则；聚合在函数体内仍以地址表示。
 
 ADR-0002 为 TCC 后端选定「包装结构体」（机制 a）；本后端**从零实现**，
 采用 **机制 b（调用点拷贝 + 指针传递）**，同样满足 ADR-0001 的全部语言

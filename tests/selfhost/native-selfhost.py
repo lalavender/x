@@ -6,7 +6,7 @@
     cc2     build compiler/     → cc3（冷编）
     cc3     build compiler/     → cc4（冷编）
 门：
-    1. 固定点：候选 cc3/cc4 全部模块 .s/.s.i 逐字节一致；
+    1. 固定点：候选 cc3/cc4 全部模块 .s/.s.i/.s.ct 逐字节一致；
     2. cc4 自解析：compiler/ 全部 .yh 源文件 --syntax-check 通过；
     3. cc4 语法语料：tests/yh 正例全过、反例全拒；
     4. cc4 运行语料：tests/yh-run 全量（run/fail/pass）。
@@ -35,7 +35,7 @@ def run(cmd, cwd=None):
                           text=True, timeout=1800)
 
 
-def build(cc, out, generation, expected):
+def build(cc, out, generation, expected, compatible=()):
     """冷编一代，并在共享的 .build 被后续代覆盖前保存其产物。"""
     bdir = COMPILER / ".build"
     if bdir.exists():
@@ -47,6 +47,11 @@ def build(cc, out, generation, expected):
         sys.exit(1)
     snapshot = save_snapshot(bdir, WORK / "snapshots" / generation)
     errors = snapshot_errors([(generation, snapshot)], expected)
+    if errors:
+        for compatible_expected in compatible:
+            if not snapshot_errors([(generation, snapshot)], compatible_expected):
+                errors = []
+                break
     if errors:
         print(f"FAIL {generation} 产物：", "；".join(errors))
         sys.exit(1)
@@ -108,7 +113,10 @@ def main() -> int:
 
     ok = True
     expected = expected_artifacts(COMPILER)
-    d2 = build(seed, WORK / "cc2", "cc2", expected)
+    # 滚动种子可能早于或已包含 .s.ct；首代只接受这两种完整产物集合之一，
+    # 后续代必须全部使用当前格式并进入固定点。
+    legacy_expected = {path for path in expected if not path.endswith(".s.ct")}
+    d2 = build(seed, WORK / "cc2", "cc2", expected, (legacy_expected,))
     d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected)
     d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected)
     print(f"cc2/cc3/cc4 构建完成（种子 = {seed}）")

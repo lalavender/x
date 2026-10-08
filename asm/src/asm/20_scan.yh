@@ -1,0 +1,512 @@
+module asm;
+
+// ============================================================================
+// asm/scan.yh —— 汇编扫描器：把源字节切成 token 数组
+//
+// 冻结子集（契约 §3/§5）：`//` 行注释、`/* */` 块注释、`;` 与换行是语句
+// 分隔符；数字支持十进制与 0x 十六进制（可含下划线）；寄存器写
+// x0..x30 / w0..w30 / sp / wsp / xzr / wzr。
+//
+// 扫描器一次扫完并保留每个 token 的源范围与行列，解析器只读 token 数组，
+// 不再回头看字符——错误位置因此始终可报。扫描器不做语义判断：它只把
+// 合法词法单元切开，语义拒绝留给解析与编码层。
+// ============================================================================
+
+// —— token 种类 ——
+
+pub const TK_END int = 0;       // 文件结束
+pub const TK_IDENT int = 1;     // 标识符（符号名）
+pub const TK_NUM int = 2;       // 整数
+pub const TK_REG int = 3;       // 寄存器
+pub const TK_DIR int = 4;       // 伪指令（. 开头）
+pub const TK_COMMA int = 5;     // ,
+pub const TK_COLON int = 6;     // :
+pub const TK_LBRACKET int = 7;  // [
+pub const TK_RBRACKET int = 8;  // ]
+pub const TK_HASH int = 9;      // #（立即数前缀，可选）
+pub const TK_STAR int = 10;     // *
+pub const TK_MINUS int = 11;    // -
+pub const TK_PLUS int = 12;     // +
+pub const TK_BANG int = 13;     // !（写回）
+pub const TK_AT int = 14;       // @
+pub const TK_PIPE int = 15;     // |
+pub const TK_EQUAL int = 16;    // =
+pub const TK_MODIFIER int = 17; // :lo12: 等符号修饰符
+pub const TK_SLASH int = 18;    // /
+pub const TK_PERCENT int = 19;  // %（.type 的 %function / %object）
+pub const TK_SEMI int = 20;     // ;（语句分隔）
+pub const TK_BAD int = 21;      // 非法字符
+
+// —— 寄存器类别 ——
+//
+// 编号 31 在 x/w 语境下是 SP 或 ZR，两者语义不同：SP 出现在基址/目的位置
+// 合法，ZR 在源位置等价 x31、在目的位置表示丢弃结果。类别必须带到编码层。
+
+pub const RK_X int = 0;    // x0..x30
+pub const RK_W int = 1;    // w0..w30
+pub const RK_SP int = 2;   // sp
+pub const RK_WSP int = 3;  // wsp
+pub const RK_XZR int = 4;  // xzr
+pub const RK_WZR int = 5;  // wzr
+pub const RK_S int = 6;    // s0..s31  单精度浮点
+pub const RK_D int = 7;    // d0..d31  双精度浮点
+
+// —— 符号修饰符 ——
+
+pub const MOD_NONE int = 0;   // 无
+pub const MOD_LO12 int = 1;   // :lo12:
+
+// Tok：token 记录。start/end 是源内字节偏移（start 含、end 不含），用于
+// 诊断；line/col 是 1 基行列，在 token 开始处记录。
+pub struct Tok {
+    kind int;
+    start int;
+    end int;
+    line int;
+    col int;
+    num i64;    // 数字值 / 寄存器号 / 修饰符编号
+    rkind int;  // TK_REG 时的寄存器类别
+}
+
+// —— 扫描器状态 ——
+//
+// 属于一次 asm 调用的任务私有上下文，不复用任何全局缓冲。
+
+pub struct Lexer {
+    src *u8;      // 源字节（借自调用方，全程有效）
+    len int;      // 源字节数
+    pos int;      // 当前字节下标
+    line int;     // 当前行（1 基）
+    lstart int;   // 当前行首字节下标（换算列号）
+    toks *Tok;    // token 数组
+    n int;        // 已产生 token 数
+    cap int;      // 数组容量
+    err int;      // 1 = 词法层已报错
+}
+
+// lex_init：初始化扫描器。
+pub fn lex_init(l *Lexer, src *u8, nbytes int) int {
+    l.src = src;
+    l.len = nbytes;
+    l.pos = 0;
+    l.line = 1;
+    l.lstart = 0;
+    l.toks = 0;
+    l.n = 0;
+    l.cap = 0;
+    l.err = 0;
+    return 0;
+}
+
+// lex_free：释放 token 数组。
+pub fn lex_free(l *Lexer) int {
+    if (l.toks != 0) {
+        free(l.toks);
+    }
+    l.toks = 0;
+    l.n = 0;
+    l.cap = 0;
+    return 0;
+}
+
+// lex_col：字节下标对应的列号（1 基）。
+// lex_tok：取 token 数组的元素指针。
+// 注意：yh 的 `ptr + int` 对结构体指针不做元素大小缩放，必须用下标。
+pub fn lex_tok(l *Lexer, i int) *Tok {
+    return &l.toks[i];
+}
+
+fn lex_col(l *Lexer, at int) int {
+    return at - l.lstart + 1;
+}
+
+// lex_peek_b：读 pos+off 处的字节，越界返回 0。
+fn lex_peek_b(l *Lexer, off int) u8 {
+    let i int = l.pos + off;
+    if (i < 0 || i >= l.len) {
+        return 0;
+    }
+    return l.src[i];
+}
+
+// lex_push：把当前 pos 处的 token 追加进数组。失败返回 -1。
+fn lex_push(l *Lexer, kind int, start int, num i64, rkind int) int {
+    if (l.n >= l.cap) {
+        let ncap int = l.cap * 2;
+        if (ncap < 64) { ncap = 64; }
+        let p *Tok = malloc((ncap * sizeof(Tok)).to_type(u64)).to_type(*Tok);
+        if (p == 0) {
+            return -1;
+        }
+        if (l.n > 0) {
+            memcpy(p, l.toks, (l.n * sizeof(Tok)).to_type(u64));
+        }
+        if (l.toks != 0) {
+            free(l.toks);
+        }
+        l.toks = p;
+        l.cap = ncap;
+    }
+    let i int = l.n;
+    l.toks[i].kind = kind;
+    l.toks[i].start = start;
+    l.toks[i].end = l.pos;
+    l.toks[i].line = l.line;
+    l.toks[i].col = lex_col(l, start);
+    l.toks[i].num = num;
+    l.toks[i].rkind = rkind;
+    l.n += 1;
+    return 0;
+}
+
+// is_lower：a..z。
+fn is_lower(b u8) int {
+    if (b < 'a'.to_type(u8)) { return 0; }
+    if (b > 'z'.to_type(u8)) { return 0; }
+    return 1;
+}
+
+// is_upper：A..Z。
+fn is_upper(b u8) int {
+    if (b < 'A'.to_type(u8)) { return 0; }
+    if (b > 'Z'.to_type(u8)) { return 0; }
+    return 1;
+}
+
+// is_digit：0..9。
+fn is_digit(b u8) int {
+    if (b < '0'.to_type(u8)) { return 0; }
+    if (b > '9'.to_type(u8)) { return 0; }
+    return 1;
+}
+
+// is_hexd：十六进制数字。
+fn is_hexd(b u8) int {
+    if (is_digit(b) != 0) { return 1; }
+    if (is_lower(b) != 0) {
+        return ((b >= 'a'.to_type(u8) && b <= 'f'.to_type(u8)).to_type(int));
+    }
+    if (is_upper(b) != 0) {
+        return ((b >= 'A'.to_type(u8) && b <= 'F'.to_type(u8)).to_type(int));
+    }
+    return 0;
+}
+
+// is_ident_head：标识符首字符（字母、下划线、点）。
+fn is_ident_head(b u8) int {
+    if (is_lower(b) != 0) { return 1; }
+    if (is_upper(b) != 0) { return 1; }
+    if (b == '_'.to_type(u8)) { return 1; }
+    if (b == '.'.to_type(u8)) { return 1; }
+    return 0;
+}
+
+// is_ident_tail：标识符后续字符。
+fn is_ident_tail(b u8) int {
+    if (is_ident_head(b) != 0) { return 1; }
+    return is_digit(b);
+}
+
+// is_space：空白（不含换行；换行单独处理以更新行号）。
+fn is_space(b u8) int {
+    if (b == ' '.to_type(u8)) { return 1; }
+    if (b == '\t'.to_type(u8)) { return 1; }
+    if (b == '\r'.to_type(u8)) { return 1; }
+    return 0;
+}
+
+// hex_val：十六进制字符的数值；非十六进制返回 -1。
+fn hex_val(b u8) int {
+    if (is_digit(b) != 0) {
+        return (b - '0'.to_type(u8)).to_type(int);
+    }
+    if (is_lower(b) != 0 && b <= 'f'.to_type(u8)) {
+        return (b - 'a'.to_type(u8)).to_type(int) + 10;
+    }
+    if (is_upper(b) != 0 && b <= 'F'.to_type(u8)) {
+        return (b - 'A'.to_type(u8)).to_type(int) + 10;
+    }
+    return -1;
+}
+
+// —— 寄存器识别 ——
+
+// lex_reg：把源中 [s, e) 的字节解释为寄存器，把编号写入 num。
+// 返回寄存器类别；不是寄存器返回 -1。
+fn lex_reg(l *Lexer, s int, e int, num *int) int {
+    let n int = e - s;
+    if (n < 2) {
+        return -1;
+    }
+    let b0 u8 = l.src[s];
+    let b1 u8 = l.src[s + 1];
+    if (is_digit(b1) != 0) {
+        let v int = 0;
+        let i int = s + 1;
+        for i < e {
+            if (is_digit(l.src[i]) == 0) {
+                return -1;
+            }
+            v = v * 10 + (l.src[i] - '0'.to_type(u8)).to_type(int);
+            if (v > 31) {
+                return -1;
+            }
+            i += 1;
+        }
+        if (b0 == 'x'.to_type(u8)) { num[0] = v; return RK_X; }
+        if (b0 == 'w'.to_type(u8)) { num[0] = v; return RK_W; }
+        if (b0 == 's'.to_type(u8)) { num[0] = v; return RK_S; }
+        if (b0 == 'd'.to_type(u8)) { num[0] = v; return RK_D; }
+        return -1;
+    }
+    if (n == 2) {
+        if (b0 == 's'.to_type(u8) && b1 == 'p'.to_type(u8)) { num[0] = 31; return RK_SP; }
+        return -1;
+    }
+    if (n != 3) {
+        return -1;
+    }
+    let b2 u8 = l.src[s + 2];
+    if (b1 == 's'.to_type(u8) && b2 == 'p'.to_type(u8)) {
+        if (b0 == 'w'.to_type(u8)) { num[0] = 31; return RK_WSP; }
+        if (b0 == 'x'.to_type(u8)) { num[0] = 31; return RK_SP; }
+        return -1;
+    }
+    if (b1 == 'z'.to_type(u8) && b2 == 'r'.to_type(u8)) {
+        if (b0 == 'w'.to_type(u8)) { num[0] = 31; return RK_WZR; }
+        if (b0 == 'x'.to_type(u8)) { num[0] = 31; return RK_XZR; }
+        return -1;
+    }
+    return -1;
+}
+
+// —— 数字 ——
+
+// lex_number：扫描整数（十进制或 0x 十六进制，可含下划线分隔）。
+// 结果写入 out。返回 0 成功，-1 表示无数字或溢出。
+fn lex_number(l *Lexer, out *i64) int {
+    let base int = 10;
+    if (l.src[l.pos] == '0'.to_type(u8)) {
+        let n2 u8 = lex_peek_b(l, 1);
+        if (n2 == 'x'.to_type(u8) || n2 == 'X'.to_type(u8)) {
+            base = 16;
+            l.pos += 2;
+        }
+    }
+    let digits int = 0;
+    let v u64 = 0;
+    for l.pos < l.len {
+        let b u8 = l.src[l.pos];
+        if (b == '_'.to_type(u8)) {
+            l.pos += 1;
+            continue;
+        }
+        if (base == 16) {
+            if (is_hexd(b) == 0) { break; }
+        } else {
+            if (is_digit(b) == 0) { break; }
+        }
+        let d int = hex_val(b);
+        let nv u64 = v * base.to_type(u64) + d.to_type(u64);
+        if (nv < v) {
+            l.err = 1;
+            return -1;
+        }
+        v = nv;
+        digits += 1;
+        l.pos += 1;
+    }
+    if (digits == 0) {
+        l.err = 1;
+        return -1;
+    }
+    out[0] = v.to_type(i64);
+    return 0;
+}
+
+// —— 修饰符 ——
+
+// lex_modifier：扫描 `:name:` 形式的符号修饰符并压成一个 TK_MODIFIER。
+// 不是合法修饰符时退化为 TK_COLON（让解析层按标签/错误处理）。
+fn lex_modifier(l *Lexer) int {
+    let start int = l.pos;
+    let i int = l.pos + 1;
+    for i < l.len {
+        if (l.src[i] == ':'.to_type(u8)) { break; }
+        if (l.src[i] == '\n'.to_type(u8)) { return 0; }
+        if (is_ident_tail(l.src[i]) == 0) { return 0; }
+        i += 1;
+    }
+    if (i >= l.len || l.src[i] != ':'.to_type(u8)) {
+        return 0;
+    }
+    let body int = start + 1;
+    let blen int = i - body;
+    if (blen == 0) {
+        return 0;
+    }
+    if (mem_eq_n(l.src, body, blen, "lo12") != 0) {
+        if (lex_push_mod(l, start, i + 1, MOD_LO12) != 0) { return -1; }
+        return 1;
+    }
+    return 0;
+}
+
+// lex_push_mod：为一个修饰符 token 追加记录（end 显式给出）。
+fn lex_push_mod(l *Lexer, start int, end int, mod int) int {
+    l.pos = end;
+    if (lex_push(l, TK_MODIFIER, start, mod.to_type(i64), 0) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+// mem_eq_n：比较源中 off 起的 n 字节与常量字符串的前 n 字节。
+fn mem_eq_n(src *u8, off int, n int, s *char) int {
+    let i int = 0;
+    for i < n {
+        if (src[off + i] != s[i].to_type(u8)) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// —— 跳过空白与注释 ——
+
+// lex_trivia：跳过空白与注释，换行时更新行列。
+// 未闭合块注释记词法错误并停在文件尾。
+fn lex_trivia(l *Lexer) int {
+    for {
+        if (l.pos >= l.len) {
+            return 0;
+        }
+        let b u8 = l.src[l.pos];
+        if (b == '\n'.to_type(u8)) {
+            l.pos += 1;
+            l.line += 1;
+            l.lstart = l.pos;
+            continue;
+        }
+        if (is_space(b) != 0) {
+            l.pos += 1;
+            continue;
+        }
+        if (b == '/' && lex_peek_b(l, 1) == '/') {
+            for l.pos < l.len && l.src[l.pos] != '\n' {
+                l.pos += 1;
+            }
+            continue;
+        }
+        if (b == '/' && lex_peek_b(l, 1) == '*') {
+            let start int = l.pos;
+            l.pos += 2;
+            let closed int = 0;
+            for l.pos < l.len {
+                if (l.src[l.pos] == '*' && lex_peek_b(l, 1) == '/') {
+                    l.pos += 2;
+                    closed = 1;
+                    break;
+                }
+                if (l.src[l.pos] == '\n') {
+                    l.line += 1;
+                    l.lstart = l.pos + 1;
+                }
+                l.pos += 1;
+            }
+            if (closed == 0) {
+                l.err = 1;
+                l.pos = start + 2;
+                if (lex_push(l, TK_BAD, start, 0, 0) != 0) { return -1; }
+            }
+            continue;
+        }
+        return 0;
+    }
+}
+
+// —— 主扫描循环 ——
+
+// lex_run：扫描整个输入，末尾追加一个 TK_END。
+// 返回 0 成功（词法错误由 l.err 表达，扫描继续以便报出更多问题）；
+// -1 表示内存不足。
+pub fn lex_run(l *Lexer) int {
+    for {
+        if (lex_trivia(l) != 0) {
+            return -1;
+        }
+        if (l.pos >= l.len) {
+            if (lex_push(l, TK_END, l.pos, 0, 0) != 0) { return -1; }
+            return 0;
+        }
+        let start int = l.pos;
+        let b u8 = l.src[l.pos];
+
+        let pk int = lex_punct_kind(b);
+        if (pk >= 0) {
+            if (b == ':') {
+                let r int = lex_modifier(l);
+                if (r < 0) { return -1; }
+                if (r != 0) { continue; }
+            }
+            l.pos += 1;
+            if (lex_push(l, pk, start, 0, 0) != 0) { return -1; }
+            continue;
+        }
+
+        if (is_digit(b) != 0) {
+            let v i64 = 0;
+            if (lex_number(l, &v) != 0) {
+                if (lex_push(l, TK_BAD, start, 0, 0) != 0) { return -1; }
+                continue;
+            }
+            if (lex_push(l, TK_NUM, start, v, 0) != 0) { return -1; }
+            continue;
+        }
+
+        if (is_ident_head(b) != 0) {
+            l.pos += 1;
+            for l.pos < l.len && is_ident_tail(l.src[l.pos]) != 0 {
+                l.pos += 1;
+            }
+            let e int = l.pos;
+            let num int = 0;
+            let rk int = lex_reg(l, start, e, &num);
+            if (rk >= 0) {
+                if (lex_push(l, TK_REG, start, num.to_type(i64), rk) != 0) { return -1; }
+                continue;
+            }
+            let kind int = TK_IDENT;
+            if (b == '.') {
+                kind = TK_DIR;
+            }
+            if (lex_push(l, kind, start, 0, 0) != 0) { return -1; }
+            continue;
+        }
+
+        l.err = 1;
+        l.pos += 1;
+        if (lex_push(l, TK_BAD, start, 0, 0) != 0) { return -1; }
+    }
+}
+
+// lex_punct_kind：单字符标点对应的 token 种类；不是标点返回 -1。
+fn lex_punct_kind(b u8) int {
+    if (b == ',') { return TK_COMMA; }
+    if (b == '[') { return TK_LBRACKET; }
+    if (b == ']') { return TK_RBRACKET; }
+    if (b == '#') { return TK_HASH; }
+    if (b == '*') { return TK_STAR; }
+    if (b == '-') { return TK_MINUS; }
+    if (b == '+') { return TK_PLUS; }
+    if (b == '!') { return TK_BANG; }
+    if (b == '@') { return TK_AT; }
+    if (b == '|') { return TK_PIPE; }
+    if (b == '=') { return TK_EQUAL; }
+    if (b == '/') { return TK_SLASH; }
+    if (b == ':') { return TK_COLON; }
+    if (b == '%') { return TK_PERCENT; }
+    if (b == ';') { return TK_SEMI; }
+    return -1;
+}

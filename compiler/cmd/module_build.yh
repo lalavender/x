@@ -174,6 +174,7 @@ pub fn mb_mkdir(dir *char) int {
 let mb_dep_bind *int = 0;
 let mb_dep_bindlen *int = 0;
 let mb_dep_ifoff *int = 0;
+let mb_dep_ctoff *int = 0;
 let mb_dep_mod *int = 0;
 let mb_dep_mi *int = 0;
 let mb_dep_n int = 0;
@@ -229,8 +230,14 @@ pub fn mb_check_clear_ifaces(build_off int, build_len int, count int) void {
         if (mb_module_iface_path(m, build_off, build_len, path) == 0) {
             unlink(gen.arr_cstr(path));
         }
+        if (mb_module_ctiface_path(m, build_off, build_len, path) == 0) {
+            unlink(gen.arr_cstr(path));
+        }
         // 清除升级前留下的无后缀 check 接口。
         if (mb_module_iface_plain_path(m, build_off, build_len, path) == 0) {
+            unlink(gen.arr_cstr(path));
+        }
+        if (mb_module_ctiface_plain_path(m, build_off, build_len, path) == 0) {
             unlink(gen.arr_cstr(path));
         }
         ci += 1;
@@ -279,6 +286,13 @@ pub fn mb_dep_push(target int, bind_off int, bind_len int) int {
         }
         free(mb_dep_ifoff);
         mb_dep_ifoff = nc;
+        let nct *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
+        if (nct == 0) { return gen.fail("内存分配失败"); }
+        if (mb_dep_n > 0) {
+            memcpy(nct, mb_dep_ctoff, (mb_dep_n * sizeof(int)).to_type(u64));
+        }
+        free(mb_dep_ctoff);
+        mb_dep_ctoff = nct;
         let ndm *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
         if (ndm == 0) {
             return gen.fail("内存分配失败");
@@ -304,6 +318,7 @@ pub fn mb_dep_push(target int, bind_off int, bind_len int) int {
     mb_dep_mod[mb_dep_n] = target;
     mb_dep_mi[mb_dep_n] = -1;
     mb_dep_ifoff[mb_dep_n] = -1;
+    mb_dep_ctoff[mb_dep_n] = -1;
     mb_dep_n += 1;
     return 1;
 }
@@ -413,6 +428,9 @@ pub fn mb_module_iface_deps(m int, build_off int, build_len int) int {
             let t3 int = mb_dep_ifoff[si];
             mb_dep_ifoff[si] = mb_dep_ifoff[best];
             mb_dep_ifoff[best] = t3;
+            let tct int = mb_dep_ctoff[si];
+            mb_dep_ctoff[si] = mb_dep_ctoff[best];
+            mb_dep_ctoff[best] = tct;
             let t4 int = mb_dep_mod[si];
             mb_dep_mod[si] = mb_dep_mod[best];
             mb_dep_mod[best] = t4;
@@ -435,6 +453,7 @@ pub fn mb_module_iface_deps(m int, build_off int, build_len int) int {
         pn = gen.append_str(pbuf, pn, ".s.i");
         pbuf[pn] = 0;
         let chosen *char = gen.arr_cstr(pbuf);
+        let iface_session int = 0;
         if (mb_iface_suffix != 0) {
             let session [760]u8;
             let sn int = 0;
@@ -442,6 +461,7 @@ pub fn mb_module_iface_deps(m int, build_off int, build_len int) int {
             sn = gen.append_str(session, sn, mb_iface_suffix);
             session[sn] = 0;
             if (pj_file_exists(gen.arr_cstr(session)) != 0) {
+                iface_session = 1;
                 pn = sn;
                 let k int = 0;
                 for k <= sn {
@@ -455,6 +475,26 @@ pub fn mb_module_iface_deps(m int, build_off int, build_len int) int {
             return -1;
         }
         mb_dep_ifoff[di] = po;
+        let ctpath [1000]u8;
+        if (mb_module_ctiface_plain_path(mb_dep_mod[di], build_off,
+                build_len, ctpath) != 0) { return -1; }
+        let ctn int = strlen(gen.arr_cstr(ctpath)).to_type(int);
+        if (mb_iface_suffix != 0 && iface_session != 0) {
+            let session_ct [1000]u8;
+            let csn int = gen.append_str(session_ct, 0,
+                gen.arr_cstr(ctpath));
+            csn = gen.append_str(session_ct, csn, mb_iface_suffix);
+            session_ct[csn] = 0;
+            ctn = csn;
+            let k2 int = 0;
+            for k2 <= csn {
+                ctpath[k2] = session_ct[k2];
+                k2 += 1;
+            }
+        }
+        let cto int = gen.tml_intern_str(ctpath, 0, ctn);
+        if (cto < 0) { return -1; }
+        mb_dep_ctoff[di] = cto;
         di += 1;
     }
     return mb_dep_n;
@@ -506,11 +546,23 @@ pub fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     in2 = gen.append_str(ipath, in2, pj_pool_str(tag_off));
     in2 = gen.append_str(ipath, in2, ".s.i");
     ipath[in2] = 0;
+    let ctpath [600]u8;
+    let ctn int = 0;
+    ctn = gen.append_str(ctpath, ctn, pj_pool_str(pj_canon_off));
+    ctn = gen.append_byte(ctpath, ctn, '/');
+    ctn = gen.append_str(ctpath, ctn, pj_pool_str(tag_off));
+    ctn = gen.append_str(ctpath, ctn, ".s.ct");
+    ctpath[ctn] = 0;
     let session_ipath [700]u8;
     if (mb_module_iface_path(m, build_off, build_len, session_ipath) != 0) {
         return -1;
     }
     unlink(gen.arr_cstr(session_ipath));
+    let session_ctpath [700]u8;
+    if (mb_module_ctiface_path(m, build_off, build_len, session_ctpath) != 0) {
+        return -1;
+    }
+    unlink(gen.arr_cstr(session_ctpath));
     if (pj_canon(build_off, build_len, "manifest") != 0) {
         return -1;
     }
@@ -554,12 +606,14 @@ pub fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     }
     let di int = 0;
     for di < mb_dep_n {
-        if (pj_file_exists(pj_pool_str(mb_dep_ifoff[di])) == 0) {
+        if (pj_file_exists(pj_pool_str(mb_dep_ifoff[di])) == 0
+            || pj_file_exists(pj_pool_str(mb_dep_ctoff[di])) == 0) {
             // 依赖接口缺失：视为需要重编译
             di = mb_dep_n + 1;
             break;
         }
-        if (mb_hash_file(&h, pj_pool_str(mb_dep_ifoff[di])) != 0) {
+        if (mb_hash_file(&h, pj_pool_str(mb_dep_ifoff[di])) != 0
+            || mb_hash_file(&h, pj_pool_str(mb_dep_ctoff[di])) != 0) {
             return -1;
         }
         di += 1;
@@ -573,7 +627,7 @@ pub fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         return -1;
     }
     // 版本标记
-    let tag *char = "yh-iface-cache-2";
+    let tag *char = "yh-iface-cache-3-ct";
     let ti int = 0;
     for tag[ti] != 0 {
         mb_fnv(&h, tag[ti].to_type(u8));
@@ -592,6 +646,7 @@ pub fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     // 缓存命中：三个产物齐全且 manifest 字节一致
     if (deps_ok != 0 && pj_file_exists(gen.arr_cstr(spath)) != 0
         && pj_file_exists(gen.arr_cstr(ipath)) != 0
+        && pj_file_exists(gen.arr_cstr(ctpath)) != 0
         && pj_file_exists(gen.arr_cstr(mpath)) != 0) {
         if (gen.read_source(gen.arr_cstr(mpath)) == 0 && gs.c_src_len == wn) {
             let same int = 1;
@@ -695,6 +750,37 @@ pub fn mb_module_iface_path(m int, build_off int, build_len int, out *u8) int {
     return 0;
 }
 
+// mb_module_ctiface_plain_path：返回持久 CT 正文接口路径。
+pub fn mb_module_ctiface_plain_path(m int, build_off int, build_len int,
+    out *u8) int {
+    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) { return -1; }
+    let tag_off int = pj_canon_off;
+    if (pj_canon(build_off, build_len, "iface") != 0) { return -1; }
+    let n int = 0;
+    n = gen.append_str(out, n, pj_pool_str(pj_canon_off));
+    n = gen.append_byte(out, n, '/');
+    n = gen.append_str(out, n, pj_pool_str(tag_off));
+    n = gen.append_str(out, n, ".s.ct");
+    out[n] = 0;
+    return 0;
+}
+
+// mb_module_ctiface_path：返回带本轮会话后缀的 CT 正文接口路径。
+pub fn mb_module_ctiface_path(m int, build_off int, build_len int,
+    out *u8) int {
+    let plain [700]u8;
+    if (mb_module_ctiface_plain_path(m, build_off, build_len, plain) != 0) {
+        return -1;
+    }
+    let n int = 0;
+    n = gen.append_str(out, n, gen.arr_cstr(plain));
+    if (mb_iface_suffix != 0) {
+        n = gen.append_str(out, n, mb_iface_suffix);
+    }
+    out[n] = 0;
+    return 0;
+}
+
 // mb_iface_copy_file：完整读取源接口，经同目录暂存后原子发布到目标路径。
 pub fn mb_iface_copy_file(src *char, dst *char) int {
     let gs *gen.GenState = gen.G();
@@ -766,6 +852,30 @@ pub fn mb_file_head_bind(fi int) int {
         }
         gs.mod_import_mod[i] = mi;
         gs.mod_import_used[i] = 0;
+        // 导入可只在全局初始化器中使用，而模块文件会在全局遍历与
+        // 函数遍历之间重新绑定头部；按 token 快照保留整文件的限定引用。
+        let ti int = 0;
+        for ti + 1 < gs.c_tok_n {
+            if (gs.c_toks[ti].kind == gen.TOK_IDENT
+                && gs.c_toks[ti].len == gs.mod_imports[i].alias_len
+                && gs.c_toks[ti + 1].kind == gen.TK_DOT) {
+                let same int = 1;
+                let j int = 0;
+                for j < gs.mod_imports[i].alias_len {
+                    if (gs.c_src[gs.c_toks[ti].start + j]
+                        != gs.np_data[gs.mod_imports[i].alias_off + j]) {
+                        same = 0;
+                        break;
+                    }
+                    j += 1;
+                }
+                if (same != 0) {
+                    gs.mod_import_used[i] = 1;
+                    break;
+                }
+            }
+            ti += 1;
+        }
         i += 1;
     }
     return 0;
@@ -812,11 +922,11 @@ pub fn mb_restore_front_file(path *char, fi int) int {
     return 0;
 }
 
-// mb_globals_or_fns：pass 2a/2b 复用现有子遍（头已消费，头解析在先）。
-// is_globals=1 走 parse_source_globals，否则 parse_source_fns。
+// mb_pass2_file：复用模块文件快照执行全局、CT 捕获/布局常量子遍或函数子遍。
+// 1 全局初始化，2 CT 正文捕获，3 布局请求登记，4 布局 const 求值，0 普通函数。
 pub fn mb_pass2_file(path *char, fi int, is_globals int) int {
     let gs *gen.GenState = gen.G();
-    if (is_globals != 0 && gs.c_stats_enabled != 0) {
+    if (is_globals == 1 && gs.c_stats_enabled != 0) {
         gs.c_stats_globals += 1;
     }
     if (is_globals == 0 && gs.c_stats_enabled != 0) {
@@ -829,7 +939,13 @@ pub fn mb_pass2_file(path *char, fi int, is_globals int) int {
         return -1;
     }
     if (is_globals != 0) {
-        if (parse.parse_source_globals() != 0) {
+        if (is_globals == 2) {
+            if (parse.parse_source_ct_fns() != 0) { return -1; }
+        } else if (is_globals == 3) {
+            if (parse.parse_source_ct_layout_register() != 0) { return -1; }
+        } else if (is_globals == 4) {
+            if (parse.parse_source_ct_layout_consts() != 0) { return -1; }
+        } else if (parse.parse_source_globals() != 0) {
             return -1;
         }
     } else {

@@ -50,8 +50,8 @@ def main() -> int:
         parent_timing = [row for row in timing_rows if row[3] > 0]
         totals = tuple(sum(row[index] for row in rows) for index in range(7))
         # 父进程为四个文件只建一次索引；fork worker 继承只读快照，main
-        # 仅额外词法分析 mathx 接口。每个模块仍执行 pass1/全局/函数语义遍。
-        expected = (5, 9, 4, 4, 4, 4, 2)
+        # 额外词法分析 mathx 的 .s.i 和 .s.ct。每个模块仍执行相同语义遍。
+        expected = (6, 9, 4, 4, 4, 4, 2)
         if len(rows) != 3 or totals != expected or len(parent_timing) != 1:
             print(f"阶段计数错误：进程数={len(rows)}，总计={totals}，期望={expected}")
             print(output_text[-2000:])
@@ -82,7 +82,7 @@ def main() -> int:
                 or sum(warm_timing[0][:4]) > warm_timing[0][4]:
             print(f"热构建阶段计时无效：{warm_timing}")
             return 1
-    print("前端快照复用：通过（词法 5，声明索引 9，项目文件 4，热构建跳过索引，fork worker 2）")
+    print("前端快照复用：通过（词法 6，声明索引 9，项目文件 4，热构建跳过索引，fork worker 2）")
     return 0
 
 

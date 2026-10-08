@@ -1,0 +1,865 @@
+module asm;
+
+// ============================================================================
+// asm/parse_alu.yh —— 数据处理与访存指令的分派
+//
+// p_instruction 是唯一入口：先按助记符分成四组（条件分支 / 分支与系统 /
+// 访存 / 数据处理），再按操作数形态在组内选编码函数。判断只看形态，不看
+// 助记符个数——「目的寄存器 + 逗号 + 第三个操作数是寄存器还是立即数」
+// 决定了走哪条编码路径。
+// ============================================================================
+
+// —— 立即数辅助 ——
+
+// p_expr_val：解析一个只允许数字的立即数，返回带符号值。
+// p_is_imm_start：当前 token 是否可能是立即数表达式的开头。
+fn p_is_imm_start(p *Parser) int {
+    let k int = p_peek(p);
+    if (k == TK_HASH || k == TK_NUM || k == TK_MINUS || k == TK_MODIFIER) {
+        return 1;
+    }
+    if (k == TK_IDENT || k == TK_DIR) {
+        return 1;
+    }
+    return 0;
+}
+
+fn p_expr_val(p *Parser, out *i64) int {
+    let e Expr;
+    if (p_expr(p, &e) != 0) { return -1; }
+    if (e.kind != EX_NUM) {
+        return p_err(p, "此处需要一个数字");
+    }
+    if (e.neg != 0) {
+        out[0] = -e.val;
+    } else {
+        out[0] = e.val;
+    }
+    return 0;
+}
+
+// p_tail_shift：若当前位置是逗号，吃掉并解析移位修饰。
+fn p_tail_shift(p *Parser, s *Shift) int {
+    s.kind = SHF_NONE;
+    s.amount = 0;
+    if (p_peek(p) != TK_COMMA) {
+        return 0;
+    }
+    p_adv(p);
+    return p_need_shift(p, s);
+}
+
+// —— mov 立即数 ——
+//
+// `mov Rd, #imm` 是别名，按 GNU as 的顺序择一：MOVZ → MOVN → ORR 立即数。
+// 顺序固定才能保证同一输入产出同一编码。
+
+fn p_mov_imm(p *Parser, rd int, sf int, v i64) int {
+    let nh int = 2;
+    if (sf != 0) { nh = 4; }
+    let t u64 = v.to_type(u64);
+    let i int = 0;
+    for i < nh {
+        let sh int = i * 16;
+        let part u64 = (t >> sh.to_type(u32)) & 0xffff.to_type(u64);
+        if ((t - (part << sh.to_type(u32))) == 0) {
+            let w i64 = e_movw(sf, 2, i, rd, part.to_type(i64));
+            if (w < 0) { return p_err(p, "mov 立即数编码失败"); }
+            return p_write32(p, w);
+        }
+        i += 1;
+    }
+    let inv u64 = 0xffffffffffffffff - t;
+    let j int = 0;
+    for j < nh {
+        let sh2 int = j * 16;
+        let part2 u64 = (inv >> sh2.to_type(u32)) & 0xffff.to_type(u64);
+        if ((inv - (part2 << sh2.to_type(u32))) == 0) {
+            let w2 i64 = e_movw(sf, 0, j, rd, part2.to_type(i64));
+            if (w2 < 0) { return p_err(p, "mov 立即数编码失败"); }
+            return p_write32(p, w2);
+        }
+        j += 1;
+    }
+    let w3 i64 = e_logical_imm(sf, OP_ORR, rd, 31, v);
+    if (w3 < 0) {
+        return p_err(p, "mov 的立即数无法用一条指令表示");
+    }
+    return p_write32(p, w3);
+}
+
+// —— 加减 ——
+
+// p_addsub：add/sub/adds/subs/cmp/cmn 的公共实现。
+// is_cmp 非 0 时目的寄存器固定为 xzr/wzr。
+fn p_addsub(p *Parser, sub int, setflags int, is_cmp int) int {
+    let rd int = 31;
+    let sf int = 1;
+    if (is_cmp == 0) {
+        let d Reg;
+        if (p_reg(p, &d) != 0) { return -1; }
+        if (p_comma(p) != 0) { return -1; }
+        let n Reg;
+        if (p_reg(p, &n) != 0) { return -1; }
+        if (reg_is64(&d) != reg_is64(&n)) {
+            return p_err(p, "两个寄存器位宽不一致");
+        }
+        rd = reg_field(&d);
+        sf = reg_is64(&d);
+        if (p_comma(p) != 0) { return -1; }
+        let rnsp int = 0;
+        if (n.k == RK_SP) { rnsp = 1; }
+        let rdsp int = 0;
+        if (d.k == RK_SP) { rdsp = 1; }
+        return p_addsub_tail(p, sub, setflags, rd, reg_field(&n), sf, rdsp, rnsp);
+    }
+    let n2 Reg;
+    if (p_reg(p, &n2) != 0) { return -1; }
+    sf = reg_is64(&n2);
+    if (p_comma(p) != 0) { return -1; }
+    // cmp 的目的恒为 XZR（编号 31），不是 sp，所以 rdsp 传 0
+    let rnsp int = 0;
+    if (n2.k == RK_SP) { rnsp = 1; }
+    return p_addsub_tail(p, sub, setflags, 31, reg_field(&n2), sf, 0, rnsp);
+}
+
+// p_addsub_tail：解析第三个操作数并编码。
+//
+// rdsp/rnsp 表示目的/第一源操作数是不是「写成了 sp」。64 位加减只要有一个
+// 是 sp，就必须用扩展寄存器形式（其中编号 31 表示 sp）；移位寄存器形式里
+// 编号 31 是 xzr，编码出来语义就变了。
+fn p_addsub_tail(p *Parser, sub int, setflags int, rd int, rn int, sf int,
+                 rdsp int, rnsp int) int {
+    if (p_peek(p) == TK_REG) {
+        let m Reg;
+        if (p_reg(p, &m) != 0) { return -1; }
+        let s Shift;
+        if (p_tail_shift(p, &s) != 0) { return -1; }
+        let w i64 = 0;
+        let flat int = 0;
+        if (s.kind == SHF_NONE || (s.kind == SH_LSL && s.amount == 0)) {
+            flat = 1;
+        }
+        if (s.kind >= SHF_EXT) {
+            w = e_addsub_ext(sf, sub, setflags, s.kind - SHF_EXT, s.amount,
+                             rd, rn, reg_field(&m));
+        } else if (sf != 0 && flat != 0 && (rdsp != 0 || rnsp != 0)) {
+            // sp 参与 64 位加减：扩展形式 + UXTX + 移位 0，等价于原寄存器操作数
+            w = e_addsub_ext(sf, sub, setflags, 3, 0, rd, rn, reg_field(&m));
+        } else {
+            let k int = SH_LSL;
+            if (s.kind != SHF_NONE) { k = s.kind; }
+            w = e_addsub_reg(sf, sub, setflags, k, s.amount, rd, rn,
+                             reg_field(&m));
+        }
+        return p_write32(p, w);
+    }
+    let e Expr;
+    if (p_expr(p, &e) != 0) { return -1; }
+    if (e.kind == EX_PAGEOFF) {
+        // add Xd, Xn, sym@PAGEOFF —— 低 12 位由链接器填
+        let off int = p_emit32(p, e_addsub_imm(sf, sub, setflags, 0, rd, rn, 0));
+        if (off < 0) { return -1; }
+        return p_push_fix(p, FIX_ADD_LO12, off, e.sym, 0);
+    }
+    if (e.kind != EX_NUM) {
+        return p_err(p, "加减的第三个操作数只能是寄存器、立即数或 sym@PAGEOFF");
+    }
+    let v i64 = e.val;
+    if (e.neg != 0) { v = -e.val; }
+    let sh int = 0;
+    if (p_peek(p) == TK_COMMA) {
+        p_adv(p);
+        let s2 Shift;
+        if (p_need_shift(p, &s2) != 0) { return -1; }
+        if (s2.kind != SH_LSL) {
+            return p_err(p, "加减立即数只支持 lsl 移位");
+        }
+        sh = s2.amount.to_type(int);
+    }
+    let sb int = sub;
+    if (sb == 0 && v < 0) {
+        // add Xd, Xn, #-N 等价于 sub Xd, Xn, #N
+        sb = 1;
+        v = -v;
+    }
+    let shbit int = 0;
+    if (sh == 12) { shbit = 1; } else if (sh != 0) {
+        return p_err(p, "加减立即数的移位只能是 #0 或 #12");
+    }
+    let w2 i64 = e_addsub_imm(sf, sb, setflags, shbit, rd, rn, v);
+    if (w2 < 0) {
+        return p_err(p, "加减立即数超出范围");
+    }
+    return p_write32(p, w2);
+}
+
+// —— 逻辑 ——
+
+// p_logic：and/ands/orr/eor/bic/tst 的公共实现。
+fn p_logic(p *Parser, op int, is_tst int) int {
+    let sd Reg;
+    if (p_reg(p, &sd) != 0) { return -1; }
+    let sf int = reg_is64(&sd);
+    let rd int = reg_field(&sd);
+    let rn int = 0;
+    if (is_tst != 0) {
+        rn = reg_field(&sd);
+        rd = 31;
+    } else {
+        if (p_comma(p) != 0) { return -1; }
+        let sn Reg;
+        if (p_reg(p, &sn) != 0) { return -1; }
+        if (reg_is64(&sn) != sf) {
+            return p_err(p, "两个寄存器位宽不一致");
+        }
+        rn = reg_field(&sn);
+    }
+    if (p_comma(p) != 0) { return -1; }
+    if (p_peek(p) == TK_REG) {
+        let sm Reg;
+        if (p_reg(p, &sm) != 0) { return -1; }
+        let s Shift;
+        if (p_tail_shift(p, &s) != 0) { return -1; }
+        let k int = SH_LSL;
+        if (s.kind != SHF_NONE) {
+            if (s.kind >= SHF_EXT || s.kind == SH_ROR) {
+                return p_err(p, "逻辑运算的移位只支持 lsl/lsr/asr");
+            }
+            k = s.kind;
+        }
+        let w i64 = e_logical_reg(sf, op, k, s.amount, rd, rn,
+                                  reg_field(&sm));
+        return p_write32(p, w);
+    }
+    let v i64 = 0;
+    if (p_expr_val(p, &v) != 0) { return -1; }
+    let w2 i64 = e_logical_imm(sf, op, rd, rn, v);
+    if (w2 < 0) {
+        return p_err(p, "逻辑立即数不是合法的重复模式");
+    }
+    return p_write32(p, w2);
+}
+
+// —— 二元运算与乘加 ——
+
+// p_binop：sdiv/udiv/lslv/lsrv/asrv，三个寄存器。
+fn p_binop(p *Parser, opcode int) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let n Reg;
+    if (p_reg(p, &n) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let m Reg;
+    if (p_reg(p, &m) != 0) { return -1; }
+    if (reg_is64(&d) != reg_is64(&n) || reg_is64(&d) != reg_is64(&m)) {
+        return p_err(p, "三个寄存器位宽必须一致");
+    }
+    let w i64 = e_binop(reg_is64(&d), opcode, reg_field(&d), reg_field(&n),
+                        reg_field(&m));
+    return p_write32(p, w);
+}
+
+// p_madd：mul（三个寄存器）与 madd/msub（四个寄存器）。
+fn p_madd(p *Parser, sub int) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let n Reg;
+    if (p_reg(p, &n) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let m Reg;
+    if (p_reg(p, &m) != 0) { return -1; }
+    let ra int = 31;
+    if (p_peek(p) == TK_COMMA) {
+        p_adv(p);
+        let a Reg;
+        if (p_reg(p, &a) != 0) { return -1; }
+        ra = reg_field(&a);
+    } else if (sub != 0) {
+        return p_err(p, "msub 需要四个寄存器");
+    }
+    let w i64 = e_madd(reg_is64(&d), sub, reg_field(&d), reg_field(&n),
+                       reg_field(&m), ra);
+    return p_write32(p, w);
+}
+
+// —— 位域与扩展 ——
+
+// p_bitfield_alias：sxtb/sxth/sxtw/uxtb/uxth/uxtw 的别名展开。
+// sxt* 用 SBFM，uxtb/uxth 用 UBFM（目的按 32 位，上零扩展由 W 目的完成），
+// uxtw 是 32 位寄存器搬移（orr Wd, wzr, Wm）。
+fn p_bitfield_alias(p *Parser, opc int, width i64) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let n Reg;
+    if (p_reg(p, &n) != 0) { return -1; }
+    if (reg_is64(&n) != 0) {
+        return p_err(p, "扩展指令的源寄存器必须是 W 寄存器");
+    }
+    let sf int = reg_is64(&d);
+    let w i64 = 0;
+    if (opc == 3) {
+        // uxtw：UBFM Xd, Xn, #0, #31（把 32 位零扩展到 64 位）
+        if (sf == 0) {
+            return p_err(p, "uxtw 的目的寄存器必须是 X 寄存器");
+        }
+        w = e_bitfield(1, OP_UBFM, reg_field(&d), reg_field(&n), 0, 31);
+    } else {
+        // uxtb/uxth 落到 32 位目的；sxtb/sxth/sxtw 按目的位宽选 sf
+        let use int = sf;
+        if (opc == 2) { use = 0; }
+        w = e_bitfield(use, opc, reg_field(&d), reg_field(&n), 0, width);
+    }
+    return p_write32(p, w);
+}
+
+// p_sbfx：sbfx Xd, Xn, #lsb, #width。
+fn p_sbfx(p *Parser) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let n Reg;
+    if (p_reg(p, &n) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let lsb i64 = 0;
+    if (p_expr_val(p, &lsb) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let width i64 = 0;
+    if (p_expr_val(p, &width) != 0) { return -1; }
+    let w i64 = e_sbfx(reg_is64(&d), reg_field(&d), reg_field(&n), lsb, width);
+    if (w < 0) {
+        return p_err(p, "sbfx 的位域超出寄存器宽度");
+    }
+    return p_write32(p, w);
+}
+
+// —— 条件选择 ——
+
+// p_csel：csel Xd, Xn, Xm, cond。
+fn p_csel(p *Parser) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let n Reg;
+    if (p_reg(p, &n) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let m Reg;
+    if (p_reg(p, &m) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let c int = p_cond(p);
+    if (c < 0) {
+        return p_err(p, "此处需要一个条件码");
+    }
+    let w i64 = e_csel(reg_is64(&d), 0, 0, reg_field(&d), reg_field(&n),
+                       reg_field(&m), c);
+    return p_write32(p, w);
+}
+
+// p_cset：cset Xd, cond（CSINC Xd, xzr, xzr, invert(cond)）。
+fn p_cset(p *Parser) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let c int = p_cond(p);
+    if (c < 0) {
+        return p_err(p, "此处需要一个条件码");
+    }
+    // cset 的编码固定用 cond^1，见 ARM ARM 的 CSET 别名定义
+    let inv int = c ^ 1;
+    let w i64 = e_csel(reg_is64(&d), 0, 1, reg_field(&d), 31, 31, inv);
+    return p_write32(p, w);
+}
+
+// —— 访存分派 ——
+
+// p_mem_insn：单寄存器访存（ldr/str/ldrb/strb/ldrh/strh/ldrsb/ldrsh/ldrsw）。
+fn p_mem_insn(p *Parser) int {
+    let r Reg;
+    if (p_reg(p, &r) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let m MemOp;
+    if (p_mem(p, &m) != 0) { return -1; }
+    if (m.index >= 0 && m.exkind != EX_NUM) {
+        return p_err(p, "寻址操作数不能同时有索引寄存器与符号位移");
+    }
+    let store int = 0;
+    let size int = 2;
+    let sgn int = 0;
+    let wide int = reg_is64(&r);
+    // 浮点数据寄存器：只有 ldr/str，宽度由寄存器本身决定（s=32 位、d=64 位）。
+    // 编码跟同宽整数访存一模一样，只多一个 V 位（bit26），所以下面统一按
+    // 整数路径算 kind，最后再或上 vbit。
+    let fp int = 0;
+    if (r.k == RK_S || r.k == RK_D) {
+        if (p_mn_is(p, "ldrb") != 0 || p_mn_is(p, "strb") != 0 ||
+            p_mn_is(p, "ldrh") != 0 || p_mn_is(p, "strh") != 0 ||
+            p_mn_is(p, "ldrsb") != 0 || p_mn_is(p, "ldrsh") != 0 ||
+            p_mn_is(p, "ldrsw") != 0) {
+            return p_err(p, "浮点寄存器只支持 ldr/str 整宽访存");
+        }
+        fp = 1;
+    }
+    let vbit u32 = 0;
+    if (fp != 0) { vbit = 0x04000000; }
+    if (p_mn_is(p, "ldr") != 0 || p_mn_is(p, "str") != 0) {
+        if (p_mn_is(p, "str") != 0) { store = 1; }
+        if (wide != 0) { size = 3; } else { size = 2; }
+        if (fp != 0) {
+            if (r.k == RK_D) { size = 3; }
+        }
+    } else if (p_mn_is(p, "ldrb") != 0 || p_mn_is(p, "strb") != 0) {
+        if (p_mn_is(p, "strb") != 0) { store = 1; }
+        size = 0;
+        if (wide != 0) {
+            return p_err(p, "字节访问的目的寄存器必须是 W 寄存器");
+        }
+    } else if (p_mn_is(p, "ldrh") != 0 || p_mn_is(p, "strh") != 0) {
+        if (p_mn_is(p, "strh") != 0) { store = 1; }
+        size = 1;
+        if (wide != 0) {
+            return p_err(p, "半字访问的目的寄存器必须是 W 寄存器");
+        }
+    } else if (p_mn_is(p, "ldrsb") != 0) {
+        size = 0;
+        sgn = 1;
+    } else if (p_mn_is(p, "ldrsh") != 0) {
+        size = 1;
+        sgn = 1;
+    } else if (p_mn_is(p, "ldrsw") != 0) {
+        size = 2;
+        sgn = 1;
+        wide = 1;
+    } else {
+        return p_err(p, "未知的访存指令");
+    }
+    let kind i64 = 0;
+    if (store != 0) {
+        kind = e_mem_store(size);
+    } else {
+        kind = e_mem_kind(size, sgn, wide);
+    }
+    if (kind < 0) {
+        return p_err(p, "该访存形态没有对应的编码");
+    }
+    if (m.base_k == RK_WSP) {
+        return p_err(p, "基址寄存器必须是 X 寄存器或 sp");
+    }
+    if (m.exkind != EX_NUM) {
+        if (m.exkind == EX_GOTPAGEOFF) {
+            // GOT 项地址的低 12 位。LP64 下只有 64 位访存有对应的重定位。
+            if (size != 3) {
+                return p_err(p, "GOT 访存只支持 64 位宽度");
+            }
+            let goff int = p_emit32(p,
+                e_loadstore_imm(kind, reg_field(&r), m.base, 0) | vbit.to_type(i64));
+            if (goff < 0) { return -1; }
+            return p_push_fix(p, FIX_GOT_LO12, goff, m.sym, 0);
+        }
+        if (m.exkind != EX_PAGEOFF && m.exkind != EX_LO12) {
+            return p_err(p, "访存的符号位移只支持 sym@PAGEOFF、:lo12:sym 或 sym@GOTPAGEOFF");
+        }
+        let off int = p_emit32(p,
+            e_loadstore_imm(kind, reg_field(&r), m.base, 0) | vbit.to_type(i64));
+        if (off < 0) { return -1; }
+        return p_push_fix(p, FIX_LDST_LO12, off, m.sym, kind);
+    }
+    if (m.index >= 0) {
+        let w i64 = e_loadstore_reg(kind, reg_field(&r), m.base, m.index,
+                                    m.ext, m.shift.to_type(int));
+        if (w < 0) {
+            return p_err(p, "寄存器偏移寻址的编码失败");
+        }
+        return p_write32(p, w | vbit.to_type(i64));
+    }
+    if (m.wb == 0) {
+        if (m.disp >= 0) {
+            let w0 i64 = e_loadstore_imm(kind, reg_field(&r), m.base, m.disp);
+            if (w0 >= 0) {
+                return p_write32(p, w0 | vbit.to_type(i64));
+            }
+        }
+        let w1 i64 = e_loadstore_wb(kind, reg_field(&r), m.base, m.disp, 0);
+        if (w1 < 0) {
+            return p_err(p, "访存位移超出范围");
+        }
+        return p_write32(p, w1 | vbit.to_type(i64));
+    }
+    let mode int = 3;
+    if (m.wb == 1) { mode = 1; }
+    let w2 i64 = e_loadstore_wb(kind, reg_field(&r), m.base, m.disp, mode);
+    if (w2 < 0) {
+        return p_err(p, "带写回的访存位移超出范围");
+    }
+    return p_write32(p, w2 | vbit.to_type(i64));
+}
+
+// p_pair：成对访存 stp/ldp/ldpsw。
+fn p_pair(p *Parser) int {
+    let load int = 0;
+    if (p_mn_is(p, "ldp") != 0 || p_mn_is(p, "ldpsw") != 0) { load = 1; }
+    let r1 Reg;
+    if (p_reg(p, &r1) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let r2 Reg;
+    if (p_reg(p, &r2) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let m MemOp;
+    if (p_mem(p, &m) != 0) { return -1; }
+    if (m.index >= 0 || m.exkind != EX_NUM) {
+        return p_err(p, "成对访存只支持立即数位移");
+    }
+    if (m.base_k == RK_WSP) {
+        return p_err(p, "成对访存的基址必须是 X 寄存器或 sp");
+    }
+    let opc int = PAIR_32;
+    if (reg_is64(&r1) != 0) { opc = PAIR_64; }
+    if (reg_is64(&r1) != reg_is64(&r2)) {
+        return p_err(p, "成对访存的两个寄存器位宽必须一致");
+    }
+    if (p_mn_is(p, "ldpsw") != 0) { opc = PAIR_SW; }
+    let w i64 = 0;
+    if (m.wb == 0) {
+        w = e_pair_off(opc, load, reg_field(&r1), reg_field(&r2), m.base,
+                       m.disp);
+    } else {
+        let mode int = 2;
+        if (m.wb == 1) { mode = 3; }
+        w = e_pair_idx(opc, load, reg_field(&r1), reg_field(&r2), m.base,
+                       m.disp, mode);
+    }
+    if (w < 0) {
+        return p_err(p, "成对访存的位移超出范围");
+    }
+    return p_write32(p, w);
+}
+
+// —— 入口 ——
+
+// p_instruction：解析一条指令。进入时当前 token 必须是助记符。
+fn p_instruction(p *Parser) int {
+    if (p_peek(p) != TK_IDENT) {
+        return p_err(p, "此处需要一条指令");
+    }
+    let c int = p_is_bcond(p);
+    p.mn_off = p_txt_off(p);
+    p.mn_end = p_tok(p, p.i).end;
+    p_adv(p);
+    if (c >= 0) {
+        return p_condbr(p, c);
+    }
+    if (p_mn_is(p, "b") != 0) { return p_branch(p, 0); }
+    if (p_mn_is(p, "bl") != 0) { return p_branch(p, 1); }
+    if (p_mn_is(p, "br") != 0) { return p_branch_reg(p, 0); }
+    if (p_mn_is(p, "blr") != 0) { return p_branch_reg(p, 1); }
+    if (p_mn_is(p, "ret") != 0) { return p_branch_reg(p, 2); }
+    if (p_mn_is(p, "cbz") != 0) { return p_cmpbr(p, 0); }
+    if (p_mn_is(p, "cbnz") != 0) { return p_cmpbr(p, 1); }
+    if (p_mn_is(p, "adr") != 0) { return p_adr(p, 0); }
+    if (p_mn_is(p, "adrp") != 0) { return p_adr(p, 1); }
+    if (p_is_zero_operand(p) != 0) { return p_system(p); }
+
+    // 访存
+    if (p_is_mem_mn(p) != 0) { return p_mem_insn(p); }
+    if (p_mn_is(p, "stp") != 0 || p_mn_is(p, "ldp") != 0 ||
+        p_mn_is(p, "ldpsw") != 0) {
+        return p_pair(p);
+    }
+
+    // 数据处理
+    if (p_mn_is(p, "mov") != 0) { return p_mov(p); }
+    if (p_mn_is(p, "mvn") != 0) { return p_mvn(p); }
+    if (p_mn_is(p, "neg") != 0) { return p_neg(p, 0); }
+    if (p_mn_is(p, "negs") != 0) { return p_neg(p, 1); }
+    if (p_mn_is(p, "add") != 0) { return p_addsub(p, 0, 0, 0); }
+    if (p_mn_is(p, "adds") != 0) { return p_addsub(p, 0, 1, 0); }
+    if (p_mn_is(p, "sub") != 0) { return p_addsub(p, 1, 0, 0); }
+    if (p_mn_is(p, "subs") != 0) { return p_addsub(p, 1, 1, 0); }
+    if (p_mn_is(p, "cmp") != 0) { return p_addsub(p, 1, 1, 1); }
+    if (p_mn_is(p, "cmn") != 0) { return p_addsub(p, 0, 1, 1); }
+    if (p_mn_is(p, "and") != 0) { return p_logic(p, OP_AND, 0); }
+    if (p_mn_is(p, "ands") != 0) { return p_logic(p, OP_ANDS, 0); }
+    if (p_mn_is(p, "orr") != 0) { return p_logic(p, OP_ORR, 0); }
+    if (p_mn_is(p, "eor") != 0) { return p_logic(p, OP_EOR, 0); }
+    if (p_mn_is(p, "bic") != 0) { return p_logic(p, OP_BIC, 0); }
+    if (p_mn_is(p, "bics") != 0) { return p_logic(p, OP_BICS, 0); }
+    if (p_mn_is(p, "tst") != 0) { return p_logic(p, OP_ANDS, 1); }
+    if (p_mn_is(p, "mul") != 0) { return p_madd(p, 0); }
+    if (p_mn_is(p, "madd") != 0) { return p_madd(p, 0); }
+    if (p_mn_is(p, "msub") != 0) { return p_madd(p, 1); }
+    if (p_mn_is(p, "sdiv") != 0) { return p_binop(p, BIN_SDIV); }
+    if (p_mn_is(p, "udiv") != 0) { return p_binop(p, BIN_UDIV); }
+    if (p_mn_is(p, "lslv") != 0) { return p_binop(p, BIN_LSLV); }
+    if (p_mn_is(p, "lsrv") != 0) { return p_binop(p, BIN_LSRV); }
+    if (p_mn_is(p, "asrv") != 0) { return p_binop(p, BIN_ASRV); }
+    if (p_mn_is(p, "lsl") != 0) { return p_shift_imm(p, BIN_LSLV, 0); }
+    if (p_mn_is(p, "lsr") != 0) { return p_shift_imm(p, BIN_LSRV, 1); }
+    if (p_mn_is(p, "asr") != 0) { return p_shift_imm(p, BIN_ASRV, 2); }
+    if (p_mn_is(p, "sxtb") != 0) { return p_bitfield_alias(p, OP_SBFM, 7); }
+    if (p_mn_is(p, "sxth") != 0) { return p_bitfield_alias(p, OP_SBFM, 15); }
+    if (p_mn_is(p, "sxtw") != 0) { return p_bitfield_alias(p, OP_SBFM, 31); }
+    if (p_mn_is(p, "uxtb") != 0) { return p_bitfield_alias(p, OP_UBFM, 7); }
+    if (p_mn_is(p, "uxth") != 0) { return p_bitfield_alias(p, OP_UBFM, 15); }
+    if (p_mn_is(p, "uxtw") != 0) { return p_bitfield_alias(p, 3, 31); }
+    if (p_mn_is(p, "sbfx") != 0) { return p_sbfx(p); }
+    if (p_mn_is(p, "csel") != 0) { return p_csel(p); }
+    if (p_mn_is(p, "cset") != 0) { return p_cset(p); }
+    if (p_mn_is(p, "movz") != 0) { return p_movw(p, 2); }
+    if (p_mn_is(p, "movk") != 0) { return p_movw(p, 3); }
+    if (p_mn_is(p, "movn") != 0) { return p_movw(p, 0); }
+    if (p_is_float_mn(p) != 0) { return p_float_insn(p); }
+    return p_err(p, "不在冻结子集内的指令");
+}
+
+// —— 标量浮点 ——
+
+// p_is_float_mn：v1 支持的浮点助记符集合。
+fn p_is_float_mn(p *Parser) int {
+    if (p_mn_is(p, "fadd") != 0 || p_mn_is(p, "fsub") != 0) { return 1; }
+    if (p_mn_is(p, "fmul") != 0 || p_mn_is(p, "fdiv") != 0) { return 1; }
+    if (p_mn_is(p, "fcmp") != 0 || p_mn_is(p, "fcvt") != 0) { return 1; }
+    if (p_mn_is(p, "fcvtzs") != 0) { return 1; }
+    if (p_mn_is(p, "scvtf") != 0 || p_mn_is(p, "ucvtf") != 0) { return 1; }
+    if (p_mn_is(p, "fmov") != 0) { return 1; }
+    return 0;
+}
+
+// fp_dbl：s 寄存器是单精度（0），d 寄存器是双精度（1）。
+fn fp_dbl(r *Reg) int {
+    if (r.k == RK_D) { return 1; }
+    return 0;
+}
+
+// p_fp_reg：读一个 s/d 浮点寄存器。
+fn p_fp_reg(p *Parser, r *Reg) int {
+    if (p_reg(p, r) != 0) { return -1; }
+    if (r.k != RK_S && r.k != RK_D) {
+        return p_err(p, "此处需要一个 s 或 d 浮点寄存器");
+    }
+    return 0;
+}
+
+// p_gp_reg：读一个 x/w 通用寄存器。
+fn p_gp_reg(p *Parser, r *Reg) int {
+    if (p_reg(p, r) != 0) { return -1; }
+    if (r.k != RK_X && r.k != RK_W) {
+        return p_err(p, "此处需要一个 x 或 w 通用寄存器");
+    }
+    return 0;
+}
+
+// p_float3：fadd/fsub/fmul/fdiv Vd, Vn, Vm，三个寄存器必须同宽度。
+fn p_float3(p *Parser, op int) int {
+    let d Reg;
+    let n Reg;
+    let m Reg;
+    if (p_fp_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    if (p_fp_reg(p, &n) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    if (p_fp_reg(p, &m) != 0) { return -1; }
+    if (d.k != n.k || d.k != m.k) {
+        return p_err(p, "浮点三源指令的三个寄存器必须同宽度");
+    }
+    return p_write32(p, e_farith(op, fp_dbl(&d), d.num, n.num, m.num));
+}
+
+// p_float_insn：标量浮点指令的解析入口，由 p_instruction 分派。
+fn p_float_insn(p *Parser) int {
+    if (p_mn_is(p, "fadd") != 0) { return p_float3(p, 2); }
+    if (p_mn_is(p, "fsub") != 0) { return p_float3(p, 3); }
+    if (p_mn_is(p, "fmul") != 0) { return p_float3(p, 0); }
+    if (p_mn_is(p, "fdiv") != 0) { return p_float3(p, 1); }
+    if (p_mn_is(p, "fcmp") != 0) {
+        let n Reg;
+        let m Reg;
+        if (p_fp_reg(p, &n) != 0) { return -1; }
+        if (p_comma(p) != 0) { return -1; }
+        if (p_fp_reg(p, &m) != 0) { return -1; }
+        if (n.k != m.k) {
+            return p_err(p, "fcmp 的两个寄存器必须同宽度");
+        }
+        return p_write32(p, e_fcmp(fp_dbl(&n), n.num, m.num));
+    }
+    if (p_mn_is(p, "fcvt") != 0) {
+        let d Reg;
+        let n Reg;
+        if (p_fp_reg(p, &d) != 0) { return -1; }
+        if (p_comma(p) != 0) { return -1; }
+        if (p_fp_reg(p, &n) != 0) { return -1; }
+        if (d.k == n.k) {
+            return p_err(p, "fcvt 的两个寄存器宽度必须不同");
+        }
+        return p_write32(p, e_fcvt(fp_dbl(&n), fp_dbl(&d), d.num, n.num));
+    }
+    if (p_mn_is(p, "fcvtzs") != 0) {
+        let d Reg;
+        let n Reg;
+        if (p_gp_reg(p, &d) != 0) { return -1; }
+        if (p_comma(p) != 0) { return -1; }
+        if (p_fp_reg(p, &n) != 0) { return -1; }
+        return p_write32(p, e_fcvtzs(reg_is64(&d), fp_dbl(&n), d.num, n.num));
+    }
+    if (p_mn_is(p, "scvtf") != 0 || p_mn_is(p, "ucvtf") != 0) {
+        // 无符号形态：目标机器码只差 bit16，其余编码完全一样。
+        let uns int = 0;
+        if (p_mn_is(p, "ucvtf") != 0) { uns = 1; }
+        let d Reg;
+        let n Reg;
+        if (p_fp_reg(p, &d) != 0) { return -1; }
+        if (p_comma(p) != 0) { return -1; }
+        if (p_gp_reg(p, &n) != 0) { return -1; }
+        if (uns != 0) {
+            return p_write32(p, e_ucvtf(reg_is64(&n), fp_dbl(&d), d.num, n.num));
+        }
+        return p_write32(p, e_scvtf(reg_is64(&n), fp_dbl(&d), d.num, n.num));
+    }
+    if (p_mn_is(p, "fmov") != 0) {
+        let d Reg;
+        let n Reg;
+        if (p_fp_reg(p, &d) != 0) { return -1; }
+        if (p_comma(p) != 0) { return -1; }
+        if (p_gp_reg(p, &n) != 0) { return -1; }
+        return p_write32(p, e_fmov_g(reg_is64(&n), fp_dbl(&d), d.num, n.num));
+    }
+    return p_err(p, "不在冻结子集内的浮点指令");
+}
+
+// p_is_zero_operand：无操作数指令（nop / dsb / dmb / isb 及带立即数的系统指令）。
+fn p_is_zero_operand(p *Parser) int {
+    if (p_mn_is(p, "nop") != 0) { return 1; }
+    if (p_mn_is(p, "brk") != 0) { return 1; }
+    if (p_mn_is(p, "hlt") != 0) { return 1; }
+    if (p_mn_is(p, "svc") != 0) { return 1; }
+    if (p_mn_is(p, "dsb") != 0) { return 1; }
+    if (p_mn_is(p, "dmb") != 0) { return 1; }
+    if (p_mn_is(p, "isb") != 0) { return 1; }
+    return 0;
+}
+
+// p_is_mem_mn：单寄存器访存助记符集合。
+fn p_is_mem_mn(p *Parser) int {
+    if (p_mn_is(p, "ldr") != 0 || p_mn_is(p, "str") != 0) { return 1; }
+    if (p_mn_is(p, "ldrb") != 0 || p_mn_is(p, "strb") != 0) { return 1; }
+    if (p_mn_is(p, "ldrh") != 0 || p_mn_is(p, "strh") != 0) { return 1; }
+    if (p_mn_is(p, "ldrsb") != 0 || p_mn_is(p, "ldrsh") != 0) { return 1; }
+    if (p_mn_is(p, "ldrsw") != 0) { return 1; }
+    return 0;
+}
+
+// p_mov：mov 的三种形态——寄存器搬移、立即数、sp 之间搬移（add #0）。
+fn p_mov(p *Parser) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    if (p_peek(p) == TK_REG) {
+        let m Reg;
+        if (p_reg(p, &m) != 0) { return -1; }
+        let sf int = reg_is64(&d);
+        if (reg_is64(&m) != sf) {
+            return p_err(p, "mov 的两个寄存器位宽必须一致");
+        }
+        if (d.k == RK_SP || m.k == RK_SP) {
+            // sp 只能通过 add Rd, Rn, #0 搬移
+            let w i64 = e_addsub_imm(sf, 0, 0, 0, reg_field(&d),
+                                     reg_field(&m), 0);
+            return p_write32(p, w);
+        }
+        let w2 i64 = e_logical_reg(sf, OP_ORR, SH_LSL, 0, reg_field(&d), 31,
+                                   reg_field(&m));
+        return p_write32(p, w2);
+    }
+    let v i64 = 0;
+    if (p_expr_val(p, &v) != 0) { return -1; }
+    return p_mov_imm(p, reg_field(&d), reg_is64(&d), v);
+}
+
+// p_mvn：mvn Rd, Rm —— ORN Rd, zr, Rm。
+fn p_mvn(p *Parser) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let m Reg;
+    if (p_reg(p, &m) != 0) { return -1; }
+    let s Shift;
+    if (p_tail_shift(p, &s) != 0) { return -1; }
+    let k int = SH_LSL;
+    if (s.kind != SHF_NONE) { k = s.kind; }
+    let w i64 = e_logical_reg(reg_is64(&d), OP_ORN, k, s.amount,
+                              reg_field(&d), 31, reg_field(&m));
+    return p_write32(p, w);
+}
+
+// p_neg：neg/negs Rd, Rm [, shift] —— SUB/SUBS Rd, zr, Rm。
+fn p_neg(p *Parser, setflags int) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let m Reg;
+    if (p_reg(p, &m) != 0) { return -1; }
+    let s Shift;
+    if (p_tail_shift(p, &s) != 0) { return -1; }
+    let k int = SH_LSL;
+    if (s.kind != SHF_NONE) { k = s.kind; }
+    let w i64 = e_addsub_reg(reg_is64(&d), 1, setflags, k, s.amount,
+                             reg_field(&d), 31, reg_field(&m));
+    return p_write32(p, w);
+}
+
+// p_shift_imm：lsl/lsr/asr 的立即数形态；第三个操作数是寄存器时改走二元运算。
+fn p_shift_imm(p *Parser, opcode int, kind int) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let n Reg;
+    if (p_reg(p, &n) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    if (p_peek(p) == TK_REG) {
+        let m Reg;
+        if (p_reg(p, &m) != 0) { return -1; }
+        let w i64 = e_binop(reg_is64(&d), opcode, reg_field(&d),
+                            reg_field(&n), reg_field(&m));
+        return p_write32(p, w);
+    }
+    let v i64 = 0;
+    if (p_expr_val(p, &v) != 0) { return -1; }
+    let sf int = reg_is64(&d);
+    let w2 i64 = 0;
+    if (kind == 0) {
+        w2 = e_lsl_imm(sf, reg_field(&d), reg_field(&n), v);
+    } else if (kind == 1) {
+        w2 = e_lsr_imm(sf, reg_field(&d), reg_field(&n), v);
+    } else {
+        w2 = e_asr_imm(sf, reg_field(&d), reg_field(&n), v);
+    }
+    if (w2 < 0) {
+        return p_err(p, "移位量超出寄存器位宽");
+    }
+    return p_write32(p, w2);
+}
+
+// p_movw：movz/movk/movn Rd, #imm16 [, lsl #0/16/32/48]。
+fn p_movw(p *Parser, op int) int {
+    let d Reg;
+    if (p_reg(p, &d) != 0) { return -1; }
+    if (p_comma(p) != 0) { return -1; }
+    let v i64 = 0;
+    if (p_expr_val(p, &v) != 0) { return -1; }
+    let hw int = 0;
+    if (p_peek(p) == TK_COMMA) {
+        p_adv(p);
+        let s Shift;
+        if (p_need_shift(p, &s) != 0) { return -1; }
+        if (s.kind != SH_LSL || (s.amount % 16) != 0) {
+            return p_err(p, "宽位搬运的移位必须是 16 的倍数");
+        }
+        hw = (s.amount / 16).to_type(int);
+    }
+    let w i64 = e_movw(reg_is64(&d), op, hw, reg_field(&d), v);
+    if (w < 0) {
+        return p_err(p, "宽位搬运的立即数或移位超出范围");
+    }
+    return p_write32(p, w);
+}

@@ -63,7 +63,8 @@ def expected_artifacts(project: Path):
         artifacts = {
             f"{directory}/{name.group(1)}-{module}{suffix}"
             for module in modules
-            for directory, suffix in (("asm", ".s"), ("iface", ".s.i"))
+            for directory, suffix in (("asm", ".s"), ("iface", ".s.i"),
+                                      ("iface", ".s.ct"))
         }
         dependencies = re.search(
             r"(?ms)^\[dependencies\]\s*(.*?)(?=^\[|\Z)", manifest
@@ -112,7 +113,8 @@ def save_snapshot(build_dir: Path, snapshot_dir: Path):
     snapshot_dir.mkdir(parents=True)
 
     result = {}
-    for directory, suffix in (("asm", ".s"), ("iface", ".s.i")):
+    for directory, suffix in (("asm", ".s"), ("iface", ".s.i"),
+                              ("iface", ".s.ct")):
         source_dir = build_dir / directory
         if not source_dir.is_dir():
             continue
@@ -162,7 +164,8 @@ def self_test() -> bool:
     assert default_seed(root, "Darwin", "arm64") == root / "bin" / "yh"
     assert default_seed(root, "Linux", "aarch64") == root / "bin" / "yh-linux-arm64"
     assert default_seed(root, "Linux", "x86_64") == root / "bin" / "yh-linux-x64"
-    expected = {"asm/demo-lib.s", "iface/demo-lib.s.i"}
+    expected = {"asm/demo-lib.s", "iface/demo-lib.s.i",
+                "iface/demo-lib.s.ct"}
     good = {path: path.encode() for path in expected}
     assert not snapshot_errors([("cc2", good), ("cc3", good.copy())], expected)
     assert snapshot_errors([("cc2", {}), ("cc3", good)], expected)
@@ -189,7 +192,7 @@ def self_test() -> bool:
         (nested / "project.toml").write_text('[project]\nname = "nested"\n')
         (nested / "ir.yh").write_text("module ir;\n")
         assert expected_artifacts(project) == {
-            "asm/root-main.s", "iface/root-main.s.i"
+            "asm/root-main.s", "iface/root-main.s.i", "iface/root-main.s.ct"
         }
     with tempfile.TemporaryDirectory(dir=str(tmp_root)) as directory:
         project = Path(directory)
@@ -203,7 +206,8 @@ def self_test() -> bool:
         (dependency / "ir.yh").write_text("module ir;\n")
         assert expected_artifacts(project) == {
             "asm/root-main.s", "iface/root-main.s.i",
-            "asm/nested-ir.s", "iface/nested-ir.s.i",
+            "iface/root-main.s.ct", "asm/nested-ir.s", "iface/nested-ir.s.i",
+            "iface/nested-ir.s.ct",
         }
     with tempfile.TemporaryDirectory(dir=str(tmp_root)) as directory:
         seed = Path(directory) / "yh-test"
