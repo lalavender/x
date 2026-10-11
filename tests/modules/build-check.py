@@ -693,6 +693,11 @@ def main():
                    f"兼容配置运行失败: rc={run.returncode}\n{run.stderr[-400:]}")
             continue
         if c["kind"] == "ir":
+            # Windows 检出（core.autocrlf）下工作树是 CRLF：本用例随后会改写
+            # 源文件触发增量构建，行尾差异会使 IR 缓存键全量失效；先统一规范
+            # 化为 LF（与后续 751 行的字节比较基准一致，替换前 normalize 亦同）。
+            ir_main = dst / "main" / "main.yh"
+            ir_main.write_bytes(ir_main.read_bytes().replace(b"\r\n", b"\n"))
             r = sh([compiler, "build", "--stats"], cwd=dst)
             built = dst / ".build" / "irfront"
             build_stat = next((line for line in r.stderr.splitlines()
@@ -749,7 +754,9 @@ def main():
                    f"{rcheck.stderr[-400:]}")
 
             source = dst / "main" / "main.yh"
-            original = source.read_bytes()
+            # Windows 检出（core.autocrlf）下工作树是 CRLF，直接字节匹配会
+            # 失败；比较与改写都在规范化（LF）文本上进行。
+            original = source.read_bytes().replace(b"\r\n", b"\n")
             main_body = (b"return choose_true() + choose_false() + from_param(7) + "
                          b"local_left() + local_right()\n"
                          b"        + branch_update(10, true) + branch_update(10, false) "

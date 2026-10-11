@@ -4,6 +4,7 @@
 import argparse
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,9 +57,24 @@ def main():
     if forbidden:
         print(f"FAIL 产物仍从 C runtime 导入: {', '.join(forbidden)}")
         return 1
-    if not {"mmap", "munmap", "write"}.issubset(names):
-        print(f"FAIL Darwin 可执行文件未显式导入映射/输出 OS API: {sorted(names)}")
-        return 1
+    # 宿主产物导入边界：Darwin（Mach-O）经 libSystem 显式导入
+    # mmap/munmap/write；Linux（ELF）的 yh 运行时用 svc 直调，`nm -u`
+    # 只余 gcc/glibc 起动辅助（版本化 GLIBC 符号与 libgcc/起动别名），
+    # 显式 C 运行库导入已在上方拒绝。
+    darwin_host = sys.platform == "darwin"
+    # 集合元素与上方 lstrip("_") 后的名字一致（nm 的 _ 前缀已被剥除）。
+    aux_ok = {"gmon_start__", "libc_start_main",
+              "ITM_deregisterTMCloneTable", "ITM_registerTMCloneTable"}
+    if darwin_host:
+        if not {"mmap", "munmap", "write"}.issubset(names):
+            print(f"FAIL Darwin 可执行文件未显式导入映射/输出 OS API: {sorted(names)}")
+            return 1
+    else:
+        unexpected = sorted(n for n in names
+                            if "@" not in n and n not in aux_ok)
+        if unexpected:
+            print(f"FAIL Linux 可执行文件未预期的未定义符号: {unexpected}")
+            return 1
 
     linux_asm = run([compiler, "-target", "linux", "--emit-asm", "main.yh"], WORK)
     linux_syscalls = ("mov\tx8, #222" in linux_asm.stdout
@@ -74,7 +90,10 @@ def main():
     asm_path = WORK / "linux-main.s"
     obj_path = WORK / "linux-main.o"
     asm_path.write_text(linux_asm.stdout)
-    assembled = run(["clang", "-target", "aarch64-linux-gnu", "-c",
+    # 交叉组装：PATH 可能被项目工具链包装劫持（如 crossbin/clang → 交叉
+    # gcc，不识别 -target），Linux 上显式取系统 clang；Darwin 用默认命令。
+    clang_tool = "/usr/bin/clang" if sys.platform != "darwin" else "clang"
+    assembled = run([clang_tool, "-target", "aarch64-linux-gnu", "-c",
                      str(asm_path), "-o", str(obj_path)], WORK)
     if assembled.returncode != 0:
         print(f"FAIL Linux arm64 运行时汇编: rc={assembled.returncode}\n"
@@ -104,9 +123,16 @@ def main():
     if compiler_forbidden:
         print(f"FAIL 自编译器仍从 C runtime 导入: {', '.join(compiler_forbidden)}")
         return 1
-    if not {"mmap", "munmap"}.issubset(compiler_names):
-        print(f"FAIL 自编译器未导入审核后的映射 OS API: {sorted(compiler_names)}")
-        return 1
+    if darwin_host:
+        if not {"mmap", "munmap"}.issubset(compiler_names):
+            print(f"FAIL 自编译器未导入审核后的映射 OS API: {sorted(compiler_names)}")
+            return 1
+    else:
+        unexpected_c = sorted(n for n in compiler_names
+                              if "@" not in n and n not in aux_ok)
+        if unexpected_c:
+            print(f"FAIL Linux 自编译器未预期的未定义符号: {unexpected_c}")
+            return 1
 
     if PLAIN_WORK.exists():
         shutil.rmtree(PLAIN_WORK)
