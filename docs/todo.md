@@ -126,33 +126,30 @@ Linux/arm64 已在推进；macOS/arm64 要写第二个对象写出器（出口�
 
 仓库的语法/运行/模块/自举门此前只在 macOS 上跑过；本次用重建的
 Linux/aarch64 种子在 WSL 上跑出一批**既有**缺口（与 HEAD 基线一致，
-非本次改动引入）。CT6 交付期间（2026-10-09）复测：build-check 仍为 77/84、
-自举主门全过，缺口与基线一致。重建链最终种子已入库为
-`bin/yh-linux-arm64`（2026-10-09）。重建与验证路径见
-[WSL 种子链记录](01-finished/yh-WSL重建Linux-aarch64自举种子-2026-10-09.md)。
+非本次改动引入）。重建链最终种子已入库为 `bin/yh-linux-arm64`
+（2026-10-09）。**2026-10-11：build-check 7 项缺口全部修复**（宿主
+open 旗标按宿主平台取值、窄整型返回宽度归一、模块链接 -lm、
+clock_gettime 公共登记、libsbase fixture 平台化、CRLF 规范化），
+`make test` / `make selfhost-native`（含 build-check **84/84**、
+runtime-memory/lex-stats/scratch-isolation）在 WSL 全绿。重建与验证
+路径见 [WSL 种子链记录](01-finished/yh-WSL重建Linux-aarch64自举种子-2026-10-09.md)。
 
 - [ ] **yh_link 的 ELF64 方言要求 `sym@PAGE`，编译器 GNU 方言发 `:lo12:sym`**：
   模块汇编步一旦命中 `yh_link`（`argv0` 同目录或 PATH 上），绝对寻址的
   `adrp xN, sym` 就报「adrp 需要 sym@PAGE，adr 需要符号或数字」（编译器
   的 GNU 方言按 `adrp xN, sym` + `add xN, xN, :lo12:sym` 发射，GNU as 两者
   都接受，yc_link 的 ELF64 模式不受 `:lo12:`）。macOS 上 yh_link 走 `-t
-  darwin` 方言与发射一致，Linux 上从未让 yh_link 参战，故未暴露。影响：
-  `tests/selfhost/lex-stats.py`、`runtime-memory.py`、`link-cache.py` 与
-  部分项目用例。绕过：`YH_LINK=/nonexistent` 强制回落 gcc。修法二选一：
-  编译器 GNU 方言也发 `@PAGE/@PAGEOFF`（GNU as 接受），或 yh_link 的
-  ELF64 模式接受 `:lo12:` 与裸符号。
-- [ ] **build-check 在本机的 7 项失败待复核**（2026-10-09 实测 77/84；ct5b 的
-  13 个用例与 `u5-cold-builds` 经状态清理后已转绿，其余与本机缓存污染、宿主
-  行为相关，与未改动基线一致）：`s2-libs-core-modules`、
-  `r2c-ir-cache-fixture`、`r3-dup2-os-api`、`r3-capture-uses-host-file-flags`、
-  `r3-cross-target-source-selection`、`r3-linux-syscall-is-target-gated`、
-  `r3-getattrlistbulk-darwin-available`。多数是交叉目标行为探针（Darwin
-  目标在 Linux 宿主上的登记/源文件选择），需要在新检出（干净构建目录）
-  上复核后逐项修。
+  darwin` 方言与发射一致，Linux 上从未让 yh_link 参战，故未暴露。
+  绕过：`YH_LINK=/nonexistent` 强制回落 gcc（WSL 全套门禁即按此通过）。
+  修法二选一：编译器 GNU 方言也发 `@PAGE/@PAGEOFF`（GNU as 接受），或
+  yh_link 的 ELF64 模式接受 `:lo12:` 与裸符号。
 - [ ] **本机 ANTLR 参考语法门需要 Java + antlr4 工具 jar**：`tests/yh/check.py`
   默认模式在无 `~/.m2/.../antlr4-*-complete.jar` 时报「找不到本地 ANTLR jar
   缓存」；jar 需从 Maven Central 下载（antlr4-tools 的自动下载走 GitHub
   Release，本机不可达）。已手工放 jar 后 76/76 + 45/45 通过（含 CT6 语法语料）。
+  WSL 侧已配置：apt `antlr4`（4.9.2）+ `libantlr4-runtime-java` +
+  `libantlr3-runtime-java` + `python3-antlr4`（4.9 runtime）+ `/usr/local/bin/antlr4`
+  兼容 wrapper（吞掉 `-v` 并加载全部依赖 jar），本机 `make test` 第 1 层通过。
 
 ### Linux/AArch64 libc（2026-10-02，候选方案未实施）
 

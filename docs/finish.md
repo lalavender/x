@@ -2,6 +2,50 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-11 yh：WSL/Linux 全量门禁修复（build-check 84/84、make test/selfhost-native 全绿）
+
+- **背景**：Linux 种子入库（2026-10-09）后，WSL 上 `make test` /
+  `make selfhost-native` 仍有三处卡点（ANTLR 环境缺失、runtime-memory.py
+  的 Darwin 断言、build-check 7 项既有缺口）。本轮全部修复：
+- **编译器缺陷**：
+  - **宿主文件操作按宿主平台取值**：新增 `gen.tg_host_darwin()`（进程运行
+    平台探测），`driver/module_build/iface/iface_ct/ast_ir_cache` 的 open
+    旗标从「目标方言 tg_darwin」改为宿主——交叉目标（`-target darwin`）
+    不再把 Darwin 的 O_CREAT 位值 0x601 发给 Linux 内核（strace 实证：
+    Linux 上 0x601 = O_APPEND|O_TRUNC|O_WRONLY、无 O_CREAT → 写接口
+    ENOENT），修复 r3-capture-uses-host-file-flags / r3-cross-target-
+    source-selection / r3-linux-syscall-is-target-gated /
+    r3-getattrlistbulk-darwin-available 四例；
+  - **窄整型返回宽度归一**：`sem_call`（yh ABI 调用点）对窄整型返回补
+    sbfx/ubfx（与 sem_cabi_call 同一约定）——extern/prelude 实现只保证
+    w0 有效，64 位比较/压栈此前读到垃圾高位（反汇编对比 add2〔内部〕
+    与 dup2〔glibc〕后定位；`dup2(-1,1) == -1` 恒假、保存局部后正确），
+    修复 r3-dup2-os-api；
+  - **模块链接追加 -lm**（Linux 宿主；glibc 数学库分离，libs/math 的
+    cos/pow 链接失败；Darwin libSystem 已含——按宿主取）；
+  - **prelude clock_gettime 公共登记**（原仅 Darwin 目标；libs/time 引用，
+    Linux 经 glibc 解析）——修复 s2-libs-core-modules 编译段。
+- **测试脚本/语料平台适配**：
+  - `runtime-memory.py` 宿主感知：Darwin 断言按 sys.platform 分支，
+    Linux/ELF 检查起动辅助符号白名单（gmon_start__/libc_start_main/
+    ITM_* 及版本化 GLIBC 符号），交叉组装显式 `/usr/bin/clang`；
+  - `build-check.py` 对 Windows 检出（core.autocrlf）规范化 CRLF 后再
+    字节匹配与源改写（r2c-ir-cache-fixture / r2c-function-ir-cache-hit
+    先前因工作树 CRLF 导致源改写改变缓存键、全量失效）；
+  - `libsbase` fixture 的文件创建标志按 CT0 目标常量平台化（0x241 /
+    0x601）。
+- **WSL 环境**（apt/pip，不入库）：`antlr4`（4.9.2）+ `libantlr4-runtime-
+  java` + `libantlr3-runtime-java` + `python3-antlr4` + `antlr4-python3-
+  runtime==4.9.2`（pip）；`/usr/local/bin/antlr4` 兼容 wrapper（吞掉
+  `-v` 并加载全部依赖 jar）。本机 `make test` 第 1 层（ANTLR 参考语法）
+  通过（76/76 + 45/45）。
+- **验证**（WSL2 x86_64 + qemu-user/binfmt，`SEED=bin/yh-linux-arm64 make`）：
+  `make test` 全绿（ANTLR + 编译器语法 + 运行 292/292）；`make
+  selfhost-native` 全绿（native-selfhost 全过、scratch-isolation 8/8、
+  lex-stats、runtime-memory、**build-check project cases 84/84**）。
+- **提交**：`863c8b0`（12 files，+98/−31）。todo「Linux 平台缺口」区
+  的 build-check 条目移除，yh_link 方言与 ANTLR 条目保留并注明现状。
+
 ## 2026-10-09 yh：Linux/aarch64 自举种子入库（`bin/yh-linux-arm64`）
 
 - **入库**：WSL 重建链的最终种子 `tmp/boot/chain/yh-19e2e3a` 以
