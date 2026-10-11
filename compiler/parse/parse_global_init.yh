@@ -1,6 +1,7 @@
 module parse;
 import gen;
 import comptime;
+import lex;
 
 // ============================================================================
 // parse_global_init.yh —— 绑定与全局初始化
@@ -107,9 +108,10 @@ pub fn parse_binding(global int, kind int) int {
 }
 
 // record_aggregate_const_src：为聚合（结构体/数组）常量记下**初始化式源文本**
-// （const_expr_kind = 4）。聚合常量的值在编译期不可得（数据在发射阶段才写出），
-// 所以跨模块 CT 闭包改为重放源文本、由导入侧重新解析。范围由首尾 token 求得。
-fn record_aggregate_const_src(idx int, first int, after int) int {
+// （const_expr_kind：4 = 字面量初始化，5 = $ 调用初始化）。聚合常量的值在
+// 编译期不可得（数据在发射阶段才写出），所以跨模块 CT 闭包与 .s.i 导出都
+// 改为重放源文本、由导入侧重新解析/执行。范围由首尾 token 求得。
+fn record_aggregate_const_src(idx int, first int, after int, kind int) int {
     let gs *gen.GenState = gen.G();
     if (after <= first) { return 0; }
     let start int = gs.c_toks[first].start;
@@ -120,7 +122,7 @@ fn record_aggregate_const_src(idx int, first int, after int) int {
     if (off < 0) { return -1; }
     gs.c_syms[idx].const_expr_off = off;
     gs.c_syms[idx].const_expr_len = span;
-    gs.c_syms[idx].const_expr_kind = 4;
+    gs.c_syms[idx].const_expr_kind = kind;
     return 0;
 }
 
@@ -131,23 +133,31 @@ pub fn parse_global_init(idx int, tid int, kind int) int {
     let fk int = gs.t_types[tid].kind;
     if (fk == gen.TY_STRUCT) {
         // const 聚合常量：与全局变量走同一条初始化路径（发射到数据段，运行期只读）。
-        // 模块模式只拒绝 **pub** 的：接口（.s.i）的常量导出只能传标量 cval，覆盖不了聚合，
-        // 私有常量不经过接口，可安全放行。
-        if (kind == gen.SYM_CONST && gs.c_module_mode != 0
-            && (gs.c_syms[idx].flags & gen.F_PUB) != 0) {
-            return gen.sem_err("pub const 聚合常量暂不支持跨模块导出");
-        }
+        // 字面量与 $ 调用形态的 pub/私有常量都放行：pub 的 $ 调用形态经
+        // .s.i 重放调用文本并登记闭包可达种子（见 parse_global_comptime_aggregate_ex）。
         if (p_cur() == gen.TK_DOLLAR) {
-            return parse_global_comptime_aggregate(idx, tid);
+            return parse_global_comptime_aggregate_ex(idx, tid, kind, init_pos);
         }
-        if (parse_global_struct_init(idx, tid) != 0) { return -1; }
+        // 编译期模型：字面量的元素值在前端已知，建成 CtAggregate 供编译期读字段与
+        // 下标（聚合常量的 cval 只是数据段标签，见 comptime/ct_global_agg.yh）。
+        let ct_obj i64 = 0;
+        if (kind == gen.SYM_CONST
+            && comptime.ct_global_agg_modelable(tid, 0) != 0) {
+            ct_obj = comptime.ct_global_agg_new(tid, gs.t_types[tid].len);
+            if (ct_obj == 0) { return -1; }
+        }
+        if (parse_global_struct_init(idx, tid, ct_obj) != 0) { return -1; }
         // 聚合常量没有标量值，但数据已发射到数据段：标记为已就绪，避免读取时
         // 被「编译期常量尚未就绪」拦下（运行期按全局符号地址访问字段）。
         if (kind == gen.SYM_CONST) {
-            if (record_aggregate_const_src(idx, init_pos, gs.c_pos) != 0) {
+            if (record_aggregate_const_src(idx, init_pos, gs.c_pos, 4) != 0) {
                 return -1;
             }
             gs.c_syms[idx].const_ready = 1;
+            if (ct_obj != 0
+                && comptime.ct_global_agg_register(idx, ct_obj) != 0) {
+                return -1;
+            }
         }
         return 0;
     }
@@ -155,25 +165,35 @@ pub fn parse_global_init(idx int, tid int, kind int) int {
         return gen.sem_err("union 全局初始化暂不支持");
     }
     if (fk == gen.TY_ARRAY || fk == gen.TY_SLICE) {
-        // const 数组/切片常量：与结构体同理，单文件走变量同一条发射路径；
-        // 模块模式同样只拒绝 **pub** 的（理由见上）。
-        if (kind == gen.SYM_CONST && gs.c_module_mode != 0
-            && (gs.c_syms[idx].flags & gen.F_PUB) != 0) {
-            return gen.sem_err("pub const 聚合常量暂不支持跨模块导出");
-        }
+        // const 数组/切片常量：与结构体同理走变量同一条发射路径；pub 的
+        // $ 调用形态经 .s.i 重放调用文本跨模块导出（见 aggregate_ex）。
         if (p_cur() == gen.TK_DOLLAR) {
-            return parse_global_comptime_aggregate(idx, tid);
+            return parse_global_comptime_aggregate_ex(idx, tid, kind, init_pos);
         }
         if (p_cur() != gen.TK_LBRACKET) {
             return gen.sem_err("全局数组/切片初始化仅支持字面量（零初始化可用）");
         }
-        if (parse_global_array_init(idx, tid, fk) != 0) { return -1; }
+        // 定长数组常量在外部按类型长度建模型；切片常量的元素个数只有解析完
+        // 字面量才知道，模型对象在 parse_global_array_init 内部按 count 创建
+        // （CtValue 以聚合对象的 count/values 承载切片视图，无需「地址+长度」）。
+        let ct_obj i64 = 0;
+        if (kind == gen.SYM_CONST && fk == gen.TY_ARRAY
+            && comptime.ct_global_agg_modelable(tid, 0) != 0) {
+            ct_obj = comptime.ct_global_agg_new(gs.t_types[tid].elem,
+                gs.t_types[tid].len);
+            if (ct_obj == 0) { return -1; }
+        }
+        if (parse_global_array_init(idx, tid, fk, &ct_obj) != 0) { return -1; }
         // 聚合常量：数据已发射，标记已就绪供运行期按符号地址读取。
         if (kind == gen.SYM_CONST) {
-            if (record_aggregate_const_src(idx, init_pos, gs.c_pos) != 0) {
+            if (record_aggregate_const_src(idx, init_pos, gs.c_pos, 4) != 0) {
                 return -1;
             }
             gs.c_syms[idx].const_ready = 1;
+            if (ct_obj != 0
+                && comptime.ct_global_agg_register(idx, ct_obj) != 0) {
+                return -1;
+            }
         }
         return 0;
     }
@@ -275,6 +295,133 @@ pub fn parse_global_init(idx int, tid int, kind int) int {
     return gen.em_data_scalar(tid, r.ival);
 }
 
+// parse_global_comptime_aggregate_ex：顶层 CT 聚合初始化（$ 调用形态）。
+// pub + 模块模式：提供方额外登记初始化式里的同模块 `$fn` 调用目标为闭包
+// 可达种子（.s.ct 需要把 fn 正文带给导入方）并记录初始化式源文本
+// （const_expr_kind = 5，.s.i 按此重放调用文本）；导入侧（c_iface_load）
+// 不立即执行——.s.i 先于 .s.ct 加载、调用目标（隐藏符号）尚未登记——只
+// 登记延迟执行项，由 module_worker 在接口闭包加载完成后统一执行。
+fn parse_global_comptime_aggregate_ex(idx int, tid int, kind int,
+    init_pos int) int {
+    let gs *gen.GenState = gen.G();
+    let pub_ex int = (kind == gen.SYM_CONST && gs.c_module_mode != 0
+        && (gs.c_syms[idx].flags & gen.F_PUB) != 0).to_type(int);
+    if (gs.c_iface_load != 0) {
+        // 接口加载阶段：pub 形态（.s.i）的调用目标隐藏符号尚未登记，
+        // 私有隐藏形态（.s.ct 闭包常量）的目标正文尚未捕获——两者都推迟到
+        // 接口闭包加载完成之后（module_worker 调 pub_agg_deferred_run）。
+        // 初始化式 token 在此跳过（延迟执行时按起点重新解析），调用方随后
+        // 正常消费声明末尾的 ';'。
+        let dfirst int = gs.c_pos;
+        if (skip_init() != 0) { return -1; }
+        return pub_agg_deferred_add(idx, dfirst);
+    }
+    if (pub_ex != 0) {
+        // 只支持同模块 `$fn(...)`：模块限定形态（$m.f）的导出重写
+        // （.s.i 调用文本按隐藏符号改名）首版不覆盖。
+        if (gs.c_toks[init_pos].kind != gen.TK_DOLLAR
+            || init_pos + 1 >= gs.c_tok_n
+            || gs.c_toks[init_pos + 1].kind != gen.TOK_IDENT
+            || (init_pos + 2 < gs.c_tok_n
+                && gs.c_toks[init_pos + 2].kind == gen.TK_DOT)) {
+            return gen.sem_err("pub 聚合常量的 $ 初始化暂只支持同模块函数调用");
+        }
+        let fname_start int = gs.c_toks[init_pos + 1].start;
+        let fname_len int = gs.c_toks[init_pos + 1].len;
+        let fnsym int = gen.sym_lookup(fname_start, fname_len);
+        if (fnsym < 0 || (gs.c_syms[fnsym].flags & gen.F_COMPTIME) == 0
+            || comptime.ct_pub_agg_fn_add(fnsym) != 0) { return -1; }
+    }
+    let status int = parse_global_comptime_aggregate(idx, tid);
+    if (status != 0) { return -1; }
+    if (kind == gen.SYM_CONST) {
+        // 与字面量初始化路径一致：聚合常量数据已发射、模型已登记，
+        // 标记就绪供正文闭包引用（iface_ct_emit_const 要求 const_ready）。
+        gs.c_syms[idx].const_ready = 1;
+    }
+    if (pub_ex != 0
+        && record_aggregate_const_src(idx, init_pos, gs.c_pos, 5) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+// pub_agg_deferred_add：登记导入侧 pub $ 聚合常量的延迟执行项（记录 .s.i
+// 路径与初始化式 token 起点）。执行见 pub_agg_deferred_run。
+pub fn pub_agg_deferred_add(idx int, first int) int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_pub_agg_dep_n == gs.c_pub_agg_dep_cap) {
+        let ncap int = gs.c_pub_agg_dep_cap * 2;
+        if (ncap == 0) { ncap = 8; }
+        let nd *gen.PubAggDeferred = malloc(
+            (ncap * sizeof(gen.PubAggDeferred)).to_type(u64))
+            .to_type(*gen.PubAggDeferred);
+        if (nd == 0) { return gen.fail("pub 聚合常量延迟表分配失败"); }
+        if (gs.c_pub_agg_dep_n > 0) {
+            memcpy(nd, gs.c_pub_agg_dep,
+                (gs.c_pub_agg_dep_n * sizeof(gen.PubAggDeferred))
+                    .to_type(u64));
+        }
+        if (gs.c_pub_agg_dep != 0) {
+            free(gs.c_pub_agg_dep.to_type(*void));
+        }
+        gs.c_pub_agg_dep = nd;
+        gs.c_pub_agg_dep_cap = ncap;
+    }
+    let item *gen.PubAggDeferred = &gs.c_pub_agg_dep[gs.c_pub_agg_dep_n];
+    let plen int = 0;
+    for gs.c_path[plen] != 0 { plen += 1; }
+    let poff int = gen.tml_intern_str(gs.c_path.to_type(*u8), 0, plen);
+    if (poff < 0) { return gen.fail("pub 聚合常量路径登记失败"); }
+    item.sym = idx;
+    item.first = first;
+    item.after = -1;
+    item.path_off = poff;
+    item.path_len = plen;
+    gs.c_pub_agg_dep_n += 1;
+    return 0;
+}
+
+// pub_agg_deferred_run：在 .s.ct 接口闭包加载完成后执行全部延迟项。
+// 调用目标（闭包隐藏符号）此时已登记；对每个延迟项重新读 .s.i 源、
+// 词法化后按登记的 token 起点解析初始化式并执行（建模 + 本地物化，
+// 与提供方 parse_global_comptime_aggregate 同一路径）。
+pub fn pub_agg_deferred_run() int {
+    let gs *gen.GenState = gen.G();
+    let i int = 0;
+    for i < gs.c_pub_agg_dep_n {
+        let item gen.PubAggDeferred = gs.c_pub_agg_dep[i];
+        if (item.sym < 0) { i += 1; continue; }
+        if (item.first < 0 || item.sym >= gs.c_sym_n
+            || item.path_off <= 0 || item.path_len <= 0) {
+            return gen.fail("内部错误：pub 聚合常量延迟项无效");
+        }
+        let path *char = (gs.np_data + item.path_off).to_type(*char);
+        if (gen.read_source(path) != 0) { return -1; }
+        gs.c_tok_n = 0;
+        gs.c_pos = 0;
+        gs.c_iface_load = 1;
+        // 延迟解析只求值、不参与 AST 收集（此刻没有有效的前端文件身份）。
+        let saved_capture int = gs.c_ast_capture;
+        gs.c_ast_capture = 0;
+        if (lex.lex_all() != 0) {
+            gs.c_ast_capture = saved_capture;
+            gs.c_iface_load = 0;
+            return -1;
+        }
+        gs.c_pos = item.first;
+        let tid int = gs.c_syms[item.sym].type_id;
+        let status int = parse_global_comptime_aggregate(item.sym, tid);
+        gs.c_ast_capture = saved_capture;
+        gs.c_iface_load = 0;
+        if (status != 0) { return -1; }
+        gs.c_syms[item.sym].const_ready = 1;
+        gs.c_pub_agg_dep[i].sym = -1;
+        i += 1;
+    }
+    return 0;
+}
+
 // parse_global_comptime_aggregate：折叠顶层 CT 聚合结果并写入全局数据符号。
 pub fn parse_global_comptime_aggregate(idx int, tid int) int {
     let gs *gen.GenState = gen.G();
@@ -293,7 +440,16 @@ pub fn parse_global_comptime_aggregate(idx int, tid int) int {
     value.value = result.ival;
     value.is_lit = result.is_lit;
     value.lit_big = result.lit_big;
-    return comptime.ct_ir_data_emit_global(idx, tid, &value);
+    if (comptime.ct_ir_data_emit_global(idx, tid, &value) != 0) { return -1; }
+    // 顶层 CT 结果本身就是受支持的 CtAggregate 对象：登记成编译期模型，
+    // 同一编译单元内再引用该常量时可直接读元素/字段，不必重跑 CT 调用。
+    let ck int = gs.t_types[tid].kind;
+    if (ck == gen.TY_ARRAY || ck == gen.TY_STRUCT) {
+        if (comptime.ct_global_agg_register(idx, result.ival) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 // parse_global_ct_const_probe：提前折叠已登记的简单 CT 整数常量供后续数组布局使用。
@@ -366,7 +522,7 @@ pub fn sem_global_zero(idx int, tid int) int {
     return 0;
 }
 
-pub fn parse_global_array_init(idx int, tid int, fk int) int {
+pub fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64) int {
     let gs *gen.GenState = gen.G();
     let elem int = gs.t_types[tid].elem;
     let esz int = gs.t_types[elem].size;
@@ -438,6 +594,27 @@ pub fn parse_global_array_init(idx int, tid int, fk int) int {
     if (fk == gen.TY_ARRAY && count != gs.t_types[tid].len) {
         return gen.sem_err("数组字面量元素个数与数组长度不一致");
     }
+    // 切片常量没有类型内建长度：解析完字面量才知元素个数，模型在这里创建
+    // （数组的模型已在 parse_global_init 按类型长度创建）。
+    if (fk == gen.TY_SLICE && ct_obj[0] == 0
+        && gs.c_syms[idx].kind == gen.SYM_CONST
+        && comptime.ct_global_agg_modelable(elem, 0) != 0) {
+        ct_obj[0] = comptime.ct_global_agg_new(elem, count);
+        if (ct_obj[0] == 0) { return -1; }
+    }
+    // 编译期模型：按源码顺序填入元素值（整数值或 f64 位模式）。
+    if (ct_obj[0] != 0) {
+        let mi int = 0;
+        for mi < count {
+            if (kinds[mi] != 0) {
+                return gen.sem_err("内部错误：指针元素不应进入全局聚合常量模型");
+            }
+            if (comptime.ct_global_agg_set(ct_obj[0], mi, elem, vals[mi]) != 0) {
+                return -1;
+            }
+            mi += 1;
+        }
+    }
     // 发射变量数据
     let lbl int = 0;
     if (fk == gen.TY_SLICE) {
@@ -499,7 +676,7 @@ pub fn parse_global_array_init(idx int, tid int, fk int) int {
     return 0;
 }
 
-pub fn parse_global_struct_init(idx int, tid int) int {
+pub fn parse_global_struct_init(idx int, tid int, ct_obj i64) int {
     let gs *gen.GenState = gen.G();
     if (p_cur() != gen.TOK_IDENT) {
         return gen.sem_err("全局结构体初始化需要「类型名 { 字段 }」字面量");
@@ -517,7 +694,7 @@ pub fn parse_global_struct_init(idx int, tid int) int {
         return -1;
     }
     let cur int = 0;
-    if (parse_global_struct_body(tid, 0, &cur) != 0) {
+    if (parse_global_struct_body(tid, 0, &cur, ct_obj) != 0) {
         return -1;
     }
     if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
@@ -535,7 +712,7 @@ pub fn parse_global_struct_init(idx int, tid int) int {
     return 0;
 }
 
-pub fn parse_global_struct_body(tid int, base int, cur *int) int {
+pub fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64) int {
     let gs *gen.GenState = gen.G();
     if (p_cur() == gen.TK_RBRACE) {
         return gen.err_tok("结构体字面量不能为空");
@@ -568,7 +745,8 @@ pub fn parse_global_struct_body(tid int, base int, cur *int) int {
             fidx = gs.t_types[tid].sub + fpos;
             fpos += 1;
         }
-        if (parse_global_field_value(fidx, base, cur) != 0) {
+        if (parse_global_field_value(fidx, base, cur, ct_obj,
+                fidx - gs.t_types[tid].sub) != 0) {
             return -1;
         }
         if (p_cur() == gen.TK_COMMA) {
@@ -583,7 +761,8 @@ pub fn parse_global_struct_body(tid int, base int, cur *int) int {
     return 0;
 }
 
-pub fn parse_global_field_value(fidx int, base int, cur *int) int {
+pub fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
+    ct_index int) int {
     let gs *gen.GenState = gen.G();
     let ftid int = gs.t_fields[fidx].type_id;
     let foff int = base + gs.t_fields[fidx].offset;
@@ -615,7 +794,13 @@ pub fn parse_global_field_value(fidx int, base int, cur *int) int {
         if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
             return -1;
         }
-        if (parse_global_struct_body(ftid, foff, cur) != 0) {
+        // 嵌套结构体的编译期模型：先建子对象，填完再挂到父对象字段上。
+        let ct_child i64 = 0;
+        if (ct_obj != 0) {
+            ct_child = comptime.ct_global_agg_new(ftid, gs.t_types[ftid].len);
+            if (ct_child == 0) { return -1; }
+        }
+        if (parse_global_struct_body(ftid, foff, cur, ct_child) != 0) {
             return -1;
         }
         if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
@@ -633,6 +818,11 @@ pub fn parse_global_field_value(fidx int, base int, cur *int) int {
             }
         }
         cur[0] = foff + gs.t_types[ftid].size;
+        if (ct_obj != 0
+            && comptime.ct_global_agg_set_obj(ct_obj, ct_index, ftid,
+                ct_child) != 0) {
+            return -1;
+        }
         return 0;
     }
     if (fk == gen.TY_UNION) {
@@ -709,6 +899,11 @@ pub fn parse_global_field_value(fidx int, base int, cur *int) int {
             return -1;
         }
         r = gen.dat_put('\n');
+        if (r == 0 && ct_obj != 0
+            && comptime.ct_global_agg_set(ct_obj, ct_index, ftid,
+                fv2.fval_bits) != 0) {
+            return -1;
+        }
     } else {
         gs.c_fold += 1;
         let v gen.Res;
@@ -724,6 +919,11 @@ pub fn parse_global_field_value(fidx int, base int, cur *int) int {
             return -1;
         }
         r = gen.em_data_scalar(ftid, v.ival);
+        if (r == 0 && ct_obj != 0
+            && comptime.ct_global_agg_set(ct_obj, ct_index, ftid,
+                v.ival) != 0) {
+            return -1;
+        }
     }
     if (r != 0) {
         return -1;

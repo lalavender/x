@@ -7,6 +7,8 @@ pub fn ct_reset() void {
     ct_layout_reset();
     ct_ir_result_pool_clear();
     ct_pool_reset();
+    ct_global_agg_reset();
+    ct_pub_agg_fn_n = 0;
     let i int = 0;
     for i < ct_function_n {
         if (ct_functions[i].params != 0) { free(ct_functions[i].params.to_type(*void)); }
@@ -389,6 +391,16 @@ pub fn ct_iface_local_type_target(row int, token_index int) int {
     for i < item.ir_binding_after {
         let binding CtBinding = ct_ir_bindings[i];
         if (binding.is_param == 0 && binding.name_token + 1 == token_index) {
+            // for-in 元素/下标绑定后跟 `in` 或 `,`，不是「名字 <类型> =」声明：
+            // 局部类型改写只针对声明形态，循环绑定在改写后的正文里保持原样
+            // （否则闭包发射会在这里找不到初始化等号而报「无法确定类型范围」）。
+            // token_index 是绝对 token 下标；body[] 以函数体左花括号为 0 基。
+            let rel int = token_index - item.body_token_first;
+            if (rel >= 0 && rel < item.body_n
+                && (item.body[rel].kind == gen.TK_IN
+                    || item.body[rel].kind == gen.TK_COMMA)) {
+                return -1;
+            }
             return binding.sym_type_id;
         }
         i += 1;
@@ -587,4 +599,37 @@ fn ct_unsupported_diagnostic(code int) int {
         return gen.sem_err("编译期函数正文含缺少类型的表达式（typed IR 子集要求完整类型）");
     }
     return gen.sem_err("编译期函数正文不在受支持的 typed IR 子集内");
+}
+
+// —— pub 聚合常量（$ 调用初始化）的闭包可达种子 ——
+// 提供方把 `pub const TBL [3]int = $mk();` 初始化式里调用的编译期函数登记
+// 到这里（仅模块模式、pub、`$IDENT(...)` 同模块形态），.s.ct 闭包发射时
+// 把它们作为初始可达种子，保证导入方重放声明后能执行同一调用。
+let ct_pub_agg_fn [64]int;
+let ct_pub_agg_fn_n int = 0;
+
+// ct_pub_agg_fn_add：登记一个 pub 聚合常量初始化式调用的编译期函数。
+pub fn ct_pub_agg_fn_add(sym_id int) int {
+    if (sym_id < 0 || ct_pub_agg_fn_n >= 64) {
+        return gen.sem_err("pub 聚合常量的编译期调用目标超过 64 个");
+    }
+    let i int = 0;
+    for i < ct_pub_agg_fn_n {
+        if (ct_pub_agg_fn[i] == sym_id) { return 0; }
+        i += 1;
+    }
+    ct_pub_agg_fn[ct_pub_agg_fn_n] = sym_id;
+    ct_pub_agg_fn_n += 1;
+    return 0;
+}
+
+// ct_pub_agg_fn_count：登记的 pub 聚合常量调用目标数量。
+pub fn ct_pub_agg_fn_count() int {
+    return ct_pub_agg_fn_n;
+}
+
+// ct_pub_agg_fn_at：第 ordinal 个 pub 聚合常量调用目标符号编号。
+pub fn ct_pub_agg_fn_at(ordinal int) int {
+    if (ordinal < 0 || ordinal >= ct_pub_agg_fn_n) { return -1; }
+    return ct_pub_agg_fn[ordinal];
 }

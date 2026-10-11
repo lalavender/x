@@ -6,8 +6,9 @@
 
 **0.0.3 起仓库已删除 src/（C 版 stage0）与 bootstrap/，进入滚动自举**：
 编译器源码在 `compiler/`（gen/lex/parse/cmd/ir/backend 多模块的 project.toml 项目），
-构建只依赖入库种子 `bin/yh`（上一版自举编译器二进制，SHA-256 见
-`bin/yh.sha256`）。
+构建只依赖**宿主平台对应的入库种子**：macOS/arm64 用 `bin/yh`（Mach-O，
+SHA-256 见 `bin/yh.sha256`），Linux/aarch64 用 `bin/yh-linux-arm64`（ELF，
+SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
 
 - 日常构建：`make`（= `bin/yh` 对 `compiler/` 项目 `yh build`，冷编，
   产出根目录 `yh`）；日常验证以 `make selfhost-native` 为主门
@@ -15,9 +16,11 @@
 - 滚种子：`make test` 与 `make selfhost-native` 全绿后执行 `make seed`
   （把新 yh 覆盖 bin/yh 并更新哈希）。源码无法在仓库内独立
   重建编译器，正确性由固定点与语料门保证，git 历史保留每一代种子。
-- stage0 的差分参照与 `-run`/交叉 ELF 能力随删除终结；Linux CI/开发
-  需另行建立（Linux 版含模块系统的 yh 待发布归档）。需要 Linux 环境
-  验证时优先用容器而非虚拟机，见下文《Linux 环境验证（容器方案）》。
+- stage0 的差分参照与 `-run`/交叉 ELF 能力随删除终结；Linux/aarch64 ELF
+  种子已入库（2026-10-09，`bin/yh-linux-arm64`），Linux 上可直接
+  `make`/`make test`/`make selfhost-native`；Linux CI 流程按需重建。
+  需要 Linux 环境验证时优先用容器而非虚拟机，见下文
+  《Linux 环境验证（容器方案）》。
 - 自举侧新增/修改行为时，须在 `tests/yh-run/` 或 `tests/modules/`
   新增 `.yh` 用例并运行 `make`。决策依据见 ADR-0006/0007。
 
@@ -32,7 +35,8 @@
 ## 目录
 
 - `compiler/` —— 编译器源码（gen/lex/parse/cmd/ir/backend 多模块的 project.toml 项目）
-- `bin/yh` + `bin/yh.sha256` —— 入库种子与哈希
+- `bin/yh` + `bin/yh.sha256` —— 入库种子与哈希（Darwin/arm64）
+- `bin/yh-linux-arm64` + `bin/yh-linux-arm64.sha256` —— Linux/aarch64 入库种子与哈希
 - `docs/03-design/` 语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
   `docs/adr/` 决策、`docs/finish.md` 完成流水、`docs/todo.md` 待办
 - `tests/yh/` 语法语料、`tests/yh-run/` 语义运行语料、
@@ -42,9 +46,13 @@
 
 ## 编译流程
 
-1. `bin/yh`（上一代编译器）对 `compiler/` 执行 `yh build`，冷编产出根 `yh`；
+1. 宿主平台种子（macOS/arm64：`bin/yh`；Linux/arm64：`bin/yh-linux-arm64`）
+   对 `compiler/` 执行 `yh build`，冷编产出根 `yh`；x86_64 Linux 宿主无
+   x64 后端（`compiler/backend/` 只有 `arm64.yh`），须显式
+   `SEED=bin/yh-linux-arm64`（配合 qemu-user/binfmt 模拟 arm64）。
 2. 新 `yh` 再自编一次，两次产物的模块 `.s`/`.s.i` 必须逐字节相同（固定点）；
-3. `make seed` 把验证过的 `yh` 覆盖回 `bin/yh`，进入下一代。
+3. `make seed` 把验证过的 `yh` 覆盖回宿主平台种子（Linux 上为
+   `bin/yh-linux-arm64`），进入下一代。
 
 ## 使用
 
@@ -81,12 +89,15 @@ make seed               # 滚种子（仅在全绿后）
 
 ### 前提事实（先读再动手）
 
-- 当前入库种子 `bin/yh` 是 **darwin/arm64（Mach-O）二进制，不能在
-  Linux 容器内运行**。在 Linux ELF 种子（`bin/yh-linux-arm64`，
-  待发布归档）入库之前，容器内无法跑 `yh build`/自举门，只能做
-  产物级验证（汇编/ELF 检查、运行已交叉产出的测试程序等）。
-- Makefile 按宿主自动选种子：Linux 宿主取 `bin/yh-linux-$(SEED_ARCH)`；
-  产物形态随宿主（Darwin → Mach-O，Linux → ELF）。平台矩阵见
+- 入库种子按平台分文件：`bin/yh` 是 **darwin/arm64（Mach-O）**，不能
+  在 Linux 里运行（`Exec format error`）；`bin/yh-linux-arm64` 是
+  **linux/aarch64（ELF）**，2026-10-09 入库，Linux 容器/宿主内可直接跑
+  `yh build` 与自举门。
+- Makefile 按宿主自动选种子：Linux/arm64 宿主取 `bin/yh-linux-arm64`；
+  **x86_64 Linux 宿主没有 x64 种子**（x64 后端未实施），须显式
+  `SEED=bin/yh-linux-arm64`（arm64 容器原生跑，或 x86_64 上配
+  qemu-user/binfmt 执行 arm64 ELF）。产物形态随宿主（Darwin →
+  Mach-O，Linux → ELF）。平台矩阵见
   `docs/02-plan/yh-link平台与架构矩阵方案.md`。
 - 宿主是 Apple Silicon（darwin/arm64），系统 container 默认
   arch=arm64 / os=linux，直接用 alpine/debian 等多架构 OCI 镜像即可，
@@ -113,9 +124,13 @@ apt-get update && apt-get install -y python3 build-essential
 故障处理：卡死的容器用 `container ls -a` 查看、
 `container rm --force <id>` 清理；服务异常看 `container system logs`。
 
-有 Linux ELF 种子后的容器内自举验证（预期用法）：
+Linux/arm64 容器内的自举验证（种子已入库；arm64 原生宿主缺省即选
+`bin/yh-linux-arm64`，无需覆盖）：
 
 ```bash
+make test
+make selfhost-native
+# x86_64 宿主/CI 的等价形式（配 qemu-user/binfmt 后）：
 SEED=bin/yh-linux-arm64 make test
 SEED=bin/yh-linux-arm64 make selfhost-native
 ```

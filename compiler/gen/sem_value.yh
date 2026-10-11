@@ -306,13 +306,27 @@ pub fn sem_ident_val(idx int, r *Res) int {
             if (g_state.c_lvalue == 1) {
                 return sem_err("不能给 const 聚合常量赋值");
             }
+            // 导入的聚合常量：接口加载时物化了本单元副本（cval = 本地数据标签号），
+            // 按标签装载地址（与字符串指针常量同一路径），提供方符号不参与消费者链接。
+            if ((g_state.c_syms[idx].flags & F_EXTERN) != 0
+                && g_state.c_syms[idx].cval != 0) {
+                if (g_state.c_fold == 0) {
+                    if (em_load_data_label(g_state.c_syms[idx].cval.to_type(int)) != 0) {
+                        return -1;
+                    }
+                }
+                g_state.c_res_is_addr = 1;
+                return 0;
+            }
             kind = SYM_VAR;
         }
     }
     if (kind == SYM_CONST) {
-        if ((g_state.c_syms[idx].flags & F_ENUM_META) != 0) {
+        if ((g_state.c_syms[idx].flags & (F_ENUM_META | F_FIELD_META)) != 0) {
+            // 元信息绑定（枚举 values / 结构体 fields）：本身不是值，
+            // 只能投影 .name/.value（枚举）或 .name（字段）或作类型谓词实参。
             if (g_state.c_syms[idx].const_ready == 0) {
-                return sem_err("枚举 values 元信息尚未就绪");
+                return sem_err("编译期元信息绑定尚未就绪");
             }
             return 0;
         }
@@ -464,6 +478,36 @@ pub fn sem_enum_meta_name(meta *Res) int {
     }
     let lbl int = em_data_name_string(g_state.c_syms[member].name_off,
         g_state.c_syms[member].name_len);
+    if (lbl < 0) { return -1; }
+    sem_res_reset(meta, ty_ptr(TY_CHAR));
+    meta.is_const = 1;
+    meta.ival = lbl.to_type(i64);
+    if (g_state.c_compile != 0 && g_state.c_fold == 0
+        && em_load_data_label(lbl) != 0) { return -1; }
+    return 0;
+}
+
+// sem_field_meta_name：把 `$for f in T.fields` 迭代绑定的 name 投影为只读
+// 字段名静态 C 字符串。绑定槽位约定见 model.yh 的 F_FIELD_META：
+// cval 存宿主结构体/联合体类型 id，offset 存字段下标。
+pub fn sem_field_meta_name(meta *Res) int {
+    if (meta.sym < 0 || meta.sym >= g_state.c_sym_n
+        || (g_state.c_syms[meta.sym].flags & F_FIELD_META) == 0) {
+        return sem_err("字段元信息绑定无效");
+    }
+    if (g_state.c_lvalue != 0) {
+        return sem_err("字段元信息只读");
+    }
+    let owner int = g_state.c_syms[meta.sym].cval.to_type(int);
+    let index int = g_state.c_syms[meta.sym].offset;
+    if (owner < 0 || owner >= g_state.t_type_n
+        || (g_state.t_types[owner].kind != TY_STRUCT
+            && g_state.t_types[owner].kind != TY_UNION)
+        || index < 0 || index >= g_state.t_types[owner].len) {
+        return sem_err("字段元信息索引无效");
+    }
+    let field SField = g_state.t_fields[g_state.t_types[owner].sub + index];
+    let lbl int = em_data_name_string(field.name_off, field.name_len);
     if (lbl < 0) { return -1; }
     sem_res_reset(meta, ty_ptr(TY_CHAR));
     meta.is_const = 1;

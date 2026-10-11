@@ -692,11 +692,15 @@ pub fn iface_ct_emit_const(sym_id int, suffix_off int,
     let string_ptr int = (type_kind == gen.TY_PTR
         && gs.t_types[type_id].elem == gen.TY_CHAR
         && (sym.flags & gen.F_ADDR) != 0).to_type(int);
-    // 聚合常量（kind 4）：重放初始化式源文本，导入侧按模块模式重新解析（私有聚合常量
-    // 在第 47 轮已放行，所以导入侧能接受）。
-    let agg_src int = (string_ptr == 0 && sym.const_expr_kind == 4
+    // 聚合常量（kind 4/5）：重放初始化式源文本，导入侧按模块模式重新解析（私有聚合常量
+    // 在第 47 轮已放行，所以导入侧能接受）。切片常量同样以源文本重放，导入侧按 count
+    // 建模（run/165）；$ 调用初始化（kind 5）在重放时把调用目标重写为闭包隐藏名，
+    // 导入侧延迟到闭包加载完成后执行（见 parse_global_init.yh 的 pub_agg_deferred_run）。
+    let ck_src int = sym.const_expr_kind;
+    let agg_src int = (string_ptr == 0 && (ck_src == 4 || ck_src == 5)
         && sym.const_expr_len > 0
-        && (type_kind == gen.TY_ARRAY || type_kind == gen.TY_STRUCT)).to_type(int);
+        && (type_kind == gen.TY_ARRAY || type_kind == gen.TY_STRUCT
+            || type_kind == gen.TY_SLICE)).to_type(int);
     if (gen.ty_is_integer(type_id) == 0
         && gen.ty_is_float(type_id) == 0 && string_ptr == 0 && agg_src == 0) {
         if (type_kind == gen.TY_PTR) {
@@ -724,7 +728,8 @@ pub fn iface_ct_emit_const(sym_id int, suffix_off int,
         return if_puts(";\n");
     }
     if (agg_src != 0) {
-        if (if_put_np(sym.const_expr_off, sym.const_expr_len) != 0) { return -1; }
+        // kind 4 原样重放；kind 5 重写 $ 调用目标（iface.yh 的公共实现）。
+        if (iface_emit_pub_agg_src(sym_id) != 0) { return -1; }
         return if_puts(";\n");
     }
     if (string_ptr != 0) {
@@ -861,6 +866,21 @@ pub fn iface_ct_emit(path *char, sym_base int) int {
             reachable[i] = 1;
         }
         i += 1;
+    }
+    // pub 聚合常量（$ 调用初始化）的调用目标是附加可达种子：它们的正文
+    // 必须随闭包传给导入方，导入方才能重放 .s.i 声明并执行同一调用。
+    let paf int = 0;
+    for paf < comptime.ct_pub_agg_fn_count() {
+        let paf_sym int = comptime.ct_pub_agg_fn_at(paf);
+        let paf_row int = comptime.ct_find(paf_sym);
+        if (paf_row >= 0 && paf_row < count) {
+            let paf_item comptime.CtFunction
+                = comptime.ct_iface_function(paf_row);
+            if (paf_item.sym_id >= sym_base && paf_item.sym_id < gs.c_sym_n) {
+                reachable[paf_row] = 1;
+            }
+        }
+        paf += 1;
     }
     let changed int = 1;
     for changed != 0 {

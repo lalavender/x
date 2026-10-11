@@ -331,6 +331,31 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
                 si2 += 1;
                 continue;
             }
+            // 聚合常量（结构体/定长数组/切片）：按**初始化式源文本**重放声明
+            // （const_expr_kind = 4），导入侧按模块模式重新解析：编译期建模、
+            // 运行期在导入方物化本单元副本（本地数据标签，见 em_data_symbol_header）。
+            // 与 .s.ct 闭包的聚合常量重放共用同一份源文本。
+            let ck3 int = gs.t_types[gs.c_syms[si2].type_id].kind;
+            if (ck3 == gen.TY_STRUCT || ck3 == gen.TY_ARRAY
+                    || ck3 == gen.TY_SLICE) {
+                let ck4 int = gs.c_syms[si2].const_expr_kind;
+                if ((ck4 != 4 && ck4 != 5)
+                    || gs.c_syms[si2].const_expr_len <= 0) {
+                    return gen.sem_err("pub 聚合常量暂只支持字面量或 $ 调用初始化式导出");
+                }
+                if (if_puts("pub const ") != 0) { return -1; }
+                if (if_put_np(gs.c_syms[si2].name_off,
+                        gs.c_syms[si2].name_len) != 0) { return -1; }
+                if (if_put(' ') != 0) { return -1; }
+                if (if_emit_type(gs.c_syms[si2].type_id, tname_base) != 0) {
+                    return -1;
+                }
+                if (if_puts(" = ") != 0) { return -1; }
+                if (iface_emit_pub_agg_src(si2) != 0) { return -1; }
+                if (if_puts(";\n") != 0) { return -1; }
+                si2 += 1;
+                continue;
+            }
             if ((fl & gen.F_ADDR) != 0) {
                 // 字符串字面量指针常量：原样重放声明（含引号与转义），导入方按
                 // 与函数体内字面量相同的规则重新登记只读字节池。
@@ -446,6 +471,58 @@ pub fn iface_header_suffix(path *char, off *int, olen *int) int {
     off[0] = o;
     olen[0] = e - s;
     return 0;
+}
+
+// iface_emit_pub_agg_src：输出聚合常量初始化式文本（.s.i 与 .s.ct 导出共用）。
+// 字面量形态（const_expr_kind = 4）原样重放；$ 调用形态（kind = 5）把
+// 同模块 `$fn` 重写为闭包隐藏名——导入方侧该函数只以隐藏符号登记，
+// 重放文本按隐藏名解析才能命中正文。
+pub fn iface_emit_pub_agg_src(sym_id int) int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_syms[sym_id].const_expr_kind == 4) {
+        return if_put_np(gs.c_syms[sym_id].const_expr_off,
+            gs.c_syms[sym_id].const_expr_len);
+    }
+    let off int = gs.c_syms[sym_id].const_expr_off;
+    let srclen int = gs.c_syms[sym_id].const_expr_len;
+    let cursor int = 0;
+    let i int = 0;
+    for i < srclen {
+        if (gs.np_data[off + i] == 36 && i + 1 < srclen) {
+            let j int = i + 1;
+            let c0 int = gs.np_data[off + j].to_type(int);
+            if ((c0 >= 65 && c0 <= 90) || (c0 >= 97 && c0 <= 122) || c0 == 95) {
+                let k int = j + 1;
+                for k < srclen {
+                    let cc int = gs.np_data[off + k].to_type(int);
+                    if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90)
+                        || (cc >= 97 && cc <= 122) || cc == 95) {
+                        k += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let fnsym int = gen.sym_lookup_off(off + j, k - j);
+                if (fnsym >= 0 && fnsym < gs.c_sym_n
+                    && (gs.c_syms[fnsym].flags & gen.F_COMPTIME) != 0) {
+                    if (if_put_np(off + cursor, i - cursor) != 0
+                        || if_put('$') != 0) { return -1; }
+                    let hidden_off int = -1;
+                    let hidden_len int = 0;
+                    if (iface_ct_name(fnsym, gs.c_sym_sfx_off,
+                            gs.c_sym_sfx_len, &hidden_off, &hidden_len) != 0
+                        || if_put_np(hidden_off, hidden_len) != 0) {
+                        return -1;
+                    }
+                    cursor = k;
+                    i = k;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    return if_put_np(off + cursor, srclen - cursor);
 }
 
 // iface_load：加载一份接口并登记为当前编译单元的导入模块。

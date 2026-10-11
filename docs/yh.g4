@@ -377,8 +377,20 @@ exprList
     ;
 
 // 表达式：优先级由低到高逐层展开，沿用 C 的优先级表。
+// `$if (cond) e1 $else e2` 是编译期表达式选择（位于链最上层，条件必须
+// 编译期可求值；两个分支都做语法与类型检查，但只求值/发射选中分支）；
+// 语句形态 `$if (…) { … }` 见 comptimeIfStmt。
 expr
-    : conditionalExpr
+    : comptimeIfExpr
+    | conditionalExpr
+    ;
+
+// 编译期表达式选择：`$else` 必须书写（表达式没有「原值」）。
+// 无歧义论证：语句形态 `$if (…) '{' … '}'` 的 `)` 之后要求块，而表达式
+// 形态要求 expr（不可从 '{' 开始），单 token lookahead 即可区分；
+// `$else` 就近匹配（与 C 的 else-if 链同理）。
+comptimeIfExpr
+    : '$' 'if' '(' expr ')' expr '$' 'else' expr
     ;
 
 // 三元条件：`cond ? a : b`。
@@ -472,8 +484,12 @@ primaryExpr
 // 编译期调用支持同模块 $IDENT(...) 与导入模块 $module.IDENT(...)；
 // 诊断内建仍使用未限定形式，与普通运行时调用保持词法区分。
 // assert/compile_error/compile_warn 由语义检查限制为函数内独立语句，不能作值。
+// `$is_type(x, T)` 的第二实参是类型引用（expr 不能以类型名开头，因此与
+// 第一条备选无歧义，ANTLR 尝试失败后自动回溯）；`$is_int`/`$is_float`
+// 由语义层按内建谓词名拦截（实参是普通表达式）。
 comptimeCall
     : '$' comptimeTarget '(' callArgs? ')'
+    | '$' 'is_type' '(' expr ',' typeRef ')'
     ;
 
 comptimeTarget

@@ -38,6 +38,9 @@ pub fn parse_comptime_branch(selected int) int {
     if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_IF) {
         status = parse_comptime_if();
     } else {
+        if (p_cur() != gen.TK_LBRACE) {
+            return gen.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置");
+        }
         status = parse_block();
     }
     gs.c_compile = saved_compile;
@@ -93,6 +96,9 @@ fn parse_comptime_if_body() int {
     }
     if (typed_if != 0) {
         gs.c_fn_falls = 1;
+        if (p_cur() != gen.TK_LBRACE) {
+            return gen.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置");
+        }
         if (parse_block() != 0) { return -1; }
         let then_falls int = gs.c_fn_falls;
         let has_else int = 0;
@@ -102,6 +108,9 @@ fn parse_comptime_if_body() int {
             p_adv();
             p_adv();
             gs.c_fn_falls = 1;
+            if (p_cur() != gen.TK_LBRACE) {
+                return gen.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置");
+            }
             if (parse_block() != 0) { return -1; }
             else_falls = gs.c_fn_falls;
         }
@@ -216,6 +225,74 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
     return 0;
 }
 
+// parse_comptime_field_for：按字段声明顺序展开 `T.fields` 元信息（CT6 P1b）。
+// 每轮绑定携带字段下标（offset）、字段类型（type_id，供 $is_type/$is_int/
+// $is_float 静态类型谓词）与宿主类型（cval，供 .name 投影查字段表）。
+// typed 路径把每个字段保存为 wrapper 下的独立块，普通路径逐轮解析并正常发码。
+fn parse_comptime_field_for(name_start int, name_len int, name_token int,
+    typed_for int) int {
+    let gs *gen.GenState = gen.G();
+    let owner_start int = gs.c_toks[gs.c_pos].start;
+    let owner_len int = gs.c_toks[gs.c_pos].len;
+    p_adv();
+    if (p_expect(gen.TK_DOT, "字段元信息需要 '.'") != 0
+        || p_cur() != gen.TOK_IDENT || p_tok_text_is("fields", 6) == 0) {
+        return gen.err_tok("$for 只支持 `枚举名.values` 与 `类型名.fields` 元信息源");
+    }
+    p_adv();
+    if (p_cur() != gen.TK_LBRACE) { return gen.err_tok("fields 后需要块"); }
+    let body_first int = gs.c_pos;
+    let body_after int = parse_comptime_block_end(body_first);
+    if (body_after < 0) { return gen.err_tok("$for 函数体缺少 '}'"); }
+    if (gs.c_compile == 0) { return parse_comptime_branch(-1); }
+
+    let owner int = gen.ty_lookup_name(owner_start, owner_len);
+    if (owner < 0) { return gen.sem_err("$for fields 来源不是已声明的类型"); }
+    let owner_kind int = gs.t_types[owner].kind;
+    if (owner_kind != gen.TY_STRUCT && owner_kind != gen.TY_UNION) {
+        return gen.sem_err("$for fields 来源必须是结构体或联合体");
+    }
+    let field_count int = gs.t_types[owner].len;
+    if (field_count < 0) { return gen.fail("内部错误：字段表长度无效"); }
+    if (field_count > 1024) { return gen.sem_err("单个 fields 展开超过 1024 次"); }
+    if (typed_for != 0 && ast_stmt_current >= 0) {
+        ast_stmt_nodes[ast_stmt_current].op = 0;
+    }
+    if (field_count == 0) { return parse_comptime_branch(0); }
+
+    let parent_falls int = gs.c_fn_falls;
+    let index int = 0;
+    for index < field_count {
+        let field gen.SField = gs.t_fields[gs.t_types[owner].sub + index];
+        if (comptime.ct_charge_expansion(body_after - body_first) != 0
+            || comptime.ct_for_boundary_value(index.to_type(i64)) != 0) { return -1; }
+        if (typed_for != 0 && gs.c_ast_capture != 0
+            && comptime.ct_charge_expansion_ast_nodes(body_after - body_first) != 0) {
+            return -1;
+        }
+        gs.c_pos = body_first;
+        gen.scope_push();
+        let binding int = gen.sym_push(name_start, name_len,
+            gen.SYM_CONST, field.type_id, gen.F_FIELD_META);
+        if (binding < 0) { return -1; }
+        gs.c_syms[binding].offset = index;
+        gs.c_syms[binding].cval = owner.to_type(i64);
+        gs.c_syms[binding].const_ready = 1;
+        if (gs.c_ast_capture != 0
+            && ast_binding_add(binding, name_token, 0) != 0) { return -1; }
+        if (typed_for != 0) { gs.c_fn_falls = 1; }
+        if (parse_block() != 0) { return -1; }
+        if (gs.c_pos != body_after) {
+            return gen.err_tok("内部错误：字段元信息展开没有消费完整函数体");
+        }
+        if (typed_for != 0) { gs.c_fn_falls = parent_falls; }
+        gen.scope_pop();
+        index += 1;
+    }
+    gs.c_pos = body_after;
+    return 0;
+}
+
 // parse_comptime_template_safe：限制模板首片不跨越逐轮语义变化的编译期结构。
 fn parse_comptime_template_safe(first int, after int) int {
     let gs *gen.GenState = gen.G();
@@ -246,6 +323,15 @@ fn parse_comptime_for_body() int {
     p_adv();
     if (p_expect(gen.TK_IN, "$for 变量后需要 in") != 0) { return -1; }
     if (p_cur() == gen.TOK_IDENT && p_peek(1) == gen.TK_DOT) {
+        // 元信息源按 `.` 之后的固定名分派：values（枚举）/ fields（结构体、联合体）。
+        let saved_pos int = gs.c_pos;
+        p_adv();
+        p_adv();
+        let src_fields int = p_tok_text_is("fields", 6);
+        gs.c_pos = saved_pos;
+        if (src_fields != 0) {
+            return parse_comptime_field_for(name_start, name_len, name_token, typed_for);
+        }
         return parse_comptime_enum_for(name_start, name_len, name_token, typed_for);
     }
     if (p_expect(gen.TK_LPAREN, "$for 区间必须带括号") != 0) { return -1; }

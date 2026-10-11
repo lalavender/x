@@ -18,9 +18,28 @@ import comptime;
 // 编译模式中结构体字面量作为值使用统一拒绝（B5 仅支持 let 直接初始化）。
 // ============================================================================
 
-// parse_expr：表达式入口（= 条件表达式层）。
+// parse_expr：表达式入口（= 条件表达式层；`$if` 表达式位于链最上层）。
 pub fn parse_expr(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
+    if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_IF) {
+        // 与三元同等的 capture 语义：子表达式以 depth>0 解析（不会误挂语句
+        // 表达式边），CTIF 节点本身在最外层 depth==0 时挂载。
+        if (gs.c_ast_capture == 0) {
+            return parse_ct_if_expr(res);
+        }
+        ast_expr_parse_depth += 1;
+        let r int = parse_ct_if_expr(res);
+        ast_expr_parse_depth -= 1;
+        if (r == 0 && gs.c_compile != 0 && res.ct_diag != 0
+            && gs.c_ct_diag_stmt == 0) {
+            return gen.sem_err("编译期诊断只能作为独立语句");
+        }
+        if (r == 0 && res.ct_diag == 0 && ast_expr_parse_depth == 0
+            && ast_stmt_add_expr(res.ast_id) != 0) {
+            return -1;
+        }
+        return r;
+    }
     if (gs.c_ast_capture == 0) {
         let r int = parse_ternary(res);
         if (r == 0 && gs.c_compile != 0 && res.ct_diag != 0
@@ -41,6 +60,134 @@ pub fn parse_expr(res *gen.Res) int {
         return -1;
     }
     return r;
+}
+
+// parse_ct_if_expr：编译期表达式选择 `$if (cond) e1 $else e2`。
+// `$else` 必须书写（表达式没有「原值」）。
+// 普通路径：cond 必须折叠为编译期常量，选中分支正常检查与发码，未选分支
+// 以 c_em_suppress 静默发射但**保留完整语义检查**（合流需要两侧类型）。
+// typed（comptime 函数正文捕获）路径：两个分支都正常解析并捕获 AST，
+// 执行器（ct_ir kind 14）按 cond 的编译期值选支。合流按类型相等，
+// 字面量分支可向另一分支类型窄化/加宽（复用 sem_can_assign 的 is_lit
+// 路径，与 `?:` 的赋值语义一致）。
+pub fn parse_ct_if_expr(res *gen.Res) int {
+    let gs *gen.GenState = gen.G();
+    let typed int = (gs.c_ct_prepare_active != 0 && gs.c_ast_capture != 0).to_type(int);
+    let first int = gs.c_pos;
+    let cond_ast int = -1;
+    let then_ast int = -1;
+    let else_ast int = -1;
+    p_adv();
+    p_adv(); // 消费 `$` 与 `if`
+    if (p_expect(gen.TK_LPAREN, "$if 条件必须带括号") != 0) { return -1; }
+    let cond gen.Res;
+    let saved_fold int = gs.c_fold;
+    let saved_target_ctx int = gs.c_ct_target_ctx;
+    if (gs.c_compile != 0 && typed == 0) {
+        gs.c_fold += 1;
+        gs.c_ct_target_ctx = 1;
+    }
+    let cr int = parse_expr_iso(&cond);
+    if (gs.c_compile != 0 && typed == 0) {
+        gs.c_fold = saved_fold;
+        gs.c_ct_target_ctx = saved_target_ctx;
+    }
+    if (cr != 0 || p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1; }
+    let selected int = -1;
+    if (gs.c_compile != 0) {
+        if (sem_check_cond(&cond) != 0) { return -1; }
+        if (typed == 0) {
+            if (cond.is_const == 0) {
+                return gen.sem_err("$if 表达式条件必须是编译期常量");
+            }
+            selected = (cond.ival != 0).to_type(int);
+        }
+    }
+    if (gs.c_ast_capture != 0) { cond_ast = cond.ast_id; }
+    // then 分支：普通路径未选时静默发射但保留语义检查，不捕获 AST。
+    let saved_capture int = gs.c_ast_capture;
+    let saved_suppress int = gs.c_em_suppress;
+    let then gen.Res;
+    if (typed == 0 && gs.c_compile != 0 && selected == 0) {
+        gs.c_em_suppress += 1;
+        gs.c_ast_capture = 0;
+    }
+    if (parse_expr(&then) != 0) {
+        gs.c_em_suppress = saved_suppress;
+        gs.c_ast_capture = saved_capture;
+        return -1;
+    }
+    gs.c_em_suppress = saved_suppress;
+    gs.c_ast_capture = saved_capture;
+    if (gs.c_ast_capture != 0) { then_ast = then.ast_id; }
+    if (p_cur() != gen.TK_DOLLAR || p_peek(1) != gen.TK_ELSE) {
+        return gen.err_tok("$if 表达式必须写 $else");
+    }
+    p_adv();
+    p_adv();
+    // else 分支：普通路径选中 then 时静默发射，仍做完整语义检查。
+    let els gen.Res;
+    if (typed == 0 && gs.c_compile != 0 && selected == 1) {
+        gs.c_em_suppress += 1;
+        gs.c_ast_capture = 0;
+    }
+    if (parse_expr(&els) != 0) {
+        gs.c_em_suppress = saved_suppress;
+        gs.c_ast_capture = saved_capture;
+        return -1;
+    }
+    gs.c_em_suppress = saved_suppress;
+    gs.c_ast_capture = saved_capture;
+    if (gs.c_ast_capture != 0) { else_ast = els.ast_id; }
+    let merged int = -1;
+    if (gs.c_compile != 0 && ct_if_merge_type(&then, &els, &merged) != 0) {
+        return -1;
+    }
+    if (gs.c_compile != 0) {
+        if (typed == 0) {
+            // 普通路径：结果取选中分支的值语义，类型用合流类型。
+            let src gen.Res;
+            if (selected != 0) {
+                gen.sem_res_copy(&src, &then);
+            } else {
+                gen.sem_res_copy(&src, &els);
+            }
+            gen.sem_res_copy(res, &src);
+            res.type_id = merged;
+            res.sym = -1;
+            res.layout_type_id = -1;
+            res.ct_diag = 0;
+        } else {
+            gen.sem_res_reset(res, merged);
+        }
+    }
+    if (gs.c_ast_capture != 0
+        && ast_expr_finish(res, AST_EXPR_CTIF, gen.TK_IF, first,
+            cond_ast, then_ast, else_ast) != 0) { return -1; }
+    return 0;
+}
+
+// ct_if_merge_type：$if 表达式两分支的类型合流检查。
+// 两支类型相等 → 该类型；字面量分支可通过 sem_can_assign 的 is_lit 路径
+// 向另一分支类型窄化/加宽（与 `?:` 的赋值语义一致）；其余拒绝。
+fn ct_if_merge_type(then *gen.Res, els *gen.Res, merged *int) int {
+    if (then.type_id == els.type_id) {
+        merged[0] = then.type_id;
+        return 0;
+    }
+    if (then.is_lit != 0) {
+        if (gen.sem_can_assign(els.type_id, then.type_id,
+                then.is_lit, then.ival, then.lit_big) != 0) { return -1; }
+        merged[0] = els.type_id;
+        return 0;
+    }
+    if (els.is_lit != 0) {
+        if (gen.sem_can_assign(then.type_id, els.type_id,
+                els.is_lit, els.ival, els.lit_big) != 0) { return -1; }
+        merged[0] = then.type_id;
+        return 0;
+    }
+    return gen.sem_err("$if 表达式两个分支的类型不一致");
 }
 
 // parse_array_literal：数组/切片字面量 '[' e1, e2, ... ']'。
@@ -792,12 +939,33 @@ pub fn parse_postfix(res *gen.Res) int {
             if (is_member_name(p_cur()) != 0) {
                 let start int = gs.c_toks[gs.c_pos].start;
                 let n int = gs.c_toks[gs.c_pos].len;
-                let enum_meta int = (gs.c_compile != 0 && res.sym >= 0
-                    && res.sym < gs.c_sym_n
-                    && (gs.c_syms[res.sym].flags & gen.F_ENUM_META) != 0).to_type(int);
+                let meta_bits int = 0;
+                if (gs.c_compile != 0 && res.sym >= 0 && res.sym < gs.c_sym_n) {
+                    meta_bits = gs.c_syms[res.sym].flags
+                        & (gen.F_ENUM_META | gen.F_FIELD_META);
+                }
+                let enum_meta int = ((meta_bits & gen.F_ENUM_META) != 0).to_type(int);
+                let field_meta int = ((meta_bits & gen.F_FIELD_META) != 0).to_type(int);
                 let enum_name int = (enum_meta != 0 && p_tok_text_is("name", 4) != 0).to_type(int);
                 let enum_value int = (enum_meta != 0 && p_tok_text_is("value", 5) != 0).to_type(int);
+                let field_name int = (field_meta != 0 && p_tok_text_is("name", 4) != 0).to_type(int);
                 p_adv();
+                if (field_meta != 0) {
+                    // 字段元信息：只投影 .name（字段名字符串常量）。
+                    if (field_name == 0 || n != 4) {
+                        return gen.sem_err("字段元信息迭代变量只支持 .name");
+                    }
+                    if (gen.sem_field_meta_name(res) != 0) { return -1; }
+                    if (gs.c_ast_capture != 0) {
+                        let id int = ast_expr_add(AST_EXPR_PRIMARY, gen.TOK_STRING,
+                            first3, gs.c_pos, res.type_id, -1, -1, -1);
+                        if (id < 0 || ast_expr_set_semantics(id, res) != 0) {
+                            return -1;
+                        }
+                        res.ast_id = id;
+                    }
+                    continue;
+                }
                 if (enum_meta != 0) {
                     let ast_op int = gen.TOK_NUMBER;
                     if (enum_name != 0 && n == 4) {
@@ -832,9 +1000,16 @@ pub fn parse_postfix(res *gen.Res) int {
         }
         break;
     }
-    if (gs.c_compile != 0 && res.sym >= 0 && res.sym < gs.c_sym_n
-        && (gs.c_syms[res.sym].flags & gen.F_ENUM_META) != 0) {
-        return gen.sem_err("枚举 values 迭代变量必须访问 .name 或 .value");
+    if (gs.c_compile != 0 && gs.c_ct_meta_bare == 0
+        && res.sym >= 0 && res.sym < gs.c_sym_n) {
+        let bare_meta int = gs.c_syms[res.sym].flags
+            & (gen.F_ENUM_META | gen.F_FIELD_META);
+        if ((bare_meta & gen.F_FIELD_META) != 0) {
+            return gen.sem_err("字段元信息迭代变量必须访问 .name 或作类型谓词实参");
+        }
+        if (bare_meta != 0) {
+            return gen.sem_err("枚举 values 迭代变量必须访问 .name 或 .value");
+        }
     }
     return 0;
 }
@@ -863,6 +1038,138 @@ pub fn parse_primary(res *gen.Res) int {
     return 0;
 }
 
+// parse_comptime_pred_kind：将当前内建类型谓词名映射为固定类别，不新增词法关键字。
+fn parse_comptime_pred_kind() int {
+    if (p_tok_text_is("is_type", 7) != 0) { return 1; }
+    if (p_tok_text_is("is_int", 6) != 0) { return 2; }
+    if (p_tok_text_is("is_float", 8) != 0) { return 3; }
+    return 0;
+}
+
+// parse_comptime_pred：编译期类型谓词 `$is_type(x, T)`（kind 1）、
+// `$is_int(x)`（kind 2）、`$is_float(x)`（kind 3）——CT6 P1（类型分派，
+// 候选 A 首片）。谓词只看**静态类型**，不求值实参表达式（实参以
+// c_em_suppress 静默发射做完整语义检查）；结果恒为编译期布尔常量：
+// 普通路径直接折叠，typed 捕获记入常量节点后由执行器经 PRIMARY 常量
+// 路径返回，无需新增 typed IR kind。
+fn parse_comptime_pred(res *gen.Res, kind int) int {
+    let gs *gen.GenState = gen.G();
+    let first int = gs.c_pos;
+    p_adv(); // 谓词名
+    if (p_expect(gen.TK_LPAREN, "类型谓词期望 '('") != 0) { return -1; }
+    let x gen.Res;
+    let saved_fold int = gs.c_fold;
+    let saved_suppress int = gs.c_em_suppress;
+    let saved_bare int = gs.c_ct_meta_bare;
+    // 谓词不求值实参：折叠上下文（如 $if 条件）下也按普通语义解析，
+    // 只取静态类型；发射由 c_em_suppress 静默；允许裸元信息绑定
+    // （`$is_type(f, T)` 的 f 是字段/枚举迭代绑定，只作类型引用）。
+    gs.c_fold = 0;
+    gs.c_em_suppress += 1;
+    gs.c_ct_meta_bare += 1;
+    let xr int = parse_expr_iso(&x);
+    gs.c_fold = saved_fold;
+    gs.c_em_suppress = saved_suppress;
+    gs.c_ct_meta_bare = saved_bare;
+    if (xr != 0) { return -1; }
+    let target int = -1;
+    if (kind == 1) {
+        if (p_expect(gen.TK_COMMA, "$is_type 需要第二个参数（类型）") != 0) { return -1; }
+        target = parse_type_ref();
+        if (target < 0) { return -1; }
+    }
+    if (p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1; }
+    let v int = 0;
+    if (gs.c_compile != 0) {
+        if (kind == 1) { v = (x.type_id == target).to_type(int); }
+        else if (kind == 2) { v = gen.ty_is_integer(x.type_id); }
+        else { v = gen.ty_is_float(x.type_id); }
+    }
+    let c gen.Res;
+    if (gen.sem_res_const(&c, gen.TY_BOOL, v.to_type(i64)) != 0) { return -1; }
+    gen.sem_res_copy(res, &c);
+    if (gs.c_compile != 0 && gs.c_fold == 0
+        && gen.em_mov_imm("x0", v.to_type(i64)) != 0) { return -1; }
+    gs.c_res_is_addr = 0;
+    if (gs.c_ast_capture != 0
+        && ast_expr_finish(res, AST_EXPR_PRIMARY, gen.TOK_IDENT, first,
+            -1, -1, -1) != 0) { return -1; }
+    return 0;
+}
+
+// parse_comptime_field_access：`$field(x, "name")` —— 按编译期常量字段名
+// 读取 x 的字段（CT6 P1c 首片，只读）。语义等价于 `x.name`，但名字来自
+// 字符串字面量：普通路径与 typed 路径共用 `sem_member` 的成员访问语义
+// （值/地址形态、指针基底自动解引用都与 `.` 一致）；typed 捕获为
+// AST_EXPR_CTFIELD 节点（op = 按名字解析出的字段下标），执行器按下标读取。
+// 写入路径（ct_ir_lvalue）不识别该节点，因此赋值自然按只读拒绝。
+fn parse_comptime_field_access(res *gen.Res) int {
+    let gs *gen.GenState = gen.G();
+    let first int = gs.c_pos;
+    p_adv(); // 消费 field 名
+    if (p_expect(gen.TK_LPAREN, "$field 期望 '('") != 0) { return -1; }
+    let base gen.Res;
+    if (parse_expr_iso(&base) != 0) { return -1; }
+    if (p_expect(gen.TK_COMMA, "$field 需要第二个参数（字段名字符串）") != 0) {
+        return -1;
+    }
+    if (p_cur() != gen.TOK_STRING) {
+        return gen.err_tok("$field 的字段名必须是字符串字面量");
+    }
+    let str_start int = gs.c_toks[gs.c_pos].start;
+    let str_len int = gs.c_toks[gs.c_pos].len;
+    p_adv();
+    if (p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1; }
+    if (gs.c_compile == 0) { return 0; }
+    if (str_len < 3) { return gen.sem_err("$field 的字段名不能为空"); }
+    let name_start int = str_start + 1;
+    let name_len int = str_len - 2;
+    let owner int = base.type_id;
+    if (owner >= 0 && owner < gs.t_type_n
+        && gs.t_types[owner].kind == gen.TY_PTR) {
+        owner = gs.t_types[owner].elem;
+    }
+    if (owner < 0 || owner >= gs.t_type_n
+        || (gs.t_types[owner].kind != gen.TY_STRUCT
+            && gs.t_types[owner].kind != gen.TY_UNION)) {
+        return gen.sem_err("$field 的左侧不是结构体或结构体指针");
+    }
+    let field_index int = -1;
+    let nf int = gs.t_types[owner].len;
+    let i int = 0;
+    for i < nf {
+        let fld gen.SField = gs.t_fields[gs.t_types[owner].sub + i];
+        if (fld.name_len == name_len) {
+            let same int = 1;
+            let j int = 0;
+            for j < name_len {
+                if (gs.np_data[fld.name_off + j] != gs.c_src[name_start + j]) {
+                    same = 0;
+                    break;
+                }
+                j += 1;
+            }
+            if (same != 0) {
+                field_index = i;
+                break;
+            }
+        }
+        i += 1;
+    }
+    if (field_index < 0) { return gen.sem_err("结构体没有该字段"); }
+    let base_ast int = base.ast_id;
+    if (gen.sem_member(&base, name_start, name_len) != 0) { return -1; }
+    gen.sem_res_copy(res, &base);
+    if (gs.c_ast_capture != 0) {
+        let id int = ast_expr_add(AST_EXPR_CTFIELD, gen.TOK_STRING, first,
+            gs.c_pos, res.type_id, base_ast, -1, -1);
+        if (id < 0 || ast_expr_set_semantics(id, res) != 0) { return -1; }
+        ast_expr_nodes[id].op = field_index;
+        res.ast_id = id;
+    }
+    return 0;
+}
+
 // parse_comptime_call：解析 $fn(args) 或 $module.fn(args)，并执行 CT 正文。
 pub fn parse_comptime_call(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
@@ -874,6 +1181,13 @@ pub fn parse_comptime_call(res *gen.Res) int {
     let diag_kind int = parse_comptime_diag_kind();
     if (diag_kind != 0) {
         return parse_comptime_diag_call(res, diag_kind, call_line, call_col);
+    }
+    let pred_kind int = parse_comptime_pred_kind();
+    if (pred_kind != 0) {
+        return parse_comptime_pred(res, pred_kind);
+    }
+    if (p_tok_text_is("field", 5) != 0) {
+        return parse_comptime_field_access(res);
     }
     let alias_start int = gs.c_toks[gs.c_pos].start;
     let alias_len int = gs.c_toks[gs.c_pos].len;
@@ -989,9 +1303,39 @@ pub fn parse_comptime_call(res *gen.Res) int {
                         let fold2 int = p_ct_arg_array_literal(&args[arg_n], ptid2);
                         if (fold2 < 0) { return -1; }
                         if (fold2 == 0) { agg_lit = 0; folded = 1; }
+                    } else if (pk == gen.TY_SLICE) {
+                        // 切片字面量：backing 聚合按元素个数创建（与全局切片常量的
+                        // 模型同一形状），实参是切片类型 + 对象指针，见 p_ct_arg_slice_literal。
+                        let fold3 int = p_ct_arg_slice_literal(&args[arg_n], ptid2);
+                        if (fold3 < 0) { return -1; }
+                        if (fold3 == 0) { agg_lit = 0; folded = 1; }
                     }
                     if (agg_lit != 0) {
-                        return gen.sem_err("编译期调用实参里的聚合值暂时只支持结构体与数组字面量（字段/元素可递归嵌套标量、结构体、数组）；切片与联合体仍需在 @[comptime] 函数体内构造");
+                        return gen.sem_err("编译期调用实参里的聚合值暂时只支持结构体、数组与切片字面量（字段/元素可递归嵌套标量、结构体、数组）；联合体仍需在 @[comptime] 函数体内构造");
+                    }
+                }
+                // 命名的全局聚合常量实参：前端在语义阶段已把字面量元素值建成编译期
+                // 模型（comptime/ct_global_agg.yh），直接把模型对象指针当聚合实参，
+                // 与上面的字面量折叠走同一条 ct_call 协议。
+                if (agg_param != 0 && agg_lit == 0 && folded == 0
+                    && p_cur() == gen.TOK_IDENT && gs.c_pos + 1 < gs.c_tok_n
+                    && (gs.c_toks[gs.c_pos + 1].kind == gen.TK_COMMA
+                        || gs.c_toks[gs.c_pos + 1].kind == gen.TK_RPAREN)) {
+                    let astart int = gs.c_toks[gs.c_pos].start;
+                    let alen int = gs.c_toks[gs.c_pos].len;
+                    let asym int = gen.sym_lookup(astart, alen);
+                    if (asym < 0) { return gen.sem_err("引用了未声明的名字"); }
+                    if (gs.c_syms[asym].kind == gen.SYM_CONST) {
+                        let model i64 = comptime.ct_global_agg_lookup(asym);
+                        if (model == 0) {
+                            return gen.sem_err("编译期实参里的全局聚合常量尚未在编译期建模（只支持标量元素的定长数组与标量字段结构体）");
+                        }
+                        gen.sem_res_reset(&args[arg_n], gs.c_syms[asym].type_id);
+                        args[arg_n].is_const = 1;
+                        args[arg_n].ival = model;
+                        args[arg_n].sym = asym;
+                        p_adv();
+                        folded = 1;
                     }
                 }
             }
@@ -1138,6 +1482,65 @@ pub fn p_ct_arg_array_literal(res *gen.Res, tid int) int {
     if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) { return -1; }
     if (idx != at.len) { return 1; }
     let obj i64 = comptime.ct_arg_pool_agg(at.elem, &vals[0], &tys[0], at.len);
+    if (obj == 0) { return -1; }
+    gen.sem_res_reset(res, tid);
+    res.is_const = 1;
+    res.ival = obj;
+    return 0;
+}
+
+// p_ct_arg_slice_literal：把切片字面量实参折进编译期临时构造区。
+// backing 聚合按元素个数创建（与切片常量的编译期模型同一形状：elem_type = 元素
+// 类型、count = 元素个数），res 的类型写回形参的切片类型 —— ct_ir_param_copy 的
+// 切片分支按 ct_ir_slice_param_valid 校验后直接别名这个 backing，无需「地址+长度」
+// 的独立视图表示。元素形态与数组字面量一致（标量/结构体/定长数组递归折叠），
+// 空切片字面量 `[]` 合法；不支持返回 1（调用方给出诊断）。
+pub fn p_ct_arg_slice_literal(res *gen.Res, tid int) int {
+    let gs *gen.GenState = gen.G();
+    let st gen.CType = gs.t_types[tid];
+    if (p_cur() != gen.TK_LBRACKET || st.kind != gen.TY_SLICE) { return 1; }
+    let vals [64]i64;
+    let tys [64]int;
+    p_adv();
+    let idx int = 0;
+    for p_cur() != gen.TK_RBRACKET {
+        if (idx >= 64) { return 1; }
+        let ek int = gs.t_types[st.elem].kind;
+        if (ek == gen.TY_ARRAY) {
+            let er gen.Res;
+            let sub int = p_ct_arg_array_literal(&er, st.elem);
+            if (sub < 0) { return -1; }
+            if (sub != 0) { return 1; }
+            vals[idx] = er.ival;
+        } else if (ek == gen.TY_STRUCT) {
+            let sr gen.Res;
+            let sub2 int = p_ct_arg_struct_literal(&sr, st.elem);
+            if (sub2 < 0) { return -1; }
+            if (sub2 != 0) { return 1; }
+            vals[idx] = sr.ival;
+        } else if (ek == gen.TY_UNION || ek == gen.TY_SLICE) {
+            return 1;
+        } else {
+            let save_exp int = gs.c_expect_tid;
+            gs.c_expect_tid = st.elem;
+            gs.c_fold += 1;
+            let fr gen.Res;
+            let rr int = parse_expr_iso(&fr);
+            gs.c_fold -= 1;
+            gs.c_expect_tid = save_exp;
+            if (rr != 0) { return -1; }
+            if (fr.is_const == 0) { return 1; }
+            if (gen.sem_can_assign(st.elem, fr.type_id, fr.is_lit,
+                    fr.ival, fr.lit_big) != 0) { return -1; }
+            vals[idx] = fr.ival;
+        }
+        tys[idx] = st.elem;
+        idx += 1;
+        if (p_cur() != gen.TK_COMMA) { break; }
+        p_adv();
+    }
+    if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) { return -1; }
+    let obj i64 = comptime.ct_arg_pool_agg(st.elem, &vals[0], &tys[0], idx);
     if (obj == 0) { return -1; }
     gen.sem_res_reset(res, tid);
     res.is_const = 1;

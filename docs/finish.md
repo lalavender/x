@@ -2,6 +2,295 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-09 yh：Linux/aarch64 自举种子入库（`bin/yh-linux-arm64`）
+
+- **入库**：WSL 重建链的最终种子 `tmp/boot/chain/yh-19e2e3a` 以
+  `bin/yh-linux-arm64` 正式入库（ELF 64-bit ARM aarch64，SHA-256
+  `137c5fdb…76f2c`），并写 `bin/yh-linux-arm64.sha256`
+  （`selfhost_snapshot_gate --verify-seed` 通过）。Makefile 在
+  Linux/arm64 宿主自动选择它；**x86_64 Linux 宿主须显式
+  `SEED=bin/yh-linux-arm64`**（x64 后端未实施，`make` 缺省会找
+  `bin/yh-linux-x64`）。
+- **验证**（WSL，x86_64 + qemu-user/binfmt，`YH_LINK=/nonexistent` 回落 gcc）：
+  - 入库种子冷编产物与入库前构建**逐字节一致**；
+  - `SEED=bin/yh-linux-arm64 make`：通过；
+  - tests/yh-run **292/292**、语法门（编译器模式）正例 **76/76**、反例 **45/45**；
+  - `SEED=bin/yh-linux-arm64 make selfhost-native`：native-selfhost 全过
+    （固定点 21 产物一致、自解析 71 文件、CLI 冒烟、运行语料 292/292）、
+    scratch-isolation 8/8、lex-stats 通过；末尾 `runtime-memory.py` 的
+    **Darwin 可执行文件 OS API 核对**在 Linux 上按 ELF 产物（GLIBC 符号）
+    判失败——**既有 Linux 平台缺口**（todo「yh_link ELF64 方言」条目已列，
+    非本轮引入）；
+  - `SEED=bin/yh-linux-arm64 make test`：仅在 **ANTLR 参考语法门**失败
+    （WSL 无 Java/antlr4 jar）——**既有缺口**（todo「本机 ANTLR 参考语法门
+    需要 Java + antlr4 工具 jar」，macOS 上已放 jar 通过）。
+- **文档**：AGENTS.md 更新为双种子说明（开发策略/目录/编译流程/Linux 环境
+  章节）；todo 多平台后端区移除「Linux 版待发布归档」表述；WSL 种子链记录
+  追加「入库」小节。
+- **后续**：macOS 上照旧运行/滚动 Darwin 种子 `bin/yh`；Linux CI 可按需
+  用 `bin/yh-linux-arm64` 重建。
+
+## 2026-10-09 yh 编译期：`$` 调用 pub 聚合常量跨模块导出交付 + 编译期过程全部任务完成
+
+- **`$` 调用初始化的 pub 聚合常量跨模块导出**（原 todo 最后一项「小项，暂挂起」）：
+  - 解析期守卫放开；提供方在求值后记录初始化式源文本（新 `const_expr_kind = 5`）
+    并登记**同模块** `$fn` 调用目标为**闭包附加可达种子**
+    （`ct_registry.ct_pub_agg_fn_*`），`mk` 正文随 `.s.ct` 传递；
+  - `.s.i` 导出重放调用文本，其中 `$fn` 重写为闭包隐藏名
+    （`iface_emit_pub_agg_src`，与闭包正文重写同一约定；`.s.ct` 闭包常量
+    重放同步支持 kind 5）；
+  - 导入侧**延迟执行**：`.s.i` 先于 `.s.ct` 加载，接口加载阶段只登记
+    （`PubAggDeferred`：符号 + 初始化式 token 起点 + 接口路径）并跳过
+    token，`.s.ct` 闭包加载完成后由 `module_worker` 调
+    `pub_agg_deferred_run()` 重新读源、求值、建模并物化本单元副本；
+  - 边界：`$mod.f(...)` 形态的导出重写首版不覆盖（解析期明确诊断）。
+- **编译期过程剩余条目收尾**（正式撤销，历史见 01-finished/）：
+  - **CT1/CT2 typed AST 收尾**：模板实例化首片已实现并验收（`2026-10-05`），
+    两个子项（去重解析、统一入口）已于 2026-10-07 实测撤销，无剩余任务；
+  - **CT3 完整 typed 执行器**：2026-10-07 覆盖审计确认表达式/语句种类全支持，
+    本轮 CT6 又补齐 `$if` 表达式（kind 14）、字段元信息展开、`$field`
+    按下标读取（kind 15）与类型谓词常量折叠；「其他聚合值与一般左值」多轮
+    探针（含本轮 CT6 用例矩阵）未发现具体缺口，撤销；
+  - **CT5A**：布局请求、依赖调度、长度表达式与混合环诊断均已交付；
+    「其他一般 typed CT 请求」多轮探针未发现具体缺口，撤销。
+  - **CT6 三项**：表达式选择、类型分派谓词、字段元信息与 `$field`
+    已于同日交付（见下方三条记录）；条件导入按用户决议不做。
+  **至此编译期过程（CT0–CT6）全部任务完成**，todo 的「编译期过程」区已清空移除。
+- **用例**：comptimecross 增 `CT_TBL`（私有 `mk_ct_tbl()` + `pub const
+  CT_TBL [3]int = $mk_ct_tbl();`；消费者正文读 31、提供方正文读 16、运行期
+  读 0 断言）；新增 run/174（单文件 `$` 初始化聚合常量的编译期/运行期读）。
+- **验证**（WSL+qemu，临时种子）：tests/yh-run **292/292**（run 152/152、
+  fail 132/132、pass 8/8）；语法门正例 76/76、反例 45/45；modules 门 77/84
+  （与基线一致，comptimecross 用例通过）；**native-selfhost 主门全部通过**
+  （模块固定点 21 产物一致、cc4 自解析 71 文件、CLI 冒烟、运行语料 292/292）。
+- **记录**：[完成记录](01-finished/yh-编译期pub调用聚合常量跨模块导出-2026-10-09.md)。
+
+## 2026-10-09 yh 编译期：CT6 P1b/P1c 字段元信息与按名取字段交付（CT6 完成）
+
+- **P1b `$for f in T.fields` 字段元信息**：
+  - 无需改 g4（`IDENT '.' IDENT` 形态已覆盖，按 `.` 后固定名分派 values/fields）；
+  - 新 `F_FIELD_META` 绑定：offset = 字段下标、type_id = **字段类型**（可直接作
+    `$is_type(f,T)`/`$is_int(f)` 静态类型引用）、cval = 宿主类型（`.name` 投影）；
+  - `parse_comptime_field_for` 按声明顺序展开，typed 逐字段块（wrapper op=0）
+    与普通逐轮发码，与 `E.values` 同构；`sem_field_meta_name` 投影字段名常量；
+    裸用拒绝，谓词实参经新 `c_ct_meta_bare` 计数放行。
+- **P1c `$field(x, "name")` 按名取字段（只读）**：
+  - 无需改 g4（走既有 callArgs）；基底走 `sem_member` 同一路径（指针自动解引用）；
+    字符串名按字段表解析出**字段下标**；
+  - typed 捕获 `AST_EXPR_CTFIELD = 15`（op 槽存下标，sym_* 槽受 AST 校验约束）；
+    `ct_ir_member_place` 按 op 下标定位（跳过源码 token 名匹配）；
+  - **只读**：`ct_ir_lvalue` 不识别 kind 15，赋值自然被拒。
+- **用例**：run/172、run/173；fail/159–164；语法语料 positive/73。
+- **验证**（WSL+qemu，临时种子）：tests/yh-run **291/291**（run 151/151、
+  fail 132/132、pass 8/8）；语法门正例 76/76、反例 45/45；modules 门 77/84
+  （基线）；native-selfhost 主门全部通过。
+- **CT6 三项全部落地**：表达式选择（P0）、条件导入（决议不做）、类型分派
+  （P1a）+ 动态字段（P1b/P1c）；todo 的 CT6 条目可标记完成。
+
+## 2026-10-09 yh 编译期：CT6 P1a 类型分派谓词 `$is_type`/`$is_int`/`$is_float` 交付
+
+- **P1a 交付**（CT6 子项「类型分派」候选 A 首片）：
+  - g4：`comptimeCall` 增加 `'$' 'is_type' '(' expr ',' typeRef ')'` 备选
+    （typeRef 实参需独立形态；`$is_int`/`$is_float` 走既有 callArgs）；
+  - 语义（parse_expr.yh）：`parse_comptime_pred` 谓词**只看静态类型、不求值
+    实参**（实参以 `c_em_suppress` 静默做完整语义检查；折叠上下文临时清
+    `c_fold`，否则实参变量误报「不是常量」）；结果**恒为编译期布尔常量**，
+    typed 路径记入常量节点 —— 无需新增 typed IR kind；
+  - 判定：`$is_type(x, T)` = 类型相等；`$is_int`/`$is_float` 复用
+    `ty_is_integer`/`ty_is_float`。
+- **用例**：run/171（普通路径 + typed 字段类型分派 + 顶层 const 聚合实参）、
+  fail/158（未知类型拒绝）、语法语料 positive/72。
+- **验证**（WSL+qemu，临时种子）：tests/yh-run **283/283**（run 149/149、
+  fail 126/126、pass 8/8）；语法门正例 75/75、反例 45/45；modules 门与
+  自举主门结果见同日条目。
+- **todo 更新**：CT6 条目改为「P0 表达式选择 + P1a 类型分派谓词已交付，
+  P1b `$for f in T.fields` / P1c `$field` 待实施」。
+
+## 2026-10-09 yh 编译期：CT6 P0 表达式选择 `$if (cond) e1 $else e2` 交付
+
+- **决策落地**：用户确认 CT6 三项决策——表达式选择**候选 A**、条件导入
+  **不做**（方案已从设计稿删除）、类型分派**候选 A**（`$is_type` 谓词）+
+  动态字段与 CT4 合并**先只读**。设计稿定稿
+  （[03-design/yh-编译期CT6语法设计.md](03-design/yh-编译期CT6语法设计.md)），
+  实施见 [02-plan/yh-编译期CT6实施方案.md](02-plan/yh-编译期CT6实施方案.md)。
+- **P0 表达式选择交付**：
+  - g4：`expr` 链最上层新增 `comptimeIfExpr`（`$else` 必须书写，单 token
+    lookahead 无歧义；作二元操作数需加括号）；
+  - 解析（parse_expr.yh）：普通路径 cond 折叠选支，未选分支
+    **`c_em_suppress` 静默发射但保留完整语义检查**（合流需要两侧类型）；
+    typed 路径两分支全捕获、执行器按编译期值选支；合流按类型相等 +
+    字面量 is_lit 路径；语句位置给出专用诊断；
+  - `AST_EXPR_CTIF = 14` + ct_ir 执行器 kind 4/14 共用（含字面量类型归一）；
+  - 修复首版 bug：子表达式曾在 depth==0 下误挂语句表达式边，return 执行器
+    取到条件值（0/1）；改为与三元同等处理 capture depth 与挂载。
+- **用例**：run/168–170、fail/154–157；语法语料 positive/71 + rejected/30。
+- **验证**（WSL+qemu，临时种子）：tests/yh-run **281/281**（run 148/148、
+  fail 125/125、pass 8/8）；语法门正例 74/74、反例 45/45；modules 门与
+  主门结果见同日条目。
+- **todo 更新**：CT6 条目拆分为「P0 已交付、P1 类型分派/动态字段待实施」。
+
+## 2026-10-09 yh 编译期：return 聚合字面量 + CT 调用结果求值形态（同日追加）
+
+- **发现并修复前端缺口**：`parse_array_literal` 要求「目标类型上下文」的设置点
+  漏了 **return** —— `return [1, 2, 3]`（以及嵌套 `[[1,2],[3,4]]`、切片字面量）
+  在编译期与普通函数里都被拒。修复：`parse_return` 求值返回表达式时把
+  `c_expect_tid` 设为函数返回类型（与 let 初始化/赋值/调用实参一致）；非字面量
+  表达式不受影响，`sem_can_assign` 校验不变。
+- **随探针一并确认的既有能力**：编译期正文里对调用结果直接求值的下标、成员、
+  切片视图、嵌套下标与 `for i, v in $mk()` 循环全部可用（typed IR 路径）。
+- **用例**：run/167（编译期直接返回数组/嵌套数组/切片/结构体字面量 + 调用结果
+  求值形态 + 普通函数运行时字面量返回）。
+- **核实边界**：顶层 const 折叠的 `$mk()[0]`（对 CT 调用结果直接下标）仍不支持
+  —— 折叠路径无法索引裸聚合对象指针，惯用写法 `const T = $mk(); T[0]` 经模型
+  可用；已记 todo（暂不作，按现状说明）。
+- **验证**（WSL+qemu，临时种子 `tmp/boot/chain/yh-19e2e3a`）：tests/yh-run
+  **274/274**（run 145/145、fail 121/121、pass 8/8）；tests/modules/check 17/17；
+  `native-selfhost.py` **全部通过**（模块固定点 21 产物一致、71 文件自解析、探针、
+  CLI、语法 44/44、运行语料 274/274）；comptimecross 构建+运行 0。
+
+## 2026-10-09 yh 编译期：CT6 语法与范围设计稿交付
+
+- **内容**：todo 的 CT6（表达式选择、条件导入、类型分派/动态字段）按过程实施
+  方案「先单独设计语法、类型阶段和依赖规则，再实施」的约定交付**设计稿**
+  （[03-design/yh-编译期CT6语法设计.md](03-design/yh-编译期CT6语法设计.md)）：
+  - **表达式选择**：推荐表达式形态 `$if (cond) e1 $else e2`，复用 `?:` 的
+    种类合流检查；g4 无歧义论证（单 token lookahead 区分语句/表达式形态）；
+  - **条件导入**：推荐 `@[if(<条件>)] import`，条件限定**目标常量**（CT0 标记
+    集），在项目索引/依赖解析阶段求值，条件值并入缓存键（可重现构建 + 并行
+    worker 确定性）；与平台后缀文件正交；
+  - **类型分派/动态字段**：推荐 `$is_type(x, T)` 谓词 + 快捷谓词，不引入类型
+    值/重载/泛型；动态字段定义为**编译期反射元信息消费**（`T.fields` +
+    `$field(x, "name")`，先只读），建议与 CT4 合并设计实施；明确不做运行时
+    反射与 `@[comptime]` 特化重载。
+  - 给出实施顺序（P0 表达式选择 → P1 条件导入 → P2 分派/字段）与每项验收，
+    以及 **D1–D6 决策点清单（待用户确认）**。
+- **说明**：本项无编译器改动（设计先行，符合 AGENTS「修改语法规则」流程）；
+  前几轮的验证结果（273/273、自举主门、comptimecross、ct5b 13 用例全绿）
+  继续有效。本轮另确认 `$` 调用初始化的 pub 聚合常量跨模块导出**无任何真实
+  使用面**（编译期正文、测试语料均无），维持 todo 的「小项挂起」决议。
+
+## 2026-10-09 yh 编译期：CT5B 收尾核实（闭包契约与缓存失效在 Linux 上全绿）
+
+- **内容**：本轮无编译器改动，对 todo 的 CT5B 条目做**收尾核实**：
+  - `tests/modules/build-check.py` 的 **13 个 ct5b 用例全部通过**，包括
+    `ct5b-cross-module-body`（`.s.ct` 闭包重写文本契约：隐藏符号 `__yhct_*`、
+    局部类型/结构体字面量/限定名内联、字符串闭包与 `.data` 隔离）与
+    **`ct5b-transitive-body-invalidates-importer`（缓存失效）**：提供方私有闭包
+    常量 `OFFSET 1→2` 后导入方重求值（运行断言退出码按预期变化）；
+  - 正文固定点另由 `native-selfhost.py` 的 `.s.ct` 跨代逐字节一致门覆盖
+    （cc3→cc4 21 产物一致，自举主门全绿）；
+  - 本机 build-check 总体 **77/84**（原 74/84），剩余 7 项是既有 Linux 平台
+    缺口（r3-* 交叉目标探针 ×5、r2c-ir-cache-fixture、s2-libs-core-modules），
+    与改动前基线一致，见 todo.md「Linux 平台缺口」。
+- **todo 更新**：CT5B 标记完成；「未完成」清单收敛为：CT6（新特性设计，待语法
+  方案与确认）、CT4 字段反射（按需）、`$` 初始化 pub 聚合常量导出（小项挂起）、
+  泛条目（撤销候选项）。
+- **验证环境**：WSL2 + qemu（临时种子 `tmp/boot/chain/yh-19e2e3a`），命令与
+  前几轮相同；本轮不涉及编译器源码改动，前几轮的 273/273、自举主门与
+  comptimecross 结果继续有效。
+
+## 2026-10-09 yh 编译期：pub 聚合常量跨模块导出（同日追加）
+
+- **交付**：
+  - 解析期放行模块模式下的 **字面量初始化** pub 聚合常量（结构体/定长数组/切片），
+    `$` 调用初始化仍拒绝（没有可重放的源文本，给明确诊断）；
+  - `.s.i` 对聚合常量按**初始化式源文本**重放（`const_expr_kind = 4`，与 `.s.ct`
+    闭包共用同一份文本）；导入侧重新解析即**编译期建模**；
+  - 运行期在**导入方物化本单元副本**：`em_data_symbol_header` 在 `c_iface_load`
+    下写本地数据标签（`.LD<n>`）并把标签号记入 `cval`，`sem_ident_val` 对
+    `F_EXTERN` 聚合常量按标签装载地址（与字符串指针常量同一路径）——不与提供方
+    导出的同名全局符号在链接期重复定义（实测：提供方 `.globl`，消费者只用 `.LD`）。
+  - 提供方正文（.s.ct 闭包）、消费者自己正文（.s.i 加载模型）的编译期读都可用。
+- **用例**：comptimecross 增 `PUB_TBL`（运行期 4+6、提供方 `pub_tbl_ct()`=20、
+  消费者 `pub_model()`=19），host 全断言通过；另核对接口重放文本与两方对象符号
+  形态。
+- **验证**（WSL+qemu，临时种子 `tmp/boot/chain/yh-19e2e3a`）：tests/yh-run
+  **273/273**（run 144/144、fail 121/121、pass 8/8）；tests/modules/check 17/17；
+  `native-selfhost.py` **全部通过**（模块固定点 21 产物一致、71 文件自解析、探针、
+  CLI、语法 44/44、运行语料 273/273）；comptimecross 构建+运行 0。
+- **边界（记入 todo）**：`$` 调用初始化的 pub 聚合常量仍拒绝；CT5B 剩余、CT6/CT4
+  仍待后续。
+
+## 2026-10-09 yh 编译期：顶层切片实参（切片常量与切片字面量，同日追加）
+
+- **交付**：
+  - **切片字面量实参** `$f([1, 2, 3])`：新增 `p_ct_arg_slice_literal` 把形状折进
+    编译期临时构造区 —— backing 聚合按元素个数创建（与切片常量模型同一形状），
+    `ct_ir_slice_param_valid` 校验后直接别名，无需「地址 + 长度」的独立视图表示；
+    元素支持标量/结构体/定长数组递归折叠，空切片字面量 `[]` 合法；
+  - **切片常量实参** `$f(SL)` 随切片常量建模（上一轮）自动可用；
+  - 正文内转发保持视图别名语义；聚合字面量实参的形态至此全部覆盖
+    （联合体不存在：`union` 不是 yh 关键字）。
+- **用例**：run/166（切片常量/字面量实参、下标+len、正文内转发、空切片）新增；
+  fail/148（原「切片实参无折叠路径」）按惯例升级为 run/166 并删除；诊断文本
+  「切片与联合体…」收窄为「联合体…」。
+- **验证**（WSL+qemu，临时种子 `tmp/boot/chain/yh-19e2e3a`）：tests/yh-run
+  **273/273**（run 144/144、fail 121/121、pass 8/8）；tests/modules/check 17/17；
+  `native-selfhost.py` **全部通过**（模块固定点 21 产物一致、71 文件自解析、探针、
+  CLI、语法 44/44、运行语料 273/273）；comptimecross 构建+运行 0。
+- **边界（记入 todo）**：pub 聚合常量跨模块导出、CT5B 剩余、CT6/CT4 仍待后续。
+
+## 2026-10-09 yh 全局聚合常量：模型取址只读别名 + 切片常量建模（同日追加）
+
+- **交付**：
+  - `&TABLE[0]` / `&P.x`（含嵌套聚合）可在编译期**取址并只读解引用** ——
+    `ct_ir_lvalue` 对模型基址的下标/字段分支放行，`ct_ir_pointer_target` 解析链
+    追加模型区扫描（覆盖嵌套子对象），指针下标/指针算术/指针形参转发随之可用；
+    写入统一按只读拒绝（赋值语句按 `ct_global_agg_hit` 拦截，与字符串只读池
+    同一策略）。
+  - **切片常量**同样建模（`const SLICE []int = [...]`）：元素个数只有解析完
+    字面量才知道，`parse_global_array_init` 的 `ct_obj` 改为出参、切片模型在内部
+    按 count 创建；下标/`len`/`for-in`/切片视图表达式/空切片/浮点元素可用；
+    `.s.ct` 闭包的 `agg_src` 加入 `TY_SLICE`，跨模块切片常量随闭包重放并建模
+    （comptimecross 的 `priv_slice_ct()`，host 断言 29）。
+- **用例**：run/164（模型取址只读）、run/165（切片常量 CT 读）新增；fail/153
+  （模型写入被拒）新增；fail/152（原「取址一律拒绝」）升级为 run/164 并删除；
+  comptimecross 增 `priv_slice_ct()`。
+- **验证**（WSL+qemu，临时种子 `tmp/boot/chain/yh-19e2e3a`）：tests/yh-run
+  **273/273**（run 143/143、fail 122/122、pass 8/8）；tests/modules/check 17/17；
+  `native-selfhost.py` **全部通过**（模块固定点 21 产物一致、71 文件自解析、探针、
+  CLI、语法 44/44、运行语料 273/273）；comptimecross 构建+运行 0。
+- **边界（记入 todo）**：切片**实参/值传递**（需要顶层视图表示）、pub 聚合常量
+  跨模块导出仍待后续。
+
+## 2026-10-09 yh 全局聚合常量在编译期有值（编译期过程剩余任务的实质项）
+
+- **交付**：全局聚合常量（顶层 `const` 数组/结构体）的元素值在**语义阶段**建模成
+  `CtAggregate`——新增 `compiler/comptime/ct_global_agg.yh`（独立只增拥有区 +
+  按符号登记 + 可建模性谓词；`ct_reset` 清登记表）。编译期正文读下标/字段/嵌套
+  字段/`len`/`for-in`/按值传参全部复用既有聚合路径；顶层 `$f(TABLE)`/`$f(P)`
+  命名聚合实参；跨模块（`.s.ct` 闭包重放初始化式源文本，导入侧重新解析即建模）
+  随之打通（`comptimecross` 的 `priv_tbl_ct()` 用 for-in + 下标读到 9，host
+  断言通过）——顺带修复闭包发射对 for-in 绑定的误判（`ct_iface_local_type_target`
+  跳过 `in`/`,` 后缀，跨模块 CT 正文首次支持 for-in）。
+  见[完成记录](01-finished/yh-全局聚合常量编译期建模-2026-10-09.md)。
+- **用例**：run/161–163 新增；fail/151（旧诊断形态）按惯例升级为 run/162 并删除；
+  fail/152 锁定「模型元素取址/写入」的只读边界诊断。
+- **顺带修复**：`asm/src/main/main.yh` 的写对象 `open` 标志按目标平台取值
+  （Linux 0x241 / Darwin 0x601，此前写死 Darwin 数值，Linux 上汇编产物永远写不
+  出，「写对象文件失败」）；Linux 上 `asm/tests/check.py` 自检通过。
+- **WSL 种子链**：入库种子是 darwin/arm64（Mach-O），Windows/WSL 无法执行；
+  本次在 WSL 沿 git 历史重建 Linux/aarch64 自举种子链（C stage0 → 逐代重建到
+  HEAD，含三段过渡补丁），临时开发种子 `tmp/boot/chain/yh-19e2e3a`（不入库），
+  见[完成记录](01-finished/yh-WSL重建Linux-aarch64自举种子-2026-10-09.md)。
+- **验证**（本机 WSL+qemu，等价 `make test` 与 `make selfhost-native`，种子哈希
+  校验除外）：
+  - `tests/yh/check.py`（ANTLR 参考语法，需 Java + antlr4 jar）：正例 73/73、
+    反例 44/44；`--compiler` 模式同 73/73 + 44/44；
+  - `tests/yh-run/check.py --compiler ./yh`：run 141/141、fail 122/122、
+    pass 8/8，总计 **271/271**；
+  - `tests/modules/check.py`：17/17；`build-check.py`：74/84，与未改动的
+    HEAD 基线在同一环境完全一致（无回归；剩余 10 项是既有 Linux 缺口，见
+    todo.md「Linux 平台缺口」）；
+  - `tests/selfhost/native-selfhost.py --seed <临时种子>`：**全部通过**——
+    cc2→cc4 三代冷编、模块固定点（21 产物）一致、71 文件自解析、固定点探针、
+    CLI 冒烟、语法与运行语料 271/271；
+  - 探针：scratch-isolation 8/8、check-command 通过；lex-stats/runtime-memory/
+    link-cache 被 yh_link 的 ELF64 方言缺口阻塞（本机 `YH_LINK=/nonexistent`
+    回落 gcc 可绕过，已记入 todo.md）。
+- 边界（记入 todo.md）：切片常量不建模；`&TABLE[0]` 编译期取址/写入按 fail/152
+  拒绝（模型只读）；pub 聚合常量跨模块导出仍未做。
+
 ## 2026-10-07 汇编器与链接器项目归位（asm/ 与 link/）
 
 - **两个项目按职责分开**：`asm/`（yh_asm）= 汇编器，`link/`（yh_link）= 链接器。

@@ -120,7 +120,7 @@ pub fn ct_ir_support_code(stmt_first int, stmt_after int,
     i = expr_first;
     for i < expr_after {
         let kind2 int = ct_ir_exprs[i].kind;
-        if (kind2 < 1 || kind2 > 13) { return 600; }
+        if (kind2 < 1 || kind2 > 15) { return 600; }
         if (ct_ir_exprs[i].type_id < 0 && kind2 != 6 && kind2 != 12) { return 700; }
         i += 1;
     }
@@ -326,6 +326,16 @@ pub fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
                     }
                     return gen.sem_err("编译期求值不支持指针常量");
                 }
+                // 全局聚合常量：用前端在语义阶段建好的编译期模型（元素值）代替
+                // 数据段标签，编译期读下标/字段/迭代/传参因此走既有聚合路径。
+                let model i64 = ct_global_agg_lookup(expr.sym_id);
+                if (model != 0) {
+                    out.type_id = expr.type_id;
+                    out.value = model;
+                    out.is_lit = 0;
+                    out.lit_big = 0;
+                    return 0;
+                }
                 out.type_id = expr.type_id;
                 out.value = gs.c_syms[expr.sym_id].cval;
                 out.is_lit = 0;
@@ -518,13 +528,24 @@ pub fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
         out.lit_big = 0;
         return 0;
     }
-    if (expr.kind == 4) {
+    // kind 4 = 运行期三元 `?:`，kind 14 = 编译期表达式选择 `$if (…) e1 $else e2`：
+    // 执行语义相同（求条件值 → 只求值选中分支）。kind 14 的分支可能带
+    // 字面量提升（前端合流把字面量分支收敛到另一分支类型），这里按
+    // is_lit 路径做类型归一，保证 out.type_id 与表达式声明的合流类型一致。
+    if (expr.kind == 4 || expr.kind == 14) {
         let condition CtValue;
         if (ct_ir_eval_expr(frame, expr.child0, &condition) != 0) { return -1; }
         if (condition.value != 0) {
-            return ct_ir_eval_expr(frame, expr.child1, out);
+            if (ct_ir_eval_expr(frame, expr.child1, out) != 0) { return -1; }
+        } else {
+            if (ct_ir_eval_expr(frame, expr.child2, out) != 0) { return -1; }
         }
-        return ct_ir_eval_expr(frame, expr.child2, out);
+        if (expr.kind == 14 && out.type_id != expr.type_id && out.is_lit != 0
+            && gen.sem_can_assign(expr.type_id, out.type_id, out.is_lit,
+                out.value, out.lit_big) == 0) {
+            out.type_id = expr.type_id;
+        }
+        return 0;
     }
     if (expr.kind == 5) {
         let args [64]CtValue;
@@ -571,7 +592,9 @@ pub fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
     if (expr.kind == 13) {
         return ct_ir_struct_eval(frame, expr_id, out);
     }
-    if (expr.kind == 9) {
+    if (expr.kind == 9 || expr.kind == 15) {
+        // kind 9 = 成员访问 `x.name`（源码 token 定名）；
+        // kind 15 = `$field(x, "name")`（parse 期解析出的字段下标，只读读取）。
         return ct_ir_member_read(frame, expr_id, out);
     }
     if (expr.kind == 8) {
@@ -1239,6 +1262,10 @@ pub fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
         if (place.direct != 0 && ct_pool_hit(place.direct.to_type(i64)) != 0) {
             return gen.sem_err("编译期不能写入字符串字面量指针常量");
         }
+        // 全局聚合常量的编译期模型只读：解引用读取允许，写入统一在此拒绝。
+        if (place.direct != 0 && ct_global_agg_hit(place.direct.to_type(i64)) != 0) {
+            return gen.sem_err("编译期不能写入全局聚合常量（编译期模型只读）");
+        }
         let rhs CtValue;
         if (ct_ir_eval_expr(frame, rhs_id, &rhs) != 0) { return -1; }
         let current CtValue;
@@ -1303,6 +1330,11 @@ pub fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
             place.direct.is_lit = updated.is_lit;
             place.direct.lit_big = updated.lit_big;
         } else if (place.aggregate != 0) {
+            // 防御：前端已拒绝 const 聚合赋值的直接形态，经指针的写入走上面的
+            // direct 分支；这里再拦一次，保证模型聚合永远不可写。
+            if (ct_global_agg_owns(place.aggregate) != 0) {
+                return gen.sem_err("编译期不能写入全局聚合常量（编译期模型只读）");
+            }
             place.aggregate.values[place.index] = updated;
             // 联合体写入后把同一存储按各字段类型重解释到其他槽。
             if (ct_ir_union_broadcast(place.aggregate, place.index,

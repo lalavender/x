@@ -231,6 +231,15 @@ pub fn ct_ir_pointer_target(value i64, want_type int) *CtValue {
         }
         pi += 1;
     }
+    // 全局聚合常量的编译期模型：元素槽可被取址/解引用读取（含嵌套聚合对象），
+    // 写入在赋值语句按 ct_global_agg_hit 拒绝，这里只负责解析读目标。
+    let model *CtAggregate = ct_global_agg_chain();
+    for model != 0 {
+        let target *CtValue = ct_ir_block_slot_hit(model.values, model.count,
+            addr, stride, want_type);
+        if (target != 0) { return target; }
+        model = model.next;
+    }
     return 0;
 }
 
@@ -800,7 +809,7 @@ pub fn ct_ir_clone_value(frame *CtFrame, type_id int, source *CtValue,
 pub fn ct_ir_member_root_slot(frame *CtFrame, expr_id int) int {
     if (expr_id < 0 || expr_id >= frame.target.ir_expr_after) { return -1; }
     let expr CtExpr = ct_ir_exprs[expr_id];
-    if (expr.kind == 9) { return ct_ir_member_root_slot(frame, expr.child0); }
+    if (expr.kind == 9 || expr.kind == 15) { return ct_ir_member_root_slot(frame, expr.child0); }
     if (expr.kind == 7) { return ct_ir_local_binding(frame, expr.child0); }
     if (expr.kind == 1 && expr.child0 >= 0) {
         return ct_ir_member_root_slot(frame, expr.child0);
@@ -819,7 +828,7 @@ pub fn ct_ir_member_place(frame *CtFrame, expr_id int,
     place *CtPlace) int {
     if (expr_id < 0 || expr_id >= frame.target.ir_expr_after) { return -1; }
     let expr CtExpr = ct_ir_exprs[expr_id];
-    if (expr.kind != 9 || expr.child0 < 0) {
+    if ((expr.kind != 9 && expr.kind != 15) || expr.child0 < 0) {
         return gen.sem_err("编译期成员访问表达式结构无效");
     }
     let base CtValue;
@@ -836,34 +845,42 @@ pub fn ct_ir_member_place(frame *CtFrame, expr_id int,
         || aggregate.elem_type != base.type_id || aggregate.count != st.len) {
         return gen.sem_err("内部错误：编译期结构体存储无效");
     }
-    let member_rel int = expr.after - frame.target.body_token_first - 1;
-    if (member_rel < 0 || member_rel >= frame.target.body_n) {
-        return gen.sem_err("内部错误：编译期成员名源码范围无效");
-    }
-    // 字段名按源文本匹配字段表，token 类别不参与判断：被语言用作关键字的文本
-    // （如 `in`）同样可以是字段名，此处只校验范围。
-    let member CtToken = frame.target.body[member_rel];
     let field_index int = -1;
-    let i int = 0;
-    for i < st.len {
-        let field gen.SField = gs.t_fields[st.sub + i];
-        if (field.name_len == member.len) {
-            let same int = 1;
-            let j int = 0;
-            for j < member.len {
-                if (gs.np_data[field.name_off + j]
-                    != frame.target.src[member.start + j]) {
-                    same = 0;
-                    break;
-                }
-                j += 1;
-            }
-            if (same != 0) { field_index = i; break; }
+    if (expr.kind == 15) {
+        // `$field(x, "name")`：字段下标已在 parse 期按名字解析并校验过。
+        field_index = expr.op;
+        if (field_index < 0 || field_index >= st.len) {
+            return gen.sem_err("内部错误：编译期 $field 字段下标无效");
         }
-        i += 1;
-    }
-    if (field_index < 0) {
-        return gen.sem_err("内部错误：编译期结构体成员无法匹配字段表");
+    } else {
+        let member_rel int = expr.after - frame.target.body_token_first - 1;
+        if (member_rel < 0 || member_rel >= frame.target.body_n) {
+            return gen.sem_err("内部错误：编译期成员名源码范围无效");
+        }
+        // 字段名按源文本匹配字段表，token 类别不参与判断：被语言用作关键字的文本
+        // （如 `in`）同样可以是字段名，此处只校验范围。
+        let member CtToken = frame.target.body[member_rel];
+        let i int = 0;
+        for i < st.len {
+            let field gen.SField = gs.t_fields[st.sub + i];
+            if (field.name_len == member.len) {
+                let same int = 1;
+                let j int = 0;
+                for j < member.len {
+                    if (gs.np_data[field.name_off + j]
+                        != frame.target.src[member.start + j]) {
+                        same = 0;
+                        break;
+                    }
+                    j += 1;
+                }
+                if (same != 0) { field_index = i; break; }
+            }
+            i += 1;
+        }
+        if (field_index < 0) {
+            return gen.sem_err("内部错误：编译期结构体成员无法匹配字段表");
+        }
     }
     let field gen.SField = gs.t_fields[st.sub + field_index];
     if (ct_ir_struct_field_supported(field.type_id, 0) == 0) {
@@ -953,6 +970,10 @@ pub fn ct_ir_lvalue(frame *CtFrame, expr_id int, place *CtPlace) int {
         // 指针下标 p[i] 的写入目标由存活帧校验解析，不需要局部变量槽。
         if (place.direct != 0) { return 0; }
         if (place.slot < 0 || place.slot >= frame.local_n) {
+            // 基址不是局部绑定但聚合有效：全局聚合常量的编译期模型允许取址与
+            // 读取（元素槽只读，写入在赋值语句拒绝，见 ct_global_agg_hit）；
+            // 临时聚合仍按原诊断。
+            if (ct_global_agg_owns(place.aggregate) != 0) { return 0; }
             return gen.sem_err("编译期数组/切片下标写入必须来自可写局部变量");
         }
         let binding CtBinding = ct_ir_bindings[
@@ -965,6 +986,8 @@ pub fn ct_ir_lvalue(frame *CtFrame, expr_id int, place *CtPlace) int {
     if (expr.kind == 9) {
         if (ct_ir_member_place(frame, expr_id, place) != 0) { return -1; }
         if (place.slot < 0 || place.slot >= frame.local_n) {
+            // 同下标分支：全局聚合常量的成员槽允许取址/读取，写入在赋值路径拒绝。
+            if (ct_global_agg_owns(place.aggregate) != 0) { return 0; }
             return gen.sem_err("编译期结构体字段写入只支持本地变量");
         }
         let binding CtBinding = ct_ir_bindings[
