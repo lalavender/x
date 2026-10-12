@@ -2,6 +2,7 @@
 """验证 yh 自有内存运行时与 Darwin/Linux 导入边界。"""
 
 import argparse
+import platform
 import shutil
 import subprocess
 import sys
@@ -90,11 +91,22 @@ def main():
     asm_path = WORK / "linux-main.s"
     obj_path = WORK / "linux-main.o"
     asm_path.write_text(linux_asm.stdout)
-    # 交叉组装：PATH 可能被项目工具链包装劫持（如 crossbin/clang → 交叉
-    # gcc，不识别 -target），Linux 上显式取系统 clang；Darwin 用默认命令。
-    clang_tool = "/usr/bin/clang" if sys.platform != "darwin" else "clang"
-    assembled = run([clang_tool, "-target", "aarch64-linux-gnu", "-c",
-                     str(asm_path), "-o", str(obj_path)], WORK)
+    # 组装 Linux 目标：宿主本来就是 aarch64（如 CI 的 arm64 容器）时系统 gcc
+    # 原生汇编即可；x86_64 宿主才需要交叉汇编器，此时显式取系统 clang
+    # （PATH 上的 clang 可能被项目工具链包装劫持成认不出 -target 的交叉 gcc）。
+    # 容器里只装 build-essential+python3，没有 clang，故不能只留 clang 一条路。
+    if sys.platform == "darwin":
+        assembler = ["clang", "-target", "aarch64-linux-gnu", "-c"]
+    elif platform.machine().lower() in ("aarch64", "arm64"):
+        assembler = ["gcc", "-c"]
+    else:
+        clang_tool = "/usr/bin/clang" if Path("/usr/bin/clang").exists() \
+            else shutil.which("clang")
+        if clang_tool is None:
+            print("FAIL 找不到交叉汇编器 clang（x86_64 宿主汇编 aarch64 目标需要它）")
+            return 1
+        assembler = [clang_tool, "-target", "aarch64-linux-gnu", "-c"]
+    assembled = run(assembler + [str(asm_path), "-o", str(obj_path)], WORK)
     if assembled.returncode != 0:
         print(f"FAIL Linux arm64 运行时汇编: rc={assembled.returncode}\n"
               f"{assembled.stderr[-1000:]}")

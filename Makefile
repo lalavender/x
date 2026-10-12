@@ -138,6 +138,7 @@ selfhost-native: $(YH)
 	python3 $(TOPSRC)/tests/selfhost/lex-stats.py --compiler-path $(TOPSRC)/yh
 	python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(TOPSRC)/yh
 	python3 $(TOPSRC)/tests/selfhost/check-command.py --compiler-path $(TOPSRC)/yh
+	python3 $(TOPSRC)/tests/selfhost/foreign-fs-build.py --compiler-path $(TOPSRC)/yh
 	python3 $(TOPSRC)/tests/selfhost/link-cache.py --compiler-path $(TOPSRC)/yh
 	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(TOPSRC)/yh
 	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(TOPSRC)/yh

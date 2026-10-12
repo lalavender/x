@@ -18,8 +18,8 @@ STATS_RE = re.compile(
     r"ast_bindings=\d+ )?(?:ast_functions=\d+ )?workers=(\d+)"
 )
 TIMING_RE = re.compile(
-    r"yh-stats .* time_project_ns=(\d+) time_schedule_ns=(\d+) "
-    r"time_object_ns=(\d+) time_link_ns=(\d+) time_total_ns=(\d+)"
+    r"yh-stats .* time_project_ns=(-?\d+) time_schedule_ns=(-?\d+) "
+    r"time_object_ns=(-?\d+) time_link_ns=(-?\d+) time_total_ns=(-?\d+)"
 )
 
 
@@ -47,6 +47,11 @@ def main() -> int:
                 for match in STATS_RE.findall(output_text)]
         timing_rows = [tuple(int(value) for value in match)
                        for match in TIMING_RE.findall(output_text)]
+        # 负计时＝64 位纳秒被 32 位 int 截断（构建一旦超过 2.147 s 必现），
+        # 单独报出来，免得混在下面的阶段计数诊断里
+        if any(value < 0 for row in timing_rows for value in row):
+            print(f"构建计时为负（64 位计时被截断）：{timing_rows}")
+            return 1
         parent_timing = [row for row in timing_rows if row[3] > 0]
         totals = tuple(sum(row[index] for row in rows) for index in range(7))
         # 父进程为四个文件只建一次索引；fork worker 继承只读快照，main

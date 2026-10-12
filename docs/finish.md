@@ -2,6 +2,40 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-13 yh：arm64 目录扫描常量、CI 首跑两处阻塞与 64 位计时截断
+
+- **背景**：`1a8b4fa` push 后 CI 的 `linux-arm64` 作业**首次真实运行**，2m13s 在容器内
+  `make` 首步失败：`yh: 无法打开目录: .`。三条缺陷都是「本地环境够宽容就看不见」型。
+- **① arm64 `O_DIRECTORY` 常量错**：`compiler/cmd/project_dir.linux.yh` 的 openat flags
+  写的是 x86_64 的 `0x10000`，而 arm64 上 `O_DIRECTORY=0o40000(0x4000)`、`0x10000` 是
+  `O_DIRECT`——于是实际在「用 O_DIRECT 打开目录」，tmpfs/ext4/overlayfs 一律 `EINVAL`，
+  只有 9p（WSL 的 `/mnt/c`，本仓库所在处）不校验该标志、放行，本地因此全绿。改成
+  `0x4000`，并把 arm64/x86_64 取值错位写进注释（这个判据在 9p 上完全看不出来）。
+- **② `runtime-memory.py` 硬编码 `/usr/bin/clang`**：CI 容器只装 `build-essential python3`，
+  没有 clang，而 `run()` 不捕获 `FileNotFoundError`——修完 ① 后必然在
+  `make selfhost-native` 这一步爆。改为按宿主架构选汇编器：aarch64 宿主（CI 的 arm64
+  容器）用系统 gcc 原生汇编；x86_64 宿主仍取系统 clang + `-target aarch64-linux-gnu`；
+  都没有时给明确 FAIL 而不是 traceback。
+- **③ 统计计时 32 位截断**：yh 的 `int` 是 32 位（`TK_INT → TY_I32`），`gen.append_int`
+  的实参就是 `int`，纳秒计时超过 2.147 s 即翻负（实证
+  `2292776097 - 2^32 = -2002191199`，恰好等于四次阶段耗时之和 + 3.18 ms 开销），
+  `lex-stats.py` 的 `TIMING_RE` 因负号匹配不到父进程那行。新增 `gen.append_i64`，
+  `cmd/module_build.yh` 的五个计时字段改走它，门里把「负计时」单独报成截断诊断。
+- **新增回归门**：`tests/selfhost/foreign-fs-build.py`——把 fixture 复制到**系统临时目录**
+  （另一个文件系统：Linux tmpfs/ext4、容器 overlayfs）冷编 + 运行并核对退出码，日志里
+  打印该目录的文件系统类型；接入 `make selfhost-native`。旧编译器上必失败
+  （`/tmp` 实测 `无法打开目录: src`），修复后通过。
+- **验证**：`make test` 语法正例 78/78、反例 42/42、运行语料 293/293；`make selfhost-native`
+  全绿（含新增门）；慢构建实证（编译器自编 9.17 s）`time_total_ns=9173060069`；
+  修复后的编译器与新种子都能在 `/tmp`（tmpfs）上冷编整个 `compiler/` 项目
+  （等价于 CI 容器 overlayfs 场景）。
+- **滚种子**：`bin/yh-linux-arm64` `970cf4ff…` → **`33733767…`**（滚完用新种子复跑主门
+  全绿；新种子在 `/tmp`（tmpfs）上冷编 `compiler/` 项目 `rc=0`，等价 CI 容器条件）。
+- **未做/边界**：`darwin-arm64` 作业仍未真实跑过（只在 `workflow_dispatch` 触发；macOS
+  目录枚举走 `getattrlistbulk`，不涉及这组标志）；CI 的 60 分钟上限仍未实测；
+  `asm/`、`link/` 两个项目的改动按用户要求仍不提交。详情见
+  [完成记录](01-finished/yh-Linux目录扫描arm64常量与CI首跑修复-2026-10-13.md)。
+
 ## 2026-10-12 yh_asm 汇编器稳定化（ASM-0–ASM-8：断电、GNU 方言、门禁可移植、拒绝层、影子验收）
 
 - **本轮定位**：只做 `asm/`（yh_asm）与它的门禁/文档，**不接入编译器**；
