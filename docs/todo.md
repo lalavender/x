@@ -33,21 +33,45 @@ Linux/arm64 已在推进；macOS/arm64 要写第二个对象写出器（出口�
 按职责归位（记录见
 [归位记录](01-finished/yh汇编器与链接器项目归位-2026-10-07.md)）。
 
-- [ ] **TC0**：冻结汇编/操作数/重定位契约，拆分宿主与目标，盘点 Linux OS 导入与模式矩阵
-  （asm/ 现以 134 项 llvm-mc oracle 向量充当首版编码契约，inventory 脚本待补）。
-- [ ] **指令级负例门**：`asm/` 自检只有编码层负例（逻辑立即数不可编码值），
-  没有指令级负例。上一代 asm 项目的 19 条负例（越界立即数/偏移、SP 与 ZR
-  混用、未知助记符、未定义局部标签、`.balign 非 2 的幂` 等）没有随实现迁移，
-  归档在 `tmp/removed-2026-10-07/asm-legacy/`；其中浮点类负例在现实现已支持
-  浮点后不再适用，其余应按现状重写进 `asm/src/asm/70_selftest.yh` 或 `asm/tests/`。
-- [ ] **编译器汇编步查找名切换**：`compiler/cmd/link_cache.yh` 的 `mb_asm_tool`
-  仍按 `yh_link`（及 `YH_LINK`）查找、并按 `asm` 子命令调用；实现早已是
-  `asm/` 项目。切到 `yh_asm`/`YH_ASM` 后删掉 Makefile 的 `yh-link` 过渡别名
-  目标，并跑 `make selfhost-native` 复验。
-- [ ] **TC3 容器链接门剩余：yh 运行时外部符号桩**：容器差分门里 7 个语料因
-  `__Exit`/`_strtoul`/`_open`/`_close`/`_abs` 在 `tests/elf/yhr.s` 没有桩而跳过
-  （两边同样链不上，按差分语义跳过），另有 2 个语料因 `_mmap` 桩不全段错误
-  （参照对象同样崩）；补桩后这两类都会变成真正的运行比对。
+**2026-10-12：汇编器 `asm/`（yh_asm）稳定化 ASM-0–ASM-8 已完成并断电**（方案
+[yh-asm 汇编器稳定化实施方案](02-plan/yh-asm汇编器稳定化实施方案.md)、完成记录
+[yh-asm 稳定化](01-finished/yh-asm稳定化-2026-10-12.md)）：`-t linux` 接受
+编译器 GNU 方言、8 个模块原文汇编并与 clang 逐节/逐重定位一致、拒绝层与诊断门
+就位、链接运行差分 159/0/10、影子验收固定点 0 不一致、Darwin 输出由字节快照守住。
+剩余的未完成事项与明确的边界：
+
+- [ ] **接入编译器（未开工，2026-10-12 决定）**：`compiler/cmd/link_cache.yh` 的
+  `mb_asm_tool` 仍按 `yh_link`（及 `YH_LINK`）查找、按 `asm` 子命令调用。
+  **2026-10-12 已断电**：`make yh-link` 过渡别名与根目录入库的 `yh_asm`/`yh_link`
+  副本删除并进 `.gitignore`，编译器因此查不到、回落 `clang`/`gcc`（WSL/Linux 上
+  不再需要 `YH_LINK=/nonexistent` 绕过）。重新接入（查找名切到 `yh_asm`/`YH_ASM`、
+  产物与安装布局、缓存键纳入工具版本、默认切换、滚种子）待稳定判据 S1–S7
+  全过后另立。
+- [ ] **长条件分支放宽（明确不做）**：`b.cond`/`cbz`/`cbnz` 距离 ±256 KB，
+  越界报诊断；编译器最大模块 `.text` 已 413 KB（8 个模块实测 35–413 KB）但
+  没有出现越界的条件分支（本工具与 clang 都能汇编）。真出现时再评估放宽。
+- [ ] **`.size` 的符号表达式（明确不做）**：契约 v2 已按实测收窄为「只接受纯
+  数字」；编译器语料里没有 `.size`，出现真实消费者时再设计。
+- [ ] **寄存器同名符号（编译器侧缺陷）**：用户函数名 `w12` 等与寄存器同名时，
+  编译器发射的 `w12:` 标签本工具与 clang 都汇编不了（clang 接受标签定义、
+  但同样拒绝 `bl w12`）。根因在编译器发射用户符号未避让寄存器名；
+  `tests/yh-run/run/14-many-args.yh` 与 `37-many-args-noprintf.yh` 属这一类，
+  链接运行门里按「两边都拒绝汇编」跳过。
+- [ ] **macOS 原生 macho 两门未验证**：本轮环境只有 Linux，
+  `macho_corpus_check.py` / `macho_link_run.py` 未执行；Darwin 输出目前只由
+  `asm/tests/darwin-snapshot.txt`（9 个文件的字节快照）守住不回退。
+- [ ] **性能（待原生数据）**：同一批编译器模块语料（8.98 MB）clang 5.52 s vs
+  yh_asm 41.18 s；WSL 上 yh_asm 走 qemu 模拟（自建基准实测模拟因子 2.2–3.0×），
+  折算原生 arm64 约 2.5–3.5×。接入决策前需要原生 arm64 实测，再决定是否做
+  热路径优化。
+- [ ] **llvm-mc 未安装**：WSL 里没有 llvm-mc（`sudo` 需交互密码，装不了
+  llvm-21），全部门走 clang 集成汇编器回退；装上后可再跑一次，补「llvm-mc 与
+  clang 两条 oracle 都绿」的交叉证据。
+- [ ] **TC3 容器链接门剩余：Darwin 方言语料的运行时桩**：容器差分门里 7 个语料
+  因 `__Exit`/`_strtoul`/`_open`/`_close`/`_abs` 在 `tests/elf/yhr.s` 没有桩而跳过，
+  另有 2 个语料因 `_mmap` 桩不全段错误（参照对象同样崩）。2026-10-12：ASM-4 已用
+  `tests/elf/yhr-linux.s` 在**原生门**补齐（159/0/10 全绿），容器门那一份
+  （Darwin 方言 `tests/elf/yhr.s`）仍未补。
 - [ ] **TC4**：普通对象到静态 ELF，符号/布局/重定位、自有入口与长调用跳板。
   验收可用容器做差分：同一组对象分别用自有链接器与 GNU `ld` 链，比对行为。
 - [ ] **TC5**：单文件/项目内部调用、yh-asm/yh-link 入口、缓存身份与事务发布。
@@ -259,7 +283,19 @@ runtime-memory/lex-stats/scratch-isolation）在 WSL 全绿。重建与验证
 
 当前实施顺序以编译流程重规划的 R2/R4–R6 为准；
 [多平台架构整理与优化方案](02-plan/yh-多平台架构整理与优化方案.md)
-作为既有平台调查参照。
+作为既有平台调查参照。**2026-10-12 用户决定：开发与验证集中在 Linux 平台，
+macOS/Windows 等其他平台后接入**；Linux/aarch64 种子、门禁与滚种子流程优先维护。
+
+- [ ] **macOS 种子跨代恢复**：`bin/yh` 仍是 2026-10-11 一代，含 2026-10-12 删除的
+  「struct/union/enum 必须带 pub」门禁，**无法编译当前源码**（`compiler/ast`、
+  `cmd`、`comptime`、`parse` 已有模块私有类型）。接入 macOS 时的恢复步骤：先取
+  「语言规则一代」源码（本地化改动 = `docs/yh.g4` + `parse/parse_decl.yh` 两处门禁，
+  见 [模块私有类型实施方案](02-plan/yh-模块私有类型实施方案.md) P1）用现有 `bin/yh`
+  构建一次并 `make seed`（macOS 上写 `bin/yh`），再回到包含 P4 类型私有化的版本。
+  **已自动化**：`.github/workflows/ci.yml` 的 `darwin-arm64` 作业在种子落后时自动
+  补这一代（临时恢复 13 处 `pub` → `make` → `make seed` → 还原源码），跑完主门后把
+  `bin/yh` 与 `bin/yh.sha256` 作为 artifact 上传；手动触发一次 workflow_dispatch、
+  下载 artifact 并提交，即可追平 macOS 种子（该作业的核心逻辑已在 Linux 上等价干跑）。
 当前只有 arm64 双方言（GNU/Linux 与 Darwin/Mach-O）；Darwin 方言基础
 已在 compiler/gen/target.yh、emit_arm64.yh 与 cmd/driver.yh 就位。x64 后端与
 Windows 目标未实施。Linux/aarch64 自举种子已入库（`bin/yh-linux-arm64`，
@@ -277,9 +313,6 @@ Windows 目标未实施。Linux/aarch64 自举种子已入库（`bin/yh-linux-ar
 - [ ] **VS-U4**：扩展集成测试、VSIX、发布与 CI。
 
 ### 编译器可选收尾
-
-- [ ] **接口 pub 收缩**：四模块成模时 pub 从宽（顶层与字段全 pub），
-  按实际跨模块使用收缩，减小接口文件（ADR-0007 P5 可选项）。
 对象缓存键已包含编译器二进制内容（见 finish.md 同日项目增强记录），
 相关未完成事项归入本轮流程与缓存设计，不再重复列“补编译器身份”。
 

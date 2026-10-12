@@ -5,7 +5,8 @@
 ## 开发策略（必须遵守）
 
 **0.0.3 起仓库已删除 src/（C 版 stage0）与 bootstrap/，进入滚动自举**：
-编译器源码在 `compiler/`（gen/lex/parse/cmd/ir/backend 多模块的 project.toml 项目），
+编译器源码在 `compiler/`（gen/lex/parse/ast/comptime/cmd/ir/backend
+多模块的 project.toml 项目），
 构建只依赖**宿主平台对应的入库种子**：macOS/arm64 用 `bin/yh`（Mach-O，
 SHA-256 见 `bin/yh.sha256`），Linux/aarch64 用 `bin/yh-linux-arm64`（ELF，
 SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
@@ -23,6 +24,15 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
   《Linux 环境验证（容器方案）》。
 - 自举侧新增/修改行为时，须在 `tests/yh-run/` 或 `tests/modules/`
   新增 `.yh` 用例并运行 `make`。决策依据见 ADR-0006/0007。
+- **模块导出面**：只导出别的模块真的使用的声明（`pub` 同时决定 `.s.i` 接口
+  与 `.globl`）；仅模块内使用的 `fn`/`const` 不写 `pub`，入口 `cmd/` 只保留
+  `main`。跨模块可变状态经 `pub fn` 访问（`gen.G()` 模式）。
+- **模块私有类型**（2026-10-12，ADR-0013）：`struct`/`union`/`enum` 的 `pub`
+  可选，不带 `pub` 即模块私有（不进 `.s.i`、跨模块不可命名），且不得出现在
+  本模块的 `pub` 签名、`pub` 字段或 `pub` 别名里。
+- **平台顺序（2026-10-12 用户决定）：开发与验证以 Linux 平台为先**，
+  macOS/Windows 等其他平台后续接入；非 Linux 目标不因日常改动回归验收，
+  但 Linux 上的 `make test` / `make selfhost-native` 与滚种子照常执行。
 
 ## 修改语法规则
 
@@ -34,7 +44,7 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
 
 ## 目录
 
-- `compiler/` —— 编译器源码（gen/lex/parse/cmd/ir/backend 多模块的 project.toml 项目）
+- `compiler/` —— 编译器源码（gen/lex/parse/ast/comptime/cmd/ir/backend 多模块的项目）
 - `bin/yh` + `bin/yh.sha256` —— 入库种子与哈希（Darwin/arm64）
 - `bin/yh-linux-arm64` + `bin/yh-linux-arm64.sha256` —— Linux/aarch64 入库种子与哈希
 - `docs/03-design/` 语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
@@ -79,6 +89,13 @@ make test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 
 make selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
 make seed               # 滚种子（仅在全绿后）
 ```
+
+GitHub Actions（`.github/workflows/ci.yml`，手动 `workflow_dispatch` 或推送
+`arm64`/`main`）：`linux-arm64` 作业在 arm64 容器里跑第 2/3 层语料与
+`make selfhost-native`（第 1 层 ANTLR 需要 Java 与 jar 缓存，不在 CI 跑）；
+`darwin-arm64` 作业在 `macos-14` 上跑同一套门禁，入库 `bin/yh` 落后时先自动
+补一代种子（把模块私有类型临时改回 `pub` → `make` → `make seed` → 还原源码），
+并把 `bin/yh` + `bin/yh.sha256` 作为 artifact 上传——下载后提交即追平 macOS 种子。
 
 
 ## Linux 环境验证（容器方案）
@@ -143,6 +160,22 @@ SEED=bin/yh-linux-arm64 make selfhost-native
   `make test` 与 `make selfhost-native` 全绿后执行 `make seed`。
 - 容器内验证结论（命令、镜像、结果）记入 `docs/finish.md`；
   若发现 Linux 特有问题，先在 `docs/todo.md` 立项再修。
+
+### WSL（Windows 宿主）验证
+
+Windows 宿主按仓库规则在 WSL 内构建/验证（本机为 Ubuntu x86_64 +
+qemu-user/binfmt，交叉 gcc 包装在 `tmp/boot/crossbin/gcc`）：
+
+```bash
+export PATH="$PWD/tmp/boot/crossbin:$PATH"   # gcc → aarch64-linux-gnu-gcc
+export SEED=bin/yh-linux-arm64              # x86_64 宿主没有 x64 种子
+export YH_LINK=/nonexistent                 # 仓库根 yh_link 是 Mach-O，强制回落交叉 gcc
+make
+make test
+make selfhost-native
+# 滚种子：x86_64 宿主必须显式 SEED_DEST，否则会写到 bin/yh-linux-x64
+SEED=bin/yh-linux-arm64 SEED_DEST=bin/yh-linux-arm64 make seed
+```
 
 ## graphify
 

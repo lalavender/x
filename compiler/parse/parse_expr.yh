@@ -1,6 +1,7 @@
 module parse;
 import gen;
 import comptime;
+import ast;
 
 // ============================================================================
 // parse_expr.yh —— 自举编译器：表达式解析（语义钩子集成）
@@ -19,7 +20,7 @@ import comptime;
 // ============================================================================
 
 // parse_expr：表达式入口（= 条件表达式层；`$if` 表达式位于链最上层）。
-pub fn parse_expr(res *gen.Res) int {
+fn parse_expr(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_IF) {
         // 与三元同等的 capture 语义：子表达式以 depth>0 解析（不会误挂语句
@@ -27,15 +28,15 @@ pub fn parse_expr(res *gen.Res) int {
         if (gs.c_ast_capture == 0) {
             return parse_ct_if_expr(res);
         }
-        ast_expr_parse_depth += 1;
+        ast.ast_expr_depth_add(1);
         let r int = parse_ct_if_expr(res);
-        ast_expr_parse_depth -= 1;
+        ast.ast_expr_depth_add(-1);
         if (r == 0 && gs.c_compile != 0 && res.ct_diag != 0
             && gs.c_ct_diag_stmt == 0) {
             return gen.sem_err("编译期诊断只能作为独立语句");
         }
-        if (r == 0 && res.ct_diag == 0 && ast_expr_parse_depth == 0
-            && ast_stmt_add_expr(res.ast_id) != 0) {
+        if (r == 0 && res.ct_diag == 0 && ast.ast_expr_depth_now() == 0
+            && ast.ast_stmt_add_expr(res.ast_id) != 0) {
             return -1;
         }
         return r;
@@ -48,15 +49,15 @@ pub fn parse_expr(res *gen.Res) int {
         }
         return r;
     }
-    ast_expr_parse_depth += 1;
+    ast.ast_expr_depth_add(1);
     let r int = parse_ternary(res);
-    ast_expr_parse_depth -= 1;
+    ast.ast_expr_depth_add(-1);
     if (r == 0 && gs.c_compile != 0 && res.ct_diag != 0
         && gs.c_ct_diag_stmt == 0) {
         return gen.sem_err("编译期诊断只能作为独立语句");
     }
-    if (r == 0 && res.ct_diag == 0 && ast_expr_parse_depth == 0
-        && ast_stmt_add_expr(res.ast_id) != 0) {
+    if (r == 0 && res.ct_diag == 0 && ast.ast_expr_depth_now() == 0
+        && ast.ast_stmt_add_expr(res.ast_id) != 0) {
         return -1;
     }
     return r;
@@ -70,7 +71,7 @@ pub fn parse_expr(res *gen.Res) int {
 // 执行器（ct_ir kind 14）按 cond 的编译期值选支。合流按类型相等，
 // 字面量分支可向另一分支类型窄化/加宽（复用 sem_can_assign 的 is_lit
 // 路径，与 `?:` 的赋值语义一致）。
-pub fn parse_ct_if_expr(res *gen.Res) int {
+fn parse_ct_if_expr(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     let typed int = (gs.c_ct_prepare_active != 0 && gs.c_ast_capture != 0).to_type(int);
     let first int = gs.c_pos;
@@ -162,7 +163,7 @@ pub fn parse_ct_if_expr(res *gen.Res) int {
         }
     }
     if (gs.c_ast_capture != 0
-        && ast_expr_finish(res, AST_EXPR_CTIF, gen.TK_IF, first,
+        && ast.ast_expr_finish(res, ast.AST_EXPR_CTIF, gen.TK_IF, first,
             cond_ast, then_ast, else_ast) != 0) { return -1; }
     return 0;
 }
@@ -194,7 +195,7 @@ fn ct_if_merge_type(then *gen.Res, els *gen.Res, merged *int) int {
 // 目标类型取自 c_expect_tid（let 初始化/赋值上下文预先设置）；无上下文
 // 干净拒绝。数组要求元素个数与长度一致；切片按元素个数建 {len, data}
 // 视图。元素先逐个求值压栈，再逆序弹入临时数组（与类型化变参打包同法）。
-pub fn parse_array_literal(res *gen.Res, first int) int {
+fn parse_array_literal(res *gen.Res, first int) int {
     let gs *gen.GenState = gen.G();
     let tid int = gs.c_expect_tid;
     gs.c_expect_tid = -1;
@@ -247,7 +248,7 @@ pub fn parse_array_literal(res *gen.Res, first int) int {
             if (gen.sem_push_value(&e) != 0) {
                 return -1;
             }
-            if (gs.c_ast_capture != 0 && ast_expr_args_append(&list, e.ast_id) != 0) {
+            if (gs.c_ast_capture != 0 && ast.ast_expr_args_append(&list, e.ast_id) != 0) {
                 return -1;
             }
             count += 1;
@@ -314,14 +315,14 @@ pub fn parse_array_literal(res *gen.Res, first int) int {
     res.is_const = 0;
     gs.c_res_is_addr = 1;
     if (gs.c_ast_capture != 0
-        && ast_expr_finish(res, AST_EXPR_ARRAY, gen.TK_LBRACKET, first, list, -1, -1) != 0) {
+        && ast.ast_expr_finish(res, ast.AST_EXPR_ARRAY, gen.TK_LBRACKET, first, list, -1, -1) != 0) {
         return -1;
     }
     return 0;
 }
 
 // parse_expr_iso：隔离上下文——「IDENT {」恒按结构体字面量处理。
-pub fn parse_expr_iso(res *gen.Res) int {
+fn parse_expr_iso(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     let save int = gs.c_ctx_block;
     gs.c_ctx_block = 0;
@@ -331,7 +332,7 @@ pub fn parse_expr_iso(res *gen.Res) int {
 }
 
 // parse_expr_blockctx：块跟随上下文——for/switch/case 头部表达式。
-pub fn parse_expr_blockctx(res *gen.Res) int {
+fn parse_expr_blockctx(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     let save int = gs.c_ctx_block;
     gs.c_ctx_block = 1;
@@ -341,7 +342,7 @@ pub fn parse_expr_blockctx(res *gen.Res) int {
 }
 
 // parse_ternary：cond ? a : b（右结合；两支经值栈汇合）。
-pub fn parse_ternary(res *gen.Res) int {
+fn parse_ternary(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_logical_or(res) != 0) {
         return -1;
@@ -351,7 +352,7 @@ pub fn parse_ternary(res *gen.Res) int {
         let cond_ast int = -1;
         if (gs.c_ast_capture != 0) {
             cond_ast = res.ast_id;
-            first = ast_expr_start(cond_ast);
+            first = ast.ast_expr_start(cond_ast);
         }
         p_adv();
         if (gen.sem_ternary_cond(res) != 0) {
@@ -378,7 +379,7 @@ pub fn parse_ternary(res *gen.Res) int {
         gen.sem_res_copy(res, &mid);
         gs.c_res_is_addr = 0;
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_TERNARY, gen.TK_QUEST,
+            && ast.ast_expr_finish(res, ast.AST_EXPR_TERNARY, gen.TK_QUEST,
                 first, cond_ast, mid_ast, else_ast) != 0) {
             return -1;
         }
@@ -387,7 +388,7 @@ pub fn parse_ternary(res *gen.Res) int {
 }
 
 // parse_logical_or：a || b（短路）。
-pub fn parse_logical_or(res *gen.Res) int {
+fn parse_logical_or(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_logical_and(res) != 0) {
         return -1;
@@ -397,7 +398,7 @@ pub fn parse_logical_or(res *gen.Res) int {
         let first int = gs.c_pos;
         if (gs.c_ast_capture != 0) {
             left_ast = res.ast_id;
-            first = ast_expr_start(left_ast);
+            first = ast.ast_expr_start(left_ast);
         }
         let op int = p_cur();
         p_adv();
@@ -412,7 +413,7 @@ pub fn parse_logical_or(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_BINARY, op, first, left_ast, right_ast, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, right_ast, -1) != 0) {
             return -1;
         }
     }
@@ -420,7 +421,7 @@ pub fn parse_logical_or(res *gen.Res) int {
 }
 
 // parse_logical_and：a && b（短路）。
-pub fn parse_logical_and(res *gen.Res) int {
+fn parse_logical_and(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_bit_or(res) != 0) {
         return -1;
@@ -430,7 +431,7 @@ pub fn parse_logical_and(res *gen.Res) int {
         let first int = gs.c_pos;
         if (gs.c_ast_capture != 0) {
             left_ast = res.ast_id;
-            first = ast_expr_start(left_ast);
+            first = ast.ast_expr_start(left_ast);
         }
         let op int = p_cur();
         p_adv();
@@ -445,7 +446,7 @@ pub fn parse_logical_and(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_BINARY, op, first, left_ast, right_ast, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, right_ast, -1) != 0) {
             return -1;
         }
     }
@@ -453,7 +454,7 @@ pub fn parse_logical_and(res *gen.Res) int {
 }
 
 // parse_bit_or：a | b。
-pub fn parse_bit_or(res *gen.Res) int {
+fn parse_bit_or(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_bit_xor(res) != 0) {
         return -1;
@@ -463,7 +464,7 @@ pub fn parse_bit_or(res *gen.Res) int {
         let first int = gs.c_pos;
         if (gs.c_ast_capture != 0) {
             left_ast = res.ast_id;
-            first = ast_expr_start(left_ast);
+            first = ast.ast_expr_start(left_ast);
         }
         let op int = gen.TK_PIPE;
         p_adv();
@@ -476,7 +477,7 @@ pub fn parse_bit_or(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1;
         }
     }
@@ -484,7 +485,7 @@ pub fn parse_bit_or(res *gen.Res) int {
 }
 
 // parse_bit_xor：a ^ b。
-pub fn parse_bit_xor(res *gen.Res) int {
+fn parse_bit_xor(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_bit_and(res) != 0) {
         return -1;
@@ -494,7 +495,7 @@ pub fn parse_bit_xor(res *gen.Res) int {
         let first int = gs.c_pos;
         if (gs.c_ast_capture != 0) {
             left_ast = res.ast_id;
-            first = ast_expr_start(left_ast);
+            first = ast.ast_expr_start(left_ast);
         }
         let op int = gen.TK_CARET;
         p_adv();
@@ -507,7 +508,7 @@ pub fn parse_bit_xor(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1;
         }
     }
@@ -515,7 +516,7 @@ pub fn parse_bit_xor(res *gen.Res) int {
 }
 
 // parse_bit_and：a & b。
-pub fn parse_bit_and(res *gen.Res) int {
+fn parse_bit_and(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_equality(res) != 0) {
         return -1;
@@ -525,7 +526,7 @@ pub fn parse_bit_and(res *gen.Res) int {
         let first int = gs.c_pos;
         if (gs.c_ast_capture != 0) {
             left_ast = res.ast_id;
-            first = ast_expr_start(left_ast);
+            first = ast.ast_expr_start(left_ast);
         }
         let op int = gen.TK_AMP;
         p_adv();
@@ -538,7 +539,7 @@ pub fn parse_bit_and(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1;
         }
     }
@@ -546,7 +547,7 @@ pub fn parse_bit_and(res *gen.Res) int {
 }
 
 // parse_equality：a == b、a != b。
-pub fn parse_equality(res *gen.Res) int {
+fn parse_equality(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_relational(res) != 0) {
         return -1;
@@ -557,7 +558,7 @@ pub fn parse_equality(res *gen.Res) int {
         let first int = gs.c_pos;
         if (gs.c_ast_capture != 0) {
             left_ast = res.ast_id;
-            first = ast_expr_start(left_ast);
+            first = ast.ast_expr_start(left_ast);
         }
         p_adv();
         let rhs gen.Res;
@@ -569,7 +570,7 @@ pub fn parse_equality(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1;
         }
     }
@@ -577,7 +578,7 @@ pub fn parse_equality(res *gen.Res) int {
 }
 
 // parse_relational：a < b、<=、>、>=。
-pub fn parse_relational(res *gen.Res) int {
+fn parse_relational(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_shift(res) != 0) {
         return -1;
@@ -588,7 +589,7 @@ pub fn parse_relational(res *gen.Res) int {
         let first int = gs.c_pos;
         if (gs.c_ast_capture != 0) {
             left_ast = res.ast_id;
-            first = ast_expr_start(left_ast);
+            first = ast.ast_expr_start(left_ast);
         }
         p_adv();
         let rhs gen.Res;
@@ -600,7 +601,7 @@ pub fn parse_relational(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1;
         }
     }
@@ -608,7 +609,7 @@ pub fn parse_relational(res *gen.Res) int {
 }
 
 // parse_shift：a << b、a >> b。
-pub fn parse_shift(res *gen.Res) int {
+fn parse_shift(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_additive(res) != 0) {
         return -1;
@@ -619,7 +620,7 @@ pub fn parse_shift(res *gen.Res) int {
         let first int = gs.c_pos;
         if (gs.c_ast_capture != 0) {
             left_ast = res.ast_id;
-            first = ast_expr_start(left_ast);
+            first = ast.ast_expr_start(left_ast);
         }
         p_adv();
         let rhs gen.Res;
@@ -631,7 +632,7 @@ pub fn parse_shift(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1;
         }
     }
@@ -639,7 +640,7 @@ pub fn parse_shift(res *gen.Res) int {
 }
 
 // parse_additive：a + b、a - b（含指针 ± 整数）。
-pub fn parse_additive(res *gen.Res) int {
+fn parse_additive(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_multiplicative(res) != 0) {
         return -1;
@@ -650,7 +651,7 @@ pub fn parse_additive(res *gen.Res) int {
         let first int = gs.c_pos;
         if (gs.c_ast_capture != 0) {
             left_ast = res.ast_id;
-            first = ast_expr_start(left_ast);
+            first = ast.ast_expr_start(left_ast);
         }
         p_adv();
         let rhs gen.Res;
@@ -662,7 +663,7 @@ pub fn parse_additive(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1;
         }
     }
@@ -670,7 +671,7 @@ pub fn parse_additive(res *gen.Res) int {
 }
 
 // parse_multiplicative：a * b、a / b、a % b。
-pub fn parse_multiplicative(res *gen.Res) int {
+fn parse_multiplicative(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_unary(res) != 0) {
         return -1;
@@ -681,7 +682,7 @@ pub fn parse_multiplicative(res *gen.Res) int {
         let first int = gs.c_pos;
         if (gs.c_ast_capture != 0) {
             left_ast = res.ast_id;
-            first = ast_expr_start(left_ast);
+            first = ast.ast_expr_start(left_ast);
         }
         p_adv();
         let rhs gen.Res;
@@ -693,7 +694,7 @@ pub fn parse_multiplicative(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1;
         }
     }
@@ -703,7 +704,7 @@ pub fn parse_multiplicative(res *gen.Res) int {
 // parse_unary：一元运算（可嵌套；后缀优先于一元）。
 // AMP 取地址：操作数按 lvalue 解析出地址；STAR 解引用：操作数恒按值
 // 解析（得到指针值），结果作为地址参与外层（c_lvalue 语义由钩子处理）。
-pub fn parse_unary(res *gen.Res) int {
+fn parse_unary(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     let k int = p_cur();
     if (k == gen.TK_MINUS || k == gen.TK_PLUS || k == gen.TK_BANG || k == gen.TK_TILDE) {
@@ -717,7 +718,7 @@ pub fn parse_unary(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_UNARY, k, first, child, -1, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, k, first, child, -1, -1) != 0) {
             return -1;
         }
         return 0;
@@ -737,7 +738,7 @@ pub fn parse_unary(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_UNARY, gen.TK_STAR, first2, child2, -1, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, gen.TK_STAR, first2, child2, -1, -1) != 0) {
             return -1;
         }
         return 0;
@@ -759,7 +760,7 @@ pub fn parse_unary(res *gen.Res) int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_UNARY, gen.TK_AMP, first3, child3, -1, -1) != 0) {
+            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, gen.TK_AMP, first3, child3, -1, -1) != 0) {
             return -1;
         }
         return 0;
@@ -768,7 +769,7 @@ pub fn parse_unary(res *gen.Res) int {
 }
 
 // parse_postfix：后缀链：调用、下标、.to_type(T)、.成员。
-pub fn parse_postfix(res *gen.Res) int {
+fn parse_postfix(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (parse_primary(res) != 0) {
         return -1;
@@ -785,7 +786,7 @@ pub fn parse_postfix(res *gen.Res) int {
             let first int = gs.c_pos;
             if (gs.c_ast_capture != 0) {
                 base_ast = res.ast_id;
-                first = ast_expr_start(base_ast);
+                first = ast.ast_expr_start(base_ast);
             }
             // 调用：实参表为行内列表，不允许尾逗号
             p_adv();
@@ -819,7 +820,7 @@ pub fn parse_postfix(res *gen.Res) int {
                     if (pr != 0) {
                         return -1;
                     }
-                    if (gs.c_ast_capture != 0 && ast_expr_args_append(&args, arg.ast_id) != 0) {
+                    if (gs.c_ast_capture != 0 && ast.ast_expr_args_append(&args, arg.ast_id) != 0) {
                         return -1;
                     }
                     argi += 1;
@@ -840,7 +841,7 @@ pub fn parse_postfix(res *gen.Res) int {
                 return -1;
             }
             if (gs.c_ast_capture != 0
-                && ast_expr_finish(res, AST_EXPR_CALL, gen.TK_LPAREN,
+                && ast.ast_expr_finish(res, ast.AST_EXPR_CALL, gen.TK_LPAREN,
                     first, base_ast, args, -1) != 0) {
                 return -1;
             }
@@ -851,7 +852,7 @@ pub fn parse_postfix(res *gen.Res) int {
             let first2 int = gs.c_pos;
             if (gs.c_ast_capture != 0) {
                 base_ast2 = res.ast_id;
-                first2 = ast_expr_start(base_ast2);
+                first2 = ast.ast_expr_start(base_ast2);
             }
             // 下标 / 切片表达式：基址压栈 → 首个下标表达式（恒为值，
             // 清 c_lvalue）→ 遇 '..' 为切片形态（再解析终点），否则普通下标
@@ -885,7 +886,7 @@ pub fn parse_postfix(res *gen.Res) int {
                     return -1;
                 }
                 if (gs.c_ast_capture != 0
-                    && ast_expr_finish(res, AST_EXPR_SLICE, gen.TK_RANGE,
+                    && ast.ast_expr_finish(res, ast.AST_EXPR_SLICE, gen.TK_RANGE,
                         first2, base_ast2, start_ast, end_ast) != 0) {
                     return -1;
                 }
@@ -899,7 +900,7 @@ pub fn parse_postfix(res *gen.Res) int {
                 return -1;
             }
             if (gs.c_ast_capture != 0
-                && ast_expr_finish(res, AST_EXPR_INDEX, gen.TK_LBRACKET,
+                && ast.ast_expr_finish(res, ast.AST_EXPR_INDEX, gen.TK_LBRACKET,
                     first2, base_ast2, idx_ast, -1) != 0) {
                 return -1;
             }
@@ -910,7 +911,7 @@ pub fn parse_postfix(res *gen.Res) int {
             let first3 int = gs.c_pos;
             if (gs.c_ast_capture != 0) {
                 base_ast3 = res.ast_id;
-                first3 = ast_expr_start(base_ast3);
+                first3 = ast.ast_expr_start(base_ast3);
             }
             p_adv();
             if (p_cur() == gen.TK_TO_TYPE) {
@@ -930,7 +931,7 @@ pub fn parse_postfix(res *gen.Res) int {
                     return -1;
                 }
                 if (gs.c_ast_capture != 0
-                    && ast_expr_finish(res, AST_EXPR_CAST, gen.TK_TO_TYPE,
+                    && ast.ast_expr_finish(res, ast.AST_EXPR_CAST, gen.TK_TO_TYPE,
                         first3, base_ast3, -1, -1) != 0) {
                     return -1;
                 }
@@ -957,9 +958,9 @@ pub fn parse_postfix(res *gen.Res) int {
                     }
                     if (gen.sem_field_meta_name(res) != 0) { return -1; }
                     if (gs.c_ast_capture != 0) {
-                        let id int = ast_expr_add(AST_EXPR_PRIMARY, gen.TOK_STRING,
+                        let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, gen.TOK_STRING,
                             first3, gs.c_pos, res.type_id, -1, -1, -1);
-                        if (id < 0 || ast_expr_set_semantics(id, res) != 0) {
+                        if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) {
                             return -1;
                         }
                         res.ast_id = id;
@@ -977,9 +978,9 @@ pub fn parse_postfix(res *gen.Res) int {
                         return gen.sem_err("枚举 values 迭代变量只支持 .name 和 .value");
                     }
                     if (gs.c_ast_capture != 0) {
-                        let id int = ast_expr_add(AST_EXPR_PRIMARY, ast_op,
+                        let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, ast_op,
                             first3, gs.c_pos, res.type_id, -1, -1, -1);
-                        if (id < 0 || ast_expr_set_semantics(id, res) != 0) {
+                        if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) {
                             return -1;
                         }
                         res.ast_id = id;
@@ -990,7 +991,7 @@ pub fn parse_postfix(res *gen.Res) int {
                     return -1;
                 }
                 if (gs.c_ast_capture != 0
-                    && ast_expr_finish(res, AST_EXPR_MEMBER, gen.TK_DOT,
+                    && ast.ast_expr_finish(res, ast.AST_EXPR_MEMBER, gen.TK_DOT,
                         first3, base_ast3, -1, -1) != 0) {
                     return -1;
                 }
@@ -1015,7 +1016,7 @@ pub fn parse_postfix(res *gen.Res) int {
 }
 
 // parse_primary：基本表达式。进入时重置地址标记。
-pub fn parse_primary(res *gen.Res) int {
+fn parse_primary(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     let first int = gs.c_pos;
     let op int = p_cur();
@@ -1026,12 +1027,12 @@ pub fn parse_primary(res *gen.Res) int {
         return 0;
     }
     let child int = res.ast_id;
-    let id int = ast_expr_add(AST_EXPR_PRIMARY, op, first, gs.c_pos,
+    let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, op, first, gs.c_pos,
         res.type_id, child, -1, -1);
     if (id < 0) {
         return -1;
     }
-    if (ast_expr_set_semantics(id, res) != 0) {
+    if (ast.ast_expr_set_semantics(id, res) != 0) {
         return -1;
     }
     res.ast_id = id;
@@ -1092,7 +1093,7 @@ fn parse_comptime_pred(res *gen.Res, kind int) int {
         && gen.em_mov_imm("x0", v.to_type(i64)) != 0) { return -1; }
     gs.c_res_is_addr = 0;
     if (gs.c_ast_capture != 0
-        && ast_expr_finish(res, AST_EXPR_PRIMARY, gen.TOK_IDENT, first,
+        && ast.ast_expr_finish(res, ast.AST_EXPR_PRIMARY, gen.TOK_IDENT, first,
             -1, -1, -1) != 0) { return -1; }
     return 0;
 }
@@ -1161,17 +1162,17 @@ fn parse_comptime_field_access(res *gen.Res) int {
     if (gen.sem_member(&base, name_start, name_len) != 0) { return -1; }
     gen.sem_res_copy(res, &base);
     if (gs.c_ast_capture != 0) {
-        let id int = ast_expr_add(AST_EXPR_CTFIELD, gen.TOK_STRING, first,
+        let id int = ast.ast_expr_add(ast.AST_EXPR_CTFIELD, gen.TOK_STRING, first,
             gs.c_pos, res.type_id, base_ast, -1, -1);
-        if (id < 0 || ast_expr_set_semantics(id, res) != 0) { return -1; }
-        ast_expr_nodes[id].op = field_index;
+        if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) { return -1; }
+        ast.ast_expr_op_set(id, field_index);
         res.ast_id = id;
     }
     return 0;
 }
 
 // parse_comptime_call：解析 $fn(args) 或 $module.fn(args)，并执行 CT 正文。
-pub fn parse_comptime_call(res *gen.Res) int {
+fn parse_comptime_call(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     let call_token int = gs.c_pos;
     let call_line int = gs.c_toks[call_token].line;
@@ -1409,15 +1410,15 @@ pub fn parse_comptime_call(res *gen.Res) int {
             let args_ast int = -1;
             let ai2 int = 0;
             for ai2 < arg_n {
-                if (ast_expr_args_append(&args_ast, args[ai2].ast_id) != 0) {
+                if (ast.ast_expr_args_append(&args_ast, args[ai2].ast_id) != 0) {
                     return -1;
                 }
                 ai2 += 1;
             }
             res.sym = sym;
-            let call_ast int = ast_expr_add(AST_EXPR_CALL, gen.TK_DOLLAR,
+            let call_ast int = ast.ast_expr_add(ast.AST_EXPR_CALL, gen.TK_DOLLAR,
                 call_token, gs.c_pos, res.type_id, -1, args_ast, -1);
-            if (call_ast < 0 || ast_expr_set_semantics(call_ast, res) != 0) {
+            if (call_ast < 0 || ast.ast_expr_set_semantics(call_ast, res) != 0) {
                 return -1;
             }
             res.ast_id = call_ast;
@@ -1434,7 +1435,7 @@ pub fn parse_comptime_call(res *gen.Res) int {
 // p_ct_arg_array_literal：把数组字面量折进编译期临时构造区。元素按源码顺序填位，
 // 标量元素用 c_fold 折成常量，嵌套数组与结构体元素递归折叠。成功返回 0 并把 res 写成
 // 「聚合对象指针常量」；不支持的形态返回 1（调用方给出诊断）。
-pub fn p_ct_arg_array_literal(res *gen.Res, tid int) int {
+fn p_ct_arg_array_literal(res *gen.Res, tid int) int {
     let gs *gen.GenState = gen.G();
     let at gen.CType = gs.t_types[tid];
     if (p_cur() != gen.TK_LBRACKET) { return 1; }
@@ -1495,7 +1496,7 @@ pub fn p_ct_arg_array_literal(res *gen.Res, tid int) int {
 // 切片分支按 ct_ir_slice_param_valid 校验后直接别名这个 backing，无需「地址+长度」
 // 的独立视图表示。元素形态与数组字面量一致（标量/结构体/定长数组递归折叠），
 // 空切片字面量 `[]` 合法；不支持返回 1（调用方给出诊断）。
-pub fn p_ct_arg_slice_literal(res *gen.Res, tid int) int {
+fn p_ct_arg_slice_literal(res *gen.Res, tid int) int {
     let gs *gen.GenState = gen.G();
     let st gen.CType = gs.t_types[tid];
     if (p_cur() != gen.TK_LBRACKET || st.kind != gen.TY_SLICE) { return 1; }
@@ -1551,7 +1552,7 @@ pub fn p_ct_arg_slice_literal(res *gen.Res, tid int) int {
 // p_ct_arg_struct_literal：把顶层编译期调用的结构体字面量实参折进编译期临时构造区，
 // 成功时把 res 写成「聚合对象指针常量」并返回 0；不支持的字面量返回 1（调用方给出诊断）。
 // 字段支持标量、嵌套结构体与数组（都递归折叠）；切片、联合体字段返回 1。
-pub fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
+fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
     let gs *gen.GenState = gen.G();
     let st gen.CType = gs.t_types[tid];
     if (gen.ty_lookup_name(gs.c_toks[gs.c_pos].start,
@@ -1640,7 +1641,7 @@ pub fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
 }
 
 // parse_primary_impl：解析基本表达式；外层统一记录源范围和类型。
-pub fn parse_primary_impl(res *gen.Res, first int) int {
+fn parse_primary_impl(res *gen.Res, first int) int {
     let gs *gen.GenState = gen.G();
     gs.c_res_is_addr = 0;
     let k int = p_cur();
@@ -1724,7 +1725,7 @@ pub fn parse_primary_impl(res *gen.Res, first int) int {
         let len_child int = res.ast_id;
         if (gen.sem_len(res) != 0) { return -1; }
         if (gs.c_ast_capture != 0
-            && ast_expr_finish(res, AST_EXPR_UNARY, gen.TK_LEN, first,
+            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, gen.TK_LEN, first,
                 len_child, -1, -1) != 0) { return -1; }
         return 0;
     }
@@ -1741,7 +1742,7 @@ pub fn parse_primary_impl(res *gen.Res, first int) int {
 
 // parse_ident_primary：标识符作为基本表达式（含结构体字面量决策与
 // 模块限定名分派）。
-pub fn parse_ident_primary(res *gen.Res) int {
+fn parse_ident_primary(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     // 注意：stage0 中 if/while 体不开新词法作用域，同名局部必须提升到函数级
     let istart int = gs.c_toks[gs.c_pos].start;
@@ -1812,7 +1813,7 @@ pub fn parse_ident_primary(res *gen.Res) int {
 // parse_module_qualified：m.member 的模块成员访问（消费 m . member）。
 // 命名空间命中后按普通名字求值（跨模块符号已带后缀且为外部引用）；
 // 未使用的导入在此标记。want_type=0。
-pub fn parse_module_qualified(res *gen.Res, mi int, unused int) int {
+fn parse_module_qualified(res *gen.Res, mi int, unused int) int {
     let gs *gen.GenState = gen.G();
     p_adv(); // 绑定名
     p_adv(); // '.'
@@ -1839,7 +1840,7 @@ pub fn parse_module_qualified(res *gen.Res, mi int, unused int) int {
 
 // parse_module_struct_lit：m.T { … } 限定结构体字面量（消费 m . T）。
 // tid 来自接口命名空间；构造检查与本地类型一致（跨模块私有字段拒绝）。
-pub fn parse_module_struct_lit(res *gen.Res, mi int) int {
+fn parse_module_struct_lit(res *gen.Res, mi int) int {
     let gs *gen.GenState = gen.G();
     p_adv();
     p_adv();
@@ -1865,7 +1866,7 @@ pub fn parse_module_struct_lit(res *gen.Res, mi int) int {
 }
 
 // try_struct_init：试探「IDENT { structInitBody }」成立且其后紧跟 '{'。
-pub fn try_struct_init() int {
+fn try_struct_init() int {
     let gs *gen.GenState = gen.G();
     let save int = gs.c_pos;
     let save_fold int = gs.c_fold;
@@ -1898,7 +1899,7 @@ pub fn try_struct_init() int {
 
 // parse_struct_init_forced：结构体字面量：IDENT '{' body '}'。
 // 编译模式：作为值使用统一拒绝（B5 只支持 let 直接初始化路径）。
-pub fn parse_struct_init_forced(res *gen.Res) int {
+fn parse_struct_init_forced(res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     // 结构体字面量：IDENT '{' body '}'
     // 语法模式只消费 token；编译模式在临时槽构造聚合值，地址留 x0。
@@ -1924,7 +1925,7 @@ pub fn parse_struct_init_forced(res *gen.Res) int {
 
 // parse_struct_init_tid：按给定类型构造结构体字面量（'{ … }' 由本函数
 // 消费；本地路径与模块限定路径共用）。
-pub fn parse_struct_init_tid(tid int, res *gen.Res) int {
+fn parse_struct_init_tid(tid int, res *gen.Res) int {
     let gs *gen.GenState = gen.G();
     let init_first int = gs.c_pos;
     if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
@@ -1949,9 +1950,9 @@ pub fn parse_struct_init_tid(tid int, res *gen.Res) int {
         gen.sem_res_reset(res, tid);
     }
     if (gs.c_ast_capture != 0) {
-        let id int = ast_expr_add(AST_EXPR_STRUCT_INIT, gen.TK_LBRACE,
+        let id int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_INIT, gen.TK_LBRACE,
             init_first, gs.c_pos, tid, fields, -1, -1);
-        if (id < 0 || ast_expr_set_semantics(id, res) != 0) { return -1; }
+        if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) { return -1; }
         res.ast_id = id;
     }
     return 0;
@@ -1959,7 +1960,7 @@ pub fn parse_struct_init_tid(tid int, res *gen.Res) int {
 
 // parse_struct_init_body：字面量体（'{' 与 '}' 由调用方处理）。
 // 强制非空；首元素第二个 token 为 ':' 即命名式；不得混写；允许尾逗号。
-pub fn parse_struct_init_body(tid int, fields *int) int {
+fn parse_struct_init_body(tid int, fields *int) int {
     let gs *gen.GenState = gen.G();
     if (p_cur() == gen.TK_RBRACE) {
         return gen.err_tok("结构体字面量不能为空");
@@ -2030,9 +2031,9 @@ pub fn parse_struct_init_body(tid int, fields *int) int {
             }
             let node_first int = field_first;
             if (fields[0] >= 0) {
-                node_first = ast_expr_nodes[fields[0]].first;
+                node_first = ast.ast_expr_first_of(fields[0]);
             }
-            let field_node int = ast_expr_add(AST_EXPR_STRUCT_FIELD, fidx,
+            let field_node int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_FIELD, fidx,
                 node_first, gs.c_pos, -1, fields[0], fv.ast_id, -1);
             if (field_node < 0) { return -1; }
             fields[0] = field_node;

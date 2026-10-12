@@ -1,0 +1,286 @@
+module ast;
+import gen;
+import comptime;
+
+// AstFunctionContext：已检查函数的只读 arena 切片，也是后续函数级任务的稳定输入。
+struct AstFunctionContext {
+    file_id int;              // SourceStore 文件编号
+    owner_decl int;           // 文件内 PDecl 编号
+    decl_row int;             // AstDecl 行号
+    token_first int;          // 函数声明在文件 token 表中的起点
+    token_after int;          // 函数声明 token 半开区间终点
+    expr_first int;           // 本函数表达式 arena 起点
+    expr_after int;           // 本函数表达式 arena 半开区间终点
+    stmt_first int;           // 本函数语句 arena 起点
+    stmt_after int;           // 本函数语句 arena 半开区间终点
+    edge_first int;           // 本函数语句表达式边起点
+    edge_after int;           // 本函数语句表达式边半开区间终点
+    binding_first int;        // 本函数参数和局部绑定起点
+    binding_after int;        // 本函数绑定 arena 半开区间终点
+    body_stmt int;            // 函数体根语句节点
+    asm_first int;            // 旧发射器为该函数写入 .text 的起点
+    asm_after int;             // 旧发射器为该函数写入 .text 的终点
+}
+
+let ast_function_nodes *AstFunctionContext = 0;
+let ast_function_count int = 0;
+let ast_function_cap int = 0;
+
+let ast_function_active int = 0;
+let ast_function_file int = -1;
+let ast_function_owner int = -1;
+let ast_function_expr_first int = 0;
+let ast_function_stmt_first int = 0;
+let ast_function_edge_first int = 0;
+let ast_function_binding_first int = 0;
+let ast_function_asm_first int = 0;
+
+// ast_function_reset：释放当前模块收集的函数上下文并清除未完成捕获状态。
+pub fn ast_function_reset() void {
+    let gs *gen.GenState = gen.G();
+    if (ast_function_nodes != 0) {
+        free(ast_function_nodes.to_type(*void));
+    }
+    ast_function_nodes = 0;
+    ast_function_count = 0;
+    ast_function_cap = 0;
+    ast_function_active = 0;
+    ast_function_file = -1;
+    ast_function_owner = -1;
+    ast_function_expr_first = 0;
+    ast_function_stmt_first = 0;
+    ast_function_edge_first = 0;
+    ast_function_binding_first = 0;
+    ast_function_asm_first = 0;
+    gs.c_stats_ast_functions = 0;
+}
+
+// ast_function_find_decl：查找文件声明身份对应的 AST 行；缺失时返回 -1。
+fn ast_function_find_decl(file_id int, owner_decl int) int {
+    if (file_id < 0 || file_id >= ast_decl_file_cap || owner_decl < 0
+        || ast_decl_file_first == 0 || ast_decl_file_first[file_id] < 0) {
+        return -1;
+    }
+    let row int = ast_decl_file_first[file_id] + owner_decl;
+    if (row < 0 || row >= ast_decl_count
+        || ast_decl_nodes[row].file_id != file_id
+        || ast_decl_nodes[row].decl_index != owner_decl) {
+        return -1;
+    }
+    return row;
+}
+
+// ast_function_begin：在函数语义遍历前记录各 arena 的私有起点。
+pub fn ast_function_begin(file_id int, owner_decl int) int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_ast_capture == 0) { return 0; }
+    if (ast_function_active != 0 || file_id != gs.c_active_file
+        || owner_decl != gs.c_file_decl_i) {
+        return gen.fail("内部错误：函数 AST 上下文嵌套或归属错误");
+    }
+    let decl_row int = ast_function_find_decl(file_id, owner_decl);
+    if (decl_row < 0 && gs.c_ct_prepare_active != 0
+        && gs.c_file_indexed == 0) {
+        // 单文件编译没有项目级 AstDecl；编译期准备过程用合成文件/声明身份。
+    } else if (decl_row < 0 || ast_decl_nodes[decl_row].kind != gen.TK_FN
+        || ast_decl_nodes[decl_row].body_stmt >= 0) {
+        return gen.fail("内部错误：函数 AST 上下文没有待解析的函数声明");
+    }
+    ast_function_active = 1;
+    ast_function_file = file_id;
+    ast_function_owner = owner_decl;
+    ast_function_expr_first = ast_expr_count;
+    ast_function_stmt_first = ast_stmt_count;
+    ast_function_edge_first = ast_stmt_expr_count;
+    ast_function_binding_first = ast_binding_count;
+    ast_function_asm_first = gs.o_len;
+    return 0;
+}
+
+// ast_function_end：在函数通过语义遍历后封存只读 arena 范围。
+pub fn ast_function_end() int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_ast_capture == 0) { return 0; }
+    if (ast_function_active == 0 || ast_function_file != gs.c_active_file
+        || ast_function_owner != gs.c_file_decl_i) {
+        return gen.fail("内部错误：函数 AST 上下文结束位置错误");
+    }
+    let decl_row int = ast_function_find_decl(ast_function_file, ast_function_owner);
+    let synthetic int = (decl_row < 0 && gs.c_ct_prepare_active != 0
+        && gs.c_file_indexed == 0).to_type(int);
+    if (synthetic == 0 && (decl_row < 0
+        || ast_decl_nodes[decl_row].body_stmt < ast_function_stmt_first
+        || ast_decl_nodes[decl_row].body_stmt >= ast_stmt_count)) {
+        return gen.fail("内部错误：函数 AST 上下文缺少函数体根");
+    }
+    if (synthetic != 0 && (ast_function_stmt_first >= ast_stmt_count
+        || ast_stmt_nodes[ast_function_stmt_first].kind != AST_STMT_BLOCK)) {
+        return gen.fail("内部错误：单文件编译期 AST 缺少函数体根");
+    }
+    if (ast_function_count == ast_function_cap) {
+        let ncap int = ast_function_cap * 2;
+        if (ncap == 0) { ncap = 32; }
+        let next *AstFunctionContext = malloc(
+            (ncap * sizeof(AstFunctionContext)).to_type(u64)).to_type(*AstFunctionContext);
+        if (next == 0) { return gen.fail("函数 AST 上下文分配失败"); }
+        if (ast_function_count > 0) {
+            memcpy(next, ast_function_nodes,
+                (ast_function_count * sizeof(AstFunctionContext)).to_type(u64));
+        }
+        if (ast_function_nodes != 0) {
+            free(ast_function_nodes.to_type(*void));
+        }
+        ast_function_nodes = next;
+        ast_function_cap = ncap;
+    }
+    let row int = ast_function_count;
+    ast_function_nodes[row].file_id = ast_function_file;
+    ast_function_nodes[row].owner_decl = ast_function_owner;
+    ast_function_nodes[row].decl_row = decl_row;
+    ast_function_nodes[row].token_first = synthetic != 0
+        ? gs.c_ct_prepare_first : ast_decl_nodes[decl_row].first;
+    ast_function_nodes[row].token_after = synthetic != 0
+        ? gs.c_pos : ast_decl_nodes[decl_row].after;
+    ast_function_nodes[row].expr_first = ast_function_expr_first;
+    ast_function_nodes[row].expr_after = ast_expr_count;
+    ast_function_nodes[row].stmt_first = ast_function_stmt_first;
+    ast_function_nodes[row].stmt_after = ast_stmt_count;
+    ast_function_nodes[row].edge_first = ast_function_edge_first;
+    ast_function_nodes[row].edge_after = ast_stmt_expr_count;
+    ast_function_nodes[row].binding_first = ast_function_binding_first;
+    ast_function_nodes[row].binding_after = ast_binding_count;
+    ast_function_nodes[row].body_stmt = synthetic != 0
+        ? ast_function_stmt_first : ast_decl_nodes[decl_row].body_stmt;
+    ast_function_nodes[row].asm_first = ast_function_asm_first;
+    ast_function_nodes[row].asm_after = gs.o_len;
+    ast_function_count += 1;
+    gs.c_stats_ast_functions += 1;
+    ast_function_active = 0;
+    ast_function_file = -1;
+    ast_function_owner = -1;
+    return 0;
+}
+
+// ast_function_ct_export：把刚封存的编译期函数 AST 切片导入 comptime 私有 arena。
+pub fn ast_function_ct_export(sym_id int) int {
+    if (ast_function_count <= 0) {
+        return gen.fail("内部错误：编译期函数 AST 上下文缺失");
+    }
+    if (sizeof(AstExpr) != sizeof(comptime.CtExpr)
+        || sizeof(AstStmt) != sizeof(comptime.CtStmt)
+        || sizeof(AstStmtExpr) != sizeof(comptime.CtEdge)
+        || sizeof(AstBinding) != sizeof(comptime.CtBinding)) {
+        return gen.fail("内部错误：编译期 IR 与前端 AST 布局不一致");
+    }
+    let ctx AstFunctionContext = ast_function_nodes[ast_function_count - 1];
+    return comptime.ct_ir_import(sym_id,
+        ast_expr_nodes.to_type(*comptime.CtExpr), ctx.expr_first,
+        ctx.expr_after - ctx.expr_first,
+        ast_stmt_nodes.to_type(*comptime.CtStmt), ctx.stmt_first,
+        ctx.stmt_after - ctx.stmt_first,
+        ast_stmt_exprs.to_type(*comptime.CtEdge), ctx.edge_first,
+        ctx.edge_after - ctx.edge_first,
+        ast_bindings.to_type(*comptime.CtBinding), ctx.binding_first,
+        ctx.binding_after - ctx.binding_first, ctx.body_stmt);
+}
+
+// ast_function_verify：确认 arena 切片不重叠，且每条引用留在所属函数内。
+pub fn ast_function_verify() int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_ast_capture == 0) { return 0; }
+    if (ast_function_active != 0 || ast_function_count > ast_function_cap) {
+        return gen.fail("内部错误：函数 AST 上下文未封存");
+    }
+    let i int = 0;
+    for i < ast_function_count {
+        let ctx AstFunctionContext = ast_function_nodes[i];
+        if (ctx.file_id < 0 || ctx.file_id >= gs.p_file_n || ctx.owner_decl < 0
+            || ctx.owner_decl >= gs.p_files[ctx.file_id].decl_n
+            || ctx.decl_row < 0 || ctx.decl_row >= ast_decl_count
+            || ctx.expr_first < 0 || ctx.expr_after < ctx.expr_first
+            || ctx.expr_after > ast_expr_count || ctx.stmt_first < 0
+            || ctx.stmt_after <= ctx.stmt_first || ctx.stmt_after > ast_stmt_count
+            || ctx.edge_first < 0 || ctx.edge_after < ctx.edge_first
+            || ctx.edge_after > ast_stmt_expr_count || ctx.binding_first < 0
+            || ctx.binding_after < ctx.binding_first
+            || ctx.binding_after > ast_binding_count || ctx.asm_first < 0
+            || ctx.asm_after < ctx.asm_first || ctx.asm_after > gs.o_len
+            || ctx.body_stmt < ctx.stmt_first || ctx.body_stmt >= ctx.stmt_after) {
+            return gen.fail("内部错误：函数 AST arena 范围无效");
+        }
+        let decl AstDecl = ast_decl_nodes[ctx.decl_row];
+        if (decl.kind != gen.TK_FN || decl.file_id != ctx.file_id
+            || decl.decl_index != ctx.owner_decl || decl.first != ctx.token_first
+            || decl.after != ctx.token_after || decl.body_stmt != ctx.body_stmt
+            || ast_stmt_nodes[ctx.body_stmt].kind != AST_STMT_BLOCK
+            || ast_stmt_nodes[ctx.body_stmt].parent != -1) {
+            return gen.fail("内部错误：函数 AST 声明与上下文不匹配");
+        }
+        if (i > 0) {
+            let prev AstFunctionContext = ast_function_nodes[i - 1];
+            if (ctx.expr_first < prev.expr_after || ctx.stmt_first < prev.stmt_after
+                || ctx.edge_first < prev.edge_after
+                || ctx.binding_first < prev.binding_after
+                || ctx.asm_first < prev.asm_after) {
+                return gen.fail("内部错误：函数 AST arena 切片互相重叠");
+            }
+        }
+        let ei int = ctx.expr_first;
+        for ei < ctx.expr_after {
+            let expr AstExpr = ast_expr_nodes[ei];
+            if (expr.file_id != ctx.file_id || expr.owner_decl != ctx.owner_decl
+                || expr.first < ctx.token_first || expr.after > ctx.token_after
+                || (expr.child0 >= 0 && (expr.child0 < ctx.expr_first
+                    || expr.child0 >= ctx.expr_after))
+                || (expr.child1 >= 0 && (expr.child1 < ctx.expr_first
+                    || expr.child1 >= ctx.expr_after))
+                || (expr.child2 >= 0 && (expr.child2 < ctx.expr_first
+                    || expr.child2 >= ctx.expr_after))
+                || (expr.binding_row >= 0 && (expr.binding_row < ctx.binding_first
+                    || expr.binding_row >= ctx.binding_after))) {
+                return gen.fail("内部错误：函数表达式越出所属上下文");
+            }
+            ei += 1;
+        }
+        let si int = ctx.stmt_first;
+        for si < ctx.stmt_after {
+            let stmt AstStmt = ast_stmt_nodes[si];
+            if (stmt.file_id != ctx.file_id || stmt.first < ctx.token_first
+                || stmt.after > ctx.token_after
+                || (stmt.parent >= 0 && (stmt.parent < ctx.stmt_first
+                    || stmt.parent >= ctx.stmt_after))
+                || (stmt.first_expr >= 0 && (stmt.first_expr < ctx.edge_first
+                    || stmt.first_expr >= ctx.edge_after))
+                || (stmt.last_expr >= 0 && (stmt.last_expr < ctx.edge_first
+                    || stmt.last_expr >= ctx.edge_after))
+                || (stmt.first_binding >= 0 && (stmt.first_binding < ctx.binding_first
+                    || stmt.first_binding >= ctx.binding_after))
+                || (stmt.last_binding >= 0 && (stmt.last_binding < ctx.binding_first
+                    || stmt.last_binding >= ctx.binding_after))) {
+                return gen.fail("内部错误：函数语句越出所属上下文");
+            }
+            si += 1;
+        }
+        let edge int = ctx.edge_first;
+        for edge < ctx.edge_after {
+            if (ast_stmt_exprs[edge].expr_id < ctx.expr_first
+                || ast_stmt_exprs[edge].expr_id >= ctx.expr_after) {
+                return gen.fail("内部错误：函数语句表达式边越出所属上下文");
+            }
+            edge += 1;
+        }
+        let bi int = ctx.binding_first;
+        for bi < ctx.binding_after {
+            let binding AstBinding = ast_bindings[bi];
+            if (binding.file_id != ctx.file_id || binding.owner_decl != ctx.owner_decl
+                || binding.id != bi - ctx.binding_first
+                || (binding.stmt_id >= 0 && (binding.stmt_id < ctx.stmt_first
+                    || binding.stmt_id >= ctx.stmt_after))) {
+                return gen.fail("内部错误：函数绑定越出所属上下文");
+            }
+            bi += 1;
+        }
+        i += 1;
+    }
+    return 0;
+}

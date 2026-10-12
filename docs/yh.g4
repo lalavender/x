@@ -33,10 +33,11 @@ sourceFile
     : topLevelDecl* EOF
     ;
 
-// 顶层声明：`pub` 导出标记。struct/union/enum **必须**经 `pub` 声明
-// （`pub struct` / `pub union` / `pub enum`；struct/union 全部字段公开，
-// enum 成员常量随枚举导出）；let/const/fn/type 的 pub 可选，默认仅本
-// 模块可见。**let 不支持导出**：`pub let` 非法（见 plainDeclBody 注释）。
+// 顶层声明：`pub` 导出标记。struct/union/enum 的 pub 可选（2026-10-12）：
+// 带 pub 的类型进接口、跨模块可命名（struct/union 字段一律公开，enum 成员
+// 常量随枚举导出，见 ADR-0013）；不带 pub 的是模块私有类型，只在本模块
+// 可见、不进接口。let/const/fn/type 的 pub 同样可选，默认仅本模块可见。
+// **let 不支持导出**：`pub let` 非法（见 plainDeclBody 注释）。
 // 类型声明不允许嵌套：struct/union/enum/type 只能出现在顶层。
 topLevelDecl
     : 'pub' exportedDeclBody
@@ -57,7 +58,7 @@ attributeName
 
 attributedDecl
     : 'pub'? attributedFnDecl
-    | 'pub' (structDecl | unionDecl | enumDecl)
+    | 'pub'? (structDecl | unionDecl | enumDecl)
     ;
 
 exportedDeclBody
@@ -69,12 +70,15 @@ exportedDeclBody
     | enumDecl
     ;
 
-// 不带 pub 的顶层声明：struct/union/enum 不在其中——裸写即语法错误。
+// 不带 pub 的顶层声明：struct/union/enum 在此为模块私有类型（2026-10-12）。
 plainDeclBody
     : letDecl
     | constDecl
     | fnDecl
     | typeDecl
+    | structDecl
+    | unionDecl
+    | enumDecl
     ;
 
 /*

@@ -2,6 +2,171 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-12 yh_asm 汇编器稳定化（ASM-0–ASM-8：断电、GNU 方言、门禁可移植、拒绝层、影子验收）
+
+- **本轮定位**：只做 `asm/`（yh_asm）与它的门禁/文档，**不接入编译器**；
+  接入（查找名切到 `yh_asm`/`YH_ASM`、默认切换、安装布局）留到判据 S1–S7
+  通过后另立。方案见
+  [yh-asm 汇编器稳定化实施方案](02-plan/yh-asm汇编器稳定化实施方案.md)，
+  工作记录见
+  [完成记录](01-finished/yh-asm稳定化-2026-10-12.md)。
+- **ASM-0 断电**：删 `Makefile` 的 `yh-link` 过渡目标与 `YH_LINK` 变量，
+  `git rm` 根目录入库的同一份 Mach-O 副本 `yh_asm`/`yh_link`
+  （sha256 `3675076a…`）并进 `.gitignore`；编译器 `mb_asm_tool` 查不到
+  `yh_link` 就回落系统 cc，WSL 上不再需要 `YH_LINK=/nonexistent` 绕过。
+  断电后主门复验全绿：`make` rc=0、`make test` rc=0（run 153/153、
+  fail 132/132、pass 8/8）、`make selfhost-native` rc=0（模块固定点
+  cc3→cc4 24 个产物一致、语法反例 42/42、modules 18/18、build-check 93/93）。
+- **ASM-1 GNU 方言**：`-t linux` 接受编译器 Linux 目标的实际发射
+  （`adrp Xd, sym` 裸符号、`add`/访存的 `:lo12:sym`），Darwin 目标仍要求
+  `@PAGE`。修前编译器 **8 个模块一条都汇编不了**（首错 `adrp` 需要
+  `sym@PAGE`）；修后 **8/8 原文汇编成功**（8.98 MB、1974 条 `adrp` 的模块
+  也不在话下），与 clang 对象**逐节内容 + 逐重定位 0 不一致 0 跳过**。
+- **ASM-2 语料盘点**：新增 `tools/yh-toolchain-inventory.py`，重建
+  `tmp/inv`（单文件 161 + 编译器模块 8 = 169 个 `.s`）、统计 69 个助记符与
+  2 个伪指令，查出契约漏列 `uxtw`（95 次）并补入契约 v2。
+- **ASM-3/ASM-4 门禁可移植**：oracle 解析改为
+  `LLVM_MC` → Homebrew 默认 → **clang 集成汇编器**（并校验是真 clang，
+  避开交叉工具链包装），WSL 上 134 条编码差分 0 不一致；新增
+  `tests/elf_link_native.py`（交叉 `aarch64-linux-gnu-ld` + `qemu-aarch64`，
+  不需要 docker）与 `tests/elf/start-linux.s`、`tests/elf/yhr-linux.s`
+  （运行时符号桩：`read/write/open/close/_Exit/abs/strtoul`）：169 个程序语料
+  **159 行为一致 / 0 不一致 / 10 跳过**（补桩前 152/0/17；跳过全部有名单与
+  原因：8 个编译器模块缺入口与跨模块运行时符号、2 个与寄存器同名的符号
+  语料两边都拒绝）。
+- **ASM-5 拒绝层**：内建第 4、5 层自检（GNU 方言端到端 + 拒绝层 25 条，
+  每条负例配正向对照），新增 `tests/asm-neg/` 与 `tests/check_neg.py`
+  （断言退出码 1、`<path>:<line>:<col>: 错误:` 形态与类别关键字）。顺带修掉
+  四个既有缺陷：`.balign` 非 2 的幂只有退出码没有诊断；分支目标带符号修饰符
+  被静默编成 `b #0`；未定义的 `.L` 符号被降级成未定义全局符号；未闭合块注释
+  报成「无法识别的语句开头」且列号为负。
+- **ASM-6/ASM-7/ASM-8**：退出码归一为 0/1/2（此前输入错误退 255）；
+  交叉目标（Linux 宿主 `-t darwin`）写对象修复（open 旗标按宿主取，此前按
+  目标取，Linux 上 0x601 没有 O_CREAT 直接失败）；影子验收
+  `tests/shadow-build.py` 用显式 `YH_LINK` 冷编编译器两代，
+  **16 次汇编调用、固定点 16 个产物 0 不一致**；Darwin 输出改由
+  `tests/darwin-snapshot.txt` 字节快照守住（9 个文件）。
+- **性能如实记录**：同一批编译器模块语料（8.98 MB）clang 5.52 s、
+  yh_asm 41.18 s（≈7.5×）；WSL 上 yh_asm 是 aarch64 ELF 走 qemu 模拟，
+  自建 CPU 基准实测模拟因子 2.2–3.0×，折算原生 arm64 约 2.5–3.5×。
+  本轮**不做热路径优化**，接入决策前需要原生数据。
+- **未做/边界**：长条件分支单调放宽（`b.cond`/`cbz` ±256 KB，编译器最大
+  模块 `.text` 已 413 KB 但未出现越界条件分支）；`.size` 的符号表达式
+  （契约按实测收窄）；GOT 窄访问；与寄存器同名的符号（编译器发射缺陷，
+  两边都汇编不了）；macOS 原生 macho 两门本轮未跑（无 macOS 环境），
+  只由快照守不回退。
+
+## 2026-10-12 CI：双平台自举门禁工作流（Linux 容器 + macOS 原生，含 macOS 种子自动补代）
+
+- **背景**：macOS 侧此前只在发布 tag 上由 `release.yml` 跑 `make` + 冒烟，没有跑门禁；
+  且入库 `bin/yh` 因「类型必须带 pub」门禁被删除而编不了当前源码，需要跨代恢复。
+- **新增** `.github/workflows/ci.yml`：
+  - 触发：`workflow_dispatch`（可选只跑某一平台，省 macOS 计费分钟）或推送 `arm64`/`main`；
+  - `linux-arm64`：`docker run --platform linux/arm64 ubuntu:24.04`，容器内 `make` + 第 2/3 层
+    语料 + `make selfhost-native`（第 1 层 ANTLR 需 Java 与 jar 缓存，不在 CI 跑）；
+  - `darwin-arm64`：`macos-14`（Apple Silicon）上先探测入库种子是否支持模块私有类型，
+    落后则把 13 处类型临时恢复 `pub` → `make` → `make seed` → `git checkout -- compiler`，
+    再 `make` + 冒烟 + `make selfhost-native`，最后校验并上传 `bin/yh`、`bin/yh.sha256`。
+    种子追平后该步骤自动跳过（探测即 `bin/yh --syntax-check` 一个裸 struct），可整段删除。
+- **本地验证**（macOS 无法本地执行，故用 Linux 种子等价干跑同一套逻辑）：YAML 解析、
+  各 `run` 脚本 `bash -n`、内嵌 Python 语法均通过；干跑链路——执行 ci.yml 内嵌的恢复脚本
+  （13 处命中，裸类型 0）→ 旧种子 `make` → `make seed`（新种子接受裸 struct）→ 还原 13 处
+  （等价 `git checkout -- compiler`）→ `make` → `make selfhost-native` **全绿**（固定点 24 产物、
+  自解析 71 文件、运行语料 293/293、modules 18/18、项目验收 93/93）→ 还原种子与工作树。
+- **注意**：`yh`/`yh_asm`/`yh_link` 是 gitignore 的本地产物，检出里不存在，因此 CI 的汇编/链接
+  自然回落系统工具链（Linux 容器内 gcc、macOS 上 clang），不需要 `YH_LINK` 兜底（该兜底只对
+  本地工作树有意义，见 AGENTS.md 的 WSL 命令）。
+- **未做**：尚未 push 到 GitHub、也没有真实跑过 macOS 作业（本地无 macOS）；该作业跑通后，
+  把 artifact 里的 `bin/yh` + `bin/yh.sha256` 提交回仓库即完成 macOS 种子追平。
+
+## 2026-10-12 yh：模块私有类型（struct/union/enum 的 pub 转可选，接口 39,990 → 36,633 字节）
+
+- **背景**：用户要求把不带 `pub` 的 `struct`/`union`/`enum` 标识为模块私有类型，
+  并选定「私有类型不得以任何形式（含指针）出现在 pub API」。规划交付[设计](../03-design/yh-模块私有类型设计.md)、
+  [实施方案](../02-plan/yh-模块私有类型实施方案.md)与 [ADR-0013](../adr/0013-yh模块私有类型.md)
+  （修订 2026-10-02「类型必须带 pub」，保留字段一律公开与禁止嵌套）。
+- **语法**：`docs/yh.g4` 的 `attributedDecl` 类型分支改 `'pub'?`、`plainDeclBody`
+  增 struct/union/enum（三处注释同步）；无歧义论证：`topLevelDecl` 三个分支首 token
+  集合互不相交（`pub` / `@` / 其余关键字）。
+- **前端**：删 `parse/parse_decl.yh` 两处「必须带 pub」门禁；接口按 `is_pub` 过滤、
+  enum 成员 `F_PUB`、pub 声明引用非 pub 类型的诊断、CT 私有类型诊断等机制原样复用。
+- **语料**：删 `rejected/{30_bare_struct,31_bare_union,34_bare_enum}.yh`（转正）；新增
+  `tests/yh/03-decl/10_private_types.yh`、`11_private_extern_type.yh`、
+  `tests/yh-run/run/175-private-types.yh`、`tests/modules/accept/08-private-type.yh`
+  与新 fixture `tests/modules/projects/privtype/`（lib/host/host2/host3 + badpub/badfield/
+  badalias/badptr），build-check 增 7 条用例。
+- **编译器自身（P4）**：12 个类型去 `pub`（ast 5、cmd 4、comptime 2、parse 1；13 处
+  含平台文件两份），接口 `.s.i` 39,990 → **36,633** 字节（−8.4%，自 63,160 起累计 −42%）；
+  编译器二进制与上一代逐字节相同——类型可见性只影响接口产物。
+- **验证**：`make` 两代各一次冷编通过；`make test` 语法正例 **78/78**、反例 **42/42**、
+  运行语料 **293/293**；`make selfhost-native` 固定点 24 产物一致、自解析 71 源文件、
+  固定点探针、CLI 冒烟、modules **18/18**、项目验收 **93/93**。
+- **滚种子**：`bin/yh-linux-arm64` `a4c66d5b…` → **`970cf4ff…`**（语言规则一代；
+  类型私有化一代二进制不变），两代后均复跑主门全绿。
+- **文档**：00-语义边界、Go 风格模块设计 §5.3（标注不透明导出类型暂不支持）、
+  模块与项目管理设计、CONTEXT.md（新增术语）、`compiler/README.md`、`AGENTS.md`、
+  todo（立项条目随完成移除）与本条。
+- **过程发现**：`tests/yh-run` 是单文件模式、不发射接口，故模块级语义负例只能放
+  `tests/modules/projects`；负例函数名不能撞 prelude 名（`open` 会先报顶层符号重定义）。
+
+## 2026-10-12 yh：模块导出面收缩（`pub` 1048 → 585，接口 −36.7%、`.globl` −57%）
+
+- **背景**：用户要求分析各模块导出范围并收紧，理想形态是「每模块一个结构体 +
+  一个函数导出」。原口径是成模时 pub 从宽：1048 处 `pub`，其中 461 处 fn/const
+  无人跨模块引用。`pub` 在本编译器同时决定 `.s.i` 接口导出与 `.globl`
+  （`gen/emit_arm64.yh` 的 `em_prologue`/数据/`bss`）。
+- **收缩**：463 处 `pub` 移除（55 个文件），只针对 `fn`/`const`——lex 16、
+  backend 1、main 116、parse 119、ast 9、ir 12、comptime 81、gen 107；
+  同名跨平台文件（`clock.darwin|linux`、`project_dir.darwin|linux`）两处一起改写。
+  保留：入口 `cmd` 的 `main`（CRT 调用需 `.globl`）；`struct`/`union`/`enum` 按
+  2026-10-02「pub 一等化」必须带 pub，语言层面无法私有化；`let` 本就不导出。
+- **效果**：导出项 1048 → 585、`pub fn` 747 → 302；接口 `.s.i` 合计
+  63,160 → 39,990 字节（−36.7%，lex 681→69、main 6501→721、parse 7027→1190、
+  comptime 12621→7524）；模块汇编 `.globl` 776 → 333（−57%）。收缩后
+  `lex`/`backend` 已「≤1 函数、0 结构体」，`main` 只剩入口函数。
+- **无语言/行为改动**：只删关键字，不引入新用例（既有 292 条运行语料与 86 个
+  项目用例即回归门），`ir` 的对外 API 收缩由 `irverify`/`irfront` 依赖用例覆盖。
+- **验证**（WSL2 Ubuntu x86_64 + qemu-user/binfmt，`SEED=bin/yh-linux-arm64`、
+  `YH_LINK=/nonexistent`）：`make` 冷编一次通过；`make test` 语法正例 76/76、
+  反例 45/45、运行语料 **292/292**；`make selfhost-native` 模块固定点 cc3→cc4
+  **24 个产物逐字节一致**、cc4 自解析 71 个源文件、并发项目扫描 8/8、前端快照
+  复用、自有运行时、`yh check`、modules **17/17**、项目验收 **86/86**。
+- **滚种子**：`bin/yh-linux-arm64` `3eeae704…` → `a4c66d5b…`，用新种子复跑
+  `make selfhost-native` 仍全绿。
+- **文档**：新增[设计](../03-design/yh-编译器模块导出面收缩设计.md)与
+  [完成报告](01-finished/yh-编译器导出面收缩-2026-10-12.md)；同步 `compiler/README.md`、
+  `AGENTS.md` 与 `docs/todo.md`（原「接口 pub 收缩」条目换成待决策的
+  「模块私有类型」）。
+
+## 2026-10-12 yh：AST 阶段拆成独立 `compiler/ast/` 模块（解析与 AST 编译单元分离）
+
+- **背景**：用户决定「开发主要集中在 Linux 平台，其他平台后接入」，并要求优化编译流程、
+  把 AST 过程单独提到 `ast` 目录。此前 `compiler/parse/` 同时装语法分析器与 AST 阶段
+  （`ast_*.yh` 11 文件），共用一个编译单元：`yh-parse.s` 3.31 MB 为最大单元。
+- **改动**：11 个 `ast_*.yh` 迁入 `compiler/ast/` 并改 `module ast;`；parse/cmd 侧 80 处
+  `ast_*` 调用、50 处 `AST_*` 常量加 `ast.` 限定；`is_assign_op` 自 `parse_type.yh` 迁入
+  `gen/buffer.yh` 解环；AST arena 的 7 个跨模块状态 + 语句 `first_child` 字段改为 12 个
+  `pub fn` 访问函数（`let` 不导出），调用点约 33 处；8 个文件补 `import ast;`。
+- **产物**（同一编译器、同一源码仅差拆分）：`yh-parse.s` 3,310,028 → 2,174,107 字节
+  （−34.3%），新增 `yh-ast.s` 1,132,669 字节；`gen`/`main` 因 `is_assign_op` 与限定调用
+  微增；`lex`/`ir`/`backend`/`comptime` 的 `.s` 与 `.s.i` 与拆分前**逐字节一致**。
+  模块数 7→8，固定点产物 21→24。
+- **用例**：新增 `tests/modules/projects/modstate/`（私有 `let` arena + pub 访问函数），
+  `build-check.py` 增 `u3-private-let-accessor`（run，退出码 7）与
+  `u3-private-let-access`（fail，诊断「模块没有导出该名字」）。
+- **验证**（WSL2 Ubuntu x86_64 + qemu-user/binfmt，`SEED=bin/yh-linux-arm64`、
+  `YH_LINK=/nonexistent`、`PATH` 前置 `tmp/boot/crossbin`）：`make` 冷编通过（8 模块）；
+  `make test` 语法正例 76/76、反例 45/45（ANTLR 与编译器模式）、运行语料 **292/292**；
+  `make selfhost-native` 模块固定点 cc3→cc4 **24 个产物逐字节一致**、cc4 自解析 71 个
+  源文件、固定点探针、CLI 冒烟、并发项目扫描 8/8、前端快照复用、自有运行时、`yh check`、
+  modules **17/17**、项目验收 **86/86**（含本轮新增 2 例）全绿。
+- **滚种子**：`SEED=bin/yh-linux-arm64 SEED_DEST=bin/yh-linux-arm64 make seed`；
+  `bin/yh-linux-arm64` 哈希 `137c5fdb…76f2c` → `3eeae704…9aebe`，并用新种子复跑
+  `make selfhost-native` 仍全绿。
+- **文档**：新增[设计](03-design/yh-编译器ast模块拆分设计.md)与
+  [完成报告](01-finished/yh-编译器ast模块拆分-2026-10-12.md)；同步 `compiler/README.md`、
+  `README`、`AGENTS.md`（含 WSL 验证命令）与 `docs/todo.md`（Linux 平台优先）。
+
 ## 2026-10-11 yh：WSL/Linux 全量门禁修复（build-check 84/84、make test/selfhost-native 全绿）
 
 - **背景**：Linux 种子入库（2026-10-09）后，WSL 上 `make test` /

@@ -1,0 +1,158 @@
+name: CI
+
+# 自举门禁的双平台验证：
+#  - linux-arm64：QEMU 容器内（arm64 原生仿真）跑编译器语法模式、运行语料与主门；
+#    第 1 层 ANTLR 语料需要 Java 与 antlr4 jar 缓存，不在 CI 里跑（本机门禁仍覆盖）。
+#  - darwin-arm64：macOS（Apple Silicon）上跑同一套门禁；入库 bin/yh 若落后于
+#    「模块私有类型」一代，先自动补一代种子再验证（见下方步骤注释）。
+# 触发：手动 workflow_dispatch（可选只跑某个平台，省 macOS 计费分钟）或推送分支。
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 验证范围
+        type: choice
+        default: all
+        options:
+          - all
+          - linux-arm64
+          - darwin-arm64
+  push:
+    branches: [arm64, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}-${{ inputs.platform || 'push' }}
+  cancel-in-progress: true
+
+jobs:
+  linux-arm64:
+    name: AArch64 Linux（ELF）主门
+    if: github.event_name != 'workflow_dispatch' || inputs.platform != 'darwin-arm64'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # 免费私有仓库没有 arm64 原生 runner；用 QEMU 在 x86_64 runner 上跑
+      # arm64 容器，产物是货真价实的 AArch64 Linux ELF。
+      - name: 准备 QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: 语法/运行语料与主门（容器内）
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD":/repo:ro \
+            ubuntu:24.04 bash -ec '
+              set -e
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq >/dev/null
+              apt-get install -y -qq build-essential python3 >/dev/null
+              cp -r /repo /build
+              cd /build
+              # 仓库根的 yh/yh_link/yh_asm 是 gitignore 的本地产物，检出里没有，
+              # 汇编与链接自然回落容器内的系统 gcc（arm64 原生）。
+              make
+              python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+              python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet
+              make selfhost-native
+            '
+
+  darwin-arm64:
+    name: Darwin arm64（Mach-O）主门
+    if: github.event_name == 'workflow_dispatch' && inputs.platform != 'linux-arm64'
+    runs-on: macos-14          # Apple Silicon（arm64）；macos-13 是 x86_64，跑不了 arm64 种子
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # 临时步骤（种子追平后可删）：入库 bin/yh 是 2026-10-11 一代，仍带
+      # 「struct/union/enum 必须带 pub」门禁，而当前编译器源码已有模块私有类型。
+      # 补法：把 13 处模块私有类型临时改回 pub（等价于「语言规则一代」源码），
+      # 用旧种子编出这一代并 make seed 覆盖 bin/yh，然后还原源码。
+      # 种子已支持裸 struct 时本步骤自动跳过。
+      - name: 必要时补一代 macOS 种子
+        run: |
+          set -euo pipefail
+          cat > /tmp/bare.yh <<'EOF'
+          struct S { v int; }
+          fn main() int { let s S; s.v = 1; return s.v - 1; }
+          EOF
+          if bin/yh --syntax-check /tmp/bare.yh >/dev/null 2>&1; then
+            echo "入库种子已支持模块私有类型，无需中间代"
+            exit 0
+          fi
+          echo "入库种子落后一代：造「语言规则一代」（类型临时恢复 pub）"
+          python3 - <<'PY'
+          import pathlib
+          import sys
+
+          TARGETS = [
+              ("compiler/ast/ast_expr.yh", "AstExpr"),
+              ("compiler/ast/ast_function.yh", "AstFunctionContext"),
+              ("compiler/ast/ast_ir_build.yh", "AstIRBuilder"),
+              ("compiler/ast/ast_ir_inline.yh", "AstIRInlineEntry"),
+              ("compiler/ast/ast_stmt.yh", "AstStmt"),
+              ("compiler/cmd/toml.yh", "TomlArrayItem"),
+              ("compiler/cmd/toml.yh", "TomlSec"),
+              ("compiler/cmd/project.yh", "PJDirEntry"),
+              ("compiler/cmd/clock.darwin.yh", "CmdTimespec"),
+              ("compiler/cmd/clock.linux.yh", "CmdTimespec"),
+              ("compiler/comptime/ct_ir_data.yh", "CtDataSlice"),
+              ("compiler/comptime/ct_global_agg.yh", "CtGlobalAgg"),
+              ("compiler/parse/iface_ct_map.yh", "IfaceCtColMap"),
+          ]
+          done = 0
+          for rel, name in TARGETS:
+              path = pathlib.Path(rel)
+              # newline="" 按字节保留行尾，避免在 CRLF 检出上重写整文件
+              text = path.read_text(encoding="utf-8", newline="")
+              old = "struct " + name + " "
+              new = "pub struct " + name + " "
+              hits = text.count("\n" + old)
+              if hits != 1:
+                  sys.exit(f"{rel}: {name} 命中 {hits} 处，期望 1 处")
+              path.write_text(text.replace("\n" + old, "\n" + new),
+                              encoding="utf-8", newline="")
+              done += 1
+          print(f"已临时恢复 {done} 处类型的 pub")
+          PY
+          make
+          make seed
+          git checkout -- compiler
+          python3 tools/selfhost_snapshot_gate.py --verify-seed "$PWD/bin/yh"
+          echo "中间代种子已就位（bin/yh 与 bin/yh.sha256 已更新）"
+
+      - name: 构建 HEAD 源码
+        run: make
+
+      - name: 冒烟
+        run: |
+          cat > /tmp/smoke.yh <<'EOF'
+          fn main() int {
+              printf("hello, yh!\n");
+              return 0;
+          }
+          EOF
+          ./yh /tmp/smoke.yh -o /tmp/smoke && /tmp/smoke
+
+      - name: 主门（固定点 + 自解析 + 语料 + 模块/项目验收）
+        run: make selfhost-native
+
+      - name: 校验入库种子
+        run: |
+          file bin/yh
+          python3 tools/selfhost_snapshot_gate.py --verify-seed "$PWD/bin/yh"
+
+      - name: 上传 macOS 种子（如已补代，下载后提交回仓库）
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64-seed
+          path: |
+            bin/yh
+            bin/yh.sha256
+          if-no-files-found: error

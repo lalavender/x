@@ -1,6 +1,7 @@
 module parse;
 import gen;
 import comptime;
+import ast;
 
 // ============================================================================
 // parse_stmt.yh —— 自举编译器：语句解析（语义钩子集成）
@@ -20,7 +21,7 @@ import comptime;
 
 // scan_assign_ahead：从当前 token 扫描到 ';'，返回深度 0 处首个赋值
 // 运算符的 token 种类；无则返回 0。括号/花括号/方括号内不视为顶层。
-pub fn scan_assign_ahead() int {
+fn scan_assign_ahead() int {
     let gs *gen.GenState = gen.G();
     let i int = gs.c_pos;
     let depth int = 0;
@@ -32,7 +33,7 @@ pub fn scan_assign_ahead() int {
         if (k == gen.TK_RPAREN || k == gen.TK_RBRACKET || k == gen.TK_RBRACE) {
             depth -= 1;
         }
-        if (depth <= 0 && is_assign_op(k) != 0) {
+        if (depth <= 0 && gen.is_assign_op(k) != 0) {
             return k;
         }
         if (depth == 0 && (k == gen.TK_SEMI || k == gen.TOK_EOF)) {
@@ -44,7 +45,7 @@ pub fn scan_assign_ahead() int {
 }
 
 // sem_check_cond：条件上下文类型检查（标量且非浮点）。
-pub fn sem_check_cond(r *gen.Res) int {
+fn sem_check_cond(r *gen.Res) int {
     let gs *gen.GenState = gen.G();
     if (gs.c_compile == 0) {
         return 0;
@@ -59,17 +60,18 @@ pub fn sem_check_cond(r *gen.Res) int {
 }
 
 // parse_block：'{' stmt* '}'。
-pub fn parse_block() int {
+fn parse_block() int {
     let gs *gen.GenState = gen.G();
     let own_ast int = 0;
     let block_ast int = -1;
     let top_root int = 0;
     if (gs.c_ast_capture != 0) {
-        if (ast_stmt_current < 0 || ast_stmt_nodes[ast_stmt_current].kind != AST_STMT_BLOCK
-            || ast_stmt_nodes[ast_stmt_current].first != gs.c_pos) {
+        if (ast.ast_stmt_current_now() < 0
+            || ast.ast_stmt_node_kind_of(ast.ast_stmt_current_now()) != ast.AST_STMT_BLOCK
+            || ast.ast_stmt_node_first_of(ast.ast_stmt_current_now()) != gs.c_pos) {
             own_ast = 1;
-            if (ast_stmt_current < 0) { top_root = 1; }
-            block_ast = ast_stmt_begin(AST_STMT_BLOCK, gen.TK_LBRACE, gs.c_pos);
+            if (ast.ast_stmt_current_now() < 0) { top_root = 1; }
+            block_ast = ast.ast_stmt_begin(ast.AST_STMT_BLOCK, gen.TK_LBRACE, gs.c_pos);
             if (block_ast < 0) { return -1; }
         }
     }
@@ -92,67 +94,67 @@ pub fn parse_block() int {
         return -1;
     }
     gen.scope_pop();
-    if (own_ast != 0 && ast_stmt_end(block_ast, gs.c_pos) != 0) {
+    if (own_ast != 0 && ast.ast_stmt_end(block_ast, gs.c_pos) != 0) {
         return -1;
     }
     if (own_ast != 0 && top_root != 0 && gs.c_file_decl_i >= 0
         && (gs.c_ct_prepare_active == 0 || gs.c_file_indexed != 0)
-        && ast_decl_attach_body(gs.c_active_file, gs.c_file_decl_i, block_ast) != 0) {
+        && ast.ast_decl_attach_body(gs.c_active_file, gs.c_file_decl_i, block_ast) != 0) {
         return -1;
     }
     return 0;
 }
 
 // parse_stmt_capture：仅供 check worker 包装一条语句并记录 AST 范围。
-pub fn parse_stmt_capture() int {
+fn parse_stmt_capture() int {
     let gs *gen.GenState = gen.G();
     let first int = gs.c_pos;
     let op int = p_cur();
-    let kind int = AST_STMT_EXPR;
+    let kind int = ast.AST_STMT_EXPR;
     let diag_kind int = 0;
     let typed_if int = 0;
     let typed_for int = 0;
-    if (op == gen.TK_LBRACE) { kind = AST_STMT_BLOCK; }
-    if (op == gen.TK_LET || op == gen.TK_CONST) { kind = AST_STMT_DECL; }
+    if (op == gen.TK_LBRACE) { kind = ast.AST_STMT_BLOCK; }
+    if (op == gen.TK_LET || op == gen.TK_CONST) { kind = ast.AST_STMT_DECL; }
     if (op == gen.TK_STRUCT || op == gen.TK_UNION || op == gen.TK_ENUM
-        || op == gen.TK_TYPE) { kind = AST_STMT_TYPE; }
-    if (op == gen.TK_IF) { kind = AST_STMT_IF; }
-    if (op == gen.TK_FOR) { kind = AST_STMT_FOR; }
+        || op == gen.TK_TYPE) { kind = ast.AST_STMT_TYPE; }
+    if (op == gen.TK_IF) { kind = ast.AST_STMT_IF; }
+    if (op == gen.TK_FOR) { kind = ast.AST_STMT_FOR; }
     if (op == gen.TK_DOLLAR && (p_peek(1) == gen.TK_IF || p_peek(1) == gen.TK_FOR)) {
-        kind = AST_STMT_COMPTIME;
+        kind = ast.AST_STMT_COMPTIME;
         if (gs.c_ct_prepare_active != 0 && gs.c_ast_capture != 0) {
             if (p_peek(1) == gen.TK_IF) { typed_if = 1; }
             if (p_peek(1) == gen.TK_FOR) { typed_for = 1; }
         }
     } else if (op == gen.TK_DOLLAR && parse_comptime_diag_kind_at(first) != 0) {
-        kind = AST_STMT_COMPTIME;
+        kind = ast.AST_STMT_COMPTIME;
         diag_kind = parse_comptime_diag_kind_at(first);
     }
-    if (op == gen.TK_SWITCH) { kind = AST_STMT_SWITCH; }
-    if (op == gen.TK_RETURN) { kind = AST_STMT_RETURN; }
-    if (op == gen.TK_BREAK) { kind = AST_STMT_BREAK; }
-    if (op == gen.TK_CONTINUE) { kind = AST_STMT_CONTINUE; }
-    if (op == gen.TK_GOTO) { kind = AST_STMT_GOTO; }
+    if (op == gen.TK_SWITCH) { kind = ast.AST_STMT_SWITCH; }
+    if (op == gen.TK_RETURN) { kind = ast.AST_STMT_RETURN; }
+    if (op == gen.TK_BREAK) { kind = ast.AST_STMT_BREAK; }
+    if (op == gen.TK_CONTINUE) { kind = ast.AST_STMT_CONTINUE; }
+    if (op == gen.TK_GOTO) { kind = ast.AST_STMT_GOTO; }
     if (op == gen.TOK_IDENT && p_peek(1) == gen.TK_COLON) {
-        kind = AST_STMT_LABEL;
-    } else if (kind == AST_STMT_EXPR) {
+        kind = ast.AST_STMT_LABEL;
+    } else if (kind == ast.AST_STMT_EXPR) {
         let assign_op int = scan_assign_ahead();
         if (assign_op != 0) {
-            kind = AST_STMT_ASSIGN;
+            kind = ast.AST_STMT_ASSIGN;
             op = assign_op;
         }
     }
-    let id int = ast_stmt_begin(kind, op, first);
+    let id int = ast.ast_stmt_begin(kind, op, first);
     if (id < 0) { return -1; }
     if (parse_stmt() != 0) {
         return -1;
     }
-    if (diag_kind != 0) { ast_stmt_nodes[id].op = diag_kind; }
-    if (typed_if != 0) { ast_stmt_nodes[id].op = gen.TK_IF; }
-    if (typed_for != 0 && ast_stmt_nodes[id].op != 0) {
-        ast_stmt_nodes[id].op = gen.TK_FOR;
+    if (diag_kind != 0) { ast.ast_stmt_node_op_set(id, diag_kind); }
+    if (typed_if != 0) { ast.ast_stmt_node_op_set(id, gen.TK_IF); }
+    if (typed_for != 0 && ast.ast_stmt_node_op_of(id) != 0) {
+        ast.ast_stmt_node_op_set(id, gen.TK_FOR);
     }
-    return ast_stmt_end(id, gs.c_pos);
+    return ast.ast_stmt_end(id, gs.c_pos);
 }
 
 // parse_stmt：按首 token 分派语句并调用现有语义钩子。
@@ -295,7 +297,7 @@ fn parse_stmt_inner() int {
 }
 
 // parse_stmt：隔离当前语句的调用效果，并更新函数顺序落底状态。
-pub fn parse_stmt() int {
+fn parse_stmt() int {
     let gs *gen.GenState = gen.G();
     let first_kind int = p_cur();
     gs.c_expr_noreturn = 0;
@@ -313,7 +315,7 @@ pub fn parse_stmt() int {
 }
 
 // parse_return：'return' expr? ';'。返回类型检查与收尾跳转由 sem 层管理。
-pub fn parse_return() int {
+fn parse_return() int {
     let gs *gen.GenState = gen.G();
     p_adv();
     if (gs.c_compile != 0) {
@@ -358,7 +360,7 @@ pub fn parse_return() int {
 }
 
 // parse_if：'if' '(' expr ')' block ('else' (ifStmt | block))?。
-pub fn parse_if() int {
+fn parse_if() int {
     let gs *gen.GenState = gen.G();
     let parent_falls int = gs.c_fn_falls;
     p_adv();
@@ -435,7 +437,7 @@ pub fn parse_if() int {
 }
 
 // parse_for：三种形态（无限 / 条件 / for-in）。
-pub fn parse_for() int {
+fn parse_for() int {
     let gs *gen.GenState = gen.G();
     let parent_falls int = gs.c_fn_falls;
     p_adv();
@@ -558,7 +560,7 @@ pub fn parse_for() int {
                 let etid int = gen.sem_forin_elem_type(&it, is_range);
                 let esym int = gen.sem_declare_local(elem_start, elem_len, etid);
                 if (esym < 0) { return -1; }
-                if (gs.c_ast_capture != 0 && ast_binding_add(esym, elem_token, 0) != 0) {
+                if (gs.c_ast_capture != 0 && ast.ast_binding_add(esym, elem_token, 0) != 0) {
                     return -1;
                 }
                 eoff = gs.c_syms[esym].offset;
@@ -566,7 +568,7 @@ pub fn parse_for() int {
             if (idx_start >= 0) {
                 let isym int = gen.sem_declare_local(idx_start, idx_len, gen.TY_I32);
                 if (isym < 0) { return -1; }
-                if (gs.c_ast_capture != 0 && ast_binding_add(isym, idx_token, 0) != 0) {
+                if (gs.c_ast_capture != 0 && ast.ast_binding_add(isym, idx_token, 0) != 0) {
                     return -1;
                 }
                 ioff = gs.c_syms[isym].offset;
@@ -633,7 +635,7 @@ pub fn parse_for() int {
 //   body: 块体 → 跳 end
 //   next:（下一个 case 的比较链开始处）
 // default 分支的块体无条件执行（排在源码位置）。
-pub fn parse_switch() int {
+fn parse_switch() int {
     let gs *gen.GenState = gen.G();
     p_adv();
     let ctrl gen.Res;
@@ -661,7 +663,7 @@ pub fn parse_switch() int {
     for p_cur() == gen.TK_CASE || p_cur() == gen.TK_DEFAULT {
         let case_ast int = -1;
         if (gs.c_ast_capture != 0) {
-            case_ast = ast_stmt_begin(AST_STMT_CASE, p_cur(), gs.c_pos);
+            case_ast = ast.ast_stmt_begin(ast.AST_STMT_CASE, p_cur(), gs.c_pos);
             if (case_ast < 0) { return -1; }
         }
         let body_lbl int = gen.em_new_label();
@@ -750,7 +752,7 @@ pub fn parse_switch() int {
                 }
             }
         }
-        if (gs.c_ast_capture != 0 && ast_stmt_end(case_ast, gs.c_pos) != 0) {
+        if (gs.c_ast_capture != 0 && ast.ast_stmt_end(case_ast, gs.c_pos) != 0) {
             return -1;
         }
     }

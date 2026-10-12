@@ -154,6 +154,23 @@ case("u3-entry-not-importable", "fail", "cycleentry", "host", msg="入口模块�
 case("u3-pub-field-access", "run", "pubpriv", "host", 2)
 case("u3-private-fn", "fail", "pubpriv", "host2", msg="导出")
 case("u3-positional-pub-construct", "run", "pubpriv", "host3", 1)
+case("u3-private-let-accessor", "run", "modstate", "host", 7)
+case("u3-private-let-access", "fail", "modstate", "host2",
+     msg="模块没有导出该名字")
+# —— 模块私有类型（2026-10-12，ADR-0013）：pub 可选，缺省即模块私有 ——
+case("u3-private-type-module-api", "run", "privtype", "host", 0)
+case("u3-private-type-not-exported", "fail", "privtype", "host2",
+     msg="模块没有导出该类型")
+case("u3-private-enum-member-not-exported", "fail", "privtype", "host3",
+     msg="模块没有导出该名字")
+case("u3-private-type-in-pub-signature", "fail", "privtype", "badpub",
+     msg="pub 接口引用了非 pub 类型")
+case("u3-private-type-in-pub-field", "fail", "privtype", "badfield",
+     msg="pub 接口引用了非 pub 类型")
+case("u3-private-type-in-pub-alias", "fail", "privtype", "badalias",
+     msg="pub 接口引用了非 pub 类型")
+case("u3-private-type-pointer-in-pub", "fail", "privtype", "badptr",
+     msg="pub 接口引用了非 pub 类型")
 case("u3-duplicate-decl", "fail", "dupdecl", "host", msg="重定义")
 case("u3-unused-import", "fail", "unusedimp", "host", msg="导入未使用")
 case("u3-import-clash", "fail", "clashname", "host", msg="导入名冲突")

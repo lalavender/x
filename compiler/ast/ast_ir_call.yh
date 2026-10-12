@@ -1,0 +1,262 @@
+module ast;
+import gen;
+import ir;
+
+// ast_ir_call_init：初始化任务私有缓冲，不持有前端共享状态。
+fn ast_ir_call_init(out *AstIRCalls) void {
+    out.calls = 0;
+    out.call_count = 0;
+    out.call_cap = 0;
+    out.args = 0;
+    out.arg_count = 0;
+    out.arg_cap = 0;
+    out.symbols = 0;
+    out.symbol_size = 0;
+    out.symbol_cap = 0;
+}
+
+// ast_ir_call_release：释放单函数调用缓冲，包含失败回退路径。
+fn ast_ir_call_release(out *AstIRCalls) void {
+    if (out.calls != 0) { free(out.calls); }
+    if (out.args != 0) { free(out.args); }
+    if (out.symbols != 0) { free(out.symbols); }
+    ast_ir_call_init(out);
+}
+
+// ast_ir_call_has_suffix：复用普通发射器的模块符号限定规则。
+fn ast_ir_call_has_suffix(base *AstExpr) int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_module_mode == 0 || gs.c_sym_sfx_len == 0
+        || (base.sym_flags & (gen.F_EXTERN | gen.F_CABI)) != 0) { return 0; }
+    if (gs.c_is_entry_mod != 0 && base.sym_name_len == 4
+        && gs.np_data[base.sym_name_off] == 'm'
+        && gs.np_data[base.sym_name_off + 1] == 'a'
+        && gs.np_data[base.sym_name_off + 2] == 'i'
+        && gs.np_data[base.sym_name_off + 3] == 'n') { return 0; }
+    return 1;
+}
+
+// ast_ir_call_name_supported：确认缓存中的目标名能由汇编器安全直接读取。
+fn ast_ir_call_name_supported(base *AstExpr) int {
+    let gs *gen.GenState = gen.G();
+    if (base.sym_name_off < 0 || base.sym_name_len <= 0
+        || base.sym_name_off + base.sym_name_len > gs.np_len) { return 0; }
+    if (gs.c_sym_sfx_len > 0 && (gs.c_sym_sfx_off < 0
+        || gs.c_sym_sfx_off + gs.c_sym_sfx_len > gs.np_len)) { return 0; }
+    let i int = 0;
+    for i < base.sym_name_len {
+        if (ir.ir_call_symbol_byte_ok(gs.np_data[base.sym_name_off + i]) == 0) {
+            return 0;
+        }
+        i += 1;
+    }
+    if (ast_ir_call_has_suffix(base) != 0) {
+        i = 0;
+        for i < gs.c_sym_sfx_len {
+            if (ir.ir_call_symbol_byte_ok(gs.np_data[gs.c_sym_sfx_off + i]) == 0) {
+                return 0;
+            }
+            i += 1;
+        }
+    }
+    return 1;
+}
+
+// ast_ir_call_supported：只接受已语义检查的固定参数直接调用；
+// 返回值须是可映射标量，或与签名一致的 void（语句级调用使用）。
+fn ast_ir_call_supported(ctx *AstFunctionContext, node *AstExpr,
+    param_count int, binding_limit int) int {
+    let gs *gen.GenState = gen.G();
+    if (node.child0 < ctx.expr_first || node.child0 >= ctx.expr_after) { return 0; }
+    let result_type int = ast_ir_type(node.type_id);
+    if (result_type < 0 && ast_ir_void_type(node.type_id) == 0) { return 0; }
+    let base *AstExpr = &ast_expr_nodes[node.child0];
+    if (base.kind != AST_EXPR_PRIMARY || base.child0 >= 0
+        || base.sym_kind != gen.SYM_FN || base.sym_type_id < 0
+        || base.sym_type_id >= gs.t_type_n
+        || (base.sym_flags & (gen.F_INTRINSIC | gen.F_LINUX_SYSCALL)) != 0
+        || gs.t_types[base.sym_type_id].kind != gen.TY_FN
+        || ast_ir_call_name_supported(base) == 0) { return 0; }
+    let sig int = gs.t_types[base.sym_type_id].sub;
+    if (sig < 0 || sig >= gs.t_sig_n || gs.t_sig_vararg[sig] != 0
+        || ast_ir_type(gs.t_sig_ret[sig]) != ast_ir_type(node.type_id)) { return 0; }
+    let arg_i int = gs.t_sig_np[sig] - 1;
+    let link int = node.child1;
+    for link >= 0 {
+        if (link < ctx.expr_first || link >= ctx.expr_after || arg_i < 0) { return 0; }
+        let arg_link AstExpr = ast_expr_nodes[link];
+        if (arg_link.kind != AST_EXPR_ARG_LIST || arg_link.child1 < ctx.expr_first
+            || arg_link.child1 >= ctx.expr_after
+            || ast_ir_type(ast_expr_nodes[arg_link.child1].type_id)
+                != ast_ir_type(gs.t_sig_params[gs.t_sig_first[sig] + arg_i])
+            || ast_ir_expr_supported(ctx, arg_link.child1,
+                param_count, binding_limit) == 0) { return 0; }
+        arg_i -= 1;
+        link = arg_link.child0;
+    }
+    return arg_i == -1 ? 1 : 0;
+}
+
+// ast_ir_call_reserve：按需扩容调用表、实参表和目标符号字节缓冲。
+fn ast_ir_call_reserve(out *AstIRCalls, need_calls int, need_args int,
+    need_symbols int) int {
+    if (need_calls > out.call_cap) {
+        let next_cap int = out.call_cap == 0 ? 4 : out.call_cap * 2;
+        for next_cap < need_calls { next_cap *= 2; }
+        let next *ir.IRCall = malloc((next_cap * sizeof(ir.IRCall)).to_type(u64)).to_type(*ir.IRCall);
+        if (next == 0) { return -1; }
+        if (out.call_count > 0) { memcpy(next, out.calls, (out.call_count * sizeof(ir.IRCall)).to_type(u64)); }
+        if (out.calls != 0) { free(out.calls); }
+        out.calls = next;
+        out.call_cap = next_cap;
+    }
+    if (need_args > out.arg_cap) {
+        let next_cap2 int = out.arg_cap == 0 ? 8 : out.arg_cap * 2;
+        for next_cap2 < need_args { next_cap2 *= 2; }
+        let next2 *ir.IRCallArg = malloc((next_cap2 * sizeof(ir.IRCallArg)).to_type(u64)).to_type(*ir.IRCallArg);
+        if (next2 == 0) { return -1; }
+        if (out.arg_count > 0) { memcpy(next2, out.args, (out.arg_count * sizeof(ir.IRCallArg)).to_type(u64)); }
+        if (out.args != 0) { free(out.args); }
+        out.args = next2;
+        out.arg_cap = next_cap2;
+    }
+    if (need_symbols > out.symbol_cap) {
+        let next_cap3 int = out.symbol_cap == 0 ? 32 : out.symbol_cap * 2;
+        for next_cap3 < need_symbols { next_cap3 *= 2; }
+        let next3 *u8 = malloc(next_cap3.to_type(u64)).to_type(*u8);
+        if (next3 == 0) { return -1; }
+        if (out.symbol_size > 0) { memcpy(next3, out.symbols, out.symbol_size.to_type(u64)); }
+        if (out.symbols != 0) { free(out.symbols); }
+        out.symbols = next3;
+        out.symbol_cap = next_cap3;
+    }
+    return 0;
+}
+
+// ast_ir_call_append：在所有嵌套实参调用完成后，原子追加当前调用的连续片段。
+fn ast_ir_call_append(out *AstIRCalls, base *AstExpr,
+    values *ir.IRCallArg, count int) int {
+    let gs *gen.GenState = gen.G();
+    let suffix_len int = ast_ir_call_has_suffix(base) != 0 ? gs.c_sym_sfx_len : 0;
+    let prefix_len int = gen.tg_darwin() != 0 ? 1 : 0;
+    let name_len int = prefix_len + base.sym_name_len + suffix_len;
+    if (ast_ir_call_reserve(out, out.call_count + 1,
+        out.arg_count + count, out.symbol_size + name_len) != 0) { return -1; }
+    let id int = out.call_count;
+    out.calls[id].symbol_first = out.symbol_size;
+    out.calls[id].symbol_len = name_len;
+    out.calls[id].arg_first = out.arg_count;
+    out.calls[id].arg_count = count;
+    out.calls[id].abi = gs.t_sig_abi[gs.t_types[base.sym_type_id].sub];
+    if (prefix_len != 0) {
+        out.symbols[out.symbol_size] = '_';
+        out.symbol_size += 1;
+    }
+    let i int = 0;
+    for i < base.sym_name_len {
+        out.symbols[out.symbol_size] = gs.np_data[base.sym_name_off + i];
+        out.symbol_size += 1;
+        i += 1;
+    }
+    i = 0;
+    for i < suffix_len {
+        out.symbols[out.symbol_size] = gs.np_data[gs.c_sym_sfx_off + i];
+        out.symbol_size += 1;
+        i += 1;
+    }
+    i = 0;
+    for i < count {
+        out.args[out.arg_count + i] = values[i];
+        i += 1;
+    }
+    out.arg_count += count;
+    out.call_count += 1;
+    return id;
+}
+
+// ast_ir_lower_call_args：按源码顺序求值，暂存外层调用实参以避开嵌套调用插入。
+fn ast_ir_lower_call_args(b *AstIRBuilder, ctx *AstFunctionContext, link int,
+    values *ir.IRCallArg, next *int) int {
+    if (link < 0) { return 0; }
+    let item AstExpr = ast_expr_nodes[link];
+    let prev int = ast_ir_lower_call_args(b, ctx, item.child0, values, next);
+    if (prev != 0) { return prev; }
+    let value int = ast_ir_lower_expr(b, ctx, item.child1);
+    if (value < 0) { return value; }
+    values[next[0]].value = value;
+    values[next[0]].type_id = ast_ir_type(ast_expr_nodes[item.child1].type_id);
+    next[0] += 1;
+    return 0;
+}
+
+// ast_ir_lower_call_expr：构造保留副作用的 CALL 指令与稳定的目标/实参元数据。
+fn ast_ir_lower_call_expr(b *AstIRBuilder, ctx *AstFunctionContext,
+    expr_id int) int {
+    let gs *gen.GenState = gen.G();
+    let node AstExpr = ast_expr_nodes[expr_id];
+    let base *AstExpr = &ast_expr_nodes[node.child0];
+    let sig int = gs.t_types[base.sym_type_id].sub;
+    let count int = gs.t_sig_np[sig];
+    let inline_values [8]ir.IRCallArg;
+    let values *ir.IRCallArg = &inline_values[0];
+    let heap_values int = 0;
+    if (count > 8) {
+        values = malloc((count * sizeof(ir.IRCallArg)).to_type(u64)).to_type(*ir.IRCallArg);
+        if (values == 0) { return -1; }
+        heap_values = 1;
+    }
+    let next int = 0;
+    let status int = ast_ir_lower_call_args(b, ctx, node.child1, values, &next);
+    if (status != 0 || next != count) {
+        if (heap_values != 0) { free(values); }
+        return status != 0 ? status : -1;
+    }
+    let call_id int = ast_ir_call_append(&b.calls, base, values, count);
+    if (heap_values != 0) { free(values); }
+    if (call_id < 0) { return -1; }
+    let result_type int = ast_ir_type(node.type_id);
+    let no_return int = (base.sym_flags & gen.F_NORETURN) != 0 ? 1 : 0;
+    if (result_type < 0) {
+        // void 调用不定义 SSA 值；支持检查已排除其余不可映射的返回类型。
+        let call_inst int = ast_ir_b_add_call(b, call_id, -1);
+        if (call_inst < 0) { return call_inst; }
+        if (no_return != 0) {
+            if (ast_ir_b_close_term(b, b.cur_block, ir.IR_TERM_UNREACHABLE,
+                -1, -1, -1) != 0) { return -1; }
+            return -3;
+        }
+        return call_inst;
+    }
+    if (no_return != 0) { return -2; }
+    return ast_ir_b_add_call(b, call_id, result_type);
+}
+
+// ast_ir_expr_stmt_supported：表达式语句只接受已检查的直接调用；
+// void 返回或被丢弃的标量返回值都可以，其余表达式形态仍走旧发射器。
+fn ast_ir_expr_stmt_supported(ctx *AstFunctionContext, stmt_id int,
+    param_count int, binding_limit int) int {
+    if (stmt_id < ctx.stmt_first || stmt_id >= ctx.stmt_after) { return 0; }
+    let stmt AstStmt = ast_stmt_nodes[stmt_id];
+    if (stmt.kind != AST_STMT_EXPR || stmt.first_expr < ctx.edge_first
+        || stmt.first_expr >= ctx.edge_after || stmt.first_expr != stmt.last_expr
+        || ast_stmt_exprs[stmt.first_expr].next >= 0) { return 0; }
+    let expr_id int = ast_stmt_exprs[stmt.first_expr].expr_id;
+    if (expr_id < ctx.expr_first || expr_id >= ctx.expr_after) { return 0; }
+    let node AstExpr = ast_expr_nodes[expr_id];
+    if (node.kind != AST_EXPR_CALL) { return 0; }
+    return ast_ir_call_supported(ctx, &node, param_count, binding_limit);
+}
+
+// ast_ir_lower_expr_stmt：降低语句级调用，保留副作用并丢弃任何返回值。
+fn ast_ir_lower_expr_stmt(b *AstIRBuilder, ctx *AstFunctionContext,
+    stmt_id int, param_count int, binding_limit int) int {
+    if (ast_ir_expr_stmt_supported(ctx, stmt_id, param_count, binding_limit) == 0) {
+        return 0;
+    }
+    let stmt AstStmt = ast_stmt_nodes[stmt_id];
+    let expr_id int = ast_stmt_exprs[stmt.first_expr].expr_id;
+    let value int = ast_ir_lower_call_expr(b, ctx, expr_id);
+    if (value == -2) { return 0; }
+    if (value == -3) { return -3; }
+    return value;
+}

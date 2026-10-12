@@ -11,9 +11,14 @@
 #   * make install    安装到 $(PREFIX)（默认 /usr/local；DESTDIR 用作打包根）
 #   * make uninstall  卸载
 #   * make explorer   启动 yh Compiler Explorer（本地浏览器图形界面）
-#   * make yh-asm     构建 asm/ 汇编器项目，产出根目录 yh_asm
-#   * make yh-link    过渡别名：同一份 yh_asm 再复制成 yh_link（编译器现役对接）
+#   * make yh-asm     构建 asm/ 汇编器项目，产出根目录 yh_asm（编译器不发现它）
 #   * make clean      清理
+#
+# 汇编器当前**不接入编译器**：编译器只按 yh_link 名字发现汇编器
+# （compiler/cmd/link_cache.yh 的 mb_asm_tool），根目录不再放该名字。
+# 需要让编译器临时用汇编器时，显式给 YH_LINK=<asm 产物绝对路径>，
+# 或跑 asm/tests/shadow-build.py（影子验收）。见 docs/02-plan/
+# yh-asm汇编器稳定化实施方案.md。
 #
 # 可在命令行覆盖：SEED（编译种子路径）。Linux CI 用匹配架构的 ELF 种子。
 # --------------------------------------------------------------------------
@@ -82,14 +87,12 @@ $(YH): $(YH_PREREQ) $(wildcard compiler/*.yh) $(wildcard compiler/*/*.yh) $(TOPS
 # yh-asm：用刚构建出的 $(YH) 冷编 asm/（汇编器项目），产出 yh_asm。
 # 刻意不依赖 $(SEED)：asm/ 用到了新语言特性，上一代种子编不了，必须等 $(YH) 就位。
 #
-# yh_asm 与 yh 放在同一目录后，编译器会优先用它做模块汇编（找不到才回落
-# clang/gcc），所以 `make yh-asm` 之后 `./yh` 就默认走自研工具链。
-#
-# 过渡期：编译器侧 mb_asm_tool 仍按 yh_link 名字查找（compiler/cmd/link_cache.yh），
-# yh-link 目标把同一份产物再复制一份成 yh_link 供现役对接；查找名切到 yh_asm
-# 之后删除该别名目标（见 docs/todo.md）。
+# 汇编器**不接入编译器**（2026-10-12 决定，见 docs/02-plan/
+# yh-asm汇编器稳定化实施方案.md）：编译器只按 yh_link 名字发现汇编器
+# （compiler/cmd/link_cache.yh 的 mb_asm_tool），本目标不再产出该名字，
+# 因此 `make yh-asm` 之后 `./yh` 仍走系统 cc。要让编译器临时用汇编器，
+# 显式给 YH_LINK=<asm 产物绝对路径>，或跑 asm/tests/shadow-build.py。
 YH_ASM = $(TOP)/yh_asm$(EXESUF)
-YH_LINK = $(TOP)/yh_link$(EXESUF)
 
 .PHONY: yh-asm
 yh-asm: $(YH)
@@ -100,11 +103,6 @@ yh-asm: $(YH)
 ifeq ($(HOST_SYSTEM),Darwin)
 	@codesign -s - -f "$(YH_ASM)" 2>/dev/null || true
 endif
-
-.PHONY: yh-link
-yh-link: yh-asm
-	cp -f "$(YH_ASM)" "$(YH_LINK).tmp"
-	mv -f "$(YH_LINK).tmp" "$(YH_LINK)"
 
 # seed：滚种子——把刚构建并验证过的 yh 覆盖入库种子。
 # 只应在 make test 与 make selfhost-native 全绿后执行（不作为依赖，
@@ -159,6 +157,6 @@ clean:
 help:
 	@sed -n '2,26p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all explorer seed selfhost-native clean help yh-asm yh-link
+.PHONY: all install uninstall test test-all explorer seed selfhost-native clean help yh-asm
 
 endif # ($(INCLUDED),no)

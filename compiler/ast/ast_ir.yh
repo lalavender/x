@@ -1,0 +1,307 @@
+module ast;
+import gen;
+import ir;
+
+// ast_ir.yh —— 从已完成语义检查的 AST 构造首批可验证 SSA 函数。
+// 当前接入标量参数、顺序 let/标量赋值、语句级直接调用（含 void 返回）、
+// 单层分支参数合流、固定标量直接调用、条件循环（for cond）与表达式 return；
+// 其他函数由旧发射器负责。
+
+// AstIRCalls：单函数 lowering 私有的调用、实参和稳定符号缓冲。
+pub struct AstIRCalls {
+    calls *ir.IRCall;
+    call_count int;
+    call_cap int;
+    args *ir.IRCallArg;
+    arg_count int;
+    arg_cap int;
+    symbols *u8;
+    symbol_size int;
+    symbol_cap int;
+}
+
+
+// ast_ir_type：把前端标量类型映射到 IR 私有类型编号；暂不降低聚合类型。
+fn ast_ir_type(type_id int) int {
+    let gs *gen.GenState = gen.G();
+    if (type_id < 0 || type_id >= gs.t_type_n) { return -1; }
+    let kind int = gs.t_types[type_id].kind;
+    if (kind == gen.TY_BOOL) { return ir.IR_TY_BOOL; }
+    if (kind == gen.TY_CHAR || kind == gen.TY_U8) { return ir.IR_TY_U8; }
+    if (kind == gen.TY_I8) { return ir.IR_TY_I8; }
+    if (kind == gen.TY_I16) { return ir.IR_TY_I16; }
+    if (kind == gen.TY_I32) { return ir.IR_TY_I32; }
+    if (kind == gen.TY_I64) { return ir.IR_TY_I64; }
+    if (kind == gen.TY_U16) { return ir.IR_TY_U16; }
+    if (kind == gen.TY_U32) { return ir.IR_TY_U32; }
+    if (kind == gen.TY_U64) { return ir.IR_TY_U64; }
+    return -1;
+}
+
+// ast_ir_promoted_type：用前端的二元运算提升规则取得 SSA 操作数公共类型。
+fn ast_ir_promoted_type(left_type int, right_type int) int {
+    return ast_ir_type(gen.sem_promote(left_type, right_type));
+}
+
+// ast_ir_void_type：确认类型编号指向完整 void 类型；ast_ir_type 对 void 返回 -1。
+fn ast_ir_void_type(type_id int) int {
+    let gs *gen.GenState = gen.G();
+    return type_id >= 0 && type_id < gs.t_type_n
+        && gs.t_types[type_id].kind == gen.TY_VOID ? 1 : 0;
+}
+
+// ast_ir_bindings_supported：确认参数与局部变量使用连续编号和当前 IR 标量类型。
+fn ast_ir_bindings_supported(ctx *AstFunctionContext, sig int) int {
+    let gs *gen.GenState = gen.G();
+    if (sig < 0 || sig >= gs.t_sig_n || gs.t_sig_vararg[sig] != 0) { return 0; }
+    let expected int = gs.t_sig_np[sig];
+    let found int = 0;
+    let i int = ctx.binding_first;
+    for i < ctx.binding_after {
+        let binding AstBinding = ast_bindings[i];
+        if (binding.file_id != ctx.file_id || binding.owner_decl != ctx.owner_decl
+            || binding.id != found || ast_ir_type(binding.sym_type_id) < 0) {
+            return 0;
+        }
+        if (binding.sym_kind == gen.SYM_CONST) {
+            if (found < expected || binding.is_param != 0
+                || gen.ty_is_integer(binding.sym_type_id) == 0) { return 0; }
+            found += 1;
+            i += 1;
+            continue;
+        }
+        if (binding.sym_kind != gen.SYM_VAR) { return 0; }
+        if (found < expected) {
+            let source_type int = gs.t_sig_params[gs.t_sig_first[sig] + found];
+            if (binding.is_param == 0 || ast_ir_type(source_type) < 0
+                || ast_ir_type(binding.sym_type_id) != ast_ir_type(source_type)) {
+                return 0;
+            }
+        } else if (binding.is_param != 0 || binding.stmt_id < 0) {
+            return 0;
+        }
+        found += 1;
+        i += 1;
+    }
+    return found >= expected ? 1 : 0;
+}
+
+// ast_ir_expr_supported：只接受参数和当前语句前已初始化的局部绑定。
+fn ast_ir_expr_supported(ctx *AstFunctionContext, expr_id int, param_count int,
+    binding_limit int) int {
+    if (expr_id < ctx.expr_first || expr_id >= ctx.expr_after) { return 0; }
+    let node AstExpr = ast_expr_nodes[expr_id];
+    if (node.kind == AST_EXPR_PRIMARY) {
+        if (node.child0 >= 0) {
+            return ast_ir_expr_supported(ctx, node.child0, param_count, binding_limit);
+        }
+        if (ast_ir_type(node.type_id) < 0) { return 0; }
+        if (node.sym_id >= 0) {
+            if (node.sym_kind == gen.SYM_CONST) {
+                if (node.binding_row >= ctx.binding_first
+                    && node.binding_row < ctx.binding_after) {
+                    let template int = ast_comptime_for_find_binding(node.binding_row);
+                    if (template >= 0) {
+                        let binding AstBinding = ast_bindings[node.binding_row];
+                        return binding.id >= 0 && binding.id < binding_limit
+                            && binding.sym_kind == gen.SYM_CONST
+                            && ast_ir_type(binding.sym_type_id)
+                                == ast_ir_type(node.type_id) ? 1 : 0;
+                    }
+                }
+                return node.is_const != 0 && gen.ty_is_integer(node.type_id) != 0
+                    ? 1 : 0;
+            }
+            if (node.binding_row < ctx.binding_first
+                || node.binding_row >= ctx.binding_after) { return 0; }
+            let binding AstBinding = ast_bindings[node.binding_row];
+            return binding.id >= 0 && binding.id < binding_limit
+                && binding.file_id == node.file_id && binding.owner_decl == node.owner_decl
+                && binding.sym_id == node.sym_id && binding.sym_kind == gen.SYM_VAR
+                && ((binding.id < param_count && binding.is_param != 0)
+                    || (binding.id >= param_count && binding.is_param == 0))
+                && ast_ir_type(binding.sym_type_id) == ast_ir_type(node.type_id) ? 1 : 0;
+        }
+        return node.is_const != 0 && (node.op == gen.TOK_NUMBER || node.op == gen.TOK_CHAR
+            || node.op == gen.TK_TRUE || node.op == gen.TK_FALSE) ? 1 : 0;
+    }
+    if (node.kind == AST_EXPR_CALL) {
+        return ast_ir_call_supported(ctx, &node, param_count, binding_limit);
+    }
+    if (node.kind == AST_EXPR_CAST) {
+        if (node.child0 < 0) { return 0; }
+        let source_type int = ast_ir_type(ast_expr_nodes[node.child0].type_id);
+        let target_type int = ast_ir_type(node.type_id);
+        return ir.ir_integer_type(source_type) != 0
+            && ir.ir_integer_type(target_type) != 0
+            && ast_ir_expr_supported(ctx, node.child0, param_count, binding_limit) != 0
+            ? 1 : 0;
+    }
+    // 逻辑非：!x 语义上产生 0/1（旧语义层把 bool 结果升为 i32），
+    // IR 一律归一为 bool；操作数必须已是 bool。
+    if (node.kind == AST_EXPR_UNARY) {
+        if (node.op != gen.TK_BANG || node.child0 < 0) { return 0; }
+        return ast_ir_type(ast_expr_nodes[node.child0].type_id) == ir.IR_TY_BOOL
+            && ast_ir_type(node.type_id) >= 0
+            && ast_ir_expr_supported(ctx, node.child0, param_count, binding_limit) != 0
+            ? 1 : 0;
+    }
+    if (node.kind != AST_EXPR_BINARY || node.child0 < 0 || node.child1 < 0
+        || ast_ir_type(node.type_id) < 0) {
+        return 0;
+    }
+    // 逻辑或/与是短路运算：结果为 bool；操作数可为 bool 或整数
+    // （降低时按非零为真归一化），其余运算见下方白名单。
+    if (node.op == gen.TK_OROR || node.op == gen.TK_ANDAND) {
+        let lt int = ast_ir_type(ast_expr_nodes[node.child0].type_id);
+        let rt int = ast_ir_type(ast_expr_nodes[node.child1].type_id);
+        return ast_ir_type(node.type_id) == ir.IR_TY_BOOL
+            && ir.ir_const_type(lt) != 0 && ir.ir_const_type(rt) != 0
+            && ast_ir_expr_supported(ctx, node.child0, param_count, binding_limit) != 0
+            && ast_ir_expr_supported(ctx, node.child1, param_count, binding_limit) != 0
+            ? 1 : 0;
+    }
+    if (node.op != gen.TK_PLUS && node.op != gen.TK_MINUS
+        && node.op != gen.TK_STAR && node.op != gen.TK_SLASH
+        && node.op != gen.TK_PERCENT && node.op != gen.TK_AMP
+        && node.op != gen.TK_PIPE && node.op != gen.TK_CARET
+        && node.op != gen.TK_LSHIFT && node.op != gen.TK_RSHIFT
+        && node.op != gen.TK_EQEQ
+        && node.op != gen.TK_NEQ && node.op != gen.TK_LT
+        && node.op != gen.TK_LEQ && node.op != gen.TK_GT
+        && node.op != gen.TK_GEQ) {
+        return 0;
+    }
+    if (ast_ir_expr_supported(ctx, node.child0, param_count, binding_limit) == 0
+        || ast_ir_expr_supported(ctx, node.child1, param_count, binding_limit) == 0) {
+        return 0;
+    }
+    let operand_type int = ast_ir_promoted_type(
+        ast_expr_nodes[node.child0].type_id,
+        ast_expr_nodes[node.child1].type_id);
+    if (ir.ir_const_type(operand_type) == 0) { return 0; }
+    if (node.op == gen.TK_EQEQ || node.op == gen.TK_NEQ
+        || node.op == gen.TK_LT || node.op == gen.TK_LEQ
+        || node.op == gen.TK_GT || node.op == gen.TK_GEQ) {
+        return ast_ir_type(node.type_id) == ir.IR_TY_BOOL ? 1 : 0;
+    }
+    return ast_ir_type(node.type_id) == operand_type
+        && ir.ir_integer_type(operand_type) != 0 ? 1 : 0;
+}
+
+// ast_ir_add_inst：向函数私有指令数组追加一条完整初始化的 SSA 指令。
+fn ast_ir_add_inst(insts *ir.IRInst, inst_count *int, capacity int,
+    op int, type_id int, a int, b int, imm i64) int {
+    if (inst_count[0] < 0 || inst_count[0] >= capacity || type_id < 0) {
+        return -1;
+    }
+    let id int = inst_count[0];
+    insts[id].op = op;
+    insts[id].result_id = id;
+    insts[id].result_type = type_id;
+    insts[id].a = a;
+    insts[id].b = b;
+    insts[id].imm = imm;
+    insts[id].aux = -1;
+    inst_count[0] += 1;
+    return id;
+}
+
+// ast_ir_add_noresult_inst：追加一条不定义 SSA 值的指令；当前用于 void CALL。
+fn ast_ir_add_noresult_inst(insts *ir.IRInst, inst_count *int, capacity int,
+    op int, aux int) int {
+    if (inst_count[0] < 0 || inst_count[0] >= capacity) { return -1; }
+    let id int = inst_count[0];
+    insts[id].op = op;
+    insts[id].result_id = -1;
+    insts[id].result_type = -1;
+    insts[id].a = -1;
+    insts[id].b = -1;
+    insts[id].imm = 0;
+    insts[id].aux = aux;
+    inst_count[0] += 1;
+    return id;
+}
+
+
+// ast_ir_assign_op：映射当前受支持的赋值符，0 表示直接赋值。
+fn ast_ir_assign_op(op int) int {
+    if (op == gen.TK_ASSIGN) { return 0; }
+    if (op == gen.TK_PLUSEQ) { return ir.IR_OP_ADD; }
+    if (op == gen.TK_MINUSEQ) { return ir.IR_OP_SUB; }
+    if (op == gen.TK_STAREQ) { return ir.IR_OP_MUL; }
+    return -1;
+}
+
+// ast_ir_assign_binding：验证简单变量赋值并返回其稳定绑定行。
+fn ast_ir_assign_binding(ctx *AstFunctionContext, stmt_id int,
+    param_count int, binding_limit int) int {
+    if (stmt_id < ctx.stmt_first || stmt_id >= ctx.stmt_after) { return -1; }
+    let stmt AstStmt = ast_stmt_nodes[stmt_id];
+    if (stmt.kind != AST_STMT_ASSIGN || ast_ir_assign_op(stmt.op) < 0
+        || stmt.first_expr < ctx.edge_first || stmt.first_expr >= ctx.edge_after
+        || stmt.first_expr == stmt.last_expr) { return -1; }
+    let lhs_edge int = stmt.first_expr;
+    let rhs_edge int = ast_stmt_exprs[lhs_edge].next;
+    if (rhs_edge < ctx.edge_first || rhs_edge >= ctx.edge_after
+        || rhs_edge != stmt.last_expr || ast_stmt_exprs[rhs_edge].next >= 0) { return -1; }
+    let lhs AstExpr = ast_expr_nodes[ast_stmt_exprs[lhs_edge].expr_id];
+    if (lhs.kind != AST_EXPR_PRIMARY || lhs.child0 >= 0 || lhs.sym_id < 0
+        || lhs.binding_row < ctx.binding_first || lhs.binding_row >= ctx.binding_after) {
+        return -1;
+    }
+    let binding AstBinding = ast_bindings[lhs.binding_row];
+    if (binding.id < 0 || binding.id >= binding_limit
+        || binding.file_id != lhs.file_id || binding.owner_decl != lhs.owner_decl
+        || binding.sym_id != lhs.sym_id || binding.sym_kind != gen.SYM_VAR
+        || ((binding.id < param_count && binding.is_param == 0)
+            || (binding.id >= param_count && binding.is_param != 0))
+        || ast_ir_type(binding.sym_type_id) != ast_ir_type(lhs.type_id)) {
+        return -1;
+    }
+    return lhs.binding_row;
+}
+
+
+// ast_ir_lower_module：遍历当前 worker 收集的声明并累计成功验证的函数数。
+pub fn ast_ir_lower_module(cache_dir *char, compiler_salt u64) int {
+    let gs *gen.GenState = gen.G();
+    ast_ir_inline_reset();
+    let i int = 0;
+    let asm_shift int = 0;
+    let pass int = 0;
+    for pass < 2 {
+        i = 0;
+        for i < ast_function_count {
+            let ctx AstFunctionContext = ast_function_nodes[i];
+            let is_inline int = 0;
+            if (ctx.decl_row >= 0 && ctx.decl_row < ast_decl_count) {
+                let decl AstDecl = ast_decl_nodes[ctx.decl_row];
+                if (decl.sym_id >= 0 && decl.sym_id < gs.c_sym_n
+                    && (gs.c_syms[decl.sym_id].flags & gen.F_COMPTIME) != 0) {
+                    i += 1;
+                    continue;
+                }
+                if (decl.sym_id >= 0 && decl.sym_id < gs.c_sym_n
+                    && (gs.c_syms[decl.sym_id].flags & gen.F_INLINE) != 0) {
+                    is_inline = 1;
+                }
+            }
+            if (pass == 0 && is_inline == 0 || pass == 1 && is_inline != 0) {
+                i += 1;
+                continue;
+            }
+            let lowered int = ast_ir_lower_function(&ctx,
+                cache_dir, compiler_salt, &asm_shift);
+            if (lowered < 0) {
+                ast_ir_inline_reset();
+                return -1;
+            }
+            if (lowered != 0) { gs.c_stats_ir_functions += 1; }
+            i += 1;
+        }
+        pass += 1;
+    }
+    ast_ir_inline_reset();
+    return 0;
+}

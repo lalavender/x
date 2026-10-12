@@ -7,9 +7,19 @@
 > `make selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
-version = `0.0.3`，source = `.`），按 **gen / lex / parse / comptime / cmd / ir / backend
-多模块**组织，编译器源码共 65 个 `.yh` 文件；`ir`（目标隔离
+version = `0.0.3`，source = `.`），按 **gen / lex / parse / ast / comptime / cmd / ir / backend
+多模块**组织，编译器源码共 71 个 `.yh` 文件（`ast/` 为 2026-10-12
+自 parse 拆出的 AST 阶段模块）；`ir`（目标隔离
 SSA）与其它模块同为根项目普通模块，共同进入编译器构建与自举固定点。
+
+模块导出面按「只有别的模块真的用到才 `pub`」维护（2026-10-12 两轮：`pub`
+声明 1048 → 585，随后 `struct`/`union`/`enum` 的 `pub` 改为可选并私有化 12 个
+模块内部类型，接口 `.s.i` 63,160 → 39,990 → 36,633 字节）：仅模块内使用的
+`fn`/`const`/类型不写 `pub`（`pub` 同时决定接口导出与 `.globl`）；私有类型
+不得出现在本模块的 `pub` 签名、`pub` 字段或 `pub` 别名里；入口模块 `cmd/`
+只保留 `main` 为 `pub`。规则见
+[导出面收缩设计](../docs/03-design/yh-编译器模块导出面收缩设计.md)与
+[模块私有类型设计](../docs/03-design/yh-模块私有类型设计.md)。
 
 ```
 bin/yh（入库种子）──yh build──▶ yh ──自编──▶ yh'（固定点：模块 .s/.s.i 逐字节相同）
@@ -59,19 +69,27 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 | --- | --- |
 | `parse/parse_type.yh` | 类型引用解析 + 解析器共用游标工具 |
 | `parse/parse_expr.yh` | 表达式优先级链、后缀链、structInit 与「字面量 vs 块」消解 |
-| `parse/ast_expr.yh` | `yh check` typed 表达式 AST、绑定/常量快照与结构校验 |
-| `parse/ast_stmt.yh` | `yh check` 迁移期语句树、绑定关联、编译期 `$for` 模板目录与源范围校验 |
-| `parse/ast_decl.yh` | 从 PDecl 索引建立文件级声明节点并关联函数体 |
-| `parse/ast_ir.yh` | 函数级 typed SSA 构造与旧后端迁移接线 |
-| `parse/ast_ir_cache.yh` | 目标隔离的函数 IR 内容键、缓存读取与写入 |
-| `parse/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
-| `parse/ast_ir_control.yh` | 局部赋值、受限分支 CFG/phi 与 SSA 临时缓冲管理 |
-| `parse/ast_ir_template.yh` | 普通函数编译期 `$for` typed AST 模板的 SSA 区间实例化 |
 | `parse/parse_stmt.yh` | 语句：块/if/for/switch/return/goto/标签/赋值 |
 | `parse/parse_decl.yh` | 顶层声明两遍处理：let/const/fn/type/struct/union/enum |
 | `parse/parse_global_init.yh` | 全局聚合变量初始化（命名/位置/嵌套/字符串字面量） |
 | `parse/parse_module.yh` | 模块头解析：`module` 声明、`import NAME (as ALIAS)?;` |
 | `parse/iface.yh` | 模块接口与私有性：跨模块可见边界 |
+
+**ast** —— AST 阶段（2026-10-12 自 parse 拆出，独立编译单元）
+
+| 文件 | 职责 |
+| --- | --- |
+| `ast/ast_decl.yh` | 从 PDecl 索引建立文件级声明节点并关联函数体 |
+| `ast/ast_expr.yh` | `yh check` typed 表达式 AST、绑定/常量快照与结构校验 |
+| `ast/ast_stmt.yh` | `yh check` 迁移期语句树、绑定关联、编译期 `$for` 模板目录与源范围校验 |
+| `ast/ast_function.yh` | 函数在 AST arena 中的范围与绑定身份 |
+| `ast/ast_ir.yh` | 函数级 typed SSA 构造与旧后端迁移接线 |
+| `ast/ast_ir_build.yh` | 受支持函数的 AST → typed SSA 构造器 |
+| `ast/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
+| `ast/ast_ir_control.yh` | 局部赋值、受限分支 CFG/phi 与 SSA 临时缓冲管理 |
+| `ast/ast_ir_inline.yh` | 编译期内联候选登记与套用 |
+| `ast/ast_ir_template.yh` | 普通函数编译期 `$for` typed AST 模板的 SSA 区间实例化 |
+| `ast/ast_ir_cache.yh` | 目标隔离的函数 IR 内容键、缓存读取与写入 |
 
 **comptime** —— 编译期函数登记与受限求值
 
@@ -170,7 +188,7 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 ## 架构与多平台
 
 后端分三层，边界即多平台接入缝：前端语义（`gen/symbols.yh` +
-`gen/sem_*.yh` + `parse/parse_*.yh`）→ 目标数据模型（`gen/target.yh`）→
+`gen/sem_*.yh` + `parse/parse_*.yh` + `ast/ast_*.yh`）→ 目标数据模型（`gen/target.yh`）→
 指令发射（`gen/emit_arm64.yh`）。前端只调用 `em_*` 抽象机原语，不含 ISA
 细节；换目标 = 新数据模型 + 新 `emit_<isa>.yh`。原语契约与换平台步骤详见
 [自举后端架构](../docs/03-design/yh-自举后端架构.md)。

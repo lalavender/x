@@ -1,6 +1,7 @@
 module parse;
 import gen;
 import comptime;
+import ast;
 
 // ============================================================================
 // parse_decl.yh —— 自举编译器：顶层声明与源文件入口（两遍驱动）
@@ -23,7 +24,7 @@ import comptime;
 // skip_to_decl_end：pass 1 跳过一条顶层声明的剩余 token。
 // 以深度 0 处的 ';' 或 '}'（fn/struct/enum 体收尾）为界。
 
-pub fn skip_to_decl_end() int {
+fn skip_to_decl_end() int {
     let depth int = 0;
     for p_cur() != gen.TOK_EOF {
         let k int = p_cur();
@@ -49,7 +50,7 @@ pub fn skip_to_decl_end() int {
     return 0;
 }
 
-pub fn skip_init() int {
+fn skip_init() int {
     let depth int = 0;
     for 1 {
         let k int = p_cur();
@@ -98,7 +99,7 @@ pub fn parse_source() int {
     return 0;
 }
 
-pub fn at_top_decl_start(k int) int {
+fn at_top_decl_start(k int) int {
     if (k == gen.TK_PUB || k == gen.TK_LET || k == gen.TK_CONST || k == gen.TK_FN || k == gen.TK_TYPE
         || k == gen.TK_STRUCT || k == gen.TK_UNION || k == gen.TK_ENUM || k == gen.TK_AT) {
         return 1;
@@ -107,7 +108,7 @@ pub fn at_top_decl_start(k int) int {
 }
 
 // p_tok_text_is：比较当前 token 的源字节，用于识别属性名而不保留新关键字。
-pub fn p_tok_text_is(text *char, n int) int {
+fn p_tok_text_is(text *char, n int) int {
     let gs *gen.GenState = gen.G();
     if (gs.c_pos < 0 || gs.c_pos >= gs.c_tok_n || gs.c_toks[gs.c_pos].len != n) {
         return 0;
@@ -123,7 +124,7 @@ pub fn p_tok_text_is(text *char, n int) int {
 }
 
 // parse_attr_list：消费一个非空、无尾逗号的属性列表并返回识别出的属性位。
-pub fn parse_attr_list(attrs *int) int {
+fn parse_attr_list(attrs *int) int {
     *attrs = 0;
     if (p_expect(gen.TK_AT, "期望 '@'") != 0
         || p_expect(gen.TK_LBRACKET, "属性列表期望 '['") != 0) {
@@ -165,7 +166,7 @@ pub fn parse_attr_list(attrs *int) int {
 }
 
 // p_top_decl_kind：查看属性列表与 pub 之后的声明种类，不改变解析游标。
-pub fn p_top_decl_kind() int {
+fn p_top_decl_kind() int {
     let gs *gen.GenState = gen.G();
     let pos int = gs.c_pos;
     if (p_cur() == gen.TK_AT) {
@@ -183,7 +184,7 @@ pub fn p_top_decl_kind() int {
 }
 
 // p_decl_is_comptime：检查指定顶层声明是否由 comptime 属性修饰。
-pub fn p_decl_is_comptime(start int) int {
+fn p_decl_is_comptime(start int) int {
     let gs *gen.GenState = gen.G();
     let saved int = gs.c_pos;
     if (start < 0 || start >= gs.c_tok_n) { return 0; }
@@ -200,7 +201,7 @@ pub fn p_decl_is_comptime(start int) int {
     return found;
 }
 
-pub fn skip_top_decl() int {
+fn skip_top_decl() int {
     let depth int = 0;
     let consumed int = 0;
     for p_cur() != gen.TOK_EOF {
@@ -432,7 +433,7 @@ pub fn parse_source_ct_fns() int {
 }
 
 // parse_top_decl_body：消费已由 parse_top_decl 解析前缀后的声明主体。
-pub fn parse_top_decl_body() int {
+fn parse_top_decl_body() int {
     let gs *gen.GenState = gen.G();
     let k int = p_cur();
     if (k == gen.TK_LET) {
@@ -457,18 +458,13 @@ pub fn parse_top_decl_body() int {
         return parse_type_decl();
     }
     if (k == gen.TK_STRUCT || k == gen.TK_UNION) {
-        // pub struct / pub union 一等化：struct/union 必须经 pub 声明
-        // （全部字段公开）；裸写即语法错误。
-        if (gs.c_decl_pub == 0) {
-            return gen.err_tok("struct/union 必须带 pub（写作 pub struct / pub union，字段一律公开）");
-        }
+        // pub 可选（2026-10-12，ADR-0013）：带 pub 的 struct/union 进接口、
+        // 跨模块可命名（字段一律公开）；不带 pub 的是模块私有类型，
+        // 只在本模块可见、不进 .s.i。
         return parse_struct_decl();
     }
     if (k == gen.TK_ENUM) {
-        // pub enum 一等化：与 struct/union 同规则，裸写即语法错误。
-        if (gs.c_decl_pub == 0) {
-            return gen.err_tok("enum 必须带 pub（写作 pub enum，成员随枚举导出）");
-        }
+        // 同上：私有 enum 的成员常量不带 F_PUB，只在模块内可见。
         return parse_enum_decl();
     }
     return gen.err_tok("此处需要一个顶层声明");
@@ -517,7 +513,7 @@ pub fn parse_top_decl() int {
     return result;
 }
 
-pub fn parse_local_init(idx int, tid int, kind int) int {
+fn parse_local_init(idx int, tid int, kind int) int {
     let gs *gen.GenState = gen.G();
     if (kind == gen.SYM_CONST) {
         gs.c_fold += 1;
@@ -555,7 +551,7 @@ pub fn parse_local_init(idx int, tid int, kind int) int {
     return gen.sem_store_local_value(idx, tid);
 }
 
-pub fn parse_let_decl(global int) int {
+fn parse_let_decl(global int) int {
     p_adv();
     for 1 {
         if (parse_binding(global, gen.SYM_VAR) != 0) {
@@ -570,7 +566,7 @@ pub fn parse_let_decl(global int) int {
     return p_expect(gen.TK_SEMI, "期望 ';'");
 }
 
-pub fn parse_const_decl(global int) int {
+fn parse_const_decl(global int) int {
     p_adv();
     for 1 {
         if (parse_binding(global, gen.SYM_CONST) != 0) {
@@ -585,7 +581,7 @@ pub fn parse_const_decl(global int) int {
     return p_expect(gen.TK_SEMI, "期望 ';'");
 }
 
-pub fn parse_fn_decl() int {
+fn parse_fn_decl() int {
     let gs *gen.GenState = gen.G();
     p_adv();
     if (p_cur() != gen.TOK_IDENT) {
@@ -834,10 +830,10 @@ pub fn parse_fn_decl() int {
     if (gen.sem_fn_begin(fidx) != 0) {
         return -1;
     }
-    if (ast_function_begin(gs.c_active_file, gs.c_file_decl_i) != 0) {
+    if (ast.ast_function_begin(gs.c_active_file, gs.c_file_decl_i) != 0) {
         return -1;
     }
-    ast_binding_begin_function();
+    ast.ast_binding_begin_function();
     let fi int = 0;
     // AAPCS64 整型与浮点参数寄存器各自独立计数：整型进 x0..x7、浮点进
     // d0..d7。因此给每个参数定位寄存器时，必须用「它在本类型中的序号」
@@ -860,7 +856,7 @@ pub fn parse_fn_decl() int {
             return -1;
         }
         if (gs.c_ast_capture != 0
-            && ast_binding_add(gs.c_sym_n - 1, pname_tokens[fi], 1) != 0) {
+            && ast.ast_binding_add(gs.c_sym_n - 1, pname_tokens[fi], 1) != 0) {
             return -1;
         }
         fi += 1;
@@ -871,16 +867,16 @@ pub fn parse_fn_decl() int {
     if (gen.sem_fn_end() != 0) {
         return -1;
     }
-    if (ast_function_end() != 0) {
+    if (ast.ast_function_end() != 0) {
         return -1;
     }
     if (compile_only != 0 && gs.c_ct_prepare_active != 0
-        && ast_function_ct_export(fidx) != 0) { return -1; }
+        && ast.ast_function_ct_export(fidx) != 0) { return -1; }
     if (compile_only != 0) { gs.c_em_suppress -= 1; }
     return 0;
 }
 
-pub fn parse_type_decl() int {
+fn parse_type_decl() int {
     let gs *gen.GenState = gen.G();
     p_adv();
     if (p_cur() != gen.TOK_IDENT) {
@@ -910,7 +906,7 @@ pub fn parse_type_decl() int {
     return 0;
 }
 
-pub fn parse_struct_decl() int {
+fn parse_struct_decl() int {
     let gs *gen.GenState = gen.G();
     let saved_type_abi int = gs.c_type_abi;
     // extern 共享布局中的回调字段默认采用 C ABI；类型别名仍保持自身约定。
@@ -998,7 +994,7 @@ pub fn parse_struct_decl() int {
     return 0;
 }
 
-pub fn parse_enum_decl() int {
+fn parse_enum_decl() int {
     let gs *gen.GenState = gen.G();
     p_adv();
     if (p_cur() != gen.TOK_IDENT) {
