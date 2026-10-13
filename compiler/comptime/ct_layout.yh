@@ -49,6 +49,12 @@ fn ct_value_request_grow() int {
     return 0;
 }
 
+// ct_value_requested：该符号是否已登记为布局期值请求（供解析侧判断某个
+// 未就绪 const 需要在布局子遍求值）。
+pub fn ct_value_requested(sym_id int) int {
+    return (ct_value_find(sym_id) >= 0).to_type(int);
+}
+
 // ct_value_request_add：登记一个待执行的 typed CT 整数常量。
 pub fn ct_value_request_add(sym_id int, line int, col int) int {
     if (ct_value_find(sym_id) >= 0) { return 0; }
@@ -263,6 +269,43 @@ fn ct_layout_add(kind int, type_id int, const_sym int, length int,
     return row;
 }
 
+// ct_layout_array_find：按「元素类型 + 长度来源」查找既有布局数组类型项。
+// 布局期数组类型由请求创建，而同一处声明会在多个 pass 重复解析（pass1、
+// CT 捕获、布局登记、布局求值、全局、函数）：同一来源必须复用同一 type_id，
+// 否则会与 gen.ty_array 的规范项并存（内容相同、编号不同，即 2026-10-07
+// 遗留的别名/同长数组类型编号不一致）。
+// 来源判据按优先级：同一 const 符号 → 同一长度 token 区间 → 同一已知长度。
+fn ct_layout_array_find(elem int, length int, const_sym int,
+    file_id int, first int, after int) int {
+    let gs *gen.GenState = gen.G();
+    let i int = 0;
+    for i < ct_layout_request_n {
+        if (ct_layout_requests[i].kind == CT_LAYOUT_ARRAY) {
+            let tid int = ct_layout_requests[i].type_id;
+            if (tid >= 0 && tid < gs.t_type_n
+                && gs.t_types[tid].kind == gen.TY_ARRAY
+                && gs.t_types[tid].elem == elem) {
+                if (const_sym >= 0 && ct_layout_requests[i].const_sym == const_sym) {
+                    return tid;
+                }
+                if (file_id >= 0 && ct_layout_requests[i].expr_file_id == file_id
+                    && ct_layout_requests[i].expr_first == first
+                    && ct_layout_requests[i].expr_after == after) {
+                    return tid;
+                }
+                if (length > 0 && const_sym < 0 && file_id < 0
+                    && ct_layout_requests[i].const_sym < 0
+                    && ct_layout_requests[i].expr_first < 0
+                    && ct_layout_requests[i].length == length) {
+                    return tid;
+                }
+            }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
 // ct_layout_array：创建显式 pending 数组类型，长度可来自未就绪 const 或已知值。
 pub fn ct_layout_array(elem int, length int, const_sym int,
     line int, col int) int {
@@ -270,6 +313,18 @@ pub fn ct_layout_array(elem int, length int, const_sym int,
     if (elem < 0 || elem >= gs.t_type_n
         || (const_sym < 0 && length <= 0)) {
         return gen.sem_err("内部错误：编译期数组布局请求无效");
+    }
+    // 长度来自未就绪 const：声明在前的常量登记为布局期值请求，让布局循环
+    // 先求出它（普通 `const N int = 3;` 的值原本只在全局子遍就绪，导致
+    // `[N]int` 出现在全局/字段/形参/返回位置时误报「编译期常量尚未就绪」）。
+    // 前向引用（声明在后）仍不登记，保持既有声明顺序规则与诊断。
+    if (const_sym >= 0 && gen.sym_declared_before(const_sym, line, col) != 0
+        && ct_value_request_add(const_sym, line, col) != 0) {
+        return -1;
+    }
+    let existing int = ct_layout_array_find(elem, length, const_sym, -1, -1, -1);
+    if (existing >= 0) {
+        return existing;
     }
     let align int = gs.t_types[elem].align;
     if (align < 1) { align = 1; }
@@ -293,6 +348,10 @@ pub fn ct_layout_array_expr(elem int, file_id int, first int, after int,
         || (file_id >= 0 && file_id >= gs.p_file_n)
         || first < 0 || after <= first || after > gs.c_tok_n) {
         return gen.sem_err("内部错误：编译期数组长度表达式范围无效");
+    }
+    let existing int = ct_layout_array_find(elem, -1, -1, file_id, first, after);
+    if (existing >= 0) {
+        return existing;
     }
     let align int = gs.t_types[elem].align;
     if (align < 1) { align = 1; }
@@ -590,6 +649,9 @@ pub fn ct_layout_stuck_diagnostic() int {
         i += 1;
     }
     if (ct_value_pending_count() > 0) {
+        // 先按值请求报告：阻塞在未就绪常量（含前向引用）时给出与旧行为一致的
+        // 「编译期常量尚未就绪」，只有确实是依赖环/布局未完成才报通用诊断。
+        if (ct_value_stuck_diagnostic() != 0) { return -1; }
         i = 0;
         for i < ct_layout_request_n {
             if (ct_layout_requests[i].ready == 0) {
@@ -612,6 +674,72 @@ pub fn ct_layout_stuck_diagnostic() int {
     return ct_value_stuck_diagnostic();
 }
 
+// ct_layout_canon_type：数组类型的规范编号（同元素、同长度、同大小项中的最小编号）。
+// 布局期可能为同一 (元素, 长度) 建立多个类型项——长度来源不同（const 符号、
+// token 区间、已知字面量）时各自成项，内容全同；归一到最小编号后，函数签名
+// 等按类型编号比较的路径不再把它们当成不同类型。
+fn ct_layout_canon_type(tid int) int {
+    let gs *gen.GenState = gen.G();
+    if (tid < 0 || tid >= gs.t_type_n || gs.t_types[tid].kind != gen.TY_ARRAY) {
+        return tid;
+    }
+    let elem int = gs.t_types[tid].elem;
+    let alen int = gs.t_types[tid].len;
+    let size int = gs.t_types[tid].size;
+    let i int = 0;
+    for i < tid {
+        if (gs.t_types[i].kind == gen.TY_ARRAY && gs.t_types[i].elem == elem
+            && gs.t_types[i].len == alen && gs.t_types[i].size == size) {
+            return i;
+        }
+        i += 1;
+    }
+    return tid;
+}
+
+// ct_layout_canonicalize：布局完成后把重复的数组类型编号归一到规范项。
+// 改写面覆盖持久保存类型编号的表：类型表（指针/切片/数组的元素）、结构体与
+// 联合体字段、签名返回与形参、符号类型。重复项本身保留（内容与规范项相同），
+// 归一只保证后续比较与新建类型都走规范编号。
+fn ct_layout_canonicalize() int {
+    let gs *gen.GenState = gen.G();
+    let i int = 0;
+    for i < gs.t_type_n {
+        let kind int = gs.t_types[i].kind;
+        if (kind == gen.TY_PTR || kind == gen.TY_SLICE || kind == gen.TY_ARRAY) {
+            let elem int = gs.t_types[i].elem;
+            let canon int = ct_layout_canon_type(elem);
+            if (canon != elem) { gs.t_types[i].elem = canon; }
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < gs.t_field_n {
+        let canon int = ct_layout_canon_type(gs.t_fields[i].type_id);
+        if (canon != gs.t_fields[i].type_id) { gs.t_fields[i].type_id = canon; }
+        i += 1;
+    }
+    i = 0;
+    for i < gs.t_sig_n {
+        let canon int = ct_layout_canon_type(gs.t_sig_ret[i]);
+        if (canon != gs.t_sig_ret[i]) { gs.t_sig_ret[i] = canon; }
+        i += 1;
+    }
+    i = 0;
+    for i < gs.t_sigparam_n {
+        let canon int = ct_layout_canon_type(gs.t_sig_params[i]);
+        if (canon != gs.t_sig_params[i]) { gs.t_sig_params[i] = canon; }
+        i += 1;
+    }
+    i = 0;
+    for i < gs.c_sym_n {
+        let canon int = ct_layout_canon_type(gs.c_syms[i].type_id);
+        if (canon != gs.c_syms[i].type_id) { gs.c_syms[i].type_id = canon; }
+        i += 1;
+    }
+    return 0;
+}
+
 // ct_layout_resolve：最终确认全部布局 READY；残留请求按其源码位置报告依赖环。
 pub fn ct_layout_resolve() int {
     let gs *gen.GenState = gen.G();
@@ -629,5 +757,6 @@ pub fn ct_layout_resolve() int {
         return ct_value_stuck_diagnostic();
     }
     if (gs.c_errors > 0) { return -1; }
-    return 0;
+    // 布局完成：同一 (元素, 长度) 的多个数组类型项归一到规范编号
+    return ct_layout_canonicalize();
 }

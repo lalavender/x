@@ -40,6 +40,33 @@ fn p_ct_layout_expr_needs_defer(first int, after int) int {
     return 0;
 }
 
+// p_ct_layout_expr_defer_now：当前 pass 下必须延迟求值的数组长度表达式。
+// ① 含 `$` CT 调用或 `sizeof`：仅 pass1 延迟——CT 正文在 pass2 捕获，
+//    之后的 pass 直接折叠（否则后续 pass 会重新拿回长度仍为 -2 的 pending
+//    类型项，数组字面量个数检查会误报）。
+// ② 引用未就绪 const：任何 pass 都延迟——普通 `const N int = 3;` 的值原本
+//    只在全局子遍就绪，而全局/字段/形参/返回位置的 `[N]int` 在布局子遍就定长。
+fn p_ct_layout_expr_defer_now(first int, after int) int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_pass == 1 && p_ct_layout_expr_needs_defer(first, after) != 0) {
+        return 1;
+    }
+    let i int = first;
+    for i < after {
+        let kind int = gs.c_toks[i].kind;
+        if (kind == gen.TOK_IDENT
+            && (i == first || (gs.c_toks[i - 1].kind != gen.TK_DOT
+                && gs.c_toks[i - 1].kind != gen.TK_DOLLAR))) {
+            let sym int = gen.sym_lookup(gs.c_toks[i].start, gs.c_toks[i].len);
+            if (sym >= 0 && sym < gs.c_sym_n
+                && gs.c_syms[sym].kind == gen.SYM_CONST
+                && gs.c_syms[sym].const_ready == 0) { return 1; }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
 // p_ct_layout_expr_runnable：等待常量和 CT 函数中的 pending sizeof 类型布局就绪。
 fn p_ct_layout_expr_runnable(first int, after int) int {
     let gs *gen.GenState = gen.G();
@@ -87,9 +114,21 @@ fn p_ct_layout_expr_register(row int) int {
                 && gs.c_toks[i - 1].kind != gen.TK_DOLLAR))) {
             let sym int = gen.sym_lookup(gs.c_toks[i].start, gs.c_toks[i].len);
             if (sym >= 0 && sym < gs.c_sym_n
-                && gs.c_syms[sym].kind == gen.SYM_CONST
-                && comptime.ct_layout_expr_value_dependency_add(row, sym) != 0) {
-                return -1;
+                && gs.c_syms[sym].kind == gen.SYM_CONST) {
+                if (comptime.ct_layout_expr_value_dependency_add(row, sym) != 0) {
+                    return -1;
+                }
+                // 长度表达式引用的普通整数常量也要在布局期求出值：
+                // `const N int = 3;` 原本只在全局子遍就绪，而全局/字段/形参
+                // 位置的 `[N]int` 在布局子遍就要定长。仅限声明在前的常量，
+                // 前向引用保持既有「编译期常量尚未就绪」诊断。
+                if (gs.c_syms[sym].const_ready == 0
+                    && gen.sym_declared_before(sym, gs.c_toks[first].line,
+                        gs.c_toks[first].col) != 0
+                    && comptime.ct_value_request_add(sym, gs.c_syms[sym].def_line,
+                        gs.c_syms[sym].def_col) != 0) {
+                    return -1;
+                }
             }
         }
         if (kind == gen.TK_SIZEOF && i + 3 < after
@@ -141,7 +180,10 @@ fn p_decl_ct_layout_eval_runnable(start int) int {
     return p_ct_layout_expr_runnable(first, after);
 }
 
-// p_decl_ct_layout_const_unready：选择未就绪整数 const 中含 CT 调用的初始化器。
+// p_decl_ct_layout_const_unready：选择需要在布局期求值的未就绪整数 const。
+// 两种来源：① 初始化器含 `$` CT 调用（原有判据）；② 该常量已被登记为布局
+// 值请求——数组长度引用的普通常量（`const N int = 3;`）的值原本只在全局
+// 子遍就绪，而全局/字段/形参/返回位置的 `[N]int` 在布局子遍就要定长。
 fn p_decl_ct_layout_const_unready(start int) int {
     let gs *gen.GenState = gen.G();
     let saved int = gs.c_pos;
@@ -192,7 +234,8 @@ fn p_decl_ct_layout_const_unready(start int) int {
         i += 1;
     }
     gs.c_pos = saved;
-    return has_call;
+    if (has_call != 0) { return 1; }
+    return comptime.ct_value_requested(sym);
 }
 
 // p_decl_ct_layout_const_sym：取得合格布局常量请求对应的全局符号编号。
@@ -245,8 +288,15 @@ fn p_decl_ct_layout_const_register(start int) int {
                 && gs.c_toks[i - 1].kind != gen.TK_DOLLAR))) {
             let dep int = gen.sym_lookup(gs.c_toks[i].start, gs.c_toks[i].len);
             if (dep >= 0 && dep < gs.c_sym_n && gs.c_syms[dep].kind == gen.SYM_CONST
-                && gs.c_syms[dep].const_ready == 0
-                && comptime.ct_value_dependency_add(sym, dep) != 0) { return -1; }
+                && gs.c_syms[dep].const_ready == 0) {
+                if (comptime.ct_value_dependency_add(sym, dep) != 0) { return -1; }
+                // 依赖链上的常量同样要在布局期求出（`const N int = M + 1;`），
+                // 但仅限声明在 owner 之前的依赖：前向引用保持既有诊断。
+                if (gen.sym_declared_before(dep, gs.c_syms[sym].def_line,
+                        gs.c_syms[sym].def_col) != 0
+                    && comptime.ct_value_request_add(dep, gs.c_syms[dep].def_line,
+                        gs.c_syms[dep].def_col) != 0) { return -1; }
+            }
         }
         if (kind == gen.TK_DOLLAR && i + 1 < gs.c_tok_n
             && gs.c_toks[i + 1].kind == gen.TOK_IDENT) {

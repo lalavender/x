@@ -87,10 +87,17 @@ fn ast_ir_call_supported(ctx *AstFunctionContext, node *AstExpr,
         let arg_link AstExpr = ast_expr_nodes[link];
         if (arg_link.kind != AST_EXPR_ARG_LIST || arg_link.child1 < ctx.expr_first
             || arg_link.child1 >= ctx.expr_after
-            || ast_ir_type(ast_expr_nodes[arg_link.child1].type_id)
-                != ast_ir_type(gs.t_sig_params[gs.t_sig_first[sig] + arg_i])
             || ast_ir_expr_supported(ctx, arg_link.child1,
                 param_count, binding_limit) == 0) { return 0; }
+        // 实参类型：同型直接支持；整数字面量按 sem_binop/sem_call 的
+        // 「字面量适配」放行（降低时把常量重定型到形参类型）。
+        if (ast_ir_type(ast_expr_nodes[arg_link.child1].type_id)
+            != ast_ir_type(gs.t_sig_params[gs.t_sig_first[sig] + arg_i])) {
+            let lit *AstExpr = &ast_expr_nodes[arg_link.child1];
+            let want int = gs.t_sig_params[gs.t_sig_first[sig] + arg_i];
+            if (lit.is_lit == 0 || gen.ty_is_integer(want) == 0
+                || gen.sem_lit_fits(want, lit.const_bits) == 0) { return 0; }
+        }
         arg_i -= 1;
         link = arg_link.child0;
     }
@@ -210,6 +217,30 @@ fn ast_ir_lower_call_expr(b *AstIRBuilder, ctx *AstFunctionContext,
     if (status != 0 || next != count) {
         if (heap_values != 0) { free(values); }
         return status != 0 ? status : -1;
+    }
+    // 实参类型适配：字面量实参的常量指令改按**形参类型**解释（位型不变）。
+    // 否则字面量先按自身类型（i32）装入再扩展：`u64` 形参收到 0x80000000
+    // 时会拿到 0xFFFFFFFF80000000。非字面量实参与形参类型不一致的调用不在
+    // 支持子集内，整体回退旧发射器（避免静默算错）。
+    let ai int = 0;
+    for ai < count {
+        let want int = ast_ir_type(gs.t_sig_params[gs.t_sig_first[sig] + ai]);
+        if (want < 0) {
+            if (heap_values != 0) { free(values); }
+            return -2;
+        }
+        if (values[ai].type_id == want) {
+            ai += 1;
+            continue;
+        }
+        let v int = values[ai].value;
+        if (v < 0 || v >= b.inst_count || b.insts[v].op != ir.IR_OP_CONST) {
+            if (heap_values != 0) { free(values); }
+            return -2;
+        }
+        b.insts[v].result_type = want;
+        values[ai].type_id = want;
+        ai += 1;
     }
     let call_id int = ast_ir_call_append(&b.calls, base, values, count);
     if (heap_values != 0) { free(values); }

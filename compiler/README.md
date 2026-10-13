@@ -51,9 +51,9 @@ python3 tests/yh-run/check.py --compiler $PWD/../yh
 
 门：①固定点——cc3/cc4 全部模块 `.s`/`.s.i` 逐字节一致；②cc4 自解析
 compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反例全拒）；
-④cc4 运行语料（`tests/yh-run` 全量 run/fail/pass）；⑤模块语料
-（`tests/modules/check.py` 17 例）；⑥项目验收
-（`tests/modules/build-check.py` 82 例）。滚种子前必须全绿。
+④cc4 运行语料（`tests/yh-run` 全量 run/fail/pass，2026-10-13：299 例）；
+⑤模块语料（`tests/modules/check.py` 18 例）；⑥项目验收
+（`tests/modules/build-check.py` 95 例）。滚种子前必须全绿。
 
 ## 模块与文件职责
 
@@ -167,8 +167,10 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 校验后会把有限的标量参数、顺序单绑定 `let` 初始化、整数 `to_type` 和公共整数类型提升、同类型标量赋值（`=`、`+=`、`-=`、`*=`）、
 表达式 return、双臂 if/else return、单层分支中更新参数或分支前初始化的局部值并在合流点 return，
 以及固定参数整数/布尔直接调用降低为 SSA 并校验。合流时发生变化的绑定用双前驱 phi 表示；
-受支持函数由 arm64 SSA 后端发射，其余函数仍由旧发射器生成汇编。当前自编项目
-528 个函数上下文仅 5 个进入 SSA，完整前端/后端迁移仍在进行。
+实参是**整数字面量**时按形参类型取值（与旧语义层的字面量适配同判据）；
+受支持函数由 arm64 SSA 后端发射，其余函数仍由旧发射器生成汇编。2026-10-13 实测自编项目
+991 个函数上下文 22 个进入 SSA（`yh build --stats` 逐模块 `functions`/`ir_functions` 求和），
+完整前端/后端迁移仍在进行。
 
 ## 已实现的语义
 

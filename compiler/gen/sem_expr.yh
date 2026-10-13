@@ -485,6 +485,14 @@ pub fn sem_ternary_cond(lhs *Res) int {
     if (g_state.c_fold != 0) {
         return sem_err("三元不支持编译期折叠");
     }
+    // 保存外层三元标签（嵌套 `a ? b : (c ? d : e)` 时内层不破坏外层；
+    // 此前共用一对全局标签，内层覆盖外层后发射重复 .L 标签）
+    if (g_state.tn_depth >= 64) {
+        return sem_err("三元表达式嵌套超过 64 层");
+    }
+    g_state.tn_else_stk[g_state.tn_depth] = g_state.tn_lbl_else;
+    g_state.tn_end_stk[g_state.tn_depth] = g_state.tn_lbl_end;
+    g_state.tn_depth += 1;
     g_state.tn_lbl_else = em_new_label();
     g_state.tn_lbl_end = em_new_label();
     if (em_jz(g_state.tn_lbl_else) != 0) { return -1; }
@@ -509,6 +517,10 @@ pub fn sem_ternary_end(lhs *Res) int {
     if (em_label(g_state.tn_lbl_end) != 0) { return -1; }
     if (em_pop("x0") != 0) { return -1; }
     g_state.c_res_is_addr = 0;
+    // 恢复外层三元标签（嵌套时内层用完即还）
+    g_state.tn_depth -= 1;
+    g_state.tn_lbl_else = g_state.tn_else_stk[g_state.tn_depth];
+    g_state.tn_lbl_end = g_state.tn_end_stk[g_state.tn_depth];
     return 0;
 }
 
@@ -521,11 +533,18 @@ pub fn sem_unary(op int, operand *Res) int {
         if (g_state.t_types[operand.type_id].kind != TY_PTR) {
             return sem_err("解引用的操作数必须是指针");
         }
-        if (g_state.c_lvalue == 0 && g_state.c_fold == 0) {
+        let elem int = g_state.t_types[operand.type_id].elem;
+        let ek int = g_state.t_types[elem].kind;
+        let agg int = (ek == TY_STRUCT || ek == TY_UNION
+            || ek == TY_ARRAY || ek == TY_SLICE).to_type(int);
+        if (g_state.c_lvalue == 0 && g_state.c_fold == 0 && agg == 0) {
             // x0 = 指针值（地址）→ 装入点值
             if (em_ins("mov\tx10, x0") != 0) { return -1; }
-            if (em_load_sized(g_state.t_types[operand.type_id].elem) != 0) { return -1; }
+            if (em_load_sized(elem) != 0) { return -1; }
         }
+        // 聚合的值语义就是对象地址（见 emit_arm64.yh 的聚合原语约定）：
+        // 解引用聚合**不装入**，x0 保持地址；按标量装入会把对象开头 8 字节
+        // 当成地址（`*dst = *src` 曾因此块拷贝到野地址而段错误）。
         g_state.c_res_is_addr = 1;
         sem_res_reset(operand, g_state.t_types[operand.type_id].elem);
         operand.is_const = 0;

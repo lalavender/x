@@ -119,6 +119,8 @@ case("s1-libs-io-write", "stdlib-run", "libsio", ".", 23,
      stdout="yh libs io ok\n")
 case("s2-libs-core-modules", "stdlib-run", "libsbase", ".", 0,
      stdout="yh libs base ok\n")
+case("u4-pub-const-wide-values", "run", "pubconst", "host", 0)
+case("u3-import-used-via-field-type", "run", "importfield", "host", 0)
 case("u1-extern-abs-module", "run", "externabs", "host", 0)
 case("u3-c-source-object-library-mix", "run", "cinterop", ".", 0)
 case("cabi-automatic-values-and-callbacks", "cabi-run", "autoabi", ".", 0)

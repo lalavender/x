@@ -61,6 +61,19 @@ FAIL_CONTAINS_RE = re.compile(r"^//\s*fail-contains:\s?(.*)$")
 # 标准输入注入（十六进制字节串，可为空）与附加命令行参数。
 STDIN_HEX_RE = re.compile(r"^//\s*stdin-hex:\s?([0-9a-fA-F]*)\s*$")
 ARGV_RE = re.compile(r"^//\s*argv:\s?(.*)$")
+# asm-symbols-safe：要求 --emit-asm 输出里不出现与 AArch64 寄存器同名的符号。
+# GNU as 容忍 `bl w12`，clang 的集成汇编器直接拒绝，因此这条约束只能在发射
+# 文本上校验（运行结果与退出码都看不出来）。
+ASM_SYMBOLS_SAFE_RE = re.compile(r"^\s*//\s*asm-symbols-safe\s*$", re.M)
+REGISTER_NAME_RE = re.compile(
+    r"^(?:[xwsdqvbh](?:[0-9]|[12][0-9]|3[01])|sp|lr|fp|xzr|wzr)$")
+# 符号出现的位置：.globl 目标、行首标签定义、bl/b 目标、adrp 第二操作数、:lo12: 前缀
+ASM_SYMBOL_RE = re.compile(
+    r"^\s*\.globl\s+([A-Za-z_.$][\w.$]*)"
+    r"|^([A-Za-z_.$][\w.$]*):"
+    r"|\b(?:bl|b)\s+([A-Za-z_.$][\w.$]*)"
+    r"|:lo12:([A-Za-z_.$][\w.$]*)"
+    r"|adrp\s+\w+,\s*([A-Za-z_.$][\w.$]*)", re.M)
 
 # 汇总里每种状态的打印标签。
 LABELS = {"PASS": "PASS", "FAIL": "FAIL", "SKIP": "SKIP"}
@@ -185,6 +198,35 @@ def cross_ready():
     return True, ""
 
 
+def check_asm_symbols(path):
+    """按 `// asm-symbols-safe` 指令校验发射汇编里的符号名。
+
+    返回 (status, detail)；用例没有该指令时返回 None（不参与判定）。
+    判据：`.globl` 目标、标签定义、`bl`/`b` 目标、`adrp` 操作数与 `:lo12:`
+    前缀处的符号名都不得是 AArch64 寄存器名（x0-x30、w0-w30、s/d/q/v/b/h0-31、
+    sp/lr/fp/xzr/wzr）。
+    """
+    if not ASM_SYMBOLS_SAFE_RE.search(path.read_text(encoding="utf-8")):
+        return None
+    try:
+        proc = subprocess.run([str(YH_BIN), "--emit-asm", str(path)],
+                              capture_output=True, text=True,
+                              timeout=COMPILE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return "FAIL", "--emit-asm 超时"
+    if proc.returncode != 0:
+        return "FAIL", f"--emit-asm 失败（退出码 {proc.returncode}）\n    " \
+            + "\n    ".join(diag_tail(proc))
+    bad = []
+    for match in ASM_SYMBOL_RE.finditer(proc.stdout):
+        name = next((g for g in match.groups() if g), "")
+        if REGISTER_NAME_RE.match(name):
+            bad.append(name)
+    if bad:
+        return "FAIL", "发射汇编使用了寄存器同名符号：" + ", ".join(sorted(set(bad)))
+    return "PASS", ""
+
+
 def check_run_case(path, cross):
     """run/ 用例：编译并运行，比对输出与退出码。"""
     stem = path.stem
@@ -225,6 +267,9 @@ def check_run_case(path, cross):
         diffs.append(f"退出码：期望 {exit_code} 实际 {run.returncode}")
     if diffs:
         return "FAIL", "；".join(diffs[:5])
+    asm_status = check_asm_symbols(path)
+    if asm_status is not None and asm_status[0] != "PASS":
+        return asm_status
     return "PASS", ""
 
 
@@ -268,6 +313,9 @@ def check_pass_case(path, cross):
     if proc.returncode != 0:
         return "FAIL", f"编译失败（退出码 {proc.returncode}）\n    " \
             + "\n    ".join(diag_tail(proc))
+    asm_status = check_asm_symbols(path)
+    if asm_status is not None and asm_status[0] != "PASS":
+        return asm_status
     return "PASS", ""
 
 
