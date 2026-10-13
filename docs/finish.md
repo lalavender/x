@@ -2,6 +2,28 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-13 macOS 种子追平（主门验过的中间代种子入库）
+
+- **背景**：0.0.4 发布后，入库 `bin/yh` 仍是带「struct/union/enum 必须带 pub」门禁的旧一代
+  （`2e150732…`，2,272,608 B），release/CI 的 darwin 作业都得先跑「种子自动补代」才能构建
+  当前源码——这条 todo 挂了多日。
+- **做法**：`workflow_dispatch` 触发 `ci.yml` 的 `darwin-arm64` 作业（run `38414283098`，
+  commit `a19ffb0`）：先补代（日志 `已临时恢复 13 处类型的 pub` → `make seed`，中间代种子
+  `b123acbe…`），再跑**完整主门**——候选两代固定点、cc4 自解析 71 文件、反例 42/42、
+  运行语料 293/293、并发项目扫描 8/8、前端快照复用、自有运行时、`yh check`、modules、
+  项目验收（含裸 `struct` 的 privtype/modstate fixture）全绿，最后把 `bin/yh` +
+  `bin/yh.sha256` 作为 `darwin-arm64-seed` artifact 上传。
+- **入库**：提交该 artifact（Mach-O 64-bit arm64，与本地工作树的 `bin/yh` 逐字节相同）：
+  `bin/yh` `2e150732…` → **`b123acbe…`**（2,358,688 B），`bin/yh.sha256` 同步。这份种子已被
+  macOS 主门验证能编译含裸 `struct` 的当前源码，因此**下一步 release/CI 的 darwin 作业会
+  直接跳过补代步骤**（该步骤保留为保险，不删）。
+- **CI 超时实测**：`a19ffb0` push 触发的 `linux-arm64` 作业（QEMU 全模拟的 arm64 容器里跑
+  `make` + 两层语料 + `make selfhost-native`）**6.4 分钟**，`timeout-minutes: 60` 充裕，
+  todo 里「CI 超时上限未实测」随之关闭。
+- **判据提醒**：作业日志里 `make verify-seed` 在补代前后分别打印 `2e150732…`（检出里的旧
+  种子）与 `b123acbe…`（补代产物），这是「补代确实换了种子」的直接证据；也说明**用二进制
+  字符串判断门禁不可靠**——`必须带`/`字段一律公开` 在当前源码里仍有同名诊断与注释。
+
 ## 2026-10-13 yh 0.0.4：版本号提升与发布流程种子补代
 
 - **版本**：`compiler/project.toml` `0.0.3` → `0.0.4`，`compiler/README.md` 的版本记录与

@@ -100,7 +100,7 @@ make: *** [Makefile:78: verify-seed] Error 127
 
 ## 边界
 
-- 入库 `bin/yh` 本身**没有**被这次发布追平：darwin 作业只在检出内补代，仓库种子仍是
-  2026-10-08 一代；追平路径是下载本版 Release 的 `yh-0.0.4-darwin-arm64.tar.gz`（里面就是
-  0.0.4 的 Mach-O `yh`）替换 `bin/yh` 并更新 `bin/yh.sha256`（见 `docs/todo.md`）。
+- 入库 `bin/yh` 当时**没有**被这次发布追平（darwin 作业只在检出内补代）；随后用 `ci.yml`
+  的 `darwin-arm64` 作业（run `38414283098`）产出主门验过的中间代种子 `b123acbe…` 并提交
+  入库，追平已完成——见 `docs/finish.md` 的 2026-10-13「macOS 种子追平」条目。
 - 补代逻辑已在 macOS 上真实跑通（本版首发 darwin 作业），不再只是打桩干跑。

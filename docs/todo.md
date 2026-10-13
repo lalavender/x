@@ -286,28 +286,14 @@ runtime-memory/lex-stats/scratch-isolation）在 WSL 全绿。重建与验证
 作为既有平台调查参照。**2026-10-12 用户决定：开发与验证集中在 Linux 平台，
 macOS/Windows 等其他平台后接入**；Linux/aarch64 种子、门禁与滚种子流程优先维护。
 
-- [ ] **macOS 种子跨代恢复**：`bin/yh` 仍是 2026-10-11 一代，含 2026-10-12 删除的
-  「struct/union/enum 必须带 pub」门禁，**无法编译当前源码**（`compiler/ast`、
-  `cmd`、`comptime`、`parse` 已有模块私有类型）。接入 macOS 时的恢复步骤：先取
-  「语言规则一代」源码（本地化改动 = `docs/yh.g4` + `parse/parse_decl.yh` 两处门禁，
-  见 [模块私有类型实施方案](02-plan/yh-模块私有类型实施方案.md) P1）用现有 `bin/yh`
-  构建一次并 `make seed`（macOS 上写 `bin/yh`），再回到包含 P4 类型私有化的版本。
-  **已自动化**：`.github/workflows/ci.yml` 的 `darwin-arm64` 作业在种子落后时自动
-  补这一代（临时恢复 13 处 `pub` → `make` → `make seed` → 还原源码），跑完主门后把
-  `bin/yh` 与 `bin/yh.sha256` 作为 artifact 上传；手动触发一次 workflow_dispatch、
-  下载 artifact 并提交，即可追平 macOS 种子（该作业的核心逻辑已在 Linux 上等价干跑）。
-  **2026-10-13 状态**：`linux-arm64` 作业已首次真实运行并修掉三处 CI-only 阻塞
-  （arm64 `O_DIRECTORY` 常量、`runtime-memory.py` 的 clang 硬编码、统计计时 32 位截断，
-  见 [完成记录](01-finished/yh-Linux目录扫描arm64常量与CI首跑修复-2026-10-13.md)）；
-  `darwin-arm64` 作业**仍未真实跑过**。
-- [ ] **CI 超时上限未实测**：`linux-arm64` 作业要在 QEMU 全模拟的 arm64 容器里跑
-  `make` + 两层语料 + `make selfhost-native`，`timeout-minutes: 60` 够不够还没实测
-  （2026-10-13 首次运行在 `make` 首步就失败，没走到耗时段）。下次真实运行先看总耗时；
-  不够就先减负（拆步骤/砍语料层），再考虑 arm64 原生 runner。
 当前只有 arm64 双方言（GNU/Linux 与 Darwin/Mach-O）；Darwin 方言基础
 已在 compiler/gen/target.yh、emit_arm64.yh 与 cmd/driver.yh 就位。x64 后端与
 Windows 目标未实施。Linux/aarch64 自举种子已入库（`bin/yh-linux-arm64`，
 2026-10-09），Linux 上可直接构建与跑自举门禁；Linux CI 流程按需重建。
+**2026-10-13 关闭两条**：macOS 入库种子 `bin/yh` 换成 macOS 主门验过的中间代种子
+（`b123acbe…`，可直接编译当前源码，「种子落后自动补代」降级为保险）；
+`linux-arm64` CI 作业实测 **6.4 分钟**（`timeout-minutes: 60` 充裕）。证据见
+[finish.md](finish.md) 的 2026-10-13 条目。
 
 ### 玉衡 VS Code 扩展
 
