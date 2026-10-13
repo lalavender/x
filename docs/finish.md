@@ -2,6 +2,26 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-13 yh 0.0.4：版本号提升与发布流程种子补代
+
+- **版本**：`compiler/project.toml` `0.0.3` → `0.0.4`，`compiler/README.md` 的版本记录与
+  `tools/compiler-performance.py` 的 `yh version` 断言同步。版本号只在运行时从
+  `project.toml` 读取（`version` 子命令），**不编进二进制**——变更后重编的 `yh`
+  SHA-256 与变更前逐字节相同（`33733767…`）。
+- **发布流程补代**：`.github/workflows/release.yml` 的 `darwin-arm64` 作业补上与 `ci.yml`
+  同款的「必要时补一代 macOS 种子」（探测裸 `struct` → 临时恢复 13 处 `pub` → `make` →
+  `make seed` → `git checkout -- compiler` → 继续构建 HEAD）。不补的话：入库 `bin/yh` 仍是
+  2026-10-08 一代、带「`struct/union/enum` 必须带 pub」门禁，编不了当前源码（12 个模块私有
+  类型），tag push 后 darwin 作业必失败、`release` 作业（needs 两个作业）不跑，0.0.4 不会
+  有 Release 产物；linux 作业不受影响（0.0.3 的 Release 里有 `yh-0.0.3-linux-arm64.tar.gz`
+  作种子，已用只读 API 核实）。
+- **本地干跑**（macOS 无法本地执行）：YAML 解析通过、抽出的 run 体（50 行）`bash -n` 通过、
+  打桩环境（旧种子探针 exit 1）下补代 **13/13 命中**且退出码 0；探针成功时该步骤自动跳过。
+- **验证**：`make` / `make test`（语法 78/78、反例 42/42、运行 293/293）/
+  `make selfhost-native` 全绿；在 `compiler/` 目录下 `../yh version` 输出 `yh 0.0.4`。
+- **tag**：`0.0.4`（annotated），push 触发 `Release` 作业（linux + darwin 构建、归档
+  tar.gz + sha256）。详情见[完成记录](01-finished/yh-0.0.4发布-2026-10-13.md)。
+
 ## 2026-10-13 yh：arm64 目录扫描常量、CI 首跑两处阻塞与 64 位计时截断
 
 - **背景**：`1a8b4fa` push 后 CI 的 `linux-arm64` 作业**首次真实运行**，2m13s 在容器内

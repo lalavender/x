@@ -102,6 +102,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 入库 bin/yh 落后一代时先补一代（与 ci.yml 的 darwin 作业同一段逻辑）：
+      # 种子带「struct/union/enum 必须带 pub」门禁时编不了当前源码，所以先把它
+      # 自检出的 13 处模块私有类型临时改回 pub，用旧种子编出这一代并 make seed，
+      # 再还原源码继续构建 HEAD。种子已支持裸 struct 时本步骤自动跳过。
+      - name: 必要时补一代 macOS 种子
+        run: |
+          set -euo pipefail
+          cat > /tmp/bare.yh <<'EOF'
+          struct S { v int; }
+          fn main() int { let s S; s.v = 1; return s.v - 1; }
+          EOF
+          if bin/yh --syntax-check /tmp/bare.yh >/dev/null 2>&1; then
+            echo "入库种子已支持模块私有类型，无需中间代"
+            exit 0
+          fi
+          echo "入库种子落后一代：造「语言规则一代」（类型临时恢复 pub）"
+          python3 - <<'PY'
+          import pathlib
+          import sys
+
+          TARGETS = [
+              ("compiler/ast/ast_expr.yh", "AstExpr"),
+              ("compiler/ast/ast_function.yh", "AstFunctionContext"),
+              ("compiler/ast/ast_ir_build.yh", "AstIRBuilder"),
+              ("compiler/ast/ast_ir_inline.yh", "AstIRInlineEntry"),
+              ("compiler/ast/ast_stmt.yh", "AstStmt"),
+              ("compiler/cmd/toml.yh", "TomlArrayItem"),
+              ("compiler/cmd/toml.yh", "TomlSec"),
+              ("compiler/cmd/project.yh", "PJDirEntry"),
+              ("compiler/cmd/clock.darwin.yh", "CmdTimespec"),
+              ("compiler/cmd/clock.linux.yh", "CmdTimespec"),
+              ("compiler/comptime/ct_ir_data.yh", "CtDataSlice"),
+              ("compiler/comptime/ct_global_agg.yh", "CtGlobalAgg"),
+              ("compiler/parse/iface_ct_map.yh", "IfaceCtColMap"),
+          ]
+          done = 0
+          for rel, name in TARGETS:
+              path = pathlib.Path(rel)
+              # newline="" 按字节保留行尾，避免在 CRLF 检出上重写整文件
+              text = path.read_text(encoding="utf-8", newline="")
+              old = "struct " + name + " "
+              new = "pub struct " + name + " "
+              hits = text.count("\n" + old)
+              if hits != 1:
+                  sys.exit(f"{rel}: {name} 命中 {hits} 处，期望 1 处")
+              path.write_text(text.replace("\n" + old, "\n" + new),
+                              encoding="utf-8", newline="")
+              done += 1
+          print(f"已临时恢复 {done} 处类型的 pub")
+          PY
+          make
+          make seed
+          git checkout -- compiler
+          python3 tools/selfhost_snapshot_gate.py --verify-seed "$PWD/bin/yh"
+          echo "中间代种子已就位（本作业检出内的 bin/yh 与 bin/yh.sha256 已更新）"
+
       - name: make
         run: make
 

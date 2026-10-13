@@ -7,7 +7,7 @@
 > `make selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
-version = `0.0.3`，source = `.`），按 **gen / lex / parse / ast / comptime / cmd / ir / backend
+version = `0.0.4`，source = `.`），按 **gen / lex / parse / ast / comptime / cmd / ir / backend
 多模块**组织，编译器源码共 71 个 `.yh` 文件（`ast/` 为 2026-10-12
 自 parse 拆出的 AST 阶段模块）；`ir`（目标隔离
 SSA）与其它模块同为根项目普通模块，共同进入编译器构建与自举固定点。
