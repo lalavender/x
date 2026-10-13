@@ -58,13 +58,49 @@ darwin/linux 两套资产）。
 - 提交：版本号 + workflow + 文档（`asm/`、`link/` 仍不提交）。
 - tag：`0.0.4`（annotated，风格与 0.0.1–0.0.3 一致），消息：
   `yh 0.0.4：模块私有类型与 AST 独立模块、导出面收缩；arm64 目录扫描与 CI 首跑修复，发布流程自带种子补代`
-- push 后触发 `Release` 作业：linux 作业取 0.0.3 的 linux 资产作种子在 QEMU 容器内构建并冒烟，
-  darwin 作业先补代再构建并冒烟，`release` 作业把两套 tar.gz + sha256 归档成 0.0.4 Release。
+- push 触发 `Release` 作业（run `38410260504`）：darwin 作业（含补代）**成功**，linux 作业
+  失败，`release` 作业被跳过。
+
+## 首发失败的复盘（run 38410260504）
+
+**darwin 作业：成功，补代真的跑了**（日志实证，11 秒跑完）：
+
+```
+入库种子落后一代：造「语言规则一代」（类型临时恢复 pub）
+已临时恢复 13 处类型的 pub
+宿主平台种子已更新：./bin/yh
+中间代种子已就位（本作业检出内的 bin/yh 与 bin/yh.sha256 已更新）
+hello, yh!
+```
+
+也就是说：不补这一段，darwin 作业必然失败——补代是这次发布能出 macOS 产物的前提。
+
+**linux 作业：失败在容器构建步骤**，原因与编译器无关，是发布工作流自己的两处过时：
+
+```
+python3 ./tools/selfhost_snapshot_gate.py --verify-seed "/repo/prevseed/yh"
+/bin/sh: 1: python3: not found
+make: *** [Makefile:78: verify-seed] Error 127
+```
+
+1. 容器里只装了 `build-essential`，**没有 python3**；而 Makefile 的 `verify-seed` 与
+   `tools/seed-build.py` 都要 python3（`ci.yml` 的容器一直是 `build-essential python3`，
+   所以 CI 从不触发这个坑）。这是 0.0.3 发版之后 Makefile 才引入的依赖，工作流没跟上。
+2. 种子取的是**上一版 Release 的 linux 资产**（0.0.3，2026-09-29 构建）——它比
+   arm64 `O_DIRECTORY` 那个修复早，仍然带着该 bug；就算补上 python3，它在容器
+   （overlayfs）上构建时也会以 `无法打开目录` 失败。仓库现在已入库
+   `bin/yh-linux-arm64`（上一代 Linux 种子，已含修复），Makefile 在 aarch64 宿主上本来就
+   自动选它，所以下载上一版资产这一步是历史遗留。
+
+**修复**（都在 `release.yml` 的 linux 作业里）：
+
+- 容器安装列表改为 `build-essential python3`；
+- 去掉「下载上一版 Release 的 linux-arm64 资产」整步，改为直接用入库
+  `bin/yh-linux-arm64`（`make` 不带 `SEED=` 覆盖），与 `ci.yml` 的容器配方一致。
 
 ## 边界
 
-- 补代逻辑在 macOS 上仍是**首次真实执行**（本地只能做打桩干跑）。
-- 入库 `bin/yh` 本身**没有**被这次发布追平：release 作业只在检出内补代，仓库种子仍是
-  2026-10-08 一代；追平走 `ci.yml` 的 `darwin-arm64` 作业 artifact（见 `docs/todo.md`）。
-- `release.yml` 的 linux 作业仍要求「上一版 Release 有 linux-arm64 资产」（滚动自举设计），
-  这次 0.0.3 有，故不受影响。
+- 入库 `bin/yh` 本身**没有**被这次发布追平：darwin 作业只在检出内补代，仓库种子仍是
+  2026-10-08 一代；追平路径是下载本版 Release 的 `yh-0.0.4-darwin-arm64.tar.gz`（里面就是
+  0.0.4 的 Mach-O `yh`）替换 `bin/yh` 并更新 `bin/yh.sha256`（见 `docs/todo.md`）。
+- 补代逻辑已在 macOS 上真实跑通（本版首发 darwin 作业），不再只是打桩干跑。

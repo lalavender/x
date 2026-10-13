@@ -1,9 +1,9 @@
 name: Release
 
 # 滚动自举发布：编译器就是 yh，由上一版二进制编译当前源码。
-#  - linux 作业：种子取上一版 Release 的 linux-arm64 资产（bin/ 入库种子
-#    是宿主 Mach-O，Linux 无法执行；QEMU 容器内 make SEED=… 构建并冒烟；
-#  - darwin 作业：直接用入库 bin/yh（Mach-O）构建并冒烟；
+#  - linux 作业：种子用入库的 bin/yh-linux-arm64（它本身就是上一代 Linux 种子，
+#    Makefile 在 aarch64 宿主上自动选它）；QEMU 容器内 make 构建并冒烟；
+#  - darwin 作业：用入库 bin/yh（Mach-O）构建并冒烟，种子落后一代时先自动补代；
 #  - release 作业：tar.gz + sha256 归档到 GitHub Release（下一版的种子）。
 on:
   push:
@@ -26,35 +26,6 @@ jobs:
         with:
           platforms: arm64
 
-      - name: 下载上一版 Release 的 linux-arm64 资产（编译种子）
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          CUR="${GITHUB_REF_NAME}"
-          TAGS="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=10" --jq '.[].tag_name' 2>/dev/null)" || {
-            echo "gh api 查询 Release 列表失败"; exit 1
-          }
-          if [ -z "$TAGS" ]; then
-            echo "仓库没有任何 Release（滚动自举需要上一版的 linux-arm64 资产作种子）"
-            exit 1
-          fi
-          PREV=""
-          for t in $TAGS; do
-            if [ "$t" != "$CUR" ]; then PREV="$t"; break; fi
-          done
-          if [ -z "$PREV" ]; then
-            echo "找不到上一版 Release（滚动自举需要它的 linux-arm64 资产作种子）"
-            exit 1
-          fi
-          echo "上一版 Release：$PREV"
-          gh release download "$PREV" -p 'yh-*-linux-arm64.tar.gz' -O prev.tgz
-          mkdir prevseed && tar xzf prev.tgz -C prevseed
-          # 0.0.2 及以前的包内主编译器叫 yh-new，之后叫 yh
-          if [ -x prevseed/yh-new ]; then SEED_BIN=yh-new; else SEED_BIN=yh; fi
-          echo "SEED_BIN=$SEED_BIN" >> "$GITHUB_ENV"
-          test -f prevseed/yh
-
       - name: 容器内 make 与冒烟（ubuntu:24.04）
         run: |
           cat > /tmp/smoke.yh <<'EOF'
@@ -65,16 +36,18 @@ jobs:
           EOF
           docker run --rm --platform linux/arm64 \
             -v "$PWD":/repo:ro \
-            -e SEED_BIN \
             -v "$PWD/out":/out \
             -v /tmp/smoke.yh:/smoke.yh:ro \
             ubuntu:24.04 bash -ec '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq >/dev/null
-              apt-get install -y -qq build-essential >/dev/null
+              # Makefile 的 verify-seed / seed-build.py 都要 python3，只装
+              # build-essential 会让 make 以 127 失败（2026-10-13 0.0.4 首跑踩到）
+              apt-get install -y -qq build-essential python3 >/dev/null
               cp -r /repo /build
               cd /build
-              make SEED=/repo/prevseed/$SEED_BIN
+              # 种子用入库的 bin/yh-linux-arm64（aarch64 宿主上 Makefile 自动选它）
+              make
               # 开箱状态冒烟（链接走容器内系统 gcc）
               ./yh /smoke.yh -o /tmp/smoke && /tmp/smoke
               # 两个产物都在容器内写入（容器是 root，外层步骤对 root 所有的

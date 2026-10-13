@@ -19,8 +19,16 @@
   打桩环境（旧种子探针 exit 1）下补代 **13/13 命中**且退出码 0；探针成功时该步骤自动跳过。
 - **验证**：`make` / `make test`（语法 78/78、反例 42/42、运行 293/293）/
   `make selfhost-native` 全绿；在 `compiler/` 目录下 `../yh version` 输出 `yh 0.0.4`。
-- **tag**：`0.0.4`（annotated），push 触发 `Release` 作业（linux + darwin 构建、归档
-  tar.gz + sha256）。详情见[完成记录](01-finished/yh-0.0.4发布-2026-10-13.md)。
+- **首发 Release（run 38410260504）**：darwin 作业**成功**且补代真的执行了（日志
+  `已临时恢复 13 处类型的 pub` → `make seed` → 冒烟 `hello, yh!`），证明这段补代是出
+  macOS 产物的前提；linux 作业失败在容器构建步骤——容器只装了 `build-essential` 没有
+  python3（`make: *** [Makefile:78: verify-seed] Error 127`，该依赖是 0.0.3 之后 Makefile
+  才引入的），且它下载的 0.0.3 Release 种子早于 arm64 `O_DIRECTORY` 修复、本身带 bug。
+  修复：容器安装 `build-essential python3`，去掉「下载上一版 Release 资产」整步，改用
+  入库 `bin/yh-linux-arm64`（与 `ci.yml` 的容器配方一致）。
+- **tag**：`0.0.4`（annotated，指向本轮修复后的提交），push 触发 `Release` 作业
+  （linux + darwin 构建、归档 tar.gz + sha256）。详情见
+  [完成记录](01-finished/yh-0.0.4发布-2026-10-13.md)。
 
 ## 2026-10-13 yh：arm64 目录扫描常量、CI 首跑两处阻塞与 64 位计时截断
 
