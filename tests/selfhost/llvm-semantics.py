@@ -47,6 +47,10 @@ def main() -> int:
             assert emitted >= 8, f"bool 探针没有实际发射八种 SSA 函数：{stats}"
         if "call-block-order" in source.name:
             assert emitted >= 2, f"调用/合流探针没有实际发射两个 SSA 函数：{stats}"
+        if "integer-boundaries" in source.name:
+            assert emitted >= 11, f"整数探针没有实际发射十一种 SSA 函数：{stats}"
+        if "unary-types" in source.name:
+            assert emitted >= 1, f"一元逻辑非没有实际发射 SSA 函数：{stats}"
         records.append({"source": source.name, "stdout": result.stdout,
                         "exit_code": result.returncode, "backend_emitted_functions": emitted})
     (work / "report.json").write_text(json.dumps(records, ensure_ascii=False, indent=2)

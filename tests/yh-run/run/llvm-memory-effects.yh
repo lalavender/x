@@ -1,0 +1,81 @@
+// expect: llvm-memory=ok
+// exit: 0
+// 数组/结构体独立复制，切片共享元素；实参副本在对应实参求值时固定。
+
+// Padded：包含布局填充的聚合，默认局部声明应清零完整对象。
+struct Padded { tag u8; value i64; }
+// Cell：联合体共享存储，默认声明按对象大小清零。
+union Cell { word i64; bytes [8]u8; }
+
+let shared [2]int;
+let history int = 0;
+let global_zero Padded;
+let shared_view []int;
+
+// change_copy：数组形参是独立值，修改不影响调用方。
+fn change_copy(values [2]int) int { values[0] = 99; return values[0]; }
+// take_snapshot：第二个实参改变源数组时，第一个实参副本已经固定。
+fn take_snapshot(values [2]int, marker int) int { return values[0] * 10 + marker; }
+// change_source：留下后续实参的副作用。
+fn change_source() int { shared[0] = 9; return 2; }
+// mark：观察标量实参从左到右求值和逻辑短路。
+fn mark(value int) int { history = history * 10 + value; return value; }
+// pair：保持两个已求值标量的顺序。
+fn pair(first int, second int) int { return first * 10 + second; }
+// change_struct：结构体形参复制后独立修改。
+fn change_struct(value Padded) i64 { value.value = 88; return value.value; }
+// take_pointer：退化的数组指针共享元素，不应为了值参数修复而复制数组。
+fn take_pointer(values *int, marker int) int { return values[0] * 10 + marker; }
+// take_slice / change_descriptor：切片实参固定描述符副本，后续改全局描述符不影响已求值参数。
+fn take_slice(values []int, marker int) int { return len(values) * 10 + marker; }
+fn change_descriptor() int { shared_view = shared[1..2]; return 3; }
+
+// main：同时验收默认初始化、聚合赋值/传参、切片描述符与副作用。
+fn main() int {
+    let scalar i64;
+    let values [2]int;
+    let padded Padded;
+    let cell Cell;
+    let empty []int;
+    if (scalar != 0 || values[0] != 0 || values[1] != 0 || cell.word != 0
+        || len(empty) != 0 || global_zero.tag != 0 || global_zero.value != 0) { return 1; }
+    let bytes *u8 = (&padded).to_type(*u8);
+    let index int = 0;
+    for index < sizeof(Padded) {
+        if (bytes[index] != 0) { return 2; }
+        index += 1;
+    }
+    values[0] = 4;
+    values[1] = 5;
+    let copied [2]int = values;
+    copied[0] = 7;
+    if (values[0] != 4 || change_copy(values) != 99 || values[0] != 4) { return 3; }
+    padded.tag = 3;
+    padded.value = 42;
+    let second Padded = padded;
+    second.value = 9;
+    if (padded.value != 42 || second.tag != 3 || change_struct(padded) != 88
+        || padded.value != 42) { return 4; }
+    let view []int = values.to_type([]int);
+    let another []int = view;
+    another[1] = 8;
+    view = values[1..2];
+    if (values[1] != 8 || len(view) != 1 || len(another) != 2
+        || another[0] != 4 || view[0] != 8) { return 5; }
+    shared[0] = 4;
+    if (take_snapshot(shared, change_source()) != 42 || shared[0] != 9) { return 6; }
+    shared[0] = 4;
+    let indirect fn([2]int, int) int = take_snapshot;
+    if (indirect(shared, change_source()) != 42) { return 9; }
+    shared[0] = 4;
+    if (take_pointer(shared, change_source()) != 92) { return 10; }
+    shared_view = shared.to_type([]int);
+    if (take_slice(shared_view, change_descriptor()) != 23 || len(shared_view) != 1) { return 11; }
+    if (pair(mark(1), mark(2)) != 12 || history != 12) { return 7; }
+    history = 0;
+    let yes bool = mark(1) > 0 || mark(2) > 0;
+    let no bool = false && mark(3) > 0;
+    if (!yes || no || history != 1) { return 8; }
+    printf("llvm-memory=ok\n");
+    return 0;
+}

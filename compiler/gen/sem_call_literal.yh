@@ -33,7 +33,9 @@ pub fn sem_call_begin(callee *Res) int {
     return 0;
 }
 
-pub fn sem_push_arg(r *Res) int {
+// sem_push_arg：每个实参求值后立即保存标量或按值聚合副本，后续实参不能改变已求值的值。
+// callee 提供形参类型；数组退化为指针时仍保存原地址，切片副本只复制描述符、不复制元素。
+pub fn sem_push_arg(r *Res, callee *Res) int {
     if (g_state.c_compile == 0) {
         return 0;
     }
@@ -46,8 +48,26 @@ pub fn sem_push_arg(r *Res) int {
     if (g_state.c_fold != 0) {
         return 0;
     }
-    if (g_state.c_call_depth > 0 && g_state.c_call_abi[g_state.c_call_depth - 1] == ABI_C
-        && (g_state.t_types[r.type_id].kind == TY_STRUCT || g_state.t_types[r.type_id].kind == TY_UNION)) {
+    let kind int = g_state.t_types[r.type_id].kind;
+    let copy int = 0;
+    if (g_state.c_call_depth > 0) {
+        let depth int = g_state.c_call_depth - 1;
+        if (g_state.c_call_abi[depth] == ABI_C && (kind == TY_STRUCT || kind == TY_UNION)) {
+            copy = 1;
+        }
+        if (g_state.t_types[callee.type_id].kind == TY_FN) {
+            let sig int = g_state.t_types[callee.type_id].sub;
+            let position int = g_state.c_arg_n - g_state.c_call_base[depth] - 1;
+            if (position < g_state.t_sig_np[sig]) {
+                let want int = g_state.t_sig_params[g_state.t_sig_first[sig] + position];
+                if (g_state.t_types[want].kind == kind
+                    && (kind == TY_ARRAY || kind == TY_SLICE || kind == TY_STRUCT || kind == TY_UNION)) {
+                    copy = 1;
+                }
+            }
+        }
+    }
+    if (copy != 0) {
         if (em_agg_arg_copy(g_state.t_types[r.type_id].size) != 0) { return -1; }
     }
     return sem_push_value(r);

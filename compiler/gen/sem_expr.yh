@@ -392,6 +392,8 @@ pub fn sem_binop(op int, lhs *Res, rhs *Res) int {
     } else {
         if (em_pop("x9") != 0) { return -1; }
         if (em_binop(op, tid) != 0) { return -1; }
+        // 运算按 64 位计算，源结果先恢复定宽位型，随后扩大转换不能读取高位残留。
+        if (em_normalize_int(tid) != 0) { return -1; }
         sem_res_reset(lhs, tid);
     }
     lhs.is_const = 0;
@@ -579,15 +581,21 @@ pub fn sem_unary(op int, operand *Res) int {
             }
             return 0;
         }
+        let unary_type int = operand.type_id;
+        if (g_state.t_types[unary_type].kind == TY_BOOL) { unary_type = TY_I32; }
         if (ty_is_integer(operand.type_id) != 0) {
             let value i64 = 0;
-            if (sem_fold_const_unary(op, operand.type_id, operand.ival,
+            if (sem_fold_const_unary(op, unary_type, operand.ival,
                     operand.is_lit, &value) != 0) { return -1; }
             operand.ival = value;
         } else {
             operand.ival = fold_unary(op, operand.ival);
+            unary_type = TY_I32;
         }
-        operand.type_id = TY_I32;
+        // 常量与动态一元结果类型一致；bool 已升为 int，其他整数保留原宽度/符号性。
+        operand.type_id = unary_type;
+        // 结果是新常量值，原符号绑定只属于操作数子节点；括号不能继承为错型基本表达式。
+        operand.sym = -1;
         if (g_state.c_fold == 0) {
             if (em_mov_imm("x0", operand.ival) != 0) {
                 return -1;
@@ -615,6 +623,7 @@ pub fn sem_unary(op int, operand *Res) int {
         return sem_err("该类型不支持一元运算");
     }
     if (em_unary(op, tid) != 0) { return -1; }
+    if (em_normalize_int(tid) != 0) { return -1; }
     sem_res_reset(operand, tid);
     g_state.c_res_is_addr = 0;
     return 0;
