@@ -2,6 +2,31 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-14 LLVM LL0E：固定 SDK 与静态桥独立验收
+
+- 固定 LLVM 21.1.8 SDK 包下载地址、SHA-256、静态组件闭包与桥 ABI；从已校验包
+  提取 C API/配置头、实际 `.a` 和许可到 tmp，未向系统安装 LLVM。
+  SHA-256 为 aa13e8f4ad91572eaf40e959232d32e07362856e14f22861236017c544ed11d4，
+  错哈希明确拒绝。静态桥配置另保存桥源码/归档哈希，供后续缓存接入。
+- C API 薄桥独立管理 context/module/target machine，运行前后 verifier、O0/O2、generic
+  CPU、静态重定位与对象/汇编输出；C ABI 诊断有界，失败保留既有产物并清理临时文件。
+  目标初始化通过 pthread_once，共享登记表，每次调用的模块和目标机器独占。
+- 先观察“桥尚未实现”的红门，后真实构建/运行测试宿主：无 LLVM 工具 PATH，
+  O0/O2 x64/ARM64 对象 machine=62/183，x64 原生退出 0，汇编输出成功；
+  8 类拒绝、重复成功/失败、零/一字节诊断、既有产物保留、写入失败清理全部通过。
+- 额外 WSL root chroot：根目录仅含测试宿主、输入和必要 OS 动态库，成功生成 O2
+  x64 对象。readelf NEEDED 为 libc/libm/zlib/zstd/加载器，无 libLLVM/libclang；
+  libstdc++/libgcc 静态链接。当前 SDK 分发范围为本机 WSL Ubuntu x64。
+- 发现 GNU BFD 在 DrvFS 上大量 read/lseek 9P RPC，普通静态链接实测 459.8 秒并
+  超过原门超时；修正为同一 GNU 链接器、归档/输出匿名 memfd，最终文件原子发布到 tmp。
+  不使用系统 lld，也不产生 tmp 外的持久临时文件。
+- 验证：`python3 tests/selfhost/llvm-embedded.py --chroot` 在 WSL root 下退出 0；
+  `.yh` 桥签名由当前编译器发射检查通过；make、make test、make selfhost-native 退出 0，
+  运行语料 299/299、两代固定点和项目验收 95/95。详见
+  [LL0E 记录](01-finished/yh-LLVM-LL0E内嵌桥-2026-10-14.md)。
+- 边界：这次是独立桥验收，尚未接入 yh 前端/默认驱动/自举；LLVM 全语言覆盖、
+  原生 x64 编译器与最终无系统 LLVM 的 yh 自编门仍待 LL1–LL11，种子未更新。
+
 ## 2026-10-14 LLVM LL0：覆盖、来源与启动基线
 
 - 新增 llvmcoverage `.yh` 项目和 llvm-baseline.py；先观察缺覆盖字段的红门，

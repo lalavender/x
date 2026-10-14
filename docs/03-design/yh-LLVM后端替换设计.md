@@ -92,7 +92,8 @@ flowchart LR
 - 薄桥只封装 LLVM 的生命周期和 C API，不承担 yh 语义、AST lowering 或 ABI 设计。
   LLVM 静态库链接进编译器，禁止依赖 `libLLVM.so`、dlopen 或 LLVM 工具旁车。
   SDK 由固定下载地址与 SHA-256 锁定，解包到 `tmp/llvm-migration/sdk/`，不安装到系统。
-  首片先交付 Linux/x86_64 的固定 SDK；ARM64 宿主 SDK 和种子桥在 F1 验收。
+  首片先交付 Linux/x86_64 的固定 SDK；ARM64 启动 SDK 在 LL3 接入 A 前验收，
+  ARM64 LLVM 运行时和原生种子/自举在 F1 验收。
   LLVM 的 Apache-2.0 WITH LLVM-exception 许可和发行包版权随交付保存。
   C/C++ 编译器、平台链接器和 libc 属构建/OS 依赖，不能混称为系统 LLVM 依赖。
 

@@ -141,19 +141,26 @@ output *char, diagnostic *char, capacity u64) int` 返回 0/-1；
 kind=0 对象、1 汇编，opt_level=0/2，缓冲归调用方所有。
 每次调用创建私有 context/module/target machine；诊断失败不发布目标文件。
 
-- [ ] 先加内嵌桥验收：无 LLVM 工具 PATH、对象/汇编生成、O0/O2、坏 IR、坏 target、
+- [x] 先加内嵌桥验收：无 LLVM 工具 PATH、对象/汇编生成、O0/O2、坏 IR、坏 target、
   verifier 失败、目标输出写失败，正常/失败重复调用；未实现桥时明确失败。
-- [ ] 固定 Linux/x86_64 SDK 21.1.8 下载地址、SHA-256、静态组件依赖及许可；
+- [x] 固定 Linux/x86_64 SDK 21.1.8 下载地址、SHA-256、静态组件依赖及许可；
   解包到 tmp，不调用系统 llvm-config，不装系统 LLVM，不提交解包临时文件。
-- [ ] C ABI 桥只调用 LLVM C API；输入验证、前后 verifier、generic CPU、静态重定位，
+- [x] C ABI 桥只调用 LLVM C API；输入验证、前后 verifier、generic CPU、静态重定位，
   目标只初始化 X86/AArch64；诊断有界并释放所有自有对象。
-- [ ] 使用固定 SDK 静态链接测试宿主，readelf NEEDED 不含 LLVM；在无系统 LLVM 的
+- [x] 使用固定 SDK 静态链接测试宿主，readelf NEEDED 不含 LLVM；在无系统 LLVM 的
   隔离根目录生成对象和汇编。此宿主是桥测试工具，不能声称 yh 已完成嵌入。
-- [ ] 运行 make、make test、make selfhost-native，记录桥门与旧门证据并提交。
+- [x] 运行 make、make test、make selfhost-native，记录桥门与旧门证据并提交。
 
 **验证：**`python3 tests/selfhost/llvm-embedded.py`；独立测试宿主无 LLVM 动态依赖，
 对象 ELF machine=62/183，x64 最小 IR 原生运行 exit 0。LL3 接入 yh 调用，
 LL10 再把静态桥/SDK 与连续自编链接绑定，LL11 完成最终交付的无系统 LLVM 门。
+
+2026-10-14 LL0E 已验收：固定 SDK 哈希正确，坏哈希拒绝；薄桥独立宿主无 LLVM 动态依赖，
+无 LLVM 工具 PATH 的 O0/O2 对象/汇编/原生 x64 运行和 8 类拒绝门通过。
+WSL root chroot 仅放测试宿主、输入与 OS 动态库，O2 生成对象退出 0。
+链接采用同一 GNU 链接器和匿名 memfd 输入/输出，消除 DrvFS 细碎 IO 的超时，
+不增加系统 LLVM/lld 依赖。源码级 `.yh` 桥签名经当前编译器检查通过。
+make / make test / make selfhost-native 全绿；普通编译器仍是旧 ARM64 路径。
 
 ## LL1：锁定边界语义与调用政策（LLVM-01、05）
 

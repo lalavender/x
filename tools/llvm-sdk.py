@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""从固定、校验的私有 SDK 构建静态 LLVM 桥；不发现系统 LLVM 或调用 llvm-config。"""
+
+import argparse
+import contextlib
+import hashlib
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+WORK = ROOT / "tmp/llvm-migration/sdk"
+
+
+def digest(path: Path) -> str:
+    """分块计算下载包或桥源码身份，不把整个 SDK 读入内存。"""
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def prepare(lock: dict) -> Path:
+    """先校验下载包再解包到仓库 tmp；坏包拒绝，不安装任何系统 LLVM 包。"""
+    if platform.system() != "Linux" or platform.machine() != "x86_64":
+        raise RuntimeError("当前固定 SDK 仅支持 Linux/x86_64 宿主；ARM64 SDK 后续独立验收")
+    WORK.mkdir(parents=True, exist_ok=True)
+    package = WORK.parent / lock["package"]
+    if not package.exists():
+        temporary = package.with_suffix(".download")
+        with urllib.request.urlopen(lock["url"], timeout=60) as response, temporary.open("wb") as output:
+            while chunk := response.read(1024 * 1024):
+                output.write(chunk)
+        if digest(temporary) != lock["sha256"]:
+            temporary.unlink()
+            raise RuntimeError("LLVM SDK 下载 SHA-256 不符")
+        temporary.replace(package)
+    if digest(package) != lock["sha256"]:
+        raise RuntimeError("LLVM SDK 缓存包 SHA-256 不符，请移除坏包后重试")
+    prefix = WORK / "linux-x64-capi"
+    # 只展开 C API/配置头、实际静态组件和许可，避免在 DrvFS 写入上万个无用 C++ 头。
+    # 每次仍从校验包重新读取所需字节，不能把解包目录当作可信输入。
+    libraries = {f"{lock['prefix']}/lib/lib{name}.a" for name in lock["static_components"]}
+    process = subprocess.Popen(["/usr/bin/dpkg-deb", "--fsys-tarfile", str(package)],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    with process.stdout, tarfile.open(fileobj=process.stdout, mode="r|") as archive:
+        for member in archive:
+            name = member.name.removeprefix("./")
+            relative = None
+            if name in libraries:
+                relative = Path("lib") / Path(name).name
+            elif name.startswith("usr/include/llvm-c-21/llvm-c/"):
+                relative = Path("include/llvm-c") / name.removeprefix("usr/include/llvm-c-21/llvm-c/")
+            elif name.startswith("usr/include/llvm-21/llvm/Config/"):
+                relative = Path("include/llvm/Config") / name.removeprefix("usr/include/llvm-21/llvm/Config/")
+            elif name == "usr/share/doc/llvm-21-dev/copyright":
+                relative = Path("share/LICENSE")
+            if relative is None or not member.isfile():
+                continue
+            if ".." in relative.parts:
+                process.kill()
+                raise RuntimeError("LLVM SDK 包含非法文件路径")
+            target = prefix / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.extractfile(member) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+    error = process.stderr.read()
+    process.stderr.close()
+    if process.wait():
+        raise RuntimeError(error.decode(errors="replace"))
+    for name in lock["static_components"]:
+        library = prefix / "lib" / f"lib{name}.a"
+        if not library.is_file():
+            raise RuntimeError(f"固定 SDK 缺少静态组件：{name}")
+    return prefix
+
+
+def build(lock: dict, prefix: Path) -> dict:
+    """用普通 C 编译器构建桥归档，返回静态 LLVM 链接参数与可追踪身份。"""
+    output = WORK / "bridge"
+    output.mkdir(exist_ok=True)
+    source = ROOT / "compiler/llvm/bridge.c"
+    obj, archive = output / "bridge.o", output / "libyh_llvm.a"
+    subprocess.run(["/usr/bin/gcc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                    "-I" + str(prefix / "include"), "-c", str(source), "-o", str(obj)], check=True)
+    subprocess.run(["/usr/bin/ar", "rcsD", str(archive), str(obj)], check=True)
+    libraries = [str(prefix / "lib" / f"lib{name}.a") for name in lock["static_components"]]
+    flags = [str(archive), "-Wl,--start-group", *libraries, "-Wl,--end-group",
+             "-static-libstdc++", "-static-libgcc", *lock["system_libraries"]]
+    config = {"llvm_version": lock["llvm_version"], "sdk_sha256": lock["sha256"],
+              "bridge_abi": lock["bridge_abi"], "bridge_source_sha256": digest(source),
+              "bridge_sha256": digest(archive), "license": str(prefix / "share/LICENSE"),
+              "prefix": str(prefix), "archive": str(archive), "link_flags": flags}
+    (output / "config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return config
+
+
+def link(config: dict, objects: list[str], output: Path) -> None:
+    """以 GNU 链接器静态链接桥；归档以匿名内存 fd 传入，避免 WSL/DrvFS 逐成员 RPC。
+
+    每个 fd 保存固定 SDK 归档的原始字节，不改变符号或链接顺序。所有持久文件仍在 tmp，
+    内存 fd 在成功/失败后统一关闭；不要求 LLVM 链接工具或系统 LLVM 安装。
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.ExitStack() as resources:
+        flags, descriptors = [], []
+        for flag in config["link_flags"]:
+            if flag.endswith(".a"):
+                fd = os.memfd_create("yh-llvm-static", flags=0)
+                resources.callback(os.close, fd)
+                with open(flag, "rb") as source, os.fdopen(fd, "wb", closefd=False) as memory:
+                    shutil.copyfileobj(source, memory, length=1024 * 1024)
+                descriptors.append(fd)
+                flags.append(f"/proc/self/fd/{fd}")
+            else:
+                flags.append(flag)
+        output_fd = os.memfd_create("yh-llvm-executable", flags=0)
+        resources.callback(os.close, output_fd)
+        descriptors.append(output_fd)
+        result = subprocess.run(["/usr/bin/g++", *objects, "-o", f"/proc/self/fd/{output_fd}", *flags],
+                                pass_fds=descriptors, capture_output=True, text=True, timeout=120)
+        if result.returncode:
+            raise RuntimeError(result.stderr)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=output.parent, prefix=f".{output.name}.",
+                                             delete=False) as target:
+                temporary = Path(target.name)
+                with os.fdopen(output_fd, "rb", closefd=False) as executable:
+                    executable.seek(0)
+                    shutil.copyfileobj(executable, target, length=1024 * 1024)
+            temporary.chmod(0o755)
+            temporary.replace(output)
+        finally:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+
+
+def main() -> int:
+    """准备/构建私有 SDK，或静态链接调用方对象；以 JSON 返回精确身份与输入。"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=("prepare", "build", "link"))
+    parser.add_argument("--object", action="append", default=[], help="链接调用方对象，可重复")
+    parser.add_argument("--output", type=Path, help="静态宿主输出路径")
+    args = parser.parse_args()
+    lock = json.loads((ROOT / "vendor/llvm/sdk.lock.json").read_text(encoding="utf-8"))
+    prefix = prepare(lock)
+    result = build(lock, prefix) if args.command != "prepare" else {"prefix": str(prefix)}
+    if args.command == "link":
+        if not args.object or not args.output:
+            parser.error("link 需要 --object 和 --output")
+        link(result, args.object, args.output)
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (RuntimeError, subprocess.CalledProcessError) as error:
+        print(f"LLVM SDK：{error}", file=sys.stderr)
+        raise SystemExit(1)
