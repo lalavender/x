@@ -181,10 +181,10 @@ LL3 与 LL7 只使用已锁定条目。
 **验证：**`python3 tests/yh-run/check.py --compiler ./yh --filter llvm- --workdir tmp/llvm-migration/semantics`；
 每个探针有已定义期望或明确的非生产观察状态，所有发现的 bug 单独通过完整门。
 
-2026-10-14 已关闭两个独立切片：SEM-01 NaN 比较、SEM-03 bool 字节与 CFG 回归。
-后者 make test / make selfhost-native 全绿（302/302、24 个固定点产物、71 文件自解析、
-项目 95/95），候选项目探针实际 SSA 发射 8/2 个函数。SEM-02 浮点整数转换和
-SEM-04 定宽运算结果扩大转换仍未关闭；LL1 整体不标为完成。
+2026-10-14 已关闭 SEM-01 NaN 比较、SEM-03 bool 字节与 CFG 回归、SEM-02 浮点整数转换。
+当前 make test / make selfhost-native 全绿（303/303、24 个固定点产物、71 文件自解析、
+项目 95/95）；bool/CFG 候选项目探针实际 SSA 发射 8/2 个函数，浮点仍走旧后端。
+SEM-04 定宽运算结果扩大转换、SEM-05 常量一元结果类型及其余探针仍未关闭；LL1 整体不标为完成。
 
 ## LL2：受检输入、目标模型与阶段边界（LLVM-02、04、06、08、14、16）
 

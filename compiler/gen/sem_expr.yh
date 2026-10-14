@@ -28,16 +28,21 @@ pub fn sem_fold_norm(tid int, value i64) i64 {
     return raw.to_type(i64);
 }
 
+// sem_fold_fp_to_int：按目标符号性向零转换到完整 64 位值域，再按源级目标宽度截断。
+// 常量折叠和 typed CT 共用，避免无符号高位先经过 i64 饱和而丢失；NaN/越界沿用宿主饱和规则。
+pub fn sem_fold_fp_to_int(tid int, value f64) i64 {
+    if (ty_is_signed(tid) != 0) { return sem_fold_norm(tid, value.to_type(i64)); }
+    return sem_fold_norm(tid, value.to_type(u64).to_type(i64));
+}
+
 // sem_fold_float_convert：常量浮点转换（整数↔浮点、浮点↔浮点），结果写位模式。
-// ponytail: 无符号整数目标按有符号截断，避免生成冻结子集之外的 fcvtzu；
-// 需要超出 i64 范围的 u64 浮点常量时再扩汇编器子集。
 fn sem_fold_float_convert(src_tid int, dst_tid int, bits i64) i64 {
     let src_fp int = ty_is_float(src_tid);
     let dst_fp int = ty_is_float(dst_tid);
     if (src_fp != 0) {
         let source f64 = fp64_from_bits(bits);
         if (dst_fp != 0) { return fp64_norm_bits(dst_tid, source); }
-        return sem_fold_norm(dst_tid, source.to_type(i64));
+        return sem_fold_fp_to_int(dst_tid, source);
     }
     if (dst_fp == 0) { return bits; }
     let widened f64 = 0.0;
@@ -1011,30 +1016,13 @@ pub fn sem_cast(operand *Res, tid int) int {
         } else if (to_fp == 0 && from_fp != 0) {
             let dst_signed int = ty_is_signed(tid);
             if (em_fp_to_int(operand.type_id, dst_signed) != 0) { return -1; }
+            if (em_normalize_int(tid) != 0) { return -1; }
         } else if (g_state.t_types[operand.type_id].size != g_state.t_types[tid].size
                    || ty_is_signed(operand.type_id) != ty_is_signed(tid)) {
             // 整数 → 整数：x0 中按源类型已扩展，需按目标宽度/符号性重新扩展。
             // 例如 i64 → int 必须截断到低 32 位并符号扩展，否则比较/运算会用
             // 到高位的残留值（曾导致 i64 的 int 视图比较结果错误）。
-            let tsz int = g_state.t_types[tid].size;
-            if (ty_is_signed(tid) != 0) {
-                if (tsz == 4) {
-                    if (em_ins("sxtw\tx0, w0") != 0) { return -1; }
-                } else if (tsz == 2) {
-                    if (em_ins("sxth\tx0, w0") != 0) { return -1; }
-                } else if (tsz == 1) {
-                    if (em_ins("sxtb\tx0, w0") != 0) { return -1; }
-                }
-            } else {
-                if (tsz == 4) {
-                    // 零扩展：写 w0 即清零高 32 位
-                    if (em_ins("mov\tw0, w0") != 0) { return -1; }
-                } else if (tsz == 2) {
-                    if (em_ins("uxth\tx0, w0") != 0) { return -1; }
-                } else if (tsz == 1) {
-                    if (em_ins("uxtb\tx0, w0") != 0) { return -1; }
-                }
-            }
+            if (em_normalize_int(tid) != 0) { return -1; }
         }
         // 其余整数→整数（更宽或同宽同符号）已在 x0 中正确扩展，无需发码。
     }

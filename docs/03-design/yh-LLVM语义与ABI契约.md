@@ -20,6 +20,24 @@ nnan/fast-math。依据：[LLVM fcmp](https://llvm.org/docs/LangRef.html#fcmp-in
 证据：tests/yh-run/run/llvm-float-nan-comparisons.yh，覆盖常量折叠、typed CT、
 动态 f32/f64、左右 NaN、正常有序比较。LLVM 路径验收仍归 LL6。
 
+## 浮点转整数（LLVM-SEM-02）
+
+按目标符号性先向零转换到 i64/u64，在该 64 位值域饱和，然后按目标源类型保留
+低 N 位并恢复符号性。NaN 得零；有符号正/负越界得到 i64 最大/最小值；无符号
+负值得零、正越界得到 u64 最大值。因此 u8(300.0) 得 44，i8(130.0) 得 -126，
+u64(2^63) 保留高位。bool 遵循无符号字节转换，2.0 转 bool 得 2，条件另外取真。
+
+原常量折叠和 typed CT 一律先转 i64，造成 u64 高位饱和及负数错误回绕；现共用
+sem_fold_fp_to_int。动态路径原先漏掉窄整数规范化，现复用整数转换的大小/符号扩展。
+规则由现有动态 64 位转换和目标宽度定义导出，并以三条执行路径校验；不新增运行期错误。
+
+LLVM 必须使用 llvm.fptosi.sat.i64.f32/f64 或 llvm.fptoui.sat.i64.f32/f64，
+再 trunc 到目标源宽度；不能直接用窄目标饱和，也不能使用越界产生 poison 的普通
+fptosi/fptoui。依据：[LLVM 饱和转换](https://llvm.org/docs/LangRef.html#saturating-floating-point-to-integer-conversions)。
+证据：llvm-float-integer-casts.yh 的高位、负数、窄化、NaN、无穷、f32 与 bool 探针。
+长十进制字面量目前由前端逐位 f64 累积解析；本探针用精确整数转浮点构造边界，
+LLVM 迁移保留前端给定的位型，不顺带改写十进制解析算法。
+
 ## bool 字节值与条件（LLVM-SEM-03）
 
 现行源级 bool 为一字节无符号标量。显式整数转换保留低 8 位：2 转 bool 得 2，
