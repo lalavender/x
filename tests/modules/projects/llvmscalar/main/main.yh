@@ -1,0 +1,385 @@
+module main;
+import backend;
+import gen;
+import ir;
+
+// ScalarCase：手算的动态调用输入/结果；expected 不从 LLVM 发射实现推导。
+struct ScalarCase {
+    symbol int;
+    a i64;
+    b i64;
+    expected i64;
+    count int;
+}
+
+// init_module：建立真实目标、来源和完整首片标量表，各类型编号与 IR_TY 编码相同。
+fn init_module(unit *ir.IRModule, target *gen.TargetInfo) int {
+    let module_target ir.IRModuleTarget;
+    module_target.triple = target.triple; module_target.data_layout = target.data_layout;
+    module_target.abi = target.abi; module_target.pointer_bits = target.pointer_bits;
+    module_target.little_endian = target.little_endian; module_target.layout_version = target.layout_version;
+    if (ir.ir_module_init(unit, &module_target) != 0) { return -1; }
+    let text *char = "fixture\ncase\n";
+    if (ir.ir_module_add_source(unit, "fixture\"\\测试.yh", text.to_type(*u8), 13) != 0) { return -1; }
+    let i int = 0;
+    for i <= ir.IR_TY_U64 {
+        let scalar ir.IRModuleType;
+        scalar.kind = i; scalar.elem = -1;
+        if (i == ir.IR_TY_VOID) { scalar.bits = 0; scalar.size = 0; scalar.align = 1; }
+        else {
+            let bits int = 8;
+            if (i == ir.IR_TY_I16 || i == ir.IR_TY_U16) { bits = 16; }
+            if (i == ir.IR_TY_I32 || i == ir.IR_TY_U32) { bits = 32; }
+            if (i == ir.IR_TY_I64 || i == ir.IR_TY_U64) { bits = 64; }
+            scalar.bits = bits; scalar.size = bits / 8; scalar.align = bits / 8;
+        }
+        if (ir.ir_module_add_type(unit, "scalar", &scalar, 0, 0) != i) { return -1; }
+        i += 1;
+    }
+    return 0;
+}
+
+// local_types：为函数复制模块标量描述，映射明确保持 kind/bits/模块身份一致。
+fn local_types(unit *ir.IRModule, types *ir.IRType, mapping *int) void {
+    let i int = 0;
+    for i < 10 {
+        types[i].kind = unit.types[i].kind; types[i].bits = unit.types[i].bits;
+        types[i].elem = -1; mapping[i] = i; i += 1;
+    }
+}
+
+// instruction：初始化未使用操作数为 -1，防止依赖隐式零值误构造 SSA 编码。
+fn instruction(inst *ir.IRInst, op int, result int, type_id int, a int, b int, imm i64, aux int) void {
+    inst.op = op; inst.result_id = result; inst.result_type = type_id;
+    inst.a = a; inst.b = b; inst.imm = imm; inst.aux = aux;
+}
+
+// block：构造一个显式 CFG 块；所有终结字段均由调用者给出。
+fn block(out *ir.IRBlock, id int, first int, count int, term int, value int, a int, b int) void {
+    out.id = id; out.first_inst = first; out.inst_count = count; out.term = term;
+    out.term_value = value; out.succ0 = a; out.succ1 = b;
+}
+
+// symbol：为真实模块增加逻辑函数签名，不借用旧机器符号或目标汇编前缀。
+fn symbol(unit *ir.IRModule, name *char, ret int, params *int, count int, defined int) int {
+    let item ir.IRModuleSymbol;
+    item.kind = ir.IR_MODULE_SYMBOL_FUNCTION; item.type_id = ret;
+    item.linkage = ir.IR_MODULE_LINK_EXTERNAL; item.defined = defined;
+    item.source = 0; item.offset = 8;
+    return ir.ir_module_add_symbol(unit, name, &item, params, count);
+}
+
+// finish_function：模块增建深拷贝函数、类型和来源，调用者栈上输入可以立即消失。
+fn finish_function(unit *ir.IRModule, name int, f *ir.IRFunction) int {
+    let types [10]ir.IRType; let mapping [10]int;
+    local_types(unit, &types[0], &mapping[0]);
+    f.types = &types[0]; f.type_count = 10; f.target_id = unit.target.key;
+    return ir.ir_module_add_function(unit, name, f, &mapping[0], 0);
+}
+
+// binary：两参数动态算术/比较函数，optional_widen 用来检查计算后截断再扩大。
+fn binary(unit *ir.IRModule, name *char, type_id int, op int, optional_widen int) int {
+    let params [2]int; params[0] = type_id; params[1] = type_id;
+    let result_type int = type_id;
+    if (op == ir.IR_OP_EQ || op >= ir.IR_OP_NE && op <= ir.IR_OP_GE) { result_type = ir.IR_TY_BOOL; }
+    let ret int = optional_widen >= 0 ? optional_widen : result_type;
+    let id int = symbol(unit, name, ret, &params[0], 2, 1);
+    if (id < 0) { return -1; }
+    let insts [4]ir.IRInst; let blocks [1]ir.IRBlock;
+    instruction(&insts[0], ir.IR_OP_PARAM, 0, type_id, -1, -1, 0, -1);
+    instruction(&insts[1], ir.IR_OP_PARAM, 1, type_id, -1, -1, 1, -1);
+    instruction(&insts[2], op, 2, result_type, 0, 1, 0, -1);
+    let count int = 3;
+    if (optional_widen >= 0) { instruction(&insts[3], ir.IR_OP_CAST, 3, ret, 2, -1, 0, -1); count = 4; }
+    block(&blocks[0], 0, 0, count, ir.IR_TERM_RET, count - 1, -1, -1);
+    let f ir.IRFunction; f.ret_type = ret; f.insts = &insts[0]; f.inst_count = count;
+    f.blocks = &blocks[0]; f.block_count = 1; f.value_count = count;
+    if (finish_function(unit, id, &f) < 0) { return -1; }
+    return id;
+}
+
+// cast_chain：独立测试截断、扩大、改符号性及源 bool 非规范字节的传递。
+fn cast_chain(unit *ir.IRModule, name *char, from int, middle int, to int) int {
+    let params [1]int; params[0] = from;
+    let id int = symbol(unit, name, to, &params[0], 1, 1);
+    if (id < 0) { return -1; }
+    let insts [3]ir.IRInst; let blocks [1]ir.IRBlock;
+    instruction(&insts[0], ir.IR_OP_PARAM, 0, from, -1, -1, 0, -1);
+    instruction(&insts[1], ir.IR_OP_CAST, 1, middle, 0, -1, 0, -1);
+    instruction(&insts[2], ir.IR_OP_CAST, 2, to, 1, -1, 0, -1);
+    block(&blocks[0], 0, 0, 3, ir.IR_TERM_RET, 2, -1, -1);
+    let f ir.IRFunction; f.ret_type = to; f.insts = &insts[0]; f.inst_count = 3;
+    f.blocks = &blocks[0]; f.block_count = 1; f.value_count = 3;
+    if (finish_function(unit, id, &f) < 0) { return -1; }
+    return id;
+}
+
+// choice：bool 入参保留 2/254 字节，分支按非零；合流 phi 也必须保持字节 254。
+fn choice(unit *ir.IRModule) int {
+    let params [1]int; params[0] = ir.IR_TY_BOOL;
+    let id int = symbol(unit, "choose.byte", ir.IR_TY_BOOL, &params[0], 1, 1);
+    let insts [4]ir.IRInst; let blocks [4]ir.IRBlock;
+    instruction(&insts[0], ir.IR_OP_PARAM, 0, ir.IR_TY_BOOL, -1, -1, 0, -1);
+    instruction(&insts[1], ir.IR_OP_CONST, 1, ir.IR_TY_BOOL, -1, -1, 254, -1);
+    instruction(&insts[2], ir.IR_OP_CONST, 2, ir.IR_TY_BOOL, -1, -1, 7, -1);
+    instruction(&insts[3], ir.IR_OP_PHI, 3, ir.IR_TY_BOOL, -1, -1, 0, 0);
+    block(&blocks[0], 0, 0, 1, ir.IR_TERM_COND_BR, 0, 1, 2);
+    block(&blocks[1], 1, 1, 1, ir.IR_TERM_BR, -1, 3, -1);
+    block(&blocks[2], 2, 2, 1, ir.IR_TERM_BR, -1, 3, -1);
+    block(&blocks[3], 3, 3, 1, ir.IR_TERM_RET, 3, -1, -1);
+    let phis [1]ir.IRPhi; let inputs [2]ir.IRPhiInput;
+    phis[0].first = 0; phis[0].count = 2;
+    inputs[0].pred = 1; inputs[0].value = 1; inputs[1].pred = 2; inputs[1].value = 2;
+    let f ir.IRFunction; f.ret_type = ir.IR_TY_BOOL; f.insts = &insts[0]; f.inst_count = 4;
+    f.blocks = &blocks[0]; f.block_count = 4; f.value_count = 4;
+    f.phis = &phis[0]; f.phi_count = 1; f.phi_inputs = &inputs[0]; f.phi_input_count = 2;
+    if (finish_function(unit, id, &f) < 0) { return -1; }
+    return id;
+}
+
+// loop：真实循环 phi 有前向编号的回边输入，验证 CFG 与 SSA 文本发射而不是常量替代。
+fn loop(unit *ir.IRModule) int {
+    let params [1]int; params[0] = ir.IR_TY_I32;
+    let id int = symbol(unit, "loop.phi", ir.IR_TY_I32, &params[0], 1, 1);
+    let insts [6]ir.IRInst; let blocks [4]ir.IRBlock;
+    instruction(&insts[0], ir.IR_OP_PARAM, 0, ir.IR_TY_I32, -1, -1, 0, -1);
+    instruction(&insts[1], ir.IR_OP_CONST, 1, ir.IR_TY_I32, -1, -1, 0, -1);
+    instruction(&insts[2], ir.IR_OP_CONST, 2, ir.IR_TY_I32, -1, -1, 1, -1);
+    instruction(&insts[3], ir.IR_OP_PHI, 3, ir.IR_TY_I32, -1, -1, 0, 0);
+    instruction(&insts[4], ir.IR_OP_LT, 4, ir.IR_TY_BOOL, 3, 0, 0, -1);
+    instruction(&insts[5], ir.IR_OP_ADD, 5, ir.IR_TY_I32, 3, 2, 0, -1);
+    block(&blocks[0], 0, 0, 3, ir.IR_TERM_BR, -1, 1, -1);
+    block(&blocks[1], 1, 3, 2, ir.IR_TERM_COND_BR, 4, 2, 3);
+    block(&blocks[2], 2, 5, 1, ir.IR_TERM_BR, -1, 1, -1);
+    block(&blocks[3], 3, 6, 0, ir.IR_TERM_RET, 3, -1, -1);
+    let phis [1]ir.IRPhi; let inputs [2]ir.IRPhiInput;
+    phis[0].first = 0; phis[0].count = 2;
+    inputs[0].pred = 0; inputs[0].value = 1; inputs[1].pred = 2; inputs[1].value = 5;
+    let f ir.IRFunction; f.ret_type = ir.IR_TY_I32; f.insts = &insts[0]; f.inst_count = 6;
+    f.blocks = &blocks[0]; f.block_count = 4; f.value_count = 6;
+    f.phis = &phis[0]; f.phi_count = 1; f.phi_inputs = &inputs[0]; f.phi_input_count = 2;
+    if (finish_function(unit, id, &f) < 0) { return -1; }
+    return id;
+}
+
+// empty：定义真正零指令的 void 函数，验证没有结果 SSA 值的固定调用与返回。
+fn empty(unit *ir.IRModule) int {
+    let id int = symbol(unit, "empty.void", ir.IR_TY_VOID, 0, 0, 1);
+    let blocks [1]ir.IRBlock;
+    block(&blocks[0], 0, 0, 0, ir.IR_TERM_RET, -1, -1, -1);
+    let f ir.IRFunction; f.ret_type = ir.IR_TY_VOID; f.blocks = &blocks[0]; f.block_count = 1;
+    if (finish_function(unit, id, &f) < 0) { return -1; }
+    return id;
+}
+
+// add_case：追加字面量预期的运行案例；count 区分单/双参数固定调用。
+fn add_case(cases *ScalarCase, count *int, id int, a i64, b i64, expected i64, args int) void {
+    cases[*count].symbol = id; cases[*count].a = a; cases[*count].b = b;
+    cases[*count].expected = expected; cases[*count].count = args; *count += 1;
+}
+
+// checked_main：每例发射 CONST→固定调用→比较→累计失败数；程序 main 不依赖 libc/helper。
+fn checked_main(unit *ir.IRModule, cases *ScalarCase, count int) int {
+    let id int = symbol(unit, "main", ir.IR_TY_I32, 0, 0, 1);
+    let insts [1024]ir.IRInst; let calls [128]ir.IRCall; let args [256]ir.IRCallArg;
+    let names [4096]u8; let blocks [1]ir.IRBlock;
+    let n int = 1; let used_args int = 0; let used_names int = 0; let accumulator int = 0;
+    instruction(&insts[0], ir.IR_OP_CONST, 0, ir.IR_TY_I32, -1, -1, 0, -1);
+    let i int = 0;
+    for i < count {
+        let item ScalarCase = cases[i];
+        if (item.symbol < 0) { return -1; }
+        let called ir.IRModuleSymbol = unit.symbols[item.symbol];
+        calls[i].arg_first = used_args; calls[i].arg_count = item.count;
+        calls[i].symbol_first = used_names;
+        let j int = 0;
+        for called.name[j] != 0 { names[used_names] = called.name[j].to_type(u8); used_names += 1; j += 1; }
+        calls[i].symbol_len = j;
+        j = 0;
+        for j < item.count {
+            instruction(&insts[n], ir.IR_OP_CONST, n, called.params[j], -1, -1, j == 0 ? item.a : item.b, -1);
+            args[used_args].type_id = called.params[j]; args[used_args].value = n;
+            used_args += 1; n += 1; j += 1;
+        }
+        let actual int = n;
+        instruction(&insts[n], ir.IR_OP_CALL, called.type_id == ir.IR_TY_VOID ? -1 : n,
+            called.type_id == ir.IR_TY_VOID ? -1 : called.type_id, -1, -1, 0, i); n += 1;
+        if (called.type_id == ir.IR_TY_VOID) { i += 1; continue; }
+        let expected int = n;
+        instruction(&insts[n], ir.IR_OP_CONST, n, called.type_id, -1, -1, item.expected, -1); n += 1;
+        let unequal int = n;
+        instruction(&insts[n], ir.IR_OP_NE, n, ir.IR_TY_BOOL, actual, expected, 0, -1); n += 1;
+        let failure int = n;
+        instruction(&insts[n], ir.IR_OP_CAST, n, ir.IR_TY_I32, unequal, -1, 0, -1); n += 1;
+        instruction(&insts[n], ir.IR_OP_ADD, n, ir.IR_TY_I32, accumulator, failure, 0, -1);
+        accumulator = n; n += 1; i += 1;
+    }
+    block(&blocks[0], 0, 0, n, ir.IR_TERM_RET, accumulator, -1, -1);
+    let f ir.IRFunction; f.ret_type = ir.IR_TY_I32; f.insts = &insts[0]; f.inst_count = n;
+    f.blocks = &blocks[0]; f.block_count = 1; f.value_count = n;
+    f.calls = &calls[0]; f.call_count = count; f.call_args = &args[0]; f.call_arg_count = used_args;
+    f.call_symbols = &names[0]; f.call_symbol_size = used_names;
+    return finish_function(unit, id, &f);
+}
+
+// main：真实模块模型覆盖移位/除模/截断/bool/分支/循环/调用/全局，输出只包含 LLVM 文本。
+fn main() int {
+    let target gen.TargetInfo;
+    if (gen.target_resolve("x86_64-unknown-linux-gnu", &target) != 0) { return 1; }
+    let unit ir.IRModule;
+    if (init_module(&unit, &target) != 0) { return 2; }
+    let cases [128]ScalarCase; let count int = 0;
+    let i int = 0;
+    let add int = binary(&unit, "add.i32", ir.IR_TY_I32, ir.IR_OP_ADD, ir.IR_TY_I64);
+    add_case(&cases[0], &count, add, 2147483647, 1, -2147483648, 2);
+    let shl int = binary(&unit, "shift.i32", ir.IR_TY_I32, ir.IR_OP_SHL, -1);
+    add_case(&cases[0], &count, shl, 1, 32, 0, 2);
+    add_case(&cases[0], &count, shl, 1, 64, 1, 2);
+    add_case(&cases[0], &count, shl, 1, -1, 0, 2);
+    let shr int = binary(&unit, "right.i32", ir.IR_TY_I32, ir.IR_OP_SHR, -1);
+    add_case(&cases[0], &count, shr, -2, 32, -1, 2);
+    add_case(&cases[0], &count, shr, -2, 65, -1, 2);
+    let ushr int = binary(&unit, "right.u32", ir.IR_TY_U32, ir.IR_OP_SHR, -1);
+    add_case(&cases[0], &count, ushr, -1, 32, 0, 2);
+    add_case(&cases[0], &count, ushr, -1, 1, 2147483647, 2);
+    let div int = binary(&unit, "divide.i64", ir.IR_TY_I64, ir.IR_OP_DIV, -1);
+    let rem int = binary(&unit, "remainder.i64", ir.IR_TY_I64, ir.IR_OP_REM, -1);
+    // 从运行期位型构造 min64，避免启动种子的长负数字面量折叠影响手算预期。
+    let high u64 = 1; high = high << 63;
+    let minimum i64 = high.to_type(i64);
+    add_case(&cases[0], &count, div, minimum, -1, minimum, 2);
+    add_case(&cases[0], &count, rem, minimum, -1, 0, 2);
+    add_case(&cases[0], &count, div, 87, 0, 0, 2);
+    add_case(&cases[0], &count, rem, -87, 0, -87, 2);
+    add_case(&cases[0], &count, div, -17, 5, -3, 2);
+    add_case(&cases[0], &count, rem, -17, 5, -2, 2);
+    let udiv int = binary(&unit, "divide.u64", ir.IR_TY_U64, ir.IR_OP_DIV, -1);
+    let urem int = binary(&unit, "remainder.u64", ir.IR_TY_U64, ir.IR_OP_REM, -1);
+    add_case(&cases[0], &count, udiv, -1, 2, 9223372036854775807, 2);
+    add_case(&cases[0], &count, urem, -1, 0, -1, 2);
+    add_case(&cases[0], &count, udiv, -1, 0, 0, 2);
+    let div32 int = binary(&unit, "divide.i32", ir.IR_TY_I32, ir.IR_OP_DIV, ir.IR_TY_I64);
+    add_case(&cases[0], &count, div32, -2147483648, -1, -2147483648, 2);
+    let shift64 int = binary(&unit, "shift.i64", ir.IR_TY_I64, ir.IR_OP_SHL, -1);
+    add_case(&cases[0], &count, shift64, 1, 63, minimum, 2);
+    add_case(&cases[0], &count, shift64, 1, 64, 1, 2);
+    let right64 int = binary(&unit, "right.u64", ir.IR_TY_U64, ir.IR_OP_SHR, -1);
+    add_case(&cases[0], &count, right64, -1, -1, 1, 2);
+    let narrow int = binary(&unit, "narrow.i8", ir.IR_TY_I8, ir.IR_OP_SUB, ir.IR_TY_I64);
+    add_case(&cases[0], &count, narrow, 0, -128, -128, 2);
+    let boolcast int = cast_chain(&unit, "bool.cast", ir.IR_TY_I64, ir.IR_TY_BOOL, ir.IR_TY_I32);
+    add_case(&cases[0], &count, boolcast, 2, 0, 2, 1);
+    add_case(&cases[0], &count, boolcast, -2, 0, 254, 1);
+    let unsignedcast int = cast_chain(&unit, "unsigned.cast", ir.IR_TY_I32, ir.IR_TY_U32, ir.IR_TY_U64);
+    add_case(&cases[0], &count, unsignedcast, -1, 0, 4294967295, 1);
+    let cast16 int = cast_chain(&unit, "narrow.i16", ir.IR_TY_I64, ir.IR_TY_I16, ir.IR_TY_I64);
+    add_case(&cases[0], &count, cast16, 32768, 0, -32768, 1);
+    let cast8 int = cast_chain(&unit, "narrow.u8", ir.IR_TY_I64, ir.IR_TY_U8, ir.IR_TY_U64);
+    add_case(&cases[0], &count, cast8, -1, 0, 255, 1);
+    let choose int = choice(&unit);
+    add_case(&cases[0], &count, choose, 2, 0, 254, 1);
+    add_case(&cases[0], &count, choose, 0, 0, 7, 1);
+    let looping int = loop(&unit);
+    add_case(&cases[0], &count, looping, 12, 0, 12, 1);
+    add_case(&cases[0], &count, looping, -1, 0, 0, 1);
+    if (looping < 0) { return 14; }
+    unit.symbols[looping].linkage = ir.IR_MODULE_LINK_PRIVATE;
+    let bool_eq int = binary(&unit, "eq.byte", ir.IR_TY_BOOL, ir.IR_OP_EQ, -1);
+    add_case(&cases[0], &count, bool_eq, 2, 1, 0, 2);
+    let voidcall int = empty(&unit);
+    add_case(&cases[0], &count, voidcall, 0, 0, 0, 0);
+    let op int = ir.IR_OP_EQ;
+    for op <= ir.IR_OP_GE {
+        if (op == ir.IR_OP_EQ || op >= ir.IR_OP_NE) {
+            let name [32]u8; let n int = gen.append_str(&name[0], 0, "comparison.");
+            n = gen.append_int(&name[0], n, op); name[n] = 0;
+            let compare int = binary(&unit, (&name[0]).to_type(*char), ir.IR_TY_U64, op, -1);
+            let expected i64 = 0;
+            if (op == ir.IR_OP_NE || op == ir.IR_OP_GT || op == ir.IR_OP_GE) { expected = 1; }
+            add_case(&cases[0], &count, compare, -1, 1, expected, 2);
+            n = gen.append_str(&name[0], 0, "signed.comparison.");
+            n = gen.append_int(&name[0], n, op); name[n] = 0;
+            compare = binary(&unit, (&name[0]).to_type(*char), ir.IR_TY_I64, op, -1);
+            expected = 0;
+            if (op == ir.IR_OP_NE || op == ir.IR_OP_LT || op == ir.IR_OP_LE) { expected = 1; }
+            add_case(&cases[0], &count, compare, -1, 1, expected, 2);
+        }
+        op += 1;
+    }
+    let mul int = binary(&unit, "multiply.u16", ir.IR_TY_U16, ir.IR_OP_MUL, -1);
+    add_case(&cases[0], &count, mul, 65535, 2, 65534, 2);
+    let band int = binary(&unit, "band.i32", ir.IR_TY_I32, ir.IR_OP_BAND, -1);
+    let bor int = binary(&unit, "bor.i32", ir.IR_TY_I32, ir.IR_OP_BOR, -1);
+    let bxor int = binary(&unit, "bxor.i32", ir.IR_TY_I32, ir.IR_OP_BXOR, -1);
+    add_case(&cases[0], &count, band, 10, 12, 8, 2);
+    add_case(&cases[0], &count, bor, 10, 12, 14, 2);
+    add_case(&cases[0], &count, bxor, 10, 12, 6, 2);
+    if (checked_main(&unit, &cases[0], count) < 0) { return 3; }
+    let future int = symbol(&unit, "7unused.name$", ir.IR_TY_I32, 0, 0, 0);
+    if (future < 0) { return 4; }
+    let data ir.IRModuleSymbol;
+    data.kind = ir.IR_MODULE_SYMBOL_GLOBAL; data.type_id = ir.IR_TY_I32;
+    data.linkage = ir.IR_MODULE_LINK_PRIVATE; data.defined = 1; data.source = 0; data.offset = 8;
+    let global int = ir.ir_module_add_symbol(&unit, "7constant.data$", &data, 0, 0);
+    let bytes [4]u8; bytes[0] = 42;
+    if (global < 0 || ir.ir_module_add_global(&unit, global, &bytes[0], 4, 4, 0, 0) < 0) { return 5; }
+    if (ir.ir_module_verify(&unit) != 0) { return 6; }
+    let out backend.LLVMOutput;
+    let mismatched gen.TargetInfo = target; mismatched.layout_version = 2;
+    if (backend.llvm_emit_module(&unit, &mismatched, &out) != -1 || out.text != 0) { return 7; }
+    mismatched = target; mismatched.pointer_bits = 32;
+    if (backend.llvm_emit_module(&unit, &mismatched, &out) != -1 || out.text != 0) { return 15; }
+    mismatched = target; mismatched.little_endian = 0;
+    if (backend.llvm_emit_module(&unit, &mismatched, &out) != -1 || out.text != 0) { return 16; }
+    mismatched = target; mismatched.arch = gen.TARGET_ARCH_ARM64;
+    if (backend.llvm_emit_module(&unit, &mismatched, &out) != -1 || out.text != 0) { return 17; }
+    mismatched = target; mismatched.abi = "aapcs64";
+    if (backend.llvm_emit_module(&unit, &mismatched, &out) != -1 || out.text != 0) { return 18; }
+    mismatched = target; mismatched.data_layout = "e-p:32:32";
+    if (backend.llvm_emit_module(&unit, &mismatched, &out) != -1 || out.text != 0) { return 19; }
+    if (gen.target_resolve("aarch64-unknown-linux-gnu", &mismatched) != 0
+        || backend.llvm_emit_module(&unit, &mismatched, &out) != -1 || out.text != 0) { return 20; }
+    if (backend.llvm_emit_module(&unit, &target, &out) != 0) { return 8; }
+    if (out.emitted != unit.function_count || out.map_count <= unit.function_count
+        || out.text == 0 || out.text[out.length] != 0) { return 9; }
+    i = 0;
+    for i < out.map_count {
+        if (out.maps[i].line < 1 || out.maps[i].end_line < out.maps[i].line
+            || out.maps[i].source != 0 || out.maps[i].offset < 0 || out.maps[i].offset > 13) { return 10; }
+        i += 1;
+    }
+    let original *u8 = out.text; let length int = out.length;
+    unit.symbols[future].abi = 1;
+    if (backend.llvm_emit_module(&unit, &target, &out) != -1 || out.text != original || out.length != length) { return 11; }
+    unit.symbols[future].abi = 0; unit.symbols[future].variadic = 1;
+    if (backend.llvm_emit_module(&unit, &target, &out) != -1 || out.text != original) { return 12; }
+    unit.symbols[future].variadic = 0;
+    let old_length int = out.length; let old_maps int = out.map_count;
+    if (backend.llvm_emit_module(&unit, &target, &out) != 0 || out.length != old_length || out.map_count != old_maps) { return 21; }
+    original = out.text;
+    let unsupported ir.IRModuleType;
+    unsupported.kind = ir.IR_TY_PTR; unsupported.bits = 64; unsupported.size = 8; unsupported.align = 8;
+    unsupported.elem = ir.IR_TY_I32;
+    let unsupported_id int = ir.ir_module_add_type(&unit, "unused.ptr", &unsupported, 0, 0);
+    unit.symbols[future].type_id = unsupported_id;
+    if (unsupported_id < 0 || ir.ir_module_verify(&unit) != 0
+        || backend.llvm_emit_module(&unit, &target, &out) != -1 || out.text != original) { return 22; }
+    unit.types[unsupported_id].kind = ir.IR_TY_F32; unit.types[unsupported_id].bits = 32;
+    unit.types[unsupported_id].size = 4; unit.types[unsupported_id].align = 4; unit.types[unsupported_id].elem = -1;
+    if (ir.ir_module_verify(&unit) != 0 || backend.llvm_emit_module(&unit, &target, &out) != -1 || out.text != original) { return 23; }
+    // stderr 只报告验证计数；stdout 仍是可直接解析的 LLVM 文本。
+    let summary [128]u8; let summary_length int = gen.append_str(&summary[0], 0, "LL3 fixture: functions=");
+    summary_length = gen.append_int(&summary[0], summary_length, out.emitted);
+    summary_length = gen.append_str(&summary[0], summary_length, " cases=");
+    summary_length = gen.append_int(&summary[0], summary_length, count);
+    summary_length = gen.append_str(&summary[0], summary_length, " maps=");
+    summary_length = gen.append_int(&summary[0], summary_length, out.map_count);
+    summary_length = gen.append_byte(&summary[0], summary_length, '\n');
+    gen.write_all(2, &summary[0], summary_length);
+    let result int = gen.write_all(1, out.text, out.length);
+    backend.llvm_output_release(&out);
+    backend.llvm_output_release(&out);
+    if (out.text != 0 || out.maps != 0 || out.length != 0 || out.map_count != 0) { return 13; }
+    ir.ir_module_release(&unit);
+    return result;
+}

@@ -2,6 +2,100 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-15 LLVM LL2：纯快照 lowering 打通，受检快照/模块 IR 一并提交
+
+- **范围**：关闭 LL2 的「受检前端 + 受检快照 + 模块 IR + 纯快照 lowering」四个切片，
+  并把上一轮记录的「工作区未提交、make 为红」状态结清。生产默认仍是旧 ARM64 发射，
+  LLVM 模式常驻、IRModule 序列化、R2b 契约对齐仍未完成，LL2 整体保持未关闭。
+- **新增 lowering**：`compiler/ast/checked_module_lower.yh` 的 `lower_module` 把
+  `CheckedModule` 降低为 `ir.IRModule`（0 成功 / 1 首片不支持并带来源 / -1 内部错误，
+  失败不发布候选且不改变出参）。首片覆盖顺序 `let`、简单与复合赋值、表达式语句（直接调用）、
+  `return`、`if/else`（含 else-if 链）、条件循环 `for cond {}`、`break`/`continue`、
+  短路 `&&`/`||`、一元 `!`/`-`、转换、算术/位/比较与直接调用。
+  循环沿用两趟协议（发现趟收集携带绑定与 break/continue 站点数，真实趟预留 phi 输入）。
+- **类型闭包拆分**：`CheckedStorage`/`CheckedString` 留在 `checked_module.yh`，
+  `CheckedFlow`/`CheckedLower` 放进新增的 `compiler/ast/checked_module_ctx.yh`——
+  模块按文件名字典序编译且要求类型先声明后使用，两个结构体之间不再互相引用
+  （lowering 的构造器指针由上下文显式传参）。
+- **根因修复（有复现）**：`checked_lower_binding` 原先按 `binding.sym_id` 回查快照符号表，
+  但 `gen/symbols.yh` 的 `scope_pop` 会截断参数/局部槽位，快照符号表天然不含这些行
+  （`AstBinding.sym_id` 按注释只是「解析时符号槽，仅作诊断，不作持久身份」）；
+  改为只使用绑定自己的快照字段后，`inc(x) { return x + 1; }` 这类最普通函数才能降低。
+  直接调用保留符号槽防护：被调目标必须仍解析到同名同型的函数符号，回收槽错配一律拒绝。
+- **测试夹具**：`tests/modules/projects/llvmlower/fixture.yh` 实现真实单文件前端
+  （读源→词法→文件头→顶层声明索引→两遍语义），在 AST 捕获开启状态下交出快照；
+  与 `cmd/driver.yh` 的 `run_file_check` 同序，差别只有「语义前就置 `c_ast_capture=1`」
+  「采用已索引文件形态」「路径同时进固定缓冲与名字池」三处，且都是让 arena 活到快照生成之后所必需。
+- **验收（全部在 WSL，`SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`）**：
+  `make` 退出 0；`make test` 退出 0（语法正例 78/78、反例 42/42，运行 307/307）；
+  `make selfhost-native` 退出 0（固定点 cc3→cc4 共 24 个产物一致、cc4 自解析 82 文件、
+  运行时/缓存/`check` 等专项门通过）；`build-check.py` **100/100**
+  （新增 `llvm-snapshot-lowering`）；`llvm-front-boundary.py`、`llvm-front-output.py`、
+  `llvm-checked.py`、`llvm-module.py`、`llvm-lower.py`、`llvm-semantics.py`、`llvm-ir.py`
+  全部退出 0。日志在 tmp/llvm-migration/ll2-full-*.log/.exit 与 ll2-gate-*.log/.exit。
+- **纯快照 lowering 观察值**：`scalar.yh` 得到
+  `lower-snapshot=ok functions=5 phis=2 calls=4`（编译期函数不计入；if/else 合流与循环携带各一个 phi）；
+  `pointer.yh`/`aggregate.yh` 返回 1，诊断带真实来源与被拒函数名
+  （`.../input/pointer.yh:5:9: LLVM lowering pointer_body: ...`）且出参保持零初始化。
+- **仍未验收**：LLVM 模式未常驻（`--backend/--target/-O0/-O2` 与 worker LLVM 分支未接入）、
+  `IR_MODULE_VERSION` 只是内存内版本、跨缓存身份键未落、首片之外的形态
+  （全局对象/聚合/指针/浮点/间接调用/变参/`switch`/`goto`/`for-in`）明确拒绝不做回退；
+  未滚种子，`bin/yh` 与 `bin/yh-linux-arm64` 保持原哈希。
+- 详见 [完成记录](01-finished/yh-LLVM-LL2受检快照与纯快照lowering-2026-10-15.md)。
+
+## 2026-10-14 LLVM LL2 首片：受检前端闸门、受检快照与模块 IR（工作区，未提交）
+
+- 新增 `compiler/gen/front_stage.yh`：`front_checked_begin/verify/end` 建立独立于 check 的
+  受检前端阶段，进入时拒绝已有旧输出或重复进入，退出前必须核对 text/body/data/bss 四缓冲为零，
+  失败保留禁发状态。`gen/state.yh` 增加 `c_front_checked`；`gen/buffer.yh` 的
+  em_/dat_/bss_ 写入与 `gen/emit_arm64.yh` 的体缓冲拷贝在该阶段整体静默；
+  `cmd/driver.yh` 的单文件 check 与 `cmd/module_worker.yh` 的模块 check 成对进出该阶段。
+- 新增 `compiler/ast/checked_module.yh` 与 `checked_module_verify.yh`：语义遍历结束后独立复制
+  AST、语句/表达式/边、绑定、声明、类型/字段/名称、签名、符号表与源码字节，原 ID 在快照内
+  继续指向同一行；原 arena 销毁后仍可校验，重复释放安全，非法捕获不留部分对象。
+  `cmd/module_worker.yh` 在 check 的语义结束处 capture→verify→release；`--stats` 新增
+  `legacy_bytes`（四个旧缓冲长度之和，见 `cmd/module_build.yh`）。
+- 新增 `compiler/ir/ssa_module_00_model.yh`、`ssa_module_10_build.yh`、`ssa_module_20_verify.yh`：
+  模块级逻辑符号、类型（结构/联合/数组/切片/函数签名）、全局初始化目录、来源表与位置，
+  全部深拷贝；`ir_module_init/add_source/add_type/add_symbol/add_global/add_function/release/verify`
+  从完整 triple 推导目标键并核对指针位宽、字节序与布局，拒绝坏来源、未知名字、
+  错 ABI/返回/参数与未闭合签名。
+- 门禁与 fixture：`tests/selfhost/llvm-front-output.py`（真实项目 check 断言全部 worker
+  `legacy_bytes=0`、污染拒绝、退出后旧路径恢复）、`llvm-checked.py`（销毁原 arena 后快照校验、
+  重复释放、非法捕获清理、旧汇编区间无关）、`llvm-module.py`（完整模型/深拷贝/目标/布局/
+  重定位/函数 verifier/重复释放），以及 `llvmfront`、`llvmchecked`、`llvmmodule` 三个项目 fixture；
+  `tests/modules/build-check.py` 增加 `llvm-front-zero-output`、`llvm-module-ownership`、
+  `llvm-checked-snapshot` 三个常规项目用例。
+- 命令与证据：`python3 tmp/llvm-migration/run-ll2-acceptance.py` 用 ll2-base.tar 加本片 16 个文件
+  与 3 个 fixture 冻结验收树（明确排除并行中的 LLVM emitter 与 checked lowering），树内先跑
+  `make test selfhost-native`，再依次跑 `llvm-front-boundary.py`、`llvm-front-output.py`、
+  `llvm-checked.py`、`llvm-module.py`，实际退出 0；日志 tmp/llvm-migration/ll2-owned-acceptance.log
+  与 .exit。
+- 观察到的计数（同上日志）：语法正例 78/78、反例 42/42；运行语料 run 168/168、fail 131/131、
+  pass 8/8、总计 307/307；模块固定点候选 cc3→cc4 共 24 个产物一致；cc4 自解析 78 个源文件 OK；
+  modules 18/18；project cases 99/99，其中 `llvm-target-identity`、`llvm-front-zero-output`、
+  `llvm-module-ownership`、`llvm-checked-snapshot` 四项 OK。受检前端 stats 三行记录
+  （main 与 gen 模块行、调度行）均为 `legacy_bytes=0`、`asm=0`、`ir_functions=0`
+  （tmp/llvm-migration/front-output/check-stats.log）。
+- 尚未关闭的边界：纯快照 lowering `compiler/ast/checked_module_lower.yh` 的语句/表达式降低
+  仍在实现，`llvmlower` fixture 的 `lower_fixture_capture` 仍是返回 -1 的桩、
+  `tests/selfhost/llvm-lower.py` 未通过：该门唯一一次已记录的运行停在构建期
+  （tmp/llvm-migration/checked-lower/build.log，23:25，`main/main.yh:11:26`
+  报「模块没有导出该名字」），此后未重跑；
+  当前工作区源码 make 为红，失败点随实现移动；本轮观察到的三次 make 均退出 2：
+  2026-10-14 23:31 报 `ast/checked_module_lower.yh:253:41 错误: 引用了未声明的名字`
+  （ll2-resume-make.log/.exit）、2026-10-15 00:28 报
+  `ast/checked_module.yh:61:48 错误: 未知类型（类型必须先定义）`、00:33 报
+  `ast/checked_module_ctx.yh:2:8 错误: 导入未使用`（后两次共用 ll2-lower-build.log/.exit，
+  每次重跑覆盖）。行号只对应当次日志，不是稳定结论。冻结树验收之后未在当前源码上重跑完整门，
+  因此本片结论只覆盖那棵树，不覆盖当前工作区。
+- 仍未验收项：LLVM emitter（`compiler/backend/llvm_module.yh`、`llvm_scalar.yh`、
+  `tests/selfhost/llvm-ir.py`、`llvmscalar`）只有红门日志，无通过证据；IRModule 序列化及其版本
+  尚未实现（`IR_MODULE_VERSION` 目前只是内存内版本），跨缓存身份键未落；LLVM 模式未常驻，
+  check 侧的受检快照消费完即释放。本片未提交、未滚种子，LL2 整体未关闭。
+- 详见 [实施方案 LL2 小节](02-plan/yh-LLVM后端替换实施方案.md) 与
+  [LLVM 目标身份设计](03-design/yh-LLVM目标身份设计.md)；完整完成记录待归档到 `docs/01-finished/`。
+
 ## 2026-10-14 LLVM ARM64 启动 SDK：静态桥与源级调用验收
 
 - 按用户授权与快照/模块 IR 并行实施 ARM64 固定 SDK，显式 --host 选择 LLVM 桥

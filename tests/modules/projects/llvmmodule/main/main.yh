@@ -1,0 +1,278 @@
+module main;
+import ir;
+
+// make_function：构造真实单块整数函数；输入表在调用者栈上，模块必须深拷贝全部内容。
+fn make_function(f *ir.IRFunction, types *ir.IRType, insts *ir.IRInst, blocks *ir.IRBlock) void {
+    types[0].kind = ir.IR_TY_I32; types[0].elem = -1; types[0].bits = 32;
+    insts[0].op = ir.IR_OP_CONST; insts[0].result_id = 0; insts[0].result_type = 0;
+    insts[0].a = -1; insts[0].b = -1; insts[0].aux = -1; insts[0].imm = 42;
+    blocks[0].id = 0; blocks[0].first_inst = 0; blocks[0].inst_count = 1;
+    blocks[0].term = ir.IR_TERM_RET; blocks[0].term_value = 0;
+    blocks[0].succ0 = -1; blocks[0].succ1 = -1;
+    f.abi = 0; f.target_id = 2; f.ret_type = 0;
+    f.types = types; f.type_count = 1; f.insts = insts; f.inst_count = 1;
+    f.blocks = blocks; f.block_count = 1; f.value_count = 1;
+}
+
+// make_target：提供手工核对的 x64 完整身份，测试预期不由待测模块解析器生成。
+fn make_target(target *ir.IRModuleTarget) void {
+    target.triple = "x86_64-unknown-linux-gnu";
+    target.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128";
+    target.abi = "sysv-amd64"; target.pointer_bits = 64;
+    target.little_endian = 1; target.layout_version = 1;
+}
+
+// check_calls：真实跨符号调用必须闭合签名；模块拒绝未知名字、错误 ABI/返回/参数和坏来源。
+fn check_calls() int {
+    let target ir.IRModuleTarget;
+    make_target(&target);
+    let unit ir.IRModule;
+    if (ir.ir_module_init(&unit, &target) != 0
+        || ir.ir_module_add_source(&unit, "calls.yh", 0, 0) != 0) { return 1; }
+    let scalar ir.IRModuleType;
+    scalar.kind = ir.IR_TY_I32; scalar.bits = 32; scalar.size = 4; scalar.align = 4; scalar.elem = -1;
+    if (ir.ir_module_add_type(&unit, "i32", &scalar, 0, 0) != 0) { return 2; }
+    scalar.kind = ir.IR_TY_VOID; scalar.bits = 0; scalar.size = 0; scalar.align = 1;
+    if (ir.ir_module_add_type(&unit, "void", &scalar, 0, 0) != 1) { return 3; }
+    scalar.kind = ir.IR_TY_PTR; scalar.bits = 64; scalar.size = 8; scalar.align = 8; scalar.elem = 0;
+    if (ir.ir_module_add_type(&unit, "i32ptr", &scalar, 0, 0) != 2) { return 4; }
+    let params [1]int;
+    params[0] = 0;
+    let symbol ir.IRModuleSymbol;
+    symbol.kind = ir.IR_MODULE_SYMBOL_FUNCTION; symbol.type_id = 0;
+    symbol.linkage = ir.IR_MODULE_LINK_EXTERNAL; symbol.defined = 1;
+    if (ir.ir_module_add_symbol(&unit, "fixture.caller", &symbol, &params[0], 1) != 0) { return 5; }
+    symbol.defined = 0; symbol.abi = 1;
+    if (ir.ir_module_add_symbol(&unit, "fixture.echo", &symbol, &params[0], 1) != 1
+        || ir.ir_module_add_symbol(&unit, "fixture.echo", &symbol, &params[0], 1) != 1) { return 6; }
+    let types [1]ir.IRType;
+    types[0].kind = ir.IR_TY_I32; types[0].bits = 32; types[0].elem = -1;
+    let insts [2]ir.IRInst;
+    insts[0].op = ir.IR_OP_PARAM; insts[0].result_id = 0; insts[0].result_type = 0;
+    insts[0].a = -1; insts[0].b = -1; insts[0].aux = -1;
+    insts[1].op = ir.IR_OP_CALL; insts[1].result_id = 1; insts[1].result_type = 0;
+    insts[1].a = -1; insts[1].b = -1; insts[1].aux = 0;
+    let calls [1]ir.IRCall;
+    calls[0].abi = 1; calls[0].symbol_len = 12; calls[0].arg_count = 1;
+    let args [1]ir.IRCallArg;
+    args[0].value = 0; args[0].type_id = 0;
+    let call_name *char = "fixture.echo";
+    let blocks [1]ir.IRBlock;
+    blocks[0].id = 0; blocks[0].inst_count = 2;
+    blocks[0].term = ir.IR_TERM_RET; blocks[0].term_value = 1;
+    blocks[0].succ0 = -1; blocks[0].succ1 = -1;
+    let f ir.IRFunction;
+    f.target_id = 2; f.ret_type = 0; f.types = &types[0]; f.type_count = 1;
+    f.insts = &insts[0]; f.inst_count = 2; f.value_count = 2;
+    f.calls = &calls[0]; f.call_count = 1; f.call_args = &args[0]; f.call_arg_count = 1;
+    f.call_symbols = call_name.to_type(*u8); f.call_symbol_size = 12;
+    f.blocks = &blocks[0]; f.block_count = 1;
+    let mapping [1]int;
+    mapping[0] = 0;
+    if (ir.ir_module_add_function(&unit, 0, &f, &mapping[0], 0) != 0
+        || ir.ir_module_verify(&unit) != 0) { return 7; }
+    unit.symbols[1].abi = 0;
+    if (ir.ir_module_verify(&unit) == 0) { return 8; }
+    unit.symbols[1].abi = 1;
+    unit.symbols[1].params[0] = 2;
+    if (ir.ir_module_verify(&unit) == 0) { return 9; }
+    unit.symbols[1].params[0] = 0;
+    unit.symbols[1].type_id = 1;
+    if (ir.ir_module_verify(&unit) == 0) { return 10; }
+    unit.symbols[1].type_id = 0;
+    unit.functions[0].body.call_symbols[11] = 'x';
+    if (ir.ir_module_verify(&unit) == 0) { return 11; }
+    unit.functions[0].body.call_symbols[11] = 'o';
+    unit.symbols[0].params[0] = 2;
+    if (ir.ir_module_verify(&unit) == 0) { return 12; }
+    unit.symbols[0].params[0] = 0;
+    unit.functions[0].locs[1].offset = 1;
+    if (ir.ir_module_verify(&unit) == 0) { return 13; }
+    unit.functions[0].locs[1].offset = 0;
+    let original *char = unit.symbols[1].name;
+    unit.symbols[1].name = unit.symbols[0].name;
+    if (ir.ir_module_verify(&unit) == 0) { return 14; }
+    unit.symbols[1].name = original;
+    if (ir.ir_module_verify(&unit) != 0) { return 15; }
+    ir.ir_module_release(&unit);
+    return 0;
+}
+
+// check_layouts：数组、切片与 union 均保存真实初始化和指针重定位；按值环拒绝、递归指针允许。
+fn check_layouts() int {
+    let target ir.IRModuleTarget;
+    make_target(&target);
+    let unit ir.IRModule;
+    if (ir.ir_module_init(&unit, &target) != 0
+        || ir.ir_module_add_source(&unit, "layouts.yh", 0, 0) != 0) { return 1; }
+    let scalar ir.IRModuleType;
+    scalar.kind = ir.IR_TY_I32; scalar.bits = 32; scalar.size = 4; scalar.align = 4; scalar.elem = -1;
+    if (ir.ir_module_add_type(&unit, "i32", &scalar, 0, 0) != 0) { return 2; }
+    scalar.kind = ir.IR_TY_PTR; scalar.bits = 64; scalar.size = 8; scalar.align = 8; scalar.elem = 0;
+    if (ir.ir_module_add_type(&unit, "ptr", &scalar, 0, 0) != 1) { return 3; }
+    scalar.kind = ir.IR_MODULE_TY_ARRAY; scalar.bits = 0; scalar.size = 16; scalar.elem = 1; scalar.count = 2;
+    if (ir.ir_module_add_type(&unit, "array", &scalar, 0, 0) != 2) { return 4; }
+    scalar.kind = ir.IR_MODULE_TY_SLICE; scalar.elem = 0; scalar.count = 0;
+    if (ir.ir_module_add_type(&unit, "slice", &scalar, 0, 0) != 3) { return 5; }
+    let fields [2]ir.IRModuleField;
+    fields[0].type_id = 0; fields[1].type_id = 1;
+    scalar.kind = ir.IR_MODULE_TY_UNION; scalar.size = 8; scalar.elem = -1;
+    if (ir.ir_module_add_type(&unit, "union", &scalar, &fields[0], 2) != 4) { return 6; }
+    let symbol ir.IRModuleSymbol;
+    symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; symbol.defined = 1; symbol.type_id = 2;
+    if (ir.ir_module_add_symbol(&unit, "fixture.array", &symbol, 0, 0) != 0) { return 7; }
+    symbol.type_id = 3;
+    if (ir.ir_module_add_symbol(&unit, "fixture.slice", &symbol, 0, 0) != 1) { return 8; }
+    symbol.type_id = 4;
+    if (ir.ir_module_add_symbol(&unit, "fixture.union", &symbol, 0, 0) != 2) { return 9; }
+    let data [16]u8;
+    let relocs [2]ir.IRModuleReloc;
+    relocs[0].width = 8; relocs[0].symbol = 0;
+    relocs[1].offset = 8; relocs[1].width = 8; relocs[1].symbol = 1;
+    if (ir.ir_module_add_global(&unit, 0, &data[0], 16, 8, &relocs[0], 2) != 0
+        || ir.ir_module_add_global(&unit, 1, &data[0], 16, 8, &relocs[1], 1) != 1
+        || ir.ir_module_add_global(&unit, 2, &data[0], 8, 8, &relocs[0], 1) != 2
+        || ir.ir_module_verify(&unit) != 0) { return 10; }
+    unit.globals[0].relocs[1].offset = 0;
+    if (ir.ir_module_verify(&unit) == 0) { return 11; }
+    unit.globals[0].relocs[1].offset = 8;
+    unit.globals[1].data[8] = 1;
+    if (ir.ir_module_verify(&unit) == 0) { return 12; }
+    unit.globals[1].data[8] = 0;
+    unit.types[2].count = 3;
+    if (ir.ir_module_verify(&unit) == 0) { return 13; }
+    unit.types[2].count = 2;
+    if (ir.ir_module_verify(&unit) != 0) { return 14; }
+    ir.ir_module_release(&unit);
+    // 同一测试中重新初始化，确认 release 清空容量与目标，合法递归结构体依赖指针。
+    if (ir.ir_module_init(&unit, &target) != 0) { return 15; }
+    scalar.kind = ir.IR_MODULE_TY_STRUCT; scalar.size = 8; scalar.align = 8;
+    scalar.elem = -1; scalar.count = 0;
+    fields[0].type_id = 1; fields[0].offset = 0;
+    if (ir.ir_module_add_type(&unit, "Node", &scalar, &fields[0], 1) != 0) { return 16; }
+    scalar.kind = ir.IR_TY_PTR; scalar.bits = 64; scalar.elem = 0;
+    if (ir.ir_module_add_type(&unit, "NodePtr", &scalar, 0, 0) != 1
+        || ir.ir_module_verify(&unit) != 0) { return 17; }
+    unit.types[0].fields[0].type_id = 0;
+    if (ir.ir_module_verify(&unit) == 0) { return 18; }
+    unit.types[0].fields[0].type_id = 1;
+    ir.ir_module_release(&unit);
+    // 函数签名不能直接返回另一个函数类型，必须经显式指针类型表达。
+    if (ir.ir_module_init(&unit, &target) != 0) { return 19; }
+    scalar.kind = ir.IR_MODULE_TY_FUNCTION; scalar.bits = 0; scalar.size = 0;
+    scalar.align = 1; scalar.elem = 0;
+    if (ir.ir_module_add_type(&unit, "BadFunction", &scalar, 0, 0) != 0) { return 20; }
+    if (ir.ir_module_verify(&unit) == 0) { return 21; }
+    ir.ir_module_release(&unit);
+    return 0;
+}
+
+// main：独立构建有类型全局、聚合/指针布局、重定位、逻辑声明和函数定义，再逐项损坏验证。
+fn main() int {
+    let calls_status int = check_calls();
+    if (calls_status != 0) { printf("call-verifier=%d\n", calls_status); return 50 + calls_status; }
+    let layout_status int = check_layouts();
+    if (layout_status != 0) { printf("layout-verifier=%d\n", layout_status); return 100 + layout_status; }
+    let target ir.IRModuleTarget;
+    make_target(&target);
+    let unit ir.IRModule;
+    if (ir.ir_module_init(&unit, &target) != 0) { return 1; }
+    let source [8]u8;
+    source[0] = 'm'; source[1] = 'o'; source[2] = 'd'; source[3] = 'u';
+    source[4] = 'l'; source[5] = 'e'; source[6] = ';'; source[7] = '\n';
+    if (ir.ir_module_add_source(&unit, "fixture.yh", &source[0], 8) != 0) { return 2; }
+    let scalar ir.IRModuleType;
+    scalar.kind = ir.IR_TY_I32; scalar.bits = 32; scalar.size = 4; scalar.align = 4;
+    scalar.elem = -1;
+    if (ir.ir_module_add_type(&unit, "i32", &scalar, 0, 0) != 0) { return 3; }
+    let ptr ir.IRModuleType;
+    ptr.kind = ir.IR_TY_PTR; ptr.bits = 64; ptr.size = 8; ptr.align = 8; ptr.elem = 0;
+    if (ir.ir_module_add_type(&unit, "i32ptr", &ptr, 0, 0) != 1) { return 4; }
+    let fields [2]ir.IRModuleField;
+    fields[0].type_id = 0; fields[0].offset = 0;
+    fields[1].type_id = 1; fields[1].offset = 8;
+    let aggregate ir.IRModuleType;
+    aggregate.kind = ir.IR_MODULE_TY_STRUCT; aggregate.size = 16; aggregate.align = 8;
+    aggregate.elem = -1;
+    if (ir.ir_module_add_type(&unit, "Pair", &aggregate, &fields[0], 2) != 2) { return 5; }
+    let data_symbol ir.IRModuleSymbol;
+    data_symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; data_symbol.type_id = 2;
+    data_symbol.linkage = ir.IR_MODULE_LINK_PRIVATE; data_symbol.defined = 1;
+    data_symbol.mutable = 1; data_symbol.source = 0; data_symbol.offset = 0;
+    if (ir.ir_module_add_symbol(&unit, "fixture.data", &data_symbol, 0, 0) != 0) { return 6; }
+    let function_symbol ir.IRModuleSymbol;
+    function_symbol.kind = ir.IR_MODULE_SYMBOL_FUNCTION; function_symbol.type_id = 0;
+    function_symbol.linkage = ir.IR_MODULE_LINK_EXTERNAL;
+    function_symbol.source = 0; function_symbol.offset = 0;
+    if (ir.ir_module_add_symbol(&unit, "fixture.answer", &function_symbol, 0, 0) != 1) { return 7; }
+    function_symbol.defined = 1;
+    if (ir.ir_module_add_symbol(&unit, "fixture.answer", &function_symbol, 0, 0) != 1) { return 8; }
+    let bytes [16]u8;
+    bytes[0] = 7;
+    let relocation [1]ir.IRModuleReloc;
+    relocation[0].offset = 8; relocation[0].width = 8;
+    relocation[0].symbol = 1; relocation[0].addend = 0;
+    if (ir.ir_module_add_global(&unit, 0, &bytes[0], 16, 8, &relocation[0], 1) != 0) { return 9; }
+    let f ir.IRFunction;
+    let local_types [1]ir.IRType;
+    let insts [1]ir.IRInst;
+    let blocks [1]ir.IRBlock;
+    make_function(&f, &local_types[0], &insts[0], &blocks[0]);
+    let type_map [1]int;
+    type_map[0] = 0;
+    if (ir.ir_module_add_function(&unit, 1, &f, &type_map[0], 0) != 0) { return 10; }
+    if (ir.ir_module_verify(&unit) != 0) { return 11; }
+    // 深拷贝后破坏调用者全部输入，模块应仍保存源码、布局、初始化、函数和映射。
+    source[0] = 'x'; fields[1].offset = 0; bytes[0] = 99;
+    relocation[0].symbol = 99; local_types[0].bits = 8; insts[0].imm = 99;
+    blocks[0].succ0 = 99; type_map[0] = 99;
+    if (ir.ir_module_verify(&unit) != 0 || unit.sources[0].text[0] != 'm'
+        || unit.types[2].fields[1].offset != 8 || unit.globals[0].data[0] != 7
+        || unit.functions[0].body.insts[0].imm != 42) { return 12; }
+    unit.target.data_layout[0] = 'E';
+    if (ir.ir_module_verify(&unit) == 0) { return 13; }
+    unit.target.data_layout[0] = 'e';
+    unit.target.key = 1;
+    if (ir.ir_module_verify(&unit) == 0) { return 14; }
+    unit.target.key = 2;
+    unit.symbols[1].offset = 9;
+    if (ir.ir_module_verify(&unit) == 0) { return 15; }
+    unit.symbols[1].offset = 0;
+    unit.types[2].fields[1].offset = 4;
+    if (ir.ir_module_verify(&unit) == 0) { return 16; }
+    unit.types[2].fields[1].offset = 8;
+    unit.globals[0].size = 15;
+    if (ir.ir_module_verify(&unit) == 0) { return 17; }
+    unit.globals[0].size = 16;
+    unit.globals[0].align = 4;
+    if (ir.ir_module_verify(&unit) == 0) { return 18; }
+    unit.globals[0].align = 8;
+    unit.globals[0].relocs[0].offset = 12;
+    if (ir.ir_module_verify(&unit) == 0) { return 19; }
+    unit.globals[0].relocs[0].offset = 8;
+    unit.globals[0].relocs[0].symbol = 99;
+    if (ir.ir_module_verify(&unit) == 0) { return 20; }
+    unit.globals[0].relocs[0].symbol = 1;
+    unit.globals[0].relocs[0].offset = 0;
+    if (ir.ir_module_verify(&unit) == 0) { return 21; }
+    unit.globals[0].relocs[0].offset = 8;
+    unit.functions[0].type_map[0] = 1;
+    if (ir.ir_module_verify(&unit) == 0) { return 22; }
+    unit.functions[0].type_map[0] = 0;
+    unit.functions[0].body.target_id = 1;
+    if (ir.ir_module_verify(&unit) == 0) { return 23; }
+    unit.functions[0].body.target_id = 2;
+    unit.functions[0].body.blocks[0].succ0 = 99;
+    if (ir.ir_module_verify(&unit) == 0) { return 24; }
+    unit.functions[0].body.blocks[0].succ0 = -1;
+    function_symbol.type_id = 1;
+    if (ir.ir_module_add_symbol(&unit, "fixture.answer", &function_symbol, 0, 0) >= 0) { return 25; }
+    function_symbol.type_id = 0;
+    if (ir.ir_module_add_symbol(&unit, "fixture.answer", &function_symbol, 0, 0) >= 0) { return 26; }
+    if (ir.ir_module_verify(&unit) != 0) { return 27; }
+    ir.ir_module_release(&unit);
+    ir.ir_module_release(&unit);
+    if (unit.types != 0 || unit.functions != 0 || unit.sources != 0 || unit.target.triple != 0) { return 28; }
+    printf("module-model=ok\n");
+    return 0;
+}

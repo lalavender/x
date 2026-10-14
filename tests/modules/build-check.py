@@ -128,6 +128,10 @@ case("i1-inline-ssa-and-fallback", "inline", "inline", ".")
 case("r1-token-replay-run", "run", "tokenreplay", ".", 42)
 case("r2a-ssa-phi-verifier", "run", "irverify", ".", 0)
 case("llvm-target-identity", "run", "llvmtarget", ".", 0)
+case("llvm-front-zero-output", "run", "llvmfront", ".", 0)
+case("llvm-module-ownership", "run", "llvmmodule", ".", 0)
+case("llvm-checked-snapshot", "run", "llvmchecked", ".", 0)
+case("llvm-snapshot-lowering", "checked-lower", "llvmlower", ".", 0)
 case("r2c-build-lowers-ssa-cfg", "ir", "irfront", ".", 230)
 case("r2a-ssa-cross-module-call", "ir-call", "ircallmodule", ".", 41)
 case("r2b-interface-ready-scheduler", "scheduler", "scheduler", ".")
@@ -183,17 +187,34 @@ def copy_proj(src, dst):
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
-    if src.name in ("irverify", "irfront"):
+    if src.name in ("irverify", "irfront", "llvmmodule"):
         # ir 现为编译器根项目普通模块（不带清单）；fixture 仍以路径依赖
         # 方式复用其源码测跨项目解析，拷入后补最小清单使其可被发现。
         shutil.copytree(ROOT / "compiler" / "ir", dst / "ir")
         (dst / "ir" / "project.toml").write_text(
             "[project]\nname = \"yh_ir\"\nsource = \".\"\n")
-    if src.name == "llvmtarget":
+    if src.name in ("llvmtarget", "llvmfront"):
         # 目标模型测试复用实际 gen 源码，并以项目依赖检验公开类型/接口。
         shutil.copytree(ROOT / "compiler" / "gen", dst / "gen")
         (dst / "gen" / "project.toml").write_text(
             '[project]\nname = "gen"\nsource = "."\n')
+    if src.name == "llvmchecked":
+        # 快照 fixture 消费真实 AST/语义实现，并在模块内构造和释放原 arena。
+        core = dst / "compiler"
+        core.mkdir()
+        for module in ("gen", "lex", "ast", "comptime", "ir", "backend"):
+            shutil.copytree(ROOT / "compiler" / module, core / module)
+        (core / "project.toml").write_text('[project]\nname = "checkedcore"\nsource = "."\n')
+        shutil.copyfile(src / "fixture.yh", core / "ast" / "checked_fixture.yh")
+    if src.name == "llvmlower":
+        # 纯快照 lowering fixture 复用真实前端（parse/lex）与 lowering 实现，
+        # fixture 作为同模块的第二个文件随 main/ 一起构建。
+        core = dst / "compiler"
+        core.mkdir()
+        for module in ("gen", "lex", "ast", "parse", "comptime", "ir", "backend"):
+            shutil.copytree(ROOT / "compiler" / module, core / module)
+        (core / "project.toml").write_text('[project]\nname = "lowercore"\nsource = "."\n')
+        shutil.copyfile(src / "fixture.yh", dst / "main" / "fixture.yh")
 
 
 def main():
@@ -507,6 +528,32 @@ def main():
                    c["name"],
                    f"实际展开 AST 节点越界未被精确拒绝: rc={checked.returncode}\n"
                    f"{(checked.stderr + checked.stdout)[-500:]}")
+            continue
+        if c["kind"] == "checked-lower":
+            # 纯快照 lowering：受检快照 → 模块 SSA。scalar 必须全量降低并统计出
+            # 5 个运行期函数（comptime 不计入）、4 个直接调用与合流/循环携带 phi；
+            # pointer/aggregate 必须带真实来源整模块拒绝，不发布部分产物。
+            built = sh([compiler, "build"], cwd=dst)
+            program = dst / ".build" / "llvmlower"
+            run = sh([str(program), str(dst / "input" / "scalar.yh"), "0"],
+                     cwd=dst) if program.exists() else None
+            lower_ok = (built.returncode == 0 and run is not None
+                        and run.returncode == 0
+                        and "lower-snapshot=ok functions=5 phis=" in run.stdout
+                        and " calls=4" in run.stdout
+                        and "phis=0" not in run.stdout)
+            rejects = True
+            for name in ("pointer", "aggregate"):
+                rejected = sh([str(program), str(dst / "input" / f"{name}.yh"), "1"],
+                              cwd=dst) if program.exists() else None
+                rejects = rejects and rejected is not None and rejected.returncode == 0 \
+                    and "lower-rejected=ok" in rejected.stdout \
+                    and f"{name}_body" in rejected.stderr and ".yh:" in rejected.stderr
+            report(lower_ok and rejects, c["name"],
+                   f"快照 lowering 覆盖或拒绝路径失败: lower_ok={lower_ok}, rejects={rejects}, "
+                   f"build={built.returncode}, run={run.returncode if run else None}, "
+                   f"stdout={(run.stdout if run else '')[-120:]!r}\n"
+                   f"{(run.stderr if run else built.stderr)[-400:]}")
             continue
         if c["kind"] == "host-capture":
             target = "linux" if sys.platform == "darwin" else "darwin"

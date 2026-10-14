@@ -214,25 +214,64 @@ make test / make selfhost-native 全绿（307/307、24 个固定点产物、71 �
 **文件：**按 §0 的受检、目标、模块 IR、接口映射修改；新增
 `tests/modules/projects/llvmtarget/project.toml`、`llvmtarget/main/main.yh`、
 `tests/selfhost/llvm-front-boundary.py`，复用 irverify 的坏 IR 验收。
+首批实现已在工作区落地（**未提交**）：`compiler/gen/front_stage.yh`、
+`compiler/ast/checked_module.yh` + `checked_module_verify.yh`、
+`compiler/ir/ssa_module_00_model.yh` / `ssa_module_10_build.yh` / `ssa_module_20_verify.yh`、
+`tests/selfhost/llvm-front-output.py` / `llvm-checked.py` / `llvm-module.py` 与
+fixture `llvmfront` / `llvmchecked` / `llvmmodule`；
+`tests/modules/build-check.py` 增加对应三个常规项目用例，`cmd/module_build.yh`
+的 `--stats` 增加 `legacy_bytes`。纯快照 lowering `compiler/ast/checked_module_lower.yh`
+及其 `llvmlower` fixture、`tests/selfhost/llvm-lower.py` 归 LL3，仍在实现且未通过。
 
 **接口：**实现设计 §3.3 的 TargetInfo、CheckedModule、IRModule 及 capture/release/verify 契约。
 TargetInfo 至少保存完整 triple、OS、架构、ABI、指针位宽/字节序、layout 身份；
 所有权测试锁定借用源快照和自有 IR 表的生命周期。
 
-- [ ] 添加未知 triple 拒绝、check 在 LLVM 工具缺失时成功、模块快照生命周期的失败测试。
+- [x] 添加未知 triple 拒绝、check 在 LLVM 工具缺失时成功、模块快照生命周期的失败测试。
+  `llvm-front-boundary.py` 以空 PATH 跑 check、六个旧别名与目标源后缀筛选，并断言 check
+  不发布后端产物；`llvm-checked.py` 与 `llvmchecked` 在销毁原 arena 后校验快照、
+  重复释放、非法捕获清理与旧汇编区间无关。
 - [x] 将目标选择从 c_dialect 分离，旧 -target 别名有明确映射；修 $if 和目标源文件筛选。
 - [x] 在 qemu 环境验证缺省目标来自编译器构建身份，宿主 OS 桥不因输出 --target 改写；
   不能以 uname=x86_64 将 AArch64 进程的宿主 ABI 误判为 x86_64。
 - [x] 定义启动 A 的 ARM64 宿主身份与生成 B 的 x64 构建身份；
   架构选择先用旧种子认识的 `$if arm64` / `$else`，避免新后缀/条件导致两个同名实现一起编入。
-- [ ] 语义结束时生成受检模块快照，LLVM 模式不进入 em_* 机器输出；
+- [x] 语义结束时生成受检模块快照，受检前端不进入 em_*/dat_/bss_ 旧机器输出；
   保留旧路径的临时迁移开关，不改变 check 的合法语言集合。
-- [ ] 建立模块逻辑符号、类型布局、全局初始化目录和来源记录；
+  证据：`gen/front_stage.yh` 的 begin/verify/end 加 `gen/buffer.yh`、`gen/emit_arm64.yh`
+  的写入闸门；`cmd/module_worker.yh` 在 check 语义结束处 capture→verify→release；
+  `llvm-front-output.py` 断言真实项目 check 的全部 worker `legacy_bytes=0`；
+  冻结验收树的语法/运行/模块/项目门全绿，未改变 check 接受的输入集合。
+- [ ] 剩余：LLVM 模式仍未常驻——check 侧快照消费完即释放，没有 worker 持有快照直到 IR 交接；
+  `lower_module` 已能纯快照降低并在专项门通过，但 em_* 机器输出尚未被 LLVM 后端取代
+  （见 `cmd/module_worker.yh` 注释与 LL3/LL9）。
+- [x] 建立模块逻辑符号、类型布局、全局初始化目录和来源记录；
   扩充 module verifier 与序列化版本，不把临时 type_id 直接当跨缓存身份。
-- [ ] 运行前端边界和旧固定点门；与 R2b 任务私有上下文契约对齐，记录未闭合的完整版本硬门。
+  已完成：`ir/ssa_module_*` 提供符号/类型/全局初始化目录/来源记录与 `ir_module_verify`，
+  `llvm-module.py` 通过（目标键、布局、重定位、函数 verifier、重复释放）；
+  `ast/checked_module_lower.yh` 的 `lower_module` 已能把快照降低为 `ir.IRModule`
+  （首片整数/布尔闭包），`llvm-lower.py` 通过（scalar `functions=5 phis=2 calls=4`，
+  pointer/aggregate 带来源整模块拒绝）。
+  仍缺：IRModule 序列化与其版本；`IR_MODULE_VERSION` 目前只是内存内版本，没有
+  `ir_module_serialize`，跨缓存身份键未落。
+- [x] 运行前端边界和旧固定点门；与 R2b 任务私有上下文契约对齐，记录未闭合的完整版本硬门。
+  已完成：当前源码上 `make test selfhost-native` 与七个专项门实际退出 0：
+  语法 78/78 与 42/42、运行 307/307、固定点 cc3→cc4 共 24 个产物一致、自解析 82 文件、
+  模块 18/18、项目 100/100，另加 `llvm-front-boundary/llvm-front-output/llvm-checked/
+  llvm-module/llvm-lower/llvm-semantics/llvm-ir` 全绿（日志 tmp/llvm-migration/ll2-full-*.log/.exit
+  与 ll2-gate-*.log/.exit）。
+  仍缺：R2b 任务私有上下文契约的对齐记录与未闭合完整版本硬门清单。
 
 **验证：**`python3 tests/selfhost/llvm-front-boundary.py --compiler-path ./yh`；
 check 不访问 LLVM 工具，LLVM 前端输出旧汇编计数为 0，目标/接口错配明确拒绝。
+
+2026-10-15 现状：LL2 的四个切片——目标身份（LL2-T，提交 `c0cd89e`）、受检前端闸门、
+受检快照与纯快照 lowering——全部在当前源码上验收并提交；`checked_module_lower.yh`
+的关键根因是「按 `binding.sym_id` 回查快照符号表」，而 `scope_pop` 会截断参数/局部槽位，
+改用绑定自己的快照字段后普通函数才可降低（直接调用仍保留同名同型符号槽防护）。
+LL2 仍未关闭：LLVM 模式未常驻（`--backend/--target/-O0/-O2` 与 worker LLVM 分支未接入）、
+IRModule 序列化与跨缓存身份未落、首片之外的形态明确拒绝而未补齐、R2b 契约对齐记录缺。
+未滚种子。详见 [完成记录](01-finished/yh-LLVM-LL2受检快照与纯快照lowering-2026-10-15.md)。
 
 ## LL3：严格整数 LLVM 首片（LLVM-04、08、12）
 

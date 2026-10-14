@@ -1,0 +1,303 @@
+module backend;
+import gen;
+import ir;
+
+// LLVMSourceMap：LLVM 文本行区间对应模块自有来源位置；数字索引没有借用指针。
+// line/end_line 均为 1 基且闭区间，symbol 为模块逻辑符号下标，-1 表示模块头。
+pub struct LLVMSourceMap {
+    line int;
+    end_line int;
+    source int;
+    offset int;
+    symbol int;
+}
+
+// LLVMOutput：独占 NUL 结尾文本及映射数组；成功后由调用方 release，失败不改变出参。
+// length 不含 NUL，emitted 是已发射定义数；其余容量/行号/错误字段仅用于缓冲构建。
+pub struct LLVMOutput {
+    text *u8;
+    length int;
+    capacity int;
+    maps *LLVMSourceMap;
+    map_count int;
+    map_capacity int;
+    emitted int;
+    line int;
+    failed int;
+}
+
+// llvm_output_release：释放输出独占的两个缓冲并归零，允许空指针及重复释放。
+pub fn llvm_output_release(out *LLVMOutput) void {
+    if (out == 0) { return; }
+    if (out.text != 0) { free(out.text); }
+    if (out.maps != 0) { free(out.maps); }
+    let empty LLVMOutput;
+    out[0] = empty;
+}
+
+// llvm_byte：复用通用缓冲扩容，逐字节维护真实 LLVM 行号与结尾 NUL。
+fn llvm_byte(out *LLVMOutput, byte u8) void {
+    if (out.failed != 0) { return; }
+    if (out.length >= 67108862) { out.failed = 1; return; }
+    if (out.capacity <= out.length + 1) {
+        if (gen.out_grow(&out.text, out.capacity, &out.capacity, out.length + 2) != 0) {
+            out.failed = 1; return;
+        }
+    }
+    out.text[out.length] = byte;
+    out.length += 1;
+    out.text[out.length] = 0;
+    if (byte == '\n') { out.line += 1; }
+}
+
+// llvm_text：追加受控 C 字符串；不使用 gen 的机器指令缓冲或进程目标状态。
+fn llvm_text(out *LLVMOutput, text *char) void {
+    let i int = 0;
+    for text[i] != 0 { llvm_byte(out, text[i].to_type(u8)); i += 1; }
+}
+
+// llvm_number：用无符号除法写完整 64 位十进制位型，覆盖 INT64_MIN 与 U64_MAX。
+fn llvm_number(out *LLVMOutput, value u64) void {
+    let digits [24]u8;
+    let count int = 0;
+    if (value == 0) { llvm_byte(out, '0'); return; }
+    for value != 0 {
+        digits[count] = (value % 10 + 48).to_type(u8);
+        value = value / 10; count += 1;
+    }
+    for count > 0 { count -= 1; llvm_byte(out, digits[count]); }
+}
+
+// llvm_quote：LLVM 字符串/标识符按字节转义，禁止引号、反斜线与非 ASCII 注入文本。
+fn llvm_quote(out *LLVMOutput, data *u8, length int) void {
+    let hex *char = "0123456789ABCDEF";
+    llvm_byte(out, '"');
+    let i int = 0;
+    for i < length {
+        let byte u8 = data[i];
+        if (byte < 32 || byte >= 127 || byte == '"' || byte == '\\') {
+            llvm_byte(out, '\\'); llvm_byte(out, hex[(byte >> 4).to_type(int)].to_type(u8));
+            llvm_byte(out, hex[(byte & 15).to_type(int)].to_type(u8));
+        } else { llvm_byte(out, byte); }
+        i += 1;
+    }
+    llvm_byte(out, '"');
+}
+
+// llvm_string：为已经验证有终止符的来源路径、目标和逻辑名称提供转义入口。
+fn llvm_string(out *LLVMOutput, value *char) void {
+    let length int = 0;
+    for value[length] != 0 { length += 1; }
+    llvm_quote(out, value.to_type(*u8), length);
+}
+
+// llvm_map：为接下来生成的一条源指令或声明记录映射，完成后由调用方填 end_line。
+fn llvm_map(out *LLVMOutput, source int, offset int, symbol int) int {
+    if (out.failed != 0) { return -1; }
+    if (out.map_count == out.map_capacity) {
+        let capacity int = out.map_capacity == 0 ? 64 : out.map_capacity * 2;
+        if (capacity > 67108864 / sizeof(LLVMSourceMap)) { out.failed = 1; return -1; }
+        let next *LLVMSourceMap = malloc((capacity * sizeof(LLVMSourceMap)).to_type(u64)).to_type(*LLVMSourceMap);
+        if (next == 0) { out.failed = 1; return -1; }
+        if (out.map_count > 0) { memcpy(next, out.maps, (out.map_count * sizeof(LLVMSourceMap)).to_type(u64)); }
+        free(out.maps); out.maps = next; out.map_capacity = capacity;
+    }
+    let index int = out.map_count;
+    out.maps[index].line = out.line; out.maps[index].end_line = out.line;
+    out.maps[index].source = source; out.maps[index].offset = offset; out.maps[index].symbol = symbol;
+    out.map_count += 1;
+    return index;
+}
+
+// llvm_map_end：闭合映射行区间；失败时不解引用未分配的映射。
+fn llvm_map_end(out *LLVMOutput, index int) void {
+    if (index >= 0) { out.maps[index].end_line = out.line - 1; }
+}
+
+// llvm_reject：直接从模块来源计算 1 基行列，不依赖 lexer 或 GenState 中的临时源码。
+fn llvm_reject(unit *ir.IRModule, source int, offset int, message *char) int {
+    if (unit == 0 || source < 0 || source >= unit.source_count) { return gen.fail(message); }
+    let input ir.IRModuleSource = unit.sources[source];
+    let line int = 1; let column int = 1; let i int = 0;
+    for i < offset && i < input.length {
+        if (input.text[i] == '\n') { line += 1; column = 1; } else { column += 1; }
+        i += 1;
+    }
+    let buffer [2048]u8;
+    let n int = gen.append_str_limit(&buffer[0], 0, 1800, input.path);
+    n = gen.append_byte(&buffer[0], n, ':'); n = gen.append_int(&buffer[0], n, line);
+    n = gen.append_byte(&buffer[0], n, ':'); n = gen.append_int(&buffer[0], n, column);
+    n = gen.append_str_limit(&buffer[0], n, 2046, ": 错误: LLVM 首片：");
+    n = gen.append_str_limit(&buffer[0], n, 2046, message);
+    n = gen.append_byte(&buffer[0], n, '\n');
+    gen.write_all(2, &buffer[0], n);
+    return -1;
+}
+
+// llvm_type_supported：首片只提供 void 与字节 bool/定宽整数，浮点/指针/聚合严格拒绝。
+fn llvm_type_supported(kind int) int {
+    return kind >= ir.IR_TY_VOID && kind <= ir.IR_TY_U64;
+}
+
+// llvm_type：标量 LLVM 类型只反映位宽；符号性由指令及扩展显式消费。
+fn llvm_type(out *LLVMOutput, kind int, bits int) void {
+    if (kind == ir.IR_TY_VOID) { llvm_text(out, "void"); }
+    else { llvm_byte(out, 'i'); llvm_number(out, bits.to_type(u64)); }
+}
+
+// llvm_target_same：完整核对传入目标、标准目标以及模块身份，不能只用数值 target_id。
+fn llvm_target_same(unit *ir.IRModule, target *gen.TargetInfo) int {
+    let expected gen.TargetInfo;
+    if (target == 0 || target.triple == 0 || target.data_layout == 0 || target.abi == 0
+        || gen.target_resolve(target.triple, &expected) != 0 || target.os != gen.TARGET_OS_LINUX
+        || target.os != expected.os || target.arch != expected.arch
+        || target.pointer_bits != expected.pointer_bits || target.little_endian != expected.little_endian
+        || target.layout_version != expected.layout_version
+        || gen.cstr_eq(target.data_layout, expected.data_layout) == 0 || gen.cstr_eq(target.abi, expected.abi) == 0) { return 0; }
+    return gen.cstr_eq(unit.target.triple, target.triple) != 0
+        && gen.cstr_eq(unit.target.data_layout, target.data_layout) != 0
+        && gen.cstr_eq(unit.target.abi, target.abi) != 0
+        && unit.target.pointer_bits == target.pointer_bits
+        && unit.target.little_endian == target.little_endian
+        && unit.target.layout_version == target.layout_version;
+}
+
+// llvm_preflight：在分配输出前封闭全部类型/签名/指令，不支持时带真实来源并拒绝整模块。
+fn llvm_preflight(unit *ir.IRModule) int {
+    let i int = 0;
+    for i < unit.symbol_count {
+        let symbol ir.IRModuleSymbol = unit.symbols[i];
+        if (llvm_type_supported(unit.types[symbol.type_id].kind) == 0) {
+            return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持浮点、指针或聚合类型");
+        }
+        let j int = 0;
+        for j < symbol.param_count {
+            if (llvm_type_supported(unit.types[symbol.params[j]].kind) == 0) {
+                return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持浮点、指针或聚合参数");
+            }
+            j += 1;
+        }
+        if (symbol.abi != 0 || symbol.variadic != 0) {
+            return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持 C ABI 或变参调用");
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < unit.global_count {
+        let global ir.IRModuleGlobal = unit.globals[i];
+        let symbol ir.IRModuleSymbol = unit.symbols[global.symbol];
+        if (global.reloc_count != 0) { return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持数据重定位"); }
+        i += 1;
+    }
+    i = 0;
+    for i < unit.function_count {
+        let function *ir.IRModuleFunction = &unit.functions[i];
+        let j int = 0;
+        for j < function.body.inst_count {
+            let inst ir.IRInst = function.body.insts[j];
+            let op int = inst.op;
+            if (inst.result_type >= 0 && llvm_type_supported(function.body.types[inst.result_type].kind) == 0) {
+                return llvm_reject(unit, function.locs[j].source, function.locs[j].offset, "尚不支持该指令的值类型");
+            }
+            if (inst.a >= 0) {
+                let operand int = ir.ir_find_value_type(&function.body, inst.a);
+                if (llvm_type_supported(function.body.types[operand].kind) == 0) {
+                    return llvm_reject(unit, function.locs[j].source, function.locs[j].offset, "尚不支持该指令的操作数类型");
+                }
+            }
+            if (op == ir.IR_OP_LOAD || op == ir.IR_OP_STORE) {
+                return llvm_reject(unit, function.locs[j].source, function.locs[j].offset, "尚不支持内存指令");
+            }
+            j += 1;
+        }
+        j = 0;
+        for j < function.body.block_count {
+            let block ir.IRBlock = function.body.blocks[j];
+            if (block.succ0 == 0 || block.succ1 == 0) {
+                let symbol ir.IRModuleSymbol = unit.symbols[function.symbol];
+                return llvm_reject(unit, symbol.source, symbol.offset, "入口块不能有前驱");
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// llvm_signature：声明/定义使用同一个模块签名，逻辑名统一加引号，参数不添加值域属性。
+fn llvm_signature(unit *ir.IRModule, symbol *ir.IRModuleSymbol, out *LLVMOutput, definition int) void {
+    let result ir.IRModuleType = unit.types[symbol.type_id];
+    llvm_type(out, result.kind, result.bits); llvm_text(out, " @"); llvm_string(out, symbol.name);
+    llvm_byte(out, '(');
+    let i int = 0;
+    for i < symbol.param_count {
+        if (i > 0) { llvm_text(out, ", "); }
+        let ty ir.IRModuleType = unit.types[symbol.params[i]];
+        llvm_type(out, ty.kind, ty.bits);
+        if (definition != 0) { llvm_text(out, " %p"); llvm_number(out, i.to_type(u64)); }
+        i += 1;
+    }
+    llvm_byte(out, ')');
+}
+
+// llvm_globals：集中发射标量外部声明和数据定义，初始化按已验证的小端完整位型读取。
+fn llvm_globals(unit *ir.IRModule, out *LLVMOutput) void {
+    let i int = 0;
+    for i < unit.symbol_count {
+        let symbol ir.IRModuleSymbol = unit.symbols[i];
+        if (symbol.kind == ir.IR_MODULE_SYMBOL_GLOBAL) {
+            let map int = llvm_map(out, symbol.source, symbol.offset, i);
+            llvm_byte(out, '@'); llvm_string(out, symbol.name); llvm_text(out, " = ");
+            if (symbol.defined == 0) { llvm_text(out, "external "); }
+            else if (symbol.linkage == ir.IR_MODULE_LINK_PRIVATE) { llvm_text(out, "internal "); }
+            llvm_text(out, symbol.mutable != 0 ? "global " : "constant ");
+            let ty ir.IRModuleType = unit.types[symbol.type_id];
+            llvm_type(out, ty.kind, ty.bits);
+            if (symbol.defined != 0) {
+                let g int = 0;
+                for unit.globals[g].symbol != i { g += 1; }
+                let global ir.IRModuleGlobal = unit.globals[g];
+                let value u64 = 0; let j int = 0;
+                for j < global.size { value |= global.data[j].to_type(u64) << (j * 8); j += 1; }
+                llvm_byte(out, ' '); llvm_number(out, value);
+                llvm_text(out, ", align "); llvm_number(out, global.align.to_type(u64));
+            }
+            llvm_byte(out, '\n'); llvm_map_end(out, map);
+        }
+        i += 1;
+    }
+}
+
+// llvm_emit_module：只消费经过 verifier 的封闭模块；全量预检后用私有临时输出构建。
+// 成功释放旧输出并一次性转移所有权；失败保持调用方 out 原值，绝不调用旧 ARM 后端。
+pub fn llvm_emit_module(unit *ir.IRModule, target *gen.TargetInfo, out *LLVMOutput) int {
+    if (out == 0 || ir.ir_module_verify(unit) != 0) { return gen.fail("LLVM 模块未通过 IR verifier"); }
+    if (llvm_target_same(unit, target) == 0) { return llvm_reject(unit, 0, 0, "完整目标身份不一致或平台尚不支持"); }
+    if (llvm_preflight(unit) != 0) { return -1; }
+    let temporary LLVMOutput;
+    temporary.line = 1;
+    let header int = llvm_map(&temporary, 0, 0, -1);
+    llvm_text(&temporary, "source_filename = ");
+    llvm_string(&temporary, unit.source_count > 0 ? unit.sources[0].path : "yh-module.yh");
+    llvm_text(&temporary, "\ntarget datalayout = "); llvm_string(&temporary, target.data_layout);
+    llvm_text(&temporary, "\ntarget triple = "); llvm_string(&temporary, target.triple);
+    llvm_text(&temporary, "\n\n"); llvm_map_end(&temporary, header);
+    llvm_globals(unit, &temporary);
+    let i int = 0;
+    for i < unit.symbol_count {
+        let symbol ir.IRModuleSymbol = unit.symbols[i];
+        if (symbol.kind == ir.IR_MODULE_SYMBOL_FUNCTION && symbol.defined == 0) {
+            let map int = llvm_map(&temporary, symbol.source, symbol.offset, i);
+            llvm_text(&temporary, "declare "); llvm_signature(unit, &symbol, &temporary, 0);
+            llvm_byte(&temporary, '\n'); llvm_map_end(&temporary, map);
+        }
+        i += 1;
+    }
+    llvm_byte(&temporary, '\n');
+    i = 0;
+    for i < unit.function_count { llvm_function(unit, &unit.functions[i], &temporary); i += 1; }
+    if (temporary.failed != 0) { llvm_output_release(&temporary); return gen.fail("LLVM 文本或来源映射缓冲分配失败/过大"); }
+    llvm_output_release(out);
+    out[0] = temporary;
+    return 0;
+}

@@ -327,13 +327,33 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   - 2026-10-14 已按用户要求启动多 agent：目标模型只读审查、CheckedModule 快照、
     ARM64 静态 SDK 同时推进；审查释放名额后继续模块 IR。主 agent 负责前端边界与集成。
     详细文件归属见实施方案；完整门和阶段提交集中执行，各候选临时产物隔离。
-  - [x] 首片 LL2-T：四个现有 Unix triple 的 TargetInfo、构建时宿主身份、严格目标解析；
-    旧 -target 别名明确映射到 AArch64，--target 接收完整 triple。check 可检查 x64，
-    旧代码生成在 LLVM 接入前明确拒绝 x64；$if 标记和目标文件筛选共用目标模型。
-    成功门为未知目标拒绝、无 LLVM 工具 check、qemu 下默认 AArch64、选择输出目标不改变宿主身份。
-    定向门和完整 make test selfhost-native 均通过（307/307、固定点 24、自解析 72、
-    模块 18/18、项目 96/96）；独立 agent 的 22 项边界探针通过。宿主操作统一、
-    受检快照、模块 IR、完整接口/缓存身份仍待后续，LL2 整体保持未完成。
+  - 首片 LL2-T 目标身份已完成并提交（`c0cd89e`）：四个现有 Unix triple 的 TargetInfo、
+    构建时宿主身份、严格目标解析、旧 -target 别名映射、`$if` 与目标源文件筛选共用目标模型；
+    定向门与完整门通过（307/307、固定点 24、自解析 72、模块 18/18、项目 96/96），
+    独立 agent 的 22 项边界探针通过。历史过程见 [finish.md](finish.md) 的 2026-10-14 条目与
+    [完成记录](01-finished/yh-LLVM-LL2目标身份-2026-10-14.md)，本节只保留未完成项。
+  - [x] 受检快照、受检前端闸门、模块 IR 与纯快照 lowering 已完成并提交：
+    `gen/front_stage.yh`、`ast/checked_module.yh` + `checked_module_verify.yh` +
+    `checked_module_ctx.yh` + `checked_module_lower.yh`、
+    `ir/ssa_module_00_model.yh` / `_10_build.yh` / `_20_verify.yh`，门禁
+    `tests/selfhost/llvm-front-output.py` / `llvm-checked.py` / `llvm-module.py` /
+    `llvm-lower.py` 与 fixture `llvmfront` / `llvmchecked` / `llvmmodule` / `llvmlower`。
+    当前源码上完整门重跑通过：307/307、固定点 cc3→cc4 共 24 个产物一致、自解析 82 文件、
+    模块 18/18、项目 **100/100**；`scalar.yh` 的纯快照 lowering 实测
+    `functions=5 phis=2 calls=4`，pointer/aggregate 带真实来源整模块拒绝。
+    历史与证据见 [finish.md](finish.md) 的 2026-10-15 条目与
+    [完成记录](01-finished/yh-LLVM-LL2受检快照与纯快照lowering-2026-10-15.md)。
+  - [ ] LLVM 模式常驻：`--backend llvm` / `--target` / `-O0/-O2` 的 CLI 与模块 worker
+    LLVM 分支未接入；check 侧的受检快照消费完即释放，worker 持有快照直到 IR 交接尚未实现。
+  - [ ] 首片覆盖之外的形态（全局对象数据、聚合/指针/浮点、间接调用、变参、
+    `switch`/`goto`/`for-in`）当前明确拒绝并带来源，不做静默回退；接入生产前需按
+    LL5/LL4/LL6/LL7 切片补齐。
+  - [ ] 模块 IR 的序列化与缓存身份：`ir_module_verify` 已实现（`llvm-module.py` 通过），
+    但 `ir_module_serialize` 及其版本尚未实现，`IR_MODULE_VERSION` 目前只是内存内版本，
+    临时 type_id 不能当跨缓存身份。
+  - [ ] 与 R2b 任务私有上下文契约对齐，并记录未闭合的完整版本硬门。
+  - 范围说明：宿主操作统一读取 `c_host_target`（目录/时钟/系统调用桥）按设计归后续宿主桥阶段，
+    完整接口/缓存身份归 LL9，均不在 LL2 本片。
 - [ ] **LL3 严格 x64 LLVM 首片**：文本 IR、整数/布尔、分支/phi/固定调用；
   生成 EM_X86_64 ELF 并在 WSL 直接运行，禁止回退且有来源诊断。
 - [ ] **LL8a 内存 helper**：先提供 LLVM memcpy/memset/strlen，检查自包含和自递归。

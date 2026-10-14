@@ -1,0 +1,191 @@
+module main;
+import core.ast;
+import core.comptime;
+import core.gen;
+import core.lex;
+import core.parse;
+
+// ============================================================================
+// fixture.yh —— LL3 纯快照降低（tests/selfhost/llvm-lower.py）的测试专用单文件前端
+//
+// 本文件只被门禁脚本复制进 llvmlower 项目的 main 模块，不参与编译器自身构建。
+// 职责：把 path 指向的单个 .yh 源文件走完真实前端
+// （读源 → 词法 → 文件头 → 顶层声明索引 → 两遍语义），在 AST 捕获仍然开启的
+// 状态下交出 ast.CheckedModule 快照，供 ast.lower_module 消费。
+//
+// 与编译器自身单文件检查路径（cmd/driver.yh 的 run_file_check）一致的调用顺序：
+//   gen.front_checked_begin() → gen.read_source() → gen.sem_init_tables()
+//   → lex.lex_all() → gs.c_compile = 1 → gen.ty_register_builtins()
+//   → gen.scope_push() → gen.sem_register_prelude() → 两遍语义
+//   → gen.front_checked_end()
+// 差别只有三处，且都是「让 AST arena 活到快照生成之后」所必需：
+//   1) 语义遍历前就置 gs.c_ast_capture = 1 并清空四个 arena。cmd/compile.yh 的
+//      sem_compile 只在 capture == 0 时临时打开捕获、并在返回前清空 arena；
+//      预先置 1 会让它整段跳过，arena 在遍历结束后仍然存活。
+//   2) 采用项目 worker 的「已索引文件」形态（c_file_indexed = 1 + PFile/PDecl）：
+//      只有这一形态会给顶层声明编号（c_file_decl_i），而 AST 捕获的
+//      ast_function_begin / ast_decl_attach_body 依赖该编号；旧单文件形态该编号
+//      恒为 -1，捕获会直接报「函数 AST 上下文没有待解析的函数声明」。
+//   3) 用 gen.set_source_path 把真实路径复制进固定缓冲，并把同一路径 intern 进
+//      名字池供 PFile.path_off 引用：快照复制名字池之后，lower_module 的拒绝
+//      诊断才能打印 "<源文件>:行:列"。
+//
+// 所有权：本文件只借用 GenState 与各模块 arena，不释放它们；快照由
+// ast.checked_module_capture 深拷贝后交给调用方（main.yh 负责 release）。
+// 失败路径一律不写 out 指向的 CheckedModule，调用方仍然看到零初始化对象。
+// ============================================================================
+
+// lower_fixture_file_begin：登记单文件的 PFile 只读快照并把前端切换到该文件。
+// 路径同时进入两处：gen.set_source_path 的固定缓冲（解析期诊断用）与名字池
+// （PFile.path_off，快照与 lowering 报告用）。source/tokens 直接借用刚完成的
+// 词法结果；顶层声明索引留空，由 lower_fixture_capture_begin 调
+// parse.decl_index_file 填写。
+// 返回 0 成功；重复会话、路径过长或分配失败返回非 0。
+fn lower_fixture_file_begin(gs *gen.GenState, path *char) int {
+    if (gs.p_files != 0) { return 1; }
+    let path_len int = 0;
+    for path[path_len] != 0 { path_len += 1; }
+    let path_off int = gen.tml_intern_str(path.to_type(*u8), 0, path_len);
+    if (path_off < 0) { return 1; }
+    let files *gen.PFile = malloc(sizeof(gen.PFile).to_type(u64)).to_type(*gen.PFile);
+    if (files == 0) { return 1; }
+    let file gen.PFile;
+    file.path_off = path_off;
+    file.path_len = path_len;
+    file.mod = -1;              // 单文件形态没有项目模块模型
+    file.line = 0;
+    file.source = gs.c_src;
+    file.source_len = gs.c_src_len;
+    file.tokens = gs.c_toks;
+    file.token_n = gs.c_tok_n;
+    file.decls = 0;
+    file.decl_n = 0;
+    files[0] = file;
+    gs.p_files = files;
+    gs.p_file_n = 1;
+    gs.p_file_cap = 1;
+    // 前端当前文件身份：单文件恒为 0；声明编号未定，由 parse_indexed_decls 逐条设置。
+    gs.c_active_file = 0;
+    gs.c_file_decl_i = -1;
+    gs.c_file_indexed = 1;
+    gs.c_tok_cap = gs.c_tok_n;
+    gs.c_pos = 0;
+    return 0;
+}
+
+// lower_fixture_capture_begin：解析文件头、建立顶层声明索引并打开 AST 捕获。
+// 顺序与项目 worker（cmd/module_worker.yh 的 ast_decl_add_file 前置段）一致：
+// 文件头必须先于声明索引消费掉，索引才会从第一条业务声明开始；
+// ast_decl_add_file 只在 capture == 1 时工作，所以捕获开关与四次 arena reset
+// 必须排在它前面（reset 会一并清掉文件声明索引，顺序不能颠倒）。
+// 返回 0 成功；文件头非法、索引建立失败或声明登记失败返回非 0。
+fn lower_fixture_capture_begin(gs *gen.GenState) int {
+    gs.c_pos = 0;
+    parse.mod_reset_file();
+    if (parse.mod_parse_head() != 0) { return 1; }
+    // 此刻 c_pos 停在第一条业务声明上，索引范围从此处到文件末尾。
+    if (parse.decl_index_file(0) != 0) { return 1; }
+    // 打开捕获并清空四个 arena：sem_compile 只在 capture == 0 时才会代为清空，
+    // 这里先置 1，arena 就一直保留到快照生成之后。
+    gs.c_ast_capture = 1;
+    ast.ast_expr_reset();
+    ast.ast_stmt_reset();
+    ast.ast_decl_reset();
+    ast.ast_function_reset();
+    // 接上声明索引：ast_decl_add_file 要求 c_active_file 与 c_file_decls
+    // 同当前 PFile 一致，之后 parse_indexed_decls 会逐条设置 c_file_decl_i。
+    gs.c_pos = 0;
+    gs.c_file_decl_i = -1;
+    gs.c_file_decls = gs.p_files[0].decls;
+    gs.c_file_decl_n = gs.p_files[0].decl_n;
+    return ast.ast_decl_add_file(0) == 0 ? 0 : 1;
+}
+
+// lower_fixture_semantics：按 cmd/compile.yh 的 sem_compile 顺序跑完两遍语义。
+// 与 sem_compile 的唯一差别：AST 捕获由调用方预先打开并一直保持，因此这里既
+// 不需要「临时打开」也不需要「返回前清空 arena」的包装。
+// 返回 0 成功；任一遍失败或产生诊断（gs.c_errors > 0）返回非 0。
+fn lower_fixture_semantics(gs *gen.GenState) int {
+    comptime.ct_reset();
+    // pass 1：登记类型、函数签名与全局名字；已索引形态逐条按 PDecl 解析。
+    gs.c_pass = 1;
+    gs.c_pos = 0;
+    if (parse.parse_indexed_decls(0) != 0 || gs.c_errors > 0) { return 1; }
+    // 声明绑定：把符号与签名类型挂到 AstDecl 上，lowering 靠它取函数签名。
+    gs.c_pos = 0;
+    if (ast.ast_decl_bind_file(0) != 0) { return 1; }
+    // pass 2：先捕获编译期函数正文（全局常量初始化可能调用它们）。
+    gs.c_pass = 2;
+    gs.c_pos = 0;
+    if (parse.parse_source_ct_fns() != 0 || gs.c_errors > 0) { return 1; }
+    // 布局常量：登记请求 → 求值 → 推进；不收敛时给出现有卡死诊断。
+    if (parse.parse_source_ct_layout_register() != 0) { return 1; }
+    for 1 {
+        let pending_before int = comptime.ct_value_pending_count()
+            + comptime.ct_layout_expr_pending_count()
+            + comptime.ct_layout_pending_count();
+        if (pending_before == 0) { break; }
+        if (parse.parse_source_ct_layout_consts() != 0) { return 1; }
+        if (parse.parse_source_ct_layout_exprs() != 0) { return 1; }
+        if (comptime.ct_layout_advance() < 0) { return 1; }
+        let pending_after int = comptime.ct_value_pending_count()
+            + comptime.ct_layout_expr_pending_count()
+            + comptime.ct_layout_pending_count();
+        if (pending_after == 0) { break; }
+        if (pending_after >= pending_before) {
+            if (comptime.ct_layout_pending_count() > 0) {
+                comptime.ct_layout_stuck_diagnostic();
+            } else {
+                comptime.ct_value_stuck_diagnostic();
+            }
+            return 1;
+        }
+    }
+    if (comptime.ct_layout_resolve() != 0 || gs.c_errors > 0) { return 1; }
+    // 延迟的枚举判别值：此时编译期函数正文已捕获，可以真实求值。
+    if (parse.ct_enum_pending_run() != 0) { return 1; }
+    // pass 2a：全局 let/const 初始化（引用先声明规则由此保证）。
+    gs.c_pos = 0;
+    if (parse.parse_source_globals() != 0 || gs.c_errors > 0) { return 1; }
+    // pass 2b：函数体；表达式/语句/绑定/边的 AST 捕获发生在这一遍。
+    gs.c_pos = 0;
+    if (parse.parse_source_fns() != 0 || gs.c_errors > 0) { return 1; }
+    // arena 自检：范围重叠、父子越界或函数上下文缺失都在这里暴露。
+    if (ast.ast_expr_verify() != 0 || ast.ast_stmt_verify() != 0
+        || ast.ast_decl_verify() != 0 || ast.ast_function_verify() != 0) { return 1; }
+    return 0;
+}
+
+// lower_fixture_capture：真实前端初始化 + 单文件语义两遍 + 受检快照捕获。
+// 成功返回 0，并把独立快照写入 out；任何一步失败返回非 0，且 out 保持零初始化
+// —— checked_module_capture 只在全部复制与校验通过后才写 out，所以失败分支
+// 直接返回即可，既不替调用方清理也不产生半成品句柄。
+fn lower_fixture_capture(path *char, out *ast.CheckedModule) int {
+    if (path == 0 || path[0] == 0 || out == 0 || out.storage != 0) { return 1; }
+    let gs *gen.GenState = gen.G();
+    // 会话复位：c_active_file / c_file_decl_i 的 -1 初值与宿主目标身份
+    // （快照的 target 由 gs.c_target 经 target_resolve 得到）都来自这里。
+    gen.state_init();
+    // 与 `yh check <file.yh>` 相同的开关：只做语义检查，不发射旧汇编。
+    // 两点都是本门需要的：front_checked_verify 要求四类旧缓冲为空；输入文件是
+    // 库形态（入口 main 不带 argc/argv），不做入口签名检查。
+    gs.c_check_only = 1;
+    if (gen.front_checked_begin() != 0) { return 1; }
+    // 读源 → 语义表 → 词法；路径先进固定缓冲，解析期诊断才有文件名。
+    if (gen.set_source_path(path) != 0 || gen.read_source(path) != 0) { return 1; }
+    if (gen.sem_init_tables() != 0) { return 1; }
+    gs.c_pos = 0;
+    if (lex.lex_all() != 0) { return 1; }
+    // 单文件 PFile 快照 → 文件头/声明索引/捕获开关。
+    if (lower_fixture_file_begin(gs, path) != 0) { return 1; }
+    if (lower_fixture_capture_begin(gs) != 0) { return 1; }
+    // 编译模式与 prelude 登记：与 run_file_check 同序，晚于词法、早于语义。
+    gs.c_compile = 1;
+    if (gen.ty_register_builtins() != 0 || gen.scope_push() != 0
+        || gen.sem_register_prelude() != 0) { return 1; }
+    if (lower_fixture_semantics(gs) != 0) { return 1; }
+    // 阶段收尾仍要求旧汇编缓冲为零；快照捕获放在最后一步，保证失败时 out 不变。
+    if (gen.front_checked_verify() != 0 || gen.front_checked_end() != 0) { return 1; }
+    if (ast.checked_module_capture(out) != 0) { return 1; }
+    return 0;
+}

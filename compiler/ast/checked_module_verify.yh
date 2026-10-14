@@ -1,0 +1,403 @@
+module ast;
+import gen;
+
+// checked_storage_present：检查所有平面表的数量与存储，捕获失败时不解引用缺失数组。
+fn checked_storage_present(store *CheckedStorage) int {
+    if (store.expression_n < 0 || store.statement_n < 0 || store.edge_n < 0
+        || store.binding_n < 0 || store.template_n < 0 || store.declaration_n < 0
+        || store.function_n < 0 || store.type_n <= 0 || store.field_n < 0
+        || store.type_name_n < 0 || store.sig_n < 0 || store.sig_param_n < 0
+        || store.symbol_n < 0 || store.name_n < 0 || store.bss_n < 0
+        || (store.expression_n > 0 && store.expressions == 0)
+        || (store.statement_n > 0 && store.statements == 0)
+        || (store.edge_n > 0 && store.edges == 0)
+        || (store.binding_n > 0 && store.bindings == 0)
+        || (store.template_n > 0 && store.templates == 0)
+        || (store.declaration_n > 0 && store.declarations == 0)
+        || (store.function_n > 0 && store.functions == 0)
+        || store.types == 0 || store.type_home == 0
+        || (store.field_n > 0 && store.fields == 0)
+        || (store.type_name_n > 0 && store.type_names == 0)
+        || (store.sig_n > 0 && (store.sig_abi == 0 || store.sig_ret == 0
+            || store.sig_np == 0 || store.sig_vararg == 0 || store.sig_first == 0))
+        || (store.sig_param_n > 0 && store.sig_params == 0)
+        || (store.symbol_n > 0 && store.symbols == 0)
+        || (store.name_n > 0 && store.names == 0)
+        || (store.bss_n > 0 && store.bss_symbols == 0)) { return -1; }
+    return 0;
+}
+
+// checked_name_valid：池偏移与长度必须指向完整 NUL 结尾条目；先用减法避免加法溢出。
+fn checked_name_valid(store *CheckedStorage, off int, length int) int {
+    if (store.names == 0 || off < 0 || length < 0 || off >= store.name_n
+        || length >= store.name_n - off || store.names[off + length] != 0) { return 0; }
+    return 1;
+}
+
+// checked_range：验证半开区间在其拥有数组中；非空约束由消费方单独检查。
+fn checked_range(first int, after int, count int) int {
+    return (first >= 0 && after >= first && after <= count).to_type(int);
+}
+
+// checked_optional：验证可选行号，-1 表示没有引用，其他值必须在表内。
+fn checked_optional(row int, count int) int {
+    return (row >= -1 && row < count).to_type(int);
+}
+
+// checked_source_range：来源 token 范围只指向本快照自有文件，不查询 GenState。
+fn checked_source_range(store *CheckedStorage, file_id int,
+    first int, after int, token_count int) int {
+    if (file_id < 0 || file_id >= store.file_n || store.files[file_id].source == 0
+        || store.files[file_id].tokens == 0 || token_count <= 0
+        || token_count != store.files[file_id].token_n) { return 0; }
+    return checked_range(first, after, token_count);
+}
+
+// checked_verify_types：验证类型闭包、字段、签名和名字，以及不依赖旧符号槽的常量文本。
+fn checked_verify_types(store *CheckedStorage) int {
+    let i int = 0;
+    for i < store.type_n {
+        let type_row gen.CType = store.types[i];
+        if (type_row.kind < gen.TY_VOID || type_row.kind > gen.TY_FN
+            || type_row.size < 0 || type_row.align < 0) { return -1; }
+        if ((type_row.kind == gen.TY_PTR || type_row.kind == gen.TY_ARRAY
+                || type_row.kind == gen.TY_SLICE || type_row.kind == gen.TY_FN)
+            && (type_row.elem < 0 || type_row.elem >= store.type_n)) { return -1; }
+        if (type_row.kind == gen.TY_ARRAY && type_row.len < 0) { return -1; }
+        if ((type_row.kind == gen.TY_STRUCT || type_row.kind == gen.TY_UNION)
+            && (type_row.sub < 0 || type_row.len < 0 || type_row.sub > store.field_n
+                || type_row.len > store.field_n - type_row.sub)) { return -1; }
+        if (type_row.kind == gen.TY_FN && (type_row.sub < 0 || type_row.sub >= store.sig_n
+            || type_row.elem != store.sig_ret[type_row.sub]
+            || type_row.len != store.sig_np[type_row.sub])) { return -1; }
+        i += 1;
+    }
+    i = 0;
+    for i < store.field_n {
+        let field gen.SField = store.fields[i];
+        if (checked_name_valid(store, field.name_off, field.name_len) == 0
+            || field.type_id < 0 || field.type_id >= store.type_n || field.offset < 0) { return -1; }
+        i += 1;
+    }
+    i = 0;
+    for i < store.sig_n {
+        let first int = store.sig_first[i];
+        let count int = store.sig_np[i] + (store.sig_vararg[i] == 2 ? 1 : 0);
+        if (store.sig_ret[i] < 0 || store.sig_ret[i] >= store.type_n
+            || store.sig_np[i] < 0 || store.sig_np[i] >= 2147483647
+            || store.sig_vararg[i] < 0 || store.sig_vararg[i] > 2
+            || (store.sig_abi[i] != gen.ABI_YH && store.sig_abi[i] != gen.ABI_C)
+            || first < 0 || first > store.sig_param_n
+            || count > store.sig_param_n - first) { return -1; }
+        i += 1;
+    }
+    i = 0;
+    for i < store.sig_param_n {
+        if (store.sig_params[i] < 0 || store.sig_params[i] >= store.type_n) { return -1; }
+        i += 1;
+    }
+    i = 0;
+    for i < store.type_name_n {
+        let name gen.TName = store.type_names[i];
+        if (checked_name_valid(store, name.name_off, name.name_len) == 0
+            || name.type_id < 0 || name.type_id >= store.type_n) { return -1; }
+        i += 1;
+    }
+    i = 0;
+    for i < store.symbol_n {
+        let symbol gen.CSym = store.symbols[i];
+        if (checked_name_valid(store, symbol.name_off, symbol.name_len) == 0
+            || symbol.type_id < 0 || symbol.type_id >= store.type_n
+            || symbol.kind < gen.SYM_VAR || symbol.kind > gen.SYM_FN
+            || (symbol.const_expr_off >= 0 && checked_name_valid(store,
+                symbol.const_expr_off, symbol.const_expr_len) == 0)) { return -1; }
+        i += 1;
+    }
+    return 0;
+}
+
+// checked_verify_files：检查所有加载文件的 byte/token/PDecl 存储，以及导入名字闭包。
+fn checked_verify_files(store *CheckedStorage) int {
+    if (store.file_n < 0 || store.import_n < 0 || store.string_n < 0
+        || (store.file_n > 0 && store.files == 0)
+        || (store.import_n > 0 && store.imports == 0)
+        || (store.string_n > 0 && store.strings == 0)) { return -1; }
+    let i int = 0;
+    for i < store.file_n {
+        let file gen.PFile = store.files[i];
+        if (file.source_len < 0 || file.token_n < 0 || file.decl_n < 0
+            || checked_name_valid(store, file.path_off, file.path_len) == 0
+            || (file.source == 0 && (file.source_len != 0 || file.token_n != 0 || file.decl_n != 0))
+            || (file.token_n > 0 && file.tokens == 0)
+            || (file.decl_n > 0 && file.decls == 0)) { return -1; }
+        let t int = 0;
+        for t < file.token_n {
+            let token gen.Tok = file.tokens[t];
+            if (token.start < 0 || token.len < 0 || token.start > file.source_len
+                || token.len > file.source_len - token.start || token.line <= 0 || token.col <= 0) {
+                return -1;
+            }
+            t += 1;
+        }
+        t = 0;
+        for t < file.decl_n {
+            let declaration gen.PDecl = file.decls[t];
+            if (checked_range(declaration.start, declaration.end, file.token_n) == 0
+                || declaration.start >= declaration.end || declaration.keyword < declaration.start
+                || declaration.keyword >= declaration.end) { return -1; }
+            t += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < store.import_n {
+        let imported gen.ModInfo = store.imports[i];
+        if (checked_name_valid(store, imported.bind_off, imported.bind_len) == 0
+            || checked_name_valid(store, imported.prefix_off, imported.prefix_len) == 0
+            || imported.ns_n < 0 || (imported.ns_n > 0 && imported.ns == 0)) { return -1; }
+        let j int = 0;
+        for j < imported.ns_n {
+            let entry gen.ModNsEnt = imported.ns[j];
+            if (checked_name_valid(store, entry.name_off, entry.name_len) == 0
+                || checked_optional(entry.sym, store.symbol_n) == 0
+                || checked_optional(entry.tid, store.type_n) == 0) { return -1; }
+            j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < store.string_n {
+        let string CheckedString = store.strings[i];
+        if (string.label <= 0 || checked_name_valid(store, string.name_off, string.name_len) == 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < store.bss_n {
+        let symbol int = store.bss_symbols[i];
+        if (symbol < 0 || symbol >= store.symbol_n
+            || (store.symbols[symbol].flags & gen.F_GLOBAL) == 0) { return -1; }
+        i += 1;
+    }
+    if (store.suffix_off >= 0 && checked_name_valid(store, store.suffix_off, store.suffix_len) == 0) {
+        return -1;
+    }
+    return 0;
+}
+
+// checked_verify_expressions：验证 typed 表达式子边、名称和局部稳定绑定，不解引用旧符号。
+fn checked_verify_expressions(store *CheckedStorage) int {
+    let i int = 0;
+    for i < store.expression_n {
+        let node AstExpr = store.expressions[i];
+        if (node.kind < AST_EXPR_PRIMARY || node.kind > AST_EXPR_CTFIELD
+            || checked_source_range(store, node.file_id, node.first, node.after, node.token_count) == 0
+            || checked_optional(node.type_id, store.type_n) == 0
+            || checked_optional(node.layout_type_id, store.type_n) == 0
+            || checked_optional(node.sym_type_id, store.type_n) == 0
+            || checked_optional(node.binding_row, store.binding_n) == 0
+            || checked_optional(node.child0, i) == 0 || checked_optional(node.child1, i) == 0
+            || checked_optional(node.child2, i) == 0
+            || (node.sym_name_off >= 0 && checked_name_valid(store,
+                node.sym_name_off, node.sym_name_len) == 0)) { return -1; }
+        let child int = node.child0;
+        let j int = 0;
+        for j < 3 {
+            if (j == 1) { child = node.child1; }
+            if (j == 2) { child = node.child2; }
+            if (child >= 0 && (store.expressions[child].file_id != node.file_id
+                || store.expressions[child].first < node.first
+                || store.expressions[child].after > node.after)) { return -1; }
+            j += 1;
+        }
+        if (node.binding_row >= 0) {
+            let binding AstBinding = store.bindings[node.binding_row];
+            if (binding.file_id != node.file_id || binding.owner_decl != node.owner_decl
+                || binding.sym_id != node.sym_id || binding.sym_type_id != node.sym_type_id) { return -1; }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// checked_verify_statements：验证语句树、表达式边及绑定链；递增行号同时排除链环。
+fn checked_verify_statements(store *CheckedStorage) int {
+    let i int = 0;
+    for i < store.statement_n {
+        let node AstStmt = store.statements[i];
+        if (node.kind < AST_STMT_BLOCK || node.kind > AST_STMT_COMPTIME
+            || checked_source_range(store, node.file_id, node.first, node.after, node.token_count) == 0
+            || checked_optional(node.parent, i) == 0
+            || checked_optional(node.next_sibling, store.statement_n) == 0
+            || checked_optional(node.root_next, store.statement_n) == 0) { return -1; }
+        if (node.parent >= 0 && (store.statements[node.parent].file_id != node.file_id
+            || node.first < store.statements[node.parent].first
+            || node.after > store.statements[node.parent].after)) { return -1; }
+        let child int = node.first_child;
+        let previous int = i;
+        let last int = -1;
+        for child >= 0 {
+            if (child <= previous || child >= store.statement_n
+                || store.statements[child].parent != i) { return -1; }
+            previous = child;
+            last = child;
+            child = store.statements[child].next_sibling;
+        }
+        if (child != -1 || last != node.last_child) { return -1; }
+        let edge int = node.first_expr;
+        previous = -1;
+        last = -1;
+        for edge >= 0 {
+            if (edge <= previous || edge >= store.edge_n) { return -1; }
+            let expr int = store.edges[edge].expr_id;
+            if (expr < 0 || expr >= store.expression_n
+                || store.expressions[expr].file_id != node.file_id
+                || store.expressions[expr].first < node.first
+                || store.expressions[expr].after > node.after) { return -1; }
+            previous = edge;
+            last = edge;
+            edge = store.edges[edge].next;
+        }
+        if (edge != -1 || last != node.last_expr) { return -1; }
+        edge = node.first_binding;
+        previous = -1;
+        last = -1;
+        for edge >= 0 {
+            if (edge <= previous || edge >= store.binding_n
+                || store.bindings[edge].stmt_id != i) { return -1; }
+            previous = edge;
+            last = edge;
+            edge = store.bindings[edge].next;
+        }
+        if (edge != -1 || last != node.last_binding) { return -1; }
+        i += 1;
+    }
+    i = 0;
+    for i < store.binding_n {
+        let binding AstBinding = store.bindings[i];
+        if (binding.sym_type_id < 0 || binding.sym_type_id >= store.type_n
+            || binding.id < 0 || binding.file_id < 0 || binding.file_id >= store.file_n
+            || checked_optional(binding.stmt_id, store.statement_n) == 0
+            || checked_optional(binding.next, store.binding_n) == 0
+            || binding.name_token < 0 || binding.name_token >= store.files[binding.file_id].token_n) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// checked_verify_functions：验证声明与函数范围闭包，不读取旧 asm 范围或 GenState 输出。
+fn checked_verify_functions(store *CheckedStorage) int {
+    let i int = 0;
+    for i < store.declaration_n {
+        let node AstDecl = store.declarations[i];
+        if (checked_source_range(store, node.file_id, node.first, node.after, node.token_count) == 0
+            || node.first >= node.after || node.decl_index < 0
+            || node.decl_index >= store.files[node.file_id].decl_n
+            || checked_optional(node.body_stmt, store.statement_n) == 0) { return -1; }
+        if (node.kind == gen.TK_FN && (node.sym_id < 0 || node.sym_id >= store.symbol_n
+            || node.type_id < 0 || node.type_id >= store.type_n
+            || store.symbols[node.sym_id].type_id != node.type_id
+            || store.types[node.type_id].kind != gen.TY_FN)) { return -1; }
+        i += 1;
+    }
+    i = 0;
+    for i < store.function_n {
+        let ctx CheckedFunction = store.functions[i];
+        if (checked_range(ctx.expr_first, ctx.expr_after, store.expression_n) == 0
+            || checked_range(ctx.stmt_first, ctx.stmt_after, store.statement_n) == 0
+            || checked_range(ctx.edge_first, ctx.edge_after, store.edge_n) == 0
+            || checked_range(ctx.binding_first, ctx.binding_after, store.binding_n) == 0
+            || ctx.decl_row < 0 || ctx.decl_row >= store.declaration_n
+            || ctx.body_stmt < ctx.stmt_first || ctx.body_stmt >= ctx.stmt_after) { return -1; }
+        let declaration AstDecl = store.declarations[ctx.decl_row];
+        if (declaration.kind != gen.TK_FN || declaration.file_id != ctx.file_id
+            || declaration.decl_index != ctx.owner_decl || declaration.first != ctx.token_first
+            || declaration.after != ctx.token_after || declaration.body_stmt != ctx.body_stmt
+            || store.statements[ctx.body_stmt].kind != AST_STMT_BLOCK) { return -1; }
+        if (i > 0 && (ctx.expr_first < store.functions[i - 1].expr_after
+            || ctx.stmt_first < store.functions[i - 1].stmt_after
+            || ctx.edge_first < store.functions[i - 1].edge_after
+            || ctx.binding_first < store.functions[i - 1].binding_after)) { return -1; }
+        let row int = ctx.expr_first;
+        for row < ctx.expr_after {
+            let node AstExpr = store.expressions[row];
+            if (node.file_id != ctx.file_id || node.owner_decl != ctx.owner_decl
+                || node.first < ctx.token_first || node.after > ctx.token_after
+                || (node.child0 >= 0 && node.child0 < ctx.expr_first)
+                || (node.child1 >= 0 && node.child1 < ctx.expr_first)
+                || (node.child2 >= 0 && node.child2 < ctx.expr_first)
+                || (node.binding_row >= 0 && (node.binding_row < ctx.binding_first
+                    || node.binding_row >= ctx.binding_after))) { return -1; }
+            row += 1;
+        }
+        row = ctx.binding_first;
+        for row < ctx.binding_after {
+            let binding AstBinding = store.bindings[row];
+            if (binding.file_id != ctx.file_id || binding.owner_decl != ctx.owner_decl
+                || binding.id != row - ctx.binding_first) { return -1; }
+            row += 1;
+        }
+        row = ctx.stmt_first;
+        for row < ctx.stmt_after {
+            let statement AstStmt = store.statements[row];
+            if (statement.file_id != ctx.file_id || statement.first < ctx.token_first
+                || statement.after > ctx.token_after
+                || (statement.parent >= 0 && (statement.parent < ctx.stmt_first
+                    || statement.parent >= ctx.stmt_after))
+                || (statement.first_expr >= 0 && (statement.first_expr < ctx.edge_first
+                    || statement.first_expr >= ctx.edge_after))
+                || (statement.last_expr >= 0 && (statement.last_expr < ctx.edge_first
+                    || statement.last_expr >= ctx.edge_after))
+                || (statement.first_binding >= 0 && (statement.first_binding < ctx.binding_first
+                    || statement.first_binding >= ctx.binding_after))
+                || (statement.last_binding >= 0 && (statement.last_binding < ctx.binding_first
+                    || statement.last_binding >= ctx.binding_after))) { return -1; }
+            row += 1;
+        }
+        row = ctx.edge_first;
+        for row < ctx.edge_after {
+            if (store.edges[row].expr_id < ctx.expr_first
+                || store.edges[row].expr_id >= ctx.expr_after) { return -1; }
+            row += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < store.template_n {
+        let template AstComptimeFor = store.templates[i];
+        if (template.stmt_id < 0 || template.stmt_id >= store.statement_n
+            || template.body_stmt < 0 || template.body_stmt >= store.statement_n
+            || checked_range(template.binding_row, template.binding_after, store.binding_n) == 0
+            || template.binding_row == template.binding_after || template.low >= template.high
+            || template.node_cost <= 0
+            || store.statements[template.stmt_id].kind != AST_STMT_COMPTIME
+            || store.statements[template.body_stmt].kind != AST_STMT_BLOCK
+            || store.statements[template.body_stmt].parent != template.stmt_id
+            || store.bindings[template.binding_row].stmt_id != template.stmt_id) { return -1; }
+        i += 1;
+    }
+    return 0;
+}
+
+// checked_module_verify：仅访问快照自有表与静态目标表，原 arena 重置后仍可重复验证。
+// 无效对象返回 -1，不修改诊断或全局状态；capture 负责把失败转为前端错误。
+pub fn checked_module_verify(unit *CheckedModule) int {
+    if (unit == 0 || unit.storage == 0 || unit.target.triple == 0
+        || unit.target.data_layout == 0 || unit.target.abi == 0) { return -1; }
+    let expected gen.TargetInfo;
+    if (gen.target_resolve(unit.target.triple, &expected) != 0
+        || gen.cstr_eq(unit.target.data_layout, expected.data_layout) == 0
+        || gen.cstr_eq(unit.target.abi, expected.abi) == 0
+        || unit.target.os != expected.os || unit.target.arch != expected.arch
+        || unit.target.pointer_bits != expected.pointer_bits
+        || unit.target.little_endian != expected.little_endian
+        || unit.target.layout_version != expected.layout_version) { return -1; }
+    let store *CheckedStorage = unit.storage.to_type(*CheckedStorage);
+    if (checked_storage_present(store) != 0 || checked_verify_types(store) != 0
+        || checked_verify_files(store) != 0 || checked_verify_expressions(store) != 0
+        || checked_verify_statements(store) != 0 || checked_verify_functions(store) != 0) { return -1; }
+    return 0;
+}

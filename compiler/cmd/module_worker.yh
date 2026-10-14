@@ -11,6 +11,7 @@ import ast;
 fn mb_emit_indexed_module(m int, main_off int, main_len int,
     out_s *char, ir_cache_salt u64) int {
     let gs *gen.GenState = gen.G();
+    if (gs.c_check_only != 0 && gen.front_checked_begin() != 0) { return -1; }
     comptime.ct_reset();
     gs.c_front_cache = 1;
     gs.c_ast_capture = 0;
@@ -208,6 +209,16 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     if (ast.ast_function_verify() != 0) {
         return gen.fail("内部错误：函数 AST 上下文校验失败");
     }
+    // check 也通过真实受检快照边界，确认合法输入不依赖旧输出或可变语义表。
+    // 当前检查消费完即释放；LLVM worker 在后续 lowering 分支持有到 IR 交接完成。
+    if (gs.c_check_only != 0) {
+        let checked ast.CheckedModule;
+        if (gen.front_checked_verify() != 0
+            || ast.checked_module_capture(&checked) != 0) { return -1; }
+        let checked_ok int = ast.checked_module_verify(&checked);
+        ast.checked_module_release(&checked);
+        if (checked_ok != 0) { return gen.fail("内部错误：受检模块快照校验失败"); }
+    }
     if (gs.c_check_only == 0) {
         if (pj_canon(build_off, build_len, "ir") != 0) { return -1; }
         let ir_cache_dir [620]u8;
@@ -234,6 +245,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     if (gs.c_check_only == 0 && drv_write_asm(out_s) != 0) {
         return -1;
     }
+    if (gs.c_check_only != 0 && gen.front_checked_end() != 0) { return -1; }
     mb_print_stats();
     return 0;
 }
