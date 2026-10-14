@@ -105,21 +105,28 @@ LLVM 模式的 runner 在 LL9 接入前使用定向 fixture 的独立候选和�
 `tests/modules/projects/llvmcoverage/main/main.yh`；复用 `tools/compiler-performance.py`。
 
 **接口：**消费现有 --stats；产生 checked/lowered/backend_emitted/fallback 计数与稳定原因目录，
-统计 schema 记录在 `tmp/llvm-migration/baseline.json`，历史字段不悄悄改变含义。
+统计 schema 记录在 `tmp/llvm-migration/baseline/coverage.json`，历史字段不悄悄改变含义。
 
-- [ ] 核对工具绝对路径/版本、ARM64 种子哈希、当前源码快照、CPU；
+- [x] 核对工具绝对路径/版本、ARM64 种子哈希、当前源码快照、CPU；
   分开记录旧 qemu/交叉工具与原生 x64 LLVM/链接工具。
-- [ ] 用最小 IR 生成并链接 x86_64 ELF64，检查 machine=62、直接运行退出 0；
+- [x] 用最小 IR 生成并链接 x86_64 ELF64，检查 machine=62、直接运行退出 0；
   原生工具调用不能经过 crossbin/gcc，这个工具链探针不冒充 yh 支持。
-- [ ] llvmcoverage fixture 同时含一个受支持整数函数和一个全局赋值函数；
+- [x] llvmcoverage fixture 同时含一个受支持整数函数和一个全局赋值函数；
   测试断言 `checked == lowered + rejected`、`emitted <= lowered`，并区分“SSA 成功但未发射”。
-- [ ] 增加实际发射及拒绝原因计数，重测 compiler/；生成一次基线报告，不重复引用 991/22 作实时值。
-- [ ] 冻结冷编/无改动/单函数修改负载；采样至少 20 轮，保存原始样本和中位数/p95/RSS。
-- [ ] 评审 ADR-0014 的 LLVM 正式依赖、旧工具链任务对接和运行时约束，记录设计政策；
+- [x] 增加实际发射及拒绝原因计数，重测 compiler/；生成一次基线报告，不重复引用 991/22 作实时值。
+- [x] 冻结冷编/无改动/单函数修改负载；采样至少 20 轮，保存原始样本和中位数/p95/RSS。
+- [x] 评审 ADR-0014 的 LLVM 正式依赖、旧工具链任务对接和运行时约束，记录设计政策；
   不在本轮文档交付时将其自动标为已采纳。
 
 **验证：**`python3 tests/selfhost/llvm-baseline.py --compiler-path ./yh`；
 报告包含环境、实用覆盖/原因和性能；上述计数关系成立，旧后端行为/固定点不变。
+
+2026-10-14 LL0 已验收：运行期受检 923、SSA 验证/实际发射各 22、前端拒绝/回退各 901；
+comptime 不计入覆盖分母。每类性能场景 20 个原始样本，报告见
+tmp/llvm-migration/ll0-performance.json；R0 语料不再兼容已删除的字段 pub，
+本轮另行冻结当前源码到 tmp/llvm-migration/baseline/performance-corpus/，不改历史语料。
+采样环境为 WSL/DrvFS + ARM64 qemu，SDK 链接研究同期运行；数据只作为本环境启动基线，
+正式性能对照须在 LL11 无其他重负载时重测，不能冒充 ARM64 原生数据。
 
 ## LL0E：固定 SDK 与内嵌 LLVM 桥
 

@@ -263,7 +263,43 @@ fn ast_ir_assign_binding(ctx *AstFunctionContext, stmt_id int,
 }
 
 
-// ast_ir_lower_module：遍历当前 worker 收集的声明并累计成功验证的函数数。
+// ast_ir_report_reject：仅在 --stats 下报告稳定来源与拒绝阶段，不改变合法性。
+// 每行有界且一次 write，函数次序由 arena 决定；跨 worker 的目录由报告脚本排序。
+fn ast_ir_report_reject(ctx *AstFunctionContext, reason int) void {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_stats_enabled == 0 || ctx.decl_row < 0
+        || ctx.decl_row >= ast_decl_count) { return; }
+    let decl AstDecl = ast_decl_nodes[ctx.decl_row];
+    let text [2048]u8;
+    let n int = gen.append_str(text, 0, "yh-reject file=");
+    if (decl.file_id >= 0 && decl.file_id < gs.p_file_n) {
+        n = gen.append_str_limit(text, n, 1200,
+            gen.arr_cstr(&gs.np_data[gs.p_files[decl.file_id].path_off]));
+    }
+    n = gen.append_str(text, n, " line=");
+    n = gen.append_int(text, n, decl.line);
+    n = gen.append_str(text, n, " col=");
+    n = gen.append_int(text, n, decl.col);
+    n = gen.append_str(text, n, " function=");
+    if (decl.sym_id >= 0 && decl.sym_id < gs.c_sym_n) {
+        n = gen.append_str_limit(text, n, 1800,
+            gen.arr_cstr(&gs.np_data[gs.c_syms[decl.sym_id].name_off]));
+    }
+    let why *char = "context";
+    if (reason == 2) { why = "signature"; }
+    if (reason == 3) { why = "bindings"; }
+    if (reason == 4) { why = "return-type"; }
+    if (reason == 5) { why = "body"; }
+    if (reason == 6) { why = "statement-expression"; }
+    if (reason == 7) { why = "nonvoid-fallthrough"; }
+    if (reason == 8) { why = "backend"; }
+    n = gen.append_str(text, n, " reason=");
+    n = gen.append_str(text, n, why);
+    n = gen.append_byte(text, n, '\n');
+    gen.write_all(2, text, n);
+}
+
+// ast_ir_lower_module：分别统计受检、SSA 验证、实际发射和回退，不混淆覆盖层次。
 pub fn ast_ir_lower_module(cache_dir *char, compiler_salt u64) int {
     let gs *gen.GenState = gen.G();
     ast_ir_inline_reset();
@@ -291,13 +327,24 @@ pub fn ast_ir_lower_module(cache_dir *char, compiler_salt u64) int {
                 i += 1;
                 continue;
             }
+            gs.c_stats_checked_functions += 1;
+            let emitted_before int = gs.c_stats_backend_emitted;
             let lowered int = ast_ir_lower_function(&ctx,
                 cache_dir, compiler_salt, &asm_shift);
             if (lowered < 0) {
                 ast_ir_inline_reset();
                 return -1;
             }
-            if (lowered != 0) { gs.c_stats_ir_functions += 1; }
+            if (lowered != 0) {
+                gs.c_stats_ir_functions += 1;
+                if (gs.c_check_only == 0 && gs.c_stats_backend_emitted == emitted_before) {
+                    gs.c_stats_backend_rejected += 1;
+                    ast_ir_report_reject(&ctx, 8);
+                }
+            } else {
+                gs.c_stats_ir_rejected += 1;
+                ast_ir_report_reject(&ctx, gs.c_ir_reject_reason);
+            }
             i += 1;
         }
         pass += 1;

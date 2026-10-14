@@ -1152,6 +1152,7 @@ fn ast_ir_lower_expr(b *AstIRBuilder, ctx *AstFunctionContext,
 fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     compiler_salt u64, asm_shift *int) int {
     let gs *gen.GenState = gen.G();
+    gs.c_ir_reject_reason = 1;
     if (ctx.decl_row < 0 || ctx.decl_row >= ast_decl_count) { return 0; }
     let decl *AstDecl = &ast_decl_nodes[ctx.decl_row];
     if (decl.kind != gen.TK_FN || decl.body_stmt < ctx.stmt_first
@@ -1161,10 +1162,12 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
         return 0;
     }
     let fn_type gen.CType = gs.t_types[decl.type_id];
+    gs.c_ir_reject_reason = 2;
     if (fn_type.kind != gen.TY_FN || fn_type.sub < 0 || fn_type.sub >= gs.t_sig_n) {
         return 0;
     }
     let sig int = fn_type.sub;
+    gs.c_ir_reject_reason = 3;
     if (ast_ir_bindings_supported(ctx, sig) == 0) {
         return 0;
     }
@@ -1172,6 +1175,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     let binding_count int = ctx.binding_after - ctx.binding_first;
     if (binding_count < param_count) { return 0; }
     let ret_type int = ast_ir_type(gs.t_sig_ret[sig]);
+    gs.c_ir_reject_reason = 4;
     let is_void_ret int = 0;
     if (ret_type < 0) {
         // void 函数使用固定类型表下标 0（IR_TY_VOID）；其余不可映射类型仍拒绝。
@@ -1181,6 +1185,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     }
 
     let body AstStmt = ast_stmt_nodes[decl.body_stmt];
+    gs.c_ir_reject_reason = 5;
     if (body.kind != AST_STMT_BLOCK) { return 0; }
 
     let cache_key u64 = ast_ir_cache_key(ctx, decl, sig, ret_type, compiler_salt);
@@ -1215,6 +1220,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
                     ir.ir_function_release(&cached);
                     return -1;
                 }
+                if (emitted == 0) { gs.c_stats_backend_emitted += 1; }
             }
             ir.ir_function_release(&cached);
             gs.c_stats_ir_cache_hits += 1;
@@ -1293,6 +1299,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
         b.local_values[pi] = param_value;
         pi += 1;
     }
+    gs.c_ir_reject_reason = 6;
     let status int = ast_ir_b_stmts(&b, ctx, body.first_child);
     if (status == -2) {
         ast_ir_b_release(&b);
@@ -1305,6 +1312,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     if (status == 1) {
         // 函数尾贯穿：void 允许隐式结束；非 void 贯穿说明是回退形态。
         if (is_void_ret == 0) {
+            gs.c_ir_reject_reason = 7;
             ast_ir_b_release(&b);
             return 0;
         }
@@ -1366,6 +1374,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
             ast_ir_b_release(&b);
             return -1;
         }
+        if (emitted == 0) { gs.c_stats_backend_emitted += 1; }
     }
     if (verified == 0 && cache_enabled != 0) {
         ast_ir_cache_write(gen.arr_cstr(cache_path), cache_key, &f);

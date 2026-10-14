@@ -53,7 +53,8 @@ def verify_corpus() -> tuple[int, int, int]:
     for line in manifest.read_text(encoding="utf-8").splitlines():
         digest, rel = line.split("  ", 1)
         path = CORPUS / rel
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        # 冻结清单对应入库 LF 文本，Windows 检出的 CRLF 不算内容变化。
+        actual = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         if actual != digest:
             raise RuntimeError(f"冻结语料校验失败：{rel}")
         seen.add(path.resolve())
@@ -61,7 +62,7 @@ def verify_corpus() -> tuple[int, int, int]:
     if seen != {path.resolve() for path in expected}:
         raise RuntimeError("冻结语料文件集合与 SHA256SUMS 不一致")
     sources = sorted(FROZEN_PROJECT.rglob("*.yh"))
-    size = sum(path.stat().st_size for path in sources)
+    size = sum(len(path.read_bytes().replace(b"\r\n", b"\n")) for path in sources)
     lines = sum(len(path.read_bytes().splitlines()) for path in sources)
     return len(sources), lines, size
 
@@ -109,8 +110,11 @@ def one_build(compiler: Path, project: Path, wrapper_dir: Path,
     for name, real in real_tools.items():
         env[f"YH_REAL_{name.upper()}"] = real
     started = time.perf_counter_ns()
+    profile = []
+    if b"system(" in (project / "cmd/project_state.yh").read_bytes():
+        profile = ["--legacy-system"]
     result = subprocess.run(
-        [str(compiler), "build", "--legacy-system", "--stats", "-o", "../yh"], cwd=project,
+        [str(compiler), "build", *profile, "--stats", "-o", "../yh"], cwd=project,
         capture_output=True, text=True, env=env, timeout=300,
     )
     elapsed_ns = time.perf_counter_ns() - started
@@ -183,6 +187,9 @@ def make_project(work: Path) -> Path:
     work.mkdir(parents=True, exist_ok=True)
     project = work / "compiler"
     shutil.copytree(FROZEN_PROJECT, project)
+    # 仅规范化 tmp 中的测量副本，不改写入库冻结源；每轮负载字节保持一致。
+    for path in [project / "project.toml", *project.rglob("*.yh")]:
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
     return project
 
 
@@ -234,7 +241,12 @@ def run_scenario(name: str, project: Path, compiler: Path, wrapper_dir: Path,
     """预热指定构建场景并采集多轮独立进程样本。"""
     source = project / "cmd" / "project_state.yh"
     original = source.read_bytes()
-    if original.count(ORIGINAL_FUNCTION) != 1:
+    original_function = ORIGINAL_FUNCTION
+    changed_function = CHANGED_FUNCTION
+    if original.count(original_function) == 0:
+        original_function = original_function.removeprefix(b"pub ")
+        changed_function = changed_function.removeprefix(b"pub ")
+    if original.count(original_function) != 1:
         raise RuntimeError("冻结源中的 pj_file_exists 函数与预期不符")
     sample_log = work / "tool-calls.log"
     samples = []
@@ -254,8 +266,8 @@ def run_scenario(name: str, project: Path, compiler: Path, wrapper_dir: Path,
         verify_function_change(binary, project, changed=False)
         for index in range(iterations):
             changed = index % 2 == 0
-            body = CHANGED_FUNCTION if changed else ORIGINAL_FUNCTION
-            source.write_bytes(original.replace(ORIGINAL_FUNCTION, body, 1))
+            body = changed_function if changed else original_function
+            source.write_bytes(original.replace(original_function, body, 1))
             sample_log.unlink(missing_ok=True)
             samples.append(measure(compiler, project, wrapper_dir, real_tools, sample_log))
             verify_function_change(binary, project, changed=changed)
@@ -268,14 +280,19 @@ def run_scenario(name: str, project: Path, compiler: Path, wrapper_dir: Path,
             samples.append(measure(compiler, project, wrapper_dir, real_tools, sample_log))
     else:
         raise ValueError(name)
-    return summarize(samples)
+    report = summarize(samples)
+    report["samples"] = samples
+    return report
 
 
 def main() -> int:
     """验证冻结输入并运行三组性能场景。"""
+    global CORPUS, FROZEN_PROJECT
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--compiler", default=str(ROOT / "yh"))
+    parser.add_argument("--output", type=Path, help="保存包含原始样本的 JSON 报告")
+    parser.add_argument("--corpus", type=Path, help="指定含 compiler/ 和 SHA256SUMS 的冻结快照")
     parser.add_argument("--worker", nargs=5, metavar=("COMPILER", "PROJECT", "WRAPPERS", "TOOLS_JSON", "LOG"))
     args = parser.parse_args()
     if args.worker:
@@ -283,6 +300,9 @@ def main() -> int:
         return sample_worker(args)
     if args.iterations < 1:
         parser.error("--iterations 必须大于 0")
+    if args.corpus:
+        CORPUS = args.corpus.resolve()
+        FROZEN_PROJECT = CORPUS / "compiler"
     count, lines, size = verify_corpus()
     module_file_counts = module_inventory()
     compiler = Path(args.compiler).resolve()
@@ -311,7 +331,8 @@ def main() -> int:
             if memory.returncode == 0:
                 memory_bytes = int(memory.stdout.strip())
         report = {
-            "corpus_revision": "8e17bdbb41b4dcb66306c79e784c89dc4420a6d9",
+            "corpus_revision": (hashlib.sha256((CORPUS / "SHA256SUMS").read_bytes()).hexdigest()
+                                if args.corpus else "8e17bdbb41b4dcb66306c79e784c89dc4420a6d9"),
             "corpus_files": count,
             "corpus_lines": lines,
             "corpus_bytes": size,
@@ -322,7 +343,9 @@ def main() -> int:
             "iterations": args.iterations,
             "compiler": str(compiler),
             "compiler_sha256": hashlib.sha256(compiler.read_bytes()).hexdigest(),
-            "compiler_profile": "--legacy-system 仅用于冻结的 R0 源码，它仍调用 system(cmd)",
+            "compiler_profile": ("--legacy-system" if b"system(" in
+                                 (FROZEN_PROJECT / "cmd/project_state.yh").read_bytes()
+                                 else "systemless 默认配置"),
             "tool_versions": tool_versions,
             "scenarios": {},
         }
@@ -332,14 +355,22 @@ def main() -> int:
                 name, project, compiler, wrapper_dir, real_tools,
                 args.iterations, work / name,
             )
-            print(f"{name}: {json.dumps(report['scenarios'][name], ensure_ascii=False)}", flush=True)
+            summary = {key: value for key, value in report["scenarios"][name].items()
+                       if key != "samples"}
+            print(f"{name}: {json.dumps(summary, ensure_ascii=False)}", flush=True)
         report["tooling"] = {
             "assembler_linker": sorted(real_tools),
             "counted": "PATH 中 gcc/clang 汇编与链接调用；目录/环境 API、ls/printenv 不计",
             "phase_visibility": "模块重编/缓存、词法、顶层声明索引、项目索引、模块遍历、worker、SSA 函数数、项目装载、模块调度、对象缓存/汇编与链接决策耗时及单次 yh 进程峰值 RSS；语义/check 与发射耗时仍未独立计数",
             "rss_note": "RUSAGE_CHILDREN 单次样本的最大子进程 RSS，不是并发进程 RSS 总和",
         }
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        serialized = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(serialized, encoding="utf-8")
+            print(f"原始样本报告：{args.output}")
+        else:
+            print(serialized, end="")
     return 0
 
 
