@@ -2,6 +2,17 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-14 LLVM LL1 / LLVM-SEM-01：NaN 顺序比较修复
+
+- 探针复现：NaN < 0 与 NaN <= 0 返回真，新增 llvm-float-nan-comparisons.yh
+  在修复前退出 1。根因是 ARM64 FCMP 无序 NZCV=0011 被整数 lt/le 条件码接受。
+- 发射改用 mi/ls；常量折叠、typed CT 的 < / <= 增加左右有序守卫，保证旧种子
+  编出的第一代候选就正确。四个顺序关系遇 NaN 为假，!= 为真，不规定 NaN payload。
+- 验证：make、定向红绿回归、make test、make selfhost-native 通过；运行语料新增为
+  300/300，左右 NaN、f32/f64、常量折叠/typed CT/动态及正常有序比较通过。
+- 语义和 LLVM 谓词对应写入 [语义与 ABI 契约](03-design/yh-LLVM语义与ABI契约.md)；
+  文法没有变化。LL1 其他探针和两个已发现的转换/SSA bool 问题仍未关闭。
+
 ## 2026-10-14 LLVM LL0E：固定 SDK 与静态桥独立验收
 
 - 固定 LLVM 21.1.8 SDK 包下载地址、SHA-256、静态组件闭包与桥 ABI；从已校验包
