@@ -1,6 +1,7 @@
 # yh LLVM 后端替换设计
 
-日期：2026-10-14。状态：**方案草案，待评审；本轮不实施**。
+日期：2026-10-14。状态：**用户已授权分阶段实施；尚未切换生产后端**。
+实施补充：用户要求 yh 编译器嵌入 LLVM、不依赖系统 LLVM，每阶段验收后提交。
 顺序修订：同日用户明确要求 Linux/x86_64 优先，以便在本机 WSL 原生验证；“x86”按前文指 64 位 x86。
 目标已明确为最终替换自研代码生成，过渡期保留旧 ARM64 路径用于差分和种子迁移。
 问题入口：[问题清单](../02-plan/yh-LLVM后端替换问题清单.md)；执行入口：
@@ -20,7 +21,7 @@
 
 - 用户源码仍只使用 `.yh` 后缀，不新增语言功能作为迁移前提。
 - 首期平台为 Linux/x86_64（64 位 x86），目标 triple 为 `x86_64-unknown-linux-gnu`；非 Linux 目标不作为日常改动的回归前置。
-- 首期 LLVM 工具链固定为 21.1.8，clang/llvm-as/opt 使用同一发行版本；放宽版本另行验收。
+- 首期内置 LLVM 固定为 21.1.8，以校验过的静态 SDK 构建；不发现或调用系统 LLVM。clang/llvm-as/opt 21.1.8 仅作开发 oracle；放宽版本另行验收。
 - LLVM 模式禁止自动回退旧后端；不支持的形态给出来源诊断并停止发布产物。
 - 开发默认 O0、发布显式 O2；初期禁止 fast-math 和未经证明的语义属性，LTO 后置。
 - 普通 AOT 程序不依赖 LLVM 运行；编译依赖与 OS/运行时依赖分别披露。
@@ -57,7 +58,7 @@ flowchart LR
     C --> M[受检模块与函数快照]
     M --> I[yh typed IR / 明确的存储与效果]
     I --> L[LLVM IR .ll]
-    L --> O[clang -x ir -c 生成对象]
+    L --> O[yh 内嵌 LLVM 验证 / 优化 / 生成对象]
     O --> E[平台链接驱动 + 目标运行时 / 库]
     E --> P[可执行文件]
     C --> F[语言接口 .s.i / 编译期正文 .s.ct]
@@ -81,13 +82,19 @@ flowchart LR
   `llvm_memory.yh`、`llvm_call.yh`。只导出 cmd/ast 确实需要的入口和类型。
 - `backend.LLVMOutput` 独占文本及来源映射缓冲；复用 `gen.out_grow` 等通用缓冲能力，
   不修改 `gen.G()` 的 ARM64 输出、标签、寄存器或帧状态。
-- 首期选择文本 IR + 外部工具，普通对象路径用一次 `clang -x ir -c`，
-  `--emit-asm` 使用 `clang -x ir -S`。llvm-as/opt 用于开发与门禁验证。
+- 首期保留文本 IR 交接，使用薄 C ABI 桥调用静态 LLVM C API 完成解析、模块验证、
+  O0/O2 管线和目标对象/汇编输出。`--emit-asm` 也在进程内执行，不创建 clang/llc 子进程。
+  llvm-as/opt/clang 仅用于开发差分，不是 yh 正常运行依赖。
 - 固定配置采用通用 CPU，不使用 `-march=native`；O0/O2、CPU/features、布局、重定位模式
   都是显式代码生成输入。Linux 首期维持非 PIE 可执行策略。
-- 子进程使用 argv，不经 shell；工具绝对路径、发行版本与内容身份被记录。
-  `YH_LLVM_BIN` 可指定成套工具目录，缺省从 PATH 查找；不匹配版本明确报诊断。
-- 不先绑定 libLLVM。该选择为了缩小接入面，不基于“LLVM C API 没有 builder”之类错误假设。
+- 链接子进程使用 argv，不经 shell；链接驱动绝对路径及内容身份被记录。
+  LLVM 版本、SDK 包哈希、桥 ABI 和后端实现身份直接纳入对象缓存，不使用 `YH_LLVM_BIN`。
+- 薄桥只封装 LLVM 的生命周期和 C API，不承担 yh 语义、AST lowering 或 ABI 设计。
+  LLVM 静态库链接进编译器，禁止依赖 `libLLVM.so`、dlopen 或 LLVM 工具旁车。
+  SDK 由固定下载地址与 SHA-256 锁定，解包到 `tmp/llvm-migration/sdk/`，不安装到系统。
+  首片先交付 Linux/x86_64 的固定 SDK；ARM64 宿主 SDK 和种子桥在 F1 验收。
+  LLVM 的 Apache-2.0 WITH LLVM-exception 许可和发行包版权随交付保存。
+  C/C++ 编译器、平台链接器和 libc 属构建/OS 依赖，不能混称为系统 LLVM 依赖。
 
 缺省目标取编译器自身构建时记录的目标，不能仅用 uname 推断。WSL x86_64 内经 qemu
 运行的 AArch64 yh，其进程 ABI 与物理宿主 CPU 不同；宿主 OS 桥按编译器进程的构建目标
@@ -107,7 +114,8 @@ flowchart LR
 | `ir.ir_module_release(unit *IRModule) void` | 统一释放模块拥有的 IR 表；保留已有函数释放协议的明确归属 |
 | `backend.llvm_emit_module(unit *ir.IRModule, target *gen.TargetInfo, out *LLVMOutput) int` | 只接受已验证模块，发完整声明/定义/数据；0 成功、-1 错误 |
 | `backend.llvm_output_release(out *LLVMOutput) void` | 释放输出与映射缓冲 |
-| cmd 内部 `llvm_compile_object(input *char, output *char, target *gen.TargetInfo, opt_level int, tools *LLVMTools) int` | 私有驱动函数，0 成功、-1 失败；完成后才发布对象 |
+| 桥 `yh_llvm_emit(text *char, length u64, triple *char, opt_level int, kind int, output *char, diagnostic *char, capacity u64) int` | 0 成功、-1 失败；kind=0 对象、1 汇编；仅支持 O0/O2；诊断缓冲由调用方拥有，每次调用使用私有 LLVMContext/TargetMachine |
+| cmd 内部 `llvm_compile_object(input *char, output *char, target *gen.TargetInfo, opt_level int) int` | 调用内嵌桥，0 成功、-1 失败；完成后才发布对象 |
 
 类型字段由 LL2 的数据模型测试锁定；以上名称、返回协议、所有权和必要信息是阶段契约，
 后续任务不得自己改名或绕回 GenState 汇编缓冲。
@@ -197,7 +205,7 @@ manifest、ir。默认最终项目可执行文件仍按现有 `.build/<project.n
 | --- | --- |
 | 解析/check | 源、语义依赖、语言/编译器版本，check 实际读取的目标布局/条件 |
 | yh IR | 受检内容、类型/符号闭包、目标语义与 ABI、IR schema/规范化版本 |
-| LLVM 文本/对象 | IR 内容、后端/发射版本、LLVM 路径/版本/内容、triple/layout、CPU/features、O0/O2、重定位及运行时身份 |
+| LLVM 文本/对象 | IR 内容、后端/发射版本、内嵌 LLVM 版本/SDK 哈希/桥 ABI、triple/layout、CPU/features、O0/O2、重定位及运行时身份 |
 | 链接 | 所有对象/库内容、目标 SDK/sysroot、链接驱动/版本、启动代码和完整参数 |
 
 持久产物以本次会话临时文件生成，完成验证后发布 manifest；共享接口就绪的早推进
@@ -227,8 +235,10 @@ manifest 与旧内容的组合；补做缓存输入不会解决原有提交事�
    `make test` / `make selfhost-native`，最后才允许将验证过的 x64 候选滚为
    `bin/yh-linux-x64` 并生成独立 `.sha256`。ARM64 种子和哈希保留，不用 x64 产物覆盖。
 
-x64 对象与链接使用解析后的原生 LLVM/链接驱动绝对路径（本机例如 `/usr/bin/clang-21`
-和 `/usr/bin/gcc`），不能误用 `tmp/boot/crossbin/gcc` 的 AArch64 包装器。
+x64 对象由进程内 LLVM 生成，链接使用原生链接驱动绝对路径（本机 `/usr/bin/gcc`），
+不能误用 `tmp/boot/crossbin/gcc` 的 AArch64 包装器。
+额外分发门：在没有 clang/llc/llvm-config/opt/llvm-as 和 libLLVM 动态库的隔离环境运行
+交付 yh，实际编译、链接、运行 `.yh`，并完成冷编自举。readelf 的 NEEDED 不含 LLVM。
 新 x64 种子未入库前，启动脚本显式选择旧 ARM64 种子；入库后本机日常构建显式/自动选 x64。
 
 失败时保留旧种子和默认旧路径；候选留在 tmp/。退役旧后端另设检查：当前全量消费者

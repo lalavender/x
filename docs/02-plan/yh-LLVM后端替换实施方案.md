@@ -1,17 +1,18 @@
 # yh LLVM 后端替换实施方案
 
-> **执行者说明：**实施时使用 `superpowers:executing-plans` 逐项推进。当前只交付文档，
-> 不启动编码；用户未授权子代理，执行时不默认委派。本文件中新增的选项、API、脚本和测试均未实现。
+> **执行者说明：**用户已授权制定计划、开始实施并逐阶段提交。使用
+> `superpowers:executing-plans` 在当前会话逐项推进，未授权子代理，不默认委派。
+> 只有勾选并附验证证据的阶段已实现；生产默认和种子在完整验收前保持旧路径。
 
 2026-10-14 顺序修订：用户确认 Linux/x86_64 优先，目标为本机 WSL 原生验证；此处 x86 指 64 位 x86。
 
 **Goal：**以 LLVM 替换 yh 的生产代码生成，先完成 Linux/x86_64 的语义、运行时、宿主桥和原生自举闭环，再接六格平台矩阵。
 
 **Architecture：**保留 yh 语义/check、编译期执行和受检 IR；解除旧 ARM64 汇编预发射，
-通过模块级 LLVM 文本和一次 clang IR 编译生成对象。过渡期分开构建新旧可执行程序，
+通过模块级 LLVM 文本和编译器内嵌 LLVM 静态库生成对象。过渡期分开构建新旧可执行程序，
 LLVM 模式严格拒绝回退，候选完整验收后切换默认并退役旧代码生成。
 
-**Tech Stack：**旧种子可编译的 `.yh`、LLVM/clang 21.1.8、Python 门禁、Linux/x86_64 ELF；
+**Tech Stack：**旧种子可编译的 `.yh`、LLVM 21.1.8 静态 SDK + 薄 C ABI 桥、Python 门禁、Linux/x86_64 ELF；
 Windows 宿主在 WSL 原生构建与验证，ARM64 种子和 qemu 仅用于启动/旧基线。
 
 **Spec：**[替换设计](../03-design/yh-LLVM后端替换设计.md)。先读
@@ -21,7 +22,7 @@ Windows 宿主在 WSL 原生构建与验证，ARM64 种子和 qemu 仅用于启�
 
 - 用户源码仍只使用 `.yh` 后缀，不新增语言功能作为迁移前提。
 - 首期平台为 Linux/x86_64（64 位 x86），目标 triple 为 `x86_64-unknown-linux-gnu`；非 Linux 目标不作为日常改动的回归前置。
-- 首期 LLVM 工具链固定为 21.1.8，clang/llvm-as/opt 使用同一发行版本；放宽版本另行验收。
+- 首期 LLVM 固定为 21.1.8，SDK 下载与静态链接身份入库锁定；正常编译不依赖系统 LLVM，clang/llvm-as/opt 只用于开发差分。
 - LLVM 模式禁止自动回退旧后端；不支持的形态给出来源诊断并停止发布产物。
 - 开发默认 O0、发布显式 O2；初期禁止 fast-math 和未经证明的语义属性，LTO 后置。
 - 普通 AOT 程序不依赖 LLVM 运行；编译依赖与 OS/运行时依赖分别披露。
@@ -49,7 +50,7 @@ R2b 的既有子项目仍独立推进，其硬门在 LL10 默认正式切换前�
 
 建议执行顺序：
 
-`LL0 → LL1 → LL2 → LL3 → LL8a → LL5 → LL4 → LL6 → LL7 → LL8b → LL9 → LL10 → LL11 → F1 → LL12`。
+`LL0 → LL0E → LL1 → LL2 → LL3 → LL8a → LL5 → LL4 → LL6 → LL7 → LL8b → LL9 → LL10 → LL11 → F1 → LL12`。
 
 从 LL3 起生成的程序就在 WSL x86_64 原生运行；此时启动编译器 A 仍可能经 qemu。
 LL10 才要求编译器 B/C/D 自身均为原生 x64。F1 的 Linux/AArch64 回归只阻挡旧后端退役，
@@ -81,7 +82,7 @@ LL8a 用 `.yh` 编写的 LLVM 发射代码提供基本 helper 的 IR；LL8b 在�
 - [ ] 在 WSL 运行 `make`、对应定向检查；构造后/缓存读回/输出前执行 verifier。
 - [ ] 阶段关闭跑现有 `make test`、`make selfhost-native`，另跑该阶段 LLVM 专项门。
 - [ ] 更新本计划复选框、问题状态和 docs/finish.md；只提交本切片自己的改动。
-  工作区已有大量未提交变化，禁止 `git add .` 或把用户已有差异混入提交。
+  本次启动工作区干净、现有分支为 llvm；显式按文件暂存，禁止把无关差异混入提交。
 
 现行旧后端基线/启动 A 的命令（先确认 crossbin/gcc 存在且指向交叉 gcc，环境仅限这些调用）：
 
@@ -119,6 +120,33 @@ LLVM 模式的 runner 在 LL9 接入前使用定向 fixture 的独立候选和�
 
 **验证：**`python3 tests/selfhost/llvm-baseline.py --compiler-path ./yh`；
 报告包含环境、实用覆盖/原因和性能；上述计数关系成立，旧后端行为/固定点不变。
+
+## LL0E：固定 SDK 与内嵌 LLVM 桥
+
+**文件：**新增 `vendor/llvm/sdk.lock.json`、`vendor/llvm/README.md`、
+`compiler/llvm/bridge.h`、`compiler/llvm/bridge.c`、`tools/llvm-sdk.py`、
+`tests/selfhost/llvm-embedded.py` 和 `tests/selfhost/llvm-embedded-probe.yh`。
+桥放在 compiler/llvm，C 文件不参与旧种子 yh 项目扫描；不恢复 stage0。
+
+**接口：**`yh_llvm_version() *char` 返回内置版本；
+`yh_llvm_emit(text *char, length u64, triple *char, opt_level int, kind int,
+output *char, diagnostic *char, capacity u64) int` 返回 0/-1；
+kind=0 对象、1 汇编，opt_level=0/2，缓冲归调用方所有。
+每次调用创建私有 context/module/target machine；诊断失败不发布目标文件。
+
+- [ ] 先加内嵌桥验收：无 LLVM 工具 PATH、对象/汇编生成、O0/O2、坏 IR、坏 target、
+  verifier 失败、目标输出写失败，正常/失败重复调用；未实现桥时明确失败。
+- [ ] 固定 Linux/x86_64 SDK 21.1.8 下载地址、SHA-256、静态组件依赖及许可；
+  解包到 tmp，不调用系统 llvm-config，不装系统 LLVM，不提交解包临时文件。
+- [ ] C ABI 桥只调用 LLVM C API；输入验证、前后 verifier、generic CPU、静态重定位，
+  目标只初始化 X86/AArch64；诊断有界并释放所有自有对象。
+- [ ] 使用固定 SDK 静态链接测试宿主，readelf NEEDED 不含 LLVM；在无系统 LLVM 的
+  隔离根目录生成对象和汇编。此宿主是桥测试工具，不能声称 yh 已完成嵌入。
+- [ ] 运行 make、make test、make selfhost-native，记录桥门与旧门证据并提交。
+
+**验证：**`python3 tests/selfhost/llvm-embedded.py`；独立测试宿主无 LLVM 动态依赖，
+对象 ELF machine=62/183，x64 最小 IR 原生运行 exit 0。LL3 接入 yh 调用，
+LL10 再把静态桥/SDK 与连续自编链接绑定，LL11 完成最终交付的无系统 LLVM 门。
 
 ## LL1：锁定边界语义与调用政策（LLVM-01、05）
 
@@ -170,8 +198,10 @@ check 不访问 LLVM 工具，LLVM 前端输出旧汇编计数为 0，目标/接
 `compiler/cmd/llvm_toolchain.yh`、`tests/modules/projects/llvmscalar/project.toml`、
 `llvmscalar/main/main.yh`、`tests/selfhost/llvm-ir.py`；修改 driver/compile/module_worker。
 
-**接口：**实现 llvm_emit_module/LLVMOutput/release；cmd 实现工具发现、IR 对象生成和来源诊断。
+**接口：**实现 llvm_emit_module/LLVMOutput/release；cmd 调用内嵌桥、生成对象并定位来源诊断。
 实现 --backend、--target、--emit-llvm、-O0/-O2 的首片解析；新选项传至模块 worker。
+对象/汇编调用 LL0E 薄桥，禁止调用外部 LLVM 工具；启动 A 的 ARM64 静态 SDK
+必须在本片接入前准备并验收，不用 x64 SDK 混链到 ARM64 启动编译器。
 
 - [ ] llvmscalar 首片只用整数/布尔、分支/phi/固定调用，main 自校验后返回 0，
   不依赖 printf 或尚未迁移的运行时；旧候选应因新选项未实现而失败。
@@ -361,7 +391,9 @@ O0/O2 的 `.ll/.s.i/.s.ct` 候选固定点、实际覆盖、所有运行门有�
 - [ ] 用同机冻结负载对照旧模式、LLVM O0/O2，至少 20 轮并记录运行程序性能；qemu 与原生分开。
 - [ ] 归因可重复 >10% 的回退，关闭或形成经评审接受的取舍；不悄悄改旧目标数字。
 - [ ] 在 LL10/R2b 硬门关闭后切默认，新增用例断言 emitted 使用 LLVM、fallback=0。
-- [ ] 同步工具链依赖、运行依赖、安装/分发和缺工具诊断，保留源码 `.yh` 与接口可见性规则。
+- [ ] 同步固定 SDK 构建依赖、运行依赖和许可分发，保留源码 `.yh` 与接口可见性规则。
+- [ ] 在没有系统 LLVM 工具/动态库的隔离环境用最终 yh 实际编译、链接、运行 `.yh`
+  并冷编自举；readelf NEEDED 不含 LLVM，编译不调用 LLVM 旁车。
 - [ ] 原生默认 `make test` / `make selfhost-native` 全绿后，才将验证的 x64 候选滚到
   `bin/yh-linux-x64` 并写 `.sha256`；显式 SEED_DEST=bin/yh-linux-x64，
   确认 seed 输入是原生 D，不从仍为 ARM64 的根目录旧 yh 误复制；ARM64 种子/哈希保留。
@@ -406,4 +438,5 @@ NP3 的受检/解耦与本计划合并跟踪；NP4 的自研机器 IR/分配器�
 NP2/NP5 保留必要语言规范化，通用优化交 LLVM。旧自有汇编/链接任务的产品定位由 ADR 评审记录，
 不自动删除 asm/、link/ 项目，也不假称其平台门已完成。
 
-当前状态：**方案已交付；全部实施复选框未勾选；没有新增 `.yh` 测试、CLI 或后端实现**。
+当前状态：**2026-10-14 用户授权实施；已将外部 clang 路线改为内嵌静态 LLVM**。
+逐阶段状态见复选框、docs/todo.md、docs/finish.md 与 tmp/llvm-migration/progress.md。
