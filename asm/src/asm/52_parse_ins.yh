@@ -168,10 +168,17 @@ fn p_is_bcond(p *Parser) int {
 
 // —— 分支与系统指令 ——
 
-// p_branch：b / bl，目标是数字或符号。
+// p_branch：b / bl，目标是数字或标签（EX_SYM）。
+//
+// 分支目标不接受任何符号修饰符（sym@PAGEOFF、:lo12: 等）：修饰符的语义是
+// 「取符号地址的某一段」，对分支没有意义。此前这些形态落到 e.val（= 0）
+// 上被静默编成 `b #0`（自跳转），是无声的错误编译，所以这里显式拒绝。
 fn p_branch(p *Parser, link int) int {
     let e Expr;
     if (p_expr(p, &e) != 0) { return -1; }
+    if (e.kind != EX_SYM && e.kind != EX_NUM) {
+        return p_err(p, "分支目标只能是标签或数字（不接受符号修饰符）");
+    }
     if (e.kind == EX_SYM && e.neg == 0) {
         // 占位字保留操作码与 opcode 位，只把 imm26 留给回填
         let off int = p_emit32(p, e_branch(link, 0));
@@ -187,10 +194,13 @@ fn p_branch(p *Parser, link int) int {
     return p_write32(p, w);
 }
 
-// p_condbr：条件分支，b.eq / beq 等。
+// p_condbr：条件分支，b.eq / beq 等。目标形态限制同 p_branch。
 fn p_condbr(p *Parser, c int) int {
     let e Expr;
     if (p_expr(p, &e) != 0) { return -1; }
+    if (e.kind != EX_SYM && e.kind != EX_NUM) {
+        return p_err(p, "条件分支目标只能是标签或数字（不接受符号修饰符）");
+    }
     if (e.kind == EX_SYM && e.neg == 0) {
         let off int = p_emit32(p, e_condbr(c, 0));
         if (off < 0) { return -1; }
@@ -205,7 +215,7 @@ fn p_condbr(p *Parser, c int) int {
     return p_write32(p, w);
 }
 
-// p_cmpbr：cbz / cbnz。
+// p_cmpbr：cbz / cbnz。目标形态限制同 p_branch。
 fn p_cmpbr(p *Parser, nz int) int {
     let r Reg;
     if (p_reg(p, &r) != 0) { return -1; }
@@ -216,6 +226,9 @@ fn p_cmpbr(p *Parser, nz int) int {
     let e Expr;
     if (p_expr(p, &e) != 0) { return -1; }
     let sf int = reg_is64(&r);
+    if (e.kind != EX_SYM && e.kind != EX_NUM) {
+        return p_err(p, "cbz/cbnz 目标只能是标签或数字（不接受符号修饰符）");
+    }
     if (e.kind == EX_SYM && e.neg == 0) {
         let off int = p_emit32(p, e_cmpbr(sf, nz, reg_field(&r), 0));
         if (off < 0) { return -1; }
@@ -308,6 +321,14 @@ fn p_system(p *Parser) int {
 // —— 地址 ——
 
 // p_adr：adr / adrp。
+//
+// 符号形态按目标方言：
+//   adr  Xd, sym        —— 21 位 PC 相对字节偏移，留重定位；
+//   adrp Xd, sym@PAGE   —— Darwin 方言的页取址；
+//   adrp Xd, sym        —— GNU 方言的页取址（编译器 Linux 目标发射的就是这种），
+//                          与 sym@PAGE 同义；页号取决于节的最终地址，一律留给
+//                          链接器。darwin 目标仍要求显式 @PAGE，Mach-O 的输入
+//                          契约不因此放宽。
 fn p_adr(p *Parser, is_page int) int {
     let rd Reg;
     if (p_reg(p, &rd) != 0) { return -1; }
@@ -325,16 +346,19 @@ fn p_adr(p *Parser, is_page int) int {
         if (off < 0) { return -1; }
         return p_push_fix(p, FIX_ADR_PG_HI21, off, e.sym, 0);
     }
-    if (e.kind == EX_SYM && is_page == 0) {
-        let off int = p_emit32(p, e_adr(0, reg_field(&rd), 0));
-        if (off < 0) { return -1; }
-        return p_push_fix(p, FIX_ADR_PG_HI21, off, e.sym, 0);
+    if (e.kind == EX_SYM) {
+        if (is_page != 0 && p.ctx.tgt.fmt == obj.TS_FMT_MACHO64) {
+            return p_err(p, "darwin 目标的 adrp 需要 sym@PAGE（裸符号是 GNU 方言，只在 -t linux 接受）");
+        }
+        let offs int = p_emit32(p, e_adr(is_page, reg_field(&rd), 0));
+        if (offs < 0) { return -1; }
+        return p_push_fix(p, FIX_ADR_PG_HI21, offs, e.sym, 0);
     }
-    if (e.kind == EX_PAGEOFF || e.kind == EX_GOTPAGEOFF) {
-        return p_err(p, "adrp 需要 sym@PAGE 或 sym@GOTPAGE");
+    if (e.kind == EX_PAGEOFF || e.kind == EX_GOTPAGEOFF || e.kind == EX_LO12) {
+        return p_err(p, "adrp 需要符号、sym@PAGE 或 sym@GOTPAGE");
     }
     if (e.kind != EX_NUM) {
-        return p_err(p, "adrp 需要 sym@PAGE，adr 需要符号或数字");
+        return p_err(p, "adrp 需要符号或 sym@PAGE，adr 需要符号或数字");
     }
     let v i64 = e.val;
     if (e.neg != 0) { v = -e.val; }

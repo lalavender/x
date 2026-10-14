@@ -11,12 +11,13 @@
 
 | | **arm64** | **x64** |
 | --- | --- | --- |
-| **Linux / ELF** | 已完成：61/61 语料逐字节一致，容器里链接运行与参照一致 | 待做，先有编译器后端 |
+| **Linux / ELF** | 汇编器已完成（61/61 语料逐字节一致）；**自有静态链接器 P1-3 已完成（2026-10-13）** | 待做，先有编译器后端 |
 | **macOS / Mach-O** | 待做（对象出口 + 本机装载） | 待做 |
 
-「已完成」指：`yh_link` 产出的 AArch64 ELF 对象与 `llvm-mc` 参照**逐字节一致**
-（含重定位全量比对），且在容器里用 GNU `ld` 链成静态可执行后**运行行为与参照
-对象完全一致**，见 [link/README](../../link/README.md) 的测试一节。
+「已完成」对汇编器指：`yh_asm` 产出的 AArch64 ELF 对象与 `llvm-mc` 参照
+**逐字节一致**（含重定位全量比对），且在容器里用 GNU `ld` 链成静态可执行后
+**运行行为与参照对象完全一致**；对链接器指：`yh_link` 能把这些对象链成静态
+`ET_EXEC` 并真跑，行为与 `GNU ld` 一致（见 §4 的 P1-3 结论）。
 
 ## 2. 事实基线（实测，不是推测）
 
@@ -32,9 +33,15 @@
 | 容器内 `aarch64-linux-gnu-ld` | 可用（Debian bookworm binutils 2.40） |
 | 容器内 `x86_64-linux-gnu-ld` + `qemu-x86_64-static` | 可用（qemu-user 7.2） |
 
-镜像：`link/tests/docker/Dockerfile`，`debian:bookworm-slim` +
+镜像：`asm/tests/docker/Dockerfile`，`debian:bookworm-slim` +
 `binutils-aarch64-linux-gnu` + `binutils-x86-64-linux-gnu` + `qemu-user-static`。
-构建 `docker build -t yh-link-elf:latest link/tests/docker`。
+构建 `docker build -t yh-link-elf:latest asm/tests/docker`。
+
+> 路径说明（2026-10-07 目录整理）：本方案写于 2026-10-03，当时 `link/` 里寄放着
+> 汇编器实现与它的门；整理后汇编器整体迁到 `asm/`，因此下文里
+> `link/tests/<文件>` 一律指现在的 `asm/tests/<文件>`
+> （汇编器对象/链接门），而 `link/tests/` 现在只放**链接器自己的**门
+> （`check.py` / `link_accept.py` / `link_diff_regress.py` / `asm/*.s` 语料）。
 
 **注意**：要挂载进容器的目录必须落在工作区内。colima 不共享宿主的
 `/tmp` 这类私有路径，`/tmp` 下的文件容器里看不到。门统一用仓库内的
@@ -45,9 +52,9 @@
 
 ## 3. 容器门（已落地）
 
-`link/tests/elf_link_check.py`，镜像 `yh-link-elf:latest`：
+`asm/tests/elf_link_check.py`，镜像 `yh-link-elf:latest`：
 
-1. 宿主上 `yh_link` 汇编语料，同时用 `llvm-mc` 汇编一份参照；
+1. 宿主上 `yh_asm` 汇编语料，同时用 `llvm-mc` 汇编一份参照；
 2. 容器里对两边都跑 `ld -r`（结构合法）与 `ld -static -nostdlib`（重定位可解）；
 3. 链出来的可执行都真跑一遍，比对退出码与标准输出；
 4. 判定是差分的：两边行为一致即通过。
@@ -57,8 +64,11 @@
 差分门天然容忍这种已知偏差。
 
 链接需要一个 `_start` 与 yh 运行时的三个 OS 原语桩，放在
-`link/tests/elf/{start.s,yhr.s}`。桩不全只会让某些语料崩，不会让门误判——
+`asm/tests/elf/{start.s,yhr.s}`。桩不全只会让某些语料崩，不会让门误判——
 因为参照对象用的是同一套桩。
+
+> **这个门验的是"我们的对象能被 GNU `ld` 正确链接"，不验"我们的链接器"。**
+> 自有链接器（P1-3）的门在 `link/tests/`，见 §4 的 P1-3 结论。
 
 ## 4. 阶段划分
 
@@ -70,8 +80,32 @@
 | --- | --- | --- |
 | P1-1 | 浮点标量编码 | **已完成**：`check_corpus` 61/61、跳过 0、不一致 0 |
 | P1-2 | GOT 重定位 `@GOTPAGE`/`@GOTPAGEOFF` | **已完成**：同上，类型号 311/312 |
-| P1-3 | 自有静态链接器（TC4） | 用我们的对象链出的可执行能跑，且与 GNU `ld` 链出的行为一致 |
+| P1-3 | 自有静态链接器（TC4） | **已完成（2026-10-13）**：见下方结论 |
 | P1-4 | Linux 宿主连编自举（TC6） | `yh_link` 汇编 `yh_link` 自己的输出，两代固定点字节相同 |
+
+**P1-3 完成结论（2026-10-13）**：`link/` 已能把 `ELF64 ET_REL`（AArch64）
+链成静态 `ET_EXEC` 并真跑。门的实际形态比原计划更强——原计划只要求"行为与
+GNU `ld` 一致"，实际交付了三层门：
+
+1. 自检 57 项（含读取层拒绝路径与多对象合并回归）；
+2. 端到端 7 用例：结构断言 + **真跑比对退出码** + 两次链接逐字节相同；
+3. **与 GNU `ld` 的差分 7/7**：退出码相同、同为静态 `ET_EXEC`、且
+   **同一输出节内符号间距相同**（与布局无关的不变量，比"行为一致"更能定位
+   偏移类错误）。
+
+设计见 [yh-link 静态 ELF 链接器设计](../03-design/yh-link静态ELF链接器设计.md)，
+任务分解与验证记录见
+[实施方案](../02-plan/yh-link静态ELF链接器实施方案.md)。
+
+两点边界必须记住：
+
+- **产物刻意不放到仓库根 `yh_link`**：编译器当前按这个名字发现**汇编器**
+  （`compiler/cmd/link_cache.yh` 的 `mb_asm_tool` 会调用
+  `yh_link asm -t ... -o ...`）。集成（P1-4 的前置）第一步是把查找名改成
+  `yh_asm`，否则现有 `make` 会直接坏掉。
+- **本机验证是 qemu 模拟**：本机为 Windows + WSL（Ubuntu x86_64），无 AArch64
+  硬件。把"模拟通过"提升为"真机通过"需要在 arm64 容器/真机复跑
+  `make yh-link-probe FULL=1`，已记入 [docs/todo.md](../todo.md)。
 
 P1-3 的验收天然可以借容器：**同一组对象分别用自有链接器和 GNU `ld` 链，
 比对可执行的行为**。这是自举路线的第一条真链。

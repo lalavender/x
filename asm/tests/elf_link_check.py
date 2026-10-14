@@ -3,24 +3,26 @@
 
 为什么需要容器：宿主是 Darwin，没有 AArch64 的 ELF 链接器（无 GNU ld、无
 lld），也没有 Linux 系统调用环境。容器一次补齐这两样。
+（Linux 宿主不需要容器——用 tests/elf_link_native.py 的交叉 ld + qemu 门。）
 
-判定是**差分式**的：同一份汇编分别由本工具和 llvm-mc 汇编，两边都在容器里
-链成静态可执行并运行，要求退出码与标准输出完全一致。这样门自己校准——遇到
-运行时桩不全导致的崩溃（两个参照都崩），不会被误判成汇编器的错。
+判定是**差分式**的：同一份汇编分别由本工具和独立 oracle（llvm-mc 或 clang，
+见 check_corpus.oracle_kind）汇编，两边都在容器里链成静态可执行并运行，要求
+退出码与标准输出完全一致。这样门自己校准——遇到运行时桩不全导致的崩溃
+（两个参照都崩），不会被误判成汇编器的错。
 
 用法：python3 tests/elf_link_check.py [语料目录]
 需要：docker 与本机可执行的 .build/yh_asm。
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from check_corpus import to_gnu          # noqa: E402
+from check_corpus import to_gnu, oracle_kind, oracle_asm     # noqa: E402
 
-LLVM_MC = "/opt/homebrew/opt/llvm/bin/llvm-mc"
 TRIPLE = "aarch64-linux-gnu"
 IMAGE = os.environ.get("LINK_IMAGE", "yh-link-elf:latest")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # asm/
@@ -33,18 +35,25 @@ def host_asm(binary, src, dst):
     return r.returncode == 0
 
 
-def ref_asm(src, dst):
+def ref_asm(kind, tool, src, dst):
     gnu = dst + ".gnu.s"
     with open(gnu, "w") as fh:
         fh.write(to_gnu(open(src).read()))
-    r = subprocess.run([LLVM_MC, "--assemble", "-triple=" + TRIPLE,
-                        "-filetype=obj", "-o", dst, gnu], capture_output=True)
-    return r.returncode == 0
+    return oracle_asm(kind, tool, gnu, dst, TRIPLE)
 
 
 def main():
     corpus = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.path.dirname(ROOT), "tmp", "inv")
+    if shutil.which("docker") is None:
+        print("跳过：宿主没有 docker。Linux 宿主用 tests/elf_link_native.py"
+              "（交叉 aarch64-linux-gnu-ld + qemu-aarch64）跑同一道差分门。")
+        return 2
+    kind, tool = oracle_kind()
+    if kind == "":
+        print("找不到独立 oracle：给 LLVM_MC=<llvm-mc 路径> 或把 clang 放进 PATH")
+        return 2
+    print("oracle: %s (%s)" % (kind, tool))
     for sub in ("obj", "ref", "bin"):
         os.makedirs(os.path.join(BOX, sub), exist_ok=True)
         for f in os.listdir(os.path.join(BOX, sub)):
@@ -63,7 +72,8 @@ def main():
         b = f[:-2]
         if host_asm(BINARY, os.path.join(corpus, f),
                     os.path.join(BOX, "obj", b + ".o")) and \
-           ref_asm(os.path.join(corpus, f), os.path.join(BOX, "ref", b + ".o")):
+           ref_asm(kind, tool, os.path.join(corpus, f),
+                   os.path.join(BOX, "ref", b + ".o")):
             names.append(b)
     print("可汇编对象：%d 个" % len(names))
 

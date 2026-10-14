@@ -8,10 +8,18 @@
   4. 重定位类型都在契约 §6 的白名单里；
   5. 同一份输入连续两次汇编，字节完全一致（确定性）。
 
+`--target darwin --snapshot <文件>` 另走 Mach-O 出口的**字节快照**回归（ASM-8）：
+Linux 宿主没有 Mach-O 工具链可以差分，但「自己的输出有没有变」是可测的——
+逐文件记 sha256，任何动了 Darwin 输出的改动都必须显式更新快照。
+快照只与输入有关，与宿主无关，所以 Linux 上记的快照在 macOS 上同样有效。
+
 用法：
   python3 tests/check_obj.py [可执行文件] [语料目录]
+  python3 tests/check_obj.py [可执行文件] [语料目录] --target darwin \
+      --snapshot tests/darwin-snapshot.txt [--write]
 """
 
+import hashlib
 import os
 import struct
 import subprocess
@@ -130,14 +138,93 @@ class Obj:
                     self.problems.append("%s 里出现白名单外的重定位类型 %d" % (n, typ))
 
 
-def assemble(binary, src, out):
-    p = subprocess.run([binary, "asm", "-o", out, src], capture_output=True)
+def assemble(binary, src, out, target="linux"):
+    """调本工具汇编一个文件；target 为 linux（默认）或 darwin。"""
+    cmd = [binary, "asm"]
+    if target != "linux":
+        cmd += ["-t", target]
+    cmd += ["-o", out, src]
+    p = subprocess.run(cmd, capture_output=True)
     return p.returncode == 0
 
 
+def darwin_snapshot(binary, corpus, snap_path, write):
+    """Mach-O 出口的字节快照回归（ASM-8）。
+
+    记录每个语料的 `-t darwin` 对象 sha256；拒绝的语料记下诊断首行，
+    这样「从能汇编变成拒绝」也会被发现。--write 显式更新快照。
+    """
+    files = sorted(f for f in os.listdir(corpus) if f.endswith(".s"))
+    if not files:
+        print("语料目录 %s 里没有 .s 文件" % corpus)
+        return 1
+    tmp = tempfile.mkdtemp(prefix="linkobj-macho")
+    got = {}
+    for f in files:
+        out = os.path.join(tmp, f + ".o")
+        r = subprocess.run([binary, "asm", "-t", "darwin", "-o", out,
+                            os.path.join(corpus, f)], capture_output=True)
+        if r.returncode != 0:
+            first = r.stderr.decode(errors="replace").strip().split("\n")[0]
+            got[f] = "拒绝: " + first
+            continue
+        with open(out, "rb") as fh:
+            got[f] = hashlib.sha256(fh.read()).hexdigest()
+
+    if write:
+        with open(snap_path, "w") as fh:
+            for name in sorted(got):
+                fh.write("%s  %s\n" % (got[name], name))
+        print("Darwin 字节快照已更新：%s（%d 个文件）" % (snap_path, len(got)))
+        return 0
+
+    if not os.path.isfile(snap_path):
+        print("缺快照 %s；用 --write 生成一份" % snap_path)
+        return 2
+    want = {}
+    with open(snap_path) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            digest, name = line.split("  ", 1)
+            want[name] = digest
+    bad = [n for n in sorted(set(got) | set(want)) if got.get(n) != want.get(n)]
+    print("Darwin 字节快照：%d 个文件，不一致 %d 个" % (len(got), len(bad)))
+    for n in bad:
+        print("  不一致 %s：现在 %s，快照 %s"
+              % (n, got.get(n, "缺失"), want.get(n, "缺失")))
+    if bad:
+        print("若这是有意的输出变化，确认后跑一次 --write 更新快照并说明原因。")
+    return 1 if bad else 0
+
+
 def main():
-    binary = sys.argv[1] if len(sys.argv) > 1 else "./.build/yh_asm"
-    corpus = sys.argv[2] if len(sys.argv) > 2 else "tests/asm"
+    argv = sys.argv[1:]
+    target = "linux"
+    snapshot = ""
+    write = "--write" in argv
+    if write:
+        argv.remove("--write")
+    for flag, box in (("--target", "target"), ("--snapshot", "snapshot")):
+        if flag in argv:
+            i = argv.index(flag)
+            if i + 1 >= len(argv):
+                print("%s 后面需要取值" % flag)
+                return 2
+            if box == "target":
+                target = argv[i + 1]
+            else:
+                snapshot = argv[i + 1]
+            del argv[i:i + 2]
+    binary = argv[0] if argv else "./.build/yh_asm"
+    corpus = argv[1] if len(argv) > 1 else "tests/asm"
+    if target == "darwin":
+        if not snapshot:
+            print("--target darwin 需要 --snapshot <快照文件>")
+            return 2
+        return darwin_snapshot(binary, corpus, snapshot, write)
+
     files = sorted(f for f in os.listdir(corpus) if f.endswith(".s"))
     if not files:
         print("语料目录 %s 里没有 .s 文件" % corpus)
@@ -149,7 +236,7 @@ def main():
         src = os.path.join(corpus, f)
         a = os.path.join(tmp, f + ".a.o")
         b = os.path.join(tmp, f + ".b.o")
-        if not assemble(binary, src, a):
+        if not assemble(binary, src, a, target):
             continue
         checked += 1
         o = Obj(a)
@@ -160,7 +247,7 @@ def main():
         if o.problems:
             failed += 1
             print("  结构问题 %s: %s" % (f, "; ".join(o.problems)))
-        if assemble(binary, src, b):
+        if assemble(binary, src, b, target):
             d1, d2 = open(a, "rb").read(), open(b, "rb").read()
             if d1 != d2:
                 nondet += 1

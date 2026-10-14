@@ -210,7 +210,6 @@ fn p_take_name(p *Parser) *char {
 }
 
 // p_sym_of：把当前 token（标识符或 . 开头的局部名）登记成符号并返回下标。
-// p_sym_of：取名字对应的符号下标，不存在就登记一个。
 fn p_sym_of(p *Parser) int {
     let nm *char = p_take_name(p);
     return p_sym_named(p, nm);
@@ -220,12 +219,22 @@ fn p_sym_of(p *Parser) int {
 // 引用时还不知道这个名字会不会被 .globl 提升，所以先用 SYM_UNDEF 占位；
 // p_label 定义它时再定成局部（除非之前已经 .globl）。未定义的引用最终按
 // 全局输出——ELF 不允许未定义的局部符号。
+//
+// 登记时把**名字所在 token** 的行列写进符号记录：Ctx.line/col 只在报错时才
+// 更新，不写这一笔的话未定义局部符号的诊断会打在第 0 行（实测过）。
 fn p_sym_named(p *Parser, nm *char) int {
     let hit int = obj.ctx_find_sym(p.ctx, nm);
     if (hit >= 0) {
         return hit;
     }
-    return obj.ctx_add_sym(p.ctx, nm, obj.SYM_UNDEF, obj.SYM_NOTYPE);
+    let id int = obj.ctx_add_sym(p.ctx, nm, obj.SYM_UNDEF, obj.SYM_NOTYPE);
+    if (id >= 0 && p.i > 0) {
+        // p_take_name 已经把 p.i 推到了下一个 token，名字在 p.i - 1。
+        let t *Tok = p_tok(p, p.i - 1);
+        p.ctx.syms[id].line = t.line;
+        p.ctx.syms[id].col = t.col;
+    }
+    return id;
 }
 
 // p_comma：要求一个逗号。
@@ -519,6 +528,33 @@ fn p_set_size(p *Parser, nm *char, v i64) int {
     return 0;
 }
 
+// p_check_undefined_locals：`.` 开头的符号按契约（§7）一律是**局部**符号，
+// 而 ELF 与 Mach-O 都不允许「未定义的局部符号」——写出器只能把它降级成
+// 外部引用，链接器就会去别的对象里找同名符号，语义完全变了（clang 对
+// `b .Lmissing` 直接报 "Undefined temporary symbol"）。解析结束后统一检查
+// 一次，两个目标的写出路径都受这条保护。
+fn p_check_undefined_locals(c *obj.Ctx) int {
+    let i int = 1;              // 下标 0 是必有的空占位符号
+    for i < c.nsym {
+        let s obj.Symbol = c.syms[i];
+        if (obj.sym_is_defined(&s) == 0) {
+            let nm *char = obj.sym_name(c, i);
+            if (nm[0] == '.') {
+                // 符号记录里存了首次出现的行列（见 p_sym_of），诊断按它定位。
+                c.line = s.line;
+                c.col = s.col;
+                if (c.col <= 0) {
+                    c.col = 1;
+                }
+                return obj.diag(c,
+                    "局部标签未定义：. 开头的符号必须是本文件定义的局部符号");
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
 // —— 入口 ——
 
 // asm_parse：扫描并解析整个源文件，把节、符号、重定位与待回填记录写入 c。
@@ -535,12 +571,19 @@ pub fn asm_parse(c *obj.Ctx, src *u8, nbytes int) int {
         free(lx);
         return obj.diag_plain(c, "扫描器初始化失败");
     }
+    // 词法错误由 Lexer.err 表达（扫描会继续以便报出更多问题），这里按记录
+    // 的位置报一次——此前只看 lex_run 的返回值，未闭合注释之类会退化成
+    // 「无法识别的语句开头」，位置还可能算成负数列号。
     if (lex_run(lx) != 0) {
-        let ln int = lx.line;
         free(lx);
-        c.line = ln;
-        c.col = 1;
-        return obj.diag(c, "词法错误");
+        return obj.diag_plain(c, "扫描器内存不足");
+    }
+    if (lx.err != 0) {
+        c.line = lx.eline;
+        c.col = lx.ecol;
+        let msg *char = lx.emsg;
+        free(lx);
+        return obj.diag(c, msg);
     }
     let p *Parser = malloc(sizeof(Parser).to_type(u64)).to_type(*Parser);
     if (p == 0) {
@@ -565,6 +608,9 @@ pub fn asm_parse(c *obj.Ctx, src *u8, nbytes int) int {
     } else {
         p.sec = sec_text(c);
         rc = p_run(p);
+    }
+    if (rc == 0) {
+        rc = p_check_undefined_locals(c);
     }
     // 待回填记录移交给上下文，供 assemble 阶段取用。
     c.fixups = p.fix.to_type(*u8);

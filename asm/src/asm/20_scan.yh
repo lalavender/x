@@ -82,6 +82,18 @@ pub struct Lexer {
     n int;        // 已产生 token 数
     cap int;      // 数组容量
     err int;      // 1 = 词法层已报错
+    eline int;    // 错误位置：行（1 基）
+    ecol int;     // 错误位置：列（1 基）
+    emsg *char;   // 错误信息（常量字符串，交给 obj.diag 报位置）
+}
+
+// lex_err：登记一条词法错误（位置 + 信息）。扫描继续，便于一次报出更多问题。
+fn lex_err(l *Lexer, line int, col int, msg *char) int {
+    l.err = 1;
+    l.eline = line;
+    l.ecol = col;
+    l.emsg = msg;
+    return 0;
 }
 
 // lex_init：初始化扫描器。
@@ -95,6 +107,9 @@ pub fn lex_init(l *Lexer, src *u8, nbytes int) int {
     l.n = 0;
     l.cap = 0;
     l.err = 0;
+    l.eline = 1;
+    l.ecol = 1;
+    l.emsg = "词法错误".to_type(*char);
     return 0;
 }
 
@@ -401,6 +416,10 @@ fn lex_trivia(l *Lexer) int {
         }
         if (b == '/' && lex_peek_b(l, 1) == '*') {
             let start int = l.pos;
+            // 位置在进入注释体之前取：扫描中每遇换行都会推进 lstart，
+            // 之后再算列号会算出负数（诊断里出现过 `:5:-12:`）。
+            let sline int = l.line;
+            let scol int = lex_col(l, start);
             l.pos += 2;
             let closed int = 0;
             for l.pos < l.len {
@@ -416,8 +435,8 @@ fn lex_trivia(l *Lexer) int {
                 l.pos += 1;
             }
             if (closed == 0) {
-                l.err = 1;
-                l.pos = start + 2;
+                lex_err(l, sline, scol, "块注释未闭合".to_type(*char));
+                l.pos = l.len;      // 停在文件尾，不再把注释体当代码扫
                 if (lex_push(l, TK_BAD, start, 0, 0) != 0) { return -1; }
             }
             continue;
@@ -458,6 +477,8 @@ pub fn lex_run(l *Lexer) int {
         if (is_digit(b) != 0) {
             let v i64 = 0;
             if (lex_number(l, &v) != 0) {
+                lex_err(l, l.line, lex_col(l, start),
+                        "整数字面量超出范围".to_type(*char));
                 if (lex_push(l, TK_BAD, start, 0, 0) != 0) { return -1; }
                 continue;
             }
@@ -485,7 +506,7 @@ pub fn lex_run(l *Lexer) int {
             continue;
         }
 
-        l.err = 1;
+        lex_err(l, l.line, lex_col(l, start), "非法字符".to_type(*char));
         l.pos += 1;
         if (lex_push(l, TK_BAD, start, 0, 0) != 0) { return -1; }
     }

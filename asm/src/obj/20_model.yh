@@ -116,6 +116,7 @@ pub struct Symbol {
     value int;      // 节内偏移；未定义为 0
     size int;       // 字节；未知为 0
     line int;       // 首次出现的源码行（诊断用）
+    col int;        // 首次出现的源码列（诊断用）
 }
 
 // sym_is_defined：符号是否在本对象内有定义。
@@ -156,6 +157,7 @@ pub struct Ctx {
     caprel int;
     out Buf;         // 最终对象字节（成功时移交调用方）
     errors int;      // 已报告错误数
+    quiet int;       // 1 = 诊断只计数不打印（自检拒绝层用，见 diag）
     fixups *u8;      // 待回填记录数组（asm 层解释布局，obj 只持有并释放）
     strtab Buf;      // 符号名缓冲（输出 .strtab 的内容）
     nfixups int;
@@ -174,6 +176,7 @@ pub fn ctx_init(c *Ctx, t *TargetSpec, path *char) int {
     c.line = 0;
     c.col = 0;
     c.errors = 0;
+    c.quiet = 0;
     c.fixups = 0;
     c.nfixups = 0;
     buf_init(&c.strtab);
@@ -445,10 +448,16 @@ pub fn ctx_add_reloc(c *Ctx, sec int, offset int, sym int, kind u32, addend i64)
 //
 // 所有诊断写标准错误（fd 2），格式 <path>:<line>:<col>: 错误: <msg>。
 // 只做最小格式化：整数与常量字符串，避免自举期引入完整诊断框架。
+// Ctx.quiet 非 0 时只累加 errors 不打印：自检的**拒绝层**要跑一批必然出错的
+// 输入，不能让预期内的诊断淹没门自身输出；诊断格式由 tests/check_neg.py
+// 在子进程里按真实 stderr 验。
 
 // diag：报告一条带位置的错误，返回 -1（便于 `return obj.diag(...)`）。
 pub fn diag(c *Ctx, msg *char) int {
     c.errors += 1;
+    if (c.quiet != 0) {
+        return -1;
+    }
     let buf [512]u8;
     let n int = 0;
     n = dcopy(buf, n, c.path);
@@ -466,6 +475,9 @@ pub fn diag(c *Ctx, msg *char) int {
 // diag_plain：报告一条无位置的错误（编码/格式层用）。
 pub fn diag_plain(c *Ctx, msg *char) int {
     c.errors += 1;
+    if (c.quiet != 0) {
+        return -1;
+    }
     let buf [512]u8;
     let n int = 0;
     n = dcopy(buf, n, c.path);

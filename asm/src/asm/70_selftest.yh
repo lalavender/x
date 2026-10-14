@@ -416,5 +416,195 @@ pub fn asm_selftest() int {
     }
 
     obj.ctx_free(&c);
+    return asm_gnu_selftest();
+}
+
+// asm_gnu_selftest：GNU 方言（编译器 Linux 目标实际发射的形态）端到端自检——
+// `adrp Xd, sym` 裸符号、`add`/访存的 `:lo12:sym`。同一份编译器模块汇编文本
+// 不经任何改写就能进本项目，是本轮稳定化的核心契约（见 docs/02-plan/
+// yh-asm汇编器稳定化实施方案.md 的 ASM-1）。
+// 返回 0 通过，40..N 定位失败项。
+fn asm_gnu_selftest() int {
+    let src *u8 = "\t.text\n\t.globl\tg\n\tadrp\tx0, g\n\tadd\tx0, x0, :lo12:g\n\tldr\tx1, [x0, :lo12:g]\n\tldr\tw2, [x0, :lo12:g]\n\tldrb\tw3, [x0, :lo12:g]\n\tldrh\tw4, [x0, :lo12:g]\n\tstr\tx5, [x0, :lo12:g]\n\tbl\tg\n\tret\ng:\n\tret\n".to_type(*u8);
+    let ts obj.TargetSpec = obj.ts_default();
+    let c obj.Ctx;
+    if (obj.ctx_init(&c, &ts, "gnu-selftest".to_type(*char)) != 0) {
+        return 40;
+    }
+    let n int = obj.cstr_len(src.to_type(*char));
+    let bad int = asm_parse(&c, src, n);
+    if (bad == 0) {
+        bad = asm_assemble(&c);
+    }
+    if (bad != 0) {
+        obj.ctx_free(&c);
+        return 41;
+    }
+
+    // 机器字：页取址与低 12 位一律留重定位（位域保持 0），只有 ret 是纯编码。
+    let want [10]i64 = [0x90000000, 0x91000000, 0xf9400001, 0xb9400002,
+                        0x39400003, 0x79400004, 0xf9000005, 0x94000000,
+                        0xd65f03c0, 0xd65f03c0];
+    let i int = 0;
+    for i < 10 {
+        if (as_word(&c, i * 4) != want[i]) {
+            obj.ctx_free(&c);
+            return 42 + i;
+        }
+        i += 1;
+    }
+
+    // 重定位：页取址 275、加减低 12 位 277、访存按宽度 278/284/285/286，
+    // 全局符号的同节 bl 在 ELF 下照发 CALL26(283)。
+    let kinds [8]i64 = [275, 277, 286, 285, 278, 284, 286, 283];
+    let offs [8]i64 = [0, 4, 8, 12, 16, 20, 24, 28];
+    for i < 8 {
+        if (as_reloc(&c, i, 1, offs[i].to_type(int), kinds[i].to_type(int),
+                     "g".to_type(*char)) == 0) {
+            obj.ctx_free(&c);
+            return 60 + i;
+        }
+        i += 1;
+    }
+    if (c.nrel != 8) {
+        obj.ctx_free(&c);
+        return 70;
+    }
+
+    obj.ctx_free(&c);
+    return 0;
+}
+
+// —— 拒绝层自检 ——
+//
+// 契约 §8 的拒绝清单逐条核对。每条负例后面紧跟一条**正向对照**：只验「拒绝」
+// 会让「所有输入一律拒绝」这种退化实现也通过，正向对照把这条路堵死。
+// 负例本来必然产生诊断，这里把 Ctx.quiet 打开（只计数不打印），门自身输出
+// 保持干净；诊断的格式与关键字由 tests/check_neg.py 在子进程里独立验。
+
+// neg_run：跑一段源码（解析 + 回填），接受返回 0，拒绝返回非 0。
+fn neg_run(src *u8, darwin int) int {
+    let ts obj.TargetSpec = obj.ts_default();
+    if (darwin != 0) {
+        ts = obj.ts_darwin();
+    }
+    let c obj.Ctx;
+    if (obj.ctx_init(&c, &ts, "neg".to_type(*char)) != 0) {
+        return -1;
+    }
+    c.quiet = 1;
+    let n int = obj.cstr_len(src.to_type(*char));
+    let rc int = asm_parse(&c, src, n);
+    if (rc == 0) {
+        rc = asm_assemble(&c);
+    }
+    obj.ctx_free(&c);
+    if (rc == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+// neg_case：一条负例 + 一条正向对照。no 是用例号（1 基）。
+// 返回 0 通过；负例被接受返回 no；正向对照被拒绝返回 100 + no。
+fn neg_case(no int, bad *u8, good *u8, darwin int) int {
+    if (neg_run(bad, darwin) == 0) {
+        return no;
+    }
+    if (neg_run(good, darwin) != 0) {
+        return 100 + no;
+    }
+    return 0;
+}
+
+// neg_selftest：拒绝层。返回 0 通过，否则返回出错的用例号。
+pub fn neg_selftest() int {
+    let rc int = 0;
+
+    // 词法与指令面
+    rc = neg_case(1, "\tfoo\tx0, x1\n".to_type(*u8),
+                  "\tmov\tx0, x1\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(2, "\t.bogus\t1\n".to_type(*u8),
+                  "\t.balign\t4\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(3, "\tmovz\tx0, #0x10000\n".to_type(*u8),
+                  "\tmovz\tx0, #0xffff\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(4, "\tadd\tx0, x1, #4096\n".to_type(*u8),
+                  "\tadd\tx0, x1, #4095\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(5, "\tand\tx0, x1, #0x123\n".to_type(*u8),
+                  "\tand\tx0, x1, #7\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(6, "\tmov\tx0, w1\n".to_type(*u8),
+                  "\tmov\tx0, x1\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+
+    // 访存
+    rc = neg_case(7, "\tldr\tx0, [x1, #3]\n".to_type(*u8),
+                  "\tldr\tx0, [x1, #8]\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(8, "\tldrb\tx0, [x1]\n".to_type(*u8),
+                  "\tldrb\tw0, [x1]\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(9, "\tldr\tw0, [x0, sym@GOTPAGEOFF]\n".to_type(*u8),
+                  "\tldr\tx0, [x0, sym@GOTPAGEOFF]\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+
+    // 控制流：目标形态与范围
+    rc = neg_case(10, "\tcbz\tsp, .L1\n.L1:\n\tret\n".to_type(*u8),
+                  "\tcbz\tx0, .L1\n.L1:\n\tret\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(11, "\tb\t#0x40000000\n".to_type(*u8),
+                  "\tb\t#4\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(12, "\tcbz\tx0, #0x100000\n.L1:\n\tret\n".to_type(*u8),
+                  "\tcbz\tx0, .L1\n.L1:\n\tret\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(13, "\tb\tsym@PAGEOFF\n".to_type(*u8),
+                  "\tb\tsym\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(14, "\tb.eq\tsym@PAGE\n".to_type(*u8),
+                  "\tb.eq\tsym\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(15, "\tb\t.Lmissing\n".to_type(*u8),
+                  "\tb\t.L1\n.L1:\n\tret\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+
+    // 地址与符号修饰符（ASM-1：GNU 方言接受面）
+    rc = neg_case(16, "\tadrp\tx0, :lo12:sym\n".to_type(*u8),
+                  "\tadrp\tx0, sym\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(17, "\tadd\tx0, x0, sym\n".to_type(*u8),
+                  "\tadd\tx0, x0, :lo12:sym\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(18, "\tmov\tx0, :lo12:sym\n".to_type(*u8),
+                  "\tldr\tx0, [x0, :lo12:sym]\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    // 同一份文本在两个目标下的结论必须不同：裸符号只在 GNU/ELF 接受。
+    if (neg_run("\tadrp\tx0, g\n".to_type(*u8), 1) == 0) { return 19; }
+    if (neg_run("\tadrp\tx0, g\n".to_type(*u8), 0) != 0) { return 119; }
+
+    // 伪指令与表达式
+    rc = neg_case(20, "\t.balign\t3\n".to_type(*u8),
+                  "\t.balign\t4\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(21, "\t.p2align\t40\n".to_type(*u8),
+                  "\t.p2align\t3\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(22, "\t.type\tf, %notatype\nf:\n\tret\n".to_type(*u8),
+                  "\t.type\tf, %function\nf:\n\tret\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(23, "\t.size\tf, g - f\nf:\n\tret\n".to_type(*u8),
+                  "\t.size\tf, 8\nf:\n\tret\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(24, "\t.xword\tsym1 + sym2\n".to_type(*u8),
+                  "\t.xword\tsym1\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+    rc = neg_case(25, "\t.text\nf:\n\tret\nf:\n\tret\n".to_type(*u8),
+                  "\t.text\nf:\n\tret\n".to_type(*u8), 0);
+    if (rc != 0) { return rc; }
+
     return 0;
 }

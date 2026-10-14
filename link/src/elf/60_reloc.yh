@@ -1,0 +1,470 @@
+module elf;
+
+// ============================================================================
+// elf/60_reloc.yh —— AArch64 RELA 重定位应用
+//
+// 白名单与公式（汇编器契约 §6，与 asm 侧同一份契约）：
+//
+//   257 ABS64                 数据 8 字节：写 S + A
+//   275 ADR_PREL_PG_HI21      adrp：((S+A) 页 - P 页) >> 12
+//   277 ADD_ABS_LO12_NC       add 的 imm12：(S + A) 低 12 位（sh=0）
+//   278/284/285/286 LDST*     ldr/str 的 imm12：(S + A) >> scale 的低 12 位
+//   280 CONDBR19              b.cond/cbz/cbnz 的 imm19：(S + A - P) >> 2
+//   282 JUMP26                b 的 imm26：(S + A - P) >> 2
+//   283 CALL26                bl 的 imm26：(S + A - P) >> 2
+//   311 LD64_GOTPAGE_LO21     adrp 指向 GOT 槽：(GOT 页 - P 页) >> 12
+//   312 LD64_GOT_LO12_NC      ldr 的 imm12：GOT(S+A) 的低 12 位
+//
+// 页取整那一步是关键：ADRP 只写「页差」，运行时再由指令本身补上 PC 的低 12 位，
+// 所以链接期算出的必须是 (目标页 - PC 页) >> 12。少了取整这一步，节被放在
+// 非 4 KiB 对齐处时算出来的就是错值（2026-10-03 容器门抓到的真 bug 类别）。
+//
+// 安全检查：作用节必须存在、偏移 + 访问宽度必须在节内、被改写的字节必须尚未
+// 被别的重定位改写（重叠即报错）、位移必须按访问宽度对齐且在位域范围内。
+// 越界不截断、不静默降级——CALL26 超出 ±128 MiB 时报「需要跳板」，首版不做
+// 跳板，明确失败好过产出跑不起来的映像。
+//
+// 位段访问：指令字在 u64 域里读位/写位（obj.hi_bits / obj.set_bits_u），
+// 地址在 int 域里算（obj.low_bits / obj.mul_add）。两者不混进同一算式，
+// 原因见 obj/10_bytes.yh 顶部说明。
+// ============================================================================
+
+import obj;
+
+// 重定位类型号（与 30_read.yh 的白名单一致）。
+// 命名带 rl_ 前缀：yh 的模块常量与函数共享名字空间，前缀避免与助手函数重名。
+const rl_ABS64 int = 257;
+const rl_ADR_PG_HI21 int = 275;
+const rl_ADD_LO12 int = 277;
+const rl_LDST8_LO12 int = 278;
+const rl_CONDBR19 int = 280;
+const rl_JUMP26 int = 282;
+const rl_CALL26 int = 283;
+const rl_LDST16_LO12 int = 284;
+const rl_LDST32_LO12 int = 285;
+const rl_LDST64_LO12 int = 286;
+const rl_GOTPAGE_LO21 int = 311;
+const rl_GOT_LO12 int = 312;
+
+// —— 指令字的读位/写位助手 ——
+
+// iw_get：取 32 位指令字 w 的第 [lo, hi) 位段（int 结果）。
+fn iw_get(w u32, lo int, hi int) int {
+    return obj.hi_bits(w.to_type(u64), lo, hi);
+}
+
+// iw_put：把 w 的第 [lo, hi) 位段替换成 value。
+fn iw_put(w u32, lo int, hi int, value int) u32 {
+    let v u64 = value.to_type(i64).to_type(u64);
+    return obj.set_bits_u(w.to_type(u64), lo, hi, v)
+        .to_type(u64).to_type(u32);
+}
+
+// —— 指令形态校验（只看关键位段，避免把重定位打到形态不符的指令上） ——
+//
+// 全部用位段取值（iw_get）做算术比较，不写 `&`：
+// 实测 `0x90000001 & 0x9f000000` 会得到 0（正确值 0x90000000），
+// 位与在含大立即数的 u32 形态下不可靠（同一份结论见 obj/10_bytes.yh）。
+// 位段取值走除法的实现是可靠的（--verbose 下可逐条核对）。
+
+// rl_is_adrp：adrp 的 op 位段（31:24）为 0x90。
+// 注意：**不能**同时要求位段 4:0 为 0——adrp 的 immlo 就占位 30:29，
+// 紧跟其后的 add 只带 @PAGEOFF 重定位，汇编期 adrp 的低 5 位可能是任意
+// 残留值（实测 yh_asm 产出 0x90000001）。op 位段一致即可判定形态。
+fn rl_is_adrp(w u32) int {
+    return (iw_get(w, 24, 32) == 0x90).to_type(int);
+}
+
+// rl_is_add_imm：add Xd, Xn, #imm12。sf=1 时 op 位段（28:24）= 0x11。
+// 同时接受 sf=0（w 寄存器）：位段 28:24 = 0x11 与 0x01 之外的都不是 add 立即数。
+fn rl_is_add_imm(w u32) int {
+    let op int = iw_get(w, 24, 29);
+    if (op == 0x11 || op == 0x01) {
+        return 1;
+    }
+    return 0;
+}
+
+// rl_is_ldst_imm：ldr/str 的 imm12 形态。位段 27:26 必须是 11（64/32/16/8 位
+// 与符号/浮点变体都满足），位段 25:24 区分无符号/有符号/浮点：01 或 11。
+fn rl_is_ldst_imm(w u32) int {
+    if (iw_get(w, 26, 28) != 3) {
+        return 0;
+    }
+    let c2 int = iw_get(w, 24, 26);
+    if (c2 == 1 || c2 == 3) {
+        return 1;
+    }
+    return 0;
+}
+
+// rl_is_branch26：b/bl 的位段 30:26 = 00101。
+fn rl_is_branch26(w u32) int {
+    return (iw_get(w, 26, 31) == 5).to_type(int);
+}
+
+// rl_is_condbr19：b.cond（位段 31:24 = 0x54）或 cbz/cbnz（0x34/0x35/0xb4/0xb5）。
+fn rl_is_condbr19(w u32) int {
+    let v int = iw_get(w, 24, 32);
+    if (v == 0x54 || v == 0x34 || v == 0x35 || v == 0xb4 || v == 0xb5) {
+        return 1;
+    }
+    return 0;
+}
+
+// —— 重定位应用 ——
+
+// rl_mark：重定位改写前检查目标字节是否已被改写。重叠重定位是输入错误的
+// 强信号（两条重定位落在同一条指令上），必须报错而不是覆盖。
+fn rl_mark(c *obj.LinkCtx, os *obj.OSec, off int, n int) int {
+    if (os.written == 0) {
+        return obj.diag_plain(c, "内部错误：重定位位图未建立");
+    }
+    let i int = 0;
+    for i < n {
+        if (os.written[off + i] != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < n {
+        os.written[off + i] = 1;
+        i += 1;
+    }
+    return 0;
+}
+
+// rl_alloc_bitmap：为每个输出节建立「已改写字节」位图。布局之后调用。
+pub fn rl_alloc_bitmap(c *obj.LinkCtx) int {
+    let i int = 0;
+    for i < obj.osec_count() {
+        let os *obj.OSec = &c.osecs[i];
+        let n int = os.mem.len;
+        if (n > 0) {
+            os.written = malloc(n.to_type(u64)).to_type(*u8);
+            if (os.written == 0) {
+                return obj.diag_plain(c, "内存不足");
+            }
+            let k int = 0;
+            for k < n {
+                os.written[k] = 0;
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// rl_fits_bits：有符号值 v 是否放得进 bits 位补码。
+// 上界 2^(bits-1) − 1、下界 −2^(bits-1)。
+fn rl_fits_bits(v i64, bits int) int {
+    let hi u64 = obj.pow2(bits - 1);
+    if (v >= 0) {
+        return (v.to_type(u64) < hi).to_type(int);
+    }
+    let lo i64 = 0.to_type(i64) - hi.to_type(i64);
+    return (v >= lo).to_type(int);
+}
+
+// rl_read32：读作用节里的一个机器字。
+fn rl_read32(os *obj.OSec, off int) u32 {
+    return obj.rd_u32le(os.mem.data, off);
+}
+
+// rl_err：报一条带位置的诊断并返回 -1。
+fn rl_err(c *obj.LinkCtx, o int, isec int, off int, msg *char) int {
+    return obj.diag_at(c, o, obj.isec_name_at(c, o, isec), off, msg);
+}
+
+// rl_write32：检查重叠后写回一个机器字。
+fn rl_write32(c *obj.LinkCtx, os *obj.OSec, off int, w u32, o int,
+    isec int) int {
+    if (rl_mark(c, os, off, 4) != 0) {
+        return rl_err(c, o, isec, off, "重定位位置重叠（已被别的重定位改写）");
+    }
+    if (obj.buf_patch32(&os.mem, off, w) != 0) {
+        return rl_err(c, o, isec, off, "重定位写出越界");
+    }
+    return 0;
+}
+
+// rl_page_base：向下取整到 4 KiB 页（等价 v & ~0xFFF，用算术表达）。
+fn rl_page_base(v int) int {
+    return v - obj.low_bits(v, 0x1000);
+}
+
+// rl_page_diff：目标页与 PC 页之差（按字节）。ADRP 只写页差，这一步不能省。
+fn rl_page_diff(sa int, p int) int {
+    return rl_page_base(sa) - rl_page_base(p);
+}
+
+// rl_put_adrp：把 21 位页差写进 adrp 的 immlo(30:29) + immhi(23:5)。
+fn rl_put_adrp(w u32, imm int) u32 {
+    let v int = obj.low_bits(imm, 0x200000);
+    let immlo int = obj.low_bits(v, 4);
+    let immhi int = obj.low_bits(v, 0x200000) / 4;
+    let nw u32 = iw_put(w, 29, 31, immlo);
+    return iw_put(nw, 5, 24, immhi);
+}
+
+// rl_apply_branch：分支类重定位（imm19/imm26）。
+fn rl_apply_branch(c *obj.LinkCtx, os *obj.OSec, w u32, sa int, p int,
+    bits int, r obj.IRel, o int) int {
+    let d int = sa - p;
+    // 对齐判定用 |d| 取余：位移可能为负（前向跳转），而「除以再乘回」的
+    // 取余对负数是向零取整，直接判零会把 -8 这类合法位移误判成未对齐。
+    let ad int = d;
+    if (ad < 0) {
+        ad = 0 - ad;
+    }
+    if (obj.low_bits(ad, 4) != 0) {
+        return rl_err(c, o, r.sec, r.off, "分支位移未按 4 字节对齐");
+    }
+    let imm int = d / 4;
+    if (!rl_fits_bits(imm.to_type(i64), bits)) {
+        return rl_err(c, o, r.sec, r.off,
+            "分支超出 ±128 MiB（需要跳板，首版未实现）");
+    }
+    let nw u32 = w;
+    if (bits == 19) {
+        nw = iw_put(w, 5, 24, obj.low_bits(imm, 0x80000));
+    } else {
+        nw = iw_put(w, 0, 26, obj.low_bits(imm, 0x4000000));
+    }
+    return rl_write32(c, os, r.off, nw, o, r.sec);
+}
+
+// rl_apply_got：GOT 类重定位。槽地址在布局阶段确定（GOT 在只读段最前）。
+fn rl_apply_got(c *obj.LinkCtx, k int, os *obj.OSec, p int) int {
+    let r obj.IRel = c.irels[k];
+    let o int = c.irel_obj[k];
+    let kind int = r.kind.to_type(u64).to_type(i64).to_type(int);
+    let slot int = c.rel_got[k];
+    if (slot < 0) {
+        return rl_err(c, o, r.sec, r.off, "内部错误：GOT 槽位未分配");
+    }
+    let slot_addr int = c.osecs[obj.OSEC_GOT].vaddr
+        .to_type(u64).to_type(i64).to_type(int)
+        + obj.mul_add(slot, obj.GOT_ENTRY);
+    if (obj.low_bits(r.off, 4) != 0) {
+        return rl_err(c, o, r.sec, r.off, "指令重定位未按 4 字节对齐");
+    }
+    let w u32 = rl_read32(os, r.off);
+    if (kind == rl_GOTPAGE_LO21) {
+        if (rl_is_adrp(w) == 0) {
+            return rl_err(c, o, r.sec, r.off,
+                "GOTPAGE_LO21 的目标不是 adrp 指令");
+        }
+        let imm int = rl_page_diff(slot_addr, p) / 0x1000;
+        if (!rl_fits_bits(imm.to_type(i64), 21)) {
+            return rl_err(c, o, r.sec, r.off, "GOT 页差超出 ±4 GiB 代码模型");
+        }
+        return rl_write32(c, os, r.off, rl_put_adrp(w, imm), o, r.sec);
+    }
+    if (rl_is_ldst_imm(w) == 0) {
+        return rl_err(c, o, r.sec, r.off,
+            "GOT_LO12_NC 的目标不是访存立即数指令");
+    }
+    // 64 位 GOT 访存：移位指示位（31:30）为 01
+    if (iw_get(w, 30, 32) != 1) {
+        return rl_err(c, o, r.sec, r.off,
+            "GOT 访存的移位指示位不是 64 位形态");
+    }
+    let lo int = obj.low_bits(slot_addr, 0x1000);
+    return rl_write32(c, os, r.off, iw_put(w, 10, 22, lo), o, r.sec);
+}
+
+// rl_scale：访问宽度对应的缩放因子（0→1、1→2、2→4、3→8）。
+fn rl_scale(scale int) int {
+    let v int = 1;
+    let i int = 0;
+    for i < scale {
+        v = v * 2;
+        i += 1;
+    }
+    return v;
+}
+
+// rl_apply_one：应用一条重定位。成功返回 0，失败返回 -1 并已打印诊断。
+fn rl_apply_one(c *obj.LinkCtx, k int) int {
+    let r obj.IRel = c.irels[k];
+    let o int = c.irel_obj[k];
+    // 扁平符号下标 = 对象符号基址 + 对象内符号下标。
+    // 注意 `c.isym_base[o] + r.sym` 这个式子必须完整写出来：
+    // 早期误写成直接用 r.sym，跨对象符号被解析成了本对象的同名下标。
+    let gsym int = c.isym_base[o] + r.sym;
+    let kind int = r.kind.to_type(u64).to_type(i64).to_type(int);
+    let kind_osec int = c.objs[o].secs[r.sec].kind;
+    if (kind_osec < 0 || kind_osec >= obj.osec_count()) {
+        return rl_err(c, o, r.sec, r.off, "重定位作用节没有对应的输出节");
+    }
+    let os *obj.OSec = &c.osecs[kind_osec];
+    let p int = os.vaddr.to_type(u64).to_type(i64).to_type(int) + r.off;
+    if (c.symmap[gsym] == obj.SYMV_UNDEF) {
+        if (obj.trace_enabled() != 0) {
+            obj.buf_clear(&c.diag_buf);
+            obj.db_put(&c.diag_buf, "  [rl] 目标符号未解析 gsym=");
+            obj.db_int(&c.diag_buf, gsym);
+            obj.db_put(&c.diag_buf, " 名字=");
+            obj.db_put(&c.diag_buf, obj.o_str_at(c, c.isym_obj[gsym],
+                c.isyms[gsym].name_off));
+            obj.db_put(&c.diag_buf, "\n");
+            obj.dwrite(2, c.diag_buf.data, c.diag_buf.len);
+        }
+        // 未定义符号已由 st_report_undef 报过；这里不再重复报错
+        return -1;
+    }
+    let sa_int int = c.symval[gsym].to_type(u64).to_type(i64).to_type(int)
+        + r.addend.to_type(i64).to_type(int);
+    let sa u64 = sa_int.to_type(i64).to_type(u64);
+    if (kind == rl_ABS64) {
+        if (obj.low_bits(r.off, 8) != 0) {
+            return rl_err(c, o, r.sec, r.off, "ABS64 重定位未按 8 字节对齐");
+        }
+        if (rl_mark(c, os, r.off, 8) != 0) {
+            return rl_err(c, o, r.sec, r.off,
+                "重定位位置重叠（已被别的重定位改写）");
+        }
+        if (obj.buf_patch64(&os.mem, r.off, sa) != 0) {
+            return rl_err(c, o, r.sec, r.off, "ABS64 写出越界");
+        }
+        return 0;
+    }
+    if (kind == rl_GOTPAGE_LO21 || kind == rl_GOT_LO12) {
+        return rl_apply_got(c, k, os, p);
+    }
+    // 其余都是 32 位指令字重定位
+    if (obj.low_bits(r.off, 4) != 0) {
+        return rl_err(c, o, r.sec, r.off, "指令重定位未按 4 字节对齐");
+    }
+    let w u32 = rl_read32(os, r.off);
+    if (kind == rl_ADR_PG_HI21) {
+        if (obj.trace_enabled() != 0) {
+            obj.buf_clear(&c.diag_buf);
+            obj.db_put(&c.diag_buf, "  [rl] w=");
+            obj.db_hex(&c.diag_buf, w.to_type(u64));
+            obj.db_put(&c.diag_buf, " op=");
+            obj.db_int(&c.diag_buf, iw_get(w, 24, 32));
+            obj.db_put(&c.diag_buf, " lo5=");
+            obj.db_int(&c.diag_buf, iw_get(w, 0, 5));
+            obj.db_put(&c.diag_buf, "\n");
+            obj.dwrite(2, c.diag_buf.data, c.diag_buf.len);
+        }
+        if (rl_is_adrp(w) == 0) {
+            return rl_err(c, o, r.sec, r.off,
+                "ADR_PREL_PG_HI21 的目标不是 adrp 指令");
+        }
+        let imm int = rl_page_diff(sa_int, p) / 0x1000;
+        if (!rl_fits_bits(imm.to_type(i64), 21)) {
+            return rl_err(c, o, r.sec, r.off, "adrp 页差超出 ±4 GiB 代码模型");
+        }
+        return rl_write32(c, os, r.off, rl_put_adrp(w, imm), o, r.sec);
+    }
+    if (kind == rl_ADD_LO12) {
+        if (rl_is_add_imm(w) == 0) {
+            return rl_err(c, o, r.sec, r.off,
+                "ADD_ABS_LO12_NC 的目标不是 add 立即数指令");
+        }
+        if (iw_get(w, 22, 24) != 0) {
+            return rl_err(c, o, r.sec, r.off,
+                "add 带移位（sh != 0）的形态未支持");
+        }
+        let lo int = obj.low_bits(sa_int, 0x1000);
+        return rl_write32(c, os, r.off, iw_put(w, 10, 22, lo), o, r.sec);
+    }
+    if (kind == rl_LDST8_LO12 || kind == rl_LDST16_LO12
+        || kind == rl_LDST32_LO12 || kind == rl_LDST64_LO12) {
+        if (rl_is_ldst_imm(w) == 0) {
+            return rl_err(c, o, r.sec, r.off,
+                "LDST*_ABS_LO12_NC 的目标不是访存立即数指令");
+        }
+        let scale int = 0;
+        if (kind == rl_LDST16_LO12) { scale = 1; }
+        if (kind == rl_LDST32_LO12) { scale = 2; }
+        if (kind == rl_LDST64_LO12) { scale = 3; }
+        let want_sh int = 0;
+        if (scale > 0) { want_sh = 1; }
+        if (iw_get(w, 30, 32) != want_sh) {
+            return rl_err(c, o, r.sec, r.off, "访存指令的移位与访问宽度不匹配");
+        }
+        let v int = sa_int / rl_scale(scale);
+        if (v >= 0x1000) {
+            return rl_err(c, o, r.sec, r.off, "访存偏移超出 imm12 可表达范围");
+        }
+        let lo int = obj.low_bits(v, 0x1000);
+        return rl_write32(c, os, r.off, iw_put(w, 10, 22, lo), o, r.sec);
+    }
+    if (kind == rl_CONDBR19) {
+        if (rl_is_condbr19(w) == 0) {
+            return rl_err(c, o, r.sec, r.off,
+                "CONDBR19 的目标不是条件分支指令");
+        }
+        return rl_apply_branch(c, os, w, sa_int, p, 19, r, o);
+    }
+    if (kind == rl_JUMP26 || kind == rl_CALL26) {
+        if (obj.trace_enabled() != 0) {
+            obj.buf_clear(&c.diag_buf);
+            obj.db_put(&c.diag_buf, "  [rl] 分支 gsym=");
+            obj.db_int(&c.diag_buf, gsym);
+            obj.db_put(&c.diag_buf, " 名=");
+            obj.db_put(&c.diag_buf, obj.o_str_at(c, c.isym_obj[gsym],
+                c.isyms[gsym].name_off));
+            obj.db_put(&c.diag_buf, " map=");
+            obj.db_int(&c.diag_buf, c.symmap[gsym]);
+            obj.db_put(&c.diag_buf, " val=");
+            obj.db_hex(&c.diag_buf, c.symval[gsym]);
+            obj.db_put(&c.diag_buf, " sec=");
+            obj.db_int(&c.diag_buf, c.symsec[gsym]);
+            obj.db_put(&c.diag_buf, "\n");
+            obj.dwrite(2, c.diag_buf.data, c.diag_buf.len);
+        }
+        if (rl_is_branch26(w) == 0) {
+            return rl_err(c, o, r.sec, r.off,
+                "JUMP26/CALL26 的目标不是 b/bl 指令");
+        }
+        return rl_apply_branch(c, os, w, sa_int, p, 26, r, o);
+    }
+    return rl_err(c, o, r.sec, r.off, "内部错误：白名单外的重定位类型");
+}
+
+// rl_apply_all：应用全部重定位。成功返回 0，失败返回 -1。
+pub fn rl_apply_all(c *obj.LinkCtx) int {
+    let k int = 0;
+    for k < c.nirel {
+        if (obj.trace_enabled() != 0) {
+            obj.buf_clear(&c.diag_buf);
+            obj.db_put(&c.diag_buf, "  [rl] 第 ");
+            obj.db_int(&c.diag_buf, k);
+            obj.db_put(&c.diag_buf, " 条 kind=");
+            obj.db_int(&c.diag_buf, c.irels[k].kind.to_type(u64)
+                .to_type(i64).to_type(int));
+            obj.db_put(&c.diag_buf, " obj=");
+            obj.db_int(&c.diag_buf, c.irel_obj[k]);
+            obj.db_put(&c.diag_buf, " base=");
+            obj.db_int(&c.diag_buf, c.isym_base[c.irel_obj[k]]);
+            obj.db_put(&c.diag_buf, " sec=");
+            obj.db_int(&c.diag_buf, c.irels[k].sec);
+            obj.db_put(&c.diag_buf, " off=");
+            obj.db_int(&c.diag_buf, c.irels[k].off);
+            obj.db_put(&c.diag_buf, " sym=");
+            obj.db_int(&c.diag_buf, c.irels[k].sym);
+            obj.db_put(&c.diag_buf, " gsym=");
+            obj.db_int(&c.diag_buf, c.isym_base[c.irel_obj[k]]
+                + c.irels[k].sym);
+            obj.db_put(&c.diag_buf, " 名=");
+            obj.db_put(&c.diag_buf, obj.o_str_at(c,
+                c.isym_obj[c.isym_base[c.irel_obj[k]] + c.irels[k].sym],
+                c.isyms[c.isym_base[c.irel_obj[k]] + c.irels[k].sym]
+                    .name_off));
+            obj.db_put(&c.diag_buf, "\n");
+            obj.dwrite(2, c.diag_buf.data, c.diag_buf.len);
+        }
+        if (rl_apply_one(c, k) != 0) {
+            return -1;
+        }
+        k += 1;
+    }
+    return 0;
+}

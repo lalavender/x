@@ -12,6 +12,8 @@
 #   * make uninstall  卸载
 #   * make explorer   启动 yh Compiler Explorer（本地浏览器图形界面）
 #   * make yh-asm     构建 asm/ 汇编器项目，产出根目录 yh_asm（编译器不发现它）
+#   * make yh-link-build  构建 link/ 静态链接器项目，产出 link/.build/yh_link
+#   * make yh-link-probe  跑链接器验收门（自检 + CLI 契约；FULL=1 加端到端/差分）
 #   * make clean      清理
 #
 # 汇编器当前**不接入编译器**：编译器只按 yh_link 名字发现汇编器
@@ -19,6 +21,12 @@
 # 需要让编译器临时用汇编器时，显式给 YH_LINK=<asm 产物绝对路径>，
 # 或跑 asm/tests/shadow-build.py（影子验收）。见 docs/02-plan/
 # yh-asm汇编器稳定化实施方案.md。
+#
+# 链接器同样**不接入编译器**（2026-10-13 决定，见 docs/02-plan/
+# yh-link静态ELF链接器实施方案.md），并且**刻意不产出根目录 yh_link**：
+# 编译器当前把根目录的 yh_link 当作汇编器调用（`yh_link asm -t ... -o ...`），
+# 真链接器一旦占用该名字，现有 `make`/`make test` 会立刻坏掉。集成是后续任务
+# （先把编译器的工具查找改成 yh_asm，再把 yh_link 指向真链接器）。
 #
 # 可在命令行覆盖：SEED（编译种子路径）。Linux CI 用匹配架构的 ELF 种子。
 # --------------------------------------------------------------------------
@@ -104,6 +112,33 @@ ifeq ($(HOST_SYSTEM),Darwin)
 	@codesign -s - -f "$(YH_ASM)" 2>/dev/null || true
 endif
 
+# yh-link-build：用刚构建出的 $(YH) 冷编 link/（静态链接器项目）。
+# 与 yh-asm 一样刻意不依赖 $(SEED)；产物留在 link/.build/，**不复制到仓库根**
+# （原因见文件头：根目录 yh_link 目前是编译器眼中的汇编器入口）。
+# 需要让编译器临时用链接器时显式给路径，等集成任务落地后再统一。
+YH_LINK_OBJ = $(TOPSRC)/link/.build/yh_link$(EXESUF)
+
+.PHONY: yh-link-build
+yh-link-build: $(YH)
+	rm -rf $(TOPSRC)/link/.build
+	cd $(TOPSRC)/link && "$(abspath $(YH))" build
+	@test -x "$(YH_LINK_OBJ)" || { echo "错误: 未产出 $(YH_LINK_OBJ)"; exit 1; }
+	@echo "链接器已构建：$(YH_LINK_OBJ)（未接入编译器，未放到仓库根）"
+
+# yh-link-probe：链接器验收门。默认只跑构建 + 自检 + CLI 契约
+# （不需要汇编器，也不需要在 Linux 上）；FULL=1 追加端到端验收与 GNU ld 差分，
+# 这两层需要 yh_asm 与可执行 AArch64 产物的环境（Linux/aarch64 原生或
+# x86_64 + qemu-user/binfmt）。
+LINK_PROBE_FLAGS =
+ifeq ($(FULL),1)
+LINK_PROBE_FLAGS = --full
+endif
+
+.PHONY: yh-link-probe
+yh-link-probe: $(YH)
+	cd $(TOPSRC) && python3 $(TOPSRC)/link/tests/check.py \
+	    --compiler "$(abspath $(YH))" $(LINK_PROBE_FLAGS)
+
 # seed：滚种子——把刚构建并验证过的 yh 覆盖入库种子。
 # 只应在 make test 与 make selfhost-native 全绿后执行（不作为依赖，
 # 防止未验证产物污染种子）。
@@ -158,6 +193,6 @@ clean:
 help:
 	@sed -n '2,26p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all explorer seed selfhost-native clean help yh-asm
+.PHONY: all install uninstall test test-all explorer seed selfhost-native clean help yh-asm yh-link-build yh-link-probe
 
 endif # ($(INCLUDED),no)

@@ -1,27 +1,82 @@
 #!/usr/bin/env python3
-"""把 yh_asm 汇编出的对象与 llvm-mc 的参照对象逐节比对。
+"""把 yh_asm 汇编出的对象与独立 oracle 的参照对象逐节比对。
 
 比对内容：
   * 每个具名节（.text/.data/.rodata/.bss）的内容与大小；
   * 每个节的重定位列表（偏移、类型、目标符号名、addend）。
 
-llvm-mc 只作参照：符号表顺序、节头顺序、对齐填充的差异不参与判定，
+oracle 只作参照：符号表顺序、节头顺序、对齐填充的差异不参与判定，
 只比内容与重定位这两件会决定最终映像的事。
 
+oracle 解析顺序（见 oracle_kind）：`LLVM_MC` 环境变量 → Homebrew 默认路径 →
+`clang` 的集成汇编器。三者是同一个 LLVM MC 后端；只有 llvm-mc 的宿主用
+`llvm-mc --assemble`，只有 clang 的宿主（例如 WSL）用
+`clang --target=aarch64-linux-gnu -c`，差分结论等价。
+
 用法：
-  python3 tests/check_corpus.py [语料目录] [可执行文件]
+  python3 tests/check_corpus.py [语料目录...] [--bin 可执行文件]
 默认语料目录 ../tmp/inv，默认可执行文件 ./.build/yh_asm。
 """
 
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 
-LLVM_MC = "/opt/homebrew/opt/llvm/bin/llvm-mc"
 TRIPLE = "aarch64-linux-gnu"
+LLVM_MC_ENV = os.environ.get("LLVM_MC")
+LLVM_MC_DEFAULT = "/opt/homebrew/opt/llvm/bin/llvm-mc"
+CLANG_ENV = os.environ.get("CLANG")
+CLANG_CANDIDATES = ["clang", "clang-21", "clang-20", "clang-19", "clang-18"]
+
+
+def _is_real_clang(path):
+    """确认 path 是 LLVM clang，而不是同名转发脚本。
+
+    开发容器/WSL 上 tmp/boot/crossbin/clang 其实是 aarch64-linux-gnu-gcc 的
+    包装（给编译器做交叉链接用），拿它当 oracle 会直接失败。用 --version
+    输出里有没有 "clang" 判定。
+    """
+    try:
+        p = subprocess.run([path, "--version"], capture_output=True, text=True,
+                           timeout=15)
+    except Exception:
+        return False
+    return "clang" in (p.stdout + p.stderr).lower()
+
+
+def oracle_kind():
+    """决定用哪个独立 oracle，返回 (kind, tool)。
+
+    kind 为 "llvm-mc"（有 --show-encoding 与逐条文本回显）或 "clang"
+    （集成汇编器，同一个 LLVM MC 后端）。都找不到返回 ("", "")。
+    """
+    cand = LLVM_MC_ENV if LLVM_MC_ENV else LLVM_MC_DEFAULT
+    if cand and os.path.exists(cand):
+        return ("llvm-mc", cand)
+    if CLANG_ENV and _is_real_clang(CLANG_ENV):
+        return ("clang", CLANG_ENV)
+    for name in CLANG_CANDIDATES:
+        path = shutil.which(name)
+        if path and _is_real_clang(path):
+            return ("clang", path)
+    return ("", "")
+
+
+def run(cmd):
+    p = subprocess.run(cmd, capture_output=True)
+    return p.returncode, p.stdout, p.stderr
+
+
+def oracle_asm(kind, tool, src, dst, triple=TRIPLE):
+    """用 oracle 把汇编文本 src 汇编成对象 dst。成功返回 True。"""
+    if kind == "llvm-mc":
+        return run([tool, "--assemble", "-triple=" + triple,
+                    "-filetype=obj", "-o", dst, src])[0] == 0
+    return run([tool, "--target=" + triple, "-c", "-o", dst, src])[0] == 0
 
 
 def read_elf(path):
@@ -156,76 +211,105 @@ def run(cmd):
 
 
 def main():
-    corpus = sys.argv[1] if len(sys.argv) > 1 else "../tmp/inv"
-    binary = sys.argv[2] if len(sys.argv) > 2 else "./.build/yh_asm"
-    files = sorted(f for f in os.listdir(corpus) if f.endswith(".s"))
+    argv = sys.argv[1:]
+    binary = "./.build/yh_asm"
+    if "--bin" in argv:
+        i = argv.index("--bin")
+        if i + 1 >= len(argv):
+            print("--bin 后面需要可执行文件路径")
+            return 2
+        binary = argv[i + 1]
+        del argv[i:i + 2]
+    corpora = argv if argv else ["../tmp/inv"]
+
+    kind, tool = oracle_kind()
+    if kind == "":
+        print("找不到独立 oracle：给 LLVM_MC=<llvm-mc 路径> 或把 clang 放进 PATH")
+        return 2
+    print("oracle: %s (%s)" % (kind, tool))
 
     total = ours = 0
     bad = []
     skipped = []
     tmp = tempfile.mkdtemp(prefix="linkcorpus")
 
-    for f in files:
-        src = os.path.join(corpus, f)
-        total += 1
-        mine = os.path.join(tmp, f + ".mine.o")
-        ref = os.path.join(tmp, f + ".ref.o")
-        rc, _, err = run([binary, "asm", "-o", mine, src])
-        if rc != 0:
-            skipped.append((f, err.decode(errors="replace").strip().split("\n")[0]))
-            continue
-        gnu = os.path.join(tmp, f + ".gnu.s")
-        with open(gnu, "w") as fh:
-            fh.write(to_gnu(open(src).read()))
-        rc, _, err = run([LLVM_MC, "--assemble", "-triple=" + TRIPLE,
-                          "-filetype=obj", "-o", ref, gnu])
-        if rc != 0:
-            skipped.append((f, "llvm-mc 失败: " + err.decode(errors="replace")[:80]))
-            continue
-        ours += 1
-        try:
-            s1, r1 = read_elf(mine)
-            s2, r2 = read_elf(ref)
-            # 两边都在同一个模拟布局下应用重定位，把形态统一成链接后的
-            # 样子；指向外部符号的重定位两边都保留原样，不参与回填。
-            apply_relocs(s1, r1)
-            apply_relocs(s2, r2)
-        except Exception as exc:
-            bad.append((f, "解析失败: %s" % exc))
-            continue
-        diffs = []
-        for want in (".text", ".data", ".rodata", ".bss"):
-            a = s1.get(want)
-            b = s2.get(want)
-            if a is None and b is None:
+    for corpus in corpora:
+        files = sorted(f for f in os.listdir(corpus) if f.endswith(".s"))
+        for f in files:
+            src = os.path.join(corpus, f)
+            total += 1
+            mine = os.path.join(tmp, f + ".mine.o")
+            ref = os.path.join(tmp, f + ".ref.o")
+            rc, _, err = run([binary, "asm", "-o", mine, src])
+            if rc != 0:
+                skipped.append((corpus, f,
+                                err.decode(errors="replace").strip().split("\n")[0]))
                 continue
-            if a is None or b is None:
-                diffs.append("%s 节存在性不同" % want)
+            gnu = os.path.join(tmp, f + ".gnu.s")
+            try:
+                src_text = open(src).read()
+            except OSError as exc:
+                # 语料目录若是编译器的 .build 缓存，可能在别的构建里被重建。
+                # 这时明确报出来，而不是抛栈回溯。
+                bad.append((corpus, f, "语料读不到（可能被并发构建重建）：%s" % exc))
                 continue
-            if a[1] != b[1]:
-                diffs.append("%s 内容不同: 本工具 %d 字节, llvm-mc %d 字节"
-                             % (want, len(a[1]), len(b[1])))
-            elif a[2] != b[2]:
-                diffs.append("%s 大小不同: %d vs %d" % (want, a[2], b[2]))
-        for want in (".text", ".data", ".rodata"):
-            # 重定位全量比对：指向局部符号的也必须留重定位（页偏移与低 12
-            # 位取决于节的最终地址，汇编期算不出来），所以两边应该逐条相同。
-            e1 = sorted(r1.get(want, []))
-            e2 = sorted(r2.get(want, []))
-            if e1 != e2:
-                only1 = [x for x in e1 if x not in e2]
-                only2 = [x for x in e2 if x not in e1]
-                diffs.append("%s 重定位不同：本工具多 %s，llvm-mc 多 %s"
-                             % (want, only1[:3], only2[:3]))
-        if diffs:
-            bad.append((f, "; ".join(diffs)))
+            with open(gnu, "w") as fh:
+                fh.write(to_gnu(src_text))
+            if not oracle_asm(kind, tool, gnu, ref):
+                # 我们接受、oracle 拒绝：这是需要人看的方言分歧，不能当跳过。
+                bad.append((corpus, f, "本工具接受但 oracle（%s）拒绝" % kind))
+                continue
+            ours += 1
+            try:
+                s1, r1 = read_elf(mine)
+                s2, r2 = read_elf(ref)
+                # 两边都在同一个模拟布局下应用重定位，把形态统一成链接后的
+                # 样子；指向外部符号的重定位两边都保留原样，不参与回填。
+                apply_relocs(s1, r1)
+                apply_relocs(s2, r2)
+            except Exception as exc:
+                bad.append((corpus, f, "解析失败: %s" % exc))
+                continue
+            diffs = []
+            for want in (".text", ".data", ".rodata", ".bss"):
+                a = s1.get(want)
+                b = s2.get(want)
+                if a is None and b is None:
+                    continue
+                if a is None or b is None:
+                    diffs.append("%s 节存在性不同" % want)
+                    continue
+                if a[1] != b[1]:
+                    diffs.append("%s 内容不同: 本工具 %d 字节, 参照 %d 字节"
+                                 % (want, len(a[1]), len(b[1])))
+                elif a[2] != b[2]:
+                    diffs.append("%s 大小不同: %d vs %d" % (want, a[2], b[2]))
+            for want in (".text", ".data", ".rodata"):
+                # 重定位全量比对：指向局部符号的也必须留重定位（页偏移与低 12
+                # 位取决于节的最终地址，汇编期算不出来），所以两边应该逐条相同。
+                e1 = sorted(r1.get(want, []))
+                e2 = sorted(r2.get(want, []))
+                if e1 != e2:
+                    only1 = [x for x in e1 if x not in e2]
+                    only2 = [x for x in e2 if x not in e1]
+                    diffs.append("%s 重定位不同：本工具多 %s，参照多 %s"
+                                 % (want, only1[:3], only2[:3]))
+            if diffs:
+                bad.append((corpus, f, "; ".join(diffs)))
 
     print("语料 %d 个：本工具汇编成功 %d 个，比对不一致 %d 个，跳过 %d 个"
           % (total, ours, len(bad), len(skipped)))
-    for f, why in skipped:
-        print("  跳过 %s: %s" % (f, why))
-    for f, why in bad:
-        print("  不一致 %s: %s" % (f, why))
+    for corpus, f, why in skipped:
+        print("  跳过 %s/%s: %s" % (os.path.basename(corpus), f, why))
+    for corpus, f, why in bad:
+        print("  不一致 %s/%s: %s" % (os.path.basename(corpus), f, why))
+    if total == 0:
+        print("语料目录为空或不存在：%s" % ", ".join(corpora))
+        return 1
+    if ours == 0:
+        # 一个都没比对上时，门本身没跑起来（oracle 坏了/工具全拒），不能报通过。
+        print("没有任何语料真正比对过：检查 oracle 与工具环境")
+        return 1
     return 1 if bad else 0
 
 
