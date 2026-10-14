@@ -2,6 +2,21 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-14 LLVM ARM64 启动 SDK：静态桥与源级调用验收
+
+- 按用户授权与快照/模块 IR 并行实施 ARM64 固定 SDK，显式 --host 选择 LLVM 桥
+  运行架构；原 x64 目录和普通 GNU 工具保持独立。ARM LLVM/zlib/zstd 包、SHA-256
+  与许可证锁定，桥源码/头文件/归档/清单身份写入构建配置，未安装系统 LLVM。
+- qemu 下 O0/O2、ARM64/x64 对象与汇编、ARM 程序执行、8 类负例、坏包/错架构
+  拒绝、失败保留旧产物通过。ARM 直接依赖仅 libc/libm/加载器，无 LLVM、Clang、
+  libstdc++ 或 libgcc_s 动态依赖；当前交叉构建实际要求 GLIBC_2.38。
+- 独立审查发现隔离门旧根复用可能导致假绿，ARM/x64 均改为每轮新空根；WSL root
+  重新执行两套 chroot 门退出 0。记录 ll0e-arm-final-fresh、ll0e-x64-final-fresh。
+- 新增 llvm-embedded-arm64-probe.yh：真实 yh 运行时和 C ABI 调用静态 ARM 桥，
+  发射 x64 对象，在 WSL 原生链接运行退出 0；ARM 报告 yh_source_probe=true。
+- 详见 [完成记录](01-finished/yh-LLVM-ARM64静态SDK-2026-10-14.md)。这完成启动 SDK
+  与源级桥前置条件，生产 yh LLVM pipeline 和连续自编尚在后续，不滚种子。
+
 ## 2026-10-14 LLVM LL2-T：目标身份与前端解析边界
 
 - 新增 TargetInfo 与四个 Unix canonical triple，布局固定 LLVM 21.1.8；严格解析拒绝

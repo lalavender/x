@@ -81,7 +81,7 @@ LL8a 用 `.yh` 编写的 LLVM 发射代码提供基本 helper 的 IR；LL8b 在�
 | 执行者 | 可独立推进的工作 | 文件归属与验收边界 |
 | --- | --- | --- |
 | 主 agent | 前端停止预发旧汇编、模块 worker 接入、最终集成 | `gen/state.yh`、`gen/buffer.yh`、`cmd/`；统一运行完整主门与显式文件提交 |
-| target_review | LL2-T 目标模型只读审查；审查后转模块 IR | 审查不修改工作区；后续独占新增 `ir/module*.yh` 与对应测试 |
+| target_review | LL2-T 目标模型只读审查；审查后转模块 IR | 审查不修改工作区；后续独占新增 `ir/ssa_module*.yh` 与对应测试 |
 | checked_snapshot | CheckedModule 真实受检快照与生命周期测试 | 新增 `ast/checked_module*.yh`、`llvmchecked` fixture、`llvm-checked.py` |
 | arm_sdk | ARM64 固定静态 SDK、交叉桥接和无系统 LLVM 验收 | `tools/llvm-sdk.py`、`vendor/llvm/`、SDK 专项测试 |
 
@@ -89,6 +89,8 @@ LL8a 用 `.yh` 编写的 LLVM 发射代码提供基本 helper 的 IR；LL8b 在�
 LLVM lowering、驱动接入与原生自举仍按输入依赖推进，不能用并行完成的元数据或桥接
 测试代替全编译链验收。各 agent 在自己的 `tmp/llvm-migration/` 子目录构建隔离候选，
 不同时改写根 `yh`、`compiler/.build`、种子或 Git 索引；新增归属外的修改先协调。
+模块 IR 新文件按 `ssa_module_00_model/10_build/20_verify.yh` 排在已有 `ssa.yh` 后，
+以满足旧种子“类型先声明后使用”的顺序约束，直接保存 typed IRFunction。
 
 ## 1. 每个代码切片的共同验收与提交
 
@@ -164,6 +166,9 @@ kind=0 对象、1 汇编，opt_level=0/2，缓冲归调用方所有。
   目标只初始化 X86/AArch64；诊断有界并释放所有自有对象。
 - [x] 使用固定 SDK 静态链接测试宿主，readelf NEEDED 不含 LLVM；在无系统 LLVM 的
   隔离根目录生成对象和汇编。此宿主是桥测试工具，不能声称 yh 已完成嵌入。
+- [x] ARM64 启动 SDK 前置片：固定 ARM LLVM/zlib/zstd 包与许可、显式 --host 交叉链，
+  qemu O0/O2 两架构对象/汇编及全新 chroot 验收；真实 `.yh` C ABI 调用者静态链接
+  桥、生成 x64 对象并在 WSL 原生执行通过。普通编译器 pipeline 尚未接入。
 - [x] 运行 make、make test、make selfhost-native，记录桥门与旧门证据并提交。
 
 **验证：**`python3 tests/selfhost/llvm-embedded.py`；独立测试宿主无 LLVM 动态依赖，
@@ -176,6 +181,8 @@ WSL root chroot 仅放测试宿主、输入与 OS 动态库，O2 生成对象退
 链接采用同一 GNU 链接器和匿名 memfd 输入/输出，消除 DrvFS 细碎 IO 的超时，
 不增加系统 LLVM/lld 依赖。源码级 `.yh` 桥签名经当前编译器检查通过。
 make / make test / make selfhost-native 全绿；普通编译器仍是旧 ARM64 路径。
+ARM64 SDK 后续并行片已独立验收，x64 原流程复验通过；两套隔离门均改为每轮新空根。
+证据为 ll0e-arm-final-fresh 与 ll0e-x64-final-fresh 日志/退出码 0。
 
 ## LL1：锁定边界语义与调用政策（LLVM-01、05）
 

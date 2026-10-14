@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -133,25 +134,26 @@ def main() -> int:
     assert not list(WORK.glob("*.yh-llvm-*")), "原子写入失败遗留临时文件"
     if args.chroot:
         assert os.geteuid() == 0, "--chroot 必须在 WSL root 下运行"
-        sandbox = WORK / "root"
-        sandbox.mkdir(exist_ok=True)
-        shutil.copy2(executable, sandbox / "client")
-        shutil.copy2(irfile, sandbox / "input.ll")
-        dependencies = run(["/usr/bin/ldd", str(executable)])
-        assert dependencies.returncode == 0, dependencies.stderr
-        for line in dependencies.stdout.splitlines():
-            paths = [part for part in line.split() if part.startswith("/")]
-            for path in paths:
-                assert "llvm" not in path.lower(), path
-                dest = sandbox / path.lstrip("/")
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, dest)
-        chroot = shutil.which("chroot", path="/usr/sbin:/usr/bin:/sbin:/bin")
-        assert chroot, "缺少 chroot 隔离工具"
-        result = run([chroot, str(sandbox), "/client", "/input.ll", TRIPLE,
-                      "2", "0", "/output.o", "probe"], env=env)
-        assert result.returncode == 0, result.stderr
-        assert (sandbox / "output.o").read_bytes()[:5] == b"\x7fELF\x02"
+        # 每轮使用空根；此前排查留下的工具或库不能参与本轮无系统 LLVM 证明。
+        with tempfile.TemporaryDirectory(prefix="isolated-root-", dir=WORK) as directory:
+            sandbox = Path(directory)
+            shutil.copy2(executable, sandbox / "client")
+            shutil.copy2(irfile, sandbox / "input.ll")
+            dependencies = run(["/usr/bin/ldd", str(executable)])
+            assert dependencies.returncode == 0, dependencies.stderr
+            for line in dependencies.stdout.splitlines():
+                paths = [part for part in line.split() if part.startswith("/")]
+                for path in paths:
+                    assert "llvm" not in path.lower(), path
+                    dest = sandbox / path.lstrip("/")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, dest)
+            chroot = shutil.which("chroot", path="/usr/sbin:/usr/bin:/sbin:/bin")
+            assert chroot, "缺少 chroot 隔离工具"
+            result = run([chroot, str(sandbox), "/client", "/input.ll", TRIPLE,
+                          "2", "0", "/output.o", "probe"], env=env)
+            assert result.returncode == 0, result.stderr
+            assert (sandbox / "output.o").read_bytes()[:5] == b"\x7fELF\x02"
     report = {"llvm": "21.1.8", "needed": dynamic.stdout, "o0_o2": True,
               "machines": [62, 183], "negative_cases": len(failures), "chroot": args.chroot,
               "scope": "独立桥测试宿主；未接入 yh 前端/自举"}
