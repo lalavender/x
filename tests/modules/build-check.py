@@ -127,6 +127,7 @@ case("cabi-automatic-values-and-callbacks", "cabi-run", "autoabi", ".", 0)
 case("i1-inline-ssa-and-fallback", "inline", "inline", ".")
 case("r1-token-replay-run", "run", "tokenreplay", ".", 42)
 case("r2a-ssa-phi-verifier", "run", "irverify", ".", 0)
+case("llvm-target-identity", "run", "llvmtarget", ".", 0)
 case("r2c-build-lowers-ssa-cfg", "ir", "irfront", ".", 230)
 case("r2a-ssa-cross-module-call", "ir-call", "ircallmodule", ".", 41)
 case("r2b-interface-ready-scheduler", "scheduler", "scheduler", ".")
@@ -188,6 +189,11 @@ def copy_proj(src, dst):
         shutil.copytree(ROOT / "compiler" / "ir", dst / "ir")
         (dst / "ir" / "project.toml").write_text(
             "[project]\nname = \"yh_ir\"\nsource = \".\"\n")
+    if src.name == "llvmtarget":
+        # 目标模型测试复用实际 gen 源码，并以项目依赖检验公开类型/接口。
+        shutil.copytree(ROOT / "compiler" / "gen", dst / "gen")
+        (dst / "gen" / "project.toml").write_text(
+            '[project]\nname = "gen"\nsource = "."\n')
 
 
 def main():

@@ -500,29 +500,38 @@ fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir 
     return r;
 }
 
-// pj_source_target_match：平台文件仍使用唯一的 .yh 后缀；仅当当前输出目标
-// 与文件名中的 .darwin.yh/.linux.yh 匹配时纳入项目。普通 .yh 不受影响。
+// pj_target_tag_is：比较名称池中的单个后缀段，不要求池内文件名带 NUL。
+fn pj_target_tag_is(start int, n int, tag *char) int {
+    let gs *gen.GenState = gen.G();
+    let i int = 0;
+    for tag[i] != 0 {
+        if (i >= n || gs.np_data[start + i] != tag[i].to_type(u8)) { return 0; }
+        i += 1;
+    }
+    return (i == n).to_type(int);
+}
+
+// pj_source_target_match：从 .yh 前向左读取目标后缀段，OS/架构均须匹配当前 TargetInfo。
+// 支持已有 .linux/.darwin 和新增 .arm64/.x64 的组合；遇到普通文件名段即结束。
 fn pj_source_target_match(name_start int, name_len int) int {
     let gs *gen.GenState = gen.G();
-    if (name_len >= 10) {
-        let off int = name_start + name_len - 10;
-        if (gs.np_data[off] == '.' && gs.np_data[off + 1] == 'd'
-            && gs.np_data[off + 2] == 'a' && gs.np_data[off + 3] == 'r'
-            && gs.np_data[off + 4] == 'w' && gs.np_data[off + 5] == 'i'
-            && gs.np_data[off + 6] == 'n' && gs.np_data[off + 7] == '.'
-            && gs.np_data[off + 8] == 'y' && gs.np_data[off + 9] == 'h') {
-            return gen.tg_darwin();
-        }
-    }
-    if (name_len >= 9) {
-        let off int = name_start + name_len - 9;
-        if (gs.np_data[off] == '.' && gs.np_data[off + 1] == 'l'
-            && gs.np_data[off + 2] == 'i' && gs.np_data[off + 3] == 'n'
-            && gs.np_data[off + 4] == 'u' && gs.np_data[off + 5] == 'x'
-            && gs.np_data[off + 6] == '.' && gs.np_data[off + 7] == 'y'
-            && gs.np_data[off + 8] == 'h') {
-            return 1 - gen.tg_darwin();
-        }
+    let end int = name_start + name_len - 3;
+    for end > name_start {
+        let dot int = end - 1;
+        for dot >= name_start && gs.np_data[dot] != '.' { dot -= 1; }
+        if (dot < name_start) { return 1; }
+        let start int = dot + 1;
+        let n int = end - start;
+        if (pj_target_tag_is(start, n, "linux") != 0) {
+            if (gs.c_target.os != gen.TARGET_OS_LINUX) { return 0; }
+        } else if (pj_target_tag_is(start, n, "darwin") != 0) {
+            if (gs.c_target.os != gen.TARGET_OS_DARWIN) { return 0; }
+        } else if (pj_target_tag_is(start, n, "arm64") != 0) {
+            if (gs.c_target.arch != gen.TARGET_ARCH_ARM64) { return 0; }
+        } else if (pj_target_tag_is(start, n, "x64") != 0) {
+            if (gs.c_target.arch != gen.TARGET_ARCH_X64) { return 0; }
+        } else { return 1; }
+        end = dot;
     }
     return 1;
 }

@@ -1,0 +1,65 @@
+module gen;
+
+// target_resolve：严格解析当前 Unix 平台的四个完整 triple，成功填出参，失败保持出参原值。
+// LLVM 21.1.8 的布局已用固定版本 oracle 核对；这里查静态数据，check 不初始化 LLVM。
+pub fn target_resolve(triple *char, out *TargetInfo) int {
+    let target TargetInfo;
+    target.pointer_bits = 64;
+    target.little_endian = 1;
+    target.layout_version = 1;
+    if (cstr_eq(triple, "x86_64-unknown-linux-gnu") != 0) {
+        target.triple = "x86_64-unknown-linux-gnu";
+        target.os = TARGET_OS_LINUX;
+        target.arch = TARGET_ARCH_X64;
+        target.abi = "sysv-amd64";
+        target.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128";
+    } else if (cstr_eq(triple, "aarch64-unknown-linux-gnu") != 0) {
+        target.triple = "aarch64-unknown-linux-gnu";
+        target.os = TARGET_OS_LINUX;
+        target.arch = TARGET_ARCH_ARM64;
+        target.abi = "aapcs64";
+        target.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32";
+    } else if (cstr_eq(triple, "x86_64-apple-darwin") != 0) {
+        target.triple = "x86_64-apple-darwin";
+        target.os = TARGET_OS_DARWIN;
+        target.arch = TARGET_ARCH_X64;
+        target.abi = "darwin-amd64";
+        target.data_layout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128";
+    } else if (cstr_eq(triple, "aarch64-apple-darwin") != 0) {
+        target.triple = "aarch64-apple-darwin";
+        target.os = TARGET_OS_DARWIN;
+        target.arch = TARGET_ARCH_ARM64;
+        target.abi = "darwin-aapcs64";
+        target.data_layout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32";
+    } else { return -1; }
+    out[0] = target;
+    return 0;
+}
+
+// target_host_info：构建编译器时选择并固化进程身份，运行时输出 --target 不改变这些分支。
+// 启动种子只需认识已有 arm64/darwin 标记；生成原生 x64 编译器时自动选择其 $else。
+pub fn target_host_info(out *TargetInfo) int {
+    $if (darwin) {
+        $if (arm64) { return target_resolve("aarch64-apple-darwin", out); }
+        $else { return target_resolve("x86_64-apple-darwin", out); }
+    } $else {
+        $if (arm64) { return target_resolve("aarch64-unknown-linux-gnu", out); }
+        $else { return target_resolve("x86_64-unknown-linux-gnu", out); }
+    }
+}
+
+// target_select：只更新输出目标及过渡期旧汇编方言，不能写宿主身份。
+pub fn target_select(triple *char) int {
+    let target TargetInfo;
+    if (target_resolve(triple, &target) != 0) { return -1; }
+    g_state.c_target = target;
+    g_state.c_dialect = target.os == TARGET_OS_DARWIN ? TG_DIALECT_DARWIN : TG_DIALECT_GNU;
+    return 0;
+}
+
+// target_legacy_ready：旧机器后端只能发 AArch64；已识别的 x64 不能伪装为 ARM64 对象。
+// check 与纯语法模式不调用此门，LLVM 接入后由对应驱动直接消费 TargetInfo。
+pub fn target_legacy_ready() int {
+    if (g_state.c_target.arch == TARGET_ARCH_ARM64) { return 0; }
+    return fail("旧后端只支持 AArch64；x64 代码生成需 LLVM 后端");
+}

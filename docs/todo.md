@@ -321,6 +321,16 @@ LL0E 已完成固定 SDK/C ABI 桥的独立验收：O0/O2、对象/汇编、拒�
   - 最终 LL1 门：8/8 单文件、8/8 项目探针；make test / make selfhost-native 退出 0，
     运行 307/307、固定点 24、自解析 71、项目 95/95。LLVM O0/O2 兼容验收继续由后续各阶段承担。
 - [ ] **LL2 前端与目标边界**：受检模块、纯 IR 交接、宿主/目标、triple/layout/ABI、接口身份；LLVM 路径不预发旧汇编。
+  - 2026-10-14 已按用户要求启动多 agent：目标模型只读审查、CheckedModule 快照、
+    ARM64 静态 SDK 同时推进；审查释放名额后继续模块 IR。主 agent 负责前端边界与集成。
+    详细文件归属见实施方案；完整门和阶段提交集中执行，各候选临时产物隔离。
+  - [x] 首片 LL2-T：四个现有 Unix triple 的 TargetInfo、构建时宿主身份、严格目标解析；
+    旧 -target 别名明确映射到 AArch64，--target 接收完整 triple。check 可检查 x64，
+    旧代码生成在 LLVM 接入前明确拒绝 x64；$if 标记和目标文件筛选共用目标模型。
+    成功门为未知目标拒绝、无 LLVM 工具 check、qemu 下默认 AArch64、选择输出目标不改变宿主身份。
+    定向门和完整 make test selfhost-native 均通过（307/307、固定点 24、自解析 72、
+    模块 18/18、项目 96/96）；独立 agent 的 22 项边界探针通过。宿主操作统一、
+    受检快照、模块 IR、完整接口/缓存身份仍待后续，LL2 整体保持未完成。
 - [ ] **LL3 严格 x64 LLVM 首片**：文本 IR、整数/布尔、分支/phi/固定调用；
   生成 EM_X86_64 ELF 并在 WSL 直接运行，禁止回退且有来源诊断。
 - [ ] **LL8a 内存 helper**：先提供 LLVM memcpy/memset/strlen，检查自包含和自递归。

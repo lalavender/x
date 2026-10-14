@@ -22,18 +22,7 @@ import parse;
 // ============================================================================
 
 // drv_write_asm：把已发射的汇编写入 asm_path（O_WRONLY|O_CREAT|O_TRUNC，
-// 权限 0644）。返回 0 成功。open 旗标随平台不同（Linux 与 macOS 的
-// O_CREAT/O_TRUNC 位不同），由 tg_darwin 判定。
-// drv_host_darwin：宿主平台探测（实现下沉到 gen.tg_host_darwin，见那里）。
-// 用于无 -target 时的默认方言选择（与 stage0 在 Darwin 宿主默认 Mach-O 的
-// 行为一致）；显式 -target 永远覆盖探测。
-fn drv_host_darwin() int {
-    return gen.tg_host_darwin();
-}
-
-// c_target_explicit：用户是否显式给出 -target（显式则不自动探测）。
-let c_target_explicit int = 0;
-
+// 权限 0644）。返回 0 成功。open 旗标按实际宿主内核取值，不随输出 --target 改变。
 fn drv_write_asm(asm_path *char) int {
     let fl int = 0x241;
     if (gen.tg_host_darwin() != 0) {
@@ -119,6 +108,8 @@ fn usage() void {
     n = gen.append_str(buf, 0, "      yh check [module]         检查项目语义，不生成后端产物\n");
     gen.write_all(2, buf, n);
     n = gen.append_str(buf, 0, "      --legacy-system          显式启用兼容 shell system(cmd) 接口\n");
+    gen.write_all(2, buf, n);
+    n = gen.append_str(buf, 0, "      --target <triple>         选择完整输出目标（旧后端仅 AArch64）\n");
     gen.write_all(2, buf, n);
     n = gen.append_str(buf, 0, "      yh run                       构建并运行 main 模块\n");
     gen.write_all(2, buf, n);
@@ -206,24 +197,23 @@ fn run_emit_asm() int {
 // 形态：
 //   yh --syntax-check <file.yh>      （argc==3）
 //   yh --emit-asm <file.yh>          （argc==3）
-// drv_scan_target：扫描 `-target <dialect>` 选项（可出现在任意位置），
-// 设置 c_dialect 并把其余参数紧凑写入 out（调用方保证容量 ≥ argc）。
-// 返回剩余参数个数（不含程序名占位）。
-// 支持 darwin/macho/macos → TG_DIALECT_DARWIN；gnu/linux/elf → GNU。
+// drv_scan_target：扫描完整 --target 或旧 -target 别名；未知目标返回 -1，不静默回退。
+// 旧别名明确表示 AArch64 Unix；其余参数保持原顺序，返回不含程序名的参数个数。
 fn drv_scan_target(argc int, argv **char, out **char) int {
     let gs *gen.GenState = gen.G();
     let n int = 0;
     let i int = 1;
     for i < argc {
-        if (gen.cstr_eq(argv[i], "-target") != 0 && i + 1 < argc) {
-            c_target_explicit = 1;
-            if (gen.cstr_eq(argv[i + 1], "darwin") != 0
-                || gen.cstr_eq(argv[i + 1], "macho") != 0
-                || gen.cstr_eq(argv[i + 1], "macos") != 0) {
-                gs.c_dialect = gen.TG_DIALECT_DARWIN;
-            } else {
-                gs.c_dialect = gen.TG_DIALECT_GNU;
+        if (gen.cstr_eq(argv[i], "-target") != 0 || gen.cstr_eq(argv[i], "--target") != 0) {
+            if (i + 1 >= argc) { gen.fail("缺少目标 triple"); return -1; }
+            let target *char = argv[i + 1];
+            if (gen.cstr_eq(argv[i], "-target") != 0) {
+                if (gen.cstr_eq(target, "darwin") != 0 || gen.cstr_eq(target, "macho") != 0
+                    || gen.cstr_eq(target, "macos") != 0) { target = "aarch64-apple-darwin"; }
+                else if (gen.cstr_eq(target, "gnu") != 0 || gen.cstr_eq(target, "linux") != 0
+                    || gen.cstr_eq(target, "elf") != 0) { target = "aarch64-unknown-linux-gnu"; }
             }
+            if (gen.target_select(target) != 0) { gen.fail("不支持的目标 triple"); return -1; }
             i += 2;
         } else if (gen.cstr_eq(argv[i], "--legacy-system") != 0) {
             gs.c_legacy_system = 1;
@@ -254,19 +244,13 @@ pub fn main(argc int, argv **char, envp **char) int {
     // 命令行参数个数有上限（64 足够）。
     let av [64]*char;
     let n int = drv_scan_target(argc, argv, av);
+    if (n < 0) { return 2; }
     let mode int = 0;
     let needs_o int = 0;
-    // 无显式 -target：按宿主平台选默认方言（Darwin 宿主 → Mach-O 方言，
-    // 与 stage0 行为一致；Linux 容器 → GNU）
-    if (c_target_explicit == 0) {
-        if (drv_host_darwin() != 0) {
-            gs.c_dialect = gen.TG_DIALECT_DARWIN;
-        } else {
-            gs.c_dialect = gen.TG_DIALECT_GNU;
-        }
-    }
+    // 缺省身份已由 state_init 从编译器构建目标取得，不能用物理宿主 uname 或文件系统改写。
     // —— 项目命令（MOD-U2..U5，在单文件分派之前） ——
     if (n >= 1 && gen.cstr_eq(av[0], "build") != 0) {
+        if (gen.target_legacy_ready() != 0) { return 1; }
         return mb_cmd_build(av, n);
     }
     if (n >= 1 && gen.cstr_eq(av[0], "check") != 0) {
@@ -277,6 +261,7 @@ pub fn main(argc int, argv **char, envp **char) int {
         return mb_cmd_build(av, n);
     }
     if (n >= 1 && gen.cstr_eq(av[0], "run") != 0) {
+        if (gen.target_legacy_ready() != 0) { return 1; }
         return mb_cmd_run();
     }
     if (n >= 1 && gen.cstr_eq(av[0], "version") != 0) {
@@ -311,6 +296,7 @@ pub fn main(argc int, argv **char, envp **char) int {
             fi += 1;
         }
         let mlen int = 0;
+        if (gs.c_check_only == 0 && gen.target_legacy_ready() != 0) { return 1; }
         let rlen int = 0;
         let blen int = 0;
         let mo int = mb_intern_arg(av[1], &mlen);
@@ -358,6 +344,7 @@ pub fn main(argc int, argv **char, envp **char) int {
             return 2;
         }
     }
+    if (mode != 1 && gen.target_legacy_ready() != 0) { return 1; }
     gs.c_path = av[src_idx];
     if (gen.read_source(gs.c_path) != 0) {
         return 1;
