@@ -131,7 +131,8 @@ flowchart LR
 - 除零、最小负数/-1、取模分开检查常量与动态路径。需要确定结果/陷阱时，
   用安全操作数或控制流实现，不能先执行 UB 除法再用 select 遮掩。
 - 整数截断、符号/零扩展由源语义控制；未证明前不加 nsw/nuw/exact。
-- bool 寄存器值可用 i1、存储用 i8；合法 0/1 与整数转换/外部非规范字节分别验收。
+- 源 bool 寄存器/存储使用 i8，显式转换保留低字节；条件按非零为真，逻辑/比较结果
+  规范为 0/1。LLVM 的 i1 只作临时谓词，不能把字节值直接截一位。见 LL1 语义契约。
 - LLVM 指针采用 opaque ptr；元素类型、步长、union/struct 布局仍由 yh 保留。
 - LOAD/STORE 的 align 取可证明值；未知对齐保守为 1，不靠指针元素类型推断对齐。
 - 不擅自添加 inbounds/noalias/nonnull/noundef、函数 memory/效果摘要或 fast-math。

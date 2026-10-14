@@ -159,7 +159,8 @@ fn ir_type_ok(f *IRFunction, tid int) int {
     if (t.kind == IR_TY_I16 || t.kind == IR_TY_U16) { return t.bits == 16; }
     if (t.kind == IR_TY_I32 || t.kind == IR_TY_U32 || t.kind == IR_TY_F32) { return t.bits == 32; }
     if (t.kind == IR_TY_I64 || t.kind == IR_TY_U64 || t.kind == IR_TY_F64) { return t.bits == 64; }
-    if (t.kind == IR_TY_BOOL) { return t.bits == 1; }
+    // 源 bool 是无符号字节值；条件/逻辑结果单独归一为 0/1，不能丢弃显式转换的高位。
+    if (t.kind == IR_TY_BOOL) { return t.bits == 8; }
     return 0;
 }
 
@@ -242,8 +243,8 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
         if (inst.a < 0 || inst.b != -1 || inst.aux != -1) { return -1; }
         let source_type int = ir_find_value_type(f, inst.a);
         return source_type >= 0
-            && ir_integer_type(f.types[source_type].kind) != 0
-            && ir_integer_type(f.types[inst.result_type].kind) != 0 ? 0 : -1;
+            && ir_const_type(f.types[source_type].kind) != 0
+            && ir_const_type(f.types[inst.result_type].kind) != 0 ? 0 : -1;
     }
     if (inst.op == IR_OP_PHI) {
         if (inst.a != -1 || inst.b != -1 || inst.aux < 0 || inst.aux >= f.phi_count) {
@@ -681,14 +682,6 @@ pub fn ir_verify(f *IRFunction) int {
                 free(seen_ids);
                 return -1;
             }
-            if (inst.op == IR_OP_CALL) {
-                if (inst.aux != call_index) {
-                    free(covered);
-                    free(seen_ids);
-                    return -1;
-                }
-                call_index += 1;
-            }
             if (inst.op == IR_OP_PHI && ir_verify_phi(f, b, inst) != 0) {
                 free(covered);
                 free(seen_ids);
@@ -709,7 +702,7 @@ pub fn ir_verify(f *IRFunction) int {
     }
     free(covered);
     free(seen_ids);
-    if (used != f.inst_count || call_index != f.call_count) {
+    if (used != f.inst_count) {
         return -1;
     }
     // 无结果指令（void CALL、STORE）不定义值，值编号允许稀疏；
@@ -717,12 +710,17 @@ pub fn ir_verify(f *IRFunction) int {
     let defs int = 0;
     let i int = 0;
     for i < f.inst_count {
+        // 调用表按线性指令数组追加。块编号允许与指令范围乱序，不能据其枚举顺序验调用编号。
+        if (f.insts[i].op == IR_OP_CALL) {
+            if (f.insts[i].aux != call_index) { return -1; }
+            call_index += 1;
+        }
         if (f.insts[i].result_id >= 0) {
             defs += 1;
         }
         i += 1;
     }
-    if (defs > f.value_count) {
+    if (defs > f.value_count || call_index != f.call_count) {
         return -1;
     }
     let dom_result int = ir_verify_dominance(f);

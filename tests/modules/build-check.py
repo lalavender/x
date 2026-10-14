@@ -49,7 +49,7 @@ def has_two_edge_phi(path):
     data = path.read_bytes()
     if len(data) < 128 or struct.unpack_from("<Q", data, 16)[0] != 0x3141535352494859:
         return False
-    if struct.unpack_from("<Q", data, 24)[0] != 5:
+    if struct.unpack_from("<Q", data, 24)[0] != 6:
         return False
     _, _, type_count, inst_count, phi_count, input_count, call_count, arg_count, symbol_size, block_count, _ = \
         struct.unpack_from("<11q", data, 32)

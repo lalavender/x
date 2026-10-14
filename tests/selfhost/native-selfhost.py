@@ -154,11 +154,15 @@ def main() -> int:
     r = run(["python3", "tests/yh/check.py", "--compiler",
              "--compiler-path", cc4, "--quiet"])
     print("语法语料：", (r.stdout.strip().splitlines() or ["无输出"])[-1])
+    if r.returncode != 0:
+        print(r.stdout, r.stderr, sep="\n")
     ok = ok and r.returncode == 0
 
     # 5) 运行语料
     r = run(["python3", "tests/yh-run/check.py", "--compiler", cc4, "--quiet"])
     print("运行语料：", (r.stdout.strip().splitlines() or ["无输出"])[-1])
+    if r.returncode != 0:
+        print(r.stdout, r.stderr, sep="\n")
     ok = ok and r.returncode == 0
 
     if not args.keep:

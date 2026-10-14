@@ -355,13 +355,12 @@ fn ast_ir_b_expr(b *AstIRBuilder, ctx *AstFunctionContext, expr_id int) int {
 }
 
 // ast_ir_b_cond：降低条件表达式并归一化为 IR bool。
-// bool 直接使用；整数按「非零为真」与零常量比较，匹配旧发射器语义。
+// bool 与整数都按「非零为真」生成规范 0/1，逻辑合流不能保留原 bool 字节值。
 fn ast_ir_b_cond(b *AstIRBuilder, ctx *AstFunctionContext, expr_id int) int {
     let value int = ast_ir_lower_expr(b, ctx, expr_id);
     if (value == -2) { return -2; }
     if (value < 0) { return value; }
     let value_type int = b.insts[value].result_type;
-    if (b.types[value_type].kind == ir.IR_TY_BOOL) { return value; }
     let zero int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, value_type, -1, -1, 0);
     if (zero < 0) { return -1; }
     return ast_ir_b_add_inst(b, ir.IR_OP_NE, ir.IR_TY_BOOL, value, zero, 0);
@@ -597,6 +596,12 @@ fn ast_ir_b_merge_values(b *AstIRBuilder, pred0 int, values0 *int,
     pred1 int, values1 *int) int {
     let bi int = 0;
     for bi < b.binding_count {
+        // 只在一侧词法块内声明的绑定没有另一臂值，也不在合流后可见；不制造含 -1 的 phi。
+        if (values0[bi] < 0 || values1[bi] < 0) {
+            b.local_values[bi] = -1;
+            bi += 1;
+            continue;
+        }
         if (values0[bi] == values1[bi]) {
             b.local_values[bi] = values0[bi];
             bi += 1;
@@ -997,8 +1002,8 @@ fn ast_ir_lower_expr(b *AstIRBuilder, ctx *AstFunctionContext,
         if (node.child0 < 0) { return -2; }
         let source_type int = ast_ir_type(ast_expr_nodes[node.child0].type_id);
         let result_type int = ast_ir_type(node.type_id);
-        if (ir.ir_integer_type(source_type) == 0
-            || ir.ir_integer_type(result_type) == 0) { return -2; }
+        if (ir.ir_const_type(source_type) == 0
+            || ir.ir_const_type(result_type) == 0) { return -2; }
         let source int = ast_ir_lower_expr(b, ctx, node.child0);
         if (source == -2) { return -2; }
         if (source < 0) { return -1; }
@@ -1010,8 +1015,7 @@ fn ast_ir_lower_expr(b *AstIRBuilder, ctx *AstFunctionContext,
         if (node.op != gen.TK_BANG || node.child0 < 0) {
             return -2;
         }
-        // 旧语义层把 bool 的 ! 结果升为 i32；IR 一律产生 bool，
-        // 源类型只要可映射即可（值 0/1 语义一致）。
+        // bool 的 ! 在源级升为 int；先生成规范比较值，再恢复源结果类型。
         if (ast_ir_type(node.type_id) < 0) {
             return -2;
         }
@@ -1023,8 +1027,12 @@ fn ast_ir_lower_expr(b *AstIRBuilder, ctx *AstFunctionContext,
         let false_bit int = ast_ir_b_add_inst(b, ir.IR_OP_CONST,
             ir.IR_TY_BOOL, -1, -1, 0);
         if (false_bit < 0) { return -1; }
-        return ast_ir_b_add_inst(b, ir.IR_OP_EQ, ir.IR_TY_BOOL,
+        let compared int = ast_ir_b_add_inst(b, ir.IR_OP_EQ, ir.IR_TY_BOOL,
             inner, false_bit, 0);
+        if (compared < 0) { return -1; }
+        let result_type int = ast_ir_type(node.type_id);
+        if (result_type == ir.IR_TY_BOOL) { return compared; }
+        return ast_ir_b_add_inst(b, ir.IR_OP_CAST, result_type, compared, -1, 0);
     }
     if (node.kind != AST_EXPR_BINARY || node.child0 < 0 || node.child1 < 0) {
         return -2;
@@ -1245,7 +1253,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     types[0].bits = 0;
     types[1].kind = ir.IR_TY_BOOL;
     types[1].elem = -1;
-    types[1].bits = 1;
+    types[1].bits = 8;
     types[2].kind = ir.IR_TY_I8;
     types[2].elem = -1;
     types[2].bits = 8;
