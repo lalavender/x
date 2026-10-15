@@ -372,8 +372,10 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   [完成记录](01-finished/yh-LLVM-LL8a内存helper-2026-10-15.md)。
 - [ ] **LL5 内存/数据 → LL4 控制流 → LL6 浮点 → LL7 调用/ABI**：与 R2a/NP3 同源切片合并验收，
   补聚合/全局/切片、复杂控制流、转换、间接/两类变参和 C 双向互调，不另做一套重复迁移。
-  （2026-10-15 第一切片完成：局部标量 alloca/load/store 与 `&变量`/`*p`；见
+  （2026-10-15 LL5 第一切片完成：局部标量 alloca/load/store 与 `&变量`/`*p`；见
   [完成记录](01-finished/yh-LLVM-LL5局部内存首片-2026-10-15.md)。）
+  （2026-10-15 LL4 首片完成：嵌套循环、break/continue、无限 `for {}`；见
+  [完成记录](01-finished/yh-LLVM-LL4循环首片-2026-10-15.md)。）
 - [ ] **LL8b x64 完整运行时/宿主桥**：allocator/printf、x64 syscall/目录/时钟/内存/进程；
   保留 ARM64 启动分支与现行导入限制，审计 LLVM libcall。
 - [ ] **LL9 驱动/缓存/提交**：单文件与模块统一、完整键、原生 x64 链接器避开 ARM64 gcc 包装器（内嵌 lld 见 LL9L）、事务验收。

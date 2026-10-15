@@ -236,29 +236,64 @@ fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
 //   * 调用：当前函数的目标与实参临时表。
 // ============================================================================
 
-// checked_lower_carry_record：发现趟记录被赋值的绑定 ID（去重，保持源码顺序）。
-fn checked_lower_carry_record(flow *CheckedFlow, binding_id int) int {
+// checked_loop_carry_add：单层循环携带表去重追加（保持源码顺序）。
+// 循环体内声明的绑定每次迭代重新初始化，不进入携带 phi；stmt_id 大于本层
+// for 语句即该绑定声明在循环体内。
+fn checked_loop_carry_add(l *CheckedLower, loop *CheckedLoop, binding_id int) int {
+    if (binding_id < 0 || binding_id >= l.function_binding_count) { return -1; }
+    let binding AstBinding = l.store.bindings[l.function_binding_first + binding_id];
+    if (binding.stmt_id > loop.stmt_id) { return 0; }
     let probe int = 0;
     for 1 {
-        if (probe >= flow.flow_carry_count) { break; }
-        if (flow.flow_carry[probe] == binding_id) { return 0; }
-        probe = probe + 1;
+        if (probe >= loop.carry_count) { break; }
+        if (loop.carry[probe] == binding_id) { return 0; }
+        probe += 1;
     }
-    if (flow.flow_carry_count >= flow.flow_carry_cap) {
-        let capacity int = flow.flow_carry_cap == 0 ? 8 : flow.flow_carry_cap * 2;
+    if (loop.carry_count >= loop.carry_cap) {
+        let capacity int = loop.carry_cap == 0 ? 8 : loop.carry_cap * 2;
         let next *int = malloc((capacity * sizeof(int)).to_type(u64)).to_type(*int);
         if (next == 0) { return -1; }
-        if (flow.flow_carry_count > 0) {
-            memcpy(next, flow.flow_carry,
-                (flow.flow_carry_count * sizeof(int)).to_type(u64));
+        if (loop.carry_count > 0) {
+            memcpy(next, loop.carry, (loop.carry_count * sizeof(int)).to_type(u64));
         }
-        if (flow.flow_carry != 0) { free(flow.flow_carry.to_type(*void)); }
-        flow.flow_carry = next;
-        flow.flow_carry_cap = capacity;
+        if (loop.carry != 0) { free(loop.carry.to_type(*void)); }
+        loop.carry = next;
+        loop.carry_cap = capacity;
     }
-    flow.flow_carry[flow.flow_carry_count] = binding_id;
-    flow.flow_carry_count = flow.flow_carry_count + 1;
+    loop.carry[loop.carry_count] = binding_id;
+    loop.carry_count += 1;
     return 0;
+}
+
+// checked_lower_carry_record：把被赋值的绑定记录进**所有**活跃循环的携带表。
+// 内层循环体的赋值同样影响外层循环的跨迭代值，因此逐层去重记录。
+fn checked_lower_carry_record(l *CheckedLower, flow *CheckedFlow, binding_id int) int {
+    let level int = 0;
+    for level < flow.loop_depth {
+        if (checked_loop_carry_add(l, &flow.loops[level], binding_id) != 0) { return -1; }
+        level += 1;
+    }
+    return 0;
+}
+
+// checked_loop_finish：弹出栈顶循环并释放该层独占数组；未压栈时空操作。
+fn checked_loop_finish(flow *CheckedFlow) void {
+    if (flow.loop_depth <= 0) { return; }
+    flow.loop_depth -= 1;
+    let loop *CheckedLoop = &flow.loops[flow.loop_depth];
+    if (loop.carry != 0) { free(loop.carry.to_type(*void)); }
+    if (loop.carry_phis != 0) { free(loop.carry_phis.to_type(*void)); }
+    if (loop.break_blocks != 0) { free(loop.break_blocks.to_type(*void)); }
+    if (loop.break_vals != 0) { free(loop.break_vals.to_type(*void)); }
+    loop.carry = 0; loop.carry_count = 0; loop.carry_cap = 0;
+    loop.carry_phis = 0; loop.break_blocks = 0; loop.break_vals = 0;
+    loop.break_capacity = 0; loop.continue_done = 0; loop.break_done = 0;
+    loop.break_target = -1; loop.continue_target = -1; loop.stmt_id = -1;
+}
+
+// checked_loop_restore：把循环栈收缩回调用前深度；内层失败时逐层释放。
+fn checked_loop_restore(flow *CheckedFlow, depth int) void {
+    for flow.loop_depth > depth { checked_loop_finish(flow); }
 }
 
 // checked_lower_signed：整数符号性判据，与后端 llvm_signed 保持同一集合。
@@ -719,14 +754,16 @@ fn checked_lower_name_is_main(l *CheckedLower, off int, length int) int {
 // 由 lower_module 统一带来源报告，绝不回退旧机器发射。
 // ============================================================================
 
-// checked_lower_break_snapshot：按发现趟站点数记录 break 携带值快照（真实趟调用）。
-fn checked_lower_break_snapshot(l *CheckedLower, flow *CheckedFlow, sites int, index int) int {
+// checked_lower_break_snapshot：按本层发现趟站点数记录 break 携带值快照（真实趟）。
+fn checked_lower_break_snapshot(l *CheckedLower, flow *CheckedFlow, index int) int {
     let b *AstIRBuilder = &l.builder;
-    if (index < 0 || index >= sites || flow.flow_break_vals == 0) { return -1; }
+    if (flow.loop_depth <= 0) { return -1; }
+    let loop *CheckedLoop = &flow.loops[flow.loop_depth - 1];
+    if (index < 0 || index >= loop.break_capacity || loop.break_vals == 0
+        || loop.carry_count <= 0) { return -1; }
     let j int = 0;
-    for j < flow.flow_carry_count {
-        flow.flow_break_vals[index * flow.flow_carry_count + j] =
-            b.local_values[flow.flow_carry[j]];
+    for j < loop.carry_count {
+        loop.break_vals[index * loop.carry_count + j] = b.local_values[loop.carry[j]];
         j += 1;
     }
     return 0;
@@ -844,9 +881,9 @@ fn checked_lower_assign(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         if (ast_ir_b_add_store(b, target, stored) < 0) { return -1; }
         return 1;
     }
-    if (flow.flow_break_target >= 0) {
+    if (flow.loop_depth > 0) {
         // 循环体内被赋值的绑定参与循环携带；真实趟顺序与发现趟一致。
-        if (checked_lower_carry_record(flow, binding_id) != 0) { return -1; }
+        if (checked_lower_carry_record(l, flow, binding_id) != 0) { return -1; }
     }
     b.local_values[binding_id] = stored;
     // 简单语句不终结基本块：返回 1（路径继续），由序列推进处按需加续块。
@@ -1044,20 +1081,41 @@ fn checked_lower_if(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     return 0;
 }
 
-// checked_lower_loop：降低条件循环 for cond { 体 }，两趟协议与旧构造器一致。
-// 发现趟收集携带绑定与 continue/break 站点数；真实趟据此预留 header/exit phi 输入。
+// checked_lower_loop：降低条件循环 `for cond { 体 }` 与无限循环 `for { 体 }`。
+// 每层嵌套在 CheckedFlow.loops 独占携带/break 状态；两趟协议与旧构造器一致：
+// 发现趟收集携带绑定与 continue/break 站点数，真实趟据此预留 header/exit phi。
+// 本包装只负责压栈/弹栈与失败清理，主体见 checked_lower_loop_body。
 fn checked_lower_loop(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let depth int = flow.loop_depth;
+    let status int = checked_lower_loop_body(l, flow, stmt_id);
+    checked_loop_restore(flow, depth);
+    return status;
+}
+
+// checked_lower_loop_body：单层循环主体；has_condition=0 表示 `for {}`，
+// header 无条件进入循环体，唯一出口是 break。调用方保证栈深未满。
+fn checked_lower_loop_body(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     let b *AstIRBuilder = &l.builder;
     let stmt AstStmt = l.store.statements[stmt_id];
-    if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n
-        || stmt.first_binding >= 0 || flow.flow_break_target >= 0) { return -2; }
-    let edge AstStmtExpr = l.store.edges[stmt.first_expr];
-    if (edge.next >= 0 || edge.expr_id < 0 || edge.expr_id >= l.store.expression_n) { return -2; }
+    if (stmt.first_binding >= 0 || flow.loop_depth >= CHECKED_LOOP_MAX) { return -2; }
+    let has_condition int = stmt.first_expr >= 0 ? 1 : 0;
+    let edge AstStmtExpr;
+    if (has_condition != 0) {
+        if (stmt.first_expr >= l.store.edge_n) { return -2; }
+        edge = l.store.edges[stmt.first_expr];
+        if (edge.next >= 0 || edge.expr_id < 0 || edge.expr_id >= l.store.expression_n) { return -2; }
+    }
     let body int = stmt.first_child;
     if (body < 0 || body != stmt.last_child || body >= l.store.statement_n
         || l.store.statements[body].kind != AST_STMT_BLOCK) { return -2; }
+    let loop *CheckedLoop = &flow.loops[flow.loop_depth];
+    loop.carry = 0; loop.carry_count = 0; loop.carry_cap = 0;
+    loop.carry_phis = 0; loop.break_blocks = 0; loop.break_vals = 0;
+    loop.break_capacity = 0; loop.continue_done = 0; loop.break_done = 0;
+    loop.break_target = -1; loop.continue_target = -1;
+    loop.stmt_id = stmt_id;
+    flow.loop_depth += 1;
     // 发现趟：在一次性块上降低体，收集携带绑定与站点数后完全回滚。
-    flow.flow_carry_count = 0;
     let mark_inst int = b.inst_count;
     let mark_phi int = b.phi_count;
     let mark_pinput int = b.phi_input_count;
@@ -1075,17 +1133,17 @@ fn checked_lower_loop(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     if (break_b < 0 || cont_b < 0 || entry_b < 0) {
         free(mark_values.to_type(*void)); return -1;
     }
-    flow.flow_break_target = break_b;
-    flow.flow_continue_target = cont_b;
-    flow.flow_break_done = 0;
-    flow.flow_continue_done = 0;
+    loop.break_target = break_b;
+    loop.continue_target = cont_b;
+    loop.break_done = 0;
+    loop.continue_done = 0;
     ast_ir_b_enter_block(b, entry_b);
     let facts int = checked_lower_stmts(l, flow, l.store.statements[body].first_child);
-    let continue_sites int = flow.flow_continue_done;
-    let break_sites int = flow.flow_break_done;
+    let continue_sites int = loop.continue_done;
+    let break_sites int = loop.break_done;
     let has_latch int = facts == 1 ? 1 : 0;
-    flow.flow_break_target = -1;
-    flow.flow_continue_target = -1;
+    loop.break_target = -1;
+    loop.continue_target = -1;
     b.cur_block = mark_cur;
     l.local_count = mark_local;
     b.inst_count = mark_inst;
@@ -1107,52 +1165,61 @@ fn checked_lower_loop(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     if (header < 0) { return -1; }
     if (ast_ir_b_term_br(b, header) != 0) { return -1; }
     ast_ir_b_enter_block(b, header);
-    if (flow.flow_carry_phis != 0) { free(flow.flow_carry_phis.to_type(*void)); }
-    flow.flow_carry_phis = 0;
-    if (flow.flow_carry_count > 0) {
-        flow.flow_carry_phis = malloc((flow.flow_carry_count * sizeof(int)).to_type(u64)).to_type(*int);
-        if (flow.flow_carry_phis == 0) { return -1; }
+    if (loop.carry_phis != 0) { free(loop.carry_phis.to_type(*void)); }
+    loop.carry_phis = 0;
+    if (loop.carry_count > 0) {
+        loop.carry_phis = malloc((loop.carry_count * sizeof(int)).to_type(u64)).to_type(*int);
+        if (loop.carry_phis == 0) { return -1; }
     }
     let ci int = 0;
-    for ci < flow.flow_carry_count {
-        let binding AstBinding = l.store.bindings[l.function_binding_first + flow.flow_carry[ci]];
+    for ci < loop.carry_count {
+        let binding AstBinding = l.store.bindings[l.function_binding_first + loop.carry[ci]];
         let kind int = checked_lower_type(l, binding.sym_type_id);
         if (kind < 0) { return -1; }
         let phi int = ast_ir_b_add_phi(b, kind, input_count);
         if (phi < 0) { return -1; }
-        flow.flow_carry_phis[ci] = phi;
-        if (ast_ir_b_set_phi_input(b, phi, 0, preheader, b.local_values[flow.flow_carry[ci]]) != 0) {
+        loop.carry_phis[ci] = phi;
+        if (ast_ir_b_set_phi_input(b, phi, 0, preheader, b.local_values[loop.carry[ci]]) != 0) {
             return -1;
         }
-        b.local_values[flow.flow_carry[ci]] = phi;
+        b.local_values[loop.carry[ci]] = phi;
         ci += 1;
     }
-    let cond int = checked_lower_cond(l, flow, edge.expr_id);
-    if (cond == -2) { return -2; }
-    if (cond < 0) { return -1; }
+    let cond int = -1;
+    if (has_condition != 0) {
+        cond = checked_lower_cond(l, flow, edge.expr_id);
+        if (cond == -2) { return -2; }
+        if (cond < 0) { return -1; }
+    }
     let body_b int = ast_ir_b_alloc_block(b);
     let exit_b int = ast_ir_b_alloc_block(b);
     if (body_b < 0 || exit_b < 0) { return -1; }
-    if (ast_ir_b_term_cond(b, cond, body_b, exit_b) != 0) { return -1; }
-    if (flow.flow_break_blocks != 0) { free(flow.flow_break_blocks.to_type(*void)); }
-    if (flow.flow_break_vals != 0) { free(flow.flow_break_vals.to_type(*void)); }
-    flow.flow_break_blocks = 0;
-    flow.flow_break_vals = 0;
-    if (break_sites > 0 && flow.flow_carry_count > 0) {
-        flow.flow_break_blocks = malloc((break_sites * sizeof(int)).to_type(u64)).to_type(*int);
-        flow.flow_break_vals = malloc((break_sites * flow.flow_carry_count * sizeof(int))
-            .to_type(u64)).to_type(*int);
-        if (flow.flow_break_blocks == 0 || flow.flow_break_vals == 0) { return -1; }
+    if (has_condition != 0) {
+        if (ast_ir_b_term_cond(b, cond, body_b, exit_b) != 0) { return -1; }
+    } else {
+        // 无限循环：header 无条件进入体，退出只经 break。
+        if (ast_ir_b_term_br(b, body_b) != 0) { return -1; }
     }
-    flow.flow_break_target = exit_b;
-    flow.flow_continue_target = header;
-    flow.flow_continue_done = 0;
-    flow.flow_break_done = 0;
+    if (loop.break_blocks != 0) { free(loop.break_blocks.to_type(*void)); }
+    if (loop.break_vals != 0) { free(loop.break_vals.to_type(*void)); }
+    loop.break_blocks = 0;
+    loop.break_vals = 0;
+    loop.break_capacity = break_sites;
+    if (break_sites > 0 && loop.carry_count > 0) {
+        loop.break_blocks = malloc((break_sites * sizeof(int)).to_type(u64)).to_type(*int);
+        loop.break_vals = malloc((break_sites * loop.carry_count * sizeof(int))
+            .to_type(u64)).to_type(*int);
+        if (loop.break_blocks == 0 || loop.break_vals == 0) { return -1; }
+    }
+    loop.break_target = exit_b;
+    loop.continue_target = header;
+    loop.continue_done = 0;
+    loop.break_done = 0;
     ast_ir_b_enter_block(b, body_b);
     let fall int = checked_lower_stmts(l, flow, l.store.statements[body].first_child);
     let latch int = b.cur_block;
-    flow.flow_break_target = -1;
-    flow.flow_continue_target = -1;
+    loop.break_target = -1;
+    loop.continue_target = -1;
     if (fall == -2) { return -2; }
     if (fall < 0) { return fall; }
     if (has_latch != 0) {
@@ -1160,46 +1227,55 @@ fn checked_lower_loop(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         if (fall != 1) { return -1; }
         if (ast_ir_b_term_br(b, header) != 0) { return -1; }
         let lj int = 0;
-        for lj < flow.flow_carry_count {
-            if (ast_ir_b_set_phi_input(b, flow.flow_carry_phis[lj],
-                1 + continue_sites, latch, b.local_values[flow.flow_carry[lj]]) != 0) { return -1; }
+        for lj < loop.carry_count {
+            if (ast_ir_b_set_phi_input(b, loop.carry_phis[lj],
+                1 + continue_sites, latch, b.local_values[loop.carry[lj]]) != 0) { return -1; }
             lj += 1;
         }
     }
     // 循环后视角恢复为 header phi。
     let rj int = 0;
-    for rj < flow.flow_carry_count {
-        b.local_values[flow.flow_carry[rj]] = flow.flow_carry_phis[rj];
+    for rj < loop.carry_count {
+        b.local_values[loop.carry[rj]] = loop.carry_phis[rj];
         rj += 1;
     }
     ast_ir_b_enter_block(b, exit_b);
-    if (break_sites > 0 && flow.flow_carry_count > 0) {
+    if (break_sites > 0 && loop.carry_count > 0) {
+        // 条件循环的退出块有两个来源：条件为假（header）与 break 站点；无限循环
+        // 的 header 不连退出块，exit phi 只能以 break 站点为前驱。
+        let exit_base int = has_condition != 0 ? 1 : 0;
         let ej int = 0;
-        for ej < flow.flow_carry_count {
-            let header_value int = b.local_values[flow.flow_carry[ej]];
-            let differ int = 0;
-            let ei int = 0;
-            for ei < flow.flow_break_done {
-                if (flow.flow_break_vals[ei * flow.flow_carry_count + ej] != header_value) {
-                    differ = 1;
-                    break;
+        for ej < loop.carry_count {
+            let header_value int = -1;
+            let differ int = 1;
+            if (exit_base != 0) {
+                header_value = b.local_values[loop.carry[ej]];
+                differ = 0;
+                let ei int = 0;
+                for ei < loop.break_done {
+                    if (loop.break_vals[ei * loop.carry_count + ej] != header_value) {
+                        differ = 1;
+                        break;
+                    }
+                    ei += 1;
                 }
-                ei += 1;
             }
             if (differ != 0) {
-                let binding2 AstBinding = l.store.bindings[l.function_binding_first + flow.flow_carry[ej]];
+                let binding2 AstBinding = l.store.bindings[l.function_binding_first + loop.carry[ej]];
                 let kind2 int = checked_lower_type(l, binding2.sym_type_id);
                 if (kind2 < 0) { return -1; }
-                let exit_phi int = ast_ir_b_add_phi(b, kind2, 1 + flow.flow_break_done);
+                let exit_phi int = ast_ir_b_add_phi(b, kind2, exit_base + loop.break_done);
                 if (exit_phi < 0) { return -1; }
-                if (ast_ir_b_set_phi_input(b, exit_phi, 0, header, header_value) != 0) { return -1; }
+                if (exit_base != 0) {
+                    if (ast_ir_b_set_phi_input(b, exit_phi, 0, header, header_value) != 0) { return -1; }
+                }
                 let ei2 int = 0;
-                for ei2 < flow.flow_break_done {
-                    if (ast_ir_b_set_phi_input(b, exit_phi, 1 + ei2, flow.flow_break_blocks[ei2],
-                        flow.flow_break_vals[ei2 * flow.flow_carry_count + ej]) != 0) { return -1; }
+                for ei2 < loop.break_done {
+                    if (ast_ir_b_set_phi_input(b, exit_phi, exit_base + ei2, loop.break_blocks[ei2],
+                        loop.break_vals[ei2 * loop.carry_count + ej]) != 0) { return -1; }
                     ei2 += 1;
                 }
-                b.local_values[flow.flow_carry[ej]] = exit_phi;
+                b.local_values[loop.carry[ej]] = exit_phi;
             }
             ej += 1;
         }
@@ -1208,32 +1284,38 @@ fn checked_lower_loop(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     return checked_lower_exit_block(l);
 }
 
-// checked_lower_break：break 站点记录携带值快照并跳出循环；循环外不支持。
+// checked_lower_break：break 站点记录携带值快照并跳出**最内层**循环；循环外拒绝。
 fn checked_lower_break(l *CheckedLower, flow *CheckedFlow) int {
     let b *AstIRBuilder = &l.builder;
-    if (flow.flow_break_target < 0) { return -2; }
-    if (flow.flow_break_vals != 0) {
-        if (checked_lower_break_snapshot(l, flow, l.function_break_sites,
-            flow.flow_break_done) != 0) { return -1; }
-        flow.flow_break_blocks[flow.flow_break_done] = b.cur_block;
+    if (flow.loop_depth <= 0) { return -2; }
+    let loop *CheckedLoop = &flow.loops[flow.loop_depth - 1];
+    if (loop.break_target < 0) { return -2; }
+    if (loop.break_vals != 0) {
+        if (checked_lower_break_snapshot(l, flow, loop.break_done) != 0) { return -1; }
+        loop.break_blocks[loop.break_done] = b.cur_block;
     }
-    flow.flow_break_done += 1;
-    if (ast_ir_b_term_br(b, flow.flow_break_target) != 0) { return -1; }
+    loop.break_done += 1;
+    if (ast_ir_b_term_br(b, loop.break_target) != 0) { return -1; }
     return 0;
 }
 
-// checked_lower_continue：continue 站点回填 header phi 输入并跳回循环头。
+// checked_lower_continue：continue 站点回填**最内层**循环 header phi 并跳回循环头。
 fn checked_lower_continue(l *CheckedLower, flow *CheckedFlow) int {
     let b *AstIRBuilder = &l.builder;
-    if (flow.flow_continue_target < 0) { return -2; }
-    let j int = 0;
-    for j < flow.flow_carry_count {
-        if (ast_ir_b_set_phi_input(b, flow.flow_carry_phis[j], 1 + flow.flow_continue_done,
-            b.cur_block, b.local_values[flow.flow_carry[j]]) != 0) { return -1; }
-        j += 1;
+    if (flow.loop_depth <= 0) { return -2; }
+    let loop *CheckedLoop = &flow.loops[flow.loop_depth - 1];
+    if (loop.continue_target < 0) { return -2; }
+    // 发现趟只计数站点；header phi 在真实趟才存在（carry_phis 为 0）。
+    if (loop.carry_phis != 0) {
+        let j int = 0;
+        for j < loop.carry_count {
+            if (ast_ir_b_set_phi_input(b, loop.carry_phis[j], 1 + loop.continue_done,
+                b.cur_block, b.local_values[loop.carry[j]]) != 0) { return -1; }
+            j += 1;
+        }
     }
-    flow.flow_continue_done += 1;
-    if (ast_ir_b_term_br(b, flow.flow_continue_target) != 0) { return -1; }
+    loop.continue_done += 1;
+    if (ast_ir_b_term_br(b, loop.continue_target) != 0) { return -1; }
     return 0;
 }
 
@@ -1479,10 +1561,13 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
     l.function.decl_row = -1; l.function.file_id = -1;
     l.last_token = 0; l.reason = "首片不支持此语句或表达式";
     l.function_binding_first = 0; l.function_binding_count = 0;
-    l.function_break_sites = 0; l.local_count = 0;
+    l.local_count = 0;
     let flow CheckedFlow;
     flow.builder = &l.builder;
+    flow.loops = 0;
+    flow.loop_depth = 0;
     l.flow = &flow;
+    flow.loops = malloc((CHECKED_LOOP_MAX * sizeof(CheckedLoop)).to_type(u64)).to_type(*CheckedLoop);
     l.source_map = checked_zero_rows(l.store.file_n, sizeof(int)).to_type(*int);
     l.source_type_map = checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int);
     l.taken = checked_zero_rows(l.store.binding_n, 1).to_type(*u8);
@@ -1494,7 +1579,7 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
     let types [25]ir.IRType;
     let result int = -1;
     // 先建立 canonical 类型映射与模块来源，函数签名才能在符号表里登记模块类型下标。
-    if (l.source_map != 0 && l.source_type_map != 0 && tables_ok != 0
+    if (l.source_map != 0 && l.source_type_map != 0 && flow.loops != 0 && tables_ok != 0
         && checked_lower_tables(&l, &types[0]) == 0) {
         result = 0;
         let declaration int = 0;
@@ -1510,11 +1595,7 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
         let i int = 0;
         for result == 0 && i < l.store.function_n {
             l.function = l.store.functions[i];
-            flow.flow_carry_count = 0;
-            flow.flow_break_target = -1;
-            flow.flow_continue_target = -1;
-            flow.flow_break_done = 0;
-            flow.flow_continue_done = 0;
+            flow.loop_depth = 0;
             let node AstDecl = l.store.declarations[l.function.decl_row];
             let symbol gen.CSym = l.store.symbols[node.sym_id];
             l.last_token = node.first;
@@ -1530,11 +1611,7 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
         i = 0;
         for result == 0 && i < l.store.function_n {
             l.function = l.store.functions[i];
-            flow.flow_carry_count = 0;
-            flow.flow_break_target = -1;
-            flow.flow_continue_target = -1;
-            flow.flow_break_done = 0;
-            flow.flow_continue_done = 0;
+            flow.loop_depth = 0;
             let node AstDecl = l.store.declarations[l.function.decl_row];
             let symbol gen.CSym = l.store.symbols[node.sym_id];
             l.last_token = node.first; l.reason = "首片不支持此语句或表达式";
@@ -1560,6 +1637,7 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
     }
     free(l.source_map.to_type(*void)); free(l.source_type_map.to_type(*void));
     free(l.taken.to_type(*void)); free(l.storage.to_type(*void));
+    free(flow.loops.to_type(*void));
     if (result != 0) {
         checked_lower_report(&l, l.reason);
         ir.ir_module_release(&candidate);

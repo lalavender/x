@@ -33,6 +33,26 @@
     todo.md 的「设计决定不做」。
 - 详见[完成记录](01-finished/yh-全量门测试并行化-2026-10-15.md)。
 
+## 2026-10-15 LLVM LL4 首片：嵌套循环、break/continue 与无限循环
+
+- **范围**：`for {}` 无限循环、嵌套 for 的内层 break/continue、循环体局部绑定
+  与跨层携带值；`switch`/`goto`/`for-in` 仍按后续切片。
+- **实现**：`CheckedFlow` 的单份循环状态改为按深度共存的 `CheckedLoop` 栈
+  （上限 16），`checked_lower_carry_record` 逐层记录；顺带修复三个已有缺陷：
+  循环体内声明的绑定误入携带 phi、无限循环 exit phi 多算 header 前驱、
+  `break` 携带值站点数从未赋值（break + 携带绑定必失败）；发现趟 continue
+  不再访问尚未分配的 header phi。
+- **门禁**：新增 `tests/selfhost/llvm-control.py`（O0/O2 原生运行 + goto 来源
+  拒绝）与运行语料 `tests/yh-run/run/llvm-control-flow.yh`；`llvmlower` 新增
+  `input/control.yh`，`llvm-lower.py` 要求嵌套/无限循环降低成功且 `phis > 0`。
+- **验收**（WSL，`SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`）：
+  `make`、`make test`（语法 78/78 与 42/42、运行 **310/310**）全绿；
+  `make selfhost-native` 全绿（固定点 24 产物一致、自解析 86 文件、
+  modules 18/18、项目 100/100）；九个 `llvm-*` 专项门全部退出 0。
+- **未关闭**：`switch`/`goto`/`for-in`；LL5 聚合与全局数据；LLVM 默认未切换、
+  种子未滚。
+- 详见 [完成记录](01-finished/yh-LLVM-LL4循环首片-2026-10-15.md)。
+
 ## 2026-10-15 LLVM LL5 第一切片：局部标量内存（alloca/load/store）
 
 - **范围**：`&局部/参数`、指针参数与局部、`*p` 读写与复合赋值进入

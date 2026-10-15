@@ -4,29 +4,41 @@ import ir;
 // ============================================================================
 // checked_module_ctx.yh —— 纯快照 lowering 的可变上下文
 //
-// 本文件只声明纯快照 lowering（compiler/ast/checked_module_lower.yh）的两个
-// 共享上下文类型。受检快照本身（CheckedString/CheckedStorage）在
-// checked_module.yh 声明；模块要求类型先声明后使用、并按文件名字典序编译，
-// 因此本文件排在 checked_module.yh 之后、checked_module_lower.yh 之前，
-// 且两个结构体之间不允许互相引用（CheckedFlow 只引用 lowering 的构造器
-// 指针，跨对象关系由调用方显式传参给出）。
+// 本文件声明纯快照 lowering（compiler/ast/checked_module_lower.yh）的三个
+// 共享上下文类型（CheckedLoop/CheckedFlow/CheckedLower）。受检快照本身
+// （CheckedString/CheckedStorage）在 checked_module.yh 声明；模块要求类型
+// 先声明后使用、并按文件名字典序编译，因此本文件排在 checked_module.yh
+// 之后、checked_module_lower.yh 之前。CheckedFlow 只引用 lowering 的构造器
+// 指针与循环栈数组，跨对象关系由调用方显式传参给出。
 // ============================================================================
 
-// CheckedFlow：循环与合流状态，生命周期不超过一次 lower_module。
-// carry_* 由循环发现趟填充、真实趟消费；break_* 按发现趟站点数预分配。
-// 不持有 GenState、旧汇编缓冲或语义表指针，也不写回受检快照。
+// CheckedLoop：一层循环的携带绑定与 break/continue 状态；嵌套时按深度共存。
+// carry 保存被赋值绑定的稳定 ID（去重、源码顺序），发现趟填充、真实趟消费；
+// break 快照按「行 × 携带绑定」展开，break_capacity 是发现趟确定的站点数。
+struct CheckedLoop {
+    carry *int;
+    carry_count int;
+    carry_cap int;
+    carry_phis *int;         // 真实趟：各携带绑定在循环头的 phi 指令编号
+    break_blocks *int;       // 真实趟：各 break 站点所在块
+    break_vals *int;         // 真实趟：break 站点的携带值快照（行×站点）
+    break_capacity int;      // 发现趟结论：本层 break 站点容量上限
+    continue_done int;       // 真实趟：已创建的 continue 边数
+    break_done int;          // 真实趟：已创建的 break 边数
+    break_target int;        // 退出块；-1 = 本层未开放
+    continue_target int;     // 循环头块；-1 = 本层未开放
+    stmt_id int;             // 本层 for 语句 ID；用于排除循环体内声明的绑定
+}
+
+// CHECKED_LOOP_MAX：循环嵌套上限；超出时带来源拒绝而不是无限增长。
+const CHECKED_LOOP_MAX int = 16;
+
+// CheckedFlow：嵌套循环栈与当前函数的纯 SSA 构造器。loops 由 lower_module
+// 分配，只有 [0, loop_depth) 有效，栈顶是当前最内层循环。
 struct CheckedFlow {
     builder *AstIRBuilder;   // 当前函数的纯 SSA 构造器（由 CheckedLower 提供）
-    flow_carry *int;         // 循环携带绑定的稳定绑定 ID（源码顺序、已去重）
-    flow_carry_count int;
-    flow_carry_cap int;
-    flow_carry_phis *int;    // 真实趟：各携带绑定在循环头的 phi 指令编号
-    flow_break_blocks *int;  // 真实趟：各 break 站点所在块
-    flow_break_vals *int;    // 真实趟：break 站点的携带值快照（行×站点）
-    flow_continue_done int;  // 真实趟：已创建的 continue 边数
-    flow_break_done int;     // 真实趟：已创建的 break 边数
-    flow_break_target int;   // 退出块；-1 = 不在循环内
-    flow_continue_target int; // 循环头块；-1 = 不在循环内
+    loops *CheckedLoop;      // 嵌套循环栈，容量 CHECKED_LOOP_MAX
+    loop_depth int;          // 已开放的循环层数
 }
 
 // CheckedLower：单函数纯快照降低的可变上下文；所有语义读取经 store，不装回 GenState。
@@ -44,7 +56,6 @@ struct CheckedLower {
     function_binding_count int; // 本函数绑定数（参数在前）
     taken *u8;                  // 按模块绑定表行的取址标记；1 = 需要内存驻留
     storage *int;               // 按模块绑定表行的存储指针 + 1；0 = 未分配/未取址
-    function_break_sites int;   // 发现趟结论：循环体 break 站点数
     local_count int;         // 已按顺序遍历的 let 数（绑定编号顺序校验）
     last_token int;          // 最近处理的 token，用于失败诊断定位
     reason *char;            // 首片不支持时的稳定原因文本

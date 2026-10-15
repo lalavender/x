@@ -355,6 +355,12 @@ IRModule 序列化与跨缓存身份未落、首片之外的形态明确拒绝�
 **接口：**消费 CheckedModule；产生 verifier 可接受的 CFG/phi 或显式可变局部存储，
   来源顺序和效果不变；显式存储依赖先完成的 LL5。
 
+2026-10-15 首片（嵌套循环与 break/continue、无限循环 `for {}`）已完成：
+循环状态改为按深度共存的 `CheckedLoop` 栈（上限 16），顺带修复「循环体局部
+绑定入携带 phi」「无限循环 exit phi 前驱数」「break 携带值站点数」三个缺陷；
+门禁见 `tests/selfhost/llvm-control.py` 与 `tests/yh-run/run/llvm-control-flow.yh`。
+`switch`/`goto`/`for-in` 按后续行保留（`goto` 现在带来源拒绝）。
+
 - [ ] 按“嵌套循环与 break/continue → 无限循环 → switch → goto/label → for-in”逐行建用例。
 - [ ] 每行先用 LLVM 编译触发 unsupported，再实现该行，独立运行/提交；不一次混入所有控制流。
 - [ ] 保留短路和不可达检查；验证 goto 形成的图、循环携带值与同一目标的多前驱输入。
