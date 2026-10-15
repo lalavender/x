@@ -58,12 +58,10 @@ fn main() int {
 
 REJECT = """module badagg;
 
-struct Pair { x int; y int; }
-
-// bad_struct：结构体局部聚合不在首片；必须带来源拒绝，不能静默回退。
-fn bad_struct(x int) int {
-    let q Pair = Pair{ x: 1, y: 2 };
-    return q.x;
+// bad_slice：切片存储仍不在 LL5 已验收范围；必须带来源拒绝，不能静默回退。
+fn bad_slice(x int) int {
+    let s []int;
+    return x;
 }
 
 fn main() int { return 0; }

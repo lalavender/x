@@ -369,6 +369,16 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     }
     let node AstExpr = l.store.expressions[expr_id];
     l.last_token = node.first;
+    if (node.kind == AST_EXPR_MEMBER) {
+        // 标量字段读取：先求字段存储地址，再按字段类型 LOAD。
+        let want int = checked_lower_type(l, node.type_id);
+        if (want < 0) { return -2; }
+        let pointer int = checked_lower_lvalue_ptr(l, flow, expr_id);
+        if (pointer == -2) { return -2; }
+        if (pointer < 0) { return -1; }
+        if (b.types[b.insts[pointer].result_type].elem != want) { return -2; }
+        return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, pointer, -1, 0);
+    }
     if (node.kind == AST_EXPR_INDEX) {
         // 标量元素读取：先求元素存储地址，再按元素类型 LOAD。
         let want int = checked_lower_type(l, node.type_id);
@@ -797,13 +807,26 @@ fn checked_lower_break_snapshot(l *CheckedLower, flow *CheckedFlow, index int) i
     return 0;
 }
 
+// checked_stmt_has_assign：语句 token 范围内是否出现赋值号。带长度/类型引用的
+// 类型（如 `let a [3]int;`）也会挂表达式边，必须靠源码里的 `=` 区分初始化。
+fn checked_stmt_has_assign(l *CheckedLower, stmt *AstStmt) int {
+    if (stmt.file_id < 0 || stmt.file_id >= l.store.file_n) { return 0; }
+    let file gen.PFile = l.store.files[stmt.file_id];
+    let i int = stmt.first;
+    for i < stmt.after && i < file.token_n {
+        if (file.tokens[i].kind == gen.TK_ASSIGN) { return 1; }
+        i += 1;
+    }
+    return 0;
+}
+
 // checked_lower_let：降低顺序出现、单绑定且已初始化的标量 let；返回值与绑定行。
 fn checked_lower_let(l *CheckedLower, flow *CheckedFlow, stmt_id int, value_out *int, row_out *int) int {
     let stmt AstStmt = l.store.statements[stmt_id];
     if (stmt.op != gen.TK_LET || stmt.first_binding < 0
         || stmt.first_binding >= l.store.binding_n
         || stmt.first_binding != stmt.last_binding
-        || stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) {
+        || stmt.first_expr >= l.store.edge_n) {
         l.reason = "首片：let 语句形态不匹配";
         return -2;
     }
@@ -813,6 +836,13 @@ fn checked_lower_let(l *CheckedLower, flow *CheckedFlow, stmt_id int, value_out 
         || binding.id >= l.function_binding_count) {
         l.reason = "首片：let 绑定布局不匹配";
         return -2;
+    }
+    if (stmt.first_expr < 0 || checked_stmt_has_assign(l, &stmt) == 0) {
+        // 未初始化 let：标量保持未定义 SSA 值（首读前必须赋值），聚合存储已 ALLOCA；
+        // 数组类型会先挂长度表达式边，必须靠源码 `=` 判断是否真的初始化。
+        value_out[0] = -1;
+        row_out[0] = stmt.first_binding;
+        return 0;
     }
     let edge AstStmtExpr = l.store.edges[stmt.first_expr];
     if (checked_lower_is_aggregate(l.store, binding.sym_type_id) != 0) {
@@ -909,9 +939,9 @@ fn checked_lower_assign(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         want = checked_lower_type(l, binding.sym_type_id);
         if (want < 0) { return -2; }
         target = checked_lower_storage(l, binding.id);
-    } else if (lhs.kind == AST_EXPR_INDEX
+    } else if (lhs.kind == AST_EXPR_INDEX || lhs.kind == AST_EXPR_MEMBER
         || (lhs.kind == AST_EXPR_UNARY && lhs.op == gen.TK_STAR && lhs.child0 >= 0)) {
-        // 下标或解引用左值：统一走元素存储地址。
+        // 下标/字段或解引用左值：统一走元素存储地址。
         want = checked_lower_type(l, lhs.type_id);
         if (want < 0) { return -2; }
         target = checked_lower_lvalue_ptr(l, flow, lhs_edge.expr_id);
@@ -1801,6 +1831,38 @@ fn checked_lower_is_aggregate(store *CheckedStorage, source_type int) int {
         || kind == gen.TY_SLICE).to_type(int);
 }
 
+// checked_lower_member_field：按成员名 token 在结构体/联合体字段表里查字段行。
+// AST_EXPR_MEMBER 不携带字段下标，只能从名字文本与快照字段名池比对；找不到返回 -1。
+fn checked_lower_member_field(l *CheckedLower, struct_type int, file_id int, token int) int {
+    if (struct_type < 0 || struct_type >= l.store.type_n) { return -1; }
+    let ty gen.CType = l.store.types[struct_type];
+    if (ty.kind != gen.TY_STRUCT && ty.kind != gen.TY_UNION) { return -1; }
+    if (file_id < 0 || file_id >= l.store.file_n || token < 0
+        || token >= l.store.files[file_id].token_n) { return -1; }
+    let file gen.PFile = l.store.files[file_id];
+    let start int = file.tokens[token].start;
+    let name_len int = file.tokens[token].len;
+    if (start < 0 || name_len <= 0 || start + name_len > file.source_len) { return -1; }
+    let first int = ty.sub;
+    let count int = ty.len;
+    if (first < 0 || count < 0 || first + count > l.store.field_n) { return -1; }
+    let i int = 0;
+    for i < count {
+        let f gen.SField = l.store.fields[first + i];
+        if (f.name_len == name_len && f.name_off >= 0
+            && f.name_off + f.name_len <= l.store.name_n) {
+            let j int = 0;
+            for j < name_len {
+                if (l.store.names[f.name_off + j] != file.source[start + j]) { break; }
+                j += 1;
+            }
+            if (j == name_len) { return first + i; }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
 // checked_lower_lvalue_ptr：求表达式作为左值的存储指针；-2 不支持、-1 内部错误。
 // 支持变量（含聚合存储）、指针解引用与数组下标（常量或动态字节偏移）。
 fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
@@ -1823,6 +1885,28 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         if (pointer < 0) { return -1; }
         if (b.insts[pointer].result_type < ir.IR_TY_PTR) { return -2; }
         return pointer;
+    }
+    if (node.kind == AST_EXPR_MEMBER && node.child0 >= 0) {
+        // 字段左值：基址可为聚合存储（递归）或指向结构体的指针（按值）。
+        let base_type int = l.store.expressions[node.child0].type_id;
+        let base_kind int = checked_lower_kind(l.store, base_type);
+        let base int = -1;
+        let struct_type int = base_type;
+        if (base_kind >= ir.IR_TY_PTR) {
+            base = checked_lower_expr_inner(l, flow, node.child0);
+            struct_type = l.store.types[base_type].elem;
+        } else {
+            base = checked_lower_lvalue_ptr(l, flow, node.child0);
+        }
+        if (base == -2) { return -2; }
+        if (base < 0) { return -1; }
+        if (node.after <= node.first) { return -2; }
+        let field int = checked_lower_member_field(l, struct_type, node.file_id, node.after - 1);
+        if (field < 0) { return -2; }
+        let f gen.SField = l.store.fields[field];
+        let kind int = checked_lower_type(l, f.type_id);
+        let result_kind int = kind >= 0 ? ir.IR_TY_PTR + kind : ir.IR_TY_PTR;
+        return ast_ir_b_add_gep_const(b, base, f.offset, result_kind);
     }
     if (node.kind == AST_EXPR_INDEX && node.child0 >= 0 && node.child1 >= 0) {
         // 基址：指针表按值加载，数组/嵌套数组按存储地址递归。
@@ -1921,15 +2005,54 @@ fn checked_lower_array_literal(l *CheckedLower, flow *CheckedFlow, dest int,
     return result;
 }
 
+// checked_lower_struct_literal：结构体/联合体字面量逐字段写进 dest。
+// 字段节点 op 是快照字段表的绝对下标；缺省字段保持未初始化（与旧后端一致）。
+fn checked_lower_struct_literal(l *CheckedLower, flow *CheckedFlow, dest int,
+    expr_id int) int {
+    let b *AstIRBuilder = &l.builder;
+    let node AstExpr = l.store.expressions[expr_id];
+    let field_node int = node.child0;
+    let result int = 0;
+    for field_node >= 0 {
+        if (field_node >= l.store.expression_n) { result = -2; break; }
+        let fn2 AstExpr = l.store.expressions[field_node];
+        if (fn2.kind != AST_EXPR_STRUCT_FIELD || fn2.op < 0
+            || fn2.op >= l.store.field_n || fn2.child1 < 0) { result = -2; break; }
+        let f gen.SField = l.store.fields[fn2.op];
+        let fkind int = checked_lower_type(l, f.type_id);
+        let ptr_kind int = fkind >= 0 ? ir.IR_TY_PTR + fkind : ir.IR_TY_PTR;
+        let fptr int = ast_ir_b_add_gep_const(b, dest, f.offset, ptr_kind);
+        if (fptr < 0) { result = -1; break; }
+        if (checked_lower_is_aggregate(l.store, f.type_id) != 0) {
+            result = checked_lower_aggregate_store(l, flow, fptr, f.type_id, fn2.child1);
+        } else {
+            if (fkind < 0) { result = -2; break; }
+            let value int = checked_lower_expr_inner(l, flow, fn2.child1);
+            if (value == -2) { result = -2; break; }
+            if (value < 0) { result = -1; break; }
+            if (b.insts[value].result_type != fkind) {
+                value = checked_lower_adjust(l, value, fkind);
+                if (value < 0) { result = -2; break; }
+            }
+            if (ast_ir_b_add_store(b, fptr, value) < 0) { result = -1; break; }
+        }
+        field_node = fn2.child0;
+    }
+    return result;
+}
+
 // checked_lower_aggregate_store：把一个聚合值写进 dest 指向的存储。
-// 支持定长数组字面量与聚合变量/左值副本；其他来源返回 -2。
+// 支持数组/结构体/联合体字面量与聚合变量/左值副本；其他来源返回 -2。
 fn checked_lower_aggregate_store(l *CheckedLower, flow *CheckedFlow, dest int,
     source_type int, expr_id int) int {
     let b *AstIRBuilder = &l.builder;
     if (source_type < 0 || source_type >= l.store.type_n || expr_id < 0
         || expr_id >= l.store.expression_n) { return -2; }
     let ty gen.CType = l.store.types[source_type];
-    if (ty.kind != gen.TY_ARRAY || ty.size <= 0) { return -2; }
+    if (ty.size <= 0
+        || (ty.kind != gen.TY_ARRAY && ty.kind != gen.TY_STRUCT && ty.kind != gen.TY_UNION)) {
+        return -2;
+    }
     let node AstExpr = l.store.expressions[expr_id];
     // 剥掉括号等 PRIMARY 包装：聚合来源只看最内层结构。
     let inner int = expr_id;
@@ -1941,6 +2064,9 @@ fn checked_lower_aggregate_store(l *CheckedLower, flow *CheckedFlow, dest int,
     }
     if (inner_node.kind == AST_EXPR_ARRAY) {
         return checked_lower_array_literal(l, flow, dest, source_type, inner);
+    }
+    if (inner_node.kind == AST_EXPR_STRUCT_INIT) {
+        return checked_lower_struct_literal(l, flow, dest, inner);
     }
     let src int = -1;
     if (inner_node.kind == AST_EXPR_PRIMARY) {
@@ -2091,9 +2217,10 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
         let addr int = -1;
         if (checked_lower_is_aggregate(l.store, binding.sym_type_id) != 0) {
             let aty gen.CType = l.store.types[binding.sym_type_id];
-            if (aty.kind != gen.TY_ARRAY || aty.size <= 0 || aty.align <= 0) {
+            if ((aty.kind != gen.TY_ARRAY && aty.kind != gen.TY_STRUCT
+                && aty.kind != gen.TY_UNION) || aty.size <= 0 || aty.align <= 0) {
                 l.last_token = binding.name_token;
-                l.reason = "首片仅支持定长数组聚合存储";
+                l.reason = "首片仅支持定长数组/结构体/联合体聚合存储";
                 ast_ir_b_release(b); return -2;
             }
             addr = ast_ir_b_add_alloca(b, aty.size, aty.align);

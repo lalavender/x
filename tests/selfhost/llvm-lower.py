@@ -37,7 +37,7 @@ def main():
     (WORK / "build.log").write_text(result.stdout + result.stderr)
     assert result.returncode == 0, result.stdout + result.stderr
     executable = project / ".build/llvmlower"
-    for name, expected in (("scalar", "0"), ("pointer", "0"), ("control", "0"), ("goto", "0"), ("array", "0"), ("aggregate", "1")):
+    for name, expected in (("scalar", "0"), ("pointer", "0"), ("control", "0"), ("goto", "0"), ("array", "0"), ("struct", "0"), ("aggregate", "0"), ("slice", "1")):
         result = run([str(executable), str(project / f"input/{name}.yh"), expected], project)
         (WORK / f"{name}.log").write_text(result.stdout + result.stderr)
         assert result.returncode == 0, (name, result.returncode, result.stdout, result.stderr)
@@ -59,6 +59,14 @@ def main():
             assert "functions=2" in result.stdout, result.stdout
         elif name == "array":
             # LL5 聚合首片：定长数组存储/下标/复制必须降低成功。
+            assert "lower-snapshot=ok" in result.stdout, result.stdout
+            assert "functions=2" in result.stdout, result.stdout
+        elif name == "struct":
+            # LL5 结构体切片：字段/嵌套/字面量/复制必须降低成功。
+            assert "lower-snapshot=ok" in result.stdout, result.stdout
+            assert "functions=2" in result.stdout, result.stdout
+        elif name == "aggregate":
+            # LL5 结构体切片后，原 aggregate 负例已转为支持：必须降低成功。
             assert "lower-snapshot=ok" in result.stdout, result.stdout
             assert "functions=2" in result.stdout, result.stdout
         else:

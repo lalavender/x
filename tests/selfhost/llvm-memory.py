@@ -53,11 +53,10 @@ fn main() int {
 
 REJECT = """module bad;
 
-// bad_address：取数组元素地址不属于 LL5 首片；必须带来源拒绝，不能静默回退。
-fn bad_address(x int) int {
-    let arr [4]int;
-    let p *int = &arr[0];
-    return *p;
+// bad_slice：切片存储仍不在 LL5 已验收范围；必须带来源拒绝，不能静默回退。
+fn bad_slice(x int) int {
+    let s []int;
+    return x;
 }
 
 fn main() int { return 0; }
@@ -145,10 +144,10 @@ def main():
     result = run([compiler, "--backend", "llvm", "--target", TARGET, "-O0",
                   "-o", str(output), str(reject)])
     assert result.returncode != 0, "&arr[0] 未被拒绝"
-    assert ".yh:" in result.stderr and "bad_address" in result.stderr, result.stderr[-800:]
+    assert ".yh:" in result.stderr and "bad_slice" in result.stderr, result.stderr[-800:]
     assert not output.exists(), "拒绝路径仍发布了产物"
 
-    print("LL5 首片通过：局部 alloca/load/store、参数指针、O0/O2 原生运行、越界取址带来源拒绝")
+    print("LL5 首片通过：局部 alloca/load/store、参数指针、O0/O2 原生运行、切片带来源拒绝")
     return 0
 
 

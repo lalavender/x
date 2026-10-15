@@ -580,14 +580,19 @@ def main():
             pointer_ok = (pointer is not None and pointer.returncode == 0
                           and "lower-snapshot=ok" in pointer.stdout
                           and "functions=2" in pointer.stdout)
-            rejected = sh([str(program), str(dst / "input" / "aggregate.yh"), "1"],
+            aggregate = sh([str(program), str(dst / "input" / "aggregate.yh"), "0"],
+                           cwd=dst) if program.exists() else None
+            aggregate_ok = (aggregate is not None and aggregate.returncode == 0
+                            and "lower-snapshot=ok" in aggregate.stdout
+                            and "functions=2" in aggregate.stdout)
+            rejected = sh([str(program), str(dst / "input" / "slice.yh"), "1"],
                           cwd=dst) if program.exists() else None
             rejects = (rejected is not None and rejected.returncode == 0
                        and "lower-rejected=ok" in rejected.stdout
-                       and "aggregate_body" in rejected.stderr and ".yh:" in rejected.stderr)
-            report(lower_ok and pointer_ok and rejects, c["name"],
+                       and "slice_body" in rejected.stderr and ".yh:" in rejected.stderr)
+            report(lower_ok and pointer_ok and aggregate_ok and rejects, c["name"],
                    f"快照 lowering 覆盖或拒绝路径失败: lower_ok={lower_ok}, "
-                   f"pointer_ok={pointer_ok}, rejects={rejects}, "
+                   f"pointer_ok={pointer_ok}, aggregate_ok={aggregate_ok}, rejects={rejects}, "
                    f"build={built.returncode}, run={run.returncode if run else None}, "
                    f"stdout={(run.stdout if run else '')[-120:]!r}\n"
                    f"{(run.stderr if run else built.stderr)[-400:]}")

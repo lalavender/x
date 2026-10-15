@@ -33,6 +33,26 @@
     todo.md 的「设计决定不做」。
 - 详见[完成记录](01-finished/yh-全量门测试并行化-2026-10-15.md)。
 
+## 2026-10-15 LLVM LL5 结构体切片：字段、嵌套、字面量与联合体
+
+- **范围**：结构体/联合体绑定 ALLOCA；字段读写与复合赋值、嵌套字段、
+  字段取址、结构体指针解引用、结构体字面量（含嵌套/结构体数组）、按值复制、
+  联合体共享存储、未初始化 `let`（标量/聚合）。
+- **实现**：`AST_EXPR_MEMBER` 不携带字段下标，按成员名内容在快照字段表查找；
+  字段地址 = 基址 + `SField.offset` 常量 GEP；结构体字面量逐字段写入；
+  未初始化 let 用语句内 `=` token 判断（数组类型会先挂长度表达式边）。
+- **门禁**：新增 `tests/selfhost/llvm-struct.py`（O0/O2 原生运行 + 切片来源
+  拒绝）与运行语料 `tests/yh-run/run/llvm-struct.yh`；`llvmlower` 新增
+  `input/struct.yh` 与 `input/slice.yh`；`aggregate` 负例翻转为成功，
+  llvm-array/llvm-memory 负例改用切片。
+- **验收**（WSL，`SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`）：
+  `make`、`make test`（语法 78/78 与 42/42、运行 **314/314**）全绿；
+  `make selfhost-native` 全绿（固定点 24 产物一致、自解析 86 文件、
+  modules 18/18、项目 100/100）；13 个 `llvm-*` 专项门全部退出 0。
+- **未关闭**：切片、全局/CT 数据、聚合参数与返回（LL7）、`for-in`；
+  LLVM 默认未切换、种子未滚。
+- 详见 [完成记录](01-finished/yh-LLVM-LL5结构体切片-2026-10-15.md)。
+
 ## 2026-10-15 LLVM LL5 数组切片：局部定长数组与按值复制
 
 - **范围**：局部定长数组（标量/嵌套元素）的字面量初始化、下标读写与复合赋值、
