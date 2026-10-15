@@ -1,0 +1,108 @@
+module backend;
+import gen;
+import ir;
+
+// ============================================================================
+// llvm_runtime.yh —— yh 自有内存运行时的 LLVM IR 发射（LL8a）
+//
+// 本片只提供 memcpy/memset/strlen 三个入口，供 LL5 的聚合复制/清零以及需要
+// 字节内存的 lowering 复用。入口与用户函数同模块发射，不依赖尚未完成的
+// 指针/聚合 lowering，也不调用任何外部 LLVM 工具。
+//
+// 契约（与 yh prelude、目标 C ABI 一致；均为逐字节实现，按未知对齐处理）：
+//   memcpy(dst *void, src *void, n u64) *void
+//     复制 n 字节并返回 dst；dst 与 src 区域不得重叠（与 C memcpy 相同，
+//     重叠复制由调用方改用前向/后向副本，不在这里静默扩展语义）。
+//   memset(dst *void, value int, n u64) *void
+//     用 value 的低 8 位填充 n 字节并返回 dst。
+//   strlen(s *char) u64
+//     返回 s 到首个 NUL 的字节数，不含 NUL；s 必须已终止。
+//
+// 发射形态：weak 定义 + llvm.used 标记。
+//   * weak：多模块各带一份时不产生重复定义，链接器任选一份；用户同名强定义
+//     优先。模块若已有同名符号（声明或定义）则本片不发射该入口，避免 IR 重名。
+//   * llvm.used：阻止 O2 的 GlobalDCE 删除未被引用的弱定义，保证 O0/O2 产物
+//     都带入口（LL8a 验收要求）。
+//   * optnone + noinline + nobuiltin：阻止 loop-idiom 把逐字节循环改写成对自身
+//     memcpy/memset 的 libcall，避免自递归；代价是入口保持低优化，LL8b 用
+//     yh/IR 迁移运行时后再评估优化与对齐。
+// ============================================================================
+
+// llvm_runtime_named：模块符号表里是否已有该名称（声明或定义都算），
+// 用于让用户定义优先并避免与 helper 定义重名。
+fn llvm_runtime_named(unit *ir.IRModule, name *char) int {
+    let i int = 0;
+    for i < unit.symbol_count {
+        if (gen.cstr_eq(unit.symbols[i].name, name) != 0) { return 1; }
+        i += 1;
+    }
+    return 0;
+}
+
+// llvm_runtime_write_memcpy：发射 memcpy 弱定义；n==0 直接返回，复制按字节推进。
+fn llvm_runtime_write_memcpy(out *LLVMOutput) void {
+    llvm_text(out, "define weak ptr @memcpy(ptr %dst, ptr %src, i64 %n) noinline nounwind optnone nobuiltin {\n");
+    llvm_text(out, "entry:\n  %empty = icmp eq i64 %n, 0\n  br i1 %empty, label %done, label %loop\n");
+    llvm_text(out, "loop:\n  %i = phi i64 [ 0, %entry ], [ %next, %loop ]\n");
+    llvm_text(out, "  %d = getelementptr i8, ptr %dst, i64 %i\n");
+    llvm_text(out, "  %s = getelementptr i8, ptr %src, i64 %i\n");
+    llvm_text(out, "  %byte = load i8, ptr %s, align 1\n");
+    llvm_text(out, "  store i8 %byte, ptr %d, align 1\n");
+    llvm_text(out, "  %next = add i64 %i, 1\n  %more = icmp ult i64 %next, %n\n");
+    llvm_text(out, "  br i1 %more, label %loop, label %done\n");
+    llvm_text(out, "done:\n  ret ptr %dst\n}\n\n");
+}
+
+// llvm_runtime_write_memset：发射 memset 弱定义；value 截断为低 8 位，填充按字节推进。
+fn llvm_runtime_write_memset(out *LLVMOutput) void {
+    llvm_text(out, "define weak ptr @memset(ptr %dst, i32 %value, i64 %n) noinline nounwind optnone nobuiltin {\n");
+    llvm_text(out, "entry:\n  %empty = icmp eq i64 %n, 0\n  br i1 %empty, label %done, label %loop\n");
+    llvm_text(out, "loop:\n  %i = phi i64 [ 0, %entry ], [ %next, %loop ]\n");
+    llvm_text(out, "  %d = getelementptr i8, ptr %dst, i64 %i\n");
+    llvm_text(out, "  %byte = trunc i32 %value to i8\n");
+    llvm_text(out, "  store i8 %byte, ptr %d, align 1\n");
+    llvm_text(out, "  %next = add i64 %i, 1\n  %more = icmp ult i64 %next, %n\n");
+    llvm_text(out, "  br i1 %more, label %loop, label %done\n");
+    llvm_text(out, "done:\n  ret ptr %dst\n}\n\n");
+}
+
+// llvm_runtime_write_strlen：发射 strlen 弱定义；loop 携带当前下标，scan 只推进计数。
+fn llvm_runtime_write_strlen(out *LLVMOutput) void {
+    llvm_text(out, "define weak i64 @strlen(ptr %s) noinline nounwind optnone nobuiltin {\n");
+    llvm_text(out, "entry:\n  br label %loop\n");
+    llvm_text(out, "loop:\n  %i = phi i64 [ 0, %entry ], [ %next, %scan ]\n");
+    llvm_text(out, "  %p = getelementptr i8, ptr %s, i64 %i\n");
+    llvm_text(out, "  %byte = load i8, ptr %p, align 1\n");
+    llvm_text(out, "  %nul = icmp eq i8 %byte, 0\n");
+    llvm_text(out, "  br i1 %nul, label %done, label %scan\n");
+    llvm_text(out, "scan:\n  %next = add i64 %i, 1\n  br label %loop\n");
+    llvm_text(out, "done:\n  ret i64 %i\n}\n");
+}
+
+// llvm_runtime_memory_text：把模块缺失的内存入口弱定义追加到文本末尾，并用
+// llvm.used 固定住实际发射的名字。模块已有同名符号时不发射该入口。
+pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
+    let has_memcpy int = llvm_runtime_named(unit, "memcpy");
+    let has_memset int = llvm_runtime_named(unit, "memset");
+    let has_strlen int = llvm_runtime_named(unit, "strlen");
+    let emitted int = 3 - has_memcpy - has_memset - has_strlen;
+    if (emitted == 0) { return; }
+    llvm_byte(out, '\n');
+    if (has_memcpy == 0) { llvm_runtime_write_memcpy(out); }
+    if (has_memset == 0) { llvm_runtime_write_memset(out); }
+    if (has_strlen == 0) { llvm_runtime_write_strlen(out); }
+    llvm_text(out, "\n@llvm.used = appending global [");
+    llvm_number(out, emitted.to_type(u64));
+    llvm_text(out, " x ptr] [");
+    let first int = 1;
+    if (has_memcpy == 0) { llvm_text(out, "ptr @memcpy"); first = 0; }
+    if (has_memset == 0) {
+        if (first == 0) { llvm_text(out, ", "); }
+        llvm_text(out, "ptr @memset"); first = 0;
+    }
+    if (has_strlen == 0) {
+        if (first == 0) { llvm_text(out, ", "); }
+        llvm_text(out, "ptr @strlen");
+    }
+    llvm_text(out, "], section \"llvm.metadata\"\n");
+}

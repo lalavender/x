@@ -367,7 +367,9 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     完整接口/缓存身份归 LL9，均不在 LL2 本片。
 - [ ] **LL3 严格 x64 LLVM 首片**：文本 IR、整数/布尔、分支/phi/固定调用；
   生成 EM_X86_64 ELF 并在 WSL 直接运行，禁止回退且有来源诊断。
-- [ ] **LL8a 内存 helper**：先提供 LLVM memcpy/memset/strlen，检查自包含和自递归。
+- [x] **LL8a 内存 helper**（2026-10-15 完成）：LLVM 模块发射 memcpy/memset/strlen
+  弱定义 + llvm.used，O0/O2 对象与原生边界驱动全绿；见
+  [完成记录](01-finished/yh-LLVM-LL8a内存helper-2026-10-15.md)。
 - [ ] **LL5 内存/数据 → LL4 控制流 → LL6 浮点 → LL7 调用/ABI**：与 R2a/NP3 同源切片合并验收，
   补聚合/全局/切片、复杂控制流、转换、间接/两类变参和 C 双向互调，不另做一套重复迁移。
 - [ ] **LL8b x64 完整运行时/宿主桥**：allocator/printf、x64 syscall/目录/时钟/内存/进程；

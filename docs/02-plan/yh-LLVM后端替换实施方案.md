@@ -333,12 +333,16 @@ IRModule 序列化与跨缓存身份未落、首片之外的形态明确拒绝�
 **接口：**提供目标 C 签名的 memcpy/memset/strlen 入口及独立低优化编译策略；
 本片发射 helper 的 LLVM IR，不依赖尚未完成的 yh 聚合 lowering。
 
-- [ ] 用 LLVM IR 验证/对象检查建立 helper 缺失和自递归的失败断言；
+- [x] 用 LLVM IR 验证/对象检查建立 helper 缺失和自递归的失败断言；
   `.yh` fixture 覆盖 0、1、7、8、16、31、32、4096 字节复制/清零及字符串边界。
-- [ ] 以 `.yh` 发射代码实现最小 helper IR，源注释说明签名、效果、对齐和重叠契约。
-- [ ] 检查 O0/O2 的 helper 对象定义、引用和反汇编；不依赖 freestanding 选项阻止 libcall。
-- [ ] 对 runtimebytes 型自包含 fixture 检查 `nm -u` 为空，普通模块仍允许正常导入。
-- [ ] 定向运行与旧门通过后，向 LL5 提供已定义的复制/清零实现。
+  （2026-10-15：运行语料覆盖复制与字符串，清零由 `llvm-runtime.py` 的 C
+  边界驱动覆盖——yh prelude 暂无 memset；缺失/自递归断言在门内实现。）
+- [x] 以 `.yh` 发射代码实现最小 helper IR，源注释说明签名、效果、对齐和重叠契约。
+  （`compiler/backend/llvm_runtime.yh`；弱定义 + `llvm.used`，模块同名符号让位。）
+- [x] 检查 O0/O2 的 helper 对象定义、引用和反汇编；不依赖 freestanding 选项阻止 libcall。
+  （`opt` 验证 + O2 管线弱定义保留 + `nm`/`objdump` 无自递归；桥产物 O0/O2 运行。）
+- [x] 对 runtimebytes 型自包含 fixture 检查 `nm -u` 为空，普通模块仍允许正常导入。
+- [x] 定向运行与旧门通过后，向 LL5 提供已定义的复制/清零实现。
 
 **验证：**`python3 tests/selfhost/llvm-runtime.py --compiler-path ./yh --suite memory`；
 边界自校验退出 0，helper 不调用自身、不留下未解析的内存辅助入口。

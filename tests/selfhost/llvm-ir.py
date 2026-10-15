@@ -88,7 +88,11 @@ def main():
     counts = re.search(r'LL3 fixture: functions=(\d+) cases=(\d+) maps=(\d+)', result.stderr)
     assert counts, result.stderr
     emitted, cases, maps = map(int, counts.groups())
-    assert emitted == result.stdout.count('define ') and cases >= 40 and maps > emitted
+    # 文本含 LL8a 内存 helper 的 weak 定义；emitted 只统计用户函数。
+    defines = [line for line in result.stdout.splitlines() if line.startswith('define ')]
+    runtime_defines = [line for line in defines
+                       if re.search(r'@(memcpy|memset|strlen)\(', line)]
+    assert emitted == len(defines) - len(runtime_defines) and cases >= 40 and maps > emitted
     irfile = WORK / 'scalar.ll'
     irfile.write_text(result.stdout)
     oracle = WORK / 'oracle.c'

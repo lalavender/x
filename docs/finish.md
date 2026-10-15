@@ -2,6 +2,32 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-15 LLVM LL8a：内存运行时 helper（memcpy/memset/strlen）
+
+- **范围**：LL8a 第一片——用 `.yh` 发射代码为 LLVM 后端提供 C 签名的
+  `memcpy`/`memset`/`strlen` 弱定义，供 LL5 的聚合复制/清零与需要字节内存的
+  lowering 复用；不依赖尚未完成的指针/聚合 lowering，不切换生产默认。
+- **实现**：新增 `compiler/backend/llvm_runtime.yh`，在 `llvm_emit_module`
+  末尾追加 `weak` 定义与 `llvm.used` 固定；`optnone + noinline + nobuiltin`
+  阻止 loop-idiom 把逐字节循环改写成对自身的 libcall；模块已有同名符号时不
+  发射。入口按未知对齐逐字节实现，memcpy 保持 C 的非重叠契约，memset 取
+  value 低 8 位，strlen 要求已终止字符串。文本、对象与桥产物三路同源。
+- **门禁**：新增 `tests/selfhost/llvm-runtime.py`（文本契约、`opt` 验证、
+  O2 管线不丢弱定义、对象定义/未解析导入/反汇编无自递归、C 边界驱动覆盖
+  0/1/7/8/16/31/32/4096 字节复制与清零、字符串与 UTF-8 边界、桥产物 O0/O2
+  原生运行）与运行语料 `tests/yh-run/run/llvm-runtime-memory.yh`（旧后端语义锁）；
+  `llvm-ir.py` 的 define 计数改为只统计用户函数。
+- **验收**（WSL，`SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`）：
+  `make`、`make test`（语法 78/78 与 42/42、运行 308/308）、
+  `make selfhost-native`（固定点 cc3→cc4 24 个产物一致、自解析 86 文件、
+  项目 100/100）全绿；`llvm-runtime.py`、`llvm-ir.py`、`llvm-lower.py`、
+  `llvm-checked.py`、`llvm-front-output.py`、`llvm-module.py`、
+  `llvm-module-cache.py` 全部退出 0。
+- **未关闭**：yh prelude 目前只有 `memcpy`/`strlen`，`memset` 的 yh 源级调用
+  与 runtimebytes 形态要等 LL5/LL8b；helper 现在每模块携带且刻意低优化，
+  LL8b 用 yh/IR 迁移完整运行时后评估优化与裁剪；LLVM 默认仍未切换。
+- 详见 [完成记录](01-finished/yh-LLVM-LL8a内存helper-2026-10-15.md)。
+
 ## 2026-10-15 内嵌 lld 链接器：可行性实测与方案增补
 
 - **范围**：回答「能否把 lld 静态链接进 yh 编译器」并做端到端实测；产出为
