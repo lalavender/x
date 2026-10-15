@@ -11,11 +11,15 @@
     3. cc4 语法语料：tests/yh 正例全过、反例全拒；
     4. cc4 运行语料：tests/yh-run 全量（run/fail/pass）。
 
-用法：python3 tests/selfhost/native-selfhost.py [--keep]
+用法：python3 tests/selfhost/native-selfhost.py [--keep] [--jobs N]
+    自解析与两遍语料按 --jobs 并发（缺省 min(8, CPU 核数)）；--workdir 可把
+    候选编译器与语料产物放到快速文件系统（cc2/cc3/cc4 会被反复 exec）；
+    --skip-corpus 供「同一轮 make test 已跑过等价语料」时省掉重复的一遍。
 退出码：全部通过 0。
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
 import shutil
@@ -31,6 +35,10 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "tools"))
 from selfhost_snapshot_gate import default_seed, expected_artifacts, save_snapshot
 from selfhost_snapshot_gate import self_test, snapshot_errors, verify_seed
+
+# 并发上限：自解析与两遍语料都是「一个文件一次编译器进程」，进程启动在
+# qemu/容器里约 0.5s，串行跑 86 个源文件与 300 多个用例是纯等待。
+DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 
 # 自举链每一代都要编译 compiler/backend/llvm_bridge.yh，因此各代链接必须能拿到
 # 内嵌静态 LLVM 桥。这里复用 tools/llvm-host.py 的链接包装器：准备成功就把它的
@@ -132,11 +140,21 @@ def run_cli_probe(cc):
 
 def main() -> int:
     """运行种子迁移后的最终双代固定点与语言全量语料。"""
-    global SHIM_DIR
+    global SHIM_DIR, WORK
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--seed", type=Path, default=default_seed(ROOT))
+    ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
+                    help=f"自解析与语料并发数（缺省 {DEFAULT_JOBS}；1 为串行）")
+    ap.add_argument("--workdir", default=str(WORK),
+                    help="候选编译器与探针产物目录（缺省 tmp/selfhost；"
+                         "可指向快速文件系统，cc2/cc3/cc4 会被反复 exec）")
+    ap.add_argument("--skip-corpus", action="store_true",
+                    help="跳过两遍语料（仅当同一轮里 make test 已用等价编译器"
+                         "跑过语料时才用；默认不跳过）")
     args = ap.parse_args()
+    args.jobs = max(1, args.jobs)
+    WORK = Path(args.workdir)
     WORK.mkdir(parents=True, exist_ok=True)
     if not self_test():
         print("FAIL 自举快照门自检")
@@ -173,14 +191,20 @@ def main() -> int:
         print(f"模块固定点（候选 cc3→cc4，共 {len(expected)} 个产物）：一致")
 
     cc4 = str(WORK / "cc4")
-    # 2) 最终候选自解析
-    bad = []
+    # 2) 最终候选自解析（每个源文件一次进程，并发跑）
     sources = sorted(COMPILER.rglob("*.yh"))
-    for src in sources:
-        r = run([cc4, "--syntax-check", str(src)])
-        if r.returncode != 0:
-            bad.append(src.name)
-    print(f"cc4 自解析（{len(sources)} 个源文件）："
+
+    def self_parse(src):
+        """返回自解析失败的源文件名（成功返回 None）。"""
+        return None if run([cc4, "--syntax-check", str(src)]).returncode == 0 \
+            else src.name
+
+    if args.jobs > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            bad = [name for name in pool.map(self_parse, sources) if name]
+    else:
+        bad = [name for name in (self_parse(src) for src in sources) if name]
+    print(f"cc4 自解析（{len(sources)} 个源文件，并发 {args.jobs}）："
           + ("OK" if not bad else "FAIL " + ",".join(bad)))
     ok = ok and not bad
 
@@ -190,20 +214,26 @@ def main() -> int:
     # 3b) CLI 冒烟
     ok = run_cli_probe(cc4) and ok
 
-    # 4) 语法语料
-    r = run(["python3", "tests/yh/check.py", "--compiler",
-             "--compiler-path", cc4, "--quiet"])
-    print("语法语料：", (r.stdout.strip().splitlines() or ["无输出"])[-1])
-    if r.returncode != 0:
-        print(r.stdout, r.stderr, sep="\n")
-    ok = ok and r.returncode == 0
+    # 4/5) 语法语料与运行语料。--skip-corpus 供「同一轮里 make test 已经用
+    # 等价编译器跑过两遍语料」时省掉这 1 分钟；默认不跳过，门不因此变松。
+    if args.skip_corpus:
+        print("语法语料与运行语料：按 --skip-corpus 跳过（调用方已跑过）")
+    else:
+        corpus_work = WORK / "yh-run-work"
+        r = run(["python3", "tests/yh/check.py", "--compiler",
+                 "--compiler-path", cc4, "--quiet", "--jobs", str(args.jobs)])
+        print("语法语料：", (r.stdout.strip().splitlines() or ["无输出"])[-1])
+        if r.returncode != 0:
+            print(r.stdout, r.stderr, sep="\n")
+        ok = ok and r.returncode == 0
 
-    # 5) 运行语料
-    r = run(["python3", "tests/yh-run/check.py", "--compiler", cc4, "--quiet"])
-    print("运行语料：", (r.stdout.strip().splitlines() or ["无输出"])[-1])
-    if r.returncode != 0:
-        print(r.stdout, r.stderr, sep="\n")
-    ok = ok and r.returncode == 0
+        r = run(["python3", "tests/yh-run/check.py", "--compiler", cc4,
+                 "--quiet", "--jobs", str(args.jobs),
+                 "--workdir", str(corpus_work)])
+        print("运行语料：", (r.stdout.strip().splitlines() or ["无输出"])[-1])
+        if r.returncode != 0:
+            print(r.stdout, r.stderr, sep="\n")
+        ok = ok and r.returncode == 0
 
     if not args.keep:
         shutil.rmtree(WORK, ignore_errors=True)

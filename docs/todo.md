@@ -409,28 +409,16 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
 对象缓存键已包含编译器二进制内容（见 finish.md 同日项目增强记录），
 相关未完成事项归入本轮流程与缓存设计，不再重复列“补编译器身份”。
 
-### 全量门剩余加速（2026-10-15 立项；第一轮并行化已完成，见 finish.md）
-
-- [ ] **TG-1 工作目录与编译器二进制放 ext4/tmpfs**：实测单次 `--syntax-check`
-      665ms→464ms、单用例 939ms→703ms（约 −25%；9p 上每次读 72MB 编译器）。
-      做法是在 harness/Makefile 里加一步拷贝并把 `--compiler`/`--workdir` 指过去，
-      同时保留 `foreign-fs-build.py` 对 9p 的覆盖。
-- [ ] **TG-2 `selfhost-native` 内部那遍语料与 `make test` 重复**：`native-selfhost.py`
-      用 cc4 重跑 L2/L3（并行后约 70s）。做法是按 (编译器 SHA-256, 语料指纹) 缓存
-      语料结果，或给 `make selfhost-native` 加显式跳过开关。
-- [ ] **TG-3 编译器模块 worker 上限**：`compiler/cmd/build_scheduler.yh` 的
-      `active < 4` 是硬编码（ADR-0009 过渡决定），改为按核数/环境变量可配；
-      属源码改动，需补 `.yh` 用例、重编与滚种子。
-- [ ] **TG-4 批量 `--syntax-check`**：一个 yh 进程处理多个文件，可把 L2 从 15s
-      再降到与 ANTLR 层同级（~6s）；属源码改动。
-- [ ] **TG-5 门禁分层**：`quick`（L1+L2 ≈20s）/ `test` / `full`（滚种子前）三档
-      Makefile 目标，日常迭代不必跑全量。
-- [ ] **TG-6 `build-check.py --jobs` 上限调优**：已实测 -j4 274.7s、-j8 258.8s
-      （串行 560.5s）；-j8 只快 6%，缺省保持 4。换到 tmpfs/原生 arm64 后需重测
-      再定上限。
-
 ## 设计决定不做（非缺口，勿列为任务）
 
+- **编译器模块 worker 上限（原 TG-3）**：`compiler/cmd/build_scheduler.yh` 的
+  `active < 4` 保持 ADR-0009 的过渡默认。2026-10-15 实测一次冷编 33.7s，阶段
+  分解为 project 1.27s / schedule 9.07s / object 14.04s / link 8.59s，
+  `workers_peak=4`；把上限放宽到 8 预计每次冷编只省 5–8s（自举门 3 次冷编共
+  约 20s，占全量门约 5%），却要改编译器源码、补用例、重编并滚种子，峰值内存
+  还会从约 490MB 升到约 800MB。收益不足，不做；将来若有更多核的宿主再议。
+- **批量 `--syntax-check`（原 TG-4）**：并行 + 暂存后 L2 只剩约 17s、cc4 自解析
+  约 10s，批量模式最多再省十几秒，同样要动编译器源码，性价比更低。
 - 本轮 C FFI 不开放用户裸 C 变参，libc `printf` 互操作暂缓；yh runtime
   `printf` 继续使用现有规则。后续需单独设计并验证平台变参与参数提升。
 - 切片越界与生命周期运行时防护（ADR-0001）。

@@ -8,6 +8,8 @@
 #   * make seed       滚种子：写入当前宿主平台种子并记录 SHA-256
 #   * make test       运行 tests/yh 语法语料与编译器模式回归
 #   * make selfhost-native  本机全套门（候选两代固定点 + 全量语料，无需容器）
+#   * make full       滚种子前的全量门（= test + selfhost-native）
+#   * make quick      日常迭代门（ANTLR + 编译器语法语料，约 20s）
 #   * make install    安装到 $(PREFIX)（默认 /usr/local；DESTDIR 用作打包根）
 #   * make uninstall  卸载
 #   * make explorer   启动 yh Compiler Explorer（本地浏览器图形界面）
@@ -94,6 +96,44 @@ endif
 SEED ?= $(BIN_SEED)
 SEED_DEST ?= $(BIN_SEED)
 YH_PREREQ = $(SEED)
+
+# 快速暂存目录（2026-10-15）：语料门每个用例都要 exec 一遍 70MB 量级的编译器，
+# 仓库挂在 9p/网络盘上时每次读二进制要 0.2–0.4s。把编译器与语料产物放到系统
+# 临时目录（Linux /tmp 为 ext4/tmpfs、macOS $TMPDIR 为 APFS）后实测单次调用
+# 665ms→464ms、整用例 939ms→703ms（约 −25%）。
+# FAST_STAGE=0 关闭暂存，改回直接用仓库根 $(YH)。
+FAST_STAGE ?= 1
+FAST_DIR ?= $(shell printf '%s' "$${TMPDIR:-/tmp}")/yh-fast
+# 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
+YH_RUN = $(abspath $(YH))
+RUN_WORK_FLAG =
+SELFHOST_WORK_FLAG =
+MODCHECK_WORK_FLAG =
+ifeq ($(FAST_STAGE),1)
+ YH_RUN = $(abspath $(FAST_DIR)/yh)
+ RUN_WORK_FLAG = --workdir $(abspath $(FAST_DIR)/yh-run-work)
+ SELFHOST_WORK_FLAG = --workdir $(abspath $(FAST_DIR)/selfhost)
+ MODCHECK_WORK_FLAG = --workdir $(abspath $(FAST_DIR)/modcheck)
+endif
+
+# SKIP_CORPUS=1：同一轮里 make test 已经跑过等价语料时，省掉自举门里重复的
+# 那遍（约 1 分钟）。默认 0——门保持最严，重复跑一遍不省。
+SKIP_CORPUS ?= 0
+CORPUS_FLAG =
+ifeq ($(SKIP_CORPUS),1)
+ CORPUS_FLAG = --skip-corpus
+endif
+
+# stage-yh：把 $(YH) 复制到 $(YH_RUN)（FAST_STAGE=0 时 YH_RUN 就是 $(YH)，
+# 该目标退化为空操作）。先写 .tmp 再 mv，避免并发读到半个 70MB 二进制。
+.PHONY: stage-yh
+stage-yh: $(YH)
+ifeq ($(FAST_STAGE),1)
+	@mkdir -p "$(FAST_DIR)"
+	@cp -f "$(YH)" "$(YH_RUN).tmp" && mv -f "$(YH_RUN).tmp" "$(YH_RUN)"
+else
+	@:
+endif
 
 # 内嵌静态 LLVM：开关（auto/1/0）与宿主架构。宿主只按**种子文件名**判定，
 # 因为 SEED_ARCH 随宿主架构而 SEED 可被显式覆盖（x86_64 宿主上默认种子里
@@ -213,24 +253,37 @@ uninstall:
 	rm -f $(BINDIR)/yh$(EXESUF)
 
 # yh 三层回归：ANTLR 参考语法 + 编译器语法模式 + 运行语义语料。
-test: $(YH)
+# 语料门的编译器一律用暂存副本 $(YH_RUN)（见 stage-yh）；ANTLR 层在单进程内
+# 解析，不需要编译器。语料产物默认放快速暂存目录，避免 9p/网络盘上的小文件写。
+test: stage-yh
 	python3 $(TOPSRC)/tests/yh/check.py
-	python3 $(TOPSRC)/tests/yh/check.py --compiler
-	python3 $(TOPSRC)/tests/yh-run/check.py --compiler $(TOPSRC)/yh$(EXESUF)
+	python3 $(TOPSRC)/tests/yh/check.py --compiler --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/yh-run/check.py --compiler $(YH_RUN) $(RUN_WORK_FLAG)
+
+# quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
+# 秒级到十几秒，改语法/诊断时够用；运行语义与自举门留给 test/full。
+quick: stage-yh
+	python3 $(TOPSRC)/tests/yh/check.py
+	python3 $(TOPSRC)/tests/yh/check.py --compiler --compiler-path $(YH_RUN)
 
 # selfhost-native：本机全套门（无需容器、无 stage0）。
 # 旧种子迁移代 + 候选两代固定点 + 自解析/语法/运行语料 + 项目验收。
-selfhost-native: $(YH)
+# link-cache 探针要按编译器同目录找 yh_link（compiler.parent），因此它继续用
+# 仓库根 $(YH)，不能用暂存副本。
+selfhost-native: stage-yh
 	python3 $(TOPSRC)/tools/selfhost_snapshot_gate.py --verify-seed "$(abspath $(SEED))"
-	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py --seed "$(abspath $(SEED))"
-	python3 $(TOPSRC)/tests/selfhost/scratch-isolation.py --compiler-path $(TOPSRC)/yh
-	python3 $(TOPSRC)/tests/selfhost/lex-stats.py --compiler-path $(TOPSRC)/yh
-	python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(TOPSRC)/yh
-	python3 $(TOPSRC)/tests/selfhost/check-command.py --compiler-path $(TOPSRC)/yh
-	python3 $(TOPSRC)/tests/selfhost/foreign-fs-build.py --compiler-path $(TOPSRC)/yh
-	python3 $(TOPSRC)/tests/selfhost/link-cache.py --compiler-path $(TOPSRC)/yh
-	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(TOPSRC)/yh
-	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(TOPSRC)/yh
+	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py --seed "$(abspath $(SEED))" $(SELFHOST_WORK_FLAG) $(CORPUS_FLAG)
+	python3 $(TOPSRC)/tests/selfhost/scratch-isolation.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/lex-stats.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/check-command.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/foreign-fs-build.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/link-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF)
+	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(YH_RUN) $(MODCHECK_WORK_FLAG)
+
+# full：滚种子前的全量门（三层回归 + 自举全套）。
+full: test selfhost-native
 
 test-all: test
 
@@ -245,8 +298,8 @@ clean:
 	rm -rf compiler/.build tmp/selfbuild-gate tmp/selfhost tmp/modcheck
 
 help:
-	@sed -n '2,27p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,34p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all explorer seed selfhost-native clean help llvm-host yh-asm yh-link-build yh-link-probe
+.PHONY: all install uninstall test test-all quick full explorer seed selfhost-native clean help llvm-host yh-asm yh-link-build yh-link-probe stage-yh
 
 endif # ($(INCLUDED),no)

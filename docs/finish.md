@@ -2,26 +2,36 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
-## 2026-10-15 全量门测试并行化（只改 harness，不重编种子）
+## 2026-10-15 全量门加速：并行化 + 暂存/分层门（只改 harness 与 Makefile，不重编种子）
 
 - **动机**：全量门（`make test` + `make selfhost-native`）实测约 26 分钟，瓶颈是
   「每个用例起一次 yh 进程 × 全串行」，不是编译算力：单次 `--syntax-check`
   0.52–0.67s（qemu 放大 yh 自身启动），同一批 120 文件在单进程内跑 5.5s、
   逐文件起进程要 69.0s（12.5×）。
-- **改动**：`tests/yh/check.py`（`--compiler` 模式）、`tests/yh-run/check.py`、
+- **第一轮·并行**：`tests/yh/check.py`（`--compiler` 模式）、`tests/yh-run/check.py`、
   `tests/modules/check.py`、`tests/modules/build-check.py` 新增 `--jobs`
   （缺省 `min(8, CPU)`；build-check 因每个用例内部还会 fork 模块 worker 取
   `min(4, CPU)`；`--jobs 1` 恢复串行）。yhrun 产物改为
   `<workdir>/<run|fail|pass>/<用例>`；build-check 的用例循环体抽成
   `run_case(c)`、断言先收集再由 main 按 `CASES` 顺序打印、每用例独占
   `tmp/modcheck/<fixture>--<用例>`（原先是同一 fixture 共用目录，无法并发）。
-- **验收**（同一二进制内串并行对照，WSL/x86_64/qemu）：`tests/yh --compiler`
-  84.4s→15.1s（-j8，5.6×）、`tests/yh-run` 302.5s→60.9s（-j8，5.0×）、
-  `build-check` 560.5s→274.7s（-j4，2.0×）；三者并行与串行输出逐行一致
-  （78/78+42/42、309/309、100/100）。
-- 详见[完成记录](01-finished/yh-全量门测试并行化-2026-10-15.md)；剩余加速项
-  （tmpfs 工作目录、语料去重、模块 worker 上限、批量 syntax-check、门禁分层）
-  记入 todo.md。
+- **第二轮·暂存与分层**：`Makefile` 新增 `stage-yh`（把 `$(YH)` 暂存到
+  `$TMPDIR/yh-fast`，语料门用暂存副本并把它当工作目录；`FAST_STAGE=0` 关闭）、
+  新增 `make quick`（ANTLR + 编译器语法语料，热跑 22.8s）与 `make full`
+  （= `test` + `selfhost-native`，滚种子前的全量门）；`native-selfhost.py`
+  的 86 文件自解析改并发、新增 `--workdir` 与 `--skip-corpus`（Makefile
+  `SKIP_CORPUS=1`）；`tests/yh/check.py` 的 `--compiler-path` 现在会 `.resolve()`。
+- **验收**（WSL/x86_64/qemu，全部 rc=0）：
+  - 全量门 **26.2 分钟 → 6.8 分钟**（单命令 `make full` 实测 406.1s rc=0，
+    日志内无 FAIL；`SKIP_CORPUS=1` 时约 336s）。
+  - `make test` 412.6s→56.5s；`make selfhost-native` ~1160s→330.4s，其中
+    `build-check` 449.5s→86.5s、`native-selfhost` 600s→154.7s。
+  - 全绿证据：模块固定点 cc3→cc4 一致、自解析 86 文件 OK、语法语料 78/78+42/42、
+    运行语料 309/309、`modules` 18/18、`project cases` 100/100、其余探针全 OK。
+  - 编译器侧两项（模块 worker 上限、批量 `--syntax-check`）经测量判定不值得做
+    （放宽 worker 预计只省全量门约 5%，却要动编译器源码与种子流程），已移入
+    todo.md 的「设计决定不做」。
+- 详见[完成记录](01-finished/yh-全量门测试并行化-2026-10-15.md)。
 
 ## 2026-10-15 LLVM LL5 第一切片：局部标量内存（alloca/load/store）
 

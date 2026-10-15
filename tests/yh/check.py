@@ -258,8 +258,9 @@ def run_compiler_mode(quiet, compiler=None, jobs=1):
 
     compiler 可指定编译器路径（自举差分时指向 stage1/stage2），
     缺省用仓库根的 yh。jobs > 1 时并发跑语料（每个文件一个独立进程）。
+    传入的相对路径会先解析成绝对路径（subprocess 不带 cwd 时不查 PATH）。
     """
-    yh_bin = Path(compiler) if compiler else YH_BIN
+    yh_bin = Path(compiler).resolve() if compiler else YH_BIN
     if not yh_bin.exists():
         die(f"找不到编译器 {yh_bin}，请先 make")
     corpus_dir = HERE

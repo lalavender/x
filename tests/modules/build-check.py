@@ -233,13 +233,17 @@ def copy_proj(src, dst):
 
 
 def main():
+    global WORK
     ap = argparse.ArgumentParser()
     ap.add_argument("--compiler-path", default=str(ROOT / "yh"))
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
                     help=f"并发用例数（缺省 {DEFAULT_JOBS}；1 为串行）")
+    ap.add_argument("--workdir", default=str(WORK),
+                    help="用例工作目录（缺省 tmp/modcheck；可指向快速文件系统）")
     args = ap.parse_args()
     compiler = str(Path(args.compiler_path).resolve())
+    WORK = Path(args.workdir)
     WORK.mkdir(parents=True, exist_ok=True)
     failed = 0
 
