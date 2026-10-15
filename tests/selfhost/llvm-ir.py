@@ -70,6 +70,10 @@ def main():
         (project / name / 'project.toml').write_text(f'[project]\nname = "{name}"\nsource = "."\n')
     (project / 'backend').mkdir()
     for source in (ROOT / 'compiler/backend').glob('llvm_*.yh'):
+        # llvm_bridge.yh 只声明内嵌桥的 C ABI；本门直接消费文本发射器，
+        # 由 Python 侧驱动静态桥，因此不拷入该绑定文件。
+        if source.name == 'llvm_bridge.yh':
+            continue
         shutil.copy2(source, project / 'backend' / source.name)
     (project / 'backend/project.toml').write_text('[project]\nname = "backend"\nsource = "."\n'
         '[dependencies]\ngen = { path = "../gen" }\nir = { path = "../ir" }\n')

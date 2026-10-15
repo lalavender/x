@@ -1,0 +1,47 @@
+module backend;
+import gen;
+
+// ============================================================================
+// llvm_bridge.yh —— 内嵌 LLVM 静态桥的 yh 侧绑定（LL3）
+//
+// 桥的 C 实现在 compiler/llvm/bridge.c，由 tools/llvm-sdk.py 用固定 SHA-256 的
+// LLVM 21.1.8 静态 SDK 构建成归档，并在构建宿主时静态链进 yh 自身。
+// 本文件只做两件事：声明 C ABI 入口，并把「LLVM 文本 + 目标 + 优化级别 + 产物路径」
+// 交给桥；产物由桥原子发布（临时文件 + rename），失败不留部分产物。
+//
+// 契约（与 compiler/llvm/bridge.h 一致，改动必须同步两处）：
+//   yh_llvm_version() *char → 内置 LLVM 版本字符串（桥持有，不释放）
+//   yh_llvm_emit(text, length, triple, opt_level, kind, output_path,
+//                diagnostic, capacity) int
+//     kind：0 = 目标文件，1 = 汇编文本；opt_level：0/2；返回 0 成功、-1 失败。
+//     output_path 是**文件路径**，桥内部原子写入；diagnostic 为有界错误文本。
+// 本模块不缓存跨调用状态，也不调用任何外部 LLVM 工具。
+// ============================================================================
+
+@[extern] fn yh_llvm_version() *char;
+@[extern] fn yh_llvm_emit(text *char, length u64, triple *char, opt_level int, kind int,
+    output *char, diagnostic *char, capacity u64) int;
+
+// LLVM_BRIDGE_DIAG：桥诊断缓冲约定大小；bridge.c 在该容量内保证 NUL 结尾。
+pub const LLVM_BRIDGE_DIAG int = 1024;
+
+// llvm_bridge_version：内置 LLVM 版本；桥未链接时链接期就会失败（这是有意的）。
+pub fn llvm_bridge_version() *char {
+    return yh_llvm_version();
+}
+
+// llvm_bridge_emit：把 LLVM 文本交给内嵌桥，在 path 原子发布目标文件或汇编。
+// 返回 0 成功、-1 失败；失败时 path 不被创建/替换，reason 缓冲带桥的原始诊断。
+// reason 必须指向至少 LLVM_BRIDGE_DIAG 字节的调用方缓冲；不做旧汇编回退。
+pub fn llvm_bridge_emit(text *char, length int, triple *char, opt_level int,
+    kind int, path *char, reason *char) int {
+    if (text == 0 || length <= 0 || triple == 0 || path == 0 || reason == 0
+        || (opt_level != 0 && opt_level != 2) || (kind != 0 && kind != 1)) {
+        return gen.fail("LLVM 桥调用参数无效");
+    }
+    reason[0] = 0;
+    let status int = yh_llvm_emit(text, length.to_type(u64), triple, opt_level, kind,
+        path, reason, LLVM_BRIDGE_DIAG.to_type(u64));
+    if (status != 0) { return -1; }
+    return 0;
+}

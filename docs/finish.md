@@ -2,6 +2,56 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-15 LLVM LL3：命令行 LLVM 模式、内嵌桥对象发射（工作区，未提交）
+
+- **范围**：把 LL2 的受检快照/模块 IR/纯快照 lowering 接进 `yh` 自身——
+  `--backend llvm --target x86_64-unknown-linux-gnu [-O0|-O2]` 直接产出 x86_64 目标文件
+  并原生运行，全程只用内嵌静态 LLVM 桥，不调用 clang/llc/opt，也不回退旧后端。
+- **桥绑定**：新增 `compiler/backend/llvm_bridge.yh`，用 `@[extern]` 声明
+  `yh_llvm_version` / `yh_llvm_emit`（与 `compiler/llvm/bridge.h` 一一对应），
+  `llvm_bridge_emit` 校验 opt(0/2) 与 kind(0 对象/1 汇编) 后交给桥原子发布产物。
+- **构建接入**（并行 agent 交付）：新增 `tools/llvm-host.py`（prepare/status/shim/link）
+  与 `tests/selfhost/llvm-host.py`；`Makefile` 新增 `YH_LLVM_HOST ?= auto` 与 `make llvm-host`；
+  `tools/seed-build.py` 新增 `--llvm-host/--llvm-mode`，把链接包装器目录前置到种子子进程 PATH。
+  默认 auto：宿主已准备则 `make` 把 ARM64 静态桥链进 `./yh`（`readelf -d` 无 libLLVM，
+  `nm` 有 `yh_llvm_emit` 定义）；未准备则打印诊断并按原路径构建，不失败。
+- **CLI 与驱动**：`cmd/driver.yh` 新增 `--backend legacy|llvm`、`-O0`、`-O2`、`--emit-llvm`
+  （未知后端/未知 triple 明确拒绝）；`cmd/llvm_emit.yh` 提供单文件受检前端
+  （已索引文件形态 + 语义两遍 + 快照捕获）与产物发布，`-o` 先发 `<out>.yh-tmp.o` 再链接，
+  `--emit-asm` 发汇编文本到 stdout，`--emit-llvm` 只发文本。
+- **项目 worker**：`cmd/module_worker.yh` 在 `c_backend != 0` 时进入受检前端
+  （不产生任何 `.text/.data/.bss`），语义后 `checked_module_capture` →
+  `ast.lower_module` → `backend.llvm_emit_module` → 桥发 `.build/asm/<tag>.o`，
+  `--emit-llvm` 另写 `.build/llvm/<tag>.ll`；**不**进入旧 `ast_ir_lower_module` 替换路径。
+  `cmd/link_cache.yh` 在 LLVM 模式跳过「汇编→目标」步、直接收这些对象；
+  `cmd/module_build.yh` 新增 `.build/llvm/` 子目录。
+- **纯快照 lowering 两处实质修复**（`ast/checked_module_lower.yh`）：
+  ① 顺序语句必须显式收尾基本块（新增 `checked_lower_continue_block` /
+  `checked_lower_exit_block`），否则块保留默认 `unreachable` 终结符、后继语句成死代码、
+  循环/分支退出块不可达；② `checked_lower_assign` 成功时原先返回 0（"路径终结"），
+  导致循环体只降低第一条语句、`has_latch` 恒 0、循环没有回边；改为返回 1 后
+  `for i < 3 { i += 1; }` 与双语句循环体都能产生 header phi 与回边。
+- **自举链接**：`tests/selfhost/native-selfhost.py` 新增 `llvm_shim_for_seed`，
+  按种子文件名推导宿主并把链接包装器目录前置到各代 `yh build` 的 PATH——
+  否则 cc2/cc3/cc4 编译 `backend/llvm_bridge.yh` 时会 `undefined reference to yh_llvm_emit`。
+  未准备 SDK 时只警告并按原路径继续（与 make/seed-build 的 auto 语义一致）。
+- **验收**（WSL，`SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`）：
+  `make` 退出 0；`make test` 退出 0（语法 78/78 与 42/42、运行 307/307）；
+  `llvm-lower.py`、`llvm-ir.py`、`llvm-front-output.py`、`llvm-checked.py`、
+  `llvm-module.py`、`llvm-module-cache.py` 全部退出 0；单文件端到端
+  `scalar.yh` 退出码 **13**（= arithmetic(5)9 + loop(4)4），探针 A 退出 **3**、
+  探针 B 退出 **63**，生成文本经 `opt-21 -passes=verify` 通过。
+- **未关闭的边界**：
+  ① **损坏 `.s.ct` 触发 worker SIGSEGV（未定位，阻塞 `build-check` 满分）**：
+  隐藏正文签名由 `int` 改 `i64` 后构建，worker 段错误而非输出
+  「公开 CT 函数与 .s.ct 正文签名不匹配」。用 HEAD 源码构建的编译器正确拒绝，
+  `YH_LLVM_HOST=0` 同样崩 → 属当前工作区改动的回归、与桥无关；已排除名字池越界、
+  `iface_ct_load` 各阶段、体积与栈上限。复现与排查建议见 docs/todo.md。
+  `build-check.py` 因此为 **99/100**。
+  ② LLVM 模式未常驻（默认仍旧 ARM64 发射）；③ 首片之外形态（全局对象/聚合/指针/浮点/
+  间接调用/变参/`switch`/`goto`/`for-in`）明确拒绝不回退；④ 未滚种子。
+- 详见 [完成记录](01-finished/yh-LLVM-LL3命令行模式与对象发射-2026-10-15.md)。
+
 ## 2026-10-15 LLVM LL2：纯快照 lowering 打通，受检快照/模块 IR 一并提交
 
 - **范围**：关闭 LL2 的「受检前端 + 受检快照 + 模块 IR + 纯快照 lowering」四个切片，

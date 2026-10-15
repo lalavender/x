@@ -29,7 +29,9 @@ def main():
     core = project / "compiler"
     core.mkdir()
     for module in ("gen", "lex", "ast", "comptime", "ir", "backend"):
-        shutil.copytree(ROOT / "compiler" / module, core / module)
+        # llvm_bridge.yh 只声明内嵌桥的 C ABI；本门不链接桥，拷入时排除。
+        shutil.copytree(ROOT / "compiler" / module, core / module,
+                        ignore=shutil.ignore_patterns("llvm_bridge.yh"))
     (core / "project.toml").write_text('[project]\nname = "checkedcore"\nsource = "."\n')
     shutil.copyfile(ROOT / "tests/modules/projects/llvmchecked/fixture.yh",
                     core / "ast/checked_fixture.yh")

@@ -14,6 +14,7 @@
 #   * make yh-asm     构建 asm/ 汇编器项目，产出根目录 yh_asm（编译器不发现它）
 #   * make yh-link-build  构建 link/ 静态链接器项目，产出 link/.build/yh_link
 #   * make yh-link-probe  跑链接器验收门（自检 + CLI 契约；FULL=1 加端到端/差分）
+#   * make llvm-host  准备内嵌静态 LLVM 宿主（LL3；首次需要联网取固定 SDK）
 #   * make clean      清理
 #
 # 汇编器当前**不接入编译器**：编译器只按 yh_link 名字发现汇编器
@@ -29,6 +30,21 @@
 # （先把编译器的工具查找改成 yh_asm，再把 yh_link 指向真链接器）。
 #
 # 可在命令行覆盖：SEED（编译种子路径）。Linux CI 用匹配架构的 ELF 种子。
+#
+# 内嵌静态 LLVM（LL3，见 docs/02-plan/yh-LLVM后端替换实施方案.md）：
+# 根目录 $(YH) 由种子冷编，最终链接发生在编译器内部（compiler/cmd/
+# link_cache.yh 的 mb_link），只认 PATH 上的 gcc。因此这里让
+# tools/seed-build.py 调 tools/llvm-host.py 生成一个 gcc 链接包装器目录，
+# 并**只对种子构建子进程**前置 PATH：编译（gcc -c）原样透传，最终链接
+# 改用固定工具链并追加桥归档与静态 LLVM 参数。链接哪个架构由种子文件名
+# 决定（x86_64 宿主上用 bin/yh-linux-arm64 时产物仍是 aarch64 ELF）。
+#
+#   YH_LLVM_HOST=auto（默认）宿主已准备才链入；缺少 SDK/身份失效时打印
+#                 明确诊断并按原路径构建，绝不让 LLVM 成为失败点；
+#   YH_LLVM_HOST=1 显式要求：必要时联网准备固定 SDK，准备不了则构建失败；
+#   YH_LLVM_HOST=0 关闭（完全不介入）。
+#
+# 旧路径全门（make test / make selfhost-native）在 auto 与 0 下都必须保持绿。
 # --------------------------------------------------------------------------
 
 ifndef TOP
@@ -79,7 +95,43 @@ SEED ?= $(BIN_SEED)
 SEED_DEST ?= $(BIN_SEED)
 YH_PREREQ = $(SEED)
 
+# 内嵌静态 LLVM：开关（auto/1/0）与宿主架构。宿主只按**种子文件名**判定，
+# 因为 SEED_ARCH 随宿主架构而 SEED 可被显式覆盖（x86_64 宿主上默认种子里
+# 没有 x64 后端，必须显式用 bin/yh-linux-arm64，此时产物是 aarch64 ELF）。
+# macOS 种子没有对应的固定 SDK，非 Linux 宿主一律不接入。
+YH_LLVM_HOST ?= auto
+LLVM_HOST =
+ifeq ($(HOST_SYSTEM),Linux)
+ ifneq ($(findstring arm64,$(notdir $(SEED))),)
+  LLVM_HOST = linux-aarch64
+ endif
+ ifneq ($(findstring aarch64,$(notdir $(SEED))),)
+  LLVM_HOST = linux-aarch64
+ endif
+ ifneq ($(findstring x64,$(notdir $(SEED))),)
+  LLVM_HOST = linux-x86_64
+ endif
+endif
+LLVM_HOST_MODE = $(YH_LLVM_HOST)
+ifeq ($(YH_LLVM_HOST),1)
+ LLVM_HOST_MODE = require
+endif
+ifeq ($(YH_LLVM_HOST),0)
+ LLVM_HOST_MODE = off
+endif
+LLVM_HOST_FLAGS =
+ifneq ($(LLVM_HOST),)
+ LLVM_HOST_FLAGS = --llvm-host $(LLVM_HOST) --llvm-mode $(LLVM_HOST_MODE)
+endif
+
 all: $(YH)
+
+# llvm-host：准备内嵌静态 LLVM 宿主（桥归档 + 宿主可执行文件 + 身份记录）。
+# 首次需要联网取固定 SDK；之后只用 tmp/ 里的缓存包，可离线重跑。
+.PHONY: llvm-host
+llvm-host:
+	@test -n "$(LLVM_HOST)" || { echo "错误: 当前种子 $(SEED) 没有对应的固定 LLVM SDK"; exit 1; }
+	python3 $(TOPSRC)/tools/llvm-host.py prepare --host $(LLVM_HOST)
 
 .PHONY: verify-seed
 verify-seed:
@@ -88,9 +140,11 @@ verify-seed:
 # 一步链：用入库种子在默认 systemless 配置下冷编 compiler/。
 # 清除实际项目缓存 compiler/.build，确保每次都从种子冷编。
 # 产物形态随宿主（Darwin → Mach-O，Linux → ELF）。
+# LLVM_HOST_FLAGS 决定是否把静态 LLVM 桥链进 $(YH)；宿主不可用时只警告并
+# 回退旧路径，绝不让 LLVM 成为构建失败点。
 $(YH): $(YH_PREREQ) $(wildcard compiler/*.yh) $(wildcard compiler/*/*.yh) $(TOPSRC)/compiler/project.toml | verify-seed
 	rm -rf compiler/.build
-	python3 "$(TOPSRC)/tools/seed-build.py" --compiler "$(abspath $(SEED))" --project "$(TOPSRC)/compiler" --output "$(TOPSRC)/yh"
+	python3 "$(TOPSRC)/tools/seed-build.py" --compiler "$(abspath $(SEED))" --project "$(TOPSRC)/compiler" --output "$(TOPSRC)/yh" $(LLVM_HOST_FLAGS)
 
 # yh-asm：用刚构建出的 $(YH) 冷编 asm/（汇编器项目），产出 yh_asm。
 # 刻意不依赖 $(SEED)：asm/ 用到了新语言特性，上一代种子编不了，必须等 $(YH) 就位。
@@ -191,8 +245,8 @@ clean:
 	rm -rf compiler/.build tmp/selfbuild-gate tmp/selfhost tmp/modcheck
 
 help:
-	@sed -n '2,26p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,27p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all explorer seed selfhost-native clean help yh-asm yh-link-build yh-link-probe
+.PHONY: all install uninstall test test-all explorer seed selfhost-native clean help llvm-host yh-asm yh-link-build yh-link-probe
 
 endif # ($(INCLUDED),no)

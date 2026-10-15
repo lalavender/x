@@ -27,7 +27,9 @@ def main():
     core = project / "compiler"
     core.mkdir()
     for module in ("gen", "lex", "ast", "parse", "comptime", "ir", "backend"):
-        shutil.copytree(ROOT / "compiler" / module, core / module)
+        # llvm_bridge.yh 只声明内嵌桥的 C ABI；本门不链接桥，拷入时排除。
+        shutil.copytree(ROOT / "compiler" / module, core / module,
+                        ignore=shutil.ignore_patterns("llvm_bridge.yh"))
     (core / "project.toml").write_text('[project]\nname = "lowercore"\nsource = "."\n')
     shutil.copyfile(FIXTURE / "fixture.yh", project / "main/fixture.yh")
     result = run([str(Path(args.compiler_path).resolve()), "build"], project)

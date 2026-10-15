@@ -343,6 +343,17 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     `functions=5 phis=2 calls=4`，pointer/aggregate 带真实来源整模块拒绝。
     历史与证据见 [finish.md](finish.md) 的 2026-10-15 条目与
     [完成记录](01-finished/yh-LLVM-LL2受检快照与纯快照lowering-2026-10-15.md)。
+  - [x] **损坏 `.s.ct` 触发 worker SIGSEGV（已定位并修复）**：根因是
+    `parse/iface_ct.yh` 的 `iface_ct_load` 读了**悬垂的调用方指针**——调用方
+    `cmd/module_worker.yh` 用 `pj_pool_str(...)` 取的是可扩容名字池里的地址，
+    而 `iface_ct_load` 内部的 `parse_source*` 会把隐藏正文名/形参名/类型名 intern 进
+    同一个池；池增长时 `tml_intern_str` 会 `free` 旧块并换新块，调用方指针随即悬垂，
+    解析之后的「正文签名不匹配」诊断读它即 SIGSEGV。
+    修复：入口把 `path` 快照进本函数栈缓冲，其后 `read_source`/`header_valid`/诊断
+    一律用快照（顺带诊断不再打空路径）。该缺陷在 HEAD 就存在（HEAD 的 freed 块首字节
+    恰好为 0，只是打出空路径），本修复保留。
+    验证：`bisect-ct5b.py ./yh` 正确拒绝、`build-check.py` **100/100**、
+    `make test` **307/307**；回退修复的对照树再次 SIGSEGV（因果闭环）。
   - [ ] LLVM 模式常驻：`--backend llvm` / `--target` / `-O0/-O2` 的 CLI 与模块 worker
     LLVM 分支未接入；check 侧的受检快照消费完即释放，worker 持有快照直到 IR 交接尚未实现。
   - [ ] 首片覆盖之外的形态（全局对象数据、聚合/指针/浮点、间接调用、变参、

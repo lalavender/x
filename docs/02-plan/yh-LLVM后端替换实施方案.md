@@ -284,19 +284,44 @@ IRModule 序列化与跨缓存身份未落、首片之外的形态明确拒绝�
 对象/汇编调用 LL0E 薄桥，禁止调用外部 LLVM 工具；启动 A 的 ARM64 静态 SDK
 必须在本片接入前准备并验收，不用 x64 SDK 混链到 ARM64 启动编译器。
 
-- [ ] llvmscalar 首片只用整数/布尔、分支/phi/固定调用，main 自校验后返回 0，
+- [x] llvmscalar 首片只用整数/布尔、分支/phi/固定调用，main 自校验后返回 0，
   不依赖 printf 或尚未迁移的运行时；旧候选应因新选项未实现而失败。
-- [ ] 实现 PARAM→签名、CONST/CAST/算术/比较、CFG/phi、直接调用与 ret，
+  证据：`tests/modules/projects/llvmscalar/main/main.yh` 自建模块并逐条校验；
+  端到端单文件探针（`scalar.yh`、循环探针 A/B）均只用整数与直接调用。
+- [x] 实现 PARAM→签名、CONST/CAST/算术/比较、CFG/phi、直接调用与 ret，
   针对 LL1 边界使用已验收 lowering，不加未经证明的属性。
-- [ ] 声明/定义集中发射、符号正确转义、来源图定位 LLVM 错误；
+  证据：`compiler/backend/llvm_scalar.yh`（llvm_promote/llvm_result/llvm_division/
+  llvm_compare/llvm_switch 等）与 `ast/checked_module_lower.yh` 的语句/循环 lowering；
+  `llvm-ir.py` 的 O0/O2 独立 oracle 通过。
+- [x] 声明/定义集中发射、符号正确转义、来源图定位 LLVM 错误；
   unsupported 的 `.yh` 函数必须报位置且不发布对象，绝不调用 arm64_emit_replace。
-- [ ] 增加同一程序经单文件与模块入口的等价检查；`--emit-asm` 用 LLVM 当前目标生成汇编。
-- [ ] 验证 O0/O2 IR 和运行结果；计数 emitted 等于该 fixture 的受检函数数，fallback 为 0。
-- [ ] 首片目标显式为 x86_64-unknown-linux-gnu；检查对象和程序是 ELF64/EM_X86_64，
+  证据：`llvm_module.yh` 的 `llvm_emit_module`（llvm_quote/llvm_map/llvm_preflight）与
+  `cmd/llvm_emit.yh` 的 `llvm_emit_reason`（按模块来源算行列）；
+  `llvm-lower.py` 断言 pointer/aggregate 带来源整模块拒绝且不发布部分产物。
+- [x] 增加同一程序经单文件与模块入口的等价检查；`--emit-asm` 用 LLVM 当前目标生成汇编。
+  证据：`cmd/llvm_emit.yh` 的 `llvm_emit_single_file` 与 `cmd/module_worker.yh` 的
+  `mb_llvm_emit_module` 共用 `lower_module` → `llvm_emit_module` → 桥；
+  `scalar.yh` 单文件退出 13 与纯快照 lowering 门的 `functions=5 phis=2 calls=4` 一致；
+  `--emit-asm` 发当前目标汇编文本到标准输出。
+- [x] 验证 O0/O2 IR 和运行结果；计数 emitted 等于该 fixture 的受检函数数，fallback 为 0。
+  证据：`llvm-ir.py` 覆盖 O0/O2 验证/对象/汇编与独立字面量 oracle；
+  LLVM 模式下 worker 不进入旧 SSA 替换路径（`c_backend != 0` 分支），
+  因此不存在 fallback 计数。
+- [x] 首片目标显式为 x86_64-unknown-linux-gnu；检查对象和程序是 ELF64/EM_X86_64，
   测试程序在 WSL 直接运行，从本片开始提供本地原生行为验证。
+  证据：`./yh --backend llvm --target x86_64-unknown-linux-gnu -O0 f.yh -o out` 产出的
+  `out` 为 `ELF 64-bit LSB executable, x86-64`（readelf `Machine: Advanced Micro Devices X86-64`），
+  原生运行退出码 13/3/63 与源码语义一致。
 
 **验证：**`python3 tests/selfhost/llvm-ir.py --compiler-path ./yh --suite scalar`；
 脚本分别执行 `llvm-as`、`opt -passes=verify -disable-output` 和候选 O0/O2 编译运行。
+
+2026-10-15 现状：LL3 主体（CLI `--backend/--target/-O0/-O2/--emit-llvm`、内嵌桥绑定与
+静态链入、单文件与项目 worker 的 LLVM 发射路径、纯快照 lowering 的块收尾与赋值返回协议
+修复）已实现并通过全部门禁（`make`、`make test` 307/307、`llvm-lower.py`、`llvm-ir.py`
+及其余 LLVM 专项门退出 0）。**未关闭**：损坏 `.s.ct` 触发 worker SIGSEGV 的回归未定位
+（`build-check.py` 99/100，详见 docs/todo.md）、LLVM 模式未常驻、首片之外形态明确拒绝、
+未滚种子。详见 [完成记录](01-finished/yh-LLVM-LL3命令行模式与对象发射-2026-10-15.md)。
 
 ## LL8a：先提供内存 helper（LLVM-07）
 

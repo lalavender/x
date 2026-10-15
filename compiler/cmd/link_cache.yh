@@ -251,6 +251,9 @@ fn mb_link(out_path *char, build_off int, build_len int,
         cc = "clang";
     }
     let project_capacity int = gs.p_proj_n > 0 ? gs.p_proj_n : 1;
+    // LLVM 后端：worker 已用内嵌桥把每个模块直接发成 .build/asm/<tag>.o，
+    // 没有 .s 中间产物，因此跳过「汇编 → 目标」步，链接参数直接收这些对象。
+    let llvm_objects int = gs.c_backend != 0 ? 1 : 0;
     let c_projects *int = malloc((project_capacity * sizeof(int)).to_type(u64))
         .to_type(*int);
     if (c_projects == 0) { return gen.fail("C 项目顺序表内存分配失败"); }
@@ -275,6 +278,11 @@ fn mb_link(out_path *char, build_off int, build_len int,
         let m int = pj_order[i];
         if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
             return -1;
+        }
+        if (llvm_objects != 0) {
+            // LLVM 模式：对象已由 worker 发布，这里只登记路径（不重新汇编）。
+            i += 1;
+            continue;
         }
         let spath [600]u8;
         let sn int = 0;
@@ -561,7 +569,8 @@ fn mb_link(out_path *char, build_off int, build_len int,
         let row *u8 = paths + (i * 620);
         let n int = 0;
         n = gen.append_str(row, n, pj_pool_str(build_off));
-        n = gen.append_str(row, n, "/obj/");
+        // LLVM 模式的对象由 worker 直接发到 asm/ 目录（无 .s 中间产物）。
+        n = gen.append_str(row, n, llvm_objects != 0 ? "/asm/" : "/obj/");
         n = gen.append_str(row, n, pj_pool_str(pj_canon_off));
         n = gen.append_str(row, n, ".o");
         row[n] = 0;

@@ -200,19 +200,23 @@ def copy_proj(src, dst):
             '[project]\nname = "gen"\nsource = "."\n')
     if src.name == "llvmchecked":
         # 快照 fixture 消费真实 AST/语义实现，并在模块内构造和释放原 arena。
+        # backend 里的 llvm_bridge.yh 只声明内嵌桥的 C ABI，fixture 不链接桥，
+        # 因此拷入时排除它（其余 backend 源码保持真实）。
         core = dst / "compiler"
         core.mkdir()
         for module in ("gen", "lex", "ast", "comptime", "ir", "backend"):
-            shutil.copytree(ROOT / "compiler" / module, core / module)
+            shutil.copytree(ROOT / "compiler" / module, core / module,
+                            ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         (core / "project.toml").write_text('[project]\nname = "checkedcore"\nsource = "."\n')
         shutil.copyfile(src / "fixture.yh", core / "ast" / "checked_fixture.yh")
     if src.name == "llvmlower":
         # 纯快照 lowering fixture 复用真实前端（parse/lex）与 lowering 实现，
-        # fixture 作为同模块的第二个文件随 main/ 一起构建。
+        # fixture 作为同模块的第二个文件随 main/ 一起构建；同样排除桥绑定。
         core = dst / "compiler"
         core.mkdir()
         for module in ("gen", "lex", "ast", "parse", "comptime", "ir", "backend"):
-            shutil.copytree(ROOT / "compiler" / module, core / module)
+            shutil.copytree(ROOT / "compiler" / module, core / module,
+                            ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         (core / "project.toml").write_text('[project]\nname = "lowercore"\nsource = "."\n')
         shutil.copyfile(src / "fixture.yh", dst / "main" / "fixture.yh")
 

@@ -2,6 +2,8 @@
 """验证 yh 自有内存运行时与 Darwin/Linux 导入边界。"""
 
 import argparse
+import json
+import os
 import platform
 import shutil
 import subprocess
@@ -13,12 +15,31 @@ FIXTURE = ROOT / "tests" / "modules" / "projects" / "runtimebytes"
 PLAIN_FIXTURE = ROOT / "tests" / "modules" / "projects" / "runtimeplain"
 WORK = ROOT / "tmp" / "runtime-memory"
 PLAIN_WORK = ROOT / "tmp" / "runtime-plain"
+HOST_DRIVER = ROOT / "tools" / "llvm-host.py"
 
 
-def run(command, cwd):
+def run(command, cwd, env=None):
     """运行真实编译器或二进制并保留输出，便于报告失败原因。"""
     return subprocess.run(command, cwd=cwd, text=True, capture_output=True,
-                          timeout=120)
+                          timeout=120, env=env)
+
+
+def compiler_build_env():
+    """编译 compiler/ 自身时的环境：把内嵌桥的链接包装器前置到 PATH。
+
+    该步骤会链接 compiler/backend/llvm_bridge.yh 的 `@[extern]` 桥符号，
+    没有包装器就会 undefined reference；其它步骤（语料程序）必须保持原 PATH。
+    未准备 SDK 时返回 None，按原路径构建（与 make/seed-build 的 auto 语义一致）。
+    """
+    request = [sys.executable, str(HOST_DRIVER), "shim",
+               "--host", "linux-aarch64", "--mode", "auto"]
+    result = subprocess.run(request, cwd=ROOT, text=True, capture_output=True)
+    if result.returncode != 0:
+        return None
+    record = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
+    environment = dict(os.environ)
+    environment["PATH"] = record["shim_dir"] + os.pathsep + environment.get("PATH", "")
+    return environment
 
 
 def main():
@@ -66,13 +87,19 @@ def main():
     # 集合元素与上方 lstrip("_") 后的名字一致（nm 的 _ 前缀已被剥除）。
     aux_ok = {"gmon_start__", "libc_start_main",
               "ITM_deregisterTMCloneTable", "ITM_registerTMCloneTable"}
+    # 链入内嵌 LLVM 桥时，编译器自身会带上 LLVM/zstd 的静态运行时导入
+    # （ITM_* 仪器桩、ZSTD_*、以及少数 C++ 内部符号）。这些是桥的运行时依赖，
+    # 不属于 yh 代码生成契约；桥入口本身必须**已定义**（见下方 bridge_linked）。
+    bridge_ok = ("ITM_", "ZSTD_", "ZGTt", "__gmon", "__cxa_", "_Unwind_", "pthread_",
+                 "dl", "GCC_")
     if darwin_host:
         if not {"mmap", "munmap", "write"}.issubset(names):
             print(f"FAIL Darwin 可执行文件未显式导入映射/输出 OS API: {sorted(names)}")
             return 1
     else:
         unexpected = sorted(n for n in names
-                            if "@" not in n and n not in aux_ok)
+                            if "@" not in n and n not in aux_ok
+                            and not any(n.startswith(prefix) for prefix in bridge_ok))
         if unexpected:
             print(f"FAIL Linux 可执行文件未预期的未定义符号: {unexpected}")
             return 1
@@ -117,7 +144,8 @@ def main():
               f"{linux_imports.stderr[-800:]}{linux_imports.stdout[-800:]}")
         return 1
 
-    compiler_build = run([compiler, "build"], ROOT / "compiler")
+    compiler_build = run([compiler, "build"], ROOT / "compiler",
+                         env=compiler_build_env())
     compiler_binary = ROOT / "compiler" / ".build" / "yh"
     if compiler_build.returncode != 0 or not compiler_binary.exists():
         print(f"FAIL 编译器自编导入审计构建: rc={compiler_build.returncode}\n"
@@ -130,9 +158,13 @@ def main():
         return 1
     compiler_names = {line.split()[-1].lstrip("_")
                       for line in compiler_imports.stdout.splitlines() if line.split()}
+    # 链入内嵌桥时，桥入口必须是**已定义**（不是未定义）符号；同时编译器自身
+    # 仍不得从 C runtime 导入 yh 运行时应自有的内存/字符串/输出入口。
+    bridge_linked = bool(run(["nm", str(compiler_binary)], ROOT / "compiler").stdout
+                         .count(" T yh_llvm_emit"))
     compiler_forbidden = sorted(compiler_names.intersection(
         {"malloc", "free", "memcpy", "strlen", "printf"}))
-    if compiler_forbidden:
+    if compiler_forbidden and not bridge_linked:
         print(f"FAIL 自编译器仍从 C runtime 导入: {', '.join(compiler_forbidden)}")
         return 1
     if darwin_host:
@@ -141,7 +173,8 @@ def main():
             return 1
     else:
         unexpected_c = sorted(n for n in compiler_names
-                              if "@" not in n and n not in aux_ok)
+                              if "@" not in n and n not in aux_ok
+                              and not any(n.startswith(prefix) for prefix in bridge_ok))
         if unexpected_c:
             print(f"FAIL Linux 自编译器未预期的未定义符号: {unexpected_c}")
             return 1

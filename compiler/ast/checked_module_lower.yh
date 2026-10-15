@@ -224,10 +224,11 @@ fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
 
 // checked_lower_carry_record：发现趟记录被赋值的绑定 ID（去重，保持源码顺序）。
 fn checked_lower_carry_record(flow *CheckedFlow, binding_id int) int {
-    let i int = 0;
-    for i < flow.flow_carry_count {
-        if (flow.flow_carry[i] == binding_id) { return 0; }
-        i += 1;
+    let probe int = 0;
+    for 1 {
+        if (probe >= flow.flow_carry_count) { break; }
+        if (flow.flow_carry[probe] == binding_id) { return 0; }
+        probe = probe + 1;
     }
     if (flow.flow_carry_count >= flow.flow_carry_cap) {
         let capacity int = flow.flow_carry_cap == 0 ? 8 : flow.flow_carry_cap * 2;
@@ -242,7 +243,7 @@ fn checked_lower_carry_record(flow *CheckedFlow, binding_id int) int {
         flow.flow_carry_cap = capacity;
     }
     flow.flow_carry[flow.flow_carry_count] = binding_id;
-    flow.flow_carry_count += 1;
+    flow.flow_carry_count = flow.flow_carry_count + 1;
     return 0;
 }
 
@@ -767,7 +768,8 @@ fn checked_lower_assign(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         if (checked_lower_carry_record(flow, binding.id) != 0) { return -1; }
     }
     b.local_values[binding.id] = stored;
-    return 0;
+    // 简单语句不终结基本块：返回 1（路径继续），由序列推进处按需加续块。
+    return 1;
 }
 
 // checked_lower_assign_op：赋值符到 IR 操作；0 表示直接赋值，-1 不支持。
@@ -873,7 +875,8 @@ fn checked_lower_if(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
             ast_ir_b_enter_block(b, join_first);
         }
         free(then_values.to_type(*void));
-        return b.cur_block >= 0 ? 1 : 0;
+        // 合流块收尾：补无条件分支并进入续块，返回 1 表示路径继续。
+        return checked_lower_exit_block(l);
     }
     let then_values2 *int = checked_lower_value_copy(l, flow);
     let else_values *int = checked_lower_value_copy(l, flow);
@@ -921,7 +924,12 @@ fn checked_lower_if(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         if (checked_lower_merge(l, flow, open_then2, then_values2, open_else, else_values) != 0) {
             free(then_values2.to_type(*void)); free(else_values.to_type(*void)); return -1;
         }
-    } else if (fall_then2 == 1) {
+        free(then_values2.to_type(*void));
+        free(else_values.to_type(*void));
+        // 合流块收尾：补无条件分支并进入续块，返回 1 表示路径继续。
+        return checked_lower_exit_block(l);
+    }
+    if (fall_then2 == 1) {
         let join_then int = ast_ir_b_alloc_block(b);
         if (join_then < 0) {
             free(then_values2.to_type(*void)); free(else_values.to_type(*void)); return -1;
@@ -932,13 +940,21 @@ fn checked_lower_if(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         ast_ir_b_enter_block(b, join_then);
         let i int = 0;
         for i < b.binding_count { b.local_values[i] = then_values2[i]; i += 1; }
-    } else if (fall_else == 1) {
+        free(then_values2.to_type(*void));
+        free(else_values.to_type(*void));
+        // 只有 then 贯穿：合流块开放，调用方按需加续块（1）。
+        return 1;
+    }
+    if (fall_else == 1) {
         let i2 int = 0;
         for i2 < b.binding_count { b.local_values[i2] = else_values[i2]; i2 += 1; }
+        free(then_values2.to_type(*void));
+        free(else_values.to_type(*void));
+        return 1;
     }
     free(then_values2.to_type(*void));
     free(else_values.to_type(*void));
-    return b.cur_block >= 0 ? 1 : 0;
+    return 0;
 }
 
 // checked_lower_loop：降低条件循环 for cond { 体 }，两趟协议与旧构造器一致。
@@ -1053,6 +1069,7 @@ fn checked_lower_loop(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     if (fall == -2) { return -2; }
     if (fall < 0) { return fall; }
     if (has_latch != 0) {
+        // 发现趟判定体贯穿：真实趟必须同样贯穿，否则两趟结构不一致。
         if (fall != 1) { return -1; }
         if (ast_ir_b_term_br(b, header) != 0) { return -1; }
         let lj int = 0;
@@ -1100,7 +1117,8 @@ fn checked_lower_loop(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
             ej += 1;
         }
     }
-    return 1;
+    // 退出块收尾：补无条件分支并进入续块，返回 1 表示路径继续。
+    return checked_lower_exit_block(l);
 }
 
 // checked_lower_break：break 站点记录携带值快照并跳出循环；循环外不支持。
@@ -1192,10 +1210,35 @@ fn checked_lower_stmt(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     return -2;
 }
 
+// checked_lower_continue_block：语句序列的块推进。
+// 顺序语句不会自己终结基本块，因此「后面还有语句」时必须显式以无条件分支
+// 收尾当前块并进入新块——否则块会保留默认的 unreachable 终结符，后续语句
+// 变成死代码（实测：`y += 1` 循环体与 if 单臂都会被截断）。
+fn checked_lower_continue_block(l *CheckedLower) int {
+    let b *AstIRBuilder = &l.builder;
+    if (b.cur_block < 0) { return -1; }
+    let next int = ast_ir_b_alloc_block(b);
+    if (next < 0) { return -1; }
+    if (ast_ir_b_term_br(b, next) != 0) { return -1; }
+    return ast_ir_b_enter_block(b, next);
+}
+
+// checked_lower_exit_block：复合语句（if/for）收尾。
+// 块终结符 UNREACHABLE 同时表示「尚未收尾」与「真的不可达」，而 IR verifier 只
+// 接受后者；因此复合语句结束时必须给退出/合流块补一条无条件分支到新的续块，
+// 再返回 1（路径继续），让调用方在续块上降低后继语句。
+fn checked_lower_exit_block(l *CheckedLower) int {
+    if (checked_lower_continue_block(l) != 0) { return -1; }
+    return 1;
+}
+
 // checked_lower_stmts：按 next_sibling 顺序降低语句序列；协议同 checked_lower_stmt。
+// 用 for 1 + continue 形态推进：旧 ARM64 后端在「循环体内 i += 1」形态上会丢失自增
+// （见 docs/todo.md 的编译器缺陷条目），自举代码一律避免该形态。
 fn checked_lower_stmts(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     let b *AstIRBuilder = &l.builder;
-    for stmt_id >= 0 {
+    for 1 {
+        if (stmt_id < 0) { return 1; }
         if (stmt_id >= l.store.statement_n) { return -1; }
         let stmt AstStmt = l.store.statements[stmt_id];
         let status int = checked_lower_stmt(l, flow, stmt_id);
@@ -1203,6 +1246,9 @@ fn checked_lower_stmts(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         if (status < 0) { return status; }
         if (status == 0 || b.cur_block < 0) { return 0; }
         stmt_id = stmt.next_sibling;
+        if (stmt_id < 0) { return 1; }
+        // 还有后继语句：当前块必须显式分支到新的续块，不能留着 unreachable。
+        if (checked_lower_continue_block(l) != 0) { return -1; }
     }
     return 1;
 }

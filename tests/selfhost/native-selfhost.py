@@ -16,6 +16,8 @@
 """
 
 import argparse
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -24,15 +26,51 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 COMPILER = ROOT / "compiler"
 WORK = ROOT / "tmp" / "selfhost"
+HOST_DRIVER = ROOT / "tools" / "llvm-host.py"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "tools"))
 from selfhost_snapshot_gate import default_seed, expected_artifacts, save_snapshot
 from selfhost_snapshot_gate import self_test, snapshot_errors, verify_seed
 
+# 自举链每一代都要编译 compiler/backend/llvm_bridge.yh，因此各代链接必须能拿到
+# 内嵌静态 LLVM 桥。这里复用 tools/llvm-host.py 的链接包装器：准备成功就把它的
+# 目录前置到子进程 PATH；未准备（无 SDK）时只警告并按原路径继续，不把 LLVM 变成
+# 自举的失败点（与 make / seed-build.py 的 auto 语义一致）。
+SHIM_DIR = None
 
-def run(cmd, cwd=None):
+
+def llvm_shim_for_seed(seed: Path):
+    """按种子文件名推导 LLVM 宿主架构并请求链接包装器目录；不可用时返回 None。"""
+    name = seed.name
+    if "aarch64" in name or "arm64" in name:
+        host = "linux-aarch64"
+    elif "x64" in name or "x86_64" in name:
+        host = "linux-x86_64"
+    else:
+        return None
+    request = [sys.executable, str(HOST_DRIVER), "shim", "--host", host, "--mode", "auto"]
+    result = subprocess.run(request, cwd=ROOT, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"警告：本次自举未链入内嵌 LLVM 桥（{host}）："
+              f"{(result.stderr or result.stdout).strip()[-200:]}", file=sys.stderr)
+        return None
+    record = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
+    print(f"自举链接已接入内嵌 LLVM 桥：host={record['host']} "
+          f"bridge={record['bridge_sha256'][:12]}", file=sys.stderr)
+    return Path(record["shim_dir"])
+
+
+def run(cmd, cwd=None, shim=False):
+    """执行子命令；shim=True 时把内嵌桥的链接包装器前置到 PATH。
+
+    只有「编译 compiler/ 自身」的调用需要 shim（那一步会链接 llvm_bridge.yh）；
+    语料检查、自解析等步骤必须保持原始 PATH，否则会把桥链接强加给语料程序。
+    """
+    environment = dict(os.environ)
+    if shim and SHIM_DIR is not None:
+        environment["PATH"] = str(SHIM_DIR) + os.pathsep + environment.get("PATH", "")
     return subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True,
-                          text=True, timeout=1800)
+                          text=True, timeout=1800, env=environment)
 
 
 def build(cc, out, generation, expected, compatible=()):
@@ -41,7 +79,7 @@ def build(cc, out, generation, expected, compatible=()):
     if bdir.exists():
         shutil.rmtree(bdir)
     command = [str(cc), "build", "-o", str(out)]
-    r = run(command, cwd=COMPILER)
+    r = run(command, cwd=COMPILER, shim=True)
     if r.returncode != 0:
         print(f"FAIL 构建 {out.name}:", r.stderr[-400:])
         sys.exit(1)
@@ -94,6 +132,7 @@ def run_cli_probe(cc):
 
 def main() -> int:
     """运行种子迁移后的最终双代固定点与语言全量语料。"""
+    global SHIM_DIR
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--seed", type=Path, default=default_seed(ROOT))
@@ -110,6 +149,7 @@ def main() -> int:
         print(f"FAIL 自举种子：{error}")
         return 1
     print(f"自举种子 SHA-256：{seed_hash}")
+    SHIM_DIR = llvm_shim_for_seed(seed)
 
     ok = True
     expected = expected_artifacts(COMPILER)

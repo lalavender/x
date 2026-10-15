@@ -143,11 +143,13 @@ def build(lock: dict, prefix: Path) -> dict:
     return config
 
 
-def link(config: dict, objects: list[str], output: Path) -> None:
+def link(config: dict, objects: list[str], output: Path, extra_flags: list[str] = ()) -> None:
     """以 GNU 链接器静态链接桥；归档以匿名内存 fd 传入，避免 WSL/DrvFS 逐成员 RPC。
 
     每个 fd 保存固定 SDK 归档的原始字节，不改变符号或链接顺序。所有持久文件仍在 tmp，
     内存 fd 在成功/失败后统一关闭；不要求 LLVM 链接工具或系统 LLVM 安装。
+    extra_flags 原样插在输出路径与静态 SDK 参数之间，供调用方补充驱动选项
+    （例如编译器自身的 -no-pie 与 -lm）；不参与归档顺序。
     """
     output.parent.mkdir(parents=True, exist_ok=True)
     with contextlib.ExitStack() as resources:
@@ -165,7 +167,8 @@ def link(config: dict, objects: list[str], output: Path) -> None:
         output_fd = os.memfd_create("yh-llvm-executable", flags=0)
         resources.callback(os.close, output_fd)
         descriptors.append(output_fd)
-        result = subprocess.run([config["cxx"], *objects, "-o", f"/proc/self/fd/{output_fd}", *flags],
+        result = subprocess.run([config["cxx"], *objects, "-o", f"/proc/self/fd/{output_fd}",
+                                 *extra_flags, *flags],
                                 pass_fds=descriptors, capture_output=True, text=True, timeout=120)
         if result.returncode:
             raise RuntimeError(result.stderr)
