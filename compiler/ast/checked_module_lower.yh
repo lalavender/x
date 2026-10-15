@@ -426,6 +426,17 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     }
     if (node.kind == AST_EXPR_UNARY) {
         if (node.child0 < 0) { return -2; }
+        if (node.op == gen.TK_LEN) {
+            // 数组长度由语义阶段折叠为常量；这里只支持运行期切片长度。
+            let operand_type int = l.store.expressions[node.child0].type_id;
+            if (checked_lower_is_slice(l.store, operand_type) == 0) { return -2; }
+            let want int = checked_lower_type(l, node.type_id);
+            if (want < 0) { return -2; }
+            let length int = checked_lower_slice_len(l, flow, node.child0);
+            if (length == -2) { return -2; }
+            if (length < 0) { return -1; }
+            return checked_lower_adjust(l, length, want);
+        }
         if (node.op == gen.TK_AMP) {
             // 取地址：变量（含聚合存储）、指针解引用与数组下标。
             let child AstExpr = l.store.expressions[node.child0];
@@ -1863,6 +1874,160 @@ fn checked_lower_member_field(l *CheckedLower, struct_type int, file_id int, tok
     return -1;
 }
 
+// checked_lower_is_slice：源类型是否为切片。
+fn checked_lower_is_slice(store *CheckedStorage, source_type int) int {
+    if (source_type < 0 || source_type >= store.type_n) { return 0; }
+    return (store.types[source_type].kind == gen.TY_SLICE).to_type(int);
+}
+
+// checked_lower_slice_ptr：求切片表达式的运行期数据指针（不透明指针）。
+// 变量取头部 +8 的 ptr 字段；切片表达式按基址 + start×stride 计算。
+fn checked_lower_slice_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
+    let b *AstIRBuilder = &l.builder;
+    if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2; }
+    let node AstExpr = l.store.expressions[expr_id];
+    if (node.kind == AST_EXPR_PRIMARY && node.child0 >= 0) {
+        return checked_lower_slice_ptr(l, flow, node.child0);
+    }
+    if (node.kind == AST_EXPR_PRIMARY) {
+        let row int = checked_lower_binding(l, &node);
+        if (row < 0) { return -2; }
+        let binding AstBinding = l.store.bindings[row];
+        let storage int = checked_lower_storage(l, binding.id);
+        if (storage < 0) { return -2; }
+        // 头部 +8 存不透明数据指针；字段指针类型 elem = 12 才能 LOAD 出 kind 12。
+        let field int = ast_ir_b_add_gep_const(b, storage, 8, ir.IR_TY_PTR + ir.IR_TY_PTR);
+        if (field < 0) { return -1; }
+        return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, ir.IR_TY_PTR, field, -1, 0);
+    }
+    if (node.kind == AST_EXPR_SLICE && node.child0 >= 0 && node.child1 >= 0) {
+        let base_type int = l.store.expressions[node.child0].type_id;
+        let base_kind int = checked_lower_kind(l.store, base_type);
+        let base int = -1;
+        if (base_kind >= ir.IR_TY_PTR) {
+            base = checked_lower_expr_inner(l, flow, node.child0);
+        } else if (checked_lower_is_slice(l.store, base_type) != 0) {
+            base = checked_lower_slice_ptr(l, flow, node.child0);
+        } else {
+            base = checked_lower_lvalue_ptr(l, flow, node.child0);
+        }
+        if (base == -2) { return -2; }
+        if (base < 0) { return -1; }
+        // 步长取结果切片元素类型的大小。
+        let slice_ty gen.CType = l.store.types[node.type_id];
+        if (slice_ty.kind != gen.TY_SLICE || slice_ty.elem < 0 || slice_ty.elem >= l.store.type_n) {
+            return -2;
+        }
+        let stride int = l.store.types[slice_ty.elem].size;
+        if (stride <= 0) { return -2; }
+        let start int = checked_lower_expr_inner(l, flow, node.child1);
+        if (start == -2) { return -2; }
+        if (start < 0) { return -1; }
+        let ustart int = checked_lower_adjust(l, start, ir.IR_TY_U64);
+        if (ustart < 0) { return -2; }
+        let stride_value int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
+            -1, -1, stride.to_type(i64));
+        if (stride_value < 0) { return -1; }
+        let offset int = ast_ir_b_add_inst(b, ir.IR_OP_MUL, ir.IR_TY_U64,
+            ustart, stride_value, 0);
+        if (offset < 0) { return -1; }
+        return ast_ir_b_add_gep_value(b, base, offset, ir.IR_TY_PTR);
+    }
+    return -2;
+}
+
+// checked_lower_slice_len：求切片表达式的运行期长度（u64）。
+// 变量取头部 +0 的 len 字段；切片表达式按 end - start 计算。
+fn checked_lower_slice_len(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
+    let b *AstIRBuilder = &l.builder;
+    if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2; }
+    let node AstExpr = l.store.expressions[expr_id];
+    if (node.kind == AST_EXPR_PRIMARY && node.child0 >= 0) {
+        return checked_lower_slice_len(l, flow, node.child0);
+    }
+    if (node.kind == AST_EXPR_PRIMARY) {
+        let row int = checked_lower_binding(l, &node);
+        if (row < 0) { return -2; }
+        let binding AstBinding = l.store.bindings[row];
+        let storage int = checked_lower_storage(l, binding.id);
+        if (storage < 0) { return -2; }
+        let field int = ast_ir_b_add_gep_const(b, storage, 0, ir.IR_TY_PTR + ir.IR_TY_U64);
+        if (field < 0) { return -1; }
+        return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, ir.IR_TY_U64, field, -1, 0);
+    }
+    if (node.kind == AST_EXPR_SLICE && node.child1 >= 0 && node.child2 >= 0) {
+        let start int = checked_lower_expr_inner(l, flow, node.child1);
+        if (start == -2) { return -2; }
+        if (start < 0) { return -1; }
+        let end int = checked_lower_expr_inner(l, flow, node.child2);
+        if (end == -2) { return -2; }
+        if (end < 0) { return -1; }
+        let ustart int = checked_lower_adjust(l, start, ir.IR_TY_U64);
+        if (ustart < 0) { return -2; }
+        let uend int = checked_lower_adjust(l, end, ir.IR_TY_U64);
+        if (uend < 0) { return -2; }
+        return ast_ir_b_add_inst(b, ir.IR_OP_SUB, ir.IR_TY_U64, uend, ustart, 0);
+    }
+    return -2;
+}
+
+// checked_lower_slice_header：把切片来源（变量副本/切片表达式/字面量）写进头部存储。
+// 头部布局 {len u64, ptr *void}，与旧后端和模块切片布局一致。
+fn checked_lower_slice_header(l *CheckedLower, flow *CheckedFlow, dest int,
+    slice_type int, expr_id int) int {
+    let b *AstIRBuilder = &l.builder;
+    let src int = -1;
+    let len_value int = -1;
+    let inner int = expr_id;
+    let node AstExpr = l.store.expressions[expr_id];
+    for node.kind == AST_EXPR_PRIMARY && node.child0 >= 0 {
+        inner = node.child0;
+        if (inner < 0 || inner >= l.store.expression_n) { return -2; }
+        node = l.store.expressions[inner];
+    }
+    if (node.kind == AST_EXPR_ARRAY) {
+        // 切片字面量：入口预分配后备数组已在函数序言完成，元素逐个写入。
+        let backing int = l.slice_storage != 0 ? l.slice_storage[inner] : 0;
+        if (backing <= 0) {
+            l.reason = "首片：切片字面量缺少后备存储";
+            return -2;
+        }
+        let backing_ptr int = backing - 1;
+        let count int = checked_lower_array_elements(l, flow, backing_ptr, slice_type, node.child0, -1);
+        if (count == -2) { return -2; }
+        if (count < 0) { return -1; }
+        src = backing_ptr;
+        len_value = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64, -1, -1,
+            count.to_type(i64));
+        if (len_value < 0) { return -1; }
+    } else if (node.kind == AST_EXPR_SLICE) {
+        src = checked_lower_slice_ptr(l, flow, inner);
+        if (src == -2) { return -2; }
+        if (src < 0) { return -1; }
+        len_value = checked_lower_slice_len(l, flow, inner);
+        if (len_value == -2) { return -2; }
+        if (len_value < 0) { return -1; }
+    } else if (node.kind == AST_EXPR_PRIMARY) {
+        let row int = checked_lower_binding(l, &node);
+        if (row < 0) { return -2; }
+        let src_binding AstBinding = l.store.bindings[row];
+        let src_storage int = checked_lower_storage(l, src_binding.id);
+        if (src_storage < 0) { return -2; }
+        if (ast_ir_b_add_memcpy(b, dest, src_storage, 16) < 0) { return -1; }
+        return 0;
+    } else {
+        return -2;
+    }
+    // 头部字段写入：+0 = len，+8 = 数据指针。
+    let len_ptr int = ast_ir_b_add_gep_const(b, dest, 0, ir.IR_TY_PTR + ir.IR_TY_U64);
+    if (len_ptr < 0) { return -1; }
+    if (ast_ir_b_add_store(b, len_ptr, len_value) < 0) { return -1; }
+    let ptr_ptr int = ast_ir_b_add_gep_const(b, dest, 8, ir.IR_TY_PTR + ir.IR_TY_PTR);
+    if (ptr_ptr < 0) { return -1; }
+    if (ast_ir_b_add_store(b, ptr_ptr, src) < 0) { return -1; }
+    return 0;
+}
+
 // checked_lower_lvalue_ptr：求表达式作为左值的存储指针；-2 不支持、-1 内部错误。
 // 支持变量（含聚合存储）、指针解引用与数组下标（常量或动态字节偏移）。
 fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
@@ -1915,6 +2080,9 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         let base int = -1;
         if (base_kind >= ir.IR_TY_PTR) {
             base = checked_lower_expr_inner(l, flow, node.child0);
+        } else if (checked_lower_is_slice(l.store, base_type) != 0) {
+            // 切片下标：基址是头部里的运行期数据指针，不是头部本身。
+            base = checked_lower_slice_ptr(l, flow, node.child0);
         } else {
             base = checked_lower_lvalue_ptr(l, flow, node.child0);
         }
@@ -1941,20 +2109,20 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     return -2;
 }
 
-// checked_lower_array_literal：数组字面量逐元素写进 dest；元素可为标量或嵌套数组。
-// 参数列表按解析顺序倒挂（child0=前一项，child1=本项），先收集再按源码顺序写。
-fn checked_lower_array_literal(l *CheckedLower, flow *CheckedFlow, dest int,
-    source_type int, expr_id int) int {
+// checked_lower_array_elements：把元素列表按源码顺序写进 dest 指向的后备存储。
+// 返回元素个数（>=0）、-1 内部错误、-2 不支持；expected_count < 0 表示不检查个数
+// （切片字面量长度由列表决定）。source_type 的 elem 决定步长与元素类型。
+fn checked_lower_array_elements(l *CheckedLower, flow *CheckedFlow, dest int,
+    source_type int, list_head int, expected_count int) int {
     let b *AstIRBuilder = &l.builder;
     if (source_type < 0 || source_type >= l.store.type_n) { return -2; }
     let ty gen.CType = l.store.types[source_type];
-    if (ty.kind != gen.TY_ARRAY || ty.elem < 0 || ty.elem >= l.store.type_n
-        || ty.len < 0) { return -2; }
+    if ((ty.kind != gen.TY_ARRAY && ty.kind != gen.TY_SLICE)
+        || ty.elem < 0 || ty.elem >= l.store.type_n) { return -2; }
     let elem gen.CType = l.store.types[ty.elem];
-    if (elem.size <= 0 || elem.size * ty.len > ty.size) { return -2; }
-    let node AstExpr = l.store.expressions[expr_id];
+    if (elem.size <= 0) { return -2; }
     let count int = 0;
-    let walk int = node.child0;
+    let walk int = list_head;
     for walk >= 0 {
         if (walk >= l.store.expression_n) { l.reason = "首片：数组字面量元素越界"; return -2; }
         let list_node AstExpr = l.store.expressions[walk];
@@ -1962,13 +2130,16 @@ fn checked_lower_array_literal(l *CheckedLower, flow *CheckedFlow, dest int,
         count += 1;
         walk = list_node.child0;
     }
-    if (count != ty.len) { l.reason = "首片：数组字面量元素数与长度不一致"; return -2; }
+    if (expected_count >= 0 && count != expected_count) {
+        l.reason = "首片：数组字面量元素数与长度不一致";
+        return -2;
+    }
     let ids *int = 0;
     if (count > 0) {
         ids = malloc((count * sizeof(int)).to_type(u64)).to_type(*int);
         if (ids == 0) { return -1; }
     }
-    walk = node.child0;
+    walk = list_head;
     let pos int = count;
     for walk >= 0 {
         let list_node AstExpr = l.store.expressions[walk];
@@ -2002,7 +2173,19 @@ fn checked_lower_array_literal(l *CheckedLower, flow *CheckedFlow, dest int,
         i += 1;
     }
     free(ids.to_type(*void));
-    return result;
+    return result != 0 ? result : count;
+}
+
+// checked_lower_array_literal：定长数组字面量逐元素写进 dest（元素可为标量或聚合）。
+fn checked_lower_array_literal(l *CheckedLower, flow *CheckedFlow, dest int,
+    source_type int, expr_id int) int {
+    if (source_type < 0 || source_type >= l.store.type_n) { return -2; }
+    let ty gen.CType = l.store.types[source_type];
+    if (ty.kind != gen.TY_ARRAY || ty.len < 0 || ty.size <= 0) { return -2; }
+    let node AstExpr = l.store.expressions[expr_id];
+    let count int = checked_lower_array_elements(l, flow, dest, source_type, node.child0, ty.len);
+    if (count < 0) { return count; }
+    return 0;
 }
 
 // checked_lower_struct_literal：结构体/联合体字面量逐字段写进 dest。
@@ -2050,7 +2233,8 @@ fn checked_lower_aggregate_store(l *CheckedLower, flow *CheckedFlow, dest int,
         || expr_id >= l.store.expression_n) { return -2; }
     let ty gen.CType = l.store.types[source_type];
     if (ty.size <= 0
-        || (ty.kind != gen.TY_ARRAY && ty.kind != gen.TY_STRUCT && ty.kind != gen.TY_UNION)) {
+        || (ty.kind != gen.TY_ARRAY && ty.kind != gen.TY_STRUCT && ty.kind != gen.TY_UNION
+            && ty.kind != gen.TY_SLICE)) {
         return -2;
     }
     let node AstExpr = l.store.expressions[expr_id];
@@ -2061,6 +2245,11 @@ fn checked_lower_aggregate_store(l *CheckedLower, flow *CheckedFlow, dest int,
         inner = inner_node.child0;
         if (inner < 0 || inner >= l.store.expression_n) { return -2; }
         inner_node = l.store.expressions[inner];
+    }
+    if (ty.kind == gen.TY_SLICE
+        && (inner_node.kind == AST_EXPR_ARRAY || inner_node.kind == AST_EXPR_SLICE)) {
+        // 切片来源必须先于数组字面量分支：切片字面量的元素列表要写进后备数组。
+        return checked_lower_slice_header(l, flow, dest, source_type, inner);
     }
     if (inner_node.kind == AST_EXPR_ARRAY) {
         return checked_lower_array_literal(l, flow, dest, source_type, inner);
@@ -2209,6 +2398,35 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
         }
         i += 1;
     }
+    // 切片字面量后备数组：按表达式编号在入口预分配，循环内复用同一块存储。
+    scan = ctx.expr_first;
+    for scan < ctx.expr_after && scan < l.store.expression_n {
+        let enode AstExpr = l.store.expressions[scan];
+        if (enode.kind == AST_EXPR_ARRAY && checked_lower_is_slice(l.store, enode.type_id) != 0) {
+            let sty gen.CType = l.store.types[enode.type_id];
+            if (sty.elem < 0 || sty.elem >= l.store.type_n) {
+                ast_ir_b_release(b); return -2;
+            }
+            let esz int = l.store.types[sty.elem].size;
+            let eal int = l.store.types[sty.elem].align;
+            let scount int = 0;
+            let swalk int = enode.child0;
+            for swalk >= 0 {
+                if (swalk >= l.store.expression_n) { ast_ir_b_release(b); return -2; }
+                scount += 1;
+                swalk = l.store.expressions[swalk].child0;
+            }
+            if (scount > 0) {
+                if (esz <= 0 || eal <= 0 || l.slice_storage == 0) {
+                    ast_ir_b_release(b); return -2;
+                }
+                let saddr int = ast_ir_b_add_alloca(b, scount * esz, eal);
+                if (saddr < 0) { ast_ir_b_release(b); return -1; }
+                l.slice_storage[scan] = saddr + 1;
+            }
+        }
+        scan += 1;
+    }
     // 入口块为每个被取址的绑定发一条 ADDR；聚合绑定发 ALLOCA。
     i = 0;
     for i < count {
@@ -2218,9 +2436,10 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
         if (checked_lower_is_aggregate(l.store, binding.sym_type_id) != 0) {
             let aty gen.CType = l.store.types[binding.sym_type_id];
             if ((aty.kind != gen.TY_ARRAY && aty.kind != gen.TY_STRUCT
-                && aty.kind != gen.TY_UNION) || aty.size <= 0 || aty.align <= 0) {
+                && aty.kind != gen.TY_UNION && aty.kind != gen.TY_SLICE)
+                || aty.size <= 0 || aty.align <= 0) {
                 l.last_token = binding.name_token;
-                l.reason = "首片仅支持定长数组/结构体/联合体聚合存储";
+                l.reason = "首片仅支持定长数组/结构体/联合体/切片聚合存储";
                 ast_ir_b_release(b); return -2;
             }
             addr = ast_ir_b_add_alloca(b, aty.size, aty.align);
@@ -2297,9 +2516,11 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
     l.source_type_map = checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int);
     l.taken = checked_zero_rows(l.store.binding_n, 1).to_type(*u8);
     l.storage = checked_zero_rows(l.store.binding_n, sizeof(int)).to_type(*int);
+    l.slice_storage = checked_zero_rows(l.store.expression_n, sizeof(int)).to_type(*int);
     l.labels = 0; l.label_count = 0; l.label_cap = 0; l.has_goto = 0;
     let tables_ok int = 1;
     if (l.store.binding_n > 0 && (l.taken == 0 || l.storage == 0)) { tables_ok = 0; }
+    if (l.store.expression_n > 0 && l.slice_storage == 0) { tables_ok = 0; }
     let type_map [25]int;
     l.private_type_map = &type_map[0];
     let types [25]ir.IRType;
@@ -2363,6 +2584,7 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
     }
     free(l.source_map.to_type(*void)); free(l.source_type_map.to_type(*void));
     free(l.taken.to_type(*void)); free(l.storage.to_type(*void));
+    free(l.slice_storage.to_type(*void));
     free(l.labels.to_type(*void));
     free(flow.loops.to_type(*void));
     if (result != 0) {

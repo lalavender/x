@@ -585,14 +585,20 @@ def main():
             aggregate_ok = (aggregate is not None and aggregate.returncode == 0
                             and "lower-snapshot=ok" in aggregate.stdout
                             and "functions=2" in aggregate.stdout)
-            rejected = sh([str(program), str(dst / "input" / "slice.yh"), "1"],
+            slice_ok = sh([str(program), str(dst / "input" / "slice.yh"), "0"],
+                          cwd=dst) if program.exists() else None
+            slice_lowered = (slice_ok is not None and slice_ok.returncode == 0
+                             and "lower-snapshot=ok" in slice_ok.stdout
+                             and "functions=2" in slice_ok.stdout)
+            rejected = sh([str(program), str(dst / "input" / "global.yh"), "1"],
                           cwd=dst) if program.exists() else None
             rejects = (rejected is not None and rejected.returncode == 0
                        and "lower-rejected=ok" in rejected.stdout
-                       and "slice_body" in rejected.stderr and ".yh:" in rejected.stderr)
-            report(lower_ok and pointer_ok and aggregate_ok and rejects, c["name"],
+                       and "全局对象数据" in rejected.stderr and ".yh:" in rejected.stderr)
+            report(lower_ok and pointer_ok and aggregate_ok and slice_lowered and rejects, c["name"],
                    f"快照 lowering 覆盖或拒绝路径失败: lower_ok={lower_ok}, "
-                   f"pointer_ok={pointer_ok}, aggregate_ok={aggregate_ok}, rejects={rejects}, "
+                   f"pointer_ok={pointer_ok}, aggregate_ok={aggregate_ok}, "
+                   f"slice_ok={slice_lowered}, rejects={rejects}, "
                    f"build={built.returncode}, run={run.returncode if run else None}, "
                    f"stdout={(run.stdout if run else '')[-120:]!r}\n"
                    f"{(run.stderr if run else built.stderr)[-400:]}")

@@ -33,6 +33,25 @@
     todo.md 的「设计决定不做」。
 - 详见[完成记录](01-finished/yh-全量门测试并行化-2026-10-15.md)。
 
+## 2026-10-15 LLVM LL5 切片：数组切片与切片共享
+
+- **范围**：数组切片 `a[i..j]`、切片字面量（入口预分配后备数组）、切片再切片、
+  `s[k]` 共享读写、切片副本（16 字节）与运行期 `len(s)`；头部
+  `{len u64, ptr *void}`。
+- **实现**：复用 ALLOCA/GEP/MEMCPY；`slice_ptr/slice_len/slice_header` 三入口；
+  字面量后备数组按表达式预分配（循环复用）；`len` 结果按语义 i32 截回。
+- **门禁**：新增 `tests/selfhost/llvm-slice.py`（O0/O2 原生运行）与运行语料
+  `tests/yh-run/run/llvm-slice.yh`；`llvmlower` slice 转正、global 为拒绝负例；
+  其余门拒绝负例统一改用 `for-in`。
+- **验收**（WSL，`SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`）：
+  `make`、`make test`（语法 78/78 与 42/42、运行 **315/315**）全绿；
+  `make selfhost-native` 全绿（固定点 24 产物一致、自解析 86 文件、
+  modules 18/18、项目 100/100）；14 个 `llvm-*` 专项门全部退出 0。
+- **未完成（已定位阻塞）**：全局/字符串/CT 数据。受检快照不含全局初始化表达式
+  （全局解析阶段关 AST 捕获、`AstDecl` 无 init 字段），需先补解析/快照，再作物化、
+  全局取址指令与字符串/CT；作为 LL5 收尾的下一切片。
+- 详见 [完成记录](01-finished/yh-LLVM-LL5切片切片-2026-10-15.md)。
+
 ## 2026-10-15 LLVM LL5 结构体切片：字段、嵌套、字面量与联合体
 
 - **范围**：结构体/联合体绑定 ALLOCA；字段读写与复合赋值、嵌套字段、

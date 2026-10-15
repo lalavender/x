@@ -69,12 +69,14 @@ fn main() int {
 }
 """
 
-REJECT = """module baddata;
+REJECT = """module badforin;
 
-// bad_slice：切片存储不在首片；必须带来源拒绝，不能静默回退。
-fn bad_slice(x int) int {
-    let s []int;
-    return x;
+// bad_forin：for-in 迭代协议不在已验收范围；必须带来源拒绝，不能静默回退。
+fn bad_forin(x int) int {
+    let a [3]int = [1, 2, 3];
+    let sum int = 0;
+    for v in a { sum += v; }
+    return sum;
 }
 
 fn main() int { return 0; }
@@ -156,7 +158,7 @@ def main():
     result = run([compiler, "--backend", "llvm", "--target", TARGET, "-O0",
                   "-o", str(output), str(reject)])
     assert result.returncode != 0, "切片聚合未被拒绝"
-    assert ".yh:" in result.stderr and "聚合" in result.stderr, result.stderr[-800:]
+    assert ".yh:" in result.stderr and "bad_forin" in result.stderr, result.stderr[-800:]
     assert not output.exists(), "拒绝路径仍发布了产物"
 
     print("LL5 结构体切片通过：字段/嵌套/字面量/复制/联合体、O0/O2 原生运行、切片带来源拒绝")

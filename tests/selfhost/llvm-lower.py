@@ -37,7 +37,7 @@ def main():
     (WORK / "build.log").write_text(result.stdout + result.stderr)
     assert result.returncode == 0, result.stdout + result.stderr
     executable = project / ".build/llvmlower"
-    for name, expected in (("scalar", "0"), ("pointer", "0"), ("control", "0"), ("goto", "0"), ("array", "0"), ("struct", "0"), ("aggregate", "0"), ("slice", "1")):
+    for name, expected in (("scalar", "0"), ("pointer", "0"), ("control", "0"), ("goto", "0"), ("array", "0"), ("struct", "0"), ("aggregate", "0"), ("slice", "0"), ("global", "1")):
         result = run([str(executable), str(project / f"input/{name}.yh"), expected], project)
         (WORK / f"{name}.log").write_text(result.stdout + result.stderr)
         assert result.returncode == 0, (name, result.returncode, result.stdout, result.stderr)
@@ -69,9 +69,16 @@ def main():
             # LL5 结构体切片后，原 aggregate 负例已转为支持：必须降低成功。
             assert "lower-snapshot=ok" in result.stdout, result.stdout
             assert "functions=2" in result.stdout, result.stdout
+        elif name == "slice":
+            # LL5 切片：数组切片/字面量/len 必须降低成功。
+            assert "lower-snapshot=ok" in result.stdout, result.stdout
+            assert "functions=2" in result.stdout, result.stdout
         else:
-            assert "lower-rejected=ok" in result.stdout and f"{name}_body" in result.stderr, result
+            assert "lower-rejected=ok" in result.stdout, result
             assert ".yh:" in result.stderr and "LLVM" in result.stderr, result.stderr
+            name_hit = f"{name}_body" in result.stderr or (name == "global"
+                and "全局对象数据" in result.stderr)
+            assert name_hit, result.stderr
     print("LL3/LL4/LL5 纯快照降低门通过：arena销毁后SSA/phi/固定调用、取址解引用内存驻留、嵌套/无限循环、typedCT排除、不支持体严格拒绝")
     return 0
 
