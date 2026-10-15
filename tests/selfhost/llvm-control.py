@@ -5,7 +5,7 @@
   * 嵌套循环的 break/continue 只作用于最内层；无限循环 `for {}` 的退出只经 break；
   * 循环携带值（含内层写入外层绑定）在两趟协议下生成合法 phi，`opt` 验证通过；
   * O0 文本与 `default<O2>` 管线后的对象分别汇编、链接并原生运行，退出码 0；
-  * 尚未支持的 `goto` 带来源位置拒绝，不静默回退。
+  * 尚未支持的 `for-in` 带来源位置拒绝，不静默回退（goto 已由 llvm-goto 门覆盖）。
 """
 
 import argparse
@@ -80,11 +80,12 @@ fn main() int {
 
 REJECT = """module bad;
 
-// bad_goto：goto/label 不在 LL4 首片；必须带来源拒绝，不能静默回退。
-fn bad_goto(x int) int {
-    goto done;
-    done:
-    return x;
+// bad_forin：for-in 仍不在 LL4 已验收范围内；必须带来源拒绝，不能静默回退。
+fn bad_forin(x int) int {
+    let arr [3]int;
+    let sum int = 0;
+    for v in arr { sum += v; }
+    return sum;
 }
 
 fn main() int { return 0; }
@@ -166,11 +167,11 @@ def main():
     output = WORK / "bad-out"
     result = run([compiler, "--backend", "llvm", "--target", TARGET, "-O0",
                   "-o", str(output), str(reject)])
-    assert result.returncode != 0, "goto 未被拒绝"
-    assert ".yh:" in result.stderr and "bad_goto" in result.stderr, result.stderr[-800:]
+    assert result.returncode != 0, "for-in 未被拒绝"
+    assert ".yh:" in result.stderr and "bad_forin" in result.stderr, result.stderr[-800:]
     assert not output.exists(), "拒绝路径仍发布了产物"
 
-    print("LL4 首片通过：嵌套循环、break/continue、无限循环、O0/O2 原生运行、goto 带来源拒绝")
+    print("LL4 首片通过：嵌套循环、break/continue、无限循环、O0/O2 原生运行、for-in 带来源拒绝")
     return 0
 
 

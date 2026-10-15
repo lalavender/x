@@ -362,7 +362,10 @@ IRModule 序列化与跨缓存身份未落、首片之外的形态明确拒绝�
 2026-10-15 switch 切片已完成：控制值一次求值 + 常量比较链，各体无 fallthrough，
 退出块 N 元 phi 合流，循环内 break/continue 仍作用于外层；门禁见
 `tests/selfhost/llvm-switch.py` 与 `tests/yh-run/run/llvm-switch.yh`。
-`goto`/`for-in` 按后续行保留（`goto` 现在带来源拒绝）。
+2026-10-15 goto/label 切片已完成：含 goto 的函数全部绑定内存驻留，标签块在
+函数入口预分配、名字按内容匹配，发现趟回滚恢复标签块状态；门禁见
+`tests/selfhost/llvm-goto.py` 与 `tests/yh-run/run/llvm-goto.yh`。
+仅剩 `for-in`（依赖聚合切片）。
 
 - [ ] 按“嵌套循环与 break/continue → 无限循环 → switch → goto/label → for-in”逐行建用例。
 - [ ] 每行先用 LLVM 编译触发 unsupported，再实现该行，独立运行/提交；不一次混入所有控制流。

@@ -33,6 +33,24 @@
     todo.md 的「设计决定不做」。
 - 详见[完成记录](01-finished/yh-全量门测试并行化-2026-10-15.md)。
 
+## 2026-10-15 LLVM LL4 goto/label 切片：任意跳转与标签合流
+
+- **范围**：`goto 标签;`/`标签: stmt` 的前向/后向跳转、多前驱合流、跳出循环；
+  含 goto/label 的函数全部绑定内存驻留，跨任意 CFG 不需 SSA phi。
+- **实现**：`CheckedLabel` 标签表 + 函数入口预分配块；名字按源码字节内容匹配
+  （goto 与 label 是不同位置）；循环发现趟回滚恢复已进入标签块状态；
+  路径终结后开不可达续块继续降低，保证标签总被访问。
+- **门禁**：新增 `tests/selfhost/llvm-goto.py`（O0/O2 原生运行 + 未定义标签
+  来源拒绝）与运行语料 `tests/yh-run/run/llvm-goto.yh`；`llvmlower` 新增
+  `input/goto.yh`，`llvm-control.py` 首片负例改为尚未支持的 `for-in`。
+- **验收**（WSL，`SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`）：
+  `make`、`make test`（语法 78/78 与 42/42、运行 **312/312**）全绿；
+  `make selfhost-native` 全绿（固定点 24 产物一致、自解析 86 文件、
+  modules 18/18、项目 100/100）；12 个 `llvm-*` 专项门全部退出 0。
+- **未关闭**：LL4 的 `for-in`（依赖 LL5 聚合切片）；goto 函数全量内存驻留
+  属过渡策略；LLVM 默认未切换、种子未滚。
+- 详见 [完成记录](01-finished/yh-LLVM-LL4goto切片-2026-10-15.md)。
+
 ## 2026-10-15 LLVM LL4 switch 切片：多值 case/default 与合流
 
 - **范围**：`switch` 控制值一次求值 + case 常量比较链，各体无 fallthrough，

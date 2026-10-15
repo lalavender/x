@@ -1081,6 +1081,31 @@ fn checked_lower_if(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     return 0;
 }
 
+// checked_lower_goto：goto 语句；名字 token 是 goto 后的 IDENT（first+1）。
+// 目标块缺省新建（支持前向引用），当前路径以无条件分支终结，返回 0。
+fn checked_lower_goto(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let stmt AstStmt = l.store.statements[stmt_id];
+    let block int = checked_label_token(l, stmt.file_id, stmt.first + 1, 1);
+    if (block < 0) { return -1; }
+    if (l.builder.cur_block < 0) { return 0; }
+    if (ast_ir_b_term_br(&l.builder, block) != 0) { return -1; }
+    return 0;
+}
+
+// checked_lower_label：label 语句；名字 token 是语句首 token，块缺省新建。
+// 贯穿路径先分支进标签块，再降低被标记的单条子语句（子语句无兄弟链）。
+fn checked_lower_label(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let stmt AstStmt = l.store.statements[stmt_id];
+    let block int = checked_label_token(l, stmt.file_id, stmt.first, 1);
+    if (block < 0) { return -1; }
+    if (l.builder.cur_block >= 0) {
+        if (ast_ir_b_term_br(&l.builder, block) != 0) { return -1; }
+    }
+    ast_ir_b_enter_block(&l.builder, block);
+    if (stmt.first_child < 0) { return 1; }
+    return checked_lower_stmts(l, flow, stmt.first_child);
+}
+
 // checked_lower_switch_path：记录一条贯穿到 switch 退出块的分支路径（块与值快照）。
 // 值快照按「路径 × 绑定」平铺到 values；count 是当前路径数，由调用方维护。
 fn checked_lower_switch_path(values *int, blocks *int, count *int, binding_count int,
@@ -1335,6 +1360,21 @@ fn checked_lower_loop_body(l *CheckedLower, flow *CheckedFlow, stmt_id int) int 
         memcpy(b.local_values, mark_values, (b.binding_count * sizeof(int)).to_type(u64));
     }
     free(mark_values.to_type(*void));
+    // 发现趟可能进入/封闭过标签块（goto 目标在体内时为真）；回滚其块状态，
+    // 让真实趟在同一块号上重新进入，避免 first_inst 指向已丢弃的指令区间。
+    let li int = 0;
+    for li < l.label_count {
+        let lb int = l.labels[li].block;
+        if (lb >= 0 && lb < b.block_count && b.blocks[lb].first_inst >= mark_inst) {
+            b.blocks[lb].first_inst = -1;
+            b.blocks[lb].inst_count = 0;
+            b.blocks[lb].term = ir.IR_TERM_UNREACHABLE;
+            b.blocks[lb].term_value = -1;
+            b.blocks[lb].succ0 = -1;
+            b.blocks[lb].succ1 = -1;
+        }
+        li += 1;
+    }
     if (facts == -2) { return -2; }
     if (facts < 0) { return facts; }
     let input_count int = 1 + continue_sites + has_latch;
@@ -1552,6 +1592,8 @@ fn checked_lower_stmt(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     }
     if (stmt.kind == AST_STMT_IF) { return checked_lower_if(l, flow, stmt_id); }
     if (stmt.kind == AST_STMT_SWITCH) { return checked_lower_switch(l, flow, stmt_id); }
+    if (stmt.kind == AST_STMT_GOTO) { return checked_lower_goto(l, flow, stmt_id); }
+    if (stmt.kind == AST_STMT_LABEL) { return checked_lower_label(l, flow, stmt_id); }
     if (stmt.kind == AST_STMT_FOR) { return checked_lower_loop(l, flow, stmt_id); }
     if (stmt.kind == AST_STMT_BREAK) { return checked_lower_break(l, flow); }
     if (stmt.kind == AST_STMT_CONTINUE) { return checked_lower_continue(l, flow); }
@@ -1592,13 +1634,88 @@ fn checked_lower_stmts(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         let status int = checked_lower_stmt(l, flow, stmt_id);
         if (status == -2) { return -2; }
         if (status < 0) { return status; }
-        if (status == 0 || b.cur_block < 0) { return 0; }
+        if (status == 0 || b.cur_block < 0) {
+            if (l.has_goto == 0) { return 0; }
+            // goto 函数：终结后的语句仍可能被标签跳入；开一个不可达续块继续降低。
+            stmt_id = stmt.next_sibling;
+            if (stmt_id < 0) { return 0; }
+            let dead int = ast_ir_b_alloc_block(b);
+            if (dead < 0) { return -1; }
+            ast_ir_b_enter_block(b, dead);
+            continue;
+        }
         stmt_id = stmt.next_sibling;
         if (stmt_id < 0) { return 1; }
         // 还有后继语句：当前块必须显式分支到新的续块，不能留着 unreachable。
         if (checked_lower_continue_block(l) != 0) { return -1; }
     }
     return 1;
+}
+
+// checked_label_same：比较两个源码名字区间的内容是否相同。goto 与 label 同名但
+// 位置不同，必须按字节内容比较，不能比较区间本身。
+fn checked_label_same(l *CheckedLower, a_file int, a_start int, a_len int,
+    b_file int, b_start int, b_len int) int {
+    if (a_len != b_len || a_file < 0 || a_file >= l.store.file_n
+        || b_file < 0 || b_file >= l.store.file_n) { return 0; }
+    let fa gen.PFile = l.store.files[a_file];
+    let fb gen.PFile = l.store.files[b_file];
+    if (fa.source == 0 || fb.source == 0 || a_start < 0 || b_start < 0
+        || a_start + a_len > fa.source_len || b_start + b_len > fb.source_len) { return 0; }
+    let i int = 0;
+    for i < a_len {
+        if (fa.source[a_start + i] != fb.source[b_start + i]) { return 0; }
+        i += 1;
+    }
+    return 1;
+}
+
+// checked_label_find：在当前函数的标签表里按名字内容查块；create=1 时新建。
+// 表的每一项记录引用点的 (file,start,length)，比较走 checked_label_same。
+fn checked_label_find(l *CheckedLower, file_id int, start int, name_len int, create int) int {
+    let i int = 0;
+    for i < l.label_count {
+        let ent CheckedLabel = l.labels[i];
+        if (checked_label_same(l, ent.file_id, ent.start, ent.length,
+            file_id, start, name_len) != 0) {
+            return ent.block;
+        }
+        i += 1;
+    }
+    if (create == 0) { return -1; }
+    if (l.label_count >= l.label_cap) {
+        let capacity int = l.label_cap == 0 ? 8 : l.label_cap * 2;
+        let next *CheckedLabel = malloc((capacity * sizeof(CheckedLabel)).to_type(u64))
+            .to_type(*CheckedLabel);
+        if (next == 0) { return -1; }
+        if (l.label_count > 0) {
+            memcpy(next, l.labels, (l.label_count * sizeof(CheckedLabel)).to_type(u64));
+        }
+        if (l.labels != 0) { free(l.labels.to_type(*void)); }
+        l.labels = next; l.label_cap = capacity;
+    }
+    let block int = ast_ir_b_alloc_block(&l.builder);
+    if (block < 0) { return -1; }
+    l.labels[l.label_count].file_id = file_id;
+    l.labels[l.label_count].start = start;
+    l.labels[l.label_count].length = name_len;
+    l.labels[l.label_count].block = block;
+    l.label_count += 1;
+    return block;
+}
+
+// checked_label_token：把语句里的名字 token 解析成源码字节区间并查/建块；
+// 越界、非源码 token 或分配失败返回 -1。
+fn checked_label_token(l *CheckedLower, file_id int, token int, create int) int {
+    if (file_id < 0 || file_id >= l.store.file_n) { return -1; }
+    let file gen.PFile = l.store.files[file_id];
+    if (token < 0 || token >= file.token_n || file.tokens == 0 || file.source == 0) {
+        return -1;
+    }
+    let start int = file.tokens[token].start;
+    let name_len int = file.tokens[token].len;
+    if (start < 0 || name_len <= 0 || start + name_len > file.source_len) { return -1; }
+    return checked_label_find(l, file_id, start, name_len, create);
 }
 
 // checked_lower_storage：取绑定内存槽的 SSA 指针值；未取址或未分配返回 -1。
@@ -1676,6 +1793,33 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
         i += 1;
     }
     checked_lower_mark_taken(l);
+    // goto/label：函数内存在即全部绑定内存驻留，跨任意跳转不做 SSA 合流。
+    l.label_count = 0;
+    l.has_goto = 0;
+    let scan int = ctx.stmt_first;
+    for scan < ctx.stmt_after && scan < l.store.statement_n {
+        let scan_kind int = l.store.statements[scan].kind;
+        if (scan_kind == AST_STMT_GOTO || scan_kind == AST_STMT_LABEL) {
+            l.has_goto = 1;
+            break;
+        }
+        scan += 1;
+    }
+    if (l.has_goto != 0) {
+        i = 0;
+        for i < count { l.taken[l.function_binding_first + i] = 1; i += 1; }
+        // 预分配全部标签块：发现趟回滚不会丢块，goto 也能稳定复用同一目标。
+        scan = ctx.stmt_first;
+        for scan < ctx.stmt_after && scan < l.store.statement_n {
+            let label_stmt AstStmt = l.store.statements[scan];
+            if (label_stmt.kind == AST_STMT_LABEL) {
+                if (checked_label_token(l, label_stmt.file_id, label_stmt.first, 1) < 0) {
+                    ast_ir_b_release(b); return -1;
+                }
+            }
+            scan += 1;
+        }
+    }
     // 入口块为每个被取址的绑定发一条 ADDR；参数本体同时落到 alloca 槽。
     i = 0;
     for i < count {
@@ -1751,6 +1895,7 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
     l.source_type_map = checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int);
     l.taken = checked_zero_rows(l.store.binding_n, 1).to_type(*u8);
     l.storage = checked_zero_rows(l.store.binding_n, sizeof(int)).to_type(*int);
+    l.labels = 0; l.label_count = 0; l.label_cap = 0; l.has_goto = 0;
     let tables_ok int = 1;
     if (l.store.binding_n > 0 && (l.taken == 0 || l.storage == 0)) { tables_ok = 0; }
     let type_map [25]int;
@@ -1816,6 +1961,7 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
     }
     free(l.source_map.to_type(*void)); free(l.source_type_map.to_type(*void));
     free(l.taken.to_type(*void)); free(l.storage.to_type(*void));
+    free(l.labels.to_type(*void));
     free(flow.loops.to_type(*void));
     if (result != 0) {
         checked_lower_report(&l, l.reason);

@@ -37,7 +37,7 @@ def main():
     (WORK / "build.log").write_text(result.stdout + result.stderr)
     assert result.returncode == 0, result.stdout + result.stderr
     executable = project / ".build/llvmlower"
-    for name, expected in (("scalar", "0"), ("pointer", "0"), ("control", "0"), ("aggregate", "1")):
+    for name, expected in (("scalar", "0"), ("pointer", "0"), ("control", "0"), ("goto", "0"), ("aggregate", "1")):
         result = run([str(executable), str(project / f"input/{name}.yh"), expected], project)
         (WORK / f"{name}.log").write_text(result.stdout + result.stderr)
         assert result.returncode == 0, (name, result.returncode, result.stdout, result.stderr)
@@ -53,6 +53,10 @@ def main():
             counts = re.search(r"functions=(\d+) phis=(\d+) calls=(\d+)", result.stdout)
             assert counts, result.stdout
             assert counts.group(1) == "2" and int(counts.group(2)) > 0, result.stdout
+        elif name == "goto":
+            # LL4 goto：全部绑定内存驻留，模块 verifier 必须通过。
+            assert "lower-snapshot=ok" in result.stdout, result.stdout
+            assert "functions=2" in result.stdout, result.stdout
         else:
             assert "lower-rejected=ok" in result.stdout and f"{name}_body" in result.stderr, result
             assert ".yh:" in result.stderr and "LLVM" in result.stderr, result.stderr

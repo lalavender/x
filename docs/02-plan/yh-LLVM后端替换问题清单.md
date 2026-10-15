@@ -123,3 +123,6 @@ LLVM-03 待 switch/goto/for-in 后关闭。
 2026-10-15 进度：LL4 switch 切片已验收
 （证据见[完成记录](../01-finished/yh-LLVM-LL4switch切片-2026-10-15.md)），
 LLVM-03 待 goto/for-in 后关闭。
+2026-10-15 进度：LL4 goto/label 切片已验收
+（证据见[完成记录](../01-finished/yh-LLVM-LL4goto切片-2026-10-15.md)），
+LLVM-03 待 for-in 后关闭。

@@ -378,6 +378,8 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   [完成记录](01-finished/yh-LLVM-LL4循环首片-2026-10-15.md)。）
   （2026-10-15 LL4 switch 切片完成；见
   [完成记录](01-finished/yh-LLVM-LL4switch切片-2026-10-15.md)。）
+  （2026-10-15 LL4 goto/label 切片完成；见
+  [完成记录](01-finished/yh-LLVM-LL4goto切片-2026-10-15.md)。）
 - [ ] **LL8b x64 完整运行时/宿主桥**：allocator/printf、x64 syscall/目录/时钟/内存/进程；
   保留 ARM64 启动分支与现行导入限制，审计 LLVM libcall。
 - [ ] **LL9 驱动/缓存/提交**：单文件与模块统一、完整键、原生 x64 链接器避开 ARM64 gcc 包装器（内嵌 lld 见 LL9L）、事务验收。
