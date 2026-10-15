@@ -1081,6 +1081,184 @@ fn checked_lower_if(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     return 0;
 }
 
+// checked_lower_switch_path：记录一条贯穿到 switch 退出块的分支路径（块与值快照）。
+// 值快照按「路径 × 绑定」平铺到 values；count 是当前路径数，由调用方维护。
+fn checked_lower_switch_path(values *int, blocks *int, count *int, binding_count int,
+    block int, snapshot *int) int {
+    let index int = count[0];
+    if (values != 0 && binding_count > 0) {
+        memcpy(values + index * binding_count, snapshot,
+            (binding_count * sizeof(int)).to_type(u64));
+    }
+    blocks[index] = block;
+    count[0] = index + 1;
+    return 0;
+}
+
+// checked_lower_switch：降低 switch；先数分支并分配路径表，主体见 switch_body。
+// 返回协议与 checked_lower_stmt 一致；失败释放路径表，不发布部分结果。
+fn checked_lower_switch(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let stmt AstStmt = l.store.statements[stmt_id];
+    let groups int = 0;
+    let scan int = stmt.first_child;
+    for scan >= 0 {
+        if (scan >= l.store.statement_n
+            || l.store.statements[scan].kind != AST_STMT_CASE) { return -2; }
+        groups += 1;
+        scan = l.store.statements[scan].next_sibling;
+    }
+    let b *AstIRBuilder = &l.builder;
+    let paths int = groups + 1;
+    let values *int = 0;
+    if (groups > 0 && b.binding_count > 0) {
+        values = malloc((paths * b.binding_count * sizeof(int)).to_type(u64)).to_type(*int);
+        if (values == 0) { return -1; }
+    }
+    let blocks *int = malloc((paths * sizeof(int)).to_type(u64)).to_type(*int);
+    if (blocks == 0) {
+        if (values != 0) { free(values.to_type(*void)); }
+        return -1;
+    }
+    let status int = checked_lower_switch_body(l, flow, stmt_id, values, blocks);
+    free(values.to_type(*void));
+    free(blocks.to_type(*void));
+    return status;
+}
+
+// checked_lower_switch_body：按源码顺序为每个 case/default 建比较链与体块，
+// 各体块无 fallthrough；所有贯穿路径在退出块用 N 元 phi 合流。
+// case 值必须可比较（整数 canonical 类型），控制值在进入分支前只求值一次。
+fn checked_lower_switch_body(l *CheckedLower, flow *CheckedFlow, stmt_id int,
+    path_values *int, path_blocks *int) int {
+    let b *AstIRBuilder = &l.builder;
+    let stmt AstStmt = l.store.statements[stmt_id];
+    if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2; }
+    let ctrl_edge AstStmtExpr = l.store.edges[stmt.first_expr];
+    if (ctrl_edge.next >= 0 || ctrl_edge.expr_id < 0
+        || ctrl_edge.expr_id >= l.store.expression_n) { return -2; }
+    let control int = checked_lower_expr_inner(l, flow, ctrl_edge.expr_id);
+    if (control == -2) { return -2; }
+    if (control < 0) { return -1; }
+    let control_kind int = b.insts[control].result_type;
+    if (ir.ir_integer_type(b.types[control_kind].kind) == 0) { return -2; }
+    let main_values *int = b.local_values;
+    let path_count int = 0;
+    let exit_b int = ast_ir_b_alloc_block(b);
+    if (exit_b < 0) { return -1; }
+    let group int = stmt.first_child;
+    let last_default int = 0;
+    for group >= 0 {
+        let group_stmt AstStmt = l.store.statements[group];
+        if (group_stmt.kind != AST_STMT_CASE || group_stmt.first_child < 0
+            || group_stmt.first_child >= l.store.statement_n) { return -2; }
+        let body_stmt AstStmt = l.store.statements[group_stmt.first_child];
+        if (body_stmt.kind != AST_STMT_BLOCK) { return -2; }
+        let next_group int = group_stmt.next_sibling;
+        let is_default int = group_stmt.op == gen.TK_DEFAULT ? 1 : 0;
+        last_default = is_default;
+        let body_b int = ast_ir_b_alloc_block(b);
+        let after_b int = -1;
+        if (next_group >= 0 || is_default == 0) {
+            after_b = ast_ir_b_alloc_block(b);
+        }
+        if (body_b < 0) { return -1; }
+        // case：控制值与每个常量比较；default：无条件进入，未命中路径在此耗尽。
+        if (is_default != 0) {
+            if (ast_ir_b_term_br(b, body_b) != 0) { return -1; }
+        } else {
+            let edge int = group_stmt.first_expr;
+            if (edge < 0 || after_b < 0) { return -2; }
+            for 1 {
+                let e AstStmtExpr = l.store.edges[edge];
+                if (e.expr_id < 0 || e.expr_id >= l.store.expression_n) { return -2; }
+                let value int = checked_lower_expr_inner(l, flow, e.expr_id);
+                if (value == -2) { return -2; }
+                if (value < 0) { return -1; }
+                let value_kind int = b.insts[value].result_type;
+                if (ir.ir_integer_type(b.types[value_kind].kind) == 0) { return -2; }
+                if (value_kind != control_kind) {
+                    value = checked_lower_adjust(l, value, control_kind);
+                    if (value < 0) { return -2; }
+                }
+                let cmp int = ast_ir_b_add_inst(b, ir.IR_OP_EQ, ir.IR_TY_BOOL,
+                    control, value, 0);
+                if (cmp < 0) { return -1; }
+                if (e.next < 0) {
+                    if (ast_ir_b_term_cond(b, cmp, body_b, after_b) != 0) { return -1; }
+                    break;
+                }
+                let mid_b int = ast_ir_b_alloc_block(b);
+                if (mid_b < 0) { return -1; }
+                if (ast_ir_b_term_cond(b, cmp, body_b, mid_b) != 0) { return -1; }
+                ast_ir_b_enter_block(b, mid_b);
+                edge = e.next;
+            }
+        }
+        // 体：独立值快照；贯穿时记录路径并跳到退出块（无 fallthrough）。
+        let saved *int = checked_lower_value_copy(l, flow);
+        if (b.binding_count > 0 && saved == 0) { return -1; }
+        b.local_values = saved;
+        ast_ir_b_enter_block(b, body_b);
+        let fall int = checked_lower_stmts(l, flow, body_stmt.first_child);
+        if (fall < 0) { b.local_values = main_values; return fall; }
+        if (fall == 1) {
+            if (checked_lower_switch_path(path_values, path_blocks, &path_count,
+                b.binding_count, b.cur_block, saved) != 0) {
+                b.local_values = main_values; return -1;
+            }
+            if (ast_ir_b_term_br(b, exit_b) != 0) { b.local_values = main_values; return -1; }
+        }
+        b.local_values = main_values;
+        free(saved.to_type(*void));
+        if (after_b >= 0) { ast_ir_b_enter_block(b, after_b); }
+        group = next_group;
+    }
+    // 末尾仍是 case：当前块是「全部未命中」路径；默认分支会把它耗尽。
+    if (last_default == 0) {
+        if (checked_lower_switch_path(path_values, path_blocks, &path_count,
+            b.binding_count, b.cur_block, main_values) != 0) { return -1; }
+        if (ast_ir_b_term_br(b, exit_b) != 0) { return -1; }
+    }
+    // 所有分支都终结（例如每个体都 return）：退出块只作为合法空不可达块存在。
+    if (path_count <= 0) {
+        ast_ir_b_enter_block(b, exit_b);
+        return 0;
+    }
+    // 退出块：对每个绑定按贯穿路径值做 N 元合流；内存驻留读取仍走 LOAD。
+    ast_ir_b_enter_block(b, exit_b);
+    let mi int = 0;
+    for mi < b.binding_count {
+        if (checked_lower_storage(l, mi) >= 0) { b.local_values[mi] = -1; mi += 1; continue; }
+        let first int = path_values[mi];
+        let same int = 1;
+        let missing int = 0;
+        let pi int = 0;
+        for pi < path_count {
+            let v int = path_values[pi * b.binding_count + mi];
+            if (v < 0) { missing = 1; break; }
+            if (v != first) { same = 0; }
+            pi += 1;
+        }
+        if (missing != 0) { b.local_values[mi] = -1; mi += 1; continue; }
+        if (same != 0 || path_count == 1) { b.local_values[mi] = first; mi += 1; continue; }
+        let binding AstBinding = l.store.bindings[l.function_binding_first + mi];
+        let kind int = checked_lower_type(l, binding.sym_type_id);
+        if (kind < 0) { return -1; }
+        let phi int = ast_ir_b_add_phi(b, kind, path_count);
+        if (phi < 0) { return -1; }
+        pi = 0;
+        for pi < path_count {
+            if (ast_ir_b_set_phi_input(b, phi, pi, path_blocks[pi],
+                path_values[pi * b.binding_count + mi]) != 0) { return -1; }
+            pi += 1;
+        }
+        b.local_values[mi] = phi;
+        mi += 1;
+    }
+    // 退出块收尾：补无条件分支并进入续块，返回 1 表示路径继续。
+    return checked_lower_exit_block(l);
+}
+
 // checked_lower_loop：降低条件循环 `for cond { 体 }` 与无限循环 `for { 体 }`。
 // 每层嵌套在 CheckedFlow.loops 独占携带/break 状态；两趟协议与旧构造器一致：
 // 发现趟收集携带绑定与 continue/break 站点数，真实趟据此预留 header/exit phi。
@@ -1373,6 +1551,7 @@ fn checked_lower_stmt(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         return checked_lower_stmts(l, flow, stmt.first_child);
     }
     if (stmt.kind == AST_STMT_IF) { return checked_lower_if(l, flow, stmt_id); }
+    if (stmt.kind == AST_STMT_SWITCH) { return checked_lower_switch(l, flow, stmt_id); }
     if (stmt.kind == AST_STMT_FOR) { return checked_lower_loop(l, flow, stmt_id); }
     if (stmt.kind == AST_STMT_BREAK) { return checked_lower_break(l, flow); }
     if (stmt.kind == AST_STMT_CONTINUE) { return checked_lower_continue(l, flow); }

@@ -33,6 +33,23 @@
     todo.md 的「设计决定不做」。
 - 详见[完成记录](01-finished/yh-全量门测试并行化-2026-10-15.md)。
 
+## 2026-10-15 LLVM LL4 switch 切片：多值 case/default 与合流
+
+- **范围**：`switch` 控制值一次求值 + case 常量比较链，各体无 fallthrough，
+  退出块 N 元 phi 合流；体内 `break`/`continue` 仍作用于外层循环。
+- **实现**：`checked_lower_switch/switch_body`（路径表 + 独立体快照），
+  全部分支终结时退出块作为合法空不可达块；`AST_STMT_SWITCH` 分派。
+- **门禁**：新增 `tests/selfhost/llvm-switch.py`（O0/O2 原生运行 + 非常量 case
+  来源拒绝）与运行语料 `tests/yh-run/run/llvm-switch.yh`；`llvmlower` 的
+  `input/control.yh` 加入 switch。
+- **验收**（WSL，`SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`）：
+  `make`、`make test`（语法 78/78 与 42/42、运行 **311/311**）全绿；
+  `make selfhost-native` 全绿（固定点 24 产物一致、自解析 86 文件、
+  modules 18/18、项目 100/100）；十个 `llvm-*` 专项门全部退出 0。
+- **未关闭**：LL4 的 `goto`/label 与 `for-in`；LL5 聚合与全局数据；
+  LLVM 默认未切换、种子未滚。
+- 详见 [完成记录](01-finished/yh-LLVM-LL4switch切片-2026-10-15.md)。
+
 ## 2026-10-15 LLVM LL4 首片：嵌套循环、break/continue 与无限循环
 
 - **范围**：`for {}` 无限循环、嵌套 for 的内层 break/continue、循环体局部绑定

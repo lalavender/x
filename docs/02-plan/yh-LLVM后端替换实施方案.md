@@ -359,7 +359,10 @@ IRModule 序列化与跨缓存身份未落、首片之外的形态明确拒绝�
 循环状态改为按深度共存的 `CheckedLoop` 栈（上限 16），顺带修复「循环体局部
 绑定入携带 phi」「无限循环 exit phi 前驱数」「break 携带值站点数」三个缺陷；
 门禁见 `tests/selfhost/llvm-control.py` 与 `tests/yh-run/run/llvm-control-flow.yh`。
-`switch`/`goto`/`for-in` 按后续行保留（`goto` 现在带来源拒绝）。
+2026-10-15 switch 切片已完成：控制值一次求值 + 常量比较链，各体无 fallthrough，
+退出块 N 元 phi 合流，循环内 break/continue 仍作用于外层；门禁见
+`tests/selfhost/llvm-switch.py` 与 `tests/yh-run/run/llvm-switch.yh`。
+`goto`/`for-in` 按后续行保留（`goto` 现在带来源拒绝）。
 
 - [ ] 按“嵌套循环与 break/continue → 无限循环 → switch → goto/label → for-in”逐行建用例。
 - [ ] 每行先用 LLVM 编译触发 unsupported，再实现该行，独立运行/提交；不一次混入所有控制流。

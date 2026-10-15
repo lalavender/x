@@ -120,3 +120,6 @@ LLVM-03/04 待聚合、全局数据与后续切片后关闭。
 2026-10-15 进度：LL4 首片（嵌套循环/break/continue/无限 `for {}`）已验收
 （证据见[完成记录](../01-finished/yh-LLVM-LL4循环首片-2026-10-15.md)），
 LLVM-03 待 switch/goto/for-in 后关闭。
+2026-10-15 进度：LL4 switch 切片已验收
+（证据见[完成记录](../01-finished/yh-LLVM-LL4switch切片-2026-10-15.md)），
+LLVM-03 待 goto/for-in 后关闭。
