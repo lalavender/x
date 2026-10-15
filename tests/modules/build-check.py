@@ -12,10 +12,17 @@
     rebind  用例+方法  构建后新增本地同名模块，必须重绑定并重编译
 
 usage: python3 tests/modules/build-check.py [--compiler-path ./yh]
+                                          [--jobs N]
+    用例之间互不依赖（每个用例在自己独占的 tmp/modcheck/<用例> 目录里重新
+    复制 fixture 并构建），因此可并发执行；--jobs 缺省 min(4, CPU 核数)，
+    --jobs 1 恢复串行。每个用例内部还会 fork 模块 worker，故上限比纯语法
+    语料低。
 退出码：全部通过 0；有失败 1。
 """
 
 import argparse
+import concurrent.futures
+import os
 import shutil
 import struct
 import subprocess
@@ -26,6 +33,10 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 PROJ = HERE / "projects"
 WORK = ROOT / "tmp" / "modcheck"
+
+# 并发用例数缺省上限：一个用例就是若干次完整项目构建（每次还会 fork 模块
+# worker），上限 4 兼顾核数不多的机器与并发构建的内存占用。
+DEFAULT_JOBS = max(1, min(4, os.cpu_count() or 1))
 
 
 def sh(cmd, cwd, env=None):
@@ -225,6 +236,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--compiler-path", default=str(ROOT / "yh"))
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
+                    help=f"并发用例数（缺省 {DEFAULT_JOBS}；1 为串行）")
     args = ap.parse_args()
     compiler = str(Path(args.compiler_path).resolve())
     WORK.mkdir(parents=True, exist_ok=True)
@@ -238,8 +251,19 @@ def main():
         elif not args.quiet:
             print(f"OK   {name}")
 
-    for c in CASES:
-        dst = WORK / c["fixture"].replace("/", "_")
+    def run_case(c):
+        """跑一个 CASES 用例，返回收集到的断言结果列表。
+
+        每个用例在自己的 dst 目录里重新复制 fixture，彼此不共享路径，
+        因此可以并发；并发时断言结果不能就地打印，先收集再由 main 打印。
+        """
+        out = []
+
+        def report(ok, name, detail=""):
+            """收集一条断言结果，由 main 按 CASES 顺序统一打印。"""
+            out.append((ok, name, detail))
+
+        dst = WORK / f"{c['fixture'].replace('/', '_')}--{c['name']}"
         copy_proj(PROJ / c["fixture"], dst)
         if c["kind"] == "cabi-run":
             # 两个窄参数探针和整数转换都必须进入 SSA，避免回退旧发射器掩盖问题。
@@ -258,7 +282,7 @@ def main():
                    f"ir_functions={lowered}, cast_ops={casts}, "
                    f"run={run.returncode if run else None}\n"
                    f"{built.stderr[-400:]}")
-            continue
+            return out
         if c["kind"] == "comptime-local":
             built = sh([compiler, "build"], cwd=dst)
             asm_files = list((dst / ".build" / "asm").glob("*.s"))
@@ -274,7 +298,7 @@ def main():
                    f"build={built.returncode}, run={run.returncode if run else None}\n"
                    f"{built.stderr[-500:]}\n"
                    f"{asm[-600:]}")
-            continue
+            return out
         if c["kind"] == "comptime-cross-module":
             host = dst / "host"
             built = sh([compiler, "build"], cwd=host)
@@ -499,7 +523,7 @@ def main():
                        f"私有闭包函数变化后导入方仍复用了旧 CT 结果: "
                        f"build={changed.returncode}, run={rerun.returncode if rerun else None}\n"
                        f"{changed.stderr[-500:]}")
-            continue
+            return out
         if c["kind"] == "comptime-layout-deps":
             built = sh([compiler, "build"], cwd=dst)
             program = dst / ".build" / "comptimelayoutdeps"
@@ -510,7 +534,7 @@ def main():
                    f"同模块跨源文件 typed CT 布局依赖未按值依赖完成: "
                    f"build={built.returncode}, run={run.returncode if run else None}\n"
                    f"{built.stderr[-500:]}")
-            continue
+            return out
         if c["kind"] == "comptime-expanded-ast":
             built = sh([compiler, "build", "--stats"], cwd=dst)
             lines = [line for line in built.stderr.splitlines()
@@ -524,7 +548,7 @@ def main():
                    f"普通函数展开未进入稳定 SSA: build={built.returncode}, "
                    f"ir_functions={lowered}, run={run.returncode if run else None}\n"
                    f"{built.stderr[-500:]}")
-            continue
+            return out
         if c["kind"] == "comptime-expanded-budget":
             checked = sh([compiler, "check"], cwd=dst / c["sub"])
             report(checked.returncode != 0
@@ -532,7 +556,7 @@ def main():
                    c["name"],
                    f"实际展开 AST 节点越界未被精确拒绝: rc={checked.returncode}\n"
                    f"{(checked.stderr + checked.stdout)[-500:]}")
-            continue
+            return out
         if c["kind"] == "checked-lower":
             # 纯快照 lowering：受检快照 → 模块 SSA。scalar 必须全量降低并统计出
             # 5 个运行期函数（comptime 不计入）、4 个直接调用与合流/循环携带 phi；
@@ -563,14 +587,14 @@ def main():
                    f"build={built.returncode}, run={run.returncode if run else None}, "
                    f"stdout={(run.stdout if run else '')[-120:]!r}\n"
                    f"{(run.stderr if run else built.stderr)[-400:]}")
-            continue
+            return out
         if c["kind"] == "host-capture":
             target = "linux" if sys.platform == "darwin" else "darwin"
             checked = sh([compiler, "-target", target, "check"], cwd=dst)
             report(checked.returncode == 0, c["name"],
                    f"交叉目标不应改变宿主文件标志: rc={checked.returncode}\n"
                    f"{checked.stderr[-400:]} {checked.stdout[-200:]}")
-            continue
+            return out
         if c["kind"] == "stdlib-run":
             run = sh([compiler, "run"], cwd=dst / c["sub"],
                      env={"YH_STDLIB": str(ROOT / "libs")})
@@ -580,14 +604,14 @@ def main():
                    f"退出码 {run.returncode} 期望 {c['expect']}，"
                    f"输出结尾 {run.stdout[-120:]!r} 期望 {c['stdout']!r}\n"
                    f"{run.stderr[-400:]}")
-            continue
+            return out
         if c["kind"] == "envp-run":
             run = sh([compiler, "run"], cwd=dst,
                      env={"YH_ENV_TEST": "present"})
             report(run.returncode == 0, c["name"],
                    f"main(argc, argv, envp) 未收到进程环境: rc={run.returncode}\n"
                    f"{run.stderr[-400:]} {run.stdout[-200:]}")
-            continue
+            return out
         if c["kind"] == "inline":
             built = sh([compiler, "build", "--stats"], cwd=dst)
             asm_path = dst / ".build" / "asm" / "example_inline-main.s"
@@ -624,7 +648,7 @@ def main():
                    f"link={stat_value(changed_stats, 'link')}, "
                    f"run={rerun.returncode if rerun else None}\n"
                    f"{changed.stderr[-400:]}")
-            continue
+            return out
         if c["kind"] == "ir-call":
             built = sh([compiler, "build", "--stats"], cwd=dst)
             lines = [line for line in built.stderr.splitlines()
@@ -658,7 +682,7 @@ def main():
                    f"公开函数体变化未仅重编提供模块并重新链接: "
                    f"asm={stat_value(last, 'asm')}, link={stat_value(last, 'link')}, "
                    f"run={rerun.returncode if rerun else None}\n{changed.stderr[-500:]}")
-            continue
+            return out
         if c["kind"] == "platform-source":
             native = "darwin" if sys.platform == "darwin" else "linux"
             cross = "linux" if native == "darwin" else "darwin"
@@ -671,7 +695,7 @@ def main():
             report(checked.returncode == 0, "r3-cross-target-source-selection",
                    f"交叉目标未选择对应源文件: target={cross}, rc={checked.returncode}\n"
                    f"{checked.stderr[-400:]} {checked.stdout[-200:]}")
-            continue
+            return out
         if c["kind"] == "darwin-dir-api":
             darwin = sh([compiler, "-target", "darwin", "check"], cwd=dst)
             report(darwin.returncode == 0, "r3-getattrlistbulk-darwin-available",
@@ -682,7 +706,7 @@ def main():
                    "r3-getattrlistbulk-not-linux-api",
                    f"Linux 目标意外导入 Darwin API: rc={linux.returncode}\n"
                    f"{linux.stderr[-400:]}")
-            continue
+            return out
         if c["kind"] == "directory-scan":
             odd_name = dst / "line\nbreak space ' 雪.yh"
             odd_name.write_text("module main;\npub const DIR_NAME_PROBE int = 1;\n")
@@ -701,7 +725,7 @@ def main():
                    "r3-directory-enumeration-grows-past-one-batch",
                    f"目录条目超过 512 后未检查末尾源码: rc={many.returncode}\n"
                    f"{many.stderr[-500:]}")
-            continue
+            return out
         if c["kind"] == "linux-syscall-asm":
             emitted = sh([compiler, "-target", "linux", "--emit-asm", "main.yh"], cwd=dst)
             asm = emitted.stdout
@@ -720,7 +744,7 @@ def main():
                    "r3-linux-syscall-is-target-gated",
                    f"Darwin 目标意外接受 Linux 系统调用接口: rc={darwin.returncode}\n"
                    f"{darwin.stderr[-400:]}")
-            continue
+            return out
         if c["kind"] == "mode-cache":
             first = sh([compiler, "build", "--legacy-system", "--stats"], cwd=dst)
             first_stats = [line for line in first.stderr.splitlines()
@@ -747,7 +771,7 @@ def main():
                    and stat_value(hot_stats, "link") == 0,
                    "r3-link-cache-same-profile-hit",
                    f"相同默认配置未命中链接缓存: {hot_stats}\n{hot.stderr[-400:]}")
-            continue
+            return out
         if c["kind"] == "legacy-system":
             default = sh([compiler, "build"], cwd=dst)
             report(default.returncode != 0,
@@ -772,7 +796,7 @@ def main():
             run = sh([compiler, "run", "--legacy-system"], cwd=dst)
             report(run.returncode == 0, "r3-system-compat-run",
                    f"兼容配置运行失败: rc={run.returncode}\n{run.stderr[-400:]}")
-            continue
+            return out
         if c["kind"] == "ir":
             # Windows 检出（core.autocrlf）下工作树是 CRLF：本用例随后会改写
             # 源文件触发增量构建，行尾差异会使 IR 缓存键全量失效；先统一规范
@@ -934,7 +958,7 @@ def main():
             report(run is not None and run.returncode == c["expect"],
                    "r2b-built-program-runs",
                    f"程序退出码 {run.returncode if run else '未生成'} 期望 {c['expect']}")
-            continue
+            return out
         if c["kind"] == "scheduler":
             api_source = dst / "src" / "api" / "api.yh"
             extra = "".join(
@@ -994,7 +1018,7 @@ def main():
                    f"PATH 启动及含空格/引号项目路径未能由 fork 快照 worker 构建: "
                    f"rc={spaced_build.returncode}\n"
                    f"{spaced_build.stderr[-400:]} {spaced_build.stdout[-300:]}")
-            continue
+            return out
         if c["kind"] == "scheduler-diamond":
             base_source = dst / "src" / "base" / "base.yh"
             extra = "".join(
@@ -1027,7 +1051,7 @@ def main():
                        f"程序退出码 {run.returncode} 期望 42")
             else:
                 report(False, "r2b-diamond-program-runs", "菱形调度后没有生成程序")
-            continue
+            return out
         if c["name"] == "u3-c-source-object-library-mix":
             cc = "clang" if sys.platform == "darwin" else "gcc"
             obj = dst / "vendor" / "prebuilt.o"
@@ -1037,7 +1061,7 @@ def main():
             if prepared.returncode != 0:
                 report(False, c["name"],
                        f"测试预编译对象失败: {prepared.stderr[-400:]}")
-                continue
+                return out
         r = sh([compiler, "run"] if c["kind"] == "run" else [compiler, "build"],
                cwd=dst / c["sub"])
         if c["kind"] == "run":
@@ -1199,6 +1223,19 @@ def main():
                         repeated.stderr + repeated.stdout)
             report(ok, c["name"],
                    f"退出码 {r.returncode}，期望诊断含「{c['msg']}」\n{(r.stderr + r.stdout)[-400:]}")
+
+        return out
+
+    jobs = max(1, args.jobs)
+    if jobs == 1:
+        case_results = [run_case(c) for c in CASES]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            case_results = list(pool.map(run_case, CASES))
+    # 结果按 CASES 顺序打印，输出与串行时逐行一致（便于比对回归）。
+    for case_result in case_results:
+        for ok, name, detail in case_result:
+            report(ok, name, detail)
 
     # —— stdlib 三层（YH_STDLIB） ——
     std = (WORK / "stdlib")

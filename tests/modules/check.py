@@ -14,12 +14,15 @@ stage0 种子（src/ 冻结）不识别，因此不进 tests/yh 的 stage0 语�
 用法：
     python3 tests/modules/check.py
     python3 tests/modules/check.py --compiler-path ./yh
+    python3 tests/modules/check.py --jobs 1       # 串行（缺省 min(8, CPU 核数)）
     python3 tests/modules/check.py --quiet
 
 退出码：全部通过 0；有失败 1。
 """
 
 import argparse
+import concurrent.futures
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,30 +30,45 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent          # tests/modules
 ROOT = HERE.parent.parent                        # 仓库根
 
+# 并发语料数缺省上限：每个文件一次编译器进程，上限 8 兼顾核数不多的机器。
+DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 
-def run_batch(compiler: Path, subdir: str, expect_ok: bool, quiet: bool) -> int:
+
+def run_batch(compiler: Path, subdir: str, expect_ok: bool, quiet: bool,
+              jobs: int) -> int:
     """跑一个目录的语料，返回失败数。expect_ok=True 期望接受，否则期望拒绝。"""
     files = sorted((HERE / subdir).glob("*.yh"))
     if not files:
         print(f"modules/{subdir}: 无语料（缺用例）")
         return 1
-    failed = 0
-    for f in files:
+
+    def run_one(path: Path):
+        """跑一个语料，返回 (路径, 退出码, 是否被接受, 诊断文本)。"""
         proc = subprocess.run(
-            [str(compiler), "--syntax-check", str(f)],
+            [str(compiler), "--syntax-check", str(path)],
             cwd=ROOT, capture_output=True, text=True, timeout=60)
-        ok = (proc.returncode == 0)
-        if ok != expect_ok:
+        return path, proc.returncode, proc.returncode == 0, \
+            (proc.stdout.strip(), proc.stderr.strip())
+
+    if jobs > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            outcomes = list(pool.map(run_one, files))
+    else:
+        outcomes = [run_one(path) for path in files]
+
+    failed = 0
+    for path, code, accepted, (stdout, stderr) in outcomes:
+        if accepted != expect_ok:
             failed += 1
             verb = "接受" if expect_ok else "拒绝"
-            print(f"FAIL {subdir}/{f.name}: 应被{verb}，退出码 {proc.returncode}")
-            if proc.stdout.strip():
-                print(proc.stdout.strip())
-            if proc.stderr.strip():
-                print(proc.stderr.strip())
+            print(f"FAIL {subdir}/{path.name}: 应被{verb}，退出码 {code}")
+            if stdout:
+                print(stdout)
+            if stderr:
+                print(stderr)
         elif not quiet:
             verdict = "接受" if expect_ok else "拒绝"
-            print(f"OK   {subdir}/{f.name}（{verdict}）")
+            print(f"OK   {subdir}/{path.name}（{verdict}）")
     return failed
 
 
@@ -59,6 +77,8 @@ def main() -> int:
     ap.add_argument("--compiler-path", default=str(ROOT / "yh"),
                     help="自举编译器路径（默认 ./yh）")
     ap.add_argument("--quiet", action="store_true", help="只打印失败项")
+    ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
+                    help=f"并发语料数（缺省 {DEFAULT_JOBS}；1 为串行）")
     args = ap.parse_args()
 
     compiler = Path(args.compiler_path).resolve()
@@ -66,12 +86,13 @@ def main() -> int:
         print(f"编译器不存在: {compiler}")
         return 1
 
-    failed = run_batch(compiler, "accept", True, args.quiet)
-    failed += run_batch(compiler, "reject", False, args.quiet)
+    jobs = max(1, args.jobs)
+    failed = run_batch(compiler, "accept", True, args.quiet, jobs)
+    failed += run_batch(compiler, "reject", False, args.quiet, jobs)
 
     total_ok = len(list((HERE / "accept").glob("*.yh"))
                    + list((HERE / "reject").glob("*.yh")))
-    print(f"modules: 通过 {total_ok - failed}/{total_ok}")
+    print(f"modules: 通过 {total_ok - failed}/{total_ok}（并发 {jobs}）")
     return 1 if failed else 0
 
 

@@ -2,6 +2,27 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-15 全量门测试并行化（只改 harness，不重编种子）
+
+- **动机**：全量门（`make test` + `make selfhost-native`）实测约 26 分钟，瓶颈是
+  「每个用例起一次 yh 进程 × 全串行」，不是编译算力：单次 `--syntax-check`
+  0.52–0.67s（qemu 放大 yh 自身启动），同一批 120 文件在单进程内跑 5.5s、
+  逐文件起进程要 69.0s（12.5×）。
+- **改动**：`tests/yh/check.py`（`--compiler` 模式）、`tests/yh-run/check.py`、
+  `tests/modules/check.py`、`tests/modules/build-check.py` 新增 `--jobs`
+  （缺省 `min(8, CPU)`；build-check 因每个用例内部还会 fork 模块 worker 取
+  `min(4, CPU)`；`--jobs 1` 恢复串行）。yhrun 产物改为
+  `<workdir>/<run|fail|pass>/<用例>`；build-check 的用例循环体抽成
+  `run_case(c)`、断言先收集再由 main 按 `CASES` 顺序打印、每用例独占
+  `tmp/modcheck/<fixture>--<用例>`（原先是同一 fixture 共用目录，无法并发）。
+- **验收**（同一二进制内串并行对照，WSL/x86_64/qemu）：`tests/yh --compiler`
+  84.4s→15.1s（-j8，5.6×）、`tests/yh-run` 302.5s→60.9s（-j8，5.0×）、
+  `build-check` 560.5s→274.7s（-j4，2.0×）；三者并行与串行输出逐行一致
+  （78/78+42/42、309/309、100/100）。
+- 详见[完成记录](01-finished/yh-全量门测试并行化-2026-10-15.md)；剩余加速项
+  （tmpfs 工作目录、语料去重、模块 worker 上限、批量 syntax-check、门禁分层）
+  记入 todo.md。
+
 ## 2026-10-15 LLVM LL5 第一切片：局部标量内存（alloca/load/store）
 
 - **范围**：`&局部/参数`、指针参数与局部、`*p` 读写与复合赋值进入

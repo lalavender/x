@@ -15,6 +15,8 @@ tests/yh/ 下全部 .yh 语料，要求每个文件都满足：零词法错误 +
     python3 tests/yh/check.py --compiler   # yh 编译器模式（--syntax-check）
     python3 tests/yh/check.py --compiler --compiler-path ./stage1
                                            # 指定编译器路径（自举差分）
+    python3 tests/yh/check.py --compiler --jobs 4
+                                           # 并发跑语料（缺省 min(8, CPU 核数)）
     python3 tests/yh/check.py --quiet      # 只打印失败项与汇总
 
 ANTLR 模式的 parser 生成目录缺省在仓库 tmp/ 下（用 --workdir 覆盖），
@@ -24,6 +26,7 @@ ANTLR 模式的 parser 生成目录缺省在仓库 tmp/ 下（用 --workdir 覆�
 """
 
 import argparse
+import concurrent.futures
 import os
 import re
 import shutil
@@ -250,11 +253,11 @@ def run_coverage(api, corpus_files):
 YH_BIN = ROOT / "yh"
 
 
-def run_compiler_mode(quiet, compiler=None):
+def run_compiler_mode(quiet, compiler=None, jobs=1):
     """编译器模式：yh --syntax-check 接受全部正例、拒绝全部反例。
 
     compiler 可指定编译器路径（自举差分时指向 stage1/stage2），
-    缺省用仓库根的 yh。
+    缺省用仓库根的 yh。jobs > 1 时并发跑语料（每个文件一个独立进程）。
     """
     yh_bin = Path(compiler) if compiler else YH_BIN
     if not yh_bin.exists():
@@ -267,31 +270,44 @@ def run_compiler_mode(quiet, compiler=None):
     if not all_files:
         die(f"{corpus_dir} 下没有任何 .yh 语料。")
     if not quiet:
-        print(f"编译器：{yh_bin}（--syntax-check）")
+        print(f"编译器：{yh_bin}（--syntax-check，并发 {jobs}）")
         print(f"语料目录：{corpus_dir}")
         print(f"  正例 {len(positive)} 个 / 反例 {len(negative)} 个\n")
 
+    def run_one(target):
+        """跑一个语料，返回 (路径, 是否反例, 相对路径, 是否通过, 诊断)。"""
+        path, is_negative = target
+        proc = subprocess.run([str(yh_bin), "--syntax-check", str(path)],
+                              capture_output=True, text=True)
+        accepted = proc.returncode == 0
+        ok = (not accepted) if is_negative else accepted
+        return path, is_negative, path.relative_to(corpus_dir), ok, \
+            (proc.stderr.strip() or proc.stdout.strip())
+
+    targets = ([(p, False) for p in positive]
+               + [(p, True) for p in negative])
+    if jobs > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            outcomes = list(pool.map(run_one, targets))
+    else:
+        outcomes = [run_one(target) for target in targets]
+
     pos_fail, neg_fail = [], []
-    for path in positive:
-        proc = subprocess.run([str(yh_bin), "--syntax-check", str(path)],
-                              capture_output=True, text=True)
-        rel = path.relative_to(corpus_dir)
-        if proc.returncode == 0:
-            if not quiet:
-                print(f"OK   {rel}")
+    for _, is_negative, rel, ok, out in outcomes:
+        if is_negative:
+            if ok:
+                if not quiet:
+                    print(f"OK   {rel}（已按预期被拒）")
+            else:
+                neg_fail.append((rel, "预期被拒绝，实际通过"))
+                print(f"FAIL {rel}（预期被拒绝，实际通过）")
         else:
-            pos_fail.append((rel, proc.stderr.strip() or proc.stdout.strip()))
-            print(f"FAIL {rel}")
-    for path in negative:
-        proc = subprocess.run([str(yh_bin), "--syntax-check", str(path)],
-                              capture_output=True, text=True)
-        rel = path.relative_to(corpus_dir)
-        if proc.returncode != 0:
-            if not quiet:
-                print(f"OK   {rel}（已按预期被拒）")
-        else:
-            neg_fail.append((rel, "预期被拒绝，实际通过"))
-            print(f"FAIL {rel}（预期被拒绝，实际通过）")
+            if ok:
+                if not quiet:
+                    print(f"OK   {rel}")
+            else:
+                pos_fail.append((rel, out))
+                print(f"FAIL {rel}")
 
     for rel, out in pos_fail:
         print(f"\n{rel}:")
@@ -314,10 +330,14 @@ def main():
     parser.add_argument("--workdir", default=None,
                         help="ANTLR 模式生成 parser 的临时目录位置（缺省仓库 tmp/ 下）")
     parser.add_argument("--quiet", action="store_true", help="只打印失败项与汇总")
+    parser.add_argument("--jobs", type=int, default=0,
+                        help="编译器模式下并发语料数（缺省 min(8, CPU 核数)；"
+                             "1 为串行；ANTLR 模式在单进程内解析，不受影响）")
     args = parser.parse_args()
 
     if args.compiler:
-        sys.exit(run_compiler_mode(args.quiet, args.compiler_path))
+        jobs = args.jobs if args.jobs > 0 else max(1, min(8, os.cpu_count() or 1))
+        sys.exit(run_compiler_mode(args.quiet, args.compiler_path, jobs))
 
     ensure_runtime()
 

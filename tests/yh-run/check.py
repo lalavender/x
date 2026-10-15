@@ -15,8 +15,10 @@
     pass/  编译必须成功，不运行。
 
 产物统一放 <workdir>（缺省 tmp/yh-run-work，在仓库 tmp/ 下，已被
-gitignore）。并发运行多套校验时用 --workdir 指定不同目录，避免多个
-进程同时读写同一批产物文件。--cross 模式额外用
+gitignore），按 run/fail/pass 分组落到子目录；每轮校验前用 --workdir
+指定不同目录即可避免多套校验互相覆盖。--jobs N 在同一个 workdir 内并发
+执行用例（每个用例一个独立产物路径，互不干扰）；缺省取 min(8, CPU 核数)，
+--jobs 1 恢复完全串行的旧行为。--cross 模式额外用
 -Wl,-oformat=elf64-aarch64 -sysroot -B 交叉编译成 Linux ELF，经
 `docker exec yh-build` 在 aarch64 Linux 容器内运行并比对；
 docker 或 sysroot 不可用时全部打印 SKIP，不算失败。
@@ -32,6 +34,8 @@ docker 或 sysroot 不可用时全部打印 SKIP，不算失败。
 """
 
 import argparse
+import concurrent.futures
+import os
 import re
 import subprocess
 import sys
@@ -77,6 +81,10 @@ ASM_SYMBOL_RE = re.compile(
 
 # 汇总里每种状态的打印标签。
 LABELS = {"PASS": "PASS", "FAIL": "FAIL", "SKIP": "SKIP"}
+
+# 并发用例数缺省上限：每个用例都要起一次编译器（还可能汇编、链接、运行），
+# 上限 8 兼顾核数不多的机器与 qemu/容器里每进程数十 MB 的内存占用。
+DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 
 
 def diag_tail(proc, limit=6):
@@ -227,10 +235,8 @@ def check_asm_symbols(path):
     return "PASS", ""
 
 
-def check_run_case(path, cross):
-    """run/ 用例：编译并运行，比对输出与退出码。"""
-    stem = path.stem
-    out = WORK / (f"{stem}-linux" if cross else stem)
+def check_run_case(path, cross, out):
+    """run/ 用例：编译并运行，比对输出与退出码。产物写到调用方给的 out。"""
     proc, timed_out = compile_src(path, out, cross)
     if timed_out:
         return "FAIL", "编译超时"
@@ -273,9 +279,8 @@ def check_run_case(path, cross):
     return "PASS", ""
 
 
-def check_fail_case(path, cross):
+def check_fail_case(path, cross, out):
     """fail/ 用例：编译须干净拒绝；可选 fail-contains 约束诊断类别。"""
-    out = WORK / (stem_linux(path) if cross else path.stem)
     proc, timed_out = compile_src(path, out, cross)
     if timed_out:
         return "FAIL", "编译超时"
@@ -296,14 +301,8 @@ def check_fail_case(path, cross):
     return "PASS", ""
 
 
-def stem_linux(path):
-    """交叉模式下 fail/ 用例的产物名。"""
-    return f"{path.stem}-linux"
-
-
-def check_pass_case(path, cross):
+def check_pass_case(path, cross, out):
     """pass/ 用例：编译必须成功，不运行。"""
-    out = WORK / (stem_linux(path) if cross else path.stem)
     proc, timed_out = compile_src(path, out, cross)
     if timed_out:
         return "FAIL", "编译超时"
@@ -338,10 +337,13 @@ def main():
                         help="产物目录（缺省 tmp/yh-run-work；并发运行时各自指定）")
     parser.add_argument("--filter", default="",
                         help="只跑相对路径含任一子串的用例（逗号分隔；自举差分子集用）")
+    parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
+                        help=f"并发用例数（缺省 {DEFAULT_JOBS}；1 为串行）")
     args = parser.parse_args()
 
     YH_BIN = Path(args.compiler).resolve()
     WORK = Path(args.workdir)
+    jobs = max(1, args.jobs)
     filters = [f for f in args.filter.split(",") if f]
 
     def case_allowed(rel: str) -> bool:
@@ -368,17 +370,33 @@ def main():
         ("pass", PASS_DIR, check_pass_case),
     ]
 
-    results = []  # (目录名, 相对路径, 状态, 说明)
+    # 每个用例一个独立产物路径（组名 + 文件名），并发执行时互不覆盖。
+    tasks = []
     for name, directory, checker in groups:
         for path in list_cases(directory):
             rel = f"{name}/{path.name}"
             if not case_allowed(rel):
                 continue
-            if global_skip:
-                results.append((name, rel, "SKIP", global_skip))
-                continue
-            status, detail = checker(path, args.cross)
-            results.append((name, rel, status, detail))
+            out = WORK / name / (f"{path.stem}-linux" if args.cross else path.stem)
+            tasks.append((name, rel, path, out, checker))
+
+    def run_task(task):
+        """跑一个用例，返回汇总用的结果行。"""
+        name, rel, path, out, checker = task
+        status, detail = checker(path, args.cross, out)
+        return (name, rel, status, detail)
+
+    if global_skip:
+        results = [(name, rel, "SKIP", global_skip)
+                   for name, rel, _, _, _ in tasks]
+    else:
+        for _, _, _, out, _ in tasks:
+            out.parent.mkdir(parents=True, exist_ok=True)
+        if jobs == 1:
+            results = [run_task(task) for task in tasks]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+                results = list(pool.map(run_task, tasks))
 
     # 明细打印：--quiet 时略过 PASS 行。
     for _, rel, status, detail in results:
@@ -407,7 +425,7 @@ def main():
               + (f"，跳过 {n_skip}" if n_skip else ""))
     mode = "交叉 ELF" if args.cross else "Darwin Mach-O"
     print(f"总计：通过 {sum(1 for r in results if r[2] == 'PASS')}/{len(results)}"
-          f"（{mode}）{cross_note}")
+          f"（{mode}，并发 {jobs}）{cross_note}")
     sys.exit(1 if total_fail else 0)
 
 
