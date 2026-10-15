@@ -140,8 +140,34 @@ fn llvm_cast(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst) void {
     }
 }
 
-// llvm_instruction：发射完整标量指令；预检已经排除内存/浮点，不能静默忽略未知操作。
+// llvm_instruction：发射完整标量/内存指令；预检已经排除浮点与聚合，未知操作不能静默忽略。
 fn llvm_instruction(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, next *int) void {
+    if (inst.op == ir.IR_OP_ADDR) {
+        // 局部存储取址：按指针元素发 alloca，对齐取元素自然对齐（未知取 1）。
+        let pointee ir.IRType = body.types[body.types[inst.result_type].elem];
+        let align int = pointee.bits / 8;
+        if (align < 1) { align = 1; }
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = alloca ");
+        llvm_type(out, pointee.kind, pointee.bits);
+        llvm_text(out, ", align "); llvm_number(out, align.to_type(u64)); llvm_byte(out, '\n');
+        return;
+    }
+    if (inst.op == ir.IR_OP_LOAD) {
+        // 来源对齐未知，统一按 align 1 发射，不向 LLVM 声明更强国对齐属性。
+        let ty ir.IRType = body.types[inst.result_type];
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = load ");
+        llvm_type(out, ty.kind, ty.bits);
+        llvm_text(out, ", ptr "); llvm_value(out, inst.a); llvm_text(out, ", align 1\n");
+        return;
+    }
+    if (inst.op == ir.IR_OP_STORE) {
+        let value_kind int = ir.ir_find_value_type(body, inst.b);
+        let ty ir.IRType = body.types[value_kind];
+        llvm_text(out, "  store "); llvm_type(out, ty.kind, ty.bits);
+        llvm_text(out, " "); llvm_value(out, inst.b);
+        llvm_text(out, ", ptr "); llvm_value(out, inst.a); llvm_text(out, ", align 1\n");
+        return;
+    }
     if (inst.op == ir.IR_OP_CAST) { llvm_cast(out, body, inst); return; }
     if (inst.op == ir.IR_OP_EQ || inst.op >= ir.IR_OP_NE && inst.op <= ir.IR_OP_GE) {
         llvm_compare(out, body, inst, next); return;
@@ -181,6 +207,22 @@ fn llvm_instruction(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, next 
     }
     if (inst.op != ir.IR_OP_CONST && inst.op != ir.IR_OP_PARAM && inst.op != ir.IR_OP_COPY) {
         out.failed = 1; return;
+    }
+    if (ty.kind >= ir.IR_TY_PTR) {
+        // 不透明指针没有可加的整数 0：PARAM/COPY 用零偏移 GEP，CONST 用 inttoptr。
+        if (inst.op == ir.IR_OP_CONST) {
+            llvm_text(out, "inttoptr i64 "); llvm_number(out, inst.imm.to_type(u64));
+            llvm_text(out, " to ptr\n");
+        } else {
+            llvm_text(out, "getelementptr i8, ptr ");
+            if (inst.op == ir.IR_OP_PARAM) {
+                llvm_text(out, "%p"); llvm_number(out, inst.imm.to_type(u64));
+            } else {
+                llvm_value(out, inst.a);
+            }
+            llvm_text(out, ", i64 0\n");
+        }
+        return;
     }
     llvm_text(out, "add "); llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' ');
     if (inst.op == ir.IR_OP_PARAM) { llvm_text(out, "%p"); llvm_number(out, inst.imm.to_type(u64)); llvm_text(out, ", 0\n"); }

@@ -2,6 +2,31 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-15 LLVM LL5 第一切片：局部标量内存（alloca/load/store）
+
+- **范围**：`&局部/参数`、指针参数与局部、`*p` 读写与复合赋值进入
+  alloca + load/store lowering；聚合/全局/切片/指针算术仍带来源拒绝。
+- **IR**：`IR_TY_PTR` 扩展为 canonical 指针族（12..24 = `IR_TY_PTR` + 元素
+  kind）；新增 `IR_OP_ADDR`（imm = 绑定 ID）；模块层指针统一 `IR_TY_PTR`，
+  元素经 type_map 精确校验；通用 kind 12 保留旧 SSA 编码。
+- **Lowering**：预扫描标记取址绑定；入口 ADDR（参数同时 spill），读写走
+  LOAD/STORE；循环 carry 与 if 合流跳过内存绑定；`&` 只接受 `&变量`。
+- **后端**：opaque ptr、`alloca`、`load/store align 1`；指针 PARAM/COPY 用
+  零偏移 GEP、指针 CONST 用 `inttoptr`；预检放行指针但继续拒绝浮点/聚合。
+- **门禁**：新增 `tests/selfhost/llvm-memory.py`（O0/O2 对象原生运行 + `&arr[0]`
+  带来源拒绝）与运行语料 `tests/yh-run/run/llvm-local-memory.yh`；同步更新
+  `llvm-lower.py`、`llvmscalar` 指针探针、`build-check.py` 的 checked-lower
+  用例；两个 LLVM 门固定优先宿主 `/usr/bin` 工具并清理 crossbin 包装 PATH。
+- **验收**（WSL，`SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`）：
+  `make`、`make test`（语法 78/78 与 42/42、运行 309/309）全绿；
+  `make selfhost-native` 前序全绿（固定点 24 产物一致、自解析 86 文件、
+  modules 18/18），build-check 单独复跑 **100/100**（整轮因宿主时钟超时中断）；
+  `llvm-memory/llvm-lower/llvm-ir/llvm-runtime/llvm-checked/llvm-front-output/`
+  `llvm-module/llvm-module-cache` 全部退出 0。
+- **未关闭**：聚合与嵌套取址、全局/CT 数据、切片、指针算术与对齐证明；
+  LLVM 默认未切换、种子未滚。
+- 详见 [完成记录](01-finished/yh-LLVM-LL5局部内存首片-2026-10-15.md)。
+
 ## 2026-10-15 LLVM LL8a：内存运行时 helper（memcpy/memset/strlen）
 
 - **范围**：LL8a 第一片——用 `.yh` 发射代码为 LLVM 后端提供 C 签名的

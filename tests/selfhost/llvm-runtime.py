@@ -82,14 +82,18 @@ def run(command, **kwargs):
 
 
 def locate(*names):
-    """按 PATH 与 /usr/bin 顺序查找差分工具；找不到返回 None 由调用方报告。"""
+    """按 /usr/bin 优先、PATH 回落的顺序查找宿主差分工具。
+
+    这些门需要宿主 x86_64 的 clang/opt/gcc；PATH 上可能有 crossbin 交叉包装器，
+    因此先固定 /usr/bin，再允许 PATH 提供其它发行路径。
+    """
     for name in names:
-        found = shutil.which(name)
-        if found:
-            return found
         fallback = Path("/usr/bin") / name
         if fallback.is_file():
             return str(fallback)
+        found = shutil.which(name)
+        if found:
+            return found
     return None
 
 
@@ -179,9 +183,11 @@ def main():
             f"O{level} 边界驱动失败 rc={result.returncode}\n{result.stdout[-400:]}")
 
         # 桥路径：编译器自己产对象并链接，核对真实管线产物的 weak 定义与运行。
+        # 链接子进程必须用宿主 x86_64 gcc；crossbin 包装器在 PATH 上时需清掉。
         bridge_exe = WORK / f"probe-O{level}"
         result = run([compiler, "--backend", "llvm", "--target", TARGET,
-                      f"-O{level}", "-o", str(bridge_exe), str(probe_source)])
+                      f"-O{level}", "-o", str(bridge_exe), str(probe_source)],
+                     env=dict(os.environ, PATH="/usr/bin:/bin"))
         assert result.returncode == 0, f"O{level} 桥链接失败\n{result.stderr[-1200:]}"
         defined = run([tools["nm"], str(bridge_exe)]).stdout
         for name in HELPERS:

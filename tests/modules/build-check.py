@@ -536,7 +536,8 @@ def main():
         if c["kind"] == "checked-lower":
             # 纯快照 lowering：受检快照 → 模块 SSA。scalar 必须全量降低并统计出
             # 5 个运行期函数（comptime 不计入）、4 个直接调用与合流/循环携带 phi；
-            # pointer/aggregate 必须带真实来源整模块拒绝，不发布部分产物。
+            # pointer 自 LL5 首片起走取址/解引用内存驻留并成功降低；aggregate
+            # 仍必须带真实来源整模块拒绝，不发布部分产物。
             built = sh([compiler, "build"], cwd=dst)
             program = dst / ".build" / "llvmlower"
             run = sh([str(program), str(dst / "input" / "scalar.yh"), "0"],
@@ -546,15 +547,19 @@ def main():
                         and "lower-snapshot=ok functions=5 phis=" in run.stdout
                         and " calls=4" in run.stdout
                         and "phis=0" not in run.stdout)
-            rejects = True
-            for name in ("pointer", "aggregate"):
-                rejected = sh([str(program), str(dst / "input" / f"{name}.yh"), "1"],
-                              cwd=dst) if program.exists() else None
-                rejects = rejects and rejected is not None and rejected.returncode == 0 \
-                    and "lower-rejected=ok" in rejected.stdout \
-                    and f"{name}_body" in rejected.stderr and ".yh:" in rejected.stderr
-            report(lower_ok and rejects, c["name"],
-                   f"快照 lowering 覆盖或拒绝路径失败: lower_ok={lower_ok}, rejects={rejects}, "
+            pointer = sh([str(program), str(dst / "input" / "pointer.yh"), "0"],
+                         cwd=dst) if program.exists() else None
+            pointer_ok = (pointer is not None and pointer.returncode == 0
+                          and "lower-snapshot=ok" in pointer.stdout
+                          and "functions=2" in pointer.stdout)
+            rejected = sh([str(program), str(dst / "input" / "aggregate.yh"), "1"],
+                          cwd=dst) if program.exists() else None
+            rejects = (rejected is not None and rejected.returncode == 0
+                       and "lower-rejected=ok" in rejected.stdout
+                       and "aggregate_body" in rejected.stderr and ".yh:" in rejected.stderr)
+            report(lower_ok and pointer_ok and rejects, c["name"],
+                   f"快照 lowering 覆盖或拒绝路径失败: lower_ok={lower_ok}, "
+                   f"pointer_ok={pointer_ok}, rejects={rejects}, "
                    f"build={built.returncode}, run={run.returncode if run else None}, "
                    f"stdout={(run.stdout if run else '')[-120:]!r}\n"
                    f"{(run.stderr if run else built.stderr)[-400:]}")

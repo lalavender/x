@@ -24,6 +24,9 @@ pub const IR_TY_U64 int = 9;
 pub const IR_TY_F32 int = 10;
 pub const IR_TY_F64 int = 11;
 pub const IR_TY_PTR int = 12;
+// 指针类型按所指元素编码：canonical 下标 = IR_TY_PTR + 元素 kind，
+// elem 必须等于下标减 IR_TY_PTR；IR_TY_PTR（12）即 *void。
+pub const IR_TY_PTR_LAST int = 24;
 
 // 指令种类。参数由入口块前导 PARAM 定义；控制流只放在 IRBlock 的终结字段中。
 pub const IR_OP_CONST int = 1;
@@ -50,6 +53,9 @@ pub const IR_OP_SHL int = 21;
 pub const IR_OP_SHR int = 22;
 pub const IR_OP_CALL int = 23;
 pub const IR_OP_CAST int = 24;
+// 局部存储取址：imm 是函数内稳定绑定 ID，结果是指向绑定类型的 canonical 指针。
+// 每个绑定在入口块只发一条；LLVM 后端把它降为 alloca。
+pub const IR_OP_ADDR int = 25;
 
 // 基本块终结种类。每个块恰有一个终结操作。
 pub const IR_TERM_BR int = 1;
@@ -143,14 +149,20 @@ fn ir_type_ok(f *IRFunction, tid int) int {
         return 0;
     }
     let t IRType = f.types[tid];
-    if (t.kind < IR_TY_VOID || t.kind > IR_TY_PTR) {
+    if (t.kind < IR_TY_VOID || t.kind > IR_TY_PTR_LAST) {
         return 0;
     }
     if (t.kind == IR_TY_VOID) {
         return t.bits == 0 && t.elem == -1;
     }
     if (t.kind == IR_TY_PTR) {
+        // 通用指针（含旧 SSA 路径的 *元素 编码）只要求元素引用有效。
         return t.elem >= 0 && t.elem < f.type_count && t.elem != tid && t.bits > 0;
+    }
+    if (t.kind > IR_TY_PTR && t.kind <= IR_TY_PTR_LAST) {
+        // canonical 指针：elem 必须等于 kind 减 IR_TY_PTR。
+        return t.elem == t.kind - IR_TY_PTR && t.elem >= 0 && t.elem < f.type_count
+            && t.bits > 0;
     }
     if (t.elem != -1) {
         return 0;
@@ -197,10 +209,11 @@ fn ir_is_pred(f *IRFunction, from int, to int) int {
 fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
     let has_result int = inst.op != IR_OP_STORE
         && (inst.op != IR_OP_CALL || inst.result_id >= 0);
-    if (inst.op < IR_OP_CONST || inst.op > IR_OP_CAST) {
+    if (inst.op < IR_OP_CONST || inst.op > IR_OP_ADDR) {
         return -1;
     }
-    if (inst.op != IR_OP_CONST && inst.op != IR_OP_PARAM && inst.imm != 0) {
+    if (inst.op != IR_OP_CONST && inst.op != IR_OP_PARAM && inst.op != IR_OP_ADDR
+        && inst.imm != 0) {
         return -1;
     }
     if (inst.op == IR_OP_PHI && saw_non_phi != 0) {
@@ -222,6 +235,11 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
     }
     if (inst.op == IR_OP_PARAM) {
         return inst.imm >= 0 && inst.a == -1 && inst.b == -1 && inst.aux == -1 ? 0 : -1;
+    }
+    if (inst.op == IR_OP_ADDR) {
+        // 绑定 ID 必须非负；结果已验证为 canonical 指针（禁止 void 分配）。
+        if (inst.imm < 0 || inst.a != -1 || inst.b != -1 || inst.aux != -1) { return -1; }
+        return f.types[inst.result_type].elem == IR_TY_VOID ? -1 : 0;
     }
     if (inst.op == IR_OP_CALL) {
         if (inst.a != -1 || inst.b != -1 || inst.aux < 0 || inst.aux >= f.call_count) {
@@ -258,7 +276,7 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
         }
         let at int = ir_find_value_type(f, inst.a);
         let bt int = ir_find_value_type(f, inst.b);
-        if (f.types[at].kind != IR_TY_PTR || f.types[at].elem != bt) {
+        if (f.types[at].kind < IR_TY_PTR || f.types[at].elem != bt) {
             return -1;
         }
         return 0;
@@ -268,7 +286,7 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
             return -1;
         }
         let at int = ir_find_value_type(f, inst.a);
-        if (at < 0 || f.types[at].kind != IR_TY_PTR || f.types[at].elem != inst.result_type) {
+        if (at < 0 || f.types[at].kind < IR_TY_PTR || f.types[at].elem != inst.result_type) {
             return -1;
         }
         return 0;

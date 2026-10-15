@@ -19,6 +19,11 @@ fn checked_lower_kind(store *CheckedStorage, source_type int) int {
     if (kind == gen.TY_U16) { return ir.IR_TY_U16; }
     if (kind == gen.TY_U32) { return ir.IR_TY_U32; }
     if (kind == gen.TY_U64) { return ir.IR_TY_U64; }
+    if (kind == gen.TY_PTR) {
+        // canonical 指针编码：IR_TY_PTR + 所指元素 kind；*void 即 IR_TY_PTR。
+        let pointee int = checked_lower_kind(store, store.types[source_type].elem);
+        return pointee < 0 ? -1 : ir.IR_TY_PTR + pointee;
+    }
     return -1;
 }
 
@@ -167,23 +172,32 @@ fn checked_lower_signature(l *CheckedLower, off int, length int, flags int,
 // 未使用的 float/ptr<void> 仅为既有 IR 私有表完整性存在，不表示本片支持相应表达式。
 fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
     let i int = 0;
-    for i < 13 {
+    for i <= ir.IR_TY_PTR_LAST {
         types[i].kind = i;
         types[i].elem = -1;
         types[i].bits = 0;
         if (i == ir.IR_TY_BOOL || i == ir.IR_TY_I8 || i == ir.IR_TY_U8) { types[i].bits = 8; }
         if (i == ir.IR_TY_I16 || i == ir.IR_TY_U16) { types[i].bits = 16; }
         if (i == ir.IR_TY_I32 || i == ir.IR_TY_U32 || i == ir.IR_TY_F32) { types[i].bits = 32; }
-        if (i == ir.IR_TY_I64 || i == ir.IR_TY_U64 || i == ir.IR_TY_F64 || i == ir.IR_TY_PTR) {
+        if (i == ir.IR_TY_I64 || i == ir.IR_TY_U64 || i == ir.IR_TY_F64 || i >= ir.IR_TY_PTR) {
             types[i].bits = 64;
         }
-        if (i == ir.IR_TY_PTR) { types[i].elem = ir.IR_TY_VOID; }
+        if (i >= ir.IR_TY_PTR) { types[i].elem = i - ir.IR_TY_PTR; }
         let layout ir.IRModuleType;
-        layout.kind = i;
-        layout.bits = types[i].bits;
-        layout.size = types[i].bits / 8;
-        layout.align = layout.size == 0 ? 1 : layout.size;
-        layout.elem = i == ir.IR_TY_PTR ? l.private_type_map[ir.IR_TY_VOID] : -1;
+        if (i >= ir.IR_TY_PTR) {
+            // 模块层指针统一 IR_TY_PTR；元素经 type_map 精确对照，LLVM 文本仍是 opaque ptr。
+            layout.kind = ir.IR_TY_PTR;
+            layout.bits = 64;
+            layout.size = 8;
+            layout.align = 8;
+            layout.elem = l.private_type_map[i - ir.IR_TY_PTR];
+        } else {
+            layout.kind = i;
+            layout.bits = types[i].bits;
+            layout.size = types[i].bits / 8;
+            layout.align = layout.size == 0 ? 1 : layout.size;
+            layout.elem = -1;
+        }
         let added int = ir.ir_module_add_type(l.output, "", &layout, 0, 0);
         if (added < 0) { return -1; }
         l.private_type_map[i] = added;
@@ -317,6 +331,12 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
             let row int = checked_lower_binding(l, &node);
             if (row < 0) { return -2; }
             let binding AstBinding = l.store.bindings[row];
+            let storage int = checked_lower_storage(l, binding.id);
+            if (storage >= 0) {
+                let want int = checked_lower_type(l, node.type_id);
+                if (want < 0 || b.types[b.insts[storage].result_type].elem != want) { return -2; }
+                return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, storage, -1, 0);
+            }
             let value int = b.local_values[binding.id];
             return value >= 0 && value < b.inst_count ? value : -2;
         }
@@ -342,6 +362,31 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     }
     if (node.kind == AST_EXPR_UNARY) {
         if (node.child0 < 0) { return -2; }
+        if (node.op == gen.TK_AMP) {
+            // 只支持取局部/参数地址；绑定必须在入口已分配存储。
+            let child AstExpr = l.store.expressions[node.child0];
+            if (child.kind != AST_EXPR_PRIMARY || child.child0 >= 0
+                || child.sym_kind != gen.SYM_VAR) { return -2; }
+            let row int = checked_lower_binding(l, &child);
+            if (row < 0) { return -2; }
+            let binding AstBinding = l.store.bindings[row];
+            let storage int = checked_lower_storage(l, binding.id);
+            if (storage < 0) { return -2; }
+            let want int = checked_lower_type(l, node.type_id);
+            if (want < 0 || b.insts[storage].result_type != want) { return -2; }
+            return storage;
+        }
+        if (node.op == gen.TK_STAR) {
+            // 解引用：指针元素类型必须与表达式类型一致。
+            let want int = checked_lower_type(l, node.type_id);
+            if (want < 0) { return -2; }
+            let pointer int = checked_lower_expr_inner(l, flow, node.child0);
+            if (pointer == -2) { return -2; }
+            if (pointer < 0) { return -1; }
+            let pointer_kind int = b.insts[pointer].result_type;
+            if (pointer_kind < ir.IR_TY_PTR || b.types[pointer_kind].elem != want) { return -2; }
+            return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, pointer, -1, 0);
+        }
         let want int = checked_lower_type(l, node.type_id);
         if (want < 0) { return -2; }
         let inner int = checked_lower_expr_inner(l, flow, node.child0);
@@ -711,14 +756,20 @@ fn checked_lower_let(l *CheckedLower, flow *CheckedFlow, stmt_id int, value_out 
         value = checked_lower_adjust(l, value, want);
         if (value < 0) { return -2; }
     }
-    value_out[0] = value;
+    let storage int = checked_lower_storage(l, binding.id);
+    if (storage >= 0) {
+        if (ast_ir_b_add_store(&l.builder, storage, value) < 0) { return -1; }
+        value_out[0] = -1;
+    } else {
+        value_out[0] = value;
+    }
     row_out[0] = stmt.first_binding;
     return 0;
 }
 
-// checked_lower_assign：降低简单变量赋值（含 += -= *= /= %= 等复合形态）。
-// 复合赋值沿用与旧构造器一致的规则：操作数类型不同时按较宽一侧提升，
-// 结果再截回绑定类型；字面量位型不重新装入。
+// checked_lower_assign：降低简单/复合赋值；左值支持变量与 `*指针`。
+// 变量若已取址则读写内存驻留槽；复合赋值先 LOAD 再按旧规则提升/截回。
+// 指针解引用左值用指针的 canonical 元素类型核对，不匹配即带来源拒绝。
 fn checked_lower_assign(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     let b *AstIRBuilder = &l.builder;
     let stmt AstStmt = l.store.statements[stmt_id];
@@ -731,26 +782,52 @@ fn checked_lower_assign(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     if (rhs_edge.next >= 0 || rhs_edge.expr_id < 0 || rhs_edge.expr_id >= l.store.expression_n) { return -2; }
     if (lhs_edge.expr_id < 0 || lhs_edge.expr_id >= l.store.expression_n) { return -2; }
     let lhs AstExpr = l.store.expressions[lhs_edge.expr_id];
-    if (lhs.kind != AST_EXPR_PRIMARY || lhs.child0 >= 0) { return -2; }
-    let row int = checked_lower_binding(l, &lhs);
-    if (row < 0) { return -2; }
-    let binding AstBinding = l.store.bindings[row];
-    // 参数与局部都是可变绑定；快照符号表不含已弹出作用域的局部槽，不回查。
-    let want int = checked_lower_type(l, binding.sym_type_id);
-    if (want < 0) { return -2; }
+    // 左值分类：变量（target = 内存槽或 -1 表示 SSA 值）或 `*指针`。
+    let binding_id int = -1;
+    let target int = -1;
+    let want int = -1;
+    let lhs_source_type int = lhs.type_id;
+    if (lhs.kind == AST_EXPR_PRIMARY && lhs.child0 < 0) {
+        let row int = checked_lower_binding(l, &lhs);
+        if (row < 0) { return -2; }
+        let binding AstBinding = l.store.bindings[row];
+        // 参数与局部都是可变绑定；快照符号表不含已弹出作用域的局部槽，不回查。
+        binding_id = binding.id;
+        lhs_source_type = binding.sym_type_id;
+        want = checked_lower_type(l, binding.sym_type_id);
+        if (want < 0) { return -2; }
+        target = checked_lower_storage(l, binding.id);
+    } else if (lhs.kind == AST_EXPR_UNARY && lhs.op == gen.TK_STAR && lhs.child0 >= 0) {
+        want = checked_lower_type(l, lhs.type_id);
+        if (want < 0) { return -2; }
+        let pointer int = checked_lower_expr_inner(l, flow, lhs.child0);
+        if (pointer == -2) { return -2; }
+        if (pointer < 0) { return -1; }
+        let pointer_kind int = b.insts[pointer].result_type;
+        if (pointer_kind < ir.IR_TY_PTR || b.types[pointer_kind].elem != want) { return -2; }
+        target = pointer;
+    } else {
+        return -2;
+    }
     let right int = checked_lower_expr_inner(l, flow, rhs_edge.expr_id);
     if (right == -2) { return -2; }
     if (right < 0) { return -1; }
     let right_kind int = b.insts[right].result_type;
     let value int = right;
     if (op != 0) {
-        let previous int = b.local_values[binding.id];
-        if (previous < 0 || previous >= b.inst_count) { return -2; }
+        let previous int = -1;
+        if (target >= 0) {
+            previous = ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, target, -1, 0);
+            if (previous < 0) { return -1; }
+        } else {
+            previous = b.local_values[binding_id];
+            if (previous < 0 || previous >= b.inst_count) { return -2; }
+        }
         let previous_kind int = b.insts[previous].result_type;
         let operand int = previous_kind;
         if (previous_kind != right_kind) {
             if (l.store.expressions[rhs_edge.expr_id].is_lit == 0) { return -2; }
-            if (checked_lower_lit_fits(l, binding.sym_type_id,
+            if (checked_lower_lit_fits(l, lhs_source_type,
                 l.store.expressions[rhs_edge.expr_id].const_bits) == 0) { return -2; }
             b.insts[right].result_type = previous_kind;
         }
@@ -763,11 +840,15 @@ fn checked_lower_assign(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     }
     let stored int = checked_lower_adjust(l, value, want);
     if (stored < 0) { return -1; }
+    if (target >= 0) {
+        if (ast_ir_b_add_store(b, target, stored) < 0) { return -1; }
+        return 1;
+    }
     if (flow.flow_break_target >= 0) {
         // 循环体内被赋值的绑定参与循环携带；真实趟顺序与发现趟一致。
-        if (checked_lower_carry_record(flow, binding.id) != 0) { return -1; }
+        if (checked_lower_carry_record(flow, binding_id) != 0) { return -1; }
     }
-    b.local_values[binding.id] = stored;
+    b.local_values[binding_id] = stored;
     // 简单语句不终结基本块：返回 1（路径继续），由序列推进处按需加续块。
     return 1;
 }
@@ -800,6 +881,12 @@ fn checked_lower_merge(l *CheckedLower, flow *CheckedFlow, pred0 int, values0 *i
     let b *AstIRBuilder = &l.builder;
     let i int = 0;
     for i < b.binding_count {
+        // 内存驻留绑定不经 SSA 合流，读取一律走 LOAD。
+        if (checked_lower_storage(l, i) >= 0) {
+            b.local_values[i] = -1;
+            i += 1;
+            continue;
+        }
         // 只在一侧词法块内声明的绑定没有另一臂值，也不在合流后可见。
         if (values0[i] < 0 || values1[i] < 0) {
             b.local_values[i] = -1;
@@ -1161,7 +1248,7 @@ fn checked_lower_stmt(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         let status int = checked_lower_let(l, flow, stmt_id, &value, &row);
         if (status != 0) { return status; }
         let binding AstBinding = l.store.bindings[row];
-        b.local_values[binding.id] = value;
+        if (value >= 0) { b.local_values[binding.id] = value; }
         l.local_count += 1;
         return 1;
     }
@@ -1253,6 +1340,39 @@ fn checked_lower_stmts(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     return 1;
 }
 
+// checked_lower_storage：取绑定内存槽的 SSA 指针值；未取址或未分配返回 -1。
+// 存储表项保存「指令编号 + 1」以区分未分配（0）；首指令编号 0 也合法。
+fn checked_lower_storage(l *CheckedLower, binding_id int) int {
+    let slot int = l.function_binding_first + binding_id;
+    if (l.storage == 0 || slot < 0 || l.storage[slot] <= 0) { return -1; }
+    return l.storage[slot] - 1;
+}
+
+// checked_lower_mark_taken：扫描本函数表达式范围，标记 `&变量` 的绑定。
+// 只认 `&primary(变量)`；其他取址形态不标记，由表达式 lowering 带来源拒绝。
+fn checked_lower_mark_taken(l *CheckedLower) void {
+    let ctx *CheckedFunction = &l.function;
+    let i int = ctx.expr_first;
+    for i < ctx.expr_after && i < l.store.expression_n {
+        let node AstExpr = l.store.expressions[i];
+        if (node.kind == AST_EXPR_UNARY && node.op == gen.TK_AMP && node.child0 >= 0) {
+            let child AstExpr = l.store.expressions[node.child0];
+            if (child.kind == AST_EXPR_PRIMARY && child.child0 < 0
+                && child.sym_kind == gen.SYM_VAR) {
+                let row int = checked_lower_binding(l, &child);
+                if (row >= 0) {
+                    let binding AstBinding = l.store.bindings[row];
+                    if (binding.owner_decl == ctx.decl_row && binding.id >= 0
+                        && binding.id < l.function_binding_count) {
+                        l.taken[l.function_binding_first + binding.id] = 1;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
 // checked_lower_function：以快照绑定初始化纯 builder，产物经模块增建接口深拷贝后释放临时表。
 fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     let ctx *CheckedFunction = &l.function;
@@ -1287,13 +1407,41 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
         }
         i += 1;
     }
+    // 先重置本函数的取址/存储槽，再扫描表达式范围确定需要内存驻留的绑定。
+    i = 0;
+    for i < count {
+        l.taken[l.function_binding_first + i] = 0;
+        l.storage[l.function_binding_first + i] = 0;
+        i += 1;
+    }
+    checked_lower_mark_taken(l);
+    // 入口块为每个被取址的绑定发一条 ADDR；参数本体同时落到 alloca 槽。
+    i = 0;
+    for i < count {
+        if (l.taken[l.function_binding_first + i] == 0) { i += 1; continue; }
+        let binding AstBinding = l.store.bindings[ctx.binding_first + i];
+        let value_kind int = checked_lower_type(l, binding.sym_type_id);
+        if (value_kind < 0 || value_kind > ir.IR_TY_PTR) {
+            l.last_token = binding.name_token;
+            l.reason = "首片不支持此绑定的取址类型";
+            ast_ir_b_release(b); return -2;
+        }
+        let addr int = ast_ir_b_add_inst(b, ir.IR_OP_ADDR, ir.IR_TY_PTR + value_kind,
+            -1, -1, i.to_type(i64));
+        if (addr < 0) { ast_ir_b_release(b); return -1; }
+        l.storage[l.function_binding_first + i] = addr + 1;
+        if (i < params && ast_ir_b_add_store(b, addr, b.local_values[i]) < 0) {
+            ast_ir_b_release(b); return -1;
+        }
+        i += 1;
+    }
     let status int = checked_lower_stmts(l, l.flow, l.store.statements[ctx.body_stmt].first_child);
     if (status < 0) { ast_ir_b_release(b); return status; }
     if (status == 1 && ret != ir.IR_TY_VOID) { ast_ir_b_release(b); return -2; }
     if (status == 1 && ast_ir_b_term_ret(b, -1) != 0) { ast_ir_b_release(b); return -1; }
     let body ir.IRFunction;
     body.abi = l.store.sig_abi[sig]; body.target_id = l.output.target.key;
-    body.ret_type = ret; body.types = types; body.type_count = 13;
+    body.ret_type = ret; body.types = types; body.type_count = ir.IR_TY_PTR_LAST + 1;
     body.insts = b.insts; body.inst_count = b.inst_count;
     body.blocks = b.blocks; body.block_count = b.block_count;
     body.phis = b.phis; body.phi_count = b.phi_count;
@@ -1303,7 +1451,12 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     body.call_symbols = b.calls.symbols; body.call_symbol_size = b.calls.symbol_size;
     body.value_count = b.inst_count;
     let result int = ir.ir_verify(&body);
-    if (result == 0) { result = ir.ir_module_add_function(l.output, symbol, &body, l.private_type_map, 0); }
+    if (result != 0) {
+        l.reason = "内部错误：函数 SSA 校验失败";
+    } else {
+        result = ir.ir_module_add_function(l.output, symbol, &body, l.private_type_map, 0);
+        if (result < 0) { l.reason = "内部错误：函数模块增建失败"; }
+    }
     ast_ir_b_release(b);
     return result < 0 ? -1 : 0;
 }
@@ -1332,12 +1485,17 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
     l.flow = &flow;
     l.source_map = checked_zero_rows(l.store.file_n, sizeof(int)).to_type(*int);
     l.source_type_map = checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int);
-    let type_map [13]int;
+    l.taken = checked_zero_rows(l.store.binding_n, 1).to_type(*u8);
+    l.storage = checked_zero_rows(l.store.binding_n, sizeof(int)).to_type(*int);
+    let tables_ok int = 1;
+    if (l.store.binding_n > 0 && (l.taken == 0 || l.storage == 0)) { tables_ok = 0; }
+    let type_map [25]int;
     l.private_type_map = &type_map[0];
-    let types [13]ir.IRType;
+    let types [25]ir.IRType;
     let result int = -1;
     // 先建立 canonical 类型映射与模块来源，函数签名才能在符号表里登记模块类型下标。
-    if (l.source_map != 0 && l.source_type_map != 0 && checked_lower_tables(&l, &types[0]) == 0) {
+    if (l.source_map != 0 && l.source_type_map != 0 && tables_ok != 0
+        && checked_lower_tables(&l, &types[0]) == 0) {
         result = 0;
         let declaration int = 0;
         for declaration < l.store.declaration_n {
@@ -1391,16 +1549,19 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
                     }
                     free(name.to_type(*void));
                 }
-                if (found < 0) { result = -1; break; }
+                if (found < 0) { result = -1; l.reason = "内部错误：函数符号缺失"; break; }
                 result = checked_lower_function(&l, found, &types[0]);
             }
             i += 1;
         }
-        if (result == 0 && ir.ir_module_verify(&candidate) != 0) { result = -1; }
+        if (result == 0 && ir.ir_module_verify(&candidate) != 0) {
+            result = -1; l.reason = "内部错误：模块校验失败";
+        }
     }
     free(l.source_map.to_type(*void)); free(l.source_type_map.to_type(*void));
+    free(l.taken.to_type(*void)); free(l.storage.to_type(*void));
     if (result != 0) {
-        checked_lower_report(&l, result == -2 ? l.reason : "内部错误：受检 SSA 模块构造或校验失败");
+        checked_lower_report(&l, l.reason);
         ir.ir_module_release(&candidate);
         return result == -2 ? 1 : -1;
     }
