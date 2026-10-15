@@ -13,7 +13,7 @@
 通过模块级 LLVM 文本和编译器内嵌 LLVM 静态库生成对象。过渡期分开构建新旧可执行程序，
 LLVM 模式严格拒绝回退，候选完整验收后切换默认并退役旧代码生成。
 
-**Tech Stack：**旧种子可编译的 `.yh`、LLVM 21.1.8 静态 SDK + 薄 C ABI 桥、Python 门禁、Linux/x86_64 ELF；
+**Tech Stack：**旧种子可编译的 `.yh`、LLVM 21.1.8 静态 SDK + 薄 C ABI 桥（链接阶段见 LL9L 内嵌 lld）、Python 门禁、Linux/x86_64 ELF；
 Windows 宿主在 WSL 原生构建与验证，ARM64 种子和 qemu 仅用于启动/旧基线。
 
 **Spec：**[替换设计](../03-design/yh-LLVM后端替换设计.md)。先读
@@ -42,6 +42,7 @@ Windows 宿主在 WSL 原生构建与验证，ARM64 种子和 qemu 仅用于启�
 | 内存 helper 自身被 O2 改成递归 libcall | 自包含运行时仍运行正确，无未解析或递归入口 | LL8a、LL8b |
 | 同项目并发、晚到的私有函数错误、路径含空格/中文 | 不发布失败接口/产物，路径原样传递，诊断顺序确定 | LL9、LL10 / R2b |
 | x64 对象遇到 PATH 中的 ARM64 gcc 包装器，或候选 B 仍是 ARM64 | 原生工具不走 crossbin；检查 ELF machine=62，B/C/D 直接原生运行 | LL0、LL3、LL9、LL10 |
+| 内嵌 lld 后的全目标初始化、体积与重入 | 按裁剪决策只留 X86/AArch64 或明确接受全量；lld 可重入，失败不发布产物 | LL9L |
 
 ## 0. 范围、依赖与文件安排
 
@@ -51,7 +52,7 @@ R2b 的既有子项目仍独立推进，其硬门在 LL10 默认正式切换前�
 
 建议执行顺序：
 
-`LL0 → LL0E → LL1 → LL2 → LL3 → LL8a → LL5 → LL4 → LL6 → LL7 → LL8b → LL9 → LL10 → LL11 → F1 → LL12`。
+`LL0 → LL0E → LL1 → LL2 → LL3 → LL8a → LL5 → LL4 → LL6 → LL7 → LL8b → LL9 → LL9L → LL10 → LL11 → F1 → LL12`。
 
 从 LL3 起生成的程序就在 WSL x86_64 原生运行；此时启动编译器 A 仍可能经 qemu。
 LL10 才要求编译器 B/C/D 自身均为原生 x64。F1 的 Linux/AArch64 回归只阻挡旧后端退役，
@@ -68,6 +69,7 @@ LL8a 用 `.yh` 编写的 LLVM 发射代码提供基本 helper 的 IR；LL8b 在�
 | 首期 x64 OS 桥 | 修改 `compiler/cmd/project_dir.linux.yh`、`clock.linux.yh`、`process.yh`、prelude 和 LLVM runtime | x64 syscall/目录/时钟/内存/进程，旧种子可编译的架构选择 |
 | 模块/内存 IR | 新建 `compiler/ir/module.yh`、`ssa_memory.yh`；修改 `ssa.yh`、`ssa_call.yh`、`ssa_serialize.yh` | 模块声明、数据、存储/调用及验证/序列化 |
 | LLVM 输出 | 新建 `compiler/backend/llvm_module.yh`、`llvm_scalar.yh`、`llvm_memory.yh`、`llvm_call.yh`、`llvm_runtime.yh` | 文本、来源映射、各类操作与 helper |
+| LLVM 链接 | 新建 `compiler/llvm/lld_bridge.cpp`、`compiler/backend/llvm_lld.yh`；修改 `cmd/link_cache.yh`、`driver.yh`、SDK 脚本 | 进程内 lld、CRT/库路径、回落与身份 |
 | CLI/对象/缓存 | 新建 `compiler/cmd/llvm_toolchain.yh`；修改 `driver.yh`、`compile.yh`、`module_worker.yh`、`module_build.yh`、`link_cache.yh`、`build_scheduler.yh` | 解析、argv、产物与事务 |
 | 语言接口 | 修改 `compiler/parse/iface.yh`、`iface_ct.yh` 及缓存键 | 目标/ABI/布局版本身份，保留后缀 |
 | 验收 | 新建下述 `.yh` fixture 和 `tests/selfhost/llvm-*.py`；修改现有 run/modules/selfhost 脚本 | 覆盖、语义、缓存、运行时和自举 |
@@ -448,6 +450,7 @@ AST cache、语言接口；修改 tests/yh-run/check.py、tests/modules/check.py
 
 **接口：**--backend/--target/-O0/-O2 在所有入口共享；runner 提供 --backend/--target/--opt-level
 并以 argv 注入编译器命令。建立设计 §6 的目标命名空间、键和成功发布协议。
+链接驱动的内嵌 lld 方案见 LL9L；本片先完成 gcc 回落路径的目标隔离与缓存键。
 
 - [ ] 先加同名输出切目标、工具路径不变版本变、混旧对象、损坏缓存的失败用例。
 - [ ] 将单文件、emit、build/run 与 worker 接入同一受检→IR→LLVM 流程；
@@ -463,6 +466,56 @@ AST cache、语言接口；修改 tests/yh-run/check.py、tests/modules/check.py
 `python3 tests/yh-run/check.py --compiler ./tmp/llvm-migration/bootstrap/A --backend llvm --target x86_64-unknown-linux-gnu --opt-level O0 --workdir tmp/llvm-migration/run-o0`。
 runner 新参数在本任务实现；对应 O2、modules 与 build-check 同样注入目标/后端。
 
+## LL9L：内嵌 lld 静态链接器（LLVM-15；2026-10-15 用户要求增补）
+
+**背景：**LL9 只要求链接步避开 ARM64 gcc 包装器，驱动仍是平台 cc。用户进一步要求
+把 lld 也静态链接进 yh：链接在进程内完成，不再起 cc/binutils 子进程，链接器版本随
+固定 SDK 锁定。2026-10-15 已完成可行性实测：Ubuntu `liblld-21`
+（1.96 MB 包，六个静态归档约 13 MB）与固定 SDK 同为 21.1.8；`liblld-21-dev`
+提供官方库内入口 `lld::lldMain`（`lld/Common/Driver.h`，可重入、带崩溃恢复）。
+实测把 `_start` 对象在进程内链接为 `ELF64 ET_EXEC`（x86-64）并运行退出码 7；
+全量静态链 141 MB、strip 后 123 MB，`readelf -d` 无 libLLVM/liblld NEEDED。
+复现与依赖闭包见 [完成记录](../01-finished/yh-内嵌lld可行性实测-2026-10-15.md)。
+
+**文件：**新增 `compiler/llvm/lld_bridge.cpp`（C++ shim；lld 无 C API，不能用
+`.yh` 重写）、`compiler/backend/llvm_lld.yh`、`tests/selfhost/llvm-lld.py`、
+`tests/modules/projects/llvmlink/`；修改 `vendor/llvm/sdk.lock.json`、
+`tools/llvm-sdk.py`、`tools/llvm-host.py`、`Makefile`、
+`compiler/cmd/link_cache.yh`（`mb_link`）与 `compiler/cmd/driver.yh`。
+
+**接口：**`@[extern] fn yh_lld_link(argv **char, argc int, diagnostic *char, capacity u64) int`；
+yh 侧组装 `ld.lld` 风格 argv 与有界诊断缓冲，shim 调 `lld::lldMain` 并捕获 stderr，
+返回 0 成功、-1 失败。不使用 lld 的进程退出路径；`canRunAgain=false` 时 worker
+明确结束而不是继续复用。链接器版本、目标与输出类型进入对象/链接缓存键。
+
+- [ ] **L9L-1 SDK 固定与裁剪决策**：`sdk.lock.json` 增加 `liblld-21`、`liblld-21-dev`
+  （全量方案另加 `libpolly-21-dev`）的 URL/SHA-256 与组件清单；身份记录纳入 lld
+  归档哈希。全量实测约 123–141 MB；是否改用源码构建
+  `LLVM_TARGETS_TO_BUILD=X86;AArch64` + 关 Polly 的裁剪版在此片一次决定并记录。
+- [ ] **L9L-2 shim 与探针**：shim 只做参数转递、输出捕获和 C ABI 边界；
+  `tests/selfhost/llvm-lld.py` 在无系统 cc/lld 的 PATH 下链接 `_start` 探针并运行，
+  对照 gcc 链接的行为（退出码、ELF machine=62、NEEDED 不含 LLVM/lld）。
+- [ ] **L9L-3 驱动接入**：`compiler/cmd/link_cache.yh` 的 `mb_link` 切到进程内 lld，
+  yh 侧负责 CRT/libc/动态加载器发现与 argv 组装；过渡先用宿主
+  `gcc -print-file-name`/`-print-search-dirs` 取路径，自举阶段改
+  `-nostdlib` + 自有 `_start`。保留显式回落开关，缓存键不含绝对工具路径。
+- [ ] **L9L-4 交叉链接预研**：同一 lld 包含 MachO/COFF 方言，用
+  `-t darwin`/Windows 探针验证 Linux 宿主产 Mach-O/COFF；macOS ad-hoc 签名与
+  Windows 导入库不在本片，只记录边界与 F2/F3 接入条件。
+- [ ] **L9L-5 政策与文档**：ADR-0014 增补「链接器内嵌」决定（原文「平台链接驱动仍是
+  显式依赖」改为「LL9L 前可回落、LL9L 后用内嵌 lld」）；设计 §7、许可与发行说明同步；
+  不删除 gcc 回落路径，也不改写 asm/ 冻结与 link/ 暂停的结论。
+- [ ] **L9L-6 LL10 汇合**：LL10 连续自编在 L9L-3 验收后显式使用内嵌 lld，
+  至少最终一代不再经过 gcc 包装器；核对 lld 版本身份、`readelf -d` 与固定点。
+
+**验证：**`python3 tests/selfhost/llvm-lld.py`（隔离 PATH 链接并运行）、
+gcc 产物差分（退出码/stdout/动态依赖）、`make test` 与 `make selfhost-native`
+保持全绿；`readelf -d` 无 libLLVM/liblld。
+
+**边界：**本片不做 lld 源码完整裁剪流水线、不做 macOS 签名（TC10 独立）、
+不实现 Windows 启动/导入库；不把内嵌 lld 作为 LL3–LL9 的前置，未验收前默认仍走
+平台 cc。
+
 ## LL10：连续 x64 原生 LLVM 自编与硬门汇合（LLVM-10、12、14、15、16）
 
 **文件：**修改 Makefile、tools/seed-build.py、tools/selfhost_snapshot_gate.py、
@@ -472,6 +525,7 @@ tests/selfhost/native-selfhost.py 与专项 runner、`.github/workflows/ci.yml`�
 **接口：**未来 Makefile 的 BACKEND/TARGET/OPT_LEVEL 向构建与全部门禁传递；
 新增 `make test-llvm`、`make selfhost-llvm`，首期 TARGET=x86_64-unknown-linux-gnu；
 启动种子与候选目标分别记录，输出候选世代及精确产物清单，不滚种子。
+链接步在 LL9L 验收后使用内嵌 lld（至少最终一代不经过 gcc 包装器）。
 
 - [ ] 固定点脚本先测试缺 `.ll`、错接口版本、代号/目录变化与后端误用被拒绝。
 - [ ] 按设计 §7 用旧 ARM64 种子经 qemu 产 A，A 显式 LLVM x64 产 B，
@@ -499,7 +553,8 @@ O0/O2 的 `.ll/.s.i/.s.ct` 候选固定点、实际覆盖、所有运行门有�
 - [ ] 在 LL10/R2b 硬门关闭后切默认，新增用例断言 emitted 使用 LLVM、fallback=0。
 - [ ] 同步固定 SDK 构建依赖、运行依赖和许可分发，保留源码 `.yh` 与接口可见性规则。
 - [ ] 在没有系统 LLVM 工具/动态库的隔离环境用最终 yh 实际编译、链接、运行 `.yh`
-  并冷编自举；readelf NEEDED 不含 LLVM，编译不调用 LLVM 旁车。
+  并冷编自举；readelf NEEDED 不含 LLVM，编译不调用 LLVM 旁车；
+  链接使用 LL9L 的内嵌 lld（带显式回落开关）。
 - [ ] 原生默认 `make test` / `make selfhost-native` 全绿后，才将验证的 x64 候选滚到
   `bin/yh-linux-x64` 并写 `.sha256`；显式 SEED_DEST=bin/yh-linux-x64，
   确认 seed 输入是原生 D，不从仍为 ARM64 的根目录旧 yh 误复制；ARM64 种子/哈希保留。
@@ -545,4 +600,5 @@ NP2/NP5 保留必要语言规范化，通用优化交 LLVM。旧自有汇编/链
 不自动删除 asm/、link/ 项目，也不假称其平台门已完成。
 
 当前状态：**2026-10-14 用户授权实施；已将外部 clang 路线改为内嵌静态 LLVM**。
+**2026-10-15：用户要求写入内嵌 lld 链接器，新增 LL9L 阶段；可行性已完成实测。**
 逐阶段状态见复选框、docs/todo.md、docs/finish.md 与 tmp/llvm-migration/progress.md。

@@ -2,6 +2,28 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-15 内嵌 lld 链接器：可行性实测与方案增补
+
+- **范围**：回答「能否把 lld 静态链接进 yh 编译器」并做端到端实测；产出为
+  [方案 §LL9L](02-plan/yh-LLVM后端替换实施方案.md) 与
+  [完成记录](01-finished/yh-内嵌lld可行性实测-2026-10-15.md)，
+  不改生产路径、不改固定 SDK 清单、不滚种子。
+- **实测**（WSL/amd64，Ubuntu resolute universe）：`liblld-21` 与固定 SDK 同为
+  21.1.8，直接提供 `liblldCommon/ELF/MachO/COFF/Wasm/MinGW.a`（约 13 MB）；
+  `liblld-21-dev` 提供官方库内入口 `lld::lldMain`（可重入 + 崩溃恢复）。
+  C++ shim + 全量 LLVM 组件静态链得 141 MB（strip 后 123 MB），在同进程内把
+  `_start` 对象链接为 `ELF64 ET_EXEC`（x86-64）并运行退出码 7；
+  `readelf -d` 无 libLLVM/liblld NEEDED。
+- **依赖闭包**：除现有 62 个组件外还需 LLVMLTO/LLVMOption/LLVMObjCopy/
+  LLVMCoverage、全部目标后端（lld 的 LTO/管线引用 `InitializeAllTargets` 系列）
+  与 Polly（`libpolly-21-dev`）；裁剪需源码构建 `X86;AArch64` + 关 Polly，
+  已列为 L9L-1 决策项。
+- **方案落点**：实施顺序插入 `LL9L`（LL9 与 LL10 之间），含 SDK 固定/裁剪、
+  shim 与探针、`mb_link` 驱动接入、交叉链接预研、ADR-0014 增补、LL10 汇合
+  六个切片；切片说明见 [方案](02-plan/yh-LLVM后端替换实施方案.md) 与 [todo.md](todo.md)。
+- **未改变**：默认链接仍走平台 cc；asm/ 冻结、link/ 暂停的既有结论不变，
+  内嵌 lld 进一步削弱 yh_link 的必要性但不删除其成果。
+
 ## 2026-10-15 LLVM LL3：命令行 LLVM 模式、内嵌桥对象发射（工作区，未提交）
 
 - **范围**：把 LL2 的受检快照/模块 IR/纯快照 lowering 接进 `yh` 自身——
