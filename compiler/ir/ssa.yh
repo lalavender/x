@@ -56,6 +56,12 @@ pub const IR_OP_CAST int = 24;
 // 局部存储取址：imm 是函数内稳定绑定 ID，结果是指向绑定类型的 canonical 指针。
 // 每个绑定在入口块只发一条；LLVM 后端把它降为 alloca。
 pub const IR_OP_ADDR int = 25;
+// ALLOCA：按字节分配局部存储（imm=字节数，aux=对齐，均必须为正）；结果是指针。
+pub const IR_OP_ALLOCA int = 26;
+// GEP：基址加字节偏移（a=基指针；b=动态偏移 u64 值，b<0 时用常量 imm）；结果是指针。
+pub const IR_OP_GEP int = 27;
+// MEMCPY：按字节复制（a=目的指针，b=源指针，imm=字节数）；无结果。
+pub const IR_OP_MEMCPY int = 28;
 
 // 基本块终结种类。每个块恰有一个终结操作。
 pub const IR_TERM_BR int = 1;
@@ -207,12 +213,13 @@ fn ir_is_pred(f *IRFunction, from int, to int) int {
 
 // ir_verify_inst：校验单条指令的编码、结果定义与输入值是否存在。
 fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
-    let has_result int = inst.op != IR_OP_STORE
+    let has_result int = inst.op != IR_OP_STORE && inst.op != IR_OP_MEMCPY
         && (inst.op != IR_OP_CALL || inst.result_id >= 0);
-    if (inst.op < IR_OP_CONST || inst.op > IR_OP_ADDR) {
+    if (inst.op < IR_OP_CONST || inst.op > IR_OP_MEMCPY) {
         return -1;
     }
     if (inst.op != IR_OP_CONST && inst.op != IR_OP_PARAM && inst.op != IR_OP_ADDR
+        && inst.op != IR_OP_ALLOCA && inst.op != IR_OP_GEP && inst.op != IR_OP_MEMCPY
         && inst.imm != 0) {
         return -1;
     }
@@ -240,6 +247,31 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
         // 绑定 ID 必须非负；结果已验证为 canonical 指针（禁止 void 分配）。
         if (inst.imm < 0 || inst.a != -1 || inst.b != -1 || inst.aux != -1) { return -1; }
         return f.types[inst.result_type].elem == IR_TY_VOID ? -1 : 0;
+    }
+    if (inst.op == IR_OP_ALLOCA) {
+        // 字节数与对齐必须为正；结果只要求是指针（元素可为 void）。
+        if (inst.imm <= 0 || inst.aux <= 0 || inst.a != -1 || inst.b != -1) { return -1; }
+        return f.types[inst.result_type].kind >= IR_TY_PTR ? 0 : -1;
+    }
+    if (inst.op == IR_OP_GEP) {
+        // 基指针必须存在；动态偏移必须是 u64 值，常量偏移必须非负。
+        if (inst.a < 0 || inst.aux != -1) { return -1; }
+        let base_type int = ir_find_value_type(f, inst.a);
+        if (base_type < 0 || f.types[base_type].kind < IR_TY_PTR) { return -1; }
+        if (inst.b >= 0) {
+            return ir_find_value_type(f, inst.b) == IR_TY_U64 ? 0 : -1;
+        }
+        return inst.imm >= 0 ? 0 : -1;
+    }
+    if (inst.op == IR_OP_MEMCPY) {
+        // 两个指针与正字节数；无结果（has_result 已保证 result_id/type 为 -1）。
+        if (inst.imm <= 0 || inst.aux != -1 || inst.a < 0 || inst.b < 0) { return -1; }
+        let at int = ir_find_value_type(f, inst.a);
+        let bt int = ir_find_value_type(f, inst.b);
+        if (at < 0 || bt < 0 || f.types[at].kind < IR_TY_PTR || f.types[bt].kind < IR_TY_PTR) {
+            return -1;
+        }
+        return 0;
     }
     if (inst.op == IR_OP_CALL) {
         if (inst.a != -1 || inst.b != -1 || inst.aux < 0 || inst.aux >= f.call_count) {

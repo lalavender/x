@@ -389,7 +389,10 @@ IRModule 序列化与跨缓存身份未落、首片之外的形态明确拒绝�
 2026-10-15 第一切片（局部标量内存）已完成：canonical 指针族 + `IR_OP_ADDR`、
 入口 alloca、标量 LOAD/STORE、`&变量` 与 `*p`（含复合赋值、循环/合流）；
 门禁见 `tests/selfhost/llvm-memory.py` 与 `tests/yh-run/run/llvm-local-memory.yh`。
-以下复选框按剩余切片保留（聚合、全局/CT 数据、切片、指针算术与对齐证明）。
+2026-10-15 数组切片已完成：局部定长数组字面量/下标读写/`&a[i]`/按值复制，
+ALLOCA/GEP/MEMCPY 三指令 + 字节偏移寻址；门禁见 `tests/selfhost/llvm-array.py`
+与 `tests/yh-run/run/llvm-array.yh`。
+以下复选框按剩余切片保留（结构体/联合体/切片、全局/CT 数据、聚合参数/返回）。
 
 - [ ] 新 `.yh` 覆盖局部/全局取址、嵌套字段、数组/union、切片共享及按值副本、静态指针和 CT backing。
 - [ ] 建立有类型的 Place/布局描述，优先入口 alloca + 标量 load/store，

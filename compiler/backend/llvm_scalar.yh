@@ -142,6 +142,31 @@ fn llvm_cast(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst) void {
 
 // llvm_instruction：发射完整标量/内存指令；预检已经排除浮点与聚合，未知操作不能静默忽略。
 fn llvm_instruction(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, next *int) void {
+    if (inst.op == ir.IR_OP_ALLOCA) {
+        // 字节分配：统一按 i8 数组发射，对齐由 lowering 的源布局给出。
+        llvm_text(out, "  "); llvm_value(out, inst.result_id);
+        llvm_text(out, " = alloca i8, i64 "); llvm_number(out, inst.imm.to_type(u64));
+        llvm_text(out, ", align "); llvm_number(out, inst.aux.to_type(u64));
+        llvm_byte(out, '\n');
+        return;
+    }
+    if (inst.op == ir.IR_OP_GEP) {
+        // 字节偏移寻址：常量偏移写 imm，动态偏移引用 u64 SSA 值。
+        llvm_text(out, "  "); llvm_value(out, inst.result_id);
+        llvm_text(out, " = getelementptr i8, ptr "); llvm_value(out, inst.a);
+        llvm_text(out, ", i64 ");
+        if (inst.b >= 0) { llvm_value(out, inst.b); } else { llvm_number(out, inst.imm.to_type(u64)); }
+        llvm_byte(out, '\n');
+        return;
+    }
+    if (inst.op == ir.IR_OP_MEMCPY) {
+        // 聚合复制走 LLVM 内建；最终落到同对象的 memcpy 弱定义或 libc。
+        llvm_text(out, "  call void @llvm.memcpy.p0.p0.i64(ptr ");
+        llvm_value(out, inst.a); llvm_text(out, ", ptr "); llvm_value(out, inst.b);
+        llvm_text(out, ", i64 "); llvm_number(out, inst.imm.to_type(u64));
+        llvm_text(out, ", i1 false)\n");
+        return;
+    }
     if (inst.op == ir.IR_OP_ADDR) {
         // 局部存储取址：按指针元素发 alloca，对齐取元素自然对齐（未知取 1）。
         let pointee ir.IRType = body.types[body.types[inst.result_type].elem];

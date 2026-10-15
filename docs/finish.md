@@ -33,6 +33,26 @@
     todo.md 的「设计决定不做」。
 - 详见[完成记录](01-finished/yh-全量门测试并行化-2026-10-15.md)。
 
+## 2026-10-15 LLVM LL5 数组切片：局部定长数组与按值复制
+
+- **范围**：局部定长数组（标量/嵌套元素）的字面量初始化、下标读写与复合赋值、
+  `&a[i]`、`let b = a;`/`b = a;` 按值复制；聚合绑定全部 ALLOCA 字节存储。
+- **IR**：新增 `IR_OP_ALLOCA`（size/align）、`IR_OP_GEP`（常量或 u64 动态字节
+  偏移）、`IR_OP_MEMCPY`（llvm.memcpy 内建）；verifier 与 LLVM 发射同步。
+- **Lowering**：`checked_lower_lvalue_ptr` 统一元素存储地址；数组字面量逐元素
+ 写入（标量元素 GEP 结果带 canonical 元素类型）；聚合复制用 MEMCPY；剥掉
+  PRIMARY 包装；`let` 的类型长度前置边取链尾作为初始化值。
+- **门禁**：新增 `tests/selfhost/llvm-array.py`（O0/O2 原生运行 + 结构体来源
+  拒绝）与运行语料 `tests/yh-run/run/llvm-array.yh`；`llvmlower` 新增
+  `input/array.yh`。
+- **验收**（WSL，`SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`）：
+  `make`、`make test`（语法 78/78 与 42/42、运行 **313/313**）全绿；
+  `make selfhost-native` 全绿（固定点 24 产物一致、自解析 86 文件、
+  modules 18/18、项目 100/100）；12 个 `llvm-*` 专项门全部退出 0。
+- **未关闭**：结构体/联合体/切片、全局/CT 数据、聚合参数与返回（LL7）、
+  对齐证明与 `for-in`；LLVM 默认未切换、种子未滚。
+- 详见 [完成记录](01-finished/yh-LLVM-LL5数组切片-2026-10-15.md)。
+
 ## 2026-10-15 LLVM LL4 goto/label 切片：任意跳转与标签合流
 
 - **范围**：`goto 标签;`/`标签: stmt` 的前向/后向跳转、多前驱合流、跳出循环；
