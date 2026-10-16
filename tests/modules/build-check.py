@@ -590,15 +590,20 @@ def main():
             slice_lowered = (slice_ok is not None and slice_ok.returncode == 0
                              and "lower-snapshot=ok" in slice_ok.stdout
                              and "functions=2" in slice_ok.stdout)
-            rejected = sh([str(program), str(dst / "input" / "global.yh"), "1"],
+            global_run = sh([str(program), str(dst / "input" / "global.yh"), "0"],
+                            cwd=dst) if program.exists() else None
+            global_lowered = (global_run is not None and global_run.returncode == 0
+                              and "lower-snapshot=ok" in global_run.stdout
+                              and "functions=2" in global_run.stdout)
+            rejected = sh([str(program), str(dst / "input" / "globalreject.yh"), "1"],
                           cwd=dst) if program.exists() else None
             rejects = (rejected is not None and rejected.returncode == 0
                        and "lower-rejected=ok" in rejected.stdout
-                       and "全局对象数据" in rejected.stderr and ".yh:" in rejected.stderr)
-            report(lower_ok and pointer_ok and aggregate_ok and slice_lowered and rejects, c["name"],
+                       and "rejected_slice" in rejected.stderr and ".yh:" in rejected.stderr)
+            report(lower_ok and pointer_ok and aggregate_ok and slice_lowered and global_lowered and rejects, c["name"],
                    f"快照 lowering 覆盖或拒绝路径失败: lower_ok={lower_ok}, "
                    f"pointer_ok={pointer_ok}, aggregate_ok={aggregate_ok}, "
-                   f"slice_ok={slice_lowered}, rejects={rejects}, "
+                   f"slice_ok={slice_lowered}, global_ok={global_lowered}, rejects={rejects}, "
                    f"build={built.returncode}, run={run.returncode if run else None}, "
                    f"stdout={(run.stdout if run else '')[-120:]!r}\n"
                    f"{(run.stderr if run else built.stderr)[-400:]}")

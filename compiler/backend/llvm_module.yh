@@ -170,13 +170,23 @@ fn llvm_preflight(unit *ir.IRModule) int {
     let i int = 0;
     for i < unit.symbol_count {
         let symbol ir.IRModuleSymbol = unit.symbols[i];
-        if (llvm_type_supported(unit.types[symbol.type_id].kind) == 0) {
-            return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持浮点、指针或聚合类型");
+        let kind int = unit.types[symbol.type_id].kind;
+        if (symbol.kind == ir.IR_MODULE_SYMBOL_GLOBAL) {
+            if (symbol.defined == 0) {
+                return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持未定义全局");
+            }
+            // 模块聚合编号与函数私有指针变体重叠；全局按原始字节发射，单独核对对象类型。
+            if (kind == ir.IR_TY_F32 || kind == ir.IR_TY_F64 || kind == ir.IR_MODULE_TY_SLICE) {
+                return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持浮点或切片全局");
+            }
+        } else if (kind > ir.IR_TY_PTR || llvm_type_supported(kind) == 0) {
+            return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持浮点或聚合返回类型");
         }
         let j int = 0;
         for j < symbol.param_count {
-            if (llvm_type_supported(unit.types[symbol.params[j]].kind) == 0) {
-                return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持浮点、指针或聚合参数");
+            let param_kind int = unit.types[symbol.params[j]].kind;
+            if (param_kind > ir.IR_TY_PTR || llvm_type_supported(param_kind) == 0) {
+                return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持浮点或聚合参数");
             }
             j += 1;
         }
@@ -240,7 +250,8 @@ fn llvm_signature(unit *ir.IRModule, symbol *ir.IRModuleSymbol, out *LLVMOutput,
     llvm_byte(out, ')');
 }
 
-// llvm_globals：集中发射标量外部声明和数据定义，初始化按已验证的小端完整位型读取。
+// llvm_globals：已定义对象统一发射字节数组，保留布局填充、链接可变性和显式对齐。
+// 全零对象使用 zeroinitializer；其余逐字节转义，避免聚合被截断成 64 位整数。
 fn llvm_globals(unit *ir.IRModule, out *LLVMOutput) void {
     let i int = 0;
     for i < unit.symbol_count {
@@ -248,20 +259,20 @@ fn llvm_globals(unit *ir.IRModule, out *LLVMOutput) void {
         if (symbol.kind == ir.IR_MODULE_SYMBOL_GLOBAL) {
             let map int = llvm_map(out, symbol.source, symbol.offset, i);
             llvm_byte(out, '@'); llvm_string(out, symbol.name); llvm_text(out, " = ");
-            if (symbol.defined == 0) { llvm_text(out, "external "); }
-            else if (symbol.linkage == ir.IR_MODULE_LINK_PRIVATE) { llvm_text(out, "internal "); }
+            if (symbol.linkage == ir.IR_MODULE_LINK_PRIVATE) { llvm_text(out, "internal "); }
             llvm_text(out, symbol.mutable != 0 ? "global " : "constant ");
-            let ty ir.IRModuleType = unit.types[symbol.type_id];
-            llvm_type(out, ty.kind, ty.bits);
-            if (symbol.defined != 0) {
-                let g int = 0;
-                for unit.globals[g].symbol != i { g += 1; }
-                let global ir.IRModuleGlobal = unit.globals[g];
-                let value u64 = 0; let j int = 0;
-                for j < global.size { value |= global.data[j].to_type(u64) << (j * 8); j += 1; }
-                llvm_byte(out, ' '); llvm_number(out, value);
-                llvm_text(out, ", align "); llvm_number(out, global.align.to_type(u64));
+            let g int = 0;
+            for unit.globals[g].symbol != i { g += 1; }
+            let global ir.IRModuleGlobal = unit.globals[g];
+            llvm_byte(out, '['); llvm_number(out, global.size.to_type(u64)); llvm_text(out, " x i8] ");
+            let zero int = 1; let j int = 0;
+            for j < global.size {
+                if (global.data[j] != 0) { zero = 0; break; }
+                j += 1;
             }
+            if (zero != 0) { llvm_text(out, "zeroinitializer"); }
+            else { llvm_byte(out, 'c'); llvm_quote(out, global.data, global.size); }
+            llvm_text(out, ", align "); llvm_number(out, global.align.to_type(u64));
             llvm_byte(out, '\n'); llvm_map_end(out, map);
         }
         i += 1;

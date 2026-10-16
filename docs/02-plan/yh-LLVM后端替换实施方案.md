@@ -398,9 +398,11 @@ ALLOCA/GEP/MEMCPY 三指令 + 字节偏移寻址；门禁见 `tests/selfhost/llv
 2026-10-15 切片切片已完成：数组切片/切片字面量/再切片/共享下标读写/副本与
 运行期 `len`；门禁见 `tests/selfhost/llvm-slice.py` 与
 `tests/yh-run/run/llvm-slice.yh`。
-**未完成：全局/字符串/CT 数据**——受检快照不含全局初始化表达式（全局解析阶段
-关 AST 捕获、`AstDecl` 无 init 字段），需先补解析/快照再作物化与取址；详见
-[切片完成记录](01-finished/yh-LLVM-LL5切片切片-2026-10-15.md) §4。
+2026-10-16 普通全局/字符串数据已接入：`AstDecl.init_expr`、独占字节物化、
+GLOB_ADDR、完整字节数组发射、pub/private linkage 和可写别名；详见
+[全局数据切片记录](../01-finished/yh-LLVM-LL5全局数据切片-2026-10-16.md)。
+**仍未完成：CT backing、导入聚合副本、非零指针重定位与全局切片**，
+LL5 全覆盖与下面的总验收项继续保持未关闭。
 
 - [ ] 新 `.yh` 覆盖局部/全局取址、嵌套字段、数组/union、切片共享及按值副本、静态指针和 CT backing。
 - [ ] 建立有类型的 Place/布局描述，优先入口 alloca + 标量 load/store，

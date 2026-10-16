@@ -23,6 +23,7 @@ pub struct AstDecl {
     body_stmt int;        // 函数体根语句节点；非函数为 -1
     sym_id int;           // pass1 后绑定的模块级符号编号
     type_id int;          // pass1 后绑定的函数签名类型编号
+    init_expr int;        // 全局 let/const 初始化式根表达式；无初始化或 $ CT 形态为 -1
 }
 
 let ast_decl_nodes *AstDecl = 0;
@@ -128,6 +129,7 @@ pub fn ast_decl_add_file(fi int) int {
         ast_decl_nodes[id].body_stmt = -1;
         ast_decl_nodes[id].sym_id = -1;
         ast_decl_nodes[id].type_id = -1;
+        ast_decl_nodes[id].init_expr = -1;
         ast_decl_count += 1;
         gs.c_stats_decl_nodes += 1;
         i += 1;
@@ -136,6 +138,7 @@ pub fn ast_decl_add_file(fi int) int {
 }
 
 // ast_decl_bind_file：声明登记完成后绑定函数符号与签名类型，供 IR 降低读取。
+// 全局 let/const 同时绑定模块级符号（type_id 保持 -1：对象类型经符号表读取）。
 pub fn ast_decl_bind_file(fi int) int {
     let gs *gen.GenState = gen.G();
     if (gs.c_ast_capture == 0) { return 0; }
@@ -158,6 +161,19 @@ pub fn ast_decl_bind_file(fi int) int {
             }
             node.sym_id = sym;
             node.type_id = gs.c_syms[sym].type_id;
+        }
+        if (node.file_id == fi && (node.kind == gen.TK_LET || node.kind == gen.TK_CONST)) {
+            if (node.name_token < 0 || node.name_token >= gs.c_tok_n) {
+                return gen.fail("内部错误：全局声明绑定名字范围无效");
+            }
+            let gtok gen.Tok = gs.c_toks[node.name_token];
+            let gsym int = gen.sym_lookup(gtok.start, gtok.len);
+            if (gsym < 0 || (gs.c_syms[gsym].kind != gen.SYM_VAR
+                && gs.c_syms[gsym].kind != gen.SYM_CONST)
+                || (gs.c_syms[gsym].flags & gen.F_GLOBAL) == 0) {
+                return gen.fail("内部错误：全局声明未绑定到模块级符号");
+            }
+            node.sym_id = gsym;
         }
         i += 1;
     }
@@ -185,6 +201,35 @@ pub fn ast_decl_attach_body(fi int, decl_index int, stmt_id int) int {
         i += 1;
     }
     return gen.fail("内部错误：找不到函数 AST 声明节点");
+}
+
+// ast_decl_attach_init：将全局 let/const 的初始化式根表达式挂到其文件级声明。
+// 仅捕获开启且当前文件已索引（c_file_decl_i >= 0）时生效；其余形态静默跳过
+// （旧单文件路径在全局子遍保持 capture=0，不进入本函数）。
+pub fn ast_decl_attach_init(fi int, decl_index int, expr_id int) int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_ast_capture == 0 || decl_index < 0) {
+        return 0;
+    }
+    if (expr_id < 0 || expr_id >= ast_expr_count) {
+        return gen.fail("内部错误：全局初始化式 AST 根无效");
+    }
+    let i int = 0;
+    for i < ast_decl_count {
+        if (ast_decl_nodes[i].file_id == fi && ast_decl_nodes[i].decl_index == decl_index) {
+            if ((ast_decl_nodes[i].kind != gen.TK_LET && ast_decl_nodes[i].kind != gen.TK_CONST)
+                || ast_decl_nodes[i].init_expr >= 0
+                || ast_expr_nodes[expr_id].file_id != fi
+                || ast_expr_nodes[expr_id].first < ast_decl_nodes[i].first
+                || ast_expr_nodes[expr_id].after > ast_decl_nodes[i].after) {
+                return gen.fail("内部错误：全局声明与初始化式 AST 不匹配");
+            }
+            ast_decl_nodes[i].init_expr = expr_id;
+            return 0;
+        }
+        i += 1;
+    }
+    return gen.fail("内部错误：找不到全局 AST 声明节点");
 }
 
 // ast_decl_verify：检查声明范围、名字 token 及函数体根引用。
@@ -226,6 +271,23 @@ pub fn ast_decl_verify() int {
             }
         } else if (node.body_stmt != -1) {
             return gen.fail("内部错误：非函数声明 AST 带有函数体");
+        }
+        if (node.kind == gen.TK_LET || node.kind == gen.TK_CONST) {
+            if (node.sym_id < 0 || node.sym_id >= gs.c_sym_n
+                || (gs.c_syms[node.sym_id].flags & gen.F_GLOBAL) == 0
+                || (gs.c_syms[node.sym_id].kind != gen.SYM_VAR
+                    && gs.c_syms[node.sym_id].kind != gen.SYM_CONST)) {
+                return gen.fail("内部错误：全局声明 AST 未绑定到模块级符号");
+            }
+            if (node.init_expr >= 0 && (node.init_expr >= ast_expr_count
+                || ast_expr_nodes[node.init_expr].file_id != node.file_id
+                || ast_expr_nodes[node.init_expr].owner_decl != node.decl_index
+                || ast_expr_nodes[node.init_expr].first < node.first
+                || ast_expr_nodes[node.init_expr].after > node.after)) {
+                return gen.fail("内部错误：全局声明 AST 初始化式引用无效");
+            }
+        } else if (node.init_expr != -1) {
+            return gen.fail("内部错误：非全局声明 AST 带有初始化式");
         }
         i += 1;
     }

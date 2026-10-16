@@ -23,7 +23,9 @@ fn checked_lower_kind(store *CheckedStorage, source_type int) int {
         // canonical 指针编码：IR_TY_PTR + 所指元素 kind；*void 即 IR_TY_PTR。
         let pointee int = store.types[source_type].elem;
         let mapped int = checked_lower_kind(store, pointee);
-        if (mapped >= 0) { return ir.IR_TY_PTR + mapped; }
+        if (mapped >= 0) {
+            return ir.IR_TY_PTR + mapped <= ir.IR_TY_PTR_LAST ? ir.IR_TY_PTR + mapped : -1;
+        }
         if (pointee < 0 || pointee >= store.type_n) { return -1; }
         let pk int = store.types[pointee].kind;
         // 指向聚合/void 的指针在首片按不透明指针（kind 12）处理。
@@ -66,6 +68,8 @@ fn checked_lower_promoted(l *CheckedLower, left int, right int) int {
 // checked_lower_lit_fits：复用现有整数文字量范围契约的纯判断，不读 GenState。
 fn checked_lower_lit_fits(l *CheckedLower, source_type int, value i64) int {
     let kind int = checked_lower_type(l, source_type);
+    // 裸整数 0 是现有 NULL 写法；比较时可按另一侧指针类型装入零指针。
+    if (kind >= ir.IR_TY_PTR) { return value == 0 ? 1 : 0; }
     if (kind == ir.IR_TY_U64 || kind == ir.IR_TY_I64) { return 1; }
     if (kind == ir.IR_TY_BOOL) { return (value == 0 || value == 1).to_type(int); }
     if (kind == ir.IR_TY_U8) { return (value >= 0 && value <= 255).to_type(int); }
@@ -341,7 +345,8 @@ fn checked_lower_adjust(l *CheckedLower, value int, want int) int {
 // checked_lower_const：把已检查的标量常量位型规范到目标类型位宽。
 fn checked_lower_const(out *i64, kind int, bits int, value i64) int {
     if (kind == ir.IR_TY_BOOL) {
-        *out = value != 0 ? 1 : 0;
+        // 源 bool 保存低八位；只有条件判定把非零字节转成真，常量引用保留原值。
+        *out = value & 255;
         return 0;
     }
     if (ir.ir_integer_type(kind) == 0) { return -1; }
@@ -369,6 +374,27 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     }
     let node AstExpr = l.store.expressions[expr_id];
     l.last_token = node.first;
+    if (node.kind == AST_EXPR_PRIMARY && node.child0 >= 0) {
+        return checked_lower_expr_inner(l, flow, node.child0);
+    }
+    // 只消费常量叶、枚举和数组长度事实。运行期 CAST 的 is_const/const_bits
+    // 仍可能保留转换前位型，必须走逐节点转换；括号也先解包，不能越过 CAST。
+    if (node.is_const != 0 && checked_lower_type(l, node.type_id) >= 0
+        && (node.kind == AST_EXPR_PRIMARY
+            || node.kind == AST_EXPR_UNARY && (node.op == gen.TK_LEN || node.is_lit != 0)
+            || node.kind == AST_EXPR_MEMBER && l.store.types[node.type_id].kind == gen.TY_ENUM)) {
+        let kind int = checked_lower_type(l, node.type_id);
+        if (kind >= ir.IR_TY_PTR) {
+            if (node.const_bits != 0) { return checked_lower_string(l, &node); }
+            return ast_ir_b_add_inst(b, ir.IR_OP_CONST, kind, -1, -1, 0);
+        }
+        let literal i64 = 0;
+        // 未定宽整数字面量保留完整位型，供赋值/比较的上下文选定最终类型。
+        // 立即按默认 int32 截断会使 u64 全宽字面量在后续提升时丢失高位。
+        if (node.is_lit != 0) { literal = node.const_bits; }
+        else if (checked_lower_const(&literal, kind, b.types[kind].bits, node.const_bits) != 0) { return -2; }
+        return ast_ir_b_add_inst(b, ir.IR_OP_CONST, kind, -1, -1, literal);
+    }
     if (node.kind == AST_EXPR_MEMBER) {
         // 标量字段读取：先求字段存储地址，再按字段类型 LOAD。
         let want int = checked_lower_type(l, node.type_id);
@@ -391,6 +417,13 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     }
     if (node.kind == AST_EXPR_PRIMARY) {
         if (node.child0 >= 0) { return checked_lower_expr_inner(l, flow, node.child0); }
+        if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+            let pointer int = checked_lower_global_ref(l, &node);
+            if (pointer < 0) { return pointer; }
+            let want int = checked_lower_type(l, node.type_id);
+            if (want < 0) { return -2; }
+            return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, pointer, -1, 0);
+        }
         if (node.sym_id >= 0) {
             let row int = checked_lower_binding(l, &node);
             if (row < 0) { return -2; }
@@ -404,13 +437,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
             let value int = b.local_values[binding.id];
             return value >= 0 && value < b.inst_count ? value : -2;
         }
-        if (node.is_const == 0) { return -2; }
-        let kind int = checked_lower_type(l, node.type_id);
-        if (kind < 0) { return -2; }
-        let bits int = b.types[kind].bits;
-        let literal i64 = 0;
-        if (checked_lower_const(&literal, kind, bits, node.const_bits) != 0) { return -2; }
-        return ast_ir_b_add_inst(b, ir.IR_OP_CONST, kind, -1, -1, literal);
+        return -2;
     }
     if (node.kind == AST_EXPR_CALL) { return checked_lower_call(l, flow, expr_id); }
     if (node.kind == AST_EXPR_CAST) {
@@ -419,6 +446,13 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         if (want < 0) { return -2; }
         let have int = checked_lower_type(l, l.store.expressions[node.child0].type_id);
         if (have < 0) { return -2; }
+        let child AstExpr = l.store.expressions[node.child0];
+        if (child.is_lit != 0 && have < ir.IR_TY_PTR && want < ir.IR_TY_PTR) {
+            // 未定宽字面量直接按显式目标选位宽；后续链式 CAST 仍逐次截断/扩展。
+            let literal i64 = 0;
+            if (checked_lower_const(&literal, want, b.types[want].bits, child.const_bits) != 0) { return -2; }
+            return ast_ir_b_add_inst(b, ir.IR_OP_CONST, want, -1, -1, literal);
+        }
         let source int = checked_lower_expr_inner(l, flow, node.child0);
         if (source == -2) { return -2; }
         if (source < 0) { return -1; }
@@ -440,6 +474,10 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         if (node.op == gen.TK_AMP) {
             // 取地址：变量（含聚合存储）、指针解引用与数组下标。
             let child AstExpr = l.store.expressions[node.child0];
+            if (child.kind == AST_EXPR_PRIMARY && child.child0 < 0
+                && (child.sym_flags & gen.F_GLOBAL) != 0 && child.binding_row < 0) {
+                return checked_lower_global_ref(l, &child);
+            }
             if (child.kind == AST_EXPR_INDEX || child.kind == AST_EXPR_MEMBER
                 || (child.kind == AST_EXPR_UNARY && child.op == gen.TK_STAR)) {
                 let pointer int = checked_lower_lvalue_ptr(l, flow, node.child0);
@@ -581,8 +619,7 @@ fn checked_lower_binop(op int) int {
 fn checked_lower_binary(l *CheckedLower, flow *CheckedFlow, node *AstExpr, op int,
     left int, right int, operand int) int {
     let b *AstIRBuilder = &l.builder;
-    if (operand < 0 || b.types[operand].kind == ir.IR_TY_VOID
-        || b.types[operand].kind == ir.IR_TY_PTR) { return -2; }
+    if (operand < 0 || b.types[operand].kind == ir.IR_TY_VOID) { return -2; }
     if (op == ir.IR_OP_EQ || op == ir.IR_OP_NE || op == ir.IR_OP_LT
         || op == ir.IR_OP_LE || op == ir.IR_OP_GT || op == ir.IR_OP_GE) {
         // 顺序比较只有整数操作数合法（与 SSA verifier 的接受集合一致）。
@@ -940,7 +977,13 @@ fn checked_lower_assign(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     let target int = -1;
     let want int = -1;
     let lhs_source_type int = lhs.type_id;
-    if (lhs.kind == AST_EXPR_PRIMARY && lhs.child0 < 0) {
+    if (lhs.kind == AST_EXPR_PRIMARY && lhs.child0 < 0
+        && (lhs.sym_flags & gen.F_GLOBAL) != 0 && lhs.binding_row < 0) {
+        want = checked_lower_type(l, lhs.type_id);
+        if (want < 0) { return -2; }
+        target = checked_lower_global_ref(l, &lhs);
+        if (target < 0) { return target; }
+    } else if (lhs.kind == AST_EXPR_PRIMARY && lhs.child0 < 0) {
         let row int = checked_lower_binding(l, &lhs);
         if (row < 0) { return -2; }
         let binding AstBinding = l.store.bindings[row];
@@ -2036,6 +2079,9 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     let node AstExpr = l.store.expressions[expr_id];
     if (node.kind == AST_EXPR_PRIMARY) {
         if (node.child0 >= 0) { return checked_lower_lvalue_ptr(l, flow, node.child0); }
+        if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+            return checked_lower_global_ref(l, &node);
+        }
         if (node.sym_id < 0) { return -2; }
         let row int = checked_lower_binding(l, &node);
         if (row < 0) { return -2; }
@@ -2071,6 +2117,7 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         let f gen.SField = l.store.fields[field];
         let kind int = checked_lower_type(l, f.type_id);
         let result_kind int = kind >= 0 ? ir.IR_TY_PTR + kind : ir.IR_TY_PTR;
+        if (result_kind > ir.IR_TY_PTR_LAST) { return -2; }
         return ast_ir_b_add_gep_const(b, base, f.offset, result_kind);
     }
     if (node.kind == AST_EXPR_INDEX && node.child0 >= 0 && node.child1 >= 0) {
@@ -2096,6 +2143,7 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         if (index < 0) { return -1; }
         let kind int = checked_lower_type(l, node.type_id);
         let result_kind int = kind >= 0 ? ir.IR_TY_PTR + kind : ir.IR_TY_PTR;
+        if (result_kind > ir.IR_TY_PTR_LAST) { return -2; }
         let uidx int = checked_lower_adjust(l, index, ir.IR_TY_U64);
         if (uidx < 0) { return -2; }
         let stride_value int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
@@ -2155,6 +2203,7 @@ fn checked_lower_array_elements(l *CheckedLower, flow *CheckedFlow, dest int,
         // 标量元素的 GEP 结果必须是指向该标量的 canonical 指针，STORE 才能过验。
         let elem_kind int = checked_lower_type(l, ty.elem);
         let ptr_kind int = elem_kind >= 0 ? ir.IR_TY_PTR + elem_kind : ir.IR_TY_PTR;
+        if (ptr_kind > ir.IR_TY_PTR_LAST) { result = -2; break; }
         let elem_ptr int = ast_ir_b_add_gep_const(b, dest, i * elem.size, ptr_kind);
         if (elem_ptr < 0) { result = -1; break; }
         if (checked_lower_is_aggregate(l.store, ty.elem) != 0) {
@@ -2204,6 +2253,7 @@ fn checked_lower_struct_literal(l *CheckedLower, flow *CheckedFlow, dest int,
         let f gen.SField = l.store.fields[fn2.op];
         let fkind int = checked_lower_type(l, f.type_id);
         let ptr_kind int = fkind >= 0 ? ir.IR_TY_PTR + fkind : ir.IR_TY_PTR;
+        if (ptr_kind > ir.IR_TY_PTR_LAST) { return -2; }
         let fptr int = ast_ir_b_add_gep_const(b, dest, f.offset, ptr_kind);
         if (fptr < 0) { result = -1; break; }
         if (checked_lower_is_aggregate(l.store, f.type_id) != 0) {
@@ -2259,10 +2309,7 @@ fn checked_lower_aggregate_store(l *CheckedLower, flow *CheckedFlow, dest int,
     }
     let src int = -1;
     if (inner_node.kind == AST_EXPR_PRIMARY) {
-        let row int = checked_lower_binding(l, &inner_node);
-        if (row < 0) { return -2; }
-        let src_binding AstBinding = l.store.bindings[row];
-        src = checked_lower_storage(l, src_binding.id);
+        src = checked_lower_lvalue_ptr(l, flow, inner);
     } else if (inner_node.kind == AST_EXPR_INDEX || inner_node.kind == AST_EXPR_MEMBER) {
         src = checked_lower_lvalue_ptr(l, flow, inner);
     }
@@ -2514,6 +2561,8 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
     flow.loops = malloc((CHECKED_LOOP_MAX * sizeof(CheckedLoop)).to_type(u64)).to_type(*CheckedLoop);
     l.source_map = checked_zero_rows(l.store.file_n, sizeof(int)).to_type(*int);
     l.source_type_map = checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int);
+    l.global_map = checked_zero_rows(l.store.symbol_n, sizeof(int)).to_type(*int);
+    l.string_map = checked_zero_rows(l.store.string_n, sizeof(int)).to_type(*int);
     l.taken = checked_zero_rows(l.store.binding_n, 1).to_type(*u8);
     l.storage = checked_zero_rows(l.store.binding_n, sizeof(int)).to_type(*int);
     l.slice_storage = checked_zero_rows(l.store.expression_n, sizeof(int)).to_type(*int);
@@ -2521,9 +2570,11 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
     let tables_ok int = 1;
     if (l.store.binding_n > 0 && (l.taken == 0 || l.storage == 0)) { tables_ok = 0; }
     if (l.store.expression_n > 0 && l.slice_storage == 0) { tables_ok = 0; }
-    let type_map [25]int;
+    if (l.store.symbol_n > 0 && l.global_map == 0) { tables_ok = 0; }
+    if (l.store.string_n > 0 && l.string_map == 0) { tables_ok = 0; }
+    let type_map [ir.IR_TY_PTR_LAST + 1]int;
     l.private_type_map = &type_map[0];
-    let types [25]ir.IRType;
+    let types [ir.IR_TY_PTR_LAST + 1]ir.IRType;
     let result int = -1;
     // 先建立 canonical 类型映射与模块来源，函数签名才能在符号表里登记模块类型下标。
     if (l.source_map != 0 && l.source_type_map != 0 && flow.loops != 0 && tables_ok != 0
@@ -2532,10 +2583,9 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
         let declaration int = 0;
         for declaration < l.store.declaration_n {
             let node AstDecl = l.store.declarations[declaration];
-            if (node.kind == gen.TK_LET) {
-                l.function.decl_row = declaration; l.function.file_id = node.file_id;
-                l.last_token = node.first; l.reason = "首片不支持全局对象数据";
-                result = -2; break;
+            if (node.kind == gen.TK_LET || node.kind == gen.TK_CONST) {
+                result = checked_lower_global_decl(&l, declaration);
+                if (result != 0) { break; }
             }
             declaration += 1;
         }
@@ -2583,6 +2633,7 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
         }
     }
     free(l.source_map.to_type(*void)); free(l.source_type_map.to_type(*void));
+    free(l.global_map.to_type(*void)); free(l.string_map.to_type(*void));
     free(l.taken.to_type(*void)); free(l.storage.to_type(*void));
     free(l.slice_storage.to_type(*void));
     free(l.labels.to_type(*void));

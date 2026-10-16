@@ -1,0 +1,264 @@
+module ast;
+import gen;
+import ir;
+
+// checked_lower_object_type：为全局对象递归复制受检布局；标量与指针复用 canonical
+// 映射，聚合仅在实际使用时登记。源布局已验证，深度上限避免异常快照耗尽调用栈。
+// 返回模块类型下标，-2 为本片不支持（浮点/切片等），-1 为分配或一致性错误。
+fn checked_lower_object_type(l *CheckedLower, source_type int, depth int) int {
+    if (source_type < 0 || source_type >= l.store.type_n || depth > 256) { return -1; }
+    let ty gen.CType = l.store.types[source_type];
+    if (ty.kind == gen.TY_VOID || ty.kind == gen.TY_F32 || ty.kind == gen.TY_F64
+        || ty.kind == gen.TY_SLICE || ty.kind == gen.TY_FN) { return -2; }
+    if (l.source_type_map[source_type] >= 0) { return l.source_type_map[source_type]; }
+    let layout ir.IRModuleType;
+    layout.size = ty.size; layout.align = ty.align; layout.elem = -1;
+    let fields *ir.IRModuleField = 0;
+    let count int = 0;
+    if (ty.kind == gen.TY_ARRAY) {
+        layout.kind = ir.IR_MODULE_TY_ARRAY; layout.count = ty.len;
+        layout.elem = checked_lower_object_type(l, ty.elem, depth + 1);
+        if (layout.elem < 0) { return layout.elem; }
+    } else if (ty.kind == gen.TY_STRUCT || ty.kind == gen.TY_UNION) {
+        layout.kind = ty.kind == gen.TY_STRUCT ? ir.IR_MODULE_TY_STRUCT : ir.IR_MODULE_TY_UNION;
+        count = ty.len;
+        fields = checked_zero_rows(count, sizeof(ir.IRModuleField)).to_type(*ir.IRModuleField);
+        if (count > 0 && fields == 0) { return -1; }
+        let i int = 0;
+        for i < count {
+            let field gen.SField = l.store.fields[ty.sub + i];
+            let mapped int = checked_lower_object_type(l, field.type_id, depth + 1);
+            if (mapped < 0) { free(fields.to_type(*void)); return mapped; }
+            fields[i].type_id = mapped; fields[i].offset = field.offset;
+            i += 1;
+        }
+    } else { return -2; }
+    let result int = ir.ir_module_add_type(l.output, "", &layout, fields, count);
+    free(fields.to_type(*void));
+    if (result >= 0) { l.source_type_map[source_type] = result; }
+    return result;
+}
+
+// checked_lower_global_value：把已折叠的常量写入预清零的对象字节，严格使用前端
+// const_bits 而不重新运算。数组链逆向定位元素，结构体按受检字段偏移写入；填充
+// 保持零。指针仅支持 NULL，非零标签必须留待指针重定位切片，不能当地址写出。
+fn checked_lower_global_value(l *CheckedLower, data *u8, source_type int,
+    expr_id int, depth int) int {
+    if (depth > 256 || expr_id < 0 || expr_id >= l.store.expression_n) { return -2; }
+    let ty gen.CType = l.store.types[source_type];
+    let node AstExpr = l.store.expressions[expr_id];
+    l.last_token = node.first;
+    let kind int = checked_lower_kind(l.store, source_type);
+    if (kind >= 0) {
+        if (node.is_const == 0 || ty.size <= 0 || ty.size > 8) { return -2; }
+        if (ty.kind == gen.TY_PTR && node.const_bits != 0) {
+            l.reason = "全局指针非零初始化需要指针重定位"; return -2;
+        }
+        let bits u64 = node.const_bits.to_type(u64);
+        let byte int = 0;
+        for byte < ty.size {
+            data[byte] = (bits >> (byte * 8)).to_type(u8);
+            byte += 1;
+        }
+        return 0;
+    }
+    if (node.kind == AST_EXPR_PRIMARY && node.child0 >= 0) {
+        return checked_lower_global_value(l, data, source_type, node.child0, depth + 1);
+    }
+    if (ty.kind == gen.TY_ARRAY && node.kind == AST_EXPR_ARRAY) {
+        let pos int = ty.len;
+        let walk int = node.child0;
+        let stride int = l.store.types[ty.elem].size;
+        for walk >= 0 {
+            if (walk >= l.store.expression_n || pos <= 0) { return -1; }
+            let link AstExpr = l.store.expressions[walk];
+            if (link.kind != AST_EXPR_ARG_LIST) { return -1; }
+            pos -= 1;
+            let result int = checked_lower_global_value(l, data + pos * stride,
+                ty.elem, link.child1, depth + 1);
+            if (result != 0) { return result; }
+            walk = link.child0;
+        }
+        return pos == 0 ? 0 : -1;
+    }
+    if (ty.kind == gen.TY_STRUCT && node.kind == AST_EXPR_STRUCT_INIT) {
+        let walk int = node.child0;
+        for walk >= 0 {
+            if (walk >= l.store.expression_n) { return -1; }
+            let link AstExpr = l.store.expressions[walk];
+            if (link.kind != AST_EXPR_STRUCT_FIELD || link.op < ty.sub
+                || link.op >= ty.sub + ty.len) { return -1; }
+            let field gen.SField = l.store.fields[link.op];
+            let result int = checked_lower_global_value(l, data + field.offset,
+                field.type_id, link.child1, depth + 1);
+            if (result != 0) { return result; }
+            walk = link.child0;
+        }
+        return 0;
+    }
+    return -2;
+}
+
+// checked_lower_global_decl：把本模块有运行期实体的全局声明登记为独占数据。
+// 标量 const 没有运行期对象；没有初始化 AST 时仅接受 BSS 清单中的零初始化，
+// 因此 CT 聚合或接口重放的旧数据不会被误当成零。失败由 lower_module 回收候选。
+fn checked_lower_global_decl(l *CheckedLower, row int) int {
+    let node AstDecl = l.store.declarations[row];
+    let sym gen.CSym = l.store.symbols[node.sym_id];
+    let ty gen.CType = l.store.types[sym.type_id];
+    if (sym.kind == gen.SYM_CONST && checked_lower_is_aggregate(l.store, sym.type_id) == 0) {
+        return 0;
+    }
+    l.function.decl_row = row; l.function.file_id = node.file_id;
+    l.last_token = node.first; l.reason = "本片不支持此全局对象类型";
+    if ((sym.flags & gen.F_EXTERN) != 0) {
+        l.reason = "导入的全局聚合副本缺少受检初始化数据"; return -2;
+    }
+    let mapped int = checked_lower_object_type(l, sym.type_id, 0);
+    if (mapped < 0) { return mapped; }
+    let data *u8 = checked_zero_rows(ty.size, 1).to_type(*u8);
+    if (ty.size > 0 && data == 0) { return -1; }
+    let result int = 0;
+    l.reason = "全局初始化缺少受检表达式（CT backing 尚未接入）";
+    if (node.init_expr >= 0) {
+        result = checked_lower_global_value(l, data, sym.type_id, node.init_expr, 0);
+    } else {
+        result = -2;
+        let i int = 0;
+        for i < l.store.bss_n {
+            if (l.store.bss_symbols[i] == node.sym_id) { result = 0; break; }
+            i += 1;
+        }
+    }
+    if (result != 0) { free(data.to_type(*void)); return result; }
+    let name *char = checked_lower_name(l, sym.name_off, sym.name_len, sym.flags);
+    if (name == 0) { free(data.to_type(*void)); return -1; }
+    let symbol ir.IRModuleSymbol;
+    symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; symbol.type_id = mapped;
+    symbol.linkage = (sym.flags & gen.F_PUB) != 0 ? ir.IR_MODULE_LINK_EXTERNAL : ir.IR_MODULE_LINK_PRIVATE;
+    // const 约束绑定/直接左值；现有语言允许经裸指针改聚合存储，不能额外加只读页。
+    symbol.defined = 1; symbol.mutable = 1;
+    symbol.source = l.source_map[node.file_id];
+    symbol.offset = checked_lower_offset(l, node.file_id, node.first);
+    let added int = ir.ir_module_add_symbol(l.output, name, &symbol, 0, 0);
+    free(name);
+    result = added < 0 ? -1 : ir.ir_module_add_global(l.output, added, data, ty.size, ty.align, 0, 0);
+    free(data.to_type(*void));
+    if (result < 0) { return -1; }
+    l.global_map[node.sym_id] = added + 1;
+    return 0;
+}
+
+// checked_lower_global_ref：只以捕获时的全局属性识别模块对象，避免把被复用的
+// 局部符号槽当成全局。导入聚合字节尚不在快照时给出稳定的来源拒绝原因。
+fn checked_lower_global_ref(l *CheckedLower, node *AstExpr) int {
+    if ((node.sym_flags & gen.F_GLOBAL) == 0 || node.binding_row >= 0) { return -2; }
+    if (node.sym_id < 0 || node.sym_id >= l.store.symbol_n || l.global_map[node.sym_id] == 0) {
+        l.reason = "全局对象缺少受检数据（导入副本/CT backing 尚未接入）";
+        return -2;
+    }
+    let kind int = checked_lower_type(l, node.type_id);
+    let pointer int = kind >= 0 ? ir.IR_TY_PTR + kind : ir.IR_TY_PTR;
+    if (pointer > ir.IR_TY_PTR_LAST) { return -2; }
+    return ast_ir_b_add_inst(&l.builder, ir.IR_OP_GLOB_ADDR, pointer, -1, -1,
+        (l.global_map[node.sym_id] - 1).to_type(i64));
+}
+
+// checked_lower_string_byte：解码与 em_data_string_body 完全相同的转义表；十六
+// 进制额外两位已由 lexer 验证。调用方负责推进下标并为最终字符串补 NUL。
+fn checked_lower_string_byte(value u8) int {
+    if (value == 'n') { return 10; }
+    if (value == 'r') { return 13; }
+    if (value == 't') { return 9; }
+    if (value == '0') { return 0; }
+    if (value == 'a') { return 7; }
+    if (value == 'b') { return 8; }
+    if (value == 'f') { return 12; }
+    if (value == 'v') { return 11; }
+    if (value == '\'') { return 39; }
+    if (value == '"') { return 34; }
+    if (value == '\\') { return 92; }
+    return 0;
+}
+
+// checked_lower_string_symbol：全局指针常量必须可追溯到字符串字面式；数字
+// 恰好等于数据标签也不能冒充字符串。引用链使用快照名字与符号，最多 16 跳。
+fn checked_lower_string_symbol(l *CheckedLower, sym_id int, depth int) int {
+    if (sym_id < 0 || sym_id >= l.store.symbol_n || depth >= 16) { return 0; }
+    let sym gen.CSym = l.store.symbols[sym_id];
+    if (sym.kind != gen.SYM_CONST || (sym.flags & gen.F_ADDR) == 0) { return 0; }
+    if (sym.const_expr_kind == 2) { return 1; }
+    if (sym.const_expr_kind != 3) { return 0; }
+    let i int = 0;
+    for i < l.store.symbol_n {
+        let other gen.CSym = l.store.symbols[i];
+        if (other.name_len == sym.const_expr_len && other.kind == gen.SYM_CONST
+            && gen.cstr_eq((l.store.names + other.name_off).to_type(*char),
+                (l.store.names + sym.const_expr_off).to_type(*char)) != 0) {
+            return checked_lower_string_symbol(l, i, depth + 1);
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// checked_lower_string：字符串标签只作为快照索引；原样 token 经解码成为匿名
+// internal constant 字节数组。按标签缓存模块符号，发现趟/真实趟及多个函数
+// 共用实体，绝不把旧标签数值转换成宿主地址。返回 canonical *char SSA 值。
+fn checked_lower_string(l *CheckedLower, node *AstExpr) int {
+    if (node.kind != AST_EXPR_PRIMARY) { return -2; }
+    if (node.child0 >= 0) { return checked_lower_expr_inner(l, l.flow, node.child0); }
+    if (node.op != gen.TOK_STRING
+        && ((node.sym_flags & gen.F_GLOBAL) == 0
+            || checked_lower_string_symbol(l, node.sym_id, 0) == 0)) {
+        l.reason = "非零指针缺少字符串来源，指针/整数转换尚未接入";
+        return -2;
+    }
+    let row int = 0;
+    for row < l.store.string_n {
+        if (l.store.strings[row].label.to_type(i64) == node.const_bits) { break; }
+        row += 1;
+    }
+    if (row >= l.store.string_n) { l.reason = "字符串缺少受检字节"; return -2; }
+    let added int = l.string_map[row] - 1;
+    if (added < 0) {
+        let str CheckedString = l.store.strings[row];
+        let data *u8 = checked_zero_rows(str.name_len + 1, 1).to_type(*u8);
+        if (data == 0) { return -1; }
+        let src *u8 = l.store.names + str.name_off;
+        let count int = 0;
+        let i int = 1;
+        for i < str.name_len - 1 {
+            let value int = src[i].to_type(int);
+            if (src[i] == '\\') {
+                value = checked_lower_string_byte(src[i + 1]);
+                if (src[i + 1] == 'x') {
+                    value = gen.hexval(src[i + 2]) * 16 + gen.hexval(src[i + 3]);
+                    i += 4;
+                } else { i += 2; }
+            } else { i += 1; }
+            data[count] = value.to_type(u8); count += 1;
+        }
+        count += 1;
+        let layout ir.IRModuleType;
+        layout.kind = ir.IR_MODULE_TY_ARRAY; layout.elem = l.private_type_map[ir.IR_TY_U8];
+        layout.size = count; layout.align = 1; layout.count = count;
+        let mapped int = ir.ir_module_add_type(l.output, "", &layout, 0, 0);
+        let name [48]u8;
+        let n int = gen.append_str(name, 0, ".LD");
+        n = gen.append_int(name, n, str.label); name[n] = 0;
+        let symbol ir.IRModuleSymbol;
+        symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; symbol.type_id = mapped;
+        // 字符串经 *char 可写；不能用 LLVM constant 改变既有语言的存储契约。
+        symbol.linkage = ir.IR_MODULE_LINK_PRIVATE; symbol.defined = 1; symbol.mutable = 1;
+        symbol.source = l.source_map[node.file_id];
+        symbol.offset = checked_lower_offset(l, node.file_id, node.first);
+        added = mapped < 0 ? -1 : ir.ir_module_add_symbol(l.output, (&name[0]).to_type(*char), &symbol, 0, 0);
+        let result int = added < 0 ? -1 : ir.ir_module_add_global(l.output, added, data, count, 1, 0, 0);
+        free(data.to_type(*void));
+        if (result < 0) { return -1; }
+        l.string_map[row] = added + 1;
+    }
+    return ast_ir_b_add_inst(&l.builder, ir.IR_OP_GLOB_ADDR, ir.IR_TY_PTR + ir.IR_TY_U8,
+        -1, -1, added.to_type(i64));
+}

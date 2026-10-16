@@ -2,6 +2,34 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-16 LLVM LL5 普通全局与字符串数据切片
+
+- 从导出的会话和未提交改动续接，完成四层数据交接：`AstDecl.init_expr` 捕获
+  标量/数组/嵌套结构体初始化；快照与 verifier 同步；新增独占布局/字节物化；
+  `GLOB_ADDR` 引用模块符号；LLVM 全局统一发完整 `[N x i8]` 字节与对齐。
+- 覆盖全局整数/bool/char/enum、零初始化、NULL 指针对象/字段/元素、数组/
+  struct/union、读写/取址/副本、全局数组切片基址；字符串转义/NUL/UTF-8、
+  三级 const 引用链、对象地址和可写别名均由同源 `.yh` 与原生 C 驱动核对。
+- 独立审查修复了字符串/聚合 const 错发只读存储、数字与字符串标签混淆、
+  运行期 CAST 被错误快速折叠；另锁住 bool 原始字节、宽文字量、NULL 比较与
+  窄负字面量。源 const 仍受前端直接左值限制，物理后备存储保留裸指针可写性。
+- 完整门首跑 98/100 抓到 `.s.ct` 全局捕获错误；现接口/闭包重放只求值、不挂
+  消费者 AstDecl，返回后恢复捕获。新增跨文件私有常量闭包 `.yh` 回归，最终
+  项目门恢复 100/100。
+- WSL Ubuntu/x86_64，`PATH=$PWD/tmp/boot/crossbin:$PATH`、
+  `SEED=bin/yh-linux-arm64`、`YH_LINK=/nonexistent`：`make` 成功，
+  `make full` 全绿（语法 78/78 + 42/42，运行 **316/316**，固定点 **24**，
+  自解析 **87**，模块 **18/18**，项目 **100/100**）；17 个 LLVM 专项门全绿，
+  包含 O0/O2 原生 x64 C 驱动与 11 类反例的 22 次来源拒绝。
+- 日志位于 `tmp/llvm-migration/global-resume/` 的 `make-interface-boundary.log`、
+  `full-interface-final.log`、`llvm-gates-interface-final.log`、`global-interface-final.log`。
+  构建与完整自举共享 `compiler/.build`，受并发目录冲突影响的一次早期运行作废，
+  最终完整门在候选构建结束后重跑。
+- CT backing、导入聚合副本、静态非零指针重定位、全局切片仍未完成；默认后端
+  和入库种子未变。另发现的旧 ARM64 指针比较后取逻辑非问题已单独登记 todo。
+- 详见 [完成记录](01-finished/yh-LLVM-LL5全局数据切片-2026-10-16.md) 与
+  [实施方案](02-plan/yh-LLVM-LL5全局数据切片实施方案.md)。
+
 ## 2026-10-15 全量门加速：并行化 + 暂存/分层门（只改 harness 与 Makefile，不重编种子）
 
 - **动机**：全量门（`make test` + `make selfhost-native`）实测约 26 分钟，瓶颈是
