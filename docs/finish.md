@@ -2,6 +2,30 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-18 核对并回填 LL2「LLVM 模式接入」与 LL3 两条待办
+
+- **起因**：`todo.md` 里 LL2 的子项「LLVM 模式常驻：`--backend llvm`/`--target`/`-O0/-O2`
+  的 CLI 与模块 worker LLVM 分支未接入」和整条 LL3 都未勾选，却与 LL3 完成记录、
+  LL9/LL10 验收记录直接矛盾，动 LL11 前先核对。
+- **代码核对（分支 `llvm`，HEAD `dfa7195`）**：`cmd/driver.yh` 的 `drv_scan_target`
+  解析 `--target`/`-target`、`--backend legacy|llvm`、`-O0`、`-O2`、`--emit-llvm`，
+  未知后端与未知 triple 明确 `fail` 且不回退；`run_emit_asm_to` 在 `c_backend != 0`
+  时走 `llvm_emit_single_file`；`cmd/module_worker.yh` 在 `c_backend != 0 && c_check_only == 0`
+  时走 `mb_llvm_emit_module` 并直接返回，不进入 `ast_ir_lower_module` 与机器发射；
+  `cmd/module_build.yh` 把 LLVM 产物隔离到 `.build/targets/<triple>/llvm/O<n>`，
+  `cmd/link_cache.yh` 在 LLVM 模式下跳过「汇编 → 目标」步并让 `c_backend` 进缓存键。
+  结论：两条待办描述的行为确实已实现，属文档未回填。
+- **本机复跑门禁不可行（实测）**：宿主为 Darwin/arm64。`make` 用 `bin/yh`
+  （`b123acbe…`，2026-10-13 中间代）冷编当前 `compiler/` 时在 `gen/target_info.yh`
+  报「编译期常量尚未就绪」并中止，`tools/seed-build.py` 同一失败；`Makefile` 只在
+  Linux 宿主设置 `LLVM_HOST`，固定 SDK 也只有 `linux-x86_64`/`linux-aarch64`；
+  `test-llvm` 目标在 `Makefile:295-296` 硬性断言 Linux/x86_64。容器方案也未走通：
+  `container system start` 报 `XPC connection error: Connection invalid`，
+  `container system status` 仍为未运行。
+- **处理**：按代码与既有完成记录回填 `todo.md` 两条（标注「核对回填」与依据文档），
+  并新增「macOS 入库种子落后于 llvm 分支」待办，避免下次把平台限制误判为功能缺失。
+  本轮**没有**复跑 `make test-llvm`/`make selfhost-llvm`，门禁数字仍以 LL10 记录为准。
+
 ## 2026-10-18 LLVM LL9、LL9L 与 LL10 完成闭环
 
 - `make test-llvm` 与 `make selfhost-llvm` 在 WSL/Linux x86_64 均退出 0。LLVM O0/O2 各通过

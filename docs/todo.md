@@ -355,8 +355,15 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     恰好为 0，只是打出空路径），本修复保留。
     验证：`bisect-ct5b.py ./yh` 正确拒绝、`build-check.py` **100/100**、
     `make test` **307/307**；回退修复的对照树再次 SIGSEGV（因果闭环）。
-  - [ ] LLVM 模式常驻：`--backend llvm` / `--target` / `-O0/-O2` 的 CLI 与模块 worker
-    LLVM 分支未接入；check 侧的受检快照消费完即释放，worker 持有快照直到 IR 交接尚未实现。
+  - [x] **LLVM 模式接入（2026-10-15 实现，2026-10-18 核对回填）**：
+    `--backend legacy|llvm`、`--target`、`-O0/-O2`、`--emit-llvm` 已在
+    `cmd/driver.yh` 的 `drv_scan_target` 解析，未知后端/目标明确拒绝、不静默回退；
+    单文件在 `run_emit_asm_to` 走 `llvm_emit_single_file`；模块 worker 在
+    `c_backend != 0` 时走 `mb_llvm_emit_module`，由 worker 持有受检快照到 IR 交接，
+    不进入旧 SSA 替换与机器发射；产物目录、缓存键与链接 manifest 按后端/目标/优化级别
+    隔离（`cmd/module_build.yh` 的 `.build/targets/<triple>/llvm/O<n>`、
+    `cmd/link_cache.yh`）。依据 LL3 完成记录与 LL9 验收记录。
+    **注意**：这只是"可显式选用"，**默认仍是旧后端**，切默认属 LL11。
   - [x] 首片之外的 lowering 已按后续切片推进：LL4 控制流（循环、`switch`、
     `goto`/`label`、`for-in`）、LL5 内存/聚合/模块数据、LL6 浮点标量及 LL7
     间接调用/变参均已交付；LLVM 生产驱动仍归 LL9。
@@ -366,8 +373,11 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   - [ ] 与 R2b 任务私有上下文契约对齐，并记录未闭合的完整版本硬门。
   - 范围说明：宿主操作统一读取 `c_host_target`（目录/时钟/系统调用桥）按设计归后续宿主桥阶段，
     LLVM 生产驱动和完整生产缓存键归 LL9，均不在 LL2 本片。
-- [ ] **LL3 严格 x64 LLVM 首片**：文本 IR、整数/布尔、分支/phi/固定调用；
-  生成 EM_X86_64 ELF 并在 WSL 直接运行，禁止回退且有来源诊断。
+- [x] **LL3 严格 x64 LLVM 首片（2026-10-15 完成，2026-10-18 核对回填）**：文本 IR、
+  整数/布尔、分支/phi/固定调用已接入；`--backend llvm --target x86_64-unknown-linux-gnu
+  [-O0|-O2]` 直接产出 EM_X86_64 ELF 并在 WSL 原生运行，不调用任何外部 LLVM 工具、
+  不回退旧后端。见 [LL3 完成记录](01-finished/yh-LLVM-LL3命令行模式与对象发射-2026-10-15.md)；
+  其首片边界已被后续 LL4–LL10 覆盖（O0/O2 各 343/343 语料、x64 原生连续自编）。
 - [x] **LL8a 内存 helper**（2026-10-15 完成）：LLVM 模块发射 memcpy/memset/strlen
   弱定义 + llvm.used，O0/O2 对象与原生边界驱动全绿；见
   [完成记录](01-finished/yh-LLVM-LL8a内存helper-2026-10-15.md)。
