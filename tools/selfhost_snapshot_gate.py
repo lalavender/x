@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 def default_seed(root: Path, system=None, machine=None) -> Path:
-    """选择本机可执行的入库种子，Mac arm64 保留现有 bin/yh 名称。"""
+    """选择本机可执行的入库种子，统一按 yh-<平台>-<架构> 命名。"""
     system = system or platform.system()
     machine = machine or platform.machine()
     if machine in ("aarch64", "arm64"):
@@ -21,11 +21,7 @@ def default_seed(root: Path, system=None, machine=None) -> Path:
     else:
         architecture = machine.lower()
 
-    if system == "Darwin" and architecture == "arm64":
-        basename = "yh"
-    else:
-        basename = f"yh-{system.lower()}-{architecture}"
-    return root / "bin" / basename
+    return root / "bin" / f"yh-{system.lower()}-{architecture}"
 
 
 def expected_artifacts(project: Path):
@@ -215,7 +211,8 @@ def snapshot_errors(snapshots, expected):
 def self_test() -> bool:
     """验证快照门、平台种子路径与摘要检查的成功和失败分支。"""
     root = Path("/repo")
-    assert default_seed(root, "Darwin", "arm64") == root / "bin" / "yh"
+    assert default_seed(root, "Darwin", "arm64") == root / "bin" / "yh-darwin-arm64"
+    assert default_seed(root, "Darwin", "x86_64") == root / "bin" / "yh-darwin-x64"
     assert default_seed(root, "Linux", "aarch64") == root / "bin" / "yh-linux-arm64"
     assert default_seed(root, "Linux", "x86_64") == root / "bin" / "yh-linux-x64"
     expected = {"asm/demo-lib.s", "iface/demo-lib.s.i",

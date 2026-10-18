@@ -45,7 +45,7 @@ YH_LINK="$PWD/yh_asm" ./yh build <项目>       # 显式指定，用汇编器做
 
 ```bash
 cd asm
-../yh build        # 或 ../bin/yh build；产物 .build/yh_asm
+../yh build        # 或 ../bin/yh-<平台>-<架构> build；产物 .build/yh_asm
 ../yh run          # 构建并运行自检
 ```
 

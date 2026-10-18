@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """tests/selfhost/native-selfhost.py —— 本机全套自举门（0.0.3 滚动自举）。
 
-链路（无 stage0；种子 = 入库的 bin/yh）：
-    bin/yh build compiler/  → cc2（冷编）
+链路（无 stage0；种子 = 入库的 bin/yh-<平台>-<架构>）：
+    bin/yh-<平台>-<架构> build compiler/  → cc2（冷编）
     cc2     build compiler/     → cc3（冷编）
     cc3     build compiler/     → cc4（冷编）
 门：
@@ -48,8 +48,15 @@ SHIM_DIR = None
 
 
 def llvm_shim_for_seed(seed: Path):
-    """按种子文件名推导 LLVM 宿主架构并请求链接包装器目录；不可用时返回 None。"""
+    """按种子文件名推导 LLVM 宿主架构并请求链接包装器目录；不可用时返回 None。
+
+    固定 LLVM SDK 只发布 Linux 宿主（tools/llvm-host.py 的 hosts 表），
+    因此非 Linux 种子（如 bin/yh-darwin-arm64）直接返回 None，不去请求
+    不存在的宿主，避免打印误导性警告。
+    """
     name = seed.name
+    if "linux" not in name:
+        return None
     if "aarch64" in name or "arm64" in name:
         host = "linux-aarch64"
     elif "x64" in name or "x86_64" in name:

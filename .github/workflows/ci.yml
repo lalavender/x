@@ -4,7 +4,7 @@ name: CI
 #  - linux-arm64：QEMU 容器内（arm64 原生仿真）跑编译器语法模式、运行语料与主门；
 #  - linux-x86_64：ARM64 种子经 QEMU 生成 x64 A，随后以原生 x64 运行 LLVM O0/O2 全门；
 #    第 1 层 ANTLR 语料需要 Java 与 antlr4 jar 缓存，不在 CI 里跑（本机门禁仍覆盖）。
-#  - darwin-arm64：macOS（Apple Silicon）上跑同一套门禁；入库 bin/yh 若落后于
+#  - darwin-arm64：macOS（Apple Silicon）上跑同一套门禁；入库 bin/yh-darwin-arm64 若落后于
 #    「模块私有类型」一代，先自动补一代种子再验证（见下方步骤注释）。
 # 触发：手动 workflow_dispatch（可选只跑某个平台，省 macOS 计费分钟）或推送分支。
 on:
@@ -106,11 +106,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 临时步骤（种子追平后可删）：入库 bin/yh 是 2026-10-11 一代，仍带
-      # 「struct/union/enum 必须带 pub」门禁，而当前编译器源码已有模块私有类型。
-      # 补法：把 13 处模块私有类型临时改回 pub（等价于「语言规则一代」源码），
-      # 用旧种子编出这一代并 make seed 覆盖 bin/yh，然后还原源码。
-      # 种子已支持裸 struct 时本步骤自动跳过。
+      # 保险步骤：入库种子若落后于当前源码，先补一代再构建。
+      # 种子已按「yh-平台-架构」命名（darwin/arm64 → bin/yh-darwin-arm64）；
+      # 当前入库种子就是 HEAD 源码编出的，本步骤会直接跳过。
       - name: 必要时补一代 macOS 种子
         run: |
           set -euo pipefail
@@ -118,7 +116,7 @@ jobs:
           struct S { v int; }
           fn main() int { let s S; s.v = 1; return s.v - 1; }
           EOF
-          if bin/yh --syntax-check /tmp/bare.yh >/dev/null 2>&1; then
+          if bin/yh-darwin-arm64 --syntax-check /tmp/bare.yh >/dev/null 2>&1; then
             echo "入库种子已支持模块私有类型，无需中间代"
             exit 0
           fi
@@ -137,7 +135,7 @@ jobs:
               ("compiler/cmd/toml.yh", "TomlSec"),
               ("compiler/cmd/project.yh", "PJDirEntry"),
               ("compiler/cmd/clock.darwin.yh", "CmdTimespec"),
-              ("compiler/cmd/clock.linux.yh", "CmdTimespec"),
+              ("compiler/cmd/clock.linux.arm64.yh", "CmdTimespec"),
               ("compiler/comptime/ct_ir_data.yh", "CtDataSlice"),
               ("compiler/comptime/ct_global_agg.yh", "CtGlobalAgg"),
               ("compiler/parse/iface_ct_map.yh", "IfaceCtColMap"),
@@ -160,8 +158,8 @@ jobs:
           make
           make seed
           git checkout -- compiler
-          python3 tools/selfhost_snapshot_gate.py --verify-seed "$PWD/bin/yh"
-          echo "中间代种子已就位（bin/yh 与 bin/yh.sha256 已更新）"
+          python3 tools/selfhost_snapshot_gate.py --verify-seed "$PWD/bin/yh-darwin-arm64"
+          echo "中间代种子已就位（bin/yh-darwin-arm64 与 .sha256 已更新）"
 
       - name: 构建 HEAD 源码
         run: make
@@ -181,14 +179,14 @@ jobs:
 
       - name: 校验入库种子
         run: |
-          file bin/yh
-          python3 tools/selfhost_snapshot_gate.py --verify-seed "$PWD/bin/yh"
+          file bin/yh-darwin-arm64
+          python3 tools/selfhost_snapshot_gate.py --verify-seed "$PWD/bin/yh-darwin-arm64"
 
       - name: 上传 macOS 种子（如已补代，下载后提交回仓库）
         uses: actions/upload-artifact@v4
         with:
           name: darwin-arm64-seed
           path: |
-            bin/yh
-            bin/yh.sha256
+            bin/yh-darwin-arm64
+            bin/yh-darwin-arm64.sha256
           if-no-files-found: error

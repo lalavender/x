@@ -2,6 +2,25 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-18 macOS 种子补代与 `yh-<平台>-<架构>` 命名
+
+- macOS 入库种子 `b123acbe…`（10-13 中间代）编不了 llvm 分支当前源码。按
+  `b037127` → `8fe3c80` → HEAD 逐代补代（每代 2–9 秒），并把两处 macOS 阻塞点
+  正式化为平台分支：`backend/llvm_bind.darwin.yh` 提供桥桩（固定 SDK 只有 Linux
+  宿主），`backend/llvm_bind.linux.yh` 保留 9 个 `@[extern]`；`cmd/link_cache.yh`
+  的 `mb_link_query_identity` 在 Darwin 目标跳过 GCC 风格查询。
+- 入库种子统一改名：`bin/yh` + `bin/yh.sha256` 删除，改为
+  `bin/yh-darwin-arm64` + `.sha256`（3,537,600 B，Mach-O arm64，
+  SHA-256 `9d911d0b9d58d7a4a48ebf26a59621a3e6136542cd19d8e09e3f63932dc60aab`）。
+  `Makefile` 改为 `HOST_TAG` + `yh-$(HOST_TAG)-$(SEED_ARCH)`，不再有
+  macOS/arm64 特例；`tools/selfhost_snapshot_gate.py`、`tests/selfhost/native-selfhost.py`、
+  CI/release 工作流与 README/AGENTS 同步。
+- 验收：`make verify-seed` 通过；新种子冷编 `compiler/` 退出 0 并产出可用的根 `yh`；
+  `tests/yh-run` **342/343**（唯一失败是 Linux 专用 syscall 语料，缺平台筛选）。
+  本机无法复跑 `test-llvm`（Makefile 硬性要求 Linux/x86_64），Linux 侧零回退需在
+  Linux 宿主确认。
+- 详见 [完成记录](01-finished/yh-macOS种子补代与平台命名-2026-10-18.md)。
+
 ## 2026-10-18 核对并回填 LL2「LLVM 模式接入」与 LL3 两条待办
 
 - **起因**：`todo.md` 里 LL2 的子项「LLVM 模式常驻：`--backend llvm`/`--target`/`-O0/-O2`

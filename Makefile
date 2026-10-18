@@ -1,7 +1,7 @@
 # --------------------------------------------------------------------------
 # yh（玉衡）编译器 —— 自举构建
 #
-# 编译器就是 yh：由入库种子 bin/yh（上一版编译器二进制）对 compiler/
+# 编译器就是 yh：由入库种子 bin/yh-<平台>-<架构>（上一版编译器二进制）对 compiler/
 # 多模块项目 yh build 产出，形态随宿主（Darwin → Mach-O，Linux → ELF）。
 # 每个版本直接用上一个版本的二进制编译（无 C 编译步骤、无 stage0）：
 #   * make            构建 yh（主编译器，项目根目录）
@@ -80,17 +80,19 @@ endif
 
 YH = $(TOP)/yh$(EXESUF)
 REPO_BIN = $(TOP)/bin
+# 入库种子统一按「yh-平台-架构」命名，宿主直接取对应文件：
+#   Darwin/arm64 → bin/yh-darwin-arm64，Darwin/x64 → bin/yh-darwin-x64，
+#   Linux/arm64  → bin/yh-linux-arm64，Linux/x64  → bin/yh-linux-x64。
+# 不再有「macOS/arm64 特例用 bin/yh」的分支——平台与架构都写进文件名，
+# 一眼能看出种子形态，也避免跨平台误取。
 ifeq ($(HOST_SYSTEM),Darwin)
- ifeq ($(SEED_ARCH),arm64)
-  BIN_SEED = $(REPO_BIN)/yh$(EXESUF)
- else
-  BIN_SEED = $(REPO_BIN)/yh-darwin-$(SEED_ARCH)$(EXESUF)
- endif
+ HOST_TAG = darwin
 else ifeq ($(HOST_SYSTEM),Linux)
- BIN_SEED = $(REPO_BIN)/yh-linux-$(SEED_ARCH)$(EXESUF)
+ HOST_TAG = linux
 else
- BIN_SEED = $(REPO_BIN)/yh-$(HOST_SYSTEM)-$(SEED_ARCH)$(EXESUF)
+ HOST_TAG = $(shell printf '%s' '$(HOST_SYSTEM)' | tr '[:upper:]' '[:lower:]')
 endif
+BIN_SEED = $(REPO_BIN)/yh-$(HOST_TAG)-$(SEED_ARCH)$(EXESUF)
 
 # 编译、验证和滚动使用同一个宿主平台种子；显式 SEED 可用于 CI 的临时种子。
 SEED ?= $(BIN_SEED)

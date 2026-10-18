@@ -7,15 +7,16 @@
 **0.0.3 起仓库已删除 src/（C 版 stage0）与 bootstrap/，进入滚动自举**：
 编译器源码在 `compiler/`（gen/lex/parse/ast/comptime/cmd/ir/backend
 多模块的 project.toml 项目），
-构建只依赖**宿主平台对应的入库种子**：macOS/arm64 用 `bin/yh`（Mach-O，
-SHA-256 见 `bin/yh.sha256`），Linux/aarch64 用 `bin/yh-linux-arm64`（ELF，
+构建只依赖**宿主平台对应的入库种子**，种子统一按 `yh-<平台>-<架构>` 命名：
+macOS/arm64 用 `bin/yh-darwin-arm64`（Mach-O，SHA-256 见
+`bin/yh-darwin-arm64.sha256`），Linux/aarch64 用 `bin/yh-linux-arm64`（ELF，
 SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
 
-- 日常构建：`make`（= `bin/yh` 对 `compiler/` 项目 `yh build`，冷编，
+- 日常构建：`make`（= 宿主种子对 `compiler/` 项目 `yh build`，冷编，
   产出根目录 `yh`）；日常验证以 `make selfhost-native` 为主门
   （两代模块固定点 + 自解析 + 全量语法/运行语料 + modules/项目验收）。
 - 滚种子：`make test` 与 `make selfhost-native` 全绿后执行 `make seed`
-  （把新 yh 覆盖 bin/yh 并更新哈希）。源码无法在仓库内独立
+  （把新 yh 覆盖到 `bin/yh-<平台>-<架构>` 并更新哈希）。源码无法在仓库内独立
   重建编译器，正确性由固定点与语料门保证，git 历史保留每一代种子。
 - stage0 的差分参照与 `-run`/交叉 ELF 能力随删除终结；Linux/aarch64 ELF
   种子已入库（2026-10-09，`bin/yh-linux-arm64`），Linux 上可直接
@@ -45,7 +46,7 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
 ## 目录
 
 - `compiler/` —— 编译器源码（gen/lex/parse/ast/comptime/cmd/ir/backend 多模块的项目）
-- `bin/yh` + `bin/yh.sha256` —— 入库种子与哈希（Darwin/arm64）
+- `bin/yh-darwin-arm64` + `bin/yh-darwin-arm64.sha256` —— 入库种子与哈希（Darwin/arm64）
 - `bin/yh-linux-arm64` + `bin/yh-linux-arm64.sha256` —— Linux/aarch64 入库种子与哈希
 - `docs/03-design/` 语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
   `docs/adr/` 决策、`docs/finish.md` 完成流水、`docs/todo.md` 待办
@@ -56,7 +57,8 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
 
 ## 编译流程
 
-1. 宿主平台种子（macOS/arm64：`bin/yh`；Linux/arm64：`bin/yh-linux-arm64`）
+1. 宿主平台种子（macOS/arm64：`bin/yh-darwin-arm64`；Linux/arm64：
+   `bin/yh-linux-arm64`）
    对 `compiler/` 执行 `yh build`，冷编产出根 `yh`；x86_64 Linux 宿主无
    x64 后端（`compiler/backend/` 只有 `arm64.yh`），须显式
    `SEED=bin/yh-linux-arm64`（配合 qemu-user/binfmt 模拟 arm64）。
@@ -93,9 +95,10 @@ make seed               # 滚种子（仅在全绿后）
 GitHub Actions（`.github/workflows/ci.yml`，手动 `workflow_dispatch` 或推送
 `arm64`/`main`）：`linux-arm64` 作业在 arm64 容器里跑第 2/3 层语料与
 `make selfhost-native`（第 1 层 ANTLR 需要 Java 与 jar 缓存，不在 CI 跑）；
-`darwin-arm64` 作业在 `macos-14` 上跑同一套门禁，入库 `bin/yh` 落后时先自动
-补一代种子（把模块私有类型临时改回 `pub` → `make` → `make seed` → 还原源码），
-并把 `bin/yh` + `bin/yh.sha256` 作为 artifact 上传——下载后提交即追平 macOS 种子。
+`darwin-arm64` 作业在 `macos-14` 上跑同一套门禁，入库 `bin/yh-darwin-arm64`
+落后时先自动补一代种子（把模块私有类型临时改回 `pub` → `make` → `make seed` →
+还原源码），并把 `bin/yh-darwin-arm64` + `.sha256` 作为 artifact 上传——
+下载后提交即追平 macOS 种子。
 
 
 ## Linux 环境验证（容器方案）
@@ -106,7 +109,7 @@ GitHub Actions（`.github/workflows/ci.yml`，手动 `workflow_dispatch` 或推�
 
 ### 前提事实（先读再动手）
 
-- 入库种子按平台分文件：`bin/yh` 是 **darwin/arm64（Mach-O）**，不能
+- 入库种子按平台分文件：`bin/yh-darwin-arm64` 是 **darwin/arm64（Mach-O）**，不能
   在 Linux 里运行（`Exec format error`）；`bin/yh-linux-arm64` 是
   **linux/aarch64（ELF）**，2026-10-09 入库，Linux 容器/宿主内可直接跑
   `yh build` 与自举门。

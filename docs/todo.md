@@ -466,6 +466,23 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
 - [ ] **F1–F4 后续平台**：Linux/AArch64 → macOS/ARM64 → Windows/x86_64 → macOS/x86_64、Windows/ARM64；
   各格分别验收对象、链接、标准库运行、原生编译器、原生自举，不以 WSL 冒充 Windows 支持。
 
+- [x] **macOS 入库种子落后于 llvm 分支（2026-10-18 已解决）**：原 `bin/yh`
+  （`b123acbe…`，2026-10-13 的中间代种子）冷编当前 `compiler/` 时在
+  `gen/target_info.yh` 报「编译期常量尚未就绪」，`make` 与
+  `tools/seed-build.py` 均直接失败；而 Linux/aarch64 种子 `8ea2a9ac…`
+  （2026-10-18）与源码同代、全门已过。
+  **2026-10-18 处理**：按 `b037127` → `8fe3c80` → HEAD 逐代补代（每代 2–9 秒），
+  同时把两处 macOS 阻塞点正式化为源码里的平台分支——`backend/llvm_bind.darwin.yh`
+  提供桥桩（固定 SDK 只有 Linux 宿主）、`cmd/link_cache.yh` 在 Darwin 目标跳过
+  GCC 风格链接查询。新种子滚为 `bin/yh-darwin-arm64`（`9d911d0b…`），
+  `tests/yh-run` 语料 **342/343**（唯一失败是 Linux 专用 syscall 语料）。
+  详见 [finish.md](finish.md) 同日条目与
+  [完成记录](01-finished/yh-macOS种子补代与平台命名-2026-10-18.md)。
+- [ ] **macOS 仍不能跑 LLVM 后端与 `test-llvm`**：`Makefile` 只在 Linux 宿主设置
+  `LLVM_HOST`，固定 SDK 也只有 `linux-x86_64` / `linux-aarch64`；
+  `test-llvm` 在 `Makefile` 里硬性要求 Linux/x86_64。这两条是平台能力边界，
+  不是种子问题；要支持需发布 Darwin 版固定 SDK 与对应链接/签名路径（归 F2）。
+
 16 项代码/架构问题均未关闭；已完成的本轮文档交付记入 finish.md。
 
 ### 玉衡 VS Code 扩展
