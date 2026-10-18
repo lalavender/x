@@ -282,7 +282,11 @@ def prepare(lock: dict) -> Path:
                             "llvm/Support/raw_ostream.h"}
         if not required_headers <= header_names:
             raise RuntimeError("lld C++ 头文件闭包未包含 shim 所需头文件")
-        header_names |= {name for name in lld_headers if name.startswith("llvm-c/")}
+        # C API 与配置头必须全量落地：bridge.c 只经 llvm-c 头引入，但
+        # llvm-c/Target.h 会展开 llvm/Config/Targets.def 等 .def 文件，
+        # 它们不在 lld shim 的头文件闭包里（实测 linux-x86_64 因此编译失败）。
+        header_names |= {name for name in lld_headers
+                         if name.startswith(("llvm-c/", "llvm/Config/"))}
         for name in header_names:
             target = prefix / "include" / name
             target.parent.mkdir(parents=True, exist_ok=True)
