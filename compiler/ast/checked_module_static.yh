@@ -1,0 +1,227 @@
+module ast;
+import gen;
+import ir;
+
+// checked_lower_static_name：来源符号保留本模块逻辑名，导入副本与匿名 backing
+// 使用不可导出的本地名，避免两个模块的相同私有常量/数据标签冲突。
+fn checked_lower_static_name(l *CheckedLower, row int, object *CheckedStaticData) *char {
+    if (object != 0 && object.sym_id >= 0 && object.sym_id < l.store.symbol_n) {
+        let sym gen.CSym = l.store.symbols[object.sym_id];
+        if ((sym.flags & gen.F_EXTERN) == 0) {
+            return checked_lower_name(l, sym.name_off, sym.name_len, sym.flags, -1);
+        }
+        let name [64]u8;
+        let n int = gen.append_str(name, 0, ".LI");
+        n = gen.append_int(name, n, row); name[n] = 0;
+        let owned *char = malloc((n + 1).to_type(u64)).to_type(*char);
+        if (owned == 0) { return 0; }
+        memcpy(owned, &name[0], (n + 1).to_type(u64));
+        return owned;
+    }
+    let name [48]u8;
+    let n int = gen.append_str(name, 0, ".LD");
+    n = gen.append_int(name, n, object.label); name[n] = 0;
+    let owned *char = malloc((n + 1).to_type(u64)).to_type(*char);
+    if (owned == 0) { return 0; }
+    memcpy(owned, &name[0], (n + 1).to_type(u64));
+    return owned;
+}
+
+// checked_lower_static_location：静态实体必须引用模块自有来源；有原声明时采用
+// 其文件/字节位置，匿名字符串与 CT backing 退到模块首个有效来源的开头。
+fn checked_lower_static_location(l *CheckedLower, object *CheckedStaticData,
+    source_out *int, offset_out *int) int {
+    source_out[0] = -1; offset_out[0] = 0;
+    if (object != 0 && object.sym_id >= 0 && object.sym_id < l.store.symbol_n) {
+        let row int = 0;
+        for row < l.store.declaration_n {
+            let declaration AstDecl = l.store.declarations[row];
+            if (declaration.sym_id == object.sym_id && declaration.file_id >= 0
+                && declaration.file_id < l.store.file_n
+                && l.source_map[declaration.file_id] >= 0) {
+                source_out[0] = l.source_map[declaration.file_id];
+                offset_out[0] = checked_lower_offset(l, declaration.file_id, declaration.first);
+                return offset_out[0] >= 0 ? 0 : -1;
+            }
+            row += 1;
+        }
+    }
+    let file int = 0;
+    for file < l.store.file_n {
+        if (l.source_map[file] >= 0) { source_out[0] = l.source_map[file]; return 0; }
+        file += 1;
+    }
+    return -1;
+}
+
+// checked_lower_static_type：把根对象或匿名定长 backing 的已知布局映射到模块类型表。
+fn checked_lower_static_type(l *CheckedLower, object *CheckedStaticData) int {
+    if (object.type_id >= 0) { return checked_lower_object_type(l, object.type_id, 0); }
+    if (object.elem_type < 0 || object.elem_type >= l.store.type_n) { return -1; }
+    let elem int = checked_lower_object_type(l, object.elem_type, 0);
+    if (elem < 0) { return elem; }
+    let layout ir.IRModuleType;
+    layout.kind = ir.IR_MODULE_TY_ARRAY; layout.elem = elem;
+    layout.size = object.size; layout.align = object.align; layout.count = object.count;
+    return ir.ir_module_add_type(l.output, "", &layout, 0, 0);
+}
+
+// checked_lower_static_add_string：从原始 token 复制字符串字节，作为可写的私有数组。
+// 全局手工字符串字段、导入接口文字和函数字面量最终都通过同一标签映射。
+fn checked_lower_static_add_string(l *CheckedLower, row int) int {
+    if (row < 0 || row >= l.store.string_n) { return -1; }
+    if (l.string_map[row] > 0) { return l.string_map[row] - 1; }
+    let str CheckedString = l.store.strings[row];
+    if (str.name_off < 0 || str.name_len < 0
+        || (str.quoted != 0 && str.name_len < 2)) { return -1; }
+    let data *u8 = checked_zero_rows(str.name_len + 1, 1).to_type(*u8);
+    if (data == 0) { return -1; }
+    let src *u8 = l.store.names + str.name_off;
+    let count int = 0;
+    let end int = str.name_len; let i int = 0;
+    if (str.quoted != 0) { end = str.name_len - 1; i = 1; }
+    for i < end {
+        let value int = src[i].to_type(int);
+        if (str.quoted != 0 && src[i] == '\\') {
+            value = checked_lower_string_byte(src[i + 1]);
+            if (src[i + 1] == 'x') {
+                value = gen.hexval(src[i + 2]) * 16 + gen.hexval(src[i + 3]);
+                i += 4;
+            } else { i += 2; }
+        } else { i += 1; }
+        data[count] = value.to_type(u8); count += 1;
+    }
+    count += 1;
+    let layout ir.IRModuleType;
+    layout.kind = ir.IR_MODULE_TY_ARRAY; layout.elem = l.private_type_map[ir.IR_TY_U8];
+    layout.size = count; layout.align = 1; layout.count = count;
+    let mapped int = ir.ir_module_add_type(l.output, "", &layout, 0, 0);
+    let name [48]u8;
+    let n int = gen.append_str(name, 0, ".LD");
+    n = gen.append_int(name, n, str.label); name[n] = 0;
+    let symbol ir.IRModuleSymbol;
+    symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; symbol.type_id = mapped;
+    symbol.linkage = ir.IR_MODULE_LINK_PRIVATE; symbol.defined = 1; symbol.mutable = 1;
+    let source int = -1; let offset int = 0;
+    if (checked_lower_static_location(l, 0, &source, &offset) != 0) {
+        free(data.to_type(*void)); return -1;
+    }
+    symbol.source = source; symbol.offset = offset;
+    let added int = mapped < 0 ? -1 : ir.ir_module_add_symbol(l.output,
+        (&name[0]).to_type(*char), &symbol, 0, 0);
+    let result int = added < 0 ? -1 : ir.ir_module_add_global(l.output,
+        added, data, count, 1, 0, 0);
+    free(data.to_type(*void));
+    if (result < 0) { return -1; }
+    l.string_map[row] = added + 1;
+    return added;
+}
+
+// checked_lower_static_label：将会话标签解析为本模块数据符号下标。
+fn checked_lower_static_label(l *CheckedLower, label int) int {
+    let i int = 0;
+    for i < l.store.static_data_n {
+        let object CheckedStaticData = l.store.static_data[i];
+        if (object.label == label && l.static_map[i] > 0) { return l.static_map[i] - 1; }
+        i += 1;
+    }
+    i = 0;
+    for i < l.store.string_n {
+        if (l.store.strings[i].label == label) { return checked_lower_static_add_string(l, i); }
+        i += 1;
+    }
+    return -1;
+}
+
+// checked_lower_static_data：先登记全部数据符号及字符串，再复制字节/重定位。
+// 两阶段解析允许切片、字符串和循环引用任意排序，IRModule verifier 最终检查闭包。
+fn checked_lower_static_data(l *CheckedLower) int {
+    let row int = 0;
+    for row < l.store.static_data_n {
+        let object CheckedStaticData = l.store.static_data[row];
+        if (object.sym_id >= 0 && object.sym_id < l.store.symbol_n) {
+            let declaration int = 0;
+            for declaration < l.store.declaration_n {
+                let node AstDecl = l.store.declarations[declaration];
+                if (node.sym_id == object.sym_id) {
+                    l.function.file_id = node.file_id;
+                    l.function.decl_row = declaration;
+                    l.last_token = node.first;
+                    break;
+                }
+                declaration += 1;
+            }
+        }
+        let type_id int = checked_lower_static_type(l, &object);
+        if (type_id < 0) { l.reason = "静态对象类型或布局尚未接入"; return type_id; }
+        let name *char = checked_lower_static_name(l, row, &object);
+        if (name == 0) { l.reason = "静态对象名称复制失败"; return -1; }
+        let symbol ir.IRModuleSymbol;
+        symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; symbol.type_id = type_id;
+        let external int = 0;
+        if (object.sym_id >= 0 && object.sym_id < l.store.symbol_n) {
+            let source gen.CSym = l.store.symbols[object.sym_id];
+            external = ((source.flags & gen.F_EXTERN) == 0
+                && (source.flags & gen.F_PUB) != 0).to_type(int);
+        }
+        symbol.linkage = external != 0 ? ir.IR_MODULE_LINK_EXTERNAL : ir.IR_MODULE_LINK_PRIVATE;
+        // 现有常量限制直接绑定，裸指针仍可写 backing；发为可写存储与旧后端一致。
+        symbol.defined = 1; symbol.mutable = 1;
+        let source int = -1; let offset int = 0;
+        if (checked_lower_static_location(l, &object, &source, &offset) != 0) { return -1; }
+        symbol.source = source; symbol.offset = offset;
+        let added int = ir.ir_module_add_symbol(l.output, name, &symbol, 0, 0);
+        free(name.to_type(*void));
+        if (added < 0) { l.reason = "静态对象符号重复或登记失败"; return -1; }
+        l.static_map[row] = added + 1;
+        if (object.sym_id >= 0 && object.sym_id < l.store.symbol_n) {
+            l.global_map[object.sym_id] = added + 1;
+        }
+        let string int = 0;
+        for string < l.store.string_n {
+            if (object.label > 0 && l.store.strings[string].label == object.label) {
+                l.string_map[string] = added + 1;
+            }
+            string += 1;
+        }
+        row += 1;
+    }
+    row = 0;
+    for row < l.store.string_n {
+        if (l.string_map[row] == 0 && checked_lower_static_add_string(l, row) < 0) { return -1; }
+        row += 1;
+    }
+    row = 0;
+    for row < l.store.static_data_n {
+        let object CheckedStaticData = l.store.static_data[row];
+        let relocs *ir.IRModuleReloc = checked_zero_rows(object.reloc_n,
+            sizeof(ir.IRModuleReloc)).to_type(*ir.IRModuleReloc);
+        if (object.reloc_n > 0 && relocs == 0) {
+            l.reason = "静态对象重定位表分配失败"; return -1;
+        }
+        let i int = 0;
+        for i < object.reloc_n {
+            let source gen.StaticDataReloc = object.relocs[i];
+            let target int = -1;
+            if (source.target_sym >= 0 && source.target_sym < l.store.symbol_n
+                && l.global_map[source.target_sym] > 0) {
+                target = l.global_map[source.target_sym] - 1;
+            } else if (source.target_label > 0) {
+                target = checked_lower_static_label(l, source.target_label);
+            }
+            if (target < 0) {
+                l.reason = "静态重定位目标缺少本模块数据对象";
+                free(relocs.to_type(*void)); return -2;
+            }
+            relocs[i].offset = source.offset; relocs[i].width = source.width;
+            relocs[i].symbol = target; relocs[i].addend = source.addend;
+            i += 1;
+        }
+        let added int = ir.ir_module_add_global(l.output, l.static_map[row] - 1,
+            object.data, object.size, object.align, relocs, object.reloc_n);
+        free(relocs.to_type(*void));
+        if (added < 0) { l.reason = "静态对象数据登记失败"; return -1; }
+        row += 1;
+    }
+    return 0;
+}

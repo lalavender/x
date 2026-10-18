@@ -45,8 +45,13 @@ HOSTS = {
                       "qemu": "/usr/bin/qemu-aarch64", "sysroot": "/usr/aarch64-linux-gnu"},
 }
 
-# 桥暴露给 C 调用方的两个入口；宿主必须**定义**它们（nm 里不能是 U）。
-BRIDGE_SYMBOLS = ("yh_llvm_emit", "yh_llvm_version")
+# 桥暴露给 C 调用方的入口；宿主必须**定义**它们（nm 里不能是 U）。
+BRIDGE_SYMBOLS = (
+    "yh_llvm_emit", "yh_llvm_version", "yh_lld_link", "yh_lld_link_driver",
+    "yh_lld_link_identity", "yh_lld_default_file_count", "yh_lld_default_file",
+    "yh_lld_default_library_count", "yh_lld_default_library",
+    "yh_lld_resolve_library",
+)
 
 # IR：最小可验证模块，两个目标都能发射成可直接链接的 ELF 对象。
 PROBE_IR = "define i32 @main() { entry: ret i32 0 }\n"
@@ -297,12 +302,19 @@ def main() -> int:
         "bridge_sha256": config["bridge_sha256"],
         "bridge_source_sha256": config["bridge_source_sha256"],
         "bridge_header_sha256": config["bridge_header_sha256"],
+        "lld_stub_source_sha256": config["lld_stub_source_sha256"],
+        "sdk_builder_sha256": config["sdk_builder_sha256"],
         "sdk_sha256": config["sdk_sha256"], "sdk_manifest_sha256": manifest_sha256,
         "sdk_prefix": relative(prefix), "cc": config["cc"], "cxx": config["cxx"],
         "ar": config["ar"], "link_flags": config["link_flags"],
         "needed": needed, "no_llvm_shared_dependency": True, "symbols": symbols,
         "probes": probes, "rejected_cases": rejected,
         "scope": "自包含静态 LLVM 宿主；不安装系统 LLVM，不调用 llvm-config",
+        **({"lld_version": config["lld_version"],
+            "lld_bridge_source_sha256": config["lld_bridge_source_sha256"],
+            "lld_archives": config["lld_archives"],
+            "lld_component_count": config["lld_component_count"]}
+           if config.get("lld_version") else {}),
     }
     (work / "host.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n",
                                     encoding="utf-8")

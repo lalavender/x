@@ -1,0 +1,111 @@
+module backend;
+import ir;
+
+// llvm_mark_global_usage：保留函数引用的静态对象及其重定位依赖；私有且不可达的编译期字面量不入目标文件。
+fn llvm_mark_global_usage(unit *ir.IRModule, live *u8) void {
+    let i int = 0;
+    for i < unit.symbol_count {
+        live[i] = 0;
+        let symbol ir.IRModuleSymbol = unit.symbols[i];
+        if (symbol.kind == ir.IR_MODULE_SYMBOL_GLOBAL && symbol.defined != 0
+            && symbol.linkage != ir.IR_MODULE_LINK_PRIVATE) { live[i] = 1; }
+        i += 1;
+    }
+    let fi int = 0;
+    for fi < unit.function_count {
+        let function ir.IRModuleFunction = unit.functions[fi];
+        let ii int = 0;
+        for ii < function.body.inst_count {
+            let inst ir.IRInst = function.body.insts[ii];
+            if (inst.op == ir.IR_OP_GLOB_ADDR && inst.imm >= 0
+                && inst.imm < unit.symbol_count.to_type(i64)) {
+                live[inst.imm.to_type(int)] = 1;
+            }
+            ii += 1;
+        }
+        fi += 1;
+    }
+    let changed int = 1;
+    for changed != 0 {
+        changed = 0;
+        let gi int = 0;
+        for gi < unit.global_count {
+            let global ir.IRModuleGlobal = unit.globals[gi];
+            if (live[global.symbol] != 0) {
+                let ri int = 0;
+                for ri < global.reloc_count {
+                    let target int = global.relocs[ri].symbol;
+                    if (target >= 0 && target < unit.symbol_count
+                        && unit.symbols[target].kind == ir.IR_MODULE_SYMBOL_GLOBAL
+                        && live[target] == 0) {
+                        live[target] = 1;
+                        changed = 1;
+                    }
+                    ri += 1;
+                }
+            }
+            gi += 1;
+        }
+    }
+}
+
+// llvm_data_bytes：发射完整字节段类型；values 非零时同时发射精确初始化字节。
+// 零段使用 zeroinitializer，原始填充区照原样保留，不按源字段类型重新布局。
+fn llvm_data_bytes(out *LLVMOutput, data *u8, size int, values int) void {
+    llvm_byte(out, '['); llvm_number(out, size.to_type(u64)); llvm_text(out, " x i8]");
+    if (values == 0) { return; }
+    llvm_byte(out, ' ');
+    let zero int = 1; let i int = 0;
+    for i < size {
+        if (data[i] != 0) { zero = 0; break; }
+        i += 1;
+    }
+    if (zero != 0) { llvm_text(out, "zeroinitializer"); }
+    else { llvm_byte(out, 'c'); llvm_quote(out, data, size); }
+}
+
+// llvm_data_reloc：在未要求排序的重定位表中找 cursor 后最早的槽。
+// verifier 已保证各槽不重叠且落在对象内；扫描顺序不影响 LLVM 布局或数据身份。
+// ponytail: 与现有重定位 verifier 同为平方扫描；实用大表需要时再统一排序。
+fn llvm_data_reloc(global *ir.IRModuleGlobal, cursor int) int {
+    let result int = -1; let i int = 0;
+    for i < global.reloc_count {
+        let offset int = global.relocs[i].offset;
+        if (offset >= cursor && (result < 0 || offset < global.relocs[result].offset)) { result = i; }
+        i += 1;
+    }
+    return result;
+}
+
+// llvm_data_parts：按偏移交替发射字节段与目标符号指针，packed 结构不产生隐式
+// 对齐。values=0 是对象类型，values=1 是带各段类型的常量；两趟使用同一顺序。
+// addend 保持有符号字节加数，GEP 不加 inbounds，避免把合法低层地址附加 UB。
+fn llvm_data_parts(unit *ir.IRModule, global *ir.IRModuleGlobal,
+    out *LLVMOutput, values int) void {
+    llvm_text(out, "<{ ");
+    let cursor int = 0; let first int = 1;
+    for cursor < global.size {
+        if (first == 0) { llvm_text(out, ", "); }
+        first = 0;
+        let index int = llvm_data_reloc(global, cursor);
+        let next int = index < 0 ? global.size : global.relocs[index].offset;
+        if (next > cursor) {
+            llvm_data_bytes(out, global.data + cursor, next - cursor, values);
+            cursor = next;
+        } else {
+            let relocation ir.IRModuleReloc = global.relocs[index];
+            llvm_text(out, "ptr");
+            if (values != 0) {
+                llvm_text(out, " getelementptr (i8, ptr @");
+                llvm_string(out, unit.symbols[relocation.symbol].name);
+                llvm_text(out, ", i64 ");
+                if (relocation.addend < 0) { llvm_byte(out, '-'); }
+                let bits u64 = relocation.addend.to_type(u64);
+                llvm_number(out, relocation.addend < 0 ? 0.to_type(u64) - bits : bits);
+                llvm_byte(out, ')');
+            }
+            cursor += relocation.width;
+        }
+    }
+    llvm_text(out, " }>");
+}

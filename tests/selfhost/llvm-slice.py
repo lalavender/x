@@ -107,7 +107,7 @@ def main():
     for level in (0, 2):
         llfile = WORK / f"slice-O{level}.ll"
         text = emit_text(compiler, source, level, llfile)
-        for token in ("= alloca i8", "getelementptr i8, ptr", "llvm.memcpy"):
+        for token in ("= alloca i8", "getelementptr i8, ptr", "llvm.memmove"):
             assert token in text, f"O{level} 文本缺少切片 lowering 痕迹: {token}\n{text[-800:]}"
         verify = run([tools["opt"], "-passes=verify", "-S", str(llfile), "-o", os.devnull])
         assert verify.returncode == 0, f"O{level} opt 验证失败\n{verify.stderr[-1200:]}"

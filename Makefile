@@ -124,6 +124,13 @@ ifeq ($(SKIP_CORPUS),1)
  CORPUS_FLAG = --skip-corpus
 endif
 
+# LL10：x86_64 LLVM 语料与原生连续自举门。只在 Linux/x86_64 启动；
+# A 由 ARM64 种子经 qemu 交叉生成，B/C/D 均直接原生运行。
+LLVM_TARGET ?= x86_64-unknown-linux-gnu
+LLVM_SEED ?= $(REPO_BIN)/yh-linux-arm64
+LLVM_JOBS ?= 2
+LLVM_RUN_FLAGS = --backend llvm --target $(LLVM_TARGET)
+
 # stage-yh：把 $(YH) 复制到 $(YH_RUN)（FAST_STAGE=0 时 YH_RUN 就是 $(YH)，
 # 该目标退化为空操作）。先写 .tmp 再 mv，避免并发读到半个 70MB 二进制。
 .PHONY: stage-yh
@@ -281,6 +288,27 @@ selfhost-native: stage-yh
 	python3 $(TOPSRC)/tests/selfhost/link-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF)
 	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(YH_RUN) $(MODCHECK_WORK_FLAG)
+
+# test-llvm：LLVM x64 O0/O2 全量語法/运行/模块/项目语料、统计覆盖与专项门。
+.PHONY: test-llvm selfhost-llvm
+test-llvm: stage-yh
+	@test "$(HOST_SYSTEM)" = Linux || { echo "错误: test-llvm 首期要求 Linux/x86_64"; exit 1; }
+	@test "$(HOST_ARCH)" = x86_64 -o "$(HOST_ARCH)" = amd64 || { echo "错误: test-llvm 首期要求 Linux/x86_64"; exit 1; }
+	python3 $(TOPSRC)/tests/selfhost/llvm-selfhost.py --self-test
+	python3 $(TOPSRC)/tests/yh/check.py --compiler --compiler-path $(YH_RUN) --quiet
+	python3 $(TOPSRC)/tests/yh-run/check.py --compiler $(YH_RUN) $(LLVM_RUN_FLAGS) --opt-level 0 --quiet --jobs $(LLVM_JOBS) --workdir $(TOPSRC)/tmp/llvm-test/yh-run-O0
+	python3 $(TOPSRC)/tests/yh-run/check.py --compiler $(YH_RUN) $(LLVM_RUN_FLAGS) --opt-level 2 --quiet --jobs $(LLVM_JOBS) --workdir $(TOPSRC)/tmp/llvm-test/yh-run-O2
+	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(YH_RUN) $(LLVM_RUN_FLAGS) --opt-level 0 --quiet --jobs $(LLVM_JOBS)
+	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(YH_RUN) $(LLVM_RUN_FLAGS) --opt-level 2 --quiet --jobs $(LLVM_JOBS)
+	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(YH_RUN) $(LLVM_RUN_FLAGS) --opt-level 0 --jobs $(LLVM_JOBS) --workdir $(abspath $(TOPSRC)/tmp/llvm-test/modcheck-O0)
+	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(YH_RUN) $(LLVM_RUN_FLAGS) --opt-level 2 --jobs $(LLVM_JOBS) --workdir $(abspath $(TOPSRC)/tmp/llvm-test/modcheck-O2)
+	python3 $(TOPSRC)/tests/selfhost/llvm-driver.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(YH_RUN) --llvm-x64
+	python3 $(TOPSRC)/tests/selfhost/llvm-lld.py
+
+# selfhost-llvm：执行 A→B/C/D 的 O0/O2 原生固定点；脚本在最终 D 候选上运行完整语料与专项门。
+selfhost-llvm: stage-yh
+	python3 $(TOPSRC)/tests/selfhost/llvm-selfhost.py --seed "$(abspath $(LLVM_SEED))" --jobs $(LLVM_JOBS)
 
 # full：滚种子前的全量门（三层回归 + 自举全套）。
 full: test selfhost-native

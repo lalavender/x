@@ -73,10 +73,16 @@ def main() -> int:
             wrapper = wrappers / name
             wrapper.write_text(
                 "#!/bin/sh\n"
+                f'real_tool="$YH_LINK_CACHE_REAL_{name.upper()}"\n'
+                'case "$1" in\n'
+                '  -print-search-dirs|-print-sysroot|-dumpmachine|-dumpversion|'
+                '-dumpfullversion|-dumpspecs|-print-file-name=*|-print-prog-name=*) '
+                'exec "$real_tool" "$@" ;;\n'
+                'esac\n'
                 'kind=link\n'
                 'if [ "$1" = "-c" ] || [ "$1" = "asm" ]; then kind=assemble; fi\n'
                 f'printf "%s {name}\\n" "$kind" >> "$YH_LINK_CACHE_LOG"\n'
-                f'exec "$YH_LINK_CACHE_REAL_{name.upper()}" "$@"\n',
+                'exec "$real_tool" "$@"\n',
                 encoding="utf-8",
             )
             wrapper.chmod(0o755)

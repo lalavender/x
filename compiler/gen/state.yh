@@ -278,33 +278,49 @@ pub fn G() *GenState {
 // 字符串字面量的数据标签 → 原样字节（intern 池）映射：顶层或普通函数里的编译期
 // 调用实参由前端直接求值，只剩数据标签号，编译期过程据此反查字面量字节。
 // 独立全局表而非 GenState 字段：GenState 已大到让后端单条 add 的字段偏移越界。
-// 上限 128 项，超出后新字面量不再登记（退化为旧的拒绝路径）。
+// 每个编译单元最多登记 4096 项，表满时由调用方报告错误，不漏掉快照数据。
+pub const DATA_STR_CAP int = 4096;
 let c_data_str_n int = 0;
-let c_data_str_lbl [128]int;
-let c_data_str_off [128]int;
-let c_data_str_len [128]int;
+let c_data_str_lbl [DATA_STR_CAP]int;
+let c_data_str_off [DATA_STR_CAP]int;
+let c_data_str_len [DATA_STR_CAP]int;
+let c_data_str_quoted [DATA_STR_CAP]int;
 
 // data_str_add：登记字符串字面量的数据标签与原样字节，返回非零表示表满或分配失败。
 // 字节 intern 进名字池（np_data），消费侧（ct_pool_adopt_label）按同一个池取字节。
-fn data_str_add(lbl int, start int, slen int) int {
-    if (c_data_str_n >= 128) { return -1; }
+pub fn data_str_add(lbl int, start int, slen int) int {
+    if (c_data_str_n >= DATA_STR_CAP) { return -1; }
     let off int = name_intern(start, slen);
     if (off < 0) { return -1; }
+    return data_str_add_entry(lbl, off, slen, 1);
+}
+
+// data_str_add_pool：直接登记已经位于名字池中的字节，不把池偏移误当源文件偏移。
+pub fn data_str_add_pool(lbl int, off int, slen int) int {
+    return data_str_add_entry(lbl, off, slen, 0);
+}
+
+// data_str_add_entry：登记池内字节，并标记其是否含有源码字符串引号与转义。
+fn data_str_add_entry(lbl int, off int, slen int, quoted int) int {
+    if (c_data_str_n >= DATA_STR_CAP || off < 0 || slen < 0
+        || off > g_state.np_len || slen > g_state.np_len - off) { return -1; }
     c_data_str_lbl[c_data_str_n] = lbl;
     c_data_str_off[c_data_str_n] = off;
     c_data_str_len[c_data_str_n] = slen;
+    c_data_str_quoted[c_data_str_n] = quoted;
     c_data_str_n += 1;
     return 0;
 }
 
 // data_str_lookup：按数据标签号查登记项；**命中返回非零**并写出名字池偏移与字节长度，
 // 未命中返回 0（调用方 `if (data_str_lookup(...) != 0)` 以非零为命中）。
-pub fn data_str_lookup(lbl int, off *int, slen *int) int {
+pub fn data_str_lookup(lbl int, off *int, slen *int, quoted *int) int {
     let i int = 0;
     for i < c_data_str_n {
         if (c_data_str_lbl[i] == lbl) {
             *off = c_data_str_off[i];
             *slen = c_data_str_len[i];
+            *quoted = c_data_str_quoted[i];
             return 1;
         }
         i += 1;
@@ -386,6 +402,7 @@ pub fn em_get_ready(idx int) int {
 // state_init：恢复非零初始值（原 pub let 声明初始化器迁移而来）。
 // 在每次编译会话开始（driver 入口与 worker 初始化）调用。
 pub fn state_init() void {
+    static_data_reset();
     g_state.lx_line = 1;
     g_state.c_file_decl_i = -1;
     g_state.c_active_file = -1;

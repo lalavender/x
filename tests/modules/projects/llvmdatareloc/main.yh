@@ -1,0 +1,184 @@
+module main;
+import backend;
+import gen;
+import ir;
+
+// add_types：手工布局含填充的记录、切片与指针数组，编号同时供序列化读回核对。
+fn add_types(unit *ir.IRModule) int {
+    let ty ir.IRModuleType;
+    ty.kind = ir.IR_TY_I32; ty.bits = 32; ty.size = 4; ty.align = 4; ty.elem = -1;
+    if (ir.ir_module_add_type(unit, "i32", &ty, 0, 0) != 0) { return 1; }
+    ty.kind = ir.IR_TY_U8; ty.bits = 8; ty.size = 1; ty.align = 1;
+    if (ir.ir_module_add_type(unit, "u8", &ty, 0, 0) != 1) { return 2; }
+    ty.kind = ir.IR_TY_PTR; ty.bits = 64; ty.size = 8; ty.align = 8; ty.elem = 0;
+    if (ir.ir_module_add_type(unit, "ptr", &ty, 0, 0) != 2) { return 3; }
+    ty.kind = ir.IR_MODULE_TY_ARRAY; ty.bits = 0; ty.size = 32; ty.align = 1;
+    ty.elem = 1; ty.count = 32;
+    if (ir.ir_module_add_type(unit, "bytes", &ty, 0, 0) != 3) { return 4; }
+    let fields [5]ir.IRModuleField;
+    fields[0].type_id = 1;
+    fields[1].type_id = 2; fields[1].offset = 8;
+    fields[2].type_id = 0; fields[2].offset = 16;
+    fields[3].type_id = 2; fields[3].offset = 24;
+    fields[4].type_id = 1; fields[4].offset = 32;
+    ty.kind = ir.IR_MODULE_TY_STRUCT; ty.size = 40; ty.align = 8; ty.elem = -1; ty.count = 0;
+    if (ir.ir_module_add_type(unit, "record", &ty, &fields[0], 5) != 4) { return 5; }
+    ty.kind = ir.IR_MODULE_TY_SLICE; ty.size = 16; ty.elem = 0;
+    if (ir.ir_module_add_type(unit, "slice", &ty, 0, 0) != 5) { return 6; }
+    ty.kind = ir.IR_MODULE_TY_ARRAY; ty.size = 24; ty.elem = 2; ty.count = 3;
+    if (ir.ir_module_add_type(unit, "pointers", &ty, 0, 0) != 6) { return 7; }
+    ty.kind = ir.IR_TY_VOID; ty.size = 0; ty.align = 1; ty.elem = -1; ty.count = 0;
+    if (ir.ir_module_add_type(unit, "void", &ty, 0, 0) != 7) { return 8; }
+    return 0;
+}
+
+// add_global：只经真实增建接口深拷贝初始化字节和重定位，不借用局部缓冲。
+fn add_global(unit *ir.IRModule, name *char, type_id int, private int,
+    data *u8, size int, align int, relocs *ir.IRModuleReloc, count int) int {
+    let symbol ir.IRModuleSymbol;
+    symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; symbol.type_id = type_id;
+    symbol.linkage = private != 0 ? ir.IR_MODULE_LINK_PRIVATE : ir.IR_MODULE_LINK_EXTERNAL;
+    symbol.defined = 1; symbol.mutable = 1;
+    let id int = ir.ir_module_add_symbol(unit, name, &symbol, 0, 0);
+    if (id < 0 || ir.ir_module_add_global(unit, id, data, size, align, relocs, count) < 0) { return -1; }
+    return id;
+}
+
+// instruction：明确填写未使用操作数，避免零初始化混淆合法值编号与缺省字段。
+fn instruction(inst *ir.IRInst, op int, result int, type_id int, a int, b int, imm i64) void {
+    inst.op = op; inst.result_id = result; inst.result_type = type_id;
+    inst.a = a; inst.b = b; inst.imm = imm; inst.aux = -1;
+}
+
+// add_function：构造私有目标函数、全局地址访问器或支持重叠的聚合副本函数。
+fn add_function(unit *ir.IRModule, name *char, mode int, global int) int {
+    let ret int = mode == 2 ? 7 : mode == 1 ? 2 : 0;
+    let params [2]int;
+    params[0] = 2; params[1] = 2;
+    let symbol ir.IRModuleSymbol;
+    symbol.kind = ir.IR_MODULE_SYMBOL_FUNCTION; symbol.type_id = ret;
+    symbol.linkage = mode == 0 ? ir.IR_MODULE_LINK_PRIVATE : ir.IR_MODULE_LINK_EXTERNAL;
+    symbol.defined = 1;
+    let id int = ir.ir_module_add_symbol(unit, name, &symbol,
+        mode == 2 ? &params[0] : 0.to_type(*int), mode == 2 ? 2 : 0);
+    if (id < 0) { return -1; }
+    let types [4]ir.IRType;
+    let mapping [4]int;
+    let i int = 0;
+    for i < 3 {
+        types[i].kind = unit.types[i].kind; types[i].bits = unit.types[i].bits;
+        types[i].elem = unit.types[i].elem; mapping[i] = i; i += 1;
+    }
+    types[3].kind = ir.IR_TY_VOID; types[3].elem = -1; mapping[3] = 7;
+    let insts [3]ir.IRInst;
+    let count int = 1;
+    let value_count int = 1;
+    let result int = 0;
+    if (mode == 2) {
+        instruction(&insts[0], ir.IR_OP_PARAM, 0, 2, -1, -1, 0);
+        instruction(&insts[1], ir.IR_OP_PARAM, 1, 2, -1, -1, 1);
+        instruction(&insts[2], ir.IR_OP_MEMCPY, -1, -1, 0, 1, 512);
+        count = 3; value_count = 2; result = -1;
+    } else if (mode == 1) {
+        instruction(&insts[0], ir.IR_OP_GLOB_ADDR, 0, 2, -1, -1, global.to_type(i64));
+    } else {
+        instruction(&insts[0], ir.IR_OP_CONST, 0, 0, -1, -1, 99);
+    }
+    let block ir.IRBlock;
+    block.inst_count = count; block.term = ir.IR_TERM_RET; block.term_value = result;
+    block.succ0 = -1; block.succ1 = -1;
+    let body ir.IRFunction;
+    body.target_id = unit.target.key; body.ret_type = mode == 2 ? 3 : ret;
+    body.types = &types[0]; body.type_count = 4; body.insts = &insts[0]; body.inst_count = count;
+    body.value_count = value_count; body.blocks = &block; body.block_count = 1;
+    if (ir.ir_module_add_function(unit, id, &body, &mapping[0], 0) < 0) { return -1; }
+    return id;
+}
+
+// build_module：源字节与手写重定位覆盖乱序槽、正负加数、私有对象与函数地址。
+fn build_module(unit *ir.IRModule, target *gen.TargetInfo) int {
+    let identity ir.IRModuleTarget;
+    identity.triple = target.triple; identity.data_layout = target.data_layout;
+    identity.abi = target.abi; identity.pointer_bits = target.pointer_bits;
+    identity.little_endian = target.little_endian; identity.layout_version = target.layout_version;
+    if (ir.ir_module_init(unit, &identity) != 0
+        || ir.ir_module_add_source(unit, "data-reloc.yh", "data\n".to_type(*u8), 5) != 0
+        || add_types(unit) != 0) { return 1; }
+    let bytes [32]u8;
+    bytes[0] = 10; bytes[4] = 20; bytes[8] = 30; bytes[12] = 40;
+    if (add_global(unit, "private_bytes", 3, 1, &bytes[0], 32, 8, 0, 0) != 0) { return 2; }
+    let function int = add_function(unit, "private_target", 0, -1);
+    if (function != 1) { return 3; }
+    let relocs [3]ir.IRModuleReloc;
+    relocs[0].offset = 24; relocs[0].width = 8; relocs[0].symbol = 0; relocs[0].addend = -4;
+    relocs[1].offset = 8; relocs[1].width = 8; relocs[1].symbol = 0; relocs[1].addend = 8;
+    let record [40]u8;
+    record[0] = 17; record[16] = 6; record[32] = 34;
+    if (add_global(unit, "record", 4, 0, &record[0], 40, 16, &relocs[0], 2) != 2) { return 4; }
+    let slice [16]u8;
+    slice[0] = 3;
+    relocs[0].offset = 8; relocs[0].addend = 4;
+    if (add_global(unit, "view", 5, 0, &slice[0], 16, 8, &relocs[0], 1) != 3) { return 5; }
+    slice[0] = 0;
+    if (add_global(unit, "empty_view", 5, 0, &slice[0], 16, 8, 0, 0) != 4) { return 6; }
+    let pointers [24]u8;
+    relocs[0].offset = 16; relocs[0].symbol = function; relocs[0].addend = 0;
+    relocs[1].offset = 0; relocs[1].addend = 12;
+    relocs[2].offset = 8; relocs[2].width = 8; relocs[2].symbol = 0; relocs[2].addend = 4;
+    if (add_global(unit, "pointers", 6, 0, &pointers[0], 24, 8, &relocs[0], 3) != 5
+        || add_function(unit, "base_address", 1, 0) < 0
+        || add_function(unit, "copy_bytes", 2, -1) < 0) { return 7; }
+    return ir.ir_module_verify(unit) == 0 ? 0 : 8;
+}
+
+// reject_invalid：已验证的重定位仍须拒绝非槽偏移、错宽、越界目标与非零占位。
+fn reject_invalid(unit *ir.IRModule) int {
+    let relocation *ir.IRModuleReloc = &unit.globals[1].relocs[0];
+    relocation.offset = 25;
+    if (ir.ir_module_verify(unit) == 0) { return 1; }
+    relocation.offset = 24; relocation.width = 4;
+    if (ir.ir_module_verify(unit) == 0) { return 2; }
+    relocation.width = 8; relocation.symbol = 99;
+    if (ir.ir_module_verify(unit) == 0) { return 3; }
+    relocation.symbol = 0; unit.globals[1].data[24] = 1;
+    if (ir.ir_module_verify(unit) == 0) { return 4; }
+    unit.globals[1].data[24] = 0; relocation.offset = 8;
+    if (ir.ir_module_verify(unit) == 0) { return 5; }
+    relocation.offset = 24;
+    return ir.ir_module_verify(unit) == 0 ? 0 : 6;
+}
+
+// reject_helper_collision：聚合复制的目标 libcall 不能撞上用户不兼容的同名函数。
+// 只改符号名字，IR 仍然合法；backend 必须在输出前拒绝错误签名。
+fn reject_helper_collision(unit *ir.IRModule, target *gen.TargetInfo) int {
+    let name *char = unit.symbols[1].name;
+    memcpy(name, "memmove", 8);
+    let out backend.LLVMOutput;
+    let status int = backend.llvm_emit_module(unit, target, &out);
+    memcpy(name, "private_target", 15);
+    backend.llvm_output_release(&out);
+    return status == 0 ? 1 : 0;
+}
+
+// main：先序列化再销毁原模块/输入缓冲，仅从独占读回模块发射 LLVM。
+fn main() int {
+    let target gen.TargetInfo;
+    if (gen.target_resolve("x86_64-unknown-linux-gnu", &target) != 0) { return 1; }
+    let unit ir.IRModule;
+    let status int = build_module(&unit, &target);
+    if (status != 0) { printf("build=%d\n", status); return 2; }
+    if (reject_invalid(&unit) != 0) { return 3; }
+    if (reject_helper_collision(&unit, &target) != 0) { return 8; }
+    let size int = ir.ir_module_serialized_size(&unit);
+    let bytes *u8 = malloc(size.to_type(u64)).to_type(*u8);
+    if (size <= 0 || bytes == 0 || ir.ir_module_serialize(&unit, bytes, size) != size) { return 4; }
+    let restored ir.IRModule;
+    if (ir.ir_module_deserialize(&restored, bytes, size) != 0) { return 5; }
+    ir.ir_module_release(&unit); free(bytes.to_type(*void));
+    let out backend.LLVMOutput;
+    if (ir.ir_module_verify(&restored) != 0 || backend.llvm_emit_module(&restored, &target, &out) != 0) { return 6; }
+    ir.ir_module_release(&restored);
+    if (gen.write_all(1, out.text, out.length) != 0) { return 7; }
+    backend.llvm_output_release(&out);
+    return 0;
+}

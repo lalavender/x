@@ -8,6 +8,7 @@ from pathlib import Path
 import runpy
 import shutil
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 WORK = ROOT / 'tmp/llvm-migration/llvm-emitter'
@@ -58,8 +59,35 @@ def main():
     """先编译真实 .yh 发射器，再用固定 SDK 验证 IR 与实际整数边界行为。"""
     parser = argparse.ArgumentParser()
     parser.add_argument('--compiler-path', default=str(ROOT / 'yh'))
-    parser.add_argument('--suite', choices=['scalar'], default='scalar')
+    parser.add_argument('--suite', choices=['scalar', 'memory', 'float'], default='scalar')
     args = parser.parse_args()
+    if args.suite == 'memory':
+        compiler = str(Path(args.compiler_path).resolve())
+        gates = (
+            'llvm-memory.py', 'llvm-array.py', 'llvm-struct.py', 'llvm-slice.py',
+            'llvm-global.py', 'llvm-global-data.py', 'llvm-data-reloc.py',
+            'llvm-global-modules.py',
+        )
+        for gate in gates:
+            result = run([sys.executable, str(ROOT / 'tests/selfhost' / gate),
+                          '--compiler-path', compiler])
+            if result.returncode != 0:
+                sys.stderr.write(result.stdout)
+                sys.stderr.write(result.stderr)
+                return result.returncode
+            sys.stdout.write(result.stdout)
+        print('LL5 memory suite 通过：局部内存/数组/结构体/切片/全局数据/重定位/跨模块')
+        return 0
+    if args.suite == 'float':
+        compiler = str(Path(args.compiler_path).resolve())
+        result = run([sys.executable, str(ROOT / 'tests/selfhost/llvm-float.py'),
+                      '--compiler-path', compiler])
+        if result.returncode != 0:
+            sys.stderr.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            return result.returncode
+        sys.stdout.write(result.stdout)
+        return 0
     project = WORK / 'scalar'
     WORK.mkdir(parents=True, exist_ok=True)
     if project.exists():

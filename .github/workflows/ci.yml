@@ -1,7 +1,8 @@
 name: CI
 
-# 自举门禁的双平台验证：
+# 自举门禁的多平台验证：
 #  - linux-arm64：QEMU 容器内（arm64 原生仿真）跑编译器语法模式、运行语料与主门；
+#  - linux-x86_64：ARM64 种子经 QEMU 生成 x64 A，随后以原生 x64 运行 LLVM O0/O2 全门；
 #    第 1 层 ANTLR 语料需要 Java 与 antlr4 jar 缓存，不在 CI 里跑（本机门禁仍覆盖）。
 #  - darwin-arm64：macOS（Apple Silicon）上跑同一套门禁；入库 bin/yh 若落后于
 #    「模块私有类型」一代，先自动补一代种子再验证（见下方步骤注释）。
@@ -16,6 +17,7 @@ on:
         options:
           - all
           - linux-arm64
+          - linux-x86_64
           - darwin-arm64
   push:
     branches: [arm64, main]
@@ -30,7 +32,7 @@ concurrency:
 jobs:
   linux-arm64:
     name: AArch64 Linux（ELF）主门
-    if: github.event_name != 'workflow_dispatch' || inputs.platform != 'darwin-arm64'
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'linux-arm64'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -62,9 +64,43 @@ jobs:
               make selfhost-native
             '
 
+  linux-x86_64:
+    name: x86_64 Linux（ELF）LLVM 全门
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'linux-x86_64'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SEED: bin/yh-linux-arm64
+      YH_LINK: /nonexistent
+    steps:
+      - uses: actions/checkout@v4
+
+      # 过渡种子仍是 AArch64：QEMU 只用于生成 x64 候选 A；B/C/D 由自举门原生运行。
+      - name: 准备 AArch64 执行与交叉链接工具
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: 安装工具并配置 AArch64 链接器
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential gcc-aarch64-linux-gnu python3
+          mkdir -p "$RUNNER_TEMP/yh-crossbin"
+          cat > "$RUNNER_TEMP/yh-crossbin/gcc" <<'EOF'
+          #!/bin/sh
+          exec aarch64-linux-gnu-gcc "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/yh-crossbin/gcc"
+          echo "$RUNNER_TEMP/yh-crossbin" >> "$GITHUB_PATH"
+
+      - name: LLVM x64 语料与 A→B/C/D 原生自举门
+        run: |
+          make test-llvm LLVM_JOBS=2
+          make selfhost-llvm LLVM_JOBS=2
+
   darwin-arm64:
     name: Darwin arm64（Mach-O）主门
-    if: github.event_name == 'workflow_dispatch' && inputs.platform != 'linux-arm64'
+    if: github.event_name == 'workflow_dispatch' && (inputs.platform == 'all' || inputs.platform == 'darwin-arm64')
     runs-on: macos-14          # Apple Silicon（arm64）；macos-13 是 x86_64，跑不了 arm64 种子
     timeout-minutes: 60
     steps:

@@ -33,11 +33,28 @@ struct CheckedString {
     label int;
     name_off int;
     name_len int;
+    quoted int;
+}
+
+// CheckedStaticData：静态对象的完全拥有快照，不引用 GenState 或 CT arena。
+// sym_id/label 仅为本次前端会话内的来源键；重定位目标同样以来源键表达，lowering
+// 会在建立模块符号表时解析，绝不把标签整数当成运行期地址。
+struct CheckedStaticData {
+    sym_id int;
+    label int;
+    type_id int;
+    elem_type int;
+    count int;
+    size int;
+    align int;
+    data *u8;
+    relocs *gen.StaticDataReloc;
+    reloc_n int;
 }
 
 // CheckedStorage：所有 arena 与语义表均独立复制，原 ID 在快照内继续指向相同行。
 // 文件、导入描述符内部的指针也拥有副本；不持有 GenState、旧输出或 CT 对象指针。
-// CT 聚合的最终数据目录由后续 typed 全局数据阶段补齐，不能把标签解释为机器地址。
+// 静态数据目录按值深拷贝；CT 聚合、切片 backing 和导入字面量都不保留宿主指针。
 // 纯快照 lowering 的上下文（CheckedFlow/CheckedLower）依赖本类型，按模块
 // 「类型先声明后使用 + 文件名序编译」的约束放在 checked_module_ctx.yh。
 struct CheckedStorage {
@@ -82,6 +99,8 @@ struct CheckedStorage {
     bss_n int;
     strings *CheckedString;
     string_n int;
+    static_data *CheckedStaticData;
+    static_data_n int;
     suffix_off int;
     suffix_len int;
     is_entry int;
@@ -195,6 +214,36 @@ fn checked_storage_tables(store *CheckedStorage, gs *gen.GenState) int {
     return 0;
 }
 
+// checked_storage_static_data：复制 typed 数据目录及其重定位/字节载荷。
+// 此处浅拷贝只用于读取 gen 出口描述符；存入 CheckedStorage 的每个载荷均独立分配。
+fn checked_storage_static_data(store *CheckedStorage) int {
+    store.static_data_n = gen.static_data_count();
+    if (store.static_data_n < 0) { return -1; }
+    store.static_data = checked_zero_rows(store.static_data_n,
+        sizeof(CheckedStaticData)).to_type(*CheckedStaticData);
+    if (store.static_data_n > 0 && store.static_data == 0) { return -1; }
+    let i int = 0;
+    for i < store.static_data_n {
+        let source gen.StaticDataObject;
+        if (gen.static_data_at(i, &source) != 0 || source.size < 0
+            || source.reloc_n < 0 || (source.size > 0 && source.data == 0)
+            || (source.reloc_n > 0 && source.relocs == 0)) { return -1; }
+        let dest *CheckedStaticData = &store.static_data[i];
+        dest.sym_id = source.sym_id; dest.label = source.label;
+        dest.type_id = source.type_id; dest.elem_type = source.elem_type;
+        dest.count = source.count; dest.size = source.size; dest.align = source.align;
+        dest.reloc_n = source.reloc_n;
+        dest.data = checked_copy_rows(source.data.to_type(*void), source.size,
+            sizeof(u8)).to_type(*u8);
+        dest.relocs = checked_copy_rows(source.relocs.to_type(*void), source.reloc_n,
+            sizeof(gen.StaticDataReloc)).to_type(*gen.StaticDataReloc);
+        if ((source.size > 0 && dest.data == 0)
+            || (source.reloc_n > 0 && dest.relocs == 0)) { return -1; }
+        i += 1;
+    }
+    return 0;
+}
+
 // checked_storage_sources：复制文件及导入命名空间的嵌套存储；未加载文件保持空指针。
 // 源字节额外补一个 NUL，token/PDecl 保存原编号，不需借用 SourceStore 的寿命。
 fn checked_storage_sources(store *CheckedStorage, gs *gen.GenState) int {
@@ -247,10 +296,12 @@ fn checked_storage_sources(store *CheckedStorage, gs *gen.GenState) int {
     for label <= gs.c_data_n {
         let off int = -1;
         let length int = 0;
-        if (gen.data_str_lookup(label, &off, &length) != 0) {
+        let quoted int = 0;
+        if (gen.data_str_lookup(label, &off, &length, &quoted) != 0) {
             store.strings[store.string_n].label = label;
             store.strings[store.string_n].name_off = off;
             store.strings[store.string_n].name_len = length;
+            store.strings[store.string_n].quoted = quoted;
             store.string_n += 1;
         }
         label += 1;
@@ -275,11 +326,53 @@ pub fn checked_module_capture(out *CheckedModule) int {
         sizeof(CheckedStorage)).to_type(*CheckedStorage);
     if (store == 0) { return gen.fail("受检模块快照分配失败"); }
     candidate.storage = store.to_type(*void);
-    if (checked_storage_tables(store, gs) != 0
-        || checked_storage_sources(store, gs) != 0
-        || checked_module_verify(&candidate) != 0) {
+    if (checked_storage_tables(store, gs) != 0) {
         checked_module_release(&candidate);
-        return gen.fail("受检模块快照复制或校验失败");
+        return gen.fail("受检模块语义表复制或校验失败");
+    }
+    if (checked_storage_static_data(store) != 0) {
+        checked_module_release(&candidate);
+        return gen.fail("受检模块静态数据复制失败");
+    }
+    if (checked_storage_sources(store, gs) != 0) {
+        checked_module_release(&candidate);
+        return gen.fail("受检模块源码与导入副本失败");
+    }
+    if (checked_storage_present(store) != 0) {
+        checked_module_release(&candidate);
+        return gen.fail("受检模块快照表存储无效");
+    }
+    let type_stage int = 0;
+    if (checked_verify_types(store, &type_stage) != 0) {
+        let message *char = "受检模块类型快照校验失败";
+        if (type_stage > 0) { message = "受检模块类型或函数签名快照校验失败"; }
+        else if (type_stage == -1) { message = "受检模块字段类型快照校验失败"; }
+        else if (type_stage == -2 || type_stage == -3) {
+            message = "受检模块函数参数签名快照校验失败";
+        } else if (type_stage == -4) { message = "受检模块类型别名快照校验失败"; }
+        else if (type_stage == -5) { message = "受检模块符号类型快照校验失败"; }
+        checked_module_release(&candidate);
+        return gen.fail(message);
+    }
+    if (checked_verify_files(store) != 0) {
+        checked_module_release(&candidate);
+        return gen.fail("受检模块文件快照校验失败");
+    }
+    if (checked_verify_expressions(store) != 0) {
+        checked_module_release(&candidate);
+        return gen.fail("受检模块表达式快照校验失败");
+    }
+    if (checked_verify_statements(store) != 0) {
+        checked_module_release(&candidate);
+        return gen.fail("受检模块语句快照校验失败");
+    }
+    if (checked_verify_functions(store) != 0) {
+        checked_module_release(&candidate);
+        return gen.fail("受检模块函数快照校验失败");
+    }
+    if (checked_module_verify(&candidate) != 0) {
+        checked_module_release(&candidate);
+        return gen.fail("受检模块快照校验失败");
     }
     out[0] = candidate;
     return 0;
@@ -330,6 +423,15 @@ pub fn checked_module_release(unit *CheckedModule) void {
         free(store.imports.to_type(*void));
         free(store.bss_symbols.to_type(*void));
         free(store.strings.to_type(*void));
+        if (store.static_data != 0) {
+            let i int = 0;
+            for i < store.static_data_n {
+                free(store.static_data[i].data.to_type(*void));
+                free(store.static_data[i].relocs.to_type(*void));
+                i += 1;
+            }
+        }
+        free(store.static_data.to_type(*void));
         free(store.to_type(*void));
     }
     let empty CheckedModule;

@@ -1,0 +1,45 @@
+// expect: global-data=ok
+// LL5 全局数据语义锁：CT 返回切片 backing、全局字面切片、字符串重定位与聚合布局。
+struct GlobalPacket { tag u8; values [3]int; tail i16; }
+struct GlobalText { label *char; value int; }
+
+// make_view：从编译期局部数组返回带非零字节偏移的视图，运行期作为全局 backing。
+@[comptime] fn make_view(seed int) []int {
+    let values [4]int = [seed, seed + 1, seed + 2, seed + 3];
+    return values[1..4];
+}
+// make_values：验证编译期定长聚合返回值可作为全局静态初始化。
+@[comptime] fn make_values() [2]int { return [31, 32]; }
+
+let literal_view []int = [4, 5, 6];
+let ct_view []int = $make_view(20);
+let ct_values [2]int = $make_values();
+let message *char = "data\x2d\0tail";
+let packet GlobalPacket;
+let text GlobalText = GlobalText{ label: "nested", value: 9 };
+let labels [2]*char = ["left", "right"];
+
+// main：确认切片视图共享与副本隔离，并验证目标 ABI 的字段偏移。
+fn main() int {
+    packet.tag = 7;
+    packet.values = [11, 12, 13];
+    packet.tail = -2;
+    if (sizeof(GlobalPacket) != 20 || len(literal_view) != 3
+        || literal_view[0] != 4 || literal_view[2] != 6
+        || ct_values[0] != 31 || ct_values[1] != 32) { return 1; }
+    let alias []int = ct_view;
+    alias[1] = 99;
+    if (len(ct_view) != 3 || ct_view[0] != 21 || ct_view[1] != 99
+        || ct_view[2] != 23) { return 2; }
+    let copied []int = ct_view;
+    copied[0] = 88;
+    if (ct_view[0] != 88 || copied[0] != 88) { return 3; }
+
+    if (packet.tag != 7 || packet.values[0] != 11 || packet.values[2] != 13
+        || packet.tail != -2) { return 4; }
+    if (message[0] != 100 || message[4] != 45 || message[5] != 0 || message[6] != 116
+        || text.label[0] != 110
+        || labels[0][0] != 108 || labels[1][0] != 114) { return 5; }
+    printf("global-data=ok\n");
+    return 0;
+}

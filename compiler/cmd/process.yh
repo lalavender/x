@@ -90,3 +90,75 @@ fn cmd_process_run(argv **char) int {
     }
     return cmd_process_status(pid);
 }
+
+// cmd_process_capture：在不经过 shell 的前提下捕获子进程标准输出。
+// capture_path 是本次调用专属的临时文件路径；函数负责创建、读取并删除它。
+// 返回捕获字节数；命令失败、输出超出容量或文件操作失败时返回 -1。
+fn cmd_process_capture(argv **char, capture_path *char,
+    output *u8, capacity int) int {
+    if (argv == 0 || argv[0] == 0 || capture_path == 0
+        || output == 0 || capacity <= 0) {
+        return -1;
+    }
+    let pid int = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        let flags int = 0x241;
+        if (gen.tg_host_darwin() != 0) {
+            flags = 0x601;
+        }
+        let out_fd int = open(capture_path, flags, 0x1a4);
+        if (out_fd < 0) {
+            exit(126);
+        }
+        if (dup2(out_fd, 1) < 0) {
+            close(out_fd);
+            exit(126);
+        }
+        close(out_fd);
+        execvp(argv[0], argv);
+        exit(127);
+    }
+    if (cmd_process_status(pid) != 0) {
+        unlink(capture_path);
+        return -1;
+    }
+    let in_fd int = open(capture_path, 0);
+    if (in_fd < 0) {
+        unlink(capture_path);
+        return -1;
+    }
+    let total int = 0;
+    let failed int = 0;
+    let chunk [512]u8;
+    for 1 {
+        let got i64 = read(in_fd, (&chunk[0]).to_type(*u8), 512);
+        if (got < 0) {
+            failed = 1;
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        let count int = got.to_type(int);
+        if (total + count >= capacity) {
+            failed = 1;
+            break;
+        }
+        let i int = 0;
+        for i < count {
+            output[total + i] = chunk[i];
+            i += 1;
+        }
+        total += count;
+    }
+    close(in_fd);
+    unlink(capture_path);
+    if (failed != 0) {
+        return -1;
+    }
+    output[total] = 0;
+    return total;
+}

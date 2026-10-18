@@ -8,15 +8,19 @@ import ir;
 fn checked_lower_object_type(l *CheckedLower, source_type int, depth int) int {
     if (source_type < 0 || source_type >= l.store.type_n || depth > 256) { return -1; }
     let ty gen.CType = l.store.types[source_type];
-    if (ty.kind == gen.TY_VOID || ty.kind == gen.TY_F32 || ty.kind == gen.TY_F64
-        || ty.kind == gen.TY_SLICE || ty.kind == gen.TY_FN) { return -2; }
+    if (ty.kind == gen.TY_FN) { return checked_lower_module_type(l, source_type); }
     if (l.source_type_map[source_type] >= 0) { return l.source_type_map[source_type]; }
+    if (ty.kind == gen.TY_VOID) { return -2; }
     let layout ir.IRModuleType;
     layout.size = ty.size; layout.align = ty.align; layout.elem = -1;
     let fields *ir.IRModuleField = 0;
     let count int = 0;
     if (ty.kind == gen.TY_ARRAY) {
         layout.kind = ir.IR_MODULE_TY_ARRAY; layout.count = ty.len;
+        layout.elem = checked_lower_object_type(l, ty.elem, depth + 1);
+        if (layout.elem < 0) { return layout.elem; }
+    } else if (ty.kind == gen.TY_SLICE) {
+        layout.kind = ir.IR_MODULE_TY_SLICE; layout.count = 0;
         layout.elem = checked_lower_object_type(l, ty.elem, depth + 1);
         if (layout.elem < 0) { return layout.elem; }
     } else if (ty.kind == gen.TY_STRUCT || ty.kind == gen.TY_UNION) {
@@ -106,6 +110,8 @@ fn checked_lower_global_decl(l *CheckedLower, row int) int {
     let node AstDecl = l.store.declarations[row];
     let sym gen.CSym = l.store.symbols[node.sym_id];
     let ty gen.CType = l.store.types[sym.type_id];
+    if (node.sym_id >= 0 && node.sym_id < l.store.symbol_n
+        && l.global_map[node.sym_id] != 0) { return 0; }
     if (sym.kind == gen.SYM_CONST && checked_lower_is_aggregate(l.store, sym.type_id) == 0) {
         return 0;
     }
@@ -131,7 +137,7 @@ fn checked_lower_global_decl(l *CheckedLower, row int) int {
         }
     }
     if (result != 0) { free(data.to_type(*void)); return result; }
-    let name *char = checked_lower_name(l, sym.name_off, sym.name_len, sym.flags);
+    let name *char = checked_lower_name(l, sym.name_off, sym.name_len, sym.flags, -1);
     if (name == 0) { free(data.to_type(*void)); return -1; }
     let symbol ir.IRModuleSymbol;
     symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; symbol.type_id = mapped;
@@ -158,8 +164,8 @@ fn checked_lower_global_ref(l *CheckedLower, node *AstExpr) int {
         return -2;
     }
     let kind int = checked_lower_type(l, node.type_id);
-    let pointer int = kind >= 0 ? ir.IR_TY_PTR + kind : ir.IR_TY_PTR;
-    if (pointer > ir.IR_TY_PTR_LAST) { return -2; }
+    let pointer int = checked_lower_pointer_kind(kind);
+    if (pointer < 0) { return -2; }
     return ast_ir_b_add_inst(&l.builder, ir.IR_OP_GLOB_ADDR, pointer, -1, -1,
         (l.global_map[node.sym_id] - 1).to_type(i64));
 }
@@ -227,10 +233,11 @@ fn checked_lower_string(l *CheckedLower, node *AstExpr) int {
         if (data == 0) { return -1; }
         let src *u8 = l.store.names + str.name_off;
         let count int = 0;
-        let i int = 1;
-        for i < str.name_len - 1 {
+        let end int = str.name_len; let i int = 0;
+        if (str.quoted != 0) { end = str.name_len - 1; i = 1; }
+        for i < end {
             let value int = src[i].to_type(int);
-            if (src[i] == '\\') {
+            if (str.quoted != 0 && src[i] == '\\') {
                 value = checked_lower_string_byte(src[i + 1]);
                 if (src[i + 1] == 'x') {
                     value = gen.hexval(src[i + 2]) * 16 + gen.hexval(src[i + 3]);

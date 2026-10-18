@@ -114,7 +114,8 @@ fn build_module(unit *ir.IRModule, key int) int {
     insts[4].op = ir.IR_OP_COPY; insts[4].result_id = 4; insts[4].result_type = 0;
     insts[4].a = 2; insts[4].b = -1; insts[4].aux = -1;
     let calls [1]ir.IRCall;
-    calls[0].abi = 0; calls[0].symbol_first = 0; calls[0].symbol_len = 14;
+    calls[0].abi = 0; calls[0].callee_value = -1; calls[0].signature_type = -1;
+    calls[0].symbol_first = 0; calls[0].symbol_len = 14;
     calls[0].arg_first = 0; calls[0].arg_count = 1;
     let args [1]ir.IRCallArg;
     args[0].value = 2; args[0].type_id = 0;
@@ -187,7 +188,7 @@ fn section_offset(unit *ir.IRModule, section int) int {
     if (section == 2) { return offset; }
     offset += field_total * 16;
     if (section == 3) { return offset; }
-    offset += unit.symbol_count * 88;
+    offset += unit.symbol_count * 96;
     if (section == 4) { return offset; }
     offset += param_total * 8;
     if (section == 5) { return offset; }
@@ -256,7 +257,9 @@ fn same_body(a *ir.IRFunction, b *ir.IRFunction) int {
     }
     i = 0;
     for i < a.call_count {
-        if (a.calls[i].abi != b.calls[i].abi || a.calls[i].symbol_first != b.calls[i].symbol_first
+        if (a.calls[i].abi != b.calls[i].abi || a.calls[i].callee_value != b.calls[i].callee_value
+            || a.calls[i].signature_type != b.calls[i].signature_type
+            || a.calls[i].symbol_first != b.calls[i].symbol_first
             || a.calls[i].symbol_len != b.calls[i].symbol_len || a.calls[i].arg_first != b.calls[i].arg_first
             || a.calls[i].arg_count != b.calls[i].arg_count) { return 0; }
         i += 1;
@@ -323,6 +326,7 @@ fn same_module(a *ir.IRModule, b *ir.IRModule) int {
         if (a.symbols[i].kind != b.symbols[i].kind || a.symbols[i].type_id != b.symbols[i].type_id
             || a.symbols[i].param_count != b.symbols[i].param_count
             || a.symbols[i].abi != b.symbols[i].abi || a.symbols[i].variadic != b.symbols[i].variadic
+            || a.symbols[i].no_return != b.symbols[i].no_return
             || a.symbols[i].linkage != b.symbols[i].linkage || a.symbols[i].defined != b.symbols[i].defined
             || a.symbols[i].mutable != b.symbols[i].mutable || a.symbols[i].source != b.symbols[i].source
             || a.symbols[i].offset != b.symbols[i].offset
@@ -442,15 +446,18 @@ fn check_roundtrip() int {
     return 0;
 }
 
-// check_rejects：九类坏输入必须各自返回 -1 且 out 保持零初始化。
+// check_rejects：十一类坏输入必须各自返回 -1 且 out 保持零初始化。
 // 每个用例都从完整合法字节串出发，只改一处，因此失败原因唯一。
 fn check_rejects() int {
     let unit ir.IRModule;
     if (build_module(&unit, 2) != 0) { return 1; }
     let size int = ir.ir_module_serialized_size(&unit);
     let buf [4096]u8;
+    let original [4096]u8;
     if (size <= 208 || size > 4096) { return 2; }
     if (ir.ir_module_serialize(&unit, &buf[0], size) != size) { return 3; }
+    let original_i int = 0;
+    for original_i < size { original[original_i] = buf[original_i]; original_i += 1; }
     let out ir.IRModule;
     let reloc_section int = section_offset(&unit, 6);
     let global_section int = section_offset(&unit, 5);
@@ -475,7 +482,7 @@ fn check_rejects() int {
     // 3：未知内存模块版本（与 verify 的版本硬门不一致）
     put_word(&buf[0], 16, 2);
     if (ir.ir_module_deserialize(&out, &buf[0], size) != -1 || module_zeroed(&out) == 0) { return 13; }
-    put_word(&buf[0], 16, 1);
+    put_word(&buf[0], 16, get_word(&original[0], 16));
     cases += 1;
     // 4：头部长度越界（字 20 = 来源路径总长 +8，总长与 size 不再相等）
     put_word(&buf[0], 160, get_word(&buf[0], 160) + 8);
@@ -513,6 +520,7 @@ fn check_rejects() int {
     buf[path_start + 1] = 'c';
     cases += 1;
     // 恢复后必须仍然成功，证明以上失败都来自被改动的那一处。
+    if (same_bytes(&buf[0], &original[0], size) == 0) { return 31; }
     if (ir.ir_module_deserialize(&out, &buf[0], size) != 0) { return 31; }
     if (ir.ir_module_verify(&out) != 0 || same_module(&unit, &out) != 0) { return 32; }
     ir.ir_module_release(&out);

@@ -8,6 +8,7 @@ fn checked_storage_present(store *CheckedStorage) int {
         || store.function_n < 0 || store.type_n <= 0 || store.field_n < 0
         || store.type_name_n < 0 || store.sig_n < 0 || store.sig_param_n < 0
         || store.symbol_n < 0 || store.name_n < 0 || store.bss_n < 0
+        || store.static_data_n < 0
         || (store.expression_n > 0 && store.expressions == 0)
         || (store.statement_n > 0 && store.statements == 0)
         || (store.edge_n > 0 && store.edges == 0)
@@ -24,6 +25,51 @@ fn checked_storage_present(store *CheckedStorage) int {
         || (store.symbol_n > 0 && store.symbols == 0)
         || (store.name_n > 0 && store.names == 0)
         || (store.bss_n > 0 && store.bss_symbols == 0)) { return -1; }
+    if (store.static_data_n > 0 && store.static_data == 0) { return -1; }
+    let data_row int = 0;
+    for data_row < store.static_data_n {
+        let data CheckedStaticData = store.static_data[data_row];
+        if (data.size < 0 || data.align <= 0 || (data.align & (data.align - 1)) != 0
+            || (data.size > 0 && data.data == 0) || data.reloc_n < 0
+            || (data.reloc_n > 0 && data.relocs == 0)
+            || (data.sym_id < 0 && data.label <= 0)
+            || data.sym_id >= store.symbol_n || data.type_id >= store.type_n
+            || data.type_id < -1 || data.elem_type >= store.type_n
+            || data.elem_type < -1 || data.count < 0) { return -1; }
+        if (data.type_id >= 0 && data.size != store.types[data.type_id].size) { return -1; }
+        if (data.type_id == -1 && data.elem_type >= 0
+            && (data.count > 2147483647 / (store.types[data.elem_type].size > 0
+                ? store.types[data.elem_type].size : 1)
+                || data.size != data.count * store.types[data.elem_type].size)) { return -1; }
+        let reloc int = 0;
+        for reloc < data.reloc_n {
+            let item gen.StaticDataReloc = data.relocs[reloc];
+            if (item.offset < 0 || item.width != 8 || item.offset > data.size - item.width
+                || (item.target_sym < 0 && item.target_label <= 0)
+                || item.target_sym >= store.symbol_n) { return -1; }
+            let byte int = 0;
+            for byte < item.width {
+                if (data.data[item.offset + byte] != 0) { return -1; }
+                byte += 1;
+            }
+            let other int = 0;
+            for other < reloc {
+                let prior gen.StaticDataReloc = data.relocs[other];
+                if (item.offset < prior.offset + prior.width
+                    && prior.offset < item.offset + item.width) { return -1; }
+                other += 1;
+            }
+            reloc += 1;
+        }
+        let other_data int = 0;
+        for other_data < data_row {
+            let prior CheckedStaticData = store.static_data[other_data];
+            if ((data.sym_id >= 0 && prior.sym_id == data.sym_id)
+                || (data.label > 0 && prior.label == data.label)) { return -1; }
+            other_data += 1;
+        }
+        data_row += 1;
+    }
     return 0;
 }
 
@@ -53,30 +99,45 @@ fn checked_source_range(store *CheckedStorage, file_id int,
     return checked_range(first, after, token_count);
 }
 
+// checked_verify_type_alias_compatible：数组别名长度表达式会保留等价但不同编号的类型项。
+fn checked_verify_type_alias_compatible(store *CheckedStorage, left int, right int) int {
+    if (left == right) { return 1; }
+    if (left < 0 || left >= store.type_n || right < 0 || right >= store.type_n) { return 0; }
+    let a gen.CType = store.types[left];
+    let b gen.CType = store.types[right];
+    return (a.kind == gen.TY_ARRAY && b.kind == gen.TY_ARRAY
+        && a.elem == b.elem && a.len == b.len && a.size == b.size
+        && a.align == b.align).to_type(int);
+}
+
 // checked_verify_types：验证类型闭包、字段、签名和名字，以及不依赖旧符号槽的常量文本。
-fn checked_verify_types(store *CheckedStorage) int {
+fn checked_verify_types(store *CheckedStorage, failed_stage *int) int {
+    failed_stage[0] = 0;
     let i int = 0;
     for i < store.type_n {
         let type_row gen.CType = store.types[i];
         if (type_row.kind < gen.TY_VOID || type_row.kind > gen.TY_FN
-            || type_row.size < 0 || type_row.align < 0) { return -1; }
+            || type_row.size < 0 || type_row.align < 0) { failed_stage[0] = i + 1; return -1; }
         if ((type_row.kind == gen.TY_PTR || type_row.kind == gen.TY_ARRAY
                 || type_row.kind == gen.TY_SLICE || type_row.kind == gen.TY_FN)
-            && (type_row.elem < 0 || type_row.elem >= store.type_n)) { return -1; }
-        if (type_row.kind == gen.TY_ARRAY && type_row.len < 0) { return -1; }
+            && (type_row.elem < 0 || type_row.elem >= store.type_n)) { failed_stage[0] = i + 1; return -1; }
+        if (type_row.kind == gen.TY_ARRAY && type_row.len < 0) { failed_stage[0] = i + 1; return -1; }
         if ((type_row.kind == gen.TY_STRUCT || type_row.kind == gen.TY_UNION)
             && (type_row.sub < 0 || type_row.len < 0 || type_row.sub > store.field_n
-                || type_row.len > store.field_n - type_row.sub)) { return -1; }
+                || type_row.len > store.field_n - type_row.sub)) { failed_stage[0] = i + 1; return -1; }
         if (type_row.kind == gen.TY_FN && (type_row.sub < 0 || type_row.sub >= store.sig_n
-            || type_row.elem != store.sig_ret[type_row.sub]
-            || type_row.len != store.sig_np[type_row.sub])) { return -1; }
+            || checked_verify_type_alias_compatible(store, type_row.elem,
+                store.sig_ret[type_row.sub]) == 0
+            || type_row.len != store.sig_np[type_row.sub])) { failed_stage[0] = i + 1; return -1; }
         i += 1;
     }
     i = 0;
     for i < store.field_n {
         let field gen.SField = store.fields[i];
         if (checked_name_valid(store, field.name_off, field.name_len) == 0
-            || field.type_id < 0 || field.type_id >= store.type_n || field.offset < 0) { return -1; }
+            || field.type_id < 0 || field.type_id >= store.type_n || field.offset < 0) {
+            failed_stage[0] = -1; return -1;
+        }
         i += 1;
     }
     i = 0;
@@ -88,19 +149,21 @@ fn checked_verify_types(store *CheckedStorage) int {
             || store.sig_vararg[i] < 0 || store.sig_vararg[i] > 2
             || (store.sig_abi[i] != gen.ABI_YH && store.sig_abi[i] != gen.ABI_C)
             || first < 0 || first > store.sig_param_n
-            || count > store.sig_param_n - first) { return -1; }
+            || count > store.sig_param_n - first) { failed_stage[0] = -2; return -1; }
         i += 1;
     }
     i = 0;
     for i < store.sig_param_n {
-        if (store.sig_params[i] < 0 || store.sig_params[i] >= store.type_n) { return -1; }
+        if (store.sig_params[i] < 0 || store.sig_params[i] >= store.type_n) {
+            failed_stage[0] = -3; return -1;
+        }
         i += 1;
     }
     i = 0;
     for i < store.type_name_n {
         let name gen.TName = store.type_names[i];
         if (checked_name_valid(store, name.name_off, name.name_len) == 0
-            || name.type_id < 0 || name.type_id >= store.type_n) { return -1; }
+            || name.type_id < 0 || name.type_id >= store.type_n) { failed_stage[0] = -4; return -1; }
         i += 1;
     }
     i = 0;
@@ -110,7 +173,7 @@ fn checked_verify_types(store *CheckedStorage) int {
             || symbol.type_id < 0 || symbol.type_id >= store.type_n
             || symbol.kind < gen.SYM_VAR || symbol.kind > gen.SYM_FN
             || (symbol.const_expr_off >= 0 && checked_name_valid(store,
-                symbol.const_expr_off, symbol.const_expr_len) == 0)) { return -1; }
+                symbol.const_expr_off, symbol.const_expr_len) == 0)) { failed_stage[0] = -5; return -1; }
         i += 1;
     }
     return 0;
@@ -408,7 +471,8 @@ pub fn checked_module_verify(unit *CheckedModule) int {
         || unit.target.little_endian != expected.little_endian
         || unit.target.layout_version != expected.layout_version) { return -1; }
     let store *CheckedStorage = unit.storage.to_type(*CheckedStorage);
-    if (checked_storage_present(store) != 0 || checked_verify_types(store) != 0
+    let type_stage int = 0;
+    if (checked_storage_present(store) != 0 || checked_verify_types(store, &type_stage) != 0
         || checked_verify_files(store) != 0 || checked_verify_expressions(store) != 0
         || checked_verify_statements(store) != 0 || checked_verify_functions(store) != 0) { return -1; }
     return 0;

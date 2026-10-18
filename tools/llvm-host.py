@@ -35,6 +35,8 @@ BUILDER = ROOT / "tests/selfhost/llvm-host.py"
 MANIFEST = ROOT / "vendor/llvm/sdk.lock.json"
 BRIDGE_SOURCE = ROOT / "compiler/llvm/bridge.c"
 BRIDGE_HEADER = ROOT / "compiler/llvm/bridge.h"
+LLD_BRIDGE_SOURCE = ROOT / "compiler/llvm/lld_bridge.cpp"
+LLD_STUB_SOURCE = ROOT / "compiler/llvm/lld_stub.cpp"
 HOSTS = ("linux-x86_64", "linux-aarch64")
 NOT_READY = 3
 
@@ -95,12 +97,23 @@ def check(host: str, full: bool = True) -> list[str]:
     problems = []
     if record.get("host") != host:
         problems.append(f"身份记录的宿主是 {record.get('host')}")
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    host_lock = manifest["hosts"][host]
     if record.get("sdk_manifest_sha256") != digest(MANIFEST):
         problems.append("固定 SDK 清单 vendor/llvm/sdk.lock.json 已变化")
     if record.get("bridge_source_sha256") != digest(BRIDGE_SOURCE):
         problems.append("桥源码 compiler/llvm/bridge.c 已变化")
     if record.get("bridge_header_sha256") != digest(BRIDGE_HEADER):
         problems.append("桥接口 compiler/llvm/bridge.h 已变化")
+    if record.get("lld_stub_source_sha256") != digest(LLD_STUB_SOURCE):
+        problems.append("lld 占位桥源码 compiler/llvm/lld_stub.cpp 已变化")
+    if record.get("sdk_builder_sha256") != digest(SDK_TOOL):
+        problems.append("LLVM SDK 构建脚本 tools/llvm-sdk.py 已变化")
+    if lld := host_lock.get("lld"):
+        if record.get("lld_version") != lld["version"]:
+            problems.append("宿主身份记录中的 lld 版本与固定 SDK 不一致")
+        if record.get("lld_bridge_source_sha256") != digest(LLD_BRIDGE_SOURCE):
+            problems.append("lld 桥源码 compiler/llvm/lld_bridge.cpp 已变化")
     archive = ROOT / record.get("bridge_archive", "")
     if not archive.is_file():
         problems.append(f"桥归档不存在：{archive}")
@@ -189,6 +202,19 @@ def split_link_argv(argv: list[str]) -> tuple[list[str], str, list[str]]:
     return objects, output, extra
 
 
+def is_driver_query(argv: list[str]) -> bool:
+    """识别 gcc 查询调用，让缓存身份探测交给真实驱动而不进入链接器。"""
+    if not argv:
+        return False
+    exact = {
+        "-print-search-dirs", "-print-sysroot", "-dumpmachine",
+        "-dumpversion", "-dumpfullversion", "-dumpspecs",
+    }
+    prefixes = ("-print-file-name=", "-print-prog-name=")
+    return all(argument in exact or argument.startswith(prefixes)
+               for argument in argv)
+
+
 def bridge_flags(record: dict) -> list[str]:
     """在固定 SDK 的链接参数上把桥归档强制整份纳入。
 
@@ -216,6 +242,10 @@ def command_link(host: str, argv: list[str]) -> int:
     record = ensure(host, "auto")
     if {"-c", "-E", "-S"} & set(argv):
         # 汇编/C 源编译与桥无关，用固定 C 驱动原样执行（不回到 PATH 上的自己）。
+        os.execv(record["cc"], [record["cc"], *argv])
+    if is_driver_query(argv):
+        # yh 的链接缓存会查询 gcc 搜索路径、版本和默认工具；查询不产生链接产物，
+        # 必须返回真实宿主驱动的答案，不能把查询参数误当成 lld 的链接输入。
         os.execv(record["cc"], [record["cc"], *argv])
     objects, output, extra = split_link_argv(argv)
     config = {"cxx": record["cxx"], "link_flags": bridge_flags(record)}

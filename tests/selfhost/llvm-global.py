@@ -21,16 +21,18 @@ SOURCE = ROOT / "tests/yh-run/run/llvm-global.yh"
 FIXTURES = ROOT / "tests/modules/projects/llvmlower/input"
 REJECTS = {
     "globalreject": "rejected_slice",
-    "globalrejectptr": "rejected_pointer",
-    "globalrejectfield": "rejected_field",
-    "globalrejectelement": "rejected_element",
-    "globalrejectct": "rejected_ct",
     "globalrejectfloat": "rejected_float",
     "globalrejectfloatzero": "rejected_float_zero",
     "globalrejectnumericptr": "numeric",
     "globalrejectstringint": "numeric",
     "globalrejectfloatcast": "rejected_float_cast",
     "globalrejectdepth": "rejected_pointer_depth",
+}
+ACCEPTS = {
+    "globalrejectptr": 97,
+    "globalrejectfield": 97,
+    "globalrejectelement": 97,
+    "globalrejectct": 3,
 }
 
 DRIVER = r"""/* 手工边界驱动：独立读取导出常量与全局地址，避免只依赖 yh 内部比较。 */
@@ -207,7 +209,7 @@ def check_text(text, level):
         bytes([97, 108, 105, 97, 115, 0]),
     }, strings
     assert all(row[0:3] == ("internal ", "global", 1) for row in strings.values()), strings
-    for token in ('getelementptr i8, ptr @"', "llvm.memcpy", "load i32", "store i32"):
+    for token in ('getelementptr i8, ptr @"', "llvm.memmove", "load i32", "store i32"):
         assert token in text, f"O{level} 缺少全局访问/副本 lowering: {token}"
 
 
@@ -227,6 +229,28 @@ def check_rejects(compiler):
             assert "LLVM lowering" in result.stderr and declaration in result.stderr, result.stderr[-1200:]
             assert 'target triple' not in result.stdout, f"{name} 拒绝时仍发布部分 LLVM"
             assert not output.exists(), f"{name} 拒绝时仍发布可执行产物"
+
+
+def check_newly_supported(compiler, tools):
+    """运行此前误列为拒绝的全局重定位与 CT 聚合初始化正例。"""
+    for name, expected in ACCEPTS.items():
+        source = FIXTURES / f"{name}.yh"
+        emitted = run([compiler, "--emit-asm", "--backend", "llvm", "--target", TARGET,
+                       "-O0", "--emit-llvm", str(source)])
+        assert emitted.returncode == 0, f"{name} 应接受全局初始化:\n{emitted.stderr[-1000:]}"
+        llfile = WORK / f"{name}.ll"
+        llfile.write_text(emitted.stdout, encoding="utf-8")
+        verified = run([tools["opt"], "-passes=verify", "-disable-output", str(llfile)])
+        assert verified.returncode == 0, f"{name} LLVM verifier 失败:\n{verified.stderr[-1000:]}"
+        obj = WORK / f"{name}.o"
+        assembled = run([tools["clang"], "-c", str(llfile), "-o", str(obj)])
+        assert assembled.returncode == 0, f"{name} LLVM 汇编失败:\n{assembled.stderr[-1000:]}"
+        executable = WORK / f"{name}-run"
+        linked = run([tools["cc"], "-no-pie", str(obj), "-o", str(executable)])
+        assert linked.returncode == 0, f"{name} 链接失败:\n{linked.stderr[-1000:]}"
+        result = run([str(executable)])
+        assert result.returncode == expected, (
+            f"{name} 运行码不符，期望 {expected}: rc={result.returncode}\n{result.stderr[-600:]}")
 
 
 def main():
@@ -272,6 +296,7 @@ def main():
         assert result.returncode == 0 and result.stdout == "global=ok\n", (
             f"O{level} C 驱动失败 rc={result.returncode}\n{result.stdout}\n{result.stderr[-800:]}")
     check_rejects(compiler)
+    check_newly_supported(compiler, tools)
     print("LL5 全局数据通过：精确初始化/链接/读写取址/聚合副本/字符串、O0/O2 原生 C 驱动、十一类来源拒绝")
     return 0
 

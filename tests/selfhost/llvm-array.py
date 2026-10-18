@@ -3,7 +3,7 @@
 
 验收（与实施方案 LL5 局部数据/副本切片对应）：
   * 数组绑定统一 ALLOCA 字节存储；下标读写走 GEP（常量/动态偏移）+ LOAD/STORE；
-  * 数组字面量逐元素写入；按值复制用 llvm.memcpy（落到同对象 memcpy 弱定义）；
+  * 数组字面量逐元素写入；按值复制用 llvm.memmove，保持源/目标重叠时的复制语义；
   * O0 文本与 `default<O2>` 管线后的对象分别汇编、链接并原生运行，退出码 0；
   * 结构体等尚未支持的聚合形态必须带来源拒绝。
 """
@@ -120,7 +120,7 @@ def main():
         llfile = WORK / f"array-O{level}.ll"
         text = emit_text(compiler, source, level, llfile)
         # 数组存储/寻址/复制三件套必须在文本里真实出现。
-        for token in ("= alloca i8", "getelementptr i8, ptr", "llvm.memcpy"):
+        for token in ("= alloca i8", "getelementptr i8, ptr", "llvm.memmove"):
             assert token in text, f"O{level} 文本缺少聚合 lowering 痕迹: {token}\n{text[-800:]}"
         verify = run([tools["opt"], "-passes=verify", "-S", str(llfile), "-o", os.devnull])
         assert verify.returncode == 0, f"O{level} opt 验证失败\n{verify.stderr[-1200:]}"

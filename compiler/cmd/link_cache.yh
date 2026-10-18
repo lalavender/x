@@ -1,5 +1,6 @@
 module main;
 import gen;
+import backend;
 
 // mb_hash_hex：把 64 位内容指纹格式化为固定长度十六进制串。
 fn mb_hash_hex(h u64, out *u8) int {
@@ -16,18 +17,56 @@ fn mb_hash_hex(h u64, out *u8) int {
 
 // mb_write_manifest：写缓存键；写失败时不保留可被误认的旧键。
 fn mb_write_manifest(path *char, data *u8, data_len int) int {
-    let fd int = mb_open_out(path);
+    let tmp [800]u8;
+    let n int = gen.append_str(&tmp[0], 0, path);
+    n = gen.append_str(&tmp[0], n, ".tmp.");
+    n = gen.append_int(&tmp[0], n, getpid());
+    tmp[n] = 0;
+    let fd int = mb_open_out((&tmp[0]).to_type(*char));
     if (fd < 0) {
         return gen.fail_path("无法写缓存 manifest: ", path);
     }
     if (gen.write_all(fd, data, data_len) != 0) {
         close(fd);
-        unlink(path);
+        unlink((&tmp[0]).to_type(*char));
         return -1;
     }
     if (close(fd) != 0) {
-        unlink(path);
+        unlink((&tmp[0]).to_type(*char));
         return gen.fail_path("关闭缓存 manifest 失败: ", path);
+    }
+    if (rename((&tmp[0]).to_type(*char), path) != 0) {
+        unlink((&tmp[0]).to_type(*char));
+        return gen.fail_path("无法提交缓存 manifest: ", path);
+    }
+    return 0;
+}
+
+// mb_object_machine_matches：校验对象或程序头与当前目标的文件格式和 machine 一致。
+// Linux 只接受 ELF64 little-endian，Darwin 只接受 Mach-O 64 little-endian。
+fn mb_object_machine_matches(path *char) int {
+    let gs *gen.GenState = gen.G();
+    if (gen.read_source(path) != 0 || gs.c_src_len < 20) { return 0; }
+    if (gs.c_target.os == gen.TARGET_OS_LINUX) {
+        if (gs.c_src[0] != 127 || gs.c_src[1] != 'E' || gs.c_src[2] != 'L'
+            || gs.c_src[3] != 'F' || gs.c_src[4] != 2 || gs.c_src[5] != 1) {
+            return 0;
+        }
+        let machine int = gs.c_src[18].to_type(int)
+            | (gs.c_src[19].to_type(int) << 8);
+        if (gs.c_target.arch == gen.TARGET_ARCH_X64) { return machine == 62 ? 1 : 0; }
+        if (gs.c_target.arch == gen.TARGET_ARCH_ARM64) { return machine == 183 ? 1 : 0; }
+        return 0;
+    }
+    if (gs.c_target.os == gen.TARGET_OS_DARWIN && gs.c_src_len >= 8
+        && gs.c_src[0] == 207 && gs.c_src[1] == 250
+        && gs.c_src[2] == 237 && gs.c_src[3] == 254) {
+        let cpu int = gs.c_src[4].to_type(int)
+            | (gs.c_src[5].to_type(int) << 8)
+            | (gs.c_src[6].to_type(int) << 16)
+            | (gs.c_src[7].to_type(int) << 24);
+        if (gs.c_target.arch == gen.TARGET_ARCH_X64) { return cpu == 16777223 ? 1 : 0; }
+        if (gs.c_target.arch == gen.TARGET_ARCH_ARM64) { return cpu == 16777228 ? 1 : 0; }
     }
     return 0;
 }
@@ -88,6 +127,12 @@ fn mb_c_compile_sources(projects *int, project_count int,
             if (cmd_process_run(&args[0]) != 0) {
                 return gen.fail_path("C 源文件编译失败: ", args[2]);
             }
+            let object [700]u8;
+            mb_c_obj_path(build_off, proj, si, &object[0]);
+            if (mb_object_machine_matches(gen.arr_cstr(&object[0])) == 0) {
+                return gen.fail_path("C 目标文件架构与当前 target 不符: ",
+                    gen.arr_cstr(&object[0]));
+            }
             si += 1;
         }
         pi += 1;
@@ -106,6 +151,10 @@ fn mb_c_input_hash(hash *u64, projects *int, project_count int,
         for si < gs.p_projs[proj].c_source_n {
             let object [700]u8;
             mb_c_obj_path(build_off, proj, si, object);
+            if (mb_object_machine_matches(gen.arr_cstr(object)) == 0) {
+                return gen.fail_path("C 目标文件架构与当前 target 不符: ",
+                    gen.arr_cstr(object));
+            }
             if (mb_hash_file(hash, gen.arr_cstr(object)) != 0) { return -1; }
             let path_off int = gs.p_projs[proj].c_sources[si].path_off;
             let path_len int = gs.p_projs[proj].c_sources[si].path_len;
@@ -117,6 +166,10 @@ fn mb_c_input_hash(hash *u64, projects *int, project_count int,
         let oi int = 0;
         for oi < gs.p_projs[proj].c_object_n {
             let input gen.PInput = gs.p_projs[proj].c_objects[oi];
+            if (mb_object_machine_matches(pj_pool_str(input.path_off)) == 0) {
+                return gen.fail_path("C 目标文件架构与当前 target 不符: ",
+                    pj_pool_str(input.path_off));
+            }
             if (mb_hash_file(hash, pj_pool_str(input.path_off)) != 0) { return -1; }
             let j2 int = 0;
             for j2 < input.path_len { mb_fnv(hash, gs.np_data[input.path_off + j2]); j2 += 1; }
@@ -238,20 +291,486 @@ fn mb_path_find(name *char, candidate *u8) int {
     return 0;
 }
 
+// mb_hash_tool_identity：把工具解析路径与文件内容纳入缓存身份；原路径更新版本时缓存失效。
+fn mb_hash_tool_identity(hash *u64, command *char) int {
+    let resolved [1200]u8;
+    let has_slash int = 0;
+    let i int = 0;
+    for command[i] != 0 {
+        if (command[i] == '/') { has_slash = 1; }
+        i += 1;
+    }
+    if (has_slash != 0) {
+        i = 0;
+        for command[i] != 0 { resolved[i] = command[i].to_type(u8); i += 1; }
+        resolved[i] = 0;
+    } else if (mb_path_find(command, &resolved[0]) == 0) {
+        return gen.fail_path("找不到工具: ", command);
+    }
+    i = 0;
+    for resolved[i] != 0 { mb_fnv(hash, resolved[i]); i += 1; }
+    mb_fnv(hash, 0);
+    return mb_hash_file(hash, (&resolved[0]).to_type(*char));
+}
+
+// mb_lld_x64_enabled：仅在 Linux x64 target 且当前 yh 内嵌了 lld 时启用进程内链接。
+fn mb_lld_x64_enabled() int {
+    let gs *gen.GenState = gen.G();
+    if (gs.c_backend == 0 || gs.c_target.os != gen.TARGET_OS_LINUX
+        || gs.c_target.arch != gen.TARGET_ARCH_X64) {
+        return 0;
+    }
+    let identity *char = backend.llvm_lld_identity();
+    if (identity == 0 || identity[0] == 0) { return 0; }
+    return 1;
+}
+
+// mb_hash_lld_library：混入库名与 lld 实际会解析到的库文件内容。
+// required=1 用于固定模板库；项目库缺失时留给 lld 产生标准链接诊断。
+fn mb_hash_lld_library(hash *u64, name *char, required int) int {
+    if (name == 0) { return gen.fail("lld 链接库名为空"); }
+    let i int = 0;
+    for name[i] != 0 {
+        mb_fnv(hash, name[i].to_type(u8));
+        i += 1;
+    }
+    mb_fnv(hash, 0);
+    let path [1200]u8;
+    let resolved int = backend.llvm_lld_resolve_library(name,
+        (&path[0]).to_type(*char));
+    if (resolved == 0) {
+        i = 0;
+        for path[i] != 0 {
+            mb_fnv(hash, path[i].to_type(u8));
+            i += 1;
+        }
+        mb_fnv(hash, 255);
+        return mb_hash_file(hash, gen.arr_cstr(path));
+    }
+    if (resolved < 0) { return gen.fail_path("无法解析 lld 链接库: ", name); }
+    mb_fnv(hash, 254);
+    if (required != 0) { return gen.fail_path("找不到 lld 默认链接库: ", name); }
+    return 0;
+}
+
+// mb_hash_lld_identity：把 shim/SDK/默认链接模板、宿主环境与所有系统链接输入计入缓存键。
+fn mb_hash_lld_identity(hash *u64, projects *int, project_count int) int {
+    let gs *gen.GenState = gen.G();
+    let identity *char = backend.llvm_lld_identity();
+    if (identity == 0 || identity[0] == 0) {
+        return gen.fail("当前 yh 未内嵌可用的 x86_64 lld 驱动");
+    }
+    let i int = 0;
+    for identity[i] != 0 {
+        mb_fnv(hash, identity[i].to_type(u8));
+        i += 1;
+    }
+    mb_fnv(hash, 0);
+
+    let env_names [3]*char;
+    env_names[0] = "LIBRARY_PATH";
+    env_names[1] = "LD_RUN_PATH";
+    env_names[2] = 0.to_type(*char);
+    let ei int = 0;
+    for env_names[ei] != 0 {
+        let env_off int = -1;
+        let env_len int = 0;
+        if (pj_env_fetch(env_names[ei], &env_off, &env_len) != 0) { return -1; }
+        i = 0;
+        for env_names[ei][i] != 0 {
+            mb_fnv(hash, env_names[ei][i].to_type(u8));
+            i += 1;
+        }
+        mb_fnv(hash, 0);
+        let j int = 0;
+        for j < env_len {
+            mb_fnv(hash, gs.np_data[env_off + j]);
+            j += 1;
+        }
+        mb_fnv(hash, 255);
+        ei += 1;
+    }
+
+    let file_count int = backend.llvm_lld_default_file_count();
+    i = 0;
+    for i < file_count {
+        let path *char = backend.llvm_lld_default_file(i);
+        if (path == 0) { return gen.fail("lld 默认启动文件清单损坏"); }
+        let j int = 0;
+        for path[j] != 0 {
+            mb_fnv(hash, path[j].to_type(u8));
+            j += 1;
+        }
+        mb_fnv(hash, 0);
+        if (mb_hash_file(hash, path) != 0) { return -1; }
+        i += 1;
+    }
+    let library_count int = backend.llvm_lld_default_library_count();
+    i = 0;
+    for i < library_count {
+        if (mb_hash_lld_library(hash, backend.llvm_lld_default_library(i), 1) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    if (mb_hash_lld_library(hash, "m", 1) != 0) { return -1; }
+
+    let pi int = 0;
+    for pi < project_count {
+        let proj int = projects[pi];
+        let li int = 0;
+        for li < gs.p_projs[proj].c_lib_n {
+            let lib gen.PInput = gs.p_projs[proj].c_libs[li];
+            let name [128]u8;
+            let n int = append_bytes_np(&name[0], 0, lib.path_off, lib.path_len);
+            name[n] = 0;
+            if (mb_hash_lld_library(hash, gen.arr_cstr(name), 0) != 0) { return -1; }
+            li += 1;
+        }
+        pi += 1;
+    }
+    return 0;
+}
+
+// mb_lld_link_worker：在一次性子进程中执行静态内嵌 lld，避免复用不可重入状态。
+// 子进程只负责写临时输出并立即退出；父进程依据返回码决定是否发布。
+fn mb_lld_link_worker(objects **char, object_count int, extra_args **char,
+    extra_count int, output *char) int {
+    let child int = fork();
+    if (child < 0) { return gen.fail("无法启动内嵌 lld worker"); }
+    if (child == 0) {
+        let diagnostic [backend.LLVM_LLD_DIAG]u8;
+        let status int = backend.llvm_lld_link_driver(output, objects,
+            object_count, extra_args, extra_count,
+            (&diagnostic[0]).to_type(*char));
+        if (status != 0) {
+            if (diagnostic[0] != 0) {
+                gen.write_all(2, &diagnostic[0],
+                    strlen((&diagnostic[0]).to_type(*char)).to_type(int));
+                gen.write_all(2, "\n".to_type(*u8), 1);
+            }
+            if (status == -2) { exit(253); }
+            exit(1);
+        }
+        exit(0);
+    }
+    let status int = cmd_process_status(child);
+    if (status == 253) { return -2; }
+    return status == 0 ? 0 : -1;
+}
+
+// mb_link_query_identity：哈希驱动器实际报告的搜索路径、工具、启动文件和库文件。
+// 查询通过 argv 执行并写入 build/manifest 下的临时文件，避免 shell 转义与管道差异。
+fn mb_link_query_identity(hash *u64, cc *char, projects *int,
+    project_count int, build_off int) int {
+    let gs *gen.GenState = gen.G();
+    let capture_path [900]u8;
+    let pn int = 0;
+    pn = gen.append_str(&capture_path[0], pn, pj_pool_str(build_off));
+    pn = gen.append_str(&capture_path[0], pn, "/manifest/link-query.");
+    pn = gen.append_int(&capture_path[0], pn, getpid());
+    capture_path[pn] = 0;
+    let output *u8 = malloc(65536).to_type(*u8);
+    if (output == 0) { return gen.fail("链接器查询缓冲分配失败"); }
+
+    let env_names **char = malloc((9 * sizeof(*char)).to_type(u64)).to_type(**char);
+    if (env_names == 0) {
+        free(output.to_type(*void));
+        return gen.fail("链接器环境清单分配失败");
+    }
+    env_names[0] = "PATH";
+    env_names[1] = "LIBRARY_PATH";
+    env_names[2] = "COMPILER_PATH";
+    env_names[3] = "GCC_EXEC_PREFIX";
+    env_names[4] = "GCC_SPECS";
+    env_names[5] = "SDKROOT";
+    env_names[6] = "MACOSX_DEPLOYMENT_TARGET";
+    env_names[7] = "LD_RUN_PATH";
+    env_names[8] = 0.to_type(*char);
+    let ei int = 0;
+    for env_names[ei] != 0 {
+        let env_off int = -1;
+        let env_len int = 0;
+        if (pj_env_fetch(env_names[ei], &env_off, &env_len) != 0) {
+            free(env_names.to_type(*void));
+            free(output.to_type(*void));
+            return -1;
+        }
+        let en int = 0;
+        for env_names[ei][en] != 0 {
+            mb_fnv(hash, env_names[ei][en].to_type(u8));
+            en += 1;
+        }
+        mb_fnv(hash, 0);
+        let ev int = 0;
+        for ev < env_len {
+            mb_fnv(hash, gs.np_data[env_off + ev]);
+            ev += 1;
+        }
+        mb_fnv(hash, 255);
+        ei += 1;
+    }
+    free(env_names.to_type(*void));
+
+    let fixed_queries **char = malloc((10 * sizeof(*char)).to_type(u64)).to_type(**char);
+    if (fixed_queries == 0) {
+        free(output.to_type(*void));
+        return gen.fail("链接器查询清单分配失败");
+    }
+    fixed_queries[0] = "-print-search-dirs";
+    fixed_queries[1] = "-print-sysroot";
+    fixed_queries[2] = "-dumpmachine";
+    fixed_queries[3] = "-dumpfullversion";
+    fixed_queries[4] = "-dumpspecs";
+    fixed_queries[5] = "-print-prog-name=ld";
+    fixed_queries[6] = "-print-prog-name=collect2";
+    fixed_queries[7] = "-print-prog-name=as";
+    fixed_queries[8] = 0.to_type(*char);
+    fixed_queries[9] = 0.to_type(*char);
+    let qi int = 0;
+    for fixed_queries[qi] != 0 {
+        let argv [3]*char;
+        argv[0] = cc;
+        argv[1] = fixed_queries[qi];
+        argv[2] = 0.to_type(*char);
+        let n int = cmd_process_capture(&argv[0],
+            (&capture_path[0]).to_type(*char), output, 65536);
+        if (n < 0) {
+            free(fixed_queries.to_type(*void));
+            free(output.to_type(*void));
+            return gen.fail("无法读取链接驱动信息");
+        }
+        let q int = 0;
+        for fixed_queries[qi][q] != 0 {
+            mb_fnv(hash, fixed_queries[qi][q].to_type(u8));
+            q += 1;
+        }
+        mb_fnv(hash, 0);
+        let oi int = 0;
+        for oi < n { mb_fnv(hash, output[oi]); oi += 1; }
+        mb_fnv(hash, 254);
+        if (qi >= 5) {
+            for n > 0 && (output[n - 1] == 10 || output[n - 1] == 13) {
+                n -= 1;
+            }
+            output[n] = 0;
+            if (n > 0 && mb_hash_tool_identity(hash,
+                (&output[0]).to_type(*char)) != 0) {
+                free(fixed_queries.to_type(*void));
+                free(output.to_type(*void));
+                return -1;
+            }
+        }
+        qi += 1;
+    }
+    free(fixed_queries.to_type(*void));
+
+    let fixed_files **char = malloc((13 * sizeof(*char)).to_type(u64)).to_type(**char);
+    if (fixed_files == 0) {
+        free(output.to_type(*void));
+        return gen.fail("链接启动文件清单分配失败");
+    }
+    fixed_files[0] = "crt1.o";
+    fixed_files[1] = "Scrt1.o";
+    fixed_files[2] = "crti.o";
+    fixed_files[3] = "crtn.o";
+    fixed_files[4] = "crtbegin.o";
+    fixed_files[5] = "crtbeginS.o";
+    fixed_files[6] = "crtend.o";
+    fixed_files[7] = "crtendS.o";
+    fixed_files[8] = "libc.so";
+    fixed_files[9] = "libc.so.6";
+    fixed_files[10] = "libgcc.a";
+    fixed_files[11] = "libgcc_s.so";
+    fixed_files[12] = 0.to_type(*char);
+    qi = 0;
+    for fixed_files[qi] != 0 {
+        let query [96]u8;
+        let qn int = gen.append_str(&query[0], 0, "-print-file-name=");
+        qn = gen.append_str(&query[0], qn, fixed_files[qi]);
+        query[qn] = 0;
+        let argv [3]*char;
+        argv[0] = cc;
+        argv[1] = (&query[0]).to_type(*char);
+        argv[2] = 0.to_type(*char);
+        let n int = cmd_process_capture(&argv[0],
+            (&capture_path[0]).to_type(*char), output, 65536);
+        if (n < 0) {
+            free(fixed_files.to_type(*void));
+            free(output.to_type(*void));
+            return gen.fail("无法解析链接输入");
+        }
+        let oi int = 0;
+        for oi < n { mb_fnv(hash, output[oi]); oi += 1; }
+        mb_fnv(hash, 254);
+        for n > 0 && (output[n - 1] == 10 || output[n - 1] == 13) {
+            n -= 1;
+        }
+        output[n] = 0;
+        if (n > 0 && pj_file_exists((&output[0]).to_type(*char)) != 0) {
+            let pi int = 0;
+            for output[pi] != 0 { mb_fnv(hash, output[pi]); pi += 1; }
+            mb_fnv(hash, 0);
+            if (mb_hash_file(hash, (&output[0]).to_type(*char)) != 0) {
+                free(fixed_files.to_type(*void));
+                free(output.to_type(*void));
+                return -1;
+            }
+        }
+        qi += 1;
+    }
+    free(fixed_files.to_type(*void));
+
+    let pi int = 0;
+    for pi < project_count {
+        let proj int = projects[pi];
+        let li int = 0;
+        for li < gs.p_projs[proj].c_lib_n {
+            let lib gen.PInput = gs.p_projs[proj].c_libs[li];
+            let suffixes **char = malloc((4 * sizeof(*char)).to_type(u64)).to_type(**char);
+            if (suffixes == 0) {
+                free(output.to_type(*void));
+                return gen.fail("系统库后缀清单分配失败");
+            }
+            suffixes[0] = ".so";
+            suffixes[1] = ".a";
+            suffixes[2] = ".dylib";
+            suffixes[3] = 0.to_type(*char);
+            let si int = 0;
+            for suffixes[si] != 0 {
+                let query [160]u8;
+                let qn int = gen.append_str(&query[0], 0, "-print-file-name=lib");
+                qn = append_bytes_np(&query[0], qn, lib.path_off, lib.path_len);
+                qn = gen.append_str(&query[0], qn, suffixes[si]);
+                query[qn] = 0;
+                let argv [3]*char;
+                argv[0] = cc;
+                argv[1] = (&query[0]).to_type(*char);
+                argv[2] = 0.to_type(*char);
+                let n int = cmd_process_capture(&argv[0],
+                    (&capture_path[0]).to_type(*char), output, 65536);
+                if (n < 0) {
+                    free(suffixes.to_type(*void));
+                    free(output.to_type(*void));
+                    return gen.fail("无法解析配置的系统库");
+                }
+                let oi int = 0;
+                for oi < n { mb_fnv(hash, output[oi]); oi += 1; }
+                mb_fnv(hash, 254);
+                for n > 0 && (output[n - 1] == 10 || output[n - 1] == 13) {
+                    n -= 1;
+                }
+                output[n] = 0;
+                if (n > 0 && pj_file_exists((&output[0]).to_type(*char)) != 0) {
+                    let path_i int = 0;
+                    for output[path_i] != 0 { mb_fnv(hash, output[path_i]); path_i += 1; }
+                    mb_fnv(hash, 0);
+                    if (mb_hash_file(hash, (&output[0]).to_type(*char)) != 0) {
+                        free(suffixes.to_type(*void));
+                        free(output.to_type(*void));
+                        return -1;
+                    }
+                }
+                si += 1;
+            }
+            free(suffixes.to_type(*void));
+            li += 1;
+        }
+        pi += 1;
+    }
+    if (gen.tg_host_darwin() == 0) {
+        let suffixes **char = malloc((3 * sizeof(*char)).to_type(u64)).to_type(**char);
+        if (suffixes == 0) {
+            free(output.to_type(*void));
+            return gen.fail("libm 后缀清单分配失败");
+        }
+        suffixes[0] = ".so";
+        suffixes[1] = ".a";
+        suffixes[2] = 0.to_type(*char);
+        let si int = 0;
+        for suffixes[si] != 0 {
+            let query [96]u8;
+            let qn int = gen.append_str(&query[0], 0, "-print-file-name=libm");
+            qn = gen.append_str(&query[0], qn, suffixes[si]);
+            query[qn] = 0;
+            let argv [3]*char;
+            argv[0] = cc;
+            argv[1] = (&query[0]).to_type(*char);
+            argv[2] = 0.to_type(*char);
+            let n int = cmd_process_capture(&argv[0],
+                (&capture_path[0]).to_type(*char), output, 65536);
+            if (n < 0) {
+                free(suffixes.to_type(*void));
+                free(output.to_type(*void));
+                return gen.fail("无法解析 libm");
+            }
+            let oi int = 0;
+            for oi < n { mb_fnv(hash, output[oi]); oi += 1; }
+            mb_fnv(hash, 254);
+            for n > 0 && (output[n - 1] == 10 || output[n - 1] == 13) {
+                n -= 1;
+            }
+            output[n] = 0;
+            if (n > 0 && pj_file_exists((&output[0]).to_type(*char)) != 0) {
+                let path_i int = 0;
+                for output[path_i] != 0 { mb_fnv(hash, output[path_i]); path_i += 1; }
+                mb_fnv(hash, 0);
+                if (mb_hash_file(hash, (&output[0]).to_type(*char)) != 0) {
+                    free(suffixes.to_type(*void));
+                    free(output.to_type(*void));
+                    return -1;
+                }
+            }
+            si += 1;
+        }
+        free(suffixes.to_type(*void));
+    }
+    free(output.to_type(*void));
+    return 0;
+}
+
+// mb_select_linker：按输出目标选择链接驱动；YH_CC 可显式覆盖，Linux x64 默认
+// 使用原生绝对路径，避免 PATH 前置的 ARM64 crossbin/gcc 包装器劫持。
+fn mb_select_linker(out *u8) *char {
+    let gs *gen.GenState = gen.G();
+    let selected *char = "gcc";
+    if (gen.tg_darwin() != 0) { selected = "clang"; }
+    if (gs.c_backend != 0 && gs.c_target.os == gen.TARGET_OS_LINUX
+        && gs.c_target.arch == gen.TARGET_ARCH_X64) {
+        selected = "/usr/bin/gcc";
+    }
+    if (gs.c_backend != 0) {
+        let env_off int = -1;
+        let env_len int = 0;
+        if (pj_env_fetch("YH_CC", &env_off, &env_len) == 0 && env_len > 0) {
+            if (env_len >= 1200) { gen.fail("YH_CC 路径过长"); return 0.to_type(*char); }
+            let i int = 0;
+            for i < env_len { out[i] = gs.np_data[env_off + i]; i += 1; }
+            out[i] = 0;
+            if (pj_file_exists(gen.arr_cstr(out)) == 0) {
+                gen.fail_path("YH_CC 工具不存在: ", gen.arr_cstr(out));
+                return 0.to_type(*char);
+            }
+            return gen.arr_cstr(out);
+        }
+    }
+    return selected;
+}
+
 fn mb_link(out_path *char, build_off int, build_len int,
     count int, root_proj int) int {
     let gs *gen.GenState = gen.G();
+    let use_lld int = mb_lld_x64_enabled();
     let object_start_ns u64 = 0;
     if (gs.c_stats_enabled != 0) {
         object_start_ns = cmd_clock_ns();
     }
     // 两步链接（用户规划：.build/asm → .build/obj → 链接）
-    let cc *char = "gcc";
-    if (gen.tg_darwin() != 0) {
-        cc = "clang";
-    }
+    let cc_storage [1200]u8;
+    let cc *char = mb_select_linker(&cc_storage[0]);
+    if (cc == 0) { return -1; }
     let project_capacity int = gs.p_proj_n > 0 ? gs.p_proj_n : 1;
-    // LLVM 后端：worker 已用内嵌桥把每个模块直接发成 .build/asm/<tag>.o，
+    // LLVM 后端：worker 已用内嵌桥把每个模块直接发成目标命名空间的 obj/<tag>.o，
     // 没有 .s 中间产物，因此跳过「汇编 → 目标」步，链接参数直接收这些对象。
     let llvm_objects int = gs.c_backend != 0 ? 1 : 0;
     let c_projects *int = malloc((project_capacity * sizeof(int)).to_type(u64))
@@ -342,6 +861,7 @@ fn mb_link(out_path *char, build_off int, build_len int,
         } else {
             mb_fnv(&h, 'L');
         }
+        if (mb_hash_tool_identity(&h, cmd0) != 0) { return -1; }
         let want [16]u8;
         mb_hash_hex(h, want);
         let object_hit int = 0;
@@ -364,7 +884,8 @@ fn mb_link(out_path *char, build_off int, build_len int,
                 k2 += 1;
             }
             let hobj u64 = mb_hash_init();
-            if (key_matches != 0 && mb_hash_file(&hobj, gen.arr_cstr(opath)) == 0) {
+            if (key_matches != 0 && mb_hash_file(&hobj, gen.arr_cstr(opath)) == 0
+                && mb_object_machine_matches(gen.arr_cstr(opath)) != 0) {
                 let object_key [16]u8;
                 mb_hash_hex(hobj, object_key);
                 object_hit = 1;
@@ -438,7 +959,8 @@ fn mb_link(out_path *char, build_off int, build_len int,
         mb_fnv(&hlink, cc[cci].to_type(u8));
         cci += 1;
     }
-    let link_flags *char = " -no-pie -o";
+    let link_flags *char = use_lld != 0
+        ? " lld-in-process -no-pie -o" : " -no-pie -o";
     if (gen.tg_darwin() != 0) {
         link_flags = " -o";
         mb_fnv(&hlink, 'D');
@@ -446,6 +968,26 @@ fn mb_link(out_path *char, build_off int, build_len int,
         mb_fnv(&hlink, 'L');
     }
     mb_fnv(&hlink, ('0' + gs.c_legacy_system).to_type(u8));
+    let target_i int = 0;
+    for gs.c_target.triple[target_i] != 0 {
+        mb_fnv(&hlink, gs.c_target.triple[target_i].to_type(u8));
+        target_i += 1;
+    }
+    mb_fnv(&hlink, 0);
+    target_i = 0;
+    for gs.c_target.data_layout[target_i] != 0 {
+        mb_fnv(&hlink, gs.c_target.data_layout[target_i].to_type(u8));
+        target_i += 1;
+    }
+    mb_fnv(&hlink, ('0' + gs.c_backend).to_type(u8));
+    mb_fnv(&hlink, ('0' + gs.c_opt_level).to_type(u8));
+    if (use_lld != 0) {
+        if (mb_hash_lld_identity(&hlink, c_projects, c_project_n) != 0) { return -1; }
+    } else {
+        if (mb_hash_tool_identity(&hlink, cc) != 0) { return -1; }
+        if (mb_link_query_identity(&hlink, cc,
+            c_projects, c_project_n, build_off) != 0) { return -1; }
+    }
     let lfi int = 0;
     for link_flags[lfi] != 0 {
         mb_fnv(&hlink, link_flags[lfi].to_type(u8));
@@ -476,6 +1018,10 @@ fn mb_link(out_path *char, build_off int, build_len int,
         on3 = gen.append_str(opath, on3, pj_pool_str(tagoff));
         on3 = gen.append_str(opath, on3, ".o");
         opath[on3] = 0;
+        if (mb_object_machine_matches(gen.arr_cstr(opath)) == 0) {
+            return gen.fail_path("目标文件架构与当前 target 不符: ",
+                gen.arr_cstr(opath));
+        }
         if (mb_hash_file(&hlink, gen.arr_cstr(opath)) != 0) {
             return -1;
         }
@@ -545,17 +1091,26 @@ fn mb_link(out_path *char, build_off int, build_len int,
         if (libpaths != 0) { free(libpaths.to_type(*void)); }
         return gen.fail("链接 argv 缓冲分配失败");
     }
+    let link_tmp [900]u8;
+    let tmp_len int = gen.append_str(&link_tmp[0], 0, out_path);
+    tmp_len = gen.append_str(&link_tmp[0], tmp_len, ".yh-tmp.");
+    tmp_len = gen.append_int(&link_tmp[0], tmp_len, getpid());
+    link_tmp[tmp_len] = 0;
+    unlink((&link_tmp[0]).to_type(*char));
     let next_arg int = 0;
-    args[next_arg] = cc;
-    next_arg += 1;
-    if (gen.tg_darwin() == 0) {
-        args[next_arg] = "-no-pie";
+    if (use_lld == 0) {
+        args[next_arg] = cc;
+        next_arg += 1;
+        if (gen.tg_darwin() == 0) {
+            args[next_arg] = "-no-pie";
+            next_arg += 1;
+        }
+        args[next_arg] = "-o";
+        next_arg += 1;
+        args[next_arg] = (&link_tmp[0]).to_type(*char);
         next_arg += 1;
     }
-    args[next_arg] = "-o";
-    next_arg += 1;
-    args[next_arg] = out_path;
-    next_arg += 1;
+    let object_start int = next_arg;
     i = 0;
     for i < count {
         let m int = pj_order[i];
@@ -569,8 +1124,7 @@ fn mb_link(out_path *char, build_off int, build_len int,
         let row *u8 = paths + (i * 620);
         let n int = 0;
         n = gen.append_str(row, n, pj_pool_str(build_off));
-        // LLVM 模式的对象由 worker 直接发到 asm/ 目录（无 .s 中间产物）。
-        n = gen.append_str(row, n, llvm_objects != 0 ? "/asm/" : "/obj/");
+        n = gen.append_str(row, n, "/obj/");
         n = gen.append_str(row, n, pj_pool_str(pj_canon_off));
         n = gen.append_str(row, n, ".o");
         row[n] = 0;
@@ -599,6 +1153,8 @@ fn mb_link(out_path *char, build_off int, build_len int,
         }
         cp += 1;
     }
+    let object_count int = next_arg - object_start;
+    let extra_start int = next_arg;
     cp = 0;
     let libpath_i int = 0;
     for cp < c_project_n {
@@ -619,21 +1175,38 @@ fn mb_link(out_path *char, build_off int, build_len int,
     }
     // Linux：glibc 把数学函数放在独立的 libm 里，libs/math 与标准库用到
     // cos/pow 等；Darwin 的 libSystem 已包含（宿主链接命令按宿主平台取）。
-    if (gen.tg_host_darwin() == 0) {
+    if (use_lld != 0 || gen.tg_host_darwin() == 0) {
         args[next_arg] = "-lm";
         next_arg += 1;
     }
-    args[next_arg] = 0.to_type(*char);
+    let extra_count int = next_arg - extra_start;
+    if (use_lld == 0) { args[next_arg] = 0.to_type(*char); }
     if (gs.c_stats_enabled != 0) {
         gs.c_stats_link += 1;
     }
-    let link_rc int = cmd_process_run(&args[0]);
+    let link_rc int = use_lld != 0
+        ? mb_lld_link_worker(args + object_start, object_count,
+            args + extra_start, extra_count, (&link_tmp[0]).to_type(*char))
+        : cmd_process_run(&args[0]);
     free(args.to_type(*void));
     free(paths.to_type(*void));
     free(cpaths.to_type(*void));
     free(libpaths.to_type(*void));
+    if (link_rc == -2) {
+        unlink((&link_tmp[0]).to_type(*char));
+        return gen.fail("lld 不可重入：链接 worker 已结束，未发布输出");
+    }
     if (link_rc != 0) {
+        unlink((&link_tmp[0]).to_type(*char));
         return gen.fail_path("链接失败: ", out_path);
+    }
+    if (mb_object_machine_matches((&link_tmp[0]).to_type(*char)) == 0) {
+        unlink((&link_tmp[0]).to_type(*char));
+        return gen.fail_path("链接产物架构与当前 target 不符: ", out_path);
+    }
+    if (rename((&link_tmp[0]).to_type(*char), out_path) != 0) {
+        unlink((&link_tmp[0]).to_type(*char));
+        return gen.fail_path("无法发布链接产物: ", out_path);
     }
     let final_hash u64 = mb_hash_init();
     if (mb_hash_file(&final_hash, out_path) != 0) {

@@ -26,9 +26,11 @@ pub const IR_TY_F64 int = 11;
 pub const IR_TY_PTR int = 12;
 // 指针类型按所指元素编码：canonical 下标 = IR_TY_PTR + 元素 kind，
 // elem 必须等于下标减 IR_TY_PTR；IR_TY_PTR（12）即 *void。
-// 二级指针覆盖指针对象的地址（如全局 *int 的存储地址）；更深的源类型由
-// lowering 明确拒绝，不能拿越界 canonical 编号索引类型表。
-pub const IR_TY_PTR_LAST int = 36;
+// 指针区间同时容纳受检源指针和其存储地址类型，支持最多四层源指针的寻址。
+pub const IR_TY_PTR_LAST int = 72;
+// 函数值在 SSA 中也是 opaque ptr，但单独编号以便类型映射不混淆数据指针。
+pub const IR_TY_FN_PTR int = 73;
+pub const IR_TY_LAST int = 73;
 
 // 指令种类。参数由入口块前导 PARAM 定义；控制流只放在 IRBlock 的终结字段中。
 pub const IR_OP_CONST int = 1;
@@ -62,11 +64,18 @@ pub const IR_OP_ADDR int = 25;
 pub const IR_OP_ALLOCA int = 26;
 // GEP：基址加字节偏移（a=基指针；b=动态偏移 u64 值，b<0 时用常量 imm）；结果是指针。
 pub const IR_OP_GEP int = 27;
-// MEMCPY：按字节复制（a=目的指针，b=源指针，imm=字节数）；无结果。
+// MEMCPY：编译器聚合副本，按字节复制并允许重叠（memmove 语义）；
+// a=目的指针，b=源指针，imm=字节数，无结果；区别于用户显式 memcpy。
 pub const IR_OP_MEMCPY int = 28;
 // GLOB_ADDR：模块全局对象取址（imm=模块符号下标，函数私有 verifier 只查非负，
 // 符号种类/定义状态由模块 verifier 封闭）；结果是指针。
 pub const IR_OP_GLOB_ADDR int = 29;
+// FN_ADDR：模块函数取址（imm=模块符号下标，aux=其完整函数类型模块下标）。
+pub const IR_OP_FN_ADDR int = 30;
+// FNEG：按 IEEE 位级符号翻转浮点值，必须保留正负零和 NaN payload。
+pub const IR_OP_FNEG int = 31;
+// MEMSET：默认初始化的局部存储按字节清零；a=目的指针，imm=正字节数。
+pub const IR_OP_MEMSET int = 32;
 
 // 基本块终结种类。每个块恰有一个终结操作。
 pub const IR_TERM_BR int = 1;
@@ -88,7 +97,7 @@ pub struct IRInst {
     result_type int;    // 结果类型索引；无结果时为 -1
     a int;              // 第一输入值编号；该指令不使用时为 -1
     b int;              // 第二输入值编号；该指令不使用时为 -1
-    imm i64;            // CONST 的存储位型、PARAM 的形参序号；其他指令必须为 0
+    imm i64;            // CONST 位型、PARAM 序号、ALLOCA/GEP/MEMCPY/MEMSET 的大小或偏移
     aux int;            // PHI 的输入表索引或 CALL 的调用表索引；其他指令为 -1
 }
 
@@ -107,6 +116,8 @@ pub struct IRPhi {
 // 直接调用的稳定目标与变长实参片段；符号名已包含目标平台前缀和模块限定。
 pub struct IRCall {
     abi int;            // 0=yh、1=C；固定参数调用约定必须显式保存
+    callee_value int;   // -1 表示直接符号调用，否则是间接调用的函数值 SSA 编号
+    signature_type int; // 间接调用的模块 FUNCTION 类型下标；直接调用为 -1
     symbol_first int;   // IRFunction.call_symbols 的起始字节
     symbol_len int;     // 完整汇编符号名长度，不含结尾零字节
     arg_first int;      // IRFunction.call_args 的起始下标
@@ -160,8 +171,11 @@ fn ir_type_ok(f *IRFunction, tid int) int {
         return 0;
     }
     let t IRType = f.types[tid];
-    if (t.kind < IR_TY_VOID || t.kind > IR_TY_PTR_LAST) {
+    if (t.kind < IR_TY_VOID || t.kind > IR_TY_LAST) {
         return 0;
+    }
+    if (t.kind == IR_TY_FN_PTR) {
+        return t.bits == 64 && t.elem == -1;
     }
     if (t.kind == IR_TY_VOID) {
         return t.bits == 0 && t.elem == -1;
@@ -219,13 +233,15 @@ fn ir_is_pred(f *IRFunction, from int, to int) int {
 // ir_verify_inst：校验单条指令的编码、结果定义与输入值是否存在。
 fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
     let has_result int = inst.op != IR_OP_STORE && inst.op != IR_OP_MEMCPY
+        && inst.op != IR_OP_MEMSET
         && (inst.op != IR_OP_CALL || inst.result_id >= 0);
-    if (inst.op < IR_OP_CONST || inst.op > IR_OP_GLOB_ADDR) {
+    if (inst.op < IR_OP_CONST || inst.op > IR_OP_MEMSET) {
         return -1;
     }
     if (inst.op != IR_OP_CONST && inst.op != IR_OP_PARAM && inst.op != IR_OP_ADDR
         && inst.op != IR_OP_ALLOCA && inst.op != IR_OP_GEP && inst.op != IR_OP_MEMCPY
-        && inst.op != IR_OP_GLOB_ADDR && inst.imm != 0) {
+        && inst.op != IR_OP_MEMSET
+        && inst.op != IR_OP_GLOB_ADDR && inst.op != IR_OP_FN_ADDR && inst.imm != 0) {
         return -1;
     }
     if (inst.op == IR_OP_PHI && saw_non_phi != 0) {
@@ -251,7 +267,7 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
     if (inst.op == IR_OP_ADDR) {
         // 绑定 ID 必须非负；结果已验证为 canonical 指针（禁止 void 分配）。
         if (inst.imm < 0 || inst.a != -1 || inst.b != -1 || inst.aux != -1) { return -1; }
-        return f.types[inst.result_type].elem == IR_TY_VOID ? -1 : 0;
+        return 0;
     }
     if (inst.op == IR_OP_ALLOCA) {
         // 字节数与对齐必须为正；结果只要求是指针（元素可为 void）。
@@ -278,10 +294,25 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
         }
         return 0;
     }
+    if (inst.op == IR_OP_MEMSET) {
+        // 默认初始化只允许清零真实存储区，长度必须为正且没有源指针。
+        if (inst.imm <= 0 || inst.aux != -1 || inst.a < 0 || inst.b != -1) { return -1; }
+        let at int = ir_find_value_type(f, inst.a);
+        return at >= 0 && f.types[at].kind >= IR_TY_PTR ? 0 : -1;
+    }
     if (inst.op == IR_OP_GLOB_ADDR) {
         // 模块符号下标必须非负（种类由模块 verifier 核对）；结果只要求是指针。
         if (inst.imm < 0 || inst.a != -1 || inst.b != -1 || inst.aux != -1) { return -1; }
         return f.types[inst.result_type].kind >= IR_TY_PTR ? 0 : -1;
+    }
+    if (inst.op == IR_OP_FN_ADDR) {
+        return inst.imm >= 0 && inst.aux >= 0 && inst.a == -1 && inst.b == -1
+            && f.types[inst.result_type].kind == IR_TY_FN_PTR ? 0 : -1;
+    }
+    if (inst.op == IR_OP_FNEG) {
+        if (inst.a < 0 || inst.b != -1 || inst.aux != -1
+            || inst.result_type != ir_find_value_type(f, inst.a)) { return -1; }
+        return ir_float_type(f.types[inst.result_type].kind) != 0 ? 0 : -1;
     }
     if (inst.op == IR_OP_CALL) {
         if (inst.a != -1 || inst.b != -1 || inst.aux < 0 || inst.aux >= f.call_count) {
@@ -302,9 +333,15 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
     if (inst.op == IR_OP_CAST) {
         if (inst.a < 0 || inst.b != -1 || inst.aux != -1) { return -1; }
         let source_type int = ir_find_value_type(f, inst.a);
-        return source_type >= 0
-            && ir_const_type(f.types[source_type].kind) != 0
-            && ir_const_type(f.types[inst.result_type].kind) != 0 ? 0 : -1;
+        if (source_type < 0) { return -1; }
+        let from_kind int = f.types[source_type].kind;
+        let to_kind int = f.types[inst.result_type].kind;
+        let from_ptr int = (from_kind >= IR_TY_PTR && from_kind <= IR_TY_PTR_LAST).to_type(int);
+        let to_ptr int = (to_kind >= IR_TY_PTR && to_kind <= IR_TY_PTR_LAST).to_type(int);
+        if (from_ptr != 0 && to_ptr != 0
+            || from_ptr != 0 && ir_integer_type(to_kind) != 0
+            || to_ptr != 0 && ir_integer_type(from_kind) != 0) { return 0; }
+        return ir_scalar_type(from_kind) != 0 && ir_scalar_type(to_kind) != 0 ? 0 : -1;
     }
     if (inst.op == IR_OP_PHI) {
         if (inst.a != -1 || inst.b != -1 || inst.aux < 0 || inst.aux >= f.phi_count) {
@@ -318,7 +355,9 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
         }
         let at int = ir_find_value_type(f, inst.a);
         let bt int = ir_find_value_type(f, inst.b);
-        if (f.types[at].kind < IR_TY_PTR || f.types[at].elem != bt) {
+        if (f.types[at].kind < IR_TY_PTR
+            || f.types[at].elem != bt && !(f.types[at].elem == IR_TY_VOID
+                && f.types[bt].kind == IR_TY_FN_PTR)) {
             return -1;
         }
         return 0;
@@ -328,7 +367,9 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
             return -1;
         }
         let at int = ir_find_value_type(f, inst.a);
-        if (at < 0 || f.types[at].kind < IR_TY_PTR || f.types[at].elem != inst.result_type) {
+        if (at < 0 || f.types[at].kind < IR_TY_PTR
+            || f.types[at].elem != inst.result_type && !(f.types[at].elem == IR_TY_VOID
+                && f.types[inst.result_type].kind == IR_TY_FN_PTR)) {
             return -1;
         }
         return 0;
@@ -349,21 +390,23 @@ fn ir_verify_inst(f *IRFunction, inst *IRInst, saw_non_phi int) int {
         }
         if (inst.op != IR_OP_EQ && inst.op != IR_OP_NE) {
             let operand_kind int = f.types[at2].kind;
-            if (operand_kind < IR_TY_I8 || operand_kind > IR_TY_U64) {
+            if (ir_integer_type(operand_kind) == 0 && ir_float_type(operand_kind) == 0) {
                 return -1;
             }
         }
         return 0;
     }
-    if (at2 != inst.result_type || f.types[at2].kind == IR_TY_PTR || f.types[at2].kind == IR_TY_VOID
-        || f.types[at2].kind == IR_TY_BOOL) {
+    if (at2 != inst.result_type || f.types[at2].kind == IR_TY_PTR
+        || f.types[at2].kind == IR_TY_VOID || f.types[at2].kind == IR_TY_BOOL) {
         return -1;
     }
-    if (inst.op >= IR_OP_DIV && inst.op <= IR_OP_SHR
-        && ir_integer_type(f.types[at2].kind) == 0) {
-        return -1;
+    let operand_kind int = f.types[at2].kind;
+    if (ir_float_type(operand_kind) != 0) {
+        // IEEE 浮点只允许基础算术；位运算、余数和移位仍是整数专属操作。
+        return inst.op == IR_OP_ADD || inst.op == IR_OP_SUB
+            || inst.op == IR_OP_MUL || inst.op == IR_OP_DIV ? 0 : -1;
     }
-    return 0;
+    return ir_integer_type(operand_kind) != 0 ? 0 : -1;
 }
 
 // ir_verify_phi：要求 phi 对每个 CFG 前驱恰有一个同类型输入。
@@ -617,6 +660,10 @@ fn ir_verify_dominance(f *IRFunction) int {
                 }
                 if (inst.op == IR_OP_CALL) {
                     let call IRCall = f.calls[inst.aux];
+                    if (call.callee_value >= 0
+                        && ir_use_dominates(f, call.callee_value, use_block, j, -1, dom, reachable) == 0) {
+                        valid = 0;
+                    }
                     let arg int = 0;
                     for arg < call.arg_count && valid != 0 {
                         let value int = f.call_args[call.arg_first + arg].value;
@@ -645,7 +692,7 @@ fn ir_verify_dominance(f *IRFunction) int {
 // ir_verify：校验 SSA 容器的结构、值唯一性、操作数支配/类型与 phi 前驱完整性。
 // 返回 0 表示通过，-1 表示结构或类型不合法；输入所有数组均由调用方持有。
 pub fn ir_verify(f *IRFunction) int {
-    if (f == 0 || (f.abi != 0 && f.abi != 1) || f.target_id < 0 || f.block_count <= 0 || f.blocks == 0 || f.inst_count < 0
+    if (f == 0 || f.abi < 0 || f.abi > IR_ABI_YH_LLVM_V1 || f.target_id < 0 || f.block_count <= 0 || f.blocks == 0 || f.inst_count < 0
         || f.value_count < 0 || f.type_count <= 0 || f.types == 0 || f.phi_count < 0
         || f.phi_input_count < 0 || f.call_count < 0 || f.call_arg_count < 0
         || f.call_symbol_size < 0 || f.ret_type < 0 || f.ret_type >= f.type_count
@@ -815,9 +862,19 @@ pub fn ir_integer_type(kind int) int {
     return kind >= IR_TY_I8 && kind <= IR_TY_U64 ? 1 : 0;
 }
 
+// ir_float_type：判断类型是否为受支持的 IEEE 单精度或双精度标量。
+pub fn ir_float_type(kind int) int {
+    return kind == IR_TY_F32 || kind == IR_TY_F64 ? 1 : 0;
+}
+
 // ir_const_type：整数与布尔常量可以安全参与本阶段的位型简化。
 pub fn ir_const_type(kind int) int {
     return ir_integer_type(kind) != 0 || kind == IR_TY_BOOL ? 1 : 0;
+}
+
+// ir_scalar_type：标量值可参与显式数值转换；bool 保留源级一字节语义。
+pub fn ir_scalar_type(kind int) int {
+    return ir_const_type(kind) != 0 || ir_float_type(kind) != 0 ? 1 : 0;
 }
 
 // ir_normalize_int：按 yh 定宽整数位型截断，并对有符号类型进行符号扩展。

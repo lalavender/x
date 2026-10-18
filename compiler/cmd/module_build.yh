@@ -1,6 +1,7 @@
 module main;
 import gen;
 import parse;
+import backend;
 
 // ============================================================================
 // module_build.yh —— 项目构建管线（MOD-U4/U5）
@@ -126,11 +127,40 @@ fn mb_build_dir(root_off int, root_len int) int {
     let rel *char = ".build";
     if (gs.c_check_only != 0) {
         rel = ".build/check";
+    } else if (gs.c_backend != 0) {
+        let target_dir [256]u8;
+        let n int = gen.append_str(&target_dir[0], 0, ".build/targets/");
+        n = gen.append_str(&target_dir[0], n, gs.c_target.triple);
+        n = gen.append_str(&target_dir[0], n, "/llvm/O");
+        n = gen.append_int(&target_dir[0], n, gs.c_opt_level);
+        target_dir[n] = 0;
+        if (pj_canon(root_off, root_len, (&target_dir[0]).to_type(*char)) != 0) {
+            return -1;
+        }
+        return pj_canon_off;
     }
     if (pj_canon(root_off, root_len, rel) != 0) {
         return -1;
     }
     return pj_canon_off;
+}
+
+// mb_default_binary_path：默认可执行文件留在项目 .build 根目录；后端、目标和优化级别
+// 的中间缓存由 mb_build_dir 隔离，切换目标时链接 manifest 仍各自独立。
+fn mb_default_binary_path(root_off int, root_len int, build_off int,
+    project int, out *u8) int {
+    let gs *gen.GenState = gen.G();
+    let dir_off int = build_off;
+    if (gs.c_backend != 0) {
+        if (pj_canon(root_off, root_len, ".build") != 0) { return -1; }
+        dir_off = pj_canon_off;
+    }
+    let n int = gen.append_str(out, 0, pj_pool_str(dir_off));
+    n = gen.append_byte(out, n, '/');
+    n = append_bytes_np(out, n, gs.p_projs[project].name_off,
+        gs.p_projs[project].name_len);
+    out[n] = 0;
+    return n;
 }
 
 // mb_sub_dir：.build 下子目录路径（asm/obj/iface/manifest），intern 后返回。
@@ -538,6 +568,14 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     sn = gen.append_str(spath, sn, pj_pool_str(tag_off));
     sn = gen.append_str(spath, sn, ".s");
     spath[sn] = 0;
+    let cache_artifact [700]u8;
+    let artifact_path *char = gen.arr_cstr(spath);
+    if (gs.c_backend != 0) {
+        let ignored_text [700]u8;
+        if (mb_llvm_module_paths(m, root_off, root_len, &cache_artifact[0],
+                &ignored_text[0]) != 0) { return -1; }
+        artifact_path = gen.arr_cstr(&cache_artifact[0]);
+    }
     if (pj_canon(build_off, build_len, "iface") != 0) {
         return -1;
     }
@@ -595,6 +633,38 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     mb_fnv(&h, '\n');
     mb_fnv(&h, ('0' + gs.c_legacy_system).to_type(u8));
     mb_fnv(&h, '\n');
+    if (gs.c_backend != 0) {
+        let triple_i int = 0;
+        for gs.c_target.triple[triple_i] != 0 {
+            mb_fnv(&h, gs.c_target.triple[triple_i].to_type(u8));
+            triple_i += 1;
+        }
+        mb_fnv(&h, 0);
+        triple_i = 0;
+        for gs.c_target.data_layout[triple_i] != 0 {
+            mb_fnv(&h, gs.c_target.data_layout[triple_i].to_type(u8));
+            triple_i += 1;
+        }
+        mb_fnv(&h, 0);
+        triple_i = 0;
+        for gs.c_target.abi[triple_i] != 0 {
+            mb_fnv(&h, gs.c_target.abi[triple_i].to_type(u8));
+            triple_i += 1;
+        }
+        mb_fnv(&h, ('0' + gs.c_opt_level).to_type(u8));
+        let bridge_version *char = backend.llvm_bridge_version();
+        triple_i = 0;
+        for bridge_version[triple_i] != 0 {
+            mb_fnv(&h, bridge_version[triple_i].to_type(u8));
+            triple_i += 1;
+        }
+        let bridge_abi *char = "yh-llvm-bridge-abi1";
+        triple_i = 0;
+        for bridge_abi[triple_i] != 0 {
+            mb_fnv(&h, bridge_abi[triple_i].to_type(u8));
+            triple_i += 1;
+        }
+    }
     let fi int = 0;
     for fi < gs.p_mods[m].file_n {
         if (mb_hash_file(&h, pj_pool_str(gs.p_files[gs.p_mods[m].files[fi]].path_off)) != 0) {
@@ -646,19 +716,65 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         shift -= 4;
     }
     // 缓存命中：三个产物齐全且 manifest 字节一致
-    if (deps_ok != 0 && pj_file_exists(gen.arr_cstr(spath)) != 0
+    if (deps_ok != 0 && pj_file_exists(artifact_path) != 0
         && pj_file_exists(gen.arr_cstr(ipath)) != 0
         && pj_file_exists(gen.arr_cstr(ctpath)) != 0
         && pj_file_exists(gen.arr_cstr(mpath)) != 0) {
-        if (gen.read_source(gen.arr_cstr(mpath)) == 0 && gs.c_src_len == wn) {
+        let manifest_len int = gs.c_backend != 0 ? 64 : wn;
+        if (gen.read_source(gen.arr_cstr(mpath)) == 0
+            && gs.c_src_len == manifest_len) {
+            let saved_manifest [64]u8;
+            let si int = 0;
+            for si < manifest_len { saved_manifest[si] = gs.c_src[si]; si += 1; }
             let same int = 1;
             let ci int = 0;
             for ci < wn {
-                if (gs.c_src[ci] != want[ci]) {
+                if (saved_manifest[ci] != want[ci]) {
                     same = 0;
                     break;
                 }
                 ci += 1;
+            }
+            if (same != 0 && gs.c_backend != 0) {
+                let object_hash u64 = mb_hash_init();
+                let object_digest [16]u8;
+                if (mb_hash_file(&object_hash, artifact_path) != 0
+                    || mb_object_machine_matches(artifact_path) == 0) {
+                    same = 0;
+                } else {
+                    mb_hash_hex(object_hash, object_digest);
+                    ci = 0;
+                    for ci < 16 {
+                        if (saved_manifest[16 + ci] != object_digest[ci]) {
+                            same = 0;
+                            break;
+                        }
+                        ci += 1;
+                    }
+                }
+                let iface_paths [2]*char;
+                iface_paths[0] = gen.arr_cstr(ipath);
+                iface_paths[1] = gen.arr_cstr(ctpath);
+                let fi2 int = 0;
+                for fi2 < 2 && same != 0 {
+                    let iface_hash u64 = mb_hash_init();
+                    let iface_digest [16]u8;
+                    if (mb_hash_file(&iface_hash, iface_paths[fi2]) != 0) {
+                        same = 0;
+                    } else {
+                        mb_hash_hex(iface_hash, iface_digest);
+                        ci = 0;
+                        for ci < 16 {
+                            if (saved_manifest[32 + fi2 * 16 + ci]
+                                != iface_digest[ci]) {
+                                same = 0;
+                                break;
+                            }
+                            ci += 1;
+                        }
+                    }
+                    fi2 += 1;
+                }
             }
             if (same != 0) {
                 pj_out_s("  [缓存] ");
@@ -709,7 +825,55 @@ fn mb_manifest_commit(m int, build_off int, build_len int, key *u8) int {
     if (fd < 0) {
         return gen.fail_path("无法写 manifest: ", gen.arr_cstr(mpath));
     }
-    let rc int = gen.write_all(fd, key, 16);
+    let manifest_data [64]u8;
+    let manifest_len int = 16;
+    let ki int = 0;
+    for ki < 16 { manifest_data[ki] = key[ki]; ki += 1; }
+    if (gen.G().c_backend != 0) {
+        let object [700]u8;
+        let on int = gen.append_str(&object[0], 0, pj_pool_str(build_off));
+        on = gen.append_str(&object[0], on, "/obj/");
+        on = gen.append_str(&object[0], on, pj_pool_str(tag_off));
+        on = gen.append_str(&object[0], on, ".o");
+        object[on] = 0;
+        if (mb_object_machine_matches(gen.arr_cstr(&object[0])) == 0) {
+            close(fd);
+            unlink(gen.arr_cstr(tmp));
+            return gen.fail("LLVM 对象缺失或目标架构错误，拒绝提交缓存");
+        }
+        let object_hash u64 = mb_hash_init();
+        if (mb_hash_file(&object_hash, gen.arr_cstr(&object[0])) != 0) {
+            close(fd);
+            unlink(gen.arr_cstr(tmp));
+            return -1;
+        }
+        mb_hash_hex(object_hash, &manifest_data[16]);
+        let iface_path [2][700]u8;
+        let suffix *char = ".s.i";
+        let fi2 int = 0;
+        for fi2 < 2 {
+            if (fi2 == 1) { suffix = ".s.ct"; }
+            let in2 int = gen.append_str(&iface_path[fi2][0], 0,
+                pj_pool_str(build_off));
+            in2 = gen.append_str(&iface_path[fi2][0], in2, "/iface/");
+            in2 = gen.append_str(&iface_path[fi2][0], in2,
+                pj_pool_str(tag_off));
+            in2 = gen.append_str(&iface_path[fi2][0], in2, suffix);
+            iface_path[fi2][in2] = 0;
+            let iface_hash u64 = mb_hash_init();
+            if (pj_file_exists(gen.arr_cstr(&iface_path[fi2][0])) == 0
+                || mb_hash_file(&iface_hash,
+                    gen.arr_cstr(&iface_path[fi2][0])) != 0) {
+                close(fd);
+                unlink(gen.arr_cstr(tmp));
+                return gen.fail("LLVM 模块接口缺失，拒绝提交缓存");
+            }
+            mb_hash_hex(iface_hash, &manifest_data[32 + fi2 * 16]);
+            fi2 += 1;
+        }
+        manifest_len = 64;
+    }
+    let rc int = gen.write_all(fd, &manifest_data[0], manifest_len);
     close(fd);
     if (rc != 0 || rename(gen.arr_cstr(tmp), gen.arr_cstr(mpath)) != 0) {
         unlink(gen.arr_cstr(tmp));
@@ -1314,10 +1478,10 @@ fn mb_cmd_build(av **char, an int) int {
             on = gen.append_str(outbuf, on, out_arg);
         } else {
             // 无 -o：产物名取清单 project.name
-            on = gen.append_str(outbuf, on, pj_pool_str(build_off));
-            on = gen.append_str(outbuf, on, "/");
-            on = append_bytes_np(outbuf, on, gs.p_projs[proj].name_off,
-                gs.p_projs[proj].name_len);
+            if (mb_default_binary_path(root_off, root_len, build_off,
+                    proj, &outbuf[0]) < 0) { return 1; }
+            on = 0;
+            for outbuf[on] != 0 { on += 1; }
         }
         outbuf[on] = 0;
         if (mb_link(gen.arr_cstr(outbuf), build_off, build_len, count, proj) != 0) {
@@ -1380,11 +1544,9 @@ fn mb_cmd_run() int {
         return 1;
     }
     let binbuf [620]u8;
-    let bn int = 0;
-    bn = gen.append_str(binbuf, bn, pj_pool_str(build_off));
-    bn = gen.append_str(binbuf, bn, "/");
-    bn = append_bytes_np(binbuf, bn, gs.p_projs[proj].name_off, gs.p_projs[proj].name_len);
-    binbuf[bn] = 0;
+    let bn int = mb_default_binary_path(root_off, root_len, build_off,
+        proj, &binbuf[0]);
+    if (bn < 0) { return 1; }
     if (mb_link(gen.arr_cstr(binbuf), build_off, build_len, count, proj) != 0) {
         return 1;
     }

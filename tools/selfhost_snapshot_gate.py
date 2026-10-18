@@ -81,6 +81,17 @@ def expected_artifacts(project: Path):
     return collect(project, set())
 
 
+def expected_llvm_artifacts(project: Path):
+    """把同一项目模块集合映射为 LLVM 文本与接口快照路径。"""
+    result = set()
+    for path in expected_artifacts(project):
+        if path.startswith("asm/") and path.endswith(".s"):
+            result.add("llvm/" + path[len("asm/"):-len(".s")] + ".ll")
+        else:
+            result.add(path)
+    return result
+
+
 def seed_sha256(seed: Path) -> str:
     """计算平台种子的 SHA-256。"""
     return hashlib.sha256(seed.read_bytes()).hexdigest()
@@ -127,6 +138,49 @@ def save_snapshot(build_dir: Path, snapshot_dir: Path):
                 destination.write_bytes(contents)
                 result[relative] = contents
     return result
+
+
+def save_llvm_snapshot(build_dir: Path, snapshot_dir: Path):
+    """保存 LLVM 项目的 .ll/.s.i/.s.ct，供候选世代固定点比较。"""
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
+    snapshot_dir.mkdir(parents=True)
+    result = {}
+    for directory, suffix in (("llvm", ".ll"), ("iface", ".s.i"),
+                              ("iface", ".s.ct")):
+        source_dir = build_dir / directory
+        if not source_dir.is_dir():
+            continue
+        for source in sorted(source_dir.glob("*" + suffix)):
+            if source.is_file():
+                relative = f"{directory}/{source.name}"
+                contents = source.read_bytes()
+                destination = snapshot_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(contents)
+                result[relative] = contents
+    return result
+
+
+def llvm_snapshot_errors(snapshot, expected, triple: str):
+    """除路径/固定点外，核对 LLVM target triple 与接口版本头。"""
+    errors = snapshot_errors([("LLVM", snapshot)], expected)
+    for path, contents in sorted(snapshot.items()):
+        if path.endswith(".ll"):
+            marker = f'target triple = "{triple}"'.encode()
+            if marker not in contents:
+                errors.append(f"LLVM target triple 缺失或错误：{path}")
+        elif path.endswith(".s.i"):
+            header = contents.splitlines()[0] if contents else b""
+            if not re.fullmatch(
+                    rb"// yh-iface v[123] arch=arm64 suffix=.*", header):
+                errors.append(f"接口版本头不兼容：{path}")
+        elif path.endswith(".s.ct"):
+            header = contents.splitlines()[0] if contents else b""
+            if not re.fullmatch(
+                    rb"// yh-ctiface v1 arch=arm64 suffix=.*", header):
+                errors.append(f"CT 接口版本头不兼容：{path}")
+    return errors
 
 
 def snapshot_errors(snapshots, expected):
@@ -181,6 +235,26 @@ def self_test() -> bool:
     assert snapshot_errors([("cc2", good), ("cc3", changed)], expected)
     assert not snapshot_errors([("cc3", changed), ("cc4", changed.copy())], expected)
     assert snapshot_errors([("cc2", good)], set())
+    llvm_expected = {"llvm/demo-lib.ll", "iface/demo-lib.s.i",
+                     "iface/demo-lib.s.ct"}
+    llvm_good = {
+        "llvm/demo-lib.ll": b'target triple = "x86_64-unknown-linux-gnu"\n',
+        "iface/demo-lib.s.i": b"// yh-iface v3 arch=arm64 suffix=demo\n",
+        "iface/demo-lib.s.ct": b"// yh-ctiface v1 arch=arm64 suffix=demo\n",
+    }
+    assert not llvm_snapshot_errors(llvm_good, llvm_expected,
+                                    "x86_64-unknown-linux-gnu")
+    assert llvm_snapshot_errors({key: value for key, value in llvm_good.items()
+                                 if not key.endswith(".ll")}, llvm_expected,
+                                "x86_64-unknown-linux-gnu")
+    bad_iface = llvm_good.copy()
+    bad_iface["iface/demo-lib.s.i"] = b"// yh-iface v9 arch=arm64 suffix=demo\n"
+    assert llvm_snapshot_errors(bad_iface, llvm_expected,
+                                "x86_64-unknown-linux-gnu")
+    bad_triple = llvm_good.copy()
+    bad_triple["llvm/demo-lib.ll"] = b'target triple = "aarch64-unknown-linux-gnu"\n'
+    assert llvm_snapshot_errors(bad_triple, llvm_expected,
+                                "x86_64-unknown-linux-gnu")
     tmp_root = Path(__file__).resolve().parent.parent / "tmp"
     tmp_root.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=str(tmp_root)) as directory:

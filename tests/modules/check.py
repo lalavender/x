@@ -35,7 +35,7 @@ DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 
 
 def run_batch(compiler: Path, subdir: str, expect_ok: bool, quiet: bool,
-              jobs: int) -> int:
+              jobs: int, compiler_flags: list[str]) -> int:
     """跑一个目录的语料，返回失败数。expect_ok=True 期望接受，否则期望拒绝。"""
     files = sorted((HERE / subdir).glob("*.yh"))
     if not files:
@@ -45,7 +45,7 @@ def run_batch(compiler: Path, subdir: str, expect_ok: bool, quiet: bool,
     def run_one(path: Path):
         """跑一个语料，返回 (路径, 退出码, 是否被接受, 诊断文本)。"""
         proc = subprocess.run(
-            [str(compiler), "--syntax-check", str(path)],
+            [str(compiler), *compiler_flags, "--syntax-check", str(path)],
             cwd=ROOT, capture_output=True, text=True, timeout=60)
         return path, proc.returncode, proc.returncode == 0, \
             (proc.stdout.strip(), proc.stderr.strip())
@@ -77,6 +77,11 @@ def main() -> int:
     ap.add_argument("--compiler-path", default=str(ROOT / "yh"),
                     help="自举编译器路径（默认 ./yh）")
     ap.add_argument("--quiet", action="store_true", help="只打印失败项")
+    ap.add_argument("--backend", choices=("legacy", "llvm"),
+                    help="显式选择编译后端")
+    ap.add_argument("--target", help="显式选择输出目标 triple")
+    ap.add_argument("--opt-level", choices=("0", "2"),
+                    help="显式选择 LLVM 优化级别")
     ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
                     help=f"并发语料数（缺省 {DEFAULT_JOBS}；1 为串行）")
     args = ap.parse_args()
@@ -87,8 +92,17 @@ def main() -> int:
         return 1
 
     jobs = max(1, args.jobs)
-    failed = run_batch(compiler, "accept", True, args.quiet, jobs)
-    failed += run_batch(compiler, "reject", False, args.quiet, jobs)
+    compiler_flags = []
+    if args.backend:
+        compiler_flags += ["--backend", args.backend]
+    if args.target:
+        compiler_flags += ["--target", args.target]
+    if args.opt_level:
+        compiler_flags += [f"-O{args.opt_level}"]
+    failed = run_batch(compiler, "accept", True, args.quiet, jobs,
+                       compiler_flags)
+    failed += run_batch(compiler, "reject", False, args.quiet, jobs,
+                        compiler_flags)
 
     total_ok = len(list((HERE / "accept").glob("*.yh"))
                    + list((HERE / "reject").glob("*.yh")))

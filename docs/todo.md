@@ -299,7 +299,8 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     i8(130/-129) 为 130/-129 而目标位型应为 -126/127。
     已新增正式红绿回归，修正 unsigned 64 位中间值及动态窄化；单文件/项目定向门通过，
     完整 make test / make selfhost-native 退出 0（303/303、项目 95/95）。
-    NaN/无穷与 64 位饱和后窄化已写入契约，LLVM 浮点 lowering 验收仍归 LL6。
+    NaN/无穷与 64 位饱和后窄化已写入契约；LLVM 标量浮点 lowering 已由 LL6 验收，
+    见 [完成记录](01-finished/yh-LLVM-LL6浮点标量-2026-10-17.md)。
   - LLVM-SEM-04 已修复：定宽整数运算后扩大转换存在路径差异；单文件 `(1 << 32).to_type(i64)`
     为 4294967296，而 SSA 为 0；int 最大值+1 在单文件扩大后为正、SSA 为最小值。
     已按源结果位型规范化；编译器宽位掩码显式用 i64，避免依赖旧遗漏截断。
@@ -356,22 +357,34 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     `make test` **307/307**；回退修复的对照树再次 SIGSEGV（因果闭环）。
   - [ ] LLVM 模式常驻：`--backend llvm` / `--target` / `-O0/-O2` 的 CLI 与模块 worker
     LLVM 分支未接入；check 侧的受检快照消费完即释放，worker 持有快照直到 IR 交接尚未实现。
-  - [ ] 首片覆盖之外的形态（全局对象数据、聚合/指针/浮点、间接调用、变参、
-    `switch`/`goto`/`for-in`）当前明确拒绝并带来源，不做静默回退；接入生产前需按
-    LL5/LL4/LL6/LL7 切片补齐。
-  - [ ] 模块 IR 的序列化与缓存身份：`ir_module_verify` 已实现（`llvm-module.py` 通过），
-    但 `ir_module_serialize` 及其版本尚未实现，`IR_MODULE_VERSION` 目前只是内存内版本，
-    临时 type_id 不能当跨缓存身份。
+  - [x] 首片之外的 lowering 已按后续切片推进：LL4 控制流（循环、`switch`、
+    `goto`/`label`、`for-in`）、LL5 内存/聚合/模块数据、LL6 浮点标量及 LL7
+    间接调用/变参均已交付；LLVM 生产驱动仍归 LL9。
+  - [x] 模块 IR 序列化与稳定身份已实现：`ir_module_verify`、版本化
+    `ir_module_serialize`/`deserialize`、确定性身份摘要及函数值/调用 ABI metadata
+    均由 `tests/selfhost/llvm-module-cache.py` 覆盖。完整生产缓存键仍归 LL9。
   - [ ] 与 R2b 任务私有上下文契约对齐，并记录未闭合的完整版本硬门。
   - 范围说明：宿主操作统一读取 `c_host_target`（目录/时钟/系统调用桥）按设计归后续宿主桥阶段，
-    完整接口/缓存身份归 LL9，均不在 LL2 本片。
+    LLVM 生产驱动和完整生产缓存键归 LL9，均不在 LL2 本片。
 - [ ] **LL3 严格 x64 LLVM 首片**：文本 IR、整数/布尔、分支/phi/固定调用；
   生成 EM_X86_64 ELF 并在 WSL 直接运行，禁止回退且有来源诊断。
 - [x] **LL8a 内存 helper**（2026-10-15 完成）：LLVM 模块发射 memcpy/memset/strlen
   弱定义 + llvm.used，O0/O2 对象与原生边界驱动全绿；见
   [完成记录](01-finished/yh-LLVM-LL8a内存helper-2026-10-15.md)。
-- [ ] **LL5 内存/数据 → LL4 控制流 → LL6 浮点 → LL7 调用/ABI**：与 R2a/NP3 同源切片合并验收，
-  补聚合/全局/切片、复杂控制流、转换、间接/两类变参和 C 双向互调，不另做一套重复迁移。
+- [x] **LL7 调用/ABI**（2026-10-17 完成；LL4 控制流、LL5 内存/聚合与 LL6 浮点已完成）：与 R2a/NP3
+  同源切片合并验收，不另做一套重复迁移。
+  - [x] 2026-10-17 首片：Linux/x86_64 SysV 固定参数 C ABI 标量直接调用；窄整数 `signext`/`zeroext`、
+    指针、f32/f64、混合参数、栈参数、yh↔C 双向运行及 C bool 拒绝门已通过。
+    详见 [LL7 首片记录](01-finished/yh-LLVM-LL7-CABI标量直接调用-2026-10-17.md)。
+  - [x] 2026-10-17 S2：固定参数 C `_Bool` 使用 `i1 zeroext`；YH 内部 bool 字节在 ABI 边界按非零归一，
+    并覆盖跨模块、双向 C 调用和非规范 bool 返回；clang oracle 与 O0/O2 门通过。
+    详见 [LL7-S2 记录](01-finished/yh-LLVM-LL7-CABI-bool-2026-10-17.md)。
+  - [x] 2026-10-17 S3：YH 内部 ABI 采用版本化显式副本/结果缓冲；结构体、定长数组、切片参数与返回跨模块 O0/O2 运行通过。ABI id 进入 IR/缓存身份，内部符号带版本后缀。
+  - [x] 函数值类型、接口和缓存身份保留 ABI/变参 metadata；YH 与 C 函数指针跨模块传递、返回和间接调用通过。
+  - [x] 2026-10-17 SysV INTEGER/SSE/MEMORY C 聚合分类、coercion/sret/byval；CPair、CMixed、CWide 与 clang IR oracle 对照，O0/O2 双向真实运行通过。详见 [LL7-S4 记录](01-finished/yh-LLVM-LL7-SysV-C聚合ABI-2026-10-17.md)。
+  - [x] callback 双向闭环：C 调 YH、YH 调 C 返回函数值，覆盖标量与 CPair INTEGER 聚合参数/返回；YH `vararg=2` 按序打包为切片参数。
+  - [x] `@[noreturn]` 属性进入模块接口与缓存；合法定义检查、违约调用 trap、移除/恢复接口属性后的调用方重编，以及用户裸 C 变参源码拒绝均有测试。
+  - [x] `python3 tests/selfhost/llvm-abi.py --compiler-path ./yh` 的 O0/O2 双向互调、LLVM 验证/优化/链接/运行及拒绝门全过；全仓门与种子状态见 [LL7 完成记录](01-finished/yh-LLVM-LL7-完整调用与ABI-2026-10-17.md)。ARM64 HFA 留给 F1。
   （2026-10-15 LL5 第一切片完成：局部标量 alloca/load/store 与 `&变量`/`*p`；见
   [完成记录](01-finished/yh-LLVM-LL5局部内存首片-2026-10-15.md)。）
   （2026-10-15 LL5 数组切片完成：局部定长数组字面量/下标/取址/复制；见
@@ -380,28 +393,62 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   [完成记录](01-finished/yh-LLVM-LL5结构体切片-2026-10-15.md)。）
   （2026-10-15 LL5 切片切片完成：数组切片/切片字面量/共享下标/len；见
   [完成记录](01-finished/yh-LLVM-LL5切片切片-2026-10-15.md)。）
-  （2026-10-16 LL5 普通全局/字符串数据切片完成：初始化 AST + 独占字节物化 +
-  GLOB_ADDR + LLVM 字节数组，保留字符串及聚合 const 的裸指针可写性；
-  完整门 316/316、固定点 24、自解析 87、模块 18/18、项目 100/100，17 个 LLVM 门全绿。
-  见 [完成记录](01-finished/yh-LLVM-LL5全局数据切片-2026-10-16.md)。
-  CT backing、导入副本、非零指针重定位与全局切片继续待办，LL5 总项保持未关闭。）
+  （2026-10-17 LL5 内存/聚合/模块数据全量完成：CT backing、静态指针重定位、全局
+  切片、导入 `pub const` 独立副本、私有隔离与重叠复制均已验收；`make test`
+  318/318、固定点 24、自解析 92、模块 18/18、项目 101/101，LL5 memory suite 全绿。
+  见 [完成记录](01-finished/yh-LLVM-LL5全量收尾-2026-10-17.md)。）
   （2026-10-15 LL4 首片完成：嵌套循环、break/continue、无限 `for {}`；见
   [完成记录](01-finished/yh-LLVM-LL4循环首片-2026-10-15.md)。）
   （2026-10-15 LL4 switch 切片完成；见
   [完成记录](01-finished/yh-LLVM-LL4switch切片-2026-10-15.md)。）
   （2026-10-15 LL4 goto/label 切片完成；见
   [完成记录](01-finished/yh-LLVM-LL4goto切片-2026-10-15.md)。）
-- [ ] **LL8b x64 完整运行时/宿主桥**：allocator/printf、x64 syscall/目录/时钟/内存/进程；
-  保留 ARM64 启动分支与现行导入限制，审计 LLVM libcall。
-- [ ] **LL9 驱动/缓存/提交**：单文件与模块统一、完整键、原生 x64 链接器避开 ARM64 gcc 包装器（内嵌 lld 见 LL9L）、事务验收。
-- [ ] **LL9L 内嵌 lld 链接器**（2026-10-15 用户要求，可行性已实测）：把 lld 21.1.8
-  静态归档（liblldCommon/ELF/MachO/COFF/Wasm）与 C++ shim 链进 yh，链接步在进程内
+- 2026-10-17 **LL4 for-in 完成**：数组/切片与左闭右开整数区间、元素/可选下标绑定、
+  嵌套、break/continue 和聚合元素按值复制；O0/O2 原生门及仓库主门通过。见
+  [完成记录](01-finished/yh-LLVM-LL4-for-in-2026-10-17.md)。
+- 2026-10-17 **LL6 浮点标量完成**：LLVM f32/f64 常量、算术、IEEE 比较、整浮转换与
+  局部内存已通过 O0/O2 专项门和仓库主门；完整记录见
+  [完成记录](01-finished/yh-LLVM-LL6浮点标量-2026-10-17.md)。
+- [x] **LL8b x64 完整运行时/宿主桥**（2026-10-17）：allocator/printf 与内存 helper、
+  x64 syscall、目录/时钟平台拆分及进程 C ABI 通过 O0/O2 原生运行和导入/libcall 审计；
+  ARM64 旧分支与 `runtime-memory.py` 原断言保留。`make test` 323/323，
+  `make selfhost-native` 固定点 24、自解析 97、模块 18/18、项目 103/103；
+  新 Linux/aarch64 种子 SHA-256 `4b2f4a3e111e33eecd5ca48bc712e6b3b6a2f0ddfe68bfd8063f7bd15f4c1d94`。
+  详见 [LL8b 完成记录](01-finished/yh-LLVM-LL8b-完整运行时与宿主桥-2026-10-17.md)。
+- [x] **LL9 驱动/缓存/提交**：单文件与模块统一、完整键、失败事务、目标检查均完成；
+  Linux/x64 LLVM 单文件 `-o` 也统一使用 lld worker 或按目标选择的链接驱动，并以临时文件
+  校验后发布。新增 `llvm-single-link-target.yh` 锁定目标选择和失败保留。详见
+  [LL9 完成记录](01-finished/yh-LLVM-LL9-统一入口缓存失败发布-2026-10-17.md)。
+  2026-10-18 LL9 补充 runner 的 O0/O2 均通过 335/335；LL10 全门增加无限循环返回回归后，
+  当前 O0/O2 均通过 343/343，原 LL10 前置覆盖缺口已闭合。
+- [x] **LL9L 内嵌 lld 链接器（生产路径、独立探针与 x64 自举汇合完成）**：将 lld 21.1.8
+  静态归档（liblldCommon/ELF/MachO/COFF）与 C++ shim 链进 yh，Wasm/MinGW 归档保留在 SDK
+  但不进入链接组；链接步在进程内
   由 `lld::lldMain` 完成；切片、裁剪决策与验收见
   [方案 §LL9L](02-plan/yh-LLVM后端替换实施方案.md)，实测证据见
-  [可行性实测](01-finished/yh-内嵌lld可行性实测-2026-10-15.md)。
-- [ ] **LL10 x64 原生自举**：ARM64 种子经 qemu 产 A，A 用 LLVM 产原生 B，B/C/D 原生连续自编；
-  O0/O2 分别 `.ll/.s.i/.s.ct` 固定点、全量门、实际覆盖，
-  与 R2b 任务私有状态/真正线程池/增量/并发/确定性硬门汇合。
+  [可行性实测](01-finished/yh-内嵌lld可行性实测-2026-10-15.md) 和
+  [LL9L 验收记录](01-finished/yh-LLVM-LL9L内嵌lld-2026-10-18.md)。SDK 固定采用
+  全组件发行包（LLVM 226 组件并含 Polly），本片不建设源码裁剪流水线；当前生产 lld
+  目标为 Linux/x86_64，Mach-O/PE 仅有交叉格式探针。此前从 AArch64 种子构建的编译器携带
+  lld stub，`llvm-cache.py` 的“x64 最终链接不应 fork cc/ld”断言未能证明 x64 链接路径；
+  L9L-6 后续已在 Linux/x86_64 原生候选上闭环：B/C/D 未调用 gcc wrapper，D-O0/O2 内嵌 lld 身份与
+  固定 SDK 21.1.8 一致，`readelf -d` 未发现 LLVM/lld 动态依赖，O0/O2 各 24 个产物固定点一致；
+  详见 LL9L 验收记录的汇合补录。
+- [x] **LL10 x64 原生自举**：ARM64 种子经 qemu 产 A，A 用 LLVM 产原生 B，B/C/D 原生连续自编；
+  O0/O2 分别 `.ll/.s.i/.s.ct` 固定点、全量门、实际覆盖，并记录 R2b 任务私有状态/真正线程池/
+  增量/并发/确定性硬门状态。LL10 已于 2026-10-18 全门关闭；R2b 未完成项仍独立追踪，
+  不由 LLVM 门结果覆盖，LL11 默认切换继续受其阻挡。
+  - [x] 2026-10-18 原生链：A/B/C/D 均为 ELF machine=62；O0/O2 的 B→C 与 C→D 各 24 个
+    `.ll/.s.i/.s.ct` 逐字节一致；最终 D 自解析 98/98，语言 O0 语料 343/343，模块语法 18/18。
+  - [x] 完整门：最终 D 自解析 98/98；LLVM O0/O2 各通过 343/343、模块 18/18、项目 104/104；
+    LL9L、缓存、驱动与 runtime-memory 专项通过。`make test-llvm` 与 `make selfhost-llvm` 均退出 0。
+    详细日志在 `tmp/ll10/make-test-llvm-after-fix.log`、`tmp/ll10/selfhost-llvm-after-fix.log`。
+  - [x] 实际消费覆盖：`asm/` 4 模块 checked/emitted 298/298、`link/` 6 模块 197/197，均
+    fallback=0；`libs/` 由 stdlib 项目验收覆盖。R2b 线程池/任务私有状态仍单独记录在编译流程待办中，
+    LL11 默认切换不得越过该硬门。
+  - [x] LL10 前置 LLVM x64 全量语料差异：runner O0/O2 均通过 335/335；随后新增无限循环返回回归，
+    收尾全门当前为 343/343。修复覆盖聚合返回值、编译期边界、切片存储生命周期、数组到切片视图及诊断预期；
+    O0/O2 分别验收，详见 LL9 补充与 LL10 完成记录。
 - [ ] **LL11 x64 性能与默认切换**：至少 20 轮对照，原生默认全门绿后滚独立 `bin/yh-linux-x64` 与哈希；
   ARM64 种子不被覆盖，工具依赖与发行说明同步。
 - [ ] **LL12 退役旧后端**：在 LL11 及 F1 Linux/AArch64 LLVM 回归都通过后，
@@ -430,6 +477,14 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   已隔离到 `tmp/llvm-migration/llvm-global-source/legacy-bang-pointer.yh`；汇编在
   `cset` 比较后又用 `mov 1` 覆盖结果，疑似运行期比较保留了常量标记，尚待单独
   根因验证。本片用 bool 局部绑定锁住相同指针 EQ/NE，不扩展修复旧后端。
+- [ ] **旧 ARM64 后端：读取含非空指针成员的全局结构体后续整数字段**（2026-10-17
+  LL5 审计时复现）：`GlobalText{ label: "nested", value: 9 }` 后读取 `text.value`
+  应为 9；入库种子与当前候选均可构建，但程序都以 1 退出。LLVM O0/O2 专项读取该字段
+  通过，因此这是旧后端基线缺陷，不阻塞 LL5；隔离探针与两代运行结果见本轮
+  `tmp/ll5-complete/global-struct-ptr-value.yh` 及构建日志。
+- [ ] **旧 ARM64 后端：for-in continue 跳过计数递增**（2026-10-17 LL4 回归时发现）：
+  `parse_for` 把 continue 目标设为条件标签，continue 会绕过 `sem_forin_step`，循环可能不结束。
+  LLVM 专项探针验证了新后端正确回边；通用旧后端语料暂用等价条件分支覆盖。
 
 对象缓存键已包含编译器二进制内容（见 finish.md 同日项目增强记录），
 相关未完成事项归入本轮流程与缓存设计，不再重复列“补编译器身份”。

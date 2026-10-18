@@ -79,7 +79,9 @@ int yh_llvm_emit(const char *text, uint64_t length, const char *triple,
         return -1;
     }
     if (strcmp(triple, "x86_64-unknown-linux-gnu")
-        && strcmp(triple, "aarch64-unknown-linux-gnu")) {
+        && strcmp(triple, "aarch64-unknown-linux-gnu")
+        && strcmp(triple, "x86_64-apple-darwin")
+        && strcmp(triple, "x86_64-pc-windows-msvc")) {
         copy_diagnostic(diagnostic, capacity, "内嵌 LLVM：不支持的目标 triple");
         return -1;
     }

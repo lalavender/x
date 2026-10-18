@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""LL4 首片门：嵌套循环、break/continue、无限循环的 lowering 与原生运行。
+"""LL4 控制流门：循环控制 lowering、for-in 迭代与原生运行。
 
 验收（与实施方案 LL4 前两行对应）：
   * 嵌套循环的 break/continue 只作用于最内层；无限循环 `for {}` 的退出只经 break；
   * 循环携带值（含内层写入外层绑定）在两趟协议下生成合法 phi，`opt` 验证通过；
   * O0 文本与 `default<O2>` 管线后的对象分别汇编、链接并原生运行，退出码 0；
-  * 尚未支持的 `for-in` 带来源位置拒绝，不静默回退（goto 已由 llvm-goto 门覆盖）。
+  * 数组、切片、区间 for-in 的 O0/O2 结果与源语义一致；goto 由 llvm-goto 门覆盖。
 """
 
 import argparse
@@ -16,6 +16,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORK = ROOT / "tmp" / "llvm-migration" / "llvm-control"
+FOR_IN = ROOT / "tests" / "yh-run" / "run" / "llvm-for-in.yh"
+FOR_IN_CONTINUE = ROOT / "tests" / "selfhost" / "llvm-for-in-continue.yh"
 TARGET = "x86_64-unknown-linux-gnu"
 
 SOURCE = """module control;
@@ -78,20 +80,6 @@ fn main() int {
 }
 """
 
-REJECT = """module bad;
-
-// bad_forin：for-in 仍不在 LL4 已验收范围内；必须带来源拒绝，不能静默回退。
-fn bad_forin(x int) int {
-    let arr [3]int;
-    let sum int = 0;
-    for v in arr { sum += v; }
-    return sum;
-}
-
-fn main() int { return 0; }
-"""
-
-
 def run(command, **kwargs):
     """执行真候选或差分工具，保留有界输出；超时视为门失败。"""
     return subprocess.run(command, capture_output=True, text=True, timeout=300, **kwargs)
@@ -120,7 +108,7 @@ def emit_text(compiler, source, level, output):
 
 
 def main():
-    """按 O0/O2 核对控制流 lowering，并验证 goto 被拒绝。"""
+    """按 O0/O2 核对循环与 for-in lowering，所有产物均原生执行。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler-path", default=str(ROOT / "yh"))
     args = parser.parse_args()
@@ -135,8 +123,6 @@ def main():
     WORK.mkdir(parents=True)
     source = WORK / "control.yh"
     source.write_text(SOURCE, encoding="utf-8")
-    reject = WORK / "bad.yh"
-    reject.write_text(REJECT, encoding="utf-8")
 
     for level in (0, 2):
         llfile = WORK / f"control-O{level}.ll"
@@ -162,16 +148,19 @@ def main():
         result = run([str(executable)])
         assert result.returncode == 0, (
             f"O{level} 原生运行失败 rc={result.returncode}\n{result.stdout[-400:]}")
+        for fixture, suffix in ((FOR_IN, "for-in"),
+                                (FOR_IN_CONTINUE, "for-in-continue")):
+            executable = WORK / f"{suffix}-O{level}"
+            result = run([compiler, "--backend", "llvm", "--target", TARGET,
+                          f"-O{level}", "-o", str(executable), str(fixture)])
+            assert result.returncode == 0, (
+                f"O{level} {suffix} LLVM 编译失败\n{result.stderr[-1200:]}")
+            result = run([str(executable)])
+            assert result.returncode == 0, (
+                f"O{level} {suffix} 原生运行失败 rc={result.returncode}\n"
+                f"{result.stderr[-800:]}")
 
-    # goto 仍不在首片：必须带来源位置拒绝，且不发布产物。
-    output = WORK / "bad-out"
-    result = run([compiler, "--backend", "llvm", "--target", TARGET, "-O0",
-                  "-o", str(output), str(reject)])
-    assert result.returncode != 0, "for-in 未被拒绝"
-    assert ".yh:" in result.stderr and "bad_forin" in result.stderr, result.stderr[-800:]
-    assert not output.exists(), "拒绝路径仍发布了产物"
-
-    print("LL4 首片通过：嵌套循环、break/continue、无限循环、O0/O2 原生运行、for-in 带来源拒绝")
+    print("LL4 通过：嵌套循环、break/continue、无限循环与 for-in 的 O0/O2 原生运行")
     return 0
 
 

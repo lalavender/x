@@ -17,8 +17,9 @@ LLVM lowering 对 `== != < <= > >=` 分别使用 `oeq une olt ole ogt oge`，不
 nnan/fast-math。依据：[LLVM fcmp](https://llvm.org/docs/LangRef.html#fcmp-instruction)、
 [Arm 浮点条件码](https://developer.arm.com/community/arm-community-blogs/b/architectures-and-processors-blog/posts/condition-codes-4-floating-point-comparisons-using-vfp)。
 
-证据：tests/yh-run/run/llvm-float-nan-comparisons.yh，覆盖常量折叠、typed CT、
-动态 f32/f64、左右 NaN、正常有序比较。LLVM 路径验收仍归 LL6。
+证据：`tests/yh-run/run/llvm-float-nan-comparisons.yh` 与
+`llvm-float-lowering.yh` 覆盖常量折叠、typed CT、动态 f32/f64、左右 NaN 和正常
+有序比较。LL6 已用 LLVM O0/O2 门验收这些谓词。
 
 ## 浮点转整数（LLVM-SEM-02）
 
@@ -33,7 +34,8 @@ sem_fold_fp_to_int。动态路径原先漏掉窄整数规范化，现复用整�
 
 LLVM 必须使用 llvm.fptosi.sat.i64.f32/f64 或 llvm.fptoui.sat.i64.f32/f64，
 再 trunc 到目标源宽度；不能直接用窄目标饱和，也不能使用越界产生 poison 的普通
-fptosi/fptoui。依据：[LLVM 饱和转换](https://llvm.org/docs/LangRef.html#saturating-floating-point-to-integer-conversions)。
+fptosi/fptoui。LL6 已按此路径实现并以 O0/O2 检查 NaN、无穷、负值、窄型回绕和
+边界值。依据：[LLVM 饱和转换](https://llvm.org/docs/LangRef.html#saturating-floating-point-to-integer-conversions)。
 证据：llvm-float-integer-casts.yh 的高位、负数、窄化、NaN、无穷、f32 与 bool 探针。
 长十进制字面量目前由前端逐位 f64 累积解析；本探针用精确整数转浮点构造边界，
 LLVM 迁移保留前端给定的位型，不顺带改写十进制解析算法。
@@ -83,10 +85,17 @@ irverify 的一位 bool、重复调用和多余调用记录拒绝层保持严格
 普通指针/切片的既有生命周期与越界边界仍生效，不因隐藏缓冲另作所有权承诺。
 
 C ABI 使用独立目标分类器。首期 Linux/x86_64 System V 按 INTEGER/SSE/MEMORY 类、
-窄参数/返回扩展、聚合 coercion、C _Bool、变参和函数指针分别降低；等价 C 声明由
-clang 21.1.8 生成 IR/对象作开发核对，必须以 yh→C、C→yh 和回调实际运行证明兼容。
-不能把 yh 的显式副本指针签名直接标成 extern 或混用旧 AAPCS64 分类器。
-本节锁定政策与验收方法，实际完整调用实现和双向互调仍属于 LL7。
+窄参数/返回扩展、聚合 coercion、C `_Bool`、固定参数和函数指针分别降低；等价 C
+声明由 clang 21.1.8 生成 IR/对象作开发核对，并以 yh→C、C→yh 和 callback 实际运行
+证明兼容。用户裸 C 变参仍由源语言规则拒绝，不能把 yh 的显式副本指针签名直接标成
+extern，也不能混用旧 AAPCS64 分类器。
+
+**实现状态（2026-10-17，LL7 完成）：**YH 内部调用使用 `yh-llvm-v1`：结构体、定长数组、切片参数在各实参
+求值时复制到调用方缓冲，聚合返回使用首个隐藏结果缓冲；切片只复制 16 字节描述符，元素仍共享。版本号
+进入模块符号、函数/调用 IR 与缓存序列化身份，YH 内部符号带 `$yhllvmv1` 后缀。跨模块结构体、数组、切片
+参数和返回的 LLVM O0/O2 链接运行已通过。固定参数 C ABI 标量签名支持定宽整数、`_Bool`、指针、f32/f64；
+i8/i16 与 u8/u16 在函数返回、参数和调用点使用 `signext`/`zeroext`，C `_Bool` 使用 `i1 zeroext` 并在边界按
+非零值转换。Linux/x86_64 C 结构体/联合按两个八字节分类 INTEGER/SSE，超过 16 字节使用 MEMORY；参数/返回 coercion、`sret` 和 `byval` 由 CPair、CMixed、CWide 三组 oracle 与双向运行验证。函数指针类型保留 ABI、返回/参数类型和变参种类，跨模块 YH callback 与 C scalar/CPair aggregate callback 的传递、返回和间接调用均在 O0/O2 运行通过。YH 类型化变参 `vararg=2` 的尾项按源码顺序打包为末尾切片参数；用户裸 C 变参仍按 FFI 决策拒绝。`@[noreturn]` 随符号和模块接口缓存传播，调用点在该调用返回后执行 `llvm.trap` 并进入 `unreachable`；接口属性移除/恢复会重编调用方。`tests/selfhost/llvm-abi.py` 覆盖 clang oracle、LLVM verifier、优化与双向运行；不支持的源级签名和 ABI 约定明确拒绝，不回退旧后端。ARM64 HFA 留给 F1。
 
 ## 定宽整数、移位与除模（LLVM-SEM-04/05）
 
@@ -120,6 +129,11 @@ double 的低 32 位。llvm-float-boundaries.yh 对照常量、typed CT 和动�
 两种舍入中点、逐步加法、正负零、无穷和最小 f32 非正规数。LLVM 不加 fast-math，
 不合并舍入点，不使用 nnan/nsz 等未经证明的值域属性。
 
+LL6 的浮点 lowering 按此契约发射 `fadd/fsub/fmul/fdiv` 与 `fcmp`，不附加 fast-math
+标志；f32 常量从保存的 f64 IEEE 位型重解释后执行 `fptrunc`，保证每个 f32 节点
+单独舍入。参数与局部复制采用位保持路径，避免用加零复制时丢失负零。覆盖见
+`tests/selfhost/llvm-float.py` 和 `tests/yh-run/run/llvm-float-lowering.yh`。
+
 ## 内存、效果与默认初始化（LLVM-SEM-06）
 
 数组/struct/union 按值赋值和参数具有独立对象存储。实参从左到右求值，每个值参数
@@ -136,6 +150,16 @@ double 的低 32 位。llvm-float-boundaries.yh 对照常量、typed CT 和动�
 LLVM 先提供明确的存储、复制/清零和求值次序；指针仅用可证明对齐，未知对齐为 1。
 不增加 inbounds/noalias/nonnull/noundef 等未证明的约束。完整内存 lowering 归 LL5/LL7。
 
+### LL5 静态数据与重叠复制
+
+全局对象、字符串和 CT backing 以独立字节、受检布局与静态重定位记录交给 LLVM；
+重定位 addend 是目标对象内的字节偏移，不是编译器宿主地址。切片值由长度和 backing
+指针描述，赋值只复制描述符，元素继续共享；CT 返回切片按既有逃逸规则复制可见元素，
+静态物化后 backing 不依赖 CT 值池。导入的 `pub const` 聚合在消费模块形成独立副本，
+私有对象不进入导出接口。数组/聚合赋值允许同址和部分重叠，LLVM 采用 `memmove`；
+显式运行时 `memcpy` 仍要求源/目标不重叠。详细实现与边界见
+[LLVM 后端替换设计 §5.2](yh-LLVM后端替换设计.md)及 LL5 完成记录。
+
 ## LL1 探针矩阵与后续边界
 
 | 类别 | 已观察规则 | 稳定证据 | LLVM 实现归属 |
@@ -149,6 +173,7 @@ LLVM 先提供明确的存储、复制/清零和求值次序；指针仅用可�
 | 效果 | 左到右、每个实参固定值、短路跳过 | llvm-call-block-order，llvm-memory-effects | LL4/LL7 |
 | 默认初始化 | 声明对象完整清零，不读取未初始化分配内存 | llvm-memory-effects | LL5/LL8 |
 
-当前单文件和项目探针各 8/8；项目实际 SSA 发射 bool 8、CFG 2、整数 11、一元 1、
-内存探针中的纯标量 pair 1，浮点与聚合主体尚走旧路径。该矩阵锁定迁移规则和证据，
-不代表 LLVM 实现已完成；LLVM O0/O2 和全覆盖验收仍分别属于后续阶段。
+LL1 阶段交付时，单文件和项目探针各 8/8；当时的项目 SSA 计数是 bool 8、CFG 2、
+整数 11、一元 1、内存纯标量 pair 1，浮点与聚合主体尚走旧路径。后续切片已继续推进：
+LL5 完成内存/聚合与模块数据，LL6 完成浮点标量 O0/O2 lowering。当前阶段覆盖和剩余
+边界以 [LLVM LL6 完成记录](../01-finished/yh-LLVM-LL6浮点标量-2026-10-17.md)及实施方案为准。

@@ -16,6 +16,7 @@ PLAIN_FIXTURE = ROOT / "tests" / "modules" / "projects" / "runtimeplain"
 WORK = ROOT / "tmp" / "runtime-memory"
 PLAIN_WORK = ROOT / "tmp" / "runtime-plain"
 HOST_DRIVER = ROOT / "tools" / "llvm-host.py"
+LLVM_RUNTIME_SOURCE = ROOT / "tests" / "yh-run" / "run" / "llvm-runtime-complete.yh"
 
 
 def run(command, cwd, env=None):
@@ -42,12 +43,60 @@ def compiler_build_env():
     return environment
 
 
+def check_llvm_x64_imports(compiler):
+    """Check that the LLVM x64 runtime object defines its own libc runtime entries."""
+    work = ROOT / "tmp" / "llvm-migration" / "runtime-memory-imports"
+    work.mkdir(parents=True, exist_ok=True)
+    clang = next((path for path in (Path("/usr/bin/clang-21"), Path("/usr/bin/clang"))
+                  if path.is_file()), None)
+    nm = Path("/usr/bin/nm") if Path("/usr/bin/nm").is_file() else None
+    if clang is None or nm is None:
+        print("FAIL LLVM x64 导入审计缺少 /usr/bin/clang 或 /usr/bin/nm")
+        return 1
+
+    for level in (0, 2):
+        ir = work / f"runtime-complete-O{level}.ll"
+        emitted = run([compiler, "--emit-asm", "--backend", "llvm", "--target",
+                       "x86_64-unknown-linux-gnu", f"-O{level}", "--emit-llvm",
+                       str(LLVM_RUNTIME_SOURCE)], ROOT)
+        if emitted.returncode != 0:
+            print(f"FAIL LLVM x64 O{level} 运行时 IR 发射: {emitted.stderr[-1000:]}")
+            return 1
+        ir.write_text(emitted.stdout, encoding="utf-8")
+        obj = work / f"runtime-complete-O{level}.o"
+        assembled = run([str(clang), "-c", str(ir), "-o", str(obj)], ROOT)
+        if assembled.returncode != 0:
+            print(f"FAIL LLVM x64 O{level} 对象汇编: {assembled.stderr[-1000:]}")
+            return 1
+        imports = run([str(nm), "-u", str(obj)], ROOT)
+        if imports.returncode != 0:
+            print(f"FAIL LLVM x64 O{level} 未定义符号检查: {imports.stderr[-800:]}")
+            return 1
+        names = {line.split()[-1] for line in imports.stdout.splitlines()
+                 if line.split()}
+        forbidden = sorted(names.intersection(
+            {"malloc", "free", "memcpy", "memmove", "memset", "strlen",
+             "printf", "linux_syscall6", "__divti3", "__modti3", "__udivti3",
+             "__umodti3", "__multi3", "__stack_chk_fail"}))
+        unexpected = sorted(names - {"close"})
+        if forbidden or unexpected:
+            print(f"FAIL LLVM x64 O{level} 导入越界: runtime={forbidden}, "
+                  f"unexpected={unexpected}")
+            return 1
+    print("LLVM x64 runtime-memory 导入审计通过：自有 malloc/free/memcpy/memmove/memset/strlen/printf/syscall，无 libcall 泄漏")
+    return 0
+
+
 def main():
     """构建运行 fixture，检查本地分配器及平台映射接口。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler-path", default=str(ROOT / "yh"))
+    parser.add_argument("--llvm-x64", action="store_true",
+                        help="只审计 LLVM x64 运行时对象的运行库/libcall 导入")
     args = parser.parse_args()
     compiler = str(Path(args.compiler_path).resolve())
+    if args.llvm_x64:
+        return check_llvm_x64_imports(compiler)
     if WORK.exists():
         shutil.rmtree(WORK)
     shutil.copytree(FIXTURE, WORK)

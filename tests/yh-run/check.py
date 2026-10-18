@@ -85,6 +85,7 @@ LABELS = {"PASS": "PASS", "FAIL": "FAIL", "SKIP": "SKIP"}
 # 并发用例数缺省上限：每个用例都要起一次编译器（还可能汇编、链接、运行），
 # 上限 8 兼顾核数不多的机器与 qemu/容器里每进程数十 MB 的内存占用。
 DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
+COMPILER_FLAGS = []
 
 
 def diag_tail(proc, limit=6):
@@ -105,7 +106,7 @@ def compile_src(src, out, cross=False, compiler=None):
     cross=True 时追加交叉编译参数，产物为 Linux aarch64 ELF。
     compiler 缺省用仓库根的 yh。
     """
-    cmd = [str(compiler or YH_BIN), str(src), "-o", str(out)]
+    cmd = [str(compiler or YH_BIN), *COMPILER_FLAGS, str(src), "-o", str(out)]
     if cross:
         cmd += [
             "-Wl,-oformat=elf64-aarch64",
@@ -118,6 +119,29 @@ def compile_src(src, out, cross=False, compiler=None):
         return proc, False
     except subprocess.TimeoutExpired:
         return None, True
+
+
+def validate_llvm_stats(proc, require_emission):
+    """核对 LLVM 单文件门的受检/发射计数和零回退约束。"""
+    if not COMPILER_FLAGS or "llvm" not in COMPILER_FLAGS:
+        return None
+    rows = []
+    for line in (proc.stdout or "").splitlines() + (proc.stderr or "").splitlines():
+        if not line.startswith("yh-stats "):
+            continue
+        fields = dict(item.split("=", 1) for item in line.split()[1:]
+                      if "=" in item)
+        rows.append(fields)
+    if not rows:
+        return "LLVM 编译未输出 --stats 计数"
+    checked = sum(int(row.get("checked_functions", "0")) for row in rows)
+    emitted = sum(int(row.get("backend_emitted_functions", "0")) for row in rows)
+    fallback = sum(int(row.get("fallback_functions", "0")) for row in rows)
+    if emitted > checked or fallback != 0:
+        return f"LLVM 计数不一致：checked={checked} emitted={emitted} fallback={fallback}"
+    if require_emission and emitted <= 0:
+        return f"LLVM 没有发射入口函数：checked={checked} emitted={emitted}"
+    return None
 
 
 def parse_expectations(path):
@@ -209,15 +233,20 @@ def cross_ready():
 def check_asm_symbols(path):
     """按 `// asm-symbols-safe` 指令校验发射汇编里的符号名。
 
-    返回 (status, detail)；用例没有该指令时返回 None（不参与判定）。
+    返回 (status, detail)；用例没有该指令或输出目标不是 AArch64 时返回 None。
     判据：`.globl` 目标、标签定义、`bl`/`b` 目标、`adrp` 操作数与 `:lo12:`
     前缀处的符号名都不得是 AArch64 寄存器名（x0-x30、w0-w30、s/d/q/v/b/h0-31、
     sp/lr/fp/xzr/wzr）。
     """
+    target = next((COMPILER_FLAGS[index + 1]
+                   for index, flag in enumerate(COMPILER_FLAGS[:-1])
+                   if flag == "--target"), "")
+    if "llvm" in COMPILER_FLAGS and target.startswith("x86_64-"):
+        return None
     if not ASM_SYMBOLS_SAFE_RE.search(path.read_text(encoding="utf-8")):
         return None
     try:
-        proc = subprocess.run([str(YH_BIN), "--emit-asm", str(path)],
+        proc = subprocess.run([str(YH_BIN), *COMPILER_FLAGS, "--emit-asm", str(path)],
                               capture_output=True, text=True,
                               timeout=COMPILE_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -246,6 +275,9 @@ def check_run_case(path, cross, out):
         return "FAIL", why + "\n    " + "\n    ".join(diag_tail(proc))
     if not out.exists():
         return "FAIL", f"编译器未产出 {out.name}"
+    stats_error = validate_llvm_stats(proc, require_emission=True)
+    if stats_error:
+        return "FAIL", stats_error
 
     expect_lines, exit_code, problems = parse_expectations(path)
     if problems:
@@ -312,6 +344,9 @@ def check_pass_case(path, cross, out):
     if proc.returncode != 0:
         return "FAIL", f"编译失败（退出码 {proc.returncode}）\n    " \
             + "\n    ".join(diag_tail(proc))
+    stats_error = validate_llvm_stats(proc, require_emission=False)
+    if stats_error:
+        return "FAIL", stats_error
     asm_status = check_asm_symbols(path)
     if asm_status is not None and asm_status[0] != "PASS":
         return asm_status
@@ -326,13 +361,18 @@ def list_cases(directory):
 
 
 def main():
-    global YH_BIN, WORK
+    global YH_BIN, WORK, COMPILER_FLAGS
     parser = argparse.ArgumentParser(description="tests/yh-run 运行语义校验")
     parser.add_argument("--quiet", action="store_true", help="只打印失败项与汇总")
     parser.add_argument("--cross", action="store_true",
                         help="交叉编译为 Linux ELF 并在 docker 容器内运行对比")
     parser.add_argument("--compiler", default=str(DEFAULT_COMPILER),
                         help="yh 编译器路径（缺省仓库根 yh；自举时指向 stage1/stage2）")
+    parser.add_argument("--backend", choices=("legacy", "llvm"),
+                        help="显式选择编译后端")
+    parser.add_argument("--target", help="显式选择输出目标 triple")
+    parser.add_argument("--opt-level", choices=("0", "2"),
+                        help="显式选择 LLVM 优化级别")
     parser.add_argument("--workdir", default=str(DEFAULT_WORK),
                         help="产物目录（缺省 tmp/yh-run-work；并发运行时各自指定）")
     parser.add_argument("--filter", default="",
@@ -343,6 +383,15 @@ def main():
 
     YH_BIN = Path(args.compiler).resolve()
     WORK = Path(args.workdir)
+    COMPILER_FLAGS = []
+    if args.backend:
+        COMPILER_FLAGS += ["--backend", args.backend]
+    if args.target:
+        COMPILER_FLAGS += ["--target", args.target]
+    if args.opt_level:
+        COMPILER_FLAGS += [f"-O{args.opt_level}"]
+    if args.backend == "llvm":
+        COMPILER_FLAGS.append("--stats")
     jobs = max(1, args.jobs)
     filters = [f for f in args.filter.split(",") if f]
 
@@ -424,6 +473,9 @@ def main():
               + (f"，失败 {n_fail}" if n_fail else "")
               + (f"，跳过 {n_skip}" if n_skip else ""))
     mode = "交叉 ELF" if args.cross else "Darwin Mach-O"
+    if args.backend or args.target or args.opt_level:
+        mode = f"{args.backend or '默认后端'} / {args.target or '默认目标'} / " \
+            + (f"O{args.opt_level}" if args.opt_level else "默认优化级别")
     print(f"总计：通过 {sum(1 for r in results if r[2] == 'PASS')}/{len(results)}"
           f"（{mode}，并发 {jobs}）{cross_note}")
     sys.exit(1 if total_fail else 0)

@@ -1,0 +1,164 @@
+module gen;
+
+// StaticDataReloc：独占数据中的一个 64 位指针槽；目标是前端符号或数据标签。
+// target_sym/target_label 恰有一个有效，addend 按目标布局计字节；槽内始终为零。
+pub struct StaticDataReloc {
+    offset int;
+    width int;
+    target_sym int;
+    target_label int;
+    addend i64;
+}
+
+// StaticDataObject：编译单元独占的已物化字节和重定位，不含 CT 执行器地址。
+// type_id>=0 表示受检对象；-1 表示以 elem_type/count 描述的匿名 backing。
+// 导入副本可同时保留 sym_id 和 label；访问器返回的指针只借用到替换或 reset。
+pub struct StaticDataObject {
+    sym_id int;
+    label int;
+    type_id int;
+    elem_type int;
+    count int;
+    size int;
+    align int;
+    data *u8;
+    relocs *StaticDataReloc;
+    reloc_n int;
+}
+
+let static_objects *StaticDataObject = 0;
+let static_object_n int = 0;
+let static_object_cap int = 0;
+const STATIC_DATA_LIMIT int = 67108864;
+
+// static_data_drop：释放一行独占缓冲；行自身由目录表拥有，调用者负责清零或覆盖。
+fn static_data_drop(object *StaticDataObject) void {
+    free(object.data.to_type(*void));
+    free(object.relocs.to_type(*void));
+}
+
+// static_data_add：创建预清零对象；同符号或同标签重复登记时替换原行并清空重定位。
+// 先分配再替换，失败不破坏已有对象；返回稳定行号或 -1，允许空 backing。
+pub fn static_data_add(sym_id int, label int, type_id int, elem_type int,
+    count int, size int, align int) int {
+    if (sym_id < -1 || label < -1 || label == 0 || (sym_id < 0 && label < 1)
+        || type_id < -1 || elem_type < -1 || count < 0 || size < 0 || size > STATIC_DATA_LIMIT
+        || align <= 0 || align > STATIC_DATA_LIMIT || (align & (align - 1)) != 0
+        || (type_id < 0 && elem_type < 0)) {
+        return fail("静态数据对象的身份或布局无效");
+    }
+    let row int = -1; let i int = 0;
+    for i < static_object_n {
+        let current StaticDataObject = static_objects[i];
+        if ((sym_id >= 0 && current.sym_id == sym_id)
+            || (label >= 1 && current.label == label)) {
+            if (row >= 0 && row != i) { return fail("静态数据符号与标签身份冲突"); }
+            row = i;
+        }
+        i += 1;
+    }
+    let object StaticDataObject;
+    object.sym_id = sym_id; object.label = label; object.type_id = type_id;
+    object.elem_type = elem_type; object.count = count; object.size = size; object.align = align;
+    if (size > 0) {
+        object.data = malloc(size.to_type(u64)).to_type(*u8);
+        if (object.data == 0) { return fail("静态数据字节分配失败"); }
+        i = 0;
+        for i < size { object.data[i] = 0; i += 1; }
+    }
+    if (row < 0 && static_object_n == static_object_cap) {
+        let capacity int = static_object_cap == 0 ? 16 : static_object_cap * 2;
+        if (capacity > STATIC_DATA_LIMIT / sizeof(StaticDataObject)) {
+            static_data_drop(&object); return fail("静态数据目录过大");
+        }
+        let next *StaticDataObject = malloc((capacity * sizeof(StaticDataObject)).to_type(u64))
+            .to_type(*StaticDataObject);
+        if (next == 0) { static_data_drop(&object); return fail("静态数据目录分配失败"); }
+        if (static_object_n > 0) {
+            memcpy(next, static_objects, (static_object_n * sizeof(StaticDataObject)).to_type(u64));
+        }
+        free(static_objects.to_type(*void)); static_objects = next; static_object_cap = capacity;
+    }
+    if (row < 0) { row = static_object_n; static_object_n += 1; }
+    else { static_data_drop(&static_objects[row]); }
+    static_objects[row] = object;
+    return row;
+}
+
+// static_data_scalar：按小端写入完整低位，不允许越界或覆盖已有指针重定位槽。
+// bits 仅表示目标标量位型，绝不按宿主地址解引用；成功返回 0。
+pub fn static_data_scalar(row int, offset int, width int, bits i64) int {
+    if (row < 0 || row >= static_object_n || offset < 0 || width < 1 || width > 8
+        || offset > static_objects[row].size || width > static_objects[row].size - offset) {
+        return fail("静态数据标量写入范围无效");
+    }
+    let object *StaticDataObject = &static_objects[row];
+    let i int = 0;
+    for i < object.reloc_n {
+        let reloc StaticDataReloc = object.relocs[i];
+        if (offset < reloc.offset + reloc.width && reloc.offset < offset + width) {
+            return fail("静态数据标量与指针重定位重叠");
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < width { object.data[offset + i] = (bits.to_type(u64) >> (i * 8)).to_type(u8); i += 1; }
+    return 0;
+}
+
+// static_data_reloc：登记一个未重叠的 8 字节指针槽；目标必须为符号或正标签。
+// 源槽只接受零占位，目标尚未登记也可引用，最终闭包由受检模块与 IR verifier 校验。
+// ponytail: 单对象重定位按追加复制；大量指针槽成为实测瓶颈时再增加私有容量表。
+pub fn static_data_reloc(row int, offset int, target_sym int, target_label int, addend i64) int {
+    if (row < 0 || row >= static_object_n || offset < 0
+        || offset > static_objects[row].size || 8 > static_objects[row].size - offset
+        || target_sym < -1 || target_label < -1 || target_label == 0
+        || (target_sym < 0 && target_label < 1) || (target_sym >= 0 && target_label >= 1)) {
+        return fail("静态数据指针重定位无效");
+    }
+    let object *StaticDataObject = &static_objects[row];
+    let i int = 0;
+    for i < 8 {
+        if (object.data[offset + i] != 0) { return fail("静态数据指针槽必须使用零占位"); }
+        i += 1;
+    }
+    i = 0;
+    for i < object.reloc_n {
+        if (offset < object.relocs[i].offset + 8 && object.relocs[i].offset < offset + 8) {
+            return fail("静态数据指针重定位重叠");
+        }
+        i += 1;
+    }
+    if (object.reloc_n >= STATIC_DATA_LIMIT / sizeof(StaticDataReloc)) {
+        return fail("静态数据重定位过多");
+    }
+    let next *StaticDataReloc = malloc(((object.reloc_n + 1) * sizeof(StaticDataReloc)).to_type(u64))
+        .to_type(*StaticDataReloc);
+    if (next == 0) { return fail("静态数据重定位分配失败"); }
+    if (object.reloc_n > 0) {
+        memcpy(next, object.relocs, (object.reloc_n * sizeof(StaticDataReloc)).to_type(u64));
+    }
+    next[object.reloc_n].offset = offset; next[object.reloc_n].width = 8;
+    next[object.reloc_n].target_sym = target_sym; next[object.reloc_n].target_label = target_label;
+    next[object.reloc_n].addend = addend;
+    free(object.relocs.to_type(*void)); object.relocs = next; object.reloc_n += 1;
+    return 0;
+}
+
+// static_data_count：返回当前编译单元已封存的对象数，不暴露可变目录表。
+pub fn static_data_count() int { return static_object_n; }
+
+// static_data_at：复制一行描述符，内部缓冲只读借用；消费者封存时须深拷贝。
+// 越界或空出参返回 -1，不改出参；同一行替换或目录 reset 后借用失效。
+pub fn static_data_at(row int, out *StaticDataObject) int {
+    if (row < 0 || row >= static_object_n || out == 0) { return -1; }
+    out[0] = static_objects[row];
+    return 0;
+}
+
+// static_data_reset：释放本编译单元全部目录与子缓冲；允许空目录和重复调用。
+pub fn static_data_reset() void {
+    let i int = 0;
+    for i < static_object_n { static_data_drop(&static_objects[i]); i += 1; }
+    free(static_objects.to_type(*void)); static_objects = 0; static_object_n = 0; static_object_cap = 0;
+}

@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""LL8a 内存 helper 门：LLVM 文本、O0/O2 对象、自递归检查与原生边界驱动。
+"""LL8a/LL8b 运行时门：LLVM helper、完整 x64 runtime 与宿主桥。
 
 验收（与实施方案 LL8a 对应）：
-  * `memcpy`/`memset`/`strlen` 以 weak 定义 + llvm.used 出现在每个 LLVM 模块，
-    `opt` 验证通过，O2 管线不会丢弃弱定义；
-  * 对象中三个入口有定义且不留下未解析的内存导入，反汇编没有自我递归；
-  * 用 C 边界驱动（0/1/7/8/16/31/32/4096 字节复制/清零与字符串边界）链接
-    真实对象并原生运行；
+  * memory：保持 LL8a 的 helper、O0/O2 对象、自递归与 C 边界驱动检查；
+  * complete：保留 memory 检查，并在 O0/O2 编译、验证、优化及原生运行
+    allocator/printf 和 Linux x64 宿主桥用例；
   * clang/opt/objdump 只作开发差分 oracle，产物仍来自编译器自己的桥。
 """
 
@@ -21,6 +19,9 @@ ROOT = Path(__file__).resolve().parents[2]
 WORK = ROOT / "tmp" / "llvm-migration" / "llvm-runtime"
 TARGET = "x86_64-unknown-linux-gnu"
 HELPERS = ("memcpy", "memset", "strlen")
+RUNTIME_IMPORTS = {"malloc", "free", "memcpy", "memmove", "memset", "strlen",
+                   "printf", "linux_syscall6", "__divti3", "__modti3",
+                   "__udivti3", "__umodti3", "__multi3", "__stack_chk_fail"}
 
 # helpers.yh：无 main 的发射源，供 clang 汇编驱动链接；probe.yh：带 main，
 # 供编译器经内嵌桥产可执行文件，验证真实管线下的 O0/O2 产物。
@@ -136,15 +137,122 @@ def check_object(tools, llfile, level):
     return obj
 
 
+def parse_expected(source):
+    """读取 .yh 语料的逐行 stdout 与退出码期望。"""
+    expected = []
+    exit_code = 0
+    for line in source.read_text(encoding="utf-8").splitlines():
+        if line.startswith("// expect:"):
+            expected.append(line[len("// expect:"):].removeprefix(" "))
+        elif line.startswith("// expect-more:"):
+            expected.append(line[len("// expect-more:"):].removeprefix(" "))
+        elif line.startswith("// exit:"):
+            exit_code = int(line[len("// exit:"):].strip())
+    return expected, exit_code
+
+
+def undefined_symbols(tools, obj):
+    """返回原生对象的未定义符号名集合。"""
+    result = run([tools["nm"], "-u", str(obj)])
+    assert result.returncode == 0, f"nm -u 失败: {result.stderr[-800:]}"
+    return {line.split()[-1] for line in result.stdout.splitlines() if line.split()}
+
+
+def required_runtime_symbols(source):
+    """返回用例必须触发的运行时入口，保留按需注入语义。"""
+    required = ["linux_syscall6", "printf", "memcpy", "memset", "strlen",
+                "yh_printf_write", "yh_printf_emit", "yh_printf_integer"]
+    if source.name == "llvm-runtime-complete.yh":
+        required.extend(("malloc", "free"))
+    return tuple(required)
+
+
+def check_complete_object(tools, obj, source, level):
+    """核对完整运行时弱定义、未解析运行时入口与 LLVM 生成 libcall。"""
+    symbols = run([tools["nm"], str(obj)])
+    assert symbols.returncode == 0, f"O{level} nm 失败: {symbols.stderr[-800:]}"
+    required = required_runtime_symbols(source)
+    for name in required:
+        assert re.search(rf" [WwTt] {name}$", symbols.stdout, re.M), (
+            f"{source.name} O{level} 对象缺少运行时定义 {name}\n{symbols.stdout[-1200:]}")
+
+    imports = undefined_symbols(tools, obj)
+    allowed = {"close"} if source.name == "llvm-runtime-complete.yh" else {
+        "close", "execvp", "exit", "fork", "open", "waitpid"}
+    leaked_runtime = sorted(imports.intersection(RUNTIME_IMPORTS))
+    unexpected = sorted(imports - allowed)
+    assert not leaked_runtime, (
+        f"{source.name} O{level} 仍导入运行时/libcall: {leaked_runtime}")
+    assert not unexpected, f"{source.name} O{level} 有未审核导入: {unexpected}"
+
+    for name in required:
+        disasm = run([tools["objdump"], "-d", f"--disassemble={name}", str(obj)])
+        assert disasm.returncode == 0, f"O{level} objdump {name} 失败"
+        assert re.search(rf"\b(call|bl)\b.*<{name}>", disasm.stdout) is None, (
+            f"O{level} {name} 出现自递归\n{disasm.stdout[-800:]}")
+
+
+def check_complete_fixture(compiler, tools, source, level):
+    """发射、验证、优化、链接并原生运行一份 LL8b 源级契约用例。"""
+    prefix = source.stem
+    llfile = WORK / f"{prefix}-compiler-O{level}.ll"
+    text = emit_text(compiler, source, level, llfile)
+    assert "@linux_syscall6" in text, f"{source.name} O{level} 未触发 syscall runtime"
+    for name in required_runtime_symbols(source):
+        linkage = "internal" if name.startswith("yh_printf_") else "weak"
+        assert re.search(rf"define {linkage} \w+ @{name}\(", text), (
+            f"{source.name} O{level} 文本缺少 {name} {linkage} 定义")
+
+    verify = run([tools["opt"], "-passes=verify", "-disable-output", str(llfile)])
+    assert verify.returncode == 0, (
+        f"{source.name} O{level} opt 验证失败\n{verify.stderr[-1600:]}")
+    optimized = WORK / f"{prefix}-LLVM-O{level}.ll"
+    result = run([tools["opt"], "-S", "-passes=default<O2>",
+                  str(llfile), "-o", str(optimized)])
+    assert result.returncode == 0, (
+        f"{source.name} O{level} LLVM O2 优化失败\n{result.stderr[-1600:]}")
+    optimized_verify = run([tools["opt"], "-passes=verify", "-disable-output",
+                            str(optimized)])
+    assert optimized_verify.returncode == 0, (
+        f"{source.name} O{level} 优化后 IR 无效\n{optimized_verify.stderr[-1600:]}")
+
+    artifact = optimized if level == 2 else llfile
+    obj = WORK / f"{prefix}-O{level}.o"
+    result = run([tools["clang"], "-c", str(artifact), "-o", str(obj)])
+    assert result.returncode == 0, (
+        f"{source.name} O{level} clang 汇编失败\n{result.stderr[-1600:]}")
+    check_complete_object(tools, obj, source, level)
+
+    executable = WORK / f"{prefix}-O{level}"
+    result = run([tools["cc"], "-fno-builtin", "-O0", "-no-pie",
+                  str(obj), "-o", str(executable)])
+    assert result.returncode == 0, (
+        f"{source.name} O{level} 链接失败\n{result.stderr[-1600:]}")
+    if source.name == "llvm-linux-x64-host.yh":
+        host_probe = ROOT / "tmp" / "llvm-migration" / "host-probe-目录"
+        if host_probe.exists():
+            shutil.rmtree(host_probe)
+    result = run([str(executable)], cwd=ROOT)
+    expected, exit_code = parse_expected(source)
+    actual = result.stdout.rstrip("\n").split("\n") if result.stdout else []
+    assert result.returncode == exit_code, (
+        f"{source.name} O{level} 退出码 {result.returncode}，期望 {exit_code}; "
+        f"stderr={result.stderr[-800:]!r}")
+    assert actual == expected, (
+        f"{source.name} O{level} stdout 不符\n期望={expected!r}\n实际={actual!r}")
+
+
 def main():
-    """构建隔离工作区，按 O0/O2 核对文本、对象、桥产物与原生边界驱动。"""
+    """构建隔离工作区，运行 LL8a memory 或 LL8b complete 验收套件。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler-path", default=str(ROOT / "yh"))
+    parser.add_argument("--suite", choices=("memory", "complete"), default="memory")
     args = parser.parse_args()
     compiler = str(Path(args.compiler_path).resolve())
     assert Path(compiler).is_file(), f"编译器不存在: {compiler}"
     tools = {name: locate(*candidates) for name, candidates in {
-        "clang": ("clang",), "opt": ("opt",), "cc": ("cc", "gcc"),
+        "clang": ("clang-21", "clang"), "opt": ("opt-21", "opt"),
+        "cc": ("x86_64-linux-gnu-gcc", "gcc", "cc"),
         "nm": ("nm",), "objdump": ("objdump",)}.items()}
     missing = [name for name, path in tools.items() if path is None]
     assert not missing, f"LL8a 差分工具缺失: {missing}（仅开发门使用 clang/opt/objdump）"
@@ -196,7 +304,21 @@ def main():
         result = run([str(bridge_exe)])
         assert result.returncode == 0, f"O{level} 桥产物运行失败 rc={result.returncode}"
 
-    print("LL8a 内存 helper 通过：weak 定义/llvm.used、O0/O2 对象、无自递归、原生边界驱动")
+    if args.suite == "complete":
+        fixtures = (ROOT / "tests" / "yh-run" / "run" / "llvm-runtime-complete.yh",
+                    ROOT / "tests" / "yh-run" / "run" / "llvm-linux-x64-host.yh")
+        runtime_memory = ROOT / "tests" / "selfhost" / "runtime-memory.py"
+        result = run(["python3", str(runtime_memory), "--compiler-path", compiler,
+                      "--llvm-x64"], cwd=ROOT)
+        assert result.returncode == 0, (
+            f"runtime-memory LLVM 导入审计失败\n{result.stdout[-1200:]}"
+            f"{result.stderr[-1200:]}")
+        for fixture in fixtures:
+            for level in (0, 2):
+                check_complete_fixture(compiler, tools, fixture, level)
+        print("LL8b 完整运行时通过：内存 helper、allocator/printf、x64 syscall/宿主桥，O0/O2 原生运行与导入审计")
+    else:
+        print("LL8a 内存 helper 通过：weak 定义/llvm.used、O0/O2 对象、无自递归、原生边界驱动")
     return 0
 
 

@@ -55,6 +55,15 @@ def main() -> int:
     parser.add_argument("--compiler", required=True)
     parser.add_argument("--project", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--backend", choices=("legacy", "llvm"),
+                        help="显式选择构建候选时使用的后端")
+    parser.add_argument("--target", help="候选编译器的目标 triple")
+    parser.add_argument("--opt-level", choices=("0", "2"),
+                        help="LLVM 候选优化级别")
+    parser.add_argument("--emit-llvm", action="store_true",
+                        help="同时保存每个模块的 LLVM 文本")
+    parser.add_argument("--stats", action="store_true",
+                        help="输出受检/发射/回退统计")
     parser.add_argument("--llvm-host", choices=("linux-x86_64", "linux-aarch64"),
                         help="把静态 LLVM 桥链入产物的宿主架构；缺省不接入")
     parser.add_argument("--llvm-mode", choices=("auto", "require", "off"), default="auto",
@@ -68,7 +77,21 @@ def main() -> int:
         shim = llvm_shim(args.llvm_host, args.llvm_mode)
         if shim:
             environment["PATH"] = str(shim) + os.pathsep + environment.get("PATH", "")
-    command = [str(compiler), "build", "-o", str(output)]
+            # LLVM x64 target 会选择 /usr/bin/gcc 绕过 PATH；显式绑定同一 shim，
+            # 让过渡种子可链接出目标机型正确且含固定桥的候选编译器。
+            environment["YH_CC"] = str(shim / "gcc")
+    command = [str(compiler)]
+    if args.backend:
+        command += ["--backend", args.backend]
+    if args.target:
+        command += ["--target", args.target]
+    if args.opt_level:
+        command += [f"-O{args.opt_level}"]
+    if args.emit_llvm:
+        command.append("--emit-llvm")
+    if args.stats:
+        command.append("--stats")
+    command += ["build", "-o", str(output)]
     result = subprocess.run(command, cwd=project, check=False, env=environment)
     return result.returncode
 

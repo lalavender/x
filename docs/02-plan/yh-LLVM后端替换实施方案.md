@@ -66,10 +66,10 @@ LL8a 用 `.yh` 编写的 LLVM 发射代码提供基本 helper 的 IR；LL8b 在�
 | --- | --- | --- |
 | 受检阶段 | 修改 `compiler/ast/ast_function.yh`、`ast_ir*.yh`；新建 `ast/checked_module.yh` | 语义快照、所有权与 lowering 输入 |
 | 目标模型 | 修改 `compiler/gen/target.yh`、`model.yh`、`state.yh`、`comptime/ct_target.yh` | 宿主/目标、triple/layout/ABI 身份 |
-| 首期 x64 OS 桥 | 修改 `compiler/cmd/project_dir.linux.yh`、`clock.linux.yh`、`process.yh`、prelude 和 LLVM runtime | x64 syscall/目录/时钟/内存/进程，旧种子可编译的架构选择 |
+| 首期 x64 OS 桥 | `compiler/cmd/project_dir.linux.arm64.yh` / `project_dir.linux.x64.yh`、对应 `clock` 文件、通用 `process.yh` 与 LLVM runtime | syscall/目录/时钟/内存按目标隔离；进程调用沿用 C ABI |
 | 模块/内存 IR | 新建 `compiler/ir/module.yh`、`ssa_memory.yh`；修改 `ssa.yh`、`ssa_call.yh`、`ssa_serialize.yh` | 模块声明、数据、存储/调用及验证/序列化 |
 | LLVM 输出 | 新建 `compiler/backend/llvm_module.yh`、`llvm_scalar.yh`、`llvm_memory.yh`、`llvm_call.yh`、`llvm_runtime.yh` | 文本、来源映射、各类操作与 helper |
-| LLVM 链接 | 新建 `compiler/llvm/lld_bridge.cpp`、`compiler/backend/llvm_lld.yh`；修改 `cmd/link_cache.yh`、`driver.yh`、SDK 脚本 | 进程内 lld、CRT/库路径、回落与身份 |
+| LLVM 链接 | 新建 `compiler/llvm/lld_bridge.cpp`；在 `compiler/backend/llvm_bridge.yh` 增加绑定；修改 `cmd/link_cache.yh`、`driver.yh`、SDK 脚本 | 进程内 lld、CRT/库路径、回落与身份 |
 | CLI/对象/缓存 | 新建 `compiler/cmd/llvm_toolchain.yh`；修改 `driver.yh`、`compile.yh`、`module_worker.yh`、`module_build.yh`、`link_cache.yh`、`build_scheduler.yh` | 解析、argv、产物与事务 |
 | 语言接口 | 修改 `compiler/parse/iface.yh`、`iface_ct.yh` 及缓存键 | 目标/ABI/布局版本身份，保留后缀 |
 | 验收 | 新建下述 `.yh` fixture 和 `tests/selfhost/llvm-*.py`；修改现有 run/modules/selfhost 脚本 | 覆盖、语义、缓存、运行时和自举 |
@@ -254,8 +254,9 @@ TargetInfo 至少保存完整 triple、OS、架构、ABI、指针位宽/字节�
   `ast/checked_module_lower.yh` 的 `lower_module` 已能把快照降低为 `ir.IRModule`
   （首片整数/布尔闭包），`llvm-lower.py` 通过（scalar `functions=5 phis=2 calls=4`，
   pointer/aggregate 带来源整模块拒绝）。
-  仍缺：IRModule 序列化与其版本；`IR_MODULE_VERSION` 目前只是内存内版本，没有
-  `ir_module_serialize`，跨缓存身份键未落。
+  已补齐：`ir_module_serialize`/`deserialize` 的版本化稳定编码、确定性模块身份摘要，
+  并由 `tests/selfhost/llvm-module-cache.py` 验证往返、字节确定性和损坏输入拒绝；
+  LL7 将 ABI/函数类型 metadata 纳入该模块身份。完整生产缓存键仍归 LL9。
 - [x] 运行前端边界和旧固定点门；与 R2b 任务私有上下文契约对齐，记录未闭合的完整版本硬门。
   已完成：当前源码上 `make test selfhost-native` 与七个专项门实际退出 0：
   语法 78/78 与 42/42、运行 307/307、固定点 cc3→cc4 共 24 个产物一致、自解析 82 文件、
@@ -365,23 +366,32 @@ IRModule 序列化与跨缓存身份未落、首片之外的形态明确拒绝�
 2026-10-15 goto/label 切片已完成：含 goto 的函数全部绑定内存驻留，标签块在
 函数入口预分配、名字按内容匹配，发现趟回滚恢复标签块状态；门禁见
 `tests/selfhost/llvm-goto.py` 与 `tests/yh-run/run/llvm-goto.yh`。
-仅剩 `for-in`（依赖聚合切片）。
+2026-10-17 for-in 切片已完成：数组/切片与左闭右开整数区间复用两趟循环 CFG，
+循环头计数 phi 由 continue 与自然回边共同回填；元素和可选 i32 下标绑定、嵌套、
+break/continue 均有 O0/O2 原生运行断言，结构体元素验证按值复制。实现位于
+`compiler/ast/checked_module_forin.yh` 与 `checked_module_lower.yh`；完整记录见
+[`LL4 for-in 完成记录`](../01-finished/yh-LLVM-LL4-for-in-2026-10-17.md)。
 
-- [ ] 按“嵌套循环与 break/continue → 无限循环 → switch → goto/label → for-in”逐行建用例。
-- [ ] 每行先用 LLVM 编译触发 unsupported，再实现该行，独立运行/提交；不一次混入所有控制流。
-- [ ] 保留短路和不可达检查；验证 goto 形成的图、循环携带值与同一目标的多前驱输入。
-- [ ] 检查修改后 verifier、O0/O2 输出和运行一致，覆盖计数按新增函数增长。
-- [ ] 对每个实际语义变化更新相应设计文档，阶段关闭完整门。
+- [x] 按“嵌套循环与 break/continue → 无限循环 → switch → goto/label → for-in”逐行建用例。
+- [x] 每行先用 LLVM 编译触发 unsupported，再实现该行并独立运行；不一次混入所有控制流。
+- [x] 保留短路和不可达检查；验证 goto 形成的图、循环携带值与同一目标的多前驱输入。
+- [x] 检查修改后 verifier、O0/O2 输出和运行一致，覆盖计数按新增函数增长。
+- [x] 对实际语义变化更新设计与完成记录，阶段关闭完整门。
+- [ ] 提交 LL4 变更：当前共享工作区已有大量在途改动，本轮保留在工作区，不把无关改动
+  带入提交；待整理出独立变更集后完成。
 
 **验证：**`python3 tests/selfhost/llvm-ir.py --compiler-path ./yh --suite control`；
 每个子切片 self-check 退出 0，错误 CFG 被 verifier 拒绝，不产生非法 phi。
 
 ## LL5：内存、聚合与模块数据（LLVM-03、04）
 
-**文件：**新增 `compiler/ast/ast_ir_memory.yh`、`compiler/ir/ssa_memory.yh`、
-`compiler/backend/llvm_memory.yh`；修改模块 IR、global_init、CT 静态数据物化；
-新增 `tests/yh-run/run/llvm-memory-values.yh`、`llvm-global-data.yh` 和
-`tests/modules/projects/llvmprivate/{project.toml,main/main.yh,data/data.yh}`。
+**文件：**内存/聚合 lowering 与 LLVM helper 分布于 CheckedModule、IR 和 backend；
+全局/CT 数据目录位于 `compiler/gen/static_data.yh` 与
+`compiler/comptime/ct_static_data.yh`，快照/纯 lowering 位于
+`compiler/ast/checked_module_static.yh`，静态数据发射位于
+`compiler/backend/llvm_module_data.yh`。主要回归见
+`tests/yh-run/run/llvm-memory-values.yh`、`llvm-global-data.yh`、
+`tests/modules/projects/llvmprivate/` 和 `tests/modules/projects/llvmdatareloc/`。
 
 **接口：**ALLOCA、地址/字段/下标、LOAD/STORE、复制/清零及全局引用的 IR 契约，
 复用 LL8a helper；未知对齐为 1，已证明对齐才提高。
@@ -398,20 +408,20 @@ ALLOCA/GEP/MEMCPY 三指令 + 字节偏移寻址；门禁见 `tests/selfhost/llv
 2026-10-15 切片切片已完成：数组切片/切片字面量/再切片/共享下标读写/副本与
 运行期 `len`；门禁见 `tests/selfhost/llvm-slice.py` 与
 `tests/yh-run/run/llvm-slice.yh`。
-2026-10-16 普通全局/字符串数据已接入：`AstDecl.init_expr`、独占字节物化、
-GLOB_ADDR、完整字节数组发射、pub/private linkage 和可写别名；详见
-[全局数据切片记录](../01-finished/yh-LLVM-LL5全局数据切片-2026-10-16.md)。
-**仍未完成：CT backing、导入聚合副本、非零指针重定位与全局切片**，
-LL5 全覆盖与下面的总验收项继续保持未关闭。
+**状态：2026-10-17，LL5 全量验收完成。** 普通全局、字符串、零初始化、CT
+backing、静态指针重定位、全局切片、导入聚合副本与聚合重叠复制均已进入独立
+静态数据目录和 LLVM 模块；`CheckedModule` 深拷贝字节/重定位，不依赖 GenState、AST
+或 CT arena。完整实施与验收证据见
+[LL5 全量收尾实施方案](yh-LLVM-LL5全量收尾实施方案.md)和
+[完成记录](../01-finished/yh-LLVM-LL5全量收尾-2026-10-17.md)。此前普通全局/字符串
+子切片记录仍保留其当时边界与验收历史。
 
-- [ ] 新 `.yh` 覆盖局部/全局取址、嵌套字段、数组/union、切片共享及按值副本、静态指针和 CT backing。
-- [ ] 建立有类型的 Place/布局描述，优先入口 alloca + 标量 load/store，
-  不提前实现聚合 SSA 优化或任意别名分析。
-- [ ] 将全局/字符串/零初始化/CT 数据从汇编输出副作用转入模块数据目录。
-- [ ] 验证 sizeof/offset/alignment、pub 与 private linkage、别名和重叠复制；
-  再验证缓存序列化/读回，不只检查 IR 文字是否出现。
-- [ ] 每个地址/聚合切片依次通过 O0/O2 实际运行和旧门，记录剩余 unsupported；
-  本片先验收局部数据/副本和跨模块全局，跨函数聚合在 LL7、浮点字段在 LL6 汇合。
+- [x] `.yh` 覆盖局部/全局取址、嵌套字段、数组/union、切片共享及按值副本、静态指针和 CT backing。
+- [x] 存储位置由 canonical typed pointer 表示，布局由 `CheckedModule` 类型映射和
+  `IRModuleType` 描述；局部入口 alloca + 标量 LOAD/STORE 已落地，无需额外的独立 Place 对象。
+- [x] 全局/字符串/零初始化/CT 数据从汇编副作用转入独占模块静态数据目录。
+- [x] 验证 sizeof/offset/alignment、pub/private linkage、别名、重叠复制与序列化读回。
+- [x] 地址/聚合语义通过 O0/O2 运行和旧后端语料；未支持输入保持带来源拒绝。
 
 **验证：**`python3 tests/selfhost/llvm-ir.py --compiler-path ./yh --suite memory`；
 不修改调用方的副本保持独立、切片共享修改可见、跨模块数据正确且私有名不泄漏。
@@ -423,14 +433,22 @@ LL5 全覆盖与下面的总验收项继续保持未关闭。
 
 **接口：**f32/f64 常量位型、算术、比较、整浮转换和内存访问，遵守 LL1 契约。
 
-- [ ] 添加 NaN、±0、f32 舍入、signed/unsigned 转换和不确定边界的已决期望测试。
-- [ ] 实现按 IEEE 位型发常量、正确比较谓词、已定义转换路径；禁用 fast-math。
-- [ ] 核对 CT 执行/常量折叠与动态结果，发现旧差异先单列复现，不把 LLVM 改成新定义。
-- [ ] 针对不涉及 printf 的标量自校验先跑 O0/O2；格式输出等完整运行时用例在 LL8b 汇合。
-- [ ] 更新覆盖/缓存 schema 并跑完整旧门和浮点专项门。
+- [x] 添加 NaN、±0、f32 舍入、signed/unsigned 转换和不确定边界的已决期望测试；复用 LL1 边界探针并新增 `llvm-float-lowering.yh`。
+- [x] 实现按 IEEE 位型发常量、正确比较谓词、已定义转换路径；不附加 fast-math。
+- [x] 核对 CT 执行/常量折叠与动态结果；LL6 未扩大或改写已有语义。
+- [x] 针对不涉及 printf 的标量自校验跑 O0/O2；输出格式仍留给 LL8b。
+- [x] 复核覆盖/缓存 schema；本片未改 IR 序列化字段与类型编号，现有版本可表达 f32/f64；跑完整旧门和浮点专项门。
 
 **验证：**`python3 tests/selfhost/llvm-ir.py --compiler-path ./yh --suite float`；
 已锁定比较/位型/转换一致，未定义边界不被加上虚构的期望值。
+
+**完成状态（2026-10-17）：**LL6 已验收。`checked_module_lower` 映射 f32/f64，
+LLVM 后端覆盖 IEEE 浮点常量、算术/比较、整浮转换与局部标量内存；NaN、负零、
+逐步 f32 舍入、饱和窄化、整数到浮点和 CT/运行期一致性均有回归。专项门以 O0/O2
+验证 IR 并原生运行；`make test` 的运行/失败/仅编译语料共 320/320，语法两层各
+正例 78/78、反例 42/42；`make selfhost-native` 固定点 24 项一致、自解析 93 个源文件、
+运行语料 320/320、模块 18/18、项目 102/102 全通过。
+完整记录见[LL6 浮点标量完成记录](../01-finished/yh-LLVM-LL6浮点标量-2026-10-17.md)。
 
 ## LL7：完整调用、yh ABI 与 C ABI（LLVM-03、05）
 
@@ -443,64 +461,106 @@ LL5 全覆盖与下面的总验收项继续保持未关闭。
 签名、间接调用及变参 metadata。旧 AAPCS64 分类器不是首期签名实现。
 ABI 必须进入函数指针类型与接口，不能只存在直接 CALL 指令上。
 
-- [ ] 测试窄返回、超过寄存器参数数、交错整浮、x64 INTEGER/SSE/MEMORY 类聚合、
-  函数指针、两类变参与切片返回；HFA 的 ARM64 专项放 F1。
-- [ ] 固定 yh LLVM ABI 签名，所有模块使用同版重编；不与旧 yh 机器 ABI 对象混链。
-- [ ] 对等价 C 声明用 clang 21.1.8 导出 IR/对象，核对 coercion、sret 和扩展属性。
-- [ ] 运行 yh→C、C→yh 双向真实互调、callback 与源级拒绝案例；
-  `@[noreturn]` 的声明、控制流和违约 trap 分别验证。
-- [ ] 验证跨模块接口错配拒绝、缓存版本和源码兼容，关闭调用类 unsupported 后跑门。
+- [x] **LL7-S1 固定参数 C ABI 标量直接调用（2026-10-17）**：SysV x86_64 的整数、指针、f32/f64；
+  i8/i16 signed/unsigned 的 `signext`/`zeroext` 同时用于函数签名和 call site；覆盖 8 个整数栈参数、
+  交错整数/浮点参数、真实 yh→C 与 C→yh 互调。C bool 仍明确拒绝。clang 21.1.8 属性 oracle，
+  LLVM O0/O2 verifier/优化/编译/链接/运行通过；全量门结果见
+  [LL7-S1 完成记录](../01-finished/yh-LLVM-LL7-CABI标量直接调用-2026-10-17.md)。
+- [x] **LL7-S2 固定参数 C `_Bool`（2026-10-17）**：ABI 边界使用 `i1 zeroext`，内部 YH bool 仍为 i8；
+  调用入参按非零值归一，C bool 返回到 YH 扩成字节，YH ABI 函数返回按非零值归一。clang 21.1.8
+  oracle、跨模块接口、双向 C 运行及 O0/O2 通过，详见
+  [LL7-S2 完成记录](../01-finished/yh-LLVM-LL7-CABI-bool-2026-10-17.md)。
+- [x] **LL7-S3 yh-llvm-v1 内部聚合 ABI（2026-10-17）**：YH 函数 ABI 版本记入模块符号、调用/函数 IR 与序列化身份；内部 YH 符号加 `$yhllvmv1` 后缀，防止旧命名对象误链。结构体、定长数组、切片参数按实参求值时复制；聚合返回使用隐藏缓冲，切片只复制描述符。跨模块结构体/数组/切片参数及返回在 O0/O2 双向项目中运行通过，详见 [LL7-S3 完成记录](../01-finished/yh-LLVM-LL7-yh-内部聚合ABI-2026-10-17.md)。
+- [x] **LL7-S4 SysV x64 C 聚合 ABI（2026-10-17）**：按源布局分类两八字节 INTEGER/SSE 与 MEMORY；实现小聚合 coercion、`sret`/`byval`、C/YH 双向函数定义与调用。CPair、CMixed、CWide 由 clang 21.1.8 IR oracle 对照，LLVM verifier 及 O0/O2 跨模块真实链接运行通过；详见 [LL7-S4 完成记录](../01-finished/yh-LLVM-LL7-SysV-C聚合ABI-2026-10-17.md)。
+- [x] **LL7-S5 函数值、间接调用与回调（2026-10-17）**：函数类型在 IR、序列化和模块接口中保留 ABI、参数/返回类型及变参种类；YH 与 C 函数值均可跨模块传递、返回并间接调用。C callback 覆盖标量与 INTEGER 聚合参数/返回，含 C 调用 YH 回调和 YH 调用 C 返回的函数值；YH 类型化变参 `vararg=2` 在调用点按序打包为末尾切片参数。用户裸 C 变参仍按既定 FFI 政策在源码层拒绝，不由 LLVM 猜测参数提升。
+- [x] **LL7-S6 `@[noreturn]` 契约与接口缓存（2026-10-17）**：模块符号和 `.s.i` 保留属性；违约返回的外部调用后发射 `llvm.trap`/`unreachable`，合法定义不允许可达返回。O0/O2 跨模块构建、运行及属性移除/恢复的缓存往返通过；既有源级非法定义拒绝用例纳入总门。
+- [x] **LL7-S7 完整调用验收（2026-10-17）**：`llvm-abi.py` 覆盖 clang 21.1.8 oracle、标量/bool/聚合、直接/间接调用、callback、类型化变参、裸 C 变参拒绝、noreturn 接口与缓存，O0/O2 验证、优化、链接、运行通过；全仓门结果见 LL7 完成记录。
+- [x] **本片目标边界**：仅 Linux/x86_64 SysV；ARM64 AAPCS64/HFA 留到 F1，不复用旧分类器。
 
 **验证：**`python3 tests/selfhost/llvm-abi.py --compiler-path ./yh`；
 O0/O2 双向互调、自校验、拒绝层全部通过，函数指针的 ABI 不丢失。
 
 ## LL8b：x64 完整运行时与宿主 OS 桥（LLVM-07、14）
 
-**文件：**扩展 `compiler/backend/llvm_runtime.yh`，修改 prelude 与现有运行时登记；
-修改 `compiler/cmd/project_dir.linux.yh`、`clock.linux.yh`、`process.yh`；
-新增 `tests/yh-run/run/llvm-runtime-complete.yh`、`llvm-linux-x64-host.yh`，
-扩展 llvm-runtime.py 与 runtime-memory.py。
+**文件：**扩展 `compiler/backend/llvm_runtime.yh`；修改
+`compiler/ast/checked_module_lower.yh`、`compiler/ir/ssa_module_20_verify.yh`、
+`compiler/backend/llvm_call.yh`、`llvm_module.yh` 与运行时标记；将目录/时钟实现拆为
+`compiler/cmd/project_dir.linux.arm64.yh` / `project_dir.linux.x64.yh` 和
+`clock.linux.arm64.yh` / `clock.linux.x64.yh`。`process.yh` 继续使用通用 C ABI
+接口，由 LL7 的 SysV 调用 lowering 承接。新增
+`tests/yh-run/run/llvm-runtime-complete.yh`、`llvm-linux-x64-host.yh`，扩展
+`llvm-runtime.py` 与 `runtime-memory.py`。
 
 **接口：**提供与现行语言行为一致的 malloc/free/printf 和已有内存入口；
 Linux/x86_64 syscall/目录/时钟/内存/进程桥作为明确宿主与目标运行时能力，
 不复用 ARM64 syscall 编号/常量，不混入通用 LLVM 类型规则。
 
-- [ ] 覆盖 allocator 边界、格式输出、错误路径、直接/间接 runtime 调用和 LLVM helper 插入。
-- [ ] 使用 LL5/LL7 可表达的 yh/IR 迁移完整运行时，保留现有允许的 OS API 与导入政策。
-- [ ] 依据目标系统接口实现 x64 syscall、目录枚举、时钟、内存和进程；
-  保留 A 的 ARM64 启动分支，测试嵌套目录、中文/空格路径、单调时钟和子进程退出。
-- [ ] 对程序/候选的 O0/O2 做未定义符号、调用自递归及 LLVM-generated libcall 审计。
-- [ ] 保留 runtime-memory.py 原断言，新增 LLVM 口径；禁止以删除禁止列表使测试变绿。
-- [ ] 汇合全部当前运行语料与各工具项目所需运行时功能，再进入完整驱动阶段。
+- [x] 覆盖 allocator 边界、格式输出、错误路径、直接/间接 runtime 调用和 LLVM helper 插入。
+- [x] 在 YH 编写的 LLVM runtime emitter 中提供自有 LLVM 运行时定义；不链接 C allocator、格式化或内存 helper，保留原有运行时导入限制。
+- [x] 依据目标系统接口实现 x64 syscall、目录枚举、时钟、内存和进程；
+  保留 A 的 ARM64 启动分支，测试嵌套目录、中文/空格路径、单调时钟与 fork/execvp/exit/waitpid。
+- [x] 对程序 O0/O2 做未定义符号、调用自递归及 LLVM-generated libcall 审计。
+- [x] 保留 `runtime-memory.py` 原断言，新增 `--llvm-x64` 导入检查；禁止以删除禁止列表使测试变绿。
+- [x] 汇合当前运行语料与工具项目所需的 x64 运行时功能，再进入完整驱动阶段。
+
+**完成（2026-10-17）：**`llvm_runtime.yh` 按模块实际符号提供 `malloc/free/printf`、
+`linux_syscall6` 及内存 helper。x64 syscall 使用 Linux x86_64 寄存器约定；allocator
+以 `mmap/munmap` 提供 16 字节对齐、零尺寸分配、溢出拒绝与空指针释放；printf 覆盖
+现行 yh runtime 使用的整数/字符串/字符格式、UTF-8、短写循环与错误返回。LLVM runtime
+仅支持 Linux/x86_64 SysV，非该目标在预检阶段明确拒绝；ARM64 旧启动/运行时分支保留，
+LLVM AAPCS64 仍归 F1。目录/时钟按 `.linux.arm64` / `.linux.x64` 源文件隔离，进程 API
+沿用通用 C ABI；探针覆盖 `fork/execvp/exit/waitpid`。
 
 **验证：**`python3 tests/selfhost/llvm-runtime.py --compiler-path ./yh --suite complete`；
-runtimebytes 自包含门和候选导入门通过，输出、退出和错误语义与已决规则一致。
+两份 `.yh` 在 O0/O2 经 LLVM verifier、O2 优化、对象导入/自递归审计并原生运行；
+`runtime-memory.py` 默认原门不变，新增 LLVM x64 运行时导入检查。`make test` 通过
+323/323（运行 183/183、拒绝 132/132、仅编译 8/8），`make selfhost-native` 通过
+（固定点 24 项一致、自解析 97 文件、模块 18/18、项目 103/103）。随后 `make seed`
+更新 Linux/aarch64 种子，SHA-256 为
+`4b2f4a3e111e33eecd5ca48bc712e6b3b6a2f0ddfe68bfd8063f7bd15f4c1d94`；种子哈希复核通过。
+详细记录见 [LL8b 完成记录](../01-finished/yh-LLVM-LL8b-完整运行时与宿主桥-2026-10-17.md)。
 
 ## LL9：统一入口、缓存与失败发布（LLVM-08、09、12、15、16）
 
-**文件：**修改 cmd 的 driver/compile/module_worker/module_build/link_cache/build_scheduler、
-AST cache、语言接口；修改 tests/yh-run/check.py、tests/modules/check.py、build-check.py；
-新增 `tests/selfhost/llvm-cache.py`、`tests/selfhost/llvm-driver.py`，复用路径/失败 fixture。
+**文件：**修改 `cmd/driver.yh`、`cmd/llvm_emit.yh`、`cmd/module_worker.yh`、
+`cmd/module_build.yh`、`cmd/link_cache.yh`；修改 `tests/yh-run/check.py`、
+`tests/modules/check.py`、`tests/modules/build-check.py`；新增
+`tests/selfhost/llvm-cache.py`、`tests/selfhost/llvm-driver.py` 与项目/运行 fixture。
 
 **接口：**--backend/--target/-O0/-O2 在所有入口共享；runner 提供 --backend/--target/--opt-level
 并以 argv 注入编译器命令。建立设计 §6 的目标命名空间、键和成功发布协议。
-链接驱动的内嵌 lld 方案见 LL9L；本片先完成 gcc 回落路径的目标隔离与缓存键。
+Linux/x86_64 已在 LL9L 接入静态内嵌 lld；本片同时保留其他宿主/目标的显式驱动回落。
 
-- [ ] 先加同名输出切目标、工具路径不变版本变、混旧对象、损坏缓存的失败用例。
-- [ ] 将单文件、emit、build/run 与 worker 接入同一受检→IR→LLVM 流程；
+- [x] 增加同名输出切目标、同路径工具版本变化、混旧对象、损坏缓存和失败保留旧产物用例。
+- [x] 将单文件、emit、build/run 与 worker 接入同一受检→IR→LLVM 流程；
   check 无工具仍可用，路径中空格/中文完整保留。
-- [ ] 实现完整对象/链接身份，按层保留精确依赖，保持无改动命中与失败恢复正确。
-- [ ] 将旧 ARM64 crossbin/gcc 与原生 x64 LLVM/链接器完全隔离；
+- [x] 实现 LLVM 对象、接口和链接身份；工具可执行文件内容、目标、布局、ABI、优化级别、
+  对象内容及最终输出摘要进入对应缓存检查，保持热命中与失败恢复正确。
+- [x] 将旧 ARM64 crossbin/gcc 与原生 x64 LLVM/链接器隔离；
   缓存与发布检查对象 machine，错误架构输入明确拒绝而不是交给错误工具重试。
-- [ ] 复跑早接口就绪、晚私有错误、同项目并发/取消、损坏对象与 manifest 配对检查；
-  R2b 真线程池/状态隔离依赖不能以 fork 的通过替代。
-- [ ] 让全量 runner 明确选择 LLVM O0/O2 并核对 emitted/checked 数量，禁止后台隐式旧编译器。
+- [x] 复跑早接口就绪、晚私有错误、同项目并发/取消、损坏对象与 manifest 配对检查；
+  `make selfhost-native` 的接口就绪、worker 失败停止链接、并发扫描/项目用例通过，LLVM 专项门
+  覆盖缓存对象/manifest/接口损坏、错误 machine 配对与失败后保留旧程序。
+  R2b 真线程池/状态隔离仍是独立硬门，fork 通过不替代它。
+- [x] 让全量 runner 显式接受 LLVM O0/O2 参数并核对 checked/emitted 与零 fallback，
+  禁止后台静默使用旧编译器。
 
-**验证：**新 llvm-cache.py / llvm-driver.py 与当前路径/缓存/并发门；
-`python3 tests/yh-run/check.py --compiler ./tmp/llvm-migration/bootstrap/A --backend llvm --target x86_64-unknown-linux-gnu --opt-level O0 --workdir tmp/llvm-migration/run-o0`。
-runner 新参数在本任务实现；对应 O2、modules 与 build-check 同样注入目标/后端。
+**验证：**`llvm-cache.py` 覆盖冷/热链接缓存、工具文件变化、损坏对象与 manifest/接口修复、
+混入错误 machine 的对象、x64/AArch64 同名输出切换以及失败保留旧程序；`llvm-driver.py`
+覆盖无 LLVM 工具的 check、语法检查、emit、单文件和项目 build/run。O0/O2 runner 均显式传入
+目标/后端/优化级别，并在 LLVM 构建时校验覆盖计数。
+
+**覆盖边界：**2026-10-18 LL9 补充 runner 的 O0/O2 均通过 335/335；随后 LL10 收尾加入
+无限循环返回回归，`make test-llvm` 与 `make selfhost-llvm` 中 O0/O2 均通过 343/343。
+该结果表示当前语料与消费方验收通过，不等同于所有语言形态已覆盖。LL9 不关闭 R2b 真线程池/
+状态隔离硬门；内嵌 lld 的原生 x86_64 自编汇合见 LL9L-6/LL10。新单文件链接回归见
+`llvm-single-link-target.yh`。
 
 ## LL9L：内嵌 lld 静态链接器（LLVM-15；2026-10-15 用户要求增补）
+
+**状态：**Linux/x86_64 的生产链接实现、lld 探针、交叉格式探针、L9L-6 原生自举汇合及
+LL10 全量项目/专项门均已完成。详见
+[LL9L 验收记录](../01-finished/yh-LLVM-LL9L内嵌lld-2026-10-18.md)。
 
 **背景：**LL9 只要求链接步避开 ARM64 gcc 包装器，驱动仍是平台 cc。用户进一步要求
 把 lld 也静态链接进 yh：链接在进程内完成，不再起 cc/binutils 子进程，链接器版本随
@@ -512,7 +572,7 @@ runner 新参数在本任务实现；对应 O2、modules 与 build-check 同样�
 复现与依赖闭包见 [完成记录](../01-finished/yh-内嵌lld可行性实测-2026-10-15.md)。
 
 **文件：**新增 `compiler/llvm/lld_bridge.cpp`（C++ shim；lld 无 C API，不能用
-`.yh` 重写）、`compiler/backend/llvm_lld.yh`、`tests/selfhost/llvm-lld.py`、
+`.yh` 重写）、在 `compiler/backend/llvm_bridge.yh` 增加绑定、`tests/selfhost/llvm-lld.py`、
 `tests/modules/projects/llvmlink/`；修改 `vendor/llvm/sdk.lock.json`、
 `tools/llvm-sdk.py`、`tools/llvm-host.py`、`Makefile`、
 `compiler/cmd/link_cache.yh`（`mb_link`）与 `compiler/cmd/driver.yh`。
@@ -522,33 +582,39 @@ yh 侧组装 `ld.lld` 风格 argv 与有界诊断缓冲，shim 调 `lld::lldMain
 返回 0 成功、-1 失败。不使用 lld 的进程退出路径；`canRunAgain=false` 时 worker
 明确结束而不是继续复用。链接器版本、目标与输出类型进入对象/链接缓存键。
 
-- [ ] **L9L-1 SDK 固定与裁剪决策**：`sdk.lock.json` 增加 `liblld-21`、`liblld-21-dev`
-  （全量方案另加 `libpolly-21-dev`）的 URL/SHA-256 与组件清单；身份记录纳入 lld
-  归档哈希。全量实测约 123–141 MB；是否改用源码构建
-  `LLVM_TARGETS_TO_BUILD=X86;AArch64` + 关 Polly 的裁剪版在此片一次决定并记录。
-- [ ] **L9L-2 shim 与探针**：shim 只做参数转递、输出捕获和 C ABI 边界；
-  `tests/selfhost/llvm-lld.py` 在无系统 cc/lld 的 PATH 下链接 `_start` 探针并运行，
-  对照 gcc 链接的行为（退出码、ELF machine=62、NEEDED 不含 LLVM/lld）。
-- [ ] **L9L-3 驱动接入**：`compiler/cmd/link_cache.yh` 的 `mb_link` 切到进程内 lld，
-  yh 侧负责 CRT/libc/动态加载器发现与 argv 组装；过渡先用宿主
-  `gcc -print-file-name`/`-print-search-dirs` 取路径，自举阶段改
-  `-nostdlib` + 自有 `_start`。保留显式回落开关，缓存键不含绝对工具路径。
-- [ ] **L9L-4 交叉链接预研**：同一 lld 包含 MachO/COFF 方言，用
+- [x] **L9L-1 SDK 固定与裁剪决策**：`sdk.lock.json` 固定 Ubuntu LLVM/LLD 21.1.8 包 URL、
+  SHA-256、六个 lld 归档和许可文件；内嵌链接选择 Common/ELF/MachO/COFF 四个归档，
+  Wasm/MinGW 归档随包保留但不进入链接组。LLVM 仍使用 226 个组件并包含 Polly 静态库；
+  本片采用已校验发行包，不新增源码裁剪构建流程，接受其体积与构建依赖成本。
+- [x] **L9L-2 shim 与探针**：`tests/selfhost/llvm-lld.py` 在空 PATH 下从同一个 shim 进程
+  重复链接 ELF，再验证 lld 错误诊断截断、退出码和失败不发布；并检查 ELF machine=62、
+  Mach-O/PE 文件头、gcc 结果和无 LLVM/lld 动态依赖。该门通过。
+- [x] **L9L-3 驱动接入**：项目 `mb_link` 与单文件 `-o` 都通过一次性链接 worker 调用内嵌
+  `lld::lldMain`，在链接前收集/哈希 CRT、动态加载器、默认库、项目库及搜索环境；
+  输出经 machine 校验后 rename 发布。失败时保留旧产物。LLVM gcc shim 对编译器缓存所需的
+  `-print-*`/`-dump*` 查询透传给真实宿主驱动；非 Linux/x64 或无内嵌 lld 时仍走明确回落。
+- [x] **L9L-4 交叉链接预研**：同一 lld 包含 MachO/COFF 方言，用
   `-t darwin`/Windows 探针验证 Linux 宿主产 Mach-O/COFF；macOS ad-hoc 签名与
-  Windows 导入库不在本片，只记录边界与 F2/F3 接入条件。
-- [ ] **L9L-5 政策与文档**：ADR-0014 增补「链接器内嵌」决定（原文「平台链接驱动仍是
-  显式依赖」改为「LL9L 前可回落、LL9L 后用内嵌 lld」）；设计 §7、许可与发行说明同步；
+  Windows 导入库不在本片；探针通过不代表 macOS/Windows 生产支持，接入条件留给 F2/F3。
+- [x] **L9L-5 政策与文档**：ADR-0014、设计 §3.2/§7、实施方案与完成记录已同步内嵌
+  lld 的平台范围、一次性 worker、固定 SDK、许可和回落政策；
   不删除 gcc 回落路径，也不改写 asm/ 冻结与 link/ 暂停的结论。
-- [ ] **L9L-6 LL10 汇合**：LL10 连续自编在 L9L-3 验收后显式使用内嵌 lld，
-  至少最终一代不再经过 gcc 包装器；核对 lld 版本身份、`readelf -d` 与固定点。
+- [x] **L9L-6 LL10 汇合**：2026-10-18 `make selfhost-llvm` 生成 Linux/x86_64 ELF machine=62
+  的 A/B/C/D；B/C/D 自编未调用 gcc wrapper，D-O0/O2 内嵌 lld 身份均为 SDK 锁定的 21.1.8，
+  `readelf -d` 未发现 LLVM/lld 动态依赖，O0/O2 的 B→C、C→D 各 24 个 `.ll/.s.i/.s.ct`
+  产物逐字节一致；O0/O2 的最终语言、模块、项目及缓存/驱动专项门全部通过，详见 LL10 完成记录。
 
-**验证：**`python3 tests/selfhost/llvm-lld.py`（隔离 PATH 链接并运行）、
-gcc 产物差分（退出码/stdout/动态依赖）、`make test` 与 `make selfhost-native`
-保持全绿；`readelf -d` 无 libLLVM/liblld。
+**验证：**`python3 tests/selfhost/llvm-lld.py`（隔离 PATH 下 ELF/Mach-O/PE 探针、重复链接、
+失败事务与 gcc 对照）、`python3 tests/selfhost/llvm-host.py --host linux-x86_64`、
+`--host linux-aarch64`、`make test` 与 `make selfhost-native`；检查链接器产物无
+libLLVM/liblld 动态依赖。2026-10-18 内嵌 lld 探针、LLVM 驱动专项及 L9L-6 x64 原生链接、
+版本身份、动态依赖与固定点均已通过。LL10 O0 项目 runner 曾因 PATH 专项找不到候选名 `yh` 失败；
+`tests/modules/build-check.py` 增加临时 `yh` 启动链接后，完整 `make selfhost-llvm` 复跑通过，
+O0/O2 项目门均为 104/104，详见 LL10 完成记录。
 
 **边界：**本片不做 lld 源码完整裁剪流水线、不做 macOS 签名（TC10 独立）、
-不实现 Windows 启动/导入库；不把内嵌 lld 作为 LL3–LL9 的前置，未验收前默认仍走
-平台 cc。
+不实现 Windows 启动/导入库；LL3–LL9 在各自验证中可以使用平台 cc，不以 lld 为前置。
+LL9L 后 Linux/x86_64 启用内嵌 lld，其他未接入目标仍走平台 cc 回落。
 
 ## LL10：连续 x64 原生 LLVM 自编与硬门汇合（LLVM-10、12、14、15、16）
 
@@ -561,18 +627,32 @@ tests/selfhost/native-selfhost.py 与专项 runner、`.github/workflows/ci.yml`�
 启动种子与候选目标分别记录，输出候选世代及精确产物清单，不滚种子。
 链接步在 LL9L 验收后使用内嵌 lld（至少最终一代不经过 gcc 包装器）。
 
-- [ ] 固定点脚本先测试缺 `.ll`、错接口版本、代号/目录变化与后端误用被拒绝。
-- [ ] 按设计 §7 用旧 ARM64 种子经 qemu 产 A，A 显式 LLVM x64 产 B，
-  B/C/D 检查 ELF machine=62 后直接原生连续自编；O0 与 O2 分别验证相邻候选固定点。
-- [ ] 用最终原生 D 自解析、全量语法/运行/模块/项目检查和 runtime/缓存/来源专项门；
+- [x] 固定点脚本先测试缺 `.ll`、错接口版本、代号/目录变化与后端误用被拒绝。
+- [x] 按设计 §7 用旧 ARM64 种子经 qemu 产 A，A 显式 LLVM x64 产 B，
+  B/C/D 检查 ELF machine=62 后直接原生连续自编；2026-10-18 O0 与 O2 的 B→C、C→D
+  固定点分别通过，每组 24 个 `.ll/.s.i/.s.ct` 逐字节一致。
+- [x] 用最终原生 D 自解析、全量语法/运行/模块/项目检查和 runtime/缓存/来源专项门；
   新模式的原生候选和程序不得由 qemu-aarch64 代执行。
-- [ ] 核对 compiler/、asm/、link/、libs/ 实际消费能力全部覆盖，LLVM fallback=0；
-  与 R2b 任务私有状态、真正线程池、增量/并发/确定性硬门汇合。
-- [ ] CI 首期将 Linux/x86_64 原生作为新默认候选验收；已有 Linux/ARM64 和 macOS
+- [x] 核对 compiler/、asm/、link/、libs/ 实际消费能力全部覆盖，LLVM fallback=0；
+  对齐并记录 R2b 任务私有状态、真正线程池、增量/并发/确定性硬门的当前状态。R2b 独立实施项
+  不由 LLVM 门结果代替，未关闭前继续阻挡 LL11 默认切换。
+- [x] CI 首期将 Linux/x86_64 原生作为新默认候选验收；已有 Linux/ARM64 和 macOS
   种子保留过渡状态，ARM64 LLVM 迁移在 F1，不在本阶段宣称其他目标已迁移。
 
 **验证：**`make test-llvm`、`make selfhost-llvm` 在任务实现后退出 0；
 O0/O2 的 `.ll/.s.i/.s.ct` 候选固定点、实际覆盖、所有运行门有完整日志。
+
+**2026-10-18 完成验收：**Linux/WSL x86_64 上，`make test-llvm` 与 `make selfhost-llvm`
+均退出 0。最终 D 自解析 98/98；O0/O2 分别通过语言 343/343、模块 18/18、项目 104/104；
+LL9L、项目缓存、驱动和 runtime-memory 专项通过。无限循环带条件返回的 lowering 已修正并由
+`tests/yh-run/run/203-llvm-infinite-loop-return.yh` 覆盖。`asm/` 4 模块 checked/emitted
+298/298、`link/` 6 模块 197/197，fallback=0；`libs/` 由标准库项目用例覆盖。种子
+`bin/yh-linux-arm64` SHA-256 为 `8ea2a9acc20438b385ccddd522b50b8dd4749423c8db2695c758296ada343b8c`；
+A/B/C/D 均为 ELF machine=62，O0/O2 B→C、C→D 的 24 个 `.ll/.s.i/.s.ct` 均逐字节一致。
+完整记录见 [LL10 完成记录](../01-finished/yh-LLVM-LL10-x64原生自举-2026-10-18.md)。
+
+**边界：**R2b 真线程池与任务私有上下文仍未实现，继续作为 LL11 默认切换硬门；fork worker
+的通过不等同于线程池完成。
 
 ## LL11：性能评估与 x64 默认切换（LLVM-11、13、15）
 

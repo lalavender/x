@@ -3,7 +3,7 @@
 
 验收（与实施方案 LL5 局部数据/副本切片对应）：
   * 结构体/联合体绑定 ALLOCA 字节存储；字段地址按快照字段表偏移走 GEP；
-  * 结构体字面量逐字段写入（含嵌套字面量/结构体数组）；按值复制用 memcpy；
+  * 结构体字面量逐字段写入（含嵌套字面量/结构体数组）；按值复制用 memmove；
   * 未初始化 `let`（标量/聚合）与联合体共享存储按旧后端语义工作；
   * O0 文本与 `default<O2>` 管线后的对象分别汇编、链接并原生运行；
   * 切片等尚未支持的聚合形态必须带来源拒绝。
@@ -132,7 +132,7 @@ def main():
     for level in (0, 2):
         llfile = WORK / f"struct-O{level}.ll"
         text = emit_text(compiler, source, level, llfile)
-        for token in ("= alloca i8", "getelementptr i8, ptr", "llvm.memcpy"):
+        for token in ("= alloca i8", "getelementptr i8, ptr", "llvm.memmove"):
             assert token in text, f"O{level} 文本缺少结构体 lowering 痕迹: {token}\n{text[-800:]}"
         verify = run([tools["opt"], "-passes=verify", "-S", str(llfile), "-o", os.devnull])
         assert verify.returncode == 0, f"O{level} opt 验证失败\n{verify.stderr[-1200:]}"

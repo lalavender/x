@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""LL9 项目缓存门：目标隔离、工具身份、对象校验与失败发布。"""
+
+import argparse
+import os
+import platform
+import shutil
+import struct
+import subprocess
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+FIXTURE = ROOT / "tests/modules/projects/llvmcache"
+TARGET = "x86_64-unknown-linux-gnu"
+
+
+def run(command, cwd, env):
+    """运行一个测试子进程并保留原始输出。"""
+    return subprocess.run(command, cwd=cwd, env=env, capture_output=True,
+                          text=True, timeout=300)
+
+
+def machine(path):
+    """读取 ELF e_machine，返回目标机型编号。"""
+    data = path.read_bytes()
+    if len(data) < 20 or data[:4] != b"\x7fELF":
+        return -1
+    return struct.unpack_from("<H", data, 18)[0]
+
+
+def content_hash(data):
+    """按编译器 manifest 约定计算 FNV，复现可配对的损坏 machine 输入。"""
+    value = 3421674725 << 32 | 2216829733
+    full = len(data) // 8 * 8
+    for offset in range(0, full, 8):
+        value = ((value ^ int.from_bytes(data[offset:offset + 8], "little"))
+                 * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    for byte in data[full:]:
+        value = ((value ^ byte) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return f"{value:016x}".encode()
+
+
+def build(compiler, project, output, env, target=TARGET, level=0):
+    """用显式后端参数构建测试项目到指定输出路径。"""
+    return run([str(compiler), "--backend", "llvm", "--target", target,
+                f"-O{level}", "build", "--stats", "-o", str(output)],
+               cwd=project, env=env)
+
+
+def build_archive(compiler, source, archive, env):
+    """编译测试用静态库，保持库名和搜索目录不变以检测内容失效。"""
+    object_path = source.with_suffix(".o")
+    compiled = run([compiler, "-c", str(source), "-o", str(object_path)],
+                   cwd=source.parent, env=env)
+    assert compiled.returncode == 0, compiled.stdout + compiled.stderr
+    archived = run(["ar", "rcs", str(archive), str(object_path)],
+                   cwd=source.parent, env=env)
+    assert archived.returncode == 0, archived.stdout + archived.stderr
+
+
+def write_link_wrapper(wrapper, linker, marker):
+    """记录每次 cc 调用，确认内嵌 lld 路径不 fork 驱动或链接器。"""
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'printf "{marker}\\n" >> "$YH_LLVM_CACHE_LOG"\n'
+        f'exec "{linker}" "$@"\n', encoding="utf-8")
+
+
+def main():
+    """验证 LLVM 项目缓存与同名输出切换的完整发布边界。"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--compiler-path", default=str(ROOT / "yh"))
+    args = parser.parse_args()
+    compiler = Path(args.compiler_path).resolve()
+    if not compiler.is_file():
+        raise SystemExit(f"编译器不存在: {compiler}")
+    gcc = "/usr/bin/gcc" if Path("/usr/bin/gcc").is_file() else shutil.which("gcc")
+    if not Path(gcc).is_file():
+        raise SystemExit("缺少可运行的 x86_64 gcc")
+
+    temp_root = ROOT / "tmp"
+    temp_root.mkdir(exist_ok=True)
+    work = temp_root / "llvm-cache-空间 test"
+    shutil.rmtree(work, ignore_errors=True)
+    project = work / "项目 with spaces"
+    shutil.copytree(FIXTURE, project)
+    tools = work / "tools"
+    tools.mkdir(parents=True)
+    wrapper = tools / "gcc-fixed-path"
+    log = work / "link.log"
+    write_link_wrapper(wrapper, gcc, "v1")
+    wrapper.chmod(0o755)
+    env = dict(os.environ)
+    env["YH_CC"] = str(wrapper)
+    env["YH_LLVM_CACHE_LOG"] = str(log)
+    output = work / "程序 输出"
+
+    cold = build(compiler, project, output, env)
+    assert cold.returncode == 0, cold.stdout + cold.stderr
+    assert machine(output) == 62, f"冷构建产物 machine={machine(output)}"
+    assert subprocess.run([str(output)]).returncode == 42
+    assert not log.exists(), "LLVM x64 最终链接不应 fork cc/ld"
+
+    cache = project / ".build/targets" / TARGET / "llvm/O0"
+    obj = next((cache / "obj").glob("*.o"))
+    manifest = cache / "manifest/llvmcache-main.manifest"
+    hot = build(compiler, project, output, env)
+    assert hot.returncode == 0, hot.stdout + hot.stderr
+    assert "[缓存] main" in hot.stdout, hot.stdout
+    assert not log.exists(), "LLVM x64 热链接不应 fork cc/ld"
+
+    write_link_wrapper(wrapper, gcc, "v2")
+    tool_changed = build(compiler, project, output, env)
+    assert tool_changed.returncode == 0, tool_changed.stdout + tool_changed.stderr
+    assert "[缓存] main" in tool_changed.stdout, tool_changed.stdout
+    assert not log.exists(), "LLVM x64 缓存身份不应查询或执行 YH_CC"
+
+    obj.write_bytes(b"corrupt object\n")
+    repaired = build(compiler, project, output, env)
+    assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+    assert "[编译] main" in repaired.stdout, repaired.stdout
+    assert machine(obj) == 62, "损坏对象未被重建为 x86_64 ELF"
+    assert subprocess.run([str(output)]).returncode == 42
+    damaged_manifest = bytearray(manifest.read_bytes())
+    damaged_manifest[-1] = ord("0") if damaged_manifest[-1] != ord("0") else ord("1")
+    manifest.write_bytes(damaged_manifest)
+    repaired_manifest = build(compiler, project, output, env)
+    assert repaired_manifest.returncode == 0, \
+        repaired_manifest.stdout + repaired_manifest.stderr
+    assert "[编译] main" in repaired_manifest.stdout, repaired_manifest.stdout
+    iface = project / ".build/targets" / TARGET / "llvm/O0/iface/llvmcache-main.s.i"
+    iface.write_bytes(iface.read_bytes() + b"damaged interface\n")
+    repaired_iface = build(compiler, project, output, env)
+    assert repaired_iface.returncode == 0, repaired_iface.stdout + repaired_iface.stderr
+    assert "[编译] main" in repaired_iface.stdout, repaired_iface.stdout
+
+    before = output.read_bytes()
+    wrong_target = build(compiler, project, output, env,
+                         target="aarch64-unknown-linux-gnu")
+    assert wrong_target.returncode != 0, "x86_64 链接器接受了 AArch64 对象"
+    arm_obj = project / ".build/targets/aarch64-unknown-linux-gnu/llvm/O0/obj/llvmcache-main.o"
+    assert arm_obj.is_file() and machine(arm_obj) == 183, \
+        "目标切换复用了错误机型的对象"
+    assert output.read_bytes() == before, "目标链接失败覆盖了旧可执行文件"
+    assert subprocess.run([str(output)]).returncode == 42
+    arm_manifest = arm_obj.parent.parent / "manifest/llvmcache-main.manifest"
+    wrong_object = obj.read_bytes()
+    arm_obj.write_bytes(wrong_object)
+    paired = bytearray(arm_manifest.read_bytes())
+    paired[16:] = content_hash(wrong_object)
+    arm_manifest.write_bytes(paired)
+    wrong_machine = build(compiler, project, output, env,
+                          target="aarch64-unknown-linux-gnu")
+    assert wrong_machine.returncode != 0 and "[编译] main" in wrong_machine.stdout, \
+        wrong_machine.stdout + wrong_machine.stderr
+    assert machine(arm_obj) == 183, "错误 machine 与配对 manifest 被缓存命中"
+    assert output.read_bytes() == before, "错误 machine 对象覆盖了旧可执行文件"
+
+    arm_gcc = shutil.which("aarch64-linux-gnu-gcc")
+    if arm_gcc is None:
+        bundled_arm_gcc = ROOT / "tmp/boot/crossbin/aarch64-linux-gnu-gcc"
+        if bundled_arm_gcc.is_file():
+            arm_gcc = str(bundled_arm_gcc)
+    if arm_gcc is None and platform.machine().lower() in ("aarch64", "arm64"):
+        arm_gcc = gcc
+    if arm_gcc is not None:
+        write_link_wrapper(wrapper, arm_gcc, "arm64")
+        switched = build(compiler, project, output, env,
+                         target="aarch64-unknown-linux-gnu")
+        assert switched.returncode == 0, switched.stdout + switched.stderr
+        assert machine(output) == 183, "同名输出切换到 AArch64 后 machine 不正确"
+
+        write_link_wrapper(wrapper, gcc, "x64")
+        restored = build(compiler, project, output, env)
+        assert restored.returncode == 0, restored.stdout + restored.stderr
+        assert machine(output) == 62 and subprocess.run([str(output)]).returncode == 42, \
+            "同名输出从 AArch64 切回 x86_64 后没有恢复正确程序"
+
+    optimized = build(compiler, project, output, env, level=2)
+    assert optimized.returncode == 0, optimized.stdout + optimized.stderr
+    assert (project / ".build/targets" / TARGET / "llvm/O2/obj").is_dir(), \
+        "O2 未使用独立缓存命名空间"
+    assert machine(output) == 62 and subprocess.run([str(output)]).returncode == 42
+
+    # 同名静态库内容变更必须使最终链接缓存失效。
+    library_project = work / "静态库项目"
+    shutil.copytree(ROOT / "tests/selfhost/fixtures/llvmcachelib", library_project)
+    library_dir = work / "link-libraries"
+    library_dir.mkdir()
+    archive = library_dir / "libcacheprobe.a"
+    library_source = work / "cacheprobe.c"
+    library_env = dict(env)
+    library_env["LIBRARY_PATH"] = str(library_dir)
+    library_log = work / "library-link.log"
+    library_env["YH_LLVM_CACHE_LOG"] = str(library_log)
+    write_link_wrapper(wrapper, gcc, "library-link")
+    library_output = work / "静态库结果"
+    library_source.write_text(
+        "int cache_probe(void) { return 42; }\n", encoding="utf-8")
+    build_archive(gcc, library_source, archive, library_env)
+    library_cold = build(compiler, library_project, library_output, library_env)
+    assert library_cold.returncode == 0, library_cold.stdout + library_cold.stderr
+    assert subprocess.run([str(library_output)]).returncode == 42
+    assert not library_log.exists(), "LLVM x64 库链接不应 fork cc/ld"
+
+    library_source.write_text(
+        "int cache_probe(void) { return 43; }\n", encoding="utf-8")
+    build_archive(gcc, library_source, archive, library_env)
+    library_changed = build(compiler, library_project, library_output, library_env)
+    assert library_changed.returncode == 0, \
+        library_changed.stdout + library_changed.stderr
+    assert not library_log.exists(), "LLVM x64 库链接不应 fork cc/ld"
+    assert subprocess.run([str(library_output)]).returncode == 43, \
+        "静态库内容变化后复用了旧可执行文件"
+
+    before_failed_link = library_output.read_bytes()
+    archive.unlink()
+    failed_library_link = build(compiler, library_project, library_output, library_env)
+    assert failed_library_link.returncode != 0, \
+        "内嵌 lld 应拒绝缺失的项目静态库"
+    assert library_output.read_bytes() == before_failed_link, \
+        "内嵌 lld 链接失败覆盖了旧可执行文件"
+    assert subprocess.run([str(library_output)]).returncode == 43, \
+        "内嵌 lld 链接失败后旧可执行文件不可运行"
+    assert not library_log.exists(), "内嵌 lld 链接失败不应 fork cc/ld"
+
+    print("LLVM 项目缓存通过：热命中、工具版本变化、损坏对象修复、目标隔离、失败保留旧产物与路径空格/中文")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

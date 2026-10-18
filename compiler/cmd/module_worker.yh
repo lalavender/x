@@ -9,8 +9,8 @@ import backend;
 // module_worker.yh：在 fork 继承的项目快照上初始化私有语义状态并编译单个模块。
 
 // mb_llvm_module_paths：算出本模块的 LLVM 产物路径与审阅文本路径。
-// 对象放在 .build/asm/<tag>.o（与旧 .s 同目录，便于链接步统一收集），
-// 文本放在 .build/llvm/<tag>.ll；两者都用 mb_mod_tag 生成的项目+模块标记防同名冲突。
+// 对象放在当前目标命名空间的 obj/<tag>.o，文本放在 llvm/<tag>.ll；
+// 两者都用 mb_mod_tag 生成的项目+模块标记防同名冲突。
 // 返回 0 成功；任一缓冲不足或标记失败返回 -1。
 fn mb_llvm_module_paths(m int, main_off int, main_len int,
     obj_out *u8, text_out *u8) int {
@@ -22,7 +22,7 @@ fn mb_llvm_module_paths(m int, main_off int, main_len int,
     if (mb_mod_tag(m, &tag_off, &tag_len) != 0) { return -1; }
     let n int = 0;
     n = gen.append_str(obj_out, n, pj_pool_str(build_off));
-    n = gen.append_str(obj_out, n, "/asm/");
+    n = gen.append_str(obj_out, n, "/obj/");
     n = gen.append_str(obj_out, n, pj_pool_str(tag_off));
     n = gen.append_str(obj_out, n, ".o");
     obj_out[n] = 0;
@@ -67,6 +67,7 @@ fn mb_llvm_emit_module(m int, main_off int, main_len int) int {
     if (lowered != 0) {
         return -1;
     }
+    gs.c_stats_checked_functions += mod_ir.function_count;
     let output backend.LLVMOutput;
     if (backend.llvm_emit_module(&mod_ir, &gs.c_target, &output) != 0) {
         ir.ir_module_release(&mod_ir);
@@ -90,9 +91,17 @@ fn mb_llvm_emit_module(m int, main_off int, main_len int) int {
             close(text_fd);
         }
     }
+    let object_tmp [800]u8;
+    let temp_len int = gen.append_str(&object_tmp[0], 0,
+        gen.arr_cstr(&obj_path[0]));
+    temp_len = gen.append_str(&object_tmp[0], temp_len, ".tmp.");
+    temp_len = gen.append_int(&object_tmp[0], temp_len, getpid());
+    object_tmp[temp_len] = 0;
+    unlink((&object_tmp[0]).to_type(*char));
     let reason [backend.LLVM_BRIDGE_DIAG]u8;
     if (backend.llvm_bridge_emit(output.text.to_type(*char), output.length,
-            gs.c_target.triple, gs.c_opt_level, 0, gen.arr_cstr(&obj_path[0]),
+            gs.c_target.triple, gs.c_opt_level, 0,
+            (&object_tmp[0]).to_type(*char),
             (&reason[0]).to_type(*char)) != 0) {
         let buffer [2048]u8;
         let n int = gen.append_str(&buffer[0], 0, "错误: LLVM 后端: ");
@@ -100,9 +109,24 @@ fn mb_llvm_emit_module(m int, main_off int, main_len int) int {
             reason[0] == 0 ? "内嵌桥拒绝该模块（诊断缓冲为空）" : gen.arr_cstr(&reason[0]));
         n = gen.append_byte(&buffer[0], n, '\n');
         gen.write_all(2, &buffer[0], n);
+        unlink((&object_tmp[0]).to_type(*char));
         backend.llvm_output_release(&output);
         ir.ir_module_release(&mod_ir);
         return -1;
+    }
+    if (mb_object_machine_matches((&object_tmp[0]).to_type(*char)) == 0) {
+        unlink((&object_tmp[0]).to_type(*char));
+        backend.llvm_output_release(&output);
+        ir.ir_module_release(&mod_ir);
+        return gen.fail_path("LLVM 桥发出的对象架构与 target 不符: ",
+            gen.arr_cstr(&obj_path[0]));
+    }
+    if (rename((&object_tmp[0]).to_type(*char),
+            gen.arr_cstr(&obj_path[0])) != 0) {
+        unlink((&object_tmp[0]).to_type(*char));
+        backend.llvm_output_release(&output);
+        ir.ir_module_release(&mod_ir);
+        return gen.fail_path("无法发布 LLVM 对象: ", gen.arr_cstr(&obj_path[0]));
     }
     gs.c_stats_backend_emitted += output.emitted;
     backend.llvm_output_release(&output);
@@ -316,7 +340,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
         return gen.fail("内部错误：函数 AST 上下文校验失败");
     }
     // check 也通过真实受检快照边界，确认合法输入不依赖旧输出或可变语义表。
-    // LLVM 模式在同一边界上继续 lowering 并发布对象，因此不走下面的 check 分支。
+    // LLVM 编译继续 lowering 并发布对象；check 只验证受检快照，不触发后端发射。
     if (gs.c_check_only != 0) {
         let checked ast.CheckedModule;
         if (gen.front_checked_verify() != 0
@@ -327,7 +351,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     }
     // LLVM 后端：受检快照 → 模块 IR → LLVM 文本 → 内嵌桥发布对象。
     // 不进入旧 SSA 替换与机器发射，也不写任何 .text/.data/.bss。
-    if (gs.c_backend != 0) {
+    if (gs.c_backend != 0 && gs.c_check_only == 0) {
         if (mb_llvm_emit_module(m, main_off, main_len) != 0) { return -1; }
         if (gen.front_checked_end() != 0) { return -1; }
         mb_print_stats();

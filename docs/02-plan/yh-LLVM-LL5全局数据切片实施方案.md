@@ -98,7 +98,7 @@
 ## 3. 门禁
 
 1. `llvmlower` 项目：`input/global.yh` 转正向（零初始化/标量/数组/结构体/
-   嵌套/const 聚合/字符串/读写）；新增 `input/globalreject.yh` 拒绝负例
+   嵌套/const 聚合/字符串/读写/整数切片全局）；新增 `input/globalreject.yh` 浮点切片全局拒绝负例
    （切片全局、指针非零、`$` CT）；`llvm-lower.py` 与 `build-check.py` 同步。
 2. 新增 `tests/selfhost/llvm-global.py`：O0/O2 文本断言
    （`[N x i8]`/zeroinitializer/internal global/GETELEMENTPTR 全局取址）

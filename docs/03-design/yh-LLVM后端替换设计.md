@@ -74,6 +74,9 @@ flowchart LR
   不把 GenState 中临时 type_id 或指针地址持久化为缓存身份。
 - 聚合先按有类型的位置、显式复制和存储处理；可变局部存储采用入口 alloca。
   不要求先完成自研 MemorySSA、机器 IR 或寄存器分配器。
+- `for-in` 使用计数 phi 构造循环：数组/切片按长度迭代，整数区间按左闭右开边界迭代；
+  序列和区间端点在循环前求值一次，元素绑定每轮取值，聚合元素按值复制，可选下标为
+  从零开始的 `i32`。`continue` 与自然回边都递增计数后返回循环头。
 - 现有正确 SSA/phi 直接复用；LLVM 负责通用优化、phi 消解、指令选择、寄存器分配和栈帧。
 
 ### 3.2 LLVM 发射与工具驱动
@@ -87,7 +90,10 @@ flowchart LR
   llvm-as/opt/clang 仅用于开发差分，不是 yh 正常运行依赖。
 - 固定配置采用通用 CPU，不使用 `-march=native`；O0/O2、CPU/features、布局、重定位模式
   都是显式代码生成输入。Linux 首期维持非 PIE 可执行策略。
-- 链接子进程使用 argv，不经 shell；链接驱动绝对路径及内容身份被记录。
+- 链接参数按 argv 传递，不经 shell。Linux/x86_64 由静态内嵌 lld 链接；
+  `lld::lldMain` 在一次性 fork worker 中执行，避免复用 lld 的进程级状态。
+  固定 CRT、加载器、默认库、额外库及环境搜索路径内容都进入链接缓存身份。
+  其他尚未接入 lld 的宿主/目标保留显式平台驱动回落。
   LLVM 版本、SDK 包哈希、桥 ABI 和后端实现身份直接纳入对象缓存，不使用 `YH_LLVM_BIN`。
 - 薄桥只封装 LLVM 的生命周期和 C API，不承担 yh 语义、AST lowering 或 ABI 设计。
   LLVM 静态库链接进编译器，禁止依赖 `libLLVM.so`、dlopen 或 LLVM 工具旁车。
@@ -177,22 +183,52 @@ LLVM 对象统一用 `[N x i8]` 保留大小、填充和对齐。
 物理对象的可写性不能从源 `const` 绑定直接推导：现有裸指针允许修改字符串
 和聚合常量的后备存储，因此本片均发射可写 `global`，保留 pub/private linkage。
 前端继续实施 const 直接左值限制。静态非零指针重定位、CT backing、导入常量
-副本与全局切片仍需后续独立验收，不能把旧数据标签当作 LLVM 机器地址。
+副本与全局切片于 2026-10-17 完成 LL5 全量验收：Gen 静态目录只拥有字节、类型/布局
+和符号或数据标签重定位；CT `CtAggregate` 视图仅在序列化期间临时借用，按元素槽
+关系还原完整 owner 与目标字节 addend，不把执行器地址写入快照。`CheckedModule`
+深拷贝静态对象与重定位后独立 lowering，IR verifier 检查对象范围、对齐、目标和
+重定位槽冲突，LLVM 发射完整字节数组及带正负 addend 的符号地址。全局切片由长度
+和 backing 指针组成；跨模块 `pub const` 聚合在消费者重放 `.s.i/.s.ct` 后生成本地
+副本，私有对象保持模块内可见。聚合复制映射为允许重叠的 `memmove`，显式运行时
+`memcpy` 仍保留不重叠契约。详见 [LL5 全量完成记录](../01-finished/yh-LLVM-LL5全量收尾-2026-10-17.md)。
+
+LL5 仍明确拒绝语言/目标尚未支持的全局 union 初值、任意 CT 指针逃逸、浮点全局
+字段和无效布局/越界重定位；这些由负例锁定。生产 CLI 的全模块 LLVM 驱动、完整
+缓存键与事务发布仍归 LL9，LL5 的测试项目闭环不代表 LL9 完成。
+
+2026-10-17 LL6 已完成浮点标量 lowering：`CheckedModule` 将 f32/f64 映射为 LLVM
+`float`/`double`；常量从 IEEE 位型重解释，f32 在每个运算边界窄化，比较使用 IEEE
+谓词，且不加 fast-math。浮点转整数使用饱和 i64 转换后按源宽度截断，整数转浮点按
+源符号性选择转换；浮点局部值支持 alloca/load/store，复制保持位型以保留负零。
+O0/O2 专项验收见 [LL6 完成记录](../01-finished/yh-LLVM-LL6浮点标量-2026-10-17.md)。
+LL5 对全局浮点字段和全局初始化的拒绝边界仍有效。
 
 ### 5.3 运行时
 
-语言生成的 memcpy/清零及 LLVM 自动引入的辅助调用必须由明确的目标运行时提供。
-先将现有 malloc/free/printf/memcpy/strlen 语义迁成可由 LLVM 编译的 yh/IR 实现，
-补齐确实需要的 memset 等入口；保留 Linux OS 接口与现行导入审计。
+语言生成的 memcpy/清零及 LLVM 自动引入的辅助调用由目标运行时提供。LL8a/LL8b
+已在 YH LLVM emitter 中生成弱定义与 `llvm.used`：`memcpy`、`memset`、`memmove`、
+`strlen`、`malloc`、`free`、`printf` 和 Linux x86_64 `linux_syscall6`。模块只发射
+需要的 allocator/printf/syscall 入口，基础内存 helper 按现行契约提供；运行时入口
+通过 O0/O2 对象符号和反汇编检查，阻止 helper 被 LLVM 优化成自调用 libcall。
 
-辅助入口使用符合目标的调用签名；运行时实现本身通过独立低优化策略、O0/O2 和
-符号/反汇编检查避免“优化为调用自身”。不认为 freestanding 编译选项能替代 libcall 审计。
-普通模块允许声明其他模块符号；只有自包含 runtimebytes fixture 按原门要求无未定义符号。
+Linux/x86_64 运行时以 `mmap/munmap` 实现 16 字节对齐分配与释放，分配头保存映射大小；
+`printf` 覆盖现有 yh runtime 使用的 `%d/%i/%u/%lld/%llu/%s/%c/%%`，按 UTF-8 字节输出，
+处理 write 短写并在输出错误时返回 -1。它不实现宽度、精度、浮点格式或 locale，与旧
+ARM64 自有格式化入口范围一致。默认 `runtime-memory.py` 仍完整检查原 runtimebytes
+禁止导入和 Linux ARM64 汇编门；`--llvm-x64` 为 LLVM runtime 对象追加 allocator、
+格式化、内存和 syscall/libcall 未定义符号审计。
 
-Linux/x86_64 的 syscall 桥及编译器目录/时钟/内存/进程适配是首期阻塞项。
-旧 ARM64 种子不理解新架构文件筛选时，先在现有 `.linux.yh` 内使用它已支持的
-`$if arm64` / `$else` 选择实现；不能让旧种子同时编入两个同名架构实现。
-迁移后按编译器自身构建目标实例化宿主桥，按输出目标实例化程序运行时。
+Linux/x86_64 的目录和单调时钟调用使用 `.linux.x64.yh` 实现，ARM64 仍使用独立的
+`.linux.arm64.yh` 文件，避免 syscall 编号/标志混用。通用 `process.yh` 沿用 C ABI
+`open/fork/execvp/exit/waitpid`，由 LL7 的 SysV 调用 lowering 承接。测试覆盖嵌套目录、中文与
+空格路径、getdents64 文件项、单调时钟、创建/关闭文件，以及 fork/execvp 执行 `/bin/true`
+并检查子进程状态。首期 LLVM runtime
+目标门限定 Linux/x86_64 SysV；ARM64 LLVM syscall/运行时与原生种子归 F1。
+
+程序对象仅允许本身使用的 OS/C ABI 符号未定义；runtime 入口、LLVM 内存 libcalls 和
+相关整数辅助 libcall 不得泄漏。编译器可执行文件仍允许其内嵌 LLVM 桥带来的 C++/SDK
+运行依赖，和程序运行时导入门分别审计。普通模块允许引用其他模块符号；自包含
+runtimebytes fixture 继续按原门要求无未定义符号。
 
 ## 6. CLI、产物、缓存和提交
 
@@ -204,10 +240,12 @@ Linux/x86_64 的 syscall 桥及编译器目录/时钟/内存/进程适配是首�
 - `--emit-llvm f.yh`：输出完整 LLVM 模块；`--emit-asm` 输出当前后端对应汇编。
 - build/run、单文件、模块 worker 共用目标和后端解析；check 不依赖 LLVM 工具存在。
 
-中间产物放 `.build/targets/<target-tag>/<backend>/<profile>/`，下分 llvm、iface、obj、
-manifest、ir。默认最终项目可执行文件仍按现有 `.build/<project.name>` 定位，
-其 manifest 明确记录目标命名空间，不能因为路径相同复用另一个目标的程序。
-临时研究产物仍全部放 tmp/。
+正式布局为 `.build/targets/<target-tag>/<backend>/<profile>/`，下分 llvm、iface、obj、
+manifest、ir。迁移期 LL9 已将 LLVM 中间产物放入
+`.build/targets/<triple>/llvm/O<level>/`；legacy 暂留原 `.build` 平面目录，待退役时再移除。
+默认最终项目可执行文件仍按现有 `.build/<project.name>` 定位；LLVM 的链接 manifest 位于
+目标命名空间并保存最终文件摘要，因此相同输出路径切换 target、后端或优化级别时不会
+误认另一个配置的程序。临时研究产物仍全部放 tmp/。
 
 `.s.i/.s.ct` 后缀在此轮保留，避免额外接口重命名。新增接口版本包含完整目标、布局
 和 yh ABI 身份；同目标旧接口只在明确的旧后端迁移路径读取，不跨 ABI 默认为兼容。
@@ -248,12 +286,12 @@ manifest 与旧内容的组合；补做缓存输入不会解决原有提交事�
    `make test` / `make selfhost-native`，最后才允许将验证过的 x64 候选滚为
    `bin/yh-linux-x64` 并生成独立 `.sha256`。ARM64 种子和哈希保留，不用 x64 产物覆盖。
 
-x64 对象由进程内 LLVM 生成，链接使用原生链接驱动绝对路径（本机 `/usr/bin/gcc`），
-不能误用 `tmp/boot/crossbin/gcc` 的 AArch64 包装器。
-2026-10-15 增补：用户要求把 lld 静态链接进 yh，链接步改为进程内完成。上面的
-「原生链接驱动绝对路径」仍是当前实现与回落路径，待
-[方案 §LL9L](../02-plan/yh-LLVM后端替换实施方案.md) 验收后切换，并同步 ADR-0014；
-可行性证据见 [实测记录](../01-finished/yh-内嵌lld可行性实测-2026-10-15.md)。
+x64 对象由进程内 LLVM 生成，Linux/x86_64 链接用固定 SDK 中的内嵌 lld，按目标机型
+检查后发布；编译器不会因 PATH 顺序误用 AArch64 gcc 包装器。`gcc` 仍用于发现宿主 CRT、
+加载器和库搜索目录，系统链接文件与库内容纳入链接缓存身份。Linux/AArch64 及尚未接入
+的 macOS/Windows 目标保留显式平台驱动回落；Mach-O/PE 探针只证明交叉格式可链接，
+不代表那些平台已进入生产支持。
+LL9L 探针与阶段记录见 [完成记录](../01-finished/yh-LLVM-LL9L内嵌lld-2026-10-18.md)。
 额外分发门：在没有 clang/llc/llvm-config/opt/llvm-as 和 libLLVM 动态库的隔离环境运行
 交付 yh，实际编译、链接、运行 `.yh`，并完成冷编自举。readelf 的 NEEDED 不含 LLVM。
 新 x64 种子未入库前，启动脚本显式选择旧 ARM64 种子；入库后本机日常构建显式/自动选 x64。
@@ -277,7 +315,7 @@ Linux/x86_64 首期顺序已由用户确认，其余按该路线推进；不把�
 - Windows：MSVC 目标路线、SDK/导入库、LLP64 的 C 类型、Win32 OS 桥、路径/Unicode、
   内存/时间/进程、启动和栈探测辅助函数。Windows/ARM64 与 x64 分别验证 ABI。
 - 宿主进程/文件操作按实际运行系统取值；sizeof、条件编译和程序运行时按输出目标取值。
-  不把 `.linux.yh` 的 ARM64 syscall 默认复用到 Linux/x86_64，也不把 WSL 当 Windows 宿主。
+  不把 `.linux.arm64.yh` 的 ARM64 syscall 默认复用到 Linux/x86_64，也不把 WSL 当 Windows 宿主。
 
 基准冻结输入、工具版本、目标和 profile，每类至少 20 个样本，报告无改动、单函数修改、
 冷编的中位数/p95/RSS/子进程数与生成程序运行性能。qemu 与原生结果分开，

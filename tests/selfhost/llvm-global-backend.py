@@ -60,7 +60,7 @@ def main():
     (WORK / "generator.log").write_text(result.stderr)
     assert result.returncode == 0, result.stderr
     assert 'global-backend.yh:2:1: 错误:' in result.stderr, result.stderr
-    assert "尚不支持数据重定位" in result.stderr and "尚不支持未定义全局" in result.stderr, result.stderr
+    assert "LLVM 模块未通过 IR verifier" in result.stderr and "尚不支持未定义全局" in result.stderr, result.stderr
     text = result.stdout
     assert '@"zero_pair" = internal global [16 x i8] zeroinitializer, align 16' in text
     assert '@".LD7" = internal constant [4 x i8] c"\\22\\5C\\FF\\00", align 1' in text

@@ -72,6 +72,7 @@ fn llvm_emit_module_to(unit *ast.CheckedModule, kind int, out_path *char,
         // lower_module 已按首片契约写好带来源的拒绝诊断，这里不再重复。
         return -1;
     }
+    gs.c_stats_checked_functions += mod_ir.function_count;
     let output backend.LLVMOutput;
     if (backend.llvm_emit_module(&mod_ir, &gs.c_target, &output) != 0) {
         ir.ir_module_release(&mod_ir);
@@ -121,6 +122,7 @@ fn llvm_emit_module_to(unit *ast.CheckedModule, kind int, out_path *char,
         stats.emitted = output.emitted;
         stats.text_length = output.length;
     }
+    gs.c_stats_backend_emitted += output.emitted;
     backend.llvm_output_release(&output);
     ir.ir_module_release(&mod_ir);
     return 0;
@@ -194,6 +196,7 @@ fn mb_llvm_semantics() int {
     if (parse.parse_indexed_decls(0) != 0 || gs.c_errors > 0) { return 1; }
     gs.c_pos = 0;
     if (ast.ast_decl_bind_file(0) != 0) { return 1; }
+    if (gen.sem_check_main() != 0) { return 1; }
     gs.c_pass = 2;
     gs.c_pos = 0;
     if (parse.parse_source_ct_fns() != 0 || gs.c_errors > 0) { return 1; }
@@ -239,6 +242,7 @@ fn llvm_emit_text_only(unit *ast.CheckedModule, text_path *char,
     let mod_ir ir.IRModule;
     let lowered int = ast.lower_module(unit, &mod_ir);
     if (lowered != 0) { return 1; }
+    gs.c_stats_checked_functions += mod_ir.function_count;
     let output backend.LLVMOutput;
     if (backend.llvm_emit_module(&mod_ir, &gs.c_target, &output) != 0) {
         ir.ir_module_release(&mod_ir);
@@ -271,6 +275,7 @@ fn llvm_emit_text_only(unit *ast.CheckedModule, text_path *char,
         stats.emitted = output.emitted;
         stats.text_length = output.length;
     }
+    gs.c_stats_backend_emitted += output.emitted;
     backend.llvm_output_release(&output);
     ir.ir_module_release(&mod_ir);
     return status;
@@ -279,7 +284,7 @@ fn llvm_emit_text_only(unit *ast.CheckedModule, text_path *char,
 // llvm_emit_single_file：单文件入口（--emit-asm / -o）在 LLVM 模式下的实现。
 // 调用方必须已完成会话初始化（state_init + 读源 + 语义表）并打开受检前端；
 // 本函数负责词法、单文件 PFile/声明索引、两遍语义、快照捕获与产物发布。
-// link 非 0：产物是**可执行文件**（对象先写临时文件再交给宿主 cc 链接）；
+// link 非 0：产物是**可执行文件**（对象与可执行文件先写临时文件，验机后发布）；
 // link 为 0：产物是**对象文件**（kind=0）或汇编文本（kind=1）。
 // text_path 非空时额外写出 LLVM 文本（"-" = 标准输出）。
 // 返回 0 成功、1 源/形态错误、-1 内部或桥失败。
@@ -303,11 +308,17 @@ fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
     let object [620]u8;
     let on int = 0;
     let emit_path *char = out_path;
+    let link_tmp [720]u8;
+    let link_tmp_path *char = 0.to_type(*char);
     if (link != 0) {
         on = gen.append_str(&object[0], on, out_path);
         on = gen.append_str(&object[0], on, ".yh-tmp.o");
         object[on] = 0;
         emit_path = gen.arr_cstr(&object[0]);
+        let link_len int = gen.append_str(&link_tmp[0], 0, out_path);
+        link_len = gen.append_str(&link_tmp[0], link_len, ".yh-link-tmp");
+        link_tmp[link_len] = 0;
+        link_tmp_path = gen.arr_cstr(&link_tmp[0]);
     }
     // out_path 为空 = 只写 LLVM 文本（--emit-llvm 单文件形态），不调用桥。
     if (emit_path == 0) {
@@ -358,26 +369,55 @@ fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
         return -1;
     }
     if (link == 0) { return 0; }
-    // 链接沿用旧路径的宿主工具选择：Darwin 用 clang，其余用 cc。
-    let args [8]*char;
-    if (gs.c_target.os == gen.TARGET_OS_DARWIN) {
-        args[0] = "clang";
-        args[1] = "-o";
-        args[2] = out_path;
-        args[3] = gen.arr_cstr(&object[0]);
-        args[4] = 0.to_type(*char);
+    // 单文件链接沿用项目路径的目标选择；Linux x64 有内嵌 lld 时不 fork cc。
+    let link_rc int = -1;
+    if (mb_lld_x64_enabled() != 0) {
+        let objects [2]*char;
+        objects[0] = gen.arr_cstr(&object[0]);
+        objects[1] = 0.to_type(*char);
+        let extra_args [3]*char;
+        extra_args[0] = "-no-pie";
+        extra_args[1] = "-lm";
+        extra_args[2] = 0.to_type(*char);
+        link_rc = mb_lld_link_worker(&objects[0], 1, &extra_args[0], 2,
+            link_tmp_path);
     } else {
-        args[0] = "gcc";
+        let cc_storage [1200]u8;
+        let cc *char = mb_select_linker(&cc_storage[0]);
+        if (cc == 0) {
+            unlink(gen.arr_cstr(&object[0]));
+            return -1;
+        }
+        let args [8]*char;
+        args[0] = cc;
         args[1] = "-no-pie";
         args[2] = "-o";
-        args[3] = out_path;
+        args[3] = link_tmp_path;
         args[4] = gen.arr_cstr(&object[0]);
-        args[5] = 0.to_type(*char);
+        if (gs.c_target.os == gen.TARGET_OS_LINUX) {
+            args[5] = "-lm";
+            args[6] = 0.to_type(*char);
+        } else {
+            args[5] = 0.to_type(*char);
+        }
+        link_rc = cmd_process_run(&args[0]);
     }
-    let rc int = cmd_process_run(&args[0]);
     unlink(gen.arr_cstr(&object[0]));
-    if (rc != 0) {
+    if (link_rc == -2) {
+        unlink(link_tmp_path);
+        return gen.fail("内嵌 lld 链接 worker 已结束，未发布输出");
+    }
+    if (link_rc != 0) {
+        unlink(link_tmp_path);
         return gen.fail_path("LLVM 产物链接失败: ", out_path);
+    }
+    if (mb_object_machine_matches(link_tmp_path) == 0) {
+        unlink(link_tmp_path);
+        return gen.fail_path("LLVM 链接产物架构与当前 target 不符: ", out_path);
+    }
+    if (rename(link_tmp_path, out_path) != 0) {
+        unlink(link_tmp_path);
+        return gen.fail_path("无法发布 LLVM 链接产物: ", out_path);
     }
     return 0;
 }

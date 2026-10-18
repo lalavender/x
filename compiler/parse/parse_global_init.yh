@@ -304,17 +304,23 @@ fn parse_global_init(idx int, tid int, kind int) int {
     // 全局变量：指针的 0 是 NULL（.xword 0）；标签号 ≥ 1 才是字符串地址
     if (fk == gen.TY_PTR) {
         if (r.ival == 0) {
-            if (gs.c_bss_n >= 4096) {
-                return gen.sem_err("零初始化全局过多");
-            }
-            gs.c_syms[idx].offset = gs.c_bss_n;
-            gs.c_bss_syms[gs.c_bss_n] = idx;
-            gs.c_bss_n += 1;
-            return 0;
+            return sem_global_zero(idx, tid);
         }
         if (gen.em_data_symbol_header(idx, gs.t_types[tid].align) != 0) {
             return -1;
         }
+        let pointer_label int = parse_global_static_string_target(init_token_first,
+            init_token_after, r.ival);
+        if (pointer_label <= 0 || pointer_label.to_type(i64) != r.ival) {
+            return gen.sem_err("全局指针初始化仅支持字符串来源与 NULL");
+        }
+        let static_row int = parse_global_static_root(idx, tid);
+        if (static_row == -1 || parse_global_static_pointer(static_row, 0,
+                pointer_label, 0) != 0) { return -1; }
+        if (init_token_after == init_token_first + 1
+            && gs.c_toks[init_token_first].kind == gen.TOK_STRING
+            && parse_global_static_string(gs.c_toks[init_token_first].start,
+                gs.c_toks[init_token_first].len, r.ival.to_type(int)) != 0) { return -1; }
         if (gen.dat_puts(".xword\t.LD") != 0) {
             return -1;
         }
@@ -324,15 +330,13 @@ fn parse_global_init(idx int, tid int, kind int) int {
         return gen.dat_put('\n');
     }
     if (r.ival == 0) {
-        if (gs.c_bss_n >= 4096) {
-            return gen.sem_err("零初始化全局过多");
-        }
-        gs.c_syms[idx].offset = gs.c_bss_n;
-        gs.c_bss_syms[gs.c_bss_n] = idx;
-        gs.c_bss_n += 1;
-        return 0;
+        return sem_global_zero(idx, tid);
     }
     if (gen.em_data_symbol_header(idx, gs.t_types[tid].align) != 0) {
+        return -1;
+    }
+    let static_row int = parse_global_static_root(idx, tid);
+    if (static_row == -1 || parse_global_static_scalar(static_row, 0, tid, r.ival) != 0) {
         return -1;
     }
     return gen.em_data_scalar(tid, r.ival);
@@ -562,6 +566,7 @@ fn sem_global_zero(idx int, tid int) int {
     gs.c_syms[idx].offset = gs.c_bss_n;
     gs.c_bss_syms[gs.c_bss_n] = idx;
     gs.c_bss_n += 1;
+    if (parse_global_static_root(idx, tid) == -1) { return -1; }
     return 0;
 }
 
@@ -576,6 +581,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     p_adv(); // 消费 '['
     let vals [64]i64;      // 整数值 / f64 位型
     let kinds [64]int;     // 0=标量 1=字符串
+    let labels [64]int;    // 指针元素的受检字符串标签，0=非字符串/NULL
     let str_start [64]int; // 字符串源码区间（内容在元素槽之后补发）
     let str_len [64]int;
     let count int = 0;
@@ -593,6 +599,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
                 p_adv();
                 kinds[count] = 1;
                 vals[count] = gs.c_data_n.to_type(i64);
+                labels[count] = vals[count].to_type(int);
                 gs.c_data_n += 1;
                 str_start[count] = ss;
                 str_len[count] = sl;
@@ -610,6 +617,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
                 }
                 break;
             }
+            let elem_first int = gs.c_pos;
             gs.c_fold += 1;
             let e gen.Res;
             let er int = parse_expr_iso(&e);
@@ -635,6 +643,14 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
                 vals[count] = e.fval_bits;
             } else {
                 vals[count] = e.ival;
+            }
+            labels[count] = 0;
+            if (gs.t_types[elem].kind == gen.TY_PTR && vals[count] != 0) {
+                labels[count] = parse_global_static_string_target(elem_first,
+                    gs.c_pos, vals[count]);
+                if (labels[count] <= 0) {
+                    return gen.sem_err("全局指针数组元素仅支持字符串来源与 NULL");
+                }
             }
             count += 1;
             if (p_cur() == gen.TK_COMMA) {
@@ -687,11 +703,18 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     if (gen.em_data_symbol_header(idx, gs.t_types[tid].align) != 0) {
         return -1;
     }
+    let static_row int = parse_global_static_root(idx, tid);
+    if (static_row == -1) { return -1; }
+    let backing_row int = -2;
     if (fk == gen.TY_SLICE) {
+        backing_row = parse_global_static_backing(lbl, elem, count);
+        if (backing_row == -1) { return -1; }
         // {count, .LDlbl}
         if (gen.dat_puts(".xword\t") != 0) { return -1; }
         if (gen.dat_puthex(count.to_type(i64)) != 0) { return -1; }
         if (gen.dat_put('\n') != 0) { return -1; }
+        if (parse_global_static_scalar(static_row, 0, 10, count.to_type(i64)) != 0
+            || parse_global_static_pointer(static_row, 8, lbl, 0) != 0) { return -1; }
         if (gen.dat_puts(".xword\t.LD") != 0) { return -1; }
         if (gen.dat_puti(lbl) != 0) { return -1; }
         if (gen.dat_put('\n') != 0) { return -1; }
@@ -706,14 +729,21 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     let i int = 0;
     for i < count {
         if (kinds[i] == 1) {
+            if (gs.t_types[elem].kind != gen.TY_PTR || esz != 8
+                || parse_global_static_pointer(fk == gen.TY_SLICE ? backing_row : static_row,
+                    i * esz, labels[i], 0) != 0) { return -1; }
             if (gen.dat_puts(".xword\t.LD") != 0) { return -1; }
             if (gen.dat_puti(vals[i].to_type(int)) != 0) { return -1; }
             if (gen.dat_put('\n') != 0) { return -1; }
         } else if (gen.ty_is_float(elem) != 0) {
+            if (parse_global_static_scalar(fk == gen.TY_SLICE ? backing_row : static_row,
+                    i * esz, elem, vals[i]) != 0) { return -1; }
             if (gen.dat_puts(".xword\t") != 0) { return -1; }
             if (gen.dat_puthex(vals[i]) != 0) { return -1; }
             if (gen.dat_put('\n') != 0) { return -1; }
         } else {
+            if (parse_global_static_scalar(fk == gen.TY_SLICE ? backing_row : static_row,
+                    i * esz, elem, vals[i]) != 0) { return -1; }
             if (gen.em_data_scalar(elem, vals[i]) != 0) { return -1; }
         }
         i += 1;
@@ -730,6 +760,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     i = 0;
     for i < count {
         if (kinds[i] == 1) {
+            if (parse_global_static_string(str_start[i], str_len[i], labels[i]) != 0) { return -1; }
             if (gen.em_data_string_body(str_start[i], str_len[i], vals[i].to_type(int)) < 0) {
                 return -1;
             }
@@ -760,9 +791,11 @@ fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
     if (gen.em_data_symbol_header(idx, gs.t_types[tid].align) != 0) {
         return -1;
     }
+    let static_row int = parse_global_static_root(idx, tid);
+    if (static_row == -1) { return -1; }
     let cur int = 0;
     let fields int = -1;
-    if (parse_global_struct_body(tid, 0, &cur, ct_obj, &fields) != 0) {
+    if (parse_global_struct_body(tid, 0, &cur, ct_obj, &fields, static_row) != 0) {
         return -1;
     }
     if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
@@ -789,7 +822,7 @@ fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
 // parse_global_struct_body：字面量主体逐字段发射；fields_out 携带 STRUCT_FIELD 链
 // （捕获关闭时保持 -1）。链的构造次序与局部 parse_struct_init_body 完全一致。
 fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
-    fields_out *int) int {
+    fields_out *int, static_row int) int {
     let gs *gen.GenState = gen.G();
     if (p_cur() == gen.TK_RBRACE) {
         return gen.err_tok("结构体字面量不能为空");
@@ -825,7 +858,7 @@ fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
         }
         let value_ast int = -1;
         if (parse_global_field_value(fidx, base, cur, ct_obj,
-                fidx - gs.t_types[tid].sub, &value_ast) != 0) {
+                fidx - gs.t_types[tid].sub, &value_ast, static_row) != 0) {
             return -1;
         }
         if (gs.c_ast_capture != 0) {
@@ -856,7 +889,7 @@ fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
 // parse_global_field_value：单个字段值的发射与可选 AST 捕获。
 // ast_out 在捕获开启时写出该字段值的表达式根（嵌套结构体为 STRUCT_INIT），否则为 -1。
 fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
-    ct_index int, ast_out *int) int {
+    ct_index int, ast_out *int, static_row int) int {
     let gs *gen.GenState = gen.G();
     let ftid int = gs.t_fields[fidx].type_id;
     let foff int = base + gs.t_fields[fidx].offset;
@@ -897,7 +930,8 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             if (ct_child == 0) { return -1; }
         }
         let nested_fields int = -1;
-        if (parse_global_struct_body(ftid, foff, cur, ct_child, &nested_fields) != 0) {
+        if (parse_global_struct_body(ftid, foff, cur, ct_child, &nested_fields,
+                static_row) != 0) {
             return -1;
         }
         if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
@@ -946,6 +980,9 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             p_adv();
             let lbl int = gs.c_data_n;
             gs.c_data_n += 1;
+            if (gs.t_types[ftid].size != 8
+                || parse_global_static_pointer(static_row, foff, lbl, 0) != 0
+                || parse_global_static_string(ss, sl, lbl) != 0) { return -1; }
             if (gen.dat_puts(".xword\t.LD") != 0) {
                 return -1;
             }
@@ -983,6 +1020,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
                 return gen.sem_err("指针字段全局初始化仅支持字符串与 NULL");
             }
             if (gs.c_ast_capture != 0) { ast_out[0] = pv.ast_id; }
+            if (parse_global_static_scalar(static_row, foff, ftid, 0) != 0) { return -1; }
             r = gen.em_data_scalar(ftid, 0);
         }
     } else if (gen.ty_is_float(ftid) != 0) {
@@ -1002,6 +1040,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         if (gs.t_types[ftid].size != 8) {
             return gen.sem_err("f32 字段的全局初始化暂不支持（请用 f64）");
         }
+        if (parse_global_static_scalar(static_row, foff, ftid, fv2.fval_bits) != 0) { return -1; }
         if (gen.dat_puts(".xword\t") != 0) {
             return -1;
         }
@@ -1030,6 +1069,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             return -1;
         }
         if (gs.c_ast_capture != 0) { ast_out[0] = v.ast_id; }
+        if (parse_global_static_scalar(static_row, foff, ftid, v.ival) != 0) { return -1; }
         r = gen.em_data_scalar(ftid, v.ival);
         if (r == 0 && ct_obj != 0
             && comptime.ct_global_agg_set(ct_obj, ct_index, ftid,

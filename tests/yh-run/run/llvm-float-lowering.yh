@@ -1,0 +1,77 @@
+// exit: 0
+// 浮点算术、IEEE 比较、f32 舍入、整浮转换和局部浮点内存的 LLVM 语义锁。
+
+// arithmetic：参数保证运算走动态路径，返回值在调用点检查 IEEE 结果。
+fn add64(left f64, right f64) f64 { return left + right; }
+fn multiply32(left f32, right f32) f32 { return left * right; }
+fn divide64(left f64, right f64) f64 { return left / right; }
+fn narrow32(value f64) f32 { return value.to_type(f32); }
+fn twice_half(value f32, half f32) f32 { return (value + half) + half; }
+
+// cast helpers：参数阻止调用点把转换改写成源级常量折叠。
+fn signed8(value f64) i8 { return value.to_type(i8); }
+fn unsigned8(value f64) u8 { return value.to_type(u8); }
+fn signed64(value f64) i64 { return value.to_type(i64); }
+fn unsigned64(value f64) u64 { return value.to_type(u64); }
+fn float32_to_unsigned(value f32) u32 { return value.to_type(u32); }
+fn integer64_to_float(value i64) f64 { return value.to_type(f64); }
+fn unsigned64_to_float(value u64) f64 { return value.to_type(f64); }
+
+// ct_float_check：编译期执行同一组 f32 舍入与 NaN 比较规则，供 LLVM 入口检查。
+@[comptime] fn ct_float_check() int {
+    let half f64 = 1.0 / 16777216.0;
+    let rounded f32 = (1.0 + 3.0 * half).to_type(f32);
+    if (rounded != (1.0 + 4.0 * half).to_type(f32)) { return 1; }
+    let nan f64 = 0.0 / 0.0;
+    if (nan == nan || !(nan != nan) || nan <= 0.0 || 0.0 >= nan) { return 2; }
+    return 0;
+}
+const CT_FLOAT_CHECK int = $ct_float_check();
+
+// memory_roundtrip：通过指针读写 f64，覆盖浮点 alloca、load 与 store。
+fn memory_roundtrip(value f64) f64 {
+    let slot f64 = value;
+    let address *f64 = &slot;
+    *address = *address + 0.5;
+    return slot;
+}
+
+// main：逐项验证 IEEE 位型/谓词和既有饱和转换契约，非零返回码定位失败组。
+fn main() int {
+    if (CT_FLOAT_CHECK != 0) { return 11; }
+    let positive_zero f64 = 0.0;
+    let negative_zero f64 = divide64(-1.0, 1.0) * 0.0;
+    let positive_infinity f64 = divide64(1.0, 0.0);
+    let negative_infinity f64 = divide64(-1.0, 0.0);
+    if (positive_zero != negative_zero || divide64(1.0, negative_zero) != negative_infinity) {
+        return 1;
+    }
+    if (add64(1.25, 2.5) != 3.75
+        || multiply32(1.5.to_type(f32), 2.0.to_type(f32)) != 3.0.to_type(f32)
+        || positive_infinity < 0.0) { return 2; }
+
+    let half f64 = 1.0 / 16777216.0;
+    if (narrow32(1.0 + half) != 1.0.to_type(f32)) { return 3; }
+    if (narrow32(1.0 + 3.0 * half) != (1.0 + 4.0 * half).to_type(f32)) { return 4; }
+    if (twice_half(1.0.to_type(f32), half.to_type(f32)) != 1.0.to_type(f32)) { return 5; }
+
+    let nan f64 = divide64(0.0, 0.0);
+    if (nan == nan || !(nan != nan) || nan < 0.0 || nan <= 0.0
+        || nan > 0.0 || nan >= 0.0 || 0.0 < nan || 0.0 <= nan
+        || 0.0 > nan || 0.0 >= nan) { return 6; }
+    if (memory_roundtrip(2.25) != 2.75) { return 7; }
+
+    if (signed8(130.0) != -126 || unsigned8(300.0) != 44
+        || unsigned8(-1.0) != 0 || signed64(-3.75) != -3
+        || unsigned64(-3.75) != 0) { return 8; }
+    if (signed64(nan) != 0 || unsigned64(nan) != 0
+        || signed64(divide64(1.0, 0.0)) != 9223372036854775807
+        || unsigned64(divide64(1.0, 0.0)) != -1) { return 9; }
+    if (float32_to_unsigned(4294967296.0.to_type(f32)) != 0
+        || integer64_to_float(9007199254740993.to_type(i64)) != 9007199254740992.0
+        || unsigned64_to_float(0x8000000000000000.to_type(u64))
+            != integer64_to_float(9223372036854775807.to_type(i64))) {
+        return 10;
+    }
+    return 0;
+}
