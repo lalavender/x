@@ -9,6 +9,7 @@ import os
 import platform
 import re
 import resource
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -102,7 +103,8 @@ def prepare_wrappers(path: Path) -> dict[str, str]:
 
 
 def one_build(compiler: Path, project: Path, wrapper_dir: Path,
-              real_tools: dict[str, str], log_path: Path) -> dict:
+              real_tools: dict[str, str], log_path: Path,
+              build_args: str = "") -> dict:
     """以独立采样进程执行一次构建并读取其子进程峰值 RSS。"""
     env = dict(os.environ)
     env["PATH"] = str(wrapper_dir) + os.pathsep + env.get("PATH", "")
@@ -114,8 +116,9 @@ def one_build(compiler: Path, project: Path, wrapper_dir: Path,
     if b"system(" in (project / "cmd/project_state.yh").read_bytes():
         profile = ["--legacy-system"]
     result = subprocess.run(
-        [str(compiler), "build", *profile, "--stats", "-o", "../yh"], cwd=project,
-        capture_output=True, text=True, env=env, timeout=300,
+        [str(compiler), "build", *shlex.split(build_args), *profile,
+         "--stats", "-o", "../yh"], cwd=project,
+        capture_output=True, text=True, env=env, timeout=600,
     )
     elapsed_ns = time.perf_counter_ns() - started
     output = result.stdout + result.stderr
@@ -160,19 +163,20 @@ def sample_worker(args: argparse.Namespace) -> int:
     """子进程采样入口，保证 ru_maxrss 仅属于当前一次构建。"""
     values = one_build(Path(args.compiler), Path(args.project),
                        Path(args.wrapper_dir), json.loads(args.real_tools),
-                       Path(args.tool_log))
+                       Path(args.tool_log), getattr(args, "build_args", "") or "")
     print(json.dumps(values, ensure_ascii=False))
     return 0
 
 
 def measure(compiler: Path, project: Path, wrapper_dir: Path,
-            real_tools: dict[str, str], log_path: Path) -> dict:
+            real_tools: dict[str, str], log_path: Path,
+            build_args: str = "") -> dict:
     """启动隔离采样进程，避免之前构建污染本次峰值内存数据。"""
     result = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), "--worker",
          str(compiler), str(project), str(wrapper_dir), json.dumps(real_tools),
-         str(log_path)],
-        capture_output=True, text=True, timeout=360,
+         str(log_path), build_args],
+        capture_output=True, text=True, timeout=900,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr or result.stdout)
@@ -237,6 +241,7 @@ def summarize(samples: list[dict]) -> dict:
 
 def run_scenario(name: str, project: Path, compiler: Path, wrapper_dir: Path,
                  real_tools: dict[str, str], iterations: int, work: Path,
+                 build_args: str = "",
                  ) -> dict:
     """预热指定构建场景并采集多轮独立进程样本。"""
     source = project / "cmd" / "project_state.yh"
@@ -252,16 +257,16 @@ def run_scenario(name: str, project: Path, compiler: Path, wrapper_dir: Path,
     samples = []
     if name == "no-change":
         source.write_bytes(original)
-        measure(compiler, project, wrapper_dir, real_tools, sample_log)
-        warmup = measure(compiler, project, wrapper_dir, real_tools, sample_log)
+        measure(compiler, project, wrapper_dir, real_tools, sample_log, build_args)
+        warmup = measure(compiler, project, wrapper_dir, real_tools, sample_log, build_args)
         if warmup["module_cache_hits"] == 0:
             raise RuntimeError("无改动场景预热没有建立对象缓存")
         for _ in range(iterations):
             sample_log.unlink(missing_ok=True)
-            samples.append(measure(compiler, project, wrapper_dir, real_tools, sample_log))
+            samples.append(measure(compiler, project, wrapper_dir, real_tools, sample_log, build_args))
     elif name == "function-change":
         source.write_bytes(original)
-        measure(compiler, project, wrapper_dir, real_tools, sample_log)
+        measure(compiler, project, wrapper_dir, real_tools, sample_log, build_args)
         binary = project.parent / "yh"
         verify_function_change(binary, project, changed=False)
         for index in range(iterations):
@@ -269,15 +274,15 @@ def run_scenario(name: str, project: Path, compiler: Path, wrapper_dir: Path,
             body = changed_function if changed else original_function
             source.write_bytes(original.replace(original_function, body, 1))
             sample_log.unlink(missing_ok=True)
-            samples.append(measure(compiler, project, wrapper_dir, real_tools, sample_log))
+            samples.append(measure(compiler, project, wrapper_dir, real_tools, sample_log, build_args))
             verify_function_change(binary, project, changed=changed)
     elif name == "cold-build":
         source.write_bytes(original)
-        measure(compiler, project, wrapper_dir, real_tools, sample_log)
+        measure(compiler, project, wrapper_dir, real_tools, sample_log, build_args)
         for _ in range(iterations):
             shutil.rmtree(project / ".build", ignore_errors=True)
             sample_log.unlink(missing_ok=True)
-            samples.append(measure(compiler, project, wrapper_dir, real_tools, sample_log))
+            samples.append(measure(compiler, project, wrapper_dir, real_tools, sample_log, build_args))
     else:
         raise ValueError(name)
     report = summarize(samples)
@@ -291,12 +296,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--compiler", default=str(ROOT / "yh"))
+    parser.add_argument("--build-args", default="",
+                        help="追加到每次 yh build 的参数，如 --backend llvm --target x86_64-unknown-linux-gnu -O2")
+    parser.add_argument("--scenarios", default="no-change,function-change,cold-build",
+                        help="逗号分隔的场景子集")
     parser.add_argument("--output", type=Path, help="保存包含原始样本的 JSON 报告")
     parser.add_argument("--corpus", type=Path, help="指定含 compiler/ 和 SHA256SUMS 的冻结快照")
-    parser.add_argument("--worker", nargs=5, metavar=("COMPILER", "PROJECT", "WRAPPERS", "TOOLS_JSON", "LOG"))
+    parser.add_argument("--worker", nargs=6,
+                        metavar=("COMPILER", "PROJECT", "WRAPPERS", "TOOLS_JSON", "LOG", "BUILD_ARGS"))
     args = parser.parse_args()
     if args.worker:
-        args.compiler, args.project, args.wrapper_dir, args.real_tools, args.tool_log = args.worker
+        (args.compiler, args.project, args.wrapper_dir, args.real_tools,
+         args.tool_log, args.build_args) = args.worker
         return sample_worker(args)
     if args.iterations < 1:
         parser.error("--iterations 必须大于 0")
@@ -343,17 +354,19 @@ def main() -> int:
             "iterations": args.iterations,
             "compiler": str(compiler),
             "compiler_sha256": hashlib.sha256(compiler.read_bytes()).hexdigest(),
+            "build_args": args.build_args,
             "compiler_profile": ("--legacy-system" if b"system(" in
                                  (FROZEN_PROJECT / "cmd/project_state.yh").read_bytes()
                                  else "systemless 默认配置"),
             "tool_versions": tool_versions,
             "scenarios": {},
         }
-        for name in ("no-change", "function-change", "cold-build"):
+        for name in args.scenarios.split(","):
+            name = name.strip()
             project = make_project(work / name)
             report["scenarios"][name] = run_scenario(
                 name, project, compiler, wrapper_dir, real_tools,
-                args.iterations, work / name,
+                args.iterations, work / name, args.build_args,
             )
             summary = {key: value for key, value in report["scenarios"][name].items()
                        if key != "samples"}

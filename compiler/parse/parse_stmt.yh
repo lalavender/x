@@ -23,10 +23,10 @@ import ast;
 // 运算符的 token 种类；无则返回 0。括号/花括号/方括号内不视为顶层。
 fn scan_assign_ahead() int {
     let gs *gen.GenState = gen.G();
-    let i int = gs.c_pos;
+    let i int = gs.task.c_pos;
     let depth int = 0;
-    for i < gs.c_tok_n {
-        let k int = gs.c_toks[i].kind;
+    for i < gs.task.c_tok_n {
+        let k int = gs.task.c_toks[i].kind;
         if (k == gen.TK_LPAREN || k == gen.TK_LBRACKET || k == gen.TK_LBRACE) {
             depth += 1;
         }
@@ -47,7 +47,7 @@ fn scan_assign_ahead() int {
 // sem_check_cond：条件上下文类型检查（标量且非浮点）。
 fn sem_check_cond(r *gen.Res) int {
     let gs *gen.GenState = gen.G();
-    if (gs.c_compile == 0) {
+    if (gs.task.c_compile == 0) {
         return 0;
     }
     if (gen.ty_is_scalar(r.type_id) == 0) {
@@ -65,13 +65,13 @@ fn parse_block() int {
     let own_ast int = 0;
     let block_ast int = -1;
     let top_root int = 0;
-    if (gs.c_ast_capture != 0) {
+    if (gs.task.c_ast_capture != 0) {
         if (ast.ast_stmt_current_now() < 0
             || ast.ast_stmt_node_kind_of(ast.ast_stmt_current_now()) != ast.AST_STMT_BLOCK
-            || ast.ast_stmt_node_first_of(ast.ast_stmt_current_now()) != gs.c_pos) {
+            || ast.ast_stmt_node_first_of(ast.ast_stmt_current_now()) != gs.task.c_pos) {
             own_ast = 1;
             if (ast.ast_stmt_current_now() < 0) { top_root = 1; }
-            block_ast = ast.ast_stmt_begin(ast.AST_STMT_BLOCK, gen.TK_LBRACE, gs.c_pos);
+            block_ast = ast.ast_stmt_begin(ast.AST_STMT_BLOCK, gen.TK_LBRACE, gs.task.c_pos);
             if (block_ast < 0) { return -1; }
         }
     }
@@ -81,7 +81,7 @@ fn parse_block() int {
     gen.scope_push();
     for p_cur() != gen.TK_RBRACE && p_cur() != gen.TOK_EOF {
         let stmt_result int = 0;
-        if (gs.c_ast_capture != 0) {
+        if (gs.task.c_ast_capture != 0) {
             stmt_result = parse_stmt_capture();
         } else {
             stmt_result = parse_stmt();
@@ -94,12 +94,12 @@ fn parse_block() int {
         return -1;
     }
     gen.scope_pop();
-    if (own_ast != 0 && ast.ast_stmt_end(block_ast, gs.c_pos) != 0) {
+    if (own_ast != 0 && ast.ast_stmt_end(block_ast, gs.task.c_pos) != 0) {
         return -1;
     }
-    if (own_ast != 0 && top_root != 0 && gs.c_file_decl_i >= 0
-        && (gs.c_ct_prepare_active == 0 || gs.c_file_indexed != 0)
-        && ast.ast_decl_attach_body(gs.c_active_file, gs.c_file_decl_i, block_ast) != 0) {
+    if (own_ast != 0 && top_root != 0 && gs.task.c_file_decl_i >= 0
+        && (gs.task.c_ct_prepare_active == 0 || gs.task.c_file_indexed != 0)
+        && ast.ast_decl_attach_body(gs.task.c_active_file, gs.task.c_file_decl_i, block_ast) != 0) {
         return -1;
     }
     return 0;
@@ -108,7 +108,7 @@ fn parse_block() int {
 // parse_stmt_capture：仅供 check worker 包装一条语句并记录 AST 范围。
 fn parse_stmt_capture() int {
     let gs *gen.GenState = gen.G();
-    let first int = gs.c_pos;
+    let first int = gs.task.c_pos;
     let op int = p_cur();
     let kind int = ast.AST_STMT_EXPR;
     let diag_kind int = 0;
@@ -122,7 +122,7 @@ fn parse_stmt_capture() int {
     if (op == gen.TK_FOR) { kind = ast.AST_STMT_FOR; }
     if (op == gen.TK_DOLLAR && (p_peek(1) == gen.TK_IF || p_peek(1) == gen.TK_FOR)) {
         kind = ast.AST_STMT_COMPTIME;
-        if (gs.c_ct_prepare_active != 0 && gs.c_ast_capture != 0) {
+        if (gs.task.c_ct_prepare_active != 0 && gs.task.c_ast_capture != 0) {
             if (p_peek(1) == gen.TK_IF) { typed_if = 1; }
             if (p_peek(1) == gen.TK_FOR) { typed_for = 1; }
         }
@@ -154,7 +154,7 @@ fn parse_stmt_capture() int {
     if (typed_for != 0 && ast.ast_stmt_node_op_of(id) != 0) {
         ast.ast_stmt_node_op_set(id, gen.TK_FOR);
     }
-    return ast.ast_stmt_end(id, gs.c_pos);
+    return ast.ast_stmt_end(id, gs.task.c_pos);
 }
 
 // parse_stmt：按首 token 分派语句并调用现有语义钩子。
@@ -191,8 +191,8 @@ fn parse_stmt_inner() int {
         return parse_return();
     }
     if (k == gen.TK_BREAK || k == gen.TK_CONTINUE) {
-        if (gs.c_compile != 0
-            && comptime.ct_validate_loop_exit(gs.c_loop_depth, k) != 0) { return -1; }
+        if (gs.task.c_compile != 0
+            && comptime.ct_validate_loop_exit(gs.task.c_loop_depth, k) != 0) { return -1; }
         p_adv();
         let br int = 0;
         if (k == gen.TK_BREAK) {
@@ -210,8 +210,8 @@ fn parse_stmt_inner() int {
         if (p_cur() != gen.TOK_IDENT) {
             return gen.err_tok("goto 后需要标签名");
         }
-        let gstart int = gs.c_toks[gs.c_pos].start;
-        let glen int = gs.c_toks[gs.c_pos].len;
+        let gstart int = gs.task.c_toks[gs.task.c_pos].start;
+        let glen int = gs.task.c_toks[gs.task.c_pos].len;
         p_adv();
         if (gen.sem_goto(gstart, glen) != 0) {
             return -1;
@@ -220,14 +220,14 @@ fn parse_stmt_inner() int {
     }
     // 标签语句：IDENT ':' stmt
     if (k == gen.TOK_IDENT && p_peek(1) == gen.TK_COLON) {
-        let lstart int = gs.c_toks[gs.c_pos].start;
-        let llen int = gs.c_toks[gs.c_pos].len;
+        let lstart int = gs.task.c_toks[gs.task.c_pos].start;
+        let llen int = gs.task.c_toks[gs.task.c_pos].len;
         p_adv();
         p_adv();
         if (gen.sem_deflabel(lstart, llen) != 0) {
             return -1;
         }
-        if (gs.c_ast_capture != 0) {
+        if (gs.task.c_ast_capture != 0) {
             return parse_stmt_capture();
         }
         return parse_stmt();
@@ -236,14 +236,14 @@ fn parse_stmt_inner() int {
     let aop int = scan_assign_ahead();
     if (aop != 0) {
         let lres gen.Res;
-        let save int = gs.c_lvalue;
-        gs.c_lvalue += 1;
+        let save int = gs.task.c_lvalue;
+        gs.task.c_lvalue += 1;
         let r int = parse_expr(&lres);
-        gs.c_lvalue = save;
+        gs.task.c_lvalue = save;
         if (r != 0) {
             return -1;
         }
-        if (gs.c_compile != 0 && gs.c_res_is_addr == 0) {
+        if (gs.task.c_compile != 0 && gs.task.c_res_is_addr == 0) {
             return gen.sem_err("赋值目标必须是可寻址的表达式");
         }
         // 消费赋值运算符
@@ -254,17 +254,17 @@ fn parse_stmt_inner() int {
         // RHS 恒为值上下文（清 c_lvalue，避免 s[i] 被取地址）；
         // 数组/切片字面量以左值类型为目标类型上下文
         let rres gen.Res;
-        let save_lv2 int = gs.c_lvalue;
-        gs.c_lvalue = 0;
-        let save_exp int = gs.c_expect_tid;
-        gs.c_expect_tid = lres.type_id;
+        let save_lv2 int = gs.task.c_lvalue;
+        gs.task.c_lvalue = 0;
+        let save_exp int = gs.task.c_expect_tid;
+        gs.task.c_expect_tid = lres.type_id;
         let rr int = parse_expr(&rres);
-        gs.c_expect_tid = save_exp;
-        gs.c_lvalue = save_lv2;
+        gs.task.c_expect_tid = save_exp;
+        gs.task.c_lvalue = save_lv2;
         if (rr != 0) {
             return -1;
         }
-        if (gs.c_compile != 0) {
+        if (gs.task.c_compile != 0) {
             if (gen.sem_can_assign(lres.type_id, rres.type_id, rres.is_lit, rres.ival, rres.lit_big) != 0) {
                 return -1;
             }
@@ -279,16 +279,16 @@ fn parse_stmt_inner() int {
         return p_expect(gen.TK_SEMI, "期望 ';'");
     }
     let res gen.Res;
-    let saved_diag_stmt int = gs.c_ct_diag_stmt;
-    gs.c_ct_diag_stmt = 1;
+    let saved_diag_stmt int = gs.task.c_ct_diag_stmt;
+    gs.task.c_ct_diag_stmt = 1;
     let expr_status int = parse_expr(&res);
-    gs.c_ct_diag_stmt = saved_diag_stmt;
+    gs.task.c_ct_diag_stmt = saved_diag_stmt;
     if (expr_status != 0) {
         return -1;
     }
     if (p_expect(gen.TK_SEMI, "期望 ';'") != 0) { return -1; }
-    if (gs.c_compile != 0 && res.ct_diag != 0
-        && (gs.c_fn_flags & gen.F_COMPTIME) == 0) {
+    if (gs.task.c_compile != 0 && res.ct_diag != 0
+        && (gs.task.c_fn_flags & gen.F_COMPTIME) == 0) {
         return comptime.ct_diag_emit(res.ct_diag, res.ival,
             res.ct_diag_line, res.ct_diag_col,
             res.ct_diag_msg_start, res.ct_diag_msg_len);
@@ -300,16 +300,16 @@ fn parse_stmt_inner() int {
 fn parse_stmt() int {
     let gs *gen.GenState = gen.G();
     let first_kind int = p_cur();
-    gs.c_expr_noreturn = 0;
+    gs.task.c_expr_noreturn = 0;
     let status int = parse_stmt_inner();
-    if (status != 0 || gs.c_compile == 0) { return status; }
+    if (status != 0 || gs.task.c_compile == 0) { return status; }
     if (first_kind == gen.TK_RETURN || first_kind == gen.TK_BREAK
         || first_kind == gen.TK_CONTINUE) {
-        gs.c_fn_falls = 0;
+        gs.task.c_fn_falls = 0;
     } else if (first_kind != gen.TK_IF && first_kind != gen.TK_FOR
         && first_kind != gen.TK_SWITCH && first_kind != gen.TK_LBRACE
-        && gs.c_expr_noreturn != 0) {
-        gs.c_fn_falls = 0;
+        && gs.task.c_expr_noreturn != 0) {
+        gs.task.c_fn_falls = 0;
     }
     return 0;
 }
@@ -318,14 +318,14 @@ fn parse_stmt() int {
 fn parse_return() int {
     let gs *gen.GenState = gen.G();
     p_adv();
-    if (gs.c_compile != 0) {
-        if ((gs.c_fn_flags & gen.F_NORETURN) != 0) {
+    if (gs.task.c_compile != 0) {
+        if ((gs.task.c_fn_flags & gen.F_NORETURN) != 0) {
             return gen.sem_err("noreturn 函数定义不能包含 return");
         }
-        if (gs.c_fn_ret == gen.TY_VOID && p_cur() != gen.TK_SEMI) {
+        if (gs.task.c_fn_ret == gen.TY_VOID && p_cur() != gen.TK_SEMI) {
             return gen.sem_err("void 函数不能返回值");
         }
-        if (gs.c_fn_ret != gen.TY_VOID && p_cur() == gen.TK_SEMI) {
+        if (gs.task.c_fn_ret != gen.TY_VOID && p_cur() == gen.TK_SEMI) {
             return gen.sem_err("非 void 函数必须返回值");
         }
     }
@@ -334,15 +334,15 @@ fn parse_return() int {
         // 聚合字面量需要目标类型上下文：return 表达式的目标类型是函数返回类型
         // （与 let 初始化/赋值/调用实参一致，见 parse_array_literal）；非字面量
         // 表达式不受影响，随后的 sem_can_assign 仍做完整校验。
-        let save_expect int = gs.c_expect_tid;
-        gs.c_expect_tid = gs.c_fn_ret;
+        let save_expect int = gs.task.c_expect_tid;
+        gs.task.c_expect_tid = gs.task.c_fn_ret;
         let rr int = parse_expr(&r);
-        gs.c_expect_tid = save_expect;
+        gs.task.c_expect_tid = save_expect;
         if (rr != 0) {
             return -1;
         }
-        if (gs.c_compile != 0) {
-            if (gen.sem_can_assign(gs.c_fn_ret, r.type_id, r.is_lit, r.ival, r.lit_big) != 0) {
+        if (gs.task.c_compile != 0) {
+            if (gen.sem_can_assign(gs.task.c_fn_ret, r.type_id, r.is_lit, r.ival, r.lit_big) != 0) {
                 return -1;
             }
             if (gen.sem_return_value(&r) != 0) {
@@ -350,8 +350,8 @@ fn parse_return() int {
             }
         }
     } else {
-        if (gs.c_compile != 0) {
-            if (gen.em_jmp(gs.c_fn_lbl) != 0) {
+        if (gs.task.c_compile != 0) {
+            if (gen.em_jmp(gs.task.c_fn_lbl) != 0) {
                 return -1;
             }
         }
@@ -362,7 +362,7 @@ fn parse_return() int {
 // parse_if：'if' '(' expr ')' block ('else' (ifStmt | block))?。
 fn parse_if() int {
     let gs *gen.GenState = gen.G();
-    let parent_falls int = gs.c_fn_falls;
+    let parent_falls int = gs.task.c_fn_falls;
     p_adv();
     if (p_expect(gen.TK_LPAREN, "if 条件必须带括号") != 0) {
         return -1;
@@ -379,20 +379,20 @@ fn parse_if() int {
     }
     let lbl_else int = 0;
     let lbl_end int = 0;
-    if (gs.c_compile != 0) {
+    if (gs.task.c_compile != 0) {
         lbl_else = gen.em_new_label();
         if (gen.em_jz(lbl_else) != 0) {
             return -1;
         }
     }
-    gs.c_fn_falls = 1;
+    gs.task.c_fn_falls = 1;
     if (parse_block() != 0) {
         return -1;
     }
-    let then_falls int = gs.c_fn_falls;
+    let then_falls int = gs.task.c_fn_falls;
     if (p_cur() == gen.TK_ELSE) {
         p_adv();
-        if (gs.c_compile != 0) {
+        if (gs.task.c_compile != 0) {
             lbl_end = gen.em_new_label();
             if (gen.em_jmp(lbl_end) != 0) {
                 return -1;
@@ -401,10 +401,10 @@ fn parse_if() int {
                 return -1;
             }
         }
-        gs.c_fn_falls = 1;
+        gs.task.c_fn_falls = 1;
         if (p_cur() == gen.TK_IF) {
             let nested_if_result int = 0;
-            if (gs.c_ast_capture != 0) {
+            if (gs.task.c_ast_capture != 0) {
                 nested_if_result = parse_stmt_capture();
             } else {
                 nested_if_result = parse_stmt();
@@ -417,18 +417,18 @@ fn parse_if() int {
                 return -1;
             }
         }
-        if (gs.c_compile != 0) {
+        if (gs.task.c_compile != 0) {
             if (gen.em_label(lbl_end) != 0) {
                 return -1;
             }
         }
-        let else_falls int = gs.c_fn_falls;
-        gs.c_fn_falls = parent_falls != 0
+        let else_falls int = gs.task.c_fn_falls;
+        gs.task.c_fn_falls = parent_falls != 0
             && (then_falls != 0 || else_falls != 0) ? 1 : 0;
         return 0;
     }
-    gs.c_fn_falls = parent_falls != 0 ? 1 : 0;
-    if (gs.c_compile != 0) {
+    gs.task.c_fn_falls = parent_falls != 0 ? 1 : 0;
+    if (gs.task.c_compile != 0) {
         if (gen.em_label(lbl_else) != 0) {
             return -1;
         }
@@ -439,13 +439,13 @@ fn parse_if() int {
 // parse_for：三种形态（无限 / 条件 / for-in）。
 fn parse_for() int {
     let gs *gen.GenState = gen.G();
-    let parent_falls int = gs.c_fn_falls;
+    let parent_falls int = gs.task.c_fn_falls;
     p_adv();
     if (p_cur() == gen.TK_LBRACE) {
         // 无限循环
         let ibrk int = gen.em_new_label();
         let iend int = gen.em_new_label();
-        if (gs.c_compile != 0) {
+        if (gs.task.c_compile != 0) {
             if (gen.sem_loop_push(iend, ibrk) != 0) {
                 return -1;
             }
@@ -453,15 +453,15 @@ fn parse_for() int {
                 return -1;
             }
         }
-        gs.c_fn_falls = 1;
+        gs.task.c_fn_falls = 1;
         if (parse_block() != 0) {
             return -1;
         }
-        let loop_depth int = gs.c_loop_depth;
+        let loop_depth int = gs.task.c_loop_depth;
         let has_break int = loop_depth > 0
-            ? gs.c_loop_break_seen[loop_depth - 1] : 0;
-        gs.c_fn_falls = parent_falls != 0 && has_break != 0 ? 1 : 0;
-        if (gs.c_compile != 0) {
+            ? gs.task.c_loop_break_seen[loop_depth - 1] : 0;
+        gs.task.c_fn_falls = parent_falls != 0 && has_break != 0 ? 1 : 0;
+        if (gs.task.c_compile != 0) {
             if (gen.em_jmp(ibrk) != 0) {
                 return -1;
             }
@@ -491,21 +491,21 @@ fn parse_for() int {
             let elem_token int = -1;
             if (p_peek(1) == gen.TK_IN) {
                 // 只有元素绑定
-                elem_token = gs.c_pos;
-                elem_start = gs.c_toks[gs.c_pos].start;
-                elem_len = gs.c_toks[gs.c_pos].len;
+                elem_token = gs.task.c_pos;
+                elem_start = gs.task.c_toks[gs.task.c_pos].start;
+                elem_len = gs.task.c_toks[gs.task.c_pos].len;
                 p_adv();
                 p_adv();
             } else {
                 // 下标 + 元素绑定
-                idx_token = gs.c_pos;
-                idx_start = gs.c_toks[gs.c_pos].start;
-                idx_len = gs.c_toks[gs.c_pos].len;
+                idx_token = gs.task.c_pos;
+                idx_start = gs.task.c_toks[gs.task.c_pos].start;
+                idx_len = gs.task.c_toks[gs.task.c_pos].len;
                 p_adv();
                 p_adv();
-                elem_token = gs.c_pos;
-                elem_start = gs.c_toks[gs.c_pos].start;
-                elem_len = gs.c_toks[gs.c_pos].len;
+                elem_token = gs.task.c_pos;
+                elem_start = gs.task.c_toks[gs.task.c_pos].start;
+                elem_len = gs.task.c_toks[gs.task.c_pos].len;
                 p_adv();
                 p_adv();
             }
@@ -519,7 +519,7 @@ fn parse_for() int {
             if (p_cur() == gen.TK_RANGE) {
                 is_range = 1;
                 // 起点（x0）先存槽，再求终点
-                if (gs.c_compile != 0) {
+                if (gs.task.c_compile != 0) {
                     start_off = gen.em_alloc_local(8);
                     if (gen.em_lea_local_to(start_off) != 0) { return -1; }
                     if (gen.em_ins("str\tx0, [x10]") != 0) { return -1; }
@@ -529,7 +529,7 @@ fn parse_for() int {
                     return -1;
                 }
             }
-            if (gs.c_compile == 0) {
+            if (gs.task.c_compile == 0) {
                 return parse_block();
             }
             // 编译模式：建立迭代层
@@ -537,8 +537,8 @@ fn parse_for() int {
                 if (sem_check_cond(&it) != 0) { return -1; }
                 if (sem_check_cond(&end_res) != 0) { return -1; }
                 // 终点（x0）存临时槽
-                gs.c_end_tmp_off = gen.em_alloc_local(8);
-                if (gen.em_lea_local_to(gs.c_end_tmp_off) != 0) { return -1; }
+                gs.task.c_end_tmp_off = gen.em_alloc_local(8);
+                if (gen.em_lea_local_to(gs.task.c_end_tmp_off) != 0) { return -1; }
                 if (gen.em_ins("str\tx0, [x10]") != 0) { return -1; }
             }
             let lcond int = gen.em_new_label();
@@ -560,26 +560,26 @@ fn parse_for() int {
                 let etid int = gen.sem_forin_elem_type(&it, is_range);
                 let esym int = gen.sem_declare_local(elem_start, elem_len, etid);
                 if (esym < 0) { return -1; }
-                if (gs.c_ast_capture != 0 && ast.ast_binding_add(esym, elem_token, 0) != 0) {
+                if (gs.task.c_ast_capture != 0 && ast.ast_binding_add(esym, elem_token, 0) != 0) {
                     return -1;
                 }
-                eoff = gs.c_syms[esym].offset;
+                eoff = gs.task.c_syms[esym].offset;
             }
             if (idx_start >= 0) {
                 let isym int = gen.sem_declare_local(idx_start, idx_len, gen.TY_I32);
                 if (isym < 0) { return -1; }
-                if (gs.c_ast_capture != 0 && ast.ast_binding_add(isym, idx_token, 0) != 0) {
+                if (gs.task.c_ast_capture != 0 && ast.ast_binding_add(isym, idx_token, 0) != 0) {
                     return -1;
                 }
-                ioff = gs.c_syms[isym].offset;
+                ioff = gs.task.c_syms[isym].offset;
             }
             if (gen.sem_forin_set_bind(eoff, ioff) != 0) { return -1; }
             if (gen.em_label(lcond) != 0) { return -1; }
             if (gen.sem_forin_check(lend) != 0) { return -1; }
             if (gen.sem_forin_load(&it, is_range) != 0) { return -1; }
-            gs.c_fn_falls = 1;
+            gs.task.c_fn_falls = 1;
             if (parse_block() != 0) { return -1; }
-            gs.c_fn_falls = parent_falls;
+            gs.task.c_fn_falls = parent_falls;
             if (gen.sem_forin_step(lcond) != 0) { return -1; }
             if (gen.em_label(lend) != 0) { return -1; }
             gen.scope_pop();
@@ -591,7 +591,7 @@ fn parse_for() int {
     // 条件循环
     let lbl_cond int = gen.em_new_label();
     let lbl_end int = gen.em_new_label();
-    if (gs.c_compile != 0) {
+    if (gs.task.c_compile != 0) {
         if (gen.sem_loop_push(lbl_end, lbl_cond) != 0) {
             return -1;
         }
@@ -603,7 +603,7 @@ fn parse_for() int {
     if (parse_expr_blockctx(&cond) != 0) {
         return -1;
     }
-    if (gs.c_compile != 0) {
+    if (gs.task.c_compile != 0) {
         if (sem_check_cond(&cond) != 0) {
             return -1;
         }
@@ -611,12 +611,12 @@ fn parse_for() int {
             return -1;
         }
     }
-    gs.c_fn_falls = 1;
+    gs.task.c_fn_falls = 1;
     if (parse_block() != 0) {
         return -1;
     }
-    gs.c_fn_falls = parent_falls;
-    if (gs.c_compile != 0) {
+    gs.task.c_fn_falls = parent_falls;
+    if (gs.task.c_compile != 0) {
         if (gen.em_jmp(lbl_cond) != 0) {
             return -1;
         }
@@ -643,7 +643,7 @@ fn parse_switch() int {
         return -1;
     }
     let slot int = 0;
-    if (gs.c_compile != 0) {
+    if (gs.task.c_compile != 0) {
         if (gen.ty_is_integer(ctrl.type_id) == 0) {
             return gen.sem_err("switch 控制值必须是整数");
         }
@@ -662,8 +662,8 @@ fn parse_switch() int {
     let ncases int = 0;
     for p_cur() == gen.TK_CASE || p_cur() == gen.TK_DEFAULT {
         let case_ast int = -1;
-        if (gs.c_ast_capture != 0) {
-            case_ast = ast.ast_stmt_begin(ast.AST_STMT_CASE, p_cur(), gs.c_pos);
+        if (gs.task.c_ast_capture != 0) {
+            case_ast = ast.ast_stmt_begin(ast.AST_STMT_CASE, p_cur(), gs.task.c_pos);
             if (case_ast < 0) { return -1; }
         }
         let body_lbl int = gen.em_new_label();
@@ -673,17 +673,17 @@ fn parse_switch() int {
             p_adv();
             for 1 {
                 let cv gen.Res;
-                if (gs.c_compile != 0) {
-                    gs.c_fold += 1;
+                if (gs.task.c_compile != 0) {
+                    gs.task.c_fold += 1;
                 }
                 let r int = parse_expr_blockctx(&cv);
-                if (gs.c_compile != 0) {
-                    gs.c_fold -= 1;
+                if (gs.task.c_compile != 0) {
+                    gs.task.c_fold -= 1;
                 }
                 if (r != 0) {
                     return -1;
                 }
-                if (gs.c_compile != 0) {
+                if (gs.task.c_compile != 0) {
                     if (cv.is_const == 0) {
                         return gen.sem_err("case 值必须是编译期常量");
                     }
@@ -728,7 +728,7 @@ fn parse_switch() int {
                 break;
             }
             // 本 case 的值全部未命中 → 跳过块体
-            if (gs.c_compile != 0) {
+            if (gs.task.c_compile != 0) {
                 if (gen.em_jmp(skip_lbl) != 0) {
                     return -1;
                 }
@@ -742,7 +742,7 @@ fn parse_switch() int {
         if (parse_block() != 0) {
             return -1;
         }
-        if (gs.c_compile != 0) {
+        if (gs.task.c_compile != 0) {
             if (gen.em_jmp(lbl_end) != 0) {
                 return -1;
             }
@@ -752,14 +752,14 @@ fn parse_switch() int {
                 }
             }
         }
-        if (gs.c_ast_capture != 0 && ast.ast_stmt_end(case_ast, gs.c_pos) != 0) {
+        if (gs.task.c_ast_capture != 0 && ast.ast_stmt_end(case_ast, gs.task.c_pos) != 0) {
             return -1;
         }
     }
     if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
         return -1;
     }
-    if (gs.c_compile != 0) {
+    if (gs.task.c_compile != 0) {
         if (gen.em_label(lbl_end) != 0) {
             return -1;
         }

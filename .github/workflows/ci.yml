@@ -4,6 +4,8 @@ name: CI
 #  - linux-arm64：QEMU 容器内（arm64 原生仿真）跑编译器语法模式、运行语料与主门；
 #  - linux-x86_64：ARM64 种子经 QEMU 生成 x64 A，随后以原生 x64 运行 LLVM O0/O2 全门；
 #    第 1 层 ANTLR 语料需要 Java 与 antlr4 jar 缓存，不在 CI 里跑（本机门禁仍覆盖）。
+#    固定 SDK 经 YH_LLVM_HOST=1 联网准备（auto 模式在全新 runner 上不下载，
+#    构建出的 yh 没有 LLVM 桥会让 test-llvm 失败），SDK 缓存在 tmp/llvm-migration。
 #  - darwin-arm64：macOS（Apple Silicon）上跑同一套门禁；入库 bin/yh-darwin-arm64 若落后于
 #    「模块私有类型」一代，先自动补一代种子再验证（见下方步骤注释）。
 # 触发：手动 workflow_dispatch（可选只跑某个平台，省 macOS 计费分钟）或推送分支。
@@ -20,7 +22,7 @@ on:
           - linux-x86_64
           - darwin-arm64
   push:
-    branches: [arm64, main]
+    branches: [arm64, llvm, main]
 
 permissions:
   contents: read
@@ -62,6 +64,11 @@ jobs:
               python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
               python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet
               make selfhost-native
+              # TC4 arm64 原生验证：链接器端到端验收 + GNU ld 差分（FULL=1）。
+              # check.py 自行冷编 link/ 与 asm/（端到端缺 yh_asm 时自动补建），
+              # arm64 容器即原生执行环境——把 WSL/qemu 的「模拟通过」提升为
+              # CI 原生通过（todo.md「TC4 的剩余项：arm64 原生验证」）。
+              make yh-link-probe FULL=1
             '
 
   linux-x86_64:
@@ -72,8 +79,19 @@ jobs:
     env:
       SEED: bin/yh-linux-arm64
       YH_LINK: /nonexistent
+      # require 模式：全新 runner 上没有固定 SDK，auto 不联网会让构建回落旧路径
+      # （yh 无 LLVM 桥），test-llvm/selfhost-llvm 必失败。联网取一次后有缓存。
+      YH_LLVM_HOST: "1"
     steps:
       - uses: actions/checkout@v4
+
+      # 固定 SDK 与 llvm-host 产物缓存在 tmp/llvm-migration（数 GB）；
+      # 键随 SDK 锁文件、构建脚本与桥源码变化，命中后 llvm-host 离线可用。
+      - name: 缓存固定 LLVM SDK
+        uses: actions/cache@v4
+        with:
+          path: tmp/llvm-migration
+          key: llvm-host-${{ runner.os }}-${{ hashFiles('vendor/llvm/sdk.lock.json', 'tools/llvm-sdk.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp', 'compiler/llvm/lld_stub.cpp') }}
 
       # 过渡种子仍是 AArch64：QEMU 只用于生成 x64 候选 A；B/C/D 由自举门原生运行。
       - name: 准备 AArch64 执行与交叉链接工具

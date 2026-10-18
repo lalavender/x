@@ -6,33 +6,33 @@ module gen;
 // ============================================================================
 
 pub fn sem_forin_begin(it *Res, is_range int, end_res *Res) int {
-    if (g_state.c_compile == 0 || g_state.c_fold != 0) {
+    if (g_state.task.c_compile == 0 || g_state.task.c_fold != 0) {
         return 0;
     }
-    if (g_state.c_fi_depth >= 64) {
+    if (g_state.task.c_fi_depth >= 64) {
         return sem_err("for-in 嵌套过深");
     }
-    let d int = g_state.c_fi_depth;
-    g_state.c_fi_cnt_off[d] = em_alloc_local(8);
-    g_state.c_fi_len_off[d] = em_alloc_local(8);
-    g_state.c_fi_data_off[d] = em_alloc_local(8);
-    g_state.c_fi_step_off[d] = em_alloc_local(8);
-    g_state.c_fi_elem_off[d] = -1;
-    g_state.c_fi_idx_off[d] = -1;
+    let d int = g_state.task.c_fi_depth;
+    g_state.task.c_fi_cnt_off[d] = em_alloc_local(8);
+    g_state.task.c_fi_len_off[d] = em_alloc_local(8);
+    g_state.task.c_fi_data_off[d] = em_alloc_local(8);
+    g_state.task.c_fi_step_off[d] = em_alloc_local(8);
+    g_state.task.c_fi_elem_off[d] = -1;
+    g_state.task.c_fi_idx_off[d] = -1;
     if (is_range != 0) {
-        g_state.c_fi_kind[d] = 1;
+        g_state.task.c_fi_kind[d] = 1;
         // x0 = 起点。先存 data 槽（起点），再与终点比较定步长与长度。
-        if (em_lea_local_to(g_state.c_fi_data_off[d]) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fi_data_off[d]) != 0) { return -1; }
         if (em_ins("str\tx0, [x10]") != 0) { return -1; }
         // x11 = 终点（从临时槽）。用 x11 而非 x9：深帧下
         // em_lea_local_to 拼地址走 movz x9，会覆盖 x9 里的终点，
         // 区间长度被算成「槽偏移 - 起点」（run/27：长度 287 而非 4，
         // range_sum 累加成 37128——小帧时 lea 走 sub x10 不触雷，
         // 故 mini 复现全过）
-        if (em_lea_local_to(g_state.c_end_tmp_off) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_end_tmp_off) != 0) { return -1; }
         if (em_ins("ldr\tx11, [x10]") != 0) { return -1; }
         // x0 = 起点
-        if (em_lea_local_to(g_state.c_fi_data_off[d]) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fi_data_off[d]) != 0) { return -1; }
         if (em_ins("ldr\tx0, [x10]") != 0) { return -1; }
         // 长度 = max(0, 终点 - 起点)：x11 = 终点-起点；若 <0 置 0
         if (em_ins("sub\tx11, x11, x0") != 0) { return -1; }
@@ -42,42 +42,42 @@ pub fn sem_forin_begin(it *Res, is_range int, end_res *Res) int {
         if (em_frag("\n") != 0) { return -1; }
         // x11 == 0：空区间，长度 0（保持 x11=0 即可）
         if (em_label(l_pos) != 0) { return -1; }
-        if (em_lea_local_to(g_state.c_fi_len_off[d]) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fi_len_off[d]) != 0) { return -1; }
         if (em_ins("str\tx11, [x10]") != 0) { return -1; }
         // 步长恒 +1（左闭右开区间）。先取地址再装常量：深帧 lea 的
         // movz x9 不能落在步长已入 x9 之后（同数组 len 的教训）
-        if (em_lea_local_to(g_state.c_fi_step_off[d]) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fi_step_off[d]) != 0) { return -1; }
         if (em_ins("mov\tx9, #1") != 0) { return -1; }
         if (em_ins("str\tx9, [x10]") != 0) { return -1; }
-        if (em_lea_local_to(g_state.c_fi_cnt_off[d]) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fi_cnt_off[d]) != 0) { return -1; }
         if (em_ins("str\txzr, [x10]") != 0) { return -1; }
-        g_state.c_fi_depth += 1;
+        g_state.task.c_fi_depth += 1;
         return 0;
     }
     // 数组/切片
-    g_state.c_fi_kind[d] = 0;
-    let k int = g_state.t_types[it.type_id].kind;
+    g_state.task.c_fi_kind[d] = 0;
+    let k int = g_state.task.t_types[it.type_id].kind;
     if (k == TY_ARRAY) {
-        if (em_lea_local_to(g_state.c_fi_data_off[d]) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fi_data_off[d]) != 0) { return -1; }
         if (em_ins("str\tx0, [x10]") != 0) { return -1; }
         // 先取地址再装 len：深帧 lea 的 movz x9 不能落在 len 已入 x9 之后
-        if (em_lea_local_to(g_state.c_fi_len_off[d]) != 0) { return -1; }
-        if (em_mov_imm("x9", g_state.t_types[it.type_id].len.to_type(i64)) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fi_len_off[d]) != 0) { return -1; }
+        if (em_mov_imm("x9", g_state.task.t_types[it.type_id].len.to_type(i64)) != 0) { return -1; }
         if (em_ins("str\tx9, [x10]") != 0) { return -1; }
     } else if (k == TY_SLICE) {
         if (em_ins("mov\tx8, x0") != 0) { return -1; }
         if (em_ins("ldr\tx11, [x8]") != 0) { return -1; }
-        if (em_lea_local_to(g_state.c_fi_len_off[d]) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fi_len_off[d]) != 0) { return -1; }
         if (em_ins("str\tx11, [x10]") != 0) { return -1; }
         if (em_ins("ldr\tx11, [x8, #8]") != 0) { return -1; }
-        if (em_lea_local_to(g_state.c_fi_data_off[d]) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fi_data_off[d]) != 0) { return -1; }
         if (em_ins("str\tx11, [x10]") != 0) { return -1; }
     } else {
         return sem_err("for-in 需要数组、切片或区间");
     }
-    if (em_lea_local_to(g_state.c_fi_cnt_off[d]) != 0) { return -1; }
+    if (em_lea_local_to(g_state.task.c_fi_cnt_off[d]) != 0) { return -1; }
     if (em_ins("str\txzr, [x10]") != 0) { return -1; }
-    g_state.c_fi_depth += 1;
+    g_state.task.c_fi_depth += 1;
     return 0;
 }
 
@@ -86,29 +86,29 @@ pub fn sem_forin_elem_type(it *Res, is_range int) int {
         // 区间迭代绑定是默认整数类型 int（与 stage0 一致，便于 int 变量累加）
         return TY_I32;
     }
-    return g_state.t_types[it.type_id].elem;
+    return g_state.task.t_types[it.type_id].elem;
 }
 
 pub fn sem_forin_set_bind(elem_off int, idx_off int) int {
-    if (g_state.c_compile == 0 || g_state.c_fold != 0) {
+    if (g_state.task.c_compile == 0 || g_state.task.c_fold != 0) {
         return 0;
     }
-    if (g_state.c_fi_depth == 0) {
+    if (g_state.task.c_fi_depth == 0) {
         return sem_err("内部错误：for-in 状态缺失");
     }
-    g_state.c_fi_elem_off[g_state.c_fi_depth - 1] = elem_off;
-    g_state.c_fi_idx_off[g_state.c_fi_depth - 1] = idx_off;
+    g_state.task.c_fi_elem_off[g_state.task.c_fi_depth - 1] = elem_off;
+    g_state.task.c_fi_idx_off[g_state.task.c_fi_depth - 1] = idx_off;
     return 0;
 }
 
 pub fn sem_forin_check(lbl_end int) int {
-    if (g_state.c_compile == 0 || g_state.c_fold != 0) {
+    if (g_state.task.c_compile == 0 || g_state.task.c_fold != 0) {
         return 0;
     }
-    let d int = g_state.c_fi_depth - 1;
-    if (em_lea_local_to(g_state.c_fi_cnt_off[d]) != 0) { return -1; }
+    let d int = g_state.task.c_fi_depth - 1;
+    if (em_lea_local_to(g_state.task.c_fi_cnt_off[d]) != 0) { return -1; }
     if (em_ins("ldr\tx1, [x10]") != 0) { return -1; }
-    if (em_lea_local_to(g_state.c_fi_len_off[d]) != 0) { return -1; }
+    if (em_lea_local_to(g_state.task.c_fi_len_off[d]) != 0) { return -1; }
     if (em_ins("ldr\tx2, [x10]") != 0) { return -1; }
     if (em_ins("cmp\tx1, x2") != 0) { return -1; }
     if (em_frag("\tb.ge\t") != 0) { return -1; }
@@ -118,38 +118,38 @@ pub fn sem_forin_check(lbl_end int) int {
 }
 
 pub fn sem_forin_load(it *Res, is_range int) int {
-    if (g_state.c_compile == 0 || g_state.c_fold != 0) {
+    if (g_state.task.c_compile == 0 || g_state.task.c_fold != 0) {
         return 0;
     }
-    let d int = g_state.c_fi_depth - 1;
+    let d int = g_state.task.c_fi_depth - 1;
     if (is_range != 0) {
         // 下标 = count；值 = 起点 + count*step
-        if (em_lea_local_to(g_state.c_fi_cnt_off[d]) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fi_cnt_off[d]) != 0) { return -1; }
         if (em_ins("ldr\tx0, [x10]") != 0) { return -1; }
-        if (g_state.c_fi_idx_off[d] >= 0) {
-            if (em_lea_local_to(g_state.c_fi_idx_off[d]) != 0) { return -1; }
+        if (g_state.task.c_fi_idx_off[d] >= 0) {
+            if (em_lea_local_to(g_state.task.c_fi_idx_off[d]) != 0) { return -1; }
             if (em_ins("str\tx0, [x10]") != 0) { return -1; }
         }
-        if (g_state.c_fi_elem_off[d] >= 0) {
+        if (g_state.task.c_fi_elem_off[d] >= 0) {
             // x0 = count（下标）；值 = 起点 + count
-            if (em_lea_local_to(g_state.c_fi_data_off[d]) != 0) { return -1; }
+            if (em_lea_local_to(g_state.task.c_fi_data_off[d]) != 0) { return -1; }
             if (em_ins("ldr\tx9, [x10]") != 0) { return -1; }
             if (em_ins("add\tx0, x9, x0") != 0) { return -1; }
-            if (em_lea_local_to(g_state.c_fi_elem_off[d]) != 0) { return -1; }
+            if (em_lea_local_to(g_state.task.c_fi_elem_off[d]) != 0) { return -1; }
             if (em_ins("str\tx0, [x10]") != 0) { return -1; }
         }
         return 0;
     }
     // 数组/切片：值 = data[count]
-    let elem int = g_state.t_types[it.type_id].elem;
-    if (em_lea_local_to(g_state.c_fi_cnt_off[d]) != 0) { return -1; }
+    let elem int = g_state.task.t_types[it.type_id].elem;
+    if (em_lea_local_to(g_state.task.c_fi_cnt_off[d]) != 0) { return -1; }
     if (em_ins("ldr\tx0, [x10]") != 0) { return -1; }
-    if (g_state.c_fi_idx_off[d] >= 0) {
-        if (em_lea_local_to(g_state.c_fi_idx_off[d]) != 0) { return -1; }
+    if (g_state.task.c_fi_idx_off[d] >= 0) {
+        if (em_lea_local_to(g_state.task.c_fi_idx_off[d]) != 0) { return -1; }
         if (em_ins("str\tx0, [x10]") != 0) { return -1; }
     }
     // 缩放下标 → data + i*size
-    let esz int = g_state.t_types[elem].size;
+    let esz int = g_state.task.t_types[elem].size;
     if (esz == 2) {
         if (em_ins("lsl\tx0, x0, #1") != 0) { return -1; }
     } else if (esz == 4) {
@@ -160,24 +160,24 @@ pub fn sem_forin_load(it *Res, is_range int) int {
         if (em_mov_imm("x9", esz.to_type(i64)) != 0) { return -1; }
         if (em_ins("mul\tx0, x0, x9") != 0) { return -1; }
     }
-    if (em_lea_local_to(g_state.c_fi_data_off[d]) != 0) { return -1; }
+    if (em_lea_local_to(g_state.task.c_fi_data_off[d]) != 0) { return -1; }
     if (em_ins("ldr\tx9, [x10]") != 0) { return -1; }
     if (em_ins("add\tx0, x9, x0") != 0) { return -1; }
-    if (g_state.c_fi_elem_off[d] >= 0) {
-        let ek int = g_state.t_types[elem].kind;
+    if (g_state.task.c_fi_elem_off[d] >= 0) {
+        let ek int = g_state.task.t_types[elem].kind;
         if (ek == TY_STRUCT || ek == TY_UNION || ek == TY_ARRAY || ek == TY_SLICE) {
             // 聚合元素：块拷贝进绑定槽。x0 = 元素地址（add 的结果），
             // 先取绑定槽地址（x10）再拷贝——深帧 lea 的 movz x9 不碰
             // x0，此序天然安全；原「mov x9, x0 保地址」会被 lea 覆盖
             // （copy_block 源错）
-            if (em_lea_local_to(g_state.c_fi_elem_off[d]) != 0) { return -1; }
+            if (em_lea_local_to(g_state.task.c_fi_elem_off[d]) != 0) { return -1; }
             if (em_ins("mov\tx1, x10") != 0) { return -1; }
-            if (em_copy_block(g_state.t_types[elem].size) != 0) { return -1; }
+            if (em_copy_block(g_state.task.t_types[elem].size) != 0) { return -1; }
         } else {
             // 标量元素：x10 = 元素地址，load 到 x0 后存绑定槽
             if (em_ins("mov\tx10, x0") != 0) { return -1; }
             if (em_load_sized(elem) != 0) { return -1; }
-            if (em_lea_local_to(g_state.c_fi_elem_off[d]) != 0) { return -1; }
+            if (em_lea_local_to(g_state.task.c_fi_elem_off[d]) != 0) { return -1; }
             if (em_store_sized(elem) != 0) { return -1; }
         }
     }
@@ -185,11 +185,11 @@ pub fn sem_forin_load(it *Res, is_range int) int {
 }
 
 pub fn sem_forin_step(lbl_cond int) int {
-    if (g_state.c_compile == 0 || g_state.c_fold != 0) {
+    if (g_state.task.c_compile == 0 || g_state.task.c_fold != 0) {
         return 0;
     }
-    let d int = g_state.c_fi_depth - 1;
-    if (em_lea_local_to(g_state.c_fi_cnt_off[d]) != 0) { return -1; }
+    let d int = g_state.task.c_fi_depth - 1;
+    if (em_lea_local_to(g_state.task.c_fi_cnt_off[d]) != 0) { return -1; }
     if (em_ins("ldr\tx0, [x10]") != 0) { return -1; }
     if (em_ins("add\tx0, x0, #1") != 0) { return -1; }
     if (em_ins("str\tx0, [x10]") != 0) { return -1; }
@@ -197,23 +197,23 @@ pub fn sem_forin_step(lbl_cond int) int {
 }
 
 pub fn sem_forin_end() int {
-    if (g_state.c_compile == 0 || g_state.c_fold != 0) {
+    if (g_state.task.c_compile == 0 || g_state.task.c_fold != 0) {
         return 0;
     }
-    g_state.c_fi_depth -= 1;
+    g_state.task.c_fi_depth -= 1;
     return 0;
 }
 
 pub fn sem_stash_lvalue() int {
-    if (g_state.c_compile == 0 || g_state.c_fold != 0) {
+    if (g_state.task.c_compile == 0 || g_state.task.c_fold != 0) {
         return 0;
     }
-    if (g_state.c_temp_off == 0) {
-        g_state.c_temp_off = em_alloc_local(8);
+    if (g_state.task.c_temp_off == 0) {
+        g_state.task.c_temp_off = em_alloc_local(8);
     }
     // 先保护 x0 中的左值地址，再取临时槽地址，最后写入
     if (em_push() != 0) { return -1; }
-    if (em_lea_local(g_state.c_temp_off) != 0) { return -1; }
+    if (em_lea_local(g_state.task.c_temp_off) != 0) { return -1; }
     if (em_ins("mov\tx10, x0") != 0) { return -1; }
     if (em_pop("x0") != 0) { return -1; }
     if (em_ins("str\tx0, [x10]") != 0) { return -1; }
@@ -221,20 +221,20 @@ pub fn sem_stash_lvalue() int {
 }
 
 pub fn sem_assign(op int, lres *Res, rres *Res) int {
-    if (g_state.c_compile == 0) {
+    if (g_state.task.c_compile == 0) {
         return 0;
     }
-    if (g_state.c_fold != 0) {
+    if (g_state.task.c_fold != 0) {
         return sem_err("赋值不是编译期常量");
     }
-    if (em_lea_local(g_state.c_temp_off) != 0) { return -1; }
+    if (em_lea_local(g_state.task.c_temp_off) != 0) { return -1; }
     if (em_ins("mov\tx10, x0") != 0) { return -1; }
     if (ty_is_float(lres.type_id) != 0) {
         // 浮点赋值：值在 d0/s0
         if (em_ins("ldr\tx10, [x10]") != 0) { return -1; }
         if (op == TK_ASSIGN) {
             let fs *char = "d";
-            if (g_state.t_types[lres.type_id].size == 4) { fs = "s"; }
+            if (g_state.task.t_types[lres.type_id].size == 4) { fs = "s"; }
             if (em_frag("\tstr\t") != 0) { return -1; }
             if (em_frag(fs) != 0) { return -1; }
             if (em_frag("0, [x10]\n") != 0) { return -1; }
@@ -244,12 +244,12 @@ pub fn sem_assign(op int, lres *Res, rres *Res) int {
         //（每次 em_lea_local_to 都会覆盖 x10，目标地址先压栈保护、用后
         // 弹回；压/弹必须成对，此前弹空栈导致 d1 从垃圾地址装入）。
         let fs2 *char = "d";
-        if (g_state.t_types[lres.type_id].size == 4) { fs2 = "s"; }
-        if (g_state.c_fp_tmp_off == 0) {
-            g_state.c_fp_tmp_off = em_alloc_local(8);
+        if (g_state.task.t_types[lres.type_id].size == 4) { fs2 = "s"; }
+        if (g_state.task.c_fp_tmp_off == 0) {
+            g_state.task.c_fp_tmp_off = em_alloc_local(8);
         }
         if (em_ins("str\tx10, [sp, #-16]!") != 0) { return -1; }
-        if (em_lea_local_to(g_state.c_fp_tmp_off) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fp_tmp_off) != 0) { return -1; }
         if (em_frag("\tstr\t") != 0) { return -1; }
         if (em_frag(fs2) != 0) { return -1; }
         if (em_frag("0, [x10]\n") != 0) { return -1; }
@@ -258,7 +258,7 @@ pub fn sem_assign(op int, lres *Res, rres *Res) int {
         if (em_frag(fs2) != 0) { return -1; }
         if (em_frag("1, [x10]\n") != 0) { return -1; }
         if (em_ins("str\tx10, [sp, #-16]!") != 0) { return -1; }
-        if (em_lea_local_to(g_state.c_fp_tmp_off) != 0) { return -1; }
+        if (em_lea_local_to(g_state.task.c_fp_tmp_off) != 0) { return -1; }
         if (em_frag("\tldr\t") != 0) { return -1; }
         if (em_frag(fs2) != 0) { return -1; }
         if (em_frag("0, [x10]\n") != 0) { return -1; }
@@ -281,10 +281,10 @@ pub fn sem_assign(op int, lres *Res, rres *Res) int {
         // 聚合同型赋值 = 逐字节块拷贝（语义边界 §：数组同型赋值为值
         // 复制）。聚合的值语义即对象地址：x0 是源对象地址，x10 是目标
         // 地址；此前误走标量 store 只写前 8 字节。
-        let lk int = g_state.t_types[lres.type_id].kind;
+        let lk int = g_state.task.t_types[lres.type_id].kind;
         if (lk == TY_STRUCT || lk == TY_UNION || lk == TY_ARRAY || lk == TY_SLICE) {
             if (em_ins("mov\tx1, x10") != 0) { return -1; }
-            return em_copy_block(g_state.t_types[lres.type_id].size);
+            return em_copy_block(g_state.task.t_types[lres.type_id].size);
         }
         return em_store_sized(lres.type_id);
     }
@@ -313,13 +313,13 @@ pub fn sem_declare_local(start int, n int, tid int) int {
     if (ty_has_opaque_value(tid) != 0) {
         return sem_err("不透明 C 类型只能通过指针声明局部变量");
     }
-    let size int = g_state.t_types[tid].size;
+    let size int = g_state.task.t_types[tid].size;
     let idx int = sym_push(start, n, SYM_VAR, tid, 0);
     if (idx < 0) {
         return -1;
     }
     let off int = em_alloc_local(size);
-    g_state.c_syms[idx].offset = off;
+    g_state.task.c_syms[idx].offset = off;
     // 零初始化（标量直接清零；聚合逐字节循环）
     if (size == 0) {
         return idx;
@@ -353,27 +353,27 @@ pub fn sem_declare_local(start int, n int, tid int) int {
 }
 
 pub fn sem_store_local_value(idx int, tid int) int {
-    if (g_state.c_compile == 0) {
+    if (g_state.task.c_compile == 0) {
         return 0;
     }
-    let k int = g_state.t_types[tid].kind;
+    let k int = g_state.task.t_types[tid].kind;
     if (k == TY_STRUCT || k == TY_UNION || k == TY_ARRAY || k == TY_SLICE) {
         // 聚合初始化：x0 = 源聚合地址 → 块拷贝进局部槽
-        let off int = g_state.c_syms[idx].offset;
+        let off int = g_state.task.c_syms[idx].offset;
         if (em_push() != 0) { return -1; }
         if (em_lea_local_down(off) != 0) { return -1; }
         if (em_ins("mov\tx1, x0") != 0) { return -1; }
         if (em_pop("x0") != 0) { return -1; }
-        return em_copy_block(g_state.t_types[tid].size);
+        return em_copy_block(g_state.task.t_types[tid].size);
     }
     if (ty_is_float(tid) != 0) {
-        return em_fp_store_local(g_state.c_syms[idx].offset, tid);
+        return em_fp_store_local(g_state.task.c_syms[idx].offset, tid);
     }
-    let soff int = g_state.c_syms[idx].offset;
+    let soff int = g_state.task.c_syms[idx].offset;
     if (soff <= 255) {
         if (em_frag("\tstr\t") != 0) { return -1; }
         // 按大小选寄存器与助记符
-        let size int = g_state.t_types[tid].size;
+        let size int = g_state.task.t_types[tid].size;
         if (size == 8) {
             if (em_puts("x0, [x29, #-") != 0) { return -1; }
         } else if (size == 4) {
@@ -392,13 +392,13 @@ pub fn sem_store_local_value(idx int, tid int) int {
 }
 
 pub fn sem_check_duplicate(start int, n int) int {
-    let i int = g_state.c_sym_n - 1;
-    for i >= g_state.c_scope_start[g_state.c_scope_n - 1] {
-        if (g_state.c_syms[i].name_len == n) {
+    let i int = g_state.task.c_sym_n - 1;
+    for i >= g_state.task.c_scope_start[g_state.task.c_scope_n - 1] {
+        if (g_state.task.c_syms[i].name_len == n) {
             let match int = 1;
             let j int = 0;
             for j < n {
-                if (g_state.np_data[g_state.c_syms[i].name_off + j] != g_state.c_src[start + j]) {
+                if (g_state.task.np_data[g_state.task.c_syms[i].name_off + j] != g_state.task.c_src[start + j]) {
                     match = 0;
                     break;
                 }
@@ -414,132 +414,132 @@ pub fn sem_check_duplicate(start int, n int) int {
 }
 
 pub fn sem_goto(start int, n int) int {
-    if (g_state.c_compile == 0) {
+    if (g_state.task.c_compile == 0) {
         return 0;
     }
     // 已定义？
     let i int = 0;
-    for i < g_state.c_glabel_n {
-        if (g_state.c_glabels[i].name_len == n) {
+    for i < g_state.task.c_glabel_n {
+        if (g_state.task.c_glabels[i].name_len == n) {
             let match int = 1;
             let j int = 0;
             for j < n {
-                if (g_state.np_data[g_state.c_glabels[i].name_off + j] != g_state.c_src[start + j]) {
+                if (g_state.task.np_data[g_state.task.c_glabels[i].name_off + j] != g_state.task.c_src[start + j]) {
                     match = 0;
                     break;
                 }
                 j += 1;
             }
             if (match != 0) {
-                return em_jmp(g_state.c_glabels[i].lbl);
+                return em_jmp(g_state.task.c_glabels[i].lbl);
             }
         }
         i += 1;
     }
     // 前向引用：登记
-    if (g_state.c_glabel_n >= 128) {
+    if (g_state.task.c_glabel_n >= 128) {
         return sem_err("goto 标签过多");
     }
     let off int = name_intern(start, n);
-    g_state.c_glabels[g_state.c_glabel_n].name_off = off;
-    g_state.c_glabels[g_state.c_glabel_n].name_len = n;
+    g_state.task.c_glabels[g_state.task.c_glabel_n].name_off = off;
+    g_state.task.c_glabels[g_state.task.c_glabel_n].name_len = n;
     let lbl int = em_new_label();
-    g_state.c_glabels[g_state.c_glabel_n].lbl = lbl;
-    g_state.c_glabels[g_state.c_glabel_n].defined = 0;
-    g_state.c_glabel_n += 1;
+    g_state.task.c_glabels[g_state.task.c_glabel_n].lbl = lbl;
+    g_state.task.c_glabels[g_state.task.c_glabel_n].defined = 0;
+    g_state.task.c_glabel_n += 1;
     return em_jmp(lbl);
 }
 
 pub fn sem_deflabel(start int, n int) int {
-    if (g_state.c_compile == 0) {
+    if (g_state.task.c_compile == 0) {
         return 0;
     }
     let i int = 0;
-    for i < g_state.c_glabel_n {
-        if (g_state.c_glabels[i].name_len == n) {
+    for i < g_state.task.c_glabel_n {
+        if (g_state.task.c_glabels[i].name_len == n) {
             let match int = 1;
             let j int = 0;
             for j < n {
-                if (g_state.np_data[g_state.c_glabels[i].name_off + j] != g_state.c_src[start + j]) {
+                if (g_state.task.np_data[g_state.task.c_glabels[i].name_off + j] != g_state.task.c_src[start + j]) {
                     match = 0;
                     break;
                 }
                 j += 1;
             }
             if (match != 0) {
-                if (g_state.c_glabels[i].defined != 0) {
+                if (g_state.task.c_glabels[i].defined != 0) {
                     return sem_err("标签重定义");
                 }
-                g_state.c_glabels[i].defined = 1;
-                return em_label(g_state.c_glabels[i].lbl);
+                g_state.task.c_glabels[i].defined = 1;
+                return em_label(g_state.task.c_glabels[i].lbl);
             }
         }
         i += 1;
     }
-    if (g_state.c_glabel_n >= 128) {
+    if (g_state.task.c_glabel_n >= 128) {
         return sem_err("goto 标签过多");
     }
     let off int = name_intern(start, n);
-    g_state.c_glabels[g_state.c_glabel_n].name_off = off;
-    g_state.c_glabels[g_state.c_glabel_n].name_len = n;
+    g_state.task.c_glabels[g_state.task.c_glabel_n].name_off = off;
+    g_state.task.c_glabels[g_state.task.c_glabel_n].name_len = n;
     let lbl int = em_new_label();
-    g_state.c_glabels[g_state.c_glabel_n].lbl = lbl;
-    g_state.c_glabels[g_state.c_glabel_n].defined = 1;
-    g_state.c_glabel_n += 1;
+    g_state.task.c_glabels[g_state.task.c_glabel_n].lbl = lbl;
+    g_state.task.c_glabels[g_state.task.c_glabel_n].defined = 1;
+    g_state.task.c_glabel_n += 1;
     return em_label(lbl);
 }
 
 fn sem_glabels_verify() int {
     let i int = 0;
-    for i < g_state.c_glabel_n {
-        if (g_state.c_glabels[i].defined == 0) {
+    for i < g_state.task.c_glabel_n {
+        if (g_state.task.c_glabels[i].defined == 0) {
             return sem_err("goto 了未定义的标签");
         }
         i += 1;
     }
-    g_state.c_glabel_n = 0;
+    g_state.task.c_glabel_n = 0;
     return 0;
 }
 
 pub fn sem_loop_push(brk int, cnt int) int {
-    if (g_state.c_loop_depth >= 64) {
+    if (g_state.task.c_loop_depth >= 64) {
         return sem_err("循环嵌套过深");
     }
-    g_state.c_brk_stk[g_state.c_loop_depth] = brk;
-    g_state.c_cnt_stk[g_state.c_loop_depth] = cnt;
-    g_state.c_loop_break_seen[g_state.c_loop_depth] = 0;
-    g_state.c_loop_depth += 1;
-    g_state.c_loop_brk = brk;
-    g_state.c_loop_cnt = cnt;
+    g_state.task.c_brk_stk[g_state.task.c_loop_depth] = brk;
+    g_state.task.c_cnt_stk[g_state.task.c_loop_depth] = cnt;
+    g_state.task.c_loop_break_seen[g_state.task.c_loop_depth] = 0;
+    g_state.task.c_loop_depth += 1;
+    g_state.task.c_loop_brk = brk;
+    g_state.task.c_loop_cnt = cnt;
     return 0;
 }
 
 pub fn sem_loop_pop() int {
-    g_state.c_loop_depth -= 1;
-    if (g_state.c_loop_depth > 0) {
-        g_state.c_loop_brk = g_state.c_brk_stk[g_state.c_loop_depth - 1];
-        g_state.c_loop_cnt = g_state.c_cnt_stk[g_state.c_loop_depth - 1];
+    g_state.task.c_loop_depth -= 1;
+    if (g_state.task.c_loop_depth > 0) {
+        g_state.task.c_loop_brk = g_state.task.c_brk_stk[g_state.task.c_loop_depth - 1];
+        g_state.task.c_loop_cnt = g_state.task.c_cnt_stk[g_state.task.c_loop_depth - 1];
     }
     return 0;
 }
 
 pub fn sem_break() int {
-    if (g_state.c_compile == 0) {
+    if (g_state.task.c_compile == 0) {
         return 0;
     }
-    if (g_state.c_loop_depth == 0) {
+    if (g_state.task.c_loop_depth == 0) {
         return sem_err("break 不在循环内");
     }
-    g_state.c_loop_break_seen[g_state.c_loop_depth - 1] = 1;
-    return em_jmp(g_state.c_loop_brk);
+    g_state.task.c_loop_break_seen[g_state.task.c_loop_depth - 1] = 1;
+    return em_jmp(g_state.task.c_loop_brk);
 }
 
 pub fn sem_continue() int {
-    if (g_state.c_compile == 0) {
+    if (g_state.task.c_compile == 0) {
         return 0;
     }
-    if (g_state.c_loop_depth == 0) {
+    if (g_state.task.c_loop_depth == 0) {
         return sem_err("continue 不在循环内");
     }
-    return em_jmp(g_state.c_loop_cnt);
+    return em_jmp(g_state.task.c_loop_cnt);
 }

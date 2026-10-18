@@ -11,13 +11,15 @@ import backend;
 //   yh check [module]           项目语义检查，不生成后端产物
 //   yh run                       构建并运行清单 entry
 //   yh list [--resolve name]     列出模块/解释导入绑定（project.yh）
-//   yh --emit-module M ROOT -o S （内部）把模块 M 编译为独立汇编 S
+//   yh --emit-module M ROOT -o ASMDIR （内部）把模块 M 编译为按文件汇编
+//        目录（每文件一个 .s + <tag>.stub.s 运行时桩对象，RS3b 起）
 //
 // 构建流程：装载项目与依赖 → 绑定导入 → topo 排序（环报完整链）→
 // 依赖就绪时由有界 fork worker 并行编译；worker 继承父进程只读项目快照，
 // 再加载已发布接口 → 两遍编译模块文件 → 产出
-// 独立 .s 与接口 .s.i（pub 符号 GLOBAL、私有 LOCAL、符号带
-// __proj__mod 后缀）→ 最后 gcc/clang 一次链接全部 .s。
+// 按文件汇编（asm/<tag>/<file>.s + <tag>.stub.s）与接口 .s.i（pub 符号
+// GLOBAL、private LOCAL 且发 hidden 可见性、符号带 __proj__mod 后缀）
+// → mb_link 逐文件汇编成 obj/<tag>/<file>.o → 一次链接全部 .o。
 //
 // 缓存（U5）：解析不缓存（每轮重解析——重绑定由构造保证）；对象缓存
 // 按 manifest 内容哈希：后缀+entry+各源文件内容+各依赖接口内容+版本
@@ -106,15 +108,15 @@ fn mb_hash_file(h *u64, path *char) int {
         return -1;
     }
     let i int = 0;
-    let words *u64 = gs.c_src.to_type(*u64);
-    for i + 8 <= gs.c_src_len {
+    let words *u64 = gs.task.c_src.to_type(*u64);
+    for i + 8 <= gs.task.c_src_len {
         let word u64 = words[i / 8];
         h[0] = h[0] ^ word;
         h[0] = h[0] * 1099511628211;
         i += 8;
     }
-    for i < gs.c_src_len {
-        h[0] = h[0] ^ gs.c_src[i].to_type(u64);
+    for i < gs.task.c_src_len {
+        h[0] = h[0] ^ gs.task.c_src[i].to_type(u64);
         h[0] = h[0] * 1099511628211;
         i += 1;
     }
@@ -125,7 +127,7 @@ fn mb_hash_file(h *u64, path *char) int {
 fn mb_build_dir(root_off int, root_len int) int {
     let gs *gen.GenState = gen.G();
     let rel *char = ".build";
-    if (gs.c_check_only != 0) {
+    if (gs.task.c_check_only != 0) {
         rel = ".build/check";
     } else if (gs.c_backend != 0) {
         let target_dir [256]u8;
@@ -220,7 +222,7 @@ fn mb_mod_tag(m int, off *int, olen *int) int {
     let n int = 0;
     let i int = 0;
     for i < gs.p_projs[gs.p_mods[m].proj].name_len {
-        let b u8 = gs.np_data[gs.p_projs[gs.p_mods[m].proj].name_off + i];
+        let b u8 = gs.task.np_data[gs.p_projs[gs.p_mods[m].proj].name_off + i];
         if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
             || (b >= '0' && b <= '9') || b == '_')) {
             b = '_';
@@ -233,7 +235,7 @@ fn mb_mod_tag(m int, off *int, olen *int) int {
     n += 1;
     i = 0;
     for i < gs.p_mods[m].name_len {
-        let b2 u8 = gs.np_data[gs.p_mods[m].name_off + i];
+        let b2 u8 = gs.task.np_data[gs.p_mods[m].name_off + i];
         if (!((b2 >= 'a' && b2 <= 'z') || (b2 >= 'A' && b2 <= 'Z')
             || (b2 >= '0' && b2 <= '9') || b2 == '_')) {
             b2 = '_';
@@ -247,6 +249,260 @@ fn mb_mod_tag(m int, off *int, olen *int) int {
     olen[0] = n;
     if (off[0] < 0) {
         return -1;
+    }
+    return 0;
+}
+
+// mb_asm_stem_base：把源文件路径（池偏移）的基名（去 .yh 后缀）清洗为
+// 安全的文件名词干。非 [A-Za-z0-9_] 字节替换为 '_'（与 mb_mod_tag 同一套
+// 清洗规则），超过 120 字节截断。返回干长度（>= 0）。
+fn mb_asm_stem_base(path_off int, out *u8) int {
+    let gs *gen.GenState = gen.G();
+    let path *char = pj_pool_str(path_off);
+    let start int = 0;
+    let n int = 0;
+    for path[n] != 0 {
+        if (path[n] == '/') { start = n + 1; }
+        n += 1;
+    }
+    let end int = n;
+    if (end - start >= 3 && path[end - 3] == '.' && path[end - 2] == 'y'
+        && path[end - 1] == 'h') {
+        end -= 3;
+    }
+    let bn int = 0;
+    let i int = start;
+    for i < end && bn < 120 {
+        let b u8 = path[i].to_type(u8);
+        if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+            || (b >= '0' && b <= '9') || b == '_')) {
+            b = '_';
+        }
+        out[bn] = b;
+        bn += 1;
+        i += 1;
+    }
+    if (bn == 0) {
+        out[0] = '_';
+        bn = 1;
+    }
+    return bn;
+}
+
+// mb_asm_stems：一次性派生模块全部源文件的按文件对象名词干（RS3b）。
+// stems 为 file_n × 160 字节缓冲（第 i 个文件名干在 stems + i*160，NUL 结尾），
+// lens[i] 为长度。清洗后重名（如 a-b.yh 与 a_b.yh）时追加 _2/_3 保证唯一；
+// 保留名 <tag>.stub（运行时桩对象）同样避开。与此前已派生名逐一比较，
+// 因此三个及以上连环重名也稳定。worker 写 asm/<tag>/<stem>.s、mb_link 读
+// obj/<tag>/<stem>.o，两边由同一函数派生才能对上。
+fn mb_asm_stems(m int, stems *u8, lens *int) int {
+    let gs *gen.GenState = gen.G();
+    // 保留名：<tag>.stub
+    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) { return -1; }
+    let tag_off int = pj_canon_off;
+    let tag_len int = pj_canon_len;
+    let reserved [160]u8;
+    let rn int = 0;
+    let ti int = 0;
+    for ti < tag_len {
+        reserved[rn] = gs.task.np_data[tag_off + ti];
+        rn += 1;
+        ti += 1;
+    }
+    let dot *char = ".stub";
+    let di int = 0;
+    for dot[di] != 0 {
+        reserved[rn] = dot[di].to_type(u8);
+        rn += 1;
+        di += 1;
+    }
+    let idx int = 0;
+    for idx < gs.p_mods[m].file_n {
+        let fi int = gs.p_mods[m].files[idx];
+        let base [160]u8;
+        let bn int = mb_asm_stem_base(gs.p_files[fi].path_off, &base[0]);
+        if (bn < 0) { return -1; }
+        let cand [160]u8;
+        let cn int = bn;
+        let ci int = 0;
+        for ci < bn {
+            cand[ci] = base[ci];
+            ci += 1;
+        }
+        // 候选名：base，重名时 base_2、base_3……
+        let k int = 2;
+        for k < 1000 {
+            cn = bn;
+            ci = 0;
+            for ci < bn {
+                cand[ci] = base[ci];
+                ci += 1;
+            }
+            if (k > 2) {
+                cand[cn] = '_';
+                cn += 1;
+                let digits [8]u8;
+                let dn int = 0;
+                let v int = k - 1;
+                for v > 0 {
+                    digits[dn] = ((v % 10) + 48).to_type(u8);
+                    dn += 1;
+                    v /= 10;
+                }
+                for dn > 0 {
+                    dn -= 1;
+                    cand[cn] = digits[dn];
+                    cn += 1;
+                }
+            }
+            let clash int = 0;
+            if (cn == rn) {
+                let same int = 1;
+                let t int = 0;
+                for t < cn {
+                    if (cand[t] != reserved[t]) {
+                        same = 0;
+                        break;
+                    }
+                    t += 1;
+                }
+                if (same != 0) { clash = 1; }
+            }
+            let j int = 0;
+            for j < idx && clash == 0 {
+                let other *u8 = stems + (j * 160);
+                if (lens[j] == cn) {
+                    let same2 int = 1;
+                    let t2 int = 0;
+                    for t2 < cn {
+                        if (other[t2] != cand[t2]) {
+                            same2 = 0;
+                            break;
+                        }
+                        t2 += 1;
+                    }
+                    if (same2 != 0) { clash = 1; }
+                }
+                j += 1;
+            }
+            if (clash == 0) { break; }
+            k += 1;
+        }
+        if (k >= 1000) {
+            return gen.fail("内部错误：无法派生唯一的汇编文件名");
+        }
+        let dst *u8 = stems + (idx * 160);
+        let c2 int = 0;
+        for c2 < cn {
+            dst[c2] = cand[c2];
+            c2 += 1;
+        }
+        dst[cn] = 0;
+        lens[idx] = cn;
+        idx += 1;
+    }
+    return 0;
+}
+
+// mb_module_obj_row：枚举一个模块的按文件对象行（RS3b：N 个文件 + 1 个运行时桩）。
+// row_k < file_n → 第 row_k 个源文件对象（内部调 mb_asm_stems 派生文件名干，
+// 与 worker 写侧同一函数保证一致）；row_k == file_n → 桩对象（<tag>.stub）。
+// spath = <build>/asm/<tag>/<stem>.s，opath = <build>/obj/<tag>/<stem>.o，
+// mpath = 同目录 .manifest（对象缓存）；不需要的路径传 0。
+fn mb_module_obj_row(m int, build_off int, build_len int, row_k int,
+    spath *u8, opath *u8, mpath *u8) int {
+    let gs *gen.GenState = gen.G();
+    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
+        return -1;
+    }
+    let tag_off int = pj_canon_off;
+    let tag_len int = pj_canon_len;
+    let stem [160]u8;
+    let sn int = 0;
+    if (row_k < gs.p_mods[m].file_n) {
+        let stems *u8 = malloc((gs.p_mods[m].file_n * 160).to_type(u64)).to_type(*u8);
+        let lens *int = malloc((gs.p_mods[m].file_n * sizeof(int)).to_type(u64)).to_type(*int);
+        if (stems == 0 || lens == 0) {
+            if (stems != 0) { free(stems.to_type(*void)); }
+            if (lens != 0) { free(lens.to_type(*void)); }
+            return gen.fail("内存分配失败");
+        }
+        let ok int = mb_asm_stems(m, stems, lens);
+        if (ok == 0) {
+            sn = lens[row_k];
+            let src *u8 = stems + (row_k * 160);
+            let si int = 0;
+            for si < sn {
+                stem[si] = src[si];
+                si += 1;
+            }
+        }
+        free(stems.to_type(*void));
+        free(lens.to_type(*void));
+        if (ok != 0) { return -1; }
+    } else {
+        // 桩对象名词干 = <tag>.stub
+        let ti int = 0;
+        for ti < tag_len {
+            stem[ti] = gs.task.np_data[tag_off + ti];
+            ti += 1;
+        }
+        let dot *char = ".stub";
+        let di int = 0;
+        for dot[di] != 0 {
+            stem[ti] = dot[di].to_type(u8);
+            ti += 1;
+            di += 1;
+        }
+        sn = ti;
+    }
+    if (spath != 0) {
+        let pn int = 0;
+        pn = gen.append_str(spath, pn, pj_pool_str(build_off));
+        pn = gen.append_str(spath, pn, "/asm/");
+        pn = gen.append_str(spath, pn, pj_pool_str(tag_off));
+        pn = gen.append_byte(spath, pn, '/');
+        let si2 int = 0;
+        for si2 < sn {
+            spath[pn] = stem[si2];
+            pn += 1;
+            si2 += 1;
+        }
+        pn = gen.append_str(spath, pn, ".s");
+        spath[pn] = 0;
+    }
+    if (opath != 0 || mpath != 0) {
+        let on int = 0;
+        if (opath != 0) {
+            on = gen.append_str(opath, on, pj_pool_str(build_off));
+            on = gen.append_str(opath, on, "/obj/");
+            on = gen.append_str(opath, on, pj_pool_str(tag_off));
+            on = gen.append_byte(opath, on, '/');
+        }
+        let si3 int = 0;
+        for si3 < sn {
+            if (opath != 0) { opath[on] = stem[si3]; on += 1; }
+            si3 += 1;
+        }
+        if (opath != 0) {
+            on = gen.append_str(opath, on, ".o");
+            opath[on] = 0;
+        }
+        if (mpath != 0) {
+            let mn int = 0;
+            mn = gen.append_str(mpath, mn, pj_pool_str(build_off));
+            mn = gen.append_str(mpath, mn, "/obj/");
+            mn = gen.append_str(mpath, mn, pj_pool_str(tag_off));
+            mn = gen.append_byte(mpath, mn, '/');
+            let si4 int = 0;
+            for si4 < sn {
+                mpath[mn] = stem[si4];
+                mn += 1;
+                si4 += 1;
+            }
+            mn = gen.append_str(mpath, mn, ".manifest");
+            mpath[mn] = 0;
+        }
     }
     return 0;
 }
@@ -553,7 +809,8 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         return -1;
     }
     let is_entry int = gs.p_mods[m].is_entry;
-    // 产物路径 = .build/{asm,iface,manifest}/<tag>（tag 含项目，防同名冲突）
+    // 产物目录 = .build/asm/<tag>/（tag 含项目，防同名冲突；RS3b 起每模块
+    // 一个目录，内含每文件 .s 与 <tag>.stub.s 运行时桩对象）
     if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
         return -1;
     }
@@ -561,19 +818,29 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     if (pj_canon(build_off, build_len, "asm") != 0) {
         return -1;
     }
-    let spath [600]u8;
-    let sn int = 0;
-    sn = gen.append_str(spath, sn, pj_pool_str(pj_canon_off));
-    sn = gen.append_byte(spath, sn, '/');
-    sn = gen.append_str(spath, sn, pj_pool_str(tag_off));
-    sn = gen.append_str(spath, sn, ".s");
-    spath[sn] = 0;
-    let cache_artifact [700]u8;
-    let artifact_path *char = gen.arr_cstr(spath);
+    let asmdir [900]u8;
+    let an int = 0;
+    an = gen.append_str(asmdir, an, pj_pool_str(pj_canon_off));
+    an = gen.append_byte(asmdir, an, '/');
+    an = gen.append_str(asmdir, an, pj_pool_str(tag_off));
+    asmdir[an] = 0;
+    let cache_artifact [1000]u8;
+    let artifact_path *char = 0;
     if (gs.c_backend != 0) {
         let ignored_text [700]u8;
         if (mb_llvm_module_paths(m, root_off, root_len, &cache_artifact[0],
                 &ignored_text[0]) != 0) { return -1; }
+        artifact_path = gen.arr_cstr(&cache_artifact[0]);
+    } else {
+        // 旧后端（RS3b）：缓存产物 = 运行时桩对象 <tag>.stub.s；每文件 .s 的
+        // 存在性在命中判定里逐行核对（键只混入文件内容，重命名同内容文件
+        // 会同键，靠存在性兜底）。
+        let stn int = 0;
+        stn = gen.append_str(&cache_artifact[0], 0, gen.arr_cstr(asmdir));
+        stn = gen.append_byte(&cache_artifact[0], stn, '/');
+        stn = gen.append_str(&cache_artifact[0], stn, pj_pool_str(tag_off));
+        stn = gen.append_str(&cache_artifact[0], stn, ".stub.s");
+        cache_artifact[stn] = 0;
         artifact_path = gen.arr_cstr(&cache_artifact[0]);
     }
     if (pj_canon(build_off, build_len, "iface") != 0) {
@@ -614,9 +881,9 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     mn = gen.append_str(mpath, mn, ".manifest");
     mpath[mn] = 0;
     // check 不读取或更新正式构建 manifest 与缓存。
-    if (gs.c_check_only != 0) {
+    if (gs.task.c_check_only != 0) {
         if (mb_spawn_indexed_module(m, root_off, root_len,
-                gen.arr_cstr(spath), 0, pid_out) != 0) {
+                gen.arr_cstr(asmdir), 0, pid_out) != 0) {
             return gen.fail("无法启动项目检查 worker");
         }
         gs.c_stats_workers += 1;
@@ -626,12 +893,12 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     let h u64 = mb_hash_init();
     let hi int = 0;
     for hi < sfx_len {
-        mb_fnv(&h, gs.np_data[sfx_off + hi]);
+        mb_fnv(&h, gs.task.np_data[sfx_off + hi]);
         hi += 1;
     }
     mb_fnv(&h, ('0' + is_entry).to_type(u8));
     mb_fnv(&h, '\n');
-    mb_fnv(&h, ('0' + gs.c_legacy_system).to_type(u8));
+    mb_fnv(&h, ('0' + gs.task.c_legacy_system).to_type(u8));
     mb_fnv(&h, '\n');
     if (gs.c_backend != 0) {
         let triple_i int = 0;
@@ -722,10 +989,10 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         && pj_file_exists(gen.arr_cstr(mpath)) != 0) {
         let manifest_len int = gs.c_backend != 0 ? 64 : wn;
         if (gen.read_source(gen.arr_cstr(mpath)) == 0
-            && gs.c_src_len == manifest_len) {
+            && gs.task.c_src_len == manifest_len) {
             let saved_manifest [64]u8;
             let si int = 0;
-            for si < manifest_len { saved_manifest[si] = gs.c_src[si]; si += 1; }
+            for si < manifest_len { saved_manifest[si] = gs.task.c_src[si]; si += 1; }
             let same int = 1;
             let ci int = 0;
             for ci < wn {
@@ -776,6 +1043,23 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
                     fi2 += 1;
                 }
             }
+            if (same != 0 && gs.c_backend == 0) {
+                // RS3b：旧后端命中还要求本模块每个文件对象与桩对象的 .s 都在
+                // （新增/重命名文件会同键或换键，存在性核对兜底）。
+                let rowk int = 0;
+                for rowk <= gs.p_mods[m].file_n {
+                    let rowpath [900]u8;
+                    if (mb_module_obj_row(m, build_off, build_len, rowk,
+                            &rowpath[0], 0, 0) != 0) {
+                        return -1;
+                    }
+                    if (pj_file_exists(gen.arr_cstr(&rowpath[0])) == 0) {
+                        same = 0;
+                        break;
+                    }
+                    rowk += 1;
+                }
+            }
             if (same != 0) {
                 pj_out_s("  [缓存] ");
                 pj_out_np(gs.p_mods[m].name_off, gs.p_mods[m].name_len);
@@ -791,7 +1075,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         ki += 1;
     }
     // —— 子进程编译（提供方项目根 + 主项目根） ——
-    if (mb_spawn_indexed_module(m, root_off, root_len, gen.arr_cstr(spath),
+    if (mb_spawn_indexed_module(m, root_off, root_len, gen.arr_cstr(asmdir),
             mb_compiler_fingerprint, pid_out) != 0) {
         return gen.fail("无法启动模块编译 worker");
     }
@@ -963,7 +1247,7 @@ fn mb_iface_copy_file(src *char, dst *char) int {
     if (fd < 0) {
         return -1;
     }
-    let wr int = gen.write_all(fd, gs.c_src, gs.c_src_len);
+    let wr int = gen.write_all(fd, gs.task.c_src, gs.task.c_src_len);
     let cr int = close(fd);
     if (wr != 0 || cr != 0 || rename(gen.arr_cstr(tmp), dst) != 0) {
         unlink(gen.arr_cstr(tmp));
@@ -986,20 +1270,20 @@ fn mb_file_head_bind(fi int) int {
         return -1;
     }
     let i int = 0;
-    for i < gs.mod_import_n {
+    for i < gs.task.mod_import_n {
         let found int = -1;
         let ii int = 0;
         for ii < gs.p_imp_n {
             if (gs.p_imp_file[ii] == fi
-                && gs.p_imp_line[ii] == gs.mod_imports[i].line
-                && gs.p_imp_col[ii] == gs.mod_imports[i].col) {
+                && gs.p_imp_line[ii] == gs.task.mod_imports[i].line
+                && gs.p_imp_col[ii] == gs.task.mod_imports[i].col) {
                 found = ii;
                 break;
             }
             ii += 1;
         }
         if (found < 0) {
-            return gen.err_lc(gs.mod_imports[i].line, gs.mod_imports[i].col,
+            return gen.err_lc(gs.task.mod_imports[i].line, gs.task.mod_imports[i].col,
                 "内部错误：导入与扫描记录不对应");
         }
         let target int = gs.p_imp_mod[found];
@@ -1013,30 +1297,30 @@ fn mb_file_head_bind(fi int) int {
             di += 1;
         }
         if (mi < 0) {
-            return gen.err_lc(gs.mod_imports[i].line, gs.mod_imports[i].col,
+            return gen.err_lc(gs.task.mod_imports[i].line, gs.task.mod_imports[i].col,
                 "内部错误：导入的接口未加载");
         }
-        gs.mod_import_mod[i] = mi;
-        gs.mod_import_used[i] = 0;
+        gs.task.mod_import_mod[i] = mi;
+        gs.task.mod_import_used[i] = 0;
         // 导入可只在全局初始化器中使用，而模块文件会在全局遍历与
         // 函数遍历之间重新绑定头部；按 token 快照保留整文件的限定引用。
         let ti int = 0;
-        for ti + 1 < gs.c_tok_n {
-            if (gs.c_toks[ti].kind == gen.TOK_IDENT
-                && gs.c_toks[ti].len == gs.mod_imports[i].alias_len
-                && gs.c_toks[ti + 1].kind == gen.TK_DOT) {
+        for ti + 1 < gs.task.c_tok_n {
+            if (gs.task.c_toks[ti].kind == gen.TOK_IDENT
+                && gs.task.c_toks[ti].len == gs.task.mod_imports[i].alias_len
+                && gs.task.c_toks[ti + 1].kind == gen.TK_DOT) {
                 let same int = 1;
                 let j int = 0;
-                for j < gs.mod_imports[i].alias_len {
-                    if (gs.c_src[gs.c_toks[ti].start + j]
-                        != gs.np_data[gs.mod_imports[i].alias_off + j]) {
+                for j < gs.task.mod_imports[i].alias_len {
+                    if (gs.task.c_src[gs.task.c_toks[ti].start + j]
+                        != gs.task.np_data[gs.task.mod_imports[i].alias_off + j]) {
                         same = 0;
                         break;
                     }
                     j += 1;
                 }
                 if (same != 0) {
-                    gs.mod_import_used[i] = 1;
+                    gs.task.mod_import_used[i] = 1;
                     break;
                 }
             }
@@ -1069,22 +1353,22 @@ fn mb_restore_front_file(path *char, fi int) int {
         || gs.p_files[fi].tokens == 0) {
         return gen.fail("内部错误：模块 worker 缺少前端文件快照");
     }
-    gs.c_src = gs.p_files[fi].source;
-    gs.c_src_len = gs.p_files[fi].source_len;
-    gs.c_toks = gs.p_files[fi].tokens;
-    gs.c_tok_n = gs.p_files[fi].token_n;
-    gs.c_tok_cap = gs.p_files[fi].token_n;
-    gs.c_file_decls = gs.p_files[fi].decls;
-    gs.c_file_decl_n = gs.p_files[fi].decl_n;
-    gs.c_file_decl_i = -1;
-    gs.c_file_indexed = 1;
-    gs.c_active_file = fi;
-    gs.c_pos = 0;
+    gs.task.c_src = gs.p_files[fi].source;
+    gs.task.c_src_len = gs.p_files[fi].source_len;
+    gs.task.c_toks = gs.p_files[fi].tokens;
+    gs.task.c_tok_n = gs.p_files[fi].token_n;
+    gs.task.c_tok_cap = gs.p_files[fi].token_n;
+    gs.task.c_file_decls = gs.p_files[fi].decls;
+    gs.task.c_file_decl_n = gs.p_files[fi].decl_n;
+    gs.task.c_file_decl_i = -1;
+    gs.task.c_file_indexed = 1;
+    gs.task.c_active_file = fi;
+    gs.task.c_pos = 0;
     if (gen.set_source_path(path) != 0) {
         return -1;
     }
-    gs.c_spec = 0;
-    gs.c_ctx_block = 0;
+    gs.task.c_spec = 0;
+    gs.task.c_ctx_block = 0;
     return 0;
 }
 
@@ -1120,9 +1404,9 @@ fn mb_pass2_file(path *char, fi int, is_globals int) int {
         }
         // 未使用导入检查（U3）：本文件编译完后仍为零使用的导入报错
         let i int = 0;
-        for i < gs.mod_import_n {
-            if (gs.mod_import_used[i] == 0) {
-                return gen.err_lc(gs.mod_imports[i].line, gs.mod_imports[i].col,
+        for i < gs.task.mod_import_n {
+            if (gs.task.mod_import_used[i] == 0) {
+                return gen.err_lc(gs.task.mod_imports[i].line, gs.task.mod_imports[i].col,
                     "导入未使用（同文件没有任何限定名引用）");
             }
             i += 1;
@@ -1145,13 +1429,13 @@ fn mb_check_binding_clash(m int) int {
                 continue;
             }
             let idx int = gen.sym_lookup_off(gs.p_imp_off[ii], gs.p_imp_len[ii]);
-            if (idx >= 0 && (gs.c_syms[idx].flags & gen.F_GLOBAL) != 0
-                && (gs.c_syms[idx].flags & gen.F_EXTERN) == 0) {
+            if (idx >= 0 && (gs.task.c_syms[idx].flags & gen.F_GLOBAL) != 0
+                && (gs.task.c_syms[idx].flags & gen.F_EXTERN) == 0) {
                 let buf [192]u8;
                 let n int = 0;
-                n = gen.append_int(buf, n, gs.c_syms[idx].def_line);
+                n = gen.append_int(buf, n, gs.task.c_syms[idx].def_line);
                 n = gen.append_byte(buf, n, ':');
-                n = gen.append_int(buf, n, gs.c_syms[idx].def_col);
+                n = gen.append_int(buf, n, gs.task.c_syms[idx].def_col);
                 n = gen.append_str(buf, n, ": 顶层声明与导入名冲突（导入名 ");
                 n = append_bytes_np(buf, n, gs.p_imp_off[ii], gs.p_imp_len[ii]);
                 n = gen.append_str(buf, n, "）");
@@ -1159,7 +1443,7 @@ fn mb_check_binding_clash(m int) int {
                 if (mo < 0) {
                     return -1;
                 }
-                gs.c_errors += 1;
+                gs.task.c_errors += 1;
                 let out [256]u8;
                 let on int = 0;
                 on = gen.append_str(out, on, pj_pool_str(gs.p_files[f].path_off));
@@ -1176,15 +1460,16 @@ fn mb_check_binding_clash(m int) int {
     return 0;
 }
 
-// mb_emit_module：子进程入口——编译一个模块为汇编 + 接口；check-only
+// mb_emit_module：子进程入口——编译一个模块为按文件汇编 + 接口；check-only
 // 复用语义遍历并只写本轮依赖需要的临时接口。
 // prov_root：模块提供方项目根（在其中查找模块）；main_root：主项目根
-// （构建目录基准，接口路径与父进程一致）。
+// （构建目录基准，接口路径与父进程一致）；out_dir：按文件汇编目录
+// <build>/asm/<tag>（RS3b）。
 fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
-    main_off int, main_len int, out_s *char, ir_cache_salt u64) int {
+    main_off int, main_len int, out_dir *char, ir_cache_salt u64) int {
     let gs *gen.GenState = gen.G();
     gs.c_front_cache = 1;
-    gs.c_ast_capture = 0;
+    gs.task.c_ast_capture = 0;
     gs.c_ir_cache_salt = ir_cache_salt;
     if (mb_load_stdlib() != 0) {
         return -1;
@@ -1200,7 +1485,7 @@ fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
     if (m < 0) {
         return gen.fail("内部错误：模块不在索引中");
     }
-    return mb_emit_indexed_module(m, main_off, main_len, out_s, ir_cache_salt);
+    return mb_emit_indexed_module(m, main_off, main_len, out_dir, ir_cache_salt);
 }
 
 // —— 父进程：build / run ——
@@ -1232,17 +1517,17 @@ fn mb_print_stats() void {
     n = gen.append_str(buf, n, " ir_cache_misses=");
     n = gen.append_int(buf, n, gs.c_stats_ir_cache_misses);
     n = gen.append_str(buf, n, " ast_nodes=");
-    n = gen.append_int(buf, n, gs.c_stats_ast_nodes);
+    n = gen.append_int(buf, n, gs.task.c_stats_ast_nodes);
     n = gen.append_str(buf, n, " stmt_nodes=");
-    n = gen.append_int(buf, n, gs.c_stats_stmt_nodes);
+    n = gen.append_int(buf, n, gs.task.c_stats_stmt_nodes);
     n = gen.append_str(buf, n, " decl_nodes=");
-    n = gen.append_int(buf, n, gs.c_stats_decl_nodes);
+    n = gen.append_int(buf, n, gs.task.c_stats_decl_nodes);
     n = gen.append_str(buf, n, " ast_refs=");
-    n = gen.append_int(buf, n, gs.c_stats_ast_refs);
+    n = gen.append_int(buf, n, gs.task.c_stats_ast_refs);
     n = gen.append_str(buf, n, " ast_bindings=");
-    n = gen.append_int(buf, n, gs.c_stats_ast_bindings);
+    n = gen.append_int(buf, n, gs.task.c_stats_ast_bindings);
     n = gen.append_str(buf, n, " ast_functions=");
-    n = gen.append_int(buf, n, gs.c_stats_ast_functions);
+    n = gen.append_int(buf, n, gs.task.c_stats_ast_functions);
     n = gen.append_str(buf, n, " workers=");
     n = gen.append_int(buf, n, gs.c_stats_workers);
     n = gen.append_str(buf, n, " workers_peak=");
@@ -1284,7 +1569,7 @@ fn mb_print_stats() void {
     n = gen.append_str(buf, n, " fallback_functions=");
     n = gen.append_int(buf, n, gs.c_stats_ir_rejected + gs.c_stats_backend_rejected);
     n = gen.append_str(buf, n, " legacy_bytes=");
-    n = gen.append_int(buf, n, gs.o_len + gs.o_body_len + gs.o_dlen + gs.o_blen);
+    n = gen.append_int(buf, n, gs.task.o_len + gs.task.o_body_len + gs.task.o_dlen + gs.task.o_blen);
     n = gen.append_byte(buf, n, '\n');
     gen.write_all(2, buf, n);
 }
@@ -1386,7 +1671,7 @@ fn mb_cmd_build(av **char, an int) int {
     if (gs.c_stats_enabled != 0) {
         mb_stats_build_start_ns = cmd_clock_ns();
     }
-    gs.c_path = "yh";
+    gs.task.c_path = "yh";
     // 父进程建立可继承的只读前端快照，fork worker 不再重扫项目源码。
     gs.c_front_cache = 1;
     if (mb_load_stdlib() != 0) {
@@ -1454,7 +1739,7 @@ fn mb_cmd_build(av **char, an int) int {
         schedule_start_ns = cmd_clock_ns();
     }
     if (mb_schedule_modules(count, root_off, root_len, build_off, build_len) != 0) {
-        if (gs.c_check_only != 0) {
+        if (gs.task.c_check_only != 0) {
             mb_check_clear_ifaces(build_off, build_len, count);
         }
         return 1;
@@ -1462,7 +1747,7 @@ fn mb_cmd_build(av **char, an int) int {
     if (gs.c_stats_enabled != 0) {
         mb_stats_schedule_ns = cmd_clock_ns() - schedule_start_ns;
     }
-    if (gs.c_check_only != 0) {
+    if (gs.task.c_check_only != 0) {
         mb_check_clear_ifaces(build_off, build_len, count);
         pj_out_s("检查通过: ");
         pj_out_np(gs.p_projs[proj].name_off, gs.p_projs[proj].name_len);
@@ -1506,7 +1791,7 @@ fn mb_cmd_run() int {
     if (mb_resolve_self_path() != 0) {
         return 1;
     }
-    gs.c_path = "yh";
+    gs.task.c_path = "yh";
     gs.c_front_cache = 1;
     if (mb_load_stdlib() != 0) {
         return 1;
@@ -1609,7 +1894,7 @@ fn mb_cmd_list(av **char, an int) int {
         usage();
         return 2;
     }
-    gs.c_path = "yh";
+    gs.task.c_path = "yh";
     if (mb_load_stdlib() != 0) {
         return 1;
     }

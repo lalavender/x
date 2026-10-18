@@ -21,8 +21,8 @@ module gen;
 // 参数/临时在声明点 sub sp 一个 16 字节对齐的槽，用 fp 负偏移访问；
 // 值栈在 sp 之下动态生长，任何调用点 sp 保持 16 对齐。
 //
-// 输出组织：.text 进入 g_state.o_out；全局初始化与字符串进入 g_state.o_dat（.data 段）；
-// 零初始化全局进入 g_state.o_bss（.bss 段）。编译成功后由 flush_output 一次写出。
+// 输出组织：.text 进入 g_state.task.o_out；全局初始化与字符串进入 g_state.task.o_dat（.data 段）；
+// 零初始化全局进入 g_state.task.o_bss（.bss 段）。编译成功后由 flush_output 一次写出。
 // ============================================================================
 
 // —— 行发射（frag = 无换行片段；ins = 完整指令行） ——
@@ -41,8 +41,8 @@ pub fn em_ins(s *char) int {
 
 // em_new_label：分配一个局部标签号。
 pub fn em_new_label() int {
-    g_state.c_lbl_n += 1;
-    return g_state.c_lbl_n - 1;
+    g_state.task.c_lbl_n += 1;
+    return g_state.task.c_lbl_n - 1;
 }
 
 // em_put_lbl：输出 ".L<n>" 标签名。
@@ -87,7 +87,7 @@ pub fn em_beq(n int) int {
 
 // em_scale_index：把 x0 中的下标按元素类型大小缩放（地址算术用）。
 fn em_scale_index(elem_tid int) int {
-    let esz int = g_state.t_types[elem_tid].size;
+    let esz int = g_state.task.t_types[elem_tid].size;
     if (esz == 1) {
         return 0;
     }
@@ -161,12 +161,12 @@ pub fn em_pop(reg *char) int {
 fn em_load_sized(tid int) int {
     // 浮点装入 d0/s0（消费方按浮点值约定使用）
     if (ty_is_float(tid) != 0) {
-        if (g_state.t_types[tid].size == 4) {
+        if (g_state.task.t_types[tid].size == 4) {
             return em_ins("ldr\ts0, [x10]");
         }
         return em_ins("ldr\td0, [x10]");
     }
-    let size int = g_state.t_types[tid].size;
+    let size int = g_state.task.t_types[tid].size;
     if (size == 8) {
         return em_ins("ldr\tx0, [x10]");
     }
@@ -192,7 +192,7 @@ fn em_load_sized(tid int) int {
 pub fn em_store_sized(tid int) int {
     // 浮点值在 s0/d0（与值栈约定一致），不能用 x0 存
     if (ty_is_float(tid) != 0) {
-        if (g_state.t_types[tid].size == 4) {
+        if (g_state.task.t_types[tid].size == 4) {
             return em_ins("str\ts0, [x10]");
         }
         return em_ins("str\td0, [x10]");
@@ -200,12 +200,12 @@ pub fn em_store_sized(tid int) int {
     // 聚合的值语义是对象地址（见下方「聚合按值原语」约定）：x0 = 源对象地址、
     // x10 = 目标地址 → 整块拷贝。按 size 走标量分支会退化成 strb（只写 1
     // 字节），数组/结构体元素字面量的运行期初始化曾因此读出垃圾值。
-    let k int = g_state.t_types[tid].kind;
+    let k int = g_state.task.t_types[tid].kind;
     if (k == TY_STRUCT || k == TY_UNION || k == TY_ARRAY || k == TY_SLICE) {
         if (em_ins("mov\tx1, x10") != 0) { return -1; }
-        return em_copy_block(g_state.t_types[tid].size);
+        return em_copy_block(g_state.task.t_types[tid].size);
     }
-    let size int = g_state.t_types[tid].size;
+    let size int = g_state.task.t_types[tid].size;
     if (size == 8) {
         return em_ins("str\tx0, [x10]");
     }
@@ -313,7 +313,7 @@ fn em_store_local(off int, tid int) int {
 // 这类名字出现在指令操作数位置会被汇编器按寄存器解析：clang 的集成
 // 汇编器直接拒绝 `bl w12`（GNU as 放行但不可移植），因此发射时要避让。
 fn sym_is_reg_name(off int, n int) int {
-    let d *u8 = g_state.np_data;
+    let d *u8 = g_state.task.np_data;
     if (n == 2) {
         if (d[off] == 's' && d[off + 1] == 'p') { return 1; }
         if (d[off] == 'l' && d[off + 1] == 'r') { return 1; }
@@ -347,15 +347,15 @@ fn sym_is_reg_name(off int, n int) int {
 // （prelude/libc 与已带后缀的导入符号）；入口模块的 main（crt 引用裸名）。
 // 单文件模式恒不追加。
 fn sym_suffix_needed(idx int) int {
-    if (g_state.c_module_mode == 0 || g_state.c_sym_sfx_len == 0) {
+    if (g_state.c_module_mode == 0 || g_state.task.c_sym_sfx_len == 0) {
         return 0;
     }
-    if ((g_state.c_syms[idx].flags & (F_EXTERN | F_CABI)) != 0) {
+    if ((g_state.task.c_syms[idx].flags & (F_EXTERN | F_CABI)) != 0) {
         return 0;
     }
-    if (g_state.c_is_entry_mod != 0 && g_state.c_syms[idx].name_len == 4
-        && g_state.np_data[g_state.c_syms[idx].name_off] == 'm' && g_state.np_data[g_state.c_syms[idx].name_off + 1] == 'a'
-        && g_state.np_data[g_state.c_syms[idx].name_off + 2] == 'i' && g_state.np_data[g_state.c_syms[idx].name_off + 3] == 'n') {
+    if (g_state.c_is_entry_mod != 0 && g_state.task.c_syms[idx].name_len == 4
+        && g_state.task.np_data[g_state.task.c_syms[idx].name_off] == 'm' && g_state.task.np_data[g_state.task.c_syms[idx].name_off + 1] == 'a'
+        && g_state.task.np_data[g_state.task.c_syms[idx].name_off + 2] == 'i' && g_state.task.np_data[g_state.task.c_syms[idx].name_off + 3] == 'n') {
         return 0;
     }
     return 1;
@@ -367,9 +367,9 @@ fn sym_suffix_needed(idx int) int {
 // 判据基于最终名，定义侧与引用侧（含跨模块导入的已限定名）判据一致。
 fn sym_reg_guard_needed(idx int) int {
     if (tg_sym_prefix()[0] != 0) { return 0; }
-    if ((g_state.c_syms[idx].flags & (F_EXTERN | F_CABI)) != 0) { return 0; }
+    if ((g_state.task.c_syms[idx].flags & (F_EXTERN | F_CABI)) != 0) { return 0; }
     if (sym_suffix_needed(idx) != 0) { return 0; }
-    return sym_is_reg_name(g_state.c_syms[idx].name_off, g_state.c_syms[idx].name_len);
+    return sym_is_reg_name(g_state.task.c_syms[idx].name_off, g_state.task.c_syms[idx].name_len);
 }
 
 // em_sym_qualify：模块模式下把符号后缀（__proj__mod）追加到名字之后。
@@ -378,8 +378,8 @@ fn em_sym_qualify(idx int) int {
         return 0;
     }
     let i int = 0;
-    for i < g_state.c_sym_sfx_len {
-        if (em_put(g_state.np_data[g_state.c_sym_sfx_off + i]) != 0) {
+    for i < g_state.task.c_sym_sfx_len {
+        if (em_put(g_state.task.np_data[g_state.task.c_sym_sfx_off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -393,8 +393,8 @@ fn dat_sym_qualify(idx int) int {
         return 0;
     }
     let i int = 0;
-    for i < g_state.c_sym_sfx_len {
-        if (dat_put(g_state.np_data[g_state.c_sym_sfx_off + i]) != 0) {
+    for i < g_state.task.c_sym_sfx_len {
+        if (dat_put(g_state.task.np_data[g_state.task.c_sym_sfx_off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -407,8 +407,8 @@ fn bss_sym_qualify(idx int) int {
         return 0;
     }
     let i int = 0;
-    for i < g_state.c_sym_sfx_len {
-        if (bss_put(g_state.np_data[g_state.c_sym_sfx_off + i]) != 0) {
+    for i < g_state.task.c_sym_sfx_len {
+        if (bss_put(g_state.task.np_data[g_state.task.c_sym_sfx_off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -418,11 +418,11 @@ fn bss_sym_qualify(idx int) int {
 
 pub fn em_put_sym_name(idx int) int {
     if (em_frag(tg_sym_prefix()) != 0) { return -1; }
-    let n int = g_state.c_syms[idx].name_len;
-    let off int = g_state.c_syms[idx].name_off;
+    let n int = g_state.task.c_syms[idx].name_len;
+    let off int = g_state.task.c_syms[idx].name_off;
     let i int = 0;
     for i < n {
-        if (em_put(g_state.np_data[off + i]) != 0) {
+        if (em_put(g_state.task.np_data[off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -435,11 +435,11 @@ pub fn em_put_sym_name(idx int) int {
 // dat_put_sym_name：输出符号汇编名到 .data/.bss 缓冲。
 fn dat_put_sym_name(idx int) int {
     if (dat_puts(tg_sym_prefix()) != 0) { return -1; }
-    let n int = g_state.c_syms[idx].name_len;
-    let off int = g_state.c_syms[idx].name_off;
+    let n int = g_state.task.c_syms[idx].name_len;
+    let off int = g_state.task.c_syms[idx].name_off;
     let i int = 0;
     for i < n {
-        if (dat_put(g_state.np_data[off + i]) != 0) {
+        if (dat_put(g_state.task.np_data[off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -449,6 +449,56 @@ fn dat_put_sym_name(idx int) int {
     return dat_puts("__yhreg");
 }
 
+// em_put_hidden / dat_put_hidden / bss_put_hidden：按目标方言发射 hidden
+// 可见性指令（RS3a）。模块拆成按文件对象后，模块内 private 符号（非 pub）
+// 仍要被同模块其他文件的对象引用：发 .globl + hidden——链接单元内可解析、
+// 不进入动态符号表。GNU 用 `.hidden <name>`，Darwin 用 `.private_extern <name>`。
+// 三个缓冲（.text/.data/.bss）各有一份写出实现，符号名取最终汇编名
+// （含模块后缀与寄存器避让后缀，与 .globl 行一致）。
+fn em_put_hidden(idx int) int {
+    if (tg_darwin() != 0) {
+        if (em_frag("\t.private_extern\t") != 0) { return -1; }
+    } else {
+        if (em_frag("\t.hidden\t") != 0) { return -1; }
+    }
+    if (em_put_sym_name(idx) != 0) { return -1; }
+    return em_frag("\n");
+}
+
+fn dat_put_hidden(idx int) int {
+    if (tg_darwin() != 0) {
+        if (dat_puts("\t.private_extern\t") != 0) { return -1; }
+    } else {
+        if (dat_puts("\t.hidden\t") != 0) { return -1; }
+    }
+    if (dat_put_sym_name(idx) != 0) { return -1; }
+    return dat_put('\n');
+}
+
+fn bss_put_hidden(idx int) int {
+    if (tg_darwin() != 0) {
+        if (bss_puts("\t.private_extern\t") != 0) { return -1; }
+    } else {
+        if (bss_puts("\t.hidden\t") != 0) { return -1; }
+    }
+    if (bss_put_sym_name(idx) != 0) { return -1; }
+    return bss_put('\n');
+}
+
+// em_global_header：函数符号的全局声明头（RS3a）。
+// pub/CABI 符号照旧只发 .globl（导出动态符号表）；模块内 private 符号改发
+// .globl + hidden——单对象下 hidden 无语义影响，拆文件对象后跨文件 private
+// 引用靠它跨对象解析。
+pub fn em_global_header(idx int) int {
+    if (em_frag("\t.globl\t") != 0) { return -1; }
+    if (em_put_sym_name(idx) != 0) { return -1; }
+    if (em_frag("\n") != 0) { return -1; }
+    if ((g_state.task.c_syms[idx].flags & (F_PUB | F_CABI)) != 0) {
+        return 0;
+    }
+    return em_put_hidden(idx);
+}
+
 // em_lea_global：全局符号地址 → x0。
 //   GNU/Linux：`adrp x0, sym` + `add x0, x0, :lo12:sym`（静态链接，直接取址）。
 //   Darwin：外部（prelude/libc）符号必须经 GOT（Mach-O 不支持外部符号直接
@@ -456,12 +506,12 @@ fn dat_put_sym_name(idx int) int {
 //   本编译单元内定义的符号用 `adrp/add @PAGE/@PAGEOFF`。
 //   prelude 符号的标志位含 F_EXTERN（见 symbols.yh），据此区分。
 fn em_lea_global(idx int) int {
-    if ((g_state.c_syms[idx].flags & (F_RUNTIME_MEMCPY | F_RUNTIME_STRLEN
+    if ((g_state.task.c_syms[idx].flags & (F_RUNTIME_MEMCPY | F_RUNTIME_STRLEN
         | F_RUNTIME_MALLOC | F_RUNTIME_FREE | F_RUNTIME_PRINTF)) != 0) {
-        g_state.c_syms[idx].flags = g_state.c_syms[idx].flags | F_RUNTIME_USED;
+        g_state.task.c_syms[idx].flags = g_state.task.c_syms[idx].flags | F_RUNTIME_USED;
     }
     if (tg_darwin() != 0) {
-        if ((g_state.c_syms[idx].flags & F_EXTERN) != 0) {
+        if ((g_state.task.c_syms[idx].flags & F_EXTERN) != 0) {
             if (em_frag("\tadrp\tx0, ") != 0) { return -1; }
             if (em_put_sym_name(idx) != 0) { return -1; }
             if (em_frag("@GOTPAGE\n\tldr\tx0, [x0, ") != 0) { return -1; }
@@ -580,7 +630,7 @@ fn em_load_hidden_ret(off int) int {
 
 // em_fp_name：按类型返回浮点寄存器名（f64→d0/d1，f32→s0/s1）。
 fn em_fp_name(tid int, which int) *char {
-    let is64 int = (g_state.t_types[tid].size == 8).to_type(int);
+    let is64 int = (g_state.task.t_types[tid].size == 8).to_type(int);
     if (which == 0) {
         if (is64 != 0) { return "d0"; }
         return "s0";
@@ -654,7 +704,7 @@ fn em_fp_neg(tid int) int {
 fn em_fp_load_local(off int, tid int) int {
     if (em_lea_local_to(off) != 0) { return -1; }
     let suffix *char = "d";
-    if (g_state.t_types[tid].size == 4) { suffix = "s"; }
+    if (g_state.task.t_types[tid].size == 4) { suffix = "s"; }
     if (em_frag("\tldr\t") != 0) { return -1; }
     if (em_frag(suffix) != 0) { return -1; }
     if (em_frag("0, [x10]") != 0) { return -1; }
@@ -665,7 +715,7 @@ fn em_fp_load_local(off int, tid int) int {
 fn em_fp_store_local(off int, tid int) int {
     if (em_lea_local_to(off) != 0) { return -1; }
     let suffix *char = "d";
-    if (g_state.t_types[tid].size == 4) { suffix = "s"; }
+    if (g_state.task.t_types[tid].size == 4) { suffix = "s"; }
     if (em_frag("\tstr\t") != 0) { return -1; }
     if (em_frag(suffix) != 0) { return -1; }
     if (em_frag("0, [x10]") != 0) { return -1; }
@@ -698,7 +748,7 @@ fn em_fp_to_int(src_tid int, dst_signed int) int {
 // em_normalize_int：x0 按目标整数/字节 bool 的大小截断并重新扩展。
 // 1/2/4 字节目标恢复有符号或无符号值，8 字节整数/指针保持原位型；不处理浮点寄存器。
 fn em_normalize_int(tid int) int {
-    let size int = g_state.t_types[tid].size;
+    let size int = g_state.task.t_types[tid].size;
     if (ty_is_signed(tid) != 0) {
         if (size == 4) { return em_ins("sxtw\tx0, w0"); }
         if (size == 2) { return em_ins("sxth\tx0, w0"); }
@@ -785,43 +835,40 @@ fn em_unary(op int, tid int) int {
 // ---- 过程与调用 ----
 
 // em_prologue：装配函数开头（函数体已在缓冲中，帧大小确定后调用）。
-// pub 修饰为 .globl；帧大小一次 sub；随后溢出寄存器实参。
+// 符号声明头经 em_global_header：pub 导出、private 发 hidden（RS3a）；
+// 帧大小一次 sub；随后溢出寄存器实参。
 fn em_prologue(idx int) int {
-    if ((g_state.c_syms[idx].flags & (F_PUB | F_CABI)) != 0) {
-        if (em_frag("\t.globl\t") != 0) { return -1; }
-        if (em_put_sym_name(idx) != 0) { return -1; }
-        if (em_frag("\n") != 0) { return -1; }
-    }
+    if (em_global_header(idx) != 0) { return -1; }
     if (em_put_sym_name(idx) != 0) { return -1; }
     if (em_frag(":\n") != 0) { return -1; }
     if (em_ins("stp\tx29, x30, [sp, #-16]!") != 0) { return -1; }
     if (em_ins("mov\tx29, sp") != 0) { return -1; }
-    if (g_state.c_fp_off > 0) {
-        if (g_state.c_fp_off <= 4095) {
+    if (g_state.task.c_fp_off > 0) {
+        if (g_state.task.c_fp_off <= 4095) {
             if (em_frag("\tsub\tsp, sp, #") != 0) { return -1; }
-            if (em_puti(g_state.c_fp_off) != 0) { return -1; }
+            if (em_puti(g_state.task.c_fp_off) != 0) { return -1; }
             if (em_frag("\n") != 0) { return -1; }
         } else {
-            if (em_mov_imm("x9", g_state.c_fp_off.to_type(i64)) != 0) { return -1; }
+            if (em_mov_imm("x9", g_state.task.c_fp_off.to_type(i64)) != 0) { return -1; }
             if (em_ins("sub\tsp, sp, x9") != 0) { return -1; }
         }
     }
     // 溢出寄存器实参到各自槽位（负数标记 = 浮点寄存器）
     let i int = 0;
-    for i < g_state.c_spill_n {
-        if (em_lea_local_to_down(g_state.c_spill_off[i]) != 0) { return -1; }
-        if (g_state.c_spill_reg[i] < 0) {
-            let tid int = g_state.c_spill_size[i];
+    for i < g_state.task.c_spill_n {
+        if (em_lea_local_to_down(g_state.task.c_spill_off[i]) != 0) { return -1; }
+        if (g_state.task.c_spill_reg[i] < 0) {
+            let tid int = g_state.task.c_spill_size[i];
             let suffix *char = "d";
-            if (g_state.t_types[tid].size == 4) { suffix = "s"; }
-            let regno int = 0 - g_state.c_spill_reg[i] - 1;
+            if (g_state.task.t_types[tid].size == 4) { suffix = "s"; }
+            let regno int = 0 - g_state.task.c_spill_reg[i] - 1;
             if (em_frag("\tstr\t") != 0) { return -1; }
             if (em_frag(suffix) != 0) { return -1; }
             if (em_puti(regno) != 0) { return -1; }
             if (em_frag(", [x10]\n") != 0) { return -1; }
         } else {
             if (em_frag("\tstr\t") != 0) { return -1; }
-            if (em_frag(em_spill_reg_name(g_state.c_spill_reg[i])) != 0) { return -1; }
+            if (em_frag(em_spill_reg_name(g_state.task.c_spill_reg[i])) != 0) { return -1; }
             if (em_frag(", [x10]\n") != 0) { return -1; }
         }
         i += 1;
@@ -831,14 +878,14 @@ fn em_prologue(idx int) int {
 
 // em_copy_body：体缓冲逐字节转入 .text。
 fn em_copy_body() int {
-    if (g_state.c_front_checked != 0) { return front_checked_verify(); }
+    if (g_state.task.c_front_checked != 0) { return front_checked_verify(); }
     let i int = 0;
-    for i < g_state.o_body_len {
-        if (out_grow(&g_state.o_out, g_state.o_len, &g_state.o_cap, g_state.o_len + 1) != 0) {
+    for i < g_state.task.o_body_len {
+        if (out_grow(&g_state.task.o_out, g_state.task.o_len, &g_state.task.o_cap, g_state.task.o_len + 1) != 0) {
             return -1;
         }
-        g_state.o_out[g_state.o_len] = g_state.o_body[i];
-        g_state.o_len += 1;
+        g_state.task.o_out[g_state.task.o_len] = g_state.task.o_body[i];
+        g_state.task.o_len += 1;
         i += 1;
     }
     return 0;
@@ -847,7 +894,7 @@ fn em_copy_body() int {
 // em_epilogue：共享收尾。sp 恢复必须在标签之后——显式 return 与
 // 落底路径都汇聚到标签，二者都需要恢复 sp。
 fn em_epilogue() int {
-    if (em_label(g_state.c_fn_lbl) != 0) { return -1; }
+    if (em_label(g_state.task.c_fn_lbl) != 0) { return -1; }
     if (em_ins("mov\tsp, x29") != 0) { return -1; }
     if (em_ins("ldp\tx29, x30, [sp], #16") != 0) { return -1; }
     if (em_ins("ret") != 0) { return -1; }
@@ -861,17 +908,20 @@ pub fn em_alloc_local(size int) int {
     if (n == 0) {
         n = TG_STACK_ALIGN;
     }
-    g_state.c_fp_off += n;
-    return g_state.c_fp_off;
+    g_state.task.c_fp_off += n;
+    return g_state.task.c_fp_off;
 }
 
 // em_call_direct：直接调用。
 // em_emit_linux_syscall_stub：为 Linux syscall intrinsic 的函数值生成 ABI 入口。
 // 直接调用仍内联 svc；该入口保证取函数地址时不会留下未定义符号。
+// 入口为模块私有（模块后缀隔离），RS3a 起发 hidden：拆文件对象后由任何
+// 文件的对象按名解析，不进入动态符号表。
 fn em_emit_linux_syscall_stub(idx int) int {
     if (em_frag("\t.globl\t") != 0) { return -1; }
     if (em_put_sym_name(idx) != 0) { return -1; }
     if (em_frag("\n") != 0) { return -1; }
+    if (em_put_hidden(idx) != 0) { return -1; }
     if (em_put_sym_name(idx) != 0) { return -1; }
     if (em_frag(":\n") != 0) { return -1; }
     if (em_ins("mov\tx8, x0") != 0) { return -1; }
@@ -886,7 +936,7 @@ fn em_emit_linux_syscall_stub(idx int) int {
 }
 
 fn em_call_direct(idx int) int {
-    if ((g_state.c_syms[idx].flags & F_LINUX_SYSCALL) != 0) {
+    if ((g_state.task.c_syms[idx].flags & F_LINUX_SYSCALL) != 0) {
         if (tg_darwin() != 0) {
             return fail("Linux 系统调用 intrinsic 不能用于 Darwin 目标");
         }
@@ -899,14 +949,14 @@ fn em_call_direct(idx int) int {
         if (em_ins("mov\tx5, x6") != 0) { return -1; }
         return em_ins("svc\t#0");
     }
-    if ((g_state.c_syms[idx].flags & (F_RUNTIME_MEMCPY | F_RUNTIME_STRLEN
+    if ((g_state.task.c_syms[idx].flags & (F_RUNTIME_MEMCPY | F_RUNTIME_STRLEN
         | F_RUNTIME_MALLOC | F_RUNTIME_FREE | F_RUNTIME_PRINTF)) != 0) {
-        g_state.c_syms[idx].flags = g_state.c_syms[idx].flags | F_RUNTIME_USED;
+        g_state.task.c_syms[idx].flags = g_state.task.c_syms[idx].flags | F_RUNTIME_USED;
         if (em_frag("\tbl\t") != 0) { return -1; }
         if (em_put_sym_name(idx) != 0) { return -1; }
         return em_frag("\n");
     }
-    if ((g_state.c_syms[idx].flags & F_INTRINSIC) != 0) {
+    if ((g_state.task.c_syms[idx].flags & F_INTRINSIC) != 0) {
         return fail("内部错误：目标内建调用没有后端实现");
     }
     if (em_frag("\tbl\t") != 0) { return -1; }
@@ -1024,8 +1074,8 @@ pub fn dat_puthex(v i64) int {
 // em_data_string：解码字符串字面量写入 .data（NUL 结尾），返回标签号。
 // 数据标签用独立前缀 .LD 与独立计数器，避免与代码标签同名冲突。
 fn em_data_string(start int, slen int) int {
-    let lbl int = g_state.c_data_n;
-    g_state.c_data_n += 1;
+    let lbl int = g_state.task.c_data_n;
+    g_state.task.c_data_n += 1;
     return em_data_string_body(start, slen, lbl);
 }
 
@@ -1040,9 +1090,9 @@ pub fn em_data_string_body(start int, slen int, lbl int) int {
     let i int = start + 1;
     let end int = start + slen - 1;
     for i < end {
-        let b u8 = g_state.c_src[i];
+        let b u8 = g_state.task.c_src[i];
         if (b == '\\') {
-            let e u8 = g_state.c_src[i + 1];
+            let e u8 = g_state.task.c_src[i + 1];
             let out int = 0;
             if (e == 'n') { out = 10; }
             if (e == 'r') { out = 13; }
@@ -1056,7 +1106,7 @@ pub fn em_data_string_body(start int, slen int, lbl int) int {
             if (e == '"') { out = 34; }
             if (e == '\\') { out = 92; }
             if (e == 'x') {
-                out = hexval(g_state.c_src[i + 2]) * 16 + hexval(g_state.c_src[i + 3]);
+                out = hexval(g_state.task.c_src[i + 2]) * 16 + hexval(g_state.task.c_src[i + 3]);
                 i += 4;
             } else {
                 i += 2;
@@ -1079,17 +1129,17 @@ pub fn em_data_string_body(start int, slen int, lbl int) int {
 
 // em_data_name_string：从名字池发射 NUL 结尾静态字符串并返回数据标签。
 fn em_data_name_string(start int, slen int) int {
-    if (start < 0 || slen <= 0 || start + slen > g_state.np_len) {
+    if (start < 0 || slen <= 0 || start + slen > g_state.task.np_len) {
         return fail("枚举成员名称字符串范围无效");
     }
-    let lbl int = g_state.c_data_n;
-    g_state.c_data_n += 1;
+    let lbl int = g_state.task.c_data_n;
+    g_state.task.c_data_n += 1;
     if (dat_puts(".LD") != 0 || dat_puti(lbl) != 0
         || dat_put(':') != 0 || dat_put('\n') != 0) { return -1; }
     let i int = 0;
     for i < slen {
         if (dat_puts(".byte\t") != 0
-            || dat_puthex(g_state.np_data[start + i].to_type(i64)) != 0
+            || dat_puthex(g_state.task.np_data[start + i].to_type(i64)) != 0
             || dat_put('\n') != 0) { return -1; }
         i += 1;
     }
@@ -1099,7 +1149,7 @@ fn em_data_name_string(start int, slen int) int {
 
 // em_data_scalar：常量值按类型写入 .data。
 pub fn em_data_scalar(tid int, v i64) int {
-    let size int = g_state.t_types[tid].size;
+    let size int = g_state.task.t_types[tid].size;
     let unit *char = ".byte\t";
     if (size == 8) { unit = ".xword\t"; }
     if (size == 4) { unit = ".word\t"; }
@@ -1114,21 +1164,27 @@ pub fn em_data_symbol_header(idx int, align int) int {
     if (dat_puts(".balign\t") != 0) { return -1; }
     if (dat_puti(align) != 0) { return -1; }
     if (dat_put('\n') != 0) { return -1; }
-    if (g_state.c_iface_load != 0) {
+    if (g_state.task.c_iface_load != 0) {
         // 接口加载（.s.i）时为**导入的聚合常量**物化本单元副本：写成本地数据标签
         // 并把标签号记进 cval —— 运行期引用按标签装载（与字符串指针常量同一路径，
         // 见 sem_value.yh），避免与提供方导出的同名符号在链接期重复定义。
-        let lbl int = g_state.c_data_n;
-        g_state.c_data_n += 1;
+        let lbl int = g_state.task.c_data_n;
+        g_state.task.c_data_n += 1;
         if (dat_puts(".LD") != 0 || dat_puti(lbl) != 0
             || dat_put(':') != 0 || dat_put('\n') != 0) { return -1; }
-        g_state.c_syms[idx].cval = lbl.to_type(i64);
+        g_state.task.c_syms[idx].cval = lbl.to_type(i64);
         return 0;
     }
-    if ((g_state.c_syms[idx].flags & F_PUB) != 0) {
+    if ((g_state.task.c_syms[idx].flags & F_PUB) != 0) {
         if (dat_puts(".globl\t") != 0) { return -1; }
         if (dat_put_sym_name(idx) != 0) { return -1; }
         if (dat_put('\n') != 0) { return -1; }
+    } else {
+        // 模块内 private 数据符号：hidden 全局（RS3a），供同模块其他文件对象解析。
+        if (dat_puts(".globl\t") != 0) { return -1; }
+        if (dat_put_sym_name(idx) != 0) { return -1; }
+        if (dat_put('\n') != 0) { return -1; }
+        if (dat_put_hidden(idx) != 0) { return -1; }
     }
     if (dat_put_sym_name(idx) != 0) { return -1; }
     return dat_puts(":\n");
@@ -1137,11 +1193,11 @@ pub fn em_data_symbol_header(idx int, align int) int {
 // bss_put_sym_name：.bss 缓冲输出符号名（Darwin 加 "_" 前缀）。
 fn bss_put_sym_name(idx int) int {
     if (bss_puts(tg_sym_prefix()) != 0) { return -1; }
-    let n int = g_state.c_syms[idx].name_len;
-    let off int = g_state.c_syms[idx].name_off;
+    let n int = g_state.task.c_syms[idx].name_len;
+    let off int = g_state.task.c_syms[idx].name_off;
     let i int = 0;
     for i < n {
-        if (bss_put(g_state.np_data[off + i]) != 0) {
+        if (bss_put(g_state.task.np_data[off + i]) != 0) {
             return -1;
         }
         i += 1;
@@ -1152,14 +1208,17 @@ fn bss_put_sym_name(idx int) int {
 }
 
 // em_bss_symbol：.bss 输出零初始化全局（.balign + 标签 + .skip size）。
+// private 符号发 hidden 全局（RS3a）：同模块其他文件对象按名解析，
+// 不进入动态符号表。
 pub fn em_bss_symbol(idx int, size int, align int) int {
     if (bss_puts(".balign\t") != 0) { return -1; }
     if (bss_puti(align) != 0) { return -1; }
     if (bss_put('\n') != 0) { return -1; }
-    if ((g_state.c_syms[idx].flags & F_PUB) != 0) {
-        if (bss_puts(".globl\t") != 0) { return -1; }
-        if (bss_put_sym_name(idx) != 0) { return -1; }
-        if (bss_put('\n') != 0) { return -1; }
+    if (bss_puts(".globl\t") != 0) { return -1; }
+    if (bss_put_sym_name(idx) != 0) { return -1; }
+    if (bss_put('\n') != 0) { return -1; }
+    if ((g_state.task.c_syms[idx].flags & F_PUB) == 0) {
+        if (bss_put_hidden(idx) != 0) { return -1; }
     }
     if (bss_put_sym_name(idx) != 0) { return -1; }
     if (bss_puts(":\n.skip\t") != 0) { return -1; }

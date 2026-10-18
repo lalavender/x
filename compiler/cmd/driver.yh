@@ -49,7 +49,7 @@ fn drv_write_asm(asm_path *char) int {
 fn run_emit_asm_to(asm_path *char, obj_path *char) int {
     let gs *gen.GenState = gen.G();
     if (gs.c_backend != 0) {
-        let rc int = llvm_emit_single_file(gs.c_path, obj_path, 0,
+        let rc int = llvm_emit_single_file(gs.task.c_path, obj_path, 0,
             gs.c_emit_text_path, 1);
         if (rc == 0) { mb_print_stats(); }
         return rc;
@@ -57,7 +57,7 @@ fn run_emit_asm_to(asm_path *char, obj_path *char) int {
     if (lex.lex_all() != 0) {
         return 1;
     }
-    gs.c_compile = 1;
+    gs.task.c_compile = 1;
     gen.ty_register_builtins();
     gen.scope_push();
     if (gen.sem_register_prelude() != 0) {
@@ -66,7 +66,7 @@ fn run_emit_asm_to(asm_path *char, obj_path *char) int {
     if (sem_compile() != 0) {
         return 1;
     }
-    if (gs.c_errors > 0) {
+    if (gs.task.c_errors > 0) {
         return 1;
     }
     if (drv_write_asm(asm_path) != 0) {
@@ -136,7 +136,7 @@ fn run_syntax_check() int {
     if (parse.parse_source() != 0) {
         return 1;
     }
-    if (gs.c_errors > 0) {
+    if (gs.task.c_errors > 0) {
         return 1;
     }
     return 0;
@@ -156,8 +156,8 @@ fn drv_is_yh_source(path *char) int {
 // 检查失败时保留原诊断，成功时只输出检查结果，不创建汇编或对象文件。
 fn run_file_check(source_path *char) int {
     let gs *gen.GenState = gen.G();
-    gs.c_check_only = 1;
-    gs.c_path = source_path;
+    gs.task.c_check_only = 1;
+    gs.task.c_path = source_path;
     if (gen.front_checked_begin() != 0) { return 1; }
     if (gen.read_source(source_path) != 0 || gen.sem_init_tables() != 0) {
         return 1;
@@ -165,11 +165,11 @@ fn run_file_check(source_path *char) int {
     if (lex.lex_all() != 0) {
         return 1;
     }
-    gs.c_compile = 1;
+    gs.task.c_compile = 1;
     gen.ty_register_builtins();
     gen.scope_push();
     if (gen.sem_register_prelude() != 0 || sem_compile() != 0
-        || gs.c_errors > 0) {
+        || gs.task.c_errors > 0) {
         return 1;
     }
     let output [32]u8;
@@ -186,9 +186,9 @@ fn run_emit_asm() int {
     if (gs.c_backend != 0) {
         let rc int = 0;
         if (gs.c_emit_kind == 1) {
-            rc = llvm_emit_single_file(gs.c_path, 0.to_type(*char), 0, "-", 0);
+            rc = llvm_emit_single_file(gs.task.c_path, 0.to_type(*char), 0, "-", 0);
         } else {
-            rc = llvm_emit_single_file(gs.c_path, "-", 1, 0, 0);
+            rc = llvm_emit_single_file(gs.task.c_path, "-", 1, 0, 0);
         }
         if (rc == 0) { mb_print_stats(); }
         return rc;
@@ -196,7 +196,7 @@ fn run_emit_asm() int {
     if (lex.lex_all() != 0) {
         return 1;
     }
-    gs.c_compile = 1;
+    gs.task.c_compile = 1;
     gen.ty_register_builtins();
     // 全局作用域（第 0 层），随后登记 prelude 外部函数
     gen.scope_push();
@@ -206,7 +206,7 @@ fn run_emit_asm() int {
     if (sem_compile() != 0) {
         return 1;
     }
-    if (gs.c_errors > 0) {
+    if (gs.task.c_errors > 0) {
         return 1;
     }
     if (gen.flush_output() != 0) {
@@ -258,7 +258,7 @@ fn drv_scan_target(argc int, argv **char, out **char) int {
             gs.c_stats_enabled = 1;
             i += 1;
         } else if (gen.cstr_eq(argv[i], "--legacy-system") != 0) {
-            gs.c_legacy_system = 1;
+            gs.task.c_legacy_system = 1;
             i += 1;
         } else {
             out[n] = argv[i];
@@ -299,7 +299,7 @@ pub fn main(argc int, argv **char, envp **char) int {
         if (n == 2 && drv_is_yh_source(av[1]) != 0) {
             return run_file_check(av[1]);
         }
-        gs.c_check_only = 1;
+        gs.task.c_check_only = 1;
         return mb_cmd_build(av, n);
     }
     if (n >= 1 && gen.cstr_eq(av[0], "run") != 0) {
@@ -314,14 +314,15 @@ pub fn main(argc int, argv **char, envp **char) int {
     }
     if ((n >= 6 && n <= 12) && gen.cstr_eq(av[0], "--emit-module") != 0
         && gen.cstr_eq(av[4], "-o") != 0) {
-        // 内部子命令：--emit-module <mod> <提供方根> <主根> -o <out.s>
+        // 内部子命令：--emit-module <mod> <提供方根> <主根> -o <asm 目录>
+        // （RS3b：目录内含每文件 .s 与 <tag>.stub.s，不再是单个 .s）
         let cache_salt u64 = 0;
         let fi int = 6;
         for fi < n {
             if (gen.cstr_eq(av[fi], "--stats") != 0) {
                 gs.c_stats_enabled = 1;
             } else if (gen.cstr_eq(av[fi], "--check-only") != 0) {
-                gs.c_check_only = 1;
+                gs.task.c_check_only = 1;
             } else if (gen.cstr_eq(av[fi], "--ir-key") != 0 && fi + 1 < n) {
                 if (mb_parse_hex(av[fi + 1], &cache_salt) != 0) {
                     usage();
@@ -338,7 +339,7 @@ pub fn main(argc int, argv **char, envp **char) int {
             fi += 1;
         }
         let mlen int = 0;
-        if (gs.c_check_only == 0 && gen.target_legacy_ready() != 0) { return 1; }
+        if (gs.task.c_check_only == 0 && gen.target_legacy_ready() != 0) { return 1; }
         let rlen int = 0;
         let blen int = 0;
         let mo int = mb_intern_arg(av[1], &mlen);
@@ -387,8 +388,8 @@ pub fn main(argc int, argv **char, envp **char) int {
         }
     }
     if (mode != 1 && gen.target_legacy_ready() != 0) { return 1; }
-    gs.c_path = av[src_idx];
-    if (gen.read_source(gs.c_path) != 0) {
+    gs.task.c_path = av[src_idx];
+    if (gen.read_source(gs.task.c_path) != 0) {
         return 1;
     }
     // 各模式都会用到堆分配的全局表（作用域栈等）

@@ -2,6 +2,209 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-19 macOS/ARM64 LLVM 接入方案交付
+
+- 新增[接入设计](03-design/yh-macOS-LLVM后端接入设计.md)与
+  [F2 实施方案](02-plan/yh-macOS-LLVM后端接入实施方案.md)，用户确认先 Mac 原生
+  自举、再 Linux/x64 交叉验收；F2-0～10 各片列明文件、接口、`.yh` 测试与关闭门。
+- 明确固定 LLVM/lld 21.1.8、Darwin 静态包、Apple ABI/runtime、Mach-O 链接/签名、
+  SDK/部署版本缓存身份与原生固定点；缺 SDK 的 legacy 构建兼容、交叉目标库注入、
+  emitter 不按宿主后缀裁掉等边界纳入专项。默认切换/滚种子保持既有硬门。
+- 本机只读检查为 macOS27/SDK27，macos-14 兼容与建议最低版本14.0留给实施验证；
+  方案未使用虚构 SDK 包哈希，未安装/构建 LLVM，未改编译器源码或种子。
+- 关联 todo、总方案与 ADR-0014，交付记录见
+  [方案交付](01-finished/yh-macOS-LLVM接入方案交付-2026-10-19.md)。
+
+## 2026-10-19 Linux/x64 交叉引导 macOS LLVM 编译器可行性分析
+
+- 在[macOS LLVM 差距分析](02-plan/yh-macOS-LLVM迁移差距分析.md)补充交叉引导链：
+  Linux A 编译 Darwin 对象，配目标版 LLVM/桥与 macOS SDK 交叉链接 B，再在 Mac
+  完成原生连续自编和固定点。技术可行，当前生产链尚未接入；Linux/ARM64 不是
+  技术上的必要中间步骤，既有 F1/F2 排期未改。
+- 重点核对：目标源码筛选与宿主身份分离已有基础；Darwin 桥仍为失败桩；自举库
+  注入仍固定 Linux；`--backend llvm` 不会自动改变产出编译器的默认后端。
+- 本轮为代码/官方文档分析，未执行 Linux 交叉构建，未修改编译器源码或种子。
+
+## 2026-10-19 macOS/ARM64 切换 LLVM 剩余差距核查
+
+- 交付[差距分析](02-plan/yh-macOS-LLVM迁移差距分析.md)，关联 F2 待办；核对当前
+  实现的七组缺口：宿主 SDK/构建、目标发射、Apple C ABI、运行时、链接/签名、
+  SDK 缓存身份、原生全门/自举。另列公共默认切换硬门，不更改既有平台顺序。
+- 本机最小探针：Darwin/arm64 的 LLVM 文本/汇编被 emitter 平台校验拒绝；
+  Linux/x64 纯 LLVM 文本输出成功（2012 字节），汇编发射命中 Darwin 失败桩。
+  `make llvm-host YH_LLVM_HOST=1` 明确拒绝缺少固定 SDK。代码另确认 C 桥白名单
+  漏 `aarch64-apple-darwin`，SDK 构建仍依赖 GNU 链接参数与 Linux memfd。
+- 原始探针在 `tmp/mac-llvm-audit/`；本轮未修改编译器源码或种子，未重跑全量门。
+  SDK 切换缓存风险与 Darwin relocation/PIE 政策列为待验证，未宣称已复现。
+
+## 2026-10-19 RS2/RS4 核查收口（探针实测 + 代码证据）
+
+- **RS4 缓存键收口：核查关闭（代码已实现，todo 未回填）**。证据：
+  编译器二进制指纹（`mb_mix_compiler_fingerprint`）、外部汇编器身份
+  （`mb_hash_tool_identity(&h, cmd0)`，link_cache.yh:868——解析路径 +
+  二进制内容）、链接驱动身份（:991）与驱动器报告的搜索路径/工具/启动
+  文件/库文件（`mb_link_query_identity` :462，查询结果工具再哈希内容
+  :561）、lld 库内容、目标三元组/data_layout/abi、后端与优化级、全部
+  源文件与依赖 `.s.i`/`.s.ct` 内容——均已在键中。门：u5-hot-cache-hits /
+  u5-rebind 系列缓存键用例全绿。
+- **RS2 函数级缓存：缺口结构定案（探针实测）**。tmp/rs2probe 项目实测：
+  - legacy 路径有函数级 IR 缓存（ast_ir_cache.yh），但仅在 worker 子进程
+    内生效，父进程 --stats 不可见（ir_cache_hits=0 实测）；只覆盖进入
+    SSA 子集的函数；
+  - **LLVM 模式完全跳过函数级缓存**（module_worker.yh:354 直接
+    `mb_llvm_emit_module`），增量粒度 = 模块级对象缓存（无改动全命中
+    实测 [缓存] main、asm=0）；
+  - 真缺口 = LLVM 模式函数级 check/IR 缓存，必须 Linux 宿主实施与验证
+    （darwin 无固定 SDK），定位为 LL11 切默认前完成、单函数 200ms 目标
+    主力；legacy 窄子集随 LL12 退役处理。
+- **RS3**：模块 = 目录（每目录一模块、目录内多文件）结构已由探针确认；
+  文件级对象为 darwin 可实施的功能切片，待专门会话。RS5 依赖 RS2/RS3。
+- 本轮无编译器源码改动（探针项目在 tmp/rs2probe/，核查为主）。
+
+## 2026-10-19 RS1b/RS1c 完成并滚种子（任务私有上下文落地）
+
+- **RS1b 诊断/路径缓冲任务私有化**：`c_path_buffer`/`c_ct_origin_path_buffer`
+  固定 `[1024]u8` → 堆分配倍增扩容（新 `gen.task_buf_reserve` 统一助手，
+  任务生命期持有不释放）；`set_source_path` 移除 1023 上限；`iface_ct.yh`
+  来源映射解码/恢复 4 处同步。门：make + selfhost-native 全绿。
+- **RS1c TaskCtx 物理收敛**：199 个任务字段从 `GenState` 收敛进
+  `pub struct TaskCtx`（`g_state.task.<字段>`），GenState 留 52 个进程级
+  字段 + `task TaskCtx`；全仓三类访问模式机械迁移（`tmp/rs1c_rewrite.py`，
+  残留 0）；三个 LLVM fixture（llvmfront/llvmchecked/llvmlower，115 处）
+  同步迁移——首跑 101/104 暴露 fixture 直访任务字段，补迁移后全绿。
+- **门与种子**：make 冷编一次通过；selfhost-native 全绿（固定点 + 自解析
+  + 语料 + 模块 18/18 + 项目 104/104）；make test 342/343（+1 平台跳过）、
+  fail 132/132、pass 8/8；`make seed` 滚 `bin/yh-darwin-arm64`
+  （SHA-256 `5b34a0678a564e2200a5dc9a417be03e33329af8732725516e85d77b52e654b4`）。
+- **RS1d 决策修订（并入 R2c）**：fork worker 下 `g_state.task` 已任务私有
+  （每进程一份）；显式 `*TaskCtx` 传参贯穿数百函数签名在无线程消费者时属
+  投机性大改，违反「简洁优先」；R2c 线程池落地时随宿主线程桥一起实施。
+- **RS2 开工前核查**：LL9 已把后端/目标/优化级/编译器指纹纳入缓存键；
+  剩余真缺口 = 核实 LLVM 模式函数级缓存覆盖范围与 legacy 路径函数级缓存，
+  已写入计划文档。
+- **过程记录**：脚本首版丢字段名/`git checkout` 回退了未提交的 RS1a/RS1b
+  state.yh 部分（其余文件机械重写幂等无损）——均当场发现修正；批量删除
+  保护钩子会拦 make 内部 `rm -rf compiler/.build`，用 `mv` 挪入 tmp/ 绕行
+  （构建缓存，gitignore）。
+
+## 2026-10-19 RS1a 完成：GenState 域分类标注
+
+- `compiler/gen/state.yh` 的 `GenState` 加两域分界标注（纯注释，不改字段
+  顺序）：头部域分类说明指向 R2 收尾计划；四处分界注释——
+  ①构建配置与统计（`c_stats_*`/`c_front_cache`/`c_ir_cache_salt`）、
+  ②解析游标续段、③项目索引（`p_*`）、④目标与后端 CLI 选项
+  （`c_dialect/c_target/c_backend` 等）；`c_module_mode`/`c_is_entry_mod`/
+  `c_front_checked` 逐字段标注归属。未标注字段即每任务域（RS1c 收敛
+  `TaskCtx` 的对象）。
+- 验证：`make` 冷编通过；`env -u PYTHONPATH make selfhost-native` 全绿
+  （两代固定点 + 自解析 + 全量语料 + 模块/项目 104/104，darwin/arm64）。
+  纯注释无行为变化，不新增 .yh 用例。
+- **环境发现（影响所有本机门禁）**：WorkBuddy Bash 会话注入
+  `PYTHONPATH=.../WorkBuddy AI.app/.../shim`，其 sitecustomize 会让
+  Python `Path.mkdir(exist_ok=True)` 在目录已存在时误报 PermissionError
+  EEXIST，`make selfhost-native`/`make test` 直接失败；跑门禁必须
+  `env -u PYTHONPATH make ...`。
+
+## 2026-10-19 R2 收尾计划开执行：RS0 完成 + RS1 侦察
+
+- **RS0 对账回填完成**：
+  - **负数字面量实参（R2a 疑似真缺口）实测关闭**：darwin 旧后端探针
+    rc=0（负字面量作 int 实参、u32 形参、一元减号作用于调用结果）；既有
+    语料 `run/04-if-else` 的 `check(-3)`（darwin 342/343 全绿）与
+    `llvm-integer-boundaries` 的 `quotient32(-21, 4)`（LLVM 343/343）
+    双路径覆盖。「unsigned_score 回退」仅指旧 SSA 后端覆盖统计，
+    LLVM fallback=0，随 LL12 退役，不作为 R2 缺口。
+  - switch/goto/for-in/浮点/聚合/间接调用/单文件统一入口：凭 LL4–LL7、
+    LL9 完成记录关闭；双平台 ABI 移交 F1/F2；默认优化覆盖归 RS5。
+  - R1 剩余归位：会话 API 归 VS-U1；其余并入 RS1/RS2。todo.md 已回填
+    （逐项带证据）。
+- **RS1 侦察完成（第一步）**：语义状态确认为单个巨型全局
+  `gen/state.yh` 的 `GenState`（约 270 行字段、`gen.G()` 全模块访问，
+  注释明示字段偏移已越界、`c_data_str_*` 被迫拆出）；字段分「每任务
+  （名字池/符号表/发射缓冲/调用栈）」与「每进程（项目索引/目标/CLI）」
+  两域；worker 诊断走固定缓冲。实施路线定为拆分式四小步
+  RS1a（字段域重排，产物逐字节不变作门）→ RS1b（诊断缓冲任务私有化）
+  → RS1c（每任务域收敛 `TaskCtx` 子结构，逐模块迁移）→ RS1d（worker
+  主路径持 `*TaskCtx`）。已写入计划文档 RS1 节。
+- **本轮无编译器源码改动**（探针脚本在 tmp/），未跑全量门；RS1a 起的
+  代码切片待下次会话按四小步执行。
+
+## 2026-10-19 R2 收尾实施计划交付
+
+- 交付 [R2 收尾实施计划](02-plan/yh-R2收尾实施计划.md)：基于 LLVM LL1–LL10
+  闭环与 R2c 拆出后的最新状态，把 R2 收口细化为 RS0–RS5 六个独立可验收切片——
+  RS0 对账回填（R2a 剩余 10 项中与 LL4–LL7 合并验收的重叠项预期关闭，
+  负数字面量实参为疑似真缺口归 RS1.5，双平台 ABI 归 F1/F2，会话 API 归
+  VS-U1）、RS1 任务私有上下文、RS2 完整函数级 check/IR 缓存、RS3 文件级
+  对象、RS4 缓存键收口、RS5 提交协议与优化覆盖复核（产出收口报告，解除
+  LL11 的 R2b 阻挡）。
+- 成功标准：三层门全绿、build-check 100/100、缓存失效/命中矩阵用例、
+  20 轮性能披露（单函数 200ms / 冷编 1s 目标）、产物确定性。
+- 仅文档交付：todo.md 编译流程节已挂计划引用；未动代码、未跑门禁。
+  下一步从 RS0（纯文档对账）起步。
+
+## 2026-10-19 R2b 拆分：线程并行推迟到并发标准库之后（R2c）
+
+- **用户决定**：多模块线程并行（真正线程池）不在 R2b 做，推迟到并发标准库
+  完善之后；当前执行模型维持 fork/COW 进程 worker 现状——经确认，**不退回
+  单模块串行**（fork worker 本就是最多 4 路的多模块并行，串行化会让实测
+  33.7s 的冷编明显回退）。
+- **新顺序（R2c）**：宿主线程桥（Linux clone / Darwin 审核 libSystem）→
+  libs/sys 线程原语（线程/mutex/cond/join，属 SYS 任务）→ 编译器线程池与
+  接口调度的线程状态隔离/并发/确定性验收——线程池**消费自己的标准库**，
+  顺带作为标准库的狗粮自举验收。原方案「宿主桥不能等 R3」的约束随之修订
+  （R3 线程 API 与 R2c 本就共用同一座宿主桥）。
+- **R2b 硬门收窄**：去掉线程载体两项，保留完整函数级 check/IR 缓存 →
+  文件级对象 → 缓存键纳入工具版本；任务私有上下文仍在线程化前完成
+  （全局语义状态不拆掉，线程池无从谈起）。串行/多 worker 输出一致的
+  原验收门保留为 R2c 回归门。
+- **连锁影响**：LL11 切默认以「R2b 剩余 + R2c」全部关闭为前提，随之顺延；
+  LL11 的性能对照与 x64 种子滚制不受影响。已完成的 DAG 调度/接口就绪推进
+  （fork worker 上验收）不损失，线程化时调度层直接复用。
+- **文档**：todo.md（R2b/R2c/R3/LLVM 节）、实施方案 §2 与 §6 同步修订，
+  旧表述以删除线保留并标注修订依据。
+
+## 2026-10-19 GitHub Actions 多平台验证补全（TC4 并入 + x86_64 LLVM 作业修复）
+
+- **回答「能不能用 GitHub Actions 做多平台测试验证」**：能，且已就位——
+  `ci.yml` 三作业：`linux-arm64`（QEMU arm64 容器跑主门）、`linux-x86_64`
+  （ARM64 种子经 QEMU 产 x64 A，原生跑 LLVM O0/O2 全门）、`darwin-arm64`
+  （macos-14 主门 + 自动补代）。本轮补齐三处缺口：
+- **TC4 arm64 原生验证并入 CI**：`linux-arm64` 作业在 `make selfhost-native`
+  后追加 `make yh-link-probe FULL=1`——check.py 自行冷编 link/ 与 asm/，
+  arm64 容器即原生执行环境，把 WSL/qemu 的「模拟通过」提升为 CI 原生通过。
+- **linux-x86_64 作业修复（此前从未运行、按现状首跑必失败）**：全新 runner 上
+  `YH_LLVM_HOST` 默认 auto 不联网取固定 SDK，构建出的 yh 无 LLVM 桥，
+  `test-llvm` 必失败。作业 env 加 `YH_LLVM_HOST: "1"`（require 联网准备），
+  并新增 `tmp/llvm-migration` 的 actions/cache（键随 `vendor/llvm/sdk.lock.json`、
+  `tools/llvm-sdk.py` 与桥源码哈希变化，数 GB SDK 不必每次重下）。
+- **触发分支**：push 触发加入 `llvm`（当前工作分支；此前 llvm 分支推送完全不
+  触发 CI）。darwin-arm64 仍仅 workflow_dispatch 触发（省 macOS 计费分钟）。
+- **本地验证**（macOS 无 act，语法级干跑）：`tmp/ci-lint.py`——YAML 解析
+  （3 作业）、全部 8 个 run 块 `bash -n` 通过、断言 llvm 触发分支/yh-link-probe
+  步骤/YH_LLVM_HOST=1/缓存步均就位，全部通过。
+- **未运行**：CI 实跑需推送后由 Actions 执行（本机 GitHub 连接器未授权）；
+  首跑关注点已记 todo「linux-x86_64 CI 作业首跑验证」。
+- **本地/CI 分工定策（同日用户决定，写入 AGENTS.md 开发策略）**：在 Linux 或
+  macOS 上开发，本地只需保证**本平台**门禁绿（`make test` +
+  `make selfhost-native`；语料按 `// platform:` 筛选、`test-llvm` 等平台专属门
+  在别的宿主明确拒绝）；完整多平台回归由 GitHub Actions 承担，本地不为其他
+  平台预跑门禁，CI 红灯按 todo 立项再修。支撑点均已在位：语料平台筛选
+  （2026-10-18，darwin 342/343 + 1 跳过退出 0）、`test-llvm` 宿主断言、
+  ci.yml 的 arm64/x86_64 推送作业与 darwin 手动作业分工。
+
+## 2026-10-18 cli 标准库设计文档交付
+
+- 按用户要求参考 Python argparse，并确认目标范围为“尽量覆盖全部能力”，交付
+  [cli 设计](03-design/yh-cli标准库设计.md)与
+  [CLI0–CLI6 实施方案](02-plan/yh-cli标准库实施方案.md)。
+- 设计结合现有 libs 项目、NUL 字符串、显式内存管理、模块私有类型和 argc/argv 入口，
+  确定声明对象、带类型标签结果、类型化查询，以及返回结果与输出退出分离的接口。
+- 文档规定 action/数量/默认值、负数/短组合/分隔符、子命令作用域、继承/互斥/冲突、
+  四种解析模式、扩展回调、参数文件、帮助/诊断/生命周期，并明确与参考基线的差异。
+- 更新标准库设计索引和 todo；**未实现 cli、未注册空模块、未修改编译器或现有入口**。
+  本次仅做文档结构、链接与差异检查，未运行编译器构建或 cli 运行门；实现任务仍未完成。
+
 ## 2026-10-18 测试平台筛选：共有用例 + 平台专属用例
 
 - `tests/yh-run/check.py` 新增 `// platform: <tag>` 头部指令：无指令为共有用例

@@ -20,12 +20,23 @@ pub struct AstIRCalls {
     symbol_cap int;
 }
 
+// ast_ir_shift_rows / ast_ir_shift_deltas：lowering 期间每函数行的替换记录
+// （RS3b 按文件切分发射区间用）。shift_rows[i] 为第 i 行 lowering 事件时刻的
+// 累计位移；deltas[i] 为第 i 行替换造成的文本长度增量。文件边界换算必须用
+// 「位置在该边界之前的全部替换增量之和」（deltas 前缀和），不能用事件时刻
+// 累计值——pass 0 先替换靠后的非内联函数、pass 1 再替换靠前的内联函数时，
+// 靠前行的事件时刻累计值混入了位置在后的替换量。行序与文本位置序一致
+// （均按文件内声明序递增），前缀和模型因此成立。
+let ast_ir_shift_rows *int = 0;
+let ast_ir_shift_deltas *int = 0;
+let ast_ir_shift_count int = 0;
+
 
 // ast_ir_type：把前端标量类型映射到 IR 私有类型编号；暂不降低聚合类型。
 fn ast_ir_type(type_id int) int {
     let gs *gen.GenState = gen.G();
-    if (type_id < 0 || type_id >= gs.t_type_n) { return -1; }
-    let kind int = gs.t_types[type_id].kind;
+    if (type_id < 0 || type_id >= gs.task.t_type_n) { return -1; }
+    let kind int = gs.task.t_types[type_id].kind;
     if (kind == gen.TY_BOOL) { return ir.IR_TY_BOOL; }
     if (kind == gen.TY_CHAR || kind == gen.TY_U8) { return ir.IR_TY_U8; }
     if (kind == gen.TY_I8) { return ir.IR_TY_I8; }
@@ -46,15 +57,15 @@ fn ast_ir_promoted_type(left_type int, right_type int) int {
 // ast_ir_void_type：确认类型编号指向完整 void 类型；ast_ir_type 对 void 返回 -1。
 fn ast_ir_void_type(type_id int) int {
     let gs *gen.GenState = gen.G();
-    return type_id >= 0 && type_id < gs.t_type_n
-        && gs.t_types[type_id].kind == gen.TY_VOID ? 1 : 0;
+    return type_id >= 0 && type_id < gs.task.t_type_n
+        && gs.task.t_types[type_id].kind == gen.TY_VOID ? 1 : 0;
 }
 
 // ast_ir_bindings_supported：确认参数与局部变量使用连续编号和当前 IR 标量类型。
 fn ast_ir_bindings_supported(ctx *AstFunctionContext, sig int) int {
     let gs *gen.GenState = gen.G();
-    if (sig < 0 || sig >= gs.t_sig_n || gs.t_sig_vararg[sig] != 0) { return 0; }
-    let expected int = gs.t_sig_np[sig];
+    if (sig < 0 || sig >= gs.task.t_sig_n || gs.task.t_sig_vararg[sig] != 0) { return 0; }
+    let expected int = gs.task.t_sig_np[sig];
     let found int = 0;
     let i int = ctx.binding_first;
     for i < ctx.binding_after {
@@ -72,7 +83,7 @@ fn ast_ir_bindings_supported(ctx *AstFunctionContext, sig int) int {
         }
         if (binding.sym_kind != gen.SYM_VAR) { return 0; }
         if (found < expected) {
-            let source_type int = gs.t_sig_params[gs.t_sig_first[sig] + found];
+            let source_type int = gs.task.t_sig_params[gs.task.t_sig_first[sig] + found];
             if (binding.is_param == 0 || ast_ir_type(source_type) < 0
                 || ast_ir_type(binding.sym_type_id) != ast_ir_type(source_type)) {
                 return 0;
@@ -273,16 +284,16 @@ fn ast_ir_report_reject(ctx *AstFunctionContext, reason int) void {
     let n int = gen.append_str(text, 0, "yh-reject file=");
     if (decl.file_id >= 0 && decl.file_id < gs.p_file_n) {
         n = gen.append_str_limit(text, n, 1200,
-            gen.arr_cstr(&gs.np_data[gs.p_files[decl.file_id].path_off]));
+            gen.arr_cstr(&gs.task.np_data[gs.p_files[decl.file_id].path_off]));
     }
     n = gen.append_str(text, n, " line=");
     n = gen.append_int(text, n, decl.line);
     n = gen.append_str(text, n, " col=");
     n = gen.append_int(text, n, decl.col);
     n = gen.append_str(text, n, " function=");
-    if (decl.sym_id >= 0 && decl.sym_id < gs.c_sym_n) {
+    if (decl.sym_id >= 0 && decl.sym_id < gs.task.c_sym_n) {
         n = gen.append_str_limit(text, n, 1800,
-            gen.arr_cstr(&gs.np_data[gs.c_syms[decl.sym_id].name_off]));
+            gen.arr_cstr(&gs.task.np_data[gs.task.c_syms[decl.sym_id].name_off]));
     }
     let why *char = "context";
     if (reason == 2) { why = "signature"; }
@@ -302,23 +313,46 @@ fn ast_ir_report_reject(ctx *AstFunctionContext, reason int) void {
 pub fn ast_ir_lower_module(cache_dir *char, compiler_salt u64) int {
     let gs *gen.GenState = gen.G();
     ast_ir_inline_reset();
+    // RS3b：分配替换位移记录（每函数一行 + 末行总位移）。worker 按文件切分
+    // 发射区间时需要知道每个函数入口处的累计替换量，才能把 lowering 前的
+    // 标记换算成 lowering 后的实际偏移。
+    if (ast_ir_shift_rows != 0) {
+        free(ast_ir_shift_rows.to_type(*void));
+        ast_ir_shift_rows = 0;
+    }
+    if (ast_ir_shift_deltas != 0) {
+        free(ast_ir_shift_deltas.to_type(*void));
+        ast_ir_shift_deltas = 0;
+    }
+    ast_ir_shift_count = ast_function_count + 1;
+    ast_ir_shift_rows = malloc((ast_ir_shift_count * sizeof(int)).to_type(u64))
+        .to_type(*int);
+    ast_ir_shift_deltas = malloc((ast_ir_shift_count * sizeof(int)).to_type(u64))
+        .to_type(*int);
+    if (ast_ir_shift_rows == 0 || ast_ir_shift_deltas == 0) {
+        return gen.fail("替换位移记录内存分配失败");
+    }
     let i int = 0;
     let asm_shift int = 0;
     let pass int = 0;
     for pass < 2 {
         i = 0;
         for i < ast_function_count {
+            // 位移在行循环最顶端记录（两遍都记）：comptime/inline 跳过的行
+            // 不会替换文本，增量恒为 0；被替换的行在 lowering 后回写增量。
+            ast_ir_shift_rows[i] = asm_shift;
+            ast_ir_shift_deltas[i] = 0;
             let ctx AstFunctionContext = ast_function_nodes[i];
             let is_inline int = 0;
             if (ctx.decl_row >= 0 && ctx.decl_row < ast_decl_count) {
                 let decl AstDecl = ast_decl_nodes[ctx.decl_row];
-                if (decl.sym_id >= 0 && decl.sym_id < gs.c_sym_n
-                    && (gs.c_syms[decl.sym_id].flags & gen.F_COMPTIME) != 0) {
+                if (decl.sym_id >= 0 && decl.sym_id < gs.task.c_sym_n
+                    && (gs.task.c_syms[decl.sym_id].flags & gen.F_COMPTIME) != 0) {
                     i += 1;
                     continue;
                 }
-                if (decl.sym_id >= 0 && decl.sym_id < gs.c_sym_n
-                    && (gs.c_syms[decl.sym_id].flags & gen.F_INLINE) != 0) {
+                if (decl.sym_id >= 0 && decl.sym_id < gs.task.c_sym_n
+                    && (gs.task.c_syms[decl.sym_id].flags & gen.F_INLINE) != 0) {
                     is_inline = 1;
                 }
             }
@@ -328,26 +362,84 @@ pub fn ast_ir_lower_module(cache_dir *char, compiler_salt u64) int {
             }
             gs.c_stats_checked_functions += 1;
             let emitted_before int = gs.c_stats_backend_emitted;
+            let shift_before int = asm_shift;
             let lowered int = ast_ir_lower_function(&ctx,
                 cache_dir, compiler_salt, &asm_shift);
+            ast_ir_shift_deltas[i] = asm_shift - shift_before;
             if (lowered < 0) {
                 ast_ir_inline_reset();
                 return -1;
             }
             if (lowered != 0) {
                 gs.c_stats_ir_functions += 1;
-                if (gs.c_check_only == 0 && gs.c_stats_backend_emitted == emitted_before) {
+                if (gs.task.c_check_only == 0 && gs.c_stats_backend_emitted == emitted_before) {
                     gs.c_stats_backend_rejected += 1;
                     ast_ir_report_reject(&ctx, 8);
                 }
             } else {
                 gs.c_stats_ir_rejected += 1;
-                ast_ir_report_reject(&ctx, gs.c_ir_reject_reason);
+                ast_ir_report_reject(&ctx, gs.task.c_ir_reject_reason);
             }
             i += 1;
         }
         pass += 1;
     }
+    ast_ir_shift_rows[ast_function_count] = asm_shift;
     ast_ir_inline_reset();
+    return 0;
+}
+
+// ast_ir_shift_rows / ast_ir_shift_count：lowering 期间记录的每函数入口
+// 累计替换位移（RS3b）。count = ast_function_count + 1，末元素为总位移。
+
+// ast_ir_file_shift：file_id 文件的函数文本在 lowering 后的起始累计位移。
+// 取「第一个属于 file_id 或其之后文件的函数行」**之前**的全部替换增量之和
+// （deltas 前缀和）——即位置在该文件区间起点之前的替换总量。其后的文件没有
+// 函数时等价于下一个有函数文件的边界（中间文件区间为空）；全部之后没有
+// 函数时取总位移。worker 据此把 lowering 前的每文件标记换算成实际偏移。
+// 未执行 lowering（如 check-only）时返回 0。
+pub fn ast_ir_file_shift(file_id int) int {
+    if (ast_ir_shift_rows == 0 || ast_ir_shift_count <= 0) {
+        return 0;
+    }
+    let i int = 0;
+    for i < ast_function_count {
+        let ctx AstFunctionContext = ast_function_nodes[i];
+        if (ctx.decl_row >= 0 && ctx.decl_row < ast_decl_count) {
+            let decl AstDecl = ast_decl_nodes[ctx.decl_row];
+            if (decl.file_id >= file_id) {
+                break;
+            }
+        }
+        i += 1;
+    }
+    let total int = 0;
+    let j int = 0;
+    for j < i {
+        total += ast_ir_shift_deltas[j];
+        j += 1;
+    }
+    return total;
+}
+
+// ast_ir_total_shift：lowering 全部替换完成后的总位移（末文件边界）。
+pub fn ast_ir_total_shift() int {
+    if (ast_ir_shift_rows == 0 || ast_ir_shift_count <= 0) {
+        return 0;
+    }
+    return ast_ir_shift_rows[ast_function_count];
+}
+
+// ast_ir_file_shift_list：批量版 ast_ir_file_shift（RS3b）。files 为模块
+// 文件 id 数组（按声明序升序），out 至少 file_n 项，out[i] 为第 i 个文件
+// 函数文本的起始累计位移；末文件边界（总位移）由调用方用
+// ast_ir_total_shift 另行填充。worker 据此把 lowering 前的每文件
+// .text 标记换算为 lowering 后的实际偏移。
+pub fn ast_ir_file_shift_list(files *int, file_n int, out *int) int {
+    let i int = 0;
+    for i < file_n {
+        out[i] = ast_ir_file_shift(files[i]);
+        i += 1;
+    }
     return 0;
 }

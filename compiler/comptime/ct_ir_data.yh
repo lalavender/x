@@ -26,12 +26,12 @@ fn ct_ir_data_slice(type_id int, value *CtValue,
     let gs *gen.GenState = gen.G();
     if (ct_ir_slice_param_valid(type_id, value) == 0 || aggregate == 0
         || aggregate.count < 0 || aggregate.count > 100000
-        || aggregate.elem_type != gs.t_types[type_id].elem
+        || aggregate.elem_type != gs.task.t_types[type_id].elem
         || (aggregate.count > 0 && aggregate.values == 0)) {
         return gen.sem_err("顶层编译期切片存储无效");
     }
-    let label int = gs.c_data_n;
-    gs.c_data_n += 1;
+    let label int = gs.task.c_data_n;
+    gs.task.c_data_n += 1;
     let request *CtDataSlice = malloc(sizeof(CtDataSlice).to_type(u64))
         .to_type(*CtDataSlice);
     if (request == 0) { return gen.fail("编译期切片 backing 队列分配失败"); }
@@ -58,9 +58,9 @@ fn ct_ir_data_flush_slices() int {
     let gs *gen.GenState = gen.G();
     let request *CtDataSlice = ct_data_slice_head;
     for request != 0 {
-        let elem int = gs.t_types[request.type_id].elem;
+        let elem int = gs.task.t_types[request.type_id].elem;
         if (gen.dat_puts(".balign\t") != 0
-            || gen.dat_puti(gs.t_types[elem].align) != 0
+            || gen.dat_puti(gs.task.t_types[elem].align) != 0
             || gen.dat_put('\n') != 0 || gen.dat_puts(".LD") != 0
             || gen.dat_puti(request.label) != 0 || gen.dat_puts(":\n") != 0) {
             return -1;
@@ -87,7 +87,7 @@ fn ct_ir_data_flush_slices() int {
 // ct_ir_data_value：递归序列化当前执行器支持的标量、数组、结构体和切片。
 fn ct_ir_data_value(type_id int, value *CtValue, depth int) int {
     let gs *gen.GenState = gen.G();
-    if (value == 0 || depth > 32 || type_id < 0 || type_id >= gs.t_type_n
+    if (value == 0 || depth > 32 || type_id < 0 || type_id >= gs.task.t_type_n
         || value.type_id != type_id) {
         return gen.sem_err("顶层编译期聚合类型或嵌套深度无效");
     }
@@ -96,52 +96,52 @@ fn ct_ir_data_value(type_id int, value *CtValue, depth int) int {
     }
     if (gen.ty_is_float(type_id) != 0) {
         // f64 直接发位模式；f32 内部按 f64 位模式保存，需要先取单精度位模式。
-        if (gs.t_types[type_id].kind == gen.TY_F32) {
+        if (gs.task.t_types[type_id].kind == gen.TY_F32) {
             return gen.em_data_scalar(type_id, ct_ir_fp32_bits(value.value));
         }
         return gen.em_data_scalar(type_id, value.value);
     }
-    let kind int = gs.t_types[type_id].kind;
+    let kind int = gs.task.t_types[type_id].kind;
     let aggregate *CtAggregate = value.value.to_type(u64).to_type(*CtAggregate);
     if (kind == gen.TY_SLICE) {
         return ct_ir_data_slice(type_id, value, aggregate);
     }
     if (kind == gen.TY_ARRAY) {
         if (ct_ir_array_supported(type_id, 0) == 0 || aggregate == 0
-            || aggregate.count != gs.t_types[type_id].len
-            || aggregate.elem_type != gs.t_types[type_id].elem
+            || aggregate.count != gs.task.t_types[type_id].len
+            || aggregate.elem_type != gs.task.t_types[type_id].elem
             || (aggregate.count > 0 && aggregate.values == 0)) {
             return gen.sem_err("顶层编译期定长数组存储无效");
         }
-        let elem int = gs.t_types[type_id].elem;
+        let elem int = gs.task.t_types[type_id].elem;
         let cursor int = 0;
         let i int = 0;
         for i < aggregate.count {
             if (ct_ir_data_value(elem, &aggregate.values[i], depth + 1) != 0) {
                 return -1;
             }
-            cursor += gs.t_types[elem].size;
+            cursor += gs.task.t_types[elem].size;
             i += 1;
         }
-        return ct_ir_data_zero(gs.t_types[type_id].size - cursor);
+        return ct_ir_data_zero(gs.task.t_types[type_id].size - cursor);
     }
     if (kind == gen.TY_STRUCT) {
         if (ct_ir_struct_supported(type_id, 0) == 0 || aggregate == 0
             || aggregate.elem_type != type_id
-            || aggregate.count != gs.t_types[type_id].len
+            || aggregate.count != gs.task.t_types[type_id].len
             || (aggregate.count > 0 && aggregate.values == 0)) {
             return gen.sem_err("顶层编译期结构体存储无效");
         }
-        let st gen.CType = gs.t_types[type_id];
+        let st gen.CType = gs.task.t_types[type_id];
         let cursor int = 0;
         let i int = 0;
         for i < st.len {
-            let field gen.SField = gs.t_fields[st.sub + i];
+            let field gen.SField = gs.task.t_fields[st.sub + i];
             if (field.offset < cursor
                 || ct_ir_data_zero(field.offset - cursor) != 0
                 || ct_ir_data_value(field.type_id, &aggregate.values[i],
                     depth + 1) != 0) { return -1; }
-            cursor = field.offset + gs.t_types[field.type_id].size;
+            cursor = field.offset + gs.task.t_types[field.type_id].size;
             i += 1;
         }
         return ct_ir_data_zero(st.size - cursor);
@@ -152,11 +152,11 @@ fn ct_ir_data_value(type_id int, value *CtValue, depth int) int {
 // ct_ir_data_emit_temp：为运行期表达式发射匿名静态对象并返回数据标签。
 fn ct_ir_data_emit_temp(type_id int, value *CtValue) int {
     let gs *gen.GenState = gen.G();
-    let label int = gs.c_data_n;
-    gs.c_data_n += 1;
+    let label int = gs.task.c_data_n;
+    gs.task.c_data_n += 1;
     if (ct_static_data_record(-1, label, type_id, value) != 0) { return -1; }
     if (gen.dat_puts(".balign\t") != 0
-        || gen.dat_puti(gs.t_types[type_id].align) != 0
+        || gen.dat_puti(gs.task.t_types[type_id].align) != 0
         || gen.dat_put('\n') != 0 || gen.dat_puts(".LD") != 0
         || gen.dat_puti(label) != 0 || gen.dat_puts(":\n") != 0
         || ct_ir_data_value(type_id, value, 0) != 0
@@ -167,13 +167,13 @@ fn ct_ir_data_emit_temp(type_id int, value *CtValue) int {
 // ct_ir_data_emit_global：把全局初始化中的 CT 聚合和 backing 写入目标数据区。
 pub fn ct_ir_data_emit_global(sym_id int, type_id int, value *CtValue) int {
     let gs *gen.GenState = gen.G();
-    if (sym_id < 0 || sym_id >= gs.c_sym_n || value == 0
+    if (sym_id < 0 || sym_id >= gs.task.c_sym_n || value == 0
         || value.type_id != type_id || ct_ir_return_supported(type_id) == 0) {
         return gen.sem_err("全局编译期聚合初始化类型无效");
     }
-    if (gen.em_data_symbol_header(sym_id, gs.t_types[type_id].align) != 0) { return -1; }
-    let label int = (gs.c_syms[sym_id].flags & gen.F_EXTERN) != 0
-        ? gs.c_syms[sym_id].cval.to_type(int) : -1;
+    if (gen.em_data_symbol_header(sym_id, gs.task.t_types[type_id].align) != 0) { return -1; }
+    let label int = (gs.task.c_syms[sym_id].flags & gen.F_EXTERN) != 0
+        ? gs.task.c_syms[sym_id].cval.to_type(int) : -1;
     if (ct_static_data_record(sym_id, label, type_id, value) != 0
         || ct_ir_data_value(type_id, value, 0) != 0
         || ct_ir_data_flush_slices() != 0) { return -1; }

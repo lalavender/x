@@ -6,12 +6,23 @@ module gen;
 // GenState 把原先 208 个跨模块 pub let 可变全局收进单一结构体：语言规则
 // 「let 不导出」后，可变状态的跨模块共享只能经指针进行。g_state 是模块
 // 私有实例（BSS 零初始化），G() 返回其地址供 parse/cmd/backend 限定访问
-// —— `gen.G().c_pos`；gen 模块内部直接写 `g_state.c_pos`。
+// —— `gen.G().task.c_pos`；gen 模块内部直接写 `g_state.task.c_pos`。
 // 非零初始值由 state_init() 在编译入口显式设置（原声明初始化器迁移）。
 // ============================================================================
 
+// 域分类（RS1c，2026-10-19，见 docs/02-plan/yh-R2收尾实施计划.md）：
+// 每任务字段已**物理收敛**进 pub struct TaskCtx（g_state.task）——
+// worker 主路径与将来线程池以 *TaskCtx 为任务私有上下文；GenState 只
+// 保留进程级字段（构建配置/统计/项目索引/目标与 CLI）+ task 字段。
+// 偏移变化说明：字段偏移进入机器码立即数，本步由固定点门（A==B）
+// 保证自洽，不与上一代产物对比。
+
 // GenState：编译器全局状态。字段全公开（pub struct 一等化）。
-pub struct GenState {
+// TaskCtx：每任务（当前编译单元）的语义/发射工作状态（RS1c）。
+// fork worker 下每个子进程持有一份（COW 继承）；R2c 线程化后由
+// worker 线程私有持有（RS1d 改 *TaskCtx 显式传递）。
+pub struct TaskCtx {
+
     c_src *u8; // 源文件字节（read_source 分配，进程生命期持有）
     c_src_len int; // 源字节长度
     lx_line int; // 词法扫描当前行号（1 基）
@@ -19,27 +30,7 @@ pub struct GenState {
     c_toks *Tok; // token 数组首址（malloc）
     c_tok_n int; // 已存 token 数
     c_tok_cap int; // 已分配槽位数
-    c_stats_enabled int; // 1 = 输出构建阶段计数（仅开发验收）
-    c_front_cache int; // 1 = worker 保存项目源与 token 快照
-    c_stats_lex int; // 本进程实际词法扫描次数
-    c_stats_syntax int; // worker 声明索引中的顶层声明数量
-    c_stats_index int; // 项目文件索引次数
-    c_stats_pass1 int; // 模块声明遍历的文件数
-    c_stats_globals int; // 模块全局初始化遍历的文件数
-    c_stats_functions int; // 模块函数体遍历的文件数
-    c_stats_ir_functions int; // 本次构建实际生成并校验的 SSA 函数数
-    c_stats_ir_cache_hits int; // 通过输入键和校验器复用的函数 IR 数
-    c_stats_ir_cache_misses int; // 本次重新降低并验证的函数 IR 数
-    c_stats_checked_functions int; // 实际参与运行期 lowering 的受检函数数，不含 comptime
-    c_stats_backend_emitted int; // 后端返回成功、确实替换旧汇编的函数数
-    c_stats_ir_rejected int; // 前端 lowering 子集不支持的函数数
-    c_stats_backend_rejected int; // SSA 已验证但机器后端不支持的函数数
     c_ir_reject_reason int; // 最近函数的拒绝阶段：1上下文、2签名、3绑定、4返回、5函数体、6语句表达式、7落底
-    c_ir_cache_salt u64; // 父构建器传入的编译器二进制指纹
-    c_stats_workers int; // 父构建器启动的模块 worker 数
-    c_stats_asm int; // 实际调用外部汇编器的次数
-    c_stats_link int; // 实际调用外部链接器的次数
-    c_stats_compiler_hashes int; // 实际读取编译器二进制计算指纹的次数
     c_pos int; // 当前 token 下标（解析游标）
     c_spec int; // 推测解析深度：>0 时诊断静默且不计数
     c_ctx_block int; // 表达式块上下文：1 表示该表达式之后可能紧跟
@@ -49,11 +40,13 @@ pub struct GenState {
     c_file_indexed int; // 1 = 当前 token 表带项目扫描期声明索引
     c_errors int; // 已报告的错误数（推测解析不计入）
     c_path *char; // 当前源文件路径（借自 argv，不复制不释放）
-    c_path_buffer [1024]u8; // worker 路径快照，避免名字池扩容后诊断指针失效
+    c_path_buf *u8; // [任务私有] worker 路径快照（堆分配倍增扩容），避免名字池扩容后诊断指针失效
+    c_path_buf_cap int; // 路径快照缓冲容量；任务生命期持有不释放，进程退出统一回收
     c_ct_iface_mode int; // 1 = 正在读取 .s.ct，允许识别生成的来源映射注释
     c_ct_origin_active int; // 1 = 当前声明从 .s.ct 来源映射切换到定义源码
     c_ct_origin_line int; // 当前 CT 函数定义源码体起始行
-    c_ct_origin_path_buffer [1024]u8; // .s.ct 来源映射解码后的路径，独立于 sidecar 路径
+    c_ct_origin_buf *u8; // [任务私有] .s.ct 来源映射解码路径（堆分配倍增扩容），独立于 sidecar 路径
+    c_ct_origin_buf_cap int; // 来源映射路径缓冲容量；同样任务生命期持有
     c_diag_line_bias int; // err_lc/warn_lc 当前行号映射偏移
     c_compile int; // 0 = 纯语法模式（--syntax-check）；1 = 编译模式
     c_pass int; // 1 = 顶层扫描登记；2 = 函数体编译与全局初始化
@@ -210,15 +203,51 @@ pub struct GenState {
     c_mod_n int;
     c_mod_cap int;
     c_mod_home_next int; // 下一个模块编号（home 分配计数）
-    c_module_mode int; // 1 = 模块模式（--emit-module）；单文件恒 0
     c_iface_load int; // 1 = 正在加载接口文件（登记不发射、不进 bss）
-    c_is_entry_mod int; // 1 = 当前编译入口模块（main 不加后缀、须存在）
     c_sym_sfx_off int; // 本模块符号后缀（__proj__mod）池偏移；单文件 -1
     c_sym_sfx_len int;
     mod_import_mod *int; // 与 mod_imports 平行：导入绑定的 ModInfo 下标
     mod_import_used *int; // 与 mod_imports 平行：本文件是否用到该导入
     t_home *int;
     t_home_cap int;
+    c_fi_kind *int; // 0=数组/切片（按元素地址），1=区间（按下标）
+    c_fi_cnt_off *int; // 循环计数槽（fp 距离）
+    c_fi_len_off *int; // 长度槽（fp 距离）
+    c_fi_data_off *int; // 数据/区间起点槽（fp 距离）
+    c_fi_step_off *int; // 区间步长槽（+1/-1）
+    c_fi_elem_off *int; // 元素/下标绑定槽（fp 距离，-1 未绑定）
+    c_fi_idx_off *int; // 下标绑定槽（fp 距离，-1 未绑定）
+    c_fi_depth int;
+    c_end_tmp_off int; // 区间终点临时槽（for-in 区间用）
+    c_brk_stk *int;
+    c_cnt_stk *int;
+    c_front_checked int; // 1：受检前端阶段，禁止旧 text/body/data/bss 输出。
+}
+
+// GenState：编译器全局状态（进程级）+ 任务私有上下文。字段全公开。
+pub struct GenState {
+    c_stats_enabled int; // 1 = 输出构建阶段计数（仅开发验收）
+    c_front_cache int; // 1 = worker 保存项目源与 token 快照
+    c_stats_lex int; // 本进程实际词法扫描次数
+    c_stats_syntax int; // worker 声明索引中的顶层声明数量
+    c_stats_index int; // 项目文件索引次数
+    c_stats_pass1 int; // 模块声明遍历的文件数
+    c_stats_globals int; // 模块全局初始化遍历的文件数
+    c_stats_functions int; // 模块函数体遍历的文件数
+    c_stats_ir_functions int; // 本次构建实际生成并校验的 SSA 函数数
+    c_stats_ir_cache_hits int; // 通过输入键和校验器复用的函数 IR 数
+    c_stats_ir_cache_misses int; // 本次重新降低并验证的函数 IR 数
+    c_stats_checked_functions int; // 实际参与运行期 lowering 的受检函数数，不含 comptime
+    c_stats_backend_emitted int; // 后端返回成功、确实替换旧汇编的函数数
+    c_stats_ir_rejected int; // 前端 lowering 子集不支持的函数数
+    c_stats_backend_rejected int; // SSA 已验证但机器后端不支持的函数数
+    c_ir_cache_salt u64; // 父构建器传入的编译器二进制指纹
+    c_stats_workers int; // 父构建器启动的模块 worker 数
+    c_stats_asm int; // 实际调用外部汇编器的次数
+    c_stats_link int; // 实际调用外部链接器的次数
+    c_stats_compiler_hashes int; // 实际读取编译器二进制计算指纹的次数
+    c_module_mode int; // 1 = 模块模式（--emit-module）；单文件恒 0
+    c_is_entry_mod int; // 1 = 当前编译入口模块（main 不加后缀、须存在）
     p_projs *PProj;
     p_proj_n int;
     p_proj_cap int;
@@ -242,21 +271,9 @@ pub struct GenState {
     p_imp_cap int;
     p_stdlib int; // 标准库项目下标（YH_STDLIB；-1 未设置）
     p_state *int; // 项目装载状态（0 未装载 1 装载中 2 完成）
-    c_fi_kind *int; // 0=数组/切片（按元素地址），1=区间（按下标）
-    c_fi_cnt_off *int; // 循环计数槽（fp 距离）
-    c_fi_len_off *int; // 长度槽（fp 距离）
-    c_fi_data_off *int; // 数据/区间起点槽（fp 距离）
-    c_fi_step_off *int; // 区间步长槽（+1/-1）
-    c_fi_elem_off *int; // 元素/下标绑定槽（fp 距离，-1 未绑定）
-    c_fi_idx_off *int; // 下标绑定槽（fp 距离，-1 未绑定）
-    c_fi_depth int;
-    c_end_tmp_off int; // 区间终点临时槽（for-in 区间用）
-    c_brk_stk *int;
-    c_cnt_stk *int;
     c_dialect int;
     c_target TargetInfo; // 当前输出目标；$if、源文件筛选、后端与缓存共用。
     c_host_target TargetInfo; // 编译器构建时固化的进程身份，不随 --target 改写。
-    c_front_checked int; // 1：受检前端阶段，禁止旧 text/body/data/bss 输出。
     // —— LLVM 后端模式（LL3）——
     // gs.c_backend：0 = 旧机器发射（默认），1 = 内嵌 LLVM；由 CLI --backend 设置，
     // fork worker 继承。LLVM 模式下 worker 走「受检快照 → 模块 IR → LLVM 文本 → 桥」，
@@ -265,7 +282,9 @@ pub struct GenState {
     c_opt_level int; // LLVM 优化级别：0（默认 O0）或 2（显式 -O2）；其他值由 CLI 拒绝。
     c_emit_kind int; // 1 = LLVM 文本（.ll），0 = 目标文件（对象/汇编由目标决定）。
     c_emit_text_path *char; // 非空且 emit_kind=1 时把 LLVM 文本写入该路径（诊断/审阅用）。
+    task TaskCtx; // [RS1c] 每任务工作状态：g_state.task.<字段>
 }
+
 
 // g_state：gen 模块私有状态实例（零初始化）。
 let g_state GenState;
@@ -303,7 +322,7 @@ pub fn data_str_add_pool(lbl int, off int, slen int) int {
 // data_str_add_entry：登记池内字节，并标记其是否含有源码字符串引号与转义。
 fn data_str_add_entry(lbl int, off int, slen int, quoted int) int {
     if (c_data_str_n >= DATA_STR_CAP || off < 0 || slen < 0
-        || off > g_state.np_len || slen > g_state.np_len - off) { return -1; }
+        || off > g_state.task.np_len || slen > g_state.task.np_len - off) { return -1; }
     c_data_str_lbl[c_data_str_n] = lbl;
     c_data_str_off[c_data_str_n] = off;
     c_data_str_len[c_data_str_n] = slen;
@@ -340,10 +359,10 @@ let em_ready [512]int;
 // em_add：登记一个枚举成员（必须在成员的值与就绪位写完之后调用，否则快照到 0）。
 pub fn em_add(sym int) int {
     if (em_n >= 512) { return -1; }
-    em_name_off[em_n] = g_state.c_syms[sym].name_off;
-    em_name_len[em_n] = g_state.c_syms[sym].name_len;
-    em_val[em_n] = g_state.c_syms[sym].cval;
-    em_ready[em_n] = g_state.c_syms[sym].const_ready;
+    em_name_off[em_n] = g_state.task.c_syms[sym].name_off;
+    em_name_len[em_n] = g_state.task.c_syms[sym].name_len;
+    em_val[em_n] = g_state.task.c_syms[sym].cval;
+    em_ready[em_n] = g_state.task.c_syms[sym].const_ready;
     em_n += 1;
     return 0;
 }
@@ -366,7 +385,7 @@ fn em_name_eq(idx int, src *u8, start int, n int) int {
     let off int = em_name_off[idx];
     let i int = 0;
     for i < n {
-        let a int = g_state.np_data[off + i].to_type(int);
+        let a int = g_state.task.np_data[off + i].to_type(int);
         let b int = src[start + i].to_type(int);
         if (a != b) { return 0; }
         i += 1;
@@ -387,7 +406,7 @@ pub fn em_find_src(src *u8, start int, n int) int {
 
 // em_find：按前端当前源文件（c_src）的名字字节反查登记项下标。
 fn em_find(start int, n int) int {
-    return em_find_src(g_state.c_src, start, n);
+    return em_find_src(g_state.task.c_src, start, n);
 }
 
 // em_get_val / em_get_ready：读取登记项的值与就绪位。
@@ -403,17 +422,17 @@ pub fn em_get_ready(idx int) int {
 // 在每次编译会话开始（driver 入口与 worker 初始化）调用。
 pub fn state_init() void {
     static_data_reset();
-    g_state.lx_line = 1;
-    g_state.c_file_decl_i = -1;
-    g_state.c_active_file = -1;
-    g_state.c_expect_tid = -1;
-    g_state.c_data_n = 1;
+    g_state.task.lx_line = 1;
+    g_state.task.c_file_decl_i = -1;
+    g_state.task.c_active_file = -1;
+    g_state.task.c_expect_tid = -1;
+    g_state.task.c_data_n = 1;
     c_data_str_n = 0;
     em_n = 0;
-    g_state.c_ct_target_ctx = 0;
-    g_state.c_ct_diag_stmt = 0;
-    g_state.mod_name_off = -1;
-    g_state.c_sym_sfx_off = -1;
+    g_state.task.c_ct_target_ctx = 0;
+    g_state.task.c_ct_diag_stmt = 0;
+    g_state.task.mod_name_off = -1;
+    g_state.task.c_sym_sfx_off = -1;
     g_state.p_stdlib = -1;
     g_state.c_dialect = TG_DIALECT_GNU;
     target_host_info(&g_state.c_host_target);

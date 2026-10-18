@@ -9,7 +9,7 @@ module gen;
 //   * write_all：write 循环处理短写；诊断一律写文件描述符 2。
 //   * err_lc / fail：带位置与不带位置的诊断。诊断格式
 //         <path>:<line>:<col>: 错误: <msg>
-//     推测解析期间（g_state.c_spec > 0）诊断静默且不计数——试探失败由返回值
+//     推测解析期间（g_state.task.c_spec > 0）诊断静默且不计数——试探失败由返回值
 //     传递，真正失败由回退路径重新解析后报告。
 // ============================================================================
 
@@ -43,21 +43,53 @@ pub fn append_str_limit(buf *u8, n int, limit int, s *char) int {
     return n;
 }
 
-// set_source_path：把当前文件路径复制到固定缓冲区，避免可扩容字符串池搬迁后悬空。
+// task_buf_reserve：任务私有缓冲的统一倍增扩容（RS1b）。
+// 任务生命期持有、**不在任务内释放**（fork worker 下任务即进程，退出由
+// OS 统一回收）——扩容后旧块不复用，需要跨扩容稳定的指针必须整体重写后
+// 重新取。返回 0 表示分配失败；need 按「字节总数（含 NUL）」传入。
+pub fn task_buf_reserve(buf **u8, cap *int, need int) *u8 {
+    if (*buf != 0 && *cap >= need) {
+        return *buf;
+    }
+    let ncap int = *cap * 2;
+    if (ncap < need) {
+        ncap = need;
+    }
+    if (ncap < 256) {
+        ncap = 256;
+    }
+    let nd *u8 = malloc(ncap.to_type(u64)).to_type(*u8);
+    if (nd == 0) {
+        return 0;
+    }
+    *buf = nd;
+    *cap = ncap;
+    return nd;
+}
+
+// set_source_path：把当前文件路径复制进任务私有可扩容缓冲，避免可扩容
+// 字符串池搬迁后 c_path 悬空。RS1b：原固定 [1024]u8 改为堆分配倍增扩容，
+// 超长路径不再报「源文件路径过长」（实际路径长度只受内存限制）。
 pub fn set_source_path(path *char) int {
     if (path == 0) {
         return fail("源文件路径为空");
     }
     let n int = 0;
-    for path[n] != 0 && n < 1023 {
-        g_state.c_path_buffer[n] = path[n].to_type(u8);
+    for path[n] != 0 {
         n += 1;
     }
-    if (path[n] != 0) {
-        return fail("源文件路径过长");
+    let buf *u8 = task_buf_reserve(&g_state.task.c_path_buf,
+                                   &g_state.task.c_path_buf_cap, n + 1);
+    if (buf == 0) {
+        return fail("路径快照缓冲分配失败");
     }
-    g_state.c_path_buffer[n] = 0;
-    g_state.c_path = (&g_state.c_path_buffer[0]).to_type(*char);
+    let i int = 0;
+    for i < n {
+        buf[i] = path[i].to_type(u8);
+        i += 1;
+    }
+    buf[n] = 0;
+    g_state.task.c_path = buf.to_type(*char);
     return 0;
 }
 
@@ -135,12 +167,12 @@ pub fn write_all(fd int, buf *u8, n int) int {
 
 // append_ct_expand_trace：为展开体内诊断追加外层到内层的编译期循环值。
 fn append_ct_expand_trace(buf *u8, n int, limit int) int {
-    if (g_state.c_ct_expand_depth <= 0 || n >= limit - 600) { return n; }
+    if (g_state.task.c_ct_expand_depth <= 0 || n >= limit - 600) { return n; }
     n = append_str_limit(buf, n, limit, " [编译期展开值: ");
     let i int = 0;
-    for i < g_state.c_ct_expand_depth {
+    for i < g_state.task.c_ct_expand_depth {
         if (i > 0) { n = append_str_limit(buf, n, limit, " -> "); }
-        n = append_int(buf, n, g_state.c_ct_expand_values[i]);
+        n = append_int(buf, n, g_state.task.c_ct_expand_values[i]);
         i += 1;
     }
     return append_str_limit(buf, n, limit, "]");
@@ -149,17 +181,17 @@ fn append_ct_expand_trace(buf *u8, n int, limit int) int {
 // err_lc：报告一条带位置的错误（1 基行列），计一次错误并返回 -1。
 // 推测解析期间静默：不打印、不计数，仅以返回值示意失败。
 pub fn err_lc(line int, col int, msg *char) int {
-    if (g_state.c_spec > 0) {
+    if (g_state.task.c_spec > 0) {
         return -1;
     }
-    g_state.c_errors += 1;
+    g_state.task.c_errors += 1;
     // 单缓冲拼装后一次写出，避免多条 write 交错
     let buf [2048]u8;
     let limit int = 2047;
     let n int = 0;
-    n = append_str_limit(buf, n, limit, g_state.c_path);
+    n = append_str_limit(buf, n, limit, g_state.task.c_path);
     n = append_byte(buf, n, ':');
-    n = append_int(buf, n, line + g_state.c_diag_line_bias);
+    n = append_int(buf, n, line + g_state.task.c_diag_line_bias);
     n = append_byte(buf, n, ':');
     n = append_int(buf, n, col);
     n = append_str_limit(buf, n, limit, ": 错误: ");
@@ -173,13 +205,13 @@ pub fn err_lc(line int, col int, msg *char) int {
 
 // warn_lc：报告一条带位置的警告，不增加错误数；推测解析期间保持静默。
 pub fn warn_lc(line int, col int, msg *char) int {
-    if (g_state.c_spec > 0) { return 0; }
+    if (g_state.task.c_spec > 0) { return 0; }
     let buf [2048]u8;
     let limit int = 2047;
     let n int = 0;
-    n = append_str_limit(buf, n, limit, g_state.c_path);
+    n = append_str_limit(buf, n, limit, g_state.task.c_path);
     n = append_byte(buf, n, ':');
-    n = append_int(buf, n, line + g_state.c_diag_line_bias);
+    n = append_int(buf, n, line + g_state.task.c_diag_line_bias);
     n = append_byte(buf, n, ':');
     n = append_int(buf, n, col);
     n = append_str_limit(buf, n, limit, ": 警告: ");
@@ -237,7 +269,7 @@ pub fn arr_cstr(buf *u8) *char {
 }
 
 // ---------------------------------------------------------------------------
-// 汇编输出缓冲：.text（g_state.o_out/g_state.o_len/g_state.o_cap）与 .data（g_state.o_dat/g_state.o_dlen/g_state.o_dcap）。
+// 汇编输出缓冲：.text（g_state.task.o_out/g_state.task.o_len/g_state.task.o_cap）与 .data（g_state.task.o_dat/g_state.task.o_dlen/g_state.task.o_dcap）。
 // 全部汇编先写入缓冲，编译成功后由 flush_output 一次性写到标准输出——
 // 错误不会留下看似成功的部分汇编。
 // ---------------------------------------------------------------------------
@@ -272,24 +304,24 @@ pub fn out_grow(data **u8, n int, cap *int, need int) int {
 // 标签号）都汇聚于此：sizeof 求型、check-only 或受检前端模式下整体静默，
 // 单点闸门即可抑制整棵表达式求值的指令输出。
 pub fn em_put(b u8) int {
-    if (g_state.c_em_suppress > 0 || g_state.c_check_only != 0
-        || g_state.c_front_checked != 0) {
+    if (g_state.task.c_em_suppress > 0 || g_state.task.c_check_only != 0
+        || g_state.task.c_front_checked != 0) {
         return 0;
     }
     // 函数体发射期间先进体缓冲（帧大小确定后再与 prologue 装配）
-    if (g_state.c_in_body != 0) {
-        if (out_grow(&g_state.o_body, g_state.o_body_len, &g_state.o_body_cap, g_state.o_body_len + 1) != 0) {
+    if (g_state.task.c_in_body != 0) {
+        if (out_grow(&g_state.task.o_body, g_state.task.o_body_len, &g_state.task.o_body_cap, g_state.task.o_body_len + 1) != 0) {
             return -1;
         }
-        g_state.o_body[g_state.o_body_len] = b;
-        g_state.o_body_len += 1;
+        g_state.task.o_body[g_state.task.o_body_len] = b;
+        g_state.task.o_body_len += 1;
         return 0;
     }
-    if (out_grow(&g_state.o_out, g_state.o_len, &g_state.o_cap, g_state.o_len + 1) != 0) {
+    if (out_grow(&g_state.task.o_out, g_state.task.o_len, &g_state.task.o_cap, g_state.task.o_len + 1) != 0) {
         return -1;
     }
-    g_state.o_out[g_state.o_len] = b;
-    g_state.o_len += 1;
+    g_state.task.o_out[g_state.task.o_len] = b;
+    g_state.task.o_len += 1;
     return 0;
 }
 
@@ -339,14 +371,14 @@ pub fn em_puti(v int) int {
 
 // dat_put / dat_puts：向 .data 缓冲追加（全局数据发射用）。
 pub fn dat_put(b u8) int {
-    if (g_state.c_check_only != 0 || g_state.c_front_checked != 0) {
+    if (g_state.task.c_check_only != 0 || g_state.task.c_front_checked != 0) {
         return 0;
     }
-    if (out_grow(&g_state.o_dat, g_state.o_dlen, &g_state.o_dcap, g_state.o_dlen + 1) != 0) {
+    if (out_grow(&g_state.task.o_dat, g_state.task.o_dlen, &g_state.task.o_dcap, g_state.task.o_dlen + 1) != 0) {
         return -1;
     }
-    g_state.o_dat[g_state.o_dlen] = b;
-    g_state.o_dlen += 1;
+    g_state.task.o_dat[g_state.task.o_dlen] = b;
+    g_state.task.o_dlen += 1;
     return 0;
 }
 
@@ -396,14 +428,14 @@ pub fn dat_puti(v int) int {
 
 // bss_put / bss_puts / bss_puti：向 .bss 缓冲追加。
 fn bss_put(b u8) int {
-    if (g_state.c_check_only != 0 || g_state.c_front_checked != 0) {
+    if (g_state.task.c_check_only != 0 || g_state.task.c_front_checked != 0) {
         return 0;
     }
-    if (out_grow(&g_state.o_bss, g_state.o_blen, &g_state.o_bcap, g_state.o_blen + 1) != 0) {
+    if (out_grow(&g_state.task.o_bss, g_state.task.o_blen, &g_state.task.o_bcap, g_state.task.o_blen + 1) != 0) {
         return -1;
     }
-    g_state.o_bss[g_state.o_blen] = b;
-    g_state.o_blen += 1;
+    g_state.task.o_bss[g_state.task.o_blen] = b;
+    g_state.task.o_blen += 1;
     return 0;
 }
 
@@ -448,31 +480,123 @@ pub fn flush_output() int {
 // flush_output_fd：把已发射的 .text/.data/.bss 写入指定文件描述符。
 // 供 --emit-asm（fd=1，标准输出）与 -o（fd=临时汇编文件）共用。
 pub fn flush_output_fd(fd int) int {
-    if (write_all(fd, g_state.o_out, g_state.o_len) != 0) {
+    if (write_all(fd, g_state.task.o_out, g_state.task.o_len) != 0) {
         return -1;
     }
     let hdr_data *char = "\n.data\n";
     let hdr_bss *char = "\n.bss\n";
-    if (g_state.o_dlen > 0) {
+    if (g_state.task.o_dlen > 0) {
         if (write_all(fd, hdr_data.to_type(*u8), 7) != 0) {
             return -1;
         }
-        if (write_all(fd, g_state.o_dat, g_state.o_dlen) != 0) {
+        if (write_all(fd, g_state.task.o_dat, g_state.task.o_dlen) != 0) {
             return -1;
         }
     }
-    if (g_state.o_blen > 0) {
+    if (g_state.task.o_blen > 0) {
         if (write_all(fd, hdr_bss.to_type(*u8), 6) != 0) {
             return -1;
         }
-        if (write_all(fd, g_state.o_bss, g_state.o_blen) != 0) {
+        if (write_all(fd, g_state.task.o_bss, g_state.task.o_blen) != 0) {
             return -1;
         }
     }
     return 0;
 }
 
-// read_source：读取完整源文件到 g_state.c_src / g_state.c_src_len。
+// flush_asm_ranges：把 .text/.data/.bss 的若干区间写入文件 path（RS3b 按文件对象）。
+// ranges 为扁平 [start, end) 对数组（起始/结束成对，end <= start 的区间跳过）；
+// 三个段各可有多个区间——一个源文件的数据可能来自两遍（全局初始化与函数内
+// 字面量），运行时桩对象则由「模块前导文本 + 桩文本」两段组成。
+// 段头（.data/.bss）仅在该段存在非空区间时补写一次，布局与 flush_output_fd
+// 的单缓冲写法一致。open 旗标按宿主内核取值（见 drv_write_asm）。
+// 返回 0 成功；打开失败带路径诊断。
+pub fn flush_asm_ranges(path *char, text *int, text_n int,
+    data *int, data_n int, bss *int, bss_n int) int {
+    let gs *GenState = G();
+    let fl int = 0x241;
+    if (tg_host_darwin() != 0) {
+        fl = 0x601;
+    }
+    let fd int = open(path, fl, 0x1a4);
+    if (fd < 0) {
+        return fail_path("无法创建汇编文件: ", path);
+    }
+    let ri int = 0;
+    for ri < text_n {
+        let s int = text[ri * 2];
+        let e int = text[ri * 2 + 1];
+        if (e > s) {
+            if (write_all(fd, gs.task.o_out + s, e - s) != 0) {
+                close(fd);
+                return -1;
+            }
+        }
+        ri += 1;
+    }
+    let data_used int = 0;
+    ri = 0;
+    for ri < data_n {
+        if (data[ri * 2 + 1] > data[ri * 2]) {
+            data_used = 1;
+            break;
+        }
+        ri += 1;
+    }
+    if (data_used != 0) {
+        let hdr_data *char = "\n.data\n";
+        if (write_all(fd, hdr_data.to_type(*u8), 7) != 0) {
+            close(fd);
+            return -1;
+        }
+        ri = 0;
+        for ri < data_n {
+            let s int = data[ri * 2];
+            let e int = data[ri * 2 + 1];
+            if (e > s) {
+                if (write_all(fd, gs.task.o_dat + s, e - s) != 0) {
+                    close(fd);
+                    return -1;
+                }
+            }
+            ri += 1;
+        }
+    }
+    let bss_used int = 0;
+    ri = 0;
+    for ri < bss_n {
+        if (bss[ri * 2 + 1] > bss[ri * 2]) {
+            bss_used = 1;
+            break;
+        }
+        ri += 1;
+    }
+    if (bss_used != 0) {
+        let hdr_bss *char = "\n.bss\n";
+        if (write_all(fd, hdr_bss.to_type(*u8), 6) != 0) {
+            close(fd);
+            return -1;
+        }
+        ri = 0;
+        for ri < bss_n {
+            let s int = bss[ri * 2];
+            let e int = bss[ri * 2 + 1];
+            if (e > s) {
+                if (write_all(fd, gs.task.o_bss + s, e - s) != 0) {
+                    close(fd);
+                    return -1;
+                }
+            }
+            ri += 1;
+        }
+    }
+    if (close(fd) != 0) {
+        return fail("写汇编文件失败");
+    }
+    return 0;
+}
+
+// read_source：读取完整源文件到 g_state.task.c_src / g_state.task.c_src_len。
 // 流程：open（O_RDONLY=0）→ 循环 read 到倍增缓冲（read 返回 0 即 EOF，
 // 负数即错误）→ close。缓冲初始 64 KiB，每次翻倍并整体拷贝；
 // NUL 字节按普通字节保留，长度以累计字节数为准。
@@ -516,8 +640,8 @@ pub fn read_source(path *char) int {
         blen += n.to_type(int);
     }
     close(fd);
-    g_state.c_src = data;
-    g_state.c_src_len = blen;
+    g_state.task.c_src = data;
+    g_state.task.c_src_len = blen;
     return 0;
 }
 
@@ -526,7 +650,7 @@ pub fn read_source(path *char) int {
 
 // err_tok：以当前 token 的行列位置报错，返回 -1。
 pub fn err_tok(msg *char) int {
-    return err_lc(g_state.c_toks[g_state.c_pos].line, g_state.c_toks[g_state.c_pos].col, msg);
+    return err_lc(g_state.task.c_toks[g_state.task.c_pos].line, g_state.task.c_toks[g_state.task.c_pos].col, msg);
 }
 
 // is_assign_op：k 是否为赋值运算符（TK_ASSIGN..TK_RSHIFTEQ 连号）。

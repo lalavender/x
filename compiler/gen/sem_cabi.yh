@@ -37,7 +37,7 @@ fn cabi_fp_piece(reg int, offset int, size int, store int) int {
 // cabi_scalar_load：从 x10 按已声明的 C 标量宽度载入目标寄存器。
 // 窄整数显式扩展，满足 Darwin 调用方扩展约定，也使 yh 的运算值规范化。
 fn cabi_scalar_load(tid int, reg int) int {
-    let size int = g_state.t_types[tid].size;
+    let size int = g_state.task.t_types[tid].size;
     let op *char = "ldr";
     let suffix *char = "x";
     if (size < 8) {
@@ -59,21 +59,21 @@ fn cabi_scalar_load(tid int, reg int) int {
 
 // cabi_spill：登记入口的一个寄存器片。prologue 保存所有片后才执行聚合复制。
 fn cabi_spill(reg int, off int, tid int, fp int) void {
-    let i int = g_state.c_spill_n;
-    g_state.c_spill_reg[i] = fp != 0 ? 0 - reg - 1 : reg;
-    g_state.c_spill_off[i] = off;
-    g_state.c_spill_size[i] = tid;
-    g_state.c_spill_n += 1;
+    let i int = g_state.task.c_spill_n;
+    g_state.task.c_spill_reg[i] = fp != 0 ? 0 - reg - 1 : reg;
+    g_state.task.c_spill_off[i] = off;
+    g_state.task.c_spill_size[i] = tid;
+    g_state.task.c_spill_n += 1;
 }
 
 // cabi_entry_copy：记录从指针槽或调用方栈内聚合到本帧独立副本的入口任务。
 fn cabi_entry_copy(src int, dst int, size int, indirect int) void {
-    let i int = g_state.c_aggparam_n;
-    g_state.c_aggparam_src[i] = src;
-    g_state.c_aggparam_dst[i] = dst;
-    g_state.c_aggparam_size[i] = size;
-    g_state.c_aggparam_indirect[i] = indirect;
-    g_state.c_aggparam_n += 1;
+    let i int = g_state.task.c_aggparam_n;
+    g_state.task.c_aggparam_src[i] = src;
+    g_state.task.c_aggparam_dst[i] = dst;
+    g_state.task.c_aggparam_size[i] = size;
+    g_state.task.c_aggparam_indirect[i] = indirect;
+    g_state.task.c_aggparam_n += 1;
 }
 
 // sem_cabi_param：按共享分类器接收一个 C 参数，聚合在函数体内仍用地址表示。
@@ -81,16 +81,16 @@ fn sem_cabi_param(start int, n int, tid int) int {
     let value ABIValue;
     abi_c_describe(tid, &value);
     let loc ABIArg;
-    abi_c_place(&value, &g_state.c_cabi_cursor, &loc);
+    abi_c_place(&value, &g_state.task.c_cabi_cursor, &loc);
     let idx int = sym_push(start, n, SYM_VAR, tid, F_PARAM);
     if (idx < 0) { return -1; }
     if (value.aggregate == 0 && loc.kind == CABI_STACK) {
-        g_state.c_syms[idx].offset = 0 - 16 - loc.stack;
+        g_state.task.c_syms[idx].offset = 0 - 16 - loc.stack;
         return 0;
     }
     let body int = em_alloc_local(value.size);
-    g_state.c_syms[idx].offset = body;
-    if (value.aggregate != 0) { g_state.c_syms[idx].flags |= F_AGGPARAM; }
+    g_state.task.c_syms[idx].offset = body;
+    if (value.aggregate != 0) { g_state.task.c_syms[idx].flags |= F_AGGPARAM; }
     if (loc.indirect != 0) {
         let source int = 0 - 16 - loc.stack;
         if (loc.kind == CABI_GPR) {
@@ -167,19 +167,19 @@ fn sem_cabi_call(callee *Res, r *Res, base int, direct int,
         if (em_pop("x9") != 0 || em_lea_local_to(target) != 0
             || em_ins("str\tx9, [x10]") != 0) { return -1; }
     }
-    let ret int = g_state.t_sig_ret[sig];
-    let ret_agg int = (g_state.t_types[ret].kind == TY_STRUCT
-        || g_state.t_types[ret].kind == TY_UNION).to_type(int);
+    let ret int = g_state.task.t_sig_ret[sig];
+    let ret_agg int = (g_state.task.t_types[ret].kind == TY_STRUCT
+        || g_state.task.t_types[ret].kind == TY_UNION).to_type(int);
     let buffer int = 0;
-    if (ret_agg != 0) { buffer = em_alloc_local(g_state.t_types[ret].size); }
+    if (ret_agg != 0) { buffer = em_alloc_local(g_state.task.t_types[ret].size); }
     if (em_call_stack_alloc(stack_bytes) != 0) { return -1; }
     i = 0;
     for i < count {
         let loc *ABIArg = &locations[i];
         if (loc.kind == CABI_STACK) {
-            let tid int = g_state.t_sig_params[g_state.t_sig_first[sig] + i];
-            let agg int = (g_state.t_types[tid].kind == TY_STRUCT
-                || g_state.t_types[tid].kind == TY_UNION).to_type(int);
+            let tid int = g_state.task.t_sig_params[g_state.task.t_sig_first[sig] + i];
+            let agg int = (g_state.task.t_types[tid].kind == TY_STRUCT
+                || g_state.task.t_types[tid].kind == TY_UNION).to_type(int);
             if (em_lea_local_to(staged - i * 16) != 0) { return -1; }
             if (agg != 0 && loc.indirect == 0) {
                 if (em_ins("ldr\tx0, [x10]") != 0) { return -1; }
@@ -194,9 +194,9 @@ fn sem_cabi_call(callee *Res, r *Res, base int, direct int,
     for i < count {
         let loc2 *ABIArg = &locations[i];
         if (loc2.kind != CABI_STACK) {
-            let tid2 int = g_state.t_sig_params[g_state.t_sig_first[sig] + i];
-            let agg2 int = (g_state.t_types[tid2].kind == TY_STRUCT
-                || g_state.t_types[tid2].kind == TY_UNION).to_type(int);
+            let tid2 int = g_state.task.t_sig_params[g_state.task.t_sig_first[sig] + i];
+            let agg2 int = (g_state.task.t_types[tid2].kind == TY_STRUCT
+                || g_state.task.t_types[tid2].kind == TY_UNION).to_type(int);
             if (em_lea_local_to(staged - i * 16) != 0) { return -1; }
             if (agg2 != 0 && loc2.indirect == 0) {
                 if (em_ins("ldr\tx12, [x10]") != 0
@@ -216,23 +216,23 @@ fn sem_cabi_call(callee *Res, r *Res, base int, direct int,
     } else if (em_lea_local_to(target) != 0 || em_ins("ldr\tx10, [x10]") != 0
         || em_call_indirect() != 0) { return -1; }
     if (noreturn != 0) {
-        g_state.c_expr_noreturn = 1;
+        g_state.task.c_expr_noreturn = 1;
         if (em_ins("brk\t#0") != 0) { return -1; }
     }
     if (em_call_cleanup_bytes(stack_bytes) != 0) { return -1; }
     if (ret_agg != 0) {
         if (result.indirect == 0 && cabi_save_result(&result, buffer) != 0) { return -1; }
         if (em_lea_local_down(buffer) != 0) { return -1; }
-    } else if (ty_is_integer(ret) != 0 && g_state.t_types[ret].size < 8) {
+    } else if (ty_is_integer(ret) != 0 && g_state.task.t_types[ret].size < 8) {
         // C 的 32 位返回寄存器高位不能直接作为 yh 的扩展整数值使用。
-        let bits int = g_state.t_types[ret].size * 8;
+        let bits int = g_state.task.t_types[ret].size * 8;
         let op *char = ty_is_signed(ret) != 0 ? "sbfx" : "ubfx";
         if (em_frag("\t") != 0 || em_frag(op) != 0 || em_frag("\tx0, x0, #0, #") != 0
             || em_puti(bits) != 0 || em_frag("\n") != 0) { return -1; }
     }
-    g_state.c_arg_n = base;
+    g_state.task.c_arg_n = base;
     sem_res_reset(r, ret);
-    g_state.c_res_is_addr = ret_agg;
+    g_state.task.c_res_is_addr = ret_agg;
     return 0;
 }
 

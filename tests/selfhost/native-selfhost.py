@@ -33,7 +33,9 @@ WORK = ROOT / "tmp" / "selfhost"
 HOST_DRIVER = ROOT / "tools" / "llvm-host.py"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "tools"))
-from selfhost_snapshot_gate import default_seed, expected_artifacts, save_snapshot
+from selfhost_snapshot_gate import (default_seed, expected_artifacts,
+                                    expected_seed_flat_artifacts,
+                                    save_snapshot)
 from selfhost_snapshot_gate import self_test, snapshot_errors, verify_seed
 
 # 并发上限：自解析与两遍语料都是「一个文件一次编译器进程」，进程启动在
@@ -178,10 +180,12 @@ def main() -> int:
 
     ok = True
     expected = expected_artifacts(COMPILER)
-    # 滚动种子可能早于或已包含 .s.ct；首代只接受这两种完整产物集合之一，
-    # 后续代必须全部使用当前格式并进入固定点。
+    # 滚动种子可能早于或已包含 .s.ct / RS3b 按文件对象布局；首代只接受
+    # 这些历史完整产物集合之一，后续代必须全部使用当前格式并进入固定点。
     legacy_expected = {path for path in expected if not path.endswith(".s.ct")}
-    d2 = build(seed, WORK / "cc2", "cc2", expected, (legacy_expected,))
+    seed_flat = expected_seed_flat_artifacts(COMPILER)
+    d2 = build(seed, WORK / "cc2", "cc2", expected,
+               (legacy_expected, seed_flat))
     d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected)
     d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected)
     print(f"cc2/cc3/cc4 构建完成（种子 = {seed}）")

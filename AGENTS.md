@@ -34,6 +34,14 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
 - **平台顺序（2026-10-12 用户决定）：开发与验证以 Linux 平台为先**，
   macOS/Windows 等其他平台后续接入；非 Linux 目标不因日常改动回归验收，
   但 Linux 上的 `make test` / `make selfhost-native` 与滚种子照常执行。
+- **本地/CI 分工（2026-10-19 用户决定）**：在 Linux 或 macOS 上开发，本地只需
+  保证**本平台**门禁绿（`make test` + `make selfhost-native`；运行语料已按
+  `// platform:` 头部指令筛选，平台专属门如 `make test-llvm` 在别的宿主会
+  明确拒绝而不是要求本地跑通）。**完整多平台回归由 GitHub Actions 承担**
+  （见下文 CI 说明）：推送 `arm64`/`llvm`/`main` 自动跑 linux-arm64（主门 +
+  `yh-link-probe FULL=1`）与 linux-x86_64（YH_LLVM_HOST=1 的 LLVM 全门），
+  darwin-arm64 由手动 `workflow_dispatch` 触发。本地不要为其他平台预跑门禁，
+  也不要因 CI 平台的红灯阻塞本地迭代——CI 红灯按 todo 立项再修。
 
 ## 修改语法规则
 
@@ -98,12 +106,15 @@ make seed               # 滚种子（仅在全绿后）
 `make test-llvm` 是 Linux/x86_64 专属门，其他宿主会直接拒绝而不是降级运行。
 
 GitHub Actions（`.github/workflows/ci.yml`，手动 `workflow_dispatch` 或推送
-`arm64`/`main`）：`linux-arm64` 作业在 arm64 容器里跑第 2/3 层语料与
-`make selfhost-native`（第 1 层 ANTLR 需要 Java 与 jar 缓存，不在 CI 跑）；
-`darwin-arm64` 作业在 `macos-14` 上跑同一套门禁，入库 `bin/yh-darwin-arm64`
-落后时先自动补一代种子（把模块私有类型临时改回 `pub` → `make` → `make seed` →
-还原源码），并把 `bin/yh-darwin-arm64` + `.sha256` 作为 artifact 上传——
-下载后提交即追平 macOS 种子。
+`arm64`/`llvm`/`main`）：`linux-arm64` 作业在 arm64 容器里跑第 2/3 层语料、
+`make selfhost-native` 与 `make yh-link-probe FULL=1`（链接器端到端 + GNU ld
+差分的原生门；第 1 层 ANTLR 需要 Java 与 jar 缓存，不在 CI 跑）；
+`linux-x86_64` 作业以 `YH_LLVM_HOST=1` 联网准备固定 LLVM SDK（缓存在
+`tmp/llvm-migration`，键随 SDK 锁文件与桥源码变化）后跑 `make test-llvm` /
+`make selfhost-llvm`；`darwin-arm64` 作业在 `macos-14` 上跑同一套门禁，入库
+`bin/yh-darwin-arm64` 落后时先自动补一代种子（把模块私有类型临时改回 `pub` →
+`make` → `make seed` → 还原源码），并把 `bin/yh-darwin-arm64` + `.sha256`
+作为 artifact 上传——下载后提交即追平 macOS 种子。
 
 
 ## Linux 环境验证（容器方案）

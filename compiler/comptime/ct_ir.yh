@@ -284,12 +284,12 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
     if (expr.kind == 1) {
         if (expr.layout_type_id >= 0) {
             let gs *gen.GenState = gen.G();
-            if (expr.layout_type_id >= gs.t_type_n
-                || gs.t_types[expr.layout_type_id].size < 0) {
+            if (expr.layout_type_id >= gs.task.t_type_n
+                || gs.task.t_types[expr.layout_type_id].size < 0) {
                 return gen.sem_err("编译期 sizeof 依赖的类型布局尚未就绪");
             }
             out.type_id = expr.type_id;
-            out.value = gs.t_types[expr.layout_type_id].size.to_type(i64);
+            out.value = gs.task.t_types[expr.layout_type_id].size.to_type(i64);
             out.is_lit = 0;
             out.lit_big = 0;
             return 0;
@@ -306,15 +306,15 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
         }
         if (expr.sym_kind == gen.SYM_CONST && expr.sym_id >= 0) {
             let gs *gen.GenState = gen.G();
-            if (expr.sym_id < gs.c_sym_n && gs.c_syms[expr.sym_id].const_ready != 0) {
-                if ((gs.c_syms[expr.sym_id].flags & gen.F_ADDR) != 0) {
+            if (expr.sym_id < gs.task.c_sym_n && gs.task.c_syms[expr.sym_id].const_ready != 0) {
+                if ((gs.task.c_syms[expr.sym_id].flags & gen.F_ADDR) != 0) {
                     // 字符串字面量指针常量：用保存的原样字节登记只读池后返回池地址。
                     let elem int = ct_pool_elem_of(expr.type_id);
                     let lit_off int = 0;
                     let lit_len int = 0;
                     if (gen.sym_ct_lit_text(expr.sym_id, &lit_off, &lit_len) == 0
                         && lit_len >= 2 && elem >= 0) {
-                        let addr i64 = ct_pool_register(gs.np_data,
+                        let addr i64 = ct_pool_register(gs.task.np_data,
                             lit_off, lit_len, elem,
                             0 - (lit_off.to_type(i64) + 1));
                         if (addr == 0) { return -1; }
@@ -337,7 +337,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
                     return 0;
                 }
                 out.type_id = expr.type_id;
-                out.value = gs.c_syms[expr.sym_id].cval;
+                out.value = gs.task.c_syms[expr.sym_id].cval;
                 out.is_lit = 0;
                 out.lit_big = 0;
                 return 0;
@@ -383,8 +383,8 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             let gs *gen.GenState = gen.G();
             // 联合体各字段共享存储，编译期槽彼此独立，取址别名语义无法保持。
             if (place.aggregate != 0 && place.aggregate.elem_type >= 0
-                && place.aggregate.elem_type < gs.t_type_n
-                && gs.t_types[place.aggregate.elem_type].kind == gen.TY_UNION) {
+                && place.aggregate.elem_type < gs.task.t_type_n
+                && gs.task.t_types[place.aggregate.elem_type].kind == gen.TY_UNION) {
                 return gen.sem_err("编译期联合体字段不支持取址");
             }
             let element int = (place.aggregate != 0).to_type(int);
@@ -394,9 +394,9 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
                     || place.index >= place.aggregate.count))
                 || (gen.ty_is_integer(place.type_id) == 0
                     && gen.ty_is_float(place.type_id) == 0)
-                || expr.type_id < 0 || expr.type_id >= gs.t_type_n
-                || gs.t_types[expr.type_id].kind != gen.TY_PTR
-                || gs.t_types[expr.type_id].elem != place.type_id) {
+                || expr.type_id < 0 || expr.type_id >= gs.task.t_type_n
+                || gs.task.t_types[expr.type_id].kind != gen.TY_PTR
+                || gs.task.t_types[expr.type_id].elem != place.type_id) {
                 return gen.sem_err("编译期取址只支持当前帧中的标量局部变量或标量聚合元素");
             }
             out.type_id = expr.type_id;
@@ -426,11 +426,11 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
         if (ct_ir_eval_expr(frame, expr.child0, &value) != 0) { return -1; }
         if (expr.op == gen.TK_LEN) {
             let gs *gen.GenState = gen.G();
-            if (value.type_id < 0 || value.type_id >= gs.t_type_n
+            if (value.type_id < 0 || value.type_id >= gs.task.t_type_n
                 || expr.type_id != gen.TY_I32) {
                 return gen.sem_err("内部错误：编译期 len 类型无效");
             }
-            let source_type gen.CType = gs.t_types[value.type_id];
+            let source_type gen.CType = gs.task.t_types[value.type_id];
             if (source_type.kind != gen.TY_ARRAY
                 && source_type.kind != gen.TY_SLICE) {
                 return gen.sem_err("编译期 len 只支持数组或切片");
@@ -493,7 +493,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             if (ct_fp_binop_norm(expr.op, left.type_id, left.value,
                     right.value, &out.value) != 0) { return -1; }
             out.type_id = expr.type_id;
-        } else if (gen.G().t_types[left.type_id].kind == gen.TY_PTR
+        } else if (gen.G().task.t_types[left.type_id].kind == gen.TY_PTR
             && gen.ty_is_integer(right.type_id) != 0
             && (expr.op == gen.TK_PLUS || expr.op == gen.TK_MINUS)) {
             // 指针 ± 整数：按 CtValue 槽步进，结果仍是指向存活帧的地址值。
@@ -502,7 +502,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             out.value = ct_ir_pointer_offset(left.value, steps);
             if (out.value == 0) { return -1; }
             out.type_id = expr.type_id;
-        } else if (gen.G().t_types[right.type_id].kind == gen.TY_PTR
+        } else if (gen.G().task.t_types[right.type_id].kind == gen.TY_PTR
             && gen.ty_is_integer(left.type_id) != 0
             && expr.op == gen.TK_PLUS) {
             out.value = ct_ir_pointer_offset(right.value, left.value);
@@ -560,14 +560,14 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
     }
     if (expr.kind == 11) {
         let gs *gen.GenState = gen.G();
-        if (expr.type_id < 0 || expr.type_id >= gs.t_type_n) {
+        if (expr.type_id < 0 || expr.type_id >= gs.task.t_type_n) {
             return gen.sem_err("内部错误：编译期数组字面量缺少类型");
         }
-        let kind int = gs.t_types[expr.type_id].kind;
+        let kind int = gs.task.t_types[expr.type_id].kind;
         if (kind != gen.TY_ARRAY && kind != gen.TY_SLICE) {
             return gen.sem_err("编译期数组字面量目标必须是数组或切片");
         }
-        let elem_type int = gs.t_types[expr.type_id].elem;
+        let elem_type int = gs.task.t_types[expr.type_id].elem;
         if ((kind == gen.TY_ARRAY
                 && ct_ir_array_supported(expr.type_id, 0) == 0)
             || (kind == gen.TY_SLICE
@@ -576,7 +576,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
         }
         let count int = ct_ir_array_item_count(frame, expr.child0);
         if (count < 0 || count > 100000
-            || (kind == gen.TY_ARRAY && count != gs.t_types[expr.type_id].len)) {
+            || (kind == gen.TY_ARRAY && count != gs.task.t_types[expr.type_id].len)) {
             return gen.sem_err("编译期数组字面量元素数量无效或超过 100000");
         }
         let aggregate *CtAggregate = ct_ir_aggregate_new(frame, elem_type, count);
@@ -689,7 +689,7 @@ fn ct_ir_array_fill_one(frame *CtFrame, expr_id int,
     aggregate.values[index] = value;
     aggregate.values[index].type_id = aggregate.elem_type;
     let gs *gen.GenState = gen.G();
-    let elem_kind int = gs.t_types[aggregate.elem_type].kind;
+    let elem_kind int = gs.task.t_types[aggregate.elem_type].kind;
     if (elem_kind == gen.TY_ARRAY) {
         let source *CtAggregate = value.value.to_type(u64).to_type(*CtAggregate);
         let copy *CtAggregate = ct_ir_array_clone(frame, aggregate.elem_type, source);
@@ -1019,16 +1019,16 @@ fn ct_ir_exec_forin_aggregate(frame *CtFrame, stmt_id int, stmt CtStmt,
     let iterable CtValue;
     if (expr_id < 0 || ct_ir_eval_expr(frame, expr_id, &iterable) != 0) { return -1; }
     let gs *gen.GenState = gen.G();
-    if (iterable.type_id < 0 || iterable.type_id >= gs.t_type_n) {
+    if (iterable.type_id < 0 || iterable.type_id >= gs.task.t_type_n) {
         return gen.sem_err("编译期 for-in 迭代值缺少类型");
     }
-    let kind int = gs.t_types[iterable.type_id].kind;
+    let kind int = gs.task.t_types[iterable.type_id].kind;
     if (kind != gen.TY_ARRAY && kind != gen.TY_SLICE) {
         return gen.sem_err("编译期 for-in 需要数组、切片或整数区间");
     }
     let aggregate *CtAggregate = iterable.value.to_type(u64).to_type(*CtAggregate);
     if (aggregate == 0 || aggregate.count < 0 || aggregate.count > 100000
-        || aggregate.elem_type != gs.t_types[iterable.type_id].elem) {
+        || aggregate.elem_type != gs.task.t_types[iterable.type_id].elem) {
         return gen.sem_err("内部错误：编译期数组/切片存储无效");
     }
     let elem_id int = stmt.first_binding;
@@ -1166,7 +1166,7 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
                 let target int = row.sym_type_id;
                 if (gen.sem_can_assign(target, value.type_id, value.is_lit,
                         value.value, value.lit_big) != 0) { return -1; }
-                let target_kind int = gen.G().t_types[target].kind;
+                let target_kind int = gen.G().task.t_types[target].kind;
                 if (target_kind == gen.TY_ARRAY) {
                     let source *CtAggregate = value.value.to_type(u64)
                         .to_type(*CtAggregate);
@@ -1281,7 +1281,7 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
             current = frame.locals[place.slot];
         }
         let target int = place.type_id;
-        let target_kind int = gen.G().t_types[target].kind;
+        let target_kind int = gen.G().task.t_types[target].kind;
         if ((target_kind == gen.TY_STRUCT || target_kind == gen.TY_ARRAY
                 || target_kind == gen.TY_UNION) && stmt.op != gen.TK_ASSIGN) {
             return gen.sem_err("编译期聚合值不支持复合赋值");
@@ -1417,7 +1417,7 @@ fn ct_eval_ir_body(item CtFunction, values *CtValue, out *CtValue,
         ct_ir_frame_release(&frame);
         return gen.sem_err("编译期函数执行路径没有返回值");
     }
-    let return_kind int = gen.G().t_types[item.ret_type].kind;
+    let return_kind int = gen.G().task.t_types[item.ret_type].kind;
     if (return_kind == gen.TY_ARRAY || return_kind == gen.TY_STRUCT
         || return_kind == gen.TY_UNION
         || return_kind == gen.TY_SLICE) {
@@ -1438,16 +1438,16 @@ fn ct_ir_register_string_pool(expr_dst int, expr_n int) int {
     for i < expr_n {
         let e *CtExpr = &ct_ir_exprs[expr_dst + i];
         ct_ir_expr_pool[expr_dst + i] = 0;
-        if (e.is_const != 0 && e.type_id >= 0 && e.type_id < gs.t_type_n
-            && gs.t_types[e.type_id].kind == gen.TY_PTR
-            && e.token_count == gs.c_tok_n && e.after == e.first + 1
-            && e.first >= 0 && e.first < gs.c_tok_n
-            && gs.c_toks[e.first].kind == gen.TOK_STRING) {
-            let elem int = gs.t_types[e.type_id].elem;
+        if (e.is_const != 0 && e.type_id >= 0 && e.type_id < gs.task.t_type_n
+            && gs.task.t_types[e.type_id].kind == gen.TY_PTR
+            && e.token_count == gs.task.c_tok_n && e.after == e.first + 1
+            && e.first >= 0 && e.first < gs.task.c_tok_n
+            && gs.task.c_toks[e.first].kind == gen.TOK_STRING) {
+            let elem int = gs.task.t_types[e.type_id].elem;
             if (elem == gen.TY_CHAR || elem == gen.TY_U8 || elem == gen.TY_I8) {
-                ct_ir_expr_pool[expr_dst + i] = ct_pool_register(gs.c_src,
-                    gs.c_toks[e.first].start, gs.c_toks[e.first].len, elem,
-                    gs.c_toks[e.first].start.to_type(i64));
+                ct_ir_expr_pool[expr_dst + i] = ct_pool_register(gs.task.c_src,
+                    gs.task.c_toks[e.first].start, gs.task.c_toks[e.first].len, elem,
+                    gs.task.c_toks[e.first].start.to_type(i64));
             }
         }
         i += 1;
@@ -1568,9 +1568,9 @@ fn ct_pool_reset() void {
 // ct_pool_elem_of：指针类型指向单字节元素（char/u8/i8）时返回元素类型，否则 -1。
 pub fn ct_pool_elem_of(type_id int) int {
     let gs *gen.GenState = gen.G();
-    if (type_id < 0 || type_id >= gs.t_type_n) { return -1; }
-    if (gs.t_types[type_id].kind != gen.TY_PTR) { return -1; }
-    let elem int = gs.t_types[type_id].elem;
+    if (type_id < 0 || type_id >= gs.task.t_type_n) { return -1; }
+    if (gs.task.t_types[type_id].kind != gen.TY_PTR) { return -1; }
+    let elem int = gs.task.t_types[type_id].elem;
     if (elem == gen.TY_CHAR || elem == gen.TY_U8 || elem == gen.TY_I8) { return elem; }
     return -1;
 }
@@ -1583,14 +1583,14 @@ fn ct_pool_adopt_label(value *CtValue) int {
     let elem int = ct_pool_elem_of(value.type_id);
     if (elem < 0 || value.value <= 0) { return 0; }
     let i int = 0;
-    for i < gs.c_sym_n {
-        if ((gs.c_syms[i].flags & gen.F_ADDR) != 0
-            && gs.c_syms[i].const_expr_kind == 2
-            && gs.c_syms[i].const_expr_len >= 2
-            && gs.c_syms[i].cval == value.value) {
-            let addr i64 = ct_pool_register(gs.np_data,
-                gs.c_syms[i].const_expr_off, gs.c_syms[i].const_expr_len, elem,
-                0 - (gs.c_syms[i].const_expr_off.to_type(i64) + 1));
+    for i < gs.task.c_sym_n {
+        if ((gs.task.c_syms[i].flags & gen.F_ADDR) != 0
+            && gs.task.c_syms[i].const_expr_kind == 2
+            && gs.task.c_syms[i].const_expr_len >= 2
+            && gs.task.c_syms[i].cval == value.value) {
+            let addr i64 = ct_pool_register(gs.task.np_data,
+                gs.task.c_syms[i].const_expr_off, gs.task.c_syms[i].const_expr_len, elem,
+                0 - (gs.task.c_syms[i].const_expr_off.to_type(i64) + 1));
             if (addr == 0) { return -1; }
             value.value = addr;
             return 0;
@@ -1603,7 +1603,7 @@ fn ct_pool_adopt_label(value *CtValue) int {
     let slen int = 0;
     let quoted int = 0;
     if (gen.data_str_lookup(value.value.to_type(int), &off, &slen, &quoted) != 0) {
-        let addr2 i64 = ct_pool_register(gs.np_data, off, slen, elem,
+        let addr2 i64 = ct_pool_register(gs.task.np_data, off, slen, elem,
             0 - (off.to_type(i64) + 1));
         if (addr2 == 0) { return -1; }
         value.value = addr2;
@@ -1614,7 +1614,7 @@ fn ct_pool_adopt_label(value *CtValue) int {
 // ct_pool_register_src：按当前源文件的字节区间登记只读池（参数全为标量，供 parse
 // 侧在实参位置直接登记字面量，避免跨模块传递 *u8 参数）。
 pub fn ct_pool_register_src(start int, slen int, elem int) i64 {
-    return ct_pool_register(gen.G().c_src, start, slen, elem, start.to_type(i64));
+    return ct_pool_register(gen.G().task.c_src, start, slen, elem, start.to_type(i64));
 }
 
 // 顶层聚合实参的临时构造区：顶层编译期调用没有 CT 帧，前端折叠「标量字段结构体

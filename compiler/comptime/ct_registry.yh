@@ -47,7 +47,7 @@ pub fn ct_reset() void {
     ct_eval_depth = 0;
     ct_control_depth = 0;
     ct_for_boundary_depth = 0;
-    gs.c_ct_expand_depth = 0;
+    gs.task.c_ct_expand_depth = 0;
 }
 
 // ct_enter_control：进入一层编译期结构控制，并限制嵌套深度为 32。
@@ -72,9 +72,9 @@ pub fn ct_for_boundary_enter(loop_depth int) int {
         return gen.sem_err("编译期 for 嵌套超过 32 层");
     }
     ct_for_boundary_bases[ct_for_boundary_depth] = loop_depth;
-    ct_for_trace_bases[ct_for_boundary_depth] = gs.c_ct_expand_depth;
+    ct_for_trace_bases[ct_for_boundary_depth] = gs.task.c_ct_expand_depth;
     ct_for_boundary_depth += 1;
-    gs.c_ct_expand_values[ct_for_boundary_depth - 1] = 0;
+    gs.task.c_ct_expand_values[ct_for_boundary_depth - 1] = 0;
     return 0;
 }
 
@@ -84,8 +84,8 @@ pub fn ct_for_boundary_value(value i64) int {
     if (ct_for_boundary_depth <= 0 || ct_for_boundary_depth > 32) {
         return gen.fail("内部错误：编译期 for 展开值没有对应边界");
     }
-    gs.c_ct_expand_values[ct_for_boundary_depth - 1] = value.to_type(int);
-    gs.c_ct_expand_depth = ct_for_boundary_depth;
+    gs.task.c_ct_expand_values[ct_for_boundary_depth - 1] = value.to_type(int);
+    gs.task.c_ct_expand_depth = ct_for_boundary_depth;
     return 0;
 }
 
@@ -93,7 +93,7 @@ pub fn ct_for_boundary_value(value i64) int {
 pub fn ct_for_boundary_leave() void {
     let gs *gen.GenState = gen.G();
     if (ct_for_boundary_depth > 0) {
-        gs.c_ct_expand_depth = ct_for_trace_bases[ct_for_boundary_depth - 1];
+        gs.task.c_ct_expand_depth = ct_for_trace_bases[ct_for_boundary_depth - 1];
         ct_for_boundary_depth -= 1;
     }
 }
@@ -141,7 +141,7 @@ pub fn ct_charge_expansion_ast_nodes(count int) int {
 // ct_charge_expansion：限制展开轮数；无 AST 捕获时兼用保守 token 规模预算。
 pub fn ct_charge_expansion(body_token_count int) int {
     let gs *gen.GenState = gen.G();
-    if (gs.c_ast_capture == 0
+    if (gs.task.c_ast_capture == 0
         && (body_token_count < 0 || body_token_count > 100000)) {
         return gen.sem_err("编译期 for 展开语法规模超过 100000");
     }
@@ -149,10 +149,10 @@ pub fn ct_charge_expansion(body_token_count int) int {
     if (ct_expansion_count > 100000) {
         return gen.sem_err("编译期 for 总展开次数超过 100000");
     }
-    if (gs.c_ast_capture == 0 && body_token_count > 100000 - ct_expansion_size) {
+    if (gs.task.c_ast_capture == 0 && body_token_count > 100000 - ct_expansion_size) {
         return gen.sem_err("编译期 for 展开语法规模超过 100000");
     }
-    if (gs.c_ast_capture == 0) { ct_expansion_size += body_token_count; }
+    if (gs.task.c_ast_capture == 0) { ct_expansion_size += body_token_count; }
     return 0;
 }
 
@@ -175,19 +175,19 @@ fn ct_grow() int {
 pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     param_n int, ret_type int, body_first int, body_after int) int {
     let gs *gen.GenState = gen.G();
-    if (sym_id < 0 || sym_id >= gs.c_sym_n || param_n < 0 || param_n > 64
-        || body_first < 0 || body_after <= body_first || body_after > gs.c_tok_n) {
+    if (sym_id < 0 || sym_id >= gs.task.c_sym_n || param_n < 0 || param_n > 64
+        || body_first < 0 || body_after <= body_first || body_after > gs.task.c_tok_n) {
         return gen.fail("内部错误：编译期函数登记范围无效");
     }
     if (ct_function_n == ct_function_cap && ct_grow() != 0) { return -1; }
     let row int = ct_function_n;
-    let nbytes int = gs.c_src_len + 1;
+    let nbytes int = gs.task.c_src_len + 1;
     let src *u8 = malloc(nbytes.to_type(u64)).to_type(*u8);
     let body_n int = body_after - body_first;
     let body *CtToken = malloc((body_n * sizeof(CtToken)).to_type(u64)).to_type(*CtToken);
     let path_len int = 0;
-    if (gs.c_path != 0) {
-        for gs.c_path[path_len] != 0 { path_len += 1; }
+    if (gs.task.c_path != 0) {
+        for gs.task.c_path[path_len] != 0 { path_len += 1; }
     }
     let src_path *u8 = 0;
     if (path_len > 0) {
@@ -200,8 +200,8 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     }
     let import_n int = 0;
     let ii int = 0;
-    for ii < gs.mod_import_n {
-        if (gs.mod_import_mod[ii] >= 0) { import_n += 1; }
+    for ii < gs.task.mod_import_n {
+        if (gs.task.mod_import_mod[ii] >= 0) { import_n += 1; }
         ii += 1;
     }
     if (import_n > 0) {
@@ -217,17 +217,17 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
         if (imports != 0) { free(imports.to_type(*void)); }
         return gen.fail("编译期函数快照分配失败");
     }
-    memcpy(src, gs.c_src, gs.c_src_len.to_type(u64));
-    src[gs.c_src_len] = 0;
+    memcpy(src, gs.task.c_src, gs.task.c_src_len.to_type(u64));
+    src[gs.task.c_src_len] = 0;
     let path_i int = 0;
     for path_i < path_len {
-        src_path[path_i] = gs.c_path[path_i].to_type(u8);
+        src_path[path_i] = gs.task.c_path[path_i].to_type(u8);
         path_i += 1;
     }
     if (src_path != 0) { src_path[path_len] = 0; }
     let ti int = 0;
     for ti < body_n {
-        let token gen.Tok = gs.c_toks[body_first + ti];
+        let token gen.Tok = gs.task.c_toks[body_first + ti];
         body[ti].kind = token.kind;
         body[ti].start = token.start;
         body[ti].len = token.len;
@@ -244,11 +244,11 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     }
     ii = 0;
     let import_row int = 0;
-    for ii < gs.mod_import_n {
-        let module_id int = gs.mod_import_mod[ii];
+    for ii < gs.task.mod_import_n {
+        let module_id int = gs.task.mod_import_mod[ii];
         if (module_id >= 0) {
-            imports[import_row].alias_off = gs.mod_imports[ii].alias_off;
-            imports[import_row].alias_len = gs.mod_imports[ii].alias_len;
+            imports[import_row].alias_off = gs.task.mod_imports[ii].alias_off;
+            imports[import_row].alias_len = gs.task.mod_imports[ii].alias_len;
             imports[import_row].module_id = module_id;
             import_row += 1;
         }
@@ -263,11 +263,11 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     ct_functions[row].src = src;
     ct_functions[row].src_path = src_path;
     ct_functions[row].src_path_len = path_len;
-    ct_functions[row].src_body_line = gs.c_toks[body_first].line;
-    if (gs.c_ct_origin_active != 0) {
-        ct_functions[row].src_body_line = gs.c_ct_origin_line;
+    ct_functions[row].src_body_line = gs.task.c_toks[body_first].line;
+    if (gs.task.c_ct_origin_active != 0) {
+        ct_functions[row].src_body_line = gs.task.c_ct_origin_line;
     }
-    ct_functions[row].src_line_bias = gs.c_diag_line_bias;
+    ct_functions[row].src_line_bias = gs.task.c_diag_line_bias;
     ct_functions[row].body = body;
     ct_functions[row].body_n = body_n;
     ct_functions[row].body_token_first = body_first;
@@ -463,7 +463,7 @@ fn ct_invoke_in_frame(caller *CtFrame, sym_id int, args *CtValue,
         return gen.sem_err("编译期函数返回值类型不受支持");
     }
     let typed int = (target.ir_ready != 0 && target.ir_supported != 0).to_type(int);
-    let return_kind int = gen.G().t_types[target.ret_type].kind;
+    let return_kind int = gen.G().task.t_types[target.ret_type].kind;
     let aggregate_return int = ((return_kind == gen.TY_ARRAY
         || return_kind == gen.TY_STRUCT || return_kind == gen.TY_SLICE
         || return_kind == gen.TY_UNION).to_type(int));
@@ -483,7 +483,7 @@ fn ct_invoke_in_frame(caller *CtFrame, sym_id int, args *CtValue,
         }
         if (gen.sem_can_assign(param_type, args[i].type_id,
                 args[i].is_lit, args[i].value, args[i].lit_big) != 0) { return -1; }
-        if (gen.G().t_types[param_type].kind == gen.TY_SLICE
+        if (gen.G().task.t_types[param_type].kind == gen.TY_SLICE
             && ct_ir_slice_param_valid(param_type, &args[i]) == 0) {
             return gen.sem_err("编译期切片形参需要有效的本地数组或切片视图");
         }
@@ -546,20 +546,20 @@ pub fn ct_call(sym_id int, args *gen.Res, arg_n int, out *gen.Res) int {
         ct_ir_aggregate_free_all(&result_frame);
         return -1;
     }
-    let result_kind int = gs.t_types[value.type_id].kind;
+    let result_kind int = gs.task.t_types[value.type_id].kind;
     if (result_kind == gen.TY_ARRAY || result_kind == gen.TY_STRUCT
         || result_kind == gen.TY_SLICE || result_kind == gen.TY_UNION) {
         ct_ir_result_pool_keep(&result_frame);
-        if (gs.c_fold != 0) {
+        if (gs.task.c_fold != 0) {
             gen.sem_res_const(out, value.type_id, value.value);
-            gs.c_res_is_addr = 1;
+            gs.task.c_res_is_addr = 1;
             return 0;
         }
         let label int = ct_ir_data_emit_temp(value.type_id, &value);
         if (label < 0) { return -1; }
         gen.sem_res_const(out, value.type_id, label.to_type(i64));
         if (gen.em_load_data_label(label) != 0) { return -1; }
-        gs.c_res_is_addr = 1;
+        gs.task.c_res_is_addr = 1;
         return 0;
     }
     ct_ir_aggregate_free_all(&result_frame);
@@ -567,13 +567,13 @@ pub fn ct_call(sym_id int, args *gen.Res, arg_n int, out *gen.Res) int {
     if (gen.ty_is_float(value.type_id) != 0) {
         // 浮点常量以 IEEE754 位模式同时写入 ival 与 fval_bits。
         out.fval_bits = value.value;
-        if (gs.c_fold == 0 && gen.em_mov_imm("x0", value.value) != 0) { return -1; }
-        if (gs.c_fold == 0 && gen.em_ins("fmov\td0, x0") != 0) { return -1; }
-        gs.c_res_is_addr = 0;
+        if (gs.task.c_fold == 0 && gen.em_mov_imm("x0", value.value) != 0) { return -1; }
+        if (gs.task.c_fold == 0 && gen.em_ins("fmov\td0, x0") != 0) { return -1; }
+        gs.task.c_res_is_addr = 0;
         return 0;
     }
-    if (gs.c_fold == 0 && gen.em_mov_imm("x0", value.value) != 0) { return -1; }
-    gs.c_res_is_addr = 0;
+    if (gs.task.c_fold == 0 && gen.em_mov_imm("x0", value.value) != 0) { return -1; }
+    gs.task.c_res_is_addr = 0;
     return 0;
 }
 

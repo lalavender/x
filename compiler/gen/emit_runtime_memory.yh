@@ -2,17 +2,30 @@ module gen;
 
 // emit_runtime_memory.yh：把基础字节/字符串运行时入口发射到当前目标对象。
 // 符号由项目模块后缀隔离，所以多对象链接时不会互相定义同一入口。
+// RS3a：入口符号一律发 .globl + hidden（模块私有、拆文件对象后跨对象解析）。
+
+// em_rt_stub_header：运行时入口的隐藏全局声明头（.text 缓冲版）。
+fn em_rt_stub_header(idx int) int {
+    if (em_frag("\t.globl\t") != 0) { return -1; }
+    if (em_put_sym_name(idx) != 0) { return -1; }
+    if (em_frag("\n") != 0) { return -1; }
+    if (tg_darwin() != 0) {
+        if (em_frag("\t.private_extern\t") != 0) { return -1; }
+    } else {
+        if (em_frag("\t.hidden\t") != 0) { return -1; }
+    }
+    if (em_put_sym_name(idx) != 0) { return -1; }
+    return em_frag("\n");
+}
 
 // em_emit_runtime_memory_stub：为 memcpy/strlen 发射本地 AArch64 ABI 入口。
 // memcpy 对齐无要求，优先用 32/16/8 字节块，剩余字节逐个复制；strlen
 // 先扫描至对齐边界，再按机器字查零并回退逐字节确定 NUL 的准确位置。
 fn em_emit_runtime_memory_stub(idx int) int {
-    if (em_frag("\t.globl\t") != 0) { return -1; }
-    if (em_put_sym_name(idx) != 0) { return -1; }
-    if (em_frag("\n") != 0) { return -1; }
+    if (em_rt_stub_header(idx) != 0) { return -1; }
     if (em_put_sym_name(idx) != 0) { return -1; }
     if (em_frag(":\n") != 0) { return -1; }
-    if ((g_state.c_syms[idx].flags & F_RUNTIME_MEMCPY) != 0) {
+    if ((g_state.task.c_syms[idx].flags & F_RUNTIME_MEMCPY) != 0) {
         let chunks int = em_new_label();
         let tail16 int = em_new_label();
         let tail8 int = em_new_label();
@@ -59,7 +72,7 @@ fn em_emit_runtime_memory_stub(idx int) int {
         if (em_ins("mov\tx0, x4") != 0) { return -1; }
         return em_ins("ret");
     }
-    if ((g_state.c_syms[idx].flags & F_RUNTIME_STRLEN) != 0) {
+    if ((g_state.task.c_syms[idx].flags & F_RUNTIME_STRLEN) != 0) {
         let align int = em_new_label();
         let init int = em_new_label();
         let words int = em_new_label();
@@ -113,12 +126,10 @@ fn em_emit_runtime_memory_stub(idx int) int {
 // em_emit_runtime_allocator_stub：用 mmap 与 munmap 提供 malloc/free。
 // 映射起始处保存映射长度，用户指针偏移 16 字节并满足常用 ABI 对齐。
 fn em_emit_runtime_allocator_stub(idx int) int {
-    if (em_frag("\t.globl\t") != 0) { return -1; }
-    if (em_put_sym_name(idx) != 0) { return -1; }
-    if (em_frag("\n") != 0) { return -1; }
+    if (em_rt_stub_header(idx) != 0) { return -1; }
     if (em_put_sym_name(idx) != 0) { return -1; }
     if (em_frag(":\n") != 0) { return -1; }
-    if ((g_state.c_syms[idx].flags & F_RUNTIME_MALLOC) != 0) {
+    if ((g_state.task.c_syms[idx].flags & F_RUNTIME_MALLOC) != 0) {
         let failed int = em_new_label();
         let done int = em_new_label();
         if (em_ins("stp\tx19, x30, [sp, #-16]!") != 0) { return -1; }
@@ -156,7 +167,7 @@ fn em_emit_runtime_allocator_stub(idx int) int {
         if (em_ins("ldp\tx19, x30, [sp], #16") != 0) { return -1; }
         return em_ins("ret");
     }
-    if ((g_state.c_syms[idx].flags & F_RUNTIME_FREE) != 0) {
+    if ((g_state.task.c_syms[idx].flags & F_RUNTIME_FREE) != 0) {
         let done int = em_new_label();
         if (em_ins("stp\tx19, x30, [sp, #-16]!") != 0) { return -1; }
         if (em_frag("\tcbz\tx0, ") != 0 || em_put_lbl(done) != 0
@@ -214,8 +225,7 @@ fn em_emit_runtime_printf_stub(idx int) int {
     let fail_label int = em_new_label();
     let epilogue int = em_new_label();
 
-    if (em_frag("\t.globl\t") != 0) { return -1; }
-    if (em_put_sym_name(idx) != 0 || em_frag("\n") != 0) { return -1; }
+    if (em_rt_stub_header(idx) != 0) { return -1; }
     if (em_put_sym_name(idx) != 0 || em_frag(":\n") != 0) { return -1; }
     // 保存被调用方寄存器，保留 256 字节输出缓冲、7 个 Linux 参数槽、
     // 32 字节十进制反转区和 flush/返回地址暂存区，栈始终 16 字节对齐。
@@ -526,8 +536,8 @@ fn em_emit_runtime_printf_stub(idx int) int {
 // 无条件携带分配、格式化与字符串服务及其 OS 导入。
 pub fn em_emit_runtime_stubs() int {
     let idx int = 0;
-    for idx < g_state.c_sym_n {
-        let flags int = g_state.c_syms[idx].flags;
+    for idx < g_state.task.c_sym_n {
+        let flags int = g_state.task.c_syms[idx].flags;
         if ((flags & F_RUNTIME_USED) != 0) {
             if ((flags & F_RUNTIME_PRINTF) != 0) {
                 if (em_emit_runtime_printf_stub(idx) != 0) { return -1; }

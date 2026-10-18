@@ -26,13 +26,13 @@ fn ast_ir_call_release(out *AstIRCalls) void {
 // ast_ir_call_has_suffix：复用普通发射器的模块符号限定规则。
 fn ast_ir_call_has_suffix(base *AstExpr) int {
     let gs *gen.GenState = gen.G();
-    if (gs.c_module_mode == 0 || gs.c_sym_sfx_len == 0
+    if (gs.c_module_mode == 0 || gs.task.c_sym_sfx_len == 0
         || (base.sym_flags & (gen.F_EXTERN | gen.F_CABI)) != 0) { return 0; }
     if (gs.c_is_entry_mod != 0 && base.sym_name_len == 4
-        && gs.np_data[base.sym_name_off] == 'm'
-        && gs.np_data[base.sym_name_off + 1] == 'a'
-        && gs.np_data[base.sym_name_off + 2] == 'i'
-        && gs.np_data[base.sym_name_off + 3] == 'n') { return 0; }
+        && gs.task.np_data[base.sym_name_off] == 'm'
+        && gs.task.np_data[base.sym_name_off + 1] == 'a'
+        && gs.task.np_data[base.sym_name_off + 2] == 'i'
+        && gs.task.np_data[base.sym_name_off + 3] == 'n') { return 0; }
     return 1;
 }
 
@@ -40,20 +40,20 @@ fn ast_ir_call_has_suffix(base *AstExpr) int {
 fn ast_ir_call_name_supported(base *AstExpr) int {
     let gs *gen.GenState = gen.G();
     if (base.sym_name_off < 0 || base.sym_name_len <= 0
-        || base.sym_name_off + base.sym_name_len > gs.np_len) { return 0; }
-    if (gs.c_sym_sfx_len > 0 && (gs.c_sym_sfx_off < 0
-        || gs.c_sym_sfx_off + gs.c_sym_sfx_len > gs.np_len)) { return 0; }
+        || base.sym_name_off + base.sym_name_len > gs.task.np_len) { return 0; }
+    if (gs.task.c_sym_sfx_len > 0 && (gs.task.c_sym_sfx_off < 0
+        || gs.task.c_sym_sfx_off + gs.task.c_sym_sfx_len > gs.task.np_len)) { return 0; }
     let i int = 0;
     for i < base.sym_name_len {
-        if (ir.ir_call_symbol_byte_ok(gs.np_data[base.sym_name_off + i]) == 0) {
+        if (ir.ir_call_symbol_byte_ok(gs.task.np_data[base.sym_name_off + i]) == 0) {
             return 0;
         }
         i += 1;
     }
     if (ast_ir_call_has_suffix(base) != 0) {
         i = 0;
-        for i < gs.c_sym_sfx_len {
-            if (ir.ir_call_symbol_byte_ok(gs.np_data[gs.c_sym_sfx_off + i]) == 0) {
+        for i < gs.task.c_sym_sfx_len {
+            if (ir.ir_call_symbol_byte_ok(gs.task.np_data[gs.task.c_sym_sfx_off + i]) == 0) {
                 return 0;
             }
             i += 1;
@@ -73,14 +73,14 @@ fn ast_ir_call_supported(ctx *AstFunctionContext, node *AstExpr,
     let base *AstExpr = &ast_expr_nodes[node.child0];
     if (base.kind != AST_EXPR_PRIMARY || base.child0 >= 0
         || base.sym_kind != gen.SYM_FN || base.sym_type_id < 0
-        || base.sym_type_id >= gs.t_type_n
+        || base.sym_type_id >= gs.task.t_type_n
         || (base.sym_flags & (gen.F_INTRINSIC | gen.F_LINUX_SYSCALL)) != 0
-        || gs.t_types[base.sym_type_id].kind != gen.TY_FN
+        || gs.task.t_types[base.sym_type_id].kind != gen.TY_FN
         || ast_ir_call_name_supported(base) == 0) { return 0; }
-    let sig int = gs.t_types[base.sym_type_id].sub;
-    if (sig < 0 || sig >= gs.t_sig_n || gs.t_sig_vararg[sig] != 0
-        || ast_ir_type(gs.t_sig_ret[sig]) != ast_ir_type(node.type_id)) { return 0; }
-    let arg_i int = gs.t_sig_np[sig] - 1;
+    let sig int = gs.task.t_types[base.sym_type_id].sub;
+    if (sig < 0 || sig >= gs.task.t_sig_n || gs.task.t_sig_vararg[sig] != 0
+        || ast_ir_type(gs.task.t_sig_ret[sig]) != ast_ir_type(node.type_id)) { return 0; }
+    let arg_i int = gs.task.t_sig_np[sig] - 1;
     let link int = node.child1;
     for link >= 0 {
         if (link < ctx.expr_first || link >= ctx.expr_after || arg_i < 0) { return 0; }
@@ -92,9 +92,9 @@ fn ast_ir_call_supported(ctx *AstFunctionContext, node *AstExpr,
         // 实参类型：同型直接支持；整数字面量按 sem_binop/sem_call 的
         // 「字面量适配」放行（降低时把常量重定型到形参类型）。
         if (ast_ir_type(ast_expr_nodes[arg_link.child1].type_id)
-            != ast_ir_type(gs.t_sig_params[gs.t_sig_first[sig] + arg_i])) {
+            != ast_ir_type(gs.task.t_sig_params[gs.task.t_sig_first[sig] + arg_i])) {
             let lit *AstExpr = &ast_expr_nodes[arg_link.child1];
-            let want int = gs.t_sig_params[gs.t_sig_first[sig] + arg_i];
+            let want int = gs.task.t_sig_params[gs.task.t_sig_first[sig] + arg_i];
             if (lit.is_lit == 0 || gen.ty_is_integer(want) == 0
                 || gen.sem_lit_fits(want, lit.const_bits) == 0) { return 0; }
         }
@@ -144,7 +144,7 @@ fn ast_ir_call_reserve(out *AstIRCalls, need_calls int, need_args int,
 fn ast_ir_call_append(out *AstIRCalls, base *AstExpr,
     values *ir.IRCallArg, count int) int {
     let gs *gen.GenState = gen.G();
-    let suffix_len int = ast_ir_call_has_suffix(base) != 0 ? gs.c_sym_sfx_len : 0;
+    let suffix_len int = ast_ir_call_has_suffix(base) != 0 ? gs.task.c_sym_sfx_len : 0;
     let prefix_len int = gen.tg_darwin() != 0 ? 1 : 0;
     let name_len int = prefix_len + base.sym_name_len + suffix_len;
     if (ast_ir_call_reserve(out, out.call_count + 1,
@@ -154,7 +154,7 @@ fn ast_ir_call_append(out *AstIRCalls, base *AstExpr,
     out.calls[id].symbol_len = name_len;
     out.calls[id].arg_first = out.arg_count;
     out.calls[id].arg_count = count;
-    out.calls[id].abi = gs.t_sig_abi[gs.t_types[base.sym_type_id].sub];
+    out.calls[id].abi = gs.task.t_sig_abi[gs.task.t_types[base.sym_type_id].sub];
     out.calls[id].callee_value = -1;
     out.calls[id].signature_type = -1;
     if (prefix_len != 0) {
@@ -163,13 +163,13 @@ fn ast_ir_call_append(out *AstIRCalls, base *AstExpr,
     }
     let i int = 0;
     for i < base.sym_name_len {
-        out.symbols[out.symbol_size] = gs.np_data[base.sym_name_off + i];
+        out.symbols[out.symbol_size] = gs.task.np_data[base.sym_name_off + i];
         out.symbol_size += 1;
         i += 1;
     }
     i = 0;
     for i < suffix_len {
-        out.symbols[out.symbol_size] = gs.np_data[gs.c_sym_sfx_off + i];
+        out.symbols[out.symbol_size] = gs.task.np_data[gs.task.c_sym_sfx_off + i];
         out.symbol_size += 1;
         i += 1;
     }
@@ -204,8 +204,8 @@ fn ast_ir_lower_call_expr(b *AstIRBuilder, ctx *AstFunctionContext,
     let gs *gen.GenState = gen.G();
     let node AstExpr = ast_expr_nodes[expr_id];
     let base *AstExpr = &ast_expr_nodes[node.child0];
-    let sig int = gs.t_types[base.sym_type_id].sub;
-    let count int = gs.t_sig_np[sig];
+    let sig int = gs.task.t_types[base.sym_type_id].sub;
+    let count int = gs.task.t_sig_np[sig];
     let inline_values [8]ir.IRCallArg;
     let values *ir.IRCallArg = &inline_values[0];
     let heap_values int = 0;
@@ -226,7 +226,7 @@ fn ast_ir_lower_call_expr(b *AstIRBuilder, ctx *AstFunctionContext,
     // 支持子集内，整体回退旧发射器（避免静默算错）。
     let ai int = 0;
     for ai < count {
-        let want int = ast_ir_type(gs.t_sig_params[gs.t_sig_first[sig] + ai]);
+        let want int = ast_ir_type(gs.task.t_sig_params[gs.task.t_sig_first[sig] + ai]);
         if (want < 0) {
             if (heap_values != 0) { free(values); }
             return -2;

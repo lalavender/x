@@ -54,10 +54,13 @@ def artifact_root(project):
 
 
 def backend_text_files(project):
-    """列出当前后端保留的模块文本（LLVM IR 或旧后端汇编）。"""
+    """列出当前后端保留的模块文本（LLVM IR 或旧后端汇编）。
+
+    旧后端 RS3b 起按文件对象布局 asm/<tag>/<stem>.s，递归收集。
+    """
     if COMPILER_BACKEND == "llvm":
         return sorted((artifact_root(project) / "llvm").glob("*.ll"))
-    return sorted((artifact_root(project) / "asm").glob("*.s"))
+    return sorted((artifact_root(project) / "asm").rglob("*.s"))
 
 
 def validate_llvm_stats(proc):
@@ -1463,7 +1466,7 @@ def main():
                 attr_iface = iface.read_text() if iface.exists() else ""
                 host_asm = backend_text_files(dst / "host")
                 main_text = next((path.read_text() for path in host_asm
-                                  if "example_externabs_host-main" in path.name), "")
+                                  if "example_externabs_host-main" in str(path)), "")
                 if COMPILER_BACKEND == "llvm":
                     stop_call = 'call void @"stop__example_externabs_lib__lib_'
                     stop_pos = main_text.find(stop_call)

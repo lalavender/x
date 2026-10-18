@@ -43,3 +43,8 @@ LL9L 后 Linux/x86_64 使用内嵌 lld 完成最终链接；尚未接入 lld 的
 详见[替换设计](../03-design/yh-LLVM后端替换设计.md)、
 [问题清单](../02-plan/yh-LLVM后端替换问题清单.md)、
 [实施方案](../02-plan/yh-LLVM后端替换实施方案.md)。
+
+2026-10-19 F2 方案细化：[macOS/ARM64 接入设计](../03-design/yh-macOS-LLVM后端接入设计.md)、
+[F2 分片计划](../02-plan/yh-macOS-LLVM后端接入实施方案.md)。用户确认先用现有 Mac
+种子打通原生 LLVM，再验收 Linux/x64 交叉引导；代码尚未实施，既有平台顺序、
+LL11/R2b/R2c 默认切换与种子门不变。

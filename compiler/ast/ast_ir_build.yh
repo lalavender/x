@@ -1234,40 +1234,40 @@ fn ast_ir_lower_expr(b *AstIRBuilder, ctx *AstFunctionContext,
 fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     compiler_salt u64, asm_shift *int) int {
     let gs *gen.GenState = gen.G();
-    gs.c_ir_reject_reason = 1;
+    gs.task.c_ir_reject_reason = 1;
     if (ctx.decl_row < 0 || ctx.decl_row >= ast_decl_count) { return 0; }
     let decl *AstDecl = &ast_decl_nodes[ctx.decl_row];
     if (decl.kind != gen.TK_FN || decl.body_stmt < ctx.stmt_first
         || decl.body_stmt >= ctx.stmt_after || decl.sym_id < 0
-        || decl.sym_id >= gs.c_sym_n || decl.type_id < 0
-        || decl.type_id >= gs.t_type_n) {
+        || decl.sym_id >= gs.task.c_sym_n || decl.type_id < 0
+        || decl.type_id >= gs.task.t_type_n) {
         return 0;
     }
-    let fn_type gen.CType = gs.t_types[decl.type_id];
-    gs.c_ir_reject_reason = 2;
-    if (fn_type.kind != gen.TY_FN || fn_type.sub < 0 || fn_type.sub >= gs.t_sig_n) {
+    let fn_type gen.CType = gs.task.t_types[decl.type_id];
+    gs.task.c_ir_reject_reason = 2;
+    if (fn_type.kind != gen.TY_FN || fn_type.sub < 0 || fn_type.sub >= gs.task.t_sig_n) {
         return 0;
     }
     let sig int = fn_type.sub;
-    gs.c_ir_reject_reason = 3;
+    gs.task.c_ir_reject_reason = 3;
     if (ast_ir_bindings_supported(ctx, sig) == 0) {
         return 0;
     }
-    let param_count int = gs.t_sig_np[sig];
+    let param_count int = gs.task.t_sig_np[sig];
     let binding_count int = ctx.binding_after - ctx.binding_first;
     if (binding_count < param_count) { return 0; }
-    let ret_type int = ast_ir_type(gs.t_sig_ret[sig]);
-    gs.c_ir_reject_reason = 4;
+    let ret_type int = ast_ir_type(gs.task.t_sig_ret[sig]);
+    gs.task.c_ir_reject_reason = 4;
     let is_void_ret int = 0;
     if (ret_type < 0) {
         // void 函数使用固定类型表下标 0（IR_TY_VOID）；其余不可映射类型仍拒绝。
-        if (ast_ir_void_type(gs.t_sig_ret[sig]) == 0) { return 0; }
+        if (ast_ir_void_type(gs.task.t_sig_ret[sig]) == 0) { return 0; }
         is_void_ret = 1;
         ret_type = ir.IR_TY_VOID;
     }
 
     let body AstStmt = ast_stmt_nodes[decl.body_stmt];
-    gs.c_ir_reject_reason = 5;
+    gs.task.c_ir_reject_reason = 5;
     if (body.kind != AST_STMT_BLOCK) { return 0; }
 
     let cache_key u64 = ast_ir_cache_key(ctx, decl, sig, ret_type, compiler_salt);
@@ -1286,14 +1286,14 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
         cached.blocks = 0;
         let cache_hit int = ast_ir_cache_read(gen.arr_cstr(cache_path), cache_key, &cached);
         if (cache_hit != 0
-            && cached.ret_type == ret_type && cached.abi == gs.t_sig_abi[sig]) {
-            let flags int = gs.c_syms[decl.sym_id].flags;
+            && cached.ret_type == ret_type && cached.abi == gs.task.t_sig_abi[sig]) {
+            let flags int = gs.task.c_syms[decl.sym_id].flags;
             if ((flags & gen.F_INLINE) != 0 && (flags & gen.F_PUB) == 0
                 && ast_ir_inline_register(decl.sym_id, &cached) != 0) {
                 ir.ir_function_release(&cached);
                 return gen.fail("inline SSA 候选登记失败");
             }
-            if (gs.c_check_only == 0) {
+            if (gs.task.c_check_only == 0) {
                 let delta int = 0;
                 let emitted int = backend.arm64_emit_replace(&cached,
                     decl.sym_id, ctx.asm_first + asm_shift[0],
@@ -1371,7 +1371,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     ast_ir_b_enter_block(&b, entry);
     let pi int = 0;
     for pi < param_count {
-        let type_id int = ast_ir_type(gs.t_sig_params[gs.t_sig_first[sig] + pi]);
+        let type_id int = ast_ir_type(gs.task.t_sig_params[gs.task.t_sig_first[sig] + pi]);
         let param_value int = ast_ir_b_add_inst(&b, ir.IR_OP_PARAM, type_id,
             -1, -1, pi.to_type(i64));
         if (type_id < 0 || param_value < 0) {
@@ -1381,7 +1381,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
         b.local_values[pi] = param_value;
         pi += 1;
     }
-    gs.c_ir_reject_reason = 6;
+    gs.task.c_ir_reject_reason = 6;
     let status int = ast_ir_b_stmts(&b, ctx, body.first_child);
     if (status == -2) {
         ast_ir_b_release(&b);
@@ -1394,7 +1394,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
     if (status == 1) {
         // 函数尾贯穿：void 允许隐式结束；非 void 贯穿说明是回退形态。
         if (is_void_ret == 0) {
-            gs.c_ir_reject_reason = 7;
+            gs.task.c_ir_reject_reason = 7;
             ast_ir_b_release(&b);
             return 0;
         }
@@ -1403,7 +1403,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
 
 
     let f ir.IRFunction;
-    f.abi = gs.t_sig_abi[sig];
+    f.abi = gs.task.t_sig_abi[sig];
     f.target_id = gs.c_dialect + 1;
     f.ret_type = ret_type;
     f.types = &types[0];
@@ -1438,7 +1438,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
         return inline_status;
     }
     let verified int = ir.ir_simplify(&f);
-    let fn_flags int = gs.c_syms[decl.sym_id].flags;
+    let fn_flags int = gs.task.c_syms[decl.sym_id].flags;
     if (verified == 0 && (fn_flags & gen.F_INLINE) != 0
         && (fn_flags & gen.F_PUB) == 0
         && ast_ir_inline_register(decl.sym_id, &f) != 0) {
@@ -1446,7 +1446,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
         ast_ir_b_release(&b);
         return gen.fail("inline SSA 候选登记失败");
     }
-    if (verified == 0 && gs.c_check_only == 0) {
+    if (verified == 0 && gs.task.c_check_only == 0) {
         let delta int = 0;
         let emitted int = backend.arm64_emit_replace(&f, decl.sym_id,
             ctx.asm_first + asm_shift[0], ctx.asm_after + asm_shift[0],
@@ -1465,7 +1465,7 @@ fn ast_ir_lower_function(ctx *AstFunctionContext, cache_dir *char,
         ast_ir_release_built(&f);
         ast_ir_b_release(&b);
         return gen.fail_path("内部错误：SSA 函数校验失败：",
-            gen.arr_cstr(&gs.np_data[gs.c_syms[decl.sym_id].name_off]));
+            gen.arr_cstr(&gs.task.np_data[gs.task.c_syms[decl.sym_id].name_off]));
     }
     ast_ir_release_built(&f);
     ast_ir_b_release(&b);

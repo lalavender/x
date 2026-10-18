@@ -93,14 +93,24 @@ def main() -> int:
             env[f"YH_LINK_CACHE_REAL_{tool_name.upper()}"] = tool_path
         output = work / "program"
 
+        # RS3b 按文件对象：冷构建汇编次数 = 每源文件一个 .s + 每模块一个
+        # 运行时桩对象 <tag>.stub.s。
+        sources = list(project.rglob("*.yh"))
+        modules = {
+            re.search(r"(?m)^\s*module\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+                      path.read_text(encoding="utf-8")).group(1)
+            for path in sources
+        }
+        expected_asm = len(sources) + len(modules)
+
         cold = run_build(compiler, project, output, env)
         if cold.returncode != 0:
             print(f"冷构建失败：\n{cold.stdout}{cold.stderr}")
             return 1
         first = read_calls(log)
-        if n_assemble(first) != 2 or n_link(first) != 1 or \
-                stat_counts(cold) != (2, 1, 1):
-            print(f"冷构建调用次数不符：{first}")
+        if n_assemble(first) != expected_asm or n_link(first) != 1 or \
+                stat_counts(cold) != (expected_asm, 1, 1):
+            print(f"冷构建调用次数不符（期望 {expected_asm} 次汇编）：{first}")
             return 1
         if subprocess.run([str(output)], check=False).returncode != 42:
             print("冷构建程序结果不符")
@@ -112,7 +122,7 @@ def main() -> int:
             print(f"热构建未复用对象/链接结果：\n{hot.stdout}{hot.stderr}\n{second}")
             return 1
 
-        object_file = next((project / ".build" / "obj").glob("*.o"))
+        object_file = next((project / ".build" / "obj").rglob("*.o"))
         object_file.write_bytes(b"corrupt object\n")
         repaired_object = run_build(compiler, project, output, env)
         third = read_calls(log)

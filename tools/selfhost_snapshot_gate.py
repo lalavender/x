@@ -24,8 +24,51 @@ def default_seed(root: Path, system=None, machine=None) -> Path:
     return root / "bin" / f"yh-{system.lower()}-{architecture}"
 
 
+def _clean_component(text: str) -> str:
+    """与编译器 mb_mod_tag/mb_asm_stem 同一套清洗：非 [A-Za-z0-9_] → '_'。"""
+    return re.sub(r"[^A-Za-z0-9_]", "_", text)
+
+
+def _host_platform():
+    """返回 (system, arch)，arch 与 default_seed 的命名一致（arm64/x64）。"""
+    machine = platform.machine()
+    if machine in ("aarch64", "arm64"):
+        return platform.system().lower(), "arm64"
+    if machine in ("x86_64", "amd64"):
+        return platform.system().lower(), "x64"
+    return platform.system().lower(), machine.lower()
+
+
+_PLATFORM_WORDS = {"darwin", "linux", "arm64", "x64"}
+
+
+def _matches_platform(stem: str, system: str, arch: str) -> bool:
+    """源文件名尾部的平台限定（<base>.<system>[.<arch>].yh）是否匹配宿主。
+
+    与编译器项目扫描一致：clock.darwin.yh 只在 darwin 编译，
+    clock.linux.arm64.yh 只在 linux/arm64 编译；无平台限定的文件全平台编译。
+    """
+    parts = stem.split(".")
+    i = len(parts)
+    while i > 1 and parts[i - 1] in _PLATFORM_WORDS:
+        i -= 1
+    for word in parts[i:]:
+        if word in ("darwin", "linux") and word != system:
+            return False
+        if word in ("arm64", "x64") and word != arch:
+            return False
+    return True
+
+
 def expected_artifacts(project: Path):
-    """按 project.toml 的本地项目边界与显式 path 依赖发现完整产物集。"""
+    """按 project.toml 的本地项目边界与显式 path 依赖发现完整产物集。
+
+    RS3b 按文件对象布局：每个源文件一个 asm/<tag>/<stem>.s（stem 为去 .yh
+    基名清洗、重名加 _2/_3、避开保留名 <tag>.stub），外加运行时桩对象
+    asm/<tag>/<tag>.stub.s；接口仍为扁平 iface/<tag>.s.i 与 iface/<tag>.s.ct。
+    源文件顺序取 sorted(rglob)，与项目扫描序一致（stem 冲突时的去重序依赖
+    该假设；仓库语料无冲突，仅为鲁棒性保留）。
+    """
     def collect(current: Path, active: set[Path]):
         current = current.resolve()
         if current in active:
@@ -42,9 +85,12 @@ def expected_artifacts(project: Path):
             for nested in current.rglob("project.toml")
             if nested.parent.resolve() != current
         }
-        modules = set()
+        module_sources: dict[str, list[Path]] = {}
+        host_system, host_arch = _host_platform()
         for source in sorted(current.rglob("*.yh")):
             if any(parent in source.resolve().parents for parent in nested_projects):
+                continue
+            if not _matches_platform(source.stem, host_system, host_arch):
                 continue
             match = re.search(
                 r"(?m)^\s*module\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
@@ -52,16 +98,28 @@ def expected_artifacts(project: Path):
             )
             if not match:
                 raise ValueError(f"源码未声明 module：{source}")
-            modules.add(match.group(1))
-        if not modules:
+            module_sources.setdefault(match.group(1), []).append(source)
+        if not module_sources:
             raise ValueError(f"项目没有 .yh 模块：{current}")
 
-        artifacts = {
-            f"{directory}/{name.group(1)}-{module}{suffix}"
-            for module in modules
-            for directory, suffix in (("asm", ".s"), ("iface", ".s.i"),
-                                      ("iface", ".s.ct"))
-        }
+        tag_prefix = _clean_component(name.group(1))
+        artifacts = set()
+        for module, sources in module_sources.items():
+            tag = f"{tag_prefix}-{_clean_component(module)}"
+            reserved = f"{tag}.stub"
+            seen: set[str] = set()
+            for source in sources:
+                base = _clean_component(source.stem)[:120] or "_"
+                k = 2
+                cand = base
+                while cand in seen or cand == reserved:
+                    k += 1
+                    cand = f"{base}_{k - 1}"
+                seen.add(cand)
+                artifacts.add(f"asm/{tag}/{cand}.s")
+            artifacts.add(f"asm/{tag}/{reserved}.s")
+            artifacts.add(f"iface/{tag}.s.i")
+            artifacts.add(f"iface/{tag}.s.ct")
         dependencies = re.search(
             r"(?ms)^\[dependencies\]\s*(.*?)(?=^\[|\Z)", manifest
         )
@@ -78,11 +136,27 @@ def expected_artifacts(project: Path):
 
 
 def expected_llvm_artifacts(project: Path):
-    """把同一项目模块集合映射为 LLVM 文本与接口快照路径。"""
+    """把同一项目模块集合映射为 LLVM 文本与接口快照路径（llvm/<tag>.ll）。"""
     result = set()
     for path in expected_artifacts(project):
-        if path.startswith("asm/") and path.endswith(".s"):
-            result.add("llvm/" + path[len("asm/"):-len(".s")] + ".ll")
+        if path.startswith("asm/") and path.endswith(".stub.s"):
+            tag = path[len("asm/"):-len(".stub.s")].split("/")[0]
+            result.add(f"llvm/{tag}.ll")
+        elif not path.startswith("asm/"):
+            result.add(path)
+    return result
+
+
+def expected_seed_flat_artifacts(project: Path):
+    """滚动种子（RS3b 之前）的扁平 asm 布局：asm/<tag>.s 每模块一个，
+    无按文件对象与运行时桩对象。仅用于种子首代（cc2）的迁移兼容判定。"""
+    result = set()
+    for path in expected_artifacts(project):
+        if path.startswith("asm/"):
+            if path.endswith(".stub.s"):
+                continue
+            parts = path.split("/")
+            result.add(f"asm/{parts[1]}.s")
         else:
             result.add(path)
     return result
@@ -125,9 +199,10 @@ def save_snapshot(build_dir: Path, snapshot_dir: Path):
         source_dir = build_dir / directory
         if not source_dir.is_dir():
             continue
-        for source in sorted(source_dir.glob("*" + suffix)):
+        # RS3b：asm/<tag>/<stem>.s 按模块分子目录，rglob 递归收集。
+        for source in sorted(source_dir.rglob("*" + suffix)):
             if source.is_file():
-                relative = f"{directory}/{source.name}"
+                relative = f"{directory}/{source.relative_to(source_dir)}"
                 contents = source.read_bytes()
                 destination = snapshot_dir / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -191,8 +266,10 @@ def snapshot_errors(snapshots, expected):
         actual = set(contents)
         if not actual:
             errors.append(f"{name} 快照为空")
+        # 汇编文件允许为空（纯类型/常量声明的源文件无任何发射内容）；
+        # 接口文件承载绑定数据，必须非空。
         for path in sorted(actual):
-            if not contents[path]:
+            if not contents[path] and not path.startswith("asm/"):
                 errors.append(f"{name} 产物为空：{path}")
         missing = expected - actual
         extra = actual - expected
@@ -263,7 +340,11 @@ def self_test() -> bool:
         (nested / "project.toml").write_text('[project]\nname = "nested"\n')
         (nested / "ir.yh").write_text("module ir;\n")
         assert expected_artifacts(project) == {
-            "asm/root-main.s", "iface/root-main.s.i", "iface/root-main.s.ct"
+            "asm/root-main/main.s", "asm/root-main/root-main.stub.s",
+            "iface/root-main.s.i", "iface/root-main.s.ct",
+        }
+        assert expected_llvm_artifacts(project) == {
+            "llvm/root-main.ll", "iface/root-main.s.i", "iface/root-main.s.ct",
         }
     with tempfile.TemporaryDirectory(dir=str(tmp_root)) as directory:
         project = Path(directory)
@@ -276,9 +357,14 @@ def self_test() -> bool:
         (dependency / "project.toml").write_text('[project]\nname = "nested"\n')
         (dependency / "ir.yh").write_text("module ir;\n")
         assert expected_artifacts(project) == {
-            "asm/root-main.s", "iface/root-main.s.i",
-            "iface/root-main.s.ct", "asm/nested-ir.s", "iface/nested-ir.s.i",
-            "iface/nested-ir.s.ct",
+            "asm/root-main/main.s", "asm/root-main/root-main.stub.s",
+            "iface/root-main.s.i", "iface/root-main.s.ct",
+            "asm/nested-ir/ir.s", "asm/nested-ir/nested-ir.stub.s",
+            "iface/nested-ir.s.i", "iface/nested-ir.s.ct",
+        }
+        assert expected_llvm_artifacts(project) == {
+            "llvm/root-main.ll", "iface/root-main.s.i", "iface/root-main.s.ct",
+            "llvm/nested-ir.ll", "iface/nested-ir.s.i", "iface/nested-ir.s.ct",
         }
     with tempfile.TemporaryDirectory(dir=str(tmp_root)) as directory:
         seed = Path(directory) / "yh-test"

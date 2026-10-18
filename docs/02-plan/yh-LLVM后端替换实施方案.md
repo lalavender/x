@@ -698,7 +698,7 @@ A/B/C/D 均为 ELF machine=62，O0/O2 B→C、C→D 的 24 个 `.ll/.s.i/.s.ct` 
 | 阶段 | 范围与主要源码落点 | 五层验收重点 |
 | --- | --- | --- |
 | F1 Linux/AArch64 | 复用首期公共 LLVM 路径，接 AAPCS64/HFA、ARM64 syscall/运行时、接口与现有种子迁移 | ARM64 对象→链接→标准库运行→原生编译器→原生种子/固定点；完成后才退役旧 ARM64 路径 |
-| F2 macOS/ARM64 | Apple ABI、SDK/sysroot、目标版本、现有 Darwin OS 桥、链接与签名 | Mach-O 对象、系统库/签名、原生语料与自举；工具版本与 SDK 身份进入缓存 |
+| F2 macOS/ARM64 | Apple ABI、SDK/sysroot、目标版本、现有 Darwin OS 桥、链接与签名；[详细切片](yh-macOS-LLVM后端接入实施方案.md) | Mach-O 对象、系统库/签名、原生语料与自举；先 Mac 原生、后 Linux/x64 交叉引导验收，工具版本与 SDK 身份进入缓存 |
 | F3 Windows/x86_64 | MSVC ABI/LLP64，新增 Windows OS 文件/目录/Unicode/进程/时间/内存桥、COFF/PE 驱动 | SDK/导入库/启动入口/辅助符号；Windows 原生构建及线程/进程调度，不以 WSL 代替 |
 | F4 macOS/x86_64、Windows/ARM64 | 对应 target ABI、目标库、OS 适配和各自原生种子 | 每格单独完成运行/自举；两种 macOS 产物全过后再考虑 universal binary |
 
