@@ -4,6 +4,21 @@
 与 `tests/yh/`（词法/语法语料校验，见其 `check.py`）互补：那里管"能解析"，
 这里管"算得对"。
 
+## 平台筛选
+
+用例分**共有**与**平台专属**两类：
+
+- 没有 `// platform:` 指令的是共有用例，所有平台都跑；
+- 带指令的只在匹配的运行平台执行，其余记 `SKIP`（不计失败、不影响退出码）：
+  `// platform: linux-x64`、`// platform: darwin`、`// platform: linux darwin-arm64`。
+  tag 形式为 `<os>` 或 `<os>-<arch>`，`<os>` 匹配该 OS 的所有架构。
+
+`--cross` 模式的运行平台按 Linux/aarch64 计（产物是 aarch64 ELF，在容器内运行）。
+这样 `make test` 在任何宿主只跑「共有 + 本平台」的用例，不需要为别的平台
+准备运行环境。当前平台专属用例只有 `run/llvm-linux-x64-host.yh`（Linux syscall
+探针）；新增平台专属语料时补一行 `// platform:` 即可，不要改文件名前缀
+（数字前缀与历史引用绑定）。
+
 2026-10-09 全局聚合常量在编译期建模（`comptime/ct_global_agg.yh`）：正文里
 下标/字段/嵌套字段/`len`/`for-in`/按值传参读全局 `const` 数组与结构体（run/161），
 原 fail/151 的下标诊断形态随交付消失、按惯例升级为 run/162，顶层命名聚合实参

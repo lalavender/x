@@ -2,6 +2,22 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-18 测试平台筛选：共有用例 + 平台专属用例
+
+- `tests/yh-run/check.py` 新增 `// platform: <tag>` 头部指令：无指令为共有用例
+  （所有平台跑），带指令只在匹配的运行平台执行、其余记 `SKIP` 不计失败；
+  tag 为 `<os>` 或 `<os>-<arch>`，`<os>` 匹配该 OS 的所有架构，`--cross` 按
+  Linux/aarch64 计。任务表加第六项 `skip_reason`，不匹配的用例不建产物目录。
+- `run/llvm-linux-x64-host.yh` 标 `// platform: linux`（正文对 arm64/x64 都有
+  syscall 号分支，按 OS 级声明；文件名保留历史 x64 标记）。
+- `make test` 在 Darwin/arm64 上退出 0：三层全过、运行语料 **342/343 + 跳过 1**，
+  跳过行为 `SKIP run/llvm-linux-x64-host.yh —— 仅适用于 linux，当前 darwin-arm64`。
+  汇总模式标签不再硬编码 `Darwin Mach-O`，改为实际运行平台。
+- 复查 `tests/yh/`（纯语法）、`tests/modules/check.py`（只 `--syntax-check`）、
+  `tests/modules/build-check.py`（已按 `sys.platform` 自适应 native/cross 断言）、
+  `tests/selfhost/llvm-*.py`（由 `test-llvm` 的 Linux/x86_64 断言隔离），均无需再加筛选。
+- 详见 [完成记录](01-finished/yh-测试平台筛选-2026-10-18.md)。
+
 ## 2026-10-18 macOS 种子补代与 `yh-<平台>-<架构>` 命名
 
 - macOS 入库种子 `b123acbe…`（10-13 中间代）编不了 llvm 分支当前源码。按

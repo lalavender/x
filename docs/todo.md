@@ -483,6 +483,14 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   `test-llvm` 在 `Makefile` 里硬性要求 Linux/x86_64。这两条是平台能力边界，
   不是种子问题；要支持需发布 Darwin 版固定 SDK 与对应链接/签名路径（归 F2）。
 
+- [x] **语料平台筛选（2026-10-18 完成）**：`tests/yh-run/check.py` 新增
+  `// platform: <tag>` 头部指令——无指令为共有用例（所有平台跑），带指令只在匹配
+  的运行平台执行、其余记 `SKIP` 不计失败；tag 为 `<os>` 或 `<os>-<arch>`，
+  `<os>` 匹配该 OS 的所有架构，`--cross` 按 Linux/aarch64 计。
+  `run/llvm-linux-x64-host.yh` 已标 `// platform: linux`（正文对两个架构都有
+  syscall 号分支）。`make test` 在 macOS 上因此退出 0（342/343 + 1 跳过），
+  不再需要为别的平台准备运行环境。见 [完成记录](01-finished/yh-测试平台筛选-2026-10-18.md)。
+
 16 项代码/架构问题均未关闭；已完成的本轮文档交付记入 finish.md。
 
 ### 玉衡 VS Code 扩展

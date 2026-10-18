@@ -10,9 +10,16 @@
                // exit: N                     （期望退出码，缺省 0）
                // stdin-hex: <十六进制>        （可选，注入进程标准输入）
                // argv: a b c                 （可选，附加命令行参数）
+               // platform: linux-x64         （可选，平台筛选；不匹配记 SKIP）
     fail/  编译必须失败。首行写 `// fail: 原因` 说明预期拒绝的理由；
            编译器若因信号崩溃（ICE）同样算 FAIL 并保留诊断。
     pass/  编译必须成功，不运行。
+
+平台筛选：`// platform:` 后跟空格分隔的若干 tag（`linux`、`darwin`、
+`linux-x64`、`darwin-arm64` 等），`<os>` 匹配该 OS 的所有架构。
+没有该指令的用例是**共有用例**，所有平台都跑；带指令的只在匹配的
+运行平台执行，其余记 SKIP 且不算失败。`--cross` 的运行平台按
+Linux/aarch64 计（产物是 aarch64 ELF，在容器内运行）。
 
 产物统一放 <workdir>（缺省 tmp/yh-run-work，在仓库 tmp/ 下，已被
 gitignore），按 run/fail/pass 分组落到子目录；每轮校验前用 --workdir
@@ -36,6 +43,7 @@ docker 或 sysroot 不可用时全部打印 SKIP，不算失败。
 import argparse
 import concurrent.futures
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -65,6 +73,10 @@ FAIL_CONTAINS_RE = re.compile(r"^//\s*fail-contains:\s?(.*)$")
 # 标准输入注入（十六进制字节串，可为空）与附加命令行参数。
 STDIN_HEX_RE = re.compile(r"^//\s*stdin-hex:\s?([0-9a-fA-F]*)\s*$")
 ARGV_RE = re.compile(r"^//\s*argv:\s?(.*)$")
+# 平台指令：`// platform: linux-x64 darwin` —— 用例只在运行平台匹配时执行，
+# 否则 SKIP（不算失败）。没有该指令 = 通用用例，所有平台都跑。
+# tag 形式为 `<os>` 或 `<os>-<arch>`，os ∈ {linux, darwin}，arch ∈ {arm64, x64}。
+PLATFORM_RE = re.compile(r"^//\s*platform:\s?(.*)$")
 # asm-symbols-safe：要求 --emit-asm 输出里不出现与 AArch64 寄存器同名的符号。
 # GNU as 容忍 `bl w12`，clang 的集成汇编器直接拒绝，因此这条约束只能在发射
 # 文本上校验（运行结果与退出码都看不出来）。
@@ -197,6 +209,55 @@ def parse_stdin_argv(path):
         if m:
             argv_extra = m.group(1).split()
     return stdin_bytes, argv_extra
+
+
+# 架构别名：uname/platform 的写法归一到语料 tag 用的 arm64 / x64。
+ARCH_ALIASES = {
+    "aarch64": "arm64", "arm64": "arm64",
+    "x86_64": "x64", "amd64": "x64", "x64": "x64",
+}
+
+
+def host_platform_tag(cross=False):
+    """本次用例的实际运行平台标签（`<os>-<arch>`）。
+
+    交叉模式（--cross）的产物是 Linux aarch64 ELF 并在容器内运行，因此
+    运行平台是 linux-arm64，而不是编译宿主。这样 `// platform: linux-x64`
+    这类按目标写的语料在交叉模式下也能正确判定。
+    """
+    if cross:
+        return "linux-arm64"
+    system = platform.system().lower()
+    machine = ARCH_ALIASES.get(platform.machine().lower(), platform.machine().lower())
+    return f"{system}-{machine}"
+
+
+def parse_platform_requirement(path):
+    """读取用例的 `// platform:` 指令，返回 tag 列表；无指令返回空列表。
+
+    多个 tag 用空格分隔，任一匹配即运行（例如 `linux darwin-arm64`）。
+    """
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = PLATFORM_RE.match(line)
+        if match:
+            return match.group(1).split()
+    return []
+
+
+def platform_matches(required, actual):
+    """判断运行平台是否满足 tag 列表。
+
+    `<os>` 匹配该 OS 的全部架构（`linux` 匹配 `linux-x64`/`linux-arm64`）；
+    `<os>-<arch>` 精确匹配。required 为空表示通用用例，总是匹配。
+    """
+    if not required:
+        return True
+    for tag in required:
+        if tag == actual:
+            return True
+        if "-" not in tag and actual.startswith(tag + "-"):
+            return True
+    return False
 
 
 def run_program(argv, timeout=RUN_TIMEOUT, input_bytes=None):
@@ -420,27 +481,36 @@ def main():
     ]
 
     # 每个用例一个独立产物路径（组名 + 文件名），并发执行时互不覆盖。
+    # 第六项 skip_reason 非空表示平台不匹配：不执行，直接记 SKIP（不计失败）。
+    actual_platform = host_platform_tag(args.cross)
     tasks = []
     for name, directory, checker in groups:
         for path in list_cases(directory):
             rel = f"{name}/{path.name}"
             if not case_allowed(rel):
                 continue
+            required = parse_platform_requirement(path)
+            skip_reason = ""
+            if not platform_matches(required, actual_platform):
+                skip_reason = f"仅适用于 {'/'.join(required)}，当前 {actual_platform}"
             out = WORK / name / (f"{path.stem}-linux" if args.cross else path.stem)
-            tasks.append((name, rel, path, out, checker))
+            tasks.append((name, rel, path, out, checker, skip_reason))
 
     def run_task(task):
-        """跑一个用例，返回汇总用的结果行。"""
-        name, rel, path, out, checker = task
+        """跑一个用例，返回汇总用的结果行；平台不匹配的直接 SKIP。"""
+        name, rel, path, out, checker, skip_reason = task
+        if skip_reason:
+            return (name, rel, "SKIP", skip_reason)
         status, detail = checker(path, args.cross, out)
         return (name, rel, status, detail)
 
     if global_skip:
         results = [(name, rel, "SKIP", global_skip)
-                   for name, rel, _, _, _ in tasks]
+                   for name, rel, _, _, _, _ in tasks]
     else:
-        for _, _, _, out, _ in tasks:
-            out.parent.mkdir(parents=True, exist_ok=True)
+        for _, _, _, out, _, skip_reason in tasks:
+            if not skip_reason:
+                out.parent.mkdir(parents=True, exist_ok=True)
         if jobs == 1:
             results = [run_task(task) for task in tasks]
         else:
@@ -472,7 +542,7 @@ def main():
         print(f"{name}: 通过 {n_pass}/{len(rows)}"
               + (f"，失败 {n_fail}" if n_fail else "")
               + (f"，跳过 {n_skip}" if n_skip else ""))
-    mode = "交叉 ELF" if args.cross else "Darwin Mach-O"
+    mode = f"交叉 ELF（{actual_platform}）" if args.cross else f"{actual_platform} 原生"
     if args.backend or args.target or args.opt_level:
         mode = f"{args.backend or '默认后端'} / {args.target or '默认目标'} / " \
             + (f"O{args.opt_level}" if args.opt_level else "默认优化级别")

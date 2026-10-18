@@ -92,6 +92,11 @@ make selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 
 make seed               # 滚种子（仅在全绿后）
 ```
 
+`make test` 只跑「共有 + 本平台」的用例：运行语料用头部指令 `// platform: <tag>`
+标注平台专属项（`linux`、`linux-x64`、`darwin-arm64` 等，`<os>` 匹配该 OS 的
+所有架构），不匹配的记 `SKIP`、不算失败也不影响退出码；没有该指令的是共有用例。
+`make test-llvm` 是 Linux/x86_64 专属门，其他宿主会直接拒绝而不是降级运行。
+
 GitHub Actions（`.github/workflows/ci.yml`，手动 `workflow_dispatch` 或推送
 `arm64`/`main`）：`linux-arm64` 作业在 arm64 容器里跑第 2/3 层语料与
 `make selfhost-native`（第 1 层 ANTLR 需要 Java 与 jar 缓存，不在 CI 跑）；
