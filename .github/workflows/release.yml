@@ -89,19 +89,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      # x64 种子默认 LLVM；编译器自举链接需要固定 LLVM/lld/桥归档。
+      # x64 种子（seed-llvm-x64-2026-10-19）动态依赖 libxml2.so.16，
+      # Ubuntu 24.04 没有该 soname；这里沿用 CI 已验证的
+      # AArch64 种子 + QEMU 交叉构建，最终 D-O2 是可在 Ubuntu 运行的 x64 ELF。
       YH_LLVM_HOST: "1"
+      YH_LINK: /nonexistent
       LLVM_JOBS: "2"
+      QEMU_LD_PREFIX: /usr/aarch64-linux-gnu
       YHL_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: 安装构建工具
+      - name: 准备 QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: 安装交叉工具
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential python3
+          sudo apt-get install -y -qq build-essential python3 gcc-aarch64-linux-gnu
+          # qemu-user 的 -L 前缀映射 /lib/aarch64-linux-gnu。
+          sudo ln -sfn . /usr/aarch64-linux-gnu/lib/aarch64-linux-gnu
+          mkdir -p "$RUNNER_TEMP/yh-crossbin"
+          cat > "$RUNNER_TEMP/yh-crossbin/gcc" <<'EOF'
+          #!/bin/sh
+          exec aarch64-linux-gnu-gcc "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/yh-crossbin/gcc"
+          echo "$RUNNER_TEMP/yh-crossbin" >> "$GITHUB_PATH"
 
       # 与 ci.yml x64 作业同键；命中后固定 SDK 可离线使用。
       - name: 恢复固定 LLVM SDK 缓存
@@ -110,37 +128,28 @@ jobs:
           path: tmp/llvm-migration
           key: llvm-host-${{ runner.os }}-${{ hashFiles('vendor/llvm/sdk.lock.json', 'tools/llvm-sdk.py', 'tools/llvm-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp', 'compiler/llvm/lld_stub.cpp') }}
 
-      - name: 下载并校验 x86_64 种子
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+      - name: 构建 x86_64 D-O2
         run: |
-          mkdir -p bin
-          gh release download seed-llvm-x64-2026-10-19 \
-            --pattern 'yh-linux-x64*' --dir bin
-          # 固定住种子身份，避免发布链悄悄跟随可变资产。
-          echo "c6733eb2851fb0ed790879e52a5f90c599f07a4d887c69d5846e57c3b6accb3c  bin/yh-linux-x64" \
-            | sha256sum -c -
-          chmod +x bin/yh-linux-x64
-          file bin/yh-linux-x64
-
-      - name: make
-        run: make SEED="$PWD/bin/yh-linux-x64"
+          rm -rf /tmp/yh-release-x64
+          python3 tests/selfhost/llvm-selfhost.py \
+            --seed "$PWD/bin/yh-linux-arm64" --jobs 2 \
+            --workdir /tmp/yh-release-x64
 
       - name: 冒烟
         run: |
+          cp /tmp/yh-release-x64/candidates/yh-D-O2 out-yh
           cat > /tmp/smoke.yh <<'EOF'
           fn main() int {
               printf("hello, yh!\n");
               return 0;
           }
           EOF
-          ./yh /tmp/smoke.yh -o /tmp/smoke && /tmp/smoke
+          out-yh /tmp/smoke.yh -o /tmp/smoke && /tmp/smoke
 
       - name: 打包
         run: |
           mkdir -p out
-          cp yh out/
+          cp out-yh out/yh
           file out/yh | tee /tmp/file.txt
           grep -q 'x86-64' /tmp/file.txt
           TAG="${YHL_RELEASE_TAG}"
