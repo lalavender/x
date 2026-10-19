@@ -37,6 +37,10 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
   **2026-10-19（F2-10）**：macOS/ARM64 默认后端已切 LLVM（Darwin 种子
   `bin/yh-darwin-arm64` 含固定桥）；Linux/ARM64 仍为 legacy，等 F1。
   性能项（RS2/RS3/R2c、20 轮对照）后置，不据此宣称首个完整 SSA 版本完成。
+  **Darwin SDK stub**：`compiler/darwin-sdk/` 随编译器分发（Zig 式，
+  SDK 26.4）；链接查找 `SDKROOT` → `YH_DARWIN_SDK` → 可执行文件附近 bundle →
+  原生 `xcrun`。C 源/libc++/目标包/frameworks 等遗留见
+  `docs/03-design/yh-Darwin交叉编译遗留边界.md`。
 - **本地/CI 分工（2026-10-19 用户决定）**：在 Linux 或 macOS 上开发，本地只需
   保证**本平台**门禁绿（`make test` + `make selfhost-native`；运行语料已按
   `// platform:` 头部指令筛选，平台专属门如 `make test-llvm` 在别的宿主会

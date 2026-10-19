@@ -119,6 +119,10 @@ def run(cmd, cwd=None, shim=False):
     语料检查、自解析等步骤必须保持原始 PATH，否则会把桥链接强加给语料程序。
     """
     environment = dict(os.environ)
+    if sys.platform == "darwin" and "YH_DARWIN_SDK" not in environment:
+        bundle = ROOT / "compiler/darwin-sdk"
+        if bundle.is_dir():
+            environment["YH_DARWIN_SDK"] = str(bundle)
     if shim and SHIM_DIR is not None:
         environment["PATH"] = str(SHIM_DIR) + os.pathsep + environment.get("PATH", "")
     if shim and SELFHOST_LLVM:

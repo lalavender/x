@@ -2,6 +2,23 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-19 自带 Darwin SDK stub（Zig 式交叉链接）
+
+- `compiler/darwin-sdk/` 增加聚合 `usr/lib/libSystem.tbd`（334KB，Apple SDK
+  26.4 TAPI，取自 Zig 0.16 `libc/darwin`）、`SDKSettings.json`（Version 26.4）
+  与 `manifest.json`（SHA-256/来源/许可说明）。
+- `compiler/cmd/darwin_link.yh` 查找顺序：`SDKROOT` → `YH_DARWIN_SDK` →
+  可执行文件附近 `darwin-sdk`/`compiler/darwin-sdk`/上层目录 → 原生 `xcrun`；
+  非 Darwin 交叉不再强制宿主 SDK。`tools/llvm-darwin-sdk-bundle.py` 支持
+  校验/从 Zig 或本机 SDK 重新生成（拒绝 SDK27 `arm64e.x1`）。
+- `tests/selfhost/llvm-darwin-bundled-sdk.py`：清空 SDKROOT、PATH 仅假工具
+  （无 xcrun/clang/ld），链接运行成功且 `LC_BUILD_VERSION sdk 26.4`；
+  显式 SDKROOT（26.5）覆盖生效；`make test-llvm-darwin` 20 项全绿。
+- 纯 `.yh` 程序交叉链接已不再依赖 Xcode/CLT SDK；C 源、libc++/Darwin 目标包、
+  frameworks/Objective-C、SDK 版本矩阵/许可仍见
+  [遗留边界](03-design/yh-Darwin交叉编译遗留边界.md)。
+- 详见[完成记录](01-finished/yh-DarwinSDK-bundle-2026-10-19.md)。
+
 ## 2026-10-19 macOS/ARM64 LLVM：F2 移植、默认切换与 Darwin 种子
 
 - **F2 移植**：按文件三方合并到 LL11（aa6e424）；上游已含的 RS1c/RS3b/LL11
@@ -14,7 +31,7 @@
   导入 malloc/free/memmove 与 C++ 符号）。
 - **默认门**：`tests/selfhost/llvm-darwin-default.py` 断言无 `--backend` 时
   emitted=checked、fallback=0、产物在 Darwin LLVM 目录、默认 asm/IR 正确。
-- **种子**：`bin/yh-darwin-arm64` 72MB（`fbd0dd19…`），Mach-O arm64、ad-hoc
+- **种子**：`bin/yh-darwin-arm64` 72MB（`2be836b7…`），Mach-O arm64、ad-hoc
   签名有效；新种子冷编、默认门、`make test`（347/348）、`make selfhost-native`、
   `test-llvm-darwin`（19 项）、`selfhost-llvm-darwin` 全部通过。
 - **后置**：20 轮性能、RS2/RS3/R2c、F2-9 交叉引导、macos-14 实跑。

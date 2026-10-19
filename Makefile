@@ -140,6 +140,9 @@ stage-yh: $(YH)
 ifeq ($(FAST_STAGE),1)
 	@mkdir -p "$(FAST_DIR)"
 	@cp -f "$(YH)" "$(YH_RUN).tmp" && mv -f "$(YH_RUN).tmp" "$(YH_RUN)"
+ifeq ($(HOST_SYSTEM),Darwin)
+	@ln -sfn "$(abspath compiler/darwin-sdk)" "$(FAST_DIR)/darwin-sdk"
+endif
 else
 	@:
 endif
@@ -148,6 +151,10 @@ endif
 # 因为 SEED_ARCH 随宿主架构而 SEED 可被显式覆盖（x86_64 宿主上默认种子里
 # 没有 x64 后端，必须显式用 bin/yh-linux-arm64，此时产物是 aarch64 ELF）。
 # Darwin/ARM64 只在本机有固定源码包/SDK 时自动接入；其他 Darwin 宿主不接入。
+# Darwin 测试/自举统一使用随编译器分发的 SDK stub；显式 SDKROOT 仍优先。
+ifeq ($(HOST_SYSTEM),Darwin)
+ export YH_DARWIN_SDK = $(abspath compiler/darwin-sdk)
+endif
 YH_LLVM_HOST ?= auto
 LLVM_HOST =
 ifeq ($(HOST_SYSTEM),Linux)
@@ -288,9 +295,17 @@ endif
 install: all
 	$(INSTALL) -d $(BINDIR)
 	$(INSTALL) -m755 yh$(EXESUF) $(BINDIR)
+ifeq ($(HOST_SYSTEM),Darwin)
+	$(INSTALL) -d $(DESTDIR)$(PREFIX)/share/yh/darwin-sdk/usr/lib
+	$(INSTALL) -m644 compiler/darwin-sdk/usr/lib/libSystem.tbd $(DESTDIR)$(PREFIX)/share/yh/darwin-sdk/usr/lib/
+	$(INSTALL) -m644 compiler/darwin-sdk/SDKSettings.json compiler/darwin-sdk/manifest.json compiler/darwin-sdk/README.md $(DESTDIR)$(PREFIX)/share/yh/darwin-sdk/
+endif
 
 uninstall:
 	rm -f $(BINDIR)/yh$(EXESUF)
+ifeq ($(HOST_SYSTEM),Darwin)
+	rm -rf $(DESTDIR)$(PREFIX)/share/yh/darwin-sdk
+endif
 
 # yh 三层回归：ANTLR 参考语法 + 编译器语法模式 + 运行语义语料。
 # 语料门的编译器一律用暂存副本 $(YH_RUN)（见 stage-yh）；ANTLR 层在单进程内
@@ -366,6 +381,7 @@ test-llvm-darwin: stage-yh
 	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-abi.py --suite full --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-cache.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-default.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-bundled-sdk.py --compiler-path $(TOPSRC)/yh$(EXESUF)
 	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-selfhost.py --self-test
 	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-runtime.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-link.py --compiler-path $(YH_RUN)

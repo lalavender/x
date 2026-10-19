@@ -578,6 +578,13 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     codesign/xcrun 调用，候选仅动态依赖 libSystem/libc++。`make selfhost-llvm-darwin`
     已接入 Darwin CI（手动触发，上传 stats/logs/snapshots）；macos-14 实跑待 CI。
   - [ ] **F2-9**：Linux/x64 交叉产 Mac 候选，再在 Mac 原生自举验收。
+    - [x] **Darwin SDK bundle（2026-10-19）**：`compiler/darwin-sdk/` 随编译器
+      分发聚合 `libSystem.tbd`（SDK 26.4，334KB）、`SDKSettings.json` 与
+      `manifest.json`；查找顺序 `SDKROOT` → `YH_DARWIN_SDK` → 可执行文件附近
+      bundle → 原生 `xcrun`。`tests/selfhost/llvm-darwin-bundled-sdk.py` 在
+      清空 SDKROOT/无 xcrun、假工具 PATH 下链接运行成功，`sdk 26.4`；
+      `SDKROOT` 覆盖仍生效。C 源/libc++/目标包/frameworks 等遗留边界见
+      [设计文档](03-design/yh-Darwin交叉编译遗留边界.md)。
   - [x] **F2-10**：Darwin/ARM64 默认后端切到 LLVM。`state_init` 对
     `DARWIN+ARM64` 置 `c_backend=1`；Makefile 对 `darwin-aarch64` 选择
     Darwin runtime/cache 门并把 project 验收显式切 LLVM；`native-selfhost.py`
@@ -586,7 +593,7 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     emitted=checked、fallback=0、产物在 `targets/aarch64-apple-darwin/llvm/O0`。
     默认 `make test`（347/348）、`make selfhost-native`、`make test-llvm-darwin`
     （19 项）与 `make selfhost-llvm-darwin` 全绿；`bin/yh-darwin-arm64` 已滚到
-    72MB 的 LLVM 默认种子（`fbd0dd19…`），新种子冷编与默认门复验通过。
+    72MB 的 LLVM 默认种子（`2be836b7…`），新种子冷编与默认门复验通过。
     **2026-10-19 用户决定**：20 轮性能对照与 RS2/RS3/R2c 后置为专门性能工作；
     本轮按正确性切默认，不宣布 LL11/F2 性能门或“首个完整 SSA 版本”完成。
 - [x] **语料平台筛选（2026-10-18 完成）**：`tests/yh-run/check.py` 新增

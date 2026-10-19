@@ -284,6 +284,10 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 ### F2-9：Linux/x64→Darwin/ARM64 交叉引导独立验收
 
 **依赖：**F2-0～7、已验收 Linux/x64 LLVM A；推荐在 F2-8 原生通过后执行。
+**2026-10-19 进展**：`compiler/darwin-sdk/` 已随编译器分发聚合 libSystem stub
+（SDK 26.4），纯 `.yh` 程序交叉链接不再要求 Linux 宿主安装 Xcode/CLT SDK；
+C 源、libc++/目标包、frameworks 等仍见
+[遗留边界](../03-design/yh-Darwin交叉编译遗留边界.md)。
 **修改：**seed-build.py、llvm-host.py 的目标包注入、Darwin lld 参数、CI artifact 传递。
 **拟新增：**`tests/selfhost/llvm-darwin-cross.py`、
 `tests/selfhost/llvm-darwin-cross-host.yh`、Make 目标 `crosshost-llvm-darwin`。
@@ -320,7 +324,7 @@ F2-9 单独标识状态。
   Makefile 对 `LLVM_HOST=darwin-aarch64` 选用 Darwin runtime/cache 门；
   `native-selfhost.py` 自动识别 Darwin LLVM，并支持旧种子 `legacy→LLVM` 过渡代。
 - [x] 默认 `make test` 与 `make selfhost-native` 全绿；`make seed` 来源是本机原生
-  验收候选（72MB，`fbd0dd19…`），未复制 Linux A 或未验收交叉 B。
+  验收候选（72MB，`2be836b7…`），未复制 Linux A 或未验收交叉 B。
 - [x] `bin/yh-darwin-arm64` 与 `.sha256` 已更新；新种子冷编、默认门与关键 `.yh`
   探针通过；失败不覆盖旧种子，旧后端删除仍交 LL12。
 - [x] 完成记录落 `docs/01-finished/`，逐片更新 todo/finish、总方案、设计与 ADR 状态。

@@ -180,6 +180,105 @@ fn cmd_darwin_sdk_discover(output *u8) int {
     return i > 0 ? i : -1;
 }
 
+// cmd_darwin_bundle_ok：目录是否包含随编译器分发的 Darwin SDK stub。
+// 只检查链接必需的两个输入：SDKSettings.json 与 libSystem.tbd。
+fn cmd_darwin_bundle_ok(root *u8) int {
+    if (root == 0 || root[0] == 0) { return 0; }
+    let path [4200]u8;
+    let n int = gen.append_str(&path[0], 0, gen.arr_cstr(root));
+    n = gen.append_str(&path[0], n, "/SDKSettings.json");
+    path[n] = 0;
+    if (pj_file_exists(gen.arr_cstr(&path[0])) == 0) { return 0; }
+    n = gen.append_str(&path[0], 0, gen.arr_cstr(root));
+    n = gen.append_str(&path[0], n, "/usr/lib/libSystem.tbd");
+    path[n] = 0;
+    return pj_file_exists(gen.arr_cstr(&path[0]));
+}
+
+// cmd_darwin_copy_root：把已校验的候选路径写入调用方缓冲。
+fn cmd_darwin_copy_root(candidate *char, root *u8, length *int) int {
+    let n int = strlen(candidate).to_type(int);
+    if (n <= 0 || n >= 4096) { return -1; }
+    let i int = 0;
+    for i < n { root[i] = candidate[i].to_type(u8); i += 1; }
+    root[n] = 0;
+    length[0] = n;
+    return 0;
+}
+
+// cmd_darwin_bundled_sdk：查找随编译器分发的 Darwin SDK stub 目录。
+// 顺序：YH_DARWIN_SDK → 可执行文件附近的 darwin-sdk、compiler/darwin-sdk、
+// ../compiler/darwin-sdk、../../compiler/darwin-sdk、../share|lib/yh/darwin-sdk。
+// 显式 SDKROOT 由调用方先处理，优先级最高。
+fn cmd_darwin_bundled_sdk(root *u8, length *int) int {
+    let env_off int = -1;
+    let env_len int = 0;
+    if (pj_env_fetch("YH_DARWIN_SDK", &env_off, &env_len) == 0 && env_len > 0) {
+        if (env_len >= 4096) { return -1; }
+        let i int = 0;
+        for i < env_len {
+            root[i] = gen.G().task.np_data[env_off + i];
+            i += 1;
+        }
+        root[env_len] = 0;
+        if (cmd_darwin_bundle_ok(root) == 0) { return -1; }
+        length[0] = env_len;
+        return 0;
+    }
+    let dir [4096]u8;
+    let dir_len int = 0;
+    if (c_argv0 != 0) {
+        let slash int = -1;
+        let i int = 0;
+        for c_argv0[i] != 0 {
+            if (c_argv0[i] == '/') { slash = i; }
+            i += 1;
+        }
+        if (slash >= 0) {
+            i = 0;
+            for i <= slash {
+                dir[i] = c_argv0[i].to_type(u8);
+                i += 1;
+            }
+            dir_len = slash + 1;
+        }
+    }
+    if (dir_len == 0) {
+        dir[0] = '.';
+        dir[1] = '/';
+        dir_len = 2;
+    }
+    let suffixes [6]*char;
+    suffixes[0] = "darwin-sdk";
+    suffixes[1] = "compiler/darwin-sdk";
+    suffixes[2] = "../compiler/darwin-sdk";
+    suffixes[3] = "../../compiler/darwin-sdk";
+    suffixes[4] = "../share/yh/darwin-sdk";
+    suffixes[5] = "../lib/yh/darwin-sdk";
+    let si int = 0;
+    for si < 6 {
+        let candidate [4096]u8;
+        let n int = 0;
+        let i int = 0;
+        for i < dir_len {
+            candidate[n] = dir[i];
+            n += 1;
+            i += 1;
+        }
+        if (n > 0 && candidate[n - 1] != '/') {
+            candidate[n] = '/';
+            n += 1;
+        }
+        n = gen.append_str(&candidate[0], n, suffixes[si]);
+        candidate[n] = 0;
+        if (cmd_darwin_bundle_ok(&candidate[0]) != 0) {
+            return cmd_darwin_copy_root(gen.arr_cstr(&candidate[0]), root, length);
+        }
+        si += 1;
+    }
+    return -1;
+}
+
 // cmd_darwin_link_configure：按会话快照 SDKROOT 与 MACOSX_DEPLOYMENT_TARGET。
 // SDKROOT 有值时绝不回退 xcrun；check/语法路径不调用本函数，也不要求安装 SDK。
 fn cmd_darwin_link_configure() int {
@@ -201,8 +300,17 @@ fn cmd_darwin_link_configure() int {
         root[root_len] = 0;
         root_length = root_len;
     } else {
-        root_length = cmd_darwin_sdk_discover(&root[0]);
-        if (root_length <= 0) { return -1; }
+        // 自带 bundle 优先：交叉主机没有 xcrun；原生主机没有安装 SDK 时
+        // 也能开箱链接。显式 SDKROOT 仍在上面优先。
+        let bundle_length int = 0;
+        if (cmd_darwin_bundled_sdk(&root[0], &bundle_length) == 0) {
+            root_length = bundle_length;
+        } else if (gs.c_host_target.os == gen.TARGET_OS_DARWIN) {
+            root_length = cmd_darwin_sdk_discover(&root[0]);
+            if (root_length <= 0) { return -1; }
+        } else {
+            return gen.fail("交叉编译需要显式 SDKROOT 或编译器自带 darwin-sdk");
+        }
     }
 
     let min_off int; let min_len int;

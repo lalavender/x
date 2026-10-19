@@ -3,7 +3,7 @@
 ## 结论
 
 F2 全量移植到 LL11 基线（`origin/llvm` aa6e424），macOS/ARM64 默认后端已切到
-LLVM；`bin/yh-darwin-arm64` 滚为 72MB 的 LLVM 默认种子（`fbd0dd19…`），新种子
+LLVM；`bin/yh-darwin-arm64` 滚为 72MB 的 LLVM 默认种子（`2be836b7…`），新种子
 冷编、默认门、自举门与 Darwin 专项门全部通过。按用户决定，性能项（20 轮对照、
 RS2/RS3/R2c）后置，不在本轮宣称 LL11/F2 性能门或“首个完整 SSA 版本”完成。
 
@@ -59,7 +59,7 @@ RS2/RS3/R2c）后置，不在本轮宣称 LL11/F2 性能门或“首个完整 SS
 ## 种子
 
 - `make seed`：`bin/yh-darwin-arm64` 72MB，SHA-256
-  `fbd0dd1949bb2eaabf65e65fa4cca7300133795ae760c6d3d771653b1bcbeab1`；
+  `2be836b7add20e04488ec387573baf06620ceba1e0863248f409c71f7e028095`；
   Mach-O arm64、ad-hoc 签名 `codesign --verify` 通过。
 - 删除根 `yh`/`compiler/.build` 后用新种子冷编成功；默认门通过；
   `make test`、`make selfhost-native` 用新种子复验全绿。

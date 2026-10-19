@@ -166,6 +166,14 @@ SDK 身份由确定排序的内容清单生成，路径、版本或 mtime 均不
 锁定无 `--backend` 时的 emitted/fallback、产物目录与默认 asm/IR。性能项
 （RS2/RS3/R2c、20 轮）按用户决定后置，不影响本正确性切换。
 
+自带 Darwin SDK stub（Zig 式，2026-10-19）：`compiler/darwin-sdk/` 内含聚合
+`usr/lib/libSystem.tbd`（334KB，SDK 26.4）、`SDKSettings.json` 与
+`manifest.json`。查找顺序 `SDKROOT` → `YH_DARWIN_SDK` → 可执行文件附近
+`darwin-sdk`/`compiler/darwin-sdk`/上层目录 → 原生 `xcrun`；非 Darwin 交叉
+只接受 bundle 或显式 SDKROOT。纯 `.yh` 程序可在无宿主 SDK/xcrun 的 Linux 上
+链接运行；C 源、libc++/目标包、frameworks、SDK 版本矩阵仍见
+[Darwin 交叉编译遗留边界](yh-Darwin交叉编译遗留边界.md)。
+
 Mac 原生 A→B→C→D 与交叉 A→B 后的 Mac B→C→D→E 分别保存源码、工具/SDK 身份、
 逐代覆盖与产物清单；O0/O2 分开，原生连续代 `.ll/.s.i/.s.ct` 精确固定点。
 不能硬编码当前模块/项目数量，按会话实际 manifest 发现完整集合。
