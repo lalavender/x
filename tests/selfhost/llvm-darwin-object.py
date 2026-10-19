@@ -90,6 +90,22 @@ def main():
     require(rejected.returncode != 0 and "SDKROOT" in rejected.stderr,
             "显式 SDKROOT 无效时没有优先拒绝该值")
 
+    # emit-only 只依赖 minOS，不得因为未安装 SDK 而失败；同时目标门仍应在
+    # 后端拒绝 Linux syscall，而不是先报交叉链接缺 SDK。
+    no_sdk = env.copy()
+    no_sdk.pop("SDKROOT", None)
+    no_sdk.pop("MACOSX_DEPLOYMENT_TARGET", None)
+    emitted = run("no-sdk-asm", [str(compiler), "--backend", "llvm",
+        "--target", TRIPLE, "--emit-asm", str(SOURCE)], no_sdk)
+    require(emitted.returncode == 0 and "_main:" in emitted.stdout,
+            f"无 SDK 的 Darwin emit-asm 失败：{emitted.stderr[-2000:]}")
+    linux_syscall = ROOT / "tests/modules/projects/linuxsyscall/main.linux.x64.yh"
+    gated = run("no-sdk-target-gate", [str(compiler), "--backend", "llvm",
+        "--target", TRIPLE, "--emit-asm", str(linux_syscall)], no_sdk)
+    require(gated.returncode != 0 and "未声明" in gated.stderr,
+            "Darwin 目标门被 SDK 查找抢先拒绝："
+            f"rc={gated.returncode}\n{gated.stderr[-2000:]}")
+
     for opt in ("-O0", "-O2"):
         project = WORK / f"object-project-{opt[2:]}"
         if project.exists():
