@@ -20,6 +20,15 @@ int yh_llvm_emit(const char *text, uint64_t length, const char *triple,
                  int opt_level, int kind, const char *output,
                  char *diagnostic, uint64_t capacity);
 
+/* yh_llvm_emit_v2：在 v1 之上增加部署目标；Darwin 目标以 min_os 生成 PIC Mach-O。
+ * Linux 目标传空 min_os，保持 v1 的 canonical triple 与代码生成行为。 */
+int yh_llvm_emit_v2(const char *text, uint64_t length, const char *triple,
+                    const char *min_os, int opt_level, int kind,
+                    const char *output, char *diagnostic, uint64_t capacity);
+
+/* yh_lld_link：把调用方持有的完整 lld argv 交给进程内 ELF/Mach-O/COFF 驱动。 */
+int yh_lld_link(const char **argv, int argc, char *diagnostic, uint64_t capacity);
+
 #ifdef __cplusplus
 }
 #endif

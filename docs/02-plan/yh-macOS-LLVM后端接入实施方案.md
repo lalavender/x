@@ -1,7 +1,7 @@
 # yh macOS/ARM64 LLVM 后端接入实施方案
 
-> 执行者：按 F2 分片逐项实施并复核；使用 superpowers:executing-plans 执行。
-> 此文为待评审计划，勾选项均未实施。本次仅交付方案，不启动代码修改。
+> 执行状态：用户已确认先完成 macOS 原生引导，再单独验收 Linux/x64 交叉引导；按 F2 分片实施。
+> 本文件是实施依据；未勾选项仍待完成，任何自举失败都不得滚动种子。
 
 **目标：**macOS/ARM64 获得内嵌 LLVM/lld 的原生 yh、全量运行与自举固定点，
 并提供 Linux/x64 交叉引导的独立验收路线。
@@ -84,12 +84,15 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 `tests/yh-run/run/llvm-darwin-target.yh`（platform: darwin-arm64）。
 **产出接口：**版本解析结果、SDK 内容身份及会话 DarwinLinkConfig 的记录契约。
 
-- [ ] 记录源码/种子 SHA、系统/SDK/工具路径与版本；最小目标探针保留当前平台拒绝证据。
-- [ ] 新用例锁定 Darwin/arm64 `$if`、LP64/布局，错误版本和缺 SDK 不生成产物。
-- [ ] 冻结会话配置解析规则：版本规范化为 major.minor.patch；SDKROOT 优先，仅 Darwin
+- [x] 记录源码树/种子 SHA、系统/SDK/工具路径与版本；最小目标探针保留当前平台拒绝证据，
+  报告位于 `tmp/llvm-migration/darwin-target/report.json`。
+- [x] 新用例锁定 Darwin/arm64 `$if`、LP64/布局；生产错误版本和缺 SDK 的拒绝在 F2-2
+  通过真实 cmd 入口验收，避免用测试副本替代生产逻辑。
+- [x] 冻结会话配置解析规则：版本规范化为 major.minor.patch；SDKROOT 优先，仅 Darwin
   原生允许 xcrun 发现；Linux 缺 SDKROOT 明确失败。生产 cmd 解析在 F2-2 接入。
-- [ ] 冻结源包获取方式及实际 SHA；不使用 latest 或未校验 Homebrew 包代替固定 SDK。
-- [ ] 验证目标门的报告/断言自测：拟新增 `python3 tests/selfhost/llvm-darwin-target.py --self-test`；
+- [x] 冻结源包获取方式及实际 SHA；固定 LLVM 21.1.8 官方源码归档，SHA-256
+  `4633a23617fa31a3ea51242586ea7fb1da7140e426bd62fc164261fe036aa142`；Homebrew 安装不作为 SDK 输入。
+- [x] 验证目标门的报告/断言自测：`python3 tests/selfhost/llvm-darwin-target.py --self-test`；
   当前拒绝基线与纯语法/语义 check 不需固定 LLVM 包。SDK27 兼容性由 F2-1 实测，
   生产配置有效输入/拒绝矩阵在 F2-2 调用真正 cmd 路径验收，不用测试内重写逻辑代替。
 
@@ -103,20 +106,24 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 `tests/selfhost/llvm-darwin-sdk.py`、`tests/selfhost/llvm-darwin-bridge-probe.yh`。
 **产出：**SDK host `darwin-aarch64`、完整 host.json、emit v2/raw lld 绑定。
 
-- [ ] SDK 门先复现宿主键不支持；`.yh` 桥探针覆盖版本、重复调用、诊断截断和失败保留。
-- [ ] 从校验过的 LLVM 21.1.8 源码构建静态包，目标 X86/AArch64、lld Common/ELF/MachO/COFF
+- [x] SDK 门复现宿主键拒绝；`.yh` 桥探针已在 Darwin 弱桩上覆盖版本、重复调用、诊断截断和失败保留。
+- [x] 从校验过的 LLVM 21.1.8 源码构建静态包，目标 X86/AArch64、lld Common/ELF/MachO/COFF
   所需闭包；BUILD_SHARED_LIBS、LLVM_BUILD_LLVM_DYLIB、LLVM_LINK_LLVM_DYLIB 为 OFF。
   非必需 zlib/zstd/XML 为 OFF；oracle clang/opt 21.1.8 作为独立测试工具归档。
+  本机在 CLT SDK 26.5 下实际构建并通过静态组件/工具身份门。
 - [ ] macos-14 构建部署版本 14.0 的候选包，记录 Apple SDK、工具链与组件/许可摘要；
   本机研究包可单独验收。用固定 lld 真正解析 SDK 的 libSystem/libc++ 及 reexport，
   检查 SDK27 新目标标签兼容性；失败不推进成可发布包。
-- [ ] Darwin 静态链接不走 memfd/GNU group；生成 clang 包装器并让 seed-build 显式选择。
+- [x] Darwin 静态链接不走 memfd/GNU group；生成 clang 包装器并让 seed-build 显式选择。
   只对编译器自举链接追加桥/LLVM；普通程序不追加。
-- [ ] Darwin `.yh` 改 extern，新增有明确诊断的 C stub；auto/off 无完整 SDK 时 legacy
+- [x] Darwin `.yh` 改 extern，新增有明确诊断的 C stub；auto/off 无完整 SDK 时 legacy
   仍可构建，require 必失败；`--backend llvm` 命中 stub 时失败而非回退。
-- [ ] 实现 emit v2；v1 Linux 行为保留。核对 `otool -L` 无 LLVM/lld/libclang，记录
+- [x] 实现 emit v2；v1 Linux 行为保留。核对 `otool -L` 无 LLVM/lld/libclang，记录
   每项 OS/C++ 动态依赖；桥及所有归档实际为 arm64 Mach-O。
 - [ ] 验证拟新增 `python3 tests/selfhost/llvm-darwin-sdk.py`；`make` 与本平台两门通过。
+  Darwin SDK、host、`make`、`make test` 与 `make test-llvm-darwin` 已通过；
+  `make selfhost-native` 在继承的 `tests/selfhost/runtime-memory.py` 失败：自编译器仍导入
+  C runtime `strlen`。macos-14 CI 候选尚待独立验收，未滚种子。
 
 **关闭：**legacy 产生真实内嵌 LLVM 的 Mac A，Darwin 桥可独立发射/验证对象；
 源码级 LLVM 目标发射仍由 F2-2 关闭。无固定包的 legacy 兼容门也须绿。
@@ -129,17 +136,21 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 **测试：**扩展 llvm-darwin-target.py，新增
 `tests/yh-run/run/llvm-darwin-object.yh`（platform: darwin-arm64）。
 
-- [ ] 探针先复现 emitter 的 Linux 限制和 C 桥缺 `aarch64-apple-darwin`；使用纯整数、
-  分支、局部内存、内部函数，避免 printf 等尚未支持入口遮盖目标问题。
-- [ ] 实现 F2-0 的会话配置解析与自有字符串生命周期；由真实 cmd 入口验证有效/非法版本、
-  SDK 缺失、SDKROOT 优先级，且语法/check 模式不因未安装固定包而失败。
-- [ ] 显式接受 canonical Darwin/arm64 目标；保持未知/错误身份失败，未支持 ABI 继续拒绝。
-- [ ] v2 按 min_os 创建版本化目标配置与 PIC TargetMachine；`.ll`/对象清单记录同一部署
-  身份，target/data layout 不匹配立即失败。有效部署版本和 PIC 从本片起进入对象键。
-- [ ] 检查逻辑符号不预加 Darwin `_`；Mach-O 外部符号只由 LLVM 添加一次。
-- [ ] 验证 O0/O2 纯文本、对象与汇编；用固定 LLVM 工具读 CPU、段、重定位与版本。
+- [x] 探针复现并解除 emitter 的 Darwin triple 限制；纯整数、分支、取址局部内存与内部
+  调用探针已验证 LLVM 文本目标、逻辑符号和无 Linux syscall 模板。
+- [x] 实现部署版本/SDKROOT 会话解析；真实命令覆盖默认值、非法版本、显式无效 SDKROOT
+  优先拒绝，以及坏环境下 check 不触碰 SDK。
+- [x] 显式接受 canonical Darwin/arm64 目标；未知目标、错误布局/ABI 与 Darwin/x64 仍拒绝。
+- [x] Darwin `.ll` 已追加规范化 `yh-macos-min-os` 注释，Darwin 模块对象键已包含同一
+  min_os；对象门验证改成 15.0 后 O0/O2 缓存失效并重发对应 LC_BUILD_VERSION。
+- [x] v2 按 min_os 创建版本化目标配置与 PIC TargetMachine；对象中的 LC_BUILD_VERSION 与
+  `.ll`/对象键一致，target/data layout 不匹配立即失败。
+- [x] 检查逻辑符号不预加 Darwin `_`；Mach-O 外部符号只由 LLVM 添加一次。
+- [x] 验证 O0/O2 纯文本、对象与汇编；用固定 LLVM 工具读 CPU、段、重定位与版本。
   改 min_os 必须使对象键失效；桥失败不发布新对象。
-- [ ] `make` 与定向门、默认本平台两门通过；完整 `.yh` 运行由 F2-4 接入后补验。
+- [x] `make`、Darwin 定向对象门和 `make test-llvm-darwin` 通过，Mach-O 对象/汇编与链接可运行。
+- [ ] 默认本平台 `make test` 与 `make selfhost-native` 两门均通过；当前 `make test` 已通过，
+  `make selfhost-native` 在继承基线 `runtime-memory.py` 因导入 `strlen` 失败，见 F2-1。
 
 **关闭：**yh 前端→IR→真实 arm64 Mach-O 对象/汇编，fallback=0；不冒称程序已可运行。
 
@@ -150,16 +161,17 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 **拟新增：**`tests/selfhost/llvm-darwin-abi.py`、`llvm-darwin-abi-probe.yh`、
 `llvm-darwin-abi-bridge.c`，以及 `tests/modules/projects/llvmdarwinabi/` 的项目/主模块/桥。
 
-- [ ] 红例锁定当前非 SysV C ABI 拒绝；使用现有语言的 C 入口属性，不新增语法。
-- [ ] 按目标分派标量 C 签名/属性；修改 llvm_abi_attr_kind 的所有调用点，处理 bool、
-  i8/u8/i16/u16/int/i64、指针、f32/f64；第 9/10 个窄参数与浮点栈溢出必须覆盖。
-- [ ] 同步定义/声明/call site/函数指针与 callback；禁止只修直调。
-- [ ] 由固定 clang21.1.8 生成等价 C 的 IR/对象，使用临时测试链接驱动将 YH 对象与
+- [x] 新增 Darwin C ABI 标量探针，使用现有语言的 `@[extern]` 属性，未新增语法。
+- [x] 按模块目标分派 C 标量支持与窄整型属性；同步声明、定义、直接调用及函数指针调用。
+  LLVM 21.1.8 Clang oracle 与 bool、i8/u8、i16/u16、i32/i64、指针、f32/f64 和第 9/10 个
+  窄参数签名一致，`opt -passes=verify` 与真实 O0/O2 Mach-O 双向运行通过。
+- [x] 同步定义/声明/call site/函数指针与 callback；禁止只修直调。
+- [x] 由固定 clang21.1.8 生成等价 C 的 IR/对象，使用临时测试链接驱动将 YH 对象与
   C 桥链接并在 Mac 双向运行，O0/O2 检查负数、边界值和回调结果。测试链接不计生产链。
-- [ ] 保留用户 ABI 错配拒绝、source location 与完整 yh 内部聚合语义。
-- [ ] 验证拟新增 `python3 tests/selfhost/llvm-darwin-abi.py --suite scalar --compiler-path ./yh`。
+- [x] F2-3 阶段先明确拒绝 Darwin C 聚合与裸 C 变参；非 HFA 聚合后续按 F2-5 独立实现。
+- [x] 验证 `python3 tests/selfhost/llvm-darwin-abi.py --suite full --compiler-path ./yh`。
 
-**关闭：**标量 C 双向互调/间调通过；聚合与裸 C 变参继续显式拒绝，留给 F2-5。
+**关闭：**标量 C 双向互调/间调通过；聚合子集与变参按 F2-5 分开验收。
 
 ### F2-4：Mach-O 生产链接、签名和原子发布
 
@@ -168,15 +180,15 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 **拟新增：**`tests/selfhost/llvm-darwin-link.py`、
 `tests/yh-run/run/llvm-darwin-link.yh`（platform: darwin-arm64）。
 
-- [ ] 首先以 return 0/getpid 等无需自有格式化的程序复现生产路径未接入；保留旧输出。
-- [ ] 单文件/项目构造一致的 raw lld argv：arm64、platform_version、syslibroot、PIE、
+- [x] 首先以 return 0/getpid 等无需自有格式化的程序复现生产路径未接入；保留旧输出。
+- [x] 单文件/项目构造一致的 raw lld argv：arm64、platform_version、syslibroot、PIE、
   libSystem、ad-hoc 签名。Darwin 不传 -no-pie；按实际输入处理 `-l` 和库搜索。
-- [ ] 新增 Darwin worker，沿用一次性 fork、0/-1/-2 及父进程发布；ELF 模板维持原职责。
+- [x] 新增 Darwin worker，沿用一次性 fork、0/-1/-2 及父进程发布；ELF 模板维持原职责。
   内嵌失败不偷偷改用 clang，显式 YH_CC 路径仍有独立标记与缓存身份。
-- [ ] 校验 Mach-O 类型/CPU/有效版本、`LC_CODE_SIGNATURE`、`codesign --verify` 与实际运行，
+- [x] 校验 Mach-O 类型/CPU/有效版本、`LC_CODE_SIGNATURE`、`codesign --verify` 与实际运行，
   不能只看 magic；成功后 rename，失败保留旧文件和旧成功 manifest。
-- [ ] SDK/libSystem 缺失、错误架构、lld worker 强制失败、带空格中文路径各有失败注入。
-- [ ] 验证拟新增 `python3 tests/selfhost/llvm-darwin-link.py --compiler-path ./yh`；
+- [x] SDK/libSystem 缺失、错误架构、lld worker 强制失败、带空格中文路径各有失败注入。
+- [x] 验证拟新增 `python3 tests/selfhost/llvm-darwin-link.py --compiler-path ./yh`；
   审计正常 LLVM 链接未启动外部 clang/ld/ld64.lld/codesign。
 
 **关闭：**单文件及多模块纯计算/标量 C 程序可原生运行，完整 runtime 仍未关闭。
@@ -187,15 +199,22 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 **修改：**llvm_apple_abi.yh、llvm_zabi.yh、llvm_scalar.yh、llvm_module.yh。
 **测试：**扩展 Darwin ABI `.yh/.c` 与项目，复用 autoabi 的类型/边界案例。
 
-- [ ] 小结构/union、1/3/8/16/24 字节对象、嵌套 HFA、HFA 寄存器耗尽整体上栈，
-  按值副本、间接结果缓冲与 C callback 分别先加失败断言。
-- [ ] 以模块布局而非旧机器寄存器输出作为分类输入；按固定 oracle 实现物理 LLVM
-  签名。定义、参数映射、调用、返回共用 Apple 规则，不套用 SysV coercion/byval。
-- [ ] 校验结构返回的独立结果寄存器效果、窄型栈布局、C→YH→C 嵌套回调，O0/O2 真实运行。
-- [ ] 接入已有 prelude/runtime 需要的 C 变参及 Darwin va_list；用户裸 C 变参、
-  非法切片/数组等负例保持原拒绝，不借平台迁移扩语言。
-- [ ] 验证拟新增 `python3 tests/selfhost/llvm-darwin-abi.py --suite full --compiler-path ./yh`；
-  实际项目 abi 对象机器码/签名与 fixed oracle 对照，禁止 legacy 回退遮盖。
+- [x] 新增 `.yh`/C 聚合探针，覆盖 1/3/8/9/16/24 字节、混合整数/浮点 union、嵌套 HFA、
+  HFA 寄存器耗尽、24 字节按值副本及 sret；固定 Clang oracle 与 O0/O2 双向运行通过。
+- [x] 按模块布局实现非 HFA Apple 分类：≤8 字节参数用单个 i64、9–16 字节用双 i64、
+  更大对象用间接参数和 sret；定义、声明、调用、参数恢复与返回走独立 Apple 路径，
+  不复用 SysV 分片/byval。
+- [x] 完成嵌套 HFA 参数/返回的浮点寄存器分类与映射，并覆盖 HFA 参数寄存器耗尽后整体上栈；
+  LLVM 21.1.8 Clang oracle 与 O0/O2 实际 C↔YH 互调通过。
+- [x] 覆盖聚合函数指针 C callback、C→YH→C 嵌套回调及间接返回函数指针；Clang oracle 与 O0/O2 运行通过。
+- [x] 为 prelude `printf` 打通 Darwin 变参调用与目标 `va_list`；用户裸 C 变参、
+  非法切片/数组等负例保持原拒绝，不借平台迁移扩语言。需与 F2-6 的 Darwin 格式化 runtime 联测。
+- [x] 联合体 HFA 分类：`union { f64; [2]f64; }` 这类全部成员同浮点基型的联合体按 HFA
+  走 v0/v1（元素数取最宽成员），参数恢复/返回写回/结果还原三条递归路径同步支持 union；
+  漏判会退化成整数聚合使 C↔YH 双向读错字段。已并入 aggregate 探针的 Clang oracle 与
+  O0/O2 互调（autoabi 项目的 `FloatUnion` 即此形态）。
+- [x] 验证 `python3 tests/selfhost/llvm-darwin-abi.py --suite full --compiler-path ./yh`；
+  标量、聚合、HFA、callback 的对象签名与固定 oracle 一致，O0/O2 本机运行通过。
 
 **关闭：**现有受支持 C ABI 的 Apple 形态在声明/定义/直调/间调与双向运行均闭环。
 
@@ -206,15 +225,15 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 **拟新增：**`tests/selfhost/llvm-darwin-runtime.py`、
 `tests/yh-run/run/llvm-darwin-runtime.yh`；复用 runtimebytes、目录/时钟/进程项目。
 
-- [ ] 红例复现 x64 syscall 被用于 Darwin/ARM64 的风险；检查对象中无该指令模板。
-- [ ] 实现 `llvm_apple_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void`；
+- [x] 红例复现 x64 syscall 被用于 Darwin/ARM64 的风险；检查对象中无该指令模板。
+- [x] 实现 `llvm_apple_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void`；
   allocator 调 mmap/munmap、输出调 write；OS 类型/常量由固定 SDK C 探针锁定。
-- [ ] 保留 16 字节对齐、零大小分配/free(NULL)、长度溢出、MAP_FAILED、UTF-8 字节、
+- [x] 保留 16 字节对齐、零大小分配/free(NULL)、长度溢出、MAP_FAILED、UTF-8 字节、
   write 短写/失败和既有 printf 格式。allocator 不导出 libc malloc/free 名称。
-- [ ] 内存 helpers O0/O2 无自递归 libcall；Mach-O weak 合并与用户强定义优先通过；
+- [x] 内存 helpers O0/O2 无自递归 libcall；Mach-O weak 合并与用户强定义优先通过；
   runtimebytes 无禁止 C 服务导入，允许的 mmap/munmap/write 单列。
-- [ ] 复验 Darwin 目录、单调时钟、open/fork/execvp/waitpid、中文空格路径及 libs 消费者。
-- [ ] 验证拟新增 `python3 tests/selfhost/llvm-darwin-runtime.py --compiler-path ./yh`；
+- [x] 复验 Darwin 目录、单调时钟、open/fork/execvp/waitpid、中文空格路径及 libs 消费者。
+- [x] 验证拟新增 `python3 tests/selfhost/llvm-darwin-runtime.py --compiler-path ./yh`；
   普通程序和内嵌 LLVM 编译器分别做依赖清单，不能放宽程序门迁就 C++ 依赖。
 
 **关闭：**现有运行时与标准库行为完整，两个 profile 原生运行、导入与 helper 门通过。
@@ -226,15 +245,15 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 **拟新增：**`tests/selfhost/llvm-darwin-cache.py`、
 `tests/modules/projects/llvmdarwincache/`（project.toml 与至少双模块 .yh）。
 
-- [ ] 以同路径内容变化、部署版本变化、SDKROOT 切换、目标库替换写失效红例；保持
+- [x] 以同路径内容变化、部署版本变化、SDKROOT 切换、目标库替换写失效红例；保持
   有效无改动构建命中，普通函数变化只影响现有实际缓存粒度，不承诺 RS2/RS3 新能力。
-- [ ] 将有效 min_os/PIC/桥身份入对象键；最终键保存完整 argv、SDK 内容清单、
+- [x] 将有效 min_os/PIC/桥身份入对象键；最终键保存完整 argv、SDK 内容清单、
   实际 stub/库/reexport 闭包、工具和自举归档内容；确定排序与路径规范化。
-- [ ] SDK 身份不能只用路径/版本/mtime；内容清单校验是会话输入，缓存损坏必须重验，
+- [x] SDK 身份不能只用路径/版本/mtime；内容清单校验是会话输入，缓存损坏必须重验，
   不以未校验旧索引证明“未改变”。依赖追踪不足以闭合时使用完整链接输入 SDK 内容清单。
-- [ ] 失败/取消、已有可执行文件、部分对象/接口损坏、两次并发构建逐项检查原子发布，
+- [x] 失败/取消、已有可执行文件、部分对象/接口损坏、两次并发构建逐项检查原子发布，
   复用现有协议，不另造提交框架。
-- [ ] 验证拟新增 `python3 tests/selfhost/llvm-darwin-cache.py --compiler-path ./yh`；
+- [x] 验证拟新增 `python3 tests/selfhost/llvm-darwin-cache.py --compiler-path ./yh`；
   两轮相同有效输入 manifest/IR 确定，无旧配置误命中。
 
 **关闭：**设计要求的输入变化与失败矩阵均有实测，不把只哈希 SDKROOT 当作内容验收。
@@ -246,20 +265,21 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 **拟新增：**`tests/selfhost/llvm-darwin-selfhost.py`、
 `tests/selfhost/llvm-darwin-fixedpoint.yh`；Make 目标 `test-llvm-darwin`、`selfhost-llvm-darwin`。
 
-- [ ] 先写脚本自测：漏 .ll/接口、错目标/版本、错代号、同目录自比较、错 CPU 必失败；
+- [x] 先写脚本自测：漏 .ll/接口、错目标/版本、错代号、同目录自比较、错 CPU 必失败；
   产物发现服从当前编译器实际 manifest，兼容正在落地的文件级产物布局。
-- [ ] 从现有 Darwin 种子 legacy 编 A（含真实桥），A 的 LLVM O0/O2 分别编 B，
+- [x] 从现有 Darwin 种子 legacy 编 A（含真实桥），A 的 LLVM O0/O2 分别编 B，
   B 编 C、C 编 D；冻结配置保存各代 checked/emitted/rejected/fallback。
-- [ ] 同 profile 的 B/C/D 输出 `.ll/.s.i/.s.ct` 精确固定点；D 自解析与全量语法、
+- [x] 同 profile 的 B/C/D 输出 `.ll/.s.i/.s.ct` 精确固定点；D 自解析与全量语法、
   运行、模块、项目以及 compiler/asm/link/libs 消费者通过，fallback=0。
-- [ ] 增加无系统 LLVM 工具/动态库测试：隔离 PATH、审计真实子进程、otool 导入；
+- [x] 增加无系统 LLVM 工具/动态库测试：隔离 PATH、审计真实子进程、otool 导入；
   自举所需固定静态归档与 Apple SDK 可作为输入，但不能调用 SDK 的 LLVM 工具。
 - [ ] 在 macos-14 原生执行候选，检查实际运行下限；本机 SDK27/系统27 结果单独记录。
+  （CI 作业已接入 `make selfhost-llvm-darwin` 与证据上传；本机 macOS 27 + CLT SDK 26.5 已通过。）
   Darwin CI 仍手动触发，缓存键纳入固定包/桥/SDK/部署版本，上传日志/候选，不自动滚种子。
-- [ ] 验证拟新增 `make test-llvm-darwin`、`make selfhost-llvm-darwin`；
+- [x] 验证拟新增 `make test-llvm-darwin`、`make selfhost-llvm-darwin`；
   legacy 本平台两门继续绿，Linux test-llvm 的平台断言保留。
 
-**关闭：**Darwin 显式 LLVM 路径具备完整原生自举证据，仍未切默认或覆盖种子。
+**关闭：**Darwin 显式 LLVM 路径具备完整原生自举证据（F2-10 随后切默认并覆盖种子）。
 
 ### F2-9：Linux/x64→Darwin/ARM64 交叉引导独立验收
 
@@ -285,23 +305,28 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 
 ### F2-10：性能、默认后端、发行依赖与 Darwin 种子
 
-**依赖：**F2-8；公共 LL11/R2b 剩余/R2c 的正式切换硬门关闭。F2-9 单独标识状态。
+**依赖：**F2-8。**2026-10-19 用户决定**：性能项（20 轮对照、RS2 函数级缓存、
+RS3 文件级对象、R2c 线程池）全部后置为专门性能工作，本轮只按正确性切默认；
+LL11 的“性能不达标即不宣布全量完成”边界继续保留，不在本轮声称关闭。
+F2-9 单独标识状态。
 **修改：**gen/state.yh、Makefile/默认构建与自举入口、发行/CI 文档、种子与哈希。
-**拟新增：**`tests/yh-run/run/llvm-darwin-default.yh`，复用 fixedpoint fixture 验证新种子。
+**拟新增：**`tests/selfhost/llvm-darwin-default.py`，断言无 `--backend` 时默认走 LLVM。
 
-- [ ] 冻结同一源码、负载与工具，legacy/LLVM O0/O2 的 no-change/function-change/
-  cold-build 各至少 20 轮，记录 median/p95/RSS/子进程与程序运行性能；>10% 回退归因。
-- [ ] 新用例断言无 --backend 时实际 emitted=checked、fallback=0，并验证两个 profile；
-  A 的构建参数不会自动改变 B 的缺省后端，必须修改会话初始化/默认配置。
-- [ ] 只有硬门全部满足才切 Darwin 默认 LLVM；把可用原生候选绑定到本平台 build/test/
-  selfhost 流程，native 固定点门随默认切换检查 LLVM 产物，不再只检查旧 `.s`。
-- [ ] 默认 `make test` 与 `make selfhost-native` 全绿，依赖/许可/最低系统版本说明完整，
-  再 `make seed`；确认来源是 Mac 原生验收候选，不复制 Linux A 或未经验收交叉 B。
-- [ ] `bin/yh-darwin-arm64` 与 `.sha256` 一起更新；新种子冷编和关键 `.yh` 探针通过；
-  失败保留旧种子，候选在 tmp，旧后端删除仍交 LL12。
-- [ ] 完成记录落 `docs/01-finished/`，逐片更新 todo/finish、总方案、设计与 ADR 状态。
+- [ ] 20 轮性能对照与回退归因——**按用户决定后置**，不属于本轮正确性门；
+  实施前不得宣称 LL11 性能门/“首个完整 SSA 版本”完成。
+- [x] 无 `--backend` 时实际 emitted=checked、fallback=0；`tests/selfhost/llvm-darwin-default.py`
+  同时校验 Darwin LLVM 产物路径、默认 `--emit-asm`/`--emit-llvm` 与可运行产物。
+- [x] 切 Darwin 默认 LLVM：`state_init` 为 `DARWIN+ARM64` 置 `c_backend=1`；
+  Makefile 对 `LLVM_HOST=darwin-aarch64` 选用 Darwin runtime/cache 门；
+  `native-selfhost.py` 自动识别 Darwin LLVM，并支持旧种子 `legacy→LLVM` 过渡代。
+- [x] 默认 `make test` 与 `make selfhost-native` 全绿；`make seed` 来源是本机原生
+  验收候选（72MB，`fbd0dd19…`），未复制 Linux A 或未验收交叉 B。
+- [x] `bin/yh-darwin-arm64` 与 `.sha256` 已更新；新种子冷编、默认门与关键 `.yh`
+  探针通过；失败不覆盖旧种子，旧后端删除仍交 LL12。
+- [x] 完成记录落 `docs/01-finished/`，逐片更新 todo/finish、总方案、设计与 ADR 状态。
 
-**关闭：**默认、本平台两门、固定点、依赖、性能和种子来源均有证据，F2 正式交付。
+**关闭：**默认后端、本平台两门、固定点与种子来源均有正确性证据；性能证据后置，
+待专门性能工作关闭 RS2/RS3/R2c 与 20 轮对照后再宣布 LL11/F2 全量完成。
 
 ## 实施命令与交付方式
 

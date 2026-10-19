@@ -159,8 +159,15 @@ def write_lld_config_header(path: Path, template: list[str], default_files: list
                             identity: str) -> None:
     """生成默认 ELF 链接模板、自举桥参数与稳定身份。"""
     def array(name: str, items: list[str]) -> str:
-        values = ",\n    ".join(cpp_string(item) for item in items)
-        return f"static const char *const {name}[] = {{\n    {values}\n}};\n"
+        counts = {
+            "yh_lld_link_template": "YH_LLD_LINK_TEMPLATE_COUNT",
+            "yh_lld_default_files": "YH_LLD_DEFAULT_FILES_COUNT",
+            "yh_lld_default_libraries": "YH_LLD_DEFAULT_LIBRARIES_COUNT",
+            "yh_llvm_selfhost_link_flags": "YH_LLVM_SELFHOST_LINK_FLAGS_COUNT",
+        }
+        values = ",\n    ".join(cpp_string(item) for item in items) or "nullptr"
+        return (f"#define {counts[name]} {len(items)}\n"
+                f"static const char *const {name}[] = {{\n    {values}\n}};\n")
 
     content = "#pragma once\n" + array("yh_lld_link_template", template) \
         + array("yh_lld_default_files", default_files) \

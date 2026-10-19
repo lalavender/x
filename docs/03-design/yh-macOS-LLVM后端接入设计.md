@@ -1,6 +1,6 @@
 # yh macOS/ARM64 LLVM 后端接入设计
 
-日期：2026-10-19。状态：方案已整理，代码尚未实施；原生先通、交叉随后验收的路线已由用户确认。
+日期：2026-10-19。状态：F2-0 已实现，F2-1 正在实施；原生先通、交叉随后验收的路线已由用户确认。
 依据：[ADR-0014](../adr/0014-yh采用LLVM作为正式代码生成后端.md)、
 [现状与交叉引导分析](../02-plan/yh-macOS-LLVM迁移差距分析.md)。
 实施入口：[F2 分片计划](../02-plan/yh-macOS-LLVM后端接入实施方案.md)。
@@ -29,8 +29,7 @@ Linux/x64 → Linux/ARM64 → macOS/ARM64 的项目顺序保持不变。
 | 后续独立验收：Linux/x64 交叉 | 经验证的 Linux A 生成 Darwin 对象，配 Darwin 静态库交叉链接 B；B 在 Mac 连续自编 | 提供独立于旧 Mac 种子的引导来源，需要目标依赖注入与交叉链接配置 |
 | 不采用：长期双后端 | LLVM 只作实验，Mac 永久保留旧后端 | 与 ADR-0014 的最终替换目标不一致 |
 
-用户已确认先 Mac 原生、再 Linux 交叉验收；交叉引导独立成片。本轮请求为整理方案，
-尚未启动代码实施。
+用户已确认先 Mac 原生、再 Linux 交叉验收；交叉引导独立成片。
 两条路线共用 Darwin SDK、Apple ABI、运行时、链接与缓存实现，不各建一套后端。
 Linux/ARM64 LLVM 自举不是 Linux/x64→Mac 的技术中间步骤，但既有 F1/F2 排期保留。
 
@@ -53,19 +52,28 @@ flowchart TD
 | 用户目标 triple | `aarch64-apple-darwin`，保持当前 canonical 身份 |
 | SDK/桥运行宿主键 | `darwin-aarch64`；种子仍叫 `bin/yh-darwin-arm64` |
 | LLVM/lld | 21.1.8；源码或发行包 URL、SHA-256、构建配置与许可必须固定 |
-| 最低 macOS 版本 | 建议缺省 `14.0`，对齐现有 `macos-14` CI；`MACOSX_DEPLOYMENT_TARGET` 可显式覆盖，实际支持版本以运行门为准 |
+| 最低 macOS 版本 | 首期候选固定 `14.0`，对齐现有 `macos-14` CI；只有旧系统实际运行验收通过后才可下调 |
 | CPU/优化 | generic；O0/O2；不使用 native CPU、fast-math 或隐式 LTO |
 | 重定位/链接 | Darwin PIC + PIE；所有用户对象、桥及静态 SDK 一致，禁止沿用 Linux `-no-pie` |
 | OS 运行依赖 | libSystem；编译器允许经清单审计的 libc++/C++ ABI 依赖，不允许动态 LLVM/lld/libclang |
 
-本机只读检查为 macOS 27.0、CLT SDK 27.0，SDK 采用 TBD v4，出现 arm64e.x1 等
+F2-0 记录的本机只读环境为 macOS 27.0（build 26A428）、CLT SDK 27.0
+（build 26A425），SDK 采用 TBD v4，出现 arm64e.x1 等
 目标标签；这不是 LLVM 21.1.8 已兼容该 SDK 的证据。F2-0/F2-1 必须用固定版本实际
 解析并链接 libSystem/libc++；不兼容时记录明确失败并选择经验证的 SDK 重新锁定，
 不悄悄升级 LLVM，也不在文档中宣称旧系统已经可运行。
 
+实测 LLVM 21.1.8 的 `ld64.lld` 拒绝 CLT SDK 27.0 的 `arm64e.x1` TAPI 架构标签。
+本机另有 CLT SDK 26.5；固定 `ld64.lld` 已用该 SDK 成功链接 libc++/libSystem reexport，
+并输出 `LC_BUILD_VERSION`（macOS platform=1、SDK 26.5、minOS 14.0）。本机静态包
+正按 SDK 26.5 重建；最终候选的归档与真实 yh 发射门通过后才确认该 SDK 锁定。
+
 LLVM 包与 Apple 系统 SDK 是两类输入：前者保存编译器静态归档，后者提供头文件和
-系统库 stub。Darwin 原生允许 SDKROOT，未指定时通过 xcrun 解析实际 SDK；Linux
-交叉模式必须显式提供 SDKROOT 和锁定记录，不执行 macOS 工具来发现依赖。
+系统库 stub。`MACOSX_DEPLOYMENT_TARGET` 缺省为 `14.0.0`，接受 `major.minor` 或
+`major.minor.patch` 并规范为三段数字；其他格式或零/负组件在生成文件前拒绝。
+Darwin 原生优先解析显式 `SDKROOT`，未指定时才通过 xcrun 发现；SDK 版本从
+`SDKSettings.json` 读取。Linux 交叉模式必须显式提供 `SDKROOT` 和同版本锁定记录，
+不执行 macOS 工具来发现依赖。
 
 每个会话解析一次 `DarwinLinkConfig`：`sdk_root`、`sdk_version`、`min_os`、
 `sdk_identity` 四个自有 NUL 字符串，由 cmd 持有至会话结束；不借用可扩容名字池。
@@ -140,6 +148,23 @@ platform_version、显式 syslibroot、PIE、libSystem、ad-hoc 签名及受检�
 SDK 身份、实际 `.tbd/.dylib/.a` 及 reexport 闭包、系统/C++ 库、链接驱动、目标依赖。
 SDK 身份由确定排序的内容清单生成，路径、版本或 mtime 均不能单独替代内容。
 复用现有 manifest 原子发布，依赖不明、损坏缓存、失败或取消都不得确认成功命中。
+
+已实现（F2-7）：对象键含 triple、data_layout、ABI、优化级、桥版本/ABI、部署版本与
+显式 PIC 标记；链接键含 lld/桥身份、SDK 根与 `SDKSettings.json` 字节、部署版本、
+`libSystem` stub **及其 `reexported-libraries` 闭包**（逐项哈希 `/usr/lib/system/*.tbd`，
+缺失与存在以哨兵字节区分、深度有界防环）、`LIBRARY_PATH`、项目 `-l` 与全部对象内容。
+链接 manifest 前半是输入键、后半是输出文件摘要；失败时不改写 manifest 与旧产物，
+损坏的 manifest/对象/接口/可执行文件都会重新验证。
+
+编译器自举链接（F2-8）：`YH_LLVM_SELFHOST=1` 时，Darwin 的 raw `ld64.lld` argv 追加
+编译进桥的固定闭包（`-force_load` 桥归档、lld 与 LLVM 静态归档，以及 `-lc++`）；
+普通程序链接不注入这些库。闭包同时写入 `lld_link_identity`，换归档即失效缓存。
+
+默认后端（F2-10，2026-10-19）：`DARWIN+ARM64` 宿主默认 `c_backend=1`，与
+`LINUX+X64` 的 LL11 门控并列；普通程序不继承 `YH_LLVM_SELFHOST`，只有构建
+`compiler/` 自身才 force-load 桥/LLVM 闭包。`tests/selfhost/llvm-darwin-default.py`
+锁定无 `--backend` 时的 emitted/fallback、产物目录与默认 asm/IR。性能项
+（RS2/RS3/R2c、20 轮）按用户决定后置，不影响本正确性切换。
 
 Mac 原生 A→B→C→D 与交叉 A→B 后的 Mac B→C→D→E 分别保存源码、工具/SDK 身份、
 逐代覆盖与产物清单；O0/O2 分开，原生连续代 `.ll/.s.i/.s.ct` 精确固定点。

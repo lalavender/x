@@ -212,8 +212,11 @@ def main():
                       for line in compiler_imports.stdout.splitlines() if line.split()}
     # 链入内嵌桥时，桥入口必须是**已定义**（不是未定义）符号；同时编译器自身
     # 仍不得从 C runtime 导入 yh 运行时应自有的内存/字符串/输出入口。
-    bridge_linked = bool(run(["nm", str(compiler_binary)], ROOT / "compiler").stdout
-                         .count(" T yh_llvm_emit"))
+    bridge_symbols = run(["nm", str(compiler_binary)], ROOT / "compiler").stdout
+    bridge_linked = any(
+        len(fields) >= 2 and fields[-2] == "T"
+        and fields[-1].removeprefix("_") == "yh_llvm_emit"
+        for fields in (line.split() for line in bridge_symbols.splitlines()))
     compiler_forbidden = sorted(compiler_names.intersection(
         {"malloc", "free", "memcpy", "strlen", "printf"}))
     if compiler_forbidden and not bridge_linked:

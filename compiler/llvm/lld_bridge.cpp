@@ -7,10 +7,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <iterator>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -82,12 +82,12 @@ std::vector<std::string> link_search_paths() {
       }
     }
   }
-  for (std::size_t i = 0; i < std::size(yh_lld_link_template); ++i) {
+  for (std::size_t i = 0; i < YH_LLD_LINK_TEMPLATE_COUNT; ++i) {
     const char *argument = yh_lld_link_template[i];
     if (std::strncmp(argument, "-L", 2) == 0 && argument[2] != '\0')
       paths.emplace_back(argument + 2);
     else if (std::strcmp(argument, "-L") == 0 &&
-             i + 1 < std::size(yh_lld_link_template))
+             i + 1 < YH_LLD_LINK_TEMPLATE_COUNT)
       paths.emplace_back(yh_lld_link_template[++i]);
   }
   return paths;
@@ -141,7 +141,7 @@ void append_lld_inputs(std::vector<const char *> &arguments,
   arguments.push_back(yh_lld_link_template[0]);
   append_library_path(arguments, owned_paths);
   append_run_path(arguments);
-  for (std::size_t i = 1; i < std::size(yh_lld_link_template); ++i) {
+  for (std::size_t i = 1; i < YH_LLD_LINK_TEMPLATE_COUNT; ++i) {
     const char *argument = yh_lld_link_template[i];
     if (std::strcmp(argument, kOutputMarker) == 0) {
       arguments.push_back(output);
@@ -152,8 +152,8 @@ void append_lld_inputs(std::vector<const char *> &arguments,
         arguments.push_back(extra_args[j]);
       const char *selfhost = std::getenv("YH_LLVM_SELFHOST");
       if (selfhost != nullptr && std::strcmp(selfhost, "1") == 0) {
-        for (const char *flag : yh_llvm_selfhost_link_flags)
-          arguments.push_back(flag);
+        for (std::size_t i = 0; i < YH_LLVM_SELFHOST_LINK_FLAGS_COUNT; ++i)
+          arguments.push_back(yh_llvm_selfhost_link_flags[i]);
       }
     } else {
       arguments.push_back(argument);
@@ -191,7 +191,7 @@ extern "C" int yh_lld_link_driver(const char *output, const char **objects,
   }
   std::vector<const char *> arguments;
   std::vector<std::string> owned_paths;
-  arguments.reserve(std::size(yh_lld_link_template) + object_count + extra_count + 8);
+  arguments.reserve(YH_LLD_LINK_TEMPLATE_COUNT + object_count + extra_count + 8);
   append_lld_inputs(arguments, output, objects, object_count, extra_args,
                     extra_count, owned_paths);
   return invoke_lld(arguments, diagnostic, capacity);
@@ -204,26 +204,39 @@ extern "C" const char *yh_lld_link_identity(void) {
 
 // yh_lld_default_file_count：返回模板中的 CRT 与动态加载器文件数量。
 extern "C" int yh_lld_default_file_count(void) {
-  return static_cast<int>(std::size(yh_lld_default_files));
+  return YH_LLD_DEFAULT_FILES_COUNT;
 }
 
 // yh_lld_default_file：按序返回固定链接模板中一个系统启动文件路径。
 extern "C" const char *yh_lld_default_file(int index) {
-  if (index < 0 || static_cast<std::size_t>(index) >= std::size(yh_lld_default_files))
+  if (index < 0 || static_cast<std::size_t>(index) >= YH_LLD_DEFAULT_FILES_COUNT)
     return nullptr;
   return yh_lld_default_files[index];
 }
 
 // yh_lld_default_library_count：返回固定 GNU 链接模板中默认 -l 库数量。
 extern "C" int yh_lld_default_library_count(void) {
-  return static_cast<int>(std::size(yh_lld_default_libraries));
+  return YH_LLD_DEFAULT_LIBRARIES_COUNT;
 }
 
 // yh_lld_default_library：按序返回固定模板中的一个默认库名，不带 -l 前缀。
 extern "C" const char *yh_lld_default_library(int index) {
-  if (index < 0 || static_cast<std::size_t>(index) >= std::size(yh_lld_default_libraries))
+  if (index < 0 || static_cast<std::size_t>(index) >= YH_LLD_DEFAULT_LIBRARIES_COUNT)
     return nullptr;
   return yh_lld_default_libraries[index];
+}
+
+// yh_lld_selfhost_flag_count：返回自举链接追加参数的数量。
+// Darwin 的 raw ld64.lld argv 由 yh 拼装，需要读取编译进桥的 force_load 闭包。
+extern "C" int yh_lld_selfhost_flag_count(void) {
+  return YH_LLVM_SELFHOST_LINK_FLAGS_COUNT;
+}
+
+// yh_lld_selfhost_flag：按序返回一个自举链接追加参数。
+extern "C" const char *yh_lld_selfhost_flag(int index) {
+  if (index < 0 || static_cast<std::size_t>(index) >= YH_LLVM_SELFHOST_LINK_FLAGS_COUNT)
+    return nullptr;
+  return yh_llvm_selfhost_link_flags[index];
 }
 
 // yh_lld_resolve_library：按实际 lld 搜索顺序解析 libNAME.so 或 libNAME.a。

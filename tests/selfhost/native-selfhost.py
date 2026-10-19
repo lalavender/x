@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 COMPILER = ROOT / "compiler"
 WORK = ROOT / "tmp" / "selfhost"
 HOST_DRIVER = ROOT / "tools" / "llvm-host.py"
+HOST_DRIVER_DARWIN = ROOT / "tools" / "llvm-darwin-host.py"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "tools"))
 from selfhost_snapshot_gate import (default_seed, expected_artifacts,
@@ -49,6 +50,18 @@ DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 # 目录前置到子进程 PATH；未准备（无 SDK）时只警告并按原路径继续，不把 LLVM 变成
 # 自举的失败点（与 make / seed-build.py 的 auto 语义一致）。
 SHIM_DIR = None
+SELFHOST_LLVM = False
+
+
+def host_triple() -> str:
+    """返回当前宿主可原生自举的完整目标 triple。"""
+    machine = platform.machine().lower()
+    if sys.platform == "darwin":
+        return "aarch64-apple-darwin" if machine in ("arm64", "aarch64") \
+            else "x86_64-apple-darwin"
+    if machine in ("x86_64", "amd64"):
+        return "x86_64-unknown-linux-gnu"
+    return "aarch64-unknown-linux-gnu"
 
 
 def llvm_shim_for_seed(seed: Path):
@@ -59,15 +72,20 @@ def llvm_shim_for_seed(seed: Path):
     不存在的宿主，避免打印误导性警告。
     """
     name = seed.name
-    if "linux" not in name:
-        return None
-    if "aarch64" in name or "arm64" in name:
-        host = "linux-aarch64"
-    elif "x64" in name or "x86_64" in name:
-        host = "linux-x86_64"
+    if "darwin" in name:
+        host = "darwin-aarch64"
+        driver = HOST_DRIVER_DARWIN
+    elif "linux" in name:
+        driver = HOST_DRIVER
+        if "aarch64" in name or "arm64" in name:
+            host = "linux-aarch64"
+        elif "x64" in name or "x86_64" in name:
+            host = "linux-x86_64"
+        else:
+            return None
     else:
         return None
-    request = [sys.executable, str(HOST_DRIVER), "shim", "--host", host, "--mode", "auto"]
+    request = [sys.executable, str(driver), "shim", "--host", host, "--mode", "auto"]
     result = subprocess.run(request, cwd=ROOT, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"警告：本次自举未链入内嵌 LLVM 桥（{host}）："
@@ -79,6 +97,21 @@ def llvm_shim_for_seed(seed: Path):
     return Path(record["shim_dir"])
 
 
+def seed_supports_llvm(seed: Path) -> bool:
+    """探测启动种子是否已能对当前宿主 triple 做 LLVM 发射。
+
+    旧 Darwin 种子只带失败桩；此时先由它 legacy 编出过渡代，再由过渡代以
+    LLVM 连续自编（与 F2-8 的 A→B/C/D 链一致）。滚动后的新种子会直接通过。
+    """
+    probe = WORK / "seed-llvm-probe.yh"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text("module main;\n\nfn main() int { return 0; }\n",
+                     encoding="utf-8")
+    result = run([str(seed), "--backend", "llvm", "--target", host_triple(),
+                  "--emit-llvm", "--emit-asm", str(probe)])
+    return result.returncode == 0
+
+
 def run(cmd, cwd=None, shim=False):
     """执行子命令；shim=True 时把内嵌桥的链接包装器前置到 PATH。
 
@@ -88,6 +121,8 @@ def run(cmd, cwd=None, shim=False):
     environment = dict(os.environ)
     if shim and SHIM_DIR is not None:
         environment["PATH"] = str(SHIM_DIR) + os.pathsep + environment.get("PATH", "")
+    if shim and SELFHOST_LLVM:
+        environment["YH_LLVM_SELFHOST"] = "1"
     return subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True,
                           text=True, timeout=1800, env=environment)
 
@@ -102,16 +137,16 @@ def build(cc, out, generation, expected, compatible=(), llvm_mode=False):
     if bdir.exists():
         shutil.rmtree(bdir)
     command = [str(cc)]
+    triple = host_triple()
     if llvm_mode:
-        command += ["--backend", "llvm", "--target", "x86_64-unknown-linux-gnu",
-                    "--emit-llvm"]
+        command += ["--backend", "llvm", "--target", triple, "--emit-llvm"]
     command += ["build", "-o", str(out)]
     r = run(command, cwd=COMPILER, shim=True)
     if r.returncode != 0:
         print(f"FAIL 构建 {out.name}:", r.stderr[-400:])
         sys.exit(1)
     if llvm_mode:
-        bdir = bdir / "targets" / "x86_64-unknown-linux-gnu" / "llvm" / "O0"
+        bdir = bdir / "targets" / triple / "llvm" / "O0"
         snapshot = save_llvm_snapshot(bdir, WORK / "snapshots" / generation)
     else:
         snapshot = save_snapshot(bdir, WORK / "snapshots" / generation)
@@ -193,10 +228,15 @@ def main() -> int:
         print(f"FAIL 自举种子：{error}")
         return 1
     print(f"自举种子 SHA-256：{seed_hash}")
+    global SHIM_DIR, SELFHOST_LLVM
     SHIM_DIR = llvm_shim_for_seed(seed)
+    machine = platform.machine().lower()
     llvm_mode = args.backend == "llvm" or (
-        args.backend == "auto" and sys.platform == "linux"
-        and platform.machine().lower() in ("x86_64", "amd64"))
+        args.backend == "auto" and (
+            (sys.platform == "linux" and machine in ("x86_64", "amd64"))
+            or (sys.platform == "darwin" and machine in ("arm64", "aarch64"))))
+    SELFHOST_LLVM = llvm_mode
+    transition_legacy = llvm_mode and not seed_supports_llvm(seed)
 
     ok = True
     expected = expected_llvm_artifacts(COMPILER) if llvm_mode \
@@ -206,7 +246,14 @@ def main() -> int:
     legacy_expected = {path for path in expected if not path.endswith(".s.ct")}
     seed_flat = expected_seed_flat_artifacts(COMPILER)
     if llvm_mode:
-        d2 = build(seed, WORK / "cc2", "cc2", expected, llvm_mode=True)
+        if transition_legacy:
+            # 启动种子只支持 legacy：cc2 用 legacy 编出带新默认的过渡代，
+            # cc3/cc4 再以 LLVM 连续自编；固定点从 cc3 开始比较。
+            legacy_expected = expected_artifacts(COMPILER)
+            d2 = build(seed, WORK / "cc2", "cc2", legacy_expected,
+                       (legacy_expected, seed_flat), llvm_mode=False)
+        else:
+            d2 = build(seed, WORK / "cc2", "cc2", expected, llvm_mode=True)
         d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected, llvm_mode=True)
         d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected, llvm_mode=True)
     else:
@@ -217,9 +264,12 @@ def main() -> int:
     print(f"cc2/cc3/cc4 构建完成（种子 = {seed}）")
 
     # 1) 旧种子可产生一次迁移差异；最终候选相邻两代必须达到固定点。
-    transition = snapshot_errors([("cc2", d2), ("cc3", d3)], expected)
-    if transition:
-        print(f"种子迁移后续跑验证：cc2→cc3 有 {len(transition)} 项内容变化")
+    if transition_legacy:
+        print("种子迁移：cc2 由旧种子以 legacy 编出，cc3→cc4 为 LLVM 固定点")
+    else:
+        transition = snapshot_errors([("cc2", d2), ("cc3", d3)], expected)
+        if transition:
+            print(f"种子迁移后续跑验证：cc2→cc3 有 {len(transition)} 项内容变化")
     errors = snapshot_errors([("cc3", d3), ("cc4", d4)], expected)
     if errors:
         print("FAIL 模块固定点：", "；".join(errors))

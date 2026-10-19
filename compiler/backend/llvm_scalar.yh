@@ -104,7 +104,7 @@ fn llvm_abi_emit_c_aggregate_call(unit *ir.IRModule, out *LLVMOutput,
             }
         } else {
             let kind int = param.kind;
-            let attr int = llvm_abi_attr_kind(call.abi, kind);
+            let attr int = llvm_abi_attr_kind(unit, call.abi, kind);
             llvm_abi_type(out, call.abi, kind, param.bits);
             if (attr == 1) { llvm_text(out, " signext"); }
             else if (attr == 2) { llvm_text(out, " zeroext"); }
@@ -426,9 +426,24 @@ fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
         if (has_indirect_signature != 0) {
             if (llvm_indirect_call_symbol(unit, &call, &called) != 0) { out.failed = 1; return; }
         } else if (called_index >= 0) { called = unit.symbols[called_index]; }
+        if (called_index >= 0 && called.abi == ir.IR_ABI_YH_LLVM_V1
+            && called.variadic == 1
+            && gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
+            && gen.cstr_eq(called.name, "open") != 0) {
+            if (call.arg_count < 2 || call.arg_count > 3) { out.failed = 1; return; }
+            if (call.arg_count == 3) {
+                let mode ir.IRCallArg = body.call_args[call.arg_first + 2];
+                let mode_type ir.IRType = body.types[mode.type_id];
+                if (mode_type.kind != ir.IR_TY_I32 && mode_type.kind != ir.IR_TY_U32) {
+                    out.failed = 1; return;
+                }
+            }
+        }
         if ((has_indirect_signature != 0 || called_index >= 0)
             && llvm_abi_has_c_aggregate(unit, &called) != 0) {
-            llvm_abi_emit_c_call(unit, out, body, inst, &call, &called, next);
+            if (gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0) {
+                llvm_apple_abi_emit_call(unit, out, body, inst, &call, &called, next);
+            } else { llvm_abi_emit_c_call(unit, out, body, inst, &call, &called, next); }
             if (has_indirect_signature != 0 && called.params != 0) { free(called.params.to_type(*void)); }
             return;
         }
@@ -455,7 +470,7 @@ fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
         if (inst.result_type < 0) { llvm_text(out, "void"); }
         else {
             let result ir.IRType = body.types[inst.result_type];
-            let result_attr int = llvm_abi_attr_kind(call.abi, result.kind);
+            let result_attr int = llvm_abi_attr_kind(unit, call.abi, result.kind);
             if (result_attr == 1) { llvm_text(out, "signext "); }
             else if (result_attr == 2) { llvm_text(out, "zeroext "); }
             llvm_abi_type(out, call.abi, result.kind, result.bits);
@@ -485,7 +500,7 @@ fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
             let arg ir.IRCallArg = body.call_args[call.arg_first + i];
             let ty ir.IRType = body.types[arg.type_id];
             llvm_abi_type(out, call.abi, ty.kind, ty.bits);
-            let attr int = llvm_abi_attr_kind(call.abi, ty.kind);
+            let attr int = llvm_abi_attr_kind(unit, call.abi, ty.kind);
             if (attr == 1) { llvm_text(out, " signext"); }
             else if (attr == 2) { llvm_text(out, " zeroext"); }
             llvm_byte(out, ' ');
@@ -508,11 +523,20 @@ fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
     let param_index int = inst.imm.to_type(int);
     if (inst.op == ir.IR_OP_PARAM && body.abi == gen.ABI_C
         && llvm_abi_has_c_aggregate(unit, symbol) != 0) {
-        if (llvm_abi_c_param(unit, symbol, out, inst, next) != 0) { return; }
-        let aggregate_return int = llvm_abi_c_aggregate_kind(unit.types[symbol.type_id].kind);
-        let logical int = inst.imm.to_type(int) - aggregate_return;
-        param_index = llvm_abi_c_param_physical(unit, symbol, logical);
-        if (param_index < 0) { out.failed = 1; return; }
+        if (gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0) {
+            let physical int = -1;
+            if (llvm_apple_abi_param(unit, symbol, out, inst, next, &physical) != 0) { return; }
+            let aggregate_return int = llvm_apple_abi_is_aggregate(unit.types[symbol.type_id].kind);
+            let logical int = inst.imm.to_type(int) - aggregate_return;
+            param_index = llvm_apple_abi_param_physical(unit, symbol, logical);
+            if (param_index < 0) { out.failed = 1; return; }
+        } else {
+            if (llvm_abi_c_param(unit, symbol, out, inst, next) != 0) { return; }
+            let aggregate_return int = llvm_abi_c_aggregate_kind(unit.types[symbol.type_id].kind);
+            let logical int = inst.imm.to_type(int) - aggregate_return;
+            param_index = llvm_abi_c_param_physical(unit, symbol, logical);
+            if (param_index < 0) { out.failed = 1; return; }
+        }
     }
     if (inst.op == ir.IR_OP_PARAM && body.abi == gen.ABI_C && ty.kind == ir.IR_TY_BOOL) {
         llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = zext i1 %p");
@@ -594,8 +618,11 @@ fn llvm_terminator(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
         llvm_temp(out, condition); llvm_text(out, ", label %b"); llvm_number(out, block.succ0.to_type(u64));
         llvm_text(out, ", label %b"); llvm_number(out, block.succ1.to_type(u64)); llvm_byte(out, '\n');
     } else if (block.term == ir.IR_TERM_RET) {
-        if (body.abi == gen.ABI_C
-            && llvm_abi_c_return(unit, symbol, body, out, next) != 0) { return; }
+        if (body.abi == gen.ABI_C) {
+            if (gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0) {
+                if (llvm_apple_abi_return(unit, symbol, body, out, next) != 0) { return; }
+            } else if (llvm_abi_c_return(unit, symbol, body, out, next) != 0) { return; }
+        }
         let ty ir.IRType = body.types[body.ret_type];
         if (body.abi == gen.ABI_C && ty.kind == ir.IR_TY_BOOL) {
             let normalized int = llvm_new_temp(out, next);

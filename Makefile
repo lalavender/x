@@ -35,9 +35,9 @@
 #
 # 内嵌静态 LLVM（LL3，见 docs/02-plan/yh-LLVM后端替换实施方案.md）：
 # 根目录 $(YH) 由种子冷编，最终链接发生在编译器内部（compiler/cmd/
-# link_cache.yh 的 mb_link），只认 PATH 上的 gcc。因此这里让
-# tools/seed-build.py 调 tools/llvm-host.py 生成一个 gcc 链接包装器目录，
-# 并**只对种子构建子进程**前置 PATH：编译（gcc -c）原样透传，最终链接
+# link_cache.yh 的 mb_link），按目标平台使用 clang/gcc。因此这里让
+# tools/seed-build.py 调宿主驱动生成链接包装器目录，并**只对种子构建子进程**
+# 前置 PATH/YH_CC：编译（clang/gcc -c）原样透传，最终链接
 # 改用固定工具链并追加桥归档与静态 LLVM 参数。链接哪个架构由种子文件名
 # 决定（x86_64 宿主上用 bin/yh-linux-arm64 时产物仍是 aarch64 ELF）。
 #
@@ -147,7 +147,7 @@ endif
 # 内嵌静态 LLVM：开关（auto/1/0）与宿主架构。宿主只按**种子文件名**判定，
 # 因为 SEED_ARCH 随宿主架构而 SEED 可被显式覆盖（x86_64 宿主上默认种子里
 # 没有 x64 后端，必须显式用 bin/yh-linux-arm64，此时产物是 aarch64 ELF）。
-# macOS 种子没有对应的固定 SDK，非 Linux 宿主一律不接入。
+# Darwin/ARM64 只在本机有固定源码包/SDK 时自动接入；其他 Darwin 宿主不接入。
 YH_LLVM_HOST ?= auto
 LLVM_HOST =
 ifeq ($(HOST_SYSTEM),Linux)
@@ -161,6 +161,11 @@ ifeq ($(HOST_SYSTEM),Linux)
   LLVM_HOST = linux-x86_64
  endif
 endif
+ifeq ($(HOST_SYSTEM),Darwin)
+ ifneq ($(findstring darwin-arm64,$(notdir $(SEED))),)
+  LLVM_HOST = darwin-aarch64
+ endif
+endif
 LLVM_HOST_MODE = $(YH_LLVM_HOST)
 ifeq ($(YH_LLVM_HOST),1)
  LLVM_HOST_MODE = require
@@ -172,16 +177,23 @@ LLVM_HOST_FLAGS =
 ifneq ($(LLVM_HOST),)
  LLVM_HOST_FLAGS = --llvm-host $(LLVM_HOST) --llvm-mode $(LLVM_HOST_MODE)
 endif
-ifeq ($(LLVM_HOST),linux-x86_64)
- export YH_LLVM_SELFHOST = 1
+ifeq ($(LLVM_HOST),darwin-aarch64)
+ # Darwin/ARM64 默认 LLVM：运行时与缓存专项改用 Darwin LLVM 变体；
+ # project 验收显式选择 LLVM，避免门禁按 legacy 产物布局断言。
+ RUNTIME_TEST = python3 $(TOPSRC)/tests/selfhost/llvm-darwin-runtime.py --compiler-path $(YH_RUN)
+ CACHE_TEST = python3 $(TOPSRC)/tests/selfhost/llvm-darwin-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF)
+ MODCHECK_FLAGS = --backend llvm
+else ifeq ($(LLVM_HOST),linux-x86_64)
  # x64 默认 LLVM 后端下，runtime-memory 的内存运行时契约由 LLVM x64 导入审计覆盖；
  # 完整 legacy 形态（含 ARM64 汇编）留给 arm64/Darwin 宿主。
- RUNTIME_MEMORY_FLAG = --llvm-x64
+ RUNTIME_TEST = python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(YH_RUN) --llvm-x64
  # 缓存专项同样改用 LLVM 缓存门（legacy link-cache 期待外部汇编器调用）。
  CACHE_TEST = python3 $(TOPSRC)/tests/selfhost/llvm-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF)
+ MODCHECK_FLAGS = --backend llvm
 else
- RUNTIME_MEMORY_FLAG =
+ RUNTIME_TEST = python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(YH_RUN)
  CACHE_TEST = python3 $(TOPSRC)/tests/selfhost/link-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF)
+ MODCHECK_FLAGS =
 endif
 
 all: $(YH)
@@ -191,7 +203,11 @@ all: $(YH)
 .PHONY: llvm-host
 llvm-host:
 	@test -n "$(LLVM_HOST)" || { echo "错误: 当前种子 $(SEED) 没有对应的固定 LLVM SDK"; exit 1; }
-	python3 $(TOPSRC)/tools/llvm-host.py prepare --host $(LLVM_HOST)
+	@if test "$(LLVM_HOST)" = darwin-aarch64; then \
+	  python3 $(TOPSRC)/tools/llvm-darwin-host.py prepare --host $(LLVM_HOST) --jobs $(LLVM_JOBS); \
+	else \
+	  python3 $(TOPSRC)/tools/llvm-host.py prepare --host $(LLVM_HOST); \
+	fi
 
 .PHONY: verify-seed
 verify-seed:
@@ -202,7 +218,11 @@ verify-seed:
 # 产物形态随宿主（Darwin → Mach-O，Linux → ELF）。
 # LLVM_HOST_FLAGS 决定是否把静态 LLVM 桥链进 $(YH)；宿主不可用时只警告并
 # 回退旧路径，绝不让 LLVM 成为构建失败点。
-$(YH): $(YH_PREREQ) $(wildcard compiler/*.yh) $(wildcard compiler/*/*.yh) $(TOPSRC)/compiler/project.toml | verify-seed
+$(YH): $(YH_PREREQ) $(wildcard compiler/*.yh) $(wildcard compiler/*/*.yh) \
+	$(wildcard compiler/llvm/*) $(TOPSRC)/compiler/project.toml \
+	$(TOPSRC)/vendor/llvm/sdk.lock.json $(TOPSRC)/tools/seed-build.py \
+	$(TOPSRC)/tools/llvm-host.py $(TOPSRC)/tools/llvm-darwin-host.py \
+	$(TOPSRC)/tools/llvm-darwin-sdk.py | verify-seed
 	rm -rf compiler/.build
 	python3 "$(TOPSRC)/tools/seed-build.py" --compiler "$(abspath $(SEED))" --project "$(TOPSRC)/compiler" --output "$(TOPSRC)/yh" $(LLVM_HOST_FLAGS)
 
@@ -295,12 +315,12 @@ selfhost-native: stage-yh
 	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py --seed "$(abspath $(SEED))" $(SELFHOST_WORK_FLAG) $(CORPUS_FLAG)
 	python3 $(TOPSRC)/tests/selfhost/scratch-isolation.py --compiler-path $(YH_RUN) --jobs 4
 	python3 $(TOPSRC)/tests/selfhost/lex-stats.py --compiler-path $(YH_RUN)
-	python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(YH_RUN) $(RUNTIME_MEMORY_FLAG)
+	$(RUNTIME_TEST)
 	python3 $(TOPSRC)/tests/selfhost/check-command.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/selfhost/foreign-fs-build.py --compiler-path $(YH_RUN)
 	$(CACHE_TEST)
 	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(YH_RUN)
-	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(YH_RUN) $(MODCHECK_WORK_FLAG)
+	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(YH_RUN) $(MODCHECK_FLAGS) $(MODCHECK_WORK_FLAG)
 
 # llvm-isolation：bwrap + 空 PATH 验证最终 yh 不依赖系统 LLVM/lld、无外部旁车。
 .PHONY: llvm-isolation
@@ -327,6 +347,29 @@ test-llvm: stage-yh
 # selfhost-llvm：执行 A→B/C/D 的 O0/O2 原生固定点；脚本在最终 D 候选上运行完整语料与专项门。
 selfhost-llvm: stage-yh
 	python3 $(TOPSRC)/tests/selfhost/llvm-selfhost.py --seed "$(abspath $(LLVM_SEED))" --jobs $(LLVM_JOBS)
+
+# selfhost-llvm-darwin：F2-8 原生连续自举（A legacy → B/C/D LLVM，
+# O0/O2 固定点 + 自解析 + 全量语料 + Darwin 专项门 + 隔离 PATH）。
+.PHONY: selfhost-llvm-darwin
+selfhost-llvm-darwin:
+	@test "$(HOST_SYSTEM)" = Darwin -a "$(HOST_ARCH)" = arm64 || { echo "错误: selfhost-llvm-darwin 要求 Darwin/ARM64"; exit 1; }
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-selfhost.py --seed "$(abspath $(SEED))" --jobs $(LLVM_JOBS)
+
+# test-llvm-darwin：Darwin/ARM64 静态 SDK、弱桩兼容、LLVM 对象与 Apple ABI 探针。
+.PHONY: test-llvm-darwin
+test-llvm-darwin: stage-yh
+	@test "$(HOST_SYSTEM)" = Darwin -a "$(HOST_ARCH)" = arm64 || { echo "错误: test-llvm-darwin 要求 Darwin/ARM64"; exit 1; }
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-sdk.py
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-host.py
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-bridge.py --compiler-path $(YH_RUN) --require-embedded
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-object.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-abi.py --suite full --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-cache.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-default.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-selfhost.py --self-test
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-runtime.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-link.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tools/llvm-darwin-host.py status --host darwin-aarch64
 
 # full：滚种子前的全量门（三层回归 + 自举全套）。
 # full：全套门。test 已用等价编译器跑过一遍语料，selfhost-native 里重复的
@@ -356,6 +399,6 @@ clean:
 help:
 	@sed -n '2,34p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all quick full explorer seed selfhost-native clean help llvm-host yh-asm yh-link-build yh-link-probe stage-yh
+.PHONY: all install uninstall test test-all quick full explorer seed selfhost-native clean help llvm-host yh-asm yh-link-build yh-link-probe stage-yh test-llvm-darwin selfhost-llvm-darwin
 
 endif # ($(INCLUDED),no)

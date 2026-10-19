@@ -4,8 +4,8 @@ import gen;
 // ============================================================================
 // llvm_bridge.yh —— 内嵌 LLVM 静态桥的 yh 侧绑定（LL3）
 //
-// 桥的 C 实现在 compiler/llvm/bridge.c，由 tools/llvm-sdk.py 用固定 SHA-256 的
-// LLVM 21.1.8 静态 SDK 构建成归档，并在构建宿主时静态链进 yh 自身。
+// 桥的 C 实现在 compiler/llvm/bridge.c，由固定 LLVM 21.1.8 静态 SDK 构建成归档，
+// 并在构建宿主时静态链进 yh 自身；无 SDK 时由弱 C 桩保留 legacy 构建。
 // 本文件只做两件事：声明 C ABI 入口，并把「LLVM 文本 + 目标 + 优化级别 + 产物路径」
 // 交给桥；产物由桥原子发布（临时文件 + rename），失败不留部分产物。
 //
@@ -19,10 +19,8 @@ import gen;
 // ============================================================================
 
 // 桥入口的 C ABI 绑定按**目标平台**分文件（`pj_source_target_match` 按文件名后缀筛选）：
-//   llvm_bind.linux.yh  → `@[extern]` 声明，符号由构建时链入的固定 SDK 归档提供；
-//   llvm_bind.darwin.yh → 桩定义：固定 SDK 只有 Linux 宿主（tools/llvm-host.py 的
-//                         hosts 表），macOS 上没有可链接的桥归档。桩让编译器能链接
-//                         自身，该宿主的 LLVM 后端不可用，旧机器后端路径不受影响。
+//   llvm_bind.linux.yh、llvm_bind.darwin.yh → `@[extern]` C ABI 声明；
+//   compiler/llvm/bridge_stub.c → 无 SDK 时的弱定义，固定桥归档的强定义优先。
 // 之所以分文件而不是 `$if`：`$if` 只支持语句级，不能包顶层声明（实测报
 // 「此处需要一个顶层声明」）。
 
@@ -51,6 +49,27 @@ pub fn llvm_bridge_emit(text *char, length int, triple *char, opt_level int,
     return 0;
 }
 
+// llvm_bridge_emit_v2：携带最低 macOS 版本调用新桥；实际配置由 cmd 每次会话校验。
+pub fn llvm_bridge_emit_v2(text *char, length int, triple *char, min_os *char,
+    opt_level int, kind int, path *char, reason *char) int {
+    if (text == 0 || length <= 0 || triple == 0 || path == 0 || reason == 0
+        || (opt_level != 0 && opt_level != 2) || (kind != 0 && kind != 1)) {
+        return gen.fail("LLVM 桥 v2 调用参数无效");
+    }
+    reason[0] = 0;
+    let status int = yh_llvm_emit_v2(text, length.to_type(u64), triple, min_os,
+        opt_level, kind, path, reason, LLVM_BRIDGE_DIAG.to_type(u64));
+    if (status != 0) { return -1; }
+    return 0;
+}
+
+// llvm_lld_link_argv：将完整 lld argv 传给 C ABI，供 Darwin Mach-O 驱动使用。
+pub fn llvm_lld_link_argv(argv **char, argc int, diagnostic *char) int {
+    if (argv == 0 || argc <= 0 || diagnostic == 0) { return -1; }
+    diagnostic[0] = 0;
+    return yh_lld_link(argv, argc, diagnostic, LLVM_LLD_DIAG.to_type(u64));
+}
+
 // llvm_lld_identity：返回固定 SDK、shim 与宿主 GNU 链接配置的 SHA-256；空串表示无 lld。
 pub fn llvm_lld_identity() *char {
     return yh_lld_link_identity();
@@ -74,6 +93,17 @@ pub fn llvm_lld_default_library_count() int {
 // llvm_lld_default_library：读取固定 GNU 链接模板中的一个默认库名。
 pub fn llvm_lld_default_library(index int) *char {
     return yh_lld_default_library(index);
+}
+
+// llvm_lld_selfhost_flag_count：返回自举链接追加参数数量。
+// Darwin 的 raw ld64.lld argv 在 yh 侧拼装，需要这些 force_load 闭包参数。
+pub fn llvm_lld_selfhost_flag_count() int {
+    return yh_lld_selfhost_flag_count();
+}
+
+// llvm_lld_selfhost_flag：按序读取一个自举链接追加参数。
+pub fn llvm_lld_selfhost_flag(index int) *char {
+    return yh_lld_selfhost_flag(index);
 }
 
 // llvm_lld_resolve_library：按内嵌 lld 使用的 LIBRARY_PATH/默认 -L 顺序解析库文件。

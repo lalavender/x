@@ -6,6 +6,23 @@
 C API/配置头、静态组件和许可解包到 tmp/llvm-migration/sdk/linux-x64-capi/ 或
 linux-arm64-capi/。每次从已校验的包重读所需内容，避免信任坏缓存。
 
+Darwin/AArch64 SDK 固定从 LLVM 21.1.8 官方源码归档构建；`darwin_source` 记录
+发布页、下载地址、字节数与官方 SHA-256。下载先校验摘要，再放入
+`tmp/llvm-migration/`；不把当前 Homebrew LLVM 版本或系统工具链当作固定 LLVM。
+在 Darwin/ARM64 上运行 `python3 tools/llvm-darwin-sdk.py preflight` 核对 Apple SDK，
+再确认 CMake/Ninja 可用，用 `python3 tools/llvm-darwin-sdk.py build --jobs 2` 构建 LLVM、clang/opt oracle
+与 lld 静态库。`llvm-config`、LLVM C API 头文件、Mach-O `ld64.lld` 驱动也随 SDK
+打包。构建阶段需要足够空间，低于门槛时会在解包/编译前停止。SDK 的 Darwin 部署版本、
+Apple SDK、Apple 工具链版本、静态组件 SHA 和 LLVM/Clang/lld 工具摘要由 `host.json` 记录。
+完成 SDK 构建后运行 `python3 tools/llvm-darwin-host.py prepare --jobs 2` 编译真实桥，并
+用 Apple `ld64.lld` 验证 SDK 的 libc++、libSystem reexport 与 Mach-O build-version 标签；
+随后真实桥发射 arm64 Mach-O 对象，失败输入保留旧文件。该宿主包装器只在编译器自举时
+由 `YH_CC` 选中，编译/查询调用透传，最终链接才 force-load 桥及固定 LLVM/lld 归档；
+`make YH_LLVM_HOST=1` 显式要求该路径，`make test-llvm-darwin` 验收桥 ABI 和宿主身份。
+F2-0 的真实宿主拒绝基线保存在
+`tmp/llvm-migration/darwin-target/report.json`，包含种子、编译器源码树和目标用例摘要，
+并记录系统、SDK、clang 与链接器版本及路径。
+
 `python3 tools/llvm-sdk.py build` 使用 `/usr/bin/gcc` 编译薄桥，返回精确的静态
 归档链接参数；不查找系统 LLVM，不调用 llvm-config/clang/llc。LLVM 全部组件按
 `.a` 的绝对路径链接进宿主可执行文件，禁止 libLLVM 动态依赖。

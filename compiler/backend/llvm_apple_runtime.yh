@@ -1,0 +1,57 @@
+module backend;
+import ir;
+
+// llvm_apple_runtime_write_support：按实际需要声明 libSystem OS 入口并发射 Darwin runtime 包装器。
+pub fn llvm_apple_runtime_write_support(unit *ir.IRModule, out *LLVMOutput,
+    emit_malloc int, emit_free int, emit_printf int) void {
+    if (emit_malloc != 0 || emit_free != 0) {
+        if (llvm_runtime_named(unit, "mmap") == 0) {
+            llvm_text(out, "declare ptr @mmap(ptr, i64, i32, i32, i32, i64)\n");
+        }
+        if (llvm_runtime_named(unit, "munmap") == 0) {
+            llvm_text(out, "declare i32 @munmap(ptr, i64)\n");
+        }
+    }
+    if (emit_printf != 0 && llvm_runtime_named(unit, "write") == 0) {
+        llvm_text(out, "declare i64 @write(i32, ptr, i64)\n");
+    }
+    if (emit_malloc != 0) { llvm_apple_runtime_write_malloc(out); }
+    if (emit_free != 0) { llvm_apple_runtime_write_free(out); }
+    if (emit_printf != 0) { llvm_apple_runtime_write_printf_support(out); }
+}
+
+// llvm_apple_runtime_write_malloc：用 Darwin MAP_PRIVATE|MAP_ANON 分配并保留 16 字节对齐头部。
+fn llvm_apple_runtime_write_malloc(out *LLVMOutput) void {
+    llvm_text(out, "define weak ptr @__yh_runtime_malloc(i64 %size) noinline nounwind optnone nobuiltin {\nentry:\n");
+    llvm_text(out, "  %overflow = icmp ugt i64 %size, -17\n  br i1 %overflow, label %fail, label %prepare\nprepare:\n");
+    llvm_text(out, "  %zero = icmp eq i64 %size, 0\n  %payload = select i1 %zero, i64 1, i64 %size\n");
+    llvm_text(out, "  %total = add i64 %payload, 16\n  %base = call ptr @mmap(ptr null, i64 %total, i32 3, i32 4098, i32 -1, i64 0)\n");
+    llvm_text(out, "  %address = ptrtoint ptr %base to i64\n  %failed = icmp eq i64 %address, -1\n");
+    llvm_text(out, "  br i1 %failed, label %fail, label %success\nsuccess:\n  store i64 %total, ptr %base, align 8\n");
+    llvm_text(out, "  %user = getelementptr i8, ptr %base, i64 16\n  ret ptr %user\nfail:\n  ret ptr null\n}\n\n");
+}
+
+// llvm_apple_runtime_write_free：NULL 无操作；其他指针读取映射长度并调用 Darwin munmap。
+fn llvm_apple_runtime_write_free(out *LLVMOutput) void {
+    llvm_text(out, "define weak void @__yh_runtime_free(ptr %user) noinline nounwind optnone nobuiltin {\nentry:\n");
+    llvm_text(out, "  %null = icmp eq ptr %user, null\n  br i1 %null, label %done, label %release\nrelease:\n");
+    llvm_text(out, "  %base = getelementptr i8, ptr %user, i64 -16\n  %size = load i64, ptr %base, align 8\n");
+    llvm_text(out, "  %status = call i32 @munmap(ptr %base, i64 %size)\n  br label %done\ndone:\n  ret void\n}\n\n");
+}
+
+// llvm_apple_runtime_write_printf_support：用 libSystem write 处理短写与错误并统计输出字节数。
+fn llvm_apple_runtime_write_printf_support(out *LLVMOutput) void {
+    llvm_text(out, "define internal i64 @yh_printf_write(ptr %data, i64 %len) noinline nounwind optnone nobuiltin {\nentry:\n");
+    llvm_text(out, "  %empty = icmp eq i64 %len, 0\n  br i1 %empty, label %done, label %loop\nloop:\n");
+    llvm_text(out, "  %written = phi i64 [ 0, %entry ], [ %next, %advance ]\n");
+    llvm_text(out, "  %cursor = getelementptr i8, ptr %data, i64 %written\n  %left = sub i64 %len, %written\n");
+    llvm_text(out, "  %chunk = call i64 @write(i32 1, ptr %cursor, i64 %left)\n");
+    llvm_text(out, "  %failed = icmp sle i64 %chunk, 0\n  br i1 %failed, label %error, label %advance\nadvance:\n");
+    llvm_text(out, "  %next = add i64 %written, %chunk\n  %complete = icmp uge i64 %next, %len\n");
+    llvm_text(out, "  br i1 %complete, label %done, label %loop\ndone:\n  ret i64 %len\nerror:\n  ret i64 -1\n}\n\n");
+    llvm_text(out, "define internal i32 @yh_printf_emit(ptr %data, i64 %len, ptr %count) noinline nounwind optnone nobuiltin {\nentry:\n");
+    llvm_text(out, "  %result = call i64 @yh_printf_write(ptr %data, i64 %len)\n  %failed = icmp slt i64 %result, 0\n");
+    llvm_text(out, "  br i1 %failed, label %error, label %account\naccount:\n  %old = load i64, ptr %count, align 8\n");
+    llvm_text(out, "  %total = add i64 %old, %result\n  store i64 %total, ptr %count, align 8\n  ret i32 0\nerror:\n  ret i32 -1\n}\n\n");
+    llvm_runtime_write_printf_integer(out);
+}

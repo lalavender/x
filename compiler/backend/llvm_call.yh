@@ -2,7 +2,7 @@ module backend;
 import gen;
 import ir;
 
-// llvm_abi_c_scalar：接受 Linux x86_64 C ABI 固定参数的布尔、整数、浮点与指针标量。
+// llvm_abi_c_scalar：列出 LLVM C ABI 可按值传递的布尔、整数、浮点与指针标量种类。
 fn llvm_abi_c_scalar(kind int) int {
     return kind == ir.IR_TY_BOOL || kind == ir.IR_TY_I8 || kind == ir.IR_TY_I16
         || kind == ir.IR_TY_I32 || kind == ir.IR_TY_I64
@@ -11,6 +11,15 @@ fn llvm_abi_c_scalar(kind int) int {
         || kind == ir.IR_TY_F32 || kind == ir.IR_TY_F64
         || kind >= ir.IR_TY_PTR && kind <= ir.IR_TY_PTR_LAST
         || kind == ir.IR_MODULE_TY_FUNCTION ? 1 : 0;
+}
+
+// llvm_abi_c_scalar_type：模块聚合编号与 canonical 指针编号相交，先按模块类型类别排除聚合。
+fn llvm_abi_c_scalar_type(unit *ir.IRModule, type_id int) int {
+    if (unit == 0 || type_id < 0 || type_id >= unit.type_count) { return 0; }
+    let kind int = unit.types[type_id].kind;
+    if (kind == ir.IR_MODULE_TY_STRUCT || kind == ir.IR_MODULE_TY_UNION
+        || kind == ir.IR_MODULE_TY_ARRAY || kind == ir.IR_MODULE_TY_SLICE) { return 0; }
+    return llvm_abi_c_scalar(kind);
 }
 
 const LLVM_ABI_CLASS_INTEGER int = 1;
@@ -136,32 +145,71 @@ fn llvm_abi_classify(unit *ir.IRModule, type_id int, out *LLVMABIInfo) int {
     return 0;
 }
 
-// llvm_abi_supported：只在 SysV AMD64 接受裸 C 变参，并限制其固定参数为标量。
+// llvm_abi_supported：按目标限制 C 标量、聚合与裸变参；Darwin 首期仅开放固定标量签名。
 fn llvm_abi_supported(unit *ir.IRModule, symbol *ir.IRModuleSymbol) int {
     if (symbol.abi == ir.IR_ABI_YH_LLVM_V1) {
+        let sysv_printf int = symbol.variadic == 1
+            && gen.cstr_eq(unit.target.abi, "sysv-amd64") != 0;
+        let darwin_printf int = symbol.variadic == 1
+            && gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
+            && gen.cstr_eq(symbol.name, "printf") != 0;
+        let darwin_open int = symbol.variadic == 1
+            && gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
+            && gen.cstr_eq(symbol.name, "open") != 0;
+        if (darwin_open != 0
+            && (symbol.param_count != 2
+                || unit.types[symbol.params[0]].kind < ir.IR_TY_PTR
+                || unit.types[symbol.params[0]].kind > ir.IR_TY_PTR_LAST
+                || unit.types[symbol.params[1]].kind != ir.IR_TY_I32
+                || unit.types[symbol.type_id].kind != ir.IR_TY_I32)) { return 0; }
         return symbol.variadic == 0 || symbol.variadic == 2
-            || symbol.variadic == 1 && gen.cstr_eq(unit.target.abi, "sysv-amd64") != 0 ? 1 : 0;
+            || sysv_printf != 0 || darwin_printf != 0 || darwin_open != 0 ? 1 : 0;
     }
-    if (symbol.abi != gen.ABI_C || symbol.variadic < 0 || symbol.variadic > 1
-        || gen.cstr_eq(unit.target.abi, "sysv-amd64") == 0) { return 0; }
+    if (symbol.abi != gen.ABI_C || symbol.variadic < 0 || symbol.variadic > 1) { return 0; }
+    let darwin int = gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0;
+    let sysv int = gen.cstr_eq(unit.target.abi, "sysv-amd64") != 0;
+    if (darwin == 0 && sysv == 0) { return 0; }
     let result_type ir.IRModuleType = unit.types[symbol.type_id];
     let result int = result_type.kind;
+    if (darwin != 0 && symbol.variadic != 0
+        && gen.cstr_eq(symbol.name, "printf") == 0
+        && gen.cstr_eq(symbol.name, "open") == 0) { return 0; }
+    if (darwin != 0 && symbol.variadic == 1
+        && gen.cstr_eq(symbol.name, "open") != 0
+        && (symbol.param_count != 2
+            || unit.types[symbol.params[0]].kind < ir.IR_TY_PTR
+            || unit.types[symbol.params[0]].kind > ir.IR_TY_PTR_LAST
+            || unit.types[symbol.params[1]].kind != ir.IR_TY_I32
+            || result != ir.IR_TY_I32)) { return 0; }
+    if (darwin != 0 && result != ir.IR_TY_VOID
+        && llvm_abi_c_scalar_type(unit, symbol.type_id) == 0
+        && llvm_apple_abi_supported(unit, symbol.type_id) == 0) { return 0; }
     if (symbol.variadic == 1
         && result != ir.IR_TY_VOID && llvm_abi_c_scalar(result) == 0) { return 0; }
     if (result != ir.IR_TY_VOID && llvm_abi_c_scalar(result) == 0) {
-        let info LLVMABIInfo;
-        if ((result != ir.IR_MODULE_TY_STRUCT && result != ir.IR_MODULE_TY_UNION)
-            || llvm_abi_classify(unit, symbol.type_id, &info) != 0) { return 0; }
+        if (darwin != 0) {
+            if (llvm_apple_abi_supported(unit, symbol.type_id) == 0) { return 0; }
+        } else {
+            let info LLVMABIInfo;
+            if ((result != ir.IR_MODULE_TY_STRUCT && result != ir.IR_MODULE_TY_UNION)
+                || llvm_abi_classify(unit, symbol.type_id, &info) != 0) { return 0; }
+        }
     }
     let i int = 0;
     for i < symbol.param_count {
         let param ir.IRModuleType = unit.types[symbol.params[i]];
         let kind int = param.kind;
+        if (darwin != 0 && llvm_abi_c_scalar_type(unit, symbol.params[i]) == 0
+            && llvm_apple_abi_supported(unit, symbol.params[i]) == 0) { return 0; }
         if (symbol.variadic == 1 && llvm_abi_c_scalar(kind) == 0) { return 0; }
         if (llvm_abi_c_scalar(kind) == 0) {
-            let info LLVMABIInfo;
-            if ((kind != ir.IR_MODULE_TY_STRUCT && kind != ir.IR_MODULE_TY_UNION)
-                || llvm_abi_classify(unit, symbol.params[i], &info) != 0) { return 0; }
+            if (darwin != 0) {
+                if (llvm_apple_abi_supported(unit, symbol.params[i]) == 0) { return 0; }
+            } else {
+                let info LLVMABIInfo;
+                if ((kind != ir.IR_MODULE_TY_STRUCT && kind != ir.IR_MODULE_TY_UNION)
+                    || llvm_abi_classify(unit, symbol.params[i], &info) != 0) { return 0; }
+            }
         }
         i += 1;
     }
@@ -201,11 +249,12 @@ fn llvm_indirect_call_symbol(unit *ir.IRModule, call *ir.IRCall,
     return 0;
 }
 
-// llvm_abi_attr_kind：映射 LLVM 窄整数 ABI 属性，0 表示无需扩展属性。
-fn llvm_abi_attr_kind(abi int, kind int) int {
-    if (abi != gen.ABI_C) { return 0; }
+// llvm_abi_attr_kind：按输出目标映射 LLVM 窄整数 C ABI 属性，0 表示无需扩展属性。
+fn llvm_abi_attr_kind(unit *ir.IRModule, abi int, kind int) int {
+    if (unit == 0 || abi != gen.ABI_C
+        || gen.cstr_eq(unit.target.abi, "sysv-amd64") == 0
+            && gen.cstr_eq(unit.target.abi, "darwin-aapcs64") == 0) { return 0; }
     if (kind == ir.IR_TY_I8 || kind == ir.IR_TY_I16) { return 1; }
     if (kind == ir.IR_TY_BOOL || kind == ir.IR_TY_U8 || kind == ir.IR_TY_U16) { return 2; }
     return 0;
 }
-

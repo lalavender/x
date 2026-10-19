@@ -653,6 +653,9 @@ A/B/C/D 均为 ELF machine=62，O0/O2 B→C、C→D 的 24 个 `.ll/.s.i/.s.ct` 
 
 **边界：**R2b 真线程池与任务私有上下文仍未实现，继续作为 LL11 默认切换硬门；fork worker
 的通过不等同于线程池完成。
+**2026-10-19 后续**：macOS/ARM64 已由 F2-10 切默认 LLVM（Darwin 种子已滚）；
+Linux/x86_64 与 Darwin/ARM64 均为默认 LLVM，Linux/ARM64 仍 legacy。性能项
+（RS2/RS3/R2c、20 轮对照）后置为专门工作，不据此宣布 LL11 全量完成。
 
 ## LL11：性能评估与 x64 默认切换（LLVM-11、13、15）
 

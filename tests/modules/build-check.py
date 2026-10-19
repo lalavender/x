@@ -194,6 +194,9 @@ case("u1-extern-abs-module", "run", "externabs", "host", 0)
 case("u3-c-source-object-library-mix", "run", "cinterop", ".", 0)
 case("cabi-automatic-values-and-callbacks", "cabi-run", "autoabi", ".", 0)
 case("i1-inline-ssa-and-fallback", "inline", "inline", ".")
+# 非 inline 函数声明在 inline 函数之前：验证按文件切分的替换位移
+# 在 pass 1 不会把后续函数的序言推掉（曾导致汇编首行只剩 `29, sp`）。
+case("i1-inline-order-after-noninline", "run", "inlineorder", ".", 0)
 case("r1-token-replay-run", "run", "tokenreplay", ".", 42)
 case("r2a-ssa-phi-verifier", "run", "irverify", ".", 0)
 case("llvm-float-cross-module", "run", "llvmfloat", ".", 0)
@@ -315,6 +318,21 @@ def main():
     COMPILER_BACKEND = args.backend
     COMPILER_TARGET = args.target
     COMPILER_OPT_LEVEL = args.opt_level
+    if COMPILER_BACKEND == "llvm":
+        # 显式 LLVM 模式下未给 --target/--opt-level 时按宿主默认补齐：
+        # 默认后端就是 LLVM，门禁不应要求调用方重复传宿主 triple。
+        if not COMPILER_TARGET:
+            import platform
+            machine = platform.machine().lower()
+            if sys.platform == "darwin":
+                COMPILER_TARGET = "aarch64-apple-darwin" if machine in ("arm64", "aarch64") \
+                    else "x86_64-apple-darwin"
+            elif machine in ("x86_64", "amd64"):
+                COMPILER_TARGET = "x86_64-unknown-linux-gnu"
+            else:
+                COMPILER_TARGET = "aarch64-unknown-linux-gnu"
+        if not COMPILER_OPT_LEVEL:
+            COMPILER_OPT_LEVEL = "0"
     COMPILER_FLAGS = []
     if args.backend:
         COMPILER_FLAGS += ["--backend", args.backend]
@@ -908,22 +926,28 @@ def main():
             return out
         if c["kind"] == "linux-syscall-asm":
             if COMPILER_BACKEND == "llvm":
-                emitted = sh([compiler, "--emit-asm", "main.linux.x64.yh"], cwd=dst)
-                asm = emitted.stdout
-                built = sh([compiler, "build"], cwd=dst)
-                program = dst / ".build" / "linuxsyscall"
-                run = sh([str(program)], cwd=dst) if program.exists() else None
-                report(emitted.returncode == 0 and "syscall" in asm
-                       and "linux_syscall6" in asm and built.returncode == 0
-                       and run is not None and run.returncode == 0,
-                       c["name"],
-                       f"Linux x64 syscall 运行时/函数值入口失败: "
-                       f"emit={emitted.returncode}, build={built.returncode}, "
-                       f"run={run.returncode if run else None}\n"
-                       f"{emitted.stderr[-400:]}\n{asm[-1000:]}")
-                report("linux_syscall6" in asm and "syscall" in asm,
-                       "r3-linux-syscall-function-value-has-local-entry",
-                       "Linux syscall 函数值没有 LLVM ABI 入口")
+                # 本用例的源文件是 Linux/x64 专属（main.linux.x64.yh）。
+                # 只有目标为 Linux 时才验证正向运行；Darwin 等其它目标下
+                # 只保留「目标门控拒绝」断言，避免把跨目标的预期拒绝
+                # 当成后端缺陷（与运行语料的 // platform: 筛选同思路）。
+                target_linux = COMPILER_TARGET is not None and "linux" in COMPILER_TARGET
+                if target_linux:
+                    emitted = sh([compiler, "--emit-asm", "main.linux.x64.yh"], cwd=dst)
+                    asm = emitted.stdout
+                    built = sh([compiler, "build"], cwd=dst)
+                    program = dst / ".build" / "linuxsyscall"
+                    run = sh([str(program)], cwd=dst) if program.exists() else None
+                    report(emitted.returncode == 0 and "syscall" in asm
+                           and "linux_syscall6" in asm and built.returncode == 0
+                           and run is not None and run.returncode == 0,
+                           c["name"],
+                           f"Linux x64 syscall 运行时/函数值入口失败: "
+                           f"emit={emitted.returncode}, build={built.returncode}, "
+                           f"run={run.returncode if run else None}\n"
+                           f"{emitted.stderr[-400:]}\n{asm[-1000:]}")
+                    report("linux_syscall6" in asm and "syscall" in asm,
+                           "r3-linux-syscall-function-value-has-local-entry",
+                           "Linux syscall 函数值没有 LLVM ABI 入口")
                 darwin = sh([compiler, "-target", "darwin", "--emit-asm",
                              "main.linux.x64.yh"], cwd=dst)
                 report(darwin.returncode != 0 and "未声明" in darwin.stderr,
@@ -1468,9 +1492,17 @@ def main():
                 main_text = next((path.read_text() for path in host_asm
                                   if "example_externabs_host-main" in str(path)), "")
                 if COMPILER_BACKEND == "llvm":
+                    # LLVM 后端会给跨模块符号追加 ABI 后缀 `$yhllvmv1`，
+                    # 因此只匹配名字前缀，不假设裸名结尾。
                     stop_call = 'call void @"stop__example_externabs_lib__lib_'
                     stop_pos = main_text.find(stop_call)
-                    after_stop = main_text[stop_pos:] if stop_pos >= 0 else ""
+                    # 只看本函数体：文件尾还有 weak runtime helper 定义，
+                    # 同样含 unreachable，截到文件尾会把它们误当调用方控制流。
+                    after_stop = ""
+                    if stop_pos >= 0:
+                        tail = main_text[stop_pos:]
+                        end = tail.find("\n}")
+                        after_stop = tail if end < 0 else tail[:end]
                     five = after_stop.find("add i32 0, 5")
                     control_ok = (stop_pos >= 0
                                   and "call void @llvm.trap()" not in after_stop

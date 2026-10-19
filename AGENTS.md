@@ -34,6 +34,9 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
 - **平台顺序（2026-10-12 用户决定）：开发与验证以 Linux 平台为先**，
   macOS/Windows 等其他平台后续接入；非 Linux 目标不因日常改动回归验收，
   但 Linux 上的 `make test` / `make selfhost-native` 与滚种子照常执行。
+  **2026-10-19（F2-10）**：macOS/ARM64 默认后端已切 LLVM（Darwin 种子
+  `bin/yh-darwin-arm64` 含固定桥）；Linux/ARM64 仍为 legacy，等 F1。
+  性能项（RS2/RS3/R2c、20 轮对照）后置，不据此宣称首个完整 SSA 版本完成。
 - **本地/CI 分工（2026-10-19 用户决定）**：在 Linux 或 macOS 上开发，本地只需
   保证**本平台**门禁绿（`make test` + `make selfhost-native`；运行语料已按
   `// platform:` 头部指令筛选，平台专属门如 `make test-llvm` 在别的宿主会

@@ -59,6 +59,27 @@ fn llvm_emit_reason(unit *ir.IRModule, source int, offset int, reason *char) voi
     gen.write_all(2, &buffer[0], n);
 }
 
+// llvm_emit_with_target：Linux 沿用 v1；Darwin 使用已校验会话配置调用带部署版本的 v2。
+fn llvm_emit_with_target(text *char, length int, triple *char, opt_level int,
+    kind int, path *char, reason *char) int {
+    if (gen.G().c_target.os == gen.TARGET_OS_DARWIN) {
+        let min_os *char = cmd_darwin_min_os();
+        if (min_os == 0) { return -1; }
+        return backend.llvm_bridge_emit_v2(text, length, triple, min_os,
+            opt_level, kind, path, reason);
+    }
+    return backend.llvm_bridge_emit(text, length, triple, opt_level,
+        kind, path, reason);
+}
+
+// llvm_emit_add_deployment_metadata：为 Darwin LLVM 文本补充与桥接器一致的规范化最低系统版本。
+fn llvm_emit_add_deployment_metadata(output *backend.LLVMOutput) int {
+    if (gen.G().c_target.os != gen.TARGET_OS_DARWIN) { return 0; }
+    let min_os *char = cmd_darwin_min_os();
+    if (min_os == 0) { return -1; }
+    return backend.llvm_output_add_macos_min_os(output, min_os);
+}
+
 // llvm_emit_module_to：把受检快照降低为模块 IR 并经内嵌桥发布产物。
 // kind：0 = 目标文件（对象），1 = 汇编文本；out_path 为产物路径，text_path 非空时
 // 额外写出 LLVM 文本（审阅/差分用，失败不致命）。
@@ -66,6 +87,7 @@ fn llvm_emit_reason(unit *ir.IRModule, source int, offset int, reason *char) voi
 fn llvm_emit_module_to(unit *ast.CheckedModule, kind int, out_path *char,
     text_path *char, stats *LLVMEmitResult) int {
     let gs *gen.GenState = gen.G();
+    if (cmd_darwin_link_configure() != 0) { return -1; }
     let mod_ir ir.IRModule;
     let lowered int = ast.lower_module(unit, &mod_ir);
     if (lowered != 0) {
@@ -75,6 +97,11 @@ fn llvm_emit_module_to(unit *ast.CheckedModule, kind int, out_path *char,
     gs.c_stats_checked_functions += mod_ir.function_count;
     let output backend.LLVMOutput;
     if (backend.llvm_emit_module(&mod_ir, &gs.c_target, &output) != 0) {
+        ir.ir_module_release(&mod_ir);
+        return -1;
+    }
+    if (llvm_emit_add_deployment_metadata(&output) != 0) {
+        backend.llvm_output_release(&output);
         ir.ir_module_release(&mod_ir);
         return -1;
     }
@@ -103,7 +130,7 @@ fn llvm_emit_module_to(unit *ast.CheckedModule, kind int, out_path *char,
         }
     }
     let reason [backend.LLVM_BRIDGE_DIAG]u8;
-    if (backend.llvm_bridge_emit(output.text.to_type(*char), output.length,
+    if (llvm_emit_with_target(output.text.to_type(*char), output.length,
             gs.c_target.triple, gs.c_opt_level, kind, out_path,
             (&reason[0]).to_type(*char)) != 0) {
         // 桥失败：按模块第一个来源定位，便于把 LLVM 错误映射回 yh 源码。
@@ -239,12 +266,18 @@ fn mb_llvm_semantics() int {
 fn llvm_emit_text_only(unit *ast.CheckedModule, text_path *char,
     stats *LLVMEmitResult) int {
     let gs *gen.GenState = gen.G();
+    if (cmd_darwin_link_configure() != 0) { return -1; }
     let mod_ir ir.IRModule;
     let lowered int = ast.lower_module(unit, &mod_ir);
     if (lowered != 0) { return 1; }
     gs.c_stats_checked_functions += mod_ir.function_count;
     let output backend.LLVMOutput;
     if (backend.llvm_emit_module(&mod_ir, &gs.c_target, &output) != 0) {
+        ir.ir_module_release(&mod_ir);
+        return -1;
+    }
+    if (llvm_emit_add_deployment_metadata(&output) != 0) {
+        backend.llvm_output_release(&output);
         ir.ir_module_release(&mod_ir);
         return -1;
     }
@@ -291,6 +324,7 @@ fn llvm_emit_text_only(unit *ast.CheckedModule, text_path *char,
 fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
     text_path *char, link int) int {
     let gs *gen.GenState = gen.G();
+    if (cmd_darwin_link_configure() != 0) { return -1; }
     // 受检前端必须在任何语义遍历之前进入：进入时拒绝已有旧输出，退出前核对
     // text/body/data/bss 四缓冲为零。单文件路径的调用方只做过读源与建表。
     if (gen.front_checked_begin() != 0) { return 1; }
@@ -371,7 +405,9 @@ fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
     if (link == 0) { return 0; }
     // 单文件链接沿用项目路径的目标选择；Linux x64 有内嵌 lld 时不 fork cc。
     let link_rc int = -1;
-    if (mb_lld_x64_enabled() != 0) {
+    if (mb_lld_darwin_enabled() != 0) {
+        link_rc = mb_macho_link_single(gen.arr_cstr(&object[0]), link_tmp_path);
+    } else if (mb_lld_x64_enabled() != 0) {
         let objects [2]*char;
         objects[0] = gen.arr_cstr(&object[0]);
         objects[1] = 0.to_type(*char);
@@ -414,6 +450,11 @@ fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
     if (mb_object_machine_matches(link_tmp_path) == 0) {
         unlink(link_tmp_path);
         return gen.fail_path("LLVM 链接产物架构与当前 target 不符: ", out_path);
+    }
+    if (mb_lld_darwin_enabled() != 0
+        && mb_darwin_executable_matches(link_tmp_path) == 0) {
+        unlink(link_tmp_path);
+        return gen.fail_path("Darwin LLVM 链接产物版本或代码签名校验失败: ", out_path);
     }
     if (rename(link_tmp_path, out_path) != 0) {
         unlink(link_tmp_path);

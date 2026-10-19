@@ -305,7 +305,10 @@ def check_asm_symbols(path):
     if target == "":
         import platform
         machine = platform.machine().lower()
-        if machine in ("x86_64", "amd64"):
+        if platform.system() == "Darwin":
+            target = "aarch64-apple-darwin" if machine in ("arm64", "aarch64") \
+                else "x86_64-apple-darwin"
+        elif machine in ("x86_64", "amd64"):
             target = "x86_64-unknown-linux-gnu"
         elif machine in ("aarch64", "arm64"):
             target = "aarch64-unknown-linux-gnu"

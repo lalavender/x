@@ -1,0 +1,443 @@
+#!/usr/bin/env python3
+"""构建并验收 yh 的 Darwin/ARM64 静态 LLVM/lld SDK。"""
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+WORK = ROOT / "tmp/llvm-migration/darwin-sdk"
+MANIFEST = ROOT / "vendor/llvm/sdk.lock.json"
+DEFAULT_MIN_OS = "14.0.0"
+MIN_FREE_BYTES = 8 * 1024**3
+MIN_BUILD_FREE_BYTES = 5 * 1024**3
+MIN_REPACK_FREE_BYTES = 2 * 1024**3
+
+
+def select_host(system=None, machine=None):
+    """只接受当前首期可原生运行桥的 Darwin/ARM64 宿主。"""
+    system = platform.system() if system is None else system
+    machine = platform.machine() if machine is None else machine
+    if system == "Darwin" and machine in ("arm64", "aarch64"):
+        return "darwin-aarch64"
+    raise RuntimeError(f"Darwin LLVM SDK 当前只支持 Darwin/ARM64 宿主，收到 {system}/{machine}")
+
+
+def parse_min_os(value):
+    """校验并规范 MACOSX_DEPLOYMENT_TARGET 为三段十进制版本。"""
+    match = re.fullmatch(r"([0-9]+)\.([0-9]+)(?:\.([0-9]+))?", value or "")
+    if not match:
+        raise RuntimeError(f"最低 macOS 版本格式无效：{value!r}，需要 major.minor[.patch]")
+    major, minor, patch = (int(part or 0) for part in match.groups())
+    if major <= 0 or minor < 0 or patch < 0:
+        raise RuntimeError(f"最低 macOS 版本组件无效：{value!r}")
+    return f"{major}.{minor}.{patch}"
+
+
+def source_spec():
+    """读取锁定的 Darwin LLVM 源码包，并核验版本、URL 与摘要格式。"""
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    spec = manifest.get("darwin_source", {})
+    if manifest.get("llvm_version") != "21.1.8" or not spec.get("url"):
+        raise RuntimeError("SDK 清单缺少固定 LLVM 21.1.8 Darwin 源码包")
+    if not re.fullmatch(r"[0-9a-f]{64}", spec.get("sha256", "")):
+        raise RuntimeError("SDK 清单中的 LLVM 源码 SHA-256 格式无效")
+    return spec
+
+
+def build_spec():
+    """读取必须随 LLVM 源码版本一起锁定的 Darwin CMake 构建配置。"""
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    spec = manifest.get("darwin_build", {})
+    if spec.get("deployment_target") != DEFAULT_MIN_OS:
+        raise RuntimeError("Darwin SDK 默认部署版本与锁定构建配置不一致")
+    if (spec.get("projects") != ["clang", "lld"]
+            or spec.get("targets") != ["AArch64", "X86"]
+            or spec.get("architectures") != ["arm64"]):
+        raise RuntimeError("Darwin SDK 项目或后端目标与固定闭包不一致")
+    disabled = ("build_shared_libs", "llvm_build_llvm_dylib", "llvm_build_llvm_c_dylib",
+                "llvm_link_llvm_dylib", "enable_zlib", "enable_zstd", "enable_libxml2",
+                "include_tests", "include_examples", "include_benchmarks", "include_docs")
+    if spec.get("build_type") != "Release" or any(spec.get(key) is not False for key in disabled):
+        raise RuntimeError("Darwin LLVM SDK 必须是 Release、纯静态且关闭可选依赖/测试")
+    return spec
+
+
+def digest(path):
+    """分块计算源归档或 SDK 静态库摘要。"""
+    with Path(path).open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def verify_archive(path, spec):
+    """在解包前同时核对固定源归档字节数和 SHA-256。"""
+    path = Path(path)
+    if not path.is_file():
+        raise RuntimeError(f"LLVM 源码包不存在：{path}")
+    if path.stat().st_size != spec["size_bytes"]:
+        raise RuntimeError("LLVM 源码包字节数与固定发行包不符")
+    if digest(path) != spec["sha256"]:
+        raise RuntimeError("LLVM 源码包 SHA-256 与固定发行包不符")
+    return path
+
+
+def load_sdk_version(sdk_root):
+    """从 Apple SDKSettings.json 读取 SDK 版本并拒绝非 macOS SDK。"""
+    settings_path = Path(sdk_root) / "SDKSettings.json"
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"无法读取 Apple SDK 元数据 {settings_path}: {error}") from error
+    version = settings.get("Version")
+    canonical = settings.get("CanonicalName", "")
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", version):
+        raise RuntimeError("SDKSettings.json 缺少有效的 Version")
+    if canonical and not canonical.startswith("macosx"):
+        raise RuntimeError(f"SDK 不是 macOS SDK：{canonical}")
+    return version
+
+
+def resolve_sdk_root(environment=None, system=None, machine=None, run=None):
+    """优先解析显式 SDKROOT；仅 Darwin/ARM64 可用 xcrun 自动发现。"""
+    environment = os.environ if environment is None else environment
+    explicit = environment.get("SDKROOT", "").strip()
+    if explicit:
+        root = Path(explicit).expanduser().resolve()
+        load_sdk_version(root)
+        return root
+    select_host(system, machine)
+    run = subprocess.run if run is None else run
+    result = run(["xcrun", "--sdk", "macosx", "--show-sdk-path"],
+                 capture_output=True, text=True, check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError("未找到 macOS SDK；设置 SDKROOT 或安装 Xcode Command Line Tools")
+    root = Path(result.stdout.strip()).resolve()
+    load_sdk_version(root)
+    return root
+
+
+def source_archive_path():
+    """返回固定源码包的 tmp 缓存路径，避免复用用户安装的 Homebrew 组件。"""
+    return WORK / source_spec()["package"]
+
+
+def download_source():
+    """只下载清单锁定的 LLVM 源码，并在原子改名之前验证字节数与摘要。"""
+    spec = source_spec()
+    WORK.mkdir(parents=True, exist_ok=True)
+    package = source_archive_path()
+    if package.exists():
+        return verify_archive(package, spec)
+    temporary = package.with_suffix(package.suffix + ".download")
+    try:
+        with urllib.request.urlopen(spec["url"], timeout=60) as response, temporary.open("wb") as output:
+            shutil.copyfileobj(response, output, length=1024 * 1024)
+        verify_archive(temporary, spec)
+        temporary.replace(package)
+    except Exception:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+    return package
+
+
+def run_logged(command, cwd, logfile):
+    """执行固定构建命令并把完整输出写入 tmp，错误时报告日志位置。"""
+    result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
+    Path(logfile).write_text(result.stdout + result.stderr, encoding="utf-8")
+    if result.returncode:
+        raise RuntimeError(f"命令失败（{result.returncode}）：{' '.join(map(str, command))}；日志：{logfile}")
+    return result.stdout + result.stderr
+
+
+def sdk_toolchain():
+    """解析构建和验收使用的 Apple 工具绝对路径及编译器版本。"""
+    paths = {}
+    for name, command in (("clang", ["xcrun", "--find", "clang"]),
+                          ("clangxx", ["xcrun", "--find", "clang++"]),
+                          ("ar", ["xcrun", "--find", "ar"]),
+                          ("libtool", ["xcrun", "--find", "libtool"]),
+                          ("lipo", ["xcrun", "--find", "lipo"]),
+                          ("otool", ["xcrun", "--find", "otool"])):
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode or not result.stdout.strip():
+            raise RuntimeError(f"Apple 工具链缺少 {name}：{' '.join(command)}")
+        paths[name] = result.stdout.strip()
+    cmake = shutil.which("cmake")
+    if not cmake:
+        raise RuntimeError("缺少 CMake；请安装 CMake 后重试")
+    paths["cmake"] = str(Path(cmake).resolve())
+    ninja = shutil.which("ninja")
+    if not ninja:
+        raise RuntimeError("缺少 Ninja；Darwin LLVM SDK 使用 Ninja 构建")
+    paths["ninja"] = str(Path(ninja).resolve())
+    paths["versions"] = {}
+    for name in ("clang", "clangxx", "cmake", "ninja"):
+        result = subprocess.run([paths[name], "--version"], capture_output=True,
+                                text=True, check=False)
+        if result.returncode:
+            raise RuntimeError(f"无法读取固定 SDK 工具链版本：{paths[name]}")
+        paths["versions"][name] = result.stdout.splitlines()[0]
+    return paths
+
+
+def build_sdk(min_os, jobs):
+    """从固定完整源码构建 X86/AArch64 LLVM、clang oracle 与 ELF/Mach-O/COFF lld。"""
+    host = select_host()
+    min_os = parse_min_os(min_os)
+    sdk_root = resolve_sdk_root()
+    sdk_version = load_sdk_version(sdk_root)
+    toolchain = sdk_toolchain()
+    package = download_source()
+    source = WORK / "source-llvm-project-21.1.8.src"
+    build = WORK / "build-llvm-project-21.1.8"
+    prefix = WORK / "sdk-darwin-aarch64"
+    marker = source / ".yh-source-sha256"
+    extracted_source = marker.is_file() and marker.read_text().strip() == source_spec()["sha256"]
+
+    reusable_prefix = prefix.exists()
+    reusable_build = extracted_source and (build / "CMakeCache.txt").is_file()
+    if reusable_prefix:
+        record_path = prefix / "host.json"
+        if not record_path.is_file():
+            raise RuntimeError(f"SDK 输出目录已存在但缺少身份记录，保留现场：{prefix}")
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"SDK 身份记录不可读，保留现场：{error}") from error
+        if (record.get("source_sha256") != source_spec()["sha256"]
+                or record.get("min_os") != min_os
+                or record.get("sdk_root") != str(sdk_root)
+                or record.get("sdk_version") != sdk_version):
+            raise RuntimeError(f"已有 Darwin SDK 的源码/目标/Apple SDK 不同，保留现场：{prefix}")
+        exact = (record.get("manifest_sha256") == digest(MANIFEST)
+                 and record.get("sdk_settings_sha256") == digest(sdk_root / "SDKSettings.json")
+                 and record.get("builder_sha256") == digest(Path(__file__))
+                 and record.get("toolchain") == toolchain)
+        if exact:
+            for name, expected in record.get("archives", {}).items():
+                archive = prefix / "lib" / name
+                exact = archive.is_file() and digest(archive) == expected
+                if not exact:
+                    break
+        if exact:
+            for name, expected in record.get("tools", {}).items():
+                executable = prefix / "bin" / name
+                exact = executable.is_file() and digest(executable) == expected
+                if not exact:
+                    break
+        if exact:
+            for name, expected in record.get("licenses", {}).items():
+                license_file = prefix / name
+                exact = license_file.is_file() and digest(license_file) == expected
+                if not exact:
+                    break
+        if exact:
+            return prefix
+
+    usage = shutil.disk_usage(ROOT)
+    minimum_free = (MIN_REPACK_FREE_BYTES if reusable_prefix or reusable_build else
+                    MIN_BUILD_FREE_BYTES if extracted_source else MIN_FREE_BYTES)
+    if usage.free < minimum_free:
+        raise RuntimeError(f"磁盘剩余空间不足：需要至少 {minimum_free // 1024**3} GiB，"
+                           f"当前 {usage.free // 1024**3} GiB；未解包或修改已有目录")
+
+    if source.exists() and (not marker.is_file() or marker.read_text().strip() != source_spec()["sha256"]):
+        raise RuntimeError(f"源码目录已存在但身份不匹配，保留现场并另选 tmp 路径：{source}")
+    if not marker.is_file():
+        source.parent.mkdir(parents=True, exist_ok=True)
+        run_logged(["tar", "-xf", str(package), "-C", str(WORK)], ROOT,
+                   WORK / "extract.log")
+        extracted = WORK / "llvm-project-21.1.8.src"
+        extracted.rename(source)
+        marker.write_text(source_spec()["sha256"] + "\n", encoding="ascii")
+    usage = shutil.disk_usage(ROOT)
+    if usage.free < minimum_free:
+        raise RuntimeError(f"准备构建/重打包后剩余空间不足：需要至少 {minimum_free // 1024**3} GiB "
+                           f"用于构建与归档，当前 {usage.free // 1024**3} GiB；源码保留在 {source}")
+
+    config = build_spec()
+    configure = [toolchain["cmake"], "-S", str(source / "llvm"), "-B", str(build), "-G", "Ninja",
+                 f"-DCMAKE_MAKE_PROGRAM={toolchain['ninja']}",
+                 f"-DCMAKE_BUILD_TYPE={config['build_type']}", f"-DCMAKE_C_COMPILER={toolchain['clang']}",
+                 f"-DCMAKE_CXX_COMPILER={toolchain['clangxx']}",
+                 f"-DCMAKE_AR={toolchain['ar']}", f"-DCMAKE_OSX_SYSROOT={sdk_root}",
+                 f"-DCMAKE_OSX_DEPLOYMENT_TARGET={min_os}",
+                 f"-DCMAKE_OSX_ARCHITECTURES={';'.join(config['architectures'])}",
+                 f"-DCMAKE_INSTALL_PREFIX={prefix}",
+                 f"-DLLVM_ENABLE_PROJECTS={';'.join(config['projects'])}",
+                 f"-DLLVM_TARGETS_TO_BUILD={';'.join(config['targets'])}",
+                 "-DLLVM_ENABLE_ASSERTIONS=OFF",
+                 f"-DLLVM_INCLUDE_TESTS={'ON' if config['include_tests'] else 'OFF'}",
+                 f"-DLLVM_INCLUDE_EXAMPLES={'ON' if config['include_examples'] else 'OFF'}",
+                 f"-DLLVM_INCLUDE_BENCHMARKS={'ON' if config['include_benchmarks'] else 'OFF'}",
+                 f"-DLLVM_INCLUDE_DOCS={'ON' if config['include_docs'] else 'OFF'}",
+                 f"-DLLVM_BUILD_LLVM_DYLIB={'ON' if config['llvm_build_llvm_dylib'] else 'OFF'}",
+                 f"-DLLVM_BUILD_LLVM_C_DYLIB={'ON' if config['llvm_build_llvm_c_dylib'] else 'OFF'}",
+                 f"-DLLVM_LINK_LLVM_DYLIB={'ON' if config['llvm_link_llvm_dylib'] else 'OFF'}",
+                 f"-DLLVM_ENABLE_ZLIB={'ON' if config['enable_zlib'] else 'OFF'}",
+                 f"-DLLVM_ENABLE_ZSTD={'ON' if config['enable_zstd'] else 'OFF'}",
+                 f"-DLLVM_ENABLE_LIBXML2={'ON' if config['enable_libxml2'] else 'OFF'}",
+                 f"-DBUILD_SHARED_LIBS={'ON' if config['build_shared_libs'] else 'OFF'}",
+                 "-DLLD_BUILD_TOOLS=ON", "-DCLANG_BUILD_TOOLS=ON"]
+    WORK.mkdir(parents=True, exist_ok=True)
+    run_logged(configure, ROOT, WORK / "configure.log")
+    run_logged([toolchain["cmake"], "--build", str(build), "--target", "clang", "opt", "lld",
+                "llvm-config",
+                "--parallel", str(jobs)], ROOT, WORK / "build.log")
+    package_sdk(source, build, prefix)
+    write_host_record(host, min_os, sdk_root, sdk_version, toolchain, package, prefix)
+    return prefix
+
+
+def package_sdk(source, build, prefix):
+    """收集构建出的所有 LLVM/lld 静态归档、头文件和固定 oracle 工具。"""
+    prefix.mkdir(parents=True, exist_ok=True)
+    (prefix / "lib").mkdir(exist_ok=True)
+    (prefix / "include").mkdir(exist_ok=True)
+    (prefix / "bin").mkdir(exist_ok=True)
+    libraries = sorted((build / "lib").glob("*.a"))
+    if not libraries:
+        raise RuntimeError("LLVM 构建目录没有静态归档")
+    current_libraries = {library.name for library in libraries}
+    for old in (prefix / "lib").glob("*.a"):
+        if old.name not in current_libraries:
+            old.unlink()
+    for library in libraries:
+        shutil.copy2(library, prefix / "lib" / library.name)
+    for project in ("llvm", "clang", "lld"):
+        source_include = source / project / "include" / project
+        if source_include.is_dir():
+            shutil.copytree(source_include, prefix / "include" / project,
+                            dirs_exist_ok=True)
+        generated_include = build / "include" / project
+        if generated_include.is_dir():
+            shutil.copytree(generated_include, prefix / "include" / project,
+                            dirs_exist_ok=True)
+    llvm_c_headers = source / "llvm" / "include" / "llvm-c"
+    if llvm_c_headers.is_dir():
+        shutil.copytree(llvm_c_headers, prefix / "include" / "llvm-c",
+                        dirs_exist_ok=True)
+    for project in ("clang", "opt", "llvm-config", "ld.lld", "ld64.lld"):
+        executable = build / "bin" / project
+        if not executable.is_file():
+            raise RuntimeError(f"LLVM 构建目录缺少固定工具：{executable}")
+        shutil.copy2(executable, prefix / "bin" / project)
+    resource = build / "lib" / "clang" / "21" / "include"
+    if resource.is_dir():
+        shutil.copytree(resource, prefix / "lib" / "clang" / "21" / "include",
+                        dirs_exist_ok=True)
+
+
+def write_host_record(host, min_os, sdk_root, sdk_version, toolchain, package, prefix):
+    """记录源码、SDK、部署版本、工具链和实际静态归档身份。"""
+    libraries = sorted(path for path in (prefix / "lib").glob("*.a") if path.is_file())
+    if not any(path.name.startswith("libLLVM") for path in libraries):
+        raise RuntimeError("Darwin SDK 没有安装 LLVM 静态归档")
+    for library in libraries:
+        architecture = subprocess.run([toolchain["lipo"], "-archs", str(library)],
+                                      capture_output=True, text=True, check=True).stdout.split()
+        if architecture != ["arm64"]:
+            raise RuntimeError(f"Darwin 静态库不是纯 arm64：{library.name} {architecture}")
+    for required in ("liblldCommon.a", "liblldELF.a", "liblldMachO.a", "liblldCOFF.a"):
+        if not (prefix / "lib" / required).is_file():
+            raise RuntimeError(f"Darwin SDK 缺少 lld 静态驱动：{required}")
+    required_tools = ("clang", "opt", "llvm-config", "ld.lld", "ld64.lld")
+    missing = [name for name in required_tools if not (prefix / "bin" / name).is_file()]
+    if missing:
+        raise RuntimeError(f"Darwin SDK 缺少固定 oracle 工具：{missing}")
+    for name in required_tools:
+        dependencies = subprocess.run([toolchain["otool"], "-L", str(prefix / "bin" / name)],
+                                      capture_output=True, text=True, check=True).stdout
+        if "libLLVM" in dependencies or "libclang" in dependencies:
+            raise RuntimeError(f"SDK 工具 {name} 意外动态依赖 LLVM/Clang")
+        architecture = subprocess.run([toolchain["lipo"], "-archs", str(prefix / "bin" / name)],
+                                      capture_output=True, text=True, check=True).stdout.split()
+        if architecture != ["arm64"]:
+            raise RuntimeError(f"SDK 工具不是纯 arm64：{name} {architecture}")
+    tool_versions = {}
+    for name in required_tools:
+        result = subprocess.run([str(prefix / "bin" / name), "--version"],
+                                 capture_output=True, text=True, check=False)
+        if result.returncode:
+            raise RuntimeError(f"SDK 工具无法报告版本：{name}")
+        version_line = next((line.strip() for line in result.stdout.splitlines()
+                             if "21.1.8" in line), "")
+        if not version_line:
+            raise RuntimeError(f"SDK 工具版本不符合 LLVM 21.1.8：{name} {result.stdout[:200]}")
+        tool_versions[name] = version_line
+    record = {"host": host, "llvm_version": "21.1.8",
+              "source_package": source_spec()["package"],
+              "source_sha256": source_spec()["sha256"], "sdk_version": sdk_version,
+              "sdk_settings_sha256": digest(Path(sdk_root) / "SDKSettings.json"),
+              "sdk_root": str(sdk_root), "min_os": min_os, "toolchain": toolchain,
+              "builder_sha256": digest(Path(__file__)),
+              "build_configuration": build_spec(),
+              "tool_versions": tool_versions,
+              "tools": {name: digest(prefix / "bin" / name) for name in required_tools},
+              "manifest_sha256": digest(MANIFEST),
+              "archives": {path.name: digest(path) for path in libraries},
+              "license_files": ["share/LICENSE-LLVM", "share/LICENSE-Clang", "share/LICENSE-lld"]}
+    share = prefix / "share"
+    share.mkdir(parents=True, exist_ok=True)
+    for project, filename in (("llvm", "LICENSE-LLVM"), ("clang", "LICENSE-Clang"),
+                              ("lld", "LICENSE-lld")):
+        source_license = WORK / "source-llvm-project-21.1.8.src" / project / "LICENSE.TXT"
+        if not source_license.is_file():
+            source_license = WORK / "source-llvm-project-21.1.8.src" / project / "LICENSE"
+        if source_license.is_file():
+            shutil.copyfile(source_license, share / filename)
+        else:
+            raise RuntimeError(f"Darwin SDK 缺少许可证：{source_license}")
+    record["licenses"] = {name: digest(prefix / name) for name in record["license_files"]}
+    output = prefix / "host.json"
+    temporary = output.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                         encoding="utf-8")
+    temporary.replace(output)
+
+
+def preflight():
+    """只读验证宿主、SDK 元数据、部署版本与锁包，不触发下载或构建。"""
+    host = select_host()
+    sdk_root = resolve_sdk_root()
+    sdk_version = load_sdk_version(sdk_root)
+    min_os = parse_min_os(os.environ.get("MACOSX_DEPLOYMENT_TARGET", DEFAULT_MIN_OS))
+    spec = source_spec()
+    result = {"host": host, "sdk_root": str(sdk_root), "sdk_version": sdk_version,
+              "min_os": min_os, "source_package": spec["package"],
+              "source_sha256": spec["sha256"]}
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def main():
+    """提供只读 preflight 与固定源码完整 SDK 构建两种操作。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("preflight", help="核对当前宿主和 Apple SDK，不下载源码")
+    build = subparsers.add_parser("build", help="构建 LLVM/lld Darwin 静态 SDK")
+    build.add_argument("--min-os", default=os.environ.get("MACOSX_DEPLOYMENT_TARGET", DEFAULT_MIN_OS))
+    build.add_argument("--jobs", type=int, default=2)
+    args = parser.parse_args()
+    if args.command == "preflight":
+        preflight()
+        return
+    if args.jobs < 1:
+        raise RuntimeError("并行构建数必须大于零")
+    print(build_sdk(args.min_os, args.jobs))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(f"Darwin LLVM SDK：{error}", file=sys.stderr)
+        sys.exit(1)

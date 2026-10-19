@@ -120,14 +120,32 @@ jobs:
     name: Darwin arm64（Mach-O）主门
     if: github.event_name == 'workflow_dispatch' && (inputs.platform == 'all' || inputs.platform == 'darwin-arm64')
     runs-on: macos-14          # Apple Silicon（arm64）；macos-13 是 x86_64，跑不了 arm64 种子
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      - name: 恢复 Darwin LLVM 源码 SDK 构建缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            tmp/llvm-migration/darwin-sdk/llvm-project-21.1.8.src.tar.xz
+            tmp/llvm-migration/darwin-sdk/source-llvm-project-21.1.8.src
+            tmp/llvm-migration/darwin-sdk/build-llvm-project-21.1.8
+            tmp/llvm-migration/darwin-sdk/sdk-darwin-aarch64
+          key: llvm-darwin-sdk-${{ hashFiles('vendor/llvm/sdk.lock.json', 'tools/llvm-darwin-sdk.py') }}
+
+      - name: 恢复 Darwin 静态桥缓存
+        uses: actions/cache@v4
+        with:
+          path: tmp/llvm-migration/llvm-host-darwin-aarch64
+          key: llvm-darwin-host-${{ hashFiles('vendor/llvm/sdk.lock.json', 'tools/llvm-darwin-sdk.py', 'tools/llvm-darwin-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp') }}
 
       # 保险步骤：入库种子若落后于当前源码，先补一代再构建。
       # 种子已按「yh-平台-架构」命名（darwin/arm64 → bin/yh-darwin-arm64）；
       # 当前入库种子就是 HEAD 源码编出的，本步骤会直接跳过。
       - name: 必要时补一代 macOS 种子
+        env:
+          YH_LLVM_HOST: "0"
         run: |
           set -euo pipefail
           cat > /tmp/bare.yh <<'EOF'
@@ -179,8 +197,31 @@ jobs:
           python3 tools/selfhost_snapshot_gate.py --verify-seed "$PWD/bin/yh-darwin-arm64"
           echo "中间代种子已就位（bin/yh-darwin-arm64 与 .sha256 已更新）"
 
-      - name: 构建 HEAD 源码
+      - name: 构建并静态接入 Darwin LLVM
+        env:
+          YH_LLVM_HOST: "1"
+          LLVM_JOBS: "2"
         run: make
+
+      - name: Darwin 固定 SDK、桥 ABI 与 Mach-O lld 门
+        run: make test-llvm-darwin
+
+      # F2-8：从入库种子 legacy 编 A，A 以 LLVM 连续编 B/C/D；O0/O2 固定点、
+      # 自解析、全量语料、Darwin 专项门与隔离 PATH。手动触发，不自动滚种子。
+      - name: 原生连续自举（F2-8）
+        env:
+          LLVM_JOBS: "2"
+        run: make selfhost-llvm-darwin
+
+      - name: 上传 F2-8 自举证据
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64-f2-8-selfhost
+          path: |
+            tmp/f2-8/selfhost-*/stats.json
+            tmp/f2-8/selfhost-*/logs
+            tmp/f2-8/selfhost-*/snapshots
+          if-no-files-found: error
 
       - name: 冒烟
         run: |
