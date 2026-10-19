@@ -1,0 +1,277 @@
+module cli;
+
+// cli 值、命名空间与类型化查询（CLI1）：结果键的深复制、借用视图与查询。
+// 所有文本和列表都在命名空间自己的池里，随 namespace_destroy / release 释放；
+// 查询函数只返回借用视图，调用者不得单独释放。
+
+// ns_state_of 从公开句柄取私有状态；空句柄返回空指针。
+fn ns_state_of(ns *Namespace) *ns_state {
+    if (ns == 0 || ns.handle == 0) {
+        return 0;
+    }
+    return ns.handle.to_type(*ns_state);
+}
+
+// entry_find 按 dest 查找键；找不到返回 -1。
+fn entry_find(state *ns_state, dest *char) int {
+    if (dest == 0) {
+        return -1;
+    }
+    let i int = 0;
+    for i < state.count {
+        if (state.rows[i].used != 0 && cstr_equal(state.rows[i].dest, dest) != 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// entry_create 建键或取已有键；失败返回 -1，成功返回行下标。
+fn entry_create(state *ns_state, dest *char) int {
+    let existing int = entry_find(state, dest);
+    if (existing >= 0) {
+        return existing;
+    }
+    if (state.count >= MAX_ENTRIES) {
+        return -1;
+    }
+    let row entry_row;
+    row.used = 1;
+    row.dest = pool_dup(&state.mem, dest);
+    row.value = value_none();
+    row.provided = 0;
+    row.occurrences = 0;
+    row.is_default = 0;
+    if (row.dest == 0) {
+        return -1;
+    }
+    state.rows[state.count] = row;
+    state.count += 1;
+    return state.count - 1;
+}
+
+// value_clone 把值深复制到目标池：文本复制字节，列表复制元素（递归）。
+fn value_clone(mem *pool, v Value) Value {
+    let result Value;
+    result.kind = v.kind;
+    if (v.kind == ValueKind.text) {
+        result.data.text = pool_dup(mem, v.data.text);
+        return result;
+    }
+    if (v.kind == ValueKind.sequence) {
+        let source *list_block = v.data.items.to_type(*list_block);
+        if (source == 0) {
+            result.data.items = 0;
+            return result;
+        }
+        let block *list_block = pool_alloc(mem,
+            sizeof(list_block).to_type(u64)).to_type(*list_block);
+        if (block == 0) {
+            result.data.items = 0;
+            return result;
+        }
+        block.count = 0;
+        let i int = 0;
+        for i < source.count {
+            if (i >= MAX_LIST) {
+                break;
+            }
+            block.items[i] = value_clone(mem, source.items[i]);
+            block.count += 1;
+            i += 1;
+        }
+        result.data.items = block.to_type(*void);
+        return result;
+    }
+    result.data = v.data;
+    return result;
+}
+
+// namespace_init 初始化独立命名空间；0 成功、-1 失败。
+pub fn namespace_init(ns *Namespace) int {
+    if (ns == 0 || ns.handle != 0) {
+        return -1;
+    }
+    let state *ns_state = malloc(sizeof(ns_state).to_type(u64)).to_type(*ns_state);
+    if (state == 0) {
+        return -1;
+    }
+    ns.handle = state.to_type(*void);
+    pool_init(&state.mem);
+    state.count = 0;
+    return 0;
+}
+
+// namespace_set 深复制值并覆盖键；0 成功、-1 失败。不计入命令行出现次数。
+pub fn namespace_set(ns *Namespace, dest *char, value Value) int {
+    let state *ns_state = ns_state_of(ns);
+    if (state == 0 || dest == 0 || dest[0] == 0) {
+        return -1;
+    }
+    let index int = entry_create(state, dest);
+    if (index < 0) {
+        return -1;
+    }
+    state.rows[index].value = value_clone(&state.mem, value);
+    if (state.mem.failed != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+// namespace_destroy 释放独立构造的命名空间并归零；零值可安全调用。
+pub fn namespace_destroy(ns *Namespace) void {
+    let state *ns_state = ns_state_of(ns);
+    if (state == 0) {
+        if (ns != 0) {
+            ns.handle = 0;
+        }
+        return;
+    }
+    pool_free_all(&state.mem);
+    free(state.to_type(*void));
+    ns.handle = 0;
+}
+
+// contains 判断键是否存在；显式 none 仍返回 true。
+pub fn contains(ns *Namespace, dest *char) bool {
+    let state *ns_state = ns_state_of(ns);
+    if (state == 0) {
+        return false;
+    }
+    return (entry_find(state, dest) >= 0);
+}
+
+// provided 判断当前解析中是否显式出现过该键。
+pub fn provided(ns *Namespace, dest *char) bool {
+    let state *ns_state = ns_state_of(ns);
+    if (state == 0) {
+        return false;
+    }
+    let index int = entry_find(state, dest);
+    if (index < 0) {
+        return false;
+    }
+    return (state.rows[index].provided != 0);
+}
+
+// occurrences 返回当前解析的出现次数；默认值和 initial 不计入。
+pub fn occurrences(ns *Namespace, dest *char) int {
+    let state *ns_state = ns_state_of(ns);
+    if (state == 0) {
+        return 0;
+    }
+    let index int = entry_find(state, dest);
+    if (index < 0) {
+        return 0;
+    }
+    return state.rows[index].occurrences;
+}
+
+// get_value 返回值的借用视图；0 成功、-1 键不存在。
+pub fn get_value(ns *Namespace, dest *char, out *Value) int {
+    let state *ns_state = ns_state_of(ns);
+    if (state == 0 || out == 0) {
+        return -1;
+    }
+    let index int = entry_find(state, dest);
+    if (index < 0) {
+        return -1;
+    }
+    *out = state.rows[index].value;
+    return 0;
+}
+
+// get_text 取文本值；0 成功、-1 缺键、-2 类型不符。
+pub fn get_text(ns *Namespace, dest *char, out **char) int {
+    let v Value;
+    let status int = get_value(ns, dest, &v);
+    if (status != 0) {
+        return status;
+    }
+    if (v.kind != ValueKind.text) {
+        return -2;
+    }
+    *out = v.data.text;
+    return 0;
+}
+
+// get_i64 取整数（integer）值；0 成功、-1 缺键、-2 类型不符。
+pub fn get_i64(ns *Namespace, dest *char, out *i64) int {
+    let v Value;
+    let status int = get_value(ns, dest, &v);
+    if (status != 0) {
+        return status;
+    }
+    if (v.kind != ValueKind.integer) {
+        return -2;
+    }
+    *out = v.data.integer;
+    return 0;
+}
+
+// get_u64 取无符号整数（natural）值；0 成功、-1 缺键、-2 类型不符。
+pub fn get_u64(ns *Namespace, dest *char, out *u64) int {
+    let v Value;
+    let status int = get_value(ns, dest, &v);
+    if (status != 0) {
+        return status;
+    }
+    if (v.kind != ValueKind.natural) {
+        return -2;
+    }
+    *out = v.data.natural;
+    return 0;
+}
+
+// get_f64 取浮点（real）值；0 成功、-1 缺键、-2 类型不符。
+pub fn get_f64(ns *Namespace, dest *char, out *f64) int {
+    let v Value;
+    let status int = get_value(ns, dest, &v);
+    if (status != 0) {
+        return status;
+    }
+    if (v.kind != ValueKind.real) {
+        return -2;
+    }
+    *out = v.data.real;
+    return 0;
+}
+
+// get_bool 取布尔值；0 成功、-1 缺键、-2 类型不符。
+pub fn get_bool(ns *Namespace, dest *char, out *bool) int {
+    let v Value;
+    let status int = get_value(ns, dest, &v);
+    if (status != 0) {
+        return status;
+    }
+    if (v.kind != ValueKind.boolean) {
+        return -2;
+    }
+    *out = v.data.boolean;
+    return 0;
+}
+
+// get_list 取序列视图；0 成功、-1 缺键、-2 类型不符。
+// 返回的切片指向命名空间内部的堆存储，随命名空间存活。
+pub fn get_list(ns *Namespace, dest *char, out *[]Value) int {
+    let state *ns_state = ns_state_of(ns);
+    if (state == 0 || out == 0) {
+        return -1;
+    }
+    let index int = entry_find(state, dest);
+    if (index < 0) {
+        return -1;
+    }
+    if (state.rows[index].value.kind != ValueKind.sequence) {
+        return -2;
+    }
+    let block *list_block = state.rows[index].value.data.items.to_type(*list_block);
+    if (block == 0) {
+        *out = [];
+        return 0;
+    }
+    *out = block.items[0..block.count];
+    return 0;
+}

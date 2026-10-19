@@ -1,0 +1,129 @@
+module main;
+
+import model;
+
+// Counter 是回调的 user 上下文；回调按 *void 收取后还原成本类型。
+pub struct Counter {
+    seen int;
+    total int;
+}
+
+// collect 累计回调收到的值，覆盖函数类型回调与 user 指针的真实调用。
+fn collect(user *void, value int) int {
+    let counter *Counter = user.to_type(*Counter);
+    counter.seen += 1;
+    counter.total += value;
+    return counter.total;
+}
+
+// build_list 用堆节点串起递归链表，返回表头；分配失败时提前结束。
+fn build_list(count int) *model.Node {
+    let head *model.Node = 0;
+    let index int = count;
+    for index > 0 {
+        let node *model.Node = malloc(sizeof(model.Node).to_type(u64)).to_type(*model.Node);
+        if (node == 0) {
+            return head;
+        }
+        node.value = index;
+        node.next = head;
+        head = node;
+        index -= 1;
+    }
+    return head;
+}
+
+// free_list 释放整条链表，覆盖递归指针类型的回收。
+fn free_list(head *model.Node) {
+    let cursor *model.Node = head;
+    for cursor != 0 {
+        let next *model.Node = cursor.next;
+        free(cursor.to_type(*void));
+        cursor = next;
+    }
+}
+
+// main 真实运行 CLI0 探针：每个断言失败返回不同退出码，全部通过返回 0。
+fn main() int {
+    // 1) tagged union：不同标签读写各自的载荷。
+    let text_value model.Value = model.make_text("cli");
+    let integer_value model.Value = model.make_integer(42);
+    let none_value model.Value = model.make_none();
+    if (model.kind_of(integer_value) != model.integer) {
+        return 1;
+    }
+    if (model.number_of(integer_value) != 42) {
+        return 2;
+    }
+    if (model.kind_of(text_value) != model.text) {
+        return 3;
+    }
+    if (model.kind_of(none_value) != model.none) {
+        return 4;
+    }
+
+    // 2) 递归列表：1..5 求和为 15。
+    let head *model.Node = build_list(5);
+    if (head == 0) {
+        return 5;
+    }
+    let list_total int = model.node_sum(head);
+    free_list(head);
+    if (list_total != 15) {
+        return 6;
+    }
+
+    // 3) 跨模块返回 []Value，并把它作为切片形参传回。
+    let bag *model.Bag = model.bag_new();
+    if (bag == 0) {
+        return 7;
+    }
+    if (model.bag_push(bag, model.make_integer(10)) != 0
+        || model.bag_push(bag, model.make_integer(20)) != 0
+        || model.bag_push(bag, model.make_integer(30)) != 0) {
+        model.bag_destroy(bag);
+        return 8;
+    }
+    let values []model.Value = model.bag_view(bag);
+    if (len(values) != 3) {
+        model.bag_destroy(bag);
+        return 9;
+    }
+    let slice_total i64 = model.sequence_sum(values);
+    model.bag_destroy(bag);
+    if (slice_total != 60) {
+        return 10;
+    }
+
+    // 4) 函数类型回调与 user 指针。
+    let counter Counter;
+    counter.seen = 0;
+    counter.total = 0;
+    let last int = model.apply_callback(collect, (&counter).to_type(*void), 7);
+    if (last != 7 || counter.seen != 1 || counter.total != 7) {
+        return 11;
+    }
+
+    // 5) 公开薄句柄：私有状态在堆上，切片视图跨模块可用。
+    let handle model.Handle = model.handle_new();
+    if (handle.inner == 0) {
+        return 12;
+    }
+    if (model.handle_push(&handle, 4) != 0
+        || model.handle_push(&handle, 5) != 0
+        || model.handle_push(&handle, 6) != 0) {
+        model.handle_destroy(&handle);
+        return 13;
+    }
+    let view []int = model.handle_view(&handle);
+    let view_total int = 0;
+    for _, item in view {
+        view_total += item;
+    }
+    model.handle_destroy(&handle);
+    if (view_total != 15) {
+        return 14;
+    }
+    printf("yh cli model ok\n");
+    return 0;
+}

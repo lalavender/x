@@ -1,0 +1,395 @@
+module cli;
+
+// cli 结果写入（CLI2）：把转换后的值按 action 与数量模型写进结果命名空间。
+// 所有文本、列表与子列表都在结果自己的池里，随 release 释放；
+// 列表块必须整体在堆上，get_list 才拿得到堆内切片视图。
+
+// ns_entry_index 查找结果里的键；找不到返回 -1。
+fn ns_entry_index(result *Result, dest *char) int {
+    let ns *ns_state = ns_state_of(&result.values);
+    if (ns == 0) {
+        return -1;
+    }
+    return entry_find(ns, dest);
+}
+
+// ns_make_block 在结果命名空间池里分配一个空列表块；失败返回空指针。
+fn ns_make_block(result *Result) *list_block {
+    let ns *ns_state = ns_state_of(&result.values);
+    if (ns == 0) {
+        return 0;
+    }
+    let block *list_block = pool_alloc(&ns.mem,
+        sizeof(list_block).to_type(u64)).to_type(*list_block);
+    if (block == 0) {
+        return 0;
+    }
+    block.count = 0;
+    return block;
+}
+
+// ns_value_block 取序列值指向的列表块；非序列返回空指针。
+fn ns_value_block(v Value) *list_block {
+    if (v.kind != ValueKind.sequence) {
+        return 0;
+    }
+    return v.data.items.to_type(*list_block);
+}
+
+// mark_appeared 记录某个参数 ID 在本次解析里显式出现（互斥组按它计数）。
+fn mark_appeared(result *Result, argument int) void {
+    let owner *result_owner = owner_of(result);
+    if (owner == 0 || argument < 0 || argument > MAX_ARGS) {
+        return;
+    }
+    owner.appeared[argument] = 1;
+}
+
+// appeared_of 查询某个参数 ID 是否显式出现。
+fn appeared_of(result *Result, argument int) int {
+    let owner *result_owner = owner_of(result);
+    if (owner == 0 || argument < 0 || argument > MAX_ARGS) {
+        return 0;
+    }
+    return owner.appeared[argument];
+}
+
+// write_scalar 覆盖写入标量值并记一次出现；0 成功、-1 失败。
+fn write_scalar(result *Result, row *arg_row, v Value) int {
+    let ns *ns_state = ns_state_of(&result.values);
+    if (ns == 0) {
+        return -1;
+    }
+    let index int = entry_create(ns, row.dest);
+    if (index < 0) {
+        return -1;
+    }
+    ns.rows[index].value = value_clone(&ns.mem, v);
+    if (ns.mem.failed != 0) {
+        return -1;
+    }
+    ns.rows[index].provided = 1;
+    ns.rows[index].occurrences += 1;
+    ns.rows[index].is_default = 0;
+    mark_appeared(result, row.id);
+    return 0;
+}
+
+// write_list 覆盖写入列表值（元素深复制到结果池）；0 成功、-1 失败。
+fn write_list(result *Result, row *arg_row, values []Value) int {
+    let ns *ns_state = ns_state_of(&result.values);
+    if (ns == 0) {
+        return -1;
+    }
+    let index int = entry_create(ns, row.dest);
+    if (index < 0) {
+        return -1;
+    }
+    let block *list_block = ns_make_block(result);
+    if (block == 0) {
+        return -1;
+    }
+    let i int = 0;
+    let count int = len(values);
+    for i < count {
+        if (i >= MAX_LIST) {
+            break;
+        }
+        block.items[i] = value_clone(&ns.mem, values[i]);
+        block.count += 1;
+        i += 1;
+    }
+    if (ns.mem.failed != 0) {
+        return -1;
+    }
+    ns.rows[index].value.kind = ValueKind.sequence;
+    ns.rows[index].value.data.items = block.to_type(*void);
+    ns.rows[index].provided = 1;
+    ns.rows[index].occurrences += 1;
+    ns.rows[index].is_default = 0;
+    mark_appeared(result, row.id);
+    return 0;
+}
+
+// write_named_text 把一段文本写入指定键（子命令名等无参数 ID 的写入）；
+// 计入出现次数与 provided，但不参与互斥组计数。
+fn write_named_text(result *Result, dest *char, text *char) int {
+    let ns *ns_state = ns_state_of(&result.values);
+    if (ns == 0) {
+        return -1;
+    }
+    let index int = entry_create(ns, dest);
+    if (index < 0) {
+        return -1;
+    }
+    ns.rows[index].value = value_clone(&ns.mem, value_text(text));
+    if (ns.mem.failed != 0) {
+        return -1;
+    }
+    ns.rows[index].provided = 1;
+    ns.rows[index].occurrences += 1;
+    ns.rows[index].is_default = 0;
+    return 0;
+}
+
+// write_default 写入默认值：不计入出现次数，并标记为可被更靠近叶子的默认覆盖。
+fn write_default(result *Result, dest *char, v Value) int {
+    let ns *ns_state = ns_state_of(&result.values);
+    if (ns == 0) {
+        return -1;
+    }
+    let index int = entry_create(ns, dest);
+    if (index < 0) {
+        return -1;
+    }
+    ns.rows[index].value = value_clone(&ns.mem, v);
+    if (ns.mem.failed != 0) {
+        return -1;
+    }
+    ns.rows[index].is_default = 1;
+    return 0;
+}
+
+// make_block_value 在结果池里构造一个子列表值；失败返回 none 值。
+fn make_block_value(result *Result, values []Value) Value {
+    let v Value;
+    v.kind = ValueKind.none;
+    let block *list_block = ns_make_block(result);
+    if (block == 0) {
+        return v;
+    }
+    let ns *ns_state = ns_state_of(&result.values);
+    let i int = 0;
+    let count int = len(values);
+    for i < count {
+        if (i >= MAX_LIST) {
+            break;
+        }
+        block.items[i] = value_clone(&ns.mem, values[i]);
+        block.count += 1;
+        i += 1;
+    }
+    if (ns.mem.failed != 0) {
+        return v;
+    }
+    v.kind = ValueKind.sequence;
+    v.data.items = block.to_type(*void);
+    return v;
+}
+
+// make_empty_list 在结果池里构造空列表值；失败返回 none 值。
+fn make_empty_list(result *Result) Value {
+    let empty []Value;
+    return make_block_value(result, empty);
+}
+
+// append_value 追加一个值到 dest 的列表（不存在时新建）；0 成功、-1 失败、-2 超容量。
+fn append_value(result *Result, row *arg_row, v Value) int {
+    let ns *ns_state = ns_state_of(&result.values);
+    if (ns == 0) {
+        return -1;
+    }
+    let index int = entry_create(ns, row.dest);
+    if (index < 0) {
+        return -1;
+    }
+    if (ns.rows[index].value.kind != ValueKind.sequence) {
+        let fresh *list_block = ns_make_block(result);
+        if (fresh == 0) {
+            return -1;
+        }
+        ns.rows[index].value.kind = ValueKind.sequence;
+        ns.rows[index].value.data.items = fresh.to_type(*void);
+    }
+    let block *list_block = ns_value_block(ns.rows[index].value);
+    if (block == 0) {
+        return -1;
+    }
+    if (block.count >= MAX_LIST) {
+        return -2;
+    }
+    block.items[block.count] = value_clone(&ns.mem, v);
+    block.count += 1;
+    if (ns.mem.failed != 0) {
+        return -1;
+    }
+    ns.rows[index].provided = 1;
+    ns.rows[index].occurrences += 1;
+    ns.rows[index].is_default = 0;
+    mark_appeared(result, row.id);
+    return 0;
+}
+
+// increment_count 累加 dest 的计数；0 成功、-1 失败、-2 溢出。
+fn increment_count(result *Result, row *arg_row) int {
+    let ns *ns_state = ns_state_of(&result.values);
+    if (ns == 0) {
+        return -1;
+    }
+    let index int = entry_create(ns, row.dest);
+    if (index < 0) {
+        return -1;
+    }
+    let current i64 = 0;
+    if (ns.rows[index].value.kind == ValueKind.integer) {
+        current = ns.rows[index].value.data.integer;
+    }
+    if (current == 9223372036854775807) {
+        return -2;
+    }
+    ns.rows[index].value = value_i64(current + 1);
+    ns.rows[index].provided = 1;
+    ns.rows[index].occurrences += 1;
+    ns.rows[index].is_default = 0;
+    mark_appeared(result, row.id);
+    return 0;
+}
+
+// —— choices 校验 ——
+
+// value_matches_choice 按类型与值比较候选与实际值；相等返回 1。
+fn value_matches_choice(candidate Value, v Value) int {
+    if (candidate.kind != v.kind) {
+        return 0;
+    }
+    if (v.kind == ValueKind.text) {
+        return cstr_equal(candidate.data.text, v.data.text);
+    }
+    if (v.kind == ValueKind.integer) {
+        return (candidate.data.integer == v.data.integer).to_type(int);
+    }
+    if (v.kind == ValueKind.natural) {
+        return (candidate.data.natural == v.data.natural).to_type(int);
+    }
+    if (v.kind == ValueKind.real) {
+        return (candidate.data.real == v.data.real).to_type(int);
+    }
+    if (v.kind == ValueKind.boolean) {
+        return (candidate.data.boolean == v.data.boolean).to_type(int);
+    }
+    return 0;
+}
+
+// value_in_choices 判断值是否命中声明的候选集合；无候选时恒为 1。
+fn value_in_choices(row *arg_row, v Value) int {
+    let count int = len(row.choices);
+    if (count <= 0) {
+        return 1;
+    }
+    let i int = 0;
+    for i < count {
+        if (value_matches_choice(row.choices[i], v) != 0) {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// value_matches_shape 校验值的叶子类型与列表层数是否符合声明。
+fn value_matches_shape(v Value, leaf int, depth int) int {
+    if (depth == 0) {
+        return (v.kind.to_type(int) == leaf).to_type(int);
+    }
+    if (v.kind != ValueKind.sequence) {
+        return 0;
+    }
+    let block *list_block = v.data.items.to_type(*list_block);
+    if (block == 0) {
+        return 0;
+    }
+    let i int = 0;
+    for i < block.count {
+        let item Value = block.items[i];
+        if (depth == 1) {
+            if (item.kind.to_type(int) != leaf) {
+                return 0;
+            }
+        } else if (depth == 2) {
+            if (item.kind != ValueKind.sequence) {
+                return 0;
+            }
+            let inner *list_block = item.data.items.to_type(*list_block);
+            if (inner == 0) {
+                return 0;
+            }
+            let j int = 0;
+            for j < inner.count {
+                if (inner.items[j].kind.to_type(int) != leaf) {
+                    return 0;
+                }
+                j += 1;
+            }
+        } else {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// write_value 覆盖写入一个完整值（自定义 action 的输出）；0 成功、-1 失败。
+fn write_value(result *Result, row *arg_row, v Value) int {
+    let ns *ns_state = ns_state_of(&result.values);
+    if (ns == 0) {
+        return -1;
+    }
+    let index int = entry_create(ns, row.dest);
+    if (index < 0) {
+        return -1;
+    }
+    ns.rows[index].value = value_clone(&ns.mem, v);
+    if (ns.mem.failed != 0) {
+        return -1;
+    }
+    ns.rows[index].provided = 1;
+    ns.rows[index].occurrences += 1;
+    ns.rows[index].is_default = 0;
+    mark_appeared(result, row.id);
+    return 0;
+}
+
+// commit_custom 调用自定义 action 回调并按声明的输出形状校验结果。
+fn commit_custom(result *Result, row *arg_row, values []Value) int {
+    let ns *ns_state = ns_state_of(&result.values);
+    if (ns == 0) {
+        return -1;
+    }
+    let ctx ActionContext;
+    ctx.argument = row.id;
+    ctx.dest = row.dest;
+    ctx.matched_name = row.names[0];
+    ctx.occurrences = 0;
+    ctx.previous = value_none();
+    ctx.values = values;
+    ctx.context = ns.to_type(*void);
+    let index int = entry_find(ns, row.dest);
+    if (index >= 0) {
+        ctx.occurrences = ns.rows[index].occurrences;
+        ctx.previous = ns.rows[index].value;
+    }
+    let diag Diagnostic;
+    clear_diagnostic(&diag);
+    let out Value;
+    let rc int = row.custom_action(&ctx, &out, &diag, row.user);
+    if (rc != 0) {
+        let message *char = "自定义 action 执行失败";
+        if (diag.message != 0) {
+            message = diag.message;
+        }
+        result_set_error(result, ResultStatus.usage_error, "usage_error",
+            message, row.names[0], row.dest, -1);
+        return -1;
+    }
+    if (value_matches_shape(out, row.shape_leaf, row.shape_depth) == 0) {
+        result_set_error(result, ResultStatus.usage_error, "usage_error",
+            "自定义 action 的输出形状与声明不符", row.names[0], row.dest, -1);
+        return -1;
+    }
+    if (write_value(result, row, out) != 0) {
+        result_set_error(result, ResultStatus.resource_error, "resource_error",
+            "写入自定义 action 结果时内存不足", row.names[0], row.dest, -1);
+        return -1;
+    }
+    return 0;
+}

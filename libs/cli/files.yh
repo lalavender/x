@@ -1,0 +1,381 @@
+module cli;
+
+import os;
+
+// cli 参数文件展开（CLI4）：`@file` 形式的 token 在解析前替换为文件内容。
+// 展开不经过 shell：不做变量、通配符或命令替换；文件里的 `--` 与直接输入等价。
+// 嵌套包含按包含文件目录解析；活动包含栈 + 深度/字节/token 上限防止循环与失控；
+// 打开、读取、超限失败都带来源诊断，且不使用部分展开结果。
+
+// file_token_block 保存展开后的 token 序列（结果池持有）。
+struct file_token_block {
+    count int;
+    items [4096]*char;   // MAX_FILE_TOKENS（跨文件数组长度用字面量）
+}
+
+// expand_ctx 是展开过程的累计状态与诊断暂存。
+struct expand_ctx {
+    memory *pool;
+    block *file_token_block;
+    prefixes *char;
+    line_converter fn(*LineContext, *LineTokens, *Diagnostic, *void) int;
+    line_user *void;
+    max_depth int;
+    max_bytes int;
+    max_tokens int;
+    bytes_read int;
+    stack [17]*char;     // MAX_DEPTH + 1
+    stack_count int;
+    failed int;
+    message *char;
+    file *char;
+    line int;
+}
+
+// is_fromfile_token 判断 token 是否以参数文件前缀开头且后面有内容。
+fn is_fromfile_token(prefixes *char, token *char) int {
+    if (prefixes == 0 || prefixes[0] == 0 || token == 0 || token[0] == 0) {
+        return 0;
+    }
+    let i int = 0;
+    for prefixes[i] != 0 {
+        if (token[0] == prefixes[i]) {
+            return (token[1] != 0).to_type(int);
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// expand_fail 记录第一条展开错误；已有错误时不覆盖。
+fn expand_fail(ec *expand_ctx, message *char, file *char, line int) void {
+    if (ec.failed != 0) {
+        return;
+    }
+    ec.failed = 1;
+    ec.message = message;
+    ec.file = file;
+    ec.line = line;
+}
+
+// join_path 把相对路径拼到基准目录后；基准为空表示当前工作目录。
+fn join_path(memory *pool, base *char, path *char) *char {
+    if (path == 0 || path[0] == 0) {
+        return 0;
+    }
+    if (path[0] == '/' || base == 0 || base[0] == 0) {
+        return pool_dup(memory, path);
+    }
+    let buffer [MAX_FILE_LINE]char;
+    let at int = 0;
+    let i int = 0;
+    for i < MAX_FILE_LINE - 1 && base[i] != 0 {
+        buffer[at] = base[i];
+        at += 1;
+        i += 1;
+    }
+    if (at > 0 && buffer[at - 1] != '/') {
+        buffer[at] = '/';
+        at += 1;
+    }
+    i = 0;
+    for i < MAX_FILE_LINE - 1 && path[i] != 0 {
+        buffer[at] = path[i];
+        at += 1;
+        i += 1;
+    }
+    if (at >= MAX_FILE_LINE - 1) {
+        return 0;
+    }
+    buffer[at] = 0;
+    return pool_dup(memory, &buffer[0]);
+}
+
+// dir_of 返回路径的目录部分（不含文件名）；没有目录时返回空串。
+fn dir_of(memory *pool, path *char) *char {
+    let cut int = -1;
+    let i int = 0;
+    for path[i] != 0 {
+        if (path[i] == '/') {
+            cut = i;
+        }
+        i += 1;
+    }
+    if (cut < 0) {
+        return pool_dup(memory, "");
+    }
+    if (cut == 0) {
+        return pool_dup(memory, "/");
+    }
+    let buffer [MAX_FILE_LINE]char;
+    let j int = 0;
+    for j < cut && j < MAX_FILE_LINE - 1 {
+        buffer[j] = path[j];
+        j += 1;
+    }
+    buffer[j] = 0;
+    return pool_dup(memory, &buffer[0]);
+}
+
+// stack_has 判断路径是否已在活动包含栈里（循环检测）。
+fn stack_has(ec *expand_ctx, path *char) int {
+    let i int = 0;
+    for i < ec.stack_count {
+        if (cstr_equal(ec.stack[i], path) != 0) {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// read_whole_file 读取整个文件；成功返回 malloc 缓冲（调用方释放）并写出长度。
+// 文件不可打开、读取失败或超过 limit 都返回空指针。
+fn read_whole_file(path *char, limit int, out_size *int) *char {
+    let fd int = os.open_file(path, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    let buffer *char = malloc((limit + 1).to_type(u64)).to_type(*char);
+    if (buffer == 0) {
+        os.close_fd(fd);
+        return 0;
+    }
+    let total int = 0;
+    let failed int = 0;
+    for total < limit {
+        let got i64 = os.read_fd(fd, (buffer + total).to_type(*void),
+            (limit - total).to_type(u64));
+        if (got < 0) {
+            failed = 1;
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        total += got.to_type(int);
+    }
+    if (os.close_fd(fd) != 0) {
+        failed = 1;
+    }
+    if (failed != 0 || total >= limit) {
+        free(buffer.to_type(*void));
+        return 0;
+    }
+    buffer[total] = 0;
+    *out_size = total;
+    return buffer;
+}
+
+// append_expanded 把一个展开后的 token 追加到结果；超上限返回 -1。
+fn append_expanded(ec *expand_ctx, token *char) int {
+    if (ec.block.count >= ec.max_tokens || ec.block.count >= MAX_FILE_TOKENS) {
+        expand_fail(ec, "参数文件展开的 token 个数超过上限", ec.file, ec.line);
+        return -1;
+    }
+    let copy *char = pool_dup(ec.memory, token);
+    if (copy == 0) {
+        expand_fail(ec, "展开参数文件时内存不足", ec.file, ec.line);
+        return -1;
+    }
+    ec.block.items[ec.block.count] = copy;
+    ec.block.count += 1;
+    return 0;
+}
+
+// emit_line 处理文件里的一行：默认整行一个 token，可用逐行回调改写。
+fn emit_line(ec *expand_ctx, line *char, path *char, line_number int,
+    base_dir *char, depth int) int {
+    if (ec.line_converter.to_type(*void) == 0) {
+        return emit_expanded_token(ec, line, path, line_number, base_dir, depth);
+    }
+    let ctx LineContext;
+    ctx.line = line;
+    ctx.file = path;
+    ctx.line_number = line_number;
+    ctx.context = ec.memory.to_type(*void);
+    let tokens LineTokens;
+    let empty []*char;
+    tokens.items = empty;
+    let diag Diagnostic;
+    clear_diagnostic(&diag);
+    let rc int = ec.line_converter(&ctx, &tokens, &diag, ec.line_user);
+    if (rc != 0) {
+        let message *char = "参数文件逐行回调失败";
+        if (diag.message != 0) {
+            message = diag.message;
+        }
+        expand_fail(ec, message, path, line_number);
+        return -1;
+    }
+    let i int = 0;
+    for i < len(tokens.items) {
+        if (emit_expanded_token(ec, tokens.items[i], path, line_number,
+                base_dir, depth) != 0) {
+            return -1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// emit_expanded_token 追加一个文件内 token；以参数文件前缀开头的 token 递归展开。
+fn emit_expanded_token(ec *expand_ctx, token *char, path *char, line_number int,
+    base_dir *char, depth int) int {
+    if (is_fromfile_token(ec.prefixes, token) != 0) {
+        return expand_file(ec, token + 1, depth + 1, base_dir, path, line_number);
+    }
+    return append_expanded(ec, token);
+}
+
+// expand_file 读取并展开一个参数文件；0 成功、-1 失败（已记录诊断）。
+fn expand_file(ec *expand_ctx, raw_path *char, depth int, base_dir *char,
+    origin_file *char, origin_line int) int {
+    if (depth > ec.max_depth) {
+        expand_fail(ec, "参数文件包含深度超过上限", origin_file, origin_line);
+        return -1;
+    }
+    let path *char = join_path(ec.memory, base_dir, raw_path);
+    if (path == 0) {
+        expand_fail(ec, "参数文件路径过长", origin_file, origin_line);
+        return -1;
+    }
+    if (stack_has(ec, path) != 0) {
+        expand_fail(ec, "参数文件包含出现循环", path, 0);
+        return -1;
+    }
+    if (ec.stack_count > MAX_DEPTH) {
+        expand_fail(ec, "参数文件包含深度超过上限", path, 0);
+        return -1;
+    }
+    ec.stack[ec.stack_count] = path;
+    ec.stack_count += 1;
+    let size int = 0;
+    let remaining int = ec.max_bytes - ec.bytes_read;
+    if (remaining <= 0) {
+        expand_fail(ec, "参数文件累计读取字节超过上限", path, 0);
+        ec.stack_count -= 1;
+        return -1;
+    }
+    let buffer *char = read_whole_file(path, remaining, &size);
+    if (buffer == 0) {
+        expand_fail(ec, "参数文件无法打开或读取失败（或超过字节上限）", path, 0);
+        ec.stack_count -= 1;
+        return -1;
+    }
+    ec.bytes_read += size;
+    let base *char = dir_of(ec.memory, path);
+    let start int = 0;
+    let line_number int = 1;
+    let i int = 0;
+    // 可选移除首行 UTF-8 BOM。
+    if (size >= 3 && buffer[0].to_type(int) == 239 && buffer[1].to_type(int) == 187
+        && buffer[2].to_type(int) == 191) {
+        start = 3;
+    }
+    for i <= size {
+        if (i == size || buffer[i].to_type(int) == 10) {
+            let end int = i;
+            if (end > start && buffer[end - 1].to_type(int) == 13) {
+                end -= 1;
+            }
+            let length int = end - start;
+            if (length > MAX_FILE_LINE - 1) {
+                free(buffer.to_type(*void));
+                expand_fail(ec, "参数文件单行超过长度上限", path, line_number);
+                ec.stack_count -= 1;
+                return -1;
+            }
+            // 文件以换行结尾时，末尾的虚拟空行不产生 token；
+            // 文件内部真正的空行仍产生空串 token。
+            let skip int = 0;
+            if (i == size && length == 0) {
+                skip = 1;
+            }
+            if (skip == 0) {
+                let line [MAX_FILE_LINE]char;
+                let k int = 0;
+                for k < length {
+                    line[k] = buffer[start + k];
+                    k += 1;
+                }
+                line[length] = 0;
+                if (emit_line(ec, &line[0], path, line_number, base, depth) != 0) {
+                    free(buffer.to_type(*void));
+                    ec.stack_count -= 1;
+                    return -1;
+                }
+            }
+            line_number += 1;
+            start = i + 1;
+        }
+        i += 1;
+    }
+    free(buffer.to_type(*void));
+    ec.stack_count -= 1;
+    return 0;
+}
+
+// expand_args 展开参数切片里的 @file；失败时结果记录诊断并返回空切片。
+// 未开启展开或没有 @file 时原样返回输入切片。
+fn expand_args(state *parser_state, config ParseConfig, result *Result,
+    args []*char) []*char {
+    let empty []*char;
+    if (state.fromfile_prefix_chars == 0 || state.fromfile_prefix_chars[0] == 0) {
+        return args;
+    }
+    let owner *result_owner = owner_of(result);
+    if (owner == 0) {
+        return args;
+    }
+    let block *file_token_block = pool_alloc(&owner.mem,
+        sizeof(file_token_block).to_type(u64)).to_type(*file_token_block);
+    if (block == 0) {
+        result_set_error(result, ResultStatus.resource_error, "resource_error",
+            "参数文件展开上下文分配失败", 0, 0, -1);
+        return empty;
+    }
+    block.count = 0;
+    let ec expand_ctx;
+    ec.memory = &owner.mem;
+    ec.block = block;
+    ec.prefixes = state.fromfile_prefix_chars;
+    ec.line_converter = state.line_converter;
+    ec.line_user = state.line_user;
+    ec.max_depth = config.file_max_depth;
+    ec.max_bytes = config.file_max_bytes;
+    ec.max_tokens = config.file_max_tokens;
+    ec.bytes_read = 0;
+    ec.stack_count = 0;
+    ec.failed = 0;
+    ec.message = 0;
+    ec.file = 0;
+    ec.line = -1;
+    let i int = 0;
+    for i < len(args) {
+        let token *char = args[i];
+        if (token == 0) {
+            result_set_error(result, ResultStatus.usage_error, "usage_error",
+                "参数切片含空指针", 0, 0, i);
+            return empty;
+        }
+        if (is_fromfile_token(state.fromfile_prefix_chars, token) != 0) {
+            if (expand_file(&ec, token + 1, 0, "", 0, -1) != 0) {
+                let message *char = "参数文件展开失败";
+                if (ec.message != 0) {
+                    message = ec.message;
+                }
+                result_set_error(result, ResultStatus.resource_error, "resource_error",
+                    message, ec.file, 0, i);
+                result.error.line = ec.line;
+                return empty;
+            }
+        } else if (append_expanded(&ec, token) != 0) {
+            result_set_error(result, ResultStatus.resource_error, "resource_error",
+                "参数文件展开超出上限", 0, 0, i);
+            return empty;
+        }
+        i += 1;
+    }
+    return block.items[0..block.count];
+}

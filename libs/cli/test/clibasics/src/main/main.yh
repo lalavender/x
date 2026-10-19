@@ -1,0 +1,390 @@
+module main;
+
+// cli 标准库 CLI1 验收：以 pack 形态走通设计示例，并在 --selftest 模式下
+// 覆盖空输入、默认值、const、count、类型转换、帮助、`--`、错误路径与生命周期。
+// 非 selftest 模式按 parse_main_or_exit 契约运行（0/2 退出码由 build-check 断言）。
+
+import cli;
+import io;
+import string;
+
+// build_pack_parser 构造验收用 parser；0 成功，其他值是装配失败码。
+fn build_pack_parser(p *cli.Parser) int {
+    let config cli.ParserConfig = cli.parser_config("pack");
+    config.description = "打包指定输入文件";
+    if (cli.init(p, config) != 0) {
+        return 1;
+    }
+    let output cli.Argument = cli.option("--output", "-o");
+    output.help = "输出文件路径";
+    output.metavar = "PATH";
+    output.default_value = cli.default_of(cli.value_text("bundle.bin"));
+    if (cli.add_argument(p, output) < 0) {
+        return 2;
+    }
+    let verbose cli.Argument = cli.option("--verbose", "-v");
+    verbose.action = cli.count;
+    verbose.help = "增加详细等级";
+    if (cli.add_argument(p, verbose) < 0) {
+        return 3;
+    }
+    let level cli.Argument = cli.option("--level", "-l");
+    level.value_kind = cli.integer;
+    if (cli.add_argument(p, level) < 0) {
+        return 4;
+    }
+    // 可选值选项：出现但无值时使用 const。
+    let tag cli.Argument = cli.option("--tag", 0);
+    tag.arity = cli.optional();
+    tag.const_value = cli.value_text("none-tag");
+    if (cli.add_argument(p, tag) < 0) {
+        return 5;
+    }
+    let force cli.Argument = cli.option("--force", 0);
+    force.action = cli.store_true;
+    if (cli.add_argument(p, force) < 0) {
+        return 6;
+    }
+    let source cli.Argument = cli.positional("source");
+    source.help = "输入文件路径";
+    if (cli.add_argument(p, source) < 0) {
+        return 7;
+    }
+    return 0;
+}
+
+// selftest 运行 CLI1 语义断言；全部通过返回 0，否则返回该断言的编号。
+fn selftest() int {
+    let parser cli.Parser;
+    let setup int = build_pack_parser(&parser);
+    if (setup != 0) {
+        return setup;
+    }
+
+    // 1) 默认值 + 位置参数：未出现的选项使用 explicit 默认值，provided=false。
+    let a1 [2]*char;
+    a1[0] = "in.txt";
+    let r1 cli.Result = cli.parse(&parser, a1[0..1]);
+    if (r1.status != cli.ok) {
+        cli.release(&r1);
+        cli.destroy(&parser);
+        return 10;
+    }
+    let path *char;
+    let input *char;
+    if (cli.get_text(&r1.values, "output", &path) != 0) {
+        cli.release(&r1);
+        cli.destroy(&parser);
+        return 11;
+    }
+    if (string.equals(path, "bundle.bin") != 1) {
+        cli.release(&r1);
+        cli.destroy(&parser);
+        return 12;
+    }
+    if (cli.provided(&r1.values, "output") != false) {
+        cli.release(&r1);
+        cli.destroy(&parser);
+        return 13;
+    }
+    if (cli.get_text(&r1.values, "source", &input) != 0
+        || string.equals(input, "in.txt") != 1) {
+        cli.release(&r1);
+        cli.destroy(&parser);
+        return 14;
+    }
+    // count 缺席时缺省 none：键存在但类型不是 integer。
+    let missing_level i64;
+    if (cli.get_i64(&r1.values, "verbose", &missing_level) != -2) {
+        cli.release(&r1);
+        cli.destroy(&parser);
+        return 15;
+    }
+    if (cli.get_i64(&r1.values, "output", &missing_level) != -2) {
+        cli.release(&r1);
+        cli.destroy(&parser);
+        return 16;
+    }
+    cli.release(&r1);
+
+    // 2) 附着值、计数、类型化取值与出现次数。
+    let a2 [6]*char;
+    a2[0] = "in.txt";
+    a2[1] = "-v";
+    a2[2] = "--verbose";
+    a2[3] = "--output=out.bin";
+    a2[4] = "--level";
+    a2[5] = "-7";
+    let r2 cli.Result = cli.parse(&parser, a2[0..6]);
+    if (r2.status != cli.ok) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 20;
+    }
+    let level i64;
+    if (cli.get_i64(&r2.values, "verbose", &level) != 0 || level != 2) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 21;
+    }
+    if (cli.occurrences(&r2.values, "verbose") != 2
+        || cli.provided(&r2.values, "verbose") != true) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 22;
+    }
+    if (cli.get_text(&r2.values, "output", &path) != 0
+        || string.equals(path, "out.bin") != 1) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 23;
+    }
+    if (cli.get_i64(&r2.values, "level", &level) != 0 || level != -7) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 24;
+    }
+    cli.release(&r2);
+
+    // 3) optional 选项无值时使用 const，有值时使用转换结果。
+    let a3 [2]*char;
+    a3[0] = "in.txt";
+    a3[1] = "--tag";
+    let r3 cli.Result = cli.parse(&parser, a3[0..2]);
+    if (r3.status != cli.ok) {
+        cli.release(&r3);
+        cli.destroy(&parser);
+        return 30;
+    }
+    let tag *char;
+    if (cli.get_text(&r3.values, "tag", &tag) != 0
+        || string.equals(tag, "none-tag") != 1) {
+        cli.release(&r3);
+        cli.destroy(&parser);
+        return 31;
+    }
+    cli.release(&r3);
+
+    let a4 [3]*char;
+    a4[0] = "in.txt";
+    a4[1] = "--tag";
+    a4[2] = "release";
+    let r4 cli.Result = cli.parse(&parser, a4[0..3]);
+    if (r4.status != cli.ok) {
+        cli.release(&r4);
+        cli.destroy(&parser);
+        return 32;
+    }
+    if (cli.get_text(&r4.values, "tag", &tag) != 0
+        || string.equals(tag, "release") != 1) {
+        cli.release(&r4);
+        cli.destroy(&parser);
+        return 33;
+    }
+    cli.release(&r4);
+
+    // 4) store_true 产生布尔值。
+    let a5 [2]*char;
+    a5[0] = "in.txt";
+    a5[1] = "--force";
+    let r5 cli.Result = cli.parse(&parser, a5[0..2]);
+    let force bool;
+    if (r5.status != cli.ok || cli.get_bool(&r5.values, "force", &force) != 0
+        || force != true) {
+        cli.release(&r5);
+        cli.destroy(&parser);
+        return 40;
+    }
+    cli.release(&r5);
+
+    // 5) `--` 之后的 token 是位置值。
+    let a6 [3]*char;
+    a6[0] = "--";
+    a6[1] = "-draft";
+    let r6 cli.Result = cli.parse(&parser, a6[0..2]);
+    if (r6.status != cli.ok || cli.get_text(&r6.values, "source", &input) != 0
+        || string.equals(input, "-draft") != 1) {
+        cli.release(&r6);
+        cli.destroy(&parser);
+        return 50;
+    }
+    cli.release(&r6);
+
+    // 6) 空输入：缺少必需的位置参数是 usage_error。
+    let a7 [1]*char;
+    let r7 cli.Result = cli.parse(&parser, a7[0..0]);
+    if (r7.status != cli.usage_error || r7.error.message == 0) {
+        cli.release(&r7);
+        cli.destroy(&parser);
+        return 60;
+    }
+    cli.release(&r7);
+
+    // 7) 未知选项是 usage_error，并带 token 下标。
+    let a8 [2]*char;
+    a8[0] = "in.txt";
+    a8[1] = "--unknown";
+    let r8 cli.Result = cli.parse(&parser, a8[0..2]);
+    if (r8.status != cli.usage_error || r8.error.token_index != 1) {
+        cli.release(&r8);
+        cli.destroy(&parser);
+        return 61;
+    }
+    cli.release(&r8);
+
+    // 8) 选项缺值是 usage_error。
+    let a9 [2]*char;
+    a9[0] = "in.txt";
+    a9[1] = "--output";
+    let r9 cli.Result = cli.parse(&parser, a9[0..2]);
+    if (r9.status != cli.usage_error) {
+        cli.release(&r9);
+        cli.destroy(&parser);
+        return 62;
+    }
+    cli.release(&r9);
+
+    // 9) 多余的位置参数是 usage_error。
+    let a10 [3]*char;
+    a10[0] = "one";
+    a10[1] = "two";
+    let r10 cli.Result = cli.parse(&parser, a10[0..2]);
+    if (r10.status != cli.usage_error) {
+        cli.release(&r10);
+        cli.destroy(&parser);
+        return 63;
+    }
+    cli.release(&r10);
+
+    // 10) 类型转换失败是 usage_error，而不是静默接受文本。
+    let a11 [3]*char;
+    a11[0] = "in.txt";
+    a11[1] = "--level";
+    a11[2] = "abc";
+    let r11 cli.Result = cli.parse(&parser, a11[0..3]);
+    if (r11.status != cli.usage_error) {
+        cli.release(&r11);
+        cli.destroy(&parser);
+        return 64;
+    }
+    cli.release(&r11);
+
+    // 11) --help 返回控制状态与帮助文本，不产生业务 values。
+    let a12 [1]*char;
+    a12[0] = "--help";
+    let r12 cli.Result = cli.parse(&parser, a12[0..1]);
+    if (r12.status != cli.help_requested || r12.control_text == 0) {
+        cli.release(&r12);
+        cli.destroy(&parser);
+        return 70;
+    }
+    cli.release(&r12);
+
+    // 12) format_usage / format_help 独立于解析生成文本。
+    let usage cli.TextResult = cli.format_usage(&parser);
+    if (usage.status != cli.ok || usage.text == 0) {
+        cli.release_text(&usage);
+        cli.destroy(&parser);
+        return 72;
+    }
+    cli.release_text(&usage);
+    let help cli.TextResult = cli.format_help(&parser);
+    if (help.status != cli.ok || help.text == 0) {
+        cli.release_text(&help);
+        cli.destroy(&parser);
+        return 73;
+    }
+    cli.release_text(&help);
+
+    // 12b) render 写出文本；无效文件描述符返回 -1。
+    let rendered cli.TextResult = cli.format_usage(&parser);
+    if (cli.render_text(&rendered, 2) != 0) {
+        cli.release_text(&rendered);
+        cli.destroy(&parser);
+        return 75;
+    }
+    if (cli.render_text(&rendered, -1) != -1) {
+        cli.release_text(&rendered);
+        cli.destroy(&parser);
+        return 76;
+    }
+    cli.release_text(&rendered);
+
+    // 13) 重复解析隔离：第二次解析不继承第一次的显式值。
+    let a13 [1]*char;
+    a13[0] = "second.txt";
+    let r13 cli.Result = cli.parse(&parser, a13[0..1]);
+    if (cli.occurrences(&r13.values, "verbose") != 0
+        || cli.provided(&r13.values, "verbose") != false) {
+        cli.release(&r13);
+        cli.destroy(&parser);
+        return 74;
+    }
+    // 13b) get_list 的类型与缺键错误码。
+    let list []cli.Value;
+    if (cli.get_list(&r13.values, "output", &list) != -2) {
+        cli.release(&r13);
+        cli.destroy(&parser);
+        return 77;
+    }
+    if (cli.get_list(&r13.values, "nosuch", &list) != -1) {
+        cli.release(&r13);
+        cli.destroy(&parser);
+        return 78;
+    }
+    cli.release(&r13);
+
+    // 14) 结果生命周期独立于 parser：destroy 之后仍可读取文本。
+    let a14 [2]*char;
+    a14[0] = "late.txt";
+    let r14 cli.Result = cli.parse(&parser, a14[0..1]);
+    if (r14.status != cli.ok) {
+        cli.release(&r14);
+        cli.destroy(&parser);
+        return 80;
+    }
+    let late *char;
+    cli.destroy(&parser);
+    if (cli.get_text(&r14.values, "source", &late) != 0
+        || string.equals(late, "late.txt") != 1) {
+        cli.release(&r14);
+        return 81;
+    }
+    cli.release(&r14);
+    return 0;
+}
+
+// run_pack 按设计示例的入口形态解析并输出结果；失败路径由 parse_main_or_exit 退出。
+fn run_pack(argc int, argv **char) int {
+    let parser cli.Parser;
+    let setup int = build_pack_parser(&parser);
+    if (setup != 0) {
+        io.println("cli 配置失败");
+        return 1;
+    }
+    let result cli.Result = cli.parse_main_or_exit(&parser, argc, argv);
+    let path *char;
+    let input *char;
+    let level i64;
+    if (cli.get_text(&result.values, "output", &path) != 0
+        || cli.get_text(&result.values, "source", &input) != 0) {
+        cli.release(&result);
+        cli.destroy(&parser);
+        return 1;
+    }
+    if (cli.get_i64(&result.values, "verbose", &level) != 0) {
+        level = 0;
+    }
+    printf("output=%s source=%s verbose=%d\n", path, input, level);
+    cli.release(&result);
+    cli.destroy(&parser);
+    return 0;
+}
+
+// main 在 --selftest 下运行内部断言，否则按 pack 入口契约执行。
+fn main(argc int, argv **char) int {
+    if (argc > 1 && string.equals(argv[1], "--selftest") == 1) {
+        return selftest();
+    }
+    return run_pack(argc, argv);
+}

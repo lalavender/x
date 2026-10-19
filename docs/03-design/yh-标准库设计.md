@@ -101,17 +101,27 @@ macOS/arm64 后续适配审核的系统 OS API，披露 dyld/libSystem 依赖。
 当前该目录仅有规划 README，清单预留项不代表模块已可使用；未迁移本文已有 API。
 静态 ELF、启动入口和连续自编须与自有工具链共同验收。
 
-## cli（2026-10-18 设计，尚未实现）
+## cli（2026-10-18 设计；CLI0–CLI5 已实现，2026-10-19）
 
-拟增加 `libs/cli/`，以 `import cli;` 提供接近 Python argparse 完整能力的命令行解析。
+`libs/cli/` 以 `import cli;` 提供接近 Python argparse 完整能力的命令行解析。
 采用参数声明、显式解析结果和类型化查询，覆盖位置/选项、多值与重复参数、子命令、
 参数组/互斥组、部分/混合解析、自定义回调、参数文件及自动帮助。
 
 核心返回结果，由入口适配决定输出和退出；声明和结果分别显式释放，不依赖反射、
 泛型或新语法。完整接口、差异和生命周期见
-[cli 设计](yh-cli标准库设计.md)，CLI0–CLI6 分期见
-[实施方案](../02-plan/yh-cli标准库实施方案.md)。当前尚未注册模块或修改既有 CLI。
-该模块的分配点将明确写进 API 契约，不改变现有基础模块的所有权约定。
+[cli 设计](yh-cli标准库设计.md)，与 argparse 的差异见
+[对照说明](yh-cli与argparse差异.md)，CLI0–CLI6 分期见
+[实施方案](../02-plan/yh-cli标准库实施方案.md)，API 与状态见
+[libs/cli/README.md](../../libs/cli/README.md)。
+
+已注册模块并在 `libs/project.toml` 登记；公开面分文件为
+`cli.yh`（模型与分配池）、`schema.yh`（注册与冻结）、`values.yh`（命名空间）、
+`parse.yh`（解析与数量）、`convert.yh`（类型转换）、`write.yh`（结果写入）、
+`commands.yh`（子命令/继承/组）、`layer.yh`（分层解析与模式）、
+`extensions.yh`（回调与注册表）、`files.yh`（参数文件）、
+`help.yh`（帮助/诊断/输出）、`entry.yh`（argc/argv 与退出码）。
+分配点按 API 契约显式声明，不改变现有基础模块的所有权约定；
+`os` 增加了 `is_terminal` 以支持帮助的自动颜色策略。
 
 ## 当前边界
 

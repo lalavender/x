@@ -162,11 +162,6 @@ runtime-memory/lex-stats/scratch-isolation）在 WSL 全绿。重建与验证
 
 ### 标准库
 
-- [ ] **CLI0–CLI6：`libs/cli` 命令行标准库**（2026-10-18 设计）：按用户要求尽量覆盖
-  argparse 完整能力，以声明、带标签结果和类型化查询实现；包含子命令、组、四种解析模式、
-  扩展回调、参数文件和完整帮助。当前仅交付设计，尚未注册模块、实现 API 或迁移入口。
-  语义及差异见[设计](03-design/yh-cli标准库设计.md)，阶段和门禁见
-  [实施方案](02-plan/yh-cli标准库实施方案.md)。
 - [ ] **SYS0–SYS6：`libs/sys` 系统调用封装**：Linux/arm64 先实现直接 syscall、
   `-errno` 结果、文件/目录、内存/时间和进程原语，再迁移上层库与编译器消费者、
   验收静态 ELF 和连续自编；**SYS7** 后续增加 Darwin OS 接口适配。

@@ -1,0 +1,877 @@
+module cli;
+
+// cli 解析（CLI1）：严格普通解析、token 匹配、内置 action 与默认值归并。
+// 未实现的能力（长名称缩写、短选项组合、append/extend/custom、
+// parse_known/intermixed、子命令、参数文件）在 freeze 或解析时给出明确诊断，
+// 不静默按另一套规则处理。
+
+// —— 结果构造与失败 ——
+
+// owner_of 取结果私有所有权句柄；空结果返回空指针。
+fn owner_of(result *Result) *result_owner {
+    if (result == 0 || result.owner == 0) {
+        return 0;
+    }
+    return result.owner.to_type(*result_owner);
+}
+
+// new_result 构造一个初始状态为 ok 的结果；失败时 owner 为空指针。
+fn new_result() Result {
+    let result Result;
+    result.status = ResultStatus.ok;
+    result.values.handle = 0;
+    let empty []*char;
+    result.unparsed = empty;
+    clear_diagnostic(&result.error);
+    result.control_text = 0;
+    result.usage_text = 0;
+    result.prog_text = 0;
+    let empty_path []*char;
+    result.command_path = empty_path;
+    result.owner = 0;
+    let owner *result_owner = malloc(sizeof(result_owner).to_type(u64)).to_type(*result_owner);
+    if (owner == 0) {
+        result.status = ResultStatus.resource_error;
+        return result;
+    }
+    pool_init(&owner.mem);
+    let slot int = 0;
+    for slot <= MAX_ARGS {
+        owner.appeared[slot] = 0;
+        slot += 1;
+    }
+    result.owner = owner.to_type(*void);
+    if (namespace_init(&result.values) != 0) {
+        pool_free_all(&owner.mem);
+        free(owner.to_type(*void));
+        result.owner = 0;
+        result.status = ResultStatus.resource_error;
+        return result;
+    }
+    return result;
+}
+
+// result_set_error 在结果里记录一条诊断；不覆盖已经记录的第一条错误。
+fn result_set_error(result *Result, status ResultStatus, code *char,
+    message *char, option *char, dest *char, token_index int) void {
+    if (result.status != ResultStatus.ok) {
+        return;
+    }
+    result.status = status;
+    let owner *result_owner = owner_of(result);
+    if (owner == 0) {
+        return;
+    }
+    result.error.code = pool_dup(&owner.mem, code);
+    if (result.error.code == 0) {
+        result.error.code = code;
+    }
+    result.error.message = pool_dup(&owner.mem, message);
+    if (result.error.message == 0) {
+        result.error.message = message;
+    }
+    result.error.option = pool_dup(&owner.mem, option);
+    result.error.dest = pool_dup(&owner.mem, dest);
+    result.error.token_index = token_index;
+    result.error.file = 0;
+    result.error.line = -1;
+    result.error.column = -1;
+}
+
+// release 释放结果的全部存储并归零；零值可安全调用。
+pub fn release(result *Result) void {
+    if (result == 0) {
+        return;
+    }
+    namespace_destroy(&result.values);
+    let owner *result_owner = owner_of(result);
+    if (owner != 0) {
+        pool_free_all(&owner.mem);
+        free(owner.to_type(*void));
+    }
+    result.owner = 0;
+    result.control_text = 0;
+    result.status = ResultStatus.ok;
+    let empty []*char;
+    result.unparsed = empty;
+    clear_diagnostic(&result.error);
+}
+
+// —— token 工具 ——
+
+// token_has_equal 返回 token 中第一个 '=' 的下标；没有时返回 -1。
+fn token_has_equal(token *char) int {
+    let i int = 0;
+    for token[i] != 0 {
+        if (token[i] == '=') {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// token_is_negative_number 判断 token 是否符合内置负数词法（-12/-1_000/-0.5/-2e-3）。
+// 注册了数字型短选项的 parser 关闭该特判（设计 §9.2）。
+fn token_is_negative_number(state *parser_state, token *char) int {
+    if (state.numeric_short != 0) {
+        return 0;
+    }
+    if (token == 0 || token[0] == 0) {
+        return 0;
+    }
+    if (is_prefix_char(state.prefix_chars, token[0].to_type(int)) == 0) {
+        return 0;
+    }
+    let i int = 1;
+    let first int = token[i].to_type(int);
+    if (first != '.' && (first < '0' || first > '9')) {
+        return 0;
+    }
+    let digits int = 0;
+    let dots int = 0;
+    for token[i] != 0 {
+        let ch int = token[i].to_type(int);
+        if (ch >= '0' && ch <= '9') {
+            digits += 1;
+            i += 1;
+            continue;
+        }
+        if (ch == '_') {
+            i += 1;
+            continue;
+        }
+        if (ch == '.' && dots == 0) {
+            dots += 1;
+            i += 1;
+            continue;
+        }
+        if ((ch == 'e' || ch == 'E') && digits > 0) {
+            i += 1;
+            if (token[i] == '-' || token[i] == '+') {
+                i += 1;
+            }
+            let exponent_digits int = 0;
+            for token[i] >= '0' && token[i] <= '9' {
+                exponent_digits += 1;
+                i += 1;
+            }
+            if (exponent_digits == 0) {
+                return 0;
+            }
+            break;
+        }
+        return 0;
+    }
+    if (digits == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+// token_is_option_like 判断 token 是否像选项：首字节是注册前缀、长度大于 1，
+// 且不符合负数词法（除非注册了数字型短选项）。
+fn token_is_option_like(state *parser_state, token *char) int {
+    if (token == 0 || token[0] == 0) {
+        return 0;
+    }
+    if (is_prefix_char(state.prefix_chars, token[0].to_type(int)) == 0) {
+        return 0;
+    }
+    if (token[1] == 0) {
+        return 0;
+    }
+    if (token_is_negative_number(state, token) != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+// cstr_prefix_of 判断 text 是否以 prefix 开头（prefix 非空且不等于 text）。
+fn cstr_prefix_of(prefix *char, text *char) int {
+    if (prefix == 0 || text == 0 || prefix[0] == 0) {
+        return 0;
+    }
+    let i int = 0;
+    for prefix[i] != 0 {
+        if (text[i] == 0 || text[i] != prefix[i]) {
+            return 0;
+        }
+        i += 1;
+    }
+    if (text[i] == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+// name_is_long 判断名称是否为双前缀长名称。
+fn name_is_long(state *parser_state, name *char) int {
+    if (name == 0 || name[0] == 0 || name[1] == 0) {
+        return 0;
+    }
+    if (is_prefix_char(state.prefix_chars, name[0].to_type(int)) != 0
+        && is_prefix_char(state.prefix_chars, name[1].to_type(int)) != 0
+        && name[2] != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+// match_option_row 在声明里精确匹配选项名称；返回行下标或 -1。
+fn match_option_row(state *parser_state, name *char) int {
+    let i int = 0;
+    for i < state.row_count {
+        let row *arg_row = &state.rows[i];
+        if (row.used != 0 && row.positional == 0) {
+            let j int = 0;
+            for j < row.name_count {
+                if (cstr_equal(row.names[j], name) != 0) {
+                    return i;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// match_long_abbrev 在长名称里做唯一前缀匹配；返回行下标或 -1，
+// 候选个数写入 out（0 = 无候选，>1 = 多义）。
+fn match_long_abbrev(state *parser_state, name *char, out *int) int {
+    let found int = -1;
+    let hits int = 0;
+    let i int = 0;
+    for i < state.row_count {
+        let row *arg_row = &state.rows[i];
+        if (row.used != 0 && row.positional == 0) {
+            let j int = 0;
+            for j < row.name_count {
+                if (name_is_long(state, row.names[j]) != 0
+                    && cstr_prefix_of(name, row.names[j]) != 0) {
+                    if (found != i) {
+                        found = i;
+                        hits += 1;
+                    }
+                    break;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    *out = hits;
+    if (hits == 1) {
+        return found;
+    }
+    return -1;
+}
+
+// nth_positional 返回第 index 个（从 0 起）位置参数的行下标；没有返回 -1。
+fn nth_positional(state *parser_state, index int) int {
+    let seen int = 0;
+    let i int = 0;
+    for i < state.row_count {
+        let row *arg_row = &state.rows[i];
+        if (row.used != 0 && row.positional != 0) {
+            if (seen == index) {
+                return i;
+            }
+            seen += 1;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// row_min_values 返回该声明要求的最少值个数。
+fn row_min_values(row *arg_row) int {
+    let kind int = effective_arity_kind(row);
+    if (kind == ArityKind.arity_single.to_type(int)
+        || kind == ArityKind.arity_one_or_more.to_type(int)) {
+        return 1;
+    }
+    if (kind == ArityKind.arity_exactly.to_type(int)) {
+        return row.arity_count;
+    }
+    return 0;
+}
+
+// row_max_values 返回该声明允许的最多值个数；-1 表示无限。
+fn row_max_values(row *arg_row) int {
+    let kind int = effective_arity_kind(row);
+    if (kind == ArityKind.arity_single.to_type(int)
+        || kind == ArityKind.arity_optional.to_type(int)) {
+        return 1;
+    }
+    if (kind == ArityKind.arity_exactly.to_type(int)) {
+        return row.arity_count;
+    }
+    if (kind == ArityKind.arity_no_values.to_type(int)) {
+        return 0;
+    }
+    return -1;
+}
+
+// —— 转换提交 ——
+
+// convert_tokens 逐个转换 token 并做 choices 校验，结果写入 out；
+// 返回转换个数，-1 表示已记录错误。
+fn convert_tokens(result *Result, row *arg_row, tokens []*char, out *Value,
+    token_index int) int {
+    let count int = len(tokens);
+    let i int = 0;
+    for i < count {
+        let v Value;
+        if (row.converter.to_type(*void) != 0) {
+            let ns *ns_state = ns_state_of(&result.values);
+            let ctx ConvertContext;
+            ctx.token = tokens[i];
+            ctx.token_index = token_index;
+            ctx.kind = row.value_kind;
+            ctx.context = ns.to_type(*void);
+            let diag Diagnostic;
+            clear_diagnostic(&diag);
+            let rc int = row.converter(&ctx, &v, &diag, row.user);
+            if (rc != 0) {
+                let message *char = "参数值转换失败";
+                if (diag.message != 0) {
+                    message = diag.message;
+                }
+                result_set_error(result, ResultStatus.usage_error, "usage_error",
+                    message, row.names[0], row.dest, token_index);
+                return -1;
+            }
+            if (v.kind != row.value_kind) {
+                result_set_error(result, ResultStatus.usage_error, "usage_error",
+                    "转换器输出类型与声明不符", row.names[0], row.dest, token_index);
+                return -1;
+            }
+        } else if (convert_token(row.value_kind, tokens[i], &v) != 0) {
+            result_set_error(result, ResultStatus.usage_error, "usage_error",
+                "参数值无法按声明类型转换", row.names[0], row.dest, token_index);
+            return -1;
+        }
+        if (value_in_choices(row, v) == 0) {
+            result_set_error(result, ResultStatus.usage_error, "usage_error",
+                "参数值不在候选集合中", row.names[0], row.dest, token_index);
+            return -1;
+        }
+        if (row.validator.to_type(*void) != 0) {
+            let diag Diagnostic;
+            clear_diagnostic(&diag);
+            let rc int = row.validator(v, &diag, row.user);
+            if (rc != 0) {
+                let message *char = "参数值未通过校验";
+                if (diag.message != 0) {
+                    message = diag.message;
+                }
+                result_set_error(result, ResultStatus.usage_error, "usage_error",
+                    message, row.names[0], row.dest, token_index);
+                return -1;
+            }
+        }
+        out[i] = v;
+        i += 1;
+    }
+    return count;
+}
+
+// commit_values 按 action 与数量模型写入已转换的值；0 成功，-1 失败，-2 超容量。
+fn commit_values(result *Result, row *arg_row, values []Value) int {
+    let action int = row.action;
+    let kind int = effective_arity_kind(row);
+    if (action == Action.store.to_type(int)) {
+        if (arity_is_multi(kind) != 0) {
+            return write_list(result, row, values);
+        }
+        if (len(values) > 0) {
+            return write_scalar(result, row, values[0]);
+        }
+        return 0;
+    }
+    if (action == Action.append.to_type(int)) {
+        if (arity_is_multi(kind) != 0) {
+            let sub Value = make_block_value(result, values);
+            if (sub.kind != ValueKind.sequence) {
+                return -1;
+            }
+            return append_value(result, row, sub);
+        }
+        let i int = 0;
+        for i < len(values) {
+            let rc int = append_value(result, row, values[i]);
+            if (rc != 0) {
+                return rc;
+            }
+            i += 1;
+        }
+        return 0;
+    }
+    if (action == Action.custom.to_type(int)) {
+        return commit_custom(result, row, values);
+    }
+    if (action == Action.extend.to_type(int)) {
+        let i int = 0;
+        for i < len(values) {
+            let rc int = append_value(result, row, values[i]);
+            if (rc != 0) {
+                return rc;
+            }
+            i += 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+// commit_or_error 提交值并把失败翻译成结构化诊断；0 成功、-1 已记录错误。
+fn commit_or_error(result *Result, row *arg_row, values []Value) int {
+    let rc int = commit_values(result, row, values);
+    if (rc == -2) {
+        result_set_error(result, ResultStatus.resource_error, "resource_error",
+            "列表元素个数超过本版本上限", row.names[0], row.dest, -1);
+        return -1;
+    }
+    if (rc != 0) {
+        result_set_error(result, ResultStatus.resource_error, "resource_error",
+            "写入参数结果时内存不足", row.names[0], row.dest, -1);
+        return -1;
+    }
+    return 0;
+}
+
+// name_is_negative_form 判断匹配到的名称去掉前缀后是否以 no- 开头
+// （boolean_optional 的否定别名形式）。
+fn name_is_negative_form(state *parser_state, name *char) int {
+    let i int = 0;
+    for name[i] != 0 && is_prefix_char(state.prefix_chars, name[i].to_type(int)) != 0 {
+        i += 1;
+    }
+    if (name[i] == 'n' && name[i + 1] == 'o' && name[i + 2] == '-') {
+        return 1;
+    }
+    return 0;
+}
+
+// handle_control_result 生成帮助/版本文本并返回控制状态。
+fn handle_control_result(state *parser_state, result *Result, action int) void {
+    let owner *result_owner = owner_of(result);
+    if (owner == 0) {
+        return;
+    }
+    if (action == Action.help.to_type(int)) {
+        result.control_text = build_help_text(state, &owner.mem);
+        result.status = ResultStatus.help_requested;
+        return;
+    }
+    result.control_text = build_version_text(state, &owner.mem);
+    result.status = ResultStatus.version_requested;
+}
+
+// apply_zero_value_action 应用一个不消费值的 action；0 成功、-1 已记录错误。
+fn apply_zero_value_action(state *parser_state, result *Result, row *arg_row,
+    matched *char) int {
+    let action int = row.action;
+    if (action_is_control(action) != 0) {
+        handle_control_result(state, result, action);
+        return 0;
+    }
+    let rc int = 0;
+    if (action == Action.store_const.to_type(int)) {
+        rc = write_scalar(result, row, row.const_value);
+    } else if (action == Action.store_true.to_type(int)) {
+        rc = write_scalar(result, row, value_bool(true));
+    } else if (action == Action.store_false.to_type(int)) {
+        rc = write_scalar(result, row, value_bool(false));
+    } else if (action == Action.boolean_optional.to_type(int)) {
+        let flag bool = true;
+        if (name_is_negative_form(state, matched) != 0) {
+            flag = false;
+        }
+        rc = write_scalar(result, row, value_bool(flag));
+    } else if (action == Action.append_const.to_type(int)) {
+        rc = append_value(result, row, row.const_value);
+    } else if (action == Action.count.to_type(int)) {
+        rc = increment_count(result, row);
+        if (rc == -2) {
+            result_set_error(result, ResultStatus.usage_error, "usage_error",
+                "计数溢出", row.names[0], row.dest, -1);
+            return -1;
+        }
+    }
+    if (rc == -2) {
+        result_set_error(result, ResultStatus.resource_error, "resource_error",
+            "列表元素个数超过本版本上限", row.names[0], row.dest, -1);
+        return -1;
+    }
+    if (rc != 0) {
+        result_set_error(result, ResultStatus.resource_error, "resource_error",
+            "写入参数结果时内存不足", row.names[0], row.dest, -1);
+        return -1;
+    }
+    return 0;
+}
+
+// —— 选项消费 ——
+
+// consume_option 消费一条已匹配选项的值并写入结果；0 继续、-1 终止解析。
+fn consume_option(state *parser_state, result *Result, args []*char, cursor *int,
+    row_index int, has_attached int, attached *char, matched *char) int {
+    let row *arg_row = &state.rows[row_index];
+    let max int = row_max_values(row);
+    if (max == 0 || action_is_zero_value(row.action) != 0) {
+        if (has_attached != 0) {
+            result_set_error(result, ResultStatus.usage_error, "usage_error",
+                "该选项不接受值", row.names[0], row.dest, *cursor);
+            return -1;
+        }
+        return apply_zero_value_action(state, result, row, matched);
+    }
+    let kind int = effective_arity_kind(row);
+    let min int = row_min_values(row);
+    let tokens [MAX_ARGC]*char;
+    let count int = 0;
+    if (has_attached != 0) {
+        tokens[count] = attached;
+        count += 1;
+    }
+    let unlimited int = 0;
+    if (max < 0) {
+        unlimited = 1;
+    }
+    for unlimited != 0 || count < max {
+        if (*cursor + 1 >= len(args)) {
+            break;
+        }
+        let candidate *char = args[*cursor + 1];
+        if (cstr_equal(candidate, "--") != 0) {
+            break;
+        }
+        if (token_is_option_like(state, candidate) != 0) {
+            break;
+        }
+        if (count >= MAX_ARGC) {
+            break;
+        }
+        *cursor += 1;
+        tokens[count] = candidate;
+        count += 1;
+    }
+    if (count < min) {
+        result_set_error(result, ResultStatus.usage_error, "usage_error",
+            "选项缺少值", row.names[0], row.dest, *cursor);
+        return -1;
+    }
+    if (kind == ArityKind.arity_optional.to_type(int) && count == 0) {
+        let rc int = write_scalar(result, row, row.const_value);
+        if (rc != 0) {
+            result_set_error(result, ResultStatus.resource_error, "resource_error",
+                "写入参数结果时内存不足", row.names[0], row.dest, *cursor);
+            return -1;
+        }
+        return 0;
+    }
+    let converted [MAX_ARGC]Value;
+    let n int = convert_tokens(result, row, tokens[0..count], &converted[0], *cursor);
+    if (n < 0) {
+        return -1;
+    }
+    return commit_or_error(result, row, converted[0..n]);
+}
+
+// consume_short_cluster 处理短选项组合（-vvv、-abc、-Ipath）；0 继续、-1 终止。
+fn consume_short_cluster(state *parser_state, result *Result, args []*char,
+    cursor *int, token *char) int {
+    let pos int = 1;
+    for token[pos] != 0 {
+        let short_name [MAX_NAMES]char;
+        short_name[0] = token[0];
+        short_name[1] = token[pos];
+        short_name[2] = 0;
+        let row_index int = match_option_row(state, &short_name[0]);
+        if (row_index < 0) {
+            result_set_error(result, ResultStatus.usage_error, "usage_error",
+                "未知选项", &short_name[0], 0, *cursor);
+            return -1;
+        }
+        let row *arg_row = &state.rows[row_index];
+        if (action_is_zero_value(row.action) != 0) {
+            if (apply_zero_value_action(state, result, row, &short_name[0]) != 0) {
+                return -1;
+            }
+            pos += 1;
+            continue;
+        }
+        let attached *char = &token[pos + 1];
+        let has_attached int = 0;
+        if (token[pos + 1] == '=') {
+            attached = &token[pos + 2];
+            has_attached = 1;
+        } else if (token[pos + 1] != 0) {
+            has_attached = 1;
+        }
+        return consume_option(state, result, args, cursor, row_index,
+            has_attached, attached, &short_name[0]);
+    }
+    return 0;
+}
+
+// —— 位置参数 ——
+
+// assign_positional_segment 把一段连续位置 token 按「贪心 + 保留后续最低需求」
+// 分配给尚未满足的位置参数；0 成功、-1 已记录错误。
+fn assign_positional_segment(state *parser_state, result *Result, tokens []*char,
+    positional_cursor *int, out_unused *int) int {
+    let index int = 0;
+    let total int = len(tokens);
+    *out_unused = 0;
+    for index < total {
+        let row_index int = nth_positional(state, *positional_cursor);
+        if (row_index < 0) {
+            // 没有可分配的位置参数：剩余 token 归还调用方（子命令槽、known 保留或多余诊断）。
+            break;
+        }
+        let row *arg_row = &state.rows[row_index];
+        // remainder 交给主循环消费（它要吞掉后续看起来像选项的 token）。
+        if (effective_arity_kind(row) == ArityKind.arity_remainder.to_type(int)) {
+            break;
+        }
+        let min int = row_min_values(row);
+        let max int = row_max_values(row);
+        let later_min int = 0;
+        let k int = *positional_cursor + 1;
+        for 1 {
+            let later int = nth_positional(state, k);
+            if (later < 0) {
+                break;
+            }
+            later_min += row_min_values(&state.rows[later]);
+            k += 1;
+        }
+        let available int = total - index;
+        let take int = available - later_min;
+        if (take < min) {
+            take = min;
+        }
+        if (take > available) {
+            take = available;
+        }
+        if (max >= 0 && take > max) {
+            take = max;
+        }
+        if (take < min) {
+            result_set_error(result, ResultStatus.usage_error, "usage_error",
+                "缺少必需的位置参数", 0, row.dest, -1);
+            return -1;
+        }
+        let kind int = effective_arity_kind(row);
+        if (kind == ArityKind.arity_optional.to_type(int) && take == 0) {
+            let rc int = write_scalar(result, row, row.const_value);
+            if (rc != 0) {
+                result_set_error(result, ResultStatus.resource_error, "resource_error",
+                    "写入参数结果时内存不足", 0, row.dest, -1);
+                return -1;
+            }
+        } else {
+            let converted [MAX_ARGC]Value;
+            let n int = convert_tokens(result, row, tokens[index..index + take], &converted[0], -1);
+            if (n < 0) {
+                return -1;
+            }
+            if (commit_or_error(result, row, converted[0..n]) != 0) {
+                return -1;
+            }
+        }
+        index += take;
+        *positional_cursor += 1;
+    }
+    *out_unused = total - index;
+    return 0;
+}
+
+// —— 默认值归并 ——
+
+// row_default_mode 解析某行的有效默认策略：参数级 → 展示组级 → parser 级。
+fn row_default_mode(state *parser_state, row *arg_row) int {
+    if (row.default_mode != DefaultMode.default_inherit.to_type(int)) {
+        return row.default_mode;
+    }
+    if (row.group != 0) {
+        let index int = group_of(state, row.group);
+        if (index >= 0 && state.groups[index].default_mode != DefaultMode.default_inherit.to_type(int)) {
+            return state.groups[index].default_mode;
+        }
+    }
+    return state.argument_default_mode;
+}
+
+// row_default_value 解析某行的有效默认值：参数级 → 展示组级 → parser 级。
+fn row_default_value(state *parser_state, row *arg_row) Value {
+    if (row.default_mode != DefaultMode.default_inherit.to_type(int)) {
+        return row.default_value;
+    }
+    if (row.group != 0) {
+        let index int = group_of(state, row.group);
+        if (index >= 0 && state.groups[index].default_mode != DefaultMode.default_inherit.to_type(int)) {
+            return state.groups[index].default_value;
+        }
+    }
+    return state.argument_default_value;
+}
+
+// action_implicit_default 返回 action 的固有缺省值；控制 action 不创建键。
+fn action_implicit_default(row *arg_row) Value {
+    if (row.action == Action.store_true.to_type(int)) {
+        return value_bool(false);
+    }
+    if (row.action == Action.store_false.to_type(int)) {
+        return value_bool(true);
+    }
+    return value_none();
+}
+
+// apply_defaults 为未显式出现的声明写入默认值：set_default 覆盖优先，
+// 其次是参数/parser 策略，最后是 action 固有缺省；位置 zero_or_more 无输入时为空列表。
+fn apply_defaults(state *parser_state, result *Result) void {
+    let i int = 0;
+    for i < state.row_count {
+        let row *arg_row = &state.rows[i];
+        if (row.used != 0 && action_is_control(row.action) == 0) {
+            let writable int = 0;
+            let existing int = ns_entry_index(result, row.dest);
+            if (existing < 0) {
+                writable = 1;
+            } else {
+                let ns *ns_state = ns_state_of(&result.values);
+                if (ns != 0 && ns.rows[existing].is_default != 0) {
+                    writable = 1;
+                }
+            }
+            if (writable != 0) {
+                let override int = override_of(state, row.dest);
+                if (override >= 0) {
+                    if (write_default(result, row.dest, state.overrides[override].value) != 0) {
+                        result_set_error(result, ResultStatus.resource_error,
+                            "resource_error", "写入默认值时内存不足", 0, row.dest, -1);
+                        return;
+                    }
+                } else {
+                    let mode int = row_default_mode(state, row);
+                    if (mode != DefaultMode.default_suppress.to_type(int)) {
+                        let value Value = action_implicit_default(row);
+                        if (mode == DefaultMode.default_explicit.to_type(int)) {
+                            value = row_default_value(state, row);
+                        } else if (effective_arity_kind(row) == ArityKind.arity_zero_or_more.to_type(int)
+                            && row.positional != 0) {
+                            value = make_empty_list(result);
+                        }
+                        if (write_default(result, row.dest, value) != 0) {
+                            result_set_error(result, ResultStatus.resource_error,
+                                "resource_error", "写入默认值时内存不足", 0, row.dest, -1);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+// —— 严格解析 ——
+
+// check_required_after_parse 检查位置参数与必需选项是否满足；0 成功、-1 已记录错误。
+fn check_required_after_parse(state *parser_state, result *Result) int {
+    let i int = 0;
+    for i < state.row_count {
+        let row *arg_row = &state.rows[i];
+        if (row.used != 0 && row.positional != 0) {
+            let kind int = effective_arity_kind(row);
+            let needs int = 0;
+            if (kind == ArityKind.arity_single.to_type(int)
+                || kind == ArityKind.arity_one_or_more.to_type(int)
+                || kind == ArityKind.arity_exactly.to_type(int)) {
+                needs = 1;
+            }
+            if (needs != 0 && entry_find(ns_state_of(&result.values), row.dest) < 0) {
+                result_set_error(result, ResultStatus.usage_error, "usage_error",
+                    "缺少必需的位置参数", 0, row.dest, -1);
+                return -1;
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    for i < state.row_count {
+        let row *arg_row = &state.rows[i];
+        if (row.used != 0 && row.required != 0 && row.positional == 0) {
+            if (provided(&result.values, row.dest) == false) {
+                result_set_error(result, ResultStatus.usage_error, "usage_error",
+                    "缺少必需选项", row.names[0], row.dest, -1);
+                return -1;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// check_mutex_layer 校验本层互斥组：默认最多一个成员显式出现，
+// required=true 时恰好一个；默认值、initial 与 set_default 不满足互斥。
+fn check_mutex_layer(state *parser_state, result *Result) int {
+    let i int = 0;
+    for i < state.mutex_count {
+        let group *mutex_row = &state.mutexes[i];
+        if (group.used != 0) {
+            let seen int = 0;
+            let j int = 0;
+            for j < state.row_count {
+                let row *arg_row = &state.rows[j];
+                if (row.used != 0 && row.mutex == group.id) {
+                    if (appeared_of(result, row.id) != 0) {
+                        seen += 1;
+                    }
+                }
+                j += 1;
+            }
+            if (seen > 1) {
+                result_set_error(result, ResultStatus.usage_error, "usage_error",
+                    "互斥组的多个成员同时出现", 0, 0, -1);
+                return -1;
+            }
+            if (group.required != 0 && seen != 1) {
+                result_set_error(result, ResultStatus.usage_error, "usage_error",
+                    "必须恰好出现一个互斥组成员", 0, 0, -1);
+                return -1;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// copy_initial_into 把初始命名空间深复制进结果：已有键保留，
+// 默认值不会覆盖它，但显式 action 与后续解析仍会更新它。
+fn copy_initial_into(result *Result, initial *Namespace) void {
+    let source *ns_state = ns_state_of(initial);
+    let target *ns_state = ns_state_of(&result.values);
+    if (source == 0 || target == 0) {
+        return;
+    }
+    let i int = 0;
+    for i < source.count {
+        if (source.rows[i].used != 0) {
+            let index int = entry_create(target, source.rows[i].dest);
+            if (index < 0) {
+                return;
+            }
+            target.rows[index].value = value_clone(&target.mem, source.rows[i].value);
+            target.rows[index].provided = 0;
+            target.rows[index].occurrences = 0;
+            target.rows[index].is_default = 0;
+        }
+        i += 1;
+    }
+}

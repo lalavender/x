@@ -140,7 +140,18 @@ libs/cli/
 核心需要分配、字符串比较和复制；按现有运行时能力提供模块内部封装。
 输出适配可消费 `io`，参数文件使用已有可验收的文件接口；不以尚未实现的 `sys`
 作为 CLI1 的前置条件。Linux 特有 I/O 问题单独登记，不能在核心硬编码 Darwin 常量。
-实施时在 `libs/project.toml` 的 `[lib]` 增加 `cli = { path = "./cli" }`。
+实施时在 `libs/project.toml` 的 `[lib]` 增加 `cli = { path = "./cli" }`；
+模块源码放在 `libs/cli/cli.yh`（同目录多文件即同一模块，按职责拆分）。
+标准库项目按 `libs/<模块>/<模块>.yh` 目录扫描装载（`YH_STDLIB`），
+`memory`、`string`、`io`、`os`、`math`、`time` 已可导入；`libs/sys`、`libs/toml`
+目前只有占位目录（无 `.yh`），不得作为 CLI1 的前置条件。
+
+**跨模块枚举项引用（CLI0 实测，2026-10-19）**：现有语言只支持
+`模块名.枚举项`（如 `cli.count`）与模块内 `枚举类型名.成员`（如 `Action.count`）；
+`模块名.枚举类型名.成员` 三段式不被接受。枚举项随 `pub enum` 导出，
+且枚举项登记在模块的全局名字表里，**同名成员不能共存**：
+`ValueKind`、`Action`、`DefaultMode`、`Color`、`ResultStatus` 等所有公开枚举的
+成员名必须在 `cli` 模块内全局唯一。设计示例按此规则书写。
 
 ## 5. 公共数据模型
 
@@ -163,14 +174,17 @@ pub enum ValueKind {
     sequence;
 }
 
-// ValueData 只存放 Value.kind 对应的成员；列表允许嵌套以保留参数批次。
+// ValueData 只存放 Value.kind 对应的成员；序列载荷用不透明指针指向内部存储。
+// 说明（CLI0 实测，2026-10-19）：union 成员不能引用尚未定义完的 Value 的切片，
+// 也不能引用它的类型指针（编译器要求类型先定义），因此 sequence 用 *void；
+// 对外可见的 []Value 视图由结果/命名空间的堆内存储切出，见第 16 节。
 pub union ValueData {
     text *char;
     integer i64;
     natural u64;
     real f64;
     boolean bool;
-    items []Value;
+    items *void;
 }
 
 // Value 是带标签的值视图；字符串和切片的所有权取决于它所属的声明或结果。
@@ -181,8 +195,12 @@ pub struct Value {
 ```
 
 构造函数：`value_none()`、`value_text(text)`、`value_i64(number)`、`value_u64(number)`、
-`value_f64(number)`、`value_bool(flag)`、`value_list(items []Value)`，均返回 `Value`。
-这些构造函数**不分配**，文本和列表暂时借用调用者存储。
+`value_f64(number)`、`value_bool(flag)`，均返回 `Value`。这些构造函数**不分配**，
+文本暂时借用调用者存储。
+**列表值不由公开构造函数创建**（CLI1 定案）：CLI0 实测切片没有可读取的 data 字段，
+无法把切片引用存进 union 载荷（见[完成记录](../01-finished/yh-cli0语言能力与ABI基线-2026-10-19.md)）；
+序列的内部布局是模块私有实现，应用通过 `get_list` 读取解析产生的列表，
+外部构造列表值的入口等到 CLI2 与多值 action 一起定约定。
 注册声明、设置默认值和设置 namespace 值时深复制，调用完成后即可释放原存储。
 值必须是无环树；`none` 的 union 载荷不读取。
 
@@ -290,6 +308,16 @@ dest 在 add_argument 时确定；后续 add_alias 不改变它。位置参数�
 store/append/extend 等消费值的 action 拒绝 no_values；不允许用 arity 改写内置零参数行为。
 子命令槽是独立声明，不把内部 parser 匹配机制暴露成公共 arity。
 
+**实现状态（CLI1–CLI3，2026-10-19）**：`Argument` 当前含 `name` 到 `metavar`
+的字段、`choices`、`group` 与 `mutex`；converter/validator、自定义 action、
+版本模板和 `output_shape` 随 CLI4–CLI5 加入。数量模型的判别值是 `ArityKind`，
+成员统一加 `arity_` 前缀（`arity_single`、`arity_exactly` 等）：枚举成员登记在
+模块全局名字表，不能与 `single()`、`exactly(n)` 这些构造函数同名；
+`DefaultMode` 同样使用 `default_` 前缀。CLI2 已实现全部内置 action（除 `custom`）
+与数量模型、值形状、等号/附着值、短组合、负数、唯一缩写、choices 与默认值层级；
+CLI3 已实现子命令、继承、组与互斥、known/intermixed 与 initial。
+`custom` 在 `freeze` 时返回 config_error，参数文件与完整帮助随 CLI4/CLI5 加入。
+
 ## 6. API 与生命周期
 
 ### 6.1 注册与冻结
@@ -380,7 +408,7 @@ pub fn main(argc int, argv **char) int {
     cli.add_argument(&parser, output);
 
     let verbose cli.Argument = cli.option("--verbose", "-v");
-    verbose.action = cli.Action.count;
+    verbose.action = cli.count;
     verbose.default_value = cli.default_of(cli.value_i64(0));
     verbose.help = "增加详细等级，可重复";
     cli.add_argument(&parser, verbose);
@@ -598,6 +626,15 @@ resolve 策略下只从旧声明删除冲突名称；旧声明剩余名称继续
 位置参数声明名重复拒绝；共用 dest 并不等于名称冲突。
 组级 conflict 优先于 parser 级策略，同样适用于继承进组的声明。
 
+**实现状态（CLI3，2026-10-19）**：子命令槽、别名、规范 `command_path`、
+槽 `dest`、必需命令、`inherit` 深复制、展示组与组级默认值、互斥组、
+`Conflict.resolve` 冲突策略，以及 `parse_known` / `parse_intermixed` /
+`parse_known_intermixed` / `parse_with` 与 `ParseConfig.initial` 已实现。
+已知边界：位置参数与子命令槽的相对顺序固定为「位置参数在前、槽在后」；
+混合模式在「同一 dest 同时由选项与位置提供」时返回 config_error，
+以保持 action 次序语义；进入子 parser 前的 initial 形状/choices 检查
+与 validator 一起在 CLI4 实现。
+
 ## 11. 部分解析和初始命名空间
 
 known 只放宽“未被当前声明消费的 token”，不放宽缺少必需项、坏值、未知子命令和互斥错误。
@@ -677,6 +714,22 @@ LineConverter 可以把一行返回为零个或多个 token，不能改变文件
 循环、超限、打开/读取失败都产生带包含链来源的诊断；不继续用部分展开结果解析。
 所有临时 fd 在成功和失败时关闭，重复使用 stdin 作为参数文件不在内置协议中。
 
+**实现状态（CLI5，2026-10-19）**：段落顺序、usage 的 `[]`/`()`/`|`/`...` 表达、
+metavar/metavars 与类型推导、choices 与默认值展示、deprecated 标注、按宽度折行、
+控制字节与非法 UTF-8 转义、颜色策略（含终端检测降级）与有限建议均已实现。
+折行按字节宽度近似；颜色目前用于 `usage:` 前缀与段标题。
+
+**实现状态（CLI4，2026-10-19）**：converter / validator / custom action
+与 `register_type`/`register_action` 已实现；回调签名、`type_name`/`action_name`
+绑定、输出类型与形状检查、freeze 期的默认值/常量校验按本节契约落地。
+分配入口目前提供 `context_text(context, text)`（把文本复制进结果池）；
+`new_values`/`new_tokens` 与 `ValueShape` 的更细粒度分配随需要追加。
+
+**实现状态（CLI4，2026-10-19）**：`@file` 展开、逐行回调、嵌套相对路径、
+活动包含栈与深度/字节/token 三个上限已实现；子 parser 不得设置展开配置。
+本版本把展开常量收敛为单文件 4096 token、单行 4096 字节、累计字节默认 1 MiB
+（`ParseConfig.file_max_bytes` 可调）；诊断带文件与行号，列号暂不提供。
+
 ## 14. 帮助、诊断、颜色与退出
 
 ### 14.1 帮助布局
@@ -715,6 +768,12 @@ parse_main_or_exit 只接受根 parser；对非 ok 结果执行 render、release
 成功返回的 result 由调用者 release，parser 仍由调用者 destroy；成功 warnings 由便捷入口
 先输出并清空，避免应用之后 render 时重复打印。
 普通 parse* 和 format* 都不调用退出函数；错误对象允许应用自行组织输出。
+
+**实现状态（CLI5，2026-10-19）**：`format_usage`/`format_help`/`release_text`、
+`render_text`、`print_usage`/`print_help`、`render(result, out_fd, error_fd)` 与
+`exit_code` 均已实现；失败结果自带 `usage_text`/`prog_text`，`render` 不依赖 parser。
+`parse_main_or_exit` 用 `render` + `exit_code` 输出与退出，输出失败时退出码降级为 1。
+`warnings` 通道尚未实现（`render` 暂不输出 warnings）。
 
 ### 14.3 错误与控制行为的优先级
 
@@ -812,7 +871,7 @@ auto 由输出 fd 是否为终端和 NO_COLOR 决定，NO_COLOR 存在时关闭�
 本次仅交付文档，**尚未新增这些用例，也未运行 cli 编译或运行测试**。
 以下路径与检查是实施要求，详细任务见[实施方案](../02-plan/yh-cli标准库实施方案.md)。
 
-拟新增 `tests/modules/projects/clibasics`、`cliactions`、`clicommands`、`cliextensions`、
+拟新增 `libs/cli/test/clibasics`、`cliactions`、`clicommands`、`cliextensions`、
 `clihelp`，均以 `.yh` 写应用和断言；通过 `YH_STDLIB` 加载真实库模块。
 临时参数文件、输出与构建产物统一放 `tmp/cli/`。
 

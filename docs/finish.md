@@ -24,6 +24,151 @@
   [完成记录](01-finished/yh-LLVM-LL11隔离环境验证-2026-10-19.md)。
 - **未完成**：20 轮性能对照/回退归因（用户暂缓）、发行/CI 文档同步；
   R2b 硬门（RS2/RS3/R2c）仍开，不宣布 LL11 全量完成。
+## 2026-10-19 cli 用例迁入 libs/cli/test（与全局测试解耦）
+
+- 按用户要求把 cli 的 fixture 与用例从 `tests/modules/projects/` 迁到
+  `libs/cli/test/`：climodel/clibasics/cliactions/clicommands/cliextensions/clihelp
+  六个项目 + 自有 runner `libs/cli/test/run.py`（9 条用例，构建后用显式 argv 运行，
+  断言退出码与 stdout/stderr 子串；默认编译器仓库根 `./yh`、标准库根 `libs/`）。
+- `tests/modules/build-check.py` 移除 9 条 cli 用例、`stdlib-argv` 分支与
+  `case()` 的 argv/stdout_contains/stderr_contains 扩展，恢复原有签名；
+  全局 project cases 由 113 变为 **104**，cli 覆盖由自有 runner 承担。
+- 运行方式：`python3 libs/cli/test/run.py`（结果 9/9）；
+  全局门 `python3 tests/modules/build-check.py` 104/104，
+  `make test` 343/344，`make selfhost-native` 全绿。
+- 文档同步：README 验收节、CLI0–CLI6 完成文档、计划与 finish 中的路径与用例名。
+  未滚种子。
+
+## 2026-10-19 cli README 使用说明与 stderr 换行修复
+
+- `libs/cli/README.md` 增加 16 节使用说明（快速开始、解析五步骤、选项、布尔/计数、
+  多值、位置参数、子命令与 inherit、组与互斥、解析模式与 initial、自定义类型与校验、
+  自定义 action、参数文件、帮助与输出、退出码、生命周期、常见陷阱），
+  每个片段都用临时教程项目实际编译运行验证（toy 项目验证后已删除）。
+- 修复 `help.yh` 中把换行误写成字面 `\\n` 的问题：`render` 在错误消息与 usage 之间
+  输出一个反斜杠而不是换行。修复后缺参数路径的 stderr 是两行：
+  `pack: 错误: ...` 与 `usage: ...`。
+- 回归：6 个 cli fixture 的构建与 selftest 全过；`make test` 与
+  `make selfhost-native` 见下一条验收记录。
+
+## 2026-10-19 CLI6：cli 标准库统一验收与文档冻结
+
+- 逐项核对设计能力表（第 3/8/9/10/11/12/13/14 节）：已实现项全部有运行用例，
+  未实现的 `warnings` 通道与分配入口扩展明确保留理由。
+- 差分：新增[与 argparse 差异](../03-design/yh-cli与argparse差异.md)，
+  用本机 Python 3.14.6 实跑对照值形状/诊断类别/退出码（`--output=a`、`-vvv`、
+  缺位置参数、`--cache/--no-cache`、`nargs=2`、负数位置、intermixed、`@file` 展开），
+  差异项（缩写缺省、消息语言、默认值展示、整数范围、浮点词法、append 批次等）逐条写明理由。
+- 导出面：`libs/cli` 公开声明 87 项，实现细节保持模块私有；README 列出文件划分、
+  API、契约、容量上限与未实现边界；标准库设计的 `cli` 章节同步为已实现。
+- 检查项：重复解析隔离、结果独立生命周期、分配失败注入（`test_fail_alloc_after`）
+  与「未迁移既有入口」均有断言或明确说明。
+- 验收：6 个 cli fixture 的 selftest 全部通过；build-check 的 8 条 cli 用例在内，
+  project cases **113/113**；`make test` 343/344；`make selfhost-native` 全绿。
+- Linux/arm64 容器（`ubuntu:24.04` + 入库 `bin/yh-linux-arm64` 种子）：6 个 fixture
+  全部构建成功并运行通过（`--selftest` 全 rc=0），cli 交付不依赖本日的枚举修复。
+  未滚种子。记录见[完成文档](../01-finished/yh-cli6统一验收与文档冻结-2026-10-19.md)。
+
+## 2026-10-19 CLI5：cli 标准库完整帮助与诊断体验
+
+- `help.yh` 重写：段落顺序（usage/description/positional/options/组/commands/epilog）、
+  usage 的 `[]`/`()`/`|`/`...` 表达、metavar 与类型推导、choices 与默认值展示、
+  deprecated 标注、按宽度折行、控制字节与非法 UTF-8 转义、颜色（含终端检测降级）、
+  有限建议（编辑距离 ≤2）；新增 `HelpFormat`/`Color`/`metavars`/`deprecated`。
+- 输出 API：`print_usage`/`print_help`/`render(result, out_fd, error_fd)`/`exit_code`
+  落地；失败结果自带 `usage_text`/`prog_text`；`libs/os` 增加 `is_terminal`。
+- 验收：`clihelp --selftest` 7 个主题；`libs/cli/test/run.py` 新增 `cli5-help`。
+  project cases **113/113**；`make test` 343/344；`make selfhost-native` 全绿。未滚种子。
+  记录见[完成文档](../01-finished/yh-cli5完整帮助与诊断体验-2026-10-19.md)。
+
+## 2026-10-19 CLI4：cli 标准库扩展与参数文件
+
+- 新增 `libs/cli/{extensions,files}.yh`：converter/validator/custom action 与
+  `register_type`/`register_action` 注册表、`type_name`/`action_name` 绑定、
+  输出类型与形状检查、freeze 期默认值/常量校验、`context_text` 分配入口；
+  `@file` 参数文件展开（逐行、嵌套相对路径、循环检测、深度/字节/token 上限、
+  带文件与行号的诊断），子 parser 不得设置展开配置（根 freeze 递归冻结整棵树）。
+- 本版本把展开上限收敛为单文件 4096 token、单行 4096 字节、累计字节默认 1 MiB
+  （`ParseConfig.file_max_bytes` 可调）；`line_converter` 返回的切片须由回调自持。
+- upkeep：`libs/cli` 与 `climodel` 里与枚举成员同名的形参改名（`value_text(content)`），
+  让 cli 交付不依赖本日的「枚举成员遮蔽」修复；该修复仍由
+  `tests/yh-run/run/204-enum-member-shadowed.yh` 锁定，旧种子也能编译全部 cli fixture。
+- 验收：`cliextensions --selftest` 14 个主题；`libs/cli/test/run.py` 新增 `cli4-extensions`。
+  `make test` 343/344（1 例平台 SKIP）；`make selfhost-native` 全绿，project cases
+  **112/112**。未滚种子。记录见[完成文档](01-finished/yh-cli4扩展与参数文件-2026-10-19.md)。
+
+## 2026-10-19 CLI3：cli 标准库组合、子命令与解析模式
+
+- 新增 `libs/cli/{commands,layer}.yh`：子命令槽与子 parser 所有权（递归 destroy）、
+  别名与规范 `command_path`、槽 `dest`、必需命令；展示组与组级默认值、
+  互斥组、`Conflict.resolve` 冲突策略；`inherit` 深复制（参数/默认值/组/互斥/覆盖值）；
+  `parse_known`/`parse_intermixed`/`parse_known_intermixed`/`parse_with` 与
+  `ParseConfig.initial`；`Result.unparsed` 按输入顺序保留。
+- 结果写入增加 `is_default` 标记实现「父 → 子」默认值覆盖，并按参数 ID 记录显式出现
+  （互斥组计数）。
+- 已知边界：位置参数与槽的顺序固定为「位置在前、槽在后」；混合模式对
+  「同一 dest 由选项与位置同时提供」返回 config_error；initial 形状检查留 CLI4。
+- 验收：`clicommands --selftest` 9 个主题；`libs/cli/test/run.py` 新增 `cli3-commands`。
+  `make test` 343/344（1 例平台 SKIP）；`make selfhost-native` 全绿：
+  模块固定点一致、自解析、modules 18/18、project cases **111/111**。未滚种子。
+  记录见[完成文档](01-finished/yh-cli3组合子命令与解析模式-2026-10-19.md)。
+
+## 2026-10-19 CLI2：cli 标准库完整内置参数行为
+
+- 新增 `libs/cli/{convert,write}.yh`（从 parse 拆出严格转换与结果写入）；
+  `Argument.choices`、`set_default`/`get_default`、`boolean_optional` 否定别名、
+  共享 dest 形状校验、组级默认值。
+- 完整数量模型与内置 action（custom 除外）、值形状（标量/列表/批次列表）、
+  等号/附着值/短组合/负数特判/唯一缩写、位置分段与 remainder、choices、
+  suppress 与默认值层级。
+- 验收：`cliactions --selftest` 11 个主题；`libs/cli/test/run.py` 新增 `cli2-actions`。
+  `make test` 343/344；`make selfhost-native` 全绿，project cases 110/110。未滚种子。
+  记录见[完成文档](01-finished/yh-cli2完整内置参数行为-2026-10-19.md)。
+
+## 2026-10-19 CLI1：cli 标准库最小可用命令行
+
+- `libs/cli/` 交付六个源文件：`cli.yh`（公开模型/容量/分配池）、`schema.yh`
+  （注册与冻结）、`values.yh`（命名空间与类型化查询）、`parse.yh`（token 匹配与
+  内置 action）、`help.yh`（usage/help/render 文本）、`entry.yh`
+  （argc/argv 与 0/1/2 退出契约）；`libs/project.toml` 的 `[lib]` 登记 cli。
+- 验收项目 `libs/cli/test/clibasics`：`--selftest` 覆盖默认值/const/count、
+  类型转换、`--`、帮助、错误诊断、重复解析隔离、`get_list` 错误码与
+  「结果晚于 parser 销毁」；pack 入口形态验证真实进程行为。
+- `libs/cli/test/run.py` 提供自有 runner（构建后用显式 argv 运行程序，
+  断言退出码与 stdout/stderr 子串）与 4 个用例，覆盖成功、帮助、缺位置三条退出码路径。
+  （2026-10-19 后续调整：cli 用例全部移入 `libs/cli/test/`，不再登记到全局 build-check。）
+- 明确阶段边界：append/extend/boolean_optional/custom、完整 arity、choices、
+  短选项组合与缩写、子命令、参数文件、完整帮助与 Result 级 render 未实现；
+  未实现的声明在 freeze 或解析时给出 config_error/usage_error，不静默降级。
+- `make test` 343/344（1 例按 `// platform:` SKIP）；`make selfhost-native` 全绿：
+  模块固定点 119 产物一致、自解析、modules 18/18、project cases 109/109。
+  未滚种子。记录见[完成文档](01-finished/yh-cli1最小可用命令行-2026-10-19.md)。
+- Linux/arm64 容器复跑受阻（已定位，不属本阶段实现范围）：`container run
+  --rm -v "$PWD":/host:ro -w /tmp ubuntu:24.04` 内 `cp -a` 仓库后 `make`，
+  因 `llvm` 分支的 `compiler/backend/llvm_bind.linux.yh` 用 `@[extern]` 声明
+  LLVM/lld 桥符号，而 `YH_LLVM_HOST=auto` 在缺 `tmp/llvm-migration` 身份时
+  不联网，链接以 `undefined reference to yh_llvm_emit / yh_lld_*` 失败；
+  直接用入库 `bin/yh-linux-arm64` 编译 `libs/cli` 则因种子不含本日的枚举成员
+  遮蔽修复而在 `cli.yh:253` 报「引用了未声明的名字」。Linux 完整门由 CI 承担。
+
+## 2026-10-19 CLI0：cli 标准库语言能力与 ABI 基线
+
+- 新增探针项目 `libs/cli/test/climodel`（用例 `cli0-model-abi`）：
+  真实运行 tagged union、递归指针链表、跨模块结构体/切片返回、切片形参、
+  函数类型回调 + `*void` user 指针、公开薄句柄（私有类型不进 pub 签名）。
+- 结论：动态列表用「堆上结构体成员数组 + 动态长度切片视图」实现（`state.items[0..count]`
+  的 data 指向堆，返回后不悬垂）；裸堆指针不能切片（`p[0..n]` 被拒绝）；
+  union 载荷不能递归引用自身类型，设计已把序列载荷改为 `*void`；
+  跨模块枚举项只能写 `模块名.枚举项`，同名枚举成员不能在同一模块共存。
+- 修复编译器名称解析缺陷：枚举成员名被同名形参遮蔽时 `Kind.text` 报「引用了未声明的
+  名字」。`compiler/gen/state.yh` 新增 `sym_find_enum_member`，`compiler/parse/parse_expr.yh`
+  在 `EnumName.member` 快路径按枚举类型反查成员符号；新增语料
+  `tests/yh-run/run/204-enum-member-shadowed.yh`。修改原因见
+  [完成记录](01-finished/yh-cli0语言能力与ABI基线-2026-10-19.md)。
+  不修则 cli 只能靠给形参改名规避（`value_text(text *char)` 这类签名与设计冲突）。
+- `make test` 343/344（1 例按 `// platform:` SKIP）；`make selfhost-native` 全绿：
+  模块固定点 119 产物一致、自解析 100 文件、modules 18/18、project cases 105/105。
+  未滚种子。
 
 ## 2026-10-19 macOS/ARM64 LLVM 接入方案交付
 

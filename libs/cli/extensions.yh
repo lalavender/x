@@ -1,0 +1,261 @@
+module cli;
+
+// cli 扩展机制（CLI4）：命名类型/action 注册表、freeze 时绑定与校验。
+// 回调在单次 parse 内顺序调用；注册表限定在当前 parser，inherit 不复制注册项
+// （设计只要求复制参数、默认值与组）。
+
+// find_type_reg 按名称查找已注册类型；返回下标或 -1。
+fn find_type_reg(state *parser_state, name *char) int {
+    let i int = 0;
+    for i < state.type_count {
+        if (state.types[i].used != 0 && cstr_equal(state.types[i].name, name) != 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// find_action_reg 按名称查找已注册 action；返回下标或 -1。
+fn find_action_reg(state *parser_state, name *char) int {
+    let i int = 0;
+    for i < state.action_count {
+        if (state.actions[i].used != 0 && cstr_equal(state.actions[i].name, name) != 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// register_type 注册命名转换器；0 成功、-1 失败（粘滞配置错误）。
+pub fn register_type(p *Parser, name *char,
+    converter fn(*ConvertContext, *Value, *Diagnostic, *void) int, user *void) int {
+    let state *parser_state = parser_state_of(p);
+    if (state == 0 || state.failed != 0 || state.frozen != 0) {
+        return -1;
+    }
+    if (name == 0 || name[0] == 0) {
+        return set_config_error(state, "config_error", "注册类型名不能为空");
+    }
+    if (converter.to_type(*void) == 0) {
+        return set_config_error(state, "config_error", "注册类型必须提供转换回调");
+    }
+    if (find_type_reg(state, name) >= 0) {
+        return set_config_error(state, "config_error", "注册类型名重复");
+    }
+    if (state.type_count >= MAX_TYPES) {
+        return set_config_error(state, "config_error", "注册类型个数超过本版本上限");
+    }
+    let reg type_reg;
+    reg.used = 1;
+    reg.name = pool_dup(&state.mem, name);
+    reg.converter = converter;
+    reg.user = user;
+    if (state.mem.failed != 0) {
+        return set_config_error(state, "resource", "注册类型时内存不足");
+    }
+    state.types[state.type_count] = reg;
+    state.type_count += 1;
+    return 0;
+}
+
+// register_action 注册命名 action；0 成功、-1 失败。
+// 注册项必须提供显式数量（infer 只允许出现在参数声明侧）与输出形状。
+pub fn register_action(p *Parser, name *char, arity Arity, shape ValueShape,
+    handler fn(*ActionContext, *Value, *Diagnostic, *void) int, user *void) int {
+    let state *parser_state = parser_state_of(p);
+    if (state == 0 || state.failed != 0 || state.frozen != 0) {
+        return -1;
+    }
+    if (name == 0 || name[0] == 0) {
+        return set_config_error(state, "config_error", "注册 action 名不能为空");
+    }
+    if (handler.to_type(*void) == 0) {
+        return set_config_error(state, "config_error", "注册 action 必须提供处理回调");
+    }
+    if (arity.kind == ArityKind.arity_infer) {
+        return set_config_error(state, "config_error", "注册 action 的数量必须显式给出");
+    }
+    if (arity.kind == ArityKind.arity_exactly && arity.count < 1) {
+        return set_config_error(state, "config_error", "注册 action 的 exactly 数量必须大于等于 1");
+    }
+    if (shape.leaf == ValueKind.sequence || shape.depth < 0 || shape.depth > 2) {
+        return set_config_error(state, "config_error", "注册 action 的输出形状无效");
+    }
+    if (find_action_reg(state, name) >= 0) {
+        return set_config_error(state, "config_error", "注册 action 名重复");
+    }
+    if (state.action_count >= MAX_ACTIONS) {
+        return set_config_error(state, "config_error", "注册 action 个数超过本版本上限");
+    }
+    let reg action_reg;
+    reg.used = 1;
+    reg.name = pool_dup(&state.mem, name);
+    reg.arity_kind = arity.kind.to_type(int);
+    reg.arity_count = arity.count;
+    reg.shape_leaf = shape.leaf.to_type(int);
+    reg.shape_depth = shape.depth;
+    reg.has_shape = 1;
+    reg.handler = handler;
+    reg.user = user;
+    if (state.mem.failed != 0) {
+        return set_config_error(state, "resource", "注册 action 时内存不足");
+    }
+    state.actions[state.action_count] = reg;
+    state.action_count += 1;
+    return 0;
+}
+
+// bind_row_extensions 在 freeze 时把一行声明上的名称绑定到注册项并校验组合。
+fn bind_row_extensions(state *parser_state, row *arg_row) int {
+    if (row.type_name != 0 && row.type_name[0] != 0) {
+        let index int = find_type_reg(state, row.type_name);
+        if (index < 0) {
+            return set_config_error(state, "config_error", "引用了未注册的类型名");
+        }
+        if (row.converter.to_type(*void) != 0) {
+            return set_config_error(state, "config_error", "converter 与 type_name 不能同时提供");
+        }
+        row.converter = state.types[index].converter;
+        if (row.user == 0) {
+            row.user = state.types[index].user;
+        }
+    }
+    if (row.action_name != 0 && row.action_name[0] != 0) {
+        let index int = find_action_reg(state, row.action_name);
+        if (index < 0) {
+            return set_config_error(state, "config_error", "引用了未注册的 action 名");
+        }
+        if (row.action != Action.custom.to_type(int)) {
+            return set_config_error(state, "config_error", "action_name 只能用于 custom action");
+        }
+        if (row.custom_action.to_type(*void) != 0) {
+            return set_config_error(state, "config_error", "custom_action 与 action_name 不能同时提供");
+        }
+        let reg *action_reg = &state.actions[index];
+        if (row.arity_kind != ArityKind.arity_infer.to_type(int)) {
+            if (row.arity_kind != reg.arity_kind
+                || (row.arity_kind == ArityKind.arity_exactly.to_type(int)
+                    && row.arity_count != reg.arity_count)) {
+                return set_config_error(state, "config_error", "显式数量与注册 action 不一致");
+            }
+        } else {
+            row.arity_kind = reg.arity_kind;
+            row.arity_count = reg.arity_count;
+        }
+        if (row.has_shape != 0 && reg.has_shape != 0) {
+            return set_config_error(state, "config_error", "output_shape 与注册 action 同时提供");
+        }
+        if (row.has_shape == 0) {
+            row.has_shape = reg.has_shape;
+            row.shape_leaf = reg.shape_leaf;
+            row.shape_depth = reg.shape_depth;
+        }
+        row.custom_action = reg.handler;
+        if (row.user == 0) {
+            row.user = reg.user;
+        }
+    }
+    if (row.action == Action.custom.to_type(int)) {
+        if (row.custom_action.to_type(*void) == 0) {
+            return set_config_error(state, "config_error", "custom action 缺少处理回调");
+        }
+        if (row.arity_kind == ArityKind.arity_infer.to_type(int)) {
+            return set_config_error(state, "config_error", "custom action 必须显式声明数量");
+        }
+        if (row.has_shape == 0) {
+            return set_config_error(state, "config_error", "custom action 必须提供 output_shape");
+        }
+    }
+    return 0;
+}
+
+// bind_extensions 绑定全部行的扩展名并校验；0 成功、-1 配置错误。
+fn bind_extensions(state *parser_state) int {
+    let i int = 0;
+    for i < state.row_count {
+        if (state.rows[i].used != 0) {
+            if (bind_row_extensions(state, &state.rows[i]) != 0) {
+                return -1;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// context_text 把回调产生的文本复制进结果池；返回新地址，失败空指针。
+pub fn context_text(context *void, text *char) *char {
+    let ns *ns_state = context.to_type(*ns_state);
+    if (ns == 0 || text == 0) {
+        return 0;
+    }
+    return pool_dup(&ns.mem, text);
+}
+
+// declared_value_ok 校验声明里的默认值/常量是否满足 choices 与 validator；
+// 0 通过、-1 已记录配置错误。
+fn declared_value_ok(state *parser_state, row *arg_row, v Value) int {
+    if (v.kind == ValueKind.none) {
+        return 0;
+    }
+    if (value_in_choices(row, v) == 0) {
+        return set_config_error(state, "config_error", "默认值或常量不在候选集合中");
+    }
+    if (row.validator.to_type(*void) != 0) {
+        let diag Diagnostic;
+        clear_diagnostic(&diag);
+        let rc int = row.validator(v, &diag, row.user);
+        if (rc != 0) {
+            let message *char = "默认值或常量未通过校验";
+            if (diag.message != 0) {
+                message = diag.message;
+            }
+            return set_config_error(state, "config_error", message);
+        }
+    }
+    return 0;
+}
+
+// check_declared_values 在 freeze 时校验全部显式默认值与零参数 action 的常量。
+fn check_declared_values(state *parser_state) int {
+    let i int = 0;
+    for i < state.row_count {
+        let row *arg_row = &state.rows[i];
+        if (row.used != 0) {
+            if (row.default_mode == DefaultMode.default_explicit.to_type(int)) {
+                if (declared_value_ok(state, row, row.default_value) != 0) {
+                    return -1;
+                }
+            }
+            if (action_is_zero_value(row.action) != 0) {
+                if (declared_value_ok(state, row, row.const_value) != 0) {
+                    return -1;
+                }
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// test_alloc_count 返回 parser 池已成功分配的次数；仅供测试观察。
+pub fn test_alloc_count(p *Parser) int {
+    let state *parser_state = parser_state_of(p);
+    if (state == 0) {
+        return -1;
+    }
+    return state.mem.alloc_count;
+}
+
+// test_fail_alloc_after 注入分配失败：第 nth 次分配起失败，nth<0 关闭。
+// 只影响当前 parser 的池，供分配失败路径验收使用，不作为产品配置项。
+pub fn test_fail_alloc_after(p *Parser, nth int) int {
+    let state *parser_state = parser_state_of(p);
+    if (state == 0) {
+        return -1;
+    }
+    state.mem.fail_after = nth;
+    return 0;
+}

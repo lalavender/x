@@ -1,0 +1,517 @@
+module main;
+
+// cli 标准库 CLI5 验收：帮助布局与 HelpFormat、metavar/metavars、默认值展示、
+// deprecated 标注、隐藏参数、互斥组 usage、颜色策略与降级、有限建议、
+// 控制字节与非法 UTF-8 转义、print_*/render/exit_code。
+// 返回 0 或「主题*10+断言号」。
+
+import cli;
+import io;
+import string;
+
+// contains 在 NUL 串里查找子串；找到返回 1。
+fn contains(haystack *char, needle *char) int {
+    if (haystack == 0 || needle == 0) {
+        return 0;
+    }
+    let i int = 0;
+    for haystack[i] != 0 {
+        let j int = 0;
+        for 1 {
+            if (needle[j] == 0) {
+                return 1;
+            }
+            if (haystack[i + j] == 0 || haystack[i + j] != needle[j]) {
+                break;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// has_byte 判断串里是否出现某个字节值。
+fn has_byte(text *char, value int) int {
+    if (text == 0) {
+        return 0;
+    }
+    let i int = 0;
+    for text[i] != 0 {
+        if (text[i].to_type(int) == value) {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// build_rich_parser 构造覆盖帮助各段的 parser；0 成功。
+fn build_rich_parser(root *cli.Parser, color cli.Color, show_defaults int,
+    suggest int) int {
+    let config cli.ParserConfig = cli.parser_config("tool");
+    config.description = "演示帮助布局";
+    config.epilog = "示例结尾说明";
+    config.color = color;
+    config.suggest_on_error = (suggest != 0);
+    config.help_format.show_defaults = (show_defaults != 0);
+    if (cli.init(root, config) != 0) {
+        return 1;
+    }
+    let output cli.Argument = cli.option("--output", "-o");
+    output.help = "输出路径";
+    output.metavar = "PATH";
+    output.default_value = cli.default_of(cli.value_text("out.bin"));
+    if (cli.add_argument(root, output) < 0) {
+        return 2;
+    }
+    let legacy cli.Argument = cli.option("--legacy", 0);
+    legacy.help = "旧开关";
+    legacy.deprecated = true;
+    legacy.action = cli.store_true;
+    if (cli.add_argument(root, legacy) < 0) {
+        return 3;
+    }
+    let hidden cli.Argument = cli.option("--hidden", 0);
+    hidden.help = "不该出现";
+    hidden.hidden = true;
+    hidden.action = cli.store_true;
+    if (cli.add_argument(root, hidden) < 0) {
+        return 4;
+    }
+    let group_spec cli.Group = cli.group("输出组", "组说明");
+    let group_id int = cli.add_group(root, group_spec);
+    if (group_id <= 0) {
+        return 5;
+    }
+    let fmt cli.Argument = cli.option("--fmt", 0);
+    fmt.help = "格式化方式";
+    fmt.group = group_id;
+    if (cli.add_argument(root, fmt) < 0) {
+        return 6;
+    }
+    let mutex int = cli.add_mutex(root, false, 0);
+    if (mutex <= 0) {
+        return 7;
+    }
+    let json cli.Argument = cli.option("--json", 0);
+    json.action = cli.store_true;
+    json.mutex = mutex;
+    let yaml cli.Argument = cli.option("--yaml", 0);
+    yaml.action = cli.store_true;
+    yaml.mutex = mutex;
+    if (cli.add_argument(root, json) < 0 || cli.add_argument(root, yaml) < 0) {
+        return 8;
+    }
+    let source cli.Argument = cli.positional("source");
+    source.help = "输入文件";
+    if (cli.add_argument(root, source) < 0) {
+        return 9;
+    }
+    let slot int = cli.add_subparsers(root, cli.subparsers());
+    if (slot < 0) {
+        return 10;
+    }
+    let cmd cli.Command = cli.command("build");
+    cmd.help = "构建目标";
+    let child *cli.Parser = cli.add_parser(root, slot, cmd);
+    if (child == 0) {
+        return 11;
+    }
+    return 0;
+}
+
+// —— 主题 1：帮助布局与段落顺序 ——
+fn case_layout() int {
+    let root cli.Parser;
+    let setup int = build_rich_parser(&root, cli.never, 0, 0);
+    if (setup != 0) {
+        cli.destroy(&root);
+        return 11;
+    }
+    let help cli.TextResult = cli.format_help(&root);
+    if (help.status != cli.ok || help.text == 0) {
+        cli.release_text(&help);
+        cli.destroy(&root);
+        return 12;
+    }
+    if (contains(help.text, "usage: tool") != 1) {
+        cli.release_text(&help);
+        cli.destroy(&root);
+        return 13;
+    }
+    if (contains(help.text, "演示帮助布局") != 1
+        || contains(help.text, "positional arguments:") != 1
+        || contains(help.text, "options:") != 1 || contains(help.text, "输出组:") != 1
+        || contains(help.text, "commands:") != 1
+        || contains(help.text, "示例结尾说明") != 1) {
+        printf("DBG help=%s\n", help.text);
+        cli.release_text(&help);
+        cli.destroy(&root);
+        return 14;
+    }
+    // 段落顺序：usage → description → positional → options → 组 → commands → epilog
+    let i_usage int = 0;
+    let i_pos int = 0;
+    let i_opt int = 0;
+    let i_group int = 0;
+    let i_cmd int = 0;
+    let i_epi int = 0;
+    let i int = 0;
+    for help.text[i] != 0 {
+        if (i_usage == 0 && help.text[i] == 'u') {
+            i_usage = i + 1;
+        }
+        i += 1;
+    }
+    // 用子串位置近似判断顺序：依次在剩余文本里查找。
+    let scan *char = help.text;
+    i_pos = index_of(scan, "positional arguments:");
+    i_opt = index_of(scan, "options:");
+    i_group = index_of(scan, "输出组:");
+    i_cmd = index_of(scan, "commands:");
+    i_epi = index_of(scan, "示例结尾说明");
+    if (i_pos < 0 || i_opt <= i_pos || i_group <= i_opt || i_cmd <= i_group
+        || i_epi <= i_cmd) {
+        cli.release_text(&help);
+        cli.destroy(&root);
+        return 15;
+    }
+    // 隐藏参数不出现，但依旧可解析。
+    if (contains(help.text, "--hidden") == 1) {
+        cli.release_text(&help);
+        cli.destroy(&root);
+        return 16;
+    }
+    cli.release_text(&help);
+    let args [3]*char;
+    args[0] = "--hidden";
+    args[1] = "in.txt";
+    let r cli.Result = cli.parse(&root, args[0..2]);
+    if (r.status != cli.ok) {
+        cli.release(&r);
+        cli.destroy(&root);
+        return 17;
+    }
+    cli.release(&r);
+    cli.destroy(&root);
+    return 0;
+}
+
+// index_of 返回子串首次出现的偏移；没有返回 -1。
+fn index_of(haystack *char, needle *char) int {
+    let i int = 0;
+    for haystack[i] != 0 {
+        let j int = 0;
+        for 1 {
+            if (needle[j] == 0) {
+                return i;
+            }
+            if (haystack[i + j] == 0 || haystack[i + j] != needle[j]) {
+                break;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// —— 主题 2：默认值展示与 deprecated ——
+fn case_defaults_and_deprecated() int {
+    let root cli.Parser;
+    let setup int = build_rich_parser(&root, cli.never, 1, 0);
+    if (setup != 0) {
+        cli.destroy(&root);
+        return 21;
+    }
+    let help cli.TextResult = cli.format_help(&root);
+    if (help.status != cli.ok || contains(help.text, "(default: out.bin)") != 1) {
+        cli.release_text(&help);
+        cli.destroy(&root);
+        return 22;
+    }
+    if (contains(help.text, "(deprecated)") != 1) {
+        cli.release_text(&help);
+        cli.destroy(&root);
+        return 23;
+    }
+    cli.release_text(&help);
+    cli.destroy(&root);
+    return 0;
+}
+
+// —— 主题 3：metavar 与互斥组 usage ——
+fn case_metavar_and_mutex() int {
+    let root cli.Parser;
+    let setup int = build_rich_parser(&root, cli.never, 0, 0);
+    if (setup != 0) {
+        cli.destroy(&root);
+        return 31;
+    }
+    let usage cli.TextResult = cli.format_usage(&root);
+    if (usage.status != cli.ok || contains(usage.text, "PATH") != 1) {
+        cli.release_text(&usage);
+        cli.destroy(&root);
+        return 32;
+    }
+    if (contains(usage.text, "--json | --yaml") != 1) {
+        printf("DBG usage=%s\n", usage.text);
+        cli.release_text(&usage);
+        cli.destroy(&root);
+        return 33;
+    }
+    if (contains(usage.text, "COMMAND") != 1) {
+        cli.release_text(&usage);
+        cli.destroy(&root);
+        return 34;
+    }
+    cli.release_text(&usage);
+    cli.destroy(&root);
+    // metavars 逐项占位名用于 exactly(n)。
+    let parser2 cli.Parser;
+    let config2 cli.ParserConfig = cli.parser_config("tool2");
+    if (cli.init(&parser2, config2) != 0) {
+        return 35;
+    }
+    let pair cli.Argument = cli.option("--pair", 0);
+    pair.arity = cli.exactly(2);
+    let names [2]*char;
+    names[0] = "LEFT";
+    names[1] = "RIGHT";
+    pair.metavars = names.to_type([]*char);
+    if (cli.add_argument(&parser2, pair) < 0) {
+        cli.destroy(&parser2);
+        return 36;
+    }
+    let help2 cli.TextResult = cli.format_help(&parser2);
+    if (help2.status != cli.ok || contains(help2.text, "--pair") != 1) {
+        cli.release_text(&help2);
+        cli.destroy(&parser2);
+        return 37;
+    }
+    cli.release_text(&help2);
+    cli.destroy(&parser2);
+    return 0;
+}
+
+// —— 主题 4：颜色策略与降级 ——
+fn case_color() int {
+    let root cli.Parser;
+    let setup int = build_rich_parser(&root, cli.always, 0, 0);
+    if (setup != 0) {
+        cli.destroy(&root);
+        return 41;
+    }
+    let colored cli.TextResult = cli.format_usage(&root);
+    if (colored.status != cli.ok || has_byte(colored.text, 27) != 1) {
+        cli.release_text(&colored);
+        cli.destroy(&root);
+        return 42;
+    }
+    cli.release_text(&colored);
+    cli.destroy(&root);
+    // 自动策略在管道（非终端）下必须无色降级。
+    let parser2 cli.Parser;
+    let setup2 int = build_rich_parser(&parser2, cli.automatic, 0, 0);
+    if (setup2 != 0) {
+        cli.destroy(&parser2);
+        return 43;
+    }
+    let plain cli.TextResult = cli.format_usage(&parser2);
+    if (plain.status != cli.ok || has_byte(plain.text, 27) != 0) {
+        cli.release_text(&plain);
+        cli.destroy(&parser2);
+        return 44;
+    }
+    cli.release_text(&plain);
+    cli.destroy(&parser2);
+    return 0;
+}
+
+// —— 主题 5：有限建议 ——
+fn case_suggestion() int {
+    let root cli.Parser;
+    let setup int = build_rich_parser(&root, cli.never, 0, 1);
+    if (setup != 0) {
+        cli.destroy(&root);
+        return 51;
+    }
+    let args [2]*char;
+    args[0] = "--outpt";
+    let r cli.Result = cli.parse(&root, args[0..1]);
+    if (r.status != cli.usage_error || r.error.message == 0
+        || contains(r.error.message, "是否想用") != 1) {
+        cli.release(&r);
+        cli.destroy(&root);
+        return 52;
+    }
+    cli.release(&r);
+    cli.destroy(&root);
+    return 0;
+}
+
+// —— 主题 6：控制字节与非法 UTF-8 转义 ——
+fn case_escaping() int {
+    let root cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("tool");
+    if (cli.init(&root, config) != 0) {
+        return 61;
+    }
+    // 说明文本里带 BEL 与一个非法 UTF-8 字节。
+    let text [16]char;
+    text[0] = 'a';
+    text[1] = 7;
+    text[2] = 'b';
+    text[3] = 255.to_type(char);
+    text[4] = 'c';
+    text[5] = 0;
+    let odd cli.Argument = cli.option("--odd", 0);
+    odd.help = &text[0];
+    if (cli.add_argument(&root, odd) < 0) {
+        cli.destroy(&root);
+        return 62;
+    }
+    let help cli.TextResult = cli.format_help(&root);
+    if (help.status != cli.ok || contains(help.text, "\\x07") != 1
+        || contains(help.text, "\\xff") != 1) {
+        printf("DBG help=%s\n", help.text);
+        cli.release_text(&help);
+        cli.destroy(&root);
+        return 63;
+    }
+    cli.release_text(&help);
+    cli.destroy(&root);
+    return 0;
+}
+
+// —— 主题 7：超长帮助与输出 API ——
+fn case_long_and_output() int {
+    let root cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("tool");
+    if (cli.init(&root, config) != 0) {
+        return 71;
+    }
+    // 超过 1000 字符的说明：必须完整输出且不越界。
+    let long_text [1200]char;
+    let i int = 0;
+    for i < 1100 {
+        long_text[i] = 'x';
+        i += 1;
+    }
+    long_text[1100] = 0;
+    let wide cli.Argument = cli.option("--wide", 0);
+    wide.help = &long_text[0];
+    if (cli.add_argument(&root, wide) < 0) {
+        cli.destroy(&root);
+        return 72;
+    }
+    let help cli.TextResult = cli.format_help(&root);
+    if (help.status != cli.ok || strlen(help.text).to_type(int) < 1100) {
+        cli.release_text(&help);
+        cli.destroy(&root);
+        return 73;
+    }
+    cli.release_text(&help);
+    // print_usage/print_help 写出文本；非法 fd 返回 -1。
+    if (cli.print_usage(&root, 1) != 0) {
+        cli.destroy(&root);
+        return 74;
+    }
+    if (cli.print_usage(&root, -1) != -1 || cli.print_help(&root, -1) != -1) {
+        cli.destroy(&root);
+        return 75;
+    }
+    // exit_code 覆盖各状态。
+    let r_ok cli.Result = cli.parse(&root, empty_args());
+    if (cli.exit_code(&r_ok) != 0) {
+        cli.release(&r_ok);
+        cli.destroy(&root);
+        return 76;
+    }
+    cli.release(&r_ok);
+    let bad [2]*char;
+    bad[0] = "--nope";
+    let r_bad cli.Result = cli.parse(&root, bad[0..1]);
+    if (cli.exit_code(&r_bad) != 2) {
+        cli.release(&r_bad);
+        cli.destroy(&root);
+        return 77;
+    }
+    // 失败结果自带 usage 与展示名：render 不依赖 parser。
+    if (r_bad.usage_text == 0 || r_bad.prog_text == 0) {
+        cli.release(&r_bad);
+        cli.destroy(&root);
+        return 78;
+    }
+    if (cli.render(&r_bad, 1, 2) != 0) {
+        cli.release(&r_bad);
+        cli.destroy(&root);
+        return 79;
+    }
+    cli.release(&r_bad);
+    let help_req [2]*char;
+    help_req[0] = "--help";
+    let r_help cli.Result = cli.parse(&root, help_req[0..1]);
+    if (cli.exit_code(&r_help) != 0 || r_help.control_text == 0) {
+        cli.release(&r_help);
+        cli.destroy(&root);
+        return 80;
+    }
+    if (cli.render(&r_help, 1, -1) != 0) {
+        cli.release(&r_help);
+        cli.destroy(&root);
+        return 81;
+    }
+    cli.release(&r_help);
+    cli.destroy(&root);
+    return 0;
+}
+
+// empty_args 返回一个空参数切片。
+fn empty_args() []*char {
+    let empty [1]*char;
+    return empty[0..0];
+}
+
+// run_all 依次运行全部主题；返回第一个失败码或 0。
+fn run_all() int {
+    let rc int = case_layout();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_defaults_and_deprecated();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_metavar_and_mutex();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_color();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_suggestion();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_escaping();
+    if (rc != 0) {
+        return rc;
+    }
+    return case_long_and_output();
+}
+
+// main 在 --selftest 下运行 CLI5 语义断言，否则打印提示并返回 0。
+fn main(argc int, argv **char) int {
+    if (argc > 1 && string.equals(argv[1], "--selftest") == 1) {
+        let rc int = run_all();
+        if (rc != 0) {
+            printf("cli5 selftest fail: %d\n", rc);
+        }
+        return rc;
+    }
+    io.println("clihelp: 使用 --selftest 运行验收断言");
+    return 0;
+}

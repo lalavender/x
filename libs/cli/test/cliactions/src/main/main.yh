@@ -1,0 +1,858 @@
+module main;
+
+// cli 标准库 CLI2 验收：完整 arity、append/extend、choices、短组合与附着值、
+// 负数特判、唯一缩写、remainder、boolean_optional、suppress 与 set_default。
+// 每个主题返回 0 或「主题号*10+断言号」，便于在 build-check 里定位失败。
+
+import cli;
+import io;
+import string;
+
+// text_is 断言 dest 的文本值等于期望；0 通过、1 缺键或类型不符、2 值不匹配。
+fn text_is(values *cli.Namespace, dest *char, want *char) int {
+    let text *char;
+    if (cli.get_text(values, dest, &text) != 0) {
+        return 1;
+    }
+    if (string.equals(text, want) != 1) {
+        return 2;
+    }
+    return 0;
+}
+
+// list_len 断言 dest 是列表且长度为 want；0 通过、1 取值失败、2 长度不符。
+fn list_len(values *cli.Namespace, dest *char, want int) int {
+    let list []cli.Value;
+    if (cli.get_list(values, dest, &list) != 0) {
+        return 1;
+    }
+    if (len(list) != want) {
+        return 2;
+    }
+    return 0;
+}
+
+// list_text_at 断言列表中第 index 个元素是期望文本。
+fn list_text_at(values *cli.Namespace, dest *char, index int, want *char) int {
+    let list []cli.Value;
+    if (cli.get_list(values, dest, &list) != 0) {
+        return 1;
+    }
+    if (index >= len(list) || list[index].kind != cli.text) {
+        return 2;
+    }
+    if (string.equals(list[index].data.text, want) != 1) {
+        return 3;
+    }
+    return 0;
+}
+
+// —— 主题 1：single 与 exactly(1) 的形状差异 ——
+fn case_shapes() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t1");
+    if (cli.init(&parser, config) != 0) {
+        return 11;
+    }
+    let one cli.Argument = cli.option("--one", 0);
+    let many cli.Argument = cli.option("--many", 0);
+    many.arity = cli.exactly(1);
+    if (cli.add_argument(&parser, one) < 0 || cli.add_argument(&parser, many) < 0) {
+        cli.destroy(&parser);
+        return 12;
+    }
+    let args [5]*char;
+    args[0] = "--one";
+    args[1] = "a";
+    args[2] = "--many";
+    args[3] = "b";
+    let r cli.Result = cli.parse(&parser, args[0..4]);
+    if (r.status != cli.ok) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 13;
+    }
+    if (text_is(&r.values, "one", "a") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 14;
+    }
+    if (list_len(&r.values, "many", 1) != 0 || list_text_at(&r.values, "many", 0, "b") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 15;
+    }
+    let text *char;
+    if (cli.get_text(&r.values, "many", &text) != -2) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 16;
+    }
+    cli.release(&r);
+    cli.destroy(&parser);
+    return 0;
+}
+
+// —— 主题 2：zero_or_more 与 one_or_more 位置参数 ——
+fn case_positional_multi() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t2");
+    if (cli.init(&parser, config) != 0) {
+        return 21;
+    }
+    let files cli.Argument = cli.positional("files");
+    files.arity = cli.zero_or_more();
+    let tags cli.Argument = cli.positional("tags");
+    tags.arity = cli.one_or_more();
+    if (cli.add_argument(&parser, files) < 0 || cli.add_argument(&parser, tags) < 0) {
+        cli.destroy(&parser);
+        return 22;
+    }
+    let args [4]*char;
+    args[0] = "a";
+    args[1] = "b";
+    args[2] = "c";
+    let r cli.Result = cli.parse(&parser, args[0..3]);
+    if (r.status != cli.ok) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 23;
+    }
+    if (list_len(&r.values, "files", 2) != 0 || list_text_at(&r.values, "files", 1, "b") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 24;
+    }
+    if (list_len(&r.values, "tags", 1) != 0 || list_text_at(&r.values, "tags", 0, "c") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 25;
+    }
+    cli.release(&r);
+    // one_or_more 缺失必须报 usage_error，不能被默认值绕过。
+    let empty [1]*char;
+    let r2 cli.Result = cli.parse(&parser, empty[0..0]);
+    if (r2.status != cli.usage_error) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 26;
+    }
+    cli.release(&r2);
+    cli.destroy(&parser);
+    return 0;
+}
+
+// —— 主题 3：普通模式的位置分段 ——
+fn case_positional_segments() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t3");
+    if (cli.init(&parser, config) != 0) {
+        return 31;
+    }
+    let first cli.Argument = cli.positional("first");
+    let rest cli.Argument = cli.positional("rest");
+    rest.arity = cli.zero_or_more();
+    let flag cli.Argument = cli.option("--flag", 0);
+    flag.action = cli.store_true;
+    if (cli.add_argument(&parser, first) < 0 || cli.add_argument(&parser, rest) < 0
+        || cli.add_argument(&parser, flag) < 0) {
+        cli.destroy(&parser);
+        return 32;
+    }
+    let args [6]*char;
+    args[0] = "a";
+    args[1] = "--flag";
+    args[2] = "b";
+    let r cli.Result = cli.parse(&parser, args[0..3]);
+    if (r.status != cli.ok) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 33;
+    }
+    if (text_is(&r.values, "first", "a") != 0
+        || list_len(&r.values, "rest", 1) != 0
+        || list_text_at(&r.values, "rest", 0, "b") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 34;
+    }
+    cli.release(&r);
+    // 已完成的可变位置参数不因后面的新段重新打开：c 是多余位置值。
+    let args2 [4]*char;
+    args2[0] = "a";
+    args2[1] = "b";
+    args2[2] = "--flag";
+    args2[3] = "c";
+    let r2 cli.Result = cli.parse(&parser, args2[0..4]);
+    if (r2.status != cli.usage_error || r2.error.token_index != 3) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 35;
+    }
+    cli.release(&r2);
+    cli.destroy(&parser);
+    return 0;
+}
+
+// —— 主题 4：remainder ——
+fn case_remainder() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t4");
+    if (cli.init(&parser, config) != 0) {
+        return 41;
+    }
+    let cmd cli.Argument = cli.positional("cmd");
+    let rest cli.Argument = cli.positional("rest");
+    rest.arity = cli.remainder();
+    if (cli.add_argument(&parser, cmd) < 0 || cli.add_argument(&parser, rest) < 0) {
+        cli.destroy(&parser);
+        return 42;
+    }
+    let args [5]*char;
+    args[0] = "go";
+    args[1] = "x";
+    args[2] = "--help";
+    args[3] = "-x";
+    let r cli.Result = cli.parse(&parser, args[0..4]);
+    if (r.status != cli.ok) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 43;
+    }
+    if (text_is(&r.values, "cmd", "go") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 44;
+    }
+    if (list_len(&r.values, "rest", 3) != 0
+        || list_text_at(&r.values, "rest", 0, "x") != 0
+        || list_text_at(&r.values, "rest", 1, "--help") != 0
+        || list_text_at(&r.values, "rest", 2, "-x") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 45;
+    }
+    cli.release(&r);
+    cli.destroy(&parser);
+    return 0;
+}
+
+// —— 主题 5：append / append_const / extend / 批次列表 ——
+fn case_append_family() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t5");
+    if (cli.init(&parser, config) != 0) {
+        return 51;
+    }
+    let inc cli.Argument = cli.option("--inc", 0);
+    inc.action = cli.append;
+    let tag cli.Argument = cli.option("--tag", 0);
+    tag.action = cli.append_const;
+    tag.const_value = cli.value_text("T");
+    let nums cli.Argument = cli.option("--nums", 0);
+    nums.action = cli.extend;
+    nums.arity = cli.exactly(2);
+    nums.value_kind = cli.integer;
+    let pair cli.Argument = cli.option("--pair", 0);
+    pair.action = cli.append;
+    pair.arity = cli.exactly(2);
+    if (cli.add_argument(&parser, inc) < 0 || cli.add_argument(&parser, tag) < 0
+        || cli.add_argument(&parser, nums) < 0 || cli.add_argument(&parser, pair) < 0) {
+        cli.destroy(&parser);
+        return 52;
+    }
+    let args [15]*char;
+    args[0] = "--inc";
+    args[1] = "a";
+    args[2] = "--inc";
+    args[3] = "b";
+    args[4] = "--tag";
+    args[5] = "--tag";
+    args[6] = "--nums";
+    args[7] = "1";
+    args[8] = "2";
+    args[9] = "--nums";
+    args[10] = "3";
+    args[11] = "4";
+    args[12] = "--pair";
+    args[13] = "x";
+    args[14] = "y";
+    let r cli.Result = cli.parse(&parser, args[0..15]);
+    if (r.status != cli.ok) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 53;
+    }
+    if (list_len(&r.values, "inc", 2) != 0
+        || list_text_at(&r.values, "inc", 0, "a") != 0
+        || list_text_at(&r.values, "inc", 1, "b") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 54;
+    }
+    if (list_len(&r.values, "tag", 2) != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 55;
+    }
+    if (list_len(&r.values, "nums", 4) != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 56;
+    }
+    let nums_list []cli.Value;
+    if (cli.get_list(&r.values, "nums", &nums_list) != 0
+        || nums_list[0].data.integer != 1 || nums_list[3].data.integer != 4) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 57;
+    }
+    // append + exactly(2) 的第二批：终止解析后校验外层是「子列表」形状。
+    cli.release(&r);
+    let args2 [6]*char;
+    args2[0] = "--pair";
+    args2[1] = "x";
+    args2[2] = "y";
+    args2[3] = "--pair";
+    args2[4] = "z";
+    args2[5] = "w";
+    let r2 cli.Result = cli.parse(&parser, args2[0..6]);
+    if (r2.status != cli.ok) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 58;
+    }
+    let batch []cli.Value;
+    if (cli.get_list(&r2.values, "pair", &batch) != 0 || len(batch) != 2) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 59;
+    }
+    if (batch[0].kind != cli.sequence) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 60;
+    }
+    // 子列表通过独立命名空间借用视图读取：证明批次列表的外层元素是序列值。
+    let scratch cli.Namespace;
+    if (cli.namespace_init(&scratch) != 0) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 61;
+    }
+    if (cli.namespace_set(&scratch, "sub", batch[0]) != 0) {
+        cli.namespace_destroy(&scratch);
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 62;
+    }
+    let inner []cli.Value;
+    if (cli.get_list(&scratch, "sub", &inner) != 0 || len(inner) != 2) {
+        cli.namespace_destroy(&scratch);
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 63;
+    }
+    if (inner[0].kind != cli.text || string.equals(inner[0].data.text, "x") != 1) {
+        cli.namespace_destroy(&scratch);
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 64;
+    }
+    cli.namespace_destroy(&scratch);
+    cli.release(&r2);
+    cli.destroy(&parser);
+    return 0;
+}
+
+// —— 主题 6：boolean_optional ——
+fn case_boolean_optional() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t6");
+    if (cli.init(&parser, config) != 0) {
+        return 65;
+    }
+    let cache cli.Argument = cli.option("--cache", 0);
+    cache.action = cli.boolean_optional;
+    if (cli.add_argument(&parser, cache) < 0) {
+        cli.destroy(&parser);
+        return 66;
+    }
+    let on [2]*char;
+    on[0] = "--cache";
+    let r cli.Result = cli.parse(&parser, on[0..1]);
+    let flag bool = false;
+    if (r.status != cli.ok || cli.get_bool(&r.values, "cache", &flag) != 0 || flag != true) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 67;
+    }
+    cli.release(&r);
+    let off [2]*char;
+    off[0] = "--no-cache";
+    let r2 cli.Result = cli.parse(&parser, off[0..1]);
+    if (r2.status != cli.ok || cli.get_bool(&r2.values, "cache", &flag) != 0 || flag != false) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 68;
+    }
+    cli.release(&r2);
+    let both [3]*char;
+    both[0] = "--cache";
+    both[1] = "--no-cache";
+    let r3 cli.Result = cli.parse(&parser, both[0..2]);
+    if (r3.status != cli.ok || cli.get_bool(&r3.values, "cache", &flag) != 0 || flag != false) {
+        cli.release(&r3);
+        cli.destroy(&parser);
+        return 69;
+    }
+    cli.release(&r3);
+    let none [1]*char;
+    let r4 cli.Result = cli.parse(&parser, none[0..0]);
+    let v cli.Value;
+    if (r4.status != cli.ok || cli.get_value(&r4.values, "cache", &v) != 0
+        || v.kind != cli.none) {
+        cli.release(&r4);
+        cli.destroy(&parser);
+        return 70;
+    }
+    cli.release(&r4);
+    cli.destroy(&parser);
+    return 0;
+}
+
+// —— 主题 7：choices ——
+fn case_choices() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t7");
+    if (cli.init(&parser, config) != 0) {
+        return 71;
+    }
+    let allowed [2]cli.Value;
+    allowed[0] = cli.value_text("fast");
+    allowed[1] = cli.value_text("slow");
+    let mode cli.Argument = cli.option("--mode", 0);
+    mode.choices = allowed.to_type([]cli.Value);
+    if (cli.add_argument(&parser, mode) < 0) {
+        cli.destroy(&parser);
+        return 72;
+    }
+    let levels [2]cli.Value;
+    levels[0] = cli.value_i64(1);
+    levels[1] = cli.value_i64(2);
+    let level cli.Argument = cli.option("--level", 0);
+    level.value_kind = cli.integer;
+    level.choices = levels.to_type([]cli.Value);
+    if (cli.add_argument(&parser, level) < 0) {
+        cli.destroy(&parser);
+        return 73;
+    }
+    let ok [3]*char;
+    ok[0] = "--mode";
+    ok[1] = "fast";
+    let r cli.Result = cli.parse(&parser, ok[0..2]);
+    if (r.status != cli.ok || text_is(&r.values, "mode", "fast") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 74;
+    }
+    cli.release(&r);
+    let bad [3]*char;
+    bad[0] = "--mode";
+    bad[1] = "bogus";
+    let r2 cli.Result = cli.parse(&parser, bad[0..2]);
+    if (r2.status != cli.usage_error) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 75;
+    }
+    cli.release(&r2);
+    let good_level [3]*char;
+    good_level[0] = "--level";
+    good_level[1] = "2";
+    let r3 cli.Result = cli.parse(&parser, good_level[0..2]);
+    if (r3.status != cli.ok) {
+        cli.release(&r3);
+        cli.destroy(&parser);
+        return 76;
+    }
+    cli.release(&r3);
+    let bad_level [3]*char;
+    bad_level[0] = "--level";
+    bad_level[1] = "3";
+    let r4 cli.Result = cli.parse(&parser, bad_level[0..2]);
+    if (r4.status != cli.usage_error) {
+        cli.release(&r4);
+        cli.destroy(&parser);
+        return 77;
+    }
+    cli.release(&r4);
+    cli.destroy(&parser);
+    return 0;
+}
+
+// —— 主题 8：短组合、附着值、负数特判 ——
+fn case_short_and_negative() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t8");
+    if (cli.init(&parser, config) != 0) {
+        return 81;
+    }
+    let verbose cli.Argument = cli.option("--verbose", "-v");
+    verbose.action = cli.count;
+    let output cli.Argument = cli.option("--output", "-o");
+    let include cli.Argument = cli.option("--include", "-I");
+    let a cli.Argument = cli.option("-a", 0);
+    a.action = cli.store_true;
+    let b cli.Argument = cli.option("-b", 0);
+    b.action = cli.store_true;
+    let c cli.Argument = cli.option("-c", 0);
+    c.action = cli.store_true;
+    let limit cli.Argument = cli.option("--limit", 0);
+    limit.value_kind = cli.integer;
+    let source cli.Argument = cli.positional("source");
+    source.value_kind = cli.integer;
+    if (cli.add_argument(&parser, verbose) < 0 || cli.add_argument(&parser, output) < 0
+        || cli.add_argument(&parser, include) < 0 || cli.add_argument(&parser, a) < 0
+        || cli.add_argument(&parser, b) < 0 || cli.add_argument(&parser, c) < 0
+        || cli.add_argument(&parser, limit) < 0 || cli.add_argument(&parser, source) < 0) {
+        cli.destroy(&parser);
+        return 82;
+    }
+    // -vvv 触发三次计数。
+    let cluster [4]*char;
+    cluster[0] = "-vvv";
+    cluster[1] = "7";
+    let r cli.Result = cli.parse(&parser, cluster[0..2]);
+    let level i64 = 0;
+    if (r.status != cli.ok || cli.get_i64(&r.values, "verbose", &level) != 0 || level != 3) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 83;
+    }
+    cli.release(&r);
+    // -abc 依次处理零参数短选项。
+    let flags [4]*char;
+    flags[0] = "-abc";
+    flags[1] = "7";
+    let r2 cli.Result = cli.parse(&parser, flags[0..2]);
+    let flag bool = false;
+    if (r2.status != cli.ok || cli.get_bool(&r2.values, "a", &flag) != 0 || flag != true
+        || cli.get_bool(&r2.values, "c", &flag) != 0 || flag != true) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 84;
+    }
+    cli.release(&r2);
+    // -Ipath 与 -I=path 都取 path；-o 附着与分离两种写法。
+    let attached [4]*char;
+    attached[0] = "-Ipath";
+    attached[1] = "-o=out.bin";
+    attached[2] = "7";
+    let r3 cli.Result = cli.parse(&parser, attached[0..3]);
+    if (r3.status != cli.ok || text_is(&r3.values, "include", "path") != 0
+        || text_is(&r3.values, "output", "out.bin") != 0) {
+        cli.release(&r3);
+        cli.destroy(&parser);
+        return 85;
+    }
+    cli.release(&r3);
+    // 负数特判：-12 是位置值（integer 转换成功）。
+    let negative [2]*char;
+    negative[0] = "-12";
+    let r4 cli.Result = cli.parse(&parser, negative[0..1]);
+    let number i64 = 0;
+    if (r4.status != cli.ok || cli.get_i64(&r4.values, "source", &number) != 0
+        || number != -12) {
+        cli.release(&r4);
+        cli.destroy(&parser);
+        return 86;
+    }
+    cli.release(&r4);
+    // 附着值写负数。
+    let attached_negative [2]*char;
+    attached_negative[0] = "--limit=-2";
+    attached_negative[1] = "7";
+    let r5 cli.Result = cli.parse(&parser, attached_negative[0..2]);
+    if (r5.status != cli.ok || cli.get_i64(&r5.values, "limit", &number) != 0
+        || number != -2) {
+        cli.release(&r5);
+        cli.destroy(&parser);
+        return 87;
+    }
+    cli.release(&r5);
+    cli.destroy(&parser);
+    // 注册数字型短选项后关闭负数特判：-12 变成未知选项。
+    let parser2 cli.Parser;
+    let config2 cli.ParserConfig = cli.parser_config("t8b");
+    if (cli.init(&parser2, config2) != 0) {
+        return 88;
+    }
+    let digit cli.Argument = cli.option("-1", 0);
+    digit.action = cli.store_true;
+    if (cli.add_argument(&parser2, digit) < 0) {
+        cli.destroy(&parser2);
+        return 89;
+    }
+    let r6 cli.Result = cli.parse(&parser2, negative[0..1]);
+    if (r6.status != cli.usage_error) {
+        cli.release(&r6);
+        cli.destroy(&parser2);
+        return 90;
+    }
+    cli.release(&r6);
+    cli.destroy(&parser2);
+    return 0;
+}
+
+// —— 主题 9：长名称唯一缩写 ——
+fn case_abbrev() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t9");
+    config.allow_abbrev = true;
+    if (cli.init(&parser, config) != 0) {
+        return 91;
+    }
+    let output cli.Argument = cli.option("--output", 0);
+    let outline cli.Argument = cli.option("--outline", 0);
+    let verbose cli.Argument = cli.option("--verbose", 0);
+    if (cli.add_argument(&parser, output) < 0 || cli.add_argument(&parser, outline) < 0
+        || cli.add_argument(&parser, verbose) < 0) {
+        cli.destroy(&parser);
+        return 92;
+    }
+    let unique [3]*char;
+    unique[0] = "--outp";
+    unique[1] = "x";
+    let r cli.Result = cli.parse(&parser, unique[0..2]);
+    if (r.status != cli.ok || text_is(&r.values, "output", "x") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 93;
+    }
+    cli.release(&r);
+    let ambiguous [3]*char;
+    ambiguous[0] = "--out";
+    ambiguous[1] = "x";
+    let r2 cli.Result = cli.parse(&parser, ambiguous[0..2]);
+    if (r2.status != cli.usage_error) {
+        cli.release(&r2);
+        cli.destroy(&parser);
+        return 94;
+    }
+    cli.release(&r2);
+    cli.destroy(&parser);
+    // allow_abbrev=false 时前缀不再匹配。
+    let parser2 cli.Parser;
+    let config2 cli.ParserConfig = cli.parser_config("t9b");
+    if (cli.init(&parser2, config2) != 0) {
+        return 95;
+    }
+    let plain cli.Argument = cli.option("--output", 0);
+    if (cli.add_argument(&parser2, plain) < 0) {
+        cli.destroy(&parser2);
+        return 96;
+    }
+    let r3 cli.Result = cli.parse(&parser2, unique[0..2]);
+    if (r3.status != cli.usage_error) {
+        cli.release(&r3);
+        cli.destroy(&parser2);
+        return 97;
+    }
+    cli.release(&r3);
+    cli.destroy(&parser2);
+    return 0;
+}
+
+// —— 主题 10：suppress、set_default 与类型查询错误码 ——
+fn case_defaults() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t10");
+    if (cli.init(&parser, config) != 0) {
+        return 101;
+    }
+    let hidden cli.Argument = cli.option("--hidden", 0);
+    hidden.default_value = cli.suppress_default();
+    let plain cli.Argument = cli.option("--plain", 0);
+    plain.default_value = cli.default_of(cli.value_text("def"));
+    let count cli.Argument = cli.option("--count", 0);
+    count.action = cli.count;
+    if (cli.add_argument(&parser, hidden) < 0 || cli.add_argument(&parser, plain) < 0
+        || cli.add_argument(&parser, count) < 0) {
+        cli.destroy(&parser);
+        return 102;
+    }
+    if (cli.set_default(&parser, "plain", cli.value_text("override")) != 0) {
+        cli.destroy(&parser);
+        return 103;
+    }
+    let query cli.Value;
+    if (cli.get_default(&parser, "plain", &query) != 0
+        || query.kind != cli.text
+        || string.equals(query.data.text, "override") != 1) {
+        cli.destroy(&parser);
+        return 104;
+    }
+    let empty [1]*char;
+    let r cli.Result = cli.parse(&parser, empty[0..0]);
+    if (r.status != cli.ok) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 105;
+    }
+    if (cli.contains(&r.values, "hidden") != false) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 106;
+    }
+    if (text_is(&r.values, "plain", "override") != 0) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 107;
+    }
+    if (cli.provided(&r.values, "plain") != false) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 108;
+    }
+    let number i64 = 0;
+    if (cli.get_i64(&r.values, "plain", &number) != -2) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 109;
+    }
+    let list []cli.Value;
+    if (cli.get_list(&r.values, "plain", &list) != -2
+        || cli.get_list(&r.values, "nosuch", &list) != -1) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 110;
+    }
+    let text *char;
+    if (cli.get_text(&r.values, "nosuch", &text) != -1) {
+        cli.release(&r);
+        cli.destroy(&parser);
+        return 111;
+    }
+    cli.release(&r);
+    cli.destroy(&parser);
+    return 0;
+}
+
+// —— 主题 11：共享 dest 的类型检查（配置错误） ——
+fn case_shared_dest() int {
+    let parser cli.Parser;
+    let config cli.ParserConfig = cli.parser_config("t11");
+    if (cli.init(&parser, config) != 0) {
+        return 111;
+    }
+    let first cli.Argument = cli.option("--first", 0);
+    first.dest = "shared";
+    let second cli.Argument = cli.option("--second", 0);
+    second.dest = "shared";
+    second.value_kind = cli.integer;
+    if (cli.add_argument(&parser, first) < 0 || cli.add_argument(&parser, second) < 0) {
+        cli.destroy(&parser);
+        return 112;
+    }
+    if (cli.freeze(&parser) != -1) {
+        cli.destroy(&parser);
+        return 113;
+    }
+    let diagnostic cli.Diagnostic = cli.last_error(&parser);
+    if (diagnostic.message == 0) {
+        cli.destroy(&parser);
+        return 114;
+    }
+    cli.destroy(&parser);
+    // 兼容的 store_true/store_false 可以共用 dest。
+    let parser2 cli.Parser;
+    let config2 cli.ParserConfig = cli.parser_config("t11b");
+    if (cli.init(&parser2, config2) != 0) {
+        return 115;
+    }
+    let on cli.Argument = cli.option("--on", 0);
+    on.dest = "toggle";
+    on.action = cli.store_true;
+    let off cli.Argument = cli.option("--off", 0);
+    off.dest = "toggle";
+    off.action = cli.store_false;
+    if (cli.add_argument(&parser2, on) < 0 || cli.add_argument(&parser2, off) < 0) {
+        cli.destroy(&parser2);
+        return 116;
+    }
+    if (cli.freeze(&parser2) != 0) {
+        cli.destroy(&parser2);
+        return 117;
+    }
+    let flag bool = true;
+    let args [2]*char;
+    args[0] = "--off";
+    let r cli.Result = cli.parse(&parser2, args[0..1]);
+    if (r.status != cli.ok || cli.get_bool(&r.values, "toggle", &flag) != 0 || flag != false) {
+        cli.release(&r);
+        cli.destroy(&parser2);
+        return 118;
+    }
+    cli.release(&r);
+    cli.destroy(&parser2);
+    return 0;
+}
+
+// run_all 依次运行全部主题；返回第一个失败码或 0。
+fn run_all() int {
+    let rc int = case_shapes();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_positional_multi();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_positional_segments();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_remainder();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_append_family();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_boolean_optional();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_choices();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_short_and_negative();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_abbrev();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = case_defaults();
+    if (rc != 0) {
+        return rc;
+    }
+    return case_shared_dest();
+}
+
+// main 在 --selftest 下运行 CLI2 语义断言，否则打印提示并返回 0。
+fn main(argc int, argv **char) int {
+    if (argc > 1 && string.equals(argv[1], "--selftest") == 1) {
+        let rc int = run_all();
+        if (rc != 0) {
+            printf("cli2 selftest fail: %d\n", rc);
+        }
+        return rc;
+    }
+    io.println("cliactions: 使用 --selftest 运行验收断言");
+    return 0;
+}
