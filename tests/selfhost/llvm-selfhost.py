@@ -345,8 +345,16 @@ def main() -> int:
     wrapper_dir.mkdir(parents=True, exist_ok=True)
     wrapper = wrapper_dir / "gcc-log"
     link_log = work / "logs" / "external-linker.log"
-    wrapper.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + str(link_log)
-                       + "\"\nexec /usr/bin/gcc \"$@\"\n", encoding="utf-8")
+    # C 源编译（-c/-E/-S）必须走外部 C 驱动；只有最终链接才应使用内嵌 lld。
+    # 包装器只记录链接调用，避免把 bridge_stub.c 的正常编译误判为外链回退。
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "for arg in \"$@\"; do\n"
+        "  case \"$arg\" in -c|-E|-S) exec /usr/bin/gcc \"$@\";; esac\n"
+        "done\n"
+        "printf '%s\\n' \"$*\" >> \"" + str(link_log) + "\"\n"
+        "exec /usr/bin/gcc \"$@\"\n",
+        encoding="utf-8")
     wrapper.chmod(0o755)
     direct_env["YH_CC"] = str(wrapper)
     direct_env["YH_LLVM_SELFHOST"] = "1"
