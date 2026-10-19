@@ -436,13 +436,12 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   - [x] LL10 前置 LLVM x64 全量语料差异：runner O0/O2 均通过 335/335；随后新增无限循环返回回归，
     收尾全门当前为 343/343。修复覆盖聚合返回值、编译期边界、切片存储生命周期、数组到切片视图及诊断预期；
     O0/O2 分别验收，详见 LL9 补充与 LL10 完成记录。
-- [ ] **linux-x86_64 CI 作业首跑验证（2026-10-19 补配置）**：该作业此前从未运行
+- [x] **linux-x86_64 CI 作业首跑验证（2026-10-19 补配置）**：该作业此前从未运行
   （推送触发只监听 `arm64`/`main`，工作都在 `llvm` 分支）。2026-10-19 已补：
-  push 触发加入 `llvm` 分支；作业 env 加 `YH_LLVM_HOST: "1"`（全新 runner 上
-  auto 模式不联网，构建出的 yh 无 LLVM 桥会让 test-llvm 必失败）；新增
-  `tmp/llvm-migration` 的 actions/cache（键随 `vendor/llvm/sdk.lock.json` 与
-  桥源码变化）。首跑需确认：SDK 下载与缓存命中、qemu 下 O0/O2 语料时长与
-  180 分钟超时是否匹配。
+  push 触发加入 `llvm` 分支；作业 env 加 `YH_LLVM_HOST: "1"`；新增
+  `tmp/llvm-migration` 的 actions/cache。2026-10-20 首跑全绿：固定 SDK 缓存命中、
+  qemu 下 A→B/C/D 与 O0/O2 全门通过，退出 0；x64 发布归档见
+  [完成记录](finish.md#2026-10-20-005-补档-linuxx86_64-release)。
 - [ ] **LL11 x64 性能与默认切换**：至少 20 轮对照，原生默认全门绿后滚独立 `bin/yh-linux-x64` 与哈希；
   ARM64 种子不被覆盖，工具依赖与发行说明同步。
   - [x] **默认切换与 x64 种子（2026-10-19）**：Linux/x86_64 宿主默认 LLVM
@@ -453,6 +452,9 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     `PATH=/nonexistent` 下通过：无 LLVM/lld 动态依赖、execve 无外部 LLVM 旁车、
     冷编自举 `fallback_functions=0`；见
     [完成记录](01-finished/yh-LLVM-LL11隔离环境验证-2026-10-19.md)。
+  - [x] **x64 Release 归档（2026-10-20）**：`release.yml` 增加
+    `linux-x86_64` 与 `x64_only` dispatch；`0.0.5` 已补
+    `yh-0.0.5-linux-x86_64.tar.gz`（x86_64 ELF，D-O2），arm64/darwin 未重跑。
   - [ ] 20 轮性能对照与回退归因（用户暂缓）；发行/CI 文档同步；
     R2b 硬门（RS2/RS3/R2c）关闭前不宣布 LL11 全量完成。
 - [ ] **LL12 退役旧后端**：在 LL11 及 F1 Linux/AArch64 LLVM 回归都通过后，

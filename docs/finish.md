@@ -6406,3 +6406,24 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
   默认 LLVM 构建仍受种子硬编码
   `/Users/lavender/.codex/worktrees/...` 与缺 `-lc++` 阻塞，属既有 todo 项，
   与本次删除无关。
+
+# 2026-10-20 0.0.5 补档 Linux/x86_64 Release
+
+- **Release CI**：`release.yml` 新增 `linux-x86_64` 作业；新增
+  `workflow_dispatch` 输入 `tag` 与 `x64_only`。`x64_only=true` 时
+  `linux-arm64`/`darwin-arm64` 直接 skipped，只构建 x64，并把
+  `yh-<tag>-linux-x86_64.tar.gz`/`.sha256` 上传到已有 Release。
+- **x64 种子兼容性**：`seed-llvm-x64-2026-10-19` 的 `yh-linux-x64`
+  （SHA-256 `c6733eb2…`）动态依赖 `libxml2.so.16`，Ubuntu 24.04 只有
+  `libxml2.so.2`，不能直接在发布 runner 上执行。发布作业沿用 CI 已验证的
+  AArch64 种子 + QEMU 路径，`tests/selfhost/llvm-selfhost.py` 产出
+  x86_64 D-O2；该候选在 Ubuntu 原生运行，且不依赖 x64 种子的 libxml2。
+- **验证**：dispatch run `39315997430` 中 x64 构建成功、arm64/darwin skipped、
+  Release 作业成功；x64 构建内 D-O2 的 O0/O2 语料各 344/349（其余为平台
+  跳过）、模块 18/18、项目 105/105、自解析 104/104，冒烟通过。
+  `0.0.5` 现有资产增加 `yh-0.0.5-linux-x86_64.tar.gz`
+  （42,565,227 B）及 `.sha256`，原 darwin-arm64/linux-arm64 资产保留。
+- Release 因多次移动 tag 一度变成 untagged/draft；已通过 API 重新关联
+  `0.0.5` tag 并发布（`https://github.com/lalavender/x/releases/tag/0.0.5`）。
+  tag 保持 `0.0.5 -> 968de29`，发布工作流修复在 `llvm` 分支，避免再触发
+  arm64/darwin 全量构建。
