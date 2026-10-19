@@ -45,8 +45,8 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
   保证**本平台**门禁绿（`make test` + `make selfhost-native`；运行语料已按
   `// platform:` 头部指令筛选，平台专属门如 `make test-llvm` 在别的宿主会
   明确拒绝而不是要求本地跑通）。**完整多平台回归由 GitHub Actions 承担**
-  （见下文 CI 说明）：推送 `arm64`/`llvm`/`main` 自动跑 linux-arm64（主门 +
-  `yh-link-probe FULL=1`）与 linux-x86_64（YH_LLVM_HOST=1 的 LLVM 全门），
+  （见下文 CI 说明）：推送 `arm64`/`llvm`/`main` 自动跑 linux-arm64（主门）
+  与 linux-x86_64（YH_LLVM_HOST=1 的 LLVM 全门），
   darwin-arm64 由手动 `workflow_dispatch` 触发。本地不要为其他平台预跑门禁，
   也不要因 CI 平台的红灯阻塞本地迭代——CI 红灯按 todo 立项再修。
 
@@ -113,9 +113,8 @@ make seed               # 滚种子（仅在全绿后）
 `make test-llvm` 是 Linux/x86_64 专属门，其他宿主会直接拒绝而不是降级运行。
 
 GitHub Actions（`.github/workflows/ci.yml`，手动 `workflow_dispatch` 或推送
-`arm64`/`llvm`/`main`）：`linux-arm64` 作业在 arm64 容器里跑第 2/3 层语料、
-`make selfhost-native` 与 `make yh-link-probe FULL=1`（链接器端到端 + GNU ld
-差分的原生门；第 1 层 ANTLR 需要 Java 与 jar 缓存，不在 CI 跑）；
+`arm64`/`llvm`/`main`）：`linux-arm64` 作业在 arm64 容器里跑第 2/3 层语料与
+`make selfhost-native`（第 1 层 ANTLR 需要 Java 与 jar 缓存，不在 CI 跑）；
 `linux-x86_64` 作业以 `YH_LLVM_HOST=1` 联网准备固定 LLVM SDK（缓存在
 `tmp/llvm-migration`，键随 SDK 锁文件与桥源码变化）后跑 `make test-llvm` /
 `make selfhost-llvm`；`darwin-arm64` 作业在 `macos-14` 上跑同一套门禁，入库
@@ -140,8 +139,7 @@ GitHub Actions（`.github/workflows/ci.yml`，手动 `workflow_dispatch` 或推�
   **x86_64 Linux 宿主没有 x64 种子**（x64 后端未实施），须显式
   `SEED=bin/yh-linux-arm64`（arm64 容器原生跑，或 x86_64 上配
   qemu-user/binfmt 执行 arm64 ELF）。产物形态随宿主（Darwin →
-  Mach-O，Linux → ELF）。平台矩阵见
-  `docs/02-plan/yh-link平台与架构矩阵方案.md`。
+  Mach-O，Linux → ELF）。
 - 宿主是 Apple Silicon（darwin/arm64），系统 container 默认
   arch=arm64 / os=linux，直接用 alpine/debian 等多架构 OCI 镜像即可，
   原生 arm64 无模拟、性能接近原生；不要切 x86_64 走 Rosetta/qemu。
@@ -195,7 +193,6 @@ qemu-user/binfmt，交叉 gcc 包装在 `tmp/boot/crossbin/gcc`）：
 ```bash
 export PATH="$PWD/tmp/boot/crossbin:$PATH"   # gcc → aarch64-linux-gnu-gcc
 export SEED=bin/yh-linux-arm64              # x86_64 宿主没有 x64 种子
-export YH_LINK=/nonexistent                 # 仓库根 yh_link 是 Mach-O，强制回落交叉 gcc
 make
 make test
 make selfhost-native

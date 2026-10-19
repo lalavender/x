@@ -36,6 +36,58 @@
   `test-llvm-darwin`（19 项）、`selfhost-llvm-darwin` 全部通过。
 - **后置**：20 轮性能、RS2/RS3/R2c、F2-9 交叉引导、macos-14 实跑。
   详见[完成记录](01-finished/yh-macOS-LLVM-F2-10-默认切换与种子-2026-10-19.md)。
+## 2026-10-20 yh 与 C / Zig / Rust 性能对比（LLVM 后端自举版）
+
+- **目的**：用同一段逻辑在四种语言分别实现，量化 yh 的二进制体积、启动速度、
+  编译速度与生成代码质量。macOS/arm64（Apple M1）实测，对照 Homebrew clang 23.1.1、
+  Zig 0.16.0、rustc 1.93.0。**用 0.0.5 的 LLVM 后端自举种子**（`bin/yh-darwin-arm64`
+  73,539,408 B，F2-10 默认切 LLVM）作为 yh 编译器，并用同一份编译器只切
+  `--backend legacy|llvm` 做**替换前后归因**。
+- **方法学**（`tests/bench/`，`bash tests/bench/run_all.sh` 一键复现）：同时采集
+  父进程 wall 与子进程 `wait4` 的 `utime+stime`、max RSS；采样 300 次取中位数；
+  设**空程序基线**（`src/empty.*`）把「运行时初始化」与「I/O 成本」拆开；
+  设**两个循环基准**——可被 LLVM loop-idiom 折叠的 A1（测优化器强度）与串行依赖链
+  的 A2（测真实 codegen 质量）；Zig 冷编译用隔离 `--global-cache-dir` 测，不污染
+  用户缓存。四种语言 hello world 动态依赖一致（均只链 libSystem），输出与计算
+  基准结果逐位相同；用 Apple clang 21.0.0 复测 A2 复核（26,393 vs 26,392 µs）。
+- **代码质量（结论已反转）**：A2 依赖链循环 yh-LLVM **27,934 µs**，与 clang 26,392
+  相差 5.9%、Rust 26,893 差 3.9%、Zig 26,241 差 6.5%——**追平 LLVM 阵营**；
+  递归 `fib(30)` **3,446 µs**，比 clang 快 39%、Rust 快 43%、Zig 快 39%；
+  可折叠循环 974 µs，比 clang 快 2.5×。legacy 后端同基准是 196,451 µs，
+  即 **LLVM 后端带来 7.0× 加速**（递归 3.0×、可折叠循环 80.6×）。
+  **前一版（legacy）报告的「7.4× 短板」不再成立。**
+- **关键洞察**：把 `main` 机器指令数拉出来（`otool -tvV` 统一口径）——yh-LLVM 368 条
+  vs legacy 293 条 vs clang -O2 21 条。**LLVM 后端指令数比 legacy 还多 26%，却快 7×**。
+  代码质量的关键不是指令数而是**每条指令背后有没有内存往返**：legacy 每个 SSA
+  临时值都走「压栈→弹出」，clang 全是寄存器操作。
+- **编译速度（四者最快）**：yh-LLVM 稳态 **25.5 ms** / 冷 **76.0 ms**，是 rustc(107.8)
+  的 1/4.2、clang(149.7) 的 1/5.9、Zig(134.6) 的 1/5.3。legacy 同项 185.8/561.1 ms。
+  原因可归因：`yh --emit-asm`（仅前端+代码生成）只要 **3.3 ms**，比 clang 编译
+  hello.c 整条链路（145.1 ms）快 **44 倍**；legacy 时代的 183.7 ms 里 98% 是外部
+  `clang` 驱动固定开销（假 clang 包装器抓到真实调用是 `clang -o <out> <out>.yh-tmp.s`），
+  切 LLVM 后端后这条外部链路整体消失。
+- **体积**：yh-LLVM `__text` 1,892 B（-O2 为 1,392 B）、空程序 264 B；文件 50,224 B
+  比 clang 多 17 KB，差异全是 Mach-O 段页对齐（yh 多一个 `__DATA` 页），非代码量。
+  Rust 442 KB 主体是链接进来的 `std`（`__text` 216 KB），与调试信息无关。
+- **启动**：yh-LLVM CPU 956 µs ≈ clang 940 ≈ Zig 959，Rust 1,247。空程序基线显示
+  Rust 慢的 289 µs **全在 std 运行时初始化**；yh 切 LLVM 后初始化 +31 µs（+3.4%，
+  桥初始化固定开销），换 7× 运行加速很划算。max RSS yh 1,622,016 B 低于 Rust/Zig。
+- **已知阻塞（新发现）**：拉取 0.0.5 后 `make` 在本工作区自举失败——
+  `ld64.lld: library not found for -lc++`。根因：**入库种子硬编码了 73 处构建机
+  绝对路径**（`/Users/lavender/.codex/worktrees/macos-llvm/x/tmp/llvm-migration/...`，
+  `strings -a bin/yh-darwin-arm64 | grep -c codex/worktrees` = 73；0.0.4 legacy 产物
+  为 0），自举时 `mb_darwin_selfhost_enabled()` 把这些路径喂给链接器。验证：
+  `cd compiler && YH_LLVM_SELFHOST=0 ../bin/yh-darwin-arm64 build -o ../yh-legacy`
+  **构建成功**（1,956,384 B）→ 阻塞只在桥注入路径；且用 `YH_LLVM_SELFHOST=0` 的产物
+  跑 `--backend llvm` 明确报「内嵌 LLVM 桥未链接」，印证桥是 LLVM 后端前提。
+  **不影响用已入库种子做编译与对比**（本轮数据即由此产出），但影响在仓库内继续自举
+  0.0.5 之后的代。已记入 `docs/todo.md`。
+- **边界**：全部数据为 macOS/arm64，Linux 需重测（dyld vs ld.so、`ru_maxrss` 单位差）；
+  相对关系预期成立。未做数组/指针吞吐基准（语义仍在语料阶段）。
+  本任务只加基准资产与文档，未改编译器实现、未滚种子。
+- **门禁**：`make test` 343/344（1 例平台专属跳过）；`make selfhost-native` 退出 0
+  （项目用例 104/104）。新增 `tests/bench/` 不在既有门禁扫描路径内。
+  详见[完成记录](01-finished/yh-与C-Zig-Rust性能对比-2026-10-20.md)。
 
 ## 2026-10-19 LL11：默认切换、x64 种子与隔离环境验证
 
@@ -59,6 +111,20 @@
   [完成记录](01-finished/yh-LLVM-LL11隔离环境验证-2026-10-19.md)。
 - **未完成**：20 轮性能对照/回退归因（用户暂缓）、发行/CI 文档同步；
   R2b 硬门（RS2/RS3/R2c）仍开，不宣布 LL11 全量完成。
+## 2026-10-19 os/sys 标准库联合规划（可用性优先）
+
+- 用户选择标准库可用性优先；交付[联合设计](03-design/yh-os与sys标准库设计.md)、
+  [OS0–OS8 实施方案](02-plan/yh-os与sys标准库实施方案.md)和
+  [提议 ADR-0015](adr/0015-yh-os与sys标准库分层.md)。先文件闭环，再目录、环境、
+  进程与 io/time 收敛；编译器迁移和 Darwin 新接口另排，尚未实施。
+- sys 保留 -errno 与单次调用；os 新接口显式错误/自有选项，旧接口保留兼容。
+  明确借用缓冲/envp、exec 失败握手与子进程回收；修正旧 sys 文档对 x64 入口、
+  OS/架构后缀和 os.platform/arch 的过时描述，沿用现行 LLVM 与本地/CI 分工。
+- 文档链接、围栏、空白与 diff 检查通过；本任务只写文档，未构建、未改实现、
+  未滚种子。工作区 CLI 的并行改动保留。详见
+  [交付记录](01-finished/yh-os与sys标准库规划交付-2026-10-19.md)。
+
+
 ## 2026-10-19 cli 用例迁入 libs/cli/test（与全局测试解耦）
 
 - 按用户要求把 cli 的 fixture 与用例从 `tests/modules/projects/` 迁到
@@ -6313,3 +6379,30 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
 - `make selfhost-llvm-darwin`、`make test-llvm-darwin`、`make test`（346/347）、
   `make selfhost-native`（固定点 123 项、模块 105/105）全部通过。未滚种子。
 - 详见[完成记录](01-finished/yh-macOS-LLVM-F2-8-原生连续自举-2026-10-19.md)。
+
+# 2026-10-20 删除 asm/、link/ 独立工具链项目
+
+- **背景**：LLVM 后端（Linux/x86_64、Darwin/ARM64 默认）由内嵌桥生成对象、
+  内嵌 lld 或平台链接驱动完成最终链接；`asm/`、`link/` 不参与任何编译链路。
+  用户决定完全删除，不再作为独立产品维护。
+- **删除**：`asm/`、`link/` 两个项目（源码、测试、构建产物）；
+  `bin/yh_link_wrap.sh`；`tools/yh-toolchain-inventory.py`；
+  `docs/02-plan/` 下 4 个专属方案文档与 `docs/03-design/` 下 4 个专属
+  设计/契约文档。
+- **同步**：Makefile 删除 `yh-asm`/`yh-link-build`/`yh-link-probe` 目标及相关
+  变量与注释；`ci.yml` 删除 linux-arm64 的 `make yh-link-probe FULL=1`；
+  `AGENTS.md` 更新 CI 与平台说明；`.gitignore` 删除 `/yh_asm`、`/yh_link`；
+  `compiler/cmd/link_cache.yh` 的 `mb_asm_tool` 注释改为通用外部汇编器
+  （`YH_LINK` 扩展点保留）；`tests/selfhost/link-cache.py` 删除同目录
+  `yh_link` 探测；`docs/todo.md` 删除 asm/link 待办与 R4/R5；ADR-0014 追加
+  删除决定。历史完成记录（`docs/01-finished/`）保留当时事实，其中指向已删除
+  方案/设计文档的链接不再解析。
+- **验证**：`make -n` 解析通过；legacy 冷编成功
+  （`python3 tools/seed-build.py --compiler bin/yh-darwin-arm64 --project compiler
+  --output yh --backend legacy`）；`tests/yh/check.py --compiler` 78/78 正例、
+  42/42 反例；`tests/yh-run/check.py --backend legacy` 通过 348/349（1 个
+  Linux 专属跳过）；`tests/modules/check.py --backend legacy` 18/18；
+  `tests/selfhost/link-cache.py` 经 legacy 包装器通过（对象/链接缓存边界正常）。
+  默认 LLVM 构建仍受种子硬编码
+  `/Users/lavender/.codex/worktrees/...` 与缺 `-lc++` 阻塞，属既有 todo 项，
+  与本次删除无关。

@@ -270,7 +270,7 @@ F2-0 目标/SDK契约 → F2-1 静态SDK与桥 → F2-2 对象发射 → F2-3 �
 - [x] 从现有 Darwin 种子 legacy 编 A（含真实桥），A 的 LLVM O0/O2 分别编 B，
   B 编 C、C 编 D；冻结配置保存各代 checked/emitted/rejected/fallback。
 - [x] 同 profile 的 B/C/D 输出 `.ll/.s.i/.s.ct` 精确固定点；D 自解析与全量语法、
-  运行、模块、项目以及 compiler/asm/link/libs 消费者通过，fallback=0。
+  运行、模块、项目以及 compiler/libs 消费者通过，fallback=0。
 - [x] 增加无系统 LLVM 工具/动态库测试：隔离 PATH、审计真实子进程、otool 导入；
   自举所需固定静态归档与 Apple SDK 可作为输入，但不能调用 SDK 的 LLVM 工具。
 - [ ] 在 macos-14 原生执行候选，检查实际运行下限；本机 SDK27/系统27 结果单独记录。

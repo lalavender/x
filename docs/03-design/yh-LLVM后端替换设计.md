@@ -267,7 +267,7 @@ manifest 与旧内容的组合；补做缓存输入不会解决原有提交事�
 
 新增 checked_functions、lowered_functions、backend_emitted_functions、fallback_functions
 及稳定排序的拒绝原因。LLVM 模式的 fallback 永远为 0，未支持形态计入 rejected。
-语料和 compiler/、asm/、link/、libs/ 的全量实用覆盖分别记录，不拿一个小 fixture 的
+语料和 compiler/、libs/ 的全量实用覆盖分别记录，不拿一个小 fixture 的
 高覆盖率代替编译器自编覆盖。
 
 候选流程：

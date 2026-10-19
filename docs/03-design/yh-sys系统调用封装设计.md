@@ -2,9 +2,16 @@
 
 日期：2026-10-03。状态：**规划交付，尚未实现**。
 
+2026-10-19 修订：用户选择**标准库可用性优先**，新增
+[os/sys 联合设计](yh-os与sys标准库设计.md)与
+[联合实施方案](../02-plan/yh-os与sys标准库实施方案.md)。本文继续定义底层契约；
+应用交付改为先打通文件，再目录、环境、进程，编译器整体迁移独立排期。
+Linux/x64 已有 LLVM syscall 入口，文件筛选支持 OS/架构组合后缀；本地主门只
+要求本宿主，完整回归交 CI。工具链依赖按 ADR-0014 的现行 LLVM/lld 路线审计。
+
 实施与验收见[实施方案](../02-plan/yh-sys系统调用封装实施方案.md)，模块入口见
 [libs/sys](../../libs/sys/README.md)。本设计承接用户“用 yh 实现运行所需能力、
-脱离其他用户态依赖”的目标；首期沿用仓库 Linux/AArch64 优先的顺序。
+脱离其他用户态依赖”的目标；平台范围按本次修订与联合设计推进。
 
 ## 1. 目标、假设与取舍
 
@@ -13,8 +20,8 @@
 硬件、内核及程序显式读取的输入仍是运行条件。
 
 本轮假设：用户要求规划，并指定实现位置为 sys 标准库；不开始实现、不修改语法。
-首期只覆盖 Linux/arm64 LP64 小端，API 依据实际消费者需求冻结。macOS/arm64
-另行适配；x64 需编译器后端和架构选择就绪后立项。
+Linux LP64 小端目标按 ISA 分别适配；Linux/x64 按 LLVM 主线推进，保留现有
+Linux/arm64 路径。API 依据实际消费者需求冻结，macOS/arm64 后续适配。
 
 | 路线 | 取舍 | 决定 |
 | --- | --- | --- |
@@ -28,14 +35,14 @@
 
 | 事实 | 位置及影响 |
 | --- | --- |
-| `libs/sys/` 为空，清单已有 `[lib] sys` 预留项 | 实际模块由目录中的 `.yh` 发现，预留项不等于已有实现 |
+| `libs/sys/` 仅有 README，清单已有 `[lib] sys` 预留项 | 实际模块由目录中的 `.yh` 发现，预留项不等于已有实现 |
 | 标准库源码根为 `.`，无默认安装发现路径 | 应用当前需 `YH_STDLIB` 或显式项目依赖 |
 | Linux 已登记 `linux_syscall6` intrinsic | `compiler/gen/symbols.yh`；七个 u64 参数、返回 i64 |
-| intrinsic 直接发射 `svc #0`，也有函数值入口 | `compiler/gen/emit_arm64.yh`；不能改为外部 libc syscall 符号 |
-| Linux 目录与计时已有局部直接调用 | `compiler/cmd/project_dir.linux.yh`、`clock.linux.yh` |
+| ARM64 intrinsic 发射 `svc #0`，LLVM/x64 runtime 发射 `syscall` | `compiler/gen/emit_arm64.yh`、`compiler/backend/llvm_runtime.yh`；不能改为 libc syscall |
+| Linux 目录与计时已有局部直接调用 | `compiler/cmd/project_dir.linux.{arm64,x64}.yh`、`clock.linux.{arm64,x64}.yh` |
 | `os/io/time` 目前主要使用 prelude/宿主接口 | 迁移必须保留现有返回值及短写行为；time 尚为 Darwin 实现 |
 | 编译器还有文件、fork/exec/wait、睡眠等外部入口 | 仅迁移目录/计时不足以证明编译器独立 |
-| 文件筛选只有 `.linux.yh`、`.darwin.yh` | 不假设 `.arm64.yh` 或 `.x64.yh` 已可筛选 |
+| 文件筛选已有 OS/架构组合后缀 | `compiler/cmd/project_index.yh` 的 pj_source_target_match；已有 platformsource 用例 |
 
 编译器调用流程中的 HostPlatform 与输出 TargetSpec 必须分开：sys 描述生成这个
 程序的目标 ABI；运行中的编译器不能因正在输出另一个目标而切换自己的宿主 I/O。
@@ -44,7 +51,7 @@
 
 ```mermaid
 flowchart TD
-    APP[应用与工具链] --> HIGH[os / io / time]
+    APP[应用与工具链] --> HIGH[os / time；io 经 os]
     APP --> SYS[sys：类型化内核原语]
     HIGH --> SYS
     SYS --> RAW[linux_syscall6：编译器 intrinsic]
@@ -60,7 +67,7 @@ flowchart TD
 - `memory` 的分配头部与策略继续属于分配器。现有生成器发射的按需 malloc/free
   桩不能直接改成未绑定的标准库符号；先保留其自有 syscall 路径，审计结果必须
   同时覆盖这些桩和 sys。将来共享事实表时也不得引入 sys → 分配器的循环。
-- `_start`、入口栈解析、运行时初始化与静态 ELF 链接属于 TC4/TC6；sys 只提供
+- `_start`、入口栈解析、运行时初始化与静态 ELF 链接属于工具链与运行时；sys 只提供
   所需退出等原语。本模块完成不等于动态装载器已经移除。
 
 ## 4. 源码布局
@@ -72,7 +79,8 @@ flowchart TD
 libs/sys/
   README.md
   00_types.yh                 Timespec、错误判定与提取
-  10_constants.linux.yh       私有 NR_*、公开标志/错误号
+  10_constants.linux.arm64.yh ARM64 私有 NR_*、公开标志/错误号
+  10_constants.linux.x64.yh   x64 私有 NR_*、公开标志/错误号
   20_raw.linux.yh             raw6 → linux_syscall6
   30_file.linux.yh            文件与目录 syscall
   40_memory.linux.yh          mmap / munmap
@@ -81,8 +89,8 @@ libs/sys/
 ```
 
 后续 Darwin 对应文件使用 `.darwin.yh`，只补已经验证的接口；raw6 和 getdents64
-保留 Linux 专属。不会提供返回伪成功的跨平台空函数。现有 `os.platform/arch` 空
-函数是独立问题，本任务不顺手修改。
+保留 Linux 专属。不会提供返回伪成功的跨平台空函数。现有 os.platform/arch
+已经实现，沿用现状；调用号与架构相关标志分别维护，不在两个 ISA 间复制数值。
 
 文件长度按职责控制，不为凑到 500 行堆代码。每个公开类型、字段和函数用中文
 说明单位、成功/错误结果、指针生命周期、修改的缓冲区及平台限制。
@@ -92,7 +100,7 @@ libs/sys/
 拟公开入口：
 
 ```yh
-// Linux/arm64 原始入口；调用方提供六个机器字，未用参数填零。
+// Linux 当前目标原始入口；调用方提供六个机器字，未用参数填零。
 // 指针转 u64，负数按二补码转 u64；返回寄存器原始值，不读取 errno。
 pub fn raw6(number u64, a0 u64, a1 u64, a2 u64,
             a3 u64, a4 u64, a5 u64) i64;
@@ -107,7 +115,10 @@ pub fn error_code(value i64) int;
 上面是 API 规格，普通 yh 函数实现必须带函数体，不能把这些无体规格作为源码。
 
 Linux/arm64 使用 `svc #0`，调用号使用 x8 的低 32 位，参数放 x0–x5，结果取 x0；复用已有
-intrinsic，不增加新语法。调用具有 I/O、内存和进程副作用，SSA/优化器不得删除、
+intrinsic，不增加新语法。Linux/x64 复用 LLVM runtime 的 syscall 入口；编号与
+传参按 x64 单独验收，来源为
+[Linux x64 表](https://github.com/torvalds/linux/blob/v6.12/arch/x86/entry/syscalls/syscall_64.tbl)。
+调用具有 I/O、内存和进程副作用，SSA/优化器不得删除、
 随意移动或作为纯函数合并。寄存器与 ABI 依据 [Linux syscall 文档](https://man7.org/linux/man-pages/man2/syscall.2.html)。
 
 所有具名原语除退出函数外返回 i64：成功是内核的字节数、fd、PID、地址位型或零；
@@ -153,8 +164,14 @@ sys 每次只执行一次 syscall，不处理短读写、不做 EINTR 重试。�
 | `exit_thread(code int) void` | exit 93 | 结束调用线程；不做语言清理 |
 | `exit_process(code int) void` | exit_group 94 | 结束线程组；不做语言清理 |
 
+以上调用号列仅适用于 Linux/arm64，不能作为 x64 的实现表。2026-10-19 为 os
+目录/进程需求追加 `get_cwd(buffer *char, capacity u64) i64`、
+`change_dir(path *char) i64`、`create_pipe(output *int, flags int) i64`；
+分别映射目标 getcwd/chdir/pipe2。pipe 输出为两个连续 int，成功才读取；
+os.spawn 的执行失败握手使用 O_CLOEXEC。新增能力分期见联合设计。
+
 公开标志只覆盖已用场景：AT_FDCWD、AT_REMOVEDIR、O_RDONLY/O_WRONLY/O_RDWR、
-O_CREAT/O_EXCL/O_TRUNC/O_DIRECTORY/O_CLOEXEC、PROT_READ/PROT_WRITE、
+O_CREAT/O_EXCL/O_TRUNC/O_APPEND/O_DIRECTORY/O_CLOEXEC、PROT_READ/PROT_WRITE、
 MAP_PRIVATE/MAP_ANONYMOUS、CLOCK_MONOTONIC/CLOCK_REALTIME、WNOHANG、
 SIGCHLD/SIGTERM、FD_CLOEXEC。NR_* 和 F_GETFD 留作私有实现常量。
 
@@ -213,26 +230,28 @@ exit_thread 与 exit_process 区分线程和进程。退出函数以已有 noret
 
 | 消费者 | 迁移与保留的契约 |
 | --- | --- |
-| `libs/os` | Linux 文件操作使用 sys；fd/PID 检查后窄化，错误仍转为原有 -1 |
-| `libs/io` | write_all 仍循环短写；首期继续原有不自动 EINTR 重试的契约 |
+| `libs/os` | 新接口显式错误与 os 自有选项；旧接口保留 -1 和宿主标志，fd/PID 判错后窄化 |
+| `libs/io` | 经 os 复用单次写入；write_all 循环短写，保留原有不自动 EINTR 重试契约 |
 | `libs/time` | 改成平台文件，使用各自 CLOCK_MONOTONIC；保留失败 -1 |
 | 编译器目录/计时 | 复用 sys 和 Timespec；目录解析保留在消费者，不放入 raw 层 |
 | 编译器文件/进程与 worker | 按实际外部引用逐个替换，校验 wait/dup/exit 语义 |
 | 分配器与发射运行时 | 保持提供方一致，单独审计残余 OS 引用，不重复定义 malloc/free |
 
-现有 os API 不是 sys API 的别名：sys 保留错误细节，os 维持当前简化返回值。
+现有 os API 不是 sys API 的别名：sys 保留错误细节，os 旧接口维持简化返回值，
+新接口提供带错误的结果结构。
 删除局部 syscall 常量和结构只能发生在其消费者已经成功迁移后。
 
 旧 prelude 的 open/read/write 等仍是另一条调用入口，导入 sys 不会自动改写它们。
-独立程序首期显式使用 sys；旧语料需要的兼容 OS 桥由 TC6 按实际引用补齐，保持
+独立程序首期显式使用 sys；旧语料需要的兼容 OS 桥由运行时迁移按实际引用补齐，保持
 旧返回约定。盘点同时覆盖 gen/buffer 中的编译器 I/O、发射运行时和用户 prelude，
 不能只替换 cmd 的调用就宣称所有原有程序已无 libc 依赖。
 
 ## 9. 平台、交付与独立性边界
 
-Linux 首期不产生外部 libc syscall/errno/文件/时间/进程引用；使用系统链接器
-做开发验证不等于最终自有工具链已完成。SYS6 与 TC4/TC5/TC6 联合验收：静态
-ELF 无 PT_INTERP、DT_NEEDED 和未解决强引用，并在独立环境中真实运行和自编。
+Linux sys 原语不产生外部 libc syscall/errno/文件/时间/进程引用。SYS6 对普通
+syscall 产物验收静态 ELF 无 PT_INTERP、DT_NEEDED 和未解决强引用，并在独立
+环境真实运行；编译器另按 ADR-0014 审计 LLVM/lld/SDK 的实际依赖并验收自举。
+不把自研 asm/link 完成作为库可用的必要条件，也不把两类产物合并宣称无依赖。
 
 应用加载仍遵守现有标准库规则。编译器和 link 项目若采用 sys，分别通过显式
 依赖定位源码，不依赖用户设置 YH_STDLIB。标准库的默认安装发现布局另行规划，
@@ -258,5 +277,5 @@ Darwin 不使用 Linux raw6/getdents64，不承诺摆脱 dyld/libSystem，也不
 - 不修改语言语法；若实际发现需新增语法，另起设计并先更新 docs/yh.g4。
 
 网络、DNS、stat 全结构、通用 ioctl/fcntl、共享库装载、线程/TLS/futex、信号处理器
-与恢复 trampoline、完整 libc/stdio、GC/异常、其他 ISA 均不作为首期前置。
+与恢复 trampoline、完整 libc/stdio、GC/异常、尚未接入的 ISA 均不作为首期前置。
 新增接口只由实际消费者或验收场景驱动，不为了覆盖 syscall 表机械生成几百个函数。

@@ -6,111 +6,64 @@
 
 ## 待办
 
-### yh-asm 与 yh-link（2026-10-02 规划；2026-10-03 起在 link/ 独立项目实施）
+### 字符串字面量只读化（2026-10-20 性能对比时发现）
 
-平台与架构矩阵（Linux/macOS × arm64/x64）的顺序、门槛与依赖见
-[平台与架构矩阵方案](02-plan/yh-link平台与架构矩阵方案.md)。要点：
-Linux/arm64 已在推进；macOS/arm64 要写第二个对象写出器（出口增量，解析与
-编码全复用，验收用宿主 Xcode 的 `ld64` 不用容器）；**x64 必须先有编译器后端**
-（`compiler/backend/` 目前只有 `arm64.yh`），否则 x64 汇编器是没有输入方的死
-代码，这一条待用户确认再动。
+yh 产物的 Mach-O 比 clang 多一个 `__DATA` 段（多占 16 KB 页），实测归属：
 
-用户确认 **Linux/AArch64 优先，随后 macOS/arm64**。完整
-[设计](03-design/yh-asm与yh-link设计.md)与
-[分期实施方案](02-plan/yh-asm与yh-link实施方案.md)细化现有 R4/R5。
-2026-10-03 起按用户决定独立立项，工具链在仓库根分**两个独立项目**：
+| 变体 | `__cstring`（只读） | `__data`（可写） |
+| --- | ---: | ---: |
+| yh（LLVM / legacy 同） | 0 | **12** |
+| clang -O2 | 11 | 0 |
+| zig ReleaseFast | 12 | 856 |
 
-- **`asm/`（yh_asm，汇编器）**：汇编文本 → 可重定位对象（ELF64 `ET_REL` /
-  Mach-O `MH_OBJECT`）。TC1–TC3 + TC8 的实现在这里，见
-  [asm/README.md](../asm/README.md)。
-- **`link/`（yh_link，链接器）**：对象 → 可执行映像（静态 ELF、Mach-O
-  装载、签名）。**TC4（Linux/AArch64 静态 ELF）已于 2026-10-13 完成**，
-  见 [link/README.md](../link/README.md) 与
-  [设计](03-design/yh-link静态ELF链接器设计.md)；TC9/TC10 未实施。
+- **机制**：`compiler/gen/emit_arm64.yh:24-25` 的输出组织只有
+  `.text` / `.data` / `.bss` 三个缓冲，「全局初始化与字符串进入 `o_dat`（.data 段）」；
+  `em_data_string`（同文件 1074 行）把字面量解码成 `.byte` 写进 `.data`，
+  **没有独立的只读数据缓冲**。Mach-O 段按 16 KB 页对齐 → 多占整整一页。
+- **语义根因**：yh 的字符串字面量**可写**（实测 `*p = 65` 合法，输出 `Aello`），
+  与 C 的 `char[]` 一致；而 clang/Zig/Rust 的字面量不可变，放只读 `__TEXT.__cstring`，
+  与代码同段、不额外占段、该页也不 dirty。LLVM 后端与 legacy 布局一致，
+  说明这是 **IR 层的建模决定**（字面量按可写全局变量建模），不是后端实现问题。
+- [ ] **评估「只读字符串常量」方案**：字面量本身放只读段（`__TEXT.__cstring`），
+  需要可写副本时走显式复制（`let s = [N]u8 = "hello";` 这类已有语法）。
+  收益：省掉一整个 16 KB 可写段、字符串页只读可与代码页共享。
+  代价：**语义变更**（字面量改为不可变），需评估对现有语料与
+  `tests/yh-run/` 中字符串相关用例的影响。
 
-两者**互不依赖、互不 import**，只通过标准对象文件交接；验收门分别是
-`python3 asm/tests/check.py` 与 `python3 link/tests/check.py`。
-2026-10-07 目录整理把原先寄放在 `link/` 里的汇编器实现整体迁到 `asm/`，
-按职责归位（记录见
-[归位记录](01-finished/yh汇编器与链接器项目归位-2026-10-07.md)）。
+### Darwin 自举链接的桥注入阻塞（2026-10-20 性能对比时发现）
 
-**2026-10-12：汇编器 `asm/`（yh_asm）稳定化 ASM-0–ASM-8 已完成并断电**（方案
-[yh-asm 汇编器稳定化实施方案](02-plan/yh-asm汇编器稳定化实施方案.md)、完成记录
-[yh-asm 稳定化](01-finished/yh-asm稳定化-2026-10-12.md)）：`-t linux` 接受
-编译器 GNU 方言、8 个模块原文汇编并与 clang 逐节/逐重定位一致、拒绝层与诊断门
-就位、链接运行差分 159/0/10、影子验收固定点 0 不一致、Darwin 输出由字节快照守住。
-剩余的未完成事项与明确的边界：
+拉取 0.0.5（F2-10，macOS/ARM64 默认切 LLVM）后，**`make` 在本工作区自举失败**：
 
-- [ ] **接入编译器（未开工，2026-10-12 决定）**：`compiler/cmd/link_cache.yh` 的
-  `mb_asm_tool` 仍按 `yh_link`（及 `YH_LINK`）查找、按 `asm` 子命令调用。
-  **2026-10-12 已断电**：`make yh-link` 过渡别名与根目录入库的 `yh_asm`/`yh_link`
-  副本删除并进 `.gitignore`，编译器因此查不到、回落 `clang`/`gcc`（WSL/Linux 上
-  不再需要 `YH_LINK=/nonexistent` 绕过）。重新接入（查找名切到 `yh_asm`/`YH_ASM`、
-  产物与安装布局、缓存键纳入工具版本、默认切换、滚种子）待稳定判据 S1–S7
-  全过后另立。
-- [ ] **长条件分支放宽（明确不做）**：`b.cond`/`cbz`/`cbnz` 距离 ±256 KB，
-  越界报诊断；编译器最大模块 `.text` 已 413 KB（8 个模块实测 35–413 KB）但
-  没有出现越界的条件分支（本工具与 clang 都能汇编）。真出现时再评估放宽。
-- [ ] **`.size` 的符号表达式（明确不做）**：契约 v2 已按实测收窄为「只接受纯
-  数字」；编译器语料里没有 `.size`，出现真实消费者时再设计。
-- [x] **寄存器同名符号（编译器侧缺陷，2026-10-13 已修）**：用户函数/全局名
-  `w12`、`x0`、`lr` 等与寄存器同名时，编译器曾原样发射 `bl w12`（clang 的
-  集成汇编器拒绝、GNU as 容忍）。现在这类符号的**最终汇编名**追加 `__yhreg`
-  后缀（`.text`/`.data`/`.bss` 与所有引用位置共用判据，模块后缀与 Darwin `_`
-  前缀已经避让的不动）。`tests/yh-run/run/182-register-named-symbols.yh` 用
-  新增的 `asm-symbols-safe` 指令守住；`14-many-args` 等语料不再依赖放宽。
-- [ ] **macOS 原生 macho 两门未验证**：本轮环境只有 Linux，
-  `macho_corpus_check.py` / `macho_link_run.py` 未执行；Darwin 输出目前只由
-  `asm/tests/darwin-snapshot.txt`（9 个文件的字节快照）守住不回退。
-- [ ] **性能（待原生数据）**：同一批编译器模块语料（8.98 MB）clang 5.52 s vs
-  yh_asm 41.18 s；WSL 上 yh_asm 走 qemu 模拟（自建基准实测模拟因子 2.2–3.0×），
-  折算原生 arm64 约 2.5–3.5×。接入决策前需要原生 arm64 实测，再决定是否做
-  热路径优化。
-- [ ] **汇编 oracle 补验**：2026-10-14 已核对 WSL 的 llvm-mc/clang 等工具为 21.1.8，
-  原工具缺失项关闭；尚需用 llvm-mc 复跑汇编差分门，补“llvm-mc 与 clang 两条
-  oracle 都绿”的交叉证据。本轮 LLVM 方案交付没有重跑该门。
-- [ ] **TC3 容器链接门剩余：Darwin 方言语料的运行时桩**：容器差分门里 7 个语料
-  因 `__Exit`/`_strtoul`/`_open`/`_close`/`_abs` 在 `tests/elf/yhr.s` 没有桩而跳过，
-  另有 2 个语料因 `_mmap` 桩不全段错误（参照对象同样崩）。2026-10-12：ASM-4 已用
-  `tests/elf/yhr-linux.s` 在**原生门**补齐（159/0/10 全绿），容器门那一份
-  （Darwin 方言 `tests/elf/yhr.s`）仍未补。
-- [ ] **TC4 的剩余项（主体 2026-10-13 已完成）**：TC4 的静态 ELF 链接主体已
-  落地并通过验收（见 [finish.md](finish.md) 的 2026-10-13 记录与
-  [设计](03-design/yh-link静态ELF链接器设计.md)）。未完成的是：
-  - [x] **arm64 原生验证已并入 CI（2026-10-19）**：`ci.yml` 的 `linux-arm64`
-    作业在 `make selfhost-native` 后追加 `make yh-link-probe FULL=1`（check.py
-    自行冷编 link/ 与 asm/，arm64 容器即原生执行环境）。待 CI 首次运行确认后，
-    WSL/qemu 的「模拟通过」即正式提升为「CI 原生通过」。
-  - [ ] **长调用跳板**：分支超出 `imm19`/`imm26` 范围时首版直接报错，不生成
-    跳板；等出现真实需求（编译器大模块 + 远距离调用）再设计。
-  - [ ] **接入编译器**：见上一条「接入编译器」待办与
-    [实施方案 §6](02-plan/yh-link静态ELF链接器实施方案.md)。**前置第一步**是把
-    编译器的汇编器查找从 `yh_link` 改成 `yh_asm`——真链接器占用 `yh_link`
-    这个名字会直接破坏现有 `make`，本轮因此刻意只在 `link/.build/` 产出产物。
-  - [ ] **Mach-O 目标（TC9/TC10）**：`-t darwin` 目前显式报错；分段布局、
-    `LC_MAIN`、绑定流与 ad-hoc 签名未实施。
-  - [ ] **首版明确不支持**：TLS / 弱符号 / COMMON / 符号可见性 / 链接脚本 /
-    归档库（`.a`）/ 动态链接 / PIE；遇到即报诊断而不是静默算错。
-  - [ ] **映射符号（`$x`/`$d`）不进输出符号表**：反汇编器看到的符号名会少
-    这些标注；不影响运行，如需保留另立任务。
-- [ ] **TC5**：单文件/项目内部调用、yh-asm/yh-link 入口、缓存身份与事务发布。
-- [ ] **TC6**：Linux 宿主 OS 桥、原生种子、独立环境与连续自编固定点。
-- [ ] **TC7**：有限 C 对象、普通 ar 读写/惰性提取与 libc 静态库交付；不阻挡显式对象闭环。
-- [ ] **TC9**：Mach-O 可执行文件链接器——分段布局、符号解析、`LC_MAIN` 入口、
-  `LC_LOAD_DYLIB` + 普通绑定流（不用 stub 与惰性绑定）。这是替换编译器**最终
-  链接步**（`driver.yh` 的 `clang -o`）的必经之路。
-  [设计](03-design/yh-link Mach-O可执行文件链接器设计.md)
-- [ ] **TC10**：ad-hoc 代码签名（`LC_CODE_SIGNATURE` + SuperBlob +
-  CodeDirectory，SHA-256 页哈希）。arm64 macOS 拒绝未签名的可执行文件，硬要求。
-  SHA-256 曾实现于旧 link 项目的 `src/ln/10_sha256.yh`（6 个向量对着
-  `shasum -a 256` 核过），但当时无生产调用点；2026-10-07 目录整理随该模块删除，
-  归档在 `tmp/removed-2026-10-07/link-src-ln/`，动工时按需取回或重建。
-  签名布局已从 `ld` 产物逐字段实测进设计文档 §5。
-  TC9 骨架先把签名做掉才能验证（dyld 见未签名直接杀进程），绑定流随后接。
-- [ ] **TC11**：`driver.yh` 最终链接步切成 `yh_link link`，`make install` 一并
-  安装 `yh_link`，主门验证自举。chained fixups 可选迁移（dyld 仍支持绑定流）。
+```
+ld64.lld: error: library not found for -lc++
+ld64.lld: error: undefined symbol: __ZdlPv
+>>> referenced by .../llvm-host-darwin-aarch64/libyh-llvm-bridge.a(lld_bridge.o)
+```
 
-### 编译器已知缺陷（2026-10-13 全部处理完毕）
+- **根因**：入库种子 `bin/yh-darwin-arm64` **硬编码了 73 处构建机的绝对路径**
+  （`/Users/lavender/.codex/worktrees/macos-llvm/x/tmp/llvm-migration/...`，
+  含桥归档与 LLVM 静态库清单）。证据：
+  `strings -a bin/yh-darwin-arm64 | grep -c "codex/worktrees"` = 73，
+  而 0.0.4 的 legacy 产物为 0。自举时
+  `compiler/cmd/link_cache.yh` 的 `mb_darwin_selfhost_enabled()`
+  （读 `YH_LLVM_SELFHOST=1`）把这些绝对路径喂给链接器，
+  于是在**任何其他路径下**都找不到对应归档；即便找到，那个 SDK 也缺 `-lc++`。
+- **已验证**：绕开桥注入后 0.0.5 编译器本体**构建成功**（1,956,384 B）：
+  `cd compiler && YH_LLVM_SELFHOST=0 ../bin/yh-darwin-arm64 build -o ../yh-legacy`；
+  且该产物跑 `--backend llvm` 明确报「内嵌 LLVM 桥未链接」，
+  印证桥是 LLVM 后端的前提。阻塞**只在桥注入路径**。
+- **影响**：不影响用已入库种子做编译与性能对比；但**影响在仓库内继续自举
+  0.0.5 之后的代**（见 finish.md 2026-10-20 条目）。
+
+- [ ] **把自举闭包路径从编译期常量改为运行时解析**（相对项目根 / 读 `host.json` /
+  环境变量覆盖），使入库种子可在任意路径下自举；顺带解决多 worktree 并行时
+  互相引用对方 SDK 缓存的问题。
+- [ ] **补 `-lc++` 到 Darwin 自举链接参数**（错误信息 `library not found for -lc++`），
+  并核对固定 SDK stub 是否带齐 libc++。
+- [ ] **补一条门禁**：入库种子不应包含构建机绝对路径（可用
+  `strings -a <seed> | grep -c "$HOME"` 之类断言），避免同类问题再次随种子入库。
+
+
 
 原「编译器已知缺陷（待修复）」清单 11 项已全部修复或复核为现行种子/编译器
 不再复现，逐项复现、根因、修法与用例见
@@ -129,15 +82,6 @@ clock_gettime 公共登记、libsbase fixture 平台化、CRLF 规范化），
 runtime-memory/lex-stats/scratch-isolation）在 WSL 全绿。重建与验证
 路径见 [WSL 种子链记录](01-finished/yh-WSL重建Linux-aarch64自举种子-2026-10-09.md)。
 
-- [ ] **yh_link 的 ELF64 方言要求 `sym@PAGE`，编译器 GNU 方言发 `:lo12:sym`**：
-  模块汇编步一旦命中 `yh_link`（`argv0` 同目录或 PATH 上），绝对寻址的
-  `adrp xN, sym` 就报「adrp 需要 sym@PAGE，adr 需要符号或数字」（编译器
-  的 GNU 方言按 `adrp xN, sym` + `add xN, xN, :lo12:sym` 发射，GNU as 两者
-  都接受，yc_link 的 ELF64 模式不受 `:lo12:`）。macOS 上 yh_link 走 `-t
-  darwin` 方言与发射一致，Linux 上从未让 yh_link 参战，故未暴露。
-  绕过：`YH_LINK=/nonexistent` 强制回落 gcc（WSL 全套门禁即按此通过）。
-  修法二选一：编译器 GNU 方言也发 `@PAGE/@PAGEOFF`（GNU as 接受），或
-  yh_link 的 ELF64 模式接受 `:lo12:` 与裸符号。
 - [ ] **本机 ANTLR 参考语法门需要 Java + antlr4 工具 jar**：`tests/yh/check.py`
   默认模式在无 `~/.m2/.../antlr4-*-complete.jar` 时报「找不到本地 ANTLR jar
   缓存」；jar 需从 Maven Central 下载（antlr4-tools 的自动下载走 GitHub
@@ -162,10 +106,18 @@ runtime-memory/lex-stats/scratch-isolation）在 WSL 全绿。重建与验证
 
 ### 标准库
 
-- [ ] **SYS0–SYS6：`libs/sys` 系统调用封装**：Linux/arm64 先实现直接 syscall、
-  `-errno` 结果、文件/目录、内存/时间和进程原语，再迁移上层库与编译器消费者、
-  验收静态 ELF 和连续自编；**SYS7** 后续增加 Darwin OS 接口适配。
-  本轮仅交付规划，API/文件与门禁见
+- [ ] **OS0–OS6：os/sys 标准库可用性优先**（2026-10-19 规划）：结果/选项 ABI →
+  文件闭环 → 流式目录/cwd → 显式 envp 查询 → 精确路径 spawn/wait/exit →
+  io/time 收敛 → 加载/示例体验；旧 os/io/time 接口保持兼容。
+  sys 按场景交付最小子集，Linux/x64 与 ARM64 分别适配，不等待编译器整体迁移。
+  **OS7** 编译器迁移/独立性审计、**OS8** Darwin 新接口另列后续。
+  当前仅有规划，阶段均未实施；见[联合设计](03-design/yh-os与sys标准库设计.md)、
+  [联合实施方案](02-plan/yh-os与sys标准库实施方案.md)与
+  [提议 ADR-0015](adr/0015-yh-os与sys标准库分层.md)。
+- [ ] **SYS0–SYS7：`libs/sys` 底层能力清单**：保留原始入口、`-errno`、文件/目录、
+  内存/时间和进程原语；排期由 OS 阶段按需取子集，消费者迁移/独立性与 Darwin
+  桥后续交付。2026-10-19 已修正 x64 入口及 OS/架构后缀的过时描述，尚无实现。
+  API/文件与门禁见
   [设计](03-design/yh-sys系统调用封装设计.md)、
   [实施方案](02-plan/yh-sys系统调用封装实施方案.md)与
   [模块入口](../libs/sys/README.md)。
@@ -259,7 +211,7 @@ check/IR 缓存 → RS3 文件级对象 → RS4 缓存键收口 → RS5 提交�
     743.5/817.8ms、冷编 2203.0/2765.1ms（中位数/p95）；无改动 50ms
     中位数目标已达标，单函数 200ms 与冷编 1s 目标未达。单函数修改仍
     重新汇编整个所属模块且以外部汇编器为主；完整函数级 check/IR、
-    文件对象与自有汇编/链接器是主要后续工作。
+    文件对象是主要后续工作。
 - [ ] **R3**：自有运行时与显式 OS API；独立配置取消隐式 system，
   旧行为只在过渡兼容配置保留。
   - [ ] R3 剩余（依赖宿主线程桥，与 R2c 交错）：
@@ -269,10 +221,6 @@ check/IR 缓存 → RS3 文件级对象 → RS4 缓存键收口 → RS5 提交�
     Darwin 走审核的 libSystem、Linux 走 clone syscall）→
     完整 OS 导入清单审计（`nm -u` 允许清单核对）后再验收 R3。
     汇编器/链接器仍通过显式 argv 调用系统工具。
-- [ ] **R4**：Linux arm64 自有汇编子集、静态 ELF 链接与连续自编闭环；
-  细化为 [yh-asm/yh-link TC0–TC6](02-plan/yh-asm与yh-link实施方案.md)。
-- [ ] **R5**：macOS arm64 自有 Mach-O 工具链，披露 dyld/libSystem 并
-  按 OS API 清单验收；细化为同方案 TC8–TC10。
 - [ ] **R6**：扩展 x64 与 Windows，各目标分别完成运行/自举/性能验收。
 
 ### MOD-U6：远程获取、版本、锁文件、工作区
@@ -482,8 +430,8 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   - [x] 完整门：最终 D 自解析 98/98；LLVM O0/O2 各通过 343/343、模块 18/18、项目 104/104；
     LL9L、缓存、驱动与 runtime-memory 专项通过。`make test-llvm` 与 `make selfhost-llvm` 均退出 0。
     详细日志在 `tmp/ll10/make-test-llvm-after-fix.log`、`tmp/ll10/selfhost-llvm-after-fix.log`。
-  - [x] 实际消费覆盖：`asm/` 4 模块 checked/emitted 298/298、`link/` 6 模块 197/197，均
-    fallback=0；`libs/` 由 stdlib 项目验收覆盖。R2b 线程池/任务私有状态仍单独记录在编译流程待办中，
+  - [x] 实际消费覆盖：`libs/` 由 stdlib 项目验收覆盖；独立项目 `asm/`、`link/`
+    已于 2026-10-20 删除。R2b 线程池/任务私有状态仍单独记录在编译流程待办中，
     LL11 默认切换不得越过该硬门。
   - [x] LL10 前置 LLVM x64 全量语料差异：runner O0/O2 均通过 335/335；随后新增无限循环返回回归，
     收尾全门当前为 343/343。修复覆盖聚合返回值、编译期边界、切片存储生命周期、数组到切片视图及诊断预期；

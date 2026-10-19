@@ -598,7 +598,7 @@ yh 侧组装 `ld.lld` 风格 argv 与有界诊断缓冲，shim 调 `lld::lldMain
   Windows 导入库不在本片；探针通过不代表 macOS/Windows 生产支持，接入条件留给 F2/F3。
 - [x] **L9L-5 政策与文档**：ADR-0014、设计 §3.2/§7、实施方案与完成记录已同步内嵌
   lld 的平台范围、一次性 worker、固定 SDK、许可和回落政策；
-  不删除 gcc 回落路径，也不改写 asm/ 冻结与 link/ 暂停的结论。
+  不删除 gcc 回落路径；asm/、link/ 已于 2026-10-20 按用户决定删除。
 - [x] **L9L-6 LL10 汇合**：2026-10-18 `make selfhost-llvm` 生成 Linux/x86_64 ELF machine=62
   的 A/B/C/D；B/C/D 自编未调用 gcc wrapper，D-O0/O2 内嵌 lld 身份均为 SDK 锁定的 21.1.8，
   `readelf -d` 未发现 LLVM/lld 动态依赖，O0/O2 的 B→C、C→D 各 24 个 `.ll/.s.i/.s.ct`
@@ -633,7 +633,8 @@ tests/selfhost/native-selfhost.py 与专项 runner、`.github/workflows/ci.yml`�
   固定点分别通过，每组 24 个 `.ll/.s.i/.s.ct` 逐字节一致。
 - [x] 用最终原生 D 自解析、全量语法/运行/模块/项目检查和 runtime/缓存/来源专项门；
   新模式的原生候选和程序不得由 qemu-aarch64 代执行。
-- [x] 核对 compiler/、asm/、link/、libs/ 实际消费能力全部覆盖，LLVM fallback=0；
+- [x] 核对 compiler/、libs/ 实际消费能力全部覆盖，LLVM fallback=0（asm/、link/ 已于
+  2026-10-20 删除，不再纳入覆盖）；
   对齐并记录 R2b 任务私有状态、真正线程池、增量/并发/确定性硬门的当前状态。R2b 独立实施项
   不由 LLVM 门结果代替，未关闭前继续阻挡 LL11 默认切换。
 - [x] CI 首期将 Linux/x86_64 原生作为新默认候选验收；已有 Linux/ARM64 和 macOS
@@ -645,8 +646,7 @@ O0/O2 的 `.ll/.s.i/.s.ct` 候选固定点、实际覆盖、所有运行门有�
 **2026-10-18 完成验收：**Linux/WSL x86_64 上，`make test-llvm` 与 `make selfhost-llvm`
 均退出 0。最终 D 自解析 98/98；O0/O2 分别通过语言 343/343、模块 18/18、项目 104/104；
 LL9L、项目缓存、驱动和 runtime-memory 专项通过。无限循环带条件返回的 lowering 已修正并由
-`tests/yh-run/run/203-llvm-infinite-loop-return.yh` 覆盖。`asm/` 4 模块 checked/emitted
-298/298、`link/` 6 模块 197/197，fallback=0；`libs/` 由标准库项目用例覆盖。种子
+`tests/yh-run/run/203-llvm-infinite-loop-return.yh` 覆盖。`libs/` 由标准库项目用例覆盖。种子
 `bin/yh-linux-arm64` SHA-256 为 `8ea2a9acc20438b385ccddd522b50b8dd4749423c8db2695c758296ada343b8c`；
 A/B/C/D 均为 ELF machine=62，O0/O2 B→C、C→D 的 24 个 `.ll/.s.i/.s.ct` 均逐字节一致。
 完整记录见 [LL10 完成记录](../01-finished/yh-LLVM-LL10-x64原生自举-2026-10-18.md)。
@@ -713,8 +713,8 @@ Linux/x86_64 与 Darwin/ARM64 均为默认 LLVM，Linux/ARM64 仍 legacy。性�
 代码阶段只刷新实际受影响的语法/语义/ABI/平台文档；如果确实修改语法，先更新并分析
 docs/yh.g4 的无歧义性，再按仓库语法流程推进。单纯后端替换不伪造语法变更。
 NP3 的受检/解耦与本计划合并跟踪；NP4 的自研机器 IR/分配器不作为 LLVM 路线前置；
-NP2/NP5 保留必要语言规范化，通用优化交 LLVM。旧自有汇编/链接任务的产品定位由 ADR 评审记录，
-不自动删除 asm/、link/ 项目，也不假称其平台门已完成。
+NP2/NP5 保留必要语言规范化，通用优化交 LLVM。旧自有汇编/链接任务的产品定位已由
+ADR-0014 记录；2026-10-20 用户决定完全删除 asm/、link/ 项目。
 
 当前状态：**2026-10-14 用户授权实施；已将外部 clang 路线改为内嵌静态 LLVM**。
 **2026-10-15：用户要求写入内嵌 lld 链接器，新增 LL9L 阶段；可行性已完成实测。**

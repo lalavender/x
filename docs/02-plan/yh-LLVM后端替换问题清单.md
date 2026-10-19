@@ -23,7 +23,7 @@
 | --- | --- | --- | --- | --- |
 | LLVM-01 | P0 / 待复现风险 | 除法、取模、移位、溢出、bool、浮点边界未形成跨执行路径契约；`gen/sem_expr.yh`、`ir/ssa.yh:935–974`、`backend/arm64.yh:226–255` | LL1 | 编译期、旧动态发射、SSA、LLVM O0/O2 的探针矩阵有结论；差异单独处理 |
 | LLVM-02 | P0 / 已确认缺口 | 语义/check 和 ARM64 发射交织，SSA 成功后仍替换旧汇编文本；`cmd/module_worker.yh:187–235`、`backend/arm64.yh:369` | LL2 | LLVM 路径不执行旧汇编预发射，不使用汇编区间替换 |
-| LLVM-03 | P0 / 已确认缺口 | typed SSA 只覆盖窄子集；`ast/ast_ir.yh:24`、`ast/ast_ir_build.yh`，历史自编基线为 991/22 | LL0、LL4–LL7 | 当前语料及 compiler/、asm/、link/、libs/ 实际消费的语言形态均覆盖；LLVM 回退数为 0 |
+| LLVM-03 | P0 / 已确认缺口 | typed SSA 只覆盖窄子集；`ast/ast_ir.yh:24`、`ast/ast_ir_build.yh`，历史自编基线为 991/22 | LL0、LL4–LL7 | 当前语料及 compiler/、libs/ 实际消费的语言形态均覆盖；LLVM 回退数为 0（asm/link 已于 2026-10-20 删除） |
 | LLVM-04 | P0 / 已确认缺口 | 函数 IR 缺少模块级全局、字符串、静态初始化及稳定逻辑符号交接；`ir/ssa.yh:90–138`、`parse/parse_global_init.yh` | LL2、LL3、LL5 | 模块函数和数据统一发 `.ll`；前向引用、聚合全局及重定位指针正确 |
 | LLVM-05 | P0 / 已确认缺口 | yh ABI、C ABI 与 ARM64 寄存器计划耦合；聚合副本与 x8 返回不能直接复制为跨目标 LLVM 签名；`gen/sem_decl.yh:29–118`、`gen/abi_c.yh` | LL1、LL7 | 按值、切片、HFA、大聚合、窄返回、变参和回调有明确映射与双向互调证据 |
 | LLVM-06 | P0 / 已确认缺口 | 目标身份仅近似 Linux/Darwin 方言；`c_dialect + 1`、`$if arm64` 固定为真、接口头 `arch=arm64`；qemu 下 uname 不能代表编译器进程 ABI | LL2 | 宿主/目标分开，缺省取编译器构建目标，完整 triple/layout/ABI 身份进入 check、IR、接口和缓存 |

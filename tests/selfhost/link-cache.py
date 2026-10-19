@@ -48,17 +48,13 @@ def main() -> int:
     parser.add_argument("--compiler-path", default=str(ROOT / "yh"))
     args = parser.parse_args()
     compiler = Path(args.compiler_path).resolve()
-    # 汇编步可以用系统 cc，也可以用自研 yh_link（编译器同目录下有就优先用）。
-    # 门要验证的是**缓存边界**，不是「用的是哪个汇编器」，所以两类都拦截、
-    # 统一按 assemble/link 两类计数。
+    # 汇编步用系统 cc；门要验证的是**缓存边界**，不是「用的是哪个汇编器」，
+    # 因此统一按 assemble/link 两类计数。
     real_tools = {name: shutil.which(name) for name in ("gcc", "clang")}
     real_tools = {name: path for name, path in real_tools.items() if path is not None}
     if not real_tools:
         print("找不到 gcc/clang，无法验证链接缓存")
         return 1
-    self_asm = compiler.parent / "yh_link"
-    if self_asm.exists():
-        real_tools["yh_link"] = str(self_asm)
 
     temp_root = ROOT / "tmp"
     temp_root.mkdir(exist_ok=True)

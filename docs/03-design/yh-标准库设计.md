@@ -71,8 +71,15 @@ YH_STDLIB=/path/to/yh/libs yh run
 | `process_id() int` | 返回当前进程号 |
 | `sleep_us(duration int) int` | 睡眠微秒数；负值返回 -1，其余返回宿主结果 |
 | `terminate(code int) void` | 用指定状态结束当前进程 |
+| `platform() *char` | 返回编译目标的平台名称，当前为 linux/darwin 或 unknown |
+| `arch() *char` | 返回编译目标架构名称，当前为 arm64/x64 或 unknown |
 
 这些函数沿用宿主接口的返回值和标志，不会把平台常量伪装成跨平台抽象。
+
+2026-10-19 新增 [os/sys 联合规划](yh-os与sys标准库设计.md)，用户选择标准库
+可用性优先：先交付文件闭环，再目录、显式 envp 查询及精确路径进程启动。
+拟议新接口使用 os 自有打开选项、具体结果结构和稳定错误分类；上表旧接口保留
+原有名字、宿主标志与 -1 约定。新接口**尚未实现**，不可按规划当作现有 API 使用。
 
 ### `math`
 
@@ -86,16 +93,18 @@ YH_STDLIB=/path/to/yh/libs yh run
 提供 `monotonic_ns() i64`，返回单调时钟纳秒数；底层调用失败返回 -1。当前实现
 使用 Darwin 的 `CLOCK_MONOTONIC` 编号与 `clock_gettime`。
 
-## sys（2026-10-03 规划，尚未实现）
+## sys（2026-10-03 规划，2026-10-19 修订，尚未实现）
 
 用户指定系统调用封装放在 `libs/sys/`；模块入口见
 [README](../../libs/sys/README.md)，完整契约与分期见
 [sys 设计](yh-sys系统调用封装设计.md)和
 [实施方案](../02-plan/yh-sys系统调用封装实施方案.md)。
 
-首期 Linux/arm64 复用 `linux_syscall6`，提供 raw6、显式错误结果及文件/目录、
-内存/时间、进程原语；sys 不分配、不自动重试，结果保留 `-errno`。后续
-os/io/time 消费 sys 并保留既有上层返回约定，编译器采用显式项目依赖。
+Linux/x64 与 Linux/arm64 按现有后端分别复用 `linux_syscall6`，提供 raw6、
+显式错误结果及文件/目录、内存/时间、进程原语；sys 不分配、不自动重试，结果
+保留 `-errno`。按[联合实施方案](../02-plan/yh-os与sys标准库实施方案.md)逐个场景
+交付 os 新接口，io/time 复用底层并保留旧契约；编译器整体迁移另列后续阶段，
+采用显式项目依赖。不把静态 ELF/编译器独立验收作为文件 API 可用的前置。
 macOS/arm64 后续适配审核的系统 OS API，披露 dyld/libSystem 依赖。
 
 当前该目录仅有规划 README，清单预留项不代表模块已可使用；未迁移本文已有 API。

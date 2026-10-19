@@ -177,7 +177,7 @@ SDK 身份由确定排序的内容清单生成，路径、版本或 mtime 均不
 Mac 原生 A→B→C→D 与交叉 A→B 后的 Mac B→C→D→E 分别保存源码、工具/SDK 身份、
 逐代覆盖与产物清单；O0/O2 分开，原生连续代 `.ll/.s.i/.s.ct` 精确固定点。
 不能硬编码当前模块/项目数量，按会话实际 manifest 发现完整集合。
-全量语法/运行/模块/项目与 compiler/asm/link/libs 消费者必须 fallback=0。
+全量语法/运行/模块/项目与 compiler/libs 消费者必须 fallback=0。
 
 新增 Darwin 专门门，不放松 Linux/x64 的 test-llvm。macos-14 CI 继续手动触发，
 增加 Darwin LLVM 原生门；Linux 交叉产物传到 Mac 作业运行，不把 Linux 出格式当作
