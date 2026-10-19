@@ -9,7 +9,9 @@
 - **x64 种子**：`bin/yh-linux-x64` + `.sha256`（`c6733eb2…`）已滚，冷编、
   单文件编译/运行通过；Makefile 对 `linux-x86_64` 自动 `export
   YH_LLVM_SELFHOST=1`，runtime-memory 走 `--llvm-x64`、缓存专项走
-  `llvm-cache`、scratch-isolation 降为 `--jobs 4`。
+  `llvm-cache`、scratch-isolation 降为 `--jobs 4`。种子 135MB 超过 GitHub
+  100MB 限制，**不入库**，由 Release `seed-llvm-x64-2026-10-19` 分发
+  （`yh-linux-x64` + `.sha256`）；`.gitignore` 已忽略并留下载说明。
 - **测试适配**：`native-selfhost.py` 支持 LLVM 模式快照（`--backend llvm
   --emit-llvm`、`llvm/<tag>.ll` 固定点）；`runtime-memory.py` 的 ARM64 汇编
   契约显式走 legacy；`check.py` 非 AArch64 跳过寄存器同名检查、编译超时
