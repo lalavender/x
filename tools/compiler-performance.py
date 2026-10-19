@@ -205,7 +205,7 @@ def verify_function_change(binary: Path, cwd: Path, changed: bool) -> None:
     if changed:
         if result.returncode == 0 or "未找到 project.toml" not in output:
             raise RuntimeError("变化后的函数体未改变编译器行为")
-    elif result.returncode != 0 or "yh 0.0.4" not in output:
+    elif result.returncode != 0 or "yh 0.0.5" not in output:
         raise RuntimeError("恢复原函数体后编译器行为未恢复")
 
 
