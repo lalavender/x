@@ -267,17 +267,31 @@ def write_shim(host: str, record: dict) -> Path:
     return path
 
 
+def split_passthrough(argv: list[str]) -> tuple[list[str], list[str]]:
+    """在第一个 `--` 处切分驱动参数与透传参数。
+
+    argparse 的 `--` 处理在部分 Python 版本/参数布局下会把分隔符留在
+    `nargs="*"` 中；C 源编译（`gcc -c`）会因此被当成链接参数拒绝。
+    """
+    argv = list(argv)
+    if "--" not in argv:
+        return argv, []
+    cut = argv.index("--")
+    return argv[:cut], argv[cut + 1:]
+
+
 def main(argv: list[str]) -> int:
     """解析子命令；所有子命令都以 JSON（或包装器执行结果）收尾。"""
+    head, passthrough = split_passthrough(argv)
     parser = argparse.ArgumentParser(description="内嵌静态 LLVM 宿主驱动")
     parser.add_argument("command", choices=("prepare", "status", "shim", "link"))
     parser.add_argument("--host", choices=HOSTS, required=True)
     parser.add_argument("--mode", choices=("auto", "require"), default="auto",
                         help="auto 只用本地已有的 SDK 包，require 允许联网补齐")
     parser.add_argument("tail", nargs="*", help="link 子命令透传的编译器参数")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(head)
     if args.command == "link":
-        return command_link(args.host, args.tail)
+        return command_link(args.host, list(args.tail) + passthrough)
     if args.command == "status":
         # status 是纯离线查询：只报告现状，不准备、不联网，便于门禁与排查。
         problems = check(args.host)

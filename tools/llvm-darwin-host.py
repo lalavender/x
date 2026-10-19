@@ -460,17 +460,27 @@ def command_link(argv):
     os.execv(record["toolchain"]["clangxx"], [record["toolchain"]["clangxx"], *command])
 
 
+def split_passthrough(argv):
+    """在第一个 `--` 处切分驱动参数与透传参数（兼容不同 Python 的 argparse）。"""
+    argv = list(argv)
+    if "--" not in argv:
+        return argv, []
+    cut = argv.index("--")
+    return argv[:cut], argv[cut + 1:]
+
+
 def main(argv):
     """提供 prepare/status/shim/link 四种 Makefile 与 seed-build 操作。"""
+    head, passthrough = split_passthrough(argv)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("prepare", "status", "shim", "link"))
     parser.add_argument("--host", choices=(HOST,), default=HOST)
     parser.add_argument("--mode", choices=("auto", "require"), default="auto")
     parser.add_argument("--jobs", type=int, default=int(os.environ.get("LLVM_JOBS", "2")))
     parser.add_argument("tail", nargs="*", help="传给 Apple clang 的原始调用参数")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(head)
     if args.command == "link":
-        command_link(args.tail)
+        command_link(list(args.tail) + passthrough)
     if args.command == "status":
         problems = check(full=True)
         if problems:
