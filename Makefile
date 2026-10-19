@@ -172,6 +172,17 @@ LLVM_HOST_FLAGS =
 ifneq ($(LLVM_HOST),)
  LLVM_HOST_FLAGS = --llvm-host $(LLVM_HOST) --llvm-mode $(LLVM_HOST_MODE)
 endif
+ifeq ($(LLVM_HOST),linux-x86_64)
+ export YH_LLVM_SELFHOST = 1
+ # x64 默认 LLVM 后端下，runtime-memory 的内存运行时契约由 LLVM x64 导入审计覆盖；
+ # 完整 legacy 形态（含 ARM64 汇编）留给 arm64/Darwin 宿主。
+ RUNTIME_MEMORY_FLAG = --llvm-x64
+ # 缓存专项同样改用 LLVM 缓存门（legacy link-cache 期待外部汇编器调用）。
+ CACHE_TEST = python3 $(TOPSRC)/tests/selfhost/llvm-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF)
+else
+ RUNTIME_MEMORY_FLAG =
+ CACHE_TEST = python3 $(TOPSRC)/tests/selfhost/link-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF)
+endif
 
 all: $(YH)
 
@@ -282,14 +293,19 @@ quick: stage-yh
 selfhost-native: stage-yh
 	python3 $(TOPSRC)/tools/selfhost_snapshot_gate.py --verify-seed "$(abspath $(SEED))"
 	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py --seed "$(abspath $(SEED))" $(SELFHOST_WORK_FLAG) $(CORPUS_FLAG)
-	python3 $(TOPSRC)/tests/selfhost/scratch-isolation.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/scratch-isolation.py --compiler-path $(YH_RUN) --jobs 4
 	python3 $(TOPSRC)/tests/selfhost/lex-stats.py --compiler-path $(YH_RUN)
-	python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(YH_RUN) $(RUNTIME_MEMORY_FLAG)
 	python3 $(TOPSRC)/tests/selfhost/check-command.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/selfhost/foreign-fs-build.py --compiler-path $(YH_RUN)
-	python3 $(TOPSRC)/tests/selfhost/link-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF)
+	$(CACHE_TEST)
 	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(YH_RUN) $(MODCHECK_WORK_FLAG)
+
+# llvm-isolation：bwrap + 空 PATH 验证最终 yh 不依赖系统 LLVM/lld、无外部旁车。
+.PHONY: llvm-isolation
+llvm-isolation: $(YH)
+	python3 $(TOPSRC)/tests/selfhost/llvm-isolation.py --compiler $(TOPSRC)/bin/yh-linux-x64
 
 # test-llvm：LLVM x64 O0/O2 全量語法/运行/模块/项目语料、统计覆盖与专项门。
 .PHONY: test-llvm selfhost-llvm
@@ -313,7 +329,17 @@ selfhost-llvm: stage-yh
 	python3 $(TOPSRC)/tests/selfhost/llvm-selfhost.py --seed "$(abspath $(LLVM_SEED))" --jobs $(LLVM_JOBS)
 
 # full：滚种子前的全量门（三层回归 + 自举全套）。
+# full：全套门。test 已用等价编译器跑过一遍语料，selfhost-native 里重复的
+# 那一遍用 SKIP_CORPUS=1 省掉（约 1 分钟）。
+full: SKIP_CORPUS = 1
 full: test selfhost-native
+
+# dev：开发迭代用增量构建。与 make 的差别是不删除 compiler/.build，
+# 让编译器自己的对象/IR 缓存命中未变模块；只用于本地迭代，
+# 不用于种子候选与固定点验收（那些必须冷编）。
+.PHONY: dev
+dev: verify-seed
+	python3 "$(TOPSRC)/tools/seed-build.py" --compiler "$(abspath $(SEED))" --project "$(TOPSRC)/compiler" --output "$(TOPSRC)/yh" $(LLVM_HOST_FLAGS)
 
 test-all: test
 

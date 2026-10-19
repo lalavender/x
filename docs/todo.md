@@ -502,6 +502,16 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   180 分钟超时是否匹配。
 - [ ] **LL11 x64 性能与默认切换**：至少 20 轮对照，原生默认全门绿后滚独立 `bin/yh-linux-x64` 与哈希；
   ARM64 种子不被覆盖，工具依赖与发行说明同步。
+  - [x] **默认切换与 x64 种子（2026-10-19）**：Linux/x86_64 宿主默认 LLVM
+    后端（`compiler/gen/state.yh`）；`bin/yh-linux-x64`（`c6733eb2…`）已滚；
+    冷编、单文件运行与 `make test` 分段验证通过；Makefile 对 x64 自动
+    `YH_LLVM_SELFHOST=1` 并切换缓存/运行时专项门。
+  - [x] **隔离环境验证（2026-10-19）**：`make llvm-isolation` 在 bwrap +
+    `PATH=/nonexistent` 下通过：无 LLVM/lld 动态依赖、execve 无外部 LLVM 旁车、
+    冷编自举 `fallback_functions=0`；见
+    [完成记录](01-finished/yh-LLVM-LL11隔离环境验证-2026-10-19.md)。
+  - [ ] 20 轮性能对照与回退归因（用户暂缓）；发行/CI 文档同步；
+    R2b 硬门（RS2/RS3/R2c）关闭前不宣布 LL11 全量完成。
 - [ ] **LL12 退役旧后端**：在 LL11 及 F1 Linux/AArch64 LLVM 回归都通过后，
   分片移除失去消费者的机器发射，不阻挡 x64 首期，也不删除 gen 语义或历史种子。
 - [ ] **F1–F4 后续平台**：Linux/AArch64 → macOS/ARM64 → Windows/x86_64 → macOS/x86_64、Windows/ARM64；

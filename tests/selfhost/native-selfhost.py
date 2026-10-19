@@ -22,6 +22,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -34,8 +35,9 @@ HOST_DRIVER = ROOT / "tools" / "llvm-host.py"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "tools"))
 from selfhost_snapshot_gate import (default_seed, expected_artifacts,
+                                    expected_llvm_artifacts,
                                     expected_seed_flat_artifacts,
-                                    save_snapshot)
+                                    save_llvm_snapshot, save_snapshot)
 from selfhost_snapshot_gate import self_test, snapshot_errors, verify_seed
 
 # 并发上限：自解析与两遍语料都是「一个文件一次编译器进程」，进程启动在
@@ -90,17 +92,29 @@ def run(cmd, cwd=None, shim=False):
                           text=True, timeout=1800, env=environment)
 
 
-def build(cc, out, generation, expected, compatible=()):
-    """冷编一代，并在共享的 .build 被后续代覆盖前保存其产物。"""
+def build(cc, out, generation, expected, compatible=(), llvm_mode=False):
+    """冷编一代，并在共享的 .build 被后续代覆盖前保存其产物。
+
+    llvm_mode=True 时显式选择 LLVM 后端并保存 .ll/接口快照；默认仍按
+    宿主默认后端（Linux/x86_64 已是 LLVM，旧平台为 legacy）构建。
+    """
     bdir = COMPILER / ".build"
     if bdir.exists():
         shutil.rmtree(bdir)
-    command = [str(cc), "build", "-o", str(out)]
+    command = [str(cc)]
+    if llvm_mode:
+        command += ["--backend", "llvm", "--target", "x86_64-unknown-linux-gnu",
+                    "--emit-llvm"]
+    command += ["build", "-o", str(out)]
     r = run(command, cwd=COMPILER, shim=True)
     if r.returncode != 0:
         print(f"FAIL 构建 {out.name}:", r.stderr[-400:])
         sys.exit(1)
-    snapshot = save_snapshot(bdir, WORK / "snapshots" / generation)
+    if llvm_mode:
+        bdir = bdir / "targets" / "x86_64-unknown-linux-gnu" / "llvm" / "O0"
+        snapshot = save_llvm_snapshot(bdir, WORK / "snapshots" / generation)
+    else:
+        snapshot = save_snapshot(bdir, WORK / "snapshots" / generation)
     errors = snapshot_errors([(generation, snapshot)], expected)
     if errors:
         for compatible_expected in compatible:
@@ -161,6 +175,9 @@ def main() -> int:
     ap.add_argument("--skip-corpus", action="store_true",
                     help="跳过两遍语料（仅当同一轮里 make test 已用等价编译器"
                          "跑过语料时才用；默认不跳过）")
+    ap.add_argument("--backend", choices=("auto", "legacy", "llvm"), default="auto",
+                    help="自举链使用的后端；auto 在 Linux/x86_64 走 LLVM，"
+                         "其余平台沿用 legacy")
     args = ap.parse_args()
     args.jobs = max(1, args.jobs)
     WORK = Path(args.workdir)
@@ -177,17 +194,26 @@ def main() -> int:
         return 1
     print(f"自举种子 SHA-256：{seed_hash}")
     SHIM_DIR = llvm_shim_for_seed(seed)
+    llvm_mode = args.backend == "llvm" or (
+        args.backend == "auto" and sys.platform == "linux"
+        and platform.machine().lower() in ("x86_64", "amd64"))
 
     ok = True
-    expected = expected_artifacts(COMPILER)
+    expected = expected_llvm_artifacts(COMPILER) if llvm_mode \
+        else expected_artifacts(COMPILER)
     # 滚动种子可能早于或已包含 .s.ct / RS3b 按文件对象布局；首代只接受
     # 这些历史完整产物集合之一，后续代必须全部使用当前格式并进入固定点。
     legacy_expected = {path for path in expected if not path.endswith(".s.ct")}
     seed_flat = expected_seed_flat_artifacts(COMPILER)
-    d2 = build(seed, WORK / "cc2", "cc2", expected,
-               (legacy_expected, seed_flat))
-    d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected)
-    d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected)
+    if llvm_mode:
+        d2 = build(seed, WORK / "cc2", "cc2", expected, llvm_mode=True)
+        d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected, llvm_mode=True)
+        d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected, llvm_mode=True)
+    else:
+        d2 = build(seed, WORK / "cc2", "cc2", expected,
+                   (legacy_expected, seed_flat))
+        d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected)
+        d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected)
     print(f"cc2/cc3/cc4 构建完成（种子 = {seed}）")
 
     # 1) 旧种子可产生一次迁移差异；最终候选相邻两代必须达到固定点。

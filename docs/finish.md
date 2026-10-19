@@ -2,6 +2,27 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-19 LL11：默认切换、x64 种子与隔离环境验证
+
+- **默认后端**：`compiler/gen/state.yh` 在 Linux/x86_64 宿主默认 `c_backend=1`
+  （LLVM），无需 `--backend`；arm64/Darwin 仍走 legacy，待 F1/F2。
+- **x64 种子**：`bin/yh-linux-x64` + `.sha256`（`c6733eb2…`）已滚，冷编、
+  单文件编译/运行通过；Makefile 对 `linux-x86_64` 自动 `export
+  YH_LLVM_SELFHOST=1`，runtime-memory 走 `--llvm-x64`、缓存专项走
+  `llvm-cache`、scratch-isolation 降为 `--jobs 4`。
+- **测试适配**：`native-selfhost.py` 支持 LLVM 模式快照（`--backend llvm
+  --emit-llvm`、`llvm/<tag>.ll` 固定点）；`runtime-memory.py` 的 ARM64 汇编
+  契约显式走 legacy；`check.py` 非 AArch64 跳过寄存器同名检查、编译超时
+  180s。分段验证：固定点 24 产物、自解析 100/100、语法 42/42、运行 343/343、
+  scratch-isolation 4/4、llvm-cache、runtime-memory --llvm-x64、modules 18/18。
+- **隔离环境验证**：新增 `tests/selfhost/llvm-isolation.py` 与 `make
+  llvm-isolation`：bwrap + `PATH=/nonexistent` 下单文件编译/运行、项目构建、
+  冷编自举全过；`readelf -d` 无 LLVM/lld 依赖，`strace execve` 无外部 LLVM
+  旁车，自举 `fallback_functions=0`。详见
+  [完成记录](01-finished/yh-LLVM-LL11隔离环境验证-2026-10-19.md)。
+- **未完成**：20 轮性能对照/回退归因（用户暂缓）、发行/CI 文档同步；
+  R2b 硬门（RS2/RS3/R2c）仍开，不宣布 LL11 全量完成。
+
 ## 2026-10-19 macOS/ARM64 LLVM 接入方案交付
 
 - 新增[接入设计](03-design/yh-macOS-LLVM后端接入设计.md)与

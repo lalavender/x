@@ -153,7 +153,10 @@ def main():
             print(f"FAIL Linux 可执行文件未预期的未定义符号: {unexpected}")
             return 1
 
-    linux_asm = run([compiler, "-target", "linux", "--emit-asm", "main.yh"], WORK)
+    # Linux/arm64 的本地内存运行时是旧 ARM64 后端产物；LLVM 路线的 ARM64
+    # 运行时留给 F1，因此这里显式选择 legacy 后端锁定 ARM64 汇编契约。
+    linux_asm = run([compiler, "--backend", "legacy", "-target", "linux",
+                     "--emit-asm", "main.yh"], WORK)
     linux_syscalls = ("mov\tx8, #222" in linux_asm.stdout
                      and "mov\tx8, #215" in linux_asm.stdout
                      and "mov\tx8, #64" in linux_asm.stdout)

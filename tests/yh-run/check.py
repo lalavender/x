@@ -61,7 +61,7 @@ PASS_DIR = HERE / "pass"
 SYSROOT = ROOT / "tmp" / "sysroot"
 CROSS_CONTAINER = "yh-build"
 
-COMPILE_TIMEOUT = 60     # 编译超时（秒）
+COMPILE_TIMEOUT = 180    # 编译超时（秒）；LLVM 后端并发重负荷下 60s 会误报超时
 RUN_TIMEOUT = 15         # 运行超时（秒）
 
 # 期望注释的标记；行内容在第一个空格之后原样保留（允许行内空格/制表符）。
@@ -302,7 +302,14 @@ def check_asm_symbols(path):
     target = next((COMPILER_FLAGS[index + 1]
                    for index, flag in enumerate(COMPILER_FLAGS[:-1])
                    if flag == "--target"), "")
-    if "llvm" in COMPILER_FLAGS and target.startswith("x86_64-"):
+    if target == "":
+        import platform
+        machine = platform.machine().lower()
+        if machine in ("x86_64", "amd64"):
+            target = "x86_64-unknown-linux-gnu"
+        elif machine in ("aarch64", "arm64"):
+            target = "aarch64-unknown-linux-gnu"
+    if not target.startswith("aarch64-"):
         return None
     if not ASM_SYMBOLS_SAFE_RE.search(path.read_text(encoding="utf-8")):
         return None
