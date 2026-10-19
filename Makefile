@@ -360,7 +360,9 @@ test-llvm: stage-yh
 	python3 $(TOPSRC)/tests/selfhost/llvm-lld.py
 
 # selfhost-llvm：执行 A→B/C/D 的 O0/O2 原生固定点；脚本在最终 D 候选上运行完整语料与专项门。
-selfhost-llvm: stage-yh
+# 不依赖 stage-yh：x64 交叉种子是 arm64，root $(YH) 会误按宿主种子构建；
+# 脚本自行用 seed-build 产 x64 A。
+selfhost-llvm:
 	python3 $(TOPSRC)/tests/selfhost/llvm-selfhost.py --seed "$(abspath $(LLVM_SEED))" --jobs $(LLVM_JOBS)
 
 # selfhost-llvm-darwin：F2-8 原生连续自举（A legacy → B/C/D LLVM，
