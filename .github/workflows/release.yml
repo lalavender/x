@@ -8,6 +8,16 @@ name: Release
 on:
   push:
     tags: ['*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要归档的 tag（例如 0.0.5）
+        required: true
+        default: 0.0.5
+      x64_only:
+        description: 只构建 linux-x86_64，并补到已有 Release
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -15,9 +25,14 @@ permissions:
 jobs:
   linux-arm64:
     name: 构建 AArch64 Linux（ELF）
+    if: ${{ github.event_name == 'push' || inputs.x64_only == false || inputs.x64_only == 'false' }}
     runs-on: ubuntu-latest
+    env:
+      YHL_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       # 免费私有仓库没有 arm64 原生 runner，用 QEMU 在 x86_64 runner 上
       # 仿真 arm64 容器；产物是货真价实的 AArch64 Linux ELF。
@@ -58,7 +73,7 @@ jobs:
       - name: 打包
         run: |
           file out/yh
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${YHL_RELEASE_TAG}"
           tar czf "yh-${TAG}-linux-arm64.tar.gz" -C out yh
           sha256sum "yh-${TAG}-linux-arm64.tar.gz" > "yh-${TAG}-linux-arm64.sha256"
 
@@ -77,8 +92,11 @@ jobs:
       # x64 种子默认 LLVM；编译器自举链接需要固定 LLVM/lld/桥归档。
       YH_LLVM_HOST: "1"
       LLVM_JOBS: "2"
+      YHL_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: 安装构建工具
         run: |
@@ -125,7 +143,7 @@ jobs:
           cp yh out/
           file out/yh | tee /tmp/file.txt
           grep -q 'x86-64' /tmp/file.txt
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${YHL_RELEASE_TAG}"
           tar czf "yh-${TAG}-linux-x86_64.tar.gz" -C out yh
           sha256sum "yh-${TAG}-linux-x86_64.tar.gz" > "yh-${TAG}-linux-x86_64.sha256"
 
@@ -138,14 +156,18 @@ jobs:
 
   darwin-arm64:
     name: 构建 Darwin arm64（Mach-O）
+    if: ${{ github.event_name == 'push' || inputs.x64_only == false || inputs.x64_only == 'false' }}
     runs-on: macos-14
     env:
       # 种子默认 LLVM，自举链接需要固定 LLVM/lld/桥归档；不能依赖种子内嵌的
       # 构建机绝对路径。
       YH_LLVM_HOST: "1"
       LLVM_JOBS: "2"
+      YHL_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       # 编译器自举仍由 Apple clang 编译 bridge_stub.c 等 C 源，需要 SDK 头；
       # 这里只准备构建环境，不改变用户程序使用 compiler/darwin-sdk 的行为。
@@ -231,7 +253,7 @@ jobs:
       - name: 打包
         run: |
           file yh
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${YHL_RELEASE_TAG}"
           tar czf "yh-${TAG}-darwin-arm64.tar.gz" yh
           shasum -a 256 "yh-${TAG}-darwin-arm64.tar.gz" > "yh-${TAG}-darwin-arm64.sha256"
 
@@ -245,7 +267,10 @@ jobs:
   release:
     name: 发布 Release
     needs: [linux-arm64, linux-x86_64, darwin-arm64]
+    if: ${{ always() && needs.linux-x86_64.result == 'success' && needs.linux-arm64.result != 'failure' && needs.darwin-arm64.result != 'failure' }}
     runs-on: ubuntu-latest
+    env:
+      YHL_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: 下载构建产物
         uses: actions/download-artifact@v4
@@ -277,7 +302,7 @@ jobs:
           - `.sha256` 为对应 tar.gz 的 SHA-256 校验和。
           EOF
           sed -i 's/^          //' notes.md
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${YHL_RELEASE_TAG}"
           # 已存在同名 Release（例如补充 x64 资产）时原地覆盖，避免重跑失败。
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
