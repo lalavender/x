@@ -76,10 +76,6 @@ pub fn sem_number(start int, n int, r *Res) int {
         // 浮点使用点读 fval_bits，两者必须一致。
         r.ival = bits;
         r.fval_bits = bits;
-        if (g_state.task.c_fold == 0) {
-            if (em_mov_imm("x0", bits) != 0) { return -1; }
-            if (em_ins("fmov\td0, x0") != 0) { return -1; }
-        }
         return 0;
     }
     if (sem_parse_number(start, n) != 0) {
@@ -87,12 +83,6 @@ pub fn sem_number(start int, n int, r *Res) int {
     }
     r.ival = g_state.task.c_fold_ival;
     r.lit_big = g_state.task.c_fold_big;
-    if (g_state.task.c_fold == 0) {
-        // 作为运行时值使用：装入 x0（常量传播留给后续优化）
-        if (em_mov_imm("x0", r.ival) != 0) {
-            return -1;
-        }
-    }
     return 0;
 }
 
@@ -209,20 +199,13 @@ pub fn sem_string(start int, slen int, r *Res) int {
     if (g_state.task.c_compile == 0) {
         return 0;
     }
-    let lbl int = em_data_string(start, slen);
-    if (lbl < 0) {
-        return -1;
-    }
+    // LL12：标签只登记，字符串数据由后端快照按标签生成。
+    let lbl int = g_state.task.c_data_n;
+    g_state.task.c_data_n += 1;
     // 登记标签 → 原样字节，供编译期过程与后端快照按标签号反查。
     if (data_str_add(lbl, start, slen) != 0) { return -1; }
     r.is_const = 1;
     r.ival = lbl.to_type(i64);
-    if (g_state.task.c_fold == 0) {
-        // 作为值使用：装入字符串地址
-        if (em_load_data_label(lbl) != 0) {
-            return -1;
-        }
-    }
     return 0;
 }
 
@@ -255,11 +238,6 @@ pub fn sem_char(start int, clen int, r *Res) int {
     r.is_const = 1;
     r.is_lit = 1;
     r.ival = v.to_type(i64);
-    if (g_state.task.c_fold == 0) {
-        if (em_mov_imm("x0", r.ival) != 0) {
-            return -1;
-        }
-    }
     return 0;
 }
 
@@ -267,11 +245,6 @@ pub fn sem_bool(v int, r *Res) int {
     sem_res_const(r, TY_BOOL, v.to_type(i64));
     if (g_state.task.c_compile == 0) {
         return 0;
-    }
-    if (g_state.task.c_fold == 0) {
-        if (em_mov_imm("x0", r.ival) != 0) {
-            return -1;
-        }
     }
     return 0;
 }
@@ -308,11 +281,6 @@ pub fn sem_ident_val(idx int, r *Res) int {
             // 按标签装载地址（与字符串指针常量同一路径），提供方符号不参与消费者链接。
             if ((g_state.task.c_syms[idx].flags & F_EXTERN) != 0
                 && g_state.task.c_syms[idx].cval != 0) {
-                if (g_state.task.c_fold == 0) {
-                    if (em_load_data_label(g_state.task.c_syms[idx].cval.to_type(int)) != 0) {
-                        return -1;
-                    }
-                }
                 g_state.task.c_res_is_addr = 1;
                 return 0;
             }
@@ -339,26 +307,7 @@ pub fn sem_ident_val(idx int, r *Res) int {
         r.ival = g_state.task.c_syms[idx].cval;
         if ((g_state.task.c_syms[idx].flags & F_ADDR) != 0) {
             // 指针常量：值是数据标签
-            if (g_state.task.c_fold == 0) {
-                if (em_load_data_label(g_state.task.c_syms[idx].cval.to_type(int)) != 0) {
-                    return -1;
-                }
-            }
             return 0;
-        }
-        if (g_state.task.c_fold == 0) {
-            if (em_mov_imm("x0", g_state.task.c_syms[idx].cval) != 0) {
-                return -1;
-            }
-            // 浮点常量以 IEEE754 位模式保存，引用时按浮点寄存器装载。
-            if (ty_is_float(r.type_id) != 0) {
-                if (em_ins("fmov\td0, x0") != 0) {
-                    return -1;
-                }
-                // 常量统一保存 f64 位型；f32 使用点须转换到 s0，不能把 double 低位当 float。
-                if (g_state.task.t_types[r.type_id].size == 4
-                    && em_ins("fcvt\ts0, d0") != 0) { return -1; }
-            }
         }
         if (ty_is_float(r.type_id) != 0) {
             r.fval_bits = g_state.task.c_syms[idx].cval;
@@ -368,11 +317,6 @@ pub fn sem_ident_val(idx int, r *Res) int {
     if (kind == SYM_FN) {
         if (g_state.task.c_fold != 0) {
             return sem_err("函数引用不是编译期常量");
-        }
-        if (g_state.task.c_lvalue == 0) {
-            if (em_lea_global(idx) != 0) {
-                return -1;
-            }
         }
         g_state.task.c_res_is_addr = 1;
         return 0;
@@ -386,54 +330,16 @@ pub fn sem_ident_val(idx int, r *Res) int {
     let global int = ((g_state.task.c_syms[idx].flags & F_GLOBAL) != 0).to_type(int);
     if (k == TY_ARRAY || k == TY_STRUCT || k == TY_UNION || k == TY_SLICE) {
         // 聚合：值语义即地址（数组退化 / 结构体以地址使用）
-        if (global != 0) {
-            if (em_lea_global(idx) != 0) {
-                return -1;
-            }
-        } else {
-            if (em_lea_local(g_state.task.c_syms[idx].offset) != 0) {
-                return -1;
-            }
-        }
         g_state.task.c_res_is_addr = 1;
         return 0;
     }
     if (g_state.task.c_lvalue != 0) {
-        if (global != 0) {
-            if (em_lea_global(idx) != 0) {
-                return -1;
-            }
-        } else {
-            if (em_lea_local(g_state.task.c_syms[idx].offset) != 0) {
-                return -1;
-            }
-        }
         g_state.task.c_res_is_addr = 1;
         return 0;
     }
     if (ty_is_float(tid) != 0) {
-        if (global != 0) {
-            if (em_lea_global(idx) != 0) { return -1; }
-            if (em_ins("mov\tx10, x0") != 0) { return -1; }
-            if (g_state.task.t_types[tid].size == 4) {
-                if (em_ins("ldr\ts0, [x10]") != 0) { return -1; }
-            } else {
-                if (em_ins("ldr\td0, [x10]") != 0) { return -1; }
-            }
-        } else {
-            if (em_fp_load_local(g_state.task.c_syms[idx].offset, tid) != 0) { return -1; }
-        }
         g_state.task.c_res_is_addr = 0;
         return 0;
-    }
-    if (global != 0) {
-        if (em_load_global(idx, tid) != 0) {
-            return -1;
-        }
-    } else {
-        if (em_load_local(g_state.task.c_syms[idx].offset, tid) != 0) {
-            return -1;
-        }
     }
     g_state.task.c_res_is_addr = 0;
     return 0;
@@ -457,8 +363,6 @@ pub fn sem_enum_meta_value(meta *Res) int {
     let tid int = g_state.task.c_syms[member].type_id;
     let value i64 = g_state.task.c_syms[member].cval;
     sem_res_const(meta, tid, value);
-    if (g_state.task.c_compile != 0 && g_state.task.c_fold == 0
-        && em_mov_imm("x0", value) != 0) { return -1; }
     return 0;
 }
 
@@ -477,16 +381,14 @@ pub fn sem_enum_meta_name(meta *Res) int {
         || g_state.task.c_syms[member].const_ready == 0) {
         return sem_err("枚举 values 成员索引无效");
     }
-    let lbl int = em_data_name_string(g_state.task.c_syms[member].name_off,
-        g_state.task.c_syms[member].name_len);
-    if (lbl < 0) { return -1; }
+    // LL12：标签只登记，名称数据由快照生成。
+    let lbl int = g_state.task.c_data_n;
+    g_state.task.c_data_n += 1;
     if (data_str_add_pool(lbl, g_state.task.c_syms[member].name_off,
         g_state.task.c_syms[member].name_len) != 0) { return -1; }
     sem_res_reset(meta, ty_ptr(TY_CHAR));
     meta.is_const = 1;
     meta.ival = lbl.to_type(i64);
-    if (g_state.task.c_compile != 0 && g_state.task.c_fold == 0
-        && em_load_data_label(lbl) != 0) { return -1; }
     return 0;
 }
 
@@ -510,13 +412,12 @@ pub fn sem_field_meta_name(meta *Res) int {
         return sem_err("字段元信息索引无效");
     }
     let field SField = g_state.task.t_fields[g_state.task.t_types[owner].sub + index];
-    let lbl int = em_data_name_string(field.name_off, field.name_len);
-    if (lbl < 0) { return -1; }
+    // LL12：标签只登记，名称数据由快照生成。
+    let lbl int = g_state.task.c_data_n;
+    g_state.task.c_data_n += 1;
     if (data_str_add_pool(lbl, field.name_off, field.name_len) != 0) { return -1; }
     sem_res_reset(meta, ty_ptr(TY_CHAR));
     meta.is_const = 1;
     meta.ival = lbl.to_type(i64);
-    if (g_state.task.c_compile != 0 && g_state.task.c_fold == 0
-        && em_load_data_label(lbl) != 0) { return -1; }
     return 0;
 }
