@@ -70,6 +70,10 @@
   1085→1004 行，删除 `.xword`/`.zero`/`.balign`/`em_data_scalar`/
   `em_data_string_body` 等 50 处发射；保留 `static_data` 登记、AST 捕获、
   CT 聚合收集与接口加载标签登记（`parse_global_bind_iface_label`）。
+- **2026-10-21 第四片完成（取值/地址）**：`gen/sem_value.yh` 522→423 行，
+  删除数字/字符/布尔常量装载、字符串/元信息名称的数据发射、标识符取值的
+  `lea/load` 指令；保留类型与常量标记、`c_res_is_addr`、字符串与名称标签
+  登记（`data_str_add`/`data_str_add_pool`）。
 - 先把「只语义」变成唯一模式：以 `c_compile == 0` + `c_em_suppress`
   （`gen/sem_expr.yh`、`compiler/parse/parse_decl.yh`）为雏形，逐文件把
   混合函数拆成 `sem_*`（类型/值类别/诊断/CT）与 `emit_*`（发射）两段。

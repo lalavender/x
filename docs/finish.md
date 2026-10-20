@@ -31,6 +31,17 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第十刀：sem_value 取值/地址剥离（C1 第四片）
+
+- `compiler/gen/sem_value.yh` 522→423 行：删除数字/字符/布尔常量装载、
+  字符串与枚举/字段名称的数据发射、标识符取值的 `lea/load` 指令。
+- 保留：类型与常量标记、`c_res_is_addr` 语义、字符串标签登记
+  （`data_str_add`）、元信息名称标签登记（`data_str_add_pool`）。
+- 验证：`em_`/`dat_` 在该文件零命中；400 语料诊断快照零差异；
+  字符串/常量/聚合用例通过；`make test` 退出 0；`make selfhost-native`
+  退出 0（project 106/106）。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第九刀：全局初始化发射剥离（C1 第三片）
 
 - `compiler/parse/parse_global_init.yh` 1085→1004 行：删除标量/字符串指针/
