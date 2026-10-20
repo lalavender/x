@@ -31,6 +31,18 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第五刀：旧 SSA 链与运行期桩删除（C3 首片）
+
+- 删除 `compiler/gen/emit_runtime_memory.yh`（555 行；`em_emit_runtime_stubs`
+  已无调用者）与 `emit_arm64.yh` 的 `em_emit_linux_syscall_stub`。
+- 删除 `ast/ast_ir_cache.yh`、`ast_ir_inline.yh`、`ast_ir_control.yh`、
+  `ast_ir_template.yh`（643 行）；`ast_ir_build.yh` 1473→423 行（只留
+  `ast_ir_b_*` builder 底层）、`ast_ir_call.yh` 295→141 行、`ast_ir.yh`
+  435→268 行（删除模块编排与位移表）。
+- 验证：`make` 通过；400 语料诊断快照零差异；`make test` 退出 0；
+  `make selfhost-native` 退出 0（project 106/106）；单文件 `-o` 运行正常。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第四刀：删除 c_backend 字段与旧目标门
 
 - `compiler/cmd/link_cache.yh`：`mb_lld_linux_enabled`、`mb_select_linker` 去掉后端
