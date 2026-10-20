@@ -31,6 +31,21 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第四刀：删除 c_backend 字段与旧目标门
+
+- `compiler/cmd/link_cache.yh`：`mb_lld_linux_enabled`、`mb_select_linker` 去掉后端
+  条件，Linux x64 原生绝对路径与 `YH_CC` 覆盖恒定生效；链接键固定混入 `'1'`。
+- `compiler/cmd/darwin_link.yh`：4 处 `c_backend == 0` 短路删除。
+- `compiler/gen/state.yh`：删除 `c_backend` 字段与三处平台默认赋值。
+- `compiler/gen/target_info.yh`：删除 `target_legacy_ready`（「旧后端只能发
+  AArch64」的门）；`compiler/cmd/driver.yh` 删除对应 4 处调用。
+- `compiler/cmd/driver.yh`：`--backend` 只接受 `llvm`（兼容 no-op），`legacy`
+  与其他值明确拒绝。
+- 验证：全仓 `rg 'c_backend|target_legacy_ready' compiler/` 零命中；`make` 通过；
+  400 语料诊断快照零差异；`make test` 退出 0；`make selfhost-native` 退出 0
+  （project 106/106）；`--backend llvm` 成功、`legacy` 与未知值给出明确诊断。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第三刀：worker 旧发射段
 
 - `compiler/cmd/module_worker.yh`：删除 `ast_ir_lower_module`、按文件 `.s`

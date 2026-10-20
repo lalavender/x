@@ -116,13 +116,16 @@
   `drv_write_asm` 与临时 `.yh-tmp.s` 路径，`-o` 直接走 `drv_compile_file`
   （LLVM）；`--emit-asm` 只保留 LLVM 分支；usage 去掉「旧后端仅 AArch64」
   （driver 418→322 行）。
-- 删除 `c_backend`（`gen/state.yh`、`cmd/driver.yh`、`cmd/module_build.yh`、
-  `cmd/link_cache.yh`、`cmd/module_worker.yh`、`cmd/darwin_link.yh` 全部引用）。
-- 删除 `target_legacy_ready` 与 `-target linux` 旧别名里的 AArch64 隐含语义；
-  目标校验统一走 LLVM 目标身份。
-- 更新 `--help`（`cmd/driver.yh` 的「旧后端仅 AArch64」）、
-  `compiler/README.md` 模块表与源码注释中的旧后端说明。
-- 验收：无 `--backend legacy` 可用路径；错误信息明确指向 LLVM。
+- **2026-10-21 已完成第三片**：`cmd/link_cache.yh` 与 `cmd/darwin_link.yh` 的
+  后端条件全部收敛（Linux x64 原生绝对路径、YH_CC 覆盖、内嵌 lld 常量生效；
+  链接键固定混入 `'1'`）。
+- **2026-10-21 已完成第四片**：删除 `c_backend` 字段（`gen/state.yh`）与三处
+  默认赋值；删除 `target_legacy_ready`（`gen/target_info.yh`）及 driver 的 4 处
+  调用；`--backend` 只接受 `llvm`（兼容 no-op），`legacy` 与其他值明确拒绝。
+- 待办：`-target linux` 旧别名里的 AArch64 隐含语义（别名保留，需按 LLVM
+  目标身份复核）；`compiler/README.md` 模块表与源码注释的旧后端说明。
+- 验收（2026-10-21 已达成）：全仓 `rg 'c_backend|target_legacy_ready' compiler/`
+  零命中；无 `--backend legacy` 可用路径；错误信息明确指向 LLVM。
 
 ### LL12-5 门禁、种子与文档迁移
 
