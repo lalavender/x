@@ -1,0 +1,90 @@
+version: 2.1
+
+# CircleCI 主门：原生 Linux/AArch64 + 独立的 ANTLR 参考语法门。
+#
+# 与 GitHub Actions 的分工：
+#   - GitHub：linux-x86_64、darwin-arm64；linux-arm64 仅保留手动 QEMU 回退；
+#   - CircleCI：原生 arm64 机器跑 Linux/AArch64 默认 LLVM 主门，避免 QEMU。
+# 两者都在 push 到 arm64/llvm/main 时执行，互不依赖。
+
+commands:
+  install_linux_deps:
+    description: 安装 Linux 构建与 LFS 依赖
+    steps:
+      - run:
+          name: 安装构建依赖
+          command: |
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+              build-essential python3 binutils xz-utils libxml2-dev git-lfs
+
+  pull_seed_lfs:
+    description: 拉取仓库中的 Linux/AArch64 自举种子
+    steps:
+      - run:
+          name: 拉取 Git LFS 种子
+          command: |
+            git lfs install --local
+            git lfs pull --include="bin/yh-linux-arm64"
+
+jobs:
+  antlr:
+    docker:
+      - image: cimg/base:stable
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: 安装 Java/ANTLR 依赖
+          command: |
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq default-jre-headless python3-pip curl
+      - run:
+          name: ANTLR 参考语法门
+          command: bash tools/run-antlr-ci.sh --quiet
+
+  linux-arm64:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: arm.large
+    environment:
+      # 固定 SDK 未就绪时允许联网补齐；之后走 tmp/llvm-migration 缓存。
+      YH_LLVM_HOST: "1"
+    steps:
+      - checkout
+      - install_linux_deps
+      - pull_seed_lfs
+      - restore_cache:
+          keys:
+            - llvm-host-linux-arm64-v2-{{ checksum "vendor/llvm/sdk.lock.json" }}-{{ checksum "tools/llvm-sdk.py" }}-{{ checksum "tools/llvm-host.py" }}-{{ checksum "tests/selfhost/llvm-host.py" }}-{{ checksum "compiler/llvm/bridge.c" }}-{{ checksum "compiler/llvm/bridge.h" }}-{{ checksum "compiler/llvm/lld_bridge.cpp" }}-{{ checksum "compiler/llvm/lld_stub.cpp" }}
+      - run:
+          name: 准备固定 LLVM/lld 宿主并冷编
+          command: make bootstrap
+          no_output_timeout: 30m
+      - save_cache:
+          key: llvm-host-linux-arm64-v2-{{ checksum "vendor/llvm/sdk.lock.json" }}-{{ checksum "tools/llvm-sdk.py" }}-{{ checksum "tools/llvm-host.py" }}-{{ checksum "tests/selfhost/llvm-host.py" }}-{{ checksum "compiler/llvm/bridge.c" }}-{{ checksum "compiler/llvm/bridge.h" }}-{{ checksum "compiler/llvm/lld_bridge.cpp" }}-{{ checksum "compiler/llvm/lld_stub.cpp" }}
+          paths:
+            - tmp/llvm-migration
+      - run:
+          name: Linux/AArch64 LLVM 专项门
+          command: make test-llvm-linux-arm64
+      - run:
+          name: 编译器语法与运行语料
+          command: |
+            python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+            python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
+      - run:
+          name: 自举主门（语料已单独跑过）
+          command: make selfhost-native SKIP_CORPUS=1
+
+workflows:
+  ci:
+    jobs:
+      - antlr:
+          filters:
+            branches:
+              only: /^(arm64|llvm|main)$/
+      - linux-arm64:
+          filters:
+            branches:
+              only: /^(arm64|llvm|main)$/

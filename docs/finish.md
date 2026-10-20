@@ -2,6 +2,21 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-20 CI：CircleCI 原生 AArch64 与 GitHub 去重
+
+- 新增 `.circleci/config.yml`：`arm.large` 原生 Ubuntu 24.04 跑 Linux/AArch64
+  `make bootstrap`、F1 专项、第 2/3 层语料与 `make selfhost-native SKIP_CORPUS=1`；
+  独立 `antlr` 作业跑参考语法门。种子用 Git LFS 拉取，固定 LLVM/lld 宿主缓存
+  到 `tmp/llvm-migration`，键覆盖 SDK 锁、构建脚本、宿主验证器与桥源码。
+- GitHub Actions 的 `linux-arm64` 改为仅手动 `workflow_dispatch` 的 QEMU 回退，
+  日常 arm64 由 CircleCI 原生机器承担；`linux-x86_64`、`darwin-arm64` 与
+  Release 在手动语料后改用 `make selfhost-native SKIP_CORPUS=1`，避免重复跑语料。
+- Release 的 arm64 作业补 `YH_LLVM_HOST=1`、`libxml2-dev`、`binutils/xz-utils`
+  与固定 LLVM/lld 宿主缓存；超时从默认值提高到 240 分钟。
+- 验证：两份 workflow 与 CircleCI YAML 均通过 YAML 解析；本地 `make test-code-stats`
+  与 `make quick` 通过。CircleCI 首次实跑需在 CircleCI 连接仓库后观察，
+  首次会构建 arm64 固定 LLVM 宿主，后续命中缓存。
+
 ## 2026-10-20 yh 编译器源码规模统计工具
 
 - 新增 `tools/yh-code-stats.py`，按 yh 的字符串、字符、转义与注释词法边界

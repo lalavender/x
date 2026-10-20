@@ -134,15 +134,18 @@ make seed               # 滚种子（仅在全绿后；拒绝带构建机路径
 所有架构），不匹配的记 `SKIP`、不算失败也不影响退出码；没有该指令的是共有用例。
 `make test-llvm` 是 Linux/x86_64 专属门，其他宿主会直接拒绝而不是降级运行。
 
-GitHub Actions（`.github/workflows/ci.yml`，手动 `workflow_dispatch` 或推送
-`arm64`/`llvm`/`main`）：`linux-arm64` 作业在 arm64 容器里跑第 2/3 层语料与
-`make selfhost-native`（第 1 层 ANTLR 需要 Java 与 jar 缓存，不在 CI 跑）；
-`linux-x86_64` 作业以 `YH_LLVM_HOST=1` 联网准备固定 LLVM SDK（缓存在
-`tmp/llvm-migration`，键随 SDK 锁文件与桥源码变化）后跑 `make test-llvm` /
-`make selfhost-llvm`；`darwin-arm64` 作业在 `macos-14` 上跑同一套门禁，入库
-`bin/yh-darwin-arm64` 落后时先自动补一代种子（把模块私有类型临时改回 `pub` →
-`make` → `make seed` → 还原源码），并把 `bin/yh-darwin-arm64` + `.sha256`
-作为 artifact 上传——下载后提交即追平 macOS 种子。
+CI 分两套（推送 `arm64`/`llvm`/`main` 时并行）：
+
+- **CircleCI**（`.circleci/config.yml`）：原生 `arm.large` Linux/AArch64 机器跑
+  `make bootstrap`、`make test-llvm-linux-arm64`、第 2/3 层语料与
+  `make selfhost-native SKIP_CORPUS=1`；独立 `antlr` 作业跑参考语法门。
+  `tmp/llvm-migration` 按 SDK/脚本/桥源码哈希缓存；种子通过 Git LFS 拉取。
+- **GitHub Actions**（`.github/workflows/ci.yml`）：`linux-x86_64` 作业以
+  `YH_LLVM_HOST=1` 联网准备固定 LLVM SDK 后跑 `make test-llvm` /
+  `make selfhost-llvm`；`darwin-arm64` 作业在 `macos-14` 上跑同一套门禁；
+  `linux-arm64` 只保留手动 `workflow_dispatch` 的 QEMU 回退，日常由 CircleCI
+  原生机器覆盖。入库 `bin/yh-darwin-arm64` 落后时先自动补一代种子后作为
+  artifact 上传——下载后提交即追平 macOS 种子。
 
 
 ## Linux 环境验证（容器方案）

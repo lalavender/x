@@ -42,6 +42,7 @@ jobs:
     name: 构建 AArch64 Linux（ELF）
     if: ${{ github.event_name == 'push' || inputs.x64_only == false || inputs.x64_only == 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     env:
       YHL_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       YHL_SEED_EXCLUDE: ${{ github.event_name == 'push' && github.ref_name || '' }}
@@ -59,6 +60,13 @@ jobs:
           python3 tools/fetch-release-seed.py --platform linux-arm64 \
             --dest bin/yh-linux-arm64 --exclude-tag "${YHL_SEED_EXCLUDE}"
 
+      # 固定 arm64 LLVM/lld 宿主缓存；首次构建较慢，之后可离线复用。
+      - name: 缓存固定 arm64 LLVM/lld 宿主
+        uses: actions/cache@v4
+        with:
+          path: tmp/llvm-migration
+          key: llvm-host-linux-arm64-${{ hashFiles('vendor/llvm/sdk.lock.json', 'tools/llvm-sdk.py', 'tools/llvm-host.py', 'tests/selfhost/llvm-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp', 'compiler/llvm/lld_stub.cpp') }}
+
       # 免费私有仓库没有 arm64 原生 runner，用 QEMU 在 x86_64 runner 上
       # 仿真 arm64 容器；产物是货真价实的 AArch64 Linux ELF。
       - name: 准备 QEMU
@@ -75,6 +83,7 @@ jobs:
           }
           EOF
           docker run --rm --platform linux/arm64 \
+            -e YH_LLVM_HOST=1 \
             -v "$PWD":/repo:ro \
             -v "$PWD/out":/out \
             -v /tmp/smoke.yh:/smoke.yh:ro \
@@ -83,15 +92,15 @@ jobs:
               apt-get update -qq >/dev/null
               # Makefile 的 verify-seed / seed-build.py 都要 python3，只装
               # build-essential 会让 make 以 127 失败（2026-10-13 0.0.4 首跑踩到）
-              apt-get install -y -qq build-essential python3 >/dev/null
+              apt-get install -y -qq build-essential python3 binutils xz-utils libxml2-dev >/dev/null
               cp -r /repo /build
               cd /build
               # 种子是刚下载的上一版 Release linux-arm64 资产。
               make
               python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
               python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet
-              make selfhost-native
-              # 开箱状态冒烟（链接走容器内系统 gcc）
+              make selfhost-native SKIP_CORPUS=1
+              # 开箱状态冒烟（默认 LLVM，最终链接走内嵌 lld）
               ./yh /smoke.yh -o /tmp/smoke && /tmp/smoke
               # 两个产物都在容器内写入（容器是 root，外层步骤对 root 所有的
               # out/ 目录没有写权限，只读打包）
@@ -148,7 +157,7 @@ jobs:
           make
           python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
           python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet
-          make selfhost-native
+          make selfhost-native SKIP_CORPUS=1
 
       - name: 冒烟
         run: |
@@ -225,7 +234,7 @@ jobs:
           python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet
           make test-llvm-darwin
           make selfhost-llvm-darwin
-          make selfhost-native
+          make selfhost-native SKIP_CORPUS=1
 
       - name: 冒烟
         run: |
