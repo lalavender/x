@@ -11,9 +11,9 @@ pub fn sem_fn_begin(idx int) int {
     g_state.task.c_fn_falls = 1;
     g_state.task.c_expr_noreturn = 0;
     g_state.task.c_fn_ret = g_state.task.t_types[g_state.task.c_syms[idx].type_id].elem;
-    g_state.task.c_fn_lbl = em_new_label();
+    // LL12：标签、栈槽、序言与体缓冲等机器状态由 LLVM lowering 生成，
+    // 语义层只保留类型事实与诊断状态。
     g_state.task.c_temp_off = 0;
-    // 浮点赋值临时槽属于当前帧，不能复用上一函数的偏移。
     g_state.task.c_fp_tmp_off = 0;
     g_state.task.c_glabel_n = 0;
     g_state.task.c_spill_n = 0;
@@ -22,11 +22,10 @@ pub fn sem_fn_begin(idx int) int {
     g_state.task.c_ret_ptr_off = 0;
     g_state.task.c_ret_agg_val = 0;
     abi_c_cursor_init(&g_state.task.c_cabi_cursor, tg_darwin());
-    // prologue 的 fp/lr 对占 16 字节，槽偏移从 16 起算
     g_state.task.c_fp_off = 16;
     g_state.task.o_body_len = 0;
     g_state.task.c_in_body = 1;
-    // 聚合返回：入口保存 x8（调用方给的返回缓冲地址）
+    // 聚合返回：记录间接返回事实，返回缓冲地址由 lowering 处理。
     let rk int = g_state.task.t_types[g_state.task.c_fn_ret].kind;
     let indirect_ret int = 1;
     if ((g_state.task.c_fn_flags & F_CABI) != 0) {
@@ -34,13 +33,9 @@ pub fn sem_fn_begin(idx int) int {
         abi_c_result(g_state.task.c_fn_ret, &result);
         indirect_ret = result.indirect;
     }
-    if (indirect_ret != 0 && (rk == TY_STRUCT || rk == TY_UNION || rk == TY_ARRAY || rk == TY_SLICE)) {
+    if (indirect_ret != 0 && (rk == TY_STRUCT || rk == TY_UNION
+        || rk == TY_ARRAY || rk == TY_SLICE)) {
         g_state.task.c_ret_agg = 1;
-        g_state.task.c_ret_ptr_off = em_alloc_local(TG_PTR_SIZE);
-        // 入口把 x8（调用方返回缓冲）存进槽：函数体在缓冲中发射时会用到
-        if (em_save_hidden_ret(g_state.task.c_ret_ptr_off) != 0) {
-            return -1;
-        }
     } else {
         g_state.task.c_ret_agg = 0;
     }
@@ -56,65 +51,23 @@ pub fn sem_declare_param(start int, n int, tid int, regidx int) int {
     let pk int = g_state.task.t_types[tid].kind;
     let is_agg int = ((pk == TY_ARRAY) || (pk == TY_STRUCT) || (pk == TY_UNION)
                       || (pk == TY_SLICE)).to_type(int);
-    let size int = g_state.task.t_types[tid].size;
     let idx int = sym_push(start, n, SYM_VAR, tid, F_PARAM);
     if (idx < 0) {
         return -1;
     }
     if (is_agg != 0) {
-        // 聚合按值：参数槽存「指向调用方副本的指针」，入口处再拷进本帧
-        // 的独立存储。拷贝让形参修改不影响调用方（ADR-0001 可观察行为），
-        // 也让递归各层持有各自副本。
-        let pslot int = 0;
-        if (regidx < TG_ARG_REGS) {
-            pslot = em_alloc_local(TG_PTR_SIZE);
-            g_state.task.c_spill_reg[g_state.task.c_spill_n] = regidx;
-            g_state.task.c_spill_off[g_state.task.c_spill_n] = pslot;
-            g_state.task.c_spill_size[g_state.task.c_spill_n] = 0;
-            g_state.task.c_spill_n += 1;
-        } else {
-            // 栈实参第 (regidx-8) 个槽存指针
-            // 栈实参 8 字节间距（AAPCS64/调用方回压一致）
-            pslot = 0 - (16 + 8 * (regidx - TG_ARG_REGS));
-        }
-        let body int = em_alloc_local(size);
-        g_state.task.c_syms[idx].offset = body;
+        // 聚合按值：形参持有调用方副本；独立副本与栈槽由 lowering 生成。
         g_state.task.c_syms[idx].flags |= F_AGGPARAM;
-        // 记录「指针槽 → 体型槽」的入口拷贝任务，prologue 之后执行
-        g_state.task.c_aggparam_indirect[g_state.task.c_aggparam_n] = 1;
-        g_state.task.c_aggparam_src[g_state.task.c_aggparam_n] = pslot;
-        g_state.task.c_aggparam_dst[g_state.task.c_aggparam_n] = body;
-        g_state.task.c_aggparam_size[g_state.task.c_aggparam_n] = size;
         g_state.task.c_aggparam_n += 1;
         return 0;
     }
     if (ty_is_float(tid) != 0) {
-        // 浮点参数：前 8 个进 d0-d7（负数标记 + 浮点槽溢出）
         if (g_state.task.c_fp_argn < TG_ARG_REGS) {
-            let off int = em_alloc_local(size);
-            g_state.task.c_syms[idx].offset = off;
-            g_state.task.c_spill_reg[g_state.task.c_spill_n] = 0 - (g_state.task.c_fp_argn + 1);
-            g_state.task.c_spill_off[g_state.task.c_spill_n] = off;
-            g_state.task.c_spill_size[g_state.task.c_spill_n] = tid;
-            g_state.task.c_spill_n += 1;
             g_state.task.c_fp_argn += 1;
             return 0;
         }
-        // 超出：栈传（这里简化拒绝，B7 用例不涉及）
         return sem_err("过多的浮点参数暂不支持");
     }
-    if (regidx < TG_ARG_REGS) {
-        let ioff int = em_alloc_local(size);
-        g_state.task.c_syms[idx].offset = ioff;
-        g_state.task.c_spill_reg[g_state.task.c_spill_n] = regidx;
-        g_state.task.c_spill_off[g_state.task.c_spill_n] = ioff;
-        g_state.task.c_spill_size[g_state.task.c_spill_n] = 0;
-        g_state.task.c_spill_n += 1;
-        return 0;
-    }
-    // AAPCS：调用方栈实参区在 sp_at_call+0 起（每参 8 字节槽）；
-    // callee 的 fp = sp_at_call-16
-    g_state.task.c_syms[idx].offset = 0 - (16 + 8 * (regidx - TG_ARG_REGS));
     return 0;
 }
 
@@ -130,41 +83,8 @@ pub fn sem_fn_end() int {
             return sem_err("noreturn 函数存在正常落底路径");
         }
     }
-    // 落底返回：聚合返回函数以 x0 = 聚合地址（调用方缓冲或本帧临时）；
-    // 标量返回 0。显式 return 已在各分支把值放好。
-    if (g_state.task.c_ret_agg != 0) {
-        if (g_state.task.c_ret_agg_val != 0) {
-            if (em_load_hidden_ret(g_state.task.c_ret_ptr_off) != 0) { return -1; }
-        } else {
-            if (em_ins("mov\tx0, xzr") != 0) { return -1; }
-        }
-    } else if (g_state.task.c_fn_ret != TY_VOID) {
-        if (em_ins("mov\tx0, xzr") != 0) { return -1; }
-    }
+    // LL12：落底返回、prologue、聚合参数入口拷贝与 epilogue 由 lowering 生成。
     g_state.task.c_in_body = 0;
-    if (em_prologue(g_state.task.c_fn_sym) != 0) {
-        return -1;
-    }
-    // 聚合参数入口拷贝：x10 = 指针槽内容（调用方副本地址），
-    // 逐字节拷进本帧体型槽
-    let ai int = 0;
-    for ai < g_state.task.c_aggparam_n {
-        if (em_lea_local_to(g_state.task.c_aggparam_src[ai]) != 0) { return -1; }
-        if (g_state.task.c_aggparam_indirect[ai] != 0) {
-            if (em_ins("ldr\tx0, [x10]") != 0) { return -1; }
-        } else if (em_ins("mov\tx0, x10") != 0) { return -1; }
-        if (em_lea_local_to(g_state.task.c_aggparam_dst[ai]) != 0) { return -1; }
-        if (em_ins("mov\tx1, x10") != 0) { return -1; }
-        if (em_copy_block(g_state.task.c_aggparam_size[ai]) != 0) { return -1; }
-        ai += 1;
-    }
-    // 聚合参数指针槽本身不再需要，但槽已在静态帧内，无需回收
-    if (em_copy_body() != 0) {
-        return -1;
-    }
-    if (em_epilogue() != 0) {
-        return -1;
-    }
     scope_pop();
     return 0;
 }
