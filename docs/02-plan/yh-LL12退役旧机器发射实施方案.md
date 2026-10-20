@@ -108,9 +108,10 @@
 
 ### LL12-4 入口与开关收敛
 
+- **2026-10-21 已完成首片**：`--backend legacy` 在 `cmd/driver.yh` 明确拒绝
+  （提示 LL12 已退役，rc 2）；`--backend llvm` 保留为兼容 no-op。
 - 删除 `c_backend`（`gen/state.yh`、`cmd/driver.yh`、`cmd/module_build.yh`、
-  `cmd/link_cache.yh`、`cmd/module_worker.yh`、`cmd/darwin_link.yh` 全部引用）；
-  `--backend` 只接受 `llvm`（一个版本期可对 `legacy` 给出明确迁移诊断）。
+  `cmd/link_cache.yh`、`cmd/module_worker.yh`、`cmd/darwin_link.yh` 全部引用）。
 - 删除 `target_legacy_ready` 与 `-target linux` 旧别名里的 AArch64 隐含语义；
   目标校验统一走 LLVM 目标身份。
 - 更新 `--help`（`cmd/driver.yh` 的「旧后端仅 AArch64」）、

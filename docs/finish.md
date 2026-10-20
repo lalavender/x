@@ -31,6 +31,23 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 首刀：legacy 入口拒绝与 syscall 桩退役
+
+- `compiler/cmd/driver.yh`：`--backend legacy` 明确拒绝（rc 2，提示「已在
+  LL12 退役；LLVM 是唯一代码生成后端」）；`--backend llvm` 保留为兼容 no-op。
+- `compiler/gen/symbols.yh`：删除 Linux syscall 旧汇编桩发射，保留
+  `prelude_add_linux_syscall6` 的语义登记；Linux 入口由
+  `backend/llvm_runtime.yh` 的 `linux_syscall6` 提供。
+- 验证：`make` 14s 通过；400 语料诊断快照零差异；`make test` 348/349
+  （1 个平台跳过，fail 132/132、pass 8/8、统计 6/6）；`make selfhost-native`
+  退出 0（1m43s，project 106/106）；legacy 显式调用报错、LLVM 与默认路径
+  编译并运行 `hello` 正常。
+- 已知过渡红门（C5 统一迁移，不计入本轮失败）：`tests/bench/run_all.sh` 的
+  7 处 legacy 基线、`runtime-memory.py` 的 legacy 段、`llvm-darwin-target.py`
+  的 `legacy-build`/`legacy-run`、`llvm-darwin-selfhost.py` 的 A 代、
+  `native-selfhost.py --backend legacy`。
+- 未滚种子。
+
 ## 2026-10-21 CircleCI 三端全绿与 tag Release 验证
 
 - CircleCI 分支流水线在 `9438244` 三端全部 success：Linux/AArch64、
