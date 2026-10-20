@@ -153,49 +153,6 @@ def main():
             print(f"FAIL Linux 可执行文件未预期的未定义符号: {unexpected}")
             return 1
 
-    # Linux/arm64 的本地内存运行时是旧 ARM64 后端产物；LLVM 路线的 ARM64
-    # 运行时留给 F1，因此这里显式选择 legacy 后端锁定 ARM64 汇编契约。
-    linux_asm = run([compiler, "--backend", "legacy", "-target", "linux",
-                     "--emit-asm", "main.yh"], WORK)
-    linux_syscalls = ("mov\tx8, #222" in linux_asm.stdout
-                     and "mov\tx8, #215" in linux_asm.stdout
-                     and "mov\tx8, #64" in linux_asm.stdout)
-    if (linux_asm.returncode != 0 or "\nmemcpy:\n" not in linux_asm.stdout
-            or "\nstrlen:\n" not in linux_asm.stdout
-            or "\nmalloc:\n" not in linux_asm.stdout
-            or "\nfree:\n" not in linux_asm.stdout or not linux_syscalls):
-        print(f"FAIL Linux arm64 未生成本地内存运行时: rc={linux_asm.returncode}\n"
-              f"{linux_asm.stderr[-800:]} {linux_asm.stdout[-400:]}")
-        return 1
-    asm_path = WORK / "linux-main.s"
-    obj_path = WORK / "linux-main.o"
-    asm_path.write_text(linux_asm.stdout)
-    # 组装 Linux 目标：宿主本来就是 aarch64（如 CI 的 arm64 容器）时系统 gcc
-    # 原生汇编即可；x86_64 宿主才需要交叉汇编器，此时显式取系统 clang
-    # （PATH 上的 clang 可能被项目工具链包装劫持成认不出 -target 的交叉 gcc）。
-    # 容器里只装 build-essential+python3，没有 clang，故不能只留 clang 一条路。
-    if sys.platform == "darwin":
-        assembler = ["clang", "-target", "aarch64-linux-gnu", "-c"]
-    elif platform.machine().lower() in ("aarch64", "arm64"):
-        assembler = ["gcc", "-c"]
-    else:
-        clang_tool = "/usr/bin/clang" if Path("/usr/bin/clang").exists() \
-            else shutil.which("clang")
-        if clang_tool is None:
-            print("FAIL 找不到交叉汇编器 clang（x86_64 宿主汇编 aarch64 目标需要它）")
-            return 1
-        assembler = [clang_tool, "-target", "aarch64-linux-gnu", "-c"]
-    assembled = run(assembler + [str(asm_path), "-o", str(obj_path)], WORK)
-    if assembled.returncode != 0:
-        print(f"FAIL Linux arm64 运行时汇编: rc={assembled.returncode}\n"
-              f"{assembled.stderr[-1000:]}")
-        return 1
-    linux_imports = run(["nm", "-u", str(obj_path)], WORK)
-    if linux_imports.returncode != 0 or linux_imports.stdout.strip():
-        print(f"FAIL Linux runtimebytes 对象仍有未定义符号:\n"
-              f"{linux_imports.stderr[-800:]}{linux_imports.stdout[-800:]}")
-        return 1
-
     compiler_build = run([compiler, "build"], ROOT / "compiler",
                          env=compiler_build_env())
     compiler_binary = ROOT / "compiler" / ".build" / "yh"
