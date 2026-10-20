@@ -251,9 +251,9 @@ def main() -> int:
     ap.add_argument("--skip-corpus", action="store_true",
                     help="跳过两遍语料（仅当同一轮里 make test 已用等价编译器"
                          "跑过语料时才用；默认不跳过）")
-    ap.add_argument("--backend", choices=("auto", "legacy", "llvm"), default="auto",
-                    help="自举链使用的后端；auto 在 Linux/x86_64、Linux/AArch64 "
-                         "与 Darwin/ARM64 走 LLVM，其余平台沿用 legacy")
+    ap.add_argument("--backend", choices=("auto", "llvm"), default="auto",
+                    help="自举链使用的后端；LL12 后 LLVM 是唯一后端，"
+                         "legacy 已退役")
     args = ap.parse_args()
     args.jobs = max(1, args.jobs)
     WORK = Path(args.workdir)
@@ -282,41 +282,25 @@ def main() -> int:
             (sys.platform == "linux" and machine in ("x86_64", "amd64", "aarch64", "arm64"))
             or (sys.platform == "darwin" and machine in ("arm64", "aarch64"))))
     SELFHOST_LLVM = llvm_mode
-    transition_legacy = llvm_mode and not seed_supports_llvm(seed)
+    if not llvm_mode:
+        print("FAIL 该宿主没有 LLVM 自举后端（LL12 已退役 legacy）")
+        return 1
+    if not seed_supports_llvm(seed):
+        print("FAIL 启动种子不支持 LLVM：LL12 已退役 legacy，请先升级种子")
+        return 1
 
     ok = True
-    expected = expected_llvm_artifacts(COMPILER) if llvm_mode \
-        else expected_artifacts(COMPILER)
-    # 滚动种子可能早于或已包含 .s.ct / RS3b 按文件对象布局；首代只接受
-    # 这些历史完整产物集合之一，后续代必须全部使用当前格式并进入固定点。
-    legacy_expected = {path for path in expected if not path.endswith(".s.ct")}
+    expected = expected_llvm_artifacts(COMPILER)
     seed_flat = expected_seed_flat_artifacts(COMPILER)
-    if llvm_mode:
-        if transition_legacy:
-            # 启动种子只支持 legacy：cc2 用 legacy 编出带新默认的过渡代，
-            # cc3/cc4 再以 LLVM 连续自编；固定点从 cc3 开始比较。
-            legacy_expected = expected_artifacts(COMPILER)
-            d2 = build(seed, WORK / "cc2", "cc2", legacy_expected,
-                       (legacy_expected, seed_flat), llvm_mode=False, seed_link=True)
-        else:
-            d2 = build(seed, WORK / "cc2", "cc2", expected, llvm_mode=True,
-                       seed_link=True)
-        d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected, llvm_mode=True)
-        d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected, llvm_mode=True)
-    else:
-        d2 = build(seed, WORK / "cc2", "cc2", expected,
-                   (legacy_expected, seed_flat), seed_link=True)
-        d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected)
-        d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected)
+    d2 = build(seed, WORK / "cc2", "cc2", expected, llvm_mode=True, seed_link=True)
+    d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected, llvm_mode=True)
+    d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected, llvm_mode=True)
     print(f"cc2/cc3/cc4 构建完成（种子 = {seed}）")
 
-    # 1) 旧种子可产生一次迁移差异；最终候选相邻两代必须达到固定点。
-    if transition_legacy:
-        print("种子迁移：cc2 由旧种子以 legacy 编出，cc3→cc4 为 LLVM 固定点")
-    else:
-        transition = snapshot_errors([("cc2", d2), ("cc3", d3)], expected)
-        if transition:
-            print(f"种子迁移后续跑验证：cc2→cc3 有 {len(transition)} 项内容变化")
+    # 最终候选相邻两代必须达到固定点。
+    transition = snapshot_errors([("cc2", d2), ("cc3", d3)], expected)
+    if transition:
+        print(f"种子迁移后续跑验证：cc2→cc3 有 {len(transition)} 项内容变化")
     errors = snapshot_errors([("cc3", d3), ("cc4", d4)], expected)
     if errors:
         print("FAIL 模块固定点：", "；".join(errors))
