@@ -31,6 +31,16 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第十五刀：sem_expr 表达式发射剥离（C1 第九片）
+
+- `compiler/gen/sem_expr.yh` 1050→929 行：删除二元/一元/比较/逻辑短路/三元/
+  转换/下标/切片/成员访问的指令发射、标签分配、临时槽与值栈搬运。
+- 保留：类型规则与提升、常量折叠、全部诊断、`c_res_is_addr` 形态、枚举成员
+  表查询（`em_find/em_get_ready/em_get_val` 是语义表，不是发射）。
+- 验证：400 语料诊断快照零差异；算术/短路/分支用例通过；`make test` 退出 0；
+  `make selfhost-native` 退出 0（project 106/106）。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第十四刀：sem_call_literal 调用发射剥离（C1 第八片）
 
 - `compiler/gen/sem_call_literal.yh` 496→264 行：删除实参压栈/弹栈、栈参数
