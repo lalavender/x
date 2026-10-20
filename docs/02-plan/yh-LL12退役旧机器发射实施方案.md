@@ -82,6 +82,9 @@
   片搬运、栈参数、聚合入口拷贝、C 返回寄存器转换）；`sem_declare_param` 的
   C 分派改为普通登记，`sem_call` 的 `ABI_C` 分支只记录结果形态并保留
   noreturn 可达性；C 函数不受旧浮点参数上限约束（HFA 由 lowering 分类）。
+- **2026-10-21 第七片完成（表达式字面量）**：`parse/parse_expr.yh` 2058→2015 行，
+  删除数组/切片字面量的临时数组写入与切片描述符构造、类型谓词的常量装载；
+  保留元素解析、`sem_push_value` 值栈协议（留待 sem_call 片）与 AST 捕获。
 - 先把「只语义」变成唯一模式：以 `c_compile == 0` + `c_em_suppress`
   （`gen/sem_expr.yh`、`compiler/parse/parse_decl.yh`）为雏形，逐文件把
   混合函数拆成 `sem_*`（类型/值类别/诊断/CT）与 `emit_*`（发射）两段。

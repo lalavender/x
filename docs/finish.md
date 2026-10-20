@@ -31,6 +31,17 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第十三刀：parse_expr 字面量发射剥离（C1 第七片）
+
+- `compiler/parse/parse_expr.yh` 2058→2015 行：删除数组/切片字面量的临时数组
+  逐元素写入、切片描述符构造（`em_alloc_local`/`em_pop`/`em_store_sized`/
+  `em_lea_local*`/`em_frag`/`em_ins`）与类型谓词的 `em_mov_imm`。
+- 保留元素解析与类型检查、`sem_push_value` 值栈协议（留待 sem_call 片）、
+  结果形态（`c_res_is_addr`）与 AST 捕获。
+- 验证：`\bem_` 在该文件零命中；400 语料诊断快照零差异；切片/聚合用例通过；
+  `make test` 退出 0；`make selfhost-native` 退出 0（project 106/106）。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第十二刀：C ABI 发射层删除（C1 第六片）
 
 - 删除 `compiler/gen/sem_cabi.yh`（246 行）：GPR/FPR 片搬运、栈参数、
