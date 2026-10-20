@@ -31,6 +31,16 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第八刀：sem_decl 发射剥离（C1 第二片）
+
+- `compiler/gen/sem_decl.yh` 314→234 行：删除 `em_new_label`、`em_alloc_local`、
+  `em_save_hidden_ret`、`em_prologue`、`em_copy_body`、`em_epilogue` 与聚合参数
+  入口拷贝；保留不透明 C 类型/浮点参数上限/noreturn 校验、C ABI 分派、
+  `sym_push` 登记与 `F_AGGPARAM` 事实。
+- 验证：`em_` 在该文件零命中；400 语料诊断快照零差异；`make test` 退出 0；
+  `make selfhost-native` 退出 0（project 106/106）；单文件 `-o` 正常。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第七刀：CT 数据发射剥离（C1 首片）
 
 - `compiler/comptime/ct_ir_data.yh` 181→119 行：删除 `.zero`/`.xword`/`.balign`/

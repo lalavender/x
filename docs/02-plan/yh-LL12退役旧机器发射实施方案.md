@@ -62,6 +62,10 @@
   接口加载时的本地标签登记独立为 `ct_ir_data_bind_iface_label`（只写 `cval`
   与 `c_data_n`，不写 `.LD` 文本）。验证：400 语料快照零差异、`make test`
   与 `selfhost-native`（106/106）全绿。
+- **2026-10-21 第二片完成（函数/参数）**：`gen/sem_decl.yh` 314→234 行，
+  删除标签/栈槽/`em_save_hidden_ret`/`em_prologue`/`em_copy_body`/`em_epilogue`
+  与聚合参数拷贝；保留不透明类型、浮点参数上限、noreturn 校验、C ABI 分派、
+  符号登记与 `F_AGGPARAM` 事实。
 - 先把「只语义」变成唯一模式：以 `c_compile == 0` + `c_em_suppress`
   （`gen/sem_expr.yh`、`compiler/parse/parse_decl.yh`）为雏形，逐文件把
   混合函数拆成 `sem_*`（类型/值类别/诊断/CT）与 `emit_*`（发射）两段。
