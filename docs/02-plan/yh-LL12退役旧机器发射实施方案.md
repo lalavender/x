@@ -123,6 +123,10 @@
 - **2026-10-21 首片完成**：删除 `backend/arm64.yh`（441 行）与
   `backend/arm64_call.yh`（115 行，`arm64_emit_replace` 已无消费者）；
   清理 `comptime/ct_registry.yh` 与 `cmd/compile.yh` 的最后 5 处残留发射。
+- **2026-10-21 第二片完成**：删除 `gen/emit_arm64.yh`（1227 行）与
+  `gen/buffer.yh` 的 `em_*/dat_*/bss_*/flush_output*/flush_asm_ranges`
+  （661→365 行）；`hexval` 迁入 `gen/state.yh`；`llvmfront` fixture 改为
+  只验证受检前端边界（原「旧输出为零」断言随 API 删除而过时）。
 
 - 删除 `gen/emit_arm64.yh`、`gen/emit_runtime_memory.yh`、`backend/arm64.yh`、
   `backend/arm64_call.yh`；删除 `gen/buffer.yh` 的 `em_*/dat_*/bss_put*` 与

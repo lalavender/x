@@ -31,6 +31,20 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第十八刀：删除 emit_arm64 与四缓冲（C2 第二片）
+
+- 删除 `compiler/gen/emit_arm64.yh`（1227 行）；`hexval` 迁入
+  `compiler/gen/state.yh`（语义层共用）。
+- `compiler/gen/buffer.yh` 661→365 行：删除 `em_put/em_puts/em_puti`、
+  `dat_put*`、`bss_put*`、`flush_output`、`flush_output_fd`、`flush_asm_ranges`；
+  保留 `append_*`/`out_grow`/`read_source`/诊断等通用工具。
+- `tests/modules/projects/llvmfront/main/main.yh` 迁移：原用例断言「旧四缓冲
+  为零」并调用 `em_puts/dat_puts/em_bss_symbol`；改为只验证受检前端的
+  进入/校验/退出/再次进入。
+- 验证：400 语料诊断快照零差异；`make test` 退出 0；`make selfhost-native`
+  退出 0（project 106/106）。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第十七刀：删除旧 arm64 后端（C2 首片）
 
 - 删除 `compiler/backend/arm64.yh`（441 行）与 `arm64_call.yh`（115 行）：
