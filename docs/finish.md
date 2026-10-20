@@ -31,6 +31,18 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第十六刀：sem_flow 流程发射剥离（C1 完成）
+
+- `compiler/gen/sem_flow.yh` 545→410 行：删除 `sem_assign` 取改存、`sem_forin_*`、
+  `goto`/`label`、`break`/`continue` 的指令发射、槽与标签分配。
+- 保留：类型检查、循环上下文与 break/continue 标记、`goto` 登记与诊断、
+  for-in 元素/下标绑定事实。
+- **C1 完成**：`gen/sem_*`、`parse/*`、`comptime/*` 不再调用任何 `em_*`；
+  剩余 `em_*` 定义只存在于发射器自身（下一阶段 C2 删除）。
+- 验证：400 语料诊断快照零差异；循环/switch/全局/for-in 用例通过；
+  `make test` 退出 0；`make selfhost-native` 退出 0（project 106/106）。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第十五刀：sem_expr 表达式发射剥离（C1 第九片）
 
 - `compiler/gen/sem_expr.yh` 1050→929 行：删除二元/一元/比较/逻辑短路/三元/

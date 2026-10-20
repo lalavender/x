@@ -93,6 +93,10 @@
   删除二元/一元/比较/转换/下标/切片/成员/三元/短路的指令发射与值栈搬运；
   保留类型规则、常量折叠、诊断、`c_res_is_addr` 与枚举成员表查询
   （`em_find/em_get_ready/em_get_val` 不是发射，保留）。
+- **2026-10-21 第十片完成（流程）**：`gen/sem_flow.yh` 545→410 行，删除
+  `sem_assign` 取改存、`sem_forin_*`、goto/label、break/continue 的指令发射、
+  槽与标签分配；保留类型检查、循环/break 上下文、`goto` 登记与诊断。
+  **C1 完成**：`gen/sem_*`、`parse/*`、`comptime/*` 不再调用任何 `em_*`。
 - 先把「只语义」变成唯一模式：以 `c_compile == 0` + `c_em_suppress`
   （`gen/sem_expr.yh`、`compiler/parse/parse_decl.yh`）为雏形，逐文件把
   混合函数拆成 `sem_*`（类型/值类别/诊断/CT）与 `emit_*`（发射）两段。
