@@ -31,6 +31,25 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 退役验收（本分支静态与门禁证据）
+
+- **代码规模**：`compiler/` 自分支起点 `e5e81ac` 累计 **+241 / -6757 行**
+  （净 -6516），涉及 38 个文件。
+- **删除的实现**：`gen/emit_arm64.yh`、`gen/emit_runtime_memory.yh`、
+  `backend/arm64.yh`、`backend/arm64_call.yh`、`ast/ast_ir_cache.yh`、
+  `ast_ir_inline.yh`、`ast_ir_control.yh`、`ast_ir_template.yh`、
+  `gen/sem_cabi.yh`；`gen/buffer.yh` 的四缓冲原语、`gen/state.yh` 的
+  `TaskCtx` 缓冲字段、`c_backend`/`target_legacy_ready` 等全部移除。
+- **剩余 `em_*` 引用**：`parse/parse_decl.yh`（`em_add`）、
+  `parse/parse_ct_layout.yh`（`em_update_value`）、`comptime/ct_ir_place.yh`
+  与 `gen/sem_expr.yh`（`em_find/em_get_ready/em_get_val`）、`gen/state.yh`
+  （枚举成员表定义）——均为语义基础设施，不是机器发射。
+- **门禁**：`make test`（348/349，1 平台跳过）、`make selfhost-native`
+  （固定点、自解析、project 106/106）全绿；400 语料诊断快照零差异。
+- **待办**：Linux/arm64 与 Linux/x64 的 CI 复核（本机 Darwin 无法覆盖）；
+  `AGENTS.md` 与替换设计文档的「legacy 过渡」表述收尾；滚种子。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第二十刀：C5 门禁迁移（首片）
 
 - `tests/selfhost/runtime-memory.py`：删除 Linux/arm64 的 legacy 汇编契约段
