@@ -98,10 +98,6 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 | `ast/ast_ir.yh` | builder 指令表辅助（LL12：旧 SSA 编排已退役） |
 | `ast/ast_ir_build.yh` | 受支持函数的 AST → typed SSA 构造器 |
 | `ast/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
-| `ast/ast_ir_control.yh` | 局部赋值、受限分支 CFG/phi 与 SSA 临时缓冲管理 |
-| `ast/ast_ir_inline.yh` | 编译期内联候选登记与套用 |
-| `ast/ast_ir_template.yh` | 普通函数编译期 `$for` typed AST 模板的 SSA 区间实例化 |
-| `ast/ast_ir_cache.yh` | 目标隔离的函数 IR 内容键、缓存读取与写入 |
 
 **check** —— AST arena 与独立快照的一致性校验
 
@@ -139,15 +135,12 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | `gen/buffer.yh` | 源文件整读（open/read/close）、汇编输出缓冲、诊断、字节写出 |
 | `gen/symbols.yh` | 名字池、类型表、符号/作用域、类型兼容、常量折叠、prelude 登记 |
 | `gen/target.yh` | 目标数据模型：字长、对齐、结构体布局（**换平台的第一步**） |
-| `gen/sem_value.yh` | 值栈与求值辅助（`sem_push_value`、`sem_cast` 等） |
-| `gen/sem_expr.yh` | 表达式语义：下标、成员、调用发码 |
-| `gen/sem_decl.yh` | 声明语义：局部/全局符号登记、结构体与函数布局 |
-| `gen/sem_flow.yh` | 控制流语义：if/for/for-in/switch 的跳转与出口 |
-| `gen/sem_call_literal.yh` | 调用点实参搬运：聚合按值拷贝、混合 x0/d0 弹出、变参打包 |
+| `gen/sem_value.yh` | 字面量/标识符求值、常量折叠与值类别（LL12：无发射） |
+| `gen/sem_expr.yh` | 表达式语义：下标、成员、运算、转换、切片（LL12：无发射） |
+| `gen/sem_decl.yh` | 声明语义：符号登记、结构体布局与函数参数/返回事实 |
+| `gen/sem_flow.yh` | 控制流语义：类型检查、循环上下文与可达性（LL12：无跳转发射） |
+| `gen/sem_call_literal.yh` | 调用点语义：实参检查、变参打包记录与结果形态（LL12：无搬运） |
 | `gen/abi_c.yh` | 共享 AArch64 C ABI 分类：值描述、HFA、寄存器与目标栈布局 |
-| `gen/sem_cabi.yh` | 固定参数 C 调用、入口与返回转换，聚合在函数体内保持地址表示 |
-| `gen/emit_arm64.yh` | AArch64 指令发射：值栈、访存、控制流、调用约定、段与符号 |
-| `gen/emit_runtime_memory.yh` | 自有 arm64 `memcpy`/`strlen` 运行时入口发射 |
 
 **ir / backend** —— 受检函数的独立表示与目标发射
 
@@ -155,7 +148,6 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | --- | --- |
 | `ir/ssa.yh`、`ir/ssa_call.yh` | typed SSA、整数转换、CFG/verifier 与直接调用契约 |
 | `ir/ssa_serialize.yh` | 含调用目标与实参的稳定 IR 编码 |
-| `backend/arm64.yh`、`backend/arm64_call.yh` | SSA arm64 发射、寄存器/栈调用约定 |
 
 **cmd** —— CLI 与项目管理
 
@@ -171,25 +163,21 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | `cmd/build_scheduler.yh` | 有界 fork worker、继承只读项目快照、接口就绪调度与本轮接口隔离 |
 | `cmd/clock.*.yh` | `--stats` 阶段耗时；Darwin 单调时钟 API 与 Linux arm64 clock syscall |
 | `cmd/process.yh` | 用 `fork/execvp/waitpid` 按 argv 启动宿主进程，不经 shell |
-| `cmd/link_cache.yh` | 模块 `.s` 到 `.o` 的内容缓存、最终程序缓存与外部链接 |
+| `cmd/link_cache.yh` | 模块对象与最终程序的内容缓存、内嵌 lld/外部驱动链接 |
 
 普通配置默认不登记 `system(cmd)`；`--legacy-system` 为迁移期显式兼容开关。
 自举构建使用默认配置。编译器入口接收 `envp`，直接读取 `PATH` 与
 `YH_STDLIB`；构建与临时目录使用 `mkdir` OS API。项目目录扫描由 Darwin
 `getattrlistbulk` 与 Linux arm64 `getdents64` 适配完成，
-不再调用 `/bin/ls`；Linux syscall 由后端直接发射。系统汇编器/链接器以及
-`malloc`、`free` 等通用 C 服务仍待替换或审计；arm64 的 `memcpy` 与 `strlen`
-已由 `gen/emit_runtime_memory.yh` 发射为本地运行时入口，并纳入自举导入审计。
+不再调用 `/bin/ls`；Linux 系统调用经 LLVM 运行时入口完成。系统汇编器/链接器与
+`malloc`、`free` 等 C 服务由 LLVM 运行时与内嵌 lld 承担；LL12 已删除旧 arm64
+内存运行时发射。
 
-`compiler/ir/` 是独立的 typed SSA 子项目，由 `compiler/project.toml` 以本地 path
-依赖引入，也由 `tests/modules/projects/irverify/` 直接依赖并运行验收。build 在 AST
-校验后会把有限的标量参数、顺序单绑定 `let` 初始化、整数 `to_type` 和公共整数类型提升、同类型标量赋值（`=`、`+=`、`-=`、`*=`）、
-表达式 return、双臂 if/else return、单层分支中更新参数或分支前初始化的局部值并在合流点 return，
-以及固定参数整数/布尔直接调用降低为 SSA 并校验。合流时发生变化的绑定用双前驱 phi 表示；
-实参是**整数字面量**时按形参类型取值（与旧语义层的字面量适配同判据）；
-受支持函数由 arm64 SSA 后端发射，其余函数仍由旧发射器生成汇编。2026-10-13 实测自编项目
-991 个函数上下文 22 个进入 SSA（`yh build --stats` 逐模块 `functions`/`ir_functions` 求和），
-完整前端/后端迁移仍在进行。
+`compiler/ir/` 是独立的模块 IR 子项目，由 `compiler/project.toml` 以本地 path
+依赖引入，也由 `tests/modules/projects/irverify/` 直接依赖并运行验收。
+LL12 后受检快照统一经 `ast/module_snapshot_lower.yh` 降低为 `ir.IRModule`，
+再由 `backend/llvm_*.yh` 发 LLVM 文本；旧「函数级 SSA + 汇编替换」链已删除，
+`ast/ast_ir*.yh` 只保留 builder 底层与共享调用缓冲。
 
 ## 已实现的语义
 
@@ -208,11 +196,12 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 
 ## 架构与多平台
 
-后端分三层，边界即多平台接入缝：前端语义（`gen/symbols.yh` +
-`gen/sem_*.yh` + `parse/parse_*.yh` + `ast/ast_*.yh` + `check/verify.yh`）→ 目标数据模型（`gen/target.yh`）→
-指令发射（`gen/emit_arm64.yh`）。前端只调用 `em_*` 抽象机原语，不含 ISA
-细节；换目标 = 新数据模型 + 新 `emit_<isa>.yh`。原语契约与换平台步骤详见
-[自举后端架构](../docs/03-design/yh-自举后端架构.md)。
+后端分三层：前端语义（`gen/symbols.yh` + `gen/sem_*.yh` +
+`parse/parse_*.yh` + `ast/ast_*.yh` + `check/verify.yh`）→ 受检快照/模块 IR
+（`ast/module_snapshot*.yh`、`ir/ssa_module_*.yh`）→ LLVM 发射
+（`backend/llvm_*.yh` + 内嵌桥）。前端不持有 ISA 状态；换目标 = 目标身份 +
+对应 LLVM 目标库。LL12 已删除 `em_*` 抽象机原语与旧 arm64 发射器，
+历史架构见[自举后端架构](../docs/03-design/yh-自举后端架构.md)。
 
 ## 自编子集与已知边界
 
