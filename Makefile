@@ -14,6 +14,7 @@
 #   * make uninstall  卸载
 #   * make explorer   启动 yh Compiler Explorer（本地浏览器图形界面）
 #   * make llvm-host  准备内嵌静态 LLVM 宿主（LL3；首次需要联网取固定 SDK）
+#   * make bootstrap  准备固定 LLVM 宿主后冷编（首次/换机的一条命令）
 #   * make clean      清理
 #
 # 可在命令行覆盖：SEED（编译种子路径）。Linux CI 用匹配架构的 ELF 种子。
@@ -26,12 +27,17 @@
 # 改用固定工具链并追加桥归档与静态 LLVM 参数。链接哪个架构由种子文件名
 # 决定（x86_64 宿主上用 bin/yh-linux-arm64 时产物仍是 aarch64 ELF）。
 #
-#   YH_LLVM_HOST=auto（默认）宿主已准备才链入；缺少 SDK/身份失效时打印
-#                 明确诊断并按原路径构建，绝不让 LLVM 成为失败点；
+#   YH_LLVM_HOST=auto（默认）宿主已准备才链入；缺少固定闭包时打印明确诊断；
+#                  Darwin 新种子不再内置闭包路径，自举链接会报「缺少 LLVM 闭包」；
 #   YH_LLVM_HOST=1 显式要求：必要时联网准备固定 SDK，准备不了则构建失败；
-#   YH_LLVM_HOST=0 关闭（完全不介入）。
+#   YH_LLVM_HOST=0 关闭（不准备固定闭包；种子无内置闭包时链接会明确报错）。
+# 自举闭包由构建机提供：tools/llvm-darwin-host.py prepare 生成的
+# selfhost-flags.txt 经 YH_LLVM_SELFHOST_FLAGS 传给种子（Zig 式：闭包路径
+# 属于构建环境，不烘焙进种子）。
 #
-# 旧路径全门（make test / make selfhost-native）在 auto 与 0 下都必须保持绿。
+# 旧路径全门（make test / make selfhost-native）在 auto 下必须保持绿；
+# YH_LLVM_HOST=0 不准备固定闭包：旧种子仍用自身烘焙路径，新种子会在链接阶段
+# 明确报缺少闭包，LLVM 专项门随后失败。
 # --------------------------------------------------------------------------
 
 ifndef TOP
@@ -139,6 +145,12 @@ endif
 # Darwin 测试/自举统一使用随编译器分发的 SDK stub；显式 SDKROOT 仍优先。
 ifeq ($(HOST_SYSTEM),Darwin)
  export YH_DARWIN_SDK = $(abspath compiler/darwin-sdk)
+ # 固定 SDK 一旦准备好，就用它的 SDKROOT：自举闭包末尾的 -lc++ 只能由宿主
+ # 真实 SDK 解析（bundled stub 不含 libc++）。显式 SDKROOT 仍然优先。
+ DARWIN_SDK_RECORD = $(TOPSRC)/tmp/llvm-migration/darwin-sdk/sdk-darwin-aarch64/host.json
+ ifneq ($(wildcard $(DARWIN_SDK_RECORD)),)
+  export SDKROOT ?= $(shell python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sdk_root"])' '$(DARWIN_SDK_RECORD)')
+ endif
 endif
 YH_LLVM_HOST ?= auto
 LLVM_HOST =
@@ -175,6 +187,8 @@ ifeq ($(LLVM_HOST),darwin-aarch64)
  RUNTIME_TEST = python3 $(TOPSRC)/tests/selfhost/llvm-darwin-runtime.py --compiler-path $(YH_RUN)
  CACHE_TEST = python3 $(TOPSRC)/tests/selfhost/llvm-darwin-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF)
  MODCHECK_FLAGS = --backend llvm
+ # 自举闭包门：证明闭包来自构建机的 selfhost-flags.txt，而不是种子内烘焙路径。
+ SELFHOST_FLAGS_TEST = python3 $(TOPSRC)/tests/selfhost/llvm-darwin-selfhost-flags.py --compiler-path $(YH_RUN)
 else ifeq ($(LLVM_HOST),linux-x86_64)
  # x64 默认 LLVM 后端下，runtime-memory 的内存运行时契约由 LLVM x64 导入审计覆盖；
  # 完整 legacy 形态（含 ARM64 汇编）留给 arm64/Darwin 宿主。
@@ -200,6 +214,12 @@ llvm-host:
 	else \
 	  python3 $(TOPSRC)/tools/llvm-host.py prepare --host $(LLVM_HOST); \
 	fi
+
+# bootstrap：准备固定 LLVM 宿主（幂等）后冷编，首次/换机的一条命令。
+# 顺序由子 make 保证，避免 -j 下 llvm-host 与 all 并发。
+.PHONY: bootstrap
+bootstrap: llvm-host
+	@$(MAKE) all
 
 .PHONY: verify-seed
 verify-seed:
@@ -269,6 +289,7 @@ selfhost-native: stage-yh
 	python3 $(TOPSRC)/tests/selfhost/scratch-isolation.py --compiler-path $(YH_RUN) --jobs 4
 	python3 $(TOPSRC)/tests/selfhost/lex-stats.py --compiler-path $(YH_RUN)
 	$(RUNTIME_TEST)
+	$(SELFHOST_FLAGS_TEST)
 	python3 $(TOPSRC)/tests/selfhost/check-command.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/selfhost/foreign-fs-build.py --compiler-path $(YH_RUN)
 	$(CACHE_TEST)
@@ -324,6 +345,7 @@ test-llvm-darwin: stage-yh
 	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-bundled-sdk.py --compiler-path $(TOPSRC)/yh$(EXESUF)
 	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-selfhost.py --self-test
 	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-runtime.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-selfhost-flags.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/selfhost/llvm-darwin-link.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tools/llvm-darwin-host.py status --host darwin-aarch64
 
@@ -353,8 +375,8 @@ clean:
 	rm -rf compiler/.build tmp/selfbuild-gate tmp/selfhost tmp/modcheck
 
 help:
-	@sed -n '2,19p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,20p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all quick full explorer seed selfhost-native clean help llvm-host stage-yh test-llvm-darwin selfhost-llvm-darwin
+.PHONY: all install uninstall test test-all quick full explorer seed selfhost-native clean help llvm-host bootstrap stage-yh test-llvm-darwin selfhost-llvm-darwin
 
 endif # ($(INCLUDED),no)

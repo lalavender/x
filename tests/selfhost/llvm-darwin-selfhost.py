@@ -62,10 +62,17 @@ def macho_cpu_type(path: Path) -> int:
 
 
 def base_environment() -> dict:
-    """构造构建环境：显式 SDKROOT，剔除会改变后端选择的变量。"""
+    """构造构建环境：显式 SDKROOT、自举闭包文件，剔除会改变后端选择的变量。"""
     environment = dict(os.environ)
     environment.pop("YH_LLVM_SELFHOST", None)
     environment.pop("YH_CC", None)
+    # 自举闭包由构建机提供（种子不再烘焙绝对路径）；与 make / seed-build
+    # 使用同一份 selfhost-flags.txt，换机器只需重新 prepare。
+    if HOST_RECORD.is_file():
+        record = json.loads(HOST_RECORD.read_text(encoding="utf-8"))
+        flags_file = record.get("selfhost_flags_file")
+        if flags_file:
+            environment["YH_LLVM_SELFHOST_FLAGS"] = str((ROOT / flags_file).resolve())
     if not environment.get("SDKROOT") and SDK_RECORD.is_file():
         record = json.loads(SDK_RECORD.read_text(encoding="utf-8"))
         if record.get("sdk_root"):
@@ -411,6 +418,10 @@ def main() -> int:
     # 桥与 LLVM/lld 静态闭包；普通程序与探针保持不注入。
     build_env = dict(env)
     build_env["YH_LLVM_SELFHOST"] = "1"
+    flags_file = Path(build_env.get("YH_LLVM_SELFHOST_FLAGS", ""))
+    if not flags_file.is_file():
+        raise RuntimeError("缺少自举闭包文件：先运行 make llvm-host"
+                           "（tools/llvm-darwin-host.py prepare）")
     frozen = {"A": {"legacy": True}}
     final_candidates = {}
     for level in LEVELS:

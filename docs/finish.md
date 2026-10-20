@@ -2,6 +2,55 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-20 构建简化：一条命令、失败前置、身份去路径
+
+- `make bootstrap`：幂等 `llvm-host` + 冷编，首次/换机只需一条命令；
+  `make llvm-host` 保留为“只准备闭包”。
+- Darwin 固定 SDK 就绪后 Makefile 自动 `export SDKROOT`（显式值优先），
+  `make test` / `make selfhost-native` 不再需要手工导出，C 互操作 9 个
+  project case 恢复。
+- `tools/llvm-darwin-sdk.py` 在 `resolve_sdk_root` 期间拒绝含 `arm64e.x1`
+  的 TAPI（与 `llvm-darwin-sdk-bundle.py` 的 `KNOWN_UNSUPPORTED` 同边界），
+  SDK 27 在秒级失败并提示 26.x，不再浪费整轮 LLVM 构建；SDK 契约门补正反例。
+- `tools/llvm-darwin-host.py` 的 `lld_identity` 去掉 `sdk_root` 与
+  `selfhost_flags` 路径，只保留归档内容与构建参数：同一份源码/归档在不同
+  worktree 生成相同身份的编译器（跨机可复现的前提）。
+- **验证**（无 `SDKROOT`、默认 PATH）：`make bootstrap`、`make test`（348/349）、
+  `make selfhost-native`（固定点、自解析、语法 42/42、运行 348/349、
+  modules 18/18、project 105/105、runtime/cache/闭包门全 PASS）、
+  `make test-llvm-darwin`、`make selfhost-llvm-darwin` 全绿；滚种子后
+  `bin/yh-darwin-arm64`（`c3b0c9b7…`，73,541,840 B）仍 0 处构建机路径，
+  复跑 `make test` / `make selfhost-native` 全绿。
+## 2026-10-20 Darwin 自举闭包改为构建机提供（Zig 式）
+
+- **背景**：0.0.5 种子把桥与 LLVM/lld 静态闭包的 73 处构建机绝对路径编进 lld
+  配置，`make`/`make selfhost-native` 只在种子构建机的路径下可用；换机器/换
+  worktree 会链接不存在的归档，`-lc++` 也只能由宿主 SDK 解析。
+- **改动**：
+  - `compiler/llvm/lld_bridge.cpp`：新增 `YH_LLVM_SELFHOST_FLAGS`（每行一个
+    参数）运行时读取；文件不可读返回 -1、空文件视为无效；桥内常量只作过渡回退。
+  - `compiler/cmd/link_cache.yh` / `darwin_link.yh`：闭包计数与参数统一走访问器，
+    缺失/损坏给出可操作诊断；闭包参数计入 Darwin 链接键（换闭包即重链接）。
+  - `tools/llvm-darwin-host.py`：`prepare` 生成 `selfhost-flags.txt` 并把路径与
+    摘要写进 `host.json`；`lld_link_config.h` 不再烘焙闭包；`shim` 输出该文件。
+  - `tools/seed-build.py`：`--llvm-mode off` 不再注入自举标记；准备成功时导出
+    `YH_LLVM_SELFHOST_FLAGS`。
+  - 自举脚本：`native-selfhost.py` 第一代经 `YH_CC` 用本机 shim 链接，避免旧种子
+    把旧桥带进新编译器；`llvm-darwin-selfhost.py` 从 `host.json` 读取闭包文件。
+  - 新门 `tests/selfhost/llvm-darwin-selfhost-flags.py`：普通链接不注入、运行时
+    文件优先（坏路径进入诊断）、缺失/空文件有诊断、真实闭包可链接运行且无动态
+    LLVM；`make selfhost-native` 与 `make test-llvm-darwin` 均接入。
+  - 种子卫生：`tools/selfhost_snapshot_gate.py` 增加 `$HOME` 路径检查，
+    `make seed` 拒绝带构建机路径的种子，`--verify-seed` 对旧种子只告警。
+- **验证**（Darwin/ARM64，`SDKROOT=.../MacOSX26.5.sdk`）：
+  - `make`、`make test`（348/349，1 SKIP）、`make selfhost-native` 全绿：
+    固定点、自解析 104 文件、语法 42/42、运行 348/349、modules 18/18、
+    project 105/105，runtime/cache/闭包门全 PASS。
+  - 滚种子后 `bin/yh-darwin-arm64`（`ad52b36c…`，73,541,840 B）中构建机路径
+    0 处；把种子复制到 `tmp/reloc/` 冷编候选编译器仍成功。
+- **边界**：首次仍需 `make llvm-host`（569MB 固定 SDK）；SDK 27 的
+  `arm64e.x1` TAPI 超出内嵌 lld 21，暂用 26.5；`compiler/darwin-sdk` 仍不含
+  libc++（交叉构建边界见遗留边界文档）。
 ## 2026-10-19 自带 Darwin SDK stub（Zig 式交叉链接）
 
 - `compiler/darwin-sdk/` 增加聚合 `usr/lib/libSystem.tbd`（334KB，Apple SDK

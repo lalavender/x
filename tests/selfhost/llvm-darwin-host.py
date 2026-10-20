@@ -89,6 +89,13 @@ def main():
             and '"-force_load"' in header
             and '"/tmp/libbridge.a"' in header and '"-lc++"' in header,
             "Darwin 自举链接闭包没有编入 lld 配置")
+    # 自举闭包：构建机提供的文件必须是「每行一个参数」，空闭包写空文件。
+    text = host["selfhost_flags_text"](["-force_load", "/tmp/libbridge.a", "-lc++"])
+    require(text == "-force_load\n/tmp/libbridge.a\n-lc++\n",
+            "自举闭包文件必须是每行一个参数且以换行结尾")
+    require(host["selfhost_flags_text"]([]) == "", "空闭包必须写成空文件")
+    require(host["selfhost_flags_path"]().name == "selfhost-flags.txt",
+            "自举闭包文件名必须稳定，构建机与门禁按名字发现")
     print("PASS Darwin LLVM host 契约：编译透传、查询透传、链接注入与参数保留")
 
 

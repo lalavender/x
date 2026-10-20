@@ -776,6 +776,20 @@ fn mb_link(out_path *char, build_off int, build_len int,
     let gs *gen.GenState = gen.G();
     let use_lld int = mb_lld_x64_enabled();
     let use_macho int = mb_lld_darwin_enabled();
+    // 自举闭包由构建机提供：优先读 YH_LLVM_SELFHOST_FLAGS 指向的文件，
+    // 未提供时桥内烘焙常量作为过渡回退。负数是文件不可读，0 是没有任何闭包
+    // （新种子不再烘焙绝对路径），两种情况都要立刻给出可操作诊断。
+    let selfhost_on int = mb_darwin_selfhost_enabled();
+    let selfhost_flag_n int = 0;
+    if (use_macho != 0 && selfhost_on != 0) {
+        selfhost_flag_n = backend.llvm_lld_selfhost_flag_count();
+        if (selfhost_flag_n < 0) {
+            return gen.fail("自举链接闭包文件不可读：检查 YH_LLVM_SELFHOST_FLAGS（每行一个链接参数）");
+        }
+        if (selfhost_flag_n == 0) {
+            return gen.fail("自举链接缺少 LLVM 闭包：先运行 make llvm-host，或用 YH_LLVM_SELFHOST_FLAGS 指定闭包文件");
+        }
+    }
     let object_start_ns u64 = 0;
     if (gs.c_stats_enabled != 0) {
         object_start_ns = cmd_clock_ns();
@@ -1162,8 +1176,7 @@ fn mb_link(out_path *char, build_off int, build_len int,
     }
     let argc int = total_rows + c_object_n + c_lib_n + 20
         + (library_search_count * 2)
-        + (mb_darwin_selfhost_enabled() != 0
-            ? backend.llvm_lld_selfhost_flag_count() : 0);
+        + selfhost_flag_n;
     let args **char = malloc((argc * sizeof(*char)).to_type(u64)).to_type(**char);
     let paths *u8 = malloc((total_rows * 900).to_type(u64)).to_type(*u8);
     let cpaths *u8 = malloc(((c_object_n > 0 ? c_object_n : 1) * 700).to_type(u64)).to_type(*u8);
@@ -1309,13 +1322,12 @@ fn mb_link(out_path *char, build_off int, build_len int,
     } else if (use_macho != 0) {
         // 编译器自举：Darwin raw lld argv 由 yh 侧拼装，需要把桥与
         // LLVM/lld 静态闭包以 force_load 形式追加；普通程序不注入。
-        if (mb_darwin_selfhost_enabled() != 0) {
-            let flag_n int = backend.llvm_lld_selfhost_flag_count();
-            if (flag_n > 0 && next_arg + flag_n > argc) {
+        if (selfhost_on != 0) {
+            if (next_arg + selfhost_flag_n > argc) {
                 return gen.fail("Darwin 自举链接参数超出 argv 容量");
             }
             let fi int = 0;
-            for fi < flag_n {
+            for fi < selfhost_flag_n {
                 let flag *char = backend.llvm_lld_selfhost_flag(fi);
                 if (flag == 0 || flag[0] == 0) {
                     return gen.fail("Darwin 自举链接参数无效");

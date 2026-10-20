@@ -26,12 +26,13 @@ HOST_DRIVERS = {
 }
 
 
-def llvm_shim(host: str, mode: str) -> Path | None:
-    """请求链接包装器目录；不可用时按模式返回 None 或抛错。
+def prepare_llvm_host(host: str, mode: str) -> dict | None:
+    """请求本机固定 LLVM 宿主记录；不可用时按模式返回 None 或抛错。
 
-    返回值是包装器所在目录（内含名为 gcc 的包装器），调用方把它前置到
-    子进程 PATH。失败信息取自驱动自身的 stderr，保证诊断里带着
-    「缺什么」与「下一步跑什么命令」。
+    返回值是 tools/llvm-*-host.py `shim` 子命令的 JSON 记录：`shim_dir` 是链接
+    包装器目录，`selfhost_flags` 是「每行一个参数」的闭包文件。调用方把包装器
+    目录前置到 PATH，并把闭包文件通过 YH_LLVM_SELFHOST_FLAGS 传给种子。闭包
+    路径属于构建机（Zig 式做法：配方由构建环境给出，不编进种子）。
     """
     if mode == "off":
         print(f"提示：YH_LLVM_HOST=0，本次不接入内嵌 LLVM 桥（{host}）", file=sys.stderr)
@@ -44,15 +45,15 @@ def llvm_shim(host: str, mode: str) -> Path | None:
         detail = result.stderr.strip() or result.stdout.strip() or f"退出码 {result.returncode}"
         if mode == "require":
             raise RuntimeError(f"显式要求链入内嵌 LLVM 桥，但准备失败：{detail}")
-        print(f"警告：本次未链入内嵌 LLVM 桥，按原路径（系统 cc）构建。\n{detail}",
-              file=sys.stderr)
+        print(f"警告：本次未准备固定 LLVM 闭包，自举链接将回退到种子内烘焙的路径"
+              f"（仅过渡种子可用；新种子会报缺少闭包）。\n{detail}", file=sys.stderr)
         return None
     record = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
     sdk_identity = record.get("sdk_sha256", record.get("sdk_host_sha256", "unknown"))
     print(f"内嵌 LLVM 桥已接入链接：host={record['host']} "
           f"bridge={record['bridge_sha256'][:12]} sdk={sdk_identity[:12]} "
           f"shim={record['shim_dir']}", file=sys.stderr)
-    return Path(record["shim_dir"])
+    return record
 
 
 def main() -> int:
@@ -80,17 +81,25 @@ def main() -> int:
     output = Path(args.output).resolve()
     environment = dict(os.environ)
     # 只有构建 compiler/ 自身才把固定桥/LLVM 闭包注入最终链接；普通项目
-    # 不能继承该标记，否则会把 LLVM 静态库链进用户程序。
+    # 不能继承该标记，否则会把 LLVM 静态库链进用户程序。`--llvm-mode off`
+    # 只表示本次不准备固定闭包：旧种子仍会用自身烘焙的路径，新种子没有内置
+    # 路径，链接阶段会明确报「缺少 LLVM 闭包」。
     if project == (ROOT / "compiler").resolve():
         environment["YH_LLVM_SELFHOST"] = "1"
     if args.llvm_host:
-        shim = llvm_shim(args.llvm_host, args.llvm_mode)
-        if shim:
+        record = prepare_llvm_host(args.llvm_host, args.llvm_mode)
+        if record:
+            shim = Path(record["shim_dir"])
             environment["PATH"] = str(shim) + os.pathsep + environment.get("PATH", "")
             # LLVM x64 target 会选择 /usr/bin/gcc 绕过 PATH；显式绑定同一 shim，
             # 让过渡种子可链接出目标机型正确且含固定桥的候选编译器。
             compiler_shim = "clang" if args.llvm_host == "darwin-aarch64" else "gcc"
             environment["YH_CC"] = str(shim / compiler_shim)
+            # 闭包由构建机提供（种子不再烘焙绝对路径）；文件缺失时保持不设置，
+            # 让链接阶段给出「缺少闭包」的可操作诊断，而不是静默降级。
+            flags_file = record.get("selfhost_flags")
+            if flags_file and Path(flags_file).is_file():
+                environment["YH_LLVM_SELFHOST_FLAGS"] = str(flags_file)
     command = [str(compiler)]
     if args.backend:
         command += ["--backend", args.backend]

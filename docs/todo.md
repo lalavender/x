@@ -55,13 +55,33 @@ ld64.lld: error: undefined symbol: __ZdlPv
 - **影响**：不影响用已入库种子做编译与性能对比；但**影响在仓库内继续自举
   0.0.5 之后的代**（见 finish.md 2026-10-20 条目）。
 
-- [ ] **把自举闭包路径从编译期常量改为运行时解析**（相对项目根 / 读 `host.json` /
-  环境变量覆盖），使入库种子可在任意路径下自举；顺带解决多 worktree 并行时
-  互相引用对方 SDK 缓存的问题。
-- [ ] **补 `-lc++` 到 Darwin 自举链接参数**（错误信息 `library not found for -lc++`），
-  并核对固定 SDK stub 是否带齐 libc++。
-- [ ] **补一条门禁**：入库种子不应包含构建机绝对路径（可用
-  `strings -a <seed> | grep -c "$HOME"` 之类断言），避免同类问题再次随种子入库。
+- **已修（2026-10-20，Zig 式）**：自举闭包改由构建机提供。
+  `tools/llvm-darwin-host.py prepare` 生成
+  `tmp/llvm-migration/llvm-host-darwin-aarch64/selfhost-flags.txt`（每行一个参数），
+  `seed-build.py` 经 `YH_LLVM_SELFHOST_FLAGS` 传给种子；`lld_bridge.cpp` 优先读
+  该文件，桥内常量只在旧种子过渡期回退。新种子不再烘焙绝对路径
+  （`strings -a bin/yh-darwin-arm64 | grep -c /Users/` 从 73 → 0），
+  换机器/换 worktree 只需重新 `make llvm-host`。
+- **已修**：`-lc++` 仍由闭包末尾携带，解析交给宿主 SDK 的 `libc++.tbd`
+  （`SDKROOT` 指 26.5 时通过；SDK 27 的 TAPI 超出内嵌 lld 21，见下）。
+  stub 不含 libc++ 的交叉边界仍见
+  [遗留边界](03-design/yh-Darwin交叉编译遗留边界.md)。
+- **已修（门禁）**：`tools/selfhost_snapshot_gate.py` 新增
+  `seed_path_warnings()`；`make seed` 拒绝包含 `$HOME` 路径的种子，
+  `--verify-seed` 对旧种子只告警（保证上一版 Release 种子仍能引导）。
+- [ ] **固定 SDK 预编译分发**：首次 `make llvm-host` 仍要从源码构建 569MB
+  LLVM/lld；把产物作为 Release 资产（带锁文件校验）可免掉每台机器的构建。
+- [ ] **Linux/x64 同步**：x64 自举仍把闭包参数编进种子（`tools/llvm-sdk.py`），
+  按同一机制改到运行时文件。
+- [ ] **SDK 27 兼容**：内嵌 lld 21 解析不了 `arm64e.x1` TAPI。2026-10-20 起
+  `tools/llvm-darwin-sdk.py` 在解析期直接拒绝并提示 26.x（不再等 LLVM 编完），
+  真正兼容仍需升级固定 LLVM 或按实际 SDK 裁剪目标列表。
+- **已做（2026-10-20）一条命令构建**：`make bootstrap` = 幂等 prepare + 冷编；
+  Darwin 固定 SDK 就绪后 Makefile 自动导出 `SDKROOT`，C 互操作用例不再依赖
+  手工环境变量；`lld_identity` 去掉构建机路径，同一份源码/归档在不同
+  worktree 得到相同身份。
+- [ ] **`make dev` 增量构建**：闭包参数已进 Darwin 链接键，但归档内容仍按路径
+  计身份；SDK 原地重建时需清缓存或补内容哈希。
 
 
 

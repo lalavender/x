@@ -6,6 +6,7 @@ import hashlib
 import re
 import shutil
 import platform
+import sys
 import tempfile
 from pathlib import Path
 
@@ -167,6 +168,31 @@ def seed_sha256(seed: Path) -> str:
     return hashlib.sha256(seed.read_bytes()).hexdigest()
 
 
+def seed_path_warnings(seed: Path) -> list[str]:
+    """检查种子是否携带构建机 $HOME 绝对路径（Zig 式：闭包配方属于构建环境）。
+
+    滚动前入库的种子会把桥/LLVM 归档路径烘焙进 lld 配置；新流程改由
+    YH_LLVM_SELFHOST_FLAGS 在链接时提供，因此新种子不应出现 $HOME 路径。
+    旧种子只警告（否则上一版 Release 种子无法参与 CI 自举）。
+    """
+    home = str(Path.home())
+    if len(home) < 5:
+        return []
+    needle = home.encode()
+    overlap = len(needle) - 1
+    tail = b""
+    with seed.open("rb") as source:
+        while True:
+            chunk = source.read(8 * 1024 * 1024)
+            if not chunk:
+                return []
+            block = tail + chunk
+            if needle in block:
+                return [f"种子包含构建机绝对路径 {home}："
+                        "自举闭包必须由构建机在链接时提供（YH_LLVM_SELFHOST_FLAGS）"]
+            tail = block[-overlap:] if overlap > 0 else b""
+
+
 def verify_seed(seed: Path) -> str:
     """验证种子相邻的 SHA-256 文件，并返回实际摘要。"""
     if not seed.is_file():
@@ -175,13 +201,21 @@ def verify_seed(seed: Path) -> str:
     fields = hash_file.read_text().split()
     if not fields or fields[0].lower() != seed_sha256(seed):
         raise ValueError(f"种子 SHA-256 不匹配：{seed}（校验文件 {hash_file}）")
+    for warning in seed_path_warnings(seed):
+        print(f"警告：{warning}", file=sys.stderr)
     return fields[0].lower()
 
 
 def write_seed_hash(seed: Path) -> str:
-    """为已验证滚动的种子写入同名 SHA-256 记录。"""
+    """为已验证滚动的种子写入同名 SHA-256 记录。
+
+    连同滚动一起拒绝携带构建机路径的种子，避免同类问题再次入库。
+    """
     if not seed.is_file():
         raise ValueError(f"种子不存在：{seed}")
+    warnings = seed_path_warnings(seed)
+    if warnings:
+        raise ValueError("；".join(warnings))
     digest = seed_sha256(seed)
     Path(str(seed) + ".sha256").write_text(f"{digest}  {seed.name}\n")
     return digest
@@ -292,6 +326,13 @@ def self_test() -> bool:
     assert default_seed(root, "Darwin", "x86_64") == root / "bin" / "yh-darwin-x64"
     assert default_seed(root, "Linux", "aarch64") == root / "bin" / "yh-linux-arm64"
     assert default_seed(root, "Linux", "x86_64") == root / "bin" / "yh-linux-x64"
+    with tempfile.TemporaryDirectory() as directory:
+        clean_seed = Path(directory) / "clean"
+        clean_seed.write_bytes(b"clean seed")
+        assert not seed_path_warnings(clean_seed)
+        dirty_seed = Path(directory) / "dirty"
+        dirty_seed.write_bytes(b"prefix " + str(Path.home()).encode() + b" suffix")
+        assert seed_path_warnings(dirty_seed)
     expected = {"asm/demo-lib.s", "iface/demo-lib.s.i",
                 "iface/demo-lib.s.ct"}
     good = {path: path.encode() for path in expected}

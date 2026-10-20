@@ -67,6 +67,21 @@ def main():
 
         require(resolve_sdk_root({}, "Darwin", "arm64", discover) == sdk_root.resolve(),
                 "Darwin 原生 xcrun SDK 发现失败")
+        # SDK 27 的 arm64e.x1 TAPI 目标：固定 lld 21 解析不了，必须在解析期拒绝。
+        tapi_dir = sdk_root / "usr/lib"
+        tapi_dir.mkdir(parents=True)
+        (tapi_dir / "libSystem.tbd").write_text(
+            "--- !tapi-tbd\ntargets: [ arm64e.x1-macos ]\n", encoding="utf-8")
+        try:
+            resolve_sdk_root({"SDKROOT": str(sdk_root)}, "Linux", "x86_64")
+        except RuntimeError as error:
+            require("arm64e.x1" in str(error), "SDK 27 拒绝信息没有指出目标标签")
+        else:
+            raise RuntimeError("含 arm64e.x1 的 SDK 没有被拒绝")
+        (tapi_dir / "libSystem.tbd").write_text(
+            "--- !tapi-tbd\ntargets: [ arm64-macos ]\n", encoding="utf-8")
+        require(resolve_sdk_root({"SDKROOT": str(sdk_root)}, "Linux", "x86_64")
+                == sdk_root.resolve(), "26.x 风格的 SDK 被误拒")
         try:
             resolve_sdk_root({}, "Linux", "x86_64", discover)
         except RuntimeError:

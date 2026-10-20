@@ -81,6 +81,18 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
 3. `make seed` 把验证过的 `yh` 覆盖回宿主平台种子（Linux 上为
    `bin/yh-linux-arm64`），进入下一代。
 
+Darwin/ARM64 自举闭包（2026-10-20 起，Zig 式）：LLVM/lld/桥的 `-force_load`
+参数不再烘焙进种子，而由构建机提供 —— 首次执行 `make bootstrap`
+（= 幂等 `make llvm-host` + 冷编；`make llvm-host` 单独只准备闭包）生成
+`tmp/llvm-migration/llvm-host-darwin-aarch64/selfhost-flags.txt`，
+`make`/`make seed` 经 `YH_LLVM_SELFHOST_FLAGS` 传给种子；换机器或 worktree
+只需重新 bootstrap/llvm-host。固定 SDK 就绪后 Makefile 自动导出 `SDKROOT`
+（显式 SDKROOT 仍优先），`make test`/`make selfhost-native` 不再要求手工导出；
+SDK 27 的 `arm64e.x1` TAPI 会被 `tools/llvm-darwin-sdk.py` 在解析期拒绝并提示
+用 26.x（内嵌 lld 21 尚不支持）。`YH_LLVM_HOST=0` 只表示不准备固定闭包，
+新种子会在链接阶段明确报缺少闭包。`make seed` 会拒绝仍带构建机 `$HOME`
+路径的种子。
+
 ## 使用
 
 ```bash
@@ -103,8 +115,10 @@ make
 
 ```bash
 make test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
+make bootstrap          # 首次/换机：准备固定 LLVM 闭包后冷编（一条命令，幂等）
 make selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
-make seed               # 滚种子（仅在全绿后）
+make llvm-host          # 只准备本机固定 LLVM 闭包（不编编译器）
+make seed               # 滚种子（仅在全绿后；拒绝带构建机路径的种子）
 ```
 
 `make test` 只跑「共有 + 本平台」的用例：运行语料用头部指令 `// platform: <tag>`

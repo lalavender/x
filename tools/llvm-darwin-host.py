@@ -70,6 +70,26 @@ def workdir():
     return WORK / f"llvm-host-{HOST}"
 
 
+def selfhost_flags_path():
+    """自举闭包文件：构建机在链接时通过 YH_LLVM_SELFHOST_FLAGS 提供。"""
+    return workdir() / "selfhost-flags.txt"
+
+
+def selfhost_flags_text(flags):
+    """把闭包参数排成「每行一个」：yh 运行时按行读取，不做 shell 切分。"""
+    return "".join(f"{flag}\n" for flag in flags)
+
+
+def write_selfhost_flags(record):
+    """把闭包写成本地文件并回填身份字段（种子不再内置构建机绝对路径）。"""
+    path = selfhost_flags_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(selfhost_flags_text(record["selfhost_link_flags"]), encoding="utf-8")
+    record["selfhost_flags_file"] = str(path.relative_to(ROOT))
+    record["selfhost_flags_sha256"] = digest(path)
+    return path
+
+
 def is_compile_call(argv):
     """识别编译/预处理类调用，这些调用必须原样交给 Apple clang。"""
     return bool({"-c", "-E", "-S", "-fsyntax-only"} & set(argv))
@@ -199,15 +219,20 @@ def compile_bridge(sdk_record, libraries):
     archive = directory / "libyh-llvm-bridge.a"
     flags = fixed_link_flags(archive, sdk_record, libraries)
     selfhost_flags = raw_selfhost_flags(flags)
+    # 身份只取内容与构建参数，不取构建机路径：闭包路径属于构建环境
+    # （YH_LLVM_SELFHOST_FLAGS），算进身份会让同一份源码在不同 worktree 生成
+    # 不同身份的编译器，种子无法跨机复现。
     lld_identity = hashlib.sha256(json.dumps({
         "sdk": sdk_record["archives"], "bridge": digest(BRIDGE),
         "header": digest(BRIDGE_HEADER), "lld": digest(LLD_BRIDGE),
         "components": [path.name for path in libraries],
-        "min_os": sdk_record["min_os"], "sdk_root": sdk_record["sdk_root"],
-        "selfhost_flags": selfhost_flags,
+        "min_os": sdk_record["min_os"],
     }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     config_header = directory / "lld_link_config.h"
-    generate_lld_config(config_header, lld_identity, selfhost_flags)
+    # 自举闭包不再编进编译器：绝对路径随种子跨机器必然失效（Zig 式做法是
+    # 让构建机在链接时给出配方），因此这里只写空闭包，真实参数落到
+    # selfhost-flags.txt，由 seed-build.py 通过 YH_LLVM_SELFHOST_FLAGS 传给 yh。
+    generate_lld_config(config_header, lld_identity, [])
     include = str(SDK_PREFIX / "include")
     common = ["-O2", "-Wall", "-Wextra", "-Werror", "-isysroot", sdk_record["sdk_root"],
               f"-mmacosx-version-min={sdk_record['min_os']}", "-I" + include]
@@ -370,6 +395,9 @@ def build_host(jobs):
         "toolchain": sdk_record["toolchain"], "sdk_root": sdk_record["sdk_root"],
         "sdk_version": sdk_record["sdk_version"], "min_os": sdk_record["min_os"],
     }
+    # 闭包文件与 host.json 同目录，并记录其摘要；种子只保留 compiler 本体，
+    # 绝对路径永远来自构建机的这次 prepare。
+    write_selfhost_flags(record)
     (workdir() / "host.json").write_text(
         json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return record
@@ -400,6 +428,11 @@ def check(full=True):
         problems.append("compiler/llvm/bridge.h 已变化")
     if record.get("lld_bridge_source_sha256") != digest(LLD_BRIDGE):
         problems.append("compiler/llvm/lld_bridge.cpp 已变化")
+    flags_file = ROOT / record.get("selfhost_flags_file", "")
+    if not record.get("selfhost_flags_file") or not flags_file.is_file():
+        problems.append("Darwin 自举闭包文件缺失（需要重新 prepare）")
+    elif full and digest(flags_file) != record.get("selfhost_flags_sha256"):
+        problems.append("Darwin 自举闭包文件摘要错误")
     archive = ROOT / record.get("bridge_archive", "")
     if not archive.is_file() or (full and digest(archive) != record.get("bridge_sha256")):
         problems.append("Darwin LLVM 桥归档缺失或摘要错误")
@@ -495,6 +528,7 @@ def main(argv):
         record = ensure(args.mode)
         print(json.dumps({"host": HOST, "shim_dir": str(write_shim(record).parent),
                           "bridge_sha256": record["bridge_sha256"],
+                          "selfhost_flags": str(selfhost_flags_path()),
                           "sdk_host_sha256": record["sdk_host_sha256"]}, ensure_ascii=False))
         return 0
     if args.command == "prepare":

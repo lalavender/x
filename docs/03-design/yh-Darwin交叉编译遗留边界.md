@@ -25,7 +25,9 @@ Linux/x64 主机上交叉发射、链接并产出可运行 Mach-O。
 ## 2. 编译器自举的 C++ 依赖
 
 - 现状：编译器自身链接固定 LLVM/lld/桥（C++），自举链接需要 `libc++`；
-  `compiler/darwin-sdk/usr/lib/libSystem.tbd` **不含 libc++**。
+  `compiler/darwin-sdk/usr/lib/libSystem.tbd` **不含 libc++**。2026-10-20 起
+  自举闭包由本机 `selfhost-flags.txt` 提供（末尾带 `-lc++`），原生自举用宿主
+  SDK 解析；种子不再内置路径，但交叉构建仍需目标包提供 libc++。
 - 影响：Linux/x64 交叉构建 Darwin 版 yh（F2-9）时，`-lc++` 无法解析；
   仅在 Mac 原生自举时由宿主 SDK 的 `libc++.tbd` 解决。
 - 后续方案：目标包附带 `usr/lib/libc++.tbd`（Apple SDK 许可）或 Darwin

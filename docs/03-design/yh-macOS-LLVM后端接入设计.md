@@ -156,9 +156,17 @@ SDK 身份由确定排序的内容清单生成，路径、版本或 mtime 均不
 链接 manifest 前半是输入键、后半是输出文件摘要；失败时不改写 manifest 与旧产物，
 损坏的 manifest/对象/接口/可执行文件都会重新验证。
 
-编译器自举链接（F2-8）：`YH_LLVM_SELFHOST=1` 时，Darwin 的 raw `ld64.lld` argv 追加
-编译进桥的固定闭包（`-force_load` 桥归档、lld 与 LLVM 静态归档，以及 `-lc++`）；
-普通程序链接不注入这些库。闭包同时写入 `lld_link_identity`，换归档即失效缓存。
+编译器自举链接（F2-8；2026-10-20 改为构建机提供）：`YH_LLVM_SELFHOST=1` 时，
+Darwin 的 raw `ld64.lld` argv 追加**本机构建环境给出**的闭包（`-force_load` 桥归档、
+lld 与 LLVM 静态归档，以及 `-lc++`）。`tools/llvm-darwin-host.py prepare` 生成
+`tmp/llvm-migration/llvm-host-darwin-aarch64/selfhost-flags.txt`（每行一个参数），
+`seed-build.py` 经 `YH_LLVM_SELFHOST_FLAGS` 传给种子；桥内常量只在旧种子过渡期回退。
+闭包不再编进编译器/种子，换机器或 worktree 只需重新 prepare；普通程序链接不注入
+这些库。闭包参数计入 Darwin 链接键（闭包变化即重链接），归档内容仍以路径身份参与。
+
+种子卫生：`tools/selfhost_snapshot_gate.py` 检查种子不含构建机 `$HOME` 路径，
+`make seed` 拒绝带路径的种子；`--verify-seed` 对旧种子只告警，保证上一版
+Release 种子仍能引导。
 
 默认后端（F2-10，2026-10-19）：`DARWIN+ARM64` 宿主默认 `c_backend=1`，与
 `LINUX+X64` 的 LL11 门控并列；普通程序不继承 `YH_LLVM_SELFHOST`，只有构建

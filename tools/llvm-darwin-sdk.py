@@ -105,6 +105,27 @@ def load_sdk_version(sdk_root):
     return version
 
 
+# 固定 LLVM 21.1.8 的 lld TAPI 解析器不认识 SDK 27 的 arm64e.x1 目标标签；
+# 与 tools/llvm-darwin-sdk-bundle.py 的 KNOWN_UNSUPPORTED 保持同一条边界。
+UNSUPPORTED_TAPI_TARGET = "arm64e.x1"
+
+
+def reject_incompatible_sdk(root):
+    """在解析 SDK 时立刻拒绝固定 lld 解析不了的目标标签。
+
+    否则要等 LLVM 构建数十分钟后、在 lld 链接探针上才发现，代价太高。
+    """
+    for name in ("usr/lib/libSystem.tbd", "usr/lib/libc++.tbd"):
+        path = Path(root) / name
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if UNSUPPORTED_TAPI_TARGET in text:
+            raise RuntimeError(
+                f"SDK 的 {name} 含 {UNSUPPORTED_TAPI_TARGET}：固定 lld 21 无法解析；"
+                "请把 SDKROOT 指向 26.x SDK（例如 MacOSX26.5.sdk）")
+
+
 def resolve_sdk_root(environment=None, system=None, machine=None, run=None):
     """优先解析显式 SDKROOT；仅 Darwin/ARM64 可用 xcrun 自动发现。"""
     environment = os.environ if environment is None else environment
@@ -112,6 +133,7 @@ def resolve_sdk_root(environment=None, system=None, machine=None, run=None):
     if explicit:
         root = Path(explicit).expanduser().resolve()
         load_sdk_version(root)
+        reject_incompatible_sdk(root)
         return root
     select_host(system, machine)
     run = subprocess.run if run is None else run
@@ -121,6 +143,7 @@ def resolve_sdk_root(environment=None, system=None, machine=None, run=None):
         raise RuntimeError("未找到 macOS SDK；设置 SDKROOT 或安装 Xcode Command Line Tools")
     root = Path(result.stdout.strip()).resolve()
     load_sdk_version(root)
+    reject_incompatible_sdk(root)
     return root
 
 

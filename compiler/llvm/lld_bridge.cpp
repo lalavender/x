@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -24,6 +25,74 @@ namespace {
 bool can_run_again = true;
 constexpr const char *kOutputMarker = "@YH_LLD_OUTPUT@";
 constexpr const char *kInputsMarker = "@YH_LLD_INPUTS@";
+
+// SelfhostFlags：编译器自举链接闭包的运行时快照。
+// 构建机通过 YH_LLVM_SELFHOST_FLAGS 指向「每行一个链接参数」的文件（与 Zig 的
+// build 脚本同思路：闭包路径属于构建环境，不编进编译器）。未设置该变量时回退到
+// 编译期常量，只用于过渡种子；文件不可读或为空时标记 invalid，由 yh 侧给出
+// 可操作诊断，绝不静默把闭包当成空的。
+struct SelfhostFlags {
+  bool from_file = false;
+  bool invalid = false;
+  std::vector<std::string> values;
+};
+
+// load_selfhost_flags：解析并缓存运行时闭包文件；进程内只读一次。
+SelfhostFlags load_selfhost_flags() {
+  SelfhostFlags result;
+  const char *path = std::getenv("YH_LLVM_SELFHOST_FLAGS");
+  if (path == nullptr || *path == '\0')
+    return result;
+  std::ifstream input(path);
+  if (!input) {
+    result.invalid = true;
+    return result;
+  }
+  std::string line;
+  while (std::getline(input, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    if (!line.empty())
+      result.values.push_back(line);
+  }
+  if (result.values.empty())
+    result.invalid = true;
+  else
+    result.from_file = true;
+  return result;
+}
+
+// selfhost_flags：返回进程级只读快照（C++11 起静态局部初始化线程安全）。
+const SelfhostFlags &selfhost_flags() {
+  static const SelfhostFlags snapshot = load_selfhost_flags();
+  return snapshot;
+}
+
+// selfhost_flag_count_internal：返回自举闭包参数数量；-1 表示运行时文件不可用。
+int selfhost_flag_count_internal() {
+  const SelfhostFlags &flags = selfhost_flags();
+  if (flags.invalid)
+    return -1;
+  if (flags.from_file)
+    return static_cast<int>(flags.values.size());
+  return YH_LLVM_SELFHOST_LINK_FLAGS_COUNT;
+}
+
+// selfhost_flag_internal：按序返回一个自举闭包参数；越界返回空指针。
+const char *selfhost_flag_internal(int index) {
+  if (index < 0)
+    return nullptr;
+  const SelfhostFlags &flags = selfhost_flags();
+  if (flags.from_file) {
+    const std::size_t position = static_cast<std::size_t>(index);
+    if (position >= flags.values.size())
+      return nullptr;
+    return flags.values[position].c_str();
+  }
+  if (static_cast<std::size_t>(index) >= YH_LLVM_SELFHOST_LINK_FLAGS_COUNT)
+    return nullptr;
+  return yh_llvm_selfhost_link_flags[index];
+}
 
 // copy_diagnostic：把 lld 错误文本复制到调用方缓冲区，并保证有容量时以 NUL 结尾。
 void copy_diagnostic(const std::string &source, char *destination,
@@ -152,8 +221,12 @@ void append_lld_inputs(std::vector<const char *> &arguments,
         arguments.push_back(extra_args[j]);
       const char *selfhost = std::getenv("YH_LLVM_SELFHOST");
       if (selfhost != nullptr && std::strcmp(selfhost, "1") == 0) {
-        for (std::size_t i = 0; i < YH_LLVM_SELFHOST_LINK_FLAGS_COUNT; ++i)
-          arguments.push_back(yh_llvm_selfhost_link_flags[i]);
+        const int count = selfhost_flag_count_internal();
+        for (int index = 0; index < count; ++index) {
+          const char *flag = selfhost_flag_internal(index);
+          if (flag != nullptr)
+            arguments.push_back(flag);
+        }
       }
     } else {
       arguments.push_back(argument);
@@ -227,16 +300,15 @@ extern "C" const char *yh_lld_default_library(int index) {
 }
 
 // yh_lld_selfhost_flag_count：返回自举链接追加参数的数量。
-// Darwin 的 raw ld64.lld argv 由 yh 拼装，需要读取编译进桥的 force_load 闭包。
+// 优先使用构建机通过 YH_LLVM_SELFHOST_FLAGS 提供的闭包文件；未提供时回退到
+// 编译期常量（过渡种子）。负数表示文件不可读，调用方必须报错而不是当作空闭包。
 extern "C" int yh_lld_selfhost_flag_count(void) {
-  return YH_LLVM_SELFHOST_LINK_FLAGS_COUNT;
+  return selfhost_flag_count_internal();
 }
 
 // yh_lld_selfhost_flag：按序返回一个自举链接追加参数。
 extern "C" const char *yh_lld_selfhost_flag(int index) {
-  if (index < 0 || static_cast<std::size_t>(index) >= YH_LLVM_SELFHOST_LINK_FLAGS_COUNT)
-    return nullptr;
-  return yh_llvm_selfhost_link_flags[index];
+  return selfhost_flag_internal(index);
 }
 
 // yh_lld_resolve_library：按实际 lld 搜索顺序解析 libNAME.so 或 libNAME.a。

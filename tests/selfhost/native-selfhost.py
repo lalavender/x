@@ -46,10 +46,11 @@ from selfhost_snapshot_gate import self_test, snapshot_errors, verify_seed
 DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 
 # 自举链每一代都要编译 compiler/backend/llvm_bridge.yh，因此各代链接必须能拿到
-# 内嵌静态 LLVM 桥。这里复用 tools/llvm-host.py 的链接包装器：准备成功就把它的
-# 目录前置到子进程 PATH；未准备（无 SDK）时只警告并按原路径继续，不把 LLVM 变成
-# 自举的失败点（与 make / seed-build.py 的 auto 语义一致）。
+# 内嵌静态 LLVM 桥。这里复用 tools/llvm-*-host.py 的链接包装器：准备成功就把它的
+# 目录前置到子进程 PATH，并把闭包文件经 YH_LLVM_SELFHOST_FLAGS 交给编译器；
+# 未准备时，Linux 仍按旧路径继续，Darwin 默认后端是 LLVM，直接给出准备命令。
 SHIM_DIR = None
+SELFHOST_FLAGS = None
 SELFHOST_LLVM = False
 
 
@@ -65,11 +66,10 @@ def host_triple() -> str:
 
 
 def llvm_shim_for_seed(seed: Path):
-    """按种子文件名推导 LLVM 宿主架构并请求链接包装器目录；不可用时返回 None。
+    """按种子文件名推导 LLVM 宿主架构并返回本机宿主记录；不可用时按平台处理。
 
-    固定 LLVM SDK 只发布 Linux 宿主（tools/llvm-host.py 的 hosts 表），
-    因此非 Linux 种子（如 bin/yh-darwin-arm64）直接返回 None，不去请求
-    不存在的宿主，避免打印误导性警告。
+    返回的记录含 `shim_dir`（链接包装器目录）与 `selfhost_flags`（每行一个
+    链接参数的闭包文件）。闭包路径属于构建机，不再烘焙进种子。
     """
     name = seed.name
     if "darwin" in name:
@@ -90,11 +90,16 @@ def llvm_shim_for_seed(seed: Path):
     if result.returncode != 0:
         print(f"警告：本次自举未链入内嵌 LLVM 桥（{host}）："
               f"{(result.stderr or result.stdout).strip()[-200:]}", file=sys.stderr)
+        if sys.platform == "darwin":
+            # Darwin 默认后端已是 LLVM，没有闭包就无法继续自举；给出可操作的
+            # 准备命令，而不是让链接器在半路报缺少归档。
+            raise SystemExit("错误：Darwin 自举需要本机固定 LLVM 闭包；"
+                             "先运行 make llvm-host（或 tools/llvm-darwin-host.py prepare）")
         return None
     record = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
     print(f"自举链接已接入内嵌 LLVM 桥：host={record['host']} "
           f"bridge={record['bridge_sha256'][:12]}", file=sys.stderr)
-    return Path(record["shim_dir"])
+    return record
 
 
 def seed_supports_llvm(seed: Path) -> bool:
@@ -112,13 +117,23 @@ def seed_supports_llvm(seed: Path) -> bool:
     return result.returncode == 0
 
 
-def run(cmd, cwd=None, shim=False):
+def run(cmd, cwd=None, shim=False, seed_link=False):
     """执行子命令；shim=True 时把内嵌桥的链接包装器前置到 PATH。
 
     只有「编译 compiler/ 自身」的调用需要 shim（那一步会链接 llvm_bridge.yh）；
     语料检查、自解析等步骤必须保持原始 PATH，否则会把桥链接强加给语料程序。
+    seed_link=True 表示调用方是过渡种子：它只会用自己烘焙的闭包，必须通过
+    YH_CC 把最终链接交给本机 shim，才能链入当前构建机的桥（Zig 式配方）。
     """
     environment = dict(os.environ)
+    if sys.platform == "darwin" and "SDKROOT" not in environment:
+        # 自举闭包末尾带 -lc++，只有宿主 SDK 能解析；优先用固定 SDK 记录里的
+        # 真实 SDK，避免调用方每次手工导出 SDKROOT。
+        sdk_record = ROOT / "tmp/llvm-migration/darwin-sdk/sdk-darwin-aarch64/host.json"
+        if sdk_record.is_file():
+            sdk_root = json.loads(sdk_record.read_text(encoding="utf-8")).get("sdk_root")
+            if sdk_root and (Path(sdk_root) / "SDKSettings.json").is_file():
+                environment["SDKROOT"] = sdk_root
     if sys.platform == "darwin" and "YH_DARWIN_SDK" not in environment:
         bundle = ROOT / "compiler/darwin-sdk"
         if bundle.is_dir():
@@ -127,15 +142,23 @@ def run(cmd, cwd=None, shim=False):
         environment["PATH"] = str(SHIM_DIR) + os.pathsep + environment.get("PATH", "")
     if shim and SELFHOST_LLVM:
         environment["YH_LLVM_SELFHOST"] = "1"
+        if SELFHOST_FLAGS is not None:
+            environment["YH_LLVM_SELFHOST_FLAGS"] = SELFHOST_FLAGS
+    if seed_link and SHIM_DIR is not None:
+        linker = "clang" if sys.platform == "darwin" else "gcc"
+        environment["YH_CC"] = str(SHIM_DIR / linker)
     return subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True,
                           text=True, timeout=1800, env=environment)
 
 
-def build(cc, out, generation, expected, compatible=(), llvm_mode=False):
+def build(cc, out, generation, expected, compatible=(), llvm_mode=False,
+          seed_link=False):
     """冷编一代，并在共享的 .build 被后续代覆盖前保存其产物。
 
     llvm_mode=True 时显式选择 LLVM 后端并保存 .ll/接口快照；默认仍按
     宿主默认后端（Linux/x86_64 已是 LLVM，旧平台为 legacy）构建。
+    seed_link=True 只用于第一代：过渡种子改用本机 shim 链接，避免它把自己的
+    烘焙闭包（含旧桥）带进新编译器。
     """
     bdir = COMPILER / ".build"
     if bdir.exists():
@@ -145,7 +168,7 @@ def build(cc, out, generation, expected, compatible=(), llvm_mode=False):
     if llvm_mode:
         command += ["--backend", "llvm", "--target", triple, "--emit-llvm"]
     command += ["build", "-o", str(out)]
-    r = run(command, cwd=COMPILER, shim=True)
+    r = run(command, cwd=COMPILER, shim=True, seed_link=seed_link)
     if r.returncode != 0:
         print(f"FAIL 构建 {out.name}:", r.stderr[-400:])
         sys.exit(1)
@@ -232,8 +255,13 @@ def main() -> int:
         print(f"FAIL 自举种子：{error}")
         return 1
     print(f"自举种子 SHA-256：{seed_hash}")
-    global SHIM_DIR, SELFHOST_LLVM
-    SHIM_DIR = llvm_shim_for_seed(seed)
+    global SHIM_DIR, SELFHOST_FLAGS, SELFHOST_LLVM
+    host_record = llvm_shim_for_seed(seed)
+    if host_record:
+        SHIM_DIR = Path(host_record["shim_dir"])
+        flags_file = host_record.get("selfhost_flags")
+        if flags_file and Path(flags_file).is_file():
+            SELFHOST_FLAGS = str(flags_file)
     machine = platform.machine().lower()
     llvm_mode = args.backend == "llvm" or (
         args.backend == "auto" and (
@@ -255,14 +283,15 @@ def main() -> int:
             # cc3/cc4 再以 LLVM 连续自编；固定点从 cc3 开始比较。
             legacy_expected = expected_artifacts(COMPILER)
             d2 = build(seed, WORK / "cc2", "cc2", legacy_expected,
-                       (legacy_expected, seed_flat), llvm_mode=False)
+                       (legacy_expected, seed_flat), llvm_mode=False, seed_link=True)
         else:
-            d2 = build(seed, WORK / "cc2", "cc2", expected, llvm_mode=True)
+            d2 = build(seed, WORK / "cc2", "cc2", expected, llvm_mode=True,
+                       seed_link=True)
         d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected, llvm_mode=True)
         d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected, llvm_mode=True)
     else:
         d2 = build(seed, WORK / "cc2", "cc2", expected,
-                   (legacy_expected, seed_flat))
+                   (legacy_expected, seed_flat), seed_link=True)
         d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected)
         d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected)
     print(f"cc2/cc3/cc4 构建完成（种子 = {seed}）")
