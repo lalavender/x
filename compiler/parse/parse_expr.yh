@@ -269,47 +269,6 @@ fn parse_array_literal(res *gen.Res, first int) int {
     if (gs.task.c_fold != 0) {
         return gen.sem_err("数组/切片字面量不是编译期常量");
     }
-    // 临时数组：逆序弹栈写入（值栈顶是最后一个元素）
-    let asize int = esz * count;
-    let aoff int = 0;
-    if (asize > 0) {
-        aoff = gen.em_alloc_local(asize);
-        let i int = count - 1;
-        for i >= 0 {
-            // 弹出第 i 个元素并写入 aoff + i*esz
-            if (gen.ty_is_float(elem) != 0) {
-                let fsfx *char = "d";
-                if (esz == 4) { fsfx = "s"; }
-                if (gen.em_frag("\tldr\t") != 0) { return -1; }
-                if (gen.em_frag(fsfx) != 0) { return -1; }
-                if (gen.em_frag("0, [sp], #16\n") != 0) { return -1; }
-                if (gen.em_lea_local_to(aoff - i * esz) != 0) { return -1; }
-                if (gen.em_frag("\tstr\t") != 0) { return -1; }
-                if (gen.em_frag(fsfx) != 0) { return -1; }
-                if (gen.em_frag("0, [x10]\n") != 0) { return -1; }
-            } else {
-                if (gen.em_pop("x0") != 0) { return -1; }
-                if (gen.em_lea_local_to(aoff - i * esz) != 0) { return -1; }
-                if (gen.em_store_sized(elem) != 0) { return -1; }
-            }
-            i -= 1;
-        }
-    }
-    // 结果：数组 → 临时数组地址（数组值语义即地址）；
-    //       切片 → {count, &临时} 视图（16 字节临时）
-    if (fk == gen.TY_ARRAY) {
-        if (gen.em_lea_local(aoff) != 0) {
-            return -1;
-        }
-    } else {
-        let voff int = gen.em_alloc_local(gen.TG_LONG_SIZE * 2);
-        if (gen.em_lea_local_to(voff) != 0) { return -1; }
-        if (gen.em_mov_imm("x9", count.to_type(i64)) != 0) { return -1; }
-        if (gen.em_ins("str\tx9, [x10]") != 0) { return -1; }
-        if (gen.em_lea_local(aoff) != 0) { return -1; }
-        if (gen.em_ins("str\tx0, [x10, #8]") != 0) { return -1; }
-        if (gen.em_lea_local_down(voff) != 0) { return -1; }
-    }
     gen.sem_res_reset(res, tid);
     res.is_lit = 0;
     res.is_const = 0;
@@ -1089,8 +1048,6 @@ fn parse_comptime_pred(res *gen.Res, kind int) int {
     let c gen.Res;
     if (gen.sem_res_const(&c, gen.TY_BOOL, v.to_type(i64)) != 0) { return -1; }
     gen.sem_res_copy(res, &c);
-    if (gs.task.c_compile != 0 && gs.task.c_fold == 0
-        && gen.em_mov_imm("x0", v.to_type(i64)) != 0) { return -1; }
     gs.task.c_res_is_addr = 0;
     if (gs.task.c_ast_capture != 0
         && ast.ast_expr_finish(res, ast.AST_EXPR_PRIMARY, gen.TOK_IDENT, first,
