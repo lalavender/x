@@ -31,6 +31,20 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第六刀：C3 收尾（旧 SSA 支持判定清零）
+
+- `ast/ast_ir.yh` 268→60 行：只留 `ast_ir_add_inst`/`ast_ir_add_noresult_inst`；
+  删除 `ast_ir_expr_supported`、`ast_ir_call_supported`、`ast_ir_type`、
+  `ast_ir_void_type`、`ast_ir_promoted_type`、`ast_ir_bindings_supported`、
+  `ast_ir_assign_op`、`ast_ir_assign_binding`。
+- `ast/ast_ir_call.yh` 141→59 行：只留 init/release/reserve；删除
+  `has_suffix`、`name_supported`、`supported`。
+- `ast/ast_ir_build.yh` 415 行：删除 `ast_ir_release_built`。
+- 验证：`make` 通过；400 语料诊断快照零差异；`make test` 退出 0；
+  `make selfhost-native` 退出 0（project 106/106）；单文件 `-o` 正常。
+- C3（旧 SSA 替换链）完成；`ast/` 只余 builder 与共享调用缓冲。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第五刀：旧 SSA 链与运行期桩删除（C3 首片）
 
 - 删除 `compiler/gen/emit_runtime_memory.yh`（555 行；`em_emit_runtime_stubs`

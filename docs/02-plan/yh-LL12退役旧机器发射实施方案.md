@@ -98,8 +98,9 @@
   `ast_ir_control.yh`、`ast_ir_template.yh`（643 行）；`ast_ir_build.yh`
   1473→423 行（只留 `ast_ir_b_*` builder 底层）、`ast_ir_call.yh` 295→141 行、
   `ast_ir.yh` 435→268 行。旧模块编排/位移表/缓存/内联全部移除。
-  待收尾：`ast_ir.yh` 的支持判定（`ast_ir_expr_supported` 等）与
-  `ast_ir_call_supported` 已无调用者，可随 C3 收尾删除。
+  **收尾（同日完成）**：`ast_ir.yh` 268→60 行（只留 `add_inst`/
+  `add_noresult_inst`）、`ast_ir_call.yh` 141→59 行（只留 init/release/reserve）、
+  `ast_ir_build.yh` 415 行；无用户的支持判定全部删除。C3 完成。
 - **先切出共享 builder**：`ast_ir_b_*`（390 处，其中 `module_snapshot_lower`
   用 220 处）是 LLVM 快照 lowering 的 IR 构造层，必须保留（可留在
   `ast_ir_build.yh` 或拆成独立文件），不属于旧链。
