@@ -162,6 +162,12 @@ def main(argv):
     _asset_prefix, default_dest = PLATFORMS[args.platform]
     destination = args.dest or Path(default_dest)
     fallback = args.fallback or (destination if destination.is_file() else None)
+    if fallback is not None:
+        # 未执行 git lfs pull 时 bin 里是 LFS 指针，不是可执行种子；不能把它
+        # 当成 fallback 发布，否则 make 会在 exec 阶段报 Exec format error。
+        with fallback.open("rb") as source:
+            if source.read(64).startswith(b"version https://git-lfs.github.com/spec/v1"):
+                fallback = None
     try:
         if not args.repo:
             raise FetchError("缺少 GITHUB_REPOSITORY")
