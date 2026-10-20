@@ -86,8 +86,9 @@
   注意保留快照字段 `bss_n`/`bss_symbols`，不要按名字误删。
 - 入口同步：`cmd/compile.yh` 的 `.bss`/运行期桩段（**2026-10-21 已删**，
   函数只留两遍语义/CT/布局供 `yh check`）、`cmd/module_worker.yh`
-  的按文件 `.s` 发射与桩对象、`cmd/module_build.yh` 的 `.build/asm` 分支、
-  `cmd/link_cache.yh` 的 `.s` 对象清单与后端位。
+  的按文件 `.s` 发射与桩对象（**2026-10-21 已删**：worker 544→405 行，
+  `out_dir`/`ir_cache_salt` 参数留待调用链清理）、`cmd/module_build.yh`
+  的 `.build/asm` 分支、`cmd/link_cache.yh` 的 `.s` 对象清单与后端位。
 - 验收：`rg 'em_|dat_|bss_|o_out|o_body|flush_output' compiler/` 无生产
   消费者；三平台单文件/项目/自举全绿；种子暂不滚。
 

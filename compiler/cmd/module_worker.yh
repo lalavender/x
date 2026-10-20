@@ -58,7 +58,7 @@ fn mb_llvm_module_paths(m int, main_off int, main_len int,
 //   * 语义遍历前打开受检前端（front_checked_begin）并保持 AST 捕获，
 //     因此 worker 不会产生任何 .text/.data/.bss 文本；
 //   * 语义结束后捕获 CheckedModule 快照，经 ast.lower_module → backend.llvm_emit_module
-//     → 内嵌静态桥发布对象，**不**调用 ast.ast_ir_lower_module（旧 SSA 替换路径）；
+//     → 内嵌静态桥发布对象；
 //   * 形态不支持时带来源诊断并失败，绝不回退旧 ARM64 发射。
 // 返回 0 成功、-1 失败（诊断已写 stderr）。
 fn mb_llvm_emit_module(m int, main_off int, main_len int) int {
@@ -164,9 +164,8 @@ fn mb_llvm_emit_module(m int, main_off int, main_len int) int {
 }
 
 // mb_emit_indexed_module：复用父进程已扫描的项目、词法 token 与顶层声明索引，
-// 只在当前子进程建立语义表、检查模块并写出汇编和本轮私有接口。
-// out_dir：本模块的按文件汇编目录 <build>/asm/<tag>（RS3b：每文件一个 .s，
-// 外加 <tag>.stub.s 运行时桩对象）。
+// 只在当前子进程建立语义表、检查模块并发布 LLVM 对象与本轮私有接口。
+// 参数 out_dir/ir_cache_salt 是旧按文件汇编路径的遗留，待 C2 清理调用链。
 fn mb_emit_indexed_module(m int, main_off int, main_len int,
     out_dir *char, ir_cache_salt u64) int {
     let gs *gen.GenState = gen.G();
@@ -330,42 +329,16 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     if (comptime.ct_layout_resolve() != 0 || gs.task.c_errors > 0) { return -1; }
     // 延迟的枚举判别值：此时编译期函数正文已捕获，可以真实求值。
     if (parse.ct_enum_pending_run() != 0) { return -1; }
-    // —— RS3b 按文件对象：发射区间标记 ——
-    // 每文件在三个共享缓冲中的区间（发射顺序 = 文件顺序，各文件贡献连续）：
-    //   .text：mode 0 逐文件连续；其前的「模块前导文本」（Linux syscall 入口）
-    //         归入独立桩对象 <tag>.stub.s；
-    //   .data：mode 1（全局初始化）与 mode 0（函数内字面量）各一段；其前的
-    //         「模块前导数据」（导入侧物化的 pub 聚合常量副本，本地 .LD 标签，
-    //         任意文件都可能引用）复写进每个文件对象；
-    //   .bss：按 mode 1 注册序逐文件连续（em_bss_symbol 时按文件分段）。
-    let marks_n int = gs.p_mods[m].file_n + 1;
-    let t_mark *int = malloc((marks_n * sizeof(int)).to_type(u64)).to_type(*int);
-    let dat_mark1 *int = malloc((marks_n * sizeof(int)).to_type(u64)).to_type(*int);
-    let dat_mark0 *int = malloc((marks_n * sizeof(int)).to_type(u64)).to_type(*int);
-    let bss_mark *int = malloc((marks_n * sizeof(int)).to_type(u64)).to_type(*int);
-    let bss_wmark *int = malloc((marks_n * sizeof(int)).to_type(u64)).to_type(*int);
-    if (t_mark == 0 || dat_mark1 == 0 || dat_mark0 == 0 || bss_mark == 0
-        || bss_wmark == 0) {
-        return gen.fail("内存分配失败");
-    }
-    // 模块前导区间：[0, t_pre) 文本（Linux syscall 入口，正常为空）与
-    // [0, d_pre) 数据（导入侧物化的 pub 聚合常量副本）。前导文本归桩对象；
-    // 前导数据被任意文件引用，复写进每个文件对象。
-    let t_pre int = gs.task.o_len;
-    let d_pre int = gs.task.o_dlen;
+    // 全局初始化（mode 1）：ST/CT 数据登记，供受检快照消费。
     let fi2 int = 0;
     for fi2 < gs.p_mods[m].file_n {
         let file_id int = gs.p_mods[m].files[fi2];
-        dat_mark1[fi2] = gs.task.o_dlen;
-        bss_mark[fi2] = gs.task.c_bss_n;
         if (mb_pass2_file(pj_pool_str(gs.p_files[file_id].path_off),
                 file_id, 1) != 0) {
             return -1;
         }
         fi2 += 1;
     }
-    dat_mark1[gs.p_mods[m].file_n] = gs.task.o_dlen;
-    bss_mark[gs.p_mods[m].file_n] = gs.task.c_bss_n;
     if (gs.task.c_errors > 0) {
         return -1;
     }
@@ -380,16 +353,12 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     let fi3 int = 0;
     for fi3 < gs.p_mods[m].file_n {
         let file_id int = gs.p_mods[m].files[fi3];
-        t_mark[fi3] = gs.task.o_len;
-        dat_mark0[fi3] = gs.task.o_dlen;
         if (mb_pass2_file(pj_pool_str(gs.p_files[file_id].path_off),
                 file_id, 0) != 0) {
             return -1;
         }
         fi3 += 1;
     }
-    t_mark[gs.p_mods[m].file_n] = gs.task.o_len;
-    dat_mark0[gs.p_mods[m].file_n] = gs.task.o_dlen;
     if (gs.task.c_errors > 0) {
         return -1;
     }
@@ -419,126 +388,14 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
         let checked_ok int = mb_verify_checked_snapshot(&checked);
         ast.checked_module_release(&checked);
         if (checked_ok != 0) { return checked_ok; }
-    }
-    // LLVM 后端：受检快照 → 模块 IR → LLVM 文本 → 内嵌桥发布对象。
-    // 不进入旧 SSA 替换与机器发射，也不写任何 .text/.data/.bss。
-    if (gs.c_backend != 0 && gs.task.c_check_only == 0) {
-        if (mb_llvm_emit_module(m, main_off, main_len) != 0) { return -1; }
         if (gen.front_checked_end() != 0) { return -1; }
         mb_print_stats();
         return 0;
     }
-    if (gs.task.c_check_only == 0) {
-        if (pj_canon(build_off, build_len, "ir") != 0) { return -1; }
-        let ir_cache_dir [620]u8;
-        let irn int = 0;
-        irn = gen.append_str(ir_cache_dir, irn, pj_pool_str(pj_canon_off));
-        ir_cache_dir[irn] = 0;
-        if (ast.ast_ir_lower_module(gen.arr_cstr(ir_cache_dir),
-                gs.c_ir_cache_salt) != 0) {
-            return -1;
-        }
-        // lowering 的按函数文本替换会移动后续字节：把 lowering 前的每文件
-        // 标记换算成实际偏移（ast 按函数行记录替换增量，边界取前缀和）。
-        let tshift *int = malloc((marks_n * sizeof(int)).to_type(u64)).to_type(*int);
-        if (tshift == 0) { return gen.fail("内存分配失败"); }
-        if (ast.ast_ir_file_shift_list(gs.p_mods[m].files,
-                gs.p_mods[m].file_n, tshift) != 0) {
-            return -1;
-        }
-        tshift[gs.p_mods[m].file_n] = ast.ast_ir_total_shift();
-        // bss 符号按文件分段发射（注册序 = mode 1 文件序，bss_mark 为每文件基数）
-        let fbi int = 0;
-        for fbi < gs.p_mods[m].file_n {
-            bss_wmark[fbi] = gs.task.o_blen;
-            let bi int = bss_mark[fbi];
-            for bi < bss_mark[fbi + 1] {
-                let bidx int = gs.task.c_bss_syms[bi];
-                if (gen.em_bss_symbol(bidx, gs.task.t_types[gs.task.c_syms[bidx].type_id].size,
-                        gs.task.t_types[gs.task.c_syms[bidx].type_id].align) != 0) {
-                    return -1;
-                }
-                bi += 1;
-            }
-            fbi += 1;
-        }
-        bss_wmark[gs.p_mods[m].file_n] = gs.task.o_blen;
-        // 运行时桩（本模块实际用到的入口，hidden）追加在全部文件文本之后
-        let stub_start int = gs.task.o_len;
-        if (gen.em_emit_runtime_stubs() != 0) { return -1; }
-        let stub_end int = gs.task.o_len;
-        // —— 写出：桩对象 + 每文件对象（RS3b）——
-        // 1) 桩对象：模块前导文本 + 运行时桩（两段 .text，无数据/bss）
-        let stub_ranges [4]int;
-        stub_ranges[0] = 0;
-        stub_ranges[1] = t_pre;
-        stub_ranges[2] = stub_start;
-        stub_ranges[3] = stub_end;
-        let none [2]int;
-        none[0] = 0;
-        none[1] = 0;
-        let stub_path [900]u8;
-        let stn int = 0;
-        stn = gen.append_str(stub_path, stn, out_dir);
-        stn = gen.append_byte(stub_path, stn, '/');
-        if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) { return -1; }
-        stn = gen.append_str(stub_path, stn, pj_pool_str(pj_canon_off));
-        stn = gen.append_str(stub_path, stn, ".stub.s");
-        stub_path[stn] = 0;
-        if (gen.flush_asm_ranges(gen.arr_cstr(stub_path), &stub_ranges[0], 2,
-                &none[0], 1, &none[0], 1) != 0) {
-            return -1;
-        }
-        // 2) 每文件对象：.text 一段 + .data 三段（前导 + mode 1 + mode 0）
-        //    + .bss 一段。文件名干整模块预计算（与 mb_link 读侧一致）。
-        let stems *u8 = malloc(((gs.p_mods[m].file_n > 0
-            ? gs.p_mods[m].file_n : 1) * 160).to_type(u64)).to_type(*u8);
-        let stem_lens *int = malloc(((gs.p_mods[m].file_n > 0
-            ? gs.p_mods[m].file_n : 1) * sizeof(int)).to_type(u64)).to_type(*int);
-        if (stems == 0 || stem_lens == 0) { return gen.fail("内存分配失败"); }
-        if (mb_asm_stems(m, stems, stem_lens) != 0) { return -1; }
-        let fiw int = 0;
-        for fiw < gs.p_mods[m].file_n {
-            let stem [160]u8;
-            let stem_len int = stem_lens[fiw];
-            let si int = 0;
-            for si < stem_len {
-                stem[si] = stems[fiw * 160 + si];
-                si += 1;
-            }
-            let fpath [900]u8;
-            let fn2 int = 0;
-            fn2 = gen.append_str(fpath, fn2, out_dir);
-            fn2 = gen.append_byte(fpath, fn2, '/');
-            let pi int = 0;
-            for pi < stem_len {
-                fpath[fn2] = stem[pi];
-                fn2 += 1;
-                pi += 1;
-            }
-            fn2 = gen.append_str(fpath, fn2, ".s");
-            fpath[fn2] = 0;
-            let tr [2]int;
-            tr[0] = t_mark[fiw] + tshift[fiw];
-            tr[1] = t_mark[fiw + 1] + tshift[fiw + 1];
-            let dr [6]int;
-            dr[0] = 0;
-            dr[1] = d_pre;
-            dr[2] = dat_mark1[fiw];
-            dr[3] = dat_mark1[fiw + 1];
-            dr[4] = dat_mark0[fiw];
-            dr[5] = dat_mark0[fiw + 1];
-            let br [2]int;
-            br[0] = bss_wmark[fiw];
-            br[1] = bss_wmark[fiw + 1];
-            if (gen.flush_asm_ranges(gen.arr_cstr(fpath), &tr[0], 1,
-                    &dr[0], 3, &br[0], 1) != 0) {
-                return -1;
-            }
-            fiw += 1;
-        }
-    }
-    if (gs.task.c_check_only != 0 && gen.front_checked_end() != 0) { return -1; }
+    // LLVM 后端：受检快照 → 模块 IR → LLVM 文本 → 内嵌桥发布对象。
+    // LL12：旧 SSA 替换与机器发射已删除。
+    if (mb_llvm_emit_module(m, main_off, main_len) != 0) { return -1; }
+    if (gen.front_checked_end() != 0) { return -1; }
     mb_print_stats();
     return 0;
 }

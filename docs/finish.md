@@ -31,6 +31,19 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第三刀：worker 旧发射段
+
+- `compiler/cmd/module_worker.yh`：删除 `ast_ir_lower_module`、按文件 `.s`
+  区间标记与写出、`.stub.s` 桩对象、`.bss` 与运行期桩发射（544→405 行）。
+  check 分支验证受检快照后直接结束；其余一律走 `mb_llvm_emit_module`，
+  `front_checked_end` 与统计保持在两条出口。
+- `out_dir`/`ir_cache_salt` 参数暂留（调用链在 `module_build`/`build_scheduler`），
+  待 C2 清理。
+- 验证：`make` 通过；400 语料诊断快照零差异；`make test` 退出 0；
+  `make selfhost-native` 退出 0（1m57s，project 106/106）；单文件 `-o` 与
+  `check` 正常。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第二刀：driver 旧分支与 compile 发射段
 
 - `compiler/cmd/driver.yh`：删除 legacy 的 `run_emit_asm_to`、`drv_write_asm`
