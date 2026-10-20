@@ -2,6 +2,23 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-21 LL12-0：基线冻结与旧发射消费者普查
+
+- 新建专用 worktree `/Users/lavender/Documents/x-ll12`（分支
+  `ll12-retire-legacy`，起点 `e5e81ac`）；`tmp/llvm-migration` 以符号链接复用
+  本机闭包，`make` 14s 冷编通过（`yh 0.0.5`）。
+- 新增 [LL12 实施方案](02-plan/yh-LL12退役旧机器发射实施方案.md) 与
+  [消费者普查](02-plan/yh-LL12旧发射消费者普查-2026-10-21.md)；普查工具
+  `tools/ll12-legacy-consumers.py` 入库，共统计 2669 处引用：发射原语 1818、
+  四缓冲 81、开关 60、旧链 240、共享 builder 390、目标值状态 80。
+- 普查修正三处关键判断：`ast_ir_b_*` 390 处是 LLVM 快照 lowering 共享的 IR
+  构造层（C3 保留）；`bss_n/bss_symbols` 是快照字段（C2 只删 `bss_put*`）；
+  C1 范围从 `gen/sem_*`（549）扩到 `parse/*`（143）与 `comptime/*`（36），
+  CT 常量需改走快照/模块 IR。
+- 基线：hello 的 legacy/LLVM 可执行文件 50,672/50,256 B；legacy `.s` 234 行、
+  LLVM `.s` 584 行。产物与脚本在 `tmp/ll12/`（未入库）。
+- 本轮只新增文档与普查脚本，未改编译器、未滚种子。
+
 ## 2026-10-21 CircleCI 三端全绿与 tag Release 验证
 
 - CircleCI 分支流水线在 `9438244` 三端全部 success：Linux/AArch64、
