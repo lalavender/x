@@ -11,6 +11,8 @@
 macOS/arm64 用 `bin/yh-darwin-arm64`（Mach-O，SHA-256 见
 `bin/yh-darwin-arm64.sha256`），Linux/aarch64 用 `bin/yh-linux-arm64`（ELF，
 SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
+Linux/AArch64 种子因内嵌 LLVM/lld 超过 GitHub 100 MB 单文件限制，使用 Git LFS
+跟踪；克隆后需执行 `git lfs pull`，否则 `bin/yh-linux-arm64` 只是指针文件。
 
 - 日常构建：`make`（= 宿主种子对 `compiler/` 项目 `yh build`，冷编，
   产出根目录 `yh`）；日常验证以 `make selfhost-native` 为主门
