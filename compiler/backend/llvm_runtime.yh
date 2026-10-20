@@ -150,41 +150,55 @@ fn llvm_runtime_write_strlen(out *LLVMOutput, hidden int) void {
     llvm_text(out, "done:\n  ret i64 %i\n}\n");
 }
 
-// llvm_runtime_write_syscall：Linux x86_64 syscall ABI；r10/r8/r9 承接参数 4–6。
-fn llvm_runtime_write_syscall(out *LLVMOutput) void {
+// llvm_runtime_write_syscall：Linux syscall ABI。x86_64 用 rax/rdi/rsi/rdx/r10/r8/r9，
+// AArch64 用 x8 传号、x0..x5 传参并以 svc #0 进入内核。
+fn llvm_runtime_write_syscall(out *LLVMOutput, arm64 int) void {
     llvm_text(out, "define weak i64 @linux_syscall6(i64 %nr, i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) noinline nounwind optnone nobuiltin {\n");
-    llvm_text(out, "entry:\n  %result = call i64 asm sideeffect \"syscall\", \"={rax},0,{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}\"(i64 %nr, i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5)\n");
+    if (arm64 != 0) {
+        llvm_text(out, "entry:\n  %result = call i64 asm sideeffect \"svc #0\", \"={x0},{x8},0,{x1},{x2},{x3},{x4},{x5},~{memory}\"(i64 %nr, i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5)\n");
+    } else {
+        llvm_text(out, "entry:\n  %result = call i64 asm sideeffect \"syscall\", \"={rax},0,{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}\"(i64 %nr, i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5)\n");
+    }
     llvm_text(out, "  ret i64 %result\n}\n\n");
 }
 
 // llvm_runtime_write_malloc：映射 payload+16 字节，前 8 字节记录 munmap 长度，用户指针保持 16 字节对齐。
-fn llvm_runtime_write_malloc(out *LLVMOutput) void {
+// mmap 号在 x86_64 为 9、AArch64 为 222，其余 PROT/MAP 常量一致。
+fn llvm_runtime_write_malloc(out *LLVMOutput, arm64 int) void {
     llvm_text(out, "define weak ptr @__yh_runtime_malloc(i64 %size) noinline nounwind optnone nobuiltin {\nentry:\n");
     llvm_text(out, "  %overflow = icmp ugt i64 %size, -17\n  br i1 %overflow, label %fail, label %prepare\nprepare:\n");
     llvm_text(out, "  %zero = icmp eq i64 %size, 0\n  %payload = select i1 %zero, i64 1, i64 %size\n");
-    llvm_text(out, "  %total = add i64 %payload, 16\n  %raw = call i64 @linux_syscall6(i64 9, i64 0, i64 %total, i64 3, i64 34, i64 -1, i64 0)\n");
+    llvm_text(out, "  %total = add i64 %payload, 16\n  %raw = call i64 @linux_syscall6(i64 ");
+    llvm_number(out, arm64 != 0 ? 222 : 9);
+    llvm_text(out, ", i64 0, i64 %total, i64 3, i64 34, i64 -1, i64 0)\n");
     llvm_text(out, "  %error = icmp slt i64 %raw, 0\n  br i1 %error, label %fail, label %success\nsuccess:\n");
     llvm_text(out, "  %base = inttoptr i64 %raw to ptr\n  store i64 %total, ptr %base, align 8\n");
     llvm_text(out, "  %user = getelementptr i8, ptr %base, i64 16\n  ret ptr %user\nfail:\n  ret ptr null\n}\n\n");
 }
 
 // llvm_runtime_write_free：NULL 无操作；其他指针回到 16 字节头部并解除映射。
-fn llvm_runtime_write_free(out *LLVMOutput) void {
+// munmap 号在 x86_64 为 11、AArch64 为 215。
+fn llvm_runtime_write_free(out *LLVMOutput, arm64 int) void {
     llvm_text(out, "define weak void @__yh_runtime_free(ptr %user) noinline nounwind optnone nobuiltin {\nentry:\n");
     llvm_text(out, "  %null = icmp eq ptr %user, null\n  br i1 %null, label %done, label %release\nrelease:\n");
     llvm_text(out, "  %base = getelementptr i8, ptr %user, i64 -16\n  %size = load i64, ptr %base, align 8\n");
     llvm_text(out, "  %address = ptrtoint ptr %base to i64\n");
-    llvm_text(out, "  %ignored = call i64 @linux_syscall6(i64 11, i64 %address, i64 %size, i64 0, i64 0, i64 0, i64 0)\n  br label %done\n");
+    llvm_text(out, "  %ignored = call i64 @linux_syscall6(i64 ");
+    llvm_number(out, arm64 != 0 ? 215 : 11);
+    llvm_text(out, ", i64 %address, i64 %size, i64 0, i64 0, i64 0, i64 0)\n  br label %done\n");
     llvm_text(out, "done:\n  ret void\n}\n\n");
 }
 
 // llvm_runtime_write_printf_support：按 syscall 短写循环输出，并累计成功字节数。
-fn llvm_runtime_write_printf_support(out *LLVMOutput) void {
+// write 号在 x86_64 为 1、AArch64 为 64。
+fn llvm_runtime_write_printf_support(out *LLVMOutput, arm64 int) void {
     llvm_text(out, "define internal i64 @yh_printf_write(ptr %data, i64 %len) noinline nounwind optnone nobuiltin {\nentry:\n");
     llvm_text(out, "  %empty = icmp eq i64 %len, 0\n  br i1 %empty, label %done, label %loop\nloop:\n");
     llvm_text(out, "  %written = phi i64 [ 0, %entry ], [ %next, %advance ]\n");
     llvm_text(out, "  %cursor = getelementptr i8, ptr %data, i64 %written\n  %left = sub i64 %len, %written\n");
-    llvm_text(out, "  %address = ptrtoint ptr %cursor to i64\n  %chunk = call i64 @linux_syscall6(i64 1, i64 1, i64 %address, i64 %left, i64 0, i64 0, i64 0)\n");
+    llvm_text(out, "  %address = ptrtoint ptr %cursor to i64\n  %chunk = call i64 @linux_syscall6(i64 ");
+    llvm_number(out, arm64 != 0 ? 64 : 1);
+    llvm_text(out, ", i64 1, i64 %address, i64 %left, i64 0, i64 0, i64 0)\n");
     llvm_text(out, "  %failed = icmp sle i64 %chunk, 0\n  br i1 %failed, label %error, label %advance\nadvance:\n");
     llvm_text(out, "  %next = add i64 %written, %chunk\n  %complete = icmp uge i64 %next, %len\n");
     llvm_text(out, "  br i1 %complete, label %done, label %loop\ndone:\n  ret i64 %len\nerror:\n  ret i64 -1\n}\n\n");
@@ -218,13 +232,39 @@ fn llvm_runtime_write_printf_integer(out *LLVMOutput) void {
     llvm_text(out, "  %result = call i64 @yh_printf_write(ptr %start, i64 %length)\n  ret i64 %result\n}\n\n");
 }
 
-// llvm_runtime_write_printf：基于 va_arg 支持现行格式集合；格式字符串和 %s 都按 UTF-8 字节输出。
-fn llvm_runtime_write_printf(out *LLVMOutput, hidden int) void {
+// llvm_runtime_write_va_helper：统一取下一个 8 字节变参槽。
+// x86_64/Darwin 的 va_list 是线性游标，直接用 va_arg 取 i64；Linux/AArch64 的
+// va_list 是 {stack, gr_top, vr_top, gr_offs, vr_offs} 结构，LLVM 的 va_arg 指令
+// 不展开寄存器保存区，必须按 AAPCS64 的 gr_offs 规则显式取寄存器槽或栈槽。
+// 返回 i64 位型；调用方按格式再用 trunc/inttoptr 解释成 i32/指针。
+fn llvm_runtime_write_va_helper(out *LLVMOutput, arm64 int) void {
+    llvm_text(out, "define internal i64 @yh_va_next(ptr %args) noinline nounwind optnone nobuiltin {\nentry:\n");
+    if (arm64 != 0) {
+        llvm_text(out, "  %offs_ptr = getelementptr i8, ptr %args, i64 24\n  %offs = load i32, ptr %offs_ptr, align 4\n");
+        llvm_text(out, "  %stacked = icmp sge i32 %offs, 0\n  br i1 %stacked, label %stack, label %reg\nreg:\n");
+        llvm_text(out, "  %next_offs = add i32 %offs, 8\n  store i32 %next_offs, ptr %offs_ptr, align 4\n");
+        llvm_text(out, "  %still_reg = icmp sle i32 %next_offs, 0\n  br i1 %still_reg, label %from_reg, label %stack\nfrom_reg:\n");
+        llvm_text(out, "  %gr_top_ptr = getelementptr i8, ptr %args, i64 8\n  %gr_top = load ptr, ptr %gr_top_ptr, align 8\n");
+        llvm_text(out, "  %old_offs = sext i32 %offs to i64\n  %slot = getelementptr i8, ptr %gr_top, i64 %old_offs\n");
+        llvm_text(out, "  %reg_value = load i64, ptr %slot, align 8\n  ret i64 %reg_value\nstack:\n");
+        llvm_text(out, "  %stack_ptr = getelementptr i8, ptr %args, i64 0\n  %cursor = load ptr, ptr %stack_ptr, align 8\n");
+        llvm_text(out, "  %next = getelementptr i8, ptr %cursor, i64 8\n  store ptr %next, ptr %stack_ptr, align 8\n");
+        llvm_text(out, "  %stack_value = load i64, ptr %cursor, align 8\n  ret i64 %stack_value\n}\n\n");
+    } else {
+        llvm_text(out, "  %value = va_arg ptr %args, i64\n  ret i64 %value\n}\n\n");
+    }
+}
+
+// llvm_runtime_write_printf：支持现行格式集合；格式字符串和 %s 都按 UTF-8 字节输出。
+// arm64 同时选择 32 字节 Linux va_list 与显式寄存器槽/栈槽读取。
+fn llvm_runtime_write_printf(out *LLVMOutput, hidden int, arm64 int) void {
     llvm_text(out, "declare void @llvm.va_start(ptr)\ndeclare void @llvm.va_end(ptr)\n\n");
+    llvm_runtime_write_va_helper(out, arm64);
     llvm_text(out, "define weak ");
     if (hidden != 0) { llvm_text(out, "hidden "); }
     llvm_text(out, "i32 @printf(ptr %fmt, ...) noinline nounwind optnone nobuiltin {\nentry:\n");
-    llvm_text(out, "  %args = alloca [24 x i8], align 8\n  %count = alloca i64, align 8\n");
+    llvm_text(out, "  %args = alloca ["); llvm_number(out, arm64 != 0 ? 32 : 24);
+    llvm_text(out, " x i8], align 8\n  %count = alloca i64, align 8\n");
     llvm_text(out, "  %character = alloca [1 x i8], align 1\n  %unknown = alloca [2 x i8], align 1\n");
     llvm_text(out, "  store i64 0, ptr %count, align 8\n  call void @llvm.va_start(ptr %args)\n  br label %scan\nscan:\n");
     llvm_text(out, "  %index = phi i64 [ 0, %entry ], [ %cursor, %span_done ], [ %resume, %account_integer_bytes ], [ %resume_string, %emit_string ], [ %resume_char, %emit_char ], [ %resume_percent, %emit_percent_next ], [ %resume_unknown, %emit_unknown ]\n");
@@ -260,28 +300,28 @@ fn llvm_runtime_write_printf(out *LLVMOutput, hidden int) void {
     llvm_text(out, "  %long_type_byte = load i8, ptr %type_ptr, align 1\n  %long_d = icmp eq i8 %long_type_byte, 100\n");
     llvm_text(out, "  %long_u = icmp eq i8 %long_type_byte, 117\n  br i1 %long_d, label %signed64, label %check_long_u\n");
     llvm_text(out, "check_long_u:\n  br i1 %long_u, label %unsigned64, label %unknown_long\n");
-    llvm_text(out, "signed32:\n  %signed_arg = va_arg ptr %args, i32\n  %signed_wide = sext i32 %signed_arg to i64\n");
+    llvm_text(out, "signed32:\n  %signed_raw = call i64 @yh_va_next(ptr %args)\n  %signed_arg = trunc i64 %signed_raw to i32\n  %signed_wide = sext i32 %signed_arg to i64\n");
     llvm_text(out, "  %signed_written = call i64 @yh_printf_integer(i64 %signed_wide, i1 true)\n");
     llvm_text(out, "  %signed_resume = add i64 %index, 2\n  br label %account_integer\nunsigned32:\n");
-    llvm_text(out, "  %unsigned_arg = va_arg ptr %args, i32\n  %unsigned_wide = zext i32 %unsigned_arg to i64\n");
+    llvm_text(out, "  %unsigned_raw = call i64 @yh_va_next(ptr %args)\n  %unsigned_arg = trunc i64 %unsigned_raw to i32\n  %unsigned_wide = zext i32 %unsigned_arg to i64\n");
     llvm_text(out, "  %unsigned_written = call i64 @yh_printf_integer(i64 %unsigned_wide, i1 false)\n");
     llvm_text(out, "  %unsigned_resume = add i64 %index, 2\n  br label %account_integer\nsigned64:\n");
-    llvm_text(out, "  %signed64_arg = va_arg ptr %args, i64\n  %signed64_written = call i64 @yh_printf_integer(i64 %signed64_arg, i1 true)\n");
+    llvm_text(out, "  %signed64_arg = call i64 @yh_va_next(ptr %args)\n  %signed64_written = call i64 @yh_printf_integer(i64 %signed64_arg, i1 true)\n");
     llvm_text(out, "  %signed64_resume = add i64 %index, 4\n  br label %account_integer\nunsigned64:\n");
-    llvm_text(out, "  %unsigned64_arg = va_arg ptr %args, i64\n  %unsigned64_written = call i64 @yh_printf_integer(i64 %unsigned64_arg, i1 false)\n");
+    llvm_text(out, "  %unsigned64_arg = call i64 @yh_va_next(ptr %args)\n  %unsigned64_written = call i64 @yh_printf_integer(i64 %unsigned64_arg, i1 false)\n");
     llvm_text(out, "  %unsigned64_resume = add i64 %index, 4\n  br label %account_integer\naccount_integer:\n");
     llvm_text(out, "  %written = phi i64 [ %signed_written, %signed32 ], [ %unsigned_written, %unsigned32 ], [ %signed64_written, %signed64 ], [ %unsigned64_written, %unsigned64 ]\n");
     llvm_text(out, "  %resume = phi i64 [ %signed_resume, %signed32 ], [ %unsigned_resume, %unsigned32 ], [ %signed64_resume, %signed64 ], [ %unsigned64_resume, %unsigned64 ]\n");
     llvm_text(out, "  %integer_failed = icmp slt i64 %written, 0\n  br i1 %integer_failed, label %error, label %account_integer_bytes\naccount_integer_bytes:\n");
     llvm_text(out, "  %old_count = load i64, ptr %count, align 8\n  %new_count = add i64 %old_count, %written\n");
     llvm_text(out, "  store i64 %new_count, ptr %count, align 8\n  br label %scan\nstring_arg:\n");
-    llvm_text(out, "  %string_value = va_arg ptr %args, ptr\n  %string_null = icmp eq ptr %string_value, null\n");
+    llvm_text(out, "  %string_bits = call i64 @yh_va_next(ptr %args)\n  %string_value = inttoptr i64 %string_bits to ptr\n  %string_null = icmp eq ptr %string_value, null\n");
     llvm_text(out, "  br i1 %string_null, label %empty_string, label %measure_string\nempty_string:\n  br label %string_length\nmeasure_string:\n");
     llvm_text(out, "  %measured = call i64 @strlen(ptr %string_value)\n  br label %string_length\nstring_length:\n");
     llvm_text(out, "  %string_size = phi i64 [ 0, %empty_string ], [ %measured, %measure_string ]\n");
     llvm_text(out, "  %string_status = call i32 @yh_printf_emit(ptr %string_value, i64 %string_size, ptr %count)\n");
     llvm_text(out, "  %string_failed = icmp slt i32 %string_status, 0\n  br i1 %string_failed, label %error, label %emit_string\nemit_string:\n");
-    llvm_text(out, "  %resume_string = add i64 %index, 2\n  br label %scan\nchar_arg:\n  %char_value = va_arg ptr %args, i32\n");
+    llvm_text(out, "  %resume_string = add i64 %index, 2\n  br label %scan\nchar_arg:\n  %char_raw = call i64 @yh_va_next(ptr %args)\n  %char_value = trunc i64 %char_raw to i32\n");
     llvm_text(out, "  %char_byte = trunc i32 %char_value to i8\n  store i8 %char_byte, ptr %character, align 1\n");
     llvm_text(out, "  %char_status = call i32 @yh_printf_emit(ptr %character, i64 1, ptr %count)\n");
     llvm_text(out, "  %char_failed = icmp slt i32 %char_status, 0\n  br i1 %char_failed, label %error, label %emit_char\nemit_char:\n");
@@ -303,6 +343,7 @@ fn llvm_runtime_write_printf(out *LLVMOutput, hidden int) void {
 // 只有模块未定义的标准入口才生成弱定义；llvm.used 阻止 O2 删除未直接引用的 helper。
 pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
     let darwin int = gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0 ? 1 : 0;
+    let arm64 int = gen.cstr_eq(unit.target.abi, "aapcs64") != 0 ? 1 : 0;
     let emit_memcpy int = (llvm_runtime_defined(unit, "memcpy") == 0).to_type(int);
     let emit_memset int = (llvm_runtime_defined(unit, "memset") == 0).to_type(int);
     let emit_strlen int = (llvm_runtime_defined(unit, "strlen") == 0).to_type(int);
@@ -325,12 +366,12 @@ pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
     if (darwin != 0) {
         llvm_apple_runtime_write_support(unit, out, emit_malloc, emit_free, emit_printf);
     } else {
-        if (emit_syscall != 0) { llvm_runtime_write_syscall(out); }
-        if (emit_malloc != 0) { llvm_runtime_write_malloc(out); }
-        if (emit_free != 0) { llvm_runtime_write_free(out); }
-        if (emit_printf != 0) { llvm_runtime_write_printf_support(out); }
+        if (emit_syscall != 0) { llvm_runtime_write_syscall(out, arm64); }
+        if (emit_malloc != 0) { llvm_runtime_write_malloc(out, arm64); }
+        if (emit_free != 0) { llvm_runtime_write_free(out, arm64); }
+        if (emit_printf != 0) { llvm_runtime_write_printf_support(out, arm64); }
     }
-    if (emit_printf != 0) { llvm_runtime_write_printf(out, darwin); }
+    if (emit_printf != 0) { llvm_runtime_write_printf(out, darwin, arm64); }
     if (emit_memcpy != 0) { llvm_runtime_write_memcpy(out, darwin); }
     if (emit_memset != 0) { llvm_runtime_write_memset(out, darwin); }
     if (emit_strlen != 0) { llvm_runtime_write_strlen(out, darwin); }

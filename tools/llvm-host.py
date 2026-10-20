@@ -114,6 +114,13 @@ def check(host: str, full: bool = True) -> list[str]:
             problems.append("宿主身份记录中的 lld 版本与固定 SDK 不一致")
         if record.get("lld_bridge_source_sha256") != digest(LLD_BRIDGE_SOURCE):
             problems.append("lld 桥源码 compiler/llvm/lld_bridge.cpp 已变化")
+    selfhost = ROOT / record.get("selfhost_flags", "")
+    if not record.get("selfhost_flags"):
+        problems.append("宿主身份记录缺少自举闭包文件")
+    elif not selfhost.is_file():
+        problems.append(f"自举闭包文件不存在：{selfhost}")
+    elif digest(selfhost) != record.get("selfhost_flags_sha256"):
+        problems.append("自举闭包文件内容与身份记录不一致")
     archive = ROOT / record.get("bridge_archive", "")
     if not archive.is_file():
         problems.append(f"桥归档不存在：{archive}")
@@ -308,12 +315,15 @@ def main(argv: list[str]) -> int:
     if args.command == "shim":
         record = ensure(args.host, args.mode)
         path = write_shim(args.host, record)
+        selfhost_flags = (ROOT / record["selfhost_flags"]).resolve() \
+            if record.get("selfhost_flags") else None
         print(json.dumps({"host": args.host, "shim_dir": str(path.parent),
                           "shim": str(path), "mode": args.mode,
                           "executable": record["executable"],
                           "executable_sha256": record["executable_sha256"],
                           "bridge_sha256": record["bridge_sha256"],
                           "sdk_sha256": record["sdk_sha256"],
+                          "selfhost_flags": str(selfhost_flags) if selfhost_flags else "",
                           "cxx": record["cxx"], "cc": record["cc"]}, ensure_ascii=False))
         return 0
     record = ensure(args.host, "require")

@@ -95,7 +95,7 @@ extern，也不能混用旧 AAPCS64 分类器。
 进入模块符号、函数/调用 IR 与缓存序列化身份，YH 内部符号带 `$yhllvmv1` 后缀。跨模块结构体、数组、切片
 参数和返回的 LLVM O0/O2 链接运行已通过。固定参数 C ABI 标量签名支持定宽整数、`_Bool`、指针、f32/f64；
 i8/i16 与 u8/u16 在函数返回、参数和调用点使用 `signext`/`zeroext`，C `_Bool` 使用 `i1 zeroext` 并在边界按
-非零值转换。Linux/x86_64 C 结构体/联合按两个八字节分类 INTEGER/SSE，超过 16 字节使用 MEMORY；参数/返回 coercion、`sret` 和 `byval` 由 CPair、CMixed、CWide 三组 oracle 与双向运行验证。函数指针类型保留 ABI、返回/参数类型和变参种类，跨模块 YH callback 与 C scalar/CPair aggregate callback 的传递、返回和间接调用均在 O0/O2 运行通过。YH 类型化变参 `vararg=2` 的尾项按源码顺序打包为末尾切片参数；用户裸 C 变参仍按 FFI 决策拒绝。`@[noreturn]` 随符号和模块接口缓存传播，调用点在该调用返回后执行 `llvm.trap` 并进入 `unreachable`；接口属性移除/恢复会重编调用方。`tests/selfhost/llvm-abi.py` 覆盖 clang oracle、LLVM verifier、优化与双向运行；不支持的源级签名和 ABI 约定明确拒绝，不回退旧后端。ARM64 HFA 留给 F1。
+非零值转换。Linux/x86_64 C 结构体/联合按两个八字节分类 INTEGER/SSE，超过 16 字节使用 MEMORY；参数/返回 coercion、`sret` 和 `byval` 由 CPair、CMixed、CWide 三组 oracle 与双向运行验证。函数指针类型保留 ABI、返回/参数类型和变参种类，跨模块 YH callback 与 C scalar/CPair aggregate callback 的传递、返回和间接调用均在 O0/O2 运行通过。YH 类型化变参 `vararg=2` 的尾项按源码顺序打包为末尾切片参数；用户裸 C 变参仍按 FFI 决策拒绝。`@[noreturn]` 随符号和模块接口缓存传播，调用点在该调用返回后执行 `llvm.trap` 并进入 `unreachable`；接口属性移除/恢复会重编调用方。`tests/selfhost/llvm-abi.py` 覆盖 clang oracle、LLVM verifier、优化与双向运行；不支持的源级签名和 ABI 约定明确拒绝，不回退旧后端。Linux/AArch64 的 AAPCS64 标量、HFA2/HFA3、16 字节直接聚合、24 字节 sret/间接参数与双向回调已于 2026-10-20 接入，见 `tests/selfhost/llvm-linux-arm64.py`。
 
 ## 定宽整数、移位与除模（LLVM-SEM-04/05）
 

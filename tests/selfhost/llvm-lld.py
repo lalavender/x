@@ -290,6 +290,8 @@ def main() -> int:
     require_success([str(client), "--driver", str(main_object), str(driver_output)], env=env)
     selfhost_env = dict(env)
     selfhost_env["YH_LLVM_SELFHOST"] = "1"
+    if shim_info.get("selfhost_flags"):
+        selfhost_env["YH_LLVM_SELFHOST_FLAGS"] = shim_info["selfhost_flags"]
     selfhost_output = WORK / "lld-selfhost"
     selfhost_output.unlink(missing_ok=True)
     require_success([str(client), "--driver", str(selfhost_object),

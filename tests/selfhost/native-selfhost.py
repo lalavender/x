@@ -103,18 +103,32 @@ def llvm_shim_for_seed(seed: Path):
 
 
 def seed_supports_llvm(seed: Path) -> bool:
-    """探测启动种子是否已能对当前宿主 triple 做 LLVM 发射。
+    """探测启动种子是否能完整走 LLVM 目标链路（发射、运行时、链接、执行）。
 
-    旧 Darwin 种子只带失败桩；此时先由它 legacy 编出过渡代，再由过渡代以
-    LLVM 连续自编（与 F2-8 的 A→B/C/D 链一致）。滚动后的新种子会直接通过。
+    只看 `--emit-asm` 会误判：旧 Linux/ARM64 种子能发纯标量 IR，却因自带
+    x86_64 syscall 运行时无法编出可运行程序。这里用 malloc/printf 探针实际
+    链接并运行；不能完整通过时按过渡种子处理：先 legacy 编 cc2，再由 cc2
+    以 LLVM 连续自编（与 F2-8 的 A→B/C/D 链一致）。
     """
     probe = WORK / "seed-llvm-probe.yh"
+    binary = WORK / "seed-llvm-probe"
     probe.parent.mkdir(parents=True, exist_ok=True)
-    probe.write_text("module main;\n\nfn main() int { return 0; }\n",
-                     encoding="utf-8")
+    probe.write_text(
+        "module main;\n\n"
+        "fn main() int {\n"
+        "    let p *u8 = malloc(8).to_type(*u8);\n"
+        "    if (p == 0) { return 1; }\n"
+        "    p[0] = 65; p[1] = 0;\n"
+        "    printf(\"%s\\n\", p.to_type(*char));\n"
+        "    free(p.to_type(*void));\n"
+        "    return 0;\n"
+        "}\n", encoding="utf-8")
     result = run([str(seed), "--backend", "llvm", "--target", host_triple(),
-                  "--emit-llvm", "--emit-asm", str(probe)])
-    return result.returncode == 0
+                  "-o", str(binary), str(probe)])
+    if result.returncode != 0 or not binary.is_file():
+        return False
+    execution = run([str(binary)])
+    return execution.returncode == 0 and execution.stdout.strip() == "A"
 
 
 def run(cmd, cwd=None, shim=False, seed_link=False):
@@ -238,8 +252,8 @@ def main() -> int:
                     help="跳过两遍语料（仅当同一轮里 make test 已用等价编译器"
                          "跑过语料时才用；默认不跳过）")
     ap.add_argument("--backend", choices=("auto", "legacy", "llvm"), default="auto",
-                    help="自举链使用的后端；auto 在 Linux/x86_64 走 LLVM，"
-                         "其余平台沿用 legacy")
+                    help="自举链使用的后端；auto 在 Linux/x86_64、Linux/AArch64 "
+                         "与 Darwin/ARM64 走 LLVM，其余平台沿用 legacy")
     args = ap.parse_args()
     args.jobs = max(1, args.jobs)
     WORK = Path(args.workdir)
@@ -265,7 +279,7 @@ def main() -> int:
     machine = platform.machine().lower()
     llvm_mode = args.backend == "llvm" or (
         args.backend == "auto" and (
-            (sys.platform == "linux" and machine in ("x86_64", "amd64"))
+            (sys.platform == "linux" and machine in ("x86_64", "amd64", "aarch64", "arm64"))
             or (sys.platform == "darwin" and machine in ("arm64", "aarch64"))))
     SELFHOST_LLVM = llvm_mode
     transition_legacy = llvm_mode and not seed_supports_llvm(seed)

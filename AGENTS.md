@@ -35,7 +35,10 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
   macOS/Windows 等其他平台后续接入；非 Linux 目标不因日常改动回归验收，
   但 Linux 上的 `make test` / `make selfhost-native` 与滚种子照常执行。
   **2026-10-19（F2-10）**：macOS/ARM64 默认后端已切 LLVM（Darwin 种子
-  `bin/yh-darwin-arm64` 含固定桥）；Linux/ARM64 仍为 legacy，等 F1。
+  `bin/yh-darwin-arm64` 含固定桥）。
+  **2026-10-20（F1）**：Linux/AArch64 默认后端也已切 LLVM，内嵌 lld 与
+  固定桥随种子分发；`make test` / `make selfhost-native` 默认走 LLVM，
+  O0/O2 与连续自编固定点通过，种子已滚为 `bin/yh-linux-arm64`。
   性能项（RS2/RS3/R2c、20 轮对照）后置，不据此宣称首个完整 SSA 版本完成。
   **Darwin SDK stub**：`compiler/darwin-sdk/` 随编译器分发（Zig 式，
   SDK 26.4）；链接查找 `SDKROOT` → `YH_DARWIN_SDK` → 可执行文件附近 bundle →
@@ -81,10 +84,10 @@ SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
 3. `make seed` 把验证过的 `yh` 覆盖回宿主平台种子（Linux 上为
    `bin/yh-linux-arm64`），进入下一代。
 
-Darwin/ARM64 自举闭包（2026-10-20 起，Zig 式）：LLVM/lld/桥的 `-force_load`
-参数不再烘焙进种子，而由构建机提供 —— 首次执行 `make bootstrap`
-（= 幂等 `make llvm-host` + 冷编；`make llvm-host` 单独只准备闭包）生成
-`tmp/llvm-migration/llvm-host-darwin-aarch64/selfhost-flags.txt`，
+Darwin/ARM64 与 Linux/AArch64 自举闭包（2026-10-20 起，Zig 式）：
+LLVM/lld/桥的归档参数不再烘焙进种子，而由构建机提供 —— 首次执行
+`make bootstrap`（= 幂等 `make llvm-host` + 冷编；`make llvm-host` 单独只准备闭包）
+生成 `tmp/llvm-migration/llvm-host-<宿主>/selfhost-flags.txt`，
 `make`/`make seed` 经 `YH_LLVM_SELFHOST_FLAGS` 传给种子；换机器或 worktree
 只需重新 bootstrap/llvm-host。固定 SDK 就绪后 Makefile 自动导出 `SDKROOT`
 （显式 SDKROOT 仍优先），`make test`/`make selfhost-native` 不再要求手工导出；
@@ -120,6 +123,7 @@ make selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 
 make llvm-host          # 只准备本机固定 LLVM 闭包（不编编译器）
 make code-stats         # 统计 compiler/ 下 yh 源码规模
 make test-code-stats    # 运行统计工具边界与 JSON 检查
+make test-llvm-linux-arm64  # F1：Linux/AArch64 LLVM 运行时/C ABI/O0-O2（容器内）
 make seed               # 滚种子（仅在全绿后；拒绝带构建机路径的种子）
 ```
 
@@ -174,8 +178,8 @@ container system start
 container run --rm -it -v "$PWD":/work -w /work alpine:latest sh
 
 # 容器内一次性装齐门禁所需工具（python3 跑门禁脚本，cc/ld 供链接）
-apk add python3 build-base        # alpine；用 debian 镜像则：
-apt-get update && apt-get install -y python3 build-essential
+apk add python3 build-base libxml2-dev   # alpine；用 debian 镜像则：
+apt-get update && apt-get install -y python3 build-essential libxml2-dev
 ```
 
 故障处理：卡死的容器用 `container ls -a` 查看、

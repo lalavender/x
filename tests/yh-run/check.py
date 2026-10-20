@@ -314,6 +314,22 @@ def check_asm_symbols(path):
             target = "aarch64-unknown-linux-gnu"
     if not target.startswith("aarch64-"):
         return None
+    # 该约束针对旧 ARM64 发射器的文本替换/标签命名；LLVM 路径的函数符号带
+    # ABI 版本后缀，全局符号由 LLVM 自己合法化，GNU as 与 LLVM 集成汇编器都
+    # 接受 adrp/bl 后的同名符号，因此不把旧规则的寄存器后缀强加给 LLVM。
+    backend = ""
+    for index, flag in enumerate(COMPILER_FLAGS[:-1]):
+        if flag == "--backend":
+            backend = COMPILER_FLAGS[index + 1]
+    if backend == "llvm":
+        return None
+    if backend == "":
+        import platform
+        machine = platform.machine().lower()
+        if (platform.system() == "Linux"
+                and machine in ("x86_64", "amd64", "aarch64", "arm64")) \
+                or (platform.system() == "Darwin" and machine in ("arm64", "aarch64")):
+            return None
     if not ASM_SYMBOLS_SAFE_RE.search(path.read_text(encoding="utf-8")):
         return None
     try:

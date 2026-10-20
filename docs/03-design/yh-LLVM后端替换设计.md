@@ -99,7 +99,8 @@ flowchart LR
   LLVM 静态库链接进编译器，禁止依赖 `libLLVM.so`、dlopen 或 LLVM 工具旁车。
   SDK 由固定下载地址与 SHA-256 锁定，解包到 `tmp/llvm-migration/sdk/`，不安装到系统。
   首片先交付 Linux/x86_64 的固定 SDK；ARM64 启动 SDK 在 LL3 接入 A 前验收，
-  ARM64 LLVM 运行时和原生种子/自举在 F1 验收。
+  Linux/AArch64 的 LLVM 运行时、内嵌 lld、原生自举与种子已于 2026-10-20 由
+  F1 验收。
   LLVM 的 Apache-2.0 WITH LLVM-exception 许可和发行包版权随交付保存。
   C/C++ 编译器、平台链接器和 libc 属构建/OS 依赖，不能混称为系统 LLVM 依赖。
 
@@ -166,7 +167,7 @@ C ABI 另行按目标降低签名，显式处理小聚合/HFA、间接返回、�
 两种变参。不能只把源结构体原样写成 LLVM struct 就声称与 clang ABI 相同。
 Clang 针对等价 C 声明产生的 IR/对象作为核对材料，测试同时验证 yh→C、C→yh。
 首期以 Linux/x86_64 System V ABI 的整数/浮点寄存器类、聚合 coercion 和栈传参为准；
-现有 AAPCS64 分类器仅作为旧平台资料，HFA 等 ARM64 专项在 F1 验收。
+现有 AAPCS64 分类器与旧平台资料在 F1 已与 LLVM 路径对齐；HFA/聚合、AArch64 syscall 与 `va_list` 由 `tests/selfhost/llvm-linux-arm64.py` 验收（2026-10-20）。
 
 ### 5.2 数据与符号
 
@@ -223,7 +224,8 @@ Linux/x86_64 的目录和单调时钟调用使用 `.linux.x64.yh` 实现，ARM64
 `open/fork/execvp/exit/waitpid`，由 LL7 的 SysV 调用 lowering 承接。测试覆盖嵌套目录、中文与
 空格路径、getdents64 文件项、单调时钟、创建/关闭文件，以及 fork/execvp 执行 `/bin/true`
 并检查子进程状态。首期 LLVM runtime
-目标门限定 Linux/x86_64 SysV；ARM64 LLVM syscall/运行时与原生种子归 F1。
+目标门已覆盖 Linux/x86_64 SysV 与 Linux/AArch64 AAPCS64；ARM64 LLVM syscall/运行时、
+内嵌 lld、默认后端与种子已于 F1 完成（2026-10-20）。
 
 程序对象仅允许本身使用的 OS/C ABI 符号未定义；runtime 入口、LLVM 内存 libcalls 和
 相关整数辅助 libcall 不得泄漏。编译器可执行文件仍允许其内嵌 LLVM 桥带来的 C++/SDK
@@ -288,9 +290,9 @@ manifest 与旧内容的组合；补做缓存输入不会解决原有提交事�
 
 x64 对象由进程内 LLVM 生成，Linux/x86_64 链接用固定 SDK 中的内嵌 lld，按目标机型
 检查后发布；编译器不会因 PATH 顺序误用 AArch64 gcc 包装器。`gcc` 仍用于发现宿主 CRT、
-加载器和库搜索目录，系统链接文件与库内容纳入链接缓存身份。Linux/AArch64 及尚未接入
-的 macOS/Windows 目标保留显式平台驱动回落；Mach-O/PE 探针只证明交叉格式可链接，
-不代表那些平台已进入生产支持。
+加载器和库搜索目录，系统链接文件与库内容纳入链接缓存身份。Linux/AArch64 与
+Linux/x86_64 一样使用内嵌 lld；尚未接入的 macOS/Windows 目标才保留显式平台驱动回落。
+Mach-O/PE 探针只证明交叉格式可链接，不代表那些平台已进入生产支持。
 LL9L 探针与阶段记录见 [完成记录](../01-finished/yh-LLVM-LL9L内嵌lld-2026-10-18.md)。
 额外分发门：在没有 clang/llc/llvm-config/opt/llvm-as 和 libLLVM 动态库的隔离环境运行
 交付 yh，实际编译、链接、运行 `.yh`，并完成冷编自举。readelf 的 NEEDED 不含 LLVM。
@@ -299,8 +301,8 @@ LL9L 探针与阶段记录见 [完成记录](../01-finished/yh-LLVM-LL9L内嵌ll
 失败时保留旧种子和默认旧路径；候选留在 tmp/。退役旧后端另设检查：当前全量消费者
 已用 LLVM 验收、语义/ABI/性能/自举门全过、源码不再引用 em_* 机器原语；
 保留 gen 的类型与语义能力，不整目录删除 gen。删除源码和默认开关不删除历史种子。
-LL12 退役还须等待 F1 的 Linux/AArch64 LLVM 回归，避免删除旧路径导致当前 Linux/ARM64
-构建失去可用后端；这不阻挡 x86_64 原生候选、默认验收和独立种子建设。
+F1 的 Linux/AArch64 LLVM 回归已通过，当前 Linux/ARM64 默认路径不再依赖旧后端；
+LL12 仍等待 LL11 的 R2b/性能硬门关闭后再分片删除机器发射。
 
 ## 8. 多平台路线与性能
 
@@ -309,8 +311,8 @@ macOS/x86_64、Windows/ARM64；后两格按获得的原生验证环境排队。
 Linux/x86_64 首期顺序已由用户确认，其余按该路线推进；不把未来平台纳入当前 Linux 日常回归。
 
 - Linux/x86_64：上述首期内容，目标是本机 WSL 原生验证与独立 x64 种子。
-- F1 Linux/AArch64：复用公共 LLVM 路径，接 AAPCS64、ARM64 syscall/运行时和原生 ARM64 自举，
-  对现有 ARM64 行为回归后再执行 LL12 退役。
+- F1 Linux/AArch64：已完成（AAPCS64、ARM64 syscall/运行时、内嵌 lld、原生自举、
+  默认切换与种子）。
 - macOS：Apple ABI、SDK、目标版本、系统库/链接/签名和原生自举；两架构完成后才考虑 universal binary。
 - Windows：MSVC 目标路线、SDK/导入库、LLP64 的 C 类型、Win32 OS 桥、路径/Unicode、
   内存/时间/进程、启动和栈探测辅助函数。Windows/ARM64 与 x64 分别验证 ABI。

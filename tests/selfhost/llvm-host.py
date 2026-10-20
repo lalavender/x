@@ -300,6 +300,8 @@ def main() -> int:
         "runner": [str(Path(runner[0]).name), *runner[1:-1]], "version_line": version_line,
         "bridge_archive": relative(Path(config["archive"])),
         "bridge_sha256": config["bridge_sha256"],
+        "selfhost_flags": relative(Path(config["selfhost_flags"])),
+        "selfhost_flags_sha256": config["selfhost_flags_sha256"],
         "bridge_source_sha256": config["bridge_source_sha256"],
         "bridge_header_sha256": config["bridge_header_sha256"],
         "lld_stub_source_sha256": config["lld_stub_source_sha256"],

@@ -355,6 +355,11 @@ def build(lock: dict, prefix: Path) -> dict:
             selfhost_flags.append("-lpthread")
         elif flag != "-static-libgcc":
             selfhost_flags.append(flag)
+    # 自举闭包属于构建机，不能烘焙进种子：单独落一个「每行一个参数」的文件，
+    # 由 seed-build/native-selfhost 在链接期经 YH_LLVM_SELFHOST_FLAGS 传入。
+    selfhost_file = output / "selfhost-flags.txt"
+    selfhost_file.write_text(
+        "".join(f"{flag}\n" for flag in selfhost_flags), encoding="utf-8")
     if lock.get("lld"):
         lld_source = ROOT / "compiler/llvm/lld_bridge.cpp"
         template, lld_default_files, lld_default_libraries = lld_driver_config(
@@ -380,9 +385,10 @@ def build(lock: dict, prefix: Path) -> dict:
         }
         lld_link_identity = hashlib.sha256(json.dumps(identity_payload, sort_keys=True,
             separators=(",", ":")).encode()).hexdigest()
+        # 新种子不再回退到烘焙闭包；缺失运行时闭包时由 mb_link 明确报错。
         write_lld_config_header(output / "lld_link_config.h", template,
                                 lld_default_files, lld_default_libraries,
-                                selfhost_flags, lld_link_identity)
+                                [], lld_link_identity)
         lld_object = output / "lld_bridge.o"
         subprocess.run([compilers["cxx"], "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror",
                         "-I" + str(prefix / "include"), "-I" + str(output),
@@ -395,6 +401,9 @@ def build(lock: dict, prefix: Path) -> dict:
         subprocess.run([compilers["cxx"], "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror",
                         "-c", str(lld_source), "-o", str(lld_object)], check=True)
         bridge_objects.append(lld_object)
+    # 从无 lld 的 stub 宿主升级到 lld 宿主时，同名归档里会残留旧的 lld_stub.o；
+    # ar rcsD 只替换同名成员、不删除旧成员，必须先删除归档再重建。
+    archive.unlink(missing_ok=True)
     subprocess.run([compilers["ar"], "rcsD", str(archive),
                     *(str(obj) for obj in bridge_objects)], check=True)
     lld_identity = {}
@@ -413,6 +422,8 @@ def build(lock: dict, prefix: Path) -> dict:
         }
     config = {"llvm_version": lock["llvm_version"], "sdk_sha256": lock["sha256"],
               "host": lock["host"], "build_host": build_host(), **compilers,
+              "selfhost_flags": str(selfhost_file),
+              "selfhost_flags_sha256": digest(selfhost_file),
               "bridge_abi": lock["bridge_abi"], "bridge_source_sha256": digest(source),
               "bridge_header_sha256": digest(ROOT / "compiler/llvm/bridge.h"),
               "lld_stub_source_sha256": digest(ROOT / "compiler/llvm/lld_stub.cpp"),

@@ -358,6 +358,16 @@ def main() -> int:
     wrapper.chmod(0o755)
     direct_env["YH_CC"] = str(wrapper)
     direct_env["YH_LLVM_SELFHOST"] = "1"
+    # 自举闭包不再烘焙进编译器：B/C/D 的最终链接必须读构建机的运行时闭包文件。
+    host_record = json.loads((ROOT / "tmp/llvm-migration/llvm-host-linux-x86_64/host.json")
+                             .read_text(encoding="utf-8"))
+    closure = host_record.get("selfhost_flags")
+    if not closure:
+        raise RuntimeError("LLVM x64 宿主身份缺少 selfhost_flags 闭包文件")
+    closure_path = (ROOT / closure).resolve()
+    if not closure_path.is_file():
+        raise RuntimeError(f"LLVM x64 自举闭包文件不存在：{closure_path}")
+    direct_env["YH_LLVM_SELFHOST_FLAGS"] = str(closure_path)
 
     final_candidates = {}
     for level in ("0", "2"):

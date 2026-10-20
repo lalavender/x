@@ -96,7 +96,7 @@ YH_PREREQ = $(SEED)
 # 665ms→464ms、整用例 939ms→703ms（约 −25%）。
 # FAST_STAGE=0 关闭暂存，改回直接用仓库根 $(YH)。
 FAST_STAGE ?= 1
-FAST_DIR ?= $(shell printf '%s' "$${TMPDIR:-/tmp}")/yh-fast
+FAST_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/yh-fast
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
 YH_RUN = $(abspath $(YH))
 RUN_WORK_FLAG =
@@ -195,6 +195,11 @@ else ifeq ($(LLVM_HOST),linux-x86_64)
  RUNTIME_TEST = python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(YH_RUN) --llvm-x64
  # 缓存专项同样改用 LLVM 缓存门（legacy link-cache 期待外部汇编器调用）。
  CACHE_TEST = python3 $(TOPSRC)/tests/selfhost/llvm-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF)
+ MODCHECK_FLAGS = --backend llvm
+else ifeq ($(LLVM_HOST),linux-aarch64)
+ # F1：Linux/AArch64 默认 LLVM；运行时/C ABI 用 F1 门，缓存用通用 LLVM 门。
+ RUNTIME_TEST = python3 $(TOPSRC)/tests/selfhost/llvm-linux-arm64.py --compiler-path $(YH_RUN)
+ CACHE_TEST = python3 $(TOPSRC)/tests/selfhost/llvm-cache.py --compiler-path $(TOPSRC)/yh$(EXESUF) --target aarch64-unknown-linux-gnu
  MODCHECK_FLAGS = --backend llvm
 else
  RUNTIME_TEST = python3 $(TOPSRC)/tests/selfhost/runtime-memory.py --compiler-path $(YH_RUN)
@@ -325,6 +330,14 @@ test-llvm: stage-yh
 selfhost-llvm:
 	python3 $(TOPSRC)/tests/selfhost/llvm-selfhost.py --seed "$(abspath $(LLVM_SEED))" --jobs $(LLVM_JOBS)
 
+# test-llvm-linux-arm64：F1 Linux/AArch64 LLVM 运行时、C ABI、对象架构与 O0/O2。
+# 只在 arm64 Linux 容器内原生运行；x64 宿主不预跑本门。
+.PHONY: test-llvm-linux-arm64
+test-llvm-linux-arm64: stage-yh
+	@test "$(HOST_SYSTEM)" = Linux || { echo "错误: test-llvm-linux-arm64 要求 Linux/aarch64"; exit 1; }
+	@test "$(HOST_ARCH)" = aarch64 -o "$(HOST_ARCH)" = arm64 || { echo "错误: test-llvm-linux-arm64 要求 Linux/aarch64"; exit 1; }
+	python3 $(TOPSRC)/tests/selfhost/llvm-linux-arm64.py --compiler-path $(YH_RUN)
+
 # selfhost-llvm-darwin：F2-8 原生连续自举（A legacy → B/C/D LLVM，
 # O0/O2 固定点 + 自解析 + 全量语料 + Darwin 专项门 + 隔离 PATH）。
 .PHONY: selfhost-llvm-darwin
@@ -386,6 +399,6 @@ clean:
 help:
 	@sed -n '2,20p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all quick full explorer code-stats test-code-stats seed selfhost-native clean help llvm-host bootstrap stage-yh test-llvm-darwin selfhost-llvm-darwin
+.PHONY: all install uninstall test test-all quick full explorer code-stats test-code-stats seed selfhost-native clean help llvm-host bootstrap stage-yh test-llvm-linux-arm64 test-llvm-darwin selfhost-llvm-darwin
 
 endif # ($(INCLUDED),no)

@@ -15,6 +15,7 @@
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -133,10 +134,15 @@ def main() -> int:
     if not args.skip_cold:
         cold = WORK / "yh-cold"
         shutil.rmtree(ROOT / "compiler" / ".build", ignore_errors=True)
+        # 新种子不再烘焙自举闭包；冷编必须从构建机的运行时文件读桥/LLVM 归档。
+        host_record = json.loads((ROOT / "tmp/llvm-migration/llvm-host-linux-x86_64/host.json")
+                                 .read_text(encoding="utf-8"))
+        flags_path = (ROOT / host_record["selfhost_flags"]).resolve()
         result = sandbox([
             str(compiler), "--backend", "llvm", "--target", TRIPLE,
             "--emit-llvm", "--stats", "build", "-o", str(cold),
-        ], ROOT / "compiler", env={"YH_LLVM_SELFHOST": "1"})
+        ], ROOT / "compiler", env={"YH_LLVM_SELFHOST": "1",
+                                   "YH_LLVM_SELFHOST_FLAGS": str(flags_path)})
         if result.returncode != 0:
             print(f"FAIL 隔离冷编自举失败：rc={result.returncode}\n{result.stderr[-800:]}")
             return 1

@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests/modules/projects/llvmcache"
 TARGET = "x86_64-unknown-linux-gnu"
+EXPECTED_MACHINE = 62
 
 
 def run(command, cwd, env):
@@ -40,8 +41,9 @@ def content_hash(data):
     return f"{value:016x}".encode()
 
 
-def build(compiler, project, output, env, target=TARGET, level=0):
+def build(compiler, project, output, env, target=None, level=0):
     """用显式后端参数构建测试项目到指定输出路径。"""
+    target = target or TARGET
     return run([str(compiler), "--backend", "llvm", "--target", target,
                 f"-O{level}", "build", "--stats", "-o", str(output)],
                cwd=project, env=env)
@@ -70,13 +72,23 @@ def main():
     """验证 LLVM 项目缓存与同名输出切换的完整发布边界。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler-path", default=str(ROOT / "yh"))
+    parser.add_argument("--target", default=None,
+                        help="输出目标；缺省按宿主 Linux 架构选择 x64 或 AArch64")
     args = parser.parse_args()
+    global TARGET, EXPECTED_MACHINE
+    if args.target:
+        TARGET = args.target
+    else:
+        host = platform.machine().lower()
+        TARGET = "aarch64-unknown-linux-gnu" if host in ("aarch64", "arm64") \
+            else "x86_64-unknown-linux-gnu"
+    EXPECTED_MACHINE = 183 if TARGET.startswith("aarch64-") else 62
     compiler = Path(args.compiler_path).resolve()
     if not compiler.is_file():
         raise SystemExit(f"编译器不存在: {compiler}")
     gcc = "/usr/bin/gcc" if Path("/usr/bin/gcc").is_file() else shutil.which("gcc")
     if not Path(gcc).is_file():
-        raise SystemExit("缺少可运行的 x86_64 gcc")
+        raise SystemExit("缺少可运行的宿主 gcc")
 
     temp_root = ROOT / "tmp"
     temp_root.mkdir(exist_ok=True)
@@ -97,9 +109,9 @@ def main():
 
     cold = build(compiler, project, output, env)
     assert cold.returncode == 0, cold.stdout + cold.stderr
-    assert machine(output) == 62, f"冷构建产物 machine={machine(output)}"
+    assert machine(output) == EXPECTED_MACHINE, f"冷构建产物 machine={machine(output)}"
     assert subprocess.run([str(output)]).returncode == 42
-    assert not log.exists(), "LLVM x64 最终链接不应 fork cc/ld"
+    assert not log.exists(), "LLVM 最终链接不应 fork cc/ld"
 
     cache = project / ".build/targets" / TARGET / "llvm/O0"
     obj = next((cache / "obj").glob("*.o"))
@@ -107,19 +119,19 @@ def main():
     hot = build(compiler, project, output, env)
     assert hot.returncode == 0, hot.stdout + hot.stderr
     assert "[缓存] main" in hot.stdout, hot.stdout
-    assert not log.exists(), "LLVM x64 热链接不应 fork cc/ld"
+    assert not log.exists(), "LLVM 热链接不应 fork cc/ld"
 
     write_link_wrapper(wrapper, gcc, "v2")
     tool_changed = build(compiler, project, output, env)
     assert tool_changed.returncode == 0, tool_changed.stdout + tool_changed.stderr
     assert "[缓存] main" in tool_changed.stdout, tool_changed.stdout
-    assert not log.exists(), "LLVM x64 缓存身份不应查询或执行 YH_CC"
+    assert not log.exists(), "LLVM 缓存身份不应查询或执行 YH_CC"
 
     obj.write_bytes(b"corrupt object\n")
     repaired = build(compiler, project, output, env)
     assert repaired.returncode == 0, repaired.stdout + repaired.stderr
     assert "[编译] main" in repaired.stdout, repaired.stdout
-    assert machine(obj) == 62, "损坏对象未被重建为 x86_64 ELF"
+    assert machine(obj) == EXPECTED_MACHINE, "损坏对象未被重建为目标架构 ELF"
     assert subprocess.run([str(output)]).returncode == 42
     damaged_manifest = bytearray(manifest.read_bytes())
     damaged_manifest[-1] = ord("0") if damaged_manifest[-1] != ord("0") else ord("1")
@@ -135,52 +147,55 @@ def main():
     assert "[编译] main" in repaired_iface.stdout, repaired_iface.stdout
 
     before = output.read_bytes()
-    wrong_target = build(compiler, project, output, env,
-                         target="aarch64-unknown-linux-gnu")
-    assert wrong_target.returncode != 0, "x86_64 链接器接受了 AArch64 对象"
-    arm_obj = project / ".build/targets/aarch64-unknown-linux-gnu/llvm/O0/obj/llvmcache-main.o"
-    assert arm_obj.is_file() and machine(arm_obj) == 183, \
+    wrong_name = "x86_64-unknown-linux-gnu" if EXPECTED_MACHINE == 183 \
+        else "aarch64-unknown-linux-gnu"
+    wrong_expected = 62 if EXPECTED_MACHINE == 183 else 183
+    wrong_target = build(compiler, project, output, env, target=wrong_name)
+    assert wrong_target.returncode != 0, "目标链接器接受了另一架构的对象"
+    wrong_obj = project / ".build/targets" / wrong_name / "llvm/O0/obj/llvmcache-main.o"
+    assert wrong_obj.is_file() and machine(wrong_obj) == wrong_expected, \
         "目标切换复用了错误机型的对象"
     assert output.read_bytes() == before, "目标链接失败覆盖了旧可执行文件"
     assert subprocess.run([str(output)]).returncode == 42
-    arm_manifest = arm_obj.parent.parent / "manifest/llvmcache-main.manifest"
+    wrong_manifest = wrong_obj.parent.parent / "manifest/llvmcache-main.manifest"
     wrong_object = obj.read_bytes()
-    arm_obj.write_bytes(wrong_object)
-    paired = bytearray(arm_manifest.read_bytes())
+    wrong_obj.write_bytes(wrong_object)
+    paired = bytearray(wrong_manifest.read_bytes())
     paired[16:] = content_hash(wrong_object)
-    arm_manifest.write_bytes(paired)
-    wrong_machine = build(compiler, project, output, env,
-                          target="aarch64-unknown-linux-gnu")
+    wrong_manifest.write_bytes(paired)
+    wrong_machine = build(compiler, project, output, env, target=wrong_name)
     assert wrong_machine.returncode != 0 and "[编译] main" in wrong_machine.stdout, \
         wrong_machine.stdout + wrong_machine.stderr
-    assert machine(arm_obj) == 183, "错误 machine 与配对 manifest 被缓存命中"
+    assert machine(wrong_obj) == wrong_expected, "错误 machine 与配对 manifest 被缓存命中"
     assert output.read_bytes() == before, "错误 machine 对象覆盖了旧可执行文件"
 
-    arm_gcc = shutil.which("aarch64-linux-gnu-gcc")
-    if arm_gcc is None:
-        bundled_arm_gcc = ROOT / "tmp/boot/crossbin/aarch64-linux-gnu-gcc"
-        if bundled_arm_gcc.is_file():
-            arm_gcc = str(bundled_arm_gcc)
-    if arm_gcc is None and platform.machine().lower() in ("aarch64", "arm64"):
-        arm_gcc = gcc
-    if arm_gcc is not None:
-        write_link_wrapper(wrapper, arm_gcc, "arm64")
-        switched = build(compiler, project, output, env,
-                         target="aarch64-unknown-linux-gnu")
-        assert switched.returncode == 0, switched.stdout + switched.stderr
-        assert machine(output) == 183, "同名输出切换到 AArch64 后 machine 不正确"
+    # 同名输出切换到另一架构并成功链接只覆盖 x64→AArch64 的交叉驱动场景；
+    # AArch64 原生宿主没有对应的 x64 交叉 gcc，跳过成功切换，仅保留上面的
+    # 错误目标拒绝/缓存隔离断言。
+    if EXPECTED_MACHINE == 62:
+        arm_gcc = shutil.which("aarch64-linux-gnu-gcc")
+        if arm_gcc is None:
+            bundled_arm_gcc = ROOT / "tmp/boot/crossbin/aarch64-linux-gnu-gcc"
+            if bundled_arm_gcc.is_file():
+                arm_gcc = str(bundled_arm_gcc)
+        if arm_gcc is not None:
+            write_link_wrapper(wrapper, arm_gcc, "arm64")
+            switched = build(compiler, project, output, env,
+                             target="aarch64-unknown-linux-gnu")
+            assert switched.returncode == 0, switched.stdout + switched.stderr
+            assert machine(output) == 183, "同名输出切换到 AArch64 后 machine 不正确"
 
-        write_link_wrapper(wrapper, gcc, "x64")
-        restored = build(compiler, project, output, env)
-        assert restored.returncode == 0, restored.stdout + restored.stderr
-        assert machine(output) == 62 and subprocess.run([str(output)]).returncode == 42, \
-            "同名输出从 AArch64 切回 x86_64 后没有恢复正确程序"
+            write_link_wrapper(wrapper, gcc, "x64")
+            restored = build(compiler, project, output, env)
+            assert restored.returncode == 0, restored.stdout + restored.stderr
+            assert machine(output) == EXPECTED_MACHINE and subprocess.run([str(output)]).returncode == 42, \
+                "同名输出从 AArch64 切回 x86_64 后没有恢复正确程序"
 
     optimized = build(compiler, project, output, env, level=2)
     assert optimized.returncode == 0, optimized.stdout + optimized.stderr
     assert (project / ".build/targets" / TARGET / "llvm/O2/obj").is_dir(), \
         "O2 未使用独立缓存命名空间"
-    assert machine(output) == 62 and subprocess.run([str(output)]).returncode == 42
+    assert machine(output) == EXPECTED_MACHINE and subprocess.run([str(output)]).returncode == 42
 
     # 同名静态库内容变更必须使最终链接缓存失效。
     library_project = work / "静态库项目"
@@ -201,7 +216,7 @@ def main():
     library_cold = build(compiler, library_project, library_output, library_env)
     assert library_cold.returncode == 0, library_cold.stdout + library_cold.stderr
     assert subprocess.run([str(library_output)]).returncode == 42
-    assert not library_log.exists(), "LLVM x64 库链接不应 fork cc/ld"
+    assert not library_log.exists(), "LLVM 库链接不应 fork cc/ld"
 
     library_source.write_text(
         "int cache_probe(void) { return 43; }\n", encoding="utf-8")
@@ -209,7 +224,7 @@ def main():
     library_changed = build(compiler, library_project, library_output, library_env)
     assert library_changed.returncode == 0, \
         library_changed.stdout + library_changed.stderr
-    assert not library_log.exists(), "LLVM x64 库链接不应 fork cc/ld"
+    assert not library_log.exists(), "LLVM 库链接不应 fork cc/ld"
     assert subprocess.run([str(library_output)]).returncode == 43, \
         "静态库内容变化后复用了旧可执行文件"
 

@@ -20,6 +20,80 @@
   `make selfhost-native`：两代固定点 24 个输出一致、自解析 104 个源码文件、模块 18/18、
   项目构建案例 105/105。未执行 `make seed`，没有改变入库种子。
 
+## 2026-10-20 编译器代码规模统计工具方案交付
+
+- 用户确认首版关注代码行、注释、模块占比与大文件；建议以 Python 标准库
+  实现 `tools/yh-code-stats.py`，提供文本/JSON 与独立 `make code-stats`。
+- 明确 yh 源码、全平台变体、职责目录及混合注释行的统计口径；按目录汇总时
+  说明 `cmd/` 对应 `module main`，不把 C/C++ 桥、SDK 或冻结测试副本计入总数。
+- 当前工作区只读盘点为 104 个 `.yh` 文件、50,497 物理行，14 个文件超过
+  1,000 行；该盘点未区分代码与注释，不作为有效代码行数。
+- [方案](02-plan/yh-编译器代码统计工具方案.md)与 [STAT0–STAT3 待办](todo.md)
+  已记录；本轮仅文档设计，未实现工具、未修改编译器、未运行构建或自举门。
+
+## 2026-10-20 C/C++ 代码使用 yh 重写与链接的可行性分析
+
+- 盘点当前工作区 C/C++：生产桥 5 文件 / 747 行；区分 ABI 测试、性能对照、
+  旧示例和第三方 SDK，建议保留独立 C 验证程序。
+- `bridge.c` 可迁到 yh；lld 桥的大部分配置逻辑可迁，`lldMain` C++ 接口仍需
+  最小适配层；弱桩和自举归档迁移不能直接按文件替换。
+- `tmp/c-bridge-analysis/` 探针由 yh 编译，直接引用 25 个 LLVM C API，
+  排除项目桥与 lld 归档后链接固定 LLVM，O0/O2 对象生成与运行通过；
+  无动态 LLVM/lld 依赖。既有 `llvm-darwin-abi.py --suite full` PASS。
+- [完整分析](01-finished/yh-C与C++代码重写可行性分析-2026-10-20.md)与
+  [候选任务](todo.md)已记录；本轮未修改编译器、构建脚本或种子，未执行
+  完整构建/自举门或其他平台门，迁移尚未实施。
+
+## 2026-10-20 project.toml 静态库分组链接方案交付
+
+- 用户确认 `[link]` 自定义组名，`yh build` 默认全部链接；传入
+  `--link <组名>` 时仅选择指定组。方案建议重复参数以选择多组。
+- 方案包含可选 whole 加载、按输出目标的库配置、只检查选中归档、内容哈希
+  与链接缓存、自举候选引导及新旧归档注入互斥；实施任务已记入 todo。
+- 详见[实施方案](02-plan/yh-project-link静态库实施方案.md)和
+  [ADR-0016 提议](adr/0016-yh项目静态库分组链接.md)。
+- 本轮仅文档方案；未修改编译器、未实施功能、未运行构建或自举门。
+
+## 2026-10-20 Linux/AArch64 LLVM F1：运行时、AAPCS64、内嵌 lld 与默认切换
+
+- **范围**：`--backend llvm --target aarch64-unknown-linux-gnu` 的运行时、C ABI、
+  O0/O2 与容器门；未切默认后端、未滚种子。
+- **运行时**：AArch64 syscall（`x8` + `svc #0`）、`mmap=222`/`munmap=215`/
+  `write=64`；Linux `va_list` 是 32 字节结构，LLVM `va_arg` 指令不展开
+  `gr_top/gr_offs` 寄存器保存区，改为 `yh_va_next` 按 AAPCS64 显式取寄存器/栈槽，
+  `printf` 全部格式复用；x64/Darwin 原路径不变。
+- **C ABI**：新增 Linux `aapcs64` 分派，AAPCS64 聚合/HFA 复用 Apple 分类器；
+  标量、`_Bool`、混合整浮、HFA2/HFA3、16 字节聚合、24 字节 sret/间接参数与
+  C↔YH↔C 函数指针回调通过。Linux/AArch64 不写 `signext/zeroext`（GCC C 调用方
+  只保证 32 位扩展；强加属性会让 O2 读到高位垃圾，cinterop 由 8 复现并修复）。
+- **门禁**：新增 `make test-llvm-linux-arm64` 与
+  `tests/selfhost/llvm-linux-arm64.py`、`.yh`/`.c` 探针；`asm-symbols-safe`
+  只约束旧发射器，build-check 的属性断言按目标放宽。
+- **验证**（Apple Container，Ubuntu 24.04 原生 arm64，6G/6CPU）：
+  `test-llvm-linux-arm64` O0/O2 全绿；`tests/yh-run` O0/O2 各 344/349
+  （5 个 Darwin SKIP）；modules 18/18；build-check O0/O2 105/105；
+  旧后端 `make test` 编译器层 78/78 + 42/42、运行 344/349、
+  `make selfhost-native` 全绿。
+- **自举（第一片）**：容器内当前编译器以 LLVM 目标冷编 A，A→B→C，三份二进制
+  SHA-256 均为
+  `58859df932e6ddd2b3e6e3606d45d269e55e672c4fe4a17b215d84b0260e992b`
+  （72,052,424 B AArch64 ELF）；第二阶段已补默认自举与 O2。
+- **第一片边界（已由第二批关闭）**：当时最终链接回落宿主 `gcc`，内嵌 lld、
+  默认切换与种子滚动未完成；Darwin `make` 与 `make test-llvm-darwin` 复跑全绿。
+- **第二批（同日）**：Linux/AArch64 内嵌 lld 21.1.8 接通，固定 SDK 增加 arm64
+  lld/Polly 包；自举闭包改为 `selfhost-flags.txt`，新种子不再烘焙构建机路径。
+  `state.yh` 将 Linux/AArch64 默认后端切 LLVM；`native-selfhost.py` 支持
+  Linux/AArch64 LLVM 与旧种子 legacy 过渡；`llvm-cache.py` 参数化到双架构；
+  F1 门新增默认后端 + 空 PATH 内嵌 lld + 编译器静态桥审计。
+- **最终验证**：容器内 `make test` 全绿（运行 344/349，5 个 Darwin SKIP）；
+  `make selfhost-native` 全绿（cc3→cc4 24 产物固定点、自解析 104、F1 O0/O2、
+  LLVM 缓存门、项目 105/105）；O2 连续自编 B/C SHA-256 相同。
+- **种子**：`bin/yh-linux-arm64` 已滚为默认 LLVM 编译器，
+  SHA-256 `4d13e297547bf3616ab75464e34bd8c18d2ca6f758b83dc41703f9322e087b9a`
+  （141,752,552 B），种子内无构建机闭包路径。
+- 详见[完成记录](01-finished/yh-Linux-ARM64-LLVM-F1-2026-10-20.md)与
+  [实施方案](02-plan/yh-Linux-ARM64-LLVM接入实施方案.md)。
+
 ## 2026-10-20 构建简化：一条命令、失败前置、身份去路径
 
 - `make bootstrap`：幂等 `llvm-host` + 冷编，首次/换机只需一条命令；

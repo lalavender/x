@@ -44,10 +44,10 @@ jobs:
           bash tools/run-antlr-ci.sh --quiet
 
   linux-arm64:
-    name: AArch64 Linux（ELF）主门
+    name: AArch64 Linux（ELF）LLVM 主门
     if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'linux-arm64'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +61,12 @@ jobs:
 
       # 免费私有仓库没有 arm64 原生 runner；用 QEMU 在 x86_64 runner 上跑
       # arm64 容器，产物是货真价实的 AArch64 Linux ELF。
+      - name: 缓存固定 arm64 LLVM/lld 宿主
+        uses: actions/cache@v4
+        with:
+          path: tmp/llvm-migration
+          key: llvm-host-linux-arm64-${{ hashFiles('vendor/llvm/sdk.lock.json', 'tools/llvm-sdk.py', 'tools/llvm-host.py', 'tests/selfhost/llvm-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp', 'compiler/llvm/lld_stub.cpp') }}
+
       - name: 准备 QEMU
         uses: docker/setup-qemu-action@v3
         with:
@@ -69,17 +75,20 @@ jobs:
       - name: 语法/运行语料与主门（容器内）
         run: |
           docker run --rm --platform linux/arm64 \
+            -e YH_LLVM_HOST=1 \
             -v "$PWD":/repo:ro \
             ubuntu:24.04 bash -ec '
               set -e
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq >/dev/null
-              apt-get install -y -qq build-essential python3 >/dev/null
+              apt-get install -y -qq build-essential python3 binutils xz-utils libxml2-dev >/dev/null
               cp -r /repo /build
               cd /build
-              # 仓库根的 yh 是 gitignore 的本地产物，检出里没有；
-              # 汇编与链接使用容器内的系统 gcc（arm64 原生）。
+              # 仓库根的 yh 是 gitignore 的本地产物，检出里没有。首次 make
+              # 准备固定 arm64 LLVM/lld 宿主（缓存 tmp/llvm-migration）；之后
+              # 默认后端为 LLVM，最终链接走内嵌 lld，C 源编译仍用 arm64 gcc。
               make
+              make test-llvm-linux-arm64
               python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
               python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet
               make selfhost-native
@@ -105,7 +114,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tmp/llvm-migration
-          key: llvm-host-${{ runner.os }}-${{ hashFiles('vendor/llvm/sdk.lock.json', 'tools/llvm-sdk.py', 'tools/llvm-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp', 'compiler/llvm/lld_stub.cpp') }}
+          key: llvm-host-${{ runner.os }}-${{ hashFiles('vendor/llvm/sdk.lock.json', 'tools/llvm-sdk.py', 'tools/llvm-host.py', 'tests/selfhost/llvm-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp', 'compiler/llvm/lld_stub.cpp') }}
 
       - name: 下载上一版 Release 种子
         env:

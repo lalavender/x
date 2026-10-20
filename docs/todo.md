@@ -6,6 +6,43 @@
 
 ## 待办
 
+### 编译器代码规模统计工具（2026-10-20，方案交付，尚未实施）
+
+用户确认首版统计代码行、注释、模块占比与大文件。拟新增
+`tools/yh-code-stats.py`，默认扫描 `compiler/**/*.yh`，详细口径见
+[工具方案](02-plan/yh-编译器代码统计工具方案.md)。
+
+- [ ] STAT0：在 `tests/tools/yh-code-stats/` 添加 `.yh` 夹具与预期计数检查。
+- [ ] STAT1：Python 标准库实现 yh 注释/字面量边界扫描及职责目录汇总。
+- [ ] STAT2：文本/JSON、大文件排行与不依赖编译器构建的 `make code-stats`。
+- [ ] STAT3：本机实跑、人工抽查与构建/回归门，更新使用文档及完成记录。
+
+### C/C++ 桥迁移到 yh（2026-10-20，可行性建议，未开始实施）
+
+已完成[源码分析与本机探针](01-finished/yh-C与C++代码重写可行性分析-2026-10-20.md)。
+以下是候选迁移顺序；本轮只分析，没有修改生产实现。
+
+- [ ] 迁移 `compiler/llvm/bridge.c` 到 yh，保持 LLVM 生命周期、初始化同步、
+  有界诊断及原子发布；添加正式 `.yh` 对等用例与错误路径验收。
+- [ ] 将 `lld_bridge.cpp` 的配置/argv/库搜索移到 yh，保留 `lldMain` 的最小
+  C++ 适配层及不可重入状态处理。
+- [ ] 评估桩的构建期择一机制；迁移前保留当前 C 弱桩，避免直接引入重复强符号。
+- [ ] 更新 SDK 身份、归档成员与自举闭包，完成候选引导和本机完整门后再滚种子。
+
+### project.toml 静态库分组与 build --link（2026-10-20）
+
+方案已交付，功能未实施。用户已确认：默认链接全部组，显式 `--link <组名>`
+仅选择点名组；方案建议重复参数以选择多组。其他细则见
+[实施方案](02-plan/yh-project-link静态库实施方案.md)与
+[ADR-0016 提议](adr/0016-yh项目静态库分组链接.md)。
+
+- [ ] LINK0：新增 `.yh` 项目与真实归档 fixture，覆盖默认/单组/多组选取。
+- [ ] LINK1：清单分组快照、CLI 选择、按目标配置与 whole 规则、完整诊断。
+- [ ] LINK2：接入各链接出口与归档内容哈希；组切换仅影响最终链接缓存。
+- [ ] LINK3：候选引导后迁移 compiler 清单及自举入口，停用重复归档注入。
+- [ ] LINK4：本机 `make` / `make test` / `make selfhost-native` 与相关链接门，
+  更新使用/设计文档和完成记录；全绿后才允许滚本机种子。
+
 ### 字符串字面量只读化（2026-10-20 性能对比时发现）
 
 yh 产物的 Mach-O 比 clang 多一个 `__DATA` 段（多占 16 KB 页），实测归属：
@@ -199,7 +236,7 @@ check/IR 缓存 → RS3 文件级对象 → RS4 缓存键收口 → RS5 提交�
     `quotient32(-21, 4)`。「unsigned_score 回退」仅指旧 SSA 后端覆盖统计，
     LLVM 路线 fallback=0，旧后端随 LL12 退役，不作为 R2 缺口。
   - [ ] 默认优化覆盖与缓存提交协议复核 → 归 R2 收尾计划 RS5。
-  - [ ] Linux/macOS arm64 双平台 ABI 验收 → 移交 F1/F2（平台与架构矩阵）。
+  - [x] Linux/AArch64 ABI 已于 2026-10-20 通过 F1；macOS/ARM64 仍归 F2。
 - [ ] **R2b**：首个完整 SSA 版本须具备接口就绪推进、函数
   check/IR 缓存、文件对象/链接缓存、确定性与失败提交验收。
   **2026-10-19 用户决定：多模块线程并行（真正线程池）推迟到并发标准库
@@ -390,7 +427,7 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
   - [x] 2026-10-17 SysV INTEGER/SSE/MEMORY C 聚合分类、coercion/sret/byval；CPair、CMixed、CWide 与 clang IR oracle 对照，O0/O2 双向真实运行通过。详见 [LL7-S4 记录](01-finished/yh-LLVM-LL7-SysV-C聚合ABI-2026-10-17.md)。
   - [x] callback 双向闭环：C 调 YH、YH 调 C 返回函数值，覆盖标量与 CPair INTEGER 聚合参数/返回；YH `vararg=2` 按序打包为切片参数。
   - [x] `@[noreturn]` 属性进入模块接口与缓存；合法定义检查、违约调用 trap、移除/恢复接口属性后的调用方重编，以及用户裸 C 变参源码拒绝均有测试。
-  - [x] `python3 tests/selfhost/llvm-abi.py --compiler-path ./yh` 的 O0/O2 双向互调、LLVM 验证/优化/链接/运行及拒绝门全过；全仓门与种子状态见 [LL7 完成记录](01-finished/yh-LLVM-LL7-完整调用与ABI-2026-10-17.md)。ARM64 HFA 留给 F1。
+  - [x] `python3 tests/selfhost/llvm-abi.py --compiler-path ./yh` 的 O0/O2 双向互调、LLVM 验证/优化/链接/运行及拒绝门全过；全仓门与种子状态见 [LL7 完成记录](01-finished/yh-LLVM-LL7-完整调用与ABI-2026-10-17.md)。ARM64 HFA 已于 2026-10-20 由 F1 接入（见 `llvm-linux-arm64.py`）。
   （2026-10-15 LL5 第一切片完成：局部标量 alloca/load/store 与 `&变量`/`*p`；见
   [完成记录](01-finished/yh-LLVM-LL5局部内存首片-2026-10-15.md)。）
   （2026-10-15 LL5 数组切片完成：局部定长数组字面量/下标/取址/复制；见
@@ -477,9 +514,26 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     `yh-0.0.5-linux-x86_64.tar.gz`（x86_64 ELF，D-O2），arm64/darwin 未重跑。
   - [ ] 20 轮性能对照与回退归因（用户暂缓）；发行/CI 文档同步；
     R2b 硬门（RS2/RS3/R2c）关闭前不宣布 LL11 全量完成。
-- [ ] **LL12 退役旧后端**：在 LL11 及 F1 Linux/AArch64 LLVM 回归都通过后，
-  分片移除失去消费者的机器发射，不阻挡 x64 首期，也不删除 gen 语义或历史种子。
-- [ ] **F1–F4 后续平台**：Linux/AArch64 → macOS/ARM64 → Windows/x86_64 → macOS/x86_64、Windows/ARM64；
+- [ ] **LL12 退役旧后端**：F1 已通过，LL11 的 R2b/性能硬门关闭后，分片移除
+  失去消费者的机器发射；不阻挡 x64 首期，也不删除 gen 语义或历史种子。
+- [x] **F1 Linux/AArch64 LLVM 默认后端（2026-10-20 完成）**：AArch64 syscall/runtime、
+  `va_list`、AAPCS64 标量/HFA/小聚合/大聚合、C↔YH 双向回调、内嵌 lld、
+  默认后端切换、容器全门与种子滚动均已完成。`make test` 全绿（运行 344/349，
+  5 个 Darwin SKIP）；`make selfhost-native` cc3→cc4 24 产物固定点、自解析
+  104、F1 O0/O2 门、LLVM 缓存门、项目 105/105；O2 连续自编 B/C SHA-256 相同。
+  种子 `bin/yh-linux-arm64` = `4d13e297…`，无构建机闭包路径。详见
+  [完成记录](01-finished/yh-Linux-ARM64-LLVM-F1-2026-10-20.md)。
+  - [x] **F1-2 生产链接**：arm64 lld 21.1.8、固定 GCC ELF 模板、链接缓存身份与
+    自举闭包运行时文件。
+  - [x] **F1-3 自举门**：`native-selfhost.py` 支持 Linux/AArch64 LLVM（含旧种子
+    legacy 过渡）；`make selfhost-native` 覆盖 O0 固定点，O2 连续自编单独验收。
+  - [x] **F1-4 默认切换**：Linux/AArch64 默认 LLVM；滚种子与哈希。
+  - [x] **F1-5 CI**：`linux-arm64` 作业增加固定 arm64 LLVM/lld 宿主缓存、
+    `YH_LLVM_HOST=1` 与 `libxml2-dev`；`make selfhost-native` 内含 F1 运行时门。
+  - [ ] **F1-6 可选后续**：x64 专用 `llvm-selfhost.py` 若需 ARM64 变体再参数化；
+    跨宿主（x64 上跑 arm64 种子）链接模板策略单独立项。
+
+- [ ] **F2–F4 后续平台**：macOS/ARM64 → Windows/x86_64 → macOS/x86_64、Windows/ARM64；
   各格分别验收对象、链接、标准库运行、原生编译器、原生自举，不以 WSL 冒充 Windows 支持。
 
 - [x] **macOS 入库种子落后于 llvm 分支（2026-10-18 已解决）**：原 `bin/yh`

@@ -313,11 +313,14 @@ fn mb_hash_tool_identity(hash *u64, command *char) int {
     return mb_hash_file(hash, (&resolved[0]).to_type(*char));
 }
 
-// mb_lld_x64_enabled：仅在 Linux x64 target 且当前 yh 内嵌了 lld 时启用进程内链接。
-fn mb_lld_x64_enabled() int {
+// mb_lld_linux_enabled：Linux x64/AArch64 target 且当前 yh 内嵌 lld 时启用进程内链接。
+// 目标 ELF 的启动文件、动态加载器与默认库由固定宿主 GCC 的 -### 配置生成；
+// 两架构各自在对应宿主构建，不共享架构专用模板。
+fn mb_lld_linux_enabled() int {
     let gs *gen.GenState = gen.G();
     if (gs.c_backend == 0 || gs.c_target.os != gen.TARGET_OS_LINUX
-        || gs.c_target.arch != gen.TARGET_ARCH_X64) {
+        || (gs.c_target.arch != gen.TARGET_ARCH_X64
+            && gs.c_target.arch != gen.TARGET_ARCH_ARM64)) {
         return 0;
     }
     let identity *char = backend.llvm_lld_identity();
@@ -358,7 +361,7 @@ fn mb_hash_lld_identity(hash *u64, projects *int, project_count int) int {
     let gs *gen.GenState = gen.G();
     let identity *char = backend.llvm_lld_identity();
     if (identity == 0 || identity[0] == 0) {
-        return gen.fail("当前 yh 未内嵌可用的 x86_64 lld 驱动");
+        return gen.fail("当前 yh 未内嵌可用的 Linux lld 驱动");
     }
     let i int = 0;
     for identity[i] != 0 {
@@ -774,14 +777,16 @@ fn mb_darwin_selfhost_enabled() int {
 fn mb_link(out_path *char, build_off int, build_len int,
     count int, root_proj int) int {
     let gs *gen.GenState = gen.G();
-    let use_lld int = mb_lld_x64_enabled();
+    let use_lld int = mb_lld_linux_enabled();
     let use_macho int = mb_lld_darwin_enabled();
     // 自举闭包由构建机提供：优先读 YH_LLVM_SELFHOST_FLAGS 指向的文件，
     // 未提供时桥内烘焙常量作为过渡回退。负数是文件不可读，0 是没有任何闭包
     // （新种子不再烘焙绝对路径），两种情况都要立刻给出可操作诊断。
     let selfhost_on int = mb_darwin_selfhost_enabled();
     let selfhost_flag_n int = 0;
-    if (use_macho != 0 && selfhost_on != 0) {
+    // 内嵌 lld 的 Linux 与 Darwin 都从同一运行时闭包文件读取桥/静态 LLVM；
+    // 自举时必须先证明闭包存在，不能让空闭包静默链接出不可发射的二进代。
+    if ((use_macho != 0 || use_lld != 0) && selfhost_on != 0) {
         selfhost_flag_n = backend.llvm_lld_selfhost_flag_count();
         if (selfhost_flag_n < 0) {
             return gen.fail("自举链接闭包文件不可读：检查 YH_LLVM_SELFHOST_FLAGS（每行一个链接参数）");

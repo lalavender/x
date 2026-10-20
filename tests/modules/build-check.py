@@ -380,8 +380,12 @@ def main():
                 emitted = sum(stat_value(line, "backend_emitted_functions", 0)
                               for line in lines)
                 text = "\n".join(path.read_text() for path in backend_text_files(dst))
+                # Linux/AArch64 按 AAPCS64 不写 signext/zeroext；该属性断言只适用于
+                # 需要寄存器级窄型承诺的 SysV/Darwin 目标。
+                attrs_ok = COMPILER_TARGET.startswith("aarch64-unknown-linux") \
+                    or ("signext" in text and "zeroext" in text)
                 report(built.returncode == 0 and checked >= 3 and emitted == checked
-                       and "signext" in text and "zeroext" in text
+                       and attrs_ok
                        and run is not None and run.returncode == c["expect"],
                        c["name"],
                        f"C 双向 ABI/LLVM 覆盖失败: rc={built.returncode}, "
