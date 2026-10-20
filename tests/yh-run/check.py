@@ -455,8 +455,8 @@ def main():
                         help="交叉编译为 Linux ELF 并在 docker 容器内运行对比")
     parser.add_argument("--compiler", default=str(DEFAULT_COMPILER),
                         help="yh 编译器路径（缺省仓库根 yh；自举时指向 stage1/stage2）")
-    parser.add_argument("--backend", choices=("legacy", "llvm"),
-                        help="显式选择编译后端")
+    parser.add_argument("--backend", choices=("llvm",),
+                        help="显式选择编译后端（LLVM 是唯一后端）")
     parser.add_argument("--target", help="显式选择输出目标 triple")
     parser.add_argument("--opt-level", choices=("0", "2"),
                         help="显式选择 LLVM 优化级别")

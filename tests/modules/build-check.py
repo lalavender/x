@@ -312,8 +312,8 @@ def main():
     global COMPILER_TARGET, COMPILER_OPT_LEVEL
     ap = argparse.ArgumentParser()
     ap.add_argument("--compiler-path", default=str(ROOT / "yh"))
-    ap.add_argument("--backend", choices=("legacy", "llvm"),
-                    help="显式选择编译后端")
+    ap.add_argument("--backend", choices=("llvm",),
+                    help="显式选择编译后端（LLVM 是唯一后端）")
     ap.add_argument("--target", help="显式选择输出目标 triple")
     ap.add_argument("--opt-level", choices=("0", "2"),
                     help="显式选择 LLVM 优化级别")

@@ -95,7 +95,7 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 | `ast/module_snapshot_global.yh` | 全局对象类型、初始化值与引用 lowering |
 | `ast/module_snapshot_static.yh` | 静态数据、字符串与重定位 lowering 辅助 |
 | `ast/module_snapshot_template.yh` | 编译期 `$for` 模板 lowering 辅助 |
-| `ast/ast_ir.yh` | 函数级 typed SSA 构造与旧后端迁移接线 |
+| `ast/ast_ir.yh` | builder 指令表辅助（LL12：旧 SSA 编排已退役） |
 | `ast/ast_ir_build.yh` | 受支持函数的 AST → typed SSA 构造器 |
 | `ast/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
 | `ast/ast_ir_control.yh` | 局部赋值、受限分支 CFG/phi 与 SSA 临时缓冲管理 |
