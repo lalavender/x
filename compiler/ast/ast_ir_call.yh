@@ -1,5 +1,4 @@
 module ast;
-import gen;
 import ir;
 
 // ast_ir_call_init：初始化任务私有缓冲，不持有前端共享状态。
@@ -22,88 +21,6 @@ fn ast_ir_call_release(out *AstIRCalls) void {
     if (out.symbols != 0) { free(out.symbols); }
     ast_ir_call_init(out);
 }
-
-// ast_ir_call_has_suffix：复用普通发射器的模块符号限定规则。
-fn ast_ir_call_has_suffix(base *AstExpr) int {
-    let gs *gen.GenState = gen.G();
-    if (gs.c_module_mode == 0 || gs.task.c_sym_sfx_len == 0
-        || (base.sym_flags & (gen.F_EXTERN | gen.F_CABI)) != 0) { return 0; }
-    if (gs.c_is_entry_mod != 0 && base.sym_name_len == 4
-        && gs.task.np_data[base.sym_name_off] == 'm'
-        && gs.task.np_data[base.sym_name_off + 1] == 'a'
-        && gs.task.np_data[base.sym_name_off + 2] == 'i'
-        && gs.task.np_data[base.sym_name_off + 3] == 'n') { return 0; }
-    return 1;
-}
-
-// ast_ir_call_name_supported：确认缓存中的目标名能由汇编器安全直接读取。
-fn ast_ir_call_name_supported(base *AstExpr) int {
-    let gs *gen.GenState = gen.G();
-    if (base.sym_name_off < 0 || base.sym_name_len <= 0
-        || base.sym_name_off + base.sym_name_len > gs.task.np_len) { return 0; }
-    if (gs.task.c_sym_sfx_len > 0 && (gs.task.c_sym_sfx_off < 0
-        || gs.task.c_sym_sfx_off + gs.task.c_sym_sfx_len > gs.task.np_len)) { return 0; }
-    let i int = 0;
-    for i < base.sym_name_len {
-        if (ir.ir_call_symbol_byte_ok(gs.task.np_data[base.sym_name_off + i]) == 0) {
-            return 0;
-        }
-        i += 1;
-    }
-    if (ast_ir_call_has_suffix(base) != 0) {
-        i = 0;
-        for i < gs.task.c_sym_sfx_len {
-            if (ir.ir_call_symbol_byte_ok(gs.task.np_data[gs.task.c_sym_sfx_off + i]) == 0) {
-                return 0;
-            }
-            i += 1;
-        }
-    }
-    return 1;
-}
-
-// ast_ir_call_supported：只接受已语义检查的固定参数直接调用；
-// 返回值须是可映射标量，或与签名一致的 void（语句级调用使用）。
-fn ast_ir_call_supported(ctx *AstFunctionContext, node *AstExpr,
-    param_count int, binding_limit int) int {
-    let gs *gen.GenState = gen.G();
-    if (node.child0 < ctx.expr_first || node.child0 >= ctx.expr_after) { return 0; }
-    let result_type int = ast_ir_type(node.type_id);
-    if (result_type < 0 && ast_ir_void_type(node.type_id) == 0) { return 0; }
-    let base *AstExpr = &ast_expr_nodes[node.child0];
-    if (base.kind != AST_EXPR_PRIMARY || base.child0 >= 0
-        || base.sym_kind != gen.SYM_FN || base.sym_type_id < 0
-        || base.sym_type_id >= gs.task.t_type_n
-        || (base.sym_flags & (gen.F_INTRINSIC | gen.F_LINUX_SYSCALL)) != 0
-        || gs.task.t_types[base.sym_type_id].kind != gen.TY_FN
-        || ast_ir_call_name_supported(base) == 0) { return 0; }
-    let sig int = gs.task.t_types[base.sym_type_id].sub;
-    if (sig < 0 || sig >= gs.task.t_sig_n || gs.task.t_sig_vararg[sig] != 0
-        || ast_ir_type(gs.task.t_sig_ret[sig]) != ast_ir_type(node.type_id)) { return 0; }
-    let arg_i int = gs.task.t_sig_np[sig] - 1;
-    let link int = node.child1;
-    for link >= 0 {
-        if (link < ctx.expr_first || link >= ctx.expr_after || arg_i < 0) { return 0; }
-        let arg_link AstExpr = ast_expr_nodes[link];
-        if (arg_link.kind != AST_EXPR_ARG_LIST || arg_link.child1 < ctx.expr_first
-            || arg_link.child1 >= ctx.expr_after
-            || ast_ir_expr_supported(ctx, arg_link.child1,
-                param_count, binding_limit) == 0) { return 0; }
-        // 实参类型：同型直接支持；整数字面量按 sem_binop/sem_call 的
-        // 「字面量适配」放行（降低时把常量重定型到形参类型）。
-        if (ast_ir_type(ast_expr_nodes[arg_link.child1].type_id)
-            != ast_ir_type(gs.task.t_sig_params[gs.task.t_sig_first[sig] + arg_i])) {
-            let lit *AstExpr = &ast_expr_nodes[arg_link.child1];
-            let want int = gs.task.t_sig_params[gs.task.t_sig_first[sig] + arg_i];
-            if (lit.is_lit == 0 || gen.ty_is_integer(want) == 0
-                || gen.sem_lit_fits(want, lit.const_bits) == 0) { return 0; }
-        }
-        arg_i -= 1;
-        link = arg_link.child0;
-    }
-    return arg_i == -1 ? 1 : 0;
-}
-
 // ast_ir_call_reserve：按需扩容调用表、实参表和目标符号字节缓冲。
 fn ast_ir_call_reserve(out *AstIRCalls, need_calls int, need_args int,
     need_symbols int) int {
