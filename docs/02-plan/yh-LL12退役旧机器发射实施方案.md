@@ -57,6 +57,11 @@
 
 ### LL12-1 语义纯化（最大片）
 
+- **2026-10-21 首片完成（CT 数据）**：`comptime/ct_ir_data.yh` 181→119 行，
+  `.data` 文本发射全部删除；保留 `ct_static_data_record` 登记与全部形状校验。
+  接口加载时的本地标签登记独立为 `ct_ir_data_bind_iface_label`（只写 `cval`
+  与 `c_data_n`，不写 `.LD` 文本）。验证：400 语料快照零差异、`make test`
+  与 `selfhost-native`（106/106）全绿。
 - 先把「只语义」变成唯一模式：以 `c_compile == 0` + `c_em_suppress`
   （`gen/sem_expr.yh`、`compiler/parse/parse_decl.yh`）为雏形，逐文件把
   混合函数拆成 `sem_*`（类型/值类别/诊断/CT）与 `emit_*`（发射）两段。

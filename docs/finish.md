@@ -31,6 +31,19 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第七刀：CT 数据发射剥离（C1 首片）
+
+- `compiler/comptime/ct_ir_data.yh` 181→119 行：删除 `.zero`/`.xword`/`.balign`/
+  `.LD` 与 `em_data_scalar` 等文本发射；保留 `ct_static_data_record` 登记与
+  标量/数组/结构体/切片的形状校验。
+- 接口加载的本地标签语义独立为 `ct_ir_data_bind_iface_label`：只登记 `cval`
+  与 `c_data_n`，不写文本（LLVM 快照按 label 命名对象）。
+- 首次验证发现导入聚合常量副本的 label 缺失导致 3 个用例报「静态数据对象的
+  身份或布局无效」；补上纯登记函数后恢复。
+- 验证：400 语料诊断快照零差异；`make test` 退出 0；`make selfhost-native`
+  退出 0（project 106/106）；CT 运行用例通过。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第六刀：C3 收尾（旧 SSA 支持判定清零）
 
 - `ast/ast_ir.yh` 268→60 行：只留 `ast_ir_add_inst`/`ast_ir_add_noresult_inst`；
