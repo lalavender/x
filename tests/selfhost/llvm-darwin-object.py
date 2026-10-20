@@ -22,6 +22,33 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def sdk_version(root):
+    """读取 macOS SDK 的规范化版本，用于选择合法的第二部署版本。"""
+    import json
+    settings = Path(root) / "SDKSettings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    parts = [int(item) for item in str(data.get("Version", "")).split(".")]
+    return tuple(parts + [0] * (3 - len(parts)))
+
+
+def second_deployment(min_os, sdk_root):
+    """返回一个高于 min_os 且不高于 SDK 的部署版本；没有可用值返回 None。
+
+    GitHub macos-14 runner 可能只有 Xcode 15.4（SDK 14.5），不能硬编码 15.0；
+    本地 SDK 较新时仍优先用 15.0，保留原缓存身份用例的覆盖面。
+    """
+    if not sdk_root:
+        return None
+    version = sdk_version(sdk_root)
+    major, minor, _ = version
+    base = tuple(map(int, min_os.split("."))) + (0,)
+    if version <= base:
+        return None
+    if version >= (15, 0, 0):
+        return "15.0.0"
+    return f"{major}.{minor}.0"
+
+
 def run(label, command, env=None, cwd=ROOT):
     """保存每条真实命令的输出，失败时返回完整结果供报告诊断。"""
     result = subprocess.run(command, cwd=cwd, env=env, capture_output=True,
@@ -142,25 +169,30 @@ def main():
         require(match is not None and actual_min == expected_min,
                 f"{opt} 对象最低系统版本与会话配置不符")
 
-        before_min_change = hashlib.sha256(obj.read_bytes()).digest()
         changed_min = env.copy()
-        changed_min["MACOSX_DEPLOYMENT_TARGET"] = "15.0.0"
-        rebuilt = run(f"object-min-os-change-{opt[2:]}", [str(compiler), "--backend", "llvm",
-            "--target", TRIPLE, opt, "build"], changed_min, cwd=project)
-        require(rebuilt.returncode == 0,
-                f"{opt} 改变部署版本后项目重建失败：{rebuilt.stderr[-3000:]}")
-        after_min_change = hashlib.sha256(obj.read_bytes()).digest()
-        require(after_min_change != before_min_change,
-                f"{opt} 改变 MACOSX_DEPLOYMENT_TARGET 后错误命中旧对象缓存")
-        changed_load = run(f"load-command-min-os-change-{opt[2:]}",
-                           ["otool", "-l", str(obj)])
-        changed_match = re.search(r"\bminos\s+(\d+(?:\.\d+){1,2})",
-                                  changed_load.stdout)
-        changed_min_parts = tuple(map(int, changed_match.group(1).split("."))) \
-            if changed_match else ()
-        changed_min_parts += (0,) * (3 - len(changed_min_parts))
-        require(changed_load.returncode == 0 and changed_min_parts == (15, 0, 0),
-                f"{opt} 重建对象没有采用新的 macOS 部署版本")
+        second = second_deployment(args.min_os, env.get("SDKROOT"))
+        if second is None:
+            print(f"{opt} 跳过部署版本切换：当前 SDK 没有高于 {args.min_os} 的版本")
+        else:
+            before_min_change = hashlib.sha256(obj.read_bytes()).digest()
+            changed_min["MACOSX_DEPLOYMENT_TARGET"] = second
+            rebuilt = run(f"object-min-os-change-{opt[2:]}", [str(compiler), "--backend", "llvm",
+                "--target", TRIPLE, opt, "build"], changed_min, cwd=project)
+            require(rebuilt.returncode == 0,
+                    f"{opt} 改变部署版本后项目重建失败：{rebuilt.stderr[-3000:]}")
+            after_min_change = hashlib.sha256(obj.read_bytes()).digest()
+            require(after_min_change != before_min_change,
+                    f"{opt} 改变 MACOSX_DEPLOYMENT_TARGET 后错误命中旧对象缓存")
+            changed_load = run(f"load-command-min-os-change-{opt[2:]}",
+                               ["otool", "-l", str(obj)])
+            changed_match = re.search(r"\bminos\s+(\d+(?:\.\d+){1,2})",
+                                      changed_load.stdout)
+            changed_min_parts = tuple(map(int, changed_match.group(1).split("."))) \
+                if changed_match else ()
+            expected_second = tuple(map(int, second.split(".")))
+            changed_min_parts += (0,) * (3 - len(changed_min_parts))
+            require(changed_load.returncode == 0 and changed_min_parts == expected_second,
+                    f"{opt} 重建对象没有采用新的 macOS 部署版本 {second}")
 
     print("PASS Darwin/ARM64 LLVM 首对象门：IR、O0/O2 Mach-O、汇编与部署版本")
 

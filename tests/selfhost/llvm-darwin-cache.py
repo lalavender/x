@@ -47,6 +47,24 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def sdk_version(root):
+    """读取 SDK 的规范化版本，用于选择合法的第二部署版本。"""
+    data = json.loads((Path(root) / "SDKSettings.json").read_text(encoding="utf-8"))
+    parts = [int(item) for item in str(data.get("Version", "")).split(".")]
+    return tuple(parts + [0] * (3 - len(parts)))
+
+
+def second_deployment(sdk_root, min_os="14.0.0"):
+    """返回高于 min_os 且不高于 SDK 的部署版本；没有可用值返回 None。"""
+    version = sdk_version(sdk_root)
+    base = tuple(map(int, min_os.split("."))) + (0,)
+    if version <= base:
+        return None
+    if version >= (15, 0, 0):
+        return "15.0.0"
+    return f"{version[0]}.{version[1]}.0"
+
+
 def find_sdk_root(environment):
     """优先显式 SDKROOT，其次固定包记录，最后 xcrun 发现本机 SDK。"""
     if environment.get("SDKROOT"):
@@ -261,21 +279,26 @@ def run_suite(args, compiler, sdk_root, environment):
     built = build(compiler, os_project, project_env(sdk_a, "14.0.0"))
     require(built.returncode == 0, f"minOS 14 构建失败：{built.stderr[-2000:]}")
     min14 = os_project.state()
-    built = build(compiler, os_project, project_env(sdk_a, "15.0.0"))
-    require(built.returncode == 0, f"minOS 15 构建失败：{built.stderr[-2000:]}")
-    min15 = os_project.state()
-    for tag in ("llvmdarwincache-main.manifest", "llvmdarwincache-helper.manifest",
-                "link.manifest"):
-        require(min15[tag] != min14[tag], f"部署版本变化未失效 {tag}")
-    built = build(compiler, os_project, project_env(sdk_a, "14.0.0"))
-    require(built.returncode == 0, f"minOS 切回失败：{built.stderr[-2000:]}")
-    min14_again = os_project.state()
-    for key in IDENTITY_KEYS:
-        require(min14_again[key] == min14[key],
-                f"切回 14.0 后 {key} 未复现原值")
-    require(link_input_key(min14_again) == link_input_key(min14),
-            "切回 14.0 后链接输入键未复现原值")
-    report("cache-deployment-version", "minOS 14→15→14 对象与链接键均按值复现")
+    second = second_deployment(sdk_a)
+    if second is None:
+        report("cache-deployment-version", "当前 SDK 没有可用的第二部署版本（跳过）")
+    else:
+        built = build(compiler, os_project, project_env(sdk_a, second))
+        require(built.returncode == 0, f"minOS {second} 构建失败：{built.stderr[-2000:]}")
+        min15 = os_project.state()
+        for tag in ("llvmdarwincache-main.manifest", "llvmdarwincache-helper.manifest",
+                    "link.manifest"):
+            require(min15[tag] != min14[tag], f"部署版本变化未失效 {tag}")
+        built = build(compiler, os_project, project_env(sdk_a, "14.0.0"))
+        require(built.returncode == 0, f"minOS 切回失败：{built.stderr[-2000:]}")
+        min14_again = os_project.state()
+        for key in IDENTITY_KEYS:
+            require(min14_again[key] == min14[key],
+                    f"切回 14.0 后 {key} 未复现原值")
+        require(link_input_key(min14_again) == link_input_key(min14),
+                "切回 14.0 后链接输入键未复现原值")
+        report("cache-deployment-version",
+               f"minOS 14→{second}→14 对象与链接键均按值复现")
 
     # —— SDKROOT 切换：链接键区分路径，对象键与 SDK 无关 ——
     switched = Project("sdk-switch")
