@@ -120,6 +120,10 @@
 
 ### LL12-2 删除发射器与四缓冲
 
+- **2026-10-21 首片完成**：删除 `backend/arm64.yh`（441 行）与
+  `backend/arm64_call.yh`（115 行，`arm64_emit_replace` 已无消费者）；
+  清理 `comptime/ct_registry.yh` 与 `cmd/compile.yh` 的最后 5 处残留发射。
+
 - 删除 `gen/emit_arm64.yh`、`gen/emit_runtime_memory.yh`、`backend/arm64.yh`、
   `backend/arm64_call.yh`；删除 `gen/buffer.yh` 的 `em_*/dat_*/bss_put*` 与
   `flush_output`；清理 `gen/state.yh` 的 `TaskCtx` 旧字段与四缓冲指针。

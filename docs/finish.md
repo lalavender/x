@@ -31,6 +31,18 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第十七刀：删除旧 arm64 后端（C2 首片）
+
+- 删除 `compiler/backend/arm64.yh`（441 行）与 `arm64_call.yh`（115 行）：
+  `arm64_emit_replace` 在 `ast_ir_lower_function` 删除后已无消费者。
+- 清理最后 5 处残留发射：`comptime/ct_registry.yh` 的 `em_load_data_label`/
+  `em_mov_imm`/`em_ins` 与 `cmd/compile.yh` 的 `em_puts`。
+- 全仓 `em_*` 消费者只剩 `gen/emit_arm64.yh`、`gen/buffer.yh`、`gen/state.yh`
+  与语义表（`em_find/em_get_val` 等）。
+- 验证：400 语料诊断快照零差异；`make test` 退出 0；`make selfhost-native`
+  退出 0（project 106/106）。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第十六刀：sem_flow 流程发射剥离（C1 完成）
 
 - `compiler/gen/sem_flow.yh` 545→410 行：删除 `sem_assign` 取改存、`sem_forin_*`、
