@@ -31,6 +31,20 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第十九刀：清理旧发射缓冲字段（C2 第三片）
+
+- `gen/state.yh`：删除 `o_out/o_len/o_cap/o_dat/o_dlen/o_dcap/o_bss/o_blen/
+  o_bcap/o_body/o_body_len/o_body_cap/c_in_body` 字段；`gen/front_stage.yh`
+  的进入/校验只检查受检阶段标志。
+- `parse/parse_decl.yh`、`parse/parse_expr.yh`：删除 `c_em_suppress` 读写；
+  `parse/iface_ct.yh` 删除数据长度回滚；`ast/ast_function.yh` 的 asm 区间
+  归零；`check/verify.yh` 去掉 `o_len` 上限；`cmd/module_build.yh` 的
+  `legacy_bytes` 统计恒 0。
+- fixture 迁移：`llvmfront`（受检前端边界）、`astcheck`（删除 `o_len` 赋值）。
+- 验证：400 语料诊断快照零差异；`make test` 退出 0；`make selfhost-native`
+  退出 0（project 106/106）。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第十八刀：删除 emit_arm64 与四缓冲（C2 第二片）
 
 - 删除 `compiler/gen/emit_arm64.yh`（1227 行）；`hexval` 迁入

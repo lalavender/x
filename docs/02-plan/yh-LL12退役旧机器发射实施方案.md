@@ -127,6 +127,11 @@
   `gen/buffer.yh` 的 `em_*/dat_*/bss_*/flush_output*/flush_asm_ranges`
   （661→365 行）；`hexval` 迁入 `gen/state.yh`；`llvmfront` fixture 改为
   只验证受检前端边界（原「旧输出为零」断言随 API 删除而过时）。
+- **2026-10-21 第三片完成**：删除 `TaskCtx` 的四缓冲与体缓冲字段
+  （`o_out/o_len/o_cap/o_dat/o_dlen/o_dcap/o_bss/o_blen/o_bcap/o_body/o_body_len/
+  o_body_cap/c_in_body`）、`c_em_suppress` 读写与 `front_stage` 的旧输出检查；
+  `ast_function` 的 asm 区间归零；`legacy_bytes` 统计恒 0。
+  `llvmfront`/`astcheck` 两个 fixture 同步迁移。
 
 - 删除 `gen/emit_arm64.yh`、`gen/emit_runtime_memory.yh`、`backend/arm64.yh`、
   `backend/arm64_call.yh`；删除 `gen/buffer.yh` 的 `em_*/dat_*/bss_put*` 与
