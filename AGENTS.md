@@ -118,6 +118,8 @@ make test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 
 make bootstrap          # 首次/换机：准备固定 LLVM 闭包后冷编（一条命令，幂等）
 make selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
 make llvm-host          # 只准备本机固定 LLVM 闭包（不编编译器）
+make code-stats         # 统计 compiler/ 下 yh 源码规模
+make test-code-stats    # 运行统计工具边界与 JSON 检查
 make seed               # 滚种子（仅在全绿后；拒绝带构建机路径的种子）
 ```
 

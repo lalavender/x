@@ -31,6 +31,7 @@ bin/yh-<平台>-<架构>（入库种子）──yh build──▶ yh ──自�
 make                    # 用 bin/yh-<平台>-<架构> 冷编本目录项目，产出仓库根 yh
 make test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
 make selfhost-native    # 本机主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
+make code-stats         # 统计 compiler/ 下 yh 源码规模
 make seed               # 滚种子（仅在 test 与 selfhost-native 全绿后执行）
 ```
 

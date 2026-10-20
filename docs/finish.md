@@ -2,6 +2,24 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-20 yh 编译器源码规模统计工具
+
+- 新增 `tools/yh-code-stats.py`，按 yh 的字符串、字符、转义与注释词法边界
+  统计 `compiler/**/*.yh`，输出物理行分类、职责目录占比及大文件排行，支持 JSON。
+- 新增 `make code-stats` 与 `make test-code-stats`；源码统计用例也并入 `make test`。
+- `tests/tools/yh-code-stats/` 新增 `.yh` 固定夹具及 Python 检查，覆盖注释边界、
+  行尾/多行混合注释、CRLF、空白行、转义、错误输入、缓存目录排除与稳定 JSON。
+- 新 worktree 的已提交基线：104 个 `.yh` 文件、50,415 物理行，代码 44,843 行，
+  纯注释 3,897 行，空白 1,675 行，混合 698 行；混合行是代码行子集。
+- [实施方案](02-plan/yh-编译器代码统计工具方案.md)记录统计口径和 worktree 基线差异；
+- `make code-stats` 报表与上述基线一致；统计脚本用例 6/6 通过。
+- 在 Darwin/arm64 上使用固定 SDK 26.5 执行
+  `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk make bootstrap`，冷编通过；
+  随后使用同一 `SDKROOT` 执行 `make test` 与 `make selfhost-native` 均全绿。
+  `make test`：ANTLR 正向 78/78、反向 42/42、运行语料 348/349（1 个平台跳过）、统计工具 6/6；
+  `make selfhost-native`：两代固定点 24 个输出一致、自解析 104 个源码文件、模块 18/18、
+  项目构建案例 105/105。未执行 `make seed`，没有改变入库种子。
+
 ## 2026-10-20 构建简化：一条命令、失败前置、身份去路径
 
 - `make bootstrap`：幂等 `llvm-host` + 冷编，首次/换机只需一条命令；

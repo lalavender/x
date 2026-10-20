@@ -272,6 +272,7 @@ test: stage-yh
 	python3 $(TOPSRC)/tests/yh/check.py
 	python3 $(TOPSRC)/tests/yh/check.py --compiler --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/yh-run/check.py --compiler $(YH_RUN) $(RUN_WORK_FLAG)
+	python3 $(TOPSRC)/tests/tools/yh-code-stats/check.py
 
 # quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
 # 秒级到十几秒，改语法/诊断时够用；运行语义与自举门留给 test/full。
@@ -368,6 +369,14 @@ test-all: test
 explorer:
 	python3 $(TOPSRC)/tools/yh-explorer.py
 
+# 统计编译器 yh 源码规模；独立运行，不依赖编译器构建。
+.PHONY: code-stats test-code-stats
+code-stats:
+	python3 $(TOPSRC)/tools/yh-code-stats.py
+
+test-code-stats:
+	python3 $(TOPSRC)/tests/tools/yh-code-stats/check.py
+
 tests.%: ;
 
 clean:
@@ -377,6 +386,6 @@ clean:
 help:
 	@sed -n '2,20p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all quick full explorer seed selfhost-native clean help llvm-host bootstrap stage-yh test-llvm-darwin selfhost-llvm-darwin
+.PHONY: all install uninstall test test-all quick full explorer code-stats test-code-stats seed selfhost-native clean help llvm-host bootstrap stage-yh test-llvm-darwin selfhost-llvm-darwin
 
 endif # ($(INCLUDED),no)
