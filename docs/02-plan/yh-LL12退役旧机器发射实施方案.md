@@ -74,6 +74,10 @@
   删除数字/字符/布尔常量装载、字符串/元信息名称的数据发射、标识符取值的
   `lea/load` 指令；保留类型与常量标记、`c_res_is_addr`、字符串与名称标签
   登记（`data_str_add`/`data_str_add_pool`）。
+- **2026-10-21 第五片完成（控制流解析）**：`parse/parse_stmt.yh` 768→647 行，
+  删除 if/for/switch/return 的标签、跳转、比较链与临时槽发射，以及赋值 RHS
+  压栈；保留循环上下文（`sem_loop_push/pop`）、`c_fn_falls` 可达性、case
+  常量与 AST 捕获。
 - 先把「只语义」变成唯一模式：以 `c_compile == 0` + `c_em_suppress`
   （`gen/sem_expr.yh`、`compiler/parse/parse_decl.yh`）为雏形，逐文件把
   混合函数拆成 `sem_*`（类型/值类别/诊断/CT）与 `emit_*`（发射）两段。

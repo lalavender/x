@@ -31,6 +31,18 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第十一刀：parse_stmt 控制流发射剥离（C1 第五片）
+
+- `compiler/parse/parse_stmt.yh` 768→647 行：删除 `em_new_label`/`em_label`/
+  `em_jmp`/`em_jz`/`em_beq`/`em_frag`/`em_mov_imm`/`em_alloc_local`/
+  `em_lea_local_to`/`em_ins`/`em_push` 在 if/for/switch/return 中的调用。
+- 保留：`sem_loop_push/pop` 循环上下文、`c_fn_falls` 可达性、case 常量与
+  数量上限诊断、`sem_assign`/`sem_forin_*` 调用（其发射留待后续片）、AST 捕获。
+- 验证：`\bem_` 在该文件零命中；400 语料诊断快照零差异；if/loop/switch/
+  goto/递归用例通过；`make test` 退出 0；`make selfhost-native` 退出 0
+  （project 106/106）。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第十刀：sem_value 取值/地址剥离（C1 第四片）
 
 - `compiler/gen/sem_value.yh` 522→423 行：删除数字/字符/布尔常量装载、
