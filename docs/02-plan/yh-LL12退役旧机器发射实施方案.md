@@ -71,8 +71,9 @@
 - 值表示替换：`c_res_is_addr`、`c_spill_reg`、值栈、`c_in_body`、
   `tn_lbl_*` 等目标相关状态换成目标无关的「值类别/临时」抽象；LLVM 路径
   继续只消费 AST 快照。
-- 每片验收：同一批语法/运行/项目/诊断语料在「纯语义」与「语义+发射」下
-  诊断逐条一致；`make selfhost-native` 固定点不变。
+- 每片验收：`python3 tools/ll12-diagnostic-snapshot.py` 与基线零差异
+  （400 个语法/运行语料、175 个预期失败；基线 `tmp/ll12/diag-baseline.json`），
+  且 `make selfhost-native` 固定点不变。基线在改动前生成，改后重跑比对。
 
 风险：诊断时机改变（现求值与发射同遍）；CT 求值依赖发射顺序；需逐函数
 对照，不以整文件重写代替。

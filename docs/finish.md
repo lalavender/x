@@ -19,6 +19,18 @@
   LLVM `.s` 584 行。产物与脚本在 `tmp/ll12/`（未入库）。
 - 本轮只新增文档与普查脚本，未改编译器、未滚种子。
 
+## 2026-10-21 LL12-1a：诊断快照基线（语义纯化的回归前提）
+
+- 新增 `tools/ll12-diagnostic-snapshot.py`：对 `tests/yh/{positive,rejected}` 与
+  `tests/yh-run/{pass,run,fail}` 共 400 个 `.yh` 跑 `yh check`，记录
+  rc/stdout/stderr 并归一化绝对路径；`--write` 生成基线，默认与基线比对，
+  有差异退出 1。
+- 基线 `tmp/ll12/diag-baseline.json`：400 个文件、175 个预期失败；
+  生成与比对各约 4s，二次比对零差异（幂等）。
+- 用途：C1 每剥离一处发射段后重跑比对，保证诊断逐条不变；基线不入库，
+  换分支/改语料后重新 `--write`。
+- 未改编译器、未滚种子。
+
 ## 2026-10-21 CircleCI 三端全绿与 tag Release 验证
 
 - CircleCI 分支流水线在 `9438244` 三端全部 success：Linux/AArch64、
