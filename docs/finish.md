@@ -31,6 +31,20 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第二刀：driver 旧分支与 compile 发射段
+
+- `compiler/cmd/driver.yh`：删除 legacy 的 `run_emit_asm_to`、`drv_write_asm`
+  与 `<out>.yh-tmp.s` 临时路径；`-o` 直接走新增的 `drv_compile_file`
+  （`llvm_emit_single_file`）；`--emit-asm` 只保留 LLVM 分支；usage 的
+  `--target` 文案去掉「旧后端仅 AArch64」。418→322 行。
+- `compiler/cmd/compile.yh`：删除 `.bss` 与运行期桩发射段，`sem_compile`
+  只保留两遍语义、编译期求值与布局，继续作为 `yh check` 的纯语义路径。
+  116→105 行。
+- 验证：`make` 通过；400 语料诊断快照零差异；`make test` 退出 0；
+  `make selfhost-native` 退出 0（1m48s，project 106/106）；单文件 `-o`、
+  `--emit-asm`、`check` 均正常。
+- 未滚种子。
+
 ## 2026-10-21 LL12 首刀：legacy 入口拒绝与 syscall 桩退役
 
 - `compiler/cmd/driver.yh`：`--backend legacy` 明确拒绝（rc 2，提示「已在

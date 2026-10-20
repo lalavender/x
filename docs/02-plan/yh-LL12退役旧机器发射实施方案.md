@@ -84,7 +84,8 @@
   `backend/arm64_call.yh`；删除 `gen/buffer.yh` 的 `em_*/dat_*/bss_put*` 与
   `flush_output`；清理 `gen/state.yh` 的 `TaskCtx` 旧字段与四缓冲指针。
   注意保留快照字段 `bss_n`/`bss_symbols`，不要按名字误删。
-- 入口同步：`cmd/compile.yh` 的 `.bss`/运行期桩段、`cmd/module_worker.yh`
+- 入口同步：`cmd/compile.yh` 的 `.bss`/运行期桩段（**2026-10-21 已删**，
+  函数只留两遍语义/CT/布局供 `yh check`）、`cmd/module_worker.yh`
   的按文件 `.s` 发射与桩对象、`cmd/module_build.yh` 的 `.build/asm` 分支、
   `cmd/link_cache.yh` 的 `.s` 对象清单与后端位。
 - 验收：`rg 'em_|dat_|bss_|o_out|o_body|flush_output' compiler/` 无生产
@@ -110,6 +111,10 @@
 
 - **2026-10-21 已完成首片**：`--backend legacy` 在 `cmd/driver.yh` 明确拒绝
   （提示 LL12 已退役，rc 2）；`--backend llvm` 保留为兼容 no-op。
+- **2026-10-21 已完成第二片**：删除 driver 的 `run_emit_asm_to`/
+  `drv_write_asm` 与临时 `.yh-tmp.s` 路径，`-o` 直接走 `drv_compile_file`
+  （LLVM）；`--emit-asm` 只保留 LLVM 分支；usage 去掉「旧后端仅 AArch64」
+  （driver 418→322 行）。
 - 删除 `c_backend`（`gen/state.yh`、`cmd/driver.yh`、`cmd/module_build.yh`、
   `cmd/link_cache.yh`、`cmd/module_worker.yh`、`cmd/darwin_link.yh` 全部引用）。
 - 删除 `target_legacy_ready` 与 `-target linux` 旧别名里的 AArch64 隐含语义；
