@@ -167,7 +167,16 @@ pub fn sem_call(callee *Res, r *Res) int {
         return sem_err("函数调用不是编译期常量");
     }
     if (g_state.task.t_sig_abi[sig] == ABI_C) {
-        return sem_cabi_call(callee, r, base, direct, sig, na, noreturn);
+        // LL12：C ABI 的寄存器/栈搬运由 lowering 处理，语义层只记录结果形态。
+        let ret_c int = g_state.task.t_sig_ret[sig];
+        let ret_agg_c int = (g_state.task.t_types[ret_c].kind == TY_STRUCT
+            || g_state.task.t_types[ret_c].kind == TY_UNION).to_type(int);
+        g_state.task.c_arg_n = base;
+        sem_res_reset(r, ret_c);
+        g_state.task.c_res_is_addr = ret_agg_c;
+        // noreturn 的 C 调用仍是不可达边界，可达性判定必须保留。
+        if (noreturn != 0) { g_state.task.c_expr_noreturn = 1; }
+        return 0;
     }
     // 类型化变参：把尾部实参（已逐个压栈）打包为一个切片参数
     let na2 int = na;
@@ -408,10 +417,6 @@ pub fn sem_call(callee *Res, r *Res) int {
 pub fn sem_return_value(r *Res) int {
     if (g_state.task.c_compile == 0 || g_state.task.c_fold != 0) {
         return 0;
-    }
-    if ((g_state.task.c_fn_flags & F_CABI) != 0 && g_state.task.c_ret_agg == 0
-        && (g_state.task.t_types[g_state.task.c_fn_ret].kind == TY_STRUCT || g_state.task.t_types[g_state.task.c_fn_ret].kind == TY_UNION)) {
-        if (sem_cabi_return(g_state.task.c_fn_ret) != 0) { return -1; }
     }
     if (g_state.task.c_ret_agg != 0) {
         // x0 = 聚合源地址；x1 = x8 缓冲；拷贝 size 字节
