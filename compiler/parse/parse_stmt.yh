@@ -14,7 +14,7 @@ import ast;
 // LHS 以 lvalue 模式解析出地址并存入临时槽（地址只计算一次），RHS 求值
 // 后由 sem_assign 完成取改存。
 //
-// 编译模式的控制流全部落到 em_* 标签原语：if/else 与三元同构；for 的
+// LL12：控制流不再发射标签/跳转/临时槽，结构由 AST 捕获与 lowering 生成。
 // 三种形态统一为「条件标签 + 体 + 回跳」；switch 用比较链（无 fallthrough，
 // 控制值存专用槽，case 值要求编译期常量）。
 // ============================================================================
@@ -268,10 +268,6 @@ fn parse_stmt_inner() int {
             if (gen.sem_can_assign(lres.type_id, rres.type_id, rres.is_lit, rres.ival, rres.lit_big) != 0) {
                 return -1;
             }
-            // RHS 值压栈，供 sem_assign 弹出（与 sem_assign 的取改存协议配套）
-            if (gen.em_push() != 0) {
-                return -1;
-            }
             if (gen.sem_assign(aop, &lres, &rres) != 0) {
                 return -1;
             }
@@ -350,11 +346,6 @@ fn parse_return() int {
             }
         }
     } else {
-        if (gs.task.c_compile != 0) {
-            if (gen.em_jmp(gs.task.c_fn_lbl) != 0) {
-                return -1;
-            }
-        }
     }
     return p_expect(gen.TK_SEMI, "期望 ';'");
 }
@@ -379,12 +370,6 @@ fn parse_if() int {
     }
     let lbl_else int = 0;
     let lbl_end int = 0;
-    if (gs.task.c_compile != 0) {
-        lbl_else = gen.em_new_label();
-        if (gen.em_jz(lbl_else) != 0) {
-            return -1;
-        }
-    }
     gs.task.c_fn_falls = 1;
     if (parse_block() != 0) {
         return -1;
@@ -392,15 +377,6 @@ fn parse_if() int {
     let then_falls int = gs.task.c_fn_falls;
     if (p_cur() == gen.TK_ELSE) {
         p_adv();
-        if (gs.task.c_compile != 0) {
-            lbl_end = gen.em_new_label();
-            if (gen.em_jmp(lbl_end) != 0) {
-                return -1;
-            }
-            if (gen.em_label(lbl_else) != 0) {
-                return -1;
-            }
-        }
         gs.task.c_fn_falls = 1;
         if (p_cur() == gen.TK_IF) {
             let nested_if_result int = 0;
@@ -417,22 +393,12 @@ fn parse_if() int {
                 return -1;
             }
         }
-        if (gs.task.c_compile != 0) {
-            if (gen.em_label(lbl_end) != 0) {
-                return -1;
-            }
-        }
         let else_falls int = gs.task.c_fn_falls;
         gs.task.c_fn_falls = parent_falls != 0
             && (then_falls != 0 || else_falls != 0) ? 1 : 0;
         return 0;
     }
     gs.task.c_fn_falls = parent_falls != 0 ? 1 : 0;
-    if (gs.task.c_compile != 0) {
-        if (gen.em_label(lbl_else) != 0) {
-            return -1;
-        }
-    }
     return 0;
 }
 
@@ -443,13 +409,10 @@ fn parse_for() int {
     p_adv();
     if (p_cur() == gen.TK_LBRACE) {
         // 无限循环
-        let ibrk int = gen.em_new_label();
-        let iend int = gen.em_new_label();
+        let ibrk int = 0;
+        let iend int = 0;
         if (gs.task.c_compile != 0) {
             if (gen.sem_loop_push(iend, ibrk) != 0) {
-                return -1;
-            }
-            if (gen.em_label(ibrk) != 0) {
                 return -1;
             }
         }
@@ -462,12 +425,6 @@ fn parse_for() int {
             ? gs.task.c_loop_break_seen[loop_depth - 1] : 0;
         gs.task.c_fn_falls = parent_falls != 0 && has_break != 0 ? 1 : 0;
         if (gs.task.c_compile != 0) {
-            if (gen.em_jmp(ibrk) != 0) {
-                return -1;
-            }
-            if (gen.em_label(iend) != 0) {
-                return -1;
-            }
             gen.sem_loop_pop();
         }
         return 0;
@@ -519,11 +476,6 @@ fn parse_for() int {
             if (p_cur() == gen.TK_RANGE) {
                 is_range = 1;
                 // 起点（x0）先存槽，再求终点
-                if (gs.task.c_compile != 0) {
-                    start_off = gen.em_alloc_local(8);
-                    if (gen.em_lea_local_to(start_off) != 0) { return -1; }
-                    if (gen.em_ins("str\tx0, [x10]") != 0) { return -1; }
-                }
                 p_adv();
                 if (parse_expr_blockctx(&end_res) != 0) {
                     return -1;
@@ -537,18 +489,14 @@ fn parse_for() int {
                 if (sem_check_cond(&it) != 0) { return -1; }
                 if (sem_check_cond(&end_res) != 0) { return -1; }
                 // 终点（x0）存临时槽
-                gs.task.c_end_tmp_off = gen.em_alloc_local(8);
-                if (gen.em_lea_local_to(gs.task.c_end_tmp_off) != 0) { return -1; }
-                if (gen.em_ins("str\tx0, [x10]") != 0) { return -1; }
+                gs.task.c_end_tmp_off = 0;
             }
-            let lcond int = gen.em_new_label();
-            let lend int = gen.em_new_label();
+            let lcond int = 0;
+            let lend int = 0;
             if (gen.sem_loop_push(lend, lcond) != 0) { return -1; }
             gen.scope_push();
             if (is_range != 0) {
                 // 起点从槽读回 x0，然后启动区间迭代
-                if (gen.em_lea_local_to(start_off) != 0) { return -1; }
-                if (gen.em_ins("ldr\tx0, [x10]") != 0) { return -1; }
                 if (gen.sem_forin_begin(&it, 1, &end_res) != 0) { return -1; }
             } else {
                 if (gen.sem_forin_begin(&it, 0, &end_res) != 0) { return -1; }
@@ -574,14 +522,12 @@ fn parse_for() int {
                 ioff = gs.task.c_syms[isym].offset;
             }
             if (gen.sem_forin_set_bind(eoff, ioff) != 0) { return -1; }
-            if (gen.em_label(lcond) != 0) { return -1; }
             if (gen.sem_forin_check(lend) != 0) { return -1; }
             if (gen.sem_forin_load(&it, is_range) != 0) { return -1; }
             gs.task.c_fn_falls = 1;
             if (parse_block() != 0) { return -1; }
             gs.task.c_fn_falls = parent_falls;
             if (gen.sem_forin_step(lcond) != 0) { return -1; }
-            if (gen.em_label(lend) != 0) { return -1; }
             gen.scope_pop();
             gen.sem_forin_end();
             gen.sem_loop_pop();
@@ -589,13 +535,10 @@ fn parse_for() int {
         }
     }
     // 条件循环
-    let lbl_cond int = gen.em_new_label();
-    let lbl_end int = gen.em_new_label();
+    let lbl_cond int = 0;
+    let lbl_end int = 0;
     if (gs.task.c_compile != 0) {
         if (gen.sem_loop_push(lbl_end, lbl_cond) != 0) {
-            return -1;
-        }
-        if (gen.em_label(lbl_cond) != 0) {
             return -1;
         }
     }
@@ -607,9 +550,6 @@ fn parse_for() int {
         if (sem_check_cond(&cond) != 0) {
             return -1;
         }
-        if (gen.em_jz(lbl_end) != 0) {
-            return -1;
-        }
     }
     gs.task.c_fn_falls = 1;
     if (parse_block() != 0) {
@@ -617,12 +557,6 @@ fn parse_for() int {
     }
     gs.task.c_fn_falls = parent_falls;
     if (gs.task.c_compile != 0) {
-        if (gen.em_jmp(lbl_cond) != 0) {
-            return -1;
-        }
-        if (gen.em_label(lbl_end) != 0) {
-            return -1;
-        }
         gen.sem_loop_pop();
     }
     return 0;
@@ -647,18 +581,11 @@ fn parse_switch() int {
         if (gen.ty_is_integer(ctrl.type_id) == 0) {
             return gen.sem_err("switch 控制值必须是整数");
         }
-        slot = gen.em_alloc_local(8);
-        if (gen.em_lea_local_to(slot) != 0) {
-            return -1;
-        }
-        if (gen.em_ins("str\tx0, [x10]") != 0) {
-            return -1;
-        }
     }
     if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
         return -1;
     }
-    let lbl_end int = gen.em_new_label();
+    let lbl_end int = 0;
     let ncases int = 0;
     for p_cur() == gen.TK_CASE || p_cur() == gen.TK_DEFAULT {
         let case_ast int = -1;
@@ -666,8 +593,8 @@ fn parse_switch() int {
             case_ast = ast.ast_stmt_begin(ast.AST_STMT_CASE, p_cur(), gs.task.c_pos);
             if (case_ast < 0) { return -1; }
         }
-        let body_lbl int = gen.em_new_label();
-        let skip_lbl int = gen.em_new_label();
+        let body_lbl int = 0;
+        let skip_lbl int = 0;
         let is_case int = (p_cur() == gen.TK_CASE).to_type(int);
         if (is_case != 0) {
             p_adv();
@@ -691,35 +618,6 @@ fn parse_switch() int {
                     if (ncases > 512) {
                         return gen.sem_err("switch 分支过多（上限 512 个 case 值）");
                     }
-                    // 控制值 → x0，与常量比较；命中跳 body
-                    if (gen.em_lea_local_to(slot) != 0) {
-                        return -1;
-                    }
-                    if (gen.em_ins("ldr\tx0, [x10]") != 0) {
-                        return -1;
-                    }
-                    let v int = cv.ival.to_type(int);
-                    if (v >= 0 && v <= 4095) {
-                        if (gen.em_frag("\tcmp\tx0, #") != 0) {
-                            return -1;
-                        }
-                        if (gen.em_puti(v) != 0) {
-                            return -1;
-                        }
-                        if (gen.em_frag("\n") != 0) {
-                            return -1;
-                        }
-                    } else {
-                        if (gen.em_mov_imm("x10", cv.ival) != 0) {
-                            return -1;
-                        }
-                        if (gen.em_ins("cmp\tx0, x10") != 0) {
-                            return -1;
-                        }
-                    }
-                    if (gen.em_beq(body_lbl) != 0) {
-                        return -1;
-                    }
                 }
                 if (p_cur() == gen.TK_COMMA) {
                     p_adv();
@@ -728,29 +626,11 @@ fn parse_switch() int {
                 break;
             }
             // 本 case 的值全部未命中 → 跳过块体
-            if (gs.task.c_compile != 0) {
-                if (gen.em_jmp(skip_lbl) != 0) {
-                    return -1;
-                }
-                if (gen.em_label(body_lbl) != 0) {
-                    return -1;
-                }
-            }
         } else {
             p_adv();
         }
         if (parse_block() != 0) {
             return -1;
-        }
-        if (gs.task.c_compile != 0) {
-            if (gen.em_jmp(lbl_end) != 0) {
-                return -1;
-            }
-            if (is_case != 0) {
-                if (gen.em_label(skip_lbl) != 0) {
-                    return -1;
-                }
-            }
         }
         if (gs.task.c_ast_capture != 0 && ast.ast_stmt_end(case_ast, gs.task.c_pos) != 0) {
             return -1;
@@ -758,11 +638,6 @@ fn parse_switch() int {
     }
     if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
         return -1;
-    }
-    if (gs.task.c_compile != 0) {
-        if (gen.em_label(lbl_end) != 0) {
-            return -1;
-        }
     }
     return 0;
 }
