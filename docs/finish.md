@@ -31,6 +31,21 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第十二刀：C ABI 发射层删除（C1 第六片）
+
+- 删除 `compiler/gen/sem_cabi.yh`（246 行）：GPR/FPR 片搬运、栈参数、
+  聚合入口拷贝、C 返回寄存器转换与 `sbfx/ubfx` 窄化全部移除。
+- `gen/sem_decl.yh`：`sem_declare_param` 不再分派 `sem_cabi_param`，C 参数
+  只登记符号与 `F_AGGPARAM` 事实。
+- `gen/sem_call_literal.yh`：`ABI_C` 调用改为记录结果形态（类型/地址事实）
+  并保留 `noreturn` 可达性；删除 `sem_cabi_return` 调用。
+- 过程中发现并修复两处语义回归：① noreturn 的 C 调用丢失不可达标记，导致
+  `07-noreturn-branches` 报「正常落底路径」；② C 函数 HFA 参数被旧浮点
+  上限（8）拒绝，改为 C 函数跳过该上限。
+- 验证：400 语料诊断快照零差异；`make test` 退出 0；`make selfhost-native`
+  退出 0（project 106/106，含 C 双向 ABI/回调用例）。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第十一刀：parse_stmt 控制流发射剥离（C1 第五片）
 
 - `compiler/parse/parse_stmt.yh` 768→647 行：删除 `em_new_label`/`em_label`/

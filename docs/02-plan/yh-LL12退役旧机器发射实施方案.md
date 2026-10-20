@@ -78,6 +78,10 @@
   删除 if/for/switch/return 的标签、跳转、比较链与临时槽发射，以及赋值 RHS
   压栈；保留循环上下文（`sem_loop_push/pop`）、`c_fn_falls` 可达性、case
   常量与 AST 捕获。
+- **2026-10-21 第六片完成（C ABI）**：删除 `gen/sem_cabi.yh`（246 行：GPR/FPR
+  片搬运、栈参数、聚合入口拷贝、C 返回寄存器转换）；`sem_declare_param` 的
+  C 分派改为普通登记，`sem_call` 的 `ABI_C` 分支只记录结果形态并保留
+  noreturn 可达性；C 函数不受旧浮点参数上限约束（HFA 由 lowering 分类）。
 - 先把「只语义」变成唯一模式：以 `c_compile == 0` + `c_em_suppress`
   （`gen/sem_expr.yh`、`compiler/parse/parse_decl.yh`）为雏形，逐文件把
   混合函数拆成 `sem_*`（类型/值类别/诊断/CT）与 `emit_*`（发射）两段。
