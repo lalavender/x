@@ -532,9 +532,11 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     `YH_LLVM_HOST=1` 与 `libxml2-dev`；`make selfhost-native` 内含 F1 运行时门。
   - [ ] **F1-6 可选后续**：x64 专用 `llvm-selfhost.py` 若需 ARM64 变体再参数化；
     跨宿主（x64 上跑 arm64 种子）链接模板策略单独立项。
-  - [ ] **CircleCI 首次实跑**：连接 GitHub 仓库后观察 `antlr` 与
-    `linux-arm64`，确认 LFS 种子、LLVM 宿主缓存命中与 `SKIP_CORPUS=1`
-    的实际耗时；首次需构建固定 arm64 LLVM/lld 宿主。
+  - [x] **CircleCI 首次实跑**：`antlr`/`linux-arm64` 在 commit `9e1dec3`
+    均 success；`antlr` 镜像从 Ubuntu 20.04 的 `cimg/base` 改为
+    `cimg/python:3.12` 后修复旧 pip 不支持 `--break-system-packages` 的问题。
+  - [ ] **GitHub Actions 账单恢复**：antlr/x64/darwin 作业在启动前被账单/消费
+    限额拒绝（不是工作流错误）；恢复后复跑同一提交确认。
 
 - [ ] **F2–F4 后续平台**：macOS/ARM64 → Windows/x86_64 → macOS/x86_64、Windows/ARM64；
   各格分别验收对象、链接、标准库运行、原生编译器、原生自举，不以 WSL 冒充 Windows 支持。

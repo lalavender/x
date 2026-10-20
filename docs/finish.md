@@ -14,8 +14,14 @@
 - Release 的 arm64 作业补 `YH_LLVM_HOST=1`、`libxml2-dev`、`binutils/xz-utils`
   与固定 LLVM/lld 宿主缓存；超时从默认值提高到 240 分钟。
 - 验证：两份 workflow 与 CircleCI YAML 均通过 YAML 解析；本地 `make test-code-stats`
-  与 `make quick` 通过。CircleCI 首次实跑需在 CircleCI 连接仓库后观察，
-  首次会构建 arm64 固定 LLVM 宿主，后续命中缓存。
+  与 `make quick` 通过。
+- **CircleCI 首次实跑（commit `9e1dec3`）**：`antlr` 与 `linux-arm64` 均 success；
+  arm64 从启动到完成约 4 分钟。首次发现 `antlr` 的 `cimg/base:stable` 仍是
+  Ubuntu 20.04 + 旧 pip，不支持 `--break-system-packages`，已改用
+  `cimg/python:3.12` 后通过。
+- **GitHub Actions 阻塞**：同一提交的 antlr/x64/darwin 作业在启动前失败，
+  注解为账号账单/消费限额（`recent account payments have failed or your
+  spending limit needs to be increased`），不是工作流代码错误；账单恢复后需复跑。
 
 ## 2026-10-20 yh 编译器源码规模统计工具
 
