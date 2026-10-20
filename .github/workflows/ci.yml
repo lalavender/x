@@ -1,14 +1,12 @@
 name: CI
 
-# 自举门禁的多平台验证：
-#  - linux-arm64：QEMU 容器内（arm64 原生仿真）跑编译器语法模式、运行语料与主门；
-#  - linux-x86_64：ARM64 种子经 QEMU 生成 x64 A，随后以原生 x64 运行 LLVM O0/O2 全门；
-#    第 1 层 ANTLR 语料需要 Java 与 antlr4 jar 缓存，不在 CI 里跑（本机门禁仍覆盖）。
-#    固定 SDK 经 YH_LLVM_HOST=1 联网准备（auto 模式在全新 runner 上不下载，
-#    构建出的 yh 没有 LLVM 桥会让 test-llvm 失败），SDK 缓存在 tmp/llvm-migration。
-#  - darwin-arm64：macOS（Apple Silicon）上跑同一套门禁；入库 bin/yh-darwin-arm64 若落后于
-#    「模块私有类型」一代，先自动补一代种子再验证（见下方步骤注释）。
-# 触发：手动 workflow_dispatch（可选只跑某个平台，省 macOS 计费分钟）或推送分支。
+# 自举门禁的多平台验证（普通提交）：
+#  - 三个作业都从最近一个已发布 Release 下载对应平台 `yh` 资产作种子；
+#  - linux-arm64：QEMU 容器内跑语法/运行语料与自举主门；
+#  - linux-x86_64：原生 x64 Release 种子，跑 LLVM 全量测试与自举；
+#  - darwin-arm64：macOS Release 种子，跑 Darwin LLVM 专项、连续自举与主门；
+#  - tag 推送不在这里跑：Release 工作流负责三端完整测试并发布新 Release。
+# 触发：手动 workflow_dispatch（可选平台）或推送分支。
 on:
   workflow_dispatch:
     inputs:
@@ -23,7 +21,6 @@ on:
           - darwin-arm64
   push:
     branches: [arm64, llvm, main]
-    tags: ['0.0.*']
 
 permissions:
   contents: read
@@ -40,6 +37,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      # 每次提交都用上一版 Release 的 linux-arm64 资产作种子；首次发布或
+      # 找不到 Release 时脚本会退回仓库内已有种子。
+      - name: 下载上一版 Release 种子
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 tools/fetch-release-seed.py --platform linux-arm64 --dest bin/yh-linux-arm64
 
       # 免费私有仓库没有 arm64 原生 runner；用 QEMU 在 x86_64 runner 上跑
       # arm64 容器，产物是货真价实的 AArch64 Linux ELF。
@@ -73,13 +78,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      SEED: bin/yh-linux-arm64
+      SEED: bin/yh-linux-x64
       YH_LINK: /nonexistent
-      # 交叉 libc 的 loader 不在宿主的 /lib；qemu-user 用该前缀解析
-      # /lib/ld-linux-aarch64.so.1 与 /lib/aarch64-linux-gnu。
-      QEMU_LD_PREFIX: /usr/aarch64-linux-gnu
-      # require 模式：全新 runner 上没有固定 SDK，auto 不联网会让构建回落旧路径
-      # （yh 无 LLVM 桥），test-llvm/selfhost-llvm 必失败。联网取一次后有缓存。
+      LLVM_JOBS: "2"
+      # 全新 runner 上 auto 不联网；require 允许首次取固定 SDK，之后走缓存。
       YH_LLVM_HOST: "1"
     steps:
       - uses: actions/checkout@v4
@@ -92,38 +94,24 @@ jobs:
           path: tmp/llvm-migration
           key: llvm-host-${{ runner.os }}-${{ hashFiles('vendor/llvm/sdk.lock.json', 'tools/llvm-sdk.py', 'tools/llvm-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp', 'compiler/llvm/lld_stub.cpp') }}
 
-      # 过渡种子仍是 AArch64：QEMU 只用于生成 x64 候选 A；B/C/D 由自举门原生运行。
-      - name: 准备 AArch64 执行与交叉链接工具
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
+      - name: 下载上一版 Release 种子
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 tools/fetch-release-seed.py --platform linux-x86_64 --dest bin/yh-linux-x64
 
-      - name: 安装工具并配置 AArch64 链接器
+      - name: LLVM x64 全量语料与原生自举门
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential gcc-aarch64-linux-gnu python3
-          # qemu-user 的 -L 前缀会映射 /lib/aarch64-linux-gnu；交叉 libc 实际
-          # 位于 /usr/aarch64-linux-gnu/lib，补一个目录内自引用。
-          sudo ln -sfn . /usr/aarch64-linux-gnu/lib/aarch64-linux-gnu
-          mkdir -p "$RUNNER_TEMP/yh-crossbin"
-          cat > "$RUNNER_TEMP/yh-crossbin/gcc" <<'EOF'
-          #!/bin/sh
-          exec aarch64-linux-gnu-gcc "$@"
-          EOF
-          chmod +x "$RUNNER_TEMP/yh-crossbin/gcc"
-          echo "$RUNNER_TEMP/yh-crossbin" >> "$GITHUB_PATH"
-
-      - name: LLVM x64 语料与 A→B/C/D 原生自举门
-        run: |
-          # 种子是 arm64，root `make` 会按宿主种子构建 arm64 yh；x64 A/B/C/D
-          # 由 llvm-selfhost.py 用 seed-build 显式产 x64，并在最终 D 上跑全门。
-          make selfhost-llvm LLVM_JOBS=2
+          make test
+          make selfhost-native
 
   darwin-arm64:
     name: Darwin arm64（Mach-O）主门
-    if: github.event_name == 'workflow_dispatch' && (inputs.platform == 'all' || inputs.platform == 'darwin-arm64')
+    if: github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'darwin-arm64'
     runs-on: macos-14          # Apple Silicon（arm64）；macos-13 是 x86_64，跑不了 arm64 种子
     timeout-minutes: 120
+    env:
+      SEED: bin/yh-darwin-arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -131,6 +119,12 @@ jobs:
       # 需要 Xcode SDK 头文件；用户程序链接则由 compiler/darwin-sdk 覆盖。
       - name: 选择 Xcode macOS SDK
         run: echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+
+      - name: 下载上一版 Release 种子
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 tools/fetch-release-seed.py --platform darwin-arm64 --dest bin/yh-darwin-arm64
 
       - name: 恢复 Darwin LLVM 源码 SDK 构建缓存
         uses: actions/cache@v4
@@ -148,62 +142,6 @@ jobs:
           path: tmp/llvm-migration/llvm-host-darwin-aarch64
           key: llvm-darwin-host-${{ hashFiles('vendor/llvm/sdk.lock.json', 'tools/llvm-darwin-sdk.py', 'tools/llvm-darwin-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp') }}
 
-      # 保险步骤：入库种子若落后于当前源码，先补一代再构建。
-      # 种子已按「yh-平台-架构」命名（darwin/arm64 → bin/yh-darwin-arm64）；
-      # 当前入库种子就是 HEAD 源码编出的，本步骤会直接跳过。
-      - name: 必要时补一代 macOS 种子
-        env:
-          YH_LLVM_HOST: "0"
-        run: |
-          set -euo pipefail
-          cat > /tmp/bare.yh <<'EOF'
-          struct S { v int; }
-          fn main() int { let s S; s.v = 1; return s.v - 1; }
-          EOF
-          if bin/yh-darwin-arm64 --syntax-check /tmp/bare.yh >/dev/null 2>&1; then
-            echo "入库种子已支持模块私有类型，无需中间代"
-            exit 0
-          fi
-          echo "入库种子落后一代：造「语言规则一代」（类型临时恢复 pub）"
-          python3 - <<'PY'
-          import pathlib
-          import sys
-
-          TARGETS = [
-              ("compiler/ast/ast_expr.yh", "AstExpr"),
-              ("compiler/ast/ast_function.yh", "AstFunctionContext"),
-              ("compiler/ast/ast_ir_build.yh", "AstIRBuilder"),
-              ("compiler/ast/ast_ir_inline.yh", "AstIRInlineEntry"),
-              ("compiler/ast/ast_stmt.yh", "AstStmt"),
-              ("compiler/cmd/toml.yh", "TomlArrayItem"),
-              ("compiler/cmd/toml.yh", "TomlSec"),
-              ("compiler/cmd/project.yh", "PJDirEntry"),
-              ("compiler/cmd/clock.darwin.yh", "CmdTimespec"),
-              ("compiler/cmd/clock.linux.arm64.yh", "CmdTimespec"),
-              ("compiler/comptime/ct_ir_data.yh", "CtDataSlice"),
-              ("compiler/comptime/ct_global_agg.yh", "CtGlobalAgg"),
-              ("compiler/parse/iface_ct_map.yh", "IfaceCtColMap"),
-          ]
-          done = 0
-          for rel, name in TARGETS:
-              path = pathlib.Path(rel)
-              # newline="" 按字节保留行尾，避免在 CRLF 检出上重写整文件
-              text = path.read_text(encoding="utf-8", newline="")
-              old = "struct " + name + " "
-              new = "pub struct " + name + " "
-              hits = text.count("\n" + old)
-              if hits != 1:
-                  sys.exit(f"{rel}: {name} 命中 {hits} 处，期望 1 处")
-              path.write_text(text.replace("\n" + old, "\n" + new),
-                              encoding="utf-8", newline="")
-              done += 1
-          print(f"已临时恢复 {done} 处类型的 pub")
-          PY
-          make
-          make seed
-          git checkout -- compiler
-          python3 tools/selfhost_snapshot_gate.py --verify-seed "$PWD/bin/yh-darwin-arm64"
-          echo "中间代种子已就位（bin/yh-darwin-arm64 与 .sha256 已更新）"
 
       - name: 构建并静态接入 Darwin LLVM
         env:
@@ -242,18 +180,6 @@ jobs:
           ./yh /tmp/smoke.yh -o /tmp/smoke && /tmp/smoke
 
       - name: 主门（固定点 + 自解析 + 语料 + 模块/项目验收）
-        run: make selfhost-native
-
-      - name: 校验入库种子
         run: |
-          file bin/yh-darwin-arm64
-          python3 tools/selfhost_snapshot_gate.py --verify-seed "$PWD/bin/yh-darwin-arm64"
-
-      - name: 上传 macOS 种子（如已补代，下载后提交回仓库）
-        uses: actions/upload-artifact@v4
-        with:
-          name: darwin-arm64-seed
-          path: |
-            bin/yh-darwin-arm64
-            bin/yh-darwin-arm64.sha256
-          if-no-files-found: error
+          make test
+          make selfhost-native
