@@ -31,6 +31,21 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 Linux 验证尝试（本机资源受阻）
+
+- 尝试 Apple Container（Debian trixie/arm64）复跑 Linux 全门：
+  - 默认内存下链接 LLVM 桥被 OOM kill（`ld terminated with signal 9`）；
+  - 加 `-m 6G -c 6` 后，闭包根经符号链接解析到 `/Users/.../x/tmp`，不在
+    `/work` 前缀下，`prepare` 写身份记录时 `relative_to(ROOT)` 失败；
+  - 宿主可用磁盘仅 2.6–2.7 GiB，容不下 Linux LLVM SDK（deb 159 MB + 解包
+    约 1.5–2 GiB）与构建产物。
+- 容器内还发现 `/work/yh` 仍是宿主编译的 Mach-O（`make` 因源未变跳过重编），
+  复跑前需 `rm -rf compiler/.build` 强制冷编。
+- 结论：Linux/arm64 与 Linux/x64 的退役验证交由 CI（CircleCI 原生 arm64/x64、
+  GitHub Actions）；本机 Darwin 门已全绿。换足量磁盘后可复跑：
+  `container run --rm -m 6G -c 6 -v "$PWD":/work -v <宿主tmp>:/work/tmp -w /work ...`。
+- 未改代码、未滚种子。
+
 ## 2026-10-21 LL12 退役验收（本分支静态与门禁证据）
 
 - **代码规模**：`compiler/` 自分支起点 `e5e81ac` 累计 **+241 / -6757 行**
