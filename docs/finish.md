@@ -31,6 +31,19 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第二十刀：C5 门禁迁移（首片）
+
+- `tests/selfhost/runtime-memory.py`：删除 Linux/arm64 的 legacy 汇编契约段
+  （`--backend legacy --emit-asm`、交叉汇编、符号检查）；保留 LLVM 运行时
+  导入审计、编译器自编审计与无运行时项目检查。
+- 删除 `tests/selfhost/llvm-darwin-target.py` 与 fixture
+  `tests/yh-run/run/llvm-darwin-target.yh`：F2-0 基线验收器断言
+  「legacy 成功、LLVM 被拒绝」，与 F2-2 完成后的实际相反，且不在任何门禁中；
+  其覆盖由 `llvm-darwin-object/abi/runtime` 门承担。
+- `tests/bench/` 在本分支不存在（bench 资产未入库），无需迁移。
+- 验证：`python3 -m py_compile` 通过；`make test` 退出 0。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第十九刀：清理旧发射缓冲字段（C2 第三片）
 
 - `gen/state.yh`：删除 `o_out/o_len/o_cap/o_dat/o_dlen/o_dcap/o_bss/o_blen/
