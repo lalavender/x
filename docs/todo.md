@@ -163,17 +163,19 @@ runtime-memory/lex-stats/scratch-isolation）在 WSL 全绿。重建与验证
 
 ### 标准库
 
-- [ ] **OS0–OS6：os/sys 标准库可用性优先**（2026-10-19 规划）：结果/选项 ABI →
-  文件闭环 → 流式目录/cwd → 显式 envp 查询 → 精确路径 spawn/wait/exit →
-  io/time 收敛 → 加载/示例体验；旧 os/io/time 接口保持兼容。
-  sys 按场景交付最小子集，Linux/x64 与 ARM64 分别适配，不等待编译器整体迁移。
+- [x] **OS0：os/sys 结果、选项与 ABI 基线（2026-10-21 完成）**：新增
+  `libs/sys/00_types.yh`、`libs/os/00_model.yh`；`sysresult` 与 `osmodel`
+  在 Darwin 与 Linux/arm64 原生运行通过。见[完成记录](01-finished/yh-os与sys-OS0-OS1文件闭环-2026-10-21.md)。
+- [ ] **OS1：文件闭环（首片已实现，阶段未关闭）**：`libs/sys/30_file.linux.yh`
+  与 `libs/os/file.linux.yh` 提供 open/read/write/close/mkdir/rmdir/remove/rename，
+  错误分类与 OpenOptions 已落地；`sysraw/sysfiles/osfiles` 在 Linux/arm64
+  原生通过。**待补**：稳定短写/EINTR 注入用例、CLI 重新验收、Linux/x64 原生运行。
+- [ ] **OS2–OS6：目录/cwd、envp、进程、io/time 收敛、加载体验**：按
+  [联合实施方案](02-plan/yh-os与sys标准库实施方案.md)继续；OS2 尚未开始。
   **OS7** 编译器迁移/独立性审计、**OS8** Darwin 新接口另列后续。
-  当前仅有规划，阶段均未实施；见[联合设计](03-design/yh-os与sys标准库设计.md)、
-  [联合实施方案](02-plan/yh-os与sys标准库实施方案.md)与
-  [提议 ADR-0015](adr/0015-yh-os与sys标准库分层.md)。
-- [ ] **SYS0–SYS7：`libs/sys` 底层能力清单**：保留原始入口、`-errno`、文件/目录、
-  内存/时间和进程原语；排期由 OS 阶段按需取子集，消费者迁移/独立性与 Darwin
-  桥后续交付。2026-10-19 已修正 x64 入口及 OS/架构后缀的过时描述，尚无实现。
+  当前设计见[联合设计](03-design/yh-os与sys标准库设计.md)。
+- [ ] **SYS0–SYS7：`libs/sys` 底层能力清单**：SYS1 结果/raw6 与 SYS2 文件子集
+  已实现；目录、内存、时间、进程、消费者迁移/独立性、Darwin 桥仍待交付。
   API/文件与门禁见
   [设计](03-design/yh-sys系统调用封装设计.md)、
   [实施方案](02-plan/yh-sys系统调用封装实施方案.md)与
@@ -537,8 +539,8 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     `cimg/python:3.12` 后修复旧 pip 不支持 `--break-system-packages` 的问题。
   - [ ] **GitHub Actions 账单恢复**：antlr/x64/darwin 作业在启动前被账单/消费
     限额拒绝（不是工作流错误）；恢复后复跑同一提交确认。
-  - [ ] **CircleCI tag Release 首发**：配置项目环境变量 `GITHUB_TOKEN`
-    （repo 权限）；推送 tag 后确认三端 cc4 打包、`publish` 创建/更新 Release。
+  - [x] **CircleCI tag Release 首发**：`ci-selftest-20261020b` 三端 cc4 打包、
+    `publish` 创建 Release 与种子回读均通过；测试 tag/release 已清理。
 
 - [ ] **F2–F4 后续平台**：macOS/ARM64 → Windows/x86_64 → macOS/x86_64、Windows/ARM64；
   各格分别验收对象、链接、标准库运行、原生编译器、原生自举，不以 WSL 冒充 Windows 支持。

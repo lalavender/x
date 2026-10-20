@@ -2,6 +2,41 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-21 CircleCI 三端全绿与 tag Release 验证
+
+- CircleCI 分支流水线在 `9438244` 三端全部 success：Linux/AArch64、
+  Linux/x86_64、Darwin/ARM64（`m4pro.medium` + Xcode 26.5）。
+- 修正 CircleCI 项目元数据不是 `lalavender/x` 的问题：显式设置
+  `GITHUB_REPOSITORY=lalavender/x`；取 Release 种子前拒绝 LFS 指针兜底。
+- Darwin 首次宿主构建缺 CMake/Ninja，已加入 job 依赖。
+- tag `ci-selftest-20261020b` 验证 `release` workflow：三端 cc4 打包、
+  `publish` 创建 Release；资产内二进制名为 `yh`，`fetch-release-seed.py`
+  成功回读 x64 种子。测试 tag/release 已清理，正式 Release 0.0.5 保留。
+- 最新 Release `0.0.5` 的 Linux x64/arm64 资产已替换为当前自举种子。
+
+## 2026-10-21 os/sys OS0 与 OS1 文件闭环首片
+
+- 新增 `libs/sys/00_types.yh`（Timespec、is_error、error_code）、
+  `10_constants.linux.{arm64,x64}.yh`（NR_*、O_*、AT_*、errno）、
+  `20_raw.linux.yh`（raw6）与 `30_file.linux.yh`（open_at/read_fd/write_fd/
+  close_fd/create_dir_at/remove_at/rename_at）。
+- 新增 `libs/os/00_model.yh`（Error/ErrorKind、FdResult、IoResult、
+  OpenOptions、DirEntry）与 `file.linux.yh`（open_path/read_some/write_some/
+  close_file/make_dir/remove_path/remove_dir_path/rename_path）。旧 os.yh
+  接口与 -1、宿主标志语义保持不变。
+- 新增 `.yh` 用例：`sysresult`、`osmodel`（跨平台），`sysraw`、`sysfiles`、
+  `osfiles`（Linux 专属，非 Linux 宿主不注册）；接入
+  `tests/modules/build-check.py`。
+- 验证：Darwin/arm64 `make`、`make test` 通过；`build-check --backend llvm`
+  中 `os0-sys-result-model`、`os0-os-result-model` 通过。Apple Container
+  `debian:trixie`（Linux/arm64，入库种子）运行五个用例全部退出 0；
+  `yh -target x86_64-unknown-linux-gnu check` 通过，未宣称 Linux/x64 原生运行。
+- 未关闭：OS1 的强制短写/EINTR 注入、CLI 重新验收、Linux/x64 原生门；
+  OS2 目录/cwd 起均未实施。未运行 `make selfhost-native` 收尾与 `make seed`，
+  种子未改动。
+- 设计/方案/README/索引已同步；详见
+  [完成记录](01-finished/yh-os与sys-OS0-OS1文件闭环-2026-10-21.md)。
+
 ## 2026-10-20 AST 快照文件命名消歧
 
 - 将 `compiler/ast/` 中原 `checked_module*` 快照所有权与 lowering 文件统一改名为
