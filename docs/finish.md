@@ -31,6 +31,18 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 LL12 第九刀：全局初始化发射剥离（C1 第三片）
+
+- `compiler/parse/parse_global_init.yh` 1085→1004 行：删除标量/字符串指针/
+  数组/切片/结构体初始化的 `.xword`/`.zero`/`.balign`/`.LD`/`em_data_scalar`/
+  `em_data_string_body` 共 50 处文本发射。
+- 保留：`parse_global_static_*` 的 static_data 登记、AST 捕获、CT 聚合收集、
+  接口加载标签（新增 `parse_global_bind_iface_label`，只写 `cval`/`c_data_n`）。
+- 验证：`gen.(dat_|em_data_|bss_)` 在该文件零命中；400 语料诊断快照零差异；
+  全局聚合/字符串用例（151/152/161/144）运行通过；`make test` 退出 0；
+  `make selfhost-native` 退出 0（project 106/106）。
+- 未滚种子。
+
 ## 2026-10-21 LL12 第八刀：sem_decl 发射剥离（C1 第二片）
 
 - `compiler/gen/sem_decl.yh` 314→234 行：删除 `em_new_label`、`em_alloc_local`、

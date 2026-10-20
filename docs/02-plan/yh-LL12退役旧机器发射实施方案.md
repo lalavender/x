@@ -66,6 +66,10 @@
   删除标签/栈槽/`em_save_hidden_ret`/`em_prologue`/`em_copy_body`/`em_epilogue`
   与聚合参数拷贝；保留不透明类型、浮点参数上限、noreturn 校验、C ABI 分派、
   符号登记与 `F_AGGPARAM` 事实。
+- **2026-10-21 第三片完成（全局初始化）**：`parse/parse_global_init.yh`
+  1085→1004 行，删除 `.xword`/`.zero`/`.balign`/`em_data_scalar`/
+  `em_data_string_body` 等 50 处发射；保留 `static_data` 登记、AST 捕获、
+  CT 聚合收集与接口加载标签登记（`parse_global_bind_iface_label`）。
 - 先把「只语义」变成唯一模式：以 `c_compile == 0` + `c_em_suppress`
   （`gen/sem_expr.yh`、`compiler/parse/parse_decl.yh`）为雏形，逐文件把
   混合函数拆成 `sem_*`（类型/值类别/诊断/CT）与 `emit_*`（发射）两段。
