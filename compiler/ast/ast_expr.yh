@@ -3,7 +3,7 @@ import gen;
 import comptime;
 
 // ============================================================================
-// ast_expr.yh —— 前端表达式 AST arena 与一致性检查
+// ast_expr.yh —— 前端表达式 AST arena 与捕获
 //
 // 节点按构造顺序连续存放，子节点 ID 总小于父节点 ID；源位置使用当前
 // 文件的 token 半开区间，并保存 token_count，避免多文件解析后游标变化
@@ -17,7 +17,7 @@ pub const AST_EXPR_UNARY int = 2;
 pub const AST_EXPR_BINARY int = 3;
 pub const AST_EXPR_TERNARY int = 4;
 pub const AST_EXPR_CALL int = 5;
-const AST_EXPR_ARG_LIST int = 6;
+pub const AST_EXPR_ARG_LIST int = 6;
 pub const AST_EXPR_INDEX int = 7;
 pub const AST_EXPR_SLICE int = 8;
 pub const AST_EXPR_MEMBER int = 9;
@@ -29,7 +29,7 @@ pub const AST_EXPR_CTIF int = 14; // 编译期表达式选择 `$if (cond) e1 $el
 pub const AST_EXPR_CTFIELD int = 15; // 编译期按名取字段 `$field(x, "name")`（op = 字段下标）
 
 // AstExpr：单个带类型表达式及其子节点索引。
-struct AstExpr {
+pub struct AstExpr {
     kind int;           // AST_EXPR_* 语法结构
     op int;             // 运算符/基本 token 种类；无运算符时为 0
     first int;          // 源文件 token 半开区间起点
@@ -262,106 +262,6 @@ pub fn ast_expr_args_append(list *int, arg int) int {
     return 0;
 }
 
-// ast_expr_verify：确认 AST 源范围、同文件子节点和后序编号完整。
-pub fn ast_expr_verify() int {
-    let gs *gen.GenState = gen.G();
-    if (gs.task.c_ast_capture == 0) {
-        return 0;
-    }
-    let i int = 0;
-    for i < ast_expr_count {
-        let node AstExpr = ast_expr_nodes[i];
-        if (node.kind < AST_EXPR_PRIMARY || node.kind > AST_EXPR_CTFIELD
-            || node.file_id < 0 || node.first < 0 || node.after < node.first
-            || node.after > node.token_count || node.token_count <= 0) {
-            return -1;
-        }
-        if (node.kind != AST_EXPR_ARG_LIST && node.kind != AST_EXPR_STRUCT_FIELD
-            && (node.type_id < 0 || node.type_id >= gs.task.t_type_n)) {
-            return -1;
-        }
-        if (node.file_id >= gs.p_file_n || node.owner_decl < 0
-            || node.owner_decl >= gs.p_files[node.file_id].decl_n
-            || (node.is_const != 0 && node.is_const != 1)
-            || (node.is_lit != 0 && node.is_lit != 1)
-            || (node.lit_big != 0 && node.lit_big != 1)) {
-            return gen.fail("内部错误：表达式 AST 绑定或常量事实无效");
-        }
-        if (node.layout_type_id < -1 || node.layout_type_id >= gs.task.t_type_n
-            || (node.layout_type_id >= 0
-                && (node.kind != AST_EXPR_PRIMARY || node.op != gen.TK_SIZEOF))) {
-            return gen.fail("内部错误：表达式 AST sizeof 布局依赖无效");
-        }
-        if (node.sym_id < -1 || node.binding_row < -1
-            || (node.sym_id == -1
-            && (node.sym_type_id != -1 || node.sym_kind != -1
-                || node.sym_flags != 0 || node.sym_offset != 0
-                || node.binding_row != -1))
-            || (node.sym_id >= 0 && (node.sym_type_id < 0
-                || node.sym_type_id >= gs.task.t_type_n
-                || node.sym_kind < gen.SYM_VAR || node.sym_kind > gen.SYM_FN))) {
-            return gen.fail("内部错误：表达式 AST 符号快照无效");
-        }
-        if (node.binding_row >= 0 && (node.binding_row >= ast_binding_count
-            || ast_bindings[node.binding_row].file_id != node.file_id
-            || ast_bindings[node.binding_row].owner_decl != node.owner_decl
-            || ast_bindings[node.binding_row].sym_id != node.sym_id
-            || ast_bindings[node.binding_row].sym_type_id != node.sym_type_id
-            || ast_bindings[node.binding_row].sym_kind != node.sym_kind
-            || ast_bindings[node.binding_row].sym_flags != node.sym_flags
-            || ast_bindings[node.binding_row].sym_offset != node.sym_offset)) {
-            return gen.fail("内部错误：表达式 AST 局部绑定行无效");
-        }
-        if (node.sym_id >= 0 && (node.sym_kind == gen.SYM_VAR || node.sym_kind == gen.SYM_CONST)
-            && (node.sym_flags & gen.F_GLOBAL) == 0 && node.binding_row < 0) {
-            return gen.fail("内部错误：局部变量表达式缺少稳定绑定行");
-        }
-        if (node.kind == AST_EXPR_PRIMARY && node.sym_id >= 0
-            && node.sym_type_id != node.type_id) {
-            return gen.fail("内部错误：基本表达式绑定类型与符号类型不匹配");
-        }
-        if ((node.kind == AST_EXPR_ARG_LIST || node.kind == AST_EXPR_STRUCT_FIELD)
-            && node.type_id != -1) {
-            return -1;
-        }
-        if ((node.kind == AST_EXPR_ARG_LIST || node.kind == AST_EXPR_STRUCT_FIELD)
-            && (node.sym_id != -1 || node.sym_type_id != -1 || node.sym_kind != -1
-                || node.sym_flags != 0 || node.sym_offset != 0 || node.binding_row != -1
-                || node.is_const != 0 || node.const_bits != 0
-                || node.is_lit != 0 || node.lit_big != 0 || node.fval_bits != 0
-                || node.layout_type_id != -1)) {
-            return gen.fail("内部错误：复合表达式链 AST 带有不应存在的语义事实");
-        }
-        if (node.kind == AST_EXPR_STRUCT_FIELD
-            && (node.op < 0 || node.child1 < 0 || node.child2 >= 0)) {
-            return gen.fail("内部错误：结构体字段初始化 AST 形态无效");
-        }
-        if (node.kind == AST_EXPR_STRUCT_INIT
-            && (node.child0 < 0 || node.child1 >= 0 || node.child2 >= 0
-                || (gs.task.t_types[node.type_id].kind != gen.TY_STRUCT
-                    && gs.task.t_types[node.type_id].kind != gen.TY_UNION))) {
-            return gen.fail("内部错误：结构体/联合体初始化 AST 形态无效");
-        }
-        let j int = 0;
-        for j < 3 {
-            let child int = -1;
-            if (j == 0) { child = node.child0; }
-            if (j == 1) { child = node.child1; }
-            if (j == 2) { child = node.child2; }
-            if (child >= i || child < -1) {
-                return -1;
-            }
-            if (child >= 0 && (ast_expr_nodes[child].file_id != node.file_id
-                || ast_expr_nodes[child].first < node.first
-                || ast_expr_nodes[child].after > node.after)) {
-                return -1;
-            }
-            j += 1;
-        }
-        i += 1;
-    }
-    return 0;
-}
 
 // ============================================================================
 // 跨模块访问函数：ast 状态的 let 不导出，parse/cmd 只经这些入口读写。

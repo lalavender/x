@@ -198,6 +198,7 @@ case("i1-inline-ssa-and-fallback", "inline", "inline", ".")
 # 在 pass 1 不会把后续函数的序言推掉（曾导致汇编首行只剩 `29, sp`）。
 case("i1-inline-order-after-noninline", "run", "inlineorder", ".", 0)
 case("r1-token-replay-run", "run", "tokenreplay", ".", 42)
+case("r2b-ast-check-module", "run", "astcheck", ".", 0)
 case("r2a-ssa-phi-verifier", "run", "irverify", ".", 0)
 case("llvm-float-cross-module", "run", "llvmfloat", ".", 0)
 case("llvm-yh-cross-module-call", "run", "llvmyhimport", ".", 0)
@@ -263,6 +264,13 @@ def copy_proj(src, dst):
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
+    if src.name == "astcheck":
+        # 探针直接使用当前编译器的 AST arena 与 check 实现。
+        for module in ("gen", "comptime", "ir", "backend", "ast", "check"):
+            source = ROOT / "compiler" / module
+            if source.is_dir():
+                ignore = shutil.ignore_patterns("llvm_bridge.yh") if module == "backend" else None
+                shutil.copytree(source, dst / module, ignore=ignore)
     if src.name in ("irverify", "irfront", "llvmmodule"):
         # ir 现为编译器根项目普通模块（不带清单）；fixture 仍以路径依赖
         # 方式复用其源码测跨项目解析，拷入后补最小清单使其可被发现。
@@ -280,17 +288,19 @@ def copy_proj(src, dst):
         # 因此拷入时排除它（其余 backend 源码保持真实）。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "lex", "ast", "comptime", "ir", "backend"):
+        for module in ("gen", "lex", "ast", "comptime", "ir", "backend", "check"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         (core / "project.toml").write_text('[project]\nname = "checkedcore"\nsource = "."\n')
-        shutil.copyfile(src / "fixture.yh", core / "ast" / "checked_fixture.yh")
+        # 快照 fixture 的导出签名引用 CheckedModule；module_snapshot.yh 的句点
+        # 排在下划线前，因而其类型声明先于 module_snapshot_fixture.yh。
+        shutil.copyfile(src / "fixture.yh", core / "ast" / "module_snapshot_fixture.yh")
     if src.name == "llvmlower":
         # 纯快照 lowering fixture 复用真实前端（parse/lex）与 lowering 实现，
         # fixture 作为同模块的第二个文件随 main/ 一起构建；同样排除桥绑定。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "lex", "ast", "parse", "comptime", "ir", "backend"):
+        for module in ("gen", "lex", "ast", "parse", "comptime", "ir", "backend", "check"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         (core / "project.toml").write_text('[project]\nname = "lowercore"\nsource = "."\n')

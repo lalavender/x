@@ -140,10 +140,12 @@ fn checked_fixture_destroy_front() void {
     gen.target_select("x86_64-unknown-linux-gnu");
 }
 
-// checked_snapshot_fixture：验证多份快照独立拥有存储、reset 后可读、越界拒绝和幂等释放。
-pub fn checked_snapshot_fixture() int {
+// checked_snapshot_fixture：构造并返回独立快照，供 check 模块跨边界验证与拒绝损坏项。
+pub fn checked_snapshot_fixture(first_out *CheckedModule, second_out *CheckedModule) int {
+    if (first_out == 0 || second_out == 0
+        || first_out.storage != 0 || second_out.storage != 0) { return 1; }
     let prepared int = checked_fixture_prepare();
-    if (prepared != 0) { printf("prepare=%d\n", prepared); return 1; }
+    if (prepared != 0) { printf("prepare=%d\n", prepared); return 2; }
     let gs *gen.GenState = gen.G();
     let original_target *char = gs.c_target.triple;
     // 旧汇编范围故意无效：快照只取 checked 语义，不借它们携带函数信息。
@@ -151,22 +153,14 @@ pub fn checked_snapshot_fixture() int {
     ast_function_nodes[0].asm_after = -78;
     let first CheckedModule;
     let second CheckedModule;
-    if (checked_module_capture(&first) != 0 || checked_module_capture(&second) != 0) { return 2; }
-    if (first.storage == second.storage || checked_module_verify(&first) != 0) { return 3; }
+    if (checked_module_capture(&first) != 0 || checked_module_capture(&second) != 0) { return 3; }
+    if (first.storage == second.storage) { return 4; }
     let stored *CheckedStorage = first.storage.to_type(*CheckedStorage);
     if (stored.expressions == ast_expr_nodes || stored.names == gs.task.np_data
         || stored.types == gs.task.t_types || stored.files[0].source == gs.task.c_src
-        || stored.files[0].tokens == gs.task.c_toks || stored.files[0].decls == gs.task.c_file_decls) { return 4; }
-    let rejected CheckedModule;
-    ast_expr_nodes[0].child0 = 999;
-    if (checked_module_capture(&rejected) == 0 || rejected.storage != 0) { return 12; }
-    checked_module_release(&rejected);
-    checked_module_release(&rejected);
-    ast_expr_nodes[0].child0 = -1;
-    gs.task.c_errors = 0;
+        || stored.files[0].tokens == gs.task.c_toks || stored.files[0].decls == gs.task.c_file_decls) { return 5; }
     checked_fixture_destroy_front();
-    if (checked_module_verify(&first) != 0 || checked_module_verify(&second) != 0
-        || gen.cstr_eq(first.target.triple, original_target) == 0) { return 5; }
+    if (gen.cstr_eq(first.target.triple, original_target) == 0) { return 6; }
     let function CheckedFunction;
     let declaration AstDecl;
     let expression comptime.CtExpr;
@@ -189,12 +183,12 @@ pub fn checked_snapshot_fixture() int {
         || checked_module_binding(&first, expression.binding_row, &binding) != 0
         || binding.id != 0 || binding.is_param != 1
         || gen.cstr_eq(checked_module_name(&first, expression.sym_name_off, expression.sym_name_len), "x") == 0) {
-        return 6;
+        return 7;
     }
     let length int = 0;
     let source *u8 = checked_module_source(&first, 0, &length);
     if (length != 29 || source == 0 || source[0] != 'f' || source[9] != 't'
-        || checked_module_name(&first, stored.name_n, 0) != 0) { return 7; }
+        || checked_module_name(&first, stored.name_n, 0) != 0) { return 8; }
     let aggregate gen.CType;
     let array gen.CType;
     let pointer gen.CType;
@@ -208,21 +202,9 @@ pub fn checked_snapshot_fixture() int {
         || pointer.kind != gen.TY_PTR || pointer.elem != structure
         || gen.cstr_eq(checked_module_name(&first, stored.fields[0].name_off, 5), "value") == 0
         || gen.cstr_eq(checked_module_name(&first, stored.type_names[0].name_off, 5), "Saved") == 0) {
-        return 11;
+        return 9;
     }
-    // 刻意破坏真正需要引用元素类型的函数类型，证明校验读的是快照自己的类型表。
-    let fn_type int = stored.declarations[0].type_id;
-    let saved int = stored.types[fn_type].elem;
-    stored.types[fn_type].elem = stored.type_n;
-    if (checked_module_verify(&first) == 0) { return 8; }
-    stored.types[fn_type].elem = saved;
-    if (checked_module_verify(&first) != 0) { return 9; }
-    checked_module_release(&first);
-    checked_module_release(&first);
-    if (first.storage != 0 || first.target.triple != 0 || checked_module_verify(&first) == 0
-        || checked_module_function(&first, 0, &function) == 0
-        || checked_module_verify(&second) != 0) { return 10; }
-    checked_module_release(&second);
-    checked_module_release(&second);
+    first_out[0] = first;
+    second_out[0] = second;
     return 0;
 }

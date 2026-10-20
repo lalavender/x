@@ -2,6 +2,62 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-20 AST 快照文件命名消歧
+
+- 将 `compiler/ast/` 中原 `checked_module*` 快照所有权与 lowering 文件统一改名为
+  `module_snapshot*`，避免与实际 AST 校验器 `compiler/check/checked_module.yh` 混淆。
+  `CheckedModule`、`checked_module_capture` 与 `check.verify_checked_module` 等
+  类型/API 名称保持不变；同步更新源码注释、编译器 README 和项目验收 fixture 名称。
+- Apple Container Debian stable-slim（Linux/arm64）验证：`make`、`make test`、
+  `make selfhost-native` 均退出 0。固定点 129 项产物一致，自解析 107 个源文件，模块
+  用例 18/18、项目验收 106/106；语法正例 78/78、反例 42/42，运行语料 344/349
+  （5 项平台跳过），fail 132/132、pass 8/8、代码统计 6/6。
+- 种子哈希保持
+  `8ea2a9acc20438b385ccddd522b50b8dd4749423c8db2695c758296ada343b8c`，未执行
+  `make seed`。方案与映射见[实施方案](02-plan/yh-AST快照文件命名消歧方案.md)，
+  验证记录见[完成报告](01-finished/yh-AST快照文件命名消歧-2026-10-20.md)。
+
+## 2026-10-20 AST 一致性检查全部迁入 check
+
+- 在 arena 校验迁移基础上，将原 `ast/checked_module_verify.yh` 快照一致性验证
+  迁至 `check/checked_module.yh`，公开统一入口 `check.verify_checked_module`；删除
+  `ast.checked_module_verify`，无转发包装。
+- 新增 `ast.CheckedModuleView` 借用视图。`checked_module_capture` 只负责安全复制、
+  失败清理和所有权提交；`cmd/module_worker`、`cmd/llvm_emit` 在快照消费前调用
+  check，`ast` 不反向依赖 `check`。SSA verifier 仍由 `ir` 负责。
+- 扩展 `llvmchecked` `.yh` 项目用例：验证空句柄拒绝、两份独立快照、损坏类型闭包
+  被拒绝、修复后通过、释放后句柄失效且未影响另一份快照。`llvmlower` 也在 lowering
+  前调用快照校验。AST arena 探针仍覆盖四类节点校验、捕获关闭与只读行为。
+- Apple Container `debian:stable-slim`（Linux/arm64）验证：`make`、`make test`、
+  `make selfhost-native` 全部退出 0。语法正例 78/78、反例 42/42；运行语料
+  344/349（5 项平台跳过）、fail 132/132、pass 8/8、代码统计 6/6；自举固定点
+  129 项产物一致，自解析 107 个 `.yh` 文件，模块语料 18/18、项目验收 106/106。
+  `yh check` 有效/无效项目行为正确，且未生成后端产物或调用汇编器/链接器。
+- 容器未准备 LLVM host 桥/SDK；自举日志提示过渡种子路径。种子哈希仍为
+  `8ea2a9acc20438b385ccddd522b50b8dd4749423c8db2695c758296ada343b8c`，未执行
+  `make seed`。
+- 设计与详细验证见 [check 模块设计](03-design/yh-编译器check模块拆分设计.md)、
+  [CheckedModule 方案](02-plan/yh-CheckedModule校验迁入check方案.md)和
+  [完成报告](01-finished/yh-check模块拆分-2026-10-20.md)。
+
+## 2026-10-20 AST 一致性校验迁入 check 模块
+
+- 新增 `compiler/check/verify.yh`，将表达式、语句、声明和函数上下文四项 AST
+  校验迁出 `ast`；`ast.AstView` 只读借用原 arena，不复制或转移所有权。统一入口
+  保持检查顺序、具体诊断和调用方的外层失败诊断。
+- `cmd/module_worker` 的两处及 `cmd/llvm_emit` 的一处调用迁移；删除旧四个 AST
+  校验导出。`check` 仅依赖 `ast/gen`，`parse` 不依赖 `check`。
+- 新增 `tests/modules/projects/astcheck/` 验证成功、损坏引用、绑定与编译期 `$for`
+  关联、捕获关闭和只读行为；`llvmlower` fixture 同步改用新校验入口。
+- Apple Container `debian:stable-slim`（Linux/arm64）验证：`make`、`make test`、
+  `make selfhost-native` 全部退出 0。语法 78/42，运行 344/349（5 项跳过）、
+  fail 132/132、pass 8/8、统计 6/6；自举固定点 128 项产物一致，自解析 106 文件，
+  模块语料 18/18、项目验收 106/106；`yh check` 未生成后端产物。
+- 种子哈希校验通过（`8ea2a9acc20438b385ccddd522b50b8dd4749423c8db2695c758296ada343b8c`）；
+  未执行 `make seed`。方案和边界见[设计](03-design/yh-编译器check模块拆分设计.md)、
+  [实施方案](02-plan/yh-check模块拆分实施方案.md)及
+  [完成记录](01-finished/yh-check模块拆分-2026-10-20.md)。
+
 ## 2026-10-20 CircleCI 三端与 tag Release 发布
 
 - CircleCI 增加 `linux-x86_64` 与 `darwin-arm64` 作业：前者从最新 Release 取

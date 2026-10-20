@@ -4,7 +4,7 @@ import comptime;
 
 // CheckedModule：语义遍历完成后的模块所有者，storage 独占受检表与只读源码副本。
 // 必须以零初始化对象调用 capture；拥有者不能按值复制，读取副本须经有界访问入口。
-// target 的字符串取自 target_resolve 的静态常量，release 不释放它们。
+// 使用快照 lowering 前，调用方须通过 check 校验且保证之后不修改；target 字符串为静态常量。
 pub struct CheckedModule {
     target gen.TargetInfo;
     storage *void;
@@ -28,18 +28,18 @@ pub struct CheckedFunction {
     body_stmt int;
 }
 
-// CheckedString：字符串标签与名称池原样字节的对应关系；标签仅在本快照内有效。
-struct CheckedString {
+// CheckedString：视图引用的字符串标签与名称池字节关系；不单独拥有名称池。
+pub struct CheckedString {
     label int;
     name_off int;
     name_len int;
     quoted int;
 }
 
-// CheckedStaticData：静态对象的完全拥有快照，不引用 GenState 或 CT arena。
+// CheckedStaticData：视图引用的静态对象快照，不引用 GenState 或 CT arena。
 // sym_id/label 仅为本次前端会话内的来源键；重定位目标同样以来源键表达，lowering
 // 会在建立模块符号表时解析，绝不把标签整数当成运行期地址。
-struct CheckedStaticData {
+pub struct CheckedStaticData {
     sym_id int;
     label int;
     type_id int;
@@ -56,7 +56,7 @@ struct CheckedStaticData {
 // 文件、导入描述符内部的指针也拥有副本；不持有 GenState、旧输出或 CT 对象指针。
 // 静态数据目录按值深拷贝；CT 聚合、切片 backing 和导入字面量都不保留宿主指针。
 // 纯快照 lowering 的上下文（CheckedFlow/CheckedLower）依赖本类型，按模块
-// 「类型先声明后使用 + 文件名序编译」的约束放在 checked_module_ctx.yh。
+// 「类型先声明后使用 + 文件名序编译」的约束放在 module_snapshot_ctx.yh。
 struct CheckedStorage {
     expressions *AstExpr;
     expression_n int;
@@ -130,6 +130,59 @@ fn checked_zero_rows(count int, width int) *void {
     return result.to_type(*void);
 }
 
+// checked_storage_copy_ready：确认捕获器建立的表与嵌套缓冲可安全转交和释放。
+// 这里只检查复制/所有权所需的非空指针，不验证快照内容；一致性检查由 check 负责。
+fn checked_storage_copy_ready(store *CheckedStorage) int {
+    if (store.expression_n < 0 || store.statement_n < 0 || store.edge_n < 0
+        || store.binding_n < 0 || store.template_n < 0 || store.declaration_n < 0
+        || store.function_n < 0 || store.type_n <= 0 || store.field_n < 0
+        || store.type_name_n < 0 || store.sig_n < 0 || store.sig_param_n < 0
+        || store.symbol_n < 0 || store.name_n < 0 || store.bss_n < 0
+        || store.file_n < 0 || store.import_n < 0 || store.string_n < 0
+        || store.static_data_n < 0
+        || (store.expression_n > 0 && store.expressions == 0)
+        || (store.statement_n > 0 && store.statements == 0)
+        || (store.edge_n > 0 && store.edges == 0)
+        || (store.binding_n > 0 && store.bindings == 0)
+        || (store.template_n > 0 && store.templates == 0)
+        || (store.declaration_n > 0 && store.declarations == 0)
+        || (store.function_n > 0 && store.functions == 0)
+        || store.types == 0 || store.type_home == 0
+        || (store.field_n > 0 && store.fields == 0)
+        || (store.type_name_n > 0 && store.type_names == 0)
+        || (store.sig_n > 0 && (store.sig_abi == 0 || store.sig_ret == 0
+            || store.sig_np == 0 || store.sig_vararg == 0 || store.sig_first == 0))
+        || (store.sig_param_n > 0 && store.sig_params == 0)
+        || (store.symbol_n > 0 && store.symbols == 0)
+        || (store.name_n > 0 && store.names == 0)
+        || (store.bss_n > 0 && store.bss_symbols == 0)
+        || (store.file_n > 0 && store.files == 0)
+        || (store.import_n > 0 && store.imports == 0)
+        || (store.string_n > 0 && store.strings == 0)
+        || (store.static_data_n > 0 && store.static_data == 0)) { return -1; }
+    let i int = 0;
+    for i < store.file_n {
+        let file gen.PFile = store.files[i];
+        if ((file.source_len > 0 && file.source == 0)
+            || (file.token_n > 0 && file.tokens == 0)
+            || (file.decl_n > 0 && file.decls == 0)) { return -1; }
+        i += 1;
+    }
+    i = 0;
+    for i < store.import_n {
+        if (store.imports[i].ns_n > 0 && store.imports[i].ns == 0) { return -1; }
+        i += 1;
+    }
+    i = 0;
+    for i < store.static_data_n {
+        let item CheckedStaticData = store.static_data[i];
+        if ((item.size > 0 && item.data == 0)
+            || (item.reloc_n > 0 && item.relocs == 0)) { return -1; }
+        i += 1;
+    }
+    return 0;
+}
+
 // checked_storage_tables：复制 AST、布局、签名、名称与符号，所有引用 ID 保持原值。
 fn checked_storage_tables(store *CheckedStorage, gs *gen.GenState) int {
     store.expression_n = ast_expr_count;
@@ -190,7 +243,7 @@ fn checked_storage_tables(store *CheckedStorage, gs *gen.GenState) int {
         sizeof(u8)).to_type(*u8);
     store.bss_symbols = checked_copy_rows(gs.task.c_bss_syms.to_type(*void), store.bss_n,
         sizeof(int)).to_type(*int);
-    if (checked_storage_present(store) != 0) { return -1; }
+    if (checked_storage_copy_ready(store) != 0) { return -1; }
     let i int = 0;
     for i < store.function_n {
         let ctx AstFunctionContext = ast_function_nodes[i];
@@ -309,7 +362,8 @@ fn checked_storage_sources(store *CheckedStorage, gs *gen.GenState) int {
     return 0;
 }
 
-// checked_module_capture：封存成功语义遍历的独立快照；失败不改出参，并回收全部部分副本。
+// checked_module_capture：封存成功语义遍历的独立副本，只执行安全复制，不检查快照一致性。
+// 失败不改出参并回收部分副本；调用方须在读取或 lowering 前调用 check 校验。
 // 不生成汇编，不要求 LLVM 存在；仅接受已启用 AST 收集且没有未完成函数的模块 worker。
 pub fn checked_module_capture(out *CheckedModule) int {
     let gs *gen.GenState = gen.G();
@@ -328,7 +382,7 @@ pub fn checked_module_capture(out *CheckedModule) int {
     candidate.storage = store.to_type(*void);
     if (checked_storage_tables(store, gs) != 0) {
         checked_module_release(&candidate);
-        return gen.fail("受检模块语义表复制或校验失败");
+        return gen.fail("受检模块语义表复制失败");
     }
     if (checked_storage_static_data(store) != 0) {
         checked_module_release(&candidate);
@@ -338,41 +392,9 @@ pub fn checked_module_capture(out *CheckedModule) int {
         checked_module_release(&candidate);
         return gen.fail("受检模块源码与导入副本失败");
     }
-    if (checked_storage_present(store) != 0) {
+    if (checked_storage_copy_ready(store) != 0) {
         checked_module_release(&candidate);
         return gen.fail("受检模块快照表存储无效");
-    }
-    let type_stage int = 0;
-    if (checked_verify_types(store, &type_stage) != 0) {
-        let message *char = "受检模块类型快照校验失败";
-        if (type_stage > 0) { message = "受检模块类型或函数签名快照校验失败"; }
-        else if (type_stage == -1) { message = "受检模块字段类型快照校验失败"; }
-        else if (type_stage == -2 || type_stage == -3) {
-            message = "受检模块函数参数签名快照校验失败";
-        } else if (type_stage == -4) { message = "受检模块类型别名快照校验失败"; }
-        else if (type_stage == -5) { message = "受检模块符号类型快照校验失败"; }
-        checked_module_release(&candidate);
-        return gen.fail(message);
-    }
-    if (checked_verify_files(store) != 0) {
-        checked_module_release(&candidate);
-        return gen.fail("受检模块文件快照校验失败");
-    }
-    if (checked_verify_expressions(store) != 0) {
-        checked_module_release(&candidate);
-        return gen.fail("受检模块表达式快照校验失败");
-    }
-    if (checked_verify_statements(store) != 0) {
-        checked_module_release(&candidate);
-        return gen.fail("受检模块语句快照校验失败");
-    }
-    if (checked_verify_functions(store) != 0) {
-        checked_module_release(&candidate);
-        return gen.fail("受检模块函数快照校验失败");
-    }
-    if (checked_module_verify(&candidate) != 0) {
-        checked_module_release(&candidate);
-        return gen.fail("受检模块快照校验失败");
     }
     out[0] = candidate;
     return 0;
@@ -503,6 +525,13 @@ pub fn checked_module_edge(unit *CheckedModule, row int, out *AstStmtExpr) int {
     if (row < 0 || row >= store.edge_n) { return -1; }
     out[0] = store.edges[row];
     return 0;
+}
+
+// checked_name_valid：确认名称偏移和长度完整落在快照名称池中，避免访问器越界读取。
+fn checked_name_valid(store *CheckedStorage, off int, length int) int {
+    if (store.names == 0 || off < 0 || length < 0 || off >= store.name_n
+        || length >= store.name_n - off || store.names[off + length] != 0) { return 0; }
+    return 1;
 }
 
 // checked_module_name：返回快照自有名称池的只读借用；只在本所有者 release 之前有效。

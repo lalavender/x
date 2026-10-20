@@ -3,10 +3,28 @@ import gen;
 import parse;
 import comptime;
 import ast;
+import check;
 import ir;
 import backend;
 
 // module_worker.yh：在 fork 继承的项目快照上初始化私有语义状态并编译单个模块。
+
+// mb_verify_checked_snapshot：把只读快照校验的失败阶段映射回捕获期既有诊断。
+fn mb_verify_checked_snapshot(unit *ast.CheckedModule) int {
+    let stage int = check.verify_checked_module(unit);
+    if (stage == 0) { return 0; }
+    if (stage == 1) { return gen.fail("受检模块快照表存储无效"); }
+    if (stage == 2) { return gen.fail("受检模块类型或函数签名快照校验失败"); }
+    if (stage == 3) { return gen.fail("受检模块字段类型快照校验失败"); }
+    if (stage == 4) { return gen.fail("受检模块函数参数签名快照校验失败"); }
+    if (stage == 5) { return gen.fail("受检模块类型别名快照校验失败"); }
+    if (stage == 6) { return gen.fail("受检模块符号类型快照校验失败"); }
+    if (stage == 7) { return gen.fail("受检模块文件快照校验失败"); }
+    if (stage == 8) { return gen.fail("受检模块表达式快照校验失败"); }
+    if (stage == 9) { return gen.fail("受检模块语句快照校验失败"); }
+    if (stage == 10) { return gen.fail("受检模块函数快照校验失败"); }
+    return gen.fail("受检模块快照校验失败");
+}
 
 // mb_llvm_module_paths：算出本模块的 LLVM 产物路径与审阅文本路径。
 // 对象放在当前目标命名空间的 obj/<tag>.o，文本放在 llvm/<tag>.ll；
@@ -50,14 +68,20 @@ fn mb_llvm_emit_module(m int, main_off int, main_len int) int {
     if (mb_llvm_module_paths(m, main_off, main_len, &obj_path[0], &text_path[0]) != 0) {
         return -1;
     }
-    if (ast.ast_expr_verify() != 0 || ast.ast_stmt_verify() != 0
-        || ast.ast_decl_verify() != 0 || ast.ast_function_verify() != 0) {
+    let view ast.AstView;
+    ast.ast_view(&view);
+    if (check.verify_module(&view) != 0) {
         return gen.fail("内部错误：受检 AST 上下文校验失败");
     }
     let checked ast.CheckedModule;
     if (gen.front_checked_verify() != 0
         || ast.checked_module_capture(&checked) != 0) {
         return -1;
+    }
+    let checked_status int = mb_verify_checked_snapshot(&checked);
+    if (checked_status != 0) {
+        ast.checked_module_release(&checked);
+        return checked_status;
     }
     // 文本路径只在 --emit-llvm 时给出；对象始终发布，构建步才能继续链接。
     let text_out *char = gs.c_emit_kind == 1 ? gen.arr_cstr(&text_path[0]) : 0.to_type(*char);
@@ -369,27 +393,32 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     if (gs.task.c_errors > 0) {
         return -1;
     }
-    if (ast.ast_expr_verify() != 0) {
+    let view ast.AstView;
+    ast.ast_view(&view);
+    // verify_module 的 1–4 表达式、语句、声明、函数阶段；映射回既有外层诊断。
+    let check_result int = check.verify_module(&view);
+    if (check_result == 1) {
         return gen.fail("内部错误：表达式 AST 校验失败");
     }
-    if (ast.ast_stmt_verify() != 0) {
+    if (check_result == 2) {
         return gen.fail("内部错误：语句 AST 校验失败");
     }
-    if (ast.ast_decl_verify() != 0) {
+    if (check_result == 3) {
         return gen.fail("内部错误：顶层声明 AST 校验失败");
     }
-    if (ast.ast_function_verify() != 0) {
+    if (check_result == 4) {
         return gen.fail("内部错误：函数 AST 上下文校验失败");
     }
+    if (check_result != 0) { return -1; }
     // check 也通过真实受检快照边界，确认合法输入不依赖旧输出或可变语义表。
     // LLVM 编译继续 lowering 并发布对象；check 只验证受检快照，不触发后端发射。
     if (gs.task.c_check_only != 0) {
         let checked ast.CheckedModule;
         if (gen.front_checked_verify() != 0
             || ast.checked_module_capture(&checked) != 0) { return -1; }
-        let checked_ok int = ast.checked_module_verify(&checked);
+        let checked_ok int = mb_verify_checked_snapshot(&checked);
         ast.checked_module_release(&checked);
-        if (checked_ok != 0) { return gen.fail("内部错误：受检模块快照校验失败"); }
+        if (checked_ok != 0) { return checked_ok; }
     }
     // LLVM 后端：受检快照 → 模块 IR → LLVM 文本 → 内嵌桥发布对象。
     // 不进入旧 SSA 替换与机器发射，也不写任何 .text/.data/.bss。

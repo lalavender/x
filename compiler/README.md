@@ -7,10 +7,12 @@
 > `make selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
-version = `0.0.5`，source = `.`），按 **gen / lex / parse / ast / comptime / cmd / ir / backend
-多模块**组织，编译器源码共 72 个 `.yh` 文件（`ast/` 为 2026-10-12
-自 parse 拆出的 AST 阶段模块）；`ir`（目标隔离
+version = `0.0.5`，source = `.`），按 **gen / lex / parse / ast / check / comptime / cmd / ir / backend
+多模块**组织，2026-10-20 新增 `check` 后共 **九个模块**、107 个 `.yh` 文件；
+`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担 AST 一致性校验；
+`ir`（目标隔离
 SSA）与其它模块同为根项目普通模块，共同进入编译器构建与自举固定点。
+校验视图生命周期与模块依赖见[check 拆分设计](../docs/03-design/yh-编译器check模块拆分设计.md)。
 
 模块导出面按「只有别的模块真的用到才 `pub`」维护（2026-10-12 两轮：`pub`
 声明 1048 → 585，随后 `struct`/`union`/`enum` 的 `pub` 改为可选并私有化 12 个
@@ -54,7 +56,7 @@ python3 tests/yh-run/check.py --compiler $PWD/../yh
 compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反例全拒）；
 ④cc4 运行语料（`tests/yh-run` 全量 run/fail/pass，2026-10-13：299 例）；
 ⑤模块语料（`tests/modules/check.py` 18 例）；⑥项目验收
-（`tests/modules/build-check.py` 95 例）。滚种子前必须全绿。
+（`tests/modules/build-check.py` 106 例）。滚种子前必须全绿。
 
 ## 模块与文件职责
 
@@ -81,9 +83,18 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 | 文件 | 职责 |
 | --- | --- |
 | `ast/ast_decl.yh` | 从 PDecl 索引建立文件级声明节点并关联函数体 |
-| `ast/ast_expr.yh` | `yh check` typed 表达式 AST、绑定/常量快照与结构校验 |
-| `ast/ast_stmt.yh` | `yh check` 迁移期语句树、绑定关联、编译期 `$for` 模板目录与源范围校验 |
+| `ast/ast_expr.yh` | `yh check` typed 表达式 AST、绑定与常量快照 |
+| `ast/ast_stmt.yh` | `yh check` 迁移期语句树、绑定关联与编译期 `$for` 模板目录 |
 | `ast/ast_function.yh` | 函数在 AST arena 中的范围与绑定身份 |
+| `ast/ast_view.yh` | 为外部只读校验借出 arena 视图，不转移所有权 |
+| `ast/module_snapshot.yh` | `CheckedModule` 快照数据模型、捕获/释放与有界读取 |
+| `ast/module_snapshot_view.yh` | 为外部快照校验借出只读视图，不转移所有权 |
+| `ast/module_snapshot_ctx.yh` | 纯快照 lowering 的循环、控制流、标签与函数上下文 |
+| `ast/module_snapshot_lower.yh` | 将受检快照转换为模块 IR 的主体 lowering |
+| `ast/module_snapshot_forin.yh` | `for-in` 循环 lowering 辅助 |
+| `ast/module_snapshot_global.yh` | 全局对象类型、初始化值与引用 lowering |
+| `ast/module_snapshot_static.yh` | 静态数据、字符串与重定位 lowering 辅助 |
+| `ast/module_snapshot_template.yh` | 编译期 `$for` 模板 lowering 辅助 |
 | `ast/ast_ir.yh` | 函数级 typed SSA 构造与旧后端迁移接线 |
 | `ast/ast_ir_build.yh` | 受支持函数的 AST → typed SSA 构造器 |
 | `ast/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
@@ -91,6 +102,13 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 | `ast/ast_ir_inline.yh` | 编译期内联候选登记与套用 |
 | `ast/ast_ir_template.yh` | 普通函数编译期 `$for` typed AST 模板的 SSA 区间实例化 |
 | `ast/ast_ir_cache.yh` | 目标隔离的函数 IR 内容键、缓存读取与写入 |
+
+**check** —— AST arena 与独立快照的一致性校验
+
+| 文件 | 职责 |
+| --- | --- |
+| `check/verify.yh` | 按固定顺序只读校验表达式、语句、声明与函数上下文 arena |
+| `check/checked_module.yh` | 只读校验 `CheckedModule` 快照；由调用方在 lowering 前调用 |
 
 **comptime** —— 编译期函数登记与受限求值
 
@@ -191,7 +209,7 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 ## 架构与多平台
 
 后端分三层，边界即多平台接入缝：前端语义（`gen/symbols.yh` +
-`gen/sem_*.yh` + `parse/parse_*.yh` + `ast/ast_*.yh`）→ 目标数据模型（`gen/target.yh`）→
+`gen/sem_*.yh` + `parse/parse_*.yh` + `ast/ast_*.yh` + `check/verify.yh`）→ 目标数据模型（`gen/target.yh`）→
 指令发射（`gen/emit_arm64.yh`）。前端只调用 `em_*` 抽象机原语，不含 ISA
 细节；换目标 = 新数据模型 + 新 `emit_<isa>.yh`。原语契约与换平台步骤详见
 [自举后端架构](../docs/03-design/yh-自举后端架构.md)。

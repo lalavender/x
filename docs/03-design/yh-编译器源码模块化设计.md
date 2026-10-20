@@ -6,6 +6,10 @@
 实施步骤见[详细方案](../02-plan/yh-编译器模块化详细方案.md)，
 架构决定见 [ADR-0007](../adr/0007-yh编译器使用源码模块.md)。
 
+2026-10-20 补记：当前编译器已扩展为九模块，AST 一致性校验从 `ast` 拆入
+`check`。下文记录 0.0.3 首轮四模块成模时的设计基线；当前 `check` 边界见
+[check 模块拆分设计](yh-编译器check模块拆分设计.md)。
+
 ## 1. 现状与边界
 
 编译器源码已按 **lex / parse / gen / cmd** 四模块成模，共 29 个 `.yh`
@@ -155,4 +159,26 @@ cc2   ──yh build──▶ cc3（冷编）
 正式代码修改的每一步都新增 tests/ 里的 .yh 正反或运行用例，
 运行 make 和相关门；Windows 在 WSL 内执行。计划状态写
 docs/todo.md，实际命令和结果写 docs/finish.md 与
-docs/01-finished/。本轮仅修订方案，未填充空清单或改动用户移动的源码。
+docs/01-finished/。2026-09-30 历史记录：当时仅修订方案，未填充空清单或改动
+用户移动的源码。
+
+## 7. 现行 AST 校验模块边界（2026-10-20）
+
+`check` 只依赖 `ast` 与 `gen`，通过 `ast.AstView` 读取表达式、语句、声明和
+函数上下文 arena，并通过 `ast.CheckedModuleView` 读取独立快照；`cmd` 调用统一
+校验入口。两种视图都不拥有内存，仅在对应 AST/快照仍有效且未修改时使用。
+`parse` 不依赖 `check`，AST 构造、编译期导出、快照构造与释放、只读访问器及
+SSA lowering 仍属于 `ast`，快照一致性验证由 `check` 承担。
+
+```mermaid
+graph LR
+  check --> ast
+  check --> gen
+  cmd --> check
+  cmd --> ast
+```
+
+`ast.checked_module_capture` 只做快照复制安全检查，不调用 `check`；调用方必须在
+快照读取或 lowering 前调用 `check.verify_checked_module`。`ast.lower_module` 本身不
+依赖验证器，调用方负责保证验证后快照未被修改。`ir` 的 SSA 函数/模块验证继续归
+`ir`，不属于 AST 一致性校验。

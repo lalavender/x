@@ -4,6 +4,7 @@ import lex;
 import parse;
 import comptime;
 import ast;
+import check;
 import ir;
 import backend;
 
@@ -72,6 +73,23 @@ fn llvm_emit_with_target(text *char, length int, triple *char, opt_level int,
         kind, path, reason);
 }
 
+// llvm_emit_verify_checked_snapshot：保留快照捕获原有的具体失败诊断。
+fn llvm_emit_verify_checked_snapshot(unit *ast.CheckedModule) int {
+    let stage int = check.verify_checked_module(unit);
+    if (stage == 0) { return 0; }
+    if (stage == 1) { return gen.fail("受检模块快照表存储无效"); }
+    if (stage == 2) { return gen.fail("受检模块类型或函数签名快照校验失败"); }
+    if (stage == 3) { return gen.fail("受检模块字段类型快照校验失败"); }
+    if (stage == 4) { return gen.fail("受检模块函数参数签名快照校验失败"); }
+    if (stage == 5) { return gen.fail("受检模块类型别名快照校验失败"); }
+    if (stage == 6) { return gen.fail("受检模块符号类型快照校验失败"); }
+    if (stage == 7) { return gen.fail("受检模块文件快照校验失败"); }
+    if (stage == 8) { return gen.fail("受检模块表达式快照校验失败"); }
+    if (stage == 9) { return gen.fail("受检模块语句快照校验失败"); }
+    if (stage == 10) { return gen.fail("受检模块函数快照校验失败"); }
+    return gen.fail("受检模块快照校验失败");
+}
+
 // llvm_emit_add_deployment_metadata：为 Darwin LLVM 文本补充与桥接器一致的规范化最低系统版本。
 fn llvm_emit_add_deployment_metadata(output *backend.LLVMOutput) int {
     if (gen.G().c_target.os != gen.TARGET_OS_DARWIN) { return 0; }
@@ -80,7 +98,7 @@ fn llvm_emit_add_deployment_metadata(output *backend.LLVMOutput) int {
     return backend.llvm_output_add_macos_min_os(output, min_os);
 }
 
-// llvm_emit_module_to：把受检快照降低为模块 IR 并经内嵌桥发布产物。
+// llvm_emit_module_to：把已由调用方校验且未修改的快照降低为模块 IR 并经内嵌桥发布产物。
 // kind：0 = 目标文件（对象），1 = 汇编文本；out_path 为产物路径，text_path 非空时
 // 额外写出 LLVM 文本（审阅/差分用，失败不致命）。
 // 返回 0 成功、-1 失败（诊断已写 stderr，且不发布任何产物）。
@@ -254,12 +272,13 @@ fn mb_llvm_semantics() int {
     if (parse.parse_source_globals() != 0 || gs.task.c_errors > 0) { return 1; }
     gs.task.c_pos = 0;
     if (parse.parse_source_fns() != 0 || gs.task.c_errors > 0) { return 1; }
-    if (ast.ast_expr_verify() != 0 || ast.ast_stmt_verify() != 0
-        || ast.ast_decl_verify() != 0 || ast.ast_function_verify() != 0) { return 1; }
+    let view ast.AstView;
+    ast.ast_view(&view);
+    if (check.verify_module(&view) != 0) { return 1; }
     return 0;
 }
 
-// llvm_emit_text_only：只做 lowering 与 LLVM 文本发射，不调用内嵌桥。
+// llvm_emit_text_only：只对已校验且未修改的快照做 lowering 与文本发射，不调用内嵌桥。
 // 供 --emit-llvm 审阅形态使用（单文件写标准输出，项目写 .build/llvm/<tag>.ll）。
 // 返回 0 成功、1 首片不支持（lowering 已给来源诊断）、-1 内部错误。
 fn llvm_emit_text_only(unit *ast.CheckedModule, text_path *char,
@@ -334,6 +353,11 @@ fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
     if (gen.front_checked_verify() != 0) { return 1; }
     let checked ast.CheckedModule;
     if (ast.checked_module_capture(&checked) != 0) { return -1; }
+    let checked_status int = llvm_emit_verify_checked_snapshot(&checked);
+    if (checked_status != 0) {
+        ast.checked_module_release(&checked);
+        return checked_status;
+    }
     if (gen.front_checked_end() != 0) { return 1; }
     // 链接形态先把对象写到 <out>.yh-tmp.o，避免与最终可执行文件同名。
     let object [620]u8;
