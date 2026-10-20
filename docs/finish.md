@@ -2,6 +2,32 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-20 CircleCI 三端与 tag Release 发布
+
+- CircleCI 增加 `linux-x86_64` 与 `darwin-arm64` 作业：前者从最新 Release 取
+  x64 种子，后者用 `m4pro.large` + Xcode 26.5、固定 Darwin SDK/桥；三端均跑
+  各平台专项门、语法/运行语料和 `make selfhost-native SKIP_CORPUS=1`。
+- `bin/yh-linux-x64` 不再入库：其自举二进制已替换最新 Release `0.0.5` 的
+  `yh-0.0.5-linux-x86_64.tar.gz`（cc4 SHA-256 `fda39ef3…`），`bin` 中
+  x64 二进制与哈希已删除；开发机用 `make fetch-seed` 取最新 Release。
+- CircleCI 分支流水线三端每次都从最新 GitHub Release 取种子；tag 流水线取
+  上一版 Release（排除当前 tag）。
+- 新增 CircleCI `release` workflow：tag push 时三端并行构建，通过
+  `SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost` 保留 cc4，打包 cc4 为
+  `dist/yh-<tag>-<platform>.tar.gz` 与 `.sha256`；`publish` 作业用
+  `GITHUB_TOKEN` 创建/更新 GitHub Release。
+- `Makefile` 新增 `SELFHOST_KEEP`/`SELFHOST_WORKDIR`，默认行为不变。
+- 验证：CircleCI 配置与 GitHub workflows YAML 解析通过；`make quick` 通过。
+- **已完成 Release 种子更新**：x86_64 在 Rosetta 容器内从 0.0.5 种子冷编 A，
+  A→cc2→cc3→cc4 固定点通过，cc4 在空 `PATH` 下编译/运行 `.yh`；x64 cc4
+  SHA-256 `fda39ef3…`，已替换 Release 0.0.5 的 x86_64 tar/sha 资产。
+  最新 Release 的 arm64 资产原只有 435KB（不可用），已同步替换为当前
+  141,752,552 B 自举种子（SHA-256 `4d13e297…`）。
+- `tools/fetch-release-seed.py` 下载资产时核对 API size，并对截断/连接中断
+  重试 3 次；两条平台种子均已通过实际 fetch 验证。
+- **待办**：首次 tag 发布需在 CircleCI 配置 `GITHUB_TOKEN`（repo 权限），
+  并观察三端 cc4 打包与 Release 上传；本地未推送测试 tag。
+
 ## 2026-10-20 CI：CircleCI 原生 AArch64 与 GitHub 去重
 
 - 新增 `.circleci/config.yml`：`arm.large` 原生 Ubuntu 24.04 跑 Linux/AArch64

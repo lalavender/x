@@ -84,6 +84,15 @@ else
  HOST_TAG = $(shell printf '%s' '$(HOST_SYSTEM)' | tr '[:upper:]' '[:lower:]')
 endif
 BIN_SEED = $(REPO_BIN)/yh-$(HOST_TAG)-$(SEED_ARCH)$(EXESUF)
+# 从最新 GitHub Release 取本机平台种子时使用的平台名；Linux/x86_64 种子
+# 默认不入库，开发机先执行 make fetch-seed 或显式设置 SEED。
+ifeq ($(HOST_SYSTEM),Darwin)
+ SEED_PLATFORM = darwin-arm64
+else ifeq ($(SEED_ARCH),arm64)
+ SEED_PLATFORM = linux-arm64
+else
+ SEED_PLATFORM = linux-x86_64
+endif
 
 # 编译、验证和滚动使用同一个宿主平台种子；显式 SEED 可用于 CI 的临时种子。
 SEED ?= $(BIN_SEED)
@@ -107,6 +116,18 @@ ifeq ($(FAST_STAGE),1)
  RUN_WORK_FLAG = --workdir $(abspath $(FAST_DIR)/yh-run-work)
  SELFHOST_WORK_FLAG = --workdir $(abspath $(FAST_DIR)/selfhost)
  MODCHECK_WORK_FLAG = --workdir $(abspath $(FAST_DIR)/modcheck)
+endif
+
+# SELFHOST_WORKDIR/SELFHOST_KEEP 供 Release CI 保留 cc4 自举候选：
+#   make selfhost-native SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
+# 默认不保留，保持日常门临时目录/清理行为。
+SELFHOST_KEEP ?= 0
+SELFHOST_KEEP_FLAG =
+ifeq ($(SELFHOST_KEEP),1)
+ SELFHOST_KEEP_FLAG = --keep
+endif
+ifneq ($(SELFHOST_WORKDIR),)
+ SELFHOST_WORK_FLAG = --workdir $(abspath $(SELFHOST_WORKDIR))
 endif
 
 # SKIP_CORPUS=1：同一轮里 make test 已经跑过等价语料时，省掉自举门里重复的
@@ -226,9 +247,15 @@ llvm-host:
 bootstrap: llvm-host
 	@$(MAKE) all
 
-.PHONY: verify-seed
+.PHONY: verify-seed fetch-seed
 verify-seed:
 	python3 $(TOPSRC)/tools/selfhost_snapshot_gate.py --verify-seed "$(abspath $(SEED))"
+
+# fetch-seed：从最新 GitHub Release 下载当前平台种子（写入 bin/...）。
+# 私有仓库需要 GITHUB_REPOSITORY 与 GH_TOKEN/GITHUB_TOKEN；
+# Linux/x86_64 种子默认不入库，开发机首次构建前执行本目标。
+fetch-seed:
+	python3 $(TOPSRC)/tools/fetch-release-seed.py --platform $(SEED_PLATFORM)
 
 # 一步链：用入库种子在默认 systemless 配置下冷编 compiler/。
 # 清除实际项目缓存 compiler/.build，确保每次都从种子冷编。
@@ -291,7 +318,7 @@ quick: stage-yh
 # 仓库根 $(YH)，不能用暂存副本。
 selfhost-native: stage-yh
 	python3 $(TOPSRC)/tools/selfhost_snapshot_gate.py --verify-seed "$(abspath $(SEED))"
-	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py --seed "$(abspath $(SEED))" $(SELFHOST_WORK_FLAG) $(CORPUS_FLAG)
+	python3 $(TOPSRC)/tests/selfhost/native-selfhost.py --seed "$(abspath $(SEED))" $(SELFHOST_WORK_FLAG) $(CORPUS_FLAG) $(SELFHOST_KEEP_FLAG)
 	python3 $(TOPSRC)/tests/selfhost/scratch-isolation.py --compiler-path $(YH_RUN) --jobs 4
 	python3 $(TOPSRC)/tests/selfhost/lex-stats.py --compiler-path $(YH_RUN)
 	$(RUNTIME_TEST)
@@ -399,6 +426,6 @@ clean:
 help:
 	@sed -n '2,20p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all quick full explorer code-stats test-code-stats seed selfhost-native clean help llvm-host bootstrap stage-yh test-llvm-linux-arm64 test-llvm-darwin selfhost-llvm-darwin
+.PHONY: all install uninstall test test-all quick full explorer code-stats test-code-stats seed selfhost-native clean help llvm-host bootstrap stage-yh fetch-seed test-llvm-linux-arm64 test-llvm-darwin selfhost-llvm-darwin
 
 endif # ($(INCLUDED),no)

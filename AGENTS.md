@@ -10,9 +10,11 @@
 构建只依赖**宿主平台对应的入库种子**，种子统一按 `yh-<平台>-<架构>` 命名：
 macOS/arm64 用 `bin/yh-darwin-arm64`（Mach-O，SHA-256 见
 `bin/yh-darwin-arm64.sha256`），Linux/aarch64 用 `bin/yh-linux-arm64`（ELF，
-SHA-256 见 `bin/yh-linux-arm64.sha256`）；Makefile 按宿主自动选择。
-Linux/AArch64 种子因内嵌 LLVM/lld 超过 GitHub 100 MB 单文件限制，使用 Git LFS
-跟踪；克隆后需执行 `git lfs pull`，否则 `bin/yh-linux-arm64` 只是指针文件。
+SHA-256 见 `bin/yh-linux-arm64.sha256`）；Linux/x86_64 种子不入库，从最新
+GitHub Release 获取（`make fetch-seed`，写入被 gitignore 的
+`bin/yh-linux-x64`）。Linux/aarch64 种子因内嵌 LLVM/lld 超过 GitHub 100 MB
+单文件限制，使用 Git LFS 跟踪；克隆后需执行 `git lfs pull`，否则该种子只是
+指针文件。
 
 - 日常构建：`make`（= 宿主种子对 `compiler/` 项目 `yh build`，冷编，
   产出根目录 `yh`）；日常验证以 `make selfhost-native` 为主门
@@ -68,6 +70,8 @@ Linux/AArch64 种子因内嵌 LLVM/lld 超过 GitHub 100 MB 单文件限制，�
 - `compiler/` —— 编译器源码（gen/lex/parse/ast/comptime/cmd/ir/backend 多模块的项目）
 - `bin/yh-darwin-arm64` + `bin/yh-darwin-arm64.sha256` —— 入库种子与哈希（Darwin/arm64）
 - `bin/yh-linux-arm64` + `bin/yh-linux-arm64.sha256` —— Linux/aarch64 入库种子与哈希
+- `bin/yh-linux-x64` + `bin/yh-linux-x64.sha256` —— Linux/x86_64 种子
+  （默认不入库，`make fetch-seed` 从最新 Release 获取）
 - `docs/03-design/` 语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
   `docs/adr/` 决策、`docs/finish.md` 完成流水、`docs/todo.md` 待办
 - `tests/yh/` 语法语料、`tests/yh-run/` 语义运行语料、
@@ -123,6 +127,7 @@ make test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 
 make bootstrap          # 首次/换机：准备固定 LLVM 闭包后冷编（一条命令，幂等）
 make selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
 make llvm-host          # 只准备本机固定 LLVM 闭包（不编编译器）
+make fetch-seed         # 从最新 GitHub Release 取本机平台种子（x64 首次构建前）
 make code-stats         # 统计 compiler/ 下 yh 源码规模
 make test-code-stats    # 运行统计工具边界与 JSON 检查
 make test-llvm-linux-arm64  # F1：Linux/AArch64 LLVM 运行时/C ABI/O0-O2（容器内）
@@ -136,10 +141,16 @@ make seed               # 滚种子（仅在全绿后；拒绝带构建机路径
 
 CI 分两套（推送 `arm64`/`llvm`/`main` 时并行）：
 
-- **CircleCI**（`.circleci/config.yml`）：原生 `arm.large` Linux/AArch64 机器跑
-  `make bootstrap`、`make test-llvm-linux-arm64`、第 2/3 层语料与
-  `make selfhost-native SKIP_CORPUS=1`；独立 `antlr` 作业跑参考语法门。
-  `tmp/llvm-migration` 按 SDK/脚本/桥源码哈希缓存；种子通过 Git LFS 拉取。
+- **CircleCI**（`.circleci/config.yml`）：原生 `arm.large` Linux/AArch64、
+  Linux/x86_64 与 `m4pro.large` Darwin/ARM64 三端并行；每端先取最新 Release
+  种子，再跑 `make bootstrap`、平台专项门、第 2/3 层语料与
+  `make selfhost-native SKIP_CORPUS=1`。`tmp/llvm-migration` 按 SDK/脚本/
+  桥源码哈希缓存；独立 `antlr` 作业跑参考语法门。
+- **种子来源**：CircleCI 每个分支流水线都从最新 GitHub Release 取三端种子；
+  tag 流水线取上一版 Release（排除当前 tag）。项目环境变量需配置
+  `GITHUB_TOKEN`（repo 权限），同时用于取种子和发布。
+- **tag 发布**：CircleCI `release` workflow 由 tag 触发，三端保留 cc4 自举候选，
+  打包后由 `publish` 作业创建/更新 GitHub Release。
 - **GitHub Actions**（`.github/workflows/ci.yml`）：`linux-x86_64` 作业以
   `YH_LLVM_HOST=1` 联网准备固定 LLVM SDK 后跑 `make test-llvm` /
   `make selfhost-llvm`；`darwin-arm64` 作业在 `macos-14` 上跑同一套门禁；

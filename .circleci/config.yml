@@ -1,31 +1,67 @@
 version: 2.1
 
-# CircleCI 主门：原生 Linux/AArch64 + 独立的 ANTLR 参考语法门。
+# CircleCI 主门：原生 Linux/AArch64、Linux/x86_64、Darwin/ARM64 与 tag 发布。
 #
-# 与 GitHub Actions 的分工：
-#   - GitHub：linux-x86_64、darwin-arm64；linux-arm64 仅保留手动 QEMU 回退；
-#   - CircleCI：原生 arm64 机器跑 Linux/AArch64 默认 LLVM 主门，避免 QEMU。
-# 两者都在 push 到 arm64/llvm/main 时执行，互不依赖。
+# 分支流水线（arm64/llvm/main）：
+#   - antlr：参考语法门；
+#   - 三端每次都从最新 GitHub Release 取种子，再跑各平台默认 LLVM 主门。
+# tag 流水线：
+#   - 三端从上一版 Release（排除当前 tag）取种子，自举并打包 cc4；
+#   - publish 汇总 workspace 产物，创建/更新 GitHub Release。
+#
+# 需要项目环境变量 GITHUB_TOKEN（repo 权限）：既用于取 Release 种子，
+# 也用于 tag 发布。
 
 commands:
   install_linux_deps:
-    description: 安装 Linux 构建与 LFS 依赖
+    description: 安装 Linux 构建、LLVM 宿主与 LFS 依赖
     steps:
       - run:
           name: 安装构建依赖
           command: |
             sudo apt-get update -qq
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-              build-essential python3 binutils xz-utils libxml2-dev git-lfs
+              build-essential python3 binutils xz-utils libxml2-dev
 
-  pull_seed_lfs:
-    description: 拉取仓库中的 Linux/AArch64 自举种子
+  fetch_latest_seed:
+    description: 从 GitHub Release 取指定平台的上一版种子
+    parameters:
+      platform:
+        type: string
     steps:
       - run:
-          name: 拉取 Git LFS 种子
+          name: 获取最新 Release 种子（<< parameters.platform >>）
           command: |
-            git lfs install --local
-            git lfs pull --include="bin/yh-linux-arm64"
+            : "${GITHUB_TOKEN:?需要在 CircleCI 项目环境变量设置 GITHUB_TOKEN（repo 权限）}"
+            export GITHUB_REPOSITORY="$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME"
+            export GH_TOKEN="$GITHUB_TOKEN"
+            python3 tools/fetch-release-seed.py --platform << parameters.platform >> --exclude-tag "${CIRCLE_TAG:-}"
+
+  package_release:
+    description: 打包当前平台的自举编译器与 SHA-256
+    parameters:
+      platform:
+        type: string
+    steps:
+      - run:
+          name: 打包 << parameters.platform >>
+          command: |
+            set -euo pipefail
+            : "${CIRCLE_TAG:?release 步骤必须由 tag 触发}"
+            safe_tag=$(printf '%s' "$CIRCLE_TAG" | tr '/' '_')
+            name="yh-${safe_tag}-<< parameters.platform >>"
+            mkdir -p dist
+            cp yh "dist/${name}"
+            tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+            if command -v sha256sum >/dev/null 2>&1; then
+              (cd dist && sha256sum "${name}.tar.gz" > "${name}.sha256")
+            else
+              (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.sha256")
+            fi
+      - persist_to_workspace:
+          root: .
+          paths:
+            - dist
 
 jobs:
   antlr:
@@ -49,13 +85,18 @@ jobs:
     machine:
       image: ubuntu-2404:current
     resource_class: arm.large
+    parameters:
+      release:
+        type: boolean
+        default: false
     environment:
       # 固定 SDK 未就绪时允许联网补齐；之后走 tmp/llvm-migration 缓存。
       YH_LLVM_HOST: "1"
     steps:
       - checkout
       - install_linux_deps
-      - pull_seed_lfs
+      - fetch_latest_seed:
+          platform: linux-arm64
       - restore_cache:
           keys:
             - llvm-host-linux-arm64-v2-{{ checksum "vendor/llvm/sdk.lock.json" }}-{{ checksum "tools/llvm-sdk.py" }}-{{ checksum "tools/llvm-host.py" }}-{{ checksum "tests/selfhost/llvm-host.py" }}-{{ checksum "compiler/llvm/bridge.c" }}-{{ checksum "compiler/llvm/bridge.h" }}-{{ checksum "compiler/llvm/lld_bridge.cpp" }}-{{ checksum "compiler/llvm/lld_stub.cpp" }}
@@ -77,7 +118,162 @@ jobs:
             python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
       - run:
           name: 自举主门（语料已单独跑过）
-          command: make selfhost-native SKIP_CORPUS=1
+          command: |
+            if [ "<< parameters.release >>" = "true" ]; then
+              make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
+            else
+              make selfhost-native SKIP_CORPUS=1
+            fi
+      - when:
+          condition: << parameters.release >>
+          steps:
+            - run:
+                name: 选用 cc4 自举候选
+                command: |
+                  cp dist/selfhost/cc4 yh
+                  rm -rf dist/selfhost
+            - package_release:
+                platform: linux-arm64
+
+  linux-x86_64:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: large
+    parameters:
+      release:
+        type: boolean
+        default: false
+    environment:
+      SEED: bin/yh-linux-x64
+      YH_LLVM_HOST: "1"
+      LLVM_JOBS: "4"
+    steps:
+      - checkout
+      - install_linux_deps
+      - run:
+          name: 安装 x64 runtime 导入审计依赖
+          command: sudo apt-get install -y -qq clang
+      - fetch_latest_seed:
+          platform: linux-x86_64
+      - restore_cache:
+          keys:
+            - llvm-host-linux-x86_64-v2-{{ checksum "vendor/llvm/sdk.lock.json" }}-{{ checksum "tools/llvm-sdk.py" }}-{{ checksum "tools/llvm-host.py" }}-{{ checksum "tests/selfhost/llvm-host.py" }}-{{ checksum "compiler/llvm/bridge.c" }}-{{ checksum "compiler/llvm/bridge.h" }}-{{ checksum "compiler/llvm/lld_bridge.cpp" }}-{{ checksum "compiler/llvm/lld_stub.cpp" }}
+      - run:
+          name: 准备固定 LLVM/lld 宿主并冷编
+          command: make bootstrap
+          no_output_timeout: 30m
+      - save_cache:
+          key: llvm-host-linux-x86_64-v2-{{ checksum "vendor/llvm/sdk.lock.json" }}-{{ checksum "tools/llvm-sdk.py" }}-{{ checksum "tools/llvm-host.py" }}-{{ checksum "tests/selfhost/llvm-host.py" }}-{{ checksum "compiler/llvm/bridge.c" }}-{{ checksum "compiler/llvm/bridge.h" }}-{{ checksum "compiler/llvm/lld_bridge.cpp" }}-{{ checksum "compiler/llvm/lld_stub.cpp" }}
+          paths:
+            - tmp/llvm-migration
+      - run:
+          name: 编译器语法与运行语料
+          command: |
+            python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+            python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
+      - run:
+          name: 自举主门（语料已单独跑过）
+          command: |
+            if [ "<< parameters.release >>" = "true" ]; then
+              make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
+            else
+              make selfhost-native SKIP_CORPUS=1
+            fi
+      - when:
+          condition: << parameters.release >>
+          steps:
+            - run:
+                name: 选用 cc4 自举候选
+                command: |
+                  cp dist/selfhost/cc4 yh
+                  rm -rf dist/selfhost
+            - package_release:
+                platform: linux-x86_64
+
+  darwin-arm64:
+    macos:
+      xcode: 26.5
+    resource_class: m4pro.large
+    parameters:
+      release:
+        type: boolean
+        default: false
+    environment:
+      SEED: bin/yh-darwin-arm64
+      YH_LLVM_HOST: "1"
+      LLVM_JOBS: "4"
+    steps:
+      - checkout
+      - fetch_latest_seed:
+          platform: darwin-arm64
+      - run:
+          name: 选择 Xcode macOS SDK
+          command: |
+            echo 'export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"' >> "$BASH_ENV"
+      - restore_cache:
+          keys:
+            - llvm-host-darwin-aarch64-v2-{{ checksum "vendor/llvm/sdk.lock.json" }}-{{ checksum "tools/llvm-darwin-sdk.py" }}-{{ checksum "tools/llvm-darwin-host.py" }}-{{ checksum "tests/selfhost/llvm-darwin-host.py" }}-{{ checksum "compiler/llvm/bridge.c" }}-{{ checksum "compiler/llvm/bridge.h" }}-{{ checksum "compiler/llvm/lld_bridge.cpp" }}
+      - run:
+          name: 准备 Darwin LLVM/lld 宿主并冷编
+          command: make bootstrap
+          no_output_timeout: 45m
+      - save_cache:
+          key: llvm-host-darwin-aarch64-v2-{{ checksum "vendor/llvm/sdk.lock.json" }}-{{ checksum "tools/llvm-darwin-sdk.py" }}-{{ checksum "tools/llvm-darwin-host.py" }}-{{ checksum "tests/selfhost/llvm-darwin-host.py" }}-{{ checksum "compiler/llvm/bridge.c" }}-{{ checksum "compiler/llvm/bridge.h" }}-{{ checksum "compiler/llvm/lld_bridge.cpp" }}
+          paths:
+            - tmp/llvm-migration/darwin-sdk/sdk-darwin-aarch64
+            - tmp/llvm-migration/llvm-host-darwin-aarch64
+      - run:
+          name: Darwin LLVM 专项门
+          command: make test-llvm-darwin
+      - run:
+          name: 编译器语法与运行语料
+          command: |
+            python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+            python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(sysctl -n hw.ncpu)"
+      - run:
+          name: 自举主门（语料已单独跑过）
+          command: |
+            if [ "<< parameters.release >>" = "true" ]; then
+              make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
+            else
+              make selfhost-native SKIP_CORPUS=1
+            fi
+      - when:
+          condition: << parameters.release >>
+          steps:
+            - run:
+                name: 选用 cc4 自举候选
+                command: |
+                  cp dist/selfhost/cc4 yh
+                  rm -rf dist/selfhost
+            - package_release:
+                platform: darwin-arm64
+
+  publish:
+    docker:
+      - image: ubuntu:24.04
+    resource_class: small
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: 发布 GitHub Release
+          command: |
+            set -euo pipefail
+            : "${GITHUB_TOKEN:?需要在 CircleCI 项目环境变量设置 GITHUB_TOKEN（repo 权限）}"
+            apt-get update -qq
+            apt-get install -y -qq ca-certificates curl gh
+            export GH_TOKEN="$GITHUB_TOKEN"
+            repo="$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME"
+            cd /tmp/workspace
+            ls -l dist
+            if gh release view "$CIRCLE_TAG" --repo "$repo" >/dev/null 2>&1; then
+              gh release upload "$CIRCLE_TAG" dist/*.tar.gz dist/*.sha256 --repo "$repo" --clobber
+            else
+              gh release create "$CIRCLE_TAG" dist/*.tar.gz dist/*.sha256 \
+                --repo "$repo" --title "$CIRCLE_TAG" \
+                --notes "自举构建：Linux/AArch64、Linux/x86_64、Darwin/ARM64"
+            fi
 
 workflows:
   ci:
@@ -90,3 +286,45 @@ workflows:
           filters:
             branches:
               only: /^(arm64|llvm|main)$/
+      - linux-x86_64:
+          filters:
+            branches:
+              only: /^(arm64|llvm|main)$/
+      - darwin-arm64:
+          filters:
+            branches:
+              only: /^(arm64|llvm|main)$/
+
+  release:
+    jobs:
+      - linux-arm64:
+          release: true
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /.*/
+      - linux-x86_64:
+          release: true
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /.*/
+      - darwin-arm64:
+          release: true
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /.*/
+      - publish:
+          requires:
+            - linux-arm64
+            - linux-x86_64
+            - darwin-arm64
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /.*/

@@ -537,6 +537,8 @@ chroot 门全绿，原 x64 复验全绿；新增 `.yh` 源级桥调用生成 x64
     `cimg/python:3.12` 后修复旧 pip 不支持 `--break-system-packages` 的问题。
   - [ ] **GitHub Actions 账单恢复**：antlr/x64/darwin 作业在启动前被账单/消费
     限额拒绝（不是工作流错误）；恢复后复跑同一提交确认。
+  - [ ] **CircleCI tag Release 首发**：配置项目环境变量 `GITHUB_TOKEN`
+    （repo 权限）；推送 tag 后确认三端 cc4 打包、`publish` 创建/更新 Release。
 
 - [ ] **F2–F4 后续平台**：macOS/ARM64 → Windows/x86_64 → macOS/x86_64、Windows/ARM64；
   各格分别验收对象、链接、标准库运行、原生编译器、原生自举，不以 WSL 冒充 Windows 支持。

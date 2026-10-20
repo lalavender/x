@@ -18,11 +18,13 @@ CI 与 Release 的共同约定：当前提交通用**上一版已发布 Release*
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -76,8 +78,9 @@ def find_asset(repo, token, platform, exclude_tag):
     return None
 
 
-def download_asset(asset, token, destination):
-    """通过资产 API 下载二进制，避免依赖 browser_download_url 的登录跳转。"""
+def download_asset_once(asset, token, destination):
+    """下载一次资产并核对 API 给出的字节数，截断时按可重试错误处理。"""
+    total = 0
     with api_request(asset["url"], token, "application/octet-stream") as response:
         with destination.open("wb") as output:
             while True:
@@ -85,6 +88,24 @@ def download_asset(asset, token, destination):
                 if not block:
                     break
                 output.write(block)
+                total += len(block)
+    expected = int(asset.get("size", -1))
+    if expected >= 0 and total != expected:
+        raise FetchError(f"Release 资产下载不完整：{total}/{expected} 字节")
+
+
+def download_asset(asset, token, destination):
+    """下载资产；网络截断/连接中断时有限重试，避免 CI 偶发失败。"""
+    last = None
+    for attempt in range(3):
+        try:
+            download_asset_once(asset, token, destination)
+            return
+        except (FetchError, OSError, http.client.IncompleteRead) as error:
+            last = error
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    raise FetchError(f"Release 资产下载失败（重试 3 次）：{last}")
 
 
 def extract_yh(archive, destination):
