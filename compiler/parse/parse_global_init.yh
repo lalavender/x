@@ -12,6 +12,17 @@ import ast;
 
 // ---- 绑定与初始化 ----
 
+// parse_global_bind_iface_label：接口加载时为导入聚合常量副本分配本地标签。
+// LL12：只登记 cval 与 c_data_n，不写 .globl/.LD 文本（与 CT 数据同规则）。
+fn parse_global_bind_iface_label(idx int) void {
+    let gs *gen.GenState = gen.G();
+    if (gs.task.c_iface_load != 0) {
+        let lbl int = gs.task.c_data_n;
+        gs.task.c_data_n += 1;
+        gs.task.c_syms[idx].cval = lbl.to_type(i64);
+    }
+}
+
 // parse_binding：名字 + 必需类型 + 可选初值。kind：SYM_VAR / SYM_CONST。
 // global=1 为顶层绑定（pass1 登记 / pass2 折叠发射），global=0 为局部。
 // 通过 c_bind_idx 返回涉及的符号下标（无则为 -1）。
@@ -306,9 +317,7 @@ fn parse_global_init(idx int, tid int, kind int) int {
         if (r.ival == 0) {
             return sem_global_zero(idx, tid);
         }
-        if (gen.em_data_symbol_header(idx, gs.task.t_types[tid].align) != 0) {
-            return -1;
-        }
+        parse_global_bind_iface_label(idx);
         let pointer_label int = parse_global_static_string_target(init_token_first,
             init_token_after, r.ival);
         if (pointer_label <= 0 || pointer_label.to_type(i64) != r.ival) {
@@ -321,25 +330,17 @@ fn parse_global_init(idx int, tid int, kind int) int {
             && gs.task.c_toks[init_token_first].kind == gen.TOK_STRING
             && parse_global_static_string(gs.task.c_toks[init_token_first].start,
                 gs.task.c_toks[init_token_first].len, r.ival.to_type(int)) != 0) { return -1; }
-        if (gen.dat_puts(".xword\t.LD") != 0) {
-            return -1;
-        }
-        if (gen.dat_puti(r.ival.to_type(int)) != 0) {
-            return -1;
-        }
-        return gen.dat_put('\n');
+        return 0;
     }
     if (r.ival == 0) {
         return sem_global_zero(idx, tid);
     }
-    if (gen.em_data_symbol_header(idx, gs.task.t_types[tid].align) != 0) {
-        return -1;
-    }
+    parse_global_bind_iface_label(idx);
     let static_row int = parse_global_static_root(idx, tid);
     if (static_row == -1 || parse_global_static_scalar(static_row, 0, tid, r.ival) != 0) {
         return -1;
     }
-    return gen.em_data_scalar(tid, r.ival);
+    return 0;
 }
 
 // parse_global_comptime_aggregate_ex：顶层 CT 聚合初始化（$ 调用形态）。
@@ -700,31 +701,15 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
         lbl = gs.task.c_data_n;
         gs.task.c_data_n += 1;
     }
-    if (gen.em_data_symbol_header(idx, gs.task.t_types[tid].align) != 0) {
-        return -1;
-    }
+    parse_global_bind_iface_label(idx);
     let static_row int = parse_global_static_root(idx, tid);
     if (static_row == -1) { return -1; }
     let backing_row int = -2;
     if (fk == gen.TY_SLICE) {
         backing_row = parse_global_static_backing(lbl, elem, count);
         if (backing_row == -1) { return -1; }
-        // {count, .LDlbl}
-        if (gen.dat_puts(".xword\t") != 0) { return -1; }
-        if (gen.dat_puthex(count.to_type(i64)) != 0) { return -1; }
-        if (gen.dat_put('\n') != 0) { return -1; }
         if (parse_global_static_scalar(static_row, 0, 10, count.to_type(i64)) != 0
             || parse_global_static_pointer(static_row, 8, lbl, 0) != 0) { return -1; }
-        if (gen.dat_puts(".xword\t.LD") != 0) { return -1; }
-        if (gen.dat_puti(lbl) != 0) { return -1; }
-        if (gen.dat_put('\n') != 0) { return -1; }
-        if (gen.dat_puts(".balign\t") != 0) { return -1; }
-        if (gen.dat_puti(esz) != 0) { return -1; }
-        if (gen.dat_put('\n') != 0) { return -1; }
-        if (gen.dat_puts(".LD") != 0) { return -1; }
-        if (gen.dat_puti(lbl) != 0) { return -1; }
-        if (gen.dat_put(':') != 0) { return -1; }
-        if (gen.dat_put('\n') != 0) { return -1; }
     }
     let i int = 0;
     for i < count {
@@ -732,38 +717,23 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
             if (gs.task.t_types[elem].kind != gen.TY_PTR || esz != 8
                 || parse_global_static_pointer(fk == gen.TY_SLICE ? backing_row : static_row,
                     i * esz, labels[i], 0) != 0) { return -1; }
-            if (gen.dat_puts(".xword\t.LD") != 0) { return -1; }
-            if (gen.dat_puti(vals[i].to_type(int)) != 0) { return -1; }
-            if (gen.dat_put('\n') != 0) { return -1; }
+
         } else if (gen.ty_is_float(elem) != 0) {
             if (parse_global_static_scalar(fk == gen.TY_SLICE ? backing_row : static_row,
                     i * esz, elem, vals[i]) != 0) { return -1; }
-            if (gen.dat_puts(".xword\t") != 0) { return -1; }
-            if (gen.dat_puthex(vals[i]) != 0) { return -1; }
-            if (gen.dat_put('\n') != 0) { return -1; }
+
         } else {
             if (parse_global_static_scalar(fk == gen.TY_SLICE ? backing_row : static_row,
                     i * esz, elem, vals[i]) != 0) { return -1; }
-            if (gen.em_data_scalar(elem, vals[i]) != 0) { return -1; }
+
         }
         i += 1;
     }
-    if (fk == gen.TY_ARRAY) {
-        let used int = esz * count;
-        if (used < gs.task.t_types[tid].size) {
-            if (gen.dat_puts(".zero\t") != 0) { return -1; }
-            if (gen.dat_puti(gs.task.t_types[tid].size - used) != 0) { return -1; }
-            if (gen.dat_put('\n') != 0) { return -1; }
-        }
-    }
-    // 补发字符串内容（标签号已在元素槽中引用）
+    // 字符串内容只登记 static_data，由快照生成。
     i = 0;
     for i < count {
         if (kinds[i] == 1) {
             if (parse_global_static_string(str_start[i], str_len[i], labels[i]) != 0) { return -1; }
-            if (gen.em_data_string_body(str_start[i], str_len[i], vals[i].to_type(int)) < 0) {
-                return -1;
-            }
         }
         i += 1;
     }
@@ -788,9 +758,7 @@ fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
     if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
         return -1;
     }
-    if (gen.em_data_symbol_header(idx, gs.task.t_types[tid].align) != 0) {
-        return -1;
-    }
+    parse_global_bind_iface_label(idx);
     let static_row int = parse_global_static_root(idx, tid);
     if (static_row == -1) { return -1; }
     let cur int = 0;
@@ -806,15 +774,6 @@ fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
             first, gs.task.c_pos, tid, fields, -1, -1);
         if (root < 0) { return -1; }
         ast_out[0] = root;
-    }
-    if (cur < gs.task.t_types[tid].size) {
-        if (gen.dat_puts(".zero\t") != 0) {
-            return -1;
-        }
-        if (gen.dat_puti(gs.task.t_types[tid].size - cur) != 0) {
-            return -1;
-        }
-        return gen.dat_put('\n');
     }
     return 0;
 }
@@ -894,18 +853,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
     let ftid int = gs.task.t_fields[fidx].type_id;
     let foff int = base + gs.task.t_fields[fidx].offset;
     ast_out[0] = -1;
-    if (foff > cur[0]) {
-        // 字段间对齐间隙
-        if (gen.dat_puts(".zero\t") != 0) {
-            return -1;
-        }
-        if (gen.dat_puti(foff - cur[0]) != 0) {
-            return -1;
-        }
-        if (gen.dat_put('\n') != 0) {
-            return -1;
-        }
-    }
+
     cur[0] = foff;
     let fk int = gs.task.t_types[ftid].kind;
     if (fk == gen.TY_STRUCT) {
@@ -943,17 +891,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             if (nested_root < 0) { return -1; }
             ast_out[0] = nested_root;
         }
-        if (cur[0] < foff + gs.task.t_types[ftid].size) {
-            if (gen.dat_puts(".zero\t") != 0) {
-                return -1;
-            }
-            if (gen.dat_puti(foff + gs.task.t_types[ftid].size - cur[0]) != 0) {
-                return -1;
-            }
-            if (gen.dat_put('\n') != 0) {
-                return -1;
-            }
-        }
+
         cur[0] = foff + gs.task.t_types[ftid].size;
         if (ct_obj != 0
             && comptime.ct_global_agg_set_obj(ct_obj, ct_index, ftid,
@@ -983,19 +921,6 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             if (gs.task.t_types[ftid].size != 8
                 || parse_global_static_pointer(static_row, foff, lbl, 0) != 0
                 || parse_global_static_string(ss, sl, lbl) != 0) { return -1; }
-            if (gen.dat_puts(".xword\t.LD") != 0) {
-                return -1;
-            }
-            if (gen.dat_puti(lbl) != 0) {
-                return -1;
-            }
-            if (gen.dat_put('\n') != 0) {
-                return -1;
-            }
-            // 注意 em_data_string_body 返回标签号（可能 >0），不是错误码
-            if (gen.em_data_string_body(ss, sl, lbl) < 0) {
-                return -1;
-            }
             if (gs.task.c_ast_capture != 0) {
                 let snode int = parse_global_string_ast(ftid, str_first, gs.task.c_pos, lbl);
                 if (snode < 0) { return -1; }
@@ -1021,7 +946,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             }
             if (gs.task.c_ast_capture != 0) { ast_out[0] = pv.ast_id; }
             if (parse_global_static_scalar(static_row, foff, ftid, 0) != 0) { return -1; }
-            r = gen.em_data_scalar(ftid, 0);
+            r = 0;
         }
     } else if (gen.ty_is_float(ftid) != 0) {
         gs.task.c_fold += 1;
@@ -1041,13 +966,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             return gen.sem_err("f32 字段的全局初始化暂不支持（请用 f64）");
         }
         if (parse_global_static_scalar(static_row, foff, ftid, fv2.fval_bits) != 0) { return -1; }
-        if (gen.dat_puts(".xword\t") != 0) {
-            return -1;
-        }
-        if (gen.dat_puthex(fv2.fval_bits) != 0) {
-            return -1;
-        }
-        r = gen.dat_put('\n');
+        r = 0;
         if (gs.task.c_ast_capture != 0) { ast_out[0] = fv2.ast_id; }
         if (r == 0 && ct_obj != 0
             && comptime.ct_global_agg_set(ct_obj, ct_index, ftid,
@@ -1070,7 +989,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         }
         if (gs.task.c_ast_capture != 0) { ast_out[0] = v.ast_id; }
         if (parse_global_static_scalar(static_row, foff, ftid, v.ival) != 0) { return -1; }
-        r = gen.em_data_scalar(ftid, v.ival);
+        r = 0;
         if (r == 0 && ct_obj != 0
             && comptime.ct_global_agg_set(ct_obj, ct_index, ftid,
                 v.ival) != 0) {
