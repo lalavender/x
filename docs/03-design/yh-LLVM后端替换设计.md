@@ -244,13 +244,13 @@ runtimebytes fixture 继续按原门要求无未定义符号。
 
 正式布局为 `.build/targets/<target-tag>/<backend>/<profile>/`，下分 llvm、iface、obj、
 manifest、ir。迁移期 LL9 已将 LLVM 中间产物放入
-`.build/targets/<triple>/llvm/O<level>/`；legacy 暂留原 `.build` 平面目录，待退役时再移除。
+`.build/targets/<triple>/llvm/O<level>/`；LL12 已移除 legacy 的 `.build` 平面目录分支。
 默认最终项目可执行文件仍按现有 `.build/<project.name>` 定位；LLVM 的链接 manifest 位于
 目标命名空间并保存最终文件摘要，因此相同输出路径切换 target、后端或优化级别时不会
 误认另一个配置的程序。临时研究产物仍全部放 tmp/。
 
 `.s.i/.s.ct` 后缀在此轮保留，避免额外接口重命名。新增接口版本包含完整目标、布局
-和 yh ABI 身份；同目标旧接口只在明确的旧后端迁移路径读取，不跨 ABI 默认为兼容。
+和 yh ABI 身份；LL12 后旧后端迁移路径已删除，不跨 ABI 默认为兼容。
 
 缓存层按真实输入划分：
 
@@ -301,8 +301,12 @@ LL9L 探针与阶段记录见 [完成记录](../01-finished/yh-LLVM-LL9L内嵌ll
 失败时保留旧种子和默认旧路径；候选留在 tmp/。退役旧后端另设检查：当前全量消费者
 已用 LLVM 验收、语义/ABI/性能/自举门全过、源码不再引用 em_* 机器原语；
 保留 gen 的类型与语义能力，不整目录删除 gen。删除源码和默认开关不删除历史种子。
-F1 的 Linux/AArch64 LLVM 回归已通过，当前 Linux/ARM64 默认路径不再依赖旧后端；
-LL12 仍等待 LL11 的 R2b/性能硬门关闭后再分片删除机器发射。
+F1 的 Linux/AArch64 LLVM 回归已通过，当前 Linux/ARM64 默认路径不再依赖旧后端。
+**LL12 已于 2026-10-21 完成**：发射器（`emit_arm64`/`emit_runtime_memory`）、
+旧 arm64 后端、四缓冲原语、旧 SSA 替换链、C ABI 发射层与 `c_backend` 开关
+全部删除；`compiler/` 净减 6516 行，`gen/sem_*`/`parse/*`/`comptime/*` 不再
+调用任何机器发射原语。证据见 `docs/finish.md` 的「LL12 退役验收」与
+`docs/02-plan/yh-LL12退役旧机器发射实施方案.md`。
 
 ## 8. 多平台路线与性能
 
