@@ -16,8 +16,10 @@
 """
 
 import argparse
+import http.client
 import json
 import os
+import time
 import sys
 import urllib.error
 import urllib.parse
@@ -44,14 +46,22 @@ def request(method, url, token, data=None, content_type=None):
     if content_type:
         headers["Content-Type"] = content_type
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=300) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", "replace")
-        raise PublishError(f"GitHub API {error.code}: {method} {url}: {body}") from error
-    except urllib.error.URLError as error:
-        raise PublishError(f"GitHub API 连接失败: {method} {url}: {error}") from error
+    last = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=300) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", "replace")
+            # 5xx/429 与传输中断可重试；4xx 立即失败（鉴权/参数问题）。
+            if error.code < 500 and error.code != 429:
+                raise PublishError(f"GitHub API {error.code}: {method} {url}: {body}") from error
+            last = PublishError(f"GitHub API {error.code}: {method} {url}: {body}")
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+            last = PublishError(f"GitHub API 连接失败: {method} {url}: {error}")
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))
+    raise last
 
 
 def find_release(repo, token, tag):
@@ -72,11 +82,18 @@ def delete_asset(repo, token, asset):
 
 
 def upload_asset(repo, token, release_id, path):
-    """上传单个资产到 uploads.github.com。"""
+    """上传单个资产到 uploads.github.com；已存在视为成功（重跑幂等）。"""
     url = (f"{UPLOAD_API}/repos/{repo}/releases/{release_id}/assets"
            f"?name={urllib.parse.quote(path.name, safe='')}")
-    request("POST", url, token, data=path.read_bytes(),
-            content_type="application/octet-stream")
+    try:
+        request("POST", url, token, data=path.read_bytes(),
+                content_type="application/octet-stream")
+    except PublishError as error:
+        # 上一次尝试可能已创建、只是响应中断；同名资产在 GitHub 上是 422。
+        if "already_exists" in str(error) or " 422:" in str(error):
+            print(f"资产已存在，跳过：{path.name}")
+            return
+        raise
 
 
 def collect_assets(dist, tag):
