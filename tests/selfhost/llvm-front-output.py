@@ -23,7 +23,7 @@ def main():
     shutil.copytree(ROOT / "compiler/gen", project / "gen",
                     ignore=shutil.ignore_patterns(".build"))
     (project / "gen/project.toml").write_text(
-        '[project]\nname = "gen"\nsource = "."\n', encoding="utf-8")
+        '[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n', encoding="utf-8")
     result = subprocess.run([str(compiler), "build"], cwd=project,
                             env=os.environ.copy(), capture_output=True, text=True)
     (work / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")

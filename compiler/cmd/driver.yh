@@ -43,7 +43,7 @@ fn usage() void {
     gen.write_all(2, buf, n);
     n = gen.append_str(buf, 0, "      yh -o <out> <file.yh>\n");
     gen.write_all(2, buf, n);
-    n = gen.append_str(buf, 0, "      yh build [-o out] [module] [--stats] 项目构建\n");
+    n = gen.append_str(buf, 0, "      yh build [-o out] [module] [--link 组名]... [--stats] 项目构建\n");
     gen.write_all(2, buf, n);
     n = gen.append_str(buf, 0, "      yh check <file.yh>       检查单文件语义，不要求 main\n");
     gen.write_all(2, buf, n);
@@ -53,7 +53,7 @@ fn usage() void {
     gen.write_all(2, buf, n);
     n = gen.append_str(buf, 0, "      --target <triple>         选择完整输出目标（LLVM）\n");
     gen.write_all(2, buf, n);
-    n = gen.append_str(buf, 0, "      yh run                       构建并运行 main 模块\n");
+    n = gen.append_str(buf, 0, "      yh run [--link 组名]...      构建并运行 main 模块\n");
     gen.write_all(2, buf, n);
     n = gen.append_str(buf, 0, "      yh version                   显示当前项目名与版本\n");
     gen.write_all(2, buf, n);
@@ -131,6 +131,19 @@ fn run_emit_asm() int {
 // 形态：
 //   yh --syntax-check <file.yh>      （argc==3）
 //   yh --emit-asm <file.yh>          （argc==3）
+// drv_has_link_option：检查参数表里是否出现 --link；用于不支持它的命令。
+fn drv_has_link_option(av **char, an int) int {
+    let i int = 0;
+    for i < an {
+        if (gen.cstr_eq(av[i], "--link") != 0) { return 1; }
+        let p *char = av[i];
+        if (p[0] == '-' && p[1] == '-' && p[2] == 'l' && p[3] == 'i'
+            && p[4] == 'n' && p[5] == 'k' && p[6] == '=') { return 1; }
+        i += 1;
+    }
+    return 0;
+}
+
 // drv_scan_target：扫描完整 --target 或旧 -target 别名，以及 LLVM 后端的
 // --backend/-O0/-O2/--emit-llvm 选项；未知目标或未知后端返回 -1，不静默回退。
 // 旧别名明确表示 AArch64 Unix；其余参数保持原顺序，返回不含程序名的参数个数。
@@ -151,6 +164,7 @@ fn drv_scan_target(argc int, argv **char, out **char) int {
                 return -1;
             }
             if (gen.target_select(target) != 0) { gen.fail("不支持的目标 triple"); return -1; }
+            gs.c_target_explicit = 1;
             i += 2;
         } else if (gen.cstr_eq(argv[i], "--backend") != 0) {
             if (i + 1 >= argc) { gen.fail("缺少后端名（llvm）"); return -1; }
@@ -221,9 +235,13 @@ pub fn main(argc int, argv **char, envp **char) int {
         return mb_cmd_build(av, n);
     }
     if (n >= 1 && gen.cstr_eq(av[0], "run") != 0) {
-        return mb_cmd_run();
+        return mb_cmd_run(av, n);
     }
     if (n >= 1 && gen.cstr_eq(av[0], "version") != 0) {
+        if (drv_has_link_option(av, n) != 0) {
+            gen.fail("version 不支持 --link");
+            return 2;
+        }
         return mb_print_version(0);
     }
     if (n >= 1 && gen.cstr_eq(av[0], "list") != 0) {

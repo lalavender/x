@@ -46,7 +46,7 @@ def main():
     selection = WORK / "source-selection"
     shutil.rmtree(selection, ignore_errors=True)
     selection.mkdir()
-    (selection / "project.toml").write_text('[project]\nname = "selection"\nsource = "."\n')
+    (selection / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "selection"\nsource = "."\n')
     for suffix, condition in (("linux.arm64", "linux && arm64"),
                               ("linux.x64", "linux && x64"), ("darwin.x64", "darwin && x64")):
         (selection / f"main.{suffix}.yh").write_text(
@@ -60,7 +60,7 @@ def main():
     shutil.rmtree(project, ignore_errors=True)
     shutil.copytree(ROOT / "tests/modules/projects/llvmtarget", project)
     shutil.copytree(ROOT / "compiler/gen", project / "gen")
-    (project / "gen/project.toml").write_text('[project]\nname = "gen"\nsource = "."\n')
+    (project / "gen/project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n')
     result = run([str(compiler), "build"], cwd=project)
     assert result.returncode == 0, result.stdout + result.stderr
     result = run([str(project / ".build/llvmtarget")])

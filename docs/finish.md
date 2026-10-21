@@ -2,6 +2,22 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-21 project.toml 库文件链接（普通项目，移植到 LL12 基线）
+
+- 在 `origin/llvm`（0.0.6 / LL12 退役后）重新落地 `[link]` 普通项目能力：
+  `[project].os/arch`、`[link]` 命名组、`[link-<os>-<arch>]` 覆盖、
+  realpath 去重、`.a`/`.so`/`.so.<版本>`/`.dylib`/`.tbd` 检查、
+  `.build` 的 mtime/size+摘要缓存、`--link` 选择与 `run` 动态库搜索路径。
+- 链接路径收敛到 LLVM 单后端：ELF 选中库统一 `--start-group`，Darwin 按
+  声明顺序；链接顺序为对象 → `[link]` 库 → `[c].libs` → 系统库。
+- 新增 `compiler/cmd/project_link.yh`、`compiler/cmd/link_inputs.yh`；
+  适配 `project_index` / `module_build` / `driver` / `link_cache` 与
+  `gen/model|state|target_info`。
+- 测试复用 `linkgroups` / `linkshared` / `linkbad` / `linkmissingtarget` /
+  `linkbadsuffix`，`build-check.py` 最新基线 111/111（LLVM）。
+- 为兼容最新“种子不入库”策略，本工作区只在被忽略的 `bin/` 放置过渡种子；
+  未提交种子二进制。普通项目实现已完成；F1（编译器自举闭包迁移）仍未开始。
+
 ## 2026-10-21 LL12-0：基线冻结与旧发射消费者普查
 
 - 新建专用 worktree `/Users/lavender/Documents/x-ll12`（分支

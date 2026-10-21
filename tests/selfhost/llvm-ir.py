@@ -95,7 +95,7 @@ def main():
     shutil.copytree(ROOT / 'tests/modules/projects/llvmscalar', project)
     for name in ('gen', 'ir'):
         shutil.copytree(ROOT / f'compiler/{name}', project / name)
-        (project / name / 'project.toml').write_text(f'[project]\nname = "{name}"\nsource = "."\n')
+        (project / name / 'project.toml').write_text(f'[project]\nos = "host"\narch = "host"\nname = "{name}"\nsource = "."\n')
     (project / 'backend').mkdir()
     for source in (ROOT / 'compiler/backend').glob('llvm_*.yh'):
         # llvm_bridge.yh 只声明内嵌桥的 C ABI；本门直接消费文本发射器，
@@ -103,7 +103,7 @@ def main():
         if source.name == 'llvm_bridge.yh':
             continue
         shutil.copy2(source, project / 'backend' / source.name)
-    (project / 'backend/project.toml').write_text('[project]\nname = "backend"\nsource = "."\n'
+    (project / 'backend/project.toml').write_text('[project]\nos = "host"\narch = "host"\nname = "backend"\nsource = "."\n'
         '[dependencies]\ngen = { path = "../gen" }\nir = { path = "../ir" }\n')
     compiler = Path(args.compiler_path).resolve()
     result = run([str(compiler), 'build'], cwd=project)

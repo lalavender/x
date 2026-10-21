@@ -176,7 +176,7 @@ def run_aggregate_suite(args, compiler, sdk_root, oracle, environment):
         shutil.copy2(AGGREGATE_PROBE, project / "src/main.yh")
         shutil.copy2(AGGREGATE_BRIDGE, project / "c/bridge.c")
         (project / "project.toml").write_text(
-            '[project]\nname = "llvmdarwinaggregate"\nsource = "src"\n\n'
+            '[project]\nos = "host"\narch = "host"\nname = "llvmdarwinaggregate"\nsource = "src"\n\n'
             '[c]\nsources = ["c/bridge.c"]\n', encoding="utf-8")
         built = run(f"aggregate-build-{opt[2:]}", [compiler, "--backend", "llvm",
             "--target", TRIPLE, opt, "build"], environment, cwd=project)
@@ -260,7 +260,7 @@ def main():
         shutil.copy2(PROBE, project / "src/main.yh")
         shutil.copy2(BRIDGE, project / "c/bridge.c")
         (project / "project.toml").write_text(
-            '[project]\nname = "llvmdarwinabi"\nsource = "src"\n\n'
+            '[project]\nos = "host"\narch = "host"\nname = "llvmdarwinabi"\nsource = "src"\n\n'
             '[c]\nsources = ["c/bridge.c"]\n', encoding="utf-8")
         object_file = (project / ".build/targets/aarch64-apple-darwin/llvm"
             / opt[1:] / "obj/llvmdarwinabi-main.o")

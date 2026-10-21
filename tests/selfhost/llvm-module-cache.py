@@ -601,7 +601,7 @@ def main():
         shutil.rmtree(project)
     shutil.copytree(ROOT / "tests/modules/projects/llvmmodule", project)
     shutil.copytree(ROOT / "compiler/ir", project / "ir")
-    (project / "ir/project.toml").write_text('[project]\nname = "ir"\nsource = "."\n')
+    (project / "ir/project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "ir"\nsource = "."\n')
     (project / "main/main.yh").write_text(FIXTURE.lstrip("\n"))
     result = run([str(compiler), "build"], project)
     (WORK / "build.log").write_text(result.stdout + result.stderr)

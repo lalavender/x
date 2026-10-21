@@ -44,13 +44,13 @@ def main():
     shutil.copytree(ROOT / "tests/modules/projects/llvmglobalbackend", project)
     for name in ("gen", "ir"):
         shutil.copytree(ROOT / f"compiler/{name}", project / name)
-        (project / name / "project.toml").write_text(f'[project]\nname = "{name}"\nsource = "."\n')
+        (project / name / "project.toml").write_text(f'[project]\nos = "host"\narch = "host"\nname = "{name}"\nsource = "."\n')
     (project / "backend").mkdir()
     for source in (ROOT / "compiler/backend").glob("llvm_*.yh"):
         if source.name != "llvm_bridge.yh":
             shutil.copy2(source, project / "backend" / source.name)
     (project / "backend/project.toml").write_text(
-        '[project]\nname = "backend"\nsource = "."\n'
+        '[project]\nos = "host"\narch = "host"\nname = "backend"\nsource = "."\n'
         '[dependencies]\ngen = { path = "../gen" }\nir = { path = "../ir" }\n')
     compiler = Path(args.compiler_path).resolve()
     result = run([str(compiler), "build"], cwd=project)

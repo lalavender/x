@@ -1613,6 +1613,8 @@ fn mb_cmd_build(av **char, an int) int {
     let out_arg *char = 0;
     let mod_arg_off int = -1;
     let mod_arg_len int = 0;
+    let mod_arg_n int = 0;
+    li_select_reset();
     let i int = 1;
     for i < an {
         if (gen.cstr_eq(av[i], "--stats") != 0) {
@@ -1620,23 +1622,60 @@ fn mb_cmd_build(av **char, an int) int {
             i += 1;
             continue;
         }
-        if (gen.cstr_eq(av[i], "-o") != 0 && i + 1 < an) {
+        if (gen.cstr_eq(av[i], "--link") != 0) {
+            if (i + 1 >= an || av[i + 1][0] == 0) {
+                usage();
+                gen.fail("--link 需要一个组名");
+                return 2;
+            }
+            let link_arg *char = av[i + 1];
+            let ll int = 0;
+            for link_arg[ll] != 0 { ll += 1; }
+            let lo int = gen.tml_intern_str(link_arg.to_type(*u8), 0, ll);
+            if (lo < 0) { return -1; }
+            if (pl_group_name_ok(lo, ll) == 0) {
+                usage();
+                gen.fail("--link 组名只能包含字母、数字、_、-");
+                return 2;
+            }
+            if (li_select_add(lo, ll) != 0) { return -1; }
+            i += 2;
+            continue;
+        }
+        if (gen.cstr_eq(av[i], "-o") != 0) {
+            if (i + 1 >= an) {
+                usage();
+                gen.fail("-o 需要一个输出路径");
+                return 2;
+            }
             out_arg = av[i + 1];
             i += 2;
             continue;
         }
-        // 模块参数
-        let sl int = 0;
-        for av[i][sl] != 0 {
-            sl += 1;
+        if (av[i][0] == '-') {
+            usage();
+            gen.fail_path("未知的项目构建选项: ", av[i]);
+            return 2;
         }
+        // 模块参数：只允许一个，避免最后一个静默覆盖。
+        let sl int = 0;
+        for av[i][sl] != 0 { sl += 1; }
         let mo int = gen.tml_intern_str(av[i].to_type(*u8), 0, sl);
-        if (mo < 0) {
-            return -1;
+        if (mo < 0) { return -1; }
+        if (mod_arg_n > 0) {
+            usage();
+            gen.fail("yh build 只能指定一个模块");
+            return 2;
         }
         mod_arg_off = mo;
         mod_arg_len = sl;
+        mod_arg_n += 1;
         i += 1;
+    }
+    if (gs.task.c_check_only != 0 && li_select_count() > 0) {
+        usage();
+        gen.fail("yh check 不支持 --link");
+        return 2;
     }
     mb_stats_build_start_ns = 0;
     mb_stats_project_ns = 0;
@@ -1659,6 +1698,7 @@ fn mb_cmd_build(av **char, an int) int {
     // 捕获根路径（后续 canon 调用会改写全局游标）
     let root_off int = pj_canon_off;
     let root_len int = pj_canon_len;
+    pj_set_root_project(root_off, root_len);
     let proj int = pj_load_project(root_off, root_len);
     if (proj < 0) {
         return 1;
@@ -1683,6 +1723,11 @@ fn mb_cmd_build(av **char, an int) int {
         }
     } else {
         rootmod = pj_entry_mod(proj);
+    }
+    if (rootmod < 0 && li_select_count() > 0) {
+        usage();
+        gen.fail("库项目没有可链接产物，--link 不适用");
+        return 2;
     }
     // topo（依赖序）
     let count int = 0;
@@ -1761,10 +1806,43 @@ fn mb_cmd_build(av **char, an int) int {
 }
 
 // mb_cmd_run：yh run——构建清单 entry 并运行，返回程序退出码。
-fn mb_cmd_run() int {
+// 支持与 build 相同的 --link 组选择；跨目标在本机运行前明确拒绝。
+fn mb_cmd_run(av **char, an int) int {
     let gs *gen.GenState = gen.G();
     if (mb_resolve_self_path() != 0) {
         return 1;
+    }
+    li_select_reset();
+    let i int = 1;
+    for i < an {
+        if (gen.cstr_eq(av[i], "--stats") != 0) {
+            gs.c_stats_enabled = 1;
+            i += 1;
+            continue;
+        }
+        if (gen.cstr_eq(av[i], "--link") != 0) {
+            if (i + 1 >= an || av[i + 1][0] == 0) {
+                usage();
+                gen.fail("--link 需要一个组名");
+                return 2;
+            }
+            let link_arg *char = av[i + 1];
+            let ll int = 0;
+            for link_arg[ll] != 0 { ll += 1; }
+            let lo int = gen.tml_intern_str(link_arg.to_type(*u8), 0, ll);
+            if (lo < 0) { return -1; }
+            if (pl_group_name_ok(lo, ll) == 0) {
+                usage();
+                gen.fail("--link 组名只能包含字母、数字、_、-");
+                return 2;
+            }
+            if (li_select_add(lo, ll) != 0) { return -1; }
+            i += 2;
+            continue;
+        }
+        usage();
+        gen.fail_path("yh run 未知参数: ", av[i]);
+        return 2;
     }
     gs.task.c_path = "yh";
     gs.c_front_cache = 1;
@@ -1777,9 +1855,13 @@ fn mb_cmd_run() int {
     }
     let root_off int = pj_canon_off;
     let root_len int = pj_canon_len;
+    pj_set_root_project(root_off, root_len);
     let proj int = pj_load_project(root_off, root_len);
     if (proj < 0) {
         return 1;
+    }
+    if (gen.target_matches_host() == 0) {
+        return gen.fail("yh run 的目标平台必须与宿主一致；跨目标请用 yh build");
     }
     if (pj_entry_mod(proj) < 0) {
         return gen.fail("库项目没有入口，无法 run（需要一个 module main;）");
@@ -1810,6 +1892,7 @@ fn mb_cmd_run() int {
     if (mb_link(gen.arr_cstr(binbuf), build_off, build_len, count, proj) != 0) {
         return 1;
     }
+    if (li_apply_runtime_env() != 0) { return 1; }
     // 运行（继承 stdout/stderr；退出码由 waitpid 状态字解码）。
     let args [2]*char;
     args[0] = gen.arr_cstr(binbuf);
@@ -1851,6 +1934,11 @@ fn mb_cmd_list(av **char, an int) int {
     let has_resolve int = 0;
     let i int = 1;
     for i < an {
+        if (gen.cstr_eq(av[i], "--link") != 0) {
+            usage();
+            gen.fail("yh list 不支持 --link");
+            return 2;
+        }
         if (gen.cstr_eq(av[i], "--resolve") != 0 && i + 1 < an) {
             let sl int = 0;
             for av[i + 1][sl] != 0 {
@@ -1879,6 +1967,7 @@ fn mb_cmd_list(av **char, an int) int {
     }
     let root_off int = pj_canon_off;
     let root_len int = pj_canon_len;
+    pj_set_root_project(root_off, root_len);
     let proj int = pj_load_project(root_off, root_len);
     if (proj < 0) {
         return 1;

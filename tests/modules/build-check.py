@@ -223,6 +223,11 @@ case("r3-target-specific-sources", "platform-source", "platformsource", ".")
 case("r3-linux-syscall-intrinsic", "linux-syscall-asm", "linuxsyscall", ".")
 case("r3-darwin-getattrlistbulk-api", "darwin-dir-api", "darwindirapi", ".")
 case("r3-os-directory-enumeration", "directory-scan", "directoryscan", ".")
+case("link-static-groups", "linkgroups", "linkgroups", ".", 0)
+case("link-shared-group", "linkshared", "linkshared", ".", 0)
+case("link-bad-section", "fail", "linkbad", ".", msg="非法的链接节名")
+case("link-missing-target", "fail", "linkmissingtarget", ".", msg="project.os 必填")
+case("link-bad-suffix", "fail", "linkbadsuffix", ".", msg="后缀不符合当前目标")
 # —— MOD-U2：清单与三层解析 ——
 case("u2-toml-syntax", "fail", "tomlbad", ".", msg="project.toml")
 case("u2-toml-unknown-field", "fail", "tomlunknown", ".", msg="未知字段")
@@ -276,12 +281,12 @@ def copy_proj(src, dst):
         # 方式复用其源码测跨项目解析，拷入后补最小清单使其可被发现。
         shutil.copytree(ROOT / "compiler" / "ir", dst / "ir")
         (dst / "ir" / "project.toml").write_text(
-            "[project]\nname = \"yh_ir\"\nsource = \".\"\n")
+            '[project]\nos = "host"\narch = "host"\nname = "yh_ir"\nsource = "."\n')
     if src.name in ("llvmtarget", "llvmfront"):
         # 目标模型测试复用实际 gen 源码，并以项目依赖检验公开类型/接口。
         shutil.copytree(ROOT / "compiler" / "gen", dst / "gen")
         (dst / "gen" / "project.toml").write_text(
-            '[project]\nname = "gen"\nsource = "."\n')
+            '[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n')
     if src.name == "llvmchecked":
         # 快照 fixture 消费真实 AST/语义实现，并在模块内构造和释放原 arena。
         # backend 里的 llvm_bridge.yh 只声明内嵌桥的 C ABI，fixture 不链接桥，
@@ -291,7 +296,7 @@ def copy_proj(src, dst):
         for module in ("gen", "lex", "ast", "comptime", "ir", "backend", "check"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
-        (core / "project.toml").write_text('[project]\nname = "checkedcore"\nsource = "."\n')
+        (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "checkedcore"\nsource = "."\n')
         # 快照 fixture 的导出签名引用 CheckedModule；module_snapshot.yh 的句点
         # 排在下划线前，因而其类型声明先于 module_snapshot_fixture.yh。
         shutil.copyfile(src / "fixture.yh", core / "ast" / "module_snapshot_fixture.yh")
@@ -303,7 +308,7 @@ def copy_proj(src, dst):
         for module in ("gen", "lex", "ast", "parse", "comptime", "ir", "backend", "check"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
-        (core / "project.toml").write_text('[project]\nname = "lowercore"\nsource = "."\n')
+        (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "lowercore"\nsource = "."\n')
         shutil.copyfile(src / "fixture.yh", dst / "main" / "fixture.yh")
 
 
@@ -378,6 +383,110 @@ def main():
 
         dst = WORK / f"{c['fixture'].replace('/', '_')}--{c['name']}"
         copy_proj(PROJ / c["fixture"], dst)
+        if c["kind"] == "linkgroups":
+            cc = "clang" if sys.platform == "darwin" else "gcc"
+
+            def make_archive(src_name, lib_name):
+                obj = dst / "lib" / (Path(src_name).stem + ".o")
+                lib = dst / "lib" / lib_name
+                lib.parent.mkdir(parents=True, exist_ok=True)
+                r = sh([cc, "-c", src_name, "-o", str(obj)], cwd=dst)
+                if r.returncode != 0:
+                    return r
+                return sh(["ar", "rcs", str(lib), str(obj)], cwd=dst)
+
+            def link_count(proc):
+                lines = [line for line in proc.stderr.splitlines()
+                         if line.startswith("yh-stats ")]
+                return max([stat_value(line, "link", 0) for line in lines] or [0])
+
+            for src_name, lib_name in (("c/a.c", "liba.a"), ("c/b.c", "libb.a"),
+                                       ("c/a_target.c", "liba_target.a"),
+                                       ("c/extra.c", "libextra.a")):
+                prepared = make_archive(src_name, lib_name)
+                if prepared.returncode != 0:
+                    report(False, c["name"], f"准备归档失败: {prepared.stderr[-400:]}")
+                    return out
+            first = sh([compiler, "build", "--stats"], cwd=dst)
+            program = dst / ".build" / "linkgroups"
+            run = sh([str(program)], cwd=dst) if program.exists() else None
+            report(first.returncode == 0 and run is not None and run.returncode == 79,
+                   c["name"] + ":default-all",
+                   f"默认全链失败: build={first.returncode}, "
+                   f"run={run.returncode if run else None}\n{first.stderr[-500:]}")
+            second = sh([compiler, "build", "--stats"], cwd=dst)
+            report(second.returncode == 0 and link_count(second) == 0,
+                   c["name"] + ":hot-cache",
+                   f"第二次构建未命中链接缓存: link={link_count(second)}\n"
+                   f"{second.stderr[-400:]}")
+            single = sh([compiler, "build", "--link", "a"], cwd=dst)
+            report(single.returncode != 0 and "link_probe_b" in (single.stdout + single.stderr),
+                   c["name"] + ":single-group",
+                   f"--link a 不应混入 b 组符号: rc={single.returncode}\n"
+                   f"{single.stderr[-400:]}")
+            unknown = sh([compiler, "build", "--link", "nope"], cwd=dst)
+            report(unknown.returncode != 0 and "未知的 --link 组" in (unknown.stdout + unknown.stderr),
+                   c["name"] + ":unknown-group",
+                   f"未知组没有明确诊断: rc={unknown.returncode}\n{unknown.stderr[-400:]}")
+            hidden = dst / "lib" / "libb.a"
+            backup = dst / "lib" / "libb.a.hidden"
+            hidden.rename(backup)
+            unselected = sh([compiler, "build", "--link", "a"], cwd=dst)
+            report(unselected.returncode != 0
+                   and "库文件不存在" not in (unselected.stdout + unselected.stderr),
+                   c["name"] + ":unselected-missing",
+                   f"未选组缺文件不应在链接前报错: rc={unselected.returncode}\n"
+                   f"{unselected.stderr[-400:]}")
+            selected_missing = sh([compiler, "build", "--link", "b"], cwd=dst)
+            report(selected_missing.returncode != 0
+                   and "库文件不存在" in (selected_missing.stdout + selected_missing.stderr),
+                   c["name"] + ":selected-missing",
+                   f"选中组缺文件没有明确诊断: rc={selected_missing.returncode}\n"
+                   f"{selected_missing.stderr[-400:]}")
+            backup.rename(hidden)
+            # 同路径替换归档内容必须触发重新链接。
+            (dst / "c" / "a_target.c").write_text(
+                "int link_probe_a(void) { return 51; }\n", encoding="utf-8")
+            prepared = make_archive("c/a_target.c", "liba_target.a")
+            changed = sh([compiler, "build", "--stats"], cwd=dst)
+            run_changed = sh([str(program)], cwd=dst) if program.exists() else None
+            report(prepared.returncode == 0 and changed.returncode == 0
+                   and link_count(changed) > 0
+                   and run_changed is not None and run_changed.returncode == 80,
+                   c["name"] + ":archive-content",
+                   f"归档内容变化未重链或运行值不符: prepared={prepared.returncode}, "
+                   f"build={changed.returncode}, link={link_count(changed)}, "
+                   f"run={run_changed.returncode if run_changed else None}\n"
+                   f"{changed.stderr[-400:]}")
+            shutil.rmtree(dst / "lib")
+            checked = sh([compiler, "check"], cwd=dst)
+            report(checked.returncode == 0, c["name"] + ":check-no-files",
+                   f"check 不应检查库文件: rc={checked.returncode}\n{checked.stderr[-400:]}")
+            return out
+        if c["kind"] == "linkshared":
+            cc = "clang" if sys.platform == "darwin" else "gcc"
+            lib = dst / "lib" / ("libdyn.dylib" if sys.platform == "darwin" else "libdyn.so")
+            lib.parent.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "darwin":
+                prepared = sh([cc, "-dynamiclib", "-o", str(lib), "c/dyn.c"], cwd=dst)
+            else:
+                prepared = sh([cc, "-shared", "-fPIC", "-o", str(lib), "c/dyn.c"], cwd=dst)
+            if prepared.returncode != 0:
+                report(False, c["name"], f"准备共享库失败: {prepared.stderr[-400:]}")
+                return out
+            built = sh([compiler, "build"], cwd=dst)
+            ran = sh([compiler, "run", "--link", "dyn"], cwd=dst)
+            report(prepared.returncode == 0 and built.returncode == 0
+                   and ran.returncode == 31,
+                   c["name"] + ":run-shared",
+                   f"共享库链接/运行失败: prep={prepared.returncode}, "
+                   f"build={built.returncode}, run={ran.returncode}\n"
+                   f"{ran.stderr[-500:]}")
+            bad = sh([compiler, "run", "--link", "missing"], cwd=dst)
+            report(bad.returncode != 0 and "未知的 --link 组" in (bad.stdout + bad.stderr),
+                   c["name"] + ":unknown-group",
+                   f"共享库未知组没有诊断: rc={bad.returncode}\n{bad.stderr[-400:]}")
+            return out
         if c["kind"] == "cabi-run":
             # 两个窄参数探针和整数转换必须进入选定的真实后端并保持 C ABI。
             built = sh([compiler, "build", "--stats"], cwd=dst)

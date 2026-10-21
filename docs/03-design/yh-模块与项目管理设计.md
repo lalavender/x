@@ -179,8 +179,13 @@ import 的绑定属于文件，不能被同模块其他文件借用。重复导�
 | project.version | 字符串 | 可选，`yh version` 读取显示；具体版本规则另行确定 |
 | project.author | 字符串 | 可选，仅接受不解释 |
 | project.source | 字符串 | 可选，默认 src；相对 project.toml 所在目录的源码根 |
+| project.os | 字符串 | 必填；`linux` / `darwin` / `host`。缺省目标平台；`--target` 可覆盖 |
+| project.arch | 字符串 | 必填；`arm64` / `x64` / `host`。缺省目标架构；`--target` 可覆盖 |
 | dependencies | 表 | 可选，记录当前项目直接依赖的项目 |
 | dependencies.<依赖键>.path | 字符串 | 本地阶段必填，相对声明它的 project.toml 定位依赖项目 |
+| link | 表 | 可选；组名 → 具体库文件路径字符串数组 |
+| link.<组名> | 字符串数组 | 相对 project.toml 的库文件路径；允许绝对路径；空数组合法 |
+| link-<os>-<arch> | 表 | 可选；只允许 linux/darwin × arm64/x64；同名组替换公共组，新组追加 |
 
 源码根必须位于本项目内；依赖 path 可以指向外部本地项目。依赖键用于
 清单管理和错误定位，不充当源码导入别名。源码仍以依赖提供的 module
@@ -192,6 +197,35 @@ import 的绑定属于文件，不能被同模块其他文件借用。重复导�
 从当前工作目录向上查找最近的 project.toml，确定命令所属项目。项目的
 source、依赖 path 均相对各自清单解析，不受运行命令的工作目录影响。
 源码根内遇到嵌套 project.toml 时停止进入，该目录属于另一个项目。
+
+### 4.1 `[link]` 库输入（2026-10-21）
+
+`[link]` 只写具体库文件，不写 `-l` 库名或表项：
+
+```toml
+[project]
+os = "linux"
+arch = "arm64"
+
+[link]
+core = ["vendor/lib/libcore.a"]
+
+[link-linux-arm64]
+core = ["vendor/lib/linux-arm64/libcore.so"]
+extra = ["vendor/lib/linux-arm64/libextra.a"]
+```
+
+- 只有根项目生效；依赖项目的 `[link]` 忽略。
+- 相对路径基于声明它的 `project.toml`，读取时用 `realpath` 规范化。
+- `.a` 普通静态库按需加载；`.so` / `.dylib` 动态链接；`.tbd` 为 Darwin
+  链接期 stub。首版不实现 whole-archive。
+- 默认链接全部有效组；`build` / `run` 的 `--link <组名>` 可重复，只选点名组。
+- ELF 选中库放在同一 `--start-group`；Darwin 按声明顺序。
+- 只检查最终选中组；`check` / `list` 只校验 schema，不检查库文件。
+- 链接顺序：对象 → `[link]` 库 → `[c].libs` → 系统库。
+
+详细诊断、缓存和自举迁移见
+[实施方案](../02-plan/yh-project-link静态库实施方案.md)。
 
 无效 TOML、字段类型错误、未知字段和不可用源根要有清晰诊断。
 不接受旧清单作为隐式替代，也不扫描未列入 dependencies 的任意库目录。

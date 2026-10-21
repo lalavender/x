@@ -20,7 +20,7 @@ def main():
         shutil.rmtree(project)
     shutil.copytree(ROOT / 'tests/modules/projects/llvmmodule', project)
     shutil.copytree(ROOT / 'compiler/ir', project / 'ir')
-    (project / 'ir/project.toml').write_text('[project]\nname = "ir"\nsource = "."\n')
+    (project / 'ir/project.toml').write_text('[project]\nos = "host"\narch = "host"\nname = "ir"\nsource = "."\n')
     result = subprocess.run([str(compiler), 'build'], cwd=project,
                             capture_output=True, text=True, timeout=180)
     (WORK / 'build.log').write_text(result.stdout + result.stderr)

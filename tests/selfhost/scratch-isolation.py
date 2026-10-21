@@ -17,7 +17,7 @@ def make_project(parent: Path, index: int) -> Path:
     source = project / "src"
     source.mkdir(parents=True)
     (project / "project.toml").write_text(
-        f'[project]\nname = "scratch{index}"\nsource = "src"\n',
+        f'[project]\nos = "host"\narch = "host"\nname = "scratch{index}"\nsource = "src"\n',
         encoding="utf-8",
     )
     (source / "main.yh").write_bytes(FIXTURE.read_bytes())

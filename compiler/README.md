@@ -39,9 +39,10 @@ make code-stats         # 统计 compiler/ 下 yh 源码规模
 make seed               # 滚种子（仅在 test 与 selfhost-native 全绿后执行）
 ```
 
-`make` 的产物形态随宿主（Darwin → Mach-O arm64，Linux → ELF），链接走
-系统 gcc/clang，不需要运行时库或额外环境变量。可直接用于编译 `.yh` 程序
-与跑语料：
+`make` 的产物形态随宿主（Darwin → Mach-O arm64，Linux → ELF）。最终链接
+由内嵌 lld/平台驱动完成；编译器自举闭包由 `make bootstrap` 准备。普通项目
+可在 `project.toml` 的 `[link]` 中声明平台库文件，由 `yh build` 自动链入。
+可直接用于编译 `.yh` 程序与跑语料：
 
 ```bash
 python3 tests/yh-run/check.py --compiler $PWD/../yh
@@ -159,7 +160,9 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | `cmd/compile.yh` | 单文件编译模式（`yh -o out file.yh`） |
 | `cmd/toml.yh` | `project.toml` 解析与 schema 诊断（未知字段、必填项、行号） |
 | `cmd/project_state.yh` | 项目状态：根发现、源码根扫描、模块索引 |
-| `cmd/project_index.yh` | 清单 schema 校验与字段提取（name/version/author/source/dependencies） |
+| `cmd/project_index.yh` | 清单 schema 校验与字段提取（name/version/author/source/os/arch/dependencies） |
+| `cmd/project_link.yh` | `[project].os/arch` 与 `[link]` / `[link-<os>-<arch>]` 结构校验 |
+| `cmd/link_inputs.yh` | `--link` 选择、库文件 realpath/格式/摘要检查与 argv 素材 |
 | `cmd/project_resolve.yh` | 三层来源解析（当前项目 / 标准库 / 直接依赖）与 import 绑定 |
 | `cmd/module_build.yh` | 项目构建编排、模块缓存与过渡期 `check` |
 | `cmd/build_scheduler.yh` | 有界 fork worker、继承只读项目快照、接口就绪调度与本轮接口隔离 |

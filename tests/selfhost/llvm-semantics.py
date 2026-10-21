@@ -29,7 +29,7 @@ def main() -> int:
         text = source.read_text(encoding="utf-8")
         (project / "main/main.yh").write_text("module main;\n" + text, encoding="utf-8")
         (project / "project.toml").write_text(
-            '[project]\nname = "probe"\nversion = "0.0.1"\nsource = "."\n', encoding="utf-8")
+            '[project]\nos = "host"\narch = "host"\nname = "probe"\nversion = "0.0.1"\nsource = "."\n', encoding="utf-8")
         compiled = subprocess.run([str(compiler), "build", "--stats"], cwd=project,
                                   capture_output=True, text=True, timeout=120)
         (project / "compile.log").write_text(compiled.stdout + compiled.stderr, encoding="utf-8")

@@ -31,7 +31,7 @@ def main():
         # llvm_bridge.yh 只声明内嵌桥的 C ABI；本门不链接桥，拷入时排除。
         shutil.copytree(ROOT / "compiler" / module, core / module,
                         ignore=shutil.ignore_patterns("llvm_bridge.yh"))
-    (core / "project.toml").write_text('[project]\nname = "lowercore"\nsource = "."\n')
+    (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "lowercore"\nsource = "."\n')
     shutil.copyfile(FIXTURE / "fixture.yh", project / "main/fixture.yh")
     result = run([str(Path(args.compiler_path).resolve()), "build"], project)
     (WORK / "build.log").write_text(result.stdout + result.stderr)

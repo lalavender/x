@@ -374,11 +374,11 @@ def self_test() -> bool:
     tmp_root.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=str(tmp_root)) as directory:
         project = Path(directory)
-        (project / "project.toml").write_text('[project]\nname = "root"\n')
+        (project / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "root"\n')
         (project / "main.yh").write_text("module main;\n")
         nested = project / "tools"
         nested.mkdir()
-        (nested / "project.toml").write_text('[project]\nname = "nested"\n')
+        (nested / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "nested"\n')
         (nested / "ir.yh").write_text("module ir;\n")
         assert expected_artifacts(project) == {
             "asm/root-main/main.s", "asm/root-main/root-main.stub.s",
@@ -390,12 +390,12 @@ def self_test() -> bool:
     with tempfile.TemporaryDirectory(dir=str(tmp_root)) as directory:
         project = Path(directory)
         (project / "project.toml").write_text(
-            '[project]\nname = "root"\n\n[dependencies]\nir = { path = "tools/ir" }\n'
+            '[project]\nos = "host"\narch = "host"\nname = "root"\n\n[dependencies]\nir = { path = "tools/ir" }\n'
         )
         (project / "main.yh").write_text("module main;\n")
         dependency = project / "tools" / "ir"
         dependency.mkdir(parents=True)
-        (dependency / "project.toml").write_text('[project]\nname = "nested"\n')
+        (dependency / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "nested"\n')
         (dependency / "ir.yh").write_text("module ir;\n")
         assert expected_artifacts(project) == {
             "asm/root-main/main.s", "asm/root-main/root-main.stub.s",

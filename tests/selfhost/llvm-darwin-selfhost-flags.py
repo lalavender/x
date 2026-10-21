@@ -76,7 +76,7 @@ def main():
         directory = WORK / label
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "project.toml").write_text(
-            f'[project]\nname = "{label.replace("-", "_")}"\nsource = "."\n',
+            f'[project]\nos = "host"\narch = "host"\nname = "{label.replace("-", "_")}"\nsource = "."\n',
             encoding="utf-8")
         (directory / "main.yh").write_text(SOURCE_TEXT, encoding="utf-8")
         return directory, directory / "out"

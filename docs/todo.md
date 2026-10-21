@@ -80,9 +80,11 @@
 
 ### F. project.toml 库文件链接（LINK，普通项目完成，自举迁移待下一轮）
 
-普通项目能力已落地：`compiler/cmd/project_link.yh`、`compiler/cmd/link_inputs.yh`、
-`--link` 解析、`[project].os/arch`、目标覆盖表、路径/后缀/格式检查、
-`.build` 摘要缓存及 `linkgroups`/`linkshared`/反例 fixture。
+普通项目能力已落地并移植到 LL12 基线：`compiler/cmd/project_link.yh`、
+`compiler/cmd/link_inputs.yh`、`--link` 解析、`[project].os/arch`、目标覆盖表、
+路径/后缀/格式检查、`.build` 摘要缓存及 `linkgroups`/`linkshared`/反例 fixture；
+`build-check.py` 111/111 通过。种子按最新策略不入库，过渡候选只放被忽略的
+`bin/`；发布新 seed 后才能让只认识旧清单的 Release seed 升级到本功能。
 
 - [ ] **F1 LINK3**：compiler 清单与自举脚本迁移到同一套 `[link]` 机制，拆分
   归档/运行库参数，停用桥内重复归档注入。

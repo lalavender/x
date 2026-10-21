@@ -820,6 +820,10 @@ fn mb_link(out_path *char, build_off int, build_len int,
         c_lib_n += gs.p_projs[cproj].c_lib_n;
         cpi += 1;
     }
+    if (li_prepare(root_proj, build_off, build_len) != 0) {
+        return -1;
+    }
+    let link_lib_n int = li_count();
     if (mb_c_compile_sources(c_projects, c_project_n, build_off, cc) != 0) {
         return -1;
     }
@@ -1092,6 +1096,7 @@ fn mb_link(out_path *char, build_off int, build_len int,
     if (mb_c_input_hash(&hlink, c_projects, c_project_n, build_off) != 0) {
         return -1;
     }
+    li_hash(&hlink);
     let link_want [16]u8;
     mb_hash_hex(hlink, link_want);
     let link_manifest [620]u8;
@@ -1177,7 +1182,7 @@ fn mb_link(out_path *char, build_off int, build_len int,
             library_search_storage[library_search_len] = 0;
         }
     }
-    let argc int = total_rows + c_object_n + c_lib_n + 20
+    let argc int = total_rows + c_object_n + c_lib_n + link_lib_n + 24
         + (library_search_count * 2)
         + selfhost_flag_n;
     let args **char = malloc((argc * sizeof(*char)).to_type(u64)).to_type(**char);
@@ -1299,6 +1304,26 @@ fn mb_link(out_path *char, build_off int, build_len int,
     }
     let object_count int = next_arg - object_start;
     let extra_start int = next_arg;
+    // [link] 库紧跟在 yh/C 对象之后、[c].libs 和系统库之前。
+    // Linux/ELF 的静态库循环引用由同一个 --start-group 覆盖；共享库也放入
+    // group，保持声明顺序。Darwin 没有等价 group，按声明顺序直接传入。
+    if (link_lib_n > 0) {
+        let elv int = gs.c_target.os == gen.TARGET_OS_LINUX ? 1 : 0;
+        if (elv != 0) {
+            args[next_arg] = use_lld != 0 ? "--start-group" : "-Wl,--start-group";
+            next_arg += 1;
+        }
+        let lb int = 0;
+        for lb < link_lib_n {
+            args[next_arg] = li_path(lb);
+            next_arg += 1;
+            lb += 1;
+        }
+        if (elv != 0) {
+            args[next_arg] = use_lld != 0 ? "--end-group" : "-Wl,--end-group";
+            next_arg += 1;
+        }
+    }
     cp = 0;
     let libpath_i int = 0;
     for cp < c_project_n {
