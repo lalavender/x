@@ -1,333 +1,333 @@
-module backend;
-import gen;
-import ir;
+module backend
+import gen
+import ir
 
 // llvm_value：SSA 值与临时值使用不同名字空间，编号无需连续且 phi 可向前引用。
 fn llvm_value(out *LLVMOutput, value int) void {
-    llvm_text(out, "%v"); llvm_number(out, value.to_type(u64));
+    llvm_text(out, "%v"); llvm_number(out, value.to_type(u64))
 }
 
 // llvm_temp：打印函数内部的临时编号，不占用 IRModule 的稳定 SSA 值身份。
 fn llvm_temp(out *LLVMOutput, value int) void {
-    llvm_text(out, "%t"); llvm_number(out, value.to_type(u64));
+    llvm_text(out, "%t"); llvm_number(out, value.to_type(u64))
 }
 
 // llvm_new_temp：分配并开始一条临时定义，调用方随后写入指令右侧与换行。
 fn llvm_new_temp(out *LLVMOutput, next *int) int {
-    let value int = *next; *next += 1;
-    llvm_text(out, "  "); llvm_temp(out, value); llvm_text(out, " = ");
-    return value;
+    let value int = *next; *next += 1
+    llvm_text(out, "  "); llvm_temp(out, value); llvm_text(out, " = ")
+    return value
 }
 
 // llvm_abi_load_piece：从调用方聚合副本按 SysV coercion 类型读取一个八字节片。
 fn llvm_abi_load_piece(out *LLVMOutput, body *ir.IRFunction, pointer int,
     info *LLVMABIInfo, piece int, next *int) int {
-    let class int = piece == 0 ? info.class0 : info.class1;
-    let size int = piece == 0 ? info.size0 : info.size1;
-    let address int = pointer;
+    let class int = piece == 0 ? info.class0 : info.class1
+    let size int = piece == 0 ? info.size0 : info.size1
+    let address int = pointer
     if (piece > 0) {
-        address = llvm_new_temp(out, next);
-        llvm_text(out, "getelementptr i8, ptr "); llvm_value(out, pointer);
-        llvm_text(out, ", i64 "); llvm_number(out, (piece * 8).to_type(u64)); llvm_byte(out, '\n');
+        address = llvm_new_temp(out, next)
+        llvm_text(out, "getelementptr i8, ptr "); llvm_value(out, pointer)
+        llvm_text(out, ", i64 "); llvm_number(out, (piece * 8).to_type(u64)); llvm_byte(out, '\n')
     }
-    let value int = llvm_new_temp(out, next);
-    llvm_text(out, "load "); llvm_abi_piece_type(out, class, size); llvm_text(out, ", ptr ");
-    if (piece > 0) { llvm_temp(out, address); } else { llvm_value(out, address); }
-    llvm_text(out, ", align 1\n");
-    return value;
+    let value int = llvm_new_temp(out, next)
+    llvm_text(out, "load "); llvm_abi_piece_type(out, class, size); llvm_text(out, ", ptr ")
+    if (piece > 0) { llvm_temp(out, address) } else { llvm_value(out, address) }
+    llvm_text(out, ", align 1\n")
+    return value
 }
 
 // llvm_abi_store_piece：把 C 聚合返回的 coercion 值写回 yh 临时结果缓冲。
 fn llvm_abi_store_piece(out *LLVMOutput, body *ir.IRFunction, pointer int,
     info *LLVMABIInfo, piece int, value int, value_is_temp int, next *int) void {
-    let class int = piece == 0 ? info.class0 : info.class1;
-    let size int = piece == 0 ? info.size0 : info.size1;
-    let address int = pointer;
+    let class int = piece == 0 ? info.class0 : info.class1
+    let size int = piece == 0 ? info.size0 : info.size1
+    let address int = pointer
     if (piece > 0) {
-        address = llvm_new_temp(out, next);
-        llvm_text(out, "getelementptr i8, ptr "); llvm_value(out, pointer);
-        llvm_text(out, ", i64 "); llvm_number(out, (piece * 8).to_type(u64)); llvm_byte(out, '\n');
+        address = llvm_new_temp(out, next)
+        llvm_text(out, "getelementptr i8, ptr "); llvm_value(out, pointer)
+        llvm_text(out, ", i64 "); llvm_number(out, (piece * 8).to_type(u64)); llvm_byte(out, '\n')
     }
-    llvm_text(out, "store "); llvm_abi_piece_type(out, class, size); llvm_byte(out, ' ');
-    if (value_is_temp != 0) { llvm_temp(out, value); } else { llvm_value(out, value); }
-    llvm_text(out, ", ptr ");
-    if (piece > 0) { llvm_temp(out, address); } else { llvm_value(out, address); }
-    llvm_text(out, ", align 1\n");
+    llvm_text(out, "store "); llvm_abi_piece_type(out, class, size); llvm_byte(out, ' ')
+    if (value_is_temp != 0) { llvm_temp(out, value) } else { llvm_value(out, value) }
+    llvm_text(out, ", ptr ")
+    if (piece > 0) { llvm_temp(out, address) } else { llvm_value(out, address) }
+    llvm_text(out, ", align 1\n")
 }
 
 // llvm_abi_emit_c_aggregate_call：发射 C 聚合返回的 SysV coercion 或 hidden sret 调用。
 fn llvm_abi_emit_c_aggregate_call(unit *ir.IRModule, out *LLVMOutput,
     body *ir.IRFunction, inst *ir.IRInst, call *ir.IRCall,
     symbol *ir.IRModuleSymbol, next *int) void {
-    let result_type int = symbol.type_id;
-    let result ir.IRModuleType = unit.types[result_type];
-    let result_info LLVMABIInfo;
-    llvm_abi_classify(unit, result_type, &result_info);
-    let hidden int = 1;
-    let output_buffer int = body.call_args[call.arg_first].value;
-    let call_result int = -1;
-    if (result_info.memory == 0) { call_result = llvm_new_temp(out, next); }
-    llvm_text(out, "call ");
-    if (result_info.memory != 0) { llvm_text(out, "void"); }
-    else { llvm_signature_return(unit, result_type, out); }
+    let result_type int = symbol.type_id
+    let result ir.IRModuleType = unit.types[result_type]
+    let result_info LLVMABIInfo
+    llvm_abi_classify(unit, result_type, &result_info)
+    let hidden int = 1
+    let output_buffer int = body.call_args[call.arg_first].value
+    let call_result int = -1
+    if (result_info.memory == 0) { call_result = llvm_new_temp(out, next) }
+    llvm_text(out, "call ")
+    if (result_info.memory != 0) { llvm_text(out, "void") }
+    else { llvm_signature_return(unit, result_type, out) }
     llvm_text(out, " @"); llvm_quote(out,
-        body.call_symbols + call.symbol_first, call.symbol_len); llvm_byte(out, '(');
-    let physical int = 0;
+        body.call_symbols + call.symbol_first, call.symbol_len); llvm_byte(out, '(')
+    let physical int = 0
     if (result_info.memory != 0) {
-        llvm_text(out, "ptr sret("); llvm_abi_memory_type(unit, result_type, out);
-        llvm_text(out, ") align "); llvm_number(out, result.align.to_type(u64)); llvm_byte(out, ' ');
-        llvm_value(out, output_buffer); physical = 1;
+        llvm_text(out, "ptr sret("); llvm_abi_memory_type(unit, result_type, out)
+        llvm_text(out, ") align "); llvm_number(out, result.align.to_type(u64)); llvm_byte(out, ' ')
+        llvm_value(out, output_buffer); physical = 1
     }
-    let logical int = 0;
+    let logical int = 0
     for logical < symbol.param_count {
-        if (physical > 0) { llvm_text(out, ", "); }
-        let argument ir.IRCallArg = body.call_args[call.arg_first + logical + hidden];
-        let param_type_id int = symbol.params[logical];
-        let param ir.IRModuleType = unit.types[param_type_id];
+        if (physical > 0) { llvm_text(out, ", ") }
+        let argument ir.IRCallArg = body.call_args[call.arg_first + logical + hidden]
+        let param_type_id int = symbol.params[logical]
+        let param ir.IRModuleType = unit.types[param_type_id]
         if (param.kind == ir.IR_MODULE_TY_STRUCT || param.kind == ir.IR_MODULE_TY_UNION) {
-            let info LLVMABIInfo;
-            llvm_abi_classify(unit, param_type_id, &info);
+            let info LLVMABIInfo
+            llvm_abi_classify(unit, param_type_id, &info)
             if (info.memory != 0) {
-                llvm_text(out, "ptr byval("); llvm_abi_memory_type(unit, param_type_id, out);
-                llvm_text(out, ") align "); llvm_number(out, param.align.to_type(u64));
-                llvm_byte(out, ' '); llvm_value(out, argument.value); physical += 1;
+                llvm_text(out, "ptr byval("); llvm_abi_memory_type(unit, param_type_id, out)
+                llvm_text(out, ") align "); llvm_number(out, param.align.to_type(u64))
+                llvm_byte(out, ' '); llvm_value(out, argument.value); physical += 1
             } else {
-                let piece int = 0;
+                let piece int = 0
                 for piece < info.chunk_count {
-                    if (piece > 0) { llvm_text(out, ", "); }
-                    let value int = llvm_abi_load_piece(out, body, argument.value, &info, piece, next);
-                    let class int = piece == 0 ? info.class0 : info.class1;
-                    let size int = piece == 0 ? info.size0 : info.size1;
-                    llvm_abi_piece_type(out, class, size); llvm_byte(out, ' '); llvm_temp(out, value);
-                    physical += 1; piece += 1;
+                    if (piece > 0) { llvm_text(out, ", ") }
+                    let value int = llvm_abi_load_piece(out, body, argument.value, &info, piece, next)
+                    let class int = piece == 0 ? info.class0 : info.class1
+                    let size int = piece == 0 ? info.size0 : info.size1
+                    llvm_abi_piece_type(out, class, size); llvm_byte(out, ' '); llvm_temp(out, value)
+                    physical += 1; piece += 1
                 }
             }
         } else {
-            let kind int = param.kind;
-            let attr int = llvm_abi_attr_kind(unit, call.abi, kind);
-            llvm_abi_type(out, call.abi, kind, param.bits);
-            if (attr == 1) { llvm_text(out, " signext"); }
-            else if (attr == 2) { llvm_text(out, " zeroext"); }
-            llvm_byte(out, ' '); llvm_value(out, argument.value); physical += 1;
+            let kind int = param.kind
+            let attr int = llvm_abi_attr_kind(unit, call.abi, kind)
+            llvm_abi_type(out, call.abi, kind, param.bits)
+            if (attr == 1) { llvm_text(out, " signext") }
+            else if (attr == 2) { llvm_text(out, " zeroext") }
+            llvm_byte(out, ' '); llvm_value(out, argument.value); physical += 1
         }
-        logical += 1;
+        logical += 1
     }
-    llvm_byte(out, ')'); llvm_byte(out, '\n');
+    llvm_byte(out, ')'); llvm_byte(out, '\n')
     if (result_info.memory == 0) {
-        let piece int = 0;
+        let piece int = 0
         for piece < result_info.chunk_count {
-            let value int = call_result;
-            let is_temp int = 1;
+            let value int = call_result
+            let is_temp int = 1
             if (result_info.chunk_count > 1) {
-                value = llvm_new_temp(out, next);
-                llvm_text(out, "extractvalue "); llvm_signature_return(unit, result_type, out);
-                llvm_byte(out, ' '); llvm_temp(out, call_result); llvm_text(out, ", ");
-                llvm_number(out, piece.to_type(u64)); llvm_byte(out, '\n');
+                value = llvm_new_temp(out, next)
+                llvm_text(out, "extractvalue "); llvm_signature_return(unit, result_type, out)
+                llvm_byte(out, ' '); llvm_temp(out, call_result); llvm_text(out, ", ")
+                llvm_number(out, piece.to_type(u64)); llvm_byte(out, '\n')
             }
             llvm_abi_store_piece(out, body, output_buffer, &result_info, piece,
-                value, is_temp, next);
-            piece += 1;
+                value, is_temp, next)
+            piece += 1
         }
     }
 }
 
 // llvm_signed：bool 与无符号整数按零扩展，有符号整数按符号扩展。
 fn llvm_signed(kind int) int {
-    return kind >= ir.IR_TY_I8 && kind <= ir.IR_TY_I64;
+    return kind >= ir.IR_TY_I8 && kind <= ir.IR_TY_I64
 }
 
 // llvm_promote：每个整数运算先扩到 i64；64 位原值用无属性 add 拷贝以统一临时引用。
 fn llvm_promote(out *LLVMOutput, body *ir.IRFunction, value int, next *int) int {
-    let type_id int = ir.ir_find_value_type(body, value);
-    let ty ir.IRType = body.types[type_id];
-    let result int = llvm_new_temp(out, next);
-    if (ty.bits == 64) { llvm_text(out, "add i64 "); llvm_value(out, value); llvm_text(out, ", 0\n"); }
+    let type_id int = ir.ir_find_value_type(body, value)
+    let ty ir.IRType = body.types[type_id]
+    let result int = llvm_new_temp(out, next)
+    if (ty.bits == 64) { llvm_text(out, "add i64 "); llvm_value(out, value); llvm_text(out, ", 0\n") }
     else {
-        llvm_text(out, llvm_signed(ty.kind) != 0 ? "sext " : "zext ");
-        llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' '); llvm_value(out, value);
-        llvm_text(out, " to i64\n");
+        llvm_text(out, llvm_signed(ty.kind) != 0 ? "sext " : "zext ")
+        llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' '); llvm_value(out, value)
+        llvm_text(out, " to i64\n")
     }
-    return result;
+    return result
 }
 
 // llvm_result：在结果位置截回源宽度，随后 CAST 才能看到正确的窄值符号。
 fn llvm_result(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, value int) void {
-    let ty ir.IRType = body.types[inst.result_type];
-    llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ");
-    if (ty.bits == 64) { llvm_text(out, "add i64 "); llvm_temp(out, value); llvm_text(out, ", 0\n"); }
+    let ty ir.IRType = body.types[inst.result_type]
+    llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ")
+    if (ty.bits == 64) { llvm_text(out, "add i64 "); llvm_temp(out, value); llvm_text(out, ", 0\n") }
     else {
-        llvm_text(out, "trunc i64 "); llvm_temp(out, value); llvm_text(out, " to ");
-        llvm_type(out, ty.kind, ty.bits); llvm_byte(out, '\n');
+        llvm_text(out, "trunc i64 "); llvm_temp(out, value); llvm_text(out, " to ")
+        llvm_type(out, ty.kind, ty.bits); llvm_byte(out, '\n')
     }
 }
 
 // llvm_predicate：按操作数源符号性选择整数谓词；bool 字节相等按实际字节比较。
 fn llvm_predicate(op int, is_signed int) *char {
-    if (op == ir.IR_OP_EQ) { return "eq"; }
-    if (op == ir.IR_OP_NE) { return "ne"; }
-    if (op == ir.IR_OP_LT) { return is_signed != 0 ? "slt" : "ult"; }
-    if (op == ir.IR_OP_LE) { return is_signed != 0 ? "sle" : "ule"; }
-    if (op == ir.IR_OP_GT) { return is_signed != 0 ? "sgt" : "ugt"; }
-    return is_signed != 0 ? "sge" : "uge";
+    if (op == ir.IR_OP_EQ) { return "eq" }
+    if (op == ir.IR_OP_NE) { return "ne" }
+    if (op == ir.IR_OP_LT) { return is_signed != 0 ? "slt" : "ult" }
+    if (op == ir.IR_OP_LE) { return is_signed != 0 ? "sle" : "ule" }
+    if (op == ir.IR_OP_GT) { return is_signed != 0 ? "sgt" : "ugt" }
+    return is_signed != 0 ? "sge" : "uge"
 }
 
 // llvm_float_predicate：有序比较对 NaN 返回假，!= 使用 unordered-not-equal 返回真。
 fn llvm_float_predicate(op int) *char {
-    if (op == ir.IR_OP_EQ) { return "oeq"; }
-    if (op == ir.IR_OP_NE) { return "une"; }
-    if (op == ir.IR_OP_LT) { return "olt"; }
-    if (op == ir.IR_OP_LE) { return "ole"; }
-    if (op == ir.IR_OP_GT) { return "ogt"; }
-    return "oge";
+    if (op == ir.IR_OP_EQ) { return "oeq" }
+    if (op == ir.IR_OP_NE) { return "une" }
+    if (op == ir.IR_OP_LT) { return "olt" }
+    if (op == ir.IR_OP_LE) { return "ole" }
+    if (op == ir.IR_OP_GT) { return "ogt" }
+    return "oge"
 }
 
 // llvm_compare：i1 仅用作临时谓词，比较结果显式恢复为源 bool 的 i8。
 fn llvm_compare(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, next *int) void {
-    let ty ir.IRType = body.types[ir.ir_find_value_type(body, inst.a)];
-    let result int = llvm_new_temp(out, next);
+    let ty ir.IRType = body.types[ir.ir_find_value_type(body, inst.a)]
+    let result int = llvm_new_temp(out, next)
     if (ir.ir_float_type(ty.kind) != 0) {
-        llvm_text(out, "fcmp "); llvm_text(out, llvm_float_predicate(inst.op));
+        llvm_text(out, "fcmp "); llvm_text(out, llvm_float_predicate(inst.op))
     } else {
-        llvm_text(out, "icmp "); llvm_text(out, llvm_predicate(inst.op, llvm_signed(ty.kind)));
+        llvm_text(out, "icmp "); llvm_text(out, llvm_predicate(inst.op, llvm_signed(ty.kind)))
     }
-    llvm_byte(out, ' '); llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' ');
-    llvm_value(out, inst.a); llvm_text(out, ", "); llvm_value(out, inst.b); llvm_byte(out, '\n');
-    llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = zext i1 ");
-    llvm_temp(out, result); llvm_text(out, " to i8\n");
+    llvm_byte(out, ' '); llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' ')
+    llvm_value(out, inst.a); llvm_text(out, ", "); llvm_value(out, inst.b); llvm_byte(out, '\n')
+    llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = zext i1 ")
+    llvm_temp(out, result); llvm_text(out, " to i8\n")
 }
 
 // llvm_division：在除法之前用安全除数消除除零与 min64/-1；不能先产生 poison 再 select。
 // 危险有符号除数改为 1：min64 的商仍为自身且余数为零；除零另恢复商 0/余数原值。
 fn llvm_division(out *LLVMOutput, a int, b int, is_signed int, remainder int, next *int) int {
-    let zero int = llvm_new_temp(out, next);
-    llvm_text(out, "icmp eq i64 "); llvm_temp(out, b); llvm_text(out, ", 0\n");
-    let unsafe int = zero;
+    let zero int = llvm_new_temp(out, next)
+    llvm_text(out, "icmp eq i64 "); llvm_temp(out, b); llvm_text(out, ", 0\n")
+    let unsafe int = zero
     if (is_signed != 0) {
-        let minimum int = llvm_new_temp(out, next);
-        llvm_text(out, "icmp eq i64 "); llvm_temp(out, a); llvm_text(out, ", -9223372036854775808\n");
-        let negative int = llvm_new_temp(out, next);
-        llvm_text(out, "icmp eq i64 "); llvm_temp(out, b); llvm_text(out, ", -1\n");
-        let overflow int = llvm_new_temp(out, next);
-        llvm_text(out, "and i1 "); llvm_temp(out, minimum); llvm_text(out, ", "); llvm_temp(out, negative); llvm_byte(out, '\n');
-        unsafe = llvm_new_temp(out, next);
-        llvm_text(out, "or i1 "); llvm_temp(out, zero); llvm_text(out, ", "); llvm_temp(out, overflow); llvm_byte(out, '\n');
+        let minimum int = llvm_new_temp(out, next)
+        llvm_text(out, "icmp eq i64 "); llvm_temp(out, a); llvm_text(out, ", -9223372036854775808\n")
+        let negative int = llvm_new_temp(out, next)
+        llvm_text(out, "icmp eq i64 "); llvm_temp(out, b); llvm_text(out, ", -1\n")
+        let overflow int = llvm_new_temp(out, next)
+        llvm_text(out, "and i1 "); llvm_temp(out, minimum); llvm_text(out, ", "); llvm_temp(out, negative); llvm_byte(out, '\n')
+        unsafe = llvm_new_temp(out, next)
+        llvm_text(out, "or i1 "); llvm_temp(out, zero); llvm_text(out, ", "); llvm_temp(out, overflow); llvm_byte(out, '\n')
     }
-    let safe int = llvm_new_temp(out, next);
-    llvm_text(out, "select i1 "); llvm_temp(out, unsafe); llvm_text(out, ", i64 1, i64 "); llvm_temp(out, b); llvm_byte(out, '\n');
-    let computed int = llvm_new_temp(out, next);
-    llvm_text(out, is_signed != 0 ? (remainder != 0 ? "srem" : "sdiv") : (remainder != 0 ? "urem" : "udiv"));
-    llvm_text(out, " i64 "); llvm_temp(out, a); llvm_text(out, ", "); llvm_temp(out, safe); llvm_byte(out, '\n');
-    let result int = llvm_new_temp(out, next);
-    llvm_text(out, "select i1 "); llvm_temp(out, zero); llvm_text(out, ", i64 ");
-    if (remainder != 0) { llvm_temp(out, a); } else { llvm_byte(out, '0'); }
-    llvm_text(out, ", i64 "); llvm_temp(out, computed); llvm_byte(out, '\n');
-    return result;
+    let safe int = llvm_new_temp(out, next)
+    llvm_text(out, "select i1 "); llvm_temp(out, unsafe); llvm_text(out, ", i64 1, i64 "); llvm_temp(out, b); llvm_byte(out, '\n')
+    let computed int = llvm_new_temp(out, next)
+    llvm_text(out, is_signed != 0 ? (remainder != 0 ? "srem" : "sdiv") : (remainder != 0 ? "urem" : "udiv"))
+    llvm_text(out, " i64 "); llvm_temp(out, a); llvm_text(out, ", "); llvm_temp(out, safe); llvm_byte(out, '\n')
+    let result int = llvm_new_temp(out, next)
+    llvm_text(out, "select i1 "); llvm_temp(out, zero); llvm_text(out, ", i64 ")
+    if (remainder != 0) { llvm_temp(out, a) } else { llvm_byte(out, '0') }
+    llvm_text(out, ", i64 "); llvm_temp(out, computed); llvm_byte(out, '\n')
+    return result
 }
 
 // llvm_binary：整数算术在 i64 中计算、浮点运算保留源宽度；移位量掩码 63，不加溢出属性。
 fn llvm_binary(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, next *int) void {
-    let ty ir.IRType = body.types[inst.result_type];
+    let ty ir.IRType = body.types[inst.result_type]
     if (ir.ir_float_type(ty.kind) != 0) {
-        let opcode *char = "fadd";
-        if (inst.op == ir.IR_OP_SUB) { opcode = "fsub"; }
-        else if (inst.op == ir.IR_OP_MUL) { opcode = "fmul"; }
-        else if (inst.op == ir.IR_OP_DIV) { opcode = "fdiv"; }
+        let opcode *char = "fadd"
+        if (inst.op == ir.IR_OP_SUB) { opcode = "fsub" }
+        else if (inst.op == ir.IR_OP_MUL) { opcode = "fmul" }
+        else if (inst.op == ir.IR_OP_DIV) { opcode = "fdiv" }
         // 浮点指令不附加 fast-math/nnan/ninf，保留 IEEE 舍入与异常值关系。
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ");
-        llvm_text(out, opcode); llvm_byte(out, ' '); llvm_type(out, ty.kind, ty.bits);
-        llvm_byte(out, ' '); llvm_value(out, inst.a); llvm_text(out, ", ");
-        llvm_value(out, inst.b); llvm_byte(out, '\n');
-        return;
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ")
+        llvm_text(out, opcode); llvm_byte(out, ' '); llvm_type(out, ty.kind, ty.bits)
+        llvm_byte(out, ' '); llvm_value(out, inst.a); llvm_text(out, ", ")
+        llvm_value(out, inst.b); llvm_byte(out, '\n')
+        return
     }
-    let a int = llvm_promote(out, body, inst.a, next);
-    let b int = llvm_promote(out, body, inst.b, next);
-    let result int = -1;
+    let a int = llvm_promote(out, body, inst.a, next)
+    let b int = llvm_promote(out, body, inst.b, next)
+    let result int = -1
     if (inst.op == ir.IR_OP_DIV || inst.op == ir.IR_OP_REM) {
-        result = llvm_division(out, a, b, llvm_signed(ty.kind), inst.op == ir.IR_OP_REM, next);
+        result = llvm_division(out, a, b, llvm_signed(ty.kind), inst.op == ir.IR_OP_REM, next)
     } else {
         if (inst.op == ir.IR_OP_SHL || inst.op == ir.IR_OP_SHR) {
-            let masked int = llvm_new_temp(out, next);
-            llvm_text(out, "and i64 "); llvm_temp(out, b); llvm_text(out, ", 63\n"); b = masked;
+            let masked int = llvm_new_temp(out, next)
+            llvm_text(out, "and i64 "); llvm_temp(out, b); llvm_text(out, ", 63\n"); b = masked
         }
-        let opcode *char = "add";
-        if (inst.op == ir.IR_OP_SUB) { opcode = "sub"; }
-        else if (inst.op == ir.IR_OP_MUL) { opcode = "mul"; }
-        else if (inst.op == ir.IR_OP_BAND) { opcode = "and"; }
-        else if (inst.op == ir.IR_OP_BOR) { opcode = "or"; }
-        else if (inst.op == ir.IR_OP_BXOR) { opcode = "xor"; }
-        else if (inst.op == ir.IR_OP_SHL) { opcode = "shl"; }
-        else if (inst.op == ir.IR_OP_SHR) { opcode = llvm_signed(ty.kind) != 0 ? "ashr" : "lshr"; }
-        result = llvm_new_temp(out, next);
-        llvm_text(out, opcode); llvm_text(out, " i64 "); llvm_temp(out, a);
-        llvm_text(out, ", "); llvm_temp(out, b); llvm_byte(out, '\n');
+        let opcode *char = "add"
+        if (inst.op == ir.IR_OP_SUB) { opcode = "sub" }
+        else if (inst.op == ir.IR_OP_MUL) { opcode = "mul" }
+        else if (inst.op == ir.IR_OP_BAND) { opcode = "and" }
+        else if (inst.op == ir.IR_OP_BOR) { opcode = "or" }
+        else if (inst.op == ir.IR_OP_BXOR) { opcode = "xor" }
+        else if (inst.op == ir.IR_OP_SHL) { opcode = "shl" }
+        else if (inst.op == ir.IR_OP_SHR) { opcode = llvm_signed(ty.kind) != 0 ? "ashr" : "lshr" }
+        result = llvm_new_temp(out, next)
+        llvm_text(out, opcode); llvm_text(out, " i64 "); llvm_temp(out, a)
+        llvm_text(out, ", "); llvm_temp(out, b); llvm_byte(out, '\n')
     }
-    llvm_result(out, body, inst, result);
+    llvm_result(out, body, inst, result)
 }
 
 // llvm_cast：整数/浮点转换按源符号性选择转换；浮点转整数先饱和到 64 位再截断。
 fn llvm_cast(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, next *int) void {
-    let from ir.IRType = body.types[ir.ir_find_value_type(body, inst.a)];
-    let to ir.IRType = body.types[inst.result_type];
+    let from ir.IRType = body.types[ir.ir_find_value_type(body, inst.a)]
+    let to ir.IRType = body.types[inst.result_type]
     let from_ptr int = ((from.kind >= ir.IR_TY_PTR && from.kind <= ir.IR_TY_PTR_LAST)
-        || from.kind == ir.IR_TY_FN_PTR).to_type(int);
+        || from.kind == ir.IR_TY_FN_PTR).to_type(int)
     let to_ptr int = ((to.kind >= ir.IR_TY_PTR && to.kind <= ir.IR_TY_PTR_LAST)
-        || to.kind == ir.IR_TY_FN_PTR).to_type(int);
+        || to.kind == ir.IR_TY_FN_PTR).to_type(int)
     if (from_ptr != 0 && to_ptr != 0) {
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ");
-        llvm_text(out, "getelementptr i8, ptr "); llvm_value(out, inst.a);
-        llvm_text(out, ", i64 0\n");
-        return;
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ")
+        llvm_text(out, "getelementptr i8, ptr "); llvm_value(out, inst.a)
+        llvm_text(out, ", i64 0\n")
+        return
     }
     if (from_ptr != 0) {
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ");
-        llvm_text(out, "ptrtoint ptr "); llvm_value(out, inst.a);
-        llvm_text(out, " to "); llvm_type(out, to.kind, to.bits); llvm_byte(out, '\n');
-        return;
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ")
+        llvm_text(out, "ptrtoint ptr "); llvm_value(out, inst.a)
+        llvm_text(out, " to "); llvm_type(out, to.kind, to.bits); llvm_byte(out, '\n')
+        return
     }
     if (to_ptr != 0) {
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ");
-        llvm_text(out, "inttoptr "); llvm_type(out, from.kind, from.bits);
-        llvm_byte(out, ' '); llvm_value(out, inst.a);
-        llvm_text(out, " to ptr\n");
-        return;
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ")
+        llvm_text(out, "inttoptr "); llvm_type(out, from.kind, from.bits)
+        llvm_byte(out, ' '); llvm_value(out, inst.a)
+        llvm_text(out, " to ptr\n")
+        return
     }
     if (ir.ir_float_type(from.kind) != 0 && ir.ir_float_type(to.kind) == 0) {
-        let converted int = llvm_new_temp(out, next);
-        llvm_text(out, "call i64 @llvm.fpto");
-        llvm_text(out, llvm_signed(to.kind) != 0 ? "si.sat.i64." : "ui.sat.i64.");
-        llvm_text(out, from.kind == ir.IR_TY_F32 ? "f32(" : "f64(");
-        llvm_type(out, from.kind, from.bits); llvm_byte(out, ' '); llvm_value(out, inst.a);
-        llvm_text(out, ")\n");
+        let converted int = llvm_new_temp(out, next)
+        llvm_text(out, "call i64 @llvm.fpto")
+        llvm_text(out, llvm_signed(to.kind) != 0 ? "si.sat.i64." : "ui.sat.i64.")
+        llvm_text(out, from.kind == ir.IR_TY_F32 ? "f32(" : "f64(")
+        llvm_type(out, from.kind, from.bits); llvm_byte(out, ' '); llvm_value(out, inst.a)
+        llvm_text(out, ")\n")
         if (to.bits == 64) {
-            llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = add i64 ");
-            llvm_temp(out, converted); llvm_text(out, ", 0\n");
+            llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = add i64 ")
+            llvm_temp(out, converted); llvm_text(out, ", 0\n")
         } else {
-            llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = trunc i64 ");
-            llvm_temp(out, converted); llvm_text(out, " to "); llvm_type(out, to.kind, to.bits);
-            llvm_byte(out, '\n');
+            llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = trunc i64 ")
+            llvm_temp(out, converted); llvm_text(out, " to "); llvm_type(out, to.kind, to.bits)
+            llvm_byte(out, '\n')
         }
-        return;
+        return
     }
-    llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ");
+    llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ")
     if (ir.ir_float_type(from.kind) != 0 && ir.ir_float_type(to.kind) != 0) {
-        llvm_text(out, from.bits < to.bits ? "fpext " : "fptrunc ");
-        llvm_type(out, from.kind, from.bits); llvm_byte(out, ' '); llvm_value(out, inst.a);
-        llvm_text(out, " to "); llvm_type(out, to.kind, to.bits); llvm_byte(out, '\n');
-        return;
+        llvm_text(out, from.bits < to.bits ? "fpext " : "fptrunc ")
+        llvm_type(out, from.kind, from.bits); llvm_byte(out, ' '); llvm_value(out, inst.a)
+        llvm_text(out, " to "); llvm_type(out, to.kind, to.bits); llvm_byte(out, '\n')
+        return
     }
     if (ir.ir_float_type(from.kind) == 0 && ir.ir_float_type(to.kind) != 0) {
-        llvm_text(out, llvm_signed(from.kind) != 0 ? "sitofp " : "uitofp ");
-        llvm_type(out, from.kind, from.bits); llvm_byte(out, ' '); llvm_value(out, inst.a);
-        llvm_text(out, " to "); llvm_type(out, to.kind, to.bits); llvm_byte(out, '\n');
-        return;
+        llvm_text(out, llvm_signed(from.kind) != 0 ? "sitofp " : "uitofp ")
+        llvm_type(out, from.kind, from.bits); llvm_byte(out, ' '); llvm_value(out, inst.a)
+        llvm_text(out, " to "); llvm_type(out, to.kind, to.bits); llvm_byte(out, '\n')
+        return
     }
     if (from.bits == to.bits) {
-        llvm_text(out, "add "); llvm_type(out, to.kind, to.bits); llvm_byte(out, ' ');
-        llvm_value(out, inst.a); llvm_text(out, ", 0\n");
+        llvm_text(out, "add "); llvm_type(out, to.kind, to.bits); llvm_byte(out, ' ')
+        llvm_value(out, inst.a); llvm_text(out, ", 0\n")
     } else {
-        llvm_text(out, from.bits > to.bits ? "trunc " : (llvm_signed(from.kind) != 0 ? "sext " : "zext "));
-        llvm_type(out, from.kind, from.bits); llvm_byte(out, ' '); llvm_value(out, inst.a);
-        llvm_text(out, " to "); llvm_type(out, to.kind, to.bits); llvm_byte(out, '\n');
+        llvm_text(out, from.bits > to.bits ? "trunc " : (llvm_signed(from.kind) != 0 ? "sext " : "zext "))
+        llvm_type(out, from.kind, from.bits); llvm_byte(out, ' '); llvm_value(out, inst.a)
+        llvm_text(out, " to "); llvm_type(out, to.kind, to.bits); llvm_byte(out, '\n')
     }
 }
 
@@ -336,276 +336,276 @@ fn llvm_cast(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, next *int) v
 fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
     out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, next *int) void {
     if (inst.op == ir.IR_OP_FN_ADDR) {
-        let target ir.IRModuleSymbol = unit.symbols[inst.imm.to_type(int)];
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = select i1 true, ptr @");
-        llvm_string(out, target.name); llvm_text(out, ", ptr null\n");
-        return;
+        let target ir.IRModuleSymbol = unit.symbols[inst.imm.to_type(int)]
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = select i1 true, ptr @")
+        llvm_string(out, target.name); llvm_text(out, ", ptr null\n")
+        return
     }
     if (inst.op == ir.IR_OP_GLOB_ADDR) {
         // 全局基址统一为字节指针，不把对象布局重复编码进 GEP 的元素类型。
-        llvm_text(out, "  "); llvm_value(out, inst.result_id);
-        llvm_text(out, " = getelementptr i8, ptr @");
-        llvm_string(out, unit.symbols[inst.imm.to_type(int)].name); llvm_text(out, ", i64 0\n");
-        return;
+        llvm_text(out, "  "); llvm_value(out, inst.result_id)
+        llvm_text(out, " = getelementptr i8, ptr @")
+        llvm_string(out, unit.symbols[inst.imm.to_type(int)].name); llvm_text(out, ", i64 0\n")
+        return
     }
     if (inst.op == ir.IR_OP_ALLOCA) {
         // 字节分配：统一按 i8 数组发射，对齐由 lowering 的源布局给出。
-        llvm_text(out, "  "); llvm_value(out, inst.result_id);
-        llvm_text(out, " = alloca i8, i64 "); llvm_number(out, inst.imm.to_type(u64));
-        llvm_text(out, ", align "); llvm_number(out, inst.aux.to_type(u64));
-        llvm_byte(out, '\n');
-        return;
+        llvm_text(out, "  "); llvm_value(out, inst.result_id)
+        llvm_text(out, " = alloca i8, i64 "); llvm_number(out, inst.imm.to_type(u64))
+        llvm_text(out, ", align "); llvm_number(out, inst.aux.to_type(u64))
+        llvm_byte(out, '\n')
+        return
     }
     if (inst.op == ir.IR_OP_GEP) {
         // 字节偏移寻址：常量偏移写 imm，动态偏移引用 u64 SSA 值。
-        llvm_text(out, "  "); llvm_value(out, inst.result_id);
-        llvm_text(out, " = getelementptr i8, ptr "); llvm_value(out, inst.a);
-        llvm_text(out, ", i64 ");
-        if (inst.b >= 0) { llvm_value(out, inst.b); } else { llvm_number(out, inst.imm.to_type(u64)); }
-        llvm_byte(out, '\n');
-        return;
+        llvm_text(out, "  "); llvm_value(out, inst.result_id)
+        llvm_text(out, " = getelementptr i8, ptr "); llvm_value(out, inst.a)
+        llvm_text(out, ", i64 ")
+        if (inst.b >= 0) { llvm_value(out, inst.b) } else { llvm_number(out, inst.imm.to_type(u64)) }
+        llvm_byte(out, '\n')
+        return
     }
     if (inst.op == ir.IR_OP_MEMCPY) {
         // 编译器生成的聚合副本允许源/目标重叠；用户 memcpy 仍按不重叠契约。
-        llvm_text(out, "  call void @llvm.memmove.p0.p0.i64(ptr ");
-        llvm_value(out, inst.a); llvm_text(out, ", ptr "); llvm_value(out, inst.b);
-        llvm_text(out, ", i64 "); llvm_number(out, inst.imm.to_type(u64));
-        llvm_text(out, ", i1 false)\n");
-        return;
+        llvm_text(out, "  call void @llvm.memmove.p0.p0.i64(ptr ")
+        llvm_value(out, inst.a); llvm_text(out, ", ptr "); llvm_value(out, inst.b)
+        llvm_text(out, ", i64 "); llvm_number(out, inst.imm.to_type(u64))
+        llvm_text(out, ", i1 false)\n")
+        return
     }
     if (inst.op == ir.IR_OP_MEMSET) {
         // 局部默认初始化直接使用 LLVM memset intrinsic，不引入运行时 libc 依赖。
-        llvm_text(out, "  call void @llvm.memset.p0.i64(ptr "); llvm_value(out, inst.a);
-        llvm_text(out, ", i8 0, i64 "); llvm_number(out, inst.imm.to_type(u64));
-        llvm_text(out, ", i1 false)\n");
-        return;
+        llvm_text(out, "  call void @llvm.memset.p0.i64(ptr "); llvm_value(out, inst.a)
+        llvm_text(out, ", i8 0, i64 "); llvm_number(out, inst.imm.to_type(u64))
+        llvm_text(out, ", i1 false)\n")
+        return
     }
     if (inst.op == ir.IR_OP_ADDR) {
         // 局部存储取址：按指针元素发 alloca，对齐取元素自然对齐（未知取 1）。
-        let pointee ir.IRType = body.types[body.types[inst.result_type].elem];
-        let align int = pointee.bits / 8;
-        if (align < 1) { align = 1; }
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = alloca ");
-        llvm_type(out, pointee.kind, pointee.bits);
-        llvm_text(out, ", align "); llvm_number(out, align.to_type(u64)); llvm_byte(out, '\n');
-        return;
+        let pointee ir.IRType = body.types[body.types[inst.result_type].elem]
+        let align int = pointee.bits / 8
+        if (align < 1) { align = 1 }
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = alloca ")
+        llvm_type(out, pointee.kind, pointee.bits)
+        llvm_text(out, ", align "); llvm_number(out, align.to_type(u64)); llvm_byte(out, '\n')
+        return
     }
     if (inst.op == ir.IR_OP_LOAD) {
         // 来源对齐未知，统一按 align 1 发射，不向 LLVM 声明更强国对齐属性。
-        let ty ir.IRType = body.types[inst.result_type];
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = load ");
-        llvm_type(out, ty.kind, ty.bits);
-        llvm_text(out, ", ptr "); llvm_value(out, inst.a); llvm_text(out, ", align 1\n");
-        return;
+        let ty ir.IRType = body.types[inst.result_type]
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = load ")
+        llvm_type(out, ty.kind, ty.bits)
+        llvm_text(out, ", ptr "); llvm_value(out, inst.a); llvm_text(out, ", align 1\n")
+        return
     }
     if (inst.op == ir.IR_OP_STORE) {
-        let value_kind int = ir.ir_find_value_type(body, inst.b);
-        let ty ir.IRType = body.types[value_kind];
-        llvm_text(out, "  store "); llvm_type(out, ty.kind, ty.bits);
-        llvm_text(out, " "); llvm_value(out, inst.b);
-        llvm_text(out, ", ptr "); llvm_value(out, inst.a); llvm_text(out, ", align 1\n");
-        return;
+        let value_kind int = ir.ir_find_value_type(body, inst.b)
+        let ty ir.IRType = body.types[value_kind]
+        llvm_text(out, "  store "); llvm_type(out, ty.kind, ty.bits)
+        llvm_text(out, " "); llvm_value(out, inst.b)
+        llvm_text(out, ", ptr "); llvm_value(out, inst.a); llvm_text(out, ", align 1\n")
+        return
     }
-    if (inst.op == ir.IR_OP_CAST) { llvm_cast(out, body, inst, next); return; }
+    if (inst.op == ir.IR_OP_CAST) { llvm_cast(out, body, inst, next); return }
     if (inst.op == ir.IR_OP_FNEG) {
-        let ty ir.IRType = body.types[inst.result_type];
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = fneg ");
-        llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' '); llvm_value(out, inst.a);
-        llvm_byte(out, '\n');
-        return;
+        let ty ir.IRType = body.types[inst.result_type]
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = fneg ")
+        llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' '); llvm_value(out, inst.a)
+        llvm_byte(out, '\n')
+        return
     }
     if (inst.op == ir.IR_OP_EQ || inst.op >= ir.IR_OP_NE && inst.op <= ir.IR_OP_GE) {
-        llvm_compare(out, body, inst, next); return;
+        llvm_compare(out, body, inst, next); return
     }
     if (inst.op >= ir.IR_OP_ADD && inst.op <= ir.IR_OP_MUL || inst.op >= ir.IR_OP_DIV && inst.op <= ir.IR_OP_SHR) {
-        llvm_binary(out, body, inst, next); return;
+        llvm_binary(out, body, inst, next); return
     }
     if (inst.op == ir.IR_OP_CALL) {
-        let call ir.IRCall = body.calls[inst.aux];
-        let called_index int = call.callee_value < 0 ? llvm_call_symbol_index(unit, body, &call) : -1;
-        let called ir.IRModuleSymbol;
-        let has_indirect_signature int = call.callee_value >= 0;
+        let call ir.IRCall = body.calls[inst.aux]
+        let called_index int = call.callee_value < 0 ? llvm_call_symbol_index(unit, body, &call) : -1
+        let called ir.IRModuleSymbol
+        let has_indirect_signature int = call.callee_value >= 0
         if (has_indirect_signature != 0) {
-            if (llvm_indirect_call_symbol(unit, &call, &called) != 0) { out.failed = 1; return; }
-        } else if (called_index >= 0) { called = unit.symbols[called_index]; }
+            if (llvm_indirect_call_symbol(unit, &call, &called) != 0) { out.failed = 1; return }
+        } else if (called_index >= 0) { called = unit.symbols[called_index] }
         if (called_index >= 0 && called.abi == ir.IR_ABI_YH_LLVM_V1
             && called.variadic == 1
             && gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
             && gen.cstr_eq(called.name, "open") != 0) {
-            if (call.arg_count < 2 || call.arg_count > 3) { out.failed = 1; return; }
+            if (call.arg_count < 2 || call.arg_count > 3) { out.failed = 1; return }
             if (call.arg_count == 3) {
-                let mode ir.IRCallArg = body.call_args[call.arg_first + 2];
-                let mode_type ir.IRType = body.types[mode.type_id];
+                let mode ir.IRCallArg = body.call_args[call.arg_first + 2]
+                let mode_type ir.IRType = body.types[mode.type_id]
                 if (mode_type.kind != ir.IR_TY_I32 && mode_type.kind != ir.IR_TY_U32) {
-                    out.failed = 1; return;
+                    out.failed = 1; return
                 }
             }
         }
         if ((has_indirect_signature != 0 || called_index >= 0)
             && llvm_abi_has_c_aggregate(unit, &called) != 0) {
             if (llvm_abi_is_aapcs64(unit) != 0) {
-                llvm_apple_abi_emit_call(unit, out, body, inst, &call, &called, next);
-            } else { llvm_abi_emit_c_call(unit, out, body, inst, &call, &called, next); }
-            if (has_indirect_signature != 0 && called.params != 0) { free(called.params.to_type(*void)); }
-            return;
+                llvm_apple_abi_emit_call(unit, out, body, inst, &call, &called, next)
+            } else { llvm_abi_emit_c_call(unit, out, body, inst, &call, &called, next) }
+            if (has_indirect_signature != 0 && called.params != 0) { free(called.params.to_type(*void)) }
+            return
         }
-        let bool_result int = 0;
-        let result_temp int = -1;
-        let arg_temp_first int = next[0];
+        let bool_result int = 0
+        let result_temp int = -1
+        let arg_temp_first int = next[0]
         if (inst.result_type >= 0 && call.abi == gen.ABI_C
-            && body.types[inst.result_type].kind == ir.IR_TY_BOOL) { bool_result = 1; }
+            && body.types[inst.result_type].kind == ir.IR_TY_BOOL) { bool_result = 1 }
         // 先把 YH 的非零 bool 字节转为 C _Bool 的 i1，再按顺序生成 call 实参。
-        let i int = 0;
+        let i int = 0
         for i < call.arg_count {
-            let arg ir.IRCallArg = body.call_args[call.arg_first + i];
-            let ty ir.IRType = body.types[arg.type_id];
+            let arg ir.IRCallArg = body.call_args[call.arg_first + i]
+            let ty ir.IRType = body.types[arg.type_id]
             if (call.abi == gen.ABI_C && ty.kind == ir.IR_TY_BOOL) {
-                llvm_new_temp(out, next);
-                llvm_text(out, "icmp ne i8 "); llvm_value(out, arg.value);
-                llvm_text(out, ", 0\n");
+                llvm_new_temp(out, next)
+                llvm_text(out, "icmp ne i8 "); llvm_value(out, arg.value)
+                llvm_text(out, ", 0\n")
             }
-            i += 1;
+            i += 1
         }
-        if (bool_result != 0) { result_temp = llvm_new_temp(out, next); }
-        else if (inst.result_id >= 0) { llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = "); }
-        llvm_text(out, "call ");
-        if (inst.result_type < 0) { llvm_text(out, "void"); }
+        if (bool_result != 0) { result_temp = llvm_new_temp(out, next) }
+        else if (inst.result_id >= 0) { llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ") }
+        llvm_text(out, "call ")
+        if (inst.result_type < 0) { llvm_text(out, "void") }
         else {
-            let result ir.IRType = body.types[inst.result_type];
-            let result_attr int = llvm_abi_attr_kind(unit, call.abi, result.kind);
-            if (result_attr == 1) { llvm_text(out, "signext "); }
-            else if (result_attr == 2) { llvm_text(out, "zeroext "); }
-            llvm_abi_type(out, call.abi, result.kind, result.bits);
+            let result ir.IRType = body.types[inst.result_type]
+            let result_attr int = llvm_abi_attr_kind(unit, call.abi, result.kind)
+            if (result_attr == 1) { llvm_text(out, "signext ") }
+            else if (result_attr == 2) { llvm_text(out, "zeroext ") }
+            llvm_abi_type(out, call.abi, result.kind, result.bits)
         }
         if (called.variadic == 1) {
-            llvm_text(out, " (");
-            let fixed int = 0;
+            llvm_text(out, " (")
+            let fixed int = 0
             for fixed < called.param_count {
-                if (fixed > 0) { llvm_text(out, ", "); }
-                let fixed_type ir.IRModuleType = unit.types[called.params[fixed]];
-                llvm_abi_type(out, called.abi, fixed_type.kind, fixed_type.bits);
-                fixed += 1;
+                if (fixed > 0) { llvm_text(out, ", ") }
+                let fixed_type ir.IRModuleType = unit.types[called.params[fixed]]
+                llvm_abi_type(out, called.abi, fixed_type.kind, fixed_type.bits)
+                fixed += 1
             }
-            if (called.param_count > 0) { llvm_text(out, ", "); }
-            llvm_text(out, "...)");
+            if (called.param_count > 0) { llvm_text(out, ", ") }
+            llvm_text(out, "...)")
         }
         if (has_indirect_signature != 0) {
-            llvm_byte(out, ' '); llvm_value(out, call.callee_value);
+            llvm_byte(out, ' '); llvm_value(out, call.callee_value)
         } else {
-            llvm_text(out, " @"); llvm_quote(out, body.call_symbols + call.symbol_first, call.symbol_len);
+            llvm_text(out, " @"); llvm_quote(out, body.call_symbols + call.symbol_first, call.symbol_len)
         }
-        llvm_byte(out, '(');
-        i = 0;
-        let next_arg_temp int = arg_temp_first;
+        llvm_byte(out, '(')
+        i = 0
+        let next_arg_temp int = arg_temp_first
         for i < call.arg_count {
-            if (i > 0) { llvm_text(out, ", "); }
-            let arg ir.IRCallArg = body.call_args[call.arg_first + i];
-            let ty ir.IRType = body.types[arg.type_id];
-            llvm_abi_type(out, call.abi, ty.kind, ty.bits);
-            let attr int = llvm_abi_attr_kind(unit, call.abi, ty.kind);
-            if (attr == 1) { llvm_text(out, " signext"); }
-            else if (attr == 2) { llvm_text(out, " zeroext"); }
-            llvm_byte(out, ' ');
+            if (i > 0) { llvm_text(out, ", ") }
+            let arg ir.IRCallArg = body.call_args[call.arg_first + i]
+            let ty ir.IRType = body.types[arg.type_id]
+            llvm_abi_type(out, call.abi, ty.kind, ty.bits)
+            let attr int = llvm_abi_attr_kind(unit, call.abi, ty.kind)
+            if (attr == 1) { llvm_text(out, " signext") }
+            else if (attr == 2) { llvm_text(out, " zeroext") }
+            llvm_byte(out, ' ')
             if (call.abi == gen.ABI_C && ty.kind == ir.IR_TY_BOOL) {
-                llvm_temp(out, next_arg_temp); next_arg_temp += 1;
-            } else { llvm_value(out, arg.value); }
-            i += 1;
+                llvm_temp(out, next_arg_temp); next_arg_temp += 1
+            } else { llvm_value(out, arg.value) }
+            i += 1
         }
-        llvm_text(out, ")\n");
+        llvm_text(out, ")\n")
         if (bool_result != 0) {
-            llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = zext i1 ");
-            llvm_temp(out, result_temp); llvm_text(out, " to i8\n");
+            llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = zext i1 ")
+            llvm_temp(out, result_temp); llvm_text(out, " to i8\n")
         }
         if (has_indirect_signature == 0 && called_index >= 0
-            && called.no_return != 0) { llvm_text(out, "  call void @llvm.trap()\n"); }
-        if (has_indirect_signature != 0 && called.params != 0) { free(called.params.to_type(*void)); }
-        return;
+            && called.no_return != 0) { llvm_text(out, "  call void @llvm.trap()\n") }
+        if (has_indirect_signature != 0 && called.params != 0) { free(called.params.to_type(*void)) }
+        return
     }
-    let ty ir.IRType = body.types[inst.result_type];
-    let param_index int = inst.imm.to_type(int);
+    let ty ir.IRType = body.types[inst.result_type]
+    let param_index int = inst.imm.to_type(int)
     if (inst.op == ir.IR_OP_PARAM && body.abi == gen.ABI_C
         && llvm_abi_has_c_aggregate(unit, symbol) != 0) {
         if (llvm_abi_is_aapcs64(unit) != 0) {
-            let physical int = -1;
-            if (llvm_apple_abi_param(unit, symbol, out, inst, next, &physical) != 0) { return; }
-            let aggregate_return int = llvm_apple_abi_is_aggregate(unit.types[symbol.type_id].kind);
-            let logical int = inst.imm.to_type(int) - aggregate_return;
-            param_index = llvm_apple_abi_param_physical(unit, symbol, logical);
-            if (param_index < 0) { out.failed = 1; return; }
+            let physical int = -1
+            if (llvm_apple_abi_param(unit, symbol, out, inst, next, &physical) != 0) { return }
+            let aggregate_return int = llvm_apple_abi_is_aggregate(unit.types[symbol.type_id].kind)
+            let logical int = inst.imm.to_type(int) - aggregate_return
+            param_index = llvm_apple_abi_param_physical(unit, symbol, logical)
+            if (param_index < 0) { out.failed = 1; return }
         } else {
-            if (llvm_abi_c_param(unit, symbol, out, inst, next) != 0) { return; }
-            let aggregate_return int = llvm_abi_c_aggregate_kind(unit.types[symbol.type_id].kind);
-            let logical int = inst.imm.to_type(int) - aggregate_return;
-            param_index = llvm_abi_c_param_physical(unit, symbol, logical);
-            if (param_index < 0) { out.failed = 1; return; }
+            if (llvm_abi_c_param(unit, symbol, out, inst, next) != 0) { return }
+            let aggregate_return int = llvm_abi_c_aggregate_kind(unit.types[symbol.type_id].kind)
+            let logical int = inst.imm.to_type(int) - aggregate_return
+            param_index = llvm_abi_c_param_physical(unit, symbol, logical)
+            if (param_index < 0) { out.failed = 1; return }
         }
     }
     if (inst.op == ir.IR_OP_PARAM && body.abi == gen.ABI_C && ty.kind == ir.IR_TY_BOOL) {
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = zext i1 %p");
-        llvm_number(out, param_index.to_type(u64)); llvm_text(out, " to i8\n");
-        return;
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = zext i1 %p")
+        llvm_number(out, param_index.to_type(u64)); llvm_text(out, " to i8\n")
+        return
     }
     if (inst.op == ir.IR_OP_CONST && ir.ir_float_type(ty.kind) != 0) {
         if (ty.kind == ir.IR_TY_F64) {
-            llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = bitcast i64 ");
-            llvm_number(out, inst.imm.to_type(u64)); llvm_text(out, " to double\n");
+            llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = bitcast i64 ")
+            llvm_number(out, inst.imm.to_type(u64)); llvm_text(out, " to double\n")
         } else {
             // 前端以 f64 IEEE 位型保存 f32 常量；先精确重解释，再窄化一次。
-            let widened int = llvm_new_temp(out, next);
-            llvm_text(out, "bitcast i64 "); llvm_number(out, inst.imm.to_type(u64));
-            llvm_text(out, " to double\n  "); llvm_value(out, inst.result_id);
-            llvm_text(out, " = fptrunc double "); llvm_temp(out, widened);
-            llvm_text(out, " to float\n");
+            let widened int = llvm_new_temp(out, next)
+            llvm_text(out, "bitcast i64 "); llvm_number(out, inst.imm.to_type(u64))
+            llvm_text(out, " to double\n  "); llvm_value(out, inst.result_id)
+            llvm_text(out, " = fptrunc double "); llvm_temp(out, widened)
+            llvm_text(out, " to float\n")
         }
-        return;
+        return
     }
-    llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ");
+    llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ")
     if (inst.op == ir.IR_OP_PHI) {
-        llvm_text(out, "phi "); llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' ');
-        let phi ir.IRPhi = body.phis[inst.aux]; let i int = 0;
+        llvm_text(out, "phi "); llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' ')
+        let phi ir.IRPhi = body.phis[inst.aux]; let i int = 0
         for i < phi.count {
-            if (i > 0) { llvm_text(out, ", "); }
-            let input ir.IRPhiInput = body.phi_inputs[phi.first + i];
-            llvm_text(out, "[ "); llvm_value(out, input.value); llvm_text(out, ", %b");
-            llvm_number(out, input.pred.to_type(u64)); llvm_text(out, " ]"); i += 1;
+            if (i > 0) { llvm_text(out, ", ") }
+            let input ir.IRPhiInput = body.phi_inputs[phi.first + i]
+            llvm_text(out, "[ "); llvm_value(out, input.value); llvm_text(out, ", %b")
+            llvm_number(out, input.pred.to_type(u64)); llvm_text(out, " ]"); i += 1
         }
-        llvm_byte(out, '\n'); return;
+        llvm_byte(out, '\n'); return
     }
     if (inst.op != ir.IR_OP_CONST && inst.op != ir.IR_OP_PARAM && inst.op != ir.IR_OP_COPY) {
-        out.failed = 1; return;
+        out.failed = 1; return
     }
     if (ty.kind >= ir.IR_TY_PTR) {
         // 不透明指针没有可加的整数 0：PARAM/COPY 用零偏移 GEP，CONST 用 inttoptr。
         if (inst.op == ir.IR_OP_CONST) {
-            llvm_text(out, "inttoptr i64 "); llvm_number(out, inst.imm.to_type(u64));
-            llvm_text(out, " to ptr\n");
+            llvm_text(out, "inttoptr i64 "); llvm_number(out, inst.imm.to_type(u64))
+            llvm_text(out, " to ptr\n")
         } else {
-            llvm_text(out, "getelementptr i8, ptr ");
+            llvm_text(out, "getelementptr i8, ptr ")
             if (inst.op == ir.IR_OP_PARAM) {
-                llvm_text(out, "%p"); llvm_number(out, param_index.to_type(u64));
+                llvm_text(out, "%p"); llvm_number(out, param_index.to_type(u64))
             } else {
-                llvm_value(out, inst.a);
+                llvm_value(out, inst.a)
             }
-            llvm_text(out, ", i64 0\n");
+            llvm_text(out, ", i64 0\n")
         }
-        return;
+        return
     }
     if (ir.ir_float_type(ty.kind) != 0) {
         // select 是逐位复制；用 fadd 0.0 复制会破坏负零等 IEEE 位型。
-        llvm_text(out, "select i1 true, "); llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' ');
+        llvm_text(out, "select i1 true, "); llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' ')
         if (inst.op == ir.IR_OP_PARAM) {
-            llvm_text(out, "%p"); llvm_number(out, param_index.to_type(u64));
-        } else { llvm_value(out, inst.a); }
-        llvm_text(out, ", "); llvm_type(out, ty.kind, ty.bits); llvm_text(out, " 0.0\n");
-        return;
+            llvm_text(out, "%p"); llvm_number(out, param_index.to_type(u64))
+        } else { llvm_value(out, inst.a) }
+        llvm_text(out, ", "); llvm_type(out, ty.kind, ty.bits); llvm_text(out, " 0.0\n")
+        return
     }
-    llvm_text(out, "add "); llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' ');
-    if (inst.op == ir.IR_OP_PARAM) { llvm_text(out, "%p"); llvm_number(out, param_index.to_type(u64)); llvm_text(out, ", 0\n"); }
-    else if (inst.op == ir.IR_OP_COPY) { llvm_value(out, inst.a); llvm_text(out, ", 0\n"); }
+    llvm_text(out, "add "); llvm_type(out, ty.kind, ty.bits); llvm_byte(out, ' ')
+    if (inst.op == ir.IR_OP_PARAM) { llvm_text(out, "%p"); llvm_number(out, param_index.to_type(u64)); llvm_text(out, ", 0\n") }
+    else if (inst.op == ir.IR_OP_COPY) { llvm_value(out, inst.a); llvm_text(out, ", 0\n") }
     else {
-        let value u64 = inst.imm.to_type(u64);
-        if (ty.bits < 64) { value &= (1.to_type(u64) << ty.bits) - 1; }
-        llvm_text(out, "0, "); llvm_number(out, value); llvm_byte(out, '\n');
+        let value u64 = inst.imm.to_type(u64)
+        if (ty.bits < 64) { value &= (1.to_type(u64) << ty.bits) - 1 }
+        llvm_text(out, "0, "); llvm_number(out, value); llvm_byte(out, '\n')
     }
 }
 
@@ -613,53 +613,53 @@ fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
 fn llvm_terminator(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
     out *LLVMOutput, body *ir.IRFunction, block *ir.IRBlock, next *int) void {
     if (block.term == ir.IR_TERM_BR) {
-        llvm_text(out, "  br label %b"); llvm_number(out, block.succ0.to_type(u64)); llvm_byte(out, '\n');
+        llvm_text(out, "  br label %b"); llvm_number(out, block.succ0.to_type(u64)); llvm_byte(out, '\n')
     } else if (block.term == ir.IR_TERM_COND_BR) {
-        let condition int = llvm_new_temp(out, next);
-        llvm_text(out, "icmp ne i8 "); llvm_value(out, block.term_value); llvm_text(out, ", 0\n  br i1 ");
-        llvm_temp(out, condition); llvm_text(out, ", label %b"); llvm_number(out, block.succ0.to_type(u64));
-        llvm_text(out, ", label %b"); llvm_number(out, block.succ1.to_type(u64)); llvm_byte(out, '\n');
+        let condition int = llvm_new_temp(out, next)
+        llvm_text(out, "icmp ne i8 "); llvm_value(out, block.term_value); llvm_text(out, ", 0\n  br i1 ")
+        llvm_temp(out, condition); llvm_text(out, ", label %b"); llvm_number(out, block.succ0.to_type(u64))
+        llvm_text(out, ", label %b"); llvm_number(out, block.succ1.to_type(u64)); llvm_byte(out, '\n')
     } else if (block.term == ir.IR_TERM_RET) {
         if (body.abi == gen.ABI_C) {
             if (llvm_abi_is_aapcs64(unit) != 0) {
-                if (llvm_apple_abi_return(unit, symbol, body, out, next) != 0) { return; }
-            } else if (llvm_abi_c_return(unit, symbol, body, out, next) != 0) { return; }
+                if (llvm_apple_abi_return(unit, symbol, body, out, next) != 0) { return }
+            } else if (llvm_abi_c_return(unit, symbol, body, out, next) != 0) { return }
         }
-        let ty ir.IRType = body.types[body.ret_type];
+        let ty ir.IRType = body.types[body.ret_type]
         if (body.abi == gen.ABI_C && ty.kind == ir.IR_TY_BOOL) {
-            let normalized int = llvm_new_temp(out, next);
-            llvm_text(out, "icmp ne i8 "); llvm_value(out, block.term_value); llvm_text(out, ", 0\n  ret i1 ");
-            llvm_temp(out, normalized); llvm_byte(out, '\n');
+            let normalized int = llvm_new_temp(out, next)
+            llvm_text(out, "icmp ne i8 "); llvm_value(out, block.term_value); llvm_text(out, ", 0\n  ret i1 ")
+            llvm_temp(out, normalized); llvm_byte(out, '\n')
         } else {
-            llvm_text(out, "  ret "); llvm_type(out, ty.kind, ty.bits);
-            if (ty.kind != ir.IR_TY_VOID) { llvm_byte(out, ' '); llvm_value(out, block.term_value); }
-            llvm_byte(out, '\n');
+            llvm_text(out, "  ret "); llvm_type(out, ty.kind, ty.bits)
+            if (ty.kind != ir.IR_TY_VOID) { llvm_byte(out, ' '); llvm_value(out, block.term_value) }
+            llvm_byte(out, '\n')
         }
-    } else { llvm_text(out, "  unreachable\n"); }
+    } else { llvm_text(out, "  unreachable\n") }
 }
 
 // llvm_function：定义、每条指令和终结均记录来源区间；块顺序只影响文本，不替换 CFG。
 fn llvm_function(unit *ir.IRModule, function *ir.IRModuleFunction, out *LLVMOutput) void {
-    let symbol ir.IRModuleSymbol = unit.symbols[function.symbol];
-    let map int = llvm_map(out, symbol.source, symbol.offset, function.symbol);
-    llvm_text(out, "define ");
-    if (symbol.linkage == ir.IR_MODULE_LINK_PRIVATE) { llvm_text(out, "internal "); }
-    llvm_signature(unit, &symbol, out, 1); llvm_text(out, " {\n"); llvm_map_end(out, map);
-    let next int = 0; let b int = 0;
+    let symbol ir.IRModuleSymbol = unit.symbols[function.symbol]
+    let map int = llvm_map(out, symbol.source, symbol.offset, function.symbol)
+    llvm_text(out, "define ")
+    if (symbol.linkage == ir.IR_MODULE_LINK_PRIVATE) { llvm_text(out, "internal ") }
+    llvm_signature(unit, &symbol, out, 1); llvm_text(out, " {\n"); llvm_map_end(out, map)
+    let next int = 0; let b int = 0
     for b < function.body.block_count {
-        let block ir.IRBlock = function.body.blocks[b];
-        llvm_byte(out, 'b'); llvm_number(out, b.to_type(u64)); llvm_text(out, ":\n");
-        let i int = 0;
+        let block ir.IRBlock = function.body.blocks[b]
+        llvm_byte(out, 'b'); llvm_number(out, b.to_type(u64)); llvm_text(out, ":\n")
+        let i int = 0
         for i < block.inst_count {
-            let index int = block.first_inst + i;
-            let loc ir.IRModuleLoc = function.locs[index];
-            map = llvm_map(out, loc.source, loc.offset, function.symbol);
-            llvm_instruction(unit, &symbol, out, &function.body, &function.body.insts[index], &next);
-            llvm_map_end(out, map); i += 1;
+            let index int = block.first_inst + i
+            let loc ir.IRModuleLoc = function.locs[index]
+            map = llvm_map(out, loc.source, loc.offset, function.symbol)
+            llvm_instruction(unit, &symbol, out, &function.body, &function.body.insts[index], &next)
+            llvm_map_end(out, map); i += 1
         }
-        map = llvm_map(out, symbol.source, symbol.offset, function.symbol);
-        llvm_terminator(unit, &symbol, out, &function.body, &block, &next); llvm_map_end(out, map);
-        b += 1;
+        map = llvm_map(out, symbol.source, symbol.offset, function.symbol)
+        llvm_terminator(unit, &symbol, out, &function.body, &block, &next); llvm_map_end(out, map)
+        b += 1
     }
-    llvm_text(out, "}\n\n"); out.emitted += 1;
+    llvm_text(out, "}\n\n"); out.emitted += 1
 }

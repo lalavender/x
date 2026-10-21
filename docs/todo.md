@@ -136,11 +136,21 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 - [ ] **H1 字符串字面量只读化评估**：字面量放只读段，可写副本走显式复制；
   收益是省一个 16KB 可写段，代价是语义变更（字面量改为不可变），需评估现有
   语料与 `tests/yh-run/` 影响后再决定。
-- [ ] **H2 分号清理（SC，0.0.8-rc）**：换行终结已在 `0.0.8-rc` 落地并通过
-  `make test` / `make selfhost-native`（201 + 82 处续行迁移，记录见
-  [完成记录](01-finished/yh-换行终结语句-2026-10-22.md)）。**剩余**：发版滚种子
-  后删除 `compiler/` 的 24,466 个冗余分号（保留 1,061 个同行分隔），再刷新
-  文档与二次滚种子；顺序与验收见[方案](02-plan/yh-分号清理实施方案.md)。
+- [ ] **H2 分号清理（SC，0.0.8-rc）**：换行终结与 `compiler/` 分号删除均已完成
+  （删 24,514、保留 1,061；`make test` 与 `make selfhost-native` 全绿，记录见
+  [换行终结](01-finished/yh-换行终结语句-2026-10-22.md)、
+  [分号删除](01-finished/yh-分号删除-2026-10-22.md)）。**剩余**：清 `libs/`、
+  `tests/`、`examples/`，正式 `0.0.8` 种子发布后 `make seed` 并刷新文档；
+  见[方案](02-plan/yh-分号清理实施方案.md)。
+- [ ] **H3 发布资产与源码不一致（P0）**：`0.0.8-rc.4` darwin 资产里的 `yh`
+  字节搜索无 `换行终结符分配失败`、对无分号源码报 `期望 ';'`，但该 tag 源码与
+  发布流水线自身的 `--compiler` 语料门都通过（80/80）。需重跑该 tag 构建并比对
+  `dist/selfhost/cc4` 与打包内容，确认 `cp cc4 yh` 是否被旧产物覆盖。
+- [ ] **H4 LLVM 闭包缓存 flags 被写成临时 workspace 路径（P0）**：发布/CI 的
+  `make bootstrap` 会把 `tmp/llvm-migration/llvm-host-*/selfhost-flags.txt` 重写成
+  当次 act 工作区绝对路径，任务结束即失效；本地 `make selfhost-native` 因此报
+  `Darwin 自举闭包：真实闭包链接失败`。修法：flags 只写缓存内的相对/固定路径，
+  或在 bootstrap 后统一改写回 `$YH_LLVM_CACHE`。
 
 ## P2 长期与按需
 

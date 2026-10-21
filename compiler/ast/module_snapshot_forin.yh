@@ -1,263 +1,263 @@
-module ast;
-import gen;
-import ir;
+module ast
+import gen
+import ir
 
 // checked_lower_forin_bindings：验证 for-in 绑定链并记录其稳定绑定 ID。
 // 解析器按元素、下标的顺序写入绑定表；源码顺序则是下标、元素。
 fn checked_lower_forin_bindings(l *CheckedLower, stmt AstStmt,
     loop *CheckedLoop, stmt_id int) int {
-    if (stmt.first_binding < 0 || stmt.first_binding >= l.store.binding_n) { return -2; }
-    let elem_row int = stmt.first_binding;
-    let elem AstBinding = l.store.bindings[elem_row];
+    if (stmt.first_binding < 0 || stmt.first_binding >= l.store.binding_n) { return -2 }
+    let elem_row int = stmt.first_binding
+    let elem AstBinding = l.store.bindings[elem_row]
     if (elem.stmt_id != stmt_id || elem.is_param != 0 || elem.sym_kind != gen.SYM_VAR
-        || elem.id < 0 || elem.id >= l.function_binding_count) { return -2; }
-    loop.forin_elem = elem.id;
-    loop.forin_index = -1;
+        || elem.id < 0 || elem.id >= l.function_binding_count) { return -2 }
+    loop.forin_elem = elem.id
+    loop.forin_index = -1
     if (elem.next >= 0) {
-        if (elem.next >= l.store.binding_n || elem.next != stmt.last_binding) { return -2; }
-        let index AstBinding = l.store.bindings[elem.next];
+        if (elem.next >= l.store.binding_n || elem.next != stmt.last_binding) { return -2 }
+        let index AstBinding = l.store.bindings[elem.next]
         if (index.stmt_id != stmt_id || index.is_param != 0 || index.sym_kind != gen.SYM_VAR
             || index.id < 0 || index.id >= l.function_binding_count
-            || index.id == elem.id) { return -2; }
-        loop.forin_index = index.id;
+            || index.id == elem.id) { return -2 }
+        loop.forin_index = index.id
     } else if (stmt.last_binding != elem_row) {
-        return -2;
+        return -2
     }
-    return 0;
+    return 0
 }
 
 // checked_lower_forin_source：求数组/切片来源的一次性数据地址与长度。
 // 对切片表达式按 base、start、end 顺序各降低一次，避免循环重复求值。
 fn checked_lower_forin_source(l *CheckedLower, flow *CheckedFlow, expr_id int,
     ptr_out *int, len_out *int, elem_out *int) int {
-    let b *AstIRBuilder = &l.builder;
-    if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2; }
-    let node AstExpr = l.store.expressions[expr_id];
+    let b *AstIRBuilder = &l.builder
+    if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2 }
+    let node AstExpr = l.store.expressions[expr_id]
     for node.kind == AST_EXPR_PRIMARY && node.child0 >= 0 {
-        expr_id = node.child0;
-        if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2; }
-        node = l.store.expressions[expr_id];
+        expr_id = node.child0
+        if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2 }
+        node = l.store.expressions[expr_id]
     }
-    if (node.type_id < 0 || node.type_id >= l.store.type_n) { return -2; }
-    let ty gen.CType = l.store.types[node.type_id];
+    if (node.type_id < 0 || node.type_id >= l.store.type_n) { return -2 }
+    let ty gen.CType = l.store.types[node.type_id]
     if ((ty.kind != gen.TY_ARRAY && ty.kind != gen.TY_SLICE)
-        || ty.elem < 0 || ty.elem >= l.store.type_n) { return -2; }
-    let elem_ty gen.CType = l.store.types[ty.elem];
-    if (elem_ty.size <= 0) { return -2; }
-    elem_out[0] = ty.elem;
+        || ty.elem < 0 || ty.elem >= l.store.type_n) { return -2 }
+    let elem_ty gen.CType = l.store.types[ty.elem]
+    if (elem_ty.size <= 0) { return -2 }
+    elem_out[0] = ty.elem
     if (ty.kind == gen.TY_ARRAY) {
-        if (ty.len < 0) { return -2; }
-        let ptr int = checked_lower_lvalue_ptr(l, flow, expr_id);
-        if (ptr == -2) { return -2; }
-        if (ptr < 0) { return -1; }
+        if (ty.len < 0) { return -2 }
+        let ptr int = checked_lower_lvalue_ptr(l, flow, expr_id)
+        if (ptr == -2) { return -2 }
+        if (ptr < 0) { return -1 }
         let length int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
-            -1, -1, ty.len.to_type(i64));
-        if (length < 0) { return -1; }
-        ptr_out[0] = ptr;
-        len_out[0] = length;
-        return 0;
+            -1, -1, ty.len.to_type(i64))
+        if (length < 0) { return -1 }
+        ptr_out[0] = ptr
+        len_out[0] = length
+        return 0
     }
     if (node.kind == AST_EXPR_SLICE && node.child0 >= 0
         && node.child1 >= 0 && node.child2 >= 0) {
-        let base_ptr int = -1;
-        let base_len int = -1;
-        let base_elem int = -1;
+        let base_ptr int = -1
+        let base_len int = -1
+        let base_elem int = -1
         let status int = checked_lower_forin_source(l, flow, node.child0,
-            &base_ptr, &base_len, &base_elem);
-        if (status != 0) { return status; }
-        if (base_elem != ty.elem) { return -2; }
-        let start int = checked_lower_expr_inner(l, flow, node.child1);
-        if (start == -2) { return -2; }
-        if (start < 0) { return -1; }
-        let end int = checked_lower_expr_inner(l, flow, node.child2);
-        if (end == -2) { return -2; }
-        if (end < 0) { return -1; }
-        let ustart int = checked_lower_adjust(l, start, ir.IR_TY_U64);
-        let uend int = checked_lower_adjust(l, end, ir.IR_TY_U64);
-        if (ustart < 0 || uend < 0) { return -2; }
+            &base_ptr, &base_len, &base_elem)
+        if (status != 0) { return status }
+        if (base_elem != ty.elem) { return -2 }
+        let start int = checked_lower_expr_inner(l, flow, node.child1)
+        if (start == -2) { return -2 }
+        if (start < 0) { return -1 }
+        let end int = checked_lower_expr_inner(l, flow, node.child2)
+        if (end == -2) { return -2 }
+        if (end < 0) { return -1 }
+        let ustart int = checked_lower_adjust(l, start, ir.IR_TY_U64)
+        let uend int = checked_lower_adjust(l, end, ir.IR_TY_U64)
+        if (ustart < 0 || uend < 0) { return -2 }
         let stride int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
-            -1, -1, elem_ty.size.to_type(i64));
-        if (stride < 0) { return -1; }
+            -1, -1, elem_ty.size.to_type(i64))
+        if (stride < 0) { return -1 }
         let offset int = ast_ir_b_add_inst(b, ir.IR_OP_MUL, ir.IR_TY_U64,
-            ustart, stride, 0);
-        if (offset < 0) { return -1; }
-        let ptr int = ast_ir_b_add_gep_value(b, base_ptr, offset, ir.IR_TY_PTR);
+            ustart, stride, 0)
+        if (offset < 0) { return -1 }
+        let ptr int = ast_ir_b_add_gep_value(b, base_ptr, offset, ir.IR_TY_PTR)
         let length int = ast_ir_b_add_inst(b, ir.IR_OP_SUB, ir.IR_TY_U64,
-            uend, ustart, 0);
-        if (ptr < 0 || length < 0) { return -1; }
-        ptr_out[0] = ptr;
-        len_out[0] = length;
-        return 0;
+            uend, ustart, 0)
+        if (ptr < 0 || length < 0) { return -1 }
+        ptr_out[0] = ptr
+        len_out[0] = length
+        return 0
     }
-    let ptr2 int = checked_lower_slice_ptr(l, flow, expr_id);
-    if (ptr2 == -2) { return -2; }
-    if (ptr2 < 0) { return -1; }
-    let len2 int = checked_lower_slice_len(l, flow, expr_id);
-    if (len2 == -2) { return -2; }
-    if (len2 < 0) { return -1; }
-    ptr_out[0] = ptr2;
-    len_out[0] = len2;
-    return 0;
+    let ptr2 int = checked_lower_slice_ptr(l, flow, expr_id)
+    if (ptr2 == -2) { return -2 }
+    if (ptr2 < 0) { return -1 }
+    let len2 int = checked_lower_slice_len(l, flow, expr_id)
+    if (len2 == -2) { return -2 }
+    if (len2 < 0) { return -1 }
+    ptr_out[0] = ptr2
+    len_out[0] = len2
+    return 0
 }
 
 // checked_lower_forin_prepare：解析并求值 for-in 来源；结果留在当前循环栈项。
 // 来源和区间端点均在循环前序言求一次，发现趟与真实趟共享同一 SSA 值。
 fn checked_lower_forin_prepare(l *CheckedLower, flow *CheckedFlow,
     stmt_id int, loop *CheckedLoop) int {
-    let stmt AstStmt = l.store.statements[stmt_id];
-    if (checked_lower_forin_bindings(l, stmt, loop, stmt_id) != 0) { return -2; }
-    if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2; }
-    let first AstStmtExpr = l.store.edges[stmt.first_expr];
-    if (first.expr_id < 0 || first.expr_id >= l.store.expression_n) { return -2; }
-    let second int = first.next;
-    loop.forin = 1;
-    loop.forin_phi = -1;
-    loop.forin_next = -1;
-    loop.forin_value = -1;
-    loop.forin_index_value = -1;
-    loop.forin_data = -1;
-    loop.forin_length = -1;
-    loop.forin_start = -1;
-    loop.forin_end = -1;
-    loop.forin_range_kind = -1;
-    loop.forin_stride = 0;
+    let stmt AstStmt = l.store.statements[stmt_id]
+    if (checked_lower_forin_bindings(l, stmt, loop, stmt_id) != 0) { return -2 }
+    if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2 }
+    let first AstStmtExpr = l.store.edges[stmt.first_expr]
+    if (first.expr_id < 0 || first.expr_id >= l.store.expression_n) { return -2 }
+    let second int = first.next
+    loop.forin = 1
+    loop.forin_phi = -1
+    loop.forin_next = -1
+    loop.forin_value = -1
+    loop.forin_index_value = -1
+    loop.forin_data = -1
+    loop.forin_length = -1
+    loop.forin_start = -1
+    loop.forin_end = -1
+    loop.forin_range_kind = -1
+    loop.forin_stride = 0
     if (second >= 0) {
-        if (second >= l.store.edge_n || l.store.edges[second].next >= 0) { return -2; }
-        let start_node AstExpr = l.store.expressions[first.expr_id];
-        let end_edge AstStmtExpr = l.store.edges[second];
-        if (end_edge.expr_id < 0 || end_edge.expr_id >= l.store.expression_n) { return -2; }
-        let end_node AstExpr = l.store.expressions[end_edge.expr_id];
-        let promoted int = checked_lower_promoted(l, start_node.type_id, end_node.type_id);
-        if (promoted < 0 || ir.ir_integer_type(promoted) == 0) { return -2; }
-        let range_kind int = ir.IR_TY_I64;
-        if (promoted >= ir.IR_TY_U8 && promoted <= ir.IR_TY_U64) { range_kind = ir.IR_TY_U64; }
-        let start int = checked_lower_expr_inner(l, flow, first.expr_id);
-        if (start == -2) { return -2; }
-        if (start < 0) { return -1; }
-        let end int = checked_lower_expr_inner(l, flow, end_edge.expr_id);
-        if (end == -2) { return -2; }
-        if (end < 0) { return -1; }
-        loop.forin_start = checked_lower_adjust(l, start, range_kind);
-        loop.forin_end = checked_lower_adjust(l, end, range_kind);
-        if (loop.forin_start < 0 || loop.forin_end < 0) { return -2; }
-        loop.forin_range_kind = range_kind;
-        loop.forin_elem_type = gen.TY_I32;
-        loop.forin_stride = 4;
-        let elem AstBinding = l.store.bindings[stmt.first_binding];
-        if (elem.sym_type_id < 0 || l.store.types[elem.sym_type_id].kind != gen.TY_I32) { return -2; }
+        if (second >= l.store.edge_n || l.store.edges[second].next >= 0) { return -2 }
+        let start_node AstExpr = l.store.expressions[first.expr_id]
+        let end_edge AstStmtExpr = l.store.edges[second]
+        if (end_edge.expr_id < 0 || end_edge.expr_id >= l.store.expression_n) { return -2 }
+        let end_node AstExpr = l.store.expressions[end_edge.expr_id]
+        let promoted int = checked_lower_promoted(l, start_node.type_id, end_node.type_id)
+        if (promoted < 0 || ir.ir_integer_type(promoted) == 0) { return -2 }
+        let range_kind int = ir.IR_TY_I64
+        if (promoted >= ir.IR_TY_U8 && promoted <= ir.IR_TY_U64) { range_kind = ir.IR_TY_U64 }
+        let start int = checked_lower_expr_inner(l, flow, first.expr_id)
+        if (start == -2) { return -2 }
+        if (start < 0) { return -1 }
+        let end int = checked_lower_expr_inner(l, flow, end_edge.expr_id)
+        if (end == -2) { return -2 }
+        if (end < 0) { return -1 }
+        loop.forin_start = checked_lower_adjust(l, start, range_kind)
+        loop.forin_end = checked_lower_adjust(l, end, range_kind)
+        if (loop.forin_start < 0 || loop.forin_end < 0) { return -2 }
+        loop.forin_range_kind = range_kind
+        loop.forin_elem_type = gen.TY_I32
+        loop.forin_stride = 4
+        let elem AstBinding = l.store.bindings[stmt.first_binding]
+        if (elem.sym_type_id < 0 || l.store.types[elem.sym_type_id].kind != gen.TY_I32) { return -2 }
         if (loop.forin_index >= 0) {
-            let index AstBinding = l.store.bindings[stmt.last_binding];
-            if (index.sym_type_id < 0 || l.store.types[index.sym_type_id].kind != gen.TY_I32) { return -2; }
+            let index AstBinding = l.store.bindings[stmt.last_binding]
+            if (index.sym_type_id < 0 || l.store.types[index.sym_type_id].kind != gen.TY_I32) { return -2 }
         }
     } else {
-        let source_type int = l.store.expressions[first.expr_id].type_id;
+        let source_type int = l.store.expressions[first.expr_id].type_id
         let source_kind int = source_type >= 0 && source_type < l.store.type_n ?
-            l.store.types[source_type].kind : -1;
-        if (source_kind != gen.TY_ARRAY && source_kind != gen.TY_SLICE) { return -2; }
+            l.store.types[source_type].kind : -1
+        if (source_kind != gen.TY_ARRAY && source_kind != gen.TY_SLICE) { return -2 }
         let status int = checked_lower_forin_source(l, flow, first.expr_id,
-            &loop.forin_data, &loop.forin_length, &loop.forin_elem_type);
-        if (status != 0) { return status; }
-        let elem AstBinding = l.store.bindings[stmt.first_binding];
-        if (elem.sym_type_id != loop.forin_elem_type) { return -2; }
+            &loop.forin_data, &loop.forin_length, &loop.forin_elem_type)
+        if (status != 0) { return status }
+        let elem AstBinding = l.store.bindings[stmt.first_binding]
+        if (elem.sym_type_id != loop.forin_elem_type) { return -2 }
         if (loop.forin_index >= 0) {
-            let index AstBinding = l.store.bindings[stmt.last_binding];
-            if (index.sym_type_id < 0 || l.store.types[index.sym_type_id].kind != gen.TY_I32) { return -2; }
+            let index AstBinding = l.store.bindings[stmt.last_binding]
+            if (index.sym_type_id < 0 || l.store.types[index.sym_type_id].kind != gen.TY_I32) { return -2 }
         }
-        loop.forin_stride = l.store.types[loop.forin_elem_type].size;
+        loop.forin_stride = l.store.types[loop.forin_elem_type].size
     }
-    if (loop.forin_stride <= 0) { return -2; }
+    if (loop.forin_stride <= 0) { return -2 }
     let zero int = ast_ir_b_add_inst(&l.builder, ir.IR_OP_CONST, ir.IR_TY_U64,
-        -1, -1, 0);
-    if (zero < 0) { return -1; }
-    loop.forin_zero = zero;
-    loop.forin_index_value = zero;
-    return 0;
+        -1, -1, 0)
+    if (zero < 0) { return -1 }
+    loop.forin_zero = zero
+    loop.forin_index_value = zero
+    return 0
 }
 
 // checked_lower_forin_range_value：把区间起点与当前无符号迭代计数相加。
 fn checked_lower_forin_range_value(l *CheckedLower, loop *CheckedLoop, index int) int {
-    let b *AstIRBuilder = &l.builder;
-    let widened int = checked_lower_adjust(l, index, loop.forin_range_kind);
-    if (widened < 0) { return -2; }
+    let b *AstIRBuilder = &l.builder
+    let widened int = checked_lower_adjust(l, index, loop.forin_range_kind)
+    if (widened < 0) { return -2 }
     return ast_ir_b_add_inst(b, ir.IR_OP_ADD, loop.forin_range_kind,
-        loop.forin_start, widened, 0);
+        loop.forin_start, widened, 0)
 }
 
 // checked_lower_forin_condition：生成数组/切片长度或区间终点比较。
 fn checked_lower_forin_condition(l *CheckedLower, loop *CheckedLoop) int {
-    let b *AstIRBuilder = &l.builder;
-    if (loop.forin == 0 || loop.forin_index_value < 0) { return -2; }
+    let b *AstIRBuilder = &l.builder
+    if (loop.forin == 0 || loop.forin_index_value < 0) { return -2 }
     if (loop.forin_range_kind >= 0) {
-        loop.forin_value = checked_lower_forin_range_value(l, loop, loop.forin_index_value);
-        if (loop.forin_value < 0) { return loop.forin_value; }
+        loop.forin_value = checked_lower_forin_range_value(l, loop, loop.forin_index_value)
+        if (loop.forin_value < 0) { return loop.forin_value }
         return ast_ir_b_add_inst(b, ir.IR_OP_LT, ir.IR_TY_BOOL,
-            loop.forin_value, loop.forin_end, 0);
+            loop.forin_value, loop.forin_end, 0)
     }
     return ast_ir_b_add_inst(b, ir.IR_OP_LT, ir.IR_TY_BOOL,
-        loop.forin_index_value, loop.forin_length, 0);
+        loop.forin_index_value, loop.forin_length, 0)
 }
 
 // checked_lower_forin_store：把新迭代值写入绑定；聚合值按字节复制。
 fn checked_lower_forin_store(l *CheckedLower, flow *CheckedFlow,
     binding_id int, value int) int {
-    let b *AstIRBuilder = &l.builder;
+    let b *AstIRBuilder = &l.builder
     if (binding_id < 0 || binding_id >= l.function_binding_count
-        || value < 0 || value >= b.inst_count) { return -2; }
-    let binding AstBinding = l.store.bindings[l.function_binding_first + binding_id];
+        || value < 0 || value >= b.inst_count) { return -2 }
+    let binding AstBinding = l.store.bindings[l.function_binding_first + binding_id]
     if (checked_lower_is_aggregate(l.store, binding.sym_type_id) != 0) {
-        let dest int = checked_lower_storage(l, binding_id);
-        if (dest < 0) { return -2; }
-        let size int = l.store.types[binding.sym_type_id].size;
-        if (size <= 0 || ast_ir_b_add_memcpy(b, dest, value, size) < 0) { return -1; }
-        return 0;
+        let dest int = checked_lower_storage(l, binding_id)
+        if (dest < 0) { return -2 }
+        let size int = l.store.types[binding.sym_type_id].size
+        if (size <= 0 || ast_ir_b_add_memcpy(b, dest, value, size) < 0) { return -1 }
+        return 0
     }
-    let want int = checked_lower_type(l, binding.sym_type_id);
-    if (want < 0) { return -2; }
-    let adjusted int = checked_lower_adjust(l, value, want);
-    if (adjusted < 0) { return -2; }
-    let storage int = checked_lower_storage(l, binding_id);
-    if (storage >= 0 && ast_ir_b_add_store(b, storage, adjusted) < 0) { return -1; }
-    b.local_values[binding_id] = adjusted;
-    return 0;
+    let want int = checked_lower_type(l, binding.sym_type_id)
+    if (want < 0) { return -2 }
+    let adjusted int = checked_lower_adjust(l, value, want)
+    if (adjusted < 0) { return -2 }
+    let storage int = checked_lower_storage(l, binding_id)
+    if (storage >= 0 && ast_ir_b_add_store(b, storage, adjusted) < 0) { return -1 }
+    b.local_values[binding_id] = adjusted
+    return 0
 }
 
 // checked_lower_forin_bind：为当前迭代写入元素副本和可选的 i32 下标绑定。
 fn checked_lower_forin_bind(l *CheckedLower, flow *CheckedFlow, loop *CheckedLoop) int {
-    let b *AstIRBuilder = &l.builder;
-    let index int = loop.forin_index_value;
-    if (index < 0) { return -2; }
-    let elem_value int = -1;
+    let b *AstIRBuilder = &l.builder
+    let index int = loop.forin_index_value
+    if (index < 0) { return -2 }
+    let elem_value int = -1
     if (loop.forin_range_kind >= 0) {
-        elem_value = checked_lower_forin_range_value(l, loop, index);
-        if (elem_value < 0) { return elem_value; }
+        elem_value = checked_lower_forin_range_value(l, loop, index)
+        if (elem_value < 0) { return elem_value }
     } else {
         let stride int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
-            -1, -1, loop.forin_stride.to_type(i64));
-        if (stride < 0) { return -1; }
+            -1, -1, loop.forin_stride.to_type(i64))
+        if (stride < 0) { return -1 }
         let offset int = ast_ir_b_add_inst(b, ir.IR_OP_MUL, ir.IR_TY_U64,
-            index, stride, 0);
-        if (offset < 0) { return -1; }
-        let elem_kind int = checked_lower_type(l, loop.forin_elem_type);
-        let ptr_kind int = checked_lower_pointer_kind(elem_kind);
-        if (ptr_kind < 0) { return -2; }
-        let ptr int = ast_ir_b_add_gep_value(b, loop.forin_data, offset, ptr_kind);
-        if (ptr < 0) { return -1; }
+            index, stride, 0)
+        if (offset < 0) { return -1 }
+        let elem_kind int = checked_lower_type(l, loop.forin_elem_type)
+        let ptr_kind int = checked_lower_pointer_kind(elem_kind)
+        if (ptr_kind < 0) { return -2 }
+        let ptr int = ast_ir_b_add_gep_value(b, loop.forin_data, offset, ptr_kind)
+        if (ptr < 0) { return -1 }
         if (checked_lower_is_aggregate(l.store, loop.forin_elem_type) != 0) {
-            elem_value = ptr;
+            elem_value = ptr
         } else {
             if (elem_kind < 0 || checked_lower_pointer_matches(l,
-                b.insts[ptr].result_type, elem_kind) == 0) { return -2; }
-            elem_value = ast_ir_b_add_inst(b, ir.IR_OP_LOAD, elem_kind, ptr, -1, 0);
-            if (elem_value < 0) { return -1; }
+                b.insts[ptr].result_type, elem_kind) == 0) { return -2 }
+            elem_value = ast_ir_b_add_inst(b, ir.IR_OP_LOAD, elem_kind, ptr, -1, 0)
+            if (elem_value < 0) { return -1 }
         }
     }
-    let stored int = checked_lower_forin_store(l, flow, loop.forin_elem, elem_value);
-    if (stored != 0) { return stored; }
+    let stored int = checked_lower_forin_store(l, flow, loop.forin_elem, elem_value)
+    if (stored != 0) { return stored }
     if (loop.forin_index >= 0) {
-        let index_value int = checked_lower_adjust(l, index, ir.IR_TY_I32);
-        if (index_value < 0) { return -2; }
-        stored = checked_lower_forin_store(l, flow, loop.forin_index, index_value);
-        if (stored != 0) { return stored; }
+        let index_value int = checked_lower_adjust(l, index, ir.IR_TY_I32)
+        if (index_value < 0) { return -2 }
+        stored = checked_lower_forin_store(l, flow, loop.forin_index, index_value)
+        if (stored != 0) { return stored }
     }
-    return 0;
+    return 0
 }

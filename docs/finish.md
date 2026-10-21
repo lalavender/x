@@ -7184,3 +7184,15 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
 - **验证**：`0.0.8-rc.4` tag 全流程成功，GitHub Release 三端资产齐全
   （darwin-arm64 26.5MB、linux-arm64 42.6MB、linux-x86_64 42.6MB，各带
   `.sha256`），见 <https://github.com/lalavender/x/releases/tag/0.0.8-rc.4>。
+
+# 2026-10-22 分号删除（compiler/，0.0.8-rc）
+
+- **范围**：`compiler/` 101 个 `.yh`，删除 24,514 个可省略行尾分号，保留 1,061 个
+  同行分隔/裸块前分号，行数不变。
+- **工具适配**：`selfhost_snapshot_gate.py`、`tests/selfhost/link-cache.py` 的
+  module 声明正则改为分号可选；`compiler-performance.py` 的模块名提取同步。
+- **验证**：`make` 冷编成功，`compiler/.build` 与删除前对比**非 manifest 差异 0**；
+  `make test` 全绿；`make selfhost-native` 全绿（27 个产物固定点、自解析 101 文件、
+  modules 19/19、project cases 115/115）。
+- 记录：[01-finished/yh-分号删除-2026-10-22.md](01-finished/yh-分号删除-2026-10-22.md)。
+  未清 `libs/`/`tests/`/`examples/`，未滚种子。

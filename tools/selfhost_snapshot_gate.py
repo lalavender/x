@@ -94,7 +94,7 @@ def expected_artifacts(project: Path):
             if not _matches_platform(source.stem, host_system, host_arch):
                 continue
             match = re.search(
-                r"(?m)^\s*module\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+                r"(?m)^\s*module\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?",
                 source.read_text(),
             )
             if not match:

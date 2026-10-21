@@ -18,8 +18,15 @@
   旧种子对新正例报「期望 module 声明结尾 ';'」，红灯成立。
 - `make test` 全绿（运行语料 350/351，1 条平台 SKIP）。
 
-尚未执行：滚种子与发版（Phase 1）、批量删除分号（Phase 2）、产物对比与文档
-刷新（Phase 3/4）。
+后续（2026-10-22 更新）：
+
+- Phase 1 部分完成：`0.0.8-rc.4` 已发布（prerelease，三端资产）。
+- Phase 2 编译器部分完成：`compiler/` 101 个文件删除 24,514 个分号、保留 1,061
+  个；`make` 冷编产物与删除前**非 manifest 差异 0**，`make test` 与
+  `make selfhost-native` 全绿。记录见
+  [完成记录](../01-finished/yh-分号删除-2026-10-22.md)。
+- 剩余：`libs/`、`tests/`、`examples/` 清理；正式 `0.0.8` 种子发布后
+  `make seed` 与文档刷新（Phase 3/4）。
 
 ## 统计基线
 
