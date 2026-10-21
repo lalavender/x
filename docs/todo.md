@@ -88,7 +88,8 @@
 
 - [x] **F1 LINK3**：compiler 清单与自举脚本已迁移到 `[link]`：归档来自
   清单，运行库参数走 `YH_LINK_RUNTIME_FLAGS`，新编译器 manifest-only；
-  Darwin/Linux 固定点与自解析通过。剩余发布新 seed（Release 资产）。
+  Darwin/Linux arm64 固定点与自解析通过。剩余：Linux x64 清单需在 x64
+  宿主用 `tools/link-closure.py` 生成并校验；发布支持本功能的新 Release seed。
 
 ### G. C/C++ 桥迁移到 yh
 
