@@ -15,8 +15,11 @@
   （固定点/自解析/项目 111/111）、Linux 种子哈希与 CI 资产一致。
 - Release 资产：
   `yh-0.0.7-{darwin-arm64,linux-arm64,linux-x86_64}.tar.gz` 与 `.sha256`。
-- `link-latest` 已快进合并到远端 `llvm`（`a81d872..ecca3bc`），默认分支包含
-  F1、0.0.7 版本号、Release 说明与种子拉取顺序修复。
+- `link-latest` 已快进合并到远端 `llvm`（`a81d872..ecca3bc`），并继续推进到
+  `c704a48`；默认分支包含 F1、0.0.7 版本号、Release 说明与种子拉取顺序修复。
+- 合并后的 `llvm` 分支 CI 全绿：`antlr` 与
+  `darwin-arm64` / `linux-arm64` / `linux-x86_64` 四个作业均 success
+  （使用 0.0.7 Release 种子）。
 
 ## 2026-10-21 F1：编译器自举闭包迁移到 [link]
 
