@@ -142,10 +142,8 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
   [分号删除](01-finished/yh-分号删除-2026-10-22.md)）。**剩余**：清 `libs/`、
   `tests/`、`examples/`，正式 `0.0.8` 种子发布后 `make seed` 并刷新文档；
   见[方案](02-plan/yh-分号清理实施方案.md)。
-- [ ] **H3 发布资产与源码不一致（P0）**：`0.0.8-rc.4` darwin 资产里的 `yh`
-  字节搜索无 `换行终结符分配失败`、对无分号源码报 `期望 ';'`，但该 tag 源码与
-  发布流水线自身的 `--compiler` 语料门都通过（80/80）。需重跑该 tag 构建并比对
-  `dist/selfhost/cc4` 与打包内容，确认 `cp cc4 yh` 是否被旧产物覆盖。
+- [x] **H3 发布资产与源码不一致（已关闭）**：`0.0.8-rc.7` 重新发布后三端资产
+  均含换行终结（字节与行为核对通过）；发布流程已加打包后 `--syntax-check` 自检。
 - [ ] **H4 LLVM 闭包缓存 flags 被写成临时 workspace 路径（P0）**：发布/CI 的
   `make bootstrap` 会把 `tmp/llvm-migration/llvm-host-*/selfhost-flags.txt` 重写成
   当次 act 工作区绝对路径，任务结束即失效；本地 `make selfhost-native` 因此报

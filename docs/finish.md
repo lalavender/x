@@ -7196,3 +7196,20 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
   modules 19/19、project cases 115/115）。
 - 记录：[01-finished/yh-分号删除-2026-10-22.md](01-finished/yh-分号删除-2026-10-22.md)。
   未清 `libs/`/`tests/`/`examples/`，未滚种子。
+
+# 2026-10-22 0.0.8-rc.7 发布与种子换代
+
+- **发布流程改造**：`release.yml` 拆成 `prepare`（预建 arm64/amd64 镜像）→
+  `darwin-arm64`/`linux-arm64`/`linux-x86_64` 三端**并行** → `publish` 汇总；
+  产物写 `$HOME/yh-release-dist/ci-<run_id>`；打包后追加 `./yh --syntax-check`
+  无分号用例自检。`ci.yml` 增加 `linux-x86_64` 并行任务。
+- **失败与修复**：rc.5 两个 Linux job 漏 `GH_TOKEN`（取种 403）；rc.6 publish
+  发现容器内写的宿主绝对路径宿主看不到（改为容器内 `/work/dist`、宿主搬运）；
+  rc.7 publish 上传遇 SSL/EOF，`publish-release.py` 加退避重试与同名资产幂等。
+- **结果**：`0.0.8-rc.7` 三端资产发布成功：
+  <https://github.com/lalavender/x/releases/tag/0.0.8-rc.7>；darwin 资产字节
+  含 `换行终结符分配失败`、对 `tests/yh/02-basic/04_newline_terminator.yh`
+  通过。
+- **种子换代**：`make fetch-seed` 取 rc.7 官方种子（`624ffc50…`），`make` 冷编
+  无分号源码成功、`--compiler` 语料 80/80 + 44/44；`make seed` 已是新一代
+  （`e96eca03…`）。
