@@ -111,7 +111,9 @@ YH_PREREQ = $(SEED)
 # 665ms→464ms、整用例 939ms→703ms（约 −25%）。
 # FAST_STAGE=0 关闭暂存，改回直接用仓库根 $(YH)。
 FAST_STAGE ?= 1
-FAST_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/yh-fast
+# 每次 CI run 独占一个快速目录：同机并发跑多个 run 时共用 /tmp/yh-fast 会让
+# stage-yh 互相覆盖（release 与分支门同时跑时出现过 selfhost 探针读错二进制）。
+FAST_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/yh-fast$(if $(GITHUB_RUN_ID),-$(GITHUB_RUN_ID))
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
 YH_RUN = $(abspath $(YH))
 RUN_WORK_FLAG =
