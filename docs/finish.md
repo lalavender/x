@@ -2,6 +2,20 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-22 修复文档乱码并静音编辑器 Unicode 提示
+
+- **问题**：`docs/01-finished/yh-linkMach-O出口与编译器汇编步替换-2026-10-04.md`
+  第 129 行的「注」+ 3 个 U+FFFD + 「说明」，是一个 3 字节汉字（「释」）被逐字节
+  替换成 3 个替换字符；同时编辑器对中文全角标点报「模棱两可 / 易混淆 Unicode
+  字符」（未信任工作区下 `nonBasicASCII` 会把中文正文也算进来）。
+- **实现**：该行复原为 `注释说明`；新增 `.vscode/settings.json`，关闭
+  `editor.unicodeHighlight.ambiguousCharacters` 与
+  `editor.unicodeHighlight.nonBasicASCII`——中文标点是本仓库正文的正常排版；
+  `invisibleCharacters`（零宽、NBSP）保持默认开启。
+- **范围与验证**：不改中文标点正文。全仓扫描确认无 BOM、无残留 U+FFFD，
+  `.yh`/`.py`/`.sh`/`.yml` 的代码位置（去掉注释与字符串后）无全角字符，
+  因此没有隐藏的语法错误；`git diff` 只涉及 1 行文档、1 行记录和 1 个新配置。
+
 ## 2026-10-21 恢复并验证 os/sys OS0–OS6
 
 - 0.0.7 同步后的主工作区缺少 `libs/os`/`libs/sys` 实现；从备份 stash 选择性
