@@ -7159,3 +7159,28 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
   个源文件、modules 19/19、project cases 115/115）。
 - 记录：[01-finished/yh-换行终结语句-2026-10-22.md](01-finished/yh-换行终结语句-2026-10-22.md)。
   未滚种子、未发版、未批量删分号（方案 Phase 1/2）。
+
+# 2026-10-22 CI 迁到 Gitea Actions（Jenkins 退役）
+
+- **背景**：原 CI 分两套（CircleCI 分支门 + 本机 Jenkins 发布），Jenkins 靠本地
+  `pre-push` 钩子触发，`--no-verify`、换机器、网页操作与 PR 都覆盖不到。
+- **落地**：
+  - Gitea 1.26.1 开 `[actions] ENABLED=true`；装 `gitea-runner` 5.2（brew
+    formula 名 `gitea-runner`），host 模式实例 `yh-local`，labels
+    `macos-arm64` / `linux-arm64`，capacity 1。
+  - `.gitea/workflows/ci.yml`（分支门：ANTLR + Darwin/arm64 + Linux/AArch64）与
+    `.gitea/workflows/release.yml`（版本 tag：三端构建、cc4 打包、发 GitHub Release）。
+  - 删除 `Jenkinsfile` 与 `tools/jenkins/`（trigger/setup 随触发链移除），发布脚本
+    迁到 `tools/publish-release.py`；恢复被串联的 git-lfs `pre-push` 钩子。
+- **调试结论（已写进 workflow 注释与 todo D2/D3）**：
+  - Gitea 会把 `GITHUB_REPOSITORY` 覆写成 `yh/yh`，取种必须 `--repo lalavender/x`；
+  - Apple container 内 GitHub API 不可达（DNS 失败），取种改在宿主 step 完成；
+  - `tests/selfhost/llvm-host.py` 用 `relative_to(ROOT)` 写身份记录，容器内闭包
+    缓存必须挂到 `/work/tmp/llvm-migration`，symlink 到宿主绝对路径会断言失败；
+  - 8GB 宿主并发两个构建会触发 OOM（LLVM 静态链接被 kill），capacity 降到 1、
+    容器内存提到 3G；宿主磁盘一度只剩 2.5Gi，清掉闲置镜像 13.5GB 后恢复；
+  - x86_64 端在 amd64 模拟下 `run/20-bytebuf.yh` 崩溃（信号 5），发布流水线对该
+    端只做构建+打包，运行证据以真机为准。
+- **验证**：`0.0.8-rc.4` tag 全流程成功，GitHub Release 三端资产齐全
+  （darwin-arm64 26.5MB、linux-arm64 42.6MB、linux-x86_64 42.6MB，各带
+  `.sha256`），见 <https://github.com/lalavender/x/releases/tag/0.0.8-rc.4>。
