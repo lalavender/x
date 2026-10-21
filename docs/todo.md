@@ -26,6 +26,24 @@
 
 图例：P0 发布质量与主线；P1 标准库与工具链；P2 长期与按需；⏸ 用户暂缓；❓ 待决策。
 
+## 版本与发布流程（P0 前置）
+
+每个版本两条分支：`<ver>-rc` 开发与候选、`<ver>-release` 只收合并；rc tag 发
+prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支上。方案见
+[分版本 rc/release 分支发版流程](02-plan/yh-分版本rc与release分支发版流程方案-2026-10-21.md)。
+
+- [ ] **R1 分支模型落地**：`0.0.7-release`（指向 tag `0.0.7`）＋ `0.0.8-rc` /
+  `0.0.8-release`；默认分支切到最新 `<ver>-release`；`llvm` 保留为历史线。
+- [ ] **R2 CI 改造**：tag filter 收紧为 `^\d+\.\d+\.\d+(-rc\.\d+)?$`；`publish`
+  支持 `--prerelease`，正式 tag 增加「必须落在 `<ver>-release` 上」的祖先校验；
+  `ci` workflow 分支 filter 改为 `<ver>-rc`。
+- [ ] **R3 取种改造**：`tools/fetch-release-seed.py` 加 `--include-prerelease`
+  （默认开启），使 rc.N 能用 rc.N-1、正式版能用最后一个 rc 作种子。
+- [ ] **R4 版本漂移修复**：`compiler/README.md` 与
+  `tools/compiler-performance.py:208` 写死的 `0.0.5` 改为从清单读取或前缀断言。
+- [ ] **R5 0.0.8-rc.1 内容**：当前工作区未提交的 os/sys OS0–OS6 恢复 + R1–R4；
+  之后按 A1/C1/C3/D1 分期出 rc.2、rc.3。
+
 ## P0 发布质量：平台、CI 与分发
 
 ### A. F2 收尾与 F1 可选后续

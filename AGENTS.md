@@ -158,6 +158,31 @@ CI 分两套（推送 `arm64`/`llvm`/`main` 时并行）：
   `release.yml` 已删除，多平台回归与发布由 CircleCI 承担；需要时从 git 历史
   还原。种子不再入库，CI 一律用 token 从最新 Release 取种子。
 
+## 版本与发布（每版本 rc/release 分支）
+
+每个版本两条分支：`<ver>-rc` 是开发与候选线；`<ver>-release` 只收合并、不含直接
+提交。`compiler/project.toml` 的 `version` 在 rc 期就写目标正式号，因此最后一个
+rc 与正式版是同一提交。完整方案见
+[分版本 rc/release 分支发版流程](docs/02-plan/yh-分版本rc与release分支发版流程方案-2026-10-21.md)。
+
+1. 在 `<ver>-rc` 上开发；写 `docs/01-finished/release-<ver>-rc.N.md`；本地
+   `make test` + `make selfhost-native` 全绿。
+2. 打 `git tag -a <ver>-rc.N` → 三端 tag 流水线构建并发布 prerelease Release
+   （带三端种子资产）。非版本号 tag 不触发发布。
+3. **用发布出去的 rc 二进制验收**：`rm -rf bin && make fetch-seed` → `make` →
+   `make test` → `make selfhost-native`（两代固定点）。
+4. 验收不过就回 `<ver>-rc` 修，打下一个 rc（种子自动取上一个 rc）。
+5. `git merge --no-ff <ver>-rc` 到 `<ver>-release`，再打 `git tag -a <ver>`
+   发正式版；正式 tag 必须落在 `<ver>-release` 上（CI 校验），否则拒绝发布。
+6. 发完删 `<ver>-rc`、保留 `<ver>-release`；默认分支为最新 `<ver>-release`。
+
+种子规则：分支与 tag 流水线一律取**最新带资产的 Release（含 rc，排除当前 tag）**，
+所以 rc.N 用 rc.N−1、正式版用该版最后一个 rc 编译出来。禁止修改已发布 Release
+的资产（要改就发新 rc）；`release-<tag>.md` 缺失即发布失败（rc 与正式都要写）。
+
+迁移完成前（[todo](docs/todo.md) R1–R5 未关闭），CI 仍只跑
+`arm64`/`llvm`/`main`。
+
 
 ## Linux 环境验证（容器方案）
 
@@ -236,34 +261,28 @@ make selfhost-native
 SEED=bin/yh-linux-arm64 SEED_DEST=bin/yh-linux-arm64 make seed
 ```
 
-## graphify
+## 代码规范
 
-仓库支持使用 graphify 做依赖和死代码分析：
+- 结构体和函数都要有详细注释说明
+- 每个文件尽量保持在 500-1000 行
+- 修改完代码都要构建验证
+- 每次修改代码完成之后都要在tests目录中生成.yh测试用例，并确保测试通过
+- Windows平台执行切换到wsl进行运行
+- 安装ripgrep，使用ripgrep进行搜索
+- 必须执行
+- 用中文回答，如果是代码用中文注释
+- 计划的任务记录在docs/todo.md
+- 完成的任务记录在docs/finish.md
+- 每次修改完代码都要构建验证
+- 每个文件尽量保持在500-1000行
+- 结构体和函数都要有详细注释说明
+- 语法设计文档放在 docs/03-design/
+- 计划任务文档放在 docs/02-plan/
+- 完成任务文档放在 docs/01-finished/
+- 所有临时文件都放到tmp/目录
 
-```bash
-GRAPHIFY_OUT=graphify-out graphify update .
-GRAPHIFY_OUT=graphify-out graphify god-nodes
-```
+## 编码要求
 
-
-代码规范
-结构体和函数都要有详细注释说明
-每个文件尽量保持在 500-1000 行
-修改完代码都要构建验证
-每次修改代码完成之后都要在tests目录中生成.yh测试用例，并确保测试通过
-Windows平台执行切换到wsl进行运行
-安装ripgrep，使用ripgrep进行搜索
-必须执行
-用中文回答，如果是代码用中文注释
-计划的任务记录在docs/todo.md
-完成的任务记录在docs/finish.md
-每次修改完代码都要构建验证
-每个文件尽量保持在500-1000行
-结构体和函数都要有详细注释说明
-语法设计文档放在 docs/03-design/
-计划任务文档放在 docs/02-plan/
-完成任务文档放在 docs/01-finished/
-所有临时文件都放到tmp/目录
 1. 编码前先思考
 不要假设。不要隐藏困惑。暴露权衡。
 
