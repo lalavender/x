@@ -31,6 +31,25 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 C4/C5 小尾巴、GitHub Actions 移除与 todo 优化
+
+- **C4 目标简写移除**：`cmd/driver.yh` 不再把 `linux/gnu/elf/darwin/macho/macos`
+  映射为隐含 AArch64 的 triple；`-target` 与 `--target` 都只接受完整三元组，
+  简写给出来源诊断。`tests/modules/build-check.py` 的 5 个 r3 用例改用
+  `aarch64-unknown-linux-gnu` / `aarch64-apple-darwin`。
+- **C5 断言清理**：删除 `tests/yh-run/check.py` 的 `asm-symbols-safe` 校验
+  （正则、函数与两处调用）与 `182-register-named-symbols.yh` 的指令；
+  删除 `cmd/module_build.yh` 的 `legacy_bytes=0` 统计与
+  `tests/selfhost/llvm-front-output.py` 的对应断言。
+- **GitHub Actions 移除**：删除 `.github/workflows/ci.yml` 与 `release.yml`；
+  多平台回归与 tag Release 由 CircleCI 承担，需要时从 git 历史还原。
+- **todo 优化**：LL12（C0–C5）关闭；LL11 性能门移出（专门性能任务）；R2b
+  （RS2/RS3/R2c）移到「后续任务」，不作为 LLVM 收尾；GA 账单项随移除关闭；
+  ❓2/❓3 关闭。
+- 验证：`make` 通过；`make test` 退出 0；`make selfhost-native` 退出 0
+  （project 106/106）；`-target linux` 拒绝、完整三元组构建运行正常。
+- 未滚种子（0.0.6 已发布）。
+
 ## 2026-10-21 0.0.6 Release 种子验证
 
 - Release 0.0.6 已发布，三端资产齐全：

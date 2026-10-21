@@ -774,7 +774,7 @@ def main():
                    f"{(run.stderr if run else built.stderr)[-400:]}")
             return out
         if c["kind"] == "host-capture":
-            target = "linux" if sys.platform == "darwin" else "darwin"
+            target = "aarch64-unknown-linux-gnu" if sys.platform == "darwin" else "aarch64-apple-darwin"
             checked = sh([compiler, "-target", target, "check"], cwd=dst)
             report(checked.returncode == 0, c["name"],
                    f"交叉目标不应改变宿主文件标志: rc={checked.returncode}\n"
@@ -896,9 +896,11 @@ def main():
                    f"run={rerun.returncode if rerun else None}\n{changed.stderr[-500:]}")
             return out
         if c["kind"] == "platform-source":
-            native = "darwin" if sys.platform == "darwin" else "linux"
-            cross = "linux" if native == "darwin" else "darwin"
-            expected = 31 if native == "darwin" else 32
+            native = "aarch64-apple-darwin" if sys.platform == "darwin" \
+                else "aarch64-unknown-linux-gnu"
+            cross = "aarch64-unknown-linux-gnu" if native == "aarch64-apple-darwin" \
+                else "aarch64-apple-darwin"
+            expected = 31 if sys.platform == "darwin" else 32
             run = sh([compiler, "run"], cwd=dst)
             report(run.returncode == expected, c["name"],
                    f"本机目标源选择错误: rc={run.returncode}, 期望 {expected}\n"
@@ -909,11 +911,11 @@ def main():
                    f"{checked.stderr[-400:]} {checked.stdout[-200:]}")
             return out
         if c["kind"] == "darwin-dir-api":
-            darwin = sh([compiler, "-target", "darwin", "check"], cwd=dst)
+            darwin = sh([compiler, "-target", "aarch64-apple-darwin", "check"], cwd=dst)
             report(darwin.returncode == 0, "r3-getattrlistbulk-darwin-available",
                    f"Darwin 目标未登记目录 OS API: rc={darwin.returncode}\n"
                    f"{darwin.stderr[-400:]}")
-            linux = sh([compiler, "-target", "linux", "check"], cwd=dst)
+            linux = sh([compiler, "-target", "aarch64-unknown-linux-gnu", "check"], cwd=dst)
             report(linux.returncode != 0 and "未声明" in linux.stderr,
                    "r3-getattrlistbulk-not-linux-api",
                    f"Linux 目标意外导入 Darwin API: rc={linux.returncode}\n"
@@ -962,14 +964,14 @@ def main():
                     report("linux_syscall6" in asm and "syscall" in asm,
                            "r3-linux-syscall-function-value-has-local-entry",
                            "Linux syscall 函数值没有 LLVM ABI 入口")
-                darwin = sh([compiler, "-target", "darwin", "--emit-asm",
+                darwin = sh([compiler, "-target", "aarch64-apple-darwin", "--emit-asm",
                              "main.linux.x64.yh"], cwd=dst)
                 report(darwin.returncode != 0 and "未声明" in darwin.stderr,
                        "r3-linux-syscall-is-target-gated",
                        f"Darwin 目标意外接受 Linux 系统调用接口: "
                        f"rc={darwin.returncode}\n{darwin.stderr[-400:]}")
             else:
-                emitted = sh([compiler, "-target", "linux", "--emit-asm",
+                emitted = sh([compiler, "-target", "aarch64-unknown-linux-gnu", "--emit-asm",
                               "main.linux.arm64.yh"], cwd=dst)
                 asm = emitted.stdout
                 report(emitted.returncode == 0 and "mov\tx8, x0" in asm
@@ -982,7 +984,7 @@ def main():
                 report("\nlinux_syscall6:\n" in asm,
                        "r3-linux-syscall-function-value-has-local-entry",
                        "Linux syscall intrinsic 的函数值引用没有本地 ABI 入口，可能产生未定义符号")
-                darwin = sh([compiler, "-target", "darwin", "--emit-asm",
+                darwin = sh([compiler, "-target", "aarch64-apple-darwin", "--emit-asm",
                              "main.linux.arm64.yh"], cwd=dst)
                 report(darwin.returncode != 0 and "未声明" in darwin.stderr,
                        "r3-linux-syscall-is-target-gated",

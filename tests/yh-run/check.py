@@ -77,20 +77,6 @@ ARGV_RE = re.compile(r"^//\s*argv:\s?(.*)$")
 # 否则 SKIP（不算失败）。没有该指令 = 通用用例，所有平台都跑。
 # tag 形式为 `<os>` 或 `<os>-<arch>`，os ∈ {linux, darwin}，arch ∈ {arm64, x64}。
 PLATFORM_RE = re.compile(r"^//\s*platform:\s?(.*)$")
-# asm-symbols-safe：要求 --emit-asm 输出里不出现与 AArch64 寄存器同名的符号。
-# GNU as 容忍 `bl w12`，clang 的集成汇编器直接拒绝，因此这条约束只能在发射
-# 文本上校验（运行结果与退出码都看不出来）。
-ASM_SYMBOLS_SAFE_RE = re.compile(r"^\s*//\s*asm-symbols-safe\s*$", re.M)
-REGISTER_NAME_RE = re.compile(
-    r"^(?:[xwsdqvbh](?:[0-9]|[12][0-9]|3[01])|sp|lr|fp|xzr|wzr)$")
-# 符号出现的位置：.globl 目标、行首标签定义、bl/b 目标、adrp 第二操作数、:lo12: 前缀
-ASM_SYMBOL_RE = re.compile(
-    r"^\s*\.globl\s+([A-Za-z_.$][\w.$]*)"
-    r"|^([A-Za-z_.$][\w.$]*):"
-    r"|\b(?:bl|b)\s+([A-Za-z_.$][\w.$]*)"
-    r"|:lo12:([A-Za-z_.$][\w.$]*)"
-    r"|adrp\s+\w+,\s*([A-Za-z_.$][\w.$]*)", re.M)
-
 # 汇总里每种状态的打印标签。
 LABELS = {"PASS": "PASS", "FAIL": "FAIL", "SKIP": "SKIP"}
 
@@ -291,66 +277,6 @@ def cross_ready():
     return True, ""
 
 
-def check_asm_symbols(path):
-    """按 `// asm-symbols-safe` 指令校验发射汇编里的符号名。
-
-    返回 (status, detail)；用例没有该指令或输出目标不是 AArch64 时返回 None。
-    判据：`.globl` 目标、标签定义、`bl`/`b` 目标、`adrp` 操作数与 `:lo12:`
-    前缀处的符号名都不得是 AArch64 寄存器名（x0-x30、w0-w30、s/d/q/v/b/h0-31、
-    sp/lr/fp/xzr/wzr）。
-    """
-    target = next((COMPILER_FLAGS[index + 1]
-                   for index, flag in enumerate(COMPILER_FLAGS[:-1])
-                   if flag == "--target"), "")
-    if target == "":
-        import platform
-        machine = platform.machine().lower()
-        if platform.system() == "Darwin":
-            target = "aarch64-apple-darwin" if machine in ("arm64", "aarch64") \
-                else "x86_64-apple-darwin"
-        elif machine in ("x86_64", "amd64"):
-            target = "x86_64-unknown-linux-gnu"
-        elif machine in ("aarch64", "arm64"):
-            target = "aarch64-unknown-linux-gnu"
-    if not target.startswith("aarch64-"):
-        return None
-    # 该约束针对旧 ARM64 发射器的文本替换/标签命名；LLVM 路径的函数符号带
-    # ABI 版本后缀，全局符号由 LLVM 自己合法化，GNU as 与 LLVM 集成汇编器都
-    # 接受 adrp/bl 后的同名符号，因此不把旧规则的寄存器后缀强加给 LLVM。
-    backend = ""
-    for index, flag in enumerate(COMPILER_FLAGS[:-1]):
-        if flag == "--backend":
-            backend = COMPILER_FLAGS[index + 1]
-    if backend == "llvm":
-        return None
-    if backend == "":
-        import platform
-        machine = platform.machine().lower()
-        if (platform.system() == "Linux"
-                and machine in ("x86_64", "amd64", "aarch64", "arm64")) \
-                or (platform.system() == "Darwin" and machine in ("arm64", "aarch64")):
-            return None
-    if not ASM_SYMBOLS_SAFE_RE.search(path.read_text(encoding="utf-8")):
-        return None
-    try:
-        proc = subprocess.run([str(YH_BIN), *COMPILER_FLAGS, "--emit-asm", str(path)],
-                              capture_output=True, text=True,
-                              timeout=COMPILE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return "FAIL", "--emit-asm 超时"
-    if proc.returncode != 0:
-        return "FAIL", f"--emit-asm 失败（退出码 {proc.returncode}）\n    " \
-            + "\n    ".join(diag_tail(proc))
-    bad = []
-    for match in ASM_SYMBOL_RE.finditer(proc.stdout):
-        name = next((g for g in match.groups() if g), "")
-        if REGISTER_NAME_RE.match(name):
-            bad.append(name)
-    if bad:
-        return "FAIL", "发射汇编使用了寄存器同名符号：" + ", ".join(sorted(set(bad)))
-    return "PASS", ""
-
-
 def check_run_case(path, cross, out):
     """run/ 用例：编译并运行，比对输出与退出码。产物写到调用方给的 out。"""
     proc, timed_out = compile_src(path, out, cross)
@@ -392,9 +318,6 @@ def check_run_case(path, cross, out):
         diffs.append(f"退出码：期望 {exit_code} 实际 {run.returncode}")
     if diffs:
         return "FAIL", "；".join(diffs[:5])
-    asm_status = check_asm_symbols(path)
-    if asm_status is not None and asm_status[0] != "PASS":
-        return asm_status
     return "PASS", ""
 
 
@@ -434,9 +357,6 @@ def check_pass_case(path, cross, out):
     stats_error = validate_llvm_stats(proc, require_emission=False)
     if stats_error:
         return "FAIL", stats_error
-    asm_status = check_asm_symbols(path)
-    if asm_status is not None and asm_status[0] != "PASS":
-        return asm_status
     return "PASS", ""
 
 

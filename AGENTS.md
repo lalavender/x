@@ -54,11 +54,13 @@ gitignore 的 `bin/` 并核对哈希。
 - **本地/CI 分工（2026-10-19 用户决定）**：在 Linux 或 macOS 上开发，本地只需
   保证**本平台**门禁绿（`make test` + `make selfhost-native`；运行语料已按
   `// platform:` 头部指令筛选，平台专属门如 `make test-llvm` 在别的宿主会
-  明确拒绝而不是要求本地跑通）。**完整多平台回归由 GitHub Actions 承担**
-  （见下文 CI 说明）：推送 `arm64`/`llvm`/`main` 自动跑 linux-arm64（主门）
-  与 linux-x86_64（YH_LLVM_HOST=1 的 LLVM 全门），
-  darwin-arm64 由手动 `workflow_dispatch` 触发。本地不要为其他平台预跑门禁，
-  也不要因 CI 平台的红灯阻塞本地迭代——CI 红灯按 todo 立项再修。
+  明确拒绝而不是要求本地跑通）。**完整多平台回归由 CircleCI 承担**
+  （见下文 CI 说明）：推送 `arm64`/`llvm`/`main` 自动跑
+  linux-arm64（主门）、linux-x86_64（LLVM 全门）、darwin-arm64 三端；
+  tag 推送走 `release` workflow 并发布 Release。GitHub Actions 已于
+  2026-10-21 移除（`.github/workflows/` 删除，需要时从 git 历史还原）。
+  本地不要为其他平台预跑门禁，也不要因 CI 红灯阻塞本地迭代——CI 红灯按
+  todo 立项再修。
 
 ## 修改语法规则
 
@@ -152,12 +154,9 @@ CI 分两套（推送 `arm64`/`llvm`/`main` 时并行）：
   `GITHUB_TOKEN`（repo 权限），同时用于取种子和发布。
 - **tag 发布**：CircleCI `release` workflow 由 tag 触发，三端保留 cc4 自举候选，
   打包后由 `publish` 作业创建/更新 GitHub Release。
-- **GitHub Actions**（`.github/workflows/ci.yml`）：`linux-x86_64` 作业以
-  `YH_LLVM_HOST=1` 联网准备固定 LLVM SDK 后跑 `make test-llvm` /
-  `make selfhost-llvm`；`darwin-arm64` 作业在 `macos-14` 上跑同一套门禁；
-  `linux-arm64` 只保留手动 `workflow_dispatch` 的 QEMU 回退，日常由 CircleCI
-  原生机器覆盖。入库 `bin/yh-darwin-arm64` 落后时先自动补一代种子后作为
-  artifact 上传——下载后提交即追平 macOS 种子。
+- **GitHub Actions（2026-10-21 移除）**：`.github/workflows/ci.yml` 与
+  `release.yml` 已删除，多平台回归与发布由 CircleCI 承担；需要时从 git 历史
+  还原。种子不再入库，CI 一律用 token 从最新 Release 取种子。
 
 
 ## Linux 环境验证（容器方案）
