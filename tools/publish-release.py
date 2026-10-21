@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """把三端构建产物发布到 GitHub Release。
 
-由 Jenkinsfile 的「发布 Release」阶段调用，替代 CircleCI 的 gh 发布步骤：
+由 Gitea Actions 的发布 workflow（.gitea/workflows/release.yml）调用：
 
-  python3 tools/jenkins/publish.py --repo lalavender/x --tag 0.0.8 \
+  python3 tools/publish-release.py --repo lalavender/x --tag 0.0.8 \
       --dist dist --notes docs/01-finished/release-0.0.8.md
 
 约定：
-  - 资产名与 CircleCI 一致：yh-<tag>-<platform>.tar.gz + .sha256；
+  - 资产名：yh-<tag>-<platform>.tar.gz + .sha256；
   - 三端资产缺一即失败（不允许发布半套 Release）；
   - tag 含 `-rc.` 时发布 prerelease；
   - Release 已存在时先删除同名资产再上传，保证可重跑。
@@ -39,7 +39,7 @@ def request(method, url, token, data=None, content_type=None):
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "yh-jenkins-publish",
+        "User-Agent": "yh-publish",
     }
     if content_type:
         headers["Content-Type"] = content_type

@@ -1,0 +1,153 @@
+name: release
+# 版本 tag 发布（Gitea Actions，本机 host 模式 runner，macOS/arm64 宿主）。
+#
+# 三端顺序构建（单 workspace，与旧 Jenkins 发布流程同构）：
+#   Darwin/arm64 宿主原生 → Linux/AArch64（容器原生）→ Linux/x86_64（容器模拟）
+# 每端跑该平台门禁并以 cc4 自举候选刷新 yh，打包 yh-<tag>-<platform>.tar.gz，
+# 最后由 tools/publish-release.py 发布到 GitHub Release。
+#
+# 只认 x.y.z 与 x.y.z-rc.N；其他 tag（如 seed-*）在首个 step 判定后跳过。
+on:
+  push:
+    tags:
+      - '*'
+
+env:
+  LLVM_JOBS: "4"
+  SEED_REPO: lalavender/x
+
+jobs:
+  release:
+    runs-on: macos-arm64
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
+      YH_LLVM_HOST: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验版本 tag
+        id: ver
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+            echo "版本 tag：$tag"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            echo "跳过：$tag 不是版本 tag（只发布 x.y.z 与 x.y.z-rc.N）"
+          fi
+
+      - name: 复用 LLVM 闭包缓存
+        if: steps.ver.outputs.ok == '1'
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
+          if [ -d "$cache" ]; then
+            ln -sfn "$cache" tmp/llvm-migration
+            echo "复用闭包缓存：$cache"
+          else
+            make llvm-host
+          fi
+
+      - name: Darwin/arm64 构建与打包
+        if: steps.ver.outputs.ok == '1'
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          python3 tools/fetch-release-seed.py --platform darwin-arm64 \
+            --repo "$SEED_REPO" --exclude-tag "$tag"
+          make bootstrap
+          make test-llvm-darwin
+          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(sysctl -n hw.ncpu)"
+          make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
+          cp dist/selfhost/cc4 yh
+          rm -rf dist/selfhost
+          name="yh-$tag-darwin-arm64"
+          stage="dist/.stage-darwin-arm64"
+          mkdir -p "$stage"
+          cp yh "$stage/yh"
+          tar -czf "dist/$name.tar.gz" -C "$stage" yh
+          rm -rf "$stage"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.sha256")
+          ls -l "dist/$name.tar.gz"
+
+      - name: Linux/AArch64 构建与打包（容器原生）
+        if: steps.ver.outputs.ok == '1'
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
+          mount=""
+          if [ -d "$cache" ]; then mount="-v $cache:$cache"; fi
+          container run --rm -v "$PWD":/work -w /work $mount \
+            -e GH_TOKEN -e LLVM_JOBS -e SEED_REPO -e TAG="$tag" \
+            ubuntu:24.04 bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                build-essential python3 binutils xz-utils libxml2-dev zlib1g-dev libzstd-dev
+              python3 tools/fetch-release-seed.py --platform linux-arm64 \
+                --repo "$SEED_REPO" --exclude-tag "$TAG"
+              make bootstrap
+              make test-llvm-linux-arm64
+              python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+              python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
+              make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
+              cp dist/selfhost/cc4 yh
+              rm -rf dist/selfhost
+              name="yh-$TAG-linux-arm64"
+              stage="dist/.stage-linux-arm64"
+              mkdir -p "$stage"
+              cp yh "$stage/yh"
+              tar -czf "dist/$name.tar.gz" -C "$stage" yh
+              rm -rf "$stage"
+              (cd dist && sha256sum "$name.tar.gz" > "$name.sha256")
+            '
+
+      - name: Linux/x86_64 构建与打包（容器模拟）
+        if: steps.ver.outputs.ok == '1'
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
+          mount=""
+          if [ -d "$cache" ]; then mount="-v $cache:$cache"; fi
+          container run --rm -a amd64 -v "$PWD":/work -w /work $mount \
+            -e GH_TOKEN -e LLVM_JOBS -e SEED_REPO -e TAG="$tag" \
+            ubuntu:24.04 bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                build-essential python3 binutils xz-utils libxml2-dev zlib1g-dev libzstd-dev clang
+              python3 tools/fetch-release-seed.py --platform linux-x86_64 \
+                --repo "$SEED_REPO" --exclude-tag "$TAG"
+              make bootstrap
+              make test-llvm
+              python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+              python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
+              make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
+              cp dist/selfhost/cc4 yh
+              rm -rf dist/selfhost
+              name="yh-$TAG-linux-x86_64"
+              stage="dist/.stage-linux-x86_64"
+              mkdir -p "$stage"
+              cp yh "$stage/yh"
+              tar -czf "dist/$name.tar.gz" -C "$stage" yh
+              rm -rf "$stage"
+              (cd dist && sha256sum "$name.tar.gz" > "$name.sha256")
+            '
+
+      - name: 发布 GitHub Release
+        if: steps.ver.outputs.ok == '1'
+        run: |
+          set -euo pipefail
+          python3 tools/publish-release.py \
+            --repo "$SEED_REPO" \
+            --tag "$GITHUB_REF_NAME" \
+            --dist dist \
+            --notes "docs/01-finished/release-$GITHUB_REF_NAME.md"

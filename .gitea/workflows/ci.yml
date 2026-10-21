@@ -1,0 +1,112 @@
+name: ci
+# 分支门（Gitea Actions，本机 host 模式 runner，macOS/arm64 宿主）。
+#
+# 推送 arm64 / llvm / main 与 <ver>-rc / <ver>-release 时并行跑：
+#   antlr        参考语法门（Apple container 内）
+#   darwin-arm64 宿主原生 LLVM 主门
+#   linux-arm64  Apple container（arm64 原生）LLVM 主门
+# 版本 tag 发布见 release.yml；Linux/x86_64 只在发布时跑。
+#
+# 种子仍托管在 GitHub Release：Gitea 会把 GITHUB_REPOSITORY 覆写成 yh/yh，
+# 所以取种脚本一律用 --repo "$SEED_REPO" 显式指定。
+on:
+  push:
+    branches:
+      - arm64
+      - llvm
+      - main
+      - '*-rc'
+      - '*-release'
+
+env:
+  LLVM_JOBS: "4"
+  SEED_REPO: lalavender/x
+
+jobs:
+  antlr:
+    runs-on: macos-arm64
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: ANTLR 参考语法门（容器内）
+        run: |
+          set -euo pipefail
+          container run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -lc '
+            set -euo pipefail
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+              python3 python3-pip default-jre-headless curl ca-certificates
+            bash tools/run-antlr-ci.sh --quiet
+          '
+
+  darwin-arm64:
+    runs-on: macos-arm64
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
+      YH_LLVM_HOST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: 复用 LLVM 闭包缓存
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
+          if [ -d "$cache" ]; then
+            ln -sfn "$cache" tmp/llvm-migration
+            echo "复用闭包缓存：$cache"
+          else
+            make llvm-host
+          fi
+      - name: 取种子
+        run: python3 tools/fetch-release-seed.py --platform darwin-arm64 --repo "$SEED_REPO"
+      - name: 准备闭包并冷编
+        run: make bootstrap
+      - name: Darwin 专项门
+        run: make test-llvm-darwin
+      - name: 语法与运行语料
+        run: |
+          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(sysctl -n hw.ncpu)"
+      - name: 自举主门（语料已单独跑）
+        run: make selfhost-native SKIP_CORPUS=1
+
+  linux-arm64:
+    runs-on: macos-arm64
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
+      YH_LLVM_HOST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: 复用 LLVM 闭包缓存
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
+          if [ -d "$cache" ]; then
+            ln -sfn "$cache" tmp/llvm-migration
+            echo "复用闭包缓存：$cache"
+          else
+            make llvm-host
+          fi
+      - name: 容器内构建（Linux/AArch64 原生）
+        run: |
+          set -euo pipefail
+          cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
+          mount=""
+          if [ -d "$cache" ]; then mount="-v $cache:$cache"; fi
+          container run --rm -v "$PWD":/work -w /work $mount \
+            -e GH_TOKEN -e LLVM_JOBS -e SEED_REPO \
+            ubuntu:24.04 bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                build-essential python3 binutils xz-utils libxml2-dev zlib1g-dev libzstd-dev
+              python3 tools/fetch-release-seed.py --platform linux-arm64 --repo "$SEED_REPO"
+              make bootstrap
+              make test-llvm-linux-arm64
+              python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+              python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
+              make selfhost-native SKIP_CORPUS=1
+            '
