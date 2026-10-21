@@ -31,6 +31,21 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 0.0.6 Release 种子验证
+
+- Release 0.0.6 已发布，三端资产齐全：
+  `yh-0.0.6-darwin-arm64.tar.gz`（26.5 MB）、`yh-0.0.6-linux-arm64.tar.gz`
+  （42.6 MB）、`yh-0.0.6-linux-x86_64.tar.gz`（42.6 MB）及各自 `.sha256`，
+  说明 CircleCI tag release workflow 的三端测试与打包成功。
+- 清理本地二进制（`bin/`、根 `yh`、`compiler/.build`）后，
+  `make fetch-seed` 从 0.0.6 Release 下载种子：
+  `bin/yh-darwin-arm64` sha256=`ce7cdb17…38ba6d`。
+- 用新种子复跑：`make` 冷编通过；`make test` 无 FAIL；`make selfhost-native`
+  模块固定点一致（27 产物）、cc4 自解析 98 文件 OK、project 106/106；
+  `yh version` = `0.0.6`。
+- fetch-seed 需要 `GITHUB_TOKEN` + `GITHUB_REPOSITORY=lalavender/x`
+  （私有仓库），已在本地用 git 凭证临时提供，环境变量本身未持久化。
+
 ## 2026-10-21 推送 llvm 与种子出库
 
 - 把退役分支推送到远端 `llvm`（`e5e81ac..1f2c8ba`），随后提交
