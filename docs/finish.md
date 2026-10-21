@@ -7144,3 +7144,18 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
   `0.0.5` tag 并发布（`https://github.com/lalavender/x/releases/tag/0.0.5`）。
   tag 保持 `0.0.5 -> 968de29`，发布工作流修复在 `llvm` 分支，避免再触发
   arm64/darwin 全量构建。
+
+# 2026-10-22 换行终结语句（0.0.8-rc）
+
+- **语法**：`\n` 参与语句边界，简单语句、模块头、类型别名、字段与枚举成员可以
+  省略行尾分号；同一行仍用 `;` 分隔；严格续行要求括号外运算符放在上一行末尾；
+  裸 `return` 行尾结束。设计见
+  [03-design/yh-换行终结语句设计.md](03-design/yh-换行终结语句设计.md)。
+- **实现**：`compiler/lex/layout.yh` 归一化补零长度 `TK_SEMI`；解析器用
+  `p_implicit_semi`/`p_take_block_end` 区分隐式与显式终结符；参考语法用
+  `tokens { IMPLICIT }` + `stmtEnd`，语料门禁按同一规则归一化。
+- **验证**：`make test` 全绿（正例 80/80、反例 44/44，run 209/210、fail 133/133、
+  pass 8/8）；`make selfhost-native` 全绿（cc3→cc4 27 个产物一致、自解析 101
+  个源文件、modules 19/19、project cases 115/115）。
+- 记录：[01-finished/yh-换行终结语句-2026-10-22.md](01-finished/yh-换行终结语句-2026-10-22.md)。
+  未滚种子、未发版、未批量删分号（方案 Phase 1/2）。

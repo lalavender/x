@@ -67,6 +67,16 @@ ANTLR_CANDIDATES = [
 # 本地 Maven 缓存里的 ANTLR 工具 jar。
 M2_ANTLR = Path.home() / ".m2/repository/org/antlr/antlr4"
 
+# 归一化判定用到的保留字与内建类型（与 compiler/lex/layout.yh 保持一致）。
+KEYWORDS = set(
+    "pub let const fn type struct union enum if else switch case default for in "
+    "goto sizeof len as to_type while do unsigned signed short long float double "
+    "typedef extern static register auto inline volatile restrict module import".split()
+)
+BUILTIN_TYPES = set(
+    "int i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool char void".split()
+)
+
 HEADER_PREFIX = "// 覆盖规则："
 RULE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -165,6 +175,8 @@ def load_parser(work):
     """把临时目录里的生成物 import 进来，返回 (lexer 类, parser 类, Token)。"""
     sys.path.insert(0, str(work))
     from antlr4 import Token  # noqa: E402
+    from antlr4.Token import CommonToken  # noqa: E402
+    from antlr4.ListTokenSource import ListTokenSource  # noqa: E402
     from antlr4 import CommonTokenStream, InputStream  # noqa: E402
     from antlr4.error.ErrorListener import ErrorListener  # noqa: E402
     from yhLexer import yhLexer  # noqa: E402
@@ -179,11 +191,81 @@ def load_parser(work):
         def syntaxError(self, recognizer, offending, line, column, msg, exc):
             self._c.syntaxError(recognizer, offending, line, column, msg, exc)
 
-    return InputStream, CommonTokenStream, Token, yhLexer, yhParser, Collector
+    return (InputStream, CommonTokenStream, Token, yhLexer, yhParser,
+            Collector, CommonToken, ListTokenSource)
+
+
+def can_end(text, before_text):
+    """该 token 能否结束简单语句、字段或枚举成员（与 lex_can_end 同规则）。"""
+    if before_text == ".":
+        return True
+    if text in BUILTIN_TYPES:
+        return True
+    if text in (")", "]", "}", "true", "false", "return", "break", "continue"):
+        return True
+    if text and (text[0].isalnum() or text[0] in "_\"'"):
+        return text not in KEYWORDS
+    return False
+
+
+def normalize_tokens(raw, Token, semi_type, CommonToken, ListTokenSource):
+    """按 compiler/lex/layout.yh 的规则把换行补成隐式 ';'，返回新的 token 流。
+
+    括号/方括号内、属性组之后、行首 '{' 之前不补；显式 ';' 优先；
+    '}' 前与 EOF 前补。行号取自 ANTLR 词法器，块注释里的换行同样生效。
+    """
+    visible = [t for t in raw
+               if t.channel == Token.DEFAULT_CHANNEL and t.type != Token.EOF]
+    pos = raw.index(raw[-1]) if raw else 0
+    eof = raw[-1] if raw else None
+    if eof is None:
+        return None
+    seq = visible + [eof]
+    out = []
+    parens = 0
+    brackets = 0
+    attribute_depth = -1
+    closed_attribute = False
+    for idx, tok in enumerate(seq):
+        if idx:
+            prev = seq[idx - 1]
+            before = seq[idx - 2] if idx > 1 else None
+            before_text = before.text if before is not None else ""
+            is_eof = tok is eof
+            boundary = is_eof or tok.line > prev.line or tok.text == "}"
+            jump_end = (before_text != "." and
+                        (prev.text in ("return", "break", "continue")
+                         or before_text == "goto"))
+            if (boundary and parens == 0 and brackets == 0
+                    and not closed_attribute and tok.text != ";"
+                    and (tok.text != "{" or jump_end)
+                    and can_end(prev.text, before_text)):
+                semi = CommonToken(type=semi_type)
+                semi.text = ";"
+                semi.line = prev.line
+                semi.column = prev.column + len(prev.text)
+                out.append(semi)
+        out.append(tok)
+        closed_attribute = False
+        if tok.text == "(":
+            parens += 1
+        elif tok.text == ")" and parens > 0:
+            parens -= 1
+        elif tok.text == "[":
+            brackets += 1
+            if idx > 0 and seq[idx - 1].text == "@":
+                attribute_depth = brackets
+        elif tok.text == "]" and brackets > 0:
+            if attribute_depth == brackets:
+                closed_attribute = True
+                attribute_depth = -1
+            brackets -= 1
+    return ListTokenSource(out)
 
 
 def check_file(path, api):
-    InputStream, CommonTokenStream, Token, yhLexer, yhParser, Collector = api
+    (InputStream, CommonTokenStream, Token, yhLexer, yhParser, Collector,
+     CommonToken, ListTokenSource) = api
     text = path.read_text(encoding="utf-8")
 
     lex_errors = []
@@ -191,8 +273,17 @@ def check_file(path, api):
     lexer.removeErrorListeners()
     lexer.addErrorListener(Collector(lex_errors))
 
-    tokens = CommonTokenStream(lexer)
-    tokens.fill()  # 强制全量词法，暴露文件尾部的词法错误
+    raw = CommonTokenStream(lexer)
+    raw.fill()  # 强制全量词法，暴露文件尾部的词法错误
+
+    semi_type = next((i for i, name in enumerate(yhParser.symbolicNames)
+                      if name == "IMPLICIT"), None)
+    if semi_type is None:
+        die("参考语法缺少 IMPLICIT token，无法归一化换行终结符")
+    source = normalize_tokens(raw.tokens, Token, semi_type, CommonToken,
+                              ListTokenSource)
+    tokens = CommonTokenStream(source)
+    tokens.fill()
 
     parse_errors = []
     parser = yhParser(tokens)

@@ -1,4 +1,8 @@
 grammar yh;
+
+// IMPLICIT：归一化补入的隐式语句终结符（不对应任何源文本）。
+// 语料门禁用同一规则生成该 token，参考语法据此区分显式分号。
+tokens { IMPLICIT }
 /*
  * 玉衡（yh）v0.1 语法参考。
  *
@@ -17,9 +21,12 @@ grammar yh;
  *   - 标识符位置严格区分保留字；成员位置（字段声明 / 字面量字段 /
  *     成员访问）放开保留字，见 memberName。
  *
- * 语句边界由显式的 `;` 钉死，因此本参考语法**不存在**「一条语句 vs
- * 两条相邻语句」的歧义。NL 仍放隐藏通道，只用于保留位置信息。
- * 注意：`return` 会吞掉下一行开头的表达式（见 returnStmt）。
+ * 简单语句、模块头、类型别名、字段与枚举成员可以用换行收尾：词法归一化
+ *（compiler/lex/layout.yh）按行号、'}' 与 EOF 补入隐式 `;`，解析器只看
+ * 归一化后的 token 流。因此本参考语法仍按显式 `;` 描述，且不存在
+ *「一条语句 vs 两条相邻语句」的歧义。
+ * 括号/方括号内换行不终结语句；括号外的行首运算符属于下一条语句，续行必须
+ * 把运算符放在上一行末尾；`return` 在行尾结束（见 returnStmt）。
  */
 
 /*
@@ -141,7 +148,7 @@ removedKeyword
 // 但 `let a, b int = 1, 2` 不合法（类型不共享）。
 // 绑定列表为行内列表，不允许尾逗号（见 structInitBody 的列表策略）。
 letDecl
-    : 'let' binding (',' binding)* ';'
+    : 'let' binding (',' binding)* stmtEnd
     ;
 
 // 变量绑定：名字 + 必需类型 + 可选初值。
@@ -154,7 +161,7 @@ binding
 
 // const 必须带初值，且类型必须显式写出。
 constDecl
-    : 'const' IDENT typeRef '=' expr ';'
+    : 'const' IDENT typeRef '=' expr stmtEnd
     ;
 
 // --- fn 声明（函数）---
@@ -173,7 +180,7 @@ fnSignature
 // 属性函数允许函数体定义，也允许以分号结尾的外部声明；是否允许无体
 // 以及属性组合是否合法由语义检查决定。
 attributedFnDecl
-    : fnSignature (block | ';')
+    : fnSignature (block | stmtEnd)
     ;
 
 // 参数表：逗号分隔的参数列表（行内列表，不允许尾逗号）。
@@ -194,7 +201,7 @@ param
 
 // 类型别名：`type Handle = *void`、`type Callback = fn(int, int) int`。
 typeDecl
-    : 'type' IDENT '=' typeRef ';'
+    : 'type' IDENT '=' typeRef stmtEnd
     ;
 
 // --- struct / union 声明 ---
@@ -207,19 +214,19 @@ typeDecl
 // 字段顺序即内存布局顺序；不支持位域、packed、自定义对齐。
 // 字段名允许保留字（memberName）——union 的标签域 `type int;` 因此可用。
 structDecl
-    : 'struct' IDENT '{' fieldDecl* '}'
+    : 'struct' IDENT '{' fieldDecl* '}' IMPLICIT?
     ;
 
 // union：同一块内存的互斥视图。与 struct 同规则：必须 `pub union`，
 // 全部字段公开。
 unionDecl
-    : 'union' IDENT '{' fieldDecl* '}'
+    : 'union' IDENT '{' fieldDecl* '}' IMPLICIT?
     ;
 
 // 字段声明。字段名放开保留字（见 memberName）；不写 pub 前缀
 // （`pub struct` 的字段一律公开），`pub` 仅可作为字段名出现。
 fieldDecl
-    : memberName typeRef ';'
+    : memberName typeRef stmtEnd
     ;
 
 // --- enum 声明 ---
@@ -228,12 +235,12 @@ fieldDecl
 // 随枚举导出（F_PUB），跨模块以 `模块名.成员` 引用。成员逐个书写，
 // 可带显式判别值；未指定时从 0 递增。
 enumDecl
-    : 'enum' IDENT '{' enumItem* '}'
+    : 'enum' IDENT '{' enumItem* '}' IMPLICIT?
     ;
 
 // enum 成员名是普通标识符（与 let/const 同一命名空间），不允许保留字。
 enumItem
-    : IDENT ('=' expr)? ';'
+    : IDENT ('=' expr)? stmtEnd
     ;
 
 /*
@@ -244,7 +251,14 @@ enumItem
 
 // 语句块：花括号包围的语句列表。
 block
-    : '{' stmt* '}'
+    : '{' stmt* '}' IMPLICIT?
+    ;
+
+// 语句终结：显式分号，或归一化补入的隐式终结符。显式分号仍代表空语句
+// 以外的唯一写法；隐式终结只出现在可省略分号的位置。
+stmtEnd
+    : ';'
+    | IMPLICIT
     ;
 
 // 语句分发。
@@ -282,25 +296,25 @@ labelStmt
 
 // goto 语句。
 gotoStmt
-    : 'goto' IDENT ';'
+    : 'goto' IDENT stmtEnd
     ;
 
 // break / continue 语句。
 branchStmt
-    : ('break' | 'continue') ';'
+    : ('break' | 'continue') stmtEnd
     ;
 
 // return 语句：可返回单个表达式；无值 return 用于 void 函数。
-// 注意：NL 在隐藏通道（同 C），`return` 会吞掉下一行开头的表达式——
-// `return` 换行 `x;` 即 `return x;`。无值 return 必须显式写 `return;`。
+// `return` 在行尾结束（归一化补隐式 ';'）；跨行返回值必须写成 `return (`
+// 或在括号内换行，不再吞掉下一行开头的表达式。
 returnStmt
-    : 'return' expr? ';'
+    : 'return' expr? stmtEnd
     ;
 
 // 表达式语句或单目标赋值语句。
 // v0.1 不支持元组赋值：`a, b = 1, 2;` 非法；逗号仅用于调用实参（exprList）。
 exprStmt
-    : expr (assignOp expr)? ';'
+    : expr (assignOp expr)? stmtEnd
     ;
 
 /*
@@ -317,7 +331,7 @@ ifStmt
 
 // switch 语句：每个 case 自带块；支持多值与 default。
 switchStmt
-    : 'switch' expr '{' switchCase* '}'
+    : 'switch' expr '{' switchCase* '}' IMPLICIT?
     ;
 
 // case 块之间无 fallthrough，default 的书写位置因此无语义；
@@ -538,7 +552,7 @@ lenExpr
  * 命名式 vs 位置式：首元素第二个 token 为 `:` 即命名式，否则位置式。
  */
 structInit
-    : IDENT '{' structInitBody '}'
+    : IDENT '{' structInitBody IMPLICIT? '}'
     ;
 
 /*
@@ -711,7 +725,10 @@ IDENT
     : [A-Za-z_] [A-Za-z0-9_]*
     ;
 
-// 换行符：ANTLR 参考放入隐藏通道；手写 lexer 必须把它交给 parser 执行 ASI。
+// 换行符：保留在隐藏通道仅用于记录行号；语句终结由归一化补入隐式 ';'。
+// 归一化规则：括号/方括号外、上一 token 能结束语句时（含 '}' 前与 EOF 前）
+// 补 ';'；属性组之后、行首 '{' 之前不补；显式 ';' 优先。测试门禁
+//（tests/yh/check.py）用同一规则归一化 token 后再解析。
 NL
     : '\r'? '\n' -> channel(HIDDEN)
     ;
