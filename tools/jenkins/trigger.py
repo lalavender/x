@@ -31,7 +31,7 @@ from pathlib import Path
 
 TRACKED_BRANCHES = {"arm64", "llvm", "main"}
 VERSION_BRANCH = re.compile(r"^\d+\.\d+\.\d+-(rc|release)$")
-VERSION_TAG = re.compile(r"^\d+\.\d+\.\d+$")
+VERSION_TAG = re.compile(r"^\d+\.\d+\.\d+(-rc\.\d+)?$")
 HOOK_MARKER = "yh-jenkins-trigger"
 DEFAULT_ENV = Path.home() / ".config" / "yh-jenkins" / "env"
 
@@ -121,7 +121,7 @@ def trigger_ref(config, ref):
     if ref.startswith("refs/tags/"):
         tag = ref[len("refs/tags/"):]
         if not VERSION_TAG.match(tag):
-            print(f"跳过 tag {tag}（只发布 x.y.z；rc tag 按 CircleCI 现状忽略）")
+            print(f"跳过 tag {tag}（只发布 x.y.z 与 x.y.z-rc.N）")
             return False
         return post_build(config, config["JENKINS_RELEASE_JOB"], {"TAG": tag})
     print(f"跳过 ref {ref}")

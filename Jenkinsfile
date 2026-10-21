@@ -15,7 +15,9 @@
 def tagName = (params.TAG ?: '').trim()
 def branchName = (params.BRANCH ?: '').trim()
 def isRelease = tagName != ''
-def isVersionTag = isRelease && (tagName ==~ /^\d+\.\d+\.\d+$/)
+// rc 预发布（x.y.z-rc.N）与正式版都走 tag 流水线；publish.py 对含 -rc. 的
+// tag 发布 prerelease，正式版必须是 x.y.z。
+def isVersionTag = isRelease && (tagName ==~ /^\d+\.\d+\.\d+(-rc\.\d+)?$/)
 def isTrackedBranch = branchName in ['arm64', 'llvm', 'main'] ||
     branchName ==~ /^\d+\.\d+\.\d+-(rc|release)$/
 def shouldRun = isRelease ? isVersionTag : isTrackedBranch
@@ -46,7 +48,7 @@ pipeline {
           env.IS_RELEASE = isRelease ? '1' : '0'
           echo "ref=${refName} release=${isRelease}"
           if (!shouldRun) {
-            echo '跳过：分支只构建 arm64/llvm/main；tag 只构建 x.y.z（rc tag 按 CircleCI 现状忽略）'
+            echo '跳过：分支只构建 arm64/llvm/main 与 <ver>-rc/<ver>-release；tag 只构建 x.y.z 与 x.y.z-rc.N'
           }
         }
       }
