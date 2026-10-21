@@ -78,13 +78,12 @@
 - [ ] **E4 libc L0–L5**：按[分阶段候选方案](02-plan/yh-libc分阶段候选方案.md)
   推进，未授权全部实施。
 
-### F. project.toml 库文件链接（LINK，普通项目完成，自举迁移待下一轮）
+### F. project.toml 库文件链接（LINK，已随 0.0.7 发布）
 
-普通项目能力已落地并移植到 LL12 基线：`compiler/cmd/project_link.yh`、
+普通项目与 F1 自举闭包迁移已落地并发布：`compiler/cmd/project_link.yh`、
 `compiler/cmd/link_inputs.yh`、`--link` 解析、`[project].os/arch`、目标覆盖表、
 路径/后缀/格式检查、`.build` 摘要缓存及 `linkgroups`/`linkshared`/反例 fixture；
-`build-check.py` 111/111 通过。种子按最新策略不入库，过渡候选只放被忽略的
-`bin/`；发布新 seed 后才能让只认识旧清单的 Release seed 升级到本功能。
+`build-check.py` 111/111 通过。0.0.7 Release 三端种子已回读验证。
 
 - [x] **F1 LINK3**：compiler 清单与自举脚本已迁移到 `[link]`：归档来自
   清单，运行库参数走 `YH_LINK_RUNTIME_FLAGS`，新编译器 manifest-only；
@@ -145,9 +144,6 @@ R2c 与增量能力，排在 LLVM 收尾之后按需启动：
   与 lowering 解耦，NP0/NP1/NP2/NP4/NP5 关闭（NP4 自研机器 IR 与 ADR-0014
   冲突）；需用户确认后再改
   [Nanopass 方案](02-plan/yh-Nanopass风格优化架构实施方案.md) 与 ADR-0011。
-- **❓2 project.toml 的 `os`/`arch` 必填**：当前实现要求两份字段（`host` 表示
-  宿主），是破坏性 schema 变更；需确认是否保留、是否给缺省值或迁移诊断，并写入
-  [模块与项目管理设计](03-design/yh-模块与项目管理设计.md)。
 - **❓3 字面量只读化**：见 H1，属语义变更，需单独决定。
 
 ## 设计决定不做（非缺口，勿列为任务）
