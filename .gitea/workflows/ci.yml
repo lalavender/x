@@ -1,18 +1,35 @@
 name: ci
 # Gitea Actions 真构建验证（host 模式，macOS/arm64）。
-# 阶段一：取种子；阶段二（验证后追加）：make + make test。
+# host 模式直接复用宿主 $HOME/Documents/x/tmp/llvm-migration 闭包缓存，
+# 避免每次重新准备 LLVM（与 Jenkins 的 YH_LLVM_CACHE 同一份）。
 on: [push]
 jobs:
   build:
     runs-on: macos-arm64
+    timeout-minutes: 120
     env:
-      # 种子仍从 GitHub Release 取（Gitea 侧尚未托管种子资产）。
-      GITHUB_REPOSITORY: lalavender/x
+      # 种子仍托管在 GitHub Release；GITHUB_REPOSITORY 会被 Gitea 覆盖成 yh/yh，
+      # 所以显式用 --repo 传给取种脚本。
       GH_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+      - name: 复用 LLVM 闭包缓存
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          cache="$HOME/Documents/x/tmp/llvm-migration"
+          if [ -d "$cache" ]; then
+            ln -sfn "$cache" tmp/llvm-migration
+            echo "复用宿主闭包缓存：$cache"
+          else
+            make llvm-host
+          fi
       - name: 取种子
         run: |
           set -euo pipefail
-          make fetch-seed
+          python3 tools/fetch-release-seed.py --platform darwin-arm64 --repo lalavender/x
           ls -l bin/
+      - name: 冷编
+        run: make
+      - name: 三层回归
+        run: make test
