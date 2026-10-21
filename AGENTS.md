@@ -7,14 +7,13 @@
 **0.0.3 起仓库已删除 src/（C 版 stage0）与 bootstrap/，进入滚动自举**：
 编译器源码在 `compiler/`（gen/lex/parse/ast/comptime/cmd/ir/backend
 多模块的 project.toml 项目），
-构建只依赖**宿主平台对应的入库种子**，种子统一按 `yh-<平台>-<架构>` 命名：
+构建只依赖**宿主平台对应的种子**，种子统一按 `yh-<平台>-<架构>` 命名：
 macOS/arm64 用 `bin/yh-darwin-arm64`（Mach-O，SHA-256 见
 `bin/yh-darwin-arm64.sha256`），Linux/aarch64 用 `bin/yh-linux-arm64`（ELF，
-SHA-256 见 `bin/yh-linux-arm64.sha256`）；Linux/x86_64 种子不入库，从最新
-GitHub Release 获取（`make fetch-seed`，写入被 gitignore 的
-`bin/yh-linux-x64`）。Linux/aarch64 种子因内嵌 LLVM/lld 超过 GitHub 100 MB
-单文件限制，使用 Git LFS 跟踪；克隆后需执行 `git lfs pull`，否则该种子只是
-指针文件。
+SHA-256 见 `bin/yh-linux-arm64.sha256`）；Linux/x86_64 用
+`bin/yh-linux-x64`。**种子不入库**（2026-10-21 起，仓库不再使用 Git LFS）：
+克隆后首次构建前执行 `make fetch-seed`，从最新 GitHub Release 下载到被
+gitignore 的 `bin/` 并核对哈希。
 
 - 日常构建：`make`（= 宿主种子对 `compiler/` 项目 `yh build`，冷编，
   产出根目录 `yh`）；日常验证以 `make selfhost-native` 为主门
@@ -72,10 +71,8 @@ GitHub Release 获取（`make fetch-seed`，写入被 gitignore 的
 ## 目录
 
 - `compiler/` —— 编译器源码（gen/lex/parse/ast/comptime/cmd/ir/backend 多模块的项目）
-- `bin/yh-darwin-arm64` + `bin/yh-darwin-arm64.sha256` —— 入库种子与哈希（Darwin/arm64）
-- `bin/yh-linux-arm64` + `bin/yh-linux-arm64.sha256` —— Linux/aarch64 入库种子与哈希
-- `bin/yh-linux-x64` + `bin/yh-linux-x64.sha256` —— Linux/x86_64 种子
-  （默认不入库，`make fetch-seed` 从最新 Release 获取）
+- `bin/` —— 种子目录（**不入库**，`make fetch-seed` 从最新 Release 下载
+  `yh-<平台>-<架构>` 与哈希）
 - `docs/03-design/` 语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
   `docs/adr/` 决策、`docs/finish.md` 完成流水、`docs/todo.md` 待办
 - `tests/yh/` 语法语料、`tests/yh-run/` 语义运行语料、

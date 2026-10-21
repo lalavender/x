@@ -1,7 +1,8 @@
 # --------------------------------------------------------------------------
 # yh（玉衡）编译器 —— 自举构建
 #
-# 编译器就是 yh：由入库种子 bin/yh-<平台>-<架构>（上一版编译器二进制）对 compiler/
+# 编译器就是 yh：由种子 bin/yh-<平台>-<架构>（上一版编译器二进制，不入库，
+# 首次 make fetch-seed 下载）对 compiler/
 # 多模块项目 yh build 产出，形态随宿主（Darwin → Mach-O，Linux → ELF）。
 # 每个版本直接用上一个版本的二进制编译（无 C 编译步骤、无 stage0）：
 #   * make            构建 yh（主编译器，项目根目录）
@@ -253,7 +254,7 @@ verify-seed:
 
 # fetch-seed：从最新 GitHub Release 下载当前平台种子（写入 bin/...）。
 # 私有仓库需要 GITHUB_REPOSITORY 与 GH_TOKEN/GITHUB_TOKEN；
-# Linux/x86_64 种子默认不入库，开发机首次构建前执行本目标。
+# 种子不入库（2026-10-21 起不再使用 Git LFS），任何平台首次构建前执行本目标。
 fetch-seed:
 	python3 $(TOPSRC)/tools/fetch-release-seed.py --platform $(SEED_PLATFORM)
 

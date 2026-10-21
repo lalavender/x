@@ -2,7 +2,8 @@
 
 > 0.0.3 起本目录是**主要开发编译器**（[ADR-0006](../docs/adr/0006-yh自举产物为主要开发编译器.md)、
 > [ADR-0007](../docs/adr/0007-yh编译器使用源码模块.md)）：仓库已删除 C 版
-> stage0 与 bootstrap，构建只依赖入库种子 `bin/yh-<平台>-<架构>`（上一版编译器二进制）。
+> stage0 与 bootstrap，构建只依赖种子 `bin/yh-<平台>-<架构>`（上一版编译器二进制，
+> 用 `make fetch-seed` 从 Release 下载，不入库）。
 > 自举产物默认目标取编译器构建身份（qemu 下仍为进程架构），日常验证以
 > `make selfhost-native` 为主门。
 
@@ -24,12 +25,13 @@ SSA）与其它模块同为根项目普通模块，共同进入编译器构建�
 [模块私有类型设计](../docs/03-design/yh-模块私有类型设计.md)。
 
 ```
-bin/yh-<平台>-<架构>（入库种子）──yh build──▶ yh ──自编──▶ yh'（固定点：模块 .s/.s.i 逐字节相同）
+bin/yh-<平台>-<架构>（Release 种子）──yh build──▶ yh ──自编──▶ yh'（固定点：模块 .s/.s.i 逐字节相同）
 ```
 
 ## 构建与验证
 
 ```bash
+make fetch-seed         # 首次：从 Release 下载本平台种子到 bin/
 make                    # 用 bin/yh-<平台>-<架构> 冷编本目录项目，产出仓库根 yh
 make test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
 make selfhost-native    # 本机主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
@@ -46,7 +48,7 @@ python3 tests/yh-run/check.py --compiler $PWD/../yh
 ```
 
 `make selfhost-native` 由 `tests/selfhost/native-selfhost.py` 执行本机全套
-自举门（滚动自举，无 stage0；种子 = 入库的 `bin/yh-<平台>-<架构>`）：
+自举门（滚动自举，无 stage0；种子 = `make fetch-seed` 取得的 `bin/yh-<平台>-<架构>`）：
 
     bin/yh-<平台>-<架构> build compiler/  → cc2（冷编）
     cc2     build compiler/ → cc3（冷编）
