@@ -49,8 +49,8 @@
 
 - [ ] **C1 固定 SDK 预编译分发**：把 569MB 的 LLVM/lld 构建产物作为 Release
   资产（带锁文件校验），免掉每台机器首次 `make llvm-host` 的源码构建。
-- [ ] **C2 Linux/x64 闭包改运行时文件**：按 Darwin 的 Zig 式机制把
-  `selfhost-flags` 从种子内编路径改为构建机文件（`tools/llvm-sdk.py`）。
+- [x] **C2 Linux/x64 闭包改运行时文件**：`tools/llvm-sdk.py` 生成
+  `selfhost-runtime.txt`；0.0.7 三端种子不再带构建机闭包路径。
 - [ ] **C3 SDK 27 兼容**：内嵌 lld 21 解析不了 `arm64e.x1` TAPI；升级固定 LLVM
   或按实际 SDK 裁剪目标列表。
 - [ ] **C4 `make dev` 增量**：归档身份目前按路径计，SDK 原地重建需清缓存或补
