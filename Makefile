@@ -46,8 +46,8 @@ ifndef TOP
  INCLUDED = no
 TOPSRC = $(TOP)
 # LLVM 闭包缓存根：显式 YH_LLVM_CACHE 优先，否则仓库 tmp/llvm-migration，
-# 再否则复用同一 Git 仓库主 worktree 的缓存（见 tools/llvm-cache.py）。
-YH_LLVM_CACHE ?= $(shell python3 $(TOPSRC)/tools/llvm-cache.py 2>/dev/null || echo $(TOPSRC)/tmp/llvm-migration)
+# 再否则复用同一 Git 仓库主 worktree 的缓存（见 tools/llvm_cache.py）。
+YH_LLVM_CACHE ?= $(shell python3 $(TOPSRC)/tools/llvm_cache.py 2>/dev/null || echo $(TOPSRC)/tmp/llvm-migration)
 export YH_LLVM_CACHE
 
 EXESUF =
