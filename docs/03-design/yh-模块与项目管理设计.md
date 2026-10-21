@@ -217,8 +217,8 @@ extra = ["vendor/lib/linux-arm64/libextra.a"]
 
 - 只有根项目生效；依赖项目的 `[link]` 忽略。
 - 相对路径基于声明它的 `project.toml`，读取时用 `realpath` 规范化。
-- `.a` 普通静态库按需加载；`.so` / `.dylib` 动态链接；`.tbd` 为 Darwin
-  链接期 stub。首版不实现 whole-archive。
+- `.a` 默认按需加载；`[link-options] whole = ["组名"]` 可指定整库加载
+  （自举桥使用）；`.so` / `.dylib` 动态链接；`.tbd` 为 Darwin 链接期 stub。
 - 默认链接全部有效组；`build` / `run` 的 `--link <组名>` 可重复，只选点名组。
 - ELF 选中库放在同一 `--start-group`；Darwin 按声明顺序。
 - 只检查最终选中组；`check` / `list` 只校验 schema，不检查库文件。

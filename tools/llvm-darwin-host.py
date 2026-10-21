@@ -75,6 +75,11 @@ def selfhost_flags_path():
     return workdir() / "selfhost-flags.txt"
 
 
+def selfhost_runtime_path():
+    """非归档运行库参数：通过 YH_LINK_RUNTIME_FLAGS 追加到最终链接。"""
+    return workdir() / "selfhost-runtime.txt"
+
+
 def selfhost_flags_text(flags):
     """把闭包参数排成「每行一个」：yh 运行时按行读取，不做 shell 切分。"""
     return "".join(f"{flag}\n" for flag in flags)
@@ -87,6 +92,12 @@ def write_selfhost_flags(record):
     path.write_text(selfhost_flags_text(record["selfhost_link_flags"]), encoding="utf-8")
     record["selfhost_flags_file"] = str(path.relative_to(ROOT))
     record["selfhost_flags_sha256"] = digest(path)
+    runtime = [flag for flag in record["selfhost_link_flags"]
+               if flag != "-force_load" and not flag.startswith("/")]
+    runtime_path = selfhost_runtime_path()
+    runtime_path.write_text(selfhost_flags_text(runtime), encoding="utf-8")
+    record["selfhost_runtime_file"] = str(runtime_path.relative_to(ROOT))
+    record["selfhost_runtime_sha256"] = digest(runtime_path)
     return path
 
 
@@ -433,6 +444,11 @@ def check(full=True):
         problems.append("Darwin 自举闭包文件缺失（需要重新 prepare）")
     elif full and digest(flags_file) != record.get("selfhost_flags_sha256"):
         problems.append("Darwin 自举闭包文件摘要错误")
+    runtime_file = ROOT / record.get("selfhost_runtime_file", "")
+    if not record.get("selfhost_runtime_file") or not runtime_file.is_file():
+        problems.append("Darwin 运行库参数文件缺失（需要重新 prepare）")
+    elif full and digest(runtime_file) != record.get("selfhost_runtime_sha256"):
+        problems.append("Darwin 运行库参数文件摘要错误")
     archive = ROOT / record.get("bridge_archive", "")
     if not archive.is_file() or (full and digest(archive) != record.get("bridge_sha256")):
         problems.append("Darwin LLVM 桥归档缺失或摘要错误")
@@ -529,6 +545,8 @@ def main(argv):
         print(json.dumps({"host": HOST, "shim_dir": str(write_shim(record).parent),
                           "bridge_sha256": record["bridge_sha256"],
                           "selfhost_flags": str(selfhost_flags_path()),
+                          "selfhost_runtime": str((ROOT / record["selfhost_runtime_file"]).resolve())
+                          if record.get("selfhost_runtime_file") else "",
                           "sdk_host_sha256": record["sdk_host_sha256"]}, ensure_ascii=False))
         return 0
     if args.command == "prepare":

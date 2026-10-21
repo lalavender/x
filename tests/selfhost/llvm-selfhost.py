@@ -163,6 +163,15 @@ def log_result(work: Path, label: str, result):
     (logs / f"{label}.stderr.log").write_text(result.stderr, encoding="utf-8")
 
 
+def compiler_uses_link_manifest() -> bool:
+    """compiler/project.toml 是否已迁移到 [link] 归档清单。"""
+    try:
+        text = (COMPILER / "project.toml").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return re.search(r"^\[link(?:-[a-z0-9-]+)?\]", text, re.MULTILINE) is not None
+
+
 def build_candidate(compiler: Path, label: str, level: str, work: Path,
                    env: dict[str, str], expected: set[str], seed=False):
     """冷编一代候选，校验 stats/机型/LLVM 接口并立即保存快照。"""
@@ -236,6 +245,9 @@ def self_parse(compiler: Path, jobs: int, work: Path):
     sources = sorted(COMPILER.rglob("*.yh"))
     env = dict(os.environ)
     env.pop("YH_LLVM_SELFHOST", None)
+    env.pop("YH_LLVM_SELFHOST_FLAGS", None)
+    env.pop("YH_LINK_MANIFEST_ONLY", None)
+    env.pop("YH_LINK_RUNTIME_FLAGS", None)
     def parse_one(source):
         result = run([str(compiler), "--syntax-check", str(source)],
                      cwd=ROOT, env=env, timeout=120)
@@ -253,6 +265,9 @@ def run_language_gates(compiler: Path, level: str, jobs: int, work: Path):
     """用最终原生候选运行语法、语义、模块与项目 LLVM O0/O2 全门。"""
     env = dict(os.environ)
     env.pop("YH_LLVM_SELFHOST", None)
+    env.pop("YH_LLVM_SELFHOST_FLAGS", None)
+    env.pop("YH_LINK_MANIFEST_ONLY", None)
+    env.pop("YH_LINK_RUNTIME_FLAGS", None)
     commands = [
         [sys.executable, str(ROOT / "tests/yh-run/check.py"), "--compiler",
          str(compiler), "--backend", "llvm", "--target", TRIPLE,
@@ -289,6 +304,9 @@ def run_specialized_gates(compiler: Path, jobs: int, work: Path):
     ]
     env = dict(os.environ)
     env.pop("YH_LLVM_SELFHOST", None)
+    env.pop("YH_LLVM_SELFHOST_FLAGS", None)
+    env.pop("YH_LINK_MANIFEST_ONLY", None)
+    env.pop("YH_LINK_RUNTIME_FLAGS", None)
     for index, command in enumerate(commands):
         result = run(command, cwd=ROOT, env=env)
         log_result(work, f"specialized-{index}", result)
@@ -334,6 +352,9 @@ def main() -> int:
 
     base_env = dict(os.environ)
     base_env.pop("YH_LLVM_SELFHOST", None)
+    base_env.pop("YH_LLVM_SELFHOST_FLAGS", None)
+    base_env.pop("YH_LINK_MANIFEST_ONLY", None)
+    base_env.pop("YH_LINK_RUNTIME_FLAGS", None)
     base_env.pop("YH_CC", None)
     a, a_files, a_dir = build_candidate(seed, "A", "0", work, base_env,
                                         expected, seed=True)
@@ -357,17 +378,25 @@ def main() -> int:
         encoding="utf-8")
     wrapper.chmod(0o755)
     direct_env["YH_CC"] = str(wrapper)
-    direct_env["YH_LLVM_SELFHOST"] = "1"
-    # 自举闭包不再烘焙进编译器：B/C/D 的最终链接必须读构建机的运行时闭包文件。
     host_record = json.loads((ROOT / "tmp/llvm-migration/llvm-host-linux-x86_64/host.json")
                              .read_text(encoding="utf-8"))
-    closure = host_record.get("selfhost_flags")
-    if not closure:
-        raise RuntimeError("LLVM x64 宿主身份缺少 selfhost_flags 闭包文件")
-    closure_path = (ROOT / closure).resolve()
-    if not closure_path.is_file():
-        raise RuntimeError(f"LLVM x64 自举闭包文件不存在：{closure_path}")
-    direct_env["YH_LLVM_SELFHOST_FLAGS"] = str(closure_path)
+    if compiler_uses_link_manifest():
+        direct_env.pop("YH_LLVM_SELFHOST", None)
+        direct_env.pop("YH_LLVM_SELFHOST_FLAGS", None)
+        direct_env["YH_LINK_MANIFEST_ONLY"] = "1"
+        runtime = host_record.get("selfhost_runtime")
+        if runtime and (ROOT / runtime).is_file():
+            direct_env["YH_LINK_RUNTIME_FLAGS"] = str((ROOT / runtime).resolve())
+    else:
+        direct_env["YH_LLVM_SELFHOST"] = "1"
+        # 自举闭包不再烘焙进编译器：B/C/D 的最终链接必须读构建机的运行时闭包文件。
+        closure = host_record.get("selfhost_flags")
+        if not closure:
+            raise RuntimeError("LLVM x64 宿主身份缺少 selfhost_flags 闭包文件")
+        closure_path = (ROOT / closure).resolve()
+        if not closure_path.is_file():
+            raise RuntimeError(f"LLVM x64 自举闭包文件不存在：{closure_path}")
+        direct_env["YH_LLVM_SELFHOST_FLAGS"] = str(closure_path)
 
     final_candidates = {}
     for level in ("0", "2"):

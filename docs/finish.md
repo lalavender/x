@@ -2,6 +2,21 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-21 F1：编译器自举闭包迁移到 [link]
+
+- `tools/link-closure.py` 从固定宿主记录生成 `compiler/project.toml` 的
+  `[link-<os>-<arch>]`：bridge / lld / LLVM / support 归档；Darwin 全量
+  whole，Linux 只强制 bridge。
+- 新增 `[link-options] whole` 语义；bridge 使用 whole 覆盖弱桩。
+- 运行库参数从归档闭包拆出：`selfhost-runtime.txt` 经
+  `YH_LINK_RUNTIME_FLAGS` 在链接期追加；`YH_LINK_MANIFEST_ONLY=1` 让 C++ 桥
+  停止旧归档注入。
+- `seed-build.py` / `native-selfhost.py` / `llvm-selfhost.py` /
+  `llvm-darwin-selfhost.py` 根据 compiler 清单自动切换 legacy 引导与
+  manifest-only；生成期先走旧注入，清单生效后不再新旧叠加。
+- 验证：Darwin 与 Linux/aarch64 均完成 cc3→cc4 固定点、自解析、CLI 冒烟；
+  `build-check.py` Darwin 111/111。
+
 ## 2026-10-21 project.toml 库文件链接（普通项目，移植到 LL12 基线）
 
 - 在 `origin/llvm`（0.0.6 / LL12 退役后）重新落地 `[link]` 普通项目能力：

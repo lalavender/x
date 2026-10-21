@@ -121,6 +121,13 @@ def check(host: str, full: bool = True) -> list[str]:
         problems.append(f"自举闭包文件不存在：{selfhost}")
     elif digest(selfhost) != record.get("selfhost_flags_sha256"):
         problems.append("自举闭包文件内容与身份记录不一致")
+    selfhost_runtime = ROOT / record.get("selfhost_runtime", "")
+    if not record.get("selfhost_runtime"):
+        problems.append("宿主身份记录缺少运行库参数文件")
+    elif not selfhost_runtime.is_file():
+        problems.append(f"运行库参数文件不存在：{selfhost_runtime}")
+    elif digest(selfhost_runtime) != record.get("selfhost_runtime_sha256"):
+        problems.append("运行库参数文件内容与身份记录不一致")
     archive = ROOT / record.get("bridge_archive", "")
     if not archive.is_file():
         problems.append(f"桥归档不存在：{archive}")
@@ -317,6 +324,8 @@ def main(argv: list[str]) -> int:
         path = write_shim(args.host, record)
         selfhost_flags = (ROOT / record["selfhost_flags"]).resolve() \
             if record.get("selfhost_flags") else None
+        selfhost_runtime = (ROOT / record["selfhost_runtime"]).resolve() \
+            if record.get("selfhost_runtime") else None
         print(json.dumps({"host": args.host, "shim_dir": str(path.parent),
                           "shim": str(path), "mode": args.mode,
                           "executable": record["executable"],
@@ -324,6 +333,7 @@ def main(argv: list[str]) -> int:
                           "bridge_sha256": record["bridge_sha256"],
                           "sdk_sha256": record["sdk_sha256"],
                           "selfhost_flags": str(selfhost_flags) if selfhost_flags else "",
+                          "selfhost_runtime": str(selfhost_runtime) if selfhost_runtime else "",
                           "cxx": record["cxx"], "cc": record["cc"]}, ensure_ascii=False))
         return 0
     record = ensure(args.host, "require")

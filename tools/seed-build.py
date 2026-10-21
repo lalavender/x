@@ -14,6 +14,7 @@ LLVM 不是构建的失败点：--llvm-mode auto（默认）下任何缺失都�
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -56,6 +57,16 @@ def prepare_llvm_host(host: str, mode: str) -> dict | None:
     return record
 
 
+def project_uses_link_manifest(project: Path) -> bool:
+    """项目清单是否已声明 [link] 组；是则改用清单归档，不再注入旧闭包归档。"""
+    manifest = project / "project.toml"
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return re.search(r"^\[link(?:-[a-z0-9-]+)?\]", text, re.MULTILINE) is not None
+
+
 def main() -> int:
     """解析参数、按需准备包装器，然后用种子冷编项目。"""
     parser = argparse.ArgumentParser()
@@ -81,25 +92,39 @@ def main() -> int:
     output = Path(args.output).resolve()
     environment = dict(os.environ)
     # 只有构建 compiler/ 自身才把固定桥/LLVM 闭包注入最终链接；普通项目
-    # 不能继承该标记，否则会把 LLVM 静态库链进用户程序。`--llvm-mode off`
-    # 只表示本次不准备固定闭包：旧种子仍会用自身烘焙的路径，新种子没有内置
-    # 路径，链接阶段会明确报「缺少 LLVM 闭包」。
-    if project == (ROOT / "compiler").resolve():
+    # 不能继承该标记，否则会把 LLVM 静态库链进用户程序。
+    # 编译器清单一旦声明 [link]，归档改由清单提供，旧闭包归档注入必须关闭；
+    # 第一代候选仍走旧注入，避免旧种子不认识 [link]。
+    is_compiler = project == (ROOT / "compiler").resolve()
+    manifest_mode = is_compiler and project_uses_link_manifest(project)
+    if is_compiler and not manifest_mode:
         environment["YH_LLVM_SELFHOST"] = "1"
     if args.llvm_host:
         record = prepare_llvm_host(args.llvm_host, args.llvm_mode)
         if record:
-            shim = Path(record["shim_dir"])
-            environment["PATH"] = str(shim) + os.pathsep + environment.get("PATH", "")
-            # LLVM x64 target 会选择 /usr/bin/gcc 绕过 PATH；显式绑定同一 shim，
-            # 让过渡种子可链接出目标机型正确且含固定桥的候选编译器。
-            compiler_shim = "clang" if args.llvm_host == "darwin-aarch64" else "gcc"
-            environment["YH_CC"] = str(shim / compiler_shim)
-            # 闭包由构建机提供（种子不再烘焙绝对路径）；文件缺失时保持不设置，
-            # 让链接阶段给出「缺少闭包」的可操作诊断，而不是静默降级。
-            flags_file = record.get("selfhost_flags")
-            if flags_file and Path(flags_file).is_file():
-                environment["YH_LLVM_SELFHOST_FLAGS"] = str(flags_file)
+            if not manifest_mode:
+                shim = Path(record["shim_dir"])
+                environment["PATH"] = str(shim) + os.pathsep + environment.get("PATH", "")
+                # LLVM x64 target 会选择 /usr/bin/gcc 绕过 PATH；显式绑定同一 shim，
+                # 让过渡种子可链接出目标机型正确且含固定桥的候选编译器。
+                compiler_shim = "clang" if args.llvm_host == "darwin-aarch64" else "gcc"
+                environment["YH_CC"] = str(shim / compiler_shim)
+            else:
+                environment.pop("YH_CC", None)
+            if manifest_mode:
+                # 归档来自 [link]；运行库参数走独立配方文件。
+                environment.pop("YH_LLVM_SELFHOST", None)
+                environment.pop("YH_LLVM_SELFHOST_FLAGS", None)
+                environment["YH_LINK_MANIFEST_ONLY"] = "1"
+                runtime_file = record.get("selfhost_runtime")
+                if runtime_file and Path(runtime_file).is_file():
+                    environment["YH_LINK_RUNTIME_FLAGS"] = str(runtime_file)
+            else:
+                # 闭包由构建机提供（种子不再烘焙绝对路径）；文件缺失时保持不设置，
+                # 让链接阶段给出「缺少闭包」的可操作诊断，而不是静默降级。
+                flags_file = record.get("selfhost_flags")
+                if flags_file and Path(flags_file).is_file():
+                    environment["YH_LLVM_SELFHOST_FLAGS"] = str(flags_file)
     command = [str(compiler)]
     if args.backend:
         command += ["--backend", args.backend]

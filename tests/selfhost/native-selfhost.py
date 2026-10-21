@@ -23,6 +23,7 @@ import concurrent.futures
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -51,7 +52,9 @@ DEFAULT_JOBS = max(1, min(8, os.cpu_count() or 1))
 # 未准备时，Linux 仍按旧路径继续，Darwin 默认后端是 LLVM，直接给出准备命令。
 SHIM_DIR = None
 SELFHOST_FLAGS = None
+SELFHOST_RUNTIME = None
 SELFHOST_LLVM = False
+SELFHOST_MANIFEST = False
 
 
 def host_triple() -> str:
@@ -131,6 +134,15 @@ def seed_supports_llvm(seed: Path) -> bool:
     return execution.returncode == 0 and execution.stdout.strip() == "A"
 
 
+def compiler_uses_link_manifest() -> bool:
+    """compiler/project.toml 是否已迁移到 [link] 归档清单。"""
+    try:
+        text = (COMPILER / "project.toml").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return re.search(r"^\[link(?:-[a-z0-9-]+)?\]", text, re.MULTILINE) is not None
+
+
 def run(cmd, cwd=None, shim=False, seed_link=False):
     """执行子命令；shim=True 时把内嵌桥的链接包装器前置到 PATH。
 
@@ -155,10 +167,17 @@ def run(cmd, cwd=None, shim=False, seed_link=False):
     if shim and SHIM_DIR is not None:
         environment["PATH"] = str(SHIM_DIR) + os.pathsep + environment.get("PATH", "")
     if shim and SELFHOST_LLVM:
-        environment["YH_LLVM_SELFHOST"] = "1"
-        if SELFHOST_FLAGS is not None:
-            environment["YH_LLVM_SELFHOST_FLAGS"] = SELFHOST_FLAGS
-    if seed_link and SHIM_DIR is not None:
+        if SELFHOST_MANIFEST:
+            environment.pop("YH_LLVM_SELFHOST", None)
+            environment.pop("YH_LLVM_SELFHOST_FLAGS", None)
+            environment["YH_LINK_MANIFEST_ONLY"] = "1"
+            if SELFHOST_RUNTIME is not None:
+                environment["YH_LINK_RUNTIME_FLAGS"] = SELFHOST_RUNTIME
+        else:
+            environment["YH_LLVM_SELFHOST"] = "1"
+            if SELFHOST_FLAGS is not None:
+                environment["YH_LLVM_SELFHOST_FLAGS"] = SELFHOST_FLAGS
+    if seed_link and SHIM_DIR is not None and not SELFHOST_MANIFEST:
         linker = "clang" if sys.platform == "darwin" else "gcc"
         environment["YH_CC"] = str(SHIM_DIR / linker)
     return subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True,
@@ -269,13 +288,17 @@ def main() -> int:
         print(f"FAIL 自举种子：{error}")
         return 1
     print(f"自举种子 SHA-256：{seed_hash}")
-    global SHIM_DIR, SELFHOST_FLAGS, SELFHOST_LLVM
+    global SHIM_DIR, SELFHOST_FLAGS, SELFHOST_RUNTIME, SELFHOST_LLVM, SELFHOST_MANIFEST
     host_record = llvm_shim_for_seed(seed)
     if host_record:
         SHIM_DIR = Path(host_record["shim_dir"])
         flags_file = host_record.get("selfhost_flags")
         if flags_file and Path(flags_file).is_file():
             SELFHOST_FLAGS = str(flags_file)
+        runtime_file = host_record.get("selfhost_runtime")
+        if runtime_file and Path(runtime_file).is_file():
+            SELFHOST_RUNTIME = str(runtime_file)
+    SELFHOST_MANIFEST = compiler_uses_link_manifest()
     machine = platform.machine().lower()
     llvm_mode = args.backend == "llvm" or (
         args.backend == "auto" and (

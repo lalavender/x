@@ -360,6 +360,15 @@ def build(lock: dict, prefix: Path) -> dict:
     selfhost_file = output / "selfhost-flags.txt"
     selfhost_file.write_text(
         "".join(f"{flag}\n" for flag in selfhost_flags), encoding="utf-8")
+    # 运行库参数与归档分离：归档进入 [link]，-l/-pthread 等仍由构建机配方
+    # 在链接期追加，避免把系统运行库误当成项目库文件。
+    runtime_flags = [flag for flag in selfhost_flags
+                     if flag not in ("--whole-archive", "--no-whole-archive",
+                                     "--start-group", "--end-group")
+                     and not flag.endswith(".a")]
+    runtime_file = output / "selfhost-runtime.txt"
+    runtime_file.write_text(
+        "".join(f"{flag}\n" for flag in runtime_flags), encoding="utf-8")
     if lock.get("lld"):
         lld_source = ROOT / "compiler/llvm/lld_bridge.cpp"
         template, lld_default_files, lld_default_libraries = lld_driver_config(
@@ -424,6 +433,8 @@ def build(lock: dict, prefix: Path) -> dict:
               "host": lock["host"], "build_host": build_host(), **compilers,
               "selfhost_flags": str(selfhost_file),
               "selfhost_flags_sha256": digest(selfhost_file),
+              "selfhost_runtime": str(runtime_file),
+              "selfhost_runtime_sha256": digest(runtime_file),
               "bridge_abi": lock["bridge_abi"], "bridge_source_sha256": digest(source),
               "bridge_header_sha256": digest(ROOT / "compiler/llvm/bridge.h"),
               "lld_stub_source_sha256": digest(ROOT / "compiler/llvm/lld_stub.cpp"),

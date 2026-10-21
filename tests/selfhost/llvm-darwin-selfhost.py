@@ -62,18 +62,34 @@ def macho_cpu_type(path: Path) -> int:
     return struct.unpack_from("<I", data, 4)[0]
 
 
+def compiler_uses_link_manifest() -> bool:
+    """compiler/project.toml 是否已迁移到 [link] 归档清单。"""
+    try:
+        text = (COMPILER / "project.toml").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return re.search(r"^\[link(?:-[a-z0-9-]+)?\]", text, re.MULTILINE) is not None
+
+
 def base_environment() -> dict:
     """构造构建环境：显式 SDKROOT、自举闭包文件，剔除会改变后端选择的变量。"""
     environment = dict(os.environ)
     environment.pop("YH_LLVM_SELFHOST", None)
+    environment.pop("YH_LLVM_SELFHOST_FLAGS", None)
+    environment.pop("YH_LINK_MANIFEST_ONLY", None)
+    environment.pop("YH_LINK_RUNTIME_FLAGS", None)
     environment.pop("YH_CC", None)
-    # 自举闭包由构建机提供（种子不再烘焙绝对路径）；与 make / seed-build
-    # 使用同一份 selfhost-flags.txt，换机器只需重新 prepare。
     if HOST_RECORD.is_file():
         record = json.loads(HOST_RECORD.read_text(encoding="utf-8"))
-        flags_file = record.get("selfhost_flags_file")
-        if flags_file:
-            environment["YH_LLVM_SELFHOST_FLAGS"] = str((ROOT / flags_file).resolve())
+        if compiler_uses_link_manifest():
+            environment["YH_LINK_MANIFEST_ONLY"] = "1"
+            runtime = record.get("selfhost_runtime_file")
+            if runtime:
+                environment["YH_LINK_RUNTIME_FLAGS"] = str((ROOT / runtime).resolve())
+        else:
+            flags_file = record.get("selfhost_flags_file")
+            if flags_file:
+                environment["YH_LLVM_SELFHOST_FLAGS"] = str((ROOT / flags_file).resolve())
     if not environment.get("SDKROOT") and SDK_RECORD.is_file():
         record = json.loads(SDK_RECORD.read_text(encoding="utf-8"))
         if record.get("sdk_root"):
@@ -418,11 +434,16 @@ def main() -> int:
     # B/C/D 的最终链接由内嵌 raw lld 完成，需要显式自举标记才会追加固定
     # 桥与 LLVM/lld 静态闭包；普通程序与探针保持不注入。
     build_env = dict(env)
-    build_env["YH_LLVM_SELFHOST"] = "1"
-    flags_file = Path(build_env.get("YH_LLVM_SELFHOST_FLAGS", ""))
-    if not flags_file.is_file():
-        raise RuntimeError("缺少自举闭包文件：先运行 make llvm-host"
-                           "（tools/llvm-darwin-host.py prepare）")
+    if compiler_uses_link_manifest():
+        build_env.pop("YH_LLVM_SELFHOST", None)
+        build_env.pop("YH_LLVM_SELFHOST_FLAGS", None)
+        build_env["YH_LINK_MANIFEST_ONLY"] = "1"
+    else:
+        build_env["YH_LLVM_SELFHOST"] = "1"
+        flags_file = Path(build_env.get("YH_LLVM_SELFHOST_FLAGS", ""))
+        if not flags_file.is_file():
+            raise RuntimeError("缺少自举闭包文件：先运行 make llvm-host"
+                               "（tools/llvm-darwin-host.py prepare）")
     frozen = {"A": {"legacy": True}}
     final_candidates = {}
     for level in LEVELS:

@@ -86,8 +86,9 @@
 `build-check.py` 111/111 通过。种子按最新策略不入库，过渡候选只放被忽略的
 `bin/`；发布新 seed 后才能让只认识旧清单的 Release seed 升级到本功能。
 
-- [ ] **F1 LINK3**：compiler 清单与自举脚本迁移到同一套 `[link]` 机制，拆分
-  归档/运行库参数，停用桥内重复归档注入。
+- [x] **F1 LINK3**：compiler 清单与自举脚本已迁移到 `[link]`：归档来自
+  清单，运行库参数走 `YH_LINK_RUNTIME_FLAGS`，新编译器 manifest-only；
+  Darwin/Linux 固定点与自解析通过。剩余发布新 seed（Release 资产）。
 
 ### G. C/C++ 桥迁移到 yh
 

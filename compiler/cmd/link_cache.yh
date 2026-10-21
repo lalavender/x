@@ -780,7 +780,8 @@ fn mb_link(out_path *char, build_off int, build_len int,
     // 自举闭包由构建机提供：优先读 YH_LLVM_SELFHOST_FLAGS 指向的文件，
     // 未提供时桥内烘焙常量作为过渡回退。负数是文件不可读，0 是没有任何闭包
     // （新种子不再烘焙绝对路径），两种情况都要立刻给出可操作诊断。
-    let selfhost_on int = mb_darwin_selfhost_enabled();
+    let selfhost_on int = li_manifest_mode(root_proj) != 0
+        ? 0 : mb_darwin_selfhost_enabled();
     let selfhost_flag_n int = 0;
     // 内嵌 lld 的 Linux 与 Darwin 都从同一运行时闭包文件读取桥/静态 LLVM；
     // 自举时必须先证明闭包存在，不能让空闭包静默链接出不可发射的二进代。
@@ -1182,7 +1183,8 @@ fn mb_link(out_path *char, build_off int, build_len int,
             library_search_storage[library_search_len] = 0;
         }
     }
-    let argc int = total_rows + c_object_n + c_lib_n + link_lib_n + 24
+    let argc int = total_rows + c_object_n + c_lib_n + link_lib_n * 2
+        + li_runtime_count() + 24
         + (library_search_count * 2)
         + selfhost_flag_n;
     let args **char = malloc((argc * sizeof(*char)).to_type(u64)).to_type(**char);
@@ -1313,13 +1315,32 @@ fn mb_link(out_path *char, build_off int, build_len int,
             args[next_arg] = use_lld != 0 ? "--start-group" : "-Wl,--start-group";
             next_arg += 1;
         }
+        let whole_on int = 0;
         let lb int = 0;
         for lb < link_lib_n {
+            let want_whole int = elv != 0 ? li_whole(lb) : 0;
+            if (elv != 0 && want_whole != whole_on) {
+                if (want_whole != 0) {
+                    args[next_arg] = use_lld != 0 ? "--whole-archive" : "-Wl,--whole-archive";
+                } else {
+                    args[next_arg] = use_lld != 0 ? "--no-whole-archive" : "-Wl,--no-whole-archive";
+                }
+                next_arg += 1;
+                whole_on = want_whole;
+            }
+            if (elv == 0 && li_whole(lb) != 0) {
+                args[next_arg] = "-force_load";
+                next_arg += 1;
+            }
             args[next_arg] = li_path(lb);
             next_arg += 1;
             lb += 1;
         }
         if (elv != 0) {
+            if (whole_on != 0) {
+                args[next_arg] = use_lld != 0 ? "--no-whole-archive" : "-Wl,--no-whole-archive";
+                next_arg += 1;
+            }
             args[next_arg] = use_lld != 0 ? "--end-group" : "-Wl,--end-group";
             next_arg += 1;
         }
@@ -1341,6 +1362,12 @@ fn mb_link(out_path *char, build_off int, build_len int,
             li2 += 1;
         }
         cp += 1;
+    }
+    let rt int = 0;
+    for rt < li_runtime_count() {
+        args[next_arg] = li_runtime_flag(rt);
+        next_arg += 1;
+        rt += 1;
     }
     // Linux：glibc 把数学函数放在独立的 libm 里，libs/math 与标准库用到
     // cos/pow 等；Darwin 的 libSystem 已包含（宿主链接命令按宿主平台取）。

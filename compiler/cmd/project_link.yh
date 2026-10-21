@@ -121,6 +121,7 @@ fn pl_group_push(proj int, name_off int, name_len int, target int,
     g.name_off = name_off;
     g.name_len = name_len;
     g.target = target;
+    g.whole = 0;
     g.line = line;
     g.items = 0;
     g.item_n = 0;
@@ -224,6 +225,19 @@ fn pl_apply_project_target(proj int) int {
     return 0;
 }
 
+// pl_options_code_from_section：返回 0=公共 [link-options]，1..4=目标选项表，
+// -1=非法 link-options 节名，-2=与选项无关的节。
+fn pl_options_code_from_section(off int, n int) int {
+    if (pl_bytes_eq(off, n, "link-options") != 0) { return 0; }
+    if (n < 13) { return -2; }
+    if (!(pl_bytes_eq(off, 13, "link-options-") != 0)) { return -2; }
+    if (pl_bytes_eq(off, n, "link-options-linux-arm64") != 0) { return 1; }
+    if (pl_bytes_eq(off, n, "link-options-linux-x64") != 0) { return 2; }
+    if (pl_bytes_eq(off, n, "link-options-darwin-arm64") != 0) { return 3; }
+    if (pl_bytes_eq(off, n, "link-options-darwin-x64") != 0) { return 4; }
+    return -1;
+}
+
 // pl_load_link_config：只在根项目装载 [link] 与 [link-<os>-<arch>]。
 // 依赖项目的 [link] 按约定忽略；这里不读取，也不报 schema 错。
 fn pl_load_link_config(proj int, is_root int) int {
@@ -233,6 +247,11 @@ fn pl_load_link_config(proj int, is_root int) int {
     for si < toml_sec_n {
         let name_off int = toml_secs[si].name_off;
         let name_len int = toml_secs[si].name_len;
+        let opt_target int = pl_options_code_from_section(name_off, name_len);
+        if (opt_target != -2) {
+            si += 1;
+            continue;
+        }
         let target int = pl_target_code_from_section(name_off, name_len);
         if (target == -2) {
             si += 1;
@@ -284,6 +303,62 @@ fn pl_load_link_config(proj int, is_root int) int {
                 ai += 1;
             }
             vi += 1;
+        }
+        si += 1;
+    }
+    // 第二遍：解析 [link-options] / [link-options-<os>-<arch>] 的 whole。
+    si = 0;
+    for si < toml_sec_n {
+        let name_off int = toml_secs[si].name_off;
+        let name_len int = toml_secs[si].name_len;
+        let opt_target int = pl_options_code_from_section(name_off, name_len);
+        if (opt_target == -2) { si += 1; continue; }
+        if (opt_target < 0) {
+            return pj_proj_diag(gs.p_projs[proj].root_off, toml_secs[si].line,
+                "非法的链接选项节名");
+        }
+        let vi2 int = 0;
+        for vi2 < toml_secs[si].val_n {
+            let val TomlVal = toml_secs[si].vals[vi2];
+            if (!(val.key_len == 5 && gs.task.np_data[val.key_off] == 'w'
+                && gs.task.np_data[val.key_off + 1] == 'h'
+                && gs.task.np_data[val.key_off + 2] == 'o'
+                && gs.task.np_data[val.key_off + 3] == 'l'
+                && gs.task.np_data[val.key_off + 4] == 'e')) {
+                return pj_proj_diag(gs.p_projs[proj].root_off, val.line,
+                    "[link-options] 只支持 whole 字段");
+            }
+            if (val.kind != 4 || val.arr_first < 0 || val.arr_count < 0
+                || val.arr_first + val.arr_count > toml_array_n) {
+                return pj_proj_diag(gs.p_projs[proj].root_off, val.line,
+                    "[link-options].whole 必须是字符串数组");
+            }
+            let ai2 int = 0;
+            for ai2 < val.arr_count {
+                let item TomlArrayItem = toml_array_items[val.arr_first + ai2];
+                if (pl_group_name_ok(item.sval_off, item.sval_len) == 0) {
+                    return pj_proj_diag(gs.p_projs[proj].root_off, val.line,
+                        "[link-options].whole 组名非法");
+                }
+                let matched int = 0;
+                let gi int = 0;
+                for gi < gs.p_projs[proj].link_group_n {
+                    let g *gen.PLinkGroup = &gs.p_projs[proj].link_groups[gi];
+                    if (pl_name_eq(g.name_off, g.name_len,
+                        item.sval_off, item.sval_len) != 0
+                        && (opt_target == 0 || g.target == 0 || g.target == opt_target)) {
+                        g.whole = 1;
+                        matched = 1;
+                    }
+                    gi += 1;
+                }
+                if (matched == 0) {
+                    return pj_proj_diag(gs.p_projs[proj].root_off, val.line,
+                        "[link-options].whole 引用了不存在的组");
+                }
+                ai2 += 1;
+            }
+            vi2 += 1;
         }
         si += 1;
     }

@@ -1,6 +1,6 @@
 # yh project.toml 库文件链接实施方案（v2）
 
-日期：2026-10-21。状态：**普通项目已实施；编译器自举闭包迁移设计已交付，下一轮执行。**
+日期：2026-10-21。状态：**普通项目与编译器自举闭包迁移（F1）已实施。**
 
 用户确认：`[link]` 中必须写具体库文件路径；相对路径以 `project.toml`
 所在目录为基准并规范化为绝对路径。决策摘要见
@@ -74,7 +74,8 @@ core = ["vendor/lib/darwin-arm64/libcore.dylib"]
   ```
 - ELF 目标把所有选中的库放进同一个 `--start-group … --end-group`，保持顺序；
   共享库也放在其中。Darwin 没有等价 group，按声明顺序直接传入。
-- `.a` 按普通静态库按需加载（暂不实现 whole）；`.so` / `.dylib` 动态链接；
+- `.a` 默认按普通静态库按需加载；可选 `[link-options] whole = ["组名"]`
+  指定整库加载（自举桥必须 whole）；`.so` / `.dylib` 动态链接；
   `.tbd` 只作为 Darwin 链接期 stub。
 - 不自动写 rpath。`yh run` 临时把选中 `.so` / `.dylib` 所在目录加入本次
   子进程的 `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`；不修改二进制。
@@ -133,18 +134,19 @@ mtime_sec mtime_nsec size digest realpath
 - `tests/modules/build-check.py` 接入上述用例。
 - 本机 `make test`、`make selfhost-native` 全绿后才滚种子。
 
-## 8. 编译器自举迁移设计（下一轮）
+## 8. 编译器自举闭包迁移（F1，已实施）
 
-当前 `compiler/` 仍使用 `YH_LLVM_SELFHOST_FLAGS` 注入 bridge / LLVM / lld。
-下一轮迁移时：
+编译器清单已通过 `tools/link-closure.py` 从固定宿主记录生成：
 
-1. 先把闭包拆成“归档组”和“运行库参数”两部分：归档进入
-   `[link-<os>-<arch>]`，`-lc++`、`-lstdc++`、`-lpthread` 等仍由构建机配方
-   提供，并排在归档之后。
-2. 新 seed 一旦读到 `[link]` 就进入 manifest-only，不再追加旧归档；旧 seed
-   引导第一代候选时仍使用旧闭包。
-3. `tools/llvm-host.py` / `tools/llvm-darwin-host.py` 核对清单与实际 SDK
-   归档闭包一致；`make` 在缺闭包时给出 `make bootstrap` 诊断。
-4. 迁移后重新验证固定点、语料、模块门和种子路径检查，再滚两端种子。
+- bridge / lld / LLVM / support 归档进入 `[link-<os>-<arch>]`；
+- Darwin 保持桥、lld、LLVM 全量 `-force_load`（全部组 whole）；Linux 只强制
+  bridge，其余在同一个 `--start-group` 内按需加载；
+- `-lc++`、`-lstdc++`、`-lpthread` 等运行库参数由构建机写入
+  `selfhost-runtime.txt`，经 `YH_LINK_RUNTIME_FLAGS` 传给链接；
+- 新编译器读到 `compiler/project.toml` 的 `[link]` 即进入 manifest-only，
+  `YH_LINK_MANIFEST_ONLY=1` 让 C++ 桥停止追加旧归档；
+- 第一代候选仍可用旧 seed + 旧注入构建；manifest 生效后不再新旧叠加；
+- `tools/link-closure.py check --host ...` 校验清单与 host.json 一致。
 
-本文件所述普通项目能力已实现；第 8 节是下一轮计划，不是当前已交付结果。
+验证：Darwin 与 Linux/aarch64 均完成 manifest 自举固定点、自解析和 CLI 冒烟；
+本机 `make test` / `make selfhost-native` 全绿。

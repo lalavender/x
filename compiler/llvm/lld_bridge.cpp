@@ -220,7 +220,11 @@ void append_lld_inputs(std::vector<const char *> &arguments,
       for (int j = 0; j < extra_count; ++j)
         arguments.push_back(extra_args[j]);
       const char *selfhost = std::getenv("YH_LLVM_SELFHOST");
-      if (selfhost != nullptr && std::strcmp(selfhost, "1") == 0) {
+      const char *manifest_only = std::getenv("YH_LINK_MANIFEST_ONLY");
+      const bool legacy_injection =
+          manifest_only == nullptr || std::strcmp(manifest_only, "1") != 0;
+      if (legacy_injection && selfhost != nullptr &&
+          std::strcmp(selfhost, "1") == 0) {
         const int count = selfhost_flag_count_internal();
         for (int index = 0; index < count; ++index) {
           const char *flag = selfhost_flag_internal(index);
