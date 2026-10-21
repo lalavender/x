@@ -41,18 +41,29 @@ class FetchError(RuntimeError):
     """无法取得上一版种子；调用方应显式失败而不是静默回退。"""
 
 
-def api_request(url, token, accept="application/vnd.github+json"):
-    """执行一次 GitHub API 请求，返回响应对象。"""
+def api_request(url, token, accept="application/vnd.github+json", attempts=3):
+    """执行 GitHub API 请求，返回响应对象。
+
+    CI 上到 api.github.com 的连接偶发 SSL/EOF 中断；5xx/429 与传输层错误按
+    退避有限重试，4xx 立即失败（鉴权/路径问题重试无意义）。
+    """
     headers = {"Accept": accept, "User-Agent": "yh-ci-seed-fetcher"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
-    try:
-        return urllib.request.urlopen(request, timeout=180)
-    except urllib.error.HTTPError as error:
-        raise FetchError(f"GitHub API {error.code}: {url}") from error
-    except urllib.error.URLError as error:
-        raise FetchError(f"GitHub API 连接失败: {url}: {error}") from error
+    last = None
+    for attempt in range(attempts):
+        try:
+            return urllib.request.urlopen(request, timeout=180)
+        except urllib.error.HTTPError as error:
+            if error.code < 500 and error.code != 429:
+                raise FetchError(f"GitHub API {error.code}: {url}") from error
+            last = error
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+            last = error
+        if attempt + 1 < attempts:
+            time.sleep(2 * (attempt + 1))
+    raise FetchError(f"GitHub API 连接失败（重试 {attempts} 次）：{url}: {last}")
 
 
 def read_releases(repo, token):

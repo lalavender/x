@@ -143,8 +143,17 @@ def digest(path: Path) -> str:
 
 
 def relative(path: Path) -> str:
-    """身份记录里统一写仓库相对路径，便于在别的 WSL/容器里对照同一份产物。"""
-    return str(path.resolve().relative_to(ROOT))
+    """身份记录优先写仓库相对路径，便于在别的 WSL/容器里对照同一份产物。
+
+    共享闭包缓存按绝对路径挂进容器时（workspace 里的 tmp/llvm-migration 是指向
+    缓存的符号链接），产物解析后会落在仓库根之外；此时保留绝对路径，避免
+    relative_to 抛错。消费方用 (ROOT / value) 拼接，绝对路径同样可用。
+    """
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(ROOT))
+    except ValueError:
+        return str(resolved)
 
 
 def readelf_machine(executable: Path) -> tuple[int, str]:
