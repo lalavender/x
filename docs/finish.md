@@ -15,7 +15,8 @@
   `llvm-darwin-selfhost.py` 根据 compiler 清单自动切换 legacy 引导与
   manifest-only；生成期先走旧注入，清单生效后不再新旧叠加。
 - 验证：Darwin 与 Linux/aarch64 均完成 cc3→cc4 固定点、自解析、CLI 冒烟；
-  `build-check.py` Darwin 111/111。
+  `build-check.py` 两端均 111/111，Linux `yh-run` 344/348（4 个 Darwin
+  专属跳过），Darwin `make test` 347/348、`make selfhost-native` 全绿。
 
 ## 2026-10-21 project.toml 库文件链接（普通项目，移植到 LL12 基线）
 
