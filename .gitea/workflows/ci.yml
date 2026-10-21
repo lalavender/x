@@ -5,7 +5,8 @@ name: ci
 #   antlr        参考语法门（Apple container 内）
 #   darwin-arm64 宿主原生 LLVM 主门
 #   linux-arm64  Apple container（arm64 原生）LLVM 主门
-# 版本 tag 发布见 release.yml；Linux/x86_64 只在发布时跑。
+#   linux-x86_64 Apple container（amd64 模拟）LLVM 主门
+# 版本 tag 发布见 release.yml。
 #
 # 种子仍托管在 GitHub Release：Gitea 会把 GITHUB_REPOSITORY 覆写成 yh/yh，
 # 所以取种脚本一律用 --repo "$SEED_REPO" 显式指定。
@@ -110,6 +111,41 @@ jobs:
               set -euo pipefail
               make bootstrap
               make test-llvm-linux-arm64
+              python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+              python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
+              make selfhost-native SKIP_CORPUS=1
+            '
+
+  linux-x86_64:
+    runs-on: macos-arm64
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
+      YH_LLVM_HOST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: 取种子（宿主；容器内 DNS 不通，取种不放容器）
+        run: python3 tools/fetch-release-seed.py --platform linux-x86_64 --repo "$SEED_REPO"
+      - name: 确保 CI 镜像（amd64 模拟）
+        run: |
+          set -euo pipefail
+          if ! container image list | grep -qE '^yh-ci[[:space:]]+ubuntu24-amd64[[:space:]]'; then
+            container build -a amd64 -t yh-ci:ubuntu24-amd64 -f .gitea/ci/Dockerfile .
+          fi
+      - name: 容器内构建与测试（Linux/x86_64 模拟）
+        run: |
+          set -euo pipefail
+          # 缓存挂到仓库内固定路径：llvm-host.py 要求产物路径 resolve 后仍在仓库内。
+          rm -rf tmp/llvm-migration
+          cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
+          mount=""
+          if [ -d "$cache" ]; then mount="-v $cache:/work/tmp/llvm-migration"; fi
+          container run --rm -m 3G -a amd64 -v "$PWD":/work -w /work $mount \
+            -e LLVM_JOBS \
+            yh-ci:ubuntu24-amd64 bash -lc '
+              set -euo pipefail
+              make bootstrap
+              make test-llvm
               python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
               python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
               make selfhost-native SKIP_CORPUS=1

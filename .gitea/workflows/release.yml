@@ -1,12 +1,11 @@
 name: release
 # 版本 tag 发布（Gitea Actions，本机 host 模式 runner，macOS/arm64 宿主）。
 #
-# 三端顺序构建（单 workspace，与旧 Jenkins 发布流程同构）：
-#   Darwin/arm64 宿主原生 → Linux/AArch64（容器原生）→ Linux/x86_64（容器模拟）
-# 每端跑该平台门禁并以 cc4 自举候选刷新 yh，打包 yh-<tag>-<platform>.tar.gz，
-# 最后由 tools/publish-release.py 发布到 GitHub Release。
+# 并行结构：prepare 预建镜像 → 三个平台 job 并行构建打包 → publish 汇总发布。
+# host 模式下三个 job 在同一台机器的文件系统上，产物统一写到
+# $HOME/yh-release-dist/ci-<run_id>，不需要 artifact 上传下载。
 #
-# 只认 x.y.z 与 x.y.z-rc.N；其他 tag（如 seed-*）在首个 step 判定后跳过。
+# 只认 x.y.z 与 x.y.z-rc.N；其他 tag（如 seed-*）在 prepare 判定后跳过。
 on:
   push:
     tags:
@@ -17,13 +16,9 @@ env:
   SEED_REPO: lalavender/x
 
 jobs:
-  release:
+  prepare:
     runs-on: macos-arm64
-    timeout-minutes: 240
-    env:
-      GH_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
-      YH_LLVM_HOST: "1"
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -40,16 +35,35 @@ jobs:
             echo "跳过：$tag 不是版本 tag（只发布 x.y.z 与 x.y.z-rc.N）"
           fi
 
-      - name: 复用 LLVM 闭包缓存
+      - name: 预建 CI 镜像（arm64 + amd64，并行 job 复用）
         if: steps.ver.outputs.ok == '1'
+        run: |
+          set -euo pipefail
+          # 镜像按标签复用：三个平台 job 直接 container run，不再各自 apt 安装。
+          if ! container image list | grep -qE '^yh-ci[[:space:]]+ubuntu24[[:space:]]'; then
+            container build -t yh-ci:ubuntu24 -f .gitea/ci/Dockerfile .
+          fi
+          if ! container image list | grep -qE '^yh-ci[[:space:]]+ubuntu24-amd64[[:space:]]'; then
+            container build -a amd64 -t yh-ci:ubuntu24-amd64 -f .gitea/ci/Dockerfile .
+          fi
+
+  darwin-arm64:
+    needs: prepare
+    runs-on: macos-arm64
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
+      YH_LLVM_HOST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: 复用 LLVM 闭包缓存
         run: |
           set -euo pipefail
           mkdir -p tmp
           cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
           if [ -d "$cache" ]; then
             ln -sfn "$cache" tmp/llvm-migration
-            # 自举 flags 里存的是首次构建时的绝对路径（绑定当时的 workspace）；
-            # 统一改写为缓存真实路径，任何 workspace 都能复用。
+            # 自举 flags 存的是首次构建时的绝对路径；统一改写为缓存真实路径。
             for f in "$cache"/llvm-host-darwin-*/selfhost-flags.txt; do
               [ -f "$f" ] || continue
               perl -pi -e "s#/Users/[^\s]*?/tmp/llvm-migration/#$cache/#g" "$f"
@@ -58,9 +72,7 @@ jobs:
           else
             make llvm-host
           fi
-
       - name: Darwin/arm64 构建与打包
-        if: steps.ver.outputs.ok == '1'
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
@@ -73,38 +85,41 @@ jobs:
           make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
           cp dist/selfhost/cc4 yh
           rm -rf dist/selfhost
+          # 打包自检：产物必须支持换行终结（rc.4 曾打包出不含该特性的旧二进制）。
+          ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
+          out="$HOME/yh-release-dist/ci-$GITHUB_RUN_ID"
+          mkdir -p "$out"
           name="yh-$tag-darwin-arm64"
           stage="dist/.stage-darwin-arm64"
           mkdir -p "$stage"
           cp yh "$stage/yh"
-          tar -czf "dist/$name.tar.gz" -C "$stage" yh
+          tar -czf "$out/$name.tar.gz" -C "$stage" yh
           rm -rf "$stage"
-          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.sha256")
-          ls -l "dist/$name.tar.gz"
+          (cd "$out" && shasum -a 256 "$name.tar.gz" > "$name.sha256")
+          ls -l "$out/$name.tar.gz"
 
-      - name: 确保 CI 镜像（arm64）
-        if: steps.ver.outputs.ok == '1'
-        run: |
-          set -euo pipefail
-          if ! container image list | grep -qE '^yh-ci[[:space:]]+ubuntu24[[:space:]]'; then
-            container build -t yh-ci:ubuntu24 -f .gitea/ci/Dockerfile .
-          fi
-
+  linux-arm64:
+    needs: prepare
+    runs-on: macos-arm64
+    timeout-minutes: 180
+    env:
+      YH_LLVM_HOST: "1"
+    steps:
+      - uses: actions/checkout@v4
       - name: Linux/AArch64 构建与打包（容器原生）
-        if: steps.ver.outputs.ok == '1'
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
+          out="$HOME/yh-release-dist/ci-$GITHUB_RUN_ID"
           python3 tools/fetch-release-seed.py --platform linux-arm64 \
             --repo "$SEED_REPO" --exclude-tag "$tag"
-          # darwin 步骤在 workspace 里留的是 symlink；容器改用挂载到
-          # /work/tmp/llvm-migration（llvm-host.py 要求产物路径 resolve 后仍在仓库内）。
+          # 缓存挂到仓库内固定路径：llvm-host.py 要求产物路径 resolve 后仍在仓库内。
           rm -rf tmp/llvm-migration
           cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
           mount=""
           if [ -d "$cache" ]; then mount="-v $cache:/work/tmp/llvm-migration"; fi
           container run --rm -m 3G -v "$PWD":/work -w /work $mount \
-            -e LLVM_JOBS -e TAG="$tag" \
+            -e LLVM_JOBS -e TAG="$tag" -e OUT="$out" \
             yh-ci:ubuntu24 bash -lc '
               set -euo pipefail
               make bootstrap
@@ -114,64 +129,74 @@ jobs:
               make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
               cp dist/selfhost/cc4 yh
               rm -rf dist/selfhost
+              ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
+              mkdir -p "$OUT"
               name="yh-$TAG-linux-arm64"
               stage="dist/.stage-linux-arm64"
               mkdir -p "$stage"
               cp yh "$stage/yh"
-              tar -czf "dist/$name.tar.gz" -C "$stage" yh
+              tar -czf "$OUT/$name.tar.gz" -C "$stage" yh
               rm -rf "$stage"
-              (cd dist && sha256sum "$name.tar.gz" > "$name.sha256")
+              (cd "$OUT" && sha256sum "$name.tar.gz" > "$name.sha256")
             '
 
-      - name: 确保 CI 镜像（amd64 模拟）
-        if: steps.ver.outputs.ok == '1'
-        run: |
-          set -euo pipefail
-          if ! container image list | grep -qE '^yh-ci[[:space:]]+ubuntu24-amd64[[:space:]]'; then
-            container build -a amd64 -t yh-ci:ubuntu24-amd64 -f .gitea/ci/Dockerfile .
-          fi
-
+  linux-x86_64:
+    needs: prepare
+    runs-on: macos-arm64
+    timeout-minutes: 180
+    env:
+      YH_LLVM_HOST: "1"
+    steps:
+      - uses: actions/checkout@v4
       - name: Linux/x86_64 构建与打包（容器模拟）
-        if: steps.ver.outputs.ok == '1'
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
+          out="$HOME/yh-release-dist/ci-$GITHUB_RUN_ID"
           python3 tools/fetch-release-seed.py --platform linux-x86_64 \
             --repo "$SEED_REPO" --exclude-tag "$tag"
-          # darwin 步骤在 workspace 里留的是 symlink；容器改用挂载到
-          # /work/tmp/llvm-migration（llvm-host.py 要求产物路径 resolve 后仍在仓库内）。
           rm -rf tmp/llvm-migration
           cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
           mount=""
           if [ -d "$cache" ]; then mount="-v $cache:/work/tmp/llvm-migration"; fi
           container run --rm -m 3G -a amd64 -v "$PWD":/work -w /work $mount \
-            -e LLVM_JOBS -e TAG="$tag" \
+            -e LLVM_JOBS -e TAG="$tag" -e OUT="$out" \
             yh-ci:ubuntu24-amd64 bash -lc '
               set -euo pipefail
               make bootstrap
-              # x86_64 端只在 Apple container 的 amd64 模拟里跑：make test-llvm 的
-              # run 语料在模拟器下会崩（run/20-bytebuf.yh 信号 5，见 docs/todo.md），
-              # 因此发布流水线这里只做构建与打包；x86_64 运行证据以真机为准
-              # （CircleCI 的 linux-x86_64 作业保留）。
+              # 模拟环境下运行语义不可靠（run/20-bytebuf 曾信号 5），发布这里只做
+              # 构建、语法语料与打包；运行证据以 CI 的 x64 任务与真机为准。
               python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
               make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
               cp dist/selfhost/cc4 yh
               rm -rf dist/selfhost
+              ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
+              mkdir -p "$OUT"
               name="yh-$TAG-linux-x86_64"
               stage="dist/.stage-linux-x86_64"
               mkdir -p "$stage"
               cp yh "$stage/yh"
-              tar -czf "dist/$name.tar.gz" -C "$stage" yh
+              tar -czf "$OUT/$name.tar.gz" -C "$stage" yh
               rm -rf "$stage"
-              (cd dist && sha256sum "$name.tar.gz" > "$name.sha256")
+              (cd "$OUT" && sha256sum "$name.tar.gz" > "$name.sha256")
             '
 
+  publish:
+    needs: [darwin-arm64, linux-arm64, linux-x86_64]
+    runs-on: macos-arm64
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
       - name: 发布 GitHub Release
-        if: steps.ver.outputs.ok == '1'
         run: |
           set -euo pipefail
+          dist="$HOME/yh-release-dist/ci-$GITHUB_RUN_ID"
+          ls -l "$dist"
           python3 tools/publish-release.py \
             --repo "$SEED_REPO" \
             --tag "$GITHUB_REF_NAME" \
-            --dist dist \
+            --dist "$dist" \
             --notes "docs/01-finished/release-$GITHUB_REF_NAME.md"
