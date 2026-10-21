@@ -44,6 +44,10 @@ GitHub Release 获取（`make fetch-seed`，写入被 gitignore 的
   固定桥随种子分发；`make test` / `make selfhost-native` 默认走 LLVM，
   O0/O2 与连续自编固定点通过，种子已滚为 `bin/yh-linux-arm64`。
   性能项（RS2/RS3/R2c、20 轮对照）后置，不据此宣称首个完整 SSA 版本完成。
+  **2026-10-21（LL12）**：旧机器发射已彻底退役（`emit_arm64`/旧 arm64 后端/
+  四缓冲/旧 SSA 替换链/C ABI 发射层删除，`compiler/` 净减 6516 行），
+  `--backend legacy` 拒绝执行，LLVM 是唯一代码生成后端；证据见
+  `docs/01-finished/yh-LL12退役旧机器发射-2026-10-21.md`。
   **Darwin SDK stub**：`compiler/darwin-sdk/` 随编译器分发（Zig 式，
   SDK 26.4）；链接查找 `SDKROOT` → `YH_DARWIN_SDK` → 可执行文件附近 bundle →
   原生 `xcrun`。C 源/libc++/目标包/frameworks 等遗留见

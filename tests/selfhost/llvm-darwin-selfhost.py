@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""F2-8：Darwin/ARM64 从入库种子 legacy 编 A，A 以 LLVM 连续编 B/C/D。
+"""F2-8：Darwin/ARM64 从入库种子编 A，A 以 LLVM 连续编 B/C/D。
 
-- A：现有 Darwin 种子以 legacy 代码生成、链入真实静态 LLVM 桥的过渡代；
+- A：现有 Darwin 种子以 LLVM 代码生成、链入真实静态 LLVM 桥的过渡代
+  （LL12 后种子只支持 LLVM，A 与 B/C/D 同一后端）；
 - B/C/D：A 及后续代以显式 `--backend llvm` 编出，O0/O2 各自比较 B→C→D 的
   `.ll/.s.i/.s.ct` 逐字节固定点，并冻结各代 checked/emitted/rejected/fallback；
 - 最终 D-O2 上跑自解析、语法/运行/模块/项目全门与 Darwin 专项门（ABI、runtime、

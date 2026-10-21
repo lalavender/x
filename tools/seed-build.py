@@ -62,8 +62,8 @@ def main() -> int:
     parser.add_argument("--compiler", required=True)
     parser.add_argument("--project", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--backend", choices=("legacy", "llvm"),
-                        help="显式选择构建候选时使用的后端")
+    parser.add_argument("--backend", choices=("llvm",),
+                        help="显式选择构建候选时使用的后端（LLVM 是唯一后端）")
     parser.add_argument("--target", help="候选编译器的目标 triple")
     parser.add_argument("--opt-level", choices=("0", "2"),
                         help="LLVM 候选优化级别")

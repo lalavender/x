@@ -77,8 +77,8 @@ def main() -> int:
     ap.add_argument("--compiler-path", default=str(ROOT / "yh"),
                     help="自举编译器路径（默认 ./yh）")
     ap.add_argument("--quiet", action="store_true", help="只打印失败项")
-    ap.add_argument("--backend", choices=("legacy", "llvm"),
-                    help="显式选择编译后端")
+    ap.add_argument("--backend", choices=("llvm",),
+                    help="显式选择编译后端（LLVM 是唯一后端）")
     ap.add_argument("--target", help="显式选择输出目标 triple")
     ap.add_argument("--opt-level", choices=("0", "2"),
                     help="显式选择 LLVM 优化级别")

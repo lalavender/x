@@ -365,8 +365,9 @@ test-llvm-linux-arm64: stage-yh
 	@test "$(HOST_ARCH)" = aarch64 -o "$(HOST_ARCH)" = arm64 || { echo "错误: test-llvm-linux-arm64 要求 Linux/aarch64"; exit 1; }
 	python3 $(TOPSRC)/tests/selfhost/llvm-linux-arm64.py --compiler-path $(YH_RUN)
 
-# selfhost-llvm-darwin：F2-8 原生连续自举（A legacy → B/C/D LLVM，
+# selfhost-llvm-darwin：F2-8 原生连续自举（种子 → B/C/D LLVM，
 # O0/O2 固定点 + 自解析 + 全量语料 + Darwin 专项门 + 隔离 PATH）。
+# LL12 后种子即 LLVM 编出的过渡代 A，不再有 legacy 起点。
 .PHONY: selfhost-llvm-darwin
 selfhost-llvm-darwin:
 	@test "$(HOST_SYSTEM)" = Darwin -a "$(HOST_ARCH)" = arm64 || { echo "错误: selfhost-llvm-darwin 要求 Darwin/ARM64"; exit 1; }
