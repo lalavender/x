@@ -73,7 +73,7 @@ pipeline {
             url: 'https://github.com/lalavender/x.git',
             credentialsId: 'github-https'
           ]],
-          extensions: [[$class: 'CloneOption', noTags: false, shallow: false, timeout: 30]]
+          extensions: [[$class: 'CloneOption', noTags: false, shallow: true, depth: 1, timeout: 30]]
         ])
         // 检出后恢复共享 LLVM 闭包缓存；删 workspace 不会删缓存本体。
         sh '''
