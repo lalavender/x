@@ -14,7 +14,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WORK = ROOT / "tmp/llvm-migration"
+sys.path.insert(0, str(ROOT / "tools"))
+from llvm_cache import cache_root  # noqa: E402
+WORK = cache_root()
 HOST = "darwin-aarch64"
 SDK_BUILDER = ROOT / "tools/llvm-darwin-sdk.py"
 SDK_PREFIX = WORK / "darwin-sdk/sdk-darwin-aarch64"

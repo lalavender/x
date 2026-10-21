@@ -1,0 +1,89 @@
+module lex
+import gen
+
+// lex_can_end：判定某个 token 是否能结束简单语句、类型字段或枚举成员。
+// 点号后的成员名允许保留字；其余位置只接受值、类型与无操作数跳转
+//（return/break/continue）；goto 需要标签，不能作语句结尾。
+fn lex_can_end(kind int, before int) int {
+    if (before == gen.TK_DOT) { return 1 }
+    if (kind >= gen.TOK_IDENT && kind <= gen.TOK_CHAR) { return 1 }
+    if (kind >= gen.TK_INT && kind <= gen.TK_VOID) { return 1 }
+    return (kind == gen.TK_RPAREN || kind == gen.TK_RBRACKET
+        || kind == gen.TK_RBRACE || kind == gen.TK_TRUE || kind == gen.TK_FALSE
+        || kind == gen.TK_RETURN || kind == gen.TK_BREAK
+        || kind == gen.TK_CONTINUE).to_type(int)
+}
+
+// lex_layout：词法扫描结束后归一化 token 表，把「换行处、'}' 前、EOF 前」
+// 可省略的分号补成零长度 TK_SEMI，位置取上一 token 末尾。规则：
+//   * 括号、方括号内不终结（允许自由换行）；
+//   * 属性组 `@[...]` 之后不终结，声明头可以另起一行；
+//   * 行首为 '{' 时不终结，兼容头与左花括号分行的排版；跳转语句之后的
+//     裸块属于下一条语句，仍补终结符；
+//   * 显式分号优先，不重复产生终结符；
+//   * 行号来自词法器，块注释里的换行同样参与边界判断。
+// 成功返回 0；分配失败输出诊断并返回 -1。
+fn lex_layout() int {
+    let gs *gen.GenState = gen.G()
+    let raw *gen.Tok = gs.task.c_toks
+    let count int = gs.task.c_tok_n
+    // 最坏情况每两个 token 之间补一个终结符，容量取 2 倍再加 1 即可。
+    let capacity int = count * 2 + 1
+    let output *gen.Tok = malloc((capacity * sizeof(gen.Tok)).to_type(u64)).to_type(*gen.Tok)
+    if (output == 0) {
+        return gen.fail("换行终结符分配失败")
+    }
+    gs.task.c_toks = output
+    gs.task.c_tok_n = 0
+    gs.task.c_tok_cap = capacity
+    let parens int = 0
+    let brackets int = 0
+    let attribute_depth int = -1
+    let closed_attribute int = 0
+    let i int = 0
+    for i < count {
+        let token gen.Tok = raw[i]
+        if (i > 0) {
+            let previous gen.Tok = raw[i - 1]
+            let before int = 0
+            if (i > 1) { before = raw[i - 2].kind }
+            let boundary int = (token.line > previous.line
+                || token.kind == gen.TK_RBRACE || token.kind == gen.TOK_EOF).to_type(int)
+            // 跳转语句之后的裸块属于下一条语句，不能套用「'{' 前不终结」。
+            let jump_end int = (before != gen.TK_DOT
+                && (previous.kind == gen.TK_RETURN || previous.kind == gen.TK_BREAK
+                    || previous.kind == gen.TK_CONTINUE || before == gen.TK_GOTO)).to_type(int)
+            if (boundary != 0 && parens == 0 && brackets == 0
+                && closed_attribute == 0 && token.kind != gen.TK_SEMI
+                && (token.kind != gen.TK_LBRACE || jump_end != 0)
+                && lex_can_end(previous.kind, before) != 0) {
+                if (tok_push(gen.TK_SEMI, previous.start + previous.len, 0,
+                        previous.line, previous.col + previous.len) != 0) {
+                    return -1
+                }
+            }
+        }
+        if (tok_push(token.kind, token.start, token.len, token.line, token.col) != 0) {
+            return -1
+        }
+        closed_attribute = 0
+        if (token.kind == gen.TK_LPAREN) { parens += 1 }
+        if (token.kind == gen.TK_RPAREN && parens > 0) { parens -= 1 }
+        if (token.kind == gen.TK_LBRACKET) {
+            brackets += 1
+            if (i > 0 && raw[i - 1].kind == gen.TK_AT) {
+                attribute_depth = brackets
+            }
+        }
+        if (token.kind == gen.TK_RBRACKET && brackets > 0) {
+            if (attribute_depth == brackets) {
+                closed_attribute = 1
+                attribute_depth = -1
+            }
+            brackets -= 1
+        }
+        i += 1
+    }
+    free(raw.to_type(*void))
+    return 0
+}

@@ -1,279 +1,279 @@
-module backend;
-import gen;
-import ir;
+module backend
+import gen
+import ir
 
 // llvm_abi_c_scalar：列出 LLVM C ABI 可按值传递的布尔、整数、浮点与指针标量种类。
 fn llvm_abi_c_scalar(kind int) int {
-    return kind == ir.IR_TY_BOOL || kind == ir.IR_TY_I8 || kind == ir.IR_TY_I16
-        || kind == ir.IR_TY_I32 || kind == ir.IR_TY_I64
-        || kind == ir.IR_TY_U8 || kind == ir.IR_TY_U16
-        || kind == ir.IR_TY_U32 || kind == ir.IR_TY_U64
-        || kind == ir.IR_TY_F32 || kind == ir.IR_TY_F64
-        || kind >= ir.IR_TY_PTR && kind <= ir.IR_TY_PTR_LAST
-        || kind == ir.IR_MODULE_TY_FUNCTION ? 1 : 0;
+    return kind == ir.IR_TY_BOOL || kind == ir.IR_TY_I8 || kind == ir.IR_TY_I16 ||
+        kind == ir.IR_TY_I32 || kind == ir.IR_TY_I64 ||
+        kind == ir.IR_TY_U8 || kind == ir.IR_TY_U16 ||
+        kind == ir.IR_TY_U32 || kind == ir.IR_TY_U64 ||
+        kind == ir.IR_TY_F32 || kind == ir.IR_TY_F64 ||
+        kind >= ir.IR_TY_PTR && kind <= ir.IR_TY_PTR_LAST ||
+        kind == ir.IR_MODULE_TY_FUNCTION ? 1 : 0
 }
 
 // llvm_abi_c_scalar_type：模块聚合编号与 canonical 指针编号相交，先按模块类型类别排除聚合。
 fn llvm_abi_c_scalar_type(unit *ir.IRModule, type_id int) int {
-    if (unit == 0 || type_id < 0 || type_id >= unit.type_count) { return 0; }
-    let kind int = unit.types[type_id].kind;
+    if (unit == 0 || type_id < 0 || type_id >= unit.type_count) { return 0 }
+    let kind int = unit.types[type_id].kind
     if (kind == ir.IR_MODULE_TY_STRUCT || kind == ir.IR_MODULE_TY_UNION
-        || kind == ir.IR_MODULE_TY_ARRAY || kind == ir.IR_MODULE_TY_SLICE) { return 0; }
-    return llvm_abi_c_scalar(kind);
+        || kind == ir.IR_MODULE_TY_ARRAY || kind == ir.IR_MODULE_TY_SLICE) { return 0 }
+    return llvm_abi_c_scalar(kind)
 }
 
 // llvm_abi_is_aapcs64：Linux/AArch64 与 Darwin/ARM64 共用 AAPCS64 的固定参数、
 // HFA 与聚合分类；两者差异只在平台运行时、变参和链接，不复制一套分类器。
 fn llvm_abi_is_aapcs64(unit *ir.IRModule) int {
-    return gen.cstr_eq(unit.target.abi, "aapcs64") != 0
-        || gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0 ? 1 : 0;
+    return gen.cstr_eq(unit.target.abi, "aapcs64") != 0 ||
+        gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0 ? 1 : 0
 }
 
 // llvm_abi_is_linux_aapcs64：只用于 Linux 目标的运行时/变参分支，避免把
 // Darwin 已有的 libSystem 路径混入。
 fn llvm_abi_is_linux_aapcs64(unit *ir.IRModule) int {
-    return gen.cstr_eq(unit.target.triple, "aarch64-unknown-linux-gnu") != 0 ? 1 : 0;
+    return gen.cstr_eq(unit.target.triple, "aarch64-unknown-linux-gnu") != 0 ? 1 : 0
 }
 
-const LLVM_ABI_CLASS_INTEGER int = 1;
-const LLVM_ABI_CLASS_SSE int = 2;
+const LLVM_ABI_CLASS_INTEGER int = 1
+const LLVM_ABI_CLASS_SSE int = 2
 
 // LLVMABIInfo：SysV AMD64 首两个八字节的类别与有效字节范围；更大值走 MEMORY。
 struct LLVMABIInfo {
-    memory int;
-    chunk_count int;
-    class0 int;
-    class1 int;
-    size0 int;
-    size1 int;
+    memory int
+    chunk_count int
+    class0 int
+    class1 int
+    size0 int
+    size1 int
 }
 
 // llvm_call_symbol_index：按 IR 调用记录里的逻辑名解析模块函数签名。
 fn llvm_call_symbol_index(unit *ir.IRModule, body *ir.IRFunction, call *ir.IRCall) int {
-    let i int = 0;
+    let i int = 0
     for i < unit.symbol_count {
-        let symbol ir.IRModuleSymbol = unit.symbols[i];
-        let length int = 0;
-        for symbol.name[length] != 0 { length += 1; }
+        let symbol ir.IRModuleSymbol = unit.symbols[i]
+        let length int = 0
+        for symbol.name[length] != 0 { length += 1 }
         if (symbol.kind == ir.IR_MODULE_SYMBOL_FUNCTION && length == call.symbol_len) {
-            let j int = 0;
-            for j < length && symbol.name[j].to_type(u8)
-                == body.call_symbols[call.symbol_first + j] { j += 1; }
-            if (j == length) { return i; }
+            let j int = 0
+            for j < length && symbol.name[j].to_type(u8) ==
+                body.call_symbols[call.symbol_first + j] { j += 1 }
+            if (j == length) { return i }
         }
-        i += 1;
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // llvm_abi_merge_class：按 SysV 类合并优先级合并字段覆盖的八字节。
 fn llvm_abi_merge_class(current int, incoming int) int {
-    if (current == 0) { return incoming; }
+    if (current == 0) { return incoming }
     if (current == LLVM_ABI_CLASS_INTEGER || incoming == LLVM_ABI_CLASS_INTEGER) {
-        return LLVM_ABI_CLASS_INTEGER;
+        return LLVM_ABI_CLASS_INTEGER
     }
-    return LLVM_ABI_CLASS_SSE;
+    return LLVM_ABI_CLASS_SSE
 }
 
 // llvm_abi_mark：把叶子字段的类别和有效字节范围并入一个或两个八字节。
 fn llvm_abi_mark(info *LLVMABIInfo, offset int, size int, align int, class int) void {
     if (size <= 0 || offset < 0 || offset + size > 16 || align <= 0 || offset % align != 0) {
-        info.memory = 1; return;
+        info.memory = 1; return
     }
-    let first int = offset / 8;
-    let last int = (offset + size - 1) / 8;
-    let chunk int = first;
+    let first int = offset / 8
+    let last int = (offset + size - 1) / 8
+    let chunk int = first
     for chunk <= last {
         if (chunk == 0) {
-            info.class0 = llvm_abi_merge_class(info.class0, class);
-            let end int = offset + size - chunk * 8;
-            if (end > 8) { end = 8; }
-            if (end > info.size0) { info.size0 = end; }
+            info.class0 = llvm_abi_merge_class(info.class0, class)
+            let end int = offset + size - chunk * 8
+            if (end > 8) { end = 8 }
+            if (end > info.size0) { info.size0 = end }
         } else {
-            info.class1 = llvm_abi_merge_class(info.class1, class);
-            let end int = offset + size - chunk * 8;
-            if (end > 8) { end = 8; }
-            if (end > info.size1) { info.size1 = end; }
+            info.class1 = llvm_abi_merge_class(info.class1, class)
+            let end int = offset + size - chunk * 8
+            if (end > 8) { end = 8 }
+            if (end > info.size1) { info.size1 = end }
         }
-        chunk += 1;
+        chunk += 1
     }
 }
 
 // llvm_abi_classify_walk：递归按源布局分类结构、联合、数组、切片及标量字段。
 fn llvm_abi_classify_walk(unit *ir.IRModule, type_id int, base int,
     info *LLVMABIInfo, depth int) int {
-    if (type_id < 0 || type_id >= unit.type_count || depth > 64) { return -1; }
-    let ty ir.IRModuleType = unit.types[type_id];
-    if (ty.kind == ir.IR_TY_VOID) { return -1; }
+    if (type_id < 0 || type_id >= unit.type_count || depth > 64) { return -1 }
+    let ty ir.IRModuleType = unit.types[type_id]
+    if (ty.kind == ir.IR_TY_VOID) { return -1 }
     if (ty.kind == ir.IR_TY_F32 || ty.kind == ir.IR_TY_F64) {
-        llvm_abi_mark(info, base, ty.size, ty.align, LLVM_ABI_CLASS_SSE);
-        return 0;
+        llvm_abi_mark(info, base, ty.size, ty.align, LLVM_ABI_CLASS_SSE)
+        return 0
     }
     if (ty.kind == ir.IR_TY_BOOL || ty.kind >= ir.IR_TY_I8 && ty.kind <= ir.IR_TY_PTR
         || ty.kind == ir.IR_MODULE_TY_FUNCTION) {
-        llvm_abi_mark(info, base, ty.size, ty.align, LLVM_ABI_CLASS_INTEGER);
-        return 0;
+        llvm_abi_mark(info, base, ty.size, ty.align, LLVM_ABI_CLASS_INTEGER)
+        return 0
     }
     if (ty.kind == ir.IR_MODULE_TY_SLICE) {
-        llvm_abi_mark(info, base, 8, 8, LLVM_ABI_CLASS_INTEGER);
-        llvm_abi_mark(info, base + 8, 8, 8, LLVM_ABI_CLASS_INTEGER);
-        return 0;
+        llvm_abi_mark(info, base, 8, 8, LLVM_ABI_CLASS_INTEGER)
+        llvm_abi_mark(info, base + 8, 8, 8, LLVM_ABI_CLASS_INTEGER)
+        return 0
     }
     if (ty.kind == ir.IR_MODULE_TY_ARRAY) {
-        let elem ir.IRModuleType = unit.types[ty.elem];
-        let i int = 0;
+        let elem ir.IRModuleType = unit.types[ty.elem]
+        let i int = 0
         for i < ty.count {
-            if (llvm_abi_classify_walk(unit, ty.elem, base + i * elem.size, info, depth + 1) != 0) { return -1; }
-            i += 1;
+            if (llvm_abi_classify_walk(unit, ty.elem, base + i * elem.size, info, depth + 1) != 0) { return -1 }
+            i += 1
         }
-        return 0;
+        return 0
     }
     if (ty.kind == ir.IR_MODULE_TY_STRUCT || ty.kind == ir.IR_MODULE_TY_UNION) {
-        let i int = 0;
+        let i int = 0
         for i < ty.field_count {
-            let field ir.IRModuleField = ty.fields[i];
-            if (llvm_abi_classify_walk(unit, field.type_id, base + field.offset, info, depth + 1) != 0) { return -1; }
-            i += 1;
+            let field ir.IRModuleField = ty.fields[i]
+            if (llvm_abi_classify_walk(unit, field.type_id, base + field.offset, info, depth + 1) != 0) { return -1 }
+            i += 1
         }
-        return 0;
+        return 0
     }
-    return -1;
+    return -1
 }
 
 // llvm_abi_classify：取得 SysV 首两个八字节分类；>16 字节对象完整归入 MEMORY。
 fn llvm_abi_classify(unit *ir.IRModule, type_id int, out *LLVMABIInfo) int {
-    if (unit == 0 || out == 0 || type_id < 0 || type_id >= unit.type_count) { return -1; }
-    let empty LLVMABIInfo;
-    out[0] = empty;
-    let ty ir.IRModuleType = unit.types[type_id];
-    if (ty.size <= 0) { return -1; }
-    if (ty.size > 16) { out.memory = 1; return 0; }
-    out.chunk_count = (ty.size + 7) / 8;
-    if (llvm_abi_classify_walk(unit, type_id, 0, out, 0) != 0) { return -1; }
-    if (out.class0 == 0) { out.class0 = LLVM_ABI_CLASS_INTEGER; out.size0 = 8; }
+    if (unit == 0 || out == 0 || type_id < 0 || type_id >= unit.type_count) { return -1 }
+    let empty LLVMABIInfo
+    out[0] = empty
+    let ty ir.IRModuleType = unit.types[type_id]
+    if (ty.size <= 0) { return -1 }
+    if (ty.size > 16) { out.memory = 1; return 0 }
+    out.chunk_count = (ty.size + 7) / 8
+    if (llvm_abi_classify_walk(unit, type_id, 0, out, 0) != 0) { return -1 }
+    if (out.class0 == 0) { out.class0 = LLVM_ABI_CLASS_INTEGER; out.size0 = 8 }
     if (out.chunk_count > 1 && out.class1 == 0) {
-        out.class1 = LLVM_ABI_CLASS_INTEGER;
-        out.size1 = ty.size - 8;
+        out.class1 = LLVM_ABI_CLASS_INTEGER
+        out.size1 = ty.size - 8
     }
-    return 0;
+    return 0
 }
 
 // llvm_abi_supported：按目标限制 C 标量、聚合与裸变参；AAPCS64 走 Apple 分类器，
 // SysV 走 llvm_zabi.yh 的分片分类器。
 fn llvm_abi_supported(unit *ir.IRModule, symbol *ir.IRModuleSymbol) int {
     if (symbol.abi == ir.IR_ABI_YH_LLVM_V1) {
-        let sysv_printf int = symbol.variadic == 1
-            && gen.cstr_eq(unit.target.abi, "sysv-amd64") != 0;
-        let darwin_printf int = symbol.variadic == 1
-            && gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
-            && gen.cstr_eq(symbol.name, "printf") != 0;
-        let darwin_open int = symbol.variadic == 1
-            && gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
-            && gen.cstr_eq(symbol.name, "open") != 0;
+        let sysv_printf int = symbol.variadic == 1 &&
+            gen.cstr_eq(unit.target.abi, "sysv-amd64") != 0
+        let darwin_printf int = symbol.variadic == 1 &&
+            gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0 &&
+            gen.cstr_eq(symbol.name, "printf") != 0
+        let darwin_open int = symbol.variadic == 1 &&
+            gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0 &&
+            gen.cstr_eq(symbol.name, "open") != 0
         // Linux/AArch64 的 printf/open 与 Darwin 一样是 prelude 裸变参入口：
         // 只放行这两个已知符号，用户源码的裸 C 变参仍在 check 阶段拒绝。
-        let aarch64_printf int = symbol.variadic == 1
-            && llvm_abi_is_linux_aapcs64(unit) != 0
-            && gen.cstr_eq(symbol.name, "printf") != 0;
-        let aarch64_open int = symbol.variadic == 1
-            && llvm_abi_is_linux_aapcs64(unit) != 0
-            && gen.cstr_eq(symbol.name, "open") != 0;
+        let aarch64_printf int = symbol.variadic == 1 &&
+            llvm_abi_is_linux_aapcs64(unit) != 0 &&
+            gen.cstr_eq(symbol.name, "printf") != 0
+        let aarch64_open int = symbol.variadic == 1 &&
+            llvm_abi_is_linux_aapcs64(unit) != 0 &&
+            gen.cstr_eq(symbol.name, "open") != 0
         if ((darwin_open != 0 || aarch64_open != 0)
             && (symbol.param_count != 2
                 || unit.types[symbol.params[0]].kind < ir.IR_TY_PTR
                 || unit.types[symbol.params[0]].kind > ir.IR_TY_PTR_LAST
                 || unit.types[symbol.params[1]].kind != ir.IR_TY_I32
-                || unit.types[symbol.type_id].kind != ir.IR_TY_I32)) { return 0; }
-        return symbol.variadic == 0 || symbol.variadic == 2
-            || sysv_printf != 0 || darwin_printf != 0 || darwin_open != 0
-            || aarch64_printf != 0 || aarch64_open != 0 ? 1 : 0;
+                || unit.types[symbol.type_id].kind != ir.IR_TY_I32)) { return 0 }
+        return symbol.variadic == 0 || symbol.variadic == 2 ||
+            sysv_printf != 0 || darwin_printf != 0 || darwin_open != 0 ||
+            aarch64_printf != 0 || aarch64_open != 0 ? 1 : 0
     }
-    if (symbol.abi != gen.ABI_C || symbol.variadic < 0 || symbol.variadic > 1) { return 0; }
-    let darwin int = gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0;
-    let sysv int = gen.cstr_eq(unit.target.abi, "sysv-amd64") != 0;
-    let aarch64 int = gen.cstr_eq(unit.target.abi, "aapcs64") != 0;
-    if (darwin == 0 && sysv == 0 && aarch64 == 0) { return 0; }
+    if (symbol.abi != gen.ABI_C || symbol.variadic < 0 || symbol.variadic > 1) { return 0 }
+    let darwin int = gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
+    let sysv int = gen.cstr_eq(unit.target.abi, "sysv-amd64") != 0
+    let aarch64 int = gen.cstr_eq(unit.target.abi, "aapcs64") != 0
+    if (darwin == 0 && sysv == 0 && aarch64 == 0) { return 0 }
     // 用户 C 裸变参在 Linux/AArch64 仍不开放；固定参数和已知 prelude 走上面的
     // yh ABI 分支。这样不会把未实现的 AAPCS64 变参规则当成已支持。
-    if (aarch64 != 0 && symbol.variadic != 0) { return 0; }
-    let result_type ir.IRModuleType = unit.types[symbol.type_id];
-    let result int = result_type.kind;
+    if (aarch64 != 0 && symbol.variadic != 0) { return 0 }
+    let result_type ir.IRModuleType = unit.types[symbol.type_id]
+    let result int = result_type.kind
     if (darwin != 0 && symbol.variadic != 0
         && gen.cstr_eq(symbol.name, "printf") == 0
-        && gen.cstr_eq(symbol.name, "open") == 0) { return 0; }
+        && gen.cstr_eq(symbol.name, "open") == 0) { return 0 }
     if (darwin != 0 && symbol.variadic == 1
         && gen.cstr_eq(symbol.name, "open") != 0
         && (symbol.param_count != 2
             || unit.types[symbol.params[0]].kind < ir.IR_TY_PTR
             || unit.types[symbol.params[0]].kind > ir.IR_TY_PTR_LAST
             || unit.types[symbol.params[1]].kind != ir.IR_TY_I32
-            || result != ir.IR_TY_I32)) { return 0; }
+            || result != ir.IR_TY_I32)) { return 0 }
     if ((darwin != 0 || aarch64 != 0) && result != ir.IR_TY_VOID
         && llvm_abi_c_scalar_type(unit, symbol.type_id) == 0
-        && llvm_apple_abi_supported(unit, symbol.type_id) == 0) { return 0; }
+        && llvm_apple_abi_supported(unit, symbol.type_id) == 0) { return 0 }
     if (symbol.variadic == 1
-        && result != ir.IR_TY_VOID && llvm_abi_c_scalar(result) == 0) { return 0; }
+        && result != ir.IR_TY_VOID && llvm_abi_c_scalar(result) == 0) { return 0 }
     if (result != ir.IR_TY_VOID && llvm_abi_c_scalar(result) == 0) {
         if (darwin != 0 || aarch64 != 0) {
-            if (llvm_apple_abi_supported(unit, symbol.type_id) == 0) { return 0; }
+            if (llvm_apple_abi_supported(unit, symbol.type_id) == 0) { return 0 }
         } else {
-            let info LLVMABIInfo;
+            let info LLVMABIInfo
             if ((result != ir.IR_MODULE_TY_STRUCT && result != ir.IR_MODULE_TY_UNION)
-                || llvm_abi_classify(unit, symbol.type_id, &info) != 0) { return 0; }
+                || llvm_abi_classify(unit, symbol.type_id, &info) != 0) { return 0 }
         }
     }
-    let i int = 0;
+    let i int = 0
     for i < symbol.param_count {
-        let param ir.IRModuleType = unit.types[symbol.params[i]];
-        let kind int = param.kind;
+        let param ir.IRModuleType = unit.types[symbol.params[i]]
+        let kind int = param.kind
         if ((darwin != 0 || aarch64 != 0) && llvm_abi_c_scalar_type(unit, symbol.params[i]) == 0
-            && llvm_apple_abi_supported(unit, symbol.params[i]) == 0) { return 0; }
-        if (symbol.variadic == 1 && llvm_abi_c_scalar(kind) == 0) { return 0; }
+            && llvm_apple_abi_supported(unit, symbol.params[i]) == 0) { return 0 }
+        if (symbol.variadic == 1 && llvm_abi_c_scalar(kind) == 0) { return 0 }
         if (llvm_abi_c_scalar(kind) == 0) {
             if (darwin != 0 || aarch64 != 0) {
-                if (llvm_apple_abi_supported(unit, symbol.params[i]) == 0) { return 0; }
+                if (llvm_apple_abi_supported(unit, symbol.params[i]) == 0) { return 0 }
             } else {
-                let info LLVMABIInfo;
+                let info LLVMABIInfo
                 if ((kind != ir.IR_MODULE_TY_STRUCT && kind != ir.IR_MODULE_TY_UNION)
-                    || llvm_abi_classify(unit, symbol.params[i], &info) != 0) { return 0; }
+                    || llvm_abi_classify(unit, symbol.params[i], &info) != 0) { return 0 }
             }
         }
-        i += 1;
+        i += 1
     }
-    return 1;
+    return 1
 }
 
 // llvm_indirect_call_symbol：把函数值携带的模块 FUNCTION 签名展开为 ABI 发射使用的临时符号视图。
 fn llvm_indirect_call_symbol(unit *ir.IRModule, call *ir.IRCall,
     out *ir.IRModuleSymbol) int {
     if (call.callee_value < 0 || call.signature_type < 0
-        || call.signature_type >= unit.type_count) { return -1; }
-    let signature ir.IRModuleType = unit.types[call.signature_type];
+        || call.signature_type >= unit.type_count) { return -1 }
+    let signature ir.IRModuleType = unit.types[call.signature_type]
     if (signature.kind != ir.IR_MODULE_TY_FUNCTION || signature.variadic < 0
         || signature.variadic > 2
-        || signature.field_count < 0) { return -1; }
-    let empty ir.IRModuleSymbol;
-    out[0] = empty;
-    out.kind = ir.IR_MODULE_SYMBOL_FUNCTION;
-    out.type_id = signature.elem;
-    out.abi = signature.abi;
-    out.variadic = signature.variadic;
-    out.param_count = signature.field_count;
+        || signature.field_count < 0) { return -1 }
+    let empty ir.IRModuleSymbol
+    out[0] = empty
+    out.kind = ir.IR_MODULE_SYMBOL_FUNCTION
+    out.type_id = signature.elem
+    out.abi = signature.abi
+    out.variadic = signature.variadic
+    out.param_count = signature.field_count
     if (out.param_count > 0) {
-        out.params = malloc((out.param_count * sizeof(int)).to_type(u64)).to_type(*int);
-        if (out.params == 0) { return -1; }
+        out.params = malloc((out.param_count * sizeof(int)).to_type(u64)).to_type(*int)
+        if (out.params == 0) { return -1 }
     }
-    let i int = 0;
+    let i int = 0
     for i < out.param_count {
-        out.params[i] = signature.fields[i].type_id;
-        i += 1;
+        out.params[i] = signature.fields[i].type_id
+        i += 1
     }
     if (llvm_abi_supported(unit, out) == 0) {
-        if (out.params != 0) { free(out.params.to_type(*void)); }
-        out.params = 0;
-        return -1;
+        if (out.params != 0) { free(out.params.to_type(*void)) }
+        out.params = 0
+        return -1
     }
-    return 0;
+    return 0
 }
 
 // llvm_abi_attr_kind：按输出目标映射 LLVM 窄整数 C ABI 属性，0 表示无需扩展属性。
@@ -284,8 +284,8 @@ fn llvm_abi_attr_kind(unit *ir.IRModule, abi int, kind int) int {
     if (unit == 0 || abi != gen.ABI_C
         || gen.cstr_eq(unit.target.abi, "aapcs64") != 0
         || gen.cstr_eq(unit.target.abi, "sysv-amd64") == 0
-            && gen.cstr_eq(unit.target.abi, "darwin-aapcs64") == 0) { return 0; }
-    if (kind == ir.IR_TY_I8 || kind == ir.IR_TY_I16) { return 1; }
-    if (kind == ir.IR_TY_BOOL || kind == ir.IR_TY_U8 || kind == ir.IR_TY_U16) { return 2; }
-    return 0;
+            && gen.cstr_eq(unit.target.abi, "darwin-aapcs64") == 0) { return 0 }
+    if (kind == ir.IR_TY_I8 || kind == ir.IR_TY_I16) { return 1 }
+    if (kind == ir.IR_TY_BOOL || kind == ir.IR_TY_U8 || kind == ir.IR_TY_U16) { return 2 }
+    return 0
 }

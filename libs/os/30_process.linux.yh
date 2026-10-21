@@ -1,6 +1,6 @@
-module os;
+module os
 
-import sys;
+import sys
 
 // Linux 进程接口：精确路径 spawn、wait 与 exit。
 // spawn 用 close-on-exec 错误管道回传 exec 失败：子进程 exec 成功时写端随
@@ -10,35 +10,35 @@ import sys;
 
 // WaitState 区分正常退出、信号退出与等待失败。
 pub enum WaitState {
-    wait_exited;
-    wait_signaled;
-    wait_error;
+    wait_exited
+    wait_signaled
+    wait_error
 }
 
 // PidResult 是 spawn 的结果：成功 pid 为正子进程号，失败 pid 为 -1。
 // 成功只表示 exec 已通过错误管道确认，不承诺子程序随后不会立即退出。
 pub struct PidResult {
-    pid int;
-    error Error;
+    pid int
+    error Error
 }
 
 // WaitResult 是 wait 的结果：state 为 wait_exited 时 exit_code 有效，
 // wait_signaled 时 signal 有效；wait_error 时 error 有效。
 pub struct WaitResult {
-    state WaitState;
-    exit_code int;
-    signal int;
-    error Error;
+    state WaitState
+    exit_code int
+    signal int
+    error Error
 }
 
 // pid_ok 构造成功的 spawn 结果。
 fn pid_ok(pid int) PidResult {
-    return PidResult{ pid: pid, error: no_error() };
+    return PidResult{ pid: pid, error: no_error() }
 }
 
 // pid_error 构造失败的 spawn 结果，pid 固定为 -1。
 fn pid_error(kind ErrorKind, native_code int) PidResult {
-    return PidResult{ pid: -1, error: make_error(kind, native_code) };
+    return PidResult{ pid: -1, error: make_error(kind, native_code) }
 }
 
 // wait_failed 构造等待失败结果，退出码与信号字段无意义并置为 -1/0。
@@ -48,21 +48,21 @@ fn wait_failed(error Error) WaitResult {
         exit_code: -1,
         signal: 0,
         error: error
-    };
+    }
 }
 
 // wait_from_status 解码 wait4 原始 32 位状态字。
 // 低 7 位为 0 表示正常退出；不为 0 且不是 0x7f（停止）时表示信号退出；
 // 不使用 WUNTRACED，因此停止状态只作为 error_other 返回。
 fn wait_from_status(status int) WaitResult {
-    let low int = status & 0x7f;
+    let low int = status & 0x7f
     if (low == 0) {
         return WaitResult{
             state: wait_exited,
             exit_code: (status >> 8) & 0xff,
             signal: 0,
             error: no_error()
-        };
+        }
     }
     if (low != 0x7f) {
         return WaitResult{
@@ -70,25 +70,25 @@ fn wait_from_status(status int) WaitResult {
             exit_code: -1,
             signal: low,
             error: no_error()
-        };
+        }
     }
-    return wait_failed(make_error(error_other, 0));
+    return wait_failed(make_error(error_other, 0))
 }
 
 // reap_wait 回收指定子进程；遇到 EINTR 重试，其他错误放弃。
 // 用于 spawn 的 exec 失败路径，避免留下僵尸进程。
 fn reap_wait(pid int) void {
-    let status int = 0;
+    let status int = 0
     for 1 == 1 {
-        let result i64 = sys.wait_process(pid, &status, 0);
+        let result i64 = sys.wait_process(pid, &status, 0)
         if (result > 0) {
-            return;
+            return
         }
         if (sys.is_error(result) == 0) {
-            return;
+            return
         }
         if (sys.error_code(result) != sys.EINTR) {
-            return;
+            return
         }
     }
 }
@@ -97,31 +97,31 @@ fn reap_wait(pid int) void {
 // 干净 EOF（total == 0）表示 exec 成功并返回 no_error；短帧后 EOF 或读取
 // 错误返回显式错误；EINTR 重试，保持帧边界不丢失已读字节。
 fn read_exec_frame(fd int, frame *u8) Error {
-    let total int = 0;
+    let total int = 0
     for total < 4 {
-        let remaining u64 = (4 - total).to_type(u64);
+        let remaining u64 = (4 - total).to_type(u64)
         let result i64 = sys.read_fd(fd, (frame + total).to_type(*void),
-            remaining);
+            remaining)
         if (sys.is_error(result) != 0) {
-            let code int = sys.error_code(result);
+            let code int = sys.error_code(result)
             if (code == sys.EINTR) {
-                continue;
+                continue
             }
-            return error_from_native(code);
+            return error_from_native(code)
         }
         if (result == 0) {
             if (total == 0) {
-                return no_error();
+                return no_error()
             }
-            return make_error(error_other, 0);
+            return make_error(error_other, 0)
         }
-        total += result.to_type(int);
+        total += result.to_type(int)
     }
-    let code int = frame[0].to_type(int)
-        | (frame[1].to_type(int) << 8)
-        | (frame[2].to_type(int) << 16)
-        | (frame[3].to_type(int) << 24);
-    return error_from_native(code);
+    let code int = frame[0].to_type(int) |
+        (frame[1].to_type(int) << 8) |
+        (frame[2].to_type(int) << 16) |
+        (frame[3].to_type(int) << 24)
+    return error_from_native(code)
 }
 
 // spawn 用精确路径启动进程并等待 exec 结果握手。
@@ -130,69 +130,69 @@ fn read_exec_frame(fd int, frame *u8) Error {
 // 的标准描述符按当前进程继承，其余本库新建 fd 默认 close-on-exec。
 pub fn spawn(path *char, argv **char, envp **char) PidResult {
     if (path == 0 || argv == 0 || envp == 0) {
-        return pid_error(error_invalid_argument, 0);
+        return pid_error(error_invalid_argument, 0)
     }
-    let fds [2]int;
-    let created i64 = sys.create_pipe(&fds[0], sys.O_CLOEXEC);
+    let fds [2]int
+    let created i64 = sys.create_pipe(&fds[0], sys.O_CLOEXEC)
     if (sys.is_error(created) != 0) {
-        let code int = sys.error_code(created);
-        return pid_error(error_kind_for(code), code);
+        let code int = sys.error_code(created)
+        return pid_error(error_kind_for(code), code)
     }
-    let pid i64 = sys.fork_process();
+    let pid i64 = sys.fork_process()
     if (sys.is_error(pid) != 0) {
-        let code int = sys.error_code(pid);
-        sys.close_fd(fds[0]);
-        sys.close_fd(fds[1]);
-        return pid_error(error_kind_for(code), code);
+        let code int = sys.error_code(pid)
+        sys.close_fd(fds[0])
+        sys.close_fd(fds[1])
+        return pid_error(error_kind_for(code), code)
     }
     if (pid == 0) {
         // 子路径只做 close/exec/写错误帧/exit，不分配、不格式化、不做清理。
-        sys.close_fd(fds[0]);
-        let executed i64 = sys.execute(path, argv, envp);
-        let code int = sys.error_code(executed);
-        let frame [4]u8;
-        frame[0] = (code & 0xff).to_type(u8);
-        frame[1] = ((code >> 8) & 0xff).to_type(u8);
-        frame[2] = ((code >> 16) & 0xff).to_type(u8);
-        frame[3] = ((code >> 24) & 0xff).to_type(u8);
-        sys.write_fd(fds[1], (&frame[0]).to_type(*void), 4);
-        sys.close_fd(fds[1]);
-        sys.exit_process(127);
-        return pid_error(error_other, 0);
+        sys.close_fd(fds[0])
+        let executed i64 = sys.execute(path, argv, envp)
+        let code int = sys.error_code(executed)
+        let frame [4]u8
+        frame[0] = (code & 0xff).to_type(u8)
+        frame[1] = ((code >> 8) & 0xff).to_type(u8)
+        frame[2] = ((code >> 16) & 0xff).to_type(u8)
+        frame[3] = ((code >> 24) & 0xff).to_type(u8)
+        sys.write_fd(fds[1], (&frame[0]).to_type(*void), 4)
+        sys.close_fd(fds[1])
+        sys.exit_process(127)
+        return pid_error(error_other, 0)
     }
-    sys.close_fd(fds[1]);
-    let frame [4]u8;
-    let frame_error Error = read_exec_frame(fds[0], &frame[0]);
-    sys.close_fd(fds[0]);
+    sys.close_fd(fds[1])
+    let frame [4]u8
+    let frame_error Error = read_exec_frame(fds[0], &frame[0])
+    sys.close_fd(fds[0])
     if (frame_error.kind != error_none) {
-        reap_wait(pid.to_type(int));
-        return pid_error(frame_error.kind, frame_error.native_code);
+        reap_wait(pid.to_type(int))
+        return pid_error(frame_error.kind, frame_error.native_code)
     }
-    return pid_ok(pid.to_type(int));
+    return pid_ok(pid.to_type(int))
 }
 
 // wait 阻塞等待指定子进程并解码退出状态；pid = -1 等待任一子进程。
 // 遇 EINTR 内部重试；等待失败返回 wait_error，不把错误压成退出码。
 pub fn wait(pid int) WaitResult {
-    let status int = 0;
+    let status int = 0
     for 1 == 1 {
-        let result i64 = sys.wait_process(pid, &status, 0);
+        let result i64 = sys.wait_process(pid, &status, 0)
         if (result > 0) {
-            return wait_from_status(status);
+            return wait_from_status(status)
         }
         if (sys.is_error(result) == 0) {
-            return wait_failed(make_error(error_other, 0));
+            return wait_failed(make_error(error_other, 0))
         }
-        let code int = sys.error_code(result);
+        let code int = sys.error_code(result)
         if (code == sys.EINTR) {
-            continue;
+            continue
         }
-        return wait_failed(error_from_native(code));
+        return wait_failed(error_from_native(code))
     }
-    return wait_failed(make_error(error_other, 0));
+    return wait_failed(make_error(error_other, 0))
 }
 
 // exit_now 立即以指定状态结束进程；不刷新未来缓冲流、不执行析构或语言清理。
 pub fn exit_now(code int) void {
-    sys.exit_process(code);
+    sys.exit_process(code)
 }

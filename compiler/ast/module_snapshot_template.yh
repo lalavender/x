@@ -1,127 +1,127 @@
-module ast;
-import gen;
-import ir;
+module ast
+import gen
+import ir
 
 // checked_lower_comptime_binding：读取模板迭代变量当前轮的 SSA 常量值。
 // AST 常量字段只描述首轮；逐轮 lowering 时必须优先读取活动绑定槽。
 fn checked_lower_comptime_binding(l *CheckedLower, node *AstExpr) int {
     if (node.sym_kind != gen.SYM_CONST || node.binding_row < 0
-        || node.binding_row >= l.store.binding_n) { return -3; }
-    let template_row int = 0;
+        || node.binding_row >= l.store.binding_n) { return -3 }
+    let template_row int = 0
     for template_row < l.store.template_n {
-        let template AstComptimeFor = l.store.templates[template_row];
+        let template AstComptimeFor = l.store.templates[template_row]
         if (template.binding_row == node.binding_row) {
-            let binding AstBinding = l.store.bindings[node.binding_row];
-            let declaration AstDecl = l.store.declarations[l.function.decl_row];
+            let binding AstBinding = l.store.bindings[node.binding_row]
+            let declaration AstDecl = l.store.declarations[l.function.decl_row]
             if (binding.file_id != l.function.file_id
                 || binding.owner_decl != declaration.decl_index || binding.id < 0
                 || binding.id >= l.function_binding_count
                 || binding.sym_kind != gen.SYM_CONST
                 || checked_lower_type(l, binding.sym_type_id)
-                    != checked_lower_type(l, node.type_id)) { return -2; }
-            let value int = l.builder.local_values[binding.id];
-            return value >= 0 && value < l.builder.inst_count ? value : -2;
+                    != checked_lower_type(l, node.type_id)) { return -2 }
+            let value int = l.builder.local_values[binding.id]
+            return value >= 0 && value < l.builder.inst_count ? value : -2
         }
-        template_row += 1;
+        template_row += 1
     }
-    return -3;
+    return -3
 }
 
 // checked_lower_comptime_for：按受检快照中的半开区间重复降低一份 `$for` AST 模板。
 // 每轮重置模板局部值并更新编译期绑定，保证同一模板不会跨轮泄漏 SSA 值。
 fn checked_lower_comptime_for(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
-    let store *CheckedStorage = l.store;
-    let template_row int = 0;
+    let store *CheckedStorage = l.store
+    let template_row int = 0
     for template_row < store.template_n {
-        if (store.templates[template_row].stmt_id == stmt_id) { break; }
-        template_row += 1;
+        if (store.templates[template_row].stmt_id == stmt_id) { break }
+        template_row += 1
     }
-    if (template_row >= store.template_n) { return -3; }
+    if (template_row >= store.template_n) { return -3 }
 
-    let template AstComptimeFor = store.templates[template_row];
+    let template AstComptimeFor = store.templates[template_row]
     if (template.binding_row < 0 || template.binding_row >= template.binding_after
         || template.binding_after > store.binding_n || template.low >= template.high
         || template.body_stmt < 0 || template.body_stmt >= store.statement_n
         || store.statements[template.stmt_id].first_child != template.body_stmt
         || store.statements[template.body_stmt].kind != AST_STMT_BLOCK) {
-        l.reason = "首片：编译期 `$for` 模板快照无效";
-        return -2;
+        l.reason = "首片：编译期 `$for` 模板快照无效"
+        return -2
     }
 
-    let slot_count int = template.binding_after - template.binding_row;
-    let saved_values *int = malloc((slot_count * sizeof(int)).to_type(u64)).to_type(*int);
-    if (saved_values == 0) { return -1; }
-    let row int = template.binding_row;
+    let slot_count int = template.binding_after - template.binding_row
+    let saved_values *int = malloc((slot_count * sizeof(int)).to_type(u64)).to_type(*int)
+    if (saved_values == 0) { return -1 }
+    let row int = template.binding_row
     for row < template.binding_after {
-        let binding AstBinding = store.bindings[row];
-        let declaration AstDecl = store.declarations[l.function.decl_row];
+        let binding AstBinding = store.bindings[row]
+        let declaration AstDecl = store.declarations[l.function.decl_row]
         if (binding.id < 0 || binding.id >= l.function_binding_count
             || binding.file_id != l.function.file_id
             || binding.owner_decl != declaration.decl_index) {
-            free(saved_values.to_type(*void));
-            l.reason = "首片：编译期 `$for` 模板绑定越界";
-            return -2;
+            free(saved_values.to_type(*void))
+            l.reason = "首片：编译期 `$for` 模板绑定越界"
+            return -2
         }
-        saved_values[row - template.binding_row] = l.builder.local_values[binding.id];
-        row += 1;
+        saved_values[row - template.binding_row] = l.builder.local_values[binding.id]
+        row += 1
     }
 
-    let loop_binding AstBinding = store.bindings[template.binding_row];
+    let loop_binding AstBinding = store.bindings[template.binding_row]
     if (loop_binding.stmt_id != stmt_id || loop_binding.sym_kind != gen.SYM_CONST) {
-        free(saved_values.to_type(*void));
-        l.reason = "首片：编译期 `$for` 迭代绑定无效";
-        return -2;
+        free(saved_values.to_type(*void))
+        l.reason = "首片：编译期 `$for` 迭代绑定无效"
+        return -2
     }
-    let outer_local_count int = l.local_count;
-    let body_local_after int = -1;
-    let value i64 = template.low;
+    let outer_local_count int = l.local_count
+    let body_local_after int = -1
+    let value i64 = template.low
     for value < template.high {
-        row = template.binding_row;
+        row = template.binding_row
         for row < template.binding_after {
-            let binding AstBinding = store.bindings[row];
-            l.builder.local_values[binding.id] = saved_values[row - template.binding_row];
-            row += 1;
+            let binding AstBinding = store.bindings[row]
+            l.builder.local_values[binding.id] = saved_values[row - template.binding_row]
+            row += 1
         }
-        l.local_count = outer_local_count + 1;
+        l.local_count = outer_local_count + 1
         let constant int = ast_ir_b_add_inst(&l.builder, ir.IR_OP_CONST,
-            ir.IR_TY_I32, -1, -1, value);
+            ir.IR_TY_I32, -1, -1, value)
         if (constant < 0) {
-            l.local_count = outer_local_count;
-            free(saved_values.to_type(*void));
-            return -1;
+            l.local_count = outer_local_count
+            free(saved_values.to_type(*void))
+            return -1
         }
-        l.builder.local_values[loop_binding.id] = constant;
+        l.builder.local_values[loop_binding.id] = constant
         let status int = checked_lower_stmts(l, flow,
-            store.statements[template.body_stmt].first_child);
+            store.statements[template.body_stmt].first_child)
         if (status != 1) {
-            row = template.binding_row;
+            row = template.binding_row
             for row < template.binding_after {
-                let binding AstBinding = store.bindings[row];
-                l.builder.local_values[binding.id] = saved_values[row - template.binding_row];
-                row += 1;
+                let binding AstBinding = store.bindings[row]
+                l.builder.local_values[binding.id] = saved_values[row - template.binding_row]
+                row += 1
             }
-            l.local_count = outer_local_count;
-            free(saved_values.to_type(*void));
-            return status;
+            l.local_count = outer_local_count
+            free(saved_values.to_type(*void))
+            return status
         }
         if (body_local_after < 0) {
-            body_local_after = l.local_count;
+            body_local_after = l.local_count
         } else if (body_local_after != l.local_count) {
-            l.local_count = outer_local_count;
-            free(saved_values.to_type(*void));
-            l.reason = "内部错误：编译期 `$for` 模板绑定布局不稳定";
-            return -1;
+            l.local_count = outer_local_count
+            free(saved_values.to_type(*void))
+            l.reason = "内部错误：编译期 `$for` 模板绑定布局不稳定"
+            return -1
         }
-        value += 1;
+        value += 1
     }
 
-    row = template.binding_row;
+    row = template.binding_row
     for row < template.binding_after {
-        let binding AstBinding = store.bindings[row];
-        l.builder.local_values[binding.id] = saved_values[row - template.binding_row];
-        row += 1;
+        let binding AstBinding = store.bindings[row]
+        l.builder.local_values[binding.id] = saved_values[row - template.binding_row]
+        row += 1
     }
-    l.local_count = body_local_after;
-    free(saved_values.to_type(*void));
-    return 1;
+    l.local_count = body_local_after
+    free(saved_values.to_type(*void))
+    return 1
 }

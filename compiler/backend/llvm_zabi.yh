@@ -1,287 +1,287 @@
-module backend;
-import gen;
-import ir;
+module backend
+import gen
+import ir
 
 // llvm_abi_memory_type：为 SysV MEMORY 属性输出与源对象大小一致的字节数组类型。
 fn llvm_abi_memory_type(unit *ir.IRModule, type_id int, out *LLVMOutput) void {
-    let ty ir.IRModuleType = unit.types[type_id];
-    llvm_byte(out, '['); llvm_number(out, ty.size.to_type(u64)); llvm_text(out, " x i8]");
+    let ty ir.IRModuleType = unit.types[type_id]
+    llvm_byte(out, '['); llvm_number(out, ty.size.to_type(u64)); llvm_text(out, " x i8]")
 }
 
 // llvm_abi_c_aggregate_kind：判断是否为首期 SysV C ABI 按值结构或联合。
 fn llvm_abi_c_aggregate_kind(kind int) int {
-    return kind == ir.IR_MODULE_TY_STRUCT || kind == ir.IR_MODULE_TY_UNION ? 1 : 0;
+    return kind == ir.IR_MODULE_TY_STRUCT || kind == ir.IR_MODULE_TY_UNION ? 1 : 0
 }
 
 // llvm_abi_has_c_aggregate：只在签名含按值聚合时改走 SysV 分片调用路径。
 fn llvm_abi_has_c_aggregate(unit *ir.IRModule, symbol *ir.IRModuleSymbol) int {
-    if (symbol.abi != gen.ABI_C) { return 0; }
-    if (llvm_abi_c_aggregate_kind(unit.types[symbol.type_id].kind) != 0) { return 1; }
-    let i int = 0;
+    if (symbol.abi != gen.ABI_C) { return 0 }
+    if (llvm_abi_c_aggregate_kind(unit.types[symbol.type_id].kind) != 0) { return 1 }
+    let i int = 0
     for i < symbol.param_count {
-        if (llvm_abi_c_aggregate_kind(unit.types[symbol.params[i]].kind) != 0) { return 1; }
-        i += 1;
+        if (llvm_abi_c_aggregate_kind(unit.types[symbol.params[i]].kind) != 0) { return 1 }
+        i += 1
     }
-    return 0;
+    return 0
 }
 
 // llvm_abi_c_hidden_sret：只有 MEMORY 返回占物理参数零；寄存器返回仍需 IR 临时缓冲。
 fn llvm_abi_c_hidden_sret(unit *ir.IRModule, symbol *ir.IRModuleSymbol) int {
-    let kind int = unit.types[symbol.type_id].kind;
-    if (symbol.abi != gen.ABI_C || llvm_abi_c_aggregate_kind(kind) == 0) { return 0; }
-    let info LLVMABIInfo;
-    if (llvm_abi_classify(unit, symbol.type_id, &info) != 0) { return 0; }
-    return info.memory;
+    let kind int = unit.types[symbol.type_id].kind
+    if (symbol.abi != gen.ABI_C || llvm_abi_c_aggregate_kind(kind) == 0) { return 0 }
+    let info LLVMABIInfo
+    if (llvm_abi_classify(unit, symbol.type_id, &info) != 0) { return 0 }
+    return info.memory
 }
 
 // llvm_abi_c_param_physical：把 IR 逻辑形参编号映射到 SysV 展平后的 LLVM 参数编号。
 fn llvm_abi_c_param_physical(unit *ir.IRModule, symbol *ir.IRModuleSymbol, logical int) int {
-    if (logical < 0 || logical >= symbol.param_count) { return -1; }
-    let physical int = llvm_abi_c_hidden_sret(unit, symbol);
-    let i int = 0;
+    if (logical < 0 || logical >= symbol.param_count) { return -1 }
+    let physical int = llvm_abi_c_hidden_sret(unit, symbol)
+    let i int = 0
     for i < logical {
-        let type_id int = symbol.params[i];
-        let ty ir.IRModuleType = unit.types[type_id];
+        let type_id int = symbol.params[i]
+        let ty ir.IRModuleType = unit.types[type_id]
         if (llvm_abi_c_aggregate_kind(ty.kind) != 0) {
-            let info LLVMABIInfo;
-            if (llvm_abi_classify(unit, type_id, &info) != 0) { return -1; }
-            physical += info.memory != 0 ? 1 : info.chunk_count;
-        } else { physical += 1; }
-        i += 1;
+            let info LLVMABIInfo
+            if (llvm_abi_classify(unit, type_id, &info) != 0) { return -1 }
+            physical += info.memory != 0 ? 1 : info.chunk_count
+        } else { physical += 1 }
+        i += 1
     }
-    return physical;
+    return physical
 }
 
 // llvm_abi_alloc_bytes：为聚合的寄存器分片建立可寻址字节缓冲。
 fn llvm_abi_alloc_bytes(out *LLVMOutput, value int, ty ir.IRModuleType) void {
-    llvm_text(out, "  "); llvm_value(out, value); llvm_text(out, " = alloca [");
-    llvm_number(out, ty.size.to_type(u64)); llvm_text(out, " x i8], align ");
-    llvm_number(out, ty.align.to_type(u64)); llvm_byte(out, '\n');
+    llvm_text(out, "  "); llvm_value(out, value); llvm_text(out, " = alloca [")
+    llvm_number(out, ty.size.to_type(u64)); llvm_text(out, " x i8], align ")
+    llvm_number(out, ty.align.to_type(u64)); llvm_byte(out, '\n')
 }
 
 // llvm_abi_store_param_piece：把一个展平的物理参数写回聚合参数缓冲。
 fn llvm_abi_store_param_piece(out *LLVMOutput, value int, physical int,
     piece int, class int, size int, next *int) void {
-    let address int = value;
+    let address int = value
     if (piece > 0) {
-        address = llvm_new_temp(out, next);
-        llvm_text(out, "getelementptr i8, ptr "); llvm_value(out, value);
-        llvm_text(out, ", i64 "); llvm_number(out, (piece * 8).to_type(u64)); llvm_byte(out, '\n');
+        address = llvm_new_temp(out, next)
+        llvm_text(out, "getelementptr i8, ptr "); llvm_value(out, value)
+        llvm_text(out, ", i64 "); llvm_number(out, (piece * 8).to_type(u64)); llvm_byte(out, '\n')
     }
-    llvm_text(out, "  store "); llvm_abi_piece_type(out, class, size); llvm_text(out, " %p");
-    llvm_number(out, physical.to_type(u64)); llvm_text(out, ", ptr ");
-    if (piece > 0) { llvm_temp(out, address); } else { llvm_value(out, address); }
-    llvm_text(out, ", align 1\n");
+    llvm_text(out, "  store "); llvm_abi_piece_type(out, class, size); llvm_text(out, " %p")
+    llvm_number(out, physical.to_type(u64)); llvm_text(out, ", ptr ")
+    if (piece > 0) { llvm_temp(out, address) } else { llvm_value(out, address) }
+    llvm_text(out, ", align 1\n")
 }
 
 // llvm_abi_c_param：将 C 聚合形参视图还原成 SSA 中使用的指针。
 fn llvm_abi_c_param(unit *ir.IRModule, symbol *ir.IRModuleSymbol, out *LLVMOutput,
     inst *ir.IRInst, next *int) int {
-    let logical int = inst.imm.to_type(int);
-    let aggregate_return int = llvm_abi_c_aggregate_kind(unit.types[symbol.type_id].kind);
-    let physical_hidden int = llvm_abi_c_hidden_sret(unit, symbol);
+    let logical int = inst.imm.to_type(int)
+    let aggregate_return int = llvm_abi_c_aggregate_kind(unit.types[symbol.type_id].kind)
+    let physical_hidden int = llvm_abi_c_hidden_sret(unit, symbol)
     if (logical == 0 && aggregate_return != 0) {
         if (physical_hidden != 0) {
-            llvm_text(out, "  %v"); llvm_number(out, inst.result_id.to_type(u64));
-            llvm_text(out, " = getelementptr i8, ptr %p0, i64 0\n");
-            return 1;
+            llvm_text(out, "  %v"); llvm_number(out, inst.result_id.to_type(u64))
+            llvm_text(out, " = getelementptr i8, ptr %p0, i64 0\n")
+            return 1
         }
-        let result ir.IRModuleType = unit.types[symbol.type_id];
-        llvm_abi_alloc_bytes(out, inst.result_id, result);
-        return 1;
+        let result ir.IRModuleType = unit.types[symbol.type_id]
+        llvm_abi_alloc_bytes(out, inst.result_id, result)
+        return 1
     }
-    let param int = logical - aggregate_return;
-    if (param < 0 || param >= symbol.param_count) { return 0; }
-    let type_id int = symbol.params[param];
-    let ty ir.IRModuleType = unit.types[type_id];
-    if (llvm_abi_c_aggregate_kind(ty.kind) == 0) { return 0; }
-    let info LLVMABIInfo;
-    if (llvm_abi_classify(unit, type_id, &info) != 0) { return 0; }
-    let physical int = llvm_abi_c_param_physical(unit, symbol, param);
-    if (physical < 0) { return 0; }
+    let param int = logical - aggregate_return
+    if (param < 0 || param >= symbol.param_count) { return 0 }
+    let type_id int = symbol.params[param]
+    let ty ir.IRModuleType = unit.types[type_id]
+    if (llvm_abi_c_aggregate_kind(ty.kind) == 0) { return 0 }
+    let info LLVMABIInfo
+    if (llvm_abi_classify(unit, type_id, &info) != 0) { return 0 }
+    let physical int = llvm_abi_c_param_physical(unit, symbol, param)
+    if (physical < 0) { return 0 }
     if (info.memory != 0) {
-        llvm_text(out, "  %v"); llvm_number(out, inst.result_id.to_type(u64));
-        llvm_text(out, " = getelementptr i8, ptr %p"); llvm_number(out, physical.to_type(u64));
-        llvm_text(out, ", i64 0\n");
-        return 1;
+        llvm_text(out, "  %v"); llvm_number(out, inst.result_id.to_type(u64))
+        llvm_text(out, " = getelementptr i8, ptr %p"); llvm_number(out, physical.to_type(u64))
+        llvm_text(out, ", i64 0\n")
+        return 1
     }
-    llvm_abi_alloc_bytes(out, inst.result_id, ty);
-    let piece int = 0;
+    llvm_abi_alloc_bytes(out, inst.result_id, ty)
+    let piece int = 0
     for piece < info.chunk_count {
-        let class int = piece == 0 ? info.class0 : info.class1;
-        let size int = piece == 0 ? info.size0 : info.size1;
+        let class int = piece == 0 ? info.class0 : info.class1
+        let size int = piece == 0 ? info.size0 : info.size1
         llvm_abi_store_param_piece(out, inst.result_id, physical + piece,
-            piece, class, size, next);
-        piece += 1;
+            piece, class, size, next)
+        piece += 1
     }
-    return 1;
+    return 1
 }
 
 // llvm_abi_emit_c_call：按 SysV 分类发射 C 聚合参数/返回，并在边界复制临时缓冲。
 fn llvm_abi_emit_c_call(unit *ir.IRModule, out *LLVMOutput, body *ir.IRFunction,
     inst *ir.IRInst, call *ir.IRCall, symbol *ir.IRModuleSymbol, next *int) void {
-    let result_type int = symbol.type_id;
-    let result ir.IRModuleType = unit.types[result_type];
-    let aggregate_return int = llvm_abi_c_aggregate_kind(result.kind);
-    let result_info LLVMABIInfo;
-    if (aggregate_return != 0) { llvm_abi_classify(unit, result_type, &result_info); }
-    let hidden int = aggregate_return;
-    let output_buffer int = hidden != 0 ? body.call_args[call.arg_first].value : -1;
-    let bool_result int = inst.result_type >= 0 && result.kind == ir.IR_TY_BOOL ? 1 : 0;
-    let result_temp int = -1;
-    let bool_temp_first int = next[0];
-    let arg int = 0;
+    let result_type int = symbol.type_id
+    let result ir.IRModuleType = unit.types[result_type]
+    let aggregate_return int = llvm_abi_c_aggregate_kind(result.kind)
+    let result_info LLVMABIInfo
+    if (aggregate_return != 0) { llvm_abi_classify(unit, result_type, &result_info) }
+    let hidden int = aggregate_return
+    let output_buffer int = hidden != 0 ? body.call_args[call.arg_first].value : -1
+    let bool_result int = inst.result_type >= 0 && result.kind == ir.IR_TY_BOOL ? 1 : 0
+    let result_temp int = -1
+    let bool_temp_first int = next[0]
+    let arg int = 0
     for arg < symbol.param_count {
-        let type_id int = symbol.params[arg];
+        let type_id int = symbol.params[arg]
         if (unit.types[type_id].kind == ir.IR_TY_BOOL) {
-            let value int = body.call_args[call.arg_first + arg + hidden].value;
-            llvm_new_temp(out, next); llvm_text(out, "icmp ne i8 ");
-            llvm_value(out, value); llvm_text(out, ", 0\n");
+            let value int = body.call_args[call.arg_first + arg + hidden].value
+            llvm_new_temp(out, next); llvm_text(out, "icmp ne i8 ")
+            llvm_value(out, value); llvm_text(out, ", 0\n")
         }
-        arg += 1;
+        arg += 1
     }
-    let call_result int = -1;
+    let call_result int = -1
     // 聚合分片必须先读入 SSA 临时值，不能把 load 指令插进 call 参数列表。
-    let aggregate_temp_first int = next[0];
-    arg = 0;
+    let aggregate_temp_first int = next[0]
+    arg = 0
     for arg < symbol.param_count {
-        let type_id int = symbol.params[arg];
-        let ty ir.IRModuleType = unit.types[type_id];
+        let type_id int = symbol.params[arg]
+        let ty ir.IRModuleType = unit.types[type_id]
         if (llvm_abi_c_aggregate_kind(ty.kind) != 0) {
-            let info LLVMABIInfo;
-            llvm_abi_classify(unit, type_id, &info);
+            let info LLVMABIInfo
+            llvm_abi_classify(unit, type_id, &info)
             if (info.memory == 0) {
-                let argument ir.IRCallArg = body.call_args[call.arg_first + arg + hidden];
-                let piece int = 0;
+                let argument ir.IRCallArg = body.call_args[call.arg_first + arg + hidden]
+                let piece int = 0
                 for piece < info.chunk_count {
-                    llvm_abi_load_piece(out, body, argument.value, &info, piece, next);
-                    piece += 1;
+                    llvm_abi_load_piece(out, body, argument.value, &info, piece, next)
+                    piece += 1
                 }
             }
         }
-        arg += 1;
+        arg += 1
     }
-    if (bool_result != 0) { result_temp = llvm_new_temp(out, next); }
+    if (bool_result != 0) { result_temp = llvm_new_temp(out, next) }
     else if (aggregate_return != 0 && result_info.memory == 0) {
-        call_result = llvm_new_temp(out, next);
+        call_result = llvm_new_temp(out, next)
     } else if (aggregate_return == 0 && inst.result_id >= 0) {
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ");
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = ")
     }
-    llvm_text(out, "call ");
-    if (aggregate_return != 0 && result_info.memory != 0) { llvm_text(out, "void"); }
-    else if (aggregate_return != 0) { llvm_signature_return(unit, result_type, out); }
-    else if (inst.result_type < 0) { llvm_text(out, "void"); }
+    llvm_text(out, "call ")
+    if (aggregate_return != 0 && result_info.memory != 0) { llvm_text(out, "void") }
+    else if (aggregate_return != 0) { llvm_signature_return(unit, result_type, out) }
+    else if (inst.result_type < 0) { llvm_text(out, "void") }
     else {
-        let attr int = llvm_abi_attr_kind(unit, call.abi, result.kind);
-        if (attr == 1) { llvm_text(out, "signext "); }
-        else if (attr == 2) { llvm_text(out, "zeroext "); }
-        llvm_abi_type(out, call.abi, result.kind, result.bits);
+        let attr int = llvm_abi_attr_kind(unit, call.abi, result.kind)
+        if (attr == 1) { llvm_text(out, "signext ") }
+        else if (attr == 2) { llvm_text(out, "zeroext ") }
+        llvm_abi_type(out, call.abi, result.kind, result.bits)
     }
     if (call.callee_value >= 0) {
-        llvm_byte(out, ' '); llvm_value(out, call.callee_value);
+        llvm_byte(out, ' '); llvm_value(out, call.callee_value)
     } else {
         llvm_text(out, " @"); llvm_quote(out,
-            body.call_symbols + call.symbol_first, call.symbol_len);
+            body.call_symbols + call.symbol_first, call.symbol_len)
     }
-    llvm_byte(out, '(');
-    let physical int = 0;
+    llvm_byte(out, '(')
+    let physical int = 0
     if (aggregate_return != 0 && result_info.memory != 0) {
-        llvm_text(out, "ptr sret("); llvm_abi_memory_type(unit, result_type, out);
-        llvm_text(out, ") align "); llvm_number(out, result.align.to_type(u64));
-        llvm_byte(out, ' '); llvm_value(out, output_buffer); physical = 1;
+        llvm_text(out, "ptr sret("); llvm_abi_memory_type(unit, result_type, out)
+        llvm_text(out, ") align "); llvm_number(out, result.align.to_type(u64))
+        llvm_byte(out, ' '); llvm_value(out, output_buffer); physical = 1
     }
-    arg = 0;
-    let bool_temp int = bool_temp_first;
-    let aggregate_temp int = aggregate_temp_first;
+    arg = 0
+    let bool_temp int = bool_temp_first
+    let aggregate_temp int = aggregate_temp_first
     for arg < symbol.param_count {
-        let type_id int = symbol.params[arg];
-        let ty ir.IRModuleType = unit.types[type_id];
-        let argument ir.IRCallArg = body.call_args[call.arg_first + arg + hidden];
-        if (physical > 0) { llvm_text(out, ", "); }
+        let type_id int = symbol.params[arg]
+        let ty ir.IRModuleType = unit.types[type_id]
+        let argument ir.IRCallArg = body.call_args[call.arg_first + arg + hidden]
+        if (physical > 0) { llvm_text(out, ", ") }
         if (llvm_abi_c_aggregate_kind(ty.kind) != 0) {
-            let info LLVMABIInfo;
-            llvm_abi_classify(unit, type_id, &info);
+            let info LLVMABIInfo
+            llvm_abi_classify(unit, type_id, &info)
             if (info.memory != 0) {
-                llvm_text(out, "ptr byval("); llvm_abi_memory_type(unit, type_id, out);
-                llvm_text(out, ") align "); llvm_number(out, ty.align.to_type(u64));
-                llvm_byte(out, ' '); llvm_value(out, argument.value); physical += 1;
+                llvm_text(out, "ptr byval("); llvm_abi_memory_type(unit, type_id, out)
+                llvm_text(out, ") align "); llvm_number(out, ty.align.to_type(u64))
+                llvm_byte(out, ' '); llvm_value(out, argument.value); physical += 1
             } else {
-                let piece int = 0;
+                let piece int = 0
                 for piece < info.chunk_count {
-                    if (piece > 0) { llvm_text(out, ", "); }
-                    if (piece > 0) { aggregate_temp += 1; }
-                    let value int = aggregate_temp; aggregate_temp += 1;
-                    let class int = piece == 0 ? info.class0 : info.class1;
-                    let size int = piece == 0 ? info.size0 : info.size1;
-                    llvm_abi_piece_type(out, class, size); llvm_byte(out, ' '); llvm_temp(out, value);
-                    physical += 1; piece += 1;
+                    if (piece > 0) { llvm_text(out, ", ") }
+                    if (piece > 0) { aggregate_temp += 1 }
+                    let value int = aggregate_temp; aggregate_temp += 1
+                    let class int = piece == 0 ? info.class0 : info.class1
+                    let size int = piece == 0 ? info.size0 : info.size1
+                    llvm_abi_piece_type(out, class, size); llvm_byte(out, ' '); llvm_temp(out, value)
+                    physical += 1; piece += 1
                 }
             }
         } else {
-            let attr int = llvm_abi_attr_kind(unit, call.abi, ty.kind);
-            llvm_abi_type(out, call.abi, ty.kind, ty.bits);
-            if (attr == 1) { llvm_text(out, " signext"); }
-            else if (attr == 2) { llvm_text(out, " zeroext"); }
-            llvm_byte(out, ' ');
-            if (ty.kind == ir.IR_TY_BOOL) { llvm_temp(out, bool_temp); bool_temp += 1; }
-            else { llvm_value(out, argument.value); }
-            physical += 1;
+            let attr int = llvm_abi_attr_kind(unit, call.abi, ty.kind)
+            llvm_abi_type(out, call.abi, ty.kind, ty.bits)
+            if (attr == 1) { llvm_text(out, " signext") }
+            else if (attr == 2) { llvm_text(out, " zeroext") }
+            llvm_byte(out, ' ')
+            if (ty.kind == ir.IR_TY_BOOL) { llvm_temp(out, bool_temp); bool_temp += 1 }
+            else { llvm_value(out, argument.value) }
+            physical += 1
         }
-        arg += 1;
+        arg += 1
     }
-    llvm_text(out, ")\n");
+    llvm_text(out, ")\n")
     if (aggregate_return != 0 && result_info.memory == 0) {
-        let piece int = 0;
+        let piece int = 0
         for piece < result_info.chunk_count {
-            let value int = call_result;
+            let value int = call_result
             if (result_info.chunk_count > 1) {
-                value = llvm_new_temp(out, next);
-                llvm_text(out, "extractvalue "); llvm_signature_return(unit, result_type, out);
-                llvm_byte(out, ' '); llvm_temp(out, call_result); llvm_text(out, ", ");
-                llvm_number(out, piece.to_type(u64)); llvm_byte(out, '\n');
+                value = llvm_new_temp(out, next)
+                llvm_text(out, "extractvalue "); llvm_signature_return(unit, result_type, out)
+                llvm_byte(out, ' '); llvm_temp(out, call_result); llvm_text(out, ", ")
+                llvm_number(out, piece.to_type(u64)); llvm_byte(out, '\n')
             }
-            llvm_abi_store_piece(out, body, output_buffer, &result_info, piece, value, 1, next);
-            piece += 1;
+            llvm_abi_store_piece(out, body, output_buffer, &result_info, piece, value, 1, next)
+            piece += 1
         }
     } else if (bool_result != 0) {
-        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = zext i1 ");
-        llvm_temp(out, result_temp); llvm_text(out, " to i8\n");
+        llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = zext i1 ")
+        llvm_temp(out, result_temp); llvm_text(out, " to i8\n")
     }
 }
 
 // llvm_abi_c_return：把 IR 的结果缓冲还原为 SysV C 返回分片或 MEMORY 的 void。
 fn llvm_abi_c_return(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
     body *ir.IRFunction, out *LLVMOutput, next *int) int {
-    if (llvm_abi_c_aggregate_kind(unit.types[symbol.type_id].kind) == 0) { return 0; }
-    let info LLVMABIInfo;
-    llvm_abi_classify(unit, symbol.type_id, &info);
-    if (info.memory != 0) { llvm_text(out, "  ret void\n"); return 1; }
-    let buffer int = -1;
-    let i int = 0;
+    if (llvm_abi_c_aggregate_kind(unit.types[symbol.type_id].kind) == 0) { return 0 }
+    let info LLVMABIInfo
+    llvm_abi_classify(unit, symbol.type_id, &info)
+    if (info.memory != 0) { llvm_text(out, "  ret void\n"); return 1 }
+    let buffer int = -1
+    let i int = 0
     for i < body.inst_count {
-        let inst ir.IRInst = body.insts[i];
-        if (inst.op == ir.IR_OP_PARAM && inst.imm == 0) { buffer = inst.result_id; break; }
+        let inst ir.IRInst = body.insts[i]
+        if (inst.op == ir.IR_OP_PARAM && inst.imm == 0) { buffer = inst.result_id; break }
     }
-    if (buffer < 0) { out.failed = 1; return 1; }
-    let ret_type int = symbol.type_id;
-    let piece int = 0;
+    if (buffer < 0) { out.failed = 1; return 1 }
+    let ret_type int = symbol.type_id
+    let piece int = 0
     if (info.chunk_count == 1) {
-        let value int = llvm_abi_load_piece(out, body, buffer, &info, 0, next);
-        llvm_text(out, "  ret "); llvm_abi_piece_type(out, info.class0, info.size0);
-        llvm_byte(out, ' '); llvm_temp(out, value); llvm_byte(out, '\n');
-        return 1;
+        let value int = llvm_abi_load_piece(out, body, buffer, &info, 0, next)
+        llvm_text(out, "  ret "); llvm_abi_piece_type(out, info.class0, info.size0)
+        llvm_byte(out, ' '); llvm_temp(out, value); llvm_byte(out, '\n')
+        return 1
     }
-    let first int = llvm_abi_load_piece(out, body, buffer, &info, 0, next);
-    let aggregate_type int = llvm_new_temp(out, next);
-    llvm_text(out, "insertvalue "); llvm_signature_return(unit, ret_type, out);
-    llvm_text(out, " poison, "); llvm_abi_piece_type(out, info.class0, info.size0);
-    llvm_byte(out, ' '); llvm_temp(out, first); llvm_text(out, ", 0\n");
-    let second int = llvm_abi_load_piece(out, body, buffer, &info, 1, next);
-    let aggregate_final int = llvm_new_temp(out, next);
-    llvm_text(out, "insertvalue "); llvm_signature_return(unit, ret_type, out);
-    llvm_byte(out, ' '); llvm_temp(out, aggregate_type); llvm_text(out, ", ");
-    llvm_abi_piece_type(out, info.class1, info.size1); llvm_byte(out, ' '); llvm_temp(out, second);
-    llvm_text(out, ", 1\n  ret "); llvm_signature_return(unit, ret_type, out);
-    llvm_byte(out, ' '); llvm_temp(out, aggregate_final); llvm_byte(out, '\n');
-    return 1;
+    let first int = llvm_abi_load_piece(out, body, buffer, &info, 0, next)
+    let aggregate_type int = llvm_new_temp(out, next)
+    llvm_text(out, "insertvalue "); llvm_signature_return(unit, ret_type, out)
+    llvm_text(out, " poison, "); llvm_abi_piece_type(out, info.class0, info.size0)
+    llvm_byte(out, ' '); llvm_temp(out, first); llvm_text(out, ", 0\n")
+    let second int = llvm_abi_load_piece(out, body, buffer, &info, 1, next)
+    let aggregate_final int = llvm_new_temp(out, next)
+    llvm_text(out, "insertvalue "); llvm_signature_return(unit, ret_type, out)
+    llvm_byte(out, ' '); llvm_temp(out, aggregate_type); llvm_text(out, ", ")
+    llvm_abi_piece_type(out, info.class1, info.size1); llvm_byte(out, ' '); llvm_temp(out, second)
+    llvm_text(out, ", 1\n  ret "); llvm_signature_return(unit, ret_type, out)
+    llvm_byte(out, ' '); llvm_temp(out, aggregate_final); llvm_byte(out, '\n')
+    return 1
 }

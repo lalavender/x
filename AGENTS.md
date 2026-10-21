@@ -51,13 +51,13 @@ gitignore 的 `bin/` 并核对哈希。
   SDK 26.4）；链接查找 `SDKROOT` → `YH_DARWIN_SDK` → 可执行文件附近 bundle →
   原生 `xcrun`。C 源/libc++/目标包/frameworks 等遗留见
   `docs/03-design/yh-Darwin交叉编译遗留边界.md`。
-- **本地/CI 分工（2026-10-19 用户决定）**：在 Linux 或 macOS 上开发，本地只需
-  保证**本平台**门禁绿（`make test` + `make selfhost-native`；运行语料已按
+- **本地/CI 分工（2026-10-19 用户决定，2026-10-22 调整）**：在 Linux 或 macOS 上开发，
+  本地只需保证**本平台**门禁绿（`make test` + `make selfhost-native`；运行语料已按
   `// platform:` 头部指令筛选，平台专属门如 `make test-llvm` 在别的宿主会
-  明确拒绝而不是要求本地跑通）。**完整多平台回归由 CircleCI 承担**
+  明确拒绝而不是要求本地跑通）。**完整多平台回归由 Gitea Actions 承担**
   （见下文 CI 说明）：推送 `arm64`/`llvm`/`main` 自动跑
-  linux-arm64（主门）、linux-x86_64（LLVM 全门）、darwin-arm64 三端；
-  tag 推送走 `release` workflow 并发布 Release。GitHub Actions 已于
+  linux-arm64（主门）与 darwin-arm64；linux-x86_64（LLVM 全门）只在 tag 发布时跑；
+  **tag 发布同样由 Gitea Actions 的 `release.yml` 承担**。GitHub Actions 已于
   2026-10-21 移除（`.github/workflows/` 删除，需要时从 git 历史还原）。
   本地不要为其他平台预跑门禁，也不要因 CI 红灯阻塞本地迭代——CI 红灯按
   todo 立项再修。
@@ -142,21 +142,30 @@ make seed               # 滚种子（仅在全绿后；拒绝带构建机路径
 所有架构），不匹配的记 `SKIP`、不算失败也不影响退出码；没有该指令的是共有用例。
 `make test-llvm` 是 Linux/x86_64 专属门，其他宿主会直接拒绝而不是降级运行。
 
-CI 分两套（推送 `arm64`/`llvm`/`main` 时并行）：
+CI 由 **Gitea Actions** 承担（2026-10-22 起；替代原 CircleCI 分支门与本机 Jenkins）：
 
-- **CircleCI**（`.circleci/config.yml`）：原生 `arm.large` Linux/AArch64、
-  Linux/x86_64 与 `m4pro.large` Darwin/ARM64 三端并行；每端先取最新 Release
-  种子，再跑 `make bootstrap`、平台专项门、第 2/3 层语料与
-  `make selfhost-native SKIP_CORPUS=1`。`tmp/llvm-migration` 按 SDK/脚本/
-  桥源码哈希缓存；独立 `antlr` 作业跑参考语法门。
-- **种子来源**：CircleCI 每个分支流水线都从最新 GitHub Release 取三端种子；
-  tag 流水线取上一版 Release（排除当前 tag）。项目环境变量需配置
-  `GITHUB_TOKEN`（repo 权限），同时用于取种子和发布。
-- **tag 发布**：CircleCI `release` workflow 由 tag 触发，三端保留 cc4 自举候选，
-  打包后由 `publish` 作业创建/更新 GitHub Release。
-- **GitHub Actions（2026-10-21 移除）**：`.github/workflows/ci.yml` 与
-  `release.yml` 已删除，多平台回归与发布由 CircleCI 承担；需要时从 git 历史
-  还原。种子不再入库，CI 一律用 token 从最新 Release 取种子。
+- **仓库与 runner**：`http://localhost:3000/yh/yh`，runner 是 `gitea-runner` 5.2 的
+  **host 模式**实例 `yh-local`（labels `macos-arm64` / `linux-arm64`，宿主为
+  macOS/arm64）。本机无 docker，workflow 里不用 `container:` 语法；Linux 任务由
+  脚本自行调 Apple `container`。
+- **`ci.yml`（分支门）**：`arm64`/`llvm`/`main` 与 `<ver>-rc`/`<ver>-release`
+  分支 push → 并行跑 ANTLR、Darwin/arm64（宿主原生）、Linux/AArch64（Apple
+  container 内原生）；每端先取最新 Release 种子，再 `make bootstrap`、平台专项
+  门、第 2/3 层语料与 `make selfhost-native SKIP_CORPUS=1`。
+- **`release.yml`（发布）**：版本 tag（`x.y.z`、`x.y.z-rc.N`）push → 三端顺序
+  构建（Darwin 原生 → Linux/AArch64 容器原生 → Linux/x86_64 容器模拟）、cc4 打包、
+  `tools/publish-release.py` 发布 GitHub Release；其他 tag（如 `seed-*`）跳过。
+- **凭据**：仓库 secret `YH_GITHUB_TOKEN`（取种与发布）。取种脚本必须显式
+  `--repo lalavender/x`——Gitea 会把 `GITHUB_REPOSITORY` 覆写成 `yh/yh`。
+- **缓存**：host 模式直接复用宿主 `$YH_LLVM_CACHE`（缺省
+  `$HOME/Documents/x/tmp/llvm-migration`）并 symlink 进 workspace；**不要删这个
+  目录**，只清理 `tmp/` 里其他旧产物，否则首次 `make bootstrap` 会重新准备
+  LLVM 闭包。
+- **磁盘**：完整三端约需 15–20 GB；x86_64 是容器模拟，不能等同原生 CI 证据。
+- **已退役**：GitHub Actions（2026-10-21 删除）、本机 Jenkins（2026-10-22 删除，
+  `Jenkinsfile` 与 `tools/jenkins/` 一并移除，发布脚本改为
+  `tools/publish-release.py`）；`.circleci/config.yml` 仅留作云端真机参照，不再
+  作为门禁。
 
 ## 版本与发布（每版本 rc/release 分支）
 
@@ -164,6 +173,10 @@ CI 分两套（推送 `arm64`/`llvm`/`main` 时并行）：
 提交。`compiler/project.toml` 的 `version` 在 rc 期就写目标正式号，因此最后一个
 rc 与正式版是同一提交。完整方案见
 [分版本 rc/release 分支发版流程](docs/02-plan/yh-分版本rc与release分支发版流程方案-2026-10-21.md)。
+
+**当前状态（2026-10-22）**：tag 发布已由 Gitea Actions 的 `release.yml` 承担；
+rc/prerelease 与正式 tag 的 `<ver>-release` 祖先校验尚未落地（R1–R3/R5 未
+关闭），本节描述的是目标流程。
 
 1. 在 `<ver>-rc` 上开发；写 `docs/01-finished/release-<ver>-rc.N.md`；本地
    `make test` + `make selfhost-native` 全绿。
@@ -180,8 +193,8 @@ rc 与正式版是同一提交。完整方案见
 所以 rc.N 用 rc.N−1、正式版用该版最后一个 rc 编译出来。禁止修改已发布 Release
 的资产（要改就发新 rc）；`release-<tag>.md` 缺失即发布失败（rc 与正式都要写）。
 
-迁移完成前（[todo](docs/todo.md) R1–R5 未关闭），CI 仍只跑
-`arm64`/`llvm`/`main`。
+迁移完成前（[todo](docs/todo.md) R1–R5 未关闭），分支门仍跑
+`arm64`/`llvm`/`main`；`<ver>-rc`/`<ver>-release` 分支同样触发。
 
 
 ## Linux 环境验证（容器方案）

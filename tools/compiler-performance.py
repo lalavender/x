@@ -73,8 +73,11 @@ def module_inventory() -> dict[str, int]:
     counts = {}
     for source in FROZEN_PROJECT.rglob("*.yh"):
         for line in source.read_text(encoding="utf-8").splitlines():
-            if line.startswith("module ") and line.endswith(";"):
-                name = line[7:-1]
+            if not line.startswith("module "):
+                continue
+            # 行尾分号可省略（换行终结），两种写法都要识别。
+            name = line[len("module "):].strip().rstrip(";").strip()
+            if name:
                 counts[name] = counts.get(name, 0) + 1
                 break
     return counts

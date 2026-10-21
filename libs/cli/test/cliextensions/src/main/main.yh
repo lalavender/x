@@ -1,922 +1,922 @@
-module main;
+module main
 
 // cli 标准库 CLI4 验收（扩展回调部分）：converter/validator/custom action、
 // 命名注册表、输出形状检查、坏回调形状拒绝与 freeze 期的默认值校验。
 // 参数文件部分在同一项目的后续主题里追加。返回 0 或「主题*10+断言号」。
 
-import cli;
-import io;
-import os;
-import string;
+import cli
+import io
+import os
+import string
 
 // g_pair 是逐行回调借出的 token 缓冲（全局存储，回调返回后仍有效）。
-let g_pair [2]*char;
+let g_pair [2]*char
 
 // hex_convert 把 0x 前缀的十六进制文本转换成 integer。
 fn hex_convert(ctx *cli.ConvertContext, out *cli.Value, error *cli.Diagnostic, user *void) int {
-    let text *char = ctx.token;
+    let text *char = ctx.token
     if (text[0] != '0' || (text[1] != 'x' && text[1] != 'X')) {
-        error.message = "需要 0x 前缀的十六进制";
-        return -1;
+        error.message = "需要 0x 前缀的十六进制"
+        return -1
     }
-    let value i64 = 0;
-    let i int = 2;
+    let value i64 = 0
+    let i int = 2
     for text[i] != 0 {
-        let ch int = text[i].to_type(int);
-        let digit int = -1;
+        let ch int = text[i].to_type(int)
+        let digit int = -1
         if (ch >= '0' && ch <= '9') {
-            digit = ch - '0';
+            digit = ch - '0'
         } else if (ch >= 'a' && ch <= 'f') {
-            digit = ch - 'a' + 10;
+            digit = ch - 'a' + 10
         } else if (ch >= 'A' && ch <= 'F') {
-            digit = ch - 'A' + 10;
+            digit = ch - 'A' + 10
         } else {
-            error.message = "十六进制里出现非法字符";
-            return -1;
+            error.message = "十六进制里出现非法字符"
+            return -1
         }
-        value = value * 16 + digit.to_type(i64);
-        i += 1;
+        value = value * 16 + digit.to_type(i64)
+        i += 1
     }
-    *out = cli.value_i64(value);
-    return 0;
+    *out = cli.value_i64(value)
+    return 0
 }
 
 // bad_kind_convert 故意返回文本，用于验证输出类型检查。
 fn bad_kind_convert(ctx *cli.ConvertContext, out *cli.Value, error *cli.Diagnostic, user *void) int {
-    *out = cli.value_text(ctx.token);
-    return 0;
+    *out = cli.value_text(ctx.token)
+    return 0
 }
 
 // reject_negative 校验值非负。
 fn reject_negative(value cli.Value, error *cli.Diagnostic, user *void) int {
     if (value.kind != cli.integer) {
-        error.message = "校验器只接受整数";
-        return -1;
+        error.message = "校验器只接受整数"
+        return -1
     }
     if (value.data.integer < 0) {
-        error.message = "数值不能为负";
-        return -1;
+        error.message = "数值不能为负"
+        return -1
     }
-    return 0;
+    return 0
 }
 
 // join_more 是一个自定义 action：把本次值与旧值用逗号拼接。
 fn join_more(ctx *cli.ActionContext, out *cli.Value, error *cli.Diagnostic, user *void) int {
-    let buffer [256]char;
-    let at int = 0;
+    let buffer [256]char
+    let at int = 0
     if (ctx.previous.kind == cli.text && ctx.previous.data.text != 0) {
-        let old *char = ctx.previous.data.text;
+        let old *char = ctx.previous.data.text
         for old[at] != 0 && at < 200 {
-            buffer[at] = old[at];
-            at += 1;
+            buffer[at] = old[at]
+            at += 1
         }
     }
-    let i int = 0;
+    let i int = 0
     for i < len(ctx.values) {
         if (at > 0 && at < 200) {
-            buffer[at] = ',';
-            at += 1;
+            buffer[at] = ','
+            at += 1
         }
-        let item *char = ctx.values[i].data.text;
-        let j int = 0;
+        let item *char = ctx.values[i].data.text
+        let j int = 0
         for item[j] != 0 && at < 200 {
-            buffer[at] = item[j];
-            at += 1;
-            j += 1;
+            buffer[at] = item[j]
+            at += 1
+            j += 1
         }
-        i += 1;
+        i += 1
     }
-    buffer[at] = 0;
+    buffer[at] = 0
     // 复制到结果池后再返回，证明上下文分配入口可用。
-    let copied *char = cli.context_text(ctx.context, &buffer[0]);
+    let copied *char = cli.context_text(ctx.context, &buffer[0])
     if (copied == 0) {
-        error.message = "结果池分配失败";
-        return -1;
+        error.message = "结果池分配失败"
+        return -1
     }
-    *out = cli.value_text(copied);
-    return 0;
+    *out = cli.value_text(copied)
+    return 0
 }
 
 // bad_shape_action 返回标量，但声明形状是列表，用于验证形状检查。
 fn bad_shape_action(ctx *cli.ActionContext, out *cli.Value, error *cli.Diagnostic, user *void) int {
-    *out = cli.value_text("scalar");
-    return 0;
+    *out = cli.value_text("scalar")
+    return 0
 }
 
 // count_chars 是一个注册类型：把文本长度当作整数。
 fn count_chars(ctx *cli.ConvertContext, out *cli.Value, error *cli.Diagnostic, user *void) int {
-    *out = cli.value_i64(strlen(ctx.token).to_type(i64));
-    return 0;
+    *out = cli.value_i64(strlen(ctx.token).to_type(i64))
+    return 0
 }
 
 // upper_action 是一个注册 action：把本次值转成大写。
 fn upper_action(ctx *cli.ActionContext, out *cli.Value, error *cli.Diagnostic, user *void) int {
-    let buffer [256]char;
-    let at int = 0;
-    let i int = 0;
+    let buffer [256]char
+    let at int = 0
+    let i int = 0
     for i < len(ctx.values) {
-        let item *char = ctx.values[i].data.text;
-        let j int = 0;
+        let item *char = ctx.values[i].data.text
+        let j int = 0
         for item[j] != 0 && at < 250 {
-            let ch int = item[j].to_type(int);
+            let ch int = item[j].to_type(int)
             if (ch >= 'a' && ch <= 'z') {
-                buffer[at] = (ch - 32).to_type(char);
+                buffer[at] = (ch - 32).to_type(char)
             } else {
-                buffer[at] = item[j];
+                buffer[at] = item[j]
             }
-            at += 1;
-            j += 1;
+            at += 1
+            j += 1
         }
-        i += 1;
+        i += 1
     }
-    buffer[at] = 0;
-    *out = cli.value_text(cli.context_text(ctx.context, &buffer[0]));
-    return 0;
+    buffer[at] = 0
+    *out = cli.value_text(cli.context_text(ctx.context, &buffer[0]))
+    return 0
 }
 
 // —— 主题 1：converter 直接回调 ——
 fn case_converter() int {
-    let root cli.Parser;
-    let config cli.ParserConfig = cli.parser_config("tool");
+    let root cli.Parser
+    let config cli.ParserConfig = cli.parser_config("tool")
     if (cli.init(&root, config) != 0) {
-        return 11;
+        return 11
     }
-    let mask cli.Argument = cli.option("--mask", 0);
-    mask.value_kind = cli.integer;
-    mask.converter = hex_convert;
+    let mask cli.Argument = cli.option("--mask", 0)
+    mask.value_kind = cli.integer
+    mask.converter = hex_convert
     if (cli.add_argument(&root, mask) < 0) {
-        cli.destroy(&root);
-        return 12;
+        cli.destroy(&root)
+        return 12
     }
-    let args [3]*char;
-    args[0] = "--mask";
-    args[1] = "0x1f";
-    let r cli.Result = cli.parse(&root, args[0..2]);
-    let number i64 = 0;
+    let args [3]*char
+    args[0] = "--mask"
+    args[1] = "0x1f"
+    let r cli.Result = cli.parse(&root, args[0..2])
+    let number i64 = 0
     if (r.status != cli.ok || cli.get_i64(&r.values, "mask", &number) != 0
         || number != 31) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 13;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 13
     }
-    cli.release(&r);
+    cli.release(&r)
     // 回调返回 -1 时诊断消息应出现在结果里。
-    let bad [3]*char;
-    bad[0] = "--mask";
-    bad[1] = "zz";
-    let r2 cli.Result = cli.parse(&root, bad[0..2]);
+    let bad [3]*char
+    bad[0] = "--mask"
+    bad[1] = "zz"
+    let r2 cli.Result = cli.parse(&root, bad[0..2])
     if (r2.status != cli.usage_error || r2.error.message == 0
         || string.equals(r2.error.message, "需要 0x 前缀的十六进制") != 1) {
-        cli.release(&r2);
-        cli.destroy(&root);
-        return 14;
+        cli.release(&r2)
+        cli.destroy(&root)
+        return 14
     }
-    cli.release(&r2);
-    cli.destroy(&root);
-    return 0;
+    cli.release(&r2)
+    cli.destroy(&root)
+    return 0
 }
 
 // —— 主题 2：converter 输出类型不符 ——
 fn case_converter_shape() int {
-    let root cli.Parser;
-    let config cli.ParserConfig = cli.parser_config("tool");
+    let root cli.Parser
+    let config cli.ParserConfig = cli.parser_config("tool")
     if (cli.init(&root, config) != 0) {
-        return 21;
+        return 21
     }
-    let mask cli.Argument = cli.option("--mask", 0);
-    mask.value_kind = cli.integer;
-    mask.converter = bad_kind_convert;
+    let mask cli.Argument = cli.option("--mask", 0)
+    mask.value_kind = cli.integer
+    mask.converter = bad_kind_convert
     if (cli.add_argument(&root, mask) < 0) {
-        cli.destroy(&root);
-        return 22;
+        cli.destroy(&root)
+        return 22
     }
-    let args [3]*char;
-    args[0] = "--mask";
-    args[1] = "7";
-    let r cli.Result = cli.parse(&root, args[0..2]);
+    let args [3]*char
+    args[0] = "--mask"
+    args[1] = "7"
+    let r cli.Result = cli.parse(&root, args[0..2])
     if (r.status != cli.usage_error) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 23;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 23
     }
-    cli.release(&r);
-    cli.destroy(&root);
-    return 0;
+    cli.release(&r)
+    cli.destroy(&root)
+    return 0
 }
 
 // —— 主题 3：validator ——
 fn case_validator() int {
-    let root cli.Parser;
-    let config cli.ParserConfig = cli.parser_config("tool");
+    let root cli.Parser
+    let config cli.ParserConfig = cli.parser_config("tool")
     if (cli.init(&root, config) != 0) {
-        return 31;
+        return 31
     }
-    let level cli.Argument = cli.option("--level", 0);
-    level.value_kind = cli.integer;
-    level.validator = reject_negative;
+    let level cli.Argument = cli.option("--level", 0)
+    level.value_kind = cli.integer
+    level.validator = reject_negative
     if (cli.add_argument(&root, level) < 0) {
-        cli.destroy(&root);
-        return 32;
+        cli.destroy(&root)
+        return 32
     }
-    let good [3]*char;
-    good[0] = "--level";
-    good[1] = "3";
-    let r cli.Result = cli.parse(&root, good[0..2]);
+    let good [3]*char
+    good[0] = "--level"
+    good[1] = "3"
+    let r cli.Result = cli.parse(&root, good[0..2])
     if (r.status != cli.ok) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 33;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 33
     }
-    cli.release(&r);
-    let bad [3]*char;
-    bad[0] = "--level";
-    bad[1] = "-3";
-    let r2 cli.Result = cli.parse(&root, bad[0..2]);
+    cli.release(&r)
+    let bad [3]*char
+    bad[0] = "--level"
+    bad[1] = "-3"
+    let r2 cli.Result = cli.parse(&root, bad[0..2])
     if (r2.status != cli.usage_error) {
-        cli.release(&r2);
-        cli.destroy(&root);
-        return 34;
+        cli.release(&r2)
+        cli.destroy(&root)
+        return 34
     }
-    cli.release(&r2);
-    cli.destroy(&root);
+    cli.release(&r2)
+    cli.destroy(&root)
     // 默认值也要过 validator：freeze 时报配置错误。
-    let parser2 cli.Parser;
-    let config2 cli.ParserConfig = cli.parser_config("tool2");
+    let parser2 cli.Parser
+    let config2 cli.ParserConfig = cli.parser_config("tool2")
     if (cli.init(&parser2, config2) != 0) {
-        return 35;
+        return 35
     }
-    let bad_default cli.Argument = cli.option("--level", 0);
-    bad_default.value_kind = cli.integer;
-    bad_default.validator = reject_negative;
-    bad_default.default_value = cli.default_of(cli.value_i64(0 - 5));
+    let bad_default cli.Argument = cli.option("--level", 0)
+    bad_default.value_kind = cli.integer
+    bad_default.validator = reject_negative
+    bad_default.default_value = cli.default_of(cli.value_i64(0 - 5))
     if (cli.add_argument(&parser2, bad_default) < 0) {
-        cli.destroy(&parser2);
-        return 36;
+        cli.destroy(&parser2)
+        return 36
     }
-    let empty [1]*char;
-    let r3 cli.Result = cli.parse(&parser2, empty[0..0]);
+    let empty [1]*char
+    let r3 cli.Result = cli.parse(&parser2, empty[0..0])
     if (r3.status != cli.config_error) {
-        cli.release(&r3);
-        cli.destroy(&parser2);
-        return 37;
+        cli.release(&r3)
+        cli.destroy(&parser2)
+        return 37
     }
-    cli.release(&r3);
-    cli.destroy(&parser2);
-    return 0;
+    cli.release(&r3)
+    cli.destroy(&parser2)
+    return 0
 }
 
 // —— 主题 4：自定义 action 直接回调 ——
 fn case_custom_action() int {
-    let root cli.Parser;
-    let config cli.ParserConfig = cli.parser_config("tool");
+    let root cli.Parser
+    let config cli.ParserConfig = cli.parser_config("tool")
     if (cli.init(&root, config) != 0) {
-        return 41;
+        return 41
     }
-    let add cli.Argument = cli.option("--add", 0);
-    add.action = cli.custom;
-    add.arity = cli.exactly(1);
-    let shape cli.ValueShape = cli.value_shape(cli.text, 0);
-    add.output_shape = &shape;
-    add.custom_action = join_more;
+    let add cli.Argument = cli.option("--add", 0)
+    add.action = cli.custom
+    add.arity = cli.exactly(1)
+    let shape cli.ValueShape = cli.value_shape(cli.text, 0)
+    add.output_shape = &shape
+    add.custom_action = join_more
     if (cli.add_argument(&root, add) < 0) {
-        cli.destroy(&root);
-        return 42;
+        cli.destroy(&root)
+        return 42
     }
-    let args [5]*char;
-    args[0] = "--add";
-    args[1] = "a";
-    args[2] = "--add";
-    args[3] = "b";
-    let r cli.Result = cli.parse(&root, args[0..4]);
+    let args [5]*char
+    args[0] = "--add"
+    args[1] = "a"
+    args[2] = "--add"
+    args[3] = "b"
+    let r cli.Result = cli.parse(&root, args[0..4])
     if (r.status != cli.ok) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 43;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 43
     }
-    let text *char;
+    let text *char
     if (cli.get_text(&r.values, "add", &text) != 0
         || string.equals(text, "a,b") != 1) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 44;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 44
     }
-    cli.release(&r);
-    cli.destroy(&root);
-    return 0;
+    cli.release(&r)
+    cli.destroy(&root)
+    return 0
 }
 
 // —— 主题 5：输出形状检查 ——
 fn case_custom_shape() int {
-    let root cli.Parser;
-    let config cli.ParserConfig = cli.parser_config("tool");
+    let root cli.Parser
+    let config cli.ParserConfig = cli.parser_config("tool")
     if (cli.init(&root, config) != 0) {
-        return 51;
+        return 51
     }
-    let add cli.Argument = cli.option("--add", 0);
-    add.action = cli.custom;
-    add.arity = cli.exactly(1);
-    let shape cli.ValueShape = cli.value_shape(cli.text, 1);
-    add.output_shape = &shape;
-    add.custom_action = bad_shape_action;
+    let add cli.Argument = cli.option("--add", 0)
+    add.action = cli.custom
+    add.arity = cli.exactly(1)
+    let shape cli.ValueShape = cli.value_shape(cli.text, 1)
+    add.output_shape = &shape
+    add.custom_action = bad_shape_action
     if (cli.add_argument(&root, add) < 0) {
-        cli.destroy(&root);
-        return 52;
+        cli.destroy(&root)
+        return 52
     }
-    let args [3]*char;
-    args[0] = "--add";
-    args[1] = "a";
-    let r cli.Result = cli.parse(&root, args[0..2]);
+    let args [3]*char
+    args[0] = "--add"
+    args[1] = "a"
+    let r cli.Result = cli.parse(&root, args[0..2])
     if (r.status != cli.usage_error) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 53;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 53
     }
-    cli.release(&r);
-    cli.destroy(&root);
-    return 0;
+    cli.release(&r)
+    cli.destroy(&root)
+    return 0
 }
 
 // —— 主题 6：命名注册表 ——
 fn case_registry() int {
-    let root cli.Parser;
-    let config cli.ParserConfig = cli.parser_config("tool");
+    let root cli.Parser
+    let config cli.ParserConfig = cli.parser_config("tool")
     if (cli.init(&root, config) != 0) {
-        return 61;
+        return 61
     }
     if (cli.register_type(&root, "chars", count_chars, 0) != 0) {
-        cli.destroy(&root);
-        return 62;
+        cli.destroy(&root)
+        return 62
     }
-    let shape cli.ValueShape = cli.value_shape(cli.text, 0);
+    let shape cli.ValueShape = cli.value_shape(cli.text, 0)
     if (cli.register_action(&root, "upper", cli.exactly(1), shape, upper_action, 0) != 0) {
-        cli.destroy(&root);
-        return 63;
+        cli.destroy(&root)
+        return 63
     }
-    let length cli.Argument = cli.option("--length", 0);
-    length.value_kind = cli.integer;
-    length.type_name = "chars";
+    let length cli.Argument = cli.option("--length", 0)
+    length.value_kind = cli.integer
+    length.type_name = "chars"
     if (cli.add_argument(&root, length) < 0) {
-        cli.destroy(&root);
-        return 64;
+        cli.destroy(&root)
+        return 64
     }
-    let shout cli.Argument = cli.option("--shout", 0);
-    shout.action = cli.custom;
-    shout.action_name = "upper";
+    let shout cli.Argument = cli.option("--shout", 0)
+    shout.action = cli.custom
+    shout.action_name = "upper"
     if (cli.add_argument(&root, shout) < 0) {
-        cli.destroy(&root);
-        return 65;
+        cli.destroy(&root)
+        return 65
     }
-    let args [5]*char;
-    args[0] = "--length";
-    args[1] = "abcd";
-    args[2] = "--shout";
-    args[3] = "hi";
-    let r cli.Result = cli.parse(&root, args[0..4]);
-    let number i64 = 0;
+    let args [5]*char
+    args[0] = "--length"
+    args[1] = "abcd"
+    args[2] = "--shout"
+    args[3] = "hi"
+    let r cli.Result = cli.parse(&root, args[0..4])
+    let number i64 = 0
     if (r.status != cli.ok || cli.get_i64(&r.values, "length", &number) != 0
         || number != 4) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 66;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 66
     }
-    let text *char;
+    let text *char
     if (cli.get_text(&r.values, "shout", &text) != 0
         || string.equals(text, "HI") != 1) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 67;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 67
     }
-    cli.release(&r);
-    cli.destroy(&root);
-    return 0;
+    cli.release(&r)
+    cli.destroy(&root)
+    return 0
 }
 
 // —— 主题 7：坏声明被拒绝 ——
 fn case_bad_declarations() int {
     // custom 缺少 output_shape。
-    let root cli.Parser;
-    let config cli.ParserConfig = cli.parser_config("tool");
+    let root cli.Parser
+    let config cli.ParserConfig = cli.parser_config("tool")
     if (cli.init(&root, config) != 0) {
-        return 71;
+        return 71
     }
-    let add cli.Argument = cli.option("--add", 0);
-    add.action = cli.custom;
-    add.arity = cli.exactly(1);
-    add.custom_action = join_more;
+    let add cli.Argument = cli.option("--add", 0)
+    add.action = cli.custom
+    add.arity = cli.exactly(1)
+    add.custom_action = join_more
     if (cli.add_argument(&root, add) < 0) {
-        cli.destroy(&root);
-        return 72;
+        cli.destroy(&root)
+        return 72
     }
-    let empty [1]*char;
-    let r cli.Result = cli.parse(&root, empty[0..0]);
+    let empty [1]*char
+    let r cli.Result = cli.parse(&root, empty[0..0])
     if (r.status != cli.config_error) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 73;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 73
     }
-    cli.release(&r);
-    cli.destroy(&root);
+    cli.release(&r)
+    cli.destroy(&root)
     // custom 使用 infer 数量。
-    let parser2 cli.Parser;
-    let config2 cli.ParserConfig = cli.parser_config("tool2");
+    let parser2 cli.Parser
+    let config2 cli.ParserConfig = cli.parser_config("tool2")
     if (cli.init(&parser2, config2) != 0) {
-        return 74;
+        return 74
     }
-    let add2 cli.Argument = cli.option("--add", 0);
-    add2.action = cli.custom;
-    let shape cli.ValueShape = cli.value_shape(cli.text, 0);
-    add2.output_shape = &shape;
-    add2.custom_action = join_more;
+    let add2 cli.Argument = cli.option("--add", 0)
+    add2.action = cli.custom
+    let shape cli.ValueShape = cli.value_shape(cli.text, 0)
+    add2.output_shape = &shape
+    add2.custom_action = join_more
     if (cli.add_argument(&parser2, add2) < 0) {
-        cli.destroy(&parser2);
-        return 75;
+        cli.destroy(&parser2)
+        return 75
     }
-    let r2 cli.Result = cli.parse(&parser2, empty[0..0]);
+    let r2 cli.Result = cli.parse(&parser2, empty[0..0])
     if (r2.status != cli.config_error) {
-        cli.release(&r2);
-        cli.destroy(&parser2);
-        return 76;
+        cli.release(&r2)
+        cli.destroy(&parser2)
+        return 76
     }
-    cli.release(&r2);
-    cli.destroy(&parser2);
+    cli.release(&r2)
+    cli.destroy(&parser2)
     // converter 与 type_name 同时提供。
-    let parser3 cli.Parser;
-    let config3 cli.ParserConfig = cli.parser_config("tool3");
+    let parser3 cli.Parser
+    let config3 cli.ParserConfig = cli.parser_config("tool3")
     if (cli.init(&parser3, config3) != 0) {
-        return 77;
+        return 77
     }
     if (cli.register_type(&parser3, "chars", count_chars, 0) != 0) {
-        cli.destroy(&parser3);
-        return 78;
+        cli.destroy(&parser3)
+        return 78
     }
-    let both cli.Argument = cli.option("--both", 0);
-    both.type_name = "chars";
-    both.converter = hex_convert;
+    let both cli.Argument = cli.option("--both", 0)
+    both.type_name = "chars"
+    both.converter = hex_convert
     if (cli.add_argument(&parser3, both) < 0) {
-        cli.destroy(&parser3);
-        return 79;
+        cli.destroy(&parser3)
+        return 79
     }
-    let r3 cli.Result = cli.parse(&parser3, empty[0..0]);
+    let r3 cli.Result = cli.parse(&parser3, empty[0..0])
     if (r3.status != cli.config_error) {
-        cli.release(&r3);
-        cli.destroy(&parser3);
-        return 80;
+        cli.release(&r3)
+        cli.destroy(&parser3)
+        return 80
     }
-    cli.release(&r3);
-    cli.destroy(&parser3);
+    cli.release(&r3)
+    cli.destroy(&parser3)
     // 未注册的名称被拒绝。
-    let parser4 cli.Parser;
-    let config4 cli.ParserConfig = cli.parser_config("tool4");
+    let parser4 cli.Parser
+    let config4 cli.ParserConfig = cli.parser_config("tool4")
     if (cli.init(&parser4, config4) != 0) {
-        return 81;
+        return 81
     }
-    let unknown cli.Argument = cli.option("--unknown", 0);
-    unknown.type_name = "nosuch";
+    let unknown cli.Argument = cli.option("--unknown", 0)
+    unknown.type_name = "nosuch"
     if (cli.add_argument(&parser4, unknown) < 0) {
-        cli.destroy(&parser4);
-        return 82;
+        cli.destroy(&parser4)
+        return 82
     }
-    let r4 cli.Result = cli.parse(&parser4, empty[0..0]);
+    let r4 cli.Result = cli.parse(&parser4, empty[0..0])
     if (r4.status != cli.config_error) {
-        cli.release(&r4);
-        cli.destroy(&parser4);
-        return 83;
+        cli.release(&r4)
+        cli.destroy(&parser4)
+        return 83
     }
-    cli.release(&r4);
-    cli.destroy(&parser4);
-    return 0;
+    cli.release(&r4)
+    cli.destroy(&parser4)
+    return 0
 }
 
 // —— 参数文件辅助 ——
 
 // write_text_file 按宿主标志写一个文本文件；0 成功、-1 失败。
 fn write_text_file(path *char, content *char) int {
-    let flags int = 0x241;
+    let flags int = 0x241
     $if (darwin) {
-        flags = 0x601;
+        flags = 0x601
     }
-    let fd int = os.open_file_mode(path, flags, 420);
+    let fd int = os.open_file_mode(path, flags, 420)
     if (fd < 0) {
-        return -1;
+        return -1
     }
-    let size u64 = strlen(content);
+    let size u64 = strlen(content)
     if (os.write_fd(fd, content.to_type(*void), size) != size.to_type(i64)) {
-        os.close_fd(fd);
-        return -1;
+        os.close_fd(fd)
+        return -1
     }
-    return os.close_fd(fd);
+    return os.close_fd(fd)
 }
 
 // split_line 是逐行回调：把 "a b" 拆成两个 token，"a" 保持一个 token。
 fn split_line(ctx *cli.LineContext, out *cli.LineTokens, error *cli.Diagnostic, user *void) int {
-    let line *char = ctx.line;
-    let i int = 0;
+    let line *char = ctx.line
+    let i int = 0
     for line[i] != 0 {
         if (line[i] == ' ') {
-            line[i] = 0;
-            g_pair[0] = line;
-            g_pair[1] = line + i + 1;
-            out.items = g_pair[0..2];
-            return 0;
+            line[i] = 0
+            g_pair[0] = line
+            g_pair[1] = line + i + 1
+            out.items = g_pair[0..2]
+            return 0
         }
-        i += 1;
+        i += 1
     }
-    g_pair[0] = line;
-    out.items = g_pair[0..1];
-    return 0;
+    g_pair[0] = line
+    out.items = g_pair[0..1]
+    return 0
 }
 
 // build_file_parser 构造带参数文件展开的 parser；0 成功。
 fn build_file_parser(root *cli.Parser, use_line_callback int) int {
-    let config cli.ParserConfig = cli.parser_config("tool");
-    config.fromfile_prefix_chars = "@";
+    let config cli.ParserConfig = cli.parser_config("tool")
+    config.fromfile_prefix_chars = "@"
     if (use_line_callback != 0) {
-        config.line_converter = split_line;
+        config.line_converter = split_line
     }
     if (cli.init(root, config) != 0) {
-        return 1;
+        return 1
     }
-    let level cli.Argument = cli.option("--level", 0);
-    level.value_kind = cli.integer;
-    let source cli.Argument = cli.positional("source");
+    let level cli.Argument = cli.option("--level", 0)
+    level.value_kind = cli.integer
+    let source cli.Argument = cli.positional("source")
     if (cli.add_argument(root, level) < 0) {
-        return 2;
+        return 2
     }
     if (cli.add_argument(root, source) < 0) {
-        return 3;
+        return 3
     }
-    return 0;
+    return 0
 }
 
 // —— 主题 8：参数文件基本展开 ——
 fn case_fromfile() int {
-    let root cli.Parser;
-    let setup int = build_file_parser(&root, 0);
+    let root cli.Parser
+    let setup int = build_file_parser(&root, 0)
     if (setup != 0) {
-        return 81;
+        return 81
     }
     if (write_text_file("cli-args.txt", "--level\n7\ninput.bin\n") != 0) {
-        cli.destroy(&root);
-        return 82;
+        cli.destroy(&root)
+        return 82
     }
-    let args [2]*char;
-    args[0] = "@cli-args.txt";
-    let r cli.Result = cli.parse(&root, args[0..1]);
-    let level i64 = 0;
+    let args [2]*char
+    args[0] = "@cli-args.txt"
+    let r cli.Result = cli.parse(&root, args[0..1])
+    let level i64 = 0
     if (r.status != cli.ok || cli.get_i64(&r.values, "level", &level) != 0
         || level != 7) {
-        cli.release(&r);
-        cli.destroy(&root);
-        os.remove_file("cli-args.txt");
-        return 83;
+        cli.release(&r)
+        cli.destroy(&root)
+        os.remove_file("cli-args.txt")
+        return 83
     }
-    let text *char;
+    let text *char
     if (cli.get_text(&r.values, "source", &text) != 0
         || string.equals(text, "input.bin") != 1) {
-        cli.release(&r);
-        cli.destroy(&root);
-        os.remove_file("cli-args.txt");
-        return 84;
+        cli.release(&r)
+        cli.destroy(&root)
+        os.remove_file("cli-args.txt")
+        return 84
     }
-    cli.release(&r);
-    cli.destroy(&root);
-    os.remove_file("cli-args.txt");
-    return 0;
+    cli.release(&r)
+    cli.destroy(&root)
+    os.remove_file("cli-args.txt")
+    return 0
 }
 
 // —— 主题 9：嵌套包含与相对路径 ——
 fn case_fromfile_nested() int {
-    let root cli.Parser;
-    let setup int = build_file_parser(&root, 0);
+    let root cli.Parser
+    let setup int = build_file_parser(&root, 0)
     if (setup != 0) {
-        return 91;
+        return 91
     }
     if (os.create_dir("cli-sub", 493) != 0) {
-        cli.destroy(&root);
-        return 92;
+        cli.destroy(&root)
+        return 92
     }
     if (write_text_file("cli-outer.txt", "@cli-sub/inner.txt\n") != 0
         || write_text_file("cli-sub/inner.txt", "--level\n5\nsrc.bin\n") != 0) {
-        cli.destroy(&root);
-        os.remove_file("cli-outer.txt");
-        os.remove_file("cli-sub/inner.txt");
-        os.remove_dir("cli-sub");
-        return 93;
+        cli.destroy(&root)
+        os.remove_file("cli-outer.txt")
+        os.remove_file("cli-sub/inner.txt")
+        os.remove_dir("cli-sub")
+        return 93
     }
-    let args [2]*char;
-    args[0] = "@cli-outer.txt";
-    let r cli.Result = cli.parse(&root, args[0..1]);
-    let level i64 = 0;
-    let text *char;
+    let args [2]*char
+    args[0] = "@cli-outer.txt"
+    let r cli.Result = cli.parse(&root, args[0..1])
+    let level i64 = 0
+    let text *char
     if (r.status != cli.ok || cli.get_i64(&r.values, "level", &level) != 0
         || level != 5 || cli.get_text(&r.values, "source", &text) != 0
         || string.equals(text, "src.bin") != 1) {
-        cli.release(&r);
-        cli.destroy(&root);
-        os.remove_file("cli-outer.txt");
-        os.remove_file("cli-sub/inner.txt");
-        os.remove_dir("cli-sub");
-        return 94;
+        cli.release(&r)
+        cli.destroy(&root)
+        os.remove_file("cli-outer.txt")
+        os.remove_file("cli-sub/inner.txt")
+        os.remove_dir("cli-sub")
+        return 94
     }
-    cli.release(&r);
-    cli.destroy(&root);
-    os.remove_file("cli-outer.txt");
-    os.remove_file("cli-sub/inner.txt");
-    os.remove_dir("cli-sub");
-    return 0;
+    cli.release(&r)
+    cli.destroy(&root)
+    os.remove_file("cli-outer.txt")
+    os.remove_file("cli-sub/inner.txt")
+    os.remove_dir("cli-sub")
+    return 0
 }
 
 // —— 主题 10：循环检测 ——
 fn case_fromfile_cycle() int {
-    let root cli.Parser;
-    let setup int = build_file_parser(&root, 0);
+    let root cli.Parser
+    let setup int = build_file_parser(&root, 0)
     if (setup != 0) {
-        return 101;
+        return 101
     }
     if (write_text_file("cli-cycle.txt", "@cli-cycle.txt\n") != 0) {
-        cli.destroy(&root);
-        return 102;
+        cli.destroy(&root)
+        return 102
     }
-    let args [2]*char;
-    args[0] = "@cli-cycle.txt";
-    let r cli.Result = cli.parse(&root, args[0..1]);
+    let args [2]*char
+    args[0] = "@cli-cycle.txt"
+    let r cli.Result = cli.parse(&root, args[0..1])
     if (r.status != cli.resource_error || r.error.message == 0
         || string.equals(r.error.message, "参数文件包含出现循环") != 1) {
-        cli.release(&r);
-        cli.destroy(&root);
-        os.remove_file("cli-cycle.txt");
-        return 103;
+        cli.release(&r)
+        cli.destroy(&root)
+        os.remove_file("cli-cycle.txt")
+        return 103
     }
-    cli.release(&r);
-    cli.destroy(&root);
-    os.remove_file("cli-cycle.txt");
-    return 0;
+    cli.release(&r)
+    cli.destroy(&root)
+    os.remove_file("cli-cycle.txt")
+    return 0
 }
 
 // —— 主题 11：I/O 失败可定位 ——
 fn case_fromfile_missing() int {
-    let root cli.Parser;
-    let setup int = build_file_parser(&root, 0);
+    let root cli.Parser
+    let setup int = build_file_parser(&root, 0)
     if (setup != 0) {
-        return 111;
+        return 111
     }
-    let args [2]*char;
-    args[0] = "@cli-nosuch.txt";
-    let r cli.Result = cli.parse(&root, args[0..1]);
+    let args [2]*char
+    args[0] = "@cli-nosuch.txt"
+    let r cli.Result = cli.parse(&root, args[0..1])
     if (r.status != cli.resource_error || r.error.message == 0) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 112;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 112
     }
-    cli.release(&r);
-    cli.destroy(&root);
-    return 0;
+    cli.release(&r)
+    cli.destroy(&root)
+    return 0
 }
 
 // —— 主题 12：深度与 token 上限 ——
 fn case_fromfile_limits() int {
-    let root cli.Parser;
-    let setup int = build_file_parser(&root, 0);
+    let root cli.Parser
+    let setup int = build_file_parser(&root, 0)
     if (setup != 0) {
-        return 121;
+        return 121
     }
     if (write_text_file("cli-a.txt", "@cli-b.txt\n") != 0
         || write_text_file("cli-b.txt", "--level\n3\nz.bin\n") != 0) {
-        cli.destroy(&root);
-        return 122;
+        cli.destroy(&root)
+        return 122
     }
-    let spec cli.ParseConfig = cli.parse_config();
-    spec.file_max_depth = 0;
-    let args [2]*char;
-    args[0] = "@cli-a.txt";
-    let r cli.Result = cli.parse_with(&root, args[0..1], spec);
+    let spec cli.ParseConfig = cli.parse_config()
+    spec.file_max_depth = 0
+    let args [2]*char
+    args[0] = "@cli-a.txt"
+    let r cli.Result = cli.parse_with(&root, args[0..1], spec)
     if (r.status != cli.resource_error) {
-        cli.release(&r);
-        cli.destroy(&root);
-        os.remove_file("cli-a.txt");
-        os.remove_file("cli-b.txt");
-        return 123;
+        cli.release(&r)
+        cli.destroy(&root)
+        os.remove_file("cli-a.txt")
+        os.remove_file("cli-b.txt")
+        return 123
     }
-    cli.release(&r);
+    cli.release(&r)
     // token 上限：文件两行但上限为 1。
-    let spec2 cli.ParseConfig = cli.parse_config();
-    spec2.file_max_tokens = 1;
-    let r2 cli.Result = cli.parse_with(&root, args[0..1], spec2);
+    let spec2 cli.ParseConfig = cli.parse_config()
+    spec2.file_max_tokens = 1
+    let r2 cli.Result = cli.parse_with(&root, args[0..1], spec2)
     if (r2.status != cli.resource_error) {
-        cli.release(&r2);
-        cli.destroy(&root);
-        os.remove_file("cli-a.txt");
-        os.remove_file("cli-b.txt");
-        return 124;
+        cli.release(&r2)
+        cli.destroy(&root)
+        os.remove_file("cli-a.txt")
+        os.remove_file("cli-b.txt")
+        return 124
     }
-    cli.release(&r2);
-    cli.destroy(&root);
-    os.remove_file("cli-a.txt");
-    os.remove_file("cli-b.txt");
-    return 0;
+    cli.release(&r2)
+    cli.destroy(&root)
+    os.remove_file("cli-a.txt")
+    os.remove_file("cli-b.txt")
+    return 0
 }
 
 // —— 主题 13：逐行回调 ——
 fn case_line_converter() int {
-    let root cli.Parser;
-    let setup int = build_file_parser(&root, 1);
+    let root cli.Parser
+    let setup int = build_file_parser(&root, 1)
     if (setup != 0) {
-        return 131;
+        return 131
     }
     if (write_text_file("cli-lines.txt", "--level 9\nfrom-line.bin\n") != 0) {
-        cli.destroy(&root);
-        return 132;
+        cli.destroy(&root)
+        return 132
     }
-    let args [2]*char;
-    args[0] = "@cli-lines.txt";
-    let r cli.Result = cli.parse(&root, args[0..1]);
-    let level i64 = 0;
-    let text *char;
+    let args [2]*char
+    args[0] = "@cli-lines.txt"
+    let r cli.Result = cli.parse(&root, args[0..1])
+    let level i64 = 0
+    let text *char
     if (r.status != cli.ok || cli.get_i64(&r.values, "level", &level) != 0
         || level != 9) {
-        cli.release(&r);
-        cli.destroy(&root);
-        os.remove_file("cli-lines.txt");
-        return 133;
+        cli.release(&r)
+        cli.destroy(&root)
+        os.remove_file("cli-lines.txt")
+        return 133
     }
     if (cli.get_text(&r.values, "source", &text) != 0
         || string.equals(text, "from-line.bin") != 1) {
-        cli.release(&r);
-        cli.destroy(&root);
-        os.remove_file("cli-lines.txt");
-        return 134;
+        cli.release(&r)
+        cli.destroy(&root)
+        os.remove_file("cli-lines.txt")
+        return 134
     }
-    cli.release(&r);
-    cli.destroy(&root);
-    os.remove_file("cli-lines.txt");
-    return 0;
+    cli.release(&r)
+    cli.destroy(&root)
+    os.remove_file("cli-lines.txt")
+    return 0
 }
 
 // —— 主题 14：子 parser 不能设置参数文件配置 ——
 fn case_child_fromfile_rejected() int {
-    let root cli.Parser;
-    let config cli.ParserConfig = cli.parser_config("tool");
+    let root cli.Parser
+    let config cli.ParserConfig = cli.parser_config("tool")
     if (cli.init(&root, config) != 0) {
-        return 141;
+        return 141
     }
-    let slot int = cli.add_subparsers(&root, cli.subparsers());
+    let slot int = cli.add_subparsers(&root, cli.subparsers())
     if (slot < 0) {
-        cli.destroy(&root);
-        return 142;
+        cli.destroy(&root)
+        return 142
     }
-    let cmd cli.Command = cli.command("go");
-    cmd.config.fromfile_prefix_chars = "@";
-    let child *cli.Parser = cli.add_parser(&root, slot, cmd);
+    let cmd cli.Command = cli.command("go")
+    cmd.config.fromfile_prefix_chars = "@"
+    let child *cli.Parser = cli.add_parser(&root, slot, cmd)
     if (child == 0) {
-        cli.destroy(&root);
-        return 143;
+        cli.destroy(&root)
+        return 143
     }
-    let args [2]*char;
-    args[0] = "go";
-    let r cli.Result = cli.parse(&root, args[0..1]);
+    let args [2]*char
+    args[0] = "go"
+    let r cli.Result = cli.parse(&root, args[0..1])
     if (r.status != cli.config_error) {
-        cli.release(&r);
-        cli.destroy(&root);
-        return 144;
+        cli.release(&r)
+        cli.destroy(&root)
+        return 144
     }
-    cli.release(&r);
-    cli.destroy(&root);
-    return 0;
+    cli.release(&r)
+    cli.destroy(&root)
+    return 0
 }
 
 // —— 主题 15：分配失败注入 ——
 fn case_alloc_failure() int {
-    let root cli.Parser;
-    let config cli.ParserConfig = cli.parser_config("tool");
+    let root cli.Parser
+    let config cli.ParserConfig = cli.parser_config("tool")
     if (cli.init(&root, config) != 0) {
-        return 151;
+        return 151
     }
-    let first cli.Argument = cli.option("--first", 0);
+    let first cli.Argument = cli.option("--first", 0)
     if (cli.add_argument(&root, first) < 0) {
-        cli.destroy(&root);
-        return 152;
+        cli.destroy(&root)
+        return 152
     }
-    let before int = cli.test_alloc_count(&root);
+    let before int = cli.test_alloc_count(&root)
     if (before <= 0) {
-        cli.destroy(&root);
-        return 153;
+        cli.destroy(&root)
+        return 153
     }
     if (cli.test_fail_alloc_after(&root, before) != 0) {
-        cli.destroy(&root);
-        return 154;
+        cli.destroy(&root)
+        return 154
     }
-    let second cli.Argument = cli.option("--second", 0);
+    let second cli.Argument = cli.option("--second", 0)
     if (cli.add_argument(&root, second) != -1) {
-        cli.destroy(&root);
-        return 155;
+        cli.destroy(&root)
+        return 155
     }
-    let diag cli.Diagnostic = cli.last_error(&root);
+    let diag cli.Diagnostic = cli.last_error(&root)
     if (diag.message == 0) {
-        cli.destroy(&root);
-        return 156;
+        cli.destroy(&root)
+        return 156
     }
-    cli.test_fail_alloc_after(&root, -1);
-    cli.destroy(&root);
+    cli.test_fail_alloc_after(&root, -1)
+    cli.destroy(&root)
     // 解析期分配失败：结果池分配失败必须给出 resource_error。
-    let parser2 cli.Parser;
-    let config2 cli.ParserConfig = cli.parser_config("tool2");
+    let parser2 cli.Parser
+    let config2 cli.ParserConfig = cli.parser_config("tool2")
     if (cli.init(&parser2, config2) != 0) {
-        return 157;
+        return 157
     }
-    let source cli.Argument = cli.positional("source");
+    let source cli.Argument = cli.positional("source")
     if (cli.add_argument(&parser2, source) < 0) {
-        cli.destroy(&parser2);
-        return 158;
+        cli.destroy(&parser2)
+        return 158
     }
-    let count int = cli.test_alloc_count(&parser2);
+    let count int = cli.test_alloc_count(&parser2)
     if (cli.test_fail_alloc_after(&parser2, count) != 0) {
-        cli.destroy(&parser2);
-        return 159;
+        cli.destroy(&parser2)
+        return 159
     }
-    let args [2]*char;
-    args[0] = "x";
-    let r cli.Result = cli.parse(&parser2, args[0..1]);
+    let args [2]*char
+    args[0] = "x"
+    let r cli.Result = cli.parse(&parser2, args[0..1])
     // 结果池与 parser 池相互独立：parser 池被注入失败也不影响本次解析。
     if (r.status != cli.ok) {
-        cli.release(&r);
-        cli.destroy(&parser2);
-        return 160;
+        cli.release(&r)
+        cli.destroy(&parser2)
+        return 160
     }
-    cli.release(&r);
-    cli.destroy(&parser2);
-    return 0;
+    cli.release(&r)
+    cli.destroy(&parser2)
+    return 0
 }
 
 // run_all 依次运行全部主题；返回第一个失败码或 0。
 fn run_all() int {
-    let rc int = case_converter();
+    let rc int = case_converter()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_converter_shape();
+    rc = case_converter_shape()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_validator();
+    rc = case_validator()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_custom_action();
+    rc = case_custom_action()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_custom_shape();
+    rc = case_custom_shape()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_registry();
+    rc = case_registry()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_bad_declarations();
+    rc = case_bad_declarations()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_fromfile();
+    rc = case_fromfile()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_fromfile_nested();
+    rc = case_fromfile_nested()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_fromfile_cycle();
+    rc = case_fromfile_cycle()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_fromfile_missing();
+    rc = case_fromfile_missing()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_fromfile_limits();
+    rc = case_fromfile_limits()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_line_converter();
+    rc = case_line_converter()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    rc = case_child_fromfile_rejected();
+    rc = case_child_fromfile_rejected()
     if (rc != 0) {
-        return rc;
+        return rc
     }
-    return case_alloc_failure();
+    return case_alloc_failure()
 }
 
 // main 在 --selftest 下运行 CLI4 语义断言，否则打印提示并返回 0。
 fn main(argc int, argv **char) int {
     if (argc > 1 && string.equals(argv[1], "--selftest") == 1) {
-        let rc int = run_all();
+        let rc int = run_all()
         if (rc != 0) {
-            printf("cli4 selftest fail: %d\n", rc);
+            printf("cli4 selftest fail: %d\n", rc)
         }
-        return rc;
+        return rc
     }
-    io.println("cliextensions: 使用 --selftest 运行验收断言");
-    return 0;
+    io.println("cliextensions: 使用 --selftest 运行验收断言")
+    return 0
 }

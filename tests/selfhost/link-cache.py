@@ -93,7 +93,7 @@ def main() -> int:
         # 运行时桩对象 <tag>.stub.s。
         sources = list(project.rglob("*.yh"))
         modules = {
-            re.search(r"(?m)^\s*module\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+            re.search(r"(?m)^\s*module\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?",
                       path.read_text(encoding="utf-8")).group(1)
             for path in sources
         }

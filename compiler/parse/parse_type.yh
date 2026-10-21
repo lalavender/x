@@ -1,6 +1,6 @@
-module parse;
-import gen;
-import comptime;
+module parse
+import gen
+import comptime
 
 // ============================================================================
 // parse_type.yh —— 自举编译器：类型引用解析与解析器共用工具
@@ -15,59 +15,77 @@ import comptime;
 
 // p_cur：当前 token 种类。
 pub fn p_cur() int {
-    let gs *gen.GenState = gen.G();
-    return gs.task.c_toks[gs.task.c_pos].kind;
+    let gs *gen.GenState = gen.G()
+    return gs.task.c_toks[gs.task.c_pos].kind
 }
 
 // p_peek：向前看第 k 个 token 的种类；越过表尾按 EOF 处理。
 fn p_peek(k int) int {
-    let gs *gen.GenState = gen.G();
+    let gs *gen.GenState = gen.G()
     if (gs.task.c_pos + k < gs.task.c_tok_n) {
-        return gs.task.c_toks[gs.task.c_pos + k].kind;
+        return gs.task.c_toks[gs.task.c_pos + k].kind
     }
-    return gen.TOK_EOF;
+    return gen.TOK_EOF
 }
 
 // p_adv：游标前进一个 token；EOF 处不动。
 fn p_adv() void {
-    let gs *gen.GenState = gen.G();
+    let gs *gen.GenState = gen.G()
     if (gs.task.c_toks[gs.task.c_pos].kind != gen.TOK_EOF) {
-        gs.task.c_pos += 1;
+        gs.task.c_pos += 1
     }
 }
 
 // p_expect：当前 token 必须是 kind，是则消费并返回 0，否则报错返回 -1。
+// 右花括号前单独放行一个隐式终结符：字面量最后一个元素可以直接换行收尾；
+// 显式分号不在此列，保持「空语句非法」。
 fn p_expect(kind int, what *char) int {
-    if (p_cur() == kind) {
-        p_adv();
-        return 0;
+    if (kind == gen.TK_RBRACE && p_implicit_semi() != 0 && p_peek(1) == gen.TK_RBRACE) {
+        p_adv()
     }
-    return gen.err_tok(what);
+    if (p_cur() == kind) {
+        p_adv()
+        return 0
+    }
+    return gen.err_tok(what)
+}
+
+// p_implicit_semi：当前 token 是否为换行补入的隐式终结符（长度为 0）。
+// 显式分号长度为 1，用它区分「语句结束」与「空语句」。
+fn p_implicit_semi() int {
+    let gs *gen.GenState = gen.G()
+    return (p_cur() == gen.TK_SEMI && gs.task.c_toks[gs.task.c_pos].len == 0).to_type(int)
+}
+
+// p_take_block_end：块或顶层类型已闭合后消费其可选的隐式终结符。
+// 只消费零长度终结符，显式分号仍按旧规则拒绝（块后多余分号、空语句）。
+fn p_take_block_end() void {
+    if (p_implicit_semi() != 0) { p_adv() }
 }
 
 // is_member_name：k 是否可作「成员名」（成员位置放开保留字，to_type 除外）。
 fn is_member_name(k int) int {
     if (k == gen.TOK_IDENT) {
-        return 1;
+        return 1
     }
     if (k >= gen.TK_PUB && k <= gen.TK_AS) {
-        return 1;
+        return 1
     }
     if (k == gen.TK_RESERVED) {
-        return 1;
+        return 1
     }
     if (k >= gen.TK_INT && k <= gen.TK_VOID) {
-        return 1;
+        return 1
     }
-    return 0;
+    return 0
 }
 
 // is_type_start：k 是否可作为类型引用起始（返回类型省略判定用）。
 fn is_type_start(k int) int {
     if (k == gen.TK_AT || k == gen.TK_STAR || k == gen.TK_LBRACKET || k == gen.TK_FN || k == gen.TOK_IDENT) {
-        return 1;
+        return 1
     }
-    return (k >= gen.TK_INT && k <= gen.TK_VOID).to_type(int);
+    return (k >= gen.TK_INT && k <= gen.TK_VOID).to_type(int)
 }
 
 // sizeof_starts_type：sizeof('(' 后当前 token 是否为「类型」形态。
@@ -75,58 +93,58 @@ fn is_type_start(k int) int {
 // 连续 * 后跟已登记类型名判为指针类型（如 sizeof(*P)）；IDENT 仅当
 // 已登记为类型名才走类型路径（否则是表达式，如 sizeof(x)、sizeof(*p)）。
 fn sizeof_starts_type() int {
-    let gs *gen.GenState = gen.G();
-    let k int = p_cur();
-    let off int = 0;
+    let gs *gen.GenState = gen.G()
+    let k int = p_cur()
+    let off int = 0
     for k == gen.TK_STAR {
-        off += 1;
-        k = p_peek(off);
+        off += 1
+        k = p_peek(off)
     }
     if (k == gen.TK_AT || k == gen.TK_LBRACKET || k == gen.TK_FN) {
-        return 1;
+        return 1
     }
     if (k >= gen.TK_INT && k <= gen.TK_VOID) {
-        return 1;
+        return 1
     }
     if (k == gen.TOK_IDENT) {
         // 跳过的星号是当前形态前缀；类型名字位于 c_pos + off。
-        let type_pos int = gs.task.c_pos + off;
+        let type_pos int = gs.task.c_pos + off
         let tid int = gen.ty_lookup_name(gs.task.c_toks[type_pos].start,
-            gs.task.c_toks[type_pos].len);
+            gs.task.c_toks[type_pos].len)
         if (tid >= 0) {
-            return 1;
+            return 1
         }
         // 模块限定类型 m.T（P3）：绑定名在导入表且命名空间导出该类型名
         if (p_peek(off + 1) == gen.TK_DOT
             && p_peek(off + 2) == gen.TOK_IDENT) {
             let qb int = gen.mod_file_binding(gs.task.c_toks[type_pos].start,
-                gs.task.c_toks[type_pos].len);
+                gs.task.c_toks[type_pos].len)
             if (qb >= 0 && gen.mod_ns_lookup(qb,
                 gs.task.c_toks[type_pos + 2].start,
                 gs.task.c_toks[type_pos + 2].len, 1) >= 0) {
-                return 1;
+                return 1
             }
         }
     }
-    return 0;
+    return 0
 }
 
 // tk_to_builtin：内建类型 token → 类型编号（编译模式）。
 fn tk_to_builtin(k int) int {
-    if (k == gen.TK_INT) { return gen.TY_I32; }
-    if (k == gen.TK_I8) { return gen.TY_I8; }
-    if (k == gen.TK_I16) { return gen.TY_I16; }
-    if (k == gen.TK_I32) { return gen.TY_I32; }
-    if (k == gen.TK_I64) { return gen.TY_I64; }
-    if (k == gen.TK_U8) { return gen.TY_U8; }
-    if (k == gen.TK_U16) { return gen.TY_U16; }
-    if (k == gen.TK_U32) { return gen.TY_U32; }
-    if (k == gen.TK_U64) { return gen.TY_U64; }
-    if (k == gen.TK_F32) { return gen.TY_F32; }
-    if (k == gen.TK_F64) { return gen.TY_F64; }
-    if (k == gen.TK_BOOL) { return gen.TY_BOOL; }
-    if (k == gen.TK_CHAR) { return gen.TY_CHAR; }
-    return gen.TY_VOID;
+    if (k == gen.TK_INT) { return gen.TY_I32 }
+    if (k == gen.TK_I8) { return gen.TY_I8 }
+    if (k == gen.TK_I16) { return gen.TY_I16 }
+    if (k == gen.TK_I32) { return gen.TY_I32 }
+    if (k == gen.TK_I64) { return gen.TY_I64 }
+    if (k == gen.TK_U8) { return gen.TY_U8 }
+    if (k == gen.TK_U16) { return gen.TY_U16 }
+    if (k == gen.TK_U32) { return gen.TY_U32 }
+    if (k == gen.TK_U64) { return gen.TY_U64 }
+    if (k == gen.TK_F32) { return gen.TY_F32 }
+    if (k == gen.TK_F64) { return gen.TY_F64 }
+    if (k == gen.TK_BOOL) { return gen.TY_BOOL }
+    if (k == gen.TK_CHAR) { return gen.TY_CHAR }
+    return gen.TY_VOID
 }
 
 // parse_type_ref：类型引用。返回类型编号（语法模式返回 0），错误 -1。
@@ -135,45 +153,45 @@ fn tk_to_builtin(k int) int {
 fn parse_type_ref() int {
     // 类型属性只有精确的 @[extern] fn 分支，作用范围限定为该函数类型。
     if (p_cur() == gen.TK_AT) {
-        p_adv();
-        if (p_expect(gen.TK_LBRACKET, "C 函数类型需要 '['") != 0) { return -1; }
-        if (p_tok_text_is("extern", 6) == 0) { return gen.err_tok("函数类型属性只允许 extern"); }
-        p_adv();
-        if (p_expect(gen.TK_RBRACKET, "C 函数类型属性只允许单个 extern") != 0) { return -1; }
-        if (p_cur() != gen.TK_FN) { return gen.err_tok("类型属性只能修饰 fn 类型"); }
-        let gs0 *gen.GenState = gen.G();
-        let saved int = gs0.task.c_type_abi;
-        gs0.task.c_type_abi = gen.ABI_C;
-        let result int = parse_type_ref();
-        gs0.task.c_type_abi = saved;
-        return result;
+        p_adv()
+        if (p_expect(gen.TK_LBRACKET, "C 函数类型需要 '['") != 0) { return -1 }
+        if (p_tok_text_is("extern", 6) == 0) { return gen.err_tok("函数类型属性只允许 extern") }
+        p_adv()
+        if (p_expect(gen.TK_RBRACKET, "C 函数类型属性只允许单个 extern") != 0) { return -1 }
+        if (p_cur() != gen.TK_FN) { return gen.err_tok("类型属性只能修饰 fn 类型") }
+        let gs0 *gen.GenState = gen.G()
+        let saved int = gs0.task.c_type_abi
+        gs0.task.c_type_abi = gen.ABI_C
+        let result int = parse_type_ref()
+        gs0.task.c_type_abi = saved
+        return result
     }
-    let gs *gen.GenState = gen.G();
-    let k int = p_cur();
+    let gs *gen.GenState = gen.G()
+    let k int = p_cur()
     if (k == gen.TK_STAR) {
-        p_adv();
-        let e int = parse_type_ref();
+        p_adv()
+        let e int = parse_type_ref()
         if (e < 0) {
-            return -1;
+            return -1
         }
         if (gs.task.c_compile == 0) {
-            return 0;
+            return 0
         }
-        return gen.ty_ptr(e);
+        return gen.ty_ptr(e)
     }
     if (k == gen.TK_LBRACKET) {
-        let array_line int = gs.task.c_toks[gs.task.c_pos].line;
-        let array_col int = gs.task.c_toks[gs.task.c_pos].col;
-        p_adv();
-        let alen int = -1;
-        let deferred_sym int = -1;
-        let deferred_line int = 0;
-        let deferred_col int = 0;
-        let deferred_expr int = 0;
-        let deferred_expr_first int = -1;
-        let deferred_expr_after int = -1;
+        let array_line int = gs.task.c_toks[gs.task.c_pos].line
+        let array_col int = gs.task.c_toks[gs.task.c_pos].col
+        p_adv()
+        let alen int = -1
+        let deferred_sym int = -1
+        let deferred_line int = 0
+        let deferred_col int = 0
+        let deferred_expr int = 0
+        let deferred_expr_first int = -1
+        let deferred_expr_after int = -1
         if (p_cur() != gen.TK_RBRACKET) {
-            let r gen.Res;
+            let r gen.Res
             if (gs.task.c_compile != 0) {
                 // 简单的前向 const 保持符号请求；一般表达式保存 token 范围，
                 // 待 typed CT 函数与其全局常量依赖登记完成后再求值。
@@ -182,195 +200,195 @@ fn parse_type_ref() int {
                 // （见 ct_layout_array_find），重复解析复用同一 type_id。
                 if (p_cur() == gen.TOK_IDENT
                     && p_peek(1) == gen.TK_RBRACKET) {
-                    let token int = gs.task.c_pos;
+                    let token int = gs.task.c_pos
                     let sym int = gen.sym_lookup(gs.task.c_toks[token].start,
-                        gs.task.c_toks[token].len);
+                        gs.task.c_toks[token].len)
                     if (sym >= 0 && gs.task.c_syms[sym].kind == gen.SYM_CONST
                         && gs.task.c_syms[sym].const_ready == 0
                         && gen.ty_is_integer(gs.task.c_syms[sym].type_id) != 0) {
-                        deferred_sym = sym;
-                        deferred_line = gs.task.c_toks[token].line;
-                        deferred_col = gs.task.c_toks[token].col;
-                        p_adv();
+                        deferred_sym = sym
+                        deferred_line = gs.task.c_toks[token].line
+                        deferred_col = gs.task.c_toks[token].col
+                        p_adv()
                     }
                 }
                 if (deferred_sym < 0) {
-                    let close int = p_ct_layout_array_close(gs.task.c_pos);
+                    let close int = p_ct_layout_array_close(gs.task.c_pos)
                     if (close > gs.task.c_pos
                         && p_ct_layout_expr_defer_now(gs.task.c_pos, close) != 0) {
-                        deferred_expr = 1;
-                        deferred_expr_first = gs.task.c_pos;
-                        deferred_expr_after = close;
-                        gs.task.c_pos = close;
+                        deferred_expr = 1
+                        deferred_expr_first = gs.task.c_pos
+                        deferred_expr_after = close
+                        gs.task.c_pos = close
                     }
                 }
                 if (deferred_sym < 0) {
                     if (deferred_expr == 0) {
-                        gs.task.c_fold += 1;
-                        let rr int = parse_expr(&r);
-                        gs.task.c_fold -= 1;
+                        gs.task.c_fold += 1
+                        let rr int = parse_expr(&r)
+                        gs.task.c_fold -= 1
                         if (rr != 0) {
-                            return -1;
+                            return -1
                         }
                         if (r.is_const == 0) {
-                            return gen.sem_err("数组长度必须是编译期常量");
+                            return gen.sem_err("数组长度必须是编译期常量")
                         }
                         if (r.ival <= 0) {
-                            return gen.sem_err("数组长度必须为正");
+                            return gen.sem_err("数组长度必须为正")
                         }
                         if (r.ival > 2147483647) {
-                            return gen.sem_err("数组长度超出限制");
+                            return gen.sem_err("数组长度超出限制")
                         }
-                        alen = r.ival.to_type(int);
+                        alen = r.ival.to_type(int)
                     }
                 }
             } else {
                 if (parse_expr(&r) != 0) {
-                    return -1;
+                    return -1
                 }
             }
         }
         if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) {
-            return -1;
+            return -1
         }
-        let e2 int = parse_type_ref();
+        let e2 int = parse_type_ref()
         if (e2 < 0) {
-            return -1;
+            return -1
         }
         if (gs.task.c_compile == 0) {
-            return 0;
+            return 0
         }
         if (alen < 0) {
             if (deferred_expr != 0) {
                 return comptime.ct_layout_array_expr(e2, gs.task.c_active_file,
                     deferred_expr_first, deferred_expr_after,
-                    array_line, array_col);
+                    array_line, array_col)
             }
             if (deferred_sym >= 0) {
                 return comptime.ct_layout_array(e2, -1, deferred_sym,
-                    deferred_line, deferred_col);
+                    deferred_line, deferred_col)
             }
-            return gen.ty_slice(e2);
+            return gen.ty_slice(e2)
         }
         if (gs.task.t_types[e2].size < 0) {
             return comptime.ct_layout_array(e2, alen, -1,
-                array_line, array_col);
+                array_line, array_col)
         }
-        return gen.ty_array(e2, alen);
+        return gen.ty_array(e2, alen)
     }
     if (k == gen.TK_FN) {
-        p_adv();
+        p_adv()
         if (p_expect(gen.TK_LPAREN, "期望 '('") != 0) {
-            return -1;
+            return -1
         }
         // 参数类型收集到本帧数组（递归安全），全部解析后统一入池
-        let pts [32]int;
-        let np int = 0;
+        let pts [32]int
+        let np int = 0
         if (p_cur() != gen.TK_RPAREN) {
             for 1 {
-                let pt int = parse_type_ref();
+                let pt int = parse_type_ref()
                 if (pt < 0) {
-                    return -1;
+                    return -1
                 }
                 if (gs.task.c_compile != 0) {
                     if (np >= 32) {
-                        return gen.sem_err("fn 类型参数过多");
+                        return gen.sem_err("fn 类型参数过多")
                     }
-                    pts[np] = pt;
-                    np += 1;
+                    pts[np] = pt
+                    np += 1
                 }
                 if (p_cur() == gen.TK_COMMA) {
-                    p_adv();
-                    continue;
+                    p_adv()
+                    continue
                 }
-                break;
+                break
             }
         }
         if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
-            return -1;
+            return -1
         }
-        let ret int = gen.TY_VOID;
+        let ret int = gen.TY_VOID
         if (is_type_start(p_cur()) != 0) {
-            let rt int = parse_type_ref();
+            let rt int = parse_type_ref()
             if (rt < 0) {
-                return -1;
+                return -1
             }
-            ret = rt;
+            ret = rt
         }
         if (gs.task.c_compile == 0) {
-            return 0;
+            return 0
         }
-        let first int = gs.task.t_sigparam_n;
-        let i int = 0;
+        let first int = gs.task.t_sigparam_n
+        let i int = 0
         for i < np {
-            gen.ty_sig_param(pts[i]);
-            i += 1;
+            gen.ty_sig_param(pts[i])
+            i += 1
         }
-        let ftid int = gen.ty_fn_abi(ret, first, np, 0, gs.task.c_type_abi);
+        let ftid int = gen.ty_fn_abi(ret, first, np, 0, gs.task.c_type_abi)
         // 显式 C 类型、别名与字段同样检查签名，不能绕过 extern 声明检查。
         if (ftid >= 0 && gs.task.c_type_abi == gen.ABI_C && gen.ty_cabi_param(ftid) == 0) {
-            return gen.sem_err("C ABI 不支持该函数类型");
+            return gen.sem_err("C ABI 不支持该函数类型")
         }
-        return ftid;
+        return ftid
     }
     if (k >= gen.TK_INT && k <= gen.TK_VOID) {
-        p_adv();
+        p_adv()
         if (gs.task.c_compile == 0) {
-            return 0;
+            return 0
         }
-        return tk_to_builtin(k);
+        return tk_to_builtin(k)
     }
     if (k == gen.TOK_IDENT) {
-        let start int = gs.task.c_toks[gs.task.c_pos].start;
-        let n int = gs.task.c_toks[gs.task.c_pos].len;
-        p_adv();
+        let start int = gs.task.c_toks[gs.task.c_pos].start
+        let n int = gs.task.c_toks[gs.task.c_pos].len
+        p_adv()
         // 限定类型 m.T（U3/U4）：编译模式查导入绑定的模块命名空间；
         // 单段点链（更长链不支持，干净拒绝）；语法模式仅消费。
         if (p_cur() == gen.TK_DOT) {
-            p_adv();
+            p_adv()
             if (p_cur() != gen.TOK_IDENT) {
-                return gen.err_tok("限定类型 '.' 后需要一个类型名");
+                return gen.err_tok("限定类型 '.' 后需要一个类型名")
             }
-            let tstart int = gs.task.c_toks[gs.task.c_pos].start;
-            let tlen int = gs.task.c_toks[gs.task.c_pos].len;
-            let tline int = gs.task.c_toks[gs.task.c_pos].line;
-            let tcol int = gs.task.c_toks[gs.task.c_pos].col;
-            p_adv();
+            let tstart int = gs.task.c_toks[gs.task.c_pos].start
+            let tlen int = gs.task.c_toks[gs.task.c_pos].len
+            let tline int = gs.task.c_toks[gs.task.c_pos].line
+            let tcol int = gs.task.c_toks[gs.task.c_pos].col
+            p_adv()
             if (p_cur() == gen.TK_DOT) {
-                return gen.err_tok("限定类型只支持一层（m.T）");
+                return gen.err_tok("限定类型只支持一层（m.T）")
             }
             if (gs.task.c_compile == 0) {
-                return 0;
+                return 0
             }
             if (gs.c_module_mode == 0) {
-                return gen.sem_err("限定类型只在模块模式可用");
+                return gen.sem_err("限定类型只在模块模式可用")
             }
-            let qb int = gen.mod_file_binding(start, n);
+            let qb int = gen.mod_file_binding(start, n)
             if (qb < 0) {
-                return gen.err_lc(tline, tcol, "点号左侧不是导入的模块名");
+                return gen.err_lc(tline, tcol, "点号左侧不是导入的模块名")
             }
-            let qe int = gen.mod_ns_lookup(qb, tstart, tlen, 1);
+            let qe int = gen.mod_ns_lookup(qb, tstart, tlen, 1)
             if (qe < 0) {
-                return gen.err_lc(tline, tcol, "模块没有导出该类型");
+                return gen.err_lc(tline, tcol, "模块没有导出该类型")
             }
-            let qi int = 0;
+            let qi int = 0
             for qi < gs.task.mod_import_n {
                 if (gs.task.mod_import_mod[qi] == qb) {
-                    gs.task.mod_import_used[qi] = 1;
-                    break;
+                    gs.task.mod_import_used[qi] = 1
+                    break
                 }
-                qi += 1;
+                qi += 1
             }
-            return gs.task.c_mods[qb].ns[qe].tid;
+            return gs.task.c_mods[qb].ns[qe].tid
         }
         if (gs.task.c_compile == 0) {
-            return 0;
+            return 0
         }
-        let tid int = gen.ty_lookup_name(start, n);
+        let tid int = gen.ty_lookup_name(start, n)
         if (tid < 0) {
-            return gen.sem_err("未知类型（类型必须先定义）");
+            return gen.sem_err("未知类型（类型必须先定义）")
         }
-        return tid;
+        return tid
     }
-    return gen.err_tok("此处需要一个类型");
+    return gen.err_tok("此处需要一个类型")
 }

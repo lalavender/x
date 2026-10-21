@@ -1,5 +1,5 @@
-module main;
-import gen;
+module main
+import gen
 
 // ============================================================================
 // build_scheduler.yh —— 有界快照 worker 进程池与 InterfaceReady 调度。
@@ -8,246 +8,246 @@ import gen;
 // 调度器按接口原子发布推进依赖，不等待提供方完成私有函数与汇编。
 // ============================================================================
 
-let mb_sched_peak int = 0;
-let mb_sched_iface_early int = 0;
-let mb_self_path *char = 0; // PATH 启动时用于读取编译器指纹。
+let mb_sched_peak int = 0
+let mb_sched_iface_early int = 0
+let mb_self_path *char = 0 // PATH 启动时用于读取编译器指纹。
 
 // mb_sched_reset_worker_stats：子进程继承项目快照，但阶段计数只记录模块自身。
 fn mb_sched_reset_worker_stats() void {
-    let gs *gen.GenState = gen.G();
-    mb_stats_build_start_ns = 0;
-    mb_stats_project_ns = 0;
-    mb_stats_schedule_ns = 0;
-    mb_stats_object_ns = 0;
-    mb_stats_link_ns = 0;
-    gs.c_stats_lex = 0;
-    gs.c_stats_syntax = 0;
-    gs.c_stats_index = 0;
-    gs.c_stats_pass1 = 0;
-    gs.c_stats_globals = 0;
-    gs.c_stats_functions = 0;
-    gs.c_stats_ir_functions = 0;
-    gs.c_stats_ir_cache_hits = 0;
-    gs.c_stats_ir_cache_misses = 0;
-    gs.c_stats_checked_functions = 0;
-    gs.c_stats_backend_emitted = 0;
-    gs.c_stats_ir_rejected = 0;
-    gs.c_stats_backend_rejected = 0;
-    gs.task.c_ir_reject_reason = 0;
-    gs.c_stats_workers = 0;
-    gs.c_stats_asm = 0;
-    gs.c_stats_link = 0;
-    gs.c_stats_compiler_hashes = 0;
-    gs.task.c_stats_ast_nodes = 0;
-    gs.task.c_stats_ast_refs = 0;
-    gs.task.c_stats_stmt_nodes = 0;
-    gs.task.c_stats_ast_bindings = 0;
-    gs.task.c_stats_ast_functions = 0;
-    gs.task.c_stats_decl_nodes = 0;
-    mb_sched_peak = 0;
-    mb_sched_iface_early = 0;
+    let gs *gen.GenState = gen.G()
+    mb_stats_build_start_ns = 0
+    mb_stats_project_ns = 0
+    mb_stats_schedule_ns = 0
+    mb_stats_object_ns = 0
+    mb_stats_link_ns = 0
+    gs.c_stats_lex = 0
+    gs.c_stats_syntax = 0
+    gs.c_stats_index = 0
+    gs.c_stats_pass1 = 0
+    gs.c_stats_globals = 0
+    gs.c_stats_functions = 0
+    gs.c_stats_ir_functions = 0
+    gs.c_stats_ir_cache_hits = 0
+    gs.c_stats_ir_cache_misses = 0
+    gs.c_stats_checked_functions = 0
+    gs.c_stats_backend_emitted = 0
+    gs.c_stats_ir_rejected = 0
+    gs.c_stats_backend_rejected = 0
+    gs.task.c_ir_reject_reason = 0
+    gs.c_stats_workers = 0
+    gs.c_stats_asm = 0
+    gs.c_stats_link = 0
+    gs.c_stats_compiler_hashes = 0
+    gs.task.c_stats_ast_nodes = 0
+    gs.task.c_stats_ast_refs = 0
+    gs.task.c_stats_stmt_nodes = 0
+    gs.task.c_stats_ast_bindings = 0
+    gs.task.c_stats_ast_functions = 0
+    gs.task.c_stats_decl_nodes = 0
+    mb_sched_peak = 0
+    mb_sched_iface_early = 0
 }
 
 // mb_spawn_indexed_module：fork 当前已索引项目快照，子进程独占语义状态并编译模块。
 // out_dir：本模块的按文件汇编目录 <build>/asm/<tag>（RS3b）。
 fn mb_spawn_indexed_module(module_idx int, root_off int, root_len int,
     out_dir *char, ir_cache_salt u64, pid_out *int) int {
-    let child int = fork();
+    let child int = fork()
     if (child < 0) {
-        return -1;
+        return -1
     }
     if (child == 0) {
-        mb_sched_reset_worker_stats();
+        mb_sched_reset_worker_stats()
         let result int = mb_emit_indexed_module(module_idx, root_off, root_len,
-            out_dir, ir_cache_salt);
+            out_dir, ir_cache_salt)
         if (result == 0) {
-            exit(0);
+            exit(0)
         }
-        exit(1);
+        exit(1)
     }
-    pid_out[0] = child;
-    return 0;
+    pid_out[0] = child
+    return 0
 }
 
 // mb_sched_set_session：为本次构建分配不可与其他进程混用的接口后缀。
 fn mb_sched_set_session() int {
-    let text [40]u8;
-    let n int = gen.append_str(text, 0, ".session-");
-    n = gen.append_int(text, n, getpid());
-    text[n] = 0;
-    mb_iface_suffix = malloc((n + 1).to_type(u64)).to_type(*char);
+    let text [40]u8
+    let n int = gen.append_str(text, 0, ".session-")
+    n = gen.append_int(text, n, getpid())
+    text[n] = 0
+    mb_iface_suffix = malloc((n + 1).to_type(u64)).to_type(*char)
     if (mb_iface_suffix == 0) {
-        return gen.fail("内存分配失败");
+        return gen.fail("内存分配失败")
     }
-    let i int = 0;
+    let i int = 0
     for i <= n {
-        mb_iface_suffix[i] = text[i].to_type(char);
-        i += 1;
+        mb_iface_suffix[i] = text[i].to_type(char)
+        i += 1
     }
-    return 0;
+    return 0
 }
 
 // mb_resolve_self_path：把 PATH 命令名解析为编译器指纹可读取的文件路径。
 fn mb_resolve_self_path() int {
-    let gs *gen.GenState = gen.G();
+    let gs *gen.GenState = gen.G()
     if (mb_self_path != 0) {
-        return 0;
+        return 0
     }
-    let has_slash int = 0;
-    let i int = 0;
+    let has_slash int = 0
+    let i int = 0
     for c_argv0[i] != 0 {
         if (c_argv0[i] == '/') {
-            has_slash = 1;
-            break;
+            has_slash = 1
+            break
         }
-        i += 1;
+        i += 1
     }
     if (has_slash != 0) {
-        mb_self_path = c_argv0;
-        return 0;
+        mb_self_path = c_argv0
+        return 0
     }
-    let path_off int = -1;
-    let path_len int = 0;
+    let path_off int = -1
+    let path_len int = 0
     if (pj_env_fetch("PATH", &path_off, &path_len) != 0) {
-        return gen.fail("无法解析编译器可执行路径");
+        return gen.fail("无法解析编译器可执行路径")
     }
-    let start int = 0;
-    let end int = 0;
+    let start int = 0
+    let end int = 0
     for end <= path_len {
         if (end == path_len || gs.task.np_data[path_off + end] == ':') {
-            let candidate [1200]u8;
-            let n int = 0;
+            let candidate [1200]u8
+            let n int = 0
             if (end == start) {
-                n = gen.append_str(candidate, n, ".");
+                n = gen.append_str(candidate, n, ".")
             } else {
-                let k int = start;
+                let k int = start
                 for k < end {
-                    candidate[n] = gs.task.np_data[path_off + k];
-                    n += 1;
-                    k += 1;
+                    candidate[n] = gs.task.np_data[path_off + k]
+                    n += 1
+                    k += 1
                 }
             }
-            n = gen.append_byte(candidate, n, '/');
-            n = gen.append_str(candidate, n, c_argv0);
-            candidate[n] = 0;
+            n = gen.append_byte(candidate, n, '/')
+            n = gen.append_str(candidate, n, c_argv0)
+            candidate[n] = 0
             if (pj_file_exists(gen.arr_cstr(candidate)) != 0) {
-                mb_self_path = malloc((n + 1).to_type(u64)).to_type(*char);
+                mb_self_path = malloc((n + 1).to_type(u64)).to_type(*char)
                 if (mb_self_path == 0) {
-                    return -1;
+                    return -1
                 }
-                let j int = 0;
+                let j int = 0
                 for j < n {
-                    mb_self_path[j] = candidate[j].to_type(char);
-                    j += 1;
+                    mb_self_path[j] = candidate[j].to_type(char)
+                    j += 1
                 }
-                mb_self_path[n] = 0.to_type(char);
-                return 0;
+                mb_self_path[n] = 0.to_type(char)
+                return 0
             }
-            start = end + 1;
+            start = end + 1
         }
-        end += 1;
+        end += 1
     }
-    return gen.fail("PATH 中找不到当前 yh 可执行文件");
+    return gen.fail("PATH 中找不到当前 yh 可执行文件")
 }
 
 // mb_sched_order_index：在本轮拓扑序中查找模块位置；未找到返回 -1。
 fn mb_sched_order_index(module_idx int, count int) int {
-    let i int = 0;
+    let i int = 0
     for i < count {
         if (pj_order[i] == module_idx) {
-            return i;
+            return i
         }
-        i += 1;
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // mb_sched_refresh_interfaces：将已原子发布接口的运行任务推进到状态 2。
 fn mb_sched_refresh_interfaces(states *int, count int,
     build_off int, build_len int) int {
-    let i int = 0;
+    let i int = 0
     for i < count {
         if (states[i] == 1) {
-            let path [700]u8;
+            let path [700]u8
             if (mb_module_iface_path(pj_order[i], build_off, build_len, path) != 0) {
-                return -1;
+                return -1
             }
             if (pj_file_exists(gen.arr_cstr(path)) != 0) {
-                states[i] = 2;
+                states[i] = 2
             }
         }
-        i += 1;
+        i += 1
     }
-    return 0;
+    return 0
 }
 
 // mb_sched_deps_ready：依赖均已完成或接口就绪时返回 1，否则返回 0。
 // early_out 表示至少有一个依赖仍在运行，但已发布可用接口。
 fn mb_sched_deps_ready(module_idx int, states *int, count int,
     build_off int, build_len int, early_out *int) int {
-    early_out[0] = 0;
+    early_out[0] = 0
     if (mb_module_iface_deps(module_idx, build_off, build_len) < 0) {
-        return -1;
+        return -1
     }
-    let di int = 0;
+    let di int = 0
     for di < mb_dep_n {
-        let oi int = mb_sched_order_index(mb_dep_mod[di], count);
+        let oi int = mb_sched_order_index(mb_dep_mod[di], count)
         if (oi < 0) {
-            return gen.fail("内部错误：依赖模块不在当前构建序列");
+            return gen.fail("内部错误：依赖模块不在当前构建序列")
         }
         if (states[oi] == 1) {
-            let path [700]u8;
+            let path [700]u8
             if (mb_module_iface_path(mb_dep_mod[di], build_off, build_len, path) != 0) {
-                return -1;
+                return -1
             }
             if (pj_file_exists(gen.arr_cstr(path)) != 0) {
-                states[oi] = 2;
+                states[oi] = 2
             }
         }
         if (states[oi] != 2 && states[oi] != 3) {
-            return 0;
+            return 0
         }
         if (states[oi] == 2) {
-            early_out[0] = 1;
+            early_out[0] = 1
         }
         if (pj_file_exists(pj_pool_str(mb_dep_ifoff[di])) == 0) {
-            return 0;
+            return 0
         }
         if (pj_file_exists(pj_pool_str(mb_dep_ctoff[di])) == 0) {
-            return 0;
+            return 0
         }
-        di += 1;
+        di += 1
     }
-    return 1;
+    return 1
 }
 
 // mb_sched_cancel_workers：失败时终止并回收尚未结束的子进程。
 fn mb_sched_cancel_workers(states *int, pids *int, count int) void {
-    let i int = 0;
+    let i int = 0
     for i < count {
         if (states[i] == 1 || states[i] == 2) {
-            kill(pids[i], 15);
+            kill(pids[i], 15)
         }
-        i += 1;
+        i += 1
     }
-    i = 0;
+    i = 0
     for i < count {
         if (states[i] == 1 || states[i] == 2) {
-            let status int = 0;
-            waitpid(pids[i], &status, 0);
-            states[i] = 4;
+            let status int = 0
+            waitpid(pids[i], &status, 0)
+            states[i] = 4
         }
-        i += 1;
+        i += 1
     }
 }
 
 // mb_sched_publish_interface：worker 全成功后更新持久接口缓存副本。
 fn mb_sched_publish_interface(module_idx int, build_off int,
     build_len int) int {
-    let session_path [700]u8;
-    let persistent_path [700]u8;
-    let session_ct [700]u8;
-    let persistent_ct [700]u8;
+    let session_path [700]u8
+    let persistent_path [700]u8
+    let session_ct [700]u8
+    let persistent_ct [700]u8
     if (mb_module_iface_path(module_idx, build_off, build_len, session_path) != 0
         || mb_module_ctiface_path(module_idx, build_off, build_len,
             session_ct) != 0
@@ -255,36 +255,36 @@ fn mb_sched_publish_interface(module_idx int, build_off int,
             persistent_path) != 0
         || mb_module_ctiface_plain_path(module_idx, build_off, build_len,
             persistent_ct) != 0) {
-        return -1;
+        return -1
     }
     if (mb_iface_copy_file(gen.arr_cstr(session_ct),
             gen.arr_cstr(persistent_ct)) != 0) {
         return gen.fail_path("无法提交模块 CT 接口: ",
-            gen.arr_cstr(persistent_ct));
+            gen.arr_cstr(persistent_ct))
     }
     if (mb_iface_copy_file(gen.arr_cstr(session_path),
             gen.arr_cstr(persistent_path)) != 0) {
-        return gen.fail_path("无法提交模块接口: ", gen.arr_cstr(persistent_path));
+        return gen.fail_path("无法提交模块接口: ", gen.arr_cstr(persistent_path))
     }
-    return 0;
+    return 0
 }
 
 // mb_sched_clear_interfaces：清除本轮临时接口，避免跨构建误读。
 fn mb_sched_clear_interfaces(count int, build_off int,
     build_len int) void {
     if (mb_iface_suffix == 0) {
-        return;
+        return
     }
-    let i int = 0;
+    let i int = 0
     for i < count {
-        let path [700]u8;
+        let path [700]u8
         if (mb_module_iface_path(pj_order[i], build_off, build_len, path) == 0) {
-            unlink(gen.arr_cstr(path));
+            unlink(gen.arr_cstr(path))
         }
         if (mb_module_ctiface_path(pj_order[i], build_off, build_len, path) == 0) {
-            unlink(gen.arr_cstr(path));
+            unlink(gen.arr_cstr(path))
         }
-        i += 1;
+        i += 1
     }
 }
 
@@ -292,155 +292,155 @@ fn mb_sched_clear_interfaces(count int, build_off int,
 // 进程退出成功后才提交 manifest；失败或被取消的本轮不会进入最终链接。
 fn mb_schedule_modules(count int, root_off int, root_len int,
     build_off int, build_len int) int {
-    let gs *gen.GenState = gen.G();
+    let gs *gen.GenState = gen.G()
     if (count <= 0) {
-        mb_sched_peak = 0;
-        mb_sched_iface_early = 0;
-        return 0;
+        mb_sched_peak = 0
+        mb_sched_iface_early = 0
+        return 0
     }
     if (mb_sched_set_session() != 0) {
-        return -1;
+        return -1
     }
-    let states *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int);
-    let pids *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int);
-    let keys *u8 = malloc((count * 16).to_type(u64)).to_type(*u8);
+    let states *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
+    let pids *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
+    let keys *u8 = malloc((count * 16).to_type(u64)).to_type(*u8)
     if (states == 0 || pids == 0 || keys == 0) {
-        free(states);
-        free(pids);
-        free(keys);
-        return gen.fail("内存分配失败");
+        free(states)
+        free(pids)
+        free(keys)
+        return gen.fail("内存分配失败")
     }
-    let i int = 0;
+    let i int = 0
     for i < count {
-        states[i] = 0;
-        pids[i] = 0;
-        i += 1;
+        states[i] = 0
+        pids[i] = 0
+        i += 1
     }
-    let completed int = 0;
-    let active int = 0;
-    let failed int = 0;
-    mb_sched_peak = 0;
-    mb_sched_iface_early = 0;
+    let completed int = 0
+    let active int = 0
+    let failed int = 0
+    mb_sched_peak = 0
+    mb_sched_iface_early = 0
     for completed < count && failed == 0 {
-        let progress int = 0;
+        let progress int = 0
         if (mb_sched_refresh_interfaces(states, count, build_off, build_len) != 0) {
-            failed = 1;
-            break;
+            failed = 1
+            break
         }
-        i = 0;
+        i = 0
         for i < count {
             if (states[i] == 1 || states[i] == 2) {
-                let status int = 0;
-                let waited int = waitpid(pids[i], &status, 1);
+                let status int = 0
+                let waited int = waitpid(pids[i], &status, 1)
                 if (waited == pids[i]) {
-                    active -= 1;
-                    progress = 1;
+                    active -= 1
+                    progress = 1
                     if (status != 0) {
-                        states[i] = 4;
-                        failed = 1;
-                        break;
+                        states[i] = 4
+                        failed = 1
+                        break
                     }
-                    states[i] = 3;
-                    completed += 1;
+                    states[i] = 3
+                    completed += 1
                     if (gs.task.c_check_only != 0) {
-                        pj_out_s("  [检查] ");
+                        pj_out_s("  [检查] ")
                     } else {
                         if (mb_sched_publish_interface(pj_order[i], build_off,
                                 build_len) != 0) {
-                            failed = 1;
-                            break;
+                            failed = 1
+                            break
                         }
                         if (mb_manifest_commit(pj_order[i], build_off, build_len,
                                 keys + (i * 16)) != 0) {
-                            failed = 1;
-                            break;
+                            failed = 1
+                            break
                         }
-                        pj_out_s("  [编译] ");
+                        pj_out_s("  [编译] ")
                     }
                     pj_out_np(gs.p_mods[pj_order[i]].name_off,
-                        gs.p_mods[pj_order[i]].name_len);
-                    pj_out_s("\n");
+                        gs.p_mods[pj_order[i]].name_len)
+                    pj_out_s("\n")
                 } else if (waited < 0) {
-                    kill(pids[i], 15);
-                    waitpid(pids[i], &status, 0);
-                    active -= 1;
-                    states[i] = 4;
-                    failed = 1;
-                    break;
+                    kill(pids[i], 15)
+                    waitpid(pids[i], &status, 0)
+                    active -= 1
+                    states[i] = 4
+                    failed = 1
+                    break
                 }
             }
-            i += 1;
+            i += 1
         }
         if (failed != 0) {
-            break;
+            break
         }
         if (mb_sched_refresh_interfaces(states, count, build_off, build_len) != 0) {
-            failed = 1;
-            break;
+            failed = 1
+            break
         }
-        i = 0;
+        i = 0
         for i < count && active < 4 {
             if (states[i] == 0) {
-                let early int = 0;
+                let early int = 0
                 let ready int = mb_sched_deps_ready(pj_order[i], states, count,
-                    build_off, build_len, &early);
+                    build_off, build_len, &early)
                 if (ready < 0) {
-                    failed = 1;
-                    break;
+                    failed = 1
+                    break
                 }
                 if (ready != 0) {
-                    let pid int = 0;
+                    let pid int = 0
                     let started int = mb_compile_start(pj_order[i], root_off,
-                        root_len, build_off, build_len, &pid, keys + (i * 16));
+                        root_len, build_off, build_len, &pid, keys + (i * 16))
                     if (started < 0) {
-                        failed = 1;
-                        break;
+                        failed = 1
+                        break
                     }
-                    progress = 1;
+                    progress = 1
                     if (started == 1) {
-                        states[i] = 3;
-                        completed += 1;
+                        states[i] = 3
+                        completed += 1
                     } else {
-                        states[i] = 1;
-                        pids[i] = pid;
-                        active += 1;
+                        states[i] = 1
+                        pids[i] = pid
+                        active += 1
                         if (active > mb_sched_peak) {
-                            mb_sched_peak = active;
+                            mb_sched_peak = active
                         }
                         if (early != 0) {
-                            mb_sched_iface_early += 1;
+                            mb_sched_iface_early += 1
                         }
                     }
                 }
             }
-            i += 1;
+            i += 1
         }
         if (failed != 0) {
-            break;
+            break
         }
         if (completed < count && active == 0 && progress == 0) {
-            failed = 1;
-            gen.fail("内部错误：并行构建无法满足模块依赖");
-            break;
+            failed = 1
+            gen.fail("内部错误：并行构建无法满足模块依赖")
+            break
         }
         if (completed < count && progress == 0) {
-            usleep(1000);
+            usleep(1000)
         }
     }
     if (failed != 0) {
-        mb_sched_cancel_workers(states, pids, count);
+        mb_sched_cancel_workers(states, pids, count)
         if (gs.task.c_check_only != 0) {
-            gen.fail("项目语义检查失败");
+            gen.fail("项目语义检查失败")
         } else {
-            gen.fail("模块编译失败；已停止最终链接");
+            gen.fail("模块编译失败；已停止最终链接")
         }
     }
-    mb_sched_clear_interfaces(count, build_off, build_len);
-    free(states);
-    free(pids);
-    free(keys);
+    mb_sched_clear_interfaces(count, build_off, build_len)
+    free(states)
+    free(pids)
+    free(keys)
     if (failed != 0) {
-        return -1;
+        return -1
     }
-    return 0;
+    return 0
 }

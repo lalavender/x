@@ -33,7 +33,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-WORK_ROOT = ROOT / "tmp/llvm-migration"
+sys.path.insert(0, str(ROOT / "tools"))
+from llvm_cache import cache_root  # noqa: E402
+WORK_ROOT = cache_root()
 
 # 受支持的宿主：宿主标识 → ELF e_machine 编号、qemu-user 运行器与目标 sysroot。
 # machine 用宿主 readelf -h 打印的名字反查，保证「生成它的人」与「验收它的人」
@@ -143,8 +145,17 @@ def digest(path: Path) -> str:
 
 
 def relative(path: Path) -> str:
-    """身份记录里统一写仓库相对路径，便于在别的 WSL/容器里对照同一份产物。"""
-    return str(path.resolve().relative_to(ROOT))
+    """身份记录优先写仓库相对路径，便于在别的 WSL/容器里对照同一份产物。
+
+    共享闭包缓存按绝对路径挂进容器时（workspace 里的 tmp/llvm-migration 是指向
+    缓存的符号链接），产物解析后会落在仓库根之外；此时保留绝对路径，避免
+    relative_to 抛错。消费方用 (ROOT / value) 拼接，绝对路径同样可用。
+    """
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(ROOT))
+    except ValueError:
+        return str(resolved)
 
 
 def readelf_machine(executable: Path) -> tuple[int, str]:

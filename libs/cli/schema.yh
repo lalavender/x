@@ -1,4 +1,4 @@
-module cli;
+module cli
 
 // cli 注册与冻结（CLI1）：init / add_argument / add_alias / freeze /
 // last_error / destroy。注册是原子的：任何失败都不留下半个声明，
@@ -7,708 +7,708 @@ module cli;
 // is_prefix_char 判断字节是否为 prefix_chars 中的前缀字符。
 fn is_prefix_char(prefix_chars *char, ch int) int {
     if (ch == 0) {
-        return 0;
+        return 0
     }
-    let i int = 0;
+    let i int = 0
     for prefix_chars[i] != 0 {
         if (prefix_chars[i].to_type(int) == ch) {
-            return 1;
+            return 1
         }
-        i += 1;
+        i += 1
     }
-    return 0;
+    return 0
 }
 
 // cstr_equal 比较两个 NUL 结尾字符串；完全相等返回 1。
 fn cstr_equal(left *char, right *char) int {
     if (left == 0 || right == 0) {
-        return 0;
+        return 0
     }
-    let i int = 0;
+    let i int = 0
     for 1 {
         if (left[i] != right[i]) {
-            return 0;
+            return 0
         }
         if (left[i] == 0) {
-            return 1;
+            return 1
         }
-        i += 1;
+        i += 1
     }
-    return 0;
+    return 0
 }
 
 // is_space_byte 判断字节是否为空白或等号：这些字符不允许出现在选项名里。
 fn is_forbidden_name_byte(ch int) int {
     if (ch == 0) {
-        return 1;
+        return 1
     }
     if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '=') {
-        return 1;
+        return 1
     }
-    return 0;
+    return 0
 }
 
 // is_all_prefix 判断名字是否只由前缀字符组成（如 "-"、"---"），这类名字不可注册。
 fn is_all_prefix(prefix_chars *char, name *char) int {
-    let i int = 0;
+    let i int = 0
     for name[i] != 0 {
         if (is_prefix_char(prefix_chars, name[i].to_type(int)) == 0) {
-            return 0;
+            return 0
         }
-        i += 1;
+        i += 1
     }
-    return 1;
+    return 1
 }
 
 // clear_diagnostic 把诊断重置为「无错误」。
 fn clear_diagnostic(d *Diagnostic) void {
-    d.code = 0;
-    d.message = 0;
-    d.dest = 0;
-    d.option = 0;
-    d.token_index = -1;
-    d.file = 0;
-    d.line = -1;
-    d.column = -1;
+    d.code = 0
+    d.message = 0
+    d.dest = 0
+    d.option = 0
+    d.token_index = -1
+    d.file = 0
+    d.line = -1
+    d.column = -1
 }
 
 // parser_state_of 从公开句柄取私有状态；空句柄返回空指针。
 fn parser_state_of(p *Parser) *parser_state {
     if (p == 0 || p.handle == 0) {
-        return 0;
+        return 0
     }
-    return p.handle.to_type(*parser_state);
+    return p.handle.to_type(*parser_state)
 }
 
 // set_config_error 记录第一条粘滞配置错误并返回 -1；已有错误时不覆盖。
 fn set_config_error(state *parser_state, code *char, message *char) int {
     if (state.failed == 0) {
-        state.failed = 1;
+        state.failed = 1
         // 池已失败（例如分配失败注入）时无法复制文本，退化为借用调用者的
         // 诊断字面量，保证错误仍可读；成功路径仍复制进 parser 池。
-        state.error.code = pool_dup(&state.mem, code);
+        state.error.code = pool_dup(&state.mem, code)
         if (state.error.code == 0) {
-            state.error.code = code;
+            state.error.code = code
         }
-        state.error.message = pool_dup(&state.mem, message);
+        state.error.message = pool_dup(&state.mem, message)
         if (state.error.message == 0) {
-            state.error.message = message;
+            state.error.message = message
         }
-        state.error.token_index = -1;
-        state.error.line = -1;
-        state.error.column = -1;
+        state.error.token_index = -1
+        state.error.line = -1
+        state.error.column = -1
     }
-    return -1;
+    return -1
 }
 
 // row_of_id 按参数 ID 查找登记行；找不到返回 -1。
 fn row_of_id(state *parser_state, id int) int {
-    let i int = 0;
+    let i int = 0
     for i < state.row_count {
         if (state.rows[i].used != 0 && state.rows[i].id == id) {
-            return i;
+            return i
         }
-        i += 1;
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // name_is_taken 检查名称是否已被其他参数占用；返回冲突行的下标或 -1。
 fn name_is_taken(state *parser_state, name *char) int {
-    let i int = 0;
+    let i int = 0
     for i < state.row_count {
         if (state.rows[i].used != 0) {
-            let j int = 0;
+            let j int = 0
             for j < state.rows[i].name_count {
                 if (cstr_equal(state.rows[i].names[j], name) != 0) {
-                    return i;
+                    return i
                 }
-                j += 1;
+                j += 1
             }
         }
-        i += 1;
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // derive_dest 按设计规则推导 dest：优先双前缀名称，去前缀并把 '-' 换成 '_'；
 // 没有可选前缀时使用主名称本身。
 fn derive_dest(mem *pool, prefixes *char, name *char, alias *char) *char {
-    let source *char = name;
+    let source *char = name
     if (alias != 0 && alias[0] != 0) {
         if (is_prefix_char(prefixes, alias[0].to_type(int)) != 0
             && is_prefix_char(prefixes, alias[1].to_type(int)) != 0
             && alias[2] != 0) {
-            source = alias;
+            source = alias
         }
     }
-    let offset int = 0;
+    let offset int = 0
     for source[offset] != 0 && is_prefix_char(prefixes, source[offset].to_type(int)) != 0 {
-        offset += 1;
+        offset += 1
     }
-    let length int = strlen(source).to_type(int) - offset;
+    let length int = strlen(source).to_type(int) - offset
     if (length <= 0) {
-        return 0;
+        return 0
     }
-    let buffer [MAX_TEXT]char;
+    let buffer [MAX_TEXT]char
     if (length >= MAX_TEXT) {
-        return 0;
+        return 0
     }
-    let i int = 0;
+    let i int = 0
     for i < length {
-        let ch char = source[offset + i];
+        let ch char = source[offset + i]
         if (ch == '-') {
-            buffer[i] = '_';
+            buffer[i] = '_'
         } else {
-            buffer[i] = ch;
+            buffer[i] = ch
         }
-        i += 1;
+        i += 1
     }
-    buffer[length] = 0;
-    return pool_dup(mem, &buffer[0]);
+    buffer[length] = 0
+    return pool_dup(mem, &buffer[0])
 }
 
 // is_option_name 校验一个选项名称：以注册前缀开头、不是纯前缀、无等号空白。
 fn is_option_name(prefixes *char, name *char) int {
     if (name == 0 || name[0] == 0) {
-        return 0;
+        return 0
     }
     if (is_prefix_char(prefixes, name[0].to_type(int)) == 0) {
-        return 0;
+        return 0
     }
     if (is_all_prefix(prefixes, name) != 0) {
-        return 0;
+        return 0
     }
-    let i int = 0;
+    let i int = 0
     for name[i] != 0 {
         if (is_forbidden_name_byte(name[i].to_type(int)) != 0) {
-            return 0;
+            return 0
         }
-        i += 1;
+        i += 1
     }
-    return 1;
+    return 1
 }
 
 // fill_row_names 把主名称与别名写进登记行的名称数组。
 fn fill_row_names(state *parser_state, row *arg_row, name *char, alias *char) int {
     if (name != 0 && name[0] != 0) {
-        row.names[row.name_count] = pool_dup(&state.mem, name);
-        row.name_count += 1;
+        row.names[row.name_count] = pool_dup(&state.mem, name)
+        row.name_count += 1
     }
     if (alias != 0 && alias[0] != 0) {
         if (row.name_count >= MAX_NAMES) {
-            return -1;
+            return -1
         }
-        row.names[row.name_count] = pool_dup(&state.mem, alias);
-        row.name_count += 1;
+        row.names[row.name_count] = pool_dup(&state.mem, alias)
+        row.name_count += 1
     }
-    return 0;
+    return 0
 }
 
 // register_help 注册内置帮助选项；名称按 prefix_chars 的首字符生成。
 fn register_help(state *parser_state) int {
-    let prefixes *char = state.prefix_chars;
-    let first char = '-';
+    let prefixes *char = state.prefix_chars
+    let first char = '-'
     if (prefixes != 0 && prefixes[0] != 0) {
-        first = prefixes[0];
+        first = prefixes[0]
     }
-    let short_name [8]char;
-    short_name[0] = first;
-    short_name[1] = 'h';
-    short_name[2] = 0;
-    let long_name [16]char;
-    long_name[0] = first;
-    long_name[1] = first;
-    long_name[2] = 'h';
-    long_name[3] = 'e';
-    long_name[4] = 'l';
-    long_name[5] = 'p';
-    long_name[6] = 0;
-    let spec Argument = option(&short_name[0], &long_name[0]);
-    spec.action = Action.help;
-    spec.help = "显示帮助并退出";
-    return add_argument_internal(state, spec);
+    let short_name [8]char
+    short_name[0] = first
+    short_name[1] = 'h'
+    short_name[2] = 0
+    let long_name [16]char
+    long_name[0] = first
+    long_name[1] = first
+    long_name[2] = 'h'
+    long_name[3] = 'e'
+    long_name[4] = 'l'
+    long_name[5] = 'p'
+    long_name[6] = 0
+    let spec Argument = option(&short_name[0], &long_name[0])
+    spec.action = Action.help
+    spec.help = "显示帮助并退出"
+    return add_argument_internal(state, spec)
 }
 
 // new_state 分配并初始化一个 parser 状态；parent 非空表示子命令 parser。
 // 失败返回空指针，成功的状态由调用方交给公开句柄或父 parser 拥有。
 fn new_state(config ParserConfig, parent *parser_state, command_name *char) *parser_state {
     if (config.prog == 0 || config.prog[0] == 0) {
-        return 0;
+        return 0
     }
-    let state *parser_state = malloc(sizeof(parser_state).to_type(u64)).to_type(*parser_state);
+    let state *parser_state = malloc(sizeof(parser_state).to_type(u64)).to_type(*parser_state)
     if (state == 0) {
-        return 0;
+        return 0
     }
-    pool_init(&state.mem);
-    state.prog = pool_dup(&state.mem, config.prog);
-    state.usage = pool_dup(&state.mem, config.usage);
-    state.description = pool_dup(&state.mem, config.description);
-    state.epilog = pool_dup(&state.mem, config.epilog);
-    state.add_help = config.add_help.to_type(int);
-    state.allow_abbrev = config.allow_abbrev.to_type(int);
-    state.prefix_chars = pool_dup(&state.mem, config.prefix_chars);
+    pool_init(&state.mem)
+    state.prog = pool_dup(&state.mem, config.prog)
+    state.usage = pool_dup(&state.mem, config.usage)
+    state.description = pool_dup(&state.mem, config.description)
+    state.epilog = pool_dup(&state.mem, config.epilog)
+    state.add_help = config.add_help.to_type(int)
+    state.allow_abbrev = config.allow_abbrev.to_type(int)
+    state.prefix_chars = pool_dup(&state.mem, config.prefix_chars)
     if (state.prefix_chars == 0 || state.prefix_chars[0] == 0) {
-        state.prefix_chars = pool_dup(&state.mem, "-");
+        state.prefix_chars = pool_dup(&state.mem, "-")
     }
-    state.argument_default_mode = config.argument_default.mode.to_type(int);
-    state.argument_default_value = value_clone(&state.mem, config.argument_default.value);
-    state.suggest_on_error = config.suggest_on_error.to_type(int);
-    state.conflict = config.conflict.to_type(int);
-    state.format_preserve_description = config.help_format.preserve_description.to_type(int);
-    state.format_preserve_all = config.help_format.preserve_all_text.to_type(int);
-    state.format_show_defaults = config.help_format.show_defaults.to_type(int);
-    state.format_metavar_from_type = config.help_format.metavar_from_type.to_type(int);
-    state.format_width = config.help_format.width;
-    state.format_max_help_column = config.help_format.max_help_column;
-    state.color = config.color.to_type(int);
-    state.fromfile_prefix_chars = pool_dup(&state.mem, config.fromfile_prefix_chars);
-    state.line_converter = config.line_converter;
-    state.line_user = config.line_user;
-    state.command_name = pool_dup(&state.mem, command_name);
-    state.parent = parent.to_type(*void);
-    state.owned_by_parent = 0;
-    state.frozen = 0;
-    state.failed = 0;
-    state.row_count = 0;
-    state.next_id = 1;
-    state.override_count = 0;
-    state.numeric_short = 0;
-    state.slot_used = 0;
-    state.slot_id = 0;
-    state.slot_dest = 0;
-    state.slot_required = 0;
-    state.slot_title = 0;
-    state.slot_description = 0;
-    state.child_count = 0;
-    state.group_count = 0;
-    state.mutex_count = 0;
-    state.type_count = 0;
-    state.action_count = 0;
-    clear_diagnostic(&state.error);
+    state.argument_default_mode = config.argument_default.mode.to_type(int)
+    state.argument_default_value = value_clone(&state.mem, config.argument_default.value)
+    state.suggest_on_error = config.suggest_on_error.to_type(int)
+    state.conflict = config.conflict.to_type(int)
+    state.format_preserve_description = config.help_format.preserve_description.to_type(int)
+    state.format_preserve_all = config.help_format.preserve_all_text.to_type(int)
+    state.format_show_defaults = config.help_format.show_defaults.to_type(int)
+    state.format_metavar_from_type = config.help_format.metavar_from_type.to_type(int)
+    state.format_width = config.help_format.width
+    state.format_max_help_column = config.help_format.max_help_column
+    state.color = config.color.to_type(int)
+    state.fromfile_prefix_chars = pool_dup(&state.mem, config.fromfile_prefix_chars)
+    state.line_converter = config.line_converter
+    state.line_user = config.line_user
+    state.command_name = pool_dup(&state.mem, command_name)
+    state.parent = parent.to_type(*void)
+    state.owned_by_parent = 0
+    state.frozen = 0
+    state.failed = 0
+    state.row_count = 0
+    state.next_id = 1
+    state.override_count = 0
+    state.numeric_short = 0
+    state.slot_used = 0
+    state.slot_id = 0
+    state.slot_dest = 0
+    state.slot_required = 0
+    state.slot_title = 0
+    state.slot_description = 0
+    state.child_count = 0
+    state.group_count = 0
+    state.mutex_count = 0
+    state.type_count = 0
+    state.action_count = 0
+    clear_diagnostic(&state.error)
     if (state.mem.failed != 0) {
-        pool_free_all(&state.mem);
-        free(state.to_type(*void));
-        return 0;
+        pool_free_all(&state.mem)
+        free(state.to_type(*void))
+        return 0
     }
     if (state.add_help != 0) {
         if (register_help(state) < 0) {
-            pool_free_all(&state.mem);
-            free(state.to_type(*void));
-            return 0;
+            pool_free_all(&state.mem)
+            free(state.to_type(*void))
+            return 0
         }
     }
-    return state;
+    return state
 }
 
 // init 初始化 parser；0 成功、-1 失败。要求句柄为零值或已 destroy。
 pub fn init(p *Parser, config ParserConfig) int {
     if (p == 0 || p.handle != 0) {
-        return -1;
+        return -1
     }
-    let state *parser_state = new_state(config, 0, "");
+    let state *parser_state = new_state(config, 0, "")
     if (state == 0) {
-        return -1;
+        return -1
     }
-    p.handle = state.to_type(*void);
-    return 0;
+    p.handle = state.to_type(*void)
+    return 0
 }
 
 // add_argument_internal 在已初始化的状态上登记一条声明；返回参数 ID 或 -1。
 fn add_argument_internal(state *parser_state, spec Argument) int {
     if (state.failed != 0 || state.frozen != 0) {
-        return -1;
+        return -1
     }
     if (state.row_count >= MAX_ARGS) {
-        return set_config_error(state, "config_error", "参数个数超过本版本上限");
+        return set_config_error(state, "config_error", "参数个数超过本版本上限")
     }
-    let row arg_row;
-    row.used = 1;
-    row.positional = spec.positional.to_type(int);
-    row.action = spec.action.to_type(int);
-    row.value_kind = spec.value_kind.to_type(int);
-    row.arity_kind = spec.arity.kind.to_type(int);
-    row.arity_count = spec.arity.count;
-    row.default_mode = spec.default_value.mode.to_type(int);
-    row.default_value = value_clone(&state.mem, spec.default_value.value);
-    row.const_value = value_clone(&state.mem, spec.const_value);
-    row.required = spec.required.to_type(int);
-    row.hidden = spec.hidden.to_type(int);
-    row.name_count = 0;
-    row.help = pool_dup(&state.mem, spec.help);
-    row.metavar = pool_dup(&state.mem, spec.metavar);
-    row.group = spec.group;
-    row.mutex = spec.mutex;
-    row.converter = spec.converter;
-    row.validator = spec.validator;
-    row.custom_action = spec.custom_action;
-    row.user = spec.user;
-    row.type_name = pool_dup(&state.mem, spec.type_name);
-    row.action_name = pool_dup(&state.mem, spec.action_name);
-    row.deprecated = spec.deprecated.to_type(int);
-    row.metavars = copy_metavars(state, spec.metavars);
-    row.metavars_count = len(row.metavars);
-    row.has_shape = 0;
-    row.shape_leaf = ValueKind.none.to_type(int);
-    row.shape_depth = 0;
+    let row arg_row
+    row.used = 1
+    row.positional = spec.positional.to_type(int)
+    row.action = spec.action.to_type(int)
+    row.value_kind = spec.value_kind.to_type(int)
+    row.arity_kind = spec.arity.kind.to_type(int)
+    row.arity_count = spec.arity.count
+    row.default_mode = spec.default_value.mode.to_type(int)
+    row.default_value = value_clone(&state.mem, spec.default_value.value)
+    row.const_value = value_clone(&state.mem, spec.const_value)
+    row.required = spec.required.to_type(int)
+    row.hidden = spec.hidden.to_type(int)
+    row.name_count = 0
+    row.help = pool_dup(&state.mem, spec.help)
+    row.metavar = pool_dup(&state.mem, spec.metavar)
+    row.group = spec.group
+    row.mutex = spec.mutex
+    row.converter = spec.converter
+    row.validator = spec.validator
+    row.custom_action = spec.custom_action
+    row.user = spec.user
+    row.type_name = pool_dup(&state.mem, spec.type_name)
+    row.action_name = pool_dup(&state.mem, spec.action_name)
+    row.deprecated = spec.deprecated.to_type(int)
+    row.metavars = copy_metavars(state, spec.metavars)
+    row.metavars_count = len(row.metavars)
+    row.has_shape = 0
+    row.shape_leaf = ValueKind.none.to_type(int)
+    row.shape_depth = 0
     if (spec.output_shape != 0) {
-        row.has_shape = 1;
-        row.shape_leaf = spec.output_shape.leaf.to_type(int);
-        row.shape_depth = spec.output_shape.depth;
+        row.has_shape = 1
+        row.shape_leaf = spec.output_shape.leaf.to_type(int)
+        row.shape_depth = spec.output_shape.depth
     }
-    let positional int = spec.positional.to_type(int);
-    let name *char = spec.name;
+    let positional int = spec.positional.to_type(int)
+    let name *char = spec.name
     if (name == 0 || name[0] == 0) {
-        return set_config_error(state, "config_error", "参数名称不能为空");
+        return set_config_error(state, "config_error", "参数名称不能为空")
     }
     if (positional == 0) {
         if (is_option_name(state.prefix_chars, name) == 0) {
-            return set_config_error(state, "config_error", "选项名称必须以注册前缀开头，且不能只由前缀组成");
+            return set_config_error(state, "config_error", "选项名称必须以注册前缀开头，且不能只由前缀组成")
         }
     }
-    let alias *char = spec.alias;
+    let alias *char = spec.alias
     if (positional == 0 && alias != 0 && alias[0] != 0) {
         if (is_option_name(state.prefix_chars, alias) == 0) {
-            return set_config_error(state, "config_error", "选项别名必须以注册前缀开头，且不能只由前缀组成");
+            return set_config_error(state, "config_error", "选项别名必须以注册前缀开头，且不能只由前缀组成")
         }
     }
     if (fill_row_names(state, &row, name, alias) != 0) {
-        return set_config_error(state, "config_error", "参数名称个数超过本版本上限");
+        return set_config_error(state, "config_error", "参数名称个数超过本版本上限")
     }
     // boolean_optional 为双前缀长名称生成否定别名 --no-xxx（设计 §8.1）。
     if (positional == 0 && spec.action == Action.boolean_optional
         && name_is_long(state, name) != 0) {
         if (row.name_count >= MAX_NAMES) {
-            return set_config_error(state, "config_error", "参数名称个数超过本版本上限");
+            return set_config_error(state, "config_error", "参数名称个数超过本版本上限")
         }
-        let negative [MAX_TEXT]char;
-        negative[0] = name[0];
-        negative[1] = name[1];
-        negative[2] = 'n';
-        negative[3] = 'o';
-        negative[4] = '-';
-        let k int = 2;
-        let w int = 5;
+        let negative [MAX_TEXT]char
+        negative[0] = name[0]
+        negative[1] = name[1]
+        negative[2] = 'n'
+        negative[3] = 'o'
+        negative[4] = '-'
+        let k int = 2
+        let w int = 5
         for name[k] != 0 {
             if (w >= MAX_TEXT - 1) {
-                return set_config_error(state, "config_error", "boolean_optional 名称过长");
+                return set_config_error(state, "config_error", "boolean_optional 名称过长")
             }
-            negative[w] = name[k];
-            w += 1;
-            k += 1;
+            negative[w] = name[k]
+            w += 1
+            k += 1
         }
-        negative[w] = 0;
-        row.names[row.name_count] = pool_dup(&state.mem, &negative[0]);
-        row.name_count += 1;
+        negative[w] = 0
+        row.names[row.name_count] = pool_dup(&state.mem, &negative[0])
+        row.name_count += 1
     }
     if (spec.dest != 0 && spec.dest[0] != 0) {
-        row.dest = pool_dup(&state.mem, spec.dest);
+        row.dest = pool_dup(&state.mem, spec.dest)
     } else {
-        row.dest = derive_dest(&state.mem, state.prefix_chars, name, alias);
+        row.dest = derive_dest(&state.mem, state.prefix_chars, name, alias)
     }
     if (row.dest == 0 || row.dest[0] == 0) {
-        return set_config_error(state, "config_error", "无法从参数名称推导 dest");
+        return set_config_error(state, "config_error", "无法从参数名称推导 dest")
     }
-    let choice_count int = len(spec.choices);
+    let choice_count int = len(spec.choices)
     if (choice_count > MAX_CHOICES) {
-        return set_config_error(state, "config_error", "choices 候选个数超过本版本上限");
+        return set_config_error(state, "config_error", "choices 候选个数超过本版本上限")
     }
-    row.choices = copy_choices(state, spec.choices);
-    row.choices_count = len(row.choices);
+    row.choices = copy_choices(state, spec.choices)
+    row.choices_count = len(row.choices)
     if (choice_count > 0 && row.choices_count == 0) {
-        return set_config_error(state, "resource", "登记 choices 时内存不足");
+        return set_config_error(state, "resource", "登记 choices 时内存不足")
     }
     if (positional == 0 && name_len_is_numeric_short(state.prefix_chars, name) != 0) {
-        state.numeric_short = 1;
+        state.numeric_short = 1
     }
     if (state.mem.failed != 0) {
-        return set_config_error(state, "resource", "登记参数时内存不足");
+        return set_config_error(state, "resource", "登记参数时内存不足")
     }
     if (row.group != 0 && group_of(state, row.group) < 0) {
-        return set_config_error(state, "config_error", "参数引用了不存在的展示组");
+        return set_config_error(state, "config_error", "参数引用了不存在的展示组")
     }
     if (row.mutex != 0 && mutex_of(state, row.mutex) < 0) {
-        return set_config_error(state, "config_error", "参数引用了不存在的互斥组");
+        return set_config_error(state, "config_error", "参数引用了不存在的互斥组")
     }
     // 名称冲突：位置参数重名一律拒绝；选项按组级优先的 conflict 策略处理。
-    let policy int = effective_conflict(state, row.group);
-    let j int = 0;
+    let policy int = effective_conflict(state, row.group)
+    let j int = 0
     for j < row.name_count {
-        let taken int = name_is_taken(state, row.names[j]);
+        let taken int = name_is_taken(state, row.names[j])
         if (taken >= 0) {
             if (positional != 0 || policy != Conflict.resolve.to_type(int)) {
-                return set_config_error(state, "config_error", "参数名称与已登记名称冲突");
+                return set_config_error(state, "config_error", "参数名称与已登记名称冲突")
             }
-            remove_name(state, taken, row.names[j]);
+            remove_name(state, taken, row.names[j])
         }
-        j += 1;
+        j += 1
     }
-    row.id = state.next_id;
-    state.next_id += 1;
-    state.rows[state.row_count] = row;
-    state.row_count += 1;
-    return row.id;
+    row.id = state.next_id
+    state.next_id += 1
+    state.rows[state.row_count] = row
+    state.row_count += 1
+    return row.id
 }
 
 // add_argument 登记一条参数声明；返回正数参数 ID，失败返回 -1。
 pub fn add_argument(p *Parser, spec Argument) int {
-    let state *parser_state = parser_state_of(p);
+    let state *parser_state = parser_state_of(p)
     if (state == 0) {
-        return -1;
+        return -1
     }
-    return add_argument_internal(state, spec);
+    return add_argument_internal(state, spec)
 }
 
 // add_alias 给已有参数增加一个名称；0 成功、-1 失败。
 pub fn add_alias(p *Parser, argument int, name *char) int {
-    let state *parser_state = parser_state_of(p);
+    let state *parser_state = parser_state_of(p)
     if (state == 0 || state.failed != 0 || state.frozen != 0) {
-        return -1;
+        return -1
     }
-    let index int = row_of_id(state, argument);
+    let index int = row_of_id(state, argument)
     if (index < 0) {
-        return -1;
+        return -1
     }
     if (name == 0 || name[0] == 0) {
-        return set_config_error(state, "config_error", "别名不能为空");
+        return set_config_error(state, "config_error", "别名不能为空")
     }
     if (is_option_name(state.prefix_chars, name) == 0) {
-        return set_config_error(state, "config_error", "别名必须以注册前缀开头，且不能只由前缀组成");
+        return set_config_error(state, "config_error", "别名必须以注册前缀开头，且不能只由前缀组成")
     }
     if (state.rows[index].name_count >= MAX_NAMES) {
-        return set_config_error(state, "config_error", "参数名称个数超过本版本上限");
+        return set_config_error(state, "config_error", "参数名称个数超过本版本上限")
     }
     if (name_is_taken(state, name) >= 0) {
-        return set_config_error(state, "config_error", "别名与已登记名称冲突");
+        return set_config_error(state, "config_error", "别名与已登记名称冲突")
     }
-    state.rows[index].names[state.rows[index].name_count] = pool_dup(&state.mem, name);
-    state.rows[index].name_count += 1;
-    return 0;
+    state.rows[index].names[state.rows[index].name_count] = pool_dup(&state.mem, name)
+    state.rows[index].name_count += 1
+    return 0
 }
 
 // freeze 检查整棵声明并冻结；0 成功、-1 失败，重复冻结是无操作。
 pub fn freeze(p *Parser) int {
-    let state *parser_state = parser_state_of(p);
+    let state *parser_state = parser_state_of(p)
     if (state == 0) {
-        return -1;
+        return -1
     }
     if (state.failed != 0) {
-        return -1;
+        return -1
     }
     if (state.frozen != 0) {
-        return 0;
+        return 0
     }
     if (freeze_tree(state) != 0) {
-        return -1;
+        return -1
     }
-    return 0;
+    return 0
 }
 
 // freeze_tree 递归冻结一棵 parser 树：绑定扩展、校验声明与常量、做能力检查。
 // 子命令 parser 归父所有，因此在根 freeze 时一并冻结。
 fn freeze_tree(state *parser_state) int {
     if (state.failed != 0) {
-        return -1;
+        return -1
     }
     if (state.frozen != 0) {
-        return 0;
+        return 0
     }
     if (bind_extensions(state) != 0) {
-        return -1;
+        return -1
     }
     if (check_declared_values(state) != 0) {
-        return -1;
+        return -1
     }
     if (check_freeze(state) != 0) {
-        return -1;
+        return -1
     }
-    state.frozen = 1;
-    let i int = 0;
+    state.frozen = 1
+    let i int = 0
     for i < state.child_count {
         if (state.children[i].used != 0) {
-            let child *parser_state = state.children[i].state.to_type(*parser_state);
+            let child *parser_state = state.children[i].state.to_type(*parser_state)
             if (child != 0 && freeze_tree(child) != 0) {
-                return -1;
+                return -1
             }
         }
-        i += 1;
+        i += 1
     }
-    return 0;
+    return 0
 }
 
 // last_error 返回最近配置错误的借用视图；没有错误时 code 为空指针。
 pub fn last_error(p *Parser) Diagnostic {
-    let state *parser_state = parser_state_of(p);
-    let empty Diagnostic;
-    clear_diagnostic(&empty);
+    let state *parser_state = parser_state_of(p)
+    let empty Diagnostic
+    clear_diagnostic(&empty)
     if (state == 0) {
-        return empty;
+        return empty
     }
-    return state.error;
+    return state.error
 }
 
 // destroy_state 递归释放一个 parser 状态及其全部子命令状态。
 fn destroy_state(state *parser_state) void {
-    let i int = 0;
+    let i int = 0
     for i < state.child_count {
         if (state.children[i].used != 0) {
-            let child *parser_state = state.children[i].state.to_type(*parser_state);
+            let child *parser_state = state.children[i].state.to_type(*parser_state)
             if (child != 0) {
-                destroy_state(child);
+                destroy_state(child)
             }
         }
-        i += 1;
+        i += 1
     }
-    pool_free_all(&state.mem);
-    free(state.to_type(*void));
+    pool_free_all(&state.mem)
+    free(state.to_type(*void))
 }
 
 // destroy 释放 parser 全树（含子命令 parser）并归零；零值可安全调用。
 pub fn destroy(p *Parser) void {
-    let state *parser_state = parser_state_of(p);
+    let state *parser_state = parser_state_of(p)
     if (state == 0) {
         if (p != 0) {
-            p.handle = 0;
+            p.handle = 0
         }
-        return;
+        return
     }
-    destroy_state(state);
-    p.handle = 0;
+    destroy_state(state)
+    p.handle = 0
 }
 
 // copy_choices 把候选值深复制到 parser 池，返回池内切片；失败返回空切片。
 fn copy_choices(state *parser_state, source []Value) []Value {
-    let empty []Value;
-    let count int = len(source);
+    let empty []Value
+    let count int = len(source)
     if (count <= 0 || count > MAX_CHOICES) {
-        return empty;
+        return empty
     }
     let block *choice_block = pool_alloc(&state.mem,
-        sizeof(choice_block).to_type(u64)).to_type(*choice_block);
+        sizeof(choice_block).to_type(u64)).to_type(*choice_block)
     if (block == 0) {
-        return empty;
+        return empty
     }
-    block.count = 0;
-    let i int = 0;
+    block.count = 0
+    let i int = 0
     for i < count {
-        block.items[i] = value_clone(&state.mem, source[i]);
-        block.count += 1;
-        i += 1;
+        block.items[i] = value_clone(&state.mem, source[i])
+        block.count += 1
+        i += 1
     }
-    return block.items[0..block.count];
+    return block.items[0..block.count]
 }
 
 // copy_metavars 把逐项占位名深复制到 parser 池；失败返回空切片。
 fn copy_metavars(state *parser_state, source []*char) []*char {
-    let empty []*char;
-    let count int = len(source);
+    let empty []*char
+    let count int = len(source)
     if (count <= 0 || count > MAX_METAVARS) {
-        return empty;
+        return empty
     }
     let block *metavar_block = pool_alloc(&state.mem,
-        sizeof(metavar_block).to_type(u64)).to_type(*metavar_block);
+        sizeof(metavar_block).to_type(u64)).to_type(*metavar_block)
     if (block == 0) {
-        return empty;
+        return empty
     }
-    block.count = 0;
-    let i int = 0;
+    block.count = 0
+    let i int = 0
     for i < count {
-        block.items[i] = pool_dup(&state.mem, source[i]);
-        block.count += 1;
-        i += 1;
+        block.items[i] = pool_dup(&state.mem, source[i])
+        block.count += 1
+        i += 1
     }
-    return block.items[0..block.count];
+    return block.items[0..block.count]
 }
 
 // name_len_is_numeric_short 判断名称是否为「单前缀 + 单个 ASCII 数字」的数字型短选项；
 // 注册这类名称会关闭该 parser 的负数特判（设计 §9.2）。
 fn name_len_is_numeric_short(prefixes *char, name *char) int {
     if (name == 0 || name[0] == 0 || name[1] == 0 || name[2] != 0) {
-        return 0;
+        return 0
     }
     if (is_prefix_char(prefixes, name[0].to_type(int)) == 0) {
-        return 0;
+        return 0
     }
-    let ch int = name[1].to_type(int);
+    let ch int = name[1].to_type(int)
     if (ch >= '0' && ch <= '9') {
-        return 1;
+        return 1
     }
-    return 0;
+    return 0
 }
 
 // override_of 按 dest 查找 set_default 覆盖项；找不到返回 -1。
 fn override_of(state *parser_state, dest *char) int {
-    let i int = 0;
+    let i int = 0
     for i < state.override_count {
         if (state.overrides[i].used != 0 && cstr_equal(state.overrides[i].dest, dest) != 0) {
-            return i;
+            return i
         }
-        i += 1;
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // set_default 覆盖 dest 的静态默认值；0 成功、-1 失败。默认值深复制进 parser 池。
 pub fn set_default(p *Parser, dest *char, value Value) int {
-    let state *parser_state = parser_state_of(p);
+    let state *parser_state = parser_state_of(p)
     if (state == 0 || dest == 0 || dest[0] == 0 || state.failed != 0 || state.frozen != 0) {
-        return -1;
+        return -1
     }
-    let index int = override_of(state, dest);
+    let index int = override_of(state, dest)
     if (index < 0) {
         if (state.override_count >= MAX_ENTRIES) {
-            return set_config_error(state, "config_error", "set_default 的键个数超过本版本上限");
+            return set_config_error(state, "config_error", "set_default 的键个数超过本版本上限")
         }
-        index = state.override_count;
-        state.overrides[index].used = 1;
-        state.overrides[index].dest = pool_dup(&state.mem, dest);
-        state.overrides[index].provided = 0;
-        state.overrides[index].occurrences = 0;
-        state.override_count += 1;
+        index = state.override_count
+        state.overrides[index].used = 1
+        state.overrides[index].dest = pool_dup(&state.mem, dest)
+        state.overrides[index].provided = 0
+        state.overrides[index].occurrences = 0
+        state.override_count += 1
     }
-    state.overrides[index].value = value_clone(&state.mem, value);
+    state.overrides[index].value = value_clone(&state.mem, value)
     if (state.mem.failed != 0) {
-        return set_config_error(state, "resource", "set_default 复制默认值时内存不足");
+        return set_config_error(state, "resource", "set_default 复制默认值时内存不足")
     }
-    return 0;
+    return 0
 }
 
 // get_default 查询 parser 的静态有效默认值：先看 set_default 覆盖，
 // 再看参数声明的显式默认值，最后是 action 固有缺省。0 成功、-1 失败。
 pub fn get_default(p *Parser, dest *char, out *Value) int {
-    let state *parser_state = parser_state_of(p);
+    let state *parser_state = parser_state_of(p)
     if (state == 0 || dest == 0 || out == 0) {
-        return -1;
+        return -1
     }
-    let index int = override_of(state, dest);
+    let index int = override_of(state, dest)
     if (index >= 0) {
-        *out = state.overrides[index].value;
-        return 0;
+        *out = state.overrides[index].value
+        return 0
     }
-    let i int = 0;
+    let i int = 0
     for i < state.row_count {
-        let row *arg_row = &state.rows[i];
+        let row *arg_row = &state.rows[i]
         if (row.used != 0 && cstr_equal(row.dest, dest) != 0) {
             if (row.default_mode == DefaultMode.default_explicit.to_type(int)) {
-                *out = row.default_value;
-                return 0;
+                *out = row.default_value
+                return 0
             }
             if (row.default_mode == DefaultMode.default_suppress.to_type(int)) {
-                return -1;
+                return -1
             }
         }
-        i += 1;
+        i += 1
     }
-    i = 0;
+    i = 0
     for i < state.row_count {
-        let row *arg_row = &state.rows[i];
+        let row *arg_row = &state.rows[i]
         if (row.used != 0 && cstr_equal(row.dest, dest) != 0) {
-            *out = action_implicit_default(row);
-            return 0;
+            *out = action_implicit_default(row)
+            return 0
         }
-        i += 1;
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // —— 声明校验 ——
@@ -716,18 +716,18 @@ pub fn get_default(p *Parser, dest *char, out *Value) int {
 // action_is_control 判断 action 是否为控制行为（help/version）。
 fn action_is_control(action int) int {
     if (action == Action.help.to_type(int) || action == Action.version.to_type(int)) {
-        return 1;
+        return 1
     }
-    return 0;
+    return 0
 }
 
 // action_takes_values 判断 action 是否消费值。
 fn action_takes_values(action int) int {
     if (action == Action.store.to_type(int) || action == Action.append.to_type(int)
         || action == Action.extend.to_type(int) || action == Action.custom.to_type(int)) {
-        return 1;
+        return 1
     }
-    return 0;
+    return 0
 }
 
 // action_is_zero_value 判断内置 action 是否完全不消费值。
@@ -741,21 +741,21 @@ fn action_is_zero_value(action int) int {
         || action == Action.boolean_optional.to_type(int)
         || action == Action.help.to_type(int)
         || action == Action.version.to_type(int)) {
-        return 1;
+        return 1
     }
-    return 0;
+    return 0
 }
 
 // effective_arity_kind 解析一条声明的有效数量：显式 arity 优先，
 // infer 时按 action 推导（消费值的 action 推导为 single，零参数 action 为 no_values）。
 fn effective_arity_kind(row *arg_row) int {
     if (row.arity_kind != ArityKind.arity_infer.to_type(int)) {
-        return row.arity_kind;
+        return row.arity_kind
     }
     if (action_is_zero_value(row.action) != 0) {
-        return ArityKind.arity_no_values.to_type(int);
+        return ArityKind.arity_no_values.to_type(int)
     }
-    return ArityKind.arity_single.to_type(int);
+    return ArityKind.arity_single.to_type(int)
 }
 
 // arity_is_multi 判断数量模型是否产生列表形状。
@@ -764,32 +764,32 @@ fn arity_is_multi(kind int) int {
         || kind == ArityKind.arity_zero_or_more.to_type(int)
         || kind == ArityKind.arity_one_or_more.to_type(int)
         || kind == ArityKind.arity_remainder.to_type(int)) {
-        return 1;
+        return 1
     }
-    return 0;
+    return 0
 }
 
 // row_leaf_kind 推导参数的最终叶子类型（共享 dest 检查与形状比较使用）。
 fn row_leaf_kind(row *arg_row) int {
-    let action int = row.action;
+    let action int = row.action
     if (action == Action.count.to_type(int)) {
-        return ValueKind.integer.to_type(int);
+        return ValueKind.integer.to_type(int)
     }
     if (action == Action.store_true.to_type(int)
         || action == Action.store_false.to_type(int)
         || action == Action.boolean_optional.to_type(int)) {
-        return ValueKind.boolean.to_type(int);
+        return ValueKind.boolean.to_type(int)
     }
     if (action == Action.store_const.to_type(int)
         || action == Action.append_const.to_type(int)) {
-        return row.const_value.kind.to_type(int);
+        return row.const_value.kind.to_type(int)
     }
-    return row.value_kind;
+    return row.value_kind
 }
 
 // row_depth 推导参数的最终列表层数：0 标量、1 列表、2 批次列表。
 fn row_depth(row *arg_row) int {
-    let action int = row.action;
+    let action int = row.action
     if (action == Action.count.to_type(int)
         || action == Action.store_true.to_type(int)
         || action == Action.store_false.to_type(int)
@@ -797,30 +797,30 @@ fn row_depth(row *arg_row) int {
         || action == Action.help.to_type(int)
         || action == Action.version.to_type(int)
         || action == Action.store_const.to_type(int)) {
-        return 0;
+        return 0
     }
     if (action == Action.append_const.to_type(int)) {
-        return 1;
+        return 1
     }
     if (action == Action.extend.to_type(int)) {
-        return 1;
+        return 1
     }
-    let multi int = arity_is_multi(effective_arity_kind(row));
+    let multi int = arity_is_multi(effective_arity_kind(row))
     if (action == Action.append.to_type(int)) {
         if (multi != 0) {
-            return 2;
+            return 2
         }
-        return 1;
+        return 1
     }
     if (action == Action.store.to_type(int)) {
-        return multi;
+        return multi
     }
-    return 0;
+    return 0
 }
 
 // freeze_supports 校验某条声明的 action/arity 组合是否自洽；不支持返回 0。
 fn freeze_supports(row *arg_row) int {
-    let action int = row.action;
+    let action int = row.action
     if (action != Action.store.to_type(int)
         && action != Action.store_const.to_type(int)
         && action != Action.store_true.to_type(int)
@@ -833,78 +833,78 @@ fn freeze_supports(row *arg_row) int {
         && action != Action.help.to_type(int)
         && action != Action.version.to_type(int)
         && action != Action.custom.to_type(int)) {
-        return 0;
+        return 0
     }
     if (action == Action.custom.to_type(int)) {
         if (row.arity_kind == ArityKind.arity_no_values.to_type(int)
             || row.arity_kind == ArityKind.arity_remainder.to_type(int)) {
-            return 0;
+            return 0
         }
     }
-    let kind int = row.arity_kind;
-    let explicit int = (kind != ArityKind.arity_infer.to_type(int)).to_type(int);
+    let kind int = row.arity_kind
+    let explicit int = (kind != ArityKind.arity_infer.to_type(int)).to_type(int)
     if (action_is_zero_value(action) != 0) {
         // 零参数 action 的数量由行为决定：只允许 infer 或显式 no_values。
         if (explicit != 0 && kind != ArityKind.arity_no_values.to_type(int)) {
-            return 0;
+            return 0
         }
-        return 1;
+        return 1
     }
     if (kind == ArityKind.arity_no_values.to_type(int)) {
-        return 0;
+        return 0
     }
     if (action == Action.extend.to_type(int)) {
         if (kind != ArityKind.arity_exactly.to_type(int)
             && kind != ArityKind.arity_zero_or_more.to_type(int)
             && kind != ArityKind.arity_one_or_more.to_type(int)) {
-            return 0;
+            return 0
         }
     }
     if (action == Action.append.to_type(int)
         && kind == ArityKind.arity_remainder.to_type(int)) {
-        return 0;
+        return 0
     }
     if (row.positional != 0 && kind == ArityKind.arity_optional.to_type(int)) {
-        return 1;
+        return 1
     }
-    return 1;
+    return 1
 }
 
 // check_shared_dest 校验同 dest 的参数具有一致的叶子类型与列表层数。
 fn check_shared_dest(state *parser_state) int {
-    let i int = 0;
+    let i int = 0
     for i < state.row_count {
-        let row *arg_row = &state.rows[i];
+        let row *arg_row = &state.rows[i]
         if (row.used != 0) {
-            let j int = i + 1;
+            let j int = i + 1
             for j < state.row_count {
-                let other *arg_row = &state.rows[j];
+                let other *arg_row = &state.rows[j]
                 if (other.used != 0 && cstr_equal(row.dest, other.dest) != 0) {
                     if (row_leaf_kind(row) != row_leaf_kind(other)
                         || row_depth(row) != row_depth(other)) {
                         return set_config_error(state, "config_error",
-                            "同一 dest 的参数必须具有一致的值类型与列表形状");
+                            "同一 dest 的参数必须具有一致的值类型与列表形状")
                     }
                 }
-                j += 1;
+                j += 1
             }
         }
-        i += 1;
+        i += 1
     }
-    return 0;
+    return 0
 }
 
 // check_choice_entries 校验 choices 不含序列或 none（设计：choices 只接受标量候选）。
 fn check_choice_entries(row *arg_row) int {
-    let i int = 0;
+    let i int = 0
     for i < row.choices_count {
-        let kind int = row.choices[i].kind.to_type(int);
+        let kind int = row.choices[i].kind.to_type(int)
         if (kind == ValueKind.sequence.to_type(int) || kind == ValueKind.none.to_type(int)) {
-            return 0;
+            return 0
         }
-        i += 1;
+        i += 1
     }
-    return 1;
+    return 1
 }
 
 // check_freeze 在冻结前校验声明；失败设置粘滞配置错误。
@@ -913,127 +913,127 @@ fn check_freeze(state *parser_state) int {
     if (state.parent.to_type(*parser_state) != 0) {
         if (state.fromfile_prefix_chars != 0 && state.fromfile_prefix_chars[0] != 0) {
             return set_config_error(state, "config_error",
-                "子命令 parser 不能设置参数文件前缀");
+                "子命令 parser 不能设置参数文件前缀")
         }
         if (state.line_converter.to_type(*void) != 0) {
             return set_config_error(state, "config_error",
-                "子命令 parser 不能设置参数文件逐行回调");
+                "子命令 parser 不能设置参数文件逐行回调")
         }
     }
-    let remainder_seen int = 0;
-    let i int = 0;
+    let remainder_seen int = 0
+    let i int = 0
     for i < state.row_count {
-        let row *arg_row = &state.rows[i];
+        let row *arg_row = &state.rows[i]
         if (row.used != 0) {
             if (freeze_supports(row) == 0) {
                 return set_config_error(state, "config_error",
-                    "该 action 与数量模型组合无效或尚未实现（见实施方案阶段表）");
+                    "该 action 与数量模型组合无效或尚未实现（见实施方案阶段表）")
             }
             if (row.arity_kind == ArityKind.arity_exactly.to_type(int) && row.arity_count < 1) {
-                return set_config_error(state, "config_error", "exactly 的数量必须大于等于 1");
+                return set_config_error(state, "config_error", "exactly 的数量必须大于等于 1")
             }
             if (check_choice_entries(row) == 0) {
-                return set_config_error(state, "config_error", "choices 只接受标量候选值");
+                return set_config_error(state, "config_error", "choices 只接受标量候选值")
             }
-            let arity int = effective_arity_kind(row);
+            let arity int = effective_arity_kind(row)
             if (row.positional != 0) {
                 if (arity == ArityKind.arity_no_values.to_type(int)) {
-                    return set_config_error(state, "config_error", "位置参数不能不消费值");
+                    return set_config_error(state, "config_error", "位置参数不能不消费值")
                 }
                 if (remainder_seen != 0) {
                     return set_config_error(state, "config_error",
-                        "remainder 之后不能再声明位置参数");
+                        "remainder 之后不能再声明位置参数")
                 }
                 if (arity == ArityKind.arity_remainder.to_type(int)) {
-                    remainder_seen = 1;
+                    remainder_seen = 1
                 }
             }
         }
-        i += 1;
+        i += 1
     }
-    return check_shared_dest(state);
+    return check_shared_dest(state)
 }
 
 
 // group_of 按 ID 查找展示组；找不到返回 -1。
 fn group_of(state *parser_state, id int) int {
-    let i int = 0;
+    let i int = 0
     for i < state.group_count {
         if (state.groups[i].used != 0 && state.groups[i].id == id) {
-            return i;
+            return i
         }
-        i += 1;
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // mutex_of 按 ID 查找互斥组；找不到返回 -1。
 fn mutex_of(state *parser_state, id int) int {
-    let i int = 0;
+    let i int = 0
     for i < state.mutex_count {
         if (state.mutexes[i].used != 0 && state.mutexes[i].id == id) {
-            return i;
+            return i
         }
-        i += 1;
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // effective_conflict 返回某组参数的有效冲突策略：组级设置优先于 parser 级。
 fn effective_conflict(state *parser_state, group int) int {
     if (group != 0) {
-        let index int = group_of(state, group);
+        let index int = group_of(state, group)
         if (index >= 0) {
-            return state.groups[index].conflict;
+            return state.groups[index].conflict
         }
     }
-    return state.conflict;
+    return state.conflict
 }
 
 // remove_name 从旧声明的名称表里删除一个冲突名称；名称全部移除时停用旧声明。
 fn remove_name(state *parser_state, row_index int, name *char) void {
-    let row *arg_row = &state.rows[row_index];
-    let i int = 0;
-    let found int = -1;
+    let row *arg_row = &state.rows[row_index]
+    let i int = 0
+    let found int = -1
     for i < row.name_count {
         if (cstr_equal(row.names[i], name) != 0) {
-            found = i;
-            break;
+            found = i
+            break
         }
-        i += 1;
+        i += 1
     }
     if (found < 0) {
-        return;
+        return
     }
-    let j int = found;
+    let j int = found
     for j + 1 < row.name_count {
-        row.names[j] = row.names[j + 1];
-        j += 1;
+        row.names[j] = row.names[j + 1]
+        j += 1
     }
-    row.name_count -= 1;
+    row.name_count -= 1
     if (row.name_count == 0) {
-        row.used = 0;
+        row.used = 0
     }
 }
 
 // find_child 按规范名或别名查找子命令；返回 child 下标或 -1。
 fn find_child(state *parser_state, name *char) int {
-    let i int = 0;
+    let i int = 0
     for i < state.child_count {
-        let child *child_row = &state.children[i];
+        let child *child_row = &state.children[i]
         if (child.used != 0) {
             if (cstr_equal(child.name, name) != 0) {
-                return i;
+                return i
             }
-            let j int = 0;
+            let j int = 0
             for j < child.alias_count {
                 if (cstr_equal(child.aliases[j], name) != 0) {
-                    return i;
+                    return i
                 }
-                j += 1;
+                j += 1
             }
         }
-        i += 1;
+        i += 1
     }
-    return -1;
+    return -1
 }

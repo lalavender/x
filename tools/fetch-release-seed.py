@@ -6,7 +6,7 @@ CI 与 Release 的共同约定：当前提交通用**上一版已发布 Release*
 这样每次提交都在验证「上一版编译器能否编出当前源码」。
 
 选择规则：
-  - 忽略 draft、prerelease、`seed-*`（种子里程碑）与 `--exclude-tag`
+  - 忽略 draft、`seed-*`（种子里程碑）与 `--exclude-tag`（rc 仍是种子来源）
     （当前 tag 自身，避免用当前版本测试当前版本）；
   - 从新到旧找第一个带目标平台资产的 Release；
   - 找不到且目标种子已存在时退回该文件（首次发布/离线开发），否则失败。
@@ -41,18 +41,29 @@ class FetchError(RuntimeError):
     """无法取得上一版种子；调用方应显式失败而不是静默回退。"""
 
 
-def api_request(url, token, accept="application/vnd.github+json"):
-    """执行一次 GitHub API 请求，返回响应对象。"""
+def api_request(url, token, accept="application/vnd.github+json", attempts=3):
+    """执行 GitHub API 请求，返回响应对象。
+
+    CI 上到 api.github.com 的连接偶发 SSL/EOF 中断；5xx/429 与传输层错误按
+    退避有限重试，4xx 立即失败（鉴权/路径问题重试无意义）。
+    """
     headers = {"Accept": accept, "User-Agent": "yh-ci-seed-fetcher"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
-    try:
-        return urllib.request.urlopen(request, timeout=180)
-    except urllib.error.HTTPError as error:
-        raise FetchError(f"GitHub API {error.code}: {url}") from error
-    except urllib.error.URLError as error:
-        raise FetchError(f"GitHub API 连接失败: {url}: {error}") from error
+    last = None
+    for attempt in range(attempts):
+        try:
+            return urllib.request.urlopen(request, timeout=180)
+        except urllib.error.HTTPError as error:
+            if error.code < 500 and error.code != 429:
+                raise FetchError(f"GitHub API {error.code}: {url}") from error
+            last = error
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+            last = error
+        if attempt + 1 < attempts:
+            time.sleep(2 * (attempt + 1))
+    raise FetchError(f"GitHub API 连接失败（重试 {attempts} 次）：{url}: {last}")
 
 
 def read_releases(repo, token):
@@ -69,7 +80,9 @@ def find_asset(repo, token, platform, exclude_tag):
     asset_name = f"yh-{{tag}}-{platform}.tar.gz"
     for release in read_releases(repo, token):
         tag = release.get("tag_name") or ""
-        if release.get("draft") or release.get("prerelease"):
+        # rc 也是种子来源：rc.N 用 rc.N-1、正式版用该版最后一个 rc（见 AGENTS
+        # 版本与发布）。只跳过 draft 与 seed-* 里程碑。
+        if release.get("draft"):
             continue
         if not tag or tag == exclude_tag or tag.startswith("seed-"):
             continue

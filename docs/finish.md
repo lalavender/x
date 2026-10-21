@@ -7144,3 +7144,97 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
   `0.0.5` tag 并发布（`https://github.com/lalavender/x/releases/tag/0.0.5`）。
   tag 保持 `0.0.5 -> 968de29`，发布工作流修复在 `llvm` 分支，避免再触发
   arm64/darwin 全量构建。
+
+# 2026-10-22 换行终结语句（0.0.8-rc）
+
+- **语法**：`\n` 参与语句边界，简单语句、模块头、类型别名、字段与枚举成员可以
+  省略行尾分号；同一行仍用 `;` 分隔；严格续行要求括号外运算符放在上一行末尾；
+  裸 `return` 行尾结束。设计见
+  [03-design/yh-换行终结语句设计.md](03-design/yh-换行终结语句设计.md)。
+- **实现**：`compiler/lex/layout.yh` 归一化补零长度 `TK_SEMI`；解析器用
+  `p_implicit_semi`/`p_take_block_end` 区分隐式与显式终结符；参考语法用
+  `tokens { IMPLICIT }` + `stmtEnd`，语料门禁按同一规则归一化。
+- **验证**：`make test` 全绿（正例 80/80、反例 44/44，run 209/210、fail 133/133、
+  pass 8/8）；`make selfhost-native` 全绿（cc3→cc4 27 个产物一致、自解析 101
+  个源文件、modules 19/19、project cases 115/115）。
+- 记录：[01-finished/yh-换行终结语句-2026-10-22.md](01-finished/yh-换行终结语句-2026-10-22.md)。
+  未滚种子、未发版、未批量删分号（方案 Phase 1/2）。
+
+# 2026-10-22 CI 迁到 Gitea Actions（Jenkins 退役）
+
+- **背景**：原 CI 分两套（CircleCI 分支门 + 本机 Jenkins 发布），Jenkins 靠本地
+  `pre-push` 钩子触发，`--no-verify`、换机器、网页操作与 PR 都覆盖不到。
+- **落地**：
+  - Gitea 1.26.1 开 `[actions] ENABLED=true`；装 `gitea-runner` 5.2（brew
+    formula 名 `gitea-runner`），host 模式实例 `yh-local`，labels
+    `macos-arm64` / `linux-arm64`，capacity 1。
+  - `.gitea/workflows/ci.yml`（分支门：ANTLR + Darwin/arm64 + Linux/AArch64）与
+    `.gitea/workflows/release.yml`（版本 tag：三端构建、cc4 打包、发 GitHub Release）。
+  - 删除 `Jenkinsfile` 与 `tools/jenkins/`（trigger/setup 随触发链移除），发布脚本
+    迁到 `tools/publish-release.py`；恢复被串联的 git-lfs `pre-push` 钩子。
+- **调试结论（已写进 workflow 注释与 todo D2/D3）**：
+  - Gitea 会把 `GITHUB_REPOSITORY` 覆写成 `yh/yh`，取种必须 `--repo lalavender/x`；
+  - Apple container 内 GitHub API 不可达（DNS 失败），取种改在宿主 step 完成；
+  - `tests/selfhost/llvm-host.py` 用 `relative_to(ROOT)` 写身份记录，容器内闭包
+    缓存必须挂到 `/work/tmp/llvm-migration`，symlink 到宿主绝对路径会断言失败；
+  - 8GB 宿主并发两个构建会触发 OOM（LLVM 静态链接被 kill），capacity 降到 1、
+    容器内存提到 3G；宿主磁盘一度只剩 2.5Gi，清掉闲置镜像 13.5GB 后恢复；
+  - x86_64 端在 amd64 模拟下 `run/20-bytebuf.yh` 崩溃（信号 5），发布流水线对该
+    端只做构建+打包，运行证据以真机为准。
+- **验证**：`0.0.8-rc.4` tag 全流程成功，GitHub Release 三端资产齐全
+  （darwin-arm64 26.5MB、linux-arm64 42.6MB、linux-x86_64 42.6MB，各带
+  `.sha256`），见 <https://github.com/lalavender/x/releases/tag/0.0.8-rc.4>。
+
+# 2026-10-22 分号删除（compiler/，0.0.8-rc）
+
+- **范围**：`compiler/` 101 个 `.yh`，删除 24,514 个可省略行尾分号，保留 1,061 个
+  同行分隔/裸块前分号，行数不变。
+- **工具适配**：`selfhost_snapshot_gate.py`、`tests/selfhost/link-cache.py` 的
+  module 声明正则改为分号可选；`compiler-performance.py` 的模块名提取同步。
+- **验证**：`make` 冷编成功，`compiler/.build` 与删除前对比**非 manifest 差异 0**；
+  `make test` 全绿；`make selfhost-native` 全绿（27 个产物固定点、自解析 101 文件、
+  modules 19/19、project cases 115/115）。
+- 记录：[01-finished/yh-分号删除-2026-10-22.md](01-finished/yh-分号删除-2026-10-22.md)。
+  未清 `libs/`/`tests/`/`examples/`，未滚种子。
+
+# 2026-10-22 0.0.8-rc.7 发布与种子换代
+
+- **发布流程改造**：`release.yml` 拆成 `prepare`（预建 arm64/amd64 镜像）→
+  `darwin-arm64`/`linux-arm64`/`linux-x86_64` 三端**并行** → `publish` 汇总；
+  产物写 `$HOME/yh-release-dist/ci-<run_id>`；打包后追加 `./yh --syntax-check`
+  无分号用例自检。`ci.yml` 增加 `linux-x86_64` 并行任务。
+- **失败与修复**：rc.5 两个 Linux job 漏 `GH_TOKEN`（取种 403）；rc.6 publish
+  发现容器内写的宿主绝对路径宿主看不到（改为容器内 `/work/dist`、宿主搬运）；
+  rc.7 publish 上传遇 SSL/EOF，`publish-release.py` 加退避重试与同名资产幂等。
+- **结果**：`0.0.8-rc.7` 三端资产发布成功：
+  <https://github.com/lalavender/x/releases/tag/0.0.8-rc.7>；darwin 资产字节
+  含 `换行终结符分配失败`、对 `tests/yh/02-basic/04_newline_terminator.yh`
+  通过。
+- **种子换代**：`make fetch-seed` 取 rc.7 官方种子（`624ffc50…`），`make` 冷编
+  无分号源码成功、`--compiler` 语料 80/80 + 44/44；`make seed` 已是新一代
+  （`e96eca03…`）。
+
+# 2026-10-22 全仓去分号收尾
+
+- **范围**：`libs/`、`examples/`、`tests/` 非反例语料 503 个文件删除 11,698 个
+  分号；`compiler/` 此前已删 24,514 个。反例（`rejected/`、`reject/`）、冻结
+  语料（`tests/perf/`）、按精确源码字节改写的项目 fixture、显式分号正例保留。
+- **验证**：`make test` 全绿（80/80、44/44、run 209/210、fail 133/133）；
+  `make selfhost-native` 全绿（27 产物固定点、自解析 101、modules 19/19、
+  project 115/115）。
+- 记录：[01-finished/yh-分号删除-2026-10-22.md](01-finished/yh-分号删除-2026-10-22.md)。
+
+# 2026-10-22 YH_LLVM_CACHE 自动定位
+
+- **问题**：换 worktree/机器后要手工 `YH_LLVM_CACHE=...`，否则 Makefile 与
+  `tools/llvm-*.py` 各自回落到空目录，`make llvm-host` 重新准备闭包。
+- **实现**：新增 [tools/llvm_cache.py](tools/llvm_cache.py)：显式 `YH_LLVM_CACHE`
+  → 仓库 `tmp/llvm-migration` → 主 worktree 的 `tmp/llvm-migration`
+  （`git rev-parse --git-common-dir`）。Makefile 以它为默认值并 `export`，
+  `DARWIN_SDK_RECORD` 跟随；`llvm-darwin-host`/`llvm-host`/`llvm-sdk` 与
+  selfhost 探针统一 `cache_root()`；`make` 前置目标把仓库内
+  `tmp/llvm-migration` 软链到缓存根（`compiler/project.toml` 的桥库路径是
+  仓库相对）。
+- **验证**：在 `/tmp/yh-cachetest` 新建 worktree（无缓存、不设环境变量）→
+  `make llvm-host` 复用主仓库缓存、`make` 构建成功、产物对
+  `tests/yh/02-basic/04_newline_terminator.yh` 返回 0；主仓库 `make` 回归正常。

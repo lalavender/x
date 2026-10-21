@@ -1,16 +1,16 @@
 version: 2.1
 
-# CircleCI 主门：原生 Linux/AArch64、Linux/x86_64、Darwin/ARM64 与 tag 发布。
+# CircleCI 分支门：原生 Linux/AArch64、Linux/x86_64、Darwin/ARM64。
 #
 # 分支流水线（arm64/llvm/main）：
 #   - antlr：参考语法门；
-#   - 三端每次都从最新 GitHub Release 取种子，再跑各平台默认 LLVM 主门。
-# tag 流水线：
-#   - 三端从上一版 Release（排除当前 tag）取种子，自举并打包 cc4；
-#   - publish 汇总 workspace 产物，创建/更新 GitHub Release。
+#   - 三端从最新 GitHub Release 取种子，跑各平台默认 LLVM 主门。
 #
-# 需要项目环境变量 GITHUB_TOKEN（repo 权限）：既用于取 Release 种子，
-# 也用于 tag 发布。
+# 发布已移到 Gitea Actions（.gitea/workflows/release.yml）：
+# CircleCI 不再响应 tag，也不再创建/更新 GitHub Release。
+# 本文件仅留作云端真机参照，不再是项目门禁。
+#
+# 需要项目环境变量 GITHUB_TOKEN（repo 权限），只用于取 Release 种子。
 
 commands:
   install_linux_deps:
@@ -37,34 +37,6 @@ commands:
             export GH_TOKEN="$GITHUB_TOKEN"
             python3 tools/fetch-release-seed.py --platform << parameters.platform >> --exclude-tag "${CIRCLE_TAG:-}"
 
-  package_release:
-    description: 打包当前平台的自举编译器与 SHA-256
-    parameters:
-      platform:
-        type: string
-    steps:
-      - run:
-          name: 打包 << parameters.platform >>
-          command: |
-            set -euo pipefail
-            : "${CIRCLE_TAG:?release 步骤必须由 tag 触发}"
-            safe_tag=$(printf '%s' "$CIRCLE_TAG" | tr '/' '_')
-            name="yh-${safe_tag}-<< parameters.platform >>"
-            stage="dist/.stage-<< parameters.platform >>"
-            mkdir -p "$stage"
-            cp yh "$stage/yh"
-            tar -czf "dist/${name}.tar.gz" -C "$stage" yh
-            rm -rf "$stage"
-            if command -v sha256sum >/dev/null 2>&1; then
-              (cd dist && sha256sum "${name}.tar.gz" > "${name}.sha256")
-            else
-              (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.sha256")
-            fi
-      - persist_to_workspace:
-          root: .
-          paths:
-            - dist
-
 jobs:
   antlr:
     docker:
@@ -87,10 +59,6 @@ jobs:
     machine:
       image: ubuntu-2404:current
     resource_class: arm.large
-    parameters:
-      release:
-        type: boolean
-        default: false
     environment:
       # CircleCI 项目元数据不是 lalavender/x；显式固定 GitHub Release 仓库。
       GITHUB_REPOSITORY: lalavender/x
@@ -123,30 +91,12 @@ jobs:
       - run:
           name: 自举主门（语料已单独跑过）
           command: |
-            if [ "<< parameters.release >>" = "true" ]; then
-              make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
-            else
-              make selfhost-native SKIP_CORPUS=1
-            fi
-      - when:
-          condition: << parameters.release >>
-          steps:
-            - run:
-                name: 选用 cc4 自举候选
-                command: |
-                  cp dist/selfhost/cc4 yh
-                  rm -rf dist/selfhost
-            - package_release:
-                platform: linux-arm64
+            make selfhost-native SKIP_CORPUS=1
 
   linux-x86_64:
     machine:
       image: ubuntu-2404:current
     resource_class: large
-    parameters:
-      release:
-        type: boolean
-        default: false
     environment:
       GITHUB_REPOSITORY: lalavender/x
       SEED: bin/yh-linux-x64
@@ -179,30 +129,12 @@ jobs:
       - run:
           name: 自举主门（语料已单独跑过）
           command: |
-            if [ "<< parameters.release >>" = "true" ]; then
-              make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
-            else
-              make selfhost-native SKIP_CORPUS=1
-            fi
-      - when:
-          condition: << parameters.release >>
-          steps:
-            - run:
-                name: 选用 cc4 自举候选
-                command: |
-                  cp dist/selfhost/cc4 yh
-                  rm -rf dist/selfhost
-            - package_release:
-                platform: linux-x86_64
+            make selfhost-native SKIP_CORPUS=1
 
   darwin-arm64:
     macos:
       xcode: 26.5
     resource_class: m4pro.medium
-    parameters:
-      release:
-        type: boolean
-        default: false
     environment:
       GITHUB_REPOSITORY: lalavender/x
       SEED: bin/yh-darwin-arm64
@@ -242,57 +174,7 @@ jobs:
       - run:
           name: 自举主门（语料已单独跑过）
           command: |
-            if [ "<< parameters.release >>" = "true" ]; then
-              make selfhost-native SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
-            else
-              make selfhost-native SKIP_CORPUS=1
-            fi
-      - when:
-          condition: << parameters.release >>
-          steps:
-            - run:
-                name: 选用 cc4 自举候选
-                command: |
-                  cp dist/selfhost/cc4 yh
-                  rm -rf dist/selfhost
-            - package_release:
-                platform: darwin-arm64
-
-  publish:
-    docker:
-      - image: ubuntu:24.04
-    resource_class: small
-    environment:
-      GITHUB_REPOSITORY: lalavender/x
-    steps:
-      - checkout
-      - attach_workspace:
-          at: /tmp/workspace
-      - run:
-          name: 发布 GitHub Release
-          command: |
-            set -euo pipefail
-            : "${GITHUB_TOKEN:?需要在 CircleCI 项目环境变量设置 GITHUB_TOKEN（repo 权限）}"
-            apt-get update -qq
-            apt-get install -y -qq ca-certificates curl gh
-            export GH_TOKEN="$GITHUB_TOKEN"
-            repo="$GITHUB_REPOSITORY"
-            # Release 说明：优先用仓库内 docs/01-finished/release-<tag>.md。
-            notes_file="$(pwd)/docs/01-finished/release-${CIRCLE_TAG}.md"
-            cd /tmp/workspace
-            ls -l dist
-            if gh release view "$CIRCLE_TAG" --repo "$repo" >/dev/null 2>&1; then
-              gh release upload "$CIRCLE_TAG" dist/*.tar.gz dist/*.sha256 --repo "$repo" --clobber
-            else
-              if [ -f "$notes_file" ]; then
-                gh release create "$CIRCLE_TAG" dist/*.tar.gz dist/*.sha256 \
-                  --repo "$repo" --title "$CIRCLE_TAG" --notes-file "$notes_file"
-              else
-                gh release create "$CIRCLE_TAG" dist/*.tar.gz dist/*.sha256 \
-                  --repo "$repo" --title "$CIRCLE_TAG" \
-                  --notes "自举构建：Linux/AArch64、Linux/x86_64、Darwin/ARM64"
-              fi
-            fi
+            make selfhost-native SKIP_CORPUS=1
 
 workflows:
   ci:
@@ -313,41 +195,3 @@ workflows:
           filters:
             branches:
               only: /^(arm64|llvm|main)$/
-
-  release:
-    jobs:
-      - linux-arm64:
-          release: true
-          filters:
-            branches:
-              ignore: /.*/
-            tags:
-              only: /.*/
-              ignore: /.*-rc\..*/
-      - linux-x86_64:
-          release: true
-          filters:
-            branches:
-              ignore: /.*/
-            tags:
-              only: /.*/
-              ignore: /.*-rc\..*/
-      - darwin-arm64:
-          release: true
-          filters:
-            branches:
-              ignore: /.*/
-            tags:
-              only: /.*/
-              ignore: /.*-rc\..*/
-      - publish:
-          requires:
-            - linux-arm64
-            - linux-x86_64
-            - darwin-arm64
-          filters:
-            branches:
-              ignore: /.*/
-            tags:
-              only: /.*/
-              ignore: /.*-rc\..*/

@@ -34,9 +34,9 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 
 - [ ] **R1 分支模型落地**：`0.0.7-release`（指向 tag `0.0.7`）＋ `0.0.8-rc` /
   `0.0.8-release`；默认分支切到最新 `<ver>-release`；`llvm` 保留为历史线。
-- [ ] **R2 CI 改造**：tag filter 收紧为 `^\d+\.\d+\.\d+(-rc\.\d+)?$`；`publish`
-  支持 `--prerelease`，正式 tag 增加「必须落在 `<ver>-release` 上」的祖先校验；
-  `ci` workflow 分支 filter 改为 `<ver>-rc`。
+- [ ] **R2 CI 改造**：`release.yml` 已用正则守卫只认 `x.y.z`/`x.y.z-rc.N`（等价
+  tag filter），`publish-release.py` 已支持 `--prerelease`；**剩余**正式 tag 的
+  「必须落在 `<ver>-release` 上」祖先校验。
 - [ ] **R3 取种改造**：`tools/fetch-release-seed.py` 加 `--include-prerelease`
   （默认开启），使 rc.N 能用 rc.N-1、正式版能用最后一个 rc 作种子。
 - [ ] **R4 版本漂移修复**：`compiler/README.md` 与
@@ -48,8 +48,6 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 
 ### A. F2 收尾与 F1 可选后续
 
-- [ ] **A1 macos-14 CI 实跑**：`selfhost-llvm-darwin` 与 Darwin 专项门在 CI
-  （CircleCI darwin 作业）上验收；本地已全绿。
 - [ ] **A2 F2-9 Linux/x64 交叉产 Mac 候选**：目标版 LLVM/桥依赖注入、Linux 上的
   Mach-O 交叉链接配置、Mac 原生候选固定点；SDK bundle 已完成，主项未实施。
 - [ ] **A3 F1-6 可选**：x64 专用 `llvm-selfhost.py` 参数化到 ARM64；跨宿主
@@ -80,8 +78,15 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 
 - [ ] **D1 本机 ANTLR jar**：`make test` 第 1 层需要本地
   `antlr4-*-complete.jar`；WSL 已配置，macOS 按同一方式补齐或文档化安装。
-- GitHub Actions 已于 2026-10-21 移除（`.github/workflows/` 删除），CI 由
-  CircleCI 承担；原账单恢复项随移除关闭，需要时从 git 历史还原工作流。
+- GitHub Actions 已于 2026-10-21 移除（`.github/workflows/` 删除）；CI 与发布
+  自 2026-10-22 起由 Gitea Actions 承担（`.gitea/workflows/`），CircleCI 仅留作
+  云端真机参照。
+- [ ] **D2 Gitea Actions 收尾**：仓库分支保护未要求 status check；Linux/AArch64
+  容器门在 8GB 宿主上需把闭包缓存挂到 `/work/tmp/llvm-migration`（symlink 会让
+  `llvm-host.py` 的 `relative_to(ROOT)` 失败）；CircleCI 去留待定。
+- [ ] **D3 x86_64 模拟下的运行崩溃**：Apple container `-a amd64` 里
+  `make test-llvm` 的 `run/20-bytebuf.yh` 运行崩溃（信号 5），编译类用例全过；
+  发布流水线因此把 x86_64 端降级为构建+打包，运行证据以 CircleCI 真机为准。
 
 ## P1 标准库与工具链
 
@@ -131,13 +136,20 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 - [ ] **H1 字符串字面量只读化评估**：字面量放只读段，可写副本走显式复制；
   收益是省一个 16KB 可写段，代价是语义变更（字面量改为不可变），需评估现有
   语料与 `tests/yh-run/` 影响后再决定。
-- [ ] **H2 分号清理（SC，llvm 基线）**：先在当前分支实现换行终结（`compiler/`
-  100 个文件、240 处行首运算符需迁移），再发版滚种子，最后删除 24,466 个冗余
-  分号（保留 1,061 个同行分隔）。顺序与验收见
-  [方案](02-plan/yh-分号清理实施方案.md)。
-
-## P2 长期与按需
-
+- [x] **H2 分号清理（已完成）**：换行终结 + 全仓去分号（`compiler/` 24,514、
+  `libs`/`tests`/`examples` 11,698），反例/冻结语料/按字节改写的项目 fixture
+  保留显式分号；`make test` 与 `make selfhost-native` 全绿；`0.0.8-rc.7` 种子
+  已换代并 `make seed`。记录见
+  [换行终结](01-finished/yh-换行终结语句-2026-10-22.md) 与
+  [分号删除](01-finished/yh-分号删除-2026-10-22.md)。
+- [x] **H3 发布资产与源码不一致（已关闭）**：`0.0.8-rc.7` 重新发布后三端资产
+  均含换行终结（字节与行为核对通过）；发布流程已加打包后 `--syntax-check` 自检。
+- [x] **H4 LLVM 闭包缓存路径（部分关闭）**：`YH_LLVM_CACHE` 现在由
+  `tools/llvm_cache.py` 自动定位（显式 env → 仓库 `tmp/llvm-migration` →
+  主 worktree 的同名目录），Makefile 导出并补 `tmp/llvm-migration` 软链，
+  新 worktree 不改环境变量即可 `make` 成功。**剩余**：缓存里的
+  `selfhost-flags.txt` 仍存绝对路径，整个缓存目录被搬走时需要重写或重新
+  `make llvm-host`。
 - [ ] **I1 MOD-U6**：远程来源、版本规则、锁文件与工作区，按实际需求另立设计与
   验收（不沿用旧 Go 方案承诺）。
 - [ ] **I2 VS Code 扩展**：VS-U0 最小扩展与 LSP → VS-U1 保存后诊断与取消 →

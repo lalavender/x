@@ -1,11 +1,11 @@
-module main;
-import gen;
+module main
+import gen
 
 // POSIX 文件/环境接口：直接声明 C ABI，避免把宿主路径语义塞进 prelude。
-@[extern] fn realpath(path *char, resolved *char) *char;
-@[extern] fn stat(path *char, buf *u64) int;
-@[extern] fn setenv(name *char, value *char, overwrite int) int;
-@[extern] fn getenv(name *char) *char;
+@[extern] fn realpath(path *char, resolved *char) *char
+@[extern] fn stat(path *char, buf *u64) int
+@[extern] fn setenv(name *char, value *char, overwrite int) int
+@[extern] fn getenv(name *char) *char
 
 // ============================================================================
 // link_inputs.yh —— [link] 库输入的解析、校验、内容摘要与链接 argv 素材
@@ -22,945 +22,945 @@ import gen;
 
 // LinkLib：一次最终链接实际要传入的库文件。
 struct LinkLib {
-    path_off int;       // realpath 绝对路径（池偏移）
-    path_len int;
-    orig_off int;       // 清单原始路径（池偏移，诊断用）
-    orig_len int;
-    group_off int;      // 所属组名（池偏移）
-    group_len int;
-    line int;           // 清单声明行
-    kind int;           // 1 = .a 静态；2 = 共享库/.tbd
-    whole int;          // 1 = 整库加载
-    digest u64;         // 文件内容 FNV-1a 摘要
+    path_off int       // realpath 绝对路径（池偏移）
+    path_len int
+    orig_off int       // 清单原始路径（池偏移，诊断用）
+    orig_len int
+    group_off int      // 所属组名（池偏移）
+    group_len int
+    line int           // 清单声明行
+    kind int           // 1 = .a 静态；2 = 共享库/.tbd
+    whole int          // 1 = 整库加载
+    digest u64         // 文件内容 FNV-1a 摘要
 }
 
 // —— --link 选择（构建协调进程私有） ——
-let li_select_off *int = 0;
-let li_select_len *int = 0;
-let li_select_n int = 0;
-let li_select_cap int = 0;
+let li_select_off *int = 0
+let li_select_len *int = 0
+let li_select_n int = 0
+let li_select_cap int = 0
 
 // —— 当前目标的合并组与最终库清单 ——
-let li_eff *int = 0;
-let li_eff_n int = 0;
-let li_eff_cap int = 0;
-let li_lib *LinkLib = 0;
-let li_lib_n int = 0;
-let li_lib_cap int = 0;
+let li_eff *int = 0
+let li_eff_n int = 0
+let li_eff_cap int = 0
+let li_lib *LinkLib = 0
+let li_lib_n int = 0
+let li_lib_cap int = 0
 
 // —— 构建机提供的非归档运行库参数（YH_LINK_RUNTIME_FLAGS，每行一个） ——
-let li_rt_off *int = 0;
-let li_rt_len *int = 0;
-let li_rt_n int = 0;
-let li_rt_cap int = 0;
+let li_rt_off *int = 0
+let li_rt_len *int = 0
+let li_rt_n int = 0
+let li_rt_cap int = 0
 
 // li_select_reset：命令开始时清空 --link 选择。
 fn li_select_reset() void {
-    li_select_n = 0;
+    li_select_n = 0
 }
 
 // li_select_add：追加一个组名；重复名称按首次出现去重。
 fn li_select_add(off int, plen int) int {
-    let i int = 0;
+    let i int = 0
     for i < li_select_n {
         if (li_select_len[i] == plen) {
-            let same int = 1;
-            let k int = 0;
+            let same int = 1
+            let k int = 0
             for k < plen {
                 if (gen.G().task.np_data[li_select_off[i] + k]
-                    != gen.G().task.np_data[off + k]) { same = 0; break; }
-                k += 1;
+                    != gen.G().task.np_data[off + k]) { same = 0; break }
+                k += 1
             }
-            if (same != 0) { return 0; }
+            if (same != 0) { return 0 }
         }
-        i += 1;
+        i += 1
     }
     if (li_select_n == li_select_cap) {
-        let ncap int = li_select_cap * 2;
-        if (ncap == 0) { ncap = 4; }
-        let no *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
-        let nl *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
-        if (no == 0 || nl == 0) { return gen.fail("--link 选择表内存分配失败"); }
+        let ncap int = li_select_cap * 2
+        if (ncap == 0) { ncap = 4 }
+        let no *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        let nl *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (no == 0 || nl == 0) { return gen.fail("--link 选择表内存分配失败") }
         if (li_select_n > 0) {
-            memcpy(no, li_select_off, (li_select_n * sizeof(int)).to_type(u64));
-            memcpy(nl, li_select_len, (li_select_n * sizeof(int)).to_type(u64));
-            free(li_select_off.to_type(*void));
-            free(li_select_len.to_type(*void));
+            memcpy(no, li_select_off, (li_select_n * sizeof(int)).to_type(u64))
+            memcpy(nl, li_select_len, (li_select_n * sizeof(int)).to_type(u64))
+            free(li_select_off.to_type(*void))
+            free(li_select_len.to_type(*void))
         }
-        li_select_off = no;
-        li_select_len = nl;
-        li_select_cap = ncap;
+        li_select_off = no
+        li_select_len = nl
+        li_select_cap = ncap
     }
-    li_select_off[li_select_n] = off;
-    li_select_len[li_select_n] = plen;
-    li_select_n += 1;
-    return 0;
+    li_select_off[li_select_n] = off
+    li_select_len[li_select_n] = plen
+    li_select_n += 1
+    return 0
 }
 
 // li_select_count：显式 --link 的组数；0 表示默认全部组。
-fn li_select_count() int { return li_select_n; }
+fn li_select_count() int { return li_select_n }
 
 // li_name_eq：比较两个池内字符串。
 fn li_name_eq(aoff int, alen int, boff int, blen int) int {
-    let gs *gen.GenState = gen.G();
-    if (alen != blen) { return 0; }
-    let i int = 0;
+    let gs *gen.GenState = gen.G()
+    if (alen != blen) { return 0 }
+    let i int = 0
     for i < alen {
-        if (gs.task.np_data[aoff + i] != gs.task.np_data[boff + i]) { return 0; }
-        i += 1;
+        if (gs.task.np_data[aoff + i] != gs.task.np_data[boff + i]) { return 0 }
+        i += 1
     }
-    return 1;
+    return 1
 }
 
 // li_group_at：读取项目链接组的一个只读副本。
 fn li_group_at(proj int, idx int) gen.PLinkGroup {
-    return gen.G().p_projs[proj].link_groups[idx];
+    return gen.G().p_projs[proj].link_groups[idx]
 }
 
 // li_find_group：在项目快照中按目标编码与组名查找。
 fn li_find_group(proj int, target int, off int, plen int) int {
-    let gs *gen.GenState = gen.G();
-    let i int = 0;
+    let gs *gen.GenState = gen.G()
+    let i int = 0
     for i < gs.p_projs[proj].link_group_n {
-        let g gen.PLinkGroup = gs.p_projs[proj].link_groups[i];
+        let g gen.PLinkGroup = gs.p_projs[proj].link_groups[i]
         if (g.target == target
-            && li_name_eq(g.name_off, g.name_len, off, plen) != 0) { return i; }
-        i += 1;
+            && li_name_eq(g.name_off, g.name_len, off, plen) != 0) { return i }
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // li_eff_push：合并组下标数组追加。
 fn li_eff_push(idx int) int {
     if (li_eff_n == li_eff_cap) {
-        let ncap int = li_eff_cap * 2;
-        if (ncap == 0) { ncap = 8; }
-        let next *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
-        if (next == 0) { return gen.fail("链接组顺序表内存分配失败"); }
+        let ncap int = li_eff_cap * 2
+        if (ncap == 0) { ncap = 8 }
+        let next *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (next == 0) { return gen.fail("链接组顺序表内存分配失败") }
         if (li_eff_n > 0) {
-            memcpy(next, li_eff, (li_eff_n * sizeof(int)).to_type(u64));
-            free(li_eff.to_type(*void));
+            memcpy(next, li_eff, (li_eff_n * sizeof(int)).to_type(u64))
+            free(li_eff.to_type(*void))
         }
-        li_eff = next;
-        li_eff_cap = ncap;
+        li_eff = next
+        li_eff_cap = ncap
     }
-    li_eff[li_eff_n] = idx;
-    li_eff_n += 1;
-    return 0;
+    li_eff[li_eff_n] = idx
+    li_eff_n += 1
+    return 0
 }
 
 // li_effective_groups：合并公共组与当前目标组。
 // 同名目标组保持公共组位置；目标表新组按声明顺序追加。
 fn li_effective_groups(proj int) int {
-    let gs *gen.GenState = gen.G();
-    li_eff_n = 0;
-    let target int = pl_target_code_current();
+    let gs *gen.GenState = gen.G()
+    li_eff_n = 0
+    let target int = pl_target_code_current()
     if (target < 0) {
-        return gen.fail("当前目标没有可用的 [link] 平台标签");
+        return gen.fail("当前目标没有可用的 [link] 平台标签")
     }
-    let i int = 0;
+    let i int = 0
     for i < gs.p_projs[proj].link_group_n {
-        let g gen.PLinkGroup = gs.p_projs[proj].link_groups[i];
+        let g gen.PLinkGroup = gs.p_projs[proj].link_groups[i]
         if (g.target == 0) {
-            let replace int = li_find_group(proj, target, g.name_off, g.name_len);
-            if (li_eff_push(replace >= 0 ? replace : i) != 0) { return -1; }
+            let replace int = li_find_group(proj, target, g.name_off, g.name_len)
+            if (li_eff_push(replace >= 0 ? replace : i) != 0) { return -1 }
         }
-        i += 1;
+        i += 1
     }
-    i = 0;
+    i = 0
     for i < gs.p_projs[proj].link_group_n {
-        let g gen.PLinkGroup = gs.p_projs[proj].link_groups[i];
+        let g gen.PLinkGroup = gs.p_projs[proj].link_groups[i]
         if (g.target == target
             && li_find_group(proj, 0, g.name_off, g.name_len) < 0) {
-            if (li_eff_push(i) != 0) { return -1; }
+            if (li_eff_push(i) != 0) { return -1 }
         }
-        i += 1;
+        i += 1
     }
-    return 0;
+    return 0
 }
 
 // li_find_effective：在合并组顺序中按名称查找，返回组下标；没有 -1。
 fn li_find_effective(proj int, off int, plen int) int {
-    let i int = 0;
+    let i int = 0
     for i < li_eff_n {
-        let g gen.PLinkGroup = li_group_at(proj, li_eff[i]);
-        if (li_name_eq(g.name_off, g.name_len, off, plen) != 0) { return li_eff[i]; }
-        i += 1;
+        let g gen.PLinkGroup = li_group_at(proj, li_eff[i])
+        if (li_name_eq(g.name_off, g.name_len, off, plen) != 0) { return li_eff[i] }
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // li_append_bytes：向动态缓冲追加字节；缓冲由本模块持有。
 fn li_append_bytes(buf **u8, n *int, cap *int, data *u8, plen int) int {
-    if (plen <= 0) { return 0; }
+    if (plen <= 0) { return 0 }
     if (n[0] + plen + 1 > cap[0]) {
-        let ncap int = cap[0] * 2;
-        if (ncap < n[0] + plen + 1) { ncap = n[0] + plen + 1; }
-        let next *u8 = malloc(ncap.to_type(u64)).to_type(*u8);
-        if (next == 0) { return gen.fail("链接 manifest 缓冲分配失败"); }
+        let ncap int = cap[0] * 2
+        if (ncap < n[0] + plen + 1) { ncap = n[0] + plen + 1 }
+        let next *u8 = malloc(ncap.to_type(u64)).to_type(*u8)
+        if (next == 0) { return gen.fail("链接 manifest 缓冲分配失败") }
         if (n[0] > 0) {
-            memcpy(next, buf[0], n[0].to_type(u64));
-            free(buf[0].to_type(*void));
+            memcpy(next, buf[0], n[0].to_type(u64))
+            free(buf[0].to_type(*void))
         }
-        buf[0] = next;
-        cap[0] = ncap;
+        buf[0] = next
+        cap[0] = ncap
     }
-    memcpy(buf[0] + n[0], data, plen.to_type(u64));
-    n[0] += plen;
-    return 0;
+    memcpy(buf[0] + n[0], data, plen.to_type(u64))
+    n[0] += plen
+    return 0
 }
 
 // li_error：带组名、原始路径和清单行号的诊断。
 fn li_error(proj int, group *gen.PLinkGroup, item *gen.PLinkItem,
     msg *char) int {
-    let gs *gen.GenState = gen.G();
-    let buf [1024]u8;
-    let n int = 0;
-    n = gen.append_str(buf, n, msg);
-    n = gen.append_str(buf, n, "（组 ");
-    let k int = 0;
+    let gs *gen.GenState = gen.G()
+    let buf [1024]u8
+    let n int = 0
+    n = gen.append_str(buf, n, msg)
+    n = gen.append_str(buf, n, "（组 ")
+    let k int = 0
     for k < group.name_len && n < 900 {
-        buf[n] = gs.task.np_data[group.name_off + k];
-        n += 1;
-        k += 1;
+        buf[n] = gs.task.np_data[group.name_off + k]
+        n += 1
+        k += 1
     }
-    n = gen.append_str(buf, n, "，文件 ");
-    k = 0;
+    n = gen.append_str(buf, n, "，文件 ")
+    k = 0
     for k < item.orig_len && n < 980 {
-        buf[n] = gs.task.np_data[item.orig_off + k];
-        n += 1;
-        k += 1;
+        buf[n] = gs.task.np_data[item.orig_off + k]
+        n += 1
+        k += 1
     }
-    n = gen.append_byte(buf, n, ')');
-    let mo int = gen.tml_intern_str(buf, 0, n);
-    if (mo < 0) { return -1; }
-    return pj_proj_diag(gs.p_projs[proj].root_off, item.line, gen.np_cstr(mo));
+    n = gen.append_byte(buf, n, ')')
+    let mo int = gen.tml_intern_str(buf, 0, n)
+    if (mo < 0) { return -1 }
+    return pj_proj_diag(gs.p_projs[proj].root_off, item.line, gen.np_cstr(mo))
 }
 
 // li_unknown_group：--link 指定了不存在的有效组。
 fn li_unknown_group(proj int, off int, plen int) int {
-    let gs *gen.GenState = gen.G();
-    let buf [512]u8;
-    let n int = 0;
-    n = gen.append_str(buf, n, "未知的 --link 组: ");
-    let k int = 0;
+    let gs *gen.GenState = gen.G()
+    let buf [512]u8
+    let n int = 0
+    n = gen.append_str(buf, n, "未知的 --link 组: ")
+    let k int = 0
     for k < plen && n < 300 {
-        buf[n] = gs.task.np_data[off + k];
-        n += 1;
-        k += 1;
+        buf[n] = gs.task.np_data[off + k]
+        n += 1
+        k += 1
     }
-    n = gen.append_str(buf, n, "（可用组: ");
-    let i int = 0;
+    n = gen.append_str(buf, n, "（可用组: ")
+    let i int = 0
     for i < li_eff_n {
-        let g gen.PLinkGroup = li_group_at(proj, li_eff[i]);
-        if (i > 0) { n = gen.append_str(buf, n, ", "); }
-        k = 0;
+        let g gen.PLinkGroup = li_group_at(proj, li_eff[i])
+        if (i > 0) { n = gen.append_str(buf, n, ", ") }
+        k = 0
         for k < g.name_len && n < 470 {
-            buf[n] = gs.task.np_data[g.name_off + k];
-            n += 1;
-            k += 1;
+            buf[n] = gs.task.np_data[g.name_off + k]
+            n += 1
+            k += 1
         }
-        i += 1;
+        i += 1
     }
-    n = gen.append_byte(buf, n, ')');
-    let mo int = gen.tml_intern_str(buf, 0, n);
-    if (mo < 0) { return -1; }
-    return gen.fail(gen.np_cstr(mo));
+    n = gen.append_byte(buf, n, ')')
+    let mo int = gen.tml_intern_str(buf, 0, n)
+    if (mo < 0) { return -1 }
+    return gen.fail(gen.np_cstr(mo))
 }
 
 // li_ends_with：池内路径是否以 suffix 结尾。
 fn li_ends_with(off int, plen int, suffix *char) int {
-    let gs *gen.GenState = gen.G();
-    let sn int = 0;
-    for suffix[sn] != 0 { sn += 1; }
-    if (sn <= 0 || plen < sn) { return 0; }
-    let i int = 0;
+    let gs *gen.GenState = gen.G()
+    let sn int = 0
+    for suffix[sn] != 0 { sn += 1 }
+    if (sn <= 0 || plen < sn) { return 0 }
+    let i int = 0
     for i < sn {
-        if (gs.task.np_data[off + plen - sn + i] != suffix[i].to_type(u8)) { return 0; }
-        i += 1;
+        if (gs.task.np_data[off + plen - sn + i] != suffix[i].to_type(u8)) { return 0 }
+        i += 1
     }
-    return 1;
+    return 1
 }
 
 // li_digits_dots：版本号段只允许数字与点，且至少一个数字。
 fn li_digits_dots(off int, plen int) int {
-    let gs *gen.GenState = gen.G();
-    let digits int = 0;
-    let i int = 0;
+    let gs *gen.GenState = gen.G()
+    let digits int = 0
+    let i int = 0
     for i < plen {
-        let b u8 = gs.task.np_data[off + i];
-        if (b >= '0' && b <= '9') { digits += 1; }
-        else if (b != '.') { return 0; }
-        i += 1;
+        let b u8 = gs.task.np_data[off + i]
+        if (b >= '0' && b <= '9') { digits += 1 }
+        else if (b != '.') { return 0 }
+        i += 1
     }
-    return digits > 0 ? 1 : 0;
+    return digits > 0 ? 1 : 0
 }
 
 // li_so_versioned：匹配 .so.<数字/点> 形式。
 fn li_so_versioned(off int, plen int) int {
-    let gs *gen.GenState = gen.G();
-    let i int = 0;
-    let dot int = -1;
+    let gs *gen.GenState = gen.G()
+    let i int = 0
+    let dot int = -1
     for i + 4 <= plen {
         if (gs.task.np_data[off + i] == '.'
             && gs.task.np_data[off + i + 1] == 's'
             && gs.task.np_data[off + i + 2] == 'o'
             && gs.task.np_data[off + i + 3] == '.') {
-            dot = i + 4;
+            dot = i + 4
         }
-        i += 1;
+        i += 1
     }
-    if (dot < 0) { return 0; }
-    return li_digits_dots(off + dot, plen - dot);
+    if (dot < 0) { return 0 }
+    return li_digits_dots(off + dot, plen - dot)
 }
 
 // li_kind_from_path：按目标平台严格识别库类型；0 表示不允许。
 fn li_kind_from_path(off int, plen int) int {
-    let gs *gen.GenState = gen.G();
-    if (li_ends_with(off, plen, ".a") != 0) { return 1; }
+    let gs *gen.GenState = gen.G()
+    if (li_ends_with(off, plen, ".a") != 0) { return 1 }
     if (gs.c_target.os == gen.TARGET_OS_LINUX) {
-        if (li_ends_with(off, plen, ".so") != 0) { return 2; }
-        if (li_so_versioned(off, plen) != 0) { return 2; }
+        if (li_ends_with(off, plen, ".so") != 0) { return 2 }
+        if (li_so_versioned(off, plen) != 0) { return 2 }
     }
     if (gs.c_target.os == gen.TARGET_OS_DARWIN) {
-        if (li_ends_with(off, plen, ".dylib") != 0) { return 2; }
-        if (li_ends_with(off, plen, ".tbd") != 0) { return 2; }
+        if (li_ends_with(off, plen, ".dylib") != 0) { return 2 }
+        if (li_ends_with(off, plen, ".tbd") != 0) { return 2 }
     }
-    return 0;
+    return 0
 }
 
 // li_read_header：只读文件头，避免为了格式检查加载大归档。
 fn li_read_header(path *char, out *u8, cap int) int {
-    let fd int = open(path, 0);
-    if (fd < 0) { return -1; }
-    let got i64 = read(fd, out, cap.to_type(u64));
-    close(fd);
-    if (got < 0) { return -1; }
-    return got.to_type(int);
+    let fd int = open(path, 0)
+    if (fd < 0) { return -1 }
+    let got i64 = read(fd, out, cap.to_type(u64))
+    close(fd)
+    if (got < 0) { return -1 }
+    return got.to_type(int)
 }
 
 // li_u32be / li_u32le：格式头读取。
 fn li_u32be(p *u8, off int) u32 {
-    return (p[off].to_type(u32) << 24) | (p[off + 1].to_type(u32) << 16)
-        | (p[off + 2].to_type(u32) << 8) | p[off + 3].to_type(u32);
+    return (p[off].to_type(u32) << 24) | (p[off + 1].to_type(u32) << 16) |
+        (p[off + 2].to_type(u32) << 8) | p[off + 3].to_type(u32)
 }
 fn li_u32le(p *u8, off int) u32 {
-    return p[off].to_type(u32) | (p[off + 1].to_type(u32) << 8)
-        | (p[off + 2].to_type(u32) << 16) | (p[off + 3].to_type(u32) << 24);
+    return p[off].to_type(u32) | (p[off + 1].to_type(u32) << 8) |
+        (p[off + 2].to_type(u32) << 16) | (p[off + 3].to_type(u32) << 24)
 }
 
 // li_fat_magic：Darwin fat/universal 容器。
 fn li_fat_magic(p *u8, n int) int {
-    if (n < 8) { return 0; }
-    if (p[0] == 0xca && p[1] == 0xfe && p[2] == 0xba && p[3] == 0xbe) { return 20; }
-    if (p[0] == 0xca && p[1] == 0xfe && p[2] == 0xba && p[3] == 0xbf) { return 32; }
-    return 0;
+    if (n < 8) { return 0 }
+    if (p[0] == 0xca && p[1] == 0xfe && p[2] == 0xba && p[3] == 0xbe) { return 20 }
+    if (p[0] == 0xca && p[1] == 0xfe && p[2] == 0xba && p[3] == 0xbf) { return 32 }
+    return 0
 }
 
 // li_fat_has_arch：fat 头中至少一个切片匹配目标架构。
 fn li_fat_has_arch(p *u8, n int, arch int) int {
-    let entry int = li_fat_magic(p, n);
-    if (entry == 0 || n < 8) { return 0; }
-    let count int = li_u32be(p, 4).to_type(int);
-    if (count <= 0 || count > 32) { return 0; }
-    let want u32 = arch == gen.TARGET_ARCH_ARM64 ? 0x0100000c : 0x01000007;
-    let i int = 0;
+    let entry int = li_fat_magic(p, n)
+    if (entry == 0 || n < 8) { return 0 }
+    let count int = li_u32be(p, 4).to_type(int)
+    if (count <= 0 || count > 32) { return 0 }
+    let want u32 = arch == gen.TARGET_ARCH_ARM64 ? 0x0100000c : 0x01000007
+    let i int = 0
     for i < count {
-        let off int = 8 + i * entry;
-        if (off + 4 > n) { return 0; }
-        if (li_u32be(p, off) == want) { return 1; }
-        i += 1;
+        let off int = 8 + i * entry
+        if (off + 4 > n) { return 0 }
+        if (li_u32be(p, off) == want) { return 1 }
+        i += 1
     }
-    return 0;
+    return 0
 }
 
 // li_macho_thin_arch：单架构 Mach-O 64 小端头。
 fn li_macho_thin_arch(p *u8, n int, arch int) int {
-    if (n < 8) { return 0; }
-    if (!(p[0] == 0xcf && p[1] == 0xfa && p[2] == 0xed && p[3] == 0xfe)) { return 0; }
-    let cpu u32 = li_u32le(p, 4);
-    let want u32 = arch == gen.TARGET_ARCH_ARM64 ? 0x0100000c : 0x01000007;
-    return cpu == want ? 1 : 0;
+    if (n < 8) { return 0 }
+    if (!(p[0] == 0xcf && p[1] == 0xfa && p[2] == 0xed && p[3] == 0xfe)) { return 0 }
+    let cpu u32 = li_u32le(p, 4)
+    let want u32 = arch == gen.TARGET_ARCH_ARM64 ? 0x0100000c : 0x01000007
+    return cpu == want ? 1 : 0
 }
 
 // li_check_format：按已识别的库类型检查文件头与目标架构。
 fn li_check_format(proj int, group *gen.PLinkGroup, item *gen.PLinkItem,
     path *char, kind int, orig_off int, orig_len int) int {
-    let gs *gen.GenState = gen.G();
-    let head [4096]u8;
-    let n int = li_read_header(path, &head[0], 4096);
-    if (n <= 0) { return li_error(proj, group, item, "无法读取库文件"); }
+    let gs *gen.GenState = gen.G()
+    let head [4096]u8
+    let n int = li_read_header(path, &head[0], 4096)
+    if (n <= 0) { return li_error(proj, group, item, "无法读取库文件") }
     if (kind == 1) {
-        if (li_fat_magic(&head[0], n) != 0) { return 0; }
+        if (li_fat_magic(&head[0], n) != 0) { return 0 }
         if (n >= 8 && head[0] == '!' && head[1] == '<' && head[2] == 'a'
             && head[3] == 'r' && head[4] == 'c' && head[5] == 'h'
-            && head[6] == '>' && head[7] == 10) { return 0; }
-        return li_error(proj, group, item, "静态库不是普通 ar 归档");
+            && head[6] == '>' && head[7] == 10) { return 0 }
+        return li_error(proj, group, item, "静态库不是普通 ar 归档")
     }
     if (gs.c_target.os == gen.TARGET_OS_LINUX) {
         if (n < 20 || head[0] != 127 || head[1] != 'E'
             || head[2] != 'L' || head[3] != 'F'
             || head[4] != 2 || head[5] != 1) {
-            return li_error(proj, group, item, "共享库不是 ELF64 小端文件");
+            return li_error(proj, group, item, "共享库不是 ELF64 小端文件")
         }
-        let machine int = head[18].to_type(int)
-            | (head[19].to_type(int) << 8);
-        let want int = gs.c_target.arch == gen.TARGET_ARCH_ARM64 ? 183 : 62;
+        let machine int = head[18].to_type(int) |
+            (head[19].to_type(int) << 8)
+        let want int = gs.c_target.arch == gen.TARGET_ARCH_ARM64 ? 183 : 62
         if (machine != want) {
-            return li_error(proj, group, item, "共享库架构与当前目标不符");
+            return li_error(proj, group, item, "共享库架构与当前目标不符")
         }
-        return 0;
+        return 0
     }
     if (li_ends_with(orig_off, orig_len, ".tbd") != 0) {
         if (n < 4 || head[0] != '-' || head[1] != '-' || head[2] != '-') {
-            return li_error(proj, group, item, ".tbd 不是非空文本 stub");
+            return li_error(proj, group, item, ".tbd 不是非空文本 stub")
         }
-        return 0;
+        return 0
     }
-    if (li_macho_thin_arch(&head[0], n, gs.c_target.arch) != 0) { return 0; }
-    if (li_fat_has_arch(&head[0], n, gs.c_target.arch) != 0) { return 0; }
-    return li_error(proj, group, item, "dylib 架构与当前目标不符");
+    if (li_macho_thin_arch(&head[0], n, gs.c_target.arch) != 0) { return 0 }
+    if (li_fat_has_arch(&head[0], n, gs.c_target.arch) != 0) { return 0 }
+    return li_error(proj, group, item, "dylib 架构与当前目标不符")
 }
 
 // li_build_path：把清单路径按 project.toml 基准拼成 NUL 路径。
 // 绝对路径直接使用；相对路径基于项目根。
 fn li_build_path(proj int, item *gen.PLinkItem, out *u8, cap int) int {
-    let gs *gen.GenState = gen.G();
-    let n int = 0;
+    let gs *gen.GenState = gen.G()
+    let n int = 0
     if (gs.task.np_data[item.orig_off] != '/') {
-        let root *char = pj_pool_str(gs.p_projs[proj].root_off);
-        let i int = 0;
+        let root *char = pj_pool_str(gs.p_projs[proj].root_off)
+        let i int = 0
         for root[i] != 0 {
-            if (n >= cap - 2) { return -1; }
-            out[n] = root[i].to_type(u8);
-            n += 1;
-            i += 1;
+            if (n >= cap - 2) { return -1 }
+            out[n] = root[i].to_type(u8)
+            n += 1
+            i += 1
         }
         if (n == 0 || out[n - 1] != '/') {
-            if (n >= cap - 2) { return -1; }
-            out[n] = '/';
-            n += 1;
+            if (n >= cap - 2) { return -1 }
+            out[n] = '/'
+            n += 1
         }
     }
-    let k int = 0;
+    let k int = 0
     for k < item.orig_len {
-        if (n >= cap - 1) { return -1; }
-        out[n] = gs.task.np_data[item.orig_off + k];
-        n += 1;
-        k += 1;
+        if (n >= cap - 1) { return -1 }
+        out[n] = gs.task.np_data[item.orig_off + k]
+        n += 1
+        k += 1
     }
-    out[n] = 0;
-    return 0;
+    out[n] = 0
+    return 0
 }
 
 // li_realpath：把输入路径解析为绝对真实路径并 intern。
 // 诊断仍使用清单原始路径；realpath 失败返回 -1。
 fn li_realpath(input *char, off *int, plen *int) int {
-    let buf [4096]u8;
-    let ret *char = realpath(input, (&buf[0]).to_type(*char));
-    if (ret == 0) { return -1; }
-    let n int = strlen((&buf[0]).to_type(*char)).to_type(int);
-    if (n <= 0 || n >= 1024) { return -1; }
-    let o int = gen.tml_intern_str(&buf[0], 0, n);
-    if (o < 0) { return -1; }
-    off[0] = o;
-    plen[0] = n;
-    return 0;
+    let buf [4096]u8
+    let ret *char = realpath(input, (&buf[0]).to_type(*char))
+    if (ret == 0) { return -1 }
+    let n int = strlen((&buf[0]).to_type(*char)).to_type(int)
+    if (n <= 0 || n >= 1024) { return -1 }
+    let o int = gen.tml_intern_str(&buf[0], 0, n)
+    if (o < 0) { return -1 }
+    off[0] = o
+    plen[0] = n
+    return 0
 }
 
 // li_stat_file：读取文件 mtime/size；宿主 struct stat 偏移固定。
 // Darwin: mtime@48, size@96；Linux: mtime@88, size@48。
 fn li_stat_file(path *char, sec *u64, nsec *u64, size *u64) int {
-    let buf [32]u64;
-    if (stat(path, &buf[0]) != 0) { return -1; }
-    let mtime_word int = gen.tg_host_darwin() != 0 ? 6 : 11;
-    let size_word int = gen.tg_host_darwin() != 0 ? 12 : 6;
-    sec[0] = buf[mtime_word];
-    nsec[0] = buf[mtime_word + 1];
-    size[0] = buf[size_word];
-    return 0;
+    let buf [32]u64
+    if (stat(path, &buf[0]) != 0) { return -1 }
+    let mtime_word int = gen.tg_host_darwin() != 0 ? 6 : 11
+    let size_word int = gen.tg_host_darwin() != 0 ? 12 : 6
+    sec[0] = buf[mtime_word]
+    nsec[0] = buf[mtime_word + 1]
+    size[0] = buf[size_word]
+    return 0
 }
 
 // li_digest_file：对库文件内容计算 FNV-1a 摘要。
 fn li_digest_file(path *char, digest *u64) int {
-    let h u64 = mb_hash_init();
-    if (mb_hash_file(&h, path) != 0) { return -1; }
-    digest[0] = h;
-    return 0;
+    let h u64 = mb_hash_init()
+    if (mb_hash_file(&h, path) != 0) { return -1 }
+    digest[0] = h
+    return 0
 }
 
 // li_lib_find_path：按 realpath 去重，返回已有库下标或 -1。
 fn li_lib_find_path(off int, plen int) int {
-    let i int = 0;
+    let i int = 0
     for i < li_lib_n {
         if (li_lib[i].path_len == plen
             && li_name_eq(li_lib[i].path_off, li_lib[i].path_len, off, plen) != 0) {
-            return i;
+            return i
         }
-        i += 1;
+        i += 1
     }
-    return -1;
+    return -1
 }
 
 // li_lib_push：追加一个已校验库。
 fn li_lib_push(path_off int, path_len int, orig_off int, orig_len int,
     group_off int, group_len int, line int, kind int, whole int, digest u64) int {
     if (li_lib_n == li_lib_cap) {
-        let ncap int = li_lib_cap * 2;
-        if (ncap == 0) { ncap = 8; }
-        let next *LinkLib = malloc((ncap * sizeof(LinkLib)).to_type(u64))
-            .to_type(*LinkLib);
-        if (next == 0) { return gen.fail("链接库清单内存分配失败"); }
+        let ncap int = li_lib_cap * 2
+        if (ncap == 0) { ncap = 8 }
+        let next *LinkLib = malloc((ncap * sizeof(LinkLib)).to_type(u64)) .
+            to_type(*LinkLib)
+        if (next == 0) { return gen.fail("链接库清单内存分配失败") }
         if (li_lib_n > 0) {
-            memcpy(next, li_lib, (li_lib_n * sizeof(LinkLib)).to_type(u64));
-            free(li_lib.to_type(*void));
+            memcpy(next, li_lib, (li_lib_n * sizeof(LinkLib)).to_type(u64))
+            free(li_lib.to_type(*void))
         }
-        li_lib = next;
-        li_lib_cap = ncap;
+        li_lib = next
+        li_lib_cap = ncap
     }
-    li_lib[li_lib_n].path_off = path_off;
-    li_lib[li_lib_n].path_len = path_len;
-    li_lib[li_lib_n].orig_off = orig_off;
-    li_lib[li_lib_n].orig_len = orig_len;
-    li_lib[li_lib_n].group_off = group_off;
-    li_lib[li_lib_n].group_len = group_len;
-    li_lib[li_lib_n].line = line;
-    li_lib[li_lib_n].kind = kind;
-    li_lib[li_lib_n].whole = whole;
-    li_lib[li_lib_n].digest = digest;
-    li_lib_n += 1;
-    return 0;
+    li_lib[li_lib_n].path_off = path_off
+    li_lib[li_lib_n].path_len = path_len
+    li_lib[li_lib_n].orig_off = orig_off
+    li_lib[li_lib_n].orig_len = orig_len
+    li_lib[li_lib_n].group_off = group_off
+    li_lib[li_lib_n].group_len = group_len
+    li_lib[li_lib_n].line = line
+    li_lib[li_lib_n].kind = kind
+    li_lib[li_lib_n].whole = whole
+    li_lib[li_lib_n].digest = digest
+    li_lib_n += 1
+    return 0
 }
 
 // li_parse_u64：解析十进制 u64，遇到非数字停止。
 fn li_parse_u64(data *u8, n int, pos *int, value *u64) int {
-    let v u64 = 0;
-    let digits int = 0;
+    let v u64 = 0
+    let digits int = 0
     for pos[0] < n {
-        let b u8 = data[pos[0]];
-        if (b < '0' || b > '9') { break; }
-        v = v * 10 + (b - '0').to_type(u64);
-        digits += 1;
-        pos[0] += 1;
+        let b u8 = data[pos[0]]
+        if (b < '0' || b > '9') { break }
+        v = v * 10 + (b - '0').to_type(u64)
+        digits += 1
+        pos[0] += 1
     }
-    value[0] = v;
-    return digits > 0 ? 0 : -1;
+    value[0] = v
+    return digits > 0 ? 0 : -1
 }
 
 // li_hex_value：单个十六进制字符。
 fn li_hex_value(b u8) int {
-    if (b >= '0' && b <= '9') { return (b - '0').to_type(int); }
-    if (b >= 'a' && b <= 'f') { return (b - 'a' + 10).to_type(int); }
-    return -1;
+    if (b >= '0' && b <= '9') { return (b - '0').to_type(int) }
+    if (b >= 'a' && b <= 'f') { return (b - 'a' + 10).to_type(int) }
+    return -1
 }
 
 // li_manifest_lookup：在旧 manifest 中查找同路径且 mtime/size 相同的摘要。
 fn li_manifest_lookup(data *u8, n int, path *char, path_len int,
     sec u64, nsec u64, size u64, digest *u64) int {
-    let pos int = 0;
+    let pos int = 0
     for pos < n {
-        let line_start int = pos;
-        let line_end int = pos;
-        for line_end < n && data[line_end] != 10 { line_end += 1; }
-        pos = line_end < n ? line_end + 1 : line_end;
-        let p int = line_start;
-        let s0 u64 = 0;
-        let s1 u64 = 0;
-        let s2 u64 = 0;
+        let line_start int = pos
+        let line_end int = pos
+        for line_end < n && data[line_end] != 10 { line_end += 1 }
+        pos = line_end < n ? line_end + 1 : line_end
+        let p int = line_start
+        let s0 u64 = 0
+        let s1 u64 = 0
+        let s2 u64 = 0
         if (li_parse_u64(data, line_end, &p, &s0) != 0 || p >= line_end
-            || data[p] != ' ') { continue; }
-        p += 1;
+            || data[p] != ' ') { continue }
+        p += 1
         if (li_parse_u64(data, line_end, &p, &s1) != 0 || p >= line_end
-            || data[p] != ' ') { continue; }
-        p += 1;
+            || data[p] != ' ') { continue }
+        p += 1
         if (li_parse_u64(data, line_end, &p, &s2) != 0 || p >= line_end
-            || data[p] != ' ') { continue; }
-        p += 1;
-        if (p + 16 > line_end || data[p + 16] != ' ') { continue; }
-        let d u64 = 0;
-        let ok int = 1;
-        let h int = 0;
+            || data[p] != ' ') { continue }
+        p += 1
+        if (p + 16 > line_end || data[p + 16] != ' ') { continue }
+        let d u64 = 0
+        let ok int = 1
+        let h int = 0
         for h < 16 {
-            let v int = li_hex_value(data[p + h]);
-            if (v < 0) { ok = 0; break; }
-            d = (d << 4) | v.to_type(u64);
-            h += 1;
+            let v int = li_hex_value(data[p + h])
+            if (v < 0) { ok = 0; break }
+            d = (d << 4) | v.to_type(u64)
+            h += 1
         }
-        if (ok == 0) { continue; }
-        p += 17;
-        let rest int = line_end - p;
-        if (rest != path_len) { continue; }
-        let k int = 0;
-        let same int = 1;
+        if (ok == 0) { continue }
+        p += 17
+        let rest int = line_end - p
+        if (rest != path_len) { continue }
+        let k int = 0
+        let same int = 1
         for k < rest {
-            if (data[p + k] != path[k].to_type(u8)) { same = 0; break; }
-            k += 1;
+            if (data[p + k] != path[k].to_type(u8)) { same = 0; break }
+            k += 1
         }
-        if (same == 0) { continue; }
-        if (s0 != sec || s1 != nsec || s2 != size) { continue; }
-        digest[0] = d;
-        return 1;
+        if (same == 0) { continue }
+        if (s0 != sec || s1 != nsec || s2 != size) { continue }
+        digest[0] = d
+        return 1
     }
-    return 0;
+    return 0
 }
 
 // li_manifest_append：把本次选中库的记录追加到新 manifest。
 fn li_manifest_append(buf **u8, n *int, cap *int, path *char, path_len int,
     sec u64, nsec u64, size u64, digest u64) int {
-    let line [1600]u8;
-    let ln int = 0;
-    ln = gen.append_int(line, ln, sec.to_type(int));
-    ln = gen.append_byte(line, ln, ' ');
-    ln = gen.append_int(line, ln, nsec.to_type(int));
-    ln = gen.append_byte(line, ln, ' ');
-    ln = gen.append_int(line, ln, size.to_type(int));
-    ln = gen.append_byte(line, ln, ' ');
-    ln = mb_hash_hex(digest, &line[ln]);
-    ln += 16;
-    ln = gen.append_byte(line, ln, ' ');
-    let i int = 0;
+    let line [1600]u8
+    let ln int = 0
+    ln = gen.append_int(line, ln, sec.to_type(int))
+    ln = gen.append_byte(line, ln, ' ')
+    ln = gen.append_int(line, ln, nsec.to_type(int))
+    ln = gen.append_byte(line, ln, ' ')
+    ln = gen.append_int(line, ln, size.to_type(int))
+    ln = gen.append_byte(line, ln, ' ')
+    ln = mb_hash_hex(digest, &line[ln])
+    ln += 16
+    ln = gen.append_byte(line, ln, ' ')
+    let i int = 0
     for i < path_len {
-        line[ln] = path[i].to_type(u8);
-        ln += 1;
-        i += 1;
+        line[ln] = path[i].to_type(u8)
+        ln += 1
+        i += 1
     }
-    line[ln] = 10;
-    ln += 1;
-    return li_append_bytes(buf, n, cap, &line[0], ln);
+    line[ln] = 10
+    ln += 1
+    return li_append_bytes(buf, n, cap, &line[0], ln)
 }
 
 // li_manifest_path：.build/manifest/link-libs.manifest。
 fn li_manifest_path(build_off int, build_len int, out *u8) int {
-    let n int = 0;
-    n = gen.append_str(out, n, pj_pool_str(build_off));
-    n = gen.append_str(out, n, "/manifest/link-libs.manifest");
-    out[n] = 0;
-    return 0;
+    let n int = 0
+    n = gen.append_str(out, n, pj_pool_str(build_off))
+    n = gen.append_str(out, n, "/manifest/link-libs.manifest")
+    out[n] = 0
+    return 0
 }
 
 // li_rt_push：追加一个运行库参数。
 fn li_rt_push(off int, plen int) int {
     if (li_rt_n == li_rt_cap) {
-        let ncap int = li_rt_cap * 2;
-        if (ncap == 0) { ncap = 8; }
-        let no *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
-        let nl *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int);
-        if (no == 0 || nl == 0) { return gen.fail("运行库参数表内存分配失败"); }
+        let ncap int = li_rt_cap * 2
+        if (ncap == 0) { ncap = 8 }
+        let no *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        let nl *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (no == 0 || nl == 0) { return gen.fail("运行库参数表内存分配失败") }
         if (li_rt_n > 0) {
-            memcpy(no, li_rt_off, (li_rt_n * sizeof(int)).to_type(u64));
-            memcpy(nl, li_rt_len, (li_rt_n * sizeof(int)).to_type(u64));
-            free(li_rt_off.to_type(*void));
-            free(li_rt_len.to_type(*void));
+            memcpy(no, li_rt_off, (li_rt_n * sizeof(int)).to_type(u64))
+            memcpy(nl, li_rt_len, (li_rt_n * sizeof(int)).to_type(u64))
+            free(li_rt_off.to_type(*void))
+            free(li_rt_len.to_type(*void))
         }
-        li_rt_off = no;
-        li_rt_len = nl;
-        li_rt_cap = ncap;
+        li_rt_off = no
+        li_rt_len = nl
+        li_rt_cap = ncap
     }
-    li_rt_off[li_rt_n] = off;
-    li_rt_len[li_rt_n] = plen;
-    li_rt_n += 1;
-    return 0;
+    li_rt_off[li_rt_n] = off
+    li_rt_len[li_rt_n] = plen
+    li_rt_n += 1
+    return 0
 }
 
 // li_runtime_prepare：读取构建机运行库参数文件；未设置时保持空。
 // 文件属于构建环境，不编进种子；普通项目不设置该变量。
 fn li_runtime_prepare() int {
-    let gs *gen.GenState = gen.G();
-    li_rt_n = 0;
-    let env_off int = -1;
-    let env_len int = 0;
+    let gs *gen.GenState = gen.G()
+    li_rt_n = 0
+    let env_off int = -1
+    let env_len int = 0
     if (pj_env_fetch("YH_LINK_RUNTIME_FLAGS", &env_off, &env_len) != 0) {
-        return -1;
+        return -1
     }
-    if (env_len == 0) { return 0; }
-    let path *char = pj_pool_str(env_off);
+    if (env_len == 0) { return 0 }
+    let path *char = pj_pool_str(env_off)
     if (gen.read_source(path) != 0) {
-        return gen.fail_path("无法读取运行库参数文件: ", path);
+        return gen.fail_path("无法读取运行库参数文件: ", path)
     }
-    let pos int = 0;
-    let n int = gs.task.c_src_len;
+    let pos int = 0
+    let n int = gs.task.c_src_len
     for pos < n {
-        let start int = pos;
-        for pos < n && gs.task.c_src[pos] != 10 { pos += 1; }
-        let end int = pos;
-        if (end > start && gs.task.c_src[end - 1] == 13) { end -= 1; }
+        let start int = pos
+        for pos < n && gs.task.c_src[pos] != 10 { pos += 1 }
+        let end int = pos
+        if (end > start && gs.task.c_src[end - 1] == 13) { end -= 1 }
         if (end > start) {
-            let off int = gen.tml_intern_str(gs.task.c_src, start, end - start);
-            if (off < 0 || li_rt_push(off, end - start) != 0) { return -1; }
+            let off int = gen.tml_intern_str(gs.task.c_src, start, end - start)
+            if (off < 0 || li_rt_push(off, end - start) != 0) { return -1 }
         }
-        if (pos < n) { pos += 1; }
+        if (pos < n) { pos += 1 }
     }
-    return 0;
+    return 0
 }
 
 // li_runtime_count：运行库参数数量。
-fn li_runtime_count() int { return li_rt_n; }
+fn li_runtime_count() int { return li_rt_n }
 
 // li_runtime_flag：第 i 个运行库参数（NUL 字符串）。
 fn li_runtime_flag(i int) *char {
-    if (i < 0 || i >= li_rt_n) { return 0.to_type(*char); }
-    return pj_pool_str(li_rt_off[i]);
+    if (i < 0 || i >= li_rt_n) { return 0.to_type(*char) }
+    return pj_pool_str(li_rt_off[i])
 }
 
 // li_runtime_hash：把运行库参数纳入链接键。
 fn li_runtime_hash(h *u64) void {
-    let i int = 0;
+    let i int = 0
     for i < li_rt_n {
-        let p *char = pj_pool_str(li_rt_off[i]);
-        let k int = 0;
+        let p *char = pj_pool_str(li_rt_off[i])
+        let k int = 0
         for k < li_rt_len[i] {
-            mb_fnv(h, p[k].to_type(u8));
-            k += 1;
+            mb_fnv(h, p[k].to_type(u8))
+            k += 1
         }
-        mb_fnv(h, 0);
-        i += 1;
+        mb_fnv(h, 0)
+        i += 1
     }
 }
 
 // li_prepare：合并组、选择库、校验并准备链接缓存输入。
 fn li_prepare(proj int, build_off int, build_len int) int {
-    let gs *gen.GenState = gen.G();
-    li_lib_n = 0;
-    if (li_runtime_prepare() != 0) { return -1; }
-    if (li_effective_groups(proj) != 0) { return -1; }
+    let gs *gen.GenState = gen.G()
+    li_lib_n = 0
+    if (li_runtime_prepare() != 0) { return -1 }
+    if (li_effective_groups(proj) != 0) { return -1 }
     // 没有 [link] 组且没有显式选择时，不触碰 manifest；普通项目保持零开销。
-    if (li_eff_n == 0 && li_select_n == 0) { return 0; }
-    let manifest [700]u8;
-    li_manifest_path(build_off, build_len, &manifest[0]);
-    let old *u8 = 0;
-    let old_n int = 0;
+    if (li_eff_n == 0 && li_select_n == 0) { return 0 }
+    let manifest [700]u8
+    li_manifest_path(build_off, build_len, &manifest[0])
+    let old *u8 = 0
+    let old_n int = 0
     if (pj_file_exists(gen.arr_cstr(&manifest[0])) != 0) {
-        if (gen.read_source(gen.arr_cstr(&manifest[0])) != 0) { return -1; }
-        old_n = gs.task.c_src_len;
-        old = malloc((old_n + 1).to_type(u64)).to_type(*u8);
-        if (old == 0) { return gen.fail("链接库 manifest 缓冲分配失败"); }
-        if (old_n > 0) { memcpy(old, gs.task.c_src, old_n.to_type(u64)); }
-        old[old_n] = 0;
+        if (gen.read_source(gen.arr_cstr(&manifest[0])) != 0) { return -1 }
+        old_n = gs.task.c_src_len
+        old = malloc((old_n + 1).to_type(u64)).to_type(*u8)
+        if (old == 0) { return gen.fail("链接库 manifest 缓冲分配失败") }
+        if (old_n > 0) { memcpy(old, gs.task.c_src, old_n.to_type(u64)) }
+        old[old_n] = 0
     }
-    let out *u8 = 0;
-    let out_n int = 0;
-    let out_cap int = 0;
-    let gi int = 0;
+    let out *u8 = 0
+    let out_n int = 0
+    let out_cap int = 0
+    let gi int = 0
     for gi < li_eff_n {
-        let selected int = li_select_n == 0 ? 1 : 0;
-        let group_idx int = li_eff[gi];
-        let group gen.PLinkGroup = li_group_at(proj, group_idx);
+        let selected int = li_select_n == 0 ? 1 : 0
+        let group_idx int = li_eff[gi]
+        let group gen.PLinkGroup = li_group_at(proj, group_idx)
         if (selected == 0) {
-            let si int = 0;
+            let si int = 0
             for si < li_select_n {
                 if (li_name_eq(group.name_off, group.name_len,
                     li_select_off[si], li_select_len[si]) != 0) {
-                    selected = 1;
-                    break;
+                    selected = 1
+                    break
                 }
-                si += 1;
+                si += 1
             }
         }
-        if (selected == 0) { gi += 1; continue; }
-        let ii int = 0;
+        if (selected == 0) { gi += 1; continue }
+        let ii int = 0
         for ii < group.item_n {
-            let item gen.PLinkItem = group.items[ii];
-            let full [4096]u8;
+            let item gen.PLinkItem = group.items[ii]
+            let full [4096]u8
             if (li_build_path(proj, &item, &full[0], 4096) != 0) {
-                return li_error(proj, &group, &item, "库文件路径过长");
+                return li_error(proj, &group, &item, "库文件路径过长")
             }
-            let roff int = 0;
-            let rlen int = 0;
+            let roff int = 0
+            let rlen int = 0
             if (li_realpath(gen.arr_cstr(&full[0]), &roff, &rlen) != 0) {
-                return li_error(proj, &group, &item, "库文件不存在或无法解析");
+                return li_error(proj, &group, &item, "库文件不存在或无法解析")
             }
-            if (li_lib_find_path(roff, rlen) >= 0) { ii += 1; continue; }
-            let kind int = li_kind_from_path(item.orig_off, item.orig_len);
+            if (li_lib_find_path(roff, rlen) >= 0) { ii += 1; continue }
+            let kind int = li_kind_from_path(item.orig_off, item.orig_len)
             if (kind == 0) {
                 return li_error(proj, &group, &item,
-                    "库文件后缀不符合当前目标（.a/.so/.dylib/.tbd）");
+                    "库文件后缀不符合当前目标（.a/.so/.dylib/.tbd）")
             }
             if (group.whole != 0 && kind != 1) {
                 return li_error(proj, &group, &item,
-                    "whole 加载只适用于 .a 静态库");
+                    "whole 加载只适用于 .a 静态库")
             }
-            let rpath *char = pj_pool_str(roff);
+            let rpath *char = pj_pool_str(roff)
             if (li_check_format(proj, &group, &item, rpath, kind,
-                item.orig_off, item.orig_len) != 0) { return -1; }
-            let sec u64 = 0;
-            let nsec u64 = 0;
-            let size u64 = 0;
+                item.orig_off, item.orig_len) != 0) { return -1 }
+            let sec u64 = 0
+            let nsec u64 = 0
+            let size u64 = 0
             if (li_stat_file(rpath, &sec, &nsec, &size) != 0) {
-                return li_error(proj, &group, &item, "无法读取库文件状态");
+                return li_error(proj, &group, &item, "无法读取库文件状态")
             }
-            let digest u64 = 0;
-            let found int = 0;
+            let digest u64 = 0
+            let found int = 0
             if (old != 0) {
                 found = li_manifest_lookup(old, old_n, rpath, rlen,
-                    sec, nsec, size, &digest);
+                    sec, nsec, size, &digest)
             }
             if (found == 0 && li_digest_file(rpath, &digest) != 0) {
-                return li_error(proj, &group, &item, "计算库文件摘要失败");
+                return li_error(proj, &group, &item, "计算库文件摘要失败")
             }
             if (li_lib_push(roff, rlen, item.orig_off, item.orig_len,
                 group.name_off, group.name_len, item.line, kind,
                 group.whole, digest) != 0) {
-                return -1;
+                return -1
             }
             if (li_manifest_append(&out, &out_n, &out_cap, rpath, rlen,
-                sec, nsec, size, digest) != 0) { return -1; }
-            ii += 1;
+                sec, nsec, size, digest) != 0) { return -1 }
+            ii += 1
         }
-        gi += 1;
+        gi += 1
     }
     if (li_select_n > 0) {
-        let si2 int = 0;
+        let si2 int = 0
         for si2 < li_select_n {
             if (li_find_effective(proj, li_select_off[si2],
                 li_select_len[si2]) < 0) {
                 return li_unknown_group(proj, li_select_off[si2],
-                    li_select_len[si2]);
+                    li_select_len[si2])
             }
-            si2 += 1;
+            si2 += 1
         }
     }
     if (mb_write_manifest(gen.arr_cstr(&manifest[0]), out, out_n) != 0) {
-        return -1;
+        return -1
     }
-    if (old != 0) { free(old.to_type(*void)); }
-    if (out != 0) { free(out.to_type(*void)); }
-    return 0;
+    if (old != 0) { free(old.to_type(*void)) }
+    if (out != 0) { free(out.to_type(*void)) }
+    return 0
 }
 
 // li_manifest_mode：根项目是否使用 [link] 清单闭包（存在任何组即视为清单模式）。
 fn li_manifest_mode(proj int) int {
-    if (proj < 0 || proj >= gen.G().p_proj_n) { return 0; }
-    return gen.G().p_projs[proj].link_group_n > 0 ? 1 : 0;
+    if (proj < 0 || proj >= gen.G().p_proj_n) { return 0 }
+    return gen.G().p_projs[proj].link_group_n > 0 ? 1 : 0
 }
 
 // li_count：本次最终链接的库数量。
-fn li_count() int { return li_lib_n; }
+fn li_count() int { return li_lib_n }
 
 // li_path：第 i 个库的 realpath 绝对路径。
 fn li_path(i int) *char {
-    if (i < 0 || i >= li_lib_n) { return 0; }
-    return pj_pool_str(li_lib[i].path_off);
+    if (i < 0 || i >= li_lib_n) { return 0 }
+    return pj_pool_str(li_lib[i].path_off)
 }
 
 // li_kind：1 静态；2 共享。
 fn li_kind(i int) int {
-    if (i < 0 || i >= li_lib_n) { return 0; }
-    return li_lib[i].kind;
+    if (i < 0 || i >= li_lib_n) { return 0 }
+    return li_lib[i].kind
 }
 
 // li_whole：第 i 个库是否整库加载。
 fn li_whole(i int) int {
-    if (i < 0 || i >= li_lib_n) { return 0; }
-    return li_lib[i].whole;
+    if (i < 0 || i >= li_lib_n) { return 0 }
+    return li_lib[i].whole
 }
 
 // li_hash：把库顺序、路径、类型与内容摘要纳入链接键。
 fn li_hash(h *u64) void {
-    let i int = 0;
+    let i int = 0
     for i < li_lib_n {
-        let p *char = pj_pool_str(li_lib[i].path_off);
-        let k int = 0;
+        let p *char = pj_pool_str(li_lib[i].path_off)
+        let k int = 0
         for k < li_lib[i].path_len {
-            mb_fnv(h, p[k].to_type(u8));
-            k += 1;
+            mb_fnv(h, p[k].to_type(u8))
+            k += 1
         }
-        mb_fnv(h, 0);
-        mb_fnv(h, li_lib[i].kind.to_type(u8));
-        mb_fnv(h, li_lib[i].whole.to_type(u8));
-        let d u64 = li_lib[i].digest;
-        let b int = 0;
+        mb_fnv(h, 0)
+        mb_fnv(h, li_lib[i].kind.to_type(u8))
+        mb_fnv(h, li_lib[i].whole.to_type(u8))
+        let d u64 = li_lib[i].digest
+        let b int = 0
         for b < 8 {
-            mb_fnv(h, (d & 255).to_type(u8));
-            d = d >> 8;
-            b += 1;
+            mb_fnv(h, (d & 255).to_type(u8))
+            d = d >> 8
+            b += 1
         }
-        i += 1;
+        i += 1
     }
-    li_runtime_hash(h);
+    li_runtime_hash(h)
 }
 
 // li_runtime_path：拼接选中共享库目录，供 yh run 子进程搜索。
 // .a 与链接期 .tbd 不产生运行时目录。
 fn li_runtime_path() *char {
-    let gs *gen.GenState = gen.G();
-    let out [8192]u8;
-    let n int = 0;
-    let li int = 0;
+    let gs *gen.GenState = gen.G()
+    let out [8192]u8
+    let n int = 0
+    let li int = 0
     for li < li_lib_n {
-        if (li_lib[li].kind != 2) { li += 1; continue; }
-        let path *char = pj_pool_str(li_lib[li].path_off);
-        let plen int = li_lib[li].path_len;
+        if (li_lib[li].kind != 2) { li += 1; continue }
+        let path *char = pj_pool_str(li_lib[li].path_off)
+        let plen int = li_lib[li].path_len
         if (li_ends_with(li_lib[li].orig_off, li_lib[li].orig_len, ".tbd") != 0) {
-            li += 1;
-            continue;
+            li += 1
+            continue
         }
-        let slash int = -1;
-        let k int = 0;
+        let slash int = -1
+        let k int = 0
         for k < plen {
-            if (path[k] == '/') { slash = k; }
-            k += 1;
+            if (path[k] == '/') { slash = k }
+            k += 1
         }
-        if (slash <= 0) { li += 1; continue; }
-        let in_dir int = 0;
-        let s int = 0;
+        if (slash <= 0) { li += 1; continue }
+        let in_dir int = 0
+        let s int = 0
         for s < n {
-            let e int = s;
-            for e < n && out[e] != ':' { e += 1; }
+            let e int = s
+            for e < n && out[e] != ':' { e += 1 }
             if (e - s == slash) {
-                let same int = 1;
-                let q int = 0;
+                let same int = 1
+                let q int = 0
                 for q < slash {
-                    if (out[s + q] != path[q].to_type(u8)) { same = 0; break; }
-                    q += 1;
+                    if (out[s + q] != path[q].to_type(u8)) { same = 0; break }
+                    q += 1
                 }
-                if (same != 0) { in_dir = 1; break; }
+                if (same != 0) { in_dir = 1; break }
             }
-            s = e + 1;
+            s = e + 1
         }
         if (in_dir == 0) {
-            if (n > 0) { out[n] = ':'; n += 1; }
-            let q2 int = 0;
+            if (n > 0) { out[n] = ':'; n += 1 }
+            let q2 int = 0
             for q2 < slash {
-                out[n] = path[q2].to_type(u8);
-                n += 1;
-                q2 += 1;
+                out[n] = path[q2].to_type(u8)
+                n += 1
+                q2 += 1
             }
         }
-        li += 1;
+        li += 1
     }
-    out[n] = 0;
-    let o int = gen.tml_intern_str(&out[0], 0, n);
-    if (o < 0) { return 0.to_type(*char); }
-    return pj_pool_str(o);
+    out[n] = 0
+    let o int = gen.tml_intern_str(&out[0], 0, n)
+    if (o < 0) { return 0.to_type(*char) }
+    return pj_pool_str(o)
 }
 
 // li_apply_runtime_env：yh run 临时追加共享库目录到宿主加载器变量。
 fn li_apply_runtime_env() int {
-    let dirs *char = li_runtime_path();
-    if (dirs == 0 || dirs[0] == 0) { return 0; }
-    let name *char = gen.tg_host_darwin() != 0
-        ? "DYLD_LIBRARY_PATH" : "LD_LIBRARY_PATH";
-    let old *char = getenv(name);
-    let buf [16384]u8;
-    let n int = 0;
+    let dirs *char = li_runtime_path()
+    if (dirs == 0 || dirs[0] == 0) { return 0 }
+    let name *char = gen.tg_host_darwin() != 0 ?
+        "DYLD_LIBRARY_PATH" : "LD_LIBRARY_PATH"
+    let old *char = getenv(name)
+    let buf [16384]u8
+    let n int = 0
     if (old != 0) {
-        let i int = 0;
+        let i int = 0
         for old[i] != 0 && n < 16000 {
-            buf[n] = old[i].to_type(u8);
-            n += 1;
-            i += 1;
+            buf[n] = old[i].to_type(u8)
+            n += 1
+            i += 1
         }
-        if (n > 0) { buf[n] = ':'; n += 1; }
+        if (n > 0) { buf[n] = ':'; n += 1 }
     }
-    let k int = 0;
+    let k int = 0
     for dirs[k] != 0 && n < 16380 {
-        buf[n] = dirs[k].to_type(u8);
-        n += 1;
-        k += 1;
+        buf[n] = dirs[k].to_type(u8)
+        n += 1
+        k += 1
     }
-    buf[n] = 0;
+    buf[n] = 0
     if (setenv(name, gen.arr_cstr(&buf[0]), 1) != 0) {
-        return gen.fail("无法设置运行时共享库搜索路径");
+        return gen.fail("无法设置运行时共享库搜索路径")
     }
-    return 0;
+    return 0
 }

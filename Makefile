@@ -45,6 +45,10 @@ ifndef TOP
  TOP = .
  INCLUDED = no
 TOPSRC = $(TOP)
+# LLVM 闭包缓存根：显式 YH_LLVM_CACHE 优先，否则仓库 tmp/llvm-migration，
+# 再否则复用同一 Git 仓库主 worktree 的缓存（见 tools/llvm_cache.py）。
+YH_LLVM_CACHE ?= $(shell python3 $(TOPSRC)/tools/llvm_cache.py 2>/dev/null || echo $(TOPSRC)/tmp/llvm-migration)
+export YH_LLVM_CACHE
 
 EXESUF =
 ifeq ($(shell uname -s),Darwin)
@@ -107,7 +111,9 @@ YH_PREREQ = $(SEED)
 # 665ms→464ms、整用例 939ms→703ms（约 −25%）。
 # FAST_STAGE=0 关闭暂存，改回直接用仓库根 $(YH)。
 FAST_STAGE ?= 1
-FAST_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/yh-fast
+# 每次 CI run 独占一个快速目录：同机并发跑多个 run 时共用 /tmp/yh-fast 会让
+# stage-yh 互相覆盖（release 与分支门同时跑时出现过 selfhost 探针读错二进制）。
+FAST_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/yh-fast$(if $(GITHUB_RUN_ID),-$(GITHUB_RUN_ID))
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
 YH_RUN = $(abspath $(YH))
 RUN_WORK_FLAG =
@@ -170,7 +176,7 @@ ifeq ($(HOST_SYSTEM),Darwin)
  export YH_DARWIN_SDK = $(abspath compiler/darwin-sdk)
  # 固定 SDK 一旦准备好，就用它的 SDKROOT：自举闭包末尾的 -lc++ 只能由宿主
  # 真实 SDK 解析（bundled stub 不含 libc++）。显式 SDKROOT 仍然优先。
- DARWIN_SDK_RECORD = $(TOPSRC)/tmp/llvm-migration/darwin-sdk/sdk-darwin-aarch64/host.json
+ DARWIN_SDK_RECORD = $(YH_LLVM_CACHE)/darwin-sdk/sdk-darwin-aarch64/host.json
  ifneq ($(wildcard $(DARWIN_SDK_RECORD)),)
   export SDKROOT ?= $(shell python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sdk_root"])' '$(DARWIN_SDK_RECORD)')
  endif
@@ -264,6 +270,16 @@ fetch-seed:
 # 产物形态随宿主（Darwin → Mach-O，Linux → ELF）。
 # LLVM_HOST_FLAGS 决定是否把静态 LLVM 桥链进 $(YH)；宿主不可用时只警告并
 # 回退旧路径，绝不让 LLVM 成为构建失败点。
+# 仓库内 tmp/llvm-migration 必须指向缓存根：compiler/project.toml 的桥库路径
+# 按「仓库/compiler」相对书写，新 worktree 里由这里补上软链（CI 是反向挂载）。
+.PHONY: tmp/llvm-migration
+tmp/llvm-migration:
+	@mkdir -p $(TOPSRC)/tmp
+	@if [ "$(YH_LLVM_CACHE)" != "$(TOPSRC)/tmp/llvm-migration" ]; then \
+	  ln -sfn "$(YH_LLVM_CACHE)" "$(TOPSRC)/tmp/llvm-migration"; \
+	fi
+
+$(YH): | tmp/llvm-migration
 $(YH): $(YH_PREREQ) $(wildcard compiler/*.yh) $(wildcard compiler/*/*.yh) \
 	$(wildcard compiler/llvm/*) $(TOPSRC)/compiler/project.toml \
 	$(TOPSRC)/vendor/llvm/sdk.lock.json $(TOPSRC)/tools/seed-build.py \
