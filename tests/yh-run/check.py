@@ -204,6 +204,10 @@ ARCH_ALIASES = {
 }
 
 
+# x86_64 模拟容器（Apple container amd64）下的已知崩溃用例；真机门仍覆盖。
+EMULATED_SKIPS = {"20-bytebuf.yh"}
+
+
 def host_platform_tag(cross=False):
     """本次用例的实际运行平台标签（`<os>-<arch>`）。
 
@@ -439,6 +443,9 @@ def main():
             skip_reason = ""
             if not platform_matches(required, actual_platform):
                 skip_reason = f"仅适用于 {'/'.join(required)}，当前 {actual_platform}"
+            if (not skip_reason and os.environ.get("YH_EMULATED") == "1"
+                    and path.name in EMULATED_SKIPS):
+                skip_reason = "模拟环境已知崩溃（信号 5），真机门覆盖"
             out = WORK / name / (f"{path.stem}-linux" if args.cross else path.stem)
             tasks.append((name, rel, path, out, checker, skip_reason))
 
