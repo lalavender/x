@@ -2,6 +2,20 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-21 0.0.7 Release：过渡种子与最终发布
+
+- 创建过渡 Release `0.0.7-rc.1`（正常 Release，非 prerelease），上传
+  Darwin/arm64、Linux/aarch64、Linux/x86_64 三端 F1 种子；CircleCI tag
+  流水线通过忽略 `-rc.` tag 避免用旧 0.0.6 种子构建。
+- 打 `0.0.7` tag 后 CircleCI 三端与 `publish` 全绿；三端从
+  `0.0.7-rc.1` 种子自举、跑门禁并发布最终 Release。
+- `tools/fetch-release-seed.py` 修复 Release 返回顺序依赖：显式按
+  `published_at`/`created_at` 倒序，避免 `0.0.7-rc.1` 排在 `0.0.7` 前面。
+- 从 0.0.7 Release 回读三端种子并验证：Darwin `make`、`make selfhost-native`
+  （固定点/自解析/项目 111/111）、Linux 种子哈希与 CI 资产一致。
+- Release 资产：
+  `yh-0.0.7-{darwin-arm64,linux-arm64,linux-x86_64}.tar.gz` 与 `.sha256`。
+
 ## 2026-10-21 F1：编译器自举闭包迁移到 [link]
 
 - `tools/link-closure.py` 从固定宿主记录生成 `compiler/project.toml` 的

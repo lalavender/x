@@ -56,10 +56,12 @@ def api_request(url, token, accept="application/vnd.github+json"):
 
 
 def read_releases(repo, token):
-    """读取最近的 Release；GitHub 已按创建时间倒序返回。"""
+    """读取最近的 Release，并显式按发布时间倒序；不依赖 API 返回顺序。"""
     url = f"{API}/repos/{repo}/releases?per_page=30"
     with api_request(url, token) as response:
-        return json.load(response)
+        releases = json.load(response)
+    return sorted(releases, key=lambda release: release.get("published_at")
+                  or release.get("created_at") or "", reverse=True)
 
 
 def find_asset(repo, token, platform, exclude_tag):

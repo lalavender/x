@@ -89,8 +89,8 @@
 - [x] **F1 LINK3**：compiler 清单与自举脚本已迁移到 `[link]`：归档来自
   清单，运行库参数走 `YH_LINK_RUNTIME_FLAGS`，新编译器 manifest-only；
   Darwin/Linux arm64 固定点与自解析通过；Linux x64 清单已由 x64 宿主生成并
-  通过 `link-closure.py check`，x64 链接冒烟通过。剩余：发布 0.0.7-rc.1
-  过渡 Release（三端种子），再触发 0.0.7 tag 的三端门禁与最终 Release。
+  通过 `link-closure.py check`，三端链接冒烟通过。`0.0.7-rc.1` 过渡 Release
+  与 `0.0.7` 最终 Release 已发布，CircleCI 三端全绿，0.0.7 种子回读验证通过。
 
 ### G. C/C++ 桥迁移到 yh
 
