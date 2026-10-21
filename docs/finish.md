@@ -7238,3 +7238,16 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
 - **验证**：在 `/tmp/yh-cachetest` 新建 worktree（无缓存、不设环境变量）→
   `make llvm-host` 复用主仓库缓存、`make` 构建成功、产物对
   `tests/yh/02-basic/04_newline_terminator.yh` 返回 0；主仓库 `make` 回归正常。
+
+# 2026-10-22 0.0.8 正式发布
+
+- **发布**：`0.0.8` tag 三端发布成功，GitHub Release（非 prerelease）资产齐全：
+  <https://github.com/lalavender/x/releases/tag/0.0.8>。darwin 资产实测含
+  「换行终结语句」并对无分号源码返回 0。
+- **runner 优化**（打 tag 不再起三组 runner）：
+  - `ci.yml` 去掉了 `<ver>-release` 分支触发（release 分支内容等同 rc 末提交，
+    由 tag 发布覆盖），打 tag 时只起一组；
+  - `FAST_DIR` 追加 `$GITHUB_RUN_ID`：同机并发多个 run 时不再共用
+    `/tmp/yh-fast`，否则 `stage-yh` / `--workdir` 互相覆盖，release 的
+    Darwin 任务曾因此误报 `empty 缺少可操作诊断`。
+- 记录：[release-0.0.8.md](01-finished/release-0.0.8.md)。
