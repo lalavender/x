@@ -1,0 +1,81 @@
+module main;
+
+import os;
+
+// osenv 验证显式 envp 查询：缺失、空值、重复键首项、前缀不匹配、值内等号、
+// 非法名字与真实进程环境。合成 envp 不读取开发者私有环境值。
+
+// cstr_equals 比较两个 NUL 结尾字节串，相等返回 1。
+fn cstr_equals(left *char, right *char) int {
+    let index int = 0;
+    for left[index] != 0 || right[index] != 0 {
+        if (left[index] != right[index]) {
+            return 0;
+        }
+        index += 1;
+    }
+    return 1;
+}
+
+// value_is 判断查询结果是否找到且值等于 expected。
+fn value_is(result os.EnvResult, expected *char) int {
+    if (result.found != true || result.error.kind != os.error_none
+        || result.value == 0) {
+        return 0;
+    }
+    return cstr_equals(result.value, expected);
+}
+
+// main 使用三参数入口直接接收 envp，并由 build-check 注入 YH_ENV_TEST。
+pub fn main(argc int, argv **char, envp **char) int {
+    if (argc < 1 || argv == 0 || envp == 0) {
+        return 1;
+    }
+    let table [7]*char = ["A=1", "EMPTY=", "DUP=first", "DUP=second",
+        "PREFIX=no", "LONG=a=b", 0];
+    let synthetic **char = &table[0];
+
+    if (value_is(os.get_env(synthetic, "A"), "1") != 1) {
+        return 2;
+    }
+    if (value_is(os.get_env(synthetic, "EMPTY"), "") != 1) {
+        return 3;
+    }
+    // 重复键取首项。
+    if (value_is(os.get_env(synthetic, "DUP"), "first") != 1) {
+        return 4;
+    }
+    // 值内部可以包含 '='。
+    if (value_is(os.get_env(synthetic, "LONG"), "a=b") != 1) {
+        return 5;
+    }
+    // 缺失不是错误，value 必须为空。
+    let missing os.EnvResult = os.get_env(synthetic, "MISSING");
+    if (missing.found != false || missing.error.kind != os.error_none
+        || missing.value != 0) {
+        return 6;
+    }
+    // 前缀不能误匹配：查 "PRE" 不得命中 "PREFIX"。
+    let prefix os.EnvResult = os.get_env(synthetic, "PRE");
+    if (prefix.found != false || prefix.error.kind != os.error_none) {
+        return 7;
+    }
+    // 非法名字：空名、包含 '='、空 envp、空 name 指针。
+    if (os.get_env(synthetic, "").error.kind
+            != os.error_invalid_argument
+        || os.get_env(synthetic, "A=x").error.kind
+            != os.error_invalid_argument
+        || os.get_env(0, "A").error.kind != os.error_invalid_argument
+        || os.get_env(synthetic, 0).error.kind
+            != os.error_invalid_argument) {
+        return 8;
+    }
+
+    // 真实进程环境由 build-check 的 envp-run 注入。
+    if (value_is(os.get_env(envp, "YH_ENV_TEST"), "present") != 1) {
+        return 9;
+    }
+
+    printf("os env ok\n");
+    return 0;
+}

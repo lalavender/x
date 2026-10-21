@@ -1,0 +1,186 @@
+module main;
+
+import io;
+import os;
+
+// os-demo：用显式 YH_STDLIB 加载标准库，演示文件复制、目录枚举、环境查询
+// 与启动自身子进程。默认安装发现仍未实现；运行方法见 README.md。
+
+let source_path *char = ".yh-os-demo-src";
+let target_path *char = ".yh-os-demo-dst";
+
+// str_equals 比较两个 NUL 结尾字节串。
+fn str_equals(left *char, right *char) int {
+    let index int = 0;
+    for left[index] != 0 || right[index] != 0 {
+        if (left[index] != right[index]) {
+            return 0;
+        }
+        index += 1;
+    }
+    return 1;
+}
+
+// cleanup 删除示例生成的临时文件；错误被忽略。
+fn cleanup() void {
+    os.remove_path(source_path);
+    os.remove_path(target_path);
+}
+
+// write_text 创建/截断文件并写入 NUL 结尾文本。
+fn write_text(path *char, text *char) int {
+    let options os.OpenOptions = os.write_options();
+    options.truncate = true;
+    let opened os.FdResult = os.open_path(path, options);
+    if (opened.fd < 0 || opened.error.kind != os.error_none) {
+        return 1;
+    }
+    if (io.write_all(opened.fd, text, strlen(text).to_type(int)) != 0) {
+        os.close_file(opened.fd);
+        return 2;
+    }
+    if (os.close_file(opened.fd).kind != os.error_none) {
+        return 3;
+    }
+    return 0;
+}
+
+// read_into 读取文件到调用方缓冲并返回实际字节数；失败返回 -1。
+fn read_into(path *char, buffer []u8) int {
+    let opened os.FdResult = os.open_path(path, os.read_options());
+    if (opened.fd < 0 || opened.error.kind != os.error_none) {
+        return -1;
+    }
+    let result os.IoResult = os.read_some(opened.fd, buffer);
+    if (result.error.kind != os.error_none) {
+        os.close_file(opened.fd);
+        return -1;
+    }
+    if (os.close_file(opened.fd).kind != os.error_none) {
+        return -1;
+    }
+    return result.count.to_type(int);
+}
+
+// copy_file 用 64 字节缓冲循环读取/写入，演示短读写与显式关闭。
+fn copy_file(from *char, to *char) int {
+    let input os.FdResult = os.open_path(from, os.read_options());
+    if (input.fd < 0 || input.error.kind != os.error_none) {
+        return 1;
+    }
+    let options os.OpenOptions = os.write_options();
+    options.truncate = true;
+    let output os.FdResult = os.open_path(to, options);
+    if (output.fd < 0 || output.error.kind != os.error_none) {
+        os.close_file(input.fd);
+        return 2;
+    }
+    let buffer [64]u8;
+    for 1 == 1 {
+        let read os.IoResult = os.read_some(input.fd, buffer[0..64]);
+        if (read.error.kind != os.error_none) {
+            os.close_file(input.fd);
+            os.close_file(output.fd);
+            return 3;
+        }
+        if (read.count == 0) {
+            break;
+        }
+        let chunk []u8 = buffer[0..read.count.to_type(int)];
+        let written os.IoResult = os.write_some(output.fd, chunk);
+        if (written.error.kind != os.error_none
+            || written.count != read.count) {
+            os.close_file(input.fd);
+            os.close_file(output.fd);
+            return 4;
+        }
+    }
+    if (os.close_file(input.fd).kind != os.error_none) {
+        os.close_file(output.fd);
+        return 5;
+    }
+    if (os.close_file(output.fd).kind != os.error_none) {
+        return 6;
+    }
+    return 0;
+}
+
+// list_dir 流式枚举目录并逐项打印名称；名称只在下一次读取前有效。
+fn list_dir(path *char) int {
+    let buffer [256]u8;
+    let opened os.DirReaderResult = os.open_dir(path, buffer[0..256]);
+    if (opened.reader.active != 1 || opened.error.kind != os.error_none) {
+        return 1;
+    }
+    for 1 == 1 {
+        let item os.DirEntryResult = os.next_entry(&opened.reader);
+        if (item.status == os.dir_entry_end) {
+            break;
+        }
+        if (item.status == os.dir_entry_error) {
+            os.close_dir(&opened.reader);
+            return 2;
+        }
+        if (io.write_all(1, item.entry.name.to_type(*char),
+            item.entry.name_len.to_type(int)) != 0) {
+            os.close_dir(&opened.reader);
+            return 3;
+        }
+        if (io.write_all(1, "\n", 1) != 0) {
+            os.close_dir(&opened.reader);
+            return 4;
+        }
+    }
+    if (os.close_dir(&opened.reader).kind != os.error_none) {
+        return 5;
+    }
+    return 0;
+}
+
+// main 先处理子模式，再演示环境、复制、目录与 spawn/wait。
+pub fn main(argc int, argv **char, envp **char) int {
+    if (argc < 1 || argv == 0 || envp == 0) {
+        return 1;
+    }
+    if (argc > 1 && str_equals(argv[1], "child") != 0) {
+        os.exit_now(7);
+    }
+    cleanup();
+
+    let path_env os.EnvResult = os.get_env(envp, "PATH");
+    if (path_env.error.kind != os.error_none) {
+        return 2;
+    }
+    if (write_text(source_path, "os demo\n") != 0) {
+        cleanup();
+        return 3;
+    }
+    if (copy_file(source_path, target_path) != 0) {
+        cleanup();
+        return 4;
+    }
+    let content [16]u8;
+    if (read_into(target_path, content[0..16]) != 8) {
+        cleanup();
+        return 5;
+    }
+    if (list_dir(".") != 0) {
+        cleanup();
+        return 6;
+    }
+
+    let child_argv [3]*char = [argv[0], "child", 0];
+    let spawned os.PidResult = os.spawn(argv[0], &child_argv[0], envp);
+    if (spawned.pid <= 0 || spawned.error.kind != os.error_none) {
+        cleanup();
+        return 7;
+    }
+    let waited os.WaitResult = os.wait(spawned.pid);
+    if (waited.state != os.wait_exited || waited.exit_code != 7) {
+        cleanup();
+        return 8;
+    }
+    cleanup();
+    io.println("os demo ok");
+    return 0;
+}

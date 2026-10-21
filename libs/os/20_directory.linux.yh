@@ -1,0 +1,222 @@
+module os;
+
+import sys;
+
+// Linux 目录读取与当前目录接口。
+// 读取器使用调用方提供的字节缓冲区，逐条解析 Linux getdents64 记录；
+// 不一次性分配全部目录项，不保证顺序，不把 DT_UNKNOWN 当作普通文件。
+// 条目名称借用读取器缓冲区，只保证到下一次 next_entry 或 close_dir。
+
+// DirEntryStatus 区分“一个条目 / 已结束 / 失败”三种结果。
+pub enum DirEntryStatus {
+    dir_entry_ok;
+    dir_entry_end;
+    dir_entry_error;
+}
+
+// DirReader 保存目录 fd、调用方缓冲、内核已填字节数与当前记录偏移。
+// 字段公开是为了让读取器可放在调用方栈上；调用方不得直接改写字段，
+// 生命周期结束必须调用 close_dir。active == 0 表示未打开或已关闭。
+pub struct DirReader {
+    fd int;
+    buffer *u8;
+    capacity u64;
+    used u64;
+    cursor u64;
+    active int;
+}
+
+// DirReaderResult 是 open_dir 的结果：成功时 reader.active == 1，
+// 失败时 fd 为 -1 且 error 给出显式分类。
+pub struct DirReaderResult {
+    reader DirReader;
+    error Error;
+}
+
+// DirEntryResult 是 next_entry 的结果：status 为 dir_entry_ok 时 entry 有效，
+// dir_entry_end 表示目录结束，dir_entry_error 时 error 有效。
+pub struct DirEntryResult {
+    status DirEntryStatus;
+    entry DirEntry;
+    error Error;
+}
+
+// empty_entry 返回无效条目的零值视图，供结束/失败结果使用。
+fn empty_entry() DirEntry {
+    return DirEntry{ name: 0, name_len: 0, kind: dir_unknown };
+}
+
+// reader_failure 构造未打开状态的读取器结果。
+fn reader_failure(error Error) DirReaderResult {
+    let reader DirReader;
+    reader.fd = -1;
+    reader.buffer = 0;
+    reader.capacity = 0;
+    reader.used = 0;
+    reader.cursor = 0;
+    reader.active = 0;
+    return DirReaderResult{ reader: reader, error: error };
+}
+
+// dir_error 构造失败的条目结果，entry 固定为空视图。
+fn dir_error(error Error) DirEntryResult {
+    return DirEntryResult{
+        status: dir_entry_error,
+        entry: empty_entry(),
+        error: error
+    };
+}
+
+// dir_end 构造目录结束结果，没有错误。
+fn dir_end() DirEntryResult {
+    return DirEntryResult{
+        status: dir_entry_end,
+        entry: empty_entry(),
+        error: no_error()
+    };
+}
+
+// dir_kind_of 把 Linux d_type 映射为公开分类；4 为目录、8 为普通文件，
+// 其余（含 DT_UNKNOWN）保留 unknown，调用方不得自行猜测为文件。
+fn dir_kind_of(native u8) DirKind {
+    if (native == 4) {
+        return dir_directory;
+    }
+    if (native == 8) {
+        return dir_file;
+    }
+    return dir_unknown;
+}
+
+// open_dir 按 NUL 结尾路径打开目录，缓冲区由调用方提供并借用给读取器。
+// 成功返回 active 读取器并把 fd 所有权交给读取器；空缓冲或打开失败返回错误。
+// 新 fd 默认 O_CLOEXEC，路径不搜索 PATH、不经过 shell。
+pub fn open_dir(path *char, buffer []u8) DirReaderResult {
+    if (len(buffer) == 0) {
+        return reader_failure(make_error(error_invalid_argument, 0));
+    }
+    let result i64 = sys.open_at(sys.AT_FDCWD, path,
+        sys.O_RDONLY | sys.O_DIRECTORY | sys.O_CLOEXEC, 0);
+    if (sys.is_error(result) != 0) {
+        let code int = sys.error_code(result);
+        return reader_failure(error_from_native(code));
+    }
+    let reader DirReader;
+    reader.fd = result.to_type(int);
+    reader.buffer = &buffer[0];
+    reader.capacity = len(buffer);
+    reader.used = 0;
+    reader.cursor = 0;
+    reader.active = 1;
+    return DirReaderResult{ reader: reader, error: no_error() };
+}
+
+// next_entry 返回目录中的下一个普通条目，跳过 "." 与 ".."。
+// 目录结束返回 dir_entry_end；未打开/已关闭、内核错误或损坏记录返回
+// dir_entry_error。名称视图在下一次调用前有效，调用方需要长期保存时复制。
+pub fn next_entry(reader *DirReader) DirEntryResult {
+    if (reader.active == 0) {
+        return dir_error(make_error(error_invalid_argument, 0));
+    }
+    for 1 == 1 {
+        if (reader.cursor >= reader.used) {
+            let fetched i64 = sys.getdents64(reader.fd,
+                reader.buffer.to_type(*void), reader.capacity);
+            if (sys.is_error(fetched) != 0) {
+                let code int = sys.error_code(fetched);
+                return dir_error(error_from_native(code));
+            }
+            if (fetched == 0) {
+                return dir_end();
+            }
+            reader.used = fetched.to_type(u64);
+            reader.cursor = 0;
+        }
+        let pos int = reader.cursor.to_type(int);
+        let record *u8 = reader.buffer + pos;
+        // linux_dirent64：d_reclen 位于偏移 16（小端 u16），d_type 在 18，
+        // d_name 从 19 开始。最小记录必须包含至少一个名称 NUL。
+        let record_len int = record[16].to_type(int)
+            | (record[17].to_type(int) << 8);
+        if (record_len < 20
+            || reader.cursor + record_len.to_type(u64) > reader.used) {
+            reader.cursor = reader.used;
+            return dir_error(make_error(error_other, 0));
+        }
+        let name_len int = 0;
+        for name_len < record_len - 19 && record[19 + name_len] != 0 {
+            name_len += 1;
+        }
+        if (name_len == record_len - 19) {
+            // 记录内没有 NUL 终止符：拒绝继续解析，避免越界读取。
+            reader.cursor = reader.used;
+            return dir_error(make_error(error_other, 0));
+        }
+        if (name_len == 1 && record[19] == 46) {
+            reader.cursor += record_len.to_type(u64);
+            continue;
+        }
+        if (name_len == 2 && record[19] == 46 && record[20] == 46) {
+            reader.cursor += record_len.to_type(u64);
+            continue;
+        }
+        let entry DirEntry;
+        entry.name = record + 19;
+        entry.name_len = name_len.to_type(u64);
+        entry.kind = dir_kind_of(record[18]);
+        reader.cursor += record_len.to_type(u64);
+        return DirEntryResult{
+            status: dir_entry_ok,
+            entry: entry,
+            error: no_error()
+        };
+    }
+    return dir_error(make_error(error_other, 0));
+}
+
+// close_dir 关闭目录并清空读取状态；重复关闭是幂等的并返回成功。
+// close 只调用一次，失败后 fd 可能已经释放，调用方不得继续使用读取器。
+pub fn close_dir(reader *DirReader) Error {
+    // active == 0 覆盖零值读取器与重复关闭：不能把未打开的 fd = 0 当 stdin 关闭。
+    if (reader.active == 0 || reader.fd < 0) {
+        reader.fd = -1;
+        reader.buffer = 0;
+        reader.capacity = 0;
+        reader.used = 0;
+        reader.cursor = 0;
+        reader.active = 0;
+        return no_error();
+    }
+    let result i64 = sys.close_fd(reader.fd);
+    reader.fd = -1;
+    reader.buffer = 0;
+    reader.capacity = 0;
+    reader.used = 0;
+    reader.cursor = 0;
+    reader.active = 0;
+    return error_from_result(result);
+}
+
+// get_cwd 把进程当前工作目录写入调用方缓冲，成功时写入结尾 NUL。
+// 返回的 count 不包含终止 NUL；缓冲不足返回 error_invalid_argument
+// （原生 ERANGE），不隐式扩容，也不返回局部静态缓冲。
+pub fn get_cwd(buffer []u8) IoResult {
+    if (len(buffer) == 0) {
+        return io_error(error_invalid_argument, 0);
+    }
+    let result i64 = sys.get_cwd(slice_address_char(buffer), len(buffer));
+    if (sys.is_error(result) != 0) {
+        let code int = sys.error_code(result);
+        return io_error(error_kind_for(code), code);
+    }
+    if (result <= 0) {
+        return io_error(error_other, 0);
+    }
+    return io_ok((result - 1).to_type(u64));
+}
+
+// change_dir 修改进程全局当前工作目录，成功返回 no_error。
+// 路径为 NUL 结尾字节串；该操作影响整个进程，多线程调用方需自行同步。
+pub fn change_dir(path *char) Error {
+    return error_from_result(sys.change_dir(path));
+}

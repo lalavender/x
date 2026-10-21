@@ -69,6 +69,12 @@
 
 ### E. os/sys 与 libc
 
+- [x] **E0 OS0–OS6 标准库实现（2026-10-21 恢复并验证）**：`libs/sys` 的
+  raw6/文件/目录/内存/时间/进程原语与 `libs/os` 的结果/文件/目录/环境/进程
+  API、io/time 平台拆分、默认标准库发现与安装布局已恢复并跑通。验证：
+  Linux/arm64 容器 15 个 fixture、CLI 9/9、`make test`、`make selfhost-native`
+  （115/115 项目用例）通过。见 `docs/01-finished/yh-os与sys-OS*.md` 与
+  `docs/01-finished/yh-标准库默认发现-2026-10-21.md`。
 - [ ] **E1 OS7 编译器迁移与独立性审计**：编译器改用 `libs/os`/`libs/sys` 的
   接口，减少对 C runtime 的隐式依赖；见[联合设计](03-design/yh-os与sys标准库设计.md)。
 - [ ] **E2 OS8 Darwin 新接口**：Darwin 侧补齐目录/进程/时间等新接口，与 Linux

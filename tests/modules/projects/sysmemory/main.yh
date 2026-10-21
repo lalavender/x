@@ -1,0 +1,39 @@
+module main;
+
+import sys;
+
+// 本用例只在 Linux 宿主运行，验证匿名 mmap/munmap、跨页写入与失败判定。
+// 映射长度 8192 在常见页大小下至少跨一页；不假设固定 4 KiB 页。
+
+// main 覆盖匿名映射、首尾写入读回、解除映射与零长度 EINVAL。
+pub fn main() int {
+    let mapped i64 = sys.map_memory(0, 8192,
+        sys.PROT_READ | sys.PROT_WRITE,
+        sys.MAP_PRIVATE | sys.MAP_ANONYMOUS, -1, 0);
+    if (sys.is_error(mapped) != 0) {
+        return 1;
+    }
+    let memory *u8 = mapped.to_type(*u8);
+    memory[0] = 65;
+    memory[4095] = 66;
+    memory[4096] = 67;
+    memory[8191] = 68;
+    if (memory[0] != 65 || memory[4095] != 66
+        || memory[4096] != 67 || memory[8191] != 68) {
+        sys.unmap_memory(memory.to_type(*void), 8192);
+        return 2;
+    }
+    if (sys.unmap_memory(memory.to_type(*void), 8192) != 0) {
+        return 3;
+    }
+
+    // 零长度映射必须由内核判 EINVAL，而不是在 sys 层提前返回成功。
+    let bad i64 = sys.map_memory(0, 0, sys.PROT_READ,
+        sys.MAP_PRIVATE | sys.MAP_ANONYMOUS, -1, 0);
+    if (sys.is_error(bad) != 1 || sys.error_code(bad) != sys.EINVAL) {
+        return 4;
+    }
+
+    printf("sys memory ok\n");
+    return 0;
+}

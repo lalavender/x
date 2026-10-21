@@ -30,10 +30,12 @@ YH_STDLIB=/path/to/yh/libs yh run
 | API | 契约 |
 | --- | --- |
 | `write_all(fd int, data *char, byte_count int) int` | 写完全部字节返回 0；长度为负、底层写入失败或返回零时返回 -1；循环处理短写，不重试被信号中断的写入 |
+| `write_all_result(fd int, data *char, byte_count int) os.IoResult` | 完整写入并保留短写/EINTR/EAGAIN 前的已写进度与显式错误 |
 | `print(text *char) int` | 将 NUL 结尾字符串写到标准输出，不追加换行；成功返回 0，失败返回 -1 |
 | `println(text *char) int` | 写字符串并追加一个换行；成功返回 0，失败返回 -1 |
 
-`io` 通过现有 prelude 的 `write` 与 `strlen` 实现。
+`io` 经 `os.write_once` 写入（Linux 映射 sys -errno，Darwin 使用 prelude 兼容入口），
+字符串长度仍用 prelude `strlen`。
 
 ### `memory`
 
@@ -76,10 +78,13 @@ YH_STDLIB=/path/to/yh/libs yh run
 
 这些函数沿用宿主接口的返回值和标志，不会把平台常量伪装成跨平台抽象。
 
-2026-10-19 新增 [os/sys 联合规划](yh-os与sys标准库设计.md)，用户选择标准库
-可用性优先：先交付文件闭环，再目录、显式 envp 查询及精确路径进程启动。
-拟议新接口使用 os 自有打开选项、具体结果结构和稳定错误分类；上表旧接口保留
-原有名字、宿主标志与 -1 约定。新接口**尚未实现**，不可按规划当作现有 API 使用。
+2026-10-19 新增 [os/sys 联合设计](yh-os与sys标准库设计.md)，用户选择标准库
+可用性优先。2026-10-21 已完成 OS0–OS6：新增 `Error/FdResult/IoResult/
+OpenOptions/DirReader/DirEntry/EnvResult/PidResult/WaitResult` 与
+`open_path/read_some/write_some/close_file/make_dir/remove_path/remove_dir_path/
+rename_path/open_dir/next_entry/close_dir/get_cwd/change_dir/get_env/spawn/wait/
+exit_now`（文件/目录/进程为 Linux，环境为跨平台）；上表旧接口保留原名字、
+宿主标志与 -1 约定。默认标准库发现与安装布局也已接入。
 
 ### `math`
 
@@ -90,10 +95,11 @@ YH_STDLIB=/path/to/yh/libs yh run
 
 ### `time`
 
-提供 `monotonic_ns() i64`，返回单调时钟纳秒数；底层调用失败返回 -1。当前实现
-使用 Darwin 的 `CLOCK_MONOTONIC` 编号与 `clock_gettime`。
+提供 `monotonic_ns() i64`，返回单调时钟纳秒数；底层调用失败返回 -1。
+Darwin 使用宿主 `CLOCK_MONOTONIC` 编号与 `clock_gettime`；Linux 走
+`sys.read_clock(CLOCK_MONOTONIC)`，不再硬编码 Darwin 编号。
 
-## sys（2026-10-03 规划，2026-10-19 修订，尚未实现）
+## sys（2026-10-03 规划，2026-10-21 已实现 OS0–OS5 子集）
 
 用户指定系统调用封装放在 `libs/sys/`；模块入口见
 [README](../../libs/sys/README.md)，完整契约与分期见
@@ -107,8 +113,10 @@ Linux/x64 与 Linux/arm64 按现有后端分别复用 `linux_syscall6`，提供 
 采用显式项目依赖。不把静态 ELF/编译器独立验收作为文件 API 可用的前置。
 macOS/arm64 后续适配审核的系统 OS API，披露 dyld/libSystem 依赖。
 
-当前该目录仅有规划 README，清单预留项不代表模块已可使用；未迁移本文已有 API。
-静态 ELF、启动入口和连续自编须与自有工具链共同验收。
+当前已实现 `00_types.yh`、Linux 两种 ISA 的常量、`20_raw.linux.yh`、文件/目录/
+cwd/pipe（`30_file`）、内存（`40_memory`）、时间（`50_time`）与进程
+（`60_process`）原语；Darwin 桥仍待实施。未迁移本文已有 API。静态 ELF、
+启动入口和连续自编须与自有工具链共同验收。
 
 ## cli（2026-10-18 设计；CLI0–CLI5 已实现，2026-10-19）
 

@@ -1,0 +1,75 @@
+module os;
+
+import sys;
+
+// Linux 平台共享的错误归一化与切片地址帮助函数。
+// 本文件位于 00_model.yh 之后、file.linux.yh 与 directory.linux.yh 之前，
+// 保证同模块内类型与私有帮助函数先于消费者编译。所有函数都是模块私有，
+// 不进入 os 的公开导出面。
+
+// error_kind_for 把目标平台正错误号归一化为稳定分类。
+// 未列入的错误统一为 error_other；成功（code == 0）为 error_none。
+fn error_kind_for(code int) ErrorKind {
+    if (code == 0) {
+        return error_none;
+    }
+    if (code == sys.ENOENT) {
+        return error_not_found;
+    }
+    if (code == sys.EEXIST) {
+        return error_already_exists;
+    }
+    if (code == sys.EACCES || code == sys.EPERM) {
+        return error_permission_denied;
+    }
+    if (code == sys.EINTR) {
+        return error_interrupted;
+    }
+    if (code == sys.EINVAL || code == sys.ERANGE) {
+        return error_invalid_argument;
+    }
+    if (code == sys.ENOSYS) {
+        return error_unsupported;
+    }
+    return error_other;
+}
+
+// error_from_native 把 sys 原始错误号转换为 os.Error。
+// 成功时返回 no_error；错误时保留原生正错误号供诊断使用。
+fn error_from_native(code int) Error {
+    return make_error(error_kind_for(code), code);
+}
+
+// error_from_result 把 sys 原始返回值解释为 Error。
+// 错误区间由 sys.is_error 判定，成功返回值一律视为零错误。
+fn error_from_result(result i64) Error {
+    if (sys.is_error(result) == 0) {
+        return no_error();
+    }
+    return error_from_native(sys.error_code(result));
+}
+
+// io_from_result 把 sys 单次读写返回值解释为 IoResult。
+// 失败时 count 固定为 0；成功时保留内核返回的实际字节数，0 表示 EOF。
+fn io_from_result(result i64) IoResult {
+    if (sys.is_error(result) != 0) {
+        let code int = sys.error_code(result);
+        return io_error(error_kind_for(code), code);
+    }
+    return io_ok(result.to_type(u64));
+}
+
+// slice_address 返回切片首元素的地址；空切片返回空指针。
+// 内核在 count == 0 时不读取缓冲区，因此空切片可以安全地传入读写调用。
+fn slice_address(data []u8) *void {
+    if (len(data) == 0) {
+        return 0;
+    }
+    return (&data[0]).to_type(*void);
+}
+
+// slice_address_char 返回 u8 切片首字节地址并转换为 *char。
+// 仅用于把调用方字节缓冲传给 sys 的字符指针接口；空切片返回空指针。
+fn slice_address_char(data []u8) *char {
+    return slice_address(data).to_type(*char);
+}

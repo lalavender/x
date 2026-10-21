@@ -1,0 +1,128 @@
+module main;
+
+import sys;
+
+// 本用例只在 Linux 宿主运行，覆盖 sys 文件原语的成功与错误路径。
+// 所有路径都是相对 fixture 工作目录的隐藏文件，main 每次开始和结束都清理。
+
+let file_path *char = ".yh-sys-file";
+let renamed_path *char = ".yh-sys-renamed";
+let dir_path *char = ".yh-sys-dir";
+let missing_path *char = ".yh-sys-missing";
+
+// cleanup 尽力删除本用例可能留下的文件与空目录；错误被忽略。
+fn cleanup() void {
+    sys.remove_at(sys.AT_FDCWD, file_path, 0);
+    sys.remove_at(sys.AT_FDCWD, renamed_path, 0);
+    sys.remove_at(sys.AT_FDCWD, dir_path, sys.AT_REMOVEDIR);
+}
+
+// run 执行文件往返、错误与目录操作；任何一步失败返回非零诊断码。
+fn run() int {
+    // 创建并写入 4 字节（含一个二进制零字节），零长度写入必须成功且不改变内容。
+    let fd i64 = sys.open_at(sys.AT_FDCWD, file_path,
+        sys.O_WRONLY | sys.O_CREAT | sys.O_EXCL | sys.O_TRUNC | sys.O_CLOEXEC,
+        420);
+    if (fd < 0) {
+        return 10;
+    }
+    let data [4]u8 = [65, 0, 66, 67];
+    let data_ptr *void = (&data[0]).to_type(*void);
+    if (sys.write_fd(fd.to_type(int), data_ptr, 0) != 0) {
+        return 11;
+    }
+    if (sys.write_fd(fd.to_type(int), data_ptr, 4) != 4) {
+        return 12;
+    }
+    if (sys.close_fd(fd.to_type(int)) != 0) {
+        return 13;
+    }
+
+    // 重复创建同一路径且带 O_EXCL，必须返回 -EEXIST。
+    let duplicate i64 = sys.open_at(sys.AT_FDCWD, file_path,
+        sys.O_WRONLY | sys.O_CREAT | sys.O_EXCL, 420);
+    if (sys.is_error(duplicate) != 1
+        || sys.error_code(duplicate) != sys.EEXIST) {
+        return 14;
+    }
+
+    // 读回 4 字节后再次读取必须是 0（EOF），而不是错误。
+    let read_fd i64 = sys.open_at(sys.AT_FDCWD, file_path,
+        sys.O_RDONLY | sys.O_CLOEXEC, 0);
+    if (read_fd < 0) {
+        return 15;
+    }
+    let buffer [8]u8;
+    let buffer_ptr *void = (&buffer[0]).to_type(*void);
+    if (sys.read_fd(read_fd.to_type(int), buffer_ptr, 8) != 4) {
+        return 16;
+    }
+    if (buffer[0] != 65 || buffer[1] != 0 || buffer[2] != 66
+        || buffer[3] != 67) {
+        return 17;
+    }
+    if (sys.read_fd(read_fd.to_type(int), buffer_ptr, 8) != 0) {
+        return 18;
+    }
+    if (sys.close_fd(read_fd.to_type(int)) != 0) {
+        return 19;
+    }
+
+    // 不存在路径保留 -ENOENT；零长度读写对坏 fd 仍必须报 EBADF。
+    let missing i64 = sys.open_at(sys.AT_FDCWD, missing_path,
+        sys.O_RDONLY | sys.O_CLOEXEC, 0);
+    if (sys.is_error(missing) != 1
+        || sys.error_code(missing) != sys.ENOENT) {
+        return 20;
+    }
+    let bad_read i64 = sys.read_fd(-1, 0, 0);
+    if (sys.is_error(bad_read) != 1
+        || sys.error_code(bad_read) != sys.EBADF) {
+        return 21;
+    }
+    let bad_write i64 = sys.write_fd(-1, 0, 0);
+    if (sys.is_error(bad_write) != 1
+        || sys.error_code(bad_write) != sys.EBADF) {
+        return 22;
+    }
+
+    // 单层目录创建、重复创建 EEXIST，然后用 AT_REMOVEDIR 删除空目录。
+    if (sys.create_dir_at(sys.AT_FDCWD, dir_path, 493) != 0) {
+        return 23;
+    }
+    let duplicate_dir i64 = sys.create_dir_at(sys.AT_FDCWD, dir_path, 493);
+    if (sys.is_error(duplicate_dir) != 1
+        || sys.error_code(duplicate_dir) != sys.EEXIST) {
+        return 24;
+    }
+
+    // 重命名后旧路径消失、新路径可删除；最后删除空目录。
+    if (sys.rename_at(sys.AT_FDCWD, file_path, sys.AT_FDCWD,
+        renamed_path) != 0) {
+        return 25;
+    }
+    let old_path i64 = sys.open_at(sys.AT_FDCWD, file_path,
+        sys.O_RDONLY | sys.O_CLOEXEC, 0);
+    if (sys.is_error(old_path) != 1
+        || sys.error_code(old_path) != sys.ENOENT) {
+        return 26;
+    }
+    if (sys.remove_at(sys.AT_FDCWD, renamed_path, 0) != 0) {
+        return 27;
+    }
+    if (sys.remove_at(sys.AT_FDCWD, dir_path, sys.AT_REMOVEDIR) != 0) {
+        return 28;
+    }
+    return 0;
+}
+
+// main 保证清理后报告结果；失败时保留诊断码而不打印成功信息。
+pub fn main() int {
+    cleanup();
+    let result int = run();
+    cleanup();
+    if (result == 0) {
+        printf("sys files ok\n");
+    }
+    return result;
+}

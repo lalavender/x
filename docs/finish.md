@@ -2,6 +2,20 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-21 恢复并验证 os/sys OS0–OS6
+
+- 0.0.7 同步后的主工作区缺少 `libs/os`/`libs/sys` 实现；从备份 stash 选择性
+  恢复 OS0–OS6 的库、测试、示例、设计与完成记录，并适配按 0.0.7 的
+  `[project].os/arch` 必填字段。
+- 恢复编译器 fn→ptr cast 修复与默认标准库发现（`YH_STDLIB` 优先，否则按
+  可执行文件附近布局查找）；Makefile 安装 libs 到 `share/yh/libs`。
+- 验证：`make`、`make test`、CLI 9/9、`make selfhost-native SKIP_CORPUS=1`
+  （固定点 27 产物、自解析 100 文件、项目用例 115/115）通过；Linux/arm64
+  容器 15 个 os/sys fixture 与 os-demo 示例全部退出 0。
+- 未修改种子、未执行 `make seed`。OS7 编译器迁移与 OS8 Darwin 新接口仍未实施。
+  详见 `docs/01-finished/yh-os与sys-OS*.md` 与
+  `docs/01-finished/yh-标准库默认发现-2026-10-21.md`。
+
 ## 2026-10-21 0.0.7 Release：过渡种子与最终发布
 
 - 创建过渡 Release `0.0.7-rc.1`（正常 Release，非 prerelease），上传

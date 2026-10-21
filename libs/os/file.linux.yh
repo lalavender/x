@@ -1,0 +1,121 @@
+module os;
+
+import sys;
+
+// Linux 平台的新文件接口：把 sys 的 -errno 结果转换成 os 的显式错误与
+// 自有打开选项。旧 open_file/open_file_mode/read_fd/write_fd/close_fd 等
+// 接口继续保留在 os.yh，仍返回宿主标志与 -1，不能与新接口混用返回值。
+//
+// 新 open 默认带 O_CLOEXEC；read/write 只执行一次并允许短读写，遇 EINTR
+// 返回 interrupted；close 只调用一次，失败后不重试也不继续使用该 fd。
+// 路径是 NUL 结尾字节串，不承诺 Unicode 规范化；切片只借用调用方缓冲。
+
+// validate_options 检查 os 自有打开选项的组合是否合法。
+// exclusive 只能与 create 一起使用；只读模式不能同时要求截断或追加；
+// 库自身发现的问题 native_code 为 0，不伪造内核错误号。
+fn validate_options(options OpenOptions) Error {
+    if (options.exclusive != false && options.create == false) {
+        return make_error(error_invalid_argument, 0);
+    }
+    if (options.access == access_read_only
+        && (options.truncate != false || options.append != false)) {
+        return make_error(error_invalid_argument, 0);
+    }
+    return no_error();
+}
+
+// access_flags 把访问模式转换为当前目标的 O_ACCMODE 位。
+fn access_flags(options OpenOptions) int {
+    if (options.access == access_write_only) {
+        return sys.O_WRONLY;
+    }
+    if (options.access == access_read_write) {
+        return sys.O_RDWR;
+    }
+    return sys.O_RDONLY;
+}
+
+// open_flags 把 os 选项转换为当前目标 openat 标志，并强制加入 O_CLOEXEC。
+fn open_flags(options OpenOptions) int {
+    let flags int = access_flags(options) | sys.O_CLOEXEC;
+    if (options.create != false) {
+        flags |= sys.O_CREAT;
+    }
+    if (options.truncate != false) {
+        flags |= sys.O_TRUNC;
+    }
+    if (options.exclusive != false) {
+        flags |= sys.O_EXCL;
+    }
+    if (options.append != false) {
+        flags |= sys.O_APPEND;
+    }
+    return flags;
+}
+
+// open_path 按 os 自有选项打开路径，成功转移 fd 所有权给调用方。
+// 失败时 fd 固定为 -1 并返回显式错误；创建时使用 options.mode 与当前 umask。
+pub fn open_path(path *char, options OpenOptions) FdResult {
+    let invalid Error = validate_options(options);
+    if (invalid.kind != error_none) {
+        return fd_error(invalid.kind, invalid.native_code);
+    }
+    let result i64 = sys.open_at(sys.AT_FDCWD, path, open_flags(options),
+        options.mode);
+    if (sys.is_error(result) != 0) {
+        let code int = sys.error_code(result);
+        return fd_error(error_kind_for(code), code);
+    }
+    return fd_ok(result.to_type(int));
+}
+
+// read_some 从 fd 读取至多 len(buffer) 字节到调用方切片。
+// 返回本次实际字节数与显式错误；0 字节且无错误表示 EOF，允许短读。
+pub fn read_some(fd int, buffer []u8) IoResult {
+    let result i64 = sys.read_fd(fd, slice_address(buffer), len(buffer));
+    return io_from_result(result);
+}
+
+// write_once 向 fd 单次写入至多 count 字节，供只有指针+长度的 io 层复用。
+// 返回实际字节数与显式错误；允许短写、遇 EINTR 返回 interrupted，不重试。
+pub fn write_once(fd int, buffer *void, count u64) IoResult {
+    return io_from_result(sys.write_fd(fd, buffer, count));
+}
+
+// write_some 向 fd 写入至多 len(data) 字节，返回本次实际字节数。
+// 允许短写；需要写满时由 io 层循环并保留进度。
+pub fn write_some(fd int, data []u8) IoResult {
+    return write_once(fd, slice_address(data), len(data));
+}
+
+// close_file 关闭 fd 并返回显式错误。
+// 只调用一次；失败后 fd 可能已经被释放，调用方不得重试或继续使用。
+pub fn close_file(fd int) Error {
+    return error_from_result(sys.close_fd(fd));
+}
+
+// make_dir 创建单层目录，mode 由内核结合当前 umask 裁剪。
+// 不递归创建父目录；已存在时返回 error_already_exists。
+pub fn make_dir(path *char, mode u32) Error {
+    return error_from_result(sys.create_dir_at(sys.AT_FDCWD, path, mode));
+}
+
+// remove_path 删除文件路径，不递归、不先探测再删除。
+// 删除空目录使用 remove_dir_path，本函数不会把目录当文件处理。
+pub fn remove_path(path *char) Error {
+    return error_from_result(sys.remove_at(sys.AT_FDCWD, path, 0));
+}
+
+// remove_dir_path 删除空目录，不递归删除其中的文件或子目录。
+// 目录非空时返回内核错误（通常为 error_other），调用方不得改为递归删除。
+pub fn remove_dir_path(path *char) Error {
+    return error_from_result(sys.remove_at(sys.AT_FDCWD, path,
+        sys.AT_REMOVEDIR));
+}
+
+// rename_path 把旧路径原子重命名为新路径。
+// 与底层 rename 语义一致：跨设备不自动复制，目标存在时由内核替换。
+pub fn rename_path(old_path *char, new_path *char) Error {
+    return error_from_result(sys.rename_at(sys.AT_FDCWD, old_path,
+        sys.AT_FDCWD, new_path));
+}

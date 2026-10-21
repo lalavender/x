@@ -52,6 +52,7 @@ ifeq ($(shell uname -s),Darwin)
 endif
 
 PREFIX ?= /usr/local
+INSTALL ?= install
 BINDIR = $(DESTDIR)$(PREFIX)/bin
 HOST_SYSTEM ?= $(shell uname -s)
 HOST_ARCH ?= $(shell uname -m)
@@ -286,6 +287,12 @@ endif
 install: all
 	$(INSTALL) -d $(BINDIR)
 	$(INSTALL) -m755 yh$(EXESUF) $(BINDIR)
+	@$(INSTALL) -d $(DESTDIR)$(PREFIX)/share/yh/libs
+	@cd $(TOPSRC)/libs && find . -path './cli/test' -prune -o -type f \( -name '*.yh' -o -name 'project.toml' \) -print | while read f; do \
+	  d="$(DESTDIR)$(PREFIX)/share/yh/libs/$$(dirname "$$f")"; \
+	  $(INSTALL) -d "$$d"; \
+	  $(INSTALL) -m644 "$$f" "$$d"; \
+	done
 ifeq ($(HOST_SYSTEM),Darwin)
 	$(INSTALL) -d $(DESTDIR)$(PREFIX)/share/yh/darwin-sdk/usr/lib
 	$(INSTALL) -m644 compiler/darwin-sdk/usr/lib/libSystem.tbd $(DESTDIR)$(PREFIX)/share/yh/darwin-sdk/usr/lib/
@@ -294,6 +301,7 @@ endif
 
 uninstall:
 	rm -f $(BINDIR)/yh$(EXESUF)
+	rm -rf $(DESTDIR)$(PREFIX)/share/yh/libs
 ifeq ($(HOST_SYSTEM),Darwin)
 	rm -rf $(DESTDIR)$(PREFIX)/share/yh/darwin-sdk
 endif

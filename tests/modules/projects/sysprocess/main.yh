@@ -1,0 +1,82 @@
+module main;
+
+import sys;
+
+// 本用例只在 Linux 宿主运行，验证 PID、fork 双返回、wait4 原始状态、
+// exit_group 与 kill 信号退出；不解释业务状态，只核对 ABI 行为。
+
+// check_exit 等待 pid 并核对正常退出码 expected；返回 0 或诊断码。
+fn check_exit(pid int, expected int, code int) int {
+    let status int = 0;
+    let waited i64 = sys.wait_process(pid, &status, 0);
+    if (waited != pid.to_type(i64)) {
+        return code;
+    }
+    if ((status & 0x7f) != 0 || ((status >> 8) & 0xff) != expected) {
+        return code + 1;
+    }
+    return 0;
+}
+
+// fork_exit 创建子进程并让子进程以指定状态退出。
+// 父进程返回子 PID，子进程不返回；fork 失败返回负 errno。
+fn fork_exit(code int) i64 {
+    let pid i64 = sys.fork_process();
+    if (pid == 0) {
+        sys.exit_process(code);
+        return -1;
+    }
+    return pid;
+}
+
+// main 覆盖两次 fork/exit、一次信号退出与无子进程 ECHILD。
+pub fn main() int {
+    let self_pid i64 = sys.process_id();
+    if (self_pid <= 0) {
+        return 1;
+    }
+    let first i64 = fork_exit(7);
+    if (first < 0) {
+        return 2;
+    }
+    let rc int = check_exit(first.to_type(int), 7, 10);
+    if (rc != 0) {
+        return rc;
+    }
+    let second i64 = fork_exit(9);
+    if (second < 0) {
+        return 3;
+    }
+    rc = check_exit(second.to_type(int), 9, 12);
+    if (rc != 0) {
+        return rc;
+    }
+
+    // 子进程给自己发 SIGTERM；父进程必须看到信号号而不是 128+signal。
+    let signalled i64 = sys.fork_process();
+    if (signalled == 0) {
+        sys.send_signal(sys.process_id().to_type(int), sys.SIGTERM);
+        sys.exit_process(9);
+        return 4;
+    }
+    if (signalled < 0) {
+        return 5;
+    }
+    let status int = 0;
+    let waited i64 = sys.wait_process(signalled.to_type(int), &status, 0);
+    if (waited != signalled) {
+        return 6;
+    }
+    if ((status & 0x7f) != sys.SIGTERM) {
+        return 7;
+    }
+
+    // 所有子进程已回收，再等待必须得到 -ECHILD。
+    let none i64 = sys.wait_process(-1, &status, 0);
+    if (sys.is_error(none) != 1 || sys.error_code(none) != sys.ECHILD) {
+        return 8;
+    }
+
+    printf("sys process ok\n");
+    return 0;
+}

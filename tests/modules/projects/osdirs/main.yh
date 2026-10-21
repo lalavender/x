@@ -1,0 +1,368 @@
+module main;
+
+import os;
+
+// 本用例只在 Linux 宿主运行，验证 os 目录读取器、cwd 接口、名称生命周期
+// 约定与损坏记录防护；目录项顺序不作断言，所有资源在开始/结束清理。
+
+let dir_path *char = ".yh-osdir";
+let empty_path *char = ".yh-osdir-empty";
+let long_dir *char = ".yh-osdir-long";
+let long_path *char = ".yh-osdir-long/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+let file_a *char = ".yh-osdir/a";
+let file_b *char = ".yh-osdir/b";
+let file_c *char = ".yh-osdir/c";
+let file_d *char = ".yh-osdir/d";
+let file_e *char = ".yh-osdir/e";
+let sub_path *char = ".yh-osdir/sub";
+let missing_path *char = ".yh-osdir-missing";
+
+// cleanup 删除文件、子目录与空目录；错误被忽略。
+fn cleanup() void {
+    os.remove_path(file_a);
+    os.remove_path(file_b);
+    os.remove_path(file_c);
+    os.remove_path(file_d);
+    os.remove_path(file_e);
+    os.remove_dir_path(sub_path);
+    os.remove_dir_path(empty_path);
+    os.remove_path(long_path);
+    os.remove_dir_path(long_dir);
+    os.remove_dir_path(dir_path);
+}
+
+// entry_equals 比较借用条目名称与 NUL 结尾期望串。
+fn entry_equals(entry os.DirEntry, wanted *char) int {
+    let i int = 0;
+    for wanted[i] != 0 {
+        if (i.to_type(u64) >= entry.name_len
+            || entry.name[i] != wanted[i].to_type(u8)) {
+            return 0;
+        }
+        i += 1;
+    }
+    return (i.to_type(u64) == entry.name_len).to_type(int);
+}
+
+// ends_with 判断字节串是否以 NUL 结尾后缀结束。
+fn ends_with(text *u8, length u64, suffix *char) int {
+    let suffix_len int = 0;
+    for suffix[suffix_len] != 0 {
+        suffix_len += 1;
+    }
+    if (length < suffix_len.to_type(u64)) {
+        return 0;
+    }
+    let start int = length.to_type(int) - suffix_len;
+    let i int = 0;
+    for i < suffix_len {
+        if (text[start + i] != suffix[i].to_type(u8)) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// create_file 通过新 os 文件接口创建一个空文件。
+fn create_file(path *char, code int) int {
+    let options os.OpenOptions = os.write_options();
+    let opened os.FdResult = os.open_path(path, options);
+    if (opened.fd < 0 || opened.error.kind != os.error_none) {
+        return code;
+    }
+    if (os.close_file(opened.fd).kind != os.error_none) {
+        return code + 1;
+    }
+    return 0;
+}
+
+// scan_dir 用 64 字节缓冲强制多批 getdents64，并核对全部条目。
+fn scan_dir() int {
+    let buffer [64]u8;
+    let opened os.DirReaderResult = os.open_dir(dir_path, buffer[0..64]);
+    if (opened.reader.active != 1 || opened.error.kind != os.error_none) {
+        return 10;
+    }
+    let total int = 0;
+    let seen_a int = 0;
+    let seen_b int = 0;
+    let seen_c int = 0;
+    let seen_d int = 0;
+    let seen_e int = 0;
+    let seen_sub int = 0;
+    for 1 == 1 {
+        let item os.DirEntryResult = os.next_entry(&opened.reader);
+        if (item.status == os.dir_entry_error) {
+            os.close_dir(&opened.reader);
+            return 11;
+        }
+        if (item.status == os.dir_entry_end) {
+            break;
+        }
+        total += 1;
+        if (entry_equals(item.entry, "a") != 0) {
+            if (item.entry.kind != os.dir_file) {
+                os.close_dir(&opened.reader);
+                return 12;
+            }
+            seen_a += 1;
+        } else if (entry_equals(item.entry, "b") != 0) {
+            seen_b += 1;
+        } else if (entry_equals(item.entry, "c") != 0) {
+            seen_c += 1;
+        } else if (entry_equals(item.entry, "d") != 0) {
+            seen_d += 1;
+        } else if (entry_equals(item.entry, "e") != 0) {
+            seen_e += 1;
+        } else if (entry_equals(item.entry, "sub") != 0) {
+            if (item.entry.kind != os.dir_directory) {
+                os.close_dir(&opened.reader);
+                return 13;
+            }
+            seen_sub += 1;
+        } else {
+            os.close_dir(&opened.reader);
+            return 14;
+        }
+    }
+    if (total != 6 || seen_a != 1 || seen_b != 1 || seen_c != 1
+        || seen_d != 1 || seen_e != 1 || seen_sub != 1) {
+        os.close_dir(&opened.reader);
+        return 15;
+    }
+    if (os.close_dir(&opened.reader).kind != os.error_none) {
+        return 16;
+    }
+    // close_dir 重复调用幂等；关闭后 next_entry 必须明确报未打开。
+    if (os.close_dir(&opened.reader).kind != os.error_none) {
+        return 17;
+    }
+    let closed os.DirEntryResult = os.next_entry(&opened.reader);
+    if (closed.status != os.dir_entry_error
+        || closed.error.kind != os.error_invalid_argument) {
+        return 18;
+    }
+    // 零值读取器的 fd 为 0，close_dir 不能误关 stdin。
+    let zero os.DirReader;
+    if (os.close_dir(&zero).kind != os.error_none
+        || zero.fd != -1 || zero.active != 0) {
+        return 19;
+    }
+    return 0;
+}
+
+// check_empty_dir 验证空目录立即返回 dir_entry_end。
+fn check_empty_dir() int {
+    if (os.make_dir(empty_path, 493).kind != os.error_none) {
+        return 20;
+    }
+    let buffer [64]u8;
+    let opened os.DirReaderResult = os.open_dir(empty_path, buffer[0..64]);
+    if (opened.reader.active != 1 || opened.error.kind != os.error_none) {
+        return 21;
+    }
+    let item os.DirEntryResult = os.next_entry(&opened.reader);
+    if (item.status != os.dir_entry_end
+        || item.error.kind != os.error_none) {
+        os.close_dir(&opened.reader);
+        return 22;
+    }
+    if (os.close_dir(&opened.reader).kind != os.error_none) {
+        return 23;
+    }
+    return 0;
+}
+
+// check_long_name 验证超过小缓冲大小的名称由调用方扩大缓冲后完整返回。
+fn check_long_name() int {
+    if (os.make_dir(long_dir, 493).kind != os.error_none) {
+        return 24;
+    }
+    let rc int = create_file(long_path, 25);
+    if (rc != 0) {
+        return rc;
+    }
+    let buffer [256]u8;
+    let opened os.DirReaderResult = os.open_dir(long_dir, buffer[0..256]);
+    if (opened.reader.active != 1 || opened.error.kind != os.error_none) {
+        return 27;
+    }
+    let item os.DirEntryResult = os.next_entry(&opened.reader);
+    if (item.status != os.dir_entry_ok || item.entry.kind != os.dir_file
+        || item.entry.name_len != 100
+        || item.entry.name[0] != 120 || item.entry.name[99] != 120) {
+        os.close_dir(&opened.reader);
+        return 28;
+    }
+    let end os.DirEntryResult = os.next_entry(&opened.reader);
+    if (end.status != os.dir_entry_end) {
+        os.close_dir(&opened.reader);
+        return 29;
+    }
+    if (os.close_dir(&opened.reader).kind != os.error_none) {
+        return 30;
+    }
+    return 0;
+}
+
+// check_malformed 用调用方构造的记录覆盖长度越界、缺少 NUL 与 DT_UNKNOWN。
+fn check_malformed() int {
+    let short_record [32]u8;
+    short_record[16] = 1;
+    short_record[17] = 0;
+    let bad_reader os.DirReader;
+    bad_reader.fd = -1;
+    bad_reader.buffer = &short_record[0];
+    bad_reader.capacity = 32;
+    bad_reader.used = 32;
+    bad_reader.cursor = 0;
+    bad_reader.active = 1;
+    let bad os.DirEntryResult = os.next_entry(&bad_reader);
+    if (bad.status != os.dir_entry_error
+        || bad.error.kind != os.error_other) {
+        return 30;
+    }
+
+    let noname [24]u8;
+    noname[16] = 24;
+    noname[17] = 0;
+    noname[18] = 0;
+    noname[19] = 117;
+    noname[20] = 118;
+    noname[21] = 119;
+    noname[22] = 120;
+    noname[23] = 121;
+    let noname_reader os.DirReader;
+    noname_reader.fd = -1;
+    noname_reader.buffer = &noname[0];
+    noname_reader.capacity = 24;
+    noname_reader.used = 24;
+    noname_reader.cursor = 0;
+    noname_reader.active = 1;
+    let missing_nul os.DirEntryResult = os.next_entry(&noname_reader);
+    if (missing_nul.status != os.dir_entry_error
+        || missing_nul.error.kind != os.error_other) {
+        return 31;
+    }
+
+    let unknown [24]u8;
+    unknown[16] = 24;
+    unknown[17] = 0;
+    unknown[18] = 0;
+    unknown[19] = 117;
+    unknown[20] = 0;
+    let unknown_reader os.DirReader;
+    unknown_reader.fd = -1;
+    unknown_reader.buffer = &unknown[0];
+    unknown_reader.capacity = 24;
+    unknown_reader.used = 24;
+    unknown_reader.cursor = 0;
+    unknown_reader.active = 1;
+    let item os.DirEntryResult = os.next_entry(&unknown_reader);
+    if (item.status != os.dir_entry_ok || item.entry.kind != os.dir_unknown
+        || entry_equals(item.entry, "u") == 0) {
+        return 32;
+    }
+    return 0;
+}
+
+// check_cwd 验证 get_cwd 长度归一、空间不足错误与 change_dir 恢复。
+fn check_cwd() int {
+    let saved [256]u8;
+    let saved_result os.IoResult = os.get_cwd(saved[0..256]);
+    if (saved_result.error.kind != os.error_none || saved_result.count == 0
+        || saved[saved_result.count.to_type(int)] != 0) {
+        return 40;
+    }
+    if (os.change_dir(dir_path).kind != os.error_none) {
+        return 41;
+    }
+    let tiny [1]u8;
+    let too_small os.IoResult = os.get_cwd(tiny[0..1]);
+    if (too_small.error.kind != os.error_invalid_argument
+        || too_small.count != 0) {
+        return 42;
+    }
+    let current [256]u8;
+    let current_result os.IoResult = os.get_cwd(current[0..256]);
+    if (current_result.error.kind != os.error_none
+        || ends_with(&current[0], current_result.count, "yh-osdir") != 1) {
+        return 43;
+    }
+    if (os.change_dir((&saved[0]).to_type(*char)).kind != os.error_none) {
+        return 44;
+    }
+    let missing os.Error = os.change_dir(missing_path);
+    if (missing.kind != os.error_not_found) {
+        return 45;
+    }
+    let empty os.IoResult = os.get_cwd(saved[0..0]);
+    if (empty.count != 0 || empty.error.kind != os.error_invalid_argument) {
+        return 46;
+    }
+    return 0;
+}
+
+// run 执行目录创建、条目扫描、空目录、损坏记录与 cwd 检查。
+fn run() int {
+    if (os.make_dir(dir_path, 493).kind != os.error_none) {
+        return 1;
+    }
+    let rc int = create_file(file_a, 2);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = create_file(file_b, 4);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = create_file(file_c, 6);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = create_file(file_d, 8);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = create_file(file_e, 10);
+    if (rc != 0) {
+        return rc;
+    }
+    if (os.make_dir(sub_path, 493).kind != os.error_none) {
+        return 12;
+    }
+
+    rc = scan_dir();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = check_empty_dir();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = check_long_name();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = check_malformed();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = check_cwd();
+    if (rc != 0) {
+        return rc;
+    }
+    return 0;
+}
+
+// main 保证清理后报告结果；失败时保留诊断码而不打印成功信息。
+pub fn main() int {
+    cleanup();
+    let result int = run();
+    cleanup();
+    if (result == 0) {
+        printf("os dirs ok\n");
+    }
+    return result;
+}

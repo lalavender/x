@@ -1,0 +1,215 @@
+module main;
+
+import os;
+
+// 本用例只在 Linux 宿主运行，覆盖 os 新文件 API 的选项、错误分类与旧接口兼容。
+// 新接口返回显式 Error；旧接口继续返回 -1 和宿主标志，两者不能混用。
+
+let file_path *char = ".yh-os-file";
+let renamed_path *char = ".yh-os-renamed";
+let dir_path *char = ".yh-os-dir";
+let missing_path *char = ".yh-os-missing";
+
+// cleanup 尽力删除本用例可能留下的文件与空目录，忽略清理错误。
+fn cleanup() void {
+    os.remove_path(file_path);
+    os.remove_path(renamed_path);
+    os.remove_dir_path(dir_path);
+}
+
+// verify_contents 读取整个文件并核对字节；读取失败返回非零诊断码。
+fn verify_contents(expected []u8, count u64, code int) int {
+    let read_options os.OpenOptions = os.read_options();
+    let opened os.FdResult = os.open_path(file_path, read_options);
+    if (opened.fd < 0 || opened.error.kind != os.error_none) {
+        return code;
+    }
+    let buffer [8]u8;
+    let result os.IoResult = os.read_some(opened.fd, buffer[0..8]);
+    if (result.count != count || result.error.kind != os.error_none) {
+        os.close_file(opened.fd);
+        return code + 1;
+    }
+    let index int = 0;
+    for index < len(expected) {
+        if (buffer[index] != expected[index]) {
+            os.close_file(opened.fd);
+            return code + 2;
+        }
+        index += 1;
+    }
+    let eof os.IoResult = os.read_some(opened.fd, buffer[0..8]);
+    if (eof.count != 0 || eof.error.kind != os.error_none) {
+        os.close_file(opened.fd);
+        return code + 3;
+    }
+    let empty os.IoResult = os.read_some(opened.fd, buffer[0..0]);
+    if (empty.count != 0 || empty.error.kind != os.error_none) {
+        os.close_file(opened.fd);
+        return code + 4;
+    }
+    if (os.close_file(opened.fd).kind != os.error_none) {
+        return code + 5;
+    }
+    return 0;
+}
+
+// run 执行创建、写入、读取、追加、错误映射、目录与重命名检查。
+fn run() int {
+    let create os.OpenOptions = os.write_options();
+    create.truncate = true;
+    let opened os.FdResult = os.open_path(file_path, create);
+    if (opened.fd < 0 || opened.error.kind != os.error_none) {
+        return 10;
+    }
+    let data [4]u8 = [65, 0, 66, 67];
+    let zero os.IoResult = os.write_some(opened.fd, data[0..0]);
+    if (zero.count != 0 || zero.error.kind != os.error_none) {
+        return 11;
+    }
+    let written os.IoResult = os.write_some(opened.fd, data[0..4]);
+    if (written.count != 4 || written.error.kind != os.error_none) {
+        return 12;
+    }
+    if (os.close_file(opened.fd).kind != os.error_none) {
+        return 13;
+    }
+
+    let first [4]u8 = [65, 0, 66, 67];
+    let first_check int = verify_contents(first[0..4], 4, 14);
+    if (first_check != 0) {
+        return first_check;
+    }
+
+    // 独占创建已存在路径必须返回 already_exists，而不是重塑为 -1。
+    let exclusive os.OpenOptions = os.write_options();
+    exclusive.exclusive = true;
+    let existing os.FdResult = os.open_path(file_path, exclusive);
+    if (existing.fd != -1
+        || existing.error.kind != os.error_already_exists) {
+        return 20;
+    }
+
+    // 追加模式不截断，写入两个字节后文件应为 A\0BCDE。
+    let append os.OpenOptions = os.write_options();
+    append.append = true;
+    let appending os.FdResult = os.open_path(file_path, append);
+    if (appending.fd < 0 || appending.error.kind != os.error_none) {
+        return 21;
+    }
+    let more [2]u8 = [68, 69];
+    let appended os.IoResult = os.write_some(appending.fd, more[0..2]);
+    if (appended.count != 2 || appended.error.kind != os.error_none) {
+        return 22;
+    }
+    if (os.close_file(appending.fd).kind != os.error_none) {
+        return 23;
+    }
+    let all [6]u8 = [65, 0, 66, 67, 68, 69];
+    let append_check int = verify_contents(all[0..6], 6, 24);
+    if (append_check != 0) {
+        return append_check;
+    }
+
+    // 只写 + truncate 必须把已有内容清空；空文件读取仍返回 EOF。
+    let truncate os.OpenOptions = os.write_options();
+    truncate.truncate = true;
+    let truncated os.FdResult = os.open_path(file_path, truncate);
+    if (truncated.fd < 0 || truncated.error.kind != os.error_none) {
+        return 25;
+    }
+    if (os.close_file(truncated.fd).kind != os.error_none) {
+        return 26;
+    }
+    let empty [1]u8 = [0];
+    let truncate_check int = verify_contents(empty[0..0], 0, 27);
+    if (truncate_check != 0) {
+        return truncate_check;
+    }
+
+    // 缺失路径映射为 not_found；库自身发现的非法选项 native_code 为 0。
+    let missing os.FdResult = os.open_path(missing_path, os.read_options());
+    if (missing.fd != -1 || missing.error.kind != os.error_not_found) {
+        return 30;
+    }
+    let invalid os.OpenOptions = os.read_options();
+    invalid.truncate = true;
+    let invalid_read os.FdResult = os.open_path(file_path, invalid);
+    if (invalid_read.fd != -1
+        || invalid_read.error.kind != os.error_invalid_argument
+        || invalid_read.error.native_code != 0) {
+        return 31;
+    }
+    let invalid_exclusive os.OpenOptions = os.write_options();
+    invalid_exclusive.create = false;
+    invalid_exclusive.exclusive = true;
+    let invalid_flags os.FdResult = os.open_path(file_path,
+        invalid_exclusive);
+    if (invalid_flags.fd != -1
+        || invalid_flags.error.kind != os.error_invalid_argument) {
+        return 32;
+    }
+
+    // 坏 fd 的读取、写入与关闭保留原生 EBADF 分类，不伪造前一次操作状态。
+    let buffer [2]u8 = [0, 0];
+    let bad_read os.IoResult = os.read_some(-1, buffer[0..2]);
+    if (bad_read.count != 0 || bad_read.error.kind != os.error_other
+        || bad_read.error.native_code != 9) {
+        return 33;
+    }
+    let bad_write os.IoResult = os.write_some(-1, buffer[0..2]);
+    if (bad_write.count != 0 || bad_write.error.kind != os.error_other) {
+        return 34;
+    }
+    let bad_close os.Error = os.close_file(-1);
+    if (bad_close.kind != os.error_other || bad_close.native_code != 9) {
+        return 35;
+    }
+
+    // 目录创建/删除与重命名：旧路径消失，空目录可删除。
+    if (os.make_dir(dir_path, 493).kind != os.error_none) {
+        return 40;
+    }
+    if (os.make_dir(dir_path, 493).kind != os.error_already_exists) {
+        return 41;
+    }
+    if (os.rename_path(file_path, renamed_path).kind != os.error_none) {
+        return 42;
+    }
+    let old_path os.FdResult = os.open_path(file_path, os.read_options());
+    if (old_path.error.kind != os.error_not_found) {
+        return 43;
+    }
+    if (os.remove_path(renamed_path).kind != os.error_none) {
+        return 44;
+    }
+    if (os.remove_dir_path(dir_path).kind != os.error_none) {
+        return 45;
+    }
+    if (os.remove_dir_path(dir_path).kind != os.error_not_found) {
+        return 46;
+    }
+
+    // 旧接口保持 -1 与宿主标志语义，不能泄漏 sys 的 -errno。
+    if (os.open_file(missing_path, 0) != -1) {
+        return 50;
+    }
+    if (os.read_fd(-1, 0, 0) != -1) {
+        return 51;
+    }
+    if (os.close_fd(-1) != -1) {
+        return 52;
+    }
+    return 0;
+}
+
+// main 保证清理后报告结果；失败时返回诊断码且不打印成功信息。
+pub fn main() int {
+    cleanup();
+    let result int = run();
+    cleanup();
+    if (result == 0) {
+        printf("os files ok\n");
+    }
+    return result;
+}

@@ -1,30 +1,65 @@
-# sys 标准库：系统调用封装规划
+# sys 标准库：Linux 系统调用封装
 
-日期：2026-10-03。状态：**仅交付规划，尚无 `.yh` 实现**。
+日期：2026-10-21。状态：**OS0–OS6 完成；文件/目录/进程/内存/时间 sys 原语
+与默认标准库发现已实现**（OS7–OS8 未实施）。
 
-2026-10-19 修订：用户选择**标准库可用性优先**，完整分层与新 os API 见
-[联合设计](../../docs/03-design/yh-os与sys标准库设计.md)，交付顺序见
-[联合实施方案](../../docs/02-plan/yh-os与sys标准库实施方案.md)。先按文件、目录、
-环境、进程交付应用能力，编译器整体迁移后排；本文不代表接口已可导入。
+分层与交付顺序见[联合设计](../../docs/03-design/yh-os与sys标准库设计.md)和
+[联合实施方案](../../docs/02-plan/yh-os与sys标准库实施方案.md)；底层 ABI 细节见
+[系统调用封装设计](../../docs/03-design/yh-sys系统调用封装设计.md)。
 
-源码落点为 `libs/sys/`，每个源文件声明 `module sys;`，沿用 `libs/project.toml`
-的 `source = "."` 和目录模块发现规则，不建立第二份项目清单。
+## 当前实现
 
-Linux/x64 与 Linux/arm64：通过各后端已有 `linux_syscall6` 接口直接进入内核，
-提供文件/目录、内存映射、时间和进程原语。正常结果或 `-errno` 由调用返回值
-直接携带，不依赖 libc、全局 errno、shell 或外部命令；sys 不做隐式分配和重试。
+```text
+libs/sys/
+  00_types.yh                  Timespec、is_error、error_code
+  10_constants.linux.arm64.yh  AArch64 调用号、O_*、AT_*、errno
+  10_constants.linux.x64.yh    x86_64 调用号、O_*、AT_*、errno
+  20_raw.linux.yh              raw6 → linux_syscall6
+  30_file.linux.yh             open_at/read_fd/write_fd/close_fd/
+                               create_dir_at/remove_at/rename_at/
+                               getdents64/get_cwd/change_dir/create_pipe
+  40_memory.linux.yh           map_memory/unmap_memory
+  50_time.linux.yh             read_clock/sleep_time
+  60_process.linux.yh          process_id/fork_process/execute/
+                               wait_process/exit_process/send_signal
+```
 
-- 完整 API、错误和平台契约：[系统调用封装设计](../../docs/03-design/yh-sys系统调用封装设计.md)。
-- 分阶段文件、测试和接线：[实施方案](../../docs/02-plan/yh-sys系统调用封装实施方案.md)。
-- 未完成任务：[docs/todo.md](../../docs/todo.md)。
+- 每个文件声明 `module sys;`，沿用 `libs/project.toml` 的 `source = "."` 与
+  目录模块发现规则；数字前缀保证类型、常量和底层函数先于消费者编译。
+- Linux 具名原语返回内核原始成功值或 `-errno`；只有 `[-4095, -1]` 是错误区间。
+  `read_fd/write_fd` 各调用一次并允许短读写，`close_fd` 不重试。
+- 调用号、`O_*` 与 errno 按 ISA 分开维护；AArch64 的 `O_DIRECTORY` 是 `0x4000`，
+  x86_64 是 `0x10000`，不能跨目标复制。
+- `getdents64` 返回原始目录记录，记录布局、名称边界与 DT_UNKNOWN 由 os 读取器
+  处理；`get_cwd` 成功时包含结尾 NUL，空间不足保留 `-ERANGE`；`change_dir`
+  修改进程全局当前目录。
+- `create_pipe` 使用 pipe2，输出两个连续 int；`O_NONBLOCK`/`EAGAIN` 供短写与
+  进程握手使用。
+- `fork_process` 使用 SIGCHLD、空子栈、无 CLONE_VM 的 clone；`execute` 精确
+  execve；`wait_process` 返回原始 wait4 状态；`exit_process` 使用 exit_group；
+  `send_signal` 使用 kill。os.spawn 的错误管道握手在 os 层。
+- `map_memory/unmap_memory` 直接 mmap/munmap；成功值先经 is_error 判定再转指针。
+  `read_clock/sleep_time` 填入 Timespec；nanosleep 不自动重试。
+- `Timespec` 与 `is_error/error_code` 是跨平台文件；在 Darwin 上只有这部分可用，
+  Linux 专属文件不会被选中，也不提供返回伪成功的空桩。
 
-SYS0–SYS7 保留为底层能力清单：基线、入口/结果、文件/目录、内存/时间、进程、
-消费者迁移、独立性验收、Darwin 桥。实际实施按 OS0–OS6 场景取最小子集，
-OS7 单列编译器迁移，OS8 后续增加 macOS/arm64 接口并披露 dyld/libSystem。
+## 使用
 
-应用未来可用 `import sys;`；标准库当前仍通过 `YH_STDLIB` 加载。编译器、
-自有工具链应采用显式项目依赖，避免构建时被环境变量或本地同名模块改变绑定。
+```yh
+import sys;
 
-sys 是内核接口层。os 新接口负责应用级错误、选项与资源约定，旧接口维持兼容；
-io 负责完整写入和输出，time 负责时间语义，`memory` 负责
-分配器，`_start` 和静态 ELF 由工具链任务负责。sys 规划交付不代表这些任务已完成。
+let fd i64 = sys.open_at(sys.AT_FDCWD, "/tmp/a",
+    sys.O_WRONLY | sys.O_CREAT | sys.O_TRUNC | sys.O_CLOEXEC, 420);
+if (sys.is_error(fd) != 0) {
+    let code int = sys.error_code(fd);
+}
+```
+
+普通应用优先使用 `os` 的新文件接口（`open_path/read_some/write_some/...`），
+由 os 负责错误分类、打开选项和资源约定；需要原始内核结果时直接导入 sys。
+
+## 未实施
+
+内存映射、时间、Darwin 原生桥与编译器迁移仍按
+OS5–OS8 单列；旧 os/io/time 接口保持原契约。当前标准库仍需 `YH_STDLIB`
+或显式项目依赖加载。

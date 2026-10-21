@@ -1,0 +1,245 @@
+module main;
+
+import sys;
+
+// 本用例只在 Linux 宿主运行，直接验证 getdents64、get_cwd 与 change_dir
+// 的原始返回、记录边界和错误号；目录项解析策略由 os 层再次验收。
+
+let dir_path *char = ".yh-sysdir";
+let alpha_path *char = ".yh-sysdir/alpha";
+let beta_path *char = ".yh-sysdir/beta";
+let sub_path *char = ".yh-sysdir/sub";
+let missing_path *char = ".yh-sysdir-missing";
+
+// cleanup 删除本用例可能留下的文件、子目录与主目录。
+fn cleanup() void {
+    sys.remove_at(sys.AT_FDCWD, alpha_path, 0);
+    sys.remove_at(sys.AT_FDCWD, beta_path, 0);
+    sys.remove_at(sys.AT_FDCWD, sub_path, sys.AT_REMOVEDIR);
+    sys.remove_at(sys.AT_FDCWD, dir_path, sys.AT_REMOVEDIR);
+}
+
+// name_equals 比较原始记录中的名称字节与 NUL 结尾期望串。
+fn name_equals(name *u8, name_len int, wanted *char) int {
+    let i int = 0;
+    for wanted[i] != 0 {
+        if (i >= name_len || name[i] != wanted[i].to_type(u8)) {
+            return 0;
+        }
+        i += 1;
+    }
+    return (i == name_len).to_type(int);
+}
+
+// ends_with 判断字节串是否以 NUL 结尾后缀结束。
+fn ends_with(text *u8, length u64, suffix *char) int {
+    let suffix_len int = 0;
+    for suffix[suffix_len] != 0 {
+        suffix_len += 1;
+    }
+    if (length < suffix_len.to_type(u64)) {
+        return 0;
+    }
+    let start int = length.to_type(int) - suffix_len;
+    let i int = 0;
+    for i < suffix_len {
+        if (text[start + i] != suffix[i].to_type(u8)) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+
+// create_file 创建一个空文件并立即关闭，返回 0 或诊断码。
+fn create_file(path *char, code int) int {
+    let fd i64 = sys.open_at(sys.AT_FDCWD, path,
+        sys.O_WRONLY | sys.O_CREAT | sys.O_EXCL | sys.O_CLOEXEC, 420);
+    if (fd < 0) {
+        return code;
+    }
+    if (sys.close_fd(fd.to_type(int)) != 0) {
+        return code + 1;
+    }
+    return 0;
+}
+
+// scan_dir 读取全部目录记录，返回 0 或诊断码；记录顺序不作断言。
+fn scan_dir() int {
+    let buffer [512]u8;
+    let buffer_ptr *void = (&buffer[0]).to_type(*void);
+    let fd i64 = sys.open_at(sys.AT_FDCWD, dir_path,
+        sys.O_RDONLY | sys.O_DIRECTORY | sys.O_CLOEXEC, 0);
+    if (fd < 0) {
+        return 10;
+    }
+    let seen_alpha int = 0;
+    let seen_beta int = 0;
+    let seen_sub int = 0;
+    let entries int = 0;
+    let reads int = 0;
+    for 1 == 1 {
+        let n i64 = sys.getdents64(fd.to_type(int), buffer_ptr, 512);
+        if (n < 0) {
+            sys.close_fd(fd.to_type(int));
+            return 11;
+        }
+        if (n == 0) {
+            break;
+        }
+        reads += 1;
+        let pos int = 0;
+        for pos < n.to_type(int) {
+            let record *u8 = (&buffer[0]) + pos;
+            let record_len int = record[16].to_type(int)
+                | (record[17].to_type(int) << 8);
+            if (record_len < 20 || record_len > n.to_type(int) - pos) {
+                sys.close_fd(fd.to_type(int));
+                return 12;
+            }
+            let name *u8 = record + 19;
+            let name_len int = 0;
+            for name_len < record_len - 19 && name[name_len] != 0 {
+                name_len += 1;
+            }
+            if (name_len == record_len - 19) {
+                sys.close_fd(fd.to_type(int));
+                return 13;
+            }
+            if (name_equals(name, name_len, ".") != 0
+                || name_equals(name, name_len, "..") != 0) {
+                pos += record_len;
+                continue;
+            }
+            entries += 1;
+            if (name_equals(name, name_len, "alpha") != 0) {
+                if (record[18] != 8) {
+                    sys.close_fd(fd.to_type(int));
+                    return 14;
+                }
+                seen_alpha += 1;
+            } else if (name_equals(name, name_len, "beta") != 0) {
+                if (record[18] != 8) {
+                    sys.close_fd(fd.to_type(int));
+                    return 15;
+                }
+                seen_beta += 1;
+            } else if (name_equals(name, name_len, "sub") != 0) {
+                if (record[18] != 4) {
+                    sys.close_fd(fd.to_type(int));
+                    return 16;
+                }
+                seen_sub += 1;
+            } else {
+                sys.close_fd(fd.to_type(int));
+                return 17;
+            }
+            pos += record_len;
+        }
+    }
+    if (sys.close_fd(fd.to_type(int)) != 0) {
+        return 18;
+    }
+    if (reads != 1 || entries != 3 || seen_alpha != 1 || seen_beta != 1
+        || seen_sub != 1) {
+        return 19;
+    }
+    return 0;
+}
+
+// check_cwd 验证 get_cwd 的 NUL/长度、空间不足错误与 change_dir 恢复。
+fn check_cwd() int {
+    let saved [256]u8;
+    let saved_n i64 = sys.get_cwd((&saved[0]).to_type(*char), 256);
+    if (saved_n <= 0 || saved[(saved_n - 1).to_type(int)] != 0) {
+        return 20;
+    }
+    if (sys.change_dir(dir_path) != 0) {
+        return 21;
+    }
+    let tiny [1]u8;
+    let too_small i64 = sys.get_cwd((&tiny[0]).to_type(*char), 1);
+    if (sys.is_error(too_small) != 1
+        || sys.error_code(too_small) != sys.ERANGE) {
+        return 22;
+    }
+    let current [256]u8;
+    let current_n i64 = sys.get_cwd((&current[0]).to_type(*char), 256);
+    if (current_n <= 0
+        || current[(current_n - 1).to_type(int)] != 0
+        || ends_with(&current[0], (current_n - 1).to_type(u64),
+            "yh-sysdir") != 1) {
+        return 23;
+    }
+    if (sys.change_dir((&saved[0]).to_type(*char)) != 0) {
+        return 24;
+    }
+    let restored [256]u8;
+    let restored_n i64 = sys.get_cwd((&restored[0]).to_type(*char), 256);
+    if (restored_n != saved_n) {
+        return 25;
+    }
+    let i int = 0;
+    for i < saved_n.to_type(int) {
+        if (restored[i] != saved[i]) {
+            return 26;
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+// run 执行目录创建、记录扫描、错误检查与 cwd 往返。
+fn run() int {
+    if (sys.create_dir_at(sys.AT_FDCWD, dir_path, 493) != 0) {
+        return 1;
+    }
+    let rc int = create_file(alpha_path, 2);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = create_file(beta_path, 4);
+    if (rc != 0) {
+        return rc;
+    }
+    if (sys.create_dir_at(sys.AT_FDCWD, sub_path, 493) != 0) {
+        return 6;
+    }
+
+    rc = scan_dir();
+    if (rc != 0) {
+        return rc;
+    }
+
+    // 用普通文件当目录打开必须得到 ENOTDIR，而不是当成空目录。
+    let not_dir i64 = sys.open_at(sys.AT_FDCWD, alpha_path,
+        sys.O_RDONLY | sys.O_DIRECTORY | sys.O_CLOEXEC, 0);
+    if (sys.is_error(not_dir) != 1
+        || sys.error_code(not_dir) != sys.ENOTDIR) {
+        return 27;
+    }
+    let bad_fd i64 = sys.getdents64(-1, 0, 0);
+    if (sys.is_error(bad_fd) != 1 || sys.error_code(bad_fd) != sys.EBADF) {
+        return 28;
+    }
+    let missing i64 = sys.change_dir(missing_path);
+    if (sys.is_error(missing) != 1 || sys.error_code(missing) != sys.ENOENT) {
+        return 29;
+    }
+    rc = check_cwd();
+    if (rc != 0) {
+        return rc;
+    }
+    return 0;
+}
+
+// main 保证清理后报告结果；失败时保留诊断码而不打印成功信息。
+pub fn main() int {
+    cleanup();
+    let result int = run();
+    cleanup();
+    if (result == 0) {
+        printf("sys dirs ok\n");
+    }
+    return result;
+}

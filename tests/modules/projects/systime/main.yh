@@ -1,0 +1,68 @@
+module main;
+
+import os;
+import sys;
+import time;
+
+// 本用例只在 Linux 宿主运行，验证 sys.read_clock/sleep_time、time.monotonic_ns
+// 与旧 os.sleep_us 的 Linux 适配；不把定时误差写成不稳定的微秒级断言。
+
+// not_earlier 判断 later 不早于 earlier。
+fn not_earlier(later sys.Timespec, earlier sys.Timespec) int {
+    if (later.sec > earlier.sec) {
+        return 1;
+    }
+    if (later.sec == earlier.sec && later.nsec >= earlier.nsec) {
+        return 1;
+    }
+    return 0;
+}
+
+// main 覆盖单调时钟、零/非法睡眠、坏时钟号与旧接口兼容。
+pub fn main() int {
+    let first sys.Timespec;
+    if (sys.read_clock(sys.CLOCK_MONOTONIC, &first) != 0) {
+        return 1;
+    }
+    if (first.sec < 0 || first.nsec < 0 || first.nsec >= 1000000000) {
+        return 2;
+    }
+    let second sys.Timespec;
+    if (sys.read_clock(sys.CLOCK_MONOTONIC, &second) != 0
+        || not_earlier(second, first) != 1) {
+        return 3;
+    }
+
+    let zero sys.Timespec;
+    zero.sec = 0;
+    zero.nsec = 0;
+    if (sys.sleep_time(&zero, 0) != 0) {
+        return 4;
+    }
+    let invalid sys.Timespec;
+    invalid.sec = 0;
+    invalid.nsec = 1000000000;
+    let bad_sleep i64 = sys.sleep_time(&invalid, 0);
+    if (sys.is_error(bad_sleep) != 1
+        || sys.error_code(bad_sleep) != sys.EINVAL) {
+        return 5;
+    }
+    let bad_clock sys.Timespec;
+    let bad_read i64 = sys.read_clock(9999, &bad_clock);
+    if (sys.is_error(bad_read) != 1
+        || sys.error_code(bad_read) != sys.EINVAL) {
+        return 6;
+    }
+
+    let before i64 = time.monotonic_ns();
+    if (before < 0 || os.sleep_us(1000) != 0) {
+        return 7;
+    }
+    let after i64 = time.monotonic_ns();
+    if (after < before || os.sleep_us(-1) != -1) {
+        return 8;
+    }
+
+    printf("sys time ok\n");
+    return 0;
+}

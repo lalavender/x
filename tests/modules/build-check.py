@@ -188,6 +188,16 @@ case("s1-libs-io-write", "stdlib-run", "libsio", ".", 23,
      stdout="yh libs io ok\n")
 case("s2-libs-core-modules", "stdlib-run", "libsbase", ".", 0,
      stdout="yh libs base ok\n")
+# —— OS0/OS5：结果模型与 io 完整写入（跨平台） ——
+case("os0-sys-result-model", "stdlib-run", "sysresult", ".", 0,
+     stdout="sys result ok\n")
+case("os0-os-result-model", "stdlib-run", "osmodel", ".", 0,
+     stdout="os model ok\n")
+case("os5-io-write-result", "stdlib-run", "osio", ".", 0,
+     stdout="os io ok\n")
+# —— OS6：可执行文件附近的默认标准库发现（空 YH_STDLIB 触发默认路径） ——
+case("os6-default-stdlib", "default-stdlib-run", "osmodel", ".", 0,
+     stdout="os model ok\n")
 case("u4-pub-const-wide-values", "run", "pubconst", "host", 0)
 case("u3-import-used-via-field-type", "run", "importfield", "host", 0)
 case("u1-extern-abs-module", "run", "externabs", "host", 0)
@@ -263,6 +273,34 @@ case("u3-private-type-pointer-in-pub", "fail", "privtype", "badptr",
 case("u3-duplicate-decl", "fail", "dupdecl", "host", msg="重定义")
 case("u3-unused-import", "fail", "unusedimp", "host", msg="导入未使用")
 case("u3-import-clash", "fail", "clashname", "host", msg="导入名冲突")
+
+# —— OS1–OS5：Linux 文件/目录/环境/进程/时间/内存（只在 Linux 内核运行） ——
+OS_LINUX_CASES = [
+    dict(name="os1-sys-raw", kind="stdlib-run", fixture="sysraw", sub=".",
+         expect=0, msg=None, stdout="sys raw ok\n"),
+    dict(name="os1-sys-files", kind="stdlib-run", fixture="sysfiles", sub=".",
+         expect=0, msg=None, stdout="sys files ok\n"),
+    dict(name="os1-os-files", kind="stdlib-run", fixture="osfiles", sub=".",
+         expect=0, msg=None, stdout="os files ok\n"),
+    dict(name="os1-sys-eintr", kind="stdlib-run", fixture="syseintr", sub=".",
+         expect=0, msg=None, stdout="sys eintr ok\n"),
+    dict(name="os4-sys-process", kind="stdlib-run", fixture="sysprocess", sub=".",
+         expect=0, msg=None, stdout="sys process ok\n"),
+    dict(name="os4-os-process", kind="stdlib-run", fixture="osprocess", sub=".",
+         expect=0, msg=None, stdout="os process ok\n"),
+    dict(name="os5-sys-time", kind="stdlib-run", fixture="systime", sub=".",
+         expect=0, msg=None, stdout="sys time ok\n"),
+    dict(name="os5-sys-memory", kind="stdlib-run", fixture="sysmemory", sub=".",
+         expect=0, msg=None, stdout="sys memory ok\n"),
+    dict(name="os2-sys-dirs", kind="stdlib-run", fixture="sysdirs", sub=".",
+         expect=0, msg=None, stdout="sys dirs ok\n"),
+    dict(name="os2-os-dirs", kind="stdlib-run", fixture="osdirs", sub=".",
+         expect=0, msg=None, stdout="os dirs ok\n"),
+    dict(name="os3-env-query", kind="envp-run", fixture="osenv", sub=".",
+         expect=0, msg=None, stdout="os env ok\n"),
+]
+if sys.platform.startswith("linux"):
+    CASES.extend(OS_LINUX_CASES)
 
 
 def copy_proj(src, dst):
@@ -359,6 +397,9 @@ def main():
         COMPILER_FLAGS += ["--stats", "--emit-llvm"]
     WORK = Path(args.workdir)
     WORK.mkdir(parents=True, exist_ok=True)
+    if not sys.platform.startswith("linux") and not args.quiet:
+        print(f"SKIP {len(OS_LINUX_CASES)} 个 Linux 专属 os/sys 用例"
+              f"（宿主 {sys.platform}，未计为通过）")
     failed = 0
 
     def report(ok, name, detail=""):
@@ -899,9 +940,35 @@ def main():
                    f"输出结尾 {run.stdout[-120:]!r} 期望 {c['stdout']!r}\n"
                    f"{run.stderr[-400:]}")
             return out
+        if c["kind"] == "default-stdlib-run":
+            # 构建门通常把编译器暂存到 $TMPDIR/yh-fast，不能依赖暂存目录旁
+            # 恰好有 libs。这里复制一个最小安装布局：
+            #   <root>/bin/yh + <root>/share/yh/libs
+            # 并以空 YH_STDLIB 启动，真实验证安装布局的默认发现。
+            install = dst / "default-install"
+            bin_dir = install / "bin"
+            libs_dir = install / "share" / "yh" / "libs"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            installed_compiler = bin_dir / Path(compiler).name
+            try:
+                shutil.copy2(compiler, installed_compiler)
+                shutil.copytree(ROOT / "libs", libs_dir,
+                                ignore=shutil.ignore_patterns(".build"))
+                run = sh([str(installed_compiler), "run"],
+                         cwd=dst / c["sub"], env={"YH_STDLIB": ""})
+                report(run.returncode == c["expect"]
+                       and run.stdout.endswith(c["stdout"]),
+                       c["name"],
+                       f"默认标准库发现失败: 退出码 {run.returncode} 期望 {c['expect']}，"
+                       f"输出结尾 {run.stdout[-120:]!r} 期望 {c['stdout']!r}\n"
+                       f"{run.stderr[-400:]}")
+            finally:
+                shutil.rmtree(install, ignore_errors=True)
+            return out
         if c["kind"] == "envp-run":
             run = sh([compiler, "run"], cwd=dst,
-                     env={"YH_ENV_TEST": "present"})
+                     env={"YH_ENV_TEST": "present",
+                          "YH_STDLIB": str(ROOT / "libs")})
             report(run.returncode == 0, c["name"],
                    f"main(argc, argv, envp) 未收到进程环境: rc={run.returncode}\n"
                    f"{run.stderr[-400:]} {run.stdout[-200:]}")

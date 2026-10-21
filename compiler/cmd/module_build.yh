@@ -1559,7 +1559,92 @@ fn mb_intern_arg(s *char, olen *int) int {
     return gen.tml_intern_str(s.to_type(*u8), 0, sl);
 }
 
-// mb_load_stdlib：装载 YH_STDLIB 指定的标准库项目（未设置则无标准库层）。
+// mb_try_default_stdlib：尝试 dir+suffix 下的标准库项目。
+// 返回 1 表示已装载，0 表示该候选不存在，-1 表示候选存在但装载失败。
+// 只接受带 project.toml 的目录；不猜测库名，也不把任意模块目录当标准库。
+fn mb_try_default_stdlib(dir *char, suffix *char) int {
+    let gs *gen.GenState = gen.G();
+    let path [1200]u8;
+    let n int = 0;
+    n = gen.append_str(path, n, dir);
+    n = gen.append_str(path, n, suffix);
+    path[n] = 0;
+    if (pj_canon(0, 0, gen.arr_cstr(path)) != 0) {
+        return 0;
+    }
+    let cand_off int = pj_canon_off;
+    let cand_len int = pj_canon_len;
+    let manifest [1200]u8;
+    let mn int = 0;
+    let i int = 0;
+    for i < cand_len {
+        manifest[mn] = gs.task.np_data[cand_off + i];
+        mn += 1;
+        i += 1;
+    }
+    mn = gen.append_str(manifest, mn, "/project.toml");
+    manifest[mn] = 0;
+    if (pj_file_exists(gen.arr_cstr(manifest)) == 0) {
+        return 0;
+    }
+    let loaded int = pj_load_project(cand_off, cand_len);
+    if (loaded < 0) {
+        return -1;
+    }
+    gs.p_stdlib = loaded;
+    return 1;
+}
+
+// mb_load_default_stdlib：按可执行文件附近布局查找标准库。
+// 依次尝试 <exe_dir>/libs（仓库构建）、<exe_dir>/../libs（bin 下种子）
+// 与 <exe_dir>/../share/yh/libs（安装布局）。找不到时保持无标准库层；
+// 找到但项目损坏时返回 -1，不静默回退到其它候选。
+fn mb_load_default_stdlib() int {
+    let gs *gen.GenState = gen.G();
+    if (mb_resolve_self_path() != 0) {
+        return 0;
+    }
+    let self_len int = strlen(mb_self_path).to_type(int);
+    let cut int = self_len;
+    for cut > 0 && mb_self_path[cut - 1] != '/' {
+        cut -= 1;
+    }
+    let dir [1200]u8;
+    let dn int = 0;
+    if (cut > 1) {
+        let i int = 0;
+        for i < cut - 1 {
+            dir[dn] = mb_self_path[i].to_type(u8);
+            dn += 1;
+            i += 1;
+        }
+    } else if (cut == 1) {
+        dir[0] = '/';
+        dn = 1;
+    } else {
+        dir[0] = '.';
+        dn = 1;
+    }
+    dir[dn] = 0;
+    let found int = mb_try_default_stdlib(gen.arr_cstr(dir), "/libs");
+    if (found != 0) {
+        return found < 0 ? -1 : 0;
+    }
+    found = mb_try_default_stdlib(gen.arr_cstr(dir), "/../libs");
+    if (found != 0) {
+        return found < 0 ? -1 : 0;
+    }
+    found = mb_try_default_stdlib(gen.arr_cstr(dir), "/../share/yh/libs");
+    if (found != 0) {
+        return found < 0 ? -1 : 0;
+    }
+    gs.p_stdlib = -1;
+    return 0;
+}
+
+// mb_load_stdlib：装载 YH_STDLIB 指定的标准库项目。
+// YH_STDLIB 非空时优先且失败不回退；为空/未设置时按可执行文件附近布局
+// 查找默认标准库（仓库 <root>/libs、bin 种子相邻 libs 或安装 share/yh/libs）。
 fn mb_load_stdlib() int {
     let gs *gen.GenState = gen.G();
     if (gs.p_stdlib >= 0) {
@@ -1571,8 +1656,7 @@ fn mb_load_stdlib() int {
         return -1;
     }
     if (olen == 0) {
-        gs.p_stdlib = -1;
-        return 0;
+        return mb_load_default_stdlib();
     }
     if (pj_canon(0, 0, pj_pool_str(off)) != 0) {
         return -1;

@@ -1,6 +1,7 @@
 # yh sys 系统调用封装设计
 
-日期：2026-10-03。状态：**规划交付，尚未实现**。
+日期：2026-10-03；2026-10-21 更新。状态：**SYS1 结果/raw6、SYS2 文件/
+目录/cwd、SYS3 内存/时间与 SYS4 进程原语已实现；Darwin 未实施**。
 
 2026-10-19 修订：用户选择**标准库可用性优先**，新增
 [os/sys 联合设计](yh-os与sys标准库设计.md)与
@@ -35,7 +36,7 @@ Linux/arm64 路径。API 依据实际消费者需求冻结，macOS/arm64 后续�
 
 | 事实 | 位置及影响 |
 | --- | --- |
-| `libs/sys/` 仅有 README，清单已有 `[lib] sys` 预留项 | 实际模块由目录中的 `.yh` 发现，预留项不等于已有实现 |
+| `libs/sys/` 已有 00_types、平台常量、raw6、文件/目录/cwd、内存/时间与进程原语 | Darwin 桥仍待实现；登记不等于全部完成 |
 | 标准库源码根为 `.`，无默认安装发现路径 | 应用当前需 `YH_STDLIB` 或显式项目依赖 |
 | Linux 已登记 `linux_syscall6` intrinsic | `compiler/gen/symbols.yh`；七个 u64 参数、返回 i64 |
 | ARM64 intrinsic 发射 `svc #0`，LLVM/x64 runtime 发射 `syscall` | `compiler/gen/emit_arm64.yh`、`compiler/backend/llvm_runtime.yh`；不能改为 libc syscall |
@@ -72,20 +73,20 @@ flowchart TD
 
 ## 4. 源码布局
 
-以下是拟创建路径，当前只有 README。全部文件声明 `module sys;`，按已有项目
-排序规则把类型、常量和底层函数放在消费者之前。
+以下路径中，OS0/OS1 子集已落地（标“已实现”），其余仍为拟创建。全部文件声明
+`module sys;`，按已有项目排序规则把类型、常量和底层函数放在消费者之前。
 
 ```text
 libs/sys/
   README.md
-  00_types.yh                 Timespec、错误判定与提取
-  10_constants.linux.arm64.yh ARM64 私有 NR_*、公开标志/错误号
-  10_constants.linux.x64.yh   x64 私有 NR_*、公开标志/错误号
-  20_raw.linux.yh             raw6 → linux_syscall6
-  30_file.linux.yh            文件与目录 syscall
-  40_memory.linux.yh          mmap / munmap
-  50_time.linux.yh            clock_gettime / nanosleep
-  60_process.linux.yh         PID、fork、wait、exec、退出
+  00_types.yh                 Timespec、错误判定与提取（已实现）
+  10_constants.linux.arm64.yh ARM64 私有 NR_*、公开标志/错误号（已实现）
+  10_constants.linux.x64.yh   x64 私有 NR_*、公开标志/错误号（已实现）
+  20_raw.linux.yh             raw6 → linux_syscall6（已实现）
+  30_file.linux.yh            文件/目录/cwd/pipe2 syscall（OS1/OS2 子集已实现）
+  40_memory.linux.yh          mmap / munmap（已实现）
+  50_time.linux.yh            clock_gettime / nanosleep（已实现）
+  60_process.linux.yh         PID、fork、wait、exec、退出、信号（已实现）
 ```
 
 后续 Darwin 对应文件使用 `.darwin.yh`，只补已经验证的接口；raw6 和 getdents64
@@ -162,7 +163,7 @@ sys 每次只执行一次 syscall，不处理短读写、不做 EINTR 重试。�
 | `fd_flags(fd int)` | fcntl 25，command=F_GETFD | 验证 fd 并读取描述符标志 |
 | `send_signal(pid int, signal int)` | kill 129 | 返回内核结果 |
 | `exit_thread(code int) void` | exit 93 | 结束调用线程；不做语言清理 |
-| `exit_process(code int) void` | exit_group 94 | 结束线程组；不做语言清理 |
+| `exit_process(code int) void` | exit_group 94 | 结束线程组；不做语言清理（已实现） |
 
 以上调用号列仅适用于 Linux/arm64，不能作为 x64 的实现表。2026-10-19 为 os
 目录/进程需求追加 `get_cwd(buffer *char, capacity u64) i64`、
@@ -279,3 +280,21 @@ Darwin 不使用 Linux raw6/getdents64，不承诺摆脱 dyld/libSystem，也不
 网络、DNS、stat 全结构、通用 ioctl/fcntl、共享库装载、线程/TLS/futex、信号处理器
 与恢复 trampoline、完整 libc/stdio、GC/异常、尚未接入的 ISA 均不作为首期前置。
 新增接口只由实际消费者或验收场景驱动，不为了覆盖 syscall 表机械生成几百个函数。
+
+## 11. 已实现状态（2026-10-21）
+
+- `00_types.yh`：Timespec（16 字节、偏移 0/8）与 is_error/error_code。
+- `10_constants.linux.{arm64,x64}.yh`：raw6、文件与目录子集所需的 NR_*、O_*、
+  AT_*、errno；AArch64 的 O_DIRECTORY 为 0x4000，x86_64 为 0x10000。
+- `20_raw.linux.yh`：raw6 直接转发现有 linux_syscall6，不生成 libc syscall。
+- `30_file.linux.yh`：open_at/read_fd/write_fd/close_fd/create_dir_at/remove_at/
+  rename_at（renameat2，flags 固定 0）、getdents64/get_cwd/change_dir，以及
+  OS1 收尾提前交付的 create_pipe。
+- `40_memory.linux.yh`：map_memory/unmap_memory；`50_time.linux.yh`：
+  read_clock/sleep_time；`60_process.linux.yh`：process_id/fork_process
+  （SIGCHLD + 空子栈 clone）/execute/wait_process（wait4 原始状态）/
+  exit_process（exit_group）/send_signal 与 create_pipe（在 30_file）。
+- 用例：sysresult、sysraw、sysfiles、syseintr、sysprocess、sysmemory、systime、
+  sysdirs 在 Darwin（仅模型）与 Linux/arm64 原生运行通过；Linux/x64 只完成
+  语义检查，未宣称原生运行。
+- 未实现：duplicate_fd/fd_flags 与 Darwin 桥。

@@ -1,0 +1,188 @@
+module main;
+
+import io;
+import os;
+import sys;
+
+// 本用例只在 Linux 宿主运行，用稳定驱动覆盖：
+// 1) 阻塞 read 被不带 SA_RESTART 的 SIGALRM 中断，返回 -EINTR；
+// 2) 非阻塞管道写满后 write 返回短写，os 单次写入保留部分进度。
+// C 辅助只安装信号处理器与 alarm，不改变标准库 API。
+
+@[extern]
+fn test_install_alarm(seconds int) int;
+
+@[extern]
+fn test_alarm_fired() int;
+
+@[extern]
+fn test_socketpair(fds *int) int;
+
+// open_pipe 创建管道并返回 0 或诊断码；flags 由调用方选择阻塞/非阻塞。
+fn open_pipe(fds *int, flags int, code int) int {
+    if (sys.create_pipe(fds, flags) != 0) {
+        return code;
+    }
+    if (fds[0] < 0 || fds[1] < 0 || fds[0] == fds[1]) {
+        sys.close_fd(fds[0]);
+        sys.close_fd(fds[1]);
+        return code + 1;
+    }
+    return 0;
+}
+
+// close_pipe 关闭管道两端；错误被忽略，测试结束不保留 fd。
+fn close_pipe(fds *int) void {
+    sys.close_fd(fds[0]);
+    sys.close_fd(fds[1]);
+}
+
+// check_eintr 在空管道上阻塞读取，由 1 秒 alarm 中断并核对 -EINTR。
+fn check_eintr() int {
+    let fds [2]int;
+    let rc int = open_pipe(&fds[0], sys.O_CLOEXEC, 10);
+    if (rc != 0) {
+        return rc;
+    }
+    if (test_install_alarm(1) != 0) {
+        close_pipe(&fds[0]);
+        return 12;
+    }
+    let buffer [1]u8;
+    let result i64 = sys.read_fd(fds[0], (&buffer[0]).to_type(*void), 1);
+    if (sys.is_error(result) != 1 || sys.error_code(result) != sys.EINTR) {
+        close_pipe(&fds[0]);
+        return 13;
+    }
+    if (test_alarm_fired() != 1) {
+        close_pipe(&fds[0]);
+        return 14;
+    }
+    // 中断后管道仍可用：写一个字节再读取，确认 fd 未被破坏。
+    let byte [1]u8 = [65];
+    if (sys.write_fd(fds[1], (&byte[0]).to_type(*void), 1) != 1) {
+        close_pipe(&fds[0]);
+        return 15;
+    }
+    if (sys.read_fd(fds[0], (&buffer[0]).to_type(*void), 1) != 1
+        || buffer[0] != 65) {
+        close_pipe(&fds[0]);
+        return 16;
+    }
+    close_pipe(&fds[0]);
+    return 0;
+}
+
+// check_short_sys 在非阻塞 Unix 流式 socket 上写入 65536 字节，
+// 要求发送缓冲不足时返回 0 < count < 65536 的短写，而不是整块成功。
+fn check_short_sys() int {
+    let fds [2]int;
+    if (test_socketpair(&fds[0]) != 0) {
+        return 20;
+    }
+    let data [65536]u8;
+    let data_ptr *void = (&data[0]).to_type(*void);
+    let short_seen int = 0;
+    let attempts int = 0;
+    for attempts < 64 {
+        let written i64 = sys.write_fd(fds[1], data_ptr, 65536);
+        if (written > 0 && written < 65536) {
+            short_seen = 1;
+            break;
+        }
+        if (written == 65536) {
+            attempts += 1;
+            continue;
+        }
+        if (sys.is_error(written) == 1
+            && sys.error_code(written) == sys.EAGAIN) {
+            break;
+        }
+        close_pipe(&fds[0]);
+        return 21;
+    }
+    close_pipe(&fds[0]);
+    if (short_seen != 1) {
+        return 22;
+    }
+    return 0;
+}
+
+// check_short_os 重复上一步但走 os.write_some，确认显式结果保留短写进度。
+fn check_short_os() int {
+    let fds [2]int;
+    if (test_socketpair(&fds[0]) != 0) {
+        return 30;
+    }
+    let data [65536]u8;
+    let short_seen int = 0;
+    let attempts int = 0;
+    for attempts < 64 {
+        let result os.IoResult = os.write_some(fds[1], data[0..65536]);
+        if (result.error.kind == os.error_none) {
+            if (result.count > 0 && result.count < 65536) {
+                short_seen = 1;
+                break;
+            }
+            if (result.count == 65536) {
+                attempts += 1;
+                continue;
+            }
+            close_pipe(&fds[0]);
+            return 31;
+        }
+        if (result.error.native_code == sys.EAGAIN) {
+            break;
+        }
+        close_pipe(&fds[0]);
+        return 32;
+    }
+    close_pipe(&fds[0]);
+    if (short_seen != 1) {
+        return 33;
+    }
+    return 0;
+}
+
+// check_short_io 在非阻塞 socket 上调用 io.write_all_result，要求它循环到
+// EAGAIN 后返回已写进度与显式错误，而不是丢弃先前写入的字节。
+fn check_short_io() int {
+    let fds [2]int;
+    if (test_socketpair(&fds[0]) != 0) {
+        return 40;
+    }
+    let data [262144]u8;
+    let result os.IoResult = io.write_all_result(fds[1],
+        (&data[0]).to_type(*char), 262144);
+    close_pipe(&fds[0]);
+    if (result.error.kind != os.error_other
+        || result.error.native_code != sys.EAGAIN) {
+        return 41;
+    }
+    if (result.count == 0 || result.count >= 262144) {
+        return 42;
+    }
+    return 0;
+}
+
+// main 依次执行 EINTR、sys 短写、os 短写与 io 完整写入进度检查。
+pub fn main() int {
+    let rc int = check_eintr();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = check_short_sys();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = check_short_os();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = check_short_io();
+    if (rc != 0) {
+        return rc;
+    }
+    printf("sys eintr ok\n");
+    return 0;
+}

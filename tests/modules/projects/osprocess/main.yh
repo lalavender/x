@@ -1,0 +1,157 @@
+module main;
+
+import os;
+import sys;
+
+// 本用例只在 Linux 宿主运行，覆盖精确路径 spawn、exec 失败握手、wait 状态
+// 解码、exit_now 与失败子进程回收。子模式复用同一可执行文件，不依赖 PATH
+// 或 shell；父进程通过 argv[0] 指定精确路径。
+
+let noexec_path *char = ".yh-osprocess-noexec";
+
+// str_equals 比较两个 NUL 结尾字节串。
+fn str_equals(left *char, right *char) int {
+    let index int = 0;
+    for left[index] != 0 || right[index] != 0 {
+        if (left[index] != right[index]) {
+            return 0;
+        }
+        index += 1;
+    }
+    return 1;
+}
+
+// child_mode 处理 exec 后的子模式；正常子进程在 exit_now 处结束，不返回。
+fn child_mode(argc int, argv **char) int {
+    if (argc < 2 || argv == 0) {
+        return 0;
+    }
+    if (str_equals(argv[1], "child") != 0) {
+        os.exit_now(42);
+    }
+    if (str_equals(argv[1], "signal") != 0) {
+        sys.send_signal(sys.process_id().to_type(int), sys.SIGTERM);
+        os.exit_now(99);
+    }
+    return 0;
+}
+
+// cleanup 删除坏可执行文件；错误被忽略。
+fn cleanup() void {
+    os.remove_path(noexec_path);
+}
+
+// check_success 启动一次正常子进程并核对 42 退出码。
+fn check_success(argv **char, envp **char, code int) int {
+    let child_argv [3]*char = [argv[0], "child", 0];
+    let spawned os.PidResult = os.spawn(argv[0], &child_argv[0], envp);
+    if (spawned.pid <= 0 || spawned.error.kind != os.error_none) {
+        return code;
+    }
+    let waited os.WaitResult = os.wait(spawned.pid);
+    if (waited.state != os.wait_exited || waited.exit_code != 42
+        || waited.error.kind != os.error_none) {
+        return code + 1;
+    }
+    return 0;
+}
+
+// check_signal 启动自我发送 SIGTERM 的子进程，核对信号号与退出状态分离。
+fn check_signal(argv **char, envp **char) int {
+    let signal_argv [3]*char = [argv[0], "signal", 0];
+    let spawned os.PidResult = os.spawn(argv[0], &signal_argv[0], envp);
+    if (spawned.pid <= 0 || spawned.error.kind != os.error_none) {
+        return 20;
+    }
+    let waited os.WaitResult = os.wait(spawned.pid);
+    if (waited.state != os.wait_signaled || waited.signal != sys.SIGTERM
+        || waited.error.kind != os.error_none) {
+        return 21;
+    }
+    return 0;
+}
+
+// check_missing 启动不存在路径，必须由错误管道返回 not_found 而不是假 PID。
+fn check_missing(envp **char) int {
+    let child_argv [3]*char = ["missing", "child", 0];
+    let spawned os.PidResult = os.spawn(".yh-osprocess-missing",
+        &child_argv[0], envp);
+    if (spawned.pid != -1 || spawned.error.kind != os.error_not_found) {
+        return 30;
+    }
+    return 0;
+}
+
+// check_noexec 创建没有执行权限的文件，exec 失败必须回传 permission_denied。
+fn check_noexec(envp **char) int {
+    let options os.OpenOptions = os.write_options();
+    let created os.FdResult = os.open_path(noexec_path, options);
+    if (created.fd < 0 || created.error.kind != os.error_none) {
+        return 40;
+    }
+    if (os.close_file(created.fd).kind != os.error_none) {
+        return 41;
+    }
+    let child_argv [3]*char = [noexec_path, "child", 0];
+    let spawned os.PidResult = os.spawn(noexec_path, &child_argv[0], envp);
+    if (spawned.pid != -1
+        || spawned.error.kind != os.error_permission_denied) {
+        return 42;
+    }
+    return 0;
+}
+
+// check_no_zombies 用 WNOHANG 等待任一子进程，要求返回 ECHILD。
+fn check_no_zombies() int {
+    let status int = 0;
+    let result i64 = sys.wait_process(-1, &status, sys.WNOHANG);
+    if (sys.is_error(result) != 1 || sys.error_code(result) != sys.ECHILD) {
+        return 50;
+    }
+    return 0;
+}
+
+// main 先处理子模式，再在父进程执行全部 spawn/wait 检查。
+pub fn main(argc int, argv **char, envp **char) int {
+    if (argc < 1 || argv == 0 || envp == 0) {
+        return 1;
+    }
+    let child_rc int = child_mode(argc, argv);
+    if (child_rc != 0) {
+        return child_rc;
+    }
+    cleanup();
+    let rc int = check_success(argv, envp, 10);
+    if (rc != 0) {
+        cleanup();
+        return rc;
+    }
+    // 重复启动确认 fd/子进程不累积。
+    rc = check_success(argv, envp, 12);
+    if (rc != 0) {
+        cleanup();
+        return rc;
+    }
+    rc = check_signal(argv, envp);
+    if (rc != 0) {
+        cleanup();
+        return rc;
+    }
+    rc = check_missing(envp);
+    if (rc != 0) {
+        cleanup();
+        return rc;
+    }
+    rc = check_noexec(envp);
+    if (rc != 0) {
+        cleanup();
+        return rc;
+    }
+    rc = check_no_zombies();
+    cleanup();
+    if (rc != 0) {
+        return rc;
+    }
+    printf("os process ok\n");
+    return 0;
+}
