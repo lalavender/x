@@ -7213,3 +7213,13 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
 - **种子换代**：`make fetch-seed` 取 rc.7 官方种子（`624ffc50…`），`make` 冷编
   无分号源码成功、`--compiler` 语料 80/80 + 44/44；`make seed` 已是新一代
   （`e96eca03…`）。
+
+# 2026-10-22 全仓去分号收尾
+
+- **范围**：`libs/`、`examples/`、`tests/` 非反例语料 503 个文件删除 11,698 个
+  分号；`compiler/` 此前已删 24,514 个。反例（`rejected/`、`reject/`）、冻结
+  语料（`tests/perf/`）、按精确源码字节改写的项目 fixture、显式分号正例保留。
+- **验证**：`make test` 全绿（80/80、44/44、run 209/210、fail 133/133）；
+  `make selfhost-native` 全绿（27 产物固定点、自解析 101、modules 19/19、
+  project 115/115）。
+- 记录：[01-finished/yh-分号删除-2026-10-22.md](01-finished/yh-分号删除-2026-10-22.md)。

@@ -21,12 +21,12 @@
 后续（2026-10-22 更新）：
 
 - Phase 1 部分完成：`0.0.8-rc.4` 已发布（prerelease，三端资产）。
-- Phase 2 编译器部分完成：`compiler/` 101 个文件删除 24,514 个分号、保留 1,061
-  个；`make` 冷编产物与删除前**非 manifest 差异 0**，`make test` 与
+- Phase 2 完成：`compiler/` 101 个文件删除 24,514 个分号；`libs/`、`tests/`、
+  `examples/` 再删 11,698 个（503 个文件）。反例、冻结语料与按字节改写的项目
+  fixture 保留显式分号；`make` 冷编产物与删除前**非 manifest 差异 0**，`make test` 与
   `make selfhost-native` 全绿。记录见
   [完成记录](../01-finished/yh-分号删除-2026-10-22.md)。
-- 剩余：`libs/`、`tests/`、`examples/` 清理；正式 `0.0.8` 种子发布后
-  `make seed` 与文档刷新（Phase 3/4）。
+- 种子：`0.0.8-rc.7` 已发布并通过 `make fetch-seed` 换代，`make seed` 完成。
 
 ## 统计基线
 
