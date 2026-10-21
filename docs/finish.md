@@ -31,6 +31,21 @@
   换分支/改语料后重新 `--write`。
 - 未改编译器、未滚种子。
 
+## 2026-10-21 推送 llvm 与种子出库
+
+- 把退役分支推送到远端 `llvm`（`e5e81ac..1f2c8ba`），随后提交
+  `5ee3779`：删除 `.gitattributes`（唯一 LFS 规则）与 `bin/` 下的
+  darwin/linux 种子及哈希，`.gitignore` 改为忽略 `/bin/`，仓库不再依赖
+  git-lfs；AGENTS/compiler README/Makefile 的种子说明改为
+  `make fetch-seed` 从 Release 获取。
+- 本地种子用 git 历史（darwin）与主仓库 LFS 缓存（linux）恢复到被忽略的
+  `bin/`，哈希与入库记录一致；`make` 冷编通过，`make test` 退出 0。
+- 本机 `make fetch-seed` 因仓库私有且匿名 API 限流失败，需提供
+  `GH_TOKEN`/`GITHUB_TOKEN` 与 `GITHUB_REPOSITORY=lalavender/x`。
+- CI：推送到 `llvm` 会触发 GitHub Actions（linux-x86_64、darwin-arm64）与
+  CircleCI 三端；两者均用 token 从 Release 取种子，不依赖入库 bin。
+- 未滚种子。
+
 ## 2026-10-21 LL12 完成报告
 
 阶段完成报告：[docs/01-finished/yh-LL12退役旧机器发射-2026-10-21.md](01-finished/yh-LL12退役旧机器发射-2026-10-21.md)。
