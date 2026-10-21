@@ -7223,3 +7223,18 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
   `make selfhost-native` 全绿（27 产物固定点、自解析 101、modules 19/19、
   project 115/115）。
 - 记录：[01-finished/yh-分号删除-2026-10-22.md](01-finished/yh-分号删除-2026-10-22.md)。
+
+# 2026-10-22 YH_LLVM_CACHE 自动定位
+
+- **问题**：换 worktree/机器后要手工 `YH_LLVM_CACHE=...`，否则 Makefile 与
+  `tools/llvm-*.py` 各自回落到空目录，`make llvm-host` 重新准备闭包。
+- **实现**：新增 [tools/llvm_cache.py](tools/llvm_cache.py)：显式 `YH_LLVM_CACHE`
+  → 仓库 `tmp/llvm-migration` → 主 worktree 的 `tmp/llvm-migration`
+  （`git rev-parse --git-common-dir`）。Makefile 以它为默认值并 `export`，
+  `DARWIN_SDK_RECORD` 跟随；`llvm-darwin-host`/`llvm-host`/`llvm-sdk` 与
+  selfhost 探针统一 `cache_root()`；`make` 前置目标把仓库内
+  `tmp/llvm-migration` 软链到缓存根（`compiler/project.toml` 的桥库路径是
+  仓库相对）。
+- **验证**：在 `/tmp/yh-cachetest` 新建 worktree（无缓存、不设环境变量）→
+  `make llvm-host` 复用主仓库缓存、`make` 构建成功、产物对
+  `tests/yh/02-basic/04_newline_terminator.yh` 返回 0；主仓库 `make` 回归正常。

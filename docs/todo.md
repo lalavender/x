@@ -144,14 +144,12 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
   [分号删除](01-finished/yh-分号删除-2026-10-22.md)。
 - [x] **H3 发布资产与源码不一致（已关闭）**：`0.0.8-rc.7` 重新发布后三端资产
   均含换行终结（字节与行为核对通过）；发布流程已加打包后 `--syntax-check` 自检。
-- [ ] **H4 LLVM 闭包缓存 flags 被写成临时 workspace 路径（P0）**：发布/CI 的
-  `make bootstrap` 会把 `tmp/llvm-migration/llvm-host-*/selfhost-flags.txt` 重写成
-  当次 act 工作区绝对路径，任务结束即失效；本地 `make selfhost-native` 因此报
-  `Darwin 自举闭包：真实闭包链接失败`。修法：flags 只写缓存内的相对/固定路径，
-  或在 bootstrap 后统一改写回 `$YH_LLVM_CACHE`。
-
-## P2 长期与按需
-
+- [x] **H4 LLVM 闭包缓存路径（部分关闭）**：`YH_LLVM_CACHE` 现在由
+  `tools/llvm_cache.py` 自动定位（显式 env → 仓库 `tmp/llvm-migration` →
+  主 worktree 的同名目录），Makefile 导出并补 `tmp/llvm-migration` 软链，
+  新 worktree 不改环境变量即可 `make` 成功。**剩余**：缓存里的
+  `selfhost-flags.txt` 仍存绝对路径，整个缓存目录被搬走时需要重写或重新
+  `make llvm-host`。
 - [ ] **I1 MOD-U6**：远程来源、版本规则、锁文件与工作区，按实际需求另立设计与
   验收（不沿用旧 Go 方案承诺）。
 - [ ] **I2 VS Code 扩展**：VS-U0 最小扩展与 LSP → VS-U1 保存后诊断与取消 →

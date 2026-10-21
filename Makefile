@@ -268,6 +268,16 @@ fetch-seed:
 # 产物形态随宿主（Darwin → Mach-O，Linux → ELF）。
 # LLVM_HOST_FLAGS 决定是否把静态 LLVM 桥链进 $(YH)；宿主不可用时只警告并
 # 回退旧路径，绝不让 LLVM 成为构建失败点。
+# 仓库内 tmp/llvm-migration 必须指向缓存根：compiler/project.toml 的桥库路径
+# 按「仓库/compiler」相对书写，新 worktree 里由这里补上软链（CI 是反向挂载）。
+.PHONY: tmp/llvm-migration
+tmp/llvm-migration:
+	@mkdir -p $(TOPSRC)/tmp
+	@if [ "$(YH_LLVM_CACHE)" != "$(TOPSRC)/tmp/llvm-migration" ]; then \
+	  ln -sfn "$(YH_LLVM_CACHE)" "$(TOPSRC)/tmp/llvm-migration"; \
+	fi
+
+$(YH): | tmp/llvm-migration
 $(YH): $(YH_PREREQ) $(wildcard compiler/*.yh) $(wildcard compiler/*/*.yh) \
 	$(wildcard compiler/llvm/*) $(TOPSRC)/compiler/project.toml \
 	$(TOPSRC)/vendor/llvm/sdk.lock.json $(TOPSRC)/tools/seed-build.py \
