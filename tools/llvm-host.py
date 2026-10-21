@@ -29,7 +29,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WORK_ROOT = ROOT / "tmp/llvm-migration"
+sys.path.insert(0, str(ROOT / "tools"))
+from llvm_cache import cache_root  # noqa: E402
+WORK_ROOT = cache_root()
 SDK_TOOL = ROOT / "tools/llvm-sdk.py"
 BUILDER = ROOT / "tests/selfhost/llvm-host.py"
 MANIFEST = ROOT / "vendor/llvm/sdk.lock.json"

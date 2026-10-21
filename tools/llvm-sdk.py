@@ -18,7 +18,9 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WORK = ROOT / "tmp/llvm-migration/sdk"
+sys.path.insert(0, str(ROOT / "tools"))
+from llvm_cache import cache_root  # noqa: E402
+WORK = cache_root() / "sdk"
 HEADER_INCLUDE = re.compile(r'^\s*#\s*include\s*([<"])([^">]+)[">]', re.MULTILINE)
 LLD_OUTPUT_MARKER = "@YH_LLD_OUTPUT@"
 LLD_INPUT_MARKER = "@YH_LLD_INPUTS@"

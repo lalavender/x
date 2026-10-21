@@ -30,6 +30,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools"))
+from llvm_cache import cache_root  # noqa: E402
 COMPILER = ROOT / "compiler"
 WORK = ROOT / "tmp" / "selfhost"
 HOST_DRIVER = ROOT / "tools" / "llvm-host.py"
@@ -155,7 +157,7 @@ def run(cmd, cwd=None, shim=False, seed_link=False):
     if sys.platform == "darwin" and "SDKROOT" not in environment:
         # 自举闭包末尾带 -lc++，只有宿主 SDK 能解析；优先用固定 SDK 记录里的
         # 真实 SDK，避免调用方每次手工导出 SDKROOT。
-        sdk_record = ROOT / "tmp/llvm-migration/darwin-sdk/sdk-darwin-aarch64/host.json"
+        sdk_record = cache_root() / "darwin-sdk/sdk-darwin-aarch64/host.json"
         if sdk_record.is_file():
             sdk_root = json.loads(sdk_record.read_text(encoding="utf-8")).get("sdk_root")
             if sdk_root and (Path(sdk_root) / "SDKSettings.json").is_file():

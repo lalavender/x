@@ -45,6 +45,10 @@ ifndef TOP
  TOP = .
  INCLUDED = no
 TOPSRC = $(TOP)
+# LLVM 闭包缓存根：显式 YH_LLVM_CACHE 优先，否则仓库 tmp/llvm-migration，
+# 再否则复用同一 Git 仓库主 worktree 的缓存（见 tools/llvm-cache.py）。
+YH_LLVM_CACHE ?= $(shell python3 $(TOPSRC)/tools/llvm-cache.py 2>/dev/null || echo $(TOPSRC)/tmp/llvm-migration)
+export YH_LLVM_CACHE
 
 EXESUF =
 ifeq ($(shell uname -s),Darwin)
@@ -170,7 +174,7 @@ ifeq ($(HOST_SYSTEM),Darwin)
  export YH_DARWIN_SDK = $(abspath compiler/darwin-sdk)
  # 固定 SDK 一旦准备好，就用它的 SDKROOT：自举闭包末尾的 -lc++ 只能由宿主
  # 真实 SDK 解析（bundled stub 不含 libc++）。显式 SDKROOT 仍然优先。
- DARWIN_SDK_RECORD = $(TOPSRC)/tmp/llvm-migration/darwin-sdk/sdk-darwin-aarch64/host.json
+ DARWIN_SDK_RECORD = $(YH_LLVM_CACHE)/darwin-sdk/sdk-darwin-aarch64/host.json
  ifneq ($(wildcard $(DARWIN_SDK_RECORD)),)
   export SDKROOT ?= $(shell python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sdk_root"])' '$(DARWIN_SDK_RECORD)')
  endif

@@ -33,7 +33,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-WORK_ROOT = ROOT / "tmp/llvm-migration"
+sys.path.insert(0, str(ROOT / "tools"))
+from llvm_cache import cache_root  # noqa: E402
+WORK_ROOT = cache_root()
 
 # 受支持的宿主：宿主标识 → ELF e_machine 编号、qemu-user 运行器与目标 sysroot。
 # machine 用宿主 readelf -h 打印的名字反查，保证「生成它的人」与「验收它的人」
