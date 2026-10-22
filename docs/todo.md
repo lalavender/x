@@ -171,8 +171,20 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
   见[方案](02-plan/yh-VSCode扩展方案.md)。
 - [ ] **I3 R3 剩余**：printf 按需扩展（宽度/精度/浮点）、完整 OS 导入清单审计
   （`nm -u` 允许清单）；线程 API 已并入「后续任务」。
-- [ ] **I4 编译器缺陷清单**：11 项已全部修复或复核为不再复现，无待办；新缺陷按
+- [ ] **I4 编译器缺陷清单**：11 项已全部修复或复核为不再复现；新缺陷按
   「先复现、再红绿回归、后修」入本清单。
+  - [ ] **I4-1 非 void 函数末尾缺少 return 的诊断误导**（2026-10-22 记录）：
+    `fn main() int { printf("Hello, World!\n") }` 报
+    `LLVM lowering main: 首片不支持此语句或表达式`，位置指向最后一条语句的
+    实参 token（使用例的位置看起来像 printf 不支持）。原因：
+    `checked_lower_function` 在 `status == 1 && (ret != ir.IR_TY_VOID ||
+    aggregate_return != 0)` 时返回 -2，但返回前没有设置 `l.reason` 与
+    `l.last_token`（`compiler/ast/module_snapshot_lower.yh` 约 3698 行），
+    沿用默认文案。复现：`examples/ex1.yh`（缺 `return 0`；补上即通过）。
+    期望：报「非 void 函数末尾缺少 return」并把位置指到函数体收尾；先加
+    `tests/yh-run/fail/` 用例（用 `// fail-contains:` 锁新文案），再改文案，
+    跑 `make test` + `make selfhost-native`。**附**：`examples/ex1.yh` 是照搬
+    C 的 hello world，已补 `return 0`（已提交）。
 
 ## 后续任务：首个完整 SSA 版本（非 LLVM 收尾）
 
