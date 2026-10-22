@@ -8,10 +8,10 @@
 > `make selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
-version = `0.0.5`，source = `.`），按 **gen / lex / parse / ast / check / comptime / cmd / ir / backend
-多模块**组织，2026-10-20 新增 `check` 后共 **九个模块**、107 个 `.yh` 文件；
-`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担 AST 一致性校验；
-`ir`（目标隔离
+version = `0.0.5`，source = `.`），按 **gen / builtin / lex / parse / ast / check / comptime / cmd / ir / backend
+多模块**组织，2026-10-22 新增 `builtin` 后共 **十个模块**、102 个 `.yh` 文件；
+`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担 AST 一致性校验，
+`builtin/` 只放内置（prelude）函数登记表；`ir`（目标隔离
 SSA）与其它模块同为根项目普通模块，共同进入编译器构建与自举固定点。
 校验视图生命周期与模块依赖见[check 拆分设计](../docs/03-design/yh-编译器check模块拆分设计.md)。
 
@@ -130,13 +130,24 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 统一交给 pass2a 之后的 typed 布局常量依赖调度（早期快路径只在 `ct_is_prepared` 已就绪时生效）。
 单文件入口与函数 AST 的统一仍在待办中。
 
+**builtin** —— 内置（prelude）函数登记
+
+| 文件 | 职责 |
+| --- | --- |
+| `builtin/prelude.yh` | prelude 名字/签名/变参形态与 `F_RUNTIME_*` 标志；只 import gen |
+
+登记顺序沿用历史实现：先 `gen.ty_register_builtins()`、`gen.scope_push()`，再
+`builtin.sem_register_prelude()`。符号表与类型表仍归 gen（`gen.prelude_add`
+是唯一被导出的原语），运行时函数体在 `backend/llvm_runtime.yh` /
+`backend/llvm_apple_runtime.yh` 按需发射。
+
 **gen** —— 语义与后端
 
 | 文件 | 职责 |
 | --- | --- |
 | `gen/model.yh` | token 常量、类型/符号常量、Tok/Res/CType/CSym 等结构、全部全局状态 |
 | `gen/buffer.yh` | 源文件整读（open/read/close）、汇编输出缓冲、诊断、字节写出 |
-| `gen/symbols.yh` | 名字池、类型表、符号/作用域、类型兼容、常量折叠、prelude 登记 |
+| `gen/symbols.yh` | 名字池、类型表、符号/作用域、类型兼容、常量折叠、prelude 符号表原语 |
 | `gen/target.yh` | 目标数据模型：字长、对齐、结构体布局（**换平台的第一步**） |
 | `gen/sem_value.yh` | 字面量/标识符求值、常量折叠与值类别（LL12：无发射） |
 | `gen/sem_expr.yh` | 表达式语义：下标、成员、运算、转换、切片（LL12：无发射） |

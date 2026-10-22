@@ -1077,7 +1077,9 @@ pub fn sem_init_tables() int {
 }
 
 // prelude_add：登记一个 prelude 外部函数（名字进池；签名进签名表）。
-fn prelude_add(name *char, ret int, np int, vararg int) int {
+// 供 builtin 模块的 sem_register_prelude 使用；gen 只提供符号表原语，不认识
+// 具体内置函数名。
+pub fn prelude_add(name *char, ret int, np int, vararg int) int {
     let n int = 0
     for name[n] != 0 {
         n += 1
@@ -1088,138 +1090,6 @@ fn prelude_add(name *char, ret int, np int, vararg int) int {
     }
     let ftid int = ty_fn(ret, g_state.task.t_sigparam_n - np, np, vararg)
     return sym_push_lit(off, n, SYM_FN, ftid, F_EXTERN | F_PUB)
-}
-
-// prelude_add_linux_syscall6：Linux arm64 的六参数系统调用入口；调用点由后端
-// 发射 svc 指令，因此不生成外部符号引用。
-fn prelude_add_linux_syscall6() int {
-    let i int = 0
-    for i < 7 {
-        ty_sig_param(TY_U64)
-        i += 1
-    }
-    let idx int = prelude_add("linux_syscall6", TY_I64, 7, 0)
-    if (idx < 0) {
-        return -1
-    }
-    g_state.task.c_syms[idx].flags = F_PUB | F_INTRINSIC | F_LINUX_SYSCALL
-    return idx
-}
-
-// sem_register_prelude：登记编译器和程序使用的外部接口（语义边界 §7）。
-// 签名参数类型先按序入池，再以池起始下标建函数类型。
-pub fn sem_register_prelude() int {
-    let t_pvoid int = ty_ptr(TY_VOID)
-    let t_pchar int = ty_ptr(TY_CHAR)
-    // printf(fmt *char, ...) int —— 本地格式化运行时，支持整数/字符串/字符。
-    ty_sig_param(t_pchar)
-    let printf_idx int = prelude_add("printf", TY_I32, 1, 1)
-    if (printf_idx < 0) { return -1 }
-    g_state.task.c_syms[printf_idx].flags = F_PUB | F_INTRINSIC | F_RUNTIME_PRINTF
-    // malloc(size u64) *void，由 yh 运行时直接通过 OS 内存映射实现。
-    ty_sig_param(TY_U64)
-    let malloc_idx int = prelude_add("malloc", t_pvoid, 1, 0)
-    if (malloc_idx < 0) { return -1 }
-    g_state.task.c_syms[malloc_idx].flags = F_PUB | F_INTRINSIC | F_RUNTIME_MALLOC
-    // free(p *void) void，由映射头部记录尺寸后直接解除映射。
-    ty_sig_param(t_pvoid)
-    let free_idx int = prelude_add("free", TY_VOID, 1, 0)
-    if (free_idx < 0) { return -1 }
-    g_state.task.c_syms[free_idx].flags = F_PUB | F_INTRINSIC | F_RUNTIME_FREE
-    // memcpy(dst *void, src *void, n u64) *void，由 yh 本地运行时实现。
-    ty_sig_param(t_pvoid)
-    ty_sig_param(t_pvoid)
-    ty_sig_param(TY_U64)
-    let memcpy_idx int = prelude_add("memcpy", t_pvoid, 3, 0)
-    if (memcpy_idx < 0) { return -1 }
-    g_state.task.c_syms[memcpy_idx].flags = F_PUB | F_INTRINSIC | F_RUNTIME_MEMCPY
-    // strlen(s *char) u64，由 yh 本地运行时实现。
-    ty_sig_param(t_pchar)
-    let strlen_idx int = prelude_add("strlen", TY_U64, 1, 0)
-    if (strlen_idx < 0) { return -1 }
-    g_state.task.c_syms[strlen_idx].flags = F_PUB | F_INTRINSIC | F_RUNTIME_STRLEN
-    // exit(code int) void
-    ty_sig_param(TY_I32)
-    prelude_add("exit", TY_VOID, 1, 0)
-    // open(path *char, flags int, ...) int —— 裸变参
-    ty_sig_param(t_pchar)
-    ty_sig_param(TY_I32)
-    prelude_add("open", TY_I32, 2, 1)
-    // close(fd int) int
-    ty_sig_param(TY_I32)
-    prelude_add("close", TY_I32, 1, 0)
-    // mkdir(path *char, mode int) int —— 创建一个目录，不递归创建父目录。
-    ty_sig_param(t_pchar)
-    ty_sig_param(TY_I32)
-    prelude_add("mkdir", TY_I32, 2, 0)
-    // read(fd int, buf *void, count u64) i64
-    ty_sig_param(TY_I32)
-    ty_sig_param(t_pvoid)
-    ty_sig_param(TY_U64)
-    prelude_add("read", TY_I64, 3, 0)
-    // write(fd int, buf *void, count u64) i64
-    ty_sig_param(TY_I32)
-    ty_sig_param(t_pvoid)
-    ty_sig_param(TY_U64)
-    prelude_add("write", TY_I64, 3, 0)
-    // system(cmd *char) int 仅由明确启用的兼容配置提供。
-    if (g_state.task.c_legacy_system != 0) {
-        ty_sig_param(t_pchar)
-        prelude_add("system", TY_I32, 1, 0)
-    }
-    // unlink(path *char) int —— 清理 -o 模式的临时汇编文件
-    ty_sig_param(t_pchar)
-    prelude_add("unlink", TY_I32, 1, 0)
-    // fork/execv/waitpid：过渡期直接启动模块 worker，不经过 shell。
-    prelude_add("fork", TY_I32, 0, 0)
-    ty_sig_param(t_pchar)
-    ty_sig_param(ty_ptr(t_pchar))
-    prelude_add("execv", TY_I32, 2, 0)
-    ty_sig_param(t_pchar)
-    ty_sig_param(ty_ptr(t_pchar))
-    prelude_add("execvp", TY_I32, 2, 0)
-    // dup2(oldfd int, newfd int) int —— 子进程输出重定向的 POSIX 接口。
-    ty_sig_param(TY_I32)
-    ty_sig_param(TY_I32)
-    prelude_add("dup2", TY_I32, 2, 0)
-    ty_sig_param(TY_I32)
-    ty_sig_param(ty_ptr(TY_I32))
-    ty_sig_param(TY_I32)
-    prelude_add("waitpid", TY_I32, 3, 0)
-    // getpid/rename/usleep/kill：原子发布接口和调度进程 worker。
-    prelude_add("getpid", TY_I32, 0, 0)
-    ty_sig_param(t_pchar)
-    ty_sig_param(t_pchar)
-    prelude_add("rename", TY_I32, 2, 0)
-    ty_sig_param(TY_I32)
-    prelude_add("usleep", TY_I32, 1, 0)
-    ty_sig_param(TY_I32)
-    ty_sig_param(TY_I32)
-    prelude_add("kill", TY_I32, 2, 0)
-    if (tg_darwin() == 0) {
-        // LL12：Linux syscall 入口由 LLVM 运行时提供（backend/llvm_runtime.yh
-        // 的 linux_syscall6），旧汇编桩不再发射。
-        if (prelude_add_linux_syscall6() < 0) {
-            return -1
-        }
-    }
-    // clock_gettime 是编译器 --stats 使用的单调时钟 OS API，libs/time 也
-    // 引用它；Darwin 经 libSystem、Linux 经 glibc 解析（POSIX 公共接口），
-    // 两种目标都登记。getattrlistbulk 是 Darwin 专用目录 API，保持限定。
-    ty_sig_param(TY_I32)
-    ty_sig_param(t_pvoid)
-    if (prelude_add("clock_gettime", TY_I32, 2, 0) < 0) {
-        return -1
-    }
-    if (tg_darwin() != 0) {
-        ty_sig_param(TY_I32)
-        ty_sig_param(ty_ptr(TY_VOID))
-        ty_sig_param(ty_ptr(TY_VOID))
-        ty_sig_param(TY_U64)
-        ty_sig_param(TY_U64)
-        prelude_add("getattrlistbulk", TY_I32, 5, 0)
-    }
-    return 0
 }
 
 // tml_intern_str：把任意缓冲字节 intern 进名字池（mod.toml/项目路径/

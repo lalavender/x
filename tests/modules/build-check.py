@@ -343,7 +343,7 @@ def copy_proj(src, dst):
         # fixture 作为同模块的第二个文件随 main/ 一起构建；同样排除桥绑定。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "lex", "ast", "parse", "comptime", "ir", "backend", "check"):
+        for module in ("gen", "lex", "ast", "parse", "comptime", "ir", "backend", "builtin", "check"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "lowercore"\nsource = "."\n')

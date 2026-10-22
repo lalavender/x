@@ -2,6 +2,23 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-22 内置函数迁入 builtin 模块
+
+- **结构**：新增 `compiler/builtin/`（`module builtin`，只 `import gen`），
+  把 `sem_register_prelude` 与 `prelude_add_linux_syscall6` 从
+  `gen/symbols.yh` 迁出；`gen` 只保留符号表原语 `gen.prelude_add`（改为 `pub`）。
+  入口（`cmd/driver.yh`、`cmd/llvm_emit.yh`、`cmd/module_worker.yh`）改为
+  `import builtin` 后调用 `builtin.sem_register_prelude()`，调用顺序不变。
+  prelude 名字、签名、登记顺序与 `F_*` 标志均未改；运行时函数体仍在
+  `backend/llvm_runtime.yh` / `backend/llvm_apple_runtime.yh`，本次不动后端。
+- **测试**：新增 `tests/yh-run/run/205-builtin-prelude-registration.yh`
+  （printf/malloc/memcpy/strlen/free）；`llvmlower` fixture 补
+  `import core.builtin`，`tests/modules/build-check.py` 拷贝清单加 `builtin`。
+- **验证**：`make test`（run 210/211、fail 133/133、pass 8/8）与
+  `make selfhost-native`（固定点 30 产物、自解析 102 源文件、run 351/352、
+  模块 19/19、项目 115/115）全绿。记录见
+  [完成报告](01-finished/yh-内置函数迁入builtin模块-2026-10-22.md)。
+
 ## 2026-10-22 修复文档乱码并静音编辑器 Unicode 提示
 
 - **问题**：`docs/01-finished/yh-linkMach-O出口与编译器汇编步替换-2026-10-04.md`

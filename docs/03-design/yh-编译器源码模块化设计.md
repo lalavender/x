@@ -10,6 +10,13 @@
 `check`。下文记录 0.0.3 首轮四模块成模时的设计基线；当前 `check` 边界见
 [check 模块拆分设计](yh-编译器check模块拆分设计.md)。
 
+2026-10-22 补记：新增第十个模块 `builtin`（`compiler/builtin/prelude.yh`），
+把内置（prelude）函数登记表从 `gen/symbols.yh` 迁出：`builtin` 只 `import gen`，
+用 `gen.prelude_add` 写符号表并设置 `F_*` 标志；`gen` 不反向 import `builtin`，
+入口模块在 `gen.ty_register_builtins()` / `gen.scope_push()` 之后调用
+`builtin.sem_register_prelude()`。运行时函数体仍在 `backend/llvm_*_runtime.yh`，
+本次只搬登记层，不改 prelude 名字、签名、顺序或运行时行为。
+
 ## 1. 现状与边界
 
 编译器源码已按 **lex / parse / gen / cmd** 四模块成模，共 29 个 `.yh`
