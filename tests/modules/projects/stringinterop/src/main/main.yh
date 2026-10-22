@@ -1,0 +1,87 @@
+module main
+
+import io
+import string
+import toml
+
+// main 覆盖 ST6 的 TOML Text→View 显式适配、NUL 长度保持与所有者释放。
+fn main() int {
+    // 解码后的 NUL 存在于 TOML 字节视图；显式 view_bytes 保留完整长度。
+    let parsed toml.ParseResult = toml.parse_text("s = \"a\\u0000b\"")
+    if (parsed.status != toml.parse_ok) {
+        return 1
+    }
+    let root toml.Value = toml.root(&parsed.document)
+    let got toml.LookupResult = toml.get(root, "s")
+    if (got.status != toml.query_ok) {
+        return 2
+    }
+    let text toml.Text
+    if (toml.as_text(got.value, &text) != toml.query_ok) {
+        return 3
+    }
+    if (text.count != 3 || text.data[1] != 0) {
+        return 4
+    }
+
+    // 显式适配：长度来自 Text.count，不调用 strlen。
+    let adapted string.ViewResult = string.view_bytes(text.data, text.count)
+    if (adapted.status != string.status_ok || adapted.value.count != 3) {
+        return 5
+    }
+    if (string.view_equal(adapted.value, string.view_cstr("a").value)) {
+        return 6
+    }
+
+    // 复制到拥有者后可以释放 TOML 文档，副本仍保留内嵌 NUL。
+    let owned string.StringResult = string.from_view(adapted.value)
+    if (owned.status != string.status_ok) {
+        return 7
+    }
+    toml.release(&parsed.document)
+    if (string.byte_length(&owned.value) != 3
+        || string.as_view(&owned.value).data[1] != 0) {
+        return 8
+    }
+    let c_result string.CStrResult = string.c_str(&owned.value)
+    if (c_result.status != string.status_embedded_nul || c_result.data != 0) {
+        return 9
+    }
+    string.release(&owned.value)
+
+    // 普通 UTF-8 文本同样按 count 适配，释放后复制值保持。
+    let utf8_parsed toml.ParseResult = toml.parse_text("s = \"hé中\"")
+    if (utf8_parsed.status != toml.parse_ok) {
+        return 10
+    }
+    let utf8_root toml.Value = toml.root(&utf8_parsed.document)
+    let utf8_got toml.LookupResult = toml.get(utf8_root, "s")
+    let utf8_text toml.Text
+    if (toml.as_text(utf8_got.value, &utf8_text) != toml.query_ok) {
+        return 11
+    }
+    let utf8_view string.ViewResult = string.view_bytes(utf8_text.data, utf8_text.count)
+    if (utf8_view.status != string.status_ok || utf8_view.value.count != 6) {
+        return 12
+    }
+    let utf8_info string.Utf8Info = string.utf8_validate(utf8_view.value)
+    if (utf8_info.status != string.status_ok || utf8_info.rune_count != 3) {
+        return 13
+    }
+    let utf8_owned string.StringResult = string.from_view(utf8_view.value)
+    if (utf8_owned.status != string.status_ok) {
+        return 14
+    }
+    toml.release(&utf8_parsed.document)
+    let utf8_c string.CStrResult = string.c_str(&utf8_owned.value)
+    if (utf8_c.status != string.status_ok || utf8_c.data == 0) {
+        return 15
+    }
+    if (utf8_c.data[0] != 'h' || utf8_c.data[1] != 195 || utf8_c.data[2] != 169) {
+        return 16
+    }
+    string.release(&utf8_owned.value)
+
+    io.println("string interop ok")
+    return 0
+}

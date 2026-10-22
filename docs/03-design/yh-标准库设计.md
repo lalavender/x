@@ -47,7 +47,9 @@ YH_STDLIB=/path/to/yh/libs yh run
 
 本模块只包装现有 yh 运行时分配与复制入口；所有权由调用方管理，不引入隐式分配。
 
-### `string`
+### `string`（2026-10-23 首期完成）
+
+旧接口保持原签名、返回值与 NUL 截止语义：
 
 | API | 契约 |
 | --- | --- |
@@ -55,7 +57,24 @@ YH_STDLIB=/path/to/yh/libs yh run
 | `equals(left *char, right *char) int` | 内容相等返回 1，否则返回 0 |
 | `compare(left *char, right *char) int` | 按无符号字节序返回 -1、0 或 1 |
 
-字符串 API 操作 NUL 结尾字节串，不做 Unicode 码点解码。
+新增按字节存储的 `View`（借用）与 `String`（独占、显式释放），单位统一为
+字节（`u64`）。公开面分四组：
+
+| 组 | API |
+| --- | --- |
+| 视图 | `view_bytes`/`view_cstr`、`view_equal`/`view_compare`、`starts_with`/`ends_with`、`find`/`rfind`/`contains`、`slice`、`trim_ascii`、`split`/`split_next` |
+| 拥有者 | `make`、`from_view`、`clone`、`move`、`release`、`as_view`、`byte_length`、`capacity`、`reserve`、`clear`、`truncate`、`assign`、`append`、`append_byte`、`c_str` |
+| 变换 | `concat`、`join`、`replace`、`replace_all`、`lower_ascii`、`upper_ascii` |
+| UTF-8 | `utf8_validate`、`utf8_next`、`append_rune`（RFC 3629 严格解码，只计标量） |
+
+`String` 始终维护额外结尾 NUL，内容内允许 NUL；成功的可变操作与 `release`
+使旧视图/C 指针失效，失败的操作保持原状态。最大内容长度
+`0x7ffffffffffffffe`，查找/切分/替换首版最坏 `O(n*m)`。Unicode 大小写折叠、
+规范化、字素边界、正则与格式化仍后置。
+
+设计见 [string 标准库设计](yh-string标准库设计-2026-10-23.md)，分期与验收见
+[实施方案](../02-plan/yh-string标准库实施方案-2026-10-23.md)，使用说明见
+[`libs/string/README.md`](../../libs/string/README.md)。
 
 ### `os`
 

@@ -353,6 +353,28 @@ test-toml-injection: stage-yh
 test-toml-install:
 	python3 $(TOPSRC)/tests/toml/install.py --workdir $(TOPSRC)/tmp/toml-install
 
+# test-string：string 标准库专项门（ST1–ST6，O0；含分配失败注入与参考差分）。
+.PHONY: test-string
+test-string: stage-yh
+	python3 $(TOPSRC)/tests/string/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-test --opt-level 0
+	python3 $(TOPSRC)/tests/string/reference.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-reference --opt-level 0
+
+# test-string-o2：同一专项门在 O2 下重跑（较慢，单独入口）。
+.PHONY: test-string-o2
+test-string-o2: stage-yh
+	python3 $(TOPSRC)/tests/string/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-test-o2 --opt-level 2
+	python3 $(TOPSRC)/tests/string/reference.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-reference-o2 --opt-level 2
+
+# test-string-install：make install 后从仓库外、无 YH_STDLIB 导入 string。
+.PHONY: test-string-install
+test-string-install:
+	python3 $(TOPSRC)/tests/string/install.py --workdir $(TOPSRC)/tmp/string-install
+
+# test-string-complexity：直接匹配的耗时探针（只记录，不设固定耗时门）。
+.PHONY: test-string-complexity
+test-string-complexity: stage-yh
+	python3 $(TOPSRC)/tests/string/complexity.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-complexity
+
 # quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
 # 秒级到十几秒，改语法/诊断时够用；运行语义与自举门留给 test/full。
 quick: stage-yh
@@ -476,6 +498,6 @@ clean:
 help:
 	@sed -n '2,20p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all quick full explorer code-stats test-code-stats seed selfhost-native clean help llvm-host bootstrap stage-yh fetch-seed test-llvm-linux-arm64 test-llvm-darwin selfhost-llvm-darwin
+.PHONY: all install uninstall test test-all quick full explorer code-stats test-code-stats seed selfhost-native clean help llvm-host bootstrap stage-yh fetch-seed test-string test-string-o2 test-string-install test-string-complexity test-llvm-linux-arm64 test-llvm-darwin selfhost-llvm-darwin
 
 endif # ($(INCLUDED),no)

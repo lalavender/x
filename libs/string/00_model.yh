@@ -1,0 +1,155 @@
+module string
+
+// yh string 标准库：公开模型、状态与结果类型。
+//
+// 本文件只放类型、常量和极小的构造辅助函数；不实现查询、增长或编码。
+// 设计见 docs/03-design/yh-string标准库设计-2026-10-23.md，分期见
+// docs/02-plan/yh-string标准库实施方案-2026-10-23.md。
+//
+// 实现约束：
+//   * 所有长度、位置、容量与切片边界单位都是字节（u64），不是码点或字素。
+//   * View 借用一段连续字节，不拥有存储；count 不含额外的结尾 NUL。
+//   * String 是薄句柄，私有状态只在本模块内可见；零句柄表示空串。
+//   * 已分配 String 始终维护 data[count] == 0，但内容本身允许内嵌 NUL。
+
+// Status 是 string 操作的稳定结果分类；end 只表示迭代正常结束。
+pub enum Status {
+    status_ok
+    status_end
+    status_invalid_argument
+    status_bounds
+    status_overflow
+    status_out_of_memory
+    status_invalid_utf8
+    status_embedded_nul
+}
+
+// View 借用一段连续字节；data 不是语言层面的 const 指针，调用者必须保证
+// 源在视图使用期间存活且不被改写。count 为 0 时 data 可以为 0。
+pub struct View {
+    data *u8
+    count u64
+}
+
+// String 独占模块私有状态；handle 只允许本模块解释，零句柄表示空串。
+// 结构体赋值不会复制内容，也不会增加所有者；转移和复制分别使用 move、clone。
+pub struct String {
+    handle *void
+}
+
+// ViewResult 是返回借用视图的结果；失败时 value 为空视图。
+pub struct ViewResult {
+    status Status
+    value View
+}
+
+// StringResult 是返回拥有者的结果；失败时 value 为零句柄，无需清理半成品。
+pub struct StringResult {
+    status Status
+    value String
+}
+
+// IndexResult 是查找结果；未找到时 found=false、index=0。
+pub struct IndexResult {
+    found bool
+    index u64
+}
+
+// CStrResult 是 C 字符串视图结果；成功指针只读借用，失败时 data=0。
+pub struct CStrResult {
+    status Status
+    data *char
+}
+
+// Utf8Info 是整段 UTF-8 校验结果；非法时 rune_count=0、error_offset 为
+// 首个非法编码序列的起始字节。
+pub struct Utf8Info {
+    status Status
+    rune_count u64
+    error_offset u64
+}
+
+// RuneResult 是从指定游标解码一个标量的结果；成功时 rune/width/offset 有效，
+// 失败或结束时 rune=0、width=0，offset 按调用契约给出定位。
+pub struct RuneResult {
+    status Status
+    rune u32
+    width u64
+    offset u64
+}
+
+// SplitIter 保存一次字节切分的借用状态；迭代器本身不需要 release。
+// 复制迭代器只复制游标，源与分隔符必须在整个迭代期间存活且保持不变。
+pub struct SplitIter {
+    text View
+    separator View
+    cursor u64
+    ended int
+}
+
+// STRING_MAX_LENGTH 是内部允许的最大内容长度，为有符号地址差与额外 NUL
+// 留出空间；不宣称这么大的内存可以实际分配。
+const STRING_MAX_LENGTH u64 = 9223372036854775806
+
+// STRING_TEST_FAIL_AFTER 是测试构建的分配失败注入点：-1 关闭；>=0 时允许
+// 该次数的私有分配，下一次失败。产品构建保持 -1，测试在标准库临时副本中
+// 改写本行，不向产品模块导出 test_* 接口。
+const STRING_TEST_FAIL_AFTER int = -1
+
+// string_state 是 String.handle 指向的私有状态；不出现在 pub 签名或接口文件。
+struct string_state {
+    data *u8
+    count u64
+    capacity u64
+}
+
+// string_alloc_count 记录本次进程内成功的私有分配次数，仅用于失败注入。
+let string_alloc_count int = 0
+
+// string_empty_view 返回空借用视图。
+fn string_empty_view() View {
+    let value View
+    value.data = 0
+    value.count = 0
+    return value
+}
+
+// view_result_ok 构造成功的视图结果。
+fn view_result_ok(value View) ViewResult {
+    let result ViewResult
+    result.status = Status.status_ok
+    result.value = value
+    return result
+}
+
+// view_result_error 构造失败的视图结果；失败值恒为空视图。
+fn view_result_error(status Status) ViewResult {
+    let result ViewResult
+    result.status = status
+    result.value = string_empty_view()
+    return result
+}
+
+// string_result_ok 构造成功的拥有者结果。
+fn string_result_ok(value String) StringResult {
+    let result StringResult
+    result.status = Status.status_ok
+    result.value = value
+    return result
+}
+
+// string_result_error 构造失败的拥有者结果；失败值恒为零句柄。
+fn string_result_error(status Status) StringResult {
+    let result StringResult
+    result.status = status
+    result.value.handle = 0
+    return result
+}
+
+// string_state_of 返回句柄指向的私有状态；空指针或零句柄返回 0。
+fn string_state_of(value *String) *string_state {
+    if (value == 0 || value.handle == 0) {
+        return 0
+    }
+    return value.handle.to_type(*string_state)
+}

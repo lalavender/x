@@ -90,8 +90,6 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 
 - [ ] **C1 固定 SDK 预编译分发**：把 569MB 的 LLVM/lld 构建产物作为 Release
   资产（带锁文件校验），免掉每台机器首次 `make llvm-host` 的源码构建。
-- [x] **C2 Linux/x64 闭包改运行时文件**：`tools/llvm-sdk.py` 生成
-  `selfhost-runtime.txt`；0.0.7 三端种子不再带构建机闭包路径。
 - [ ] **C3 SDK 27 兼容**：内嵌 lld 21 解析不了 `arm64e.x1` TAPI；升级固定 LLVM
   或按实际 SDK 裁剪目标列表。
 - [ ] **C4 `make dev` 增量**：归档身份目前按路径计，SDK 原地重建需清缓存或补
@@ -117,15 +115,6 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 
 ### E. os/sys 与 libc
 
-- [x] **E0 OS0–OS6 标准库实现（2026-10-21 恢复并验证）**：`libs/sys` 的
-  raw6/文件/目录/内存/时间/进程原语与 `libs/os` 的结果/文件/目录/环境/进程
-  API、io/time 平台拆分、默认标准库发现与安装布局已恢复并跑通。验证：
-  Linux/arm64 容器 15 个 fixture、CLI 9/9、`make test`、`make selfhost-native`
-  （115/115 项目用例）通过。见 `docs/01-finished/yh-os与sys-OS*.md` 与
-  `docs/01-finished/yh-标准库默认发现-2026-10-21.md`。
-- [x] **E0.1 对外 API 文档与使用说明（2026-10-21 完成）**：
-  `libs/os/doc.yh`、`libs/sys/doc.yh` 列出全部 pub 接口；两个 README 给出
-  加载方式与文件/目录/环境/进程/时间/内存示例；根 README 增加标准库入口。
 - [ ] **E1 OS7 编译器迁移与独立性审计**：编译器改用 `libs/os`/`libs/sys` 的
   接口，减少对 C runtime 的隐式依赖；见[联合设计](03-design/yh-os与sys标准库设计.md)。
 - [ ] **E1.1 OS7 第一切片：显式依赖与时钟/目录迁移**：给 `compiler/` 增加
@@ -146,27 +135,6 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 - [ ] **E4 libc L0–L5**：按[分阶段候选方案](02-plan/yh-libc分阶段候选方案.md)
   推进，未授权全部实施。
 
-### string 标准库（2026-10-23 规划）
-
-用户已确认**只读视图、可增长 String、查找/切分/替换与 UTF-8 基础操作**。
-具体接口仍为提案，以下均未实施；见[设计](03-design/yh-string标准库设计-2026-10-23.md)
-与[分期](02-plan/yh-string标准库实施方案-2026-10-23.md)。保留旧三函数，
-不等待语言内 test，不在本轮迁移编译器消费者。
-
-- [ ] **ST0 契约与探针**：跨模块模型/结果、薄句柄、地址索引、长度上限、自别名
-  和私有故障注入接点；先验证当前语言可实现。
-- [ ] **ST1 视图与兼容**：指针加长度 View、字节查询/查找/裁剪、空模式和边界；
-  新增 `.yh` 项目与专项 runner，保留 length/equals/compare。
-- [ ] **ST2 无分配切分**：借用迭代器、空片段、多字节分隔符、空分隔符拒绝和 end。
-- [ ] **ST3 拥有者与增长**：显式 clone/move/release、容量复用、赋值/追加/缩短、
-  自追加、失败原子性、NUL 与 C 边界；逐分配点失败及溢出验收。
-- [ ] **ST4 组合与变换**：concat/join/限次与全部替换、ASCII 大小写；字节参考差分、
-  非重叠语义与搜索复杂度证据。
-- [ ] **ST5 UTF-8 基础**：严格校验/标量计数/遍历/编码，非法序列位置与游标保持；
-  接受 U+0000/BOM，独立参考差分，不承担完整 Unicode 文本处理。
-- [ ] **ST6 首期收口**：doc.yh/README、TOML 文本显式适配、安装分发、O0/O2、
-  test-string 和本平台 test/selfhost-native；有证据后再关闭实现阶段。
-
 ### TOML 标准库（2026-10-23 设计；T0–T5 reader 已完成）
 
 用户已确认**完整 TOML 1.1 reader 优先、写入后置**。`libs/toml/` 已交付完整
@@ -180,19 +148,6 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
 - [ ] **T6 编译器迁移（独立切片）**：显式标准库依赖、保留清单 schema、递归文档
   生命周期、缓存与种子冷编/两代固定点；全迁移后删除旧解析器。
 - [ ] **T7 生成器（后续按需）**：独立构建/编码契约与 encoder 验收；保真编辑另立项。
-
-### F. project.toml 库文件链接（LINK，已随 0.0.7 发布）
-
-普通项目与 F1 自举闭包迁移已落地并发布：`compiler/cmd/project_link.yh`、
-`compiler/cmd/link_inputs.yh`、`--link` 解析、`[project].os/arch`、目标覆盖表、
-路径/后缀/格式检查、`.build` 摘要缓存及 `linkgroups`/`linkshared`/反例 fixture；
-`build-check.py` 111/111 通过。0.0.7 Release 三端种子已回读验证。
-
-- [x] **F1 LINK3**：compiler 清单与自举脚本已迁移到 `[link]`：归档来自
-  清单，运行库参数走 `YH_LINK_RUNTIME_FLAGS`，新编译器 manifest-only；
-  Darwin/Linux arm64 固定点与自解析通过；Linux x64 清单已由 x64 宿主生成并
-  通过 `link-closure.py check`，三端链接冒烟通过。`0.0.7-rc.1` 过渡 Release
-  与 `0.0.7` 最终 Release 已发布，CircleCI 三端全绿，0.0.7 种子回读验证通过。
 
 ### G. C/C++ 桥迁移到 yh
 
@@ -210,20 +165,9 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
 - [ ] **H1 字符串字面量只读化评估**：字面量放只读段，可写副本走显式复制；
   收益是省一个 16KB 可写段，代价是语义变更（字面量改为不可变），需评估现有
   语料与 `tests/yh-run/` 影响后再决定。
-- [x] **H2 分号清理（已完成）**：换行终结 + 全仓去分号（`compiler/` 24,514、
-  `libs`/`tests`/`examples` 11,698），反例/冻结语料/按字节改写的项目 fixture
-  保留显式分号；`make test` 与 `make selfhost-native` 全绿；`0.0.8-rc.7` 种子
-  已换代并 `make seed`。记录见
-  [换行终结](01-finished/yh-换行终结语句-2026-10-22.md) 与
-  [分号删除](01-finished/yh-分号删除-2026-10-22.md)。
-- [x] **H3 发布资产与源码不一致（已关闭）**：`0.0.8-rc.7` 重新发布后三端资产
-  均含换行终结（字节与行为核对通过）；发布流程已加打包后 `--syntax-check` 自检。
-- [x] **H4 LLVM 闭包缓存路径（部分关闭）**：`YH_LLVM_CACHE` 现在由
-  `tools/llvm_cache.py` 自动定位（显式 env → 仓库 `tmp/llvm-migration` →
-  主 worktree 的同名目录），Makefile 导出并补 `tmp/llvm-migration` 软链，
-  新 worktree 不改环境变量即可 `make` 成功。**剩余**：缓存里的
-  `selfhost-flags.txt` 仍存绝对路径，整个缓存目录被搬走时需要重写或重新
-  `make llvm-host`。
+- [ ] **H4 LLVM 闭包缓存路径迁移**：缓存里的 `selfhost-flags.txt` 仍存绝对
+  路径，整个缓存目录被搬走或换机器时需要重写或重新 `make llvm-host`；
+  `YH_LLVM_CACHE` 自动定位已完成，此项只保留路径可迁移性。
 - [ ] **I1 MOD-U6**：远程来源、版本规则、锁文件与工作区，按实际需求另立设计与
   验收（不沿用旧 Go 方案承诺）。
 - [ ] **I2 VS Code 扩展**：VS-U0 最小扩展与 LSP → VS-U1 保存后诊断与取消 →

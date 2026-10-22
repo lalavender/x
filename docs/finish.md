@@ -2,6 +2,29 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 string 标准库首期实施（ST0–ST6）
+
+- **实现**：`libs/string/` 新增 `00_model.yh`、`10_view.yh`、`20_owned.yh`、
+  `30_transform.yh`、`40_utf8.yh`、`doc.yh` 与 README；旧
+  `length`/`equals`/`compare` 保留在 `string.yh`，原空 `String` 占位移除。
+  交付按字节 `View`、可增长 `String`、查询/切分/替换、ASCII 大小写与严格
+  UTF-8；所有权、失效规则、失败原子性、自别名、最大长度与 C 边界按设计落地。
+- **测试**：新增 7 个 `tests/modules/projects/string*` fixture、
+  `tests/string/run.py`（含 10 场景 × 8 档分配失败注入）、
+  `tests/string/reference.py`（固定种子 92 例 Python bytes/str 差分）与
+  `tests/string/README.md`；`build-check.py` 登记 6 个基本组。
+- **门禁**：新增 `make test-string`（O0）、`make test-string-o2`、
+  `make test-string-install` 与 `make test-string-complexity`；Gitea
+  Darwin/arm64 与 Linux/AArch64 分支门调用 `make test-string` 与安装门。
+- **验证**：`make`、`make test-string`、`make test-string-o2`、
+  `make test-string-install`、`make test-string-complexity`、`make test`、
+  `make selfhost-native` 全部通过；`make test` 运行 211/212（1 个平台跳过）、
+  TOML API 6/6；`selfhost-native` project cases 121/121
+  （新增 6 例）。完整记录见
+  [string 首期实施](01-finished/yh-string标准库首期实施-2026-10-23.md)。
+- **边界**：未迁移编译器/CLI/TOML 私有实现；Unicode 大小写/折叠、规范化、
+  字素、正则、格式化、优化搜索等后置；未改语法、未滚种子、未推送。
+
 ## 2026-10-23 TOML 标准库 reader 实施（T0–T5）
 
 - **实现**：新增普通 `toml` 模块并登记 `libs/project.toml`；`Document` 独占

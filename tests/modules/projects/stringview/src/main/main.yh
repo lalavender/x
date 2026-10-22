@@ -1,0 +1,202 @@
+module main
+
+import io
+import string
+
+// view_of_cstr 把已知有效的 C 字符串转成视图，供测试直接传参。
+fn view_of_cstr(text *char) string.View {
+    let result string.ViewResult = string.view_cstr(text)
+    return result.value
+}
+
+// view_of_bytes 把已知有效的字节区间转成视图。
+fn view_of_bytes(data *u8, count u64) string.View {
+    let result string.ViewResult = string.view_bytes(data, count)
+    return result.value
+}
+
+// expect_cstr 比较视图与 NUL 结尾期望文本；失败返回 code。
+fn expect_cstr(actual string.View, expected *char, code int) int {
+    let expected_result string.ViewResult = string.view_cstr(expected)
+    if (expected_result.status != string.status_ok) {
+        return code
+    }
+    if (!string.view_equal(actual, expected_result.value)) {
+        return code
+    }
+    return 0
+}
+
+// expect_bytes 比较视图与显式字节区间；失败返回 code。
+fn expect_bytes(actual string.View, data *u8, count u64, code int) int {
+    let expected string.View
+    expected.data = data
+    expected.count = count
+    if (!string.view_equal(actual, expected)) {
+        return code
+    }
+    return 0
+}
+
+// next_cstr 取下一个片段并与 NUL 结尾期望文本比较。
+fn next_cstr(iter *string.SplitIter, expected *char, code int) int {
+    let result string.ViewResult = string.split_next(iter)
+    if (result.status != string.status_ok) {
+        return code
+    }
+    return expect_cstr(result.value, expected, code)
+}
+
+// next_end 断言迭代已经结束。
+fn next_end(iter *string.SplitIter, code int) int {
+    let result string.ViewResult = string.split_next(iter)
+    if (result.status != string.status_end) {
+        return code
+    }
+    return 0
+}
+
+// main 覆盖 ST2：无分配切分的空片段、多字节分隔符、内嵌 NUL 与迭代器复制。
+fn main() int {
+    let comma string.View = view_of_cstr(",")
+    let empty string.View = view_of_cstr("")
+
+    // 普通切分：保留首尾与连续分隔符产生的空片段。
+    let iter string.SplitIter
+    if (string.split(view_of_cstr("a,,b,"), comma, &iter) != string.status_ok) {
+        return 1
+    }
+    if (next_cstr(&iter, "a", 10) != 0) { return 10 }
+    if (next_cstr(&iter, "", 11) != 0) { return 11 }
+    if (next_cstr(&iter, "b", 12) != 0) { return 12 }
+    if (next_cstr(&iter, "", 13) != 0) { return 13 }
+    if (next_end(&iter, 14) != 0) { return 14 }
+    if (next_end(&iter, 15) != 0) { return 15 }
+
+    // 空文本产生一个空片段，然后结束。
+    if (string.split(empty, comma, &iter) != string.status_ok) { return 2 }
+    if (next_cstr(&iter, "", 20) != 0) { return 20 }
+    if (next_end(&iter, 21) != 0) { return 21 }
+
+    // 多字节分隔符按整个连续字节序列匹配，不重叠。
+    if (string.split(view_of_cstr("aaaa"), view_of_cstr("aa"), &iter) != string.status_ok) {
+        return 3
+    }
+    if (next_cstr(&iter, "", 30) != 0) { return 30 }
+    if (next_cstr(&iter, "", 31) != 0) { return 31 }
+    if (next_cstr(&iter, "", 32) != 0) { return 32 }
+    if (next_end(&iter, 33) != 0) { return 33 }
+
+    // 单字符分隔符与不匹配的末尾片段。
+    if (string.split(view_of_cstr("abc"), view_of_cstr("b"), &iter) != string.status_ok) {
+        return 4
+    }
+    if (next_cstr(&iter, "a", 40) != 0) { return 40 }
+    if (next_cstr(&iter, "c", 41) != 0) { return 41 }
+    if (next_end(&iter, 42) != 0) { return 42 }
+
+    // 文本等于分隔符：前后各一个空片段。
+    if (string.split(view_of_cstr(","), comma, &iter) != string.status_ok) { return 5 }
+    if (next_cstr(&iter, "", 50) != 0) { return 50 }
+    if (next_cstr(&iter, "", 51) != 0) { return 51 }
+    if (next_end(&iter, 52) != 0) { return 52 }
+
+    // 开头分隔符：先返回空片段。
+    if (string.split(view_of_cstr(",a"), comma, &iter) != string.status_ok) { return 6 }
+    if (next_cstr(&iter, "", 60) != 0) { return 60 }
+    if (next_cstr(&iter, "a", 61) != 0) { return 61 }
+    if (next_end(&iter, 62) != 0) { return 62 }
+
+    // 多字节 UTF-8 分隔符：中 = E4 B8 AD。
+    let mid [3]u8 = [0, 0, 0]
+    mid[0] = 228
+    mid[1] = 184
+    mid[2] = 173
+    let mid_view string.View = view_of_bytes(&mid[0], 3)
+    if (string.split(view_of_cstr("a中b中"), mid_view, &iter) != string.status_ok) {
+        return 7
+    }
+    if (next_cstr(&iter, "a", 70) != 0) { return 70 }
+    if (next_cstr(&iter, "b", 71) != 0) { return 71 }
+    if (next_cstr(&iter, "", 72) != 0) { return 72 }
+    if (next_end(&iter, 73) != 0) { return 73 }
+
+    // 内嵌 NUL 分隔符：片段按 count 而不是 strlen 计数。
+    let nul_text [5]u8 = [0, 0, 0, 0, 0]
+    nul_text[0] = 'a'
+    nul_text[1] = 0
+    nul_text[2] = 'b'
+    nul_text[3] = 0
+    nul_text[4] = 'c'
+    let nul_sep [1]u8 = [0]
+    if (string.split(view_of_bytes(&nul_text[0], 5),
+        view_of_bytes(&nul_sep[0], 1), &iter) != string.status_ok) {
+        return 8
+    }
+    if (next_cstr(&iter, "a", 80) != 0) { return 80 }
+    if (next_cstr(&iter, "b", 81) != 0) { return 81 }
+    if (next_cstr(&iter, "c", 82) != 0) { return 82 }
+    if (next_end(&iter, 83) != 0) { return 83 }
+
+    // 空分隔符是参数错误，失败不修改 out。
+    let preserved string.SplitIter
+    preserved.text = view_of_cstr("keep")
+    preserved.separator = comma
+    preserved.cursor = 9
+    preserved.ended = 1
+    if (string.split(view_of_cstr("abc"), empty, &preserved)
+        != string.status_invalid_argument) {
+        return 9
+    }
+    if (preserved.text.count != 4 || preserved.cursor != 9 || preserved.ended != 1) {
+        return 90
+    }
+    let null_iter *string.SplitIter = 0
+    if (string.split(view_of_cstr("abc"), comma, null_iter)
+        != string.status_invalid_argument) {
+        return 91
+    }
+    let null_next string.ViewResult = string.split_next(null_iter)
+    if (null_next.status != string.status_invalid_argument) { return 92 }
+    let broken string.SplitIter
+    broken.text = view_of_cstr("abc")
+    broken.separator = empty
+    broken.cursor = 0
+    broken.ended = 0
+    let broken_next string.ViewResult = string.split_next(&broken)
+    if (broken_next.status != string.status_invalid_argument) { return 93 }
+
+    // 迭代器复制只复制游标：原迭代器继续前进不影响副本。
+    if (string.split(view_of_cstr("a,b,c"), comma, &iter) != string.status_ok) { return 10 }
+    if (next_cstr(&iter, "a", 100) != 0) { return 100 }
+    let copied string.SplitIter = iter
+    if (next_cstr(&iter, "b", 101) != 0) { return 101 }
+    if (next_cstr(&iter, "c", 102) != 0) { return 102 }
+    if (next_cstr(&copied, "b", 103) != 0) { return 103 }
+    if (next_cstr(&copied, "c", 104) != 0) { return 104 }
+
+    // 分隔符比剩余文本长：不匹配，整段作为最后一个片段。
+    if (string.split(view_of_cstr("a"), view_of_cstr("ab"), &iter) != string.status_ok) {
+        return 11
+    }
+    if (next_cstr(&iter, "a", 110) != 0) { return 110 }
+    if (next_end(&iter, 111) != 0) { return 111 }
+
+    // 切片片段仍借用源：用首尾哨兵确认没有越界读取或改写。
+    let guarded [6]u8 = [0, 0, 0, 0, 0, 0]
+    guarded[0] = 90
+    guarded[1] = 'x'
+    guarded[2] = ','
+    guarded[3] = 'y'
+    guarded[4] = 91
+    guarded[5] = 92
+    let guarded_text string.View = view_of_bytes(&guarded[1], 3)
+    if (string.split(guarded_text, comma, &iter) != string.status_ok) { return 12 }
+    if (next_cstr(&iter, "x", 120) != 0) { return 120 }
+    if (next_cstr(&iter, "y", 121) != 0) { return 121 }
+    if (next_end(&iter, 122) != 0) { return 122 }
+    if (guarded[0] != 90 || guarded[4] != 91 || guarded[5] != 92) { return 123 }
+
+    io.println("string view ok")
+    return 0
+}

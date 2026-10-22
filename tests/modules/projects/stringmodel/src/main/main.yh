@@ -1,0 +1,217 @@
+module main
+
+import io
+import string
+
+// view_of_cstr 把已知有效的 C 字符串转成视图，供测试直接传参。
+fn view_of_cstr(text *char) string.View {
+    let result string.ViewResult = string.view_cstr(text)
+    return result.value
+}
+
+// view_of_bytes 把已知有效的字节区间转成视图。
+fn view_of_bytes(data *u8, count u64) string.View {
+    let result string.ViewResult = string.view_bytes(data, count)
+    return result.value
+}
+
+// expect_cstr 比较视图与 NUL 结尾期望文本；失败返回 code。
+fn expect_cstr(actual string.View, expected *char, code int) int {
+    let expected_result string.ViewResult = string.view_cstr(expected)
+    if (expected_result.status != string.status_ok) {
+        return code
+    }
+    if (!string.view_equal(actual, expected_result.value)) {
+        return code
+    }
+    return 0
+}
+
+// expect_bytes 比较视图与显式字节区间；失败返回 code。
+fn expect_bytes(actual string.View, data *u8, count u64, code int) int {
+    let expected string.View
+    expected.data = data
+    expected.count = count
+    if (!string.view_equal(actual, expected)) {
+        return code
+    }
+    return 0
+}
+
+// main 覆盖 ST1：旧三函数、View 构造/比较/查找/切片/裁剪与边界。
+fn main() int {
+    // 旧接口保持 NUL 截止与固定返回值。
+    if (string.length("hé") != 3 || string.equals("yh", "yh") != 1
+        || string.equals("yh", "YH") != 0
+        || string.compare("a", "b") != -1
+        || string.compare("b", "a") != 1
+        || string.compare("yh", "yh") != 0) {
+        return 1
+    }
+
+    // view_bytes：空指针/零长度组合与普通视图。
+    let null_bytes *u8 = 0
+    let null_chars *char = 0
+    let zero_zero string.ViewResult = string.view_bytes(null_bytes, 0)
+    if (zero_zero.status != string.status_ok) { return 2 }
+    let zero_one string.ViewResult = string.view_bytes(null_bytes, 1)
+    if (zero_one.status != string.status_invalid_argument) { return 3 }
+    let raw [5]u8 = [0, 0, 0, 0, 0]
+    raw[0] = 'a'
+    raw[1] = 0
+    raw[2] = 'b'
+    raw[3] = 128
+    raw[4] = 255
+    let raw_view_result string.ViewResult = string.view_bytes(&raw[0], 5)
+    if (raw_view_result.status != string.status_ok || raw_view_result.value.count != 5) {
+        return 4
+    }
+    if (raw_view_result.value.data[1] != 0 || raw_view_result.value.data[3] != 128
+        || raw_view_result.value.data[4] != 255) {
+        return 5
+    }
+
+    // view_cstr：空指针、空串、普通串与首个 NUL 截止。
+    let null_cstr string.ViewResult = string.view_cstr(null_chars)
+    if (null_cstr.status != string.status_invalid_argument) { return 6 }
+    let empty_view string.ViewResult = string.view_cstr("")
+    if (empty_view.status != string.status_ok || empty_view.value.count != 0) { return 7 }
+    let abc_result string.ViewResult = string.view_cstr("abc")
+    if (abc_result.status != string.status_ok || abc_result.value.count != 3) { return 8 }
+    if (expect_cstr(abc_result.value, "abc", 9) != 0) { return 9 }
+    let nul_text [4]u8 = [0, 0, 0, 0]
+    nul_text[0] = 'a'
+    nul_text[1] = 0
+    nul_text[2] = 'b'
+    nul_text[3] = 0
+    let cstr_nul string.ViewResult = string.view_cstr("a\0b")
+    if (cstr_nul.status != string.status_ok || cstr_nul.value.count != 1) { return 10 }
+    if (expect_bytes(cstr_nul.value, &nul_text[0], 1, 11) != 0) { return 11 }
+
+    // view_equal / view_compare：空、前缀、长度与无符号字节序。
+    let empty_a string.View = view_of_cstr("")
+    let empty_b string.View = view_of_cstr("")
+    let a_view string.View = view_of_cstr("a")
+    let b_view string.View = view_of_cstr("b")
+    let aa_view string.View = view_of_cstr("aa")
+    if (!string.view_equal(empty_a, empty_b) || string.view_equal(a_view, b_view)) {
+        return 12
+    }
+    if (!string.view_equal(a_view, view_of_cstr("a"))) { return 13 }
+    if (string.view_compare(a_view, b_view) != -1
+        || string.view_compare(b_view, a_view) != 1
+        || string.view_compare(a_view, a_view) != 0
+        || string.view_compare(a_view, aa_view) != -1
+        || string.view_compare(aa_view, a_view) != 1) {
+        return 14
+    }
+    let high [2]u8 = [0, 0]
+    high[0] = 128
+    high[1] = 127
+    let high_view string.View = view_of_bytes(&high[0], 1)
+    let low_view string.View = view_of_bytes(&high[1], 1)
+    if (string.view_compare(high_view, low_view) != 1) { return 15 }
+
+    // starts_with / ends_with：空模式、整串与不匹配。
+    if (!string.starts_with(abc_result.value, empty_a)
+        || !string.ends_with(abc_result.value, empty_a)) {
+        return 16
+    }
+    if (!string.starts_with(abc_result.value, view_of_cstr("ab"))
+        || !string.ends_with(abc_result.value, view_of_cstr("bc"))) {
+        return 17
+    }
+    if (string.starts_with(abc_result.value, view_of_cstr("b"))
+        || string.ends_with(abc_result.value, view_of_cstr("ab"))) {
+        return 18
+    }
+    if (string.starts_with(abc_result.value, view_of_cstr("abcd"))
+        || string.ends_with(abc_result.value, view_of_cstr("abcd"))) {
+        return 19
+    }
+
+    // find / rfind / contains：空模式、位置 0、末尾、未找到与模式更长。
+    let found_zero string.IndexResult = string.find(abc_result.value, empty_a)
+    if (!found_zero.found || found_zero.index != 0) { return 20 }
+    let found_b string.IndexResult = string.find(abc_result.value, b_view)
+    if (!found_b.found || found_b.index != 1) { return 21 }
+    let found_bc string.IndexResult = string.find(abc_result.value, view_of_cstr("bc"))
+    if (!found_bc.found || found_bc.index != 1) { return 22 }
+    let missing string.IndexResult = string.find(abc_result.value, view_of_cstr("z"))
+    if (missing.found || missing.index != 0) { return 23 }
+    let too_long string.IndexResult = string.find(abc_result.value, view_of_cstr("abcd"))
+    if (too_long.found) { return 24 }
+    if (!string.contains(abc_result.value, b_view)
+        || string.contains(abc_result.value, view_of_cstr("z"))) {
+        return 25
+    }
+    let rfound string.IndexResult = string.rfind(aa_view, a_view)
+    if (!rfound.found || rfound.index != 1) { return 26 }
+    let rfound_empty string.IndexResult = string.rfind(abc_result.value, empty_a)
+    if (!rfound_empty.found || rfound_empty.index != 3) { return 27 }
+    let rmissing string.IndexResult = string.rfind(abc_result.value, view_of_cstr("z"))
+    if (rmissing.found) { return 28 }
+
+    // slice：空区间、全区间、中间区间与越界；不复制。
+    let slice_empty string.ViewResult = string.slice(abc_result.value, 0, 0)
+    if (slice_empty.status != string.status_ok || slice_empty.value.count != 0) { return 29 }
+    let slice_all string.ViewResult = string.slice(abc_result.value, 0, 3)
+    if (slice_all.status != string.status_ok || expect_cstr(slice_all.value, "abc", 30) != 0) {
+        return 30
+    }
+    let slice_mid string.ViewResult = string.slice(abc_result.value, 1, 2)
+    if (slice_mid.status != string.status_ok || slice_mid.value.count != 1
+        || slice_mid.value.data[0] != 'b') {
+        return 31
+    }
+    let slice_reverse string.ViewResult = string.slice(abc_result.value, 2, 1)
+    let slice_over string.ViewResult = string.slice(abc_result.value, 0, 4)
+    if (slice_reverse.status != string.status_bounds
+        || slice_over.status != string.status_bounds) {
+        return 32
+    }
+    let slice_again string.ViewResult = string.slice(abc_result.value, 0, 3)
+    if (slice_again.value.data.to_type(u64) != abc_result.value.data.to_type(u64)) {
+        return 33
+    }
+
+    // trim_ascii：首尾 ASCII 空白、全空白、内部空白与非空白控制字节。
+    if (expect_cstr(string.trim_ascii(view_of_cstr(" \t\nabc\r ")), "abc", 34) != 0) {
+        return 34
+    }
+    if (string.trim_ascii(view_of_cstr(" \t\r\n")).count != 0) { return 35 }
+    if (expect_cstr(string.trim_ascii(view_of_cstr("a b")), "a b", 36) != 0) {
+        return 36
+    }
+    let controls [3]u8 = [0, 0, 0]
+    controls[0] = 11
+    controls[1] = 'a'
+    controls[2] = 12
+    let trimmed_controls string.View = string.trim_ascii(view_of_bytes(&controls[0], 3))
+    if (trimmed_controls.count != 1 || trimmed_controls.data[0] != 'a') { return 37 }
+    let zero_edge [3]u8 = [0, 0, 0]
+    zero_edge[0] = 0
+    zero_edge[1] = 'a'
+    zero_edge[2] = 0
+    let trimmed_zero string.View = string.trim_ascii(view_of_bytes(&zero_edge[0], 3))
+    if (trimmed_zero.count != 3) { return 38 }
+
+    // 首尾哨兵：切片与裁剪只读区间内部，不触碰外部字节。
+    let guarded [7]u8 = [0, 0, 0, 0, 0, 0, 0]
+    guarded[0] = 90
+    guarded[1] = ' '
+    guarded[2] = 'a'
+    guarded[3] = 'b'
+    guarded[4] = ' '
+    guarded[5] = 91
+    guarded[6] = 92
+    let guarded_view string.View = view_of_bytes(&guarded[1], 4)
+    let guarded_trim string.View = string.trim_ascii(guarded_view)
+    if (guarded_trim.count != 2 || guarded_trim.data[0] != 'a' || guarded_trim.data[1] != 'b') {
+        return 39
+    }
+    if (guarded[0] != 90 || guarded[5] != 91 || guarded[6] != 92) { return 40 }
+
+    io.println("string model ok")
+    return 0
+}

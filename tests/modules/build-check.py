@@ -188,6 +188,19 @@ case("s1-libs-io-write", "stdlib-run", "libsio", ".", 23,
      stdout="yh libs io ok\n")
 case("s2-libs-core-modules", "stdlib-run", "libsbase", ".", 0,
      stdout="yh libs base ok\n")
+# —— ST1–ST6：string 标准库基础组（失败注入由 make test-string 承担） ——
+case("st1-string-model", "stdlib-run", "stringmodel", ".", 0,
+     stdout="string model ok\n")
+case("st2-string-view", "stdlib-run", "stringview", ".", 0,
+     stdout="string view ok\n")
+case("st3-string-owned", "stdlib-run", "stringowned", ".", 0,
+     stdout="string owned ok\n")
+case("st4-string-transform", "stdlib-run", "stringtransform", ".", 0,
+     stdout="string transform ok\n")
+case("st5-string-utf8", "stdlib-run", "stringutf8", ".", 0,
+     stdout="string utf8 ok\n")
+case("st6-string-interop", "stdlib-run", "stringinterop", ".", 0,
+     stdout="string interop ok\n")
 # —— OS0/OS5：结果模型与 io 完整写入（跨平台） ——
 case("os0-sys-result-model", "stdlib-run", "sysresult", ".", 0,
      stdout="sys result ok\n")
