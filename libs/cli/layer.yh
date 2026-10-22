@@ -152,6 +152,13 @@ fn dispatch_command(ctx *parse_ctx, state *parser_state, args []*char,
         return -1
     }
     let child *child_row = &state.children[index]
+    if (child.deprecated != 0) {
+        if (ctx_add_warning(ctx, "命令 ", child.name) != 0) {
+            result_set_error(ctx.result, ResultStatus.resource_error, "resource_error",
+                "记录弃用警告时内存不足", 0, 0, cursor)
+            return -1
+        }
+    }
     if (ctx_push_path(ctx, child.name) != 0) {
         result_set_error(ctx.result, ResultStatus.resource_error, "resource_error",
             "记录命令路径时内存不足", 0, 0, cursor)
@@ -169,6 +176,51 @@ fn dispatch_command(ctx *parse_ctx, state *parser_state, args []*char,
     return parse_layer(ctx, child_state, args[cursor + 1..len(args)], depth + 1)
 }
 
+// ctx_add_warning 记录一条运行期警告，文本由结果池持有；0 成功、-1 失败。
+fn ctx_add_warning(ctx *parse_ctx, kind *char, name *char) int {
+    let owner *result_owner = owner_of(ctx.result)
+    if (owner == 0 || ctx.warnings == 0 || ctx.warnings.count >= MAX_ARGC) {
+        return -1
+    }
+    let buffer [MAX_HELP]char
+    let at int = put_text(&buffer[0], 0, kind)
+    at = put_text(&buffer[0], at, name)
+    at = put_text(&buffer[0], at, " 已弃用")
+    if (at < 0) {
+        return -1
+    }
+    buffer[at] = 0
+    ctx.warnings.items[ctx.warnings.count] = pool_dup(&owner.mem, &buffer[0])
+    if (ctx.warnings.items[ctx.warnings.count] == 0) {
+        return -1
+    }
+    ctx.warnings.count += 1
+    return 0
+}
+
+// emit_deprecated_warnings 为显式出现的 deprecated 声明补警告；0 成功、-1 失败。
+fn emit_deprecated_warnings(ctx *parse_ctx) int {
+    let i int = 0
+    for i < ctx.chain_count {
+        let state *parser_state = ctx.chain[i]
+        let j int = 0
+        for j < state.row_count {
+            let row *arg_row = &state.rows[j]
+            if (row.used != 0 && row.deprecated != 0
+                && appeared_of(ctx.result, row.id) != 0) {
+                if (ctx_add_warning(ctx, "参数 ", row.names[0]) != 0) {
+                    result_set_error(ctx.result, ResultStatus.resource_error,
+                        "resource_error", "记录弃用警告时内存不足", 0, row.dest, -1)
+                    return -1
+                }
+            }
+            j += 1
+        }
+        i += 1
+    }
+    return 0
+}
+
 // parse_layer 解析一层输入（根或某个子命令）；0 成功、-1 已记录错误。
 // 选中子命令后剩余的 token 全部交给子层，父层不再处理。
 fn parse_layer(ctx *parse_ctx, state *parser_state, args []*char, depth int) int {
@@ -180,6 +232,12 @@ fn parse_layer(ctx *parse_ctx, state *parser_state, args []*char, depth int) int
     ctx.chain[ctx.chain_count] = state
     ctx.chain_slot[ctx.chain_count] = 0
     ctx.chain_count += 1
+    // 默认值先于本层显式 action 归并（设计 §8.3）：append/extend/count 才能
+    // 基于初始值累计，required 仍只看显式出现。
+    apply_defaults(state, ctx.result)
+    if (ctx.result.status != ResultStatus.ok) {
+        return -1
+    }
     let mixed int = (ctx.config.mode == ParseMode.intermixed).to_type(int)
     let options_ended int = 0
     let positional_cursor int = 0
@@ -485,33 +543,41 @@ fn parse_core(p *Parser, args []*char, config ParseConfig) Result {
         sizeof(command_path_block).to_type(u64)).to_type(*command_path_block)
     let unparsed *token_list_block = pool_alloc(&owner.mem,
         sizeof(token_list_block).to_type(u64)).to_type(*token_list_block)
-    if (path == 0 || unparsed == 0) {
+    let warnings *warning_list_block = pool_alloc(&owner.mem,
+        sizeof(warning_list_block).to_type(u64)).to_type(*warning_list_block)
+    if (path == 0 || unparsed == 0 || warnings == 0) {
         result_set_error(&result, ResultStatus.resource_error, "resource_error",
             "解析上下文分配失败", 0, 0, -1)
         return result
     }
     path.count = 0
     unparsed.count = 0
+    warnings.count = 0
     let ctx parse_ctx
     ctx.result = &result
     ctx.config = config
     ctx.chain_count = 0
     ctx.path = path
     ctx.unparsed = unparsed
+    ctx.warnings = warnings
     if (config.mode == ParseMode.intermixed && check_intermixed_support(&ctx, state) != 0) {
         return result
     }
-    if (parse_layer(&ctx, state, expanded, 0) != 0) {
-        return result
+    let layer_rc int = parse_layer(&ctx, state, expanded, 0)
+    // 弃用警告在控制请求与错误路径上也保留；成功路径随后再归并默认值。
+    if (emit_deprecated_warnings(&ctx) != 0 && result.status == ResultStatus.ok) {
+        result_set_error(&result, ResultStatus.resource_error, "resource_error",
+            "记录弃用警告时内存不足", 0, 0, -1)
     }
-    if (result.status != ResultStatus.ok) {
+    result.command_path = path.items[0..path.count]
+    result.unparsed = unparsed.items[0..unparsed.count]
+    result.warnings = warnings.items[0..warnings.count]
+    if (layer_rc != 0 || result.status != ResultStatus.ok) {
         return result
     }
     if (finish_layers(&ctx) != 0) {
         return result
     }
-    result.command_path = path.items[0..path.count]
-    result.unparsed = unparsed.items[0..unparsed.count]
     return result
 }
 

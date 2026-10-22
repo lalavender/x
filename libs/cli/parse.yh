@@ -22,6 +22,7 @@ fn new_result() Result {
     result.values.handle = 0
     let empty []*char
     result.unparsed = empty
+    result.warnings = empty
     clear_diagnostic(&result.error)
     result.control_text = 0
     result.usage_text = 0
@@ -456,7 +457,8 @@ fn name_is_negative_form(state *parser_state, name *char) int {
 }
 
 // handle_control_result 生成帮助/版本文本并返回控制状态。
-fn handle_control_result(state *parser_state, result *Result, action int) void {
+fn handle_control_result(state *parser_state, result *Result, action int,
+    row *arg_row) void {
     let owner *result_owner = owner_of(result)
     if (owner == 0) {
         return
@@ -466,7 +468,7 @@ fn handle_control_result(state *parser_state, result *Result, action int) void {
         result.status = ResultStatus.help_requested
         return
     }
-    result.control_text = build_version_text(state, &owner.mem)
+    result.control_text = build_version_text(state, &owner.mem, row)
     result.status = ResultStatus.version_requested
 }
 
@@ -475,7 +477,7 @@ fn apply_zero_value_action(state *parser_state, result *Result, row *arg_row,
     matched *char) int {
     let action int = row.action
     if (action_is_control(action) != 0) {
-        handle_control_result(state, result, action)
+        handle_control_result(state, result, action, row)
         return 0
     }
     let rc int = 0
@@ -541,15 +543,20 @@ fn consume_option(state *parser_state, result *Result, args []*char, cursor *int
     if (max < 0) {
         unlimited = 1
     }
+    let is_remainder int = 0
+    if (kind == ArityKind.arity_remainder.to_type(int)) {
+        is_remainder = 1
+    }
     for unlimited != 0 || count < max {
         if (*cursor + 1 >= len(args)) {
             break
         }
         let candidate *char = args[*cursor + 1]
-        if (cstr_equal(candidate, "--") != 0) {
+        // remainder 开始消费后，-- 与选项样式 token 都是数据（设计 §9.3）。
+        if (is_remainder == 0 && cstr_equal(candidate, "--") != 0) {
             break
         }
-        if (token_is_option_like(state, candidate) != 0) {
+        if (is_remainder == 0 && token_is_option_like(state, candidate) != 0) {
             break
         }
         if (count >= MAX_ARGC) {
@@ -795,7 +802,7 @@ fn check_required_after_parse(state *parser_state, result *Result) int {
                 || kind == ArityKind.arity_exactly.to_type(int)) {
                 needs = 1
             }
-            if (needs != 0 && entry_find(ns_state_of(&result.values), row.dest) < 0) {
+            if (needs != 0 && appeared_of(result, row.id) == 0) {
                 result_set_error(result, ResultStatus.usage_error, "usage_error",
                     "缺少必需的位置参数", 0, row.dest, -1)
                 return -1
