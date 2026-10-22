@@ -74,10 +74,10 @@ def render_host(host: str) -> str:
         raise SystemExit(f"缺少宿主记录 {rel_record}；先运行 make llvm-host")
     record = json.loads(record_path.read_text(encoding="utf-8"))
     groups = archive_paths(record)
-    # Darwin 自举保持桥/LLVM/lld 全量 force_load；Linux 只强制桥。
+    # 只强制桥整库加载：桥归档里的 yh_llvm_* 是对外入口，其他 LLVM/lld 归档
+    # 由符号引用按需取成员。整库 force_load 会把每个归档的全部成员都塞进产物
+    # （Darwin 实测仅多 3 MB，链接命令每库多一个 -force_load），没有收益。
     whole = ["bridge"]
-    if host.startswith("darwin-"):
-        whole = ["bridge", "lld", "llvm", "support"]
     out = [f"[link-{tag}]"]
     for name in ("bridge", "lld", "llvm", "support"):
         paths = groups[name]
@@ -134,8 +134,7 @@ def check(host: str) -> int:
         if actual != wanted:
             raise SystemExit(f"[link-{tag}].{name} 与宿主记录不一致")
     whole = set(manifest.get(f"link-options-{tag}", {}).get("whole", []))
-    wanted_whole = {"bridge"} if host.startswith("linux-") else {
-        "bridge", "lld", "llvm", "support"}
+    wanted_whole = {"bridge"}
     if whole != wanted_whole:
         raise SystemExit(f"[link-options-{tag}].whole 与宿主记录不一致")
     print(f"PASS 自举闭包清单：{host}")

@@ -2,6 +2,27 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-22 自举链接闭包只强制桥整库加载
+
+- **起因**：Darwin 自举链接把 `[link-options-darwin-arm64].whole` 写成桥/lld/llvm/
+  support 四组全量 `-force_load`，每个归档再加一个 `-force_load`，72 个归档的全部
+  成员都被塞进 `yh`（73,740,160 字节）；归档本身按 `llvm-config --link-static
+  --libs` 的组件闭包给出，无法再靠删文件压缩。
+- **改动**：`tools/link-closure.py` 的 `whole` 统一为 `["bridge"]`（Linux 原本如此），
+  `check` 同步；重生成 `compiler/project.toml`，Darwin 只强制桥，LLVM/lld 归档交回
+  符号引用按需取成员。
+- **实测**：`yh` 70,645,536 字节（−3,094,624 B，−4.2%），链接参数少 72 个
+  `-force_load`；`nm` 符号闭包显示 72 个归档里 71 个真被引用，只有
+  `libLLVMExtensions.a` 无引用，故收益来自「少加载成员」而不是「少列文件」。
+- **Linux 事实**：`tools/llvm-sdk.py` 用 `glob("libLLVM*.a")` 把 226 个组件全放进
+  一个 `--start-group`（桥仍只整库加载，故不胀产物）。`llvm-nm` 闭包显示 58 个
+  组件（BOLT*/`*Disassembler`/Exegesis*/FileCheck/Fuzzer*/Orc*/MCJIT/ObjCopy 等）
+  完全无引用，可删；但只省链接扫描时间，且要连 `sdk.lock.json` 与 Linux 门一起验，
+  本轮不动。
+- **验证**：`make`、`make test`（run 210/211、fail 133/133、pass 8/8）、
+  `make selfhost-native`（退出码 0，项目段 115/115）全绿；
+  `link-closure.py check` 三个宿主 PASS。`otool -L yh` 仍只有 libc++/libSystem。
+
 ## 2026-10-22 内置函数迁入 builtin 模块
 
 - **结构**：新增 `compiler/builtin/`（`module builtin`，只 `import gen`），
