@@ -140,6 +140,27 @@ cwd/pipe（`30_file`）、内存（`40_memory`）、时间（`50_time`）与进�
 分配点按 API 契约显式声明，不改变现有基础模块的所有权约定；
 `os` 增加了 `is_terminal` 以支持帮助的自动颜色策略。
 
+## toml（2026-10-23 设计；T0–T5 reader 已实现）
+
+`libs/toml/` 以 `import toml;` 提供完整 TOML 1.1 reader：内存/文件解析、
+`Document` 独占文档存储、`Value` 只读句柄、按字节长度的 `Text`、类型化查询
+和结构化诊断；不依赖 compiler/gen，不修改 yh 语法。写入后置。
+
+已注册模块并在 `libs/project.toml` 登记。实际文件按编译顺序：
+`00_types.yh`（公开类型/预算）、`10_storage.yh`（私有池/节点/容器）、
+`20_utf8.yh`、`30_numbers.yh`（整数与精确 binary64）、`40_datetime.yh`、
+`45_parser_state.yh`、`46_strings.yh`、`50_parse.yh`（文档/键/表语义）、
+`60_query.yh`、`70_files.linux.yh`/`70_files.darwin.yh`、`90_api.yh`。
+
+固定 toml-test v2.2.0 的 1.1 decoder 清单通过 681/681（有效 214、非法 467），
+六组 `.yh` API/所有权/资源/文件用例与 `make test`/`make selfhost-native`
+本平台通过；另通过 124 个池分配失败点、低预算强制失败和 `make install`
+后仓库外导入。剩余项：编译器清单迁移（T6）、writer（T7），以及发布资产是否
+携带标准库（T5.2，另行决定）。现有 `compiler/cmd/toml.yh` 仍是旧清单
+子集，尚未迁移。API、限制与生命周期见
+[libs/toml/README.md](../../libs/toml/README.md)，取舍见
+[ADR-0017](../adr/0017-yh-TOML标准库独立文档模型.md)。
+
 ## 当前边界
 
 当前基础层不定义完整文件句柄、错误类型、缓冲策略、Unicode 处理、通用格式化或

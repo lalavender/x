@@ -1,0 +1,195 @@
+module main
+
+// TOML T4 错误与预算验收：UTF-8、参数、输入/嵌套/键/数字上限、查询边界。
+
+import io
+import toml
+
+let failed int = 0
+
+// ok 记录一条断言结果。
+fn ok(condition int, name *char) void {
+    if (condition == 0) {
+        failed += 1
+        io.print("FAIL ")
+        io.println(name)
+    }
+}
+
+// main 跑错误与预算断言。
+pub fn main() int {
+    // 参数错误：非零长度空指针、空文本指针。
+    let null_input toml.ParseResult = toml.parse(0, 5)
+    ok((null_input.status == toml.parse_argument_error
+        && null_input.error.code == toml.error_argument).to_type(int),
+        "null input")
+    ok((null_input.document.handle == 0).to_type(int), "null input no doc")
+    let null_text toml.ParseResult = toml.parse_text(0)
+    ok((null_text.status == toml.parse_argument_error).to_type(int),
+        "null text")
+
+    // 非法 UTF-8 与 BOM。
+    let bad_utf8 [8]u8
+    bad_utf8[0] = 'a'
+    bad_utf8[1] = ' '
+    bad_utf8[2] = '='
+    bad_utf8[3] = ' '
+    bad_utf8[4] = '"'
+    bad_utf8[5] = 195
+    bad_utf8[6] = 40
+    bad_utf8[7] = '"'
+    let utf8 toml.ParseResult = toml.parse(&bad_utf8[0], 8)
+    ok((utf8.status == toml.parse_syntax_error
+        && utf8.error.code == toml.error_utf8).to_type(int), "utf8 code")
+    ok((utf8.error.span.offset == 5 && utf8.error.span.length == 2).to_type(int),
+        "utf8 span")
+    ok((utf8.error.span.line == 1 && utf8.error.span.column == 6).to_type(int),
+        "utf8 position")
+    toml.release(&utf8.document)
+    let bom [6]u8
+    bom[0] = 239
+    bom[1] = 187
+    bom[2] = 191
+    bom[3] = 'a'
+    bom[4] = '='
+    bom[5] = '1'
+    let bom_result toml.ParseResult = toml.parse(&bom[0], 6)
+    ok((bom_result.status == toml.parse_syntax_error
+        && bom_result.error.code == toml.error_utf8).to_type(int), "bom")
+    toml.release(&bom_result.document)
+
+    // 语法错误：未闭合字符串/数组/表头、裸 CR、尾随垃圾。
+    let unterminated toml.ParseResult = toml.parse_text("a = \"x")
+    ok((unterminated.status == toml.parse_syntax_error).to_type(int),
+        "unterminated string")
+    ok((unterminated.error.message[0] != 0).to_type(int), "error message")
+    toml.release(&unterminated.document)
+    let unclosed_array toml.ParseResult = toml.parse_text("a = [1, 2")
+    ok((unclosed_array.status == toml.parse_syntax_error).to_type(int),
+        "unclosed array")
+    toml.release(&unclosed_array.document)
+    let unclosed_header toml.ParseResult = toml.parse_text("[a\n")
+    ok((unclosed_header.status == toml.parse_syntax_error).to_type(int),
+        "unclosed header")
+    toml.release(&unclosed_header.document)
+    let bare_cr toml.ParseResult = toml.parse_text("a = 1\rb = 2\n")
+    ok((bare_cr.status == toml.parse_syntax_error).to_type(int), "bare cr")
+    toml.release(&bare_cr.document)
+    let trailing toml.ParseResult = toml.parse_text("a = 1 b = 2\n")
+    ok((trailing.status == toml.parse_syntax_error).to_type(int), "trailing")
+    toml.release(&trailing.document)
+
+    // 输入字节上限：超限在读取内容前拒绝。
+    let too_large u64 = 16777217
+    let huge *u8 = malloc(too_large).to_type(*u8)
+    if (huge != 0) {
+        let huge_result toml.ParseResult = toml.parse(huge, too_large)
+        ok((huge_result.status == toml.parse_resource_error
+            && huge_result.error.code == toml.error_resource_limit).to_type(int),
+            "input budget")
+        free(huge.to_type(*void))
+    } else {
+        ok(0, "input budget allocation")
+    }
+
+    // 嵌套深度上限：129 层数组。
+    let nested [1024]u8
+    nested[0] = 'a'
+    nested[1] = ' '
+    nested[2] = '='
+    nested[3] = ' '
+    let at int = 4
+    let d int = 0
+    for d < 129 {
+        nested[at] = '['
+        at += 1
+        d += 1
+    }
+    d = 0
+    for d < 129 {
+        nested[at] = ']'
+        at += 1
+        d += 1
+    }
+    let depth_result toml.ParseResult = toml.parse(&nested[0], at.to_type(u64))
+    ok((depth_result.status == toml.parse_resource_error
+        && depth_result.error.code == toml.error_resource_limit).to_type(int),
+        "depth budget")
+    toml.release(&depth_result.document)
+
+    // 点键段数上限：129 段。
+    let parts [1024]u8
+    parts[0] = 'a'
+    at = 1
+    let p int = 0
+    for p < 128 {
+        parts[at] = '.'
+        at += 1
+        parts[at] = 'a'
+        at += 1
+        p += 1
+    }
+    parts[at] = ' '
+    at += 1
+    parts[at] = '='
+    at += 1
+    parts[at] = ' '
+    at += 1
+    parts[at] = '1'
+    at += 1
+    let parts_result toml.ParseResult = toml.parse(&parts[0], at.to_type(u64))
+    ok((parts_result.status == toml.parse_resource_error
+        && parts_result.error.code == toml.error_resource_limit).to_type(int),
+        "key parts budget")
+    toml.release(&parts_result.document)
+
+    // 浮点有效数字上限：4097 位。
+    let digits [5000]u8
+    digits[0] = 'x'
+    digits[1] = ' '
+    digits[2] = '='
+    digits[3] = ' '
+    digits[4] = '1'
+    digits[5] = '.'
+    at = 6
+    let n int = 0
+    for n < 4097 {
+        digits[at] = '1'
+        at += 1
+        n += 1
+    }
+    let digits_result toml.ParseResult = toml.parse(&digits[0], at.to_type(u64))
+    ok((digits_result.status == toml.parse_resource_error
+        && digits_result.error.code == toml.error_resource_limit).to_type(int),
+        "digits budget")
+    toml.release(&digits_result.document)
+
+    // 查询边界：越界、非容器、空输出参数。
+    let query toml.ParseResult = toml.parse_text("a = 1\nb = [1]\n")
+    let query_root toml.Value = toml.root(&query.document)
+    let entry toml.EntryResult = toml.table_entry(query_root, 99)
+    ok((entry.status == toml.query_bounds_error
+        && entry.value.handle == 0 && entry.key.count == 0).to_type(int),
+        "entry bounds")
+    let a toml.LookupResult = toml.get(query_root, "a")
+    ok((toml.table_get(a.value, toml.Text{ data: 0, count: 0 }).status
+        == toml.query_type_error).to_type(int), "table_get scalar")
+    let none u64 = 5
+    ok((toml.count(a.value, 0) == toml.query_argument_error).to_type(int),
+        "count null out")
+    ok((toml.as_i64(a.value, 0) == toml.query_argument_error).to_type(int),
+        "as_i64 null out")
+    let b toml.LookupResult = toml.get(query_root, "b")
+    ok((toml.array_get(b.value, 1).status == toml.query_bounds_error).to_type(int),
+        "array bounds")
+    let not_found toml.LookupResult = toml.get(query_root, "missing")
+    ok((not_found.status == toml.query_missing
+        && not_found.value.handle == 0).to_type(int), "missing key")
+    toml.release(&query.document)
+
+    if (failed != 0) {
+        return 1
+    }
+    io.println("toml errors ok")
+    return 0
+}

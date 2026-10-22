@@ -329,7 +329,29 @@ test: stage-yh
 	python3 $(TOPSRC)/tests/yh/check.py
 	python3 $(TOPSRC)/tests/yh/check.py --compiler --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/yh-run/check.py --compiler $(YH_RUN) $(RUN_WORK_FLAG)
+	python3 $(TOPSRC)/tests/toml/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-test
 	python3 $(TOPSRC)/tests/tools/yh-code-stats/check.py
+
+# test-toml：TOML 标准库 API/所有权/资源/文件验收（TOML T0–T4）。
+.PHONY: test-toml
+test-toml: stage-yh
+	python3 $(TOPSRC)/tests/toml/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-test
+
+# test-toml-conformance：固定 toml-test v2.2.0（TOML 1.1）decoder 一致性门。
+# 语料不随仓库分发；缺失时按提示先执行 --prepare（下载并核对 SHA-256）。
+.PHONY: test-toml-conformance
+test-toml-conformance: stage-yh
+	python3 $(TOPSRC)/tests/toml/conformance.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-conformance
+
+# test-toml-injection：在临时标准库副本注入池分配失败点，逐点验证失败原子性。
+.PHONY: test-toml-injection
+test-toml-injection: stage-yh
+	python3 $(TOPSRC)/tests/toml/injection.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-inject
+
+# test-toml-install：make install 后从仓库外、无 YH_STDLIB 导入 toml。
+.PHONY: test-toml-install
+test-toml-install:
+	python3 $(TOPSRC)/tests/toml/install.py --workdir $(TOPSRC)/tmp/toml-install
 
 # quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
 # 秒级到十几秒，改语法/诊断时够用；运行语义与自举门留给 test/full。

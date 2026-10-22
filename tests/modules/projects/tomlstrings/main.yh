@@ -1,0 +1,207 @@
+module main
+
+// TOML T1 字符串与键验收：四种字符串、转义、NUL、UTF-8、多行裁剪与键语义。
+
+import io
+import toml
+
+let failed int = 0
+
+// ok 记录一条断言结果。
+fn ok(condition int, name *char) void {
+    if (condition == 0) {
+        failed += 1
+        io.print("FAIL ")
+        io.println(name)
+    }
+}
+
+// bytes_eq 按长度比较字节，允许期望值包含 NUL。
+fn bytes_eq(data *u8, count u64, expected *u8, expected_count u64) int {
+    if (count != expected_count) {
+        return 0
+    }
+    let i u64 = 0
+    for i < count {
+        if (data[i] != expected[i]) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// cstr_eq 将 Text 与 NUL 结尾期望值比较（期望值本身不能含 NUL）。
+fn cstr_eq(text toml.Text, expected *char) int {
+    if (text.count != strlen(expected)) {
+        return 0
+    }
+    let i u64 = 0
+    for i < text.count {
+        if (text.data[i] != expected[i].to_type(u8)) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// value_text 取一个键的字符串视图；失败返回空视图。
+fn value_text(root toml.Value, key *char) toml.Text {
+    let empty toml.Text
+    empty.data = 0
+    empty.count = 0
+    let got toml.LookupResult = toml.get(root, key)
+    if (got.status != toml.query_ok) {
+        return empty
+    }
+    let text toml.Text
+    if (toml.as_text(got.value, &text) != toml.query_ok) {
+        return empty
+    }
+    return text
+}
+
+// main 跑字符串断言。
+pub fn main() int {
+    // 基本转义全集，含 1.1 的 \e 与 \xHH。
+    let escapes toml.ParseResult = toml.parse_text(
+        "s = \"\\b\\t\\n\\f\\r\\e\\\"\\\\\\x41\\u00E9\\U0001F600\"")
+    ok((escapes.status == toml.parse_ok).to_type(int), "escapes parse")
+    let root toml.Value = toml.root(&escapes.document)
+    let t toml.Text = value_text(root, "s")
+    let expect_escapes [15]u8
+    expect_escapes[0] = 8
+    expect_escapes[1] = 9
+    expect_escapes[2] = 10
+    expect_escapes[3] = 12
+    expect_escapes[4] = 13
+    expect_escapes[5] = 27
+    expect_escapes[6] = 34
+    expect_escapes[7] = 92
+    expect_escapes[8] = 65
+    expect_escapes[9] = 195
+    expect_escapes[10] = 169
+    expect_escapes[11] = 240
+    expect_escapes[12] = 159
+    expect_escapes[13] = 152
+    expect_escapes[14] = 128
+    ok(bytes_eq(t.data, t.count, &expect_escapes[0], 15), "escape bytes")
+    toml.release(&escapes.document)
+
+    // \xHH 是 U+00HH，输出 UTF-8 两字节而不是裸单字节。
+    let hex toml.ParseResult = toml.parse_text("s = \"\\xE9\"")
+    let hex_root toml.Value = toml.root(&hex.document)
+    let hex_text toml.Text = value_text(hex_root, "s")
+    ok((hex_text.count == 2).to_type(int), "xE9 length")
+    ok((hex_text.data[0] == 195 && hex_text.data[1] == 169).to_type(int),
+        "xE9 utf8")
+    toml.release(&hex.document)
+
+    // 解码后的 NUL 存在于字节视图，不截断。
+    let nul toml.ParseResult = toml.parse_text("s = \"a\\u0000b\"")
+    let nul_root toml.Value = toml.root(&nul.document)
+    let nul_text toml.Text = value_text(nul_root, "s")
+    let nul_expect [3]u8
+    nul_expect[0] = 'a'
+    nul_expect[1] = 0
+    nul_expect[2] = 'b'
+    ok(bytes_eq(nul_text.data, nul_text.count, &nul_expect[0], 3), "nul text")
+    toml.release(&nul.document)
+
+    // 字面量字符串不处理反斜杠。
+    let literal toml.ParseResult = toml.parse_text("s = 'C:\\Users\\n'\n")
+    let literal_root toml.Value = toml.root(&literal.document)
+    ok((cstr_eq(value_text(literal_root, "s"), "C:\\Users\\n")).to_type(int),
+        "literal backslash")
+    toml.release(&literal.document)
+
+    // 多行基本字符串：首换行裁剪、续行吞掉空白、行尾引号保留。
+    let multi toml.ParseResult = toml.parse_text(
+        "a = \"\"\"\nline1\\\n   line2\"\"\"\nb = \"\"\"x\"\"\"\"\n")
+    let multi_root toml.Value = toml.root(&multi.document)
+    ok((cstr_eq(value_text(multi_root, "a"), "line1line2")).to_type(int),
+        "multiline continuation")
+    ok((cstr_eq(value_text(multi_root, "b"), "x\"")).to_type(int),
+        "multiline ending quote")
+    toml.release(&multi.document)
+
+    // 多行字面量：首换行裁剪、保留反斜杠与换行。
+    let raw toml.ParseResult = toml.parse_text(
+        "s = '''\nraw\\n\nline'''\n")
+    let raw_root toml.Value = toml.root(&raw.document)
+    ok((cstr_eq(value_text(raw_root, "s"), "raw\\n\nline")).to_type(int),
+        "literal multiline")
+    toml.release(&raw.document)
+
+    // 引号键与空键；键可以含解码后的 NUL。
+    let keys toml.ParseResult = toml.parse_text(
+        "\"a.b\" = 1\na.b = 2\n\"\" = 3\n\"x\\u0000y\" = 4\n")
+    ok((keys.status == toml.parse_ok).to_type(int), "keys parse")
+    let keys_root toml.Value = toml.root(&keys.document)
+    let literal_key toml.LookupResult = toml.get(keys_root, "a.b")
+    let dotted_key toml.LookupResult = toml.get(keys_root, "a")
+    let v1 i64 = 0
+    let v2 i64 = 0
+    ok((toml.as_i64(literal_key.value, &v1) == toml.query_ok).to_type(int),
+        "literal dotted key")
+    ok((v1 == 1).to_type(int), "literal dotted value")
+    ok((toml.as_i64(toml.get(dotted_key.value, "b").value, &v2)
+        == toml.query_ok).to_type(int), "nested dotted key")
+    ok((v2 == 2).to_type(int), "nested dotted value")
+    let empty_key toml.LookupResult = toml.get(keys_root, "")
+    let v3 i64 = 0
+    ok((toml.as_i64(empty_key.value, &v3) == toml.query_ok).to_type(int),
+        "empty key")
+    ok((v3 == 3).to_type(int), "empty key value")
+    let nul_key_bytes [3]u8
+    nul_key_bytes[0] = 'x'
+    nul_key_bytes[1] = 0
+    nul_key_bytes[2] = 'y'
+    let nul_key toml.Text
+    nul_key.data = &nul_key_bytes[0]
+    nul_key.count = 3
+    let nul_key_result toml.LookupResult = toml.table_get(keys_root, nul_key)
+    let v4 i64 = 0
+    ok((toml.as_i64(nul_key_result.value, &v4) == toml.query_ok).to_type(int),
+        "nul key")
+    ok((v4 == 4).to_type(int), "nul key value")
+    toml.release(&keys.document)
+
+    // 非法字符串与键必须拒绝。
+    let bad_escape toml.ParseResult = toml.parse_text("s = \"\\q\"")
+    ok((bad_escape.status == toml.parse_syntax_error).to_type(int),
+        "unknown escape")
+    toml.release(&bad_escape.document)
+    let bad_surrogate toml.ParseResult = toml.parse_text("s = \"\\uD800\"")
+    ok((bad_surrogate.status == toml.parse_syntax_error).to_type(int),
+        "surrogate escape")
+    toml.release(&bad_surrogate.document)
+    let bad_scalar toml.ParseResult = toml.parse_text("s = \"\\U00110000\"")
+    ok((bad_scalar.status == toml.parse_syntax_error).to_type(int),
+        "scalar range")
+    toml.release(&bad_scalar.document)
+    let raw_control_bytes [8]u8
+    raw_control_bytes[0] = 's'
+    raw_control_bytes[1] = ' '
+    raw_control_bytes[2] = '='
+    raw_control_bytes[3] = ' '
+    raw_control_bytes[4] = '"'
+    raw_control_bytes[5] = 'a'
+    raw_control_bytes[6] = 1
+    raw_control_bytes[7] = '"'
+    let raw_control toml.ParseResult = toml.parse(&raw_control_bytes[0], 8)
+    ok((raw_control.status == toml.parse_syntax_error).to_type(int),
+        "raw control")
+    toml.release(&raw_control.document)
+    let raw_newline toml.ParseResult = toml.parse_text("s = \"a\nb\"")
+    ok((raw_newline.status == toml.parse_syntax_error).to_type(int),
+        "raw newline")
+    toml.release(&raw_newline.document)
+
+    if (failed != 0) {
+        return 1
+    }
+    io.println("toml strings ok")
+    return 0
+}

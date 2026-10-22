@@ -1,0 +1,144 @@
+module toml
+
+// yh TOML 标准库：公共数据模型与实现常量。
+//
+// 本文件只放公开类型、枚举、容量/预算常量与私有节点状态常量；不实现解析。
+// 设计见 docs/03-design/yh-TOML标准库设计-2026-10-23.md，分期见
+// docs/02-plan/yh-TOML标准库实施方案-2026-10-23.md。
+//
+// 实现约束：
+//   * 文本一律是「字节指针 + 长度」，不要求 NUL 结尾：TOML 字符串和引号键
+//     可以包含解码后的 NUL，strlen 会截断。
+//   * Document 独占一次成功解析的私有内存池；Value 是池内节点的只读视图，
+//     不单独分配、不单独释放。释放文档后所有视图失效。
+//   * 私有类型只在本模块使用，不出现在 pub 签名里（ADR-0013）。
+
+// —— 资源预算（实现限制，README 必须披露）——
+// 输入字节上限；超过返回 parse_resource_error。
+const TOML_MAX_INPUT u64 = 16777216
+// 容器（数组/内联表）嵌套深度上限。
+const TOML_MAX_DEPTH int = 128
+// 单个点键的最大段数。
+const TOML_MAX_KEY_PARTS int = 128
+// 单个浮点字面量保留的最大有效数字位数；超过报资源错误而不静默近似。
+const TOML_MAX_DIGITS int = 4096
+// 单文档累计分配上限（池内所有块加上存储头部）。
+const TOML_MAX_BYTES u64 = 134217728
+// 测试构建的分配失败注入点：-1 关闭；>=0 时允许该次数的池分配，下一次失败。
+// 产品构建保持 -1；tests/toml/injection.py 在临时标准库副本中改写本行。
+const TOML_TEST_FAIL_AFTER int = -1
+
+// —— 私有表定义状态 ——
+// 节点不是表时使用 DEF_NONE。这些状态只用于语义校验，不导出。
+const TOML_DEF_NONE int = 0      // 非表节点
+const TOML_DEF_ROOT int = 1      // 文档根表
+const TOML_DEF_IMPLICIT int = 2  // 表头路径隐式创建的父表，可稍后显式定义
+const TOML_DEF_DEFINED int = 3   // 已显式定义，或点键在当前节结束后冻结
+const TOML_DEF_DOTTED int = 4    // 当前节点键创建，尚未冻结
+const TOML_DEF_INLINE int = 5    // 内联表，整体不可再扩展
+
+// ValueKind 是 TOML 值的类型标签；invalid 只表示空视图，数据本身没有 null。
+pub enum ValueKind {
+    kind_invalid
+    kind_string
+    kind_integer
+    kind_float
+    kind_boolean
+    kind_array
+    kind_table
+    kind_offset_datetime
+    kind_local_datetime
+    kind_local_date
+    kind_local_time
+}
+
+// ParseStatus 是一次解析的最终状态。
+pub enum ParseStatus {
+    parse_ok
+    parse_syntax_error
+    parse_resource_error
+    parse_io_error
+    parse_argument_error
+}
+
+// QueryStatus 是查询/取值的结果分类；失败时不修改输出参数。
+pub enum QueryStatus {
+    query_ok
+    query_missing
+    query_type_error
+    query_bounds_error
+    query_argument_error
+}
+
+// ErrorCode 是稳定诊断分类；message 文字不是程序判断接口。
+pub enum ErrorCode {
+    error_none
+    error_utf8
+    error_syntax
+    error_duplicate_key
+    error_table_conflict
+    error_integer_range
+    error_float_range
+    error_datetime_value
+    error_resource_limit
+    error_out_of_memory
+    error_io
+    error_argument
+}
+
+// Text 是 UTF-8 字节视图；长度不含额外终止字节，可以包含 NUL。
+// 视图借用所属 Document 的存储，文档释放后失效。
+pub struct Text {
+    data *u8
+    count u64
+}
+
+// Span 是来源位置：字节偏移零基，长度是字节数；行号和字节列号一基。
+pub struct Span {
+    offset u64
+    length u64
+    line u64
+    column u64
+}
+
+// Diagnostic 是结构化诊断；message 是静态中文文本，不归调用者释放。
+// related/has_related 用于重复定义关联的第一处位置。
+pub struct Diagnostic {
+    code ErrorCode
+    message *char
+    span Span
+    related Span
+    has_related int
+    native_code int
+}
+
+// Document 独占一次成功解析的存储；句柄由模块管理，调用者不可改写。
+pub struct Document {
+    handle *void
+}
+
+// Value 是所属 Document 内节点的只读视图，不单独分配或释放。
+pub struct Value {
+    handle *void
+}
+
+// ParseResult 是解析入口的统一返回；失败时 document.handle 为 0。
+pub struct ParseResult {
+    status ParseStatus
+    document Document
+    error Diagnostic
+}
+
+// LookupResult 是一次查找的结果；失败时 value.handle 为 0。
+pub struct LookupResult {
+    status QueryStatus
+    value Value
+}
+
+// EntryResult 是按首次引入顺序遍历表条目时的结果。
+pub struct EntryResult {
+    status QueryStatus
+    key Text
+    value Value
+    span Span
+}

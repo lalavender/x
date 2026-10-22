@@ -1,0 +1,80 @@
+module main
+
+// TOML T4 文件入口验收：真实文件读取、错误分类、路径参数与解析失败生命周期。
+
+import io
+import toml
+
+let failed int = 0
+
+// ok 记录一条断言结果。
+fn ok(condition int, name *char) void {
+    if (condition == 0) {
+        failed += 1
+        io.print("FAIL ")
+        io.println(name)
+    }
+}
+
+// main 跑文件入口断言；runner 以 fixture 目录为工作目录。
+pub fn main() int {
+    let result toml.ParseResult = toml.read_file("data.toml")
+    ok((result.status == toml.parse_ok).to_type(int), "read file")
+    let root toml.Value = toml.root(&result.document)
+    let title toml.LookupResult = toml.get(root, "title")
+    let text toml.Text
+    ok((toml.as_text(title.value, &text) == toml.query_ok
+        && text.count == 2).to_type(int), "file title")
+    let server toml.LookupResult = toml.get(root, "server")
+    let port toml.LookupResult = toml.get(server.value, "port")
+    let port_value i64 = 0
+    toml.as_i64(port.value, &port_value)
+    ok((port_value == 8080).to_type(int), "file port")
+    let tags toml.LookupResult = toml.get(server.value, "tags")
+    let tag_count u64 = 0
+    toml.count(tags.value, &tag_count)
+    ok((tag_count == 2).to_type(int), "file tags")
+    toml.release(&result.document)
+
+    // 不存在的文件是 I/O 错误，带目标平台错误号，不产生文档。
+    let missing toml.ParseResult = toml.read_file("missing.toml")
+    ok((missing.status == toml.parse_io_error
+        && missing.error.code == toml.error_io).to_type(int), "missing file")
+    // Linux 结果接口保留 errno；Darwin 在 OS8 前用旧文件接口，native_code 为 0。
+    $if (linux) {
+        ok((missing.error.native_code != 0).to_type(int), "missing native code")
+    }
+    $if (darwin) {
+        ok((missing.error.native_code == 0).to_type(int), "missing native code")
+    }
+    ok((missing.document.handle == 0).to_type(int), "missing no doc")
+    toml.release(&missing.document)
+
+    // 空路径是参数错误。
+    let empty_path toml.ParseResult = toml.read_file(0)
+    ok((empty_path.status == toml.parse_argument_error
+        && empty_path.error.code == toml.error_argument).to_type(int),
+        "null path")
+
+    // 文件内容语法错误：读到字节后按普通解析失败处理，无半成品文档。
+    let bad toml.ParseResult = toml.read_file("bad.toml")
+    ok((bad.status == toml.parse_syntax_error).to_type(int), "bad file")
+    ok((bad.document.handle == 0).to_type(int), "bad file no doc")
+    toml.release(&bad.document)
+
+    // 两个文件同时存活。
+    let again toml.ParseResult = toml.read_file("data.toml")
+    ok((again.status == toml.parse_ok).to_type(int), "second read")
+    let again_root toml.Value = toml.root(&again.document)
+    let again_title toml.LookupResult = toml.get(again_root, "title")
+    let again_text toml.Text
+    toml.as_text(again_title.value, &again_text)
+    ok((again_text.count == 2).to_type(int), "second read value")
+    toml.release(&again.document)
+
+    if (failed != 0) {
+        return 1
+    }
+    io.println("toml files ok")
+    return 0
+}

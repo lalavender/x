@@ -22,11 +22,24 @@
   `conformance.py --prepare` 下载并核对 SHA-256，常规运行不静默联网。
   Gitea `ci.yml` 的 Darwin 原生与 Linux/AArch64 容器门已加入 API 组和一致性门；
   本轮未触发 CI 实跑，CI 证据待首次推送。
+- **验证**：`python3 tests/toml/run.py --quiet --conformance` 输出 API 6/6、
+  一致性 681/681；`make test-toml`、`make test-toml-conformance` 退出 0；
+  `make test` 与 `make selfhost-native` 退出 0（后者 project cases 115/115）。
+  浮点另做 1437 例随机/边界、400 例相邻 double 中点、3000 例随机 double
+  格式化往返差分，全部与 Python 位模式一致。
+- **T4.1/T5.1 收口**：`tests/toml/injection.py` 在临时标准库副本注入运行时
+  失败接缝，`tomlinject` 逐次允许 0..N 次池分配，覆盖 **124 个失败点**，
+  每点均验证资源错误、无半成品文档和重复解析；`tomlbudget` 把副本
+  `TOML_MAX_BYTES` 降到 2048，验证累计预算 `error_resource_limit`。
+  `tests/toml/install.py` 执行 `make install` 并在仓库外、无 `YH_STDLIB`
+  时用默认 `../share/yh/libs` 运行 `tomloutside`。新增
+  `make test-toml-injection`/`make test-toml-install`，Gitea CI 同步接入。
 - **文档**：设计/分期/ADR/标准库总览/todo/README 同步实施状态；
   `libs/toml/README.md` 记录 API、所有权、错误、预算和未实现项。
-- **未完成**：分配失败注入与累计分配预算强制失败（T4.1）；`make install` 后
-  仓库外导入与 Release 打包实测（T5.1）；编译器清单消费者迁移（T6）；writer
-  与保真编辑（T7）。`compiler/cmd/toml.yh` 未改动，本轮未滚种子、未触发发布。
+- **未完成**：编译器清单消费者迁移（T6）；writer 与保真编辑（T7）；
+  三端 Release 资产是否携带标准库（T5.2，现状只含 `yh`，标准库由
+  `make install` 分发）。`compiler/cmd/toml.yh` 未改动，本轮未滚种子、
+  未触发发布。
 
 ## 2026-10-23 string 标准库规划交付
 

@@ -1,0 +1,393 @@
+module toml
+
+// yh TOML 标准库：四种字符串的扫描、转义校验与解码。
+//
+// 先扫描确定结束位置并校验全部转义，再按“原始区间长度”上限分配解码缓冲
+// （任何转义解码后都不长于源字节），最后解码。结果写入 p.str_data/p.str_count，
+// 内存属于文档池。支持 TOML 1.1 的 \e、\xHH 与多行字符串。
+
+// p_is_triple 判断当前位置是否连续三个指定引号。
+fn p_is_triple(p *parser, quote u8) int {
+    if (p.pos + 3 > p.count) {
+        return 0
+    }
+    if (p.data[p.pos] == quote && p.data[p.pos + 1] == quote
+        && p.data[p.pos + 2] == quote) {
+        return 1
+    }
+    return 0
+}
+
+// scan_hex_n 读取并校验 n 位十六进制数字，返回码点；失败返回 -1。
+fn scan_hex_n(p *parser, n int) i64 {
+    if (p.pos + n.to_type(u64) > p.count) {
+        p_fail_here(p, ErrorCode.error_syntax, "十六进制转义位数不足")
+        return -1
+    }
+    let value i64 = 0
+    let i int = 0
+    for i < n {
+        let v int = hex_digit_value(p.data[p.pos])
+        if (v < 0) {
+            p_fail_here(p, ErrorCode.error_syntax, "十六进制转义含非法字符")
+            return -1
+        }
+        value = value * 16 + v.to_type(i64)
+        p_advance(p)
+        i += 1
+    }
+    return value
+}
+
+// p_scan_escape 校验并跳过一个基本字符串转义；p.pos 在反斜杠上。
+fn p_scan_escape(p *parser, multiline int) int {
+    p_advance(p)
+    if (p.pos >= p.count) {
+        p_fail_here(p, ErrorCode.error_syntax, "字符串以反斜杠结尾")
+        return -1
+    }
+    let b u8 = p.data[p.pos]
+    if (multiline != 0 && (b == ' ' || b == '\t' || b == '\n' || b == '\r')) {
+        // 续行：反斜杠 + 行内空白 + 换行，然后吞掉后续空白与换行。
+        p_skip_ws(p)
+        if (p.pos >= p.count || p_is_newline(p) == 0) {
+            p_fail_here(p, ErrorCode.error_syntax, "转义续行需要换行")
+            return -1
+        }
+        if (p_newline(p) != 0) {
+            return -1
+        }
+        for 1 {
+            p_skip_ws(p)
+            if (p.pos < p.count && p_is_newline(p) != 0) {
+                if (p_newline(p) != 0) {
+                    return -1
+                }
+                continue
+            }
+            return 0
+        }
+    }
+    if (b == '"' || b == '\\' || b == 'b' || b == 't' || b == 'n'
+        || b == 'f' || b == 'r' || b == 'e') {
+        p_advance(p)
+        return 0
+    }
+    if (b == 'x') {
+        p_advance(p)
+        let cp i64 = scan_hex_n(p, 2)
+        if (cp < 0) {
+            return -1
+        }
+        return 0
+    }
+    if (b == 'u') {
+        p_advance(p)
+        let cp i64 = scan_hex_n(p, 4)
+        if (cp < 0) {
+            return -1
+        }
+        if (utf8_is_scalar(cp.to_type(u64)) == 0) {
+            p_fail_here(p, ErrorCode.error_syntax, "转义不是 Unicode 标量值")
+            return -1
+        }
+        return 0
+    }
+    if (b == 'U') {
+        p_advance(p)
+        let cp i64 = scan_hex_n(p, 8)
+        if (cp < 0) {
+            return -1
+        }
+        if (utf8_is_scalar(cp.to_type(u64)) == 0) {
+            p_fail_here(p, ErrorCode.error_syntax, "转义不是 Unicode 标量值")
+            return -1
+        }
+        return 0
+    }
+    p_fail_here(p, ErrorCode.error_syntax, "未知的字符串转义")
+    return -1
+}
+
+// p_is_string_control 判断字节是否是字符串不允许的裸控制字符。
+// 单行允许 tab；多行另允许换行（由调用方处理）。
+fn p_is_string_control(b u8) int {
+    if (b == '\t') {
+        return 0
+    }
+    if (b < 32) {
+        return 1
+    }
+    if (b == 127) {
+        return 1
+    }
+    return 0
+}
+
+// advance_continuation 在解码阶段跳过续行后的空白与换行，返回新下标。
+fn advance_continuation(data *u8, count u64, start u64, multiline int) u64 {
+    let i u64 = start
+    if (multiline == 0) {
+        return i
+    }
+    if (i >= count) {
+        return i
+    }
+    let b u8 = data[i]
+    if (b != ' ' && b != '\t' && b != '\n' && b != '\r') {
+        return i
+    }
+    for i < count && (data[i] == ' ' || data[i] == '\t') {
+        i += 1
+    }
+    if (i < count && data[i] == '\r' && i + 1 < count && data[i + 1] == '\n') {
+        i += 2
+    } else if (i < count && data[i] == '\n') {
+        i += 1
+    } else {
+        return start
+    }
+    for 1 {
+        for i < count && (data[i] == ' ' || data[i] == '\t') {
+            i += 1
+        }
+        if (i < count && data[i] == '\r' && i + 1 < count && data[i + 1] == '\n') {
+            i += 2
+            continue
+        }
+        if (i < count && data[i] == '\n') {
+            i += 1
+            continue
+        }
+        return i
+    }
+    return i
+}
+
+// simple_escape_byte 返回单字符转义的输出字节；未知返回 0（调用方已校验）。
+fn simple_escape_byte(b u8) u8 {
+    if (b == 'b') {
+        return 8
+    }
+    if (b == 't') {
+        return 9
+    }
+    if (b == 'n') {
+        return 10
+    }
+    if (b == 'f') {
+        return 12
+    }
+    if (b == 'r') {
+        return 13
+    }
+    if (b == 'e') {
+        return 27
+    }
+    if (b == '"') {
+        return '"'
+    }
+    return '\\'
+}
+
+// hex_n_at 解码阶段读取 n 位十六进制；调用方已校验。
+fn hex_n_at(data *u8, start u64, n int) i64 {
+    let value i64 = 0
+    let i int = 0
+    for i < n {
+        let v int = hex_digit_value(data[start + i.to_type(u64)])
+        value = value * 16 + v.to_type(i64)
+        i += 1
+    }
+    return value
+}
+
+// p_parse_quoted 解析一个完整引号字符串（值或键）。
+// multiline=1 表示三引号形态；literal=1 表示不处理反斜杠。
+// 成功后 p.pos 在结束引号之后，结果在 p.str_data/p.str_count。
+fn p_parse_quoted(p *parser, multiline int, literal int) int {
+    p.str_data = 0
+    p.str_count = 0
+    let quote u8 = '"'
+    if (literal != 0) {
+        quote = '\''
+    }
+    if (p.pos >= p.count || p.data[p.pos] != quote) {
+        p_fail_here(p, ErrorCode.error_syntax, "期望字符串引号")
+        return -1
+    }
+    p_advance(p)
+    if (multiline != 0) {
+        p_advance(p)
+        p_advance(p)
+        if (p.pos < p.count && p_is_newline(p) != 0) {
+            if (p_newline(p) != 0) {
+                return -1
+            }
+        }
+    }
+    let content_start u64 = p.pos
+    let close_pos u64 = 0
+    let extra int = 0
+    let closed int = 0
+    for p.pos < p.count {
+        let b u8 = p.data[p.pos]
+        if (b == quote) {
+            if (multiline == 0) {
+                close_pos = p.pos
+                p_advance(p)
+                closed = 1
+                break
+            }
+            let run int = 1
+            for (p.pos + run.to_type(u64) < p.count
+                && p.data[p.pos + run.to_type(u64)] == quote) {
+                run += 1
+            }
+            if (run >= 3) {
+                extra = run - 3
+                if (extra > 2) {
+                    extra = 2
+                }
+                close_pos = p.pos
+                p_advance(p)
+                p_advance(p)
+                p_advance(p)
+                if (extra >= 1) {
+                    p_advance(p)
+                }
+                if (extra == 2) {
+                    p_advance(p)
+                }
+                closed = 1
+                break
+            }
+            let k int = 0
+            for k < run {
+                p_advance(p)
+                k += 1
+            }
+            continue
+        }
+        if (b == '\\' && literal == 0) {
+            if (p_scan_escape(p, multiline) != 0) {
+                return -1
+            }
+            continue
+        }
+        if (b == '\n') {
+            if (multiline == 0) {
+                p_fail_here(p, ErrorCode.error_syntax, "单行字符串不能包含换行")
+                return -1
+            }
+            p_advance(p)
+            continue
+        }
+        if (b == '\r') {
+            if (multiline == 0 || p.pos + 1 >= p.count
+                || p.data[p.pos + 1] != '\n') {
+                p_fail_here(p, ErrorCode.error_syntax, "字符串内出现裸 CR")
+                return -1
+            }
+            p.pos += 2
+            p.line += 1
+            p.column = 1
+            continue
+        }
+        if (p_is_string_control(b) != 0) {
+            p_fail_here(p, ErrorCode.error_syntax, "字符串内出现控制字符")
+            return -1
+        }
+        p_advance(p)
+    }
+    if (closed == 0) {
+        p_fail_here(p, ErrorCode.error_syntax, "字符串没有结束引号")
+        return -1
+    }
+
+    // 原始区间长度是解码长度的上界：\uXXXX 最多输出 4 字节，\xHH 最多 2 字节。
+    let capacity u64 = close_pos - content_start + extra.to_type(u64)
+    let out *u8 = 0
+    if (capacity > 0) {
+        out = pool_alloc(&p.state.mem, capacity).to_type(*u8)
+        if (out == 0) {
+            p_fail_here(p, ErrorCode.error_out_of_memory, "字符串解码内存不足")
+            return -1
+        }
+    }
+    let i u64 = content_start
+    let o u64 = 0
+    for i < close_pos {
+        let b u8 = p.data[i]
+        if (b == '\\' && literal == 0) {
+            let escape_start u64 = i + 1
+            let e u8 = p.data[escape_start]
+            if (multiline != 0 && (e == ' ' || e == '\t' || e == '\n'
+                || e == '\r')) {
+                let next u64 = advance_continuation(p.data, close_pos, escape_start, 1)
+                if (next > escape_start) {
+                    i = next
+                    continue
+                }
+                // 校验阶段已确认这是合法续行，不会走到这里。
+                i += 1
+                continue
+            }
+            if (e == 'x') {
+                let cp i64 = hex_n_at(p.data, escape_start + 1, 2)
+                let tmp [4]u8
+                let n int = utf8_encode(cp.to_type(u64), &tmp[0])
+                let k int = 0
+                for k < n {
+                    out[o] = tmp[k]
+                    o += 1
+                    k += 1
+                }
+                i = escape_start + 3
+                continue
+            }
+            if (e == 'u') {
+                let cp i64 = hex_n_at(p.data, escape_start + 1, 4)
+                let tmp [4]u8
+                let n int = utf8_encode(cp.to_type(u64), &tmp[0])
+                let k int = 0
+                for k < n {
+                    out[o] = tmp[k]
+                    o += 1
+                    k += 1
+                }
+                i = escape_start + 5
+                continue
+            }
+            if (e == 'U') {
+                let cp i64 = hex_n_at(p.data, escape_start + 1, 8)
+                let tmp [4]u8
+                let n int = utf8_encode(cp.to_type(u64), &tmp[0])
+                let k int = 0
+                for k < n {
+                    out[o] = tmp[k]
+                    o += 1
+                    k += 1
+                }
+                i = escape_start + 9
+                continue
+            }
+            out[o] = simple_escape_byte(e)
+            o += 1
+            i = escape_start + 1
+            continue
+        }
+        out[o] = b
+        o += 1
+        i += 1
+    }
+    let k2 int = 0
+    for k2 < extra {
+        out[o] = quote
+        o += 1
+        k2 += 1
+    }
+    p.str_data = out
+    p.str_count = o
+    return 0
+}
