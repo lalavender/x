@@ -1,0 +1,373 @@
+module ir
+
+// ============================================================================
+// ssa_module_50_function_rebind.yh —— 函数缓存记录合并回当前模块（LA3）
+//
+// capture 产生一个只含单函数及贡献闭包的迷你 IRModule；本文件在命中时：
+//   1. 反序列化迷你模块并核对目标/环境/函数身份；
+//   2. 类型按结构复用或补建，得到 mini 类型 → 当前类型映射；
+//   3. 符号按名字复用或补建，全局实体按符号与内容复用或补建；
+//   4. 把函数体里的模块下标重绑为当前下标，再交给 ir_module_add_function。
+//
+// 返回值：0 成功；1 记录损坏/不兼容（调用方按 miss 重新 lowering）；
+// -1 内部错误或分配失败（调用方停止，不把内部错误当 miss 掩盖）。
+// 递归/前向类型闭包在 capture 阶段已跳过，这里只处理依赖后序的类型表。
+// ============================================================================
+
+// ir_fc_target_same：完整目标身份必须一致，不能只比 key。
+fn ir_fc_target_same(a *IRModuleTarget, b *IRModuleTarget) int {
+    if (a.key != b.key || a.pointer_bits != b.pointer_bits
+        || a.little_endian != b.little_endian
+        || a.layout_version != b.layout_version) { return 0 }
+    if (ir_module_str_eq(a.triple, b.triple) == 0
+        || ir_module_str_eq(a.data_layout, b.data_layout) == 0
+        || ir_module_str_eq(a.abi, b.abi) == 0) { return 0 }
+    return 1
+}
+
+// ir_fc_type_equiv：比较 mini 类型与当前类型；mini 依赖经 type_map 映射。
+fn ir_fc_type_equiv(unit *IRModule, current int, mini *IRModule, candidate int,
+    type_map *int) int {
+    if (current < 0 || current >= unit.type_count || candidate < 0
+        || candidate >= mini.type_count) { return 0 }
+    let a IRModuleType = unit.types[current]
+    let b IRModuleType = mini.types[candidate]
+    if (ir_module_str_eq(a.name, b.name) == 0 || a.kind != b.kind
+        || a.bits != b.bits || a.size != b.size || a.align != b.align
+        || a.count != b.count || a.abi != b.abi || a.variadic != b.variadic
+        || a.field_count != b.field_count) { return 0 }
+    if (b.elem >= 0) {
+        if (type_map[b.elem] < 0 || type_map[b.elem] != a.elem) { return 0 }
+    } else if (a.elem >= 0) { return 0 }
+    let i int = 0
+    for i < b.field_count {
+        if (type_map[b.fields[i].type_id] < 0
+            || type_map[b.fields[i].type_id] != a.fields[i].type_id
+            || b.fields[i].offset != a.fields[i].offset) { return 0 }
+        i += 1
+    }
+    return 1
+}
+
+// ir_fc_find_type：在模块类型表中查找结构等价的类型；找不到返回 -1。
+fn ir_fc_find_type(unit *IRModule, mini *IRModule, candidate int,
+    type_map *int) int {
+    let i int = 0
+    for i < unit.type_count {
+        if (ir_fc_type_equiv(unit, i, mini, candidate, type_map) != 0) { return i }
+        i += 1
+    }
+    return -1
+}
+
+// ir_fc_find_symbol_name：按名字查找当前模块符号；找不到返回 -1。
+fn ir_fc_find_symbol_name(unit *IRModule, name *char) int {
+    let i int = 0
+    for i < unit.symbol_count {
+        if (ir_module_str_eq(unit.symbols[i].name, name) != 0) { return i }
+        i += 1
+    }
+    return -1
+}
+
+// ir_fc_find_global：按符号查找当前模块全局实体；找不到返回 -1。
+fn ir_fc_find_global(unit *IRModule, symbol int) int {
+    let i int = 0
+    for i < unit.global_count {
+        if (unit.globals[i].symbol == symbol) { return i }
+        i += 1
+    }
+    return -1
+}
+
+// ir_fc_symbol_compatible：比较 mini 符号与当前同名符号；声明可以合并到定义。
+fn ir_fc_symbol_compatible(unit *IRModule, current int, mini *IRModule,
+    candidate int, type_map *int) int {
+    if (current < 0 || current >= unit.symbol_count || candidate < 0
+        || candidate >= mini.symbol_count) { return 0 }
+    let a IRModuleSymbol = unit.symbols[current]
+    let b IRModuleSymbol = mini.symbols[candidate]
+    if (a.kind != b.kind || a.abi != b.abi || a.variadic != b.variadic
+        || a.no_return != b.no_return || a.mutable != b.mutable
+        || a.param_count != b.param_count) { return 0 }
+    if (type_map[b.type_id] < 0 || type_map[b.type_id] != a.type_id) { return 0 }
+    let i int = 0
+    for i < b.param_count {
+        if (type_map[b.params[i]] < 0 || type_map[b.params[i]] != a.params[i]) {
+            return 0
+        }
+        i += 1
+    }
+    // mini 的声明（defined=0）可以合并到当前定义；mini 的定义必须能在当前找到定义，
+    // 但函数定义只能由当前函数体提交，其他函数在 capture 时已降为声明。
+    if (b.defined != 0) {
+        if (a.defined == 0 && b.kind == IR_MODULE_SYMBOL_FUNCTION) { return 0 }
+        if (a.defined != 0 && a.linkage != b.linkage) { return 0 }
+    }
+    return 1
+}
+
+// ir_fc_global_equiv：比较已有全局实体与新记录的数据/对齐/重定位闭包。
+fn ir_fc_global_equiv(unit *IRModule, current int, mini *IRModule,
+    candidate int, symbol_map *int) int {
+    let a IRModuleGlobal = unit.globals[current]
+    let b IRModuleGlobal = mini.globals[candidate]
+    if (a.size != b.size || a.align != b.align || a.reloc_count != b.reloc_count) {
+        return 0
+    }
+    let i int = 0
+    for i < b.size {
+        if (a.data[i] != b.data[i]) { return 0 }
+        i += 1
+    }
+    i = 0
+    for i < b.reloc_count {
+        let x IRModuleReloc = a.relocs[i]
+        let y IRModuleReloc = b.relocs[i]
+        if (x.offset != y.offset || x.width != y.width || x.addend != y.addend
+            || symbol_map[y.symbol] < 0 || symbol_map[y.symbol] != x.symbol) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// ir_function_cache_merge：把一条缓存记录合并进 unit，返回 0/1/-1（见文件头）。
+pub fn ir_function_cache_merge(unit *IRModule, data *u8, size int, env_key u64,
+    expected_name *char, expected_symbol int) int {
+    if (unit == 0 || data == 0 || size < IR_FUNCTION_CACHE_HEAD
+        || expected_name == 0 || expected_symbol < 0
+        || expected_symbol >= unit.symbol_count) { return 1 }
+    let cursor int = 0
+    let magic u64 = ir_fc_get_u64(data, &cursor)
+    let version u64 = ir_fc_get_u64(data, &cursor)
+    let record_env u64 = ir_fc_get_u64(data, &cursor)
+    let payload_raw u64 = ir_fc_get_u64(data, &cursor)
+    if (magic != IR_FUNCTION_CACHE_MAGIC
+        || version != IR_FUNCTION_CACHE_VERSION.to_type(u64)
+        || record_env != env_key || payload_raw > 0x7FFFFFFFFFFFFFFF) { return 1 }
+    let payload_size int = payload_raw.to_type(int)
+    if (payload_size != size - IR_FUNCTION_CACHE_HEAD) { return 1 }
+    let mini IRModule
+    if (ir_module_deserialize(&mini, data + IR_FUNCTION_CACHE_HEAD,
+            payload_size) != 0) { return 1 }
+    let result int = 1
+    if (ir_fc_target_same(&unit.target, &mini.target) == 0
+        || mini.function_count != 1
+        || ir_module_str_eq(unit.symbols[expected_symbol].name, expected_name) == 0
+        || unit.symbols[expected_symbol].kind != IR_MODULE_SYMBOL_FUNCTION
+        || unit.symbols[expected_symbol].defined != 1) {
+        result = 1
+    } else {
+        let mini_function IRModuleFunction = mini.functions[0]
+        let mini_symbol int = mini_function.symbol
+        if (mini_symbol < 0 || mini_symbol >= mini.symbol_count
+            || ir_module_str_eq(mini.symbols[mini_symbol].name, expected_name) == 0) {
+            result = 1
+        } else {
+            // 来源先映射，符号与函数位置才能引用当前模块。
+            let type_map *int = malloc((mini.type_count * sizeof(int)).to_type(u64)).to_type(*int)
+            let symbol_map *int = malloc((mini.symbol_count * sizeof(int)).to_type(u64)).to_type(*int)
+            if (type_map == 0 || symbol_map == 0) {
+                result = -1
+            } else {
+                let i int = 0
+                for i < mini.type_count { type_map[i] = -1; i += 1 }
+                i = 0
+                for i < mini.symbol_count { symbol_map[i] = -1; i += 1 }
+                result = 0
+                // 类型：迷你模块按依赖后序保存，遇到前向引用即视为不兼容。
+                i = 0
+                for i < mini.type_count && result == 0 {
+                    let ty IRModuleType = mini.types[i]
+                    if (ty.elem >= 0) {
+                        if (ty.elem >= i || type_map[ty.elem] < 0) { result = 1; break }
+                        ty.elem = type_map[ty.elem]
+                    }
+                    let fields *IRModuleField = 0
+                    if (ty.field_count > 0) {
+                        fields = malloc((ty.field_count * sizeof(IRModuleField)).to_type(u64)).to_type(*IRModuleField)
+                        if (fields == 0) { result = -1; break }
+                        let fi int = 0
+                        for fi < ty.field_count {
+                            let field_type int = ty.fields[fi].type_id
+                            if (field_type >= i || type_map[field_type] < 0) {
+                                result = 1; break
+                            }
+                            fields[fi].type_id = type_map[field_type]
+                            fields[fi].offset = ty.fields[fi].offset
+                            fi += 1
+                        }
+                    }
+                    if (result == 0) {
+                        let found int = ir_fc_find_type(unit, &mini, i, type_map)
+                        if (found >= 0) {
+                            type_map[i] = found
+                        } else {
+                            let added int = ir_module_add_type(unit, ty.name, &ty,
+                                fields, ty.field_count)
+                            if (added < 0) { result = -1 } else { type_map[i] = added }
+                        }
+                    }
+                    if (fields != 0) { free(fields.to_type(*void)) }
+                    i += 1
+                }
+                // 符号：同名复用；缺失的声明补为外部声明，缺失的全局补实体。
+                i = 0
+                for i < mini.symbol_count && result == 0 {
+                    let sym IRModuleSymbol = mini.symbols[i]
+                    if (sym.type_id < 0 || sym.type_id >= mini.type_count
+                        || type_map[sym.type_id] < 0) { result = 1; break }
+                    let params *int = 0
+                    if (sym.param_count > 0) {
+                        params = malloc((sym.param_count * sizeof(int)).to_type(u64)).to_type(*int)
+                        if (params == 0) { result = -1; break }
+                        let pi int = 0
+                        for pi < sym.param_count {
+                            if (sym.params[pi] < 0 || sym.params[pi] >= mini.type_count
+                                || type_map[sym.params[pi]] < 0) { result = 1; break }
+                            params[pi] = type_map[sym.params[pi]]
+                            pi += 1
+                        }
+                    }
+                    if (result == 0) {
+                        let found int = ir_fc_find_symbol_name(unit, sym.name)
+                        if (found >= 0) {
+                            if (ir_fc_symbol_compatible(unit, found, &mini, i,
+                                    type_map) == 0) { result = 1 }
+                            else { symbol_map[i] = found }
+                        } else if (sym.defined != 0
+                            && sym.kind == IR_MODULE_SYMBOL_FUNCTION) {
+                            // 当前模块没有该函数定义，不能凭缓存补出半成品。
+                            result = 1
+                        } else {
+                            let added_symbol IRModuleSymbol = sym
+                            if (added_symbol.defined == 0) {
+                                added_symbol.linkage = IR_MODULE_LINK_EXTERNAL
+                            }
+                            // 缓存记录不携带旧源码偏移；新符号使用当前函数声明位置。
+                            added_symbol.type_id = type_map[sym.type_id]
+                            added_symbol.source = unit.symbols[expected_symbol].source
+                            added_symbol.offset = unit.symbols[expected_symbol].offset
+                            let added int = ir_module_add_symbol(unit,
+                                added_symbol.name, &added_symbol, params,
+                                added_symbol.param_count)
+                            if (added < 0) { result = -1 } else { symbol_map[i] = added }
+                        }
+                    }
+                    if (params != 0) { free(params.to_type(*void)) }
+                    i += 1
+                }
+                // 全局实体：已有实体必须内容一致；缺失时补建。
+                i = 0
+                for i < mini.global_count && result == 0 {
+                    let global IRModuleGlobal = mini.globals[i]
+                    let mapped_symbol int = symbol_map[global.symbol]
+                    if (mapped_symbol < 0) { result = 1; break }
+                    let existing int = ir_fc_find_global(unit, mapped_symbol)
+                    if (existing >= 0) {
+                        if (ir_fc_global_equiv(unit, existing, &mini, i,
+                                symbol_map) == 0) { result = 1 }
+                    } else {
+                        let relocs *IRModuleReloc = 0
+                        if (global.reloc_count > 0) {
+                            relocs = malloc((global.reloc_count * sizeof(IRModuleReloc)).to_type(u64)).to_type(*IRModuleReloc)
+                            if (relocs == 0) { result = -1; break }
+                            let ri int = 0
+                            for ri < global.reloc_count {
+                                relocs[ri] = global.relocs[ri]
+                                let target int = global.relocs[ri].symbol
+                                if (target < 0 || target >= mini.symbol_count
+                                    || symbol_map[target] < 0) { result = 1; break }
+                                relocs[ri].symbol = symbol_map[target]
+                                ri += 1
+                            }
+                        }
+                        if (result == 0
+                            && ir_module_add_global(unit, mapped_symbol, global.data,
+                                global.size, global.align, relocs,
+                                global.reloc_count) < 0) { result = -1 }
+                        if (relocs != 0) { free(relocs.to_type(*void)) }
+                    }
+                    i += 1
+                }
+                // 函数体：重绑模块下标、类型映射与来源位置。
+                if (result == 0) {
+                    let body IRFunction
+                    if (ir_fc_copy_function(&mini_function.body, &body) != 0) {
+                        result = -1
+                    } else {
+                        let ii int = 0
+                        for ii < body.inst_count && result == 0 {
+                            let inst *IRInst = &body.insts[ii]
+                            if (inst.op == IR_OP_GLOB_ADDR || inst.op == IR_OP_FN_ADDR) {
+                                let mapped int = symbol_map[inst.imm.to_type(int)]
+                                if (mapped < 0) { result = 1; break }
+                                inst.imm = mapped.to_type(i64)
+                            }
+                            if (inst.op == IR_OP_FN_ADDR) {
+                                if (inst.aux < 0 || inst.aux >= mini.type_count
+                                    || type_map[inst.aux] < 0) { result = 1; break }
+                                inst.aux = type_map[inst.aux]
+                            }
+                            if (inst.op == IR_OP_CALL) {
+                                let call *IRCall = &body.calls[inst.aux]
+                                if (call.callee_value >= 0) {
+                                    if (call.signature_type < 0
+                                        || call.signature_type >= mini.type_count
+                                        || type_map[call.signature_type] < 0) {
+                                        result = 1; break
+                                    }
+                                    call.signature_type = type_map[call.signature_type]
+                                }
+                            }
+                            ii += 1
+                        }
+                        let current_type_map *int = 0
+                        let current_locs *IRModuleLoc = 0
+                        if (result == 0) {
+                            current_type_map = malloc((mini_function.type_map_count * sizeof(int)).to_type(u64)).to_type(*int)
+                            if (current_type_map == 0) { result = -1 }
+                        }
+                        if (result == 0) {
+                            ii = 0
+                            for ii < mini_function.type_map_count {
+                                let mapped int = type_map[mini_function.type_map[ii]]
+                                if (mapped < 0) { result = 1; break }
+                                current_type_map[ii] = mapped
+                                ii += 1
+                            }
+                        }
+                        if (result == 0 && mini_function.loc_count > 0) {
+                            current_locs = malloc((mini_function.loc_count * sizeof(IRModuleLoc)).to_type(u64)).to_type(*IRModuleLoc)
+                            if (current_locs == 0) { result = -1 }
+                        }
+                        if (result == 0) {
+                            // 当前 lowering 把整条函数的 locs 都填成函数符号的声明位置；
+                            // 命中时按当前符号重建，不能复用旧源码字节偏移（注释/空行
+                            // 或前置声明会移动偏移，旧偏移会指向错误位置）。
+                            let symbol_loc IRModuleSymbol = unit.symbols[expected_symbol]
+                            ii = 0
+                            for ii < mini_function.loc_count {
+                                current_locs[ii].source = symbol_loc.source
+                                current_locs[ii].offset = symbol_loc.offset
+                                ii += 1
+                            }
+                        }
+                        if (result == 0
+                            && ir_module_add_function(unit, expected_symbol, &body,
+                                current_type_map, current_locs) < 0) { result = -1 }
+                        if (current_type_map != 0) { free(current_type_map.to_type(*void)) }
+                        if (current_locs != 0) { free(current_locs.to_type(*void)) }
+                        ir_fc_free_function(&body)
+                    }
+                }
+            }
+            if (type_map != 0) { free(type_map.to_type(*void)) }
+            if (symbol_map != 0) { free(symbol_map.to_type(*void)) }
+        }
+    }
+    ir_module_release(&mini)
+    return result
+}

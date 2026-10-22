@@ -915,10 +915,35 @@ def main():
                        and "lower-rejected=ok" in rejected.stdout
                        and "rejected_pointer_depth" in rejected.stderr
                        and ".yh:" in rejected.stderr)
-            report(lower_ok and pointer_ok and aggregate_ok and slice_lowered and global_lowered and rejects, c["name"],
+            # LA2b：互递归/函数内字符串、嵌套同名局部绑定与中间函数失败。
+            mutual = sh([str(program), str(dst / "input" / "mutual.yh"), "0"],
+                        cwd=dst) if program.exists() else None
+            mutual_ok = (mutual is not None and mutual.returncode == 0
+                         and "lower-snapshot=ok functions=4" in mutual.stdout)
+            shadow = sh([str(program), str(dst / "input" / "shadow.yh"), "0"],
+                        cwd=dst) if program.exists() else None
+            shadow_ok = (shadow is not None and shadow.returncode == 0
+                         and "lower-snapshot=ok functions=1" in shadow.stdout)
+            failmid = sh([str(program), str(dst / "input" / "failmid.yh"), "1"],
+                         cwd=dst) if program.exists() else None
+            failmid_ok = (failmid is not None and failmid.returncode == 0
+                          and "lower-rejected=ok" in failmid.stdout
+                          and "首片不支持此绑定类型或参数布局" in failmid.stderr
+                          and "failmid.yh:6:" in failmid.stderr)
+            # LA3.3 C2：受检 AST 切片离线往返，重建快照后 lowering 身份一致。
+            check_slice = sh([str(program), str(dst / "input" / "checkcache.yh"), "2"],
+                             cwd=dst) if program.exists() else None
+            check_slice_ok = (check_slice is not None
+                              and check_slice.returncode == 0
+                              and "check-slice=ok" in check_slice.stdout)
+            report(lower_ok and pointer_ok and aggregate_ok and slice_lowered
+                   and global_lowered and rejects and mutual_ok and shadow_ok
+                   and failmid_ok and check_slice_ok, c["name"],
                    f"快照 lowering 覆盖或拒绝路径失败: lower_ok={lower_ok}, "
                    f"pointer_ok={pointer_ok}, aggregate_ok={aggregate_ok}, "
                    f"slice_ok={slice_lowered}, global_ok={global_lowered}, rejects={rejects}, "
+                   f"mutual_ok={mutual_ok}, shadow_ok={shadow_ok}, failmid_ok={failmid_ok}, "
+                   f"check_slice_ok={check_slice_ok}, "
                    f"build={built.returncode}, run={run.returncode if run else None}, "
                    f"stdout={(run.stdout if run else '')[-120:]!r}\n"
                    f"{(run.stderr if run else built.stderr)[-400:]}")

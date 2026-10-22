@@ -1,0 +1,615 @@
+module ir
+
+// ============================================================================
+// ssa_module_40_function_cache.yh —— 函数级 IR 缓存单元（LA3）
+//
+// 缓存单元是一个只含单函数及其贡献闭包的迷你 IRModule：
+//   * 函数体沿用 ssa_serialize.yh 的稳定编码；
+//   * 类型/符号/全局/来源只保留该函数实际读取或产生的闭包；
+//   * 迷你模块先通过 ir_module_verify，再序列化为 IRModule 字节流。
+//
+// 缓存文件外层是 32 字节头：magic、格式版本、环境键与 payload 长度。
+// 命中路径把迷你模块合并回当前模块：类型按结构复用/补建，符号按名字复用/
+// 补建，全局按符号与内容复用/补建，最后把函数体里的模块下标重绑为当前下标。
+//
+// 本文件不做文件 I/O，也不读取 GenState；路径、索引与原子提交由 cmd 负责。
+// 递归/前向类型闭包暂不支持缓存，capture 返回 1（跳过该函数），由正常 lowering
+// 重建，绝不以错误的类型下标命中。
+// ============================================================================
+
+// 缓存格式版本：外层头或迷你模块语义变化时递增。
+pub const IR_FUNCTION_CACHE_VERSION int = 1
+// 缓存键长度：16 个十六进制字符 + 结尾零。
+pub const IR_FUNCTION_CACHE_KEY_HEX int = 16
+pub const IR_FUNCTION_CACHE_KEY_SIZE int = 17
+// 外层头字节数。
+const IR_FUNCTION_CACHE_HEAD int = 32
+// 外层 magic：小端写出后为 "YHFNC1" 的低 48 位加零。
+const IR_FUNCTION_CACHE_MAGIC u64 = 0x31434E465948
+
+// IRFunctionCacheEntry：一个键对应的缓存记录；data 由集合独占，size=0 表示只登记键。
+pub struct IRFunctionCacheEntry {
+    key *char
+    data *u8
+    size int
+}
+
+// IRFunctionCacheSet：命令侧装载/回收、lowering 侧查询/追加的记录集合。
+pub struct IRFunctionCacheSet {
+    entries *IRFunctionCacheEntry
+    count int
+    capacity int
+}
+
+// ir_fc_zero：把一段内存逐字节清零；size<=0 时不做任何事。
+fn ir_fc_zero(data *void, size int) void {
+    if (data == 0 || size <= 0) { return }
+    let bytes *u8 = data.to_type(*u8)
+    let i int = 0
+    for i < size { bytes[i] = 0; i += 1 }
+}
+
+// ir_fc_copy：复制一段字节；size<=0 返回空指针。
+fn ir_fc_copy(data *void, size int) *void {
+    if (data == 0 || size <= 0) { return 0 }
+    let copy *void = malloc(size.to_type(u64))
+    if (copy != 0) { memcpy(copy, data, size.to_type(u64)) }
+    return copy
+}
+
+// ir_fc_key_ok：缓存键必须是 16 个十六进制字符并以零结尾。
+pub fn ir_fc_key_ok(key *char) int {
+    if (key == 0) { return 0 }
+    let i int = 0
+    for i < IR_FUNCTION_CACHE_KEY_HEX {
+        let c u8 = key[i].to_type(u8)
+        let digit int = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+        if (digit == 0) { return 0 }
+        i += 1
+    }
+    return key[IR_FUNCTION_CACHE_KEY_HEX] == 0 ? 1 : 0
+}
+
+// ir_function_cache_set_find：按键查找记录；未找到返回空指针。
+pub fn ir_function_cache_set_find(set *IRFunctionCacheSet, key *char) *IRFunctionCacheEntry {
+    if (set == 0 || set.entries == 0 || ir_fc_key_ok(key) == 0) { return 0 }
+    let i int = 0
+    for i < set.count {
+        if (ir_module_str_eq(set.entries[i].key, key) != 0) { return &set.entries[i] }
+        i += 1
+    }
+    return 0
+}
+
+// ir_function_cache_set_add：复制键并接管 data 所有权；data 为空时只登记键。
+// 同一键已存在时释放新 data 并保留旧记录，返回 0（调用方仍负责自己的释放）。
+pub fn ir_function_cache_set_add(set *IRFunctionCacheSet, key *char, data *u8,
+    size int) int {
+    if (set == 0 || ir_fc_key_ok(key) == 0 || size < 0 || (data == 0) != (size == 0)) {
+        return -1
+    }
+    if (ir_function_cache_set_find(set, key) != 0) {
+        if (data != 0) { free(data.to_type(*void)) }
+        return 0
+    }
+    if (set.count == set.capacity) {
+        let capacity int = set.capacity == 0 ? 8 : set.capacity * 2
+        if (capacity <= set.capacity) { return -1 }
+        let next *IRFunctionCacheEntry = malloc(
+            (capacity * sizeof(IRFunctionCacheEntry)).to_type(u64)).to_type(*IRFunctionCacheEntry)
+        if (next == 0) { return -1 }
+        let i int = 0
+        for i < set.count { next[i] = set.entries[i]; i += 1 }
+        if (set.entries != 0) { free(set.entries.to_type(*void)) }
+        set.entries = next; set.capacity = capacity
+    }
+    let entry *IRFunctionCacheEntry = &set.entries[set.count]
+    entry.key = malloc(IR_FUNCTION_CACHE_KEY_SIZE.to_type(u64)).to_type(*char)
+    if (entry.key == 0) { return -1 }
+    let i int = 0
+    for i < IR_FUNCTION_CACHE_KEY_SIZE { entry.key[i] = key[i]; i += 1 }
+    entry.data = data; entry.size = size
+    set.count += 1
+    return 0
+}
+
+// ir_function_cache_set_release：释放全部键与记录；允许空集合和重复调用。
+pub fn ir_function_cache_set_release(set *IRFunctionCacheSet) void {
+    if (set == 0) { return }
+    let i int = 0
+    for i < set.count {
+        if (set.entries[i].key != 0) { free(set.entries[i].key.to_type(*void)) }
+        if (set.entries[i].data != 0) { free(set.entries[i].data.to_type(*void)) }
+        i += 1
+    }
+    if (set.entries != 0) { free(set.entries.to_type(*void)) }
+    set.entries = 0; set.count = 0; set.capacity = 0
+}
+
+// ir_fc_put_u64 / ir_fc_get_u64：外层头的小端 64 位编解码。
+fn ir_fc_put_u64(out *u8, cursor *int, value u64) void {
+    let i int = 0
+    for i < 8 {
+        out[*cursor + i] = ((value >> (i * 8)) & 255).to_type(u8)
+        i += 1
+    }
+    *cursor = *cursor + 8
+}
+
+fn ir_fc_get_u64(data *u8, cursor *int) u64 {
+    let value u64 = 0
+    let i int = 0
+    for i < 8 {
+        value = value | (data[*cursor + i].to_type(u64) << (i * 8))
+        i += 1
+    }
+    *cursor = *cursor + 8
+    return value
+}
+
+// ir_fc_find_symbol：按逻辑名查找模块符号；直接调用记录只保存名字。
+fn ir_fc_find_symbol(unit *IRModule, data *u8, length int) int {
+    let i int = 0
+    for i < unit.symbol_count {
+        let name *char = unit.symbols[i].name
+        let n int = ir_module_str_len(name)
+        if (n == length) {
+            let j int = 0
+            for j < length {
+                if (name[j].to_type(u8) != data[j]) { break }
+                j += 1
+            }
+            if (j == length) { return i }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ir_fc_global_of：返回符号对应的全局实体下标；没有实体返回 -1。
+fn ir_fc_global_of(unit *IRModule, symbol int) int {
+    let i int = 0
+    for i < unit.global_count {
+        if (unit.globals[i].symbol == symbol) { return i }
+        i += 1
+    }
+    return -1
+}
+
+// ir_fc_visit_type：按依赖后序收集类型闭包；遇到自引用/前向引用返回 -1。
+fn ir_fc_visit_type(unit *IRModule, type_id int, state *u8, order *int,
+    count *int) int {
+    if (type_id < 0 || type_id >= unit.type_count) { return -1 }
+    if (state[type_id] == 2) { return 0 }
+    if (state[type_id] == 1) { return -1 }
+    state[type_id] = 1
+    let ty IRModuleType = unit.types[type_id]
+    if (ty.elem >= 0 && ir_fc_visit_type(unit, ty.elem, state, order, count) != 0) {
+        return -1
+    }
+    let i int = 0
+    for i < ty.field_count {
+        if (ir_fc_visit_type(unit, ty.fields[i].type_id, state, order, count) != 0) {
+            return -1
+        }
+        i += 1
+    }
+    state[type_id] = 2
+    order[count[0]] = type_id
+    count[0] += 1
+    return 0
+}
+
+// ir_fc_mark_type：把类型加入待收集集合；范围无效返回 -1。
+fn ir_fc_mark_type(unit *IRModule, used *u8, type_id int) int {
+    if (type_id < 0 || type_id >= unit.type_count) { return -1 }
+    used[type_id] = 1
+    return 0
+}
+
+// ir_fc_mark_symbol：把符号加入闭包；全局符号同时标记其数据实体与重定位目标。
+fn ir_fc_mark_symbol(unit *IRModule, used *u8, global_used *u8, symbol int) int {
+    if (symbol < 0 || symbol >= unit.symbol_count) { return -1 }
+    used[symbol] = 1
+    if (unit.symbols[symbol].kind == IR_MODULE_SYMBOL_GLOBAL
+        && unit.symbols[symbol].defined != 0) {
+        let gi int = ir_fc_global_of(unit, symbol)
+        if (gi < 0) { return -1 }
+        global_used[gi] = 1
+    }
+    return 0
+}
+
+// ir_fc_mark_relocs：把已标记全局实体的重定位目标继续加入符号闭包。
+fn ir_fc_mark_relocs(unit *IRModule, used *u8, global_used *u8) int {
+    let changed int = 1
+    for changed != 0 {
+        changed = 0
+        let gi int = 0
+        for gi < unit.global_count {
+            if (global_used[gi] == 0) { gi += 1; continue }
+            let rel int = 0
+            for rel < unit.globals[gi].reloc_count {
+                let target int = unit.globals[gi].relocs[rel].symbol
+                if (target < 0 || target >= unit.symbol_count) { return -1 }
+                if (used[target] == 0) {
+                    if (ir_fc_mark_symbol(unit, used, global_used, target) != 0) { return -1 }
+                    changed = 1
+                }
+                rel += 1
+            }
+            gi += 1
+        }
+    }
+    return 0
+}
+
+// ir_fc_copy_function：复制函数体全部表，供 mini 装配时改写模块下标而不动原模块。
+fn ir_fc_copy_function(source *IRFunction, out *IRFunction) int {
+    out[0] = source[0]
+    out.types = 0.to_type(*IRType); out.insts = 0.to_type(*IRInst)
+    out.phis = 0.to_type(*IRPhi); out.phi_inputs = 0.to_type(*IRPhiInput)
+    out.calls = 0.to_type(*IRCall); out.call_args = 0.to_type(*IRCallArg)
+    out.call_symbols = 0.to_type(*u8); out.blocks = 0.to_type(*IRBlock)
+    out.types = ir_fc_copy(source.types.to_type(*void),
+        source.type_count * sizeof(IRType)).to_type(*IRType)
+    out.insts = ir_fc_copy(source.insts.to_type(*void),
+        source.inst_count * sizeof(IRInst)).to_type(*IRInst)
+    out.phis = ir_fc_copy(source.phis.to_type(*void),
+        source.phi_count * sizeof(IRPhi)).to_type(*IRPhi)
+    out.phi_inputs = ir_fc_copy(source.phi_inputs.to_type(*void),
+        source.phi_input_count * sizeof(IRPhiInput)).to_type(*IRPhiInput)
+    out.calls = ir_fc_copy(source.calls.to_type(*void),
+        source.call_count * sizeof(IRCall)).to_type(*IRCall)
+    out.call_args = ir_fc_copy(source.call_args.to_type(*void),
+        source.call_arg_count * sizeof(IRCallArg)).to_type(*IRCallArg)
+    out.call_symbols = ir_fc_copy(source.call_symbols.to_type(*void),
+        source.call_symbol_size).to_type(*u8)
+    out.blocks = ir_fc_copy(source.blocks.to_type(*void),
+        source.block_count * sizeof(IRBlock)).to_type(*IRBlock)
+    if (source.type_count > 0 && out.types == 0
+        || source.inst_count > 0 && out.insts == 0
+        || source.phi_count > 0 && out.phis == 0
+        || source.phi_input_count > 0 && out.phi_inputs == 0
+        || source.call_count > 0 && out.calls == 0
+        || source.call_arg_count > 0 && out.call_args == 0
+        || source.call_symbol_size > 0 && out.call_symbols == 0
+        || source.block_count > 0 && out.blocks == 0) {
+        ir_fc_free_function(out)
+        return -1
+    }
+    return 0
+}
+
+// ir_fc_free_function：释放 ir_fc_copy_function 产生的副本。
+fn ir_fc_free_function(value *IRFunction) void {
+    if (value == 0) { return }
+    if (value.types != 0) { free(value.types.to_type(*void)) }
+    if (value.insts != 0) { free(value.insts.to_type(*void)) }
+    if (value.phis != 0) { free(value.phis.to_type(*void)) }
+    if (value.phi_inputs != 0) { free(value.phi_inputs.to_type(*void)) }
+    if (value.calls != 0) { free(value.calls.to_type(*void)) }
+    if (value.call_args != 0) { free(value.call_args.to_type(*void)) }
+    if (value.call_symbols != 0) { free(value.call_symbols.to_type(*void)) }
+    if (value.blocks != 0) { free(value.blocks.to_type(*void)) }
+    value.types = 0; value.insts = 0; value.phis = 0; value.phi_inputs = 0
+    value.calls = 0; value.call_args = 0; value.call_symbols = 0; value.blocks = 0
+}
+
+// ir_function_cache_capture：把 module 的 function_index 打包成自包含缓存记录。
+// 成功返回 0 并交出 out_data/out_size 所有权；闭包暂不支持返回 1（跳过缓存）；
+// 内部错误返回 -1。记录外层含 env_key，合并时必须匹配。
+pub fn ir_function_cache_capture(unit *IRModule, function_index int, env_key u64,
+    out_data **u8, out_size *int) int {
+    if (unit == 0 || function_index < 0 || function_index >= unit.function_count
+        || out_data == 0 || out_size == 0) { return -1 }
+    out_data[0] = 0; out_size[0] = 0
+    let function IRModuleFunction = unit.functions[function_index]
+    if (function.symbol < 0 || function.symbol >= unit.symbol_count
+        || unit.symbols[function.symbol].kind != IR_MODULE_SYMBOL_FUNCTION
+        || ir_verify(&function.body) != 0) { return -1 }
+    let symbol_used *u8 = malloc(unit.symbol_count.to_type(u64)).to_type(*u8)
+    let global_used *u8 = malloc(unit.global_count.to_type(u64)).to_type(*u8)
+    let type_used *u8 = malloc(unit.type_count.to_type(u64)).to_type(*u8)
+    let type_state *u8 = malloc(unit.type_count.to_type(u64)).to_type(*u8)
+    let type_order *int = malloc((unit.type_count * sizeof(int)).to_type(u64)).to_type(*int)
+    let type_map *int = malloc((unit.type_count * sizeof(int)).to_type(u64)).to_type(*int)
+    let symbol_map *int = malloc((unit.symbol_count * sizeof(int)).to_type(u64)).to_type(*int)
+    let result int = -1
+    if (symbol_used == 0 || global_used == 0 || type_used == 0
+        || type_state == 0 || type_order == 0 || type_map == 0
+        || symbol_map == 0) { result = -1 } else {
+        ir_fc_zero(symbol_used, unit.symbol_count)
+        ir_fc_zero(global_used, unit.global_count)
+        ir_fc_zero(type_used, unit.type_count)
+        ir_fc_zero(type_state, unit.type_count)
+        let i int = 0
+        for i < unit.type_count { type_map[i] = -1; i += 1 }
+        i = 0
+        for i < unit.symbol_count { symbol_map[i] = -1; i += 1 }
+        result = 0
+        if (ir_fc_mark_symbol(unit, symbol_used, global_used, function.symbol) != 0) {
+            result = -1
+        }
+        i = 0
+        for i < function.body.inst_count && result == 0 {
+            let inst IRInst = function.body.insts[i]
+            if (inst.op == IR_OP_GLOB_ADDR || inst.op == IR_OP_FN_ADDR) {
+                if (ir_fc_mark_symbol(unit, symbol_used, global_used,
+                        inst.imm.to_type(int)) != 0) { result = -1 }
+            }
+            if (inst.op == IR_OP_CALL) {
+                let call IRCall = function.body.calls[inst.aux]
+                if (call.callee_value < 0) {
+                    let called int = ir_fc_find_symbol(unit,
+                        function.body.call_symbols + call.symbol_first, call.symbol_len)
+                    if (called < 0 || ir_fc_mark_symbol(unit, symbol_used,
+                            global_used, called) != 0) { result = -1 }
+                }
+            }
+            i += 1
+        }
+        if (result == 0 && ir_fc_mark_relocs(unit, symbol_used, global_used) != 0) {
+            result = -1
+        }
+        // 类型闭包：函数映射、FN_ADDR 签名、间接调用签名与符号签名。
+        if (result == 0) {
+            i = 0
+            for i < function.type_map_count {
+                if (ir_fc_mark_type(unit, type_used, function.type_map[i]) != 0) {
+                    result = -1; break
+                }
+                i += 1
+            }
+        }
+        i = 0
+        for i < function.body.inst_count && result == 0 {
+            let inst IRInst = function.body.insts[i]
+            if (inst.op == IR_OP_FN_ADDR
+                && ir_fc_mark_type(unit, type_used, inst.aux) != 0) { result = -1 }
+            if (inst.op == IR_OP_CALL) {
+                let call IRCall = function.body.calls[inst.aux]
+                if (call.callee_value >= 0
+                    && ir_fc_mark_type(unit, type_used, call.signature_type) != 0) {
+                    result = -1
+                }
+            }
+            i += 1
+        }
+        i = 0
+        for i < unit.symbol_count && result == 0 {
+            if (symbol_used[i] != 0) {
+                if (ir_fc_mark_type(unit, type_used, unit.symbols[i].type_id) != 0) {
+                    result = -1; break
+                }
+                let pi int = 0
+                for pi < unit.symbols[i].param_count {
+                    if (ir_fc_mark_type(unit, type_used,
+                            unit.symbols[i].params[pi]) != 0) { result = -1; break }
+                    pi += 1
+                }
+            }
+            i += 1
+        }
+        let type_order_count int = 0
+        i = 0
+        for i < unit.type_count && result == 0 {
+            if (type_used[i] != 0
+                && ir_fc_visit_type(unit, i, type_state, type_order,
+                    &type_order_count) != 0) { result = 1 }
+            i += 1
+        }
+        if (result == 0) {
+            let mini IRModule
+            if (ir_module_init(&mini, &unit.target) != 0) {
+                result = -1
+            } else {
+                // 迷你模块只保留一个空正文来源：函数/符号 locs 在命中时按当前
+                // 函数符号重建，不需要把整份源码复制进每条缓存记录。
+                let fn_symbol IRModuleSymbol = unit.symbols[function.symbol]
+                if (fn_symbol.source < 0 || fn_symbol.source >= unit.source_count) {
+                    result = 1
+                } else if (ir_module_add_source(&mini,
+                        unit.sources[fn_symbol.source].path, 0, 0) < 0) {
+                    result = -1
+                }
+                // 类型按依赖后序加入；字段与 elem 使用已建立的映射。
+                i = 0
+                for i < type_order_count && result == 0 {
+                    let original int = type_order[i]
+                    let ty IRModuleType = unit.types[original]
+                    let elem int = ty.elem
+                    if (elem >= 0) {
+                        if (type_map[elem] < 0) { result = 1; break }
+                        ty.elem = type_map[elem]
+                    }
+                    let fields *IRModuleField = 0
+                    if (ty.field_count > 0) {
+                        fields = malloc((ty.field_count * sizeof(IRModuleField)).to_type(u64)).to_type(*IRModuleField)
+                        if (fields == 0) { result = -1; break }
+                        let fi int = 0
+                        for fi < ty.field_count {
+                            fields[fi].offset = ty.fields[fi].offset
+                            let field_type int = ty.fields[fi].type_id
+                            if (field_type < 0 || type_map[field_type] < 0) {
+                                result = 1; break
+                            }
+                            fields[fi].type_id = type_map[field_type]
+                            fi += 1
+                        }
+                    }
+                    if (result == 0) {
+                        let added int = ir_module_add_type(&mini, ty.name, &ty,
+                            fields, ty.field_count)
+                        if (added < 0) { result = -1 } else { type_map[original] = added }
+                    }
+                    if (fields != 0) { free(fields.to_type(*void)) }
+                    i += 1
+                }
+                // 符号：函数自身保留定义；其他函数/声明一律降为外部声明。
+                i = 0
+                for i < unit.symbol_count && result == 0 {
+                    if (symbol_used[i] == 0) { i += 1; continue }
+                    let sym IRModuleSymbol = unit.symbols[i]
+                    if (sym.type_id < 0 || type_map[sym.type_id] < 0) { result = 1; break }
+                    sym.type_id = type_map[sym.type_id]
+                    let params *int = 0
+                    if (sym.param_count > 0) {
+                        params = malloc((sym.param_count * sizeof(int)).to_type(u64)).to_type(*int)
+                        if (params == 0) { result = -1; break }
+                        let pi int = 0
+                        for pi < sym.param_count {
+                            if (sym.params[pi] < 0 || type_map[sym.params[pi]] < 0) {
+                                result = 1; break
+                            }
+                            params[pi] = type_map[sym.params[pi]]
+                            pi += 1
+                        }
+                    }
+                    if (result == 0) {
+                        if (i != function.symbol) {
+                            if (sym.kind == IR_MODULE_SYMBOL_FUNCTION) {
+                                sym.defined = 0; sym.linkage = IR_MODULE_LINK_EXTERNAL
+                            } else if (sym.defined == 0) {
+                                sym.linkage = IR_MODULE_LINK_EXTERNAL
+                            }
+                        }
+                        // 迷你模块统一使用空正文来源；命中时新符号取当前函数声明位置。
+                        sym.source = 0; sym.offset = 0
+                        let added int = ir_module_add_symbol(&mini, sym.name,
+                            &sym, params, sym.param_count)
+                        if (added < 0) { result = -1 } else { symbol_map[i] = added }
+                    }
+                    if (params != 0) { free(params.to_type(*void)) }
+                    i += 1
+                }
+                // 全局实体：只复制闭包内已定义的全局符号。
+                i = 0
+                for i < unit.global_count && result == 0 {
+                    if (global_used[i] == 0) { i += 1; continue }
+                    let global IRModuleGlobal = unit.globals[i]
+                    let mapped_symbol int = symbol_map[global.symbol]
+                    if (mapped_symbol < 0) { result = 1; break }
+                    let relocs *IRModuleReloc = 0
+                    if (global.reloc_count > 0) {
+                        relocs = malloc((global.reloc_count * sizeof(IRModuleReloc)).to_type(u64)).to_type(*IRModuleReloc)
+                        if (relocs == 0) { result = -1; break }
+                        let ri int = 0
+                        for ri < global.reloc_count {
+                            relocs[ri] = global.relocs[ri]
+                            let target int = global.relocs[ri].symbol
+                            if (target < 0 || symbol_map[target] < 0) { result = 1; break }
+                            relocs[ri].symbol = symbol_map[target]
+                            ri += 1
+                        }
+                    }
+                    if (result == 0
+                        && ir_module_add_global(&mini, mapped_symbol, global.data,
+                            global.size, global.align, relocs,
+                            global.reloc_count) < 0) { result = -1 }
+                    if (relocs != 0) { free(relocs.to_type(*void)) }
+                    i += 1
+                }
+                // 函数体：复制后把模块下标改成 mini 下标，再交给模块增建接口。
+                if (result == 0) {
+                    let body IRFunction
+                    if (ir_fc_copy_function(&function.body, &body) != 0) {
+                        result = -1
+                    } else {
+                        let patched int = 1
+                        let ii int = 0
+                        for ii < body.inst_count {
+                            let inst *IRInst = &body.insts[ii]
+                            if (inst.op == IR_OP_GLOB_ADDR || inst.op == IR_OP_FN_ADDR) {
+                                let mapped int = symbol_map[inst.imm.to_type(int)]
+                                if (mapped < 0) { patched = 0; break }
+                                inst.imm = mapped.to_type(i64)
+                            }
+                            if (inst.op == IR_OP_FN_ADDR) {
+                                let mapped_type int = type_map[inst.aux]
+                                if (mapped_type < 0) { patched = 0; break }
+                                inst.aux = mapped_type
+                            }
+                            if (inst.op == IR_OP_CALL) {
+                                let call *IRCall = &body.calls[inst.aux]
+                                if (call.callee_value >= 0) {
+                                    let mapped_type int = type_map[call.signature_type]
+                                    if (mapped_type < 0) { patched = 0; break }
+                                    call.signature_type = mapped_type
+                                }
+                            }
+                            ii += 1
+                        }
+                        let mini_type_map *int = 0
+                        let mini_locs *IRModuleLoc = 0
+                        if (patched != 0) {
+                            mini_type_map = malloc((function.type_map_count * sizeof(int)).to_type(u64)).to_type(*int)
+                            if (mini_type_map == 0) { patched = 0 }
+                        }
+                        if (patched != 0) {
+                            ii = 0
+                            for ii < function.type_map_count {
+                                let mapped int = type_map[function.type_map[ii]]
+                                if (mapped < 0) { patched = 0; break }
+                                mini_type_map[ii] = mapped
+                                ii += 1
+                            }
+                        }
+                        if (patched != 0 && function.loc_count > 0) {
+                            mini_locs = malloc((function.loc_count * sizeof(IRModuleLoc)).to_type(u64)).to_type(*IRModuleLoc)
+                            if (mini_locs == 0) { patched = 0 }
+                        }
+                        if (patched != 0) {
+                            ii = 0
+                            for ii < function.loc_count {
+                                mini_locs[ii].source = 0
+                                mini_locs[ii].offset = 0
+                                ii += 1
+                            }
+                        }
+                        if (patched != 0
+                            && ir_module_add_function(&mini, symbol_map[function.symbol],
+                                &body, mini_type_map, mini_locs) < 0) { patched = 0 }
+                        if (mini_type_map != 0) { free(mini_type_map.to_type(*void)) }
+                        if (mini_locs != 0) { free(mini_locs.to_type(*void)) }
+                        ir_fc_free_function(&body)
+                        if (patched == 0) { result = 1 }
+                    }
+                }
+                if (result == 0 && ir_module_verify(&mini) != 0) { result = 1 }
+                if (result == 0) {
+                    let payload_size int = ir_module_serialized_size(&mini)
+                    if (payload_size <= 0
+                        || payload_size > IR_MODULE_SERIAL_MAX_TOTAL - IR_FUNCTION_CACHE_HEAD) {
+                        result = -1
+                    } else {
+                        let total int = IR_FUNCTION_CACHE_HEAD + payload_size
+                        let data *u8 = malloc(total.to_type(u64)).to_type(*u8)
+                        if (data == 0) { result = -1 } else {
+                            let cursor int = 0
+                            ir_fc_put_u64(data, &cursor, IR_FUNCTION_CACHE_MAGIC)
+                            ir_fc_put_u64(data, &cursor, IR_FUNCTION_CACHE_VERSION.to_type(u64))
+                            ir_fc_put_u64(data, &cursor, env_key)
+                            ir_fc_put_u64(data, &cursor, payload_size.to_type(u64))
+                            if (ir_module_serialize(&mini, data + IR_FUNCTION_CACHE_HEAD,
+                                    payload_size) != payload_size) {
+                                free(data.to_type(*void)); result = -1
+                            } else {
+                                out_data[0] = data; out_size[0] = total
+                            }
+                        }
+                    }
+                }
+                ir_module_release(&mini)
+            }
+        }
+    }
+    if (symbol_used != 0) { free(symbol_used.to_type(*void)) }
+    if (global_used != 0) { free(global_used.to_type(*void)) }
+    if (type_used != 0) { free(type_used.to_type(*void)) }
+    if (type_state != 0) { free(type_state.to_type(*void)) }
+    if (type_order != 0) { free(type_order.to_type(*void)) }
+    if (type_map != 0) { free(type_map.to_type(*void)) }
+    if (symbol_map != 0) { free(symbol_map.to_type(*void)) }
+    return result
+}

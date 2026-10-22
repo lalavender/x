@@ -1,0 +1,890 @@
+module ast
+import gen
+import ir
+
+// module_snapshot_lower_expr.yh —— 纯快照标量表达式、条件、三元与整数提升。
+//
+// 由 module_snapshot_lower.yh 按完整函数边界拆出（LA2a）；语义读取仍全部经
+// CheckedStorage，不访问 GenState、旧汇编缓冲或可变语义表。
+
+// checked_lower_kind：将快照整数/bool 映射为函数私有 canonical 类型；其余形态返回 -1。
+fn checked_lower_kind(store *CheckedStorage, source_type int) int {
+    if (source_type < 0 || source_type >= store.type_n) { return -1 }
+    let kind int = store.types[source_type].kind
+    if (kind == gen.TY_FN) { return ir.IR_TY_FN_PTR }
+    if (kind == gen.TY_VOID) { return ir.IR_TY_VOID }
+    if (kind == gen.TY_BOOL) { return ir.IR_TY_BOOL }
+    if (kind == gen.TY_CHAR || kind == gen.TY_U8) { return ir.IR_TY_U8 }
+    if (kind == gen.TY_I8) { return ir.IR_TY_I8 }
+    if (kind == gen.TY_I16) { return ir.IR_TY_I16 }
+    if (kind == gen.TY_I32 || kind == gen.TY_ENUM) { return ir.IR_TY_I32 }
+    if (kind == gen.TY_I64) { return ir.IR_TY_I64 }
+    if (kind == gen.TY_U16) { return ir.IR_TY_U16 }
+    if (kind == gen.TY_U32) { return ir.IR_TY_U32 }
+    if (kind == gen.TY_U64) { return ir.IR_TY_U64 }
+    if (kind == gen.TY_F32) { return ir.IR_TY_F32 }
+    if (kind == gen.TY_F64) { return ir.IR_TY_F64 }
+    if (kind == gen.TY_PTR) {
+        // canonical 指针编码：IR_TY_PTR + 所指元素 kind；*void 即 IR_TY_PTR。
+        let pointee int = store.types[source_type].elem
+        let mapped int = checked_lower_kind(store, pointee)
+        if (mapped >= 0) {
+            if (mapped == ir.IR_TY_FN_PTR) { return ir.IR_TY_PTR }
+            return ir.IR_TY_PTR + mapped <= ir.IR_TY_PTR_LAST ? ir.IR_TY_PTR + mapped : -1
+        }
+        if (pointee < 0 || pointee >= store.type_n) { return -1 }
+        let pk int = store.types[pointee].kind
+        // 指向聚合/void 的指针在首片按不透明指针（kind 12）处理。
+        if (pk == gen.TY_VOID || pk == gen.TY_ARRAY || pk == gen.TY_STRUCT
+            || pk == gen.TY_UNION || pk == gen.TY_SLICE) {
+            return ir.IR_TY_PTR
+        }
+        return -1
+    }
+    return -1
+}
+
+// checked_lower_type：读取当前快照的标量映射；void 不作为表达式值类型。
+fn checked_lower_type(l *CheckedLower, source_type int) int {
+    let kind int = checked_lower_kind(l.store, source_type)
+    return kind == ir.IR_TY_VOID ? -1 : kind
+}
+
+// checked_lower_pointer_kind：函数值仍以 opaque ptr 存储，其他标量沿用 canonical 元素指针。
+fn checked_lower_pointer_kind(kind int) int {
+    if (kind == ir.IR_TY_FN_PTR || kind < 0) { return ir.IR_TY_PTR }
+    let pointer int = ir.IR_TY_PTR + kind
+    return pointer <= ir.IR_TY_PTR_LAST ? pointer : -1
+}
+
+// checked_lower_pointer_matches：允许通用 opaque ptr 指向存储在内存里的函数指针值。
+fn checked_lower_pointer_matches(l *CheckedLower, pointer int, value_kind int) int {
+    if (pointer < 0 || pointer > ir.IR_TY_LAST || value_kind < 0
+        || value_kind > ir.IR_TY_LAST) { return 0 }
+    let ty ir.IRType = l.builder.types[pointer]
+    return ty.kind >= ir.IR_TY_PTR && (ty.elem == value_kind
+        || ty.elem == ir.IR_TY_VOID && l.builder.types[value_kind].kind == ir.IR_TY_FN_PTR) ?
+        1 : 0
+}
+
+// checked_lower_promoted：只根据快照布局实施已锁定的整数提升，不调用 sem_promote 的全局表。
+fn checked_lower_promoted(l *CheckedLower, left int, right int) int {
+    let a int = checked_lower_type(l, left)
+    let b int = checked_lower_type(l, right)
+    if (a < 0 || b < 0) { return -1 }
+    if (left == right) { return a }
+    let ak int = l.store.types[left].kind
+    let bk int = l.store.types[right].kind
+    if (ak == gen.TY_BOOL || ak == gen.TY_CHAR || ak == gen.TY_ENUM) { a = ir.IR_TY_I32 }
+    if (bk == gen.TY_BOOL || bk == gen.TY_CHAR || bk == gen.TY_ENUM) { b = ir.IR_TY_I32 }
+    if (a == b) { return a }
+    let bits int = l.builder.types[a].bits
+    if (l.builder.types[b].bits > bits) { bits = l.builder.types[b].bits }
+    let uns int = (a >= ir.IR_TY_U8 && a <= ir.IR_TY_U64
+        || b >= ir.IR_TY_U8 && b <= ir.IR_TY_U64).to_type(int)
+    if (bits == 8) { return uns != 0 ? ir.IR_TY_U8 : ir.IR_TY_I8 }
+    if (bits == 16) { return uns != 0 ? ir.IR_TY_U16 : ir.IR_TY_I16 }
+    if (bits == 32) { return uns != 0 ? ir.IR_TY_U32 : ir.IR_TY_I32 }
+    return uns != 0 ? ir.IR_TY_U64 : ir.IR_TY_I64
+}
+
+// checked_lower_lit_fits：复用现有整数文字量范围契约的纯判断，不读 GenState。
+fn checked_lower_lit_fits(l *CheckedLower, source_type int, value i64) int {
+    let kind int = checked_lower_type(l, source_type)
+    // 裸整数 0 是现有 NULL 写法；比较时可按另一侧指针类型装入零指针。
+    if (kind >= ir.IR_TY_PTR) { return value == 0 ? 1 : 0 }
+    if (kind == ir.IR_TY_U64 || kind == ir.IR_TY_I64) { return 1 }
+    if (kind == ir.IR_TY_BOOL) { return (value == 0 || value == 1).to_type(int) }
+    if (kind == ir.IR_TY_U8) { return (value >= 0 && value <= 255).to_type(int) }
+    if (kind == ir.IR_TY_U16) { return (value >= 0 && value <= 65535).to_type(int) }
+    if (kind == ir.IR_TY_U32) { return (value >= 0 && value <= 4294967295).to_type(int) }
+    if (kind == ir.IR_TY_I8) { return (value >= -128 && value <= 127).to_type(int) }
+    if (kind == ir.IR_TY_I16) { return (value >= -32768 && value <= 32767).to_type(int) }
+    return kind == ir.IR_TY_I32 && value >= -2147483648 && value <= 2147483647
+}
+
+// checked_lower_assign_widens：复核受检赋值允许的非字面量整数加宽或同宽枚举转换。
+fn checked_lower_assign_widens(l *CheckedLower, destination int, source int) int {
+    if (destination < 0 || destination >= l.store.type_n
+        || source < 0 || source >= l.store.type_n) { return 0 }
+    if (destination == source) { return 1 }
+    let destination_kind int = checked_lower_type(l, destination)
+    let source_kind int = checked_lower_type(l, source)
+    if (destination_kind < 0 || source_kind < 0) { return 0 }
+    if (ir.ir_float_type(destination_kind) != 0 || ir.ir_float_type(source_kind) != 0) {
+        return (destination_kind == source_kind).to_type(int)
+    }
+    if (ir.ir_integer_type(destination_kind) == 0 || ir.ir_integer_type(source_kind) == 0) {
+        return 0
+    }
+    let destination_type gen.CType = l.store.types[destination]
+    let source_type gen.CType = l.store.types[source]
+    if (destination_type.size > source_type.size) { return 1 }
+    if (destination_type.size == source_type.size
+        && (destination_type.kind == source_type.kind
+            || destination_type.kind == gen.TY_ENUM
+            || source_type.kind == gen.TY_ENUM)) { return 1 }
+    return 0
+}
+
+// checked_lower_signed：整数符号性判据，与后端 llvm_signed 保持同一集合。
+fn checked_lower_signed(kind int) int {
+    return (kind >= ir.IR_TY_I8 && kind <= ir.IR_TY_I64).to_type(int)
+}
+
+// checked_lower_binding：解析局部/参数绑定身份；只使用快照的绑定表。
+// 返回绑定行或 -1；调用方据此取 id、类型和可变性。
+// 不按 sym_id 回查符号表：作用域弹出会把参数/局部槽位截断，快照符号表
+// 天然不含这些行（ast_stmt.yh 已声明 sym_id 仅作诊断、不是持久身份）。
+fn checked_lower_binding(l *CheckedLower, expr *AstExpr) int {
+    if (expr.sym_kind != gen.SYM_VAR || expr.type_id < 0
+        || expr.binding_row < 0 || expr.binding_row >= l.store.binding_n) { return -1 }
+    let binding AstBinding = l.store.bindings[expr.binding_row]
+    if (binding.id < 0 || binding.id >= l.function_binding_count
+        || binding.sym_kind != gen.SYM_VAR || binding.sym_type_id < 0
+        || binding.sym_type_id >= l.store.type_n) { return -1 }
+    if (checked_lower_type(l, binding.sym_type_id) != checked_lower_type(l, expr.type_id)) {
+        return -1
+    }
+    if (binding.file_id != expr.file_id || binding.owner_decl != expr.owner_decl) { return -1 }
+    return expr.binding_row
+}
+
+// checked_lower_adjust：把值适配到目标 IR 类型；同型直接返回，可表示时插入 CAST。
+fn checked_lower_adjust(l *CheckedLower, value int, want int) int {
+    let b *AstIRBuilder = &l.builder
+    if (value < 0 || value >= b.inst_count || want < 0) { return -1 }
+    let have int = b.insts[value].result_type
+    if (have == want) { return value }
+    let from_kind int = b.types[have].kind
+    let to_kind int = b.types[want].kind
+    let from_ptr int = ((from_kind >= ir.IR_TY_PTR && from_kind <= ir.IR_TY_PTR_LAST)
+        || from_kind == ir.IR_TY_FN_PTR).to_type(int)
+    let to_ptr int = ((to_kind >= ir.IR_TY_PTR && to_kind <= ir.IR_TY_PTR_LAST)
+        || to_kind == ir.IR_TY_FN_PTR).to_type(int)
+    let pointer_cast int = (from_ptr != 0 && to_ptr != 0
+        || from_ptr != 0 && ir.ir_integer_type(to_kind) != 0
+        || to_ptr != 0 && ir.ir_integer_type(from_kind) != 0).to_type(int)
+    if (pointer_cast == 0
+        && (ir.ir_scalar_type(from_kind) == 0 || ir.ir_scalar_type(to_kind) == 0)) { return -1 }
+    return ast_ir_b_add_inst(b, ir.IR_OP_CAST, want, value, -1, 0)
+}
+
+// checked_lower_const：把已检查的标量常量位型规范到目标类型位宽。
+fn checked_lower_const(out *i64, kind int, bits int, value i64) int {
+    // 前端与 typed CT 把 f32/f64 常量统一存为精确的 f64 IEEE 位型。
+    if (ir.ir_float_type(kind) != 0) { *out = value; return 0 }
+    if (kind == ir.IR_TY_BOOL) {
+        // 源 bool 保存低八位；只有条件判定把非零字节转成真，常量引用保留原值。
+        *out = value & 255
+        return 0
+    }
+    if (ir.ir_integer_type(kind) == 0) { return -1 }
+    if (bits >= 64) { *out = value; return 0 }
+    let mask u64 = (1.to_type(u64) << bits) - 1
+    let raw u64 = value.to_type(u64) & mask
+    if (checked_lower_signed(kind) != 0 && (raw & (1.to_type(u64) << (bits - 1))) != 0) {
+        *out = (raw | ~mask).to_type(i64)
+    } else {
+        *out = raw.to_type(i64)
+    }
+    return 0
+}
+
+// checked_lower_expr：把受检表达式降低为 SSA 值；-2 = 首片不支持，-1 = 内部错误。
+fn checked_lower_expr(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
+    return checked_lower_expr_inner(l, flow, expr_id)
+}
+
+// checked_lower_literal_retype：按上下文类型重新规范字面量位型，避免窄型符号扩展。
+fn checked_lower_literal_retype(l *CheckedLower, value int, node *AstExpr, want int) int {
+    let b *AstIRBuilder = &l.builder
+    if (value < 0 || value >= b.inst_count || node.is_lit == 0
+        || ir.ir_integer_type(want) == 0) { return -2 }
+    if (b.insts[value].op != ir.IR_OP_CONST) {
+        // 字面量标记也会出现在运行期条件值上；只有 CONST 可直接改写位型，其余插入显式转换。
+        return checked_lower_adjust(l, value, want)
+    }
+    let literal_bits i64 = node.const_bits
+    if (node.kind == AST_EXPR_UNARY && node.op == gen.TK_MINUS
+        && node.child0 >= 0 && node.child0 < l.store.expression_n) {
+        let operand AstExpr = l.store.expressions[node.child0]
+        if (operand.is_lit != 0) {
+            // 负整数字面量的节点常量可能已按默认 int 宽度截断；从原始绝对值重算。
+            literal_bits = (0.to_type(u64) - operand.const_bits.to_type(u64)).to_type(i64)
+        }
+    }
+    let normalized i64 = 0
+    if (checked_lower_const(&normalized, want, b.types[want].bits,
+        literal_bits) != 0) { return -2 }
+    b.insts[value].result_type = want
+    b.insts[value].imm = normalized
+    return value
+}
+
+// checked_lower_ternary：用条件块和双前驱 phi 降低运行期三元表达式。
+fn checked_lower_ternary(l *CheckedLower, flow *CheckedFlow, node *AstExpr) int {
+    let b *AstIRBuilder = &l.builder
+    if (node.child0 < 0 || node.child1 < 0 || node.child2 < 0) { return -2 }
+    let want int = checked_lower_type(l, node.type_id)
+    if (want < 0) { return -2 }
+    let cond int = checked_lower_cond(l, flow, node.child0)
+    if (cond == -2) { return -2 }
+    if (cond < 0) { return -1 }
+    let then_block int = ast_ir_b_alloc_block(b)
+    let else_block int = ast_ir_b_alloc_block(b)
+    let join_block int = ast_ir_b_alloc_block(b)
+    if (then_block < 0 || else_block < 0 || join_block < 0) { return -1 }
+    if (ast_ir_b_term_cond(b, cond, then_block, else_block) != 0) { return -1 }
+    let then_values *int = checked_lower_value_copy(l, flow)
+    let else_values *int = checked_lower_value_copy(l, flow)
+    if (b.binding_count > 0 && (then_values == 0 || else_values == 0)) {
+        if (then_values != 0) { free(then_values.to_type(*void)) }
+        if (else_values != 0) { free(else_values.to_type(*void)) }
+        return -1
+    }
+    let main_values *int = b.local_values
+    b.local_values = then_values
+    ast_ir_b_enter_block(b, then_block)
+    let then_value int = checked_lower_expr_inner(l, flow, node.child1)
+    if (then_value < 0) {
+        b.local_values = main_values
+        if (then_values != 0) { free(then_values.to_type(*void)) }
+        if (else_values != 0) { free(else_values.to_type(*void)) }
+        return then_value
+    }
+    let then_kind int = b.insts[then_value].result_type
+    if (then_kind != want) {
+        let branch AstExpr = l.store.expressions[node.child1]
+        if (branch.is_lit != 0 && ir.ir_integer_type(want) != 0) {
+            then_value = checked_lower_literal_retype(l, then_value, &branch, want)
+        } else {
+            then_value = checked_lower_adjust(l, then_value, want)
+        }
+    }
+    if (then_value < 0) {
+        b.local_values = main_values
+        if (then_values != 0) { free(then_values.to_type(*void)) }
+        if (else_values != 0) { free(else_values.to_type(*void)) }
+        return -2
+    }
+    let then_end int = b.cur_block
+    if (ast_ir_b_term_br(b, join_block) != 0) {
+        b.local_values = main_values
+        if (then_values != 0) { free(then_values.to_type(*void)) }
+        if (else_values != 0) { free(else_values.to_type(*void)) }
+        return -1
+    }
+    b.local_values = else_values
+    ast_ir_b_enter_block(b, else_block)
+    let else_value int = checked_lower_expr_inner(l, flow, node.child2)
+    if (else_value < 0) {
+        b.local_values = main_values
+        if (then_values != 0) { free(then_values.to_type(*void)) }
+        if (else_values != 0) { free(else_values.to_type(*void)) }
+        return else_value
+    }
+    let else_kind int = b.insts[else_value].result_type
+    if (else_kind != want) {
+        let branch AstExpr = l.store.expressions[node.child2]
+        if (branch.is_lit != 0 && ir.ir_integer_type(want) != 0) {
+            else_value = checked_lower_literal_retype(l, else_value, &branch, want)
+        } else {
+            else_value = checked_lower_adjust(l, else_value, want)
+        }
+    }
+    if (else_value < 0) {
+        b.local_values = main_values
+        if (then_values != 0) { free(then_values.to_type(*void)) }
+        if (else_values != 0) { free(else_values.to_type(*void)) }
+        return -2
+    }
+    let else_end int = b.cur_block
+    if (ast_ir_b_term_br(b, join_block) != 0) {
+        b.local_values = main_values
+        if (then_values != 0) { free(then_values.to_type(*void)) }
+        if (else_values != 0) { free(else_values.to_type(*void)) }
+        return -1
+    }
+    b.local_values = main_values
+    ast_ir_b_enter_block(b, join_block)
+    if (checked_lower_merge(l, flow, then_end, then_values,
+        else_end, else_values) != 0) {
+        if (then_values != 0) { free(then_values.to_type(*void)) }
+        if (else_values != 0) { free(else_values.to_type(*void)) }
+        return -1
+    }
+    let phi int = ast_ir_b_add_phi(b, want, 2)
+    if (phi < 0 || ast_ir_b_set_phi_input(b, phi, 0, then_end, then_value) != 0
+        || ast_ir_b_set_phi_input(b, phi, 1, else_end, else_value) != 0) {
+        if (then_values != 0) { free(then_values.to_type(*void)) }
+        if (else_values != 0) { free(else_values.to_type(*void)) }
+        return -1
+    }
+    if (then_values != 0) { free(then_values.to_type(*void)) }
+    if (else_values != 0) { free(else_values.to_type(*void)) }
+    return phi
+}
+
+// checked_lower_function_addr：登记函数的完整 ABI 类型和符号，再生成可序列化取址指令。
+fn checked_lower_function_addr(l *CheckedLower, node *AstExpr) int {
+    let runtime int = node.sym_flags & (gen.F_RUNTIME_MEMCPY | gen.F_RUNTIME_STRLEN
+        | gen.F_RUNTIME_MALLOC | gen.F_RUNTIME_FREE | gen.F_RUNTIME_PRINTF)
+    if (node.sym_id < 0 || node.sym_id >= l.store.symbol_n
+        || node.sym_type_id < 0 || node.sym_type_id >= l.store.type_n
+        || l.store.types[node.sym_type_id].kind != gen.TY_FN
+        || (node.sym_flags & (gen.F_COMPTIME | gen.F_NORETURN)) != 0
+        || (node.sym_flags & gen.F_INTRINSIC) != 0 && runtime == 0
+            && (node.sym_flags & gen.F_LINUX_SYSCALL) == 0) { return -2 }
+    let source gen.CSym = l.store.symbols[node.sym_id]
+    if (source.kind != gen.SYM_FN || source.type_id != node.sym_type_id
+        || source.name_len != node.sym_name_len
+        || gen.cstr_eq((l.store.names + source.name_off).to_type(*char),
+            (l.store.names + node.sym_name_off).to_type(*char)) == 0) { return -2 }
+    let signature int = checked_lower_module_type(l, node.sym_type_id)
+    if (signature < 0) { return signature }
+    let name *char = checked_lower_name(l, node.sym_name_off, node.sym_name_len,
+        node.sym_flags, node.sym_type_id)
+    if (name == 0) { return -1 }
+    let sig int = l.store.types[node.sym_type_id].sub
+    let symbol int = checked_lower_symbol(l, name, node.sym_type_id,
+        ir.IR_TY_FN_PTR, sig, node.sym_flags, node.file_id, node.first)
+    free(name.to_type(*void))
+    if (symbol < 0) { return symbol }
+    let inst int = ast_ir_b_add_inst(&l.builder, ir.IR_OP_FN_ADDR,
+        ir.IR_TY_FN_PTR, -1, -1, symbol.to_type(i64))
+    if (inst < 0) { return inst }
+    l.builder.insts[inst].aux = signature
+    return inst
+}
+
+// checked_lower_expr_inner：表达式降低主体；协议与 checked_lower_expr 相同。
+fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
+    let b *AstIRBuilder = &l.builder
+    if (expr_id < 0 || expr_id >= l.store.expression_n || l.store.expressions == 0) {
+        return -2
+    }
+    let node AstExpr = l.store.expressions[expr_id]
+    l.last_token = node.first
+    if (node.kind == AST_EXPR_TERNARY) {
+        return checked_lower_ternary(l, flow, &node)
+    }
+    if (node.kind == AST_EXPR_CTIF) {
+        if (node.child1 >= 0 && node.child2 < 0) {
+            return checked_lower_expr_inner(l, flow, node.child1)
+        }
+        if (node.child2 >= 0 && node.child1 < 0) {
+            return checked_lower_expr_inner(l, flow, node.child2)
+        }
+        return -2
+    }
+    if (node.kind == AST_EXPR_PRIMARY && node.child0 >= 0) {
+        return checked_lower_expr_inner(l, flow, node.child0)
+    }
+    if (node.kind == AST_EXPR_PRIMARY && node.sym_kind == gen.SYM_CONST) {
+        let template_value int = checked_lower_comptime_binding(l, &node)
+        if (template_value != -3) { return template_value }
+    }
+    if (node.kind == AST_EXPR_PRIMARY && node.is_const != 0
+        && checked_lower_is_aggregate(l.store, node.type_id) != 0) {
+        // 编译期聚合常量以静态数据标签保存；运行期消费时取对应模块对象地址。
+        let symbol int = checked_lower_static_label(l, node.const_bits.to_type(int))
+        if (symbol < 0) {
+            l.reason = "编译期聚合常量缺少受检静态对象"
+            return -2
+        }
+        return ast_ir_b_add_inst(b, ir.IR_OP_GLOB_ADDR, ir.IR_TY_PTR,
+            -1, -1, symbol.to_type(i64))
+    }
+    if (node.kind == AST_EXPR_PRIMARY && node.child0 < 0 && node.sym_kind == gen.SYM_FN) {
+        return checked_lower_function_addr(l, &node)
+    }
+    let call_is_comptime int = 0
+    if (node.kind == AST_EXPR_CALL && node.child0 >= 0
+        && node.child0 < l.store.expression_n) {
+        let callee_id int = node.child0
+        for callee_id >= 0 && callee_id < l.store.expression_n &&
+            l.store.expressions[callee_id].kind == AST_EXPR_PRIMARY &&
+            l.store.expressions[callee_id].child0 >= 0 {
+            callee_id = l.store.expressions[callee_id].child0
+        }
+        if (callee_id >= 0 && callee_id < l.store.expression_n) {
+            call_is_comptime = (l.store.expressions[callee_id].sym_flags
+                & gen.F_COMPTIME) != 0 ? 1 : 0
+        }
+    }
+    if (node.kind == AST_EXPR_CALL && call_is_comptime != 0
+        && checked_lower_is_aggregate(l.store, node.type_id) != 0) {
+        // 编译期聚合调用已物化为受检静态对象；运行期只需取其模块地址。
+        let symbol int = checked_lower_static_label(l, node.const_bits.to_type(int))
+        if (symbol < 0) {
+            l.reason = "编译期聚合结果缺少受检静态对象"
+            return -2
+        }
+        return ast_ir_b_add_inst(b, ir.IR_OP_GLOB_ADDR, ir.IR_TY_PTR,
+            -1, -1, symbol.to_type(i64))
+    }
+    // 只消费常量叶、枚举和数组长度事实。运行期 CAST 的 is_const/const_bits
+    // 仍可能保留转换前位型，必须走逐节点转换；括号也先解包，不能越过 CAST。
+    if (node.is_const != 0 && checked_lower_type(l, node.type_id) >= 0
+        && (node.kind == AST_EXPR_PRIMARY
+            || node.kind == AST_EXPR_UNARY && (node.op == gen.TK_LEN
+                || node.op == gen.TK_SIZEOF || node.is_lit != 0)
+            || node.kind == AST_EXPR_MEMBER && l.store.types[node.type_id].kind == gen.TY_ENUM)) {
+        let kind int = checked_lower_type(l, node.type_id)
+        if (kind >= ir.IR_TY_PTR) {
+            if (node.const_bits != 0) { return checked_lower_string(l, &node) }
+            return ast_ir_b_add_inst(b, ir.IR_OP_CONST, kind, -1, -1, 0)
+        }
+        let literal i64 = 0
+        // 未定宽整数字面量保留完整位型，供赋值/比较的上下文选定最终类型。
+        // 立即按默认 int32 截断会使 u64 全宽字面量在后续提升时丢失高位。
+        if (ir.ir_float_type(kind) != 0) { literal = node.fval_bits }
+        else if (node.is_lit != 0) { literal = node.const_bits }
+        else if (checked_lower_const(&literal, kind, b.types[kind].bits, node.const_bits) != 0) { return -2 }
+        return ast_ir_b_add_inst(b, ir.IR_OP_CONST, kind, -1, -1, literal)
+    }
+    if (node.kind == AST_EXPR_MEMBER || node.kind == AST_EXPR_CTFIELD) {
+        // 普通字段和只读 $field 字段读取共用同一地址路径，再按字段类型 LOAD。
+        let want int = checked_lower_type(l, node.type_id)
+        if (want < 0) { return -2 }
+        let pointer int = checked_lower_lvalue_ptr(l, flow, expr_id)
+        if (pointer == -2) { return -2 }
+        if (pointer < 0) { return -1 }
+        if (checked_lower_pointer_matches(l, b.insts[pointer].result_type, want) == 0) { return -2 }
+        return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, pointer, -1, 0)
+    }
+    if (node.kind == AST_EXPR_INDEX) {
+        // 标量元素读取：先求元素存储地址，再按元素类型 LOAD。
+        let want int = checked_lower_type(l, node.type_id)
+        if (want < 0) { return -2 }
+        let pointer int = checked_lower_lvalue_ptr(l, flow, expr_id)
+        if (pointer == -2) { return -2 }
+        if (pointer < 0) { return -1 }
+        if (checked_lower_pointer_matches(l, b.insts[pointer].result_type, want) == 0) { return -2 }
+        return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, pointer, -1, 0)
+    }
+    if (node.kind == AST_EXPR_PRIMARY) {
+        if (node.child0 >= 0) { return checked_lower_expr_inner(l, flow, node.child0) }
+        if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+            let pointer int = checked_lower_global_ref(l, &node)
+            if (pointer < 0) { return pointer }
+            let want int = checked_lower_type(l, node.type_id)
+            if (want < 0) { return -2 }
+            return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, pointer, -1, 0)
+        }
+        if (node.sym_id >= 0) {
+            let row int = checked_lower_binding(l, &node)
+            if (row < 0) { return -2 }
+            let binding AstBinding = l.store.bindings[row]
+            let storage int = checked_lower_storage(l, binding.id)
+            if (storage >= 0) {
+                let want int = checked_lower_type(l, node.type_id)
+                if (want < 0 || checked_lower_pointer_matches(l,
+                    b.insts[storage].result_type, want) == 0) { return -2 }
+                return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, storage, -1, 0)
+            }
+            let value int = b.local_values[binding.id]
+            return value >= 0 && value < b.inst_count ? value : -2
+        }
+        return -2
+    }
+    if (node.kind == AST_EXPR_CALL) { return checked_lower_call(l, flow, expr_id) }
+    if (node.kind == AST_EXPR_CAST) {
+        if (node.child0 < 0) { return -2 }
+        let want int = checked_lower_type(l, node.type_id)
+        if (want < 0) { return -2 }
+        let have int = checked_lower_type(l, l.store.expressions[node.child0].type_id)
+        if (have < 0) { return -2 }
+        let child AstExpr = l.store.expressions[node.child0]
+        if (child.is_lit != 0 && have < ir.IR_TY_PTR && want < ir.IR_TY_PTR
+            && (ir.ir_integer_type(b.types[want].kind) != 0
+                || b.types[want].kind == ir.IR_TY_BOOL)) {
+            // 未定宽字面量直接按显式目标选位宽；后续链式 CAST 仍逐次截断/扩展。
+            let literal i64 = 0
+            if (checked_lower_const(&literal, want, b.types[want].bits, child.const_bits) != 0) { return -2 }
+            return ast_ir_b_add_inst(b, ir.IR_OP_CONST, want, -1, -1, literal)
+        }
+        let source int = checked_lower_expr_inner(l, flow, node.child0)
+        if (source == -2) { return -2 }
+        if (source < 0) { return -1 }
+        return checked_lower_adjust(l, source, want)
+    }
+    if (node.kind == AST_EXPR_UNARY) {
+        if (node.child0 < 0) { return -2 }
+        if (node.op == gen.TK_LEN) {
+            // 数组长度由语义阶段折叠为常量；这里只支持运行期切片长度。
+            let operand_type int = l.store.expressions[node.child0].type_id
+            if (checked_lower_is_slice(l.store, operand_type) == 0) { return -2 }
+            let want int = checked_lower_type(l, node.type_id)
+            if (want < 0) { return -2 }
+            let length int = checked_lower_slice_len(l, flow, node.child0)
+            if (length == -2) { return -2 }
+            if (length < 0) { return -1 }
+            return checked_lower_adjust(l, length, want)
+        }
+        if (node.op == gen.TK_AMP) {
+            // 取地址：变量（含聚合存储）、指针解引用与数组下标。
+            let child AstExpr = l.store.expressions[node.child0]
+            if (child.kind == AST_EXPR_PRIMARY && child.child0 < 0
+                && (child.sym_flags & gen.F_GLOBAL) != 0 && child.binding_row < 0) {
+                return checked_lower_global_ref(l, &child)
+            }
+            if (child.kind == AST_EXPR_INDEX || child.kind == AST_EXPR_MEMBER
+                || (child.kind == AST_EXPR_UNARY && child.op == gen.TK_STAR)) {
+                let pointer int = checked_lower_lvalue_ptr(l, flow, node.child0)
+                if (pointer == -2) { return -2 }
+                if (pointer < 0) { return -1 }
+                let want int = checked_lower_type(l, node.type_id)
+                if (want >= 0 && b.insts[pointer].result_type != want) { return -2 }
+                return pointer
+            }
+            if (child.kind != AST_EXPR_PRIMARY || child.child0 >= 0
+                || child.sym_kind != gen.SYM_VAR) { return -2 }
+            let row int = checked_lower_binding(l, &child)
+            if (row < 0) { return -2 }
+            let binding AstBinding = l.store.bindings[row]
+            let storage int = checked_lower_storage(l, binding.id)
+            if (storage < 0) { return -2 }
+            let want int = checked_lower_type(l, node.type_id)
+            if (want < 0 || b.insts[storage].result_type != want) { return -2 }
+            return storage
+        }
+        if (node.op == gen.TK_STAR) {
+            // 解引用：指针元素类型必须与表达式类型一致。
+            let want int = checked_lower_type(l, node.type_id)
+            if (want < 0) { return -2 }
+            let pointer int = checked_lower_expr_inner(l, flow, node.child0)
+            if (pointer == -2) { return -2 }
+            if (pointer < 0) { return -1 }
+            let pointer_kind int = b.insts[pointer].result_type
+            if (pointer_kind < ir.IR_TY_PTR
+                || checked_lower_pointer_matches(l, pointer_kind, want) == 0) { return -2 }
+            return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, pointer, -1, 0)
+        }
+        let want int = checked_lower_type(l, node.type_id)
+        if (want < 0) { return -2 }
+        let inner int = checked_lower_expr_inner(l, flow, node.child0)
+        if (inner == -2) { return -2 }
+        if (inner < 0) { return -1 }
+        if (node.op == gen.TK_BANG) {
+            let kind int = b.insts[inner].result_type
+            if (ir.ir_const_type(kind) == 0) { return -2 }
+            let zero int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, kind, -1, -1, 0)
+            if (zero < 0) { return -1 }
+            let compared int = ast_ir_b_add_inst(b, ir.IR_OP_EQ, ir.IR_TY_BOOL, inner, zero, 0)
+            if (compared < 0) { return -1 }
+            return checked_lower_adjust(l, compared, want)
+        }
+        if (node.op == gen.TK_TILDE) {
+            let kind int = b.insts[inner].result_type
+            if (kind == ir.IR_TY_BOOL) {
+                inner = checked_lower_adjust(l, inner, ir.IR_TY_I32)
+                if (inner < 0) { return -2 }
+                kind = ir.IR_TY_I32
+            }
+            if (ir.ir_integer_type(kind) == 0) { return -2 }
+            // 用同宽全 1 常量异或，复现按目标整数位宽取反的源语义。
+            let all_ones int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, kind,
+                -1, -1, 0 - 1)
+            let inverted int = ast_ir_b_add_inst(b, ir.IR_OP_BXOR, kind,
+                inner, all_ones, 0)
+            if (all_ones < 0 || inverted < 0) { return -1 }
+            return checked_lower_adjust(l, inverted, want)
+        }
+        if (node.op == gen.TK_MINUS) {
+            let kind int = b.insts[inner].result_type
+            if (kind == ir.IR_TY_BOOL) {
+                inner = checked_lower_adjust(l, inner, ir.IR_TY_I32)
+                if (inner < 0) { return -2 }
+                kind = ir.IR_TY_I32
+            }
+            if (ir.ir_integer_type(kind) == 0 && ir.ir_float_type(kind) == 0) { return -2 }
+            if (ir.ir_float_type(kind) != 0) {
+                return ast_ir_b_add_inst(b, ir.IR_OP_FNEG, kind, inner, -1, 0)
+            }
+            let zero_bits i64 = 0
+            let zero int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, kind, -1, -1, zero_bits)
+            let negated int = ast_ir_b_add_inst(b, ir.IR_OP_SUB, kind, zero, inner, 0)
+            if (zero < 0 || negated < 0) { return -1 }
+            return checked_lower_adjust(l, negated, want)
+        }
+        return -2
+    }
+    if (node.kind != AST_EXPR_BINARY || node.child0 < 0 || node.child1 < 0) { return -2 }
+    // 短路求值：与旧构造器同一协议，两侧经条件归一化后由合流 phi 汇合。
+    if (node.op == gen.TK_OROR || node.op == gen.TK_ANDAND) {
+        let left int = checked_lower_cond(l, flow, node.child0)
+        if (left == -2) { return -2 }
+        if (left < 0) { return -1 }
+        let short_value int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_BOOL, -1, -1,
+            node.op == gen.TK_OROR ? 1 : 0)
+        if (short_value < 0) { return -1 }
+        let pre_block int = b.cur_block
+        let rhs_block int = ast_ir_b_alloc_block(b)
+        let join_block int = ast_ir_b_alloc_block(b)
+        if (rhs_block < 0 || join_block < 0) { return -1 }
+        if (node.op == gen.TK_OROR) {
+            if (ast_ir_b_term_cond(b, left, join_block, rhs_block) != 0) { return -1 }
+        } else {
+            if (ast_ir_b_term_cond(b, left, rhs_block, join_block) != 0) { return -1 }
+        }
+        ast_ir_b_enter_block(b, rhs_block)
+        let right int = checked_lower_cond(l, flow, node.child1)
+        if (right == -2) { return -2 }
+        if (right < 0) { return -1 }
+        let rhs_end int = b.cur_block
+        if (ast_ir_b_term_br(b, join_block) != 0) { return -1 }
+        ast_ir_b_enter_block(b, join_block)
+        let phi int = ast_ir_b_add_phi(b, ir.IR_TY_BOOL, 2)
+        if (phi < 0) { return -1 }
+        if (ast_ir_b_set_phi_input(b, phi, 0, pre_block, short_value) != 0
+            || ast_ir_b_set_phi_input(b, phi, 1, rhs_end, right) != 0) { return -1 }
+        return phi
+    }
+    let op int = checked_lower_binop(node.op)
+    if (op < 0) { return -2 }
+    let left int = checked_lower_expr_inner(l, flow, node.child0)
+    if (left == -2) { return -2 }
+    if (left < 0) { return -1 }
+    let right int = checked_lower_expr_inner(l, flow, node.child1)
+    if (right == -2) { return -2 }
+    if (right < 0) { return -1 }
+    let left_node AstExpr = l.store.expressions[node.child0]
+    let right_node AstExpr = l.store.expressions[node.child1]
+    let left_kind int = b.insts[left].result_type
+    let right_kind int = b.insts[right].result_type
+    // null 指针比较的 0 字面量按另一侧指针类型解释，整数零的值保持不变。
+    if ((op == ir.IR_OP_EQ || op == ir.IR_OP_NE)
+        && left_kind >= ir.IR_TY_PTR && left_kind <= ir.IR_TY_PTR_LAST
+        && right_node.is_lit != 0 && right_node.const_bits == 0) {
+        b.insts[right].result_type = left_kind
+        right_kind = left_kind
+    } else if ((op == ir.IR_OP_EQ || op == ir.IR_OP_NE)
+        && right_kind >= ir.IR_TY_PTR && right_kind <= ir.IR_TY_PTR_LAST
+        && left_node.is_lit != 0 && left_node.const_bits == 0) {
+        b.insts[left].result_type = right_kind
+        left_kind = right_kind
+    }
+    if ((op == ir.IR_OP_ADD || op == ir.IR_OP_SUB)
+        && left_node.type_id >= 0 && left_node.type_id < l.store.type_n
+        && l.store.types[left_node.type_id].kind == gen.TY_PTR) {
+        return checked_lower_pointer_math(l, &node, left, right)
+    }
+    let operand int = left_kind
+    // 整数字面量沿用既有范围检查；浮点/整数数值字面量显式 cast 到另一侧类型。
+    if (left_kind != right_kind) {
+        let literal int = 0
+        if (right_node.is_lit != 0
+            && ir.ir_float_type(left_kind) != 0
+            && ir.ir_scalar_type(right_kind) != 0) {
+            right = checked_lower_adjust(l, right, left_kind)
+            if (right < 0) { return -2 }
+            operand = left_kind; literal = 1
+        } else if (right_node.is_lit != 0
+            && checked_lower_lit_fits(l, left_node.type_id, right_node.const_bits) != 0) {
+            right = checked_lower_literal_retype(l, right, &right_node, left_kind)
+            if (right < 0) { return -2 }
+            literal = 1
+        } else if (left_node.is_lit != 0
+            && ir.ir_float_type(right_kind) != 0
+            && ir.ir_scalar_type(left_kind) != 0) {
+            left = checked_lower_adjust(l, left, right_kind)
+            if (left < 0) { return -2 }
+            operand = right_kind; literal = 1
+        } else if (left_node.is_lit != 0
+            && checked_lower_lit_fits(l, right_node.type_id, left_node.const_bits) != 0) {
+            left = checked_lower_literal_retype(l, left, &left_node, right_kind)
+            if (left < 0) { return -2 }
+            operand = right_kind
+            literal = 1
+        } else if (ir.ir_integer_type(left_kind) != 0
+            && ir.ir_integer_type(right_kind) != 0) {
+            // 两侧都是运行期整数时，按源类型执行统一提升，再转换两个操作数。
+            operand = checked_lower_promoted(l, left_node.type_id, right_node.type_id)
+            if (operand < 0) { return -2 }
+            if (left_kind != operand) {
+                left = checked_lower_adjust(l, left, operand)
+                if (left < 0) { return -2 }
+            }
+            if (right_kind != operand) {
+                right = checked_lower_adjust(l, right, operand)
+                if (right < 0) { return -2 }
+            }
+            literal = 1
+        }
+        if (literal == 0) { return -2 }
+    }
+    return checked_lower_binary(l, flow, &node, op, left, right, operand)
+}
+
+// checked_lower_pointer_math：按指针元素大小缩放整数偏移，再生成字节 GEP。
+fn checked_lower_pointer_math(l *CheckedLower, node *AstExpr, base int, index int) int {
+    let b *AstIRBuilder = &l.builder
+    if (node.child0 < 0 || node.child0 >= l.store.expression_n
+        || node.child1 < 0 || node.child1 >= l.store.expression_n
+        || base < 0 || base >= b.inst_count || index < 0 || index >= b.inst_count) { return -2 }
+    let pointer AstExpr = l.store.expressions[node.child0]
+    let pointer_type gen.CType = l.store.types[pointer.type_id]
+    let index_kind int = b.types[b.insts[index].result_type].kind
+    let result_type int = checked_lower_type(l, node.type_id)
+    if (pointer_type.kind != gen.TY_PTR || pointer_type.elem < 0
+        || pointer_type.elem >= l.store.type_n || pointer_type.size <= 0
+        || ir.ir_integer_type(index_kind) == 0 || result_type != b.insts[base].result_type) {
+        return -2
+    }
+    let stride int = l.store.types[pointer_type.elem].size
+    if (stride <= 0) { return -2 }
+    let offset int = checked_lower_adjust(l, index, ir.IR_TY_U64)
+    if (offset < 0) { return -2 }
+    if (node.op == gen.TK_MINUS) {
+        let zero int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64, -1, -1, 0)
+        if (zero < 0) { return -1 }
+        offset = ast_ir_b_add_inst(b, ir.IR_OP_SUB, ir.IR_TY_U64, zero, offset, 0)
+        if (offset < 0) { return -1 }
+    } else if (node.op != gen.TK_PLUS) { return -2 }
+    let stride_value int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
+        -1, -1, stride.to_type(i64))
+    if (stride_value < 0) { return -1 }
+    let scaled int = ast_ir_b_add_inst(b, ir.IR_OP_MUL, ir.IR_TY_U64,
+        offset, stride_value, 0)
+    if (scaled < 0) { return -1 }
+    return ast_ir_b_add_gep_value(b, base, scaled, result_type)
+}
+
+// checked_lower_binop：算术/位/比较运算符映射；不支持的一律 0 以下。
+fn checked_lower_binop(op int) int {
+    if (op == gen.TK_PLUS) { return ir.IR_OP_ADD }
+    if (op == gen.TK_MINUS) { return ir.IR_OP_SUB }
+    if (op == gen.TK_STAR) { return ir.IR_OP_MUL }
+    if (op == gen.TK_SLASH) { return ir.IR_OP_DIV }
+    if (op == gen.TK_PERCENT) { return ir.IR_OP_REM }
+    if (op == gen.TK_AMP) { return ir.IR_OP_BAND }
+    if (op == gen.TK_PIPE) { return ir.IR_OP_BOR }
+    if (op == gen.TK_CARET) { return ir.IR_OP_BXOR }
+    if (op == gen.TK_LSHIFT) { return ir.IR_OP_SHL }
+    if (op == gen.TK_RSHIFT) { return ir.IR_OP_SHR }
+    if (op == gen.TK_EQEQ) { return ir.IR_OP_EQ }
+    if (op == gen.TK_NEQ) { return ir.IR_OP_NE }
+    if (op == gen.TK_LT) { return ir.IR_OP_LT }
+    if (op == gen.TK_LEQ) { return ir.IR_OP_LE }
+    if (op == gen.TK_GT) { return ir.IR_OP_GT }
+    if (op == gen.TK_GEQ) { return ir.IR_OP_GE }
+    return -1
+}
+
+// checked_lower_binary：按已定操作数类型发射算术/比较；比较结果固定为 IR bool。
+fn checked_lower_binary(l *CheckedLower, flow *CheckedFlow, node *AstExpr, op int,
+    left int, right int, operand int) int {
+    let b *AstIRBuilder = &l.builder
+    if (operand < 0 || b.types[operand].kind == ir.IR_TY_VOID) { return -2 }
+    if (op == ir.IR_OP_EQ || op == ir.IR_OP_NE || op == ir.IR_OP_LT
+        || op == ir.IR_OP_LE || op == ir.IR_OP_GT || op == ir.IR_OP_GE) {
+        // 浮点比较使用 IEEE 有序谓词；NaN 的 != 由 unordered-not-equal 处理。
+        if (op != ir.IR_OP_EQ && op != ir.IR_OP_NE
+            && ir.ir_integer_type(b.types[operand].kind) == 0
+            && ir.ir_float_type(b.types[operand].kind) == 0) { return -2 }
+        let want int = checked_lower_type(l, node.type_id)
+        if (want != ir.IR_TY_BOOL) { return -2 }
+        return ast_ir_b_add_inst(b, op, ir.IR_TY_BOOL, left, right, 0)
+    }
+    let operand_kind int = b.types[operand].kind
+    if (ir.ir_float_type(operand_kind) != 0) {
+        if (op != ir.IR_OP_ADD && op != ir.IR_OP_SUB
+            && op != ir.IR_OP_MUL && op != ir.IR_OP_DIV) { return -2 }
+    } else if (ir.ir_integer_type(operand_kind) == 0) { return -2 }
+    let want int = checked_lower_type(l, node.type_id)
+    if (want < 0) { return -2 }
+    let result int = ast_ir_b_add_inst(b, op, operand, left, right, 0)
+    if (result < 0) { return -1 }
+    return checked_lower_adjust(l, result, want)
+}
+
+// checked_lower_cond：把条件表达式归一化为 IR bool（整数按非零为真）。
+fn checked_lower_cond(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
+    let b *AstIRBuilder = &l.builder
+    if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2 }
+    if (checked_lower_type(l, l.store.expressions[expr_id].type_id) < 0) { return -2 }
+    let value int = checked_lower_expr_inner(l, flow, expr_id)
+    if (value <= -1) { return value }
+    let kind int = b.insts[value].result_type
+    if (ir.ir_const_type(kind) == 0) { return -2 }
+    let zero int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, kind, -1, -1, 0)
+    if (zero < 0) { return -1 }
+    return ast_ir_b_add_inst(b, ir.IR_OP_NE, ir.IR_TY_BOOL, value, zero, 0)
+}
+
+// checked_lower_array_decay：把数组左值转换为首元素指针，仅允许元素类型精确匹配。
+fn checked_lower_array_decay(l *CheckedLower, flow *CheckedFlow,
+    expr_id int, pointer_type int) int {
+    if (expr_id < 0 || expr_id >= l.store.expression_n
+        || pointer_type < 0 || pointer_type >= l.store.type_n) { return -2 }
+    let value AstExpr = l.store.expressions[expr_id]
+    if (value.type_id < 0 || value.type_id >= l.store.type_n
+        || l.store.types[value.type_id].kind != gen.TY_ARRAY
+        || l.store.types[pointer_type].kind != gen.TY_PTR) { return -2 }
+    let pointee int = l.store.types[pointer_type].elem
+    if (pointee < 0 || pointee >= l.store.type_n
+        || l.store.types[pointee].kind != gen.TY_VOID
+            && l.store.types[value.type_id].elem != pointee) { return -2 }
+    let storage int = checked_lower_lvalue_ptr(l, flow, expr_id)
+    if (storage == -2) { return -2 }
+    if (storage < 0) { return -1 }
+    let want int = checked_lower_type(l, pointer_type)
+    if (want < 0) { return -2 }
+    return ast_ir_b_add_gep_const(&l.builder, storage, 0, want)
+}
+
+// checked_lower_symbol：解析或新增被调函数的模块逻辑符号；签名必须完全一致。
+fn checked_lower_symbol(l *CheckedLower, name *char, source_type int, result int,
+    sig int, flags int, file_id int, token int) int {
+    let params *int = 0
+    let fixed_count int = l.store.sig_np[sig]
+    let count int = fixed_count + (l.store.sig_vararg[sig] == 2 ? 1 : 0)
+    if (count > 0) {
+        params = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
+        if (params == 0) { return -1 }
+    }
+    let i int = 0
+    let ok int = 1
+    for i < count {
+        let mapped int = checked_lower_module_type(l,
+            l.store.sig_params[l.store.sig_first[sig] + (i < fixed_count ? i : fixed_count)])
+        if (mapped < 0) { ok = 0 }
+        else { params[i] = mapped }
+        i += 1
+    }
+    if (ok == 0) { free(params.to_type(*void)); return -2 }
+    let symbol ir.IRModuleSymbol
+    symbol.kind = ir.IR_MODULE_SYMBOL_FUNCTION
+    symbol.type_id = checked_lower_module_type(l, l.store.sig_ret[sig])
+    symbol.abi = l.store.sig_abi[sig] == gen.ABI_YH ?
+        ir.IR_ABI_YH_LLVM_V1 : l.store.sig_abi[sig]
+    symbol.variadic = l.store.sig_vararg[sig]
+    symbol.no_return = ((flags & gen.F_NORETURN) != 0).to_type(int)
+    // extern/C ABI 调用点是模块外部实体；普通私有 yh 前向声明仍须与本模块定义合并。
+    symbol.linkage = (flags & (gen.F_EXTERN | gen.F_CABI | gen.F_PUB)) != 0 ?
+        ir.IR_MODULE_LINK_EXTERNAL : ir.IR_MODULE_LINK_PRIVATE
+    symbol.defined = 0
+    symbol.source = l.source_map[file_id]
+    symbol.offset = checked_lower_offset(l, file_id, token)
+    if (symbol.source < 0 || symbol.offset < 0) { free(params.to_type(*void)); return -1 }
+    let index int = ir.ir_module_add_symbol(l.output, name, &symbol, params, count)
+    free(params.to_type(*void))
+    return index
+}
+
+// checked_lower_offset：把声明 token 下标换算为模块来源内的字节偏移。
+fn checked_lower_offset(l *CheckedLower, file_id int, token int) int {
+    if (file_id < 0 || file_id >= l.store.file_n) { return -1 }
+    let file gen.PFile = l.store.files[file_id]
+    if (file.tokens == 0 || token < 0 || token >= file.token_n) { return -1 }
+    let offset int = file.tokens[token].start
+    return offset >= 0 && offset <= file.source_len ? offset : -1
+}
+
+// checked_lower_name_is_main：入口模块的 main 不加模块后缀。
+fn checked_lower_name_is_main(l *CheckedLower, off int, length int) int {
+    if (length != 4 || checked_name_valid(l.store, off, length) == 0) { return 0 }
+    return gen.cstr_eq((l.store.names + off).to_type(*char), "main")
+}

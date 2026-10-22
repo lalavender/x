@@ -349,6 +349,8 @@ selfhost-native: stage-yh
 	$(RUNTIME_TEST)
 	$(SELFHOST_FLAGS_TEST)
 	python3 $(TOPSRC)/tests/selfhost/check-command.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-architecture.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-function-cache.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/selfhost/foreign-fs-build.py --compiler-path $(YH_RUN)
 	$(CACHE_TEST)
 	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(YH_RUN)

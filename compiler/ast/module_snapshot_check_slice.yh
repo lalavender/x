@@ -1,0 +1,1212 @@
+module ast
+import gen
+import ir
+
+// ============================================================================
+// module_snapshot_check_slice.yh —— 函数级受检 AST 切片（LA3.3 C2）
+//
+// 本文件实现 C2 的离线基础：从 CheckedModule 快照抽取单函数的 expr/stmt/edge/
+// binding 行，按局部 ID 序列化；再导入当前 AST arena。导入后由
+// checked_module_capture 生成新的快照，lowering 应与冷编等价。
+//
+// 当前不接入生产 skip；含 `$for` 模板（AST_STMT_COMPTIME）的函数返回 1 跳过。
+// 序列化不写宿主结构体布局，所有字段按小端 64 位字；局部 ID 在导入时加 base。
+// ============================================================================
+
+const CHECKED_SLICE_MAGIC u64 = 0x31454C4353485948 // "YHSCLE1" 的低 64 位近似
+const CHECKED_SLICE_VERSION int = 2
+const CHECKED_SLICE_MAX_ROWS int = 1048576
+// 单函数 check 切片上限：编译器自身的超大函数超过它就跳过缓存，避免
+// worker 保存/装载多 MB 记录导致自举内存峰值失控。
+const CHECKED_SLICE_CACHE_MAX int = 1048576
+const CHECKED_SLICE_HEAD_WORDS int = 14
+const CHECKED_SLICE_EXPR_WORDS int = 25
+const CHECKED_SLICE_STMT_WORDS int = 15
+const CHECKED_SLICE_EDGE_WORDS int = 2
+const CHECKED_SLICE_BIND_WORDS int = 12
+const CHECKED_SLICE_SYMBOL_WORDS int = 14
+
+// CheckedSliceSymbol：切片引用的符号描述；name 为名字池字节副本。
+struct CheckedSliceSymbol {
+    old_id int
+    name *u8
+    name_len int
+    kind int
+    type_id int
+    offset int
+    flags int
+    cval i64
+    const_ready int
+    const_expr_off int
+    const_expr_len int
+    const_expr_kind int
+    def_line int
+    def_col int
+    ast_binding_row int
+}
+
+// CheckedFunctionSlice：反序列化后的单函数切片；导入前由 release 释放。
+struct CheckedFunctionSlice {
+    expr_n int
+    stmt_n int
+    edge_n int
+    binding_n int
+    symbol_n int
+    symbols *CheckedSliceSymbol
+    file_path *char
+    file_path_len int
+    owner_decl int
+    decl_row int
+    token_first int
+    token_after int
+    body_stmt int
+    exprs *AstExpr
+    stmts *AstStmt
+    edges *AstStmtExpr
+    bindings *AstBinding
+}
+
+// checked_slice_put_u64 / get_u64：小端 64 位字。
+fn checked_slice_put_u64(out *u8, cursor *int, value u64) void {
+    let i int = 0
+    for i < 8 {
+        out[*cursor + i] = ((value >> (i * 8)) & 255).to_type(u8)
+        i += 1
+    }
+    *cursor = *cursor + 8
+}
+
+fn checked_slice_get_u64(data *u8, cursor *int) u64 {
+    let value u64 = 0
+    let i int = 0
+    for i < 8 {
+        value = value | (data[*cursor + i].to_type(u64) << (i * 8))
+        i += 1
+    }
+    *cursor = *cursor + 8
+    return value
+}
+
+fn checked_slice_put_int(out *u8, cursor *int, value int) void {
+    checked_slice_put_u64(out, cursor, value.to_type(i64).to_type(u64))
+}
+
+fn checked_slice_get_int(data *u8, cursor *int) int {
+    return checked_slice_get_u64(data, cursor).to_type(i64).to_type(int)
+}
+
+// checked_slice_loc：把模块级 ID 转成函数内局部 ID；-1 保持，越界返回 -2。
+fn checked_slice_loc(id int, base int, count int) int {
+    if (id < 0) { return -1 }
+    if (id < base || id >= base + count) { return -2 }
+    return id - base
+}
+
+// checked_slice_root_loc：root_next 可以指向下一个函数的根语句；切片外一律记为 -1。
+fn checked_slice_root_loc(id int, base int, count int) int {
+    if (id < 0) { return -1 }
+    if (id < base || id >= base + count) { return -1 }
+    return id - base
+}
+
+// checked_slice_size：按计数计算编码长度；超限返回 -1。
+fn checked_slice_size(expr_n int, stmt_n int, edge_n int, binding_n int,
+    symbol_n int, symbol_name_bytes int, path_size int) int {
+    if (expr_n < 0 || expr_n > CHECKED_SLICE_MAX_ROWS
+        || stmt_n <= 0 || stmt_n > CHECKED_SLICE_MAX_ROWS
+        || edge_n < 0 || edge_n > CHECKED_SLICE_MAX_ROWS
+        || binding_n < 0 || binding_n > CHECKED_SLICE_MAX_ROWS
+        || symbol_n < 0 || symbol_n > CHECKED_SLICE_MAX_ROWS
+        || symbol_name_bytes < 0 || symbol_name_bytes > 67108864
+        || path_size <= 0 || path_size > 65536) { return -1 }
+    let words int = CHECKED_SLICE_HEAD_WORDS + expr_n * CHECKED_SLICE_EXPR_WORDS +
+        stmt_n * CHECKED_SLICE_STMT_WORDS + edge_n * CHECKED_SLICE_EDGE_WORDS +
+        binding_n * CHECKED_SLICE_BIND_WORDS + symbol_n * CHECKED_SLICE_SYMBOL_WORDS
+    if (words > 67108864 / 8) { return -1 }
+    return words * 8 + symbol_name_bytes + path_size
+}
+
+// checked_slice_validate：确认所有函数内引用都可局部化；失败返回 1（不缓存）。
+fn checked_slice_validate(store *CheckedStorage, ctx *CheckedFunction) int {
+    let i int = ctx.expr_first
+    for i < ctx.expr_after {
+        let node AstExpr = store.expressions[i]
+        if (checked_slice_loc(node.child0, ctx.expr_first,
+                ctx.expr_after - ctx.expr_first) == -2
+            || checked_slice_loc(node.child1, ctx.expr_first,
+                ctx.expr_after - ctx.expr_first) == -2
+            || checked_slice_loc(node.child2, ctx.expr_first,
+                ctx.expr_after - ctx.expr_first) == -2
+            || checked_slice_loc(node.binding_row, ctx.binding_first,
+                ctx.binding_after - ctx.binding_first) == -2) { return 1 }
+        i += 1
+    }
+    i = ctx.stmt_first
+    for i < ctx.stmt_after {
+        let node AstStmt = store.statements[i]
+        if (node.kind == AST_STMT_COMPTIME) { return 1 }
+        if (checked_slice_loc(node.parent, ctx.stmt_first,
+                ctx.stmt_after - ctx.stmt_first) == -2
+            || checked_slice_loc(node.first_child, ctx.stmt_first,
+                ctx.stmt_after - ctx.stmt_first) == -2
+            || checked_slice_loc(node.last_child, ctx.stmt_first,
+                ctx.stmt_after - ctx.stmt_first) == -2
+            || checked_slice_loc(node.next_sibling, ctx.stmt_first,
+                ctx.stmt_after - ctx.stmt_first) == -2
+            || checked_slice_loc(node.first_expr, ctx.edge_first,
+                ctx.edge_after - ctx.edge_first) == -2
+            || checked_slice_loc(node.last_expr, ctx.edge_first,
+                ctx.edge_after - ctx.edge_first) == -2
+            || checked_slice_loc(node.first_binding, ctx.binding_first,
+                ctx.binding_after - ctx.binding_first) == -2
+            || checked_slice_loc(node.last_binding, ctx.binding_first,
+                ctx.binding_after - ctx.binding_first) == -2) { return 1 }
+        i += 1
+    }
+    i = ctx.edge_first
+    for i < ctx.edge_after {
+        let edge AstStmtExpr = store.edges[i]
+        if (checked_slice_loc(edge.expr_id, ctx.expr_first,
+                ctx.expr_after - ctx.expr_first) == -2
+            || checked_slice_loc(edge.next, ctx.edge_first,
+                ctx.edge_after - ctx.edge_first) == -2) { return 1 }
+        i += 1
+    }
+    i = ctx.binding_first
+    for i < ctx.binding_after {
+        let binding AstBinding = store.bindings[i]
+        if (checked_slice_loc(binding.stmt_id, ctx.stmt_first,
+                ctx.stmt_after - ctx.stmt_first) == -2
+            || checked_slice_loc(binding.next, ctx.binding_first,
+                ctx.binding_after - ctx.binding_first) == -2) { return 1 }
+        i += 1
+    }
+    if (checked_slice_loc(ctx.body_stmt, ctx.stmt_first,
+            ctx.stmt_after - ctx.stmt_first) < 0) { return 1 }
+    return 0
+}
+
+// checked_slice_collect_symbols：只收集函数引用的全局/外部符号；局部符号
+// 由导入侧从 AstBinding 行 + 当前源码 token 重建，不依赖旧符号槽或名字池。
+fn checked_slice_collect_symbols(store *CheckedStorage, ctx *CheckedFunction,
+    used *u8, order *int, count *int, name_bytes *int) int {
+    let i int = ctx.expr_first
+    for i < ctx.expr_after {
+        let node AstExpr = store.expressions[i]
+        if (node.binding_row >= 0) { i += 1; continue }
+        if (node.sym_id >= 0) {
+            if ((node.sym_flags & gen.F_GLOBAL) == 0) { return 1 }
+            if (node.sym_id >= store.symbol_n) { return 1 }
+            used[node.sym_id] = 1
+        } else if (node.sym_name_off >= 0) {
+            return 1
+        }
+        i += 1
+    }
+    count[0] = 0
+    name_bytes[0] = 0
+    i = 0
+    for i < store.symbol_n {
+        if (used[i] != 0) {
+            order[count[0]] = i
+            count[0] += 1
+            name_bytes[0] += store.symbols[i].name_len
+        }
+        i += 1
+    }
+    return 0
+}
+
+// checked_slice_capture：把快照中的一个函数编码为字节串。
+// 成功返回 0 并交出 data/size；含模板或越界引用返回 1（跳过缓存）；内部错误 -1。
+pub fn checked_slice_capture(unit *CheckedModule, function_index int,
+    out_data **u8, out_size *int) int {
+    if (unit == 0 || unit.storage == 0 || out_data == 0 || out_size == 0) {
+        return -1
+    }
+    out_data[0] = 0; out_size[0] = 0
+    let store *CheckedStorage = unit.storage.to_type(*CheckedStorage)
+    if (function_index < 0 || function_index >= store.function_n) { return -1 }
+    let ctx CheckedFunction = store.functions[function_index]
+    // CT 函数正文参与全局布局/CT 求值，初期不进入 check 缓存。
+    if (ctx.decl_row >= 0 && ctx.decl_row < store.declaration_n) {
+        let decl AstDecl = store.declarations[ctx.decl_row]
+        if (decl.sym_id >= 0 && decl.sym_id < store.symbol_n
+            && (store.symbols[decl.sym_id].flags & gen.F_COMPTIME) != 0) {
+            return 1
+        }
+    }
+    let expr_n int = ctx.expr_after - ctx.expr_first
+    let stmt_n int = ctx.stmt_after - ctx.stmt_first
+    let edge_n int = ctx.edge_after - ctx.edge_first
+    let binding_n int = ctx.binding_after - ctx.binding_first
+    if (ctx.expr_first < 0 || ctx.expr_after > store.expression_n
+        || ctx.stmt_first < 0 || ctx.stmt_after > store.statement_n
+        || ctx.edge_first < 0 || ctx.edge_after > store.edge_n
+        || ctx.binding_first < 0 || ctx.binding_after > store.binding_n) {
+        return -1
+    }
+    if (checked_slice_validate(store, &ctx) != 0) { return 1 }
+    if (ctx.file_id < 0 || ctx.file_id >= store.file_n) { return -1 }
+    let file gen.PFile = store.files[ctx.file_id]
+    let path *char = (store.names + file.path_off).to_type(*char)
+    let path_len int = 0
+    for path[path_len] != 0 { path_len += 1 }
+    let path_size int = path_len + 1
+    let symbol_used *u8 = malloc(store.symbol_n.to_type(u64)).to_type(*u8)
+    let symbol_order *int = malloc((store.symbol_n * sizeof(int)).to_type(u64)).to_type(*int)
+    if (symbol_used == 0 || symbol_order == 0) {
+        if (symbol_used != 0) { free(symbol_used.to_type(*void)) }
+        if (symbol_order != 0) { free(symbol_order.to_type(*void)) }
+        return -1
+    }
+    let si_zero int = 0
+    for si_zero < store.symbol_n { symbol_used[si_zero] = 0; si_zero += 1 }
+    let symbol_n int = 0
+    let symbol_name_bytes int = 0
+    let symbol_status int = checked_slice_collect_symbols(store, &ctx, symbol_used,
+        symbol_order, &symbol_n, &symbol_name_bytes)
+    if (symbol_status != 0) {
+        free(symbol_used.to_type(*void)); free(symbol_order.to_type(*void))
+        return symbol_status
+    }
+    let size int = checked_slice_size(expr_n, stmt_n, edge_n, binding_n,
+        symbol_n, symbol_name_bytes, path_size)
+    if (size < 0 || size > CHECKED_SLICE_CACHE_MAX) {
+        free(symbol_used.to_type(*void)); free(symbol_order.to_type(*void))
+        return 1
+    }
+    let data *u8 = malloc(size.to_type(u64)).to_type(*u8)
+    if (data == 0) { return -1 }
+    let cursor int = 0
+    checked_slice_put_u64(data, &cursor, CHECKED_SLICE_MAGIC)
+    checked_slice_put_u64(data, &cursor, CHECKED_SLICE_VERSION.to_type(u64))
+    checked_slice_put_int(data, &cursor, expr_n)
+    checked_slice_put_int(data, &cursor, stmt_n)
+    checked_slice_put_int(data, &cursor, edge_n)
+    checked_slice_put_int(data, &cursor, binding_n)
+    checked_slice_put_int(data, &cursor, symbol_n)
+    checked_slice_put_int(data, &cursor, symbol_name_bytes)
+    checked_slice_put_int(data, &cursor, path_size)
+    checked_slice_put_int(data, &cursor, ctx.owner_decl)
+    checked_slice_put_int(data, &cursor, ctx.decl_row)
+    checked_slice_put_int(data, &cursor, ctx.token_first)
+    checked_slice_put_int(data, &cursor, ctx.token_after)
+    checked_slice_put_int(data, &cursor,
+        checked_slice_loc(ctx.body_stmt, ctx.stmt_first, stmt_n))
+    let i int = 0
+    for i < path_size {
+        data[cursor] = i < path_len ? path[i].to_type(u8) : 0
+        cursor += 1
+        i += 1
+    }
+    i = 0
+    for i < expr_n {
+        let node AstExpr = store.expressions[ctx.expr_first + i]
+        checked_slice_put_int(data, &cursor, node.kind)
+        checked_slice_put_int(data, &cursor, node.op)
+        checked_slice_put_int(data, &cursor, node.first)
+        checked_slice_put_int(data, &cursor, node.after)
+        checked_slice_put_int(data, &cursor, node.token_count)
+        checked_slice_put_int(data, &cursor, node.file_id)
+        checked_slice_put_int(data, &cursor, node.type_id)
+        checked_slice_put_int(data, &cursor, node.owner_decl)
+        let local_binding int = checked_slice_loc(node.binding_row,
+            ctx.binding_first, binding_n)
+        checked_slice_put_int(data, &cursor,
+            local_binding >= 0 ? local_binding : node.sym_id)
+        checked_slice_put_int(data, &cursor, node.sym_name_off)
+        checked_slice_put_int(data, &cursor, node.sym_name_len)
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.binding_row, ctx.binding_first, binding_n))
+        checked_slice_put_int(data, &cursor, node.sym_type_id)
+        checked_slice_put_int(data, &cursor, node.sym_kind)
+        checked_slice_put_int(data, &cursor, node.sym_flags)
+        checked_slice_put_int(data, &cursor, node.sym_offset)
+        checked_slice_put_int(data, &cursor, node.is_const)
+        checked_slice_put_u64(data, &cursor, node.const_bits.to_type(u64))
+        checked_slice_put_int(data, &cursor, node.is_lit)
+        checked_slice_put_int(data, &cursor, node.lit_big)
+        checked_slice_put_u64(data, &cursor, node.fval_bits.to_type(u64))
+        checked_slice_put_int(data, &cursor, node.layout_type_id)
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.child0, ctx.expr_first, expr_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.child1, ctx.expr_first, expr_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.child2, ctx.expr_first, expr_n))
+        i += 1
+    }
+    i = 0
+    for i < stmt_n {
+        let node AstStmt = store.statements[ctx.stmt_first + i]
+        checked_slice_put_int(data, &cursor, node.kind)
+        checked_slice_put_int(data, &cursor, node.op)
+        checked_slice_put_int(data, &cursor, node.first)
+        checked_slice_put_int(data, &cursor, node.after)
+        checked_slice_put_int(data, &cursor, node.token_count)
+        checked_slice_put_int(data, &cursor, node.file_id)
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.parent, ctx.stmt_first, stmt_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.first_child, ctx.stmt_first, stmt_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.last_child, ctx.stmt_first, stmt_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.next_sibling, ctx.stmt_first, stmt_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_root_loc(node.root_next, ctx.stmt_first, stmt_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.first_expr, ctx.edge_first, edge_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.last_expr, ctx.edge_first, edge_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.first_binding, ctx.binding_first, binding_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(node.last_binding, ctx.binding_first, binding_n))
+        i += 1
+    }
+    i = 0
+    for i < edge_n {
+        let edge AstStmtExpr = store.edges[ctx.edge_first + i]
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(edge.expr_id, ctx.expr_first, expr_n))
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(edge.next, ctx.edge_first, edge_n))
+        i += 1
+    }
+    i = 0
+    for i < binding_n {
+        let binding AstBinding = store.bindings[ctx.binding_first + i]
+        let bfile gen.PFile = store.files[binding.file_id]
+        let btok gen.Tok = bfile.tokens[binding.name_token]
+        checked_slice_put_int(data, &cursor, binding.id)
+        checked_slice_put_int(data, &cursor, binding.sym_id)
+        checked_slice_put_int(data, &cursor, binding.sym_type_id)
+        checked_slice_put_int(data, &cursor, binding.sym_kind)
+        checked_slice_put_int(data, &cursor, binding.sym_flags)
+        checked_slice_put_int(data, &cursor, binding.sym_offset)
+        checked_slice_put_int(data, &cursor, binding.file_id)
+        checked_slice_put_int(data, &cursor, binding.owner_decl)
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(binding.stmt_id, ctx.stmt_first, stmt_n))
+        checked_slice_put_int(data, &cursor, binding.name_token)
+        checked_slice_put_int(data, &cursor, binding.is_param)
+        checked_slice_put_int(data, &cursor,
+            checked_slice_loc(binding.next, ctx.binding_first, binding_n))
+        i += 1
+    }
+    // 符号闭包：名字字节单独存放，导入时重新 intern 并追加局部符号。
+    i = 0
+    for i < symbol_n {
+        let sym gen.CSym = store.symbols[symbol_order[i]]
+        checked_slice_put_int(data, &cursor, symbol_order[i])
+        checked_slice_put_int(data, &cursor, sym.name_len)
+        checked_slice_put_int(data, &cursor, sym.kind)
+        checked_slice_put_int(data, &cursor, sym.type_id)
+        checked_slice_put_int(data, &cursor, sym.offset)
+        checked_slice_put_int(data, &cursor, sym.flags)
+        checked_slice_put_u64(data, &cursor, sym.cval.to_type(u64))
+        checked_slice_put_int(data, &cursor, sym.const_ready)
+        checked_slice_put_int(data, &cursor, sym.const_expr_off)
+        checked_slice_put_int(data, &cursor, sym.const_expr_len)
+        checked_slice_put_int(data, &cursor, sym.const_expr_kind)
+        checked_slice_put_int(data, &cursor, sym.def_line)
+        checked_slice_put_int(data, &cursor, sym.def_col)
+        checked_slice_put_int(data, &cursor, sym.ast_binding_row)
+        let j int = 0
+        for j < sym.name_len {
+            data[cursor] = store.names[sym.name_off + j]
+            cursor += 1
+            j += 1
+        }
+        i += 1
+    }
+    out_data[0] = data; out_size[0] = cursor
+    free(symbol_used.to_type(*void)); free(symbol_order.to_type(*void))
+    return 0
+}
+
+// checked_slice_release：释放反序列化切片。
+fn checked_slice_release(slice *CheckedFunctionSlice) void {
+    if (slice == 0) { return }
+    if (slice.exprs != 0) { free(slice.exprs.to_type(*void)) }
+    if (slice.stmts != 0) { free(slice.stmts.to_type(*void)) }
+    if (slice.edges != 0) { free(slice.edges.to_type(*void)) }
+    if (slice.bindings != 0) { free(slice.bindings.to_type(*void)) }
+    let si int = 0
+    for si < slice.symbol_n {
+        if (slice.symbols[si].name != 0) { free(slice.symbols[si].name.to_type(*void)) }
+        si += 1
+    }
+    if (slice.symbols != 0) { free(slice.symbols.to_type(*void)) }
+    slice.symbols = 0.to_type(*CheckedSliceSymbol); slice.symbol_n = 0
+    if (slice.file_path != 0) { free(slice.file_path.to_type(*void)) }
+    slice.file_path = 0.to_type(*char); slice.file_path_len = 0
+    slice.exprs = 0.to_type(*AstExpr); slice.stmts = 0.to_type(*AstStmt)
+    slice.edges = 0.to_type(*AstStmtExpr); slice.bindings = 0.to_type(*AstBinding)
+    slice.expr_n = 0; slice.stmt_n = 0; slice.edge_n = 0; slice.binding_n = 0
+}
+
+// checked_slice_local_ok：确认局部 ID 在范围内或 -1。
+fn checked_slice_local_ok(id int, count int) int {
+    return id == -1 || (id >= 0 && id < count) ? 1 : 0
+}
+
+// checked_slice_parse：反序列化并校验局部 ID；0 成功、1 损坏、-1 内部错误。
+fn checked_slice_parse(data *u8, size int, slice *CheckedFunctionSlice) int {
+    slice.expr_n = 0; slice.stmt_n = 0; slice.edge_n = 0; slice.binding_n = 0
+    slice.exprs = 0.to_type(*AstExpr); slice.stmts = 0.to_type(*AstStmt)
+    slice.edges = 0.to_type(*AstStmtExpr); slice.bindings = 0.to_type(*AstBinding)
+    slice.file_path = 0.to_type(*char); slice.file_path_len = 0
+    slice.symbols = 0.to_type(*CheckedSliceSymbol); slice.symbol_n = 0
+    if (data == 0 || size < CHECKED_SLICE_HEAD_WORDS * 8) { return 1 }
+    let cursor int = 0
+    if (checked_slice_get_u64(data, &cursor) != CHECKED_SLICE_MAGIC
+        || checked_slice_get_u64(data, &cursor) != CHECKED_SLICE_VERSION.to_type(u64)) {
+        return 1
+    }
+    slice.expr_n = checked_slice_get_int(data, &cursor)
+    slice.stmt_n = checked_slice_get_int(data, &cursor)
+    slice.edge_n = checked_slice_get_int(data, &cursor)
+    slice.binding_n = checked_slice_get_int(data, &cursor)
+    slice.symbol_n = checked_slice_get_int(data, &cursor)
+    let symbol_name_bytes int = checked_slice_get_int(data, &cursor)
+    let path_size int = checked_slice_get_int(data, &cursor)
+    slice.owner_decl = checked_slice_get_int(data, &cursor)
+    slice.decl_row = checked_slice_get_int(data, &cursor)
+    slice.token_first = checked_slice_get_int(data, &cursor)
+    slice.token_after = checked_slice_get_int(data, &cursor)
+    slice.body_stmt = checked_slice_get_int(data, &cursor)
+    if (checked_slice_size(slice.expr_n, slice.stmt_n, slice.edge_n,
+            slice.binding_n, slice.symbol_n, symbol_name_bytes,
+            path_size) != size) { return 1 }
+    slice.file_path = malloc(path_size.to_type(u64)).to_type(*char)
+    if (slice.file_path == 0) { return -1 }
+    let pi int = 0
+    for pi < path_size {
+        slice.file_path[pi] = data[cursor + pi].to_type(char)
+        pi += 1
+    }
+    cursor += path_size
+    if (slice.file_path[path_size - 1] != 0) {
+        checked_slice_release(slice); return 1
+    }
+    slice.file_path_len = path_size - 1
+    if (!checked_slice_local_ok(slice.body_stmt, slice.stmt_n)
+        || slice.body_stmt < 0) { return 1 }
+    slice.exprs = checked_zero_rows(slice.expr_n, sizeof(AstExpr)).to_type(*AstExpr)
+    slice.stmts = checked_zero_rows(slice.stmt_n, sizeof(AstStmt)).to_type(*AstStmt)
+    slice.edges = checked_zero_rows(slice.edge_n, sizeof(AstStmtExpr)).to_type(*AstStmtExpr)
+    slice.bindings = checked_zero_rows(slice.binding_n, sizeof(AstBinding)).to_type(*AstBinding)
+    if ((slice.expr_n > 0 && slice.exprs == 0)
+        || (slice.stmt_n > 0 && slice.stmts == 0)
+        || (slice.edge_n > 0 && slice.edges == 0)
+        || (slice.binding_n > 0 && slice.bindings == 0)) {
+        checked_slice_release(slice); return -1
+    }
+    let i int = 0
+    for i < slice.expr_n {
+        let node *AstExpr = &slice.exprs[i]
+        node.kind = checked_slice_get_int(data, &cursor)
+        node.op = checked_slice_get_int(data, &cursor)
+        node.first = checked_slice_get_int(data, &cursor)
+        node.after = checked_slice_get_int(data, &cursor)
+        node.token_count = checked_slice_get_int(data, &cursor)
+        node.file_id = checked_slice_get_int(data, &cursor)
+        node.type_id = checked_slice_get_int(data, &cursor)
+        node.owner_decl = checked_slice_get_int(data, &cursor)
+        node.sym_id = checked_slice_get_int(data, &cursor)
+        node.sym_name_off = checked_slice_get_int(data, &cursor)
+        node.sym_name_len = checked_slice_get_int(data, &cursor)
+        node.binding_row = checked_slice_get_int(data, &cursor)
+        node.sym_type_id = checked_slice_get_int(data, &cursor)
+        node.sym_kind = checked_slice_get_int(data, &cursor)
+        node.sym_flags = checked_slice_get_int(data, &cursor)
+        node.sym_offset = checked_slice_get_int(data, &cursor)
+        node.is_const = checked_slice_get_int(data, &cursor)
+        node.const_bits = checked_slice_get_u64(data, &cursor).to_type(i64)
+        node.is_lit = checked_slice_get_int(data, &cursor)
+        node.lit_big = checked_slice_get_int(data, &cursor)
+        node.fval_bits = checked_slice_get_u64(data, &cursor).to_type(i64)
+        node.layout_type_id = checked_slice_get_int(data, &cursor)
+        node.child0 = checked_slice_get_int(data, &cursor)
+        node.child1 = checked_slice_get_int(data, &cursor)
+        node.child2 = checked_slice_get_int(data, &cursor)
+        if (!checked_slice_local_ok(node.child0, slice.expr_n)
+            || !checked_slice_local_ok(node.child1, slice.expr_n)
+            || !checked_slice_local_ok(node.child2, slice.expr_n)
+            || !checked_slice_local_ok(node.binding_row, slice.binding_n)) {
+            checked_slice_release(slice); return 1
+        }
+        i += 1
+    }
+    i = 0
+    for i < slice.stmt_n {
+        let node *AstStmt = &slice.stmts[i]
+        node.kind = checked_slice_get_int(data, &cursor)
+        node.op = checked_slice_get_int(data, &cursor)
+        node.first = checked_slice_get_int(data, &cursor)
+        node.after = checked_slice_get_int(data, &cursor)
+        node.token_count = checked_slice_get_int(data, &cursor)
+        node.file_id = checked_slice_get_int(data, &cursor)
+        node.parent = checked_slice_get_int(data, &cursor)
+        node.first_child = checked_slice_get_int(data, &cursor)
+        node.last_child = checked_slice_get_int(data, &cursor)
+        node.next_sibling = checked_slice_get_int(data, &cursor)
+        node.root_next = checked_slice_get_int(data, &cursor)
+        node.first_expr = checked_slice_get_int(data, &cursor)
+        node.last_expr = checked_slice_get_int(data, &cursor)
+        node.first_binding = checked_slice_get_int(data, &cursor)
+        node.last_binding = checked_slice_get_int(data, &cursor)
+        if (!checked_slice_local_ok(node.parent, slice.stmt_n)
+            || !checked_slice_local_ok(node.first_child, slice.stmt_n)
+            || !checked_slice_local_ok(node.last_child, slice.stmt_n)
+            || !checked_slice_local_ok(node.next_sibling, slice.stmt_n)
+            || !checked_slice_local_ok(node.root_next, slice.stmt_n)
+            || !checked_slice_local_ok(node.first_expr, slice.edge_n)
+            || !checked_slice_local_ok(node.last_expr, slice.edge_n)
+            || !checked_slice_local_ok(node.first_binding, slice.binding_n)
+            || !checked_slice_local_ok(node.last_binding, slice.binding_n)) {
+            checked_slice_release(slice); return 1
+        }
+        i += 1
+    }
+    i = 0
+    for i < slice.edge_n {
+        let edge *AstStmtExpr = &slice.edges[i]
+        edge.expr_id = checked_slice_get_int(data, &cursor)
+        edge.next = checked_slice_get_int(data, &cursor)
+        if (!checked_slice_local_ok(edge.expr_id, slice.expr_n)
+            || !checked_slice_local_ok(edge.next, slice.edge_n)) {
+            checked_slice_release(slice); return 1
+        }
+        i += 1
+    }
+    i = 0
+    for i < slice.binding_n {
+        let binding *AstBinding = &slice.bindings[i]
+        binding.id = checked_slice_get_int(data, &cursor)
+        binding.sym_id = checked_slice_get_int(data, &cursor)
+        binding.sym_type_id = checked_slice_get_int(data, &cursor)
+        binding.sym_kind = checked_slice_get_int(data, &cursor)
+        binding.sym_flags = checked_slice_get_int(data, &cursor)
+        binding.sym_offset = checked_slice_get_int(data, &cursor)
+        binding.file_id = checked_slice_get_int(data, &cursor)
+        binding.owner_decl = checked_slice_get_int(data, &cursor)
+        binding.stmt_id = checked_slice_get_int(data, &cursor)
+        binding.name_token = checked_slice_get_int(data, &cursor)
+        binding.is_param = checked_slice_get_int(data, &cursor)
+        binding.next = checked_slice_get_int(data, &cursor)
+        if (!checked_slice_local_ok(binding.stmt_id, slice.stmt_n)
+            || !checked_slice_local_ok(binding.next, slice.binding_n)) {
+            checked_slice_release(slice); return 1
+        }
+        i += 1
+    }
+    slice.symbols = checked_zero_rows(slice.symbol_n,
+        sizeof(CheckedSliceSymbol)).to_type(*CheckedSliceSymbol)
+    if (slice.symbol_n > 0 && slice.symbols == 0) {
+        checked_slice_release(slice); return -1
+    }
+    i = 0
+    for i < slice.symbol_n {
+        let sym *CheckedSliceSymbol = &slice.symbols[i]
+        sym.old_id = checked_slice_get_int(data, &cursor)
+        sym.name_len = checked_slice_get_int(data, &cursor)
+        sym.kind = checked_slice_get_int(data, &cursor)
+        sym.type_id = checked_slice_get_int(data, &cursor)
+        sym.offset = checked_slice_get_int(data, &cursor)
+        sym.flags = checked_slice_get_int(data, &cursor)
+        sym.cval = checked_slice_get_u64(data, &cursor).to_type(i64)
+        sym.const_ready = checked_slice_get_int(data, &cursor)
+        sym.const_expr_off = checked_slice_get_int(data, &cursor)
+        sym.const_expr_len = checked_slice_get_int(data, &cursor)
+        sym.const_expr_kind = checked_slice_get_int(data, &cursor)
+        sym.def_line = checked_slice_get_int(data, &cursor)
+        sym.def_col = checked_slice_get_int(data, &cursor)
+        sym.ast_binding_row = checked_slice_get_int(data, &cursor)
+        if (sym.name_len <= 0 || sym.name_len > 65536
+            || sym.old_id < 0 || sym.type_id < 0
+            || cursor + sym.name_len > size) {
+            checked_slice_release(slice); return 1
+        }
+        sym.name = malloc(sym.name_len.to_type(u64)).to_type(*u8)
+        if (sym.name == 0) { checked_slice_release(slice); return -1 }
+        let j int = 0
+        for j < sym.name_len {
+            sym.name[j] = data[cursor + j]
+            j += 1
+        }
+        cursor += sym.name_len
+        i += 1
+    }
+    if (cursor != size) { checked_slice_release(slice); return 1 }
+    return 0
+}
+
+// checked_slice_grow_expr/stmt/edge/binding/function：按需扩容全局 arena。
+fn checked_slice_grow_expr(need int) int {
+    if (ast_expr_count + need <= ast_expr_cap) { return 0 }
+    let cap int = ast_expr_count + need
+    let next *AstExpr = malloc((cap * sizeof(AstExpr)).to_type(u64)).to_type(*AstExpr)
+    if (next == 0) { return -1 }
+    if (ast_expr_count > 0) {
+        memcpy(next, ast_expr_nodes, (ast_expr_count * sizeof(AstExpr)).to_type(u64))
+    }
+    if (ast_expr_nodes != 0) { free(ast_expr_nodes.to_type(*void)) }
+    ast_expr_nodes = next; ast_expr_cap = cap
+    return 0
+}
+
+fn checked_slice_grow_stmt(need int) int {
+    if (ast_stmt_count + need <= ast_stmt_cap) { return 0 }
+    let cap int = ast_stmt_count + need
+    let next *AstStmt = malloc((cap * sizeof(AstStmt)).to_type(u64)).to_type(*AstStmt)
+    if (next == 0) { return -1 }
+    if (ast_stmt_count > 0) {
+        memcpy(next, ast_stmt_nodes, (ast_stmt_count * sizeof(AstStmt)).to_type(u64))
+    }
+    if (ast_stmt_nodes != 0) { free(ast_stmt_nodes.to_type(*void)) }
+    ast_stmt_nodes = next; ast_stmt_cap = cap
+    return 0
+}
+
+fn checked_slice_grow_edge(need int) int {
+    if (ast_stmt_expr_count + need <= ast_stmt_expr_cap) { return 0 }
+    let cap int = ast_stmt_expr_count + need
+    let next *AstStmtExpr = malloc((cap * sizeof(AstStmtExpr)).to_type(u64)).to_type(*AstStmtExpr)
+    if (next == 0) { return -1 }
+    if (ast_stmt_expr_count > 0) {
+        memcpy(next, ast_stmt_exprs, (ast_stmt_expr_count * sizeof(AstStmtExpr)).to_type(u64))
+    }
+    if (ast_stmt_exprs != 0) { free(ast_stmt_exprs.to_type(*void)) }
+    ast_stmt_exprs = next; ast_stmt_expr_cap = cap
+    return 0
+}
+
+fn checked_slice_grow_binding(need int) int {
+    if (ast_binding_count + need <= ast_binding_cap) { return 0 }
+    let cap int = ast_binding_count + need
+    let next *AstBinding = malloc((cap * sizeof(AstBinding)).to_type(u64)).to_type(*AstBinding)
+    if (next == 0) { return -1 }
+    if (ast_binding_count > 0) {
+        memcpy(next, ast_bindings, (ast_binding_count * sizeof(AstBinding)).to_type(u64))
+    }
+    if (ast_bindings != 0) { free(ast_bindings.to_type(*void)) }
+    ast_bindings = next; ast_binding_cap = cap
+    return 0
+}
+
+fn checked_slice_grow_function(need int) int {
+    if (ast_function_count + need <= ast_function_cap) { return 0 }
+    let cap int = ast_function_count + need
+    let next *AstFunctionContext = malloc(
+        (cap * sizeof(AstFunctionContext)).to_type(u64)).to_type(*AstFunctionContext)
+    if (next == 0) { return -1 }
+    if (ast_function_count > 0) {
+        memcpy(next, ast_function_nodes,
+            (ast_function_count * sizeof(AstFunctionContext)).to_type(u64))
+    }
+    if (ast_function_nodes != 0) { free(ast_function_nodes.to_type(*void)) }
+    ast_function_nodes = next; ast_function_cap = cap
+    return 0
+}
+
+// checked_slice_find_file：按路径查找当前 GenState 文件下标；找不到返回 -1。
+fn checked_slice_find_file(path *char) int {
+    let gs *gen.GenState = gen.G()
+    let path_len int = 0
+    for path[path_len] != 0 { path_len += 1 }
+    let i int = 0
+    for i < gs.p_file_n {
+        let file gen.PFile = gs.p_files[i]
+        if (file.path_len == path_len) {
+            let j int = 0
+            for j < path_len {
+                if (gs.task.np_data[file.path_off + j] != path[j].to_type(u8)) { break }
+                j += 1
+            }
+            if (j == path_len) { return i }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// checked_slice_import：把切片追加到当前 AST arena，返回新函数行下标。
+// decl_row_override>=0 时使用调用方当前的声明行（production 跳过路径）；
+// 否则使用切片内 decl_row（C2 自测路径）。0 成功、1 不兼容、-1 内部错误。
+pub fn checked_slice_import(data *u8, size int, decl_row_override int,
+    out_index *int) int {
+    let slice CheckedFunctionSlice
+    let parsed int = checked_slice_parse(data, size, &slice)
+    if (parsed != 0) { return parsed }
+    let file_id int = checked_slice_find_file(slice.file_path)
+    let target_decl int = decl_row_override >= 0 ? decl_row_override : slice.decl_row
+    if (file_id < 0 || target_decl < 0 || target_decl >= ast_decl_count
+        || ast_decl_nodes[target_decl].body_stmt >= 0
+        || checked_slice_grow_expr(slice.expr_n) != 0
+        || checked_slice_grow_stmt(slice.stmt_n) != 0
+        || checked_slice_grow_edge(slice.edge_n) != 0
+        || checked_slice_grow_binding(slice.binding_n) != 0
+        || checked_slice_grow_function(1) != 0) {
+        checked_slice_release(&slice); return -1
+    }
+    // 其他函数增删 token 会移动绝对 token 下标；按当前函数声明起点重定基。
+    let gs *gen.GenState = gen.G()
+    let old_first int = slice.token_first
+    let new_first int = ast_decl_nodes[target_decl].first
+    let token_delta int = new_first - old_first
+    let file_token_n int = gs.p_files[file_id].token_n
+    let max_old int = gs.task.c_sym_n
+    let si int = 0
+    for si < slice.symbol_n {
+        if (slice.symbols[si].old_id >= max_old) { max_old = slice.symbols[si].old_id + 1 }
+        si += 1
+    }
+    let sym_map *int = malloc((max_old * sizeof(int)).to_type(u64)).to_type(*int)
+    if (sym_map == 0) { checked_slice_release(&slice); return -1 }
+    si = 0
+    for si < max_old { sym_map[si] = -1; si += 1 }
+    si = 0
+    for si < slice.symbol_n {
+        let sym *CheckedSliceSymbol = &slice.symbols[si]
+        let name_off int = gen.tml_intern_str(sym.name, 0, sym.name_len)
+        if (name_off < 0) {
+            free(sym_map.to_type(*void)); checked_slice_release(&slice); return -1
+        }
+        if ((sym.flags & gen.F_GLOBAL) != 0) {
+            let found int = gen.sym_lookup_off(name_off, sym.name_len)
+            if (found < 0 || gs.task.c_syms[found].type_id != sym.type_id
+                || gs.task.c_syms[found].kind != sym.kind
+                || gs.task.c_syms[found].flags != sym.flags) {
+                free(sym_map.to_type(*void)); checked_slice_release(&slice); return 1
+            }
+            sym_map[sym.old_id] = found
+        } else {
+            let added int = gen.sym_push_pool(name_off, sym.name_len, sym.kind,
+                sym.type_id, sym.flags)
+            if (added < 0) {
+                free(sym_map.to_type(*void)); checked_slice_release(&slice); return -1
+            }
+            gs.task.c_syms[added].offset = sym.offset
+            gs.task.c_syms[added].cval = sym.cval
+            gs.task.c_syms[added].const_ready = sym.const_ready
+            gs.task.c_syms[added].const_expr_off = -1
+            gs.task.c_syms[added].const_expr_len = 0
+            gs.task.c_syms[added].const_expr_kind = 0
+            gs.task.c_syms[added].def_line = sym.def_line
+            gs.task.c_syms[added].def_col = sym.def_col
+            gs.task.c_syms[added].ast_binding_row = -1
+            sym_map[sym.old_id] = added
+        }
+        si += 1
+    }
+    // 局部符号：按 AstBinding 行与当前源码 token 重建，保证 expr/binding 的
+    // sym_id 指向同一个新符号槽。
+    let binding_sym *int = malloc((slice.binding_n * sizeof(int)).to_type(u64)).to_type(*int)
+    if (binding_sym == 0) {
+        free(sym_map.to_type(*void)); checked_slice_release(&slice); return -1
+    }
+    si = 0
+    for si < slice.binding_n { binding_sym[si] = -1; si += 1 }
+    si = 0
+    for si < slice.binding_n {
+        let binding *AstBinding = &slice.bindings[si]
+        let file gen.PFile = gs.p_files[file_id]
+        let name_token int = binding.name_token + token_delta
+        if (name_token < 0 || name_token >= file.token_n) {
+            free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+            checked_slice_release(&slice); return 1
+        }
+        let token gen.Tok = file.tokens[name_token]
+        if (token.len <= 0 || token.start < 0 || token.start + token.len > file.source_len) {
+            free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+            checked_slice_release(&slice); return 1
+        }
+        // 导入的局部符号在 GenState 中没有作用域弹出点；给名字加不可由源码
+        // 产生的缓存前缀，避免它遮蔽后续函数查到的同名全局/局部。
+        let prefixed [512]u8
+        let pn int = 0
+        prefixed[pn] = 1; pn += 1
+        pn = gen.append_int(&prefixed[0], pn, decl_row_override)
+        pn = gen.append_byte(&prefixed[0], pn, '.')
+        if (token.len > 480) {
+            free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+            checked_slice_release(&slice); return 1
+        }
+        let ti int = 0
+        for ti < token.len {
+            prefixed[pn] = file.source[token.start + ti]
+            pn += 1
+            ti += 1
+        }
+        let name_off int = gen.tml_intern_str(&prefixed[0], 0, pn)
+        if (name_off < 0) {
+            free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+            checked_slice_release(&slice); return -1
+        }
+        let added int = gen.sym_push_pool(name_off, pn, binding.sym_kind,
+            binding.sym_type_id, binding.sym_flags)
+        if (added < 0) {
+            free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+            checked_slice_release(&slice); return -1
+        }
+        gs.task.c_syms[added].offset = binding.sym_offset
+        gs.task.c_syms[added].const_expr_off = -1
+        gs.task.c_syms[added].const_expr_len = 0
+        gs.task.c_syms[added].const_expr_kind = 0
+        gs.task.c_syms[added].def_line = token.line
+        gs.task.c_syms[added].def_col = token.col
+        gs.task.c_syms[added].ast_binding_row = -1
+        binding_sym[si] = added
+        si += 1
+    }
+    let expr_base int = ast_expr_count
+    let stmt_base int = ast_stmt_count
+    let edge_base int = ast_stmt_expr_count
+    let binding_base int = ast_binding_count
+    let i int = 0
+    for i < slice.expr_n {
+        let source AstExpr = slice.exprs[i]
+        let dest *AstExpr = &ast_expr_nodes[expr_base + i]
+        dest[0] = source
+        dest.file_id = file_id
+        dest.first += token_delta
+        dest.after += token_delta
+        dest.token_count = file_token_n
+        if (dest.first < 0 || dest.after < dest.first || dest.after > file_token_n) {
+            free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+            checked_slice_release(&slice); return 1
+        }
+        let mapped int = -1
+        if (source.binding_row >= 0) {
+            if (source.binding_row >= slice.binding_n) {
+                free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+                checked_slice_release(&slice); return 1
+            }
+            mapped = binding_sym[source.binding_row]
+        } else if (source.sym_id >= 0) {
+            if (source.sym_id >= max_old) {
+                free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+                checked_slice_release(&slice); return 1
+            }
+            mapped = sym_map[source.sym_id]
+            if (mapped < 0) {
+            }
+        }
+        if (mapped >= 0) {
+            dest.sym_id = mapped
+            dest.sym_name_off = gs.task.c_syms[mapped].name_off
+            dest.sym_name_len = gs.task.c_syms[mapped].name_len
+        } else {
+            dest.sym_id = -1
+            dest.sym_name_off = -1
+            dest.sym_name_len = 0
+        }
+        if (source.child0 >= 0) { dest.child0 = expr_base + source.child0 }
+        if (source.child1 >= 0) { dest.child1 = expr_base + source.child1 }
+        if (source.child2 >= 0) { dest.child2 = expr_base + source.child2 }
+        if (source.binding_row >= 0) {
+            dest.binding_row = binding_base + source.binding_row
+        }
+        i += 1
+    }
+    ast_expr_count += slice.expr_n
+    i = 0
+    for i < slice.stmt_n {
+        let source AstStmt = slice.stmts[i]
+        let dest *AstStmt = &ast_stmt_nodes[stmt_base + i]
+        dest[0] = source
+        dest.file_id = file_id
+        dest.first += token_delta
+        dest.after += token_delta
+        dest.token_count = file_token_n
+        if (dest.first < 0 || dest.after < dest.first || dest.after > file_token_n) {
+            free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+            checked_slice_release(&slice); return 1
+        }
+        if (source.parent >= 0) { dest.parent = stmt_base + source.parent }
+        if (source.first_child >= 0) { dest.first_child = stmt_base + source.first_child }
+        if (source.last_child >= 0) { dest.last_child = stmt_base + source.last_child }
+        if (source.next_sibling >= 0) { dest.next_sibling = stmt_base + source.next_sibling }
+        if (source.root_next >= 0) { dest.root_next = stmt_base + source.root_next }
+        if (source.first_expr >= 0) { dest.first_expr = edge_base + source.first_expr }
+        if (source.last_expr >= 0) { dest.last_expr = edge_base + source.last_expr }
+        if (source.first_binding >= 0) {
+            dest.first_binding = binding_base + source.first_binding
+        }
+        if (source.last_binding >= 0) {
+            dest.last_binding = binding_base + source.last_binding
+        }
+        i += 1
+    }
+    ast_stmt_count += slice.stmt_n
+    i = 0
+    for i < slice.edge_n {
+        let source AstStmtExpr = slice.edges[i]
+        let dest *AstStmtExpr = &ast_stmt_exprs[edge_base + i]
+        dest[0] = source
+        if (source.expr_id >= 0) { dest.expr_id = expr_base + source.expr_id }
+        if (source.next >= 0) { dest.next = edge_base + source.next }
+        i += 1
+    }
+    ast_stmt_expr_count += slice.edge_n
+    i = 0
+    for i < slice.binding_n {
+        let source AstBinding = slice.bindings[i]
+        let dest *AstBinding = &ast_bindings[binding_base + i]
+        dest[0] = source
+        dest.file_id = file_id
+        dest.name_token += token_delta
+        if (dest.name_token < 0 || dest.name_token >= file_token_n) {
+            free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+            checked_slice_release(&slice); return 1
+        }
+        dest.sym_id = binding_sym[i]
+        if (source.stmt_id >= 0) { dest.stmt_id = stmt_base + source.stmt_id }
+        if (source.next >= 0) { dest.next = binding_base + source.next }
+        i += 1
+    }
+    ast_binding_count += slice.binding_n
+    let row int = ast_function_count
+    let function *AstFunctionContext = &ast_function_nodes[row]
+    function.file_id = file_id
+    function.owner_decl = slice.owner_decl
+    function.decl_row = target_decl
+    function.token_first = new_first
+    function.token_after = new_first + (slice.token_after - slice.token_first)
+    if (function.token_after < new_first || function.token_after > file_token_n) {
+        free(binding_sym.to_type(*void)); free(sym_map.to_type(*void))
+        checked_slice_release(&slice); return 1
+    }
+    function.expr_first = expr_base
+    function.expr_after = expr_base + slice.expr_n
+    function.stmt_first = stmt_base
+    function.stmt_after = stmt_base + slice.stmt_n
+    function.edge_first = edge_base
+    function.edge_after = edge_base + slice.edge_n
+    function.binding_first = binding_base
+    function.binding_after = binding_base + slice.binding_n
+    function.body_stmt = stmt_base + slice.body_stmt
+    function.asm_first = 0
+    function.asm_after = 0
+    ast_function_count += 1
+    gs.task.c_stats_ast_functions += 1
+    gs.task.c_stats_ast_nodes += slice.expr_n
+    gs.task.c_stats_stmt_nodes += slice.stmt_n
+    gs.task.c_stats_ast_refs += slice.edge_n
+    gs.task.c_stats_ast_bindings += slice.binding_n
+    ast_decl_nodes[target_decl].body_stmt = function.body_stmt
+    free(binding_sym.to_type(*void))
+    free(sym_map.to_type(*void))
+    checked_slice_release(&slice)
+    if (out_index != 0) { out_index[0] = row }
+    return 0
+}
+
+// checked_slice_self_test：C2 离线探针。先冷降 unit，再清空 AST arena、
+// 从函数切片重建快照并再次 lowering，比较两次模块身份。
+// 0 一致、1 不一致、-1 内部错误。不改变生产构建路径。
+pub fn checked_slice_self_test(unit *CheckedModule) int {
+    if (unit == 0 || unit.storage == 0) { return -1 }
+    let store *CheckedStorage = unit.storage.to_type(*CheckedStorage)
+    let n int = store.function_n
+    if (n <= 0) { return -1 }
+    let datas **u8 = malloc((n * 8).to_type(u64)).to_type(**u8)
+    let sizes *int = malloc((n * sizeof(int)).to_type(u64)).to_type(*int)
+    if (datas == 0 || sizes == 0) {
+        if (datas != 0) { free(datas.to_type(*void)) }
+        if (sizes != 0) { free(sizes.to_type(*void)) }
+        return -1
+    }
+    let i int = 0
+    for i < n { datas[i] = 0.to_type(*u8); sizes[i] = 0; i += 1 }
+    let result int = 0
+    let first ir.IRModule
+    if (lower_module(unit, &first) != 0) { result = -1 }
+    i = 0
+    for i < n && result == 0 {
+        if (checked_slice_capture(unit, i, &datas[i], &sizes[i]) != 0) {
+            result = -1
+        }
+        i += 1
+    }
+    let second CheckedModule
+    if (result == 0) {
+        ast_expr_reset()
+        ast_stmt_reset()
+        ast_decl_reset()
+        ast_function_reset()
+        let gs *gen.GenState = gen.G()
+        gs.task.c_active_file = 0
+        gs.task.c_file_decl_i = -1
+        gs.task.c_file_decls = gs.p_files[0].decls
+        gs.task.c_file_decl_n = gs.p_files[0].decl_n
+        if (ast_decl_add_file(0) != 0) {
+            result = -1
+        } else {
+            // 恢复模块级声明的语义字段（sym_id/type_id/init_expr 等）。
+            i = 0
+            for 1 {
+                if (i >= store.declaration_n) { break }
+                if (i < ast_decl_count) {
+                    ast_decl_nodes[i].sym_id = store.declarations[i].sym_id
+                    ast_decl_nodes[i].type_id = store.declarations[i].type_id
+                    ast_decl_nodes[i].init_expr = store.declarations[i].init_expr
+                    // 函数体由切片导入设置；非函数声明保持 store 的 -1。
+                    ast_decl_nodes[i].body_stmt = store.declarations[i].kind == gen.TK_FN ?
+                        -1 : store.declarations[i].body_stmt
+                }
+                i += 1
+            }
+            i = 0
+            for i < n && result == 0 {
+                let imported int = -1
+                if (checked_slice_import(datas[i], sizes[i], -1, &imported) != 0) {
+                    result = -1
+                }
+                i += 1
+            }
+        }
+    }
+    if (result == 0 && checked_module_capture(&second) != 0) { result = -1 }
+    let third ir.IRModule
+    if (result == 0 && lower_module(&second, &third) != 0) { result = -1 }
+    if (result == 0) {
+        let id1 [33]u8
+        let id2 [33]u8
+        if (ir.ir_module_identity(&first, &id1[0], 33) != 32
+            || ir.ir_module_identity(&third, &id2[0], 33) != 32) {
+            result = -1
+        } else {
+            i = 0
+            for i < 32 {
+                if (id1[i] != id2[i]) { result = 1; break }
+                i += 1
+            }
+        }
+    }
+    if (result == 0) { ir.ir_module_release(&third) }
+    if (result == 0) { ir.ir_module_release(&first) }
+    if (result == 0) { checked_module_release(&second) }
+    i = 0
+    for i < n {
+        if (datas[i] != 0) { free(datas[i].to_type(*void)) }
+        i += 1
+    }
+    free(datas.to_type(*void))
+    free(sizes.to_type(*void))
+    return result
+}
+
+// ============================================================================
+// C3：check 缓存查询与 capture 钩子
+//
+// worker 在 pass2b 前装载 check 缓存并把集合挂到这里；parser 用
+// checked_gen_function_key 查命中并导入切片。模块完整成功后 worker 再从
+// CheckedModule 快照 capture 本轮记录（命中/未命中都重写同一内容）。
+// ============================================================================
+
+let checked_check_cache_in *ir.IRFunctionCacheSet = 0
+let checked_check_cache_env u64 = 0
+let checked_check_keys *u8 = 0
+let checked_check_keys_n int = 0
+
+// checked_check_cache_begin：挂接本轮只读 check 缓存；0 表示禁用。
+pub fn checked_check_cache_begin(cache_in *ir.IRFunctionCacheSet, env_key u64) void {
+    checked_check_cache_in = cache_in
+    checked_check_cache_env = env_key
+    checked_check_keys_n = ast_decl_count > 0 ? ast_decl_count : 0
+    if (checked_check_keys_n > 0) {
+        checked_check_keys = checked_zero_rows(checked_check_keys_n,
+            ir.IR_FUNCTION_CACHE_KEY_SIZE).to_type(*u8)
+    }
+}
+
+// checked_check_cache_end：解除挂接；集合仍由 cmd 所有者释放。
+pub fn checked_check_cache_end() void {
+    checked_check_cache_in = 0
+    checked_check_cache_env = 0
+    // 键表保留到本 worker 的 capture 结束；worker 是短生命周期进程，不在此释放。
+}
+
+// checked_check_store_key：保存 pass2b 前的函数键（供 capture 使用）。
+pub fn checked_check_store_key(decl_row int, key *u8) void {
+    if (key == 0 || decl_row < 0 || decl_row >= checked_check_keys_n
+        || checked_check_keys == 0) { return }
+    let base int = decl_row * ir.IR_FUNCTION_CACHE_KEY_SIZE
+    let i int = 0
+    for i < ir.IR_FUNCTION_CACHE_KEY_SIZE {
+        checked_check_keys[base + i] = key[i]
+        i += 1
+    }
+}
+
+// checked_check_key_for_decl：取 pass2b 前保存的键；未保存返回 1。
+fn checked_check_key_for_decl(decl_row int, out *u8) int {
+    if (out == 0 || decl_row < 0 || decl_row >= checked_check_keys_n
+        || checked_check_keys == 0) { return 1 }
+    let base int = decl_row * ir.IR_FUNCTION_CACHE_KEY_SIZE
+    if (checked_check_keys[base] == 0) { return 1 }
+    let i int = 0
+    for i < ir.IR_FUNCTION_CACHE_KEY_SIZE {
+        out[i] = checked_check_keys[base + i]
+        i += 1
+    }
+    return 0
+}
+
+// checked_check_cache_active：parser 判断是否启用 check 缓存。
+pub fn checked_check_cache_active() int {
+    return checked_check_cache_in != 0 ? 1 : 0
+}
+
+// checked_check_cache_lookup：按键取记录；命中返回 1 并借出 data/size，未命中 0。
+pub fn checked_check_cache_lookup(key *char, out_data **u8, out_size *int) int {
+    if (checked_check_cache_in == 0 || key == 0) { return 0 }
+    let entry *ir.IRFunctionCacheEntry = ir.ir_function_cache_set_find(
+        checked_check_cache_in, key)
+    if (entry == 0 || entry.data == 0 || entry.size <= 0) { return 0 }
+    out_data[0] = entry.data
+    out_size[0] = entry.size
+    return 1
+}
+
+// checked_check_cache_capture：从已验证快照 capture 全部函数的 check 切片。
+// 含模板等暂不支持的函数跳过；内部错误返回 -1。
+pub fn checked_check_cache_capture(unit *CheckedModule,
+    out *ir.IRFunctionCacheSet, env_key u64) int {
+    if (unit == 0 || unit.storage == 0 || out == 0) { return -1 }
+    let store *CheckedStorage = unit.storage.to_type(*CheckedStorage)
+    let i int = 0
+    let total_size int = 0
+    for i < store.function_n {
+        let key [ir.IR_FUNCTION_CACHE_KEY_SIZE]u8
+        let decl_row int = store.functions[i].decl_row
+        if (checked_check_key_for_decl(decl_row, &key[0]) != 0) {
+            // 例如 CT 函数或未启用 check 缓存时：不写记录，下次仍完整检查。
+            i += 1
+            continue
+        }
+        let data *u8 = 0
+        let size int = 0
+        let captured int = checked_slice_capture(unit, i, &data, &size)
+        if (captured == 0) {
+            if (total_size + size > 16777216) {
+                free(data.to_type(*void))
+            } else if (ir.ir_function_cache_set_add(out, gen.arr_cstr(&key[0]),
+                    data, size) != 0) {
+                free(data.to_type(*void))
+                return -1
+            } else {
+                total_size += size
+            }
+        } else if (captured < 0) {
+            return -1
+        }
+        i += 1
+    }
+    return 0
+}

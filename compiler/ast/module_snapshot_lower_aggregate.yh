@@ -1,0 +1,233 @@
+module ast
+import gen
+import ir
+
+// module_snapshot_lower_aggregate.yh —— 纯快照数组/结构体字面量与聚合存储。
+//
+// 由 module_snapshot_lower.yh 按完整函数边界拆出（LA2a）；聚合副本、数组
+// 元素与切片字面量后备存储继续使用既有 AstIRBuilder 与布局事实。
+
+// checked_lower_slice_literal_escapes：直接返回的切片字面量必须拥有超出当前函数帧的后备存储。
+fn checked_lower_slice_literal_escapes(l *CheckedLower, expr_id int) int {
+    let declaration AstDecl = l.store.declarations[l.function.decl_row]
+    let sig int = l.store.types[declaration.type_id].sub
+    if (checked_lower_is_slice(l.store, l.store.sig_ret[sig]) == 0) { return 0 }
+    let stmt_id int = l.function.stmt_first
+    for stmt_id < l.function.stmt_after {
+        let stmt AstStmt = l.store.statements[stmt_id]
+        if (stmt.kind == AST_STMT_RETURN && stmt.first_expr >= 0
+            && stmt.first_expr < l.store.edge_n) {
+            let edge AstStmtExpr = l.store.edges[stmt.first_expr]
+            let returned int = edge.expr_id
+            for returned >= 0 && returned < l.store.expression_n &&
+                l.store.expressions[returned].kind == AST_EXPR_PRIMARY &&
+                l.store.expressions[returned].child0 >= 0 {
+                returned = l.store.expressions[returned].child0
+            }
+            if (returned == expr_id) { return 1 }
+        }
+        stmt_id += 1
+    }
+    return 0
+}
+
+// checked_lower_array_elements：把元素列表按源码顺序写进 dest 指向的后备存储。
+// 返回元素个数（>=0）、-1 内部错误、-2 不支持；expected_count < 0 表示不检查个数
+// （切片字面量长度由列表决定）。source_type 的 elem 决定步长与元素类型。
+fn checked_lower_array_elements(l *CheckedLower, flow *CheckedFlow, dest int,
+    source_type int, list_head int, expected_count int) int {
+    let b *AstIRBuilder = &l.builder
+    if (source_type < 0 || source_type >= l.store.type_n) { return -2 }
+    let ty gen.CType = l.store.types[source_type]
+    if ((ty.kind != gen.TY_ARRAY && ty.kind != gen.TY_SLICE)
+        || ty.elem < 0 || ty.elem >= l.store.type_n) { return -2 }
+    let elem gen.CType = l.store.types[ty.elem]
+    if (elem.size <= 0) { return -2 }
+    let count int = 0
+    let walk int = list_head
+    for walk >= 0 {
+        if (walk >= l.store.expression_n) { l.reason = "首片：数组字面量元素越界"; return -2 }
+        let list_node AstExpr = l.store.expressions[walk]
+        if (list_node.kind != AST_EXPR_ARG_LIST) { l.reason = "首片：数组字面量元素链损坏"; return -2 }
+        count += 1
+        walk = list_node.child0
+    }
+    if (expected_count >= 0 && count != expected_count) {
+        l.reason = "首片：数组字面量元素数与长度不一致"
+        return -2
+    }
+    let ids *int = 0
+    if (count > 0) {
+        ids = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
+        if (ids == 0) { return -1 }
+    }
+    walk = list_head
+    let pos int = count
+    for walk >= 0 {
+        let list_node AstExpr = l.store.expressions[walk]
+        pos -= 1
+        ids[pos] = list_node.child1
+        walk = list_node.child0
+    }
+    let result int = 0
+    let i int = 0
+    for i < count {
+        let elem_expr int = ids[i]
+        if (elem_expr < 0 || elem_expr >= l.store.expression_n) { result = -2; break }
+        // 标量元素的 GEP 结果必须是指向该标量的 canonical 指针，STORE 才能过验。
+        let elem_kind int = checked_lower_type(l, ty.elem)
+        let ptr_kind int = checked_lower_pointer_kind(elem_kind)
+        if (ptr_kind < 0) { result = -2; break }
+        let elem_ptr int = ast_ir_b_add_gep_const(b, dest, i * elem.size, ptr_kind)
+        if (elem_ptr < 0) { result = -1; break }
+        if (checked_lower_is_aggregate(l.store, ty.elem) != 0) {
+            result = checked_lower_aggregate_store(l, flow, elem_ptr, ty.elem, elem_expr)
+        } else {
+            if (elem_kind < 0) { result = -2; break }
+            let value int = checked_lower_expr_inner(l, flow, elem_expr)
+            if (value == -2) { result = -2; break }
+            if (value < 0) { result = -1; break }
+            if (b.insts[value].result_type != elem_kind) {
+                let literal AstExpr = l.store.expressions[elem_expr]
+                if (literal.is_lit != 0 && ir.ir_integer_type(elem_kind) != 0) {
+                    value = checked_lower_literal_retype(l, value, &literal, elem_kind)
+                } else {
+                    value = checked_lower_adjust(l, value, elem_kind)
+                }
+                if (value < 0) { result = -2; break }
+            }
+            if (ast_ir_b_add_store(b, elem_ptr, value) < 0) { result = -1; break }
+        }
+        i += 1
+    }
+    free(ids.to_type(*void))
+    return result != 0 ? result : count
+}
+
+// checked_lower_array_literal：定长数组字面量逐元素写进 dest（元素可为标量或聚合）。
+fn checked_lower_array_literal(l *CheckedLower, flow *CheckedFlow, dest int,
+    source_type int, expr_id int) int {
+    if (source_type < 0 || source_type >= l.store.type_n) { return -2 }
+    let ty gen.CType = l.store.types[source_type]
+    if (ty.kind != gen.TY_ARRAY || ty.len < 0 || ty.size <= 0) { return -2 }
+    let node AstExpr = l.store.expressions[expr_id]
+    let count int = checked_lower_array_elements(l, flow, dest, source_type, node.child0, ty.len)
+    if (count < 0) { return count }
+    return 0
+}
+
+// checked_lower_struct_literal：结构体/联合体字面量逐字段写进 dest。
+// 字段节点 op 是快照字段表的绝对下标；缺省字段保持未初始化（与旧后端一致）。
+fn checked_lower_struct_literal(l *CheckedLower, flow *CheckedFlow, dest int,
+    expr_id int) int {
+    let b *AstIRBuilder = &l.builder
+    let node AstExpr = l.store.expressions[expr_id]
+    let field_node int = node.child0
+    let result int = 0
+    for field_node >= 0 {
+        if (field_node >= l.store.expression_n) { result = -2; break }
+        let fn2 AstExpr = l.store.expressions[field_node]
+        if (fn2.kind != AST_EXPR_STRUCT_FIELD || fn2.op < 0
+            || fn2.op >= l.store.field_n || fn2.child1 < 0) { result = -2; break }
+        let f gen.SField = l.store.fields[fn2.op]
+        let fkind int = checked_lower_type(l, f.type_id)
+        let ptr_kind int = checked_lower_pointer_kind(fkind)
+        if (ptr_kind < 0) { return -2 }
+        let fptr int = ast_ir_b_add_gep_const(b, dest, f.offset, ptr_kind)
+        if (fptr < 0) { result = -1; break }
+        if (checked_lower_is_aggregate(l.store, f.type_id) != 0) {
+            result = checked_lower_aggregate_store(l, flow, fptr, f.type_id, fn2.child1)
+        } else {
+            if (fkind < 0) { result = -2; break }
+            let value int = checked_lower_expr_inner(l, flow, fn2.child1)
+            if (value == -2) { result = -2; break }
+            if (value < 0) { result = -1; break }
+            if (b.insts[value].result_type != fkind) {
+                let literal AstExpr = l.store.expressions[fn2.child1]
+                if (literal.is_lit != 0 && ir.ir_integer_type(fkind) != 0) {
+                    value = checked_lower_literal_retype(l, value, &literal, fkind)
+                } else {
+                    value = checked_lower_adjust(l, value, fkind)
+                }
+                if (value < 0) { result = -2; break }
+            }
+            if (ast_ir_b_add_store(b, fptr, value) < 0) { result = -1; break }
+        }
+        field_node = fn2.child0
+    }
+    return result
+}
+
+// checked_lower_aggregate_store：把一个聚合值写进 dest 指向的存储。
+// 支持数组/结构体/联合体字面量与聚合变量/左值副本；其他来源返回 -2。
+fn checked_lower_aggregate_store(l *CheckedLower, flow *CheckedFlow, dest int,
+    source_type int, expr_id int) int {
+    let b *AstIRBuilder = &l.builder
+    if (source_type < 0 || source_type >= l.store.type_n || expr_id < 0
+        || expr_id >= l.store.expression_n) {
+        l.reason = "首片：聚合初始化类型或表达式编号无效"
+        return -2
+    }
+    let ty gen.CType = l.store.types[source_type]
+    if (ty.size <= 0
+        || (ty.kind != gen.TY_ARRAY && ty.kind != gen.TY_STRUCT && ty.kind != gen.TY_UNION
+            && ty.kind != gen.TY_SLICE)) {
+        l.reason = "首片：聚合初始化目标不是有布局的聚合类型"
+        return -2
+    }
+    let node AstExpr = l.store.expressions[expr_id]
+    // 剥掉括号等 PRIMARY 包装：聚合来源只看最内层结构。
+    let inner int = expr_id
+    let inner_node AstExpr = node
+    for inner_node.kind == AST_EXPR_PRIMARY && inner_node.child0 >= 0 {
+        inner = inner_node.child0
+        if (inner < 0 || inner >= l.store.expression_n) { return -2 }
+        inner_node = l.store.expressions[inner]
+    }
+    if (ty.kind == gen.TY_SLICE
+        && (inner_node.kind == AST_EXPR_ARRAY || inner_node.kind == AST_EXPR_SLICE)) {
+        // 切片来源必须先于数组字面量分支：切片字面量的元素列表要写进后备数组。
+        return checked_lower_slice_header(l, flow, dest, source_type, inner)
+    }
+    if (ty.kind == gen.TY_SLICE && inner_node.kind == AST_EXPR_CAST
+        && inner_node.child0 >= 0 && inner_node.child0 < l.store.expression_n) {
+        // 数组/切片显式转型只建立视图头，不复制或改动底层元素。
+        let source AstExpr = l.store.expressions[inner_node.child0]
+        if (source.type_id >= 0 && source.type_id < l.store.type_n
+            && (l.store.types[source.type_id].kind == gen.TY_ARRAY
+                || l.store.types[source.type_id].kind == gen.TY_SLICE)) {
+            return checked_lower_slice_header(l, flow, dest, source_type, inner_node.child0)
+        }
+    }
+    if (inner_node.kind == AST_EXPR_ARRAY) {
+        let result int = checked_lower_array_literal(l, flow, dest, source_type, inner)
+        if (result == -2) { l.reason = "首片：聚合数组字面量 lowering 形态无效" }
+        return result
+    }
+    if (inner_node.kind == AST_EXPR_STRUCT_INIT) {
+        let result int = checked_lower_struct_literal(l, flow, dest, inner)
+        if (result == -2) { l.reason = "首片：结构体字面量 lowering 形态无效" }
+        return result
+    }
+    let src int = -1
+    if (inner_node.kind == AST_EXPR_PRIMARY) {
+        src = checked_lower_lvalue_ptr(l, flow, inner)
+    } else if (inner_node.kind == AST_EXPR_INDEX || inner_node.kind == AST_EXPR_MEMBER) {
+        src = checked_lower_lvalue_ptr(l, flow, inner)
+    } else if (inner_node.kind == AST_EXPR_UNARY && inner_node.op == gen.TK_STAR) {
+        // 聚合指针解引用的右值仍是对象地址，整体复制而不按标量 LOAD。
+        src = checked_lower_lvalue_ptr(l, flow, inner)
+    } else if (inner_node.kind == AST_EXPR_CALL) {
+        src = checked_lower_expr_inner(l, flow, inner)
+        if (src == -2) { l.reason = "首片：聚合调用未生成运行期地址或静态结果" }
+    }
+    if (src == -2) {
+        if (inner_node.kind == AST_EXPR_INDEX || inner_node.kind == AST_EXPR_MEMBER) {
+            l.reason = "首片：聚合初始化左值来源不可寻址"
+        }
+        return -2
+    }
+    if (src < 0) { return -1 }
+    if (ast_ir_b_add_memcpy(b, dest, src, ty.size) < 0) { return -1 }
+    return 0
+}

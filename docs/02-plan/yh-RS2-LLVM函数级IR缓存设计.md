@@ -1,4 +1,59 @@
-# yh RS2：LLVM 模式函数级 check/IR 缓存设计（2026-10-19 侦察）
+# yh RS2：LLVM 模式函数级 check/IR 缓存设计（2026-10-19 侦察，2026-10-22 实施修订）
+
+> 2026-10-22：LA3 交付 1–2 已按本文修订版落地（见
+> [LA3 完成报告](../01-finished/yh-LLVM架构LA3-2026-10-22.md)）。旧侦察记录
+> 保留在文末“历史记录”，不再作为实现依据。函数级 check 复用（交付 3）未启动。
+
+## 2026-10-22 实施版
+
+### 1. 缓存单元
+
+每个函数缓存记录是一个**只含单函数及其贡献闭包的迷你 IRModule**，不是
+`IRModuleFunction + type_map` 的裸拷贝：
+
+- 函数体沿用 `ir_serialize` 稳定编码；
+- 类型闭包按依赖后序保存（自引用/前向类型返回 miss，不缓存）；
+- 符号闭包含函数自身、`GLOB_ADDR`/`FN_ADDR` 目标与直接调用名；
+  其他函数一律降为外部声明，避免迷你模块出现无 body 的定义；
+- 全局实体闭包含函数产生的字符串/静态数据及重定位目标；
+- 来源闭包含函数 locs 与符号声明位置，命中时按当前模块路径重建。
+
+迷你模块先通过 `ir_module_verify`，再序列化为 `IRModule` 字节流；外层 32 字节
+头保存 magic/版本/环境键/payload 长度。
+
+### 2. 键与失效
+
+函数键 = schema + 模块环境键 + 目标/指针位宽/布局/ABI + 源路径 +
+类型/字段/签名布局哈希 + 本模块非函数声明 token 流 + 本函数 token 流。
+词法器不保留注释/空白，因此注释、空行、缩进变化不改变函数键。
+
+模块环境键由 `cmd/function_ir_cache.yh` 计算：目标/优化级别/编译器指纹/
+桥版本 + 本模块 `.s.i`/`.s.ct` + 依赖模块接口。它**不含本模块函数体源码**，
+所以单函数修改不会让其他函数失效；接口、CT、目标或布局变化保守地让全部
+函数失效。
+
+### 3. 生产接入
+
+- `cmd/function_ir_cache.yh`：目录 `<build>/firc/<tag>/`、`index` 与
+  `<key>.fir`；装载失败按空缓存，模块完整成功后才原子提交记录与索引。
+- `ast.lower_module_cached`：在 `checked_lower_build_functions` 逐函数查/写；
+  命中调用 `ir_function_cache_merge` 重绑定，未命中走原 lowering 并 capture。
+- `cmd/module_worker.yh` / `llvm_pipeline.yh`：项目 worker 接入缓存；
+  单文件入口暂不接缓存。整模块前端检查保留，本阶段只缓存已受检函数的 IR。
+- `--stats`：`ir_cache_hits`、`ir_cache_misses`、`ir_lowered` 与
+  `ir_functions` 区分命中、未命中与实际 lowering。
+
+### 4. 验收
+
+`tests/selfhost/llvm-function-cache.py` + `llvmfunctioncache` 项目：
+冷编 0/4、注释变化 4/0、单函数修改 3/1、插入第 5 个函数 4/1、损坏一条记录
+只重建该记录、接口变化 0/5；O0/O2 均通过，命中构建的对象与 LLVM 文本和
+冷编逐字节一致。递归/前向类型闭包暂不缓存；函数级 check 复用仍未实现。
+
+---
+
+## 历史记录（2026-10-19 侦察，保留）
+
 
 本文件是 RS2（R2 收尾实施计划 §RS2）的侦察与实施设计，不改变代码。
 完整 R2 收尾见 `yh-R2收尾实施计划.md`。

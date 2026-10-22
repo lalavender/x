@@ -2,6 +2,7 @@ module parse
 import gen
 import comptime
 import ast
+import ir
 
 // ============================================================================
 // parse_decl.yh —— 自举编译器：顶层声明与源文件入口（两遍驱动）
@@ -320,6 +321,36 @@ pub fn parse_indexed_decls(mode int) int {
         gs.task.c_file_decl_i = i
         if (selected != 0) {
             gs.task.c_pos = node.start
+            // LA3.3 C3：pass2b 函数体可按键复用受检 AST 切片；命中时跳过
+            // 签名/body 的解析与语义检查，直接导入切片。
+            if (mode == 2 && node.kind == gen.TK_FN
+                && p_decl_is_comptime(node.start) == 0
+                && ast.checked_check_cache_active() != 0) {
+                let decl_row int = ast.checked_pdecl_decl_row(gs.task.c_active_file, i)
+                let key [ir.IR_FUNCTION_CACHE_KEY_SIZE]u8
+                if (decl_row >= 0
+                    && ast.checked_gen_function_key(decl_row, &key[0]) == 0) {
+                    ast.checked_check_store_key(decl_row, &key[0])
+                    let cache_data *u8 = 0
+                    let cache_size int = 0
+                    let lookup int = ast.checked_check_cache_lookup(gen.arr_cstr(&key[0]),
+                        &cache_data, &cache_size)
+                    if (lookup != 0) {
+                        let imported int = -1
+                        let import_rc int = ast.checked_slice_import(cache_data,
+                            cache_size, decl_row, &imported)
+                        if (import_rc != 0) {
+                        }
+                        if (import_rc == 0) {
+                            gs.task.c_pos = node.end
+                            gs.c_stats_check_cache_hits += 1
+                            gs.c_stats_check_cache_skipped += 1
+                            i += 1
+                            continue
+                        }
+                    }
+                }
+            }
             if (mode == 3) {
                 gs.task.c_ct_prepare_active = 1
                 gs.task.c_ct_prepare_first = node.start
