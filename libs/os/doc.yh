@@ -1,0 +1,340 @@
+module os;
+
+// ============================================================================
+// yh os 标准库 API 参考
+//
+// 本文件只包含文档注释，不导出任何符号；实际实现位于同模块的
+// 00_model.yh、file.*.yh、20_directory.linux.yh、30_process.linux.yh、
+// environment.yh、40_sleep.*.yh 与 os.yh。
+//
+// 平台范围（OS0–OS6）：
+//   * 结果模型、环境查询：Linux 与 Darwin 共有；
+//   * 新文件 API、目录/cwd、进程：当前仅 Linux；
+//   * write_once/sleep_us：Linux 与 Darwin 各有实现；
+//   * 旧 os.yh 接口：两平台保留宿主语义，返回 -1/宿主标志。
+//
+// 加载方式（按优先级）：
+//   1. 显式依赖：project.toml 中
+//        [dependencies]
+//        yh_libs = { path = "relative/to/libs" }
+//      然后 import yh_libs.os as os;
+//   2. YH_STDLIB=<libs 根> yh run/build；然后 import os;
+//   3. 默认发现：编译器在 <exe_dir>/libs、<exe_dir>/../libs、
+//      <exe_dir>/../share/yh/libs 查找标准库。
+//
+// 错误约定：
+//   * Error.kind 是稳定分类，Error.native_code 是目标平台正错误号；
+//   * 成功时 kind = os.error_none，native_code = 0；
+//   * 不得只凭 native_code 判断成功；库自身发现的非法参数 native_code = 0。
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 1. 错误与结果类型（00_model.yh，跨平台）
+// ----------------------------------------------------------------------------
+
+// ErrorKind：os.error_none / os.error_not_found / os.error_already_exists /
+// os.error_permission_denied / os.error_interrupted /
+// os.error_invalid_argument / os.error_unsupported / os.error_other。
+// pub enum ErrorKind {
+//     error_none;
+//     error_not_found;
+//     error_already_exists;
+//     error_permission_denied;
+//     error_interrupted;
+//     error_invalid_argument;
+//     error_unsupported;
+//     error_other;
+// }
+
+// Error：kind 稳定分类 + native_code 目标平台正错误号（无内核来源时为 0）。
+// pub struct Error {
+//     kind ErrorKind;
+//     native_code int;
+// }
+
+// FdResult：成功 fd >= 0；失败 fd = -1 且 error 给出原因。
+// 成功 fd 的所有权转移给调用方，必须由调用方关闭。
+// pub struct FdResult {
+//     fd int;
+//     error Error;
+// }
+
+// IoResult：count 为本次实际字节数；单次失败 count = 0。
+// EOF 表示为 count = 0 且 error.kind = error_none。
+// pub struct IoResult {
+//     count u64;
+//     error Error;
+// }
+
+// AccessKind：os.access_read_only / os.access_write_only /
+// os.access_read_write。
+// pub enum AccessKind {
+//     access_read_only;
+//     access_write_only;
+//     access_read_write;
+// }
+
+// OpenOptions：os 自有打开选项，不使用宿主 open 标志。
+//   access    访问模式
+//   create    不存在时创建
+//   truncate  创建/打开后截断
+//   exclusive 与 create 一起使用，已存在则失败
+//   append    追加写
+//   mode      创建权限（默认 420 = 0666，受 umask 裁剪）
+// pub struct OpenOptions {
+//     access AccessKind;
+//     create bool;
+//     truncate bool;
+//     exclusive bool;
+//     append bool;
+//     mode u32;
+// }
+
+// DirKind：os.dir_unknown / os.dir_file / os.dir_directory。
+// unknown 对应 DT_UNKNOWN 或无法确认的类型，不得当作普通文件。
+// pub enum DirKind {
+//     dir_unknown;
+//     dir_file;
+//     dir_directory;
+// }
+
+// DirEntry：目录条目借用视图。
+// name 指向读取器缓冲，name_len 不含结尾 NUL；视图只保证到下一次
+// next_entry 或 close_dir，需要长期保存时由调用方复制。
+// pub struct DirEntry {
+//     name *u8;
+//     name_len u64;
+//     kind DirKind;
+// }
+
+// 结果构造函数（跨平台）：
+//   no_error()                         成功 Error
+//   make_error(kind, native_code)      显式 Error
+//   fd_ok(fd) / fd_error(kind, code)   FdResult
+//   io_ok(count) / io_error(kind, code) IoResult
+//   read_options()                     只读、不创建、不截断、mode 0666
+//   write_options()                    只写、创建、不截断、mode 0666
+//   make_dir_entry(name []u8, kind)    由调用方切片构造 DirEntry 视图
+// pub fn no_error() Error;
+// pub fn make_error(kind ErrorKind, native_code int) Error;
+// pub fn fd_ok(fd int) FdResult;
+// pub fn fd_error(kind ErrorKind, native_code int) FdResult;
+// pub fn io_ok(count u64) IoResult;
+// pub fn io_error(kind ErrorKind, native_code int) IoResult;
+// pub fn read_options() OpenOptions;
+// pub fn write_options() OpenOptions;
+// pub fn make_dir_entry(name []u8, kind DirKind) DirEntry;
+
+// ----------------------------------------------------------------------------
+// 2. Linux 新文件 API（file.linux.yh）
+// ----------------------------------------------------------------------------
+//
+// open_path(path *char, options OpenOptions) FdResult
+//   按 os 选项打开/创建文件；新 fd 默认 O_CLOEXEC；成功转移所有权。
+//   只读与 truncate/append 组合、exclusive 缺少 create 返回
+//   error_invalid_argument；创建权限使用 options.mode。
+//
+// read_some(fd int, buffer []u8) IoResult
+//   单次读取至多 len(buffer) 字节；0 表示 EOF；EINTR 返回 interrupted。
+//
+// write_once(fd int, buffer *void, count u64) IoResult
+//   单次写入的指针版本，供 io 层复用；允许短写，不重试。
+//
+// write_some(fd int, data []u8) IoResult
+//   单次写入至多 len(data) 字节；允许短写并返回实际 count。
+//
+// close_file(fd int) Error
+//   单次关闭；失败不重试，fd 可能已释放，不得继续使用。
+//
+// make_dir(path *char, mode u32) Error
+//   创建单层目录；不递归；已存在返回 error_already_exists。
+//
+// remove_path(path *char) Error
+//   删除文件路径；不递归、不先探测。
+//
+// remove_dir_path(path *char) Error
+//   删除空目录；非空返回内核错误。
+//
+// rename_path(old_path *char, new_path *char) Error
+//   原子重命名；跨设备不自动复制。
+// pub fn open_path(path *char, options OpenOptions) FdResult;
+// pub fn read_some(fd int, buffer []u8) IoResult;
+// pub fn write_once(fd int, buffer *void, count u64) IoResult;
+// pub fn write_some(fd int, data []u8) IoResult;
+// pub fn close_file(fd int) Error;
+// pub fn make_dir(path *char, mode u32) Error;
+// pub fn remove_path(path *char) Error;
+// pub fn remove_dir_path(path *char) Error;
+// pub fn rename_path(old_path *char, new_path *char) Error;
+
+// Darwin 兼容入口（file.darwin.yh）：
+//   write_once(fd, buffer, count) IoResult
+//   仅服务 io.write_all_result；失败分类为 error_other，native_code = 0，
+//   Darwin 完整新文件 API 仍待 OS8。
+// pub fn write_once(fd int, buffer *void, count u64) IoResult;
+
+// ----------------------------------------------------------------------------
+// 3. Linux 目录与当前目录（20_directory.linux.yh）
+// ----------------------------------------------------------------------------
+//
+// DirEntryStatus：os.dir_entry_ok / os.dir_entry_end / os.dir_entry_error。
+//
+// DirReader：调用方栈上读取器，字段公开但不得直接改写。
+//   fd, buffer, capacity, used, cursor, active
+//   active = 0 表示未打开或已关闭。
+//
+// DirReaderResult：reader + error；成功 active = 1。
+//
+// DirEntryResult：status + entry + error；只有 ok 时 entry 有效。
+//
+// open_dir(path *char, buffer []u8) DirReaderResult
+//   打开目录并借用调用方缓冲；空缓冲/打开失败返回错误；fd 归读取器所有。
+//
+// next_entry(reader *DirReader) DirEntryResult
+//   返回下一条目，跳过 . 与 ..；区分条目/结束/失败；损坏记录返回
+//   error_other 并停止解析当前批次。
+//
+// close_dir(reader *DirReader) Error
+//   关闭目录；重复调用幂等；关闭后 next_entry 返回 invalid_argument。
+//
+// get_cwd(buffer []u8) IoResult
+//   写入当前工作目录 + NUL；count 不含 NUL；空间不足
+//   error_invalid_argument（native ERANGE）。
+//
+// change_dir(path *char) Error
+//   修改进程全局当前目录。
+// pub enum DirEntryStatus {
+//     dir_entry_ok;
+//     dir_entry_end;
+//     dir_entry_error;
+// }
+// pub struct DirReader {
+//     fd int;
+//     buffer *u8;
+//     capacity u64;
+//     used u64;
+//     cursor u64;
+//     active int;
+// }
+// pub struct DirReaderResult {
+//     reader DirReader;
+//     error Error;
+// }
+// pub struct DirEntryResult {
+//     status DirEntryStatus;
+//     entry DirEntry;
+//     error Error;
+// }
+// pub fn open_dir(path *char, buffer []u8) DirReaderResult;
+// pub fn next_entry(reader *DirReader) DirEntryResult;
+// pub fn close_dir(reader *DirReader) Error;
+// pub fn get_cwd(buffer []u8) IoResult;
+// pub fn change_dir(path *char) Error;
+
+// ----------------------------------------------------------------------------
+// 4. 环境查询（environment.yh，跨平台）
+// ----------------------------------------------------------------------------
+//
+// EnvResult { found, value, error }：
+//   found = true 时 value 指向第一个 '=' 后的 NUL 字节串（可为空串），
+//   借用 envp 生命周期；found = false 表示不存在且无错误。
+//
+// get_env(envp **char, name *char) EnvResult
+//   name 不能为空或含 '='；按完整键匹配，重复键取首项；值内可含 '='。
+//   非法参数返回 error_invalid_argument（native_code = 0）。
+// pub struct EnvResult {
+//     found bool;
+//     value *char;
+//     error Error;
+// }
+// pub fn get_env(envp **char, name *char) EnvResult;
+
+// ----------------------------------------------------------------------------
+// 5. Linux 进程（30_process.linux.yh）
+// ----------------------------------------------------------------------------
+//
+// WaitState：os.wait_exited / os.wait_signaled / os.wait_error。
+//
+// PidResult { pid, error }：成功 pid > 0，失败 pid = -1。
+//
+// WaitResult { state, exit_code, signal, error }：
+//   wait_exited   exit_code 有效；
+//   wait_signaled signal 有效；
+//   wait_error    error 有效。
+//
+// spawn(path *char, argv **char, envp **char) PidResult
+//   精确路径启动，不搜索 PATH、不经过 shell；close-on-exec 错误管道确认
+//   exec 成功后才返回 pid；exec 失败返回显式错误并回收失败子进程。
+//
+// wait(pid int) WaitResult
+//   阻塞等待；遇 EINTR 内部重试；不把信号退出压成 128+signal。
+//
+// exit_now(code int) void
+//   立即 exit_group；不做语言清理、不刷新未来缓冲流。
+// pub enum WaitState {
+//     wait_exited;
+//     wait_signaled;
+//     wait_error;
+// }
+// pub struct PidResult {
+//     pid int;
+//     error Error;
+// }
+// pub struct WaitResult {
+//     state WaitState;
+//     exit_code int;
+//     signal int;
+//     error Error;
+// }
+// pub fn spawn(path *char, argv **char, envp **char) PidResult;
+// pub fn wait(pid int) WaitResult;
+// pub fn exit_now(code int) void;
+
+// ----------------------------------------------------------------------------
+// 6. sleep_us 兼容接口（40_sleep.linux.yh / 40_sleep.darwin.yh）
+// ----------------------------------------------------------------------------
+//
+// sleep_us(duration int) int
+//   负值返回 -1；Linux 经 sys.nanosleep 成功返回 0，失败返回 -1；
+//   Darwin 沿用宿主 usleep 返回值。保持旧契约，不暴露剩余时间。
+// pub fn sleep_us(duration int) int;
+
+// ----------------------------------------------------------------------------
+// 7. 旧 os 接口（os.yh，兼容保留）
+// ----------------------------------------------------------------------------
+//
+// 旧接口继续接受宿主 open 标志，失败返回 -1（不返回 -errno）；
+// 新代码应优先使用上面的 os 结果接口。
+//
+// open_file(path *char, flags int) int
+// open_file_mode(path *char, flags int, mode int) int
+// read_fd(fd int, buffer *void, byte_count u64) i64
+// write_fd(fd int, buffer *void, byte_count u64) i64
+// close_fd(fd int) int
+// create_dir(path *char, mode int) int
+// remove_dir(path *char) int
+// remove_file(path *char) int
+// rename_file(old_path *char, new_path *char) int
+// is_terminal(fd int) int
+// process_id() int
+// terminate(code int) void
+// platform() *char
+// arch() *char
+// pub fn open_file(path *char, flags int) int;
+// pub fn open_file_mode(path *char, flags int, mode int) int;
+// pub fn read_fd(fd int, buffer *void, byte_count u64) i64;
+// pub fn write_fd(fd int, buffer *void, byte_count u64) i64;
+// pub fn close_fd(fd int) int;
+// pub fn create_dir(path *char, mode int) int;
+// pub fn remove_dir(path *char) int;
+// pub fn remove_file(path *char) int;
+// pub fn rename_file(old_path *char, new_path *char) int;
+// pub fn is_terminal(fd int) int;
+// pub fn process_id() int;
+// pub fn terminate(code int) void;
+// pub fn platform() *char;
+// pub fn arch() *char;
+
+// ============================================================================
+// 所有 pub 接口到此结束。实现细节、平台常量和 sys 原语见 libs/sys/doc.yh。
+// ============================================================================

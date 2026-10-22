@@ -16,6 +16,18 @@
   `.yh`/`.py`/`.sh`/`.yml` 的代码位置（去掉注释与字符串后）无全角字符，
   因此没有隐藏的语法错误；`git diff` 只涉及 1 行文档、1 行记录和 1 个新配置。
 
+## 2026-10-21 os/sys API 文档与 README
+
+- 新增 `libs/os/doc.yh`、`libs/sys/doc.yh`：仅注释的完整公开接口参考，
+  枚举所有 pub 类型/常量/函数、参数语义、所有权、错误与平台范围；
+  文件本身不导出符号，不改变模块接口。
+- 新增 `libs/os/README.md`；重写 `libs/sys/README.md`：加载方式
+  （默认发现/YH_STDLIB/显式依赖）、错误约定、文件/目录/cwd/环境/进程/
+  时间/内存示例、平台矩阵与旧接口兼容。
+- 根 `README` 增加“标准库”使用段，链接两个 doc.yh 与 README。
+- 验证：`osmodel`/`sysresult` 在 Darwin 与 aarch64-linux 语义检查通过，
+  doc.yh 作为注释文件不引入导出面或编译错误。
+
 ## 2026-10-21 恢复并验证 os/sys OS0–OS6
 
 - 0.0.7 同步后的主工作区缺少 `libs/os`/`libs/sys` 实现；从备份 stash 选择性

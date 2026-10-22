@@ -1,0 +1,240 @@
+module sys;
+
+// ============================================================================
+// yh sys 标准库 API 参考
+//
+// 本文件只包含文档注释，不导出任何符号；实际实现位于
+// 00_types.yh、10_constants.linux.{arm64,x64}.yh、20_raw.linux.yh、
+// 30_file.linux.yh、40_memory.linux.yh、50_time.linux.yh、
+// 60_process.linux.yh。README.md 给出可运行示例。
+//
+// 平台范围：
+//   * Timespec、is_error、error_code：Linux/Darwin 共有；
+//   * 其余调用号、常量和具名原语：当前仅 Linux；
+//   * Darwin 不提供伪成功空桩，Linux 专属文件不会被选中。
+//
+// 结果约定：
+//   * 具名原语成功返回内核结果（字节数/fd/PID/地址/0）；
+//   * 失败返回 -errno，不设置全局 errno；
+//   * 只有 [-4095, -1] 是错误区间，用 is_error 判断；
+//   * read/write 各执行一次，允许短读写；close 不重试；
+//   * sys 不分配、不格式化、不遍历目录、不解释 wait 状态。
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 1. 类型与结果（00_types.yh）
+// ----------------------------------------------------------------------------
+//
+// Timespec：Linux LP64 时间结构，16 字节，sec 偏移 0、nsec 偏移 8。
+//   sec  整秒
+//   nsec 纳秒，合法范围 0..999999999
+//
+// is_error(value i64) int
+//   仅当 value ∈ [-4095, -1] 返回 1；0、正数、-4096 及更小负数返回 0。
+//
+// error_code(value i64) int
+//   错误时返回 1..4095 的正 errno；成功或非错误负数返回 0。
+// pub struct Timespec {
+//     sec i64;
+//     nsec i64;
+// }
+// pub fn is_error(value i64) int;
+// pub fn error_code(value i64) int;
+
+// ----------------------------------------------------------------------------
+// 2. 原始入口（20_raw.linux.yh）
+// ----------------------------------------------------------------------------
+//
+// raw6(number u64, a0..a5 u64) i64
+//   直接执行 Linux 六参数系统调用；number 按目标 ISA 填写，未用槽填 0。
+//   返回原始寄存器结果；不读取 errno、不重试、不解释。
+//   普通应用优先使用具名原语；只有确实需要未封装调用时才使用 raw6。
+// pub fn raw6(number u64, a0 u64, a1 u64, a2 u64,
+//     a3 u64, a4 u64, a5 u64) i64;
+
+// ----------------------------------------------------------------------------
+// 3. 公开常量（10_constants.linux.arm64.yh / x64.yh）
+// ----------------------------------------------------------------------------
+//
+// 目录与打开标志：
+//   AT_FDCWD      -100        使用进程当前目录
+//   AT_REMOVEDIR  0x200       unlinkat 删除空目录
+//   O_RDONLY      0           只读
+//   O_WRONLY      1           只写
+//   O_RDWR        2           读写
+//   O_CREAT       0x40        创建
+//   O_EXCL        0x80        独占创建
+//   O_TRUNC       0x200       截断
+//   O_APPEND      0x400       追加
+//   O_DIRECTORY   AArch64 0x4000 / x86_64 0x10000
+//   O_CLOEXEC     0x80000     exec 时自动关闭
+//   O_NONBLOCK    0x800       非阻塞
+//
+// errno：
+//   EPERM 1, ENOENT 2, EINTR 4, EBADF 9, EAGAIN 11, ECHILD 10,
+//   ENOEXEC 8, EACCES 13, EEXIST 17, ENOTDIR 20, EINVAL 22,
+//   ENOSYS 38, ERANGE 34
+//
+// 信号与等待：
+//   SIGKILL 9, SIGTERM 15, WNOHANG 1
+//
+// 内存映射：
+//   PROT_READ 1, PROT_WRITE 2, MAP_PRIVATE 0x02, MAP_ANONYMOUS 0x20
+//
+// 时钟：
+//   CLOCK_REALTIME 0, CLOCK_MONOTONIC 1
+//
+// 所有值均为目标 ISA 的 ABI 常量；不得把 AArch64 的 O_DIRECTORY 复制到
+// x86_64，也不得在源码中硬编码跨平台错误号。
+// pub const AT_FDCWD int = -100;
+// pub const AT_REMOVEDIR int = 0x200;
+// pub const O_RDONLY int = 0;
+// pub const O_WRONLY int = 1;
+// pub const O_RDWR int = 2;
+// pub const O_CREAT int = 0x40;
+// pub const O_EXCL int = 0x80;
+// pub const O_TRUNC int = 0x200;
+// pub const O_APPEND int = 0x400;
+// pub const O_DIRECTORY int = 0x4000;
+// pub const O_CLOEXEC int = 0x80000;
+// pub const O_NONBLOCK int = 0x800;
+// pub const EPERM int = 1;
+// pub const ENOENT int = 2;
+// pub const EINTR int = 4;
+// pub const EBADF int = 9;
+// pub const EACCES int = 13;
+// pub const EAGAIN int = 11;
+// pub const ECHILD int = 10;
+// pub const ENOEXEC int = 8;
+// pub const SIGKILL int = 9;
+// pub const SIGTERM int = 15;
+// pub const WNOHANG int = 1;
+// pub const PROT_READ int = 1;
+// pub const PROT_WRITE int = 2;
+// pub const MAP_PRIVATE int = 0x02;
+// pub const MAP_ANONYMOUS int = 0x20;
+// pub const CLOCK_REALTIME int = 0;
+// pub const CLOCK_MONOTONIC int = 1;
+// pub const ENOTDIR int = 20;
+// pub const EEXIST int = 17;
+// pub const EINVAL int = 22;
+// pub const ENOSYS int = 38;
+// pub const ERANGE int = 34;
+
+// ----------------------------------------------------------------------------
+// 4. 文件与目录原语（30_file.linux.yh）
+// ----------------------------------------------------------------------------
+//
+// open_at(dir_fd int, path *char, flags int, mode u32) i64
+//   在 dir_fd 下打开路径；dir_fd 可用 AT_FDCWD；flags 为 O_* 组合；
+//   mode 始终传给内核（只有创建时生效）。成功 fd，失败 -errno。
+//
+// read_fd(fd int, buffer *void, count u64) i64
+//   单次读取至多 count 字节；0 表示 EOF；失败 -errno；允许短读。
+//
+// write_fd(fd int, buffer *void, count u64) i64
+//   单次写入至多 count 字节；返回实际写入数；失败 -errno；允许短写。
+//
+// close_fd(fd int) i64
+//   单次关闭；成功 0，失败 -errno；失败后不得重试或继续使用 fd。
+//
+// create_dir_at(dir_fd int, path *char, mode u32) i64
+//   创建单层目录；不递归；成功 0，失败 -errno。
+//
+// remove_at(dir_fd int, path *char, flags int) i64
+//   flags = 0 删除文件；AT_REMOVEDIR 删除空目录；成功 0，失败 -errno。
+//
+// rename_at(old_dir_fd int, old_path *char,
+//           new_dir_fd int, new_path *char) i64
+//   renameat2(..., flags = 0)；不复制、不回退；成功 0，失败 -errno。
+//
+// getdents64(fd int, buffer *void, count u64) i64
+//   读取原始目录记录到调用方缓冲；返回字节数，0 为结束；记录解析由 os 负责。
+//
+// get_cwd(buffer *char, capacity u64) i64
+//   写入当前工作目录 + NUL；成功返回含 NUL 的总字节数；空间不足 -ERANGE。
+//
+// change_dir(path *char) i64
+//   修改进程全局当前目录；成功 0，失败 -errno。
+//
+// create_pipe(output *int, flags int) i64
+//   pipe2；output 指向两个连续 int（读端、写端）；成功 0 后才可读取；
+//   flags 可用 O_CLOEXEC/O_NONBLOCK；失败 -errno。
+// pub fn open_at(dir_fd int, path *char, flags int, mode u32) i64;
+// pub fn read_fd(fd int, buffer *void, count u64) i64;
+// pub fn write_fd(fd int, buffer *void, count u64) i64;
+// pub fn close_fd(fd int) i64;
+// pub fn create_dir_at(dir_fd int, path *char, mode u32) i64;
+// pub fn remove_at(dir_fd int, path *char, flags int) i64;
+// pub fn rename_at(old_dir_fd int, old_path *char,
+//     new_dir_fd int, new_path *char) i64;
+// pub fn getdents64(fd int, buffer *void, count u64) i64;
+// pub fn get_cwd(buffer *char, capacity u64) i64;
+// pub fn change_dir(path *char) i64;
+// pub fn create_pipe(output *int, flags int) i64;
+
+// ----------------------------------------------------------------------------
+// 5. 内存映射（40_memory.linux.yh）
+// ----------------------------------------------------------------------------
+//
+// map_memory(address *void, count u64, protection int, flags int,
+//            fd int, offset u64) i64
+//   mmap 六参数；成功返回地址位型，失败 -errno。
+//   必须先用 is_error 判断，再把完整 64 位成功值转指针；
+//   不能以空指针或任意负 i64 作为失败判定。
+//
+// unmap_memory(address *void, count u64) i64
+//   解除映射；成功 0，失败 -errno。
+// pub fn map_memory(address *void, count u64, protection int, flags int,
+//     fd int, offset u64) i64;
+// pub fn unmap_memory(address *void, count u64) i64;
+
+// ----------------------------------------------------------------------------
+// 6. 时间（50_time.linux.yh）
+// ----------------------------------------------------------------------------
+//
+// read_clock(clock_id int, output *Timespec) i64
+//   读取 CLOCK_REALTIME/CLOCK_MONOTONIC 到 output；成功 0，失败 -errno；
+//   失败时 output 内容不可用。
+//
+// sleep_time(request *Timespec, remaining *Timespec) i64
+//   nanosleep；remaining 可为空；成功 0；EINTR 返回 -EINTR 并可能写剩余时间；
+//   sys 不自动重试。
+// pub fn read_clock(clock_id int, output *Timespec) i64;
+// pub fn sleep_time(request *Timespec, remaining *Timespec) i64;
+
+// ----------------------------------------------------------------------------
+// 7. 进程（60_process.linux.yh）
+// ----------------------------------------------------------------------------
+//
+// process_id() i64
+//   当前 PID；失败 -errno。
+//
+// fork_process() i64
+//   SIGCHLD、空子栈、无 CLONE_VM 的 clone；父进程得到正 PID，子进程 0，
+//   失败 -errno；首期只支持单线程父进程的 fork/COW worker。
+//
+// execute(path *char, argv **char, envp **char) i64
+//   精确路径 execve；成功不返回，失败 -errno；argv/envp 为 NULL 结尾数组；
+//   不搜索 PATH、不经过 shell。
+//
+// wait_process(pid int, status *int, options int) i64
+//   wait4；pid 可为正 PID 或 -1；options 为 0 或 WNOHANG；
+//   成功返回被回收 PID 并写原始 32 位状态字；失败 -errno；sys 不解码状态。
+//
+// exit_process(code int) void
+//   exit_group；成功后不返回，不做语言清理。
+//
+// send_signal(pid int, signal int) i64
+//   kill；返回内核结果，失败 -errno。
+// pub fn process_id() i64;
+// pub fn fork_process() i64;
+// pub fn execute(path *char, argv **char, envp **char) i64;
+// pub fn wait_process(pid int, status *int, options int) i64;
+// pub fn exit_process(code int) void;
+// pub fn send_signal(pid int, signal int) i64;
+
+// ============================================================================
+// 所有 pub 接口到此结束。os 层的应用级 API、错误分类与使用示例见
+// libs/os/doc.yh、libs/os/README.md 与 libs/sys/README.md。
+// ============================================================================

@@ -98,12 +98,26 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
   Linux/arm64 容器 15 个 fixture、CLI 9/9、`make test`、`make selfhost-native`
   （115/115 项目用例）通过。见 `docs/01-finished/yh-os与sys-OS*.md` 与
   `docs/01-finished/yh-标准库默认发现-2026-10-21.md`。
+- [x] **E0.1 对外 API 文档与使用说明（2026-10-21 完成）**：
+  `libs/os/doc.yh`、`libs/sys/doc.yh` 列出全部 pub 接口；两个 README 给出
+  加载方式与文件/目录/环境/进程/时间/内存示例；根 README 增加标准库入口。
 - [ ] **E1 OS7 编译器迁移与独立性审计**：编译器改用 `libs/os`/`libs/sys` 的
   接口，减少对 C runtime 的隐式依赖；见[联合设计](03-design/yh-os与sys标准库设计.md)。
-- [ ] **E2 OS8 Darwin 新接口**：Darwin 侧补齐目录/进程/时间等新接口，与 Linux
-  契约对齐。
-- [ ] **E3 SYS 消费者迁移与独立性**：SYS0–SYS7 中已实现的结果/文件/目录/内存/
-  时间/进程原语，剩余消费者迁移与独立验收。
+- [ ] **E1.1 OS7 第一切片：显式依赖与时钟/目录迁移**：给 `compiler/` 增加
+  `yh_libs` 显式依赖；把 `compiler/cmd/clock.linux.{arm64,x64}.yh` 与
+  `project_dir.linux.{arm64,x64}.yh` 迁到 `libs/sys`/`libs/os`；验证宿主
+  编译器 I/O 与输出目标隔离，更新缓存/种子身份。
+- [ ] **E1.2 OS7 第二切片：文件/进程与独立性**：迁移编译器剩余文件、worker、
+  fork/exec/wait 调用；审计普通 syscall 程序与嵌入 LLVM 编译器的依赖清单，
+  区分宿主与目标，补独立性验收。
+- [ ] **E2.1 OS8 Darwin 文件 API**：新增 Darwin `file` 平台实现与即时 errno
+  桥，覆盖 open/read/write/close/mkdir/remove/rename、CLOEXEC 与错误分类；
+  原生用例与 Linux 契约对齐。
+- [ ] **E2.2 OS8 Darwin 目录/进程/时间**：目录枚举（getattrlistbulk）、
+  cwd、spawn/wait/exit 与时钟/睡眠的 Darwin 适配；逐项原生门并披露
+  libSystem/dyld 依赖。
+- [ ] **E3 独立产物与消费者审计**：普通 ELF/syscall 程序与编译器分别列出
+  运行时依赖，完成 SYS5–SYS6 的消费者迁移、固定点与独立环境验收。
 - [ ] **E4 libc L0–L5**：按[分阶段候选方案](02-plan/yh-libc分阶段候选方案.md)
   推进，未授权全部实施。
 
