@@ -1,0 +1,138 @@
+module fmt
+
+import string
+
+// yh fmt 运行时：V 格式说明符解析（R1）。
+//
+// 语法：[flags][width][.precision][type]；flags 只允许 - 0 +，type 只允许
+// d x X o b f F e E g G s。空 spec 合法，表示全部默认。
+// width/precision 上限 1,048,576；超限或多余字符返回 status_invalid_spec。
+// 浮点的 .precision 语义在 R2 的渲染层处理，本文件只做语法解析。
+
+// format_spec 是解析后的格式说明符；type==0 表示省略，由渲染层按类型取默认。
+struct format_spec {
+    minus int
+    zero int
+    plus int
+    width int
+    precision int
+    has_precision int
+    type u8
+}
+
+// spec_result 是解析结果；失败时 spec 为零值，忽略即可。
+struct spec_result {
+    status Status
+    spec format_spec
+}
+
+// spec_type_valid 判断 type 是否属于允许集合；0 由调用方单独视为省略。
+fn spec_type_valid(type_byte u8) int {
+    if (type_byte == 'd' || type_byte == 'x' || type_byte == 'X'
+        || type_byte == 'o' || type_byte == 'b') {
+        return 1
+    }
+    if (type_byte == 'f' || type_byte == 'F' || type_byte == 'e'
+        || type_byte == 'E' || type_byte == 'g' || type_byte == 'G') {
+        return 1
+    }
+    if (type_byte == 's') {
+        return 1
+    }
+    return 0
+}
+
+// spec_limit_ok 判断宽度/精度是否在允许上限内。
+fn spec_limit_ok(value int) int {
+    return (value <= 1048576).to_type(int)
+}
+
+// parse_spec 解析 V 格式说明符；空视图返回全部默认。
+fn parse_spec(text string.View) spec_result {
+    let result spec_result
+    result.status = Status.status_ok
+    if (text.count > 0 && text.data == 0) {
+        result.status = Status.status_invalid_spec
+        return result
+    }
+    let i u64 = 0
+    // flags：- 0 + 任意顺序；'0' 在这里只能作为 flag，宽度从非 0 数字开始。
+    for i < text.count {
+        let b u8 = text.data[i]
+        if (b == '-') {
+            result.spec.minus = 1
+            i += 1
+            continue
+        }
+        if (b == '0') {
+            result.spec.zero = 1
+            i += 1
+            continue
+        }
+        if (b == '+') {
+            result.spec.plus = 1
+            i += 1
+            continue
+        }
+        break
+    }
+    // width：十进制数字；没有数字表示省略。
+    let width int = 0
+    let width_digits int = 0
+    for i < text.count {
+        let b u8 = text.data[i]
+        if (b < '0' || b > '9') {
+            break
+        }
+        width = width * 10 + (b.to_type(int) - 48)
+        if (spec_limit_ok(width) == 0) {
+            result.status = Status.status_invalid_spec
+            return result
+        }
+        width_digits += 1
+        i += 1
+    }
+    if (width_digits > 0) {
+        result.spec.width = width
+    }
+    // precision：'.' 后必须至少一位数字。
+    if (i < text.count && text.data[i] == '.') {
+        i += 1
+        let precision int = 0
+        let precision_digits int = 0
+        for i < text.count {
+            let b u8 = text.data[i]
+            if (b < '0' || b > '9') {
+                break
+            }
+            precision = precision * 10 + (b.to_type(int) - 48)
+            if (spec_limit_ok(precision) == 0) {
+                result.status = Status.status_invalid_spec
+                return result
+            }
+            precision_digits += 1
+            i += 1
+        }
+        if (precision_digits == 0) {
+            result.status = Status.status_invalid_spec
+            return result
+        }
+        result.spec.precision = precision
+        result.spec.has_precision = 1
+    }
+    // type：至多一个字符，且必须在允许集合内。
+    if (i < text.count) {
+        let b u8 = text.data[i]
+        if (spec_type_valid(b) == 0) {
+            result.status = Status.status_invalid_spec
+            return result
+        }
+        result.spec.type = b
+        i += 1
+    }
+    if (i != text.count) {
+        result.status = Status.status_invalid_spec
+        return result
+    }
+    return result
+}

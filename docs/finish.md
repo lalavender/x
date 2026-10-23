@@ -2,6 +2,16 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-24 yh fmt R1：V 格式说明符整数/文本子集
+
+- **实现**：`20_spec.yh` 解析 flags/width/precision/type；`30_render.yh`
+  接通整数 `d/x/X/o/b`、`+/-/0` 对齐、字符串 rune 宽度与 bool 宽度；
+  非法 spec 返回 `status_invalid_spec`。
+- **测试**：fmt 内建测试增至 10 项；`make test-lib-tests` 全绿。
+- **边界**：f64 渲染仍 `status_unsupported`（R2）；print/sprint 与语言插值未开始。
+- **记录**：[R1 实施记录](01-finished/yh-fmt-R1-2026-10-24.md)。
+- **验证**：`cd libs && ../yh test fmt` 10/10；未跑全量门，未滚种子。
+
 ## 2026-10-24 yh fmt R0：Value 与默认渲染
 
 - **实现**：`libs/fmt/` 落地 R0：`Kind`/`Value`/`Status`/`TextResult`、
