@@ -9,7 +9,8 @@
 - **语言限制**：`pub` 变参函数非法，公开打印族接收 `[]Value`；设计与 README
   已同步。
 - **测试**：fmt 内建测试增至 16 项；`make test-lib-tests` 全绿。
-- **边界**：安装导入、全 API surface、`nm -u` 留在 R3.2；语言插值未开始。
+- **R3.2**：`make test-fmt-install` 安装后仓库外导入并通过 fmtbasic
+  全 API surface；`nm -u` 未做。语言插值未开始。
 - **记录**：[R3 实施记录](01-finished/yh-fmt-R3-2026-10-24.md)。
 
 ## 2026-10-24 yh fmt R2：浮点渲染

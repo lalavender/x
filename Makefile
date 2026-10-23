@@ -385,6 +385,11 @@ test-string-complexity: stage-yh
 test-compiler-tests: stage-yh
 	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 
+# test-fmt-install：fmt 安装后仓库外导入与公开 API surface。
+.PHONY: test-fmt-install
+test-fmt-install:
+	python3 $(TOPSRC)/tests/fmt/install.py --workdir $(TOPSRC)/tmp/fmt-install
+
 # test-lib-tests：标准库内建测试（yh test 直接跑 libs 项目里的 test 块）。
 # 目前覆盖 string 与 fmt 模块；新增模块的 test 块只需在此追加模块名。
 .PHONY: test-lib-tests
