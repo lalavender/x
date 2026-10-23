@@ -1,0 +1,91 @@
+module fmt
+
+import string
+
+// ============================================================================
+// 99_tests.yh —— fmt 运行时 R0 的 yh 内建测试
+//
+// 只在 `yh test fmt` 中执行；生产构建不登记测试符号、不发射测试体。
+// 覆盖构造器分类、文本/整数/bool/nil 追加、NULL C 字符串、i64 最小值与
+// R0 的两个明确失败路径（f64 未接通、非空 spec 未接通）。
+// ============================================================================
+
+// test_view 把 NUL 结尾字面量转成借用视图。
+fn test_view(text *char) string.View {
+    let viewed string.ViewResult = string.view_cstr(text)
+    return viewed.value
+}
+
+// expect_text 比较 String 与期望的 NUL 结尾字节序列。
+fn expect_text(value *string.String, expected *char) bool {
+    let wanted string.ViewResult = string.view_cstr(expected)
+    let got string.View = string.as_view(value)
+    return string.view_equal(got, wanted.value)
+}
+
+test "构造器分类" {
+    $assert(kind_of(of_int(42)) == Kind.kind_int, "int 分类")
+    $assert(kind_of(of_i64(-1)) == Kind.kind_int, "i64 分类")
+    $assert(kind_of(of_u64(7)) == Kind.kind_uint, "u64 分类")
+    $assert(kind_of(of_f64(1.5)) == Kind.kind_f64, "f64 分类")
+    $assert(kind_of(of_bool(true)) == Kind.kind_bool, "bool 分类")
+    $assert(kind_of(of_str(test_view("x"))) == Kind.kind_str, "str 分类")
+    let zero Value
+    $assert(kind_of(zero) == Kind.kind_invalid, "零值应为 invalid")
+}
+
+test "追加文本与有符号整数" {
+    let out string.String = string.make()
+    $assert(append_text(&out, test_view("x=")) == Status.status_ok)
+    $assert(append_value(&out, of_int(-123), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "x=-123"), "文本与负整数")
+    $assert(append_value(&out, of_i64(0), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "x=-1230"), "零值整数")
+    string.release(&out)
+}
+
+test "无符号整数上界" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_u64(18446744073709551615),
+        test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "18446744073709551615"), "u64 最大值")
+    string.release(&out)
+}
+
+test "i64 最小值" {
+    let out string.String = string.make()
+    let minimum i64 = -9223372036854775807
+    minimum = minimum - 1
+    $assert(append_value(&out, of_i64(minimum), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "-9223372036854775808"), "i64 最小值")
+    string.release(&out)
+}
+
+test "bool、字符串与 nil" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_bool(true), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view(" ")) == Status.status_ok)
+    $assert(append_value(&out, of_bool(false), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view(" ")) == Status.status_ok)
+    $assert(append_value(&out, of_str(test_view("ok")), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view(" ")) == Status.status_ok)
+    let invalid Value
+    $assert(append_value(&out, invalid, test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "true false ok <nil>"), "bool/str/nil")
+    string.release(&out)
+}
+
+test "NULL C 字符串为空串" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_cstr(0), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, ""), "NULL 应为空串")
+    string.release(&out)
+}
+
+test "R0 明确失败路径" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_f64(1.5), test_view("")) == Status.status_unsupported)
+    $assert(append_value(&out, of_int(7), test_view("d")) == Status.status_invalid_spec)
+    $assert(expect_text(&out, ""), "失败不写内容")
+    string.release(&out)
+}

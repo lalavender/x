@@ -2,6 +2,18 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-24 yh fmt R0：Value 与默认渲染
+
+- **实现**：`libs/fmt/` 落地 R0：`Kind`/`Value`/`Status`/`TextResult`、
+  `of_*` 构造器、`append_text`、空 spec 的 `append_value` 默认渲染
+  （整数、无符号、bool、字符串、`<nil>`、NULL C 字符串）。
+- **测试**：`libs/fmt/99_tests.yh` 7 项；`libs/project.toml` 登记 fmt；
+  `make test-lib-tests` 覆盖 string 5 项与 fmt 7 项，全绿。
+- **边界**：f64 默认渲染（R2）返回 `status_unsupported`，非空 spec（R1）
+  返回 `status_invalid_spec`；print/sprint 与语言层插值未开始。
+- **记录**：[R0 实施记录](01-finished/yh-fmt-R0-2026-10-24.md)。
+- **验证**：`make` 冷编成功；未改编译器/语法，未跑全量门与自举门，未滚种子。
+
 ## 2026-10-23 yh test 逐例日志与截断提示（YT2d-1）
 
 - **实现**：每个用例的 stdout/stderr 重定向到

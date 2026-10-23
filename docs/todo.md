@@ -255,7 +255,7 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
   生命周期、缓存与种子冷编/两代固定点；全迁移后删除旧解析器。
 - [ ] **T7 生成器（后续按需）**：独立构建/编码契约与 encoder 验收；保真编辑另立项。
 
-### FMT fmt 运行时与 V 风格插值（2026-10-23 改版；R0–R3/I0–I5 待实施）
+### FMT fmt 运行时与 V 风格插值（2026-10-23 改版；R1–R3/I0–I5 待实施）
 
 用户决定：字符串格式化采用 V 式插值 `"…${expr:spec}…"`，结果为
 `string.String`；首版不实现 Go 的 `%` 格式串与 `Printf` 族（是否保留为
@@ -266,8 +266,6 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
 I0–I5（语言）；插值需要改词法/解析/检查/降级。fmt 不改 prelude
 `printf`（H.I3 的按需扩展仍独立）。
 
-- [ ] **R0 Value 与基础渲染**：Kind/Value/构造器、append_text/append_value
-  默认格式；`fmtvalue`/`fmtappend` fixture。
 - [ ] **R1 V spec 与整数/文本**：flags/width/precision、`d x X o b s`、
   对齐与非法 spec；`fmtspec` fixture。
 - [ ] **R2 浮点**：NaN/±Inf/-0、`f F e E g G`、V 尾零规则；`fmtfloat`

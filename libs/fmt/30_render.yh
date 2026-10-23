@@ -1,0 +1,116 @@
+module fmt
+
+import string
+
+// yh fmt 运行时：默认渲染与追加入口（R0）。
+//
+// R0 只处理空 spec：整数十进制、无符号十进制、bool、字符串与 nil；
+// f64 的默认渲染在 R2 接通前返回 status_unsupported。非空 spec 由 R1 接通，
+// 当前返回 status_invalid_spec，不静默忽略。
+
+// map_status 把 string 的失败分类映射到 fmt.Status；未列出的归入 other。
+fn map_status(status string.Status) Status {
+    if (status == string.status_ok) {
+        return Status.status_ok
+    }
+    if (status == string.status_out_of_memory) {
+        return Status.status_out_of_memory
+    }
+    if (status == string.status_overflow) {
+        return Status.status_overflow
+    }
+    return Status.status_other
+}
+
+// append_text 把借用视图追加到目标 String；空文本不分配。
+pub fn append_text(target *string.String, text string.View) Status {
+    return map_status(string.append(target, text))
+}
+
+// append_integer 以十进制追加有符号 64 位整数；i64 最小值先按位取绝对值。
+fn append_integer(target *string.String, value i64) Status {
+    let buffer [24]u8
+    let magnitude u64 = value.to_type(u64)
+    let negative int = 0
+    if (value < 0) {
+        negative = 1
+        magnitude = 0 - magnitude
+    }
+    let index int = 24
+    for 1 {
+        index -= 1
+        let digit u8 = (magnitude % 10).to_type(u8)
+        buffer[index] = (digit.to_type(int) + 48).to_type(u8)
+        magnitude = magnitude / 10
+        if (magnitude == 0) {
+            break
+        }
+    }
+    if (negative != 0) {
+        index -= 1
+        buffer[index] = 45
+    }
+    let viewed string.ViewResult = string.view_bytes(&buffer[index],
+        (24 - index).to_type(u64))
+    if (viewed.status != string.status_ok) {
+        return Status.status_other
+    }
+    return append_text(target, viewed.value)
+}
+
+// append_unsigned 以十进制追加无符号 64 位整数。
+fn append_unsigned(target *string.String, value u64) Status {
+    let buffer [24]u8
+    let magnitude u64 = value
+    let index int = 24
+    for 1 {
+        index -= 1
+        let digit u8 = (magnitude % 10).to_type(u8)
+        buffer[index] = (digit.to_type(int) + 48).to_type(u8)
+        magnitude = magnitude / 10
+        if (magnitude == 0) {
+            break
+        }
+    }
+    let viewed string.ViewResult = string.view_bytes(&buffer[index],
+        (24 - index).to_type(u64))
+    if (viewed.status != string.status_ok) {
+        return Status.status_other
+    }
+    return append_text(target, viewed.value)
+}
+
+// append_bool 追加 true/false 文本。
+fn append_bool(target *string.String, value bool) Status {
+    if (value) {
+        return append_text(target, view_of("true"))
+    }
+    return append_text(target, view_of("false"))
+}
+
+// append_value 按 Value 的分类与 spec 追加默认文本。
+// R0 只接受空 spec；非空 spec 返回 status_invalid_spec。
+pub fn append_value(target *string.String, value Value, spec string.View) Status {
+    if (spec.count != 0) {
+        return Status.status_invalid_spec
+    }
+    if (value.kind == Kind.kind_invalid) {
+        return append_text(target, view_of("<nil>"))
+    }
+    if (value.kind == Kind.kind_int) {
+        return append_integer(target, value.integer)
+    }
+    if (value.kind == Kind.kind_uint) {
+        return append_unsigned(target, value.number)
+    }
+    if (value.kind == Kind.kind_bool) {
+        return append_bool(target, value.truth)
+    }
+    if (value.kind == Kind.kind_str) {
+        return append_text(target, value.text)
+    }
+    if (value.kind == Kind.kind_f64) {
+        return Status.status_unsupported
+    }
+    return Status.status_other
+}

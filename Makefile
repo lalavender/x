@@ -386,10 +386,11 @@ test-compiler-tests: stage-yh
 	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 
 # test-lib-tests：标准库内建测试（yh test 直接跑 libs 项目里的 test 块）。
-# 目前覆盖 string 模块；新增模块的 test 块只需在此追加模块名。
+# 目前覆盖 string 与 fmt 模块；新增模块的 test 块只需在此追加模块名。
 .PHONY: test-lib-tests
 test-lib-tests: stage-yh
 	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
+	@cd $(TOPSRC)/libs && $(YH_RUN) test fmt --timeout 60
 
 # quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
 # 秒级到十几秒，改语法/诊断时够用；运行语义与自举门留给 test/full。
