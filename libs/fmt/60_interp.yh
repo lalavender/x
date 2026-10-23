@@ -1,0 +1,68 @@
+module fmt
+
+import string
+
+// yh fmt 运行时：编译器插值降级使用的叶/拼接 API。
+//
+// 这些函数是编译器与 fmt 的契约：编译器把 `"a${x}b"` 降级为
+// text/concat/value 调用。String 参数按值传递，concat 消费两个输入并返回
+// 合并结果；调用方只保留返回值，不再释放输入。失败一律返回零句柄。
+//
+// v1 的 text/value_spec 接收 NUL 结尾 *char；文本块内嵌 NUL 暂不支持。
+
+// text 新建一个只含文本的 String；NULL 视为空串。
+pub fn text(value *char) string.String {
+    let result string.String = string.make()
+    if (value != 0) {
+        let view string.ViewResult = string.view_cstr(value)
+        if (view.status == string.status_ok) {
+            if (append_text(&result, view.value) != Status.status_ok) {
+                string.release(&result)
+                return string.make()
+            }
+        }
+    }
+    return result
+}
+
+// value 以默认格式新建一个 String；失败返回零句柄。
+pub fn value(item Value) string.String {
+    let empty string.ViewResult = string.view_bytes(0, 0)
+    let result TextResult = render(item, empty.value)
+    if (result.status != Status.status_ok) {
+        return string.make()
+    }
+    return result.value
+}
+
+// value_spec 以给定 V spec 新建一个 String；失败返回零句柄。
+pub fn value_spec(item Value, spec *char) string.String {
+    let view string.ViewResult = string.view_cstr(spec)
+    if (view.status != string.status_ok) {
+        return string.make()
+    }
+    let result TextResult = render(item, view.value)
+    if (result.status != Status.status_ok) {
+        return string.make()
+    }
+    return result.value
+}
+
+// concat 消费两个 String 并返回拼接结果；任一侧失败/为零句柄时退化为另一侧。
+pub fn concat(left string.String, right string.String) string.String {
+    if (left.handle == 0) {
+        return right
+    }
+    if (right.handle == 0) {
+        return left
+    }
+    let right_view string.View = string.as_view(&right)
+    let status string.Status = string.append(&left, right_view)
+    if (status != string.status_ok) {
+        string.release(&left)
+        string.release(&right)
+        return string.make()
+    }
+    string.release(&right)
+    return left
+}

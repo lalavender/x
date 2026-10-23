@@ -2,6 +2,14 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-24 yh fmt 插值叶 API
+
+- **实现**：`60_interp.yh` 增加编译器降级契约 `text`/`value`/`value_spec`/
+  `concat`；String 按值传递，`concat` 消费输入并返回合并结果，失败零句柄。
+- **测试**：fmt 内建测试增至 17 项；`make test-lib-tests` 全绿。
+- **边界**：`text`/`value_spec` 接收 NUL 结尾 `*char`，文本块内嵌 NUL 暂不支持；
+  编译器插值尚未接通。
+
 ## 2026-10-24 yh fmt R3 API：print/sprint/render
 
 - **实现**：`50_output.yh` 的 print/sprint/fprint/render/of_string；打印族

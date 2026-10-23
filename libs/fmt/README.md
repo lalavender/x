@@ -5,8 +5,9 @@ yh 标准库的格式化运行时。设计见
 分期见
 [`docs/02-plan/yh-fmt标准库实施方案-2026-10-23.md`](../../docs/02-plan/yh-fmt标准库实施方案-2026-10-23.md)。
 
-当前是 **R3**：Value/构造器、V 格式说明符（整数/字符串/bool/f64）、
-追加、print/sprint/render。语言层 `${}` 插值（I0–I5）尚未实现。
+当前是 **R3 + 插值叶 API**：Value/构造器、V 格式说明符、追加、
+print/sprint/render，以及编译器降级用的 `text`/`value`/`value_spec`/
+`concat`。语言层 `${}` 插值（I0–I5）尚未实现。
 
 ## 模型
 
@@ -45,6 +46,10 @@ pub struct Value { ... }  // 字段公开；布局不是接口，只用构造器
 | `sprint([]Value)` / `sprintln([]Value)` | 拼接新建字符串 / 加换行 |
 | `fprint(int, []Value)` / `fprintln(int, []Value)` | 写 fd / 加换行 |
 | `print([]Value)` / `println([]Value)` | 写标准输出 / 加换行 |
+| `text(*char) string.String` | 新建文本 String；NULL 为空 |
+| `value(Value) string.String` | 默认格式新建 String |
+| `value_spec(Value, *char) string.String` | 指定 spec 新建 String |
+| `concat(String, String) String` | 消费两个输入并拼接 |
 
 `Status`：`status_ok`、`status_out_of_memory`、`status_overflow`、
 `status_invalid_spec`、`status_unsupported`、`status_other`。
@@ -96,5 +101,5 @@ make test-lib-tests
 ```
 
 R3 覆盖构造器、整数/浮点默认与 spec、字符串/bool 对齐、rune 宽度、
-浮点符号/宽度/特殊值、非法 spec、实现上限、sprint/render/of_string 与
-fprint 错误路径。语言层插值按 I0–I5 继续。
+浮点符号/宽度/特殊值、非法 spec、实现上限、sprint/render/of_string、
+fprint 错误路径与插值叶 API。语言层插值按 I0–I5 继续。
