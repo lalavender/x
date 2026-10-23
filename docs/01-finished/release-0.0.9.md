@@ -114,9 +114,9 @@ YH_TEST_JOBS=8 yh test         # 并行度（缺省 4，限制 1..8）
 
 | 资产 | SHA-256（tar.gz） |
 | --- | --- |
-| `yh-0.0.9-darwin-arm64.tar.gz` | `2b0a3c0c…`（见同目录 `.sha256`） |
-| `yh-0.0.9-linux-arm64.tar.gz` | 同上 |
-| `yh-0.0.9-linux-x86_64.tar.gz` | 同上 |
+| `yh-0.0.9-darwin-arm64.tar.gz` | `a9b27a923b1d94c5ac49b653e26f0abe093568a1f3daf01da2ecfff5da84910e` |
+| `yh-0.0.9-linux-arm64.tar.gz` | `4b707ec7619d82b7ecd1525602b76ce9348fbb7c71a74166c13d02f75abaca38` |
+| `yh-0.0.9-linux-x86_64.tar.gz` | `c797e6d2ad5e745c1d35b3b7ff147120a0dfd3007120622412c2c30fdd77bb36` |
 
 Darwin/arm64 种子（解包后 `yh` sha256
 `56bf3f56027fb7609c8f37c384c0f3b8e07314f50618f2cf093274583ca6ceb8`）装入
