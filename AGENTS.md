@@ -138,7 +138,6 @@ make fetch-seed         # 从最新 GitHub Release 取本机平台种子（x64 �
 make code-stats         # 统计 compiler/ 下 yh 源码规模
 make test-code-stats    # 运行统计工具边界与 JSON 检查
 make test-lib-tests     # 标准库内建测试（yh test 跑 libs 项目的 test 块）
-make test-compiler-tests # compiler/ 内嵌 yh test 测试（需种子支持 test 语法）
 make test-llvm-linux-arm64  # F1：Linux/AArch64 LLVM 运行时/C ABI/O0-O2（容器内）
 make seed               # 滚种子（仅在全绿后；拒绝带构建机路径的种子）
 ```

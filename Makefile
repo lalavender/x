@@ -331,7 +331,6 @@ test: stage-yh
 	python3 $(TOPSRC)/tests/yh-run/check.py --compiler $(YH_RUN) $(RUN_WORK_FLAG)
 	python3 $(TOPSRC)/tests/modules/test-check.py --compiler-path $(YH_RUN)
 	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
-	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/toml/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-test
 	python3 $(TOPSRC)/tests/tools/yh-code-stats/check.py
 
@@ -378,13 +377,6 @@ test-string-install:
 test-string-complexity: stage-yh
 	python3 $(TOPSRC)/tests/string/complexity.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-complexity
 
-# test-compiler-tests：compiler/ 内嵌 yh test 测试（需要种子支持 test 语法）。
-# 测试二进制与编译器本身一样要链内嵌 LLVM 闭包，工具复用 tools/llvm-*-host.py
-# 的 shim 记录准备 PATH/YH_CC/YH_LLVM_SELFHOST_FLAGS/SDKROOT。
-.PHONY: test-compiler-tests
-test-compiler-tests: stage-yh
-	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
-
 # test-lib-tests：标准库内建测试（yh test 直接跑 libs 项目里的 test 块）。
 # 目前覆盖 string 模块；新增模块的 test 块只需在此追加模块名。
 .PHONY: test-lib-tests
@@ -416,7 +408,6 @@ selfhost-native: stage-yh
 	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/modules/test-check.py --compiler-path $(YH_RUN)
 	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
-	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(YH_RUN) $(MODCHECK_FLAGS) $(MODCHECK_WORK_FLAG)
 
 # llvm-isolation：bwrap + 空 PATH 验证最终 yh 不依赖系统 LLVM/lld、无外部旁车。

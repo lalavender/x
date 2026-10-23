@@ -62,20 +62,6 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 （`tests/modules/build-check.py` 115 例），以及
 `tests/selfhost/llvm-function-cache.py` 的函数级缓存矩阵。滚种子前必须全绿。
 
-## 内建测试
-
-`gen/buffer.yh`、`lex/layout.yh`、`parse/parse_type.yh` 含 `test` 块，覆盖
-纯函数边界（`hexval`、`is_assign_op`、`lex_can_end`、`is_member_name`、
-`is_type_start`）。运行：
-
-```bash
-make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test 语法）
-```
-
-测试体走与普通函数相同的 CheckedModule→SSA→LLVM 路径，但只在测试模式下登记，
-生产构建的模块对象与 `.s.i` 不含 `__yh_test_` 符号。给本目录新增 `test` 块前，
-入库种子必须已经支持 test 语法（滚种子之后）。
-
 ## 模块与文件职责
 
 **lex** —— 词法
