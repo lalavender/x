@@ -2,6 +2,23 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 yh test 项目外单文件（YT1.1）
+
+- **实现**：`yh test <项目外文件>` 为单文件建立临时项目
+  （`<源文件目录>/tmp/yh-test/single`，`source` 指向源文件目录但扫描只接受
+  该文件），相邻 `.yh` 与子目录不装入；模块名取 `module` 头，缺失时由文件名
+  派生；允许导入标准库；`--list/--no-run/--filter/--timeout/--emit-llvm`
+  全部沿用。完整记录见
+  [YT1.1 实施记录](01-finished/yh-test项目外单文件-2026-10-23.md)。
+- **语料**：`tests/modules/single/`（无 module 头、导入标准库、故意写坏的相邻
+  文件），`test-check.py` 增至 38 项。
+- **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 38/38；string 内建 5/5；
+  compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
+  project cases 121/121）。
+- **边界**：单文件模式无 `[link]`/`[c]` 配置，只能用默认链接环境；临时项目根
+  固定，同目录并发执行会互相覆盖。
+
 ## 2026-10-23 yh test 测试构建缓存键（YT2d-2）
 
 - **实现**：`GenState.c_test_key` 记录本轮选中测试集合摘要（模块/文件/声明号/

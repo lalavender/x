@@ -235,6 +235,18 @@ fn tc_rel_path(file int, off *int, olen *int) void {
     let gs *gen.GenState = gen.G()
     let poff int = gs.p_files[file].path_off
     let plen int = gs.p_files[file].path_len
+    if (gs.c_scan_file_off >= 0) {
+        // 单文件模式：显示文件名本身，而不是临时项目根之外的绝对路径。
+        let base int = 0
+        let i int = 0
+        for i < plen {
+            if (gs.task.np_data[poff + i] == '/') { base = i + 1 }
+            i += 1
+        }
+        off[0] = poff + base
+        olen[0] = plen - base
+        return
+    }
     let start int = 0
     if (plen > tc_root_len && gs.task.np_data[poff + tc_root_len] == '/') {
         let same int = 1
@@ -718,6 +730,110 @@ fn tc_select(proj int, s *char, mod_filter *int, file_filter *int) int {
     return 0
 }
 
+// tc_file_has_project：源文件所在目录向上 32 层内是否存在 project.toml。
+// 存在即按项目模式处理（文件不属于该项目时报错，不静默降级为单文件）。
+fn tc_file_has_project(abs_path *char) int {
+    let dir [1100]u8
+    let dn int = 0
+    let last int = -1
+    let i int = 0
+    for abs_path[i] != 0 {
+        dir[i] = abs_path[i].to_type(u8)
+        if (abs_path[i] == '/') { last = i }
+        i += 1
+    }
+    if (last <= 0) { return 0 }
+    dn = last
+    dir[dn] = 0
+    let depth int = 0
+    for depth <= 32 {
+        let probe [1100]u8
+        let pn int = 0
+        let k int = 0
+        for k < dn {
+            probe[pn] = dir[k]
+            pn += 1
+            k += 1
+        }
+        pn = gen.append_str(&probe[0], pn, "/project.toml")
+        probe[pn] = 0
+        if (pj_file_exists(gen.arr_cstr(&probe[0])) != 0) { return 1 }
+        // 上移一层：去掉最后一个路径段
+        let slash int = -1
+        let j int = 0
+        for j < dn {
+            if (dir[j] == '/') { slash = j }
+            j += 1
+        }
+        if (slash <= 0) { return 0 }
+        dn = slash
+        dir[dn] = 0
+        depth += 1
+    }
+    return 0
+}
+
+// tc_single_file_project：为项目外单文件建立临时项目并装载。
+// 临时项目根 = <源文件目录>/tmp/yh-test/single；source 指向源文件目录，扫描
+// 只接受该文件（相邻 .yh 不会被装入）。成功写回项目下标与根路径。
+fn tc_single_file_project(abs_path *char, proj_out *int,
+    root_off *int, root_len *int) int {
+    let gs *gen.GenState = gen.G()
+    let dir [1000]u8
+    let dn int = 0
+    let last int = -1
+    let i int = 0
+    for abs_path[i] != 0 {
+        dir[i] = abs_path[i].to_type(u8)
+        if (abs_path[i] == '/') { last = i }
+        i += 1
+    }
+    if (last <= 0) { return gen.fail("单文件测试需要绝对路径") }
+    dn = last
+    dir[dn] = 0
+    let dir_str *char = gen.arr_cstr(&dir[0])
+    let rootb [1000]u8
+    let rn int = gen.append_str(&rootb[0], 0, dir_str)
+    rn = gen.append_str(&rootb[0], rn, "/tmp/yh-test/single")
+    rootb[rn] = 0
+    if (cmd_mkdirs(gen.arr_cstr(&rootb[0])) != 0) {
+        return gen.fail("无法创建单文件测试目录")
+    }
+    // 临时清单：source 指向源文件目录，os/arch 跟随宿主。
+    let manifest *u8 = 0
+    let mcap int = 0
+    let mn int = 0
+    if (tc_buf_puts(&manifest, &mn, &mcap, "[project]\nos = \"host\"\narch = \"host\"\nname = \"yh_test_single\"\nsource = \"") != 0) { return -1 }
+    if (tc_buf_puts(&manifest, &mn, &mcap, dir_str) != 0) { return -1 }
+    if (tc_buf_puts(&manifest, &mn, &mcap, "\"\n") != 0) { return -1 }
+    let mpath [1100]u8
+    let mpn int = gen.append_str(&mpath[0], 0, gen.arr_cstr(&rootb[0]))
+    mpn = gen.append_str(&mpath[0], mpn, "/project.toml")
+    mpath[mpn] = 0
+    if (tc_write_file(gen.arr_cstr(&mpath[0]), manifest, mn) != 0) {
+        free(manifest.to_type(*void))
+        return -1
+    }
+    free(manifest.to_type(*void))
+    // 只在源码扫描时接受这一个文件。
+    let alen int = 0
+    for abs_path[alen] != 0 { alen += 1 }
+    let aoff int = gen.tml_intern_str(abs_path.to_type(*u8), 0, alen)
+    if (aoff < 0) { return -1 }
+    gs.c_scan_file_off = aoff
+    gs.c_scan_file_len = alen
+    if (pj_canon(0, 0, gen.arr_cstr(&rootb[0])) != 0) { return -1 }
+    let roff int = pj_canon_off
+    let rlen int = pj_canon_len
+    pj_set_root_project(roff, rlen)
+    let proj int = pj_load_project(roff, rlen)
+    if (proj < 0) { return -1 }
+    proj_out[0] = proj
+    root_off[0] = roff
+    root_len[0] = rlen
+    return 0
+}
+
 // mb_run_test_command：解析 CLI、装载项目并执行 YT1 发现/检查。
 fn mb_run_test_command(av **char, an int) int {
     let gs *gen.GenState = gen.G()
@@ -804,18 +920,50 @@ fn mb_run_test_command(av **char, an int) int {
     // YT2a：测试体降低为模块内 pub 无参 void 函数并发布对象；不链接、不执行。
     gs.task.c_check_only = 0
     if (mb_load_stdlib() != 0) { return 1 }
-    let root int = pj_find_root(0)
-    if (root < 0) { return 1 }
-    let root_off int = pj_canon_off
-    let root_len int = pj_canon_len
-    pj_set_root_project(root_off, root_len)
-    let proj int = pj_load_project(root_off, root_len)
-    if (proj < 0) { return 1 }
+    let single_file int = 0
+    let abs_file [1100]u8
+    abs_file[0] = 0
+    if (selector != 0 && tc_is_source_path(selector) != 0) {
+        // 项目外单文件：文件所在目录向上没有 project.toml 时按临时单模块处理，
+        // 只编译该文件并允许导入标准库；相邻文件不会被装入。
+        let resolved [4096]u8
+        if (realpath(selector, gen.arr_cstr(&resolved[0])) == 0) {
+            return gen.fail_path("无法解析测试文件路径: ", selector)
+        }
+        let alen int = 0
+        for resolved[alen] != 0 { alen += 1 }
+        let i2 int = 0
+        for i2 < alen {
+            abs_file[i2] = resolved[i2]
+            i2 += 1
+        }
+        abs_file[i2] = 0
+        if (alen > 0 && tc_file_has_project(gen.arr_cstr(&abs_file[0])) == 0) {
+            single_file = 1
+        }
+    }
+    let root_off int = 0
+    let root_len int = 0
+    let proj int = -1
     let mod_filter int = -1
     let file_filter int = -1
-    if (selector != 0) {
-        if (tc_select(proj, selector, &mod_filter, &file_filter) != 0) {
+    if (single_file != 0) {
+        if (tc_single_file_project(gen.arr_cstr(&abs_file[0]), &proj,
+                &root_off, &root_len) != 0) {
             return 1
+        }
+    } else {
+        let root int = pj_find_root(0)
+        if (root < 0) { return 1 }
+        root_off = pj_canon_off
+        root_len = pj_canon_len
+        pj_set_root_project(root_off, root_len)
+        proj = pj_load_project(root_off, root_len)
+        if (proj < 0) { return 1 }
+        if (selector != 0) {
+            if (tc_select(proj, selector, &mod_filter, &file_filter) != 0) {
+                return 1
+            }
         }
     }
     let count int = tc_discover(proj, mod_filter, file_filter)

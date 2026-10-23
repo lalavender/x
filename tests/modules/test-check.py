@@ -278,6 +278,36 @@ class Checker:
                    and "结果: 2 passed; 0 skipped; 0 failed" in narrow.stdout,
                    f"退出码 {narrow.returncode}，输出 {narrow.stdout[:400]!r}")
 
+        # 5o. 项目外单文件：临时单模块、不装入相邻文件、可导入标准库。
+        single = self.work / "single-file"
+        if single.exists():
+            shutil.rmtree(single)
+        shutil.copytree(HERE / "single", single, ignore=shutil.ignore_patterns("tmp"))
+        proc = self.run(single, "standalone.yh")
+        self.check("single-file-test",
+                   proc.returncode == 0
+                   and "结果: 2 passed; 0 skipped; 0 failed" in proc.stdout
+                   and "standalone::standalone.yh::test::加法" in proc.stdout,
+                   f"退出码 {proc.returncode}，输出 {proc.stdout[-400:]!r}，"
+                   f"stderr {proc.stderr[-300:]!r}")
+        listed = self.run(single, "standalone.yh", "--list")
+        no_run = self.run(single, "standalone.yh", "--no-run")
+        self.check("single-file-options",
+                   listed.returncode == 0 and no_run.returncode == 0
+                   and len(listed.stdout.splitlines()) == 2
+                   and "PASS " not in no_run.stdout,
+                   f"list {listed.returncode}，no-run {no_run.returncode}")
+        imported = self.run(single, "with_import.yh")
+        self.check("single-file-stdlib-import",
+                   imported.returncode == 0
+                   and "imported_demo::with_import.yh::test::标准库可用" in imported.stdout,
+                   f"退出码 {imported.returncode}，输出 {imported.stdout[-400:]!r}")
+        # 相邻的 neighbour.yh 有意写坏：若被装入单文件模式，本用例必然编译失败。
+        self.check("single-file-skips-neighbours",
+                   (single / "neighbour.yh").is_file()
+                   and proc.returncode == 0,
+                   "相邻文件被错误装入")
+
         # 5f. --no-run 只构建，不执行。
         noexec = self.prepare("ytest", "no-exec")
         proc = self.run(noexec, "--no-run")
