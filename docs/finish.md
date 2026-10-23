@@ -2,6 +2,25 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 0.0.9-rc.2 开发与本地验收
+
+- **内容**：恢复 compiler 内嵌测试与门禁（YT3b）：`gen/buffer.yh`、
+  `lex/layout.yh`、`parse/parse_type.yh` 的 test 块，`tools/compiler-tests.py`
+  与 `make test-compiler-tests`，并入 `make test` / `make selfhost-native`。
+- **修复**（rc.1 验收后暴露）：
+  1. 测试构建不读/不写模块 manifest 缓存（复用生产对象会让测试入口找不到
+     `__yh_test_*`）；2. 测试构建不装载/不提交函数级 IR 与 check 切片缓存
+     （曾出现「表达式 AST 校验失败」）；3. 测试函数只在本轮选中的模块/文件
+     登记（依赖模块曾留下无函数体的受检声明，`yh test <模块>` 直接挂）；
+     4. 自解析与种子快照跳过 `tmp/`、`.build/`（自解析曾从 114 变 117）。
+- **回归**：`tests/modules/test-check.py` 增至 28 项，新增
+  `test-after-production-build`。
+- **验证**：种子 = 0.0.9-rc.1；`make`、`make test`、`make selfhost-native`
+  全绿（语法 81/81、49/49；run 211/212；fail 136/136；pass 9/9；
+  test-check 28/28；string 内建 5/5；compiler-tests 3/3；TOML 6/6；
+  固定点 30 产物、自解析 114 文件、modules 19/19、project cases 121/121）。
+- 发布说明：[release-0.0.9-rc.2](01-finished/release-0.0.9-rc.2.md)。
+
 ## 2026-10-23 0.0.9-rc.1 发布与发布版二进制验收
 
 - **发布**：Gitea `release.yml` 的 `publish` 作业成功（run 142），三端资产

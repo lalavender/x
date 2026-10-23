@@ -38,7 +38,7 @@
 - [ ] **PF3**：规模增长、产物运行基准与代码体积；并发扫描待存在控制入口后再做。
 - [ ] **PF4**：Gitea 独立性能报告、资产归档、噪声校准与回退复测。
 
-## 语言内测试（YT0–YT3b 已实施，剩余 YT2d 与 YT1.1）
+## 语言内测试（YT0–YT3b 已实施，剩余 YT2d/YT1.1 与 YT4 迁移）
 
 [设计提案](03-design/yh-test语言内测试设计-2026-10-23.md)与
 [实施分期](02-plan/yh-test分阶段实施方案-2026-10-23.md)已整理。
@@ -53,6 +53,8 @@ YT3b（compiler 内嵌测试与门禁，随 0.0.9-rc.2 交付）已完成，证�
 [YT2c 记录](01-finished/yh-test执行增强-2026-10-23.md)、
 [YT3a 记录](01-finished/yh-test标准库内建测试-2026-10-23.md)与
 [YT3b 记录](01-finished/yh-test编译器内嵌测试-2026-10-23.md)；
+既有测试的迁移候选见
+[YT4 分析](02-plan/yh-test语法迁移既有测试分析-2026-10-23.md)；
 以下只保留未完成项。
 
 - [ ] **YT1.1**：项目外单文件临时单模块上下文（当前明确拒绝，不装入相邻文件）。
@@ -73,6 +75,29 @@ YT3b（compiler 内嵌测试与门禁，随 0.0.9-rc.2 交付）已完成，证�
 - [x] **YT3b（0.0.9-rc.2 交付）**：用 rc.1 种子给 `gen`/`lex`/`parse` 加内嵌
   test 块，恢复 `tools/compiler-tests.py` 与 `make test-compiler-tests`，
   并验证生产对象与 `.s.i` 零测试符号。
+
+### YT4 既有测试迁移（2026-10-23 分析完成，待实施）
+
+[分析](02-plan/yh-test语法迁移既有测试分析-2026-10-23.md)按「纯逻辑断言可迁移、
+编译器契约不迁移」给出候选、前置缺口与分阶段顺序。结论：收益是失败定位与
+粒度，不是门禁变快；迁移前必须先做 YT4a，且每个库保留一个外部消费者 smoke。
+
+- [ ] **YT4a 前置**：测试运行目录/缓存隔离（并入 YT2d：编译器身份 + 目标 +
+  优化级 + 运行实例）、`make test-lib-tests` 改无选择器、补 `-O2` 入口；
+  连跑两次 + O0/O2 交替验证。
+- [ ] **YT4b string**：5 组行为夹具 → `libs/string` 测试，`stringinterop` →
+  `libs/toml`；保留 `stringresources` 注入、`reference.py` 差分与安装门。
+- [ ] **YT4c toml**：5 组 API 夹具（873 行、146 处 `ok()`）→ `libs/toml`
+  测试；保留 `tomlfiles`、conformance、injection、install。
+- [ ] **YT4d cli**：5 个 `--selftest` 主体（约 3625 行）→ `libs/cli` 测试；
+  保留 argv/退出码/stderr 用例、`cliwarnings`、`clidiff` 差分。
+- [ ] **YT4e 编译器 fixture**：`irverify`/`astcheck`/`irfront` 迁入
+  `compiler/{ir,ast,check}` 测试并删除 `copy_proj` 特判；`llvmlower`/
+  `llvmchecked` 暂留。
+- [ ] **YT4f os/sys/time**：纯模型与错误分类断言迁入 `*.linux.yh`/
+  `*.darwin.yh` 测试；文件/目录/进程/环境与 Linux 目标类型检查留在外部。
+- [ ] **决策**：迁移范围（是否含 YT4e）、旧 runner 双跑周期、OS/FS 是否迁入、
+  断言粒度、是否允许测试调用私有 `fn`、消费者 smoke 规模。
 
 ## 版本与发布流程（P0 前置）
 
