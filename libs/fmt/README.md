@@ -1,13 +1,12 @@
-# fmt（R1）
+# fmt（R2）
 
 yh 标准库的格式化运行时。设计见
 [`docs/03-design/yh-fmt标准库设计-2026-10-23.md`](../../docs/03-design/yh-fmt标准库设计-2026-10-23.md)，
 分期见
 [`docs/02-plan/yh-fmt标准库实施方案-2026-10-23.md`](../../docs/02-plan/yh-fmt标准库实施方案-2026-10-23.md)。
 
-当前是 **R1**：Value/构造器、V 格式说明符（整数/字符串/bool）与追加接口。
-f64 的数值渲染（R2）尚未接通，返回 `status_unsupported`；print/sprint
-（R3）与语言层 `${}` 插值（I0–I5）尚未实现。
+当前是 **R2**：Value/构造器、V 格式说明符（整数/字符串/bool/f64）与追加接口。
+print/sprint（R3）与语言层 `${}` 插值（I0–I5）尚未实现。
 
 ## 模型
 
@@ -33,7 +32,7 @@ pub struct Value { ... }  // 字段公开；布局不是接口，只用构造器
 | --- | --- |
 | `of_int(int)` / `of_i64(i64)` | 有符号 64 位 |
 | `of_u64(u64)` | 无符号 64 位 |
-| `of_f64(f64)` | 存储；数值渲染待 R2 |
+| `of_f64(f64)` | 默认 g；支持 f/F/e/E/g/G |
 | `of_bool(bool)` | true/false |
 | `of_str(string.View)` | 借用字节文本 |
 | `of_cstr(*char)` | NUL 结尾；NULL 视为空串 |
@@ -56,12 +55,17 @@ pub struct Value { ... }  // 字段公开；布局不是接口，只用构造器
 | flags | `-` 左对齐、`0` 零补齐、`+` 非负显示正号；`-` 优先于 `0` |
 | width | 十进制字面量，最小宽度；上限 1,048,576 |
 | precision | 只对浮点有意义（R2）；整数忽略；字符串/bool 传 precision 为非法 |
-| type | 整数 `d x X o b`；字符串 `s`；bool 仅默认；浮点类型在 R2 |
+| type | 整数 `d x X o b`；字符串 `s`；bool 仅默认；浮点 `f F e E g G` |
 | 默认 | 整数 `d`、浮点 `g`、字符串 `s` |
 
 整数按 ASCII 数字计宽；字符串按 UTF-8 标量计宽，非法字节每个计 1。
 负整数先输出 `-`，再输出绝对值的指定进制。`0` 与 `+` 同时出现时零补齐
 放在符号之后。
+
+浮点：默认 `g`（6 位有效数字）；`.N` 视为小数位数并去掉无意义尾零，
+`.Nf` 保留尾零；`e/E` 指数至少两位；NaN/±Inf/负零分别输出
+`NaN`/`+Inf`/`-Inf`/`-0`。定点路径在 `scaled > 1e18` 或精度 > 17 时返回
+`status_unsupported`（实现上限，不是语法错误）。
 
 ## 示例
 
@@ -86,6 +90,6 @@ cd libs && ../yh test fmt --timeout 60
 make test-lib-tests
 ```
 
-R1 覆盖构造器、整数默认与 spec（宽度/符号/进制/i64 最小值）、字符串/bool
-对齐、rune 宽度、非法 spec 与 f64 未接通路径。print/sprint、浮点与插值
-降级按 R2–R3/I0–I5 继续。
+R2 覆盖构造器、整数/浮点默认与 spec、字符串/bool 对齐、rune 宽度、
+浮点符号/宽度/特殊值、非法 spec 与实现上限。print/sprint 与插值降级按
+R3/I0–I5 继续。

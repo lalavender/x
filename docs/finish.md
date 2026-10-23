@@ -2,6 +2,17 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-24 yh fmt R2：浮点渲染
+
+- **实现**：`40_float.yh` 接通 f64：NaN/±Inf/负零、默认 g（6 位有效数字）、
+  `f/F`、`e/E`、`g/G`，`.N` 去尾零、`.Nf` 保留，指数至少两位；宽度/符号/
+  零补齐复用浮点文本路径。
+- **测试**：fmt 内建测试增至 13 项；`make test-lib-tests` 全绿。
+- **边界**：定点 `scaled > 1e18` 或 precision > 17 返回
+  `status_unsupported`；未做 V 实测差分。
+- **记录**：[R2 实施记录](01-finished/yh-fmt-R2-2026-10-24.md)。
+- **验证**：`cd libs && ../yh test fmt` 13/13；未跑全量门，未滚种子。
+
 ## 2026-10-24 yh fmt R1：V 格式说明符整数/文本子集
 
 - **实现**：`20_spec.yh` 解析 flags/width/precision/type；`30_render.yh`
