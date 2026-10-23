@@ -1,0 +1,62 @@
+module sys
+
+// Darwin 进程原语：PID、fork、exec、wait、退出、信号与 posix_spawn 桥。
+// 经 libSystem 的 POSIX 入口调用，除退出外保留内核结果或 -errno；
+// 不做状态解释、不分配、不格式化。getpid/fork/kill/exit 复用编译器 prelude
+// 已登记的同名 C 入口，其余按固定参数声明。
+
+// execve 与 wait4 在本文件按固定参数声明；wait4 的 rusage 传空指针。
+@[extern] fn execve(path *char, argv **char, envp **char) int
+@[extern] fn wait4(pid int, status *int, options int, usage *void) int
+
+// posix_spawn 直接完成 fork+exec：成功返回 0 并写入子 PID，失败返回正 errno
+// （不是 -1，也不设置全局 errno）。file_actions/attrp 传空指针表示继承
+// 当前描述符与默认属性；path 必须精确，不搜索 PATH。
+@[extern] fn posix_spawn(pid *int, path *char, actions *void, attrs *void,
+    argv **char, envp **char) int
+
+// process_id 返回当前进程号；getpid 不会失败。
+pub fn process_id() i64 {
+    return getpid().to_type(i64)
+}
+
+// fork_process 复制当前进程；父进程得到正子 PID，子进程得到 0，
+// 失败返回负 errno。两端从同一返回点继续，调用方必须按返回值分流。
+// 首期只支持单线程父进程的 fork/COW worker，不提供任意 clone(flags, stack)。
+pub fn fork_process() i64 {
+    return errno_result(fork().to_type(i64))
+}
+
+// execute 用显式 argv/envp 替换当前映像；成功不返回，失败返回负 errno。
+// 路径必须是精确路径，不搜索 PATH、不经过 shell；argv/envp 为 NULL 结尾指针数组。
+pub fn execute(path *char, argv **char, envp **char) i64 {
+    return errno_result(execve(path, argv, envp).to_type(i64))
+}
+
+// spawn_process 用 posix_spawn 创建进程并把 exec 结果一次性返回。
+// 成功返回 0 且 pid 为正子 PID；失败返回负 errno，且不创建子进程，
+// 因此调用方不需要回收失败路径。path/argv/envp 与 execute 的约定相同。
+pub fn spawn_process(path *char, argv **char, envp **char, pid *int) i64 {
+    let result int = posix_spawn(pid, path, 0, 0, argv, envp)
+    if (result != 0) {
+        return (0 - result).to_type(i64)
+    }
+    return 0
+}
+
+// wait_process 等待指定子进程并把原始 32 位状态字写入 status。
+// pid 可为正子 PID 或 -1 等待任一子进程；options 为 0 或 WNOHANG。
+// 返回被回收的子 PID，失败返回负 errno；status 只在成功时有效，sys 不解码。
+pub fn wait_process(pid int, status *int, options int) i64 {
+    return errno_result(wait4(pid, status, options, 0).to_type(i64))
+}
+
+// exit_process 以指定状态结束进程；成功后不返回，不做语言清理。
+pub fn exit_process(code int) void {
+    exit(code)
+}
+
+// send_signal 向 pid 发送信号并返回内核结果；错误保留负 errno。
+pub fn send_signal(pid int, signal int) i64 {
+    return errno_result(kill(pid, signal).to_type(i64))
+}

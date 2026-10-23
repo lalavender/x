@@ -1,0 +1,84 @@
+module libc
+
+// libc 的排序与查找（L1 纯 yh 子集）。
+//
+// qsort/bsearch 使用 C 标准签名：元素按字节宽度寻址，比较函数是 C ABI 回调
+// fn(*void, *void) int，返回值小于 0 表示前者在前。实现不分配、不依赖 yh
+// 运行时，因此 C 调用方可以直接链接。
+//
+// 约束与取舍：
+//   * 比较函数必须非空；当前编译器后端不支持“函数指针与 0 比较”，空指针
+//     由调用方保证不传（C 标准同样要求合法回调）。
+//   * qsort 用插入排序：最坏 O(n^2)，但稳定、只用 O(1) 额外空间；L1 只要求
+//     语义正确，大数据量排序可在 L4 换成内省排序。
+//   * bsearch 要求 base 已按同一比较函数排好序，返回命中的元素地址；查找
+//     到任意一个相等元素即可（与 C 一致）。
+
+// swap_bytes 交换两块 width 字节的存储（模块私有，允许重叠外的普通交换）。
+fn swap_bytes(left *void, right *void, width u64) void {
+    let a *u8 = left.to_type(*u8)
+    let b *u8 = right.to_type(*u8)
+    let index u64 = 0
+    for index < width {
+        let byte u8 = a[index.to_type(int)]
+        a[index.to_type(int)] = b[index.to_type(int)]
+        b[index.to_type(int)] = byte
+        index += 1
+    }
+}
+
+// element_at 返回 base 起第 index 个元素的地址；调用方保证范围有效。
+fn element_at(base *u8, index u64, width u64) *void {
+    let offset u64 = index * width
+    return (base + offset.to_type(int)).to_type(*void)
+}
+
+// qsort 就地把 count 个 width 字节的元素按 compare 升序排序。
+// count < 2 或 width == 0 时不做任何事；compare 必须非空。
+@[extern] pub fn qsort(base *void, count u64, width u64,
+    compare fn(*void, *void) int) void {
+    if (base == 0 || count < 2 || width == 0) {
+        return
+    }
+    let bytes *u8 = base.to_type(*u8)
+    let index u64 = 1
+    for index < count {
+        let cursor u64 = index
+        for cursor > 0 {
+            let current *void = element_at(bytes, cursor, width)
+            let previous *void = element_at(bytes, cursor - 1, width)
+            if (compare(previous, current) <= 0) {
+                break
+            }
+            swap_bytes(previous, current, width)
+            cursor -= 1
+        }
+        index += 1
+    }
+}
+
+// bsearch 在已排序的 base 中二分查找等于 key 的元素，返回元素地址或 NULL。
+// count == 0 或 width == 0 返回 NULL；compare 必须非空且与 qsort 一致。
+@[extern] pub fn bsearch(key *void, base *void, count u64, width u64,
+    compare fn(*void, *void) int) *void {
+    if (key == 0 || base == 0 || count == 0 || width == 0) {
+        return 0
+    }
+    let bytes *u8 = base.to_type(*u8)
+    let low u64 = 0
+    let high u64 = count
+    for low < high {
+        let middle u64 = low + (high - low) / 2
+        let slot *void = element_at(bytes, middle, width)
+        let order int = compare(key, slot)
+        if (order == 0) {
+            return slot
+        }
+        if (order < 0) {
+            high = middle
+        } else {
+            low = middle + 1
+        }
+    }
+    return 0
+}

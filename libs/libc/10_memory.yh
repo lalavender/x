@@ -1,0 +1,94 @@
+module libc
+
+// libc 的内存原语（L1 纯 yh 子集）。
+//
+// 所有导出函数都带 @[extern]：定义的是 C ABI 符号（如 memmove），既可被
+// yh 程序 import libc 直接调用，也可被 C 调用方按标准原型链接。
+// 只处理 LP64 目标的 size_t（u64）；返回指针保持 C 契约（目标或 NULL）。
+// 不分配、不设置 errno、不依赖 yh 运行时，模块对象可独立链接。
+//
+// 未提供 memcpy/strlen：这两个名字由编译器 prelude 登记（弱定义在 yh
+// 运行时里），模块内不能重复声明。需要时直接调用 prelude 版本，或在
+// C ABI 变参/符号别名落地后由 L0 补齐。
+
+// text_len 返回 NUL 结尾字节串的长度（不含 NUL）。
+// 模块私有的 strlen 替身，避免本模块对象引用 yh 运行时符号。
+fn text_len(text *char) u64 {
+    let index u64 = 0
+    for text[index.to_type(int)] != 0 {
+        index += 1
+    }
+    return index
+}
+
+// memmove 复制 count 字节到 destination，允许源与目标重叠。
+// 按地址先后选择前向或后向拷贝；count 为 0 或同一地址直接返回。
+// 成功返回 destination；不检查空指针（与 C 一致）。
+@[extern] pub fn memmove(destination *void, source *void,
+    count u64) *void {
+    let dest *u8 = destination.to_type(*u8)
+    let from *u8 = source.to_type(*u8)
+    if (count == 0 || dest == from) {
+        return destination
+    }
+    if (destination.to_type(u64) < source.to_type(u64)) {
+        let index u64 = 0
+        for index < count {
+            dest[index.to_type(int)] = from[index.to_type(int)]
+            index += 1
+        }
+        return destination
+    }
+    let index u64 = count
+    for index > 0 {
+        index -= 1
+        dest[index.to_type(int)] = from[index.to_type(int)]
+    }
+    return destination
+}
+
+// memset 把 destination 起的 count 个字节写成 (value & 0xff)。
+// 返回 destination；不做分配、不检查空指针。
+@[extern] pub fn memset(destination *void, value int, count u64) *void {
+    let dest *u8 = destination.to_type(*u8)
+    let byte u8 = (value & 0xff).to_type(u8)
+    let index u64 = 0
+    for index < count {
+        dest[index.to_type(int)] = byte
+        index += 1
+    }
+    return destination
+}
+
+// memcmp 按无符号字节比较前 count 个字节。
+// 相等返回 0；否则返回首个不同字节的差（left - right），符号与 C 一致。
+// 不把返回值当作绝对值使用。
+@[extern] pub fn memcmp(left *void, right *void, count u64) int {
+    let a *u8 = left.to_type(*u8)
+    let b *u8 = right.to_type(*u8)
+    let index u64 = 0
+    for index < count {
+        let la u8 = a[index.to_type(int)]
+        let lb u8 = b[index.to_type(int)]
+        if (la != lb) {
+            return la.to_type(int) - lb.to_type(int)
+        }
+        index += 1
+    }
+    return 0
+}
+
+// memchr 在 buffer 的前 count 字节里找第一个等于 (value & 0xff) 的字节。
+// 找到返回该字节地址；没找到返回 NULL。count 为 0 时返回 NULL。
+@[extern] pub fn memchr(buffer *void, value int, count u64) *void {
+    let bytes *u8 = buffer.to_type(*u8)
+    let target u8 = (value & 0xff).to_type(u8)
+    let index u64 = 0
+    for index < count {
+        if (bytes[index.to_type(int)] == target) {
+            return (bytes + index.to_type(int)).to_type(*void)
+        }
+        index += 1
+    }
+    return 0
+}

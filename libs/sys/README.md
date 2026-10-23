@@ -1,7 +1,8 @@
-# sys 标准库：Linux 系统调用封装
+# sys 标准库：Linux 系统调用与 Darwin libSystem 封装
 
-日期：2026-10-21。状态：**OS0–OS6 完成；文件/目录/进程/内存/时间 sys 原语
-与默认标准库发现已实现**（OS7–OS8 未实施）。
+日期：2026-10-22。状态：**OS0–OS8 完成**：Linux 走原始 syscall，Darwin 走
+libSystem 桥；文件/目录/进程/内存/时间原语与默认标准库发现均已实现
+（OS7 编译器迁移仍未实施）。
 
 - 完整 API 清单与契约：[doc.yh](doc.yh)
 - 分层与交付顺序：[联合设计](../../docs/03-design/yh-os与sys标准库设计.md)、
@@ -140,34 +141,58 @@ if (pid > 0) {
 ```
 
 - `fork_process`：SIGCHLD + 空子栈 + 无 CLONE_VM；父得 PID，子得 0。
+  Darwin 直接用 libSystem `fork`。
 - `execute`：精确路径 execve，不搜索 PATH、不经过 shell。
+- `spawn_process(path, argv, envp, pid)`（Darwin）：`posix_spawn` 一次完成
+  fork+exec，成功返回 0 并写 pid，失败返回 `-errno` 且不创建子进程。
 - `wait_process`：返回原始 wait4 状态；正常/信号/错误由 os.wait 解码。
-- `create_pipe(output, flags)`：pipe2，输出两个连续 int，成功后才可读取。
+- `create_pipe(output, flags)`：Linux 用 pipe2；Darwin 只有无标志 `pipe`，
+  带 `O_CLOEXEC`/`O_NONBLOCK` 的请求返回 `-ENOSYS`（见下节限制）。
 - `send_signal`：kill。
 
 ## 常量与平台
 
-- 调用号、`O_*`、errno 按 ISA 分开维护。AArch64 `O_DIRECTORY = 0x4000`，
-  x86_64 `O_DIRECTORY = 0x10000`，不能跨目标复制。
-- `Timespec`、`is_error`、`error_code` 跨平台；其余 Linux 专属。
-  Darwin 不会选中 Linux 文件，也不提供伪成功空桩。
+- Linux 调用号、`O_*`、errno 按 ISA 分开维护。AArch64
+  `O_DIRECTORY = 0x4000`，x86_64 `O_DIRECTORY = 0x10000`，不能跨目标复制。
+- Darwin 常量来自 macOS SDK：`AT_FDCWD = -2`、`O_DIRECTORY = 0x100000`、
+  `O_CLOEXEC = 0x1000000`、`CLOCK_MONOTONIC = 6`、`ENOSYS = 78` 等，
+  不能与 Linux 数值混用。
+- `Timespec`、`is_error`、`error_code` 跨平台。Darwin 桥把 libSystem 的
+  “返回 -1 + 线程 errno”归一化为 `-errno`，调用方判断方式不变。
+
+### Darwin 桥的限制（明确失败，不假装成功）
+
+- `open_at` 只支持 `AT_FDCWD`（os 文件的唯一调用形式），其他目录 fd 返回
+  `-ENOSYS`。原因是 Darwin 的 `openat` 是 C 变参入口，mode 必须经变参栈
+  传递，而 C ABI v1 的 extern 声明只能是固定参数。
+- `create_pipe` 的 `flags != 0` 返回 `-ENOSYS`：同一原因，`fcntl` 的第三个
+  实参也是变参。os 的 Darwin `spawn` 因此改用 `posix_spawn`，不依赖管道。
+- 目录读取走 `getattrlistbulk`：每批返回若干条目组，组内布局由 os 解析；
+  缓冲不足一条记录时返回 `-ERANGE`（os 归一化为 `error_invalid_argument`）。
 
 ## 实现文件
 
 ```text
 libs/sys/
   00_types.yh                  Timespec、is_error、error_code
+  05_errno.darwin.yh           __error 读取与 -errno 归一化
   10_constants.linux.arm64.yh  AArch64 调用号、O_*、AT_*、errno
   10_constants.linux.x64.yh    x86_64 调用号、O_*、AT_*、errno
+  10_constants.darwin.yh       Darwin O_*、AT_*、errno、映射/时钟、attrlist 位
   20_raw.linux.yh              raw6 → linux_syscall6
   30_file.linux.yh             文件/目录/cwd/pipe2
-  40_memory.linux.yh           mmap/munmap
-  50_time.linux.yh             clock_gettime/nanosleep
-  60_process.linux.yh          PID/fork/exec/wait/exit/signal
+  30_file.darwin.yh            文件/目录/cwd/pipe/getattrlistbulk 桥
+  40_memory.linux.yh           mmap/munmap（系统调用）
+  40_memory.darwin.yh          mmap/munmap（libSystem）
+  50_time.linux.yh             clock_gettime/nanosleep（系统调用）
+  50_time.darwin.yh            clock_gettime/nanosleep（libSystem）
+  60_process.linux.yh          PID/fork/exec/wait/exit/signal（系统调用）
+  60_process.darwin.yh         PID/fork/exec/wait/exit/signal/posix_spawn
   doc.yh                       仅注释的完整 API 参考
 ```
 
 ## 未实施
 
-Darwin 原生桥、duplicate_fd/fd_flags、编译器迁移（OS7/OS8）仍待后续；
-旧 os/io/time 接口保持原契约。
+duplicate_fd/fd_flags 与编译器迁移（OS7）仍待后续；旧 os/io/time 接口
+保持原契约。Darwin 的变参入口（openat/fcntl 第三实参）要等 C ABI 支持
+变参后再补齐，当前按上面的限制显式报错。

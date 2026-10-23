@@ -1,7 +1,7 @@
 # os 标准库：应用级 OS 操作
 
-日期：2026-10-21。状态：**OS0–OS6 完成**（Linux 新文件/目录/进程 API；
-环境查询跨平台；旧接口兼容保留）。
+日期：2026-10-22。状态：**OS0–OS8 完成**（Linux 与 Darwin 都提供文件、
+目录/cwd、环境查询与进程接口；平台差异收敛在 `libs/sys` 的平台实现里）。
 
 - 完整 API 清单与契约：[doc.yh](doc.yh)
 - 分层与交付顺序：[联合设计](../../docs/03-design/yh-os与sys标准库设计.md)、
@@ -182,13 +182,40 @@ pub fn main(argc int, argv **char, envp **char) int {
 | --- | --- | --- |
 | 结果模型、OpenOptions | ✅ | ✅ |
 | 环境查询 | ✅ | ✅ |
-| 新文件 API | ✅ | 仅 `write_once` 兼容入口 |
-| 目录/cwd | ✅ | ❌（OS8） |
-| 进程 | ✅ | ❌（OS8） |
-| `sleep_us` | nanosleep | usleep |
+| 新文件 API | ✅ | ✅ |
+| 目录/cwd | ✅ | ✅（getattrlistbulk） |
+| 进程 | ✅ | ✅（posix_spawn） |
+| `sleep_us` | nanosleep | nanosleep |
 
-Darwin 新接口未接入前保留旧 `os.yh` 宿主接口；缺少的新符号在编译期报错，
-不提供成功空桩。
+两平台的差异只在实现方式，公开契约一致：
+
+- Linux 的 `spawn` 用 fork + close-on-exec 错误管道确认 exec；Darwin 用
+  `posix_spawn`，exec 失败直接返回错误，不会产生待回收子进程。
+- Linux 目录读取解析 `getdents64` 记录，Darwin 解析 `getattrlistbulk`
+  条目组；缓冲不足一条记录时都返回 `error_invalid_argument`。
+- Darwin 的 `sys.open_at` 只支持 `AT_FDCWD`（os 的唯一调用形式）；其他目录
+  fd 返回 `-ENOSYS`（见 [sys README](../sys/README.md) 的平台限制）。
+
+旧 `os.yh` 宿主接口在两平台继续保留，缺少的新符号在编译期报错，不提供
+成功空桩。
+
+## 自带验收（Darwin 契约）
+
+```sh
+python3 libs/os/test/run.py            # 非 Darwin 宿主明确 SKIP
+python3 libs/os/test/run.py --quiet
+```
+
+runner 分两段：
+
+- `linux-check`：把 `tests/modules/projects` 里的 os/sys 平台用例逐个以
+  `-target aarch64-unknown-linux-gnu check` 检查（只读复制，任何宿主都能跑）；
+- `darwin-contract`（仅 Darwin）：构建 `libs/os/test/main.yh` 并运行，覆盖
+  文件 API 与错误分类、getattrlistbulk 目录读取（含 60 字节长名称与小缓冲）、
+  cwd、环境查询、时间/睡眠/内存映射、管道、posix_spawn 的退出码/信号/
+  EACCES/ENOENT 与 wait 错误。
+
+Linux 原生运行仍由 `tests/modules` 的 Linux 专属用例承担。
 
 ## 旧接口兼容
 
@@ -201,14 +228,14 @@ remove_file/rename_file/is_terminal/process_id/terminate/platform/arch`
 ```text
 libs/os/
   00_model.yh            Error/FdResult/IoResult/OpenOptions/DirEntry 等
-  10_errors.linux.yh     私有错误归一化
-  file.linux.yh          Linux 文件 API
-  file.darwin.yh         Darwin write_once 兼容入口
-  20_directory.linux.yh  DirReader/cwd
-  30_process.linux.yh    spawn/wait/exit_now
+  10_errors.yh           私有错误归一化与切片地址帮助（跨平台）
+  file.yh                文件 API（经 sys，跨平台）
+  20_directory.linux.yh  DirReader/cwd（getdents64 记录）
+  20_directory.darwin.yh DirReader/cwd（getattrlistbulk 条目组）
+  30_process.linux.yh    spawn/wait/exit_now（fork + 错误管道）
+  30_process.darwin.yh   spawn/wait/exit_now（posix_spawn）
   environment.yh         envp 查询（跨平台）
-  40_sleep.linux.yh      旧 sleep_us（Linux）
-  40_sleep.darwin.yh     旧 sleep_us（Darwin）
+  40_sleep.yh            旧 sleep_us（经 sys.sleep_time，跨平台）
   os.yh                  旧接口兼容
   doc.yh                 仅注释的完整 API 参考
 ```

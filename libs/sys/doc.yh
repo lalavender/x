@@ -4,14 +4,18 @@ module sys;
 // yh sys 标准库 API 参考
 //
 // 本文件只包含文档注释，不导出任何符号；实际实现位于
-// 00_types.yh、10_constants.linux.{arm64,x64}.yh、20_raw.linux.yh、
-// 30_file.linux.yh、40_memory.linux.yh、50_time.linux.yh、
-// 60_process.linux.yh。README.md 给出可运行示例。
+// 00_types.yh、05_errno.darwin.yh、10_constants.{linux.arm64,linux.x64,
+// darwin}.yh、20_raw.linux.yh、30_file.{linux,darwin}.yh、
+// 40_memory.{linux,darwin}.yh、50_time.{linux,darwin}.yh、
+// 60_process.{linux,darwin}.yh。README.md 给出可运行示例。
 //
 // 平台范围：
 //   * Timespec、is_error、error_code：Linux/Darwin 共有；
-//   * 其余调用号、常量和具名原语：当前仅 Linux；
-//   * Darwin 不提供伪成功空桩，Linux 专属文件不会被选中。
+//   * 具名原语：两平台都提供同名接口，Linux 走原始 syscall，Darwin 走
+//     libSystem 桥；Darwin 桥把“返回 -1 + 线程 errno”归一化为 -errno；
+//   * Darwin 特有：spawn_process（posix_spawn）与 read_dir_entries
+//     （getattrlistbulk 条目组）；raw6 仍然只有 Linux；
+//   * 平台文件按后缀选择，缺失入口不会提供伪成功空桩。
 //
 // 结果约定：
 //   * 具名原语成功返回内核结果（字节数/fd/PID/地址/0）；
@@ -25,7 +29,7 @@ module sys;
 // 1. 类型与结果（00_types.yh）
 // ----------------------------------------------------------------------------
 //
-// Timespec：Linux LP64 时间结构，16 字节，sec 偏移 0、nsec 偏移 8。
+// Timespec：LP64 时间结构，16 字节，sec 偏移 0、nsec 偏移 8。
 //   sec  整秒
 //   nsec 纳秒，合法范围 0..999999999
 //
@@ -53,7 +57,7 @@ module sys;
 //     a3 u64, a4 u64, a5 u64) i64;
 
 // ----------------------------------------------------------------------------
-// 3. 公开常量（10_constants.linux.arm64.yh / x64.yh）
+// 3. 公开常量（10_constants.linux.arm64.yh / x64.yh / 10_constants.darwin.yh）
 // ----------------------------------------------------------------------------
 //
 // 目录与打开标志：
@@ -86,6 +90,13 @@ module sys;
 //
 // 所有值均为目标 ISA 的 ABI 常量；不得把 AArch64 的 O_DIRECTORY 复制到
 // x86_64，也不得在源码中硬编码跨平台错误号。
+//
+// Darwin 取值（macOS SDK）：AT_FDCWD -2、AT_REMOVEDIR 0x80、
+// O_CREAT 0x200、O_EXCL 0x800、O_TRUNC 0x400、O_APPEND 0x8、
+// O_DIRECTORY 0x100000、O_CLOEXEC 0x1000000、O_NONBLOCK 0x4、
+// MAP_PRIVATE 0x2、MAP_ANONYMOUS 0x1000、CLOCK_MONOTONIC 6、ENOSYS 78；
+// 目录枚举另有 ATTR_BIT_MAP_COUNT、ATTR_CMN_NAME/OBJTYPE/RETURNED_ATTRS
+// 与 VREG/VDIR。数值与 Linux 不同，必须由平台文件提供。
 // pub const AT_FDCWD int = -100;
 // pub const AT_REMOVEDIR int = 0x200;
 // pub const O_RDONLY int = 0;
@@ -122,7 +133,7 @@ module sys;
 // pub const ERANGE int = 34;
 
 // ----------------------------------------------------------------------------
-// 4. 文件与目录原语（30_file.linux.yh）
+// 4. 文件与目录原语（30_file.linux.yh / 30_file.darwin.yh）
 // ----------------------------------------------------------------------------
 //
 // open_at(dir_fd int, path *char, flags int, mode u32) i64
@@ -158,8 +169,13 @@ module sys;
 //   修改进程全局当前目录；成功 0，失败 -errno。
 //
 // create_pipe(output *int, flags int) i64
-//   pipe2；output 指向两个连续 int（读端、写端）；成功 0 后才可读取；
-//   flags 可用 O_CLOEXEC/O_NONBLOCK；失败 -errno。
+//   Linux 用 pipe2；output 指向两个连续 int（读端、写端）；成功 0 后才可
+//   读取；flags 可用 O_CLOEXEC/O_NONBLOCK；失败 -errno。
+//   Darwin 只有无标志 pipe，flags != 0 返回 -ENOSYS（不假装已设置）。
+//
+// read_dir_entries(fd int, buffer *void, capacity u64) i64（Darwin）
+//   getattrlistbulk 读取目录条目组；返回本批组数（0 为结束），失败 -errno；
+//   缓冲不足一条记录返回 -ERANGE。组布局由 os 目录读取器解析。
 // pub fn open_at(dir_fd int, path *char, flags int, mode u32) i64;
 // pub fn read_fd(fd int, buffer *void, count u64) i64;
 // pub fn write_fd(fd int, buffer *void, count u64) i64;
@@ -169,12 +185,17 @@ module sys;
 // pub fn rename_at(old_dir_fd int, old_path *char,
 //     new_dir_fd int, new_path *char) i64;
 // pub fn getdents64(fd int, buffer *void, count u64) i64;
+// pub fn read_dir_entries(fd int, buffer *void, capacity u64) i64;
 // pub fn get_cwd(buffer *char, capacity u64) i64;
 // pub fn change_dir(path *char) i64;
 // pub fn create_pipe(output *int, flags int) i64;
+//
+// Darwin 的 open_at 只接受 AT_FDCWD：openat 是 C 变参入口，mode 必须经变参
+// 栈传递，C ABI v1 的固定参数 extern 无法复现该约定，其他目录 fd 返回
+// -ENOSYS。
 
 // ----------------------------------------------------------------------------
-// 5. 内存映射（40_memory.linux.yh）
+// 5. 内存映射（40_memory.linux.yh / 40_memory.darwin.yh）
 // ----------------------------------------------------------------------------
 //
 // map_memory(address *void, count u64, protection int, flags int,
@@ -190,7 +211,7 @@ module sys;
 // pub fn unmap_memory(address *void, count u64) i64;
 
 // ----------------------------------------------------------------------------
-// 6. 时间（50_time.linux.yh）
+// 6. 时间（50_time.linux.yh / 50_time.darwin.yh）
 // ----------------------------------------------------------------------------
 //
 // read_clock(clock_id int, output *Timespec) i64
@@ -204,7 +225,7 @@ module sys;
 // pub fn sleep_time(request *Timespec, remaining *Timespec) i64;
 
 // ----------------------------------------------------------------------------
-// 7. 进程（60_process.linux.yh）
+// 7. 进程（60_process.linux.yh / 60_process.darwin.yh）
 // ----------------------------------------------------------------------------
 //
 // process_id() i64
@@ -227,12 +248,17 @@ module sys;
 //
 // send_signal(pid int, signal int) i64
 //   kill；返回内核结果，失败 -errno。
+//
+// spawn_process(path *char, argv **char, envp **char, pid *int) i64（Darwin）
+//   posix_spawn 一次完成 fork+exec；成功 0 并写正子 PID，失败 -errno 且
+//   不创建子进程；file_actions/attrp 为空表示继承当前描述符与默认属性。
 // pub fn process_id() i64;
 // pub fn fork_process() i64;
 // pub fn execute(path *char, argv **char, envp **char) i64;
 // pub fn wait_process(pid int, status *int, options int) i64;
 // pub fn exit_process(code int) void;
 // pub fn send_signal(pid int, signal int) i64;
+// pub fn spawn_process(path *char, argv **char, envp **char, pid *int) i64;
 
 // ============================================================================
 // 所有 pub 接口到此结束。os 层的应用级 API、错误分类与使用示例见

@@ -46,6 +46,17 @@ YH_STDLIB=/path/to/yh/libs yh run
 | `copy(destination *void, source *void, byte_count u64) *void` | 复制指定字节数并返回目标地址 |
 
 本模块只包装现有 yh 运行时分配与复制入口；所有权由调用方管理，不引入隐式分配。
+`alloc` 结果至少 16 字节对齐，`alloc(0)` 返回非空地址，`copy` 不处理重叠区间。
+
+2026-10-23 新增[内存管理标准库设计](yh-memory标准库设计-2026-10-23.md)与
+[实施方案](../02-plan/yh-memory标准库实施方案-2026-10-23.md)，按 Zig
+`std.mem.Allocator`/`std.heap` 的能力分层规划：保持上述签名不变，补
+`reallocate`（显式 `old_size`）、`FixedBuffer`（调用方缓冲区、LIFO
+resize/free）、增强 Arena（几何增长、reset 模式、LIFO 回收、capacity）与
+基于 Arena + 空闲链的 FixedPool；统一 `Allocator`（函数指针 vtable）为 M5
+可选，Debug/ThreadSafe/Page/StackFallback 后置。设计状态是**未实施**：当前
+只有上表三个 API；块来源统一为 prelude 堆，不新增 `sys` 依赖，也不替换
+`libc` 的 C ABI 分配器。
 
 ### `string`（2026-10-23 首期完成）
 
@@ -180,8 +191,29 @@ cwd/pipe（`30_file`）、内存（`40_memory`）、时间（`50_time`）与进�
 [libs/toml/README.md](../../libs/toml/README.md)，取舍见
 [ADR-0017](../adr/0017-yh-TOML标准库独立文档模型.md)。
 
+## testing（2026-10-23 首期完成）
+
+`libs/testing/` 是 `yh test` 的最小运行时辅助模块，只提供
+`fail(message *char) void` 与 `skip(reason *char) void`。两者都向 fd 3 写测试
+记录并立即 `exit`，父进程据此判定 FAIL / SKIP；基本断言仍用编译器内建的
+`$assert(cond[, msg])`，不需要导入本模块。只依赖 prelude 的 `write`/`exit`，
+避免与 `os`/`io` 形成依赖环。见[`libs/testing/README.md`](../../libs/testing/README.md)。
+
+## fmt 与 V 风格字符串插值（2026-10-23 设计；未实施）
+
+`libs/fmt/` 规划为 V 风格字符串插值的运行时：`Value`、构造器、
+`append_text`/`append_value`、`render` 与 print/sprint。语言层插值
+`"…${expr:spec}…"` 由编译器实现，结果类型为 `string.String`；首版不实现
+Go 的 `%` 格式串与 `Printf` 族。语言没有 `any`/接口/反射，插值只支持
+整数、`f64`、`bool`、`*char`/`string.View` 等标量文本类型，复合值不自动
+格式化。首版限制、spec 子集与错误语义见
+[字符串插值设计](yh-字符串插值设计-2026-10-23.md)；运行时 API 见
+[fmt 标准库设计](yh-fmt标准库设计-2026-10-23.md)；R0–R3/I0–I5 分期见
+[实施方案](../02-plan/yh-fmt标准库实施方案-2026-10-23.md)。当前状态是规划，
+`libs/fmt/` 尚未创建，编译器插值尚未实现。
+
 ## 当前边界
 
-当前基础层不定义完整文件句柄、错误类型、缓冲策略、Unicode 处理、通用格式化或
-跨平台 ABI。库源码跨平台验收不在本阶段范围内；后续 API 按实际需求追加设计和
-`.yh` 项目测试。
+当前基础层不定义完整文件句柄、错误类型、缓冲策略、Unicode 处理或跨平台 ABI；
+通用格式化由上述规划的 V 风格插值与 `fmt` 运行时承接，尚未实现。库源码
+跨平台验收不在本阶段范围内；后续 API 按实际需求追加设计和 `.yh` 项目测试。

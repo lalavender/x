@@ -4,13 +4,17 @@ module os;
 // yh os 标准库 API 参考
 //
 // 本文件只包含文档注释，不导出任何符号；实际实现位于同模块的
-// 00_model.yh、file.*.yh、20_directory.linux.yh、30_process.linux.yh、
-// environment.yh、40_sleep.*.yh 与 os.yh。
+// 00_model.yh、10_errors.yh、file.yh、environment.yh、40_sleep.yh、
+// 平台文件 20_directory.{linux,darwin}.yh、30_process.{linux,darwin}.yh
+// 与旧接口 os.yh。
 //
-// 平台范围（OS0–OS6）：
-//   * 结果模型、环境查询：Linux 与 Darwin 共有；
-//   * 新文件 API、目录/cwd、进程：当前仅 Linux；
-//   * write_once/sleep_us：Linux 与 Darwin 各有实现；
+// 平台范围（OS0–OS8）：
+//   * 结果模型、文件 API、环境查询、sleep_us：Linux 与 Darwin 共有，
+//     平台差异收敛在 sys 的平台实现里；
+//   * 目录/cwd：两平台都提供；Linux 解析 getdents64 记录，Darwin 解析
+//     getattrlistbulk 条目组；
+//   * 进程：两平台都提供；Linux 用 fork + close-on-exec 错误管道确认 exec，
+//     Darwin 用 posix_spawn 直接返回 exec 错误；
 //   * 旧 os.yh 接口：两平台保留宿主语义，返回 -1/宿主标志。
 //
 // 加载方式（按优先级）：
@@ -126,7 +130,7 @@ module os;
 // pub fn make_dir_entry(name []u8, kind DirKind) DirEntry;
 
 // ----------------------------------------------------------------------------
-// 2. Linux 新文件 API（file.linux.yh）
+// 2. 文件 API（file.yh，跨平台）
 // ----------------------------------------------------------------------------
 //
 // open_path(path *char, options OpenOptions) FdResult
@@ -167,14 +171,8 @@ module os;
 // pub fn remove_dir_path(path *char) Error;
 // pub fn rename_path(old_path *char, new_path *char) Error;
 
-// Darwin 兼容入口（file.darwin.yh）：
-//   write_once(fd, buffer, count) IoResult
-//   仅服务 io.write_all_result；失败分类为 error_other，native_code = 0，
-//   Darwin 完整新文件 API 仍待 OS8。
-// pub fn write_once(fd int, buffer *void, count u64) IoResult;
-
 // ----------------------------------------------------------------------------
-// 3. Linux 目录与当前目录（20_directory.linux.yh）
+// 3. 目录与当前目录（20_directory.linux.yh / 20_directory.darwin.yh）
 // ----------------------------------------------------------------------------
 //
 // DirEntryStatus：os.dir_entry_ok / os.dir_entry_end / os.dir_entry_error。
@@ -192,7 +190,8 @@ module os;
 //
 // next_entry(reader *DirReader) DirEntryResult
 //   返回下一条目，跳过 . 与 ..；区分条目/结束/失败；损坏记录返回
-//   error_other 并停止解析当前批次。
+//   error_other 并停止解析当前批次。缓冲不足一条记录时两平台都返回
+//   error_invalid_argument（Linux EINVAL / Darwin ERANGE），不静默当成 EOF。
 //
 // close_dir(reader *DirReader) Error
 //   关闭目录；重复调用幂等；关闭后 next_entry 返回 invalid_argument。
@@ -250,7 +249,7 @@ module os;
 // pub fn get_env(envp **char, name *char) EnvResult;
 
 // ----------------------------------------------------------------------------
-// 5. Linux 进程（30_process.linux.yh）
+// 5. 进程（30_process.linux.yh / 30_process.darwin.yh）
 // ----------------------------------------------------------------------------
 //
 // WaitState：os.wait_exited / os.wait_signaled / os.wait_error。
@@ -263,8 +262,9 @@ module os;
 //   wait_error    error 有效。
 //
 // spawn(path *char, argv **char, envp **char) PidResult
-//   精确路径启动，不搜索 PATH、不经过 shell；close-on-exec 错误管道确认
-//   exec 成功后才返回 pid；exec 失败返回显式错误并回收失败子进程。
+//   精确路径启动，不搜索 PATH、不经过 shell；成功返回 pid 前已确认 exec：
+//   Linux 用 close-on-exec 错误管道并回收失败子进程，Darwin 用 posix_spawn
+//   直接返回 exec 错误（失败时不创建子进程）。
 //
 // wait(pid int) WaitResult
 //   阻塞等待；遇 EINTR 内部重试；不把信号退出压成 128+signal。
@@ -291,12 +291,12 @@ module os;
 // pub fn exit_now(code int) void;
 
 // ----------------------------------------------------------------------------
-// 6. sleep_us 兼容接口（40_sleep.linux.yh / 40_sleep.darwin.yh）
+// 6. sleep_us 兼容接口（40_sleep.yh，跨平台）
 // ----------------------------------------------------------------------------
 //
 // sleep_us(duration int) int
-//   负值返回 -1；Linux 经 sys.nanosleep 成功返回 0，失败返回 -1；
-//   Darwin 沿用宿主 usleep 返回值。保持旧契约，不暴露剩余时间。
+//   负值返回 -1；两平台都经 sys.sleep_time 成功返回 0，失败返回 -1。
+//   保持旧契约，不暴露剩余时间，也不在库内重试。
 // pub fn sleep_us(duration int) int;
 
 // ----------------------------------------------------------------------------
