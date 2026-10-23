@@ -2,6 +2,24 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 0.0.9-rc.2 发布与发布版二进制验收
+
+- **发布**：Gitea `release.yml` run 57 五个作业全部 success，创建
+  prerelease `0.0.9-rc.2` 并上传三端资产；`ci.yml` 的 `0.0.9-rc` 分支门同轮
+  通过。
+- **CI 迭代**：① 首轮 tag 因 GitHub 资产 SSL 中断失败（环境网络）；
+  ② 次轮暴露 `compiler-tests`/隔离冷编重复注入闭包导致
+  `ld.lld: duplicate symbol: yh_lld_link_driver`，改为 `[link]` 清单环境
+  （`YH_LINK_MANIFEST_ONLY=1` + `YH_LINK_RUNTIME_FLAGS`）；
+  ③ 第三轮构建机磁盘仅剩 2.3 GiB，Darwin 链接与 x86_64 对象原子写入失败，
+  清理可再生的缓存与旧产物后重跑成功。
+- **验收**：发布种子 `yh 0.0.9`（`7cbf2580…cfb1e837`）装入 `bin/yh-darwin-arm64`
+  后，`make`、`make test`、`make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 28/28；string 内建 5/5；
+  compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
+  modules 19/19、project cases 121/121）。
+- 记录详见[release-0.0.9-rc.2](01-finished/release-0.0.9-rc.2.md)。
+
 ## 2026-10-23 linux-x64 发布门 duplicate symbol 修复
 
 - **现象**：Gitea `release.yml` 的 linux-x86_64 job 在 `make selfhost-native`

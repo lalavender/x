@@ -375,6 +375,23 @@ LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
   （`tests/modules/projects/llvmarchitecture/cases/lowering.yh` 暂将 goto 与
   函数指针放在独立函数，未降低断言）。需单独立项修复并补回归。
 
+## 接口特性（IF1–IF5，方案待评审）
+
+2026-10-24 取向已定：**显式 vtable 语法糖、零运行时魔法**——interface 展开为
+`self` + 方法函数指针字段的普通 struct，impl 只做编译期检查，`s.m()` 是
+`s.m(s.self)` 的糖。方案见
+[接口特性实施方案](02-plan/yh-接口特性实施方案-2026-10-24.md)；按片立项，
+实施顺序 IF1 → IF2 → IF3 → IF4/IF5。
+
+- [ ] **IF1**：`interface` 关键字、类型登记（form=4、隐含 `self *void`）、
+  方法槽必须是 fn 类型的检查。
+- [ ] **IF2**：`s.m(args)` 插接收者糖（旧发射路径与 AST/lower 路径行为一致），
+  首版接收者限变量名；comptime 内显式拒绝。
+- [ ] **IF3**：`.s.i` v4（interface 发射/加载）与跨模块构造/调用用例。
+- [ ] **IF4**：`impl` 纯检查（全方法覆盖、签名严格相等）、缓存与固定点复核、
+  `docs/yh.g4` 与语义边界文档刷新、ADR。
+- [ ] **IF5**：`tests/yh`、`tests/yh-run/{run,fail}`、`tests/modules` 门禁用例。
+
 ## 待决策（❓）
 
 - **❓1 Nanopass 定位**：LLVM 已接管通用优化与寄存器分配。建议 NP3 并入受检契约

@@ -61,3 +61,31 @@
 - YT2d（并行执行、逐例日志文件、测试缓存键隔离的完整键设计、超长断言消息
   提示）、YT1.1（项目外单文件临时单模块上下文）。
 - 发布流程 R1–R4 仍未落地。
+
+## 用发布出的 rc 二进制验收（2026-10-23）
+
+发布资产的 tar.gz 与其 `.sha256` 一致（取自 host 模式 runner 的
+`~/yh-release-dist/ci-131`，与 GitHub Release 上传的是同一组文件）：
+
+| 资产 | SHA-256（tar.gz） |
+| --- | --- |
+| `yh-0.0.9-rc.2-darwin-arm64.tar.gz` | `7e22591b2c2db81c1f4c2ca6d5cce209e321008301531034f7599f952ada5554` |
+| `yh-0.0.9-rc.2-linux-arm64.tar.gz` | `c6caace66939076482e203b2618891a2ead2626c58c8eab530f6cafc3aa2bb77` |
+| `yh-0.0.9-rc.2-linux-x86_64.tar.gz` | `7d2a89baae86d0e4e70b1eaa9ad30fe10bfb4b0a1b610e09d66eb7feabf77dbd` |
+
+Darwin/arm64 种子（解包后 `yh` sha256 `7cbf2580…cfb1e837`）装入
+`bin/yh-darwin-arm64` 后：
+
+- `bin/yh-darwin-arm64 version` → `yh 0.0.9`；
+- `make` 冷编通过；
+- `make test` 退出码 0：语法 81/81、49/49；run 211/212（1 条平台 SKIP）、
+  fail 136/136、pass 9/9；`test-check` 28/28（含缓存隔离回归）；string 内建
+  5/5；`compiler-tests: 通过 3/3`；TOML 6/6；代码统计 6/6；
+- `make selfhost-native` 退出码 0：30 个模块产物固定点一致、cc4 自解析
+  114 个源文件、modules 19/19、`compiler-tests 3/3`、project cases 121/121。
+
+**CI 迭代记录**：首轮 tag 因 GitHub 资产下载 SSL 中断失败（环境网络）；
+二轮暴露 `compiler-tests` 重复注入闭包的 duplicate symbol（已修）；
+三轮因构建机磁盘只剩 2.3 GiB，Darwin 链接与 x86_64 对象原子写入失败
+（清理再生缓存后重跑）；run 57 五作业全部 success 并发布 prerelease。
+`ci.yml` 的 `0.0.9-rc` 分支门同轮通过。
