@@ -2,6 +2,18 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 0.0.9 正式版开发
+
+- **版本**：`compiler/project.toml` 保持 `0.0.9`；发布说明见
+  [release-0.0.9](01-finished/release-0.0.9.md)。
+- **内容**：在 rc.1/rc.2 基础上完成 YT2d（逐例日志与截断提示、并行执行、
+  测试构建缓存键）与 YT1.1（项目外单文件临时单模块上下文），
+  `test-check.py` 增至 38 项；`ci.yml` 分支门 Darwin 与 Linux/AArch64 均通过。
+- **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 38/38；string 内建 5/5；
+  compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
+  project cases 121/121）。
+
 ## 2026-10-23 yh test 项目外单文件（YT1.1）
 
 - **实现**：`yh test <项目外文件>` 为单文件建立临时项目
