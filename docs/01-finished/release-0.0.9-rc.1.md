@@ -65,6 +65,22 @@ yh test --timeout 15           # 单例超时秒数（1..3600，缺省 15）
   （`libs/libc/test/`）。
 - `examples/` 清理为单文件示例。
 
+## 其它变化（0.0.8 之后的累积）
+
+- **string 标准库首期（ST0–ST6）**：只读 `View`、可增长 `String`、查找/切分/
+  替换与 UTF-8 基础操作；保留旧的三个 NUL 结尾 C 接口。
+- **TOML 1.1 reader 标准库**：独立 `Document`/只读 `Value` 模型，覆盖四种
+  字符串、点键/引号键、隐式/显式表、数组表、四种日期时间与精确 binary64；
+  通过固定 toml-test v2.2.0 的 1.1 清单 681/681。
+- **cli 标准库 argparse 差分收尾**：自定义 usage 与模板、`version_text`、
+  每层默认值预置、选项 remainder、`Result.warnings` 与 deprecated 警告。
+- **LLVM 架构收口（LA0–LA3）**：函数/check 级缓存、受检快照与 lowering
+  分层、会话接口就绪调度；`--stats` 覆盖计数。
+- **自举链接闭包只强制桥整库加载**（`whole = ["bridge"]`），`yh` 体积
+  73.7 MB → 70.6 MB。
+- 编译器内置（prelude）函数登记迁入 `builtin` 模块；`examples/ex1` 补
+  `return 0` 并登记缺 `return` 诊断缺陷；发布脚本上传后核对远端资产大小。
+
 ## 文档与规划
 
 - yh test：设计提案、块执行模型、T0–T3b 分期与 7 份完成记录。
