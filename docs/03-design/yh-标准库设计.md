@@ -202,7 +202,7 @@ cwd/pipe（`30_file`）、内存（`40_memory`）、时间（`50_time`）与进�
 ## fmt 与 V 风格字符串插值（2026-10-23 设计；未实施）
 
 `libs/fmt/` 规划为 V 风格字符串插值的运行时：`Value`、构造器、
-`append_text`/`append_value`、`render` 与 print/sprint。语言层插值
+`append_text`/`append_value`、`render` 与 print/sprint（公开打印族接收 `[]Value`）。语言层插值
 `"…${expr:spec}…"` 由编译器实现，结果类型为 `string.String`；首版不实现
 Go 的 `%` 格式串与 `Printf` 族。语言没有 `any`/接口/反射，插值只支持
 整数、`f64`、`bool`、`*char`/`string.View` 等标量文本类型，复合值不自动

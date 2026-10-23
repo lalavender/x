@@ -2,6 +2,16 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-24 yh fmt R3 API：print/sprint/render
+
+- **实现**：`50_output.yh` 的 print/sprint/fprint/render/of_string；打印族
+  渲染进临时 String 后一次写出，值之间不插入隐式分隔符。
+- **语言限制**：`pub` 变参函数非法，公开打印族接收 `[]Value`；设计与 README
+  已同步。
+- **测试**：fmt 内建测试增至 16 项；`make test-lib-tests` 全绿。
+- **边界**：安装导入、全 API surface、`nm -u` 留在 R3.2；语言插值未开始。
+- **记录**：[R3 实施记录](01-finished/yh-fmt-R3-2026-10-24.md)。
+
 ## 2026-10-24 yh fmt R2：浮点渲染
 
 - **实现**：`40_float.yh` 接通 f64：NaN/±Inf/负零、默认 g（6 位有效数字）、
