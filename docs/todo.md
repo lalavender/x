@@ -38,21 +38,21 @@
 - [ ] **PF3**：规模增长、产物运行基准与代码体积；并发扫描待存在控制入口后再做。
 - [ ] **PF4**：Gitea 独立性能报告、资产归档、噪声校准与回退复测。
 
-## 语言内测试（YT0–YT3a 随 rc.1；YT3b 随 rc.2；剩余 YT2d 与 YT1.1）
+## 语言内测试（YT0–YT3b 已实施，剩余 YT2d 与 YT1.1）
 
 [设计提案](03-design/yh-test语言内测试设计-2026-10-23.md)与
 [实施分期](02-plan/yh-test分阶段实施方案-2026-10-23.md)已整理。
 YT0 语法基线、YT1 发现/文档绑定/无运行检查、YT2a（测试体降低 + 运行期
 断言）、YT2b（入口模块/逐例进程/结果协议/汇总）、YT2c（执行过滤/超时/
-`testing.fail/skip`/断言消息）与 YT3a（标准库 string 内建测试与门禁）已随
-0.0.9-rc.1 交付；YT3b 推迟到 rc.2（rc.1 种子由 0.0.8 编译，不支持 test 语法）。
-证据见
+`testing.fail/skip`/断言消息）、YT3a（标准库 string 内建测试与门禁）与
+YT3b（compiler 内嵌测试与门禁，随 0.0.9-rc.2 交付）已完成，证据见
 [YT0 记录](01-finished/yh-test语法基线-2026-10-23.md)、
 [YT1 记录](01-finished/yh-test发现与无运行检查-2026-10-23.md)、
 [YT2a 记录](01-finished/yh-test降低与运行期断言-2026-10-23.md)、
 [YT2b 记录](01-finished/yh-test执行器与结果协议-2026-10-23.md)、
 [YT2c 记录](01-finished/yh-test执行增强-2026-10-23.md)、
-[YT3a 记录](01-finished/yh-test标准库内建测试-2026-10-23.md)；
+[YT3a 记录](01-finished/yh-test标准库内建测试-2026-10-23.md)与
+[YT3b 记录](01-finished/yh-test编译器内嵌测试-2026-10-23.md)；
 以下只保留未完成项。
 
 - [ ] **YT1.1**：项目外单文件临时单模块上下文（当前明确拒绝，不装入相邻文件）。
@@ -70,10 +70,9 @@ YT0 语法基线、YT1 发现/文档绑定/无运行检查、YT2a（测试体降
 - [x] **YT3a**：`libs/string/99_tests.yh` 内建测试、`make test-lib-tests`
   入口，接入 `make test` 与 `make selfhost-native`；修复非目标项目 test 声明
   误登记与源码根内 `tmp/`、`.build/` 被当源码扫描两个缺陷。
-- [ ] **YT3b（随 0.0.9-rc.2）**：用 rc.1 种子给 `gen`/`lex`/`parse` 加内嵌
+- [x] **YT3b（0.0.9-rc.2 交付）**：用 rc.1 种子给 `gen`/`lex`/`parse` 加内嵌
   test 块，恢复 `tools/compiler-tests.py` 与 `make test-compiler-tests`，
-  并验证生产对象与 `.s.i` 零测试符号。rc.1 的种子已实测可冷编该内容并通过
-  `compiler-tests 3/3`，rc.2 只需 revert “rc.1 暂缓 compiler 内嵌测试”提交。
+  并验证生产对象与 `.s.i` 零测试符号。
 
 ## 版本与发布流程（P0 前置）
 
