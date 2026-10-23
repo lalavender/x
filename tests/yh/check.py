@@ -70,7 +70,7 @@ M2_ANTLR = Path.home() / ".m2/repository/org/antlr/antlr4"
 # 归一化判定用到的保留字与内建类型（与 compiler/lex/layout.yh 保持一致）。
 KEYWORDS = set(
     "pub let const fn type struct union enum if else switch case default for in "
-    "goto sizeof len as to_type while do unsigned signed short long float double "
+    "goto sizeof len as to_type test while do unsigned signed short long float double "
     "typedef extern static register auto inline volatile restrict module import".split()
 )
 BUILTIN_TYPES = set(

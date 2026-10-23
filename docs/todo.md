@@ -38,18 +38,41 @@
 - [ ] **PF3**：规模增长、产物运行基准与代码体积；并发扫描待存在控制入口后再做。
 - [ ] **PF4**：Gitea 独立性能报告、资产归档、噪声校准与回退复测。
 
-## 语言内测试（2026-10-23 提案，待评审）
+## 语言内测试（YT0–YT3b 已实施，剩余 YT2d 与 YT1.1）
 
-用户要求先给方案；[设计提案](03-design/yh-test语言内测试设计-2026-10-23.md)
-与[实施分期](02-plan/yh-test分阶段实施方案-2026-10-23.md)已整理，以下尚未实施。
+[设计提案](03-design/yh-test语言内测试设计-2026-10-23.md)与
+[实施分期](02-plan/yh-test分阶段实施方案-2026-10-23.md)已整理。
+YT0 语法基线、YT1 发现/文档绑定/无运行检查、YT2a（测试体降低 + 运行期
+断言）、YT2b（入口模块/逐例进程/结果协议/汇总）、YT2c（执行过滤/超时/
+`testing.fail/skip`/断言消息）、YT3a（标准库 string 内建测试与门禁）与
+YT3b（滚种子后 compiler 内嵌测试与门禁）已完成，证据见
+[YT0 记录](01-finished/yh-test语法基线-2026-10-23.md)、
+[YT1 记录](01-finished/yh-test发现与无运行检查-2026-10-23.md)、
+[YT2a 记录](01-finished/yh-test降低与运行期断言-2026-10-23.md)、
+[YT2b 记录](01-finished/yh-test执行器与结果协议-2026-10-23.md)、
+[YT2c 记录](01-finished/yh-test执行增强-2026-10-23.md)、
+[YT3a 记录](01-finished/yh-test标准库内建测试-2026-10-23.md)与
+[YT3b 记录](01-finished/yh-test编译器内嵌测试-2026-10-23.md)；
+以下只保留未完成项。
 
-- [ ] **YT0**：字符串行为测试与 `test 声明名` 文档测试语法、关键字兼容性、
-  声明索引与 `.yh` 正反语料。
-- [ ] **YT1**：项目/模块/文件发现、文档测试目标绑定、测试专用导入、稳定身份与列表。
-- [ ] **YT2**：模块私有测试函数、test 内统一 `$assert` 运行时扩展及断言定位、
-  既有编译期断言兼容、受检节点/入口身份、fail/skip、逐例进程与结果协议、
-  过滤/仅构建/超时与缓存隔离；接点见[执行模型](03-design/yh-test语法块执行模型-2026-10-23.md)。
-- [ ] **YT3**：候选/种子分期、自举验收、少量标准库试用与本平台门禁接入。
+- [ ] **YT1.1**：项目外单文件临时单模块上下文（当前明确拒绝，不装入相邻文件）。
+- [x] **YT2a**：测试体降低为模块内 `pub` 无参 `void` 函数、`$assert` 降为
+  `__yh_test_assert(cond, line, col, msg)` 运行期调用、受检节点与检查身份、
+  `--no-run` 发布对象与 `--emit-llvm` 审阅；生产构建零测试符号。
+- [x] **YT2b**：`__yh_test_assert` 运行时定义与失败位置记录、测试入口模块、
+  逐例 fork/exec、`YHTP`/`YHTF` 结果协议与
+  `结果: N passed; M skipped; K failed` 汇总；崩溃、提前退出与记录缺失均判
+  失败且不阻断后续用例。
+- [x] **YT2c**：执行过滤、`--timeout`（1..3600，缺省 15 秒）、
+  `libs/testing` 的 `fail/skip`、断言位置与消息报告、SKIP 汇总。
+- [ ] **YT2d**：并行执行、逐例独立日志文件、测试缓存键隔离、断言消息超长
+  截断提示。
+- [x] **YT3a**：`libs/string/99_tests.yh` 内建测试、`make test-lib-tests`
+  入口，接入 `make test` 与 `make selfhost-native`；修复非目标项目 test 声明
+  误登记与源码根内 `tmp/`、`.build/` 被当源码扫描两个缺陷。
+- [x] **YT3b**：滚种子；`gen`/`lex`/`parse` 内嵌 test 块；新增
+  `tools/compiler-tests.py` 与 `make test-compiler-tests`，接入两大主门；
+  生产对象与 `.s.i` 零测试符号。
 
 ## 版本与发布流程（P0 前置）
 
@@ -135,6 +158,61 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 - [ ] **E4 libc L0–L5**：按[分阶段候选方案](02-plan/yh-libc分阶段候选方案.md)
   推进，未授权全部实施。
 
+### MEM 内存管理标准库（2026-10-23 设计第二版；M0–M6 待实施）
+
+[设计](03-design/yh-memory标准库设计-2026-10-23.md)与
+[方案](02-plan/yh-memory标准库实施方案-2026-10-23.md)已按 Zig
+`std.mem.Allocator`/`std.heap` 的能力分层整理。保持现有
+`alloc`/`release`/`copy` 签名；新增 `reallocate`（调用方显式提供 `old_size`）、
+`FixedBuffer`（调用方缓冲区、LIFO resize/free）、增强 Arena（几何增长、
+reset 模式、LIFO 回收、capacity）与基于 Arena + 空闲链的 FixedPool。
+统一 `Allocator`（函数指针 vtable）列为 M5 可选；Debug/ThreadSafe/Page/
+StackFallback 后置。块统一取自 prelude 堆，不新增 `sys` 依赖，不改
+`string`/`toml`/编译器，也不替代 `libc` 的 C ABI 分配器。
+
+- [ ] **M0 基线固化**：`memoryheap` fixture 覆盖零长度、16 字节对齐、超长请求
+  返回 0、`release(0)`；不改源码，确认现状与设计一致。
+- [ ] **M1 `reallocate` 与文档**：增长/缩小/失败保留旧块/`new_size=0` 释放；
+  README 与 `old_size`、重叠、对齐边界；`libsbase` 不回退。
+- [ ] **M2 FixedBuffer**：绝对地址对齐、空间不足返回 0、最近分配
+  resize/free、非最近缩小 resize=1 但不回收、reset/owns/容量；新增
+  `tests/memory/run.py`、`make test-memory(-o2)` 与 build-check 登记。
+- [ ] **M3 Arena**：单块/跨块、几何增长（1.5 倍）、64/256 对齐、非法对齐/
+  溢出返回 0、LIFO resize/free、`reset(free_all/retain)`、capacity、
+  `MEMORY_TEST_FAIL_AFTER` 注入。
+- [ ] **M4 FixedPool**：内部 Arena + 空闲链、`reserve`、复用、reset/release、
+  block_size/alignment 校验、映射失败注入；以 `toml`/`cli` 池迁移为可选消费者。
+- [ ] **M5 `Allocator` 统一接口（按需）**：函数指针 vtable、heap/arena/
+  fixed_buffer/pool/failing 适配器、`allocator_reallocate` 组合；触发条件为
+  多容器共享接口、Arena 用 FixedBuffer 作 child 或 StackFallback。
+- [ ] **M6 后置候选**：堆对齐分配、简化 DebugAllocator、StackFallback、
+  PageAllocator 适配器、统计/上限、ThreadSafe（J4）；无消费者不做。
+- [ ] **E4 配对**：libc 分配器与 prelude 的配对（见 E4），不得跨入口释放。
+
+### MATH math 纯 yh 标准库（2026-10-23 方案；P0 已完成）
+
+[方案](02-plan/yh-math标准库实施方案-2026-10-23.md)按用户决定改为**纯 yh
+实现**：不用 `@[extern]`/libm，函数名与 `<math.h>` 一致；算法移植
+fdlibm/musl，位级函数正确舍入，f32 复用 f64 内核。P0 探针已确认普通
+`pub fn` 的 mangled 符号、私有 const 数组/递归/二进制 stdout、并集位模式，
+以及 `pub const f64` 导出损坏与极端十进制字面量偏差。以下只留未完成项。
+
+- [ ] **P1 位级/精确层与谓词**：`00_bits/05_predicates/10_exact/15_round/
+  20_fmod` 的 f64+f32；`mathpredicates`/`mathexact` 夹具、`tests/math/run.py`、
+  `make test-math`、build-check 登记；0 ULP 差分。
+- [ ] **P2 根与 fma**：`01_fma/25_sqrt`；sqrt/sqrtf 位相等，cbrt/hypot ≤1 ULP，
+  fma <1 ULP。
+- [ ] **P3 指数/对数**：`30_exp/35_log`；上溢/下溢/次正规边界，最大 ULP <1。
+- [ ] **P4 幂**：`40_pow`；C 附录 F 特殊值逐条断言，常规区间 <2 ULP。
+- [ ] **P5 三角/反三角**：`44_rem_pio2/45_trig/50_inverse_trig`；Cody-Waite
+  与 Payne-Hanek，大参数与 `atan2` 象限。
+- [ ] **P6 双曲/误差/伽马**：`55_hyper/60_erf/65_gamma`；极点、负半轴、
+  溢出边界。
+- [ ] **P7 贝塞尔/旧名/收口**：`70_bessel/75_legacy`、`doc.yh`/`README.md`、
+  surface 全调用、`nm -u` 无数学符号、O0/O2 与 Linux 容器差分。
+- [ ] **P8 公共 f64 常量（后置）**：修 `iface_emit_const_value` 浮点分支并扩展
+  `pubconst` 项目，再交付 `INFINITY/HUGE_VAL/NAN/M_*`；不修则常量不交付。
+
 ### TOML 标准库（2026-10-23 设计；T0–T5 reader 已完成）
 
 用户已确认**完整 TOML 1.1 reader 优先、写入后置**。`libs/toml/` 已交付完整
@@ -148,6 +226,38 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
 - [ ] **T6 编译器迁移（独立切片）**：显式标准库依赖、保留清单 schema、递归文档
   生命周期、缓存与种子冷编/两代固定点；全迁移后删除旧解析器。
 - [ ] **T7 生成器（后续按需）**：独立构建/编码契约与 encoder 验收；保真编辑另立项。
+
+### FMT fmt 运行时与 V 风格插值（2026-10-23 改版；R0–R3/I0–I5 待实施）
+
+用户决定：字符串格式化采用 V 式插值 `"…${expr:spec}…"`，结果为
+`string.String`；首版不实现 Go 的 `%` 格式串与 `Printf` 族（是否保留为
+次级 API 待确认）。语言设计见
+[字符串插值设计](03-design/yh-字符串插值设计-2026-10-23.md)，运行时见
+[fmt 标准库设计](03-design/yh-fmt标准库设计-2026-10-23.md)，
+[方案](02-plan/yh-fmt标准库实施方案-2026-10-23.md)列出 R0–R3（fmt）与
+I0–I5（语言）；插值需要改词法/解析/检查/降级。fmt 不改 prelude
+`printf`（H.I3 的按需扩展仍独立）。
+
+- [ ] **R0 Value 与基础渲染**：Kind/Value/构造器、append_text/append_value
+  默认格式；`fmtvalue`/`fmtappend` fixture。
+- [ ] **R1 V spec 与整数/文本**：flags/width/precision、`d x X o b s`、
+  对齐与非法 spec；`fmtspec` fixture。
+- [ ] **R2 浮点**：NaN/±Inf/-0、`f F e E g G`、V 尾零规则；`fmtfloat`
+  fixture 与 golden 差额记录。
+- [ ] **R3 打印/字符串与收口**：print/sprint/fprint、render、of_string、
+  安装导入、surface/`nm -u`、`make test-fmt` O0/O2。
+- [ ] **I0 语言探针**：词法后扩展、layout 边界、AST 快照/缓存、降级 ABI、
+  缺 import 诊断；决定 append 契约还是 `fmt.interp`。
+- [ ] **I1 词法扩展与解析**：`${}` 扫描、内部 token、AST 插值/part、
+  转义与错误；`tests/yh/interp` 语法门。
+- [ ] **I2 检查与缓存**：`string.String` 类型解析、按静态类型选构造器、
+  编译期 spec 校验、跨 worker/缓存/固定点。
+- [ ] **I3 降级与端到端**：临时 String + append、失败零句柄、求值顺序、
+  `tests/yh-run`/modules O0/O2。
+- [ ] **I4 诊断/文档/全量门**：错误表、README/设计/todo/finish、
+  `make`/`make test`/`make selfhost-native`/`git diff --check`。
+- [ ] **I5 可选扩展**：嵌套插值、运行时 width/precision、`r/R`、
+  `string.String`/enum 支持；每项单独立项。
 
 ### G. C/C++ 桥迁移到 yh
 
@@ -189,6 +299,28 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
     `tests/yh-run/fail/` 用例（用 `// fail-contains:` 锁新文案），再改文案，
     跑 `make test` + `make selfhost-native`。**附**：`examples/ex1.yh` 是照搬
     C 的 hello world，已补 `return 0`（已提交）。
+  - [ ] **I4-2 极端十进制浮点字面量不精确**（2026-10-23 math 探针）：
+    `1e300`、`1e-300`、`1.7976931348623157e308` 与正确位型不等，
+    `2.2250738585072014e-308` 是 DBL_MIN+2 ULP，`5e-324` 直接变 0；
+    π、0.1、1.5 精确。影响所有数值代码，纯 yh math 只能用位模式构造常量。
+    修复：前端十进制→f64 改为正确舍入（Eisel-Lemire/strtod 路线），补
+    `tests/yh-run/` 极端指数字面量用例，先红后绿。
+  - [ ] **I4-3 `pub const f64` 跨模块导出损坏**：`.s.i` 把浮点位型当整数写出，
+    导入侧报「浮点与整数之间需要 .to_type 显式转换」。修复：
+    `parse_global_init` 保存浮点初始化式文本，`iface_emit_const_value` 增加
+    浮点分支；扩展 `tests/modules/projects/pubconst/`。math 的
+    `INFINITY/NAN/M_*` 等常量依赖此项。
+  - [ ] **I4-4 `!bool` 在 bool 返回位置退化为 i32**：`fn f(b bool) bool {
+    return !b }` 报「整数不能隐式转为 bool」；条件位置正常。修复：
+    `sem_unary` 对 bool 保留 `TY_BOOL`（或写进语义边界），补 run/fail 用例。
+  - [ ] **I4-5 `@[inline]` 无后端效果、IR 内联器未接线**：`F_INLINE` 只在
+    parse/iface 使用，`compiler/ir/ssa_inline.yh` 没有调用点，跨模块也无 LTO。
+    影响纯 yh math 的小函数与 O0 性能。修复：把 `@[inline]` 降为 LLVM
+    `alwaysinline`，或让模块接口携带可内联体；再决定是否启用 IR 内联器。
+  - [ ] **I4-6 能力文档漂移**：`compiler/README.md` 的浮点参数边界与
+    `compiler/gen/target.yh` 的 emit_arm64 说明仍指旧后端；`libs/libc/README.md`
+    称函数指针不支持（LLVM ABI 已支持）；`AGENTS.md` 的 x64 种子说明与
+    Makefile 现状不一致。按实际行为刷新或标为历史。
 
 ## 后续任务：文件对象、线程池与性能（LA4/LA5）
 

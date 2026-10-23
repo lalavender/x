@@ -35,7 +35,7 @@ tokens { IMPLICIT }
  * ============================================================================
  */
 
-// 源文件：顶层声明列表 + EOF。没有模块声明、没有 import、没有 test 块。
+// 源文件：模块头（可选）+ 顶层声明列表 + EOF。test 声明是顶层声明的一种。
 sourceFile
     : topLevelDecl* EOF
     ;
@@ -50,6 +50,7 @@ topLevelDecl
     : 'pub' exportedDeclBody
     | plainDeclBody
     | attributeGroup attributedDecl
+    | testDecl
     ;
 
 // 单组属性前缀只修饰一个紧随其后的顶层声明；属性名逗号分隔，不允许空组或尾逗号。
@@ -86,6 +87,22 @@ plainDeclBody
     | structDecl
     | unionDecl
     | enumDecl
+    ;
+
+// test 声明（YT0，2026-10-23）：`test "名称" { ... }` 是字符串行为测试；
+// `test 声明名 { ... }` 是绑定本模块顶层声明的文档测试（doctest）。
+// 只允许顶层且不带 pub/属性；名称的 STRING 与 IDENT token 互斥，块首 token
+// 为 '{'，因此与其它顶层声明无歧义。块后不写显式分号（与 fn 声明一致）。
+// 语法层只检查声明与块体形态；测试发现/绑定/执行由后续 yh test 实现。
+testDecl
+    : 'test' testName block
+    ;
+
+// 测试名称：非空字符串字面量或单个标识符。空字符串在语义/语法检查拒绝；
+// 不接受匿名块、限定名（test math.add）或计算名称。
+testName
+    : STRING
+    | IDENT
     ;
 
 /*
@@ -586,7 +603,7 @@ memberName
     | 'pub' | 'let' | 'const' | 'fn' | 'type' | 'struct' | 'union' | 'enum'
     | 'if' | 'else' | 'switch' | 'case' | 'default' | 'for' | 'in' | 'as'
     | 'return' | 'break' | 'continue' | 'goto'
-    | 'true' | 'false' | 'sizeof' | 'len'
+    | 'true' | 'false' | 'sizeof' | 'len' | 'test'
     | 'int' | 'i8' | 'i16' | 'i32' | 'i64'
     | 'u8' | 'u16' | 'u32' | 'u64'
     | 'f32' | 'f64' | 'bool' | 'char' | 'void'

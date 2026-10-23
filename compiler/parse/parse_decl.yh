@@ -102,7 +102,8 @@ pub fn parse_source() int {
 
 fn at_top_decl_start(k int) int {
     if (k == gen.TK_PUB || k == gen.TK_LET || k == gen.TK_CONST || k == gen.TK_FN || k == gen.TK_TYPE
-        || k == gen.TK_STRUCT || k == gen.TK_UNION || k == gen.TK_ENUM || k == gen.TK_AT) {
+        || k == gen.TK_STRUCT || k == gen.TK_UNION || k == gen.TK_ENUM || k == gen.TK_AT
+        || k == gen.TK_TEST) {
         return 1
     }
     return 0
@@ -203,6 +204,7 @@ fn p_decl_is_comptime(start int) int {
 }
 
 fn skip_top_decl() int {
+    let gs *gen.GenState = gen.G()
     let depth int = 0
     let consumed int = 0
     for p_cur() != gen.TOK_EOF {
@@ -214,7 +216,10 @@ fn skip_top_decl() int {
             let attr_type int = (k == gen.TK_AT && p_peek(1) == gen.TK_LBRACKET
                 && p_peek(3) == gen.TK_RBRACKET && p_peek(4) == gen.TK_FN
                 && p_peek(5) == gen.TK_LPAREN).to_type(int)
-            if (fn_type == 0 && attr_type == 0) { return 0 }
+            // `.test` 是成员名（memberName 放开保留字），不是下一条声明。
+            let member_test int = (k == gen.TK_TEST && gs.task.c_pos > 0
+                && gs.task.c_toks[gs.task.c_pos - 1].kind == gen.TK_DOT).to_type(int)
+            if (fn_type == 0 && attr_type == 0 && member_test == 0) { return 0 }
         }
         p_adv()
         consumed = 1
@@ -286,6 +291,7 @@ pub fn decl_index_file(fi int) int {
         nodes[count].keyword = keyword
         nodes[count].line = line
         nodes[count].col = col
+        nodes[count].test_sym = -1
         count += 1
     }
     gs.task.c_pos = head
@@ -312,6 +318,9 @@ pub fn parse_indexed_decls(mode int) int {
             selected = 1
         }
         if (mode == 2 && node.kind == gen.TK_FN) {
+            selected = 1
+        }
+        if (mode == 5 && node.kind == gen.TK_TEST) {
             selected = 1
         }
         if (mode == 3 && node.kind == gen.TK_FN
@@ -362,8 +371,19 @@ pub fn parse_indexed_decls(mode int) int {
             }
             gs.task.c_ct_prepare_active = 0
             if (gs.task.c_pos > node.end) {
-                gs.task.c_file_decl_i = -1
-                return gen.err_lc(node.line, node.col, "内部错误：解析越过顶层声明范围")
+                // test 的 parse_block 会消费块后的隐式终结符，而 PDecl.end
+                // 停在该终结符上；只允许这一格的隐式终结符，显式分号仍报错。
+                let trailing_implicit int = (node.kind == gen.TK_TEST
+                    && gs.task.c_pos == node.end + 1
+                    && node.end >= 0 && node.end < gs.task.c_tok_n
+                    && gs.task.c_toks[node.end].kind == gen.TK_SEMI
+                    && gs.task.c_toks[node.end].len == 0).to_type(int)
+                if (trailing_implicit != 0) {
+                    gs.task.c_pos = node.end
+                } else {
+                    gs.task.c_file_decl_i = -1
+                    return gen.err_lc(node.line, node.col, "内部错误：解析越过顶层声明范围")
+                }
             }
         }
         gs.task.c_pos = node.end
@@ -384,6 +404,27 @@ pub fn parse_source_globals() int {
     for p_cur() != gen.TOK_EOF {
         let kind int = p_top_decl_kind()
         if (kind == gen.TK_LET || kind == gen.TK_CONST) {
+            if (parse_top_decl() != 0) { return -1 }
+            continue
+        }
+        if (skip_top_decl() != 0) {
+            return -1
+        }
+    }
+    return 0
+}
+
+// parse_source_tests：测试模式下按文件检查 test 声明体。
+// 与普通函数子遍分开：pass1 先登记全部符号，测试体才能前向/跨文件引用。
+pub fn parse_source_tests() int {
+    let gs *gen.GenState = gen.G()
+    if (gs.task.c_file_indexed != 0) {
+        return parse_indexed_decls(5)
+    }
+    mod_skip_head()
+    for p_cur() != gen.TOK_EOF {
+        let kind int = p_top_decl_kind()
+        if (kind == gen.TK_TEST) {
             if (parse_top_decl() != 0) { return -1 }
             continue
         }
@@ -498,7 +539,106 @@ fn parse_top_decl_body() int {
         // 同上：私有 enum 的成员常量不带 F_PUB，只在模块内可见。
         return parse_enum_decl()
     }
+    if (k == gen.TK_TEST) {
+        // YT0：test 只允许顶层，不支持 pub/属性；测试体只做语法检查。
+        if (gs.task.c_decl_pub != 0) {
+            return gen.err_tok("test 声明不支持 pub")
+        }
+        return parse_test_decl()
+    }
     return gen.err_tok("此处需要一个顶层声明")
+}
+
+// p_test_decl_active：当前文件是否属于 yh test 的目标项目。
+// 依赖/标准库里也有 test 声明，但只有目标项目的测试才登记函数与检查体；
+// 其余按生产构建处理（只做语法），避免留下没有函数体的受检声明。
+fn p_test_decl_active() int {
+    let gs *gen.GenState = gen.G()
+    if (gs.task.c_test_mode == 0 || gs.c_test_project < 0) { return 0 }
+    if (gs.task.c_active_file < 0 || gs.task.c_active_file >= gs.p_file_n) { return 0 }
+    let m int = gs.p_files[gs.task.c_active_file].mod
+    if (m < 0 || m >= gs.p_mod_n) { return 0 }
+    return (gs.p_mods[m].proj == gs.c_test_project).to_type(int)
+}
+
+// parse_test_fn_name：测试体在本模块内的稳定内部函数名。
+// 名字只由项目文件号与文件内 PDecl 号组成，yh test 生成入口按同一规则调用。
+fn parse_test_fn_name(buf *u8) int {
+    let gs *gen.GenState = gen.G()
+    let n int = 0
+    n = gen.append_str(buf, n, "__yh_test_")
+    n = gen.append_int(buf, n, gs.task.c_active_file)
+    n = gen.append_byte(buf, n, '_')
+    n = gen.append_int(buf, n, gs.task.c_file_decl_i)
+    return n
+}
+
+// parse_test_decl：解析顶层 `test STRING|IDENT block`。
+// 生产构建只做语法检查；yh test 的 pass1 登记 pub 无参 void 测试函数，
+// pass2 用正常函数上下文解析并捕获测试体，供 CheckedModule/LLVM 降低与
+// 测试入口模块调用。
+fn parse_test_decl() int {
+    let gs *gen.GenState = gen.G()
+    p_adv()
+    if (p_cur() == gen.TOK_STRING) {
+        if (gs.task.c_toks[gs.task.c_pos].len <= 2) {
+            return gen.err_tok("test 名称不能为空字符串")
+        }
+        p_adv()
+    } else if (p_cur() == gen.TOK_IDENT) {
+        p_adv()
+    } else {
+        return gen.err_tok("test 后需要字符串字面量或声明名")
+    }
+    if (p_cur() != gen.TK_LBRACE) {
+        return gen.err_tok("test 声明后需要块")
+    }
+    if (p_test_decl_active() != 0) {
+        if (gs.task.c_file_indexed == 0 || gs.task.c_file_decl_i < 0) {
+            return gen.err_tok("内部错误：yh test 需要项目文件声明索引")
+        }
+        let name [96]u8
+        let nn int = parse_test_fn_name(&name[0])
+        if (gs.task.c_pass == 1) {
+            let noff int = gen.tml_intern_str(&name[0], 0, nn)
+            if (noff < 0) { return -1 }
+            let ftid int = gen.ty_fn_abi(gen.TY_VOID, gs.task.t_sigparam_n,
+                0, 0, gen.ABI_YH)
+            if (ftid < 0) { return -1 }
+            let idx int = gen.sym_push_pool(noff, nn, gen.SYM_FN, ftid,
+                gen.F_GLOBAL | gen.F_PUB)
+            if (idx < 0) { return -1 }
+            gs.task.c_file_decls[gs.task.c_file_decl_i].test_sym = idx
+            gs.task.c_pos = gs.task.c_file_decls[gs.task.c_file_decl_i].end
+            return 0
+        }
+        let sym int = gs.task.c_file_decls[gs.task.c_file_decl_i].test_sym
+        if (sym < 0 || sym >= gs.task.c_sym_n
+            || gs.task.c_syms[sym].kind != gen.SYM_FN) {
+            return gen.sem_err("内部错误：测试函数符号丢失")
+        }
+        if (gen.sem_fn_begin(sym) != 0) { return -1 }
+        if (ast.ast_function_begin(gs.task.c_active_file,
+                gs.task.c_file_decl_i) != 0) { return -1 }
+        ast.ast_binding_begin_function()
+        let saved_body int = gs.task.c_test_body
+        gs.task.c_test_body = 1
+        let status int = parse_block()
+        gs.task.c_test_body = saved_body
+        if (status != 0) { return -1 }
+        if (gen.sem_fn_end() != 0) { return -1 }
+        if (ast.ast_function_end() != 0) { return -1 }
+        return 0
+    }
+    // 生产构建：测试体只做语法检查，不登记符号、不捕获 AST。
+    let saved_compile int = gs.task.c_compile
+    let saved_capture int = gs.task.c_ast_capture
+    gs.task.c_compile = 0
+    gs.task.c_ast_capture = 0
+    let status2 int = parse_block()
+    gs.task.c_compile = saved_compile
+    gs.task.c_ast_capture = saved_capture
+    return status2
 }
 
 // parse_top_decl：消费可选的单组属性、pub 与一条顶层声明，并清理属性状态。

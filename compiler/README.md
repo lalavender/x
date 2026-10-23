@@ -9,7 +9,7 @@
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
 version = `0.0.8`，source = `.`），按 **gen / builtin / lex / parse / ast / check / comptime / cmd / ir / backend
-多模块**组织，2026-10-22 LA3 后共 **十个模块**、113 个 `.yh` 文件；
+多模块**组织，2026-10-22 LA3 后共 **十个模块**、114 个 `.yh` 文件；
 `ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担 AST 一致性校验，
 `builtin/` 只放内置（prelude）函数登记表；`ir`（目标隔离
 SSA）与其它模块同为根项目普通模块，共同进入编译器构建与自举固定点。
@@ -61,6 +61,20 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 ⑤模块语料（`tests/modules/check.py`）；⑥项目验收
 （`tests/modules/build-check.py` 115 例），以及
 `tests/selfhost/llvm-function-cache.py` 的函数级缓存矩阵。滚种子前必须全绿。
+
+## 内建测试
+
+`gen/buffer.yh`、`lex/layout.yh`、`parse/parse_type.yh` 含 `test` 块，覆盖
+纯函数边界（`hexval`、`is_assign_op`、`lex_can_end`、`is_member_name`、
+`is_type_start`）。运行：
+
+```bash
+make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test 语法）
+```
+
+测试体走与普通函数相同的 CheckedModule→SSA→LLVM 路径，但只在测试模式下登记，
+生产构建的模块对象与 `.s.i` 不含 `__yh_test_` 符号。给本目录新增 `test` 块前，
+入库种子必须已经支持 test 语法（滚种子之后）。
 
 ## 模块与文件职责
 
@@ -178,7 +192,8 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 
 | 文件 | 职责 |
 | --- | --- |
-| `cmd/driver.yh` | `main(argc, argv)`、参数分派、`check` / `--syntax-check` / `--emit-asm` |
+| `cmd/driver.yh` | `main(argc, argv)`、参数分派、`check` / `test` / `--syntax-check` / `--emit-asm` |
+| `cmd/test_cmd.yh` | `yh test` 的测试发现、文档目标绑定、模块/文件选择、测试体降低与对象发布（YT1/YT2a） |
 | `cmd/llvm_emit.yh` | 单文件受检前端、CLI 形态转换与单文件链接协调 |
 | `cmd/llvm_pipeline.yh` | 已验证快照 → LLVM 文本/对象/汇编的共用驱动与原子发布 |
 | `cmd/function_ir_cache.yh` | 函数缓存目录、索引、环境键与原子记录提交 |

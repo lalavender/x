@@ -1,0 +1,72 @@
+module string;
+
+// ============================================================================
+// 99_tests.yh —— string 标准库的 yh 内建测试
+//
+// 只在 `yh test string` 中执行；生产构建不登记测试符号、不发射测试体。
+// 覆盖视图查询、无分配切分、拥有者增长与 UTF-8 基础行为。
+// ============================================================================
+
+fn test_view(text *char) View {
+    let viewed ViewResult = view_cstr(text)
+    return viewed.value
+}
+
+test "视图相等与比较" {
+    let a View = test_view("alpha")
+    let b View = test_view("alpha")
+    let c View = test_view("beta")
+    $assert(view_equal(a, b) == true, "同内容视图应相等")
+    $assert(view_equal(a, c) == false, "不同内容视图不应相等")
+    $assert(view_compare(a, c) < 0, "alpha 应小于 beta")
+}
+
+test "前缀后缀与查找" {
+    let text View = test_view("hello world")
+    $assert(starts_with(text, test_view("hello")), "应匹配前缀")
+    $assert(ends_with(text, test_view("world")), "应匹配后缀")
+    $assert(contains(text, test_view("lo wo")), "应包含子串")
+    let found IndexResult = find(text, test_view("world"))
+    $assert(found.found && found.index == 6, "world 应在下标 6")
+    let missing IndexResult = find(text, test_view("zzz"))
+    $assert(missing.found == false, "不存在的子串不应命中")
+}
+
+test "切分与修剪" {
+    let text View = test_view("  a,b,,c  ")
+    let trimmed View = trim_ascii(text)
+    $assert(trimmed.count == 6, "修剪后长度应为 6")
+    let iter SplitIter
+    $assert(split(trimmed, test_view(","), &iter) == Status.status_ok)
+    let first ViewResult = split_next(&iter)
+    $assert(first.value.count == 1, "首个片段长度应为 1")
+    let second ViewResult = split_next(&iter)
+    $assert(second.value.count == 1, "第二个片段长度应为 1")
+    let empty ViewResult = split_next(&iter)
+    $assert(empty.value.count == 0, "空片段长度应为 0")
+    let last ViewResult = split_next(&iter)
+    $assert(last.value.count == 1, "末片段长度应为 1")
+}
+
+test "增长与释放" {
+    let buffer StringResult = from_view(test_view("ab"))
+    $assert(buffer.status == Status.status_ok)
+    let value *String = &buffer.value
+    $assert(byte_length(value) == 2)
+    $assert(append_byte(value, 'c').to_type(int) == 0)
+    $assert(append(value, test_view("de")).to_type(int) == 0)
+    $assert(byte_length(value) == 5)
+    let text CStrResult = c_str(value)
+    $assert(text.data != 0, "c_str 应返回非空指针")
+    $assert(text.data[0] == 'a', "首字节应为 a")
+    release(value)
+}
+
+test "UTF-8 校验" {
+    let valid Utf8Info = utf8_validate(test_view("héllo"))
+    $assert(valid.status == Status.status_ok, "合法 UTF-8 应通过校验")
+    $assert(valid.rune_count == 5, "héllo 应有 5 个码点")
+    let bad Utf8Info = utf8_validate(test_view("\xff"))
+    $assert(bad.status == Status.status_invalid_utf8, "孤立 0xFF 应判为非法")
+    $assert(bad.rune_count == 0, "非法输入不应有码点数")
+}

@@ -123,3 +123,9 @@ make test-string-o2    # O2 同组
 `resources` 组把标准库复制到 `tmp/`，逐次改写
 `libs/string/00_model.yh` 的 `STRING_TEST_FAIL_AFTER`，覆盖每个分配点的失败
 原子性。基本组同时登记在 `tests/modules/build-check.py` 的 `stdlib-run` 用例中。
+
+## 内建测试
+
+`99_tests.yh` 包含 5 条 `test` 块（视图比较、前后缀与查找、无分配切分、
+拥有者增长、UTF-8 校验）。用 `yh test string`（在 `libs/` 目录）或
+`make test-lib-tests` 运行；生产构建不会登记或发射这些测试。

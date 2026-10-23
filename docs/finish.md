@@ -2,6 +2,117 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 yh test 编译器内嵌测试（YT3b）
+
+- **滚种子**：在两大主门全绿后执行 `make seed`，把本代 `yh` 写入
+  `bin/yh-darwin-arm64`（按规则不入库），使 `compiler/` 可以写 test 块。
+- **实现**：`gen/buffer.yh`（`hexval`、`is_assign_op`）、`lex/layout.yh`
+  （`lex_can_end`）、`parse/parse_type.yh`（`is_member_name`、`is_type_start`）
+  新增内建 test 块，可直接测试同模块私有函数；新增
+  `tools/compiler-tests.py`（复用 `tools/llvm-*-host.py shim` 准备
+  `PATH`/`YH_CC`/`YH_LLVM_SELFHOST_FLAGS`/`SDKROOT`）与
+  `make test-compiler-tests`，并接入 `make test` 与 `make selfhost-native`。
+  完整记录见[YT3b 实施记录](01-finished/yh-test编译器内嵌测试-2026-10-23.md)。
+- **验证**：`compiler-tests: 通过 3/3`（gen 2、lex 3、parse 3 例）；
+  `make test` 与 `make selfhost-native` 全绿（固定点、cc4 自解析 114 个源文件、
+  project cases 121/121）；生产对象与 `.s.i` 中 `__yh_test_` 符号数为 0。
+- **边界**：种子滚动仅在本机构建环境完成；YT2d（并行/日志/缓存键）与
+  YT1.1（项目外单文件）仍未实施。
+
+## 2026-10-23 yh test 标准库内建测试与门禁（YT3a）
+
+- **实现**：新增 `libs/string/99_tests.yh`（5 条内建测试：视图比较、前后缀与
+  查找、无分配切分、拥有者增长、UTF-8 校验）；新增 `make test-lib-tests`
+  （`cd libs && yh test string`），并接入 `make test` 与 `make selfhost-native`。
+  完整记录见[YT3a 实施记录](01-finished/yh-test标准库内建测试-2026-10-23.md)。
+- **修复缺陷**：① 非目标项目的 test 声明此前也登记测试函数，导致
+  「函数声明 AST 缺少函数体根」——改为按文件所属项目判断
+  （`p_test_decl_active` / `ast_decl_test_active`）；② 源码根内的 `tmp/`、
+  `.build/` 被当源码扫描，导致第二次 `yh test` 报「顶层符号重定义」——
+  新增 `pj_scan_skip_dir` 跳过构建产物目录。
+- **验证**：`make test-lib-tests` 连续两次 `5 passed; 0 skipped; 0 failed`；
+  `make test` 与 `make selfhost-native` 全绿（固定点、cc4 自解析 114 个源文件、
+  project cases 121/121）。
+- **边界**：`compiler/` 仍不含 test 块——入库种子不认识 test 语法，
+  YT3b 需先 `make seed`；本轮未滚种子。
+
+## 2026-10-23 memory 标准库设计交付（第二版，参考 Zig）
+
+- **交付**：[memory 标准库设计](03-design/yh-memory标准库设计-2026-10-23.md)与
+  [实施方案](02-plan/yh-memory标准库实施方案-2026-10-23.md)；同步
+  [标准库设计](03-design/yh-标准库设计.md)的 `memory` 节与
+  [todo](todo.md) 的 MEM M0–M6。
+- **参考**：核对 Zig `std.mem.Allocator` 的 vtable（`alloc`/`resize`/`remap`/
+  `free`，`error.OutOfMemory`，free 带长度/对齐，remap 可返回 null 让调用方
+  复制）与 `std.heap` 的 Arena/FixedBuffer/Page/MemoryPool/Debug/ThreadSafe/
+  StackFallback 实现。
+- **设计**：保留 `alloc`/`release`/`copy`；新增 `reallocate`、`FixedBuffer`
+  （LIFO resize/free）、增强 Arena（1.5 倍几何增长、`reset(free_all/retain)`、
+  LIFO 回收、capacity）与基于 Arena + 空闲链的 FixedPool；统一 `Allocator`
+  （函数指针 vtable）列为 M5 可选，Debug/ThreadSafe/Page/StackFallback 后置。
+  块统一取自 prelude 堆，不新增 `sys` 依赖，不改 `string`/`toml`/编译器，
+  不替代 `libc` 的 C ABI 分配器。
+- **核验**：核对 `libs/memory`、prelude、LLVM 运行时（Linux/Darwin 的
+  malloc/free 布局、16 字节对齐与零长度行为）、`sys` 内存原语、
+  `string`/`toml` 现有分配与 `libs/cli` 的函数指针字段先例；新文档相对链接
+  检查通过。
+- **状态**：M0–M6 均未实施；本轮只改文档，未构建、未运行门禁、未滚种子。
+
+## 2026-10-23 yh test 执行增强（YT2c）
+
+- **实现**：`yh test --filter` 作用于执行（过滤后零用例报错）；新增
+  `--timeout <秒>`（1..3600，缺省 15，`WNOHANG` 轮询 + 单调时钟 + kill 回收）；
+  记录扩展为 72 字节（`magic + line + col + 60 字节消息`），失败输出
+  「断言位置」与「断言消息」；新增 `libs/testing` 的 `fail/skip`，汇总改为
+  `结果: N passed; M skipped; K failed`。完整记录见
+  [YT2c 实施记录](01-finished/yh-test执行增强-2026-10-23.md)。
+- **语料**：新增 `tests/modules/projects/ytestskip`（fail/skip/断言消息）与
+  `ytesttimeout`（死循环 + 超时后继续）；`tests/modules/test-check.py` 增至
+  27 条断言。
+- **验证**：`ytestskip` 输出 `2 passed; 1 skipped; 2 failed`（含两条断言消息），
+  `ytesttimeout --timeout 1` 报「用例超时」并继续执行后续用例；
+  `make test` 与 `make selfhost-native` 全绿（固定点一致、cc4 自解析
+  114 个源文件、project cases 121/121）。
+- **边界**：并行执行、逐例日志文件、测试缓存键隔离与超长消息提示属 YT2d；
+  平台自动跳过未提供；未滚种子。
+
+## 2026-10-23 yh test 执行器与结果协议（YT2b）
+
+- **实现**：每个含测试的模块生成入口模块 `yh_test_<mod>`
+  （`tmp/yh-test/gen/<mod>/entry.yh`），按 `argv[1]` 首字节选择用例并在测试体
+  正常返回后向 fd 3 写 `YHTP`；编译器运行时发射 `__yh_test_assert` 弱定义，
+  断言失败时写 `YHTF + line + col` 并 `exit(1)`。父进程逐例 fork/exec，
+  只有「退出码 0 且记录 YHTP」判 PASS；提前 `exit(0)`、崩溃、记录缺失一律
+  FAIL 且继续后续用例，输出「断言位置: 行:列」与
+  `结果: N passed; M failed`。完整记录见
+  [YT2b 实施记录](01-finished/yh-test执行器与结果协议-2026-10-23.md)。
+- **语料**：新增 `tests/modules/projects/ytestfail`（通过/断言失败/提前退出/
+  崩溃/失败后继续），`tests/modules/test-check.py` 增至 23 条断言。
+- **验证**：`ytest` 8/8 PASS（rc 0）；`ytestfail` `2 passed; 3 failed`（rc 1，
+  含 `断言位置: 12:5`）；`make test` 与 `make selfhost-native` 全绿
+  （固定点一致、cc4 自解析 114 个源文件、project cases 121/121）。
+- **边界**：执行过滤、`--timeout`、`testing.fail/skip`、断言消息正文、日志文件
+  与测试缓存键隔离属 YT2c；未滚种子。
+
+## 2026-10-23 yh test 测试体降低与运行期断言（YT2a）
+
+- **实现**：测试模式下 pass1 为每条 test 登记模块内 `pub` 无参 `void` 函数
+  `__yh_test_<file>_<decl>`（符号写回 `PDecl.test_sym`），pass2 用正常函数
+  上下文解析并捕获测试体；`$assert(cond[, msg])` 降为
+  `__yh_test_assert(cond, line, col, msg)` 运行期调用，条件不再要求编译期
+  常量。`TK_TEST` 声明进入 AstDecl/AstFunctionContext/CheckedModule，
+  `--no-run` 走完整 CheckedModule→SSA→LLVM→对象发布（不链接），新增
+  `--emit-llvm` 审阅。生产构建不登记测试符号、不发射测试体。完整记录见
+  [YT2a 实施记录](01-finished/yh-test降低与运行期断言-2026-10-23.md)。
+- **语料**：`tests/modules/test-check.py` 增至 19 条断言，新增
+  `emit-llvm`、`test-bodies-lowered`（对象含 `__yh_test_*`、LLVM 文本含
+  `call void @"__yh_test_assert"`）与 `production-has-no-test-symbols`。
+- **验证**：`make test` 通过（语法 81/81、49/49；run 211/212；test-check 19/19；
+  TOML 6/6），`make selfhost-native` 通过（固定点一致、cc4 自解析 114 个源文件、
+  project cases 121/121）。
+- **边界**：`__yh_test_assert` 尚无运行时定义，测试二进制不能链接；测试入口、
+  逐例进程、结果协议、`fail`/`skip`、超时与汇总属 YT2b，`yh test` 仍不执行测试。
+
 ## 2026-10-23 string 标准库首期实施（ST0–ST6）
 
 - **实现**：`libs/string/` 新增 `00_model.yh`、`10_view.yh`、`20_owned.yh`、
@@ -19,11 +130,44 @@
 - **验证**：`make`、`make test-string`、`make test-string-o2`、
   `make test-string-install`、`make test-string-complexity`、`make test`、
   `make selfhost-native` 全部通过；`make test` 运行 211/212（1 个平台跳过）、
-  TOML API 6/6；`selfhost-native` project cases 121/121
+  test-check 16/16、TOML API 6/6；`selfhost-native` project cases 121/121
   （新增 6 例）。完整记录见
   [string 首期实施](01-finished/yh-string标准库首期实施-2026-10-23.md)。
 - **边界**：未迁移编译器/CLI/TOML 私有实现；Unicode 大小写/折叠、规范化、
   字素、正则、格式化、优化搜索等后置；未改语法、未滚种子、未推送。
+
+## 2026-10-23 yh test 发现与无运行检查（YT1）实施
+
+- **实现**：新增 `compiler/cmd/test_cmd.yh` 与 `yh test`；`--list` 发现稳定身份
+  并绑定文档目标，`--no-run`/默认命令在临时函数上下文检查测试体语义（不执行）。
+  跨文件/前向/私有函数、常量、全局变量与类型目标可绑定；同文件同种类重名、
+  无效目标与导入模块名被拒绝。测试专用导入按 token 区间分类，生产构建跳过其
+  绑定、依赖边、接口加载与未使用诊断。完整记录见
+  [YT1 实施记录](01-finished/yh-test发现与无运行检查-2026-10-23.md)。
+- **语料**：新增 `tests/modules/test-check.py` 与 `ytest`/`ytestbad`/`ytestdup`/
+  `ytestsem`/`ytestempty` fixture，16 个断言；覆盖模块/文件选择、跨文件私有
+  目标、平台文件、零用例、测试专用导入不污染生产、测试体错误只在测试模式报错。
+- **验证**：`make test` 通过（语法 81/81、49/49；运行 211/212；test-check 16/16），
+  `make selfhost-native` 通过（固定点一致、cc4 自解析 114 个源文件、
+  project cases 121/121）。
+- **边界**：尚无执行器、运行时 `$assert` 失败定位、逐例进程与超时；`--filter`
+  只过滤 `--list`；项目外单文件（YT1.1）未实现；未滚种子。
+
+## 2026-10-23 yh test 语法基线（YT0）实施
+
+- **实现**：`docs/yh.g4` 增加 `testDecl`/`testName`，`memberName` 放开 `test`；
+  编译器新增 `TK_TEST`、保留字识别、成员名放行、顶层声明索引与
+  `parse_test_decl`。生产 `build`/`run`/`check`/`--syntax-check` 只检查
+  测试体语法，跳过语义与代码发射；`pub test`、属性前缀、匿名/缺块/空名称
+  被拒绝。完整记录见[YT0 实施记录](01-finished/yh-test语法基线-2026-10-23.md)。
+- **语料**：`03-decl/12_test_decl.yh`、`pass/09-test-decl.yh`、
+  `run/206-test-decl-production-skip.yh`，以及 `rejected/47..51`、
+  `fail/165..167`；`tests/yh/README.md` 计数更新为正例 81、反例 49、规则 82。
+- **验证**：`make`、`make quick`、`make test`、`make selfhost-native` 全部通过；
+  自举固定点一致、cc4 自解析 113 个源文件、project cases 115/115。另用临时
+  test 声明项目验证 `yh build`/`yh check` 的索引路径。
+- **边界**：`yh test`、测试发现/文档目标绑定、运行时 `$assert`、`testing`
+  辅助接口、重复名称与测试体语义检查均未实现；未滚种子。YT1–YT3 继续开放。
 
 ## 2026-10-23 TOML 标准库 reader 实施（T0–T5）
 
@@ -7371,7 +7515,7 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
   `tokens { IMPLICIT }` + `stmtEnd`，语料门禁按同一规则归一化。
 - **验证**：`make test` 全绿（正例 80/80、反例 44/44，run 209/210、fail 133/133、
   pass 8/8）；`make selfhost-native` 全绿（cc3→cc4 27 个产物一致、自解析 101
-  个源文件、modules 19/19、project cases 115/115）。
+  个源文件、modules 19/19、project cases 121/121）。
 - 记录：[01-finished/yh-换行终结语句-2026-10-22.md](01-finished/yh-换行终结语句-2026-10-22.md)。
   未滚种子、未发版、未批量删分号（方案 Phase 1/2）。
 
@@ -7408,7 +7552,7 @@ setjmp 错误恢复与 tcc_compile 同构；不解析符号、不调用 gen_*、
   module 声明正则改为分号可选；`compiler-performance.py` 的模块名提取同步。
 - **验证**：`make` 冷编成功，`compiler/.build` 与删除前对比**非 manifest 差异 0**；
   `make test` 全绿；`make selfhost-native` 全绿（27 个产物固定点、自解析 101 文件、
-  modules 19/19、project cases 115/115）。
+  modules 19/19、project cases 121/121）。
 - 记录：[01-finished/yh-分号删除-2026-10-22.md](01-finished/yh-分号删除-2026-10-22.md)。
   未清 `libs/`/`tests/`/`examples/`，未滚种子。
 
