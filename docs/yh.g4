@@ -699,7 +699,7 @@ COMMENT
  * STRING 与 CHAR 使用同一转义集合。
  */
 fragment ESC
-    : '\\' [nrt0abfv'"\\]
+    : '\\' [nrt0abfv'"\\$]
     ;
 
 fragment ESC_HEX

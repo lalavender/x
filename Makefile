@@ -333,6 +333,7 @@ test: stage-yh
 	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
 	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/toml/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-test
+	python3 $(TOPSRC)/tests/fmt/interp.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/fmt-interp
 	python3 $(TOPSRC)/tests/tools/yh-code-stats/check.py
 
 # test-toml：TOML 标准库 API/所有权/资源/文件验收（TOML T0–T4）。
@@ -384,6 +385,11 @@ test-string-complexity: stage-yh
 .PHONY: test-compiler-tests
 test-compiler-tests: stage-yh
 	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
+
+# test-fmt-interp：字符串插值负例门（缺 import/空表达式/未终结/spec/类型）。
+.PHONY: test-fmt-interp
+test-fmt-interp: stage-yh
+	python3 $(TOPSRC)/tests/fmt/interp.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/fmt-interp
 
 # test-fmt-install：fmt 安装后仓库外导入与公开 API surface。
 .PHONY: test-fmt-install

@@ -1,0 +1,322 @@
+module lex
+
+import gen
+
+// ============================================================================
+// interp.yh —— 字符串插值的词法后扩展
+//
+// 普通字符串先按现有规则成为一个 TOK_STRING；本文件在行终结归一化之前把它
+// 重写为源顺序的内部 token 序列：
+//   INTERP_BEGIN TEXT? (EXPR_BEGIN <expr tokens> EXPR_END SPEC? TEXT?)* INTERP_END
+// 表达式 token 仍写入同一个 token 表，因此 AST 的 token 区间、快照与缓存都
+// 不需要“游离 token”。内部 kind>=200，用户源码无法写出。
+//
+// v1 限制：单行；`${}` 内不允许裸双引号、花括号与顶层三元 `?:`（三元需
+// 加括号）；文本块/说明符保留源码转义，由 sem_raw_string 解码。
+// ============================================================================
+
+// interp_copy_token：把旧 token 原样复制到当前（新）token 表。
+fn interp_copy_token(token gen.Tok) int {
+    return tok_push(token.kind, token.start, token.len, token.line, token.col)
+}
+
+// interp_has_marker：判断字符串 token 内是否存在未被转义的 `${`。
+fn interp_has_marker(start int, tlen int) int {
+    let gs *gen.GenState = gen.G()
+    if (tlen < 3) {
+        return 0
+    }
+    let end int = start + tlen - 1
+    let i int = start + 1
+    for i < end {
+        let b u8 = gs.task.c_src[i]
+        if (b == '\\') {
+            if (i + 1 < end && gs.task.c_src[i + 1] == 'x') {
+                i += 4
+            } else {
+                i += 2
+            }
+            continue
+        }
+        if (b == '$' && i + 1 < end && gs.task.c_src[i + 1] == '{') {
+            return 1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// interp_push_text：把 [start,end) 文本块写成 INTERP_TEXT；空块跳过。
+fn interp_push_text(start int, end int) int {
+    if (end <= start) {
+        return 0
+    }
+    let gs *gen.GenState = gen.G()
+    let line int = gs.task.lx_line
+    let col int = start - gs.task.lx_lstart + 1
+    return tok_push(gen.TOK_INTERP_TEXT, start, end - start, line, col)
+}
+
+// interp_skip_char：跳过字符字面量（i 指向单引号）；成功返回闭引号之后。
+fn interp_skip_char(i int, end int) int {
+    let gs *gen.GenState = gen.G()
+    let j int = i + 1
+    for j < end {
+        let b u8 = gs.task.c_src[j]
+        if (b == '\\') {
+            j += 2
+            continue
+        }
+        if (b == '\'') {
+            return j + 1
+        }
+        if (b == '\n' || b == '\r') {
+            return err_here(j, "插值内的字符字面量不允许换行")
+        }
+        j += 1
+    }
+    return err_here(i, "插值内的字符字面量未终结")
+}
+
+// interp_skip_space：跳过空白与注释；遇到换行报错。
+fn interp_skip_space(i int, end int) int {
+    let gs *gen.GenState = gen.G()
+    let at int = i
+    for at < end {
+        let b u8 = gs.task.c_src[at]
+        if (b == ' ' || b == '\t' || b == '\r' || b == 12 || b == 11) {
+            at += 1
+            continue
+        }
+        if (b == '\n') {
+            return err_here(at, "插值内不允许换行")
+        }
+        if (b == '/' && at + 1 < end && gs.task.c_src[at + 1] == '/') {
+            at += 2
+            for at < end && gs.task.c_src[at] != '\n' {
+                at += 1
+            }
+            if (at < end) {
+                return err_here(at, "插值内不允许换行")
+            }
+            return at
+        }
+        if (b == '/' && at + 1 < end && gs.task.c_src[at + 1] == '*') {
+            at += 2
+            for at + 1 < end {
+                if (gs.task.c_src[at] == '\n') {
+                    return err_here(at, "插值内不允许换行")
+                }
+                if (gs.task.c_src[at] == '*' && gs.task.c_src[at + 1] == '/') {
+                    at += 2
+                    break
+                }
+                at += 1
+            }
+            continue
+        }
+        return at
+    }
+    return at
+}
+
+// interp_lex_range：把表达式的源码区间按普通 token 规则写入当前 token 表。
+fn interp_lex_range(start int, end int) int {
+    let gs *gen.GenState = gen.G()
+    let i int = start
+    for i < end {
+        i = interp_skip_space(i, end)
+        if (i >= end) {
+            break
+        }
+        let b u8 = gs.task.c_src[i]
+        if (b == '"') {
+            return err_here(i, "插值表达式内不允许裸双引号")
+        }
+        if (b == '{' || b == '}') {
+            return err_here(i, "插值表达式内暂不支持花括号")
+        }
+        if (is_ident_start(b)) {
+            i = lex_ident(i)
+        } else if (is_digit(b)) {
+            i = lex_number(i)
+        } else if (b == '\'') {
+            i = lex_char(i)
+        } else {
+            i = lex_op(i)
+        }
+        if (i < 0) {
+            return -1
+        }
+    }
+    return 0
+}
+
+// interp_find_close：从表达式起点找 `}`，同时定位顶层 spec 冒号。
+// 返回闭括号下标；spec_colon 为 -1 或冒号下标；失败返回 -1 并已报错。
+fn interp_find_close(start int, end int, spec_colon *int) int {
+    let gs *gen.GenState = gen.G()
+    let depth int = 0
+    let i int = start
+    for i < end {
+        let b u8 = gs.task.c_src[i]
+        if (b == '\n' || b == '\r') {
+            return err_here(i, "插值内不允许换行")
+        }
+        if (b == '"') {
+            return err_here(i, "插值表达式内不允许裸双引号")
+        }
+        if (b == '\'') {
+            let next int = interp_skip_char(i, end)
+            if (next < 0) { return -1 }
+            i = next
+            continue
+        }
+        if (b == '/' && i + 1 < end && gs.task.c_src[i + 1] == '/') {
+            return err_here(i, "插值表达式内不允许行注释")
+        }
+        if (b == '/' && i + 1 < end && gs.task.c_src[i + 1] == '*') {
+            return err_here(i, "插值表达式内不允许块注释")
+        }
+        if (b == '(' || b == '[') {
+            depth += 1
+            i += 1
+            continue
+        }
+        if (b == ')' || b == ']') {
+            if (depth > 0) { depth -= 1 }
+            i += 1
+            continue
+        }
+        if (depth == 0) {
+            if (b == '{') {
+                return err_here(i, "插值表达式内暂不支持花括号")
+            }
+            if (b == '}') {
+                return i
+            }
+            if (b == '?') {
+                return err_here(i, "插值内的三元表达式需要加括号")
+            }
+            if (b == ':') {
+                spec_colon[0] = i
+                // 说明符内不允许表达式结构，直接找闭括号。
+                let j int = i + 1
+                for j < end {
+                    if (gs.task.c_src[j] == '}') {
+                        return j
+                    }
+                    if (gs.task.c_src[j] == '{' || gs.task.c_src[j] == '"') {
+                        return err_here(j, "插值格式说明符内不允许该字符")
+                    }
+                    j += 1
+                }
+                return err_here(i, "插值未终结")
+            }
+        }
+        i += 1
+    }
+    return err_here(start, "插值未终结")
+}
+
+// interp_expand_string：把一个插值字符串 token 展开为内部 token 序列。
+fn interp_expand_string(start int, tlen int) int {
+    let gs *gen.GenState = gen.G()
+    let end int = start + tlen - 1
+    if (tok_push(gen.TOK_INTERP_BEGIN, start, 1, gs.task.lx_line,
+            start - gs.task.lx_lstart + 1) != 0) {
+        return -1
+    }
+    let i int = start + 1
+    let text_start int = i
+    for i < end {
+        let b u8 = gs.task.c_src[i]
+        if (b == '\\') {
+            if (i + 1 < end && gs.task.c_src[i + 1] == 'x') {
+                i += 4
+            } else {
+                i += 2
+            }
+            continue
+        }
+        if (b == '$' && i + 1 < end && gs.task.c_src[i + 1] == '{') {
+            if (interp_push_text(text_start, i) != 0) { return -1 }
+            if (tok_push(gen.TOK_INTERP_EXPR_BEGIN, i, 2, gs.task.lx_line,
+                    i - gs.task.lx_lstart + 1) != 0) {
+                return -1
+            }
+            let spec_colon int = -1
+            let close int = interp_find_close(i + 2, end, &spec_colon)
+            if (close < 0) { return -1 }
+            let expr_end int = close
+            if (spec_colon >= 0) { expr_end = spec_colon }
+            if (expr_end <= i + 2) {
+                return err_here(i + 2, "插值表达式不能为空")
+            }
+            if (interp_lex_range(i + 2, expr_end) != 0) { return -1 }
+            if (tok_push(gen.TOK_INTERP_EXPR_END, expr_end, 0, gs.task.lx_line,
+                    expr_end - gs.task.lx_lstart + 1) != 0) {
+                return -1
+            }
+            if (spec_colon >= 0) {
+                if (spec_colon + 1 >= close) {
+                    return err_here(spec_colon, "插值格式说明符不能为空")
+                }
+                if (tok_push(gen.TOK_INTERP_SPEC, spec_colon + 1,
+                        close - spec_colon - 1, gs.task.lx_line,
+                        spec_colon - gs.task.lx_lstart + 2) != 0) {
+                    return -1
+                }
+            }
+            i = close + 1
+            text_start = i
+            continue
+        }
+        i += 1
+    }
+    if (interp_push_text(text_start, end) != 0) { return -1 }
+    return tok_push(gen.TOK_INTERP_END, end, 1, gs.task.lx_line,
+        end - gs.task.lx_lstart + 1)
+}
+
+// interp_expand_all：扫描原 token 表，把所有插值字符串替换为内部序列。
+// 成功返回 0；失败返回 -1（诊断已输出）。
+pub fn interp_expand_all() int {
+    let gs *gen.GenState = gen.G()
+    let raw *gen.Tok = gs.task.c_toks
+    let raw_n int = gs.task.c_tok_n
+    let capacity int = raw_n * 3 + 64
+    let output *gen.Tok = malloc((capacity * sizeof(gen.Tok)).to_type(u64)).to_type(*gen.Tok)
+    if (output == 0) {
+        return gen.fail("插值扩展分配失败")
+    }
+    let saved_line int = gs.task.lx_line
+    let saved_lstart int = gs.task.lx_lstart
+    gs.task.c_toks = output
+    gs.task.c_tok_n = 0
+    gs.task.c_tok_cap = capacity
+    let i int = 0
+    for i < raw_n {
+        let token gen.Tok = raw[i]
+        if (token.kind == gen.TOK_STRING
+            && interp_has_marker(token.start, token.len) != 0) {
+            // 行号/行首按字符串起点定位；插值内禁止换行，后续 token 同处一行。
+            let line_start int = token.start
+            for line_start > 0 && gs.task.c_src[line_start - 1] != '\n' {
+                line_start -= 1
+            }
+            gs.task.lx_lstart = line_start
+            gs.task.lx_line = token.line
+            if (interp_expand_string(token.start, token.len) != 0) {
+                return -1
+            }
+        } else {
+            if (interp_copy_token(token) != 0) { return -1 }
+        }
+        i += 1
+    }
+    gs.task.lx_line = saved_line
+    gs.task.lx_lstart = saved_lstart
+    free(raw.to_type(*void))
+    return 0
+}

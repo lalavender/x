@@ -2,6 +2,16 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-24 yh 字符串插值 I0–I3
+
+- **实现**：词法后扩展 + raw-string body 数据 + parser 合成 fmt 调用树；
+  `${expr:spec}` 端到端可用，结果 `string.String`；编译期校验 spec 与类型。
+- **测试**：`fmtinterp` modules fixture、`tests/fmt/interp.py` 8 个负例、
+  `make test-fmt-interp`、fmt 内建 17 项。
+- **边界**：需 import fmt/string；不支持 View/String、结构体、嵌套/花括号/
+  裸双引号/顶层三元；旧发射器与 O2 专项待 I4。
+- **记录**：[I0–I3 实施记录](01-finished/yh-fmt-插值I0-I3-2026-10-24.md)。
+
 ## 2026-10-24 yh fmt 插值叶 API
 
 - **实现**：`60_interp.yh` 增加编译器降级契约 `text`/`value`/`value_spec`/

@@ -255,7 +255,7 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
   生命周期、缓存与种子冷编/两代固定点；全迁移后删除旧解析器。
 - [ ] **T7 生成器（后续按需）**：独立构建/编码契约与 encoder 验收；保真编辑另立项。
 
-### FMT fmt 运行时与 V 风格插值（2026-10-23 改版；I0–I5 待实施）
+### FMT fmt 运行时与 V 风格插值（2026-10-23 改版；I4–I5 待实施）
 
 用户决定：字符串格式化采用 V 式插值 `"…${expr:spec}…"`，结果为
 `string.String`；首版不实现 Go 的 `%` 格式串与 `Printf` 族（是否保留为
@@ -263,21 +263,14 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
 [字符串插值设计](03-design/yh-字符串插值设计-2026-10-23.md)，运行时见
 [fmt 标准库设计](03-design/yh-fmt标准库设计-2026-10-23.md)，
 [方案](02-plan/yh-fmt标准库实施方案-2026-10-23.md)列出 R0–R3（fmt）与
-I0–I5（语言）；插值需要改词法/解析/检查/降级。fmt 不改 prelude
-`printf`（H.I3 的按需扩展仍独立）。
+I0–I5（语言）；R0–R3 与 I0–I3 已实施，语言插值已端到端可用。fmt 不改
+prelude `printf`（H.I3 的按需扩展仍独立）。
 
-- [ ] **I0 语言探针**：词法后扩展、layout 边界、AST 快照/缓存、降级 ABI、
-  缺 import 诊断；决定 append 契约还是 `fmt.interp`。
-- [ ] **I1 词法扩展与解析**：`${}` 扫描、内部 token、AST 插值/part、
-  转义与错误；`tests/yh/interp` 语法门。
-- [ ] **I2 检查与缓存**：`string.String` 类型解析、按静态类型选构造器、
-  编译期 spec 校验、跨 worker/缓存/固定点。
-- [ ] **I3 降级与端到端**：临时 String + append、失败零句柄、求值顺序、
-  `tests/yh-run`/modules O0/O2。
-- [ ] **I4 诊断/文档/全量门**：错误表、README/设计/todo/finish、
-  `make`/`make test`/`make selfhost-native`/`git diff --check`。
+- [ ] **I4 收口与全量门**：完整 `make test`/`make selfhost-native` 复跑；
+  旧发射器路径与 O2 的插值用例；`nm -u`/安装 surface 复核；README/设计/
+  todo/finish 刷新；`git diff --check`。
 - [ ] **I5 可选扩展**：嵌套插值、运行时 width/precision、`r/R`、
-  `string.String`/enum 支持；每项单独立项。
+  `string.View`/`string.String`/enum 名称、fmt 别名导入；每项单独立项。
 
 ### G. C/C++ 桥迁移到 yh
 
