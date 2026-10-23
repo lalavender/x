@@ -8,7 +8,7 @@
 > `make selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
-version = `0.0.8`，source = `.`），按 **gen / builtin / lex / parse / ast / check / comptime / cmd / ir / backend
+version = `0.0.9`，source = `.`），按 **gen / builtin / lex / parse / ast / check / comptime / cmd / ir / backend
 多模块**组织，2026-10-22 LA3 后共 **十个模块**、114 个 `.yh` 文件；
 `ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担 AST 一致性校验，
 `builtin/` 只放内置（prelude）函数登记表；`ir`（目标隔离

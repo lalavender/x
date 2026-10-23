@@ -2,6 +2,25 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 0.0.9-rc.1 开发与本地验收
+
+- **版本**：`compiler/project.toml` 升到 `0.0.9`（rc 期写目标正式号），
+  发布说明见[release-0.0.9-rc.1](01-finished/release-0.0.9-rc.1.md)。
+- **内容**：语言内测试 YT0–YT3a（语法、`yh test` 发现/降低/逐例执行、
+  `--filter`/`--timeout`/`--no-run`/`--emit-llvm`、`libs/testing` 的
+  `fail`/`skip`、`libs/string/99_tests.yh` 内建测试）、os/sys 跨平台拆分收口、
+  libc 模块、fmt/math/memory/插值/性能测试规划文档。
+- **自举顺序**：0.0.9-rc.1 由 0.0.8 种子编译，该种子不认识 `test` 语法，
+  因此本版 `compiler/` 暂不含 test 块（`tools/compiler-tests.py` 与
+  `make test-compiler-tests` 同步暂缓）；compiler 内嵌测试随 rc.2 恢复，
+  届时 revert “rc.1 暂缓 compiler 内嵌测试”提交即可。
+- **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 27/27；string 内建 5/5；
+  固定点 30 产物一致、自解析 114 文件、modules 19/19、project cases 121/121）。
+- **本地预检限制**：用本机备份的上一代种子冷编会在 Darwin 链接阶段因
+  lld/libc++ 解析错配失败，且同一闭包下 **0.0.8 源码本身也失败**，说明是本机
+  闭包缓存与旧种子不匹配，不是本版源码回归；实际冷编以 tag 流水线为准。
+- **未提交**：`compiler/.codegraph/`（本地工具数据库）保持未跟踪，未入提交。
 ## 2026-10-23 yh test 编译器内嵌测试（YT3b，随 0.0.9-rc.2 交付）
 
 > 0.0.9-rc.1 由 0.0.8 一代种子编译（不支持 test 语法），因此 rc.1 的
