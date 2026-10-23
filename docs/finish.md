@@ -2,6 +2,25 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 0.0.9-rc.1 发布与发布版二进制验收
+
+- **发布**：Gitea `release.yml` 的 `publish` 作业成功（run 142），三端资产
+  `yh-0.0.9-rc.1-{darwin-arm64,linux-arm64,linux-x86_64}.tar.gz` 已上传。
+- **取种**：本机无 GitHub token，`make fetch-seed` 无法直连私有仓库；改用
+  host 模式 runner 的同一批产物 `~/yh-release-dist/ci-126`，tar.gz 与其
+  `.sha256` 校验一致，解包后装入 `bin/yh-darwin-arm64`
+  （种子 sha256 `21da09ed…7b15e1`）。
+- **验收**：种子报告 `yh 0.0.9` 且接受 `test` 语法；`make` 冷编通过；
+  `make test` 退出码 0（语法 81/81、49/49；run 211/212、fail 136/136、
+  pass 9/9；test-check 27/27；string 内建 5/5；TOML 6/6；代码统计 6/6）；
+  `make selfhost-native` 退出码 0（30 产物固定点一致、自解析 114 文件、
+  modules 19/19、project cases 121/121）。
+- **rc.2 解锁**：用该种子冷编含 YT3b test 块的 `llvm` 线通过，
+  `compiler-tests: 通过 3/3`，确认滚动自举顺序成立。
+- **Linux 冒烟**：linux-arm64 资产在 Ubuntu 24.04 容器内报告 `yh 0.0.9` 并接受
+  test 语法；x86_64 资产为模拟环境，未作为原生证据。
+- 记录详见[release-0.0.9-rc.1](01-finished/release-0.0.9-rc.1.md)。
+
 ## 2026-10-23 0.0.9-rc.1 开发与本地验收
 
 - **版本**：`compiler/project.toml` 升到 `0.0.9`（rc 期写目标正式号），

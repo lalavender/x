@@ -72,8 +72,8 @@ YT0 语法基线、YT1 发现/文档绑定/无运行检查、YT2a（测试体降
   误登记与源码根内 `tmp/`、`.build/` 被当源码扫描两个缺陷。
 - [ ] **YT3b（随 0.0.9-rc.2）**：用 rc.1 种子给 `gen`/`lex`/`parse` 加内嵌
   test 块，恢复 `tools/compiler-tests.py` 与 `make test-compiler-tests`，
-  并验证生产对象与 `.s.i` 零测试符号。本机已在 llvm 线实现并验证，按滚动
-  自举规则推迟到 rc.2。
+  并验证生产对象与 `.s.i` 零测试符号。rc.1 的种子已实测可冷编该内容并通过
+  `compiler-tests 3/3`，rc.2 只需 revert “rc.1 暂缓 compiler 内嵌测试”提交。
 
 ## 版本与发布流程（P0 前置）
 

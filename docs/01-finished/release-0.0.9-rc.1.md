@@ -113,3 +113,33 @@ yh test --timeout 15           # 单例超时秒数（1..3600，缺省 15）
   缓存键隔离、超长断言消息提示）、YT1.1（项目外单文件临时单模块上下文）。
 - 发布流程 R1–R4（分支模型、tag 祖先校验、rc 取种、版本漂移）仍未落地，
   本版按现有 `release.yml` 流程发布。
+
+## 用发布出的 rc 二进制验收（2026-10-23）
+
+发布资产取自本机 host 模式 runner 的产物目录 `~/yh-release-dist/ci-126`
+（与 GitHub Release 上传的是同一组文件），tar.gz 与其 `.sha256` 一致：
+
+| 资产 | SHA-256（tar.gz） |
+| --- | --- |
+| `yh-0.0.9-rc.1-darwin-arm64.tar.gz` | `0cb526332596c95d414bd24dbf7721d9e9cae5a4433dbfd8d6780b10d32ee9e4` |
+| `yh-0.0.9-rc.1-linux-arm64.tar.gz` | `dbbe9c06318819a490d802d4ab917e41172510f8f6db50e3c40aa828c2e7f2d1` |
+| `yh-0.0.9-rc.1-linux-x86_64.tar.gz` | `1312e375c929262ad3d4ea230f73efbe624418fb38a36c4b0e7c61cc771f2782` |
+
+Darwin/arm64 种子（解包后 `yh` sha256 `21da09ed…7b15e1`）装入
+`bin/yh-darwin-arm64` 后：
+
+- `bin/yh-darwin-arm64 version` → `yh 0.0.9`；
+- 该种子接受 `test` 语法（0.0.8 一代种子会报「此处需要一个顶层声明」）；
+- `make` 冷编通过；
+- `make test` 退出码 0：ANTLR 与编译器语法正例 81/81、反例 49/49；
+  run 211/212（1 条平台 SKIP）、fail 136/136、pass 9/9；`test-check` 27/27；
+  string 内建测试 5/5；TOML API 6/6；代码统计 6/6；
+- `make selfhost-native` 退出码 0：30 个模块产物固定点一致、cc4 自解析
+  114 个源文件、modules 19/19、project cases 121/121。
+
+**rc.2 解锁验证**：用该种子在 `llvm` 线（含 `compiler/` 内嵌 test 块）冷编，
+`tools/compiler-tests.py` 输出 `compiler-tests: 通过 3/3`（gen 2、lex 3、
+parse 3 例），说明“先发支持 test 语法的种子、再加编译器内嵌测试”的顺序成立。
+
+**Linux/arm64 冒烟**（Ubuntu 24.04 容器 + `libxml2`）：种子报告 `yh 0.0.9`，
+`--syntax-check` 接受 test 块。Linux/x86_64 资产为容器模拟，未作为原生证据。
