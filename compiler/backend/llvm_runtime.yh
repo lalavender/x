@@ -346,9 +346,15 @@ fn llvm_runtime_write_printf(out *LLVMOutput, hidden int, arm64 int) void {
 // 小端 i32），随后 exit(1)；条件为真直接返回。记录通道与 stdout/stderr 分离，
 // 父进程据此同时得到失败位置与「未被断言捕获的退出」的区别。
 fn llvm_runtime_write_test_assert(unit *ir.IRModule, out *LLVMOutput) void {
-    // 模块里可能已引用 write/exit（用户测试体调用它们）；只在缺席时补声明，
-    // 否则 LLVM 会报重复定义。
-    if (llvm_runtime_named(unit, "write") == 0) {
+    // 模块里可能已引用 write/exit（用户测试体调用它们）。Darwin 的 printf 运行时
+    // 支持本身会声明 @write；Linux 版 printf 走 syscall、不声明它，因此仅在
+    // 「既没引用 write、也没有 Darwin printf 支持」时补声明，避免重复声明。
+    let darwin_write int = 0
+    if (gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
+        && llvm_runtime_named(unit, "printf") != 0) {
+        darwin_write = 1
+    }
+    if (llvm_runtime_named(unit, "write") == 0 && darwin_write == 0) {
         llvm_text(out, "declare i64 @write(i32, ptr, i64)\n")
     }
     if (llvm_runtime_named(unit, "exit") == 0) {
@@ -384,8 +390,16 @@ fn llvm_runtime_write_test_assert(unit *ir.IRModule, out *LLVMOutput) void {
     llvm_text(out, "body:\n  %moff = add i64 12, %mk\n")
     llvm_text(out, "  %dp = getelementptr i8, ptr %rec, i64 %moff\n")
     llvm_text(out, "  store i8 %mc, ptr %dp, align 1\n")
-    llvm_text(out, "  %mkn = add i64 %mk, 1\n  %mmore = icmp ult i64 %mkn, 60\n")
-    llvm_text(out, "  br i1 %mmore, label %copy, label %emit\n")
+    // 消息最多拷 59 字节；拷满后看第 60 字节是否为 NUL，决定「已截断」标记。
+    llvm_text(out, "  %mkn = add i64 %mk, 1\n  %mmore = icmp ult i64 %mkn, 59\n")
+    llvm_text(out, "  br i1 %mmore, label %copy, label %trunc\n")
+    llvm_text(out, "trunc:\n  %tailp = getelementptr i8, ptr %msg, i64 59\n")
+    llvm_text(out, "  %tail = load i8, ptr %tailp, align 1\n")
+    llvm_text(out, "  %more_bytes = icmp ne i8 %tail, 0\n")
+    llvm_text(out, "  %mark = select i1 %more_bytes, i8 30, i8 0\n")
+    llvm_text(out, "  %markp = getelementptr i8, ptr %rec, i64 71\n")
+    llvm_text(out, "  store i8 %mark, ptr %markp, align 1\n")
+    llvm_text(out, "  br label %emit\n")
     llvm_text(out, "emit:\n  %w = call i64 @write(i32 3, ptr %rec, i64 72)\n")
     llvm_text(out, "  call void @exit(i32 1)\n  unreachable\ndone:\n  ret void\n}\n\n")
 }

@@ -89,6 +89,9 @@ def expected_artifacts(project: Path):
         module_sources: dict[str, list[Path]] = {}
         host_system, host_arch = _host_platform()
         for source in sorted(current.rglob("*.yh")):
+            # 跳过构建/测试产物（yh test 生成的入口模块落在项目 tmp/ 下）。
+            if {"tmp", ".build"} & set(source.relative_to(current).parts):
+                continue
             if any(parent in source.resolve().parents for parent in nested_projects):
                 continue
             if not _matches_platform(source.stem, host_system, host_arch):

@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -43,6 +44,15 @@ def host_key() -> str:
     if system == "Darwin":
         return f"darwin-{arch}"
     return f"linux-{arch}"
+
+
+def compiler_uses_link_manifest() -> bool:
+    """compiler/project.toml 是否已迁移到 [link] 归档清单（判据同 seed-build）。"""
+    try:
+        text = (COMPILER / "project.toml").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return re.search(r"^\[link(?:-[a-z0-9-]+)?\]", text, re.MULTILINE) is not None
 
 
 def llvm_cache() -> Path:
@@ -73,15 +83,27 @@ def prepare_env(host: str) -> dict:
         print(f"提示：未能准备 {host} 固定 LLVM 闭包，按原环境运行", file=sys.stderr)
         return env
     record = json.loads(result.stdout)
-    shim = record.get("shim_dir")
-    flags = record.get("selfhost_flags")
-    if shim:
-        env["PATH"] = shim + os.pathsep + env.get("PATH", "")
-        tool = "clang" if host.startswith("darwin") else "gcc"
-        env["YH_CC"] = str(Path(shim) / tool)
-    if flags and Path(flags).is_file():
-        env["YH_LLVM_SELFHOST"] = "1"
-        env["YH_LLVM_SELFHOST_FLAGS"] = flags
+    if compiler_uses_link_manifest():
+        # compiler/ 的 [link] 清单已声明桥/lld/LLVM 归档：清单链接时旧闭包
+        # 注入必须关闭（YH_LINK_MANIFEST_ONLY），否则桥归档在同一条链接命令
+        # 里出现两次，ld.lld 报 duplicate symbol: yh_lld_link_driver。运行库
+        # 参数（-lstdc++/-lz 等）仍由构建机配方文件提供。
+        env.pop("YH_LLVM_SELFHOST", None)
+        env.pop("YH_LLVM_SELFHOST_FLAGS", None)
+        env["YH_LINK_MANIFEST_ONLY"] = "1"
+        runtime = record.get("selfhost_runtime")
+        if runtime and Path(runtime).is_file():
+            env["YH_LINK_RUNTIME_FLAGS"] = runtime
+    else:
+        shim = record.get("shim_dir")
+        flags = record.get("selfhost_flags")
+        if shim:
+            env["PATH"] = shim + os.pathsep + env.get("PATH", "")
+            tool = "clang" if host.startswith("darwin") else "gcc"
+            env["YH_CC"] = str(Path(shim) / tool)
+        if flags and Path(flags).is_file():
+            env["YH_LLVM_SELFHOST"] = "1"
+            env["YH_LLVM_SELFHOST_FLAGS"] = flags
     if host.startswith("darwin"):
         sdk_record = llvm_cache() / "darwin-sdk" / f"sdk-{host}" / "host.json"
         if sdk_record.is_file():

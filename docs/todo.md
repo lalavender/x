@@ -38,24 +38,32 @@
 - [ ] **PF3**：规模增长、产物运行基准与代码体积；并发扫描待存在控制入口后再做。
 - [ ] **PF4**：Gitea 独立性能报告、资产归档、噪声校准与回退复测。
 
-## 语言内测试（YT0–YT3b 已实施，剩余 YT2d 与 YT1.1）
+## 语言内测试（YT0–YT3b、YT2d、YT1.1 已实施；剩余 YT4 迁移与发版）
 
 [设计提案](03-design/yh-test语言内测试设计-2026-10-23.md)与
 [实施分期](02-plan/yh-test分阶段实施方案-2026-10-23.md)已整理。
 YT0 语法基线、YT1 发现/文档绑定/无运行检查、YT2a（测试体降低 + 运行期
 断言）、YT2b（入口模块/逐例进程/结果协议/汇总）、YT2c（执行过滤/超时/
 `testing.fail/skip`/断言消息）、YT3a（标准库 string 内建测试与门禁）与
-YT3b（滚种子后 compiler 内嵌测试与门禁）已完成，证据见
+YT3b（compiler 内嵌测试与门禁，随 0.0.9-rc.2 交付）、YT2d（日志/并行/缓存键）
+与 YT1.1（项目外单文件）已完成，证据见
 [YT0 记录](01-finished/yh-test语法基线-2026-10-23.md)、
 [YT1 记录](01-finished/yh-test发现与无运行检查-2026-10-23.md)、
 [YT2a 记录](01-finished/yh-test降低与运行期断言-2026-10-23.md)、
 [YT2b 记录](01-finished/yh-test执行器与结果协议-2026-10-23.md)、
 [YT2c 记录](01-finished/yh-test执行增强-2026-10-23.md)、
 [YT3a 记录](01-finished/yh-test标准库内建测试-2026-10-23.md)与
-[YT3b 记录](01-finished/yh-test编译器内嵌测试-2026-10-23.md)；
+[YT3b 记录](01-finished/yh-test编译器内嵌测试-2026-10-23.md)、
+[YT2d-1 记录](01-finished/yh-test逐例日志与截断提示-2026-10-23.md)、
+[YT2d-2 记录](01-finished/yh-test测试缓存键-2026-10-23.md)与
+[YT1.1 记录](01-finished/yh-test项目外单文件-2026-10-23.md)；
+既有测试的迁移候选见
+[YT4 分析](02-plan/yh-test语法迁移既有测试分析-2026-10-23.md)；
 以下只保留未完成项。
 
-- [ ] **YT1.1**：项目外单文件临时单模块上下文（当前明确拒绝，不装入相邻文件）。
+- [x] **YT1.1**：项目外单文件临时单模块上下文（临时项目根在
+  `<源文件目录>/tmp/yh-test/single`，只装入该文件，模块名缺失时由文件名派生，
+  允许导入标准库）。
 - [x] **YT2a**：测试体降低为模块内 `pub` 无参 `void` 函数、`$assert` 降为
   `__yh_test_assert(cond, line, col, msg)` 运行期调用、受检节点与检查身份、
   `--no-run` 发布对象与 `--emit-llvm` 审阅；生产构建零测试符号。
@@ -65,14 +73,42 @@ YT3b（滚种子后 compiler 内嵌测试与门禁）已完成，证据见
   失败且不阻断后续用例。
 - [x] **YT2c**：执行过滤、`--timeout`（1..3600，缺省 15 秒）、
   `libs/testing` 的 `fail/skip`、断言位置与消息报告、SKIP 汇总。
-- [ ] **YT2d**：并行执行、逐例独立日志文件、测试缓存键隔离、断言消息超长
-  截断提示。
+- [x] **YT2d-1**：逐例独立日志文件（`tmp/yh-test/log/`，失败回显末尾 2 KiB）
+  与断言消息截断提示（`0x1e` 标记 + UTF-8 边界回退）。
+- [x] **YT2d-2**：测试构建使用独立目录与扩展模块键（测试模式 + 协议标签 +
+  本轮选中测试集合摘要）；同选择第二次命中、换选择重编、生产/测试互不相通。
+  **剩余**：函数级 IR 与 check 切片缓存仍未用于测试构建（键不覆盖 TK_TEST）。
+- [x] **YT2d-3**：并行执行用例（`YH_TEST_JOBS` 缺省 4，每批同时 fork/exec，
+  批内按原顺序等待与打印；每例独立超时与日志）。
 - [x] **YT3a**：`libs/string/99_tests.yh` 内建测试、`make test-lib-tests`
   入口，接入 `make test` 与 `make selfhost-native`；修复非目标项目 test 声明
   误登记与源码根内 `tmp/`、`.build/` 被当源码扫描两个缺陷。
-- [x] **YT3b**：滚种子；`gen`/`lex`/`parse` 内嵌 test 块；新增
-  `tools/compiler-tests.py` 与 `make test-compiler-tests`，接入两大主门；
-  生产对象与 `.s.i` 零测试符号。
+- [x] **YT3b（0.0.9-rc.2 交付）**：用 rc.1 种子给 `gen`/`lex`/`parse` 加内嵌
+  test 块，恢复 `tools/compiler-tests.py` 与 `make test-compiler-tests`，
+  并验证生产对象与 `.s.i` 零测试符号。
+
+### YT4 既有测试迁移（2026-10-23 分析完成，待实施）
+
+[分析](02-plan/yh-test语法迁移既有测试分析-2026-10-23.md)按「纯逻辑断言可迁移、
+编译器契约不迁移」给出候选、前置缺口与分阶段顺序。结论：收益是失败定位与
+粒度，不是门禁变快；迁移前必须先做 YT4a，且每个库保留一个外部消费者 smoke。
+
+- [ ] **YT4a 前置**：测试运行目录/缓存隔离（并入 YT2d：编译器身份 + 目标 +
+  优化级 + 运行实例）、`make test-lib-tests` 改无选择器、补 `-O2` 入口；
+  连跑两次 + O0/O2 交替验证。
+- [ ] **YT4b string**：5 组行为夹具 → `libs/string` 测试，`stringinterop` →
+  `libs/toml`；保留 `stringresources` 注入、`reference.py` 差分与安装门。
+- [ ] **YT4c toml**：5 组 API 夹具（873 行、146 处 `ok()`）→ `libs/toml`
+  测试；保留 `tomlfiles`、conformance、injection、install。
+- [ ] **YT4d cli**：5 个 `--selftest` 主体（约 3625 行）→ `libs/cli` 测试；
+  保留 argv/退出码/stderr 用例、`cliwarnings`、`clidiff` 差分。
+- [ ] **YT4e 编译器 fixture**：`irverify`/`astcheck`/`irfront` 迁入
+  `compiler/{ir,ast,check}` 测试并删除 `copy_proj` 特判；`llvmlower`/
+  `llvmchecked` 暂留。
+- [ ] **YT4f os/sys/time**：纯模型与错误分类断言迁入 `*.linux.yh`/
+  `*.darwin.yh` 测试；文件/目录/进程/环境与 Linux 目标类型检查留在外部。
+- [ ] **决策**：迁移范围（是否含 YT4e）、旧 runner 双跑周期、OS/FS 是否迁入、
+  断言粒度、是否允许测试调用私有 `fn`、消费者 smoke 规模。
 
 ## 版本与发布流程（P0 前置）
 
@@ -349,6 +385,23 @@ LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
   `fn main() int { goto done; done: let f fn(int) int = add_one; return f(41) == 42 ? 0 : 1 }`
   （`tests/modules/projects/llvmarchitecture/cases/lowering.yh` 暂将 goto 与
   函数指针放在独立函数，未降低断言）。需单独立项修复并补回归。
+
+## 接口特性（IF1–IF5，方案待评审）
+
+2026-10-24 取向已定：**显式 vtable 语法糖、零运行时魔法**——interface 展开为
+`self` + 方法函数指针字段的普通 struct，impl 只做编译期检查，`s.m()` 是
+`s.m(s.self)` 的糖。方案见
+[接口特性实施方案](02-plan/yh-接口特性实施方案-2026-10-24.md)；按片立项，
+实施顺序 IF1 → IF2 → IF3 → IF4/IF5。
+
+- [ ] **IF1**：`interface` 关键字、类型登记（form=4、隐含 `self *void`）、
+  方法槽必须是 fn 类型的检查。
+- [ ] **IF2**：`s.m(args)` 插接收者糖（旧发射路径与 AST/lower 路径行为一致），
+  首版接收者限变量名；comptime 内显式拒绝。
+- [ ] **IF3**：`.s.i` v4（interface 发射/加载）与跨模块构造/调用用例。
+- [ ] **IF4**：`impl` 纯检查（全方法覆盖、签名严格相等）、缓存与固定点复核、
+  `docs/yh.g4` 与语义边界文档刷新、ADR。
+- [ ] **IF5**：`tests/yh`、`tests/yh-run/{run,fail}`、`tests/modules` 门禁用例。
 
 ## 待决策（❓）
 

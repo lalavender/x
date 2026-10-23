@@ -43,11 +43,13 @@ class Checker:
                         ignore=shutil.ignore_patterns(".build", "tmp"))
         return dst
 
-    def run(self, project: Path, *args: str):
+    def run(self, project: Path, *args: str, env_extra=None):
         # 编译器可能被暂存到临时目录（make test 的 FAST_STAGE），
         # 显式给出仓库标准库根，保证 import testing 等模块可解析。
         env = dict(os.environ)
         env.setdefault("YH_STDLIB", str(ROOT / "libs"))
+        if env_extra:
+            env.update(env_extra)
         proc = subprocess.run(
             [str(self.compiler), "test", *args],
             cwd=project, capture_output=True, text=True, timeout=300, env=env)
@@ -194,9 +196,20 @@ class Checker:
                    and "SKIP app::src/app/lib.yh::test::显式跳过" in out
                    and "断言消息: helper 拒绝继续" in out
                    and "断言消息: bump 结果不对" in out
-                   and "结果: 2 passed; 1 skipped; 2 failed" in out,
+                   and "结果: 2 passed; 1 skipped; 3 failed" in out,
                    f"退出码 {proc.returncode}，输出 {out[-500:]!r}，"
                    f"stderr {proc.stderr[-300:]!r}")
+
+        # 5k. 逐例日志与超长断言消息截断提示。
+        self.check("per-case-log-and-truncation",
+                   "用例日志: " in out
+                   and "case-stdout-marker" in out
+                   and "…（消息已截断）" in out,
+                   f"输出 {out[-600:]!r}")
+        log_dir = skip / "tmp" / "yh-test" / "log"
+        self.check("per-case-log-files",
+                   log_dir.is_dir() and len(list(log_dir.glob("*.log"))) >= 5,
+                   f"日志目录 {log_dir} 内容 {list(log_dir.glob('*.log'))}")
 
         # 5i. --timeout 终止死循环用例，后续用例继续。
         slow = self.prepare("ytesttimeout", "execute-timeout")
@@ -210,6 +223,90 @@ class Checker:
                    and "结果: 1 passed; 0 skipped; 1 failed" in out,
                    f"退出码 {proc.returncode}，输出 {out[-500:]!r}，"
                    f"stderr {proc.stderr[-300:]!r}")
+
+        # 5j. 先做生产构建再跑测试：测试构建不得复用生产模块缓存
+        # （生产接口没有 __yh_test_* 导出，复用会让测试入口找不到测试函数）。
+        both = self.prepare("ytest", "prod-then-test")
+        prod = subprocess.run([str(self.compiler), "build"], cwd=both,
+                              capture_output=True, text=True, timeout=300)
+        proc = self.run(both)
+        self.check("test-after-production-build",
+                   prod.returncode == 0 and proc.returncode == 0
+                   and f"结果: {self.expected_tests} passed; 0 skipped; 0 failed"
+                   in proc.stdout,
+                   f"生产 {prod.returncode}，测试 {proc.returncode}，"
+                   f"输出 {proc.stdout[-300:]!r}")
+
+        # 5l. 跨目标测试构建：Linux 目标下 printf 运行时走 syscall、不声明
+        # @write，测试断言运行时必须自己补声明（曾出现 use of undefined value）。
+        cross = self.prepare("ytestskip", "cross-target")
+        proc = self.run(cross, "--no-run", "--target", "aarch64-unknown-linux-gnu")
+        self.check("cross-target-test-build", proc.returncode == 0,
+                   f"退出码 {proc.returncode}，stderr {proc.stderr[-400:]!r}")
+
+        # 5m. 并行执行：默认并行度与串行结果一致，且输出顺序与 --list 相同。
+        par = self.prepare("ytestparallel", "parallel")
+        listed = [line.split("  ")[0] for line in
+                  self.run(par, "--list").stdout.splitlines() if line.strip()]
+        para = self.run(par, env_extra={"YH_TEST_JOBS": "4"})
+        seri = self.prepare("ytestparallel", "serial")
+        seri_proc = self.run(seri, env_extra={"YH_TEST_JOBS": "1"})
+        pass_order = [line[len("PASS "):].split("  ")[0]
+                      for line in para.stdout.splitlines()
+                      if line.startswith("PASS ")]
+        self.check("parallel-matches-serial",
+                   para.returncode == 0 and seri_proc.returncode == 0
+                   and pass_order == listed
+                   and "结果: 5 passed; 0 skipped; 0 failed" in para.stdout
+                   and "结果: 5 passed; 0 skipped; 0 failed" in seri_proc.stdout,
+                   f"并行 {para.returncode} 串行 {seri_proc.returncode}，"
+                   f"顺序 {pass_order} vs {listed}")
+
+        # 5n. 测试构建缓存：同一选择第二次命中；选择范围变化必须重新编译
+        # （模块键含本轮选中测试集合的摘要）。
+        cachep = self.prepare("ytest", "test-cache")
+        self.run(cachep)
+        warm = self.run(cachep)
+        narrow = self.run(cachep, "src/app/more.yh")
+        self.check("test-build-cache-hit",
+                   warm.returncode == 0 and "[缓存]" in warm.stdout
+                   and f"结果: {self.expected_tests} passed; 0 skipped; 0 failed"
+                   in warm.stdout,
+                   f"退出码 {warm.returncode}，输出 {warm.stdout[:400]!r}")
+        self.check("test-cache-selection-isolated",
+                   narrow.returncode == 0 and "[编译] app" in narrow.stdout
+                   and "结果: 2 passed; 0 skipped; 0 failed" in narrow.stdout,
+                   f"退出码 {narrow.returncode}，输出 {narrow.stdout[:400]!r}")
+
+        # 5o. 项目外单文件：临时单模块、不装入相邻文件、可导入标准库。
+        single = self.work / "single-file"
+        if single.exists():
+            shutil.rmtree(single)
+        shutil.copytree(HERE / "single", single, ignore=shutil.ignore_patterns("tmp"))
+        proc = self.run(single, "standalone.yh")
+        self.check("single-file-test",
+                   proc.returncode == 0
+                   and "结果: 2 passed; 0 skipped; 0 failed" in proc.stdout
+                   and "standalone::standalone.yh::test::加法" in proc.stdout,
+                   f"退出码 {proc.returncode}，输出 {proc.stdout[-400:]!r}，"
+                   f"stderr {proc.stderr[-300:]!r}")
+        listed = self.run(single, "standalone.yh", "--list")
+        no_run = self.run(single, "standalone.yh", "--no-run")
+        self.check("single-file-options",
+                   listed.returncode == 0 and no_run.returncode == 0
+                   and len(listed.stdout.splitlines()) == 2
+                   and "PASS " not in no_run.stdout,
+                   f"list {listed.returncode}，no-run {no_run.returncode}")
+        imported = self.run(single, "with_import.yh")
+        self.check("single-file-stdlib-import",
+                   imported.returncode == 0
+                   and "imported_demo::with_import.yh::test::标准库可用" in imported.stdout,
+                   f"退出码 {imported.returncode}，输出 {imported.stdout[-400:]!r}")
+        # 相邻的 neighbour.yh 有意写坏：若被装入单文件模式，本用例必然编译失败。
+        self.check("single-file-skips-neighbours",
+                   (single / "neighbour.yh").is_file()
+                   and proc.returncode == 0,
+                   "相邻文件被错误装入")
 
         # 5f. --no-run 只构建，不执行。
         noexec = self.prepare("ytest", "no-exec")

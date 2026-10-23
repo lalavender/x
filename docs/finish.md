@@ -2,7 +2,185 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
-## 2026-10-23 yh test 编译器内嵌测试（YT3b）
+## 2026-10-23 0.0.9 正式版发布与验收
+
+- **发布**：`0.0.9-rc` 以 `--no-ff` 合入新建的 `0.0.9-release`（起点
+  `0.0.8-release`），打正式 tag `0.0.9`；Gitea `release.yml` run 65 五个作业
+  全部 success，创建正式 Release 并上传三端资产。`ci.yml` 分支门 run 64 通过。
+- **验收**：发布种子（`56bf3f56…ca6ceb8`，`yh 0.0.9`）装入
+  `bin/yh-darwin-arm64` 后，`make`、`make test`、`make selfhost-native` 全绿
+  （语法 81/81、49/49；run 211/212；fail 136/136；pass 9/9；test-check 38/38；
+  string 内建 5/5；compiler-tests 3/3；TOML 6/6；固定点 30 产物、
+  自解析 114 文件、project cases 121/121）。
+- **分支**：`0.0.9-rc` 已按流程删除，保留 `0.0.9-release`。
+- 说明见[release-0.0.9](01-finished/release-0.0.9.md)。
+
+## 2026-10-23 0.0.9 正式版开发
+
+- **版本**：`compiler/project.toml` 保持 `0.0.9`；发布说明见
+  [release-0.0.9](01-finished/release-0.0.9.md)。
+- **内容**：在 rc.1/rc.2 基础上完成 YT2d（逐例日志与截断提示、并行执行、
+  测试构建缓存键）与 YT1.1（项目外单文件临时单模块上下文），
+  `test-check.py` 增至 38 项；`ci.yml` 分支门 Darwin 与 Linux/AArch64 均通过。
+- **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 38/38；string 内建 5/5；
+  compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
+  project cases 121/121）。
+
+## 2026-10-23 yh test 项目外单文件（YT1.1）
+
+- **实现**：`yh test <项目外文件>` 为单文件建立临时项目
+  （`<源文件目录>/tmp/yh-test/single`，`source` 指向源文件目录但扫描只接受
+  该文件），相邻 `.yh` 与子目录不装入；模块名取 `module` 头，缺失时由文件名
+  派生；允许导入标准库；`--list/--no-run/--filter/--timeout/--emit-llvm`
+  全部沿用。完整记录见
+  [YT1.1 实施记录](01-finished/yh-test项目外单文件-2026-10-23.md)。
+- **语料**：`tests/modules/single/`（无 module 头、导入标准库、故意写坏的相邻
+  文件），`test-check.py` 增至 38 项。
+- **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 38/38；string 内建 5/5；
+  compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
+  project cases 121/121）。
+- **边界**：单文件模式无 `[link]`/`[c]` 配置，只能用默认链接环境；临时项目根
+  固定，同目录并发执行会互相覆盖。
+
+## 2026-10-23 yh test 测试构建缓存键（YT2d-2）
+
+- **实现**：`GenState.c_test_key` 记录本轮选中测试集合摘要（模块/文件/声明号/
+  种类），模块 manifest 键在既有字段后混入「测试模式 + `yh-test-key-1` +
+  摘要」；测试构建目录仍是 `tmp/yh-test/check`，与生产 `.build` 天然隔离。
+  `mb_compile_start` 不再对测试模式强制绕过缓存，调度器也提交测试 manifest。
+  完整记录见[YT2d-2 实施记录](01-finished/yh-test测试缓存键-2026-10-23.md)。
+- **语料**：`test-check.py` 增至 34 项（`test-build-cache-hit`、
+  `test-cache-selection-isolated`）。
+- **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 34/34；string 内建 5/5；
+  compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
+  project cases 121/121）。
+- **边界**：函数级 IR 与 check 切片缓存仍未用于测试构建（键不覆盖 `TK_TEST`
+  声明）；测试构建目录不按 target 细分，跨目标交替构建会互相冲刷 manifest。
+- **运维提示**：本机门禁偶发失败来自 macOS 清理 `$TMPDIR`，把 `FAST_DIR` 指到
+  仓库 `tmp/faststage` 可稳定复现全绿。
+
+## 2026-10-23 yh test 逐例日志与截断提示（YT2d-1）
+
+- **实现**：每个用例的 stdout/stderr 重定向到
+  `tmp/yh-test/log/<模块>-<序号>.log`，失败时报告日志路径并回显末尾 2 KiB
+  （滚动窗口单遍读取）；断言消息上限 59 字节，记录偏移 71 写 `0x1e`
+  截断标记，父进程按 UTF-8 边界回退并追加「…（消息已截断）」。
+  修复 `@write` 声明：Darwin 的 printf 支持会声明它、Linux 走 syscall 不会，
+  测试运行时按目标补声明（跨目标构建曾报 `use of undefined value '@write'`）。
+  完整记录见
+  [YT2d-1 实施记录](01-finished/yh-test逐例日志与截断提示-2026-10-23.md)。
+- **语料**：`ytestskip` 新增「带输出的长消息失败」；`test-check.py` 增至
+  30 项（`per-case-log-and-truncation`、`per-case-log-files`）。
+- **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 31/31；string 内建 5/5；
+  compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
+  modules 19/19、project cases 121/121）。
+- **并行执行（YT2d-3）**：`YH_TEST_JOBS`（缺省 4，限制 1..8）分批并发
+  fork/exec，批内按原顺序等待与打印，输出顺序与 `--list` 一致；每例独立
+  超时与日志。新增 `ytestparallel` 与 `parallel-matches-serial` 断言
+  （test-check 32/32）。
+- **边界**：不同命令并发执行同一项目仍可能覆盖日志（命令级运行目录未隔离）；
+  测试构建仍不启用模块/函数级缓存（YT2d-2）。
+
+## 2026-10-23 0.0.9-rc.2 发布与发布版二进制验收
+
+- **发布**：Gitea `release.yml` run 57 五个作业全部 success，创建
+  prerelease `0.0.9-rc.2` 并上传三端资产；`ci.yml` 的 `0.0.9-rc` 分支门同轮
+  通过。
+- **CI 迭代**：① 首轮 tag 因 GitHub 资产 SSL 中断失败（环境网络）；
+  ② 次轮暴露 `compiler-tests`/隔离冷编重复注入闭包导致
+  `ld.lld: duplicate symbol: yh_lld_link_driver`，改为 `[link]` 清单环境
+  （`YH_LINK_MANIFEST_ONLY=1` + `YH_LINK_RUNTIME_FLAGS`）；
+  ③ 第三轮构建机磁盘仅剩 2.3 GiB，Darwin 链接与 x86_64 对象原子写入失败，
+  清理可再生的缓存与旧产物后重跑成功。
+- **验收**：发布种子 `yh 0.0.9`（`7cbf2580…cfb1e837`）装入 `bin/yh-darwin-arm64`
+  后，`make`、`make test`、`make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 28/28；string 内建 5/5；
+  compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
+  modules 19/19、project cases 121/121）。
+- 记录详见[release-0.0.9-rc.2](01-finished/release-0.0.9-rc.2.md)。
+
+## 2026-10-23 linux-x64 发布门 duplicate symbol 修复
+
+- **现象**：Gitea `release.yml` 的 linux-x86_64 job 在 `make selfhost-native`
+  的 compiler-tests 处失败：`ld.lld: error: duplicate symbol:
+  yh_lld_link_driver`（`lld_bridge.o` 两次出现在同一归档），`通过 0/3`。
+- **根因**：compiler/ 已迁移 `[link]` 清单闭包（F1），但
+  `tools/compiler-tests.py` 仍按旧链路设置 `YH_LLVM_SELFHOST=1` 与
+  `YH_LLVM_SELFHOST_FLAGS`；ELF 驱动在清单之外把整份运行时闭包（含
+  `--whole-archive` 桥归档）再追加一次，同一条链接命令里桥归档出现两次。
+  `tests/selfhost/llvm-isolation.py` 冷编段同样停留在旧链路。
+- **修复**：两处改为清单模式环境（`YH_LINK_MANIFEST_ONLY=1` +
+  `YH_LINK_RUNTIME_FLAGS` 指向构建机 runtime 配方），不再注入旧闭包；与
+  `tools/seed-build.py`、`tests/selfhost/native-selfhost.py` 的既有约定一致。
+- **复现与验证**：amd64 容器（`yh-ci:ubuntu24-amd64`）+ 0.0.9-rc.1 x64 种子，
+  旧环境复现上述重复符号；清单模式环境同一条构建链接成功；修复后
+  `tools/compiler-tests.py` 在容器内 3/3、本机 macOS 3/3 通过，`make` 冷编正常。
+
+## 2026-10-23 0.0.9-rc.2 开发与本地验收
+
+- **内容**：恢复 compiler 内嵌测试与门禁（YT3b）：`gen/buffer.yh`、
+  `lex/layout.yh`、`parse/parse_type.yh` 的 test 块，`tools/compiler-tests.py`
+  与 `make test-compiler-tests`，并入 `make test` / `make selfhost-native`。
+- **修复**（rc.1 验收后暴露）：
+  1. 测试构建不读/不写模块 manifest 缓存（复用生产对象会让测试入口找不到
+     `__yh_test_*`）；2. 测试构建不装载/不提交函数级 IR 与 check 切片缓存
+     （曾出现「表达式 AST 校验失败」）；3. 测试函数只在本轮选中的模块/文件
+     登记（依赖模块曾留下无函数体的受检声明，`yh test <模块>` 直接挂）；
+     4. 自解析与种子快照跳过 `tmp/`、`.build/`（自解析曾从 114 变 117）。
+- **回归**：`tests/modules/test-check.py` 增至 28 项，新增
+  `test-after-production-build`。
+- **验证**：种子 = 0.0.9-rc.1；`make`、`make test`、`make selfhost-native`
+  全绿（语法 81/81、49/49；run 211/212；fail 136/136；pass 9/9；
+  test-check 28/28；string 内建 5/5；compiler-tests 3/3；TOML 6/6；
+  固定点 30 产物、自解析 114 文件、modules 19/19、project cases 121/121）。
+- 发布说明：[release-0.0.9-rc.2](01-finished/release-0.0.9-rc.2.md)。
+
+## 2026-10-23 0.0.9-rc.1 发布与发布版二进制验收
+
+- **发布**：Gitea `release.yml` 的 `publish` 作业成功（run 142），三端资产
+  `yh-0.0.9-rc.1-{darwin-arm64,linux-arm64,linux-x86_64}.tar.gz` 已上传。
+- **取种**：本机无 GitHub token，`make fetch-seed` 无法直连私有仓库；改用
+  host 模式 runner 的同一批产物 `~/yh-release-dist/ci-126`，tar.gz 与其
+  `.sha256` 校验一致，解包后装入 `bin/yh-darwin-arm64`
+  （种子 sha256 `21da09ed…7b15e1`）。
+- **验收**：种子报告 `yh 0.0.9` 且接受 `test` 语法；`make` 冷编通过；
+  `make test` 退出码 0（语法 81/81、49/49；run 211/212、fail 136/136、
+  pass 9/9；test-check 27/27；string 内建 5/5；TOML 6/6；代码统计 6/6）；
+  `make selfhost-native` 退出码 0（30 产物固定点一致、自解析 114 文件、
+  modules 19/19、project cases 121/121）。
+- **rc.2 解锁**：用该种子冷编含 YT3b test 块的 `llvm` 线通过，
+  `compiler-tests: 通过 3/3`，确认滚动自举顺序成立。
+- **Linux 冒烟**：linux-arm64 资产在 Ubuntu 24.04 容器内报告 `yh 0.0.9` 并接受
+  test 语法；x86_64 资产为模拟环境，未作为原生证据。
+- 记录详见[release-0.0.9-rc.1](01-finished/release-0.0.9-rc.1.md)。
+
+## 2026-10-23 0.0.9-rc.1 开发与本地验收
+
+- **版本**：`compiler/project.toml` 升到 `0.0.9`（rc 期写目标正式号），
+  发布说明见[release-0.0.9-rc.1](01-finished/release-0.0.9-rc.1.md)。
+- **内容**：语言内测试 YT0–YT3a（语法、`yh test` 发现/降低/逐例执行、
+  `--filter`/`--timeout`/`--no-run`/`--emit-llvm`、`libs/testing` 的
+  `fail`/`skip`、`libs/string/99_tests.yh` 内建测试）、os/sys 跨平台拆分收口、
+  libc 模块、fmt/math/memory/插值/性能测试规划文档。
+- **自举顺序**：0.0.9-rc.1 由 0.0.8 种子编译，该种子不认识 `test` 语法，
+  因此本版 `compiler/` 暂不含 test 块（`tools/compiler-tests.py` 与
+  `make test-compiler-tests` 同步暂缓）；compiler 内嵌测试随 rc.2 恢复，
+  届时 revert “rc.1 暂缓 compiler 内嵌测试”提交即可。
+- **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 27/27；string 内建 5/5；
+  固定点 30 产物一致、自解析 114 文件、modules 19/19、project cases 121/121）。
+- **本地预检限制**：用本机备份的上一代种子冷编会在 Darwin 链接阶段因
+  lld/libc++ 解析错配失败，且同一闭包下 **0.0.8 源码本身也失败**，说明是本机
+  闭包缓存与旧种子不匹配，不是本版源码回归；实际冷编以 tag 流水线为准。
+- **未提交**：`compiler/.codegraph/`（本地工具数据库）保持未跟踪，未入提交。
+## 2026-10-23 yh test 编译器内嵌测试（YT3b，0.0.9-rc.2 交付）
+
+> 0.0.9-rc.1 由 0.0.8 一代种子编译（不认识 test 语法），当时暂缓了本项；
+> rc.1 发布出的种子已具备 test 语法，rc.2 恢复内嵌测试与门禁。
 
 - **滚种子**：在两大主门全绿后执行 `make seed`，把本代 `yh` 写入
   `bin/yh-darwin-arm64`（按规则不入库），使 `compiler/` 可以写 test 块。
