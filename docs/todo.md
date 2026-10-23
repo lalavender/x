@@ -255,7 +255,7 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
   生命周期、缓存与种子冷编/两代固定点；全迁移后删除旧解析器。
 - [ ] **T7 生成器（后续按需）**：独立构建/编码契约与 encoder 验收；保真编辑另立项。
 
-### FMT fmt 运行时与 V 风格插值（2026-10-23 改版；I4–I5 待实施）
+### FMT fmt 运行时与 V 风格插值（2026-10-23 改版；I5 可选扩展未做）
 
 用户决定：字符串格式化采用 V 式插值 `"…${expr:spec}…"`，结果为
 `string.String`；首版不实现 Go 的 `%` 格式串与 `Printf` 族（是否保留为
@@ -266,9 +266,6 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
 I0–I5（语言）；R0–R3 与 I0–I3 已实施，语言插值已端到端可用。fmt 不改
 prelude `printf`（H.I3 的按需扩展仍独立）。
 
-- [ ] **I4 收口与全量门**：完整 `make test`/`make selfhost-native` 复跑；
-  旧发射器路径与 O2 的插值用例；`nm -u`/安装 surface 复核；README/设计/
-  todo/finish 刷新；`git diff --check`。
 - [ ] **I5 可选扩展**：嵌套插值、运行时 width/precision、`r/R`、
   `string.View`/`string.String`/enum 名称、fmt 别名导入；每项单独立项。
 

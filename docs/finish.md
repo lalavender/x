@@ -2,6 +2,16 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-24 yh 字符串插值 I4 收口
+
+- **实现**：`string.View` 插值、O2 正例、`--syntax-check` 插值语法模式；
+  `docs/yh.g4` 记录 STRING 内部细化与 `\$` 转义。
+- **验证**：`make test` 356/357；`make selfhost-native` project 122/122；
+  `tests/fmt/interp.py` 10/10；`make test-lib-tests` string 5 + fmt 17；
+  fmtinterp `nm -u`/`otool -L` 无 printf/LLVM/lld。
+- **残余**：旧发射器未统计区分；I5 可选扩展未做；未滚种子/合并。
+- **记录**：[I4 记录](01-finished/yh-fmt-插值I4-2026-10-24.md)。
+
 ## 2026-10-24 yh 字符串插值 I0–I3
 
 - **实现**：词法后扩展 + raw-string body 数据 + parser 合成 fmt 调用树；

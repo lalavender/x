@@ -165,7 +165,22 @@ def main() -> int:
               f"output={result.stdout[-300:]!r}")
     else:
         print("OK   positive-O2")
-    total = len(CASES) + 1
+    # 语法模式：不要求 import，也不做类型/spec 语义，只验证 token 与表达式语法。
+    syntax = work / "syntax.yh"
+    syntax.write_text('''fn main() int {
+    let text *char = "x=${1 + 2} y=${'a'}"
+    return 0
+}
+''')
+    result = subprocess.run([args.compiler, "--syntax-check", str(syntax)],
+                            capture_output=True, text=True, timeout=120, env=env)
+    if result.returncode != 0:
+        failed += 1
+        print(f"FAIL syntax-only: rc={result.returncode} "
+              f"output={result.stderr[-300:]!r}")
+    else:
+        print("OK   syntax-only")
+    total = len(CASES) + 2
     if not args.keep:
         shutil.rmtree(work, ignore_errors=True)
     print(f"结果: {total - failed} passed; {failed} failed")
