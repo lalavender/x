@@ -205,7 +205,8 @@ case("st6-string-interop", "stdlib-run", "stringinterop", ".", 0,
 case("fmt-interp", "stdlib-run", "fmtinterp", ".", 0,
      stdout="Hello, Bob! n=7 sum=12 p=3,4 idx=10 u=42 w=99\n"
             "hex=0007 f=1.50 bool=true literal=${n}\n"
-            "plain $5 and ${x} and $x\n")
+            "plain $5 and ${x} and $x\n"
+            "v=hi\n")
 # —— OS0/OS5：结果模型与 io 完整写入（跨平台） ——
 case("os0-sys-result-model", "stdlib-run", "sysresult", ".", 0,
      stdout="sys result ok\n")

@@ -108,7 +108,7 @@ string.release(&text)
 - `${expr}` / `${expr:spec}` 由编译器降级为 `fmt.text`/`fmt.value`/
   `fmt.value_spec`/`fmt.concat` 调用；结果类型是 `string.String`。
 - 支持整数、`f64`、`bool`、`*char` 表达式；enum 按有符号整数。
-  `string.View`/`string.String`、结构体/数组/切片暂不支持。
+  `string.View` 按文本支持；`string.String`、结构体/数组/切片暂不支持。
 - 首版限制：单行；`${}` 内不允许裸双引号、花括号与顶层三元（三元需加
   括号）；不允许嵌套插值；`import fmt` 不支持 `as` 别名；文本块内嵌 NUL
   暂不支持。

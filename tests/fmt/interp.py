@@ -147,9 +147,28 @@ def main() -> int:
                   f"expect={expected!r} output={output[-300:]!r}")
         else:
             print(f"OK   {name}")
+    # 正例：O2 端到端，复用 modules fixture 的期望输出。
+    positive = work / "positive"
+    shutil.copytree(ROOT / "tests" / "modules" / "projects" / "fmtinterp",
+                    positive,
+                    ignore=shutil.ignore_patterns(".build"))
+    result = subprocess.run([args.compiler, "-O2", "run"], cwd=positive,
+                            capture_output=True, text=True,
+                            timeout=600, env=env)
+    expected_stdout = ("Hello, Bob! n=7 sum=12 p=3,4 idx=10 u=42 w=99\n"
+                       "hex=0007 f=1.50 bool=true literal=${n}\n"
+                       "plain $5 and ${x} and $x\n"
+                       "v=hi\n")
+    if result.returncode != 0 or not result.stdout.endswith(expected_stdout):
+        failed += 1
+        print(f"FAIL positive-O2: rc={result.returncode} "
+              f"output={result.stdout[-300:]!r}")
+    else:
+        print("OK   positive-O2")
+    total = len(CASES) + 1
     if not args.keep:
         shutil.rmtree(work, ignore_errors=True)
-    print(f"结果: {len(CASES) - failed} passed; {failed} failed")
+    print(f"结果: {total - failed} passed; {failed} failed")
     return 0 if failed == 0 else 1
 
 
