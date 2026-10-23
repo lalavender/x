@@ -262,6 +262,22 @@ class Checker:
                    f"并行 {para.returncode} 串行 {seri_proc.returncode}，"
                    f"顺序 {pass_order} vs {listed}")
 
+        # 5n. 测试构建缓存：同一选择第二次命中；选择范围变化必须重新编译
+        # （模块键含本轮选中测试集合的摘要）。
+        cachep = self.prepare("ytest", "test-cache")
+        self.run(cachep)
+        warm = self.run(cachep)
+        narrow = self.run(cachep, "src/app/more.yh")
+        self.check("test-build-cache-hit",
+                   warm.returncode == 0 and "[缓存]" in warm.stdout
+                   and f"结果: {self.expected_tests} passed; 0 skipped; 0 failed"
+                   in warm.stdout,
+                   f"退出码 {warm.returncode}，输出 {warm.stdout[:400]!r}")
+        self.check("test-cache-selection-isolated",
+                   narrow.returncode == 0 and "[编译] app" in narrow.stdout
+                   and "结果: 2 passed; 0 skipped; 0 failed" in narrow.stdout,
+                   f"退出码 {narrow.returncode}，输出 {narrow.stdout[:400]!r}")
+
         # 5f. --no-run 只构建，不执行。
         noexec = self.prepare("ytest", "no-exec")
         proc = self.run(noexec, "--no-run")

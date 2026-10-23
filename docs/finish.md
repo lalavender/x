@@ -2,6 +2,24 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 yh test 测试构建缓存键（YT2d-2）
+
+- **实现**：`GenState.c_test_key` 记录本轮选中测试集合摘要（模块/文件/声明号/
+  种类），模块 manifest 键在既有字段后混入「测试模式 + `yh-test-key-1` +
+  摘要」；测试构建目录仍是 `tmp/yh-test/check`，与生产 `.build` 天然隔离。
+  `mb_compile_start` 不再对测试模式强制绕过缓存，调度器也提交测试 manifest。
+  完整记录见[YT2d-2 实施记录](01-finished/yh-test测试缓存键-2026-10-23.md)。
+- **语料**：`test-check.py` 增至 34 项（`test-build-cache-hit`、
+  `test-cache-selection-isolated`）。
+- **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 34/34；string 内建 5/5；
+  compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
+  project cases 121/121）。
+- **边界**：函数级 IR 与 check 切片缓存仍未用于测试构建（键不覆盖 `TK_TEST`
+  声明）；测试构建目录不按 target 细分，跨目标交替构建会互相冲刷 manifest。
+- **运维提示**：本机门禁偶发失败来自 macOS 清理 `$TMPDIR`，把 `FAST_DIR` 指到
+  仓库 `tmp/faststage` 可稳定复现全绿。
+
 ## 2026-10-23 yh test 逐例日志与截断提示（YT2d-1）
 
 - **实现**：每个用例的 stdout/stderr 重定向到

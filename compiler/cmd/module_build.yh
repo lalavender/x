@@ -880,11 +880,10 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     mn = gen.append_str(mpath, mn, pj_pool_str(tag_off))
     mn = gen.append_str(mpath, mn, ".manifest")
     mpath[mn] = 0
-    // check 不读取或更新正式构建 manifest 与缓存。yh test 同样隔离：
-    // 测试模式的模块接口会多出 __yh_test_* 导出，若复用生产 manifest 会出现
-    // 「命中的是生产对象、测试入口却找不到测试函数」。测试构建因此总是重编、
-    // 且不回写生产 manifest（生成物只落在项目 tmp/yh-test 下）。
-    if (gs.task.c_check_only != 0 || gs.task.c_test_mode != 0) {
+    // check 不读取或更新正式构建 manifest 与缓存。yh test 用独立的构建目录
+    // （tmp/yh-test）与扩展键（见下方 c_test_key），既不复用生产对象，也能在
+    // 选中测试集合不变时增量复用测试对象。
+    if (gs.task.c_check_only != 0) {
         if (mb_spawn_indexed_module(m, root_off, root_len,
                 gen.arr_cstr(asmdir), 0, pid_out) != 0) {
             return gen.fail("无法启动项目检查/测试 worker")
@@ -903,6 +902,24 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     mb_fnv(&h, '\n')
     mb_fnv(&h, ('0' + gs.task.c_legacy_system).to_type(u8))
     mb_fnv(&h, '\n')
+    // yh test：测试对象还取决于「本轮选中了哪些测试」，把选择摘要与协议版本
+    // 并入键。生产构建不混入，且两种构建目录本身互不相通。
+    if (gs.task.c_test_mode != 0) {
+        mb_fnv(&h, 'T')
+        mb_fnv(&h, 'S')
+        let key_tag *char = "yh-test-key-1"
+        let kti int = 0
+        for key_tag[kti] != 0 {
+            mb_fnv(&h, key_tag[kti].to_type(u8))
+            kti += 1
+        }
+        let key_bits u64 = gs.c_test_key
+        let kbi int = 0
+        for kbi < 8 {
+            mb_fnv(&h, ((key_bits >> (kbi * 8)) & 255).to_type(u8))
+            kbi += 1
+        }
+    }
     let triple_i int = 0
         for gs.c_target.triple[triple_i] != 0 {
             mb_fnv(&h, gs.c_target.triple[triple_i].to_type(u8))
