@@ -1,0 +1,833 @@
+module toml
+
+// yh TOML 标准库：整数、浮点与布尔字面量的扫描和精确转换。
+//
+// 浮点转换不使用宿主 strtod，也不复用编译器的逐位乘十算法：先把十进制
+// 有效数字转换为私有大整数，再按 binary64 的 53 位尾数做一次正确舍入
+// （就近舍入、平局取偶）。负零、inf、nan 与次正规数都按位保留；有限字面量
+// 上溢报 error_float_range，不下溢成 inf。
+
+const NUM_OK int = 0
+const NUM_SYNTAX int = 1
+const NUM_INT_RANGE int = 2
+const NUM_FLOAT_RANGE int = 3
+const NUM_RESOURCE int = 4
+
+// —— 大整数：小端 32 位 limb，容量覆盖 4096 位十进制 + 指数 + 移位 ——
+const BIG_LIMBS int = 640
+
+// bigint 是固定容量无符号大整数；count=0 表示零。
+struct bigint {
+    limbs [640]u32
+    count int
+}
+
+// num_result 是数字扫描结果；end 是独占结束偏移。
+struct num_result {
+    status int
+    end u64
+    is_float int
+    ival i64
+    fval f64
+}
+
+// big_zero 把大整数清零。
+fn big_zero(b *bigint) void {
+    b.count = 0
+}
+
+// big_is_zero 判断是否为零。
+fn big_is_zero(b *bigint) int {
+    return (b.count == 0).to_type(int)
+}
+
+// big_copy 逐 limb 复制。
+fn big_copy(dst *bigint, src *bigint) void {
+    let i int = 0
+    for i < src.count {
+        dst.limbs[i] = src.limbs[i]
+        i += 1
+    }
+    dst.count = src.count
+}
+
+// big_trim 去掉高位的零 limb。
+fn big_trim(b *bigint) void {
+    for b.count > 0 {
+        if (b.limbs[b.count - 1] != 0) {
+            return
+        }
+        b.count -= 1
+    }
+}
+
+// big_mul_small 乘以一个 32 位因子；超出容量返回 -1。
+fn big_mul_small(b *bigint, factor u32) int {
+    if (factor == 0) {
+        b.count = 0
+        return 0
+    }
+    if (b.count == 0) {
+        return 0
+    }
+    if (b.count + 2 > BIG_LIMBS) {
+        return -1
+    }
+    let carry u64 = 0
+    let i int = 0
+    for i < b.count {
+        let product u64 = b.limbs[i].to_type(u64) * factor.to_type(u64) + carry
+        b.limbs[i] = (product & 4294967295).to_type(u32)
+        carry = product >> 32
+        i += 1
+    }
+    if (carry != 0) {
+        b.limbs[b.count] = carry.to_type(u32)
+        b.count += 1
+    }
+    return 0
+}
+
+// big_add_small 加一个小于 10 的数字。
+fn big_add_small(b *bigint, digit u32) int {
+    if (digit == 0) {
+        return 0
+    }
+    if (b.count == 0) {
+        b.limbs[0] = digit
+        b.count = 1
+        return 0
+    }
+    let carry u64 = digit.to_type(u64)
+    let i int = 0
+    for i < b.count && carry != 0 {
+        let sum u64 = b.limbs[i].to_type(u64) + carry
+        b.limbs[i] = (sum & 4294967295).to_type(u32)
+        carry = sum >> 32
+        i += 1
+    }
+    if (carry != 0) {
+        if (b.count >= BIG_LIMBS) {
+            return -1
+        }
+        b.limbs[b.count] = carry.to_type(u32)
+        b.count += 1
+    }
+    return 0
+}
+
+// big_from_digits 把 ASCII 十进制数字（不含下划线）写入输出大整数。
+fn big_from_digits(out *bigint, digits *u8, count int) int {
+    big_zero(out)
+    let i int = 0
+    for i < count {
+        let d u8 = digits[i]
+        if (d < '0' || d > '9') {
+            return -1
+        }
+        if (big_mul_small(out, 10) != 0) {
+            return -1
+        }
+        if (big_add_small(out, (d - '0').to_type(u32)) != 0) {
+            return -1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// big_mul_pow10 乘以 10^k；k 为负按 0 处理。
+fn big_mul_pow10(b *bigint, k int) int {
+    let left int = k
+    for left >= 9 {
+        if (big_mul_small(b, 1000000000) != 0) {
+            return -1
+        }
+        left -= 9
+    }
+    let small u32 = 1
+    let i int = 0
+    for i < left {
+        small *= 10
+        i += 1
+    }
+    return big_mul_small(b, small)
+}
+
+// big_bitlen 返回最高有效位的位数；零返回 0。
+fn big_bitlen(b *bigint) u64 {
+    if (b.count == 0) {
+        return 0
+    }
+    let top u32 = b.limbs[b.count - 1]
+    let bits u64 = 0
+    for top != 0 {
+        top = top >> 1
+        bits += 1
+    }
+    return (b.count - 1).to_type(u64) * 32 + bits
+}
+
+// big_cmp 比较两个大整数，返回 -1、0 或 1。
+fn big_cmp(a *bigint, b *bigint) int {
+    if (a.count != b.count) {
+        if (a.count < b.count) {
+            return -1
+        }
+        return 1
+    }
+    let i int = a.count - 1
+    for i >= 0 {
+        if (a.limbs[i] < b.limbs[i]) {
+            return -1
+        }
+        if (a.limbs[i] > b.limbs[i]) {
+            return 1
+        }
+        i -= 1
+    }
+    return 0
+}
+
+// big_sub 计算 a -= b，要求 a >= b。
+fn big_sub(a *bigint, b *bigint) void {
+    let borrow u64 = 0
+    let i int = 0
+    for i < a.count {
+        let left u64 = a.limbs[i].to_type(u64)
+        let right u64 = 0
+        if (i < b.count) {
+            right = b.limbs[i].to_type(u64)
+        }
+        let sub u64 = right + borrow
+        if (left >= sub) {
+            a.limbs[i] = (left - sub).to_type(u32)
+            borrow = 0
+        } else {
+            a.limbs[i] = (left + 4294967296 - sub).to_type(u32)
+            borrow = 1
+        }
+        i += 1
+    }
+    big_trim(a)
+}
+
+// big_shl_one 左移一位；容量不足返回 -1。
+fn big_shl_one(b *bigint) int {
+    if (b.count == 0) {
+        return 0
+    }
+    if (b.count + 1 > BIG_LIMBS) {
+        return -1
+    }
+    let carry u32 = 0
+    let i int = 0
+    for i < b.count {
+        let value u32 = b.limbs[i]
+        b.limbs[i] = (value << 1) | carry
+        carry = value >> 31
+        i += 1
+    }
+    if (carry != 0) {
+        b.limbs[b.count] = carry
+        b.count += 1
+    }
+    return 0
+}
+
+// big_shl 左移 bits 位；结果写入 b 自身。容量不足返回 -1。
+fn big_shl(b *bigint, bits u64) int {
+    if (bits == 0 || b.count == 0) {
+        return 0
+    }
+    let limb_shift int = (bits / 32).to_type(int)
+    let bit_shift u32 = (bits % 32).to_type(u32)
+    let extra int = 0
+    if (bit_shift != 0) {
+        extra = 1
+    }
+    if (b.count + limb_shift + extra > BIG_LIMBS) {
+        return -1
+    }
+    let out bigint
+    big_zero(&out)
+    out.count = b.count + limb_shift + extra
+    let i int = 0
+    for i < out.count {
+        out.limbs[i] = 0
+        i += 1
+    }
+    i = 0
+    for i < b.count {
+        let value u64 = b.limbs[i].to_type(u64)
+        let target int = i + limb_shift
+        out.limbs[target] = (out.limbs[target].to_type(u64)
+            | ((value << bit_shift) & 4294967295)).to_type(u32)
+        if (bit_shift != 0) {
+            out.limbs[target + 1] = (out.limbs[target + 1].to_type(u64)
+                | (value >> (32 - bit_shift))).to_type(u32)
+        }
+        i += 1
+    }
+    big_trim(&out)
+    big_copy(b, &out)
+    return 0
+}
+
+// big_divmod 计算 n / d 的商（必须能放进 64 位）与余数。
+// 采用逐位长除法：调用方已按目标尾数位数缩放，商不超过 55 位。
+fn big_divmod(n *bigint, d *bigint, quotient *u64, rem *bigint) int {
+    if (big_is_zero(d) != 0) {
+        return -1
+    }
+    big_zero(rem)
+    let q u64 = 0
+    let bits u64 = big_bitlen(n)
+    if (bits == 0) {
+        quotient[0] = 0
+        return 0
+    }
+    let i i64 = bits.to_type(i64) - 1
+    for i >= 0 {
+        if (big_shl_one(rem) != 0) {
+            return -1
+        }
+        let limb_index u64 = i.to_type(u64) / 32
+        let bit_index u64 = i.to_type(u64) % 32
+        if (((n.limbs[limb_index.to_type(int)] >> bit_index.to_type(u32)) & 1) != 0) {
+            if (rem.count == 0) {
+                rem.limbs[0] = 1
+                rem.count = 1
+            } else {
+                rem.limbs[0] = rem.limbs[0] | 1
+            }
+        }
+        if (big_cmp(rem, d) >= 0) {
+            big_sub(rem, d)
+            q = q * 2 + 1
+        } else {
+            q = q * 2
+        }
+        i -= 1
+    }
+    quotient[0] = q
+    return 0
+}
+
+// f64_from_bits 把 IEEE754 位模式还原为 f64（与编译器 fp64_from_bits 同法）。
+fn f64_from_bits(bits i64) f64 {
+    let holder *i64 = malloc(8).to_type(*i64)
+    holder[0] = bits
+    let view *f64 = holder.to_type(*f64)
+    let value f64 = view[0]
+    free(holder.to_type(*void))
+    return value
+}
+
+// digit_value 返回十进制数字值；非数字返回 -1。
+fn digit_value(b u8) int {
+    if (b >= '0' && b <= '9') {
+        return (b - '0').to_type(int)
+    }
+    return -1
+}
+
+// scan_digit_run 扫描「首字符为数字、下划线只能夹在两个数字之间」的串。
+// 成功返回新位置；语法错误返回 -1。
+fn scan_digit_run(data *u8, count u64, start u64, base int) u64 {
+    let pos u64 = start
+    let value int = digit_value(data[pos])
+    if (value < 0 || value >= base) {
+        return 0
+    }
+    pos += 1
+    let last_digit int = 1
+    for pos < count {
+        let b u8 = data[pos]
+        let v int = digit_value(b)
+        if (v >= 0 && v < base) {
+            pos += 1
+            last_digit = 1
+            continue
+        }
+        if (b == '_') {
+            if (last_digit == 0 || pos + 1 >= count) {
+                return 0
+            }
+            let next int = digit_value(data[pos + 1])
+            if (next < 0 || next >= base) {
+                return 0
+            }
+            pos += 1
+            last_digit = 0
+            continue
+        }
+        break
+    }
+    if (last_digit == 0) {
+        return 0
+    }
+    return pos
+}
+
+// scan_hex_run 扫描十六进制数字串（下划线规则同十进制）。
+fn scan_hex_run(data *u8, count u64, start u64) u64 {
+    let pos u64 = start
+    if (pos >= count || hex_digit_value(data[pos]) < 0) {
+        return 0
+    }
+    pos += 1
+    let last_digit int = 1
+    for pos < count {
+        let b u8 = data[pos]
+        let v int = hex_digit_value(b)
+        if (v >= 0) {
+            pos += 1
+            last_digit = 1
+            continue
+        }
+        if (b == '_') {
+            if (last_digit == 0 || pos + 1 >= count
+                || hex_digit_value(data[pos + 1]) < 0) {
+                return 0
+            }
+            pos += 1
+            last_digit = 0
+            continue
+        }
+        break
+    }
+    if (last_digit == 0) {
+        return 0
+    }
+    return pos
+}
+
+// int_accumulate 把一个数字（已跳过下划线）累加到无符号幅值；溢出返回 -1。
+fn int_accumulate(magnitude *u64, digit int, base u64, limit u64) int {
+    let d u64 = digit.to_type(u64)
+    if (magnitude[0] > (limit - d) / base) {
+        return -1
+    }
+    magnitude[0] = magnitude[0] * base + d
+    return 0
+}
+
+// parse_integer_span 转换已扫描的整数字面量（start 到 end）。
+// negative 表示带负号；base=10 时允许 -2^63，其他进制上限为 i64 最大值。
+fn parse_integer_span(data *u8, start u64, end u64, negative int,
+    base int, out *i64) int {
+    let pos u64 = start
+    if (pos < end && (data[pos] == '+' || data[pos] == '-')) {
+        pos += 1
+    }
+    if (base != 10) {
+        pos += 2
+    }
+    let limit u64 = 9223372036854775807
+    if (negative != 0) {
+        limit = 9223372036854775808
+    }
+    let magnitude u64 = 0
+    for pos < end {
+        let b u8 = data[pos]
+        if (b != '_') {
+            let v int = digit_value(b)
+            if (base == 16) {
+                v = hex_digit_value(b)
+            }
+            if (v < 0 || v >= base) {
+                return NUM_SYNTAX
+            }
+            if (int_accumulate(&magnitude, v, base.to_type(u64), limit) != 0) {
+                return NUM_INT_RANGE
+            }
+        }
+        pos += 1
+    }
+    if (negative == 0) {
+        out[0] = magnitude.to_type(i64)
+        return NUM_OK
+    }
+    if (magnitude == 9223372036854775808) {
+        out[0] = -9223372036854775807 - 1
+        return NUM_OK
+    }
+    out[0] = (0 - magnitude.to_type(i64))
+    return NUM_OK
+}
+
+// float_parse_span 把已扫描的浮点字面量（含可选的 inf/nan）转换为 binary64。
+// start/end 是原始字节区间；negative 由调用方给出。
+fn float_parse_span(data *u8, start u64, end u64, negative int, out *f64) int {
+    let pos u64 = start
+    if (pos < end && (data[pos] == '+' || data[pos] == '-')) {
+        pos += 1
+    }
+    let sign_bits i64 = 0
+    if (negative != 0) {
+        sign_bits = -9223372036854775807 - 1
+    }
+    if (pos + 3 == end && data[pos] == 'i' && data[pos + 1] == 'n'
+        && data[pos + 2] == 'f') {
+        out[0] = f64_from_bits(sign_bits | 9218868437227405312)
+        return NUM_OK
+    }
+    if (pos + 3 == end && data[pos] == 'n' && data[pos + 1] == 'a'
+        && data[pos + 2] == 'n') {
+        out[0] = f64_from_bits(sign_bits | 9221120237041090560)
+        return NUM_OK
+    }
+
+    // 第二遍：收集有效数字、统计小数位并解析指数。
+    let digits [4096]u8
+    let digit_count int = 0
+    let frac_len u64 = 0
+    let seen_dot int = 0
+    let exp_value i64 = 0
+    let exp_positive int = 1
+    let in_exp int = 0
+    let started int = 0
+    let all_zero int = 1
+    let i u64 = pos
+    for i < end {
+        let b u8 = data[i]
+        if (b == '_') {
+            i += 1
+            continue
+        }
+        if (b == '.') {
+            seen_dot = 1
+            i += 1
+            continue
+        }
+        if (b == 'e' || b == 'E') {
+            in_exp = 1
+            i += 1
+            if (i < end && (data[i] == '+' || data[i] == '-')) {
+                if (data[i] == '-') {
+                    exp_positive = 0
+                }
+                i += 1
+            }
+            continue
+        }
+        let v int = digit_value(b)
+        if (v < 0) {
+            return NUM_SYNTAX
+        }
+        if (in_exp != 0) {
+            if (exp_value < 1000000000) {
+                exp_value = exp_value * 10 + v.to_type(i64)
+            }
+            i += 1
+            continue
+        }
+        if (seen_dot != 0) {
+            frac_len += 1
+        }
+        if (v != 0) {
+            all_zero = 0
+        }
+        if (started == 0 && v == 0) {
+            i += 1
+            continue
+        }
+        started = 1
+        if (digit_count >= TOML_MAX_DIGITS) {
+            return NUM_RESOURCE
+        }
+        digits[digit_count] = b
+        digit_count += 1
+        i += 1
+    }
+    if (exp_positive == 0) {
+        exp_value = -exp_value
+    }
+    if (all_zero != 0) {
+        if (negative != 0) {
+            out[0] = f64_from_bits(-9223372036854775807 - 1)
+        } else {
+            out[0] = f64_from_bits(0)
+        }
+        return NUM_OK
+    }
+
+    let e_value i64 = exp_value - frac_len.to_type(i64)
+    let lead i64 = digit_count.to_type(i64) - 1 + e_value
+    if (lead > 400) {
+        return NUM_FLOAT_RANGE
+    }
+    if (lead < -400) {
+        if (negative != 0) {
+            out[0] = f64_from_bits(-9223372036854775807 - 1)
+        } else {
+            out[0] = f64_from_bits(0)
+        }
+        return NUM_OK
+    }
+
+    let numerator bigint
+    let denominator bigint
+    big_zero(&numerator)
+    big_zero(&denominator)
+    if (big_from_digits(&numerator, &digits[0], digit_count) != 0) {
+        return NUM_RESOURCE
+    }
+    denominator.limbs[0] = 1
+    denominator.count = 1
+    if (e_value >= 0) {
+        if (big_mul_pow10(&numerator, e_value.to_type(int)) != 0) {
+            return NUM_RESOURCE
+        }
+    } else {
+        if (big_mul_pow10(&denominator, (-e_value).to_type(int)) != 0) {
+            return NUM_RESOURCE
+        }
+    }
+
+    // e0 = bitlen(N) - bitlen(D)，最多比真实二进制指数大 1。
+    let e0 i64 = big_bitlen(&numerator).to_type(i64) - big_bitlen(&denominator).to_type(i64)
+    let q u64 = 0
+    let rem bigint
+    let divisor bigint
+    let dividend bigint
+    let e_bits i64 = e0
+    let subnormal int = 0
+    if (e0 < -1022) {
+        // 值小于最小正规数，按 2^-1074 缩放。
+        subnormal = 1
+        big_copy(&dividend, &numerator)
+        big_copy(&divisor, &denominator)
+        if (big_shl(&dividend, 1074) != 0) {
+            return NUM_RESOURCE
+        }
+        if (big_divmod(&dividend, &divisor, &q, &rem) != 0) {
+            return NUM_RESOURCE
+        }
+    } else {
+        let shift i64 = 52 - e0
+        big_copy(&dividend, &numerator)
+        big_copy(&divisor, &denominator)
+        if (shift >= 0) {
+            if (big_shl(&dividend, shift.to_type(u64)) != 0) {
+                return NUM_RESOURCE
+            }
+        } else {
+            if (big_shl(&divisor, (-shift).to_type(u64)) != 0) {
+                return NUM_RESOURCE
+            }
+        }
+        if (big_divmod(&dividend, &divisor, &q, &rem) != 0) {
+            return NUM_RESOURCE
+        }
+        if (q < 4503599627370496) {
+            // 实际指数比估计小 1，再取一位。
+            e_bits = e0 - 1
+            big_copy(&dividend, &numerator)
+            big_copy(&divisor, &denominator)
+            let shift2 i64 = 52 - e_bits
+            if (shift2 >= 0) {
+                if (big_shl(&dividend, shift2.to_type(u64)) != 0) {
+                    return NUM_RESOURCE
+                }
+            } else {
+                if (big_shl(&divisor, (-shift2).to_type(u64)) != 0) {
+                    return NUM_RESOURCE
+                }
+            }
+            if (big_divmod(&dividend, &divisor, &q, &rem) != 0) {
+                return NUM_RESOURCE
+            }
+        }
+        if (e_bits < -1022) {
+            // 估计的 e0 偏大 1，修正后落到次正规区间。
+            subnormal = 1
+            big_copy(&dividend, &numerator)
+            big_copy(&divisor, &denominator)
+            if (big_shl(&dividend, 1074) != 0) {
+                return NUM_RESOURCE
+            }
+            if (big_divmod(&dividend, &divisor, &q, &rem) != 0) {
+                return NUM_RESOURCE
+            }
+        }
+    }
+
+    // 就近舍入、平局取偶。
+    let twice bigint
+    big_copy(&twice, &rem)
+    if (big_shl_one(&twice) != 0) {
+        return NUM_RESOURCE
+    }
+    let cmp int = big_cmp(&twice, &divisor)
+    if (cmp > 0 || (cmp == 0 && (q & 1) != 0)) {
+        q += 1
+    }
+
+    let exponent i64 = e_bits
+    let bits u64 = 0
+    if (subnormal != 0) {
+        if (q >= 4503599627370496) {
+            // 次正规舍入后进位到最小正规数：指数域 1、尾数 0。
+            bits = 4503599627370496
+        } else {
+            bits = q
+        }
+    } else {
+        if (q == 9007199254740992) {
+            q = 4503599627370496
+            exponent += 1
+        }
+        if (exponent > 1023) {
+            return NUM_FLOAT_RANGE
+        }
+        if (q == 0) {
+            bits = 0
+        } else {
+            let biased u64 = (exponent + 1023).to_type(u64)
+            bits = (biased << 52) | (q - 4503599627370496)
+        }
+    }
+    let signed_bits i64 = bits.to_type(i64)
+    if (negative != 0) {
+        signed_bits = signed_bits | (-9223372036854775807 - 1)
+    }
+    out[0] = f64_from_bits(signed_bits)
+    return NUM_OK
+}
+
+// num_scan 扫描并转换一个 TOML 数字字面量（整数、浮点、inf/nan）。
+// 不检查值之后的定界符；调用方负责“尾随垃圾”诊断。
+fn num_scan(data *u8, count u64, start u64) num_result {
+    let result num_result
+    result.status = NUM_SYNTAX
+    result.end = start
+    result.is_float = 0
+    result.ival = 0
+    result.fval = 0.0
+    let pos u64 = start
+    if (pos >= count) {
+        return result
+    }
+    let negative int = 0
+    let has_sign int = 0
+    if (data[pos] == '+' || data[pos] == '-') {
+        has_sign = 1
+        if (data[pos] == '-') {
+            negative = 1
+        }
+        pos += 1
+    }
+    if (pos >= count) {
+        return result
+    }
+    // inf / nan（只允许小写，符合 ABNF）。
+    if (data[pos] == 'i' || data[pos] == 'n') {
+        if (pos + 3 <= count) {
+            let is_inf int = (data[pos] == 'i' && data[pos + 1] == 'n'
+                && data[pos + 2] == 'f').to_type(int)
+            let is_nan int = (data[pos] == 'n' && data[pos + 1] == 'a'
+                && data[pos + 2] == 'n').to_type(int)
+            if (is_inf != 0 || is_nan != 0) {
+                let value f64 = 0.0
+                let rc int = float_parse_span(data, start, pos + 3, negative, &value)
+                result.status = rc
+                result.end = pos + 3
+                result.is_float = 1
+                result.fval = value
+                return result
+            }
+        }
+        return result
+    }
+    if (pos + 2 <= count && data[pos] == '0') {
+        let prefix u8 = data[pos + 1]
+        let base int = 0
+        if (prefix == 'x') {
+            base = 16
+        } else if (prefix == 'o') {
+            base = 8
+        } else if (prefix == 'b') {
+            base = 2
+        }
+        if (base != 0) {
+            if (has_sign != 0) {
+                return result
+            }
+            let end u64 = scan_hex_run(data, count, pos + 2)
+            if (end == 0) {
+                return result
+            }
+            let value i64 = 0
+            let rc int = parse_integer_span(data, start, end, 0, base, &value)
+            result.status = rc
+            result.end = end
+            result.ival = value
+            return result
+        }
+    }
+
+    // 十进制整数/浮点：int part 不允许前导零。
+    let int_start u64 = pos
+    if (data[pos] < '0' || data[pos] > '9') {
+        return result
+    }
+    let first u8 = data[pos]
+    let end_int u64 = 0
+    if (first == '0') {
+        end_int = pos + 1
+        if (end_int < count) {
+            let next u8 = data[end_int]
+            if (next >= '0' && next <= '9') {
+                return result
+            }
+            if (next == '_') {
+                return result
+            }
+        }
+    } else {
+        end_int = scan_digit_run(data, count, pos, 10)
+        if (end_int == 0) {
+            return result
+        }
+    }
+    let is_float int = 0
+    let end u64 = end_int
+    if (end < count && data[end] == '.') {
+        is_float = 1
+        let frac_start u64 = end + 1
+        let frac_end u64 = scan_digit_run(data, count, frac_start, 10)
+        if (frac_end == 0) {
+            return result
+        }
+        end = frac_end
+    }
+    if (end < count && (data[end] == 'e' || data[end] == 'E')) {
+        is_float = 1
+        let exp_start u64 = end + 1
+        if (exp_start < count && (data[exp_start] == '+' || data[exp_start] == '-')) {
+            exp_start += 1
+        }
+        let exp_end u64 = scan_digit_run(data, count, exp_start, 10)
+        if (exp_end == 0) {
+            return result
+        }
+        end = exp_end
+    }
+    if (is_float != 0) {
+        let value f64 = 0.0
+        let rc int = float_parse_span(data, start, end, negative, &value)
+        result.status = rc
+        result.end = end
+        result.is_float = 1
+        result.fval = value
+        return result
+    }
+    let value i64 = 0
+    let rc int = parse_integer_span(data, int_start, end, negative, 10, &value)
+    result.status = rc
+    result.end = end
+    result.ival = value
+    return result
+}

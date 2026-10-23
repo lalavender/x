@@ -329,7 +329,67 @@ test: stage-yh
 	python3 $(TOPSRC)/tests/yh/check.py
 	python3 $(TOPSRC)/tests/yh/check.py --compiler --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/yh-run/check.py --compiler $(YH_RUN) $(RUN_WORK_FLAG)
+	python3 $(TOPSRC)/tests/modules/test-check.py --compiler-path $(YH_RUN)
+	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
+	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/toml/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-test
 	python3 $(TOPSRC)/tests/tools/yh-code-stats/check.py
+
+# test-toml：TOML 标准库 API/所有权/资源/文件验收（TOML T0–T4）。
+.PHONY: test-toml
+test-toml: stage-yh
+	python3 $(TOPSRC)/tests/toml/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-test
+
+# test-toml-conformance：固定 toml-test v2.2.0（TOML 1.1）decoder 一致性门。
+# 语料不随仓库分发；缺失时按提示先执行 --prepare（下载并核对 SHA-256）。
+.PHONY: test-toml-conformance
+test-toml-conformance: stage-yh
+	python3 $(TOPSRC)/tests/toml/conformance.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-conformance
+
+# test-toml-injection：在临时标准库副本注入池分配失败点，逐点验证失败原子性。
+.PHONY: test-toml-injection
+test-toml-injection: stage-yh
+	python3 $(TOPSRC)/tests/toml/injection.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-inject
+
+# test-toml-install：make install 后从仓库外、无 YH_STDLIB 导入 toml。
+.PHONY: test-toml-install
+test-toml-install:
+	python3 $(TOPSRC)/tests/toml/install.py --workdir $(TOPSRC)/tmp/toml-install
+
+# test-string：string 标准库专项门（ST1–ST6，O0；含分配失败注入与参考差分）。
+.PHONY: test-string
+test-string: stage-yh
+	python3 $(TOPSRC)/tests/string/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-test --opt-level 0
+	python3 $(TOPSRC)/tests/string/reference.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-reference --opt-level 0
+
+# test-string-o2：同一专项门在 O2 下重跑（较慢，单独入口）。
+.PHONY: test-string-o2
+test-string-o2: stage-yh
+	python3 $(TOPSRC)/tests/string/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-test-o2 --opt-level 2
+	python3 $(TOPSRC)/tests/string/reference.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-reference-o2 --opt-level 2
+
+# test-string-install：make install 后从仓库外、无 YH_STDLIB 导入 string。
+.PHONY: test-string-install
+test-string-install:
+	python3 $(TOPSRC)/tests/string/install.py --workdir $(TOPSRC)/tmp/string-install
+
+# test-string-complexity：直接匹配的耗时探针（只记录，不设固定耗时门）。
+.PHONY: test-string-complexity
+test-string-complexity: stage-yh
+	python3 $(TOPSRC)/tests/string/complexity.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/string-complexity
+
+# test-compiler-tests：compiler/ 内嵌 yh test 测试（需要种子支持 test 语法）。
+# 测试二进制与编译器本身一样要链内嵌 LLVM 闭包，工具复用 tools/llvm-*-host.py
+# 的 shim 记录准备 PATH/YH_CC/YH_LLVM_SELFHOST_FLAGS/SDKROOT。
+.PHONY: test-compiler-tests
+test-compiler-tests: stage-yh
+	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
+
+# test-lib-tests：标准库内建测试（yh test 直接跑 libs 项目里的 test 块）。
+# 目前覆盖 string 模块；新增模块的 test 块只需在此追加模块名。
+.PHONY: test-lib-tests
+test-lib-tests: stage-yh
+	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
 
 # quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
 # 秒级到十几秒，改语法/诊断时够用；运行语义与自举门留给 test/full。
@@ -349,9 +409,14 @@ selfhost-native: stage-yh
 	$(RUNTIME_TEST)
 	$(SELFHOST_FLAGS_TEST)
 	python3 $(TOPSRC)/tests/selfhost/check-command.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-architecture.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/selfhost/llvm-function-cache.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/selfhost/foreign-fs-build.py --compiler-path $(YH_RUN)
 	$(CACHE_TEST)
 	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(YH_RUN)
+	python3 $(TOPSRC)/tests/modules/test-check.py --compiler-path $(YH_RUN)
+	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
+	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(YH_RUN) $(MODCHECK_FLAGS) $(MODCHECK_WORK_FLAG)
 
 # llvm-isolation：bwrap + 空 PATH 验证最终 yh 不依赖系统 LLVM/lld、无外部旁车。
@@ -452,6 +517,6 @@ clean:
 help:
 	@sed -n '2,20p' $(TOPSRC)/Makefile | sed 's/^# \{0,1\}//'
 
-.PHONY: all install uninstall test test-all quick full explorer code-stats test-code-stats seed selfhost-native clean help llvm-host bootstrap stage-yh fetch-seed test-llvm-linux-arm64 test-llvm-darwin selfhost-llvm-darwin
+.PHONY: all install uninstall test test-all quick full explorer code-stats test-code-stats seed selfhost-native clean help llvm-host bootstrap stage-yh fetch-seed test-string test-string-o2 test-string-install test-string-complexity test-llvm-linux-arm64 test-llvm-darwin selfhost-llvm-darwin
 
 endif # ($(INCLUDED),no)

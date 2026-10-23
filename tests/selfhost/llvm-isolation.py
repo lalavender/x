@@ -134,15 +134,20 @@ def main() -> int:
     if not args.skip_cold:
         cold = WORK / "yh-cold"
         shutil.rmtree(ROOT / "compiler" / ".build", ignore_errors=True)
-        # 新种子不再烘焙自举闭包；冷编必须从构建机的运行时文件读桥/LLVM 归档。
+        # compiler/ 已迁移 [link] 清单：桥/lld/LLVM 归档由清单提供，旧闭包注入
+        # 必须关闭（否则桥归档在同一条链接命令里出现两次，ld.lld 报
+        # duplicate symbol）；运行库参数仍取构建机的配方文件。SELFHOST 显式
+        # 置空，避免调用者环境里的旧链路把闭包再注入一次。
         host_record = json.loads((ROOT / "tmp/llvm-migration/llvm-host-linux-x86_64/host.json")
                                  .read_text(encoding="utf-8"))
-        flags_path = (ROOT / host_record["selfhost_flags"]).resolve()
+        runtime_path = (ROOT / host_record["selfhost_runtime"]).resolve()
         result = sandbox([
             str(compiler), "--backend", "llvm", "--target", TRIPLE,
             "--emit-llvm", "--stats", "build", "-o", str(cold),
-        ], ROOT / "compiler", env={"YH_LLVM_SELFHOST": "1",
-                                   "YH_LLVM_SELFHOST_FLAGS": str(flags_path)})
+        ], ROOT / "compiler", env={"YH_LLVM_SELFHOST": "",
+                                   "YH_LLVM_SELFHOST_FLAGS": "",
+                                   "YH_LINK_MANIFEST_ONLY": "1",
+                                   "YH_LINK_RUNTIME_FLAGS": str(runtime_path)})
         if result.returncode != 0:
             print(f"FAIL 隔离冷编自举失败：rc={result.returncode}\n{result.stderr[-800:]}")
             return 1

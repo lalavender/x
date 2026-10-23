@@ -182,6 +182,7 @@ cli.add_argument(&parser, verbose);
 
 - `boolean_optional` 只对双前缀长名称生成否定别名；同时给出时**最后出现者胜出**。
 - `count` 缺席时键存在但值是 `none`（`get_i64` 返回 -2）；要当 0 用就按上面的写法兜底。
+- 显式默认值或 initial 是 `count` 的累计基值：默认 3 时出现一次得 4，initial 5 时得 6。
 - 短选项可组合：`-vvv`（零参数各触发一次）、`-abc`（逐个处理，遇到需要值的短选项，
   剩余后缀整体作为它的值，如 `-Ipath`）；`-I=path` 的 `=` 是分隔符。
 
@@ -227,6 +228,8 @@ if (cli.get_list(&result.values, "tag", &list) == 0) {
 }
 ```
 
+- `append`/`extend` 有非空列表默认值时先深复制再追加。列表值没有公开构造函数：
+  先解析一个列表，用 `get_value` 取出该值再交给 `default_of`，`add_argument` 会深复制。
 - `get_list` 返回借用视图：0 成功、-1 缺键、-2 类型不符（例如 `single` 的标量）。
 - `exactly(1)` 与 `single` 形状不同：前者是单元素列表，`get_text` 返回 -2。
 - 列表元素上限见文末容量表（本版本 256）。
@@ -256,7 +259,8 @@ files + more_files（都是 zero_or_more）   输入 `a b`   → files=[a,b] mor
 
 - 位置参数只在**段落内**匹配：遇到选项 token 就结束当前段；已完成的可变位置参数
   不会因为后面的新段重新打开（新段里多出来的值报 usage_error）。
-- `remainder` 一旦轮到就吞掉其后全部 token（`--help`、`--`、选项样式都算数据）。
+- `remainder` 一旦轮到就吞掉其后全部 token（`--help`、`--`、选项样式都算数据）；
+  选项形态的 remainder（`--rest a -x --`）同样全部收下。
 - `single`/`one_or_more`/`exactly(n)` 位置参数不能靠默认值满足数量要求。
 
 ## 7. 子命令与继承
@@ -546,6 +550,24 @@ if (result.status != cli.ok) {
 cli.release(&result);
 ```
 
+自定义 usage 与文本模板：
+
+```yh
+config.usage = "%(prog)s [options] src";   // 空串表示不显示 usage 正文
+config.description = "%(prog)s 做某件事";
+config.epilog = "详见 %(prog)s --help";
+output.help = "%(prog)s 输出到 %(default)s（类型 %(type)s）";
+
+let version cli.Argument = cli.option("--version", 0);
+version.action = cli.version;
+version.version_text = "%(prog)s 1.0";      // 空指针时只输出 prog
+```
+
+- 占位符：`%(prog)s`、`%(dest)s`、`%(default)s`、`%(type)s` 与 `%%`；usage/
+  description/epilog/version 只接受 `%(prog)s` 与 `%%`，help 支持全部。
+- 未知占位符在 `freeze` 报 config_error，不会带着字面量进入输出。
+- `usage` 为空串时不写 usage 正文；非空时整体替换自动生成的 usage 行。
+
 配置与效果：
 
 ```yh
@@ -596,6 +618,9 @@ if (result.status != cli.ok) {
 - 声明阶段的错误是**粘滞**的：第一次失败后 `add_argument` 继续返回 -1，
   诊断用 `cli.last_error(&parser)` 读取，直到 `destroy` 才能重新 `init`。
 - `parse_main_or_exit` 只接受根 parser；输出失败时最终退出码降级为 1。
+- `Result.warnings` 保存运行期警告（目前是 deprecated 参数/命令的显式使用），
+  每个声明每次 parse 最多一条；`render` 把它们以「警告: …」写到 error_fd。
+  `parse_main_or_exit` 在成功路径先输出并清空，应用看到的 `warnings` 为空。
 
 ## 15. 生命周期与所有权
 
@@ -667,6 +692,8 @@ cli.destroy(&parser);      // 再释放声明树（递归释放子命令 parser�
 - **扩展分配**：`context_text`（把回调产生的文本复制进结果池）。
 - **帮助与输出**：`format_usage`、`format_help`、`release_text`、`render_text`、
   `print_usage`、`print_help`、`render`、`exit_code`。
+- **结果字段**：`Result.values`、`Result.unparsed`、`Result.warnings`、
+  `Result.command_path`；`Argument.version_text` 是 version action 的输出模板。
 - **测试专用**：`test_alloc_count`、`test_fail_alloc_after`（分配失败注入，
   不作为产品配置项）。
 
@@ -693,7 +720,7 @@ cli.destroy(&parser);      // 再释放声明树（递归释放子命令 parser�
 
 ## 未实现与已知边界
 
-- `warnings` 通道、逐字段着色；`HelpFormat` 的保留模式只影响空白折叠与缩进。
+- 逐字段着色；`HelpFormat` 的保留模式只影响空白折叠与缩进。
 - 折行按字节宽度近似，中文宽度不等于终端列宽。
 - 位置参数与子命令槽的顺序固定为「位置在前、槽在后」；
   混合模式下同一 dest 不能同时由选项与位置提供（返回 config_error）。
@@ -705,15 +732,19 @@ cli.destroy(&parser);      // 再释放声明树（递归释放子命令 parser�
 cli 的用例与 fixture 全部放在本目录，不与全局 `tests/` 耦合：
 
 ```sh
-python3 libs/cli/test/run.py                     # 默认用仓库根 ./yh 与 libs/
+python3 libs/cli/test/run.py                     # 自有验收，默认用仓库根 ./yh 与 libs/
+python3 libs/cli/test/diff.py                    # 与 Python argparse 的差分验收
 python3 libs/cli/test/run.py --compiler ./yh --workdir tmp/cli-test
 ```
 
-- fixture：`libs/cli/test/{climodel,clibasics,cliactions,clicommands,cliextensions,clihelp}`，
-  各自是普通 `project.toml` 项目，也可以单独构建运行：
+- fixture：`libs/cli/test/{climodel,clibasics,cliactions,clicommands,cliextensions,
+  clihelp,cliwarnings,clidiff}`，各自是普通 `project.toml` 项目，也可以单独构建运行：
   `cd libs/cli/test/cliactions && YH_STDLIB=<仓库>/libs <仓库>/yh run`。
-- runner 的 9 条用例：`cli0-model-abi`、`cli1-basics-selftest`、`cli1-pack-run`、
+- runner 的 10 条用例：`cli0-model-abi`、`cli1-basics-selftest`、`cli1-pack-run`、
   `cli1-pack-help`、`cli1-pack-missing`、`cli2-actions`、`cli3-commands`、
-  `cli4-extensions`、`cli5-help`。
+  `cli4-extensions`、`cli5-help`、`cli6-warning-entry`。
+- `diff.py` 用 `clidiff` 探针把 94 条 argv 同时交给 yh 与 Python 3.14 argparse，
+  比较 status、各 dest 值与未消费 token；设计保留的差异在脚本里显式列出，
+  只在新差异出现时返回非 0。
 - 仓库级门（不含 cli 专有用例）：`python3 tests/modules/build-check.py`、
   `make test`、`make selfhost-native`。

@@ -1,0 +1,716 @@
+module ast
+import gen
+import ir
+
+// module_snapshot_lower_place.yh —— 纯快照绑定赋值、地址、下标与切片位置。
+//
+// 由 module_snapshot_lower.yh 按完整函数边界拆出（LA2a）；内存驻留槽与
+// 切片视图头只通过 CheckedLower 的存储表访问，不写回快照。
+
+// checked_lower_decl_binding：按绑定源码范围降低一个局部变量或常量声明。
+// edge_cursor 顺序消费该语句的表达式边；类型长度表达式可先出现，初始化器取最后一边。
+fn checked_lower_decl_binding(l *CheckedLower, flow *CheckedFlow, stmt_id int,
+    binding_row int, edge_cursor *int, value_out *int) int {
+    let stmt AstStmt = l.store.statements[stmt_id]
+    if ((stmt.op != gen.TK_LET && stmt.op != gen.TK_CONST) || binding_row < 0
+        || binding_row >= l.store.binding_n || edge_cursor == 0) {
+        l.reason = "首片：局部声明语句形态不匹配"
+        return -2
+    }
+    let binding AstBinding = l.store.bindings[binding_row]
+    if (binding.stmt_id != stmt_id || binding.is_param != 0
+        || (binding.sym_kind != gen.SYM_VAR && binding.sym_kind != gen.SYM_CONST)
+        || binding.id < 0
+        || binding.id >= l.function_binding_count) {
+        l.reason = "首片：let 绑定布局不匹配"
+        return -2
+    }
+    let binding_after int = stmt.after
+    if (binding.next >= 0) {
+        if (binding.next <= binding_row || binding.next >= l.store.binding_n) {
+            l.reason = "首片：let 绑定链无效"
+            return -2
+        }
+        binding_after = l.store.bindings[binding.next].name_token
+    }
+    let last_edge int = -1
+    let edge_id int = edge_cursor[0]
+    for edge_id >= 0 {
+        if (edge_id >= l.store.edge_n) {
+            l.reason = "首片：let 表达式边越界"
+            return -2
+        }
+        let edge_expr int = l.store.edges[edge_id].expr_id
+        if (edge_expr < 0 || edge_expr >= l.store.expression_n) {
+            l.reason = "首片：let 表达式边无效"
+            return -2
+        }
+        if (l.store.expressions[edge_expr].first >= binding_after) { break }
+        last_edge = edge_id
+        edge_id = l.store.edges[edge_id].next
+    }
+    edge_cursor[0] = edge_id
+    if (checked_binding_has_assign(l, &stmt, &binding) == 0) {
+        // 源语义将未初始化局部零初始化；数组长度边不代表源码含有赋值表达式。
+        if (checked_lower_is_aggregate(l.store, binding.sym_type_id) != 0) {
+            let storage int = checked_lower_storage(l, binding.id)
+            let ty gen.CType = l.store.types[binding.sym_type_id]
+            if (storage < 0 || ast_ir_b_add_memset(&l.builder, storage, ty.size) < 0) {
+                return -1
+            }
+            value_out[0] = -1
+        } else {
+            let kind int = checked_lower_type(l, binding.sym_type_id)
+            if (kind < 0) { return -2 }
+            let zero int = ast_ir_b_add_inst(&l.builder, ir.IR_OP_CONST,
+                kind, -1, -1, 0)
+            if (zero < 0) { return -1 }
+            let storage int = checked_lower_storage(l, binding.id)
+            if (storage >= 0) {
+                if (ast_ir_b_add_store(&l.builder, storage, zero) < 0) { return -1 }
+                value_out[0] = -1
+            } else {
+                value_out[0] = zero
+            }
+        }
+        return 0
+    }
+    if (last_edge < 0) {
+        l.reason = "首片：let 初始化表达式缺失"
+        return -2
+    }
+    let edge AstStmtExpr = l.store.edges[last_edge]
+    if (checked_lower_is_aggregate(l.store, binding.sym_type_id) != 0) {
+        let rhs int = l.store.edges[last_edge].expr_id
+        if (rhs < 0 || rhs >= l.store.expression_n) {
+            l.reason = "首片：聚合初始化缺少值表达式"
+            return -2
+        }
+        let storage int = checked_lower_storage(l, binding.id)
+        if (storage < 0) {
+            l.reason = "首片：聚合绑定没有存储"
+            return -2
+        }
+        l.reason = "首片不支持此聚合初始化形态"
+        let agg_status int = checked_lower_aggregate_store(l, flow, storage,
+            binding.sym_type_id, rhs)
+        if (agg_status != 0) { return agg_status }
+        value_out[0] = -1
+        return 0
+    }
+    if (edge.expr_id < 0 || edge.expr_id >= l.store.expression_n) {
+        l.reason = "首片：let 初始化表达式缺失"
+        return -2
+    }
+    let value int = checked_lower_expr_inner(l, flow, edge.expr_id)
+    if (value == -2) { return -2 }
+    if (value < 0) { return -1 }
+    let want int = checked_lower_type(l, binding.sym_type_id)
+    if (want < 0) { return -2 }
+    let value_type int = checked_lower_type(l, l.store.expressions[edge.expr_id].type_id)
+    if (value_type < 0) { return -2 }
+    if (want != value_type) {
+        let init AstExpr = l.store.expressions[edge.expr_id]
+        if (init.is_lit != 0 && ir.ir_integer_type(want) != 0) {
+            value = checked_lower_literal_retype(l, value, &init, want)
+        } else {
+            value = checked_lower_adjust(l, value, want)
+        }
+        if (value < 0) { return -2 }
+    }
+    let storage int = checked_lower_storage(l, binding.id)
+    if (storage >= 0) {
+        if (ast_ir_b_add_store(&l.builder, storage, value) < 0) { return -1 }
+        value_out[0] = -1
+    } else {
+        value_out[0] = value
+    }
+    return 0
+}
+
+// checked_lower_assign：降低简单/复合赋值；左值支持变量与 `*指针`。
+// 变量若已取址则读写内存驻留槽；复合赋值先 LOAD 再按旧规则提升/截回。
+// 指针解引用左值用指针的 canonical 元素类型核对，不匹配即带来源拒绝。
+fn checked_lower_assign(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let b *AstIRBuilder = &l.builder
+    let stmt AstStmt = l.store.statements[stmt_id]
+    let op int = checked_lower_assign_op(stmt.op)
+    if (op < 0 || stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2 }
+    let lhs_edge AstStmtExpr = l.store.edges[stmt.first_expr]
+    let rhs_edge_id int = lhs_edge.next
+    if (rhs_edge_id < 0 || rhs_edge_id >= l.store.edge_n) { return -2 }
+    let rhs_edge AstStmtExpr = l.store.edges[rhs_edge_id]
+    if (rhs_edge.next >= 0 || rhs_edge.expr_id < 0 || rhs_edge.expr_id >= l.store.expression_n) { return -2 }
+    if (lhs_edge.expr_id < 0 || lhs_edge.expr_id >= l.store.expression_n) { return -2 }
+    let lhs AstExpr = l.store.expressions[lhs_edge.expr_id]
+    if (checked_lower_is_aggregate(l.store, lhs.type_id) != 0) {
+        // 聚合赋值没有 SSA 值：复合运算非法，等值副本按字节写入左值存储。
+        if (op != 0) { return -2 }
+        let dest int = checked_lower_lvalue_ptr(l, flow, lhs_edge.expr_id)
+        if (dest == -2) { return -2 }
+        if (dest < 0) { return -1 }
+        let agg_status int = checked_lower_aggregate_store(l, flow, dest,
+            lhs.type_id, rhs_edge.expr_id)
+        if (agg_status == -2) { l.reason = "首片不支持此聚合赋值形态" }
+        if (agg_status != 0) { return agg_status }
+        return 1
+    }
+    // 左值分类：变量（target = 内存槽或 -1 表示 SSA 值）或 `*指针`。
+    let binding_id int = -1
+    let target int = -1
+    let want int = -1
+    let lhs_source_type int = lhs.type_id
+    if (lhs.kind == AST_EXPR_PRIMARY && lhs.child0 < 0
+        && (lhs.sym_flags & gen.F_GLOBAL) != 0 && lhs.binding_row < 0) {
+        want = checked_lower_type(l, lhs.type_id)
+        if (want < 0) { return -2 }
+        target = checked_lower_global_ref(l, &lhs)
+        if (target < 0) { return target }
+    } else if (lhs.kind == AST_EXPR_PRIMARY && lhs.child0 < 0) {
+        let row int = checked_lower_binding(l, &lhs)
+        if (row < 0) { return -2 }
+        let binding AstBinding = l.store.bindings[row]
+        // 参数与局部都是可变绑定；快照符号表不含已弹出作用域的局部槽，不回查。
+        binding_id = binding.id
+        lhs_source_type = binding.sym_type_id
+        want = checked_lower_type(l, binding.sym_type_id)
+        if (want < 0) { return -2 }
+        target = checked_lower_storage(l, binding.id)
+    } else if (lhs.kind == AST_EXPR_INDEX || lhs.kind == AST_EXPR_MEMBER
+        || (lhs.kind == AST_EXPR_UNARY && lhs.op == gen.TK_STAR && lhs.child0 >= 0)) {
+        // 下标/字段或解引用左值：统一走元素存储地址。
+        want = checked_lower_type(l, lhs.type_id)
+        if (want < 0) { return -2 }
+        target = checked_lower_lvalue_ptr(l, flow, lhs_edge.expr_id)
+        if (target == -2) { return -2 }
+        if (target < 0) { return -1 }
+        if (checked_lower_pointer_matches(l, b.insts[target].result_type, want) == 0) { return -2 }
+    } else {
+        return -2
+    }
+    let right int = checked_lower_expr_inner(l, flow, rhs_edge.expr_id)
+    if (right == -2) { return -2 }
+    if (right < 0) { return -1 }
+    let right_kind int = b.insts[right].result_type
+    let value int = right
+    if (op != 0) {
+        let previous int = -1
+        if (target >= 0) {
+            previous = ast_ir_b_add_inst(b, ir.IR_OP_LOAD, want, target, -1, 0)
+            if (previous < 0) { return -1 }
+        } else {
+            previous = b.local_values[binding_id]
+            if (previous < 0 || previous >= b.inst_count) { return -2 }
+        }
+        let previous_kind int = b.insts[previous].result_type
+        let operand int = previous_kind
+        if (previous_kind != right_kind) {
+            if (l.store.expressions[rhs_edge.expr_id].is_lit == 0) { return -2 }
+            if (checked_lower_lit_fits(l, lhs_source_type,
+                l.store.expressions[rhs_edge.expr_id].const_bits) == 0) { return -2 }
+            right = checked_lower_literal_retype(l, right,
+                &l.store.expressions[rhs_edge.expr_id], previous_kind)
+            if (right < 0) { return -2 }
+        }
+        let operand_kind int = b.types[operand].kind
+        if (ir.ir_float_type(operand_kind) != 0) {
+            if (op != ir.IR_OP_ADD && op != ir.IR_OP_SUB
+                && op != ir.IR_OP_MUL && op != ir.IR_OP_DIV) { return -2 }
+        } else if (ir.ir_integer_type(operand_kind) == 0) { return -2 }
+        value = ast_ir_b_add_inst(b, op, operand, previous, right, 0)
+        if (value < 0) { return -1 }
+    } else if (right_kind != want) {
+        let rhs_node AstExpr = l.store.expressions[rhs_edge.expr_id]
+        if (want >= ir.IR_TY_PTR && want <= ir.IR_TY_PTR_LAST
+            && right_kind >= ir.IR_TY_PTR && right_kind <= ir.IR_TY_PTR_LAST) {
+            // 受检 AST 已接受指针赋值；不同来源指针的 canonical 编码仍需显式 CAST 对齐。
+            value = checked_lower_adjust(l, right, want)
+            if (value < 0) { return -2 }
+        } else if (want >= ir.IR_TY_PTR && want <= ir.IR_TY_PTR_LAST
+            && ir.ir_integer_type(right_kind) != 0 && rhs_node.is_lit != 0
+            && rhs_node.const_bits == 0) {
+            // 只有字面量零可隐式形成空指针；其他整数到指针转换仍需显式 cast。
+            b.insts[right].result_type = want
+            b.insts[right].imm = 0
+        } else if (rhs_node.is_lit == 0
+            && checked_lower_assign_widens(l, lhs.type_id, rhs_node.type_id) != 0) {
+            value = checked_lower_adjust(l, right, want)
+            if (value < 0) { return -2 }
+        } else {
+            if (rhs_node.is_lit == 0) { return -2 }
+            right = checked_lower_literal_retype(l, right, &rhs_node, want)
+            if (right < 0) { return -2 }
+        }
+    }
+    let stored int = checked_lower_adjust(l, value, want)
+    if (stored < 0) { return -1 }
+    if (target >= 0) {
+        if (ast_ir_b_add_store(b, target, stored) < 0) { return -1 }
+        return 1
+    }
+    if (flow.loop_depth > 0) {
+        // 循环体内被赋值的绑定参与循环携带；真实趟顺序与发现趟一致。
+        if (checked_lower_carry_record(l, flow, binding_id) != 0) { return -1 }
+    }
+    b.local_values[binding_id] = stored
+    // 简单语句不终结基本块：返回 1（路径继续），由序列推进处按需加续块。
+    return 1
+}
+
+// checked_lower_assign_op：赋值符到 IR 操作；0 表示直接赋值，-1 不支持。
+fn checked_lower_assign_op(op int) int {
+    if (op == gen.TK_ASSIGN) { return 0 }
+    if (op == gen.TK_PLUSEQ) { return ir.IR_OP_ADD }
+    if (op == gen.TK_MINUSEQ) { return ir.IR_OP_SUB }
+    if (op == gen.TK_STAREQ) { return ir.IR_OP_MUL }
+    if (op == gen.TK_SLASHEQ) { return ir.IR_OP_DIV }
+    if (op == gen.TK_PERCENTEQ) { return ir.IR_OP_REM }
+    if (op == gen.TK_AMPEQ) { return ir.IR_OP_BAND }
+    if (op == gen.TK_PIPEEQ) { return ir.IR_OP_BOR }
+    if (op == gen.TK_CARETEQ) { return ir.IR_OP_BXOR }
+    if (op == gen.TK_LSHIFTEQ) { return ir.IR_OP_SHL }
+    if (op == gen.TK_RSHIFTEQ) { return ir.IR_OP_SHR }
+    return -1
+}
+
+// checked_lower_value_copy：复制当前全部绑定值，用于 if 单臂合流。
+fn checked_lower_value_copy(l *CheckedLower, flow *CheckedFlow) *int {
+    let b *AstIRBuilder = flow.builder
+    let size int = b.binding_count * sizeof(int)
+    if (b.binding_count <= 0) { return 0 }
+    let copy *int = malloc(size.to_type(u64)).to_type(*int)
+    if (copy == 0) { return 0 }
+    memcpy(copy, b.local_values, size.to_type(u64))
+    return copy
+}
+
+// checked_lower_member_field：按成员名 token 在结构体/联合体字段表里查字段行。
+// AST_EXPR_MEMBER 不携带字段下标，只能从名字文本与快照字段名池比对；找不到返回 -1。
+fn checked_lower_member_field(l *CheckedLower, struct_type int, file_id int, token int) int {
+    if (struct_type < 0 || struct_type >= l.store.type_n) { return -1 }
+    let ty gen.CType = l.store.types[struct_type]
+    if (ty.kind != gen.TY_STRUCT && ty.kind != gen.TY_UNION) { return -1 }
+    if (file_id < 0 || file_id >= l.store.file_n || token < 0
+        || token >= l.store.files[file_id].token_n) { return -1 }
+    let file gen.PFile = l.store.files[file_id]
+    let start int = file.tokens[token].start
+    let name_len int = file.tokens[token].len
+    if (start < 0 || name_len <= 0 || start + name_len > file.source_len) { return -1 }
+    let first int = ty.sub
+    let count int = ty.len
+    if (first < 0 || count < 0 || first + count > l.store.field_n) { return -1 }
+    let i int = 0
+    for i < count {
+        let f gen.SField = l.store.fields[first + i]
+        if (f.name_len == name_len && f.name_off >= 0
+            && f.name_off + f.name_len <= l.store.name_n) {
+            let j int = 0
+            for j < name_len {
+                if (l.store.names[f.name_off + j] != file.source[start + j]) { break }
+                j += 1
+            }
+            if (j == name_len) { return first + i }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// checked_lower_is_slice：源类型是否为切片。
+fn checked_lower_is_slice(store *CheckedStorage, source_type int) int {
+    if (source_type < 0 || source_type >= store.type_n) { return 0 }
+    return (store.types[source_type].kind == gen.TY_SLICE).to_type(int)
+}
+
+// checked_lower_slice_ptr：求切片表达式的运行期数据指针（不透明指针）。
+// 变量取头部 +8 的 ptr 字段；切片表达式按基址 + start×stride 计算。
+fn checked_lower_heap_alloc(l *CheckedLower, size int) int {
+    if (size <= 0) { return -2 }
+    let symbol_row int = 0
+    for symbol_row < l.store.symbol_n {
+        let candidate gen.CSym = l.store.symbols[symbol_row]
+        if ((candidate.flags & gen.F_RUNTIME_MALLOC) != 0
+            && candidate.kind == gen.SYM_FN
+            && gen.cstr_eq((l.store.names + candidate.name_off).to_type(*char), "malloc") != 0) {
+            break
+        }
+        symbol_row += 1
+    }
+    if (symbol_row >= l.store.symbol_n) {
+        l.reason = "返回切片后备存储缺少 malloc 运行时入口"
+        return -2
+    }
+    let source gen.CSym = l.store.symbols[symbol_row]
+    if (source.type_id < 0 || source.type_id >= l.store.type_n
+        || l.store.types[source.type_id].kind != gen.TY_FN) {
+        l.reason = "返回切片的 malloc 签名类型无效"
+        return -2
+    }
+    let sig int = l.store.types[source.type_id].sub
+    if (sig < 0 || sig >= l.store.sig_n || l.store.sig_np[sig] != 1
+        || l.store.sig_vararg[sig] != 0
+        || l.store.sig_params[l.store.sig_first[sig]] < 0
+        || l.store.types[l.store.sig_params[l.store.sig_first[sig]]].kind != gen.TY_U64
+        || checked_lower_type(l, l.store.sig_ret[sig]) != ir.IR_TY_PTR) {
+        l.reason = "返回切片的 malloc 签名与 u64 -> *void 不一致"
+        return -2
+    }
+    let size_value int = ast_ir_b_add_inst(&l.builder, ir.IR_OP_CONST,
+        ir.IR_TY_U64, -1, -1, size.to_type(i64))
+    if (size_value < 0) { return -1 }
+    let arg ir.IRCallArg
+    arg.value = size_value; arg.type_id = ir.IR_TY_U64
+    let name *char = checked_lower_name(l, source.name_off, source.name_len,
+        source.flags, source.type_id)
+    if (name == 0) { l.reason = "返回切片的 malloc 符号名无效"; return -1 }
+    let module_symbol int = checked_lower_symbol(l, name, source.type_id,
+        ir.IR_TY_PTR, sig, source.flags, l.function.file_id, l.last_token)
+    free(name.to_type(*void))
+    if (module_symbol < 0) { l.reason = "返回切片的 malloc 模块符号登记失败"; return module_symbol }
+    let call int = checked_lower_call_append(l, l.flow, source.name_off,
+        source.name_len, source.flags, sig, &arg, 1)
+    if (call < 0) { l.reason = "返回切片的 malloc 调用记录失败"; return -1 }
+    let result int = ast_ir_b_add_call(&l.builder, call, ir.IR_TY_PTR)
+    if (result < 0) { l.reason = "返回切片的 malloc 指令生成失败" }
+    return result
+}
+
+fn checked_lower_slice_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
+    let b *AstIRBuilder = &l.builder
+    if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2 }
+    let node AstExpr = l.store.expressions[expr_id]
+    if (node.kind == AST_EXPR_PRIMARY && node.child0 >= 0) {
+        return checked_lower_slice_ptr(l, flow, node.child0)
+    }
+    if (node.kind == AST_EXPR_PRIMARY) {
+        let storage int = -1
+        if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+            storage = checked_lower_global_ref(l, &node)
+        } else {
+            let row int = checked_lower_binding(l, &node)
+            if (row < 0) { return -2 }
+            let binding AstBinding = l.store.bindings[row]
+            storage = checked_lower_storage(l, binding.id)
+        }
+        if (storage < 0) { return -2 }
+        // 头部 +8 存不透明数据指针；字段指针类型 elem = 12 才能 LOAD 出 kind 12。
+        let field int = ast_ir_b_add_gep_const(b, storage, 8, ir.IR_TY_PTR + ir.IR_TY_PTR)
+        if (field < 0) { return -1 }
+        return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, ir.IR_TY_PTR, field, -1, 0)
+    }
+    if ((node.kind == AST_EXPR_MEMBER || node.kind == AST_EXPR_CTFIELD
+            || node.kind == AST_EXPR_CALL)
+        && checked_lower_is_aggregate(l.store, node.type_id) != 0) {
+        // 切片字段与聚合调用结果同样保存 {len, ptr} 头部，可由左值地址读取。
+        let storage int = checked_lower_lvalue_ptr(l, flow, expr_id)
+        if (storage == -2) { return -2 }
+        if (storage < 0) { return -1 }
+        let field int = ast_ir_b_add_gep_const(b, storage, 8,
+            ir.IR_TY_PTR + ir.IR_TY_PTR)
+        if (field < 0) { return -1 }
+        return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, ir.IR_TY_PTR, field, -1, 0)
+    }
+    if (node.kind == AST_EXPR_SLICE && node.child0 >= 0 && node.child1 >= 0) {
+        let base_type int = l.store.expressions[node.child0].type_id
+        let base_kind int = checked_lower_kind(l.store, base_type)
+        let base int = -1
+        if (base_kind >= ir.IR_TY_PTR) {
+            base = checked_lower_expr_inner(l, flow, node.child0)
+        } else if (checked_lower_is_slice(l.store, base_type) != 0) {
+            base = checked_lower_slice_ptr(l, flow, node.child0)
+        } else {
+            base = checked_lower_lvalue_ptr(l, flow, node.child0)
+        }
+        if (base == -2) { return -2 }
+        if (base < 0) { return -1 }
+        // 步长取结果切片元素类型的大小。
+        let slice_ty gen.CType = l.store.types[node.type_id]
+        if (slice_ty.kind != gen.TY_SLICE || slice_ty.elem < 0 || slice_ty.elem >= l.store.type_n) {
+            return -2
+        }
+        let stride int = l.store.types[slice_ty.elem].size
+        if (stride <= 0) { return -2 }
+        let start int = checked_lower_expr_inner(l, flow, node.child1)
+        if (start == -2) { return -2 }
+        if (start < 0) { return -1 }
+        let ustart int = checked_lower_adjust(l, start, ir.IR_TY_U64)
+        if (ustart < 0) { return -2 }
+        let stride_value int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
+            -1, -1, stride.to_type(i64))
+        if (stride_value < 0) { return -1 }
+        let offset int = ast_ir_b_add_inst(b, ir.IR_OP_MUL, ir.IR_TY_U64,
+            ustart, stride_value, 0)
+        if (offset < 0) { return -1 }
+        return ast_ir_b_add_gep_value(b, base, offset, ir.IR_TY_PTR)
+    }
+    return -2
+}
+
+// checked_lower_slice_len：求切片表达式的运行期长度（u64）。
+// 变量取头部 +0 的 len 字段；切片表达式按 end - start 计算。
+fn checked_lower_slice_len(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
+    let b *AstIRBuilder = &l.builder
+    if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2 }
+    let node AstExpr = l.store.expressions[expr_id]
+    if (node.kind == AST_EXPR_PRIMARY && node.child0 >= 0) {
+        return checked_lower_slice_len(l, flow, node.child0)
+    }
+    if (node.kind == AST_EXPR_PRIMARY) {
+        let storage int = -1
+        if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+            storage = checked_lower_global_ref(l, &node)
+        } else {
+            let row int = checked_lower_binding(l, &node)
+            if (row < 0) { return -2 }
+            let binding AstBinding = l.store.bindings[row]
+            storage = checked_lower_storage(l, binding.id)
+        }
+        if (storage < 0) { return -2 }
+        let field int = ast_ir_b_add_gep_const(b, storage, 0, ir.IR_TY_PTR + ir.IR_TY_U64)
+        if (field < 0) { return -1 }
+        return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, ir.IR_TY_U64, field, -1, 0)
+    }
+    if ((node.kind == AST_EXPR_MEMBER || node.kind == AST_EXPR_CTFIELD
+            || node.kind == AST_EXPR_CALL)
+        && checked_lower_is_aggregate(l.store, node.type_id) != 0) {
+        // 切片字段与聚合调用结果同样保存 {len, ptr} 头部，可由左值地址读取。
+        let storage int = checked_lower_lvalue_ptr(l, flow, expr_id)
+        if (storage == -2) { return -2 }
+        if (storage < 0) { return -1 }
+        let field int = ast_ir_b_add_gep_const(b, storage, 0,
+            ir.IR_TY_PTR + ir.IR_TY_U64)
+        if (field < 0) { return -1 }
+        return ast_ir_b_add_inst(b, ir.IR_OP_LOAD, ir.IR_TY_U64, field, -1, 0)
+    }
+    if (node.kind == AST_EXPR_SLICE && node.child1 >= 0 && node.child2 >= 0) {
+        let start int = checked_lower_expr_inner(l, flow, node.child1)
+        if (start == -2) { return -2 }
+        if (start < 0) { return -1 }
+        let end int = checked_lower_expr_inner(l, flow, node.child2)
+        if (end == -2) { return -2 }
+        if (end < 0) { return -1 }
+        let ustart int = checked_lower_adjust(l, start, ir.IR_TY_U64)
+        if (ustart < 0) { return -2 }
+        let uend int = checked_lower_adjust(l, end, ir.IR_TY_U64)
+        if (uend < 0) { return -2 }
+        return ast_ir_b_add_inst(b, ir.IR_OP_SUB, ir.IR_TY_U64, uend, ustart, 0)
+    }
+    return -2
+}
+
+// checked_lower_slice_header：把切片来源（变量副本/切片表达式/字面量）写进头部存储。
+// 头部布局 {len u64, ptr *void}，与旧后端和模块切片布局一致。
+fn checked_lower_slice_header(l *CheckedLower, flow *CheckedFlow, dest int,
+    slice_type int, expr_id int) int {
+    let b *AstIRBuilder = &l.builder
+    let src int = -1
+    let len_value int = -1
+    let inner int = expr_id
+    let node AstExpr = l.store.expressions[expr_id]
+    for node.kind == AST_EXPR_PRIMARY && node.child0 >= 0 {
+        inner = node.child0
+        if (inner < 0 || inner >= l.store.expression_n) { return -2 }
+        node = l.store.expressions[inner]
+    }
+    if (node.kind == AST_EXPR_ARRAY) {
+        // 非逃逸字面量使用入口后备槽；直接返回的字面量在此处申请外部存储。
+        let backing int = l.slice_storage != 0 ? l.slice_storage[inner] : 0
+        let element_count int = 0
+        let walk int = node.child0
+        for walk >= 0 {
+            if (walk >= l.store.expression_n) { return -2 }
+            element_count += 1
+            walk = l.store.expressions[walk].child0
+        }
+        let element_size int = l.store.types[l.store.types[slice_type].elem].size
+        let backing_ptr int = -1
+        if (element_count > 0 && backing == -1) {
+            if (element_size <= 0 || element_count > 2147483647 / element_size) { return -2 }
+            backing_ptr = checked_lower_heap_alloc(l, element_count * element_size)
+        } else if (element_count > 0 && backing > 0) {
+            backing_ptr = backing - 1
+        } else if (element_count == 0) {
+            backing_ptr = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_PTR, -1, -1, 0)
+        }
+        if (backing_ptr < 0) {
+            if (backing != -1) { l.reason = "首片：切片字面量缺少后备存储" }
+            return -2
+        }
+        let count int = checked_lower_array_elements(l, flow, backing_ptr, slice_type, node.child0, -1)
+        if (count == -2) { return -2 }
+        if (count < 0) { return -1 }
+        src = backing_ptr
+        len_value = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64, -1, -1,
+            count.to_type(i64))
+        if (len_value < 0) { return -1 }
+    } else if (node.kind == AST_EXPR_SLICE) {
+        src = checked_lower_slice_ptr(l, flow, inner)
+        if (src == -2) { return -2 }
+        if (src < 0) { return -1 }
+        len_value = checked_lower_slice_len(l, flow, inner)
+        if (len_value == -2) { return -2 }
+        if (len_value < 0) { return -1 }
+    } else if (node.kind == AST_EXPR_PRIMARY) {
+        let source_type int = node.type_id
+        if (source_type < 0 || source_type >= l.store.type_n) { return -2 }
+        let source_ty gen.CType = l.store.types[source_type]
+        if (source_ty.kind == gen.TY_ARRAY) {
+            // 定长数组转切片只借用元素存储；数组字节不是切片的 {len, ptr} 头。
+            src = checked_lower_lvalue_ptr(l, flow, inner)
+            if (src == -2) { return -2 }
+            if (src < 0) { return -1 }
+            len_value = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
+                -1, -1, source_ty.len.to_type(i64))
+            if (len_value < 0) { return -1 }
+        } else if (source_ty.kind == gen.TY_SLICE) {
+            // 切片到切片复制完整描述符，底层元素仍共享。
+            let src_storage int = -1
+            if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+                src_storage = checked_lower_global_ref(l, &node)
+            } else {
+                let row int = checked_lower_binding(l, &node)
+                if (row < 0) { return -2 }
+                let src_binding AstBinding = l.store.bindings[row]
+                src_storage = checked_lower_storage(l, src_binding.id)
+            }
+            if (src_storage < 0) { return -2 }
+            if (ast_ir_b_add_memcpy(b, dest, src_storage, 16) < 0) { return -1 }
+            return 0
+        } else { return -2 }
+    } else {
+        return -2
+    }
+    // 头部字段写入：+0 = len，+8 = 数据指针。
+    let len_ptr int = ast_ir_b_add_gep_const(b, dest, 0, ir.IR_TY_PTR + ir.IR_TY_U64)
+    if (len_ptr < 0) { return -1 }
+    if (ast_ir_b_add_store(b, len_ptr, len_value) < 0) { return -1 }
+    let ptr_ptr int = ast_ir_b_add_gep_const(b, dest, 8, ir.IR_TY_PTR + ir.IR_TY_PTR)
+    if (ptr_ptr < 0) { return -1 }
+    if (ast_ir_b_add_store(b, ptr_ptr, src) < 0) { return -1 }
+    return 0
+}
+
+// checked_lower_lvalue_ptr：求表达式作为左值的存储指针；-2 不支持、-1 内部错误。
+// 支持变量（含聚合存储）、指针解引用与数组下标（常量或动态字节偏移）。
+fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
+    let b *AstIRBuilder = &l.builder
+    if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2 }
+    let node AstExpr = l.store.expressions[expr_id]
+    if (node.kind == AST_EXPR_PRIMARY) {
+        if (node.child0 >= 0) { return checked_lower_lvalue_ptr(l, flow, node.child0) }
+        if (node.is_const != 0
+            && checked_lower_is_aggregate(l.store, node.type_id) != 0) {
+            return checked_lower_expr_inner(l, flow, expr_id)
+        }
+        if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+            return checked_lower_global_ref(l, &node)
+        }
+        if (node.sym_id < 0) {
+            l.reason = "首片：聚合主表达式没有稳定符号身份"
+            return -2
+        }
+        let row int = checked_lower_binding(l, &node)
+        if (row < 0) {
+            l.reason = "首片：聚合主表达式没有绑定快照"
+            return -2
+        }
+        let binding AstBinding = l.store.bindings[row]
+        let storage int = checked_lower_storage(l, binding.id)
+        if (storage < 0) {
+            l.reason = "首片：聚合绑定缺少入口存储"
+            return -2
+        }
+        return storage
+    }
+    if (node.kind == AST_EXPR_CALL
+        && checked_lower_is_aggregate(l.store, node.type_id) != 0) {
+        // 聚合返回调用的结果已写入独立临时缓冲，可直接作为字段/下标基址。
+        return checked_lower_expr_inner(l, flow, expr_id)
+    }
+    if (node.kind == AST_EXPR_UNARY && node.op == gen.TK_STAR && node.child0 >= 0) {
+        let pointer int = checked_lower_expr_inner(l, flow, node.child0)
+        if (pointer == -2) { return -2 }
+        if (pointer < 0) { return -1 }
+        if (b.insts[pointer].result_type < ir.IR_TY_PTR) { return -2 }
+        return pointer
+    }
+    if ((node.kind == AST_EXPR_MEMBER || node.kind == AST_EXPR_CTFIELD)
+        && node.child0 >= 0) {
+        // 字段左值：基址可为聚合存储（递归）或指向结构体的指针（按值）。
+        let base_type int = l.store.expressions[node.child0].type_id
+        let base_kind int = checked_lower_kind(l.store, base_type)
+        let base int = -1
+        let struct_type int = base_type
+        if (base_kind >= ir.IR_TY_PTR) {
+            base = checked_lower_expr_inner(l, flow, node.child0)
+            struct_type = l.store.types[base_type].elem
+        } else {
+            base = checked_lower_lvalue_ptr(l, flow, node.child0)
+        }
+        if (base == -2) { return -2 }
+        if (base < 0) { return -1 }
+        if (node.after <= node.first) { return -2 }
+        let field int = -1
+        if (node.kind == AST_EXPR_CTFIELD) {
+            if (struct_type < 0 || struct_type >= l.store.type_n || node.op < 0
+                || node.op >= l.store.field_n) { return -2 }
+            let aggregate gen.CType = l.store.types[struct_type]
+            if ((aggregate.kind != gen.TY_STRUCT && aggregate.kind != gen.TY_UNION)
+                || node.op < aggregate.sub || node.op >= aggregate.sub + aggregate.len) {
+                return -2
+            }
+            field = node.op
+        } else {
+            field = checked_lower_member_field(l, struct_type, node.file_id, node.after - 1)
+        }
+        if (field < 0) { return -2 }
+        let f gen.SField = l.store.fields[field]
+        let kind int = checked_lower_type(l, f.type_id)
+        let result_kind int = checked_lower_pointer_kind(kind)
+        if (result_kind < 0) { return -2 }
+        return ast_ir_b_add_gep_const(b, base, f.offset, result_kind)
+    }
+    if (node.kind == AST_EXPR_INDEX && node.child0 >= 0 && node.child1 >= 0) {
+        // 基址：指针表按值加载，数组/嵌套数组按存储地址递归。
+        let base_type int = l.store.expressions[node.child0].type_id
+        let base_kind int = checked_lower_kind(l.store, base_type)
+        let base int = -1
+        if (base_kind >= ir.IR_TY_PTR) {
+            base = checked_lower_expr_inner(l, flow, node.child0)
+        } else if (checked_lower_is_slice(l.store, base_type) != 0) {
+            // 切片下标：基址是头部里的运行期数据指针，不是头部本身。
+            base = checked_lower_slice_ptr(l, flow, node.child0)
+        } else {
+            base = checked_lower_lvalue_ptr(l, flow, node.child0)
+        }
+        if (base == -2) { return -2 }
+        if (base < 0) { return -1 }
+        // 步长是所选元素（node.type_id）的字节大小。
+        let stride int = l.store.types[node.type_id].size
+        if (stride <= 0) { return -2 }
+        let index int = checked_lower_expr_inner(l, flow, node.child1)
+        if (index == -2) { return -2 }
+        if (index < 0) { return -1 }
+        let kind int = checked_lower_type(l, node.type_id)
+        let result_kind int = checked_lower_pointer_kind(kind)
+        if (result_kind < 0) { return -2 }
+        let uidx int = checked_lower_adjust(l, index, ir.IR_TY_U64)
+        if (uidx < 0) { return -2 }
+        let stride_value int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
+            -1, -1, stride.to_type(i64))
+        if (stride_value < 0) { return -1 }
+        let offset int = ast_ir_b_add_inst(b, ir.IR_OP_MUL, ir.IR_TY_U64,
+            uidx, stride_value, 0)
+        if (offset < 0) { return -1 }
+        return ast_ir_b_add_gep_value(b, base, offset, result_kind)
+    }
+    return -2
+}
+
+// checked_lower_storage：取绑定内存槽的 SSA 指针值；未取址或未分配返回 -1。
+// 存储表项保存「指令编号 + 1」以区分未分配（0）；首指令编号 0 也合法。
+fn checked_lower_storage(l *CheckedLower, binding_id int) int {
+    let slot int = l.function_binding_first + binding_id
+    if (l.storage == 0 || slot < 0 || l.storage[slot] <= 0) { return -1 }
+    return l.storage[slot] - 1
+}

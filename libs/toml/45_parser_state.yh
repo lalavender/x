@@ -1,0 +1,227 @@
+module toml
+
+// yh TOML 标准库：解析游标、诊断与空白/注释处理。
+//
+// parser 只借用输入字节；成功解析后文档独立持有键、字符串和时间原文。
+// 诊断只保留静态消息和位置，不分配内存，内存不足时也能返回错误。
+
+// parser 是单次解析的全部可变状态。
+struct parser {
+    data *u8
+    count u64
+    pos u64
+    line u64
+    column u64
+    state *doc_state
+    table *node          // 当前表头指向的表，键值对写入这里
+    fail_code ErrorCode
+    fail_message *char
+    fail_span Span
+    related Span
+    has_related int
+    depth int
+    str_data *u8         // 最近一次字符串解析结果（池内存）
+    str_count u64
+}
+
+// p_at_end 判断是否已到输入末尾。
+fn p_at_end(p *parser) int {
+    return (p.pos >= p.count).to_type(int)
+}
+
+// p_current 返回当前字节；越界返回 0。
+fn p_current(p *parser) u8 {
+    if (p.pos >= p.count) {
+        return 0
+    }
+    return p.data[p.pos]
+}
+
+// p_advance 前进一个字节并维护行号/字节列号。
+fn p_advance(p *parser) void {
+    if (p.pos >= p.count) {
+        return
+    }
+    if (p.data[p.pos] == '\n') {
+        p.line += 1
+        p.column = 1
+    } else {
+        p.column += 1
+    }
+    p.pos += 1
+}
+
+// p_newline 消费一个 LF 或 CRLF；裸 CR 报语法错误。
+fn p_newline(p *parser) int {
+    if (p.pos >= p.count) {
+        return -1
+    }
+    let b u8 = p.data[p.pos]
+    if (b == '\n') {
+        p_advance(p)
+        return 0
+    }
+    if (b == '\r' && p.pos + 1 < p.count && p.data[p.pos + 1] == '\n') {
+        p.pos += 2
+        p.line += 1
+        p.column = 1
+        return 0
+    }
+    p_fail_here(p, ErrorCode.error_syntax, "裸 CR 不是合法换行")
+    return -1
+}
+
+// p_is_newline 判断当前位置是否为新行起点（LF 或 CRLF）。
+fn p_is_newline(p *parser) int {
+    if (p.pos >= p.count) {
+        return 0
+    }
+    if (p.data[p.pos] == '\n') {
+        return 1
+    }
+    if (p.data[p.pos] == '\r' && p.pos + 1 < p.count
+        && p.data[p.pos + 1] == '\n') {
+        return 1
+    }
+    return 0
+}
+
+// p_skip_ws 跳过空格与制表符。
+fn p_skip_ws(p *parser) void {
+    for p.pos < p.count {
+        let b u8 = p.data[p.pos]
+        if (b != ' ' && b != '\t') {
+            return
+        }
+        p.pos += 1
+        p.column += 1
+    }
+}
+
+// p_fail_span 记录第一条诊断；显式传入位置。
+fn p_fail_span(p *parser, code ErrorCode, message *char, offset u64,
+    length u64, line u64, column u64) void {
+    if (p.fail_code != ErrorCode.error_none) {
+        return
+    }
+    p.fail_code = code
+    p.fail_message = message
+    p.fail_span.offset = offset
+    p.fail_span.length = length
+    p.fail_span.line = line
+    p.fail_span.column = column
+}
+
+// p_fail_here 以当前位置的一字节范围记录诊断。
+fn p_fail_here(p *parser, code ErrorCode, message *char) void {
+    let length u64 = 1
+    if (p.pos >= p.count) {
+        length = 0
+    }
+    p_fail_span(p, code, message, p.pos, length, p.line, p.column)
+}
+
+// p_related 给现有诊断补充关联位置（重复定义的第一处）。
+fn p_related(p *parser, span Span) void {
+    if (p.has_related != 0) {
+        return
+    }
+    p.has_related = 1
+    p.related = span
+}
+
+// p_skip_comment 跳过 # 到行尾；注释内不允许裸 CR 与控制字符。
+fn p_skip_comment(p *parser) int {
+    if (p.pos >= p.count || p.data[p.pos] != '#') {
+        return 0
+    }
+    p.pos += 1
+    p.column += 1
+    for p.pos < p.count {
+        let b u8 = p.data[p.pos]
+        if (b == '\n') {
+            return 0
+        }
+        if (b == '\r') {
+            if (p.pos + 1 < p.count && p.data[p.pos + 1] == '\n') {
+                return 0
+            }
+            p_fail_here(p, ErrorCode.error_syntax, "注释内出现裸 CR")
+            return -1
+        }
+        if (b < 32 && b != '\t') {
+            p_fail_here(p, ErrorCode.error_syntax, "注释内出现控制字符")
+            return -1
+        }
+        if (b == 127) {
+            p_fail_here(p, ErrorCode.error_syntax, "注释内出现 DEL 字符")
+            return -1
+        }
+        p.pos += 1
+        p.column += 1
+    }
+    return 0
+}
+
+// p_skip_container_ws 跳过数组/内联表允许的空白、注释与换行。
+// 注释后必须是换行或输入末尾的未闭合错误；非换行字符直接报错。
+fn p_skip_container_ws(p *parser) int {
+    for 1 {
+        p_skip_ws(p)
+        if (p.pos >= p.count) {
+            return 0
+        }
+        if (p.data[p.pos] == '#') {
+            if (p_skip_comment(p) != 0) {
+                return -1
+            }
+            if (p.pos >= p.count) {
+                return 0
+            }
+            if (p_is_newline(p) == 0) {
+                p_fail_here(p, ErrorCode.error_syntax, "注释后需要换行")
+                return -1
+            }
+        }
+        if (p_is_newline(p) != 0) {
+            if (p_newline(p) != 0) {
+                return -1
+            }
+            continue
+        }
+        return 0
+    }
+    return 0
+}
+
+// p_skip_statement_tail 跳过一个语句末尾的空白与可选注释。
+// 成功时停在换行、EOF 或非法尾随字符上；调用方决定后续诊断。
+fn p_skip_statement_tail(p *parser) int {
+    p_skip_ws(p)
+    if (p.pos < p.count && p.data[p.pos] == '#') {
+        if (p_skip_comment(p) != 0) {
+            return -1
+        }
+    }
+    return 0
+}
+
+// p_offset_position 计算任意字节偏移的行号与字节列号（一基）。
+// 用于整段 UTF-8 校验失败时的诊断定位。
+fn p_offset_position(data *u8, count u64, offset u64, line *u64,
+    column *u64) void {
+    let l u64 = 1
+    let c u64 = 1
+    let i u64 = 0
+    for i < offset && i < count {
+        if (data[i] == '\n') {
+            l += 1
+            c = 1
+        } else {
+            c += 1
+        }
+        i += 1
+    }
+    line[0] = l
+    column[0] = c
+}

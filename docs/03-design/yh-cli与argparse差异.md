@@ -22,6 +22,10 @@
 | `a --level 2 b`（intermixed） | `files=['a','b']` | `parse_intermixed` 同为两元素 |
 | `@args.txt`（开启 fromfile 前缀） | 文件展开为 token | `@file` 展开为 token |
 | `@args.txt`（未开启 fromfile） | 仍是普通位置值 | 同（不展开） |
+| `--tries`（count，默认 3） | `tries=4` | 同（从默认值累计） |
+| `--rest a -x -- --help`（option remainder） | 全部为数据 | 同 |
+| `--version`，模板 `%(prog)s 1.0` | `diff 1.0` | 同 |
+| 自定义 usage `%(prog)s [options] src` | `usage: diff [options] src` | 同 |
 
 ## 2. 差异项与保留理由
 
@@ -40,6 +44,11 @@
 | 子命令前后全局选项 | 根选项在子命令前有效 | 同；「前后都要」用公共 parent 分别 `inherit` | 复制而非穿透，行为可预测（设计 §10.1） |
 | 参数文件注释 | `#` 无特殊含义 | 同；不做 shell 转义 | 逐行语义简单可移植；需要转义时用 `line_converter` |
 | 参数文件上限 | 无内置上限 | 深度/字节/token 三个上限，可经 `ParseConfig` 调整 | 展开必须有界，失败可定位（设计 §13） |
+| `--unknown --help` | 先识别 help，退出 0 | 未知选项优先，usage_error 退出 2 | 设计 §14.3：已识别错误优先于后来的控制请求 |
+| known 模式未知短组合 | 应用已知前缀，剩余后缀留在 extras | 整 token 保留，不累计已知前缀 | README §9：避免只生效一半的短组合 |
+| deprecated 运行期提示 | 无内置 deprecated 概念 | 显式使用时经 `Result.warnings` 返回一条警告 | 设计 §14.3；不改变退出码 |
+| 文本模板范围 | help 可引用任意 action 属性 | 仅 `%(prog)s/%(dest)s/%(default)s/%(type)s/%%` | 静态类型与有限模板，不做任意格式化 |
+| remainder 中的 `--` | 终止选项解析，`--` 不进结果 | 作为 remainder 数据保留 | 设计 §9.3：remainder 开始后全部 token 都是数据 |
 
 ## 3. 未纳入范围（与 argparse 能力表一致）
 
@@ -56,7 +65,8 @@
 ## 4. 差分维护
 
 - 值/诊断类别/退出码的对照由各验收项目的断言承担：
-  `clibasics`（基础值形状与退出码）、`cliactions`（数量/action）、
-  `clicommands`（子命令与模式）、`cliextensions`（回调与参数文件）、
-  `clihelp`（帮助与输出）。
+  `clibasics`（基础值形状与退出码）、`cliactions`（数量/action、count/append
+  基值与选项 remainder）、`clicommands`（子命令与模式）、
+  `cliextensions`（回调与参数文件）、`clihelp`（帮助、模板与警告）、
+  `cliwarnings`（入口成功路径的警告输出）。
 - 差异项一旦变化，必须同时更新本文与对应 `.yh` 用例；不接受只改文档不改用例。

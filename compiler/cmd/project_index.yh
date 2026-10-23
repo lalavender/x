@@ -380,6 +380,11 @@ fn pj_load_project(root_off int, root_len int) int {
     if (pj_scan_source(gs.p_projs[me].src_off, gs.p_projs[me].src_len, me) != 0) {
         return -1
     }
+    // 测试专用导入分类：必须在 pj_bind_imports 之前完成，生产构建据此跳过
+    // 只在 test 体内使用的依赖；测试模式仍绑定全部导入。
+    if (pj_classify_test_imports(me) != 0) {
+        return -1
+    }
     // 入口模块：模块名为 main 的那个（模块名与目录名无关；同名模块跨目录
     // 合并为一个，故至多命中一次）
     let mi int = 0
@@ -453,9 +458,50 @@ fn pj_dir_sort(entries *PJDirEntry, n int) int {
     return 0
 }
 
+// pj_scan_skip_dir：源码根内的构建产物目录不参与扫描。
+// `tmp/` 与 `.build/` 可能位于源码根之下（例如标准库项目 source = "."），
+// 其中的生成文件（含 yh test 的测试入口）不是用户源码。
+fn pj_scan_skip_dir(name_start int, name_len int) int {
+    let gs *gen.GenState = gen.G()
+    if (name_len == 3 && gs.task.np_data[name_start] == 't'
+        && gs.task.np_data[name_start + 1] == 'm'
+        && gs.task.np_data[name_start + 2] == 'p') {
+        return 1
+    }
+    if (name_len == 6 && gs.task.np_data[name_start] == '.'
+        && gs.task.np_data[name_start + 1] == 'b'
+        && gs.task.np_data[name_start + 2] == 'u'
+        && gs.task.np_data[name_start + 3] == 'i'
+        && gs.task.np_data[name_start + 4] == 'l'
+        && gs.task.np_data[name_start + 5] == 'd') {
+        return 1
+    }
+    return 0
+}
+
+// pj_scan_is_target：单文件模式下，path 是否就是被选中的那个文件。
+fn pj_scan_is_target(path *char) int {
+    let gs *gen.GenState = gen.G()
+    if (gs.c_scan_file_off < 0) { return 1 }
+    let n int = 0
+    for path[n] != 0 { n += 1 }
+    if (n != gs.c_scan_file_len) { return 0 }
+    let i int = 0
+    for i < n {
+        if (gs.task.np_data[gs.c_scan_file_off + i] != path[i].to_type(u8)) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
 fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir int, proj int) int {
     let gs *gen.GenState = gen.G()
     if (is_dir != 0) {
+        // 单文件模式（yh test <项目外文件>）不进入任何子目录，也不装入相邻文件。
+        if (gs.c_scan_file_off >= 0) { return 0 }
+        if (pj_scan_skip_dir(name_start, name_len) != 0) { return 0 }
         // 子目录相对路径：<dir>/<name>，规范化后递归
         let nm [300]u8
         let nn int = 0
@@ -503,6 +549,8 @@ fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir 
         k += 1
     }
     full[flen2] = 0
+    // 单文件模式：只接受选中的那一个文件，其它相邻 .yh 一律忽略。
+    if (pj_scan_is_target(gen.arr_cstr(&full[0])) == 0) { return 0 }
     // 读文件并解析模块头（诊断指向被扫文件）
     let save_path *char = gs.task.c_path
     gs.task.c_path = gen.arr_cstr(full)
@@ -547,6 +595,55 @@ fn pj_source_target_match(name_start int, name_len int) int {
     return 1
 }
 
+// pj_synth_module_name：从文件路径派生标识符模块名（去目录、去 .yh、非法字符转 _，
+// 首字符非字母时前置 _）。写入 task 的 mod_name_off/mod_name_len 并置 has_module。
+fn pj_synth_module_name(path *char) int {
+    let gs *gen.GenState = gen.G()
+    let base int = 0
+    let i int = 0
+    for path[i] != 0 {
+        if (path[i] == '/') { base = i + 1 }
+        i += 1
+    }
+    let end int = i
+    if (end - base > 3 && path[end - 3] == '.' && path[end - 2] == 'y'
+        && path[end - 1] == 'h') {
+        end -= 3
+    }
+    if (end <= base) { return gen.fail("单文件测试无法从文件名派生模块名") }
+    let tmp [160]u8
+    let n int = 0
+    let k int = base
+    for k < end {
+        let c u8 = path[k].to_type(u8)
+        let ok int = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_'
+        if (ok != 0) {
+            tmp[n] = c
+        } else {
+            tmp[n] = '_'
+        }
+        n += 1
+        k += 1
+    }
+    if (tmp[0] >= 48 && tmp[0] <= 57) {
+        // 首字符不能是数字：前置下划线后整体后移。
+        let m int = n
+        for m > 0 {
+            tmp[m] = tmp[m - 1]
+            m -= 1
+        }
+        tmp[0] = '_'
+        n += 1
+    }
+    let off int = gen.tml_intern_str(&tmp[0], 0, n)
+    if (off < 0) { return -1 }
+    gs.task.mod_name_off = off
+    gs.task.mod_name_len = n
+    gs.task.mod_has_module = 1
+    return 0
+}
+
 fn pj_index_file(path *char, proj int) int {
     let gs *gen.GenState = gen.G()
     if (gs.c_stats_enabled != 0) {
@@ -564,6 +661,11 @@ fn pj_index_file(path *char, proj int) int {
     parse.mod_reset_file()
     if (parse.mod_parse_head() != 0) {
         return -1
+    }
+    if (gs.task.mod_has_module == 0 && gs.c_scan_file_off >= 0
+        && pj_scan_is_target(path) != 0) {
+        // 单文件测试：文件可以省略 module 头，用文件名派生一个模块名。
+        if (pj_synth_module_name(path) != 0) { return -1 }
     }
     if (gs.task.mod_has_module == 0) {
         // 源码根内的文件必须声明模块（旧单文件形态不属于项目源码根）

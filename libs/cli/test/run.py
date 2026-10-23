@@ -37,6 +37,8 @@ CASES = [
     ("cli3-commands", "clicommands", ["--selftest"], 0, None, None),
     ("cli4-extensions", "cliextensions", ["--selftest"], 0, None, None),
     ("cli5-help", "clihelp", ["--selftest"], 0, None, None),
+    ("cli6-warning-entry", "cliwarnings", ["--old", "x", "in.txt"], 0,
+     "warnings=0 src=in.txt", "弃用"),
 ]
 
 

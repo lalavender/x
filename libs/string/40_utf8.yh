@@ -1,0 +1,195 @@
+module string
+
+// yh string 标准库：严格 UTF-8 校验、标量遍历与编码。
+//
+// 按 RFC 3629 实现 1–4 字节严格解码：拒绝截断、错误续字节、过长编码、代理项
+// 和超过 U+10FFFF 的值。U+0000 与 U+FEFF 是合法输入；不静默替换为 U+FFFD。
+// 本层只处理 Unicode 标量，不承诺字素边界、规范化或大小写折叠。
+
+// utf8_is_scalar 判断值是否为 Unicode 标量（排除代理项与越界值）。
+fn utf8_is_scalar(rune u32) bool {
+    if (rune > 1114111) {
+        return false
+    }
+    if (rune >= 55296 && rune <= 57343) {
+        return false
+    }
+    return true
+}
+
+// utf8_decode_at 从 pos 解码一个标量；成功返回 ok、rune 与 width。
+// 非法/截断返回 invalid_utf8，offset 为错误序列起点；pos>=count 返回 end。
+fn utf8_decode_at(text View, pos u64) RuneResult {
+    let result RuneResult
+    result.status = Status.status_invalid_utf8
+    result.rune = 0
+    result.width = 0
+    result.offset = pos
+    if (pos >= text.count) {
+        result.status = Status.status_end
+        result.offset = text.count
+        return result
+    }
+    let first u8 = text.data[pos]
+    if (first < 128) {
+        result.status = Status.status_ok
+        result.rune = first.to_type(u32)
+        result.width = 1
+        return result
+    }
+    let remaining u64 = text.count - pos
+    if (first >= 194 && first <= 223) {
+        if (remaining < 2) {
+            return result
+        }
+        let second u8 = text.data[pos + 1]
+        if (second < 128 || second > 191) {
+            return result
+        }
+        result.status = Status.status_ok
+        result.rune = ((first.to_type(u32) & 31) << 6) | (second.to_type(u32) & 63)
+        result.width = 2
+        return result
+    }
+    if (first >= 224 && first <= 239) {
+        if (remaining < 3) {
+            return result
+        }
+        let second u8 = text.data[pos + 1]
+        let third u8 = text.data[pos + 2]
+        if (second < 128 || second > 191 || third < 128 || third > 191) {
+            return result
+        }
+        if (first == 224 && second < 160) {
+            return result
+        }
+        if (first == 237 && second > 159) {
+            return result
+        }
+        result.status = Status.status_ok
+        result.rune = ((first.to_type(u32) & 15) << 12) | ((second.to_type(u32) & 63) << 6) | (third.to_type(u32) & 63)
+        result.width = 3
+        return result
+    }
+    if (first >= 240 && first <= 244) {
+        if (remaining < 4) {
+            return result
+        }
+        let second u8 = text.data[pos + 1]
+        let third u8 = text.data[pos + 2]
+        let fourth u8 = text.data[pos + 3]
+        if (second < 128 || second > 191 || third < 128 || third > 191
+            || fourth < 128 || fourth > 191) {
+            return result
+        }
+        if (first == 240 && second < 144) {
+            return result
+        }
+        if (first == 244 && second > 143) {
+            return result
+        }
+        result.status = Status.status_ok
+        result.rune = ((first.to_type(u32) & 7) << 18) | ((second.to_type(u32) & 63) << 12) | ((third.to_type(u32) & 63) << 6) | (fourth.to_type(u32) & 63)
+        result.width = 4
+        return result
+    }
+    return result
+}
+
+// utf8_encode 把合法标量编码到至少 4 字节的输出缓冲，返回写入字节数。
+// 调用前必须用 utf8_is_scalar 确认范围。
+fn utf8_encode(rune u32, out *u8) u64 {
+    if (rune < 128) {
+        out[0] = rune.to_type(u8)
+        return 1
+    }
+    if (rune < 2048) {
+        out[0] = (192 + (rune >> 6)).to_type(u8)
+        out[1] = (128 + (rune & 63)).to_type(u8)
+        return 2
+    }
+    if (rune < 65536) {
+        out[0] = (224 + (rune >> 12)).to_type(u8)
+        out[1] = (128 + ((rune >> 6) & 63)).to_type(u8)
+        out[2] = (128 + (rune & 63)).to_type(u8)
+        return 3
+    }
+    out[0] = (240 + (rune >> 18)).to_type(u8)
+    out[1] = (128 + ((rune >> 12) & 63)).to_type(u8)
+    out[2] = (128 + ((rune >> 6) & 63)).to_type(u8)
+    out[3] = (128 + (rune & 63)).to_type(u8)
+    return 4
+}
+
+// utf8_validate 严格校验整段字节并计完整标量数；非法时 rune_count=0，
+// error_offset 为首个非法编码序列起点。
+pub fn utf8_validate(text View) Utf8Info {
+    let result Utf8Info
+    result.status = Status.status_ok
+    result.rune_count = 0
+    result.error_offset = 0
+    if (text.count > 0 && text.data == 0) {
+        result.status = Status.status_invalid_argument
+        return result
+    }
+    let pos u64 = 0
+    let count u64 = 0
+    for pos < text.count {
+        let rune_result RuneResult = utf8_decode_at(text, pos)
+        if (rune_result.status != Status.status_ok) {
+            result.status = Status.status_invalid_utf8
+            result.rune_count = 0
+            result.error_offset = rune_result.offset
+            return result
+        }
+        count += 1
+        pos += rune_result.width
+    }
+    result.rune_count = count
+    return result
+}
+
+// utf8_next 从 cursor 解一个标量；成功推进 width 字节，结尾返回 end。
+// 越界/非法时不推进 cursor；合法 U+0000 与结束通过 status 区分。
+pub fn utf8_next(text View, cursor *u64) RuneResult {
+    let result RuneResult
+    result.status = Status.status_invalid_argument
+    result.rune = 0
+    result.width = 0
+    result.offset = 0
+    if (cursor == 0) {
+        return result
+    }
+    if (text.count > 0 && text.data == 0) {
+        return result
+    }
+    let pos u64 = cursor[0]
+    if (pos > text.count) {
+        result.status = Status.status_bounds
+        result.offset = pos
+        return result
+    }
+    if (pos == text.count) {
+        result.status = Status.status_end
+        result.offset = text.count
+        return result
+    }
+    result = utf8_decode_at(text, pos)
+    if (result.status == Status.status_ok) {
+        cursor[0] = pos + result.width
+    }
+    return result
+}
+
+// append_rune 把合法 Unicode 标量编码后追加到 String；非法标量不改变目标。
+pub fn append_rune(value *String, rune u32) Status {
+    if (!utf8_is_scalar(rune)) {
+        return Status.status_invalid_utf8
+    }
+    let buffer [4]u8
+    let width u64 = utf8_encode(rune, &buffer[0])
+    let text View
+    text.data = &buffer[0]
+    text.count = width
+    return append(value, text)
+}

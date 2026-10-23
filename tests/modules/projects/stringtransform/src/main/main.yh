@@ -1,0 +1,224 @@
+module main
+
+import io
+import string
+
+// view_of_cstr 把已知有效的 C 字符串转成视图。
+fn view_of_cstr(text *char) string.View {
+    let result string.ViewResult = string.view_cstr(text)
+    return result.value
+}
+
+// view_of_bytes 把已知有效的字节区间转成视图。
+fn view_of_bytes(data *u8, count u64) string.View {
+    let result string.ViewResult = string.view_bytes(data, count)
+    return result.value
+}
+
+// expect_cstr 比较视图与 NUL 结尾期望文本；失败返回 code。
+fn expect_cstr(actual string.View, expected *char, code int) int {
+    let expected_result string.ViewResult = string.view_cstr(expected)
+    if (expected_result.status != string.status_ok) {
+        return code
+    }
+    if (!string.view_equal(actual, expected_result.value)) {
+        return code
+    }
+    return 0
+}
+
+// expect_bytes 比较视图与显式字节区间；失败返回 code。
+fn expect_bytes(actual string.View, data *u8, count u64, code int) int {
+    let expected string.View
+    expected.data = data
+    expected.count = count
+    if (!string.view_equal(actual, expected)) {
+        return code
+    }
+    return 0
+}
+
+// main 覆盖 ST4：连接、join、限次/全部替换与 ASCII 大小写。
+fn main() int {
+    // concat：空输入、普通连接与独立存储。
+    let empty_concat string.StringResult = string.concat(view_of_cstr(""), view_of_cstr(""))
+    if (empty_concat.status != string.status_ok
+        || string.byte_length(&empty_concat.value) != 0) {
+        return 1
+    }
+    let source [2]u8 = [0, 0]
+    source[0] = 'a'
+    source[1] = 'b'
+    let concat_result string.StringResult = string.concat(view_of_bytes(&source[0], 2),
+        view_of_cstr("cd"))
+    if (concat_result.status != string.status_ok
+        || expect_cstr(string.as_view(&concat_result.value), "abcd", 2) != 0) {
+        return 2
+    }
+    source[0] = 'X'
+    if (expect_cstr(string.as_view(&concat_result.value), "abcd", 3) != 0) { return 3 }
+    string.release(&concat_result.value)
+
+    // join：零片段、单片段、空分隔符、多片段与多字节分隔符。
+    let no_parts []string.View
+    let empty_join string.StringResult = string.join(no_parts, view_of_cstr(","))
+    if (empty_join.status != string.status_ok || string.byte_length(&empty_join.value) != 0) {
+        return 4
+    }
+    let one [1]string.View
+    one[0] = view_of_cstr("solo")
+    let one_join string.StringResult = string.join(one.to_type([]string.View), view_of_cstr(","))
+    if (one_join.status != string.status_ok
+        || expect_cstr(string.as_view(&one_join.value), "solo", 5) != 0) {
+        return 5
+    }
+    let parts [3]string.View
+    parts[0] = view_of_cstr("a")
+    parts[1] = view_of_cstr("")
+    parts[2] = view_of_cstr("b")
+    let joined string.StringResult = string.join(parts.to_type([]string.View), view_of_cstr(","))
+    if (joined.status != string.status_ok
+        || expect_cstr(string.as_view(&joined.value), "a,,b", 6) != 0) {
+        return 6
+    }
+    let joined_empty_sep string.StringResult = string.join(parts.to_type([]string.View),
+        view_of_cstr(""))
+    if (joined_empty_sep.status != string.status_ok
+        || expect_cstr(string.as_view(&joined_empty_sep.value), "ab", 7) != 0) {
+        return 7
+    }
+    let pair [2]string.View
+    pair[0] = view_of_cstr("a中")
+    pair[1] = view_of_cstr("b")
+    let joined_mid string.StringResult = string.join(pair.to_type([]string.View),
+        view_of_cstr("中"))
+    if (joined_mid.status != string.status_ok) { return 8 }
+    if (string.byte_length(&joined_mid.value) != 8) { return 9 }
+    string.release(&joined.value)
+    string.release(&joined_empty_sep.value)
+    string.release(&joined_mid.value)
+    string.release(&one_join.value)
+    string.release(&empty_join.value)
+
+    // replace_all：非重叠、空替换、无匹配与空 old 拒绝。
+    let replaced string.StringResult = string.replace_all(view_of_cstr("aaaa"),
+        view_of_cstr("aa"), view_of_cstr("b"))
+    if (replaced.status != string.status_ok
+        || expect_cstr(string.as_view(&replaced.value), "bb", 10) != 0) {
+        return 10
+    }
+    let removed string.StringResult = string.replace_all(view_of_cstr("a-b-c"),
+        view_of_cstr("-"), view_of_cstr(""))
+    if (removed.status != string.status_ok
+        || expect_cstr(string.as_view(&removed.value), "abc", 11) != 0) {
+        return 11
+    }
+    let no_match string.StringResult = string.replace_all(view_of_cstr("abc"),
+        view_of_cstr("z"), view_of_cstr("y"))
+    if (no_match.status != string.status_ok
+        || expect_cstr(string.as_view(&no_match.value), "abc", 12) != 0) {
+        return 12
+    }
+    let bad_old string.StringResult = string.replace_all(view_of_cstr("abc"),
+        view_of_cstr(""), view_of_cstr("x"))
+    if (bad_old.status != string.status_invalid_argument) { return 13 }
+    let partial string.StringResult = string.replace(view_of_cstr("abcabc"),
+        view_of_cstr("abc"), view_of_cstr("xy"), 1)
+    if (partial.status != string.status_ok
+        || expect_cstr(string.as_view(&partial.value), "xyabc", 14) != 0) {
+        return 14
+    }
+    let zero_limit string.StringResult = string.replace(view_of_cstr("abc"),
+        view_of_cstr("a"), view_of_cstr("z"), 0)
+    if (zero_limit.status != string.status_ok
+        || expect_cstr(string.as_view(&zero_limit.value), "abc", 15) != 0) {
+        return 15
+    }
+    let triplet string.StringResult = string.replace_all(view_of_cstr("aaa"),
+        view_of_cstr("aa"), view_of_cstr("b"))
+    if (triplet.status != string.status_ok
+        || expect_cstr(string.as_view(&triplet.value), "ba", 16) != 0) {
+        return 16
+    }
+    let too_long string.StringResult = string.replace_all(view_of_cstr("a"),
+        view_of_cstr("ab"), view_of_cstr("x"))
+    if (too_long.status != string.status_ok
+        || expect_cstr(string.as_view(&too_long.value), "a", 17) != 0) {
+        return 17
+    }
+
+    // replacement 含 NUL：结果按 count 保存，不按 strlen 截断。
+    let nul_replacement [1]u8 = [0]
+    let nul_result string.StringResult = string.replace_all(view_of_cstr("a-a"),
+        view_of_cstr("-"), view_of_bytes(&nul_replacement[0], 1))
+    if (nul_result.status != string.status_ok || string.byte_length(&nul_result.value) != 3) {
+        return 18
+    }
+    let nul_bytes string.View = string.as_view(&nul_result.value)
+    if (nul_bytes.data[1] != 0 || nul_bytes.data[2] != 'a') { return 19 }
+    string.release(&nul_result.value)
+    string.release(&replaced.value)
+    string.release(&removed.value)
+    string.release(&no_match.value)
+    string.release(&partial.value)
+    string.release(&zero_limit.value)
+    string.release(&triplet.value)
+    string.release(&too_long.value)
+
+    // lower_ascii / upper_ascii：只改 ASCII 字母，保留 >=0x80 与其他字节。
+    let mixed string.StringResult = string.lower_ascii(view_of_cstr("AbC!中"))
+    if (mixed.status != string.status_ok) { return 20 }
+    let mixed_bytes string.View = string.as_view(&mixed.value)
+    if (mixed_bytes.count != 7) { return 21 }
+    if (mixed_bytes.data[0] != 'a' || mixed_bytes.data[1] != 'b'
+        || mixed_bytes.data[2] != 'c' || mixed_bytes.data[3] != '!') {
+        return 22
+    }
+    if (mixed_bytes.data[4] != 228 || mixed_bytes.data[5] != 184
+        || mixed_bytes.data[6] != 173) {
+        return 23
+    }
+    let upper string.StringResult = string.upper_ascii(view_of_cstr("AbC!中"))
+    if (upper.status != string.status_ok) { return 24 }
+    let upper_bytes string.View = string.as_view(&upper.value)
+    if (upper_bytes.data[0] != 'A' || upper_bytes.data[1] != 'B'
+        || upper_bytes.data[2] != 'C' || upper_bytes.data[4] != 228) {
+        return 25
+    }
+    let empty_lower string.StringResult = string.lower_ascii(view_of_cstr(""))
+    if (empty_lower.status != string.status_ok
+        || string.byte_length(&empty_lower.value) != 0) {
+        return 26
+    }
+    string.release(&mixed.value)
+    string.release(&upper.value)
+    string.release(&empty_lower.value)
+
+    // 无变化时仍返回独立存储：输入数组改写后结果不变。
+    let stable [3]u8 = [0, 0, 0]
+    stable[0] = 'a'
+    stable[1] = '-'
+    stable[2] = 'b'
+    let stable_result string.StringResult = string.replace_all(view_of_bytes(&stable[0], 3),
+        view_of_cstr("z"), view_of_cstr("y"))
+    if (stable_result.status != string.status_ok) { return 27 }
+    stable[0] = 'X'
+    if (expect_cstr(string.as_view(&stable_result.value), "a-b", 28) != 0) { return 28 }
+    string.release(&stable_result.value)
+
+    // 首尾哨兵：变换只读输入区间，不触碰区间外字节。
+    let guarded [5]u8 = [0, 0, 0, 0, 0]
+    guarded[0] = 90
+    guarded[1] = 'A'
+    guarded[2] = 'B'
+    guarded[3] = 91
+    guarded[4] = 92
+    let guarded_result string.StringResult = string.lower_ascii(view_of_bytes(&guarded[1], 2))
+    if (guarded_result.status != string.status_ok) { return 29 }
+    if (expect_cstr(string.as_view(&guarded_result.value), "ab", 30) != 0) { return 30 }
+    if (guarded[0] != 90 || guarded[3] != 91 || guarded[4] != 92) { return 31 }
+    string.release(&guarded_result.value)
+
+    io.println("string transform ok")
+    return 0
+}

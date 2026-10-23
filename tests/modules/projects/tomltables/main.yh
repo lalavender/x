@@ -1,0 +1,182 @@
+module main
+
+// TOML T3 表语义验收：普通表、点键、内联表、数组表、定义冲突与遍历顺序。
+
+import io
+import toml
+
+let failed int = 0
+
+// ok 记录一条断言结果。
+fn ok(condition int, name *char) void {
+    if (condition == 0) {
+        failed += 1
+        io.print("FAIL ")
+        io.println(name)
+    }
+}
+
+// int_at 返回 table[key] 的整数；失败返回哨兵。
+fn int_at(table toml.Value, key *char) i64 {
+    let got toml.LookupResult = toml.get(table, key)
+    let number i64 = -777
+    toml.as_i64(got.value, &number)
+    return number
+}
+
+// nested_int 按两个键取整数。
+fn nested_int(table toml.Value, first *char, second *char) i64 {
+    let one toml.LookupResult = toml.get(table, first)
+    if (one.status != toml.query_ok) {
+        return -777
+    }
+    return int_at(one.value, second)
+}
+
+// main 跑表语义断言。
+pub fn main() int {
+    // 点键、隐式父表与显式父表可共存；首次引入顺序按插入顺序。
+    let doc toml.ParseResult = toml.parse_text(
+        "z = 1\na.b.c = 2\na.b.d = 3\n[a.e]\nf = 4\n[empty]\n")
+    ok((doc.status == toml.parse_ok).to_type(int), "tables parse")
+    let root toml.Value = toml.root(&doc.document)
+    let count u64 = 0
+    toml.count(root, &count)
+    ok((count == 3).to_type(int), "root count")
+    let first toml.EntryResult = toml.table_entry(root, 0)
+    ok((first.key.count == 1 && first.key.data[0] == 'z').to_type(int),
+        "entry order first")
+    let second toml.EntryResult = toml.table_entry(root, 1)
+    ok((second.key.count == 1 && second.key.data[0] == 'a').to_type(int),
+        "entry order second")
+    let a toml.LookupResult = toml.get(root, "a")
+    ok((nested_int(a.value, "e", "f") == 4).to_type(int), "explicit subtable")
+    let b toml.LookupResult = toml.get(a.value, "b")
+    ok((int_at(b.value, "c") == 2 && int_at(b.value, "d") == 3).to_type(int),
+        "dot table shape")
+    let empty toml.LookupResult = toml.get(root, "empty")
+    let empty_count u64 = 9
+    toml.count(empty.value, &empty_count)
+    ok((empty_count == 0).to_type(int), "empty table")
+    // 隐式父表位置指向触发创建的键段。
+    let span toml.Span = toml.value_span(a.value)
+    ok((span.offset == 6 && span.length == 1).to_type(int), "implicit span")
+    toml.release(&doc.document)
+
+    // 数组：混合类型、嵌套、尾逗号与注释；下标越界。
+    let arrays toml.ParseResult = toml.parse_text(
+        "mixed = [1, \"x\", { b = 2 }, [3, 4],]\nempty = []\n")
+    ok((arrays.status == toml.parse_ok).to_type(int), "arrays parse")
+    let arrays_root toml.Value = toml.root(&arrays.document)
+    let mixed toml.LookupResult = toml.get(arrays_root, "mixed")
+    let mixed_count u64 = 0
+    toml.count(mixed.value, &mixed_count)
+    ok((mixed_count == 4).to_type(int), "mixed count")
+    let item0 toml.LookupResult = toml.array_get(mixed.value, 0)
+    let item0v i64 = 0
+    toml.as_i64(item0.value, &item0v)
+    ok((item0v == 1).to_type(int), "array int")
+    let item2 toml.LookupResult = toml.array_get(mixed.value, 2)
+    ok((int_at(item2.value, "b") == 2).to_type(int), "array inline table")
+    let item3 toml.LookupResult = toml.array_get(mixed.value, 3)
+    let item3_count u64 = 0
+    toml.count(item3.value, &item3_count)
+    ok((item3_count == 2).to_type(int), "nested array")
+    ok((toml.array_get(mixed.value, 4).status
+        == toml.query_bounds_error).to_type(int), "array bounds")
+    let empty_array toml.LookupResult = toml.get(arrays_root, "empty")
+    let empty_array_count u64 = 1
+    toml.count(empty_array.value, &empty_array_count)
+    ok((empty_array_count == 0).to_type(int), "empty array")
+    toml.release(&arrays.document)
+
+    // 内联表：TOML 1.1 多行、注释与尾逗号；整体封闭。
+    let inline_doc toml.ParseResult = toml.parse_text(
+        "t = {\n  a = 1, # one\n  b = { c = 2 },\n}\n")
+    ok((inline_doc.status == toml.parse_ok).to_type(int), "inline multiline")
+    let inline_doc_root toml.Value = toml.root(&inline_doc.document)
+    let t toml.LookupResult = toml.get(inline_doc_root, "t")
+    ok((int_at(t.value, "a") == 1).to_type(int), "inline a")
+    ok((nested_int(t.value, "b", "c") == 2).to_type(int), "inline nested")
+    toml.release(&inline_doc.document)
+    let inline_extend toml.ParseResult = toml.parse_text(
+        "t = { a = 1 }\n[t.b]\nc = 2\n")
+    ok((inline_extend.status == toml.parse_syntax_error
+        && inline_extend.error.code == toml.error_table_conflict).to_type(int),
+        "inline closed")
+    toml.release(&inline_extend.document)
+
+    // 数组表：子表绑定最近创建的元素；重复 [[a]] 追加新元素。
+    let aot toml.ParseResult = toml.parse_text(
+        "[[a]]\nx = 1\n[a.b]\ny = 2\n[[a]]\nx = 3\n[a.b]\ny = 4\n")
+    ok((aot.status == toml.parse_ok).to_type(int), "array table parse")
+    let aot_root toml.Value = toml.root(&aot.document)
+    let aot_a toml.LookupResult = toml.get(aot_root, "a")
+    let a_count u64 = 0
+    toml.count(aot_a.value, &a_count)
+    ok((a_count == 2).to_type(int), "array table count")
+    let e0 toml.LookupResult = toml.array_get(aot_a.value, 0)
+    let e1 toml.LookupResult = toml.array_get(aot_a.value, 1)
+    ok((int_at(e0.value, "x") == 1).to_type(int), "array table e0 x")
+    ok((nested_int(e0.value, "b", "y") == 2).to_type(int), "array table e0 y")
+    ok((int_at(e1.value, "x") == 3).to_type(int), "array table e1 x")
+    ok((nested_int(e1.value, "b", "y") == 4).to_type(int), "array table e1 y")
+    toml.release(&aot.document)
+
+    // 定义冲突矩阵。
+    let dup toml.ParseResult = toml.parse_text("a = 1\na = 2\n")
+    ok((dup.status == toml.parse_syntax_error
+        && dup.error.code == toml.error_duplicate_key).to_type(int),
+        "duplicate key code")
+    ok((dup.error.has_related != 0).to_type(int), "duplicate related")
+    ok((dup.error.related.offset == 4 && dup.error.related.length == 1).to_type(int),
+        "duplicate related span")
+    ok((dup.error.span.offset == 6
+        && dup.error.span.length == 1).to_type(int), "duplicate second span")
+    toml.release(&dup.document)
+    let dup_table toml.ParseResult = toml.parse_text("[a]\n[a]\n")
+    ok((dup_table.status == toml.parse_syntax_error
+        && dup_table.error.code == toml.error_table_conflict).to_type(int),
+        "duplicate table")
+    toml.release(&dup_table.document)
+    let dotted_then_table toml.ParseResult = toml.parse_text(
+        "[fruit]\napple.color = \"red\"\n[fruit.apple]\n")
+    ok((dotted_then_table.status == toml.parse_syntax_error
+        && dotted_then_table.error.code == toml.error_table_conflict).to_type(int),
+        "dotted then header")
+    toml.release(&dotted_then_table.document)
+    let scalar_table toml.ParseResult = toml.parse_text("a = 1\n[a]\n")
+    ok((scalar_table.status == toml.parse_syntax_error
+        && scalar_table.error.code == toml.error_table_conflict).to_type(int),
+        "scalar to table")
+    toml.release(&scalar_table.document)
+    let array_conflict toml.ParseResult = toml.parse_text("a = [1]\n[[a]]\n")
+    ok((array_conflict.status == toml.parse_syntax_error
+        && array_conflict.error.code == toml.error_table_conflict).to_type(int),
+        "array table conflict")
+    toml.release(&array_conflict.document)
+
+    // 引号表头是字面键；点号属于键内容。
+    let quoted toml.ParseResult = toml.parse_text(
+        "[\"a.b\"]\nx = 1\n[a]\nb = 2\n")
+    let quoted_root toml.Value = toml.root(&quoted.document)
+    let literal toml.LookupResult = toml.get(quoted_root, "a.b")
+    ok((int_at(literal.value, "x") == 1).to_type(int), "quoted header")
+    ok((nested_int(quoted_root, "a", "b") == 2).to_type(int),
+        "literal and dotted coexist")
+    toml.release(&quoted.document)
+
+    // CRLF 与空行。
+    let crlf toml.ParseResult = toml.parse_text("a = 1\r\n\r\nb = 2\r\n")
+    ok((crlf.status == toml.parse_ok).to_type(int), "crlf parse")
+    let crlf_root toml.Value = toml.root(&crlf.document)
+    ok((int_at(crlf_root, "a") == 1 && int_at(crlf_root, "b") == 2).to_type(int),
+        "crlf values")
+    toml.release(&crlf.document)
+
+    if (failed != 0) {
+        return 1
+    }
+    io.println("toml tables ok")
+    return 0
+}

@@ -1,5 +1,6 @@
 module main
 import gen
+import ast
 import lex
 import parse
 
@@ -59,6 +60,8 @@ fn usage() void {
     gen.write_all(2, buf, n)
     n = gen.append_str(buf, 0, "      yh list [--resolve name]     列出模块/解释导入绑定\n")
     gen.write_all(2, buf, n)
+    n = gen.append_str(buf, 0, "      yh test [模块|源文件] [--list] [--no-run] [--filter 子串] [--timeout 秒] [--emit-llvm]\n")
+    gen.write_all(2, buf, n)
 }
 
 // run_syntax_check：--syntax-check 路径（纯语法，G1 行为）。
@@ -85,29 +88,21 @@ fn drv_is_yh_source(path *char) int {
         path[n - 2] == 'y' && path[n - 1] == 'h' ? 1 : 0
 }
 
-// run_file_check：对单个源文件执行无后端语义检查。先装载源与语义表，再词法分析，
-// 然后复用现有声明、全局初始化和函数体检查遍历；库文件不要求定义 main，
-// 检查失败时保留原诊断，成功时只输出检查结果，不创建汇编或对象文件。
+// run_file_check：对单个源文件执行无后端语义检查。先装载源与语义表，再走
+// 与单文件编译相同的受检前端；库文件不要求定义 main，检查失败时保留原诊断，
+// 成功时只输出检查结果，不创建 LLVM 文本、汇编或对象文件。
 fn run_file_check(source_path *char) int {
     let gs *gen.GenState = gen.G()
     gs.task.c_check_only = 1
     gs.task.c_path = source_path
-    if (gen.front_checked_begin() != 0) { return 1 }
     if (gen.read_source(source_path) != 0 || gen.sem_init_tables() != 0) {
         return 1
     }
-    if (lex.lex_all() != 0) {
-        return 1
-    }
-    gs.task.c_compile = 1
-    gen.ty_register_builtins()
-    gen.scope_push()
-    if (gen.sem_register_prelude() != 0 || sem_compile() != 0
-        || gs.task.c_errors > 0) {
-        return 1
-    }
+    let checked ast.CheckedModule
+    let checked_status int = llvm_check_single_file(source_path, 0, &checked)
+    if (checked_status != 0) { return checked_status }
+    ast.checked_module_release(&checked)
     let output [32]u8
-    if (gen.front_checked_end() != 0) { return 1 }
     let n int = gen.append_str(output, 0, "检查通过\n")
     return gen.write_all(1, output, n) == 0 ? 0 : 1
 }
@@ -246,6 +241,9 @@ pub fn main(argc int, argv **char, envp **char) int {
     }
     if (n >= 1 && gen.cstr_eq(av[0], "list") != 0) {
         return mb_cmd_list(av, n)
+    }
+    if (n >= 1 && gen.cstr_eq(av[0], "test") != 0) {
+        return mb_run_test_command(av, n)
     }
     if ((n >= 6 && n <= 12) && gen.cstr_eq(av[0], "--emit-module") != 0
         && gen.cstr_eq(av[4], "-o") != 0) {

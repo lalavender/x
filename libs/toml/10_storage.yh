@@ -1,0 +1,444 @@
+module toml
+
+// yh TOML 标准库：私有存储、稳定节点与表/数组容器。
+//
+// 所有文档内容都在 doc_state.mem 池里：节点、键字节、字符串、时间原文、
+// 表条目数组和数组元素数组。池按块分配，失败或 release 时整池释放，因此
+// 解析失败不会留下半成品句柄，节点地址在文档生存期内保持稳定。
+
+// pool_node 是池内每个块的头部；size 只用于预算统计。
+struct pool_node {
+    next *pool_node
+    size u64
+}
+
+// pool 记录本次文档全部分配；status 区分成功、内存不足与预算超限。
+// status：0 正常，1 malloc 失败，2 超过 TOML_MAX_BYTES。
+struct pool {
+    head *pool_node
+    total u64
+    status int
+    alloc_count int   // 成功分配次数；仅供测试注入计数
+}
+
+// entry 是表内一个键值条目；value 是指向 node 的句柄（避免类型前向引用）。
+struct entry {
+    key Text
+    value *void
+    span Span
+}
+
+// table 是按首次引入顺序保存的表；查找为按字节线性比较。
+struct table {
+    entries *entry
+    count int
+    cap int
+}
+
+// items 是数组元素表；slots 存放 *node 句柄。
+struct items {
+    slots *void
+    count int
+    cap int
+}
+
+// node_data 只写入 kind 对应的成员。
+union node_data {
+    text Text
+    integer i64
+    real f64
+    boolean bool
+    array *items
+    tbl *table
+}
+
+// node 是文档内的稳定值节点。def 只对表有意义；is_table_array 区分
+// 普通数组与 [[数组表]]（查询时都表现为 kind_array）。
+struct node {
+    kind ValueKind
+    data node_data
+    span Span
+    def int
+    is_table_array int
+}
+
+// doc_state 是 Document.handle 指向的私有状态。
+struct doc_state {
+    mem pool
+    root *node
+    dotted *void       // 当前节内由点键创建、尚未冻结的表节点
+    dotted_count int
+    dotted_cap int
+}
+
+// text_make 由字节视图构造 Text；不复制字节。
+fn text_make(data *u8, count u64) Text {
+    let t Text
+    t.data = data
+    t.count = count
+    return t
+}
+
+// text_empty 返回空文本视图。
+fn text_empty() Text {
+    return text_make(0, 0)
+}
+
+// text_from_cstr 把 NUL 结尾字符串转成视图；空指针返回空文本。
+fn text_from_cstr(s *char) Text {
+    if (s == 0) {
+        return text_empty()
+    }
+    return text_make(s.to_type(*u8), strlen(s))
+}
+
+// text_equal 按长度和字节比较两个文本；相等返回 1。
+fn text_equal(a Text, b Text) int {
+    if (a.count != b.count) {
+        return 0
+    }
+    if (a.count == 0) {
+        return 1
+    }
+    let i u64 = 0
+    for i < a.count {
+        if (a.data[i] != b.data[i]) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// span_zero 返回全零位置。
+fn span_zero() Span {
+    let s Span
+    s.offset = 0
+    s.length = 0
+    s.line = 0
+    s.column = 0
+    return s
+}
+
+// pool_init 把池重置为空。
+fn pool_init(p *pool) void {
+    p.head = 0
+    p.total = 0
+    p.status = 0
+    p.alloc_count = 0
+}
+
+// pool_alloc 从池里分配 byte_count 字节并返回 16 字节对齐地址。
+// 预算或系统内存不足时返回空指针并记录 status。
+fn pool_alloc(p *pool, byte_count u64) *void {
+    if (p.status != 0) {
+        return 0
+    }
+    if (TOML_TEST_FAIL_AFTER >= 0 && p.alloc_count >= TOML_TEST_FAIL_AFTER) {
+        // 只有测试副本会把常量改成非负值；产品构建此分支恒为假。
+        p.status = 1
+        return 0
+    }
+    let header u64 = sizeof(pool_node).to_type(u64)
+    if (byte_count > TOML_MAX_BYTES - header) {
+        p.status = 2
+        return 0
+    }
+    let total u64 = header + byte_count
+    if (p.total > TOML_MAX_BYTES - total) {
+        p.status = 2
+        return 0
+    }
+    let block *pool_node = malloc(total).to_type(*pool_node)
+    if (block == 0) {
+        p.status = 1
+        return 0
+    }
+    block.next = p.head
+    block.size = byte_count
+    p.head = block
+    p.total += total
+    p.alloc_count += 1
+    return (block + 1).to_type(*void)
+}
+
+// pool_dup_bytes 把一段字节复制进池，供键和字符串使用；不追加 NUL。
+fn pool_dup_bytes(p *pool, data *u8, count u64) *u8 {
+    if (count == 0) {
+        return 0
+    }
+    let out *u8 = pool_alloc(p, count).to_type(*u8)
+    if (out == 0) {
+        return 0
+    }
+    memcpy(out.to_type(*void), data.to_type(*void), count)
+    return out
+}
+
+// pool_free_all 释放池内全部块并重置。
+fn pool_free_all(p *pool) void {
+    let cursor *pool_node = p.head
+    for cursor != 0 {
+        let next *pool_node = cursor.next
+        free(cursor.to_type(*void))
+        cursor = next
+    }
+    p.head = 0
+    p.total = 0
+    p.status = 0
+    p.alloc_count = 0
+}
+
+// node_new 分配并初始化一个节点；失败返回空指针。
+fn node_new(p *pool, kind ValueKind, span Span) *node {
+    let n *node = pool_alloc(p, sizeof(node).to_type(u64)).to_type(*node)
+    if (n == 0) {
+        return 0
+    }
+    n.kind = kind
+    n.span = span
+    n.def = TOML_DEF_NONE
+    n.is_table_array = 0
+    n.data.integer = 0
+    n.data.real = 0.0
+    n.data.boolean = false
+    n.data.array = 0
+    return n
+}
+
+// node_new_table 创建空表节点；def 区分根/隐式/显式/点键/内联。
+fn node_new_table(p *pool, def int, span Span) *node {
+    let n *node = node_new(p, ValueKind.kind_table, span)
+    if (n == 0) {
+        return 0
+    }
+    let t *table = pool_alloc(p, sizeof(table).to_type(u64)).to_type(*table)
+    if (t == 0) {
+        return 0
+    }
+    t.entries = 0
+    t.count = 0
+    t.cap = 0
+    n.data.tbl = t
+    n.def = def
+    return n
+}
+
+// node_new_array 创建空数组节点；is_table_array 标记 [[数组表]] 容器。
+fn node_new_array(p *pool, is_table_array int, span Span) *node {
+    let n *node = node_new(p, ValueKind.kind_array, span)
+    if (n == 0) {
+        return 0
+    }
+    let a *items = pool_alloc(p, sizeof(items).to_type(u64)).to_type(*items)
+    if (a == 0) {
+        return 0
+    }
+    a.slots = 0
+    a.count = 0
+    a.cap = 0
+    n.data.array = a
+    n.is_table_array = is_table_array
+    return n
+}
+
+// node_set_text 把已有 Text 写入字符串节点；字节必须已在池内。
+fn node_set_text(n *node, value Text) void {
+    n.kind = ValueKind.kind_string
+    n.data.text = value
+}
+
+// node_set_temporal 写入四种时间节点之一，value 为已验证的原始文本。
+fn node_set_temporal(n *node, kind ValueKind, value Text) void {
+    n.kind = kind
+    n.data.text = value
+}
+
+// table_find 在表内按键查找条目；找不到返回 -1。
+fn table_find(t *table, key Text) int {
+    if (t == 0) {
+        return -1
+    }
+    let i int = 0
+    for i < t.count {
+        if (text_equal(t.entries[i].key, key) != 0) {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// table_entry_of 返回第 index 个条目指针；越界返回空指针。
+fn table_entry_of(t *table, index int) *entry {
+    if (t == 0 || index < 0 || index >= t.count) {
+        return 0
+    }
+    return &t.entries[index]
+}
+
+// table_insert 在表尾追加一个条目并复制键字节；0 成功、-1 失败。
+// 调用方必须先用 table_find 排除重复键。
+fn table_insert(p *pool, t *table, key Text, value *node, span Span) int {
+    if (t == 0) {
+        return -1
+    }
+    if (t.count >= t.cap) {
+        let next_cap int = 8
+        if (t.cap > 0) {
+            if (t.cap > 1073741823) {
+                return -1
+            }
+            next_cap = t.cap * 2
+        }
+        let bytes u64 = next_cap.to_type(u64) * sizeof(entry).to_type(u64)
+        let block *entry = pool_alloc(p, bytes).to_type(*entry)
+        if (block == 0) {
+            return -1
+        }
+        if (t.count > 0) {
+            memcpy(block.to_type(*void), t.entries.to_type(*void),
+                t.count.to_type(u64) * sizeof(entry).to_type(u64))
+        }
+        t.entries = block
+        t.cap = next_cap
+    }
+    let key_bytes *u8 = pool_dup_bytes(p, key.data, key.count)
+    if (key.count > 0 && key_bytes == 0) {
+        return -1
+    }
+    let row *entry = &t.entries[t.count]
+    row.key = text_make(key_bytes, key.count)
+    row.value = value.to_type(*void)
+    row.span = span
+    t.count += 1
+    return 0
+}
+
+// items_append 在数组尾追加一个节点指针；0 成功、-1 失败。
+fn items_append(p *pool, a *items, value *node) int {
+    if (a == 0) {
+        return -1
+    }
+    if (a.count >= a.cap) {
+        let next_cap int = 4
+        if (a.cap > 0) {
+            if (a.cap > 1073741823) {
+                return -1
+            }
+            next_cap = a.cap * 2
+        }
+        let bytes u64 = next_cap.to_type(u64) * sizeof(*void).to_type(u64)
+        let block *void = pool_alloc(p, bytes).to_type(*void)
+        if (block == 0) {
+            return -1
+        }
+        if (a.count > 0) {
+            memcpy(block, a.slots, a.count.to_type(u64) * sizeof(*void).to_type(u64))
+        }
+        a.slots = block
+        a.cap = next_cap
+    }
+    let slots **node = a.slots.to_type(**node)
+    slots[a.count] = value
+    a.count += 1
+    return 0
+}
+
+// items_get 取数组第 index 个元素；越界返回空指针。
+fn items_get(a *items, index int) *node {
+    if (a == 0 || index < 0 || index >= a.count) {
+        return 0
+    }
+    let slots **node = a.slots.to_type(**node)
+    return slots[index]
+}
+
+// items_last 取数组最后一个元素；空数组返回空指针。
+fn items_last(a *items) *node {
+    if (a == 0 || a.count == 0) {
+        return 0
+    }
+    return items_get(a, a.count - 1)
+}
+
+// doc_add_dotted 记录当前节内新建的点键表，节结束或表头出现时统一冻结。
+fn doc_add_dotted(state *doc_state, value *node) int {
+    if (state.dotted_count >= state.dotted_cap) {
+        let next_cap int = 8
+        if (state.dotted_cap > 0) {
+            if (state.dotted_cap > 1073741823) {
+                return -1
+            }
+            next_cap = state.dotted_cap * 2
+        }
+        let bytes u64 = next_cap.to_type(u64) * sizeof(*void).to_type(u64)
+        let block *void = pool_alloc(&state.mem, bytes).to_type(*void)
+        if (block == 0) {
+            return -1
+        }
+        if (state.dotted_count > 0) {
+            memcpy(block, state.dotted,
+                state.dotted_count.to_type(u64) * sizeof(*void).to_type(u64))
+        }
+        state.dotted = block
+        state.dotted_cap = next_cap
+    }
+    let slots **node = state.dotted.to_type(**node)
+    slots[state.dotted_count] = value
+    state.dotted_count += 1
+    return 0
+}
+
+// doc_finalize_dotted 把当前节创建的点键表标记为已定义；表头切换或 EOF 调用。
+fn doc_finalize_dotted(state *doc_state) void {
+    let slots **node = state.dotted.to_type(**node)
+    let i int = 0
+    for i < state.dotted_count {
+        if (slots[i].def == TOML_DEF_DOTTED) {
+            slots[i].def = TOML_DEF_DEFINED
+        }
+        i += 1
+    }
+    state.dotted_count = 0
+}
+
+// doc_truncate_dotted 丢弃 count 之后的点键记录；用于内联表内部解析。
+fn doc_truncate_dotted(state *doc_state, count int) void {
+    if (count < 0) {
+        count = 0
+    }
+    if (count < state.dotted_count) {
+        state.dotted_count = count
+    }
+}
+
+// doc_new 创建空文档状态；失败时释放已分配部分并返回空指针。
+fn doc_new() *doc_state {
+    let state *doc_state = malloc(sizeof(doc_state).to_type(u64)).to_type(*doc_state)
+    if (state == 0) {
+        return 0
+    }
+    pool_init(&state.mem)
+    state.dotted = 0
+    state.dotted_count = 0
+    state.dotted_cap = 0
+    let root *node = node_new_table(&state.mem, TOML_DEF_ROOT, span_zero())
+    if (root == 0) {
+        pool_free_all(&state.mem)
+        free(state.to_type(*void))
+        return 0
+    }
+    state.root = root
+    return state
+}
+
+// doc_free 释放文档状态与全部池块。
+fn doc_free(state *doc_state) void {
+    if (state == 0) {
+        return
+    }
+    pool_free_all(&state.mem)
+    state.root = 0
+    free(state.to_type(*void))
+}

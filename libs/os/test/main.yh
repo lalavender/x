@@ -1,0 +1,421 @@
+module main
+
+import io
+import os
+import sys
+
+fn fail(code int) int {
+    printf("FAIL %d\n", code)
+    return 1
+}
+
+fn file_tests() int {
+    os.remove_path("work/a.txt")
+    os.remove_dir_path("work/d1")
+    let created os.Error = os.make_dir("work", 493)
+    if (created.kind != os.error_none && created.kind != os.error_already_exists) {
+        return fail(1)
+    }
+    let options os.OpenOptions = os.write_options()
+    options.truncate = true
+    let opened os.FdResult = os.open_path("work/a.txt", options)
+    if (opened.fd < 0 || opened.error.kind != os.error_none) {
+        return fail(2)
+    }
+    let data [5]u8 = [65, 66, 67, 10, 0]
+    let written os.IoResult = os.write_some(opened.fd, data[0..5])
+    if (written.count != 5 || written.error.kind != os.error_none) {
+        return fail(3)
+    }
+    if (os.close_file(opened.fd).kind != os.error_none) {
+        return fail(4)
+    }
+    let reader os.FdResult = os.open_path("work/a.txt",
+        os.read_options())
+    if (reader.fd < 0) {
+        let detail int = reader.error.native_code
+        printf("read open code=%d\n", detail)
+        return fail(5)
+    }
+    let buffer [16]u8
+    let got os.IoResult = os.read_some(reader.fd, buffer[0..16])
+    if (got.count != 5 || buffer[0] != 65 || buffer[4] != 0) {
+        return fail(6)
+    }
+    let eof os.IoResult = os.read_some(reader.fd, buffer[0..16])
+    if (eof.count != 0 || eof.error.kind != os.error_none) {
+        return fail(7)
+    }
+    os.close_file(reader.fd)
+    let missing os.FdResult = os.open_path("work/missing",
+        os.read_options())
+    if (missing.fd != -1 || missing.error.kind != os.error_not_found) {
+        return fail(8)
+    }
+    let invalid os.OpenOptions = os.read_options()
+    invalid.truncate = true
+    let rejected os.FdResult = os.open_path("work/a.txt", invalid)
+    if (rejected.fd != -1 || rejected.error.kind != os.error_invalid_argument) {
+        return fail(9)
+    }
+    if (os.make_dir("work", 493).kind != os.error_already_exists) {
+        return fail(10)
+    }
+    if (os.rename_path("work/a.txt",
+        "work/b.txt").kind != os.error_none) {
+        return fail(11)
+    }
+    if (os.remove_path("work/b.txt").kind != os.error_none) {
+        return fail(12)
+    }
+    if (os.remove_path("work/b.txt").kind != os.error_not_found) {
+        return fail(13)
+    }
+    os.remove_path("work/append.txt")
+    let create_opts os.OpenOptions = os.write_options()
+    create_opts.truncate = true
+    let create_file os.FdResult = os.open_path("work/append.txt",
+        create_opts)
+    if (create_file.fd < 0) {
+        return fail(14)
+    }
+    let head [3]u8 = [97, 98, 99]
+    os.write_some(create_file.fd, head[0..3])
+    os.close_file(create_file.fd)
+    let append os.OpenOptions = os.write_options()
+    append.append = true
+    let appended os.FdResult = os.open_path("work/append.txt", append)
+    if (appended.fd < 0) {
+        return fail(15)
+    }
+    let tail [2]u8 = [100, 101]
+    os.write_some(appended.fd, tail[0..2])
+    os.close_file(appended.fd)
+    let reader2 os.FdResult = os.open_path("work/append.txt",
+        os.read_options())
+    if (reader2.fd < 0) {
+        return fail(16)
+    }
+    let whole [8]u8
+    let got2 os.IoResult = os.read_some(reader2.fd, whole[0..8])
+    os.close_file(reader2.fd)
+    if (got2.count != 5 || whole[0] != 97 || whole[4] != 101) {
+        return fail(17)
+    }
+    let exclusive os.OpenOptions = os.write_options()
+    exclusive.exclusive = true
+    let clash os.FdResult = os.open_path("work/append.txt", exclusive)
+    if (clash.fd != -1 || clash.error.kind != os.error_already_exists) {
+        return fail(18)
+    }
+    if (os.remove_path("work/append.txt").kind != os.error_none) {
+        return fail(19)
+    }
+    if (os.make_dir("work/d1", 493).kind != os.error_none) {
+        return fail(38)
+    }
+    if (os.remove_dir_path("work/d1").kind != os.error_none) {
+        return fail(39)
+    }
+    return 0
+}
+
+fn dir_tests() int {
+    let buffer [256]u8
+    let opened os.DirReaderResult = os.open_dir("work", buffer[0..256])
+    if (opened.reader.active != 1 || opened.error.kind != os.error_none) {
+        return fail(20)
+    }
+    let entries int = 0
+    let long_seen int = 0
+    let dir_seen int = 0
+    for 1 == 1 {
+        let item os.DirEntryResult = os.next_entry(&opened.reader)
+        if (item.status == os.dir_entry_end) {
+            break
+        }
+        if (item.status == os.dir_entry_error) {
+            os.close_dir(&opened.reader)
+            return fail(21)
+        }
+        entries += 1
+        if (item.entry.name_len == 60) {
+            if (item.entry.name[0] == 110 && item.entry.name[59] == 110) {
+                long_seen = 1
+            }
+        }
+        if (item.entry.kind == os.dir_directory) {
+            if (item.entry.name_len == 6 && item.entry.name[0] == 115
+                && item.entry.name[1] == 117 && item.entry.name[2] == 98
+                && item.entry.name[5] == 114) {
+                dir_seen = 1
+            }
+        }
+    }
+    if (os.close_dir(&opened.reader).kind != os.error_none) {
+        return fail(22)
+    }
+    if (entries != 3 || long_seen != 1 || dir_seen != 1) {
+        printf("entries=%d long=%d dir=%d\n", entries, long_seen, dir_seen)
+        return fail(23)
+    }
+    let closed os.DirEntryResult = os.next_entry(&opened.reader)
+    if (closed.status != os.dir_entry_error) {
+        return fail(24)
+    }
+    let cwd [256]u8
+    let got os.IoResult = os.get_cwd(cwd[0..256])
+    if (got.count == 0 || got.error.kind != os.error_none) {
+        return fail(25)
+    }
+    // 进入 work 前保留启动目录，稍后恢复，避免污染调用方目录。
+    let origin [512]u8
+    let origin_result os.IoResult = os.get_cwd(origin[0..512])
+    if (origin_result.error.kind != os.error_none) {
+        return fail(65)
+    }
+    if (os.change_dir("work").kind != os.error_none) {
+        return fail(26)
+    }
+    let after [256]u8
+    let moved os.IoResult = os.get_cwd(after[0..256])
+    if (moved.count < 16) {
+        return fail(27)
+    }
+    if (os.change_dir((&origin[0]).to_type(*char)).kind != os.error_none) {
+        return fail(28)
+    }
+    let tiny [64]u8
+    let tiny_opened os.DirReaderResult = os.open_dir("work",
+        tiny[0..64])
+    if (tiny_opened.reader.active != 1) {
+        return fail(29)
+    }
+    let tiny_failed int = 0
+    for 1 == 1 {
+        let item os.DirEntryResult = os.next_entry(&tiny_opened.reader)
+        if (item.status == os.dir_entry_end) {
+            break
+        }
+        if (item.status == os.dir_entry_error) {
+            if (item.error.kind != os.error_invalid_argument) {
+                os.close_dir(&tiny_opened.reader)
+                return fail(33)
+            }
+            tiny_failed = 1
+            break
+        }
+    }
+    os.close_dir(&tiny_opened.reader)
+    if (tiny_failed != 1) {
+        return fail(34)
+    }
+    let empty_buf [1]u8
+    let no_buffer os.DirReaderResult = os.open_dir("work",
+        empty_buf[0..0])
+    if (no_buffer.reader.active != 0
+        || no_buffer.error.kind != os.error_invalid_argument) {
+        return fail(35)
+    }
+    let missing_dir os.DirReaderResult = os.open_dir("work/absent",
+        buffer[0..256])
+    if (missing_dir.reader.active != 0
+        || missing_dir.error.kind != os.error_not_found) {
+        return fail(36)
+    }
+    let small_cwd [4]u8
+    let short_result os.IoResult = os.get_cwd(small_cwd[0..4])
+    if (short_result.error.kind != os.error_invalid_argument) {
+        return fail(37)
+    }
+    return 0
+}
+
+fn env_tests(envp **char) int {
+    let found os.EnvResult = os.get_env(envp, "PATH")
+    if (found.found != true || found.error.kind != os.error_none) {
+        return fail(30)
+    }
+    let missing os.EnvResult = os.get_env(envp, "YH_OS8_NO_SUCH_KEY")
+    if (missing.found != false || missing.error.kind != os.error_none) {
+        return fail(31)
+    }
+    let invalid os.EnvResult = os.get_env(envp, "A=B")
+    if (invalid.error.kind != os.error_invalid_argument) {
+        return fail(32)
+    }
+    return 0
+}
+
+fn time_tests() int {
+    let stamp sys.Timespec
+    if (sys.read_clock(sys.CLOCK_MONOTONIC, &stamp) != 0) {
+        return fail(40)
+    }
+    if (stamp.sec < 0 || stamp.nsec < 0 || stamp.nsec >= 1000000000) {
+        return fail(41)
+    }
+    let request sys.Timespec
+    request.sec = 0
+    request.nsec = 1000000
+    if (sys.sleep_time(&request, 0) != 0) {
+        return fail(42)
+    }
+    let mapped i64 = sys.map_memory(0, 8192, sys.PROT_READ | sys.PROT_WRITE,
+        sys.MAP_PRIVATE | sys.MAP_ANONYMOUS, -1, 0)
+    if (sys.is_error(mapped) != 0) {
+        return fail(43)
+    }
+    let memory *u8 = mapped.to_type(*u8)
+    memory[0] = 65
+    if (memory[4095] != 0) {
+        return fail(44)
+    }
+    if (sys.unmap_memory(memory.to_type(*void), 8192) != 0) {
+        return fail(45)
+    }
+    if (sys.process_id() <= 0) {
+        return fail(46)
+    }
+    let fds [2]int
+    if (sys.create_pipe(&fds[0], 0) != 0) {
+        return fail(47)
+    }
+    let pipe_data [3]u8 = [120, 121, 122]
+    if (sys.write_fd(fds[1], (&pipe_data[0]).to_type(*void), 3) != 3) {
+        return fail(48)
+    }
+    let pipe_back [3]u8
+    if (sys.read_fd(fds[0], (&pipe_back[0]).to_type(*void), 3) != 3) {
+        return fail(49)
+    }
+    if (pipe_back[2] != 122) {
+        return fail(58)
+    }
+    sys.close_fd(fds[0])
+    sys.close_fd(fds[1])
+    let refused [2]int
+    if (sys.create_pipe(&refused[0], sys.O_CLOEXEC) != -78) {
+        return fail(59)
+    }
+    let io_code int = io.println("io write path ok")
+    if (io_code != 0) {
+        return fail(60)
+    }
+    return 0
+}
+
+fn process_tests(argv **char, envp **char) int {
+    let child_argv [3]*char = [argv[0], "child", 0]
+    let spawned os.PidResult = os.spawn(argv[0], &child_argv[0], envp)
+    if (spawned.pid <= 0) {
+        return fail(50)
+    }
+    let waited os.WaitResult = os.wait(spawned.pid)
+    if (waited.state != os.wait_exited || waited.exit_code != 7) {
+        return fail(51)
+    }
+    let missing_argv [2]*char = ["work/absent", 0]
+    let missing os.PidResult = os.spawn("work/absent",
+        &missing_argv[0], envp)
+    if (missing.pid != -1 || missing.error.kind != os.error_not_found) {
+        return fail(52)
+    }
+    let env_argv [3]*char = [argv[0], "env", 0]
+    let child_env [2]*char = ["YH_OS8_CHILD=yes", 0]
+    let env_spawned os.PidResult = os.spawn(argv[0], &env_argv[0], &child_env[0])
+    if (env_spawned.pid <= 0) {
+        return fail(56)
+    }
+    let env_waited os.WaitResult = os.wait(env_spawned.pid)
+    if (env_waited.state != os.wait_exited || env_waited.exit_code != 7) {
+        return fail(57)
+    }
+    let proc_dir os.Error = os.make_dir("proc", 493)
+    if (proc_dir.kind != os.error_none
+        && proc_dir.kind != os.error_already_exists) {
+        return fail(63)
+    }
+    let staged os.FdResult = os.open_path("proc/noexec",
+        os.write_options())
+    if (staged.fd < 0) {
+        return fail(64)
+    }
+    os.close_file(staged.fd)
+    let noexec_argv [2]*char = ["proc/noexec", 0]
+    let noexec os.PidResult = os.spawn("proc/noexec",
+        &noexec_argv[0], envp)
+    if (noexec.pid != -1 || noexec.error.kind != os.error_permission_denied) {
+        return fail(61)
+    }
+    let bad_wait os.WaitResult = os.wait(999999)
+    if (bad_wait.state != os.wait_error) {
+        return fail(62)
+    }
+    let sleep_argv [3]*char = [argv[0], "sleep", 0]
+    let sleeper os.PidResult = os.spawn(argv[0], &sleep_argv[0], envp)
+    if (sleeper.pid <= 0) {
+        return fail(53)
+    }
+    if (sys.send_signal(sleeper.pid, sys.SIGTERM) != 0) {
+        return fail(54)
+    }
+    let killed os.WaitResult = os.wait(sleeper.pid)
+    if (killed.state != os.wait_signaled || killed.signal != sys.SIGTERM) {
+        return fail(55)
+    }
+    return 0
+}
+
+fn child_tests() int {
+    os.exit_now(7)
+    return 1
+}
+
+fn sleep_child() int {
+    os.sleep_us(2000000)
+    return 0
+}
+
+pub fn main(argc int, argv **char, envp **char) int {
+    if (argc > 1) {
+        let mode *char = argv[1]
+        if (mode[0] == 99) {
+            return child_tests()
+        }
+        if (mode[0] == 101 && mode[1] == 110) {
+            let value os.EnvResult = os.get_env(envp, "YH_OS8_CHILD")
+            if (value.found == true && value.error.kind == os.error_none) {
+                os.exit_now(7)
+            }
+            os.exit_now(8)
+            return 1
+        }
+        return sleep_child()
+    }
+    os.remove_path("work/a.txt")
+    os.remove_path("work/b.txt")
+    os.remove_path("work/d1")
+    let code int = file_tests()
+    if (code != 0) {
+        return code
+    }
+    code = dir_tests()
+    if (code != 0) {
+        return code
+    }
+    code = env_tests(envp)
+    if (code != 0) {
+        return code
+    }
+    code = time_tests()
+    if (code != 0) {
+        return code
+    }
+    code = process_tests(argv, envp)
+    if (code != 0) {
+        return code
+    }
+    printf("os8 darwin ok\n")
+    return 0
+}

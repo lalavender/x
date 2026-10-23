@@ -1,0 +1,160 @@
+module builtin
+import gen
+
+// ============================================================================
+// prelude.yh —— 内置（prelude）函数登记表
+//
+// 本模块只负责「哪些名字在未导入任何模块时可见」这一层：函数名、返回/参数
+// 类型、变参形态与运行时标志。符号表/类型表本身仍由 gen 提供，本模块通过
+// gen.prelude_add 追加条目，不实现任何运行时函数体。
+//
+// 分层：builtin 只 import gen，不 import lex/parse/ast/check/comptime/ir/
+// backend；gen 不 import builtin。入口（cmd/driver、cmd/llvm_emit、
+// cmd/module_worker）在 gen.ty_register_builtins() 与 gen.scope_push() 之后
+// 调用 builtin.sem_register_prelude()，登记顺序与历史行为保持一致。
+//
+// 运行时函数体在 backend/llvm_runtime.yh（内存/printf/Linux syscall）与
+// backend/llvm_apple_runtime.yh（Darwin 入口）中按需发射；本文件只登记符号
+// 与 F_* 标志，二者靠符号名/fn 标志对接，不要在这里写 IR。
+// ============================================================================
+
+// prelude_add_linux_syscall6：Linux arm64 的六参数系统调用入口；调用点由后端
+// 发射 svc 指令，因此不生成外部符号引用。
+fn prelude_add_linux_syscall6() int {
+    let gs *gen.GenState = gen.G()
+    let i int = 0
+    for i < 7 {
+        gen.ty_sig_param(gen.TY_U64)
+        i += 1
+    }
+    let idx int = gen.prelude_add("linux_syscall6", gen.TY_I64, 7, 0)
+    if (idx < 0) {
+        return -1
+    }
+    gs.task.c_syms[idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_LINUX_SYSCALL
+    return idx
+}
+
+// sem_register_prelude：登记编译器和程序使用的外部接口（语义边界 §7）。
+// 签名参数类型先按序入池，再以池起始下标建函数类型。
+pub fn sem_register_prelude() int {
+    let gs *gen.GenState = gen.G()
+    let t_pvoid int = gen.ty_ptr(gen.TY_VOID)
+    let t_pchar int = gen.ty_ptr(gen.TY_CHAR)
+    // printf(fmt *char, ...) int —— 本地格式化运行时，支持整数/字符串/字符。
+    gen.ty_sig_param(t_pchar)
+    let printf_idx int = gen.prelude_add("printf", gen.TY_I32, 1, 1)
+    if (printf_idx < 0) { return -1 }
+    gs.task.c_syms[printf_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_PRINTF
+    // yh test 的运行时断言入口：测试模块按 prelude 裸符号调用，测试入口模块
+    // 生成同名 C ABI 定义；生产程序不引用它，不进入链接。
+    gen.ty_sig_param(gen.TY_BOOL)
+    gen.ty_sig_param(gen.TY_I32)
+    gen.ty_sig_param(gen.TY_I32)
+    gen.ty_sig_param(t_pchar)
+    gen.prelude_add("__yh_test_assert", gen.TY_VOID, 4, 0)
+    // malloc(size u64) *void，由 yh 运行时直接通过 OS 内存映射实现。
+    gen.ty_sig_param(gen.TY_U64)
+    let malloc_idx int = gen.prelude_add("malloc", t_pvoid, 1, 0)
+    if (malloc_idx < 0) { return -1 }
+    gs.task.c_syms[malloc_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_MALLOC
+    // free(p *void) void，由映射头部记录尺寸后直接解除映射。
+    gen.ty_sig_param(t_pvoid)
+    let free_idx int = gen.prelude_add("free", gen.TY_VOID, 1, 0)
+    if (free_idx < 0) { return -1 }
+    gs.task.c_syms[free_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_FREE
+    // memcpy(dst *void, src *void, n u64) *void，由 yh 本地运行时实现。
+    gen.ty_sig_param(t_pvoid)
+    gen.ty_sig_param(t_pvoid)
+    gen.ty_sig_param(gen.TY_U64)
+    let memcpy_idx int = gen.prelude_add("memcpy", t_pvoid, 3, 0)
+    if (memcpy_idx < 0) { return -1 }
+    gs.task.c_syms[memcpy_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_MEMCPY
+    // strlen(s *char) u64，由 yh 本地运行时实现。
+    gen.ty_sig_param(t_pchar)
+    let strlen_idx int = gen.prelude_add("strlen", gen.TY_U64, 1, 0)
+    if (strlen_idx < 0) { return -1 }
+    gs.task.c_syms[strlen_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_STRLEN
+    // exit(code int) void
+    gen.ty_sig_param(gen.TY_I32)
+    gen.prelude_add("exit", gen.TY_VOID, 1, 0)
+    // open(path *char, flags int, ...) int —— 裸变参
+    gen.ty_sig_param(t_pchar)
+    gen.ty_sig_param(gen.TY_I32)
+    gen.prelude_add("open", gen.TY_I32, 2, 1)
+    // close(fd int) int
+    gen.ty_sig_param(gen.TY_I32)
+    gen.prelude_add("close", gen.TY_I32, 1, 0)
+    // mkdir(path *char, mode int) int —— 创建一个目录，不递归创建父目录。
+    gen.ty_sig_param(t_pchar)
+    gen.ty_sig_param(gen.TY_I32)
+    gen.prelude_add("mkdir", gen.TY_I32, 2, 0)
+    // read(fd int, buf *void, count u64) i64
+    gen.ty_sig_param(gen.TY_I32)
+    gen.ty_sig_param(t_pvoid)
+    gen.ty_sig_param(gen.TY_U64)
+    gen.prelude_add("read", gen.TY_I64, 3, 0)
+    // write(fd int, buf *void, count u64) i64
+    gen.ty_sig_param(gen.TY_I32)
+    gen.ty_sig_param(t_pvoid)
+    gen.ty_sig_param(gen.TY_U64)
+    gen.prelude_add("write", gen.TY_I64, 3, 0)
+    // system(cmd *char) int 仅由明确启用的兼容配置提供。
+    if (gs.task.c_legacy_system != 0) {
+        gen.ty_sig_param(t_pchar)
+        gen.prelude_add("system", gen.TY_I32, 1, 0)
+    }
+    // unlink(path *char) int —— 清理 -o 模式的临时汇编文件
+    gen.ty_sig_param(t_pchar)
+    gen.prelude_add("unlink", gen.TY_I32, 1, 0)
+    // fork/execv/waitpid：过渡期直接启动模块 worker，不经过 shell。
+    gen.prelude_add("fork", gen.TY_I32, 0, 0)
+    gen.ty_sig_param(t_pchar)
+    gen.ty_sig_param(gen.ty_ptr(t_pchar))
+    gen.prelude_add("execv", gen.TY_I32, 2, 0)
+    gen.ty_sig_param(t_pchar)
+    gen.ty_sig_param(gen.ty_ptr(t_pchar))
+    gen.prelude_add("execvp", gen.TY_I32, 2, 0)
+    // dup2(oldfd int, newfd int) int —— 子进程输出重定向的 POSIX 接口。
+    gen.ty_sig_param(gen.TY_I32)
+    gen.ty_sig_param(gen.TY_I32)
+    gen.prelude_add("dup2", gen.TY_I32, 2, 0)
+    gen.ty_sig_param(gen.TY_I32)
+    gen.ty_sig_param(gen.ty_ptr(gen.TY_I32))
+    gen.ty_sig_param(gen.TY_I32)
+    gen.prelude_add("waitpid", gen.TY_I32, 3, 0)
+    // getpid/rename/usleep/kill：原子发布接口和调度进程 worker。
+    gen.prelude_add("getpid", gen.TY_I32, 0, 0)
+    gen.ty_sig_param(t_pchar)
+    gen.ty_sig_param(t_pchar)
+    gen.prelude_add("rename", gen.TY_I32, 2, 0)
+    gen.ty_sig_param(gen.TY_I32)
+    gen.prelude_add("usleep", gen.TY_I32, 1, 0)
+    gen.ty_sig_param(gen.TY_I32)
+    gen.ty_sig_param(gen.TY_I32)
+    gen.prelude_add("kill", gen.TY_I32, 2, 0)
+    if (gen.tg_darwin() == 0) {
+        // LL12：Linux syscall 入口由 LLVM 运行时提供（backend/llvm_runtime.yh
+        // 的 linux_syscall6），旧汇编桩不再发射。
+        if (prelude_add_linux_syscall6() < 0) {
+            return -1
+        }
+    }
+    // clock_gettime 是编译器 --stats 使用的单调时钟 OS API，libs/time 也
+    // 引用它；Darwin 经 libSystem、Linux 经 glibc 解析（POSIX 公共接口），
+    // 两种目标都登记。getattrlistbulk 是 Darwin 专用目录 API，保持限定。
+    gen.ty_sig_param(gen.TY_I32)
+    gen.ty_sig_param(t_pvoid)
+    if (gen.prelude_add("clock_gettime", gen.TY_I32, 2, 0) < 0) {
+        return -1
+    }
+    if (gen.tg_darwin() != 0) {
+        gen.ty_sig_param(gen.TY_I32)
+        gen.ty_sig_param(gen.ty_ptr(gen.TY_VOID))
+        gen.ty_sig_param(gen.ty_ptr(gen.TY_VOID))
+        gen.ty_sig_param(gen.TY_U64)
+        gen.ty_sig_param(gen.TY_U64)
+        gen.prelude_add("getattrlistbulk", gen.TY_I32, 5, 0)
+    }
+    return 0
+}

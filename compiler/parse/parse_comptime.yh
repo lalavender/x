@@ -478,9 +478,81 @@ fn parse_comptime_diag_kind_at(first int) int {
     return kind
 }
 
+// parse_test_assert_lit：为测试断言调用构造编译器生成的标量实参 AST。
+// line/col 与空消息没有源码 token，借用断言调用的 token 区间做来源范围。
+fn parse_test_assert_lit(res *gen.Res, tid int, value i64,
+    first int, after int) int {
+    let gs *gen.GenState = gen.G()
+    gen.sem_res_reset(res, tid)
+    res.sym = -1
+    res.is_const = 1
+    res.is_lit = 1
+    res.ival = value
+    if (gs.task.c_ast_capture == 0) { return 0 }
+    let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, gen.TOK_NUMBER,
+        first, after, tid, -1, -1, -1)
+    if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) { return -1 }
+    res.ast_id = id
+    return 0
+}
+
+// parse_test_assert_call：把 test 内的 $assert(cond, msg) 降低为对
+// __yh_test_assert(cond, line, col, msg) 的普通运行期调用。
+// 该符号是 prelude extern，由 yh test 生成的入口模块提供 C ABI 定义。
+fn parse_test_assert_call(res *gen.Res, condition *gen.Res, msg *gen.Res,
+    line int, col int, first int, after int) int {
+    let gs *gen.GenState = gen.G()
+    let name *char = "__yh_test_assert"
+    let nlen int = 16
+    let noff int = gen.tml_intern_str(name.to_type(*u8), 0, nlen)
+    if (noff < 0) { return -1 }
+    let sym int = gen.sym_lookup_off(noff, nlen)
+    if (sym < 0 || gs.task.c_syms[sym].kind != gen.SYM_FN) {
+        return gen.sem_err("内部错误：缺少 __yh_test_assert 运行时入口")
+    }
+    let callee gen.Res
+    gen.sem_res_reset(&callee, gs.task.c_syms[sym].type_id)
+    callee.sym = sym
+    if (gen.sem_call_begin(&callee) != 1) {
+        return gen.sem_err("内部错误：测试断言入口不是直接函数")
+    }
+    if (gen.sem_push_arg(condition, &callee) != 0) { return -1 }
+    // 生成的实参节点与实参链统一使用断言调用的 token 范围：实参链按追加
+    // 顺序逐层包住前一项，若各实参范围互不包含会让父节点范围校验失败。
+    let lit_first int = first
+    let lit_last int = after
+    let line_res gen.Res
+    if (parse_test_assert_lit(&line_res, gen.TY_I32, line.to_type(i64),
+            lit_first, lit_last) != 0) { return -1 }
+    if (gen.sem_push_arg(&line_res, &callee) != 0) { return -1 }
+    let col_res gen.Res
+    if (parse_test_assert_lit(&col_res, gen.TY_I32, col.to_type(i64),
+            lit_first, lit_last) != 0) { return -1 }
+    if (gen.sem_push_arg(&col_res, &callee) != 0) { return -1 }
+    if (gen.sem_push_arg(msg, &callee) != 0) { return -1 }
+    if (gen.sem_call(&callee, res) != 0) { return -1 }
+    if (gs.task.c_ast_capture == 0) { return 0 }
+    let args int = -1
+    if (ast.ast_expr_assert_args_add(&args, condition.ast_id, line_res.ast_id,
+            col_res.ast_id, msg.ast_id, first, after) != 0) { return -1 }
+    let callee_ast int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, gen.TOK_IDENT,
+        first, after, callee.type_id, -1, -1, -1)
+    if (callee_ast < 0 || ast.ast_expr_set_semantics(callee_ast, &callee) != 0) {
+        return -1
+    }
+    let call_ast int = ast.ast_expr_add(ast.AST_EXPR_CALL, gen.TK_LPAREN,
+        first, after, res.type_id, callee_ast, args, -1)
+    if (call_ast < 0 || ast.ast_expr_set_semantics(call_ast, res) != 0) {
+        return -1
+    }
+    res.ast_id = call_ast
+    return 0
+}
+
 // parse_comptime_diag_call：解析诊断实参并返回待独立语句消费的 void 标记结果。
 fn parse_comptime_diag_call(res *gen.Res, kind int, line int, col int) int {
     let gs *gen.GenState = gen.G()
+    let first int = gs.task.c_pos
     p_adv() // 诊断名
     if (p_expect(gen.TK_LPAREN, "编译期诊断调用期望 '('") != 0) { return -1 }
     let condition gen.Res
@@ -489,7 +561,11 @@ fn parse_comptime_diag_call(res *gen.Res, kind int, line int, col int) int {
     if (kind == gen.CT_DIAG_ASSERT) {
         let saved_fold int = gs.task.c_fold
         let ct_body int = (gs.task.c_fn_flags & gen.F_COMPTIME) != 0
-        if (gs.task.c_compile != 0 && ct_body == 0) { gs.task.c_fold += 1 }
+        // test 体里的断言是运行期检查（YT2 接执行器）；先按普通表达式
+        // 解析，不做强制常量折叠，否则 helper(...) 会被误判为非常量。
+        if (gs.task.c_compile != 0 && ct_body == 0 && gs.task.c_test_body == 0) {
+            gs.task.c_fold += 1
+        }
         let cr int = parse_expr_iso(&condition)
         gs.task.c_fold = saved_fold
         if (cr != 0) { return -1 }
@@ -500,9 +576,27 @@ fn parse_comptime_diag_call(res *gen.Res, kind int, line int, col int) int {
             if (condition.type_id != gen.TY_BOOL) {
                 return gen.sem_err("$assert 条件必须是 bool")
             }
-            if (ct_body == 0 && condition.is_const == 0) {
+            if (ct_body == 0 && condition.is_const == 0
+                && gs.task.c_test_body == 0) {
                 return gen.sem_err("$assert 条件必须是编译期常量")
             }
+        }
+        if (gs.task.c_test_body != 0) {
+            // test 体：把断言降成运行期调用，消息可省略；调用本身是独立语句。
+            let msg gen.Res
+            if (p_cur() == gen.TK_COMMA) {
+                p_adv()
+                if (p_cur() != gen.TOK_STRING) {
+                    return gen.err_tok("$assert 消息必须是字符串文字量")
+                }
+                if (parse_expr_iso(&msg) != 0) { return -1 }
+            } else {
+                if (parse_test_assert_lit(&msg, gen.ty_ptr(gen.TY_CHAR), 0,
+                        first, gs.task.c_pos) != 0) { return -1 }
+            }
+            if (p_expect(gen.TK_RPAREN, "编译期诊断调用期望 ')'") != 0) { return -1 }
+            return parse_test_assert_call(res, &condition, &msg, line, col,
+                first, gs.task.c_pos)
         }
         if (gs.task.c_ast_capture != 0 && condition.ast_id >= 0
             && ast.ast_stmt_add_expr(condition.ast_id) != 0) { return -1 }

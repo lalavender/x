@@ -199,8 +199,9 @@ pub struct Value {
 文本暂时借用调用者存储。
 **列表值不由公开构造函数创建**（CLI1 定案）：CLI0 实测切片没有可读取的 data 字段，
 无法把切片引用存进 union 载荷（见[完成记录](../01-finished/yh-cli0语言能力与ABI基线-2026-10-19.md)）；
-序列的内部布局是模块私有实现，应用通过 `get_list` 读取解析产生的列表，
-外部构造列表值的入口等到 CLI2 与多值 action 一起定约定。
+序列的内部布局是模块私有实现，应用通过 `get_list` 读取解析产生的列表。
+当前版本取得非空列表默认值的方式是：先解析出一个列表，用 `get_value` 取出
+该 `Value`，再交给 `default_of`；`add_argument` 会深复制，之后释放原结果安全。
 注册声明、设置默认值和设置 namespace 值时深复制，调用完成后即可释放原存储。
 值必须是无环树；`none` 的 union 载荷不读取。
 
@@ -286,7 +287,7 @@ yh 当前没有私有字段，调用者按契约不改写句柄内容；公开�
 | `group/mutex` | 当前 parser 内的组 ID，0 表示未分组 |
 | `converter/validator/user` | 可选转换、值校验与用户上下文 |
 | `type_name/action_name` | 可选已注册名称；不能与对应直接回调同时提供 |
-| `custom_action/version` | 自定义 action 回调，或版本 action 的输出模板 |
+| `custom_action/version` | 自定义 action 回调，或版本 action 的输出模板（`version_text`） |
 | `output_shape` | 可空 `*ValueShape`；直接自定义 action 必须提供，注册时复制；内置 action 自动推导 |
 
 dest 在 add_argument 时确定；后续 add_alias 不改变它。位置参数直接使用声明名称。
@@ -750,6 +751,10 @@ choices 缺省以候选集合展示；显式 metavar 优先，候选约束仍存
 文本模板支持 `%(prog)s/%(dest)s/%(default)s/%(type)s/%%`；不提供任意格式化执行。
 未知模板占位符在 freeze 报配置错误；默认值渲染转义控制字符，避免破坏帮助布局。
 
+**实现状态（2026-10-22）**：usage/description/epilog/help/version_text 的模板展开、
+自定义 usage（含空串抑制）与 `version_text` 已实现；usage/description/epilog/
+version_text 只接受 `%(prog)s` 与 `%%`，help 另接受 `%(dest)s/%(default)s/%(type)s`。
+
 ### 14.2 格式化与输出 API
 
 | 签名 | 契约 |
@@ -773,7 +778,9 @@ parse_main_or_exit 只接受根 parser；对非 ok 结果执行 render、release
 `render_text`、`print_usage`/`print_help`、`render(result, out_fd, error_fd)` 与
 `exit_code` 均已实现；失败结果自带 `usage_text`/`prog_text`，`render` 不依赖 parser。
 `parse_main_or_exit` 用 `render` + `exit_code` 输出与退出，输出失败时退出码降级为 1。
-`warnings` 通道尚未实现（`render` 暂不输出 warnings）。
+**实现状态（2026-10-22）**：`warnings` 通道已实现（`Result.warnings`）；
+deprecated 参数/命令显式使用时生成一条警告，`render` 写到 error_fd，
+`parse_main_or_exit` 成功路径先输出并清空。
 
 ### 14.3 错误与控制行为的优先级
 

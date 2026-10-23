@@ -8,10 +8,10 @@
 > `make selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
-version = `0.0.5`，source = `.`），按 **gen / lex / parse / ast / check / comptime / cmd / ir / backend
-多模块**组织，2026-10-20 新增 `check` 后共 **九个模块**、107 个 `.yh` 文件；
-`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担 AST 一致性校验；
-`ir`（目标隔离
+version = `0.0.9`，source = `.`），按 **gen / builtin / lex / parse / ast / check / comptime / cmd / ir / backend
+多模块**组织，2026-10-22 LA3 后共 **十个模块**、114 个 `.yh` 文件；
+`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担 AST 一致性校验，
+`builtin/` 只放内置（prelude）函数登记表；`ir`（目标隔离
 SSA）与其它模块同为根项目普通模块，共同进入编译器构建与自举固定点。
 校验视图生命周期与模块依赖见[check 拆分设计](../docs/03-design/yh-编译器check模块拆分设计.md)。
 
@@ -57,9 +57,24 @@ python3 tests/yh-run/check.py --compiler $PWD/../yh
 
 门：①固定点——cc3/cc4 全部模块 `.s`/`.s.i` 逐字节一致；②cc4 自解析
 compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反例全拒）；
-④cc4 运行语料（`tests/yh-run` 全量 run/fail/pass，2026-10-13：299 例）；
-⑤模块语料（`tests/modules/check.py` 18 例）；⑥项目验收
-（`tests/modules/build-check.py` 106 例）。滚种子前必须全绿。
+④cc4 运行语料（`tests/yh-run` 全量 run/fail/pass，2026-10-22：351 例）；
+⑤模块语料（`tests/modules/check.py`）；⑥项目验收
+（`tests/modules/build-check.py` 115 例），以及
+`tests/selfhost/llvm-function-cache.py` 的函数级缓存矩阵。滚种子前必须全绿。
+
+## 内建测试
+
+`gen/buffer.yh`、`lex/layout.yh`、`parse/parse_type.yh` 含 `test` 块，覆盖
+纯函数边界（`hexval`、`is_assign_op`、`lex_can_end`、`is_member_name`、
+`is_type_start`）。运行：
+
+```bash
+make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test 语法）
+```
+
+测试体走与普通函数相同的 CheckedModule→SSA→LLVM 路径，但只在测试模式下登记，
+生产构建的模块对象与 `.s.i` 不含 `__yh_test_` 符号。给本目录新增 `test` 块前，
+入库种子必须已经支持 test 语法（滚种子之后）。
 
 ## 模块与文件职责
 
@@ -93,7 +108,15 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 | `ast/module_snapshot.yh` | `CheckedModule` 快照数据模型、捕获/释放与有界读取 |
 | `ast/module_snapshot_view.yh` | 为外部快照校验借出只读视图，不转移所有权 |
 | `ast/module_snapshot_ctx.yh` | 纯快照 lowering 的循环、控制流、标签与函数上下文 |
-| `ast/module_snapshot_lower.yh` | 将受检快照转换为模块 IR 的主体 lowering |
+| `ast/module_snapshot_lower.yh` | 模块来源/类型/符号准备、签名登记、逐函数构造与模块提交（LA2b） |
+| `ast/module_snapshot_lower_expr.yh` | 标量表达式、条件、三元、整数提升与转换 lowering |
+| `ast/module_snapshot_lower_call.yh` | 实参、副本、类型化变参、直接/间接调用 lowering |
+| `ast/module_snapshot_lower_flow.yh` | if/循环/switch/label-goto 与 phi 合流 lowering |
+| `ast/module_snapshot_lower_place.yh` | 绑定赋值、地址、下标与切片位置 lowering |
+| `ast/module_snapshot_lower_aggregate.yh` | 数组/结构体字面量、聚合存储与复制 lowering |
+| `ast/module_snapshot_lower_cache.yh` | 函数级 IR 缓存键：token 流、布局/签名与非函数声明事实 |
+| `ast/module_snapshot_check_key.yh` | LA3.3 C3：pass2b 前的函数 check 键（当前未启用） |
+| `ast/module_snapshot_check_slice.yh` | LA3.3 C2/C3：函数级受检 AST 切片捕获/导入与离线往返探针 |
 | `ast/module_snapshot_forin.yh` | `for-in` 循环 lowering 辅助 |
 | `ast/module_snapshot_global.yh` | 全局对象类型、初始化值与引用 lowering |
 | `ast/module_snapshot_static.yh` | 静态数据、字符串与重定位 lowering 辅助 |
@@ -130,13 +153,24 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 统一交给 pass2a 之后的 typed 布局常量依赖调度（早期快路径只在 `ct_is_prepared` 已就绪时生效）。
 单文件入口与函数 AST 的统一仍在待办中。
 
+**builtin** —— 内置（prelude）函数登记
+
+| 文件 | 职责 |
+| --- | --- |
+| `builtin/prelude.yh` | prelude 名字/签名/变参形态与 `F_RUNTIME_*` 标志；只 import gen |
+
+登记顺序沿用历史实现：先 `gen.ty_register_builtins()`、`gen.scope_push()`，再
+`builtin.sem_register_prelude()`。符号表与类型表仍归 gen（`gen.prelude_add`
+是唯一被导出的原语），运行时函数体在 `backend/llvm_runtime.yh` /
+`backend/llvm_apple_runtime.yh` 按需发射。
+
 **gen** —— 语义与后端
 
 | 文件 | 职责 |
 | --- | --- |
 | `gen/model.yh` | token 常量、类型/符号常量、Tok/Res/CType/CSym 等结构、全部全局状态 |
 | `gen/buffer.yh` | 源文件整读（open/read/close）、汇编输出缓冲、诊断、字节写出 |
-| `gen/symbols.yh` | 名字池、类型表、符号/作用域、类型兼容、常量折叠、prelude 登记 |
+| `gen/symbols.yh` | 名字池、类型表、符号/作用域、类型兼容、常量折叠、prelude 符号表原语 |
 | `gen/target.yh` | 目标数据模型：字长、对齐、结构体布局（**换平台的第一步**） |
 | `gen/sem_value.yh` | 字面量/标识符求值、常量折叠与值类别（LL12：无发射） |
 | `gen/sem_expr.yh` | 表达式语义：下标、成员、运算、转换、切片（LL12：无发射） |
@@ -151,13 +185,18 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | --- | --- |
 | `ir/ssa.yh`、`ir/ssa_call.yh` | typed SSA、整数转换、CFG/verifier 与直接调用契约 |
 | `ir/ssa_serialize.yh` | 含调用目标与实参的稳定 IR 编码 |
+| `ir/ssa_module_40_function_cache.yh` | 单函数 + 贡献闭包的迷你模块缓存单元 |
+| `ir/ssa_module_50_function_rebind.yh` | 缓存记录的类型/符号/全局重绑定与函数装配 |
 
 **cmd** —— CLI 与项目管理
 
 | 文件 | 职责 |
 | --- | --- |
-| `cmd/driver.yh` | `main(argc, argv)`、参数分派、`check` / `--syntax-check` / `--emit-asm` |
-| `cmd/compile.yh` | 单文件编译模式（`yh -o out file.yh`） |
+| `cmd/driver.yh` | `main(argc, argv)`、参数分派、`check` / `test` / `--syntax-check` / `--emit-asm` |
+| `cmd/test_cmd.yh` | `yh test` 的测试发现、文档目标绑定、模块/文件选择、测试体降低与对象发布（YT1/YT2a） |
+| `cmd/llvm_emit.yh` | 单文件受检前端、CLI 形态转换与单文件链接协调 |
+| `cmd/llvm_pipeline.yh` | 已验证快照 → LLVM 文本/对象/汇编的共用驱动与原子发布 |
+| `cmd/function_ir_cache.yh` | 函数缓存目录、索引、环境键与原子记录提交 |
 | `cmd/toml.yh` | `project.toml` 解析与 schema 诊断（未知字段、必填项、行号） |
 | `cmd/project_state.yh` | 项目状态：根发现、源码根扫描、模块索引 |
 | `cmd/project_index.yh` | 清单 schema 校验与字段提取（name/version/author/source/os/arch/dependencies） |
@@ -180,8 +219,11 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 
 `compiler/ir/` 是独立的模块 IR 子项目，由 `compiler/project.toml` 以本地 path
 依赖引入，也由 `tests/modules/projects/irverify/` 直接依赖并运行验收。
-LL12 后受检快照统一经 `ast/module_snapshot_lower.yh` 降低为 `ir.IRModule`，
-再由 `backend/llvm_*.yh` 发 LLVM 文本；旧「函数级 SSA + 汇编替换」链已删除，
+LL12 后受检快照统一经 `ast/module_snapshot_lower*.yh` 降低为 `ir.IRModule`，
+再由 `backend/llvm_*.yh` 发 LLVM 文本，`cmd/llvm_pipeline.yh` 统一经内嵌桥
+原子发布对象/汇编；项目构建按函数复用 `ir/ssa_module_40_function_cache.yh`
+的迷你模块记录，`ssa_module_50_function_rebind.yh` 负责重绑定；旧「函数级
+SSA + 汇编替换」链已删除，
 `ast/ast_ir*.yh` 只保留 builder 底层与共享调用缓冲。
 
 ## 已实现的语义

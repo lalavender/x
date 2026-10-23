@@ -29,6 +29,10 @@ fn mb_sched_reset_worker_stats() void {
     gs.c_stats_ir_functions = 0
     gs.c_stats_ir_cache_hits = 0
     gs.c_stats_ir_cache_misses = 0
+    gs.c_stats_ir_lowered = 0
+    gs.c_stats_check_cache_hits = 0
+    gs.c_stats_check_cache_misses = 0
+    gs.c_stats_check_cache_skipped = 0
     gs.c_stats_checked_functions = 0
     gs.c_stats_backend_emitted = 0
     gs.c_stats_ir_rejected = 0
@@ -169,10 +173,10 @@ fn mb_sched_refresh_interfaces(states *int, count int,
     for i < count {
         if (states[i] == 1) {
             let path [700]u8
-            if (mb_module_iface_path(pj_order[i], build_off, build_len, path) != 0) {
+            if (mb_module_ready_path(pj_order[i], build_off, build_len, &path[0]) != 0) {
                 return -1
             }
-            if (pj_file_exists(gen.arr_cstr(path)) != 0) {
+            if (pj_file_exists(gen.arr_cstr(&path[0])) != 0) {
                 states[i] = 2
             }
         }
@@ -197,10 +201,10 @@ fn mb_sched_deps_ready(module_idx int, states *int, count int,
         }
         if (states[oi] == 1) {
             let path [700]u8
-            if (mb_module_iface_path(mb_dep_mod[di], build_off, build_len, path) != 0) {
+            if (mb_module_ready_path(mb_dep_mod[di], build_off, build_len, &path[0]) != 0) {
                 return -1
             }
-            if (pj_file_exists(gen.arr_cstr(path)) != 0) {
+            if (pj_file_exists(gen.arr_cstr(&path[0])) != 0) {
                 states[oi] = 2
             }
         }
@@ -208,6 +212,11 @@ fn mb_sched_deps_ready(module_idx int, states *int, count int,
             return 0
         }
         if (states[oi] == 2) {
+            // 早期启动只允许 CT 接口没有变化的依赖；CT 变了就等完整提交，
+            // 避免消费者用旧 .s.ct 计算全局编译期常量。
+            if (mb_iface_ct_same(mb_dep_mod[di], build_off, build_len) == 0) {
+                return 0
+            }
             early_out[0] = 1
         }
         if (pj_file_exists(pj_pool_str(mb_dep_ifoff[di])) == 0) {
@@ -283,6 +292,10 @@ fn mb_sched_clear_interfaces(count int, build_off int,
         }
         if (mb_module_ctiface_path(pj_order[i], build_off, build_len, path) == 0) {
             unlink(gen.arr_cstr(path))
+        }
+        let ready [700]u8
+        if (mb_module_ready_path(pj_order[i], build_off, build_len, &ready[0]) == 0) {
+            unlink(gen.arr_cstr(&ready[0]))
         }
         i += 1
     }

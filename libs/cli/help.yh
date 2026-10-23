@@ -276,6 +276,30 @@ fn row_metavar(state *parser_state, row *arg_row) *char {
 
 // put_value_text 渲染一个默认值/常量：文本转义，标量按十进制。
 fn put_value_text(out *char, at int, v Value) int {
+    if (v.kind == ValueKind.sequence) {
+        let block *list_block = v.data.items.to_type(*list_block)
+        at = put_char(out, at, '[')
+        if (at < 0) {
+            return -1
+        }
+        if (block != 0) {
+            let i int = 0
+            for i < block.count {
+                if (i > 0) {
+                    at = put_text(out, at, ", ")
+                    if (at < 0) {
+                        return -1
+                    }
+                }
+                at = put_value_text(out, at, block.items[i])
+                if (at < 0) {
+                    return -1
+                }
+                i += 1
+            }
+        }
+        return put_char(out, at, ']')
+    }
     if (v.kind == ValueKind.text) {
         return put_escaped(out, at, v.data.text)
     }
@@ -295,6 +319,189 @@ fn put_value_text(out *char, at int, v Value) int {
         return put_text(out, at, "float")
     }
     return put_text(out, at, "none")
+}
+
+// —— 文本模板（设计 §14.1）——
+
+// template_match 判断 text[start,stop) 是否等于 word。
+fn template_match(text *char, start int, stop int, word *char) int {
+    let i int = 0
+    for start + i < stop {
+        if (word[i] == 0 || text[start + i] != word[i]) {
+            return 0
+        }
+        i += 1
+    }
+    return (word[i] == 0).to_type(int)
+}
+
+// template_name_code 把占位符名称映射为编号：prog=1、dest=2、default=3、
+// type=4；未知名称返回 0。
+fn template_name_code(text *char, start int, stop int) int {
+    if (template_match(text, start, stop, "prog") != 0) {
+        return 1
+    }
+    if (template_match(text, start, stop, "dest") != 0) {
+        return 2
+    }
+    if (template_match(text, start, stop, "default") != 0) {
+        return 3
+    }
+    if (template_match(text, start, stop, "type") != 0) {
+        return 4
+    }
+    return 0
+}
+
+// template_code_at 识别 text[at] 起的模板片段：%% 返回 9，占位符返回
+// 1–4，普通字符返回 0，非法占位符返回 -1；*span 写入片段字节数。
+fn template_code_at(text *char, at int, span *int) int {
+    *span = 1
+    if (text[at] != '%') {
+        return 0
+    }
+    if (text[at + 1] == '%') {
+        *span = 2
+        return 9
+    }
+    if (text[at + 1] != '(') {
+        return 0
+    }
+    let j int = at + 2
+    for text[j] != 0 && text[j] != ')' {
+        j += 1
+    }
+    if (text[j] != ')' || text[j + 1] != 's') {
+        return -1
+    }
+    let code int = template_name_code(text, at + 2, j)
+    if (code == 0) {
+        return -1
+    }
+    *span = j + 2 - at
+    return code
+}
+
+// check_template 在 freeze 校验模板：allow_row=0 时只允许 %(prog)s 与 %%。
+fn check_template(text *char, allow_row int) int {
+    if (text == 0) {
+        return 0
+    }
+    let i int = 0
+    for text[i] != 0 {
+        let span int = 0
+        let code int = template_code_at(text, i, &span)
+        if (code < 0) {
+            return -1
+        }
+        if (code == 0) {
+            i += 1
+            continue
+        }
+        if (code != 1 && code != 9 && allow_row == 0) {
+            return -1
+        }
+        i += span
+    }
+    return 0
+}
+
+// row_type_name 返回 %(type)s 的展示名：优先注册类型名，否则按值类型。
+fn row_type_name(row *arg_row) *char {
+    if (row.type_name != 0 && row.type_name[0] != 0) {
+        return row.type_name
+    }
+    if (row.value_kind == ValueKind.integer.to_type(int)) {
+        return "integer"
+    }
+    if (row.value_kind == ValueKind.natural.to_type(int)) {
+        return "natural"
+    }
+    if (row.value_kind == ValueKind.real.to_type(int)) {
+        return "real"
+    }
+    if (row.value_kind == ValueKind.boolean.to_type(int)) {
+        return "boolean"
+    }
+    return "text"
+}
+
+// row_effective_default_value 返回 %(default)s 的有效默认值：set_default 覆盖
+// 优先，其次参数/组/parser 策略，最后 action 固有缺省。
+fn row_effective_default_value(state *parser_state, row *arg_row) Value {
+    let index int = override_of(state, row.dest)
+    if (index >= 0) {
+        return state.overrides[index].value
+    }
+    let mode int = row_default_mode(state, row)
+    if (mode == DefaultMode.default_suppress.to_type(int)) {
+        return value_none()
+    }
+    if (mode == DefaultMode.default_explicit.to_type(int)) {
+        return row_default_value(state, row)
+    }
+    return action_implicit_default(row)
+}
+
+// put_template 展开占位符并写入 out；allow_row=1 时支持 dest/default/type。
+// 未知或不允许的占位符返回 -1（freeze 已提前拦截，正常路径不会走到）。
+fn put_template(out *char, at int, state *parser_state, row *arg_row, text *char,
+    allow_row int) int {
+    if (text == 0) {
+        return at
+    }
+    let i int = 0
+    for text[i] != 0 {
+        let span int = 0
+        let code int = template_code_at(text, i, &span)
+        if (code < 0) {
+            return -1
+        }
+        if (code == 0) {
+            at = put_char(out, at, text[i])
+            if (at < 0) {
+                return -1
+            }
+            i += 1
+            continue
+        }
+        if (code == 9) {
+            at = put_char(out, at, '%')
+            if (at < 0) {
+                return -1
+            }
+            i += span
+            continue
+        }
+        if (code == 1) {
+            at = put_text(out, at, state.prog)
+        } else if (row == 0 || allow_row == 0) {
+            return -1
+        } else if (code == 2) {
+            at = put_text(out, at, row.dest)
+        } else if (code == 3) {
+            at = put_value_text(out, at, row_effective_default_value(state, row))
+        } else {
+            at = put_text(out, at, row_type_name(row))
+        }
+        if (at < 0) {
+            return -1
+        }
+        i += span
+    }
+    return at
+}
+
+// put_template_wrapped 先展开模板再按 put_wrapped 的规则折行。
+fn put_template_wrapped(out *char, at int, state *parser_state, row *arg_row,
+    text *char, indent int, width int, preserve int, allow_row int) int {
+    let scratch [MAX_HELP]char
+    let n int = put_template(&scratch[0], 0, state, row, text, allow_row)
+    if (n < 0) {
+        return -1
+    }
+    scratch[n] = 0
+    return put_wrapped(out, at, &scratch[0], indent, width, preserve)
 }
 
 // needs_metavar 判断选项在 usage 中是否需要占位名。
@@ -404,6 +611,29 @@ fn put_mutex_synopsis(out *char, at int, state *parser_state, group *mutex_row) 
 
 // build_usage_line 生成 usage 一行：先选项（互斥组合并展示）、再位置参数、再子命令槽。
 fn build_usage_line(state *parser_state, out *char) int {
+    if (state.usage != 0) {
+        if (state.usage[0] == 0) {
+            return 0
+        }
+        let custom_color int = color_enabled(state, 1)
+        let custom_at int = put_color(out, 0, custom_color, "1")
+        if (custom_at < 0) {
+            return -1
+        }
+        custom_at = put_text(out, custom_at, "usage: ")
+        if (custom_at < 0) {
+            return -1
+        }
+        custom_at = put_color_end(out, custom_at, custom_color)
+        if (custom_at < 0) {
+            return -1
+        }
+        custom_at = put_template(out, custom_at, state, 0, state.usage, 0)
+        if (custom_at < 0) {
+            return -1
+        }
+        return put_char(out, custom_at, '\n')
+    }
     let color int = color_enabled(state, 1)
     let at int = put_color(out, 0, color, "1")
     if (at < 0) {
@@ -661,8 +891,8 @@ fn append_help_row(out *char, at int, state *parser_state, row *arg_row, pad int
     }
     let column int = 2 + width + spaces
     if (row.help != 0 && row.help[0] != 0) {
-        at = put_wrapped(out, at, row.help, column, state.format_width,
-            state.format_preserve_all)
+        at = put_template_wrapped(out, at, state, row, row.help, column,
+            state.format_width, state.format_preserve_all, 1)
         if (at < 0) {
             return -1
         }
@@ -734,6 +964,36 @@ fn has_visible_row(state *parser_state, positional int, grouped int) int {
     return 0
 }
 
+// put_break 追加段前换行；文本还为空时跳过，避免空 usage 留下首行空行。
+fn put_break(out *char, at int) int {
+    if (at == 0) {
+        return 0
+    }
+    return put_char(out, at, '\n')
+}
+
+// put_title 追加一个带颜色的段标题（前置空行仅在已有文本时写入）。
+fn put_title(out *char, at int, state *parser_state, title *char) int {
+    at = put_break(out, at)
+    if (at < 0) {
+        return -1
+    }
+    let color int = color_enabled(state, 1)
+    at = put_color(out, at, color, "1")
+    if (at < 0) {
+        return -1
+    }
+    at = put_text(out, at, title)
+    if (at < 0) {
+        return -1
+    }
+    at = put_text(out, at, ":\n")
+    if (at < 0) {
+        return -1
+    }
+    return put_color_end(out, at, color)
+}
+
 // build_help_text 生成完整帮助文本；失败返回空指针。
 fn build_help_text(state *parser_state, mem *pool) *char {
     let scratch [MAX_HELP]char
@@ -742,31 +1002,23 @@ fn build_help_text(state *parser_state, mem *pool) *char {
         return 0
     }
     if (state.description != 0 && state.description[0] != 0) {
-        at = put_char(&scratch[0], at, '\n')
+        at = put_break(&scratch[0], at)
         if (at < 0) {
             return 0
         }
-        at = put_wrapped(&scratch[0], at, state.description, 0, state.format_width,
-            state.format_preserve_description)
+        at = put_template_wrapped(&scratch[0], at, state, 0, state.description, 0,
+            state.format_width, state.format_preserve_description, 0)
         if (at < 0) {
             return 0
         }
-        at = put_char(&scratch[0], at, '\n')
+        at = put_break(&scratch[0], at)
         if (at < 0) {
             return 0
         }
     }
     let i int = 0
     if (has_visible_row(state, 1, 0) != 0 || has_visible_row(state, 1, 1) != 0) {
-        at = put_color(&scratch[0], at, color_enabled(state, 1), "1")
-        if (at < 0) {
-            return 0
-        }
-        at = put_text(&scratch[0], at, "\npositional arguments:\n")
-        if (at < 0) {
-            return 0
-        }
-        at = put_color_end(&scratch[0], at, color_enabled(state, 1))
+        at = put_title(&scratch[0], at, state, "positional arguments")
         if (at < 0) {
             return 0
         }
@@ -782,15 +1034,7 @@ fn build_help_text(state *parser_state, mem *pool) *char {
         }
     }
     if (has_visible_row(state, 0, 0) != 0) {
-        at = put_color(&scratch[0], at, color_enabled(state, 1), "1")
-        if (at < 0) {
-            return 0
-        }
-        at = put_text(&scratch[0], at, "\noptions:\n")
-        if (at < 0) {
-            return 0
-        }
-        at = put_color_end(&scratch[0], at, color_enabled(state, 1))
+        at = put_title(&scratch[0], at, state, "options")
         if (at < 0) {
             return 0
         }
@@ -821,7 +1065,7 @@ fn build_help_text(state *parser_state, mem *pool) *char {
                 j += 1
             }
             if (has_row != 0) {
-                at = put_char(&scratch[0], at, '\n')
+                at = put_break(&scratch[0], at)
                 if (at < 0) {
                     return 0
                 }
@@ -853,15 +1097,7 @@ fn build_help_text(state *parser_state, mem *pool) *char {
         i += 1
     }
     if (state.child_count > 0) {
-        at = put_color(&scratch[0], at, color_enabled(state, 1), "1")
-        if (at < 0) {
-            return 0
-        }
-        at = put_text(&scratch[0], at, "\ncommands:\n")
-        if (at < 0) {
-            return 0
-        }
-        at = put_color_end(&scratch[0], at, color_enabled(state, 1))
+        at = put_title(&scratch[0], at, state, "commands")
         if (at < 0) {
             return 0
         }
@@ -894,7 +1130,14 @@ fn build_help_text(state *parser_state, mem *pool) *char {
                     if (at < 0) {
                         return 0
                     }
-                    at = put_escaped(&scratch[0], at, child.help)
+                    let expanded [MAX_HELP]char
+                    let expanded_at int = put_template(&expanded[0], 0, state, 0,
+                        child.help, 0)
+                    if (expanded_at < 0) {
+                        return 0
+                    }
+                    expanded[expanded_at] = 0
+                    at = put_escaped(&scratch[0], at, &expanded[0])
                     if (at < 0) {
                         return 0
                     }
@@ -905,7 +1148,7 @@ fn build_help_text(state *parser_state, mem *pool) *char {
                         return 0
                     }
                 }
-                at = put_char(&scratch[0], at, '\n')
+                at = put_break(&scratch[0], at)
                 if (at < 0) {
                     return 0
                 }
@@ -914,15 +1157,16 @@ fn build_help_text(state *parser_state, mem *pool) *char {
         }
     }
     if (state.epilog != 0 && state.epilog[0] != 0) {
-        at = put_char(&scratch[0], at, '\n')
+        at = put_break(&scratch[0], at)
         if (at < 0) {
             return 0
         }
-        at = put_wrapped(&scratch[0], at, state.epilog, 0, state.format_width, 0)
+        at = put_template_wrapped(&scratch[0], at, state, 0, state.epilog, 0,
+            state.format_width, 0, 0)
         if (at < 0) {
             return 0
         }
-        at = put_char(&scratch[0], at, '\n')
+        at = put_break(&scratch[0], at)
         if (at < 0) {
             return 0
         }
@@ -942,10 +1186,15 @@ fn build_usage_text(state *parser_state, mem *pool) *char {
     return pool_dup(mem, &scratch[0])
 }
 
-// build_version_text 生成版本文本（展示名 + 换行）。
-fn build_version_text(state *parser_state, mem *pool) *char {
+// build_version_text 生成版本文本（模板或展示名 + 换行）。
+fn build_version_text(state *parser_state, mem *pool, row *arg_row) *char {
     let scratch [MAX_TEXT]char
-    let at int = put_text(&scratch[0], 0, state.prog)
+    let at int = 0
+    if (row != 0 && row.version_text != 0) {
+        at = put_template(&scratch[0], 0, state, row, row.version_text, 0)
+    } else {
+        at = put_text(&scratch[0], 0, state.prog)
+    }
     if (at < 0) {
         return 0
     }
@@ -1067,10 +1316,45 @@ pub fn exit_code(result *Result) int {
     return 1
 }
 
+// render_warnings 把运行期警告写到 error_fd；0 成功、-1 写入失败。
+fn render_warnings(result *Result, error_fd int) int {
+    if (result == 0) {
+        return -1
+    }
+    let i int = 0
+    for i < len(result.warnings) {
+        if (io.write_all(error_fd, "警告: ", 8) != 0) {
+            return -1
+        }
+        let message *char = result.warnings[i]
+        if (message != 0
+            && io.write_all(error_fd, message, strlen(message).to_type(int)) != 0) {
+            return -1
+        }
+        if (io.write_all(error_fd, "\n", 1) != 0) {
+            return -1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// clear_warnings 清空已输出的警告，避免调用者之后 render 时重复打印。
+fn clear_warnings(result *Result) void {
+    if (result == 0) {
+        return
+    }
+    let empty []*char
+    result.warnings = empty
+}
+
 // render 按结果状态输出：控制文本写 out_fd，usage 与诊断写 error_fd；0/-1。
 // 不退出、不释放；输出失败返回 -1（调用方据此把退出码降级为 1）。
 pub fn render(result *Result, out_fd int, error_fd int) int {
     if (result == 0) {
+        return -1
+    }
+    if (render_warnings(result, error_fd) != 0) {
         return -1
     }
     if (result.status == ResultStatus.help_requested

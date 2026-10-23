@@ -1,0 +1,291 @@
+module main
+
+// cli 与 Python argparse 的差分探针：同一份声明按 argv 打印规范化结果
+// （status、各 dest 值、未消费 token），由 libs/cli/test/diff.py 对照。
+// argv[1] 是解析模式：n/k/i/ki/a/o/r，其余参数才是被测命令行。
+
+import cli
+
+// build_probe 构造主探针：覆盖 store/count/optional/choices/列表/append/
+// extend/const/boolean_optional/store_false/version 与位置参数。
+fn build_probe(p *cli.Parser, abbrev bool) int {
+    let config cli.ParserConfig = cli.parser_config("diff")
+    config.description = "差分探针"
+    config.allow_abbrev = abbrev
+    if (cli.init(p, config) != 0) {
+        return 1
+    }
+    let output cli.Argument = cli.option("--output", "-o")
+    output.default_value = cli.default_of(cli.value_text("out.bin"))
+    if (cli.add_argument(p, output) < 0) {
+        return 2
+    }
+    let verbose cli.Argument = cli.option("--verbose", "-v")
+    verbose.action = cli.count
+    if (cli.add_argument(p, verbose) < 0) {
+        return 3
+    }
+    let level cli.Argument = cli.option("--level", "-l")
+    level.value_kind = cli.integer
+    if (cli.add_argument(p, level) < 0) {
+        return 4
+    }
+    let tag cli.Argument = cli.option("--tag", 0)
+    tag.arity = cli.optional()
+    tag.const_value = cli.value_text("none-tag")
+    if (cli.add_argument(p, tag) < 0) {
+        return 5
+    }
+    let force cli.Argument = cli.option("--force", "-f")
+    force.action = cli.store_true
+    if (cli.add_argument(p, force) < 0) {
+        return 6
+    }
+    let cache cli.Argument = cli.option("--cache", 0)
+    cache.action = cli.boolean_optional
+    if (cli.add_argument(p, cache) < 0) {
+        return 7
+    }
+    let quiet cli.Argument = cli.option("--quiet", "-q")
+    quiet.action = cli.store_false
+    if (cli.add_argument(p, quiet) < 0) {
+        return 8
+    }
+    let mode cli.Argument = cli.option("--mode", 0)
+    let allowed [2]cli.Value
+    allowed[0] = cli.value_text("fast")
+    allowed[1] = cli.value_text("slow")
+    mode.choices = allowed.to_type([]cli.Value)
+    if (cli.add_argument(p, mode) < 0) {
+        return 9
+    }
+    let pair cli.Argument = cli.option("--pair", 0)
+    pair.arity = cli.exactly(2)
+    if (cli.add_argument(p, pair) < 0) {
+        return 10
+    }
+    let many cli.Argument = cli.option("--many", 0)
+    many.arity = cli.zero_or_more()
+    if (cli.add_argument(p, many) < 0) {
+        return 11
+    }
+    let append cli.Argument = cli.option("--append", 0)
+    append.action = cli.append
+    if (cli.add_argument(p, append) < 0) {
+        return 12
+    }
+    let extend cli.Argument = cli.option("--extend", 0)
+    extend.action = cli.extend
+    extend.arity = cli.one_or_more()
+    if (cli.add_argument(p, extend) < 0) {
+        return 13
+    }
+    let stamp cli.Argument = cli.option("--stamp", 0)
+    stamp.action = cli.append_const
+    stamp.const_value = cli.value_text("v1")
+    if (cli.add_argument(p, stamp) < 0) {
+        return 14
+    }
+    let answer cli.Argument = cli.option("--answer", 0)
+    answer.action = cli.store_const
+    answer.const_value = cli.value_i64(42)
+    if (cli.add_argument(p, answer) < 0) {
+        return 15
+    }
+    let version cli.Argument = cli.option("--version", 0)
+    version.action = cli.version
+    version.version_text = "%(prog)s 1.0"
+    if (cli.add_argument(p, version) < 0) {
+        return 16
+    }
+    let tries cli.Argument = cli.option("--tries", 0)
+    tries.action = cli.count
+    tries.default_value = cli.default_of(cli.value_i64(3))
+    if (cli.add_argument(p, tries) < 0) {
+        return 17
+    }
+    if (cli.add_argument(p, cli.positional("src")) < 0) {
+        return 18
+    }
+    let files cli.Argument = cli.positional("files")
+    files.arity = cli.zero_or_more()
+    if (cli.add_argument(p, files) < 0) {
+        return 19
+    }
+    return 0
+}
+
+// build_opt_rest_probe 构造「选项 remainder」专用 parser。
+fn build_opt_rest_probe(p *cli.Parser) int {
+    let config cli.ParserConfig = cli.parser_config("diff")
+    if (cli.init(p, config) != 0) {
+        return 1
+    }
+    let rest cli.Argument = cli.option("--rest", "-r")
+    rest.arity = cli.remainder()
+    if (cli.add_argument(p, rest) < 0) {
+        return 2
+    }
+    if (cli.add_argument(p, cli.positional("src")) < 0) {
+        return 3
+    }
+    return 0
+}
+
+// build_pos_rest_probe 构造「位置 remainder」专用 parser。
+fn build_pos_rest_probe(p *cli.Parser) int {
+    let config cli.ParserConfig = cli.parser_config("diff")
+    if (cli.init(p, config) != 0) {
+        return 1
+    }
+    if (cli.add_argument(p, cli.positional("src")) < 0) {
+        return 2
+    }
+    let tail cli.Argument = cli.positional("tail")
+    tail.arity = cli.remainder()
+    if (cli.add_argument(p, tail) < 0) {
+        return 3
+    }
+    return 0
+}
+
+// print_value 打印一个 dest 的规范化值；列表用 | 连接。
+fn print_value(values *cli.Namespace, dest *char) void {
+    let v cli.Value
+    if (cli.get_value(values, dest, &v) != 0) {
+        printf("%s=absent\n", dest)
+        return
+    }
+    if (v.kind == cli.text) {
+        printf("%s=T:%s\n", dest, v.data.text)
+        return
+    }
+    if (v.kind == cli.integer) {
+        printf("%s=I:%d\n", dest, v.data.integer)
+        return
+    }
+    if (v.kind == cli.boolean) {
+        if (v.data.boolean) {
+            printf("%s=B:true\n", dest)
+        } else {
+            printf("%s=B:false\n", dest)
+        }
+        return
+    }
+    if (v.kind == cli.none) {
+        printf("%s=N\n", dest)
+        return
+    }
+    if (v.kind == cli.sequence) {
+        let list []cli.Value
+        if (cli.get_list(values, dest, &list) != 0) {
+            printf("%s=badlist\n", dest)
+            return
+        }
+        printf("%s=L:", dest)
+        for i, item in list {
+            if (i > 0) {
+                printf("|")
+            }
+            if (item.kind == cli.text) {
+                printf("%s", item.data.text)
+            } else if (item.kind == cli.integer) {
+                printf("%d", item.data.integer)
+            } else if (item.kind == cli.boolean) {
+                if (item.data.boolean) {
+                    printf("true")
+                } else {
+                    printf("false")
+                }
+            } else {
+                printf("<k%d>", item.kind.to_type(int))
+            }
+        }
+        printf("\n")
+        return
+    }
+    printf("%s=other:%d\n", dest, v.kind.to_type(int))
+}
+
+// print_all 按固定顺序打印全部 dest，保证两边输出可比。
+fn print_all(values *cli.Namespace) void {
+    print_value(values, "output")
+    print_value(values, "verbose")
+    print_value(values, "level")
+    print_value(values, "tag")
+    print_value(values, "force")
+    print_value(values, "cache")
+    print_value(values, "quiet")
+    print_value(values, "mode")
+    print_value(values, "pair")
+    print_value(values, "many")
+    print_value(values, "append")
+    print_value(values, "extend")
+    print_value(values, "stamp")
+    print_value(values, "answer")
+    print_value(values, "tries")
+    print_value(values, "src")
+    print_value(values, "files")
+}
+
+// main 按 mode 选择 parse 变体，打印结果后总是返回 0（状态由 status 行表达）。
+fn main(argc int, argv **char) int {
+    let mode *char = "n"
+    let abbrev bool = false
+    if (argc > 1) {
+        mode = argv[1]
+        if (mode[0] == 'a') {
+            abbrev = true
+        }
+    }
+    let parser cli.Parser
+    let setup int = 0
+    if (mode[0] == 'o') {
+        setup = build_opt_rest_probe(&parser)
+    } else if (mode[0] == 'r') {
+        setup = build_pos_rest_probe(&parser)
+    } else {
+        setup = build_probe(&parser, abbrev)
+    }
+    if (setup != 0) {
+        printf("setup=%d\n", setup)
+        return 0
+    }
+    let buffer [64]*char
+    let count int = 0
+    let i int = 2
+    for i < argc {
+        buffer[count] = argv[i]
+        count += 1
+        i += 1
+    }
+    let args []*char = buffer[0..count]
+    let r cli.Result
+    if (mode[0] == 'k' && mode[1] == 'i') {
+        r = cli.parse_known_intermixed(&parser, args)
+    } else if (mode[0] == 'k') {
+        r = cli.parse_known(&parser, args)
+    } else if (mode[0] == 'i') {
+        r = cli.parse_intermixed(&parser, args)
+    } else {
+        r = cli.parse(&parser, args)
+    }
+    printf("status=%d\n", r.status.to_type(int))
+    if (r.status == cli.ok) {
+        if (mode[0] == 'o') {
+            print_value(&r.values, "rest")
+            print_value(&r.values, "src")
+        } else if (mode[0] == 'r') {
+            print_value(&r.values, "src")
+            print_value(&r.values, "tail")
+        } else {
+            print_all(&r.values)
+        }
+    }
+    for j, item in r.unparsed {
+        printf("extra=%s\n", item)
+    }
+    cli.release(&r)
+    cli.destroy(&parser)
+    return 0
+}

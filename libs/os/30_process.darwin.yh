@@ -1,0 +1,125 @@
+module os
+
+import sys
+
+// Darwin 进程接口：精确路径 spawn、wait 与 exit。
+//
+// spawn 直接走 libSystem 的 posix_spawn：exec 失败由调用本身返回正 errno，
+// 因此不需要 Linux 版本的 close-on-exec 错误管道握手，也没有“失败子进程待
+// 回收”的中间状态。posix_spawn 继承当前标准描述符，其余标了 close-on-exec
+// 的描述符在子进程 exec 时关闭；路径必须精确，不搜索 PATH。
+// wait 只阻塞等待普通子进程，遇 EINTR 内部重试；状态解码把正常退出码与
+// 信号号分开，与 Linux 版本保持同一公开契约。
+
+// WaitState 区分正常退出、信号退出与等待失败。
+pub enum WaitState {
+    wait_exited
+    wait_signaled
+    wait_error
+}
+
+// PidResult 是 spawn 的结果：成功 pid 为正子进程号，失败 pid 为 -1。
+// 成功只表示 exec 已确认，不承诺子程序随后不会立即退出。
+pub struct PidResult {
+    pid int
+    error Error
+}
+
+// WaitResult 是 wait 的结果：state 为 wait_exited 时 exit_code 有效，
+// wait_signaled 时 signal 有效；wait_error 时 error 有效。
+pub struct WaitResult {
+    state WaitState
+    exit_code int
+    signal int
+    error Error
+}
+
+// pid_ok 构造成功的 spawn 结果。
+fn pid_ok(pid int) PidResult {
+    return PidResult{ pid: pid, error: no_error() }
+}
+
+// pid_error 构造失败的 spawn 结果，pid 固定为 -1。
+fn pid_error(kind ErrorKind, native_code int) PidResult {
+    return PidResult{ pid: -1, error: make_error(kind, native_code) }
+}
+
+// wait_failed 构造等待失败结果，退出码与信号字段无意义并置为 -1/0。
+fn wait_failed(error Error) WaitResult {
+    return WaitResult{
+        state: wait_error,
+        exit_code: -1,
+        signal: 0,
+        error: error
+    }
+}
+
+// wait_from_status 解码 wait4 原始 32 位状态字。
+// 低 7 位为 0 表示正常退出；不为 0 且不是 0x7f（停止）时表示信号退出；
+// 不使用 WUNTRACED，因此停止状态只作为 error_other 返回。
+fn wait_from_status(status int) WaitResult {
+    let low int = status & 0x7f
+    if (low == 0) {
+        return WaitResult{
+            state: wait_exited,
+            exit_code: (status >> 8) & 0xff,
+            signal: 0,
+            error: no_error()
+        }
+    }
+    if (low != 0x7f) {
+        return WaitResult{
+            state: wait_signaled,
+            exit_code: -1,
+            signal: low,
+            error: no_error()
+        }
+    }
+    return wait_failed(make_error(error_other, 0))
+}
+
+// spawn 用精确路径启动进程并返回 exec 结果。
+// path 必须可执行且不经 PATH 搜索；argv/envp 为 NUL 结尾指针数组，失败时
+// 返回 from_native 错误且没有子进程需要回收。成功返回子 PID，子进程继承
+// 当前进程的标准描述符，其余本库新建 fd 默认 close-on-exec。
+pub fn spawn(path *char, argv **char, envp **char) PidResult {
+    if (path == 0 || argv == 0 || envp == 0) {
+        return pid_error(error_invalid_argument, 0)
+    }
+    let pid int = -1
+    let created i64 = sys.spawn_process(path, argv, envp, &pid)
+    if (sys.is_error(created) != 0) {
+        let code int = sys.error_code(created)
+        return pid_error(error_kind_for(code), code)
+    }
+    if (pid <= 0) {
+        return pid_error(error_other, 0)
+    }
+    return pid_ok(pid)
+}
+
+// wait 阻塞等待指定子进程并解码退出状态；pid = -1 等待任一子进程。
+// 遇 EINTR 内部重试；等待失败返回 wait_error，不把错误压成退出码。
+pub fn wait(pid int) WaitResult {
+    let status int = 0
+    for 1 == 1 {
+        let result i64 = sys.wait_process(pid, &status, 0)
+        if (result > 0) {
+            return wait_from_status(status)
+        }
+        if (sys.is_error(result) == 0) {
+            return wait_failed(make_error(error_other, 0))
+        }
+        let code int = sys.error_code(result)
+        if (code == sys.EINTR) {
+            continue
+        }
+        return wait_failed(error_from_native(code))
+    }
+    return wait_failed(make_error(error_other, 0))
+}
+
+// exit_now 立即以指定状态结束进程；不刷新未来缓冲流、不执行析构或语言清理。
+pub fn exit_now(code int) void {
+    sys.exit_process(code)
+}

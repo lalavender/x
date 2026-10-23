@@ -137,6 +137,20 @@ pub fn ast_decl_add_file(fi int) int {
     return 0
 }
 
+// ast_decl_test_active：该文件是否属于 yh test 的目标项目。
+// 依赖/标准库里的 test 声明不登记函数符号，绑定阶段必须跳过它们。
+fn ast_decl_test_active(fi int) int {
+    let gs *gen.GenState = gen.G()
+    if (gs.task.c_test_mode == 0 || gs.c_test_project < 0) { return 0 }
+    if (fi < 0 || fi >= gs.p_file_n) { return 0 }
+    let m int = gs.p_files[fi].mod
+    if (m < 0 || m >= gs.p_mod_n) { return 0 }
+    if (gs.p_mods[m].proj != gs.c_test_project) { return 0 }
+    if (gs.c_test_mod_filter >= 0 && gs.c_test_mod_filter != m) { return 0 }
+    if (gs.c_test_file_filter >= 0 && gs.c_test_file_filter != fi) { return 0 }
+    return 1
+}
+
 // ast_decl_bind_file：声明登记完成后绑定函数符号与签名类型，供 IR 降低读取。
 // 全局 let/const 同时绑定模块级符号（type_id 保持 -1：对象类型经符号表读取）。
 pub fn ast_decl_bind_file(fi int) int {
@@ -158,6 +172,21 @@ pub fn ast_decl_bind_file(fi int) int {
             let sym int = gen.sym_lookup(tok.start, tok.len)
             if (sym < 0 || gs.task.c_syms[sym].kind != gen.SYM_FN) {
                 return gen.fail("内部错误：函数声明未绑定到函数符号")
+            }
+            node.sym_id = sym
+            node.type_id = gs.task.c_syms[sym].type_id
+        }
+        if (node.file_id == fi && node.kind == gen.TK_TEST
+            && ast_decl_test_active(fi) != 0) {
+            // test 体符号名是编译器生成的 __yh_test_<file>_<decl>，
+            // 不能按源码里的字符串/标识符名字反查，改用 pass1 写在 PDecl 的符号。
+            if (node.decl_index < 0 || node.decl_index >= gs.task.c_file_decl_n) {
+                return gen.fail("内部错误：test 声明缺少 PDecl 身份")
+            }
+            let sym int = gs.task.c_file_decls[node.decl_index].test_sym
+            if (sym < 0 || sym >= gs.task.c_sym_n
+                || gs.task.c_syms[sym].kind != gen.SYM_FN) {
+                return gen.fail("内部错误：test 声明未绑定到测试函数符号")
             }
             node.sym_id = sym
             node.type_id = gs.task.c_syms[sym].type_id
@@ -189,7 +218,9 @@ pub fn ast_decl_attach_body(fi int, decl_index int, stmt_id int) int {
     let i int = 0
     for i < ast_decl_count {
         if (ast_decl_nodes[i].file_id == fi && ast_decl_nodes[i].decl_index == decl_index) {
-            if (ast_decl_nodes[i].kind != gen.TK_FN || ast_decl_nodes[i].body_stmt >= 0
+            if ((ast_decl_nodes[i].kind != gen.TK_FN
+                    && ast_decl_nodes[i].kind != gen.TK_TEST)
+                || ast_decl_nodes[i].body_stmt >= 0
                 || stmt_id < 0 || stmt_id >= ast_stmt_count
                 || ast_stmt_nodes[stmt_id].kind != AST_STMT_BLOCK
                 || ast_stmt_nodes[stmt_id].file_id != fi) {

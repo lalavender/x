@@ -46,8 +46,21 @@ YH_STDLIB=/path/to/yh/libs yh run
 | `copy(destination *void, source *void, byte_count u64) *void` | 复制指定字节数并返回目标地址 |
 
 本模块只包装现有 yh 运行时分配与复制入口；所有权由调用方管理，不引入隐式分配。
+`alloc` 结果至少 16 字节对齐，`alloc(0)` 返回非空地址，`copy` 不处理重叠区间。
 
-### `string`
+2026-10-23 新增[内存管理标准库设计](yh-memory标准库设计-2026-10-23.md)与
+[实施方案](../02-plan/yh-memory标准库实施方案-2026-10-23.md)，按 Zig
+`std.mem.Allocator`/`std.heap` 的能力分层规划：保持上述签名不变，补
+`reallocate`（显式 `old_size`）、`FixedBuffer`（调用方缓冲区、LIFO
+resize/free）、增强 Arena（几何增长、reset 模式、LIFO 回收、capacity）与
+基于 Arena + 空闲链的 FixedPool；统一 `Allocator`（函数指针 vtable）为 M5
+可选，Debug/ThreadSafe/Page/StackFallback 后置。设计状态是**未实施**：当前
+只有上表三个 API；块来源统一为 prelude 堆，不新增 `sys` 依赖，也不替换
+`libc` 的 C ABI 分配器。
+
+### `string`（2026-10-23 首期完成）
+
+旧接口保持原签名、返回值与 NUL 截止语义：
 
 | API | 契约 |
 | --- | --- |
@@ -55,7 +68,24 @@ YH_STDLIB=/path/to/yh/libs yh run
 | `equals(left *char, right *char) int` | 内容相等返回 1，否则返回 0 |
 | `compare(left *char, right *char) int` | 按无符号字节序返回 -1、0 或 1 |
 
-字符串 API 操作 NUL 结尾字节串，不做 Unicode 码点解码。
+新增按字节存储的 `View`（借用）与 `String`（独占、显式释放），单位统一为
+字节（`u64`）。公开面分四组：
+
+| 组 | API |
+| --- | --- |
+| 视图 | `view_bytes`/`view_cstr`、`view_equal`/`view_compare`、`starts_with`/`ends_with`、`find`/`rfind`/`contains`、`slice`、`trim_ascii`、`split`/`split_next` |
+| 拥有者 | `make`、`from_view`、`clone`、`move`、`release`、`as_view`、`byte_length`、`capacity`、`reserve`、`clear`、`truncate`、`assign`、`append`、`append_byte`、`c_str` |
+| 变换 | `concat`、`join`、`replace`、`replace_all`、`lower_ascii`、`upper_ascii` |
+| UTF-8 | `utf8_validate`、`utf8_next`、`append_rune`（RFC 3629 严格解码，只计标量） |
+
+`String` 始终维护额外结尾 NUL，内容内允许 NUL；成功的可变操作与 `release`
+使旧视图/C 指针失效，失败的操作保持原状态。最大内容长度
+`0x7ffffffffffffffe`，查找/切分/替换首版最坏 `O(n*m)`。Unicode 大小写折叠、
+规范化、字素边界、正则与格式化仍后置。
+
+设计见 [string 标准库设计](yh-string标准库设计-2026-10-23.md)，分期与验收见
+[实施方案](../02-plan/yh-string标准库实施方案-2026-10-23.md)，使用说明见
+[`libs/string/README.md`](../../libs/string/README.md)。
 
 ### `os`
 
@@ -140,8 +170,50 @@ cwd/pipe（`30_file`）、内存（`40_memory`）、时间（`50_time`）与进�
 分配点按 API 契约显式声明，不改变现有基础模块的所有权约定；
 `os` 增加了 `is_terminal` 以支持帮助的自动颜色策略。
 
+## toml（2026-10-23 设计；T0–T5 reader 已实现）
+
+`libs/toml/` 以 `import toml;` 提供完整 TOML 1.1 reader：内存/文件解析、
+`Document` 独占文档存储、`Value` 只读句柄、按字节长度的 `Text`、类型化查询
+和结构化诊断；不依赖 compiler/gen，不修改 yh 语法。写入后置。
+
+已注册模块并在 `libs/project.toml` 登记。实际文件按编译顺序：
+`00_types.yh`（公开类型/预算）、`10_storage.yh`（私有池/节点/容器）、
+`20_utf8.yh`、`30_numbers.yh`（整数与精确 binary64）、`40_datetime.yh`、
+`45_parser_state.yh`、`46_strings.yh`、`50_parse.yh`（文档/键/表语义）、
+`60_query.yh`、`70_files.linux.yh`/`70_files.darwin.yh`、`90_api.yh`。
+
+固定 toml-test v2.2.0 的 1.1 decoder 清单通过 681/681（有效 214、非法 467），
+六组 `.yh` API/所有权/资源/文件用例与 `make test`/`make selfhost-native`
+本平台通过；另通过 124 个池分配失败点、低预算强制失败和 `make install`
+后仓库外导入。剩余项：编译器清单迁移（T6）、writer（T7），以及发布资产是否
+携带标准库（T5.2，另行决定）。现有 `compiler/cmd/toml.yh` 仍是旧清单
+子集，尚未迁移。API、限制与生命周期见
+[libs/toml/README.md](../../libs/toml/README.md)，取舍见
+[ADR-0017](../adr/0017-yh-TOML标准库独立文档模型.md)。
+
+## testing（2026-10-23 首期完成）
+
+`libs/testing/` 是 `yh test` 的最小运行时辅助模块，只提供
+`fail(message *char) void` 与 `skip(reason *char) void`。两者都向 fd 3 写测试
+记录并立即 `exit`，父进程据此判定 FAIL / SKIP；基本断言仍用编译器内建的
+`$assert(cond[, msg])`，不需要导入本模块。只依赖 prelude 的 `write`/`exit`，
+避免与 `os`/`io` 形成依赖环。见[`libs/testing/README.md`](../../libs/testing/README.md)。
+
+## fmt 与 V 风格字符串插值（2026-10-23 设计；未实施）
+
+`libs/fmt/` 规划为 V 风格字符串插值的运行时：`Value`、构造器、
+`append_text`/`append_value`、`render` 与 print/sprint。语言层插值
+`"…${expr:spec}…"` 由编译器实现，结果类型为 `string.String`；首版不实现
+Go 的 `%` 格式串与 `Printf` 族。语言没有 `any`/接口/反射，插值只支持
+整数、`f64`、`bool`、`*char`/`string.View` 等标量文本类型，复合值不自动
+格式化。首版限制、spec 子集与错误语义见
+[字符串插值设计](yh-字符串插值设计-2026-10-23.md)；运行时 API 见
+[fmt 标准库设计](yh-fmt标准库设计-2026-10-23.md)；R0–R3/I0–I5 分期见
+[实施方案](../02-plan/yh-fmt标准库实施方案-2026-10-23.md)。当前状态是规划，
+`libs/fmt/` 尚未创建，编译器插值尚未实现。
+
 ## 当前边界
 
-当前基础层不定义完整文件句柄、错误类型、缓冲策略、Unicode 处理、通用格式化或
-跨平台 ABI。库源码跨平台验收不在本阶段范围内；后续 API 按实际需求追加设计和
-`.yh` 项目测试。
+当前基础层不定义完整文件句柄、错误类型、缓冲策略、Unicode 处理或跨平台 ABI；
+通用格式化由上述规划的 V 风格插值与 `fmt` 运行时承接，尚未实现。库源码
+跨平台验收不在本阶段范围内；后续 API 按实际需求追加设计和 `.yh` 项目测试。

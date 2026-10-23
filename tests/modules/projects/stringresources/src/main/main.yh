@@ -1,0 +1,235 @@
+module main
+
+import io
+import string
+
+// view_of_cstr 把已知有效的 C 字符串转成视图。
+fn view_of_cstr(text *char) string.View {
+    let result string.ViewResult = string.view_cstr(text)
+    return result.value
+}
+
+// expect_cstr 比较视图与 NUL 结尾期望文本。
+fn expect_cstr(actual string.View, expected *char) bool {
+    let expected_result string.ViewResult = string.view_cstr(expected)
+    if (expected_result.status != string.status_ok) {
+        return false
+    }
+    return string.view_equal(actual, expected_result.value)
+}
+
+// scenario_from_args 读取 argv[1] 的单个数字；缺省为 0。
+fn scenario_from_args(argc int, argv **char) int {
+    if (argc < 2 || argv[1] == 0) {
+        return 0
+    }
+    let text *char = argv[1]
+    if (text[0] == '0') { return 0 }
+    if (text[0] == '1') { return 1 }
+    if (text[0] == '2') { return 2 }
+    if (text[0] == '3') { return 3 }
+    if (text[0] == '4') { return 4 }
+    if (text[0] == '5') { return 5 }
+    if (text[0] == '6') { return 6 }
+    if (text[0] == '7') { return 7 }
+    if (text[0] == '8') { return 8 }
+    if (text[0] == '9') { return 9 }
+    return 0
+}
+
+// report_failed 记录“操作在分配点失败且原状态有效”。
+fn report_failed() int {
+    io.println("failed")
+    return 0
+}
+
+// report_ok 记录“操作成功且结果有效”。
+fn report_ok() int {
+    io.println("ok")
+    return 0
+}
+
+// scenario_from_view：无前置状态，验证数据/状态两个分配点。
+fn scenario_from_view() int {
+    let result string.StringResult = string.from_view(view_of_cstr("abc"))
+    if (result.status == string.status_out_of_memory) {
+        if (result.value.handle != 0) { return 1 }
+        return report_failed()
+    }
+    if (result.status != string.status_ok) { return 2 }
+    if (string.byte_length(&result.value) != 3
+        || !expect_cstr(string.as_view(&result.value), "abc")) {
+        return 3
+    }
+    string.release(&result.value)
+    return report_ok()
+}
+
+// scenario_append_grow：前置 “abc” 容量 16，追加 16 字节强制扩容。
+fn scenario_append_grow() int {
+    let base string.StringResult = string.from_view(view_of_cstr("abc"))
+    if (base.status != string.status_ok) { return 99 }
+    if (string.reserve(&base.value, 16) != string.status_ok) { return 99 }
+    let status string.Status = string.append(&base.value, view_of_cstr("0123456789abcdef"))
+    if (status == string.status_out_of_memory) {
+        if (string.byte_length(&base.value) != 3 || string.capacity(&base.value) != 16
+            || !expect_cstr(string.as_view(&base.value), "abc")) {
+            return 4
+        }
+        return report_failed()
+    }
+    if (status != string.status_ok) { return 5 }
+    if (string.byte_length(&base.value) != 19
+        || !expect_cstr(string.as_view(&base.value), "abc0123456789abcdef")) {
+        return 6
+    }
+    string.release(&base.value)
+    return report_ok()
+}
+
+// scenario_assign_grow：前置 “abc” 容量 3，赋值 10 字节强制扩容。
+fn scenario_assign_grow() int {
+    let base string.StringResult = string.from_view(view_of_cstr("abc"))
+    if (base.status != string.status_ok) { return 99 }
+    let status string.Status = string.assign(&base.value, view_of_cstr("abcdefghij"))
+    if (status == string.status_out_of_memory) {
+        if (string.byte_length(&base.value) != 3 || string.capacity(&base.value) != 3
+            || !expect_cstr(string.as_view(&base.value), "abc")) {
+            return 7
+        }
+        return report_failed()
+    }
+    if (status != string.status_ok) { return 8 }
+    if (!expect_cstr(string.as_view(&base.value), "abcdefghij")) { return 9 }
+    string.release(&base.value)
+    return report_ok()
+}
+
+// scenario_clone：前置 “abc”，克隆需要数据/状态两个分配点。
+fn scenario_clone() int {
+    let base string.StringResult = string.from_view(view_of_cstr("abc"))
+    if (base.status != string.status_ok) { return 99 }
+    let cloned string.StringResult = string.clone(&base.value)
+    if (cloned.status == string.status_out_of_memory) {
+        if (!expect_cstr(string.as_view(&base.value), "abc")) { return 10 }
+        return report_failed()
+    }
+    if (cloned.status != string.status_ok) { return 11 }
+    let base_view string.View = string.as_view(&base.value)
+    let cloned_view string.View = string.as_view(&cloned.value)
+    if (base_view.data.to_type(u64) == cloned_view.data.to_type(u64)) { return 12 }
+    if (!expect_cstr(cloned_view, "abc") || !expect_cstr(base_view, "abc")) { return 13 }
+    string.release(&cloned.value)
+    string.release(&base.value)
+    return report_ok()
+}
+
+// scenario_concat：无前置状态，验证连接结果的数据/状态分配点。
+fn scenario_concat() int {
+    let result string.StringResult = string.concat(view_of_cstr("abc"), view_of_cstr("def"))
+    if (result.status == string.status_out_of_memory) {
+        if (result.value.handle != 0) { return 14 }
+        return report_failed()
+    }
+    if (result.status != string.status_ok) { return 15 }
+    if (!expect_cstr(string.as_view(&result.value), "abcdef")) { return 16 }
+    string.release(&result.value)
+    return report_ok()
+}
+
+// scenario_replace：无前置状态，验证替换结果的数据/状态分配点。
+fn scenario_replace() int {
+    let result string.StringResult = string.replace(view_of_cstr("abcabc"),
+        view_of_cstr("abc"), view_of_cstr("xy"), 9223372036854775806)
+    if (result.status == string.status_out_of_memory) {
+        if (result.value.handle != 0) { return 17 }
+        return report_failed()
+    }
+    if (result.status != string.status_ok) { return 18 }
+    if (!expect_cstr(string.as_view(&result.value), "xyxy")) { return 19 }
+    string.release(&result.value)
+    return report_ok()
+}
+
+// scenario_join：无前置状态，验证 join 结果的数据/状态分配点。
+fn scenario_join() int {
+    let parts [2]string.View
+    parts[0] = view_of_cstr("abc")
+    parts[1] = view_of_cstr("def")
+    let result string.StringResult = string.join(parts.to_type([]string.View),
+        view_of_cstr("-"))
+    if (result.status == string.status_out_of_memory) {
+        if (result.value.handle != 0) { return 20 }
+        return report_failed()
+    }
+    if (result.status != string.status_ok) { return 21 }
+    if (!expect_cstr(string.as_view(&result.value), "abc-def")) { return 22 }
+    string.release(&result.value)
+    return report_ok()
+}
+
+// scenario_append_rune：前置 “abc” 容量 3，追加 3 字节标量强制扩容。
+fn scenario_append_rune() int {
+    let base string.StringResult = string.from_view(view_of_cstr("abc"))
+    if (base.status != string.status_ok) { return 99 }
+    let status string.Status = string.append_rune(&base.value, 20013)
+    if (status == string.status_out_of_memory) {
+        if (string.byte_length(&base.value) != 3 || string.capacity(&base.value) != 3
+            || !expect_cstr(string.as_view(&base.value), "abc")) {
+            return 23
+        }
+        return report_failed()
+    }
+    if (status != string.status_ok) { return 24 }
+    if (string.byte_length(&base.value) != 6) { return 25 }
+    string.release(&base.value)
+    return report_ok()
+}
+
+// scenario_reserve：零句柄直接 reserve，验证数据/状态分配点。
+fn scenario_reserve() int {
+    let value string.String = string.make()
+    let status string.Status = string.reserve(&value, 8)
+    if (status == string.status_out_of_memory) {
+        if (value.handle != 0 || string.byte_length(&value) != 0) { return 26 }
+        return report_failed()
+    }
+    if (status != string.status_ok) { return 27 }
+    if (string.capacity(&value) < 8 || string.byte_length(&value) != 0) { return 28 }
+    string.release(&value)
+    return report_ok()
+}
+
+// scenario_append_byte：前置 “abc” 容量 3，单字节追加强制扩容。
+fn scenario_append_byte() int {
+    let base string.StringResult = string.from_view(view_of_cstr("abc"))
+    if (base.status != string.status_ok) { return 99 }
+    let status string.Status = string.append_byte(&base.value, 'Z')
+    if (status == string.status_out_of_memory) {
+        if (string.byte_length(&base.value) != 3 || string.capacity(&base.value) != 3
+            || !expect_cstr(string.as_view(&base.value), "abc")) {
+            return 29
+        }
+        return report_failed()
+    }
+    if (status != string.status_ok) { return 30 }
+    if (!expect_cstr(string.as_view(&base.value), "abcZ")) { return 31 }
+    string.release(&base.value)
+    return report_ok()
+}
+
+// main 由 runner 传入 argv[1]=场景号；每个场景单独进程，分配计数从 0 开始。
+fn main(argc int, argv **char) int {
+    let scenario int = scenario_from_args(argc, argv)
+    if (scenario == 0) { return scenario_from_view() }
+    if (scenario == 1) { return scenario_append_grow() }
+    if (scenario == 2) { return scenario_assign_grow() }
+    if (scenario == 3) { return scenario_clone() }
+    if (scenario == 4) { return scenario_concat() }
+    if (scenario == 5) { return scenario_replace() }
+    if (scenario == 6) { return scenario_join() }
+    if (scenario == 7) { return scenario_append_rune() }
+    if (scenario == 8) { return scenario_reserve() }
+    if (scenario == 9) { return scenario_append_byte() }
+    return 90
+}

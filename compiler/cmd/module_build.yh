@@ -127,6 +127,13 @@ fn mb_hash_file(h *u64, path *char) int {
 // check 模式用 <root>/.build/check（LL12：不再有旧后端目录）。
 fn mb_build_dir(root_off int, root_len int) int {
     let gs *gen.GenState = gen.G()
+    if (gs.task.c_test_mode != 0) {
+        // 测试检查与生产 .build 隔离；接口/会话文件只落在项目 tmp 下。
+        if (pj_canon(root_off, root_len, "tmp/yh-test/check") != 0) {
+            return -1
+        }
+        return pj_canon_off
+    }
     if (gs.task.c_check_only != 0) {
         if (pj_canon(root_off, root_len, ".build/check") != 0) {
             return -1
@@ -742,7 +749,13 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
             sn = gen.append_str(session, sn, gen.arr_cstr(pbuf))
             sn = gen.append_str(session, sn, mb_iface_suffix)
             session[sn] = 0
-            if (pj_file_exists(gen.arr_cstr(session)) != 0) {
+            let ready [760]u8
+            let rn int = gen.append_str(&ready[0], 0, gen.arr_cstr(pbuf))
+            rn = gen.append_str(&ready[0], rn, ".ready")
+            rn = gen.append_str(&ready[0], rn, mb_iface_suffix)
+            ready[rn] = 0
+            if (pj_file_exists(gen.arr_cstr(&ready[0])) != 0
+                && pj_file_exists(gen.arr_cstr(session)) != 0) {
                 iface_session = 1
                 pn = sn
                 let k int = 0
@@ -852,6 +865,11 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         return -1
     }
     unlink(gen.arr_cstr(session_ctpath))
+    let session_ready [700]u8
+    if (mb_module_ready_path(m, build_off, build_len, &session_ready[0]) != 0) {
+        return -1
+    }
+    unlink(gen.arr_cstr(&session_ready[0]))
     if (pj_canon(build_off, build_len, "manifest") != 0) {
         return -1
     }
@@ -862,11 +880,13 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     mn = gen.append_str(mpath, mn, pj_pool_str(tag_off))
     mn = gen.append_str(mpath, mn, ".manifest")
     mpath[mn] = 0
-    // check 不读取或更新正式构建 manifest 与缓存。
+    // check 不读取或更新正式构建 manifest 与缓存。yh test 用独立的构建目录
+    // （tmp/yh-test）与扩展键（见下方 c_test_key），既不复用生产对象，也能在
+    // 选中测试集合不变时增量复用测试对象。
     if (gs.task.c_check_only != 0) {
         if (mb_spawn_indexed_module(m, root_off, root_len,
                 gen.arr_cstr(asmdir), 0, pid_out) != 0) {
-            return gen.fail("无法启动项目检查 worker")
+            return gen.fail("无法启动项目检查/测试 worker")
         }
         gs.c_stats_workers += 1
         return 0
@@ -882,6 +902,24 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     mb_fnv(&h, '\n')
     mb_fnv(&h, ('0' + gs.task.c_legacy_system).to_type(u8))
     mb_fnv(&h, '\n')
+    // yh test：测试对象还取决于「本轮选中了哪些测试」，把选择摘要与协议版本
+    // 并入键。生产构建不混入，且两种构建目录本身互不相通。
+    if (gs.task.c_test_mode != 0) {
+        mb_fnv(&h, 'T')
+        mb_fnv(&h, 'S')
+        let key_tag *char = "yh-test-key-1"
+        let kti int = 0
+        for key_tag[kti] != 0 {
+            mb_fnv(&h, key_tag[kti].to_type(u8))
+            kti += 1
+        }
+        let key_bits u64 = gs.c_test_key
+        let kbi int = 0
+        for kbi < 8 {
+            mb_fnv(&h, ((key_bits >> (kbi * 8)) & 255).to_type(u8))
+            kbi += 1
+        }
+    }
     let triple_i int = 0
         for gs.c_target.triple[triple_i] != 0 {
             mb_fnv(&h, gs.c_target.triple[triple_i].to_type(u8))
@@ -950,8 +988,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         if (mb_hash_file(&h, pj_pool_str(mb_dep_ifoff[di])) != 0
             || mb_hash_file(&h, pj_pool_str(mb_dep_ctoff[di])) != 0) {
             return -1
-        }
-        di += 1
+        }        di += 1
     }
     let deps_ok int = 1
     if (di == mb_dep_n + 1) {
@@ -1208,6 +1245,68 @@ fn mb_module_ctiface_path(m int, build_off int, build_len int,
     return 0
 }
 
+// mb_module_ready_path：本轮接口就绪标记 <tag>.s.i.ready[suffix]。
+// worker 先写 .s.ct、再写 .s.i、最后写 ready；父调度器只认 ready。
+fn mb_module_ready_path(m int, build_off int, build_len int, out *u8) int {
+    let plain [700]u8
+    if (mb_module_iface_plain_path(m, build_off, build_len, plain) != 0) {
+        return -1
+    }
+    let n int = 0
+    n = gen.append_str(out, n, gen.arr_cstr(plain))
+    n = gen.append_str(out, n, ".ready")
+    if (mb_iface_suffix != 0) {
+        n = gen.append_str(out, n, mb_iface_suffix)
+    }
+    out[n] = 0
+    return 0
+}
+
+// mb_iface_write_ready：原子写就绪标记；内容只用于存在性，不参与身份。
+fn mb_iface_write_ready(path *char) int {
+    let tmp [800]u8
+    let n int = 0
+    n = gen.append_str(tmp, n, path)
+    n = gen.append_str(tmp, n, ".tmp.")
+    n = gen.append_int(tmp, n, getpid())
+    tmp[n] = 0
+    let fd int = mb_open_out(gen.arr_cstr(tmp))
+    if (fd < 0) { return -1 }
+    let data u8 = 49
+    let wr int = gen.write_all(fd, &data, 1)
+    let cr int = close(fd)
+    if (wr != 0 || cr != 0 || rename(gen.arr_cstr(tmp), path) != 0) {
+        unlink(gen.arr_cstr(tmp))
+        return -1
+    }
+    return 0
+}
+
+// mb_iface_ct_same：比较本轮 session CT 接口与持久 CT 接口内容。
+// 返回 1 相同（允许早期启动），0 不同/缺失（等待依赖完成）。
+fn mb_iface_ct_same(m int, build_off int, build_len int) int {
+    let gs *gen.GenState = gen.G()
+    let session [700]u8
+    let plain [700]u8
+    if (mb_module_ctiface_path(m, build_off, build_len, session) != 0
+        || mb_module_ctiface_plain_path(m, build_off, build_len, plain) != 0) {
+        return 0
+    }
+    // 没有 CT 正文（文件缺失/空）时不存在旧 CT 可复用，允许早期启动。
+    if (pj_file_exists(gen.arr_cstr(session)) == 0) { return 1 }
+    if (gen.read_source(gen.arr_cstr(session)) != 0) { return 0 }
+    if (gs.task.c_src_len == 0) { return 1 }
+    // 首次构建没有持久 CT，不存在可复用的旧值；session ready 已是新接口。
+    if (pj_file_exists(gen.arr_cstr(plain)) == 0) { return 1 }
+    if (gen.read_source(gen.arr_cstr(plain)) != 0) { return 0 }
+    if (gs.task.c_src_len == 0) { return 0 }
+    let hs u64 = mb_hash_init()
+    let hp u64 = mb_hash_init()
+    if (mb_hash_file(&hs, gen.arr_cstr(session)) != 0
+        || mb_hash_file(&hp, gen.arr_cstr(plain)) != 0) { return 0 }
+    return hs == hp ? 1 : 0
+}
+
 // mb_iface_copy_file：完整读取源接口，经同目录暂存后原子发布到目标路径。
 fn mb_iface_copy_file(src *char, dst *char) int {
     let gs *gen.GenState = gen.G()
@@ -1262,6 +1361,15 @@ fn mb_file_head_bind(fi int) int {
         if (found < 0) {
             return gen.err_lc(gs.task.mod_imports[i].line, gs.task.mod_imports[i].col,
                 "内部错误：导入与扫描记录不对应")
+        }
+        let imp_proj int = gs.p_mods[gs.p_files[fi].mod].proj
+        if (gs.p_imp_test_only[found] != 0
+            && (gs.task.c_test_mode == 0 || imp_proj != gs.c_test_project)) {
+            // 生产构建/非目标项目不绑定 test 专用导入；标记 used 以免报未使用。
+            gs.task.mod_import_mod[i] = -1
+            gs.task.mod_import_used[i] = 1
+            i += 1
+            continue
         }
         let target int = gs.p_imp_mod[found]
         let mi int = -1
@@ -1372,6 +1480,8 @@ fn mb_pass2_file(path *char, fi int, is_globals int) int {
             if (parse.parse_source_ct_layout_register() != 0) { return -1 }
         } else if (is_globals == 4) {
             if (parse.parse_source_ct_layout_consts() != 0) { return -1 }
+        } else if (is_globals == 5) {
+            if (parse.parse_source_tests() != 0) { return -1 }
         } else if (parse.parse_source_globals() != 0) {
             return -1
         }
@@ -1402,6 +1512,12 @@ fn mb_check_binding_clash(m int) int {
         let ii int = 0
         for ii < gs.p_imp_n {
             if (gs.p_imp_file[ii] != f) {
+                ii += 1
+                continue
+            }
+            let imp_proj int = gs.p_mods[gs.p_files[f].mod].proj
+            if (gs.p_imp_test_only[ii] != 0
+                && (gs.task.c_test_mode == 0 || imp_proj != gs.c_test_project)) {
                 ii += 1
                 continue
             }
@@ -1493,6 +1609,8 @@ fn mb_print_stats() void {
     n = gen.append_int(buf, n, gs.c_stats_ir_cache_hits)
     n = gen.append_str(buf, n, " ir_cache_misses=")
     n = gen.append_int(buf, n, gs.c_stats_ir_cache_misses)
+    n = gen.append_str(buf, n, " ir_lowered=")
+    n = gen.append_int(buf, n, gs.c_stats_ir_lowered)
     n = gen.append_str(buf, n, " ast_nodes=")
     n = gen.append_int(buf, n, gs.task.c_stats_ast_nodes)
     n = gen.append_str(buf, n, " stmt_nodes=")
@@ -1545,6 +1663,12 @@ fn mb_print_stats() void {
     n = gen.append_int(buf, n, gs.c_stats_backend_rejected)
     n = gen.append_str(buf, n, " fallback_functions=")
     n = gen.append_int(buf, n, gs.c_stats_ir_rejected + gs.c_stats_backend_rejected)
+    n = gen.append_str(buf, n, " check_cache_hits=")
+    n = gen.append_int(buf, n, gs.c_stats_check_cache_hits)
+    n = gen.append_str(buf, n, " check_cache_misses=")
+    n = gen.append_int(buf, n, gs.c_stats_check_cache_misses)
+    n = gen.append_str(buf, n, " check_skipped=")
+    n = gen.append_int(buf, n, gs.c_stats_check_cache_skipped)
     n = gen.append_byte(buf, n, '\n')
     gen.write_all(2, buf, n)
 }

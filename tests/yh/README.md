@@ -4,9 +4,11 @@
 语料只做**词法 + 语法**层面的验证，不参与类型检查与代码生成，因此文件里可以出现
 未定义符号、无 `main`、类型不正确等情形。
 
-2026-10-05 当前 ANTLR 与编译器语法模式各校验正例 71/71、反例 44/44；新增
-编译期显式调用、函数体 `$if/$for` 及 `comptime` 普通标识符边界。自动 C ABI 的
-语义与运行结果由 `tests/yh-run/` 和 `tests/modules/projects/autoabi/` 验证。
+2026-10-23 YT0 后，ANTLR 与编译器语法模式各校验正例 81/81、反例 49/49；
+新增顶层 `test` 声明（字符串行为测试与标识符文档测试），并保持编译期显式调用、
+函数体 `$if/$for` 及 `comptime` 普通标识符边界。test 的生产构建只检查语法、
+跳过测试体语义；`yh test` 执行能力尚未实现。自动 C ABI 的语义与运行结果由
+`tests/yh-run/` 和 `tests/modules/projects/autoabi/` 验证。
 
 > 当前编译器源码位于 `compiler/`，由 `bin/yh` 滚动自举构建。
 > `make test` 同时以 `yh.g4` 的 ANTLR 解析器和编译器语法模式校验语料；
@@ -14,13 +16,13 @@
 
 ## 目录与命名
 
-按 `yh.g4` 的 11 个章节直接分区，另加一个反例区：
+按 `yh.g4` 的 12 个章节直接分区，另加扩展正例与反例区：
 
 | # | yh.g4 章节 | 目录 | 文件数 |
 | --- | --- | --- | --- |
 | 1 | 顶层结构 | `01-toplevel/` | 4 |
-| 2 | 基础规则 | `02-basic/` | 3 |
-| 3 | 声明 | `03-decl/` | 9 |
+| 2 | 基础规则 | `02-basic/` | 5 |
+| 3 | 声明 | `03-decl/` | 12 |
 | 4 | 语句 | `04-stmt/` | 9 |
 | 5 | 分支语句 | `05-branch/` | 6 |
 | 6 | 循环语句 | `06-loop/` | 4 |
@@ -30,10 +32,10 @@
 | 10 | 内置 prelude | `10-prelude/` | 2 |
 | 11 | 词法规则 | `11-lex/` | 8 |
 | 12 | 扩展语法 | `12-exp/` | 1 |
-| — | 扩展正例（C 函数类型、编译期语法与标识符） | `positive/` | 4 |
-| — | **反例** | `rejected/` | 44 |
+| — | 扩展正例（C 函数类型、编译期语法与标识符） | `positive/` | 9 |
+| — | **反例** | `rejected/` | 49 |
 
-合计 **115 个 `.yh` 文件**（正例 71 + 反例 44）。分区文件使用 `NN_<topic>.yh`，
+合计 **130 个 `.yh` 文件**（正例 81 + 反例 49）。分区文件使用 `NN_<topic>.yh`，
 独立新增正例和反例也使用序号加短横线的命名。
 
 **反例区 `rejected/`**：该目录下的文件**必须解析失败**才算通过，用来钉住「哪些写法不许出现」。
@@ -122,8 +124,9 @@ Python parser（产物落临时目录，不污染仓库）→ 遍历 `tests/yh/*
 
 ## 覆盖对照表
 
-语法共 77 条规则（parser 68 + lexer 9），包括由
-`comptimeIfStmt`、`comptimeForStmt` 与 `comptimeCall` 覆盖的编译期扩展。
+语法共 82 条规则（parser 73 + lexer 9），包括由
+`comptimeIfStmt`、`comptimeForStmt` 与 `comptimeCall` 覆盖的编译期扩展，
+以及 YT0 新增的 `testDecl`/`testName`。
 
 ### 顶层结构
 
@@ -134,6 +137,8 @@ Python parser（产物落临时目录，不污染仓库）→ 遍历 `tests/yh/*
 | `topLevelDeclBody` | 01-toplevel/01_toplevel_decls.yh、01-toplevel/02_pub_export.yh |
 | `plainDeclBody` | 01-toplevel/01_toplevel_decls.yh |
 | `exportedDeclBody` | 01-toplevel/02_pub_export.yh |
+| `testDecl` | 03-decl/12_test_decl.yh |
+| `testName` | 03-decl/12_test_decl.yh |
 
 ### 基础规则
 
@@ -336,8 +341,19 @@ for/switch 头部边界、memberName、exprStmt、labelStmt、数组类型边界
 | `27_number_underscore.yh` | `1__0` | 拒绝：下划线必须夹在数字之间 |
 | `28_legacy_as.yh` | `x as T` | 拒绝：旧类型转换写法已移除 |
 | `29_reserved_to_type.yh` | `let to_type int = 1;` | 拒绝：专用后缀关键字不作普通标识符 |
+| `47_pub_test.yh` | `pub test "x" {}` | 拒绝：test 不支持 pub |
+| `48_attributed_test.yh` | `@[inline] test "x" {}` | 拒绝：test 不接受属性 |
+| `49_test_anonymous.yh` | `test {}` | 拒绝：test 必须有名称 |
+| `50_test_missing_block.yh` | `test "x" 1` | 拒绝：test 后必须是块 |
+| `51_test_as_ident.yh` | `let test int = 1` | 拒绝：test 是保留字（成员位置除外） |
 
-### 3. 参考语法的 `NL` 仍走隐藏通道
+### 3. YT0 test 语法的语义边界
+`test` 在 YT0 只落语法与声明索引：`test "" {}` 的空名称由编译器语法检查
+拒绝（ANTLR 的 `STRING` 规则无法表达非空），生产 `build`/`run`/`check`
+跳过测试体语义且不发射测试代码。同种类重复名称、带值 `return`、文档目标
+绑定、`$assert` 运行时失败与 `yh test` 均未实现，不能由本目录语料验收。
+
+### 4. 参考语法的 `NL` 仍走隐藏通道
 
 `NL` 不参与语法判定，只用于保留位置信息。**语句边界完全由 `;` 决定**，
 因此语料里「换行」纯粹是排版，不影响解析结果。

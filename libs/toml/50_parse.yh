@@ -1,0 +1,746 @@
+module toml
+
+// yh TOML 标准库：文档、键、值与表语义解析。
+//
+// 语句边界、表定义状态与点键冻结规则按 TOML 1.1：隐式父表可稍后显式定义；
+// 点键创建的表在本节结束后冻结；内联表不可再扩展；[[数组表]] 的子表绑定到
+// 最近创建的元素。解析只报第一个错误，失败时整份文档池被释放。
+
+// is_bare_key_byte 判断裸键允许的字节（ALPHA / DIGIT / '-' / '_'）。
+fn is_bare_key_byte(b u8) int {
+    if (b >= 'a' && b <= 'z') {
+        return 1
+    }
+    if (b >= 'A' && b <= 'Z') {
+        return 1
+    }
+    if (b >= '0' && b <= '9') {
+        return 1
+    }
+    if (b == '-' || b == '_') {
+        return 1
+    }
+    return 0
+}
+
+// p_pool_fail 按池状态记录资源诊断：预算超限与系统内存不足分开。
+fn p_pool_fail(p *parser, span Span, message *char) int {
+    let code ErrorCode = ErrorCode.error_out_of_memory
+    if (p.state.mem.status == 2) {
+        code = ErrorCode.error_resource_limit
+    }
+    p_fail_span(p, code, message, span.offset, span.length, span.line, span.column)
+    return -1
+}
+
+// p_parse_key_part 解析一个键段：裸键或单行引号键。
+fn p_parse_key_part(p *parser, out *Text, span *Span) int {
+    span[0].offset = p.pos
+    span[0].line = p.line
+    span[0].column = p.column
+    span[0].length = 0
+    if (p.pos >= p.count) {
+        p_fail_here(p, ErrorCode.error_syntax, "缺少键名")
+        return -1
+    }
+    let b u8 = p.data[p.pos]
+    if (b == '"' || b == '\'') {
+        let literal int = 0
+        if (b == '\'') {
+            literal = 1
+        }
+        if (p_parse_quoted(p, 0, literal) != 0) {
+            return -1
+        }
+        span[0].length = p.pos - span[0].offset
+        out[0] = text_make(p.str_data, p.str_count)
+        return 0
+    }
+    let start u64 = p.pos
+    for p.pos < p.count && is_bare_key_byte(p.data[p.pos]) != 0 {
+        p_advance(p)
+    }
+    if (p.pos == start) {
+        p_fail_here(p, ErrorCode.error_syntax, "非法键名首字符")
+        return -1
+    }
+    let bytes *u8 = pool_dup_bytes(&p.state.mem, p.data + start, p.pos - start)
+    if (bytes == 0) {
+        p_fail_here(p, ErrorCode.error_out_of_memory, "键名内存不足")
+        return -1
+    }
+    span[0].length = p.pos - start
+    out[0] = text_make(bytes, p.pos - start)
+    return 0
+}
+
+// p_parse_key 解析完整键（可含点分段）；parts/spans 数组容量至少 128。
+fn p_parse_key(p *parser, parts *Text, spans *Span, out_count *int) int {
+    let n int = 0
+    if (p_parse_key_part(p, &parts[0], &spans[0]) != 0) {
+        return -1
+    }
+    n = 1
+    p_skip_ws(p)
+    for p.pos < p.count && p.data[p.pos] == '.' {
+        p_advance(p)
+        p_skip_ws(p)
+        if (n >= TOML_MAX_KEY_PARTS) {
+            p_fail_here(p, ErrorCode.error_resource_limit, "键分段数超过上限")
+            return -1
+        }
+        if (p_parse_key_part(p, &parts[n], &spans[n]) != 0) {
+            return -1
+        }
+        n += 1
+        p_skip_ws(p)
+    }
+    out_count[0] = n
+    return 0
+}
+
+// p_insert_pair 把 key = value 写入当前表，按点键规则创建中间表。
+fn p_insert_pair(p *parser, parts *Text, spans *Span, n int,
+    value *node, value_span Span) int {
+    let container *node = p.table
+    let i int = 0
+    for i < n - 1 {
+        let t *table = container.data.tbl
+        let idx int = table_find(t, parts[i])
+        if (idx >= 0) {
+            let entry_ptr *entry = table_entry_of(t, idx)
+            let child *node = entry_ptr.value.to_type(*node)
+            if (child.kind != ValueKind.kind_table) {
+                p_fail_span(p, ErrorCode.error_table_conflict,
+                    "点键不能穿过非表值", spans[i].offset, spans[i].length,
+                    spans[i].line, spans[i].column)
+                return -1
+            }
+            if (child.def == TOML_DEF_INLINE) {
+                p_fail_span(p, ErrorCode.error_table_conflict,
+                    "内联表不能再扩展", spans[i].offset, spans[i].length,
+                    spans[i].line, spans[i].column)
+                return -1
+            }
+            if (child.def == TOML_DEF_DEFINED) {
+                p_fail_span(p, ErrorCode.error_table_conflict,
+                    "点键不能重新定义已定义的表", spans[i].offset,
+                    spans[i].length, spans[i].line, spans[i].column)
+                return -1
+            }
+            if (child.def == TOML_DEF_IMPLICIT) {
+                // 隐式父表被点键扩展后也进入冻结序列：本节点内可继续扩展，
+                // 但后续表头不能再显式定义它。
+                child.def = TOML_DEF_DOTTED
+                if (doc_add_dotted(p.state, child) != 0) {
+                    return p_pool_fail(p, spans[i], "记录点键表失败")
+                }
+            }
+            container = child
+        } else {
+            let created *node = node_new_table(&p.state.mem, TOML_DEF_DOTTED,
+                spans[i])
+            if (created == 0) {
+                return p_pool_fail(p, spans[i], "创建点键表失败")
+            }
+            if (doc_add_dotted(p.state, created) != 0) {
+                return p_pool_fail(p, spans[i], "记录点键表失败")
+            }
+            if (table_insert(&p.state.mem, t, parts[i], created, spans[i]) != 0) {
+                return p_pool_fail(p, spans[i], "写入点键表失败")
+            }
+            container = created
+        }
+        i += 1
+    }
+    let final_table *table = container.data.tbl
+    let last Text = parts[n - 1]
+    let existing int = table_find(final_table, last)
+    if (existing >= 0) {
+        let first *entry = table_entry_of(final_table, existing)
+        p_fail_span(p, ErrorCode.error_duplicate_key, "键重复定义",
+            spans[n - 1].offset, spans[n - 1].length, spans[n - 1].line,
+            spans[n - 1].column)
+        p_related(p, first.span)
+        return -1
+    }
+    if (table_insert(&p.state.mem, final_table, last, value, value_span) != 0) {
+        return p_pool_fail(p, spans[n - 1], "写入表条目失败")
+    }
+    return 0
+}
+
+// p_open_array_table_at 在表数组末尾追加一个新表元素。
+fn p_open_array_table_at(p *parser, array_node *node, header_span Span,
+    out **node) int {
+    let element *node = node_new_table(&p.state.mem, TOML_DEF_IMPLICIT,
+        header_span)
+    if (element == 0) {
+        return p_pool_fail(p, header_span, "创建数组表元素失败")
+    }
+    if (items_append(&p.state.mem, array_node.data.array, element) != 0) {
+        return p_pool_fail(p, header_span, "追加数组表元素失败")
+    }
+    out[0] = element
+    return 0
+}
+
+// p_open_header 按表头路径打开/创建目标表并设为当前表。
+fn p_open_header(p *parser, parts *Text, spans *Span, n int, is_array int,
+    header_span Span) int {
+    let container *node = p.state.root
+    let i int = 0
+    for i < n - 1 {
+        let t *table = container.data.tbl
+        let idx int = table_find(t, parts[i])
+        if (idx < 0) {
+            let created *node = node_new_table(&p.state.mem,
+                TOML_DEF_IMPLICIT, spans[i])
+            if (created == 0) {
+                return p_pool_fail(p, spans[i], "创建隐式父表失败")
+            }
+            if (table_insert(&p.state.mem, t, parts[i], created, spans[i]) != 0) {
+                return p_pool_fail(p, spans[i], "写入隐式父表失败")
+            }
+            container = created
+            i += 1
+            continue
+        }
+        let entry_ptr *entry = table_entry_of(t, idx)
+        let child *node = entry_ptr.value.to_type(*node)
+        if (child.kind == ValueKind.kind_table) {
+            if (child.def == TOML_DEF_INLINE) {
+                p_fail_span(p, ErrorCode.error_table_conflict,
+                    "表头不能穿过内联表", spans[i].offset, spans[i].length,
+                    spans[i].line, spans[i].column)
+                return -1
+            }
+            container = child
+        } else if (child.kind == ValueKind.kind_array
+            && child.is_table_array != 0) {
+            let last *node = items_last(child.data.array)
+            if (last == 0) {
+                p_fail_span(p, ErrorCode.error_table_conflict,
+                    "数组表没有可用元素", spans[i].offset, spans[i].length,
+                    spans[i].line, spans[i].column)
+                return -1
+            }
+            container = last
+        } else {
+            p_fail_span(p, ErrorCode.error_table_conflict,
+                "表头路径穿过非表值", spans[i].offset, spans[i].length,
+                spans[i].line, spans[i].column)
+            return -1
+        }
+        i += 1
+    }
+
+    let last_table *table = container.data.tbl
+    let last_key Text = parts[n - 1]
+    let idx int = table_find(last_table, last_key)
+    if (is_array != 0) {
+        if (idx < 0) {
+            let array_node *node = node_new_array(&p.state.mem, 1, header_span)
+            if (array_node == 0) {
+                return p_pool_fail(p, spans[n - 1], "创建数组表失败")
+            }
+            if (table_insert(&p.state.mem, last_table, last_key, array_node,
+                header_span) != 0) {
+                return p_pool_fail(p, spans[n - 1], "写入数组表失败")
+            }
+            let element *node = 0
+            if (p_open_array_table_at(p, array_node, header_span, &element) != 0) {
+                return -1
+            }
+            p.table = element
+            return 0
+        }
+        let entry_ptr *entry = table_entry_of(last_table, idx)
+        let child *node = entry_ptr.value.to_type(*node)
+        if (child.kind != ValueKind.kind_array || child.is_table_array == 0) {
+            p_fail_span(p, ErrorCode.error_table_conflict,
+                "数组表与已有值冲突", spans[n - 1].offset, spans[n - 1].length,
+                spans[n - 1].line, spans[n - 1].column)
+            return -1
+        }
+        let element *node = 0
+        if (p_open_array_table_at(p, child, header_span, &element) != 0) {
+            return -1
+        }
+        p.table = element
+        return 0
+    }
+
+    if (idx < 0) {
+        let created *node = node_new_table(&p.state.mem, TOML_DEF_DEFINED,
+            header_span)
+        if (created == 0) {
+            return p_pool_fail(p, spans[n - 1], "创建表失败")
+        }
+        if (table_insert(&p.state.mem, last_table, last_key, created,
+            header_span) != 0) {
+            return p_pool_fail(p, spans[n - 1], "写入表失败")
+        }
+        p.table = created
+        return 0
+    }
+    let entry_ptr *entry = table_entry_of(last_table, idx)
+    let child *node = entry_ptr.value.to_type(*node)
+    if (child.kind == ValueKind.kind_table && child.def == TOML_DEF_IMPLICIT) {
+        child.def = TOML_DEF_DEFINED
+        p.table = child
+        return 0
+    }
+    p_fail_span(p, ErrorCode.error_table_conflict, "表重复定义",
+        spans[n - 1].offset, spans[n - 1].length, spans[n - 1].line,
+        spans[n - 1].column)
+    p_related(p, entry_ptr.span)
+    return -1
+}
+
+// p_parse_header 解析 [table] 或 [[array-table]]，并在表头前冻结上一节点键表。
+fn p_parse_header(p *parser) int {
+    doc_finalize_dotted(p.state)
+    p_advance(p)
+    let is_array int = 0
+    if (p.pos < p.count && p.data[p.pos] == '[') {
+        is_array = 1
+        p_advance(p)
+    }
+    p_skip_ws(p)
+    let key_off u64 = p.pos
+    let key_line u64 = p.line
+    let key_col u64 = p.column
+    let parts [128]Text
+    let spans [128]Span
+    let n int = 0
+    if (p_parse_key(p, &parts[0], &spans[0], &n) != 0) {
+        return -1
+    }
+    p_skip_ws(p)
+    if (p.pos >= p.count || p.data[p.pos] != ']') {
+        p_fail_here(p, ErrorCode.error_syntax, "表头缺少 ']'")
+        return -1
+    }
+    p_advance(p)
+    if (is_array != 0) {
+        if (p.pos >= p.count || p.data[p.pos] != ']') {
+            p_fail_here(p, ErrorCode.error_syntax, "数组表头缺少 ']]'")
+            return -1
+        }
+        p_advance(p)
+    }
+    let header_span Span
+    header_span.offset = key_off
+    header_span.length = p.pos - key_off
+    if (is_array != 0) {
+        header_span.length -= 2
+    } else {
+        header_span.length -= 1
+    }
+    header_span.line = key_line
+    header_span.column = key_col
+    return p_open_header(p, &parts[0], &spans[0], n, is_array, header_span)
+}
+
+// p_parse_key_value_pair 解析 key = value 并写入当前表；不消费语句尾空白。
+fn p_parse_key_value_pair(p *parser) int {
+    let parts [128]Text
+    let spans [128]Span
+    let n int = 0
+    if (p_parse_key(p, &parts[0], &spans[0], &n) != 0) {
+        return -1
+    }
+    if (p.pos >= p.count || p.data[p.pos] != '=') {
+        p_fail_here(p, ErrorCode.error_syntax, "键值对缺少 '='")
+        return -1
+    }
+    p_advance(p)
+    p_skip_ws(p)
+    let value *node = 0
+    if (p_parse_value(p, &value) != 0) {
+        return -1
+    }
+    return p_insert_pair(p, &parts[0], &spans[0], n, value, value.span)
+}
+
+// p_skip_to_value_end 以逐字节方式前进到 end（数字扫描后同步行列）。
+fn p_skip_to_value_end(p *parser, end u64) void {
+    for p.pos < end {
+        p_advance(p)
+    }
+}
+
+// p_parse_number_or_datetime 解析以数字或符号开头的值。
+fn p_parse_number_or_datetime(p *parser, out **node) int {
+    let start u64 = p.pos
+    let start_line u64 = p.line
+    let start_col u64 = p.column
+    let b u8 = p.data[p.pos]
+    let is_datetime int = 0
+    if (b >= '0' && b <= '9') {
+        if (start + 5 <= p.count
+            && p.data[start] >= '0' && p.data[start] <= '9'
+            && p.data[start + 1] >= '0' && p.data[start + 1] <= '9'
+            && p.data[start + 2] >= '0' && p.data[start + 2] <= '9'
+            && p.data[start + 3] >= '0' && p.data[start + 3] <= '9'
+            && p.data[start + 4] == '-') {
+            is_datetime = 1
+        } else if (start + 3 <= p.count
+            && p.data[start] >= '0' && p.data[start] <= '9'
+            && p.data[start + 1] >= '0' && p.data[start + 1] <= '9'
+            && p.data[start + 2] == ':') {
+            is_datetime = 1
+        }
+    }
+    if (is_datetime != 0) {
+        let result dt_result = datetime_scan(p.data, p.count, start)
+        if (result.status == DT_VALUE) {
+            let length u64 = result.end - start
+            if (length == 0) {
+                length = 1
+            }
+            p_fail_span(p, ErrorCode.error_datetime_value, "日期时间值非法",
+                start, length, start_line, start_col)
+            return -1
+        }
+        if (result.status != DT_OK) {
+            p_fail_span(p, ErrorCode.error_syntax, "日期时间语法错误",
+                start, 1, start_line, start_col)
+            return -1
+        }
+        p_skip_to_value_end(p, result.end)
+        let bytes *u8 = pool_dup_bytes(&p.state.mem, p.data + start,
+            result.end - start)
+        if (bytes == 0) {
+            p_fail_span(p, ErrorCode.error_out_of_memory, "时间文本内存不足",
+                start, result.end - start, start_line, start_col)
+            return -1
+        }
+        let text Text = text_make(bytes, result.end - start)
+        let node_ptr *node = node_new(&p.state.mem, result.kind, span_zero())
+        if (node_ptr == 0) {
+            p_fail_span(p, ErrorCode.error_out_of_memory, "时间节点内存不足",
+                start, result.end - start, start_line, start_col)
+            return -1
+        }
+        node_set_temporal(node_ptr, result.kind, text)
+        node_ptr.span.offset = start
+        node_ptr.span.length = result.end - start
+        node_ptr.span.line = start_line
+        node_ptr.span.column = start_col
+        out[0] = node_ptr
+        return 0
+    }
+
+    let scanned num_result = num_scan(p.data, p.count, start)
+    if (scanned.status != NUM_OK) {
+        let code ErrorCode = ErrorCode.error_syntax
+        let message *char = "数字字面量语法错误"
+        if (scanned.status == NUM_INT_RANGE) {
+            code = ErrorCode.error_integer_range
+            message = "整数超出 i64 范围"
+        } else if (scanned.status == NUM_FLOAT_RANGE) {
+            code = ErrorCode.error_float_range
+            message = "浮点字面量超出 binary64 范围"
+        } else if (scanned.status == NUM_RESOURCE) {
+            code = ErrorCode.error_resource_limit
+            message = "数字字面量超出实现预算"
+        }
+        let length u64 = scanned.end - start
+        if (length == 0) {
+            length = 1
+        }
+        p_fail_span(p, code, message, start, length, start_line, start_col)
+        return -1
+    }
+    p_skip_to_value_end(p, scanned.end)
+    let node_ptr *node = node_new(&p.state.mem, ValueKind.kind_integer,
+        span_zero())
+    if (node_ptr == 0) {
+        p_fail_span(p, ErrorCode.error_out_of_memory, "数值节点内存不足",
+            start, scanned.end - start, start_line, start_col)
+        return -1
+    }
+    if (scanned.is_float != 0) {
+        node_ptr.kind = ValueKind.kind_float
+        node_ptr.data.real = scanned.fval
+    } else {
+        node_ptr.kind = ValueKind.kind_integer
+        node_ptr.data.integer = scanned.ival
+    }
+    node_ptr.span.offset = start
+    node_ptr.span.length = scanned.end - start
+    node_ptr.span.line = start_line
+    node_ptr.span.column = start_col
+    out[0] = node_ptr
+    return 0
+}
+
+// p_parse_value 解析一个值并返回节点；不检查值后的定界符。
+fn p_parse_value(p *parser, out **node) int {
+    if (p.pos >= p.count) {
+        p_fail_here(p, ErrorCode.error_syntax, "缺少值")
+        return -1
+    }
+    let start u64 = p.pos
+    let start_line u64 = p.line
+    let start_col u64 = p.column
+    let b u8 = p.data[p.pos]
+    if (b == '"' || b == '\'') {
+        let literal int = 0
+        if (b == '\'') {
+            literal = 1
+        }
+        let multiline int = p_is_triple(p, b)
+        if (p_parse_quoted(p, multiline, literal) != 0) {
+            return -1
+        }
+        let node_ptr *node = node_new(&p.state.mem, ValueKind.kind_string,
+            span_zero())
+        if (node_ptr == 0) {
+            p_fail_span(p, ErrorCode.error_out_of_memory, "字符串节点内存不足",
+                start, p.pos - start, start_line, start_col)
+            return -1
+        }
+        node_set_text(node_ptr, text_make(p.str_data, p.str_count))
+        node_ptr.span.offset = start
+        node_ptr.span.length = p.pos - start
+        node_ptr.span.line = start_line
+        node_ptr.span.column = start_col
+        out[0] = node_ptr
+        return 0
+    }
+    if (b == '[') {
+        return p_parse_array(p, out)
+    }
+    if (b == '{') {
+        return p_parse_inline_table(p, out)
+    }
+    if (b == 't' || b == 'f') {
+        let word *char = "true"
+        let word_len int = 4
+        let bool_value bool = true
+        if (b == 'f') {
+            word = "false"
+            word_len = 5
+            bool_value = false
+        }
+        if (start + word_len.to_type(u64) > p.count) {
+            p_fail_span(p, ErrorCode.error_syntax, "布尔字面量不完整",
+                start, 1, start_line, start_col)
+            return -1
+        }
+        let i int = 0
+        for i < word_len {
+            if (p.data[start + i.to_type(u64)] != word[i].to_type(u8)) {
+                p_fail_span(p, ErrorCode.error_syntax, "布尔字面量语法错误",
+                    start, 1, start_line, start_col)
+                return -1
+            }
+            i += 1
+        }
+        p_skip_to_value_end(p, start + word_len.to_type(u64))
+        let node_ptr *node = node_new(&p.state.mem, ValueKind.kind_boolean,
+            span_zero())
+        if (node_ptr == 0) {
+            p_fail_span(p, ErrorCode.error_out_of_memory, "布尔节点内存不足",
+                start, p.pos - start, start_line, start_col)
+            return -1
+        }
+        node_ptr.data.boolean = bool_value
+        node_ptr.span.offset = start
+        node_ptr.span.length = p.pos - start
+        node_ptr.span.line = start_line
+        node_ptr.span.column = start_col
+        out[0] = node_ptr
+        return 0
+    }
+    if ((b >= '0' && b <= '9') || b == '+' || b == '-' || b == 'i' || b == 'n') {
+        return p_parse_number_or_datetime(p, out)
+    }
+    p_fail_here(p, ErrorCode.error_syntax, "无法识别的值")
+    return -1
+}
+
+// p_parse_array 解析数组，允许混合类型、换行、注释与尾逗号。
+fn p_parse_array(p *parser, out **node) int {
+    let start u64 = p.pos
+    let start_line u64 = p.line
+    let start_col u64 = p.column
+    p_advance(p)
+    p.depth += 1
+    if (p.depth > TOML_MAX_DEPTH) {
+        p_fail_span(p, ErrorCode.error_resource_limit, "容器嵌套超过上限",
+            start, 1, start_line, start_col)
+        return -1
+    }
+    let span Span
+    span.offset = start
+    span.length = 1
+    span.line = start_line
+    span.column = start_col
+    let array_node *node = node_new_array(&p.state.mem, 0, span)
+    if (array_node == 0) {
+        p_fail_span(p, ErrorCode.error_out_of_memory, "数组节点内存不足",
+            start, 1, start_line, start_col)
+        return -1
+    }
+    if (p_skip_container_ws(p) != 0) {
+        return -1
+    }
+    if (p.pos < p.count && p.data[p.pos] == ']') {
+        p_advance(p)
+        p.depth -= 1
+        array_node.span.length = p.pos - start
+        out[0] = array_node
+        return 0
+    }
+    for 1 {
+        let element *node = 0
+        if (p_parse_value(p, &element) != 0) {
+            return -1
+        }
+        if (items_append(&p.state.mem, array_node.data.array, element) != 0) {
+            return p_pool_fail(p, element.span, "追加数组元素失败")
+        }
+        if (p_skip_container_ws(p) != 0) {
+            return -1
+        }
+        if (p.pos < p.count && p.data[p.pos] == ']') {
+            p_advance(p)
+            break
+        }
+        if (p.pos >= p.count || p.data[p.pos] != ',') {
+            p_fail_here(p, ErrorCode.error_syntax, "数组元素之间需要逗号")
+            return -1
+        }
+        p_advance(p)
+        if (p_skip_container_ws(p) != 0) {
+            return -1
+        }
+        if (p.pos < p.count && p.data[p.pos] == ']') {
+            p_advance(p)
+            break
+        }
+    }
+    p.depth -= 1
+    array_node.span.length = p.pos - start
+    out[0] = array_node
+    return 0
+}
+
+// p_parse_inline_table 解析内联表；TOML 1.1 允许换行、注释与尾逗号。
+fn p_parse_inline_table(p *parser, out **node) int {
+    let start u64 = p.pos
+    let start_line u64 = p.line
+    let start_col u64 = p.column
+    p_advance(p)
+    p.depth += 1
+    if (p.depth > TOML_MAX_DEPTH) {
+        p_fail_span(p, ErrorCode.error_resource_limit, "容器嵌套超过上限",
+            start, 1, start_line, start_col)
+        return -1
+    }
+    let span Span
+    span.offset = start
+    span.length = 1
+    span.line = start_line
+    span.column = start_col
+    let table_node *node = node_new_table(&p.state.mem, TOML_DEF_INLINE, span)
+    if (table_node == 0) {
+        p_fail_span(p, ErrorCode.error_out_of_memory, "内联表节点内存不足",
+            start, 1, start_line, start_col)
+        return -1
+    }
+    let saved_table *node = p.table
+    let saved_dotted int = p.state.dotted_count
+    p.table = table_node
+    if (p_skip_container_ws(p) != 0) {
+        return -1
+    }
+    if (p.pos < p.count && p.data[p.pos] == '}') {
+        p_advance(p)
+        p.table = saved_table
+        doc_truncate_dotted(p.state, saved_dotted)
+        p.depth -= 1
+        table_node.span.length = p.pos - start
+        out[0] = table_node
+        return 0
+    }
+    for 1 {
+        if (p_parse_key_value_pair(p) != 0) {
+            return -1
+        }
+        if (p_skip_container_ws(p) != 0) {
+            return -1
+        }
+        if (p.pos < p.count && p.data[p.pos] == '}') {
+            p_advance(p)
+            break
+        }
+        if (p.pos >= p.count || p.data[p.pos] != ',') {
+            p_fail_here(p, ErrorCode.error_syntax, "内联表条目之间需要逗号")
+            return -1
+        }
+        p_advance(p)
+        if (p_skip_container_ws(p) != 0) {
+            return -1
+        }
+        if (p.pos < p.count && p.data[p.pos] == '}') {
+            p_advance(p)
+            break
+        }
+    }
+    p.table = saved_table
+    doc_truncate_dotted(p.state, saved_dotted)
+    p.depth -= 1
+    table_node.span.length = p.pos - start
+    out[0] = table_node
+    return 0
+}
+
+// p_parse_document 解析整份文档；1 成功、0 失败（失败详情在 parser）。
+fn p_parse_document(p *parser) int {
+    p.table = p.state.root
+    for 1 {
+        p_skip_ws(p)
+        if (p.pos >= p.count) {
+            break
+        }
+        if (p_is_newline(p) != 0) {
+            if (p_newline(p) != 0) {
+                return 0
+            }
+            continue
+        }
+        if (p.data[p.pos] == '#') {
+            if (p_skip_comment(p) != 0) {
+                return 0
+            }
+        } else if (p.data[p.pos] == '[') {
+            if (p_parse_header(p) != 0) {
+                return 0
+            }
+        } else {
+            if (p_parse_key_value_pair(p) != 0) {
+                return 0
+            }
+        }
+        if (p_skip_statement_tail(p) != 0) {
+            return 0
+        }
+        if (p.pos >= p.count) {
+            break
+        }
+        if (p_is_newline(p) == 0) {
+            p_fail_here(p, ErrorCode.error_syntax, "语句后需要换行")
+            return 0
+        }
+        if (p_newline(p) != 0) {
+            return 0
+        }
+    }
+    doc_finalize_dotted(p.state)
+    return 1
+}

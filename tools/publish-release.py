@@ -170,6 +170,19 @@ def main(argv):
             upload_asset(args.repo, token, release["id"], path)
             print(f"上传 {path.name}")
 
+        # 上传后再核对一次远端大小：防止打包目录被旧产物覆盖（0.0.8 首版发布
+        # 就出现过资产被换成上一代二进制，种子不支持无分号语法导致 CI 全红）。
+        _status, body = request(
+            "GET", f"{API}/repos/{args.repo}/releases/{release['id']}", token)
+        remote = {a["name"]: a["size"] for a in json.loads(body).get("assets", [])}
+        for path in files:
+            local_size = path.stat().st_size
+            if remote.get(path.name) != local_size:
+                raise PublishError(
+                    f"上传后大小不一致：{path.name} 远端={remote.get(path.name)} "
+                    f"本地={local_size}")
+        print("校验：远端资产大小与本地一致")
+
         print(f"完成：https://github.com/{args.repo}/releases/tag/{args.tag}")
         return 0
     except PublishError as error:

@@ -799,6 +799,119 @@ fn case_shared_dest() int {
     return 0
 }
 
+// case_bases_and_option_remainder 覆盖 count/append 的默认基值与选项 remainder。
+fn case_bases_and_option_remainder() int {
+    let parser cli.Parser
+    let config cli.ParserConfig = cli.parser_config("bases")
+    if (cli.init(&parser, config) != 0) {
+        return 120
+    }
+    let tries cli.Argument = cli.option("--tries", 0)
+    tries.action = cli.count
+    tries.default_value = cli.default_of(cli.value_i64(3))
+    let rest cli.Argument = cli.option("--rest", 0)
+    rest.arity = cli.remainder()
+    if (cli.add_argument(&parser, tries) < 0 || cli.add_argument(&parser, rest) < 0) {
+        cli.destroy(&parser)
+        return 121
+    }
+    let one [2]*char
+    one[0] = "--tries"
+    let r1 cli.Result = cli.parse(&parser, one[0..1])
+    let total i64
+    if (r1.status != cli.ok || cli.get_i64(&r1.values, "tries", &total) != 0
+        || total != 4) {
+        cli.release(&r1)
+        cli.destroy(&parser)
+        return 122
+    }
+    cli.release(&r1)
+
+    let rest_args [7]*char
+    rest_args[0] = "--rest"
+    rest_args[1] = "a"
+    rest_args[2] = "-x"
+    rest_args[3] = "--"
+    rest_args[4] = "--help"
+    rest_args[5] = "b"
+    let r2 cli.Result = cli.parse(&parser, rest_args[0..6])
+    if (r2.status != cli.ok || list_len(&r2.values, "rest", 5) != 0
+        || list_text_at(&r2.values, "rest", 1, "-x") != 0
+        || list_text_at(&r2.values, "rest", 2, "--") != 0
+        || list_text_at(&r2.values, "rest", 3, "--help") != 0) {
+        cli.release(&r2)
+        cli.destroy(&parser)
+        return 123
+    }
+    cli.release(&r2)
+    cli.destroy(&parser)
+
+    // append 基于结果里的列表默认值累计；默认值经 add_argument 深复制。
+    let seed cli.Parser
+    let seed_config cli.ParserConfig = cli.parser_config("seed")
+    if (cli.init(&seed, seed_config) != 0) {
+        return 124
+    }
+    let many cli.Argument = cli.option("--many", 0)
+    many.arity = cli.zero_or_more()
+    if (cli.add_argument(&seed, many) < 0) {
+        cli.destroy(&seed)
+        return 125
+    }
+    let seed_args [3]*char
+    seed_args[0] = "--many"
+    seed_args[1] = "a"
+    seed_args[2] = "b"
+    let seed_result cli.Result = cli.parse(&seed, seed_args[0..3])
+    let base cli.Value
+    if (seed_result.status != cli.ok
+        || cli.get_value(&seed_result.values, "many", &base) != 0) {
+        cli.release(&seed_result)
+        cli.destroy(&seed)
+        return 126
+    }
+    let append_parser cli.Parser
+    let append_config cli.ParserConfig = cli.parser_config("append")
+    if (cli.init(&append_parser, append_config) != 0) {
+        cli.release(&seed_result)
+        cli.destroy(&seed)
+        return 127
+    }
+    let tag cli.Argument = cli.option("--tag", 0)
+    tag.action = cli.append
+    tag.default_value = cli.default_of(base)
+    if (cli.add_argument(&append_parser, tag) < 0) {
+        cli.release(&seed_result)
+        cli.destroy(&seed)
+        cli.destroy(&append_parser)
+        return 128
+    }
+    cli.release(&seed_result)
+    cli.destroy(&seed)
+
+    let no_args [1]*char
+    let r3 cli.Result = cli.parse(&append_parser, no_args[0..0])
+    if (r3.status != cli.ok || list_len(&r3.values, "tag", 2) != 0) {
+        cli.release(&r3)
+        cli.destroy(&append_parser)
+        return 129
+    }
+    cli.release(&r3)
+    let tag_args [2]*char
+    tag_args[0] = "--tag"
+    tag_args[1] = "c"
+    let r4 cli.Result = cli.parse(&append_parser, tag_args[0..2])
+    if (r4.status != cli.ok || list_len(&r4.values, "tag", 3) != 0
+        || list_text_at(&r4.values, "tag", 2, "c") != 0) {
+        cli.release(&r4)
+        cli.destroy(&append_parser)
+        return 130
+    }
+    cli.release(&r4)
+    cli.destroy(&append_parser)
+    return 0
+}
+
 // run_all 依次运行全部主题；返回第一个失败码或 0。
 fn run_all() int {
     let rc int = case_shapes()
@@ -838,6 +951,10 @@ fn run_all() int {
         return rc
     }
     rc = case_defaults()
+    if (rc != 0) {
+        return rc
+    }
+    rc = case_bases_and_option_remainder()
     if (rc != 0) {
         return rc
     }

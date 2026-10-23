@@ -334,8 +334,13 @@ def main() -> int:
         print(f"模块固定点（候选 cc3→cc4，共 {len(expected)} 个产物）：一致")
 
     cc4 = str(WORK / "cc4")
-    # 2) 最终候选自解析（每个源文件一次进程，并发跑）
-    sources = sorted(COMPILER.rglob("*.yh"))
+    # 2) 最终候选自解析（每个源文件一次进程，并发跑）。
+    # 排除构建/测试产物目录：`yh test` 会把生成的入口模块写到 compiler/tmp，
+    # 它们不是编译器源码，不能进入自解析清单。
+    sources = sorted(
+        path for path in COMPILER.rglob("*.yh")
+        if "tmp" not in path.relative_to(COMPILER).parts
+        and ".build" not in path.relative_to(COMPILER).parts)
 
     def self_parse(src):
         """返回自解析失败的源文件名（成功返回 None）。"""

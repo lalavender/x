@@ -25,6 +25,7 @@ STATS_RE = re.compile(
     r"yh-stats lex=(\d+) syntax=(\d+) index=(\d+) pass1=(\d+) "
     r"globals=(\d+) functions=(\d+) (?:ir_functions=(\d+) )?"
     r"(?:ir_cache_hits=\d+ ir_cache_misses=\d+ )?"
+    r"(?:ir_lowered=\d+ )?"
     r"(?:ast_nodes=\d+ stmt_nodes=\d+ decl_nodes=\d+ ast_refs=\d+ "
     r"ast_bindings=\d+ )?(?:ast_functions=(\d+) )?workers=(\d+) "
     r"(?:workers_peak=\d+ iface_early=\d+ )?asm=(\d+) link=(\d+) "

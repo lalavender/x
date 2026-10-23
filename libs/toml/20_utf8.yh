@@ -1,0 +1,143 @@
+module toml
+
+// yh TOML 标准库：UTF-8 校验与 Unicode 标量编码。
+//
+// TOML 文档整体必须是合法 UTF-8；解析前先整段校验，遇到非法编码立即报
+// error_utf8，并给出出错字节的偏移与长度。字符串里的 \u/\U 转义在解码时
+// 另行校验 Unicode 标量范围（拒绝代理项与超过 U+10FFFF 的值）。
+
+// utf8_validate 校验整段字节；0 合法，1 非法。
+// 非法时写入 bad_off（出错起点）和 bad_len（该字符占用的字节数，截断时为
+// 剩余字节数），供诊断定位。开头出现 UTF-8 BOM 也按非法处理。
+fn utf8_validate(data *u8, count u64, bad_off *u64, bad_len *u64) int {
+    if (count >= 3 && data[0] == 239 && data[1] == 187 && data[2] == 191) {
+        bad_off[0] = 0
+        bad_len[0] = 3
+        return 1
+    }
+    let i u64 = 0
+    for i < count {
+        let b u8 = data[i]
+        if (b < 128) {
+            i += 1
+            continue
+        }
+        let need int = 0
+        if (b >= 194 && b <= 223) {
+            need = 2
+        } else if (b >= 224 && b <= 239) {
+            need = 3
+        } else if (b >= 240 && b <= 244) {
+            need = 4
+        } else {
+            bad_off[0] = i
+            bad_len[0] = 1
+            return 1
+        }
+        if (i + need.to_type(u64) > count) {
+            bad_off[0] = i
+            bad_len[0] = count - i
+            return 1
+        }
+        let c1 u8 = data[i + 1]
+        if (c1 < 128 || c1 > 191) {
+            bad_off[0] = i
+            bad_len[0] = 2
+            return 1
+        }
+        if (need >= 3) {
+            let c2 u8 = data[i + 2]
+            if (c2 < 128 || c2 > 191) {
+                bad_off[0] = i
+                bad_len[0] = 3
+                return 1
+            }
+            if (b == 224 && c1 < 160) {
+                bad_off[0] = i
+                bad_len[0] = 2
+                return 1
+            }
+            if (b == 237 && c1 > 159) {
+                bad_off[0] = i
+                bad_len[0] = 2
+                return 1
+            }
+        }
+        if (need == 4) {
+            let c2 u8 = data[i + 2]
+            let c3 u8 = data[i + 3]
+            if (c2 < 128 || c2 > 191) {
+                bad_off[0] = i
+                bad_len[0] = 3
+                return 1
+            }
+            if (c3 < 128 || c3 > 191) {
+                bad_off[0] = i
+                bad_len[0] = 4
+                return 1
+            }
+            if (b == 240 && c1 < 144) {
+                bad_off[0] = i
+                bad_len[0] = 2
+                return 1
+            }
+            if (b == 244 && c1 > 143) {
+                bad_off[0] = i
+                bad_len[0] = 2
+                return 1
+            }
+        }
+        i += need.to_type(u64)
+    }
+    return 0
+}
+
+// utf8_is_scalar 判断码点是否为 Unicode 标量值（排除代理项与越界值）。
+fn utf8_is_scalar(cp u64) int {
+    if (cp > 1114111) {
+        return 0
+    }
+    if (cp >= 55296 && cp <= 57343) {
+        return 0
+    }
+    return 1
+}
+
+// utf8_encode 把标量编码为 UTF-8，写入至少 4 字节的输出缓冲，返回字节数。
+// 调用前必须用 utf8_is_scalar 确认范围。
+fn utf8_encode(cp u64, out *u8) int {
+    if (cp < 128) {
+        out[0] = cp.to_type(u8)
+        return 1
+    }
+    if (cp < 2048) {
+        out[0] = (192 + (cp >> 6)).to_type(u8)
+        out[1] = (128 + (cp & 63)).to_type(u8)
+        return 2
+    }
+    if (cp < 65536) {
+        out[0] = (224 + (cp >> 12)).to_type(u8)
+        out[1] = (128 + ((cp >> 6) & 63)).to_type(u8)
+        out[2] = (128 + (cp & 63)).to_type(u8)
+        return 3
+    }
+    out[0] = (240 + (cp >> 18)).to_type(u8)
+    out[1] = (128 + ((cp >> 12) & 63)).to_type(u8)
+    out[2] = (128 + ((cp >> 6) & 63)).to_type(u8)
+    out[3] = (128 + (cp & 63)).to_type(u8)
+    return 4
+}
+
+// hex_digit_value 把十六进制字符转成 0..15；非法返回 -1。
+fn hex_digit_value(b u8) int {
+    if (b >= '0' && b <= '9') {
+        return (b - '0').to_type(int)
+    }
+    if (b >= 'a' && b <= 'f') {
+        return (b - 'a' + 10).to_type(int)
+    }
+    if (b >= 'A' && b <= 'F') {
+        return (b - 'A' + 10).to_type(int)
+    }
+    return -1
+}

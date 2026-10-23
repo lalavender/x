@@ -1,0 +1,1019 @@
+module ast
+import gen
+import ir
+
+// module_snapshot_lower_flow.yh —— 纯快照 if/循环/switch/label-goto 与合流。
+//
+// 由 module_snapshot_lower.yh 按完整函数边界拆出（LA2a）；phi 建点、break/
+// continue 携带值与 goto 标签块都由既有 CheckedFlow/CheckedLower 承载。
+
+// ============================================================================
+// module_snapshot_lower_flow.yh —— 纯快照语句/循环/合流 lowering
+//
+// 语义读取全部经 CheckedStorage：绑定、类型、签名、名称池和源码副本，
+// 不访问 GenState、旧汇编缓冲或语义表。每条语句/表达式都用快照来源
+// 记录位置，形态之外返回 -2（首片不支持），由 lower_module 统一报告。
+//
+// 状态分三类，均由 CheckedFlow 持有，不写回快照：
+//   * 循环：携带绑定与 break/continue 目标（嵌套循环明确不支持）；
+//   * 合流：if 两臂的值副本与 phi 建点；
+//   * 调用：当前函数的目标与实参临时表。
+// ============================================================================
+
+// checked_loop_carry_add：单层循环携带表去重追加（保持源码顺序）。
+// 循环体内声明的绑定每次迭代重新初始化，不进入携带 phi；stmt_id 大于本层
+// for 语句即该绑定声明在循环体内。
+fn checked_loop_carry_add(l *CheckedLower, loop *CheckedLoop, binding_id int) int {
+    if (binding_id < 0 || binding_id >= l.function_binding_count) { return -1 }
+    if (loop.forin != 0 && (binding_id == loop.forin_elem
+        || binding_id == loop.forin_index)) { return 0 }
+    let binding AstBinding = l.store.bindings[l.function_binding_first + binding_id]
+    if (binding.stmt_id > loop.stmt_id) { return 0 }
+    let probe int = 0
+    for 1 {
+        if (probe >= loop.carry_count) { break }
+        if (loop.carry[probe] == binding_id) { return 0 }
+        probe += 1
+    }
+    if (loop.carry_count >= loop.carry_cap) {
+        let capacity int = loop.carry_cap == 0 ? 8 : loop.carry_cap * 2
+        let next *int = malloc((capacity * sizeof(int)).to_type(u64)).to_type(*int)
+        if (next == 0) { return -1 }
+        if (loop.carry_count > 0) {
+            memcpy(next, loop.carry, (loop.carry_count * sizeof(int)).to_type(u64))
+        }
+        if (loop.carry != 0) { free(loop.carry.to_type(*void)) }
+        loop.carry = next
+        loop.carry_cap = capacity
+    }
+    loop.carry[loop.carry_count] = binding_id
+    loop.carry_count += 1
+    return 0
+}
+
+// checked_lower_carry_record：把被赋值的绑定记录进**所有**活跃循环的携带表。
+// 内层循环体的赋值同样影响外层循环的跨迭代值，因此逐层去重记录。
+fn checked_lower_carry_record(l *CheckedLower, flow *CheckedFlow, binding_id int) int {
+    let level int = 0
+    for level < flow.loop_depth {
+        if (checked_loop_carry_add(l, &flow.loops[level], binding_id) != 0) { return -1 }
+        level += 1
+    }
+    return 0
+}
+
+// checked_loop_finish：弹出栈顶循环并释放该层独占数组；未压栈时空操作。
+fn checked_loop_finish(flow *CheckedFlow) void {
+    if (flow.loop_depth <= 0) { return }
+    flow.loop_depth -= 1
+    let loop *CheckedLoop = &flow.loops[flow.loop_depth]
+    if (loop.carry != 0) { free(loop.carry.to_type(*void)) }
+    if (loop.carry_phis != 0) { free(loop.carry_phis.to_type(*void)) }
+    if (loop.break_blocks != 0) { free(loop.break_blocks.to_type(*void)) }
+    if (loop.break_vals != 0) { free(loop.break_vals.to_type(*void)) }
+    loop.carry = 0; loop.carry_count = 0; loop.carry_cap = 0
+    loop.carry_phis = 0; loop.break_blocks = 0; loop.break_vals = 0
+    loop.break_capacity = 0; loop.continue_done = 0; loop.break_done = 0
+    loop.break_target = -1; loop.continue_target = -1; loop.stmt_id = -1
+}
+
+// checked_loop_restore：把循环栈收缩回调用前深度；内层失败时逐层释放。
+fn checked_loop_restore(flow *CheckedFlow, depth int) void {
+    for flow.loop_depth > depth { checked_loop_finish(flow) }
+}
+
+// ============================================================================
+// 纯快照 lowering —— 语句/循环/合流
+//
+// 所有语义读取都经 CheckedStorage：绑定、类型、签名、名称池与源码副本，
+// 不访问 GenState、旧汇编缓冲或可变语义表。形态之外返回 -2（首片不支持），
+// 由 lower_module 统一带来源报告，绝不回退旧机器发射。
+// ============================================================================
+
+// checked_lower_break_snapshot：按本层发现趟站点数记录 break 携带值快照（真实趟）。
+fn checked_lower_break_snapshot(l *CheckedLower, flow *CheckedFlow, index int) int {
+    let b *AstIRBuilder = &l.builder
+    if (flow.loop_depth <= 0) { return -1 }
+    let loop *CheckedLoop = &flow.loops[flow.loop_depth - 1]
+    if (index < 0 || index >= loop.break_capacity || loop.break_vals == 0
+        || loop.carry_count <= 0) { return -1 }
+    let j int = 0
+    for j < loop.carry_count {
+        loop.break_vals[index * loop.carry_count + j] = b.local_values[loop.carry[j]]
+        j += 1
+    }
+    return 0
+}
+
+// checked_binding_has_assign：只检查一个 let 绑定范围内是否有初始化赋值号。
+// 以同语句下一绑定的名字作为上界，避免前一个初始化误判后续的零初始化绑定。
+fn checked_binding_has_assign(l *CheckedLower, stmt *AstStmt,
+    binding *AstBinding) int {
+    if (stmt.file_id < 0 || stmt.file_id >= l.store.file_n
+        || binding.name_token < 0) { return 0 }
+    let file gen.PFile = l.store.files[stmt.file_id]
+    let after int = stmt.after
+    if (binding.next >= 0 && binding.next < l.store.binding_n) {
+        after = l.store.bindings[binding.next].name_token
+    }
+    let i int = binding.name_token
+    for i < after && i < file.token_n {
+        if (file.tokens[i].kind == gen.TK_ASSIGN) { return 1 }
+        i += 1
+    }
+    return 0
+}
+
+// checked_lower_merge：把两臂值合流到当前块；值不同的绑定建双前驱 phi。
+fn checked_lower_merge(l *CheckedLower, flow *CheckedFlow, pred0 int, values0 *int,
+    pred1 int, values1 *int) int {
+    let b *AstIRBuilder = &l.builder
+    let i int = 0
+    for i < b.binding_count {
+        // 内存驻留绑定不经 SSA 合流，读取一律走 LOAD。
+        if (checked_lower_storage(l, i) >= 0) {
+            b.local_values[i] = -1
+            i += 1
+            continue
+        }
+        // 只在一侧词法块内声明的绑定没有另一臂值，也不在合流后可见。
+        if (values0[i] < 0 || values1[i] < 0) {
+            b.local_values[i] = -1
+            i += 1
+            continue
+        }
+        if (values0[i] == values1[i]) {
+            b.local_values[i] = values0[i]
+            i += 1
+            continue
+        }
+        let binding AstBinding = l.store.bindings[l.function_binding_first + i]
+        let kind int = checked_lower_type(l, binding.sym_type_id)
+        if (kind < 0) { return -1 }
+        let phi int = ast_ir_b_add_phi(b, kind, 2)
+        if (phi < 0) { return -1 }
+        if (ast_ir_b_set_phi_input(b, phi, 0, pred0, values0[i]) != 0
+            || ast_ir_b_set_phi_input(b, phi, 1, pred1, values1[i]) != 0) { return -1 }
+        b.local_values[i] = phi
+        i += 1
+    }
+    return 0
+}
+
+// checked_lower_if：降低 if/else（else 允许接 if 形成链）；协议同 checked_lower_stmts。
+fn checked_lower_if(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let b *AstIRBuilder = &l.builder
+    let stmt AstStmt = l.store.statements[stmt_id]
+    if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2 }
+    let edge AstStmtExpr = l.store.edges[stmt.first_expr]
+    if (edge.next >= 0 || edge.expr_id < 0 || edge.expr_id >= l.store.expression_n) { return -2 }
+    let then_stmt int = stmt.first_child
+    if (then_stmt < 0 || then_stmt >= l.store.statement_n
+        || l.store.statements[then_stmt].kind != AST_STMT_BLOCK) { return -2 }
+    let else_stmt int = l.store.statements[then_stmt].next_sibling
+    if (else_stmt >= 0 && else_stmt != stmt.last_child) { return -2 }
+    if (else_stmt >= 0 && l.store.statements[else_stmt].kind != AST_STMT_BLOCK
+        && l.store.statements[else_stmt].kind != AST_STMT_IF) { return -2 }
+    let cond int = checked_lower_cond(l, flow, edge.expr_id)
+    if (cond == -2) { return -2 }
+    if (cond < 0) { return -1 }
+    let preheader int = b.cur_block
+    let then_b int = ast_ir_b_alloc_block(b)
+    let else_b int = -1
+    let has_else int = else_stmt >= 0 ? 1 : 0
+    if (has_else != 0) {
+        else_b = ast_ir_b_alloc_block(b)
+        if (then_b < 0 || else_b < 0) { return -1 }
+        if (ast_ir_b_term_cond(b, cond, then_b, else_b) != 0) { return -1 }
+    } else {
+        let join_first int = ast_ir_b_alloc_block(b)
+        if (then_b < 0 || join_first < 0) { return -1 }
+        if (ast_ir_b_term_cond(b, cond, then_b, join_first) != 0) { return -1 }
+        // 无 else：then 贯穿时与 preheader 合流，否则直接进入合流块。
+        let then_values *int = checked_lower_value_copy(l, flow)
+        if (b.binding_count > 0 && then_values == 0) { return -1 }
+        let main_values *int = b.local_values
+        b.local_values = then_values
+        ast_ir_b_enter_block(b, then_b)
+        let fall_then int = checked_lower_stmts(l, flow, l.store.statements[then_stmt].first_child)
+        if (fall_then < 0) { b.local_values = main_values; free(then_values.to_type(*void)); return fall_then }
+        let open_then int = fall_then == 1 ? b.cur_block : -1
+        b.local_values = main_values
+        if (fall_then == 1) {
+            if (ast_ir_b_term_br(b, join_first) != 0) {
+                free(then_values.to_type(*void)); return -1
+            }
+            ast_ir_b_enter_block(b, join_first)
+            if (checked_lower_merge(l, flow, preheader, main_values, open_then, then_values) != 0) {
+                free(then_values.to_type(*void)); return -1
+            }
+        } else {
+            ast_ir_b_enter_block(b, join_first)
+        }
+        free(then_values.to_type(*void))
+        // 合流块收尾：补无条件分支并进入续块，返回 1 表示路径继续。
+        return checked_lower_exit_block(l)
+    }
+    let then_values2 *int = checked_lower_value_copy(l, flow)
+    let else_values *int = checked_lower_value_copy(l, flow)
+    if (b.binding_count > 0 && (then_values2 == 0 || else_values == 0)) {
+        if (then_values2 != 0) { free(then_values2.to_type(*void)) }
+        if (else_values != 0) { free(else_values.to_type(*void)) }
+        return -1
+    }
+    let main_values2 *int = b.local_values
+    b.local_values = then_values2
+    ast_ir_b_enter_block(b, then_b)
+    let fall_then2 int = checked_lower_stmts(l, flow, l.store.statements[then_stmt].first_child)
+    if (fall_then2 < 0) {
+        b.local_values = main_values2
+        free(then_values2.to_type(*void)); free(else_values.to_type(*void))
+        return fall_then2
+    }
+    let open_then2 int = fall_then2 == 1 ? b.cur_block : -1
+    b.local_values = main_values2
+    b.local_values = else_values
+    ast_ir_b_enter_block(b, else_b)
+    let fall_else int = 0
+    if (l.store.statements[else_stmt].kind == AST_STMT_BLOCK) {
+        fall_else = checked_lower_stmts(l, flow, l.store.statements[else_stmt].first_child)
+    } else {
+        fall_else = checked_lower_stmts(l, flow, else_stmt)
+    }
+    if (fall_else < 0) {
+        b.local_values = main_values2
+        free(then_values2.to_type(*void)); free(else_values.to_type(*void))
+        return fall_else
+    }
+    let open_else int = fall_else == 1 ? b.cur_block : -1
+    b.local_values = main_values2
+    if (fall_then2 == 1 && fall_else == 1) {
+        let join_b int = ast_ir_b_alloc_block(b)
+        if (join_b < 0) {
+            free(then_values2.to_type(*void)); free(else_values.to_type(*void)); return -1
+        }
+        if (ast_ir_b_close_term(b, open_then2, ir.IR_TERM_BR, -1, join_b, -1) != 0
+            || ast_ir_b_close_term(b, open_else, ir.IR_TERM_BR, -1, join_b, -1) != 0) {
+            free(then_values2.to_type(*void)); free(else_values.to_type(*void)); return -1
+        }
+        ast_ir_b_enter_block(b, join_b)
+        if (checked_lower_merge(l, flow, open_then2, then_values2, open_else, else_values) != 0) {
+            free(then_values2.to_type(*void)); free(else_values.to_type(*void)); return -1
+        }
+        free(then_values2.to_type(*void))
+        free(else_values.to_type(*void))
+        // 合流块收尾：补无条件分支并进入续块，返回 1 表示路径继续。
+        return checked_lower_exit_block(l)
+    }
+    if (fall_then2 == 1) {
+        let join_then int = ast_ir_b_alloc_block(b)
+        if (join_then < 0) {
+            free(then_values2.to_type(*void)); free(else_values.to_type(*void)); return -1
+        }
+        if (ast_ir_b_close_term(b, open_then2, ir.IR_TERM_BR, -1, join_then, -1) != 0) {
+            free(then_values2.to_type(*void)); free(else_values.to_type(*void)); return -1
+        }
+        ast_ir_b_enter_block(b, join_then)
+        let i int = 0
+        for i < b.binding_count { b.local_values[i] = then_values2[i]; i += 1 }
+        free(then_values2.to_type(*void))
+        free(else_values.to_type(*void))
+        // 只有 then 贯穿：合流块开放，调用方按需加续块（1）。
+        return 1
+    }
+    if (fall_else == 1) {
+        let i2 int = 0
+        for i2 < b.binding_count { b.local_values[i2] = else_values[i2]; i2 += 1 }
+        free(then_values2.to_type(*void))
+        free(else_values.to_type(*void))
+        return 1
+    }
+    free(then_values2.to_type(*void))
+    free(else_values.to_type(*void))
+    return 0
+}
+
+// checked_lower_goto：goto 语句；名字 token 是 goto 后的 IDENT（first+1）。
+// 目标块缺省新建（支持前向引用），当前路径以无条件分支终结，返回 0。
+fn checked_lower_goto(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let stmt AstStmt = l.store.statements[stmt_id]
+    let block int = checked_label_token(l, stmt.file_id, stmt.first + 1, 1)
+    if (block < 0) { return -1 }
+    if (l.builder.cur_block < 0) { return 0 }
+    if (ast_ir_b_term_br(&l.builder, block) != 0) { return -1 }
+    return 0
+}
+
+// checked_lower_label：label 语句；名字 token 是语句首 token，块缺省新建。
+// 贯穿路径先分支进标签块，再降低被标记的单条子语句（子语句无兄弟链）。
+fn checked_lower_label(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let stmt AstStmt = l.store.statements[stmt_id]
+    let block int = checked_label_token(l, stmt.file_id, stmt.first, 1)
+    if (block < 0) { return -1 }
+    if (l.builder.cur_block >= 0) {
+        if (ast_ir_b_term_br(&l.builder, block) != 0) { return -1 }
+    }
+    ast_ir_b_enter_block(&l.builder, block)
+    if (stmt.first_child < 0) { return 1 }
+    return checked_lower_stmts(l, flow, stmt.first_child)
+}
+
+// checked_lower_switch_path：记录一条贯穿到 switch 退出块的分支路径（块与值快照）。
+// 值快照按「路径 × 绑定」平铺到 values；count 是当前路径数，由调用方维护。
+fn checked_lower_switch_path(values *int, blocks *int, count *int, binding_count int,
+    block int, snapshot *int) int {
+    let index int = count[0]
+    if (values != 0 && binding_count > 0) {
+        memcpy(values + index * binding_count, snapshot,
+            (binding_count * sizeof(int)).to_type(u64))
+    }
+    blocks[index] = block
+    count[0] = index + 1
+    return 0
+}
+
+// checked_lower_switch：降低 switch；先数分支并分配路径表，主体见 switch_body。
+// 返回协议与 checked_lower_stmt 一致；失败释放路径表，不发布部分结果。
+fn checked_lower_switch(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let stmt AstStmt = l.store.statements[stmt_id]
+    let groups int = 0
+    let scan int = stmt.first_child
+    for scan >= 0 {
+        if (scan >= l.store.statement_n
+            || l.store.statements[scan].kind != AST_STMT_CASE) { return -2 }
+        groups += 1
+        scan = l.store.statements[scan].next_sibling
+    }
+    let b *AstIRBuilder = &l.builder
+    let paths int = groups + 1
+    let values *int = 0
+    if (groups > 0 && b.binding_count > 0) {
+        values = malloc((paths * b.binding_count * sizeof(int)).to_type(u64)).to_type(*int)
+        if (values == 0) { return -1 }
+    }
+    let blocks *int = malloc((paths * sizeof(int)).to_type(u64)).to_type(*int)
+    if (blocks == 0) {
+        if (values != 0) { free(values.to_type(*void)) }
+        return -1
+    }
+    let status int = checked_lower_switch_body(l, flow, stmt_id, values, blocks)
+    free(values.to_type(*void))
+    free(blocks.to_type(*void))
+    return status
+}
+
+// checked_lower_switch_body：按源码顺序为每个 case/default 建比较链与体块，
+// 各体块无 fallthrough；所有贯穿路径在退出块用 N 元 phi 合流。
+// case 值必须可比较（整数 canonical 类型），控制值在进入分支前只求值一次。
+fn checked_lower_switch_body(l *CheckedLower, flow *CheckedFlow, stmt_id int,
+    path_values *int, path_blocks *int) int {
+    let b *AstIRBuilder = &l.builder
+    let stmt AstStmt = l.store.statements[stmt_id]
+    if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2 }
+    let ctrl_edge AstStmtExpr = l.store.edges[stmt.first_expr]
+    if (ctrl_edge.next >= 0 || ctrl_edge.expr_id < 0
+        || ctrl_edge.expr_id >= l.store.expression_n) { return -2 }
+    let control int = checked_lower_expr_inner(l, flow, ctrl_edge.expr_id)
+    if (control == -2) { return -2 }
+    if (control < 0) { return -1 }
+    let control_kind int = b.insts[control].result_type
+    if (ir.ir_integer_type(b.types[control_kind].kind) == 0) { return -2 }
+    let main_values *int = b.local_values
+    let path_count int = 0
+    let exit_b int = ast_ir_b_alloc_block(b)
+    if (exit_b < 0) { return -1 }
+    let group int = stmt.first_child
+    let last_default int = 0
+    for group >= 0 {
+        let group_stmt AstStmt = l.store.statements[group]
+        if (group_stmt.kind != AST_STMT_CASE || group_stmt.first_child < 0
+            || group_stmt.first_child >= l.store.statement_n) { return -2 }
+        let body_stmt AstStmt = l.store.statements[group_stmt.first_child]
+        if (body_stmt.kind != AST_STMT_BLOCK) { return -2 }
+        let next_group int = group_stmt.next_sibling
+        let is_default int = group_stmt.op == gen.TK_DEFAULT ? 1 : 0
+        last_default = is_default
+        let body_b int = ast_ir_b_alloc_block(b)
+        let after_b int = -1
+        if (next_group >= 0 || is_default == 0) {
+            after_b = ast_ir_b_alloc_block(b)
+        }
+        if (body_b < 0) { return -1 }
+        // case：控制值与每个常量比较；default：无条件进入，未命中路径在此耗尽。
+        if (is_default != 0) {
+            if (ast_ir_b_term_br(b, body_b) != 0) { return -1 }
+        } else {
+            let edge int = group_stmt.first_expr
+            if (edge < 0 || after_b < 0) { return -2 }
+            for 1 {
+                let e AstStmtExpr = l.store.edges[edge]
+                if (e.expr_id < 0 || e.expr_id >= l.store.expression_n) { return -2 }
+                let value int = checked_lower_expr_inner(l, flow, e.expr_id)
+                if (value == -2) { return -2 }
+                if (value < 0) { return -1 }
+                let value_kind int = b.insts[value].result_type
+                if (ir.ir_integer_type(b.types[value_kind].kind) == 0) { return -2 }
+                if (value_kind != control_kind) {
+                    value = checked_lower_adjust(l, value, control_kind)
+                    if (value < 0) { return -2 }
+                }
+                let cmp int = ast_ir_b_add_inst(b, ir.IR_OP_EQ, ir.IR_TY_BOOL,
+                    control, value, 0)
+                if (cmp < 0) { return -1 }
+                if (e.next < 0) {
+                    if (ast_ir_b_term_cond(b, cmp, body_b, after_b) != 0) { return -1 }
+                    break
+                }
+                let mid_b int = ast_ir_b_alloc_block(b)
+                if (mid_b < 0) { return -1 }
+                if (ast_ir_b_term_cond(b, cmp, body_b, mid_b) != 0) { return -1 }
+                ast_ir_b_enter_block(b, mid_b)
+                edge = e.next
+            }
+        }
+        // 体：独立值快照；贯穿时记录路径并跳到退出块（无 fallthrough）。
+        let saved *int = checked_lower_value_copy(l, flow)
+        if (b.binding_count > 0 && saved == 0) { return -1 }
+        b.local_values = saved
+        ast_ir_b_enter_block(b, body_b)
+        let fall int = checked_lower_stmts(l, flow, body_stmt.first_child)
+        if (fall < 0) { b.local_values = main_values; return fall }
+        if (fall == 1) {
+            if (checked_lower_switch_path(path_values, path_blocks, &path_count,
+                b.binding_count, b.cur_block, saved) != 0) {
+                b.local_values = main_values; return -1
+            }
+            if (ast_ir_b_term_br(b, exit_b) != 0) { b.local_values = main_values; return -1 }
+        }
+        b.local_values = main_values
+        free(saved.to_type(*void))
+        if (after_b >= 0) { ast_ir_b_enter_block(b, after_b) }
+        group = next_group
+    }
+    // 末尾仍是 case：当前块是「全部未命中」路径；默认分支会把它耗尽。
+    if (last_default == 0) {
+        if (checked_lower_switch_path(path_values, path_blocks, &path_count,
+            b.binding_count, b.cur_block, main_values) != 0) { return -1 }
+        if (ast_ir_b_term_br(b, exit_b) != 0) { return -1 }
+    }
+    // 所有分支都终结（例如每个体都 return）：退出块只作为合法空不可达块存在。
+    if (path_count <= 0) {
+        ast_ir_b_enter_block(b, exit_b)
+        return 0
+    }
+    // 退出块：对每个绑定按贯穿路径值做 N 元合流；内存驻留读取仍走 LOAD。
+    ast_ir_b_enter_block(b, exit_b)
+    let mi int = 0
+    for mi < b.binding_count {
+        if (checked_lower_storage(l, mi) >= 0) { b.local_values[mi] = -1; mi += 1; continue }
+        let first int = path_values[mi]
+        let same int = 1
+        let missing int = 0
+        let pi int = 0
+        for pi < path_count {
+            let v int = path_values[pi * b.binding_count + mi]
+            if (v < 0) { missing = 1; break }
+            if (v != first) { same = 0 }
+            pi += 1
+        }
+        if (missing != 0) { b.local_values[mi] = -1; mi += 1; continue }
+        if (same != 0 || path_count == 1) { b.local_values[mi] = first; mi += 1; continue }
+        let binding AstBinding = l.store.bindings[l.function_binding_first + mi]
+        let kind int = checked_lower_type(l, binding.sym_type_id)
+        if (kind < 0) { return -1 }
+        let phi int = ast_ir_b_add_phi(b, kind, path_count)
+        if (phi < 0) { return -1 }
+        pi = 0
+        for pi < path_count {
+            if (ast_ir_b_set_phi_input(b, phi, pi, path_blocks[pi],
+                path_values[pi * b.binding_count + mi]) != 0) { return -1 }
+            pi += 1
+        }
+        b.local_values[mi] = phi
+        mi += 1
+    }
+    // 退出块收尾：补无条件分支并进入续块，返回 1 表示路径继续。
+    return checked_lower_exit_block(l)
+}
+
+// checked_lower_loop：降低条件循环 `for cond { 体 }` 与无限循环 `for { 体 }`。
+// 每层嵌套在 CheckedFlow.loops 独占携带/break 状态；两趟协议与旧构造器一致：
+// 发现趟收集携带绑定与 continue/break 站点数，真实趟据此预留 header/exit phi。
+// 本包装只负责压栈/弹栈与失败清理，主体见 checked_lower_loop_body。
+fn checked_lower_loop(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let depth int = flow.loop_depth
+    let status int = checked_lower_loop_body(l, flow, stmt_id)
+    checked_loop_restore(flow, depth)
+    return status
+}
+
+// checked_lower_loop_body：单层循环主体；has_condition=0 表示 `for {}`，
+// header 无条件进入循环体，唯一出口是 break。调用方保证栈深未满。
+fn checked_lower_loop_body(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let b *AstIRBuilder = &l.builder
+    let stmt AstStmt = l.store.statements[stmt_id]
+    if (flow.loop_depth >= CHECKED_LOOP_MAX) { return -2 }
+    let is_forin int = stmt.first_binding >= 0 ? 1 : 0
+    let has_condition int = is_forin != 0 || stmt.first_expr >= 0 ? 1 : 0
+    let edge AstStmtExpr
+    if (is_forin == 0 && has_condition != 0) {
+        if (stmt.first_expr >= l.store.edge_n) { return -2 }
+        edge = l.store.edges[stmt.first_expr]
+        if (edge.next >= 0 || edge.expr_id < 0 || edge.expr_id >= l.store.expression_n) { return -2 }
+    }
+    let body int = stmt.first_child
+    if (body < 0 || body != stmt.last_child || body >= l.store.statement_n
+        || l.store.statements[body].kind != AST_STMT_BLOCK) { return -2 }
+    let loop *CheckedLoop = &flow.loops[flow.loop_depth]
+    loop.carry = 0; loop.carry_count = 0; loop.carry_cap = 0
+    loop.carry_phis = 0; loop.break_blocks = 0; loop.break_vals = 0
+    loop.break_capacity = 0; loop.continue_done = 0; loop.break_done = 0
+    loop.break_target = -1; loop.continue_target = -1
+    loop.stmt_id = stmt_id
+    loop.forin = 0; loop.forin_elem = -1; loop.forin_index = -1
+    loop.forin_phi = -1; loop.forin_next = -1; loop.forin_zero = -1
+    loop.forin_value = -1; loop.forin_index_value = -1
+    loop.forin_data = -1; loop.forin_length = -1
+    loop.forin_start = -1; loop.forin_end = -1; loop.forin_range_kind = -1
+    loop.forin_elem_type = -1; loop.forin_stride = 0
+    if (is_forin != 0) {
+        let prepared int = checked_lower_forin_prepare(l, flow, stmt_id, loop)
+        if (prepared != 0) { return prepared }
+        l.local_count += loop.forin_index >= 0 ? 2 : 1
+    }
+    flow.loop_depth += 1
+    // 发现趟：在一次性块上降低体，收集携带绑定与站点数后完全回滚。
+    let mark_inst int = b.inst_count
+    let mark_phi int = b.phi_count
+    let mark_pinput int = b.phi_input_count
+    let mark_block int = b.block_count
+    let mark_cur int = b.cur_block
+    let mark_local int = l.local_count
+    let mark_call int = b.calls.call_count
+    let mark_arg int = b.calls.arg_count
+    let mark_sym int = b.calls.symbol_size
+    let mark_values *int = checked_lower_value_copy(l, flow)
+    if (b.binding_count > 0 && mark_values == 0) { return -1 }
+    let break_b int = ast_ir_b_alloc_block(b)
+    let cont_b int = ast_ir_b_alloc_block(b)
+    let entry_b int = ast_ir_b_alloc_block(b)
+    if (break_b < 0 || cont_b < 0 || entry_b < 0) {
+        free(mark_values.to_type(*void)); return -1
+    }
+    loop.break_target = break_b
+    loop.continue_target = cont_b
+    loop.break_done = 0
+    loop.continue_done = 0
+    ast_ir_b_enter_block(b, entry_b)
+    if (loop.forin != 0) {
+        let discovered int = checked_lower_forin_bind(l, flow, loop)
+        if (discovered == -2) { return -2 }
+        if (discovered < 0) { return -1 }
+    }
+    let facts int = checked_lower_stmts(l, flow, l.store.statements[body].first_child)
+    let continue_sites int = loop.continue_done
+    let break_sites int = loop.break_done
+    let has_latch int = facts == 1 ? 1 : 0
+    loop.break_target = -1
+    loop.continue_target = -1
+    b.cur_block = mark_cur
+    l.local_count = mark_local
+    b.inst_count = mark_inst
+    b.phi_count = mark_phi
+    b.phi_input_count = mark_pinput
+    b.block_count = mark_block
+    b.calls.call_count = mark_call
+    b.calls.arg_count = mark_arg
+    b.calls.symbol_size = mark_sym
+    if (b.binding_count > 0) {
+        memcpy(b.local_values, mark_values, (b.binding_count * sizeof(int)).to_type(u64))
+    }
+    free(mark_values.to_type(*void))
+    // 发现趟可能进入/封闭过标签块（goto 目标在体内时为真）；回滚其块状态，
+    // 让真实趟在同一块号上重新进入，避免 first_inst 指向已丢弃的指令区间。
+    let li int = 0
+    for li < l.label_count {
+        let lb int = l.labels[li].block
+        if (lb >= 0 && lb < b.block_count && b.blocks[lb].first_inst >= mark_inst) {
+            b.blocks[lb].first_inst = -1
+            b.blocks[lb].inst_count = 0
+            b.blocks[lb].term = ir.IR_TERM_UNREACHABLE
+            b.blocks[lb].term_value = -1
+            b.blocks[lb].succ0 = -1
+            b.blocks[lb].succ1 = -1
+        }
+        li += 1
+    }
+    if (facts == -2) { return -2 }
+    if (facts < 0) { return facts }
+    let input_count int = 1 + continue_sites + has_latch
+    let preheader int = b.cur_block
+    let header int = ast_ir_b_alloc_block(b)
+    if (header < 0) { return -1 }
+    if (ast_ir_b_term_br(b, header) != 0) { return -1 }
+    ast_ir_b_enter_block(b, header)
+    if (loop.carry_phis != 0) { free(loop.carry_phis.to_type(*void)) }
+    loop.carry_phis = 0
+    if (loop.carry_count > 0) {
+        loop.carry_phis = malloc((loop.carry_count * sizeof(int)).to_type(u64)).to_type(*int)
+        if (loop.carry_phis == 0) { return -1 }
+    }
+    let ci int = 0
+    for ci < loop.carry_count {
+        let binding AstBinding = l.store.bindings[l.function_binding_first + loop.carry[ci]]
+        let kind int = checked_lower_type(l, binding.sym_type_id)
+        if (kind < 0) { return -1 }
+        let phi int = ast_ir_b_add_phi(b, kind, input_count)
+        if (phi < 0) { return -1 }
+        loop.carry_phis[ci] = phi
+        if (ast_ir_b_set_phi_input(b, phi, 0, preheader, b.local_values[loop.carry[ci]]) != 0) {
+            return -1
+        }
+        b.local_values[loop.carry[ci]] = phi
+        ci += 1
+    }
+    let cond int = -1
+    if (loop.forin != 0) {
+        let iterator_phi int = ast_ir_b_add_phi(b, ir.IR_TY_U64, input_count)
+        if (iterator_phi < 0) { return -1 }
+        loop.forin_phi = iterator_phi
+        if (ast_ir_b_set_phi_input(b, iterator_phi, 0, preheader, loop.forin_zero) != 0) {
+            return -1
+        }
+        loop.forin_index_value = iterator_phi
+        let one int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64, -1, -1, 1)
+        if (one < 0) { return -1 }
+        loop.forin_next = ast_ir_b_add_inst(b, ir.IR_OP_ADD, ir.IR_TY_U64,
+            iterator_phi, one, 0)
+        if (loop.forin_next < 0) { return -1 }
+        cond = checked_lower_forin_condition(l, loop)
+        if (cond == -2) { return -2 }
+        if (cond < 0) { return -1 }
+    } else if (has_condition != 0) {
+        cond = checked_lower_cond(l, flow, edge.expr_id)
+        if (cond == -2) { return -2 }
+        if (cond < 0) { return -1 }
+    }
+    // 短路循环条件会在 header 后创建合流块；退出边从条件末块发出。
+    let condition_end int = b.cur_block
+    let body_b int = ast_ir_b_alloc_block(b)
+    let exit_b int = ast_ir_b_alloc_block(b)
+    if (body_b < 0 || exit_b < 0) { return -1 }
+    if (has_condition != 0) {
+        if (ast_ir_b_term_cond(b, cond, body_b, exit_b) != 0) { return -1 }
+    } else {
+        // 无限循环：header 无条件进入体，退出只经 break。
+        if (ast_ir_b_term_br(b, body_b) != 0) { return -1 }
+    }
+    if (loop.break_blocks != 0) { free(loop.break_blocks.to_type(*void)) }
+    if (loop.break_vals != 0) { free(loop.break_vals.to_type(*void)) }
+    loop.break_blocks = 0
+    loop.break_vals = 0
+    loop.break_capacity = break_sites
+    if (break_sites > 0 && loop.carry_count > 0) {
+        loop.break_blocks = malloc((break_sites * sizeof(int)).to_type(u64)).to_type(*int)
+        loop.break_vals = malloc((break_sites * loop.carry_count * sizeof(int))
+            .to_type(u64)).to_type(*int)
+        if (loop.break_blocks == 0 || loop.break_vals == 0) { return -1 }
+    }
+    loop.break_target = exit_b
+    loop.continue_target = header
+    loop.continue_done = 0
+    loop.break_done = 0
+    ast_ir_b_enter_block(b, body_b)
+    if (loop.forin != 0) {
+        let bound int = checked_lower_forin_bind(l, flow, loop)
+        if (bound == -2) { return -2 }
+        if (bound < 0) { return -1 }
+    }
+    let fall int = checked_lower_stmts(l, flow, l.store.statements[body].first_child)
+    let latch int = b.cur_block
+    loop.break_target = -1
+    loop.continue_target = -1
+    if (fall == -2) { return -2 }
+    if (fall < 0) { return fall }
+    if (has_latch != 0) {
+        // 发现趟判定体贯穿：真实趟必须同样贯穿，否则两趟结构不一致。
+        if (fall != 1) { return -1 }
+        if (ast_ir_b_term_br(b, header) != 0) { return -1 }
+        if (loop.forin_phi >= 0 && ast_ir_b_set_phi_input(b, loop.forin_phi,
+            1 + continue_sites, latch, loop.forin_next) != 0) { return -1 }
+        let lj int = 0
+        for lj < loop.carry_count {
+            if (ast_ir_b_set_phi_input(b, loop.carry_phis[lj],
+                1 + continue_sites, latch, b.local_values[loop.carry[lj]]) != 0) { return -1 }
+            lj += 1
+        }
+    }
+    // 循环后视角恢复为 header phi。
+    let rj int = 0
+    for rj < loop.carry_count {
+        b.local_values[loop.carry[rj]] = loop.carry_phis[rj]
+        rj += 1
+    }
+    if (has_condition == 0 && break_sites == 0) {
+        // 无条件循环没有 break 时，后继块不可达；保持函数路径终结，允许循环体内
+        // 的 return 分支覆盖全部出口。仍进入占位 exit 块，满足 SSA 每个块都有起点的校验。
+        ast_ir_b_enter_block(b, exit_b)
+        b.cur_block = -1
+        return 0
+    }
+    ast_ir_b_enter_block(b, exit_b)
+    if (break_sites > 0 && loop.carry_count > 0) {
+        // 条件循环的退出块有两个来源：条件为假（header）与 break 站点；无限循环
+        // 的 header 不连退出块，exit phi 只能以 break 站点为前驱。
+        let exit_base int = has_condition != 0 ? 1 : 0
+        let ej int = 0
+        for ej < loop.carry_count {
+            let header_value int = -1
+            let differ int = 1
+            if (exit_base != 0) {
+                header_value = b.local_values[loop.carry[ej]]
+                differ = 0
+                let ei int = 0
+                for ei < loop.break_done {
+                    if (loop.break_vals[ei * loop.carry_count + ej] != header_value) {
+                        differ = 1
+                        break
+                    }
+                    ei += 1
+                }
+            }
+            if (differ != 0) {
+                let binding2 AstBinding = l.store.bindings[l.function_binding_first + loop.carry[ej]]
+                let kind2 int = checked_lower_type(l, binding2.sym_type_id)
+                if (kind2 < 0) { return -1 }
+                let exit_phi int = ast_ir_b_add_phi(b, kind2, exit_base + loop.break_done)
+                if (exit_phi < 0) { return -1 }
+                if (exit_base != 0) {
+                    if (ast_ir_b_set_phi_input(b, exit_phi, 0, condition_end, header_value) != 0) { return -1 }
+                }
+                let ei2 int = 0
+                for ei2 < loop.break_done {
+                    if (ast_ir_b_set_phi_input(b, exit_phi, exit_base + ei2, loop.break_blocks[ei2],
+                        loop.break_vals[ei2 * loop.carry_count + ej]) != 0) { return -1 }
+                    ei2 += 1
+                }
+                b.local_values[loop.carry[ej]] = exit_phi
+            }
+            ej += 1
+        }
+    }
+    // 退出块收尾：补无条件分支并进入续块，返回 1 表示路径继续。
+    return checked_lower_exit_block(l)
+}
+
+// checked_lower_break：break 站点记录携带值快照并跳出**最内层**循环；循环外拒绝。
+fn checked_lower_break(l *CheckedLower, flow *CheckedFlow) int {
+    let b *AstIRBuilder = &l.builder
+    if (flow.loop_depth <= 0) { return -2 }
+    let loop *CheckedLoop = &flow.loops[flow.loop_depth - 1]
+    if (loop.break_target < 0) { return -2 }
+    if (loop.break_vals != 0) {
+        if (checked_lower_break_snapshot(l, flow, loop.break_done) != 0) { return -1 }
+        loop.break_blocks[loop.break_done] = b.cur_block
+    }
+    loop.break_done += 1
+    if (ast_ir_b_term_br(b, loop.break_target) != 0) { return -1 }
+    return 0
+}
+
+// checked_lower_continue：continue 站点回填**最内层**循环 header phi 并跳回循环头。
+fn checked_lower_continue(l *CheckedLower, flow *CheckedFlow) int {
+    let b *AstIRBuilder = &l.builder
+    if (flow.loop_depth <= 0) { return -2 }
+    let loop *CheckedLoop = &flow.loops[flow.loop_depth - 1]
+    if (loop.continue_target < 0) { return -2 }
+    // 发现趟只计数站点；header phi 在真实趟才存在（carry_phis 为 0）。
+    if (loop.forin_phi >= 0 && ast_ir_b_set_phi_input(b, loop.forin_phi,
+        1 + loop.continue_done, b.cur_block, loop.forin_next) != 0) { return -1 }
+    if (loop.carry_phis != 0) {
+        let j int = 0
+        for j < loop.carry_count {
+            if (ast_ir_b_set_phi_input(b, loop.carry_phis[j], 1 + loop.continue_done,
+                b.cur_block, b.local_values[loop.carry[j]]) != 0) { return -1 }
+            j += 1
+        }
+    }
+    loop.continue_done += 1
+    if (ast_ir_b_term_br(b, loop.continue_target) != 0) { return -1 }
+    return 0
+}
+
+// checked_lower_stmt：降低单条语句；1 = 继续、0 = 路径终结、-2 = 首片不支持、-1 = 内部错误。
+fn checked_lower_stmt(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let b *AstIRBuilder = &l.builder
+    let stmt AstStmt = l.store.statements[stmt_id]
+    l.last_token = stmt.first
+    if (stmt.kind == AST_STMT_DECL) {
+        let row int = stmt.first_binding
+        let edge_cursor int = stmt.first_expr
+        for row >= 0 {
+            let value int = -1
+            let status int = checked_lower_decl_binding(l, flow, stmt_id,
+                row, &edge_cursor, &value)
+            if (status != 0) { return status }
+            let binding AstBinding = l.store.bindings[row]
+            if (value >= 0) { b.local_values[binding.id] = value }
+            l.local_count += 1
+            row = binding.next
+        }
+        return 1
+    }
+    if (stmt.kind == AST_STMT_ASSIGN) { return checked_lower_assign(l, flow, stmt_id) }
+    if (stmt.kind == AST_STMT_EXPR) {
+        if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2 }
+        let edge AstStmtExpr = l.store.edges[stmt.first_expr]
+        if (edge.next >= 0 || edge.expr_id < 0 || edge.expr_id >= l.store.expression_n) { return -2 }
+        let call_id int = edge.expr_id
+        let expression AstExpr = l.store.expressions[call_id]
+        // 语句位置允许括号包装调用；语义包装节点不应改变运行期调用效果。
+        for expression.kind == AST_EXPR_PRIMARY && expression.child0 >= 0 {
+            call_id = expression.child0
+            if (call_id >= l.store.expression_n) { return -2 }
+            expression = l.store.expressions[call_id]
+        }
+        // 编译期断言、诊断和常量计算已由语义阶段执行；折叠后的纯常量无需运行期指令。
+        if (expression.is_const != 0) { return 1 }
+        if (expression.kind != AST_EXPR_CALL) {
+            return -2
+        }
+        // 编译期 intrinsic 已在语义阶段执行，运行期 IR 不应再次发出调用。
+        if ((expression.sym_flags & gen.F_COMPTIME) != 0) { return 1 }
+        let emitted int = checked_lower_call(l, flow, call_id)
+        if (emitted == -2) {
+            l.reason = "此函数调用表达式语句形态尚未受支持"
+            return -2
+        }
+        if (emitted == -3) { return 0 }
+        if (emitted < 0) { return -1 }
+        if (b.insts[emitted].op == ir.IR_OP_CALL && b.insts[emitted].result_type < 0) {
+            // void 调用不定义值；语句位置直接丢弃该指令编号。
+            return 1
+        }
+        return 1
+    }
+    if (stmt.kind == AST_STMT_RETURN) {
+        if (stmt.first_expr < 0) {
+            let return_sig int = l.store.types[l.store.declarations[l.function.decl_row].type_id].sub
+            if (b.ret_ir_type != ir.IR_TY_VOID
+                || checked_lower_is_aggregate(l.store, l.store.sig_ret[return_sig]) != 0) { return -2 }
+            if (ast_ir_b_term_ret(b, -1) != 0) { return -1 }
+            return 0
+        }
+        if (stmt.first_expr >= l.store.edge_n) { return -2 }
+        let edge2 AstStmtExpr = l.store.edges[stmt.first_expr]
+        if (edge2.next >= 0 || edge2.expr_id < 0 || edge2.expr_id >= l.store.expression_n) { return -2 }
+        let return_sig int = l.store.types[l.store.declarations[l.function.decl_row].type_id].sub
+        let return_type int = l.store.sig_ret[return_sig]
+        if (checked_lower_is_aggregate(l.store, return_type) != 0) {
+            if (l.return_buffer < 0) { return -2 }
+            let copied int = checked_lower_aggregate_store(l, flow, l.return_buffer,
+                return_type, edge2.expr_id)
+            if (copied != 0) { return copied }
+            if (ast_ir_b_term_ret(b, -1) != 0) { return -1 }
+            return 0
+        }
+        let value2 int = checked_lower_expr_inner(l, flow, edge2.expr_id)
+        if (value2 == -2) { return -2 }
+        if (value2 < 0) { return -1 }
+        let stored int = checked_lower_adjust(l, value2, b.ret_ir_type)
+        if (stored < 0) { return -2 }
+        if (ast_ir_b_term_ret(b, stored) != 0) { return -1 }
+        return 0
+    }
+    if (stmt.kind == AST_STMT_BLOCK) {
+        return checked_lower_stmts(l, flow, stmt.first_child)
+    }
+    if (stmt.kind == AST_STMT_COMPTIME) {
+        let expanded int = checked_lower_comptime_for(l, flow, stmt_id)
+        if (expanded != -3) { return expanded }
+        return checked_lower_stmts(l, flow, stmt.first_child)
+    }
+    if (stmt.kind == AST_STMT_IF) { return checked_lower_if(l, flow, stmt_id) }
+    if (stmt.kind == AST_STMT_SWITCH) { return checked_lower_switch(l, flow, stmt_id) }
+    if (stmt.kind == AST_STMT_GOTO) { return checked_lower_goto(l, flow, stmt_id) }
+    if (stmt.kind == AST_STMT_LABEL) { return checked_lower_label(l, flow, stmt_id) }
+    if (stmt.kind == AST_STMT_FOR) { return checked_lower_loop(l, flow, stmt_id) }
+    if (stmt.kind == AST_STMT_BREAK) { return checked_lower_break(l, flow) }
+    if (stmt.kind == AST_STMT_CONTINUE) { return checked_lower_continue(l, flow) }
+    return -2
+}
+
+// checked_lower_continue_block：语句序列的块推进。
+// 顺序语句不会自己终结基本块，因此「后面还有语句」时必须显式以无条件分支
+// 收尾当前块并进入新块——否则块会保留默认的 unreachable 终结符，后续语句
+// 变成死代码（实测：`y += 1` 循环体与 if 单臂都会被截断）。
+fn checked_lower_continue_block(l *CheckedLower) int {
+    let b *AstIRBuilder = &l.builder
+    if (b.cur_block < 0) { return -1 }
+    let next int = ast_ir_b_alloc_block(b)
+    if (next < 0) { return -1 }
+    if (ast_ir_b_term_br(b, next) != 0) { return -1 }
+    return ast_ir_b_enter_block(b, next)
+}
+
+// checked_lower_exit_block：复合语句（if/for）收尾。
+// 块终结符 UNREACHABLE 同时表示「尚未收尾」与「真的不可达」，而 IR verifier 只
+// 接受后者；因此复合语句结束时必须给退出/合流块补一条无条件分支到新的续块，
+// 再返回 1（路径继续），让调用方在续块上降低后继语句。
+fn checked_lower_exit_block(l *CheckedLower) int {
+    if (checked_lower_continue_block(l) != 0) { return -1 }
+    return 1
+}
+
+// checked_lower_stmts：按 next_sibling 顺序降低语句序列；协议同 checked_lower_stmt。
+// 用 for 1 + continue 形态推进：旧 ARM64 后端在「循环体内 i += 1」形态上会丢失自增
+// （见 docs/todo.md 的编译器缺陷条目），自举代码一律避免该形态。
+fn checked_lower_stmts(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
+    let b *AstIRBuilder = &l.builder
+    for 1 {
+        if (stmt_id < 0) { return 1 }
+        if (stmt_id >= l.store.statement_n) { return -1 }
+        let stmt AstStmt = l.store.statements[stmt_id]
+        let status int = checked_lower_stmt(l, flow, stmt_id)
+        if (status == -2) { return -2 }
+        if (status < 0) { return status }
+        if (status == 0 || b.cur_block < 0) {
+            if (l.has_goto == 0) { return 0 }
+            // goto 函数：终结后的语句仍可能被标签跳入；开一个不可达续块继续降低。
+            stmt_id = stmt.next_sibling
+            if (stmt_id < 0) { return 0 }
+            let dead int = ast_ir_b_alloc_block(b)
+            if (dead < 0) { return -1 }
+            ast_ir_b_enter_block(b, dead)
+            continue
+        }
+        stmt_id = stmt.next_sibling
+        if (stmt_id < 0) { return 1 }
+        // 还有后继语句：当前块必须显式分支到新的续块，不能留着 unreachable。
+        if (checked_lower_continue_block(l) != 0) { return -1 }
+    }
+    return 1
+}
+
+// checked_label_same：比较两个源码名字区间的内容是否相同。goto 与 label 同名但
+// 位置不同，必须按字节内容比较，不能比较区间本身。
+fn checked_label_same(l *CheckedLower, a_file int, a_start int, a_len int,
+    b_file int, b_start int, b_len int) int {
+    if (a_len != b_len || a_file < 0 || a_file >= l.store.file_n
+        || b_file < 0 || b_file >= l.store.file_n) { return 0 }
+    let fa gen.PFile = l.store.files[a_file]
+    let fb gen.PFile = l.store.files[b_file]
+    if (fa.source == 0 || fb.source == 0 || a_start < 0 || b_start < 0
+        || a_start + a_len > fa.source_len || b_start + b_len > fb.source_len) { return 0 }
+    let i int = 0
+    for i < a_len {
+        if (fa.source[a_start + i] != fb.source[b_start + i]) { return 0 }
+        i += 1
+    }
+    return 1
+}
+
+// checked_label_find：在当前函数的标签表里按名字内容查块；create=1 时新建。
+// 表的每一项记录引用点的 (file,start,length)，比较走 checked_label_same。
+fn checked_label_find(l *CheckedLower, file_id int, start int, name_len int, create int) int {
+    let i int = 0
+    for i < l.label_count {
+        let ent CheckedLabel = l.labels[i]
+        if (checked_label_same(l, ent.file_id, ent.start, ent.length,
+            file_id, start, name_len) != 0) {
+            return ent.block
+        }
+        i += 1
+    }
+    if (create == 0) { return -1 }
+    if (l.label_count >= l.label_cap) {
+        let capacity int = l.label_cap == 0 ? 8 : l.label_cap * 2
+        let next *CheckedLabel = malloc((capacity * sizeof(CheckedLabel)).to_type(u64)) .
+            to_type(*CheckedLabel)
+        if (next == 0) { return -1 }
+        if (l.label_count > 0) {
+            memcpy(next, l.labels, (l.label_count * sizeof(CheckedLabel)).to_type(u64))
+        }
+        if (l.labels != 0) { free(l.labels.to_type(*void)) }
+        l.labels = next; l.label_cap = capacity
+    }
+    let block int = ast_ir_b_alloc_block(&l.builder)
+    if (block < 0) { return -1 }
+    l.labels[l.label_count].file_id = file_id
+    l.labels[l.label_count].start = start
+    l.labels[l.label_count].length = name_len
+    l.labels[l.label_count].block = block
+    l.label_count += 1
+    return block
+}
+
+// checked_label_token：把语句里的名字 token 解析成源码字节区间并查/建块；
+// 越界、非源码 token 或分配失败返回 -1。
+fn checked_label_token(l *CheckedLower, file_id int, token int, create int) int {
+    if (file_id < 0 || file_id >= l.store.file_n) { return -1 }
+    let file gen.PFile = l.store.files[file_id]
+    if (token < 0 || token >= file.token_n || file.tokens == 0 || file.source == 0) {
+        return -1
+    }
+    let start int = file.tokens[token].start
+    let name_len int = file.tokens[token].len
+    if (start < 0 || name_len <= 0 || start + name_len > file.source_len) { return -1 }
+    return checked_label_find(l, file_id, start, name_len, create)
+}

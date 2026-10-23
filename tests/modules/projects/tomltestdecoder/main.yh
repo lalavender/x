@@ -1,0 +1,234 @@
+module main
+
+// toml-test v2.2.0 tagged JSON 解码桥：从文件读取 TOML，成功输出带类型标签
+// 的 JSON，失败返回非零。表是 JSON 对象，数组是 JSON 数组，标量为
+// {"type": ..., "value": ...}；浮点由 fmt 输出 17 位往返十进制。
+
+import fmt
+import io
+import toml
+
+const HEX_DIGITS *char = "0123456789abcdef"
+
+// print_char 输出一个字符。
+fn print_char(c char) void {
+    let buf [2]char
+    buf[0] = c
+    buf[1] = 0
+    io.print(&buf[0])
+}
+
+// json_string 输出 JSON 字符串，保留 NUL 与控制字符转义。
+fn json_string(data *u8, count u64) void {
+    io.print("\"")
+    let i u64 = 0
+    for i < count {
+        let b u8 = data[i]
+        if (b == '"') {
+            io.print("\\\"")
+        } else if (b == '\\') {
+            io.print("\\\\")
+        } else if (b < 32) {
+            io.print("\\u00")
+            print_char(HEX_DIGITS[(b >> 4).to_type(int)])
+            print_char(HEX_DIGITS[(b & 15).to_type(int)])
+        } else {
+            let buf [2]u8
+            buf[0] = b
+            buf[1] = 0
+            io.print((&buf[0]).to_type(*char))
+        }
+        i += 1
+    }
+    io.print("\"")
+}
+
+// print_temporal 输出规范化时间字符串：秒缺失补 :00，小数最多 9 位。
+fn print_temporal(kind toml.ValueKind, text toml.Text) void {
+    let source *u8 = text.data
+    let count u64 = text.count
+    let time_start int = -1
+    if (kind == toml.kind_local_time) {
+        time_start = 0
+    } else if (kind == toml.kind_offset_datetime
+        || kind == toml.kind_local_datetime) {
+        time_start = 11
+    }
+    let has_seconds int = 0
+    if (time_start >= 0 && time_start.to_type(u64) + 5 < count) {
+        if (source[time_start.to_type(u64) + 5] == ':') {
+            has_seconds = 1
+        }
+    }
+    let buf [96]char
+    let at int = 0
+    let inserted int = 0
+    let i u64 = 0
+    for i < count {
+        let b u8 = source[i]
+        if (time_start >= 0 && has_seconds == 0 && inserted == 0
+            && i == time_start.to_type(u64) + 5) {
+            buf[at] = ':'
+            at += 1
+            buf[at] = '0'
+            at += 1
+            buf[at] = '0'
+            at += 1
+            inserted = 1
+        }
+        if (has_seconds != 0 && b == '.') {
+            buf[at] = '.'
+            at += 1
+            i += 1
+            let copied int = 0
+            for i < count && copied < 9 {
+                let d u8 = source[i]
+                if (d < '0' || d > '9') {
+                    break
+                }
+                buf[at] = d.to_type(char)
+                at += 1
+                i += 1
+                copied += 1
+            }
+            for i < count {
+                let d u8 = source[i]
+                if (d < '0' || d > '9') {
+                    break
+                }
+                i += 1
+            }
+            continue
+        }
+        let out char = b.to_type(char)
+        if (out == ' ') {
+            out = 'T'
+        } else if (out == 't') {
+            out = 'T'
+        } else if (out == 'z') {
+            out = 'Z'
+        }
+        buf[at] = out
+        at += 1
+        i += 1
+    }
+    if (time_start >= 0 && has_seconds == 0 && inserted == 0) {
+        buf[at] = ':'
+        at += 1
+        buf[at] = '0'
+        at += 1
+        buf[at] = '0'
+        at += 1
+    }
+    buf[at] = 0
+    json_string((&buf[0]).to_type(*u8), at.to_type(u64))
+}
+
+// print_value_json 递归输出一个值。
+fn print_value_json(value toml.Value) void {
+    let k toml.ValueKind = toml.kind(value)
+    if (k == toml.kind_table) {
+        io.print("{")
+        let count u64 = 0
+        toml.count(value, &count)
+        let i u64 = 0
+        for i < count {
+            if (i > 0) {
+                io.print(", ")
+            }
+            let entry toml.EntryResult = toml.table_entry(value, i)
+            json_string(entry.key.data, entry.key.count)
+            io.print(": ")
+            print_value_json(entry.value)
+            i += 1
+        }
+        io.print("}")
+        return
+    }
+    if (k == toml.kind_array) {
+        io.print("[")
+        let count u64 = 0
+        toml.count(value, &count)
+        let i u64 = 0
+        for i < count {
+            if (i > 0) {
+                io.print(", ")
+            }
+            let item toml.LookupResult = toml.array_get(value, i)
+            print_value_json(item.value)
+            i += 1
+        }
+        io.print("]")
+        return
+    }
+    if (k == toml.kind_string) {
+        let text toml.Text
+        toml.as_text(value, &text)
+        io.print("{\"type\": \"string\", \"value\": ")
+        json_string(text.data, text.count)
+        io.print("}")
+        return
+    }
+    if (k == toml.kind_integer) {
+        let number i64 = 0
+        toml.as_i64(value, &number)
+        io.print("{\"type\": \"integer\", \"value\": \"")
+        fmt.print_i64(number)
+        io.print("\"}")
+        return
+    }
+    if (k == toml.kind_float) {
+        let number f64 = 0.0
+        toml.as_f64(value, &number)
+        io.print("{\"type\": \"float\", \"value\": \"")
+        fmt.print_float(number)
+        io.print("\"}")
+        return
+    }
+    if (k == toml.kind_boolean) {
+        let flag bool = false
+        toml.as_bool(value, &flag)
+        io.print("{\"type\": \"bool\", \"value\": \"")
+        if (flag == true) {
+            io.print("true")
+        } else {
+            io.print("false")
+        }
+        io.print("\"}")
+        return
+    }
+    let text toml.Text
+    if (toml.as_temporal(value, &text) == toml.query_ok) {
+        io.print("{\"type\": \"")
+        if (k == toml.kind_offset_datetime) {
+            io.print("datetime")
+        } else if (k == toml.kind_local_datetime) {
+            io.print("datetime-local")
+        } else if (k == toml.kind_local_date) {
+            io.print("date-local")
+        } else {
+            io.print("time-local")
+        }
+        io.print("\", \"value\": ")
+        print_temporal(k, text)
+        io.print("}")
+        return
+    }
+    io.print("null")
+}
+
+// main 读取文件并输出 tagged JSON；解析失败返回 1。
+pub fn main(argc int, argv **char) int {
+    if (argc < 2) {
+        return 2
+    }
+    let result toml.ParseResult = toml.read_file(argv[1])
+    if (result.status != toml.parse_ok) {
+        toml.release(&result.document)
+        return 1
+    }
+    print_value_json(toml.root(&result.document))
+    io.println("")
+    toml.release(&result.document)
+    return 0
+}

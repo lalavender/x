@@ -468,6 +468,126 @@ fn case_long_and_output() int {
     return 0
 }
 
+// case_templates_and_warnings 覆盖自定义 usage、模板展开、version 模板、
+// 坏模板 freeze 拒绝与 deprecated 运行期警告。
+fn case_templates_and_warnings() int {
+    let parser cli.Parser
+    let config cli.ParserConfig = cli.parser_config("tool")
+    config.usage = "%(prog)s CUSTOM src"
+    config.description = "%(prog)s description"
+    config.epilog = "%(prog)s epilog"
+    if (cli.init(&parser, config) != 0) {
+        return 90
+    }
+    let output cli.Argument = cli.option("--output", 0)
+    output.help = "%(prog)s %(default)s %(type)s %(dest)s"
+    output.default_value = cli.default_of(cli.value_text("out.bin"))
+    let version cli.Argument = cli.option("--version", 0)
+    version.action = cli.version
+    version.version_text = "%(prog)s 1.0"
+    if (cli.add_argument(&parser, output) < 0 || cli.add_argument(&parser, version) < 0
+        || cli.add_argument(&parser, cli.positional("src")) < 0) {
+        cli.destroy(&parser)
+        return 91
+    }
+    let help cli.TextResult = cli.format_help(&parser)
+    if (help.status != cli.ok || contains(help.text, "usage: tool CUSTOM src") != 1
+        || contains(help.text, "tool description") != 1
+        || contains(help.text, "tool out.bin text output") != 1
+        || contains(help.text, "tool epilog") != 1) {
+        cli.release_text(&help)
+        cli.destroy(&parser)
+        return 92
+    }
+    cli.release_text(&help)
+
+    let version_args [1]*char
+    version_args[0] = "--version"
+    let version_result cli.Result = cli.parse(&parser, version_args[0..1])
+    if (version_result.status != cli.version_requested
+        || contains(version_result.control_text, "tool 1.0") != 1) {
+        cli.release(&version_result)
+        cli.destroy(&parser)
+        return 93
+    }
+    cli.release(&version_result)
+    cli.destroy(&parser)
+
+    // usage 空串：不写 usage 正文。
+    let empty_parser cli.Parser
+    let empty_config cli.ParserConfig = cli.parser_config("tool")
+    empty_config.usage = ""
+    if (cli.init(&empty_parser, empty_config) != 0
+        || cli.add_argument(&empty_parser, cli.positional("src")) < 0) {
+        cli.destroy(&empty_parser)
+        return 94
+    }
+    let empty_usage cli.TextResult = cli.format_usage(&empty_parser)
+    if (empty_usage.status != cli.ok || empty_usage.text == 0
+        || empty_usage.text[0] != 0) {
+        cli.release_text(&empty_usage)
+        cli.destroy(&empty_parser)
+        return 95
+    }
+    cli.release_text(&empty_usage)
+    cli.destroy(&empty_parser)
+
+    // 未知占位符在 freeze 报配置错误。
+    let bad_parser cli.Parser
+    let bad_config cli.ParserConfig = cli.parser_config("tool")
+    if (cli.init(&bad_parser, bad_config) != 0) {
+        return 96
+    }
+    let bad cli.Argument = cli.option("--bad", 0)
+    bad.help = "%(bogus)s"
+    if (cli.add_argument(&bad_parser, bad) < 0 || cli.freeze(&bad_parser) == 0) {
+        cli.destroy(&bad_parser)
+        return 97
+    }
+    cli.destroy(&bad_parser)
+
+    // deprecated 显式出现产生一条警告；重复出现不重复计数；帮助路径也保留。
+    let warn_parser cli.Parser
+    let warn_config cli.ParserConfig = cli.parser_config("tool")
+    if (cli.init(&warn_parser, warn_config) != 0) {
+        return 98
+    }
+    let old cli.Argument = cli.option("--old", 0)
+    old.deprecated = true
+    if (cli.add_argument(&warn_parser, old) < 0
+        || cli.add_argument(&warn_parser, cli.positional("src")) < 0) {
+        cli.destroy(&warn_parser)
+        return 99
+    }
+    let with_src [5]*char
+    with_src[0] = "--old"
+    with_src[1] = "x"
+    with_src[2] = "--old"
+    with_src[3] = "y"
+    with_src[4] = "in.txt"
+    let warn_result cli.Result = cli.parse(&warn_parser, with_src[0..5])
+    if (warn_result.status != cli.ok || len(warn_result.warnings) != 1
+        || contains(warn_result.warnings[0], "弃用") != 1) {
+        cli.release(&warn_result)
+        cli.destroy(&warn_parser)
+        return 100
+    }
+    cli.release(&warn_result)
+    let help_args [4]*char
+    help_args[0] = "--old"
+    help_args[1] = "x"
+    help_args[2] = "--help"
+    let help_result cli.Result = cli.parse(&warn_parser, help_args[0..3])
+    if (help_result.status != cli.help_requested || len(help_result.warnings) != 1) {
+        cli.release(&help_result)
+        cli.destroy(&warn_parser)
+        return 101
+    }
+    cli.release(&help_result)
+    cli.destroy(&warn_parser)
+    return 0
+}
+
 // empty_args 返回一个空参数切片。
 fn empty_args() []*char {
     let empty [1]*char
@@ -500,7 +620,11 @@ fn run_all() int {
     if (rc != 0) {
         return rc
     }
-    return case_long_and_output()
+    rc = case_long_and_output()
+    if (rc != 0) {
+        return rc
+    }
+    return case_templates_and_warnings()
 }
 
 // main 在 --selftest 下运行 CLI5 语义断言，否则打印提示并返回 0。

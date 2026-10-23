@@ -118,6 +118,10 @@ make
 ./yh run                   # 构建并运行 main 模块
 ./yh version               # 项目名与版本
 ./yh list [--resolve name] # 列出模块/解释导入绑定
+./yh test --list           # 只列出测试身份与文档目标
+./yh test                  # 发现、构建并逐例执行测试
+./yh test --no-run         # 只构建测试对象与入口，不链接/不执行
+./yh test --filter X --timeout 15  # 只跑身份含 X 的用例，单例超时 15 秒
 ./yh --syntax-check f.yh   # 只做词法/语法检查
 ./yh --emit-asm f.yh       # 发射汇编
 ./yh f.yh -o out           # 单文件编译并链接
@@ -133,6 +137,8 @@ make llvm-host          # 只准备本机固定 LLVM 闭包（不编编译器）
 make fetch-seed         # 从最新 GitHub Release 取本机平台种子（x64 首次构建前）
 make code-stats         # 统计 compiler/ 下 yh 源码规模
 make test-code-stats    # 运行统计工具边界与 JSON 检查
+make test-lib-tests     # 标准库内建测试（yh test 跑 libs 项目的 test 块）
+make test-compiler-tests # compiler/ 内嵌 yh test 测试（需种子支持 test 语法）
 make test-llvm-linux-arm64  # F1：Linux/AArch64 LLVM 运行时/C ABI/O0-O2（容器内）
 make seed               # 滚种子（仅在全绿后；拒绝带构建机路径的种子）
 ```

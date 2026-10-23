@@ -1,0 +1,1655 @@
+module main
+import gen
+import parse
+
+// ============================================================================
+// test_cmd.yh —— yh test：测试发现、文档目标绑定与无运行检查（YT1）
+//
+// 本文件只实现 YT1：测试身份发现、doctest 目标绑定、模块/文件选择与
+// --list/--no-run 检查。执行器、运行时断言与逐例进程属于 YT2。
+// 项目发现/接口/缓存仍复用 module_build 的现有管线。
+// ============================================================================
+
+
+// pj_imp_alias_match：文件 f 的第 ti 个 token 是否等于导入 ii 的绑定名。
+fn pj_imp_alias_match(f int, ti int, ii int) int {
+    let gs *gen.GenState = gen.G()
+    let tok gen.Tok = gs.p_files[f].tokens[ti]
+    let n int = gs.p_imp_alias_len[ii]
+    if (tok.kind != gen.TOK_IDENT || tok.len != n) {
+        return 0
+    }
+    let j int = 0
+    for j < n {
+        if (gs.p_files[f].source[tok.start + j]
+            != gs.task.np_data[gs.p_imp_alias_off[ii] + j]) {
+            return 0
+        }
+        j += 1
+    }
+    return 1
+}
+
+// pj_mark_test_tokens：把文件 f 中每个顶层 test 声明的块体 token 标记为 1。
+// 用于区分「只在 test 体内使用」的导入；只扫描 token，不做语义解析。
+fn pj_mark_test_tokens(f int) *u8 {
+    let gs *gen.GenState = gen.G()
+    let n int = gs.p_files[f].token_n
+    if (n <= 0) { return 0 }
+    let marks *u8 = malloc(n.to_type(u64)).to_type(*u8)
+    if (marks == 0) { return 0 }
+    let i int = 0
+    for i < n {
+        marks[i] = 0
+        i += 1
+    }
+    let depth int = 0
+    i = 0
+    for i < n {
+        let k int = gs.p_files[f].tokens[i].kind
+        if (k == gen.TK_LBRACE) {
+            depth += 1
+            i += 1
+            continue
+        }
+        if (k == gen.TK_RBRACE) {
+            if (depth > 0) { depth -= 1 }
+            i += 1
+            continue
+        }
+        if (depth == 0 && k == gen.TK_TEST
+            && (i == 0 || gs.p_files[f].tokens[i - 1].kind != gen.TK_DOT)) {
+            let j int = i + 1
+            for j < n {
+                let jk int = gs.p_files[f].tokens[j].kind
+                if (jk == gen.TK_LBRACE || jk == gen.TK_SEMI || jk == gen.TOK_EOF) {
+                    break
+                }
+                j += 1
+            }
+            if (j < n && gs.p_files[f].tokens[j].kind == gen.TK_LBRACE) {
+                let d int = 0
+                let e int = j
+                for e < n {
+                    let ek int = gs.p_files[f].tokens[e].kind
+                    if (ek == gen.TK_LBRACE) { d += 1 }
+                    if (ek == gen.TK_RBRACE) {
+                        d -= 1
+                        if (d == 0) { break }
+                    }
+                    e += 1
+                }
+                if (e < n) {
+                    let q int = j
+                    for q <= e {
+                        marks[q] = 1
+                        q += 1
+                    }
+                    i = e + 1
+                    continue
+                }
+            }
+        }
+        i += 1
+    }
+    return marks
+}
+
+// pj_classify_test_imports：为项目 proj 的每条导入分类 test_only。
+// 仅当绑定名以 `alias.` 形式出现，且所有出现都在该文件的 test 块体内，
+// 才标记为测试专用；生产构建随后跳过该导入的绑定、依赖边和未使用诊断。
+fn pj_classify_test_imports(proj int) int {
+    let gs *gen.GenState = gen.G()
+    let mi int = 0
+    for mi < gs.p_projs[proj].mod_n {
+        let m int = gs.p_projs[proj].mods[mi]
+        let fi int = 0
+        for fi < gs.p_mods[m].file_n {
+            let f int = gs.p_mods[m].files[fi]
+            let marks *u8 = pj_mark_test_tokens(f)
+            if (marks == 0) {
+                if (gs.p_files[f].token_n > 0) { return gen.fail("内存分配失败") }
+                fi += 1
+                continue
+            }
+            let ii int = 0
+            for ii < gs.p_imp_n {
+                if (gs.p_imp_file[ii] != f) {
+                    ii += 1
+                    continue
+                }
+                let inside int = 0
+                let outside int = 0
+                let ti int = 0
+                let n int = gs.p_files[f].token_n
+                for ti + 1 < n {
+                    if (gs.p_files[f].tokens[ti].kind == gen.TOK_IDENT
+                        && gs.p_files[f].tokens[ti + 1].kind == gen.TK_DOT
+                        && pj_imp_alias_match(f, ti, ii) != 0) {
+                        if (marks[ti] != 0) {
+                            inside = 1
+                        } else {
+                            outside = 1
+                            break
+                        }
+                    }
+                    ti += 1
+                }
+                gs.p_imp_test_only[ii] = (inside != 0 && outside == 0).to_type(int)
+                ii += 1
+            }
+            free(marks.to_type(*void))
+            fi += 1
+        }
+        mi += 1
+    }
+    return 0
+}
+
+// TCase：一条已发现的测试。name_* 是名字池中的显示名（字符串去引号）。
+struct TCase {
+    proj int
+    mod int
+    file int
+    kind int        // 0 = 字符串行为测试，1 = 标识符文档测试
+    name_off int
+    name_len int
+    target_kind int // 文档测试目标声明种类；0 = 未绑定
+    target_file int
+    target_line int
+    target_col int
+    line int
+    col int
+    decl int        // 文件内 PDecl 编号（测试函数名 __yh_test_<file>_<decl>）
+    sel int         // 1 = 通过 --filter 选中（默认全部选中）
+}
+
+// TDecl：模块内一个可供文档测试绑定的顶层声明。
+struct TDecl {
+    mod int
+    file int
+    kind int
+    name_off int
+    name_len int
+    line int
+    col int
+}
+
+let tc_cases *TCase = 0
+let tc_case_n int = 0
+let tc_case_cap int = 0
+let tc_decls *TDecl = 0
+let tc_decl_n int = 0
+let tc_decl_cap int = 0
+let tc_root_proj int = -1
+let tc_root_off int = -1
+let tc_root_len int = 0
+
+// tc_reset：清空一次 yh test 会话的发现结果。
+fn tc_reset() void {
+    if (tc_cases != 0) { free(tc_cases.to_type(*void)) }
+    if (tc_decls != 0) { free(tc_decls.to_type(*void)) }
+    tc_cases = 0
+    tc_case_n = 0
+    tc_case_cap = 0
+    tc_decls = 0
+    tc_decl_n = 0
+    tc_decl_cap = 0
+    tc_root_proj = -1
+    tc_root_off = -1
+    tc_root_len = 0
+}
+
+// tc_name_eq：名字池两段字节相等。
+fn tc_name_eq(off1 int, len1 int, off2 int, len2 int) int {
+    let gs *gen.GenState = gen.G()
+    if (len1 != len2) { return 0 }
+    let i int = 0
+    for i < len1 {
+        if (gs.task.np_data[off1 + i] != gs.task.np_data[off2 + i]) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// tc_np_less：名字池两段字节的字典序比较（a < b 返回 1）。
+fn tc_np_less(off1 int, len1 int, off2 int, len2 int) int {
+    let gs *gen.GenState = gen.G()
+    let n int = len1
+    if (len2 < n) { n = len2 }
+    let i int = 0
+    for i < n {
+        let a int = gs.task.np_data[off1 + i].to_type(int)
+        let b int = gs.task.np_data[off2 + i].to_type(int)
+        if (a < b) { return 1 }
+        if (a > b) { return 0 }
+        i += 1
+    }
+    return (len1 < len2).to_type(int)
+}
+
+// tc_rel_path：把文件绝对路径换算为项目根相对路径。
+fn tc_rel_path(file int, off *int, olen *int) void {
+    let gs *gen.GenState = gen.G()
+    let poff int = gs.p_files[file].path_off
+    let plen int = gs.p_files[file].path_len
+    if (gs.c_scan_file_off >= 0) {
+        // 单文件模式：显示文件名本身，而不是临时项目根之外的绝对路径。
+        let base int = 0
+        let i int = 0
+        for i < plen {
+            if (gs.task.np_data[poff + i] == '/') { base = i + 1 }
+            i += 1
+        }
+        off[0] = poff + base
+        olen[0] = plen - base
+        return
+    }
+    let start int = 0
+    if (plen > tc_root_len && gs.task.np_data[poff + tc_root_len] == '/') {
+        let same int = 1
+        let i int = 0
+        for i < tc_root_len {
+            if (gs.task.np_data[poff + i] != gs.task.np_data[tc_root_off + i]) {
+                same = 0
+                break
+            }
+            i += 1
+        }
+        if (same != 0) { start = tc_root_len + 1 }
+    }
+    off[0] = poff + start
+    olen[0] = plen - start
+}
+
+// tc_identity：构造稳定身份 module::relpath::kind::name。
+fn tc_identity(c TCase, buf *u8) int {
+    let gs *gen.GenState = gen.G()
+    let n int = 0
+    let m int = c.mod
+    n = append_bytes_np(buf, n, gs.p_mods[m].name_off, gs.p_mods[m].name_len)
+    n = gen.append_str(buf, n, "::")
+    let poff int = 0
+    let plen int = 0
+    tc_rel_path(c.file, &poff, &plen)
+    n = append_bytes_np(buf, n, poff, plen)
+    n = gen.append_str(buf, n, "::")
+    if (c.kind == 1) {
+        n = gen.append_str(buf, n, "decltest")
+    } else {
+        n = gen.append_str(buf, n, "test")
+    }
+    n = gen.append_str(buf, n, "::")
+    n = append_bytes_np(buf, n, c.name_off, c.name_len)
+    return n
+}
+
+// tc_contains：在 hay[0..hn) 中查找名字池中的 needle。
+fn tc_contains(hay *u8, hn int, needle_off int, needle_len int) int {
+    let gs *gen.GenState = gen.G()
+    if (needle_len == 0) { return 1 }
+    if (needle_len > hn) { return 0 }
+    let i int = 0
+    for i + needle_len <= hn {
+        let match int = 1
+        let j int = 0
+        for j < needle_len {
+            if (hay[i + j] != gs.task.np_data[needle_off + j]) {
+                match = 0
+                break
+            }
+            j += 1
+        }
+        if (match != 0) { return 1 }
+        i += 1
+    }
+    return 0
+}
+
+// tc_diag：以文件路径输出测试发现诊断，不依赖当前解析游标。
+fn tc_diag(file int, line int, col int, msg *char) int {
+    let gs *gen.GenState = gen.G()
+    let buf [1024]u8
+    let n int = 0
+    n = append_bytes_np(&buf[0], n, gs.p_files[file].path_off, gs.p_files[file].path_len)
+    n = gen.append_byte(&buf[0], n, ':')
+    n = gen.append_int(&buf[0], n, line)
+    n = gen.append_byte(&buf[0], n, ':')
+    n = gen.append_int(&buf[0], n, col)
+    n = gen.append_str(&buf[0], n, ": 错误: ")
+    n = gen.append_str(&buf[0], n, msg)
+    n = gen.append_byte(&buf[0], n, '\n')
+    gen.write_all(2, &buf[0], n)
+    gs.task.c_errors += 1
+    return -1
+}
+
+// tc_push_decl：追加一个文档测试可绑定的顶层声明。
+fn tc_push_decl(d TDecl) int {
+    if (tc_decl_n == tc_decl_cap) {
+        let ncap int = tc_decl_cap * 2
+        if (ncap == 0) { ncap = 32 }
+        let nd *TDecl = malloc((ncap * sizeof(TDecl)).to_type(u64)).to_type(*TDecl)
+        if (nd == 0) { return gen.fail("内存分配失败") }
+        if (tc_decl_n > 0) {
+            memcpy(nd, tc_decls, (tc_decl_n * sizeof(TDecl)).to_type(u64))
+        }
+        if (tc_decls != 0) { free(tc_decls.to_type(*void)) }
+        tc_decls = nd
+        tc_decl_cap = ncap
+    }
+    tc_decls[tc_decl_n] = d
+    tc_decl_n += 1
+    return 0
+}
+
+// tc_add_decl：把 PDecl 中可绑定的顶层声明（函数/常量/全局变量/类型）加入索引。
+fn tc_add_decl(mod int, file int, node gen.PDecl) int {
+    if (node.kind == gen.TK_TEST) { return 0 }
+    let gs *gen.GenState = gen.G()
+    let name_tok int = node.keyword + 1
+    if (name_tok >= node.end || name_tok >= gs.p_files[file].token_n) { return 0 }
+    let tok gen.Tok = gs.p_files[file].tokens[name_tok]
+    if (tok.kind != gen.TOK_IDENT) { return 0 }
+    let noff int = gen.name_intern(tok.start, tok.len)
+    if (noff < 0) { return -1 }
+    let d TDecl
+    d.mod = mod
+    d.file = file
+    d.kind = node.kind
+    d.name_off = noff
+    d.name_len = tok.len
+    d.line = tok.line
+    d.col = tok.col
+    return tc_push_decl(d)
+}
+
+// tc_push_case：追加一条测试；同文件同种类同名直接报错。
+fn tc_push_case(c TCase) int {
+    let i int = 0
+    for i < tc_case_n {
+        if (tc_cases[i].file == c.file && tc_cases[i].kind == c.kind
+            && tc_name_eq(tc_cases[i].name_off, tc_cases[i].name_len,
+                c.name_off, c.name_len) != 0) {
+            return tc_diag(c.file, c.line, c.col,
+                "同一文件内同种类测试名称重复")
+        }
+        i += 1
+    }
+    if (tc_case_n == tc_case_cap) {
+        let ncap int = tc_case_cap * 2
+        if (ncap == 0) { ncap = 32 }
+        let nc *TCase = malloc((ncap * sizeof(TCase)).to_type(u64)).to_type(*TCase)
+        if (nc == 0) { return gen.fail("内存分配失败") }
+        if (tc_case_n > 0) {
+            memcpy(nc, tc_cases, (tc_case_n * sizeof(TCase)).to_type(u64))
+        }
+        if (tc_cases != 0) { free(tc_cases.to_type(*void)) }
+        tc_cases = nc
+        tc_case_cap = ncap
+    }
+    tc_cases[tc_case_n] = c
+    tc_case_n += 1
+    return 0
+}
+
+// tc_add_case：从 test PDecl 提取名称、种类、声明位置与 PDecl 编号。
+fn tc_add_case(mod int, file int, node gen.PDecl, decl_index int) int {
+    let gs *gen.GenState = gen.G()
+    let name_tok int = node.keyword + 1
+    if (name_tok >= node.end || name_tok >= gs.p_files[file].token_n) {
+        return tc_diag(file, node.line, node.col, "test 声明的名称缺失")
+    }
+    let tok gen.Tok = gs.p_files[file].tokens[name_tok]
+    let kind int = 0
+    let start int = tok.start
+    let nlen int = tok.len
+    if (tok.kind == gen.TOK_STRING) {
+        if (nlen <= 2) {
+            return tc_diag(file, tok.line, tok.col, "test 名称不能为空字符串")
+        }
+        start += 1
+        nlen -= 2
+        kind = 0
+    } else if (tok.kind == gen.TOK_IDENT) {
+        kind = 1
+    } else {
+        return tc_diag(file, tok.line, tok.col,
+            "test 后需要字符串字面量或声明名")
+    }
+    let noff int = gen.name_intern(start, nlen)
+    if (noff < 0) { return -1 }
+    let c TCase
+    c.proj = tc_root_proj
+    c.mod = mod
+    c.file = file
+    c.kind = kind
+    c.name_off = noff
+    c.name_len = nlen
+    c.target_kind = 0
+    c.target_file = -1
+    c.target_line = 0
+    c.target_col = 0
+    c.line = node.line
+    c.col = node.col
+    c.decl = decl_index
+    c.sel = 1
+    return tc_push_case(c)
+}
+
+// tc_lookup_decl：在模块顶层声明中查找文档测试目标；返回命中数。
+fn tc_lookup_decl(mod int, off int, olen int, out *TDecl) int {
+    let count int = 0
+    let found int = -1
+    let i int = 0
+    for i < tc_decl_n {
+        if (tc_decls[i].mod == mod
+            && tc_name_eq(tc_decls[i].name_off, tc_decls[i].name_len, off, olen) != 0) {
+            count += 1
+            found = i
+        }
+        i += 1
+    }
+    if (count == 1) { out[0] = tc_decls[found] }
+    return count
+}
+
+// tc_is_import_alias：名字是否为该文件的某个导入绑定名。
+fn tc_is_import_alias(file int, off int, olen int) int {
+    let gs *gen.GenState = gen.G()
+    let i int = 0
+    for i < gs.p_imp_n {
+        if (gs.p_imp_file[i] == file
+            && tc_name_eq(gs.p_imp_alias_off[i], gs.p_imp_alias_len[i], off, olen) != 0) {
+            return 1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// tc_case_less：稳定顺序：模块名、项目相对路径、行列、种类、名称。
+fn tc_case_less(a TCase, b TCase) int {
+    let gs *gen.GenState = gen.G()
+    let am int = gs.p_mods[a.mod].name_off
+    let al int = gs.p_mods[a.mod].name_len
+    let bm int = gs.p_mods[b.mod].name_off
+    let bl int = gs.p_mods[b.mod].name_len
+    if (tc_name_eq(am, al, bm, bl) == 0) {
+        return tc_np_less(am, al, bm, bl)
+    }
+    let ao int = 0
+    let alen int = 0
+    let bo int = 0
+    let blen int = 0
+    tc_rel_path(a.file, &ao, &alen)
+    tc_rel_path(b.file, &bo, &blen)
+    if (tc_name_eq(ao, alen, bo, blen) == 0) {
+        return tc_np_less(ao, alen, bo, blen)
+    }
+    if (a.line != b.line) { return (a.line < b.line).to_type(int) }
+    if (a.col != b.col) { return (a.col < b.col).to_type(int) }
+    if (a.kind != b.kind) { return (a.kind < b.kind).to_type(int) }
+    return tc_np_less(a.name_off, a.name_len, b.name_off, b.name_len)
+}
+
+// tc_sort：插入排序；发现数量通常很小，避免额外缓冲区。
+fn tc_sort() void {
+    let i int = 1
+    for i < tc_case_n {
+        let item TCase = tc_cases[i]
+        let j int = i
+        for j > 0 && tc_case_less(item, tc_cases[j - 1]) != 0 {
+            tc_cases[j] = tc_cases[j - 1]
+            j -= 1
+        }
+        tc_cases[j] = item
+        i += 1
+    }
+}
+
+// tc_decl_kind_name：文档目标种类名。
+fn tc_decl_kind_name(kind int) *char {
+    if (kind == gen.TK_FN) { return "fn" }
+    if (kind == gen.TK_LET) { return "let" }
+    if (kind == gen.TK_CONST) { return "const" }
+    if (kind == gen.TK_TYPE) { return "type" }
+    if (kind == gen.TK_STRUCT) { return "struct" }
+    if (kind == gen.TK_UNION) { return "union" }
+    if (kind == gen.TK_ENUM) { return "enum" }
+    return "decl"
+}
+
+// tc_print：按稳定顺序输出测试身份；filter_off < 0 表示不过滤。
+fn tc_print(filter_off int, filter_len int) int {
+    let gs *gen.GenState = gen.G()
+    let shown int = 0
+    let i int = 0
+    for i < tc_case_n {
+        let id [1024]u8
+        let n int = tc_identity(tc_cases[i], &id[0])
+        if (filter_off >= 0 && tc_contains(&id[0], n, filter_off, filter_len) == 0) {
+            i += 1
+            continue
+        }
+        gen.write_all(1, &id[0], n)
+        pj_out_s("  ")
+        let pos [32]u8
+        let pn int = 0
+        pn = gen.append_int(&pos[0], pn, tc_cases[i].line)
+        pn = gen.append_byte(&pos[0], pn, ':')
+        pn = gen.append_int(&pos[0], pn, tc_cases[i].col)
+        gen.write_all(1, &pos[0], pn)
+        if (tc_cases[i].kind == 1 && tc_cases[i].target_kind != 0) {
+            pj_out_s(" -> ")
+            pj_out_s(tc_decl_kind_name(tc_cases[i].target_kind))
+            pj_out_s(" ")
+            pj_out_np(tc_cases[i].name_off, tc_cases[i].name_len)
+        }
+        pj_out_s("\n")
+        shown += 1
+        i += 1
+    }
+    return shown
+}
+
+// tc_release_file_decls：释放发现阶段建立的 PDecl 索引，worker 会重新建立。
+fn tc_release_file_decls(file int) void {
+    let gs *gen.GenState = gen.G()
+    if (gs.p_files[file].decls != 0) {
+        free(gs.p_files[file].decls.to_type(*void))
+    }
+    gs.p_files[file].decls = 0
+    gs.p_files[file].decl_n = 0
+    gs.task.c_file_decls = 0
+    gs.task.c_file_decl_n = 0
+    gs.task.c_file_decl_i = -1
+}
+
+// tc_index_file：对文件做声明索引；add_tests=1 时才收集该文件的测试。
+// 文件选择器仍索引所属模块的全部文件，保证跨文件/前向文档目标可绑定。
+fn tc_index_file(mod int, file int, add_tests int) int {
+    let gs *gen.GenState = gen.G()
+    if (mb_restore_front_file(pj_pool_str(gs.p_files[file].path_off), file) != 0) {
+        return -1
+    }
+    gs.task.c_pos = 0
+    // 发现阶段只跳过 module/import 头，不绑定接口（--list 不做语义解析）。
+    parse.mod_reset_file()
+    if (parse.mod_parse_head() != 0) {
+        return -1
+    }
+    if (parse.decl_index_file(file) != 0) {
+        return -1
+    }
+    let i int = 0
+    for i < gs.p_files[file].decl_n {
+        let node gen.PDecl = gs.p_files[file].decls[i]
+        if (node.kind == gen.TK_TEST) {
+            if (add_tests != 0) {
+                if (tc_add_case(mod, file, node, i) != 0) {
+                    return -1
+                }
+            }
+            // 块体语法由 yh test 的语义构建（或 --syntax-check）验收；
+            // 发现阶段只读声明索引，避免在父进程建立半初始化语义表。
+        } else {
+            if (tc_add_decl(mod, file, node) != 0) {
+                return -1
+            }
+        }
+        i += 1
+    }
+    tc_release_file_decls(file)
+    return 0
+}
+
+// tc_bind_targets：为所有文档测试绑定本模块顶层声明，拒绝缺失/歧义目标。
+fn tc_bind_targets() int {
+    let i int = 0
+    for i < tc_case_n {
+        if (tc_cases[i].kind == 1) {
+            if (tc_is_import_alias(tc_cases[i].file, tc_cases[i].name_off,
+                    tc_cases[i].name_len) != 0) {
+                return tc_diag(tc_cases[i].file, tc_cases[i].line,
+                    tc_cases[i].col, "文档测试目标不能是导入模块名")
+            }
+            let d TDecl
+            let count int = tc_lookup_decl(tc_cases[i].mod,
+                tc_cases[i].name_off, tc_cases[i].name_len, &d)
+            if (count == 0) {
+                return tc_diag(tc_cases[i].file, tc_cases[i].line,
+                    tc_cases[i].col,
+                    "文档测试目标不是本模块顶层声明（不能是 import 或 prelude 名）")
+            }
+            if (count > 1) {
+                return tc_diag(tc_cases[i].file, tc_cases[i].line,
+                    tc_cases[i].col, "文档测试目标在本模块内不唯一")
+            }
+            tc_cases[i].target_kind = d.kind
+            tc_cases[i].target_file = d.file
+            tc_cases[i].target_line = d.line
+            tc_cases[i].target_col = d.col
+        }
+        i += 1
+    }
+    return 0
+}
+
+// tc_discover：发现目标项目/模块/文件的测试，返回用例数（-1 失败）。
+fn tc_discover(proj int, mod_filter int, file_filter int) int {
+    let gs *gen.GenState = gen.G()
+    tc_reset()
+    tc_root_proj = proj
+    tc_root_off = gs.p_projs[proj].root_off
+    tc_root_len = gs.p_projs[proj].root_len
+    let mi int = 0
+    for mi < gs.p_projs[proj].mod_n {
+        let m int = gs.p_projs[proj].mods[mi]
+        if (mod_filter >= 0 && mod_filter != m) {
+            mi += 1
+            continue
+        }
+        let fi int = 0
+        for fi < gs.p_mods[m].file_n {
+            let f int = gs.p_mods[m].files[fi]
+            let add_tests int = (file_filter < 0 || file_filter == f).to_type(int)
+            if (tc_index_file(m, f, add_tests) != 0) {
+                return -1
+            }
+            fi += 1
+        }
+        mi += 1
+    }
+    if (tc_bind_targets() != 0) {
+        return -1
+    }
+    tc_sort()
+    return tc_case_n
+}
+
+// tc_find_file：按规范化路径查找项目文件；未找到返回 -1。
+fn tc_find_file(off int, olen int) int {
+    let gs *gen.GenState = gen.G()
+    let i int = 0
+    for i < gs.p_file_n {
+        if (tc_name_eq(gs.p_files[i].path_off, gs.p_files[i].path_len, off, olen) != 0) {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// tc_is_source_path：选择器是否按源文件处理（.yh 或含目录分隔符）。
+fn tc_is_source_path(s *char) int {
+    let n int = 0
+    for s[n] != 0 { n += 1 }
+    if (n >= 3 && s[n - 3] == '.' && s[n - 2] == 'y' && s[n - 1] == 'h') {
+        return 1
+    }
+    let i int = 0
+    for i < n {
+        if (s[i] == '/') { return 1 }
+        i += 1
+    }
+    return 0
+}
+
+// tc_select：解析模块或源文件选择器，写回模块/文件过滤下标。
+fn tc_select(proj int, s *char, mod_filter *int, file_filter *int) int {
+    let gs *gen.GenState = gen.G()
+    if (tc_is_source_path(s) == 0) {
+        let sl int = 0
+        for s[sl] != 0 { sl += 1 }
+        let mo int = gen.tml_intern_str(s.to_type(*u8), 0, sl)
+        if (mo < 0) { return -1 }
+        let m int = pj_mod_in_proj(proj, mo, sl)
+        if (m < 0) {
+            return gen.fail_path("本项目没有模块: ", s)
+        }
+        mod_filter[0] = m
+        file_filter[0] = -1
+        return 0
+    }
+    let f int = -1
+    if (pj_canon(0, 0, s) == 0) {
+        f = tc_find_file(pj_canon_off, pj_canon_len)
+    }
+    if (f < 0 && pj_canon(gs.p_projs[proj].root_off,
+            gs.p_projs[proj].root_len, s) == 0) {
+        f = tc_find_file(pj_canon_off, pj_canon_len)
+    }
+    if (f < 0) {
+        return gen.fail_path("测试文件不属于当前项目: ", s)
+    }
+    mod_filter[0] = gs.p_files[f].mod
+    file_filter[0] = f
+    return 0
+}
+
+// tc_file_has_project：源文件所在目录向上 32 层内是否存在 project.toml。
+// 存在即按项目模式处理（文件不属于该项目时报错，不静默降级为单文件）。
+fn tc_file_has_project(abs_path *char) int {
+    let dir [1100]u8
+    let dn int = 0
+    let last int = -1
+    let i int = 0
+    for abs_path[i] != 0 {
+        dir[i] = abs_path[i].to_type(u8)
+        if (abs_path[i] == '/') { last = i }
+        i += 1
+    }
+    if (last <= 0) { return 0 }
+    dn = last
+    dir[dn] = 0
+    let depth int = 0
+    for depth <= 32 {
+        let probe [1100]u8
+        let pn int = 0
+        let k int = 0
+        for k < dn {
+            probe[pn] = dir[k]
+            pn += 1
+            k += 1
+        }
+        pn = gen.append_str(&probe[0], pn, "/project.toml")
+        probe[pn] = 0
+        if (pj_file_exists(gen.arr_cstr(&probe[0])) != 0) { return 1 }
+        // 上移一层：去掉最后一个路径段
+        let slash int = -1
+        let j int = 0
+        for j < dn {
+            if (dir[j] == '/') { slash = j }
+            j += 1
+        }
+        if (slash <= 0) { return 0 }
+        dn = slash
+        dir[dn] = 0
+        depth += 1
+    }
+    return 0
+}
+
+// tc_single_file_project：为项目外单文件建立临时项目并装载。
+// 临时项目根 = <源文件目录>/tmp/yh-test/single；source 指向源文件目录，扫描
+// 只接受该文件（相邻 .yh 不会被装入）。成功写回项目下标与根路径。
+fn tc_single_file_project(abs_path *char, proj_out *int,
+    root_off *int, root_len *int) int {
+    let gs *gen.GenState = gen.G()
+    let dir [1000]u8
+    let dn int = 0
+    let last int = -1
+    let i int = 0
+    for abs_path[i] != 0 {
+        dir[i] = abs_path[i].to_type(u8)
+        if (abs_path[i] == '/') { last = i }
+        i += 1
+    }
+    if (last <= 0) { return gen.fail("单文件测试需要绝对路径") }
+    dn = last
+    dir[dn] = 0
+    let dir_str *char = gen.arr_cstr(&dir[0])
+    let rootb [1000]u8
+    let rn int = gen.append_str(&rootb[0], 0, dir_str)
+    rn = gen.append_str(&rootb[0], rn, "/tmp/yh-test/single")
+    rootb[rn] = 0
+    if (cmd_mkdirs(gen.arr_cstr(&rootb[0])) != 0) {
+        return gen.fail("无法创建单文件测试目录")
+    }
+    // 临时清单：source 指向源文件目录，os/arch 跟随宿主。
+    let manifest *u8 = 0
+    let mcap int = 0
+    let mn int = 0
+    if (tc_buf_puts(&manifest, &mn, &mcap, "[project]\nos = \"host\"\narch = \"host\"\nname = \"yh_test_single\"\nsource = \"") != 0) { return -1 }
+    if (tc_buf_puts(&manifest, &mn, &mcap, dir_str) != 0) { return -1 }
+    if (tc_buf_puts(&manifest, &mn, &mcap, "\"\n") != 0) { return -1 }
+    let mpath [1100]u8
+    let mpn int = gen.append_str(&mpath[0], 0, gen.arr_cstr(&rootb[0]))
+    mpn = gen.append_str(&mpath[0], mpn, "/project.toml")
+    mpath[mpn] = 0
+    if (tc_write_file(gen.arr_cstr(&mpath[0]), manifest, mn) != 0) {
+        free(manifest.to_type(*void))
+        return -1
+    }
+    free(manifest.to_type(*void))
+    // 只在源码扫描时接受这一个文件。
+    let alen int = 0
+    for abs_path[alen] != 0 { alen += 1 }
+    let aoff int = gen.tml_intern_str(abs_path.to_type(*u8), 0, alen)
+    if (aoff < 0) { return -1 }
+    gs.c_scan_file_off = aoff
+    gs.c_scan_file_len = alen
+    if (pj_canon(0, 0, gen.arr_cstr(&rootb[0])) != 0) { return -1 }
+    let roff int = pj_canon_off
+    let rlen int = pj_canon_len
+    pj_set_root_project(roff, rlen)
+    let proj int = pj_load_project(roff, rlen)
+    if (proj < 0) { return -1 }
+    proj_out[0] = proj
+    root_off[0] = roff
+    root_len[0] = rlen
+    return 0
+}
+
+// mb_run_test_command：解析 CLI、装载项目并执行 YT1 发现/检查。
+fn mb_run_test_command(av **char, an int) int {
+    let gs *gen.GenState = gen.G()
+    let list_mode int = 0
+    let no_run int = 0
+    let selector *char = 0
+    let filter_off int = -1
+    let filter_len int = 0
+    let timeout_ms int = 15000
+    let i int = 1
+    for i < an {
+        if (gen.cstr_eq(av[i], "--list") != 0) {
+            list_mode = 1
+            i += 1
+            continue
+        }
+        if (gen.cstr_eq(av[i], "--no-run") != 0) {
+            no_run = 1
+            i += 1
+            continue
+        }
+        if (gen.cstr_eq(av[i], "--timeout") != 0) {
+            if (i + 1 >= an) {
+                usage()
+                gen.fail("--timeout 需要一个秒数")
+                return 2
+            }
+            let raw *char = av[i + 1]
+            let secs int = 0
+            let k int = 0
+            let bad int = (raw[0] == 0).to_type(int)
+            for k < 6 && raw[k] != 0 {
+                if (raw[k] < '0' || raw[k] > '9') { bad = 1 }
+                if (bad == 0) { secs = secs * 10 + (raw[k].to_type(int) - 48) }
+                k += 1
+            }
+            if (bad != 0 || secs <= 0 || secs > 3600) {
+                usage()
+                gen.fail("--timeout 需要 1..3600 之间的秒数")
+                return 2
+            }
+            timeout_ms = secs * 1000
+            i += 2
+            continue
+        }
+        if (gen.cstr_eq(av[i], "--emit-llvm") != 0) {
+            // 审阅形态：额外写出每个模块的 LLVM 文本，不改变构建/执行语义。
+            gs.c_emit_kind = 1
+            i += 1
+            continue
+        }
+        if (gen.cstr_eq(av[i], "--filter") != 0) {
+            if (i + 1 >= an) {
+                usage()
+                gen.fail("--filter 需要一个子串")
+                return 2
+            }
+            let fl int = 0
+            for av[i + 1][fl] != 0 { fl += 1 }
+            let fo int = gen.tml_intern_str(av[i + 1].to_type(*u8), 0, fl)
+            if (fo < 0) { return -1 }
+            filter_off = fo
+            filter_len = fl
+            i += 2
+            continue
+        }
+        if (av[i][0] == '-') {
+            usage()
+            gen.fail_path("未知的 yh test 选项: ", av[i])
+            return 2
+        }
+        if (selector != 0) {
+            usage()
+            gen.fail("yh test 只能指定一个模块或源文件")
+            return 2
+        }
+        selector = av[i]
+        i += 1
+    }
+    if (mb_resolve_self_path() != 0) { return 1 }
+    gs.task.c_path = "yh"
+    gs.c_front_cache = 1
+    gs.task.c_test_mode = 1
+    // YT2a：测试体降低为模块内 pub 无参 void 函数并发布对象；不链接、不执行。
+    gs.task.c_check_only = 0
+    if (mb_load_stdlib() != 0) { return 1 }
+    let single_file int = 0
+    let abs_file [1100]u8
+    abs_file[0] = 0
+    if (selector != 0 && tc_is_source_path(selector) != 0) {
+        // 项目外单文件：文件所在目录向上没有 project.toml 时按临时单模块处理，
+        // 只编译该文件并允许导入标准库；相邻文件不会被装入。
+        let resolved [4096]u8
+        if (realpath(selector, gen.arr_cstr(&resolved[0])) == 0) {
+            return gen.fail_path("无法解析测试文件路径: ", selector)
+        }
+        let alen int = 0
+        for resolved[alen] != 0 { alen += 1 }
+        let i2 int = 0
+        for i2 < alen {
+            abs_file[i2] = resolved[i2]
+            i2 += 1
+        }
+        abs_file[i2] = 0
+        if (alen > 0 && tc_file_has_project(gen.arr_cstr(&abs_file[0])) == 0) {
+            single_file = 1
+        }
+    }
+    let root_off int = 0
+    let root_len int = 0
+    let proj int = -1
+    let mod_filter int = -1
+    let file_filter int = -1
+    if (single_file != 0) {
+        if (tc_single_file_project(gen.arr_cstr(&abs_file[0]), &proj,
+                &root_off, &root_len) != 0) {
+            return 1
+        }
+    } else {
+        let root int = pj_find_root(0)
+        if (root < 0) { return 1 }
+        root_off = pj_canon_off
+        root_len = pj_canon_len
+        pj_set_root_project(root_off, root_len)
+        proj = pj_load_project(root_off, root_len)
+        if (proj < 0) { return 1 }
+        if (selector != 0) {
+            if (tc_select(proj, selector, &mod_filter, &file_filter) != 0) {
+                return 1
+            }
+        }
+    }
+    let count int = tc_discover(proj, mod_filter, file_filter)
+    if (count < 0) { return 1 }
+    gs.c_test_key = tc_test_key(count)
+    // 发现阶段把 task token 指针停在最后一个项目文件的快照上；worker 随后
+    // 加载接口时会复用 c_tok_cap 并可能 free(c_toks)。这里清空，避免释放
+    // p_files 持有的只读 token 数组。
+    let dummy *gen.Tok = malloc(sizeof(gen.Tok).to_type(u64)).to_type(*gen.Tok)
+    if (dummy == 0) { return gen.fail("内存分配失败") }
+    dummy[0].kind = gen.TOK_EOF
+    dummy[0].start = 0
+    dummy[0].len = 0
+    dummy[0].line = 1
+    dummy[0].col = 1
+    gs.task.c_toks = dummy
+    gs.task.c_tok_n = 0
+    gs.task.c_tok_cap = 0
+    gs.task.c_src = 0.to_type(*u8)
+    gs.task.c_src_len = 0
+    gs.task.c_pos = 0
+    gs.task.c_file_indexed = 0
+    gs.task.c_file_decls = 0
+    gs.task.c_file_decl_n = 0
+    gs.task.c_file_decl_i = -1
+    gs.task.c_active_file = -1
+    parse.mod_reset_file()
+    if (list_mode != 0) {
+        tc_print(filter_off, filter_len)
+        return 0
+    }
+    if (count == 0) {
+        gen.fail("没有找到测试用例（yh test --list 可查看发现结果）")
+        return 1
+    }
+    gs.c_test_project = proj
+    gs.c_test_mod_filter = mod_filter
+    gs.c_test_file_filter = file_filter
+    if (no_run != 0) {
+        // 只构建：发布被测模块的测试对象，不生成入口、不链接、不执行。
+        if (pj_bind_imports() != 0) { return 1 }
+        let nmods int = 0
+        if (mod_filter >= 0) {
+            nmods = pj_topo(mod_filter)
+        } else {
+            nmods = pj_topo_multi(proj)
+        }
+        if (nmods < 0) { return 1 }
+        let build_off int = mb_build_dir(root_off, root_len)
+        if (build_off < 0) { return 1 }
+        let build_len int = pj_canon_len
+        if (mb_mkdir(pj_pool_str(build_off)) != 0) { return 1 }
+        if (mb_schedule_modules(nmods, root_off, root_len, build_off, build_len) != 0) {
+            return 1
+        }
+        pj_out_s("测试构建通过: ")
+        let cb [32]u8
+        let cn int = gen.append_int(&cb[0], 0, count)
+        gen.write_all(1, &cb[0], cn)
+        pj_out_s(" 个用例（--no-run，未执行）\n")
+        return 0
+    }
+    // 执行：先按 --filter 选择，再按模块分组、逐模块生成入口并链接，
+    // 最后逐例 fork/exec。
+    let order *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
+    if (order == 0) { return gen.fail("内存分配失败") }
+    let selected int = 0
+    let si int = 0
+    for si < count {
+        let sel int = 1
+        if (filter_off >= 0) {
+            let idb [1024]u8
+            let idn int = tc_identity(tc_cases[si], &idb[0])
+            sel = tc_contains(&idb[0], idn, filter_off, filter_len)
+        }
+        tc_cases[si].sel = sel
+        if (sel != 0) {
+            order[selected] = si
+            selected += 1
+        }
+        si += 1
+    }
+    if (selected == 0) {
+        free(order.to_type(*void))
+        gen.fail("没有匹配的测试用例（--filter 未命中）")
+        return 1
+    }
+    let passed int = 0
+    let skipped int = 0
+    let failed int = 0
+    let gi int = 0
+    for gi < selected {
+        let target int = tc_cases[order[gi]].mod
+        let glimit int = 1
+        for gi + glimit < selected && tc_cases[order[gi + glimit]].mod == target {
+            glimit += 1
+        }
+        if (tc_build_and_run(proj, target, order, gi, glimit, root_off, root_len,
+                timeout_ms, &passed, &skipped, &failed) != 0) {
+            free(order.to_type(*void))
+            return 1
+        }
+        gi += glimit
+    }
+    free(order.to_type(*void))
+    let sb [128]u8
+    let sn int = gen.append_str(&sb[0], 0, "结果: ")
+    sn = gen.append_int(&sb[0], sn, passed)
+    sn = gen.append_str(&sb[0], sn, " passed; ")
+    sn = gen.append_int(&sb[0], sn, skipped)
+    sn = gen.append_str(&sb[0], sn, " skipped; ")
+    sn = gen.append_int(&sb[0], sn, failed)
+    sn = gen.append_str(&sb[0], sn, " failed\n")
+    gen.write_all(1, &sb[0], sn)
+    return failed == 0 ? 0 : 1
+}
+
+// ============================================================================
+// YT2b：测试入口模块、链接与逐例执行
+//
+// 每个含测试的模块生成一个入口模块 `yh_test_<mod>`：它 import 被测模块，
+// 按 argv[1] 的首字节选择用例，调用该模块的 `__yh_test_<file>_<decl>`，
+// 正常返回后向 fd 3 写 PASS 记录。断言失败由编译器运行时
+// `__yh_test_assert` 向 fd 3 写 FAIL 记录并 exit(1)。
+// 父进程逐例 fork/exec，按「记录 + 退出码」判定；崩溃、超时或缺失记录一律
+// 失败，不阻断后续用例。
+// ============================================================================
+
+const TC_REC_PASS int = 0x50544859 // "YHTP"
+const TC_REC_FAIL int = 0x46544859 // "YHTF"
+const TC_REC_SKIP int = 0x53544859 // "YHTS"
+const TC_REC_SIZE int = 72         // magic + 行 + 列 + 60 字节消息
+
+// tc_buf_puts：向可增长字节缓冲追加 C 字符串。
+fn tc_buf_puts(buf **u8, n *int, cap *int, s *char) int {
+    let slen int = 0
+    for s[slen] != 0 { slen += 1 }
+    if (gen.out_grow(buf, n[0], cap, n[0] + slen) != 0) { return -1 }
+    let i int = 0
+    for i < slen {
+        buf[0][n[0]] = s[i].to_type(u8)
+        n[0] += 1
+        i += 1
+    }
+    return 0
+}
+
+// tc_buf_np：向缓冲追加名字池区间。
+fn tc_buf_np(buf **u8, n *int, cap *int, off int, olen int) int {
+    let gs *gen.GenState = gen.G()
+    if (gen.out_grow(buf, n[0], cap, n[0] + olen) != 0) { return -1 }
+    let i int = 0
+    for i < olen {
+        buf[0][n[0]] = gs.task.np_data[off + i]
+        n[0] += 1
+        i += 1
+    }
+    return 0
+}
+
+// tc_buf_int：向缓冲追加十进制整数。
+fn tc_buf_int(buf **u8, n *int, cap *int, value int) int {
+    let tmp [16]u8
+    let k int = 0
+    let neg int = 0
+    if (value < 0) {
+        neg = 1
+        value = -value
+    }
+    if (value == 0) {
+        tmp[0] = '0'
+        k = 1
+    }
+    for value > 0 {
+        tmp[k] = ((value % 10) + 48).to_type(u8)
+        k += 1
+        value = value / 10
+    }
+    if (gen.out_grow(buf, n[0], cap, n[0] + k + 1) != 0) { return -1 }
+    if (neg != 0) {
+        buf[0][n[0]] = '-'
+        n[0] += 1
+    }
+    for k > 0 {
+        k -= 1
+        buf[0][n[0]] = tmp[k]
+        n[0] += 1
+    }
+    return 0
+}
+
+// tc_runner_mod_name：入口模块名 yh_test_<被测模块名>。
+fn tc_runner_mod_name(mod int, buf *u8) int {
+    let gs *gen.GenState = gen.G()
+    let n int = 0
+    n = gen.append_str(buf, n, "yh_test_")
+    n = append_bytes_np(buf, n, gs.p_mods[mod].name_off, gs.p_mods[mod].name_len)
+    return n
+}
+
+// tc_out：把 C 字符串写到标准输出（按实际长度，避免手写字节数出错）。
+fn tc_out(s *char) void {
+    let n int = 0
+    for s[n] != 0 { n += 1 }
+    gen.write_all(1, s.to_type(*u8), n)
+}
+
+// tc_utf8_trim：把长度收缩到最后一个完整 UTF-8 序列之前，避免截断提示里
+// 出现半个多字节字符（消息按字节截断到 59 字节）。
+fn tc_utf8_trim(off int, olen int) int {
+    let gs *gen.GenState = gen.G()
+    let n int = olen
+    for n > 0 {
+        let i int = n - 1
+        for i >= 0 && (gs.task.np_data[off + i] & 0xC0) == 0x80 {
+            i -= 1
+        }
+        if (i < 0) { return 0 }
+        let lead u8 = gs.task.np_data[off + i]
+        let need int = lead < 0x80 ? 1 : (lead >= 0xF0 ? 4 : (lead >= 0xE0 ? 3 : 2))
+        if (i + need <= n) { return n }
+        n = i
+    }
+    return 0
+}
+
+// tc_tail_log：回显日志文件末尾至多 limit 字节（limit <= 2048），仅用于失败诊断。
+// 采用滚动窗口，只读一遍文件，避免大日志被整份载入内存。
+fn tc_tail_log(path *char, limit int) void {
+    if (limit <= 0 || limit > 2048) { return }
+    let fd int = open(path, 0)
+    if (fd < 0) { return }
+    let chunk [4096]u8
+    let tail [2048]u8
+    let kept int = 0
+    let dropped int = 0
+    for 1 {
+        let got i64 = read(fd, (&chunk[0]).to_type(*u8), 4096)
+        if (got <= 0) { break }
+        let n int = got.to_type(int)
+        let i int = 0
+        for i < n {
+            if (kept < limit) {
+                tail[kept] = chunk[i]
+                kept += 1
+            } else {
+                let j int = 1
+                for j < limit {
+                    tail[j - 1] = tail[j]
+                    j += 1
+                }
+                tail[limit - 1] = chunk[i]
+                dropped = 1
+            }
+            i += 1
+        }
+    }
+    close(fd)
+    if (kept <= 0) { return }
+    if (dropped != 0) { tc_out("  …（仅显示日志末尾）\n") }
+    tc_out("  ")
+    gen.write_all(1, (&tail[0]).to_type(*u8), kept)
+    if (tail[kept - 1] != 10) { tc_out("\n") }
+}
+
+// tc_write_file：把缓冲区写入文件（覆盖写）。
+fn tc_write_file(path *char, data *u8, size int) int {
+    let fd int = mb_open_out(path)
+    if (fd < 0) {
+        return gen.fail_path("无法创建测试入口文件: ", path)
+    }
+    let wr int = gen.write_all(fd, data, size)
+    let cl int = close(fd)
+    if (wr != 0 || cl != 0) {
+        return gen.fail_path("写入测试入口文件失败: ", path)
+    }
+    return 0
+}
+
+// tc_gen_runner：生成入口模块源文件并登记到项目；返回入口模块下标（失败 -1）。
+// cases 的 [first, first+limit) 区间必须都属于 target 模块。
+fn tc_gen_runner(proj int, target int, order *int, first int, limit int,
+    root_off int, root_len int) int {
+    let gs *gen.GenState = gen.G()
+    let text *u8 = 0
+    let cap int = 0
+    let tn int = 0
+    let name [256]u8
+    let nn int = tc_runner_mod_name(target, &name[0])
+    if (nn <= 0) { return -1 }
+    let noff int = gen.tml_intern_str(&name[0], 0, nn)
+    if (noff < 0) { return -1 }
+    if (tc_buf_puts(&text, &tn, &cap, "module ") != 0) { return -1 }
+    if (tc_buf_np(&text, &tn, &cap, noff, nn) != 0) { return -1 }
+    if (tc_buf_puts(&text, &tn, &cap, ";\n\nimport ") != 0) { return -1 }
+    if (tc_buf_np(&text, &tn, &cap, gs.p_mods[target].name_off,
+            gs.p_mods[target].name_len) != 0) { return -1 }
+    if (tc_buf_puts(&text, &tn, &cap,
+            ";\n\nfn __yh_test_pass() void {\n    let rec [4]u8 = [89, 72, 84, 80]\n    write(3, (&rec[0]).to_type(*void), 4)\n}\n\n") != 0) { return -1 }
+    if (tc_buf_puts(&text, &tn, &cap,
+            "fn main(argc int, argv **char) int {\n    if (argc < 2) { return 2 }\n    let id int = argv[1][0].to_type(int) - 97\n") != 0) { return -1 }
+    let i int = 0
+    for i < limit {
+        let c TCase = tc_cases[order[first + i]]
+        if (tc_buf_puts(&text, &tn, &cap, "    if (id == ") != 0) { return -1 }
+        if (tc_buf_int(&text, &tn, &cap, i) != 0) { return -1 }
+        if (tc_buf_puts(&text, &tn, &cap, ") { ") != 0) { return -1 }
+        if (tc_buf_np(&text, &tn, &cap, gs.p_mods[target].name_off,
+                gs.p_mods[target].name_len) != 0) { return -1 }
+        if (tc_buf_puts(&text, &tn, &cap, ".__yh_test_") != 0) { return -1 }
+        if (tc_buf_int(&text, &tn, &cap, c.file) != 0) { return -1 }
+        if (tc_buf_puts(&text, &tn, &cap, "_") != 0) { return -1 }
+        if (tc_buf_int(&text, &tn, &cap, c.decl) != 0) { return -1 }
+        if (tc_buf_puts(&text, &tn, &cap, "(); __yh_test_pass(); return 0 }\n") != 0) { return -1 }
+        i += 1
+    }
+    if (tc_buf_puts(&text, &tn, &cap, "    return 2\n}\n") != 0) { return -1 }
+    // 每个入口模块独占一个目录，避免「每目录一个模块」冲突。
+    let dir [800]u8
+    let dn int = 0
+    dn = gen.append_str(&dir[0], dn, pj_pool_str(root_off))
+    dn = gen.append_str(&dir[0], dn, "/tmp/yh-test/gen/")
+    dn = append_bytes_np(&dir[0], dn, noff, nn)
+    dir[dn] = 0
+    if (cmd_mkdirs(gen.arr_cstr(&dir[0])) != 0) {
+        return gen.fail("无法创建测试入口目录")
+    }
+    let path [900]u8
+    let pn int = gen.append_str(&path[0], 0, gen.arr_cstr(&dir[0]))
+    pn = gen.append_str(&path[0], pn, "/entry.yh")
+    path[pn] = 0
+    if (tc_write_file(gen.arr_cstr(&path[0]), text, tn) != 0) { return -1 }
+    free(text.to_type(*void))
+    if (pj_index_file(gen.arr_cstr(&path[0]), proj) != 0) { return -1 }
+    return pj_mod_in_proj(proj, noff, nn)
+}
+
+// tc_clear_entry：清空项目内所有入口标记（测试二进制由入口模块定义 main）。
+fn tc_clear_entry(proj int) void {
+    let gs *gen.GenState = gen.G()
+    let i int = 0
+    for i < gs.p_projs[proj].mod_n {
+        gs.p_mods[gs.p_projs[proj].mods[i]].is_entry = 0
+        i += 1
+    }
+}
+
+// tc_case_start：fork 并启动单个用例，返回子进程 pid（失败 -1）。
+// 结果记录写 fd 3，用例 stdout/stderr 写日志文件；父进程不等待。
+fn tc_case_start(binary *char, rec_path *char, log_path *char, letter int) int {
+    let fd int = mb_open_out(rec_path)
+    if (fd < 0) { return -1 }
+    let log_fd int = mb_open_out(log_path)
+    if (log_fd < 0) {
+        if (fd != 3) { close(fd) }
+        return -1
+    }
+    let argv [3]*char
+    let id [2]u8
+    id[0] = (97 + letter).to_type(u8)
+    id[1] = 0
+    argv[0] = binary
+    argv[1] = gen.arr_cstr(&id[0])
+    argv[2] = 0.to_type(*char)
+    let pid int = fork()
+    if (pid == 0) {
+        // fd 3 = 结果记录，1/2 = 用例日志。先复制日志到 1/2，再把记录放到 3，
+        // 最后关闭大于 2 的原始描述符（3 可能被其中一次 open 占用）。
+        if (dup2(log_fd, 1) < 0 || dup2(log_fd, 2) < 0) { exit(126) }
+        if (dup2(fd, 3) < 0) { exit(126) }
+        if (log_fd > 2 && log_fd != 3) { close(log_fd) }
+        if (fd > 2 && fd != 3 && fd != log_fd) { close(fd) }
+        execv(binary, &argv[0])
+        exit(127)
+    }
+    if (fd != 3) { close(fd) }
+    if (log_fd > 2 && log_fd != 3 && log_fd != fd) { close(log_fd) }
+    return pid
+}
+
+// tc_case_result：读取一个用例的结果记录并判定。
+// code 是退出码；timed_out 非零表示父进程已按超时终止。返回 0 通过、1 失败、
+// 2 跳过、3 崩溃/记录损坏、4 超时。
+fn tc_case_result(rec_path *char, code int, timed_out int,
+    rec_line *int, rec_col *int, rec_msg_off *int, rec_msg_len *int,
+    truncated *int) int {
+    rec_line[0] = -1
+    rec_col[0] = -1
+    rec_msg_off[0] = -1
+    rec_msg_len[0] = 0
+    truncated[0] = 0
+    let rf int = open(rec_path, 0)
+    if (rf < 0) {
+        return timed_out != 0 ? 4 : 3
+    }
+    let rec [72]u8
+    let got i64 = read(rf, (&rec[0]).to_type(*u8), TC_REC_SIZE)
+    close(rf)
+    if (timed_out != 0) { return 4 }
+    if (got < 4) {
+        return 3
+    }
+    let magic int = rec[0].to_type(int) | (rec[1].to_type(int) << 8) |
+        (rec[2].to_type(int) << 16) | (rec[3].to_type(int) << 24)
+    if (got >= 12 && magic == TC_REC_FAIL) {
+        rec_line[0] = rec[4].to_type(int) | (rec[5].to_type(int) << 8) |
+            (rec[6].to_type(int) << 16) | (rec[7].to_type(int) << 24)
+        rec_col[0] = rec[8].to_type(int) | (rec[9].to_type(int) << 8) |
+            (rec[10].to_type(int) << 16) | (rec[11].to_type(int) << 24)
+        if (got >= TC_REC_SIZE && rec[TC_REC_SIZE - 1] == 30) {
+            // 0x1e 标记由运行时/ testing 写在消息区最后一格：表示消息被截断。
+            truncated[0] = 1
+        }
+        if (got > 12) {
+            let mlen int = 0
+            let k int = 12
+            for k < got && k < TC_REC_SIZE && rec[k] != 0 && rec[k] != 30 {
+                mlen += 1
+                k += 1
+            }
+            if (mlen > 0) {
+                let moff int = gen.tml_intern_str(&rec[0], 12, mlen)
+                if (moff >= 0) {
+                    rec_msg_off[0] = moff
+                    rec_msg_len[0] = mlen
+                }
+            }
+        }
+    }
+    if (got >= 4 && magic == TC_REC_SKIP) { return 2 }
+    if (code != 0) { return 1 }
+    if (magic != TC_REC_PASS) { return 3 }
+    return 0
+}
+
+// tc_test_key：本轮选中测试集合的稳定摘要（模块/文件/声明号/种类），
+// 参与测试构建的模块缓存键；选中范围变化时缓存自然失效。
+fn tc_test_key(count int) u64 {
+    let h u64 = 14695981039346656037
+    let i int = 0
+    for i < count {
+        let c TCase = tc_cases[i]
+        let v int = 0
+        let fields [5]int
+        fields[0] = c.mod
+        fields[1] = c.file
+        fields[2] = c.decl
+        fields[3] = c.kind
+        fields[4] = c.sel
+        for v < 5 {
+            let bits int = fields[v]
+            let k int = 0
+            for k < 4 {
+                mb_fnv(&h, ((bits >> (k * 8)) & 255).to_type(u8))
+                k += 1
+            }
+            v += 1
+        }
+        i += 1
+    }
+    return h
+}
+
+// tc_jobs：并行度（YH_TEST_JOBS，缺省 4，限制 1..8）。
+fn tc_jobs() int {
+    let off int = -1
+    let olen int = 0
+    if (pj_env_fetch("YH_TEST_JOBS", &off, &olen) != 0 || olen <= 0) {
+        return 4
+    }
+    let gs *gen.GenState = gen.G()
+    let value int = 0
+    let i int = 0
+    for i < olen {
+        let b u8 = gs.task.np_data[off + i]
+        if (b < '0' || b > '9') { return 4 }
+        value = value * 10 + (b.to_type(int) - 48)
+        if (value > 8) { return 8 }
+        i += 1
+    }
+    return value < 1 ? 1 : value
+}
+
+// tc_case_paths：为一个用例生成记录文件与日志文件路径（都放在 tmp 下）。
+fn tc_case_paths(bin *char, log_dir *char, mod_name_off int, mod_name_len int,
+    i int, rec *u8, log *u8) void {
+    let gs *gen.GenState = gen.G()
+    let rn int = gen.append_str(rec, 0, bin)
+    rn = gen.append_str(rec, rn, ".rec.")
+    rn = gen.append_int(rec, rn, i)
+    rec[rn] = 0
+    let ln int = gen.append_str(log, 0, log_dir)
+    ln = gen.append_byte(log, ln, '/')
+    ln = append_bytes_np(log, ln, mod_name_off, mod_name_len)
+    ln = gen.append_byte(log, ln, '-')
+    ln = gen.append_int(log, ln, i)
+    ln = gen.append_str(log, ln, ".log")
+    log[ln] = 0
+}
+
+// tc_report_case：打印一个用例的结果行与失败细节（失败时回显日志尾部）。
+fn tc_report_case(c TCase, outcome int, rec_line int, rec_col int,
+    rec_msg_off int, rec_msg_len int, truncated int, log_path *char,
+    passed *int, skipped *int, failed *int) void {
+    let gs *gen.GenState = gen.G()
+    let id [1024]u8
+    let idn int = tc_identity(c, &id[0])
+    if (outcome == 0) {
+        passed[0] += 1
+        tc_out("PASS ")
+    } else if (outcome == 2) {
+        skipped[0] += 1
+        tc_out("SKIP ")
+    } else {
+        failed[0] += 1
+        tc_out("FAIL ")
+    }
+    gen.write_all(1, &id[0], idn)
+    if (outcome != 0 && outcome != 2) {
+        if (rec_line > 0) {
+            let pos [64]u8
+            let pn int = gen.append_str(&pos[0], 0, "\n  断言位置: ")
+            pn = gen.append_int(&pos[0], pn, rec_line)
+            pn = gen.append_byte(&pos[0], pn, ':')
+            pn = gen.append_int(&pos[0], pn, rec_col)
+            gen.write_all(1, &pos[0], pn)
+        }
+        if (rec_msg_len > 0) {
+            tc_out("\n  断言消息: ")
+            let show int = truncated != 0 ?
+                tc_utf8_trim(rec_msg_off, rec_msg_len) : rec_msg_len
+            gen.write_all(1, gs.task.np_data + rec_msg_off, show)
+            if (truncated != 0) { tc_out("…（消息已截断）") }
+        } else if (truncated != 0) {
+            tc_out("\n  断言消息: …（消息已截断）")
+        }
+        if (outcome == 4) {
+            tc_out("\n  用例超时")
+        } else if (outcome == 3) {
+            tc_out("\n  用例崩溃或缺少结果记录")
+        } else if (rec_line < 0) {
+            tc_out("\n  未被断言捕获的失败退出")
+        }
+        tc_out("\n  用例日志: ")
+        tc_out(log_path)
+        tc_out("\n")
+        tc_tail_log(log_path, 2048)
+    }
+    tc_out("\n")
+}
+
+// tc_build_and_run：为 target 模块生成入口、构建测试二进制并逐例执行。
+fn tc_build_and_run(proj int, target int, order *int, first int, limit int,
+    root_off int, root_len int, timeout_ms int,
+    passed *int, skipped *int, failed *int) int {
+    let gs *gen.GenState = gen.G()
+    let runner int = tc_gen_runner(proj, target, order, first, limit, root_off, root_len)
+    if (runner < 0) { return -1 }
+    tc_clear_entry(proj)
+    gs.p_mods[runner].is_entry = 1
+    if (pj_bind_imports() != 0) { return -1 }
+    let count int = pj_topo(runner)
+    if (count < 0) { return -1 }
+    let build_off int = mb_build_dir(root_off, root_len)
+    if (build_off < 0) { return -1 }
+    let build_len int = pj_canon_len
+    if (mb_mkdir(pj_pool_str(build_off)) != 0) { return -1 }
+    if (mb_schedule_modules(count, root_off, root_len, build_off, build_len) != 0) {
+        return -1
+    }
+    let bin [900]u8
+    let bn int = 0
+    bn = gen.append_str(&bin[0], bn, pj_pool_str(root_off))
+    bn = gen.append_str(&bin[0], bn, "/tmp/yh-test/bin/")
+    bn = append_bytes_np(&bin[0], bn, gs.p_projs[proj].name_off,
+        gs.p_projs[proj].name_len)
+    bn = gen.append_byte(&bin[0], bn, '-')
+    bn = append_bytes_np(&bin[0], bn, gs.p_mods[target].name_off,
+        gs.p_mods[target].name_len)
+    bin[bn] = 0
+    let bindir [900]u8
+    let bdn int = 0
+    bdn = gen.append_str(&bindir[0], bdn, pj_pool_str(root_off))
+    bdn = gen.append_str(&bindir[0], bdn, "/tmp/yh-test/bin")
+    bindir[bdn] = 0
+    if (cmd_mkdirs(gen.arr_cstr(&bindir[0])) != 0) {
+        return gen.fail("无法创建测试产物目录")
+    }
+    if (mb_link(gen.arr_cstr(&bin[0]), build_off, build_len, count, proj) != 0) {
+        return -1
+    }
+    let log_dir [900]u8
+    let ldn int = gen.append_str(&log_dir[0], 0, pj_pool_str(root_off))
+    ldn = gen.append_str(&log_dir[0], ldn, "/tmp/yh-test/log")
+    log_dir[ldn] = 0
+    if (cmd_mkdirs(gen.arr_cstr(&log_dir[0])) != 0) {
+        return gen.fail("无法创建测试日志目录")
+    }
+    // 并行执行：每批最多 jobs 个用例同时运行，逐例独立记录/日志/超时；
+    // 批内结果仍按原顺序打印，因此输出顺序与 `--list` 一致。
+    let jobs int = tc_jobs()
+    let pids *int = malloc((jobs * sizeof(int)).to_type(u64)).to_type(*int)
+    let starts *u64 = malloc((jobs * 8).to_type(u64)).to_type(*u64)
+    let codes *int = malloc((jobs * sizeof(int)).to_type(u64)).to_type(*int)
+    let timeouts *int = malloc((jobs * sizeof(int)).to_type(u64)).to_type(*int)
+    let rlines *int = malloc((jobs * sizeof(int)).to_type(u64)).to_type(*int)
+    let rcols *int = malloc((jobs * sizeof(int)).to_type(u64)).to_type(*int)
+    let moffs *int = malloc((jobs * sizeof(int)).to_type(u64)).to_type(*int)
+    let mlens *int = malloc((jobs * sizeof(int)).to_type(u64)).to_type(*int)
+    let truncs *int = malloc((jobs * sizeof(int)).to_type(u64)).to_type(*int)
+    if (pids == 0 || starts == 0 || codes == 0 || timeouts == 0 || rlines == 0
+        || rcols == 0 || moffs == 0 || mlens == 0 || truncs == 0) {
+        return gen.fail("内存分配失败")
+    }
+    let base int = 0
+    for base < limit {
+        let width int = limit - base > jobs ? jobs : limit - base
+        let j int = 0
+        for j < width {
+            let idx int = base + j
+            let recb [900]u8
+            let logb [900]u8
+            tc_case_paths(gen.arr_cstr(&bin[0]), gen.arr_cstr(&log_dir[0]),
+                gs.p_mods[target].name_off, gs.p_mods[target].name_len, idx,
+                &recb[0], &logb[0])
+            pids[j] = tc_case_start(gen.arr_cstr(&bin[0]), gen.arr_cstr(&recb[0]),
+                gen.arr_cstr(&logb[0]), idx)
+            starts[j] = cmd_clock_ns()
+            codes[j] = 127
+            timeouts[j] = 0
+            j += 1
+        }
+        // 按批内顺序等待；每个用例从各自启动时刻起算超时。
+        j = 0
+        for j < width {
+            for 1 {
+                let st int = 0
+                let waited int = waitpid(pids[j], &st, 1)
+                if (waited == pids[j]) {
+                    if ((st & 127) == 0) {
+                        codes[j] = (st >> 8) & 255
+                    } else {
+                        codes[j] = 128 + (st & 127)
+                    }
+                    break
+                }
+                if (waited < 0) {
+                    break
+                }
+                let elapsed int = (cmd_clock_ns() - starts[j]).to_type(int) / 1000000
+                if (elapsed >= timeout_ms) {
+                    kill(pids[j], 9)
+                    waitpid(pids[j], &st, 0)
+                    timeouts[j] = 1
+                    break
+                }
+                usleep(2000)
+            }
+            j += 1
+        }
+        j = 0
+        for j < width {
+            let idx int = base + j
+            let recb [900]u8
+            let logb [900]u8
+            tc_case_paths(gen.arr_cstr(&bin[0]), gen.arr_cstr(&log_dir[0]),
+                gs.p_mods[target].name_off, gs.p_mods[target].name_len, idx,
+                &recb[0], &logb[0])
+            let outcome int = tc_case_result(gen.arr_cstr(&recb[0]),
+                codes[j], timeouts[j], &rlines[j], &rcols[j], &moffs[j],
+                &mlens[j], &truncs[j])
+            tc_report_case(tc_cases[order[first + idx]], outcome, rlines[j],
+                rcols[j], moffs[j], mlens[j], truncs[j],
+                gen.arr_cstr(&logb[0]), passed, skipped, failed)
+            j += 1
+        }
+        base += width
+    }
+    free(pids.to_type(*void))
+    free(starts.to_type(*void))
+    free(codes.to_type(*void))
+    free(timeouts.to_type(*void))
+    free(rlines.to_type(*void))
+    free(rcols.to_type(*void))
+    free(moffs.to_type(*void))
+    free(mlens.to_type(*void))
+    free(truncs.to_type(*void))
+    return 0
+}

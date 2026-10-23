@@ -63,6 +63,8 @@ pub fn llvm_runtime_supplies_symbol(unit *ir.IRModule, name *char) int {
         || gen.cstr_eq(name, "printf") != 0 || gen.cstr_eq(name, "linux_syscall6") != 0) {
         return 1
     }
+    // yh test 断言运行时：由本模块发射弱定义（见 llvm_runtime_write_test_assert）。
+    if (gen.cstr_eq(name, "__yh_test_assert") != 0) { return 1 }
     return 0
 }
 
@@ -339,6 +341,69 @@ fn llvm_runtime_write_printf(out *LLVMOutput, hidden int, arm64 int) void {
     llvm_text(out, "  %result = trunc i64 %final_count to i32\n  ret i32 %result\n}\n\n")
 }
 
+// llvm_runtime_write_test_assert：发射 yh test 断言运行时弱定义。
+// 条件为假时向 fd 3 写 12 字节失败记录（'Y' 'H' 'T' 'F' + line + col，
+// 小端 i32），随后 exit(1)；条件为真直接返回。记录通道与 stdout/stderr 分离，
+// 父进程据此同时得到失败位置与「未被断言捕获的退出」的区别。
+fn llvm_runtime_write_test_assert(unit *ir.IRModule, out *LLVMOutput) void {
+    // 模块里可能已引用 write/exit（用户测试体调用它们）。Darwin 的 printf 运行时
+    // 支持本身会声明 @write；Linux 版 printf 走 syscall、不声明它，因此仅在
+    // 「既没引用 write、也没有 Darwin printf 支持」时补声明，避免重复声明。
+    let darwin_write int = 0
+    if (gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
+        && llvm_runtime_named(unit, "printf") != 0) {
+        darwin_write = 1
+    }
+    if (llvm_runtime_named(unit, "write") == 0 && darwin_write == 0) {
+        llvm_text(out, "declare i64 @write(i32, ptr, i64)\n")
+    }
+    if (llvm_runtime_named(unit, "exit") == 0) {
+        llvm_text(out, "declare void @exit(i32)\n")
+    }
+    // 记录布局（72 字节）：0..3 magic，4..7 line，8..11 col，12..71 消息
+    // （NUL 填充，最长 60 字节）。条件为假时写记录并 exit(1)。
+    llvm_text(out, "define weak void @__yh_test_assert(i8 %cond, i32 %line, i32 %col, ptr %msg) noinline nounwind optnone {\n")
+    llvm_text(out, "entry:\n  %failed = icmp eq i8 %cond, 0\n")
+    llvm_text(out, "  br i1 %failed, label %report, label %done\n")
+    llvm_text(out, "report:\n  %rec = alloca [72 x i8], align 4\n")
+    // 0x46544859 = 'Y' 'H' 'T' 'F'（小端字节序）
+    llvm_text(out, "  store i32 1179928665, ptr %rec, align 4\n")
+    llvm_text(out, "  %lp = getelementptr i8, ptr %rec, i64 4\n")
+    llvm_text(out, "  store i32 %line, ptr %lp, align 4\n")
+    llvm_text(out, "  %cp = getelementptr i8, ptr %rec, i64 8\n")
+    llvm_text(out, "  store i32 %col, ptr %cp, align 4\n")
+    // 先清零消息区，保证短消息之后不会暴露未初始化字节。
+    llvm_text(out, "  br label %zero\n")
+    llvm_text(out, "zero:\n  %zk = phi i64 [ 0, %report ], [ %zkn, %zero ]\n")
+    llvm_text(out, "  %zoff = add i64 12, %zk\n")
+    llvm_text(out, "  %zp = getelementptr i8, ptr %rec, i64 %zoff\n")
+    llvm_text(out, "  store i8 0, ptr %zp, align 1\n")
+    llvm_text(out, "  %zkn = add i64 %zk, 1\n  %zmore = icmp ult i64 %zkn, 60\n")
+    llvm_text(out, "  br i1 %zmore, label %zero, label %copystart\n")
+    llvm_text(out, "copystart:\n  %hasmsg = icmp ne ptr %msg, null\n")
+    llvm_text(out, "  br i1 %hasmsg, label %copy, label %emit\n")
+    llvm_text(out, "copy:\n  %mk = phi i64 [ 0, %copystart ], [ %mkn, %body ]\n")
+    llvm_text(out, "  %mp = getelementptr i8, ptr %msg, i64 %mk\n")
+    llvm_text(out, "  %mc = load i8, ptr %mp, align 1\n")
+    llvm_text(out, "  %mend = icmp eq i8 %mc, 0\n")
+    llvm_text(out, "  br i1 %mend, label %emit, label %body\n")
+    llvm_text(out, "body:\n  %moff = add i64 12, %mk\n")
+    llvm_text(out, "  %dp = getelementptr i8, ptr %rec, i64 %moff\n")
+    llvm_text(out, "  store i8 %mc, ptr %dp, align 1\n")
+    // 消息最多拷 59 字节；拷满后看第 60 字节是否为 NUL，决定「已截断」标记。
+    llvm_text(out, "  %mkn = add i64 %mk, 1\n  %mmore = icmp ult i64 %mkn, 59\n")
+    llvm_text(out, "  br i1 %mmore, label %copy, label %trunc\n")
+    llvm_text(out, "trunc:\n  %tailp = getelementptr i8, ptr %msg, i64 59\n")
+    llvm_text(out, "  %tail = load i8, ptr %tailp, align 1\n")
+    llvm_text(out, "  %more_bytes = icmp ne i8 %tail, 0\n")
+    llvm_text(out, "  %mark = select i1 %more_bytes, i8 30, i8 0\n")
+    llvm_text(out, "  %markp = getelementptr i8, ptr %rec, i64 71\n")
+    llvm_text(out, "  store i8 %mark, ptr %markp, align 1\n")
+    llvm_text(out, "  br label %emit\n")
+    llvm_text(out, "emit:\n  %w = call i64 @write(i32 3, ptr %rec, i64 72)\n")
+    llvm_text(out, "  call void @exit(i32 1)\n  unreachable\ndone:\n  ret void\n}\n\n")
+}
+
 // llvm_runtime_memory_text：补齐模块引用的运行时入口并保留 LL8a 内存 helper。
 // 只有模块未定义的标准入口才生成弱定义；llvm.used 阻止 O2 删除未直接引用的 helper。
 pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
@@ -359,8 +424,10 @@ pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
         || emit_printf != 0 || llvm_runtime_named(unit, "linux_syscall6") != 0) ? 1 : 0
     let emit_syscall int = (needs_syscall != 0
         && llvm_runtime_defined(unit, "linux_syscall6") == 0).to_type(int)
+    let emit_test_assert int = (llvm_runtime_named(unit, "__yh_test_assert") != 0
+        && llvm_runtime_defined(unit, "__yh_test_assert") == 0).to_type(int)
     let emitted int = emit_syscall + emit_malloc + emit_free + emit_printf +
-        emit_memcpy + emit_memset + emit_strlen + emit_move
+        emit_memcpy + emit_memset + emit_strlen + emit_move + emit_test_assert
     if (emitted == 0) { return }
     llvm_byte(out, '\n')
     if (darwin != 0) {
@@ -376,6 +443,7 @@ pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
     if (emit_memset != 0) { llvm_runtime_write_memset(out, darwin) }
     if (emit_strlen != 0) { llvm_runtime_write_strlen(out, darwin) }
     if (emit_move != 0) { llvm_runtime_write_memmove(out, darwin) }
+    if (emit_test_assert != 0) { llvm_runtime_write_test_assert(unit, out) }
     llvm_text(out, "\n@llvm.used = appending global [")
     llvm_number(out, emitted.to_type(u64))
     llvm_text(out, " x ptr] [")
@@ -404,6 +472,10 @@ pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
     if (emit_memset != 0) {
         if (first == 0) { llvm_text(out, ", ") }
         llvm_text(out, "ptr @memset"); first = 0
+    }
+    if (emit_test_assert != 0) {
+        if (first == 0) { llvm_text(out, ", ") }
+        llvm_text(out, "ptr @__yh_test_assert"); first = 0
     }
     if (emit_strlen != 0) {
         if (first == 0) { llvm_text(out, ", ") }
