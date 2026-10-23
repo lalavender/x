@@ -211,6 +211,19 @@ class Checker:
                    f"退出码 {proc.returncode}，输出 {out[-500:]!r}，"
                    f"stderr {proc.stderr[-300:]!r}")
 
+        # 5j. 先做生产构建再跑测试：测试构建不得复用生产模块缓存
+        # （生产接口没有 __yh_test_* 导出，复用会让测试入口找不到测试函数）。
+        both = self.prepare("ytest", "prod-then-test")
+        prod = subprocess.run([str(self.compiler), "build"], cwd=both,
+                              capture_output=True, text=True, timeout=300)
+        proc = self.run(both)
+        self.check("test-after-production-build",
+                   prod.returncode == 0 and proc.returncode == 0
+                   and f"结果: {self.expected_tests} passed; 0 skipped; 0 failed"
+                   in proc.stdout,
+                   f"生产 {prod.returncode}，测试 {proc.returncode}，"
+                   f"输出 {proc.stdout[-300:]!r}")
+
         # 5f. --no-run 只构建，不执行。
         noexec = self.prepare("ytest", "no-exec")
         proc = self.run(noexec, "--no-run")
