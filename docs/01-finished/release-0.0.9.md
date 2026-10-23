@@ -106,3 +106,29 @@ YH_TEST_JOBS=8 yh test         # 并行度（缺省 4，限制 1..8）
   同目录并发执行会互相覆盖。
 - `tests/yh-run`、`tests/modules` 等既有验收尚未迁到语言内测试（YT4 待做）。
 - 发布流程 R1–R4（分支模型、tag 祖先校验、rc 取种、版本漂移）仍未落地。
+
+## 用发布出的正式版二进制验收（2026-10-23）
+
+发布资产（取自 host 模式 runner 的 `~/yh-release-dist/ci-139`，与 GitHub Release
+上传的是同一组文件），tar.gz 与其 `.sha256` 全部校验通过：
+
+| 资产 | SHA-256（tar.gz） |
+| --- | --- |
+| `yh-0.0.9-darwin-arm64.tar.gz` | `2b0a3c0c…`（见同目录 `.sha256`） |
+| `yh-0.0.9-linux-arm64.tar.gz` | 同上 |
+| `yh-0.0.9-linux-x86_64.tar.gz` | 同上 |
+
+Darwin/arm64 种子（解包后 `yh` sha256
+`56bf3f56027fb7609c8f37c384c0f3b8e07314f50618f2cf093274583ca6ceb8`）装入
+`bin/yh-darwin-arm64` 后：
+
+- `bin/yh-darwin-arm64 version` → `yh 0.0.9`；
+- `make` 冷编通过，产物 `./yh version` → `yh 0.0.9`；
+- `make test` 退出码 0：语法 81/81、49/49；run 211/212（1 条平台 SKIP）、
+  fail 136/136、pass 9/9；`test-check` 38/38；string 内建 5/5；
+  `compiler-tests 3/3`；TOML 6/6；代码统计 6/6；
+- `make selfhost-native` 退出码 0：30 个模块产物固定点一致、cc4 自解析
+  114 个源文件、modules 19/19、`compiler-tests 3/3`、project cases 121/121。
+
+**发布流水线**：Gitea `release.yml` run 65 五个作业全部 success，创建正式
+Release `0.0.9` 并上传三端资产；`ci.yml` 的 `0.0.9-rc` 分支门 run 64 同轮通过。

@@ -2,6 +2,19 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 0.0.9 正式版发布与验收
+
+- **发布**：`0.0.9-rc` 以 `--no-ff` 合入新建的 `0.0.9-release`（起点
+  `0.0.8-release`），打正式 tag `0.0.9`；Gitea `release.yml` run 65 五个作业
+  全部 success，创建正式 Release 并上传三端资产。`ci.yml` 分支门 run 64 通过。
+- **验收**：发布种子（`56bf3f56…ca6ceb8`，`yh 0.0.9`）装入
+  `bin/yh-darwin-arm64` 后，`make`、`make test`、`make selfhost-native` 全绿
+  （语法 81/81、49/49；run 211/212；fail 136/136；pass 9/9；test-check 38/38；
+  string 内建 5/5；compiler-tests 3/3；TOML 6/6；固定点 30 产物、
+  自解析 114 文件、project cases 121/121）。
+- **分支**：`0.0.9-rc` 已按流程删除，保留 `0.0.9-release`。
+- 说明见[release-0.0.9](01-finished/release-0.0.9.md)。
+
 ## 2026-10-23 0.0.9 正式版开发
 
 - **版本**：`compiler/project.toml` 保持 `0.0.9`；发布说明见
