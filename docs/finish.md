@@ -2,6 +2,23 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 linux-x64 发布门 duplicate symbol 修复
+
+- **现象**：Gitea `release.yml` 的 linux-x86_64 job 在 `make selfhost-native`
+  的 compiler-tests 处失败：`ld.lld: error: duplicate symbol:
+  yh_lld_link_driver`（`lld_bridge.o` 两次出现在同一归档），`通过 0/3`。
+- **根因**：compiler/ 已迁移 `[link]` 清单闭包（F1），但
+  `tools/compiler-tests.py` 仍按旧链路设置 `YH_LLVM_SELFHOST=1` 与
+  `YH_LLVM_SELFHOST_FLAGS`；ELF 驱动在清单之外把整份运行时闭包（含
+  `--whole-archive` 桥归档）再追加一次，同一条链接命令里桥归档出现两次。
+  `tests/selfhost/llvm-isolation.py` 冷编段同样停留在旧链路。
+- **修复**：两处改为清单模式环境（`YH_LINK_MANIFEST_ONLY=1` +
+  `YH_LINK_RUNTIME_FLAGS` 指向构建机 runtime 配方），不再注入旧闭包；与
+  `tools/seed-build.py`、`tests/selfhost/native-selfhost.py` 的既有约定一致。
+- **复现与验证**：amd64 容器（`yh-ci:ubuntu24-amd64`）+ 0.0.9-rc.1 x64 种子，
+  旧环境复现上述重复符号；清单模式环境同一条构建链接成功；修复后
+  `tools/compiler-tests.py` 在容器内 3/3、本机 macOS 3/3 通过，`make` 冷编正常。
+
 ## 2026-10-23 0.0.9-rc.2 开发与本地验收
 
 - **内容**：恢复 compiler 内嵌测试与门禁（YT3b）：`gen/buffer.yh`、

@@ -29,6 +29,16 @@
 - `tests/modules/test-check.py` 增至 28 项，新增
   `test-after-production-build`（先生产构建再跑测试）回归。
 
+**CI 首轮失败暴露的构建环境问题（已修）**
+
+- `linux-x86_64`/`linux-aarch64` 的 `compiler-tests` 报
+  `ld.lld: error: duplicate symbol: yh_lld_link_driver`：`compiler/` 已迁移
+  `[link]` 归档清单，而 `tools/compiler-tests.py` 仍按旧链路注入
+  `YH_LLVM_SELFHOST_FLAGS`，桥归档在同一条链接命令里出现两次。
+- 修复：`compiler-tests.py` 与 `tests/selfhost/llvm-isolation.py` 改用清单模式
+  环境（`YH_LINK_MANIFEST_ONLY=1` + `YH_LINK_RUNTIME_FLAGS`），不再注入旧闭包，
+  与 `tools/seed-build.py`、`native-selfhost.py` 的既有约定一致。
+
 ## 验证（本机 macOS/arm64，种子 = 0.0.9-rc.1）
 
 - `make`：rc.1 种子冷编含 test 块的 `compiler/` 通过。
