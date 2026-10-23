@@ -43,11 +43,13 @@ class Checker:
                         ignore=shutil.ignore_patterns(".build", "tmp"))
         return dst
 
-    def run(self, project: Path, *args: str):
+    def run(self, project: Path, *args: str, env_extra=None):
         # 编译器可能被暂存到临时目录（make test 的 FAST_STAGE），
         # 显式给出仓库标准库根，保证 import testing 等模块可解析。
         env = dict(os.environ)
         env.setdefault("YH_STDLIB", str(ROOT / "libs"))
+        if env_extra:
+            env.update(env_extra)
         proc = subprocess.run(
             [str(self.compiler), "test", *args],
             cwd=project, capture_output=True, text=True, timeout=300, env=env)
@@ -241,6 +243,24 @@ class Checker:
         proc = self.run(cross, "--no-run", "--target", "aarch64-unknown-linux-gnu")
         self.check("cross-target-test-build", proc.returncode == 0,
                    f"退出码 {proc.returncode}，stderr {proc.stderr[-400:]!r}")
+
+        # 5m. 并行执行：默认并行度与串行结果一致，且输出顺序与 --list 相同。
+        par = self.prepare("ytestparallel", "parallel")
+        listed = [line.split("  ")[0] for line in
+                  self.run(par, "--list").stdout.splitlines() if line.strip()]
+        para = self.run(par, env_extra={"YH_TEST_JOBS": "4"})
+        seri = self.prepare("ytestparallel", "serial")
+        seri_proc = self.run(seri, env_extra={"YH_TEST_JOBS": "1"})
+        pass_order = [line[len("PASS "):].split("  ")[0]
+                      for line in para.stdout.splitlines()
+                      if line.startswith("PASS ")]
+        self.check("parallel-matches-serial",
+                   para.returncode == 0 and seri_proc.returncode == 0
+                   and pass_order == listed
+                   and "结果: 5 passed; 0 skipped; 0 failed" in para.stdout
+                   and "结果: 5 passed; 0 skipped; 0 failed" in seri_proc.stdout,
+                   f"并行 {para.returncode} 串行 {seri_proc.returncode}，"
+                   f"顺序 {pass_order} vs {listed}")
 
         # 5f. --no-run 只构建，不执行。
         noexec = self.prepare("ytest", "no-exec")
