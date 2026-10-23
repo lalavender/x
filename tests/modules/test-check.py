@@ -235,6 +235,13 @@ class Checker:
                    f"生产 {prod.returncode}，测试 {proc.returncode}，"
                    f"输出 {proc.stdout[-300:]!r}")
 
+        # 5l. 跨目标测试构建：Linux 目标下 printf 运行时走 syscall、不声明
+        # @write，测试断言运行时必须自己补声明（曾出现 use of undefined value）。
+        cross = self.prepare("ytestskip", "cross-target")
+        proc = self.run(cross, "--no-run", "--target", "aarch64-unknown-linux-gnu")
+        self.check("cross-target-test-build", proc.returncode == 0,
+                   f"退出码 {proc.returncode}，stderr {proc.stderr[-400:]!r}")
+
         # 5f. --no-run 只构建，不执行。
         noexec = self.prepare("ytest", "no-exec")
         proc = self.run(noexec, "--no-run")

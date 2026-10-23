@@ -8,12 +8,14 @@
   `tmp/yh-test/log/<模块>-<序号>.log`，失败时报告日志路径并回显末尾 2 KiB
   （滚动窗口单遍读取）；断言消息上限 59 字节，记录偏移 71 写 `0x1e`
   截断标记，父进程按 UTF-8 边界回退并追加「…（消息已截断）」。
-  修复 `@write` 在 printf 运行时支持已声明时重复声明的问题。完整记录见
+  修复 `@write` 声明：Darwin 的 printf 支持会声明它、Linux 走 syscall 不会，
+  测试运行时按目标补声明（跨目标构建曾报 `use of undefined value '@write'`）。
+  完整记录见
   [YT2d-1 实施记录](01-finished/yh-test逐例日志与截断提示-2026-10-23.md)。
 - **语料**：`ytestskip` 新增「带输出的长消息失败」；`test-check.py` 增至
   30 项（`per-case-log-and-truncation`、`per-case-log-files`）。
 - **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
-  run 211/212；fail 136/136；pass 9/9；test-check 30/30；string 内建 5/5；
+  run 211/212；fail 136/136；pass 9/9；test-check 31/31；string 内建 5/5；
   compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
   modules 19/19、project cases 121/121）。
 - **边界**：并发命令会互相覆盖同模块日志（随 YT2d-3 一起隔离）；测试构建仍
