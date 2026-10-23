@@ -2,6 +2,23 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-23 yh test 逐例日志与截断提示（YT2d-1）
+
+- **实现**：每个用例的 stdout/stderr 重定向到
+  `tmp/yh-test/log/<模块>-<序号>.log`，失败时报告日志路径并回显末尾 2 KiB
+  （滚动窗口单遍读取）；断言消息上限 59 字节，记录偏移 71 写 `0x1e`
+  截断标记，父进程按 UTF-8 边界回退并追加「…（消息已截断）」。
+  修复 `@write` 在 printf 运行时支持已声明时重复声明的问题。完整记录见
+  [YT2d-1 实施记录](01-finished/yh-test逐例日志与截断提示-2026-10-23.md)。
+- **语料**：`ytestskip` 新增「带输出的长消息失败」；`test-check.py` 增至
+  30 项（`per-case-log-and-truncation`、`per-case-log-files`）。
+- **验证**：`make test` 与 `make selfhost-native` 全绿（语法 81/81、49/49；
+  run 211/212；fail 136/136；pass 9/9；test-check 30/30；string 内建 5/5；
+  compiler-tests 3/3；TOML 6/6；固定点 30 产物、自解析 114 文件、
+  modules 19/19、project cases 121/121）。
+- **边界**：并发命令会互相覆盖同模块日志（随 YT2d-3 一起隔离）；测试构建仍
+  不启用模块/函数级缓存（YT2d-2 设计独立键后恢复增量编译）。
+
 ## 2026-10-23 0.0.9-rc.2 发布与发布版二进制验收
 
 - **发布**：Gitea `release.yml` run 57 五个作业全部 success，创建

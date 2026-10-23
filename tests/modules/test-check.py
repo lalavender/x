@@ -194,9 +194,20 @@ class Checker:
                    and "SKIP app::src/app/lib.yh::test::显式跳过" in out
                    and "断言消息: helper 拒绝继续" in out
                    and "断言消息: bump 结果不对" in out
-                   and "结果: 2 passed; 1 skipped; 2 failed" in out,
+                   and "结果: 2 passed; 1 skipped; 3 failed" in out,
                    f"退出码 {proc.returncode}，输出 {out[-500:]!r}，"
                    f"stderr {proc.stderr[-300:]!r}")
+
+        # 5k. 逐例日志与超长断言消息截断提示。
+        self.check("per-case-log-and-truncation",
+                   "用例日志: " in out
+                   and "case-stdout-marker" in out
+                   and "…（消息已截断）" in out,
+                   f"输出 {out[-600:]!r}")
+        log_dir = skip / "tmp" / "yh-test" / "log"
+        self.check("per-case-log-files",
+                   log_dir.is_dir() and len(list(log_dir.glob("*.log"))) >= 5,
+                   f"日志目录 {log_dir} 内容 {list(log_dir.glob('*.log'))}")
 
         # 5i. --timeout 终止死循环用例，后续用例继续。
         slow = self.prepare("ytesttimeout", "execute-timeout")

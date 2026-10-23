@@ -1022,6 +1022,64 @@ fn tc_out(s *char) void {
     gen.write_all(1, s.to_type(*u8), n)
 }
 
+// tc_utf8_trim：把长度收缩到最后一个完整 UTF-8 序列之前，避免截断提示里
+// 出现半个多字节字符（消息按字节截断到 59 字节）。
+fn tc_utf8_trim(off int, olen int) int {
+    let gs *gen.GenState = gen.G()
+    let n int = olen
+    for n > 0 {
+        let i int = n - 1
+        for i >= 0 && (gs.task.np_data[off + i] & 0xC0) == 0x80 {
+            i -= 1
+        }
+        if (i < 0) { return 0 }
+        let lead u8 = gs.task.np_data[off + i]
+        let need int = lead < 0x80 ? 1 : (lead >= 0xF0 ? 4 : (lead >= 0xE0 ? 3 : 2))
+        if (i + need <= n) { return n }
+        n = i
+    }
+    return 0
+}
+
+// tc_tail_log：回显日志文件末尾至多 limit 字节（limit <= 2048），仅用于失败诊断。
+// 采用滚动窗口，只读一遍文件，避免大日志被整份载入内存。
+fn tc_tail_log(path *char, limit int) void {
+    if (limit <= 0 || limit > 2048) { return }
+    let fd int = open(path, 0)
+    if (fd < 0) { return }
+    let chunk [4096]u8
+    let tail [2048]u8
+    let kept int = 0
+    let dropped int = 0
+    for 1 {
+        let got i64 = read(fd, (&chunk[0]).to_type(*u8), 4096)
+        if (got <= 0) { break }
+        let n int = got.to_type(int)
+        let i int = 0
+        for i < n {
+            if (kept < limit) {
+                tail[kept] = chunk[i]
+                kept += 1
+            } else {
+                let j int = 1
+                for j < limit {
+                    tail[j - 1] = tail[j]
+                    j += 1
+                }
+                tail[limit - 1] = chunk[i]
+                dropped = 1
+            }
+            i += 1
+        }
+    }
+    close(fd)
+    if (kept <= 0) { return }
+    if (dropped != 0) { tc_out("  …（仅显示日志末尾）\n") }
+    tc_out("  ")
+    gen.write_all(1, (&tail[0]).to_type(*u8), kept)
+    if (tail[kept - 1] != 10) { tc_out("\n") }
+}
+
 // tc_write_file：把缓冲区写入文件（覆盖写）。
 fn tc_write_file(path *char, data *u8, size int) int {
     let fd int = mb_open_out(path)
@@ -1106,10 +1164,18 @@ fn tc_clear_entry(proj int) void {
 
 // tc_run_one：执行单个用例。返回 0 通过、1 失败、2 跳过、3 崩溃/记录损坏、4 超时。
 // 失败时通过 rec_line/rec_col 返回断言位置、rec_msg* 返回消息池偏移与长度。
-fn tc_run_one(binary *char, rec_path *char, letter int, timeout_ms int,
-    rec_line *int, rec_col *int, rec_msg_off *int, rec_msg_len *int) int {
+fn tc_run_one(binary *char, rec_path *char, log_path *char, letter int,
+    timeout_ms int, rec_line *int, rec_col *int, rec_msg_off *int,
+    rec_msg_len *int, truncated *int) int {
     let fd int = mb_open_out(rec_path)
     if (fd < 0) {
+        return 3
+    }
+    // 逐例独立日志：stdout/stderr 都重定向到该文件，失败时父进程只回显尾部，
+    // 避免用例输出与 PASS/FAIL 汇总互相穿插（并行执行也依赖这一点）。
+    let log_fd int = mb_open_out(log_path)
+    if (log_fd < 0) {
+        if (fd != 3) { close(fd) }
         return 3
     }
     let argv [3]*char
@@ -1125,14 +1191,17 @@ fn tc_run_one(binary *char, rec_path *char, letter int, timeout_ms int,
         return 3
     }
     if (pid == 0) {
-        if (fd != 3) {
-            if (dup2(fd, 3) < 0) { exit(126) }
-            close(fd)
-        }
+        // fd 3 = 结果记录，1/2 = 用例日志。先复制日志到 1/2，再把记录放到 3，
+        // 最后关闭大于 2 的原始描述符（3 可能被其中一次 open 占用）。
+        if (dup2(log_fd, 1) < 0 || dup2(log_fd, 2) < 0) { exit(126) }
+        if (dup2(fd, 3) < 0) { exit(126) }
+        if (log_fd > 2 && log_fd != 3) { close(log_fd) }
+        if (fd > 2 && fd != 3 && fd != log_fd) { close(fd) }
         execv(binary, &argv[0])
         exit(127)
     }
     if (fd != 3) { close(fd) }
+    if (log_fd > 2 && log_fd != 3 && log_fd != fd) { close(log_fd) }
     // 逐例超时：WNOHANG 轮询 + 单调时钟；超时 kill 后仍回收子进程。
     let start_ns u64 = cmd_clock_ns()
     let status int = 0
@@ -1164,6 +1233,7 @@ fn tc_run_one(binary *char, rec_path *char, letter int, timeout_ms int,
     rec_col[0] = -1
     rec_msg_off[0] = -1
     rec_msg_len[0] = 0
+    truncated[0] = 0
     let rf int = open(rec_path, 0)
     if (rf < 0) {
         return timed_out != 0 ? 4 : 3
@@ -1182,10 +1252,14 @@ fn tc_run_one(binary *char, rec_path *char, letter int, timeout_ms int,
             (rec[6].to_type(int) << 16) | (rec[7].to_type(int) << 24)
         rec_col[0] = rec[8].to_type(int) | (rec[9].to_type(int) << 8) |
             (rec[10].to_type(int) << 16) | (rec[11].to_type(int) << 24)
+        if (got >= TC_REC_SIZE && rec[TC_REC_SIZE - 1] == 30) {
+            // 0x1e 标记由运行时/ testing 写在消息区最后一格：表示消息被截断。
+            truncated[0] = 1
+        }
         if (got > 12) {
             let mlen int = 0
             let k int = 12
-            for k < got && k < TC_REC_SIZE && rec[k] != 0 {
+            for k < got && k < TC_REC_SIZE && rec[k] != 0 && rec[k] != 30 {
                 mlen += 1
                 k += 1
             }
@@ -1254,6 +1328,13 @@ fn tc_build_and_run(proj int, target int, order *int, first int, limit int,
     let rn int = gen.append_str(&rec_path[0], 0, gen.arr_cstr(&bin[0]))
     rn = gen.append_str(&rec_path[0], rn, ".rec")
     rec_path[rn] = 0
+    let log_dir [900]u8
+    let ldn int = gen.append_str(&log_dir[0], 0, pj_pool_str(root_off))
+    ldn = gen.append_str(&log_dir[0], ldn, "/tmp/yh-test/log")
+    log_dir[ldn] = 0
+    if (cmd_mkdirs(gen.arr_cstr(&log_dir[0])) != 0) {
+        return gen.fail("无法创建测试日志目录")
+    }
     let i int = 0
     for i < limit {
         let c TCase = tc_cases[order[first + i]]
@@ -1263,9 +1344,21 @@ fn tc_build_and_run(proj int, target int, order *int, first int, limit int,
         let rec_col int = -1
         let rec_msg_off int = -1
         let rec_msg_len int = 0
+        let truncated int = 0
+        // 日志按「模块 + 局部用例号」命名，避免与其它命令/模块互相覆盖。
+        let log_path [900]u8
+        let lpn int = gen.append_str(&log_path[0], 0, gen.arr_cstr(&log_dir[0]))
+        lpn = gen.append_byte(&log_path[0], lpn, '/')
+        lpn = append_bytes_np(&log_path[0], lpn, gs.p_mods[target].name_off,
+            gs.p_mods[target].name_len)
+        lpn = gen.append_byte(&log_path[0], lpn, '-')
+        lpn = gen.append_int(&log_path[0], lpn, i)
+        lpn = gen.append_str(&log_path[0], lpn, ".log")
+        log_path[lpn] = 0
         let outcome int = tc_run_one(gen.arr_cstr(&bin[0]),
-            gen.arr_cstr(&rec_path[0]), i, timeout_ms, &rec_line, &rec_col,
-            &rec_msg_off, &rec_msg_len)
+            gen.arr_cstr(&rec_path[0]), gen.arr_cstr(&log_path[0]), i,
+            timeout_ms, &rec_line, &rec_col, &rec_msg_off, &rec_msg_len,
+            &truncated)
         if (outcome == 0) {
             passed[0] += 1
             tc_out("PASS ")
@@ -1288,7 +1381,12 @@ fn tc_build_and_run(proj int, target int, order *int, first int, limit int,
             }
             if (rec_msg_len > 0) {
                 tc_out("\n  断言消息: ")
-                gen.write_all(1, gs.task.np_data + rec_msg_off, rec_msg_len)
+                let show int = truncated != 0 ?
+                    tc_utf8_trim(rec_msg_off, rec_msg_len) : rec_msg_len
+                gen.write_all(1, gs.task.np_data + rec_msg_off, show)
+                if (truncated != 0) { tc_out("…（消息已截断）") }
+            } else if (truncated != 0) {
+                tc_out("\n  断言消息: …（消息已截断）")
             }
             if (outcome == 4) {
                 tc_out("\n  用例超时")
@@ -1297,6 +1395,11 @@ fn tc_build_and_run(proj int, target int, order *int, first int, limit int,
             } else if (rec_line < 0) {
                 tc_out("\n  未被断言捕获的失败退出")
             }
+            // 失败时回显该用例日志尾部（最多 2 KiB），完整日志留在 tmp 下。
+            tc_out("\n  用例日志: ")
+            tc_out(gen.arr_cstr(&log_path[0]))
+            tc_out("\n")
+            tc_tail_log(gen.arr_cstr(&log_path[0]), 2048)
         }
         tc_out("\n")
         i += 1
