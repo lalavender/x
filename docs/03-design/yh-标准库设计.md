@@ -212,6 +212,21 @@ Go 的 `%` 格式串与 `Printf` 族。语言没有 `any`/接口/反射，插值
 [实施方案](../02-plan/yh-fmt标准库实施方案-2026-10-23.md)。当前状态是规划，
 `libs/fmt/` 尚未创建，编译器插值尚未实现。
 
+## net 与 http（2026-10-24 设计定稿；未实施）
+
+`libs/net/` 与 `libs/http/` 是规划的 HTTP/1.1 能力，分三级推进：`sys` 补
+socket/poll 原语 → `net` 提供 `Endpoint` 与 TCP 连接/监听 → `http` 提供消息
+模型、解析器、客户端与服务端。头字段零拷贝借用读缓冲、body 增量读、不提供
+整块 `read_all`；I/O 经 `http.Io` 两个函数指针收敛。
+
+HTTPS 由**可选**的 `libs/tls`（M6，链接系统 OpenSSL）提供，`http` 不依赖它，
+明文项目零 C 依赖；DNS 用纯 yh 实现（M5）；服务端首期只有单进程串行 accept，
+并发等并发标准库落地后另立条目；HTTP/2、HTTP/3、gzip 明确不做。范围、12 条
+解析规则、默认限制、M0–M7 分期与 libcurl 评估见
+[HTTP 标准库设计](yh-http标准库设计-2026-10-24.md)，跨模块边界见
+[ADR-0018](../adr/0018-yh网络与HTTP标准库分层.md)。当前状态是规划：三个模块
+目录尚未创建，`libs/project.toml` 未注册，`libs/sys` 也还没有 socket 原语。
+
 ## 当前边界
 
 当前基础层不定义完整文件句柄、错误类型、缓冲策略、Unicode 处理或跨平台 ABI；
