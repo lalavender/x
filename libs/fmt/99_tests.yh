@@ -1,0 +1,293 @@
+module fmt
+
+import os
+import string
+
+// ============================================================================
+// 99_tests.yh —— fmt 运行时 R0 的 yh 内建测试
+//
+// 只在 `yh test fmt` 中执行；生产构建不登记测试符号、不发射测试体。
+// 覆盖构造器分类、文本/整数/bool/nil 追加、NULL C 字符串、i64 最小值与
+// R0 的两个明确失败路径（f64 未接通、非空 spec 未接通）。
+// ============================================================================
+
+// test_view 把 NUL 结尾字面量转成借用视图。
+fn test_view(text *char) string.View {
+    let viewed string.ViewResult = string.view_cstr(text)
+    return viewed.value
+}
+
+// expect_text 比较 String 与期望的 NUL 结尾字节序列。
+fn expect_text(value *string.String, expected *char) bool {
+    let wanted string.ViewResult = string.view_cstr(expected)
+    let got string.View = string.as_view(value)
+    return string.view_equal(got, wanted.value)
+}
+
+test "构造器分类" {
+    $assert(kind_of(of_int(42)) == Kind.kind_int, "int 分类")
+    $assert(kind_of(of_i64(-1)) == Kind.kind_int, "i64 分类")
+    $assert(kind_of(of_u64(7)) == Kind.kind_uint, "u64 分类")
+    $assert(kind_of(of_f64(1.5)) == Kind.kind_f64, "f64 分类")
+    $assert(kind_of(of_bool(true)) == Kind.kind_bool, "bool 分类")
+    $assert(kind_of(of_str(test_view("x"))) == Kind.kind_str, "str 分类")
+    let zero Value
+    $assert(kind_of(zero) == Kind.kind_invalid, "零值应为 invalid")
+}
+
+test "追加文本与有符号整数" {
+    let out string.String = string.make()
+    $assert(append_text(&out, test_view("x=")) == Status.status_ok)
+    $assert(append_value(&out, of_int(-123), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "x=-123"), "文本与负整数")
+    $assert(append_value(&out, of_i64(0), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "x=-1230"), "零值整数")
+    string.release(&out)
+}
+
+test "无符号整数上界" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_u64(18446744073709551615),
+        test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "18446744073709551615"), "u64 最大值")
+    string.release(&out)
+}
+
+test "i64 最小值" {
+    let out string.String = string.make()
+    let minimum i64 = -9223372036854775807
+    minimum = minimum - 1
+    $assert(append_value(&out, of_i64(minimum), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "-9223372036854775808"), "i64 最小值")
+    string.release(&out)
+}
+
+test "bool、字符串与 nil" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_bool(true), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view(" ")) == Status.status_ok)
+    $assert(append_value(&out, of_bool(false), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view(" ")) == Status.status_ok)
+    $assert(append_value(&out, of_str(test_view("ok")), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view(" ")) == Status.status_ok)
+    let invalid Value
+    $assert(append_value(&out, invalid, test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "true false ok <nil>"), "bool/str/nil")
+    string.release(&out)
+}
+
+test "NULL C 字符串为空串" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_cstr(0), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, ""), "NULL 应为空串")
+    string.release(&out)
+}
+
+test "R1 整数 spec：宽度、符号与进制" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_int(42), test_view("d")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_int(42), test_view("05d")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_int(42), test_view("-6d")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_int(42), test_view("+05d")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_int(255), test_view("x")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_int(255), test_view("X")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_int(8), test_view("b")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_int(64), test_view("o")) == Status.status_ok)
+    $assert(expect_text(&out, "42|00042|42    |+0042|ff|FF|1000|100"), "整数 spec")
+    string.release(&out)
+}
+
+test "R1 负数与精度忽略" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_int(-255), test_view("x")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_int(7), test_view("3.4d")) == Status.status_ok)
+    $assert(expect_text(&out, "-ff|  7"), "负十六进制与整数精度忽略")
+    string.release(&out)
+}
+
+test "R1 字符串与 bool 对齐" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_str(test_view("ab")), test_view("5s")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_str(test_view("ab")), test_view("-5s")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_bool(true), test_view("5")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_str(test_view("hé")), test_view("4s")) == Status.status_ok)
+    $assert(expect_text(&out, "   ab|ab   | true|  hé"), "字符串/bool 对齐与 rune 宽度")
+    string.release(&out)
+}
+
+// zero_value 返回运行期零，避免除零在编译期折叠。
+fn zero_value() f64 {
+    let zero f64 = 0.0
+    return zero
+}
+
+// nan_value 生成运行期 NaN。
+fn nan_value() f64 {
+    let zero f64 = zero_value()
+    return zero / zero
+}
+
+// negative_zero 生成运行期负零；0.0 - 0.0 仍是正零。
+fn negative_zero() f64 {
+    let zero f64 = zero_value()
+    let minus_one f64 = -1.0
+    return zero * minus_one
+}
+
+// inf_value 生成运行期正无穷。
+fn inf_value() f64 {
+    let one f64 = 1.0
+    let zero f64 = zero_value()
+    return one / zero
+}
+
+test "R2 浮点默认 g" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_f64(1.5), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(0.25), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(10.0), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(123.4567), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(1234567.0), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(1e20), test_view("")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(0.00001), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "1.5|0.25|10|123.457|1.23457e+06|1e+20|1e-05"), "默认 g")
+    string.release(&out)
+}
+
+test "R2 浮点精度与类型" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_f64(123.4567), test_view(".2")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(10.0), test_view(".2")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(10.0), test_view(".2f")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(1.5), test_view("f")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(1500.0), test_view("e")) == Status.status_ok)
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(1500.0), test_view("E")) == Status.status_ok)
+    $assert(expect_text(&out, "123.46|10|10.00|1.500000|1.5e+03|1.5E+03"), "精度与类型")
+    string.release(&out)
+}
+
+test "R2 浮点符号与宽度" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_f64(1.5), test_view("+08.2f")) == Status.status_ok)
+    $assert(expect_text(&out, "+0001.50"), "正号零补齐")
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(1.5), test_view("-8.2f")) == Status.status_ok)
+    $assert(expect_text(&out, "+0001.50|1.50    "), "左对齐")
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(negative_zero()), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "+0001.50|1.50    |-0"), "负零")
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(nan_value()), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "+0001.50|1.50    |-0|NaN"), "NaN")
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(inf_value()), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "+0001.50|1.50    |-0|NaN|+Inf"), "+Inf")
+    $assert(append_text(&out, test_view("|")) == Status.status_ok)
+    $assert(append_value(&out, of_f64(0.0 - inf_value()), test_view("")) == Status.status_ok)
+    $assert(expect_text(&out, "+0001.50|1.50    |-0|NaN|+Inf|-Inf"), "-Inf")
+    string.release(&out)
+}
+
+test "R1 非法 spec 与 R2 浮点边界" {
+    let out string.String = string.make()
+    $assert(append_value(&out, of_int(7), test_view("z")) == Status.status_invalid_spec)
+    $assert(append_value(&out, of_int(7), test_view("s")) == Status.status_invalid_spec)
+    $assert(append_value(&out, of_str(test_view("x")), test_view("d")) == Status.status_invalid_spec)
+    $assert(append_value(&out, of_str(test_view("x")), test_view(".2s")) == Status.status_invalid_spec)
+    $assert(append_value(&out, of_bool(true), test_view("0")) == Status.status_invalid_spec)
+    $assert(append_value(&out, of_int(7), test_view("#x")) == Status.status_invalid_spec)
+    $assert(append_value(&out, of_f64(1.5), test_view("s")) == Status.status_invalid_spec)
+    $assert(append_value(&out, of_f64(1.5), test_view(".18f")) == Status.status_unsupported)
+    $assert(append_value(&out, of_f64(1e20), test_view("f")) == Status.status_unsupported)
+    $assert(expect_text(&out, ""), "失败不写内容")
+    string.release(&out)
+}
+
+test "R3 of_string 与 sprint" {
+    let source string.String = string.make()
+    $assert(append_text(&source, test_view("hi")) == Status.status_ok)
+    let values []Value = [of_int(1), of_int(2)]
+    let joined TextResult = sprint(values)
+    $assert(joined.status == Status.status_ok)
+    $assert(expect_text(&joined.value, "12"), "sprint 直接拼接")
+    string.release(&joined.value)
+    let with_newline TextResult = sprintln(values)
+    $assert(with_newline.status == Status.status_ok)
+    $assert(expect_text(&with_newline.value, "12\n"), "sprintln 换行")
+    string.release(&with_newline.value)
+    let borrowed TextResult = sprint([of_string(&source)])
+    $assert(borrowed.status == Status.status_ok)
+    $assert(expect_text(&borrowed.value, "hi"), "of_string 借用")
+    string.release(&borrowed.value)
+    string.release(&source)
+}
+
+test "R3 空列表与 render" {
+    let none []Value = []
+    let empty TextResult = sprint(none)
+    $assert(empty.status == Status.status_ok)
+    $assert(expect_text(&empty.value, ""), "空列表")
+    string.release(&empty.value)
+    let only_newline TextResult = sprintln(none)
+    $assert(only_newline.status == Status.status_ok)
+    $assert(expect_text(&only_newline.value, "\n"), "空列表换行")
+    string.release(&only_newline.value)
+    let spec string.ViewResult = string.view_cstr("+08.2f")
+    let formatted TextResult = render(of_f64(1.5), spec.value)
+    $assert(formatted.status == Status.status_ok)
+    $assert(expect_text(&formatted.value, "+0001.50"), "render 指定 spec")
+    string.release(&formatted.value)
+    let bad_spec string.ViewResult = string.view_cstr("z")
+    let failed TextResult = render(of_int(1), bad_spec.value)
+    $assert(failed.status == Status.status_invalid_spec)
+    $assert(string.byte_length(&failed.value) == 0, "失败返回零句柄")
+}
+
+test "R3 fprint 失败路径" {
+    let values []Value = [of_int(7)]
+    let result os.IoResult = fprint(-1, values)
+    $assert(result.count == 0, "无效 fd 不写入")
+    $assert(result.error.kind != os.error_none, "无效 fd 应报错")
+    let empty []Value = []
+    let newline_result os.IoResult = fprintln(-1, empty)
+    $assert(newline_result.error.kind != os.error_none, "fprintln 无效 fd")
+}
+
+test "R4 插值叶与 concat" {
+    let prefix string.String = text("a=")
+    let number string.String = value(of_int(7))
+    let real string.String = value_spec(of_f64(1.5), ".2f")
+    let suffix string.String = text("!")
+    let joined string.String = concat(prefix, number)
+    joined = concat(joined, real)
+    joined = concat(joined, suffix)
+    $assert(expect_text(&joined, "a=71.50!"), "text/value/value_spec/concat")
+    string.release(&joined)
+    let empty string.String = text(0)
+    $assert(expect_text(&empty, ""), "NULL 文本为空")
+    let zero string.String = concat(empty, string.make())
+    $assert(expect_text(&zero, ""), "零句柄参与 concat")
+    string.release(&zero)
+}

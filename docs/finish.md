@@ -5,6 +5,78 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-24 yh 字符串插值 I4 收口
+
+- **实现**：`string.View` 插值、O2 正例、`--syntax-check` 插值语法模式；
+  `docs/yh.g4` 记录 STRING 内部细化与 `\$` 转义。
+- **验证**：`make test` 356/357；`make selfhost-native` project 122/122；
+  `tests/fmt/interp.py` 10/10；`make test-lib-tests` string 5 + fmt 17；
+  fmtinterp `nm -u`/`otool -L` 无 printf/LLVM/lld。
+- **残余**：旧发射器未统计区分；I5 可选扩展未做；未滚种子/合并。
+- **记录**：[I4 记录](01-finished/yh-fmt-插值I4-2026-10-24.md)。
+
+## 2026-10-24 yh 字符串插值 I0–I3
+
+- **实现**：词法后扩展 + raw-string body 数据 + parser 合成 fmt 调用树；
+  `${expr:spec}` 端到端可用，结果 `string.String`；编译期校验 spec 与类型。
+- **测试**：`fmtinterp` modules fixture、`tests/fmt/interp.py` 8 个负例、
+  `make test-fmt-interp`、fmt 内建 17 项。
+- **边界**：需 import fmt/string；不支持 View/String、结构体、嵌套/花括号/
+  裸双引号/顶层三元；旧发射器与 O2 专项待 I4。
+- **记录**：[I0–I3 实施记录](01-finished/yh-fmt-插值I0-I3-2026-10-24.md)。
+
+## 2026-10-24 yh fmt 插值叶 API
+
+- **实现**：`60_interp.yh` 增加编译器降级契约 `text`/`value`/`value_spec`/
+  `concat`；String 按值传递，`concat` 消费输入并返回合并结果，失败零句柄。
+- **测试**：fmt 内建测试增至 17 项；`make test-lib-tests` 全绿。
+- **边界**：`text`/`value_spec` 接收 NUL 结尾 `*char`，文本块内嵌 NUL 暂不支持；
+  编译器插值尚未接通。
+
+## 2026-10-24 yh fmt R3 API：print/sprint/render
+
+- **实现**：`50_output.yh` 的 print/sprint/fprint/render/of_string；打印族
+  渲染进临时 String 后一次写出，值之间不插入隐式分隔符。
+- **语言限制**：`pub` 变参函数非法，公开打印族接收 `[]Value`；设计与 README
+  已同步。
+- **测试**：fmt 内建测试增至 16 项；`make test-lib-tests` 全绿。
+- **R3.2**：`make test-fmt-install` 安装后仓库外导入并通过 fmtbasic
+  全 API surface；`nm -u` 未做。语言插值未开始。
+- **记录**：[R3 实施记录](01-finished/yh-fmt-R3-2026-10-24.md)。
+
+## 2026-10-24 yh fmt R2：浮点渲染
+
+- **实现**：`40_float.yh` 接通 f64：NaN/±Inf/负零、默认 g（6 位有效数字）、
+  `f/F`、`e/E`、`g/G`，`.N` 去尾零、`.Nf` 保留，指数至少两位；宽度/符号/
+  零补齐复用浮点文本路径。
+- **测试**：fmt 内建测试增至 13 项；`make test-lib-tests` 全绿。
+- **边界**：定点 `scaled > 1e18` 或 precision > 17 返回
+  `status_unsupported`；未做 V 实测差分。
+- **记录**：[R2 实施记录](01-finished/yh-fmt-R2-2026-10-24.md)。
+- **验证**：`cd libs && ../yh test fmt` 13/13；未跑全量门，未滚种子。
+
+## 2026-10-24 yh fmt R1：V 格式说明符整数/文本子集
+
+- **实现**：`20_spec.yh` 解析 flags/width/precision/type；`30_render.yh`
+  接通整数 `d/x/X/o/b`、`+/-/0` 对齐、字符串 rune 宽度与 bool 宽度；
+  非法 spec 返回 `status_invalid_spec`。
+- **测试**：fmt 内建测试增至 10 项；`make test-lib-tests` 全绿。
+- **边界**：f64 渲染仍 `status_unsupported`（R2）；print/sprint 与语言插值未开始。
+- **记录**：[R1 实施记录](01-finished/yh-fmt-R1-2026-10-24.md)。
+- **验证**：`cd libs && ../yh test fmt` 10/10；未跑全量门，未滚种子。
+
+## 2026-10-24 yh fmt R0：Value 与默认渲染
+
+- **实现**：`libs/fmt/` 落地 R0：`Kind`/`Value`/`Status`/`TextResult`、
+  `of_*` 构造器、`append_text`、空 spec 的 `append_value` 默认渲染
+  （整数、无符号、bool、字符串、`<nil>`、NULL C 字符串）。
+- **测试**：`libs/fmt/99_tests.yh` 7 项；`libs/project.toml` 登记 fmt；
+  `make test-lib-tests` 覆盖 string 5 项与 fmt 7 项，全绿。
+- **边界**：f64 默认渲染（R2）返回 `status_unsupported`，非空 spec（R1）
+  返回 `status_invalid_spec`；print/sprint 与语言层插值未开始。
+- **记录**：[R0 实施记录](01-finished/yh-fmt-R0-2026-10-24.md)。
+- **验证**：`make` 冷编成功；未改编译器/语法，未跑全量门与自举门，未滚种子。
+
 ## 2026-10-24 io 标准库读写层（IO0–IO4）
 
 - **内容**：`libs/io` 从四个写侧接口扩展为完整读写层：`read_all`/`read_file`/

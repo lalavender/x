@@ -333,9 +333,11 @@ test: stage-yh
 	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
 	@cd $(TOPSRC)/libs && $(YH_RUN) test io --timeout 60
 	@cd $(TOPSRC)/libs && $(YH_RUN) test net --timeout 60
+	@cd $(TOPSRC)/libs && $(YH_RUN) test fmt --timeout 60
 	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/toml/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-test
 	python3 $(TOPSRC)/tests/json/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/json-test
+	python3 $(TOPSRC)/tests/fmt/interp.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/fmt-interp
 	python3 $(TOPSRC)/tests/tools/yh-code-stats/check.py
 	python3 $(TOPSRC)/tests/tools/arch-check/check.py
 	python3 $(TOPSRC)/tools/arch-check.py
@@ -395,13 +397,24 @@ test-string-complexity: stage-yh
 test-compiler-tests: stage-yh
 	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 
+# test-fmt-interp：字符串插值负例门（缺 import/空表达式/未终结/spec/类型）。
+.PHONY: test-fmt-interp
+test-fmt-interp: stage-yh
+	python3 $(TOPSRC)/tests/fmt/interp.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/fmt-interp
+
+# test-fmt-install：fmt 安装后仓库外导入与公开 API surface。
+.PHONY: test-fmt-install
+test-fmt-install:
+	python3 $(TOPSRC)/tests/fmt/install.py --workdir $(TOPSRC)/tmp/fmt-install
+
 # test-lib-tests：标准库内建测试（yh test 直接跑 libs 项目里的 test 块）。
-# 目前覆盖 string 与 io 模块；新增模块的 test 块只需在此追加一行。
+# 目前覆盖 string、io、net 与 fmt 模块；新增模块的 test 块只需在此追加一行。
 .PHONY: test-lib-tests
 test-lib-tests: stage-yh
 	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
 	@cd $(TOPSRC)/libs && $(YH_RUN) test io --timeout 60
 	@cd $(TOPSRC)/libs && $(YH_RUN) test net --timeout 60
+	@cd $(TOPSRC)/libs && $(YH_RUN) test fmt --timeout 60
 
 # quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
 # 秒级到十几秒，改语法/诊断时够用；运行语义与自举门留给 test/full。

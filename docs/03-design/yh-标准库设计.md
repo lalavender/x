@@ -239,18 +239,20 @@ BOM、重复键、孤立代理、尾逗号与尾随内容。设计见
 `$assert(cond[, msg])`，不需要导入本模块。只依赖 prelude 的 `write`/`exit`，
 避免与 `os`/`io` 形成依赖环。见[`libs/testing/README.md`](../../libs/testing/README.md)。
 
-## fmt 与 V 风格字符串插值（2026-10-23 设计；未实施）
+## fmt 与 V 风格字符串插值（2026-10-23 设计；R0–R3 与 I0–I4 已实现）
 
-`libs/fmt/` 规划为 V 风格字符串插值的运行时：`Value`、构造器、
-`append_text`/`append_value`、`render` 与 print/sprint。语言层插值
+`libs/fmt/` 是 V 风格字符串插值的运行时：`Value`、构造器、
+`append_text`/`append_value`、`render` 与 print/sprint（公开打印族接收 `[]Value`）。
+语言层插值
 `"…${expr:spec}…"` 由编译器实现，结果类型为 `string.String`；首版不实现
 Go 的 `%` 格式串与 `Printf` 族。语言没有 `any`/接口/反射，插值只支持
 整数、`f64`、`bool`、`*char`/`string.View` 等标量文本类型，复合值不自动
 格式化。首版限制、spec 子集与错误语义见
 [字符串插值设计](yh-字符串插值设计-2026-10-23.md)；运行时 API 见
 [fmt 标准库设计](yh-fmt标准库设计-2026-10-23.md)；R0–R3/I0–I5 分期见
-[实施方案](../02-plan/yh-fmt标准库实施方案-2026-10-23.md)。当前状态是规划，
-`libs/fmt/` 尚未创建，编译器插值尚未实现。
+[实施方案](../02-plan/yh-fmt标准库实施方案-2026-10-23.md)。当前状态：
+`libs/fmt/` 7 个源文件与语言层插值均已落地（R0–R3、I0–I4），O0/O2、
+`--syntax-check` 语法模式与仓库外安装导入均通过；I5 可选扩展未做。
 
 ## net 与 http（2026-10-24 设计定稿；未实施）
 
@@ -272,5 +274,5 @@ HTTPS 由**可选**的 `libs/tls`（M6，链接系统 OpenSSL）提供，`http` 
 `io` 自 2026-10-24 起提供调用方缓冲的 `Reader`/`Writer` 与行读取，但仍不定义
 可 seek 的文件句柄（`os`/`sys` 无 `lseek`/`fstat`）、异步/非阻塞 IO、网络与
 `mmap`；缓冲策略固定为"调用方提供、本层不分配"。Unicode 处理见 `string`，
-通用格式化由上述规划的 V 风格插值与 `fmt` 运行时承接，尚未实现。库源码
+通用格式化由 `fmt` 运行时与语言层 V 风格插值承接（R0–R3/I0–I4 已实现）。库源码
 跨平台验收不在本阶段范围内；后续 API 按实际需求追加设计和 `.yh` 项目测试。

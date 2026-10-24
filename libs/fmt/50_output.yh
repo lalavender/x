@@ -1,0 +1,129 @@
+module fmt
+
+import io
+import os
+import string
+
+// yh fmt 运行时：print/sprint/render 与结果映射（R3）。
+//
+// 语言不允许 pub 变参函数，因此公开打印族接收 []Value；调用方用切片
+// 字面量传入实参。值之间不插入隐式分隔符（V 式拼接），println 只在末尾
+// 追加 '\n'。打印族先把所有值渲染进临时 String，再一次性写 fd；构造临时串
+// 失败返回 os.error_other 且 count=0，写入失败保留 io 的已写进度。
+
+// empty_spec 返回空格式说明符视图，表示默认格式。
+fn empty_spec() string.View {
+    let result string.ViewResult = string.view_bytes(0, 0)
+    return result.value
+}
+
+// text_error 构造失败文本结果；value 为零句柄。
+fn text_error(status Status) TextResult {
+    let result TextResult
+    result.status = status
+    return result
+}
+
+// render_values 把 values 按默认格式追加到 buffer；失败返回首个失败状态。
+fn render_values(buffer *string.String, values []Value) Status {
+    let index int = 0
+    for index < len(values) {
+        let status Status = append_value(buffer, values[index], empty_spec())
+        if (status != Status.status_ok) {
+            return status
+        }
+        index += 1
+    }
+    return Status.status_ok
+}
+
+// write_buffer 一次性写 String 内容到 fd。
+fn write_buffer(fd int, buffer *string.String) os.IoResult {
+    let view string.View = string.as_view(buffer)
+    if (view.count == 0) {
+        return os.io_ok(0)
+    }
+    return io.write_all_result(fd, view.data.to_type(*char),
+        view.count.to_type(int))
+}
+
+// output_values 渲染并写 fd；newline!=0 时在末尾追加 '\n'。
+fn output_values(fd int, values []Value, newline int) os.IoResult {
+    let buffer string.String = string.make()
+    let status Status = render_values(&buffer, values)
+    if (status == Status.status_ok && newline != 0) {
+        status = append_text(&buffer, view_of("\n"))
+    }
+    if (status != Status.status_ok) {
+        string.release(&buffer)
+        return os.io_error(os.error_other, 0)
+    }
+    let result os.IoResult = write_buffer(fd, &buffer)
+    string.release(&buffer)
+    return result
+}
+
+// fprint 渲染值列表并写入 fd，不追加换行。
+pub fn fprint(fd int, values []Value) os.IoResult {
+    return output_values(fd, values, 0)
+}
+
+// fprintln 渲染值列表、追加换行并写入 fd。
+pub fn fprintln(fd int, values []Value) os.IoResult {
+    return output_values(fd, values, 1)
+}
+
+// print 把值列表写到标准输出，不追加换行。
+pub fn print(values []Value) os.IoResult {
+    return output_values(1, values, 0)
+}
+
+// println 把值列表写到标准输出并追加换行。
+pub fn println(values []Value) os.IoResult {
+    return output_values(1, values, 1)
+}
+
+// sprint 返回值列表的拼接字符串，不追加换行。
+pub fn sprint(values []Value) TextResult {
+    let buffer string.String = string.make()
+    let status Status = render_values(&buffer, values)
+    if (status != Status.status_ok) {
+        string.release(&buffer)
+        return text_error(status)
+    }
+    let result TextResult
+    result.status = Status.status_ok
+    result.value = buffer
+    return result
+}
+
+// sprintln 返回值列表的拼接字符串并追加换行。
+pub fn sprintln(values []Value) TextResult {
+    let buffer string.String = string.make()
+    let status Status = render_values(&buffer, values)
+    if (status == Status.status_ok) {
+        status = append_text(&buffer, view_of("\n"))
+    }
+    if (status != Status.status_ok) {
+        string.release(&buffer)
+        return text_error(status)
+    }
+    let result TextResult
+    result.status = Status.status_ok
+    result.value = buffer
+    return result
+}
+
+// render 按给定 spec 渲染单个值；失败时释放半成品并返回零句柄。
+pub fn render(value Value, spec string.View) TextResult {
+    let buffer string.String = string.make()
+    let status Status = append_value(&buffer, value, spec)
+    if (status != Status.status_ok) {
+        string.release(&buffer)
+        return text_error(status)
+    }
+    let result TextResult
+    result.status = Status.status_ok
+    result.value = buffer
+    return result
+}

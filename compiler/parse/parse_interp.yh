@@ -1,0 +1,423 @@
+module parse
+
+import gen
+import ast
+
+// ============================================================================
+// parse_interp.yh —— 字符串插值的 parser 降级
+//
+// 词法扩展已把 `"a${x:04d}b"` 变成内部 token 序列；本文件把它合成对 fmt 的
+// 普通 AST 调用树：
+//   fmt.text("a") / fmt.value(fmt.of_int(x)) / fmt.value_spec(...) / fmt.concat
+// 不新增 AST kind，也不改 SSA lowering。表达式类型由 parse_expr 已经求出，
+// 因此可以按 Res.type_id 选择 of_* 构造器与必要 cast。
+//
+// v1 要求 import fmt（默认绑定名，不支持别名）；文本块内嵌 NUL 暂不支持。
+// ============================================================================
+
+// interp_intern：把短名字写入名字池并返回偏移；失败返回 -1。
+fn interp_intern(name *char, n int) int {
+    let buffer [24]u8
+    if (n <= 0 || n > 24) {
+        return -1
+    }
+    let i int = 0
+    for i < n {
+        buffer[i] = name[i].to_type(u8)
+        i += 1
+    }
+    return gen.tml_intern_str(&buffer[0], 0, n)
+}
+
+// interp_mark_import：把 fmt 导入标记为已使用，避免未使用导入告警。
+fn interp_mark_import(mi int) void {
+    let gs *gen.GenState = gen.G()
+    let i int = 0
+    for i < gs.task.mod_import_n {
+        if (gs.task.mod_import_mod[i] == mi) {
+            gs.task.mod_import_used[i] = 1
+            return
+        }
+        i += 1
+    }
+}
+
+// interp_call：解析 fmt 导出名并把已求值的实参合成普通调用。
+// use_second=0 时只传 arg0。成功返回 0，结果写入 res。
+fn interp_call(mi int, name_off int, name_len int, arg0 gen.Res,
+    arg1 gen.Res, use_second int, first int, after int, res *gen.Res) int {
+    let gs *gen.GenState = gen.G()
+    let e int = gen.mod_ns_lookup_pool(mi, name_off, name_len, 0)
+    if (e < 0) {
+        return gen.sem_err("fmt 模块缺少插值所需的导出函数")
+    }
+    let callee gen.Res
+    if (gen.sem_ident_val(gs.task.c_mods[mi].ns[e].sym, &callee) != 0) {
+        return -1
+    }
+    if (gen.sem_call_begin(&callee) < 0) {
+        return -1
+    }
+    if (gen.sem_push_arg(&arg0, &callee) != 0) {
+        return -1
+    }
+    if (use_second != 0) {
+        if (gen.sem_push_arg(&arg1, &callee) != 0) {
+            return -1
+        }
+    }
+    if (gen.sem_call(&callee, res) != 0) {
+        return -1
+    }
+    interp_mark_import(mi)
+    if (gs.task.c_ast_capture == 0) {
+        return 0
+    }
+    let callee_ast int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, gen.TOK_IDENT,
+        first, after, callee.type_id, -1, -1, -1)
+    if (callee_ast < 0 || ast.ast_expr_set_semantics(callee_ast, &callee) != 0) {
+        return -1
+    }
+    let args_ast int = -1
+    if (ast.ast_expr_args_append(&args_ast, arg0.ast_id) != 0) {
+        return -1
+    }
+    if (use_second != 0 && ast.ast_expr_args_append(&args_ast, arg1.ast_id) != 0) {
+        return -1
+    }
+    let call_ast int = ast.ast_expr_add(ast.AST_EXPR_CALL, gen.TK_LPAREN,
+        first, after, res.type_id, callee_ast, args_ast, -1)
+    if (call_ast < 0 || ast.ast_expr_set_semantics(call_ast, res) != 0) {
+        return -1
+    }
+    res.ast_id = call_ast
+    return 0
+}
+
+// interp_raw_res：把源码区间登记为不含引号的字符串体 Res，并补 AST 主节点。
+fn interp_raw_res(start int, length int, first int, after int,
+    res *gen.Res) int {
+    let gs *gen.GenState = gen.G()
+    if (gen.sem_raw_string(start, length, res) != 0) {
+        return -1
+    }
+    if (gs.task.c_ast_capture == 0) {
+        return 0
+    }
+    let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, gen.TOK_STRING,
+        first, after, res.type_id, -1, -1, -1)
+    if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) {
+        return -1
+    }
+    res.ast_id = id
+    return 0
+}
+
+
+// interp_view_ctor：若表达式类型正好等于 fmt.of_str 的形参类型
+// （string.View），直接调用 of_str。返回 1 表示不匹配，0 成功，-1 失败。
+fn interp_view_ctor(mi int, expr gen.Res, first int, after int,
+    res *gen.Res) int {
+    let gs *gen.GenState = gen.G()
+    let off int = interp_intern("of_str", 6)
+    if (off < 0) { return -1 }
+    let e int = gen.mod_ns_lookup_pool(mi, off, 6, 0)
+    if (e < 0) { return 1 }
+    let sym int = gs.task.c_mods[mi].ns[e].sym
+    let fn_tid int = gs.task.c_syms[sym].type_id
+    if (fn_tid < 0 || gs.task.t_types[fn_tid].kind != gen.TY_FN) {
+        return 1
+    }
+    let sig int = gs.task.t_types[fn_tid].sub
+    if (gs.task.t_sig_np[sig] != 1) { return 1 }
+    let want int = gs.task.t_sig_params[gs.task.t_sig_first[sig]]
+    if (want != expr.type_id) { return 1 }
+    let unused gen.Res
+    return interp_call(mi, off, 6, expr, unused, 0, first, after, res)
+}
+
+// interp_value_ctor：按表达式静态类型选择 fmt.of_* 并返回构造出的 Value。
+fn interp_value_ctor(mi int, expr gen.Res, first int, after int,
+    res *gen.Res) int {
+    let gs *gen.GenState = gen.G()
+    let kind int = gs.task.t_types[expr.type_id].kind
+    if (kind == gen.TY_STRUCT) {
+        let view int = interp_view_ctor(mi, expr, first, after, res)
+        if (view <= 0) { return view }
+    }
+    let ctor_off int = -1
+    let ctor_len int = 0
+    let cast_tid int = -1
+    if (kind == gen.TY_BOOL) {
+        ctor_off = interp_intern("of_bool", 7)
+        ctor_len = 7
+    } else if (kind == gen.TY_F64) {
+        ctor_off = interp_intern("of_f64", 6)
+        ctor_len = 6
+    } else if (kind == gen.TY_F32) {
+        ctor_off = interp_intern("of_f64", 6)
+        ctor_len = 6
+        cast_tid = gen.TY_F64
+    } else if (kind == gen.TY_I8 || kind == gen.TY_I16
+        || kind == gen.TY_I32 || kind == gen.TY_I64
+        || kind == gen.TY_ENUM || kind == gen.TY_CHAR) {
+        ctor_off = interp_intern("of_i64", 6)
+        ctor_len = 6
+        cast_tid = gen.TY_I64
+    } else if (kind == gen.TY_U8 || kind == gen.TY_U16
+        || kind == gen.TY_U32 || kind == gen.TY_U64) {
+        ctor_off = interp_intern("of_u64", 6)
+        ctor_len = 6
+        cast_tid = gen.TY_U64
+    } else if (kind == gen.TY_PTR
+        && gs.task.t_types[gs.task.t_types[expr.type_id].elem].kind == gen.TY_CHAR) {
+        ctor_off = interp_intern("of_cstr", 7)
+        ctor_len = 7
+    } else {
+        return gen.sem_err("该类型不支持字符串插值")
+    }
+    if (ctor_off < 0) {
+        return gen.sem_err("插值构造器名字登记失败")
+    }
+    let arg gen.Res = expr
+    if (cast_tid >= 0) {
+        if (gen.sem_cast(&arg, cast_tid) != 0) {
+            return -1
+        }
+    }
+    let unused gen.Res
+    return interp_call(mi, ctor_off, ctor_len, arg, unused, 0, first, after, res)
+}
+
+
+// interp_spec_valid：编译期校验 V 格式说明符的语法与类型兼容性。
+// 返回 1 合法、0 非法；非法时由调用方按 SPEC token 位置报错。
+fn interp_spec_valid(type_id int, start int, length int) int {
+    let gs *gen.GenState = gen.G()
+    let kind int = gs.task.t_types[type_id].kind
+    let i int = 0
+    let minus int = 0
+    let zero int = 0
+    let plus int = 0
+    for i < length {
+        let b u8 = gs.task.c_src[start + i]
+        if (b == '-') { minus = 1; i += 1; continue }
+        if (b == '0') { zero = 1; i += 1; continue }
+        if (b == '+') { plus = 1; i += 1; continue }
+        break
+    }
+    let width int = 0
+    let digits int = 0
+    for i < length {
+        let b u8 = gs.task.c_src[start + i]
+        if (b < '0' || b > '9') { break }
+        width = width * 10 + (b.to_type(int) - 48)
+        if (width > 1048576) { return 0 }
+        digits += 1
+        i += 1
+    }
+    let precision int = 0
+    let has_precision int = 0
+    if (i < length && gs.task.c_src[start + i] == '.') {
+        i += 1
+        digits = 0
+        for i < length {
+            let b u8 = gs.task.c_src[start + i]
+            if (b < '0' || b > '9') { break }
+            precision = precision * 10 + (b.to_type(int) - 48)
+            if (precision > 1048576) { return 0 }
+            digits += 1
+            i += 1
+        }
+        if (digits == 0) { return 0 }
+        has_precision = 1
+    }
+    let type_byte u8 = 0
+    if (i < length) {
+        type_byte = gs.task.c_src[start + i]
+        i += 1
+    }
+    if (i != length) { return 0 }
+    if (kind == gen.TY_BOOL) {
+        if (type_byte != 0 || has_precision != 0 || zero != 0 || plus != 0) {
+            return 0
+        }
+        return 1
+    }
+    if (kind == gen.TY_PTR
+        && gs.task.t_types[gs.task.t_types[type_id].elem].kind == gen.TY_CHAR) {
+        if (type_byte != 0 && type_byte != 's') { return 0 }
+        if (has_precision != 0 || zero != 0 || plus != 0) { return 0 }
+        return 1
+    }
+    if (kind == gen.TY_F64 || kind == gen.TY_F32) {
+        if (type_byte == 0 || type_byte == 'f' || type_byte == 'F'
+            || type_byte == 'e' || type_byte == 'E' || type_byte == 'g'
+            || type_byte == 'G') {
+            return 1
+        }
+        return 0
+    }
+    if (kind == gen.TY_I8 || kind == gen.TY_I16 || kind == gen.TY_I32
+        || kind == gen.TY_I64 || kind == gen.TY_ENUM || kind == gen.TY_CHAR
+        || kind == gen.TY_U8 || kind == gen.TY_U16 || kind == gen.TY_U32
+        || kind == gen.TY_U64) {
+        if (type_byte == 0 || type_byte == 'd' || type_byte == 'x'
+            || type_byte == 'X' || type_byte == 'o' || type_byte == 'b') {
+            return 1
+        }
+        return 0
+    }
+    return 0
+}
+
+// interp_value_leaf：生成 fmt.value 或 fmt.value_spec 调用。
+fn interp_value_leaf(mi int, expr gen.Res, spec_start int, spec_len int,
+    use_spec int, first int, after int, res *gen.Res) int {
+    let value gen.Res
+    if (interp_value_ctor(mi, expr, first, after, &value) != 0) {
+        return -1
+    }
+    if (use_spec == 0) {
+        let off int = interp_intern("value", 5)
+        if (off < 0) { return -1 }
+        let unused gen.Res
+        return interp_call(mi, off, 5, value, unused, 0, first, after, res)
+    }
+    let spec gen.Res
+    if (interp_raw_res(spec_start, spec_len, first, after, &spec) != 0) {
+        return -1
+    }
+    let off int = interp_intern("value_spec", 10)
+    if (off < 0) { return -1 }
+    return interp_call(mi, off, 10, value, spec, 1, first, after, res)
+}
+
+// interp_text_leaf：生成 fmt.text 调用。
+fn interp_text_leaf(mi int, start int, length int, first int, after int,
+    res *gen.Res) int {
+    let text gen.Res
+    if (interp_raw_res(start, length, first, after, &text) != 0) {
+        return -1
+    }
+    let off int = interp_intern("text", 4)
+    if (off < 0) { return -1 }
+    let unused gen.Res
+    return interp_call(mi, off, 4, text, unused, 0, first, after, res)
+}
+
+// interp_join：把叶结果追加到累加器；首次直接采用。
+fn interp_join(mi int, acc *gen.Res, have *int, leaf gen.Res,
+    first int, after int) int {
+    if (have[0] == 0) {
+        acc[0] = leaf
+        have[0] = 1
+        return 0
+    }
+    let off int = interp_intern("concat", 6)
+    if (off < 0) { return -1 }
+    let joined gen.Res
+    if (interp_call(mi, off, 6, acc[0], leaf, 1, first, after, &joined) != 0) {
+        return -1
+    }
+    acc[0] = joined
+    return 0
+}
+
+// parse_interp：解析一个完整插值字面量并合成 fmt 调用树。
+fn parse_interp(res *gen.Res) int {
+    let gs *gen.GenState = gen.G()
+    let first int = gs.task.c_pos
+    // 语法模式只验证 token 结构与表达式语法；不解析 import、不做类型/spec
+    // 语义，也不合成调用树。
+    if (gs.task.c_compile == 0) {
+        p_adv() // INTERP_BEGIN
+        for p_cur() != gen.TOK_INTERP_END {
+            let k int = p_cur()
+            if (k == gen.TOK_INTERP_TEXT) {
+                p_adv()
+                continue
+            }
+            if (k == gen.TOK_INTERP_EXPR_BEGIN) {
+                p_adv()
+                let dummy gen.Res
+                if (parse_expr(&dummy) != 0) { return -1 }
+                if (p_cur() != gen.TOK_INTERP_EXPR_END) {
+                    return gen.err_tok("插值表达式解析未在预期位置结束")
+                }
+                p_adv()
+                if (p_cur() == gen.TOK_INTERP_SPEC) { p_adv() }
+                continue
+            }
+            return gen.err_tok("插值 token 序列非法")
+        }
+        p_adv() // INTERP_END
+        gen.sem_res_reset(res, 0)
+        return 0
+    }
+    let mi int = gen.mod_import_find("fmt", 3)
+    if (mi < 0) {
+        return gen.sem_err("字符串插值需要 import fmt")
+    }
+    p_adv() // INTERP_BEGIN
+    let acc gen.Res
+    let have int = 0
+    for p_cur() != gen.TOK_INTERP_END {
+        let k int = p_cur()
+        if (k == gen.TOK_INTERP_TEXT) {
+            let token gen.Tok = gs.task.c_toks[gs.task.c_pos]
+            let leaf gen.Res
+            if (interp_text_leaf(mi, token.start, token.len, first,
+                    gs.task.c_pos + 1, &leaf) != 0) {
+                return -1
+            }
+            p_adv()
+            if (interp_join(mi, &acc, &have, leaf, first,
+                    gs.task.c_pos) != 0) {
+                return -1
+            }
+            continue
+        }
+        if (k == gen.TOK_INTERP_EXPR_BEGIN) {
+            p_adv()
+            let expr gen.Res
+            if (parse_expr(&expr) != 0) {
+                return -1
+            }
+            if (p_cur() != gen.TOK_INTERP_EXPR_END) {
+                return gen.err_tok("插值表达式解析未在预期位置结束")
+            }
+            p_adv()
+            let spec_start int = -1
+            let spec_len int = 0
+            let use_spec int = 0
+            if (p_cur() == gen.TOK_INTERP_SPEC) {
+                let token gen.Tok = gs.task.c_toks[gs.task.c_pos]
+                spec_start = token.start
+                spec_len = token.len
+                use_spec = 1
+                if (interp_spec_valid(expr.type_id, spec_start, spec_len) == 0) {
+                    return gen.err_lc(token.line, token.col, "非法格式说明符")
+                }
+                p_adv()
+            }
+            let leaf gen.Res
+            if (interp_value_leaf(mi, expr, spec_start, spec_len, use_spec,
+                    first, gs.task.c_pos, &leaf) != 0) {
+                return -1
+            }
+            if (interp_join(mi, &acc, &have, leaf, first,
+                    gs.task.c_pos) != 0) {
+                return -1
+            }
+            continue
+        }
+        return gen.err_tok("插值 token 序列非法")
+    }
+    p_adv() // INTERP_END
+    if (have == 0) {
+        return gen.sem_err("插值表达式缺少内容")
+    }
+    res[0] = acc
+    return 0
+}
