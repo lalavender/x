@@ -77,6 +77,8 @@ gitignore 的 `bin/` 并核对哈希。
   `yh-<平台>-<架构>` 与哈希）
 - `docs/03-design/` 语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
   `docs/adr/` 决策、`docs/finish.md` 完成流水、`docs/todo.md` 待办
+  - `docs/finish.md` 只保留最近三天条目（靠前为最新）；更早条目归档到
+    `docs/01-finished/finish-历史归档-<起>至<止>.md`，新增条目写在最前。
 - `tests/yh/` 语法语料、`tests/yh-run/` 语义运行语料、
   `tests/modules/` 模块语料与项目验收、`tests/selfhost/` 自举探针
 - `tools/` 门禁脚本与 yh-explorer
