@@ -34,6 +34,12 @@ CASES = [
     ("files", "jsonfiles", "json files ok"),
 ]
 
+def cleanup(path):
+    """删除工作目录；任何失败都不阻断验收（沙箱可能拦截批量删除）。"""
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except BaseException:
+        pass
 
 def run(cmd, cwd, env, timeout=600):
     """运行子命令并返回 CompletedProcess。"""
@@ -71,7 +77,7 @@ def main() -> int:
 
     work = Path(args.workdir).resolve()
     # 清理失败不应阻断验收：沙箱可能拦截大批量删除，下面的 copytree 允许覆盖。
-    shutil.rmtree(work, ignore_errors=True)
+    cleanup(work)
     work.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["YH_STDLIB"] = str(stdlib)
@@ -106,7 +112,7 @@ def main() -> int:
             print(f"[ok] {name}")
 
     if not args.keep:
-        shutil.rmtree(work, ignore_errors=True)
+        cleanup(work)
 
     total = len(cases)
     print(f"json API: {total - len(failures)}/{total} 通过")
