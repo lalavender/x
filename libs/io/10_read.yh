@@ -1,0 +1,227 @@
+module io
+
+import os
+
+// yh io 标准库：读取层。
+//
+// 三档能力：整段读取（read_all/read_file）、有缓冲读取（Reader）、单字节读取。
+// 全部不分配内存、不关闭 fd、不自动重试被信号中断的读取；EOF 表现为
+// status_eof（或 read_all 的 status_ok），截断表现为 status_truncated。
+// 行只按 '\n' 切分，'\r' 保留为普通字节，换行符包含在返回内容里。
+
+// read_all 从 fd 循环读取直到 EOF 或 out 写满。
+// 到达 EOF 返回 status_ok；out 恰好填满且未确认 EOF 时返回 status_truncated
+// （需要精确判断时给 out 多留 1 字节）；读取失败返回 status_io_error 并保留
+// 已读进度。out 为空时不做任何读取，返回 status_truncated 且 count 为 0。
+pub fn read_all(fd int, out []u8) ReadResult {
+    let total u64 = 0
+    let capacity u64 = len(out)
+    for total < capacity {
+        let chunk []u8 = out[total.to_type(int)..capacity.to_type(int)]
+        let result os.IoResult = os.read_some(fd, chunk)
+        if (result.error.kind != os.error_none) {
+            return read_failed(result.error, total)
+        }
+        if (result.count == 0) {
+            return read_ok(total)
+        }
+        total += result.count
+    }
+    return read_truncated(total)
+}
+
+// read_file 打开路径、整段读入调用方缓冲并关闭 fd。
+// fd 由本函数关闭；读取结果优先于关闭错误（读取成功时才用关闭错误覆盖）。
+pub fn read_file(path *char, out []u8) ReadResult {
+    let opened os.FdResult = os.open_path(path, os.read_options())
+    if (opened.error.kind != os.error_none) {
+        return read_failed(opened.error, 0)
+    }
+    if (opened.fd < 0) {
+        return read_failed(os.make_error(os.error_other, 0), 0)
+    }
+    let result ReadResult = read_all(opened.fd, out)
+    let closed os.Error = os.close_file(opened.fd)
+    if (result.status == status_ok && closed.kind != os.error_none) {
+        return read_failed(closed, result.count)
+    }
+    return result
+}
+
+// reader_init 把读取器绑定到 fd 与调用方缓冲，游标归零。
+// 空缓冲返回 error_invalid_argument，此后所有读取直接失败；成功返回
+// no_error。本函数不校验 fd 是否可读，失败在首次读取时暴露。
+pub fn reader_init(reader *Reader, fd int, buffer []u8) os.Error {
+    reader.fd = fd
+    reader.buffer = buffer
+    reader.begin = 0
+    reader.end = 0
+    reader.eof = false
+    if (len(buffer) == 0) {
+        reader.eof = true
+        reader.error = os.make_error(os.error_invalid_argument, 0)
+        return reader.error
+    }
+    reader.error = os.no_error()
+    return reader.error
+}
+
+// reader_buffered 返回已预读未消费的字节数，只用于诊断，不做流控。
+pub fn reader_buffered(reader *Reader) u64 {
+    return reader.end - reader.begin
+}
+
+// reader_fill 把内核数据预读进缓冲，替换已消费的部分。
+// 成功返回 status_ok（count 为本次读入字节数）；EOF 返回 status_eof；
+// 失败返回 status_io_error 并把错误粘滞到 reader.error。
+fn reader_fill(reader *Reader) ReadResult {
+    if (reader.error.kind != os.error_none) {
+        return read_failed(reader.error, 0)
+    }
+    let result os.IoResult = os.read_some(reader.fd, reader.buffer)
+    if (result.error.kind != os.error_none) {
+        reader.error = result.error
+        return read_failed(result.error, 0)
+    }
+    reader.begin = 0
+    reader.end = result.count
+    if (result.count == 0) {
+        reader.eof = true
+        return read_eof()
+    }
+    return read_ok(result.count)
+}
+
+// reader_take_into 从缓冲复制 count 字节到 out 的 at 位置并推进游标。
+// 调用方保证 count 不超过缓冲可用字节与 out 剩余空间。
+fn reader_take_into(reader *Reader, out []u8, at u64, count u64) u64 {
+    if (count == 0) {
+        return 0
+    }
+    let from int = reader.begin.to_type(int)
+    let to int = at.to_type(int)
+    memcpy((&out[to]).to_type(*void), (&reader.buffer[from]).to_type(*void), count)
+    reader.begin += count
+    return count
+}
+
+// reader_take 取走缓冲中至多 len(out) 字节。
+fn reader_take(reader *Reader, out []u8) u64 {
+    let available u64 = reader.end - reader.begin
+    let want u64 = len(out)
+    if (want > available) {
+        want = available
+    }
+    return reader_take_into(reader, out, 0, want)
+}
+
+// reader_read 读取至少 1 字节（除非 EOF 或失败），不超过缓冲容量。
+// 返回 status_ok 与本次字节数；EOF 返回 status_eof；错误粘滞后一直返回同一
+// 错误。out 为空时不消费字节，返回 status_ok 且 count 为 0。
+pub fn reader_read(reader *Reader, out []u8) ReadResult {
+    if (len(out) == 0) {
+        return read_ok(0)
+    }
+    if (reader.error.kind != os.error_none) {
+        return read_failed(reader.error, 0)
+    }
+    if (reader.begin >= reader.end) {
+        let filled ReadResult = reader_fill(reader)
+        if (filled.status != status_ok) {
+            return filled
+        }
+    }
+    return read_ok(reader_take(reader, out))
+}
+
+// reader_read_byte 读取一个字节；EOF 返回 status_eof 且 value 为 0。
+pub fn reader_read_byte(reader *Reader) ByteResult {
+    if (reader.error.kind != os.error_none) {
+        return byte_failed(reader.error)
+    }
+    if (reader.begin >= reader.end) {
+        let filled ReadResult = reader_fill(reader)
+        if (filled.status == status_eof) {
+            return byte_eof()
+        }
+        if (filled.status != status_ok) {
+            return byte_failed(filled.error)
+        }
+    }
+    let value u8 = reader.buffer[reader.begin.to_type(int)]
+    reader.begin += 1
+    return byte_ok(value)
+}
+
+// reader_discard_line 丢弃当前行剩余字节直到并包含 '\n'，或直到 EOF/错误。
+// 截断语义专用：保证下一次 reader_read_line 从下一行开始。
+fn reader_discard_line(reader *Reader) void {
+    for 1 {
+        let index u64 = reader.begin
+        for index < reader.end {
+            if (reader.buffer[index.to_type(int)].to_type(int) == 10) {
+                reader.begin = index + 1
+                return
+            }
+            index += 1
+        }
+        reader.begin = reader.end
+        let filled ReadResult = reader_fill(reader)
+        if (filled.status != status_ok) {
+            return
+        }
+    }
+}
+
+// reader_read_line 读取一行到 out，换行符包含在结果里。
+// 只认 '\n'（0x0A）；'\r' 作为普通字节保留，不做 CRLF 转换。
+//   * 取到 '\n' 或读到末行（无换行）返回 status_ok，count 为字节数；
+//   * 尚未读到字节就 EOF 返回 status_eof；
+//   * 行长度超过 out 时填满 out、丢弃该行剩余字节（含 '\n'），
+//     返回 status_truncated，count 为 len(out)。
+// out 为空时仍会消费一整行，返回 status_truncated 且 count 为 0。
+pub fn reader_read_line(reader *Reader, out []u8) ReadResult {
+    let capacity u64 = len(out)
+    let total u64 = 0
+    for 1 {
+        if (reader.begin >= reader.end) {
+            let filled ReadResult = reader_fill(reader)
+            if (filled.status == status_eof) {
+                if (total == 0) {
+                    return read_eof()
+                }
+                return read_ok(total)
+            }
+            if (filled.status != status_ok) {
+                return read_failed(filled.error, total)
+            }
+        }
+        let index u64 = reader.begin
+        let found bool = false
+        for index < reader.end {
+            if (reader.buffer[index.to_type(int)].to_type(int) == 10) {
+                found = true
+                break
+            }
+            index += 1
+        }
+        if (found) {
+            let need u64 = index - reader.begin + 1
+            if (total + need > capacity) {
+                total += reader_take_into(reader, out, total, capacity - total)
+                reader_discard_line(reader)
+                return read_truncated(total)
+            }
+            total += reader_take_into(reader, out, total, need)
+            return read_ok(total)
+        }
+        let available u64 = reader.end - reader.begin
+        if (total + available > capacity) {
+            total += reader_take_into(reader, out, total, capacity - total)
+            reader_discard_line(reader)
+            return read_truncated(total)
+        }
+        total += reader_take_into(reader, out, total, available)
+    }
+    return read_eof()
+}

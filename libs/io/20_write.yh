@@ -1,0 +1,194 @@
+module io
+
+import os
+
+// yh io 标准库：写入层。
+//
+// 保留 2026-10 之前的 write_all_result/write_all 原签名与返回值，并新增
+// 带长度的 write_bytes/write_file 与调用方缓冲的 Writer。全部不分配内存、
+// 不关闭 fd、不自动重试被信号中断的写入；错误经 os.Error 显式返回。
+
+// write_all_result 将指定缓冲区的全部字节写入文件描述符。
+// count 为已写字节数（失败时保留已取得进度），error 为显式错误；
+// 成功写完时 count == byte_count 且 error.kind == error_none。
+// 中途遇到 EINTR/短写/EAGAIN 时立即返回当前进度，不在本层吞掉错误。
+pub fn write_all_result(fd int, data *char,
+    byte_count int) os.IoResult {
+    if (byte_count < 0) {
+        return os.io_error(os.error_invalid_argument, 0)
+    }
+    let offset int = 0
+    for offset < byte_count {
+        let remaining u64 = (byte_count - offset).to_type(u64)
+        let result os.IoResult = os.write_once(fd,
+            (data + offset).to_type(*void), remaining)
+        if (result.error.kind != os.error_none) {
+            return os.IoResult{
+                count: offset.to_type(u64),
+                error: result.error
+            }
+        }
+        if (result.count == 0) {
+            // 非零请求却写入零字节：不能原地空转，保留进度并报错。
+            return os.IoResult{
+                count: offset.to_type(u64),
+                error: os.make_error(os.error_other, 0)
+            }
+        }
+        offset += result.count.to_type(int)
+    }
+    return os.io_ok(offset.to_type(u64))
+}
+
+// write_all 将指定缓冲区的全部字节写入文件描述符。
+// 旧契约保持不变：长度为负、任何写入失败或意外零进度都返回 -1；
+// 全部写完返回 0。EINTR 不自动重试，但 write_all_result 可观察已写进度。
+pub fn write_all(fd int, data *char, byte_count int) int {
+    let result os.IoResult = write_all_result(fd, data, byte_count)
+    if (result.error.kind != os.error_none
+        || result.count != byte_count.to_type(u64)) {
+        return -1
+    }
+    return 0
+}
+
+// write_bytes 向 fd 循环写入切片的全部字节，支持内嵌 NUL。
+// 返回已写进度与显式错误；零进度视为异常并返回 error_other，避免空转。
+pub fn write_bytes(fd int, data []u8) os.IoResult {
+    let total u64 = 0
+    let capacity u64 = len(data)
+    for total < capacity {
+        let chunk []u8 = data[total.to_type(int)..capacity.to_type(int)]
+        let result os.IoResult = os.write_some(fd, chunk)
+        if (result.error.kind != os.error_none) {
+            return os.IoResult{ count: total, error: result.error }
+        }
+        if (result.count == 0) {
+            return os.IoResult{
+                count: total,
+                error: os.make_error(os.error_other, 0)
+            }
+        }
+        total += result.count
+    }
+    return os.io_ok(total)
+}
+
+// write_file 截断创建/覆盖路径并写入切片的全部字节，然后关闭 fd。
+// fd 由本函数关闭；写入错误优先，写入成功时才用关闭错误覆盖。
+pub fn write_file(path *char, data []u8) os.IoResult {
+    let options os.OpenOptions = os.write_options()
+    options.truncate = true
+    let opened os.FdResult = os.open_path(path, options)
+    if (opened.error.kind != os.error_none) {
+        return os.io_error(opened.error.kind, opened.error.native_code)
+    }
+    if (opened.fd < 0) {
+        return os.io_error(os.error_other, 0)
+    }
+    let result os.IoResult = write_bytes(opened.fd, data)
+    let closed os.Error = os.close_file(opened.fd)
+    if (result.error.kind == os.error_none && closed.kind != os.error_none) {
+        return os.IoResult{ count: result.count, error: closed }
+    }
+    return result
+}
+
+// writer_init 把写入器绑定到 fd 与调用方缓冲，待写字节数归零。
+// 空缓冲返回 error_invalid_argument，此后所有写入直接失败。
+pub fn writer_init(writer *Writer, fd int, buffer []u8) os.Error {
+    writer.fd = fd
+    writer.buffer = buffer
+    writer.count = 0
+    if (len(buffer) == 0) {
+        writer.error = os.make_error(os.error_invalid_argument, 0)
+        return writer.error
+    }
+    writer.error = os.no_error()
+    return writer.error
+}
+
+// writer_pending 返回待写出的字节数。
+pub fn writer_pending(writer *Writer) u64 {
+    return writer.count
+}
+
+// writer_flush 把缓冲中的字节写出，返回本次实际写出字节数与显式错误。
+// 失败时未写出的字节前移到缓冲开头并保留（count 为剩余量），错误粘滞；
+// 只有 error_interrupted 允许在再次调用本函数时清除并重试剩余字节——这是
+// 调用方的显式重试，不是库内自动重试。
+pub fn writer_flush(writer *Writer) os.IoResult {
+    if (writer.error.kind != os.error_none) {
+        if (writer.error.kind != os.error_interrupted) {
+            return os.io_error(writer.error.kind, writer.error.native_code)
+        }
+        writer.error = os.no_error()
+    }
+    if (writer.count == 0) {
+        return os.io_ok(0)
+    }
+    let pending u64 = writer.count
+    let result os.IoResult = write_all_result(writer.fd,
+        (&writer.buffer[0]).to_type(*char), pending.to_type(int))
+    if (result.error.kind != os.error_none) {
+        let remaining u64 = pending - result.count
+        if (remaining > 0 && result.count > 0) {
+            let from int = result.count.to_type(int)
+            memcpy((&writer.buffer[0]).to_type(*void),
+                (&writer.buffer[from]).to_type(*void), remaining)
+        }
+        writer.count = remaining
+        writer.error = result.error
+        return os.IoResult{ count: result.count, error: result.error }
+    }
+    writer.count = 0
+    return os.io_ok(pending)
+}
+
+// writer_write 把切片全部接收进缓冲，缓冲满时中途写出。
+// count 为已接收字节数；底层写失败时返回已接收进度与错误，未写出字节仍留在
+// 缓冲里，后续调用在错误粘滞后直接失败（先 writer_flush 处理可重试错误）。
+pub fn writer_write(writer *Writer, data []u8) os.IoResult {
+    if (writer.error.kind != os.error_none) {
+        return os.io_error(writer.error.kind, writer.error.native_code)
+    }
+    let total u64 = 0
+    let capacity u64 = len(data)
+    let buffered u64 = len(writer.buffer)
+    for total < capacity {
+        if (writer.count >= buffered) {
+            let flushed os.IoResult = writer_flush(writer)
+            if (flushed.error.kind != os.error_none) {
+                return os.IoResult{ count: total, error: flushed.error }
+            }
+        }
+        let room u64 = buffered - writer.count
+        let want u64 = capacity - total
+        if (want > room) {
+            want = room
+        }
+        let from int = total.to_type(int)
+        let to int = writer.count.to_type(int)
+        memcpy((&writer.buffer[to]).to_type(*void),
+            (&data[from]).to_type(*void), want)
+        writer.count += want
+        total += want
+    }
+    return os.io_ok(total)
+}
+
+// writer_write_byte 把一个字节写进缓冲；缓冲满时先写出。
+pub fn writer_write_byte(writer *Writer, value u8) os.IoResult {
+    if (writer.error.kind != os.error_none) {
+        return os.io_error(writer.error.kind, writer.error.native_code)
+    }
+    if (writer.count >= len(writer.buffer)) {
+        let flushed os.IoResult = writer_flush(writer)
+        if (flushed.error.kind != os.error_none) {
+            return os.IoResult{ count: 0, error: flushed.error }
+        }
+    }
+    writer.buffer[writer.count.to_type(int)] = value
+    writer.count += 1
+    return os.io_ok(1)
+}

@@ -5,6 +5,26 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-24 io 标准库读写层（IO0–IO4）
+
+- **内容**：`libs/io` 从四个写侧接口扩展为完整读写层：`read_all`/`read_file`/
+  `write_bytes`/`write_file` 与调用方缓冲的 `Reader`/`Writer`（行读取、显式
+  flush、粘滞错误与 `interrupted` 显式重试），`write_all_result`/`write_all`
+  原样迁入 `20_write.yh`，`print`/`println` 留在 `io.yh`；新增
+  `libs/io/{00_model,10_read,20_write,99_tests,doc}.yh` 与 `README.md`。
+  完整记录见 [IO0–IO4 实施记录](01-finished/yh-io标准库读写层-2026-10-24.md)，
+  设计见 [io 标准库设计](03-design/yh-io标准库设计-2026-10-24.md)。
+- **门禁**：`yh test io` 已接入 `make test`、`make selfhost-native` 与
+  `make test-lib-tests`（`yh test` 一次只接受一个模块，故单独一行）。
+- **验证**：`yh test io` 7/7；`make test` 全绿（语法 81/81、49/49；run
+  211/212；fail 136/136；pass 9/9；test-check 38/38；string 5/5；io 7/7；
+  compiler-tests 3/3；TOML 6/6；代码统计 6/6）；`make selfhost-native` 通过
+  （两代固定点、自解析 114 文件、project cases 121/121）。
+- **分支**：交付提交 `a026dbe`，经 `--no-ff` 合入 `llvm`；合入时
+  `docs/finish.md` 已被滚动归档重写，条目按"新增写在最前"手工前移。
+- **边界**：IO5（toml 读文件迁移）与 IO6（seek/copy，依赖 `os` 补
+  `lseek`/`fstat`）未实施；未滚种子、未推送。
+
 ## 2026-10-24 finish 文档滚动归档（只保留最近三天）
 
 - **做法**：`docs/finish.md` 从 7,952 行压到 814 行（含本条），只留
