@@ -1,0 +1,151 @@
+module json
+
+import string
+import memory
+
+// yh JSON 标准库：值树递归写出与一次性入口。
+//
+// 写出复用 builder 的状态机与转义逻辑：w_value 只负责按 kind 分派与遍历，
+// 所有分隔、缩进、转义都在 70_write.yh。失败状态由 builder 统一记录。
+
+// w_value 把文档子树写进 builder。
+fn w_value(b *Builder, value Value) WriteStatus {
+    let ptr *node = node_of(value)
+    if (ptr == 0) {
+        w_fail(b, WriteStatus.write_argument_error)
+        return builder_status(b)
+    }
+    if (ptr.kind == ValueKind.kind_null) {
+        return write_null(b)
+    }
+    if (ptr.kind == ValueKind.kind_boolean) {
+        return write_bool(b, ptr.boolean)
+    }
+    if (ptr.kind == ValueKind.kind_number) {
+        return write_number_text(b, ptr.text)
+    }
+    if (ptr.kind == ValueKind.kind_string) {
+        return write_string(b, ptr.text)
+    }
+    if (ptr.kind == ValueKind.kind_array) {
+        if (begin_array(b) != WriteStatus.write_ok) {
+            return builder_status(b)
+        }
+        let i int = 0
+        for i < ptr.arr.count {
+            let item *node = items_at(ptr.arr, i)
+            let status WriteStatus = w_value(b, value_of(item))
+            if (status != WriteStatus.write_ok) {
+                return status
+            }
+            i += 1
+        }
+        return end_array(b)
+    }
+    if (ptr.kind == ValueKind.kind_object) {
+        return w_object(b, ptr)
+    }
+    w_fail(b, WriteStatus.write_argument_error)
+    return builder_status(b)
+}
+
+// w_object 写一个对象；sort_keys 打开时按无符号字节序输出。
+fn w_object(b *Builder, ptr *node) WriteStatus {
+    if (begin_object(b) != WriteStatus.write_ok) {
+        return builder_status(b)
+    }
+    let o *object = ptr.obj
+    if (b.options.sort_keys == 0) {
+        let i int = 0
+        for i < o.count {
+            let row *entry = object_at(o, i)
+            if (key(b, row.key) != WriteStatus.write_ok) {
+                return builder_status(b)
+            }
+            let status WriteStatus = w_value(b, value_of(row.value.to_type(*node)))
+            if (status != WriteStatus.write_ok) {
+                return status
+            }
+            i += 1
+        }
+        return end_object(b)
+    }
+    // 排序：分配条目下标数组，插入排序；失败按缓冲错误处理。
+    let bytes u64 = o.count.to_type(u64) * sizeof(int).to_type(u64)
+    let order *int = memory.alloc(bytes).to_type(*int)
+    if (order == 0 && o.count > 0) {
+        w_fail(b, WriteStatus.write_buffer_error)
+        return builder_status(b)
+    }
+    let i int = 0
+    for i < o.count {
+        order[i] = i
+        i += 1
+    }
+    i = 1
+    for i < o.count {
+        let current int = order[i]
+        let current_row *entry = object_at(o, current)
+        let current_key Text = current_row.key
+        let j int = i - 1
+        for j >= 0 {
+            let left_row *entry = object_at(o, order[j])
+            let left_key Text = left_row.key
+            if (text_compare(left_key, current_key) <= 0) {
+                break
+            }
+            order[j + 1] = order[j]
+            j -= 1
+        }
+        order[j + 1] = current
+        i += 1
+    }
+    i = 0
+    for i < o.count {
+        let row *entry = object_at(o, order[i])
+        if (key(b, row.key) != WriteStatus.write_ok) {
+            memory.release(order.to_type(*void))
+            return builder_status(b)
+        }
+        let status WriteStatus = w_value(b, value_of(row.value.to_type(*node)))
+        if (status != WriteStatus.write_ok) {
+            memory.release(order.to_type(*void))
+            return status
+        }
+        i += 1
+    }
+    memory.release(order.to_type(*void))
+    return end_object(b)
+}
+
+// encode 把值树写进调用方提供的缓冲；失败时缓冲回滚到调用前内容。
+pub fn encode(value Value, out *string.String, options WriteOptions) WriteStatus {
+    if (out == 0) {
+        return WriteStatus.write_argument_error
+    }
+    let b Builder = builder_make(out, options)
+    if (builder_status(&b) != WriteStatus.write_ok) {
+        return builder_status(&b)
+    }
+    let status WriteStatus = w_value(&b, value)
+    if (status != WriteStatus.write_ok) {
+        return status
+    }
+    return builder_finish(&b)
+}
+
+// encode_owned 返回独占输出缓冲；失败时 text 为零句柄，无需清理。
+pub fn encode_owned(value Value, options WriteOptions) EncodeResult {
+    let result EncodeResult
+    let fresh string.String = string.make()
+    result.text = fresh
+    result.status = WriteStatus.write_ok
+    let status WriteStatus = encode(value, &result.text, options)
+    result.status = status
+    if (status != WriteStatus.write_ok) {
+        string.release(&result.text)
+        let reset string.String = string.make()
+        result.text = reset
+    }
+    return result
+}

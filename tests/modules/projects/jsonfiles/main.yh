@@ -1,0 +1,82 @@
+module main
+
+// JSON 文件验收：写出后读回、I/O 错误分类、失败不留半成品。
+
+import io
+import json
+
+let failed int = 0
+
+// ok 记录一条断言结果。
+fn ok(condition int, name *char) void {
+    if (condition == 0) {
+        failed += 1
+        io.print("FAIL ")
+        io.println(name)
+    }
+}
+
+// write_options 返回紧凑写出选项。
+fn compact() json.WriteOptions {
+    let options json.WriteOptions
+    options.indent = 0
+    options.escape_non_ascii = 0
+    options.sort_keys = 0
+    return options
+}
+
+// check_roundtrip 断言写出后读回的值一致。
+fn check_roundtrip() void {
+    let parsed json.ParseResult = json.parse_text("{\"name\":\"yh\",\"n\":[1,2,3]}")
+    ok((parsed.status == json.parse_ok).to_type(int), "source parse")
+    let root json.Value = json.root(&parsed.document)
+    let path *char = "jsonfiles-tmp.json"
+    let options json.WriteOptions = compact()
+    let written json.WriteStatus = json.write_file(path, root, options)
+    ok((written == json.write_ok).to_type(int), "write file")
+    let loaded json.ParseResult = json.read_file(path)
+    ok((loaded.status == json.parse_ok).to_type(int), "read file")
+    let loaded_root json.Value = json.root(&loaded.document)
+    let name json.LookupResult = json.get(loaded_root, "name")
+    let out json.Text
+    ok((json.as_text(name.value, &out) == json.query_ok).to_type(int), "name ok")
+    ok((out.count == 2 && out.data[0] == 121).to_type(int), "name bytes")
+    let numbers json.LookupResult = json.get(loaded_root, "n")
+    let total u64 = 0
+    ok((json.count(numbers.value, &total) == json.query_ok).to_type(int), "n ok")
+    ok((total == 3).to_type(int), "n count")
+    let third json.LookupResult = json.array_get(numbers.value, 2)
+    let value i64 = 0
+    json.as_i64(third.value, &value)
+    ok((value == 3).to_type(int), "n third")
+    json.release(&loaded.document)
+    json.release(&parsed.document)
+}
+
+// check_errors 断言 I/O 失败分类。
+fn check_errors() void {
+    let missing json.ParseResult = json.read_file("jsonfiles-does-not-exist.json")
+    ok((missing.status == json.parse_io_error).to_type(int), "missing status")
+    ok((missing.error.code == json.error_io).to_type(int), "missing code")
+    ok((missing.document.handle == 0).to_type(int), "missing no doc")
+    let null_path json.ParseResult = json.read_file(0)
+    ok((null_path.status == json.parse_argument_error).to_type(int), "null path")
+
+    let parsed json.ParseResult = json.parse_text("1")
+    let options json.WriteOptions = compact()
+    let bad json.WriteStatus = json.write_file("/nonexistent-yh-dir/out.json",
+        json.root(&parsed.document), options)
+    ok((bad == json.write_io_error).to_type(int), "write bad path")
+    json.release(&parsed.document)
+}
+
+// main 跑文件断言。
+fn main() int {
+    check_roundtrip()
+    check_errors()
+    if (failed == 0) {
+        io.println("json files ok")
+        return 0
+    }
+    return 1
+}

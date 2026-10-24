@@ -1,0 +1,378 @@
+module json
+
+// yh JSON 标准库：递归下降解析。
+//
+// 值、数组、对象三个入口；深度在进入容器时递增，超过 JSON_MAX_DEPTH 报
+// 资源错误。对象键必须是字符串，重复键在插入前线性查重并拒绝——这是本库
+// 的明确契约（ECMAScript 的 JSON.parse 是 last-wins）。
+//
+// 每个函数只做一件事：分支、容器循环和键值对各自拆开，既便于阅读，也避开
+// 当前后端对超长函数体的限制。
+
+// p_span_from 用起始位置与当前游标构造 Span。
+fn p_span_from(p *parser, start u64, line u64, column u64) Span {
+    let span Span
+    span.offset = start
+    span.length = p.pos - start
+    span.line = line
+    span.column = column
+    return span
+}
+
+// p_enter 进入容器并检查深度；超限返回 0。
+fn p_enter(p *parser, start u64) int {
+    p.depth += 1
+    if (p.depth > JSON_MAX_DEPTH) {
+        p_fail_at(p, ErrorCode.error_resource_limit, "容器嵌套超过上限", start, 1)
+        return 0
+    }
+    return 1
+}
+
+// p_leave 退出容器。
+fn p_leave(p *parser) void {
+    if (p.depth > 0) {
+        p.depth -= 1
+    }
+}
+
+// p_value 解析一个值；失败返回空指针并留下诊断。
+fn p_value(p *parser) *node {
+    p_skip_ws(p)
+    if (p_at_end(p) != 0) {
+        p_fail_here(p, ErrorCode.error_syntax, "意外的输入结束")
+        return 0
+    }
+    return p_value_at(p)
+}
+
+// p_value_at 按当前字节分派到具体值。
+fn p_value_at(p *parser) *node {
+    let b u8 = p.data[p.pos]
+    if (b == 123) {
+        return p_object(p)
+    }
+    if (b == 91) {
+        return p_array(p)
+    }
+    if (b == 34) {
+        return p_node_string(p)
+    }
+    if (b == 45 || (b >= 48 && b <= 57)) {
+        return p_node_number(p)
+    }
+    if (b == 116) {
+        return p_node_literal(p, 1)
+    }
+    if (b == 102) {
+        return p_node_literal(p, 2)
+    }
+    if (b == 110) {
+        return p_node_literal(p, 3)
+    }
+    p_fail_here(p, ErrorCode.error_syntax, "非法的值起始字节")
+    return 0
+}
+
+// p_node_string 解析字符串值。
+fn p_node_string(p *parser) *node {
+    let start u64 = p.pos
+    let span Span = p_span_from(p, start, p.line, p.column)
+    let text Text = text_empty()
+    if (p_scan_string(p, &text) == 0) {
+        return 0
+    }
+    let n *node = node_new(&p.state.mem, ValueKind.kind_string, span)
+    if (n == 0) {
+        p_fail_at(p, ErrorCode.error_out_of_memory, "节点分配失败", start, 1)
+        return 0
+    }
+    n.text = text
+    return n
+}
+
+// p_node_number 解析数字值，保存原始词素。
+fn p_node_number(p *parser) *node {
+    let start u64 = p.pos
+    let span Span = p_span_from(p, start, p.line, p.column)
+    let text Text = text_empty()
+    if (p_scan_number(p, &text) == 0) {
+        return 0
+    }
+    let n *node = node_new(&p.state.mem, ValueKind.kind_number, span)
+    if (n == 0) {
+        p_fail_at(p, ErrorCode.error_out_of_memory, "节点分配失败", start, 1)
+        return 0
+    }
+    n.text = text
+    return n
+}
+
+// p_node_literal 解析 true/false/null；which 为 1/2/3。
+fn p_node_literal(p *parser, which int) *node {
+    let start u64 = p.pos
+    let span Span = p_span_from(p, start, p.line, p.column)
+    let matched int = p_match_literal(p, which)
+    if (matched == 0) {
+        return 0
+    }
+    let kind ValueKind = ValueKind.kind_null
+    if (which == 1) {
+        kind = ValueKind.kind_boolean
+    }
+    if (which == 2) {
+        kind = ValueKind.kind_boolean
+    }
+    let n *node = node_new(&p.state.mem, kind, span)
+    if (n == 0) {
+        p_fail_at(p, ErrorCode.error_out_of_memory, "节点分配失败", start, 1)
+        return 0
+    }
+    if (which == 1) {
+        n.boolean = true
+    }
+    return n
+}
+
+// p_array 解析数组；失败返回空指针。
+fn p_array(p *parser) *node {
+    let start u64 = p.pos
+    let line u64 = p.line
+    let column u64 = p.column
+    p_advance(p, 1)
+    if (p_enter(p, start) == 0) {
+        return 0
+    }
+    let n *node = node_new_array(&p.state.mem, span_zero())
+    if (n == 0) {
+        p_fail_at(p, ErrorCode.error_out_of_memory, "节点分配失败", start, 1)
+        return 0
+    }
+    p_skip_ws(p)
+    if (p_array_closed(p) != 0) {
+        p_leave(p)
+        let span Span = p_span_from(p, start, line, column)
+        n.span = span
+        return n
+    }
+    if (p_array_items(p, n) == 0) {
+        return 0
+    }
+    p_leave(p)
+    let span Span = p_span_from(p, start, line, column)
+    n.span = span
+    return n
+}
+
+// p_array_closed 处理空数组的右括号；是空数组返回 1。
+fn p_array_closed(p *parser) int {
+    if (p_at_end(p) != 0) {
+        p_fail_here(p, ErrorCode.error_syntax, "数组未闭合")
+        return 0
+    }
+    if (p.data[p.pos] != 93) {
+        return 0
+    }
+    p_advance(p, 1)
+    return 1
+}
+
+// p_array_items 解析数组元素直到右括号；成功返回 1。
+fn p_array_items(p *parser, n *node) int {
+    for 1 == 1 {
+        let item *node = p_value(p)
+        if (item == 0) {
+            return 0
+        }
+        if (items_push(&p.state.mem, n.arr, item) != 0) {
+            p_fail_here(p, ErrorCode.error_out_of_memory, "数组元素存储失败")
+            return 0
+        }
+        p_skip_ws(p)
+        if (p_at_end(p) != 0) {
+            p_fail_here(p, ErrorCode.error_syntax, "数组未闭合")
+            return 0
+        }
+        let b u8 = p.data[p.pos]
+        if (b == 44) {
+            p_advance(p, 1)
+            continue
+        }
+        if (b == 93) {
+            p_advance(p, 1)
+            return 1
+        }
+        p_fail_here(p, ErrorCode.error_syntax, "数组缺少逗号或右括号")
+        return 0
+    }
+    return 0
+}
+
+// p_object 解析对象；失败返回空指针。
+fn p_object(p *parser) *node {
+    let start u64 = p.pos
+    let line u64 = p.line
+    let column u64 = p.column
+    p_advance(p, 1)
+    if (p_enter(p, start) == 0) {
+        return 0
+    }
+    let n *node = node_new_object(&p.state.mem, span_zero())
+    if (n == 0) {
+        p_fail_at(p, ErrorCode.error_out_of_memory, "节点分配失败", start, 1)
+        return 0
+    }
+    p_skip_ws(p)
+    if (p_object_closed(p) != 0) {
+        p_leave(p)
+        let span Span = p_span_from(p, start, line, column)
+        n.span = span
+        return n
+    }
+    if (p_object_members(p, n) == 0) {
+        return 0
+    }
+    p_leave(p)
+    let span Span = p_span_from(p, start, line, column)
+    n.span = span
+    return n
+}
+
+// p_object_closed 处理空对象的右花括号；是空对象返回 1。
+fn p_object_closed(p *parser) int {
+    if (p_at_end(p) != 0) {
+        p_fail_here(p, ErrorCode.error_syntax, "对象未闭合")
+        return 0
+    }
+    if (p.data[p.pos] != 125) {
+        return 0
+    }
+    p_advance(p, 1)
+    return 1
+}
+
+// p_object_members 解析键值对直到右花括号；成功返回 1。
+fn p_object_members(p *parser, n *node) int {
+    for 1 == 1 {
+        if (p_object_member(p, n) == 0) {
+            return 0
+        }
+        p_skip_ws(p)
+        if (p_at_end(p) != 0) {
+            p_fail_here(p, ErrorCode.error_syntax, "对象未闭合")
+            return 0
+        }
+        let b u8 = p.data[p.pos]
+        if (b == 44) {
+            p_advance(p, 1)
+            continue
+        }
+        if (b == 125) {
+            p_advance(p, 1)
+            return 1
+        }
+        p_fail_here(p, ErrorCode.error_syntax, "对象缺少逗号或右花括号")
+        return 0
+    }
+    return 0
+}
+
+// p_object_member 解析一个 "键": 值 成员；成功返回 1。
+fn p_object_member(p *parser, n *node) int {
+    p_skip_ws(p)
+    if (p_at_end(p) != 0) {
+        p_fail_here(p, ErrorCode.error_syntax, "对象未闭合")
+        return 0
+    }
+    if (p.data[p.pos] != 34) {
+        p_fail_here(p, ErrorCode.error_syntax, "对象键必须是字符串")
+        return 0
+    }
+    let key_start u64 = p.pos
+    let key_line u64 = p.line
+    let key_column u64 = p.column
+    let key Text = text_empty()
+    if (p_scan_string(p, &key) == 0) {
+        return 0
+    }
+    let key_span Span = p_span_from(p, key_start, key_line, key_column)
+    if (p_object_check_duplicate(p, n, key, key_start) == 0) {
+        return 0
+    }
+    if (p_object_colon(p) == 0) {
+        return 0
+    }
+    let value *node = p_value(p)
+    if (value == 0) {
+        return 0
+    }
+    if (object_push(&p.state.mem, n.obj, key, key_span, value) != 0) {
+        p_fail_here(p, ErrorCode.error_out_of_memory, "对象条目存储失败")
+        return 0
+    }
+    return 1
+}
+
+// p_object_check_duplicate 查重并记录第一次出现的位置；可插入返回 1。
+fn p_object_check_duplicate(p *parser, n *node, key Text, key_start u64) int {
+    let existing int = object_find(n.obj, key)
+    if (existing < 0) {
+        return 1
+    }
+    let first *entry = object_at(n.obj, existing)
+    if (first != 0) {
+        p_set_related(p, first.span)
+    }
+    p_fail_at(p, ErrorCode.error_duplicate_key, "对象存在重复键",
+        key_start, p.pos - key_start)
+    return 0
+}
+
+// p_object_colon 消费键后的冒号；成功返回 1。
+fn p_object_colon(p *parser) int {
+    p_skip_ws(p)
+    if (p_at_end(p) != 0 || p.data[p.pos] != 58) {
+        p_fail_here(p, ErrorCode.error_syntax, "对象键后缺少冒号")
+        return 0
+    }
+    p_advance(p, 1)
+    return 1
+}
+
+// p_parse_document 解析完整文档（单个值 + 尾随空白到 EOF）；1 成功。
+fn p_parse_document(p *parser) int {
+    p_skip_ws(p)
+    if (p_document_empty(p) != 0) {
+        return 0
+    }
+    let root *node = p_value(p)
+    if (root == 0) {
+        return 0
+    }
+    if (p_document_trailing(p) != 0) {
+        return 0
+    }
+    p.state.root = root
+    return 1
+}
+
+// p_document_empty 检查空输入；空输入返回 1（已写诊断）。
+fn p_document_empty(p *parser) int {
+    if (p_at_end(p) == 0) {
+        return 0
+    }
+    let message *char = "输入为空"
+    p_fail_here(p, ErrorCode.error_syntax, message)
+    return 1
+}
+
+// p_document_trailing 检查值之后的尾随内容；有尾随返回 1（已写诊断）。
+fn p_document_trailing(p *parser) int {
+    p_skip_ws(p)
+    if (p_at_end(p) != 0) {
+        return 0
+    }
+    let message *char = "值之后存在尾随内容"
+    p_fail_here(p, ErrorCode.error_syntax, message)
+    return 1
+}

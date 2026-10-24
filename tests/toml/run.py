@@ -73,7 +73,8 @@ def main() -> int:
         return 1
     work = Path(args.workdir).resolve()
     if work.exists():
-        shutil.rmtree(work)
+        # 清理失败不应阻断验收：沙箱可能拦截大批量删除，copytree 允许覆盖。
+        shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["YH_STDLIB"] = str(stdlib)
@@ -92,7 +93,7 @@ def main() -> int:
             print(f"FAIL {name}: fixture 缺失 {src}")
             continue
         dst = work / name
-        shutil.copytree(src, dst)
+        shutil.copytree(src, dst, dirs_exist_ok=True)
         built = run([str(compiler), "build"], dst, env)
         binary = dst / ".build" / fixture
         if built.returncode != 0 or not binary.exists():

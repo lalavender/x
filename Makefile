@@ -335,6 +335,7 @@ test: stage-yh
 	@cd $(TOPSRC)/libs && $(YH_RUN) test net --timeout 60
 	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/toml/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-test
+	python3 $(TOPSRC)/tests/json/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/json-test
 	python3 $(TOPSRC)/tests/tools/yh-code-stats/check.py
 	python3 $(TOPSRC)/tests/tools/arch-check/check.py
 	python3 $(TOPSRC)/tools/arch-check.py
@@ -359,6 +360,11 @@ test-toml-injection: stage-yh
 .PHONY: test-toml-install
 test-toml-install:
 	python3 $(TOPSRC)/tests/toml/install.py --workdir $(TOPSRC)/tmp/toml-install
+
+# test-json：JSON 标准库 API/所有权/资源/文件验收（J3–J6）。
+.PHONY: test-json
+test-json: stage-yh
+	python3 $(TOPSRC)/tests/json/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/json-test
 
 # test-string：string 标准库专项门（ST1–ST6，O0；含分配失败注入与参考差分）。
 .PHONY: test-string

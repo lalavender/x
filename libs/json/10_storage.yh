@@ -1,0 +1,340 @@
+module json
+
+// yh JSON 标准库：私有存储、稳定节点与对象/数组容器。
+//
+// 所有文档内容都在 doc_state.mem 池里：节点、键字节、字符串、数字词素、
+// 对象条目数组和数组元素数组。池按块分配，失败或 release 时整池释放，因此
+// 解析失败不会留下半成品句柄，节点地址在文档生存期内保持稳定。
+//
+// 与 toml 不同，JSON 没有表定义状态：对象只保存插入顺序，重复键在解析期
+// 直接拒绝。
+
+// pool_node 是池内每个块的头部；size 只用于预算统计。
+struct pool_node {
+    next *pool_node
+    size u64
+}
+
+// pool 记录本次文档全部分配；status 区分成功、内存不足与预算超限。
+// status：0 正常，1 malloc 失败，2 超过 JSON_MAX_BYTES。
+struct pool {
+    head *pool_node
+    total u64
+    status int
+    alloc_count int
+}
+
+// entry 是对象内一个键值条目；value 是指向 node 的句柄（避免类型前向引用）。
+struct entry {
+    key Text
+    value *void
+    span Span
+}
+
+// object 按首次出现顺序保存键值条目；查找为按字节线性比较。
+struct object {
+    entries *entry
+    count int
+    cap int
+}
+
+// items 是数组元素表；slots 存放 *node 句柄。
+struct items {
+    slots *void
+    count int
+    cap int
+}
+
+// node 是文档内的稳定值节点。text 按 kind 复用：字符串内容是解码后的
+// UTF-8 字节，数字是原始词素（不含前后空白）。
+struct node {
+    kind ValueKind
+    text Text
+    boolean bool
+    arr *items
+    obj *object
+    span Span
+}
+
+// doc_state 是 Document.handle 指向的私有状态。
+struct doc_state {
+    mem pool
+    root *node
+}
+
+// text_make 由字节视图构造 Text；不复制字节。
+fn text_make(data *u8, count u64) Text {
+    let t Text
+    t.data = data
+    t.count = count
+    return t
+}
+
+// text_empty 返回空文本视图。
+fn text_empty() Text {
+    return text_make(0, 0)
+}
+
+// text_from_cstr 把 NUL 结尾字符串转成视图；空指针返回空文本。
+fn text_from_cstr(s *char) Text {
+    if (s == 0) {
+        return text_empty()
+    }
+    return text_make(s.to_type(*u8), strlen(s))
+}
+
+// text_equal 按长度和字节比较两个文本；相等返回 1。
+fn text_equal(a Text, b Text) int {
+    if (a.count != b.count) {
+        return 0
+    }
+    if (a.count == 0) {
+        return 1
+    }
+    let i u64 = 0
+    for i < a.count {
+        if (a.data[i] != b.data[i]) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// text_compare 按无符号字节序比较，返回 -1、0 或 1；sort_keys 用。
+fn text_compare(a Text, b Text) int {
+    let limit u64 = a.count
+    if (b.count < limit) {
+        limit = b.count
+    }
+    let i u64 = 0
+    for i < limit {
+        if (a.data[i] < b.data[i]) {
+            return -1
+        }
+        if (a.data[i] > b.data[i]) {
+            return 1
+        }
+        i += 1
+    }
+    if (a.count < b.count) {
+        return -1
+    }
+    if (a.count > b.count) {
+        return 1
+    }
+    return 0
+}
+
+// span_zero 返回全零位置。
+fn span_zero() Span {
+    let s Span
+    s.offset = 0
+    s.length = 0
+    s.line = 0
+    s.column = 0
+    return s
+}
+
+// pool_init 把池重置为空。
+fn pool_init(p *pool) void {
+    p.head = 0
+    p.total = 0
+    p.status = 0
+    p.alloc_count = 0
+}
+
+// pool_alloc 从池里分配 byte_count 字节并返回 16 字节对齐地址。
+// 预算或系统内存不足时返回空指针并记录 status。
+fn pool_alloc(p *pool, byte_count u64) *void {
+    if (p.status != 0) {
+        return 0
+    }
+    if (JSON_TEST_FAIL_AFTER >= 0 && p.alloc_count >= JSON_TEST_FAIL_AFTER) {
+        // 只有测试副本会把常量改成非负值；产品构建此分支恒为假。
+        p.status = 1
+        return 0
+    }
+    let header u64 = sizeof(pool_node).to_type(u64)
+    if (byte_count > JSON_MAX_BYTES - header) {
+        p.status = 2
+        return 0
+    }
+    let total u64 = header + byte_count
+    if (p.total > JSON_MAX_BYTES - total) {
+        p.status = 2
+        return 0
+    }
+    let block *pool_node = malloc(total).to_type(*pool_node)
+    if (block == 0) {
+        p.status = 1
+        return 0
+    }
+    block.next = p.head
+    block.size = byte_count
+    p.head = block
+    p.total += total
+    p.alloc_count += 1
+    return (block + 1).to_type(*void)
+}
+
+// pool_dup_bytes 把一段字节复制进池，供键和字符串使用；不追加 NUL。
+fn pool_dup_bytes(p *pool, data *u8, count u64) *u8 {
+    if (count == 0) {
+        return 0
+    }
+    let out *u8 = pool_alloc(p, count).to_type(*u8)
+    if (out == 0) {
+        return 0
+    }
+    memcpy(out.to_type(*void), data.to_type(*void), count)
+    return out
+}
+
+// pool_free_all 释放池内全部块并重置。
+fn pool_free_all(p *pool) void {
+    let cursor *pool_node = p.head
+    for cursor != 0 {
+        let next *pool_node = cursor.next
+        free(cursor.to_type(*void))
+        cursor = next
+    }
+    p.head = 0
+    p.total = 0
+    p.status = 0
+    p.alloc_count = 0
+}
+
+// node_new 分配并初始化一个节点；失败返回空指针。
+fn node_new(p *pool, kind ValueKind, span Span) *node {
+    let n *node = pool_alloc(p, sizeof(node).to_type(u64)).to_type(*node)
+    if (n == 0) {
+        return 0
+    }
+    n.kind = kind
+    let empty Text = text_empty()
+    n.text = empty
+    n.boolean = false
+    n.arr = 0
+    n.obj = 0
+    n.span = span
+    return n
+}
+
+// node_new_array 创建空数组节点。
+fn node_new_array(p *pool, span Span) *node {
+    let n *node = node_new(p, ValueKind.kind_array, span)
+    if (n == 0) {
+        return 0
+    }
+    let a *items = pool_alloc(p, sizeof(items).to_type(u64)).to_type(*items)
+    if (a == 0) {
+        return 0
+    }
+    a.slots = 0
+    a.count = 0
+    a.cap = 0
+    n.arr = a
+    return n
+}
+
+// node_new_object 创建空对象节点。
+fn node_new_object(p *pool, span Span) *node {
+    let n *node = node_new(p, ValueKind.kind_object, span)
+    if (n == 0) {
+        return 0
+    }
+    let o *object = pool_alloc(p, sizeof(object).to_type(u64)).to_type(*object)
+    if (o == 0) {
+        return 0
+    }
+    o.entries = 0
+    o.count = 0
+    o.cap = 0
+    n.obj = o
+    return n
+}
+
+// items_push 追加一个元素；容量按 4 起步几何增长。失败返回 -1。
+fn items_push(p *pool, a *items, value *node) int {
+    if (a.count == a.cap) {
+        let next_cap int = a.cap * 2
+        if (next_cap < 4) {
+            next_cap = 4
+        }
+        let bytes u64 = next_cap.to_type(u64) * sizeof(*void).to_type(u64)
+        let grown *void = pool_alloc(p, bytes).to_type(*void)
+        if (grown == 0) {
+            return -1
+        }
+        if (a.count > 0) {
+            memcpy(grown, a.slots, a.count.to_type(u64) * sizeof(*void).to_type(u64))
+        }
+        a.slots = grown
+        a.cap = next_cap
+    }
+    let slots **node = a.slots.to_type(**node)
+    slots[a.count] = value
+    a.count += 1
+    return 0
+}
+
+// items_at 返回第 index 个元素；越界返回空指针。
+fn items_at(a *items, index int) *node {
+    if (a == 0 || index < 0 || index >= a.count) {
+        return 0
+    }
+    let slots **node = a.slots.to_type(**node)
+    return slots[index]
+}
+
+// object_push 追加一个键值条目（不查重）；失败返回 -1。
+fn object_push(p *pool, o *object, key Text, span Span, value *node) int {
+    if (o.count == o.cap) {
+        let next_cap int = o.cap * 2
+        if (next_cap < 4) {
+            next_cap = 4
+        }
+        let bytes u64 = next_cap.to_type(u64) * sizeof(entry).to_type(u64)
+        let grown *entry = pool_alloc(p, bytes).to_type(*entry)
+        if (grown == 0) {
+            return -1
+        }
+        if (o.count > 0) {
+            memcpy(grown.to_type(*void), o.entries.to_type(*void),
+                o.count.to_type(u64) * sizeof(entry).to_type(u64))
+        }
+        o.entries = grown
+        o.cap = next_cap
+    }
+    let slot *entry = &o.entries[o.count]
+    slot.key = key
+    slot.span = span
+    slot.value = value.to_type(*void)
+    o.count += 1
+    return 0
+}
+
+// object_find 按解码字节线性查找键；未找到返回 -1。
+fn object_find(o *object, key Text) int {
+    if (o == 0) {
+        return -1
+    }
+    let i int = 0
+    for i < o.count {
+        let slot *entry = &o.entries[i]
+        if (text_equal(slot.key, key) != 0) {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// object_at 返回第 index 个条目；越界返回空指针。
+fn object_at(o *object, index int) *entry {
+    if (o == 0 || index < 0 || index >= o.count) {
+        return 0
+    }
+    return &o.entries[index]
+}
