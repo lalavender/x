@@ -374,8 +374,12 @@ def self_test() -> bool:
     assert llvm_snapshot_errors(bad_triple, llvm_expected,
                                 "x86_64-unknown-linux-gnu")
     tmp_root = Path(__file__).resolve().parent.parent / "tmp"
-    tmp_root.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=str(tmp_root)) as directory:
+    # 仓库 tmp 通常已存在；沙箱对已存在路径的 mkdir 会报 EEXIST，
+    # 因此先判断再创建（exist_ok 在该环境下不可靠）。
+    if not tmp_root.is_dir():
+        tmp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=str(tmp_root),
+                                     ignore_cleanup_errors=True) as directory:
         project = Path(directory)
         (project / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "root"\n')
         (project / "main.yh").write_text("module main;\n")
