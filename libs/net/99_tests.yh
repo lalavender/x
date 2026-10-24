@@ -1,0 +1,71 @@
+module net;
+
+import string;
+
+// net 的内建测试：地址文本解析与格式化（纯函数，不需要网络）。
+// 由 `yh test net` 执行；生产构建不登记测试符号。
+
+fn text_of(literal *char) string.View {
+    let result string.ViewResult = string.view_cstr(literal);
+    return result.value;
+}
+
+fn formatted(endpoint Endpoint, expected *char) bool {
+    let buffer [64]u8;
+    let written TextResult = format_endpoint(endpoint, buffer[0..64]);
+    if (written.status != status_ok) {
+        return false;
+    }
+    let actual string.View;
+    actual.data = &buffer[0];
+    actual.count = written.count;
+    return string.view_equal(actual, text_of(expected));
+}
+
+test "IPv4 解析与格式化" {
+    let full EndpointResult = parse_endpoint(text_of("192.168.1.20:8080"), 0);
+    $assert(full.status == status_ok, "带端口的 IPv4 应解析成功");
+    $assert(full.value.port == 8080, "端口应为 8080");
+    $assert(full.value.family == family_inet4, "地址族应为 IPv4");
+    $assert(full.value.address[0] == 192 && full.value.address[3] == 20, "地址字节应正确");
+    $assert(formatted(full.value, "192.168.1.20:8080"), "格式化应可逆");
+
+    let bare EndpointResult = parse_endpoint(text_of("10.0.0.7"), 443);
+    $assert(bare.status == status_ok && bare.value.port == 443, "缺省端口应使用默认值");
+    $assert(formatted(bare.value, "10.0.0.7:443"), "默认端口应写进格式化结果");
+}
+
+test "IPv6 解析与压缩格式" {
+    let loopback EndpointResult = parse_endpoint(text_of("[::1]:53"), 0);
+    $assert(loopback.status == status_ok, "方括号 IPv6 应解析成功");
+    $assert(loopback.value.family == family_inet6, "地址族应为 IPv6");
+    $assert(loopback.value.port == 53, "端口应为 53");
+    $assert(loopback.value.address[15] == 1, "::1 的最末字节应为 1");
+    $assert(formatted(loopback.value, "[::1]:53"), "IPv6 应按 RFC 5952 压缩");
+
+    let doc EndpointResult = parse_endpoint(text_of("[2001:db8::1]"), 80);
+    $assert(doc.status == status_ok && doc.value.port == 80, "缺省端口应生效");
+    $assert(formatted(doc.value, "[2001:db8::1]:80"), "中段压缩应还原为 ::");
+}
+
+test "非法地址必须拒绝" {
+    $assert(parse_endpoint(text_of("127.0.0.256"), 0).status
+        == status_invalid_address, "越界字节应拒绝");
+    $assert(parse_endpoint(text_of("1.2.3"), 0).status
+        == status_invalid_address, "不足四段应拒绝");
+    $assert(parse_endpoint(text_of("1.2.3.4:"), 0).status
+        == status_invalid_address, "空端口应拒绝");
+    $assert(parse_endpoint(text_of("127.0.0.1:70000"), 0).status
+        == status_invalid_address, "端口越界应拒绝");
+    $assert(parse_endpoint(text_of("::1"), 0).status
+        == status_invalid_address, "裸 IPv6 应拒绝（避免 host:port 歧义）");
+    $assert(parse_endpoint(text_of(""), 0).status
+        == status_invalid_argument, "空文本应报参数错误");
+}
+
+test "格式化容量不足" {
+    let endpoint Endpoint = endpoint_ipv4(255, 255, 255, 255, 65535);
+    let buffer [8]u8;
+    let written TextResult = format_endpoint(endpoint, buffer[0..8]);
+    $assert(written.status == status_overflow, "容量不足应返回 overflow");
+}

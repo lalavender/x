@@ -1,0 +1,371 @@
+module net
+
+import os
+import sys
+
+// Linux 的 TCP 实现：原始 socket 系统调用 + 非阻塞 connect。
+//
+// 与 Darwin 的差异：
+//   * Linux 可以用 fcntl 切换 O_NONBLOCK，因此 dial 的超时覆盖连接阶段：
+//     connect 得 -EINPROGRESS 后 poll(POLLOUT)，再用 SO_ERROR 取真实结果。
+//   * 没有 SO_NOSIGPIPE，抑制 SIGPIPE 靠 send 的 MSG_NOSIGNAL。
+//   * sockaddr 没有 Darwin 的首字节 len：family 是偏移 0 的 u16。
+
+fn family_domain(family Family) int {
+    if (family == family_inet6) {
+        return sys.AF_INET6
+    }
+    return sys.AF_INET
+}
+
+// fill_addr 按 Linux 的 sockaddr_in/sockaddr_in6 布局写入 out，返回结构长度。
+// family 是偏移 0 的 u16（本机序），端口与地址是网络序；
+// IPv4 地址在偏移 4，IPv6 地址在偏移 8。
+fn fill_addr(endpoint Endpoint, out *SockAddr) u32 {
+    let index int = 0
+    for index < 28 {
+        out.bytes[index] = 0
+        index += 1
+    }
+    out.bytes[0] = 2
+    if (endpoint.family == family_inet6) {
+        out.bytes[0] = 10
+    }
+    out.bytes[2] = (endpoint.port >> 8).to_type(u8)
+    out.bytes[3] = (endpoint.port & 255).to_type(u8)
+    if (endpoint.family == family_inet6) {
+        index = 0
+        for index < 16 {
+            out.bytes[8 + index] = endpoint.address[index]
+            index += 1
+        }
+        return 28
+    }
+    index = 0
+    for index < 4 {
+        out.bytes[4 + index] = endpoint.address[index]
+        index += 1
+    }
+    return 16
+}
+
+// addr_to_endpoint 把 accept 得到的对端地址转回 Endpoint。
+fn addr_to_endpoint(addr *SockAddr) Endpoint {
+    let value Endpoint
+    value.family = family_inet4
+    value.port = (addr.bytes[2].to_type(u16) << 8) | addr.bytes[3].to_type(u16)
+    let index int = 0
+    if (addr.bytes[0] == 10) {
+        value.family = family_inet6
+        for index < 16 {
+            value.address[index] = addr.bytes[8 + index]
+            index += 1
+        }
+        return value
+    }
+    for index < 16 {
+        value.address[index] = 0
+        index += 1
+    }
+    index = 0
+    for index < 4 {
+        value.address[index] = addr.bytes[4 + index]
+        index += 1
+    }
+    return value
+}
+
+// set_nonblocking 设置或清除 O_NONBLOCK；失败返回 false。
+fn set_nonblocking(fd int, enabled bool) bool {
+    let current i64 = sys.fcntl_fd(fd, sys.F_GETFL, 0)
+    if (sys.is_error(current) != 0) {
+        return false
+    }
+    let flags int = current.to_type(int)
+    if (enabled) {
+        flags = flags | sys.O_NONBLOCK
+    } else {
+        // 清位：与 ~O_NONBLOCK 相与（用 -1 - O_NONBLOCK 表达 32 位掩码）。
+        flags = flags & ((0 - 1) - sys.O_NONBLOCK)
+    }
+    return sys.is_error(sys.fcntl_fd(fd, sys.F_SETFL, flags)) == 0
+}
+
+// apply_timeouts 把毫秒超时写进 SO_RCVTIMEO/SO_SNDTIMEO；<= 0 表示不设。
+fn apply_timeouts(fd int, timeout_ms int) void {
+    if (timeout_ms <= 0) {
+        return
+    }
+    let wait sys.Timeval
+    wait.sec = (timeout_ms / 1000).to_type(i64)
+    wait.usec = ((timeout_ms % 1000) * 1000).to_type(i64)
+    sys.set_socket_option(fd, sys.SOL_SOCKET, sys.SO_RCVTIMEO,
+        (&wait).to_type(*void), 16)
+    sys.set_socket_option(fd, sys.SOL_SOCKET, sys.SO_SNDTIMEO,
+        (&wait).to_type(*void), 16)
+}
+
+// wait_connected 在非阻塞 connect 之后等待可写并用 SO_ERROR 取真实结果。
+fn wait_connected(fd int, timeout_ms int) os.Error {
+    let entry sys.PollFd
+    entry.fd = fd
+    entry.events = sys.POLLOUT
+    entry.revents = 0
+    let ready i64 = sys.poll_fds(&entry, 1, timeout_ms)
+    if (sys.is_error(ready) != 0) {
+        return error_from_result(ready)
+    }
+    if (ready == 0) {
+        return os.make_error(os.error_timed_out, 0)
+    }
+    let so_error int = 0
+    let option_len u32 = 4
+    let got i64 = sys.get_socket_option(fd, sys.SOL_SOCKET, sys.SO_ERROR,
+        (&so_error).to_type(*void), &option_len)
+    if (sys.is_error(got) != 0) {
+        return error_from_result(got)
+    }
+    if (so_error != 0) {
+        return error_from_errno(so_error)
+    }
+    return error_none_value()
+}
+
+// dial 连接 endpoint；timeout_ms 同时覆盖连接阶段与之后的读写。
+pub fn dial(endpoint Endpoint, timeout_ms int) StreamResult {
+    let result StreamResult
+    result.status = status_ok
+    result.stream = stream_zero()
+    result.error = error_none_value()
+    let fd i64 = sys.socket_fd(family_domain(endpoint.family),
+        sys.SOCK_STREAM, sys.IPPROTO_TCP)
+    if (sys.is_error(fd) != 0) {
+        result.error = error_from_result(fd)
+        return result
+    }
+    let handle int = fd.to_type(int)
+    if (!set_nonblocking(handle, true)) {
+        result.error = os.make_error(os.error_other, 0)
+        sys.close_fd(handle)
+        return result
+    }
+    let addr SockAddr
+    let addr_len u32 = fill_addr(endpoint, &addr)
+    let started i64 = sys.connect_fd(handle, (&addr).to_type(*void), addr_len)
+    if (sys.is_error(started) != 0) {
+        let code int = sys.error_code(started)
+        if (code != sys.EINPROGRESS) {
+            result.error = error_from_errno(code)
+            sys.close_fd(handle)
+            return result
+        }
+        let failed os.Error = wait_connected(handle, timeout_ms)
+        if (failed.kind != os.error_none) {
+            result.error = failed
+            sys.close_fd(handle)
+            return result
+        }
+    }
+    if (!set_nonblocking(handle, false)) {
+        result.error = os.make_error(os.error_other, 0)
+        sys.close_fd(handle)
+        return result
+    }
+    apply_timeouts(handle, timeout_ms)
+    result.stream = stream_zero()
+    result.stream.fd = handle
+    result.stream.closed = false
+    return result
+}
+
+// listen 在 endpoint 上创建监听句柄；端口为 0 时由内核分配。
+pub fn listen(endpoint Endpoint, backlog int) ListenerResult {
+    let result ListenerResult
+    result.status = status_ok
+    result.listener = listener_zero()
+    result.error = error_none_value()
+    let fd i64 = sys.socket_fd(family_domain(endpoint.family),
+        sys.SOCK_STREAM, sys.IPPROTO_TCP)
+    if (sys.is_error(fd) != 0) {
+        result.error = error_from_result(fd)
+        return result
+    }
+    let handle int = fd.to_type(int)
+    let enable int = 1
+    sys.set_socket_option(handle, sys.SOL_SOCKET, sys.SO_REUSEADDR,
+        (&enable).to_type(*void), 4)
+    let addr SockAddr
+    let addr_len u32 = fill_addr(endpoint, &addr)
+    let bound i64 = sys.bind_fd(handle, (&addr).to_type(*void), addr_len)
+    if (sys.is_error(bound) != 0) {
+        result.error = error_from_result(bound)
+        sys.close_fd(handle)
+        return result
+    }
+    let listening i64 = sys.listen_fd(handle, backlog)
+    if (sys.is_error(listening) != 0) {
+        result.error = error_from_result(listening)
+        sys.close_fd(handle)
+        return result
+    }
+    result.listener = listener_zero()
+    result.listener.fd = handle
+    result.listener.closed = false
+    return result
+}
+
+// listener_local 读回监听的本地地址（端口 0 分配后取实际端口）。
+pub fn listener_local(listener *TcpListener) EndpointResult {
+    if (listener.fd < 0 || listener.closed) {
+        return endpoint_failure(status_invalid_argument)
+    }
+    let addr SockAddr
+    let addr_len u32 = 28
+    let named i64 = sys.get_socket_name(listener.fd, (&addr).to_type(*void), &addr_len)
+    if (sys.is_error(named) != 0) {
+        return endpoint_failure(status_invalid_argument)
+    }
+    return endpoint_success(addr_to_endpoint(&addr))
+}
+
+// accept 等待一个连接；timeout_ms < 0 表示无限等待。
+// 超时表现为 status_ok + error.kind == error_timed_out，连接未建立。
+pub fn accept(listener *TcpListener, timeout_ms int) AcceptResult {
+    let result AcceptResult
+    result.status = status_ok
+    result.stream = stream_zero()
+    result.peer = endpoint_zero()
+    result.error = error_none_value()
+    if (listener.fd < 0 || listener.closed) {
+        result.status = status_invalid_argument
+        return result
+    }
+    let entry sys.PollFd
+    entry.fd = listener.fd
+    entry.events = sys.POLLIN
+    entry.revents = 0
+    let ready i64 = sys.poll_fds(&entry, 1, timeout_ms)
+    if (sys.is_error(ready) != 0) {
+        result.error = error_from_result(ready)
+        return result
+    }
+    if (ready == 0) {
+        result.error = os.make_error(os.error_timed_out, 0)
+        return result
+    }
+    let addr SockAddr
+    let addr_len u32 = 28
+    let accepted i64 = sys.accept_fd(listener.fd, (&addr).to_type(*void), &addr_len)
+    if (sys.is_error(accepted) != 0) {
+        result.error = error_from_result(accepted)
+        return result
+    }
+    result.stream.fd = accepted.to_type(int)
+    result.stream.closed = false
+    result.peer = addr_to_endpoint(&addr)
+    return result
+}
+
+// read_some 读一次；count == 0 且无错误表示对端有序关闭。
+pub fn read_some(stream *TcpStream, buffer []u8) os.IoResult {
+    if (stream.fd < 0 || stream.closed) {
+        return os.io_error(os.error_not_connected, 0)
+    }
+    let capacity u64 = len(buffer).to_type(u64)
+    if (capacity == 0) {
+        return os.io_ok(0)
+    }
+    let got i64 = sys.recv_fd(stream.fd, (&buffer[0]).to_type(*void), capacity, 0)
+    if (sys.is_error(got) != 0) {
+        return os.io_error(error_from_result(got).kind, sys.error_code(got))
+    }
+    return os.io_ok(got.to_type(u64))
+}
+
+// write_some 写一次，允许短写；MSG_NOSIGNAL 抑制对端关闭时的 SIGPIPE。
+pub fn write_some(stream *TcpStream, data []u8) os.IoResult {
+    if (stream.fd < 0 || stream.closed) {
+        return os.io_error(os.error_not_connected, 0)
+    }
+    let count u64 = len(data).to_type(u64)
+    if (count == 0) {
+        return os.io_ok(0)
+    }
+    let sent i64 = sys.send_fd(stream.fd, (&data[0]).to_type(*void), count,
+        sys.MSG_NOSIGNAL)
+    if (sys.is_error(sent) != 0) {
+        return os.io_error(error_from_result(sent).kind, sys.error_code(sent))
+    }
+    return os.io_ok(sent.to_type(u64))
+}
+
+// write_all 循环写完全部字节；失败时保留已写进度。
+pub fn write_all(stream *TcpStream, data []u8) os.IoResult {
+    let total u64 = len(data).to_type(u64)
+    if (stream.fd < 0 || stream.closed) {
+        return os.io_error(os.error_not_connected, 0)
+    }
+    if (total == 0) {
+        return os.io_ok(0)
+    }
+    let offset u64 = 0
+    for offset < total {
+        let part os.IoResult = write_some(stream, data[offset.to_type(int)..len(data)])
+        if (part.error.kind != os.error_none) {
+            return os.IoResult{
+                count: offset,
+                error: part.error
+            }
+        }
+        if (part.count == 0) {
+            return os.IoResult{
+                count: offset,
+                error: os.make_error(os.error_other, 0)
+            }
+        }
+        offset += part.count
+    }
+    return os.io_ok(offset)
+}
+
+// shutdown_write 半关闭写方向：对端读到 EOF，本端仍可继续读。
+pub fn shutdown_write(stream *TcpStream) os.Error {
+    if (stream.fd < 0 || stream.closed) {
+        return os.make_error(os.error_not_connected, 0)
+    }
+    let result i64 = sys.shutdown_fd(stream.fd, sys.SHUT_WR)
+    if (sys.is_error(result) != 0) {
+        return error_from_result(result)
+    }
+    return error_none_value()
+}
+
+// close_listener 关闭监听句柄；重复调用幂等。
+pub fn close_listener(listener *TcpListener) os.Error {
+    if (listener.fd < 0) {
+        listener.closed = true
+        return error_none_value()
+    }
+    let result i64 = sys.close_fd(listener.fd)
+    listener.fd = -1
+    listener.closed = true
+    if (sys.is_error(result) != 0) {
+        return error_from_result(result)
+    }
+    return error_none_value()
+}
+
+// close_stream 关闭句柄；重复调用幂等。
+pub fn close_stream(stream *TcpStream) os.Error {
+    if (stream.fd < 0) {
+        stream.closed = true
+        return error_none_value()
+    }
+    let result i64 = sys.close_fd(stream.fd)
+    stream.fd = -1
+    stream.closed = true
+    if (sys.is_error(result) != 0) {
+        return error_from_result(result)
+    }
+    return error_none_value()
+}

@@ -188,6 +188,43 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 - [ ] **E4 libc L0–L5**：按[分阶段候选方案](02-plan/yh-libc分阶段候选方案.md)
   推进，未授权全部实施。
 
+### NET/HTTP 网络与 HTTP 标准库（2026-10-24 决策完成；NET0–NET1 已交付，HTTP2–HTTP7 待实施）
+
+[设计](03-design/yh-http标准库设计-2026-10-24.md)与
+[ADR-0018](adr/0018-yh网络与HTTP标准库分层.md)已定稿。仓库此前无任何 HTTP
+实现，`libs/sys` 无 socket 原语、`libs/os` 明确不承诺网络，故按
+「sys socket → net → http」三级推进。已确认：**首期含服务端**、**TLS 走可选
+`libs/tls`（系统 OpenSSL）**、**DNS 纯 yh**、**并发后置**、**`Date` 先补
+`time`**、**不用 libcurl**。头字段零拷贝借用读缓冲，body 增量读，不提供整块
+`read_all`。
+
+NET0/NET1 已完成（`net0-sys-socket-loopback`、`net1-net-tcp-loopback` 与
+`yh test net` 全部通过，见 [finish](finish.md)）：`libs/sys` 提供 12 个
+socket/poll 原语与两平台常量；`libs/net` 提供 Endpoint 解析/格式化与 TCP
+dial/listen/accept/read_some/write_some/write_all/shutdown/close。实测确认
+Darwin 无法在 yh 层切非阻塞（`fcntl` 是 C 变参），因此 connect 超时只在
+Linux 生效；`read`/`write` 与 prelude 重名，net 用 `read_some`/`write_some`。
+
+- [ ] **HTTP2 模型与解析/序列化**：设计 §7 的 12 条 RFC 规则正反例、chunked
+  状态机、`Io` 内存源离线测试；与 Python 参考实现逐字节比对。
+- [ ] **HTTP3 客户端**：`Target`（endpoint/host/tls）、keep-alive 复用、body
+  增量读、100-continue、可选重定向。
+- [ ] **T1 `time` 墙上时钟与 IMF-fixdate**（HTTP4 前置）：`wall_ns()` 走
+  `sys.read_clock(CLOCK_REALTIME)`，`format_imf_fixdate()` 含公历换算；
+  `monotonic_ns` 契约不变。
+- [ ] **HTTP4 服务端**：串行 accept、Responder、内建 400/413/431/501、
+  keep-alive、`Date` 头；README 写明单连接队头阻塞与适用范围。
+- [ ] **HTTP5 DNS**：纯 yh UDP 解析器 + `/etc/hosts` + `/etc/resolv.conf`；
+  poll 精确 deadline。
+- [ ] **HTTP6 TLS**：`libs/tls` + 系统 OpenSSL（定参 `@[extern]`）、客户端
+  SNI/证书/主机名校验、服务端证书链载入、`io_from_tls`；自签 fixture 五类
+  用例在 Linux 与 Darwin 各跑一遍。
+- [ ] **HTTP7 文档与门禁**：README/doc.yh/`examples/http-demo`/
+  `make test-http`/finish 记录。
+- [ ] **后置（不排期）**：`serve_fork`/poll 事件循环等并发标准库落地后再补；
+  可选 `libs/curl` 互操作模块（HTTP/2、代理、cookie、压缩场景），不得进入
+  `libs/http` 依赖图。
+
 ### MEM 内存管理标准库（2026-10-23 设计第二版；M0–M6 待实施）
 
 [设计](03-design/yh-memory标准库设计-2026-10-23.md)与

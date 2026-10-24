@@ -1,0 +1,442 @@
+module net
+
+import string
+
+// 地址文本的解析与格式化：纯函数，不做系统调用、不查询 DNS。
+//
+// 接受的写法（首期）：
+//   a.b.c.d[:port]       IPv4，点分十进制，每段 0..255
+//   [v6][:port]          IPv6 必须带方括号；不带端口时用 default_port
+// 拒绝：裸 IPv6（无方括号，避免与 host:port 歧义）、IPv4 简写（127.1）、
+// zone id（fe80::1%en0）、内嵌 IPv4 的 IPv6（::ffff:127.0.0.1）。
+// 后两项在需要时再补，先保证规则无歧义。
+
+fn byte_at(text string.View, index u64) u8 {
+    return text.data[index.to_type(int)]
+}
+
+// hex_nibble 返回一个十六进制字符的数值；非法返回 -1。
+fn hex_nibble(code u8) int {
+    if (code >= 48 && code <= 57) {
+        return (code - 48).to_type(int)
+    }
+    if (code >= 97 && code <= 102) {
+        return (code - 87).to_type(int)
+    }
+    if (code >= 65 && code <= 70) {
+        return (code - 55).to_type(int)
+    }
+    return -1
+}
+
+// parse_port 解析 1..5 位十进制端口；非法或越界返回 -1。
+fn parse_port(text string.View) int {
+    if (text.count == 0 || text.count > 5) {
+        return -1
+    }
+    let value int = 0
+    let index u64 = 0
+    for index < text.count {
+        let code u8 = byte_at(text, index)
+        if (code < 48 || code > 57) {
+            return -1
+        }
+        value = value * 10 + (code - 48).to_type(int)
+        index += 1
+    }
+    if (value > 65535) {
+        return -1
+    }
+    return value
+}
+
+// parse_octet 解析 1..3 位十进制字节；非法或越界返回 -1。
+fn parse_octet(text string.View) int {
+    if (text.count == 0 || text.count > 3) {
+        return -1
+    }
+    let value int = 0
+    let index u64 = 0
+    for index < text.count {
+        let code u8 = byte_at(text, index)
+        if (code < 48 || code > 57) {
+            return -1
+        }
+        value = value * 10 + (code - 48).to_type(int)
+        index += 1
+    }
+    if (value > 255) {
+        return -1
+    }
+    return value
+}
+
+// sub_view 从视图里截取 [start, end) 子视图，不做边界检查。
+fn sub_view(text string.View, start u64, end u64) string.View {
+    let view string.View
+    view.data = text.data + start.to_type(int)
+    view.count = end - start
+    return view
+}
+
+// parse_ipv4 解析点分十进制地址；每段必须非空且 <= 255。
+fn parse_ipv4(text string.View, port u16) EndpointResult {
+    if (text.count == 0) {
+        return endpoint_failure(status_invalid_address)
+    }
+    let address [16]u8
+    let index int = 0
+    for index < 16 {
+        address[index] = 0
+        index += 1
+    }
+    let start u64 = 0
+    let part int = 0
+    let cursor u64 = 0
+    for 1 {
+        if (cursor > text.count) {
+            return endpoint_failure(status_invalid_address)
+        }
+        let at_end bool = cursor == text.count
+        if (at_end || byte_at(text, cursor) == 46) {
+            if (cursor == start) {
+                return endpoint_failure(status_invalid_address)
+            }
+            if (part >= 4) {
+                return endpoint_failure(status_invalid_address)
+            }
+            let value int = parse_octet(sub_view(text, start, cursor))
+            if (value < 0) {
+                return endpoint_failure(status_invalid_address)
+            }
+            address[part] = value.to_type(u8)
+            part += 1
+            if (at_end) { break }
+            cursor += 1
+            start = cursor
+        } else {
+            let code u8 = byte_at(text, cursor)
+            if (code < 48 || code > 57) {
+                return endpoint_failure(status_invalid_address)
+            }
+            cursor += 1
+        }
+    }
+    if (part != 4) {
+        return endpoint_failure(status_invalid_address)
+    }
+    let value Endpoint
+    value.family = family_inet4
+    value.port = port
+    index = 0
+    for index < 16 {
+        value.address[index] = address[index]
+        index += 1
+    }
+    return endpoint_success(value)
+}
+
+// ipv6_result 把解析出的组展开成 16 字节网络序地址。
+// 规则：没有 "::" 时必须正好 8 组；有 "::" 时显式组必须少于 8 组，
+// 中间缺失的组补零，"::" 至少代表一组。
+fn ipv6_result(parts Ipv6Parts, port u16) EndpointResult {
+    if (parts.compressed < 0) {
+        if (parts.count != 8) {
+            return endpoint_failure(status_invalid_address)
+        }
+    } else if (parts.count >= 8) {
+        return endpoint_failure(status_invalid_address)
+    }
+    let value Endpoint
+    value.family = family_inet6
+    value.port = port
+    let index int = 0
+    for index < 16 {
+        value.address[index] = 0
+        index += 1
+    }
+    let trailing int = 0
+    if (parts.compressed >= 0) {
+        trailing = 8 - (parts.count - parts.compressed)
+    }
+    let group int = 0
+    for group < parts.count {
+        let slot int = group
+        if (parts.compressed >= 0 && group >= parts.compressed) {
+            slot = trailing + (group - parts.compressed)
+        }
+        value.address[slot * 2] = (parts.groups[group] >> 8).to_type(u8)
+        value.address[slot * 2 + 1] = (parts.groups[group] & 255).to_type(u8)
+        group += 1
+    }
+    return endpoint_success(value)
+}
+
+// parse_ipv6 解析十六进制组形式的 IPv6（不含方括号）。
+// 每组 1..4 位十六进制；最多出现一次 "::"；不接受尾部单冒号。
+fn parse_ipv6(text string.View, port u16) EndpointResult {
+    if (text.count == 0) {
+        return endpoint_failure(status_invalid_address)
+    }
+    let parts Ipv6Parts
+    parts.count = 0
+    parts.compressed = -1
+    let cursor u64 = 0
+    if (text.count >= 2 && byte_at(text, 0) == 58 && byte_at(text, 1) == 58) {
+        parts.compressed = 0
+        cursor = 2
+        if (cursor == text.count) {
+            return ipv6_result(parts, port)
+        }
+    }
+    for 1 {
+        if (cursor >= text.count) { break }
+        let value u32 = 0
+        let digits int = 0
+        for digits < 4 && cursor < text.count {
+            let nibble int = hex_nibble(byte_at(text, cursor))
+            if (nibble < 0) { break }
+            value = (value << 4) | nibble.to_type(u32)
+            digits += 1
+            cursor += 1
+        }
+        if (digits == 0) {
+            return endpoint_failure(status_invalid_address)
+        }
+        if (parts.count >= 8) {
+            return endpoint_failure(status_invalid_address)
+        }
+        parts.groups[parts.count] = value.to_type(u16)
+        parts.count += 1
+        if (cursor == text.count) { break }
+        if (byte_at(text, cursor) != 58) {
+            return endpoint_failure(status_invalid_address)
+        }
+        cursor += 1
+        if (cursor < text.count && byte_at(text, cursor) == 58) {
+            if (parts.compressed >= 0) {
+                return endpoint_failure(status_invalid_address)
+            }
+            parts.compressed = parts.count
+            cursor += 1
+            if (cursor == text.count) { break }
+        } else if (cursor == text.count) {
+            return endpoint_failure(status_invalid_address)
+        }
+    }
+    return ipv6_result(parts, port)
+}
+
+// parse_endpoint 解析 "a.b.c.d[:port]" 或 "[v6][:port]"。
+// 未写端口时使用 default_port；端口为 0 表示交给内核分配。
+pub fn parse_endpoint(text string.View, default_port u16) EndpointResult {
+    if (text.count == 0) {
+        return endpoint_failure(status_invalid_argument)
+    }
+    if (byte_at(text, 0) == 91) {
+        // '['：方括号 IPv6，方括号后可选 ":port"
+        let close u64 = 1
+        let found bool = false
+        for close < text.count {
+            if (byte_at(text, close) == 93) {
+                found = true
+                break
+            }
+            close += 1
+        }
+        if (!found || close == 1) {
+            return endpoint_failure(status_invalid_address)
+        }
+        let port u16 = default_port
+        if (close + 1 < text.count) {
+            if (byte_at(text, close + 1) != 58) {
+                return endpoint_failure(status_invalid_address)
+            }
+            let parsed int = parse_port(sub_view(text, close + 2, text.count))
+            if (parsed < 0) {
+                return endpoint_failure(status_invalid_address)
+            }
+            port = parsed.to_type(u16)
+        }
+        return parse_ipv6(sub_view(text, 1, close), port)
+    }
+    // 非方括号形式：至多一个冒号，且冒号后必须是数字端口。
+    let colon u64 = text.count
+    let index u64 = 0
+    for index < text.count {
+        if (byte_at(text, index) == 58) {
+            if (colon != text.count) {
+                return endpoint_failure(status_invalid_address)
+            }
+            colon = index
+        }
+        index += 1
+    }
+    if (colon == text.count) {
+        return parse_ipv4(text, default_port)
+    }
+    let parsed int = parse_port(sub_view(text, colon + 1, text.count))
+    if (parsed < 0) {
+        return endpoint_failure(status_invalid_address)
+    }
+    return parse_ipv4(sub_view(text, 0, colon), parsed.to_type(u16))
+}
+
+// put_byte 写入一个字节；容量不足返回 false 且不改变游标。
+fn put_byte(out []u8, cursor *u64, byte u8) bool {
+    if (cursor[0] >= len(out).to_type(u64)) {
+        return false
+    }
+    out[cursor[0].to_type(int)] = byte
+    cursor[0] += 1
+    return true
+}
+
+// put_decimal 写入无符号十进制；value 为 0 时也写一位 '0'。
+fn put_decimal(out []u8, cursor *u64, value u32) bool {
+    let digits [10]u8
+    let count int = 0
+    let rest u32 = value
+    for 1 {
+        digits[count] = (48 + (rest % 10)).to_type(u8)
+        count += 1
+        rest = rest / 10
+        if (rest == 0) { break }
+    }
+    let index int = count - 1
+    for 1 {
+        if (!put_byte(out, cursor, digits[index])) { return false }
+        if (index == 0) { break }
+        index -= 1
+    }
+    return true
+}
+
+// put_hex_group 写入一个小写十六进制组，去掉前导零（0 写 "0"）。
+fn put_hex_group(out []u8, cursor *u64, value u16) bool {
+    let started bool = false
+    let shift int = 12
+    for 1 {
+        let nibble u16 = (value >> shift.to_type(u16)) & 15
+        if (nibble != 0 || started || shift == 0) {
+            let digit u8 = 0
+            if (nibble < 10) {
+                digit = (48 + nibble).to_type(u8)
+            } else {
+                digit = (87 + nibble).to_type(u8)
+            }
+            if (!put_byte(out, cursor, digit)) { return false }
+            started = true
+        }
+        if (shift == 0) { break }
+        shift -= 4
+    }
+    return true
+}
+
+// longest_zero_run 返回 IPv6 组序列里最长的连续零组（长度 >= 2）；
+// 没有这样的区段时返回 start = -1，用于决定 "::" 的压缩位置。
+fn longest_zero_run(address [16]u8, start *int, length *int) void {
+    start[0] = -1
+    length[0] = 0
+    let index int = 0
+    let current int = -1
+    let run int = 0
+    for index < 8 {
+        let high u8 = address[index * 2]
+        let low u8 = address[index * 2 + 1]
+        if (high == 0 && low == 0) {
+            if (current < 0) {
+                current = index
+                run = 0
+            }
+            run += 1
+            if (run > length[0] && run >= 2) {
+                start[0] = current
+                length[0] = run
+            }
+        } else {
+            current = -1
+            run = 0
+        }
+        index += 1
+    }
+}
+
+// group_at 读取第 index 组的网络序值。
+fn group_at(address [16]u8, index int) u16 {
+    return (address[index * 2].to_type(u16) << 8) | address[index * 2 + 1].to_type(u16)
+}
+
+// format_endpoint 把端点写成 "a.b.c.d:port" 或 "[v6]:port"。
+// 空间不足返回 status_overflow，且不写半截内容以外的字节位置不做保证。
+pub fn format_endpoint(endpoint Endpoint, out []u8) TextResult {
+    let result TextResult
+    result.status = status_ok
+    result.count = 0
+    let cursor u64 = 0
+    if (endpoint.family == family_inet4) {
+        let index int = 0
+        for index < 4 {
+            if (index > 0) {
+                if (!put_byte(out, &cursor, 46)) {
+                    result.status = status_overflow
+                    return result
+                }
+            }
+            if (!put_decimal(out, &cursor, endpoint.address[index].to_type(u32))) {
+                result.status = status_overflow
+                return result
+            }
+            index += 1
+        }
+    } else {
+        if (!put_byte(out, &cursor, 91)) {
+            result.status = status_overflow
+            return result
+        }
+        let run_start int = 0
+        let run_length int = 0
+        longest_zero_run(endpoint.address, &run_start, &run_length)
+        let group int = 0
+        for group < 8 {
+            if (run_length > 0 && group == run_start) {
+                if (!put_byte(out, &cursor, 58)) {
+                    result.status = status_overflow
+                    return result
+                }
+                if (!put_byte(out, &cursor, 58)) {
+                    result.status = status_overflow
+                    return result
+                }
+                group += run_length
+            } else {
+                if (group > 0 && !(run_length > 0 && group == run_start + run_length)) {
+                    if (!put_byte(out, &cursor, 58)) {
+                        result.status = status_overflow
+                        return result
+                    }
+                }
+                if (!put_hex_group(out, &cursor, group_at(endpoint.address, group))) {
+                    result.status = status_overflow
+                    return result
+                }
+                group += 1
+            }
+        }
+        if (!put_byte(out, &cursor, 93)) {
+            result.status = status_overflow
+            return result
+        }
+    }
+    if (!put_byte(out, &cursor, 58)) {
+        result.status = status_overflow
+        return result
+    }
+    if (!put_decimal(out, &cursor, endpoint.port.to_type(u32))) {
+        result.status = status_overflow
+        return result
+    }
+    result.count = cursor
+    return result
+}

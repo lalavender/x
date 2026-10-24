@@ -1212,3 +1212,57 @@
   线程池顺序、串行/2/4 worker 一致性验收。
 - **状态**：设计门完成，LA4/LA5 代码实现未启动；继续 fork/COW 与单模块对象，
   不宣称文件对象或线程安全完成。
+
+# 2026-10-24 NET0：sys 网络原语与 HTTP 标准库设计定稿
+
+- **设计**：新增 [HTTP 标准库设计](03-design/yh-http标准库设计-2026-10-24.md)
+  与 [ADR-0018](adr/0018-yh网络与HTTP标准库分层.md)。核查确认仓库此前无任何
+  HTTP 实现、`libs/sys` 无 socket 原语、`libs/os` 明确不承诺网络，故按
+  「sys socket → net → http」三级推进。用户确认六项：首期含服务端、TLS 走可选
+  `libs/tls`（系统 OpenSSL）、DNS 纯 yh、并发后置、服务端 `Date` 先补 `time`、
+  补 ADR-0018。libcurl 评估结论：能链（`[c].libs`/`[c].sources` 已实现）但不
+  采用——`curl_easy_setopt` 是 C 变参、数据面靠回调、依赖形态不可控。
+- **NET0 实现**：`libs/sys/00_types.yh` 增 `PollFd`（8 字节）与 `Timeval`
+  （16 字节）；三份平台常量文件增 `AF_*`/`SOCK_*`/`IPPROTO_*`/`SOL_SOCKET`/
+  `SO_*`/`POLL*`/`SHUT_*`/`MSG_NOSIGNAL`/网络 errno（Linux 另加 socket 族
+  `NR_*` 与 `F_GETFL`/`F_SETFL`）；新增 `70_socket.linux.yh`（raw6）与
+  `70_socket.darwin.yh`（libSystem 桥），共 12 个原语，Linux 另加 `fcntl_fd`。
+- **探针实测**（Darwin/arm64，`tmp/probe/`，不入库）：结构体数组字面量、函数
+  指针字段、结构体切片、`Io` 经 `*Io` 调用、单进程环回 socket 闭环、
+  `ECONNREFUSED=61`、`poll` 超时/就绪语义全部可用。发现并写入设计的约束：
+  `len` 是保留字、无 `while` 语句、Darwin 无 fcntl 通道（非阻塞 connect 只在
+  Linux 可用）、本机出站连接被环境代理接受（connect 超时无法本地验证）。
+- **验证**：新增 `tests/modules/projects/netsys/` 并登记
+  `net0-sys-socket-loopback`（结构布局、收发、poll、半关闭 EOF、errno 归一化）；
+  `make test` 八个阶段全过（ANTLR、编译器语法 356/357 含 1 跳过、modules
+  test-check、string 5/5、compiler-tests 3/3、stats；toml 阶段因会话批量删除
+  守卫拦截旧工作目录清理而退出非零，换新目录复跑 6/6 通过）。
+  `make selfhost-native` 本轮未跑完：其清理步骤要删 `compiler/.build` 的
+  2600+ 文件被同一守卫拦住，改用手工两代构建时第二代链接缺自举闭包参数
+  （`-lc++`/SDKROOT 由构建机提供）。两项都是本机环境问题，且 libs 改动不参与
+  编译器固定点。未滚种子、未改语法、未改编译器。
+
+# 2026-10-24 NET1：net 模块（地址 + TCP）
+
+- **实现**：新增 `libs/net/`：`00_model.yh`（Family/Status/Endpoint/TcpStream/
+  TcpListener 与结果结构）、`05_error.yh`（errno → os.Error，含把套接字超时的
+  EAGAIN 改写为 `error_timed_out`）、`10_address.yh`（IPv4/IPv6 解析与 RFC 5952
+  压缩格式化，纯函数）、`20_tcp.{linux,darwin}.yh`（dial/listen/accept/
+  read_some/write_some/write_all/shutdown_write/close_stream/close_listener/
+  listener_local）、`99_tests.yh`、`doc.yh`、`README.md`；`libs/project.toml`
+  注册 `net`，Makefile 的 `test`/`test-lib-tests`/`selfhost-native` 增加
+  `yh test net`。
+- **os 扩展**：`ErrorKind` 末尾追加 7 个网络成员（既有取值不变），
+  `error_kind_for` 增加对应映射，新增公开 `os.error_from_errno`。
+- **平台差异**：Darwin 用阻塞 connect（`fcntl` 是 C 变参，yh 无法声明）+
+  `SO_NOSIGPIPE`；Linux 用 `fcntl(O_NONBLOCK)` + poll + `SO_ERROR` +
+  `MSG_NOSIGNAL`，connect 超时生效。
+- **命名修正**：`read`/`write` 与编译器 prelude 重名（实测报「顶层符号重定义」），
+  改名为 `read_some`/`write_some`，与 os 对齐；设计 §5.2 同步。
+- **验收**：`yh test net` 4/4（IPv4、IPv6 压缩、非法输入、容量不足）；
+  新增 `tests/modules/projects/netecho/` 并登记 `net1-net-tcp-loopback`
+  （端口 0 回读、accept 超时、双向收发、半关闭 EOF、连接被拒、IPv6 `::1`
+  环回），在 build-check 中 OK。`make test` 各阶段：ANTLR/语法语料 356/357
+  （含 1 跳过）、modules test-check、string 5/5、net 4/4、compiler-tests 3/3
+  全过；toml 阶段受会话批量删除守卫影响，用 `--keep` 复跑 6/6；代码统计脚本
+  因同环境 mkdir 被拒未运行。未滚种子、未改语法、未改编译器。

@@ -1,0 +1,185 @@
+module main;
+
+import net;
+import os;
+import string;
+
+// netecho 验证 net 模块的地址解析/格式化与 TCP 环回闭环：
+// 端口 0 分配与回读、accept 超时、双向收发、半关闭 EOF、连接被拒分类。
+// 全部走 127.0.0.1，不联网、不查询 DNS。
+
+fn view_of(text *char) string.View {
+    let result string.ViewResult = string.view_cstr(text);
+    return result.value;
+}
+
+fn expect_text(endpoint net.Endpoint, expected *char) int {
+    let buffer [64]u8;
+    let written net.TextResult = net.format_endpoint(endpoint, buffer[0..64]);
+    if (written.status != net.status_ok) { return -1; }
+    let actual string.View;
+    actual.data = &buffer[0];
+    actual.count = written.count;
+    if (!string.view_equal(actual, view_of(expected))) { return -2; }
+    return 0;
+}
+
+fn address_tests() int {
+    // IPv4 + 显式端口
+    let parsed net.EndpointResult = net.parse_endpoint(view_of("127.0.0.1:8080"), 0);
+    if (parsed.status != net.status_ok) { return 1; }
+    if (parsed.value.port != 8080) { return 2; }
+    if (parsed.value.address[0] != 127 || parsed.value.address[3] != 1) { return 3; }
+    if (parsed.value.family != net.family_inet4) { return 4; }
+    if (expect_text(parsed.value, "127.0.0.1:8080") != 0) { return 5; }
+
+    // 省略端口时用默认值
+    let simple net.EndpointResult = net.parse_endpoint(view_of("10.0.0.7"), 443);
+    if (simple.status != net.status_ok || simple.value.port != 443) { return 6; }
+
+    // 方括号 IPv6 + 压缩零段
+    let v6 net.EndpointResult = net.parse_endpoint(view_of("[::1]:53"), 0);
+    if (v6.status != net.status_ok) { return 7; }
+    if (v6.value.family != net.family_inet6 || v6.value.port != 53) { return 8; }
+    let index int = 0;
+    for index < 15 {
+        if (v6.value.address[index] != 0) { return 9; }
+        index += 1;
+    }
+    if (v6.value.address[15] != 1) { return 10; }
+    if (expect_text(v6.value, "[::1]:53") != 0) { return 11; }
+
+    // 不带端口的方括号 IPv6
+    let bare net.EndpointResult = net.parse_endpoint(view_of("[2001:db8::1]"), 80);
+    if (bare.status != net.status_ok || bare.value.port != 80) { return 12; }
+    if (expect_text(bare.value, "[2001:db8::1]:80") != 0) { return 13; }
+
+    // 非法输入必须被拒绝
+    let bad_port net.EndpointResult = net.parse_endpoint(view_of("127.0.0.1:99999"), 0);
+    if (bad_port.status != net.status_invalid_address) { return 14; }
+    let bad_octet net.EndpointResult = net.parse_endpoint(view_of("127.0.0.256"), 0);
+    if (bad_octet.status != net.status_invalid_address) { return 15; }
+    let bad_bare_v6 net.EndpointResult = net.parse_endpoint(view_of("::1"), 0);
+    if (bad_bare_v6.status != net.status_invalid_address) { return 16; }
+    let empty net.EndpointResult = net.parse_endpoint(view_of(""), 0);
+    if (empty.status != net.status_invalid_argument) { return 17; }
+    return 0;
+}
+
+fn echo_tests() int {
+    let listening net.ListenerResult = net.listen(
+        net.endpoint_ipv4(127, 0, 0, 1, 0), 8);
+    if (listening.error.kind != os.error_none) { return 20; }
+    if (listening.listener.fd < 0) { return 21; }
+
+    let local net.EndpointResult = net.listener_local(&listening.listener);
+    if (local.status != net.status_ok) { return 22; }
+    if (local.value.port == 0) { return 23; }
+    let port u16 = local.value.port;
+
+    // 没有待处理连接时 accept 必须按超时返回，而不是阻塞。
+    let idle net.AcceptResult = net.accept(&listening.listener, 20);
+    if (idle.error.kind != os.error_timed_out) { return 24; }
+
+    let dialed net.StreamResult = net.dial(
+        net.endpoint_ipv4(127, 0, 0, 1, port), 1000);
+    if (dialed.error.kind != os.error_none) { return 25; }
+    let client net.TcpStream = dialed.stream;
+
+    let accepted net.AcceptResult = net.accept(&listening.listener, 1000);
+    if (accepted.error.kind != os.error_none) { return 26; }
+    if (accepted.peer.family != net.family_inet4) { return 27; }
+    if (accepted.peer.address[0] != 127) { return 28; }
+    let server net.TcpStream = accepted.stream;
+
+    // 客户端 -> 服务端
+    let ping [4]u8;
+    ping[0] = 80;
+    ping[1] = 73;
+    ping[2] = 78;
+    ping[3] = 71;
+    let sent os.IoResult = net.write_all(&client, ping[0..4]);
+    if (sent.error.kind != os.error_none || sent.count != 4) { return 29; }
+
+    let incoming [16]u8;
+    let got os.IoResult = net.read_some(&server, incoming[0..16]);
+    if (got.error.kind != os.error_none) { return 30; }
+    if (got.count != 4 || incoming[0] != 80 || incoming[3] != 71) { return 31; }
+
+    // 服务端 -> 客户端
+    let pong [4]u8;
+    pong[0] = 80;
+    pong[1] = 79;
+    pong[2] = 78;
+    pong[3] = 71;
+    if (net.write_some(&server, pong[0..4]).count != 4) { return 32; }
+    let back [16]u8;
+    let echoed os.IoResult = net.read_some(&client, back[0..16]);
+    if (echoed.error.kind != os.error_none || echoed.count != 4) { return 33; }
+    if (back[1] != 79) { return 34; }
+
+    // 半关闭后对端读到 EOF（count == 0 且无错误）
+    if (net.shutdown_write(&client).kind != os.error_none) { return 35; }
+    let tail [16]u8;
+    let closed os.IoResult = net.read_some(&server, tail[0..16]);
+    if (closed.error.kind != os.error_none || closed.count != 0) { return 36; }
+
+    net.close_stream(&client);
+    net.close_stream(&server);
+    net.close_listener(&listening.listener);
+
+    // 监听关闭后再连同一端口：必须是连接被拒（不是超时、不是其它错误）。
+    let refused net.StreamResult = net.dial(
+        net.endpoint_ipv4(127, 0, 0, 1, port), 1000);
+    if (refused.error.kind != os.error_connection_refused) { return 37; }
+    if (refused.stream.fd >= 0) { return 38; }
+    return 0;
+}
+
+// ipv6_tests 验证 IPv6 环回：字面量地址 → listen → dial → accept。
+// 若宿主没有 ::1 则跳过（返回 0），不能把「环境没配 v6」记成实现失败。
+fn ipv6_tests() int {
+    let loopback net.EndpointResult = net.parse_endpoint(view_of("[::1]:0"), 0);
+    if (loopback.status != net.status_ok) { return 40; }
+    let listening net.ListenerResult = net.listen(loopback.value, 8);
+    if (listening.error.kind != os.error_none) { return 0; }
+    let local net.EndpointResult = net.listener_local(&listening.listener);
+    if (local.status != net.status_ok) { return 41; }
+    if (local.value.family != net.family_inet6) { return 42; }
+    let dialed net.StreamResult = net.dial(local.value, 1000);
+    if (dialed.error.kind != os.error_none) { return 43; }
+    let accepted net.AcceptResult = net.accept(&listening.listener, 1000);
+    if (accepted.error.kind != os.error_none) { return 44; }
+    if (accepted.peer.family != net.family_inet6) { return 45; }
+    let byte [1]u8;
+    byte[0] = 86;
+    if (net.write_all(&accepted.stream, byte[0..1]).count != 1) { return 46; }
+    let echo [1]u8;
+    let got os.IoResult = net.read_some(&dialed.stream, echo[0..1]);
+    if (got.error.kind != os.error_none || got.count != 1) { return 47; }
+    if (echo[0] != 86) { return 48; }
+    net.close_stream(&dialed.stream);
+    net.close_stream(&accepted.stream);
+    net.close_listener(&listening.listener);
+    return 0;
+}
+
+fn main() int {
+    let address_failure int = address_tests();
+    if (address_failure != 0) {
+        printf("address %d\n", address_failure);
+        return 1;
+    }
+    let echo_failure int = echo_tests();
+    if (echo_failure != 0) {
+        printf("echo %d\n", echo_failure);
+        return 2;
+    }
+    let ipv6_failure int = ipv6_tests();
+    if (ipv6_failure != 0) {
+        printf("ipv6 %d\n", ipv6_failure);
+        return 3;
+    }
+    printf("net tcp ok\n");
+    return 0;
+}
