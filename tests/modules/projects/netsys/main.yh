@@ -1,0 +1,147 @@
+module main;
+
+import sys;
+
+// netsys 验证 sys 的网络原语闭环：结构布局、socket/bind/listen/connect/accept、
+// send/recv、poll 超时与就绪、以及连接被拒的 errno 归一化。
+// 全部走 127.0.0.1 环回，不联网；Linux 走原始 syscall，Darwin 走 libSystem。
+
+// SockAddrIn 是 IPv4 套接字地址：Darwin 首字节是 len，Linux 没有该字节，
+// 但两平台都是 16 字节，且 family/port/addr 的偏移一致（1/2/4 与 0/2/4 的
+// 差异由 fill_v4 按平台常量写 len 的方式吸收——这里直接按 Darwin 布局写，
+// Linux 会忽略首字节并把 family 读成 u16，因此改用显式字节写入）。
+struct RawAddr {
+    bytes [16]u8
+}
+
+// fill_v4 按目标平台的 sockaddr_in 布局写入 127.0.0.1:port。
+// 端口与地址都是网络字节序；Darwin 的 sin_len 位于偏移 0、family 在 1，
+// Linux 的 family 是偏移 0 的 u16。用 AF_INET6 的取值区分两个平台
+// （Linux=10，Darwin=30），避免依赖条件编译。
+fn fill_v4(target *RawAddr, port u16) void {
+    let index int = 0;
+    for index < 16 {
+        target.bytes[index] = 0;
+        index += 1;
+    }
+    if (sys.AF_INET6 == 10) {
+        target.bytes[0] = 2;
+        target.bytes[1] = 0;
+    } else {
+        target.bytes[0] = 16;
+        target.bytes[1] = 2;
+    }
+    target.bytes[2] = (port >> 8).to_type(u8);
+    target.bytes[3] = (port & 255).to_type(u8);
+    target.bytes[4] = 127;
+    target.bytes[5] = 0;
+    target.bytes[6] = 0;
+    target.bytes[7] = 1;
+}
+
+fn net_port(host u16) u16 {
+    let low u16 = host & 255;
+    let high u16 = host >> 8;
+    return (low << 8) | high;
+}
+
+fn host_port(network u16) u16 {
+    let low u16 = network & 255;
+    let high u16 = network >> 8;
+    return (low << 8) | high;
+}
+
+fn main() int {
+    // 结构布局：PollFd 固定 8 字节，Timeval 固定 16 字节。
+    if (sizeof(sys.PollFd) != 8) { return 1; }
+    if (sizeof(sys.Timeval) != 16) { return 2; }
+
+    let listener i64 = sys.socket_fd(sys.AF_INET, sys.SOCK_STREAM, sys.IPPROTO_TCP);
+    if (sys.is_error(listener) != 0) { return 3; }
+    let listen_fd int = listener.to_type(int);
+
+    let enable int = 1;
+    if (sys.set_socket_option(listen_fd, sys.SOL_SOCKET, sys.SO_REUSEADDR,
+        (&enable).to_type(*void), 4) != 0) {
+        return 4;
+    }
+
+    let local RawAddr;
+    fill_v4(&local, 0);
+    if (sys.bind_fd(listen_fd, (&local).to_type(*void), 16) != 0) { return 5; }
+
+    let bound RawAddr;
+    let bound_len u32 = 16;
+    if (sys.get_socket_name(listen_fd, (&bound).to_type(*void), &bound_len) != 0) {
+        return 6;
+    }
+    let port u16 = host_port((bound.bytes[2].to_type(u16) << 8) | bound.bytes[3].to_type(u16));
+    if (port == 0) { return 7; }
+
+    if (sys.listen_fd(listen_fd, 8) != 0) { return 8; }
+
+    // 同进程先 connect 再 accept：backlog 允许连接在内核排队。
+    let client i64 = sys.socket_fd(sys.AF_INET, sys.SOCK_STREAM, sys.IPPROTO_TCP);
+    if (sys.is_error(client) != 0) { return 9; }
+    let client_fd int = client.to_type(int);
+    let target RawAddr;
+    fill_v4(&target, net_port(port));
+    if (sys.connect_fd(client_fd, (&target).to_type(*void), 16) != 0) { return 10; }
+
+    let peer RawAddr;
+    let peer_len u32 = 16;
+    let server i64 = sys.accept_fd(listen_fd, (&peer).to_type(*void), &peer_len);
+    if (sys.is_error(server) != 0) { return 11; }
+    let server_fd int = server.to_type(int);
+
+    // poll：无数据时按超时返回 0，对端写入后返回 1 且 POLLIN 置位。
+    let watch [1]sys.PollFd;
+    watch[0].fd = client_fd;
+    watch[0].events = sys.POLLIN;
+    watch[0].revents = 0;
+    let idle i64 = sys.poll_fds(&watch[0], 1, 20);
+    if (idle != 0) { return 12; }
+
+    let out [4]u8;
+    out[0] = 80;
+    out[1] = 73;
+    out[2] = 78;
+    out[3] = 71;
+    if (sys.send_fd(client_fd, (&out[0]).to_type(*void), 4, 0) != 4) { return 13; }
+
+    // 数据已进入服务端的接收缓冲，因此要监视服务端 fd。
+    watch[0].fd = server_fd;
+    watch[0].revents = 0;
+    let ready i64 = sys.poll_fds(&watch[0], 1, 1000);
+    if (ready != 1) { return 14; }
+    if ((watch[0].revents & sys.POLLIN) == 0) { return 15; }
+
+    let inbuf [4]u8;
+    let got i64 = sys.recv_fd(server_fd, (&inbuf[0]).to_type(*void), 4, 0);
+    if (got != 4) { return 16; }
+    if (inbuf[0] != 80 || inbuf[3] != 71) { return 17; }
+
+    // 半关闭：客户端 shutdown(WR) 后，服务端 recv 应读到 0（有序关闭）。
+    if (sys.shutdown_fd(client_fd, sys.SHUT_WR) != 0) { return 18; }
+    let tail [4]u8;
+    let closed i64 = sys.recv_fd(server_fd, (&tail[0]).to_type(*void), 4, 0);
+    if (closed != 0) { return 19; }
+
+    sys.close_fd(client_fd);
+    sys.close_fd(server_fd);
+    sys.close_fd(listen_fd);
+
+    // 监听 fd 关闭后连同一端口：必须得到 ECONNREFUSED（Linux 111 / Darwin 61）。
+    let probe i64 = sys.socket_fd(sys.AF_INET, sys.SOCK_STREAM, sys.IPPROTO_TCP);
+    if (sys.is_error(probe) != 0) { return 20; }
+    let refused RawAddr;
+    fill_v4(&refused, net_port(port));
+    let result i64 = sys.connect_fd(probe.to_type(int), (&refused).to_type(*void), 16);
+    if (sys.is_error(result) == 0) { return 21; }
+    let code int = sys.error_code(result);
+    sys.close_fd(probe.to_type(int));
+    if (code != sys.ECONNREFUSED) { return 22; }
+
+    printf("sys net ok\n");
+    return 0;
+}

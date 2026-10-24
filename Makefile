@@ -331,6 +331,7 @@ test: stage-yh
 	python3 $(TOPSRC)/tests/yh-run/check.py --compiler $(YH_RUN) $(RUN_WORK_FLAG)
 	python3 $(TOPSRC)/tests/modules/test-check.py --compiler-path $(YH_RUN)
 	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
+	@cd $(TOPSRC)/libs && $(YH_RUN) test net --timeout 60
 	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/toml/run.py --compiler $(YH_RUN) --stdlib $(TOPSRC)/libs --workdir $(TOPSRC)/tmp/toml-test
 	python3 $(TOPSRC)/tests/tools/yh-code-stats/check.py
@@ -390,6 +391,7 @@ test-compiler-tests: stage-yh
 .PHONY: test-lib-tests
 test-lib-tests: stage-yh
 	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
+	@cd $(TOPSRC)/libs && $(YH_RUN) test net --timeout 60
 
 # quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
 # 秒级到十几秒，改语法/诊断时够用；运行语义与自举门留给 test/full。
@@ -416,6 +418,7 @@ selfhost-native: stage-yh
 	python3 $(TOPSRC)/tests/modules/check.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/modules/test-check.py --compiler-path $(YH_RUN)
 	@cd $(TOPSRC)/libs && $(YH_RUN) test string --timeout 60
+	@cd $(TOPSRC)/libs && $(YH_RUN) test net --timeout 60
 	python3 $(TOPSRC)/tools/compiler-tests.py --compiler-path $(YH_RUN)
 	python3 $(TOPSRC)/tests/modules/build-check.py --compiler-path $(YH_RUN) $(MODCHECK_FLAGS) $(MODCHECK_WORK_FLAG)
 

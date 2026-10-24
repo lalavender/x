@@ -1,0 +1,93 @@
+module net
+
+// ============================================================================
+// yh net 标准库 API 参考
+//
+// 本文件只包含文档注释，不导出任何符号；实现位于同模块的 00_model.yh、
+// 05_error.yh、10_address.yh 与平台文件 20_tcp.{linux,darwin}.yh。
+//
+// 设计见 docs/03-design/yh-http标准库设计-2026-10-24.md §5；
+// 分期见同文件 §14（NET1）。本模块只做「地址 + TCP」，不含 DNS 与 TLS：
+//   * DNS 在 NET5（纯 yh 解析器）交付，此前只接受字面量地址；
+//   * TLS 在 NET6 由 libs/tls 通过 http.Io 接入，net 不感知加密。
+//
+// 约定：
+//   * Endpoint.port 是主机序；address 是 16 字节网络序，IPv4 只用前 4 字节。
+//   * 所有失败都用 os.Error 表达（分类见 os.ErrorKind 的网络成员）；
+//     status 只表达 net 自己发现的参数/地址问题。
+//   * 句柄（TcpStream/TcpListener）是薄结构：fd + closed；关闭后 fd = -1，
+//     重复 close 幂等，关闭后调用读写返回 error_not_connected。
+//
+// ----------------------------------------------------------------------------
+// 1. 地址（00_model.yh / 10_address.yh）
+// ----------------------------------------------------------------------------
+//
+// Family = family_inet4 | family_inet6
+// Status = status_ok | status_invalid_argument | status_invalid_address
+//        | status_unsupported | status_overflow
+//
+// endpoint_ipv4(a u8, b u8, c u8, d u8, port u16) Endpoint
+//   直接构造 IPv4 端点。
+//
+// parse_endpoint(text string.View, default_port u16) EndpointResult
+//   接受 "a.b.c.d[:port]" 与 "[v6][:port]"；未写端口用 default_port。
+//   拒绝：裸 IPv6、IPv4 简写（127.1）、zone id、内嵌 IPv4 的 IPv6。
+//
+// format_endpoint(endpoint Endpoint, out []u8) TextResult
+//   写成 "a.b.c.d:port" 或 "[v6]:port"；IPv6 按 RFC 5952 压缩最长零段。
+//   容量不足返回 status_overflow，已写内容不保证完整。
+//
+// ----------------------------------------------------------------------------
+// 2. TCP（20_tcp.linux.yh / 20_tcp.darwin.yh）
+// ----------------------------------------------------------------------------
+//
+// listen(endpoint Endpoint, backlog int) ListenerResult
+//   创建监听；端口 0 表示内核分配。成功时 listener.fd >= 0。
+//   失败时 status 为 status_ok 且 error 携带内核分类。
+//
+// listener_local(listener *TcpListener) EndpointResult
+//   读回本地地址（端口 0 分配后取实际端口）。
+//
+// dial(endpoint Endpoint, timeout_ms int) StreamResult
+//   Linux：非阻塞 connect + poll + SO_ERROR，timeout_ms 覆盖连接阶段；
+//   Darwin：阻塞 connect，timeout_ms 只作用于之后的读写（见 README 的平台差异）。
+//
+// accept(listener *TcpListener, timeout_ms int) AcceptResult
+//   等待连接；timeout_ms < 0 无限等待，0 只探测。
+//   超时：status == status_ok、error.kind == error_timed_out、stream.fd == -1。
+//   成功时 peer 为对端 Endpoint（IPv4 或 IPv6）。
+//
+// read_some(stream *TcpStream, buffer []u8) os.IoResult
+//   读一次；count == 0 且无错误表示对端有序关闭；允许短读。
+//
+// write_some(stream *TcpStream, data []u8) os.IoResult
+//   写一次，允许短写；Linux 用 MSG_NOSIGNAL，Darwin 用 SO_NOSIGPIPE 抑制 SIGPIPE。
+//
+// write_all(stream *TcpStream, data []u8) os.IoResult
+//   循环写完全部字节；失败时 count 保留已写进度。
+//
+// shutdown_write(stream *TcpStream) os.Error
+//   半关闭写方向：对端读到 EOF，本端仍可读。
+//
+// close_stream(stream *TcpStream) os.Error
+// close_listener(listener *TcpListener) os.Error
+//   关闭句柄并置 fd = -1；重复调用幂等，返回 error_none。
+//
+// pub fn endpoint_ipv4(a u8, b u8, c u8, d u8, port u16) Endpoint;
+// pub fn parse_endpoint(text string.View, default_port u16) EndpointResult;
+// pub fn format_endpoint(endpoint Endpoint, out []u8) TextResult;
+// pub fn listen(endpoint Endpoint, backlog int) ListenerResult;
+// pub fn listener_local(listener *TcpListener) EndpointResult;
+// pub fn dial(endpoint Endpoint, timeout_ms int) StreamResult;
+// pub fn accept(listener *TcpListener, timeout_ms int) AcceptResult;
+// pub fn read_some(stream *TcpStream, buffer []u8) os.IoResult;
+// pub fn write_some(stream *TcpStream, data []u8) os.IoResult;
+// pub fn write_all(stream *TcpStream, data []u8) os.IoResult;
+// pub fn shutdown_write(stream *TcpStream) os.Error;
+// pub fn close_stream(stream *TcpStream) os.Error;
+// pub fn close_listener(listener *TcpListener) os.Error;
+
+// ============================================================================
+// 所有 pub 接口到此结束。上层消费者：libs/http（NET2 起）；
+// 示例与验收见 tests/modules/projects/netecho 与 libs/net/99_tests.yh。
+// ============================================================================

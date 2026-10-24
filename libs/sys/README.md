@@ -150,6 +150,34 @@ if (pid > 0) {
   带 `O_CLOEXEC`/`O_NONBLOCK` 的请求返回 `-ENOSYS`（见下节限制）。
 - `send_signal`：kill。
 
+## 网络（NET0，2026-10-24）
+
+sys 只提供「一次调用、返回内核结果或 `-errno`」的 socket 原语；地址构造、
+超时归一化、DNS 与 HTTP 都在 [net](../net/README.md) 与 http 层。
+
+```yh
+// 环回监听 + 读回内核分配的端口（完整用例见
+// tests/modules/projects/netsys/main.yh）。
+let listener i64 = sys.socket_fd(sys.AF_INET, sys.SOCK_STREAM, sys.IPPROTO_TCP);
+if (sys.is_error(listener) == 0) {
+    let enable int = 1;
+    sys.set_socket_option(listener.to_type(int), sys.SOL_SOCKET,
+        sys.SO_REUSEADDR, (&enable).to_type(*void), 4);
+    // sockaddr 由 net 层按平台布局填写；sys 只接收指针与长度。
+    sys.bind_fd(listener.to_type(int), addr, 16);
+    sys.listen_fd(listener.to_type(int), 8);
+}
+```
+
+- 结构：`PollFd`（8 字节）与 `Timeval`（16 字节）在 `00_types.yh`。
+- 原语：`socket_fd`、`connect_fd`、`bind_fd`、`listen_fd`、`accept_fd`、
+  `get_socket_name`、`shutdown_fd`、`set_socket_option`、
+  `get_socket_option`、`send_fd`、`recv_fd`、`poll_fds`。
+- `poll_fds` 的 `timeout_ms`：负数无限等待、0 只探测；Linux 走 ppoll。
+- `fcntl_fd` 仅 Linux，用于 net 的非阻塞 connect；Darwin 没有等价入口。
+- SIGPIPE：Linux 用 `send_fd` 的 `MSG_NOSIGNAL`，Darwin 用
+  `SO_NOSIGPIPE` 选项（net 在连接建立后设置），不安装全局信号处理器。
+
 ## 常量与平台
 
 - Linux 调用号、`O_*`、errno 按 ISA 分开维护。AArch64
@@ -169,6 +197,10 @@ if (pid > 0) {
   实参也是变参。os 的 Darwin `spawn` 因此改用 `posix_spawn`，不依赖管道。
 - 目录读取走 `getattrlistbulk`：每批返回若干条目组，组内布局由 os 解析；
   缓冲不足一条记录时返回 `-ERANGE`（os 归一化为 `error_invalid_argument`）。
+- 网络原语不提供改阻塞模式的入口：Darwin 的 `fcntl`/`ioctl` 同样是 C 变参，
+  所以 net 在 Darwin 上只能用阻塞 `connect`（连接阶段超时不生效，读写超时
+  仍可用 `SO_RCVTIMEO`/`SO_SNDTIMEO`）；Linux 通过 `fcntl_fd` 支持
+  非阻塞 connect + poll + `SO_ERROR`。
 
 ## 实现文件
 
@@ -188,6 +220,8 @@ libs/sys/
   50_time.darwin.yh            clock_gettime/nanosleep（libSystem）
   60_process.linux.yh          PID/fork/exec/wait/exit/signal（系统调用）
   60_process.darwin.yh         PID/fork/exec/wait/exit/signal/posix_spawn
+  70_socket.linux.yh           socket/connect/bind/listen/accept/poll（系统调用）
+  70_socket.darwin.yh          同一组原语的 libSystem 桥
   doc.yh                       仅注释的完整 API 参考
 ```
 
@@ -195,4 +229,7 @@ libs/sys/
 
 duplicate_fd/fd_flags 与编译器迁移（OS7）仍待后续；旧 os/io/time 接口
 保持原契约。Darwin 的变参入口（openat/fcntl 第三实参）要等 C ABI 支持
-变参后再补齐，当前按上面的限制显式报错。
+变参后再补齐，当前按上面的限制显式报错。网络的上层（net 的
+`Endpoint`/TCP 封装、http 的消息模型与两端）按
+[HTTP 标准库设计](../../docs/03-design/yh-http标准库设计-2026-10-24.md) 的
+M1–M7 推进，本层只到 NET0。

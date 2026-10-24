@@ -1,0 +1,113 @@
+module sys
+
+// Linux 网络原语：与文件/进程原语同一契约——每次只执行一次内核调用，
+// 成功返回内核原始值，失败返回 -errno；不缓冲、不重试、不解析地址、
+// 不分类应用错误。sockaddr 的构造与解析由 net 消费者完成。
+//
+// 与 Darwin 的差异：Linux 可以在 socket() 之外用 fcntl 改阻塞模式，
+// 因此非阻塞 connect 由 net 在本层之上组合；Darwin 的 fcntl 是 C 变参，
+// yh 无法声明，详见 70_socket.darwin.yh 的说明。
+
+// socket_fd 创建一个套接字，返回 fd 或负 errno。
+// domain 用 AF_INET/AF_INET6，kind 用 SOCK_STREAM/SOCK_DGRAM，
+// protocol 通常为 0（按 kind 取默认），TCP 显式传 IPPROTO_TCP 更清楚。
+pub fn socket_fd(domain int, kind int, protocol int) i64 {
+    return raw6(NR_SOCKET, domain.to_type(u64), kind.to_type(u64),
+        protocol.to_type(u64), 0.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+}
+
+// connect_fd 在阻塞套接字上发起连接，成功返回 0，失败返回负 errno。
+// 对非阻塞套接字返回 -EINPROGRESS，调用方需自行 poll 后取 SO_ERROR。
+pub fn connect_fd(fd int, addr *void, addr_len u32) i64 {
+    return raw6(NR_CONNECT, fd.to_type(u64), addr.to_type(u64),
+        addr_len.to_type(u64), 0.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+}
+
+// bind_fd 绑定本地地址，成功返回 0，失败返回负 errno。
+// 端口传 0 表示让内核分配（配合 get_socket_name 读回实际端口）。
+pub fn bind_fd(fd int, addr *void, addr_len u32) i64 {
+    return raw6(NR_BIND, fd.to_type(u64), addr.to_type(u64),
+        addr_len.to_type(u64), 0.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+}
+
+// listen_fd 开始监听，backlog 为排队上限，成功返回 0。
+pub fn listen_fd(fd int, backlog int) i64 {
+    return raw6(NR_LISTEN, fd.to_type(u64), backlog.to_type(u64),
+        0.to_type(u64), 0.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+}
+
+// accept_fd 接受一个连接，返回新 fd 或负 errno。
+// 内部使用 accept4 并带 O_CLOEXEC（数值与 SOCK_CLOEXEC 相同），
+// 因此新 fd 默认不跨 exec 继承；addr 可为空指针，addr_len 随之为空。
+pub fn accept_fd(fd int, addr *void, addr_len *u32) i64 {
+    return raw6(NR_ACCEPT4, fd.to_type(u64), addr.to_type(u64),
+        addr_len.to_type(u64), O_CLOEXEC.to_type(u64),
+        0.to_type(u64), 0.to_type(u64))
+}
+
+// get_socket_name 读取套接字本地地址，成功返回 0。
+// addr_len 是传入容量、回写实际长度的双向参数。
+pub fn get_socket_name(fd int, addr *void, addr_len *u32) i64 {
+    return raw6(NR_GETSOCKNAME, fd.to_type(u64), addr.to_type(u64),
+        addr_len.to_type(u64), 0.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+}
+
+// shutdown_fd 关闭读/写方向（SHUT_RD/SHUT_WR/SHUT_RDWR），成功返回 0。
+pub fn shutdown_fd(fd int, how int) i64 {
+    return raw6(NR_SHUTDOWN, fd.to_type(u64), how.to_type(u64),
+        0.to_type(u64), 0.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+}
+
+// set_socket_option 设置套接字选项，成功返回 0。
+// value 指向选项值，opt_len 是其字节数；超时用 sys.Timeval。
+pub fn set_socket_option(fd int, level int, opt_name int,
+    value *void, opt_len u32) i64 {
+    return raw6(NR_SETSOCKOPT, fd.to_type(u64), level.to_type(u64),
+        opt_name.to_type(u64), value.to_type(u64), opt_len.to_type(u64),
+        0.to_type(u64))
+}
+
+// get_socket_option 读取套接字选项，成功返回 0 并把实际长度写回 opt_len。
+// 非阻塞 connect 之后用 SO_ERROR 取真实结果：0 表示连接成功。
+pub fn get_socket_option(fd int, level int, opt_name int,
+    value *void, opt_len *u32) i64 {
+    return raw6(NR_GETSOCKOPT, fd.to_type(u64), level.to_type(u64),
+        opt_name.to_type(u64), value.to_type(u64), opt_len.to_type(u64),
+        0.to_type(u64))
+}
+
+// send_fd 向已连接套接字写入至多 count 字节，返回实际写入数或负 errno。
+// flags 用于传 MSG_NOSIGNAL（避免对端关闭时收到 SIGPIPE）；允许短写。
+pub fn send_fd(fd int, buffer *void, count u64, flags int) i64 {
+    return raw6(NR_SENDTO, fd.to_type(u64), buffer.to_type(u64), count,
+        flags.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+}
+
+// recv_fd 从已连接套接字读取至多 count 字节，返回实际读入数或负 errno。
+// 返回 0 表示对端有序关闭；允许短读，不重试 EINTR。
+pub fn recv_fd(fd int, buffer *void, count u64, flags int) i64 {
+    return raw6(NR_RECVFROM, fd.to_type(u64), buffer.to_type(u64), count,
+        flags.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+}
+
+// poll_fds 等待 entries 上任意事件，返回就绪槽数或负 errno。
+// timeout_ms 为负表示无限等待，0 表示只探测不等待。
+// 内部走 ppoll（arm64 没有 poll 系统调用），第 4 个参数固定传空 sigset。
+pub fn poll_fds(entries *PollFd, count u64, timeout_ms int) i64 {
+    if (timeout_ms < 0) {
+        return raw6(NR_PPOLL, entries.to_type(u64), count,
+            0.to_type(u64), 0.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+    }
+    let wait Timespec
+    wait.sec = (timeout_ms / 1000).to_type(i64)
+    wait.nsec = ((timeout_ms % 1000) * 1000000).to_type(i64)
+    return raw6(NR_PPOLL, entries.to_type(u64), count,
+        (&wait).to_type(u64), 0.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+}
+
+// fcntl_fd 修改描述符标志，成功返回命令相关的非负值，失败返回负 errno。
+// 仅供 net 设置/清除 O_NONBLOCK；Darwin 没有等价入口（fcntl 是 C 变参）。
+pub fn fcntl_fd(fd int, cmd int, arg int) i64 {
+    return raw6(NR_FCNTL, fd.to_type(u64), cmd.to_type(u64),
+        arg.to_type(u64), 0.to_type(u64), 0.to_type(u64), 0.to_type(u64))
+}

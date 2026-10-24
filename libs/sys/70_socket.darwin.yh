@@ -1,0 +1,98 @@
+module sys
+
+// Darwin 网络原语：经 libSystem 调用，返回 0/字节数/fd 或 -errno，
+// 与 Linux 实现保持同一契约（一次调用、允许短读写、不重试 EINTR）。
+//
+// 已知平台差异（2026-10-24 实测）：
+//   * Darwin 的 fcntl/ioctl 是 C 变参入口，yh 的 @[extern] 只能声明定参，
+//     因此本层**不提供**改阻塞模式的入口，net 在 Darwin 上只能用阻塞 connect
+//     （连接阶段的 timeout_ms 不生效，读写超时仍可用 SO_RCVTIMEO/SO_SNDTIMEO）。
+//   * Darwin 没有 MSG_NOSIGNAL，抑制 SIGPIPE 要在连接建立后设 SO_NOSIGPIPE，
+//     net 在 accept/dial 之后统一设置。
+//
+// 下列 @[extern] 声明按 macOS SDK 的 POSIX 原型给出，参数名不用 len
+// （len 是 yh 的保留字）。
+
+@[extern] fn socket(domain int, kind int, protocol int) int
+@[extern] fn connect(fd int, addr *void, addr_len u32) int
+@[extern] fn bind(fd int, addr *void, addr_len u32) int
+@[extern] fn listen(fd int, backlog int) int
+@[extern] fn accept(fd int, addr *void, addr_len *u32) int
+@[extern] fn getsockname(fd int, addr *void, addr_len *u32) int
+@[extern] fn getsockopt(fd int, level int, opt_name int,
+    value *void, opt_len *u32) int
+@[extern] fn setsockopt(fd int, level int, opt_name int,
+    value *void, opt_len u32) int
+@[extern] fn shutdown(fd int, how int) int
+@[extern] fn send(fd int, buffer *void, count u64, flags int) i64
+@[extern] fn recv(fd int, buffer *void, count u64, flags int) i64
+@[extern] fn poll(entries *void, count u32, timeout_ms int) int
+
+// socket_fd 创建一个套接字，返回 fd 或负 errno。
+pub fn socket_fd(domain int, kind int, protocol int) i64 {
+    return errno_result(socket(domain, kind, protocol).to_type(i64))
+}
+
+// connect_fd 在阻塞套接字上发起连接，成功返回 0，失败返回负 errno。
+// Darwin 无法在 yh 层切换非阻塞模式，因此这里不支持 EINPROGRESS 流程。
+pub fn connect_fd(fd int, addr *void, addr_len u32) i64 {
+    return errno_result(connect(fd, addr, addr_len).to_type(i64))
+}
+
+// bind_fd 绑定本地地址，成功返回 0。
+pub fn bind_fd(fd int, addr *void, addr_len u32) i64 {
+    return errno_result(bind(fd, addr, addr_len).to_type(i64))
+}
+
+// listen_fd 开始监听，backlog 为排队上限，成功返回 0。
+pub fn listen_fd(fd int, backlog int) i64 {
+    return errno_result(listen(fd, backlog).to_type(i64))
+}
+
+// accept_fd 接受一个连接，返回新 fd 或负 errno。
+// Darwin 的 accept 没有 flags 参数，新 fd 不带 CLOEXEC；需要时由 net 侧
+// 在 fork/exec 场景显式处理（首期不涉及）。
+pub fn accept_fd(fd int, addr *void, addr_len *u32) i64 {
+    return errno_result(accept(fd, addr, addr_len).to_type(i64))
+}
+
+// get_socket_name 读取套接字本地地址，成功返回 0。
+pub fn get_socket_name(fd int, addr *void, addr_len *u32) i64 {
+    return errno_result(getsockname(fd, addr, addr_len).to_type(i64))
+}
+
+// shutdown_fd 关闭读/写方向（SHUT_RD/SHUT_WR/SHUT_RDWR），成功返回 0。
+pub fn shutdown_fd(fd int, how int) i64 {
+    return errno_result(shutdown(fd, how).to_type(i64))
+}
+
+// set_socket_option 设置套接字选项，成功返回 0。
+pub fn set_socket_option(fd int, level int, opt_name int,
+    value *void, opt_len u32) i64 {
+    return errno_result(setsockopt(fd, level, opt_name, value, opt_len).to_type(i64))
+}
+
+// get_socket_option 读取套接字选项，成功返回 0 并把实际长度写回 opt_len。
+pub fn get_socket_option(fd int, level int, opt_name int,
+    value *void, opt_len *u32) i64 {
+    return errno_result(getsockopt(fd, level, opt_name, value, opt_len).to_type(i64))
+}
+
+// send_fd 向已连接套接字写入至多 count 字节，返回实际写入数或负 errno。
+// flags 在 Darwin 上通常传 0；SIGPIPE 由 SO_NOSIGPIPE 选项抑制。
+pub fn send_fd(fd int, buffer *void, count u64, flags int) i64 {
+    return errno_result(send(fd, buffer, count, flags))
+}
+
+// recv_fd 从已连接套接字读取至多 count 字节，返回实际读入数或负 errno。
+// 返回 0 表示对端有序关闭。
+pub fn recv_fd(fd int, buffer *void, count u64, flags int) i64 {
+    return errno_result(recv(fd, buffer, count, flags))
+}
+
+// poll_fds 等待 entries 上任意事件，返回就绪槽数或负 errno。
+// timeout_ms 为负表示无限等待，0 表示只探测不等待。
+pub fn poll_fds(entries *PollFd, count u64, timeout_ms int) i64 {
+    return errno_result(poll(entries.to_type(*void), count.to_type(u32),
+        timeout_ms).to_type(i64))
+}

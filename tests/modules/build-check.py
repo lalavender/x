@@ -208,6 +208,11 @@ case("os0-os-result-model", "stdlib-run", "osmodel", ".", 0,
      stdout="os model ok\n")
 case("os5-io-write-result", "stdlib-run", "osio", ".", 0,
      stdout="os io ok\n")
+# —— NET0/NET1：sys 网络原语与 net 的 TCP 环回（不联网、不查 DNS） ——
+case("net0-sys-socket-loopback", "stdlib-run", "netsys", ".", 0,
+     stdout="sys net ok\n")
+case("net1-net-tcp-loopback", "stdlib-run", "netecho", ".", 0,
+     stdout="net tcp ok\n")
 # —— OS6：可执行文件附近的默认标准库发现（空 YH_STDLIB 触发默认路径） ——
 case("os6-default-stdlib", "default-stdlib-run", "osmodel", ".", 0,
      stdout="os model ok\n")
