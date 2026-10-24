@@ -25,7 +25,9 @@ YH_STDLIB=/path/to/yh/libs yh run
 已登记的 `clock_gettime`，`math` 使用宿主 C 数学符号。libc 裸变参 `printf`
 仍由 yh 自有运行时处理，不进入 FFI。
 
-### `io`
+### `io`（2026-10-24 扩展为完整读写层）
+
+2026-10-24 之前的四个写侧接口保持原签名、返回值与 NUL 截止语义：
 
 | API | 契约 |
 | --- | --- |
@@ -34,8 +36,29 @@ YH_STDLIB=/path/to/yh/libs yh run
 | `print(text *char) int` | 将 NUL 结尾字符串写到标准输出，不追加换行；成功返回 0，失败返回 -1 |
 | `println(text *char) int` | 写字符串并追加一个换行；成功返回 0，失败返回 -1 |
 
-`io` 经 `os.write_once` 写入（Linux 映射 sys -errno，Darwin 使用 prelude 兼容入口），
-字符串长度仍用 prelude `strlen`。
+IO0–IO4 新增（`00_model.yh`/`10_read.yh`/`20_write.yh`）：
+
+| 组 | API |
+| --- | --- |
+| 模型 | `Status`（`status_ok`/`status_eof`/`status_truncated`/`status_invalid_argument`/`status_io_error`）、`ReadResult`、`ByteResult`、`Reader`、`Writer`、`IO_BUFFER_SIZE = 8192` |
+| 整段读写 | `read_all`、`read_file`、`write_bytes`、`write_file`（后两者支持内嵌 NUL 与长度） |
+| 有缓冲读 | `reader_init`、`reader_read`、`reader_read_byte`、`reader_read_line`、`reader_buffered` |
+| 有缓冲写 | `writer_init`、`writer_write`、`writer_write_byte`、`writer_flush`、`writer_pending` |
+
+`io` 只依赖 `os`：在 `os.read_some`/`write_some` 的单次原语上做循环、缓冲、进度
+与行语义，**不分配内存**（缓冲由调用方提供，与 `os.open_dir`/`os.get_cwd` 同
+风格），不关闭 `reader_*`/`writer_*` 绑定的 fd。行只按 `\n` 切分、`\r` 保留、
+换行包含在结果里；超长行填满输出后丢弃该行剩余字节并返回 `status_truncated`。
+EINTR 不自动重试；`Reader`/`Writer` 错误粘滞，`writer_flush` 仅在
+`error_interrupted` 后允许显式重试剩余字节。
+
+`read_all` 用 `status_ok` 表示确认到达 EOF，输出恰好填满时返回
+`status_truncated`（零分配下无法在不读一个字节的前提下确认 EOF）。
+
+设计见 [io 标准库设计](yh-io标准库设计-2026-10-24.md)，IO0–IO6 分期见
+[实施方案](../02-plan/yh-io标准库实施方案-2026-10-24.md)，用法见
+[`libs/io/README.md`](../../libs/io/README.md)。IO5（toml 读文件迁移）与
+IO6（seek/copy，依赖 `os` 补 `lseek`/`fstat`）尚未实施。
 
 ### `memory`
 
@@ -214,6 +237,8 @@ Go 的 `%` 格式串与 `Printf` 族。语言没有 `any`/接口/反射，插值
 
 ## 当前边界
 
-当前基础层不定义完整文件句柄、错误类型、缓冲策略、Unicode 处理或跨平台 ABI；
+`io` 自 2026-10-24 起提供调用方缓冲的 `Reader`/`Writer` 与行读取，但仍不定义
+可 seek 的文件句柄（`os`/`sys` 无 `lseek`/`fstat`）、异步/非阻塞 IO、网络与
+`mmap`；缓冲策略固定为"调用方提供、本层不分配"。Unicode 处理见 `string`，
 通用格式化由上述规划的 V 风格插值与 `fmt` 运行时承接，尚未实现。库源码
 跨平台验收不在本阶段范围内；后续 API 按实际需求追加设计和 `.yh` 项目测试。

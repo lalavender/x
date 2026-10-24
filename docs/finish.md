@@ -2,6 +2,25 @@
 
 靠前条目记录最近状态；后续条目保留各次交付时的历史状态。
 
+## 2026-10-24 io 标准库读写层（IO0–IO4）
+
+- **内容**：`libs/io` 从四个写侧接口扩展为完整读写层：`read_all`/`read_file`/
+  `write_bytes`/`write_file` 与调用方缓冲的 `Reader`/`Writer`（行读取、显式
+  flush、粘滞错误与 `interrupted` 显式重试），`write_all_result`/`write_all`
+  原样迁入 `20_write.yh`，`print`/`println` 留在 `io.yh`；新增
+  `libs/io/{00_model,10_read,20_write,99_tests,doc}.yh` 与 `README.md`。
+  完整记录见 [IO0–IO4 实施记录](01-finished/yh-io标准库读写层-2026-10-24.md)，
+  设计见 [io 标准库设计](03-design/yh-io标准库设计-2026-10-24.md)。
+- **门禁**：`yh test io` 已接入 `make test`、`make selfhost-native` 与
+  `make test-lib-tests`（`yh test` 一次只接受一个模块，故单独一行）。
+- **验证**：`yh test io` 7/7；`make test` 全绿（语法 81/81、49/49；run
+  211/212；fail 136/136；pass 9/9；test-check 38/38；string 5/5；io 7/7；
+  compiler-tests 3/3；TOML 6/6；代码统计 6/6）；`make selfhost-native` 通过
+  （两代固定点、自解析 114 文件、project cases 121/121）。
+- **边界**：IO5（toml 读文件迁移）与 IO6（seek/copy，依赖 `os` 补
+  `lseek`/`fstat`）未实施；未滚种子、未推送、未提交（worktree 位于
+  `0.0.9-release`，该分支按约定只收合并）。
+
 ## 2026-10-23 0.0.9 正式版开发
 
 - **版本**：`compiler/project.toml` 保持 `0.0.9`；发布说明见

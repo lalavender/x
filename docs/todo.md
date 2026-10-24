@@ -225,6 +225,26 @@ StackFallback 后置。块统一取自 prelude 堆，不新增 `sys` 依赖，�
   PageAllocator 适配器、统计/上限、ThreadSafe（J4）；无消费者不做。
 - [ ] **E4 配对**：libc 分配器与 prelude 的配对（见 E4），不得跨入口释放。
 
+### IO 字节流标准库（2026-10-24 设计；IO0–IO4 已完成）
+
+[设计](03-design/yh-io标准库设计-2026-10-24.md)与
+[方案](02-plan/yh-io标准库实施方案-2026-10-24.md)已把 `libs/io` 从"只有四个写侧
+接口"扩展为完整读写层：`read_all`/`read_file`/`write_bytes`/`write_file` 与调用方
+缓冲的 `Reader`/`Writer`（行读取、显式 flush），保留
+`write_all_result`/`write_all`/`print`/`println` 原签名。`libs/io/99_tests.yh`
+7 个用例通过，`yh test io` 已接入 `make test`/`make selfhost-native`/
+`make test-lib-tests`。以下只留未完成项。
+
+- [ ] **IO5 toml 读文件迁移**：删除 `libs/toml/70_files.{linux,darwin}.yh` 的手写
+  短读循环，改用 `io.read_file`；保留 `TOML_MAX_INPUT` 上限语义与
+  `parse_io_error`/`parse_resource_error` 分类映射，先加断言锁定"恰好读满"与
+  "还有数据"的现有区分，再迁移。验收 `make test-toml` 与
+  `make test-toml-conformance`。
+- [ ] **IO6 seek/copy（依赖 os）**：`os` 补 `lseek`/`fstat` 后再评估 `Reader` 的
+  peek/seek 与零分配 `io.copy`；先出设计增量，不提前对外承诺。
+- [ ] **IO7 消费者迁移审计**：`cli/help.yh`、`examples/os-demo` 与编译器读文件的
+  手写循环是否改用 `io`，逐处评估（编译器侧属 OS7 显式依赖，另行安排）。
+
 ### MATH math 纯 yh 标准库（2026-10-23 方案；P0 已完成）
 
 [方案](02-plan/yh-math标准库实施方案-2026-10-23.md)按用户决定改为**纯 yh

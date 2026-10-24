@@ -1,0 +1,201 @@
+module io
+
+import os
+
+// ============================================================================
+// 99_tests.yh —— io 标准库的 yh 内建测试
+//
+// 只在 `yh test io` 中执行；生产构建不登记测试符号、不发射测试体。
+// 覆盖整文件往返、缓冲写入、分行读取、截断语义、单字节读取与错误路径。
+// 文件用例使用 /tmp 下按用例区分的固定路径（逐例独立进程、并行执行时互不
+// 冲突），结束时删除；不依赖仓库内临时目录，也不联网。
+// ============================================================================
+
+// fill 把 NUL 结尾文本按字节写入切片；超出切片长度的部分不写。
+fn fill(data []u8, text *char) void {
+    let index int = 0
+    for index < len(data).to_type(int) {
+        data[index] = text[index].to_type(u8)
+        index += 1
+    }
+}
+
+// equal_prefix 比较切片前 count 字节是否等于文本且文本在 count 处结束。
+fn equal_prefix(data []u8, count u64, text *char) bool {
+    let index int = 0
+    for index < count.to_type(int) {
+        if (data[index].to_type(int) != text[index].to_type(int)) {
+            return false
+        }
+        index += 1
+    }
+    return text[count.to_type(int)].to_type(int) == 0
+}
+
+test "整文件读写往返" {
+    let path *char = "/tmp/yh-io-test-roundtrip.dat"
+    let payload [8]u8
+    fill(payload[0..8], "hello")
+    let written os.IoResult = write_file(path, payload[0..5])
+    $assert(written.error.kind == os.error_none, "写入应成功")
+    $assert(written.count == 5, "应写入 5 字节")
+    let back [16]u8
+    let read ReadResult = read_file(path, back[0..16])
+    $assert(read.status == Status.status_ok, "读到 EOF 应返回 status_ok")
+    $assert(read.count == 5, "应读回 5 字节")
+    $assert(equal_prefix(back[0..16], 5, "hello"), "内容应一致")
+    os.remove_path(path)
+}
+
+test "Writer 缓冲与 flush" {
+    let path *char = "/tmp/yh-io-test-writer.dat"
+    let opened os.FdResult = os.open_path(path, os.write_options())
+    $assert(opened.error.kind == os.error_none, "打开文件应成功")
+    let storage [4]u8
+    let writer Writer
+    $assert(writer_init(&writer, opened.fd, storage[0..4]).kind
+        == os.error_none, "初始化应成功")
+    let small [4]u8
+    fill(small[0..3], "abc")
+    $assert(writer_write(&writer, small[0..3]).count == 3, "应接收 3 字节")
+    $assert(writer_pending(&writer) == 3, "3 字节应留在缓冲")
+    $assert(writer_flush(&writer).count == 3, "flush 应写出 3 字节")
+    $assert(writer_pending(&writer) == 0, "flush 后缓冲应为空")
+    let big [10]u8
+    fill(big[0..10], "0123456789")
+    $assert(writer_write(&writer, big[0..10]).count == 10, "应接收 10 字节")
+    $assert(writer_pending(&writer) == 2, "4 字节缓冲应只剩 2 字节")
+    $assert(writer_flush(&writer).count == 2, "flush 应写出剩余 2 字节")
+    $assert(os.close_file(opened.fd).kind == os.error_none, "关闭应成功")
+    let back [32]u8
+    let read ReadResult = read_file(path, back[0..32])
+    $assert(read.status == Status.status_ok, "读回应到达 EOF")
+    $assert(read.count == 13, "总字节数应为 13")
+    $assert(equal_prefix(back[0..32], 13, "abc0123456789"), "内容应一致")
+    os.remove_path(path)
+}
+
+test "read_line 分行与末行" {
+    let path *char = "/tmp/yh-io-test-lines.dat"
+    let payload [16]u8
+    fill(payload[0..16], "a\nbb\nccc")
+    let written os.IoResult = write_file(path, payload[0..8])
+    $assert(written.count == 8, "应写入 8 字节")
+    let opened os.FdResult = os.open_path(path, os.read_options())
+    $assert(opened.error.kind == os.error_none, "打开文件应成功")
+    let storage [4]u8
+    let reader Reader
+    $assert(reader_init(&reader, opened.fd, storage[0..4]).kind
+        == os.error_none, "初始化应成功")
+    let line [8]u8
+    let first ReadResult = reader_read_line(&reader, line[0..8])
+    $assert(first.status == Status.status_ok, "首行应成功")
+    $assert(first.count == 2, "首行含换行应为 2 字节")
+    $assert(equal_prefix(line[0..8], 2, "a\n"), "首行内容应为 a 加换行")
+    let second ReadResult = reader_read_line(&reader, line[0..8])
+    $assert(second.status == Status.status_ok, "第二行应成功")
+    $assert(second.count == 3, "第二行应为 3 字节")
+    $assert(equal_prefix(line[0..8], 3, "bb\n"), "第二行内容应为 bb 加换行")
+    let third ReadResult = reader_read_line(&reader, line[0..8])
+    $assert(third.status == Status.status_ok, "末行无换行仍是 status_ok")
+    $assert(third.count == 3, "末行应为 3 字节")
+    $assert(equal_prefix(line[0..8], 3, "ccc"), "末行内容应为 ccc")
+    let last ReadResult = reader_read_line(&reader, line[0..8])
+    $assert(last.status == Status.status_eof, "读完应返回 status_eof")
+    $assert(last.count == 0, "EOF 时不应有字节")
+    os.close_file(opened.fd)
+    os.remove_path(path)
+}
+
+test "read_line 空行与超长截断" {
+    let path *char = "/tmp/yh-io-test-truncate.dat"
+    let payload [16]u8
+    fill(payload[0..16], "\n\nlongline\n")
+    let written os.IoResult = write_file(path, payload[0..11])
+    $assert(written.count == 11, "应写入 11 字节")
+    let opened os.FdResult = os.open_path(path, os.read_options())
+    $assert(opened.error.kind == os.error_none, "打开文件应成功")
+    let storage [4]u8
+    let reader Reader
+    reader_init(&reader, opened.fd, storage[0..4])
+    let line [2]u8
+    let first ReadResult = reader_read_line(&reader, line[0..2])
+    $assert(first.status == Status.status_ok, "空行应成功")
+    $assert(first.count == 1, "空行只含换行，应为 1 字节")
+    let second ReadResult = reader_read_line(&reader, line[0..2])
+    $assert(second.status == Status.status_ok, "第二个空行应成功")
+    $assert(second.count == 1, "第二个空行应为 1 字节")
+    let third ReadResult = reader_read_line(&reader, line[0..2])
+    $assert(third.status == Status.status_truncated, "超长行应返回截断")
+    $assert(third.count == 2, "截断时应填满输出缓冲")
+    let fourth ReadResult = reader_read_line(&reader, line[0..2])
+    $assert(fourth.status == Status.status_eof, "截断已丢弃整行，下一次应 EOF")
+    os.close_file(opened.fd)
+    os.remove_path(path)
+}
+
+test "read_all 与 read_byte" {
+    let path *char = "/tmp/yh-io-test-readall.dat"
+    let payload [16]u8
+    fill(payload[0..16], "0123456789")
+    write_file(path, payload[0..10])
+    let opened os.FdResult = os.open_path(path, os.read_options())
+    $assert(opened.error.kind == os.error_none, "打开文件应成功")
+    let big [16]u8
+    let all ReadResult = read_all(opened.fd, big[0..16])
+    $assert(all.status == Status.status_ok, "读满到 EOF 应为 status_ok")
+    $assert(all.count == 10, "应读 10 字节")
+    $assert(equal_prefix(big[0..16], 10, "0123456789"), "内容应一致")
+    os.close_file(opened.fd)
+    let again os.FdResult = os.open_path(path, os.read_options())
+    let small [4]u8
+    let part ReadResult = read_all(again.fd, small[0..4])
+    $assert(part.status == Status.status_truncated, "缓冲满且未确认 EOF 应截断")
+    $assert(part.count == 4, "截断时应填满缓冲")
+    let storage [2]u8
+    let reader Reader
+    reader_init(&reader, again.fd, storage[0..2])
+    let first ByteResult = reader_read_byte(&reader)
+    $assert(first.status == Status.status_ok, "单字节读取应成功")
+    $assert(first.value.to_type(int) == 52, "继续读取应得字符 4")
+    let second ByteResult = reader_read_byte(&reader)
+    $assert(second.value.to_type(int) == 53, "继续读取应得字符 5")
+    os.close_file(again.fd)
+    os.remove_path(path)
+}
+
+test "错误与非法参数" {
+    let empty [1]u8
+    let reader Reader
+    let setup os.Error = reader_init(&reader, 1, empty[0..0])
+    $assert(setup.kind == os.error_invalid_argument, "空缓冲应返回非法参数")
+    let rejected ReadResult = reader_read(&reader, empty[0..1])
+    $assert(rejected.status == Status.status_io_error, "失败后读取应报错")
+    $assert(rejected.error.kind == os.error_invalid_argument, "错误分类应保持")
+    let writer Writer
+    let writer_setup os.Error = writer_init(&writer, 1, empty[0..0])
+    $assert(writer_setup.kind == os.error_invalid_argument, "空缓冲写入器应拒绝")
+    let missing ReadResult = read_file("/tmp/yh-io-test-absent-xyz.dat",
+        empty[0..1])
+    $assert(missing.status == Status.status_io_error, "缺失文件应报错")
+    $assert(missing.error.kind == os.error_not_found, "错误分类应为 not_found")
+    let bad os.IoResult = write_bytes(-1, empty[0..1])
+    $assert(bad.error.kind != os.error_none, "坏 fd 写入应报错")
+    $assert(bad.count == 0, "坏 fd 不应有进度")
+}
+
+test "write_file 覆盖截断" {
+    let path *char = "/tmp/yh-io-test-overwrite.dat"
+    let long_text [16]u8
+    fill(long_text[0..16], "abcdefgh")
+    $assert(write_file(path, long_text[0..8]).count == 8, "首次应写 8 字节")
+    let short_text [4]u8
+    fill(short_text[0..4], "xy")
+    $assert(write_file(path, short_text[0..2]).count == 2, "再次应写 2 字节")
+    let back [16]u8
+    let read ReadResult = read_file(path, back[0..16])
+    $assert(read.status == Status.status_ok, "读回应到达 EOF")
+    $assert(read.count == 2, "覆盖写应截断旧内容")
+    $assert(equal_prefix(back[0..16], 2, "xy"), "内容应为新写入的 xy")
+    os.remove_path(path)
+}

@@ -1,0 +1,103 @@
+module io
+
+import os
+
+// yh io 标准库：公开模型与结果类型。
+//
+// 本文件只放类型、常量与极小的构造辅助函数，不实现读写。设计见
+// docs/03-design/yh-io标准库设计-2026-10-24.md，分期见
+// docs/02-plan/yh-io标准库实施方案-2026-10-24.md。
+//
+// 实现约束：
+//   * 所有长度与计数单位都是字节（u64），不是码点或行。
+//   * Reader/Writer 的缓冲由调用方提供并借用，本模块不分配、不释放内存。
+//   * fd 所有权始终属于调用方；reader_*/writer_* 只使用不关闭。
+
+// Status 是 io 层的结果分类；status_io_error 时 error 携带 os 的稳定分类。
+// status_eof 只表示"一个字节都没读到就结束"，读到末行但无换行仍是 status_ok。
+pub enum Status {
+    status_ok
+    status_eof
+    status_truncated
+    status_invalid_argument
+    status_io_error
+}
+
+// ReadResult 是一次读取的结果；count 为写入调用方缓冲的字节数。
+// 失败或截断时 count 仍保留已经写入 out 的有效字节数。
+pub struct ReadResult {
+    status Status
+    count u64
+    error os.Error
+}
+
+// ByteResult 是单字节读取的结果；status_eof 时 value 为 0。
+pub struct ByteResult {
+    status Status
+    value u8
+    error os.Error
+}
+
+// Reader 是有缓冲的读取器；buffer 借用调用方存储，不复制、不释放。
+// begin/end 是本模块解释的游标，调用方只应通过 reader_* 函数操作。
+// 结构体赋值是浅拷贝，两个副本共享缓冲与游标，行为未定义。
+pub struct Reader {
+    fd int
+    buffer []u8
+    begin u64
+    end u64
+    eof bool
+    error os.Error
+}
+
+// Writer 是有缓冲的写入器；buffer 借用调用方存储，count 为待写字节数。
+// 结构体赋值是浅拷贝，两个副本共享缓冲与计数，行为未定义。
+pub struct Writer {
+    fd int
+    buffer []u8
+    count u64
+    error os.Error
+}
+
+// IO_BUFFER_SIZE 是建议的缓冲大小；不是强制值，调用方可用任意非空缓冲。
+pub const IO_BUFFER_SIZE u64 = 8192
+
+// read_result 构造读取结果。
+fn read_result(status Status, count u64, error os.Error) ReadResult {
+    return ReadResult{ status: status, count: count, error: error }
+}
+
+// read_ok 构造成功的读取结果；count 为已写入调用方缓冲的字节数。
+fn read_ok(count u64) ReadResult {
+    return read_result(status_ok, count, os.no_error())
+}
+
+// read_eof 构造"未读到任何字节即结束"的结果。
+fn read_eof() ReadResult {
+    return read_result(status_eof, 0, os.no_error())
+}
+
+// read_truncated 构造缓冲不足的结果；count 为已写入的有效字节数。
+fn read_truncated(count u64) ReadResult {
+    return read_result(status_truncated, count, os.no_error())
+}
+
+// read_failed 构造失败结果，保留已取得的进度。
+fn read_failed(error os.Error, count u64) ReadResult {
+    return read_result(status_io_error, count, error)
+}
+
+// byte_ok 构造成功的单字节结果。
+fn byte_ok(value u8) ByteResult {
+    return ByteResult{ status: status_ok, value: value, error: os.no_error() }
+}
+
+// byte_eof 构造结束的单字节结果；value 固定为 0。
+fn byte_eof() ByteResult {
+    return ByteResult{ status: status_eof, value: 0, error: os.no_error() }
+}
+
+// byte_failed 构造失败的单字节结果。
+fn byte_failed(error os.Error) ByteResult {
+    return ByteResult{ status: status_io_error, value: 0, error: error }
+}
