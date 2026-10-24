@@ -82,8 +82,12 @@ def test_unclosed_tokens_fail(stats):
 def test_tree_scope_and_module_totals(stats):
     """只统计源根下的 yh 文件，忽略缓存和符号链接，并自动发现新职责目录。"""
     temp_root = ROOT / "tmp"
-    temp_root.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=temp_root, prefix="code-stats-") as tmp:
+    # 仓库 tmp 通常已存在；沙箱对已存在路径的 mkdir 会报 EEXIST，
+    # 因此先判断再创建（exist_ok 在该环境下不可靠）。
+    if not temp_root.is_dir():
+        temp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=temp_root, prefix="code-stats-",
+                                    ignore_cleanup_errors=True) as tmp:
         source_root = Path(tmp)
         (source_root / "ast").mkdir()
         (source_root / "new_module").mkdir()

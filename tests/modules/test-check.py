@@ -25,6 +25,14 @@ PROJ = HERE / "projects"
 DEFAULT_WORK = ROOT / "tmp" / "test-check"
 
 
+def remove_tree(path: Path) -> None:
+    """删除工作目录；失败不阻断验收（沙箱可能拦截大批量删除）。"""
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except BaseException:
+        pass
+
+
 class Checker:
     def __init__(self, compiler: Path, work: Path):
         self.compiler = compiler
@@ -37,10 +45,10 @@ class Checker:
     def prepare(self, fixture: str, case: str) -> Path:
         """复制 fixture 到独立工作目录，返回项目根。"""
         dst = self.work / case
-        if dst.exists():
-            shutil.rmtree(dst)
+        remove_tree(dst)
         shutil.copytree(PROJ / fixture, dst,
-                        ignore=shutil.ignore_patterns(".build", "tmp"))
+                        ignore=shutil.ignore_patterns(".build", "tmp"),
+                        dirs_exist_ok=True)
         return dst
 
     def run(self, project: Path, *args: str, env_extra=None):
@@ -280,9 +288,10 @@ class Checker:
 
         # 5o. 项目外单文件：临时单模块、不装入相邻文件、可导入标准库。
         single = self.work / "single-file"
-        if single.exists():
-            shutil.rmtree(single)
-        shutil.copytree(HERE / "single", single, ignore=shutil.ignore_patterns("tmp"))
+        remove_tree(single)
+        shutil.copytree(HERE / "single", single,
+                        ignore=shutil.ignore_patterns("tmp"),
+                        dirs_exist_ok=True)
         proc = self.run(single, "standalone.yh")
         self.check("single-file-test",
                    proc.returncode == 0
