@@ -22,23 +22,23 @@ fn interp_copy_token(token gen.Tok) int {
 
 // interp_has_marker：判断字符串 token 内是否存在未被转义的 `${`。
 fn interp_has_marker(start int, tlen int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (tlen < 3) {
         return 0
     }
     let end int = start + tlen - 1
     let i int = start + 1
     for i < end {
-        let b u8 = gs.task.c_src[i]
+        let b u8 = tk.c_src[i]
         if (b == '\\') {
-            if (i + 1 < end && gs.task.c_src[i + 1] == 'x') {
+            if (i + 1 < end && tk.c_src[i + 1] == 'x') {
                 i += 4
             } else {
                 i += 2
             }
             continue
         }
-        if (b == '$' && i + 1 < end && gs.task.c_src[i + 1] == '{') {
+        if (b == '$' && i + 1 < end && tk.c_src[i + 1] == '{') {
             return 1
         }
         i += 1
@@ -51,18 +51,18 @@ fn interp_push_text(start int, end int) int {
     if (end <= start) {
         return 0
     }
-    let gs *gen.GenState = gen.G()
-    let line int = gs.task.lx_line
-    let col int = start - gs.task.lx_lstart + 1
+    let tk *gen.TaskCtx = gen.task()
+    let line int = tk.lx_line
+    let col int = start - tk.lx_lstart + 1
     return tok_push(gen.TOK_INTERP_TEXT, start, end - start, line, col)
 }
 
 // interp_skip_char：跳过字符字面量（i 指向单引号）；成功返回闭引号之后。
 fn interp_skip_char(i int, end int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let j int = i + 1
     for j < end {
-        let b u8 = gs.task.c_src[j]
+        let b u8 = tk.c_src[j]
         if (b == '\\') {
             j += 2
             continue
@@ -80,10 +80,10 @@ fn interp_skip_char(i int, end int) int {
 
 // interp_skip_space：跳过空白与注释；遇到换行报错。
 fn interp_skip_space(i int, end int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let at int = i
     for at < end {
-        let b u8 = gs.task.c_src[at]
+        let b u8 = tk.c_src[at]
         if (b == ' ' || b == '\t' || b == '\r' || b == 12 || b == 11) {
             at += 1
             continue
@@ -91,9 +91,9 @@ fn interp_skip_space(i int, end int) int {
         if (b == '\n') {
             return err_here(at, "插值内不允许换行")
         }
-        if (b == '/' && at + 1 < end && gs.task.c_src[at + 1] == '/') {
+        if (b == '/' && at + 1 < end && tk.c_src[at + 1] == '/') {
             at += 2
-            for at < end && gs.task.c_src[at] != '\n' {
+            for at < end && tk.c_src[at] != '\n' {
                 at += 1
             }
             if (at < end) {
@@ -101,13 +101,13 @@ fn interp_skip_space(i int, end int) int {
             }
             return at
         }
-        if (b == '/' && at + 1 < end && gs.task.c_src[at + 1] == '*') {
+        if (b == '/' && at + 1 < end && tk.c_src[at + 1] == '*') {
             at += 2
             for at + 1 < end {
-                if (gs.task.c_src[at] == '\n') {
+                if (tk.c_src[at] == '\n') {
                     return err_here(at, "插值内不允许换行")
                 }
-                if (gs.task.c_src[at] == '*' && gs.task.c_src[at + 1] == '/') {
+                if (tk.c_src[at] == '*' && tk.c_src[at + 1] == '/') {
                     at += 2
                     break
                 }
@@ -122,14 +122,14 @@ fn interp_skip_space(i int, end int) int {
 
 // interp_lex_range：把表达式的源码区间按普通 token 规则写入当前 token 表。
 fn interp_lex_range(start int, end int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let i int = start
     for i < end {
         i = interp_skip_space(i, end)
         if (i >= end) {
             break
         }
-        let b u8 = gs.task.c_src[i]
+        let b u8 = tk.c_src[i]
         if (b == '"') {
             return err_here(i, "插值表达式内不允许裸双引号")
         }
@@ -155,11 +155,11 @@ fn interp_lex_range(start int, end int) int {
 // interp_find_close：从表达式起点找 `}`，同时定位顶层 spec 冒号。
 // 返回闭括号下标；spec_colon 为 -1 或冒号下标；失败返回 -1 并已报错。
 fn interp_find_close(start int, end int, spec_colon *int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let depth int = 0
     let i int = start
     for i < end {
-        let b u8 = gs.task.c_src[i]
+        let b u8 = tk.c_src[i]
         if (b == '\n' || b == '\r') {
             return err_here(i, "插值内不允许换行")
         }
@@ -172,10 +172,10 @@ fn interp_find_close(start int, end int, spec_colon *int) int {
             i = next
             continue
         }
-        if (b == '/' && i + 1 < end && gs.task.c_src[i + 1] == '/') {
+        if (b == '/' && i + 1 < end && tk.c_src[i + 1] == '/') {
             return err_here(i, "插值表达式内不允许行注释")
         }
-        if (b == '/' && i + 1 < end && gs.task.c_src[i + 1] == '*') {
+        if (b == '/' && i + 1 < end && tk.c_src[i + 1] == '*') {
             return err_here(i, "插值表达式内不允许块注释")
         }
         if (b == '(' || b == '[') {
@@ -203,10 +203,10 @@ fn interp_find_close(start int, end int, spec_colon *int) int {
                 // 说明符内不允许表达式结构，直接找闭括号。
                 let j int = i + 1
                 for j < end {
-                    if (gs.task.c_src[j] == '}') {
+                    if (tk.c_src[j] == '}') {
                         return j
                     }
-                    if (gs.task.c_src[j] == '{' || gs.task.c_src[j] == '"') {
+                    if (tk.c_src[j] == '{' || tk.c_src[j] == '"') {
                         return err_here(j, "插值格式说明符内不允许该字符")
                     }
                     j += 1
@@ -221,28 +221,28 @@ fn interp_find_close(start int, end int, spec_colon *int) int {
 
 // interp_expand_string：把一个插值字符串 token 展开为内部 token 序列。
 fn interp_expand_string(start int, tlen int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let end int = start + tlen - 1
-    if (tok_push(gen.TOK_INTERP_BEGIN, start, 1, gs.task.lx_line,
-            start - gs.task.lx_lstart + 1) != 0) {
+    if (tok_push(gen.TOK_INTERP_BEGIN, start, 1, tk.lx_line,
+            start - tk.lx_lstart + 1) != 0) {
         return -1
     }
     let i int = start + 1
     let text_start int = i
     for i < end {
-        let b u8 = gs.task.c_src[i]
+        let b u8 = tk.c_src[i]
         if (b == '\\') {
-            if (i + 1 < end && gs.task.c_src[i + 1] == 'x') {
+            if (i + 1 < end && tk.c_src[i + 1] == 'x') {
                 i += 4
             } else {
                 i += 2
             }
             continue
         }
-        if (b == '$' && i + 1 < end && gs.task.c_src[i + 1] == '{') {
+        if (b == '$' && i + 1 < end && tk.c_src[i + 1] == '{') {
             if (interp_push_text(text_start, i) != 0) { return -1 }
-            if (tok_push(gen.TOK_INTERP_EXPR_BEGIN, i, 2, gs.task.lx_line,
-                    i - gs.task.lx_lstart + 1) != 0) {
+            if (tok_push(gen.TOK_INTERP_EXPR_BEGIN, i, 2, tk.lx_line,
+                    i - tk.lx_lstart + 1) != 0) {
                 return -1
             }
             let spec_colon int = -1
@@ -254,8 +254,8 @@ fn interp_expand_string(start int, tlen int) int {
                 return err_here(i + 2, "插值表达式不能为空")
             }
             if (interp_lex_range(i + 2, expr_end) != 0) { return -1 }
-            if (tok_push(gen.TOK_INTERP_EXPR_END, expr_end, 0, gs.task.lx_line,
-                    expr_end - gs.task.lx_lstart + 1) != 0) {
+            if (tok_push(gen.TOK_INTERP_EXPR_END, expr_end, 0, tk.lx_line,
+                    expr_end - tk.lx_lstart + 1) != 0) {
                 return -1
             }
             if (spec_colon >= 0) {
@@ -263,8 +263,8 @@ fn interp_expand_string(start int, tlen int) int {
                     return err_here(spec_colon, "插值格式说明符不能为空")
                 }
                 if (tok_push(gen.TOK_INTERP_SPEC, spec_colon + 1,
-                        close - spec_colon - 1, gs.task.lx_line,
-                        spec_colon - gs.task.lx_lstart + 2) != 0) {
+                        close - spec_colon - 1, tk.lx_line,
+                        spec_colon - tk.lx_lstart + 2) != 0) {
                     return -1
                 }
             }
@@ -275,26 +275,26 @@ fn interp_expand_string(start int, tlen int) int {
         i += 1
     }
     if (interp_push_text(text_start, end) != 0) { return -1 }
-    return tok_push(gen.TOK_INTERP_END, end, 1, gs.task.lx_line,
-        end - gs.task.lx_lstart + 1)
+    return tok_push(gen.TOK_INTERP_END, end, 1, tk.lx_line,
+        end - tk.lx_lstart + 1)
 }
 
 // interp_expand_all：扫描原 token 表，把所有插值字符串替换为内部序列。
 // 成功返回 0；失败返回 -1（诊断已输出）。
 pub fn interp_expand_all() int {
-    let gs *gen.GenState = gen.G()
-    let raw *gen.Tok = gs.task.c_toks
-    let raw_n int = gs.task.c_tok_n
+    let tk *gen.TaskCtx = gen.task()
+    let raw *gen.Tok = tk.c_toks
+    let raw_n int = tk.c_tok_n
     let capacity int = raw_n * 3 + 64
     let output *gen.Tok = malloc((capacity * sizeof(gen.Tok)).to_type(u64)).to_type(*gen.Tok)
     if (output == 0) {
         return gen.fail("插值扩展分配失败")
     }
-    let saved_line int = gs.task.lx_line
-    let saved_lstart int = gs.task.lx_lstart
-    gs.task.c_toks = output
-    gs.task.c_tok_n = 0
-    gs.task.c_tok_cap = capacity
+    let saved_line int = tk.lx_line
+    let saved_lstart int = tk.lx_lstart
+    tk.c_toks = output
+    tk.c_tok_n = 0
+    tk.c_tok_cap = capacity
     let i int = 0
     for i < raw_n {
         let token gen.Tok = raw[i]
@@ -302,11 +302,11 @@ pub fn interp_expand_all() int {
             && interp_has_marker(token.start, token.len) != 0) {
             // 行号/行首按字符串起点定位；插值内禁止换行，后续 token 同处一行。
             let line_start int = token.start
-            for line_start > 0 && gs.task.c_src[line_start - 1] != '\n' {
+            for line_start > 0 && tk.c_src[line_start - 1] != '\n' {
                 line_start -= 1
             }
-            gs.task.lx_lstart = line_start
-            gs.task.lx_line = token.line
+            tk.lx_lstart = line_start
+            tk.lx_line = token.line
             if (interp_expand_string(token.start, token.len) != 0) {
                 return -1
             }
@@ -315,8 +315,8 @@ pub fn interp_expand_all() int {
         }
         i += 1
     }
-    gs.task.lx_line = saved_line
-    gs.task.lx_lstart = saved_lstart
+    tk.lx_line = saved_line
+    tk.lx_lstart = saved_lstart
     free(raw.to_type(*void))
     return 0
 }

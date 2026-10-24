@@ -12,7 +12,11 @@
 - **验证**：`make test` 356/357；`make selfhost-native` project 122/122；
   `tests/fmt/interp.py` 10/10；`make test-lib-tests` string 5 + fmt 17；
   fmtinterp `nm -u`/`otool -L` 无 printf/LLVM/lld。
-- **残余**：旧发射器未统计区分；I5 可选扩展未做；未滚种子/合并。
+- **残余**：旧发射器未统计区分；I5 可选扩展未做；未滚种子。
+- **合入**：10 个交付提交（`9100602`…`29dacd8`）经 `--no-ff` 合入 `llvm`
+  （`513f6d7`，未推送）；合并把新增的 15 处 `gen.G()` 读点改为
+  `gen.task()`，`arch-check` 的 G() 读点维持预算 165；合入后
+  `make test` 与 `make selfhost-native`（project 126/126）全绿。
 - **记录**：[I4 记录](01-finished/yh-fmt-插值I4-2026-10-24.md)。
 
 ## 2026-10-24 yh 字符串插值 I0–I3
