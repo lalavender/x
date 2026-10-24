@@ -70,10 +70,10 @@ fn ct_static_owner_chain(best *CtAggregate, chain *CtAggregate, view *CtAggregat
 // 因而结构体中先声明的切片也能引用其后出现的数组字段，不受字段遍历顺序影响。
 fn ct_static_index(ctx *CtStaticContext, row int, offset int, type_id int,
     value *CtValue, depth int) int {
-    let gs *gen.GenState = gen.G()
-    if (depth > 32 || type_id < 0 || type_id >= gs.task.t_type_n || value == 0
+    let tk *gen.TaskCtx = gen.task()
+    if (depth > 32 || type_id < 0 || type_id >= tk.t_type_n || value == 0
         || value.type_id != type_id) { return gen.sem_err("编译期静态数据类型或深度无效") }
-    let ty gen.CType = gs.task.t_types[type_id]
+    let ty gen.CType = tk.t_types[type_id]
     if (ty.kind != gen.TY_ARRAY && ty.kind != gen.TY_STRUCT) { return 0 }
     let object *CtAggregate = value.value.to_type(u64).to_type(*CtAggregate)
     if (object == 0 || object.count != ty.len || (object.count > 0 && object.values == 0)
@@ -85,10 +85,10 @@ fn ct_static_index(ctx *CtStaticContext, row int, offset int, type_id int,
     let i int = 0
     for i < object.count {
         let child_type int = ty.elem
-        let child_offset int = i * (ty.kind == gen.TY_ARRAY ? gs.task.t_types[ty.elem].size : 0)
+        let child_offset int = i * (ty.kind == gen.TY_ARRAY ? tk.t_types[ty.elem].size : 0)
         if (ty.kind == gen.TY_STRUCT) {
-            child_type = gs.task.t_fields[ty.sub + i].type_id
-            child_offset = gs.task.t_fields[ty.sub + i].offset
+            child_type = tk.t_fields[ty.sub + i].type_id
+            child_offset = tk.t_fields[ty.sub + i].offset
         }
         if (ct_static_index(ctx, row, offset + child_offset, child_type,
                 &object.values[i], depth + 1) != 0) { return -1 }
@@ -106,26 +106,26 @@ fn ct_static_backing(ctx *CtStaticContext, view *CtAggregate, depth int) *CtStat
     owner = ct_static_owner_chain(owner, ct_global_agg_chain(), view)
     owner = ct_static_owner_chain(owner, ct_arg_pool.aggregates, view)
     if (owner == 0) { owner = view }
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let elem int = view.elem_type
-    if (elem < 0 || elem >= gs.task.t_type_n || owner.count < 0 || owner.count > 100000
-        || gs.task.t_types[elem].size < 0
-        || (gs.task.t_types[elem].size > 0 && owner.count > 67108864 / gs.task.t_types[elem].size)) {
+    if (elem < 0 || elem >= tk.t_type_n || owner.count < 0 || owner.count > 100000
+        || tk.t_types[elem].size < 0
+        || (tk.t_types[elem].size > 0 && owner.count > 67108864 / tk.t_types[elem].size)) {
         gen.sem_err("编译期静态 backing 布局无效"); return 0
     }
-    let label int = gs.task.c_data_n; gs.task.c_data_n += 1
+    let label int = tk.c_data_n; tk.c_data_n += 1
     let row int = gen.static_data_add(-1, label, -1, elem, owner.count,
-        owner.count * gs.task.t_types[elem].size, gs.task.t_types[elem].align)
+        owner.count * tk.t_types[elem].size, tk.t_types[elem].align)
     if (row < 0 || ct_static_span_add(ctx, owner.values, owner.count, elem, row, 0) != 0) { return 0 }
     let i int = 0
     for i < owner.count {
-        if (ct_static_index(ctx, row, i * gs.task.t_types[elem].size, elem,
+        if (ct_static_index(ctx, row, i * tk.t_types[elem].size, elem,
                 &owner.values[i], depth + 1) != 0) { return 0 }
         i += 1
     }
     i = 0
     for i < owner.count {
-        if (ct_static_value(ctx, row, i * gs.task.t_types[elem].size, elem,
+        if (ct_static_value(ctx, row, i * tk.t_types[elem].size, elem,
                 &owner.values[i], depth + 1) != 0) { return 0 }
         i += 1
     }
@@ -136,10 +136,10 @@ fn ct_static_backing(ctx *CtStaticContext, view *CtAggregate, depth int) *CtStat
 // slice 的长度与零指针槽分开记录，符号/标签和目标字节 addend 不含任何宿主地址。
 fn ct_static_value(ctx *CtStaticContext, row int, offset int, type_id int,
     value *CtValue, depth int) int {
-    let gs *gen.GenState = gen.G()
-    if (depth > 32 || type_id < 0 || type_id >= gs.task.t_type_n || value == 0
+    let tk *gen.TaskCtx = gen.task()
+    if (depth > 32 || type_id < 0 || type_id >= tk.t_type_n || value == 0
         || value.type_id != type_id) { return gen.sem_err("编译期静态数据值无效") }
-    let ty gen.CType = gs.task.t_types[type_id]
+    let ty gen.CType = tk.t_types[type_id]
     if (gen.ty_is_integer(type_id) != 0 || gen.ty_is_float(type_id) != 0) {
         let bits i64 = value.value
         if (ty.kind == gen.TY_F32) { bits = ct_ir_fp32_bits(bits) }
@@ -154,7 +154,7 @@ fn ct_static_value(ctx *CtStaticContext, row int, offset int, type_id int,
         if (gen.static_data_at(span.row, &target) != 0
             || gen.static_data_scalar(row, offset, 8, object.count.to_type(i64)) != 0) { return -1 }
         let index int = ct_static_contains(span.values, span.count, object)
-        let addend i64 = (span.offset + index * gs.task.t_types[ty.elem].size).to_type(i64)
+        let addend i64 = (span.offset + index * tk.t_types[ty.elem].size).to_type(i64)
         return gen.static_data_reloc(row, offset + 8, target.label >= 1 ? -1 : target.sym_id,
             target.label >= 1 ? target.label : -1, addend)
     }
@@ -164,10 +164,10 @@ fn ct_static_value(ctx *CtStaticContext, row int, offset int, type_id int,
     let i int = 0
     for i < object.count {
         let child_type int = ty.elem
-        let child_offset int = i * (ty.kind == gen.TY_ARRAY ? gs.task.t_types[ty.elem].size : 0)
+        let child_offset int = i * (ty.kind == gen.TY_ARRAY ? tk.t_types[ty.elem].size : 0)
         if (ty.kind == gen.TY_STRUCT) {
-            child_type = gs.task.t_fields[ty.sub + i].type_id
-            child_offset = gs.task.t_fields[ty.sub + i].offset
+            child_type = tk.t_fields[ty.sub + i].type_id
+            child_offset = tk.t_fields[ty.sub + i].offset
         }
         if (ct_static_value(ctx, row, offset + child_offset, child_type,
                 &object.values[i], depth + 1) != 0) { return -1 }
@@ -179,10 +179,10 @@ fn ct_static_value(ctx *CtStaticContext, row int, offset int, type_id int,
 // ct_static_data_record：封存一个根对象及其可达 backing，成功或失败均释放临时区间链。
 // .s.ct 隐藏常量的标签随后会回滚，不能登记为运行期对象；其余路径不依赖 AST 捕获开关。
 fn ct_static_data_record(sym_id int, label int, type_id int, value *CtValue) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_ct_iface_mode != 0) { return 0 }
-    if (type_id < 0 || type_id >= gs.task.t_type_n) { return gen.sem_err("编译期静态根对象类型无效") }
-    let ty gen.CType = gs.task.t_types[type_id]
+    let tk *gen.TaskCtx = gen.task()
+    if (tk.c_ct_iface_mode != 0) { return 0 }
+    if (type_id < 0 || type_id >= tk.t_type_n) { return gen.sem_err("编译期静态根对象类型无效") }
+    let ty gen.CType = tk.t_types[type_id]
     let row int = gen.static_data_add(sym_id, label, type_id, -1, 0, ty.size, ty.align)
     if (row < 0) { return -1 }
     let ctx CtStaticContext

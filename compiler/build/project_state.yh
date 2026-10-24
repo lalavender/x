@@ -1,4 +1,4 @@
-module main
+module build
 import gen
 
 // ============================================================================
@@ -6,12 +6,35 @@ import gen
 // 自 parse_decl.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
 // ============================================================================
 
-// pj_envp：进程入口提供的只读环境向量，由 driver.main 设置。
-let pj_envp **char = 0
+// pj_state().envp：进程入口提供的只读环境向量，由 driver.main 设置。
+// PjState：项目模型的可变游标与拓扑结果（A2b 前置）。
+//
+// 这些字段原先散落成 6 个模块级全局，被 project_*/module_build/link_cache/
+// build_scheduler/test_cmd 直接读写共 93 处。收进一个结构后：
+//   * 只有 `pj_state()` 一个入口，将来搬进 build 模块只需改访问前缀；
+//   * 跨模块传指针（`&pj_state().canon_off`）语义明确，不再有"改哪个全局"的歧义。
+pub struct PjState {
+    canon_off int        // pj_canon 的最近结果（路径池偏移）
+    canon_len int
+    order *int           // topo 顺序（模块下标）
+    order_n int
+    mark *int            // 模块标记：0 未访问 / 1 访问中 / 2 完成
+    envp **char          // 宿主环境向量（driver 入口写入）
+    root_off int         // 根项目路径
+    root_len int
+}
 
-fn pj_pool_str(off int) *char {
-    let gs *gen.GenState = gen.G()
-    return (gs.task.np_data + off).to_type(*char)
+let pj_state_v PjState
+
+// pj_state：项目模型状态的唯一入口。
+pub fn pj_state() *PjState {
+    return &pj_state_v
+}
+
+
+pub fn pj_pool_str(off int) *char {
+    let tk *gen.TaskCtx = gen.task()
+    return (tk.np_data + off).to_type(*char)
 }
 
 // 项目元数据通过文件 API 读取；目录扫描由平台 OS 适配直接枚举。
@@ -53,7 +76,7 @@ fn pj_dir_add(entries **PJDirEntry, n *int, cap *int,
 // pj_env_fetch：在 OS 传入的 envp 中精确匹配 name= 前缀，并把值 intern 到
 // 编译器字符串池。name 以 NUL 结尾；off/olen 返回值的池偏移和字节长度；
 // 变量缺失时成功返回空字符串，参数无效或字符串池分配失败时返回 -1。
-fn pj_env_fetch(name *char, off *int, olen *int) int {
+pub fn pj_env_fetch(name *char, off *int, olen *int) int {
     if (name == 0 || off == 0 || olen == 0) {
         return -1
     }
@@ -62,8 +85,8 @@ fn pj_env_fetch(name *char, off *int, olen *int) int {
         key_len += 1
     }
     let rowi int = 0
-    for pj_envp != 0 && pj_envp[rowi] != 0 {
-        let row *char = pj_envp[rowi]
+    for pj_state().envp != 0 && pj_state().envp[rowi] != 0 {
+        let row *char = pj_state().envp[rowi]
         let j int = 0
         for j < key_len && row[j] == name[j] {
             j += 1
@@ -95,7 +118,7 @@ fn pj_env_fetch(name *char, off *int, olen *int) int {
     return 0
 }
 
-fn pj_file_exists(path *char) int {
+pub fn pj_file_exists(path *char) int {
     let fd int = open(path, 0)
     if (fd < 0) {
         return 0
@@ -108,35 +131,31 @@ fn pj_file_exists(path *char) int {
 // —— 路径规范化（去重用）：段栈处理，消解 . / .. / 重复斜杠。 ——
 
 // pj_canon：把 base（池内串）与 rel（NUL 串）连接并规范化，intern 后
-// 经全局出参 pj_canon_off/len 返回。rel 以 '/' 开头时仅用 rel。
-let pj_canon_off int = -1
-let pj_canon_len int = 0
+// 经全局出参 pj_state().canon_off/len 返回。rel 以 '/' 开头时仅用 rel。
 
-// pj_root_project_off/len：本次命令的根项目路径；-1 表示尚未设置。
+// pj_state().root_off/len：本次命令的根项目路径；-1 表示尚未设置。
 // 依赖项目递归装载时保持根路径不变，供 project_link 只对根项目解析 [link]。
-let pj_root_project_off int = -1
-let pj_root_project_len int = 0
 
 // pj_set_root_project：命令在装载根项目前登记根路径。
-fn pj_set_root_project(off int, plen int) void {
-    pj_root_project_off = off
-    pj_root_project_len = plen
+pub fn pj_set_root_project(off int, plen int) void {
+    pj_state().root_off = off
+    pj_state().root_len = plen
 }
 
 // pj_is_root_project：当前装载的是不是命令根项目。
 fn pj_is_root_project(off int, plen int) int {
-    if (pj_root_project_off < 0) { return 0 }
-    if (pj_root_project_len != plen) { return 0 }
+    if (pj_state().root_off < 0) { return 0 }
+    if (pj_state().root_len != plen) { return 0 }
     let i int = 0
     for i < plen {
-        if (gen.G().task.np_data[pj_root_project_off + i]
+        if (gen.G().task.np_data[pj_state().root_off + i]
             != gen.G().task.np_data[off + i]) { return 0 }
         i += 1
     }
     return 1
 }
 
-fn pj_canon(base_off int, base_len int, rel *char) int {
+pub fn pj_canon(base_off int, base_len int, rel *char) int {
     let gs *gen.GenState = gen.G()
     // 组装原始串到临时堆缓冲（路径有 1024 上限，超出报错）
     let raw [1024]u8
@@ -210,7 +229,7 @@ fn pj_canon(base_off int, base_len int, rel *char) int {
     let tmp [1024]u8
     let tn int = 0
     // 空段栈：绝对路径为根 '/'；相对路径（如 "." 折叠后）为本目录 "."。
-    // 契约与其他路径一致：结果写 pj_canon_off/len，成功返回 0。
+    // 契约与其他路径一致：结果写 pj_state().canon_off/len，成功返回 0。
     if (sn == 0) {
         if (rn > 0 && raw[0] == '/') {
             tmp[0] = '/'
@@ -221,8 +240,8 @@ fn pj_canon(base_off int, base_len int, rel *char) int {
             if (o < 0) {
                 return -1
             }
-            pj_canon_off = o
-            pj_canon_len = 1
+            pj_state().canon_off = o
+            pj_state().canon_len = 1
             return 0
         }
     }
@@ -245,9 +264,9 @@ fn pj_canon(base_off int, base_len int, rel *char) int {
         si += 1
     }
     tmp[tn] = 0
-    pj_canon_off = gen.tml_intern_str(tmp, 0, tn)
-    pj_canon_len = tn
-    if (pj_canon_off < 0) {
+    pj_state().canon_off = gen.tml_intern_str(tmp, 0, tn)
+    pj_state().canon_len = tn
+    if (pj_state().canon_off < 0) {
         return -1
     }
     return 0
@@ -539,8 +558,8 @@ fn pj_imp_push(file int, off int, olen int, koff int, klen int,
     return 0
 }
 
-fn pj_proj_diag(root_off int, line int, msg *char) int {
-    let gs *gen.GenState = gen.G()
+pub fn pj_proj_diag(root_off int, line int, msg *char) int {
+    let tk *gen.TaskCtx = gen.task()
     let buf [1024]u8
     let n int = 0
     n = gen.append_str(buf, n, pj_pool_str(root_off))
@@ -550,6 +569,6 @@ fn pj_proj_diag(root_off int, line int, msg *char) int {
     n = gen.append_str(buf, n, msg)
     n = gen.append_byte(buf, n, '\n')
     gen.write_all(2, buf, n)
-    gs.task.c_errors += 1
+    tk.c_errors += 1
     return -1
 }

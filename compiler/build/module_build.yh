@@ -1,7 +1,8 @@
-module main
+module build
 import gen
 import parse
 import backend
+import ir
 
 // ============================================================================
 // module_build.yh —— 项目构建管线（MOD-U4/U5）
@@ -34,6 +35,19 @@ import backend
 // c_argv0：自身可执行路径（argv[0] 借用，不复制），用于编译器指纹。
 let c_argv0 *char = 0
 let mb_iface_suffix *char = 0
+
+// mb_set_argv0 / mb_set_iface_suffix：两个跨模块只写全局的受控写入口。
+// 跨模块全局不能直接导出（yh 的 pub 只用于 fn/const/struct/union/enum），
+// 而这两个值分别由 CLI 入口（自身路径）与内部子进程协议（接口后缀）设置，
+// 因此各给一个 setter，避免为了两个赋值把整块状态外移。
+pub fn mb_set_argv0(p *char) void {
+    c_argv0 = p
+}
+
+pub fn mb_set_iface_suffix(p *char) void {
+    mb_iface_suffix = p
+}
+
 let mb_compiler_fingerprint u64 = 0
 let mb_compiler_fingerprint_ready int = 0
 let mb_stats_build_start_ns u64 = 0
@@ -68,7 +82,7 @@ fn mb_mix_compiler_fingerprint(h *u64) int {
 }
 
 // mb_parse_hex：把恰好 16 位十六进制指纹解析为 u64；非法输入返回 -1。
-fn mb_parse_hex(text *char, value *u64) int {
+pub fn mb_parse_hex(text *char, value *u64) int {
     let result u64 = 0
     let i int = 0
     for i < 16 {
@@ -94,7 +108,7 @@ fn mb_hash_init() u64 {
 }
 
 // mb_fnv：把一个字节混入 FNV-1a 64 位哈希。
-fn mb_fnv(h *u64, b u8) void {
+pub fn mb_fnv(h *u64, b u8) void {
     h[0] = h[0] ^ b.to_type(u64)
     h[0] = h[0] * 1099511628211
 }
@@ -103,53 +117,63 @@ fn mb_fnv(h *u64, b u8) void {
 // read_source 使用 malloc 对齐缓冲；支持的 Darwin/Linux arm64 与 x64 主机均为小端。
 // 读取失败返回 -1。
 fn mb_hash_file(h *u64, path *char) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (gen.read_source(path) != 0) {
         return -1
     }
     let i int = 0
-    let words *u64 = gs.task.c_src.to_type(*u64)
-    for i + 8 <= gs.task.c_src_len {
+    let words *u64 = tk.c_src.to_type(*u64)
+    for i + 8 <= tk.c_src_len {
         let word u64 = words[i / 8]
         h[0] = h[0] ^ word
         h[0] = h[0] * 1099511628211
         i += 8
     }
-    for i < gs.task.c_src_len {
-        h[0] = h[0] ^ gs.task.c_src[i].to_type(u64)
+    for i < tk.c_src_len {
+        h[0] = h[0] ^ tk.c_src[i].to_type(u64)
         h[0] = h[0] * 1099511628211
         i += 1
     }
     return 0
 }
 
+// MB_TAG_MAX / MB_BUILD_DIR_MAX：路径预算。
+//
+// 项目名与模块名都来自用户输入，`mb_mod_tag` 用 [512]u8 临时缓冲拼接，
+// 派生的接口/对象路径又写进 600/700/900 字节的定长缓冲。两个名字不限长时
+// 会写穿栈（且 `gen.append_str` 不做容量检查）。这里在源头设预算：
+//   构建目录 ≤ 400，标记 ≤ 120，派生路径最长 400 + 7 + 120 + 5 + 1 = 533，
+//   低于最小的 600 字节缓冲；超限给出可操作诊断而不是崩溃。
+const MB_BUILD_DIR_MAX int = 400
+const MB_TAG_MAX int = 120
+
 // mb_build_dir：构建目录 = <root>/.build/targets/<triple>/llvm/O<n>；
 // check 模式用 <root>/.build/check（LL12：不再有旧后端目录）。
-fn mb_build_dir(root_off int, root_len int) int {
+pub fn mb_build_dir(root_off int, root_len int) int {
     let gs *gen.GenState = gen.G()
+    let rc int = 0
     if (gs.task.c_test_mode != 0) {
         // 测试检查与生产 .build 隔离；接口/会话文件只落在项目 tmp 下。
-        if (pj_canon(root_off, root_len, "tmp/yh-test/check") != 0) {
-            return -1
-        }
-        return pj_canon_off
+        rc = pj_canon(root_off, root_len, "tmp/yh-test/check")
+    } else if (gs.task.c_check_only != 0) {
+        rc = pj_canon(root_off, root_len, ".build/check")
+    } else {
+        let target_dir [256]u8
+        let n int = gen.append_str(&target_dir[0], 0, ".build/targets/")
+        n = gen.append_str(&target_dir[0], n, gs.c_target.triple)
+        n = gen.append_str(&target_dir[0], n, "/llvm/O")
+        n = gen.append_int(&target_dir[0], n, gs.c_opt_level)
+        target_dir[n] = 0
+        rc = pj_canon(root_off, root_len, (&target_dir[0]).to_type(*char))
     }
-    if (gs.task.c_check_only != 0) {
-        if (pj_canon(root_off, root_len, ".build/check") != 0) {
-            return -1
-        }
-        return pj_canon_off
-    }
-    let target_dir [256]u8
-    let n int = gen.append_str(&target_dir[0], 0, ".build/targets/")
-    n = gen.append_str(&target_dir[0], n, gs.c_target.triple)
-    n = gen.append_str(&target_dir[0], n, "/llvm/O")
-    n = gen.append_int(&target_dir[0], n, gs.c_opt_level)
-    target_dir[n] = 0
-    if (pj_canon(root_off, root_len, (&target_dir[0]).to_type(*char)) != 0) {
+    if (rc != 0) {
         return -1
     }
-    return pj_canon_off
+    if (pj_state().canon_len > MB_BUILD_DIR_MAX) {
+        return gen.fail_path("项目路径过长：构建目录超过 400 字节，请缩短项目根路径: ",
+            pj_pool_str(pj_state().canon_off))
+    }
+    return pj_state().canon_off
 }
 
 // mb_default_binary_path：默认可执行文件留在项目 .build 根目录，中间缓存
@@ -158,7 +182,7 @@ fn mb_default_binary_path(root_off int, root_len int, build_off int,
     project int, out *u8) int {
     let gs *gen.GenState = gen.G()
     if (pj_canon(root_off, root_len, ".build") != 0) { return -1 }
-    let dir_off int = pj_canon_off
+    let dir_off int = pj_state().canon_off
     let n int = gen.append_str(out, 0, pj_pool_str(dir_off))
     n = gen.append_byte(out, n, '/')
     n = append_bytes_np(out, n, gs.p_projs[project].name_off,
@@ -172,11 +196,11 @@ fn mb_sub_dir(build_off int, build_len int, sub *char) int {
     if (pj_canon(build_off, build_len, sub) != 0) {
         return -1
     }
-    return pj_canon_off
+    return pj_state().canon_off
 }
 
 // mb_mkdir：确保构建目录存在。
-fn mb_mkdir(dir *char) int {
+pub fn mb_mkdir(dir *char) int {
     // 建 .build 六子目录（asm/obj/iface/manifest/ir/llvm）
     let subs [6]*char
     subs[0] = "asm"
@@ -220,6 +244,13 @@ let mb_dep_base int = 0    // 本模块接口加载前 c_mod_n 基线
 // 同名模块可能来自不同项目（KEY.MOD 导入），文件名必须含项目。
 fn mb_mod_tag(m int, off *int, olen *int) int {
     let gs *gen.GenState = gen.G()
+    let proj_len int = gs.p_projs[gs.p_mods[m].proj].name_len
+    let mod_len int = gs.p_mods[m].name_len
+    // 标记 = 项目名 + '-' + 模块名。两个名字都来自用户输入：先按预算拒绝，
+    // 否则下面的 [512]u8 临时缓冲会被写穿（见 MB_TAG_MAX 注释）。
+    if (proj_len + mod_len + 1 > MB_TAG_MAX) {
+        return gen.fail("模块名过长：项目名与模块名合计超过 120 字节")
+    }
     let tmp [512]u8
     let n int = 0
     let i int = 0
@@ -259,7 +290,7 @@ fn mb_mod_tag(m int, off *int, olen *int) int {
 // 安全的文件名词干。非 [A-Za-z0-9_] 字节替换为 '_'（与 mb_mod_tag 同一套
 // 清洗规则），超过 120 字节截断。返回干长度（>= 0）。
 fn mb_asm_stem_base(path_off int, out *u8) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let path *char = pj_pool_str(path_off)
     let start int = 0
     let n int = 0
@@ -300,9 +331,9 @@ fn mb_asm_stem_base(path_off int, out *u8) int {
 fn mb_asm_stems(m int, stems *u8, lens *int) int {
     let gs *gen.GenState = gen.G()
     // 保留名：<tag>.stub
-    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) { return -1 }
-    let tag_off int = pj_canon_off
-    let tag_len int = pj_canon_len
+    if (mb_mod_tag(m, &pj_state().canon_off, &pj_state().canon_len) != 0) { return -1 }
+    let tag_off int = pj_state().canon_off
+    let tag_len int = pj_state().canon_len
     let reserved [160]u8
     let rn int = 0
     let ti int = 0
@@ -414,11 +445,11 @@ fn mb_asm_stems(m int, stems *u8, lens *int) int {
 fn mb_module_obj_row(m int, build_off int, build_len int, row_k int,
     spath *u8, opath *u8, mpath *u8) int {
     let gs *gen.GenState = gen.G()
-    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
+    if (mb_mod_tag(m, &pj_state().canon_off, &pj_state().canon_len) != 0) {
         return -1
     }
-    let tag_off int = pj_canon_off
-    let tag_len int = pj_canon_len
+    let tag_off int = pj_state().canon_off
+    let tag_len int = pj_state().canon_len
     let stem [160]u8
     let sn int = 0
     if (row_k < gs.p_mods[m].file_n) {
@@ -514,7 +545,7 @@ fn mb_module_obj_row(m int, build_off int, build_len int, row_k int,
 fn mb_check_clear_ifaces(build_off int, build_len int, count int) void {
     let ci int = 0
     for ci < count {
-        let m int = pj_order[ci]
+        let m int = pj_state().order[ci]
         let path [700]u8
         if (mb_module_iface_path(m, build_off, build_len, path) == 0) {
             unlink(gen.arr_cstr(path))
@@ -612,11 +643,11 @@ fn mb_dep_push(target int, bind_off int, bind_len int) int {
     return 1
 }
 
-// mb_dep_order_rank：模块在本轮拓扑序 pj_order 中的位置；不在则 -1。
+// mb_dep_order_rank：模块在本轮拓扑序 pj_state().order 中的位置；不在则 -1。
 fn mb_dep_order_rank(m int) int {
     let i int = 0
-    for i < pj_order_n {
-        if (pj_order[i] == m) {
+    for i < pj_state().order_n {
+        if (pj_state().order[i] == m) {
             return i
         }
         i += 1
@@ -731,14 +762,14 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
     }
     let di int = 0
     for di < mb_dep_n {
-        if (mb_mod_tag(mb_dep_mod[di], &pj_canon_off, &pj_canon_len) != 0) {
+        if (mb_mod_tag(mb_dep_mod[di], &pj_state().canon_off, &pj_state().canon_len) != 0) {
             return -1
         }
         let pbuf [760]u8
         let pn int = 0
         pn = gen.append_str(pbuf, pn, pj_pool_str(build_off))
         pn = gen.append_str(pbuf, pn, "/iface/")
-        pn = gen.append_str(pbuf, pn, pj_pool_str(pj_canon_off))
+        pn = gen.append_str(pbuf, pn, pj_pool_str(pj_state().canon_off))
         pn = gen.append_str(pbuf, pn, ".s.i")
         pbuf[pn] = 0
         let chosen *char = gen.arr_cstr(pbuf)
@@ -797,7 +828,7 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
 
 // mb_open_out：以宿主平台正确的旗标打开输出文件（覆盖写；交叉目标不影响
 // 宿主文件操作，见 gen.tg_host_darwin）。
-fn mb_open_out(path *char) int {
+pub fn mb_open_out(path *char) int {
     let flg int = 0x241
     if (gen.tg_host_darwin() != 0) {
         flg = 0x601
@@ -819,16 +850,16 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     let is_entry int = gs.p_mods[m].is_entry
     // 产物目录 = .build/asm/<tag>/（tag 含项目，防同名冲突；RS3b 起每模块
     // 一个目录，内含每文件 .s 与 <tag>.stub.s 运行时桩对象）
-    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
+    if (mb_mod_tag(m, &pj_state().canon_off, &pj_state().canon_len) != 0) {
         return -1
     }
-    let tag_off int = pj_canon_off
+    let tag_off int = pj_state().canon_off
     if (pj_canon(build_off, build_len, "asm") != 0) {
         return -1
     }
     let asmdir [900]u8
     let an int = 0
-    an = gen.append_str(asmdir, an, pj_pool_str(pj_canon_off))
+    an = gen.append_str(asmdir, an, pj_pool_str(pj_state().canon_off))
     an = gen.append_byte(asmdir, an, '/')
     an = gen.append_str(asmdir, an, pj_pool_str(tag_off))
     asmdir[an] = 0
@@ -843,14 +874,14 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     }
     let ipath [600]u8
     let in2 int = 0
-    in2 = gen.append_str(ipath, in2, pj_pool_str(pj_canon_off))
+    in2 = gen.append_str(ipath, in2, pj_pool_str(pj_state().canon_off))
     in2 = gen.append_byte(ipath, in2, '/')
     in2 = gen.append_str(ipath, in2, pj_pool_str(tag_off))
     in2 = gen.append_str(ipath, in2, ".s.i")
     ipath[in2] = 0
     let ctpath [600]u8
     let ctn int = 0
-    ctn = gen.append_str(ctpath, ctn, pj_pool_str(pj_canon_off))
+    ctn = gen.append_str(ctpath, ctn, pj_pool_str(pj_state().canon_off))
     ctn = gen.append_byte(ctpath, ctn, '/')
     ctn = gen.append_str(ctpath, ctn, pj_pool_str(tag_off))
     ctn = gen.append_str(ctpath, ctn, ".s.ct")
@@ -875,7 +906,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     }
     let mpath [600]u8
     let mn int = 0
-    mn = gen.append_str(mpath, mn, pj_pool_str(pj_canon_off))
+    mn = gen.append_str(mpath, mn, pj_pool_str(pj_state().canon_off))
     mn = gen.append_byte(mpath, mn, '/')
     mn = gen.append_str(mpath, mn, pj_pool_str(tag_off))
     mn = gen.append_str(mpath, mn, ".manifest")
@@ -1020,6 +1051,14 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         && pj_file_exists(gen.arr_cstr(ipath)) != 0
         && pj_file_exists(gen.arr_cstr(ctpath)) != 0
         && pj_file_exists(gen.arr_cstr(mpath)) != 0) {
+        // manifest 无显式版本（A1c 决策）：64 字节 = 模块键 16 + 对象摘要 16 +
+        // 每文件接口摘要 16×N。键本身含编译器二进制指纹与全部输入内容，
+        // 所以任何格式变更（必然换编译器）都会让旧 manifest 键不匹配；
+        // 长度检查挡住布局变更。**改布局时必须同时改长度或键组成**。
+        // manifest 无显式版本（A1c 决策）：64 字节 = 模块键 16 + 对象摘要 16 +
+        // 每文件接口摘要 16×N。键本身含编译器二进制指纹与全部输入内容，
+        // 所以任何格式变更（必然换编译器）都会让旧 manifest 键不匹配；
+        // 长度检查挡住布局变更。**改布局时必须同时改长度或键组成**。
         let manifest_len int = 64
         if (gen.read_source(gen.arr_cstr(mpath)) == 0
             && gs.task.c_src_len == manifest_len) {
@@ -1101,16 +1140,16 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
 
 // mb_manifest_commit：worker 完整成功后原子提交模块缓存键。
 fn mb_manifest_commit(m int, build_off int, build_len int, key *u8) int {
-    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
+    if (mb_mod_tag(m, &pj_state().canon_off, &pj_state().canon_len) != 0) {
         return -1
     }
-    let tag_off int = pj_canon_off
+    let tag_off int = pj_state().canon_off
     if (pj_canon(build_off, build_len, "manifest") != 0) {
         return -1
     }
     let mpath [600]u8
     let mn int = 0
-    mn = gen.append_str(mpath, mn, pj_pool_str(pj_canon_off))
+    mn = gen.append_str(mpath, mn, pj_pool_str(pj_state().canon_off))
     mn = gen.append_byte(mpath, mn, '/')
     mn = gen.append_str(mpath, mn, pj_pool_str(tag_off))
     mn = gen.append_str(mpath, mn, ".manifest")
@@ -1183,15 +1222,15 @@ fn mb_manifest_commit(m int, build_off int, build_len int, key *u8) int {
 // mb_module_iface_plain_path：返回持久接口路径，不附加本轮后缀。
 fn mb_module_iface_plain_path(m int, build_off int, build_len int,
     out *u8) int {
-    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) {
+    if (mb_mod_tag(m, &pj_state().canon_off, &pj_state().canon_len) != 0) {
         return -1
     }
-    let tag_off int = pj_canon_off
+    let tag_off int = pj_state().canon_off
     if (pj_canon(build_off, build_len, "iface") != 0) {
         return -1
     }
     let n int = 0
-    n = gen.append_str(out, n, pj_pool_str(pj_canon_off))
+    n = gen.append_str(out, n, pj_pool_str(pj_state().canon_off))
     n = gen.append_byte(out, n, '/')
     n = gen.append_str(out, n, pj_pool_str(tag_off))
     n = gen.append_str(out, n, ".s.i")
@@ -1217,11 +1256,11 @@ fn mb_module_iface_path(m int, build_off int, build_len int, out *u8) int {
 // mb_module_ctiface_plain_path：返回持久 CT 正文接口路径。
 fn mb_module_ctiface_plain_path(m int, build_off int, build_len int,
     out *u8) int {
-    if (mb_mod_tag(m, &pj_canon_off, &pj_canon_len) != 0) { return -1 }
-    let tag_off int = pj_canon_off
+    if (mb_mod_tag(m, &pj_state().canon_off, &pj_state().canon_len) != 0) { return -1 }
+    let tag_off int = pj_state().canon_off
     if (pj_canon(build_off, build_len, "iface") != 0) { return -1 }
     let n int = 0
-    n = gen.append_str(out, n, pj_pool_str(pj_canon_off))
+    n = gen.append_str(out, n, pj_pool_str(pj_state().canon_off))
     n = gen.append_byte(out, n, '/')
     n = gen.append_str(out, n, pj_pool_str(tag_off))
     n = gen.append_str(out, n, ".s.ct")
@@ -1285,7 +1324,7 @@ fn mb_iface_write_ready(path *char) int {
 // mb_iface_ct_same：比较本轮 session CT 接口与持久 CT 接口内容。
 // 返回 1 相同（允许早期启动），0 不同/缺失（等待依赖完成）。
 fn mb_iface_ct_same(m int, build_off int, build_len int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let session [700]u8
     let plain [700]u8
     if (mb_module_ctiface_path(m, build_off, build_len, session) != 0
@@ -1295,11 +1334,11 @@ fn mb_iface_ct_same(m int, build_off int, build_len int) int {
     // 没有 CT 正文（文件缺失/空）时不存在旧 CT 可复用，允许早期启动。
     if (pj_file_exists(gen.arr_cstr(session)) == 0) { return 1 }
     if (gen.read_source(gen.arr_cstr(session)) != 0) { return 0 }
-    if (gs.task.c_src_len == 0) { return 1 }
+    if (tk.c_src_len == 0) { return 1 }
     // 首次构建没有持久 CT，不存在可复用的旧值；session ready 已是新接口。
     if (pj_file_exists(gen.arr_cstr(plain)) == 0) { return 1 }
     if (gen.read_source(gen.arr_cstr(plain)) != 0) { return 0 }
-    if (gs.task.c_src_len == 0) { return 0 }
+    if (tk.c_src_len == 0) { return 0 }
     let hs u64 = mb_hash_init()
     let hp u64 = mb_hash_init()
     if (mb_hash_file(&hs, gen.arr_cstr(session)) != 0
@@ -1309,7 +1348,7 @@ fn mb_iface_ct_same(m int, build_off int, build_len int) int {
 
 // mb_iface_copy_file：完整读取源接口，经同目录暂存后原子发布到目标路径。
 fn mb_iface_copy_file(src *char, dst *char) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (gen.read_source(src) != 0) {
         return -1
     }
@@ -1323,7 +1362,7 @@ fn mb_iface_copy_file(src *char, dst *char) int {
     if (fd < 0) {
         return -1
     }
-    let wr int = gen.write_all(fd, gs.task.c_src, gs.task.c_src_len)
+    let wr int = gen.write_all(fd, tk.c_src, tk.c_src_len)
     let cr int = close(fd)
     if (wr != 0 || cr != 0 || rename(gen.arr_cstr(tmp), dst) != 0) {
         unlink(gen.arr_cstr(tmp))
@@ -1432,7 +1471,7 @@ fn mb_pass1_file(path *char, fi int) int {
 }
 
 // mb_restore_front_file：将当前解析器切换到项目索引时保存的只读快照。
-fn mb_restore_front_file(path *char, fi int) int {
+pub fn mb_restore_front_file(path *char, fi int) int {
     let gs *gen.GenState = gen.G()
     if (gs.c_front_cache == 0 || gs.p_files[fi].source == 0
         || gs.p_files[fi].tokens == 0) {
@@ -1526,12 +1565,12 @@ fn mb_check_binding_clash(m int) int {
                 && (gs.task.c_syms[idx].flags & gen.F_EXTERN) == 0) {
                 let buf [192]u8
                 let n int = 0
-                n = gen.append_int(buf, n, gs.task.c_syms[idx].def_line)
-                n = gen.append_byte(buf, n, ':')
-                n = gen.append_int(buf, n, gs.task.c_syms[idx].def_col)
-                n = gen.append_str(buf, n, ": 顶层声明与导入名冲突（导入名 ")
-                n = append_bytes_np(buf, n, gs.p_imp_off[ii], gs.p_imp_len[ii])
-                n = gen.append_str(buf, n, "）")
+                n = gen.append_int_cap(buf, 192, n, gs.task.c_syms[idx].def_line)
+                n = gen.append_byte_cap(buf, 192, n, ':')
+                n = gen.append_int_cap(buf, 192, n, gs.task.c_syms[idx].def_col)
+                n = gen.append_str_cap(buf, 192, n, ": 顶层声明与导入名冲突（导入名 ")
+                n = gen.append_np_cap(buf, 192, n, gs.p_imp_off[ii], gs.p_imp_len[ii])
+                n = gen.append_str_cap(buf, 192, n, "）")
                 let mo int = gen.tml_intern_str(buf, 0, n)
                 if (mo < 0) {
                     return -1
@@ -1558,7 +1597,7 @@ fn mb_check_binding_clash(m int) int {
 // prov_root：模块提供方项目根（在其中查找模块）；main_root：主项目根
 // （构建目录基准，接口路径与父进程一致）；out_dir：按文件汇编目录
 // <build>/asm/<tag>（RS3b）。
-fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
+pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
     main_off int, main_len int, out_dir *char, ir_cache_salt u64) int {
     let gs *gen.GenState = gen.G()
     gs.c_front_cache = 1
@@ -1584,7 +1623,7 @@ fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
 // —— 父进程：build / run ——
 
 // mb_print_stats：开发验收时输出当前进程的阶段计数；默认构建保持静默。
-fn mb_print_stats() void {
+pub fn mb_print_stats() void {
     let gs *gen.GenState = gen.G()
     if (gs.c_stats_enabled == 0) {
         return
@@ -1674,7 +1713,7 @@ fn mb_print_stats() void {
 }
 
 // mb_intern_arg：命令行参数字符串入名字池，返回偏移（长度出参）。
-fn mb_intern_arg(s *char, olen *int) int {
+pub fn mb_intern_arg(s *char, olen *int) int {
     let sl int = 0
     for s[sl] != 0 {
         sl += 1
@@ -1696,8 +1735,8 @@ fn mb_try_default_stdlib(dir *char, suffix *char) int {
     if (pj_canon(0, 0, gen.arr_cstr(path)) != 0) {
         return 0
     }
-    let cand_off int = pj_canon_off
-    let cand_len int = pj_canon_len
+    let cand_off int = pj_state().canon_off
+    let cand_len int = pj_state().canon_len
     let manifest [1200]u8
     let mn int = 0
     let i int = 0
@@ -1769,7 +1808,7 @@ fn mb_load_default_stdlib() int {
 // mb_load_stdlib：装载 YH_STDLIB 指定的标准库项目。
 // YH_STDLIB 非空时优先且失败不回退；为空/未设置时按可执行文件附近布局
 // 查找默认标准库（仓库 <root>/libs、bin 种子相邻 libs 或安装 share/yh/libs）。
-fn mb_load_stdlib() int {
+pub fn mb_load_stdlib() int {
     let gs *gen.GenState = gen.G()
     if (gs.p_stdlib >= 0) {
         return 0
@@ -1785,7 +1824,7 @@ fn mb_load_stdlib() int {
     if (pj_canon(0, 0, pj_pool_str(off)) != 0) {
         return -1
     }
-    let s int = pj_load_project(pj_canon_off, pj_canon_len)
+    let s int = pj_load_project(pj_state().canon_off, pj_state().canon_len)
     if (s < 0) {
         return -1
     }
@@ -1794,26 +1833,26 @@ fn mb_load_stdlib() int {
 }
 
 // pj_topo_multi：库模式——从项目每个模块出发收集依赖序。
-fn pj_topo_multi(proj int) int {
+pub fn pj_topo_multi(proj int) int {
     let gs *gen.GenState = gen.G()
     if (pj_topo(gs.p_projs[proj].mods[0]) < 0) {
         return -1
     }
     let i int = 1
     for i < gs.p_projs[proj].mod_n {
-        if (pj_mark[gs.p_projs[proj].mods[i]] != 2) {
+        if (pj_state().mark[gs.p_projs[proj].mods[i]] != 2) {
             if (pj_dfs(gs.p_projs[proj].mods[i]) != 0) {
                 return -1
             }
         }
         i += 1
     }
-    return pj_order_n
+    return pj_state().order_n
 }
 
 // mb_cmd_build：构建项目；可选 --stats 输出当前构建与模块 worker 计数。
 // argc/argv 已剥离程序名；由 build/check 命令共用。
-fn mb_cmd_build(av **char, an int) int {
+pub fn mb_cmd_build(av **char, an int) int {
     let gs *gen.GenState = gen.G()
     if (mb_resolve_self_path() != 0) {
         return 1
@@ -1832,7 +1871,6 @@ fn mb_cmd_build(av **char, an int) int {
         }
         if (gen.cstr_eq(av[i], "--link") != 0) {
             if (i + 1 >= an || av[i + 1][0] == 0) {
-                usage()
                 gen.fail("--link 需要一个组名")
                 return 2
             }
@@ -1842,7 +1880,6 @@ fn mb_cmd_build(av **char, an int) int {
             let lo int = gen.tml_intern_str(link_arg.to_type(*u8), 0, ll)
             if (lo < 0) { return -1 }
             if (pl_group_name_ok(lo, ll) == 0) {
-                usage()
                 gen.fail("--link 组名只能包含字母、数字、_、-")
                 return 2
             }
@@ -1852,7 +1889,6 @@ fn mb_cmd_build(av **char, an int) int {
         }
         if (gen.cstr_eq(av[i], "-o") != 0) {
             if (i + 1 >= an) {
-                usage()
                 gen.fail("-o 需要一个输出路径")
                 return 2
             }
@@ -1861,7 +1897,6 @@ fn mb_cmd_build(av **char, an int) int {
             continue
         }
         if (av[i][0] == '-') {
-            usage()
             gen.fail_path("未知的项目构建选项: ", av[i])
             return 2
         }
@@ -1871,7 +1906,6 @@ fn mb_cmd_build(av **char, an int) int {
         let mo int = gen.tml_intern_str(av[i].to_type(*u8), 0, sl)
         if (mo < 0) { return -1 }
         if (mod_arg_n > 0) {
-            usage()
             gen.fail("yh build 只能指定一个模块")
             return 2
         }
@@ -1881,7 +1915,6 @@ fn mb_cmd_build(av **char, an int) int {
         i += 1
     }
     if (gs.task.c_check_only != 0 && li_select_count() > 0) {
-        usage()
         gen.fail("yh check 不支持 --link")
         return 2
     }
@@ -1904,8 +1937,8 @@ fn mb_cmd_build(av **char, an int) int {
         return 1
     }
     // 捕获根路径（后续 canon 调用会改写全局游标）
-    let root_off int = pj_canon_off
-    let root_len int = pj_canon_len
+    let root_off int = pj_state().canon_off
+    let root_len int = pj_state().canon_len
     pj_set_root_project(root_off, root_len)
     let proj int = pj_load_project(root_off, root_len)
     if (proj < 0) {
@@ -1933,7 +1966,6 @@ fn mb_cmd_build(av **char, an int) int {
         rootmod = pj_entry_mod(proj)
     }
     if (rootmod < 0 && li_select_count() > 0) {
-        usage()
         gen.fail("库项目没有可链接产物，--link 不适用")
         return 2
     }
@@ -1955,7 +1987,7 @@ fn mb_cmd_build(av **char, an int) int {
     if (build_off < 0) {
         return 1
     }
-    let build_len int = pj_canon_len
+    let build_len int = pj_state().canon_len
     if (mb_mkdir(pj_pool_str(build_off)) != 0) {
         return 1
     }
@@ -2015,7 +2047,7 @@ fn mb_cmd_build(av **char, an int) int {
 
 // mb_cmd_run：yh run——构建清单 entry 并运行，返回程序退出码。
 // 支持与 build 相同的 --link 组选择；跨目标在本机运行前明确拒绝。
-fn mb_cmd_run(av **char, an int) int {
+pub fn mb_cmd_run(av **char, an int) int {
     let gs *gen.GenState = gen.G()
     if (mb_resolve_self_path() != 0) {
         return 1
@@ -2030,7 +2062,6 @@ fn mb_cmd_run(av **char, an int) int {
         }
         if (gen.cstr_eq(av[i], "--link") != 0) {
             if (i + 1 >= an || av[i + 1][0] == 0) {
-                usage()
                 gen.fail("--link 需要一个组名")
                 return 2
             }
@@ -2040,7 +2071,6 @@ fn mb_cmd_run(av **char, an int) int {
             let lo int = gen.tml_intern_str(link_arg.to_type(*u8), 0, ll)
             if (lo < 0) { return -1 }
             if (pl_group_name_ok(lo, ll) == 0) {
-                usage()
                 gen.fail("--link 组名只能包含字母、数字、_、-")
                 return 2
             }
@@ -2048,7 +2078,6 @@ fn mb_cmd_run(av **char, an int) int {
             i += 2
             continue
         }
-        usage()
         gen.fail_path("yh run 未知参数: ", av[i])
         return 2
     }
@@ -2061,8 +2090,8 @@ fn mb_cmd_run(av **char, an int) int {
     if (root < 0) {
         return 1
     }
-    let root_off int = pj_canon_off
-    let root_len int = pj_canon_len
+    let root_off int = pj_state().canon_off
+    let root_len int = pj_state().canon_len
     pj_set_root_project(root_off, root_len)
     let proj int = pj_load_project(root_off, root_len)
     if (proj < 0) {
@@ -2086,7 +2115,7 @@ fn mb_cmd_run(av **char, an int) int {
     if (build_off < 0) {
         return 1
     }
-    let build_len int = pj_canon_len
+    let build_len int = pj_state().canon_len
     if (mb_mkdir(pj_pool_str(build_off)) != 0) {
         return 1
     }
@@ -2111,14 +2140,42 @@ fn mb_cmd_run(av **char, an int) int {
 
 // mb_print_version：打印当前项目的 name 与 version（清单 project.version
 // 缺省时标注未声明）。quiet=1 时找不到项目静默返回（usage 顺手显示）。
-fn mb_print_version(quiet int) int {
+// mb_print_contracts：输出本编译器认识的产物契约版本（key=value，稳定格式）。
+//
+// 供 CI 与外部工具（yh-explorer、VSCode 扩展）协商：它们读这里的版本，
+// 而不是去猜 `.s.i`/`.s.ct` 头行或 IR 序列化格式。版本常量单点定义在
+// parse（接口头行）与 ir（序列化）模块，这里只做展示，不另存副本。
+pub fn mb_print_contracts() int {
+    let buf [512]u8
+    let n int = 0
+    n = gen.append_str(&buf[0], n, "iface-min=")
+    n = gen.append_int(&buf[0], n, parse.IFACE_VERSION_MIN)
+    n = gen.append_byte(&buf[0], n, '\n')
+    n = gen.append_str(&buf[0], n, "iface-max=")
+    n = gen.append_int(&buf[0], n, parse.IFACE_VERSION_MAX)
+    n = gen.append_byte(&buf[0], n, '\n')
+    n = gen.append_str(&buf[0], n, "ctiface=")
+    n = gen.append_int(&buf[0], n, parse.CTIFACE_VERSION)
+    n = gen.append_byte(&buf[0], n, '\n')
+    n = gen.append_str(&buf[0], n, "ir-function=")
+    n = gen.append_int(&buf[0], n, ir.IR_SERIAL_VERSION)
+    n = gen.append_byte(&buf[0], n, '\n')
+    n = gen.append_str(&buf[0], n, "ir-module=")
+    n = gen.append_int(&buf[0], n, ir.IR_MODULE_SERIAL_VERSION)
+    n = gen.append_byte(&buf[0], n, '\n')
+    buf[n] = 0
+    pj_out_s(gen.arr_cstr(&buf[0]))
+    return 0
+}
+
+pub fn mb_print_version(quiet int) int {
     let gs *gen.GenState = gen.G()
     let root int = pj_find_root(quiet)
     if (root < 0) {
         return 1
     }
-    let root_off int = pj_canon_off
-    let root_len int = pj_canon_len
+    let root_off int = pj_state().canon_off
+    let root_len int = pj_state().canon_len
     let proj int = pj_load_project(root_off, root_len)
     if (proj < 0) {
         return 1
@@ -2135,15 +2192,14 @@ fn mb_print_version(quiet int) int {
 }
 
 // mb_cmd_list：yh list [--resolve name]。
-fn mb_cmd_list(av **char, an int) int {
-    let gs *gen.GenState = gen.G()
+pub fn mb_cmd_list(av **char, an int) int {
+    let tk *gen.TaskCtx = gen.task()
     let resolve_off int = -1
     let resolve_len int = 0
     let has_resolve int = 0
     let i int = 1
     for i < an {
         if (gen.cstr_eq(av[i], "--link") != 0) {
-            usage()
             gen.fail("yh list 不支持 --link")
             return 2
         }
@@ -2162,10 +2218,9 @@ fn mb_cmd_list(av **char, an int) int {
             i += 2
             continue
         }
-        usage()
         return 2
     }
-    gs.task.c_path = "yh"
+    tk.c_path = "yh"
     if (mb_load_stdlib() != 0) {
         return 1
     }
@@ -2173,8 +2228,8 @@ fn mb_cmd_list(av **char, an int) int {
     if (root < 0) {
         return 1
     }
-    let root_off int = pj_canon_off
-    let root_len int = pj_canon_len
+    let root_off int = pj_state().canon_off
+    let root_len int = pj_state().canon_len
     pj_set_root_project(root_off, root_len)
     let proj int = pj_load_project(root_off, root_len)
     if (proj < 0) {

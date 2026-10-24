@@ -1,4 +1,4 @@
-module main
+module build
 import gen
 import lex
 import parse
@@ -88,12 +88,12 @@ fn mb_llvm_file_begin(path *char) int {
 // =1 用于程序编译。入口检查条件化，但函数体、全局与编译期检查一律保留。
 // 返回 0 成功；任一遍失败或产生诊断（c_errors > 0）返回非 0。
 fn mb_llvm_semantics(require_main int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     comptime.ct_reset()
-    gs.task.c_pass = 1
-    gs.task.c_pos = 0
-    if (parse.parse_indexed_decls(0) != 0 || gs.task.c_errors > 0) { return 1 }
-    gs.task.c_pos = 0
+    tk.c_pass = 1
+    tk.c_pos = 0
+    if (parse.parse_indexed_decls(0) != 0 || tk.c_errors > 0) { return 1 }
+    tk.c_pos = 0
     if (ast.ast_decl_bind_file(0) != 0) { return 1 }
     let main_status int = 0
     if (require_main != 0) {
@@ -102,9 +102,9 @@ fn mb_llvm_semantics(require_main int) int {
         main_status = gen.sem_check_main_optional()
     }
     if (main_status != 0) { return 1 }
-    gs.task.c_pass = 2
-    gs.task.c_pos = 0
-    if (parse.parse_source_ct_fns() != 0 || gs.task.c_errors > 0) { return 1 }
+    tk.c_pass = 2
+    tk.c_pos = 0
+    if (parse.parse_source_ct_fns() != 0 || tk.c_errors > 0) { return 1 }
     if (parse.parse_source_ct_layout_register() != 0) { return 1 }
     for 1 {
         let pending_before int = comptime.ct_value_pending_count() +
@@ -127,12 +127,12 @@ fn mb_llvm_semantics(require_main int) int {
             return 1
         }
     }
-    if (comptime.ct_layout_resolve() != 0 || gs.task.c_errors > 0) { return 1 }
+    if (comptime.ct_layout_resolve() != 0 || tk.c_errors > 0) { return 1 }
     if (parse.ct_enum_pending_run() != 0) { return 1 }
-    gs.task.c_pos = 0
-    if (parse.parse_source_globals() != 0 || gs.task.c_errors > 0) { return 1 }
-    gs.task.c_pos = 0
-    if (parse.parse_source_fns() != 0 || gs.task.c_errors > 0) { return 1 }
+    tk.c_pos = 0
+    if (parse.parse_source_globals() != 0 || tk.c_errors > 0) { return 1 }
+    tk.c_pos = 0
+    if (parse.parse_source_fns() != 0 || tk.c_errors > 0) { return 1 }
     let view ast.AstView
     ast.ast_view(&view)
     if (check.verify_module(&view) != 0) { return 1 }
@@ -145,16 +145,15 @@ fn mb_llvm_semantics(require_main int) int {
 // require_main=0 用于库文件 check，=1 用于程序编译；helper 不 lowering、
 // 不调用 LLVM、不写正式缓存。成功交付独占快照（out 由调用方释放），
 // 失败不改 out 并保留前端诊断。
-fn llvm_check_single_file(source_path *char, require_main int,
+pub fn llvm_check_single_file(source_path *char, require_main int,
     out *ast.CheckedModule) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (out == 0) { return -1 }
     if (gen.front_checked_begin() != 0) { return 1 }
     if (lex.lex_all() != 0) { return 1 }
     if (mb_llvm_file_begin(source_path) != 0) { return 1 }
-    gs.task.c_compile = 1
-    if (gen.ty_register_builtins() != 0 || gen.scope_push() != 0
-        || builtin.sem_register_prelude() != 0) { return 1 }
+    tk.c_compile = 1
+    if (builtin.front_prepare() != 0) { return 1 }
     if (mb_llvm_semantics(require_main) != 0) { return 1 }
     if (gen.front_checked_verify() != 0) { return 1 }
     if (ast.checked_module_capture(out) != 0) { return -1 }
@@ -177,7 +176,7 @@ fn llvm_check_single_file(source_path *char, require_main int,
 // link 为 0：产物是**对象文件**（kind=0）或汇编文本（kind=1）。
 // text_path 非空时额外写出 LLVM 文本（"-" = 标准输出）。
 // 返回 0 成功、1 源/形态错误、-1 内部或桥失败。
-fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
+pub fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
     text_path *char, link int) int {
     let gs *gen.GenState = gen.G()
     // 单文件 check 与编译共用同一条受检前端；调用方只做过读源与建表。

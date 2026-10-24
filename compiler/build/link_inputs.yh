@@ -1,8 +1,8 @@
-module main
+module build
 import gen
 
 // POSIX 文件/环境接口：直接声明 C ABI，避免把宿主路径语义塞进 prelude。
-@[extern] fn realpath(path *char, resolved *char) *char
+@[extern] pub fn realpath(path *char, resolved *char) *char
 @[extern] fn stat(path *char, buf *u64) int
 @[extern] fn setenv(name *char, value *char, overwrite int) int
 @[extern] fn getenv(name *char) *char
@@ -67,8 +67,8 @@ fn li_select_add(off int, plen int) int {
             let same int = 1
             let k int = 0
             for k < plen {
-                if (gen.G().task.np_data[li_select_off[i] + k]
-                    != gen.G().task.np_data[off + k]) { same = 0; break }
+                if (gen.task().np_data[li_select_off[i] + k]
+                    != gen.task().np_data[off + k]) { same = 0; break }
                 k += 1
             }
             if (same != 0) { return 0 }
@@ -102,11 +102,11 @@ fn li_select_count() int { return li_select_n }
 
 // li_name_eq：比较两个池内字符串。
 fn li_name_eq(aoff int, alen int, boff int, blen int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (alen != blen) { return 0 }
     let i int = 0
     for i < alen {
-        if (gs.task.np_data[aoff + i] != gs.task.np_data[boff + i]) { return 0 }
+        if (tk.np_data[aoff + i] != tk.np_data[boff + i]) { return 0 }
         i += 1
     }
     return 1
@@ -239,13 +239,13 @@ fn li_error(proj int, group *gen.PLinkGroup, item *gen.PLinkItem,
 
 // li_unknown_group：--link 指定了不存在的有效组。
 fn li_unknown_group(proj int, off int, plen int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let buf [512]u8
     let n int = 0
     n = gen.append_str(buf, n, "未知的 --link 组: ")
     let k int = 0
     for k < plen && n < 300 {
-        buf[n] = gs.task.np_data[off + k]
+        buf[n] = tk.np_data[off + k]
         n += 1
         k += 1
     }
@@ -256,7 +256,7 @@ fn li_unknown_group(proj int, off int, plen int) int {
         if (i > 0) { n = gen.append_str(buf, n, ", ") }
         k = 0
         for k < g.name_len && n < 470 {
-            buf[n] = gs.task.np_data[g.name_off + k]
+            buf[n] = tk.np_data[g.name_off + k]
             n += 1
             k += 1
         }
@@ -270,13 +270,13 @@ fn li_unknown_group(proj int, off int, plen int) int {
 
 // li_ends_with：池内路径是否以 suffix 结尾。
 fn li_ends_with(off int, plen int, suffix *char) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let sn int = 0
     for suffix[sn] != 0 { sn += 1 }
     if (sn <= 0 || plen < sn) { return 0 }
     let i int = 0
     for i < sn {
-        if (gs.task.np_data[off + plen - sn + i] != suffix[i].to_type(u8)) { return 0 }
+        if (tk.np_data[off + plen - sn + i] != suffix[i].to_type(u8)) { return 0 }
         i += 1
     }
     return 1
@@ -284,11 +284,11 @@ fn li_ends_with(off int, plen int, suffix *char) int {
 
 // li_digits_dots：版本号段只允许数字与点，且至少一个数字。
 fn li_digits_dots(off int, plen int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let digits int = 0
     let i int = 0
     for i < plen {
-        let b u8 = gs.task.np_data[off + i]
+        let b u8 = tk.np_data[off + i]
         if (b >= '0' && b <= '9') { digits += 1 }
         else if (b != '.') { return 0 }
         i += 1
@@ -298,14 +298,14 @@ fn li_digits_dots(off int, plen int) int {
 
 // li_so_versioned：匹配 .so.<数字/点> 形式。
 fn li_so_versioned(off int, plen int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let i int = 0
     let dot int = -1
     for i + 4 <= plen {
-        if (gs.task.np_data[off + i] == '.'
-            && gs.task.np_data[off + i + 1] == 's'
-            && gs.task.np_data[off + i + 2] == 'o'
-            && gs.task.np_data[off + i + 3] == '.') {
+        if (tk.np_data[off + i] == '.'
+            && tk.np_data[off + i + 1] == 's'
+            && tk.np_data[off + i + 2] == 'o'
+            && tk.np_data[off + i + 3] == '.') {
             dot = i + 4
         }
         i += 1
@@ -665,7 +665,7 @@ fn li_rt_push(off int, plen int) int {
 // li_runtime_prepare：读取构建机运行库参数文件；未设置时保持空。
 // 文件属于构建环境，不编进种子；普通项目不设置该变量。
 fn li_runtime_prepare() int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     li_rt_n = 0
     let env_off int = -1
     let env_len int = 0
@@ -678,14 +678,14 @@ fn li_runtime_prepare() int {
         return gen.fail_path("无法读取运行库参数文件: ", path)
     }
     let pos int = 0
-    let n int = gs.task.c_src_len
+    let n int = tk.c_src_len
     for pos < n {
         let start int = pos
-        for pos < n && gs.task.c_src[pos] != 10 { pos += 1 }
+        for pos < n && tk.c_src[pos] != 10 { pos += 1 }
         let end int = pos
-        if (end > start && gs.task.c_src[end - 1] == 13) { end -= 1 }
+        if (end > start && tk.c_src[end - 1] == 13) { end -= 1 }
         if (end > start) {
-            let off int = gen.tml_intern_str(gs.task.c_src, start, end - start)
+            let off int = gen.tml_intern_str(tk.c_src, start, end - start)
             if (off < 0 || li_rt_push(off, end - start) != 0) { return -1 }
         }
         if (pos < n) { pos += 1 }
@@ -719,7 +719,7 @@ fn li_runtime_hash(h *u64) void {
 
 // li_prepare：合并组、选择库、校验并准备链接缓存输入。
 fn li_prepare(proj int, build_off int, build_len int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     li_lib_n = 0
     if (li_runtime_prepare() != 0) { return -1 }
     if (li_effective_groups(proj) != 0) { return -1 }
@@ -731,10 +731,10 @@ fn li_prepare(proj int, build_off int, build_len int) int {
     let old_n int = 0
     if (pj_file_exists(gen.arr_cstr(&manifest[0])) != 0) {
         if (gen.read_source(gen.arr_cstr(&manifest[0])) != 0) { return -1 }
-        old_n = gs.task.c_src_len
+        old_n = tk.c_src_len
         old = malloc((old_n + 1).to_type(u64)).to_type(*u8)
         if (old == 0) { return gen.fail("链接库 manifest 缓冲分配失败") }
-        if (old_n > 0) { memcpy(old, gs.task.c_src, old_n.to_type(u64)) }
+        if (old_n > 0) { memcpy(old, tk.c_src, old_n.to_type(u64)) }
         old[old_n] = 0
     }
     let out *u8 = 0
@@ -882,7 +882,7 @@ fn li_hash(h *u64) void {
 // li_runtime_path：拼接选中共享库目录，供 yh run 子进程搜索。
 // .a 与链接期 .tbd 不产生运行时目录。
 fn li_runtime_path() *char {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let out [8192]u8
     let n int = 0
     let li int = 0

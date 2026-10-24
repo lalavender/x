@@ -34,7 +34,7 @@ let ast_decl_file_cap int = 0
 
 // ast_decl_reset：释放本模块 worker 的声明节点并清零计数。
 pub fn ast_decl_reset() void {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (ast_decl_nodes != 0) {
         free(ast_decl_nodes.to_type(*void))
     }
@@ -46,17 +46,17 @@ pub fn ast_decl_reset() void {
     }
     ast_decl_file_first = 0
     ast_decl_file_cap = 0
-    gs.task.c_stats_decl_nodes = 0
+    tk.c_stats_decl_nodes = 0
 }
 
 // ast_decl_add_file：把该文件现成的 PDecl 范围映射为只读声明节点。
 pub fn ast_decl_add_file(fi int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_ast_capture == 0) {
+    let tk *gen.TaskCtx = gen.task()
+    if (tk.c_ast_capture == 0) {
         return 0
     }
-    if (fi < 0 || fi >= gs.p_file_n || gs.task.c_active_file != fi
-        || gs.task.c_file_decls != gs.p_files[fi].decls) {
+    if (fi < 0 || fi >= gen.p_file_count() || tk.c_active_file != fi
+        || tk.c_file_decls != gen.p_file(fi).decls) {
         return gen.fail("内部错误：文件声明 AST 缺少对应的 PDecl 索引")
     }
     if (fi >= ast_decl_file_cap) {
@@ -85,8 +85,8 @@ pub fn ast_decl_add_file(fi int) int {
     }
     ast_decl_file_first[fi] = ast_decl_count
     let i int = 0
-    for i < gs.task.c_file_decl_n {
-        let src gen.PDecl = gs.task.c_file_decls[i]
+    for i < tk.c_file_decl_n {
+        let src gen.PDecl = tk.c_file_decls[i]
         if (ast_decl_count == ast_decl_cap) {
             let ncap int = ast_decl_cap * 2
             if (ncap == 0) { ncap = 32 }
@@ -108,18 +108,18 @@ pub fn ast_decl_add_file(fi int) int {
         let is_pub int = 0
         let scan int = src.start
         for scan < keyword {
-            if (gs.task.c_toks[scan].kind == gen.TK_PUB) { is_pub = 1 }
+            if (tk.c_toks[scan].kind == gen.TK_PUB) { is_pub = 1 }
             scan += 1
         }
         let name_token int = keyword + 1
-        if (name_token >= src.end || gs.task.c_toks[name_token].kind != gen.TOK_IDENT) {
+        if (name_token >= src.end || tk.c_toks[name_token].kind != gen.TOK_IDENT) {
             name_token = -1
         }
         let id int = ast_decl_count
         ast_decl_nodes[id].kind = src.kind
         ast_decl_nodes[id].first = src.start
         ast_decl_nodes[id].after = src.end
-        ast_decl_nodes[id].token_count = gs.task.c_tok_n
+        ast_decl_nodes[id].token_count = tk.c_tok_n
         ast_decl_nodes[id].file_id = fi
         ast_decl_nodes[id].decl_index = i
         ast_decl_nodes[id].line = src.line
@@ -131,7 +131,7 @@ pub fn ast_decl_add_file(fi int) int {
         ast_decl_nodes[id].type_id = -1
         ast_decl_nodes[id].init_expr = -1
         ast_decl_count += 1
-        gs.task.c_stats_decl_nodes += 1
+        tk.c_stats_decl_nodes += 1
         i += 1
     }
     return 0
@@ -140,66 +140,59 @@ pub fn ast_decl_add_file(fi int) int {
 // ast_decl_test_active：该文件是否属于 yh test 的目标项目。
 // 依赖/标准库里的 test 声明不登记函数符号，绑定阶段必须跳过它们。
 fn ast_decl_test_active(fi int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_test_mode == 0 || gs.c_test_project < 0) { return 0 }
-    if (fi < 0 || fi >= gs.p_file_n) { return 0 }
-    let m int = gs.p_files[fi].mod
-    if (m < 0 || m >= gs.p_mod_n) { return 0 }
-    if (gs.p_mods[m].proj != gs.c_test_project) { return 0 }
-    if (gs.c_test_mod_filter >= 0 && gs.c_test_mod_filter != m) { return 0 }
-    if (gs.c_test_file_filter >= 0 && gs.c_test_file_filter != fi) { return 0 }
-    return 1
+    // 选择条件由 gen.test_file_selected 统一判定：前端不感知 --filter。
+    return gen.test_file_selected(fi)
 }
 
 // ast_decl_bind_file：声明登记完成后绑定函数符号与签名类型，供 IR 降低读取。
 // 全局 let/const 同时绑定模块级符号（type_id 保持 -1：对象类型经符号表读取）。
 pub fn ast_decl_bind_file(fi int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_ast_capture == 0) { return 0 }
-    if (fi < 0 || fi >= gs.p_file_n || gs.task.c_active_file != fi
-        || gs.task.c_toks == 0 || gs.task.c_file_decls != gs.p_files[fi].decls) {
+    let tk *gen.TaskCtx = gen.task()
+    if (tk.c_ast_capture == 0) { return 0 }
+    if (fi < 0 || fi >= gen.p_file_count() || tk.c_active_file != fi
+        || tk.c_toks == 0 || tk.c_file_decls != gen.p_file(fi).decls) {
         return gen.fail("内部错误：函数声明绑定缺少当前文件 token 快照")
     }
     let i int = 0
     for i < ast_decl_count {
         let node *AstDecl = &ast_decl_nodes[i]
         if (node.file_id == fi && node.kind == gen.TK_FN) {
-            if (node.name_token < 0 || node.name_token >= gs.task.c_tok_n
-                || node.decl_index < 0 || node.decl_index >= gs.task.c_file_decl_n) {
+            if (node.name_token < 0 || node.name_token >= tk.c_tok_n
+                || node.decl_index < 0 || node.decl_index >= tk.c_file_decl_n) {
                 return gen.fail("内部错误：函数声明绑定名字范围无效")
             }
-            let tok gen.Tok = gs.task.c_toks[node.name_token]
+            let tok gen.Tok = tk.c_toks[node.name_token]
             let sym int = gen.sym_lookup(tok.start, tok.len)
-            if (sym < 0 || gs.task.c_syms[sym].kind != gen.SYM_FN) {
+            if (sym < 0 || tk.c_syms[sym].kind != gen.SYM_FN) {
                 return gen.fail("内部错误：函数声明未绑定到函数符号")
             }
             node.sym_id = sym
-            node.type_id = gs.task.c_syms[sym].type_id
+            node.type_id = tk.c_syms[sym].type_id
         }
         if (node.file_id == fi && node.kind == gen.TK_TEST
             && ast_decl_test_active(fi) != 0) {
             // test 体符号名是编译器生成的 __yh_test_<file>_<decl>，
             // 不能按源码里的字符串/标识符名字反查，改用 pass1 写在 PDecl 的符号。
-            if (node.decl_index < 0 || node.decl_index >= gs.task.c_file_decl_n) {
+            if (node.decl_index < 0 || node.decl_index >= tk.c_file_decl_n) {
                 return gen.fail("内部错误：test 声明缺少 PDecl 身份")
             }
-            let sym int = gs.task.c_file_decls[node.decl_index].test_sym
-            if (sym < 0 || sym >= gs.task.c_sym_n
-                || gs.task.c_syms[sym].kind != gen.SYM_FN) {
+            let sym int = tk.c_file_decls[node.decl_index].test_sym
+            if (sym < 0 || sym >= tk.c_sym_n
+                || tk.c_syms[sym].kind != gen.SYM_FN) {
                 return gen.fail("内部错误：test 声明未绑定到测试函数符号")
             }
             node.sym_id = sym
-            node.type_id = gs.task.c_syms[sym].type_id
+            node.type_id = tk.c_syms[sym].type_id
         }
         if (node.file_id == fi && (node.kind == gen.TK_LET || node.kind == gen.TK_CONST)) {
-            if (node.name_token < 0 || node.name_token >= gs.task.c_tok_n) {
+            if (node.name_token < 0 || node.name_token >= tk.c_tok_n) {
                 return gen.fail("内部错误：全局声明绑定名字范围无效")
             }
-            let gtok gen.Tok = gs.task.c_toks[node.name_token]
+            let gtok gen.Tok = tk.c_toks[node.name_token]
             let gsym int = gen.sym_lookup(gtok.start, gtok.len)
-            if (gsym < 0 || (gs.task.c_syms[gsym].kind != gen.SYM_VAR
-                && gs.task.c_syms[gsym].kind != gen.SYM_CONST)
-                || (gs.task.c_syms[gsym].flags & gen.F_GLOBAL) == 0) {
+            if (gsym < 0 || (tk.c_syms[gsym].kind != gen.SYM_VAR
+                && tk.c_syms[gsym].kind != gen.SYM_CONST)
+                || (tk.c_syms[gsym].flags & gen.F_GLOBAL) == 0) {
                 return gen.fail("内部错误：全局声明未绑定到模块级符号")
             }
             node.sym_id = gsym
@@ -211,8 +204,8 @@ pub fn ast_decl_bind_file(fi int) int {
 
 // ast_decl_attach_body：将刚解析的函数体根连接到其文件级函数声明。
 pub fn ast_decl_attach_body(fi int, decl_index int, stmt_id int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_ast_capture == 0) {
+    let tk *gen.TaskCtx = gen.task()
+    if (tk.c_ast_capture == 0) {
         return 0
     }
     let i int = 0
@@ -238,8 +231,8 @@ pub fn ast_decl_attach_body(fi int, decl_index int, stmt_id int) int {
 // 仅捕获开启且当前文件已索引（c_file_decl_i >= 0）时生效；其余形态静默跳过
 // （旧单文件路径在全局子遍保持 capture=0，不进入本函数）。
 pub fn ast_decl_attach_init(fi int, decl_index int, expr_id int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_ast_capture == 0 || decl_index < 0) {
+    let tk *gen.TaskCtx = gen.task()
+    if (tk.c_ast_capture == 0 || decl_index < 0) {
         return 0
     }
     if (expr_id < 0 || expr_id >= ast_expr_count) {

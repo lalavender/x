@@ -4,6 +4,37 @@
 [finish.md](finish.md) 与 [01-finished/](01-finished/)；方案文档在
 [02-plan/](02-plan/)，取舍见 [adr/](adr/)。
 
+## 2026-10-24 架构优化（只列未完成）
+
+A0a–A6 已全部完成并通过双门禁（表达式嵌套守卫、`ir/ssa_inline` 删除、A0c 路径预算、
+A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版本、A2a–A2c 模块
+拆分、A3 `api` 调用面、A4a–A4d 状态收敛、A5 前端装配收敛、A6 `testkit` 抽出），
+证据与数字见 [finish.md](finish.md)。当前基线由 `make arch-check` 守护：
+
+| 指标 | 当前 |
+|---|---|
+| 模块 / 文件 / 行数 | 12 / 114 / 51,484 |
+| `cmd` 占比 | 381 行，**0.7%** |
+| `gen.G()` 读点 | **165**（build 101、testkit 27、parse 21、main 5） |
+| 模块级可变 `let` | 183 |
+| 容量安全追加点 | 45（下界） |
+| 最大模块 / 文件 / 函数 | build 10,720 / `module_build` 2,242 / `mb_link` 674 |
+
+以下三项**是同一件事的三个面**——把构建态从单例里拿出来，建议同批做，否则会改三遍。
+
+- [ ] **B1 `BuildCtx` 对象化**：`build` 剩余 101 个 `gen.G()` 读点集中在
+  `p_projs`(204 次)/`p_mods`(124)/`p_files`(69)/`c_target`(56)。`build` 是项目模型
+  所有者，继续加窄口是本末倒置；应把项目表/目标/统计收进显式上下文对象，
+  随 worker/线程模型一起传递。前置：无。
+- [ ] **B2 拆分 `build`**：`build` 已 10,720 行、最大文件 `module_build` 2,242、
+  最大函数 `mb_link` 674。按"项目模型 / 链接 / 调度 / 模块发射"再分模块，或先把
+  `mb_link` 拆成 4–5 个阶段函数。建议在 B1 之后做（否则拆完还要按新上下文再改一遍）。
+- [ ] **B3 `lower` 独立**：`ast/module_snapshot_lower*` + `ast_ir*`（10 文件 4,739 行）
+  可移出 `ast`，但 `lower_module` 的调用点在
+  `ast/module_snapshot_check_slice.yh`（check 流水线内部），属**流程耦合**而非模块
+  边界。要成立得先拆开"check 产出 CheckedModule"与"lower 消费它"，由驱动器在拿到
+  快照后再触发 lowering。详见 finish.md「A7 不是纯搬迁」。
+
 ## 2026-10-21 重规划说明
 
 本轮按「LLVM 收尾完成 → 发布质量 → 标准库与工具链 → 后续任务 → 待决策」重排：
@@ -38,54 +69,17 @@
 - [ ] **PF3**：规模增长、产物运行基准与代码体积；并发扫描待存在控制入口后再做。
 - [ ] **PF4**：Gitea 独立性能报告、资产归档、噪声校准与回退复测。
 
-## 语言内测试（YT0–YT3b、YT2d、YT1.1 已实施；剩余 YT4 迁移与发版）
+## 语言内测试（YT4 迁移与发版）
 
 [设计提案](03-design/yh-test语言内测试设计-2026-10-23.md)与
 [实施分期](02-plan/yh-test分阶段实施方案-2026-10-23.md)已整理。
-YT0 语法基线、YT1 发现/文档绑定/无运行检查、YT2a（测试体降低 + 运行期
-断言）、YT2b（入口模块/逐例进程/结果协议/汇总）、YT2c（执行过滤/超时/
-`testing.fail/skip`/断言消息）、YT3a（标准库 string 内建测试与门禁）与
-YT3b（compiler 内嵌测试与门禁，随 0.0.9-rc.2 交付）、YT2d（日志/并行/缓存键）
-与 YT1.1（项目外单文件）已完成，证据见
-[YT0 记录](01-finished/yh-test语法基线-2026-10-23.md)、
-[YT1 记录](01-finished/yh-test发现与无运行检查-2026-10-23.md)、
-[YT2a 记录](01-finished/yh-test降低与运行期断言-2026-10-23.md)、
-[YT2b 记录](01-finished/yh-test执行器与结果协议-2026-10-23.md)、
-[YT2c 记录](01-finished/yh-test执行增强-2026-10-23.md)、
-[YT3a 记录](01-finished/yh-test标准库内建测试-2026-10-23.md)与
-[YT3b 记录](01-finished/yh-test编译器内嵌测试-2026-10-23.md)、
-[YT2d-1 记录](01-finished/yh-test逐例日志与截断提示-2026-10-23.md)、
-[YT2d-2 记录](01-finished/yh-test测试缓存键-2026-10-23.md)与
-[YT1.1 记录](01-finished/yh-test项目外单文件-2026-10-23.md)；
-既有测试的迁移候选见
-[YT4 分析](02-plan/yh-test语法迁移既有测试分析-2026-10-23.md)；
+YT0–YT3b、YT2d、YT1.1 已实施并记录在
+[01-finished/](01-finished/)；既有测试的迁移候选见
+[YT4 分析](02-plan/yh-test语法迁移既有测试分析-2026-10-23.md)。
 以下只保留未完成项。
 
-- [x] **YT1.1**：项目外单文件临时单模块上下文（临时项目根在
-  `<源文件目录>/tmp/yh-test/single`，只装入该文件，模块名缺失时由文件名派生，
-  允许导入标准库）。
-- [x] **YT2a**：测试体降低为模块内 `pub` 无参 `void` 函数、`$assert` 降为
-  `__yh_test_assert(cond, line, col, msg)` 运行期调用、受检节点与检查身份、
-  `--no-run` 发布对象与 `--emit-llvm` 审阅；生产构建零测试符号。
-- [x] **YT2b**：`__yh_test_assert` 运行时定义与失败位置记录、测试入口模块、
-  逐例 fork/exec、`YHTP`/`YHTF` 结果协议与
-  `结果: N passed; M skipped; K failed` 汇总；崩溃、提前退出与记录缺失均判
-  失败且不阻断后续用例。
-- [x] **YT2c**：执行过滤、`--timeout`（1..3600，缺省 15 秒）、
-  `libs/testing` 的 `fail/skip`、断言位置与消息报告、SKIP 汇总。
-- [x] **YT2d-1**：逐例独立日志文件（`tmp/yh-test/log/`，失败回显末尾 2 KiB）
-  与断言消息截断提示（`0x1e` 标记 + UTF-8 边界回退）。
-- [x] **YT2d-2**：测试构建使用独立目录与扩展模块键（测试模式 + 协议标签 +
-  本轮选中测试集合摘要）；同选择第二次命中、换选择重编、生产/测试互不相通。
-  **剩余**：函数级 IR 与 check 切片缓存仍未用于测试构建（键不覆盖 TK_TEST）。
-- [x] **YT2d-3**：并行执行用例（`YH_TEST_JOBS` 缺省 4，每批同时 fork/exec，
-  批内按原顺序等待与打印；每例独立超时与日志）。
-- [x] **YT3a**：`libs/string/99_tests.yh` 内建测试、`make test-lib-tests`
-  入口，接入 `make test` 与 `make selfhost-native`；修复非目标项目 test 声明
-  误登记与源码根内 `tmp/`、`.build/` 被当源码扫描两个缺陷。
-- [x] **YT3b（0.0.9-rc.2 交付）**：用 rc.1 种子给 `gen`/`lex`/`parse` 加内嵌
-  test 块，恢复 `tools/compiler-tests.py` 与 `make test-compiler-tests`，
-  并验证生产对象与 `.s.i` 零测试符号。
+- [ ] **YT2d-2 剩余**：函数级 IR 与 check 切片缓存仍未用于测试构建
+  （缓存键不覆盖 `TK_TEST`），测试构建每次整模块重编。
 
 ### YT4 既有测试迁移（2026-10-23 分析完成，待实施）
 

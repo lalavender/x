@@ -1,4 +1,4 @@
-module main
+module build
 import gen
 
 // ============================================================================
@@ -6,7 +6,7 @@ import gen
 // 自 parse_decl.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
 // ============================================================================
 
-fn pj_mod_in_proj(proj int, off int, olen int) int {
+pub fn pj_mod_in_proj(proj int, off int, olen int) int {
     let gs *gen.GenState = gen.G()
     let i int = 0
     for i < gs.p_projs[proj].mod_n {
@@ -33,7 +33,7 @@ fn pj_mod_in_proj(proj int, off int, olen int) int {
 
 // pj_entry_mod：项目的入口模块下标（模块名 main，pj_load_project 已标记
 // is_entry 并保证至多一个）；无 main 模块即库项目，返回 -1。
-fn pj_entry_mod(proj int) int {
+pub fn pj_entry_mod(proj int) int {
     let gs *gen.GenState = gen.G()
     let i int = 0
     for i < gs.p_projs[proj].mod_n {
@@ -46,7 +46,7 @@ fn pj_entry_mod(proj int) int {
     return -1
 }
 
-fn pj_bind_imports() int {
+pub fn pj_bind_imports() int {
     let gs *gen.GenState = gen.G()
     let i int = 0
     for i < gs.p_imp_n {
@@ -108,8 +108,8 @@ fn pj_bind_imports() int {
             if (gs.p_mods[m].is_entry != 0) {
                 let buf [128]u8
                 let n int = 0
-                n = gen.append_str(buf, n, "入口模块不可作为库导入: ")
-                n = append_bytes_np(buf, n, off, olen)
+                n = gen.append_str_cap(buf, 128, n, "入口模块不可作为库导入: ")
+                n = gen.append_np_cap(buf, 128, n, off, olen)
                 let mo int = gen.tml_intern_str(buf, 0, n)
                 if (mo < 0) {
                     return -1
@@ -172,7 +172,7 @@ fn pj_bind_imports() int {
     return 0
 }
 
-fn append_bytes_np(buf *u8, n int, off int, olen int) int {
+pub fn append_bytes_np(buf *u8, n int, off int, olen int) int {
     let gs *gen.GenState = gen.G()
     let i int = 0
     for i < olen {
@@ -188,14 +188,14 @@ fn imp_diag(i int, msg *char) int {
     let f int = gs.p_imp_file[i]
     let buf [512]u8
     let n int = 0
-    n = gen.append_str(buf, n, pj_pool_str(gs.p_files[f].path_off))
-    n = gen.append_byte(buf, n, ':')
-    n = gen.append_int(buf, n, gs.p_imp_line[i])
-    n = gen.append_byte(buf, n, ':')
-    n = gen.append_int(buf, n, gs.p_imp_col[i])
-    n = gen.append_str(buf, n, ": 错误: ")
-    n = gen.append_str(buf, n, msg)
-    n = gen.append_byte(buf, n, '\n')
+    n = gen.append_str_cap(buf, 512, n, pj_pool_str(gs.p_files[f].path_off))
+    n = gen.append_byte_cap(buf, 512, n, ':')
+    n = gen.append_int_cap(buf, 512, n, gs.p_imp_line[i])
+    n = gen.append_byte_cap(buf, 512, n, ':')
+    n = gen.append_int_cap(buf, 512, n, gs.p_imp_col[i])
+    n = gen.append_str_cap(buf, 512, n, ": 错误: ")
+    n = gen.append_str_cap(buf, 512, n, msg)
+    n = gen.append_byte_cap(buf, 512, n, '\n')
     gen.write_all(2, buf, n)
     gs.task.c_errors += 1
     return -1
@@ -204,9 +204,6 @@ fn imp_diag(i int, msg *char) int {
 
 // —— topo 排序与环路诊断 ——
 
-let pj_mark *int = 0       // 模块标记（0 未访问 1 访问中 2 完成），随 p_mod_n 增长
-let pj_order *int = 0      // topo 结果
-let pj_order_n int = 0
 let pj_pathstk *int = 0    // 访问路径栈（环诊断）
 let pj_pathstk_n int = 0
 fn pj_mod_edge(m int, e int) int {
@@ -253,12 +250,12 @@ fn pj_mod_edge(m int, e int) int {
     return -1
 }
 
-fn pj_dfs(m int) int {
+pub fn pj_dfs(m int) int {
     let gs *gen.GenState = gen.G()
-    if (pj_mark[m] == 2) {
+    if (pj_state().mark[m] == 2) {
         return 0
     }
-    if (pj_mark[m] == 1) {
+    if (pj_state().mark[m] == 1) {
         // 环：路径栈中从 m 开始的链
         let buf [512]u8
         let n int = 0
@@ -290,7 +287,7 @@ fn pj_dfs(m int) int {
         gen.write_all(2, out, on)
         return -1
     }
-    pj_mark[m] = 1
+    pj_state().mark[m] = 1
     pj_pathstk[pj_pathstk_n] = m
     pj_pathstk_n += 1
     let e int = 0
@@ -305,13 +302,13 @@ fn pj_dfs(m int) int {
         e += 1
     }
     pj_pathstk_n -= 1
-    pj_mark[m] = 2
-    pj_order[pj_order_n] = m
-    pj_order_n += 1
+    pj_state().mark[m] = 2
+    pj_state().order[pj_state().order_n] = m
+    pj_state().order_n += 1
     return 0
 }
 
-fn pj_topo(root int) int {
+pub fn pj_topo(root int) int {
     let gs *gen.GenState = gen.G()
     // 标记数组按需扩容
     if (gs.p_mod_n > 0) {
@@ -320,18 +317,18 @@ fn pj_topo(root int) int {
             gen.fail("内存分配失败")
             return -1
         }
-        if (pj_mark != 0) {
-            free(pj_mark)
+        if (pj_state().mark != 0) {
+            free(pj_state().mark)
         }
-        pj_mark = nm
+        pj_state().mark = nm
         let ord *int = malloc((gs.p_mod_n * sizeof(int)).to_type(u64)).to_type(*int)
         if (ord == 0) {
             return gen.fail("内存分配失败")
         }
-        if (pj_order != 0) {
-            free(pj_order)
+        if (pj_state().order != 0) {
+            free(pj_state().order)
         }
-        pj_order = ord
+        pj_state().order = ord
         let stk *int = malloc((gs.p_mod_n * sizeof(int)).to_type(u64)).to_type(*int)
         if (stk == 0) {
             return gen.fail("内存分配失败")
@@ -343,18 +340,18 @@ fn pj_topo(root int) int {
     }
     let i int = 0
     for i < gs.p_mod_n {
-        pj_mark[i] = 0
+        pj_state().mark[i] = 0
         i += 1
     }
-    pj_order_n = 0
+    pj_state().order_n = 0
     pj_pathstk_n = 0
     if (pj_dfs(root) != 0) {
         return -1
     }
-    return pj_order_n
+    return pj_state().order_n
 }
 
-fn pj_mod_suffix(proj int, mod int, off *int, olen *int) int {
+pub fn pj_mod_suffix(proj int, mod int, off *int, olen *int) int {
     let gs *gen.GenState = gen.G()
     let tmp [512]u8
     let n int = 0
@@ -395,12 +392,12 @@ fn pj_mod_suffix(proj int, mod int, off *int, olen *int) int {
     return 0
 }
 
-fn pj_out_np(off int, olen int) void {
+pub fn pj_out_np(off int, olen int) void {
     let gs *gen.GenState = gen.G()
     gen.write_all(1, gs.task.np_data + off, olen)
 }
 
-fn pj_out_s(s *char) void {
+pub fn pj_out_s(s *char) void {
     let n int = 0
     for s[n] != 0 {
         n += 1
@@ -419,7 +416,7 @@ fn pj_source_cat(importer int, m int) *char {
     return "第三方"
 }
 
-fn pj_cmd_list(root int, resolve_off int, resolve_len int, has_resolve int) int {
+pub fn pj_cmd_list(root int, resolve_off int, resolve_len int, has_resolve int) int {
     let gs *gen.GenState = gen.G()
     pj_out_s("项目 ")
     pj_out_np(gs.p_projs[root].name_off, gs.p_projs[root].name_len)
@@ -507,8 +504,8 @@ fn pj_cmd_list(root int, resolve_off int, resolve_len int, has_resolve int) int 
 }
 
 // pj_find_root：从当前目录向上最多 32 层找 project.toml，结果写入
-// pj_canon_off/pj_canon_len。quiet=1 时找不到不报诊断（usage 顺手显示版本用）。
-fn pj_find_root(quiet int) int {
+// pj_state().canon_off/pj_state().canon_len。quiet=1 时找不到不报诊断（usage 顺手显示版本用）。
+pub fn pj_find_root(quiet int) int {
     let depth int = 0
     for depth <= 32 {
         // 组装候选路径：depth 个 "../" + "project.toml"
@@ -538,8 +535,8 @@ fn pj_find_root(quiet int) int {
             if (off < 0) {
                 return -1
             }
-            pj_canon_off = off
-            pj_canon_len = rn
+            pj_state().canon_off = off
+            pj_state().canon_len = rn
             return off
         }
         depth += 1

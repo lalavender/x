@@ -31,6 +31,16 @@ pub fn append_str(buf *u8, n int, s *char) int {
     return n
 }
 
+// cstr_len：C 字符串长度（不含结尾 NUL）。接口头行等固定前缀用它代替
+// 手写的字节数常量，避免字面量与长度常量两处漂移。
+pub fn cstr_len(s *char) int {
+    let i int = 0
+    for s[i] != 0 {
+        i += 1
+    }
+    return i
+}
+
 // append_str_limit：向 buf 追加字符串，最多写到 limit 之前，返回新位置。
 // 用于包含源代码消息的诊断拼装，避免长输入写出固定缓冲区边界。
 pub fn append_str_limit(buf *u8, n int, limit int, s *char) int {
@@ -165,6 +175,22 @@ pub fn write_all(fd int, buf *u8, n int) int {
     return 0
 }
 
+// alloc：统一分配入口（A0d）。
+//
+// 编译器在内存耗尽后无法继续：与其让调用方解引用空指针、在任意深处
+// 无声崩溃，不如在这里写一条确定诊断并终止。这是编译器里**唯一**的
+// 进程级退出点；新增分配一律走这里，不再逐点重复判空。
+// 返回非 0 指针，调用方按需 `.to_type(*T)` 转换。
+pub fn alloc(size u64) *u8 {
+    let p *u8 = malloc(size).to_type(*u8)
+    if (p == 0) {
+        let msg *char = "yh: 内存不足，无法继续\n"
+        write_all(2, msg.to_type(*u8), 32)
+        exit(1)
+    }
+    return p
+}
+
 // append_ct_expand_trace：为展开体内诊断追加外层到内层的编译期循环值。
 fn append_ct_expand_trace(buf *u8, n int, limit int) int {
     if (g_state.task.c_ct_expand_depth <= 0 || n >= limit - 600) { return n }
@@ -222,13 +248,76 @@ pub fn warn_lc(line int, col int, msg *char) int {
     return write_all(2, &buf[0], n)
 }
 
+// —— 容量受限追加（A0c2）——
+//
+// `append_str`/`append_byte` 不知道目标容量，写满即越界写栈。以下 *_cap 变体
+// 把容量作为显式参数：写满即停止并保持 NUL 结尾，**绝不越界**。用于诊断拼装
+// 这类"内容含用户输入、长度不可预估"的场景——截断的诊断仍可读，栈破坏不可。
+// 约定：cap 是缓冲区总字节数，最多写 cap-1 字节。
+
+// append_str_cap：容量受限追加字符串，返回新的长度（写满即止）。
+pub fn append_str_cap(buf *u8, cap int, n int, s *char) int {
+    let i int = 0
+    for n < cap - 1 && s[i] != 0 {
+        buf[n] = s[i].to_type(u8)
+        n += 1
+        i += 1
+    }
+    buf[n] = 0
+    return n
+}
+
+// append_byte_cap：容量受限追加单字节。
+pub fn append_byte_cap(buf *u8, cap int, n int, b u8) int {
+    if (n >= cap - 1) { return n }
+    buf[n] = b
+    n += 1
+    buf[n] = 0
+    return n
+}
+
+// append_int_cap：容量受限追加十进制整数。
+pub fn append_int_cap(buf *u8, cap int, n int, v int) int {
+    let tmp [24]u8
+    let m int = 0
+    let x int = v
+    if (x < 0) {
+        n = append_byte_cap(buf, cap, n, '-')
+        x = -x
+    }
+    if (x == 0) { return append_byte_cap(buf, cap, n, '0') }
+    for x > 0 && m < 24 {
+        tmp[m] = (x % 10 + 48).to_type(u8)
+        m += 1
+        x = x / 10
+    }
+    for m > 0 {
+        m -= 1
+        n = append_byte_cap(buf, cap, n, tmp[m])
+    }
+    return n
+}
+
+// append_np_cap：容量受限追加名字池片段（偏移 + 长度）。
+pub fn append_np_cap(buf *u8, cap int, n int, off int, olen int) int {
+    let gs *GenState = G()
+    let i int = 0
+    for i < olen && n < cap - 1 {
+        buf[n] = gs.task.np_data[off + i]
+        n += 1
+        i += 1
+    }
+    buf[n] = 0
+    return n
+}
+
 // fail：报告一条不带位置的编译器级错误（打开失败、内存不足等），返回 -1。
 pub fn fail(msg *char) int {
     let buf [512]u8
     let n int = 0
-    n = append_str(buf, n, "yh: ")
-    n = append_str(buf, n, msg)
-    n = append_byte(buf, n, '\n')
+    n = append_str_cap(buf, 512, n, "yh: ")
+    n = append_str_cap(buf, 512, n, msg)
+    n = append_byte_cap(buf, 512, n, '\n')
     write_all(2, buf, n)
     return -1
 }
@@ -237,10 +326,10 @@ pub fn fail(msg *char) int {
 pub fn fail_path(msg *char, path *char) int {
     let buf [512]u8
     let n int = 0
-    n = append_str(buf, n, "yh: ")
-    n = append_str(buf, n, msg)
-    n = append_str(buf, n, path)
-    n = append_byte(buf, n, '\n')
+    n = append_str_cap(buf, 512, n, "yh: ")
+    n = append_str_cap(buf, 512, n, msg)
+    n = append_str_cap(buf, 512, n, path)
+    n = append_byte_cap(buf, 512, n, '\n')
     write_all(2, buf, n)
     return -1
 }

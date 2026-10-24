@@ -21,7 +21,7 @@ import gen
 // prelude_add_linux_syscall6：Linux arm64 的六参数系统调用入口；调用点由后端
 // 发射 svc 指令，因此不生成外部符号引用。
 fn prelude_add_linux_syscall6() int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let i int = 0
     for i < 7 {
         gen.ty_sig_param(gen.TY_U64)
@@ -31,21 +31,33 @@ fn prelude_add_linux_syscall6() int {
     if (idx < 0) {
         return -1
     }
-    gs.task.c_syms[idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_LINUX_SYSCALL
+    tk.c_syms[idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_LINUX_SYSCALL
     return idx
 }
 
 // sem_register_prelude：登记编译器和程序使用的外部接口（语义边界 §7）。
 // 签名参数类型先按序入池，再以池起始下标建函数类型。
+// front_prepare：受检前端的公共装配——类型表内置类型 + 全局作用域 + 前导库符号。
+//
+// 这段三元组原先在 llvm_emit（单文件）与 module_worker（模块）各写一遍，
+// 且 worker 侧漏检了 `ty_register_builtins` 的返回值。收敛到这里后调用方只需
+// 判一次返回码；`sem_init_tables` 仍由调用方先行——它必须跟在每模块标志
+// （c_module_mode / c_is_entry_mod / 符号后缀）之后，不能一并前置。
+pub fn front_prepare() int {
+    if (gen.ty_register_builtins() != 0) { return -1 }
+    if (gen.scope_push() != 0) { return -1 }
+    return sem_register_prelude()
+}
+
 pub fn sem_register_prelude() int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let t_pvoid int = gen.ty_ptr(gen.TY_VOID)
     let t_pchar int = gen.ty_ptr(gen.TY_CHAR)
     // printf(fmt *char, ...) int —— 本地格式化运行时，支持整数/字符串/字符。
     gen.ty_sig_param(t_pchar)
     let printf_idx int = gen.prelude_add("printf", gen.TY_I32, 1, 1)
     if (printf_idx < 0) { return -1 }
-    gs.task.c_syms[printf_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_PRINTF
+    tk.c_syms[printf_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_PRINTF
     // yh test 的运行时断言入口：测试模块按 prelude 裸符号调用，测试入口模块
     // 生成同名 C ABI 定义；生产程序不引用它，不进入链接。
     gen.ty_sig_param(gen.TY_BOOL)
@@ -57,24 +69,24 @@ pub fn sem_register_prelude() int {
     gen.ty_sig_param(gen.TY_U64)
     let malloc_idx int = gen.prelude_add("malloc", t_pvoid, 1, 0)
     if (malloc_idx < 0) { return -1 }
-    gs.task.c_syms[malloc_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_MALLOC
+    tk.c_syms[malloc_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_MALLOC
     // free(p *void) void，由映射头部记录尺寸后直接解除映射。
     gen.ty_sig_param(t_pvoid)
     let free_idx int = gen.prelude_add("free", gen.TY_VOID, 1, 0)
     if (free_idx < 0) { return -1 }
-    gs.task.c_syms[free_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_FREE
+    tk.c_syms[free_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_FREE
     // memcpy(dst *void, src *void, n u64) *void，由 yh 本地运行时实现。
     gen.ty_sig_param(t_pvoid)
     gen.ty_sig_param(t_pvoid)
     gen.ty_sig_param(gen.TY_U64)
     let memcpy_idx int = gen.prelude_add("memcpy", t_pvoid, 3, 0)
     if (memcpy_idx < 0) { return -1 }
-    gs.task.c_syms[memcpy_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_MEMCPY
+    tk.c_syms[memcpy_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_MEMCPY
     // strlen(s *char) u64，由 yh 本地运行时实现。
     gen.ty_sig_param(t_pchar)
     let strlen_idx int = gen.prelude_add("strlen", gen.TY_U64, 1, 0)
     if (strlen_idx < 0) { return -1 }
-    gs.task.c_syms[strlen_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_STRLEN
+    tk.c_syms[strlen_idx].flags = gen.F_PUB | gen.F_INTRINSIC | gen.F_RUNTIME_STRLEN
     // exit(code int) void
     gen.ty_sig_param(gen.TY_I32)
     gen.prelude_add("exit", gen.TY_VOID, 1, 0)
@@ -100,7 +112,7 @@ pub fn sem_register_prelude() int {
     gen.ty_sig_param(gen.TY_U64)
     gen.prelude_add("write", gen.TY_I64, 3, 0)
     // system(cmd *char) int 仅由明确启用的兼容配置提供。
-    if (gs.task.c_legacy_system != 0) {
+    if (tk.c_legacy_system != 0) {
         gen.ty_sig_param(t_pchar)
         gen.prelude_add("system", gen.TY_I32, 1, 0)
     }

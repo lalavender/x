@@ -1,4 +1,4 @@
-module main
+module build
 import gen
 import lex
 import parse
@@ -79,7 +79,7 @@ fn pj_c_path(proj int, item_off int, item_len int, suffix *char,
     rel[item_len] = 0
     if (pj_canon(gs.p_projs[proj].root_off,
         gs.p_projs[proj].root_len, gen.arr_cstr(rel)) != 0) { return -1 }
-    if (pj_file_exists(pj_pool_str(pj_canon_off)) == 0) {
+    if (pj_file_exists(pj_pool_str(pj_state().canon_off)) == 0) {
         return pj_proj_diag(gs.p_projs[proj].root_off, line,
             "[c] 配置路径对应的文件不存在")
     }
@@ -88,11 +88,11 @@ fn pj_c_path(proj int, item_off int, item_len int, suffix *char,
 
 // pj_c_lib_name：限制系统库名为普通名字，避免把链接器选项当作库名传入。
 fn pj_c_lib_name(off int, n int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (n == 0) { return 0 }
     let i int = 0
     for i < n {
-        let b u8 = gs.task.np_data[off + i]
+        let b u8 = tk.np_data[off + i]
         if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
             || (b >= '0' && b <= '9') || b == '_' || b == '-')) { return 0 }
         i += 1
@@ -143,8 +143,8 @@ fn pj_load_c_config(proj int, sec int) int {
             if (kind == 1 || kind == 2) {
                 let suffix *char = kind == 1 ? ".c" : ".o"
                 if (pj_c_path(proj, off, n, suffix, val.line) != 0) { return -1 }
-                let path_off int = pj_canon_off
-                let path_len int = pj_canon_len
+                let path_off int = pj_state().canon_off
+                let path_len int = pj_state().canon_len
                 if (kind == 1) {
                     if (pj_input_push(&gs.p_projs[proj].c_sources,
                         &gs.p_projs[proj].c_source_n,
@@ -168,7 +168,7 @@ fn pj_load_c_config(proj int, sec int) int {
     return 0
 }
 
-fn pj_load_project(root_off int, root_len int) int {
+pub fn pj_load_project(root_off int, root_len int) int {
     let gs *gen.GenState = gen.G()
     // 依赖环 / 重复装载
     let known int = pj_proj_find_root(root_off, root_len)
@@ -257,8 +257,8 @@ fn pj_load_project(root_off int, root_len int) int {
     if (pj_canon(root_off, root_len, srcname) != 0) {
         return -1
     }
-    gs.p_projs[me].src_off = pj_canon_off
-    gs.p_projs[me].src_len = pj_canon_len
+    gs.p_projs[me].src_off = pj_state().canon_off
+    gs.p_projs[me].src_len = pj_state().canon_len
     // version（可选，仅供 yh version 展示）
     got = toml_sec_str(sec, "version", &so, &sl)
     if (got < 0) {
@@ -347,7 +347,7 @@ fn pj_load_project(root_off int, root_len int) int {
             if (pj_canon(root_off, root_len, pj_pool_str(path_off)) != 0) {
                 return -1
             }
-            let dep int = pj_load_project(pj_canon_off, pj_canon_len)
+            let dep int = pj_load_project(pj_state().canon_off, pj_state().canon_len)
             if (dep < 0) {
                 return -1
             }
@@ -428,13 +428,13 @@ fn pj_scan_source(dir_off int, dir_len int, proj int) int {
 
 // pj_dir_less：按文件名字节序排序，保证跨宿主扫描与构建顺序稳定。
 fn pj_dir_less(a PJDirEntry, b PJDirEntry) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let n int = a.name_len
     if (b.name_len < n) { n = b.name_len }
     let i int = 0
     for i < n {
-        let av int = gs.task.np_data[a.name_off + i].to_type(int)
-        let bv int = gs.task.np_data[b.name_off + i].to_type(int)
+        let av int = tk.np_data[a.name_off + i].to_type(int)
+        let bv int = tk.np_data[b.name_off + i].to_type(int)
         if (av < bv) { return 1 }
         if (av > bv) { return 0 }
         i += 1
@@ -462,18 +462,18 @@ fn pj_dir_sort(entries *PJDirEntry, n int) int {
 // `tmp/` 与 `.build/` 可能位于源码根之下（例如标准库项目 source = "."），
 // 其中的生成文件（含 yh test 的测试入口）不是用户源码。
 fn pj_scan_skip_dir(name_start int, name_len int) int {
-    let gs *gen.GenState = gen.G()
-    if (name_len == 3 && gs.task.np_data[name_start] == 't'
-        && gs.task.np_data[name_start + 1] == 'm'
-        && gs.task.np_data[name_start + 2] == 'p') {
+    let tk *gen.TaskCtx = gen.task()
+    if (name_len == 3 && tk.np_data[name_start] == 't'
+        && tk.np_data[name_start + 1] == 'm'
+        && tk.np_data[name_start + 2] == 'p') {
         return 1
     }
-    if (name_len == 6 && gs.task.np_data[name_start] == '.'
-        && gs.task.np_data[name_start + 1] == 'b'
-        && gs.task.np_data[name_start + 2] == 'u'
-        && gs.task.np_data[name_start + 3] == 'i'
-        && gs.task.np_data[name_start + 4] == 'l'
-        && gs.task.np_data[name_start + 5] == 'd') {
+    if (name_len == 6 && tk.np_data[name_start] == '.'
+        && tk.np_data[name_start + 1] == 'b'
+        && tk.np_data[name_start + 2] == 'u'
+        && tk.np_data[name_start + 3] == 'i'
+        && tk.np_data[name_start + 4] == 'l'
+        && tk.np_data[name_start + 5] == 'd') {
         return 1
     }
     return 0
@@ -515,8 +515,8 @@ fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir 
         if (pj_canon(dir_off, dir_len, gen.arr_cstr(nm)) != 0) {
             return -1
         }
-        let sub_off int = pj_canon_off
-        let sub_len int = pj_canon_len
+        let sub_off int = pj_state().canon_off
+        let sub_len int = pj_state().canon_len
         // 嵌套项目边界：含 mod.toml 的子目录属于另一项目，不进入
         let probe [1100]u8
         let pn int = 0
@@ -561,10 +561,10 @@ fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir 
 
 // pj_target_tag_is：比较名称池中的单个后缀段，不要求池内文件名带 NUL。
 fn pj_target_tag_is(start int, n int, tag *char) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let i int = 0
     for tag[i] != 0 {
-        if (i >= n || gs.task.np_data[start + i] != tag[i].to_type(u8)) { return 0 }
+        if (i >= n || tk.np_data[start + i] != tag[i].to_type(u8)) { return 0 }
         i += 1
     }
     return (i == n).to_type(int)
@@ -644,7 +644,7 @@ fn pj_synth_module_name(path *char) int {
     return 0
 }
 
-fn pj_index_file(path *char, proj int) int {
+pub fn pj_index_file(path *char, proj int) int {
     let gs *gen.GenState = gen.G()
     if (gs.c_stats_enabled != 0) {
         gs.c_stats_index += 1
@@ -780,11 +780,11 @@ fn pj_index_file(path *char, proj int) int {
 
 // pj_dir_prefix_len：路径的目录前缀长度（最后一个 '/' 之前；无 '/' 为 0）。
 fn pj_dir_prefix_len(off int, plen int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let last int = -1
     let i int = 0
     for i < plen {
-        if (gs.task.np_data[off + i] == '/') {
+        if (tk.np_data[off + i] == '/') {
             last = i
         }
         i += 1
@@ -797,16 +797,155 @@ fn pj_dir_prefix_len(off int, plen int) int {
 
 // pj_same_np：名字池两段字节相等。
 fn pj_same_np(o1 int, l1 int, o2 int, l2 int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (l1 != l2) {
         return 0
     }
     let j int = 0
     for j < l1 {
-        if (gs.task.np_data[o1 + j] != gs.task.np_data[o2 + j]) {
+        if (tk.np_data[o1 + j] != tk.np_data[o2 + j]) {
             return 0
         }
         j += 1
     }
     return 1
 }
+
+// pj_imp_alias_match：文件 f 的第 ti 个 token 是否等于导入 ii 的绑定名。
+fn pj_imp_alias_match(f int, ti int, ii int) int {
+    let gs *gen.GenState = gen.G()
+    let tok gen.Tok = gs.p_files[f].tokens[ti]
+    let n int = gs.p_imp_alias_len[ii]
+    if (tok.kind != gen.TOK_IDENT || tok.len != n) {
+        return 0
+    }
+    let j int = 0
+    for j < n {
+        if (gs.p_files[f].source[tok.start + j]
+            != gs.task.np_data[gs.p_imp_alias_off[ii] + j]) {
+            return 0
+        }
+        j += 1
+    }
+    return 1
+}
+
+// pj_mark_test_tokens：把文件 f 中每个顶层 test 声明的块体 token 标记为 1。
+// 用于区分「只在 test 体内使用」的导入；只扫描 token，不做语义解析。
+fn pj_mark_test_tokens(f int) *u8 {
+    let gs *gen.GenState = gen.G()
+    let n int = gs.p_files[f].token_n
+    if (n <= 0) { return 0 }
+    let marks *u8 = malloc(n.to_type(u64)).to_type(*u8)
+    if (marks == 0) { return 0 }
+    let i int = 0
+    for i < n {
+        marks[i] = 0
+        i += 1
+    }
+    let depth int = 0
+    i = 0
+    for i < n {
+        let k int = gs.p_files[f].tokens[i].kind
+        if (k == gen.TK_LBRACE) {
+            depth += 1
+            i += 1
+            continue
+        }
+        if (k == gen.TK_RBRACE) {
+            if (depth > 0) { depth -= 1 }
+            i += 1
+            continue
+        }
+        if (depth == 0 && k == gen.TK_TEST
+            && (i == 0 || gs.p_files[f].tokens[i - 1].kind != gen.TK_DOT)) {
+            let j int = i + 1
+            for j < n {
+                let jk int = gs.p_files[f].tokens[j].kind
+                if (jk == gen.TK_LBRACE || jk == gen.TK_SEMI || jk == gen.TOK_EOF) {
+                    break
+                }
+                j += 1
+            }
+            if (j < n && gs.p_files[f].tokens[j].kind == gen.TK_LBRACE) {
+                let d int = 0
+                let e int = j
+                for e < n {
+                    let ek int = gs.p_files[f].tokens[e].kind
+                    if (ek == gen.TK_LBRACE) { d += 1 }
+                    if (ek == gen.TK_RBRACE) {
+                        d -= 1
+                        if (d == 0) { break }
+                    }
+                    e += 1
+                }
+                if (e < n) {
+                    let q int = j
+                    for q <= e {
+                        marks[q] = 1
+                        q += 1
+                    }
+                    i = e + 1
+                    continue
+                }
+            }
+        }
+        i += 1
+    }
+    return marks
+}
+
+// pj_classify_test_imports：为项目 proj 的每条导入分类 test_only。
+// 仅当绑定名以 `alias.` 形式出现，且所有出现都在该文件的 test 块体内，
+// 才标记为测试专用；生产构建随后跳过该导入的绑定、依赖边和未使用诊断。
+fn pj_classify_test_imports(proj int) int {
+    let gs *gen.GenState = gen.G()
+    let mi int = 0
+    for mi < gs.p_projs[proj].mod_n {
+        let m int = gs.p_projs[proj].mods[mi]
+        let fi int = 0
+        for fi < gs.p_mods[m].file_n {
+            let f int = gs.p_mods[m].files[fi]
+            let marks *u8 = pj_mark_test_tokens(f)
+            if (marks == 0) {
+                if (gs.p_files[f].token_n > 0) { return gen.fail("内存分配失败") }
+                fi += 1
+                continue
+            }
+            let ii int = 0
+            for ii < gs.p_imp_n {
+                if (gs.p_imp_file[ii] != f) {
+                    ii += 1
+                    continue
+                }
+                let inside int = 0
+                let outside int = 0
+                let ti int = 0
+                let n int = gs.p_files[f].token_n
+                for ti + 1 < n {
+                    if (gs.p_files[f].tokens[ti].kind == gen.TOK_IDENT
+                        && gs.p_files[f].tokens[ti + 1].kind == gen.TK_DOT
+                        && pj_imp_alias_match(f, ti, ii) != 0) {
+                        if (marks[ti] != 0) {
+                            inside = 1
+                        } else {
+                            outside = 1
+                            break
+                        }
+                    }
+                    ti += 1
+                }
+                gs.p_imp_test_only[ii] = (inside != 0 && outside == 0).to_type(int)
+                ii += 1
+            }
+            free(marks.to_type(*void))
+            fi += 1
+        }
+        mi += 1
+    }
+    return 0
+}
+
+// TCase：一条已发现的测试。name_* 是名字池中的显示名（字符串去引号）。
+
+// tc_reset：清空一次 yh test 会话的发现结果。

@@ -258,6 +258,10 @@ case("u2-toml-unknown-field", "fail", "tomlunknown", ".", msg="未知字段")
 case("p1-name-not-identifier", "fail", "tomlnamebad", ".", msg="project.name")
 case("u2-transitive-rejected", "fail", "transitive", "host", msg="模块不存在")
 case("u2-ambiguous-deps", "fail", "ambiguity", "host", msg="歧义")
+# —— 2026-10-24 路径预算：项目名/模块名与构建目录长度上限 ——
+# 标记与派生路径写进 512/600/700 字节定长缓冲，超限必须在源头拒绝，
+# 不能依赖 gen.append_str 的隐式 NUL 终止。
+case("u7-module-name-too-long", "fail", "longname", ".", msg="模块名过长")
 # —— MOD-U3：模块语义 ——
 # 2026-10-02 pub struct 一等化：字段一律公开，跨模块字段访问与位置式构造
 # 由 fail 用例转为 run 正向用例；符号级可见性（非 pub fn）仍被拒绝。
@@ -1891,8 +1895,27 @@ def main():
     dst = WORK / "authorproj"
     copy_proj(PROJ / "authorproj", dst)
     r = sh([compiler, "version"], cwd=dst)
-    report(r.returncode == 0 and r.stdout.strip() == "authorproj 1.2.3",
-           "p1-version-cmd", f"yh version 输出 {r.stdout.strip()!r} 期望 'authorproj 1.2.3'")
+    rc = sh([compiler, "version", "--contracts"], cwd=dst)
+    keys = ("iface-min=", "iface-max=", "ctiface=", "ir-function=", "ir-module=")
+    contracts_ok = rc.returncode == 0 and all(k in rc.stdout for k in keys)
+    report(r.returncode == 0 and r.stdout.strip() == "authorproj 1.2.3" and contracts_ok,
+           "p1-version-cmd",
+           f"yh version 输出 {r.stdout.strip()!r} 期望 'authorproj 1.2.3'；"
+           f"contracts 输出 {rc.stdout.strip()!r}")
+    # —— 单文件输出形态：--emit-asm 必须是目标汇编，不是 LLVM IR ——
+    # 2026-10-24 A3 门面重构时 API_ASM/API_LLVM_TEXT 两个分支的参数写反，
+    # 全量门禁仍绿（语料只编译+运行，不看 --emit-asm 文本）。这里锁形态。
+    hello = ROOT / "tests" / "yh-run" / "run" / "01-hello.yh"
+    # 直接调用二进制，不经 sh() 注入的 --backend/--target：
+    # 本用例锁的是"给定 --emit-asm 时的输出形态"，argv 必须精确。
+    rasm = subprocess.run([compiler, "--emit-asm", str(hello)],
+                          cwd=dst, capture_output=True, text=True)
+    asm = rasm.stdout
+    asm_ok = (rasm.returncode == 0 and "source_filename" not in asm
+              and (".globl" in asm or ".section" in asm or ".text" in asm))
+    report(asm_ok, "p1-emit-asm-form",
+           f"--emit-asm 输出不是目标汇编: {asm[:120]!r}")
+
     r = sh([compiler, "build"], cwd=dst)
     report(r.returncode == 0 and (dst / ".build" / "authorproj").exists(),
            "p1-outname-from-name", f"产物名未取 project.name: {r.stdout[-200:]}")
@@ -1901,7 +1924,7 @@ def main():
         report(r2.returncode == 42, "p1-outname-runs",
                f"产物退出码 {r2.returncode} 期望 42")
 
-    total = len(CASES) + 38
+    total = len(CASES) + 39
     print(f"project cases: 通过 {total - failed}/{total}")
     return 1 if failed else 0
 

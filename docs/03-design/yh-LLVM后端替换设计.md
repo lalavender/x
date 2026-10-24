@@ -305,8 +305,9 @@ F1 的 Linux/AArch64 LLVM 回归已通过，当前 Linux/ARM64 默认路径不�
 **LL12 已于 2026-10-21 完成**：发射器（`emit_arm64`/`emit_runtime_memory`）、
 旧 arm64 后端、四缓冲原语、旧 SSA 替换链、C ABI 发射层与 `c_backend` 开关
 全部删除；`compiler/` 净减 6516 行，`gen/sem_*`/`parse/*`/`comptime/*` 不再
-调用任何机器发射原语。证据见 `docs/finish.md` 的「LL12 退役验收」与
-`docs/02-plan/yh-LL12退役旧机器发射实施方案.md`。
+调用任何机器发射原语。证据见
+[finish 历史归档](../01-finished/finish-历史归档-2026-09-27至2026-10-21.md)
+的「LL12 退役验收」与 `docs/02-plan/yh-LL12退役旧机器发射实施方案.md`。
 
 ## 8. 多平台路线与性能
 

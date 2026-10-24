@@ -290,6 +290,53 @@ pub fn G() *GenState {
     return &g_state
 }
 
+// task：当前任务的显式上下文（A4b）。
+//
+// 前端（lex/parse/comptime/ast/check）只需要每任务工作状态，不需要 GenState
+// 里的目标、项目、统计等构建期字段。本访问器把依赖面收窄到 TaskCtx：
+// 调用方拿 `*TaskCtx` 后不再接触整个单例，将来 RS1d 把它作为显式参数传递时，
+// 这批调用点只需换参数来源，不必再改字段访问。
+pub fn task() *TaskCtx {
+    return &g_state.task
+}
+
+// p_file / p_file_count / module_mode：前端需要的**窄口**构建期只读访问。
+//
+// 前端（parse/ast）只用这几个构建期字段：当前文件表项（诊断路径、声明槽）、
+// 文件数、模块模式标志。给窄口而不是把字段搬进 TaskCtx——TaskCtx 是"每任务
+// 工作状态"，文件表与目标属于构建态，混在一起会让 RS1d 的线程模型失去边界。
+pub fn p_file(i int) *PFile {
+    return &g_state.p_files[i]
+}
+
+pub fn p_file_count() int {
+    return g_state.p_file_n
+}
+
+pub fn module_mode() int {
+    return g_state.c_module_mode
+}
+
+// test_file_selected：该文件是否属于本轮 yh test 要检查的目标（已应用模块/文件过滤）。
+//
+// 把"测试执行器的选择条件"收在 gen 一处，前端只问"这个文件要不要登记测试声明"，
+// 不必知道 `--filter` 的存在——此前 parse/ast 各抄了一份判断并直接读
+// `c_test_project`/`c_test_mod_filter`/`c_test_file_filter`，属层次倒置。
+// 依赖与标准库里的 test 声明一律返回 0：它们不会走测试体解析，登记了就会留下
+// 没有函数体的受检声明。
+pub fn test_file_selected(fi int) int {
+    if (g_state.task.c_test_mode == 0 || g_state.c_test_project < 0) { return 0 }
+    if (fi < 0 || fi >= g_state.p_file_n) { return 0 }
+    let m int = g_state.p_files[fi].mod
+    if (m < 0 || m >= g_state.p_mod_n) { return 0 }
+    if (g_state.p_mods[m].proj != g_state.c_test_project) { return 0 }
+    if (g_state.c_test_mod_filter >= 0 && g_state.c_test_mod_filter != m) { return 0 }
+    if (g_state.c_test_file_filter >= 0 && g_state.c_test_file_filter != fi) { return 0 }
+    return 1
+}
+
+
+
 // 字符串字面量的数据标签 → 原样字节（intern 池）映射：顶层或普通函数里的编译期
 // 调用实参由前端直接求值，只剩数据标签号，编译期过程据此反查字面量字节。
 // 独立全局表而非 GenState 字段：GenState 已大到让后端单条 add 的字段偏移越界。

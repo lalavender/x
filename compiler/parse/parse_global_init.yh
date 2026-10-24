@@ -15,11 +15,11 @@ import ast
 // parse_global_bind_iface_label：接口加载时为导入聚合常量副本分配本地标签。
 // LL12：只登记 cval 与 c_data_n，不写 .globl/.LD 文本（与 CT 数据同规则）。
 fn parse_global_bind_iface_label(idx int) void {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_iface_load != 0) {
-        let lbl int = gs.task.c_data_n
-        gs.task.c_data_n += 1
-        gs.task.c_syms[idx].cval = lbl.to_type(i64)
+    let t *gen.TaskCtx = gen.task()
+    if (t.c_iface_load != 0) {
+        let lbl int = t.c_data_n
+        t.c_data_n += 1
+        t.c_syms[idx].cval = lbl.to_type(i64)
     }
 }
 
@@ -28,20 +28,20 @@ fn parse_global_bind_iface_label(idx int) void {
 // 通过 c_bind_idx 返回涉及的符号下标（无则为 -1）。
 let c_bind_idx int = -1
 fn parse_binding(global int, kind int) int {
-    let gs *gen.GenState = gen.G()
+    let t *gen.TaskCtx = gen.task()
     c_bind_idx = -1
     if (p_cur() != gen.TOK_IDENT) {
         return gen.err_tok("此处需要一个变量名")
     }
-    let name_token int = gs.task.c_pos
-    let start int = gs.task.c_toks[gs.task.c_pos].start
-    let n int = gs.task.c_toks[gs.task.c_pos].len
+    let name_token int = t.c_pos
+    let start int = t.c_toks[t.c_pos].start
+    let n int = t.c_toks[t.c_pos].len
     p_adv()
     let tid int = parse_type_ref()
     if (tid < 0) {
         return -1
     }
-    if (gs.task.c_compile == 0) {
+    if (t.c_compile == 0) {
         // 语法模式：只看初值形态
         if (p_cur() == gen.TK_ASSIGN) {
             p_adv()
@@ -57,12 +57,12 @@ fn parse_binding(global int, kind int) int {
         return gen.sem_err("不透明 C 类型只能通过指针声明")
     }
     let idx int = -1
-    if (gs.task.c_pass == 1) {
+    if (t.c_pass == 1) {
         // 顶层登记：标量/聚合（结构体/数组/切片）一律登记名字与类型；
         // 零初始化聚合在 pass 2 走 .bss，带初始化器的聚合走
         // parse_global_init 的数据发射。
         let fl int = gen.F_GLOBAL
-        if (gs.task.c_decl_pub != 0) {
+        if (t.c_decl_pub != 0) {
             fl |= gen.F_PUB
         }
         idx = gen.sym_push(start, n, kind, tid, fl)
@@ -94,7 +94,7 @@ fn parse_binding(global int, kind int) int {
     }
     if (p_cur() == gen.TK_ASSIGN) {
         p_adv()
-        if (gs.task.c_pass == 1) {
+        if (t.c_pass == 1) {
             if (global != 0 && kind == gen.SYM_CONST
                 && gen.ty_is_integer(tid) != 0) {
                 let probe int = parse_global_ct_const_probe(idx, tid)
@@ -106,19 +106,19 @@ fn parse_binding(global int, kind int) int {
         if (global != 0) {
             // 接口/CT 闭包重放没有本模块的文件级 AstDecl；保留常量求值和
             // 数据模型，禁止把临时源码初始化式捕获到消费者的声明 arena。
-            let saved_capture int = gs.task.c_ast_capture
-            if (gs.task.c_iface_load != 0 || gs.task.c_ct_iface_mode != 0) { gs.task.c_ast_capture = 0 }
+            let saved_capture int = t.c_ast_capture
+            if (t.c_iface_load != 0 || t.c_ct_iface_mode != 0) { t.c_ast_capture = 0 }
             let result int = parse_global_init(idx, tid, kind)
-            gs.task.c_ast_capture = saved_capture
+            t.c_ast_capture = saved_capture
             return result
         }
         return parse_local_init(idx, tid, kind)
     }
     // 无初值
-    if (gs.task.c_compile != 0 && kind == gen.SYM_CONST) {
+    if (t.c_compile != 0 && kind == gen.SYM_CONST) {
         return gen.sem_err("const 必须带初值")
     }
-    if (gs.task.c_compile != 0 && gs.task.c_pass == 2 && global != 0 && kind == gen.SYM_VAR) {
+    if (t.c_compile != 0 && t.c_pass == 2 && global != 0 && kind == gen.SYM_VAR) {
         // 零初始化全局 → .bss
         return sem_global_zero(idx, tid)
     }
@@ -130,17 +130,17 @@ fn parse_binding(global int, kind int) int {
 // 编译期不可得（数据在发射阶段才写出），所以跨模块 CT 闭包与 .s.i 导出都
 // 改为重放源文本、由导入侧重新解析/执行。范围由首尾 token 求得。
 fn record_aggregate_const_src(idx int, first int, after int, kind int) int {
-    let gs *gen.GenState = gen.G()
+    let t *gen.TaskCtx = gen.task()
     if (after <= first) { return 0 }
-    let start int = gs.task.c_toks[first].start
+    let start int = t.c_toks[first].start
     let last int = after - 1
-    let span int = gs.task.c_toks[last].start + gs.task.c_toks[last].len - start
+    let span int = t.c_toks[last].start + t.c_toks[last].len - start
     if (span <= 0) { return 0 }
-    let off int = gen.tml_intern_str(gs.task.c_src, start, span)
+    let off int = gen.tml_intern_str(t.c_src, start, span)
     if (off < 0) { return -1 }
-    gs.task.c_syms[idx].const_expr_off = off
-    gs.task.c_syms[idx].const_expr_len = span
-    gs.task.c_syms[idx].const_expr_kind = kind
+    t.c_syms[idx].const_expr_off = off
+    t.c_syms[idx].const_expr_len = span
+    t.c_syms[idx].const_expr_kind = kind
     return 0
 }
 
@@ -169,10 +169,10 @@ fn parse_global_string_ast(str_type int, first int, after int, lbl int) int {
 }
 
 fn parse_global_init(idx int, tid int, kind int) int {
-    let gs *gen.GenState = gen.G()
+    let t *gen.TaskCtx = gen.task()
     // 初始化式的起始 token：聚合常量要按这个位置记下源文本（见 record_aggregate_const_src）。
-    let init_pos int = gs.task.c_pos
-    let fk int = gs.task.t_types[tid].kind
+    let init_pos int = t.c_pos
+    let fk int = t.t_types[tid].kind
     if (fk == gen.TY_STRUCT) {
         // const 聚合常量：与全局变量走同一条初始化路径（发射到数据段，运行期只读）。
         // 字面量与 $ 调用形态的 pub/私有常量都放行：pub 的 $ 调用形态经
@@ -185,21 +185,21 @@ fn parse_global_init(idx int, tid int, kind int) int {
         let ct_obj i64 = 0
         if (kind == gen.SYM_CONST
             && comptime.ct_global_agg_modelable(tid, 0) != 0) {
-            ct_obj = comptime.ct_global_agg_new(tid, gs.task.t_types[tid].len)
+            ct_obj = comptime.ct_global_agg_new(tid, t.t_types[tid].len)
             if (ct_obj == 0) { return -1 }
         }
         let struct_ast int = -1
         if (parse_global_struct_init(idx, tid, ct_obj, &struct_ast) != 0) { return -1 }
-        if (gs.task.c_ast_capture != 0
-            && ast.ast_decl_attach_init(gs.task.c_active_file, gs.task.c_file_decl_i,
+        if (t.c_ast_capture != 0
+            && ast.ast_decl_attach_init(t.c_active_file, t.c_file_decl_i,
                 struct_ast) != 0) { return -1 }
         // 聚合常量没有标量值，但数据已发射到数据段：标记为已就绪，避免读取时
         // 被「编译期常量尚未就绪」拦下（运行期按全局符号地址访问字段）。
         if (kind == gen.SYM_CONST) {
-            if (record_aggregate_const_src(idx, init_pos, gs.task.c_pos, 4) != 0) {
+            if (record_aggregate_const_src(idx, init_pos, t.c_pos, 4) != 0) {
                 return -1
             }
-            gs.task.c_syms[idx].const_ready = 1
+            t.c_syms[idx].const_ready = 1
             if (ct_obj != 0
                 && comptime.ct_global_agg_register(idx, ct_obj) != 0) {
                 return -1
@@ -225,21 +225,21 @@ fn parse_global_init(idx int, tid int, kind int) int {
         let ct_obj i64 = 0
         if (kind == gen.SYM_CONST && fk == gen.TY_ARRAY
             && comptime.ct_global_agg_modelable(tid, 0) != 0) {
-            ct_obj = comptime.ct_global_agg_new(gs.task.t_types[tid].elem,
-                gs.task.t_types[tid].len)
+            ct_obj = comptime.ct_global_agg_new(t.t_types[tid].elem,
+                t.t_types[tid].len)
             if (ct_obj == 0) { return -1 }
         }
         let array_ast int = -1
         if (parse_global_array_init(idx, tid, fk, &ct_obj, &array_ast) != 0) { return -1 }
-        if (gs.task.c_ast_capture != 0
-            && ast.ast_decl_attach_init(gs.task.c_active_file, gs.task.c_file_decl_i,
+        if (t.c_ast_capture != 0
+            && ast.ast_decl_attach_init(t.c_active_file, t.c_file_decl_i,
                 array_ast) != 0) { return -1 }
         // 聚合常量：数据已发射，标记已就绪供运行期按符号地址读取。
         if (kind == gen.SYM_CONST) {
-            if (record_aggregate_const_src(idx, init_pos, gs.task.c_pos, 4) != 0) {
+            if (record_aggregate_const_src(idx, init_pos, t.c_pos, 4) != 0) {
                 return -1
             }
-            gs.task.c_syms[idx].const_ready = 1
+            t.c_syms[idx].const_ready = 1
             if (ct_obj != 0
                 && comptime.ct_global_agg_register(idx, ct_obj) != 0) {
                 return -1
@@ -247,12 +247,12 @@ fn parse_global_init(idx int, tid int, kind int) int {
         }
         return 0
     }
-    let init_token_first int = gs.task.c_pos
-    gs.task.c_fold += 1
+    let init_token_first int = t.c_pos
+    t.c_fold += 1
     let r gen.Res
     let rr int = parse_expr_iso(&r)
-    gs.task.c_fold -= 1
-    let init_token_after int = gs.task.c_pos
+    t.c_fold -= 1
+    let init_token_after int = t.c_pos
     if (rr != 0) {
         return -1
     }
@@ -260,56 +260,56 @@ fn parse_global_init(idx int, tid int, kind int) int {
         return gen.sem_err("全局初始化必须是编译期常量")
     }
     // 标量/指针初始化式根挂到声明（含零初始化走 BSS 的形态），快照据此物化字节。
-    if (gs.task.c_ast_capture != 0
-        && ast.ast_decl_attach_init(gs.task.c_active_file, gs.task.c_file_decl_i,
+    if (t.c_ast_capture != 0
+        && ast.ast_decl_attach_init(t.c_active_file, t.c_file_decl_i,
             r.ast_id) != 0) { return -1 }
     if (gen.sem_can_assign(tid, r.type_id, r.is_lit, r.ival, r.lit_big) != 0) {
         return -1
     }
     if (kind == gen.SYM_CONST) {
-        gs.task.c_syms[idx].cval = r.ival
+        t.c_syms[idx].cval = r.ival
         // 跨模块 CT 闭包需要重放浮点字面值；保存字节以避免十进制/IEEE 位转换丢精度。
         if (gen.ty_is_float(tid) != 0 && init_token_after == init_token_first + 1
-            && gs.task.c_toks[init_token_first].kind == gen.TOK_NUMBER
-            && gen.sem_num_is_float(gs.task.c_toks[init_token_first].start,
-                gs.task.c_toks[init_token_first].len) != 0) {
-            let expr_start int = gs.task.c_toks[init_token_first].start
-            let expr_len int = gs.task.c_toks[init_token_first].len
-            let expr_off int = gen.tml_intern_str(gs.task.c_src, expr_start,
+            && t.c_toks[init_token_first].kind == gen.TOK_NUMBER
+            && gen.sem_num_is_float(t.c_toks[init_token_first].start,
+                t.c_toks[init_token_first].len) != 0) {
+            let expr_start int = t.c_toks[init_token_first].start
+            let expr_len int = t.c_toks[init_token_first].len
+            let expr_off int = gen.tml_intern_str(t.c_src, expr_start,
                 expr_len)
             if (expr_off < 0) { return -1 }
-            gs.task.c_syms[idx].const_expr_off = expr_off
-            gs.task.c_syms[idx].const_expr_len = expr_len
-            gs.task.c_syms[idx].const_expr_kind = 1
+            t.c_syms[idx].const_expr_off = expr_off
+            t.c_syms[idx].const_expr_len = expr_len
+            t.c_syms[idx].const_expr_kind = 1
         }
         // 只保存单个字符串 token；跨模块闭包重放原字节，不传递提供方数据标签。
         if (fk == gen.TY_PTR && init_token_after == init_token_first + 1
-            && gs.task.c_toks[init_token_first].kind == gen.TOK_STRING) {
-            let expr_start int = gs.task.c_toks[init_token_first].start
-            let expr_len int = gs.task.c_toks[init_token_first].len
-            let expr_off int = gen.tml_intern_str(gs.task.c_src, expr_start,
+            && t.c_toks[init_token_first].kind == gen.TOK_STRING) {
+            let expr_start int = t.c_toks[init_token_first].start
+            let expr_len int = t.c_toks[init_token_first].len
+            let expr_off int = gen.tml_intern_str(t.c_src, expr_start,
                 expr_len)
             if (expr_off < 0) { return -1 }
-            gs.task.c_syms[idx].const_expr_off = expr_off
-            gs.task.c_syms[idx].const_expr_len = expr_len
-            gs.task.c_syms[idx].const_expr_kind = 2
+            t.c_syms[idx].const_expr_off = expr_off
+            t.c_syms[idx].const_expr_len = expr_len
+            t.c_syms[idx].const_expr_kind = 2
         }
         // 指针常量的初始化式是单个标识符（引用另一个指针常量）：记下该名字，
         // 供接口导出时追链到最终字面式（消费者看不到提供方的私有常量名）。
         if (fk == gen.TY_PTR && init_token_after == init_token_first + 1
-            && gs.task.c_toks[init_token_first].kind == gen.TOK_IDENT) {
-            let rid_start int = gs.task.c_toks[init_token_first].start
-            let rid_len int = gs.task.c_toks[init_token_first].len
-            let rid_off int = gen.tml_intern_str(gs.task.c_src, rid_start, rid_len)
+            && t.c_toks[init_token_first].kind == gen.TOK_IDENT) {
+            let rid_start int = t.c_toks[init_token_first].start
+            let rid_len int = t.c_toks[init_token_first].len
+            let rid_off int = gen.tml_intern_str(t.c_src, rid_start, rid_len)
             if (rid_off < 0) { return -1 }
-            gs.task.c_syms[idx].const_expr_off = rid_off
-            gs.task.c_syms[idx].const_expr_len = rid_len
-            gs.task.c_syms[idx].const_expr_kind = 3
+            t.c_syms[idx].const_expr_off = rid_off
+            t.c_syms[idx].const_expr_len = rid_len
+            t.c_syms[idx].const_expr_kind = 3
         }
         if (fk == gen.TY_PTR) {
-            gs.task.c_syms[idx].flags |= gen.F_ADDR
+            t.c_syms[idx].flags |= gen.F_ADDR
         }
-        gs.task.c_syms[idx].const_ready = 1
+        t.c_syms[idx].const_ready = 1
         return 0
     }
     // 全局变量：指针的 0 是 NULL（.xword 0）；标签号 ≥ 1 才是字符串地址
@@ -327,9 +327,9 @@ fn parse_global_init(idx int, tid int, kind int) int {
         if (static_row == -1 || parse_global_static_pointer(static_row, 0,
                 pointer_label, 0) != 0) { return -1 }
         if (init_token_after == init_token_first + 1
-            && gs.task.c_toks[init_token_first].kind == gen.TOK_STRING
-            && parse_global_static_string(gs.task.c_toks[init_token_first].start,
-                gs.task.c_toks[init_token_first].len, r.ival.to_type(int)) != 0) { return -1 }
+            && t.c_toks[init_token_first].kind == gen.TOK_STRING
+            && parse_global_static_string(t.c_toks[init_token_first].start,
+                t.c_toks[init_token_first].len, r.ival.to_type(int)) != 0) { return -1 }
         return 0
     }
     if (r.ival == 0) {
@@ -351,33 +351,33 @@ fn parse_global_init(idx int, tid int, kind int) int {
 // 登记延迟执行项，由 module_worker 在接口闭包加载完成后统一执行。
 fn parse_global_comptime_aggregate_ex(idx int, tid int, kind int,
     init_pos int) int {
-    let gs *gen.GenState = gen.G()
-    let pub_ex int = (kind == gen.SYM_CONST && gs.c_module_mode != 0
-        && (gs.task.c_syms[idx].flags & gen.F_PUB) != 0).to_type(int)
-    if (gs.task.c_iface_load != 0) {
+    let tk *gen.TaskCtx = gen.task()
+    let pub_ex int = (kind == gen.SYM_CONST && gen.module_mode() != 0
+        && (tk.c_syms[idx].flags & gen.F_PUB) != 0).to_type(int)
+    if (tk.c_iface_load != 0) {
         // 接口加载阶段：pub 形态（.s.i）的调用目标隐藏符号尚未登记，
         // 私有隐藏形态（.s.ct 闭包常量）的目标正文尚未捕获——两者都推迟到
         // 接口闭包加载完成之后（module_worker 调 pub_agg_deferred_run）。
         // 初始化式 token 在此跳过（延迟执行时按起点重新解析），调用方随后
         // 正常消费声明末尾的 ';'。
-        let dfirst int = gs.task.c_pos
+        let dfirst int = tk.c_pos
         if (skip_init() != 0) { return -1 }
         return pub_agg_deferred_add(idx, dfirst)
     }
     if (pub_ex != 0) {
         // 只支持同模块 `$fn(...)`：模块限定形态（$m.f）的导出重写
         // （.s.i 调用文本按隐藏符号改名）首版不覆盖。
-        if (gs.task.c_toks[init_pos].kind != gen.TK_DOLLAR
-            || init_pos + 1 >= gs.task.c_tok_n
-            || gs.task.c_toks[init_pos + 1].kind != gen.TOK_IDENT
-            || (init_pos + 2 < gs.task.c_tok_n
-                && gs.task.c_toks[init_pos + 2].kind == gen.TK_DOT)) {
+        if (tk.c_toks[init_pos].kind != gen.TK_DOLLAR
+            || init_pos + 1 >= tk.c_tok_n
+            || tk.c_toks[init_pos + 1].kind != gen.TOK_IDENT
+            || (init_pos + 2 < tk.c_tok_n
+                && tk.c_toks[init_pos + 2].kind == gen.TK_DOT)) {
             return gen.sem_err("pub 聚合常量的 $ 初始化暂只支持同模块函数调用")
         }
-        let fname_start int = gs.task.c_toks[init_pos + 1].start
-        let fname_len int = gs.task.c_toks[init_pos + 1].len
+        let fname_start int = tk.c_toks[init_pos + 1].start
+        let fname_len int = tk.c_toks[init_pos + 1].len
         let fnsym int = gen.sym_lookup(fname_start, fname_len)
-        if (fnsym < 0 || (gs.task.c_syms[fnsym].flags & gen.F_COMPTIME) == 0
+        if (fnsym < 0 || (tk.c_syms[fnsym].flags & gen.F_COMPTIME) == 0
             || comptime.ct_pub_agg_fn_add(fnsym) != 0) { return -1 }
     }
     let status int = parse_global_comptime_aggregate(idx, tid)
@@ -385,10 +385,10 @@ fn parse_global_comptime_aggregate_ex(idx int, tid int, kind int,
     if (kind == gen.SYM_CONST) {
         // 与字面量初始化路径一致：聚合常量数据已发射、模型已登记，
         // 标记就绪供正文闭包引用（iface_ct_emit_const 要求 const_ready）。
-        gs.task.c_syms[idx].const_ready = 1
+        tk.c_syms[idx].const_ready = 1
     }
     if (pub_ex != 0
-        && record_aggregate_const_src(idx, init_pos, gs.task.c_pos, 5) != 0) {
+        && record_aggregate_const_src(idx, init_pos, tk.c_pos, 5) != 0) {
         return -1
     }
     return 0
@@ -397,36 +397,36 @@ fn parse_global_comptime_aggregate_ex(idx int, tid int, kind int,
 // pub_agg_deferred_add：登记导入侧 pub $ 聚合常量的延迟执行项（记录 .s.i
 // 路径与初始化式 token 起点）。执行见 pub_agg_deferred_run。
 fn pub_agg_deferred_add(idx int, first int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_pub_agg_dep_n == gs.task.c_pub_agg_dep_cap) {
-        let ncap int = gs.task.c_pub_agg_dep_cap * 2
+    let t *gen.TaskCtx = gen.task()
+    if (t.c_pub_agg_dep_n == t.c_pub_agg_dep_cap) {
+        let ncap int = t.c_pub_agg_dep_cap * 2
         if (ncap == 0) { ncap = 8 }
         let nd *gen.PubAggDeferred = malloc(
             (ncap * sizeof(gen.PubAggDeferred)).to_type(u64)) .
             to_type(*gen.PubAggDeferred)
         if (nd == 0) { return gen.fail("pub 聚合常量延迟表分配失败") }
-        if (gs.task.c_pub_agg_dep_n > 0) {
-            memcpy(nd, gs.task.c_pub_agg_dep,
-                (gs.task.c_pub_agg_dep_n * sizeof(gen.PubAggDeferred))
+        if (t.c_pub_agg_dep_n > 0) {
+            memcpy(nd, t.c_pub_agg_dep,
+                (t.c_pub_agg_dep_n * sizeof(gen.PubAggDeferred))
                     .to_type(u64))
         }
-        if (gs.task.c_pub_agg_dep != 0) {
-            free(gs.task.c_pub_agg_dep.to_type(*void))
+        if (t.c_pub_agg_dep != 0) {
+            free(t.c_pub_agg_dep.to_type(*void))
         }
-        gs.task.c_pub_agg_dep = nd
-        gs.task.c_pub_agg_dep_cap = ncap
+        t.c_pub_agg_dep = nd
+        t.c_pub_agg_dep_cap = ncap
     }
-    let item *gen.PubAggDeferred = &gs.task.c_pub_agg_dep[gs.task.c_pub_agg_dep_n]
+    let item *gen.PubAggDeferred = &t.c_pub_agg_dep[t.c_pub_agg_dep_n]
     let plen int = 0
-    for gs.task.c_path[plen] != 0 { plen += 1 }
-    let poff int = gen.tml_intern_str(gs.task.c_path.to_type(*u8), 0, plen)
+    for t.c_path[plen] != 0 { plen += 1 }
+    let poff int = gen.tml_intern_str(t.c_path.to_type(*u8), 0, plen)
     if (poff < 0) { return gen.fail("pub 聚合常量路径登记失败") }
     item.sym = idx
     item.first = first
     item.after = -1
     item.path_off = poff
     item.path_len = plen
-    gs.task.c_pub_agg_dep_n += 1
+    t.c_pub_agg_dep_n += 1
     return 0
 }
 
@@ -435,36 +435,36 @@ fn pub_agg_deferred_add(idx int, first int) int {
 // 词法化后按登记的 token 起点解析初始化式并执行（建模 + 本地物化，
 // 与提供方 parse_global_comptime_aggregate 同一路径）。
 pub fn pub_agg_deferred_run() int {
-    let gs *gen.GenState = gen.G()
+    let t *gen.TaskCtx = gen.task()
     let i int = 0
-    for i < gs.task.c_pub_agg_dep_n {
-        let item gen.PubAggDeferred = gs.task.c_pub_agg_dep[i]
+    for i < t.c_pub_agg_dep_n {
+        let item gen.PubAggDeferred = t.c_pub_agg_dep[i]
         if (item.sym < 0) { i += 1; continue }
-        if (item.first < 0 || item.sym >= gs.task.c_sym_n
+        if (item.first < 0 || item.sym >= t.c_sym_n
             || item.path_off <= 0 || item.path_len <= 0) {
             return gen.fail("内部错误：pub 聚合常量延迟项无效")
         }
-        let path *char = (gs.task.np_data + item.path_off).to_type(*char)
+        let path *char = (t.np_data + item.path_off).to_type(*char)
         if (gen.read_source(path) != 0) { return -1 }
-        gs.task.c_tok_n = 0
-        gs.task.c_pos = 0
-        gs.task.c_iface_load = 1
+        t.c_tok_n = 0
+        t.c_pos = 0
+        t.c_iface_load = 1
         // 延迟解析只求值、不参与 AST 收集（此刻没有有效的前端文件身份）。
-        let saved_capture int = gs.task.c_ast_capture
-        gs.task.c_ast_capture = 0
+        let saved_capture int = t.c_ast_capture
+        t.c_ast_capture = 0
         if (lex.lex_all() != 0) {
-            gs.task.c_ast_capture = saved_capture
-            gs.task.c_iface_load = 0
+            t.c_ast_capture = saved_capture
+            t.c_iface_load = 0
             return -1
         }
-        gs.task.c_pos = item.first
-        let tid int = gs.task.c_syms[item.sym].type_id
+        t.c_pos = item.first
+        let tid int = t.c_syms[item.sym].type_id
         let status int = parse_global_comptime_aggregate(item.sym, tid)
-        gs.task.c_ast_capture = saved_capture
-        gs.task.c_iface_load = 0
+        t.c_ast_capture = saved_capture
+        t.c_iface_load = 0
         if (status != 0) { return -1 }
-        gs.task.c_syms[item.sym].const_ready = 1
-        gs.task.c_pub_agg_dep[i].sym = -1
+        t.c_syms[item.sym].const_ready = 1
+        t.c_pub_agg_dep[i].sym = -1
         i += 1
     }
     return 0
@@ -472,11 +472,11 @@ pub fn pub_agg_deferred_run() int {
 
 // parse_global_comptime_aggregate：折叠顶层 CT 聚合结果并写入全局数据符号。
 fn parse_global_comptime_aggregate(idx int, tid int) int {
-    let gs *gen.GenState = gen.G()
-    gs.task.c_fold += 1
+    let t *gen.TaskCtx = gen.task()
+    t.c_fold += 1
     let result gen.Res
     let status int = parse_expr_iso(&result)
-    gs.task.c_fold -= 1
+    t.c_fold -= 1
     if (status != 0) { return -1 }
     if (result.is_const == 0) {
         return gen.sem_err("全局聚合初始化必须是编译期聚合结果")
@@ -491,7 +491,7 @@ fn parse_global_comptime_aggregate(idx int, tid int) int {
     if (comptime.ct_ir_data_emit_global(idx, tid, &value) != 0) { return -1 }
     // 顶层 CT 结果本身就是受支持的 CtAggregate 对象：登记成编译期模型，
     // 同一编译单元内再引用该常量时可直接读元素/字段，不必重跑 CT 调用。
-    let ck int = gs.task.t_types[tid].kind
+    let ck int = t.t_types[tid].kind
     if (ck == gen.TY_ARRAY || ck == gen.TY_STRUCT) {
         if (comptime.ct_global_agg_register(idx, result.ival) != 0) {
             return -1
@@ -502,30 +502,30 @@ fn parse_global_comptime_aggregate(idx int, tid int) int {
 
 // parse_global_ct_const_probe：提前折叠已登记的简单 CT 整数常量供后续数组布局使用。
 fn parse_global_ct_const_probe(idx int, tid int) int {
-    let gs *gen.GenState = gen.G()
+    let t *gen.TaskCtx = gen.task()
     if (p_cur() != gen.TK_DOLLAR || p_peek(1) != gen.TOK_IDENT) { return 0 }
     // 早期 token 探测只接受当前可解析的名字；可能前向引用的 CT 初始化器
     // 留给全部声明登记后的 typed 布局常量依赖调度。
     if (parse_global_ct_const_has_unready_name() != 0) { return 0 }
-    let token int = gs.task.c_pos + 1
-    let sym int = gen.sym_lookup(gs.task.c_toks[token].start, gs.task.c_toks[token].len)
-    if (sym < 0 || gs.task.c_syms[sym].kind != gen.SYM_FN
-        || (gs.task.c_syms[sym].flags & gen.F_COMPTIME) == 0
+    let token int = t.c_pos + 1
+    let sym int = gen.sym_lookup(t.c_toks[token].start, t.c_toks[token].len)
+    if (sym < 0 || t.c_syms[sym].kind != gen.SYM_FN
+        || (t.c_syms[sym].flags & gen.F_COMPTIME) == 0
         // 只在目标编译期函数已捕获 typed IR 时才提前折叠：pass1 期间一律让位给
         // pass2a 之后的 typed 布局常量依赖调度，避免使用第二套 token 解释器。
         || comptime.ct_is_prepared(sym) == 0) { return 0 }
-    gs.task.c_fold += 1
+    t.c_fold += 1
     let value gen.Res
     let status int = parse_expr_iso(&value)
-    gs.task.c_fold -= 1
+    t.c_fold -= 1
     if (status != 0) { return -1 }
     if (value.is_const == 0) {
         return gen.sem_err("全局整数常量初始化必须是编译期常量")
     }
     if (gen.sem_can_assign(tid, value.type_id, value.is_lit,
             value.ival, value.lit_big) != 0) { return -1 }
-    gs.task.c_syms[idx].cval = value.ival
-    gs.task.c_syms[idx].const_ready = 1
+    t.c_syms[idx].cval = value.ival
+    t.c_syms[idx].const_ready = 1
     return 1
 }
 
@@ -557,16 +557,16 @@ fn parse_global_ct_const_has_unready_name() int {
 }
 
 fn sem_global_zero(idx int, tid int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_iface_load != 0) {
+    let t *gen.TaskCtx = gen.task()
+    if (t.c_iface_load != 0) {
         return 0
     }
-    if (gs.task.c_bss_n >= 4096) {
+    if (t.c_bss_n >= 4096) {
         return gen.sem_err("零初始化全局过多")
     }
-    gs.task.c_syms[idx].offset = gs.task.c_bss_n
-    gs.task.c_bss_syms[gs.task.c_bss_n] = idx
-    gs.task.c_bss_n += 1
+    t.c_syms[idx].offset = t.c_bss_n
+    t.c_bss_syms[t.c_bss_n] = idx
+    t.c_bss_n += 1
     if (parse_global_static_root(idx, tid) == -1) { return -1 }
     return 0
 }
@@ -574,10 +574,10 @@ fn sem_global_zero(idx int, tid int) int {
 // parse_global_array_init：全局数组/切片字面量初始化（发射旧数据 + 可选 AST 捕获）。
 // ast_out 在捕获开启时写出 AST_EXPR_ARRAY 根（元素链与局部字面量同构），否则写 -1。
 fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) int {
-    let gs *gen.GenState = gen.G()
-    let elem int = gs.task.t_types[tid].elem
-    let esz int = gs.task.t_types[elem].size
-    let first int = gs.task.c_pos
+    let t *gen.TaskCtx = gen.task()
+    let elem int = t.t_types[tid].elem
+    let esz int = t.t_types[elem].size
+    let first int = t.c_pos
     ast_out[0] = -1
     p_adv() // 消费 '['
     let vals [64]i64      // 整数值 / f64 位型
@@ -594,19 +594,19 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
             }
             if (p_cur() == gen.TOK_STRING) {
                 // 字符串元素：预领标签号（内容在元素槽之后补发）
-                let ss int = gs.task.c_toks[gs.task.c_pos].start
-                let sl int = gs.task.c_toks[gs.task.c_pos].len
-                let str_first int = gs.task.c_pos
+                let ss int = t.c_toks[t.c_pos].start
+                let sl int = t.c_toks[t.c_pos].len
+                let str_first int = t.c_pos
                 p_adv()
                 kinds[count] = 1
-                vals[count] = gs.task.c_data_n.to_type(i64)
+                vals[count] = t.c_data_n.to_type(i64)
                 labels[count] = vals[count].to_type(int)
-                gs.task.c_data_n += 1
+                t.c_data_n += 1
                 str_start[count] = ss
                 str_len[count] = sl
-                if (gs.task.c_ast_capture != 0) {
+                if (t.c_ast_capture != 0) {
                     let snode int = parse_global_string_ast(elem, str_first,
-                        gs.task.c_pos, vals[count].to_type(int))
+                        t.c_pos, vals[count].to_type(int))
                     if (snode < 0
                         || ast.ast_expr_args_append(&list, snode) != 0) { return -1 }
                 }
@@ -618,11 +618,11 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
                 }
                 break
             }
-            let elem_first int = gs.task.c_pos
-            gs.task.c_fold += 1
+            let elem_first int = t.c_pos
+            t.c_fold += 1
             let e gen.Res
             let er int = parse_expr_iso(&e)
-            gs.task.c_fold -= 1
+            t.c_fold -= 1
             if (er != 0) {
                 return -1
             }
@@ -632,7 +632,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
             if (gen.sem_can_assign(elem, e.type_id, e.is_lit, e.ival, e.lit_big) != 0) {
                 return -1
             }
-            if (gs.task.c_ast_capture != 0
+            if (t.c_ast_capture != 0
                 && ast.ast_expr_args_append(&list, e.ast_id) != 0) { return -1 }
             if (gen.ty_is_float(elem) != 0) {
                 if (gen.ty_is_float(e.type_id) == 0) {
@@ -646,9 +646,9 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
                 vals[count] = e.ival
             }
             labels[count] = 0
-            if (gs.task.t_types[elem].kind == gen.TY_PTR && vals[count] != 0) {
+            if (t.t_types[elem].kind == gen.TY_PTR && vals[count] != 0) {
                 labels[count] = parse_global_static_string_target(elem_first,
-                    gs.task.c_pos, vals[count])
+                    t.c_pos, vals[count])
                 if (labels[count] <= 0) {
                     return gen.sem_err("全局指针数组元素仅支持字符串来源与 NULL")
                 }
@@ -665,19 +665,19 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) {
         return -1
     }
-    if (fk == gen.TY_ARRAY && count != gs.task.t_types[tid].len) {
+    if (fk == gen.TY_ARRAY && count != t.t_types[tid].len) {
         return gen.sem_err("数组字面量元素个数与数组长度不一致")
     }
-    if (gs.task.c_ast_capture != 0) {
+    if (t.c_ast_capture != 0) {
         let root int = ast.ast_expr_add(ast.AST_EXPR_ARRAY, gen.TK_LBRACKET,
-            first, gs.task.c_pos, tid, list, -1, -1)
+            first, t.c_pos, tid, list, -1, -1)
         if (root < 0) { return -1 }
         ast_out[0] = root
     }
     // 切片常量没有类型内建长度：解析完字面量才知元素个数，模型在这里创建
     // （数组的模型已在 parse_global_init 按类型长度创建）。
     if (fk == gen.TY_SLICE && ct_obj[0] == 0
-        && gs.task.c_syms[idx].kind == gen.SYM_CONST
+        && t.c_syms[idx].kind == gen.SYM_CONST
         && comptime.ct_global_agg_modelable(elem, 0) != 0) {
         ct_obj[0] = comptime.ct_global_agg_new(elem, count)
         if (ct_obj[0] == 0) { return -1 }
@@ -698,8 +698,8 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     // 发射变量数据
     let lbl int = 0
     if (fk == gen.TY_SLICE) {
-        lbl = gs.task.c_data_n
-        gs.task.c_data_n += 1
+        lbl = t.c_data_n
+        t.c_data_n += 1
     }
     parse_global_bind_iface_label(idx)
     let static_row int = parse_global_static_root(idx, tid)
@@ -714,7 +714,7 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
     let i int = 0
     for i < count {
         if (kinds[i] == 1) {
-            if (gs.task.t_types[elem].kind != gen.TY_PTR || esz != 8
+            if (t.t_types[elem].kind != gen.TY_PTR || esz != 8
                 || parse_global_static_pointer(fk == gen.TY_SLICE ? backing_row : static_row,
                     i * esz, labels[i], 0) != 0) { return -1 }
 
@@ -743,16 +743,16 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
 // parse_global_struct_init：全局结构体字面量初始化（发射旧数据 + 可选 AST 捕获）。
 // ast_out 在捕获开启时写出 AST_EXPR_STRUCT_INIT 根（字段链与局部字面量同构）。
 fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
-    let gs *gen.GenState = gen.G()
+    let t *gen.TaskCtx = gen.task()
     if (p_cur() != gen.TOK_IDENT) {
         return gen.sem_err("全局结构体初始化需要「类型名 { 字段 }」字面量")
     }
-    let nstart int = gs.task.c_toks[gs.task.c_pos].start
-    let nlen int = gs.task.c_toks[gs.task.c_pos].len
+    let nstart int = t.c_toks[t.c_pos].start
+    let nlen int = t.c_toks[t.c_pos].len
     if (gen.ty_lookup_name(nstart, nlen) != tid) {
         return gen.sem_err("初始化器类型与变量类型不一致")
     }
-    let first int = gs.task.c_pos
+    let first int = t.c_pos
     ast_out[0] = -1
     p_adv()
     if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
@@ -769,9 +769,9 @@ fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
     if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
         return -1
     }
-    if (gs.task.c_ast_capture != 0) {
+    if (t.c_ast_capture != 0) {
         let root int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_INIT, gen.TK_LBRACE,
-            first, gs.task.c_pos, tid, fields, -1, -1)
+            first, t.c_pos, tid, fields, -1, -1)
         if (root < 0) { return -1 }
         ast_out[0] = root
     }
@@ -782,7 +782,7 @@ fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
 // （捕获关闭时保持 -1）。链的构造次序与局部 parse_struct_init_body 完全一致。
 fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
     fields_out *int, static_row int) int {
-    let gs *gen.GenState = gen.G()
+    let t *gen.TaskCtx = gen.task()
     if (p_cur() == gen.TK_RBRACE) {
         return gen.err_tok("结构体字面量不能为空")
     }
@@ -792,14 +792,14 @@ fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
     }
     let fpos int = 0
     for 1 {
-        let field_first int = gs.task.c_pos
+        let field_first int = t.c_pos
         let fidx int = -1
         if (named != 0) {
             if (is_member_name(p_cur()) == 0) {
                 return gen.err_tok("命名式字面量需要字段名")
             }
-            let fs int = gs.task.c_toks[gs.task.c_pos].start
-            let fl int = gs.task.c_toks[gs.task.c_pos].len
+            let fs int = t.c_toks[t.c_pos].start
+            let fl int = t.c_toks[t.c_pos].len
             fidx = gen.sem_lit_field_lookup(tid, fs, fl)
             if (fidx < 0) {
                 return gen.sem_err("结构体没有该字段")
@@ -809,18 +809,18 @@ fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
                 return -1
             }
         } else {
-            if (fpos >= gs.task.t_types[tid].len) {
+            if (fpos >= t.t_types[tid].len) {
                 return gen.sem_err("位置式字面量字段过多")
             }
-            fidx = gs.task.t_types[tid].sub + fpos
+            fidx = t.t_types[tid].sub + fpos
             fpos += 1
         }
         let value_ast int = -1
         if (parse_global_field_value(fidx, base, cur, ct_obj,
-                fidx - gs.task.t_types[tid].sub, &value_ast, static_row) != 0) {
+                fidx - t.t_types[tid].sub, &value_ast, static_row) != 0) {
             return -1
         }
-        if (gs.task.c_ast_capture != 0) {
+        if (t.c_ast_capture != 0) {
             if (value_ast < 0) {
                 return gen.fail("内部错误：全局结构体初始化 AST 缺少字段值")
             }
@@ -829,7 +829,7 @@ fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
                 node_first = ast.ast_expr_first_of(fields_out[0])
             }
             let field_node int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_FIELD, fidx,
-                node_first, gs.task.c_pos, -1, fields_out[0], value_ast, -1)
+                node_first, t.c_pos, -1, fields_out[0], value_ast, -1)
             if (field_node < 0) { return -1 }
             fields_out[0] = field_node
         }
@@ -849,24 +849,24 @@ fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
 // ast_out 在捕获开启时写出该字段值的表达式根（嵌套结构体为 STRUCT_INIT），否则为 -1。
 fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
     ct_index int, ast_out *int, static_row int) int {
-    let gs *gen.GenState = gen.G()
-    let ftid int = gs.task.t_fields[fidx].type_id
-    let foff int = base + gs.task.t_fields[fidx].offset
+    let t *gen.TaskCtx = gen.task()
+    let ftid int = t.t_fields[fidx].type_id
+    let foff int = base + t.t_fields[fidx].offset
     ast_out[0] = -1
 
     cur[0] = foff
-    let fk int = gs.task.t_types[ftid].kind
+    let fk int = t.t_types[ftid].kind
     if (fk == gen.TY_STRUCT) {
         // 嵌套结构体字面量：IDENT '{' body '}'
         if (p_cur() != gen.TOK_IDENT) {
             return gen.sem_err("嵌套字段需要「类型名 { 字段 }」字面量")
         }
-        let ns int = gs.task.c_toks[gs.task.c_pos].start
-        let nl int = gs.task.c_toks[gs.task.c_pos].len
+        let ns int = t.c_toks[t.c_pos].start
+        let nl int = t.c_toks[t.c_pos].len
         if (gen.ty_lookup_name(ns, nl) != ftid) {
             return gen.sem_err("嵌套字面量类型与字段类型不一致")
         }
-        let nested_first int = gs.task.c_pos
+        let nested_first int = t.c_pos
         p_adv()
         if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
             return -1
@@ -874,7 +874,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         // 嵌套结构体的编译期模型：先建子对象，填完再挂到父对象字段上。
         let ct_child i64 = 0
         if (ct_obj != 0) {
-            ct_child = comptime.ct_global_agg_new(ftid, gs.task.t_types[ftid].len)
+            ct_child = comptime.ct_global_agg_new(ftid, t.t_types[ftid].len)
             if (ct_child == 0) { return -1 }
         }
         let nested_fields int = -1
@@ -885,14 +885,14 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
             return -1
         }
-        if (gs.task.c_ast_capture != 0) {
+        if (t.c_ast_capture != 0) {
             let nested_root int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_INIT,
-                gen.TK_LBRACE, nested_first, gs.task.c_pos, ftid, nested_fields, -1, -1)
+                gen.TK_LBRACE, nested_first, t.c_pos, ftid, nested_fields, -1, -1)
             if (nested_root < 0) { return -1 }
             ast_out[0] = nested_root
         }
 
-        cur[0] = foff + gs.task.t_types[ftid].size
+        cur[0] = foff + t.t_types[ftid].size
         if (ct_obj != 0
             && comptime.ct_global_agg_set_obj(ct_obj, ct_index, ftid,
                 ct_child) != 0) {
@@ -912,26 +912,26 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         if (p_cur() == gen.TOK_STRING) {
             // 字符串字面量：先领标签号、发指针引用，再补内容——
             // 内容不能打断变量自身的字段布局（曾插进字段中间）。
-            let ss int = gs.task.c_toks[gs.task.c_pos].start
-            let sl int = gs.task.c_toks[gs.task.c_pos].len
-            let str_first int = gs.task.c_pos
+            let ss int = t.c_toks[t.c_pos].start
+            let sl int = t.c_toks[t.c_pos].len
+            let str_first int = t.c_pos
             p_adv()
-            let lbl int = gs.task.c_data_n
-            gs.task.c_data_n += 1
-            if (gs.task.t_types[ftid].size != 8
+            let lbl int = t.c_data_n
+            t.c_data_n += 1
+            if (t.t_types[ftid].size != 8
                 || parse_global_static_pointer(static_row, foff, lbl, 0) != 0
                 || parse_global_static_string(ss, sl, lbl) != 0) { return -1 }
-            if (gs.task.c_ast_capture != 0) {
-                let snode int = parse_global_string_ast(ftid, str_first, gs.task.c_pos, lbl)
+            if (t.c_ast_capture != 0) {
+                let snode int = parse_global_string_ast(ftid, str_first, t.c_pos, lbl)
                 if (snode < 0) { return -1 }
                 ast_out[0] = snode
             }
             r = 0
         } else {
-            gs.task.c_fold += 1
+            t.c_fold += 1
             let pv gen.Res
             let pr int = parse_expr_iso(&pv)
-            gs.task.c_fold -= 1
+            t.c_fold -= 1
             if (pr != 0) {
                 return -1
             }
@@ -944,15 +944,15 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             if (pv.ival != 0) {
                 return gen.sem_err("指针字段全局初始化仅支持字符串与 NULL")
             }
-            if (gs.task.c_ast_capture != 0) { ast_out[0] = pv.ast_id }
+            if (t.c_ast_capture != 0) { ast_out[0] = pv.ast_id }
             if (parse_global_static_scalar(static_row, foff, ftid, 0) != 0) { return -1 }
             r = 0
         }
     } else if (gen.ty_is_float(ftid) != 0) {
-        gs.task.c_fold += 1
+        t.c_fold += 1
         let fv2 gen.Res
         let fr int = parse_expr_iso(&fv2)
-        gs.task.c_fold -= 1
+        t.c_fold -= 1
         if (fr != 0) {
             return -1
         }
@@ -962,22 +962,22 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         if (gen.ty_is_float(fv2.type_id) == 0) {
             return gen.sem_err("浮点字段需要浮点字面量")
         }
-        if (gs.task.t_types[ftid].size != 8) {
+        if (t.t_types[ftid].size != 8) {
             return gen.sem_err("f32 字段的全局初始化暂不支持（请用 f64）")
         }
         if (parse_global_static_scalar(static_row, foff, ftid, fv2.fval_bits) != 0) { return -1 }
         r = 0
-        if (gs.task.c_ast_capture != 0) { ast_out[0] = fv2.ast_id }
+        if (t.c_ast_capture != 0) { ast_out[0] = fv2.ast_id }
         if (r == 0 && ct_obj != 0
             && comptime.ct_global_agg_set(ct_obj, ct_index, ftid,
                 fv2.fval_bits) != 0) {
             return -1
         }
     } else {
-        gs.task.c_fold += 1
+        t.c_fold += 1
         let v gen.Res
         let vr int = parse_expr_iso(&v)
-        gs.task.c_fold -= 1
+        t.c_fold -= 1
         if (vr != 0) {
             return -1
         }
@@ -987,7 +987,7 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
         if (gen.sem_can_assign(ftid, v.type_id, v.is_lit, v.ival, v.lit_big) != 0) {
             return -1
         }
-        if (gs.task.c_ast_capture != 0) { ast_out[0] = v.ast_id }
+        if (t.c_ast_capture != 0) { ast_out[0] = v.ast_id }
         if (parse_global_static_scalar(static_row, foff, ftid, v.ival) != 0) { return -1 }
         r = 0
         if (r == 0 && ct_obj != 0
@@ -999,6 +999,6 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
     if (r != 0) {
         return -1
     }
-    cur[0] = foff + gs.task.t_types[ftid].size
+    cur[0] = foff + t.t_types[ftid].size
     return 0
 }
