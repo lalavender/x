@@ -191,6 +191,23 @@ cwd/pipe（`30_file`）、内存（`40_memory`）、时间（`50_time`）与进�
 [libs/toml/README.md](../../libs/toml/README.md)，取舍见
 [ADR-0017](../adr/0017-yh-TOML标准库独立文档模型.md)。
 
+## json（2026-10-24 设计；首期已实现）
+
+规划中的 `libs/json/` 提供 RFC 8259 读写：`parse`/`parse_text`/`read_file` +
+`Document`/`Value` 只读句柄（形状与 `toml` 对齐），以及 builder 式写出
+（`begin_object`/`key`/`write_string`/`encode`/`encode_owned`）。与 `toml`
+的差异：JSON 只有一个 number 类型，因此用单一 `kind_number` 并**原样保存
+词素**，由 `as_i64`/`as_f64`/`is_integer` 在取值时显式询问；文档模型两库各自
+独立，只把十进制 ↔ binary64 转换抽到 `libs/num` 共用。严格 profile 拒绝
+BOM、重复键、孤立代理、尾逗号与尾随内容。设计见
+[yh-JSON标准库设计](yh-JSON标准库设计-2026-10-24.md)，分期见
+[实施方案](../02-plan/yh-JSON标准库实施方案-2026-10-24.md)，取舍见
+[ADR-0019](../adr/0019-yh-JSON标准库独立文档模型与词素保真数字.md)。
+状态：**首期已实现**（reader + writer + 查询 + 文件读写），已在
+`libs/project.toml` 注册；`tests/json/run.py` 六组断言通过，`make test-json`
+可用。未完成项（一致性语料、注入门、安装门）见
+[todo](../todo.md)。
+
 ## testing（2026-10-23 首期完成）
 
 `libs/testing/` 是 `yh test` 的最小运行时辅助模块，只提供

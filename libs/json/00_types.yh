@@ -1,0 +1,157 @@
+module json
+
+// yh JSON 标准库：公共数据模型、诊断与实现常量。
+//
+// 本文件只放公开类型、枚举、预算常量与私有状态常量；不实现解析或写出。
+// 设计见 docs/03-design/yh-JSON标准库设计-2026-10-24.md，分期见
+// docs/02-plan/yh-JSON标准库实施方案-2026-10-24.md，取舍见 ADR-0018。
+//
+// 实现约束：
+//   * 文本一律是「字节指针 + 长度」，不要求 NUL 结尾：JSON 字符串和键可以
+//     包含解码后的 NUL（"\u0000"），strlen 会截断。
+//   * Document 独占一次成功解析的私有内存池；Value 是池内节点的只读视图，
+//     不单独分配、不单独释放。释放文档后所有视图失效。
+//   * 数字只校验 grammar 并保存原始词素，是整数还是浮点由 as_i64/as_f64/
+//     is_integer 在取值时显式询问。
+//   * 私有类型只在本模块使用，不出现在 pub 签名里（ADR-0013）。
+
+// —— 资源预算（实现限制，README 必须披露）——
+// 输入字节上限；超过返回 parse_resource_error。
+const JSON_MAX_INPUT u64 = 16777216
+// 容器嵌套深度上限。JSON 常由机器生成，比 TOML 配置更深，取 256。
+const JSON_MAX_DEPTH int = 256
+// 单文档累计分配上限（池内所有块加上存储头部）。
+const JSON_MAX_BYTES u64 = 134217728
+// as_f64 允许的有效位数上限；超过报范围错误而不是静默近似。
+const JSON_MAX_SIG_DIGITS int = 4096
+// 缩进空格上限，超过报参数错误。
+const JSON_MAX_INDENT int = 16
+// 对象条目超过该值时建哈希索引（J8 后置，当前未启用）。
+const JSON_HASH_THRESHOLD int = 32
+// 测试构建的分配失败注入点：-1 关闭；>=0 时允许该次数的池分配，下一次失败。
+// 产品构建保持 -1；tests/json/injection.py 在临时标准库副本中改写本行。
+const JSON_TEST_FAIL_AFTER int = -1
+
+// ValueKind 是 JSON 值的类型标签；invalid 只表示空视图。
+// JSON 只有一个 number 类型，不区分整数与浮点。
+pub enum ValueKind {
+    kind_invalid
+    kind_null
+    kind_boolean
+    kind_number
+    kind_string
+    kind_array
+    kind_object
+}
+
+// ParseStatus 是一次解析的最终状态。
+pub enum ParseStatus {
+    parse_ok
+    parse_syntax_error
+    parse_resource_error
+    parse_io_error
+    parse_argument_error
+}
+
+// QueryStatus 是查询/取值的结果分类；失败时不修改输出参数。
+pub enum QueryStatus {
+    query_ok
+    query_missing
+    query_type_error
+    query_range_error
+    query_bounds_error
+    query_argument_error
+}
+
+// WriteStatus 是一次写出的结果分类；write_state_error 表示 builder 误用。
+pub enum WriteStatus {
+    write_ok
+    write_state_error
+    write_number_range
+    write_invalid_utf8
+    write_resource_limit
+    write_argument_error
+    write_buffer_error
+    write_io_error
+}
+
+// ErrorCode 是稳定诊断分类；message 文字不是程序判断接口。
+pub enum ErrorCode {
+    error_none
+    error_utf8
+    error_bom
+    error_syntax
+    error_duplicate_key
+    error_surrogate
+    error_number_range
+    error_resource_limit
+    error_out_of_memory
+    error_io
+    error_argument
+}
+
+// Text 是 UTF-8 字节视图；长度不含额外终止字节，可以包含 NUL。
+// 视图借用所属 Document 的存储，文档释放后失效。
+pub struct Text {
+    data *u8
+    count u64
+}
+
+// Span 是来源位置：字节偏移零基，长度是字节数；行号和字节列号一基。
+pub struct Span {
+    offset u64
+    length u64
+    line u64
+    column u64
+}
+
+// Diagnostic 是结构化诊断；message 是静态中文文本，不归调用者释放。
+// related/has_related 用于重复键关联的第一次出现位置。
+pub struct Diagnostic {
+    code ErrorCode
+    message *char
+    span Span
+    related Span
+    has_related int
+    native_code int
+}
+
+// Document 独占一次成功解析的存储；句柄由模块管理，调用者不可改写。
+pub struct Document {
+    handle *void
+}
+
+// Value 是所属 Document 内节点的只读视图，不单独分配或释放。
+pub struct Value {
+    handle *void
+}
+
+// ParseResult 是解析入口的统一返回；失败时 document.handle 为 0。
+pub struct ParseResult {
+    status ParseStatus
+    document Document
+    error Diagnostic
+}
+
+// LookupResult 是一次查找的结果；失败时 value.handle 为 0。
+pub struct LookupResult {
+    status QueryStatus
+    value Value
+}
+
+// EntryResult 是按首次出现顺序遍历对象条目时的结果。
+pub struct EntryResult {
+    status QueryStatus
+    key Text
+    value Value
+    span Span
+}
+
+// WriteOptions 是写出选项。indent 为 0 表示紧凑输出；1..16 为每层空格数。
+// escape_non_ascii 为 1 时所有非 ASCII 标量写成 \uXXXX；sort_keys 为 1 时
+// 对象键按无符号字节序升序输出（只影响输出顺序，不改变文档）。
+pub struct WriteOptions {
+    indent int
+    escape_non_ascii int
+    sort_keys int
+}

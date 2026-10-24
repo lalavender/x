@@ -1,0 +1,160 @@
+module main
+
+// JSON 容器验收：嵌套、插入顺序、空容器、顶层标量、缩进与排序、builder 误用。
+
+import io
+import json
+import string
+
+let failed int = 0
+
+// ok 记录一条断言结果。
+fn ok(condition int, name *char) void {
+    if (condition == 0) {
+        failed += 1
+        io.print("FAIL ")
+        io.println(name)
+    }
+}
+
+// text_equals_c 比较 Text 与给定字节串。
+fn text_equals_c(text json.Text, expected *char, count u64) int {
+    if (text.count != count) {
+        return 0
+    }
+    let i u64 = 0
+    for i < count {
+        if (text.data[i] != expected[i].to_type(u8)) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// encode_with 按选项写出根值。
+fn encode_with(root json.Value, indent int, sort_keys int) json.EncodeResult {
+    let options json.WriteOptions
+    options.indent = indent
+    options.escape_non_ascii = 0
+    options.sort_keys = sort_keys
+    return json.encode_owned(root, options)
+}
+
+// check_nested 断言嵌套结构与插入顺序。
+fn check_nested() void {
+    let result json.ParseResult = json.parse_text("{\"a\":[{\"b\":1},{\"b\":2}],\"c\":true}")
+    ok((result.status == json.parse_ok).to_type(int), "nested parse")
+    let root json.Value = json.root(&result.document)
+    let total u64 = 0
+    ok((json.count(root, &total) == json.query_ok).to_type(int), "object count status")
+    ok((total == 2).to_type(int), "object count")
+    let first_entry json.EntryResult = json.object_entry(root, 0)
+    ok(text_equals_c(first_entry.key, "a", 1), "first key")
+    let second_entry json.EntryResult = json.object_entry(root, 1)
+    ok(text_equals_c(second_entry.key, "c", 1), "second key")
+    let array json.LookupResult = json.get(root, "a")
+    let items u64 = 0
+    json.count(array.value, &items)
+    ok((items == 2).to_type(int), "array count")
+    let second json.LookupResult = json.array_get(array.value, 1)
+    let b json.LookupResult = json.get(second.value, "b")
+    let value i64 = 0
+    ok((json.as_i64(b.value, &value) == json.query_ok).to_type(int), "nested b")
+    ok((value == 2).to_type(int), "nested b value")
+    json.release(&result.document)
+}
+
+// check_bounds 断言越界与类型错误的查询状态。
+fn check_bounds() void {
+    let result json.ParseResult = json.parse_text("{\"a\":1}")
+    let root json.Value = json.root(&result.document)
+    let a json.LookupResult = json.get(root, "a")
+    let missing json.LookupResult = json.get(root, "zzz")
+    ok((missing.status == json.query_missing).to_type(int), "missing key")
+    let total u64 = 0
+    ok((json.count(a.value, &total) == json.query_type_error).to_type(int),
+        "count on scalar")
+    let out json.LookupResult = json.array_get(root, 0)
+    ok((out.status == json.query_type_error).to_type(int), "array_get on object")
+    let entry json.EntryResult = json.object_entry(root, 5)
+    ok((entry.status == json.query_bounds_error).to_type(int), "entry bounds")
+    json.release(&result.document)
+}
+
+// check_pretty 断言缩进输出形态。
+fn check_pretty() void {
+    let result json.ParseResult = json.parse_text("{\"a\":[1],\"b\":{}}")
+    let encoded json.EncodeResult = encode_with(json.root(&result.document), 2, 0)
+    ok((encoded.status == json.write_ok).to_type(int), "pretty status")
+    let view string.View = string.as_view(&encoded.text)
+    let out json.Text
+    out.data = view.data
+    out.count = view.count
+    let expected *char = "{\n  \"a\": [\n    1\n  ],\n  \"b\": {}\n}"
+    ok(text_equals_c(out, expected, strlen(expected)), "pretty text")
+    string.release(&encoded.text)
+    json.release(&result.document)
+}
+
+// check_sort 断言键排序只影响输出顺序。
+fn check_sort() void {
+    let result json.ParseResult = json.parse_text("{\"b\":1,\"a\":2}")
+    let encoded json.EncodeResult = encode_with(json.root(&result.document), 0, 1)
+    ok((encoded.status == json.write_ok).to_type(int), "sort status")
+    let view string.View = string.as_view(&encoded.text)
+    let out json.Text
+    out.data = view.data
+    out.count = view.count
+    ok(text_equals_c(out, "{\"a\":2,\"b\":1}", 13), "sorted text")
+    let first json.EntryResult = json.object_entry(json.root(&result.document), 0)
+    ok(text_equals_c(first.key, "b", 1), "document order kept")
+    string.release(&encoded.text)
+    json.release(&result.document)
+}
+
+// check_builder_errors 断言 builder 误用被拒绝且缓冲回滚。
+fn check_builder_errors() void {
+    let text string.String = string.make()
+    let options json.WriteOptions
+    options.indent = 0
+    options.escape_non_ascii = 0
+    options.sort_keys = 0
+    let b json.Builder = json.builder_make(&text, options)
+    json.begin_object(&b)
+    let key_status json.WriteStatus = json.key(&b, json.Text{ data: "a".to_type(*u8), count: 1 })
+    ok((key_status == json.write_ok).to_type(int), "key ok")
+    let twice json.WriteStatus = json.key(&b, json.Text{ data: "b".to_type(*u8), count: 1 })
+    ok((twice == json.write_state_error).to_type(int), "two keys")
+    ok((string.byte_length(&text) == 0).to_type(int), "key rollback")
+    string.release(&text)
+}
+
+// check_top_scalars 断言顶层标量可解析可写出。
+fn check_top_scalars() void {
+    let result json.ParseResult = json.parse_text(" 42 ")
+    ok((result.status == json.parse_ok).to_type(int), "top scalar parse")
+    let encoded json.EncodeResult = encode_with(json.root(&result.document), 0, 0)
+    let view string.View = string.as_view(&encoded.text)
+    let out json.Text
+    out.data = view.data
+    out.count = view.count
+    ok(text_equals_c(out, "42", 2), "top scalar write")
+    string.release(&encoded.text)
+    json.release(&result.document)
+}
+
+// main 跑容器断言。
+fn main() int {
+    check_nested()
+    check_bounds()
+    check_pretty()
+    check_sort()
+    check_builder_errors()
+    check_top_scalars()
+    if (failed == 0) {
+        io.println("json containers ok")
+        return 0
+    }
+    return 1
+}

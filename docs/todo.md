@@ -263,6 +263,36 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
   生命周期、缓存与种子冷编/两代固定点；全迁移后删除旧解析器。
 - [ ] **T7 生成器（后续按需）**：独立构建/编码契约与 encoder 验收；保真编辑另立项。
 
+### JSON 标准库（2026-10-24 设计；J1–J3/J6 已实现，J4/J5/J7 待做）
+
+[设计](03-design/yh-JSON标准库设计-2026-10-24.md)、
+[方案](02-plan/yh-JSON标准库实施方案-2026-10-24.md)与
+[ADR-0019](adr/0019-yh-JSON标准库独立文档模型与词素保真数字.md)已落地首期：
+`libs/json/` 12 个源文件（reader + writer + 查询 + 文件读写），
+`libs/num/` 提供十进制 ↔ binary64 与最短往返格式化；
+`tests/modules/projects/json*` 六组断言 6/6 通过，`make test-json` 可用并已接入
+`make test`。口径：RFC 8259 完整语法 + 严格 profile（拒绝 BOM/重复键/孤立代理/
+尾逗号）；单一 `kind_number` 且保存原始词素；文档模型与 `toml` 独立。
+以下只保留未完成项。
+
+- [ ] **J4 预算与失败原子性**：深度/字节/有效位上限已实现并有断言；缺
+  `JSON_TEST_FAIL_AFTER` 池分配失败注入、`tests/json/injection.py` 与低预算门，
+  以及 `make test-json-injection`。
+- [ ] **J5 一致性与差分**：`jsontestbridge`（stdin→退出码）、固定 JSONTestSuite
+  提交（`y_` 全接受、`n_` 全拒绝、`i_` 逐条登记）、Python 差分（值树 + 浮点
+  位模式）、`jsonroundtrip` 组、`make test-json-conformance`。
+- [ ] **J7 收口**：`libs/json/99_tests.yh` 内建测试块与 `make test-lib-tests`
+  登记、`tests/json/install.py` 仓库外导入门、`make test-json-install`、
+  `docs/finish.md` 流水与 `01-finished/` 交付记录。
+- [ ] **J8 后置候选**：JCS 规范模式、大对象哈希索引（`JSON_HASH_THRESHOLD`
+  已预留）、流式 SAX、JSON Pointer；均需实测或真实消费者触发。
+- [ ] **N1 `libs/num` 反向迁移**：`libs/toml/30_numbers.yh` 改为调用
+  `num.parse_f64`，以 toml-test 681/681 与注入门为阻断条件；当前为不触碰已
+  验收语料而暂缓。
+- [ ] **N2 后端限制回访**：当前编译器对超长函数体、部分调用语句形态与
+  "调用结果直接赋给字段"有限制（种子与 HEAD 均有），JSON 库已按小函数规避；
+  修好后可放宽实现风格，不影响公共 API。
+
 ### FMT fmt 运行时与 V 风格插值（2026-10-23 改版；R0–R3/I0–I5 待实施）
 
 用户决定：字符串格式化采用 V 式插值 `"…${expr:spec}…"`，结果为

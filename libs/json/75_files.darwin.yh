@@ -1,0 +1,146 @@
+module json
+
+import os
+import string
+
+// yh JSON 标准库：Darwin 文件读写适配（OS8 新文件 API 落地前的兼容路径）。
+//
+// HEAD 的 os 新结果接口只覆盖 Linux；Darwin 使用旧的
+// os.open_file/read_fd/write_fd/close_fd。旧接口不提供 errno，因此诊断的
+// native_code 为 0，也不区分 interrupted；读取按短读循环，所有成功打开的
+// fd 在所有路径关闭，读取错误优先保留。OS8 接入后再迁移到结果接口。
+//
+// 打开标志按 Darwin 的 fcntl 值直接给出：O_WRONLY=1、O_CREAT=512、
+// O_TRUNC=1024，权限位 0666。
+
+// read_file 读取完整文件并解析；文件增长同样受 JSON_MAX_INPUT 约束。
+pub fn read_file(path *char) ParseResult {
+    if (path == 0) {
+        let span Span = span_zero()
+        return parse_failure(ParseStatus.parse_argument_error,
+            ErrorCode.error_argument, "文件路径为空", span, 0)
+    }
+    let fd int = os.open_file(path, 0)
+    if (fd < 0) {
+        let span Span = span_zero()
+        return parse_failure(ParseStatus.parse_io_error, ErrorCode.error_io,
+            "打开 JSON 文件失败", span, 0)
+    }
+    let capacity u64 = 8192
+    let buffer *u8 = malloc(capacity).to_type(*u8)
+    if (buffer == 0) {
+        os.close_fd(fd)
+        let span Span = span_zero()
+        return parse_failure(ParseStatus.parse_resource_error,
+            ErrorCode.error_out_of_memory, "读取缓冲内存不足", span, 0)
+    }
+    let total u64 = 0
+    let done int = 0
+    for done == 0 {
+        if (total >= JSON_MAX_INPUT) {
+            // 恰好读满上限时用单字节探测 EOF；还有数据则报超限。
+            let probe [1]u8
+            let extra i64 = os.read_fd(fd, &probe[0], 1)
+            if (extra < 0) {
+                os.close_fd(fd)
+                free(buffer.to_type(*void))
+                let span Span = span_zero()
+                return parse_failure(ParseStatus.parse_io_error,
+                    ErrorCode.error_io, "读取 JSON 文件失败", span, 0)
+            }
+            if (extra > 0) {
+                os.close_fd(fd)
+                free(buffer.to_type(*void))
+                let span Span = span_zero()
+                return parse_failure(ParseStatus.parse_resource_error,
+                    ErrorCode.error_resource_limit, "JSON 文件超过输入上限",
+                    span, 0)
+            }
+            done = 1
+            continue
+        }
+        let want u64 = 65536
+        if (JSON_MAX_INPUT - total < want) {
+            want = JSON_MAX_INPUT - total
+        }
+        if (total + want > capacity) {
+            let next_capacity u64 = capacity * 2
+            if (next_capacity < total + want) {
+                next_capacity = total + want
+            }
+            if (next_capacity > JSON_MAX_INPUT) {
+                next_capacity = JSON_MAX_INPUT
+            }
+            let grown *u8 = malloc(next_capacity).to_type(*u8)
+            if (grown == 0) {
+                os.close_fd(fd)
+                free(buffer.to_type(*void))
+                let span Span = span_zero()
+                return parse_failure(ParseStatus.parse_resource_error,
+                    ErrorCode.error_out_of_memory, "扩展读取缓冲失败", span, 0)
+            }
+            memcpy(grown.to_type(*void), buffer.to_type(*void), total)
+            free(buffer.to_type(*void))
+            buffer = grown
+            capacity = next_capacity
+        }
+        let step i64 = os.read_fd(fd, (buffer + total).to_type(*void), want)
+        if (step < 0) {
+            os.close_fd(fd)
+            free(buffer.to_type(*void))
+            let span Span = span_zero()
+            return parse_failure(ParseStatus.parse_io_error, ErrorCode.error_io,
+                "读取 JSON 文件失败", span, 0)
+        }
+        if (step == 0) {
+            done = 1
+            continue
+        }
+        total += step.to_type(u64)
+    }
+    if (os.close_fd(fd) != 0) {
+        free(buffer.to_type(*void))
+        let span Span = span_zero()
+        return parse_failure(ParseStatus.parse_io_error, ErrorCode.error_io,
+            "关闭 JSON 文件失败", span, 0)
+    }
+    let result ParseResult = parse(buffer, total)
+    free(buffer.to_type(*void))
+    return result
+}
+
+// write_file 把值树写成文件；先整段编码，再循环写完并关闭。
+pub fn write_file(path *char, value Value, options WriteOptions) WriteStatus {
+    if (path == 0) {
+        return WriteStatus.write_argument_error
+    }
+    let result EncodeResult = encode_owned(value, options)
+    if (result.status != WriteStatus.write_ok) {
+        return result.status
+    }
+    let view string.View = string.as_view(&result.text)
+    let fd int = os.open_file_mode(path, 1537, 420)
+    if (fd < 0) {
+        string.release(&result.text)
+        return WriteStatus.write_io_error
+    }
+    let total u64 = 0
+    let failed int = 0
+    for total < view.count {
+        let written i64 = os.write_fd(fd, (view.data + total).to_type(*void),
+            view.count - total)
+        if (written <= 0) {
+            failed = 1
+            break
+        }
+        total += written.to_type(u64)
+    }
+    if (os.close_fd(fd) != 0) {
+        failed = 1
+    }
+    string.release(&result.text)
+    if (failed != 0) {
+        return WriteStatus.write_io_error
+    }
+    return WriteStatus.write_ok
+}

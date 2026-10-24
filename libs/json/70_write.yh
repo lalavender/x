@@ -1,0 +1,609 @@
+module json
+
+import string
+import num
+
+// yh JSON 标准库：写出器（builder 状态机 + 值树递归写出）。
+//
+// 输出缓冲由调用者拥有（string.String），builder 自身不分配。容器栈是固定
+// [256]u8，因此深度上限与解析侧一致。失败粘滞：首次失败后所有调用变为
+// 无操作，并把缓冲回滚到调用前的长度，调用者不必处理半截文本。
+
+const W_MAX_DEPTH int = 256
+const W_NONE u8 = 0
+const W_ARRAY u8 = 1
+const W_OBJECT u8 = 2
+
+// Builder 是增量写出状态；字段私有，只能通过本模块函数推进。
+pub struct Builder {
+    out *string.String
+    options WriteOptions
+    depth int
+    fail_status WriteStatus
+    start u64
+    root_written int
+    pending_key int
+    kinds [256]u8
+    first [256]u8
+}
+
+// EncodeResult 是一次性写出的结果；成功时 text 由调用者 release。
+pub struct EncodeResult {
+    status WriteStatus
+    text string.String
+}
+
+// builder_make 初始化 builder；out 由调用者拥有并保持存活。
+// 选项非法时返回的 builder 处于失败态，首次操作即返回 write_argument_error。
+pub fn builder_make(out *string.String, options WriteOptions) Builder {
+    let b Builder
+    b.out = out
+    b.options = options
+    b.depth = 0
+    b.fail_status = WriteStatus.write_ok
+    b.start = 0
+    b.root_written = 0
+    b.pending_key = 0
+    let i int = 0
+    for i < W_MAX_DEPTH {
+        b.kinds[i] = W_NONE
+        b.first[i] = 0
+        i += 1
+    }
+    if (out == 0) {
+        b.fail_status = WriteStatus.write_argument_error
+        return b
+    }
+    if (options.indent < 0 || options.indent > JSON_MAX_INDENT) {
+        b.fail_status = WriteStatus.write_argument_error
+        return b
+    }
+    if (options.escape_non_ascii != 0 && options.escape_non_ascii != 1) {
+        b.fail_status = WriteStatus.write_argument_error
+        return b
+    }
+    if (options.sort_keys != 0 && options.sort_keys != 1) {
+        b.fail_status = WriteStatus.write_argument_error
+        return b
+    }
+    b.start = string.byte_length(out)
+    return b
+}
+
+// builder_status 返回当前状态；write_ok 表示尚未失败。
+pub fn builder_status(b *Builder) WriteStatus {
+    if (b == 0) {
+        return WriteStatus.write_argument_error
+    }
+    return b.fail_status
+}
+
+// w_fail 记录首个失败并回滚缓冲；错误粘滞。
+fn w_fail(b *Builder, status WriteStatus) void {
+    if (b.fail_status != WriteStatus.write_ok) {
+        return
+    }
+    b.fail_status = status
+    if (b.out != 0) {
+        string.truncate(b.out, b.start)
+    }
+}
+
+// w_put 追加一段字节；失败转为缓冲错误。
+fn w_put(b *Builder, data *u8, count u64) int {
+    if (b.fail_status != WriteStatus.write_ok) {
+        return 0
+    }
+    if (count == 0) {
+        return 1
+    }
+    let view string.View
+    view.data = data
+    view.count = count
+    let status string.Status = string.append(b.out, view)
+    if (status != string.status_ok) {
+        w_fail(b, WriteStatus.write_buffer_error)
+        return 0
+    }
+    return 1
+}
+
+// w_byte 追加一个字节。
+fn w_byte(b *Builder, ch u8) int {
+    if (b.fail_status != WriteStatus.write_ok) {
+        return 0
+    }
+    let status string.Status = string.append_byte(b.out, ch)
+    if (status != string.status_ok) {
+        w_fail(b, WriteStatus.write_buffer_error)
+        return 0
+    }
+    return 1
+}
+
+// w_indent_to 写入换行与 level 层缩进；紧凑模式下什么也不写。
+fn w_indent_to(b *Builder, level int) int {
+    if (b.options.indent == 0) {
+        return 1
+    }
+    if (w_byte(b, 10) == 0) {
+        return 0
+    }
+    let total int = level * b.options.indent
+    let i int = 0
+    for i < total {
+        if (w_byte(b, 32) == 0) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// w_top 返回当前栈顶容器类型；根层返回 W_NONE。
+fn w_top(b *Builder) u8 {
+    if (b.depth == 0) {
+        return W_NONE
+    }
+    return b.kinds[b.depth - 1]
+}
+
+// w_prepare_value 处理值前的分隔与缩进；不合法时返回 0 并置状态错误。
+fn w_prepare_value(b *Builder) int {
+    if (b.fail_status != WriteStatus.write_ok) {
+        return 0
+    }
+    if (b.depth == 0) {
+        if (b.root_written != 0) {
+            w_fail(b, WriteStatus.write_state_error)
+            return 0
+        }
+        return 1
+    }
+    if (w_top(b) == W_OBJECT) {
+        if (b.pending_key == 0) {
+            w_fail(b, WriteStatus.write_state_error)
+            return 0
+        }
+        return 1
+    }
+    // 数组：非首元素前写逗号，缩进模式下再换行。
+    if (b.first[b.depth - 1] == 0) {
+        if (w_byte(b, 44) == 0) {
+            return 0
+        }
+    }
+    if (w_indent_to(b, b.depth) == 0) {
+        return 0
+    }
+    b.first[b.depth - 1] = 0
+    return 1
+}
+
+// w_finish_value 结束一个值：根层标记已写，对象内清除待键标志。
+fn w_finish_value(b *Builder) void {
+    if (b.depth == 0) {
+        b.root_written = 1
+        return
+    }
+    if (w_top(b) == W_OBJECT) {
+        b.pending_key = 0
+    }
+}
+
+// w_push 进入一个容器。
+fn w_push(b *Builder, kind u8) int {
+    if (b.depth >= W_MAX_DEPTH) {
+        w_fail(b, WriteStatus.write_resource_limit)
+        return 0
+    }
+    b.kinds[b.depth] = kind
+    b.first[b.depth] = 1
+    b.depth += 1
+    return 1
+}
+
+// w_pop 退出当前容器；类型必须匹配。
+fn w_pop(b *Builder, kind u8) int {
+    if (b.depth == 0 || w_top(b) != kind) {
+        w_fail(b, WriteStatus.write_state_error)
+        return 0
+    }
+    if (b.pending_key != 0) {
+        w_fail(b, WriteStatus.write_state_error)
+        return 0
+    }
+    b.depth -= 1
+    return 1
+}
+
+// w_hex4 写 \uXXXX 的四位十六进制。
+fn w_hex4(b *Builder, value u32) int {
+    let digits [4]u8
+    let v u32 = value
+    let i int = 3
+    for i >= 0 {
+        let nibble u32 = v & 15
+        if (nibble < 10) {
+            digits[i] = ('0'.to_type(int) + nibble.to_type(int)).to_type(u8)
+        } else {
+            digits[i] = ('a'.to_type(int) + nibble.to_type(int) - 10).to_type(u8)
+        }
+        v = v >> 4
+        i -= 1
+    }
+    return w_put(b, &digits[0], 4)
+}
+
+// w_pair 连写两个字节；转义序列统一走这里，避免在函数里堆字符串字面量。
+fn w_pair(b *Builder, first u8, second u8) int {
+    if (w_byte(b, first) == 0) {
+        return 0
+    }
+    return w_byte(b, second)
+}
+
+// w_escape_simple 处理两字节短转义；不是短转义返回 0。
+fn w_escape_simple(b *Builder, ch u8) int {
+    if (ch == 34) {
+        return w_pair(b, 92, 34)
+    }
+    if (ch == 92) {
+        return w_pair(b, 92, 92)
+    }
+    if (ch == 8) {
+        return w_pair(b, 92, 98)
+    }
+    if (ch == 12) {
+        return w_pair(b, 92, 102)
+    }
+    if (ch == 10) {
+        return w_pair(b, 92, 110)
+    }
+    if (ch == 13) {
+        return w_pair(b, 92, 114)
+    }
+    if (ch == 9) {
+        return w_pair(b, 92, 116)
+    }
+    return 0
+}
+
+// w_control_escape 写 \u00XX 形式的控制字符转义。
+fn w_control_escape(b *Builder, ch u8) int {
+    if (w_pair(b, 92, 117) == 0) {
+        return 0
+    }
+    if (w_byte(b, '0') == 0) {
+        return 0
+    }
+    if (w_byte(b, '0') == 0) {
+        return 0
+    }
+    if (w_byte(b, hex_char((ch >> 4).to_type(u32))) == 0) {
+        return 0
+    }
+    return w_byte(b, hex_char((ch & 15).to_type(u32)))
+}
+
+// w_unicode_escape 把一个非 ASCII 标量写成 \uXXXX（BMP 以上写代理对）。
+fn w_unicode_escape(b *Builder, rune u32) int {
+    if (w_pair(b, 92, 117) == 0) {
+        return 0
+    }
+    if (rune.to_type(u64) < 65536) {
+        return w_hex4(b, rune)
+    }
+    let value u32 = rune - 65536
+    let high u32 = 55296 + (value >> 10)
+    let low u32 = 56320 + (value & 1023)
+    if (w_hex4(b, high) == 0) {
+        return 0
+    }
+    if (w_pair(b, 92, 117) == 0) {
+        return 0
+    }
+    return w_hex4(b, low)
+}
+
+// w_string_body 写带引号的转义字符串；内容必须是合法 UTF-8。
+fn w_string_body(b *Builder, text Text) int {
+    if (text.count > 0 && text.data == 0) {
+        w_fail(b, WriteStatus.write_argument_error)
+        return 0
+    }
+    let bad_off u64 = 0
+    let bad_len u64 = 0
+    if (utf8_validate(text.data, text.count, &bad_off, &bad_len) != 0) {
+        w_fail(b, WriteStatus.write_invalid_utf8)
+        return 0
+    }
+    if (w_byte(b, 34) == 0) {
+        return 0
+    }
+    if (w_string_payload(b, text) == 0) {
+        return 0
+    }
+    return w_byte(b, 34)
+}
+
+// w_string_payload 写引号之间的内容。
+fn w_string_payload(b *Builder, text Text) int {
+    let i u64 = 0
+    for i < text.count {
+        let ch u8 = text.data[i]
+        if (ch < 32) {
+            if (ch == 8 || ch == 12 || ch == 10 || ch == 13 || ch == 9) {
+                if (w_escape_simple(b, ch) == 0) {
+                    return 0
+                }
+            } else {
+                if (w_control_escape(b, ch) == 0) {
+                    return 0
+                }
+            }
+            i += 1
+            continue
+        }
+        if (ch == 34 || ch == 92) {
+            if (w_escape_simple(b, ch) == 0) {
+                return 0
+            }
+            i += 1
+            continue
+        }
+        if (ch >= 128 && b.options.escape_non_ascii != 0) {
+            let rune u32 = 0
+            let width u64 = 0
+            if (utf8_decode(text.data, text.count, i, &rune, &width) == 0) {
+                w_fail(b, WriteStatus.write_invalid_utf8)
+                return 0
+            }
+            if (w_unicode_escape(b, rune) == 0) {
+                return 0
+            }
+            i += width
+            continue
+        }
+        if (w_byte(b, ch) == 0) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// hex_char 把 0..15 写成小写十六进制字符。
+fn hex_char(value u32) u8 {
+    if (value < 10) {
+        return ('0'.to_type(int) + value.to_type(int)).to_type(u8)
+    }
+    return ('a'.to_type(int) + value.to_type(int) - 10).to_type(u8)
+}
+
+// begin_object 开始一个对象。
+pub fn begin_object(b *Builder) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    b.pending_key = 0
+    if (w_byte(b, 123) == 0) {
+        return builder_status(b)
+    }
+    if (w_push(b, W_OBJECT) == 0) {
+        return builder_status(b)
+    }
+    return WriteStatus.write_ok
+}
+
+// end_object 结束当前对象。
+pub fn end_object(b *Builder) WriteStatus {
+    if (w_pop(b, W_OBJECT) == 0) {
+        return builder_status(b)
+    }
+    if (b.first[b.depth] == 0) {
+        if (w_indent_to(b, b.depth) == 0) {
+            return builder_status(b)
+        }
+    }
+    if (w_byte(b, 125) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// begin_array 开始一个数组。
+pub fn begin_array(b *Builder) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    b.pending_key = 0
+    if (w_byte(b, 91) == 0) {
+        return builder_status(b)
+    }
+    if (w_push(b, W_ARRAY) == 0) {
+        return builder_status(b)
+    }
+    return WriteStatus.write_ok
+}
+
+// end_array 结束当前数组。
+pub fn end_array(b *Builder) WriteStatus {
+    if (w_pop(b, W_ARRAY) == 0) {
+        return builder_status(b)
+    }
+    if (b.first[b.depth] == 0) {
+        if (w_indent_to(b, b.depth) == 0) {
+            return builder_status(b)
+        }
+    }
+    if (w_byte(b, 93) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// key 写一个对象键；只能在对象内、且上一个键已有值时调用。
+pub fn key(b *Builder, text Text) WriteStatus {
+    if (b.fail_status != WriteStatus.write_ok) {
+        return builder_status(b)
+    }
+    if (b.depth == 0 || w_top(b) != W_OBJECT || b.pending_key != 0) {
+        w_fail(b, WriteStatus.write_state_error)
+        return builder_status(b)
+    }
+    if (b.first[b.depth - 1] == 0) {
+        if (w_byte(b, 44) == 0) {
+            return builder_status(b)
+        }
+    }
+    if (w_indent_to(b, b.depth) == 0) {
+        return builder_status(b)
+    }
+    b.first[b.depth - 1] = 0
+    if (w_string_body(b, text) == 0) {
+        return builder_status(b)
+    }
+    if (w_byte(b, 58) == 0) {
+        return builder_status(b)
+    }
+    if (b.options.indent > 0) {
+        if (w_byte(b, 32) == 0) {
+            return builder_status(b)
+        }
+    }
+    b.pending_key = 1
+    return WriteStatus.write_ok
+}
+
+// write_string 写一个字符串值。
+pub fn write_string(b *Builder, text Text) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    if (w_string_body(b, text) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// write_i64 写一个整数。
+pub fn write_i64(b *Builder, value i64) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    if (w_i64_body(b, value) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// w_i64_body 写十进制整数（含 i64 最小值）。
+fn w_i64_body(b *Builder, value i64) int {
+    let buf [24]u8
+    let at int = 24
+    let negative int = 0
+    let magnitude u64 = value.to_type(u64)
+    if (value < 0) {
+        negative = 1
+        magnitude = 0 - magnitude
+    }
+    if (magnitude == 0) {
+        at -= 1
+        buf[at] = '0'
+    } else {
+        let left u64 = magnitude
+        for left > 0 {
+            at -= 1
+            buf[at] = ('0'.to_type(int) + (left % 10).to_type(int)).to_type(u8)
+            left = left / 10
+        }
+    }
+    if (negative != 0) {
+        at -= 1
+        buf[at] = '-'
+    }
+    return w_put(b, &buf[at], (24 - at).to_type(u64))
+}
+
+// write_f64 写一个浮点值；NaN/±Inf 在 JSON 无表示，返回 write_number_range。
+pub fn write_f64(b *Builder, value f64) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    let buf [40]u8
+    let count u64 = 0
+    let out *u8 = &buf[0]
+    let out_count *u64 = &count
+    let status num.NumStatus = num.format_f64(value, out, 40, out_count)
+    if (status != num.num_ok) {
+        w_fail(b, WriteStatus.write_number_range)
+        return builder_status(b)
+    }
+    if (w_put(b, out, count) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// write_bool 写布尔值。
+pub fn write_bool(b *Builder, value bool) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    if (value) {
+        if (w_put(b, "true".to_type(*u8), 4) == 0) {
+            return builder_status(b)
+        }
+    } else {
+        if (w_put(b, "false".to_type(*u8), 5) == 0) {
+            return builder_status(b)
+        }
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// write_null 写 null。
+pub fn write_null(b *Builder) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    if (w_put(b, "null".to_type(*u8), 4) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// write_number_text 原样写一个已校验的数字词素（保真输出）。
+pub fn write_number_text(b *Builder, text Text) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    if (text.count == 0 || json_number_scan(text.data, text.count, 0) != text.count) {
+        w_fail(b, WriteStatus.write_argument_error)
+        return builder_status(b)
+    }
+    if (w_put(b, text.data, text.count) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// builder_finish 结束写出；必须已有一个根值且容器栈为空。
+pub fn builder_finish(b *Builder) WriteStatus {
+    if (b.fail_status != WriteStatus.write_ok) {
+        return b.fail_status
+    }
+    if (b.depth != 0 || b.root_written == 0) {
+        w_fail(b, WriteStatus.write_state_error)
+    }
+    return b.fail_status
+}

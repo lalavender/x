@@ -1,0 +1,180 @@
+module main
+
+// JSON 数字验收：词素保真、i64 范围、精确 binary64、最短往返写出。
+
+import io
+import json
+import string
+
+let failed int = 0
+
+// ok 记录一条断言结果。
+fn ok(condition int, name *char) void {
+    if (condition == 0) {
+        failed += 1
+        io.print("FAIL ")
+        io.println(name)
+    }
+}
+
+// bits_of 读取 f64 位模式。
+fn bits_of(value f64) u64 {
+    let holder *f64 = malloc(8).to_type(*f64)
+    holder[0] = value
+    let view *u64 = holder.to_type(*u64)
+    let bits u64 = view[0]
+    free(holder.to_type(*void))
+    return bits
+}
+
+// text_equals_c 比较 Text 与给定字节串。
+fn text_equals_c(text json.Text, expected *char, count u64) int {
+    if (text.count != count) {
+        return 0
+    }
+    let i u64 = 0
+    for i < count {
+        if (text.data[i] != expected[i].to_type(u8)) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// encode_text 把根值紧凑写出为 Text；借用返回的 String，调用方 release。
+fn encode_text(root json.Value, out *string.String) json.Text {
+    let options json.WriteOptions
+    options.indent = 0
+    options.escape_non_ascii = 0
+    options.sort_keys = 0
+    let encoded json.EncodeResult = json.encode_owned(root, options)
+    out[0] = encoded.text
+    let view string.View = string.as_view(out)
+    let text json.Text
+    text.data = view.data
+    text.count = view.count
+    return text
+}
+
+// check_lexeme 断言数字词素原样保存与往返。
+fn check_lexeme() void {
+    let result json.ParseResult = json.parse_text("[1.0, 1e2, 1e400, -0]")
+    ok((result.status == json.parse_ok).to_type(int), "lexeme parse")
+    let root json.Value = json.root(&result.document)
+    let text string.String = string.make()
+    let encoded json.Text = encode_text(root, &text)
+    ok(text_equals_c(encoded, "[1.0,1e2,1e400,-0]", strlen("[1.0,1e2,1e400,-0]")), "lexeme roundtrip")
+    string.release(&text)
+    json.release(&result.document)
+}
+
+// check_integer_bounds 断言 i64 两端的取值。
+fn check_integer_bounds(root json.Value) void {
+    let max_item json.LookupResult = json.array_get(root, 0)
+    let min_item json.LookupResult = json.array_get(root, 1)
+    let value i64 = 0
+    let max_status json.QueryStatus = json.as_i64(max_item.value, &value)
+    ok((max_status == json.query_ok).to_type(int), "i64 max status")
+    ok((value == 9223372036854775807).to_type(int), "i64 max value")
+    let min_status json.QueryStatus = json.as_i64(min_item.value, &value)
+    ok((min_status == json.query_ok).to_type(int), "i64 min status")
+    ok((value == -9223372036854775807 - 1).to_type(int), "i64 min value")
+}
+
+// check_integer_reject 断言越界与非整数形式被拒绝。
+fn check_integer_reject(root json.Value) void {
+    let over_item json.LookupResult = json.array_get(root, 2)
+    let float_item json.LookupResult = json.array_get(root, 3)
+    let value i64 = 0
+    let over_status json.QueryStatus = json.as_i64(over_item.value, &value)
+    ok((over_status == json.query_range_error).to_type(int), "i64 overflow")
+    let float_status json.QueryStatus = json.as_i64(float_item.value, &value)
+    ok((float_status == json.query_type_error).to_type(int), "i64 float form")
+    ok((json.is_integer(over_item.value) == 0).to_type(int), "is_integer overflow")
+    ok((json.is_integer(float_item.value) == 0).to_type(int), "is_integer float")
+}
+
+// check_integer 断言 i64 取值边界。
+fn check_integer() void {
+    let result json.ParseResult = json.parse_text("[9223372036854775807, -9223372036854775808, 9223372036854775808, 1.0]")
+    ok((result.status == json.parse_ok).to_type(int), "i64 parse")
+    let root json.Value = json.root(&result.document)
+    check_integer_bounds(root)
+    check_integer_reject(root)
+    let first json.LookupResult = json.array_get(root, 0)
+    ok((json.is_integer(first.value) == 1).to_type(int), "is_integer true")
+    json.release(&result.document)
+}
+
+// check_float 断言精确十进制转换与范围错误。
+fn check_float() void {
+    let result json.ParseResult = json.parse_text("[0.1, 1e400, 1e-400, 2.5]")
+    ok((result.status == json.parse_ok).to_type(int), "f64 parse")
+    let root json.Value = json.root(&result.document)
+    let tenth json.LookupResult = json.array_get(root, 0)
+    let huge json.LookupResult = json.array_get(root, 1)
+    let tiny json.LookupResult = json.array_get(root, 2)
+    let value f64 = 0.0
+    ok((json.as_f64(tenth.value, &value) == json.query_ok).to_type(int),
+        "f64 status")
+    ok((bits_of(value) == 4591870180066957722).to_type(int), "f64 0.1 bits")
+    ok((json.as_f64(huge.value, &value) == json.query_range_error).to_type(int),
+        "f64 overflow")
+    ok((json.as_f64(tiny.value, &value) == json.query_ok).to_type(int),
+        "f64 underflow ok")
+    ok((value == 0.0).to_type(int), "f64 underflow zero")
+    let text json.Text
+    ok((json.number_text(tenth.value, &text) == json.query_ok).to_type(int),
+        "number_text status")
+    ok(text_equals_c(text, "0.1", 3), "number_text lexeme")
+    json.release(&result.document)
+}
+
+// check_write 断言浮点与整数写出形态。
+fn check_write() void {
+    let text string.String = string.make()
+    let options json.WriteOptions
+    options.indent = 0
+    options.escape_non_ascii = 0
+    options.sort_keys = 0
+    let b json.Builder = json.builder_make(&text, options)
+    json.begin_array(&b)
+    json.write_f64(&b, 1.0)
+    json.write_f64(&b, 0.5)
+    json.write_f64(&b, -0.0)
+    json.write_i64(&b, -9223372036854775807 - 1)
+    json.end_array(&b)
+    let status json.WriteStatus = json.builder_finish(&b)
+    ok((status == json.write_ok).to_type(int), "write finish")
+    let view string.View = string.as_view(&text)
+    let out json.Text
+    out.data = view.data
+    out.count = view.count
+    ok(text_equals_c(out, "[1.0,0.5,-0.0,-9223372036854775808]", strlen("[1.0,0.5,-0.0,-9223372036854775808]")), "float forms")
+    string.release(&text)
+
+    // NaN 在 JSON 无表示，必须报范围错误而不是写出 null。
+    let nan_text string.String = string.make()
+    let nb json.Builder = json.builder_make(&nan_text, options)
+    let nan f64 = 0.0
+    let zero f64 = 0.0
+    nan = zero / zero
+    let nan_status json.WriteStatus = json.write_f64(&nb, nan)
+    ok((nan_status == json.write_number_range).to_type(int), "nan rejected")
+    ok((string.byte_length(&nan_text) == 0).to_type(int), "nan rollback")
+    string.release(&nan_text)
+}
+
+// main 跑数字断言。
+fn main() int {
+    check_lexeme()
+    check_integer()
+    check_float()
+    check_write()
+    if (failed == 0) {
+        io.println("json numbers ok")
+        return 0
+    }
+    return 1
+}
