@@ -160,18 +160,18 @@ cache_test := if llvm_host == "darwin-aarch64" { "python3 " + root + "/tests/sel
 modcheck_flags := if llvm_host == "" { "" } else { "--backend llvm" }
 selfhost_flags_test := if llvm_host == "darwin-aarch64" { "python3 " + root + "/tests/selfhost/llvm-darwin-selfhost-flags.py --compiler-path " + yh_run } else { "true" }
 
+# 默认目标：源比 yh 新时冷编，否则什么都不做（等价旧 make 默认目标）。
+default: _ensure_built
+
+# all：默认目标别名（等价 default）。
+all: _ensure_built
+
 # 预处理：仓库内 tmp/llvm-migration 必须指向缓存根：compiler/project.toml 的
 # 桥库路径按「仓库/compiler」相对书写，新 worktree 里由这里补上软链。
 [private]
 _prepare:
     @mkdir -p "{{ root }}/tmp"
     @if [ "{{ cache_root }}" != "{{ root }}/tmp/llvm-migration" ]; then ln -sfn "{{ cache_root }}" "{{ root }}/tmp/llvm-migration"; fi
-
-# 默认目标：源比 yh 新时冷编，否则什么都不做（等价旧 make 默认目标）。
-default: _ensure_built
-
-# all：默认目标别名（等价 default）。
-all: _ensure_built
 
 # build：强制冷编（清除 compiler/.build，从种子完整重编）。
 build: verify-seed _prepare

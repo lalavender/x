@@ -297,6 +297,9 @@
   滚前同一操作 23.0 s → **−52%**；冷编写入的函数缓存记录 `.fir` = **0**（PC3 生效）。
 - **滚后门禁**：`just test` 0 FAIL；`just selfhost-native` 122/122 + LA3 O0/O2 + 两代固定点（39 产物）
   + 自解析全通过。
+- 顺带修（迁移 bug）：`_prepare` 是 `[private]` 且排在文件最前，`just` 的「第一个 recipe」规则
+  让**裸 `just` 只跑 `_prepare`（空操作）**——`yh` 不存在时也不重建（实测 0.12 s、0 模块）。
+  把 `default` / `all` 移到 `_prepare` 之前后，裸 `just` 恢复「源比 yh 新时冷编」（实测 11.40 s、13 模块）。
 - 说明：种子不入库（`bin/` 由 `just fetch-seed` 获取），本次滚动只影响本机 `bin/`，哈希文件供校验。
 
 ## 2026-10-26 just 迁移后的门禁复核（+ 修 Darwin/ARM64 守卫）
