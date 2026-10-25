@@ -2,6 +2,7 @@
 #
 # 预装各端构建/测试必需工具，替代每个 job 里的 `apt-get install`：
 #   * build-essential / binutils：gcc 链接后端与 `make`
+#   * just：构建入口（justfile 是唯一真源；容器内 make 会转发给 just）
 #   * python3：门禁脚本（tests/yh、tests/yh-run、modules）
 #   * xz-utils：解包种子与 LLVM SDK 归档
 #   * libxml2-dev / zlib1g-dev / libzstd-dev：内嵌 LLVM 静态链接依赖
@@ -17,7 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
-        build-essential binutils python3 xz-utils \
+        build-essential binutils python3 xz-utils just \
         libxml2-dev zlib1g-dev libzstd-dev clang ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

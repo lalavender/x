@@ -11,7 +11,7 @@
 `tests/yh-run/` 和 `tests/modules/projects/autoabi/` 验证。
 
 > 当前编译器源码位于 `compiler/`，由 `bin/yh` 滚动自举构建。
-> `make test` 同时以 `yh.g4` 的 ANTLR 解析器和编译器语法模式校验语料；
+> `just test` 同时以 `yh.g4` 的 ANTLR 解析器和编译器语法模式校验语料；
 > 两条路径都须接受正例、拒绝反例。
 
 ## 目录与命名

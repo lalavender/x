@@ -14,7 +14,7 @@
   tag 形式为 `<os>` 或 `<os>-<arch>`，`<os>` 匹配该 OS 的所有架构。
 
 `--cross` 模式的运行平台按 Linux/aarch64 计（产物是 aarch64 ELF，在容器内运行）。
-这样 `make test` 在任何宿主只跑「共有 + 本平台」的用例，不需要为别的平台
+这样 `just test` 在任何宿主只跑「共有 + 本平台」的用例，不需要为别的平台
 准备运行环境。当前平台专属用例只有 `run/llvm-linux-x64-host.yh`（Linux syscall
 探针）；新增平台专属语料时补一行 `// platform:` 即可，不要改文件名前缀
 （数字前缀与历史引用绑定）。

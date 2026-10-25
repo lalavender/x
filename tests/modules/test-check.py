@@ -52,7 +52,7 @@ class Checker:
         return dst
 
     def run(self, project: Path, *args: str, env_extra=None):
-        # 编译器可能被暂存到临时目录（make test 的 FAST_STAGE），
+        # 编译器可能被暂存到临时目录（just test 的 FAST_STAGE），
         # 显式给出仓库标准库根，保证 import testing 等模块可解析。
         env = dict(os.environ)
         env.setdefault("YH_STDLIB", str(ROOT / "libs"))

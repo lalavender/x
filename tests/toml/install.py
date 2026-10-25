@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TOML T5.1 安装/仓库外导入验收。
 
-执行 `make install DESTDIR=<work>/root PREFIX=/usr`，确认安装树包含 toml
+执行 `just DESTDIR=<work>/root PREFIX=/usr install`，确认安装树包含 toml
 源码与 yh，再把 tests/modules/projects/tomloutside 复制到仓库外，清除
 YH_STDLIB 后使用安装后的 yh 构建运行。验证默认 `../share/yh/libs` 发现、
 `read_file` 与本库查询。
@@ -39,10 +39,10 @@ def main() -> int:
     work.mkdir(parents=True, exist_ok=True)
     dest = work / "root"
     installed = subprocess.run(
-        ["make", "install", f"DESTDIR={dest}", "PREFIX=/usr"],
+        ["just", f"DESTDIR={dest}", "PREFIX=/usr", "install"],
         cwd=ROOT, capture_output=True, text=True, timeout=1800)
     if installed.returncode != 0:
-        print(f"FAIL make install rc={installed.returncode}")
+        print(f"FAIL just install rc={installed.returncode}")
         print((installed.stderr or installed.stdout)[-1000:])
         return 1
     prefix = dest / "usr"

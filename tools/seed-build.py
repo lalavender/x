@@ -8,7 +8,7 @@
 
 LLVM 不是构建的失败点：--llvm-mode auto（默认）下任何缺失都只打印一条
 明确诊断，然后按原路径继续构建；只有显式 --llvm-mode require 才让准备
-失败中止构建。这样旧路径全门（make test / make selfhost-native）不受影响。
+失败中止构建。这样旧路径全门（just test / just selfhost-native）不受影响。
 """
 
 import argparse

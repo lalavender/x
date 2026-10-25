@@ -13,22 +13,24 @@ macOS/arm64 用 `bin/yh-darwin-arm64`（Mach-O，SHA-256 见
 `bin/yh-darwin-arm64.sha256`），Linux/aarch64 用 `bin/yh-linux-arm64`（ELF，
 SHA-256 见 `bin/yh-linux-arm64.sha256`）；Linux/x86_64 用
 `bin/yh-linux-x64`。**种子不入库**（2026-10-21 起，仓库不再使用 Git LFS）：
-克隆后首次构建前执行 `make fetch-seed`，从最新 GitHub Release 下载到被
+克隆后首次构建前执行 `just fetch-seed`，从最新 GitHub Release 下载到被
 gitignore 的 `bin/` 并核对哈希。
 
-- 日常构建：`make`（= 宿主种子对 `compiler/` 项目 `yh build`，冷编，
-  产出根目录 `yh`）；日常验证以 `make selfhost-native` 为主门
+- **构建入口是 just**（`justfile` 是唯一真源，仓库已无 `Makefile`；
+  `just --list` 列出全部目标与说明）。
+  日常构建：`just`（= 宿主种子对 `compiler/` 项目 `yh build`，冷编，
+  产出根目录 `yh`）；日常验证以 `just selfhost-native` 为主门
   （两代模块固定点 + 自解析 + 全量语法/运行语料 + modules/项目验收）。
-- 滚种子：`make test` 与 `make selfhost-native` 全绿后执行 `make seed`
+- 滚种子：`just test` 与 `just selfhost-native` 全绿后执行 `just seed`
   （把新 yh 覆盖到 `bin/yh-<平台>-<架构>` 并更新哈希）。源码无法在仓库内独立
   重建编译器，正确性由固定点与语料门保证，git 历史保留每一代种子。
 - stage0 的差分参照与 `-run`/交叉 ELF 能力随删除终结；Linux/aarch64 ELF
   种子已入库（2026-10-09，`bin/yh-linux-arm64`），Linux 上可直接
-  `make`/`make test`/`make selfhost-native`；Linux CI 流程按需重建。
+  `just`/`just test`/`just selfhost-native`；Linux CI 流程按需重建。
   需要 Linux 环境验证时优先用容器而非虚拟机，见下文
   《Linux 环境验证（容器方案）》。
 - 自举侧新增/修改行为时，须在 `tests/yh-run/` 或 `tests/modules/`
-  新增 `.yh` 用例并运行 `make`。决策依据见 ADR-0006/0007。
+  新增 `.yh` 用例并运行 `just`。决策依据见 ADR-0006/0007。
 - **模块导出面**：只导出别的模块真的使用的声明（`pub` 同时决定 `.s.i` 接口
   与 `.globl`）；仅模块内使用的 `fn`/`const` 不写 `pub`，入口 `cmd/` 只保留
   `main`。跨模块可变状态经 `pub fn` 访问（`gen.G()` 模式）。
@@ -37,11 +39,11 @@ gitignore 的 `bin/` 并核对哈希。
   本模块的 `pub` 签名、`pub` 字段或 `pub` 别名里。
 - **平台顺序（2026-10-12 用户决定）：开发与验证以 Linux 平台为先**，
   macOS/Windows 等其他平台后续接入；非 Linux 目标不因日常改动回归验收，
-  但 Linux 上的 `make test` / `make selfhost-native` 与滚种子照常执行。
+  但 Linux 上的 `just test` / `just selfhost-native` 与滚种子照常执行。
   **2026-10-19（F2-10）**：macOS/ARM64 默认后端已切 LLVM（Darwin 种子
   `bin/yh-darwin-arm64` 含固定桥）。
   **2026-10-20（F1）**：Linux/AArch64 默认后端也已切 LLVM，内嵌 lld 与
-  固定桥随种子分发；`make test` / `make selfhost-native` 默认走 LLVM，
+  固定桥随种子分发；`just test` / `just selfhost-native` 默认走 LLVM，
   O0/O2 与连续自编固定点通过，种子已滚为 `bin/yh-linux-arm64`。
   性能项（RS2/RS3/R2c、20 轮对照）后置，不据此宣称首个完整 SSA 版本完成。
   **2026-10-21（LL12）**：旧机器发射已彻底退役（`emit_arm64`/旧 arm64 后端/
@@ -52,16 +54,23 @@ gitignore 的 `bin/` 并核对哈希。
   SDK 26.4）；链接查找 `SDKROOT` → `YH_DARWIN_SDK` → 可执行文件附近 bundle →
   原生 `xcrun`。C 源/libc++/目标包/frameworks 等遗留见
   `docs/03-design/yh-Darwin交叉编译遗留边界.md`。
+  **libc++ 进闭包（2026-10-25）**：`just llvm-host` 会把宿主 SDK 的
+  `libc++.tbd` 复制进构建机闭包并经 `tools/link-closure.py` 写进
+  `compiler/project.toml` 的 `[link-darwin-arm64].cxx`，因此
+  `cd compiler && ../bin/yh-darwin-arm64 build`（不设 `SDKROOT`、不设
+  `YH_LINK_RUNTIME_FLAGS`）可以独立链接；标准构建仍走 `just`。
 - **本地/CI 分工（2026-10-19 用户决定，2026-10-22 调整）**：在 Linux 或 macOS 上开发，
-  本地只需保证**本平台**门禁绿（`make test` + `make selfhost-native`；运行语料已按
-  `// platform:` 头部指令筛选，平台专属门如 `make test-llvm` 在别的宿主会
+  本地只需保证**本平台**门禁绿（`just test` + `just selfhost-native`；运行语料已按
+  `// platform:` 头部指令筛选，平台专属门如 `just test-llvm` 在别的宿主会
   明确拒绝而不是要求本地跑通）。**完整多平台回归由 Gitea Actions 承担**
   （见下文 CI 说明）：推送 `arm64`/`llvm`/`main` 自动跑
   linux-arm64（主门）与 darwin-arm64；linux-x86_64（LLVM 全门）只在 tag 发布时跑；
   **tag 发布同样由 Gitea Actions 的 `release.yml` 承担**。GitHub Actions 已于
   2026-10-21 移除（`.github/workflows/` 删除，需要时从 git 历史还原）。
   本地不要为其他平台预跑门禁，也不要因 CI 红灯阻塞本地迭代——CI 红灯按
-  todo 立项再修。
+  todo 立项再修。`just libs-test`（libs 全部测试）是 CI 的独立阶段；改到
+  标准库时建议本地顺带跑一次，但日常主门仍是 `just test` +
+  `just selfhost-native`。
 
 ## 修改语法规则
 
@@ -74,7 +83,7 @@ gitignore 的 `bin/` 并核对哈希。
 ## 目录
 
 - `compiler/` —— 编译器源码（gen/lex/parse/ast/comptime/cmd/ir/backend 多模块的项目）
-- `bin/` —— 种子目录（**不入库**，`make fetch-seed` 从最新 Release 下载
+- `bin/` —— 种子目录（**不入库**，`just fetch-seed` 从最新 Release 下载
   `yh-<平台>-<架构>` 与哈希）
 - `docs/03-design/` 语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
   `docs/adr/` 决策、`docs/finish.md` 完成流水、`docs/todo.md` 待办
@@ -93,25 +102,25 @@ gitignore 的 `bin/` 并核对哈希。
    x64 后端（`compiler/backend/` 只有 `arm64.yh`），须显式
    `SEED=bin/yh-linux-arm64`（配合 qemu-user/binfmt 模拟 arm64）。
 2. 新 `yh` 再自编一次，两次产物的模块 `.s`/`.s.i` 必须逐字节相同（固定点）；
-3. `make seed` 把验证过的 `yh` 覆盖回宿主平台种子（Linux 上为
+3. `just seed` 把验证过的 `yh` 覆盖回宿主平台种子（Linux 上为
    `bin/yh-linux-arm64`），进入下一代。
 
 Darwin/ARM64 与 Linux/AArch64 自举闭包（2026-10-20 起，Zig 式）：
 LLVM/lld/桥的归档参数不再烘焙进种子，而由构建机提供 —— 首次执行
-`make bootstrap`（= 幂等 `make llvm-host` + 冷编；`make llvm-host` 单独只准备闭包）
+`just bootstrap`（= 幂等 `just llvm-host` + 冷编；`just llvm-host` 单独只准备闭包）
 生成 `tmp/llvm-migration/llvm-host-<宿主>/selfhost-flags.txt`，
-`make`/`make seed` 经 `YH_LLVM_SELFHOST_FLAGS` 传给种子；换机器或 worktree
-只需重新 bootstrap/llvm-host。固定 SDK 就绪后 Makefile 自动导出 `SDKROOT`
-（显式 SDKROOT 仍优先），`make test`/`make selfhost-native` 不再要求手工导出；
+`just`/`just seed` 经 `YH_LLVM_SELFHOST_FLAGS` 传给种子；换机器或 worktree
+只需重新 bootstrap/llvm-host。固定 SDK 就绪后 justfile 自动导出 `SDKROOT`
+（显式 SDKROOT 仍优先），`just test`/`just selfhost-native` 不再要求手工导出；
 SDK 27 的 `arm64e.x1` TAPI 会被 `tools/llvm-darwin-sdk.py` 在解析期拒绝并提示
 用 26.x（内嵌 lld 21 尚不支持）。`YH_LLVM_HOST=0` 只表示不准备固定闭包，
-新种子会在链接阶段明确报缺少闭包。`make seed` 会拒绝仍带构建机 `$HOME`
+新种子会在链接阶段明确报缺少闭包。`just seed` 会拒绝仍带构建机 `$HOME`
 路径的种子。
 
 ## 使用
 
 ```bash
-make
+just
 ```
 
 常用命令：
@@ -133,23 +142,25 @@ make
 ## 构建与测试
 
 ```bash
-make test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
-make bootstrap          # 首次/换机：准备固定 LLVM 闭包后冷编（一条命令，幂等）
-make selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
-make llvm-host          # 只准备本机固定 LLVM 闭包（不编编译器）
-make fetch-seed         # 从最新 GitHub Release 取本机平台种子（x64 首次构建前）
-make code-stats         # 统计 compiler/ 下 yh 源码规模
-make test-code-stats    # 运行统计工具边界与 JSON 检查
-make test-lib-tests     # 标准库内建测试（yh test 跑 libs 项目的 test 块）
-make test-compiler-tests # compiler/ 内嵌 yh test 测试（需种子支持 test 语法）
-make test-llvm-linux-arm64  # F1：Linux/AArch64 LLVM 运行时/C ABI/O0-O2（容器内）
-make seed               # 滚种子（仅在全绿后；拒绝带构建机路径的种子）
+just test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
+just bootstrap          # 首次/换机：准备固定 LLVM 闭包后冷编（一条命令，幂等）
+just selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
+just llvm-host          # 只准备本机固定 LLVM 闭包（不编编译器）
+just fetch-seed         # 从最新 GitHub Release 取本机平台种子（x64 首次构建前）
+just code-stats         # 统计 compiler/ 下 yh 源码规模
+just test-code-stats    # 运行统计工具边界与 JSON 检查
+just test-lib-tests     # 历史别名，等价于 just libs-test
+just libs-test          # libs 自有测试（test 块 + cli/os/libc 外部 runner；CI 独立阶段）
+just libs-test-o2       # 同一批 test 块在 tmp/libs-o2 副本上以 O2 重跑
+just test-compiler-tests # compiler/ 内嵌 yh test 测试（需种子支持 test 语法）
+just test-llvm-linux-arm64  # F1：Linux/AArch64 LLVM 运行时/C ABI/O0-O2（容器内）
+just seed               # 滚种子（仅在全绿后；拒绝带构建机路径的种子）
 ```
 
-`make test` 只跑「共有 + 本平台」的用例：运行语料用头部指令 `// platform: <tag>`
+`just test` 只跑「共有 + 本平台」的用例：运行语料用头部指令 `// platform: <tag>`
 标注平台专属项（`linux`、`linux-x64`、`darwin-arm64` 等，`<os>` 匹配该 OS 的
 所有架构），不匹配的记 `SKIP`、不算失败也不影响退出码；没有该指令的是共有用例。
-`make test-llvm` 是 Linux/x86_64 专属门，其他宿主会直接拒绝而不是降级运行。
+`just test-llvm` 是 Linux/x86_64 专属门，其他宿主会直接拒绝而不是降级运行。
 
 CI 由 **Gitea Actions** 承担（2026-10-22 起；替代原 CircleCI 分支门与本机 Jenkins）：
 
@@ -159,8 +170,8 @@ CI 由 **Gitea Actions** 承担（2026-10-22 起；替代原 CircleCI 分支门�
   脚本自行调 Apple `container`。
 - **`ci.yml`（分支门）**：`arm64`/`llvm`/`main` 与 `<ver>-rc`/`<ver>-release`
   分支 push → 并行跑 ANTLR、Darwin/arm64（宿主原生）、Linux/AArch64（Apple
-  container 内原生）；每端先取最新 Release 种子，再 `make bootstrap`、平台专项
-  门、第 2/3 层语料与 `make selfhost-native SKIP_CORPUS=1`。
+  container 内原生）；每端先取最新 Release 种子，再 `just bootstrap`、平台专项
+  门、第 2/3 层语料与 `just SKIP_CORPUS=1 selfhost-native`。
 - **`release.yml`（发布）**：版本 tag（`x.y.z`、`x.y.z-rc.N`）push → 三端顺序
   构建（Darwin 原生 → Linux/AArch64 容器原生 → Linux/x86_64 容器模拟）、cc4 打包、
   `tools/publish-release.py` 发布 GitHub Release；其他 tag（如 `seed-*`）跳过。
@@ -168,7 +179,7 @@ CI 由 **Gitea Actions** 承担（2026-10-22 起；替代原 CircleCI 分支门�
   `--repo lalavender/x`——Gitea 会把 `GITHUB_REPOSITORY` 覆写成 `yh/yh`。
 - **缓存**：host 模式直接复用宿主 `$YH_LLVM_CACHE`（缺省
   `$HOME/Documents/x/tmp/llvm-migration`）并 symlink 进 workspace；**不要删这个
-  目录**，只清理 `tmp/` 里其他旧产物，否则首次 `make bootstrap` 会重新准备
+  目录**，只清理 `tmp/` 里其他旧产物，否则首次 `just bootstrap` 会重新准备
   LLVM 闭包。
 - **磁盘**：完整三端约需 15–20 GB；x86_64 是容器模拟，不能等同原生 CI 证据。
 - **已退役**：GitHub Actions（2026-10-21 删除）、本机 Jenkins（2026-10-22 删除，
@@ -188,11 +199,11 @@ rc/prerelease 与正式 tag 的 `<ver>-release` 祖先校验尚未落地（R1–
 关闭），本节描述的是目标流程。
 
 1. 在 `<ver>-rc` 上开发；写 `docs/01-finished/release-<ver>-rc.N.md`；本地
-   `make test` + `make selfhost-native` 全绿。
+   `just test` + `just selfhost-native` 全绿。
 2. 打 `git tag -a <ver>-rc.N` → 三端 tag 流水线构建并发布 prerelease Release
    （带三端种子资产）。非版本号 tag 不触发发布。
-3. **用发布出去的 rc 二进制验收**：`rm -rf bin && make fetch-seed` → `make` →
-   `make test` → `make selfhost-native`（两代固定点）。
+3. **用发布出去的 rc 二进制验收**：`rm -rf bin && just fetch-seed` → `just` →
+   `just test` → `just selfhost-native`（两代固定点）。
 4. 验收不过就回 `<ver>-rc` 修，打下一个 rc（种子自动取上一个 rc）。
 5. `git merge --no-ff <ver>-rc` 到 `<ver>-release`，再打 `git tag -a <ver>`
    发正式版；正式 tag 必须落在 `<ver>-release` 上（CI 校验），否则拒绝发布。
@@ -218,7 +229,7 @@ rc/prerelease 与正式 tag 的 `<ver>-release` 祖先校验尚未落地（R1–
   在 Linux 里运行（`Exec format error`）；`bin/yh-linux-arm64` 是
   **linux/aarch64（ELF）**，2026-10-09 入库，Linux 容器/宿主内可直接跑
   `yh build` 与自举门。
-- Makefile 按宿主自动选种子：Linux/arm64 宿主取 `bin/yh-linux-arm64`；
+- `just`（justfile）按宿主自动选种子：Linux/arm64 宿主取 `bin/yh-linux-arm64`；
   **x86_64 Linux 宿主没有 x64 种子**（x64 后端未实施），须显式
   `SEED=bin/yh-linux-arm64`（arm64 容器原生跑，或 x86_64 上配
   qemu-user/binfmt 执行 arm64 ELF）。产物形态随宿主（Darwin →
@@ -252,11 +263,11 @@ Linux/arm64 容器内的自举验证（种子已入库；arm64 原生宿主缺�
 `bin/yh-linux-arm64`，无需覆盖）：
 
 ```bash
-make test
-make selfhost-native
+just test
+just selfhost-native
 # x86_64 宿主/CI 的等价形式（配 qemu-user/binfmt 后）：
-SEED=bin/yh-linux-arm64 make test
-SEED=bin/yh-linux-arm64 make selfhost-native
+SEED=bin/yh-linux-arm64 just test
+SEED=bin/yh-linux-arm64 just selfhost-native
 ```
 
 ### 容器内验证的约束
@@ -264,7 +275,7 @@ SEED=bin/yh-linux-arm64 make selfhost-native
 - 挂载目录的文件属主是宿主用户：容器内只做构建/测试，不做
   `chown`/权限改写；容器内生成的临时产物一律放 `tmp/`，验证完清理。
 - **不要**把容器内编出的 yh 覆盖回 `bin/` 种子；滚种子只在本机
-  `make test` 与 `make selfhost-native` 全绿后执行 `make seed`。
+  `just test` 与 `just selfhost-native` 全绿后执行 `just seed`。
 - 容器内验证结论（命令、镜像、结果）记入 `docs/finish.md`；
   若发现 Linux 特有问题，先在 `docs/todo.md` 立项再修。
 
@@ -276,11 +287,11 @@ qemu-user/binfmt，交叉 gcc 包装在 `tmp/boot/crossbin/gcc`）：
 ```bash
 export PATH="$PWD/tmp/boot/crossbin:$PATH"   # gcc → aarch64-linux-gnu-gcc
 export SEED=bin/yh-linux-arm64              # x86_64 宿主没有 x64 种子
-make
-make test
-make selfhost-native
+just
+just test
+just selfhost-native
 # 滚种子：x86_64 宿主必须显式 SEED_DEST，否则会写到 bin/yh-linux-x64
-SEED=bin/yh-linux-arm64 SEED_DEST=bin/yh-linux-arm64 make seed
+SEED=bin/yh-linux-arm64 SEED_DEST=bin/yh-linux-arm64 just seed
 ```
 
 ## 代码规范

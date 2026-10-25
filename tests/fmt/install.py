@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """fmt R3.2 安装/仓库外导入与 surface 验收。
 
-执行 `make install DESTDIR=<work>/root PREFIX=/usr`，确认安装树包含 fmt
+执行 `just DESTDIR=<work>/root PREFIX=/usr install`，确认安装树包含 fmt
 源码，再把 fmtbasic fixture 复制到仓库外，清除 YH_STDLIB 后用安装后的 yh
 构建运行。fixture 调用全部公开 API，输出逐字节比对。
 
@@ -37,10 +37,10 @@ def main() -> int:
     work.mkdir(parents=True, exist_ok=True)
     dest = work / "root"
     installed = subprocess.run(
-        ["make", "install", f"DESTDIR={dest}", "PREFIX=/usr"],
+        ["just", f"DESTDIR={dest}", "PREFIX=/usr", "install"],
         cwd=ROOT, capture_output=True, text=True, timeout=1800)
     if installed.returncode != 0:
-        print(f"FAIL make install rc={installed.returncode}")
+        print(f"FAIL just install rc={installed.returncode}")
         print((installed.stderr or installed.stdout)[-1000:])
         return 1
 

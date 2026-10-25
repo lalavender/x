@@ -237,7 +237,7 @@ def bridge_flags(record: dict) -> list[str]:
     静态归档只贡献「能解决当前未定义符号」的成员：编译器源码还没引用
     yh_llvm_* 时，桥归档一个成员都不会被拉进来，`nm ./yh` 里也就没有
     yh_llvm_* 定义。用 --whole-archive 把桥归档整份先拉进来，再让后面的
-    --start-group 解析它引用的 LLVM 组件，这样「make 产出的宿主已经静态
+    --start-group 解析它引用的 LLVM 组件，这样「构建产出的宿主已经静态
     链入桥」是链接结果的确定属性，而不取决于某个调用点。
     """
     bridge = str((ROOT / record["bridge_archive"]).resolve())

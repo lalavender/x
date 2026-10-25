@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 在 GitHub Ubuntu runner 上准备 ANTLR 4.13.2 并跑参考语法门。
 #
-# 平台 job 不再运行 `make test`（它隐含本机 ANTLR 环境）；ANTLR 参考语法
+# 平台 job 不再运行 `just test`（它隐含本机 ANTLR 环境）；ANTLR 参考语法
 # 与平台无关，统一在这个 job 里跑一次。Java/pip 由调用方先安装。
 set -euo pipefail
 

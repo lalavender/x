@@ -116,8 +116,8 @@ if (string.split(text, comma, &iter) == string.status_ok) {
 ## 测试
 
 ```bash
-make test-string       # O0：model/view/owned/transform/utf8/interop/resources
-make test-string-o2    # O2 同组
+just test-string       # O0：model/view/owned/transform/utf8/interop/resources
+just test-string-o2    # O2 同组
 ```
 
 `resources` 组把标准库复制到 `tmp/`，逐次改写
@@ -128,4 +128,4 @@ make test-string-o2    # O2 同组
 
 `99_tests.yh` 包含 5 条 `test` 块（视图比较、前后缀与查找、无分配切分、
 拥有者增长、UTF-8 校验）。用 `yh test string`（在 `libs/` 目录）或
-`make test-lib-tests` 运行；生产构建不会登记或发射这些测试。
+`just test-lib-tests` 运行；生产构建不会登记或发射这些测试。

@@ -89,7 +89,7 @@ def api_compile(body):
     cmd = [compiler, "--emit-asm", str(src)] + shlex.split(options)
     rc, out, err, timed = run_cmd(cmd, COMPILE_TIMEOUT)
     if not os.path.exists(compiler):
-        return {"ok": False, "asm": "", "stderr": f"编译器不存在: {compiler}\n（先用 make 构建，或改用右侧路径输入框指定）", "exit": None}
+        return {"ok": False, "asm": "", "stderr": f"编译器不存在: {compiler}\n（先用 just 构建，或改用右侧路径输入框指定）", "exit": None}
     if timed:
         return {"ok": False, "asm": "", "stderr": "编译超时（60 秒）", "exit": None}
     return {"ok": rc == 0, "asm": out, "stderr": err, "exit": rc}
@@ -102,7 +102,7 @@ def api_run(body):
     options = body.get("options") or ""
     stdin_data = body.get("stdin") or ""
     if not os.path.exists(compiler):
-        return {"ok": False, "stdout": "", "stderr": f"编译器不存在: {compiler}\n（先用 make 构建，或改用右侧路径输入框指定）",
+        return {"ok": False, "stdout": "", "stderr": f"编译器不存在: {compiler}\n（先用 just 构建，或改用右侧路径输入框指定）",
                 "compileStderr": "", "exit": None}
     work = ensure_work()
     src = work / "play.yh"

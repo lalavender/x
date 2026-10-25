@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """string ST6 安装/仓库外导入验收。
 
-执行 `make install DESTDIR=<work>/root PREFIX=/usr`，确认安装树包含 string
+执行 `just DESTDIR=<work>/root PREFIX=/usr install`，确认安装树包含 string
 全部源码，再把 stringmodel fixture 复制到仓库外，清除 YH_STDLIB 后用安装后的
 yh 构建运行。验证默认 `../share/yh/libs` 发现与显式环境覆盖不需要额外的
 安装规则。
@@ -41,10 +41,10 @@ def main() -> int:
     work.mkdir(parents=True, exist_ok=True)
     dest = work / "root"
     installed = subprocess.run(
-        ["make", "install", f"DESTDIR={dest}", "PREFIX=/usr"],
+        ["just", f"DESTDIR={dest}", "PREFIX=/usr", "install"],
         cwd=ROOT, capture_output=True, text=True, timeout=1800)
     if installed.returncode != 0:
-        print(f"FAIL make install rc={installed.returncode}")
+        print(f"FAIL just install rc={installed.returncode}")
         print((installed.stderr or installed.stdout)[-1000:])
         return 1
 

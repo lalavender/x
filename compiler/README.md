@@ -3,9 +3,9 @@
 > 0.0.3 起本目录是**主要开发编译器**（[ADR-0006](../docs/adr/0006-yh自举产物为主要开发编译器.md)、
 > [ADR-0007](../docs/adr/0007-yh编译器使用源码模块.md)）：仓库已删除 C 版
 > stage0 与 bootstrap，构建只依赖种子 `bin/yh-<平台>-<架构>`（上一版编译器二进制，
-> 用 `make fetch-seed` 从 Release 下载，不入库）。
+> 用 `just fetch-seed` 从 Release 下载，不入库）。
 > 自举产物默认目标取编译器构建身份（qemu 下仍为进程架构），日常验证以
-> `make selfhost-native` 为主门。
+> `just selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
 version = `0.0.9`，source = `.`），按 **gen / builtin / lex / parse / ast /
@@ -40,16 +40,16 @@ bin/yh-<平台>-<架构>（Release 种子）──yh build──▶ yh ──自
 ## 构建与验证
 
 ```bash
-make fetch-seed         # 首次：从 Release 下载本平台种子到 bin/
-make                    # 用 bin/yh-<平台>-<架构> 冷编本目录项目，产出仓库根 yh
-make test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
-make selfhost-native    # 本机主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
-make code-stats         # 统计 compiler/ 下 yh 源码规模
-make seed               # 滚种子（仅在 test 与 selfhost-native 全绿后执行）
+just fetch-seed         # 首次：从 Release 下载本平台种子到 bin/
+just                    # 用 bin/yh-<平台>-<架构> 冷编本目录项目，产出仓库根 yh
+just test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
+just selfhost-native    # 本机主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
+just code-stats         # 统计 compiler/ 下 yh 源码规模
+just seed               # 滚种子（仅在 test 与 selfhost-native 全绿后执行）
 ```
 
 `make` 的产物形态随宿主（Darwin → Mach-O arm64，Linux → ELF）。最终链接
-由内嵌 lld/平台驱动完成；编译器自举闭包由 `make bootstrap` 准备。普通项目
+由内嵌 lld/平台驱动完成；编译器自举闭包由 `just bootstrap` 准备。普通项目
 可在 `project.toml` 的 `[link]` 中声明平台库文件，由 `yh build` 自动链入。
 可直接用于编译 `.yh` 程序与跑语料：
 
@@ -57,8 +57,8 @@ make seed               # 滚种子（仅在 test 与 selfhost-native 全绿后�
 python3 tests/yh-run/check.py --compiler $PWD/../yh
 ```
 
-`make selfhost-native` 由 `tests/selfhost/native-selfhost.py` 执行本机全套
-自举门（滚动自举，无 stage0；种子 = `make fetch-seed` 取得的 `bin/yh-<平台>-<架构>`）：
+`just selfhost-native` 由 `tests/selfhost/native-selfhost.py` 执行本机全套
+自举门（滚动自举，无 stage0；种子 = `just fetch-seed` 取得的 `bin/yh-<平台>-<架构>`）：
 
     bin/yh-<平台>-<架构> build compiler/  → cc2（冷编）
     cc2     build compiler/ → cc3（冷编）
@@ -78,7 +78,7 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 `is_type_start`）。运行：
 
 ```bash
-make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test 语法）
+just test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test 语法）
 ```
 
 测试体走与普通函数相同的 CheckedModule→SSA→LLVM 路径，但只在测试模式下登记，
@@ -341,7 +341,7 @@ testkit ─▶ build（复用调度与产物路径，执行测试体）
 对应 LLVM 目标库。LL12 已删除 `em_*` 抽象机原语与旧 arm64 发射器，
 历史架构见[自举后端架构](../docs/03-design/yh-自举后端架构.md)。
 
-依赖方向由 `make arch-check` 强制（`tools/arch-check.py` 的 `ALLOWED`）：
+依赖方向由 `just arch-check` 强制（`tools/arch-check.py` 的 `ALLOWED`）：
 `gen`/`ir` 是依赖根，`parse`/`ast`/`check`/`comptime`/`lower`/`backend` 在其上，
 `build` 装配全部下层，`cmd` 在最顶。当前 13 模块 37 条边、无环；实测与
 结构性问题见[当前架构重新分析](../docs/03-design/yh-当前架构重新分析-2026-10-25.md)。

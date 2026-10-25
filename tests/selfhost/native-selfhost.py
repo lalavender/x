@@ -14,7 +14,7 @@
 用法：python3 tests/selfhost/native-selfhost.py [--keep] [--jobs N]
     自解析与两遍语料按 --jobs 并发（缺省 min(8, CPU 核数)）；--workdir 可把
     候选编译器与语料产物放到快速文件系统（cc2/cc3/cc4 会被反复 exec）；
-    --skip-corpus 供「同一轮 make test 已跑过等价语料」时省掉重复的一遍。
+    --skip-corpus 供「同一轮 just test 已跑过等价语料」时省掉重复的一遍。
 退出码：全部通过 0。
 """
 
@@ -99,7 +99,7 @@ def llvm_shim_for_seed(seed: Path):
             # Darwin 默认后端已是 LLVM，没有闭包就无法继续自举；给出可操作的
             # 准备命令，而不是让链接器在半路报缺少归档。
             raise SystemExit("错误：Darwin 自举需要本机固定 LLVM 闭包；"
-                             "先运行 make llvm-host（或 tools/llvm-darwin-host.py prepare）")
+                             "先运行 just llvm-host（或 tools/llvm-darwin-host.py prepare）")
         return None
     record = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
     print(f"自举链接已接入内嵌 LLVM 桥：host={record['host']} "
@@ -270,7 +270,7 @@ def main() -> int:
                     help="候选编译器与探针产物目录（缺省 tmp/selfhost；"
                          "可指向快速文件系统，cc2/cc3/cc4 会被反复 exec）")
     ap.add_argument("--skip-corpus", action="store_true",
-                    help="跳过两遍语料（仅当同一轮里 make test 已用等价编译器"
+                    help="跳过两遍语料（仅当同一轮里 just test 已用等价编译器"
                          "跑过语料时才用；默认不跳过）")
     ap.add_argument("--backend", choices=("auto", "llvm"), default="auto",
                     help="自举链使用的后端；LL12 后 LLVM 是唯一后端，"
@@ -362,7 +362,7 @@ def main() -> int:
     # 3b) CLI 冒烟
     ok = run_cli_probe(cc4) and ok
 
-    # 4/5) 语法语料与运行语料。--skip-corpus 供「同一轮里 make test 已经用
+    # 4/5) 语法语料与运行语料。--skip-corpus 供「同一轮里 just test 已经用
     # 等价编译器跑过两遍语料」时省掉这 1 分钟；默认不跳过，门不因此变松。
     if args.skip_corpus:
         print("语法语料与运行语料：按 --skip-corpus 跳过（调用方已跑过）")

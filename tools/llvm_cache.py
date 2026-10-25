@@ -6,7 +6,7 @@
   2. 当前仓库的 `tmp/llvm-migration`；
   3. 同一 Git 仓库的主 worktree 的 `tmp/llvm-migration`
      （`git rev-parse --git-common-dir` 的父目录，新 worktree 自动复用）；
-  4. 兜底返回当前仓库的 `tmp/llvm-migration`（尚未准备，由 make llvm-host 创建）。
+  4. 兜底返回当前仓库的 `tmp/llvm-migration`（尚未准备，由 just llvm-host 创建）。
 
 用法：
     python3 tools/llvm-cache.py          # 打印缓存根

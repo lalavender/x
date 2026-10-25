@@ -4,7 +4,7 @@
 > [ADR-0007](../docs/adr/0007-yh编译器使用源码模块.md)）：仓库已删除 C 版
 > stage0 与 bootstrap，构建只依赖入库种子 `bin/yh`（上一版编译器二进制）。
 > 自举产物可直接本机使用（宿主自动方言探测），日常验证以
-> `make selfhost-native` 为主门。
+> `just selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
 version = `0.0.3`，source = `.`），按 **gen / lex / parse / cmd 四模块**组织，
@@ -17,10 +17,10 @@ bin/yh（入库种子）──yh build──▶ yh ──自编──▶ yh'（�
 ## 构建与验证
 
 ```bash
-make                    # 用 bin/yh 对本目录项目冷编，产出仓库根 yh
-make test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
-make selfhost-native    # 本机主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
-make seed               # 滚种子（仅在 test 与 selfhost-native 全绿后执行）
+just                    # 用 bin/yh 对本目录项目冷编，产出仓库根 yh
+just test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
+just selfhost-native    # 本机主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
+just seed               # 滚种子（仅在 test 与 selfhost-native 全绿后执行）
 ```
 
 `make` 的产物形态随宿主（Darwin → Mach-O arm64，Linux → ELF），链接走
@@ -31,7 +31,7 @@ make seed               # 滚种子（仅在 test 与 selfhost-native 全绿后�
 python3 tests/yh-run/check.py --compiler $PWD/../yh
 ```
 
-`make selfhost-native` 由 `tests/selfhost/native-selfhost.py` 执行本机全套
+`just selfhost-native` 由 `tests/selfhost/native-selfhost.py` 执行本机全套
 自举门（滚动自举，无 stage0；种子 = 入库的 `bin/yh`）：
 
     bin/yh build compiler/  → cc2（冷编）

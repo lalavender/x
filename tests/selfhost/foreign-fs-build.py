@@ -5,7 +5,7 @@
 O_DIRECT（0x10000）当成 x86_64 的 O_DIRECTORY 传下去，于是「用 O_DIRECT 打开
 目录」在 tmpfs/ext4/overlayfs 上一律 EINVAL（`无法打开目录: .`），只有不校验
 该标志的 9p（WSL 的 /mnt/c）会侥幸放行——仓库挂在 9p 上时所有门都是绿的，
-一进容器（overlayfs）连第一步 make 都过不去。所以这里刻意换一个文件系统构建，
+一进容器（overlayfs）连第一步 just 都过不去。所以这里刻意换一个文件系统构建，
 把「宿主文件系统够宽容」这个偶然因素从门里排除掉。
 """
 

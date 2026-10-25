@@ -54,7 +54,7 @@ def main():
     args = parser.parse_args()
     require(sys.platform == "darwin", "Darwin 自举闭包门只能在 macOS 上运行")
     require(HOST_RECORD.is_file(),
-            "缺少固定 Darwin LLVM host.json：先运行 make llvm-host")
+            "缺少固定 Darwin LLVM host.json：先运行 just llvm-host")
     record = json.loads(HOST_RECORD.read_text(encoding="utf-8"))
     flags_file = ROOT / record.get("selfhost_flags_file", "")
     require(flags_file.is_file(), f"缺少自举闭包文件：{flags_file}")

@@ -442,7 +442,7 @@ def main() -> int:
         build_env["YH_LLVM_SELFHOST"] = "1"
         flags_file = Path(build_env.get("YH_LLVM_SELFHOST_FLAGS", ""))
         if not flags_file.is_file():
-            raise RuntimeError("缺少自举闭包文件：先运行 make llvm-host"
+            raise RuntimeError("缺少自举闭包文件：先运行 just llvm-host"
                                "（tools/llvm-darwin-host.py prepare）")
     frozen = {"A": {"legacy": True}}
     final_candidates = {}
