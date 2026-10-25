@@ -126,6 +126,23 @@ CASES = [
     ("n", ["in.txt", "--many", "-x"]),
 ]
 
+# 校准用的 argparse 语义版本：3.13/3.14 改变了 parse_args/parse_known 对
+# nargs 与未知 token 的判定（同一 argv 在 3.12 会报错、在 3.14 会成功）。
+# 参考实现随解释器版本漂移，而 yh 侧输出固定（与校准版本一致），因此把解释器
+# 版本纳入判定：低于校准版本时下列用例按「oracle 版本差异」处理，并在汇总行
+# 打印实际 oracle 版本，避免 CI 容器（Ubuntu 24.04 = Python 3.12）被误判。
+ORACLE_PYTHON = (3, 14)
+
+# 上述版本差异中受影响的用例（逐条实测 3.14 vs 3.12 得到）。
+PYTHON_VERSION_DIFFS = {
+    ("n", ("a", "--level", "2", "b")):
+        "argparse 3.13+ 才接受「位置参数 + 选项值 + 位置参数」交错",
+    ("n", ("in.txt", "--pair", "a", "b", "c")):
+        "argparse 3.13+ 才接受多值 nargs 与位置参数交错",
+    ("k", ("in.txt", "--bogus", "x")):
+        "argparse 3.13+ 才把未知选项后的 token 并入 extras",
+}
+
 # 设计文档明确保留的差异（docs/03-design/yh-cli与argparse差异.md）：
 # 不当作失败，但仍逐条打印，防止差异悄悄扩大。
 KNOWN_DIFFS = {
@@ -326,6 +343,8 @@ def main() -> int:
                 print(f"OK    {name}")
             continue
         reason = KNOWN_DIFFS.get((mode, tuple(argv)))
+        if reason is None and sys.version_info[:2] < ORACLE_PYTHON:
+            reason = PYTHON_VERSION_DIFFS.get((mode, tuple(argv)))
         if reason is not None:
             known += 1
             if not args.quiet:
@@ -339,7 +358,7 @@ def main() -> int:
     if not args.keep:
         shutil.rmtree(work, ignore_errors=True)
     total = len(CASES)
-    print(f"cli diff: 一致 {total - failed - known}/{total}，已知差异 {known}，"
+    print(f"cli diff(oracle {sys.version_info[0]}.{sys.version_info[1]}): 一致 {total - failed - known}/{total}，已知差异 {known}，"
           f"未知差异 {failed}（编译器 {compiler}）")
     return 1 if failed else 0
 
