@@ -169,9 +169,12 @@ CI 由 **Gitea Actions** 承担（2026-10-22 起；替代原 CircleCI 分支门�
   macOS/arm64）。本机无 docker，workflow 里不用 `container:` 语法；Linux 任务由
   脚本自行调 Apple `container`。
 - **`ci.yml`（分支门）**：`arm64`/`llvm`/`main` 与 `<ver>-rc`/`<ver>-release`
-  分支 push → 并行跑 ANTLR、Darwin/arm64（宿主原生）、Linux/AArch64（Apple
-  container 内原生）；每端先取最新 Release 种子，再 `just bootstrap`、平台专项
-  门、第 2/3 层语料与 `just SKIP_CORPUS=1 selfhost-native`。
+  分支 push → 并行跑 Darwin/arm64（宿主原生）、Linux/AArch64（Apple
+  container 内原生）、Linux/x86_64（Apple container 内模拟）；每端先取最新
+  Release 种子，再 `just bootstrap`、平台专项门、第 2/3 层语料与
+  `just SKIP_CORPUS=1 selfhost-native`。**ANTLR 参考语法门只在本地开发跑**
+  （`just test` / `just quick`），CI 不为它装 Java + jar，只用编译器的
+  `--syntax-check` 模式（2026-10-26 用户决定）。
 - **`release.yml`（发布）**：版本 tag（`x.y.z`、`x.y.z-rc.N`）push → 三端顺序
   构建（Darwin 原生 → Linux/AArch64 容器原生 → Linux/x86_64 容器模拟）、cc4 打包、
   `tools/publish-release.py` 发布 GitHub Release；其他 tag（如 `seed-*`）跳过。

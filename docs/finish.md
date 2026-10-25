@@ -5,6 +5,28 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-26 CI 去掉 ANTLR：参考语法门只在本地开发跑
+
+- **改动**：`.gitea/workflows/ci.yml` 删除 `antlr` job（原为 Apple container 内
+  `apt-get install default-jre-headless` + `tools/run-antlr-ci.sh`，每次 push 起
+  一个 ubuntu:24.04 容器装 Java + pip + curl 下载 jar），分支门只剩
+  `darwin-arm64` / `linux-arm64` / `linux-x86_64` 三个平台 job；ANTLR 参考语法门
+  仅保留在本地 `just test` / `just quick`（`tests/yh/check.py` 默认模式）。
+- **连带清理**：删除只为该 job 存在的 `tools/run-antlr-ci.sh`；
+  `.circleci/config.yml`（云端真机参照，非门禁）同步删除 `antlr` job 与 workflow
+  条目，避免引用已删脚本。
+- **文档**：`AGENTS.md` 的 CI 说明改为"三端并行 + ANTLR 只本地跑"；
+  `docs/02-plan/yh-基础设施即代码IaC方案-2026-10-24.md` 的 G3 缺口收敛为"只剩
+  镜像非内容寻址"（ci.yml job 数 4 → 3）；`docs/03-design/yh-架构图-2026-10-25.md`
+  的 CI 节点去掉 ANTLR。
+- **理由**（2026-10-26 用户决定）：参考语法门与平台无关，平台 job 本来就只看
+  编译器的 `--syntax-check` 模式；为它单独起容器装 Java + 现场 `curl` jar 属
+  不可复现的 CI 成本，收回到本地开发更划算。
+- **验证**：Ruby `YAML.safe_load` 解析 `ci.yml`（3 job：`darwin-arm64`/
+  `linux-arm64`/`linux-x86_64`）与 `.circleci/config.yml`（workflow 只引用现存
+  job）通过；除本条记录外，仓库内不再引用 `tools/run-antlr-ci.sh`；本地
+  `just test` 路径未改动（`tests/yh/check.py` 默认 ANTLR 模式仍在）。
+
 ## 2026-10-26 构建入口迁 just：justfile 成为唯一真源，Makefile 收成转发层
 
 - **改动**：新增仓库根 `justfile`（just 1.59 / 1.21 均解析通过），承载旧
