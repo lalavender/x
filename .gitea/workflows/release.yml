@@ -35,17 +35,16 @@ jobs:
             echo "跳过：$tag 不是版本 tag（只发布 x.y.z 与 x.y.z-rc.N）"
           fi
 
-      - name: 预建 CI 镜像（arm64 + amd64，并行 job 复用）
+      - name: 预建 CI 镜像（arm64 + amd64，按 Dockerfile 哈希）
         if: steps.ver.outputs.ok == '1'
         run: |
           set -euo pipefail
-          # 镜像按标签复用：三个平台 job 直接 container run，不再各自 apt 安装。
-          if ! container image list | grep -qE '^yh-ci[[:space:]]+ubuntu24[[:space:]]'; then
-            container build -t yh-ci:ubuntu24 -f .gitea/ci/Dockerfile .
-          fi
-          if ! container image list | grep -qE '^yh-ci[[:space:]]+ubuntu24-amd64[[:space:]]'; then
-            container build -a amd64 -t yh-ci:ubuntu24-amd64 -f .gitea/ci/Dockerfile .
-          fi
+          # 镜像标签带 Dockerfile 内容哈希：Dockerfile 变更后必须重建，否则会
+          # 继续用旧镜像（迁移到 justfile 后旧镜像没有 just，容器内直接 127）。
+          # 各平台 job 自己也会按同一哈希构建（层缓存命中，几乎零成本）。
+          sig=$(shasum -a 256 .gitea/ci/Dockerfile | cut -c1-12)
+          container build -t "yh-ci:ubuntu24-$sig" -f .gitea/ci/Dockerfile .
+          container build -a amd64 -t "yh-ci:ubuntu24-amd64-$sig" -f .gitea/ci/Dockerfile .
 
   darwin-arm64:
     needs: prepare
@@ -119,9 +118,12 @@ jobs:
           cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
           mount=""
           if [ -d "$cache" ]; then mount="-v $cache:/work/tmp/llvm-migration"; fi
+          sig=$(shasum -a 256 .gitea/ci/Dockerfile | cut -c1-12)
+          img="yh-ci:ubuntu24-$sig"
+          container build -t "$img" -f .gitea/ci/Dockerfile .
           container run --rm -m 3G -v "$PWD":/work -w /work $mount \
             -e LLVM_JOBS -e TAG="$tag" \
-            yh-ci:ubuntu24 bash -lc '
+            "$img" bash -lc '
               set -euo pipefail
               just bootstrap
               just test-llvm-linux-arm64
@@ -163,9 +165,12 @@ jobs:
           cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
           mount=""
           if [ -d "$cache" ]; then mount="-v $cache:/work/tmp/llvm-migration"; fi
+          sig=$(shasum -a 256 .gitea/ci/Dockerfile | cut -c1-12)
+          img="yh-ci:ubuntu24-amd64-$sig"
+          container build -a amd64 -t "$img" -f .gitea/ci/Dockerfile .
           container run --rm -m 3G -a amd64 -v "$PWD":/work -w /work $mount \
             -e LLVM_JOBS -e TAG="$tag" \
-            yh-ci:ubuntu24-amd64 bash -lc '
+            "$img" bash -lc '
               set -euo pipefail
               just bootstrap
               # 模拟环境下运行语义不可靠（run/20-bytebuf 曾信号 5），发布这里只做

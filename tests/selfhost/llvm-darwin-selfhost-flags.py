@@ -19,7 +19,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-WORK = ROOT / "tmp/llvm-migration/darwin-selfhost-flags"
+# 工作目录不能放在 tmp/llvm-migration 下：CI 里它是指向宿主闭包缓存的软链，
+# 探针的 rmtree/mkdir/链接产物会穿透软链写到共享缓存里（曾导致
+# 「无法打开文件 …/tmp/llvm-migration/darwin-selfhost-flags/real/out.yh-tmp.<pid>」）。
+WORK = ROOT / "tmp/selfhost-flags"
 HOST_RECORD = ROOT / "tmp/llvm-migration/llvm-host-darwin-aarch64/host.json"
 TRIPLE = "aarch64-apple-darwin"
 SOURCE_TEXT = """module main;
