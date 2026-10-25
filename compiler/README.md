@@ -8,12 +8,20 @@
 > `make selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
-version = `0.0.9`，source = `.`），按 **gen / builtin / lex / parse / ast / check / comptime / cmd / ir / backend
-多模块**组织，2026-10-22 LA3 后共 **十个模块**、114 个 `.yh` 文件；
-`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担 AST 一致性校验，
-`builtin/` 只放内置（prelude）函数登记表；`ir`（目标隔离
-SSA）与其它模块同为根项目普通模块，共同进入编译器构建与自举固定点。
-校验视图生命周期与模块依赖见[check 拆分设计](../docs/03-design/yh-编译器check模块拆分设计.md)。
+version = `0.0.9`，source = `.`），按 **gen / builtin / lex / parse / ast /
+check / comptime / ir / backend / build / testkit / cmd** 组织。
+**2026-10-25 实测（`python3 tools/arch-check.py`）：十二个模块、116 个 `.yh`、
+52,342 行**：`gen` 5,690 · `parse` 9,707 · `build` 10,717 · `ast` 9,041 ·
+`comptime` 5,522 · `ir` 4,230 · `backend` 3,340 · `testkit` 1,515 · `lex` 1,069 ·
+`check` 958 · `cmd` 381 · `builtin` 172。
+
+各层来历：`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担
+AST 与快照的**只读一致性校验**（不是语义分析），`builtin/` 只放内置
+（prelude）函数登记表，`ir`（目标隔离 SSA）与其它模块同为根项目普通模块，
+`build/` 是 2026-10-24 A2c 自 `cmd/` 拆出的构建引擎（项目模型、调度、
+模块发射、缓存、链接、平台适配），`testkit/` 是同一批 A6 抽出的语言内测试
+执行器。`cmd/` 只剩 CLI 参数映射（`driver`）与调用面（`api`），381 行、
+占 0.7%。
 
 模块导出面按「只有别的模块真的用到才 `pub`」维护（2026-10-12 两轮：`pub`
 声明 1048 → 585，随后 `struct`/`union`/`enum` 的 `pub` 改为可选并私有化 12 个
@@ -57,9 +65,9 @@ python3 tests/yh-run/check.py --compiler $PWD/../yh
 
 门：①固定点——cc3/cc4 全部模块 `.s`/`.s.i` 逐字节一致；②cc4 自解析
 compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反例全拒）；
-④cc4 运行语料（`tests/yh-run` 全量 run/fail/pass，2026-10-22：351 例）；
-⑤模块语料（`tests/modules/check.py`）；⑥项目验收
-（`tests/modules/build-check.py` 115 例），以及
+④cc4 运行语料（`tests/yh-run` 全量 run/fail/pass，2026-10-25 实测 360 个
+`.yh` 用例文件）；⑤模块语料（`tests/modules/check.py`）；⑥项目验收
+（`tests/modules/build-check.py`，2026-10-24 记录 126 例），以及
 `tests/selfhost/llvm-function-cache.py` 的函数级缓存矩阵。滚种子前必须全绿。
 
 ## 内建测试
@@ -83,6 +91,8 @@ make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test �
 | 文件 | 职责 |
 | --- | --- |
 | `lex/lexer.yh` | 字节词法器：保留字、数字/转义、注释、运算符最长匹配 |
+| `lex/layout.yh` | 布局判定：`lex_can_end` 等语句/字段边界工具，实现与全角宽度相关的前瞻 |
+| `lex/interp.yh` | 字符串插值的词法后扩展：把 `${...}` 切成分段而不破坏普通字符串 |
 
 **parse** —— 语法（含顶层声明两遍处理）
 
@@ -93,8 +103,14 @@ make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test �
 | `parse/parse_stmt.yh` | 语句：块/if/for/switch/return/goto/标签/赋值 |
 | `parse/parse_decl.yh` | 顶层声明两遍处理：let/const/fn/type/struct/union/enum |
 | `parse/parse_global_init.yh` | 全局聚合变量初始化（命名/位置/嵌套/字符串字面量） |
+| `parse/parse_global_static.yh` | 全局静态数据对象登记与接口重放标记 |
 | `parse/parse_module.yh` | 模块头解析：`module` 声明、`import NAME (as ALIAS)?;` |
-| `parse/iface.yh` | 模块接口与私有性：跨模块可见边界 |
+| `parse/parse_comptime.yh` | 函数体 `$if`/`$for` 的解析与作用域接缝 |
+| `parse/parse_ct_layout.yh` | 编译期数组长度与布局请求的 token 探测 |
+| `parse/parse_interp.yh` | 字符串插值的 parser 降级：合成 fmt 调用树 |
+| `parse/iface.yh` | 模块接口（`.s.i` / `.yh.i`）发射与加载：跨模块可见边界 |
+| `parse/iface_ct.yh` | 编译期接口（`.s.ct`）发射与加载 |
+| `parse/iface_ct_map.yh` | `.s.ct` 正文改写的生成位置与原始位置映射 |
 
 **ast** —— AST 阶段（2026-10-12 自 parse 拆出，独立编译单元）
 
@@ -102,11 +118,16 @@ make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test �
 | --- | --- |
 | `ast/ast_decl.yh` | 从 PDecl 索引建立文件级声明节点并关联函数体 |
 | `ast/ast_expr.yh` | `yh check` typed 表达式 AST、绑定与常量快照 |
-| `ast/ast_stmt.yh` | `yh check` 迁移期语句树、绑定关联与编译期 `$for` 模板目录 |
+| `ast/ast_stmt.yh` | `yh check` 语句树、绑定关联与编译期 `$for` 模板目录 |
 | `ast/ast_function.yh` | 函数在 AST arena 中的范围与绑定身份 |
 | `ast/ast_view.yh` | 为外部只读校验借出 arena 视图，不转移所有权 |
 | `ast/module_snapshot.yh` | `CheckedModule` 快照数据模型、捕获/释放与有界读取 |
 | `ast/module_snapshot_view.yh` | 为外部快照校验借出只读视图，不转移所有权 |
+| `ast/module_snapshot_check_key.yh` | LA3.3 C3：pass2b 前的函数 check 键（当前未启用） |
+| `ast/module_snapshot_check_slice.yh` | LA3.3 C2/C3：函数级受检 AST 切片捕获/导入与离线往返探针 |
+| `ast/ast_ir.yh` | builder 指令表辅助（LL12：旧 SSA 编排已退役） |
+| `ast/ast_ir_build.yh` | 受支持函数的 AST → typed SSA 构造器 |
+| `ast/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
 | `ast/module_snapshot_ctx.yh` | 纯快照 lowering 的循环、控制流、标签与函数上下文 |
 | `ast/module_snapshot_lower.yh` | 模块来源/类型/符号准备、签名登记、逐函数构造与模块提交（LA2b） |
 | `ast/module_snapshot_lower_expr.yh` | 标量表达式、条件、三元、整数提升与转换 lowering |
@@ -115,15 +136,15 @@ make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test �
 | `ast/module_snapshot_lower_place.yh` | 绑定赋值、地址、下标与切片位置 lowering |
 | `ast/module_snapshot_lower_aggregate.yh` | 数组/结构体字面量、聚合存储与复制 lowering |
 | `ast/module_snapshot_lower_cache.yh` | 函数级 IR 缓存键：token 流、布局/签名与非函数声明事实 |
-| `ast/module_snapshot_check_key.yh` | LA3.3 C3：pass2b 前的函数 check 键（当前未启用） |
-| `ast/module_snapshot_check_slice.yh` | LA3.3 C2/C3：函数级受检 AST 切片捕获/导入与离线往返探针 |
 | `ast/module_snapshot_forin.yh` | `for-in` 循环 lowering 辅助 |
 | `ast/module_snapshot_global.yh` | 全局对象类型、初始化值与引用 lowering |
 | `ast/module_snapshot_static.yh` | 静态数据、字符串与重定位 lowering 辅助 |
 | `ast/module_snapshot_template.yh` | 编译期 `$for` 模板 lowering 辅助 |
-| `ast/ast_ir.yh` | builder 指令表辅助（LL12：旧 SSA 编排已退役） |
-| `ast/ast_ir_build.yh` | 受支持函数的 AST → typed SSA 构造器 |
-| `ast/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
+
+> `ast` 目前仍同时是「AST 数据结构」与「AST → IR lowering」两种职责的模块，
+> 其中 lowering 共 5,742 行（`module_snapshot_lower*` + `module_snapshot_ctx/
+> forin/global/static/template` + `ast_ir*`）。拆成独立 `lower` 模块的方案见
+> [构建态对象化与 build 拆分重新规划](../docs/02-plan/yh-构建态对象化与build拆分重新规划-2026-10-25.md) B3。
 
 **check** —— AST arena 与独立快照的一致性校验
 
@@ -143,6 +164,12 @@ make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test �
 | `comptime/ct_ir.yh` | typed IR 表达式与语句执行、调用帧和预算 |
 | `comptime/ct_ir_place.yh` | 编译期数组/切片/结构体位置、值复制、视图与别名规则 |
 | `comptime/ct_ir_data.yh` | 受支持编译期聚合的目标布局序列化与延迟切片 backing 发射 |
+| `comptime/ct_ir_float.yh` | 编译期浮点运算与格式化辅助 |
+| `comptime/ct_global_agg.yh` | 全局聚合常量（顶层 const 数组/结构体）的编译期模型 |
+| `comptime/ct_layout.yh` | 数组长度与结构体布局的待完成请求、推进与诊断 |
+| `comptime/ct_layout_graph.yh` | 混合值/布局依赖边与拓扑推进 |
+| `comptime/ct_static_data.yh` | 封存期间值槽到目标对象位置的映射 |
+| `comptime/ct_target.yh` | `$target` 标记名匹配，不污染普通词法关键字 |
 
 函数体 `$if/$for` 的解析和作用域接缝位于 `parse/parse_comptime.yh`；
 typed 执行器覆盖标量（含浮点）、指针（取址、解引用、算术与下标）、整型/浮点/结构体元素
@@ -164,67 +191,121 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 是唯一被导出的原语），运行时函数体在 `backend/llvm_runtime.yh` /
 `backend/llvm_apple_runtime.yh` 按需发射。
 
-**gen** —— 语义与后端
+**gen** —— 共享内核：状态、类型/符号表、语义与目标描述
 
 | 文件 | 职责 |
 | --- | --- |
-| `gen/model.yh` | token 常量、类型/符号常量、Tok/Res/CType/CSym 等结构、全部全局状态 |
+| `gen/model.yh` | token 常量、类型/符号常量、Tok/Res/CType/CSym 等结构 |
+| `gen/state.yh` | `GenState`（64 字段，进程级）+ `TaskCtx`（188 字段，每编译单元）与 `G()` |
+| `gen/front_stage.yh` | 受检前端阶段的进入/校验/退出（LL12 后旧输出缓冲已删除） |
 | `gen/buffer.yh` | 源文件整读（open/read/close）、汇编输出缓冲、诊断、字节写出 |
 | `gen/symbols.yh` | 名字池、类型表、符号/作用域、类型兼容、常量折叠、prelude 符号表原语 |
+| `gen/static_data.yh` | 独占静态数据、64 位指针槽与重定位登记 |
 | `gen/target.yh` | 目标数据模型：字长、对齐、结构体布局（**换平台的第一步**） |
+| `gen/target_info.yh` | 宿主 triple 严格解析与目标身份选择 |
+| `gen/abi_c.yh` | 共享 AArch64 C ABI 分类：值描述、HFA、寄存器与目标栈布局 |
 | `gen/sem_value.yh` | 字面量/标识符求值、常量折叠与值类别（LL12：无发射） |
 | `gen/sem_expr.yh` | 表达式语义：下标、成员、运算、转换、切片（LL12：无发射） |
 | `gen/sem_decl.yh` | 声明语义：符号登记、结构体布局与函数参数/返回事实 |
 | `gen/sem_flow.yh` | 控制流语义：类型检查、循环上下文与可达性（LL12：无跳转发射） |
 | `gen/sem_call_literal.yh` | 调用点语义：实参检查、变参打包记录与结果形态（LL12：无搬运） |
-| `gen/abi_c.yh` | 共享 AArch64 C ABI 分类：值描述、HFA、寄存器与目标栈布局 |
 
 **ir / backend** —— 受检函数的独立表示与目标发射
 
 | 文件 | 职责 |
 | --- | --- |
-| `ir/ssa.yh`、`ir/ssa_call.yh` | typed SSA、整数转换、CFG/verifier 与直接调用契约 |
-| `ir/ssa_serialize.yh` | 含调用目标与实参的稳定 IR 编码 |
-| `ir/ssa_module_40_function_cache.yh` | 单函数 + 贡献闭包的迷你模块缓存单元 |
+| `ir/ssa.yh`、`ir/ssa_call.yh` | typed SSA 数据模型、整数转换、CFG/verifier 与直接调用契约 |
+| `ir/ssa_serialize.yh` | 含调用目标与实参的稳定函数 IR 编码（`IR_SERIAL_VERSION`） |
+| `ir/ssa_module_00_model.yh` | 模块级类型扩展与表结构 |
+| `ir/ssa_module_10_build.yh` | 模块构造、复制与表追加 |
+| `ir/ssa_module_20_verify.yh` | 模块表一致性与引用校验 |
+| `ir/ssa_module_30_serialize.yh` | 模块级序列化/反序列化与身份摘要（`IR_MODULE_SERIAL_VERSION`） |
+| `ir/ssa_module_40_function_cache.yh` | 单函数 + 贡献闭包的迷你模块缓存单元（`IR_FUNCTION_CACHE_VERSION`） |
 | `ir/ssa_module_50_function_rebind.yh` | 缓存记录的类型/符号/全局重绑定与函数装配 |
+| `backend/llvm_module.yh` | IRModule → LLVM 文本的模块级发射与输出缓冲 |
+| `backend/llvm_module_data.yh` | 全局数据、静态对象与重定位的 LLVM 发射 |
+| `backend/llvm_scalar.yh` | SSA 值编号、临时值与标量指令发射 |
+| `backend/llvm_call.yh` | 调用序列与 C ABI 标量分类落点 |
+| `backend/llvm_abi_model.yh` | LLVM 文本行区间到模块来源位置的映射 |
+| `backend/llvm_apple_abi.yh` | Darwin/ARM64 与 Linux/AArch64 共用的 HFA 与寄存器分类 |
+| `backend/llvm_zabi.yh` | SysV MEMORY 属性与字节数组类型 |
+| `backend/llvm_runtime.yh` | yh 自有内存与 Linux 运行时的 LLVM IR 发射 |
+| `backend/llvm_apple_runtime.yh` | Darwin libSystem OS 入口声明与运行时包装器 |
+| `backend/llvm_bridge.yh` | 内嵌 LLVM 静态桥的 yh 侧绑定与诊断读取 |
+| `backend/llvm_bind.darwin.yh` / `.linux.yh` | 桥的 C ABI 声明（按目标二选一） |
 
-**cmd** —— CLI 与项目管理
+**build** —— 构建引擎（2026-10-24 A2c 自 `cmd/` 抽出）
 
 | 文件 | 职责 |
 | --- | --- |
-| `cmd/driver.yh` | `main(argc, argv)`、参数分派、`check` / `test` / `--syntax-check` / `--emit-asm` |
-| `cmd/test_cmd.yh` | `yh test` 的测试发现、文档目标绑定、模块/文件选择、测试体降低与对象发布（YT1/YT2a） |
-| `cmd/llvm_emit.yh` | 单文件受检前端、CLI 形态转换与单文件链接协调 |
-| `cmd/llvm_pipeline.yh` | 已验证快照 → LLVM 文本/对象/汇编的共用驱动与原子发布 |
-| `cmd/function_ir_cache.yh` | 函数缓存目录、索引、环境键与原子记录提交 |
-| `cmd/toml.yh` | `project.toml` 解析与 schema 诊断（未知字段、必填项、行号） |
-| `cmd/project_state.yh` | 项目状态：根发现、源码根扫描、模块索引 |
-| `cmd/project_index.yh` | 清单 schema 校验与字段提取（name/version/author/source/os/arch/dependencies） |
-| `cmd/project_link.yh` | `[project].os/arch` 与 `[link]` / `[link-<os>-<arch>]` 结构校验 |
-| `cmd/link_inputs.yh` | `--link` 选择、库文件 realpath/格式/摘要检查与 argv 素材 |
-| `cmd/project_resolve.yh` | 三层来源解析（当前项目 / 标准库 / 直接依赖）与 import 绑定 |
-| `cmd/module_build.yh` | 项目构建编排、模块缓存与过渡期 `check` |
-| `cmd/build_scheduler.yh` | 有界 fork worker、继承只读项目快照、接口就绪调度与本轮接口隔离 |
-| `cmd/clock.*.yh` | `--stats` 阶段耗时；Darwin 单调时钟 API 与 Linux arm64 clock syscall |
-| `cmd/process.yh` | 用 `fork/execvp/waitpid` 按 argv 启动宿主进程，不经 shell |
-| `cmd/link_cache.yh` | 模块对象与最终程序的内容缓存、内嵌 lld/外部驱动链接 |
+| `build/module_build.yh` | 项目构建管线：扫描/索引/两遍文件处理/不变量/清单/CLI 命令（2,242 行，待拆） |
+| `build/build_scheduler.yh` | 有界快照 worker 进程池与 InterfaceReady 调度 |
+| `build/module_worker.yh` | fork 继承项目快照后初始化私有语义状态并编译单模块 |
+| `build/llvm_emit.yh` | 单文件受检前端与 CLI 形态转换 |
+| `build/llvm_pipeline.yh` | 已验证快照 → IRModule → LLVM 文本/对象/汇编的共用驱动与原子发布 |
+| `build/function_ir_cache.yh` | 函数级 check 切片与 IR 缓存的命令侧 I/O（`.fchk`/`.fir`/索引） |
+| `build/link_cache.yh` | 模块对象与最终程序的内容缓存、内嵌 lld/外部驱动链接、`mb_link` |
+| `build/link_inputs.yh` | `--link` 选择、库文件 realpath/格式/摘要检查与 argv 素材 |
+| `build/darwin_link.yh` | Darwin 链接驱动、SDK/部署身份与 frameworks 参数 |
+| `build/process.yh` | 用 `fork/execvp/waitpid` 按 argv 启动宿主进程，不经 shell |
+| `build/project.yh` | 项目扫描的目录项模型（平台无关） |
+| `build/project_state.yh` | 项目状态：根发现、源码根扫描、模块索引 |
+| `build/project_index.yh` | 清单 schema 校验与字段提取（name/version/author/source/os/arch/dependencies） |
+| `build/project_link.yh` | `[project].os/arch` 与 `[link]` / `[link-<os>-<arch>]` 结构校验 |
+| `build/project_resolve.yh` | 三层来源解析（当前项目 / 标准库 / 直接依赖）与 import 绑定 |
+| `build/toml.yh` | `project.toml` 解析与 schema 诊断（未知字段、必填项、行号） |
+| `build/project_dir.darwin.yh` | `getattrlistbulk` 批量目录枚举 |
+| `build/project_dir.linux.arm64.yh` / `.linux.x64.yh` | `openat`/`getdents64` 目录枚举 |
+| `build/clock.darwin.yh` | Darwin 单调时钟 `clock_gettime` |
+| `build/clock.linux.arm64.yh` / `.linux.x64.yh` | Linux 时钟 syscall 封装 |
+
+平台专属文件按**目标标签匹配文件名段**选择（`pj_target_tag_is`），不是
+`#ifdef`；新增平台要在 `gen/target.yh` 之后补 `project_dir`/`clock` 两组文件。
+
+**testkit** —— 语言内测试执行器（`yh test` 的实现）
+
+| 文件 | 职责 |
+| --- | --- |
+| `testkit/test_cmd.yh` | 测试发现、文档目标绑定、模块/文件选择、测试体降低与对象发布（YT1/YT2a） |
+
+模块名不能叫 `test`——`test "..." {}` 是语言关键字。`testkit` 位于 `build`
+之上，但当前直接使用了 `mb_link`/`mb_build_dir` 等 28 个 `build` 内部符号，
+属待收敛的层间泄漏（见架构复核 A6）。
+
+**cmd** —— CLI 与调用面（A6 后只剩两个文件）
+
+| 文件 | 职责 |
+| --- | --- |
+| `cmd/driver.yh` | `main(argc, argv, envp)` 与参数 → 请求映射，不做实际执行 |
+| `cmd/api.yh` | 调用面：单文件（语法/检查/汇编/LLVM 文本/可执行）与项目（build/run/test/list/version） |
 
 普通配置默认不登记 `system(cmd)`；`--legacy-system` 为迁移期显式兼容开关。
 自举构建使用默认配置。编译器入口接收 `envp`，直接读取 `PATH` 与
 `YH_STDLIB`；构建与临时目录使用 `mkdir` OS API。项目目录扫描由 Darwin
-`getattrlistbulk` 与 Linux arm64 `getdents64` 适配完成，
-不再调用 `/bin/ls`；Linux 系统调用经 LLVM 运行时入口完成。系统汇编器/链接器与
-`malloc`、`free` 等 C 服务由 LLVM 运行时与内嵌 lld 承担；LL12 已删除旧 arm64
-内存运行时发射。
+`getattrlistbulk` 与 Linux `getdents64` 适配完成，不再调用 `/bin/ls`；Linux
+系统调用经 LLVM 运行时入口完成。系统汇编器/链接器与 `malloc`、`free` 等 C
+服务由 LLVM 运行时与内嵌 lld 承担；LL12 已删除旧 arm64 内存运行时发射。
+
+**模块与产物流向**
+
+```
+cmd/driver ─▶ cmd/api ─▶ build（扫描/索引/绑定/拓扑/调度）
+                            ├─ fork worker ─▶ lex ─▶ parse ─▶ gen.sem_* ─▶ ast 捕获
+                            │                   ─▶ check 校验 ─▶ lowering ─▶ ir.IRModule
+                            │                   ─▶ backend（LLVM 文本）─▶ 内嵌桥 ─▶ .o
+                            └─ link_cache（内嵌 lld）─▶ 可执行
+testkit ─▶ build（复用调度与产物路径，执行测试体）
+```
+
+受检快照统一经 `ast/module_snapshot_lower*.yh` 降低为 `ir.IRModule`，再由
+`backend/llvm_*.yh` 发 LLVM 文本，`build/llvm_pipeline.yh` 统一经内嵌桥原子
+发布对象/汇编；项目构建按函数复用
+`ir/ssa_module_40_function_cache.yh` 的迷你模块记录，
+`ssa_module_50_function_rebind.yh` 负责重绑定；旧「函数级 SSA + 汇编替换」链
+已删除，`ast/ast_ir*.yh` 只保留 builder 底层与共享调用缓冲。
 
 `compiler/ir/` 是独立的模块 IR 子项目，由 `compiler/project.toml` 以本地 path
 依赖引入，也由 `tests/modules/projects/irverify/` 直接依赖并运行验收。
-LL12 后受检快照统一经 `ast/module_snapshot_lower*.yh` 降低为 `ir.IRModule`，
-再由 `backend/llvm_*.yh` 发 LLVM 文本，`cmd/llvm_pipeline.yh` 统一经内嵌桥
-原子发布对象/汇编；项目构建按函数复用 `ir/ssa_module_40_function_cache.yh`
-的迷你模块记录，`ssa_module_50_function_rebind.yh` 负责重绑定；旧「函数级
-SSA + 汇编替换」链已删除，
-`ast/ast_ir*.yh` 只保留 builder 底层与共享调用缓冲。
 
 ## 已实现的语义
 
@@ -240,6 +321,9 @@ SSA + 汇编替换」链已删除，
 - **structInit 作值**：结构体字面量可用于初始化、实参、返回、嵌套字段。
 - **全局聚合初始化**：`parse_global_init.yh`，命名/位置/嵌套/字符串字面量
   （字节镜像 + 节内 `R_DATA_PTR` 重定位）。
+- **字符串插值**：`"${expr:spec}"` 端到端（`lex/interp` → `parse_interp` →
+  fmt 库），编译期校验 spec 与类型。
+- **语言内测试**：`test "..." { }` 与 `--filter`/`--timeout`，由 `testkit` 执行。
 
 ## 架构与多平台
 
@@ -249,6 +333,11 @@ SSA + 汇编替换」链已删除，
 （`backend/llvm_*.yh` + 内嵌桥）。前端不持有 ISA 状态；换目标 = 目标身份 +
 对应 LLVM 目标库。LL12 已删除 `em_*` 抽象机原语与旧 arm64 发射器，
 历史架构见[自举后端架构](../docs/03-design/yh-自举后端架构.md)。
+
+依赖方向由 `make arch-check` 强制（`tools/arch-check.py` 的 `ALLOWED`）：
+`gen`/`ir` 是依赖根，`parse`/`ast`/`check`/`comptime`/`backend` 在其上，
+`build` 装配全部下层，`cmd` 在最顶。当前 12 模块 33 条边、无环；实测与
+结构性问题见[当前架构重新分析](../docs/03-design/yh-当前架构重新分析-2026-10-25.md)。
 
 ## 自编子集与已知边界
 

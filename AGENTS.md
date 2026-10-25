@@ -5,8 +5,9 @@
 ## 开发策略（必须遵守）
 
 **0.0.3 起仓库已删除 src/（C 版 stage0）与 bootstrap/，进入滚动自举**：
-编译器源码在 `compiler/`（gen/lex/parse/ast/comptime/cmd/ir/backend
-多模块的 project.toml 项目），
+编译器源码在 `compiler/`（gen/lex/parse/ast/check/comptime/builtin/ir/backend/
+build/testkit/cmd 十二个模块的 project.toml 项目；`build` 是构建引擎，
+`testkit` 是语言内测试执行器，`cmd` 只剩参数映射与调用面），
 构建只依赖**宿主平台对应的种子**，种子统一按 `yh-<平台>-<架构>` 命名：
 macOS/arm64 用 `bin/yh-darwin-arm64`（Mach-O，SHA-256 见
 `bin/yh-darwin-arm64.sha256`），Linux/aarch64 用 `bin/yh-linux-arm64`（ELF，

@@ -11,29 +11,37 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
 拆分、A3 `api` 调用面、A4a–A4d 状态收敛、A5 前端装配收敛、A6 `testkit` 抽出），
 证据与数字见 [finish.md](finish.md)。当前基线由 `make arch-check` 守护：
 
-| 指标 | 当前 |
+| 指标 | 当前（2026-10-25 实测） |
 |---|---|
-| 模块 / 文件 / 行数 | 12 / 114 / 51,484 |
+| 模块 / 文件 / 行数 | 12 / 116 / 52,342 |
 | `cmd` 占比 | 381 行，**0.7%** |
 | `gen.G()` 读点 | **165**（build 101、testkit 27、parse 21、main 5） |
 | 模块级可变 `let` | 183 |
-| 容量安全追加点 | 45（下界） |
-| 最大模块 / 文件 / 函数 | build 10,720 / `module_build` 2,242 / `mb_link` 674 |
+| 容量安全追加项 | 45（下界） |
+| 最大模块 / 文件 / 函数 | build 10,717 / `module_build` 2,242 / `mb_link` 674 |
 
-以下三项**是同一件事的三个面**——把构建态从单例里拿出来，建议同批做，否则会改三遍。
+顺序按 [构建态对象化与 build 拆分重新规划](02-plan/yh-构建态对象化与build拆分重新规划-2026-10-25.md)
+修正为 **B3 → B1 → B2**：B3 与 B1/B2 零文件重叠、可并行，B1+B2 才「是同一件事的
+两个面」（改两遍），B3 不是。规模也按该文实测修正（lower 是 15 文件 5,742 行，
+不是 10 文件 4,739 行）。
 
 - [ ] **B1 `BuildCtx` 对象化**：`build` 剩余 101 个 `gen.G()` 读点集中在
   `p_projs`(204 次)/`p_mods`(124)/`p_files`(69)/`c_target`(56)。`build` 是项目模型
-  所有者，继续加窄口是本末倒置；应把项目表/目标/统计收进显式上下文对象，
-  随 worker/线程模型一起传递。前置：无。
-- [ ] **B2 拆分 `build`**：`build` 已 10,720 行、最大文件 `module_build` 2,242、
-  最大函数 `mb_link` 674。按"项目模型 / 链接 / 调度 / 模块发射"再分模块，或先把
-  `mb_link` 拆成 4–5 个阶段函数。建议在 B1 之后做（否则拆完还要按新上下文再改一遍）。
-- [ ] **B3 `lower` 独立**：`ast/module_snapshot_lower*` + `ast_ir*`（10 文件 4,739 行）
-  可移出 `ast`，但 `lower_module` 的调用点在
-  `ast/module_snapshot_check_slice.yh`（check 流水线内部），属**流程耦合**而非模块
-  边界。要成立得先拆开"check 产出 CheckedModule"与"lower 消费它"，由驱动器在拿到
-  快照后再触发 lowering。详见 finish.md「A7 不是纯搬迁」。
+  所有者，继续加窄口是本末倒置；应把项目表/目标/统计收进显式上下文对象。
+  动机是**字段偏移膨胀与读点归属**，不是线程安全——当前是 `fork` + `waitpid`
+  的进程池（并发 4，COW 隔离，无锁）。分两个台阶：B1-1/B1-2 数据面（`proj`），
+  B1-3/B1-4 读点面（`BuildCtx` + `gen.G()` 归零）。
+- [ ] **B2 拆分 `build`**：`build` 已 10,717 行、最大文件 `module_build` 2,242、
+  最大函数 `mb_link` 674。前置有两条硬约束：链接簇依赖发射簇的 6 个产物路径/键
+  符号（须先抽进 `proj` 的 art 子簇），`project_link` 读 `toml_*` 模块级 globals
+  （不能进 `link`，否则 `link → build` 成环）。顺序：art → `link` → `mb_link`
+  阶段化 → `module_build` 拆 3 文件。
+- [ ] **B3 `lower` 独立**：待迁是 **15 文件 5,742 行**（`module_snapshot_lower*` +
+  `ast_ir*` + `ctx/forin/global/static/template`）。环只剩 **2 条边**（3 个 hash
+  helper + 1 个只被 `tests/modules/projects/llvmlower` 调用的等价性探针），
+  `ast/module_snapshot.yh` 实测 **0 处**调用 `lower_module`，生产驱动点已在
+  `build/llvm_pipeline.yh`。因此**不是流程重构，是一次纯搬迁 + 3 个 helper 下沉
+  + 1 个探针随迁**，可立即开工（B3-1 解环、B3-2 搬文件）。
 
 ## 2026-10-21 重规划说明
 
