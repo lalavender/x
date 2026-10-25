@@ -285,6 +285,20 @@
   全部 5 passed；陈旧锁（pid 不存在）自动清理。
 
 
+## 2026-10-26 PC3b：滚种子（冷编 23.0 s → 11.0 s）
+
+- **前置**：`just arch-check` / `just test`（0 FAIL）/ `just selfhost-native`（122/122、LA3 O0/O2）/
+  `just test-llvm-darwin` 全绿；`verify-seed` 通过；`strings yh` 无构建机 `$HOME` 路径。
+- **结果**：`bin/yh-darwin-arm64`
+  旧 `56bf3f56027fb7609c8f37c384c0f3b8e07314f50618f2cf093274583ca6ceb8`
+  → 新 **`ea24f6591abc945584e63adea8e30d72b1ef3185c9de1d2758124c63a95d652b`**（70,402,800 字节），
+  哈希文件同步写入。
+- **滚后实测（load≈2.9）**：`just build`（新种子冷编 13 模块）**11.04 s**，
+  滚前同一操作 23.0 s → **−52%**；冷编写入的函数缓存记录 `.fir` = **0**（PC3 生效）。
+- **滚后门禁**：`just test` 0 FAIL；`just selfhost-native` 122/122 + LA3 O0/O2 + 两代固定点（39 产物）
+  + 自解析全通过。
+- 说明：种子不入库（`bin/` 由 `just fetch-seed` 获取），本次滚动只影响本机 `bin/`，哈希文件供校验。
+
 ## 2026-10-26 just 迁移后的门禁复核（+ 修 Darwin/ARM64 守卫）
 
 构建入口已由并行会话从 Makefile 迁到 **justfile**（`830d1d5`），本轮性能工作的门禁证据

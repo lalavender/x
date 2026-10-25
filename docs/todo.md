@@ -88,12 +88,10 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
 
 - [ ] **PC2c 缓存记录按函数内存膨胀**：v3 每个可缓存函数都带一份字符串字节副本，
   大模块的 `.fchk` 仍可能偏大；若需要可改为「按模块共享字符串池 + 引用计数」。
-- [ ] **PC3b 种子滚动**：`just` 仍由旧种子编译（冷编 23–25 s），−50% 要等滚种子后
-  才出现在 `make` 上。滚动前置：等到工作区并行改动落地（当前 `compiler/testkit` 有
-  未完成改动）再执行 `make test` + `make selfhost-native` + `make seed`。
-  实测前置（2026-10-26，load≈4.0）：`just`（种子→compiler 冷编）**23.0 s**、13 模块；
-  `selfhost_snapshot_gate.py --verify-seed bin/yh-darwin-arm64` 通过；`strings yh` 无
-  `/Users/…` 构建机路径（滚种子不会被拒）。滚后预期 `just` 冷编进 ~11–12 s（种子拿到 PC3）。滚动命令为 `just seed`。
+- [x] **PC3b 种子滚动**（2026-10-26 完成）：`just seed` 把 `yh` 覆盖到 `bin/yh-darwin-arm64`，
+  哈希 `56bf3f56…` → **`ea24f659…`**。滚后 `just build` 冷编（13 模块）**11.04 s**（滚前 23.0 s，
+  −52%），冷编 `.fir` 写入 0；滚后 `just test` 0 FAIL、`just selfhost-native` 122/122 + LA3 O0/O2
+  + 两代固定点通过。
 - **2026-10-26 低负载复核（load≈4.5–5，见 [分析](02-plan/yh-编译器性能分析-2026-10-25.md) §14）**：
   冷编 11.2 s、全量重编（含写）**17.5 s**、热编 **1.14–1.21 s**、单函数改动中位 **3.9 s**、
   冷编后首次改 4.78 s。**热编 ≤1.5 s 与全量重编 ≤20 s 已达标**；单函数改动 ≤3 s
