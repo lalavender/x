@@ -244,6 +244,7 @@ uninstall:
 # 先写 .tmp 再 mv，避免并发读到半个 70MB 二进制。
 stage-yh: _ensure_built
     @if [ "{{ fast_stage }}" = "1" ]; then mkdir -p "{{ fast_dir }}"; cp -f "{{ yh }}" "{{ yh_run }}.tmp" && mv -f "{{ yh_run }}.tmp" "{{ yh_run }}"; fi
+    @python3 -c "import os;p='{{ yh_run }}';st=os.stat(p);print(f'编译器: {p} {st.st_size} bytes mtime={int(st.st_mtime)}')" 
     @if [ "{{ host_os }}" = "macos" ] && [ "{{ fast_stage }}" = "1" ]; then ln -sfn "{{ root }}/compiler/darwin-sdk" "{{ fast_dir }}/darwin-sdk"; fi
 
 # test：三层回归——ANTLR 参考语法 + 编译器语法模式 + 运行语义语料。

@@ -127,15 +127,22 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
 - [x] **RB1 worker 父死子退**（2026-10-26 完成）：worker 在 fork 后记录父 pid，并在
   函数入口、整模块发射前两处检查 `getppid()`；父进程不在就退出。实测 `kill -9` 构建父进程
   后，4 个在跑的 worker **2.2 s 内全部退出**（此前会残留 9–17 分钟）。
-- [ ] **RB2 门禁校验 staged 二进制新鲜度**：`justfile` 的 `stage-yh` 把仓库 `yh` 复制到
-  `$TMPDIR/yh-fast/yh`；宿主 `yh` 过期时门禁会拿旧副本跑十几分钟才失败（实测
-  `test-string` 卡 17 分钟）。stage 时比较 hash/mtime，不一致就重拷或告警。
+- [x] **RB2 门禁可见编译器身份**（2026-10-26 完成，按最小改动）：`stage-yh` 依赖
+  `_ensure_built`（源比 `yh` 新就重编），且每次都 `cp -f` 覆盖，本身不会用旧副本；
+  之前「拿旧副本白跑 17 分钟」是**仓库 `yh` 本身来自坏源码状态**，靠时间戳无法发现。
+  现在 `stage-yh` 会打印 `编译器: <path> <bytes> mtime=<epoch>`，门禁日志可直接核对
+  本轮用的是哪一个二进制（完整内容校验的收益不足以抵消每次 70 MB 哈希的成本）。
 - [x] **RB3 Darwin/ARM64 守卫判据**（2026-10-26 修）：`just` 的 `arch()` 在 macOS 返回
   `aarch64`，而 `test-llvm-darwin` / `selfhost-llvm-darwin` 的守卫拿它与 `arm64` 比较 →
   在 Darwin/ARM64 上直接拒绝执行；改用已归一化的 `seed_arch`。
 - [x] **RB4 just 迁移后的门禁复核**（2026-10-26）：`just arch-check` 0.4 s ✅、
   `just test` 0 FAIL ✅、`just selfhost-native` 122/122 + LA3 O0/O2 ✅、
   `just test-llvm-darwin` 0 FAIL ✅（修 RB3 后）。用例数 124 → 122 是 YT4 迁移删掉旧夹具所致。
+- [ ] **RB5 产物二进制不可位级复现**：同一源码重复构建得到的 `yh` 大小/哈希都不同
+  （实测 70,814,352 / 70,814,624 字节），原因是链接后 ad-hoc 签名把**临时文件名/pid**
+  写进了 codesign identifier（`Identifier=yh.yh-tmp.<pid>`）。固定点门禁比较的是模块
+  产物（`.s`/`.s.i`/`.o`），所以没暴露；但「同源同构」的预期不成立，发行可比性受影响。
+  改法：签名前先 rename 到最终名再 `codesign`，或显式给 `-i <稳定identifier>`。
 
 ## 语言内测试（YT4 迁移与发版）
 
