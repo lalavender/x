@@ -72,14 +72,14 @@ def workdir():
     return WORK / f"llvm-host-{HOST}"
 
 
-def selfhost_flags_path():
+def selfhost_flags_path(directory=None):
     """自举闭包文件：构建机在链接时通过 YH_LLVM_SELFHOST_FLAGS 提供。"""
-    return workdir() / "selfhost-flags.txt"
+    return (directory or workdir()) / "selfhost-flags.txt"
 
 
-def selfhost_runtime_path():
+def selfhost_runtime_path(directory=None):
     """非归档运行库参数：通过 YH_LINK_RUNTIME_FLAGS 追加到最终链接。"""
-    return workdir() / "selfhost-runtime.txt"
+    return (directory or workdir()) / "selfhost-runtime.txt"
 
 
 def selfhost_flags_text(flags):
@@ -87,20 +87,47 @@ def selfhost_flags_text(flags):
     return "".join(f"{flag}\n" for flag in flags)
 
 
-def write_selfhost_flags(record):
+def write_selfhost_flags(record, directory=None):
     """把闭包写成本地文件并回填身份字段（种子不再内置构建机绝对路径）。"""
-    path = selfhost_flags_path()
+    path = selfhost_flags_path(directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(selfhost_flags_text(record["selfhost_link_flags"]), encoding="utf-8")
     record["selfhost_flags_file"] = str(path.relative_to(ROOT))
     record["selfhost_flags_sha256"] = digest(path)
     runtime = [flag for flag in record["selfhost_link_flags"]
                if flag != "-force_load" and not flag.startswith("/")]
-    runtime_path = selfhost_runtime_path()
+    # 闭包已用 libc++.tbd 提供 C++ 运行库时不再传 -lc++：否则同一次链接会
+    # 同时拿到 stub 输入和 -l 参数，重复且与闭包身份不一致。
+    if record.get("cxx_tbd"):
+        runtime = [flag for flag in runtime if flag != "-lc++"]
+    runtime_path = selfhost_runtime_path(directory)
     runtime_path.write_text(selfhost_flags_text(runtime), encoding="utf-8")
     record["selfhost_runtime_file"] = str(runtime_path.relative_to(ROOT))
     record["selfhost_runtime_sha256"] = digest(runtime_path)
     return path
+
+
+def cxx_stub_path(directory=None):
+    """闭包里的 libc++ 文本 stub 路径。
+
+    libc++ 是 C++ 桥（lld/LLVM）必需的系统运行库，而随编译器分发的 SDK stub
+    只带 libSystem。把宿主 SDK 的 libc++.tbd 复制进构建机闭包后，项目只要在
+    [link-<目标>] 里引用它就能链接，不再依赖 YH_LINK_RUNTIME_FLAGS。
+    """
+    return (directory or workdir()) / "libc++.tbd"
+
+
+def write_cxx_stub(record, directory=None):
+    """把宿主 SDK 的 libc++.tbd 复制进闭包，并回填身份字段。"""
+    sdk_root = Path(record.get("sdk_root", ""))
+    source = sdk_root / "usr/lib/libc++.tbd"
+    if not source.is_file():
+        return
+    path = cxx_stub_path(directory)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(source.read_bytes())
+    record["cxx_tbd"] = str(path.relative_to(ROOT))
+    record["cxx_tbd_sha256"] = digest(path)
 
 
 def is_compile_call(argv):
@@ -410,6 +437,7 @@ def build_host(jobs):
     }
     # 闭包文件与 host.json 同目录，并记录其摘要；种子只保留 compiler 本体，
     # 绝对路径永远来自构建机的这次 prepare。
+    write_cxx_stub(record)
     write_selfhost_flags(record)
     (workdir() / "host.json").write_text(
         json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -454,6 +482,11 @@ def check(full=True):
     archive = ROOT / record.get("bridge_archive", "")
     if not archive.is_file() or (full and digest(archive) != record.get("bridge_sha256")):
         problems.append("Darwin LLVM 桥归档缺失或摘要错误")
+    cxx = ROOT / record.get("cxx_tbd", "")
+    if not record.get("cxx_tbd") or not cxx.is_file():
+        problems.append("Darwin 闭包缺少 libc++ 文本 stub（需要重新 prepare）")
+    elif full and digest(cxx) != record.get("cxx_tbd_sha256"):
+        problems.append("Darwin 闭包 libc++ 文本 stub 摘要错误")
     for name, expected in {**record.get("llvm_archives", {}),
                            **record.get("lld_archives", {})}.items():
         item = SDK_PREFIX / "lib" / name

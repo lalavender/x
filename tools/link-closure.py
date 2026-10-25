@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """生成/校验 compiler/project.toml 的 [link-<os>-<arch>] 自举归档闭包。
 
-归档来自固定 LLVM 宿主记录（host.json），运行库参数留在
-selfhost-runtime.txt；清单只保存具体 .a 路径和 whole 规则。
+归档来自固定 LLVM 宿主记录（host.json）；C++ 运行库以文本 stub（libc++.tbd）
+形式进入同一节的 `cxx` 组：它是链接输入文件而非 -l 参数，因此不需要构建机
+再通过 YH_LINK_RUNTIME_FLAGS 传递。
 """
 
 import argparse
@@ -71,16 +72,18 @@ def render_host(host: str) -> str:
     tag, rel_record = HOSTS[host]
     record_path = ROOT / rel_record
     if not record_path.is_file():
-        raise SystemExit(f"缺少宿主记录 {rel_record}；先运行 make llvm-host")
+        raise SystemExit(f"缺少宿主记录 {rel_record}；先运行 just llvm-host")
     record = json.loads(record_path.read_text(encoding="utf-8"))
     groups = archive_paths(record)
+    if record.get("cxx_tbd"):
+        groups["cxx"] = [record["cxx_tbd"]]
     # 只强制桥整库加载：桥归档里的 yh_llvm_* 是对外入口，其他 LLVM/lld 归档
     # 由符号引用按需取成员。整库 force_load 会把每个归档的全部成员都塞进产物
     # （Darwin 实测仅多 3 MB，链接命令每库多一个 -force_load），没有收益。
     whole = ["bridge"]
     out = [f"[link-{tag}]"]
-    for name in ("bridge", "lld", "llvm", "support"):
-        paths = groups[name]
+    for name in ("bridge", "lld", "llvm", "support", "cxx"):
+        paths = groups.get(name, [])
         out.append(f"{name} = [")
         for path in paths:
             out.append(f'  "{relative(path)}",')
@@ -137,6 +140,10 @@ def check(host: str) -> int:
     wanted_whole = {"bridge"}
     if whole != wanted_whole:
         raise SystemExit(f"[link-options-{tag}].whole 与宿主记录不一致")
+    cxx = {str((COMPILER / item).resolve()) for item in link.get("cxx", [])}
+    wanted_cxx = {str((ROOT / record["cxx_tbd"]).resolve())} if record.get("cxx_tbd") else set()
+    if cxx != wanted_cxx:
+        raise SystemExit(f"[link-{tag}].cxx 与宿主记录不一致")
     print(f"PASS 自举闭包清单：{host}")
     return 0
 

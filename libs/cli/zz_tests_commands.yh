@@ -1,0 +1,383 @@
+module cli
+
+import string
+
+// ============================================================================
+// zz_tests_commands.yh —— cli CLI3 子命令/分组/模式行为的语言内测试（YT4-P4c）
+//
+// 只在 `yh test cli` 中执行；生产构建不登记测试符号、不发射测试体。
+// 来源是 libs/cli/test/clicommands 的 9 个 case_*；断言只调 cli 的 pub API。
+// 文件名以 zz_ 开头：类型声明在 cli.yh，必须排在它之后。
+// ============================================================================
+
+// ct_text_is：dest 的文本值等于 want。
+fn ct_text_is(values *Namespace, dest *char, want *char) bool {
+    let text *char
+    if (get_text(values, dest, &text) != 0) {
+        return false
+    }
+    return string.equals(text, want) == 1
+}
+
+// ct_build_tool：构造「根 + build 子命令」的 parser；0 成功。
+fn ct_build_tool(root *Parser) int {
+    let config ParserConfig = parser_config("tool")
+    config.description = "构建工具"
+    if (init(root, config) != 0) {
+        return 1
+    }
+    let verbose Argument = option("--verbose", "-v")
+    verbose.action = count
+    if (add_argument(root, verbose) < 0) {
+        return 2
+    }
+    let mode Argument = option("--mode", 0)
+    mode.default_value = default_of(value_text("root"))
+    if (add_argument(root, mode) < 0) {
+        return 3
+    }
+    let slot int = add_subparsers(root, subparsers())
+    if (slot < 0) {
+        return 4
+    }
+    let spec Command = command("build")
+    let aliases [1]*char
+    aliases[0] = "b"
+    spec.aliases = aliases.to_type([]*char)
+    spec.help = "构建目标"
+    let child *Parser = add_parser(root, slot, spec)
+    if (child == 0) {
+        return 5
+    }
+    let output Argument = option("--output", "-o")
+    output.default_value = default_of(value_text("a.bin"))
+    if (add_argument(child, output) < 0) {
+        return 6
+    }
+    let child_mode Argument = option("--mode", 0)
+    child_mode.default_value = default_of(value_text("child"))
+    if (add_argument(child, child_mode) < 0) {
+        return 7
+    }
+    let source Argument = positional("source")
+    if (add_argument(child, source) < 0) {
+        return 8
+    }
+    return 0
+}
+
+test "子命令：别名与 command_path" {
+    let root Parser
+    $assert(ct_build_tool(&root) == 0, "tool parser 装配")
+    let args [4]*char
+    args[0] = "build"
+    args[1] = "in.txt"
+    args[2] = "--output"
+    args[3] = "out.bin"
+    let r Result = parse(&root, args[0..4])
+    $assert(r.status == ok, "子命令解析应成功")
+    $assert(len(r.command_path) == 1 && string.equals(r.command_path[0], "build") == 1,
+        "command_path 是规范名")
+    $assert(ct_text_is(&r.values, "source", "in.txt"), "子命令位置参数")
+    $assert(ct_text_is(&r.values, "output", "out.bin"), "子命令选项")
+    release(&r)
+
+    let alias [2]*char
+    alias[0] = "b"
+    alias[1] = "in.txt"
+    let r2 Result = parse(&root, alias[0..2])
+    $assert(r2.status == ok && len(r2.command_path) == 1
+        && string.equals(r2.command_path[0], "build") == 1,
+        "别名匹配但 command_path 仍是规范名")
+    release(&r2)
+
+    let unknown [1]*char
+    unknown[0] = "nope"
+    let r3 Result = parse_known(&root, unknown[0..1])
+    $assert(r3.status == usage_error, "未知子命令即使 known 模式也报错")
+    release(&r3)
+    destroy(&root)
+}
+
+test "子命令：父子默认值合成" {
+    let root Parser
+    $assert(ct_build_tool(&root) == 0, "tool parser 装配")
+    let args [2]*char
+    args[0] = "build"
+    args[1] = "in.txt"
+    let r Result = parse(&root, args[0..2])
+    $assert(r.status == ok, "解析应成功")
+    $assert(ct_text_is(&r.values, "mode", "child"), "子默认值覆盖根默认值")
+    release(&r)
+
+    let explicit [4]*char
+    explicit[0] = "--mode"
+    explicit[1] = "rootx"
+    explicit[2] = "build"
+    explicit[3] = "in.txt"
+    let r2 Result = parse(&root, explicit[0..4])
+    $assert(r2.status == ok && ct_text_is(&r2.values, "mode", "rootx"),
+        "根显式值不被子默认覆盖")
+    release(&r2)
+    destroy(&root)
+}
+
+test "子命令：槽 dest 与必需命令" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let spec Subparsers = subparsers()
+    spec.dest = "command"
+    spec.required = true
+    let slot int = add_subparsers(&root, spec)
+    $assert(slot >= 0, "子命令槽注册")
+    let cmd Command = command("run")
+    $assert(add_parser(&root, slot, cmd) != 0, "子命令 parser 注册")
+    let empty [1]*char
+    let r Result = parse(&root, empty[0..0])
+    $assert(r.status == usage_error, "缺少必需子命令报 usage_error")
+    release(&r)
+    let args [1]*char
+    args[0] = "run"
+    let r2 Result = parse(&root, args[0..1])
+    $assert(r2.status == ok, "子命令解析成功")
+    $assert(ct_text_is(&r2.values, "command", "run"), "槽 dest 写入规范命令名")
+    release(&r2)
+    destroy(&root)
+}
+
+test "子命令：inherit 深复制" {
+    let parent Parser
+    let pconfig ParserConfig = parser_config("common")
+    pconfig.add_help = false
+    $assert(init(&parent, pconfig) == 0, "parent 初始化")
+    let color Argument = option("--color", 0)
+    color.action = store_true
+    $assert(add_argument(&parent, color) >= 0, "parent 参数注册")
+
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "root 初始化")
+    $assert(inherit(&root, &parent) == 0, "root inherit")
+    let slot int = add_subparsers(&root, subparsers())
+    $assert(slot >= 0, "子命令槽注册")
+    let cmd Command = command("go")
+    let child *Parser = add_parser(&root, slot, cmd)
+    $assert(child != 0, "child 注册")
+    $assert(inherit(child, &parent) == 0, "child inherit")
+
+    let late Argument = option("--late", 0)
+    $assert(add_argument(&parent, late) >= 0, "inherit 后给 parent 加参数")
+    let args [3]*char
+    args[0] = "--color"
+    args[1] = "go"
+    args[2] = "--color"
+    let r Result = parse(&root, args[0..3])
+    let flag bool = false
+    $assert(r.status == ok, "inherit 解析应成功")
+    $assert(get_bool(&r.values, "color", &flag) == 0 && flag == true,
+        "inherited 选项生效")
+    release(&r)
+
+    let late_args [2]*char
+    late_args[0] = "go"
+    late_args[1] = "--late"
+    let r2 Result = parse(&root, late_args[0..2])
+    $assert(r2.status == usage_error, "inherit 之后新加的参数不在 child 中")
+    release(&r2)
+    destroy(&root)
+    destroy(&parent)
+}
+
+test "分组：展示组默认值与组级 resolve" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let gspec Group = group("输出", "输出相关参数")
+    gspec.argument_default = default_of(value_text("group-default"))
+    let group_id int = add_group(&root, gspec)
+    $assert(group_id > 0, "展示组注册")
+    let fmt Argument = option("--fmt", 0)
+    fmt.group = group_id
+    $assert(add_argument(&root, fmt) >= 0, "组内参数注册")
+    let empty [1]*char
+    let r Result = parse(&root, empty[0..0])
+    $assert(r.status == ok && ct_text_is(&r.values, "fmt", "group-default"),
+        "组级默认值生效")
+    release(&r)
+    destroy(&root)
+
+    let parser2 Parser
+    $assert(init(&parser2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let gspec2 Group = group("冲突", 0)
+    gspec2.conflict = resolve
+    let group2 int = add_group(&parser2, gspec2)
+    $assert(group2 > 0, "resolve 组注册")
+    let first Argument = option("--dup", 0)
+    first.group = group2
+    $assert(add_argument(&parser2, first) >= 0, "第一个 --dup 注册")
+    let second Argument = option("--dup", 0)
+    second.group = group2
+    second.value_kind = integer
+    $assert(add_argument(&parser2, second) >= 0, "同组第二个 --dup 注册")
+    let args [2]*char
+    args[0] = "--dup"
+    args[1] = "5"
+    let r2 Result = parse(&parser2, args[0..2])
+    let number i64 = 0
+    $assert(r2.status == ok && get_i64(&r2.values, "dup", &number) == 0
+        && number == 5, "resolve 组让新选项接管同名名称")
+    release(&r2)
+    destroy(&parser2)
+}
+
+test "分组：互斥组" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let mutex int = add_mutex(&root, false, 0)
+    $assert(mutex > 0, "互斥组注册")
+    let json Argument = option("--json", 0)
+    json.action = store_true
+    json.mutex = mutex
+    let yaml Argument = option("--yaml", 0)
+    yaml.action = store_true
+    yaml.mutex = mutex
+    $assert(add_argument(&root, json) >= 0 && add_argument(&root, yaml) >= 0,
+        "互斥组参数注册")
+    let both [2]*char
+    both[0] = "--json"
+    both[1] = "--yaml"
+    let r Result = parse(&root, both[0..2])
+    $assert(r.status == usage_error, "互斥组同时出现报错")
+    release(&r)
+    let one [1]*char
+    one[0] = "--json"
+    let r2 Result = parse(&root, one[0..1])
+    $assert(r2.status == ok, "互斥组只出现一个应成功")
+    release(&r2)
+    destroy(&root)
+
+    let parser2 Parser
+    $assert(init(&parser2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let req int = add_mutex(&parser2, true, 0)
+    $assert(req > 0, "必需互斥组注册")
+    let aa Argument = option("--aa", 0)
+    aa.action = store_true
+    aa.mutex = req
+    let bb Argument = option("--bb", 0)
+    bb.action = store_true
+    bb.mutex = req
+    $assert(add_argument(&parser2, aa) >= 0 && add_argument(&parser2, bb) >= 0,
+        "必需互斥组参数注册")
+    let empty [1]*char
+    let r3 Result = parse(&parser2, empty[0..0])
+    $assert(r3.status == usage_error, "必需互斥组缺失报错")
+    release(&r3)
+    let r4 Result = parse(&parser2, one[0..1])
+    $assert(r4.status == usage_error, "组外选项不能满足必需互斥组")
+    release(&r4)
+    let bb_args [1]*char
+    bb_args[0] = "--bb"
+    let r5 Result = parse(&parser2, bb_args[0..1])
+    $assert(r5.status == ok, "必需互斥组成员出现应成功")
+    release(&r5)
+    destroy(&parser2)
+}
+
+test "模式：parse_known 保留未知 token" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let verbose Argument = option("--verbose", "-v")
+    verbose.action = count
+    let file Argument = positional("file")
+    $assert(add_argument(&root, verbose) >= 0 && add_argument(&root, file) >= 0,
+        "参数注册成功")
+    let args [5]*char
+    args[0] = "--unknown"
+    args[1] = "x"
+    args[2] = "--verbose"
+    args[3] = "input.bin"
+    args[4] = "extra.bin"
+    let r Result = parse_known(&root, args[0..5])
+    $assert(r.status == ok, "known 模式解析应成功")
+    $assert(ct_text_is(&r.values, "file", "x"), "位置参数照常消费")
+    $assert(len(r.unparsed) == 3
+        && string.equals(r.unparsed[0], "--unknown") == 1
+        && string.equals(r.unparsed[1], "input.bin") == 1
+        && string.equals(r.unparsed[2], "extra.bin") == 1, "未知 token 原样保留")
+    release(&r)
+
+    let cluster [2]*char
+    cluster[0] = "-vx"
+    cluster[1] = "f.txt"
+    let r2 Result = parse_known(&root, cluster[0..2])
+    let level i64 = 0
+    $assert(r2.status == ok && len(r2.unparsed) == 1
+        && string.equals(r2.unparsed[0], "-vx") == 1, "未知短组合整 token 保留")
+    $assert(get_i64(&r2.values, "verbose", &level) == -2, "未知短组合不累计 -v")
+    $assert(ct_text_is(&r2.values, "file", "f.txt"), "短组合后的位置参数")
+    release(&r2)
+    destroy(&root)
+}
+
+test "模式：intermixed 跨选项收集与限制" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let level Argument = option("--level", 0)
+    level.value_kind = integer
+    let files Argument = positional("files")
+    files.arity = zero_or_more()
+    $assert(add_argument(&root, level) >= 0 && add_argument(&root, files) >= 0,
+        "参数注册成功")
+    let args [4]*char
+    args[0] = "a"
+    args[1] = "--level"
+    args[2] = "2"
+    args[3] = "b"
+    let r Result = parse_intermixed(&root, args[0..4])
+    let list []Value
+    $assert(r.status == ok && get_list(&r.values, "files", &list) == 0
+        && len(list) == 2, "intermixed 跨选项收集位置值")
+    release(&r)
+    let r2 Result = parse(&root, args[0..4])
+    $assert(r2.status == usage_error, "普通模式同输入是多余位置参数")
+    release(&r2)
+    destroy(&root)
+
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let slot int = add_subparsers(&root2, subparsers())
+    $assert(slot >= 0, "子命令槽注册")
+    let cmd Command = command("go")
+    $assert(add_parser(&root2, slot, cmd) != 0, "子命令 parser 注册")
+    let empty [1]*char
+    let r3 Result = parse_intermixed(&root2, empty[0..0])
+    $assert(r3.status == config_error, "含子命令时 intermixed 报 config_error")
+    release(&r3)
+    destroy(&root2)
+}
+
+test "模式：initial 快照" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let source Argument = positional("source")
+    source.arity = optional()
+    $assert(add_argument(&root, source) >= 0, "可选位置参数注册")
+    let preset Namespace
+    $assert(namespace_init(&preset) == 0, "preset 初始化")
+    $assert(namespace_set(&preset, "source", value_text("pre")) == 0,
+        "preset 写入 source")
+    let parse_spec ParseConfig = parse_config()
+    parse_spec.initial = &preset
+    let empty [1]*char
+    let r Result = parse_with(&root, empty[0..0], parse_spec)
+    $assert(r.status == ok && ct_text_is(&r.values, "source", "pre"),
+        "空参数使用 initial 快照")
+    release(&r)
+    let args [1]*char
+    args[0] = "cmd"
+    let r2 Result = parse_with(&root, args[0..1], parse_spec)
+    $assert(r2.status == ok && ct_text_is(&r2.values, "source", "cmd"),
+        "显式位置值覆盖 initial")
+    release(&r2)
+    $assert(ct_text_is(&preset, "source", "pre"), "initial 命名空间未被修改")
+    namespace_destroy(&preset)
+    destroy(&root)
+}

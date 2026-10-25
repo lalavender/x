@@ -189,28 +189,20 @@ case("s1-libs-io-write", "stdlib-run", "libsio", ".", 23,
      stdout="yh libs io ok\n")
 case("s2-libs-core-modules", "stdlib-run", "libsbase", ".", 0,
      stdout="yh libs base ok\n")
-# —— ST1–ST6：string 标准库基础组（失败注入由 make test-string 承担） ——
+# —— ST1/ST6：string 公开面与跨库 smoke（断言已迁入 libs/string/99_tests.yh） ——
 case("st1-string-model", "stdlib-run", "stringmodel", ".", 0,
      stdout="string model ok\n")
-case("st2-string-view", "stdlib-run", "stringview", ".", 0,
-     stdout="string view ok\n")
-case("st3-string-owned", "stdlib-run", "stringowned", ".", 0,
-     stdout="string owned ok\n")
-case("st4-string-transform", "stdlib-run", "stringtransform", ".", 0,
-     stdout="string transform ok\n")
-case("st5-string-utf8", "stdlib-run", "stringutf8", ".", 0,
-     stdout="string utf8 ok\n")
 case("st6-string-interop", "stdlib-run", "stringinterop", ".", 0,
      stdout="string interop ok\n")
+# —— JSON：断言已迁入 libs/json/99_tests.yh，这里保留公开面/链接 smoke ——
+case("j1-json-model", "stdlib-run", "jsonmodel", ".", 0,
+     stdout="json model ok\n")
 # —— FMT/I：字符串插值端到端（文本/表达式/字段/下标/uint/i64/spec/转义） ——
 case("fmt-interp", "stdlib-run", "fmtinterp", ".", 0,
      stdout="Hello, Bob! n=7 sum=12 p=3,4 idx=10 u=42 w=99\n"
             "hex=0007 f=1.50 bool=true literal=${n}\n"
             "plain $5 and ${x} and $x\n"
             "v=hi\n")
-# —— OS0/OS5：结果模型与 io 完整写入（跨平台） ——
-case("os0-sys-result-model", "stdlib-run", "sysresult", ".", 0,
-     stdout="sys result ok\n")
 case("os0-os-result-model", "stdlib-run", "osmodel", ".", 0,
      stdout="os model ok\n")
 case("os5-io-write-result", "stdlib-run", "osio", ".", 0,
@@ -234,7 +226,6 @@ case("i1-inline-ssa-and-fallback", "inline", "inline", ".")
 case("i1-inline-order-after-noninline", "run", "inlineorder", ".", 0)
 case("r1-token-replay-run", "run", "tokenreplay", ".", 42)
 case("r2b-ast-check-module", "run", "astcheck", ".", 0)
-case("r2a-ssa-phi-verifier", "run", "irverify", ".", 0)
 case("llvm-float-cross-module", "run", "llvmfloat", ".", 0)
 case("llvm-yh-cross-module-call", "run", "llvmyhimport", ".", 0)
 case("llvm-cabi-scalar-cross-module", "run", "llvmabi", ".", 0)
@@ -302,6 +293,10 @@ case("u3-private-type-pointer-in-pub", "fail", "privtype", "badptr",
 case("u3-duplicate-decl", "fail", "dupdecl", "host", msg="重定义")
 case("u3-unused-import", "fail", "unusedimp", "host", msg="导入未使用")
 case("u3-import-clash", "fail", "clashname", "host", msg="导入名冲突")
+# —— PC1（2026-10-25）：函数级 IR 缓存命中率回归 ——
+# 键里混入 arena 下标时实测全量 miss；这里固定三条断言：冷编全 miss、
+# 等价重编全命中、改一个函数体只失效该函数。
+case("pc1-function-cache-hits", "firc", "firchits", ".")
 
 # —— OS1–OS5：Linux 文件/目录/环境/进程/时间/内存（只在 Linux 内核运行） ——
 OS_LINUX_CASES = [
@@ -343,7 +338,7 @@ def copy_proj(src, dst):
             if source.is_dir():
                 ignore = shutil.ignore_patterns("llvm_bridge.yh") if module == "backend" else None
                 shutil.copytree(source, dst / module, ignore=ignore)
-    if src.name in ("irverify", "irfront", "llvmmodule"):
+    if src.name in ("irfront", "llvmmodule"):
         # ir 现为编译器根项目普通模块（不带清单）；fixture 仍以路径依赖
         # 方式复用其源码测跨项目解析，拷入后补最小清单使其可被发现。
         shutil.copytree(ROOT / "compiler" / "ir", dst / "ir")
@@ -453,6 +448,73 @@ def main():
 
         dst = WORK / f"{c['fixture'].replace('/', '_')}--{c['name']}"
         copy_proj(PROJ / c["fixture"], dst)
+        if c["kind"] == "firc":
+            if COMPILER_BACKEND != "llvm":
+                report(False, c["name"], "函数级缓存回归只覆盖 LLVM 后端")
+                return out
+            root = artifact_root(dst)
+            # 模块标记 = 项目名 + 模块名；按 glob 匹配，避免把项目名写死。
+            source = dst / "main.yh"
+            original = source.read_text(encoding="utf-8")
+
+            def cache_stats(proc):
+                """取 ir_functions 最大的 stats 行：worker 行才有缓存计数。"""
+                rows = [line for line in (proc.stdout + proc.stderr).splitlines()
+                        if line.startswith("yh-stats ") and "ir_functions=" in line]
+                if not rows:
+                    return (-1, -1, -1)
+                line = max(rows, key=lambda row: stat_value(row, "ir_functions", -1))
+                return (stat_value(line, "ir_functions", -1),
+                        stat_value(line, "ir_cache_hits", -1),
+                        stat_value(line, "ir_cache_misses", -1))
+
+            cold = sh([compiler, "build", "--stats"], cwd=dst)
+            total, hits, misses = cache_stats(cold)
+            report(cold.returncode == 0 and total > 0 and hits == 0 and misses == total,
+                   c["name"] + ":cold-miss",
+                   f"冷编应全 miss：rc={cold.returncode} total={total} "
+                   f"hits={hits} misses={misses}\n{cold.stderr[-400:]}")
+            # PC3：上一轮没完成链接（.build 刚清空）时不写函数级缓存。
+            records = list(root.glob("firc/*/*.fir"))
+            report(cold.returncode == 0 and not records,
+                   c["name"] + ":cold-no-write",
+                   f"全冷构建写了 {len(records)} 条函数缓存记录，PC3 要求为 0")
+
+            def force_recompile():
+                for pattern in ("manifest/*-main.manifest", "obj/*-main.o"):
+                    for path in root.glob(pattern):
+                        path.unlink()
+
+            # 首次等价重编：缓存还是空的（冷编没写），全 miss 并落盘。
+            force_recompile()
+            primed = sh([compiler, "build", "--stats"], cwd=dst)
+            total_p, hits_p, misses_p = cache_stats(primed)
+            report(primed.returncode == 0 and total_p == total and hits_p == 0
+                   and misses_p == total,
+                   c["name"] + ":prime-miss",
+                   f"首轮重编应全 miss：total={total_p} hits={hits_p} "
+                   f"misses={misses_p}\n{primed.stderr[-400:]}")
+            force_recompile()
+            hot = sh([compiler, "build", "--stats"], cwd=dst)
+            total2, hits2, misses2 = cache_stats(hot)
+            report(hot.returncode == 0 and total2 == total and hits2 == total
+                   and misses2 == 0,
+                   c["name"] + ":hot-all-hit",
+                   f"等价重编未全命中：total={total2} hits={hits2} misses={misses2}"
+                   f"\n{hot.stderr[-400:]}")
+            source.write_text(original.replace("    return x + 1;",
+                                               "    return x + 2;", 1),
+                              encoding="utf-8")
+            edit = sh([compiler, "build", "--stats"], cwd=dst)
+            total3, hits3, misses3 = cache_stats(edit)
+            report(edit.returncode == 0 and total3 == total and misses3 == 1
+                   and hits3 == total - 1,
+                   c["name"] + ":one-function-miss",
+                   f"单函数改动未只失效该函数：total={total3} hits={hits3} "
+                   f"misses={misses3}\n{edit.stderr[-400:]}")
+            source.write_text(original, encoding="utf-8")
+            return out
+
         if c["kind"] == "linkgroups":
             cc = "clang" if sys.platform == "darwin" else "gcc"
 

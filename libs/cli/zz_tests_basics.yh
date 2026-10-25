@@ -1,0 +1,231 @@
+module cli
+
+import string
+
+// ============================================================================
+// zz_tests_basics.yh —— cli CLI1 行为的语言内测试（YT4-P4a）
+//
+// 只在 `yh test cli` 中执行；生产构建不登记测试符号、不发射测试体。
+// 来源是 libs/cli/test/clibasics 的 `selftest()`；argv/退出码/stderr 契约
+// （pack 真实入口、--help、缺参退出码）仍由 libs/cli/test/run.py 覆盖。
+// 文件名以 zz_ 开头：类型声明在 cli.yh，必须排在它之后。
+// ============================================================================
+
+// build_pack_parser：按设计示例装配验收用 parser；0 成功。
+fn build_pack_parser(p *Parser) int {
+    let config ParserConfig = parser_config("pack")
+    config.description = "打包指定输入文件"
+    if (init(p, config) != 0) {
+        return 1
+    }
+    let output Argument = option("--output", "-o")
+    output.help = "输出文件路径"
+    output.metavar = "PATH"
+    output.default_value = default_of(value_text("bundle.bin"))
+    if (add_argument(p, output) < 0) {
+        return 2
+    }
+    let verbose Argument = option("--verbose", "-v")
+    verbose.action = count
+    verbose.help = "增加详细等级"
+    if (add_argument(p, verbose) < 0) {
+        return 3
+    }
+    let level Argument = option("--level", "-l")
+    level.value_kind = integer
+    if (add_argument(p, level) < 0) {
+        return 4
+    }
+    let tag Argument = option("--tag", 0)
+    tag.arity = optional()
+    tag.const_value = value_text("none-tag")
+    if (add_argument(p, tag) < 0) {
+        return 5
+    }
+    let force Argument = option("--force", 0)
+    force.action = store_true
+    if (add_argument(p, force) < 0) {
+        return 6
+    }
+    let source Argument = positional("source")
+    source.help = "输入文件路径"
+    if (add_argument(p, source) < 0) {
+        return 7
+    }
+    return 0
+}
+
+test "pack：默认值与位置参数" {
+    let parser Parser
+    $assert(build_pack_parser(&parser) == 0, "parser 装配应成功")
+    let args [1]*char
+    args[0] = "in.txt"
+    let r Result = parse(&parser, args[0..1])
+    $assert(r.status == ok, "解析应成功")
+    let path *char
+    $assert(get_text(&r.values, "output", &path) == 0, "读取 output")
+    $assert(string.equals(path, "bundle.bin") == 1, "缺省 output 使用显式默认值")
+    $assert(provided(&r.values, "output") == false, "默认值不算 provided")
+    let input *char
+    $assert(get_text(&r.values, "source", &input) == 0, "读取 source")
+    $assert(string.equals(input, "in.txt") == 1, "位置参数取值")
+    let number i64
+    $assert(get_i64(&r.values, "verbose", &number) == -2, "count 缺席类型不对")
+    $assert(get_i64(&r.values, "output", &number) == -2, "文本选项取 i64 类型不对")
+    release(&r)
+    destroy(&parser)
+}
+
+test "pack：附着值、计数与类型化取值" {
+    let parser Parser
+    $assert(build_pack_parser(&parser) == 0, "parser 装配应成功")
+    let args [6]*char
+    args[0] = "in.txt"
+    args[1] = "-v"
+    args[2] = "--verbose"
+    args[3] = "--output=out.bin"
+    args[4] = "--level"
+    args[5] = "-7"
+    let r Result = parse(&parser, args[0..6])
+    $assert(r.status == ok, "带值解析应成功")
+    let level i64
+    $assert(get_i64(&r.values, "verbose", &level) == 0 && level == 2,
+        "verbose 计数为 2")
+    $assert(occurrences(&r.values, "verbose") == 2, "verbose 出现次数")
+    $assert(provided(&r.values, "verbose") == true, "显式出现的选项算 provided")
+    let path *char
+    $assert(get_text(&r.values, "output", &path) == 0
+        && string.equals(path, "out.bin") == 1, "附着值 --output=out.bin")
+    $assert(get_i64(&r.values, "level", &level) == 0 && level == -7,
+        "负数值选项")
+    release(&r)
+    destroy(&parser)
+}
+
+test "pack：optional const 与 store_true" {
+    let parser Parser
+    $assert(build_pack_parser(&parser) == 0, "parser 装配应成功")
+    let bare [2]*char
+    bare[0] = "in.txt"
+    bare[1] = "--tag"
+    let r1 Result = parse(&parser, bare[0..2])
+    $assert(r1.status == ok, "optional 无值解析应成功")
+    let tag *char
+    $assert(get_text(&r1.values, "tag", &tag) == 0
+        && string.equals(tag, "none-tag") == 1, "optional 无值使用 const")
+    release(&r1)
+
+    let with_value [3]*char
+    with_value[0] = "in.txt"
+    with_value[1] = "--tag"
+    with_value[2] = "release"
+    let r2 Result = parse(&parser, with_value[0..3])
+    $assert(r2.status == ok, "optional 带值解析应成功")
+    $assert(get_text(&r2.values, "tag", &tag) == 0
+        && string.equals(tag, "release") == 1, "optional 带值使用输入")
+    release(&r2)
+
+    let forced [2]*char
+    forced[0] = "in.txt"
+    forced[1] = "--force"
+    let r3 Result = parse(&parser, forced[0..2])
+    let force bool
+    $assert(r3.status == ok && get_bool(&r3.values, "force", &force) == 0
+        && force == true, "store_true 产生 true")
+    release(&r3)
+    destroy(&parser)
+}
+
+test "pack：-- 分隔与错误分类" {
+    let parser Parser
+    $assert(build_pack_parser(&parser) == 0, "parser 装配应成功")
+    let dashed [2]*char
+    dashed[0] = "--"
+    dashed[1] = "-draft"
+    let r1 Result = parse(&parser, dashed[0..2])
+    let input *char
+    $assert(r1.status == ok && get_text(&r1.values, "source", &input) == 0
+        && string.equals(input, "-draft") == 1, "-- 之后的 token 是位置值")
+    release(&r1)
+
+    let empty_args [1]*char
+    let r2 Result = parse(&parser, empty_args[0..0])
+    $assert(r2.status == usage_error && r2.error.message != 0,
+        "缺少必需位置参数是 usage_error 且有消息")
+    release(&r2)
+
+    let unknown [2]*char
+    unknown[0] = "in.txt"
+    unknown[1] = "--unknown"
+    let r3 Result = parse(&parser, unknown[0..2])
+    $assert(r3.status == usage_error && r3.error.token_index == 1,
+        "未知选项是 usage_error 并带 token 下标")
+    release(&r3)
+
+    let missing_value [2]*char
+    missing_value[0] = "in.txt"
+    missing_value[1] = "--output"
+    let r4 Result = parse(&parser, missing_value[0..2])
+    $assert(r4.status == usage_error, "选项缺值是 usage_error")
+    release(&r4)
+
+    let extra [2]*char
+    extra[0] = "one"
+    extra[1] = "two"
+    let r5 Result = parse(&parser, extra[0..2])
+    $assert(r5.status == usage_error, "多余位置参数是 usage_error")
+    release(&r5)
+
+    let bad_value [3]*char
+    bad_value[0] = "in.txt"
+    bad_value[1] = "--level"
+    bad_value[2] = "abc"
+    let r6 Result = parse(&parser, bad_value[0..3])
+    $assert(r6.status == usage_error, "类型转换失败是 usage_error")
+    release(&r6)
+    destroy(&parser)
+}
+
+test "pack：帮助、渲染与结果生命周期" {
+    let parser Parser
+    $assert(build_pack_parser(&parser) == 0, "parser 装配应成功")
+    let help_args [1]*char
+    help_args[0] = "--help"
+    let r1 Result = parse(&parser, help_args[0..1])
+    $assert(r1.status == help_requested && r1.control_text != 0,
+        "--help 返回控制状态与帮助文本")
+    release(&r1)
+
+    let usage TextResult = format_usage(&parser)
+    $assert(usage.status == ok && usage.text != 0, "format_usage 应生成文本")
+    release_text(&usage)
+    let help TextResult = format_help(&parser)
+    $assert(help.status == ok && help.text != 0, "format_help 应生成文本")
+    release_text(&help)
+
+    let rendered TextResult = format_usage(&parser)
+    $assert(render_text(&rendered, 2) == 0, "render_text 应写出")
+    $assert(render_text(&rendered, -1) == -1, "非法 fd 应返回 -1")
+    release_text(&rendered)
+
+    let second [1]*char
+    second[0] = "second.txt"
+    let r2 Result = parse(&parser, second[0..1])
+    $assert(occurrences(&r2.values, "verbose") == 0
+        && provided(&r2.values, "verbose") == false, "第二次解析不继承显式值")
+    let list []Value
+    $assert(get_list(&r2.values, "output", &list) == -2, "get_list 类型错误码")
+    $assert(get_list(&r2.values, "nosuch", &list) == -1, "get_list 缺键错误码")
+    release(&r2)
+
+    let late [1]*char
+    late[0] = "late.txt"
+    let r3 Result = parse(&parser, late[0..1])
+    $assert(r3.status == ok, "生命周期用例解析应成功")
+    let late_value *char
+    destroy(&parser)
+    $assert(get_text(&r3.values, "source", &late_value) == 0
+        && string.equals(late_value, "late.txt") == 1,
+        "结果生命周期独立于 parser")
+    release(&r3)
+}

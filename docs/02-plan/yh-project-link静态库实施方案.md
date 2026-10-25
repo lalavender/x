@@ -141,8 +141,17 @@ mtime_sec mtime_nsec size digest realpath
 - bridge / lld / LLVM / support 归档进入 `[link-<os>-<arch>]`；
 - Darwin 保持桥、lld、LLVM 全量 `-force_load`（全部组 whole）；Linux 只强制
   bridge，其余在同一个 `--start-group` 内按需加载；
-- `-lc++`、`-lstdc++`、`-lpthread` 等运行库参数由构建机写入
-  `selfhost-runtime.txt`，经 `YH_LINK_RUNTIME_FLAGS` 传给链接；
+- **Darwin 的 C++ 运行库以文件形式进闭包**：`tools/llvm-darwin-host.py prepare`
+  把宿主 SDK 的 `usr/lib/libc++.tbd` 复制到构建机闭包目录，摘要记入 `host.json`
+  的 `cxx_tbd`/`cxx_tbd_sha256`，`tools/link-closure.py` 写入 `[link-darwin-arm64].cxx`。
+  这样 C++ 符号由链接输入文件提供，而不是靠 `-lc++` 参数：
+  `cd compiler && ../bin/yh-darwin-arm64 build` 在不设 `SDKROOT`、不设
+  `YH_LINK_RUNTIME_FLAGS` 时也能直接链接（此前会输出三万余条未定义 C++ 符号）。
+  代价是 `.tbd` 是本机 SDK 的副本，换机需重跑 `make llvm-host`；
+- 归档之外的运行库**参数**（Linux 的 `-lstdc++`、`-lpthread`、`-lxml2` 等）
+  仍由构建机写入 `selfhost-runtime.txt`，经 `YH_LINK_RUNTIME_FLAGS` 传给链接；
+  Darwin 闭包已提供 libc++ 时 prepare 会从该文件里去掉 `-lc++`，避免同一次
+  链接同时带 stub 与 `-l` 参数；
 - 新编译器读到 `compiler/project.toml` 的 `[link]` 即进入 manifest-only，
   `YH_LINK_MANIFEST_ONLY=1` 让 C++ 桥停止追加旧归档；
 - 第一代候选仍可用旧 seed + 旧注入构建；manifest 生效后不再新旧叠加；

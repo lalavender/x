@@ -1,0 +1,553 @@
+module cli
+
+import string
+
+// ============================================================================
+// zz_tests_actions.yh —— cli CLI2 行为的语言内测试（YT4-P4b）
+//
+// 只在 `yh test cli` 中执行；生产构建不登记测试符号、不发射测试体。
+// 来源是 libs/cli/test/cliactions 的 12 个 case_*；断言只调 cli 的 pub API。
+// 文件名以 zz_ 开头：类型声明在 cli.yh，必须排在它之后。
+// ============================================================================
+
+// at_text_is：dest 的文本值等于 want。
+fn at_text_is(values *Namespace, dest *char, want *char) bool {
+    let text *char
+    if (get_text(values, dest, &text) != 0) {
+        return false
+    }
+    return string.equals(text, want) == 1
+}
+
+// at_list_len：dest 是列表且长度为 want。
+fn at_list_len(values *Namespace, dest *char, want int) bool {
+    let list []Value
+    if (get_list(values, dest, &list) != 0) {
+        return false
+    }
+    return len(list) == want
+}
+
+// at_list_text_at：列表中第 index 个元素是期望文本。
+fn at_list_text_at(values *Namespace, dest *char, index int, want *char) bool {
+    let list []Value
+    if (get_list(values, dest, &list) != 0) {
+        return false
+    }
+    if (index >= len(list) || list[index].kind != text) {
+        return false
+    }
+    return string.equals(list[index].data.text, want) == 1
+}
+
+test "动作：single 与 exactly(1)" {
+    let parser Parser
+    $assert(init(&parser, parser_config("t1")) == 0, "parser 初始化")
+    let one Argument = option("--one", 0)
+    let many Argument = option("--many", 0)
+    many.arity = exactly(1)
+    $assert(add_argument(&parser, one) >= 0 && add_argument(&parser, many) >= 0,
+        "两个选项注册成功")
+    let args [4]*char
+    args[0] = "--one"
+    args[1] = "a"
+    args[2] = "--many"
+    args[3] = "b"
+    let r Result = parse(&parser, args[0..4])
+    $assert(r.status == ok, "解析应成功")
+    $assert(at_text_is(&r.values, "one", "a"), "single 取文本")
+    $assert(at_list_len(&r.values, "many", 1), "exactly(1) 得到单元素列表")
+    $assert(at_list_text_at(&r.values, "many", 0, "b"), "列表元素取值")
+    let text_value *char
+    $assert(get_text(&r.values, "many", &text_value) == -2,
+        "列表选项按文本取是类型错误")
+    release(&r)
+    destroy(&parser)
+}
+
+test "动作：zero_or_more 与 one_or_more 位置参数" {
+    let parser Parser
+    $assert(init(&parser, parser_config("t2")) == 0, "parser 初始化")
+    let files Argument = positional("files")
+    files.arity = zero_or_more()
+    let tags Argument = positional("tags")
+    tags.arity = one_or_more()
+    $assert(add_argument(&parser, files) >= 0 && add_argument(&parser, tags) >= 0,
+        "位置参数注册成功")
+    let args [3]*char
+    args[0] = "a"
+    args[1] = "b"
+    args[2] = "c"
+    let r Result = parse(&parser, args[0..3])
+    $assert(r.status == ok, "位置参数解析应成功")
+    $assert(at_list_len(&r.values, "files", 2)
+        && at_list_text_at(&r.values, "files", 1, "b"), "zero_or_more 分段")
+    $assert(at_list_len(&r.values, "tags", 1)
+        && at_list_text_at(&r.values, "tags", 0, "c"), "one_or_more 至少一个")
+    release(&r)
+
+    let empty [1]*char
+    let r2 Result = parse(&parser, empty[0..0])
+    $assert(r2.status == usage_error, "one_or_more 缺失应报 usage_error")
+    release(&r2)
+    destroy(&parser)
+}
+
+test "动作：普通模式位置分段" {
+    let parser Parser
+    $assert(init(&parser, parser_config("t3")) == 0, "parser 初始化")
+    let first Argument = positional("first")
+    let rest Argument = positional("rest")
+    rest.arity = zero_or_more()
+    let flag Argument = option("--flag", 0)
+    flag.action = store_true
+    $assert(add_argument(&parser, first) >= 0 && add_argument(&parser, rest) >= 0
+        && add_argument(&parser, flag) >= 0, "参数注册成功")
+    let args [3]*char
+    args[0] = "a"
+    args[1] = "--flag"
+    args[2] = "b"
+    let r Result = parse(&parser, args[0..3])
+    $assert(r.status == ok, "分段解析应成功")
+    $assert(at_text_is(&r.values, "first", "a"), "第一段取值")
+    $assert(at_list_len(&r.values, "rest", 1)
+        && at_list_text_at(&r.values, "rest", 0, "b"), "可变段取值")
+    release(&r)
+
+    let args2 [4]*char
+    args2[0] = "a"
+    args2[1] = "b"
+    args2[2] = "--flag"
+    args2[3] = "c"
+    let r2 Result = parse(&parser, args2[0..4])
+    $assert(r2.status == usage_error && r2.error.token_index == 3,
+        "已结束的可变段不应重新打开")
+    release(&r2)
+    destroy(&parser)
+}
+
+test "动作：remainder" {
+    let parser Parser
+    $assert(init(&parser, parser_config("t4")) == 0, "parser 初始化")
+    let cmd Argument = positional("cmd")
+    let rest Argument = positional("rest")
+    rest.arity = remainder()
+    $assert(add_argument(&parser, cmd) >= 0 && add_argument(&parser, rest) >= 0,
+        "参数注册成功")
+    let args [4]*char
+    args[0] = "go"
+    args[1] = "x"
+    args[2] = "--help"
+    args[3] = "-x"
+    let r Result = parse(&parser, args[0..4])
+    $assert(r.status == ok, "remainder 解析应成功")
+    $assert(at_text_is(&r.values, "cmd", "go"), "remainder 前的参数")
+    $assert(at_list_len(&r.values, "rest", 3)
+        && at_list_text_at(&r.values, "rest", 0, "x")
+        && at_list_text_at(&r.values, "rest", 1, "--help")
+        && at_list_text_at(&r.values, "rest", 2, "-x"), "remainder 原样收集")
+    release(&r)
+    destroy(&parser)
+}
+
+test "动作：append、append_const 与 extend" {
+    let parser Parser
+    $assert(init(&parser, parser_config("t5")) == 0, "parser 初始化")
+    let inc Argument = option("--inc", 0)
+    inc.action = append
+    let tag Argument = option("--tag", 0)
+    tag.action = append_const
+    tag.const_value = value_text("T")
+    let nums Argument = option("--nums", 0)
+    nums.action = extend
+    nums.arity = exactly(2)
+    nums.value_kind = integer
+    let pair Argument = option("--pair", 0)
+    pair.action = append
+    pair.arity = exactly(2)
+    $assert(add_argument(&parser, inc) >= 0 && add_argument(&parser, tag) >= 0
+        && add_argument(&parser, nums) >= 0 && add_argument(&parser, pair) >= 0,
+        "参数注册成功")
+    let args [15]*char
+    args[0] = "--inc"
+    args[1] = "a"
+    args[2] = "--inc"
+    args[3] = "b"
+    args[4] = "--tag"
+    args[5] = "--tag"
+    args[6] = "--nums"
+    args[7] = "1"
+    args[8] = "2"
+    args[9] = "--nums"
+    args[10] = "3"
+    args[11] = "4"
+    args[12] = "--pair"
+    args[13] = "x"
+    args[14] = "y"
+    let r Result = parse(&parser, args[0..15])
+    $assert(r.status == ok, "append 家族解析应成功")
+    $assert(at_list_len(&r.values, "inc", 2)
+        && at_list_text_at(&r.values, "inc", 0, "a")
+        && at_list_text_at(&r.values, "inc", 1, "b"), "append 累加")
+    $assert(at_list_len(&r.values, "tag", 2), "append_const 累加")
+    $assert(at_list_len(&r.values, "nums", 4), "extend 展平两批")
+    let nums_list []Value
+    $assert(get_list(&r.values, "nums", &nums_list) == 0
+        && nums_list[0].data.integer == 1 && nums_list[3].data.integer == 4,
+        "extend 保留整数类型")
+    release(&r)
+
+    let args2 [6]*char
+    args2[0] = "--pair"
+    args2[1] = "x"
+    args2[2] = "y"
+    args2[3] = "--pair"
+    args2[4] = "z"
+    args2[5] = "w"
+    let r2 Result = parse(&parser, args2[0..6])
+    $assert(r2.status == ok, "append+exactly(2) 解析应成功")
+    let batch []Value
+    $assert(get_list(&r2.values, "pair", &batch) == 0 && len(batch) == 2,
+        "批次外层是列表")
+    $assert(batch[0].kind == sequence, "批次元素是序列")
+    let scratch Namespace
+    $assert(namespace_init(&scratch) == 0, "临时命名空间初始化")
+    $assert(namespace_set(&scratch, "sub", batch[0]) == 0, "写入批次元素")
+    let inner []Value
+    $assert(get_list(&scratch, "sub", &inner) == 0 && len(inner) == 2,
+        "子列表可读")
+    $assert(inner[0].kind == text && string.equals(inner[0].data.text, "x") == 1,
+        "子列表元素")
+    namespace_destroy(&scratch)
+    release(&r2)
+    destroy(&parser)
+}
+
+test "动作：boolean_optional" {
+    let parser Parser
+    $assert(init(&parser, parser_config("t6")) == 0, "parser 初始化")
+    let cache Argument = option("--cache", 0)
+    cache.action = boolean_optional
+    $assert(add_argument(&parser, cache) >= 0, "参数注册成功")
+    let on [1]*char
+    on[0] = "--cache"
+    let r Result = parse(&parser, on[0..1])
+    let flag bool = false
+    $assert(r.status == ok && get_bool(&r.values, "cache", &flag) == 0 && flag == true,
+        "--cache 置 true")
+    release(&r)
+    let off [1]*char
+    off[0] = "--no-cache"
+    let r2 Result = parse(&parser, off[0..1])
+    $assert(r2.status == ok && get_bool(&r2.values, "cache", &flag) == 0
+        && flag == false, "--no-cache 置 false")
+    release(&r2)
+    let both [2]*char
+    both[0] = "--cache"
+    both[1] = "--no-cache"
+    let r3 Result = parse(&parser, both[0..2])
+    $assert(r3.status == ok && get_bool(&r3.values, "cache", &flag) == 0
+        && flag == false, "后出现的 --no-cache 生效")
+    release(&r3)
+    let none_args [1]*char
+    let r4 Result = parse(&parser, none_args[0..0])
+    let v Value
+    $assert(r4.status == ok && get_value(&r4.values, "cache", &v) == 0
+        && v.kind == none, "未出现时取 none")
+    release(&r4)
+    destroy(&parser)
+}
+
+test "动作：choices" {
+    let parser Parser
+    $assert(init(&parser, parser_config("t7")) == 0, "parser 初始化")
+    let allowed [2]Value
+    allowed[0] = value_text("fast")
+    allowed[1] = value_text("slow")
+    let mode Argument = option("--mode", 0)
+    mode.choices = allowed.to_type([]Value)
+    $assert(add_argument(&parser, mode) >= 0, "文本 choices 注册")
+    let levels [2]Value
+    levels[0] = value_i64(1)
+    levels[1] = value_i64(2)
+    let level Argument = option("--level", 0)
+    level.value_kind = integer
+    level.choices = levels.to_type([]Value)
+    $assert(add_argument(&parser, level) >= 0, "整数 choices 注册")
+    let good [2]*char
+    good[0] = "--mode"
+    good[1] = "fast"
+    let r Result = parse(&parser, good[0..2])
+    $assert(r.status == ok && at_text_is(&r.values, "mode", "fast"), "合法 choice")
+    release(&r)
+    let bad [2]*char
+    bad[0] = "--mode"
+    bad[1] = "bogus"
+    let r2 Result = parse(&parser, bad[0..2])
+    $assert(r2.status == usage_error, "非法 choice 报 usage_error")
+    release(&r2)
+    let good_level [2]*char
+    good_level[0] = "--level"
+    good_level[1] = "2"
+    $assert(parse(&parser, good_level[0..2]).status == ok, "合法整数 choice")
+    let bad_level [2]*char
+    bad_level[0] = "--level"
+    bad_level[1] = "3"
+    let r4 Result = parse(&parser, bad_level[0..2])
+    $assert(r4.status == usage_error, "非法整数 choice 报 usage_error")
+    release(&r4)
+    destroy(&parser)
+}
+
+test "动作：短组合、附着值与负数特判" {
+    let parser Parser
+    $assert(init(&parser, parser_config("t8")) == 0, "parser 初始化")
+    let verbose Argument = option("--verbose", "-v")
+    verbose.action = count
+    let output Argument = option("--output", "-o")
+    let include Argument = option("--include", "-I")
+    let a Argument = option("-a", 0)
+    a.action = store_true
+    let b Argument = option("-b", 0)
+    b.action = store_true
+    let c Argument = option("-c", 0)
+    c.action = store_true
+    let limit Argument = option("--limit", 0)
+    limit.value_kind = integer
+    let source Argument = positional("source")
+    source.value_kind = integer
+    $assert(add_argument(&parser, verbose) >= 0 && add_argument(&parser, output) >= 0
+        && add_argument(&parser, include) >= 0 && add_argument(&parser, a) >= 0
+        && add_argument(&parser, b) >= 0 && add_argument(&parser, c) >= 0
+        && add_argument(&parser, limit) >= 0 && add_argument(&parser, source) >= 0,
+        "参数注册成功")
+
+    let cluster [2]*char
+    cluster[0] = "-vvv"
+    cluster[1] = "7"
+    let r Result = parse(&parser, cluster[0..2])
+    let level i64 = 0
+    $assert(r.status == ok && get_i64(&r.values, "verbose", &level) == 0
+        && level == 3, "-vvv 计数三次")
+    release(&r)
+
+    let flags [2]*char
+    flags[0] = "-abc"
+    flags[1] = "7"
+    let r2 Result = parse(&parser, flags[0..2])
+    let flag bool = false
+    $assert(r2.status == ok && get_bool(&r2.values, "a", &flag) == 0 && flag == true
+        && get_bool(&r2.values, "c", &flag) == 0 && flag == true,
+        "-abc 逐个置 true")
+    release(&r2)
+
+    let attached [3]*char
+    attached[0] = "-Ipath"
+    attached[1] = "-o=out.bin"
+    attached[2] = "7"
+    let r3 Result = parse(&parser, attached[0..3])
+    $assert(r3.status == ok && at_text_is(&r3.values, "include", "path")
+        && at_text_is(&r3.values, "output", "out.bin"), "短选项附着值")
+    release(&r3)
+
+    let negative [1]*char
+    negative[0] = "-12"
+    let r4 Result = parse(&parser, negative[0..1])
+    let number i64 = 0
+    $assert(r4.status == ok && get_i64(&r4.values, "source", &number) == 0
+        && number == -12, "无数字短选项时负数作位置值")
+    release(&r4)
+
+    let attached_negative [2]*char
+    attached_negative[0] = "--limit=-2"
+    attached_negative[1] = "7"
+    let r5 Result = parse(&parser, attached_negative[0..2])
+    $assert(r5.status == ok && get_i64(&r5.values, "limit", &number) == 0
+        && number == -2, "附着负数值")
+    release(&r5)
+    destroy(&parser)
+
+    let parser2 Parser
+    $assert(init(&parser2, parser_config("t8b")) == 0, "第二个 parser 初始化")
+    let digit Argument = option("-1", 0)
+    digit.action = store_true
+    $assert(add_argument(&parser2, digit) >= 0, "数字短选项注册")
+    let r6 Result = parse(&parser2, negative[0..1])
+    $assert(r6.status == usage_error, "注册数字短选项后 -12 是未知选项")
+    release(&r6)
+    destroy(&parser2)
+}
+
+test "动作：唯一缩写" {
+    let parser Parser
+    let config ParserConfig = parser_config("t9")
+    config.allow_abbrev = true
+    $assert(init(&parser, config) == 0, "parser 初始化")
+    let output Argument = option("--output", 0)
+    let outline Argument = option("--outline", 0)
+    let verbose Argument = option("--verbose", 0)
+    $assert(add_argument(&parser, output) >= 0 && add_argument(&parser, outline) >= 0
+        && add_argument(&parser, verbose) >= 0, "参数注册成功")
+    let unique [2]*char
+    unique[0] = "--outp"
+    unique[1] = "x"
+    let r Result = parse(&parser, unique[0..2])
+    $assert(r.status == ok && at_text_is(&r.values, "output", "x"),
+        "唯一前缀可缩写")
+    release(&r)
+    let ambiguous [2]*char
+    ambiguous[0] = "--out"
+    ambiguous[1] = "x"
+    let r2 Result = parse(&parser, ambiguous[0..2])
+    $assert(r2.status == usage_error, "歧义前缀报 usage_error")
+    release(&r2)
+    destroy(&parser)
+
+    let parser2 Parser
+    $assert(init(&parser2, parser_config("t9b")) == 0, "第二个 parser 初始化")
+    let plain Argument = option("--output", 0)
+    $assert(add_argument(&parser2, plain) >= 0, "参数注册成功")
+    let r3 Result = parse(&parser2, unique[0..2])
+    $assert(r3.status == usage_error, "关闭 allow_abbrev 后前缀不再匹配")
+    release(&r3)
+    destroy(&parser2)
+}
+
+test "动作：suppress、set_default 与查询错误码" {
+    let parser Parser
+    $assert(init(&parser, parser_config("t10")) == 0, "parser 初始化")
+    let hidden Argument = option("--hidden", 0)
+    hidden.default_value = suppress_default()
+    let plain Argument = option("--plain", 0)
+    plain.default_value = default_of(value_text("def"))
+    let count_arg Argument = option("--count", 0)
+    count_arg.action = count
+    $assert(add_argument(&parser, hidden) >= 0 && add_argument(&parser, plain) >= 0
+        && add_argument(&parser, count_arg) >= 0, "参数注册成功")
+    $assert(set_default(&parser, "plain", value_text("override")) == 0,
+        "set_default 应成功")
+    let query Value
+    $assert(get_default(&parser, "plain", &query) == 0 && query.kind == text
+        && string.equals(query.data.text, "override") == 1, "get_default 取新默认值")
+    let empty [1]*char
+    let r Result = parse(&parser, empty[0..0])
+    $assert(r.status == ok, "空参数解析应成功")
+    $assert(contains(&r.values, "hidden") == false, "suppress 默认值不写入命名空间")
+    $assert(at_text_is(&r.values, "plain", "override"), "默认值生效")
+    $assert(provided(&r.values, "plain") == false, "默认值不算 provided")
+    let number i64 = 0
+    $assert(get_i64(&r.values, "plain", &number) == -2, "默认文本取 i64 类型错误")
+    let list []Value
+    $assert(get_list(&r.values, "plain", &list) == -2
+        && get_list(&r.values, "nosuch", &list) == -1, "get_list 错误码")
+    let text_value *char
+    $assert(get_text(&r.values, "nosuch", &text_value) == -1, "get_text 缺键错误码")
+    release(&r)
+    destroy(&parser)
+}
+
+test "动作：共享 dest 的类型检查" {
+    let parser Parser
+    $assert(init(&parser, parser_config("t11")) == 0, "parser 初始化")
+    let first Argument = option("--first", 0)
+    first.dest = "shared"
+    let second Argument = option("--second", 0)
+    second.dest = "shared"
+    second.value_kind = integer
+    $assert(add_argument(&parser, first) >= 0 && add_argument(&parser, second) >= 0,
+        "参数注册成功")
+    $assert(freeze(&parser) == -1, "不同类型共享 dest 应被拒绝")
+    let diagnostic Diagnostic = last_error(&parser)
+    $assert(diagnostic.message != 0, "拒绝时应有诊断消息")
+    destroy(&parser)
+
+    let parser2 Parser
+    $assert(init(&parser2, parser_config("t11b")) == 0, "第二个 parser 初始化")
+    let on Argument = option("--on", 0)
+    on.dest = "toggle"
+    on.action = store_true
+    let off Argument = option("--off", 0)
+    off.dest = "toggle"
+    off.action = store_false
+    $assert(add_argument(&parser2, on) >= 0 && add_argument(&parser2, off) >= 0,
+        "布尔共享 dest 注册成功")
+    $assert(freeze(&parser2) == 0, "store_true/store_false 可共用 dest")
+    let flag bool = true
+    let args [1]*char
+    args[0] = "--off"
+    let r Result = parse(&parser2, args[0..1])
+    $assert(r.status == ok && get_bool(&r.values, "toggle", &flag) == 0
+        && flag == false, "--off 置 false")
+    release(&r)
+    destroy(&parser2)
+}
+
+test "动作：默认基值与选项 remainder" {
+    let parser Parser
+    $assert(init(&parser, parser_config("bases")) == 0, "parser 初始化")
+    let tries Argument = option("--tries", 0)
+    tries.action = count
+    tries.default_value = default_of(value_i64(3))
+    let rest Argument = option("--rest", 0)
+    rest.arity = remainder()
+    $assert(add_argument(&parser, tries) >= 0 && add_argument(&parser, rest) >= 0,
+        "参数注册成功")
+    let one [1]*char
+    one[0] = "--tries"
+    let r1 Result = parse(&parser, one[0..1])
+    let total i64
+    $assert(r1.status == ok && get_i64(&r1.values, "tries", &total) == 0
+        && total == 4, "count 在默认基值上累加")
+    release(&r1)
+
+    let rest_args [6]*char
+    rest_args[0] = "--rest"
+    rest_args[1] = "a"
+    rest_args[2] = "-x"
+    rest_args[3] = "--"
+    rest_args[4] = "--help"
+    rest_args[5] = "b"
+    let r2 Result = parse(&parser, rest_args[0..6])
+    $assert(r2.status == ok && at_list_len(&r2.values, "rest", 5)
+        && at_list_text_at(&r2.values, "rest", 1, "-x")
+        && at_list_text_at(&r2.values, "rest", 2, "--")
+        && at_list_text_at(&r2.values, "rest", 3, "--help"), "选项 remainder 原样收集")
+    release(&r2)
+    destroy(&parser)
+
+    let seed Parser
+    $assert(init(&seed, parser_config("seed")) == 0, "seed parser 初始化")
+    let many Argument = option("--many", 0)
+    many.arity = zero_or_more()
+    $assert(add_argument(&seed, many) >= 0, "seed 参数注册")
+    let seed_args [3]*char
+    seed_args[0] = "--many"
+    seed_args[1] = "a"
+    seed_args[2] = "b"
+    let seed_result Result = parse(&seed, seed_args[0..3])
+    let base Value
+    $assert(seed_result.status == ok
+        && get_value(&seed_result.values, "many", &base) == 0, "seed 列表取值")
+    let append_parser Parser
+    $assert(init(&append_parser, parser_config("append")) == 0, "append parser 初始化")
+    let tag Argument = option("--tag", 0)
+    tag.action = append
+    tag.default_value = default_of(base)
+    $assert(add_argument(&append_parser, tag) >= 0, "append 参数注册")
+    release(&seed_result)
+    destroy(&seed)
+
+    let no_args [1]*char
+    let r3 Result = parse(&append_parser, no_args[0..0])
+    $assert(r3.status == ok && at_list_len(&r3.values, "tag", 2),
+        "列表默认值经 add_argument 深复制")
+    release(&r3)
+    let tag_args [2]*char
+    tag_args[0] = "--tag"
+    tag_args[1] = "c"
+    let r4 Result = parse(&append_parser, tag_args[0..2])
+    $assert(r4.status == ok && at_list_len(&r4.values, "tag", 3)
+        && at_list_text_at(&r4.values, "tag", 2, "c"), "append 在默认列表上累加")
+    release(&r4)
+    destroy(&append_parser)
+}

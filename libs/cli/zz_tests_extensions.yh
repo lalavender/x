@@ -1,0 +1,538 @@
+module cli
+
+import io
+import os
+import string
+
+// ============================================================================
+// zz_tests_extensions.yh —— cli CLI4 扩展回调/参数文件行为的语言内测试
+// （YT4-P4d）
+//
+// 只在 `yh test cli` 中执行；生产构建不登记测试符号、不发射测试体。
+// 来源是 libs/cli/test/cliextensions 的 15 个 case_*；参数文件用例使用
+// /tmp 下按用例区分的路径，逐例自建自清。
+// 文件名以 zz_ 开头：类型声明在 cli.yh，必须排在它之后。
+// ============================================================================
+
+// g_pair 是逐行回调借出的 token 缓冲（全局存储，回调返回后仍有效）。
+let g_pair [2]*char
+
+// ext_hex：把 0x 前缀的十六进制文本转换成 integer。
+fn ext_hex(ctx *ConvertContext, out *Value, error *Diagnostic, user *void) int {
+    let text *char = ctx.token
+    if (text[0] != '0' || (text[1] != 'x' && text[1] != 'X')) {
+        error.message = "需要 0x 前缀的十六进制"
+        return -1
+    }
+    let value i64 = 0
+    let i int = 2
+    for text[i] != 0 {
+        let ch int = text[i].to_type(int)
+        let digit int = -1
+        if (ch >= '0' && ch <= '9') {
+            digit = ch - '0'
+        } else if (ch >= 'a' && ch <= 'f') {
+            digit = ch - 'a' + 10
+        } else if (ch >= 'A' && ch <= 'F') {
+            digit = ch - 'A' + 10
+        } else {
+            error.message = "十六进制里出现非法字符"
+            return -1
+        }
+        value = value * 16 + digit.to_type(i64)
+        i += 1
+    }
+    *out = value_i64(value)
+    return 0
+}
+
+// ext_bad_kind：故意返回文本，用于验证输出类型检查。
+fn ext_bad_kind(ctx *ConvertContext, out *Value, error *Diagnostic, user *void) int {
+    *out = value_text(ctx.token)
+    return 0
+}
+
+// ext_reject_negative：校验值非负。
+fn ext_reject_negative(value Value, error *Diagnostic, user *void) int {
+    if (value.kind != integer) {
+        error.message = "校验器只接受整数"
+        return -1
+    }
+    if (value.data.integer < 0) {
+        error.message = "数值不能为负"
+        return -1
+    }
+    return 0
+}
+
+// ext_join_more：自定义 action，用逗号拼接本次值与旧值。
+fn ext_join_more(ctx *ActionContext, out *Value, error *Diagnostic, user *void) int {
+    let buffer [256]char
+    let at int = 0
+    if (ctx.previous.kind == text && ctx.previous.data.text != 0) {
+        let old *char = ctx.previous.data.text
+        for old[at] != 0 && at < 200 {
+            buffer[at] = old[at]
+            at += 1
+        }
+    }
+    let i int = 0
+    for i < len(ctx.values) {
+        if (at > 0 && at < 200) {
+            buffer[at] = ','
+            at += 1
+        }
+        let item *char = ctx.values[i].data.text
+        let j int = 0
+        for item[j] != 0 && at < 200 {
+            buffer[at] = item[j]
+            at += 1
+            j += 1
+        }
+        i += 1
+    }
+    buffer[at] = 0
+    let copied *char = context_text(ctx.context, &buffer[0])
+    if (copied == 0) {
+        error.message = "结果池分配失败"
+        return -1
+    }
+    *out = value_text(copied)
+    return 0
+}
+
+// ext_bad_shape：返回标量，但声明形状是列表。
+fn ext_bad_shape(ctx *ActionContext, out *Value, error *Diagnostic, user *void) int {
+    *out = value_text("scalar")
+    return 0
+}
+
+// ext_count_chars：注册类型，把文本长度当作整数。
+fn ext_count_chars(ctx *ConvertContext, out *Value, error *Diagnostic, user *void) int {
+    *out = value_i64(strlen(ctx.token).to_type(i64))
+    return 0
+}
+
+// ext_upper：注册 action，把本次值转成大写。
+fn ext_upper(ctx *ActionContext, out *Value, error *Diagnostic, user *void) int {
+    let buffer [256]char
+    let at int = 0
+    let i int = 0
+    for i < len(ctx.values) {
+        let item *char = ctx.values[i].data.text
+        let j int = 0
+        for item[j] != 0 && at < 250 {
+            let ch int = item[j].to_type(int)
+            if (ch >= 'a' && ch <= 'z') {
+                buffer[at] = (ch - 32).to_type(char)
+            } else {
+                buffer[at] = item[j]
+            }
+            at += 1
+            j += 1
+        }
+        i += 1
+    }
+    buffer[at] = 0
+    *out = value_text(context_text(ctx.context, &buffer[0]))
+    return 0
+}
+
+// ext_split_line：逐行回调，把 "a b" 拆成两个 token，"a" 保持一个 token。
+fn ext_split_line(ctx *LineContext, out *LineTokens, error *Diagnostic,
+    user *void) int {
+    let line *char = ctx.line
+    let i int = 0
+    for line[i] != 0 {
+        if (line[i] == ' ') {
+            line[i] = 0
+            g_pair[0] = line
+            g_pair[1] = line + i + 1
+            out.items = g_pair[0..2]
+            return 0
+        }
+        i += 1
+    }
+    g_pair[0] = line
+    out.items = g_pair[0..1]
+    return 0
+}
+
+// ext_write：把 NUL 结尾文本写入文件；0 成功。
+fn ext_write(path *char, content *char) int {
+    let data [256]u8
+    let n int = 0
+    for content[n] != 0 {
+        data[n] = content[n].to_type(u8)
+        n += 1
+    }
+    let result os.IoResult = io.write_file(path, data[0..n])
+    if (result.error.kind != os.error_none) {
+        return -1
+    }
+    return 0
+}
+
+// ext_build_file_parser：构造带参数文件展开的 parser；0 成功。
+fn ext_build_file_parser(root *Parser, use_line_callback int) int {
+    let config ParserConfig = parser_config("tool")
+    config.fromfile_prefix_chars = "@"
+    if (use_line_callback != 0) {
+        config.line_converter = ext_split_line
+    }
+    if (init(root, config) != 0) {
+        return 1
+    }
+    let level Argument = option("--level", 0)
+    level.value_kind = integer
+    let source Argument = positional("source")
+    if (add_argument(root, level) < 0) {
+        return 2
+    }
+    if (add_argument(root, source) < 0) {
+        return 3
+    }
+    return 0
+}
+
+test "扩展：converter 与输出类型检查" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let mask Argument = option("--mask", 0)
+    mask.value_kind = integer
+    mask.converter = ext_hex
+    $assert(add_argument(&root, mask) >= 0, "converter 参数注册")
+    let args [2]*char
+    args[0] = "--mask"
+    args[1] = "0x1f"
+    let r Result = parse(&root, args[0..2])
+    let number i64 = 0
+    $assert(r.status == ok && get_i64(&r.values, "mask", &number) == 0
+        && number == 31, "converter 转换结果")
+    release(&r)
+    let bad [2]*char
+    bad[0] = "--mask"
+    bad[1] = "zz"
+    let r2 Result = parse(&root, bad[0..2])
+    $assert(r2.status == usage_error && r2.error.message != 0
+        && string.equals(r2.error.message, "需要 0x 前缀的十六进制") == 1,
+        "converter 拒绝时带诊断消息")
+    release(&r2)
+    destroy(&root)
+
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let wrong Argument = option("--mask", 0)
+    wrong.value_kind = integer
+    wrong.converter = ext_bad_kind
+    $assert(add_argument(&root2, wrong) >= 0, "坏 converter 参数注册")
+    let r3 Result = parse(&root2, args[0..2])
+    $assert(r3.status == usage_error, "converter 输出类型不符应被拒绝")
+    release(&r3)
+    destroy(&root2)
+}
+
+test "扩展：validator 与默认值校验" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let level Argument = option("--level", 0)
+    level.value_kind = integer
+    level.validator = ext_reject_negative
+    $assert(add_argument(&root, level) >= 0, "validator 参数注册")
+    let good [2]*char
+    good[0] = "--level"
+    good[1] = "3"
+    $assert(parse(&root, good[0..2]).status == ok, "非负值通过校验")
+    let bad [2]*char
+    bad[0] = "--level"
+    bad[1] = "-3"
+    let r Result = parse(&root, bad[0..2])
+    $assert(r.status == usage_error, "负值被拒")
+    release(&r)
+    destroy(&root)
+
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let bad_default Argument = option("--level", 0)
+    bad_default.value_kind = integer
+    bad_default.validator = ext_reject_negative
+    bad_default.default_value = default_of(value_i64(0 - 5))
+    $assert(add_argument(&root2, bad_default) >= 0, "坏默认值参数注册")
+    let empty [1]*char
+    let r2 Result = parse(&root2, empty[0..0])
+    $assert(r2.status == config_error, "默认值未过 validator 时 freeze 报错")
+    release(&r2)
+    destroy(&root2)
+}
+
+test "扩展：自定义 action 与形状检查" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let add Argument = option("--add", 0)
+    add.action = custom
+    add.arity = exactly(1)
+    let shape ValueShape = value_shape(text, 0)
+    add.output_shape = &shape
+    add.custom_action = ext_join_more
+    $assert(add_argument(&root, add) >= 0, "custom action 参数注册")
+    let args [4]*char
+    args[0] = "--add"
+    args[1] = "a"
+    args[2] = "--add"
+    args[3] = "b"
+    let r Result = parse(&root, args[0..4])
+    let text_value *char
+    $assert(r.status == ok && get_text(&r.values, "add", &text_value) == 0
+        && string.equals(text_value, "a,b") == 1, "自定义 action 拼接旧值")
+    release(&r)
+    destroy(&root)
+
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let wrong Argument = option("--add", 0)
+    wrong.action = custom
+    wrong.arity = exactly(1)
+    let list_shape ValueShape = value_shape(text, 1)
+    wrong.output_shape = &list_shape
+    wrong.custom_action = ext_bad_shape
+    $assert(add_argument(&root2, wrong) >= 0, "形状不符参数注册")
+    let one [2]*char
+    one[0] = "--add"
+    one[1] = "a"
+    let r2 Result = parse(&root2, one[0..2])
+    $assert(r2.status == usage_error, "action 输出形状不符应被拒绝")
+    release(&r2)
+    destroy(&root2)
+}
+
+test "扩展：命名注册表" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    $assert(register_type(&root, "chars", ext_count_chars, 0) == 0, "注册类型")
+    let shape ValueShape = value_shape(text, 0)
+    $assert(register_action(&root, "upper", exactly(1), shape, ext_upper, 0) == 0,
+        "注册 action")
+    let length Argument = option("--length", 0)
+    length.value_kind = integer
+    length.type_name = "chars"
+    $assert(add_argument(&root, length) >= 0, "类型名参数注册")
+    let shout Argument = option("--shout", 0)
+    shout.action = custom
+    shout.action_name = "upper"
+    $assert(add_argument(&root, shout) >= 0, "action 名参数注册")
+    let args [4]*char
+    args[0] = "--length"
+    args[1] = "abcd"
+    args[2] = "--shout"
+    args[3] = "hi"
+    let r Result = parse(&root, args[0..4])
+    let number i64 = 0
+    $assert(r.status == ok && get_i64(&r.values, "length", &number) == 0
+        && number == 4, "注册类型转换")
+    let text_value *char
+    $assert(get_text(&r.values, "shout", &text_value) == 0
+        && string.equals(text_value, "HI") == 1, "注册 action 执行")
+    release(&r)
+    destroy(&root)
+}
+
+test "扩展：坏声明被拒绝" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let add Argument = option("--add", 0)
+    add.action = custom
+    add.arity = exactly(1)
+    add.custom_action = ext_join_more
+    $assert(add_argument(&root, add) >= 0, "缺 output_shape 的参数注册")
+    let empty [1]*char
+    let r Result = parse(&root, empty[0..0])
+    $assert(r.status == config_error, "custom 缺 output_shape 报 config_error")
+    release(&r)
+    destroy(&root)
+
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let add2 Argument = option("--add", 0)
+    add2.action = custom
+    let shape ValueShape = value_shape(text, 0)
+    add2.output_shape = &shape
+    add2.custom_action = ext_join_more
+    $assert(add_argument(&root2, add2) >= 0, "infer 数量参数注册")
+    let r2 Result = parse(&root2, empty[0..0])
+    $assert(r2.status == config_error, "custom 使用 infer 数量报 config_error")
+    release(&r2)
+    destroy(&root2)
+
+    let root3 Parser
+    $assert(init(&root3, parser_config("tool3")) == 0, "第三个 parser 初始化")
+    $assert(register_type(&root3, "chars", ext_count_chars, 0) == 0, "注册类型")
+    let both Argument = option("--both", 0)
+    both.type_name = "chars"
+    both.converter = ext_hex
+    $assert(add_argument(&root3, both) >= 0, "双来源参数注册")
+    let r3 Result = parse(&root3, empty[0..0])
+    $assert(r3.status == config_error, "converter 与 type_name 同时提供报错")
+    release(&r3)
+    destroy(&root3)
+
+    let root4 Parser
+    $assert(init(&root4, parser_config("tool4")) == 0, "第四个 parser 初始化")
+    let unknown Argument = option("--unknown", 0)
+    unknown.type_name = "nosuch"
+    $assert(add_argument(&root4, unknown) >= 0, "未注册类型参数注册")
+    let r4 Result = parse(&root4, empty[0..0])
+    $assert(r4.status == config_error, "未注册类型名报 config_error")
+    release(&r4)
+    destroy(&root4)
+}
+
+test "参数文件：基本展开与嵌套相对路径" {
+    let root Parser
+    $assert(ext_build_file_parser(&root, 0) == 0, "参数文件 parser 装配")
+    let path *char = "/tmp/yh-cli-args.txt"
+    os.remove_file(path)
+    $assert(ext_write(path, "--level\n7\ninput.bin\n") == 0, "写参数文件")
+    let args [1]*char
+    args[0] = "@/tmp/yh-cli-args.txt"
+    let r Result = parse(&root, args[0..1])
+    let level i64 = 0
+    $assert(r.status == ok && get_i64(&r.values, "level", &level) == 0
+        && level == 7, "参数文件展开选项")
+    let text_value *char
+    $assert(get_text(&r.values, "source", &text_value) == 0
+        && string.equals(text_value, "input.bin") == 1, "参数文件展开位置值")
+    release(&r)
+    destroy(&root)
+    os.remove_file(path)
+
+    let root2 Parser
+    $assert(ext_build_file_parser(&root2, 0) == 0, "第二个参数文件 parser 装配")
+    os.remove_file("/tmp/yh-cli-outer.txt")
+    os.remove_file("/tmp/yh-cli-inner.txt")
+    $assert(ext_write("/tmp/yh-cli-inner.txt", "--level\n5\nsrc.bin\n") == 0,
+        "写内层参数文件")
+    $assert(ext_write("/tmp/yh-cli-outer.txt", "@yh-cli-inner.txt\n") == 0,
+        "写外层参数文件")
+    let nested [1]*char
+    nested[0] = "@/tmp/yh-cli-outer.txt"
+    let r2 Result = parse(&root2, nested[0..1])
+    let nested_level i64 = 0
+    let nested_source *char
+    $assert(r2.status == ok && get_i64(&r2.values, "level", &nested_level) == 0
+        && nested_level == 5, "嵌套包含展开选项")
+    $assert(get_text(&r2.values, "source", &nested_source) == 0
+        && string.equals(nested_source, "src.bin") == 1, "嵌套包含相对路径")
+    release(&r2)
+    destroy(&root2)
+    os.remove_file("/tmp/yh-cli-outer.txt")
+    os.remove_file("/tmp/yh-cli-inner.txt")
+}
+
+test "参数文件：循环、缺失与上限" {
+    let root Parser
+    $assert(ext_build_file_parser(&root, 0) == 0, "参数文件 parser 装配")
+    let cycle_path *char = "/tmp/yh-cli-cycle.txt"
+    os.remove_file(cycle_path)
+    $assert(ext_write(cycle_path, "@/tmp/yh-cli-cycle.txt\n") == 0, "写循环文件")
+    let cycle [1]*char
+    cycle[0] = "@/tmp/yh-cli-cycle.txt"
+    let r Result = parse(&root, cycle[0..1])
+    $assert(r.status == resource_error && r.error.message != 0
+        && string.equals(r.error.message, "参数文件包含出现循环") == 1,
+        "循环包含报 resource_error")
+    release(&r)
+    os.remove_file(cycle_path)
+
+    let missing [1]*char
+    missing[0] = "@/tmp/yh-cli-nosuch.txt"
+    let r2 Result = parse(&root, missing[0..1])
+    $assert(r2.status == resource_error && r2.error.message != 0,
+        "缺失参数文件报 resource_error")
+    release(&r2)
+    destroy(&root)
+
+    let root2 Parser
+    $assert(ext_build_file_parser(&root2, 0) == 0, "第二个参数文件 parser 装配")
+    os.remove_file("/tmp/yh-cli-a.txt")
+    os.remove_file("/tmp/yh-cli-b.txt")
+    $assert(ext_write("/tmp/yh-cli-b.txt", "--level\n3\nz.bin\n") == 0, "写被包含文件")
+    $assert(ext_write("/tmp/yh-cli-a.txt", "@/tmp/yh-cli-b.txt\n") == 0, "写入口文件")
+    let entry [1]*char
+    entry[0] = "@/tmp/yh-cli-a.txt"
+    let depth_spec ParseConfig = parse_config()
+    depth_spec.file_max_depth = 0
+    let r3 Result = parse_with(&root2, entry[0..1], depth_spec)
+    $assert(r3.status == resource_error, "深度为 0 时报 resource_error")
+    release(&r3)
+    let token_spec ParseConfig = parse_config()
+    token_spec.file_max_tokens = 1
+    let r4 Result = parse_with(&root2, entry[0..1], token_spec)
+    $assert(r4.status == resource_error, "token 上限不足时报 resource_error")
+    release(&r4)
+    destroy(&root2)
+    os.remove_file("/tmp/yh-cli-a.txt")
+    os.remove_file("/tmp/yh-cli-b.txt")
+}
+
+test "参数文件：逐行回调与子 parser 拒绝" {
+    let root Parser
+    $assert(ext_build_file_parser(&root, 1) == 0, "逐行回调 parser 装配")
+    let path *char = "/tmp/yh-cli-lines.txt"
+    os.remove_file(path)
+    $assert(ext_write(path, "--level 9\nfrom-line.bin\n") == 0, "写逐行文件")
+    let args [1]*char
+    args[0] = "@/tmp/yh-cli-lines.txt"
+    let r Result = parse(&root, args[0..1])
+    let level i64 = 0
+    let text_value *char
+    $assert(r.status == ok && get_i64(&r.values, "level", &level) == 0
+        && level == 9, "逐行回调展开选项")
+    $assert(get_text(&r.values, "source", &text_value) == 0
+        && string.equals(text_value, "from-line.bin") == 1, "逐行回调展开位置值")
+    release(&r)
+    destroy(&root)
+    os.remove_file(path)
+
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool")) == 0, "子命令 parser 初始化")
+    let slot int = add_subparsers(&root2, subparsers())
+    $assert(slot >= 0, "子命令槽注册")
+    let cmd Command = command("go")
+    cmd.config.fromfile_prefix_chars = "@"
+    $assert(add_parser(&root2, slot, cmd) != 0, "子命令 parser 注册")
+    let sub [1]*char
+    sub[0] = "go"
+    let r2 Result = parse(&root2, sub[0..1])
+    $assert(r2.status == config_error, "子 parser 设置参数文件配置报 config_error")
+    release(&r2)
+    destroy(&root2)
+}
+
+test "扩展：分配失败注入" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let first Argument = option("--first", 0)
+    $assert(add_argument(&root, first) >= 0, "第一个参数注册")
+    let before int = test_alloc_count(&root)
+    $assert(before > 0, "parser 池已有分配")
+    $assert(test_fail_alloc_after(&root, before) == 0, "注入下一次分配失败")
+    let second Argument = option("--second", 0)
+    $assert(add_argument(&root, second) == -1, "分配失败时 add_argument 返回 -1")
+    let diag Diagnostic = last_error(&root)
+    $assert(diag.message != 0, "分配失败应有诊断")
+    test_fail_alloc_after(&root, -1)
+    destroy(&root)
+
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let source Argument = positional("source")
+    $assert(add_argument(&root2, source) >= 0, "位置参数注册")
+    let count_before int = test_alloc_count(&root2)
+    $assert(test_fail_alloc_after(&root2, count_before) == 0, "注入 parser 池失败")
+    let args [1]*char
+    args[0] = "x"
+    let r Result = parse(&root2, args[0..1])
+    $assert(r.status == ok, "parser 池注入失败不影响独立的结果池")
+    release(&r)
+    destroy(&root2)
+}

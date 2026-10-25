@@ -74,12 +74,41 @@ pub fn ir_module_add_source(unit *IRModule, path *char, text *u8, length int) in
     return unit.source_count - 1
 }
 
+// ir_module_type_same：比较两个类型的内容（布局 + 字段 + 签名），名字单独比。
+//
+// IR 层的类型是结构性的：lowering 用空名字登记数组/指针/切片/函数类型，
+// 同一布局会在每个函数里被重复登记（实测 compiler/build 的 907 个类型里
+// 有 706 个是重复）。去重后类型编号不再虚高，函数缓存合并时的编号比对
+// 也不会退化成结构比较。
+fn ir_module_type_same(a *IRModuleType, b *IRModuleType) int {
+    if (a.kind != b.kind || a.bits != b.bits || a.size != b.size
+        || a.align != b.align || a.elem != b.elem || a.count != b.count
+        || a.field_count != b.field_count || a.abi != b.abi
+        || a.variadic != b.variadic) { return 0 }
+    let i int = 0
+    for i < a.field_count {
+        if (a.fields[i].type_id != b.fields[i].type_id
+            || a.fields[i].offset != b.fields[i].offset) { return 0 }
+        i += 1
+    }
+    return 1
+}
+
 // ir_module_add_type：复制布局描述、名义名称和字段；允许前向类型引用，最终由 verifier 封闭。
+// 同内容（名字 + 布局 + 字段）已存在时直接返回既有编号，不再追加。
 pub fn ir_module_add_type(unit *IRModule, name *char, value *IRModuleType,
     fields *IRModuleField, count int) int {
     if (unit == 0 || unit.version != IR_MODULE_VERSION || value == 0
         || count < 0 || count > IR_SERIAL_MAX_BYTES / sizeof(IRModuleField)
         || count > 0 && fields == 0) { return -1 }
+    let existing int = 0
+    for existing < unit.type_count {
+        if (ir_module_type_same(&unit.types[existing], value) != 0
+            && ir_module_str_eq(unit.types[existing].name, name) != 0) {
+            return existing
+        }
+        existing += 1
+    }
     let item IRModuleType = value[0]
     item.name = ir_module_copy_str(name)
     item.fields = ir_module_copy(fields.to_type(*void), count * sizeof(IRModuleField)).to_type(*IRModuleField)

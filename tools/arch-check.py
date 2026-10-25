@@ -57,8 +57,8 @@ BUDGETS = {
     "max_file_lines": 2242,        # module_build.yh（A2c 拆分后必须下降）
     "max_function_lines": 700,     # mb_link 674（含前导注释的上界口径）
     "max_module_lines": 381,       # main（A6 后只剩 driver + api）
-    "max_testkit_lines": 1515,     # testkit（测试执行器；后续应拆分而非增长）
-    "max_build_lines": 10720,      # build（构建引擎；后续应拆分而非增长）
+    "max_testkit_lines": 1592,     # testkit（YT2d-3 同项目测试锁 +37；后续应拆分而非增长）
+    "max_build_lines": 10786,      # build（PC3 +6、PC2 v3 +5、PC2b +20、PC7a 身份哈希 +25）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
     "max_globals": 190,
     "max_g_call_sites": 165,

@@ -64,7 +64,9 @@ verifier 原来按块编号枚举调用；合流块可早分配，导致合法�
 指令数组，仍拒绝重复和无引用的调用记录。另一个缺口是 if 内局部绑定在另一臂
 没有值，不能合并为含 -1 输入的 phi；这些绑定在合流后保持不可见，外层变量仍
 按正常双前驱值合流。证据为 llvm-call-block-order.yh 的副作用序列与块内局部探针，
-irverify 的一位 bool、重复调用和多余调用记录拒绝层保持严格。
+`compiler/ir/zz_tests_verify.yh` 覆盖的一位 bool、重复调用和多余调用记录
+拒绝层保持严格（原 irverify 夹具已迁入，见
+[YT4-P6](../01-finished/yh-YT4-P6-编译器fixture迁移-2026-10-25.md)）。
 
 ## yh-llvm-v1 调用政策
 

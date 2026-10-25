@@ -1,0 +1,703 @@
+module toml
+
+import io
+
+// ============================================================================
+// 99_tests.yh —— toml 标准库的语言内测试（YT4-P2）
+//
+// 只在 `yh test toml` 中执行；生产构建不登记测试符号、不发射测试体。
+// 断言全部走 pub API（迁移决策 D7），来源是
+// tests/modules/projects/toml{model,strings,scalars,tables,errors,files} 的
+// 160 个 ok()；逐条对照见 docs/01-finished/yh-YT4-P2-toml迁移-2026-10-25.md。
+// 文件用例在 /tmp 下自建自清；io 只用于构造测试文件（测试专用导入）。
+// ============================================================================
+
+// tt_fill：把 NUL 结尾文本写入字节缓冲，返回长度。
+fn tt_fill(buf *u8, text *char) int {
+    let n int = 0
+    for text[n] != 0 {
+        buf[n] = text[n].to_type(u8)
+        n += 1
+    }
+    return n
+}
+
+// tt_cstr_eq：比较 Text 与 NUL 结尾期望值。
+fn tt_cstr_eq(text Text, expected *char) bool {
+    if (text.count != strlen(expected)) {
+        return false
+    }
+    let i u64 = 0
+    for i < text.count {
+        if (text.data[i] != expected[i].to_type(u8)) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// tt_bytes_eq：按长度比较字节，允许期望值包含 NUL。
+fn tt_bytes_eq(data *u8, count u64, expected *u8, expected_count u64) bool {
+    if (count != expected_count) {
+        return false
+    }
+    let i u64 = 0
+    for i < count {
+        if (data[i] != expected[i]) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// tt_value_text：取一个键的字符串视图；失败返回空视图。
+fn tt_value_text(root Value, key *char) Text {
+    let empty Text
+    empty.data = 0
+    empty.count = 0
+    let got LookupResult = get(root, key)
+    if (got.status != query_ok) {
+        return empty
+    }
+    let text Text
+    if (as_text(got.value, &text) != query_ok) {
+        return empty
+    }
+    return text
+}
+
+// tt_int_at：返回 table[key] 的整数；失败返回哨兵。
+fn tt_int_at(table Value, key *char) i64 {
+    let got LookupResult = get(table, key)
+    let number i64 = -777
+    as_i64(got.value, &number)
+    return number
+}
+
+// tt_nested_int：按两个键取整数。
+fn tt_nested_int(table Value, first *char, second *char) i64 {
+    let one LookupResult = get(table, first)
+    if (one.status != query_ok) {
+        return -777
+    }
+    return tt_int_at(one.value, second)
+}
+
+// tt_f64_bits：读取 f64 的 IEEE754 位模式。
+fn tt_f64_bits(value f64) i64 {
+    let holder *f64 = malloc(8).to_type(*f64)
+    holder[0] = value
+    let view *i64 = holder.to_type(*i64)
+    let bits i64 = view[0]
+    free(holder.to_type(*void))
+    return bits
+}
+
+// tt_rejects：NUL 结尾输入必须被拒绝，错误码匹配且不留半成品文档。
+fn tt_rejects(text *char, code ErrorCode) bool {
+    let result ParseResult = parse_text(text)
+    if (result.status == parse_ok) {
+        release(&result.document)
+        return false
+    }
+    return result.error.code == code && result.document.handle == 0
+}
+
+// tt_rejects_bytes：显式长度输入同上。
+fn tt_rejects_bytes(data *u8, count u64, code ErrorCode) bool {
+    let result ParseResult = parse(data, count)
+    if (result.status == parse_ok) {
+        release(&result.document)
+        return false
+    }
+    return result.error.code == code && result.document.handle == 0
+}
+
+test "模型：空文档、借用与多文档" {
+    let empty ParseResult = parse(0, 0)
+    $assert(empty.status == parse_ok, "空文档应合法")
+    let empty_root Value = root(&empty.document)
+    $assert(kind(empty_root) == kind_table, "空文档根应是表")
+    let empty_count u64 = 99
+    $assert(count(empty_root, &empty_count) == query_ok, "空表 count 状态")
+    $assert(empty_count == 0, "空表计数为 0")
+    release(&empty.document)
+    $assert(empty.document.handle == 0, "释放后句柄清零")
+    release(&empty.document)
+
+    let source [32]u8
+    let i int = 0
+    for i < 32 {
+        source[i] = 32
+        i += 1
+    }
+    source[0] = 'a'
+    source[1] = ' '
+    source[2] = '='
+    source[3] = ' '
+    source[4] = '1'
+    let first ParseResult = parse(&source[0], 5)
+    $assert(first.status == parse_ok, "借用输入应解析成功")
+    source[4] = '9'
+    let first_root Value = root(&first.document)
+    let got LookupResult = get(first_root, "a")
+    let number i64 = 0
+    $assert(as_i64(got.value, &number) == query_ok, "借用输入可取 a")
+    $assert(number == 1, "解析只借用输入")
+    let span Span = value_span(got.value)
+    $assert(span.offset == 4, "值 offset 为 4")
+    $assert(span.length == 1, "值 length 为 1")
+    $assert(span.line == 1, "值在首行")
+    $assert(span.column == 5, "值列号为 5")
+
+    let second ParseResult = parse_text("a = 2")
+    $assert(second.status == parse_ok, "第二个文档应解析成功")
+    let second_root Value = root(&second.document)
+    let second_number i64 = 0
+    as_i64(get(second_root, "a").value, &second_number)
+    $assert(second_number == 2, "第二个文档的值")
+    as_i64(got.value, &number)
+    $assert(number == 1, "第一个文档仍然有效")
+
+    let copied Value = got.value
+    let copied_number i64 = 0
+    $assert(as_i64(copied, &copied_number) == query_ok, "复制视图仍可查询")
+    $assert(copied_number == 1, "复制视图指向同一节点")
+
+    let invalid Value = copied
+    invalid.handle = 0
+    $assert(kind(invalid) == kind_invalid, "空句柄判为 invalid")
+    $assert(get(invalid, "a").status == query_type_error, "空句柄 get 报类型错误")
+    $assert(get(first_root, 0).status == query_argument_error, "空键报参数错误")
+    let zero_span Span = value_span(invalid)
+    $assert(zero_span.offset == 0 && zero_span.length == 0, "空句柄位置为 0")
+    release(&first.document)
+    release(&second.document)
+}
+
+test "字符串：转义、hex 转义与 NUL" {
+    let escapes ParseResult = parse_text(
+        "s = \"\\b\\t\\n\\f\\r\\e\\\"\\\\\\x41\\u00E9\\U0001F600\"")
+    $assert(escapes.status == parse_ok, "转义输入应解析成功")
+    let t Text = tt_value_text(root(&escapes.document), "s")
+    let expect_escapes [15]u8
+    expect_escapes[0] = 8
+    expect_escapes[1] = 9
+    expect_escapes[2] = 10
+    expect_escapes[3] = 12
+    expect_escapes[4] = 13
+    expect_escapes[5] = 27
+    expect_escapes[6] = 34
+    expect_escapes[7] = 92
+    expect_escapes[8] = 65
+    expect_escapes[9] = 195
+    expect_escapes[10] = 169
+    expect_escapes[11] = 240
+    expect_escapes[12] = 159
+    expect_escapes[13] = 152
+    expect_escapes[14] = 128
+    $assert(tt_bytes_eq(t.data, t.count, &expect_escapes[0], 15), "转义字节全量")
+    release(&escapes.document)
+
+    let hex ParseResult = parse_text("s = \"\\xE9\"")
+    let hex_text Text = tt_value_text(root(&hex.document), "s")
+    $assert(hex_text.count == 2, "\\xE9 应输出两字节")
+    $assert(hex_text.data[0] == 195 && hex_text.data[1] == 169, "\\xE9 应是 UTF-8")
+    release(&hex.document)
+
+    let nul ParseResult = parse_text("s = \"a\\u0000b\"")
+    let nul_text Text = tt_value_text(root(&nul.document), "s")
+    let nul_expect [3]u8
+    nul_expect[0] = 'a'
+    nul_expect[1] = 0
+    nul_expect[2] = 'b'
+    $assert(tt_bytes_eq(nul_text.data, nul_text.count, &nul_expect[0], 3),
+        "解码后的 NUL 不应截断")
+    release(&nul.document)
+}
+
+test "字符串：字面量、多行与键语义" {
+    let literal ParseResult = parse_text("s = 'C:\\Users\\n'\n")
+    $assert(tt_cstr_eq(tt_value_text(root(&literal.document), "s"), "C:\\Users\\n"),
+        "字面量字符串不处理反斜杠")
+    release(&literal.document)
+
+    let multi ParseResult = parse_text(
+        "a = \"\"\"\nline1\\\n   line2\"\"\"\nb = \"\"\"x\"\"\"\"\n")
+    let multi_root Value = root(&multi.document)
+    $assert(tt_cstr_eq(tt_value_text(multi_root, "a"), "line1line2"),
+        "多行续行应吞掉空白")
+    $assert(tt_cstr_eq(tt_value_text(multi_root, "b"), "x\""), "多行行尾引号保留")
+    release(&multi.document)
+
+    let raw ParseResult = parse_text("s = '''\nraw\\n\nline'''\n")
+    $assert(tt_cstr_eq(tt_value_text(root(&raw.document), "s"), "raw\\n\nline"),
+        "多行字面量保留反斜杠与换行")
+    release(&raw.document)
+
+    let keys ParseResult = parse_text(
+        "\"a.b\" = 1\na.b = 2\n\"\" = 3\n\"x\\u0000y\" = 4\n")
+    $assert(keys.status == parse_ok, "键语义输入应解析成功")
+    let keys_root Value = root(&keys.document)
+    let v1 i64 = 0
+    let v2 i64 = 0
+    $assert(as_i64(get(keys_root, "a.b").value, &v1) == query_ok, "引号键是字面键")
+    $assert(v1 == 1, "引号键值")
+    $assert(as_i64(get(get(keys_root, "a").value, "b").value, &v2) == query_ok,
+        "点键是嵌套表")
+    $assert(v2 == 2, "点键值")
+    let v3 i64 = 0
+    $assert(as_i64(get(keys_root, "").value, &v3) == query_ok, "空键可查")
+    $assert(v3 == 3, "空键值")
+    let nul_key_bytes [3]u8
+    nul_key_bytes[0] = 'x'
+    nul_key_bytes[1] = 0
+    nul_key_bytes[2] = 'y'
+    let nul_key Text
+    nul_key.data = &nul_key_bytes[0]
+    nul_key.count = 3
+    let v4 i64 = 0
+    $assert(as_i64(table_get(keys_root, nul_key).value, &v4) == query_ok,
+        "含 NUL 的键可查")
+    $assert(v4 == 4, "含 NUL 的键值")
+    release(&keys.document)
+
+    $assert(tt_rejects("s = \"\\q\"", error_syntax), "未知转义应拒绝")
+    $assert(tt_rejects("s = \"\\uD800\"", error_syntax), "孤立代理应拒绝")
+    $assert(tt_rejects("s = \"\\U00110000\"", error_syntax), "超出标量范围应拒绝")
+    let raw_control [8]u8
+    raw_control[0] = 's'
+    raw_control[1] = ' '
+    raw_control[2] = '='
+    raw_control[3] = ' '
+    raw_control[4] = '"'
+    raw_control[5] = 'a'
+    raw_control[6] = 1
+    raw_control[7] = '"'
+    $assert(tt_rejects_bytes(&raw_control[0], 8, error_syntax), "裸控制字符应拒绝")
+    $assert(tt_rejects("s = \"a\nb\"", error_syntax), "字符串内裸换行应拒绝")
+}
+
+test "标量：整数边界与进制" {
+    let ints ParseResult = parse_text(
+        "max = 9223372036854775807\nmin = -9223372036854775808\nhex = 0x7f_ff\n\noct = 0o777\nbin = 0b1010\nplus = +42\n")
+    $assert(ints.status == parse_ok, "整数输入应解析成功")
+    let ints_root Value = root(&ints.document)
+    let max i64 = 0
+    let min i64 = 0
+    as_i64(get(ints_root, "max").value, &max)
+    as_i64(get(ints_root, "min").value, &min)
+    $assert(max == 9223372036854775807, "i64 max")
+    $assert(min == -9223372036854775807 - 1, "i64 min")
+    let hex i64 = 0
+    let oct i64 = 0
+    let bin i64 = 0
+    let plus i64 = 0
+    as_i64(get(ints_root, "hex").value, &hex)
+    as_i64(get(ints_root, "oct").value, &oct)
+    as_i64(get(ints_root, "bin").value, &bin)
+    as_i64(get(ints_root, "plus").value, &plus)
+    $assert(hex == 32767 && oct == 511 && bin == 10 && plus == 42, "各进制取值")
+    release(&ints.document)
+
+    $assert(tt_rejects("x = 9223372036854775808", error_integer_range),
+        "十进制溢出")
+    $assert(tt_rejects("x = 0x8000000000000000", error_integer_range), "十六进制溢出")
+    $assert(tt_rejects("x = +0x1", error_syntax), "带符号十六进制非法")
+    $assert(tt_rejects("x = 01", error_syntax), "前导零非法")
+    $assert(tt_rejects("x = 1__2", error_syntax), "双下划线非法")
+}
+
+test "标量：浮点位模式与特殊值" {
+    let floats ParseResult = parse_text(
+        "half = 1.5\nnegzero = -0.0\ntenth = 0.1\nsub = 5e-324\npinf = inf\nninf = -inf\nnanv = nan\nexp = 3e2\n")
+    $assert(floats.status == parse_ok, "浮点输入应解析成功")
+    let floats_root Value = root(&floats.document)
+    let half f64 = 0.0
+    let negzero f64 = 0.0
+    let tenth f64 = 0.0
+    let sub f64 = 0.0
+    let pinf f64 = 0.0
+    let ninf f64 = 0.0
+    let nanv f64 = 0.0
+    let exp f64 = 0.0
+    as_f64(get(floats_root, "half").value, &half)
+    as_f64(get(floats_root, "negzero").value, &negzero)
+    as_f64(get(floats_root, "tenth").value, &tenth)
+    as_f64(get(floats_root, "sub").value, &sub)
+    as_f64(get(floats_root, "pinf").value, &pinf)
+    as_f64(get(floats_root, "ninf").value, &ninf)
+    as_f64(get(floats_root, "nanv").value, &nanv)
+    as_f64(get(floats_root, "exp").value, &exp)
+    $assert(tt_f64_bits(half) == 4609434218613702656, "1.5 位模式")
+    $assert(tt_f64_bits(negzero) == -9223372036854775807 - 1, "负零位模式")
+    $assert(tt_f64_bits(tenth) == 4591870180066957722, "0.1 位模式")
+    $assert(tt_f64_bits(sub) == 1, "最小次正规位模式")
+    $assert(tt_f64_bits(pinf) == 9218868437227405312, "inf 位模式")
+    $assert(tt_f64_bits(ninf) == -4503599627370496, "负 inf 位模式")
+    $assert((tt_f64_bits(nanv) & 9218868437227405312) == 9218868437227405312,
+        "nan 指数位")
+    $assert((tt_f64_bits(nanv) & 4503599627370495) != 0, "nan 载荷非零")
+    $assert(tt_f64_bits(exp) == 4643985272004935680, "3e2 位模式")
+    release(&floats.document)
+
+    $assert(tt_rejects("x = 1e309", error_float_range), "有限字面量上溢应报错")
+    let under ParseResult = parse_text("x = -1e-999999")
+    $assert(under.status == parse_ok, "下溢应允许")
+    let under_root Value = root(&under.document)
+    let under_value f64 = 1.0
+    as_f64(get(under_root, "x").value, &under_value)
+    $assert(tt_f64_bits(under_value) == -9223372036854775807 - 1, "负下溢为零")
+    release(&under.document)
+}
+
+test "标量：布尔与时间" {
+    let bools ParseResult = parse_text("a = true\nb = false\n")
+    let bools_root Value = root(&bools.document)
+    let yes bool = false
+    let no bool = true
+    $assert(as_bool(get(bools_root, "a").value, &yes) == query_ok && yes == true,
+        "true 取值")
+    $assert(as_bool(get(bools_root, "b").value, &no) == query_ok && no == false,
+        "false 取值")
+    release(&bools.document)
+    $assert(tt_rejects("a = true1", error_syntax), "true1 应拒绝")
+    $assert(tt_rejects("a = TRUE", error_syntax), "大写 TRUE 应拒绝")
+
+    let times ParseResult = parse_text(
+        "odt = 1979-05-27T07:32:00.123Z\nldt = 1979-05-27 07:32\nd = 1979-05-27\nt = 13:37\n")
+    $assert(times.status == parse_ok, "时间输入应解析成功")
+    let times_root Value = root(&times.document)
+    let odt LookupResult = get(times_root, "odt")
+    let ldt LookupResult = get(times_root, "ldt")
+    let d LookupResult = get(times_root, "d")
+    let t LookupResult = get(times_root, "t")
+    $assert(kind(odt.value) == kind_offset_datetime, "带偏移日期时间")
+    $assert(kind(ldt.value) == kind_local_datetime, "本地日期时间")
+    $assert(kind(d.value) == kind_local_date, "本地日期")
+    $assert(kind(t.value) == kind_local_time, "本地时间")
+    let raw Text
+    as_temporal(t.value, &raw)
+    $assert(raw.count == 5 && raw.data[0] == '1' && raw.data[1] == '3',
+        "as_temporal 返回原文")
+    let string_query Text
+    $assert(as_text(t.value, &string_query) == query_type_error, "时间不是字符串")
+    release(&times.document)
+
+    let keep ParseResult = parse_text("s = \"x\"\ni = 7\n")
+    let keep_root Value = root(&keep.document)
+    let number i64 = 42
+    $assert(as_i64(get(keep_root, "s").value, &number) == query_type_error
+        && number == 42, "as_i64 失败不改 out")
+    let real f64 = 2.5
+    $assert(as_f64(get(keep_root, "i").value, &real) == query_type_error
+        && real == 2.5, "as_f64 失败不改 out")
+    let scalar_count u64 = 9
+    $assert(count(get(keep_root, "i").value, &scalar_count) == query_type_error
+        && scalar_count == 9, "对标量 count 报错且不改 out")
+    release(&keep.document)
+}
+
+test "表：点键、顺序、隐式表与数组" {
+    let doc ParseResult = parse_text(
+        "z = 1\na.b.c = 2\na.b.d = 3\n[a.e]\nf = 4\n[empty]\n")
+    $assert(doc.status == parse_ok, "表输入应解析成功")
+    let root_value Value = root(&doc.document)
+    let total u64 = 0
+    count(root_value, &total)
+    $assert(total == 3, "根表应有 3 个键")
+    let first EntryResult = table_entry(root_value, 0)
+    $assert(first.key.count == 1 && first.key.data[0] == 'z', "首次引入顺序：z")
+    let second EntryResult = table_entry(root_value, 1)
+    $assert(second.key.count == 1 && second.key.data[0] == 'a', "首次引入顺序：a")
+    let a LookupResult = get(root_value, "a")
+    $assert(tt_nested_int(a.value, "e", "f") == 4, "显式子表")
+    let b LookupResult = get(a.value, "b")
+    $assert(tt_int_at(b.value, "c") == 2 && tt_int_at(b.value, "d") == 3,
+        "点键形成的表")
+    let empty LookupResult = get(root_value, "empty")
+    let empty_count u64 = 9
+    count(empty.value, &empty_count)
+    $assert(empty_count == 0, "空表计数")
+    let span Span = value_span(a.value)
+    $assert(span.offset == 6 && span.length == 1, "隐式父表位置指向键段")
+    release(&doc.document)
+
+    let arrays ParseResult = parse_text(
+        "mixed = [1, \"x\", { b = 2 }, [3, 4],]\nempty = []\n")
+    $assert(arrays.status == parse_ok, "数组输入应解析成功")
+    let arrays_root Value = root(&arrays.document)
+    let mixed LookupResult = get(arrays_root, "mixed")
+    let mixed_count u64 = 0
+    count(mixed.value, &mixed_count)
+    $assert(mixed_count == 4, "混合数组长度")
+    let item0v i64 = 0
+    as_i64(array_get(mixed.value, 0).value, &item0v)
+    $assert(item0v == 1, "数组首元素")
+    $assert(tt_int_at(array_get(mixed.value, 2).value, "b") == 2, "数组内联表")
+    let item3_count u64 = 0
+    count(array_get(mixed.value, 3).value, &item3_count)
+    $assert(item3_count == 2, "嵌套数组长度")
+    $assert(array_get(mixed.value, 4).status == query_bounds_error, "数组越界")
+    let empty_array_count u64 = 1
+    count(get(arrays_root, "empty").value, &empty_array_count)
+    $assert(empty_array_count == 0, "空数组计数")
+    release(&arrays.document)
+}
+
+test "表：内联、数组表与冲突矩阵" {
+    let inline_doc ParseResult = parse_text(
+        "t = {\n  a = 1, # one\n  b = { c = 2 },\n}\n")
+    $assert(inline_doc.status == parse_ok, "多行内联表应解析成功")
+    let t LookupResult = get(root(&inline_doc.document), "t")
+    $assert(tt_int_at(t.value, "a") == 1, "内联表字段 a")
+    $assert(tt_nested_int(t.value, "b", "c") == 2, "内联表嵌套")
+    release(&inline_doc.document)
+    $assert(tt_rejects("t = { a = 1 }\n[t.b]\nc = 2\n", error_table_conflict),
+        "内联表封闭")
+
+    let aot ParseResult = parse_text(
+        "[[a]]\nx = 1\n[a.b]\ny = 2\n[[a]]\nx = 3\n[a.b]\ny = 4\n")
+    $assert(aot.status == parse_ok, "数组表应解析成功")
+    let aot_root Value = root(&aot.document)
+    let aot_a LookupResult = get(aot_root, "a")
+    let a_count u64 = 0
+    count(aot_a.value, &a_count)
+    $assert(a_count == 2, "数组表长度")
+    let e0 LookupResult = array_get(aot_a.value, 0)
+    let e1 LookupResult = array_get(aot_a.value, 1)
+    $assert(tt_int_at(e0.value, "x") == 1, "数组表 e0.x")
+    $assert(tt_nested_int(e0.value, "b", "y") == 2, "数组表 e0.y")
+    $assert(tt_int_at(e1.value, "x") == 3, "数组表 e1.x")
+    $assert(tt_nested_int(e1.value, "b", "y") == 4, "数组表 e1.y")
+    release(&aot.document)
+
+    let dup ParseResult = parse_text("a = 1\na = 2\n")
+    $assert(dup.status == parse_syntax_error && dup.error.code == error_duplicate_key,
+        "重复键错误码")
+    $assert(dup.error.has_related != 0, "重复键应关联首次出现")
+    $assert(dup.error.related.offset == 4 && dup.error.related.length == 1,
+        "重复键首次出现位置")
+    $assert(dup.error.span.offset == 6 && dup.error.span.length == 1,
+        "重复键第二次出现位置")
+    release(&dup.document)
+    $assert(tt_rejects("[a]\n[a]\n", error_table_conflict), "重复表头冲突")
+    $assert(tt_rejects("[fruit]\napple.color = \"red\"\n[fruit.apple]\n",
+        error_table_conflict), "点键后表头冲突")
+    $assert(tt_rejects("a = 1\n[a]\n", error_table_conflict), "标量转表冲突")
+    $assert(tt_rejects("a = [1]\n[[a]]\n", error_table_conflict), "数组转数组表冲突")
+
+    let quoted ParseResult = parse_text("[\"a.b\"]\nx = 1\n[a]\nb = 2\n")
+    let quoted_root Value = root(&quoted.document)
+    $assert(tt_int_at(get(quoted_root, "a.b").value, "x") == 1, "引号表头是字面键")
+    $assert(tt_nested_int(quoted_root, "a", "b") == 2, "字面键与点键共存")
+    release(&quoted.document)
+
+    let crlf ParseResult = parse_text("a = 1\r\n\r\nb = 2\r\n")
+    $assert(crlf.status == parse_ok, "CRLF 应解析成功")
+    let crlf_root Value = root(&crlf.document)
+    $assert(tt_int_at(crlf_root, "a") == 1 && tt_int_at(crlf_root, "b") == 2,
+        "CRLF 取值")
+    release(&crlf.document)
+}
+
+test "错误：编码、语法与预算" {
+    let null_input ParseResult = parse(0, 5)
+    $assert(null_input.status == parse_argument_error
+        && null_input.error.code == error_argument, "空指针输入是参数错误")
+    $assert(null_input.document.handle == 0, "参数错误不产生文档")
+    $assert(parse_text(0).status == parse_argument_error, "空文本指针是参数错误")
+
+    let bad_utf8 [8]u8
+    bad_utf8[0] = 'a'
+    bad_utf8[1] = ' '
+    bad_utf8[2] = '='
+    bad_utf8[3] = ' '
+    bad_utf8[4] = '"'
+    bad_utf8[5] = 195
+    bad_utf8[6] = 40
+    bad_utf8[7] = '"'
+    let utf8 ParseResult = parse(&bad_utf8[0], 8)
+    $assert(utf8.status == parse_syntax_error && utf8.error.code == error_utf8,
+        "非法 UTF-8 错误码")
+    $assert(utf8.error.span.offset == 5 && utf8.error.span.length == 2,
+        "非法 UTF-8 位置")
+    $assert(utf8.error.span.line == 1 && utf8.error.span.column == 6,
+        "非法 UTF-8 行列")
+    release(&utf8.document)
+
+    let bom [6]u8
+    bom[0] = 239
+    bom[1] = 187
+    bom[2] = 191
+    bom[3] = 'a'
+    bom[4] = '='
+    bom[5] = '1'
+    $assert(tt_rejects_bytes(&bom[0], 6, error_utf8), "BOM 应拒绝")
+
+    $assert(tt_rejects("a = \"x", error_syntax), "未闭合字符串")
+    $assert(tt_rejects("a = [1, 2", error_syntax), "未闭合数组")
+    $assert(tt_rejects("[a\n", error_syntax), "未闭合表头")
+    $assert(tt_rejects("a = 1\rb = 2\n", error_syntax), "裸 CR")
+    $assert(tt_rejects("a = 1 b = 2\n", error_syntax), "尾随内容")
+    let unterminated ParseResult = parse_text("a = \"x")
+    $assert(unterminated.error.message[0] != 0, "错误消息非空")
+    release(&unterminated.document)
+
+    let too_large u64 = 16777217
+    let huge *u8 = malloc(too_large).to_type(*u8)
+    if (huge != 0) {
+        let huge_result ParseResult = parse(huge, too_large)
+        $assert(huge_result.status == parse_resource_error
+            && huge_result.error.code == error_resource_limit, "输入字节上限")
+        free(huge.to_type(*void))
+    } else {
+        $assert(false, "输入预算测试分配失败")
+    }
+
+    let nested [1024]u8
+    nested[0] = 'a'
+    nested[1] = ' '
+    nested[2] = '='
+    nested[3] = ' '
+    let at int = 4
+    let d int = 0
+    for d < 129 {
+        nested[at] = '['
+        at += 1
+        d += 1
+    }
+    d = 0
+    for d < 129 {
+        nested[at] = ']'
+        at += 1
+        d += 1
+    }
+    let depth_result ParseResult = parse(&nested[0], at.to_type(u64))
+    $assert(depth_result.status == parse_resource_error
+        && depth_result.error.code == error_resource_limit, "嵌套深度上限")
+    release(&depth_result.document)
+
+    let parts [1024]u8
+    parts[0] = 'a'
+    at = 1
+    let p int = 0
+    for p < 128 {
+        parts[at] = '.'
+        at += 1
+        parts[at] = 'a'
+        at += 1
+        p += 1
+    }
+    parts[at] = ' '
+    at += 1
+    parts[at] = '='
+    at += 1
+    parts[at] = ' '
+    at += 1
+    parts[at] = '1'
+    at += 1
+    let parts_result ParseResult = parse(&parts[0], at.to_type(u64))
+    $assert(parts_result.status == parse_resource_error
+        && parts_result.error.code == error_resource_limit, "点键段数上限")
+    release(&parts_result.document)
+
+    let digits [5000]u8
+    digits[0] = 'x'
+    digits[1] = ' '
+    digits[2] = '='
+    digits[3] = ' '
+    digits[4] = '1'
+    digits[5] = '.'
+    at = 6
+    let n int = 0
+    for n < 4097 {
+        digits[at] = '1'
+        at += 1
+        n += 1
+    }
+    let digits_result ParseResult = parse(&digits[0], at.to_type(u64))
+    $assert(digits_result.status == parse_resource_error
+        && digits_result.error.code == error_resource_limit, "浮点有效位上限")
+    release(&digits_result.document)
+}
+
+test "错误：查询边界" {
+    let query ParseResult = parse_text("a = 1\nb = [1]\n")
+    let query_root Value = root(&query.document)
+    let entry EntryResult = table_entry(query_root, 99)
+    $assert(entry.status == query_bounds_error && entry.value.handle == 0
+        && entry.key.count == 0, "对象条目越界")
+    let a LookupResult = get(query_root, "a")
+    $assert(table_get(a.value, Text{ data: 0, count: 0 }).status
+        == query_type_error, "对标量 table_get")
+    $assert(count(a.value, 0) == query_argument_error, "count 空输出参数")
+    $assert(as_i64(a.value, 0) == query_argument_error, "as_i64 空输出参数")
+    $assert(array_get(get(query_root, "b").value, 1).status == query_bounds_error,
+        "数组越界")
+    let not_found LookupResult = get(query_root, "missing")
+    $assert(not_found.status == query_missing && not_found.value.handle == 0,
+        "缺失键")
+    release(&query.document)
+}
+
+test "文件：读取、错误分类与生命周期" {
+    let path *char = "/tmp/yh-toml-test-data.toml"
+    let bad_path *char = "/tmp/yh-toml-test-bad.toml"
+    unlink(path)
+    unlink(bad_path)
+    let data [192]u8
+    let n int = tt_fill(&data[0],
+        "title = \"yh\"\n[server]\nport = 8080\nenabled = true\ntags = [\"a\", \"b\"]\n")
+    io.write_file(path, data[0..n])
+    let bad_data [16]u8
+    let bn int = tt_fill(&bad_data[0], "a = [1,\n")
+    io.write_file(bad_path, bad_data[0..bn])
+
+    let result ParseResult = read_file(path)
+    $assert(result.status == parse_ok, "读文件应解析成功")
+    let root_value Value = root(&result.document)
+    let text Text
+    $assert(as_text(get(root_value, "title").value, &text) == query_ok
+        && text.count == 2, "文件 title")
+    let server LookupResult = get(root_value, "server")
+    let port_value i64 = 0
+    as_i64(get(server.value, "port").value, &port_value)
+    $assert(port_value == 8080, "文件 port")
+    let tag_count u64 = 0
+    count(get(server.value, "tags").value, &tag_count)
+    $assert(tag_count == 2, "文件 tags")
+    release(&result.document)
+
+    let missing ParseResult = read_file("/tmp/yh-toml-test-missing.toml")
+    $assert(missing.status == parse_io_error && missing.error.code == error_io,
+        "缺失文件是 IO 错误")
+    $if (linux) {
+        $assert(missing.error.native_code != 0, "Linux 保留 errno")
+    }
+    $if (darwin) {
+        $assert(missing.error.native_code == 0, "Darwin 旧文件接口 native_code 为 0")
+    }
+    $assert(missing.document.handle == 0, "缺失文件不产生文档")
+    release(&missing.document)
+
+    let empty_path ParseResult = read_file(0)
+    $assert(empty_path.status == parse_argument_error
+        && empty_path.error.code == error_argument, "空路径是参数错误")
+
+    let bad ParseResult = read_file(bad_path)
+    $assert(bad.status == parse_syntax_error, "语法错误文件按解析失败处理")
+    $assert(bad.document.handle == 0, "语法错误文件不产生文档")
+    release(&bad.document)
+
+    let again ParseResult = read_file(path)
+    $assert(again.status == parse_ok, "再次读取应成功")
+    let again_text Text
+    as_text(get(root(&again.document), "title").value, &again_text)
+    $assert(again_text.count == 2, "再次读取的值")
+    release(&again.document)
+    unlink(path)
+    unlink(bad_path)
+}

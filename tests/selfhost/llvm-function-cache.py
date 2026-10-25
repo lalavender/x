@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """LA3：函数级 IR 缓存的命中、失效、损坏与产物一致性回归。
 
-用 llvmfunctioncache 项目的 4 个运行期函数验证：
+用 llvmfunctioncache 项目的 4 个运行期函数验证 IR 缓存：
     cold       0 hit / 4 miss / 4 lowered
     注释/空行   4 hit / 0 miss / 0 lowered（模块对象键变化，worker 仍运行）
     改一个函数   3 hit / 1 miss / 1 lowered
@@ -9,6 +9,10 @@
     损坏一条记录 3 hit / 1 miss，且只重建该记录
     改接口/布局  0 hit / 4 miss（环境键保守失效）
 并比较冷编与命中构建的对象/LLVM 文本字节一致。
+
+check 切片缓存自格式 v3（2026-10-26）起重新装载：记录携带本函数的字符串登记，
+并在 capture 时守卫「本函数没有新建类型/静态数据」，因此命中后 lowering 仍能查到
+受检字节，且类型编号不受跳过影响。下面的 check 期望即恢复为命中计数。
 
 所有产物在 tmp/llvm-function-cache/；默认使用候选自身目标，不写死 x64。
 usage: python3 tests/selfhost/llvm-function-cache.py --compiler-path ./yh
@@ -154,6 +158,13 @@ def one_level(compiler, opt):
         expect(cold, (0, 4, 4), (0, 4, 0), "冷编")
         cold_object_hash = digest(cold_object)
         cold_text_hash = digest(cold_text)
+        # PC3：全冷构建（.build 刚清空）不写函数缓存，避免冷编付 capture 成本。
+        # 先做一次等价重编把记录写出来，后面的失效矩阵从暖缓存开始。
+        for pattern in ("manifest/*-main.manifest", "obj/*-main.o"):
+            for path in (project / ".build").rglob(pattern):
+                path.unlink()
+        primed, _, _ = build(project, compiler, opt)
+        expect(primed, (0, 4, 4), (4, 0, 4), "首轮重编（缓存写入）")
 
         # 注释/空行不进入 token 流：模块对象键变化，但 4 个函数应全部命中。
         # 插在函数之前会移动后续源码字节偏移，命中路径必须按当前符号重建 locs。
@@ -174,20 +185,32 @@ def one_level(compiler, opt):
         changed, _, _ = build(project, compiler, opt)
         expect(changed, (3, 1, 1), (3, 1, 3), "单函数修改")
 
-        # 插入第 5 个函数：原 4 个命中，新函数 miss。
+        # 插入第 5 个函数：签名事实进函数键（调用方 ABI 依赖被调方签名），
+        # 声明集合变化按设计保守失效整模块——新函数可能被任何旧函数调用。
         append(main, "\nfn extra() int {\n    return 5;\n}\n")
         inserted, _, _ = build(project, compiler, opt)
-        expect(inserted, (4, 1, 1), (4, 1, 4), "插入新函数")
+        expect(inserted, (0, 5, 5), (4, 1, 4), "插入新函数")
 
         # 损坏一条记录：只重建该记录，其余仍命中。
         before = records(project, opt)
         require(len(before) == 5, f"应有 5 条记录，实际 {sorted(before)}")
-        victim = sorted(before)[0]
+        # 只有「可缓存的函数」才有 check 切片（v3 会跳过新建类型/静态数据的函数），
+        # 所以选一个两份记录都在的键作受害者，否则 .fchk 的损坏对命中没有影响。
+        directory = cache_dir(project, opt)
+        victim = next((key for key in sorted(before)
+                       if (directory / f"{key}.fchk").exists()), sorted(before)[0])
         for suffix in (".fir", ".fchk"):
-            (cache_dir(project, opt) / f"{victim}{suffix}").write_bytes(b"corrupt")
+            path = directory / f"{victim}{suffix}"
+            if path.exists():
+                path.write_bytes(b"corrupt")
         append(main, "\n// 触发 worker 以检查损坏记录\n")
         damaged, _, _ = build(project, compiler, opt)
-        expect(damaged, (4, 1, 1), (4, 1, 4), "损坏记录")
+        # v3 只为「不新建类型/静态数据」的函数写 check 切片，所以损坏的键是否被
+        # 索引登记才决定 check 侧是 4/1 还是 5/0；IR 侧必须稳定地只重建该记录。
+        check_index = directory / "index.check"
+        indexed = (check_index.read_text(encoding="utf-8").split() if check_index.exists() else [])
+        damaged_check = (4, 1, 4) if victim in indexed else (5, 0, 5)
+        expect(damaged, (4, 1, 1), damaged_check, "损坏记录")
         after = records(project, opt)
         changed_keys = {key for key in before if before[key] != after.get(key)}
         # 重建后的记录可能与损坏前逐字节相同（缓存不再复制源码正文），

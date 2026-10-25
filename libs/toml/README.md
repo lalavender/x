@@ -181,15 +181,16 @@ stdout/stderr、不退出进程；`read_file` 的 I/O 错误在 Linux 通过
 ## 验收
 
 ```bash
-python3 tests/toml/run.py                  # API/所有权/资源/文件 6 组
+cd libs && yh test toml                    # API/所有权/资源/文件断言（11 test）
+just test-toml                             # 同上
 python3 tests/toml/conformance.py --prepare  # 首次：取固定 toml-test v2.2.0
 python3 tests/toml/conformance.py          # 官方 tagged JSON decoder 门
 python3 tests/toml/injection.py            # 124 个池分配失败点 + 预算门
-python3 tests/toml/install.py              # make install 后仓库外导入
-make test-toml
-make test-toml-conformance
-make test-toml-injection
-make test-toml-install
+python3 tests/toml/install.py              # just install 后仓库外导入
+just test-toml
+just test-toml-conformance
+just test-toml-injection
+just test-toml-install
 ```
 
 固定语料为 toml-test v2.2.0 的 `files-toml-1.1.0` 清单：214 个有效文件比较
@@ -201,7 +202,7 @@ make test-toml-install
 常量 `TOML_TEST_FAIL_AFTER` 与池分配计数（不导出 API、恒不生效），测试副本
 改写该常量的使用位置为运行时设置。逐次允许更多池分配，验证 124 个失败点的
 失败原子性；另把副本预算降到 2048 字节，强制验证累计预算分类。安装门执行
-`make install` 并把 fixture 放到仓库外，在无 `YH_STDLIB` 时用默认
+`just install` 并把 fixture 放到仓库外，在无 `YH_STDLIB` 时用默认
 `../share/yh/libs` 发现运行。
 
 ## 未实现
@@ -209,5 +210,5 @@ make test-toml-install
 - writer/encoder、注释与排版保真编辑。
 - 结构体自动映射、schema 框架、环境变量展开、include。
 - 编译器 `project.toml` 消费者迁移（T6）；迁移前编译器仍使用旧清单解析器。
-- Release 资产当前只含 `yh`，标准库由 `make install` 分发；是否把标准库
+- Release 资产当前只含 `yh`，标准库由 `just install` 分发；是否把标准库
   打包进 Release 尚未决定（T5.2）。

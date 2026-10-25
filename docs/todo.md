@@ -36,11 +36,15 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   符号（须先抽进 `proj` 的 art 子簇），`project_link` 读 `toml_*` 模块级 globals
   （不能进 `link`，否则 `link → build` 成环）。顺序：art → `link` → `mb_link`
   阶段化 → `module_build` 拆 3 文件。
-- [x] **B3 `lower` 独立**（2026-10-25 完成）：15 个 lowering 文件 + 探针共 16 个
-  迁入 `compiler/lower/`，`ast` 9,041 → **3,278**，`lower` 5,815；补 `pub`
-  `CheckedStorage`/`checked_zero_rows`/`checked_name_valid`/`checked_decl_restore`
-  （+ `cache_mix` 的 3 个混入原语）。`ast` 不再 import `lower`，依赖矩阵 13 模块
-  37 条边无环。证据见 [finish.md](finish.md) 2026-10-25 条目。
+- [ ] **NP3 受检契约与 lowering 解耦**（2026-10-26 定位决定后唯一保留的 NP 阶段）：
+  按[方案 §6](02-plan/yh-Nanopass风格优化架构实施方案.md) 收口——封存
+  CheckedFunction 的绑定/类型/符号/调用事实，生命周期由任务持有，不再由 lowering
+  查 parser 游标或可复用 gen 槽；按控制流切片做语言规范化，逐项声明移除/新增形式并
+  保留源位置与求值顺序；把「源码形态支持预检」与「构造」分离，缓存/后端调用移到
+  协调适配层（`ir` 不向上依赖）；补嵌套循环、for-in、switch/goto、指针/内存、转换、
+  聚合、浮点与各类调用；受支持函数只走一次受检 → SSA → 后端。验收：新路径覆盖自编
+  所需全部能力并达固定点后，才允许移除失去用途的旧入口；R2b 的线程池/文件对象/
+  增量验收另外完成。
 
 ## 2026-10-21 重规划说明
 
@@ -76,40 +80,59 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
 - [ ] **PF3**：规模增长、产物运行基准与代码体积；并发扫描待存在控制入口后再做。
 - [ ] **PF4**：Gitea 独立性能报告、资产归档、噪声校准与回退复测。
 
+### 首轮归因发现的优化项（2026-10-25）
+
+[归因分析](02-plan/yh-编译器性能分析-2026-10-25.md)给出冷编 26 s / 热编 2.4 s / 单函数
+改动 7 s 的阶段归属：`capture`（函数级 IR 缓存序列化）占冷编 worker CPU 56%，
+关闭后冷编 −46%；而增量场景实测命中 0%（IR）/ ≤9%（check）。按收益排序：
+
+- [ ] **PC2c 缓存记录按函数内存膨胀**：v3 每个可缓存函数都带一份字符串字节副本，
+  大模块的 `.fchk` 仍可能偏大；若需要可改为「按模块共享字符串池 + 引用计数」。
+- [ ] **PC3b 种子滚动**：`make` 仍由旧种子编译（冷编 24.6 s），−38% 要等滚种子后
+  才出现在 `make` 上。滚动前置：等到工作区并行改动落地（当前 `compiler/testkit` 有
+  未完成改动）再执行 `make test` + `make selfhost-native` + `make seed`。
+  实测前置（2026-10-26，load≈4.0）：`make`（种子→compiler 冷编）**23.0 s**、13 模块；
+  `selfhost_snapshot_gate.py --verify-seed bin/yh-darwin-arm64` 通过；`strings yh` 无
+  `/Users/…` 构建机路径（滚种子不会被拒）。滚后预期 `make` 冷编进 ~11–12 s（种子拿到 PC3）。
+- **2026-10-26 低负载复核（load≈4.5–5，见 [分析](02-plan/yh-编译器性能分析-2026-10-25.md) §14）**：
+  冷编 11.2 s、全量重编（含写）**17.5 s**、热编 **1.14–1.21 s**、单函数改动中位 **3.9 s**、
+  冷编后首次改 4.78 s。**热编 ≤1.5 s 与全量重编 ≤20 s 已达标**；单函数改动 ≤3 s
+  受限于「模块级 `.o` + 每轮整模块 LLVM 发射」（模块重编 2.03 s 里大头在此），
+  需要**函数级目标文件**才能再降，属结构性改动。PC3c 的实测收益只有 0.5 s
+  （4.78 vs 4.27），不建议为它引入冷编后台补写。
+- [ ] **PC4c scratch 复用前先查越界**：把 7 张临时表改成按模块复用时，`yh test` 的
+  libs 构建会在 lowering 阶段失败（`memory/memory.yh:5:19 alloc`），机制未定位；
+  重做前先给 `ir_fc_mark_symbol`/`ir_fc_visit_type` 加边界断言。注意 `reserve` 必须
+  在取指针之前（扩容 realloc 会让旧指针失效）。
+- [ ] **PC7 函数级目标文件**（PC6 的 ≤3 s 只能靠它）：可行性见
+  [函数级目标文件可行性](03-design/yh-函数级目标文件可行性-2026-10-26.md)。方案 A（每函数
+  一个 `.o`）或 B（桥批处理，需改桥 ABI → 滚种子），工期按天计；落地前单函数改动
+  只能停在 ~3.5–3.9 s。
+- [ ] **LC1 Linux 对等**：Linux 宿主的裸跑仍靠 `YH_LINK_RUNTIME_FLAGS`
+  （`-lstdc++`/`-lpthread`/`-lxml2`…）。要么给 Linux 闭包生成对应的 `.so` 路径输入，
+  要么把运行库参数换成清单键（2026-10-25 试过 `[link-options].runtime`，但当前
+  种子不认该键，需先滚一代种子再落地）。验证：Linux 上
+  `cd compiler && ../bin/yh-linux-arm64 build` 不设环境变量就能链接。
+- [ ] **LC2 闭包清单门扩展到 Linux**：`tools/link-closure.py check --host …` 目前只
+  接进 `make test-llvm-darwin`；Linux 的对应门未接（需先有 Linux 宿主记录验证）。
+- [ ] **LC3 F2-9 交叉**：Linux→Darwin 交叉仍需目标包自带 `libc++.tbd`
+  （见 `03-design/yh-Darwin交叉编译遗留边界.md` §2）。
+
 ## 语言内测试（YT4 迁移与发版）
 
-[设计提案](03-design/yh-test语言内测试设计-2026-10-23.md)与
-[实施分期](02-plan/yh-test分阶段实施方案-2026-10-23.md)已整理。
-YT0–YT3b、YT2d、YT1.1 已实施并记录在
-[01-finished/](01-finished/)；既有测试的迁移候选见
-[YT4 分析](02-plan/yh-test语法迁移既有测试分析-2026-10-23.md)。
-以下只保留未完成项。
+[设计提案](03-design/yh-test语言内测试设计-2026-10-23.md)、
+[实施分期](02-plan/yh-test分阶段实施方案-2026-10-23.md)与
+[2026-10-25 迁移分析与决策](02-plan/yh-test语法迁移既有测试分析与规划-2026-10-25.md)
+（取代 10-23 版）已整理。**YT0–YT3b、YT2d、YT1.1 与 YT4-P0～P7 已全部完成**：
+每个标准库都有自己的测试文件（122 例），`libs-test`/`libs-test-o2` 与主门全绿；
+证据见 [YT4 收口与门禁验证](01-finished/yh-YT4-收口与门禁验证-2026-10-25.md)
+与各阶段 `01-finished/yh-YT4-*.md`。以下只保留延后项。
 
 - [ ] **YT2d-2 剩余**：函数级 IR 与 check 切片缓存仍未用于测试构建
   （缓存键不覆盖 `TK_TEST`），测试构建每次整模块重编。
-
-### YT4 既有测试迁移（2026-10-23 分析完成，待实施）
-
-[分析](02-plan/yh-test语法迁移既有测试分析-2026-10-23.md)按「纯逻辑断言可迁移、
-编译器契约不迁移」给出候选、前置缺口与分阶段顺序。结论：收益是失败定位与
-粒度，不是门禁变快；迁移前必须先做 YT4a，且每个库保留一个外部消费者 smoke。
-
-- [ ] **YT4a 前置**：测试运行目录/缓存隔离（并入 YT2d：编译器身份 + 目标 +
-  优化级 + 运行实例）、`make test-lib-tests` 改无选择器、补 `-O2` 入口；
-  连跑两次 + O0/O2 交替验证。
-- [ ] **YT4b string**：5 组行为夹具 → `libs/string` 测试，`stringinterop` →
-  `libs/toml`；保留 `stringresources` 注入、`reference.py` 差分与安装门。
-- [ ] **YT4c toml**：5 组 API 夹具（873 行、146 处 `ok()`）→ `libs/toml`
-  测试；保留 `tomlfiles`、conformance、injection、install。
-- [ ] **YT4d cli**：5 个 `--selftest` 主体（约 3625 行）→ `libs/cli` 测试；
-  保留 argv/退出码/stderr 用例、`cliwarnings`、`clidiff` 差分。
-- [ ] **YT4e 编译器 fixture**：`irverify`/`astcheck`/`irfront` 迁入
-  `compiler/{ir,ast,check}` 测试并删除 `copy_proj` 特判；`llvmlower`/
-  `llvmchecked` 暂留。
-- [ ] **YT4f os/sys/time**：纯模型与错误分类断言迁入 `*.linux.yh`/
-  `*.darwin.yh` 测试；文件/目录/进程/环境与 Linux 目标类型检查留在外部。
-- [ ] **决策**：迁移范围（是否含 YT4e）、旧 runner 双跑周期、OS/FS 是否迁入、
-  断言粒度、是否允许测试调用私有 `fn`、消费者 smoke 规模。
+- [ ] **D11 预期失败/诊断断言能力（另立项）**：为把 `tests/yh-run/fail`、
+  `tests/fmt/interp.py` 等负例逐步收敛到 `yh test`，需要新增“编译必须失败且
+  包含指定诊断片段”的测试能力；当前负例门继续外部运行。
 
 ## 版本与发布流程（P0 前置）
 
@@ -184,6 +207,9 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 - [ ] **E1.2 OS7 第二切片：文件/进程与独立性**：迁移编译器剩余文件、worker、
   fork/exec/wait 调用；审计普通 syscall 程序与嵌入 LLVM 编译器的依赖清单，
   区分宿主与目标，补独立性验收。
+- [ ] **E1.3 浮点字面量解析去 libc**：`compiler/gen` 的十进制常量改用宿主
+  `strtod`（正确舍入，修复 1 ULP 偏差）；E1 迁移 libs/os 时补纯 yh 等价实现
+  或改用 `libs/num`，并保持 `tests/yh-run/run/float-literal-rounding.yh` 全绿。
 - [ ] **E2.1 OS8 Darwin 文件 API**：新增 Darwin `file` 平台实现与即时 errno
   桥，覆盖 open/read/write/close/mkdir/remove/rename、CLOEXEC 与错误分类；
   原生用例与 Linux 契约对齐。
@@ -328,20 +354,22 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
 [ADR-0019](adr/0019-yh-JSON标准库独立文档模型与词素保真数字.md)已落地首期：
 `libs/json/` 12 个源文件（reader + writer + 查询 + 文件读写），
 `libs/num/` 提供十进制 ↔ binary64 与最短往返格式化；
-`tests/modules/projects/json*` 六组断言 6/6 通过，`make test-json` 可用并已接入
-`make test`。口径：RFC 8259 完整语法 + 严格 profile（拒绝 BOM/重复键/孤立代理/
-尾逗号）；单一 `kind_number` 且保存原始词素；文档模型与 `toml` 独立。
+六组断言已迁入 `libs/json/99_tests.yh`（12 个 test / 127 条断言，见
+[迁移记录](01-finished/yh-YT4-P1-json迁移-2026-10-25.md)），`jsonmodel`
+保留为 `build-check.py` 的公开面 smoke；原 `tests/json/run.py` 与
+`make test-json` 已删除，由 `yh test json` / `make libs-test` 取代。口径：
+RFC 8259 完整语法 + 严格 profile（拒绝 BOM/重复键/孤立代理/尾逗号）；
+单一 `kind_number` 且保存原始词素；文档模型与 `toml` 独立。
 以下只保留未完成项。
 
 - [ ] **J4 预算与失败原子性**：深度/字节/有效位上限已实现并有断言；缺
-  `JSON_TEST_FAIL_AFTER` 池分配失败注入、`tests/json/injection.py` 与低预算门，
-  以及 `make test-json-injection`。
+  `JSON_TEST_FAIL_AFTER` 池分配失败注入与低预算门（新建
+  `tests/json/injection.py` 与 `make test-json-injection`）。
 - [ ] **J5 一致性与差分**：`jsontestbridge`（stdin→退出码）、固定 JSONTestSuite
   提交（`y_` 全接受、`n_` 全拒绝、`i_` 逐条登记）、Python 差分（值树 + 浮点
   位模式）、`jsonroundtrip` 组、`make test-json-conformance`。
-- [ ] **J7 收口**：`libs/json/99_tests.yh` 内建测试块与 `make test-lib-tests`
-  登记、`tests/json/install.py` 仓库外导入门、`make test-json-install`、
-  `docs/finish.md` 流水与 `01-finished/` 交付记录。
+- [ ] **J7-2 收口剩余**：`tests/json/install.py` 仓库外导入门、
+  `make test-json-install`、`docs/finish.md` 流水与 `01-finished/` 交付记录。
 - [ ] **J8 后置候选**：JCS 规范模式、大对象哈希索引（`JSON_HASH_THRESHOLD`
   已预留）、流式 SAX、JSON Pointer；均需实测或真实消费者触发。
 - [ ] **N1 `libs/num` 反向迁移**：`libs/toml/30_numbers.yh` 改为调用
@@ -378,9 +406,18 @@ prelude `printf`（H.I3 的按需扩展仍独立）。
 
 ### H. 编译器可选收尾
 
-- [ ] **H1 字符串字面量只读化评估**：字面量放只读段，可写副本走显式复制；
-  收益是省一个 16KB 可写段，代价是语义变更（字面量改为不可变），需评估现有
-  语料与 `tests/yh-run/` 影响后再决定。
+- [ ] **H1 字符串字面量只读化**（2026-10-26 已决定：改语义）：字面量符号发
+  `constant` 进只读段（`backend/llvm_module.yh:385` 已按 `mutable` 选
+  `global`/`constant`，只需把 `lower/module_snapshot_static.yh` 的字面量登记
+  `mutable` 置 0）；能静态判定的写入改为编译期诊断——先覆盖 `"abc"[0] = …` 与
+  字面量绑定的局部别名（不经函数边界），与 comptime 的「字面量字节池只读」
+  口径统一（`tests/yh-run/fail/147-comptime-string-const-write.yh`），逃逸到
+  函数边界后的写入退化为运行期崩溃。
+  实测依据（2026-10-26）：运行期现在允许且生效（`let p *char = "abc";
+  p[0]='z'` → `zbc`），仓库运行语料无依赖；`__data` 实测 hello-world 14 B、
+  `./yh` 93 KB（每进程至少省一个 16 KB 页，字面量页可跨进程共享）。
+  验收：`tests/yh-run/fail/` 加直接写用例、`tests/yh-run/run/` 加只读访问用例，
+  `make test` + `make selfhost-native` 全绿后与 PC3b 一起滚种子。
 - [ ] **H4 LLVM 闭包缓存路径迁移**：缓存里的 `selfhost-flags.txt` 仍存绝对
   路径，整个缓存目录被搬走或换机器时需要重写或重新 `make llvm-host`；
   `YH_LLVM_CACHE` 自动定位已完成，此项只保留路径可迁移性。
@@ -475,14 +512,17 @@ LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
 
 ## 待决策（❓）
 
-- **❓1 Nanopass 定位**：LLVM 已接管通用优化与寄存器分配。建议 NP3 并入受检契约
-  与 lowering 解耦，NP0/NP1/NP2/NP4/NP5 关闭（NP4 自研机器 IR 与 ADR-0014
-  冲突）；需用户确认后再改
-  [Nanopass 方案](02-plan/yh-Nanopass风格优化架构实施方案.md) 与 ADR-0011。
-  2026-10-22 [LLVM 分支架构复核](03-design/yh-LLVM分支架构复核-2026-10-22.md)
-  进一步建议保留 NP0 的语义/O0-O2/固定点要求，通用优化不重复建设；优先统一
-  发射驱动、拆分 lowering，再实施可重绑定的函数 IR 复用。本次未修改旧方案状态。
-- **❓3 字面量只读化**：见 H1，属语义变更，需单独决定。
+当前无未决项。2026-10-26 用户已决定两项，记录如下。
+
+- **NP 定位（原 ❓1，已决定）**：**只保留 NP3**（受检契约与 lowering 解耦），
+  NP0/NP1/NP2/NP4/NP5 关闭——NP0 口径并入现有 `make test` + O0/O2 + 自举门；
+  NP1/NP2 的对象代码（`ir_simplify`、`ssa_inline`）已删除；NP4 由 ADR-0014
+  取代；NP5 交 LLVM 默认管线。ADR-0011 已标注部分被取代，
+  [方案](02-plan/yh-Nanopass风格优化架构实施方案.md) 与
+  [设计](03-design/yh-Nanopass风格优化架构.md) 已改状态；NP3 作为唯一保留
+  阶段记入「2026-10-24 架构优化」小节。
+- **字面量只读化（原 ❓3，已决定：改语义）**：字面量进只读段 + 静态可判定的
+  写入改编译期诊断，见 H1。
 
 ## 设计决定不做（非缺口，勿列为任务）
 

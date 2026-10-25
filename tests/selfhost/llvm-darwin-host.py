@@ -96,6 +96,25 @@ def main():
     require(host["selfhost_flags_text"]([]) == "", "空闭包必须写成空文件")
     require(host["selfhost_flags_path"]().name == "selfhost-flags.txt",
             "自举闭包文件名必须稳定，构建机与门禁按名字发现")
+    # C++ 运行库以文本 stub 进入闭包：项目清单只能引用文件，不能再依赖 -lc++ 参数。
+    stub_dir = ROOT / "tmp/llvm-migration/darwin-host-test"
+    stub_dir.mkdir(parents=True, exist_ok=True)
+    stub_sdk = stub_dir / "sdk"
+    (stub_sdk / "usr/lib").mkdir(parents=True, exist_ok=True)
+    (stub_sdk / "usr/lib/libc++.tbd").write_text("--- !tapi-tbd\n", encoding="utf-8")
+    record = {"sdk_root": str(stub_sdk),
+              "selfhost_link_flags": ["-force_load", "/tmp/libbridge.a", "-lc++"]}
+    host["write_cxx_stub"](record, stub_dir)
+    require(record.get("cxx_tbd", "").endswith("libc++.tbd")
+            and (ROOT / record["cxx_tbd"]).is_file(),
+            "libc++ 文本 stub 没有复制进构建机闭包")
+    host["write_selfhost_flags"](record, stub_dir)
+    runtime = host["selfhost_runtime_path"](stub_dir).read_text(encoding="utf-8")
+    require(runtime == "", "闭包已带 libc++.tbd 时运行库文件仍再次传 -lc++")
+    # 没有 stub 时保持旧行为：-lc++ 仍由构建机运行库文件提供。
+    host["write_selfhost_flags"]({"selfhost_link_flags": ["-lc++"]}, stub_dir)
+    runtime = host["selfhost_runtime_path"](stub_dir).read_text(encoding="utf-8")
+    require(runtime == "-lc++\n", "无 stub 时 -lc++ 没有回退到运行库文件")
     print("PASS Darwin LLVM host 契约：编译透传、查询透传、链接注入与参数保留")
 
 

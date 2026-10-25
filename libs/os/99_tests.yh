@@ -1,0 +1,96 @@
+module os
+
+import sys
+
+// ============================================================================
+// 99_tests.yh —— os 结果模型的语言内测试（YT4-P5）
+//
+// 只在 `yh test os` 中执行；生产构建不登记测试符号、不发射测试体。
+// 覆盖 no_error/make_error、FdResult/IoResult 构造函数、OpenOptions 默认值、
+// make_dir_entry 视图与 error_from_errno 分类映射（不发起系统调用）。
+// 文件/目录/进程 E2E 仍由 libs/os/test/run.py 与 tests/modules 的 Linux 用例承担。
+// ============================================================================
+
+test "错误值与结果构造函数" {
+    let ok Error = no_error()
+    $assert(ok.kind == error_none && ok.native_code == 0, "no_error 是零错误")
+
+    let made Error = make_error(error_not_found, 42)
+    $assert(made.kind == error_not_found && made.native_code == 42,
+        "make_error 保留分类与原生错误号")
+
+    let fd_ok_result FdResult = fd_ok(7)
+    $assert(fd_ok_result.fd == 7 && fd_ok_result.error.kind == error_none,
+        "fd_ok 保留 fd 且零错误")
+    let fd_bad FdResult = fd_error(error_permission_denied, 13)
+    $assert(fd_bad.fd == -1 && fd_bad.error.kind == error_permission_denied
+        && fd_bad.error.native_code == 13, "fd_error 固定 fd=-1")
+
+    let io_ok_result IoResult = io_ok(5)
+    $assert(io_ok_result.count == 5 && io_ok_result.error.kind == error_none,
+        "io_ok 保留字节数")
+    let io_bad IoResult = io_error(error_interrupted, 4)
+    $assert(io_bad.count == 0 && io_bad.error.kind == error_interrupted
+        && io_bad.error.native_code == 4, "io_error 固定 count=0")
+}
+
+test "OpenOptions 默认值" {
+    let read OpenOptions = read_options()
+    $assert(read.access == access_read_only, "read_options 只读")
+    $assert(read.create == false && read.truncate == false
+        && read.exclusive == false && read.append == false, "read_options 不创建/截断/独占/追加")
+    $assert(read.mode == 420, "read_options 权限位 0666")
+
+    let write OpenOptions = write_options()
+    $assert(write.access == access_write_only, "write_options 只写")
+    $assert(write.create == true && write.truncate == false
+        && write.exclusive == false && write.append == false,
+        "write_options 默认创建但不截断/独占/追加")
+    $assert(write.mode == 420, "write_options 权限位 0666")
+}
+
+test "目录条目视图" {
+    let empty []u8
+    let empty_entry DirEntry = make_dir_entry(empty, dir_unknown)
+    $assert(empty_entry.name == 0 && empty_entry.name_len == 0,
+        "空切片得到空指针与零长度")
+
+    let data [3]u8
+    data[0] = 'a'
+    data[1] = 'b'
+    data[2] = 'c'
+    let entry DirEntry = make_dir_entry(data[0..3], dir_file)
+    $assert(entry.name != 0 && entry.name_len == 3, "非空切片保留指针与长度")
+    $assert(entry.name[0] == 97 && entry.name[2] == 99, "条目按原字节借用")
+    $assert(entry.kind == dir_file, "条目类型保留")
+}
+
+test "errno 分类映射" {
+    $assert(error_from_errno(0).kind == error_none, "0 是零错误")
+    $assert(error_from_errno(sys.ENOENT).kind == error_not_found, "ENOENT → not_found")
+    $assert(error_from_errno(sys.EEXIST).kind == error_already_exists,
+        "EEXIST → already_exists")
+    $assert(error_from_errno(sys.EACCES).kind == error_permission_denied,
+        "EACCES → permission_denied")
+    $assert(error_from_errno(sys.EPERM).kind == error_permission_denied,
+        "EPERM → permission_denied")
+    $assert(error_from_errno(sys.EINTR).kind == error_interrupted, "EINTR → interrupted")
+    $assert(error_from_errno(sys.EINVAL).kind == error_invalid_argument,
+        "EINVAL → invalid_argument")
+    $assert(error_from_errno(sys.ERANGE).kind == error_invalid_argument,
+        "ERANGE → invalid_argument")
+    $assert(error_from_errno(sys.ENOSYS).kind == error_unsupported, "ENOSYS → unsupported")
+    $assert(error_from_errno(sys.ECONNREFUSED).kind == error_connection_refused,
+        "ECONNREFUSED → connection_refused")
+    $assert(error_from_errno(sys.EPIPE).kind == error_connection_reset,
+        "EPIPE → connection_reset")
+    $assert(error_from_errno(sys.ETIMEDOUT).kind == error_timed_out, "ETIMEDOUT → timed_out")
+    $assert(error_from_errno(sys.EADDRINUSE).kind == error_address_in_use,
+        "EADDRINUSE → address_in_use")
+    $assert(error_from_errno(sys.ENETUNREACH).kind == error_network_unreachable,
+        "ENETUNREACH → network_unreachable")
+
+    let mapped Error = error_from_errno(sys.ENOENT)
+    $assert(mapped.native_code == sys.ENOENT, "映射保留原生错误号")
+    $assert(error_from_errno(999999).kind == error_other, "未知错误号归为 other")
+}

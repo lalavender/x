@@ -71,6 +71,10 @@ fn firc_read(path *char, out_data **u8, out_size *int) int {
     return 1
 }
 
+// 装载上限只防失控：按编译器自身规模留足余量（实测单模块 28.7 MB、单记录 288 KB）。
+const FIRC_RECORD_LIMIT int = 4194304
+const FIRC_SET_LIMIT int = 268435456
+
 // firc_load_kind：按记录后缀/索引名读取缓存集合；损坏退化为空/部分集合。
 fn firc_load_kind(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
     index_name *char) int {
@@ -104,8 +108,9 @@ fn firc_load_kind(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
                     let record_size int = 0
                     if (firc_read(gen.arr_cstr(&record_path[0]), &record,
                             &record_size) != 0) {
-                        if (record_size > 1048576
-                            || loaded_total + record_size > 16777216) {
+                        // 旧的 16 MiB 总额会让大模块稳定丢掉约三成记录。
+                        if (record_size > FIRC_RECORD_LIMIT
+                            || loaded_total + record_size > FIRC_SET_LIMIT) {
                             free(record.to_type(*void))
                         } else if (ir.ir_function_cache_set_add(set, gen.arr_cstr(&key[0]),
                                 record, record_size) != 0) {
@@ -154,6 +159,30 @@ fn firc_write_atomic(path *char, data *u8, size int) int {
     return 0
 }
 
+// firc_recycle_old：按旧索引删除本轮不再使用的记录；索引外的孤儿文件不做目录枚举。
+fn firc_recycle_old(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
+    index_name *char) void {
+    let path [760]u8
+    if (firc_path(&path[0], dir, index_name, "") != 0) { return }
+    let data *u8 = 0
+    let size int = 0
+    if (firc_read(gen.arr_cstr(&path[0]), &data, &size) == 0) { return }
+    let cursor int = 0
+    for cursor + ir.IR_FUNCTION_CACHE_KEY_HEX <= size {
+        let key [ir.IR_FUNCTION_CACHE_KEY_SIZE]u8
+        let i int = 0
+        for i < ir.IR_FUNCTION_CACHE_KEY_HEX { key[i] = data[cursor + i]; i += 1 }
+        key[ir.IR_FUNCTION_CACHE_KEY_HEX] = 0
+        if (ir.ir_fc_key_ok(gen.arr_cstr(&key[0])) != 0
+            && ir.ir_function_cache_set_find(set, gen.arr_cstr(&key[0])) == 0
+            && firc_path(&path[0], dir, gen.arr_cstr(&key[0]), suffix) == 0) {
+            unlink(gen.arr_cstr(&path[0]))
+        }
+        cursor += ir.IR_FUNCTION_CACHE_KEY_HEX + 1
+    }
+    free(data.to_type(*void))
+}
+
 // firc_commit_kind：成功构建后提交记录与索引；写失败只警告，不改变构建结果。
 fn firc_commit_kind(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
     index_name *char) int {
@@ -170,6 +199,8 @@ fn firc_commit_kind(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
             return 0
         }
     }
+    // 先按旧索引回收本轮不再使用的记录，再写新记录与索引。
+    firc_recycle_old(dir, set, suffix, index_name)
     let cursor int = 0
     let i int = 0
     for i < set.count {

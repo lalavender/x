@@ -1,0 +1,188 @@
+module num
+
+// ============================================================================
+// 99_tests.yh —— num 的语言内测试（YT4-P7）
+//
+// 只在 `yh test num` 中执行；生产构建不登记测试符号、不发射测试体。
+// 覆盖 parse_f64 的 JSON 语法/边界/溢出与 format_f64 的最短往返；与 Python
+// 的逐项差分在 tests/num/reference.py（外部门，不进 libs-test 快跑）。
+// ============================================================================
+
+// nt_bits：读取 f64 的 IEEE754 位模式。
+fn nt_bits(value f64) u64 {
+    let holder *f64 = malloc(8).to_type(*f64)
+    holder[0] = value
+    let view *u64 = holder.to_type(*u64)
+    let bits u64 = view[0]
+    free(holder.to_type(*void))
+    return bits
+}
+
+// nt_len：NUL 结尾文本长度。
+fn nt_len(text *char) u64 {
+    return strlen(text).to_type(u64)
+}
+
+// nt_parse：以 NUL 结尾文本调用 parse_f64。
+fn nt_parse(text *char, out *f64) NumStatus {
+    return parse_f64(text.to_type(*u8), nt_len(text), out)
+}
+
+// nt_value：按十进制文本取 f64（避免依赖编译器字面量舍入）。
+fn nt_value(text *char) f64 {
+    let value f64 = 0.0
+    let status NumStatus = nt_parse(text, &value)
+    return value
+}
+
+// nt_text_eq：比较格式化输出与期望字节串。
+fn nt_text_eq(data *u8, count u64, expected *char) bool {
+    if (count != nt_len(expected)) {
+        return false
+    }
+    let i u64 = 0
+    for i < count {
+        if (data[i] != expected[i].to_type(u8)) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// nt_format：格式化到缓冲并返回长度；失败返回 0。
+fn nt_format(value f64, out *u8, capacity u64) u64 {
+    let count u64 = 0
+    if (format_f64(value, out, capacity, &count) != NumStatus.num_ok) {
+        return 0
+    }
+    return count
+}
+
+test "解析：合法十进制与边界" {
+    let value f64 = 0.0
+    $assert(nt_parse("0", &value) == NumStatus.num_ok && value == 0.0, "0")
+    $assert(nt_parse("-0", &value) == NumStatus.num_ok
+        && nt_bits(value) == 9223372036854775808, "-0 保留符号位")
+    $assert(nt_parse("1", &value) == NumStatus.num_ok && value == 1.0, "1")
+    $assert(nt_parse("-1.5", &value) == NumStatus.num_ok && value == -1.5, "-1.5")
+    $assert(nt_parse("0.1", &value) == NumStatus.num_ok
+        && nt_bits(value) == 4591870180066957722, "0.1 位模式")
+    $assert(nt_parse("1e2", &value) == NumStatus.num_ok && value == 100.0, "1e2")
+    $assert(nt_parse("1E+2", &value) == NumStatus.num_ok && value == 100.0, "1E+2")
+    $assert(nt_parse("1e-2", &value) == NumStatus.num_ok && value == 0.01, "1e-2")
+    $assert(nt_parse("5e-324", &value) == NumStatus.num_ok
+        && nt_bits(value) == 1, "最小次正规")
+    $assert(nt_parse("2.2250738585072014e-308", &value) == NumStatus.num_ok
+        && nt_bits(value) == 4503599627370496, "最小正规数")
+    $assert(nt_parse("1.7976931348623157e308", &value) == NumStatus.num_ok
+        && nt_bits(value) == 9218868437227405311, "最大有限数")
+    $assert(nt_parse("123456789012345678901234567890", &value) == NumStatus.num_ok
+        && nt_bits(value) == 5042042089369253694, "长有效数字舍入")
+}
+
+test "解析：语法错误" {
+    let value f64 = 0.0
+    $assert(nt_parse("", &value) == NumStatus.num_syntax, "空输入")
+    $assert(nt_parse("-", &value) == NumStatus.num_syntax, "孤立负号")
+    $assert(nt_parse("+1", &value) == NumStatus.num_syntax, "前导正号")
+    $assert(nt_parse(".1", &value) == NumStatus.num_syntax, "前导小数点")
+    $assert(nt_parse("1.", &value) == NumStatus.num_syntax, "尾随小数点")
+    $assert(nt_parse("01", &value) == NumStatus.num_ok && value == 1.0,
+        "前导零按十进制接受（num 语法约定）")
+    $assert(nt_parse("1e", &value) == NumStatus.num_syntax, "空指数")
+    $assert(nt_parse("1e+", &value) == NumStatus.num_syntax, "空带符号指数")
+    $assert(nt_parse("1_0", &value) == NumStatus.num_syntax, "下划线")
+    $assert(nt_parse("inf", &value) == NumStatus.num_syntax, "inf 文本")
+    $assert(nt_parse("nan", &value) == NumStatus.num_syntax, "nan 文本")
+    $assert(nt_parse("1.2.3", &value) == NumStatus.num_syntax, "多个小数点")
+    $assert(nt_parse("1e1e1", &value) == NumStatus.num_syntax, "多个指数")
+    $assert(nt_parse("0x10", &value) == NumStatus.num_syntax, "十六进制")
+    $assert(nt_parse("1 ", &value) == NumStatus.num_syntax, "尾随空格")
+    let null_data *u8 = 0
+    $assert(parse_f64(null_data, 1, &value) == NumStatus.num_syntax, "空指针")
+}
+
+test "解析：范围与有效位上限" {
+    let value f64 = 0.0
+    $assert(nt_parse("1e309", &value) == NumStatus.num_range, "上溢是范围错误")
+    $assert(nt_parse("-1e309", &value) == NumStatus.num_range, "负上溢是范围错误")
+    $assert(nt_parse("1e-400", &value) == NumStatus.num_ok && value == 0.0,
+        "下溢到 0 是正确舍入")
+    $assert(nt_parse("-1e-999999", &value) == NumStatus.num_ok
+        && nt_bits(value) == 9223372036854775808, "负下溢保留负零")
+
+    // 4097 位有效数字超过上限；4096 位允许。
+    let many [4200]u8
+    many[0] = '1'
+    many[1] = '.'
+    let i int = 0
+    for i < 4095 {
+        many[2 + i] = '1'
+        i += 1
+    }
+    let ok_count u64 = 4097
+    $assert(parse_f64(&many[0], ok_count, &value) == NumStatus.num_ok,
+        "4096 位有效数字允许")
+    many[4097] = '1'
+    $assert(parse_f64(&many[0], 4098, &value) == NumStatus.num_resource,
+        "4097 位有效数字报资源错误")
+}
+
+test "格式化：最短往返与 -0.0" {
+    let buffer [64]u8
+    let count u64 = nt_format(nt_value("0"), &buffer[0], 64)
+    $assert(count > 0 && nt_text_eq(&buffer[0], count, "0.0"), "0.0")
+    count = nt_format(nt_value("-0"), &buffer[0], 64)
+    $assert(count > 0 && nt_text_eq(&buffer[0], count, "-0.0"), "-0.0 保留符号")
+    count = nt_format(nt_value("1"), &buffer[0], 64)
+    $assert(count > 0 && nt_text_eq(&buffer[0], count, "1.0"), "1.0")
+    count = nt_format(nt_value("100"), &buffer[0], 64)
+    $assert(count > 0 && nt_text_eq(&buffer[0], count, "100.0"), "100.0")
+    count = nt_format(nt_value("0.1"), &buffer[0], 64)
+    $assert(count > 0 && nt_text_eq(&buffer[0], count, "0.1"), "0.1")
+    count = nt_format(nt_value("1.5e300"), &buffer[0], 64)
+    $assert(count > 0 && nt_text_eq(&buffer[0], count, "1.5e+300"), "1.5e+300")
+    count = nt_format(nt_value("5e-324"), &buffer[0], 64)
+    $assert(count > 0 && nt_text_eq(&buffer[0], count, "5.0e-324"), "最小次正规")
+    count = nt_format(nt_value("1.7976931348623157e308"), &buffer[0], 64)
+    $assert(count > 0 && nt_text_eq(&buffer[0], count, "1.7976931348623157e+308"),
+        "最大有限数")
+}
+
+test "格式化：非有限值与容量不足" {
+    let buffer [64]u8
+    let count u64 = 0
+    $assert(format_f64(1.0 / 0.0, &buffer[0], 64, &count) == NumStatus.num_range,
+        "正无穷报范围错误")
+    $assert(format_f64(-1.0 / 0.0, &buffer[0], 64, &count) == NumStatus.num_range,
+        "负无穷报范围错误")
+    let nan f64 = 0.0 / 0.0
+    $assert(format_f64(nan, &buffer[0], 64, &count) == NumStatus.num_range,
+        "NaN 报范围错误")
+    let small [4]u8
+    $assert(format_f64(1.7976931348623157e308, &small[0], 4, &count)
+        == NumStatus.num_resource, "容量不足报资源错误")
+    $assert(count == 0, "失败不写长度")
+}
+
+test "往返：格式化结果可解析回同一位模式" {
+    let values [6]f64
+    values[0] = nt_value("0.1")
+    values[1] = 1.0 / 3.0
+    values[2] = nt_value("2.2250738585072014e-308")
+    values[3] = nt_value("5e-324")
+    values[4] = nt_value("1.7976931348623157e308")
+    values[5] = nt_value("-2.5")
+    let buffer [64]u8
+    let i int = 0
+    for i < 6 {
+        let count u64 = nt_format(values[i], &buffer[0], 64)
+        $assert(count > 0, "格式化应成功")
+        let back f64 = 0.0
+        $assert(parse_f64(&buffer[0], count, &back) == NumStatus.num_ok,
+            "格式化结果应可解析")
+        $assert(nt_bits(back) == nt_bits(values[i]), "往返位模式一致")
+        i += 1
+    }
+}

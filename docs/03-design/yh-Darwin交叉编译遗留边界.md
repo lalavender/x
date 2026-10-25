@@ -25,14 +25,16 @@ Linux/x64 主机上交叉发射、链接并产出可运行 Mach-O。
 ## 2. 编译器自举的 C++ 依赖
 
 - 现状：编译器自身链接固定 LLVM/lld/桥（C++），自举链接需要 `libc++`；
-  `compiler/darwin-sdk/usr/lib/libSystem.tbd` **不含 libc++**。2026-10-20 起
-  自举闭包由本机 `selfhost-flags.txt` 提供（末尾带 `-lc++`），原生自举用宿主
-  SDK 解析；种子不再内置路径，但交叉构建仍需目标包提供 libc++。
-- 影响：Linux/x64 交叉构建 Darwin 版 yh（F2-9）时，`-lc++` 无法解析；
-  仅在 Mac 原生自举时由宿主 SDK 的 `libc++.tbd` 解决。
-- 后续方案：目标包附带 `usr/lib/libc++.tbd`（Apple SDK 许可）或 Darwin
-  静态 libc++ 归档，并把 `-lc++`/静态库路径纳入 F2-9 的自举链接参数与
-  缓存身份。
+  `compiler/darwin-sdk/usr/lib/libSystem.tbd` **不含 libc++**。2026-10-25 起
+  `tools/llvm-darwin-host.py prepare` 把**宿主 SDK 的 `libc++.tbd` 复制进构建机
+  闭包**（`llvm-host-darwin-aarch64/libc++.tbd`，摘要入 `host.json.cxx_tbd`），
+  `tools/link-closure.py` 将其写进 `[link-darwin-arm64].cxx`；原生自举因此不再
+  依赖 `-lc++` 参数或 `SDKROOT`：`cd compiler && ../bin/yh-darwin-arm64 build`
+  即可链接（之前会因缺 `-lc++` 输出三万余条未定义 C++ 符号）。
+- 影响：Linux/x64 交叉构建 Darwin 版 yh（F2-9）仍受影响——目标包必须自带
+  `usr/lib/libc++.tbd`（闭包里的 `cxx` 组只在 darwin 宿主 prepare 时生成）。
+- 后续方案：Darwin 目标包直接附带 `usr/lib/libc++.tbd`（Apple SDK 许可，
+  与现闭包同一做法），并把静态库路径纳入 F2-9 的自举链接参数与缓存身份。
 - 另：Linux 宿主固定包的 lld 模板是 GNU/ELF；交叉构建 Darwin 版 yh 时
   必须换成 Darwin 目标包（`ld64.lld` 模板 + Darwin LLVM/lld/桥归档），
   不能复用 Linux 的 `-Wl,--start-group` 自举 flags。`compiler/darwin-sdk`

@@ -1,0 +1,379 @@
+module cli
+
+// ============================================================================
+// zz_tests_help.yh —— cli CLI5 帮助/颜色/模板/警告行为的语言内测试（YT4-P4e）
+//
+// 只在 `yh test cli` 中执行；生产构建不登记测试符号、不发射测试体。
+// 来源是 libs/cli/test/clihelp 的 8 个 case_*；断言只调 cli 的 pub API。
+// 文件名以 zz_ 开头：类型声明在 cli.yh，必须排在它之后。
+// ============================================================================
+
+// hp_contains：在 NUL 串里查找子串；找到返回 true。
+fn hp_contains(haystack *char, needle *char) bool {
+    if (haystack == 0 || needle == 0) {
+        return false
+    }
+    let i int = 0
+    for haystack[i] != 0 {
+        let j int = 0
+        for 1 {
+            if (needle[j] == 0) {
+                return true
+            }
+            if (haystack[i + j] == 0 || haystack[i + j] != needle[j]) {
+                break
+            }
+            j += 1
+        }
+        i += 1
+    }
+    return false
+}
+
+// hp_index_of：返回子串首次出现的偏移；没有返回 -1。
+fn hp_index_of(haystack *char, needle *char) int {
+    let i int = 0
+    for haystack[i] != 0 {
+        let j int = 0
+        for 1 {
+            if (needle[j] == 0) {
+                return i
+            }
+            if (haystack[i + j] == 0 || haystack[i + j] != needle[j]) {
+                break
+            }
+            j += 1
+        }
+        i += 1
+    }
+    return -1
+}
+
+// hp_has_byte：串里是否出现某个字节值。
+fn hp_has_byte(text *char, value int) bool {
+    if (text == 0) {
+        return false
+    }
+    let i int = 0
+    for text[i] != 0 {
+        if (text[i].to_type(int) == value) {
+            return true
+        }
+        i += 1
+    }
+    return false
+}
+
+// hp_empty_args：返回一个空参数切片。
+fn hp_empty_args() []*char {
+    let empty [1]*char
+    return empty[0..0]
+}
+
+// hp_build_rich：构造覆盖帮助各段的 parser；0 成功。
+fn hp_build_rich(root *Parser, color Color, show_defaults int, suggest int) int {
+    let config ParserConfig = parser_config("tool")
+    config.description = "演示帮助布局"
+    config.epilog = "示例结尾说明"
+    config.color = color
+    config.suggest_on_error = (suggest != 0)
+    config.help_format.show_defaults = (show_defaults != 0)
+    if (init(root, config) != 0) {
+        return 1
+    }
+    let output Argument = option("--output", "-o")
+    output.help = "输出路径"
+    output.metavar = "PATH"
+    output.default_value = default_of(value_text("out.bin"))
+    if (add_argument(root, output) < 0) {
+        return 2
+    }
+    let legacy Argument = option("--legacy", 0)
+    legacy.help = "旧开关"
+    legacy.deprecated = true
+    legacy.action = store_true
+    if (add_argument(root, legacy) < 0) {
+        return 3
+    }
+    let hidden Argument = option("--hidden", 0)
+    hidden.help = "不该出现"
+    hidden.hidden = true
+    hidden.action = store_true
+    if (add_argument(root, hidden) < 0) {
+        return 4
+    }
+    let group_spec Group = group("输出组", "组说明")
+    let group_id int = add_group(root, group_spec)
+    if (group_id <= 0) {
+        return 5
+    }
+    let fmt Argument = option("--fmt", 0)
+    fmt.help = "格式化方式"
+    fmt.group = group_id
+    if (add_argument(root, fmt) < 0) {
+        return 6
+    }
+    let mutex int = add_mutex(root, false, 0)
+    if (mutex <= 0) {
+        return 7
+    }
+    let json Argument = option("--json", 0)
+    json.action = store_true
+    json.mutex = mutex
+    let yaml Argument = option("--yaml", 0)
+    yaml.action = store_true
+    yaml.mutex = mutex
+    if (add_argument(root, json) < 0 || add_argument(root, yaml) < 0) {
+        return 8
+    }
+    let source Argument = positional("source")
+    source.help = "输入文件"
+    if (add_argument(root, source) < 0) {
+        return 9
+    }
+    let slot int = add_subparsers(root, subparsers())
+    if (slot < 0) {
+        return 10
+    }
+    let cmd Command = command("build")
+    cmd.help = "构建目标"
+    if (add_parser(root, slot, cmd) == 0) {
+        return 11
+    }
+    return 0
+}
+
+test "帮助：布局、段落顺序与隐藏参数" {
+    let root Parser
+    $assert(hp_build_rich(&root, never, 0, 0) == 0, "rich parser 装配")
+    let help TextResult = format_help(&root)
+    $assert(help.status == ok && help.text != 0, "format_help 生成文本")
+    $assert(hp_contains(help.text, "usage: tool"), "usage 行")
+    $assert(hp_contains(help.text, "演示帮助布局")
+        && hp_contains(help.text, "positional arguments:")
+        && hp_contains(help.text, "options:")
+        && hp_contains(help.text, "输出组:")
+        && hp_contains(help.text, "commands:")
+        && hp_contains(help.text, "示例结尾说明"), "各段内容")
+    let i_pos int = hp_index_of(help.text, "positional arguments:")
+    let i_opt int = hp_index_of(help.text, "options:")
+    let i_group int = hp_index_of(help.text, "输出组:")
+    let i_cmd int = hp_index_of(help.text, "commands:")
+    let i_epi int = hp_index_of(help.text, "示例结尾说明")
+    $assert(i_pos >= 0 && i_opt > i_pos && i_group > i_opt && i_cmd > i_group
+        && i_epi > i_cmd, "段落顺序")
+    $assert(hp_contains(help.text, "--hidden") == false, "隐藏参数不出现在帮助里")
+    release_text(&help)
+    let args [2]*char
+    args[0] = "--hidden"
+    args[1] = "in.txt"
+    let r Result = parse(&root, args[0..2])
+    $assert(r.status == ok, "隐藏参数仍可解析")
+    release(&r)
+    destroy(&root)
+}
+
+test "帮助：默认值展示与 deprecated 标注" {
+    let root Parser
+    $assert(hp_build_rich(&root, never, 1, 0) == 0, "rich parser 装配")
+    let help TextResult = format_help(&root)
+    $assert(help.status == ok && hp_contains(help.text, "(default: out.bin)"),
+        "show_defaults 展示默认值")
+    $assert(hp_contains(help.text, "(deprecated)"), "deprecated 标注")
+    release_text(&help)
+    destroy(&root)
+}
+
+test "帮助：metavar 与互斥组 usage" {
+    let root Parser
+    $assert(hp_build_rich(&root, never, 0, 0) == 0, "rich parser 装配")
+    let usage TextResult = format_usage(&root)
+    $assert(usage.status == ok && hp_contains(usage.text, "PATH"), "metavar 出现在 usage")
+    $assert(hp_contains(usage.text, "--json | --yaml"), "互斥组 usage 形式")
+    $assert(hp_contains(usage.text, "COMMAND"), "子命令占位名")
+    release_text(&usage)
+    destroy(&root)
+
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let pair Argument = option("--pair", 0)
+    pair.arity = exactly(2)
+    let names [2]*char
+    names[0] = "LEFT"
+    names[1] = "RIGHT"
+    pair.metavars = names.to_type([]*char)
+    $assert(add_argument(&root2, pair) >= 0, "metavars 参数注册")
+    let help TextResult = format_help(&root2)
+    $assert(help.status == ok && hp_contains(help.text, "--pair"), "metavars 帮助")
+    release_text(&help)
+    destroy(&root2)
+}
+
+test "帮助：颜色策略与自动降级" {
+    let root Parser
+    $assert(hp_build_rich(&root, always, 0, 0) == 0, "always 颜色 parser 装配")
+    let colored TextResult = format_usage(&root)
+    $assert(colored.status == ok && hp_has_byte(colored.text, 27), "always 输出 ANSI 转义")
+    release_text(&colored)
+    destroy(&root)
+
+    let root2 Parser
+    $assert(hp_build_rich(&root2, automatic, 0, 0) == 0, "automatic 颜色 parser 装配")
+    let plain TextResult = format_usage(&root2)
+    $assert(plain.status == ok && hp_has_byte(plain.text, 27) == false,
+        "非终端下 automatic 无颜色")
+    release_text(&plain)
+    destroy(&root2)
+}
+
+test "帮助：有限建议" {
+    let root Parser
+    $assert(hp_build_rich(&root, never, 0, 1) == 0, "建议 parser 装配")
+    let args [1]*char
+    args[0] = "--outpt"
+    let r Result = parse(&root, args[0..1])
+    $assert(r.status == usage_error && r.error.message != 0
+        && hp_contains(r.error.message, "是否想用"), "拼写错误给出建议")
+    release(&r)
+    destroy(&root)
+}
+
+test "帮助：控制字节与非法 UTF-8 转义" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let text [16]char
+    text[0] = 'a'
+    text[1] = 7
+    text[2] = 'b'
+    text[3] = 255.to_type(char)
+    text[4] = 'c'
+    text[5] = 0
+    let odd Argument = option("--odd", 0)
+    odd.help = &text[0]
+    $assert(add_argument(&root, odd) >= 0, "特殊说明参数注册")
+    let help TextResult = format_help(&root)
+    $assert(help.status == ok && hp_contains(help.text, "\\x07")
+        && hp_contains(help.text, "\\xff"), "控制字节与非 UTF-8 被转义")
+    release_text(&help)
+    destroy(&root)
+}
+
+test "帮助：超长说明与输出 API" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let long_text [1200]char
+    let i int = 0
+    for i < 1100 {
+        long_text[i] = 'x'
+        i += 1
+    }
+    long_text[1100] = 0
+    let wide Argument = option("--wide", 0)
+    wide.help = &long_text[0]
+    $assert(add_argument(&root, wide) >= 0, "超长说明参数注册")
+    let help TextResult = format_help(&root)
+    $assert(help.status == ok && strlen(help.text).to_type(int) >= 1100,
+        "超长说明完整输出")
+    release_text(&help)
+    $assert(print_usage(&root, 1) == 0, "print_usage 写出")
+    $assert(print_usage(&root, -1) == -1 && print_help(&root, -1) == -1,
+        "非法 fd 返回 -1")
+
+    let r_ok Result = parse(&root, hp_empty_args())
+    $assert(exit_code(&r_ok) == 0, "成功结果退出码为 0")
+    release(&r_ok)
+    let bad [1]*char
+    bad[0] = "--nope"
+    let r_bad Result = parse(&root, bad[0..1])
+    $assert(exit_code(&r_bad) == 2, "用法错误退出码为 2")
+    $assert(r_bad.usage_text != 0 && r_bad.prog_text != 0,
+        "失败结果自带 usage 与展示名")
+    $assert(render(&r_bad, 1, 2) == 0, "render 失败结果")
+    release(&r_bad)
+
+    let help_req [1]*char
+    help_req[0] = "--help"
+    let r_help Result = parse(&root, help_req[0..1])
+    $assert(exit_code(&r_help) == 0 && r_help.control_text != 0,
+        "--help 是成功控制状态")
+    $assert(render(&r_help, 1, -1) == 0, "render 帮助结果")
+    release(&r_help)
+    destroy(&root)
+}
+
+test "帮助：模板、坏模板与 deprecated 警告" {
+    let parser Parser
+    let config ParserConfig = parser_config("tool")
+    config.usage = "%(prog)s CUSTOM src"
+    config.description = "%(prog)s description"
+    config.epilog = "%(prog)s epilog"
+    $assert(init(&parser, config) == 0, "模板 parser 初始化")
+    let output Argument = option("--output", 0)
+    output.help = "%(prog)s %(default)s %(type)s %(dest)s"
+    output.default_value = default_of(value_text("out.bin"))
+    let ver_arg Argument = option("--version", 0)
+    ver_arg.action = version
+    ver_arg.version_text = "%(prog)s 1.0"
+    $assert(add_argument(&parser, output) >= 0 && add_argument(&parser, ver_arg) >= 0
+        && add_argument(&parser, positional("src")) >= 0, "模板参数注册")
+    let help TextResult = format_help(&parser)
+    $assert(help.status == ok
+        && hp_contains(help.text, "usage: tool CUSTOM src")
+        && hp_contains(help.text, "tool description")
+        && hp_contains(help.text, "tool out.bin text output")
+        && hp_contains(help.text, "tool epilog"), "模板展开")
+    release_text(&help)
+    let version_args [1]*char
+    version_args[0] = "--version"
+    let version_result Result = parse(&parser, version_args[0..1])
+    $assert(version_result.status == version_requested
+        && hp_contains(version_result.control_text, "tool 1.0"),
+        "version 模板")
+    release(&version_result)
+    destroy(&parser)
+
+    let empty_parser Parser
+    let empty_config ParserConfig = parser_config("tool")
+    empty_config.usage = ""
+    $assert(init(&empty_parser, empty_config) == 0
+        && add_argument(&empty_parser, positional("src")) >= 0, "空 usage parser")
+    let empty_usage TextResult = format_usage(&empty_parser)
+    $assert(empty_usage.status == ok && empty_usage.text != 0
+        && empty_usage.text[0] == 0, "usage 空串不写正文")
+    release_text(&empty_usage)
+    destroy(&empty_parser)
+
+    let bad_parser Parser
+    $assert(init(&bad_parser, parser_config("tool")) == 0, "坏模板 parser 初始化")
+    let bad Argument = option("--bad", 0)
+    bad.help = "%(bogus)s"
+    $assert(add_argument(&bad_parser, bad) >= 0, "坏模板参数注册")
+    $assert(freeze(&bad_parser) != 0, "未知占位符 freeze 报配置错误")
+    destroy(&bad_parser)
+
+    let warn_parser Parser
+    $assert(init(&warn_parser, parser_config("tool")) == 0, "警告 parser 初始化")
+    let old Argument = option("--old", 0)
+    old.deprecated = true
+    $assert(add_argument(&warn_parser, old) >= 0
+        && add_argument(&warn_parser, positional("src")) >= 0, "警告参数注册")
+    let with_src [5]*char
+    with_src[0] = "--old"
+    with_src[1] = "x"
+    with_src[2] = "--old"
+    with_src[3] = "y"
+    with_src[4] = "in.txt"
+    let warn_result Result = parse(&warn_parser, with_src[0..5])
+    $assert(warn_result.status == ok && len(warn_result.warnings) == 1
+        && hp_contains(warn_result.warnings[0], "弃用"), "重复弃用只警告一次")
+    release(&warn_result)
+    let help_args [3]*char
+    help_args[0] = "--old"
+    help_args[1] = "x"
+    help_args[2] = "--help"
+    let help_result Result = parse(&warn_parser, help_args[0..3])
+    $assert(help_result.status == help_requested
+        && len(help_result.warnings) == 1, "帮助路径也保留弃用警告")
+    release(&help_result)
+    destroy(&warn_parser)
+}

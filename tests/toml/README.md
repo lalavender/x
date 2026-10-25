@@ -1,28 +1,24 @@
-# tests/toml —— TOML 标准库验收
+# tests/toml —— TOML 外部验收门
 
-本目录放 `libs/toml` 的自有验收 runner。fixture 在
-`tests/modules/projects/toml*/`，每个项目复制到 `tmp/toml-test/<组>/`
-后构建运行，标准库根通过 `YH_STDLIB` 传入。
+TOML 的 **API/所有权/资源/文件断言已迁入 `libs/toml/99_tests.yh`**（11 个
+`test`、154 条 `$assert`，由 `yh test toml` / `just test` /
+`just selfhost-native` / `just libs-test` 执行）；迁移记录见
+[YT4-P2](../01-finished/yh-YT4-P2-toml迁移-2026-10-25.md)。
 
-## API 组（T0–T4）
+本目录只保留 `yh test` 表达不了的外部门：
 
-| 组 | fixture | 覆盖 |
+| 门 | 脚本 | 内容 |
 | --- | --- | --- |
-| model | tomlmodel | 句柄、空文档、多文档、输入生命周期、释放幂等 |
-| strings | tomlstrings | 四种字符串、转义、NUL、UTF-8、多行裁剪、引号/空键 |
-| scalars | tomlscalars | i64 边界与进制、binary64 位模式、布尔、四种时间、查询 out 契约 |
-| tables | tomltables | 点键/隐式表/内联表/数组表、定义冲突、遍历顺序、CRLF |
-| errors | tomlerrors | UTF-8/BOM、参数、输入/嵌套/键/数字上限、查询边界 |
-| files | tomlfiles | 真实文件读取、I/O 错误分类、失败无半成品文档 |
+| 一致性 | `conformance.py` | toml-test v2.2.0 `files-toml-1.1.0` 清单（有效 214、非法 467），逐项比对 |
+| 分配失败/预算 | `injection.py` | 临时标准库副本注入失败点（当前 124 个）+ `TOML_MAX_BYTES=2048` 预算门 |
+| 安装导入 | `install.py` | `just install` 后从仓库外、无 `YH_STDLIB` 导入 toml |
 
 ```bash
-python3 tests/toml/run.py
-python3 tests/toml/run.py --group model,strings --quiet
-python3 tests/toml/run.py --compiler ./yh --workdir tmp/toml-test --keep
-python3 tests/toml/run.py --prepare-corpus     # 首次取固定语料
-python3 tests/toml/run.py --conformance        # API 组 + 一致性门
-python3 tests/toml/injection.py                # 分配失败注入 + 预算门
-python3 tests/toml/install.py                  # make install 后仓库外导入
+python3 tests/toml/conformance.py --prepare    # 首次取固定语料（下载并核对 SHA-256）
+just test-toml-conformance
+just test-toml-injection
+just test-toml-install
+# API/文件行为：cd libs && yh test toml（或 just test-toml）
 ```
 
 ## 一致性语料（T5）
@@ -31,8 +27,7 @@ python3 tests/toml/install.py                  # make install 后仓库外导入
 桥：表输出 JSON 对象、数组输出 JSON 数组、标量输出 `{type,value}`；浮点用
 `fmt/` 的 17 位往返十进制，日期时间补秒并截断到 9 位小数。
 `tests/toml/conformance.py` 固定 toml-test v2.2.0 的 `files-toml-1.1.0`
-清单（有效 214、非法 467），首次 `--prepare` 下载并核对 SHA-256，常规运行
-不静默联网。
+清单，首次 `--prepare` 下载并核对 SHA-256，常规运行不静默联网。
 
 ## 分配失败与预算（T4.1）
 
@@ -45,14 +40,14 @@ python3 tests/toml/install.py                  # make install 后仓库外导入
 
 ## 安装（T5.1）
 
-`install.py` 执行 `make install DESTDIR=<tmp>/root PREFIX=/usr`，确认安装树
+`install.py` 执行 `just install DESTDIR=<tmp>/root PREFIX=/usr`，确认安装树
 包含 toml `.yh` 源（当前 12 个，含 Linux/Darwin 两个文件适配），再把
 `tomloutside` 放到仓库外，清除 `YH_STDLIB` 后用安装后的 `yh` 通过默认
 `../share/yh/libs` 发现构建运行。三端 Release 资产
-当前只含 `yh`，标准库由 `make install` 分发；是否改变发布策略见 todo T5.2。
+当前只含 `yh`，标准库由 `just install` 分发；是否改变发布策略见 todo T5.2。
 
 ## 限制
 
-- 组内断言只看最终退出码和固定成功行；失败项的细节由被测程序打印。
+- 一致性/注入/安装门只看退出码与协议输出；行为细节由 `yh test toml` 覆盖。
 - 分配失败门只覆盖文档池分配；文件读取缓冲的 `malloc` 不在注入范围。
 - 表查找为按字节线性比较，大表有 O(n²) 级成本（见 libs/toml/README）。

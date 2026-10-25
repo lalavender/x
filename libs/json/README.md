@@ -111,15 +111,18 @@ JSON 只有一个 number 类型，本库**只校验 grammar 并保存原始词�
 ## 验收
 
 ```bash
-make test-json     # 六组 API 验收：model/strings/numbers/containers/errors/files
+cd libs && yh test json   # 12 个 test：parse/查询/写出/错误/文件
+just test-json            # 历史 target 已删除，改用 yh test json / just libs-test
 ```
 
-fixture 在 `tests/modules/projects/json*/`，runner 在 `tests/json/run.py`。
-`make test` 已包含这六组。
+行为断言在 `libs/json/99_tests.yh`；`jsonmodel` 是
+`tests/modules/projects/` 下保留的公开面 smoke（`build-check.py` 的
+`j1-json-model`）。迁移记录见
+[YT4-P1](../../docs/01-finished/yh-YT4-P1-json迁移-2026-10-25.md)。
 
 ## 尚未实现
 
 - JSONTestSuite 一致性语料与 Python 差分（J5）。
 - 分配失败注入与低预算门（J4）。
-- `make test-json-install` 仓库外导入验收（J7）。
+- `just test-json-install` 仓库外导入验收（J7）。
 - JCS 规范模式、大对象哈希索引、流式 SAX、JSON Pointer（J8，按需）。

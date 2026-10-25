@@ -28,15 +28,10 @@ ROOT = HERE.parent.parent.parent  # libs/cli/test -> 仓库根
 # (用例名, fixture 目录, argv, 期望退出码, stdout 子串, stderr 子串)
 CASES = [
     ("cli0-model-abi", "climodel", [], 0, "yh cli model ok", None),
-    ("cli1-basics-selftest", "clibasics", ["--selftest"], 0, None, None),
     ("cli1-pack-run", "clibasics", ["in.txt", "-v", "-o", "out.bin"], 0,
      "output=out.bin source=in.txt verbose=1", None),
     ("cli1-pack-help", "clibasics", ["--help"], 0, "usage: pack", None),
     ("cli1-pack-missing", "clibasics", [], 2, None, "缺少必需的位置参数"),
-    ("cli2-actions", "cliactions", ["--selftest"], 0, None, None),
-    ("cli3-commands", "clicommands", ["--selftest"], 0, None, None),
-    ("cli4-extensions", "cliextensions", ["--selftest"], 0, None, None),
-    ("cli5-help", "clihelp", ["--selftest"], 0, None, None),
     ("cli6-warning-entry", "cliwarnings", ["--old", "x", "in.txt"], 0,
      "warnings=0 src=in.txt", "弃用"),
 ]

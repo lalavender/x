@@ -699,6 +699,74 @@ fn tc_single_file_project(abs_path *char, proj_out *int,
     return 0
 }
 
+// tc_test_lock_path：测试锁文件 = <项目根>/tmp/yh-test/.lock。
+// 同一项目的测试构建共享入口源码、测试二进制、日志与构建缓存，两个 yh test
+// 并发执行会互相覆盖（实测会报「用例崩溃或缺少结果记录」）。这里用原子创建
+// 的锁文件把同项目运行串行化；不同项目互不影响。
+fn tc_test_lock_path(root_off int, root_len int, out *u8) int {
+    if (build.pj_canon(root_off, root_len, "tmp/yh-test") != 0) { return -1 }
+    let dir [900]u8
+    let dn int = gen.append_str(&dir[0], 0, build.pj_pool_str(build.pj_state().canon_off))
+    dir[dn] = 0
+    if (build.cmd_mkdirs(gen.arr_cstr(&dir[0])) != 0) { return -1 }
+    dn = gen.append_str(&dir[0], dn, "/.lock")
+    dir[dn] = 0
+    let i int = 0
+    for i <= dn {
+        out[i] = dir[i].to_type(u8)
+        i += 1
+    }
+    return 0
+}
+
+// tc_lock_pid：读取锁文件中的持有者进程号；缺失或格式非法返回 -1。
+fn tc_lock_pid(path *char) int {
+    let fd int = open(path, 0)
+    if (fd < 0) { return -1 }
+    let buf [32]u8
+    let n int = read(fd, &buf[0], 31).to_type(int)
+    close(fd)
+    if (n <= 0) { return -1 }
+    let value int = 0
+    let i int = 0
+    for i < n && buf[i] >= '0' && buf[i] <= '9' {
+        value = value * 10 + (buf[i].to_type(int) - 48)
+        i += 1
+    }
+    if (i == 0) { return -1 }
+    return value
+}
+
+// tc_lock_acquire：取得测试锁，返回 1 已持有、0 等待超时。
+// 锁文件用 O_CREAT|O_EXCL 原子创建并写入持有者 pid；持有者已退出（kill 0
+// 失败）时清理陈旧锁再重试。等待上限约 30 秒。
+fn tc_lock_acquire(path *char) int {
+    let flg int = 0xC1 // O_WRONLY | O_CREAT | O_EXCL（Linux）
+    if (gen.tg_host_darwin() != 0) { flg = 0xA01 }
+    let attempt int = 0
+    for attempt < 600 {
+        let fd int = open(path, flg, 0x1a4)
+        if (fd >= 0) {
+            let pidb [32]u8
+            let pn int = gen.append_int(&pidb[0], 0, getpid())
+            pidb[pn] = '\n'.to_type(u8)
+            pn += 1
+            write(fd, (&pidb[0]).to_type(*void), pn.to_type(u64))
+            close(fd)
+            return 1
+        }
+        let holder int = tc_lock_pid(path)
+        if (holder <= 0 || kill(holder, 0) != 0) {
+            // 陈旧锁：持有者已不存在（崩溃/被杀），清理后重试。
+            unlink(path)
+            continue
+        }
+        usleep(50000)
+        attempt += 1
+    }
+    return 0
+}
+
 // mb_run_test_command：解析 CLI、装载项目并执行 YT1 发现/检查。
 pub fn mb_run_test_command(av **char, an int) int {
     let gs *gen.GenState = gen.G()
@@ -859,6 +927,13 @@ pub fn mb_run_test_command(av **char, an int) int {
         gen.fail("没有找到测试用例（yh test --list 可查看发现结果）")
         return 1
     }
+    // 同一项目的测试共享入口源码/二进制/日志/构建缓存；用锁文件串行化。
+    let lock_path [900]u8
+    if (tc_test_lock_path(root_off, root_len, &lock_path[0]) != 0) { return 1 }
+    if (tc_lock_acquire(gen.arr_cstr(&lock_path[0])) == 0) {
+        gen.fail("另一个 yh test 正在使用该项目的测试目录；请等待其结束或改用不同项目")
+        return 1
+    }
     gs.c_test_project = proj
     gs.c_test_mod_filter = mod_filter
     gs.c_test_file_filter = file_filter
@@ -884,6 +959,7 @@ pub fn mb_run_test_command(av **char, an int) int {
         let cn int = gen.append_int(&cb[0], 0, count)
         gen.write_all(1, &cb[0], cn)
         build.pj_out_s(" 个用例（--no-run，未执行）\n")
+        unlink(gen.arr_cstr(&lock_path[0]))
         return 0
     }
     // 执行：先按 --filter 选择，再按模块分组、逐模块生成入口并链接，
@@ -938,6 +1014,7 @@ pub fn mb_run_test_command(av **char, an int) int {
     sn = gen.append_int(&sb[0], sn, failed)
     sn = gen.append_str(&sb[0], sn, " failed\n")
     gen.write_all(1, &sb[0], sn)
+    unlink(gen.arr_cstr(&lock_path[0]))
     return failed == 0 ? 0 : 1
 }
 

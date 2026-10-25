@@ -5,6 +5,451 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-26 构建入口迁 just：justfile 成为唯一真源，Makefile 收成转发层
+
+- **改动**：新增仓库根 `justfile`（just 1.59 / 1.21 均解析通过），承载旧
+  Makefile 的全部目标，覆盖验证通过后**删除 `Makefile`**（just 成为唯一构建
+  入口）。迁移期间用 23 行转发层（`make <目标> [VAR=值]` →
+  `just <目标> [VAR=值]`，变量经 `MAKEOVERRIDES` 前置）过渡。
+  `.gitea/ci/Dockerfile` 预装 `just`（Ubuntu 24.04 apt 包 1.21.0）；
+  `.gitea/workflows/{ci,release}.yml`、`.circleci/config.yml`（云端真机参照）
+  与 `tests/{toml,fmt,string}/install.py` 的 `make …` 全部改调 `just`
+  （变量覆盖统一写在目标名之前）。
+- **覆盖验证**：`git show HEAD:Makefile` 的 43 个目标与 justfile 逐项比对——
+  `test-json`（工作区已随 `tests/json/run.py` 删除）与 `tmp/llvm-migration`
+  （内部 order-only 目标，由 `_prepare` 承担）不需要；其余全部有等价 recipe，
+  `build`/`default`/`libs-test`/`libs-test-o2`/`test-num` 为新增入口。
+  selfhost-native、test-llvm-darwin、install、seed、stage-yh、llvm-host 等
+  行数不同的目标逐条核对（含 libs 全跑 vs 分库、Darwin SDK 安装、
+  `compiler/.build` 过期判定）。
+- **等价性**：目标名、变量名（`SEED`/`SEED_DEST`/`SKIP_CORPUS`/
+  `SELFHOST_KEEP`/`SELFHOST_WORKDIR`/`FAST_STAGE`/`YH_LLVM_HOST`/
+  `YH_LLVM_CACHE`/`LLVM_JOBS`/`LLVM_TARGET`/`LLVM_SEED`/`PREFIX`/`DESTDIR`/
+  `INSTALL`）、平台分支（种子/LLVM 宿主/专项门/缓存门）与旧 Makefile 一一
+  对应；`just`/`just build`/`just dev` 对应旧默认目标/冷编/增量，默认目标按
+  源码 mtime 判断（只看 `compiler/*.yh`、`compiler/*/*.yh`、`compiler/llvm`、
+  清单与四个构建脚本，不递归 `compiler/tmp` 与 `compiler/.build`）。
+- **迁移中发现并修掉的两处 just 语义坑**：
+  1. 命令行变量覆盖必须写在 recipe 名之前（`just SEED=… build`），反序会报
+     ``does not contain recipe``；`_ensure_built` 与 Makefile 转发层都按此顺序。
+  2. `install` 原本是 `@cd libs && find …` 单行、后续 Darwin SDK 安装仍在仓库
+     根执行；just 脚本里 `cd` 会残留，改为子 shell 内切换后 Darwin SDK 路径
+     才能解析（`just test-toml-install` 从失败转为通过）。
+- **验证**（删除 Makefile 后复跑）：`just build`（冷编，内嵌 LLVM 桥接入）、
+  `just test`（三层回归全绿，含 libs 与 arch-check）、
+  `just selfhost-native`（主门，项目语料 122/122）、`just quick`、
+  `just test-toml-install` / `just test-fmt-install`（install 验收脚本改用
+  `just DESTDIR=… PREFIX=/usr install` 后验证安装树与仓库外导入）全部通过；
+  CI 三份 YAML 经 ruby 解析无语法错误；just 1.24.0 与 Ubuntu 24.04 的
+  1.21.0 均可解析 justfile。
+- **已知限制**：同机并行跑两个 make/just 门会共享 `compiler/.build`（自举脚本
+  `native-selfhost.py` 的 `build()` 明确用仓库 `compiler/.build`），互相打断
+  模块编译；本次验证期间两次与并发会话互踩，最终串行跑通。旧 Makefile 同样
+  有此约束。
+
+## 2026-10-26 LA3 构建卡死：check 切片字符串段死循环
+
+- **症状**：工作树 `yh` 对任何项目构建都不返回（hello world 3 行 >120 s、LA3
+  fixture >300 s），`tests/selfhost/llvm-function-cache.py` 因此表现为「一直不
+  结束」；同机 10-24 种子跑同一构建 0.79 s。
+- **根因**：`compiler/ast/module_snapshot_check_slice.yh` 的 v3 字符串段编码
+  循环（`// 字符串段（v3）` 之后）没有 `i += 1`，命中前的 `continue` 也不推进
+  `i`：`data_str_lookup` 未命中（无字符串字面量的表达式，最常见）走
+  `continue`，命中走循环尾，两条路径都不自增 → 每模块首个函数永久自旋。
+  插桩实测：单次 capture 为 `fi=0, expr_n=1, store.expression_n=1`，`i` 恒 0、
+  `cursor` 恒 601，15 s 内 350 万次迭代；`sample`/`lldb` 显示 worker 时间全部
+  落在 `mb_llvm_emit_module → checked_check_cache_capture →
+  checked_slice_capture` 的 112 B `AstExpr` 拷贝（`_memmove`）。
+- **修复**：两处补 `i += 1`（`continue` 前、循环尾）。回归覆盖沿用既有
+  `tests/modules/projects/llvmfunctioncache` + LA3 脚本：该路径挂起即失败。
+- **验证**：`rm yh && make` 冷编 96.8 s；fixture 冷编 O0 2.18 s / O2 0.97 s；
+  `python3 tests/selfhost/llvm-function-cache.py --compiler-path ./yh` 7.8 s
+  （此前无限）；`make test` 依次通过语法语料、运行语料、modules、
+  libs、compiler-tests、fmt、code-stats，止于 arch-check。
+- **本轮未关闭**：
+  1. LA3 `损坏记录` 断言 `check hits/misses/skipped` 期望 `(4,1,4)`、实际
+     `(5,0,5)`：种子下 `index` 与 `index.check` 的键**完全相同**，当前 v3 下
+     两套键**完全不相交**（各 4 条）。脚本按 `index`（IR 键）写
+     `<key>.fchk` 只会造出孤儿文件，真正的 check 记录未被损坏；要么让 check
+     键回到与 IR 键一致，要么脚本改从 `index.check` 取受害键。
+  2. arch-check 超预算：`build` 10736 > 10730（在飞改动给 build 增加 25 行），
+     与本次修复无关。
+
+## 2026-10-26 两项待决策收口（用户决定）
+
+- **NP 定位**：只保留 **NP3**（受检契约与 lowering 解耦），NP0/NP1/NP2/NP4/NP5
+  关闭。依据：NP1/NP2 的对象代码（`ir_simplify`、`ssa_inline`）已随 A0b/A0e 从
+  `compiler/` 删除，NP4 由 ADR-0014 取代，NP0 的模式/计数口径并入现有
+  `make test` + O0/O2 + 自举门，NP5 交 LLVM 默认管线。
+  [ADR-0011](adr/0011-yh采用Nanopass风格优化阶段契约.md) 状态改为「部分被
+  ADR-0014 取代（2026-10-26），只保留 NP3」并附阶段处置表；
+  [方案](02-plan/yh-Nanopass风格优化架构实施方案.md) 与
+  [设计](03-design/yh-Nanopass风格优化架构.md) 头注改为只执行 NP3、其余章节
+  仅作历史设计；NP3 以单条任务记入 [todo](todo.md) 的架构优化小节。
+- **字面量只读化（H1）**：决定改语义——字面量发 `constant` 进只读段，能静态
+  判定的写入改编译期诊断（先覆盖字面量直接下标与不经函数边界的局部别名），与
+  comptime 的「字面量字节池只读」口径统一；逃逸写入退化为运行期崩溃。
+  决策前实测：运行期写入现在**允许且生效**（`let p *char = "abc"; p[0]='z'`
+  → `zbc`），`tests/yh-run` 无运行期依赖用例；`backend/llvm_module.yh:385` 已按
+  `mutable` 选 `global`/`constant`，字面量登记点在
+  `lower/module_snapshot_static.yh`；`__data` 实测 hello-world 14 B、`./yh`
+  93 KB。实施项见 todo H1，与 PC3b 一起滚种子。
+- 本轮只改文档，未改编译器、未构建、未滚种子。
+
+## 2026-10-26 修复编译器浮点字面量的 1 ULP 偏差
+
+- **根因**：`compiler/gen/sem_value.yh` 的 `sem_parse_float_bits` 用「逐位
+  `mant*10 + digit`、`frac_scale*10`、指数累乘」的浮点运算解析十进制字面量，
+  大指数（`1.5e300`）经多次舍入后比正确值多 1 ULP（bits …870 vs …869）。
+  num 库自己的解析与 Python 都是 …869，此前只有编译器字面量路径错。
+- **修复**：字面量去掉 `_` 后交给宿主 libc 的 `strtod`（glibc/macOS 均按
+  当前舍入模式正确舍入），保持 `-0.0`、次正规、上溢为 inf 等既有行为；
+  `@[extern] fn strtod` 声明在 `gen/sem_value.yh`，并在注释里记录 E1 迁移时
+  需替换为纯 yh 实现（已加 todo E1.3）。
+- **回归**：新增 `tests/yh-run/run/float-literal-rounding.yh`，覆盖 1.5e300、
+  0.1、最大有限数、最小次正规、-0.0、1e309、下划线分隔、下溢到 0、
+  2^53+1 等 13 个位模式，期望值与 Python `struct` 一致。
+- **验证**：`just build` 23.4s；`just test` exit 0（run 语料含新用例）；
+  `just libs-test` 122 + cli/os/libc；`just libs-test-o2` 122；
+  `just test-num` 220/220；`just selfhost-native` exit 0（cc3→cc4 固定点、
+  cc4 自解析 119 文件、project cases 122/122）；`git diff --check` 通过。
+  注：仓库入口此时已完全迁移到 justfile（Makefile 已删除）。
+
+## 2026-10-25/26 YT4 收口：四道门复验
+
+- YT4-P0～P7 全部完成，测试分布与外部保留清单见
+  [YT4 收口与门禁验证](01-finished/yh-YT4-收口与门禁验证-2026-10-25.md)。
+- 最终复验（仓库根，入口已迁移 justfile，make 仅转发）：
+  `make libs-test` 122 passed + cli 5/5 + os 11/11+1/1 + libc 2/2；
+  `make libs-test-o2` 122 passed；`make test` exit 0（compiler-tests 4/4 等）；
+  `make selfhost-native` exit 0（cc3→cc4 固定点、cc4 自解析 119 文件、
+  project cases 122/122）；`make test-num` 220/220；`git diff --check` 通过。
+- 延后项：YT2d-2（函数级 IR/check 缓存未用于测试构建）、D11 预期失败能力、
+  astcheck 增量门槛跳过；编译器十进制字面量 1 ULP 偏差已于 2026-10-26 修复
+  （见上方条目）。
+
+## 2026-10-25 YT4-P7：num 内建测试与 Python 往返差分
+
+- `libs/num`（958 行、此前零测试）新增 `zz_tests.yh`：6 个 test / 45 条
+  `$assert`，覆盖 `parse_f64` 合法值/边界/语法/上下溢/4096 有效位上限与
+  `format_f64` 最短往返、-0.0、指数形式、非有限值/容量不足。
+- 新增 `tests/num/reference.py`（固定种子 220 例：固定边界 + 随机 64 位模式
+  的 Python `repr` + 随机十进制指数文本），比较解析状态/位模式与格式化往返；
+  `make test-num` 独立目标，CI 的 darwin-arm64 与 linux-arm64 各加一步，
+  不进 `libs-test` 快跑。
+- 测试发现（2026-10-26 已修复）：编译器十进制字面量 `1.5e300` 曾比正确值多
+  1 ULP（`num.parse_f64`/Python 一致）；修复与回归见上方 2026-10-26 条目。
+- 验证：`yh test num` 6/6；`make test-num` 220/220；`make libs-test`
+  **122 passed** + cli/os/libc；`make libs-test-o2` 122；`make test`
+  **73.0s**；`make selfhost-native` **153.5s / 122/122**。记录见
+  [YT4-P7](01-finished/yh-YT4-P7-num迁移-2026-10-25.md)。
+
+## 2026-10-25 YT4-P6：irverify 迁入 `compiler/ir/zz_tests_verify.yh`
+
+- `tests/modules/projects/irverify`（747 行、6 个 `check_*`）→
+  `compiler/ir/zz_tests_verify.yh`（6 test / 51 断言，只调 pub API）；
+  失败点 `return N` 改为 `$assert(false, "旧断言 N"); return;`，控制流不变。
+- 删除夹具与 `build-check.py` 的 `r2a-ssa-phi-verifier`，`copy_proj` 特判
+  只剩 `irfront`/`llvmmodule`；`compiler-tests` 增加 `ir` 模块。
+- 保留（有据）：`irfront`（发射覆盖统计/符号契约）、`llvmlower` + lower
+  探针（lower 不允许依赖 parse/check）、`llvmchecked`；`astcheck` 因
+  `test-compiler-tests` 增量 19.7s > 10s 门槛跳过。记录见
+  [YT4-P6](01-finished/yh-YT4-P6-编译器fixture迁移-2026-10-25.md)。
+- 验证：`compiler-tests` 4/4；`make test` 75.2s；`make selfhost-native`
+  192.1s / project cases 122/122。
+
+## 2026-10-25 YT4-P5：os/sys/time 测试与 P0 收尾
+
+- `sysresult` 的纯模型断言 → `libs/sys/99_tests.yh`（2 test：Timespec 布局、
+  is_error/error_code 边界）；删 fixture 与 `os0-sys-result-model`。
+- 新增 `libs/os/99_tests.yh`（4 test：结果构造函数/选项默认值/目录条目视图/
+  errno 分类映射）与 `libs/time/99_tests.yh`（单调时钟非负且不倒退）。
+- 保留 `libs/os/test/run.py`（FS/目录/进程 E2E、Linux 目标类型检查）与
+  Linux 11 个 fixture；`osmodel`/`osio` smoke 不变。
+- P0 收尾：`tests/toml/run.py`、`tests/json/run.py` 与对应 `make test` 行已删；
+  `tests/fmt/interp.py` 按 D11 保留为外部负例门。
+- 全门复验（LA3 已由并发会话收口）：`make test` **61.6s**；
+  `make selfhost-native` **148.8s / project cases 123/123**；
+  `make libs-test` **116 passed** + cli/os/libc；`make libs-test-o2` 116。
+  记录见 [YT4-P5](01-finished/yh-YT4-P5-os-sys-time迁移-2026-10-25.md)。
+
+## 2026-10-25 YT4-P4：cli 五个 selftest 主体迁入 `libs/cli/zz_tests_*.yh`
+
+- 5 个夹具（clibasics/cliactions/clicommands/cliextensions/clihelp，约 3625 行）
+  → 5 个测试文件、**43 个 `test`**：basics 5、actions 12、commands 9、
+  extensions 9、help 8。记录见
+  [YT4-P4](01-finished/yh-YT4-P4-cli迁移-2026-10-25.md)。
+- 删除 cliactions/clicommands/cliextensions/clihelp 四个夹具；clibasics 只留
+  `build_pack_parser`/`run_pack`/`main`；`libs/cli/test/run.py` 10 → 5 例
+  （climodel、clibasics×3、cliwarnings），`diff.py` 保留。
+- 参数文件用例改用 `/tmp/yh-cli-*.txt` 自建自清；测试文件名必须 `zz_` 前缀
+  （cli 类型声明在 `cli.yh`）；`make libs-test` 的缺测试提示改为匹配
+  `*tests*.yh`。
+- 验证：`yh test cli` 43/43；cli runner 5/5；`make libs-test` **109 passed**
+  + cli/os/libc 全绿；`make libs-test-o2` 109 passed；`make test` **60.5s**。
+  `selfhost-native` 仍停在另一会话的 LA3「损坏记录」期望，待其收口后复验。
+
+## 2026-10-25 YT4-P2/P3：TOML 与 string 测试迁入库内
+
+- **TOML**：`toml{model,strings,scalars,tables,errors,files}` 的 160 个 `ok()`
+  （运行时断言点 154）→ `libs/toml/99_tests.yh` 的 11 个 test / **154 条
+  `$assert`**（1:1）；删除 6 个纯断言夹具与 `tests/toml/run.py`，
+  `make test-toml` 改为 `yh test toml`；conformance（681/681）、injection
+  （124 点）、install 保留。记录见
+  [YT4-P2](01-finished/yh-YT4-P2-toml迁移-2026-10-25.md)。
+- **string**：`string{view,owned,transform,utf8}` 的 206 个 `if` 断言点 →
+  `libs/string/99_tests.yh`（15 test / 216 断言）；删除 4 个 fixture 与
+  `st2`–`st5`，保留 `stringmodel`/`stringinterop` smoke 与
+  resources/reference/install/complexity；`tests/string/run.py` 默认组改为
+  model/interop/resources。记录见
+  [YT4-P3](01-finished/yh-YT4-P3-string迁移-2026-10-25.md)。
+- **门禁**：`make test` **94.9s → 56.8s**（json/toml/string 三批迁移合计
+  −38.1s）；`make libs-test` 66 passed + cli/os/libc 全绿；`yh -O2 test`
+  66 passed；`make test-string` 26.6s → **16.7s**；`make test-toml`
+  4.8s。arch-check 的 `max_build_lines` 因并发会话的 PC3 落地 +6
+  （10730 → 10736）同步并注明理由。
+- **未复验**：`make selfhost-native` 停在
+  `tests/selfhost/llvm-function-cache.py` 的「损坏记录」期望
+  （`(4,1,4)` vs 实际 `(5,0,5)`）；该脚本与 `compiler/ir/ssa_module_40*`、
+  `module_snapshot_lower_cache*` 正被另一会话改动（PC 工作 WIP），
+  与本迁移无关，待其收口后重跑。
+
+## 2026-10-25 YT4-P1：JSON 测试迁入 `libs/json/99_tests.yh`
+
+- **迁移**：`tests/modules/projects/json{model,strings,numbers,containers,errors,files}`
+  的 114 个 `ok()` 断言点 → `libs/json/99_tests.yh` 的 12 个 `test` / 127 条
+  `$assert`；断言全部走 pub API，文件用例用 `/tmp` 固定路径（照 io 先例）
+  并 `unlink` 清理。断言对照表见
+  [YT4-P1 迁移记录](01-finished/yh-YT4-P1-json迁移-2026-10-25.md)。
+- **删除**：5 个纯断言夹具（jsonstrings/numbers/containers/errors/files）、
+  `tests/json/run.py`、`tests/json/` 与 `make test-json` 目标；`make test`
+  不再跑 json runner。
+- **保留**：`jsonmodel` 作为公开面/链接 smoke，`build-check.py` 新增
+  `j1-json-model`（`stdlib-run`，期望 `json model ok`）。
+- **验证**：`yh test json` 12/12；`make libs-test` 45 passed
+  （33 + 12）+ cli/os/libc 全绿；`make test` **94.9s → 76.9s**；
+  `make selfhost-native` 188.7s，project cases **128/128**；`git diff --check`
+  通过。
+
+## 2026-10-25 YT4-0：libs 测试统一入口与 `yh test` 并发串行化
+
+- **背景**：YT4 迁移分析确认 `libs/cli`、`libs/os`、`libs/libc` 的 runner
+  完全没接门禁，且同一项目的两个 `yh test` 会互相覆盖入口/二进制/日志/缓存
+  （实测 4 并发 3/4 轮失败）。决策见
+  [YT4 规划 §11](../02-plan/yh-test语法迁移既有测试分析与规划-2026-10-25.md)。
+- **并发串行化（YT2d-3）**：`compiler/testkit/test_cmd.yh` 新增
+  `tc_test_lock_path`/`tc_lock_pid`/`tc_lock_acquire`：在
+  `<项目>/tmp/yh-test/.lock` 用 `O_CREAT|O_EXCL` 建锁并写 pid，同项目运行
+  串行化；持有者退出后按 `kill(pid, 0)` 清理陈旧锁，等待上限约 30 秒；
+  `--list` 不建锁，`--no-run`/正常结束释放锁。arch-check 的
+  `max_testkit_lines` 1515 → 1592（说明：同项目测试锁）。
+- **门禁入口**：`make test` 与 `make selfhost-native` 的 4/3 次按模块
+  `yh test` 改为一次无选择器 `yh test --timeout 60`（33 例 3.0s）；新增
+  `make libs-test`（缺测试提示 + `yh test` + `libs/cli/test/run.py` +
+  `cli/test/diff.py` + `libs/os/test/run.py` + `libs/libc/test/run.py`）与
+  `make libs-test-o2`（`tmp/libs-o2` 项目副本，独立 `tmp/yh-test` 缓存/锁）；
+  `make test-lib-tests` 保留为别名。缺 `99_tests*.yh` 的库只提示不阻断。
+- **CI**：`.gitea/workflows/ci.yml` 的 darwin-arm64、linux-arm64、
+  linux-x86_64 三个 job 各加 `make libs-test`（同一目标、平台差异交给编译期
+  文件选择）；`libs-test-o2` 只在 linux-arm64 追加。
+- **文档**：新增
+  [yh-test 测试布局与运行约定](03-design/yh-test测试布局与运行约定-2026-10-25.md)
+  （文件命名/排序、平台文件、粒度、`/tmp` 资源、并发锁、门禁职责）；
+  YT4 规划 §7.2/§8 同步为已交付，`docs/todo.md` 关闭 YT2d-3 与 YT4-0。
+- **验证**：`make test` 94.9s 绿；`make selfhost-native` 205s（两代固定点、
+  自解析、项目用例 **127/127**）绿；`make libs-test` 36s（cli/diff/os/libc
+  全绿）、`make libs-test-o2` 11s（33 例）；`tests/modules/test-check.py`
+  34 项通过；`make test-compiler-tests` 3/3；同项目 4 并发 `yh test string`
+  全部 5 passed；陈旧锁（pid 不存在）自动清理。
+
+
+## 2026-10-26 PC7a：大二进制改用 (size, mtime_ns) 身份哈希
+
+- **动机**：探针测得每轮构建重哈希 **271 MB**（352–401 次调用），其中大头是几十 MB 级的
+  二进制（编译器自身 70 MB、链接器/驱动），而 `link-libs.manifest` 对归档的摘要缓存本来是
+  命中的。
+- **改动**：新增 `mb_mix_file_identity`（`link_inputs.yh`），把「编译器指纹」与「链接工具身份」
+  两处从**内容哈希**改成 **(size, mtime_ns)**（仍混入解析路径）。
+- **语义**：这两处只需要「文件换没换」的身份，不需要内容摘要。代价是 make/ninja 级的
+  mtime 信任——同内容不同 mtime 只会多失效一次缓存；工具/编译器被替换时 mtime 变化
+  必然失效。
+- **实测（load≈4.0）**：热编 **1.14–1.21 s → 1.00–1.02 s**（其中 schedule 0.27 → 0.03 s，
+  因为不再哈希 70 MB 的编译器自身）；单函数改动 **3.83–4.45（中位 3.9）→ 3.71–3.81
+  （中位 3.76）**，object 阶段 0.87 → 0.52 s。
+- **未动的部分**：`link-libs.manifest` 的归档摘要缓存本来就有效；剩余 ~0.5 s 是模块级
+  `.o` 与 lld 的固定成本，属 PC7（函数级目标文件）范围。
+- **预算**：`max_build_lines` 10761 → 10786（PC7a 共享 helper 与两处调用 +25）。
+- **门禁**：`make test`、`make selfhost-native`（124/124、LA3 O0/O2）、`make test-llvm-darwin`、
+  `arch-check` 全绿。
+
+## 2026-10-26 性能目标收口（A3 + B，滚种子推迟）
+
+- **低负载基线（load≈4.5，`compiler/`）**：冷编 11.2–12.0 s、**全量重编（含写缓存）17.5 s**、
+  **热编 1.14–1.21 s**、单函数改动 3.83–4.45 s（中位 3.9）、冷编后首次改动 4.78 s。
+- **达标**：全量重编 ≤20 s ✅、热编 ≤1.5 s ✅（PC4b/PC5 按目标数字关闭）。
+- **目标重定（A3）**：单函数改动目标由 ≤3 s 改为 **≤4 s（现状满足）**。理由：模块重编
+  2.03 s 里 LLVM 每轮要为**整模块 205 个函数**重发 `.o`，链接 1.17 s 因 object 变必须
+  重跑；≤3 s 只能靠**函数级目标文件**，已单独立项 PC7（可行性见
+  [设计](03-design/yh-函数级目标文件可行性-2026-10-26.md)）。
+- **PC3c 按实测关闭**：冷编后首次改动只贵 0.5 s（4.78 vs 4.27），check 切片仍命中
+  38/205；为 0.5 s 引入「冷编后台补写」会重新引入孤儿进程/竞态，判定不做。
+- **顺带量化（PC7a 立项）**：每轮构建**重哈希 271 MB**（352–401 次调用，含 70 MB 级
+  二进制），关掉后热编 1.14 → 0.25 s。按 (size, mtime_ns) 复用摘要可省 ~0.4 s，
+  但与 PC7 独立，需先决定是否接受 make/ninja 级 mtime 信任。
+- **滚种子（PC3b）推迟**：三套门禁绿，但工作区有并行会话未提交改动
+  （libs/json、testkit、.gitea、tests/toml），现在滚会一并烘进种子；等其落地后由用户确认。
+- **门禁**：`make test`、`make selfhost-native`（124/124、LA3 O0/O2）、`make test-llvm-darwin`、
+  `arch-check` 全绿（本轮仅文档改动，未再动 `compiler/`）。
+
+## 2026-10-26 PC2 v3：check 切片复用恢复（并修掉一个自旋死循环）
+
+- **根因（2026-10-25 定位）**：切片格式 v2 只带 expr/stmt/edge/binding/symbol 行，
+  不带 `store.strings`，命中后 lowering 报「字符串缺少受检字节」；且 v2 的记录会
+  让类型表随命中变化，编号漂移。
+- **v3 设计**：头 +2 字（字符串计数/字节数）+ 尾部字符串段（label/length/quoted +
+  字节本体，取自本函数 expr 行的 `const_bits` 数据标签）；pass2b 入口快照
+  「类型数/字符串数/静态数据数」，capture **只缓存没有新建类型与静态数据的函数**
+  ——命中因此不会改变类型编号，字符串由 `gen.data_str_restore` 按 label 恢复。
+  `module_worker` 恢复 `firc_check_load`；`firc_commit_kind` 按旧索引回收旧键记录。
+- **实测**：编译器自编增量 `gen` 模块 check 命中 **38/205**（此前恒为 0）；带字符串的
+  函数命中后 `yh run` 输出正确；`.fchk` 记录 1209 → **373**（不可缓存的函数不写）。
+  `llvm-function-cache.py` O0/O2 矩阵（IR + check 双计数）通过。
+- **踩坑（当天修掉）**：字符串段的**计数循环**与**发射循环**用了不同谓词（发射侧漏了
+  `soff/slen` 越界判断），越界条目只多写字节 → 堆破坏 → 内层 `for` 拿到垃圾长度 →
+  无限自旋。表现是机器上 5 个 `ppid=1` 的 `yh build` 各烧 25–42% CPU、load 195，
+  并行会话的门禁（用旧的 staged 二进制）也一起卡死。`sample` 直接指到
+  `checked_slice_capture`。修复：两个循环共用同一谓词。教训：同一份数据的「算尺寸」
+  与「写字节」必须共用条件，否则先溢出再自旋，日志上什么都看不到。
+- **门禁**：`make test`、`make selfhost-native`（项目用例 **124/124**、LA3 O0/O2、
+  两代固定点）、`make test-llvm-darwin`、`arch-check` 全绿。
+- **预算**：`max_build_lines` 10736 → 10761（PC2 v3 装载 +5、PC2b 回收 +20），
+  原因即本条。
+
+## 2026-10-26 PC1b：IR 类型按内容去重
+
+- **定位**：PC1 把「同一 ABI 多个类型编号」归因到 `gen.ty_push`，实测不成立——
+  受检类型表结构重复 `cdup=0`（`ty_ptr/ty_array/ty_slice/ty_fn_abi` 已有去重）。
+  重复在 IR 层：`ir_module_add_type` 无条件追加，`compiler/build` 的 **907 个 IR 类型
+  里 706 个是同内容重复**（数组/指针/切片/函数类型每个函数都再登记一次）。
+- **修复**：`ir/ssa_module_10_build.yh` 新增 `ir_module_type_same`（种类/bits/size/
+  align/elem/count/字段(type_id,offset)/abi/变参），`ir_module_add_type` 命中既有
+  内容时直接返回旧编号（名义名单独比较，保证两个同布局 struct 不合并）。
+- **效果**：模块 IR 类型数 907 → **118**（最大模块），结构重复 706 → **0–1**；
+  函数缓存合并的结构回退（PC1 的临时绕过）计数 **0**；命中率不变
+  （`gen` 201/201、`build` 268/268，`ir_functions` 数随并行改动略变）。
+- **测试**：`tests/modules/projects/llvmmodule` 新增三条断言（同内容合并、布局不同
+  另起编号、名义名不同不合并），`llvm-module-ownership` 用例通过；
+  `llvm-function-cache.py` O0/O2 矩阵通过；`make test` 73 s 绿。
+- 说明：IR 层去重是纯收益（类型表更小、编号可比），不改变序列化/合并格式。
+
+## 2026-10-25 PC4：capture 归因与校验去重
+
+- **归因**（1460 次 capture 内嵌探针，CPU 秒）：分配+清零 **0.02**、闭包标记 **0.59**、
+  迷你模块构建 **9.97**、`ir_module_verify`+序列化 **24.34**（合计 34.9）。也就是
+  「每函数 7 张表的 malloc/free」几乎不花钱，**约七成成本在验证与序列化**。
+- **端到端**：13 个模块全量重编时，capture 开 = 26.5 s、关（PC3 冷编路径）= 13.5–15.6 s，
+  即 capture 仍占 **11–13 s**。
+- **已落地**：去掉两处重复校验——`ir_function_cache_capture` 里逐函数的
+  `ir_verify(&function.body)`，与迷你模块的 `ir_module_verify(&mini)`。两者都由
+  「capture 之后、提交之前」的模块级 `ir_module_verify(&candidate)` 覆盖，且记录只在
+  整模块构建成功后才落盘。实测收益 1–2 s（宿主机 load 40–60，噪声同量级）。
+- **已否决**：把 7 张临时表改成按模块复用的 scratch 结构体。第一版把 `reserve` 放在
+  取指针之后（扩容 realloc 后局部指针失效）；改成先 `reserve` 后取指针仍会让
+  `yh test string` 的 libs 构建在 lowering 阶段报
+  `memory/memory.yh:5:19 alloc: 首片不支持此语句或表达式`，机制未定位
+  （怀疑 `ir_fc_mark_symbol`/`ir_fc_visit_type` 对越界下标写 scratch），因此整体回退。
+- **门禁**：`make test` 100 s、`make selfhost-native` 228 s（项目用例 **128/128**、
+  LA3 缓存矩阵 O0/O2）、`make test-llvm-darwin` 42 s 全绿。
+- **环境**：门禁期间磁盘被 tmp 副本写满（`No space left on device`）导致一次
+  `selfhost-native` 假失败；已清理约 6.5 GB 临时副本（`tmp/pc*`、`tmp/modcheck`、
+  `tmp/yh-test`、`tmp/faststage`）。
+
+## 2026-10-25 PC3：全冷构建不写函数级缓存
+
+- **动机**：`make` 每轮 `rm -rf compiler/.build`，冷编里 `capture`（每函数序列化
+  迷你 IRModule）是纯成本；PC1 后单模块记录已从 28.7 MB 降到 8.4 MB，但冷编仍要
+  为 1459 个函数全部写一遍。
+- **判据**：`<build>/manifest/link.manifest` 是「上一轮构建完成」的哨兵。它不存在
+  说明 `.build` 刚被清空（或上轮失败）→ `gs.c_firc_write_off = 1`，本轮只查不写。
+  注意不能用 `manifest/` 目录存在性：`mb_mkdir` 会预建六个子目录。
+- **读写分离**：`lower_module_cached` 的 `cache_enabled` 只看 `cache_in`（能不能查），
+  capture/提交由 `cache_out` 是否为空决定——所以关掉写入后 `--stats` 的
+  `ir_functions/ir_cache_misses` 语义不变（冷编仍是 1459/1459）。
+- **结果**（候选 `./yh` 冷编 `compiler/`）：**23.9 s → 14.8 s（−38%）**，
+  `.fir` 写入 1459 → **0**；冷编后首次改一个函数 6.4 s（缓存为空，全 miss 并落盘），
+  再次改动 4.7 s（200/201 命中）。热编无改动不变（~2.4 s）。
+- **注意**：`make`（种子 `bin/yh-darwin-arm64` 编 `compiler/`）仍是 24.6 s，因为
+  种子还是旧编译器；**滚种子后 `make` 才会拿到这 −38%**。本次不滚种子：工作区
+  里有并行会话未完成的 `testkit` 改动，滚进去会污染种子。
+- **架构预算**：`build` +10 行（PC3 判据与读写分离的判据注释），
+  `tools/arch-check.py` 的 `max_build_lines` 10720 → 10730（原因即本条）。
+- **门禁**：`make test` 88 s、`make test-llvm-darwin` 36 s、`make selfhost-native`
+  206 s（LA3 缓存矩阵 O0/O2、项目用例 **127/127**、新增的 `pc1-function-cache-hits`
+  五条断言含 `cold-no-write`）全绿。
+
+## 2026-10-25 PC1/PC2：函数级缓存键稳定与 check 切片安全阀
+
+- **PC1 根因**：`checked_cache_layout` 把整张 interned 类型表（含函数体内局部数组/
+  切片产生的 lazy 类型）按下标混进函数键；表顺序取决于「本轮检查了哪些函数」，
+  而 check 切片命中会跳过检查 → 键依赖命中、命中依赖键。实测同一份源码连续三次
+  构建得到三种类型顺序（`type_n`=166/167/168），IR 命中率恒为 0。另有装载上限
+  过小（单记录 1 MiB/单模块 16 MiB）与符号按类型编号比较（`gen` 201 个函数里
+  61 个被判不兼容）两处独立缺陷。
+- **PC1 修复**：`lower/module_snapshot_lower_cache.yh` 只混声明面事实（struct/union/
+  enum 的种类/大小/对齐 + 每个函数的签名事实），不再混类型编号与 `elem`/`sub`；
+  `ir/ssa_module_50_function_rebind.yh` 的签名/参数类型改为结构等价比较；
+  `build/function_ir_cache.yh` 上限改为 4 MiB/256 MiB。
+- **PC2**：check 切片格式 v2 不带 `store.strings`，命中后 lowering 报
+  「字符串缺少受检字节」/「表达式 AST 校验失败」。升版 v3 前改为只写不读
+  （`module_worker` 传空集合，删掉失效的 `firc_check_load`），`llvm-function-cache.py`
+  的 check 期望改为 0 命中并写明原因。
+- **结果**：`gen` 等价重编 0/201 → **201/201**、`build` 0/271 → **271/271**；
+  单函数改动 6.7–7.7 s → **4.2 s（200/201）**；`firc/yh-gen` 1206 记录/49 MB →
+  **201/8.4 MB**；「清 `.build` 保留 `firc`」从内部错误变为 13.6 s 正常完成；
+  冷编 23.9 s（`capture` 全量写入属 PC3）。
+- **门禁**：`make test` 78 s、`make test-llvm-darwin` 34 s、`make selfhost-native`
+  224 s（两代固定点、自解析、LA3 缓存矩阵 O0/O2、项目用例 **127/127**）全绿；
+  新增模块用例 `pc1-function-cache-hits`（冷编全 miss / 等价重编全命中 /
+  单函数改动只失效该函数）。残留：类型 interning 去重（PC1b）、check 切片 v3。
+
+## 2026-10-25 裸跑 `yh build` 链接失败修复（libc++ 进闭包）
+
+- **现象**：`cd compiler && ../bin/yh-darwin-arm64 build` 编完 13 个模块后链接失败，
+  `ld64.lld: undefined symbol: __ZdlPv … referenced 32483 more times`（C++ 符号）。
+- **根因**：C++ 运行库参数 `-lc++` 只存在于 `selfhost-runtime.txt`，由
+  `tools/seed-build.py` 以 `YH_LINK_RUNTIME_FLAGS` 注入，所以只有 `make` 路径能链接；
+  而且即使补上 `-lc++`，随编译器分发的 SDK stub 也不含 libc++（`usr/lib` 只有
+  `libSystem.tbd`）。
+- **修复**：`tools/llvm-darwin-host.py prepare` 把宿主 SDK 的
+  `usr/lib/libc++.tbd` 复制进构建机闭包并记 `host.json.cxx_tbd`/`_sha256`，
+  `tools/link-closure.py` 生成 `[link-darwin-arm64].cxx`；闭包已带 stub 时
+  prepare 从运行库文件里去掉 `-lc++`，避免重复。`tools/link-closure.py check`
+  接进 `make test-llvm-darwin`；`tests/selfhost/llvm-darwin-host.py` 新增
+  stub 复制、运行库过滤、无 stub 回退三条契约（用显式目录注入，不动真实闭包）。
+- **验证**：`cd compiler && ../bin/yh-darwin-arm64 build`（无 SDKROOT、无
+  `YH_LINK_RUNTIME_FLAGS`，清 `.build`）成功，22.0 s；`make` 冷编 25.1 s；
+  `make test`（110 s）与 `make test-llvm-darwin`（36 s）全绿。
+
+## 2026-10-25 编译器性能首轮归因
+
+- **测量**：Apple M1/8 GiB，种子与当日候选在 `compiler/` 上冷编/热编/单函数改动三种
+  场景。冷编 26 s（`schedule` 22.3 s、link 2.1 s、object 1.0 s），热编 2.4 s
+  （link 1.3–1.5 s + object 0.6–0.8 s），单函数改动 6.7–7.7 s。
+- **归因**：用 `tmp/perf/analyze/` 下的一次性探针（worker 阶段标记 + lowering 内部
+  计时，不入库）测得冷编 worker CPU 72.7 s：lowering 62.1 s，其中函数级 IR 缓存的
+  `capture` 40.6 s（56%）、真正的 lowering 16.3 s、模块校验 3.6 s；LLVM 文本 5.9 s、
+  内嵌桥代码生成 2.8 s、受检 AST 校验 1.7 s，前端其余 <0.3 s。
+- **关键发现**：① 强制关闭 `cache_enabled` 后冷编 29.5 s → 16.1 s（−46%）；
+  ② 等价输入（只改注释/改一个函数体）重编实测 `ir_cache_hits=0/201`、
+  `check_cache_hits≤18/201`，与 RS2 设计期望不符，`firc` 目录逐轮膨胀（gen 201 个
+  函数对应 1206 个 `.fir`）；③ 把等价 `firc/` 放回冷树构建会报
+  `内部错误：表达式 AST 校验失败`（两次复现）。
+- **产出**：[归因分析](02-plan/yh-编译器性能分析-2026-10-25.md)（含复现命令、阶段表、
+  优化候选与顺序）；todo 新增 PC1–PC6。未修改编译器源码，未滚种子。
+- **注意**：测量期间宿主上虚拟机持续占用约 3.4 核（load 峰值 18.5），同一二进制
+  冷编落点从 26 s 漂到 52 s；阶段占比取自同一次运行内部，正式对照仍需按 PF1
+  空载 20 轮。
+
 ## 2026-10-25 CI 修复：TOML 语料下载重试 + x64 接口头断言
 
 - **现象**：Gitea `ci.yml` run 142（同样见 run 210）三端红：darwin-arm64 与

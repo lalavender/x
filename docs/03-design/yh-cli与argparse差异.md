@@ -64,9 +64,8 @@
 
 ## 4. 差分维护
 
-- 值/诊断类别/退出码的对照由各验收项目的断言承担：
-  `clibasics`（基础值形状与退出码）、`cliactions`（数量/action、count/append
-  基值与选项 remainder）、`clicommands`（子命令与模式）、
-  `cliextensions`（回调与参数文件）、`clihelp`（帮助、模板与警告）、
-  `cliwarnings`（入口成功路径的警告输出）。
+- 值/诊断类别/退出码的对照由 `libs/cli/zz_tests_*.yh`（43 个 test）与
+  `libs/cli/test/run.py`（真实 argv/退出码）共同承担；`cliwarnings` 保留在
+  runner，`diff.py` 负责 94 条 argv 的 argparse 差分。迁移记录见
+  [YT4-P4](../01-finished/yh-YT4-P4-cli迁移-2026-10-25.md)。
 - 差异项一旦变化，必须同时更新本文与对应 `.yh` 用例；不接受只改文档不改用例。

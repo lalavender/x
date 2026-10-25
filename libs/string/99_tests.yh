@@ -70,3 +70,656 @@ test "UTF-8 校验" {
     $assert(bad.status == Status.status_invalid_utf8, "孤立 0xFF 应判为非法")
     $assert(bad.rune_count == 0, "非法输入不应有码点数")
 }
+
+// ============================================================================
+// YT4-P3：从 stringview/stringowned/stringtransform/stringutf8 迁入的断言
+// （stringmodel 与 stringinterop 保留为外部消费者 smoke）。
+// ============================================================================
+
+// test_bytes：把已知有效的字节区间转成视图。
+fn test_bytes(data *u8, count u64) View {
+    let result ViewResult = view_bytes(data, count)
+    return result.value
+}
+
+test "切分：空片段与多字节分隔符" {
+    let comma View = test_view(",")
+    let empty View = test_view("")
+    let iter SplitIter
+    $assert(split(test_view("a,,b,"), comma, &iter) == Status.status_ok,
+        "普通切分应成功")
+    $assert(view_equal(split_next(&iter).value, test_view("a")), "首片段 a")
+    $assert(view_equal(split_next(&iter).value, empty), "连续分隔符产生空片段")
+    $assert(view_equal(split_next(&iter).value, test_view("b")), "第三片段 b")
+    $assert(view_equal(split_next(&iter).value, empty), "尾分隔符产生空片段")
+    $assert(split_next(&iter).status == Status.status_end, "切分应结束")
+    $assert(split_next(&iter).status == Status.status_end, "结束后仍返回 end")
+
+    $assert(split(empty, comma, &iter) == Status.status_ok, "空文本切分应成功")
+    $assert(view_equal(split_next(&iter).value, empty), "空文本产生一个空片段")
+    $assert(split_next(&iter).status == Status.status_end, "空文本切分应结束")
+
+    $assert(split(test_view("aaaa"), test_view("aa"), &iter) == Status.status_ok,
+        "多字节分隔符切分应成功")
+    $assert(view_equal(split_next(&iter).value, empty), "不重叠片段 1")
+    $assert(view_equal(split_next(&iter).value, empty), "不重叠片段 2")
+    $assert(view_equal(split_next(&iter).value, empty), "不重叠片段 3")
+    $assert(split_next(&iter).status == Status.status_end, "多字节切分应结束")
+
+    $assert(split(test_view("abc"), test_view("b"), &iter) == Status.status_ok,
+        "单字符分隔符切分应成功")
+    $assert(view_equal(split_next(&iter).value, test_view("a")), "b 前片段")
+    $assert(view_equal(split_next(&iter).value, test_view("c")), "b 后片段")
+    $assert(split_next(&iter).status == Status.status_end, "单字符切分应结束")
+
+    $assert(split(test_view(","), comma, &iter) == Status.status_ok,
+        "文本等于分隔符应切出两个空片段")
+    $assert(view_equal(split_next(&iter).value, empty), "前空片段")
+    $assert(view_equal(split_next(&iter).value, empty), "后空片段")
+    $assert(split_next(&iter).status == Status.status_end, "相等切分应结束")
+
+    $assert(split(test_view(",a"), comma, &iter) == Status.status_ok,
+        "开头分隔符切分应成功")
+    $assert(view_equal(split_next(&iter).value, empty), "开头空片段")
+    $assert(view_equal(split_next(&iter).value, test_view("a")), "开头分隔符后的片段")
+    $assert(split_next(&iter).status == Status.status_end, "开头分隔符切分应结束")
+
+    let mid [3]u8
+    mid[0] = 228
+    mid[1] = 184
+    mid[2] = 173
+    let mid_view View = test_bytes(&mid[0], 3)
+    $assert(split(test_view("a中b中"), mid_view, &iter) == Status.status_ok,
+        "UTF-8 分隔符切分应成功")
+    $assert(view_equal(split_next(&iter).value, test_view("a")), "中 前片段")
+    $assert(view_equal(split_next(&iter).value, test_view("b")), "中 中间片段")
+    $assert(view_equal(split_next(&iter).value, empty), "中 尾空片段")
+    $assert(split_next(&iter).status == Status.status_end, "UTF-8 切分应结束")
+}
+
+test "切分：NUL、参数错误与迭代器复制" {
+    let comma View = test_view(",")
+    let empty View = test_view("")
+    let iter SplitIter
+    let nul_text [5]u8
+    nul_text[0] = 'a'
+    nul_text[1] = 0
+    nul_text[2] = 'b'
+    nul_text[3] = 0
+    nul_text[4] = 'c'
+    let nul_sep [1]u8
+    nul_sep[0] = 0
+    $assert(split(test_bytes(&nul_text[0], 5), test_bytes(&nul_sep[0], 1), &iter)
+        == Status.status_ok, "NUL 分隔符切分应成功")
+    $assert(view_equal(split_next(&iter).value, test_view("a")), "NUL 前片段")
+    $assert(view_equal(split_next(&iter).value, test_view("b")), "NUL 中间片段")
+    $assert(view_equal(split_next(&iter).value, test_view("c")), "NUL 后片段")
+    $assert(split_next(&iter).status == Status.status_end, "NUL 切分应结束")
+
+    let preserved SplitIter
+    preserved.text = test_view("keep")
+    preserved.separator = comma
+    preserved.cursor = 9
+    preserved.ended = 1
+    $assert(split(test_view("abc"), empty, &preserved) == Status.status_invalid_argument,
+        "空分隔符应报参数错误")
+    $assert(preserved.text.count == 4 && preserved.cursor == 9 && preserved.ended == 1,
+        "参数错误不改 out")
+    let null_iter *SplitIter = 0
+    $assert(split(test_view("abc"), comma, null_iter) == Status.status_invalid_argument,
+        "空迭代器应报参数错误")
+    $assert(split_next(null_iter).status == Status.status_invalid_argument,
+        "空迭代器 split_next 应报参数错误")
+    let broken SplitIter
+    broken.text = test_view("abc")
+    broken.separator = empty
+    broken.cursor = 0
+    broken.ended = 0
+    $assert(split_next(&broken).status == Status.status_invalid_argument,
+        "非法迭代器状态应报参数错误")
+
+    $assert(split(test_view("a,b,c"), comma, &iter) == Status.status_ok,
+        "复制用切分应成功")
+    $assert(view_equal(split_next(&iter).value, test_view("a")), "复制前首片段")
+    let copied SplitIter = iter
+    $assert(view_equal(split_next(&iter).value, test_view("b")), "原迭代器第二片段")
+    $assert(view_equal(split_next(&iter).value, test_view("c")), "原迭代器第三片段")
+    $assert(view_equal(split_next(&copied).value, test_view("b")), "副本从游标继续")
+    $assert(view_equal(split_next(&copied).value, test_view("c")), "副本末片段")
+
+    $assert(split(test_view("a"), test_view("ab"), &iter) == Status.status_ok,
+        "分隔符比文本长应成功")
+    $assert(view_equal(split_next(&iter).value, test_view("a")), "整段作为片段")
+    $assert(split_next(&iter).status == Status.status_end, "长分隔符切分应结束")
+
+    let guarded [6]u8
+    guarded[0] = 90
+    guarded[1] = 'x'
+    guarded[2] = ','
+    guarded[3] = 'y'
+    guarded[4] = 91
+    guarded[5] = 92
+    let guarded_text View = test_bytes(&guarded[1], 3)
+    $assert(split(guarded_text, comma, &iter) == Status.status_ok, "哨兵切分应成功")
+    $assert(view_equal(split_next(&iter).value, test_view("x")), "哨兵首片段")
+    $assert(view_equal(split_next(&iter).value, test_view("y")), "哨兵末片段")
+    $assert(split_next(&iter).status == Status.status_end, "哨兵切分应结束")
+    $assert(guarded[0] == 90 && guarded[4] == 91 && guarded[5] == 92,
+        "切分不触碰哨兵字节")
+}
+
+test "拥有者：构造、增长与 C 边界" {
+    let value String = make()
+    $assert(value.handle == 0 && byte_length(&value) == 0 && capacity(&value) == 0,
+        "空串句柄与长度")
+    $assert(as_view(&value).count == 0, "空串视图长度为 0")
+
+    let source [3]u8
+    source[0] = 'a'
+    source[1] = 'b'
+    source[2] = 'c'
+    let from_result StringResult = from_view(test_bytes(&source[0], 3))
+    $assert(from_result.status == Status.status_ok
+        && byte_length(&from_result.value) == 3, "from_view 应复制三字节")
+    $assert(view_equal(as_view(&from_result.value), test_view("abc")), "复制内容")
+    $assert(as_view(&from_result.value).data[3] == 0, "结果应有终止 NUL")
+    source[0] = 'X'
+    $assert(view_equal(as_view(&from_result.value), test_view("abc")),
+        "输入改写不影响复制结果")
+
+    $assert(append(&from_result.value, test_view("def")) == Status.status_ok,
+        "append 应成功")
+    $assert(byte_length(&from_result.value) == 6
+        && view_equal(as_view(&from_result.value), test_view("abcdef")), "append 后内容")
+    $assert(capacity(&from_result.value) >= 6, "append 后容量应足够")
+    $assert(append(&from_result.value, test_view("")) == Status.status_ok,
+        "空 append 应成功")
+    $assert(byte_length(&from_result.value) == 6, "空 append 不改变长度")
+    $assert(append_byte(&from_result.value, 0) == Status.status_ok,
+        "append_byte NUL 应成功")
+    $assert(byte_length(&from_result.value) == 7, "append_byte 增加长度")
+    let with_nul View = as_view(&from_result.value)
+    $assert(with_nul.data[6] == 0 && with_nul.data[7] == 0, "内嵌 NUL 与终止 NUL")
+    let nul_cstr CStrResult = c_str(&from_result.value)
+    $assert(nul_cstr.status == Status.status_embedded_nul && nul_cstr.data == 0,
+        "含 NUL 内容时 c_str 应拒绝")
+    release(&from_result.value)
+
+    let empty_string String = make()
+    let empty_cstr CStrResult = c_str(&empty_string)
+    $assert(empty_cstr.status == Status.status_ok && empty_cstr.data != 0
+        && empty_cstr.data[0] == 0, "空串 c_str 返回空 C 字符串")
+
+    let text_result StringResult = from_view(test_view("hé中"))
+    $assert(text_result.status == Status.status_ok, "非 ASCII 复制应成功")
+    let text_cstr CStrResult = c_str(&text_result.value)
+    $assert(text_cstr.status == Status.status_ok && text_cstr.data != 0,
+        "非 ASCII c_str 应成功")
+    $assert(text_cstr.data[0] == 'h' && text_cstr.data[1] == 195
+        && text_cstr.data[2] == 169, "非 ASCII 字节保留")
+    let text_bytes_view View = as_view(&text_result.value)
+    $assert(text_bytes_view.count == 6 && text_bytes_view.data[6] == 0,
+        "非 ASCII 长度与终止 NUL")
+    $assert(append(&text_result.value, test_view("!")) == Status.status_ok,
+        "追加后 c_str 应重新计算")
+    let text_cstr_again CStrResult = c_str(&text_result.value)
+    $assert(text_cstr_again.status == Status.status_ok && text_cstr_again.data != 0,
+        "追加后 c_str 仍成功")
+    release(&text_result.value)
+}
+
+test "拥有者：assign、clear、truncate 与 reserve" {
+    let from_result StringResult = from_view(test_view("abc"))
+    $assert(assign(&from_result.value, test_view("hello")) == Status.status_ok,
+        "assign 应成功")
+    $assert(view_equal(as_view(&from_result.value), test_view("hello")), "assign 后内容")
+    let hello_capacity u64 = capacity(&from_result.value)
+    $assert(assign(&from_result.value, test_view("")) == Status.status_ok,
+        "空 assign 应成功")
+    $assert(byte_length(&from_result.value) == 0
+        && capacity(&from_result.value) == hello_capacity, "空 assign 保留容量")
+    $assert(assign(&from_result.value, test_view("abcdef")) == Status.status_ok,
+        "重置内容")
+    let self_sub ViewResult = slice(as_view(&from_result.value), 2, 5)
+    $assert(self_sub.status == Status.status_ok, "取自身子视图")
+    $assert(assign(&from_result.value, self_sub.value) == Status.status_ok,
+        "自身子视图 assign 应成功")
+    $assert(view_equal(as_view(&from_result.value), test_view("cde")), "重叠 assign 结果")
+
+    $assert(assign(&from_result.value, test_view("xyz")) == Status.status_ok,
+        "clear 前赋值")
+    let before_clear_capacity u64 = capacity(&from_result.value)
+    clear(&from_result.value)
+    $assert(byte_length(&from_result.value) == 0
+        && capacity(&from_result.value) == before_clear_capacity, "clear 保留容量")
+    $assert(append(&from_result.value, test_view("new")) == Status.status_ok,
+        "clear 后可追加")
+    $assert(view_equal(as_view(&from_result.value), test_view("new")), "清空后内容")
+
+    $assert(truncate(&from_result.value, 2) == Status.status_ok, "truncate 应成功")
+    $assert(view_equal(as_view(&from_result.value), test_view("ne")), "truncate 后内容")
+    $assert(as_view(&from_result.value).data[2] == 0, "truncate 应写终止 NUL")
+    $assert(truncate(&from_result.value, 5) == Status.status_bounds,
+        "truncate 越界应报 bounds")
+    $assert(view_equal(as_view(&from_result.value), test_view("ne")),
+        "truncate 失败不改内容")
+    $assert(truncate(&from_result.value, 0) == Status.status_ok, "truncate 到 0")
+
+    $assert(assign(&from_result.value, test_view("reserve")) == Status.status_ok,
+        "reserve 前赋值")
+    $assert(reserve(&from_result.value, 100) == Status.status_ok, "reserve 应成功")
+    $assert(capacity(&from_result.value) >= 100
+        && view_equal(as_view(&from_result.value), test_view("reserve")),
+        "reserve 扩容且保留内容")
+    let reserved_capacity u64 = capacity(&from_result.value)
+    $assert(reserve(&from_result.value, 10) == Status.status_ok,
+        "容量足够时 reserve 应成功")
+    $assert(capacity(&from_result.value) == reserved_capacity, "容量足够时不增长")
+    release(&from_result.value)
+}
+
+test "拥有者：clone、move、自别名与溢出" {
+    let from_result StringResult = from_view(test_view("reserve"))
+    let cloned StringResult = clone(&from_result.value)
+    $assert(cloned.status == Status.status_ok, "clone 应成功")
+    $assert(append(&from_result.value, test_view("!")) == Status.status_ok,
+        "clone 后改原串")
+    $assert(view_equal(as_view(&cloned.value), test_view("reserve")), "clone 应是深复制")
+    let moved String = move(&from_result.value)
+    $assert(from_result.value.handle == 0 && byte_length(&moved) == 8,
+        "move 应清空源并转移内容")
+    release(&moved)
+    release(&moved)
+    $assert(moved.handle == 0, "重复 release 应幂等")
+    $assert(append(&moved, test_view("again")) == Status.status_ok, "释放后可复用")
+    $assert(view_equal(as_view(&moved), test_view("again")), "复用后内容")
+    release(&moved)
+    let zero_clone StringResult = clone(&moved)
+    $assert(zero_clone.status == Status.status_ok && zero_clone.value.handle == 0,
+        "零串 clone 应得到空串")
+
+    let grow StringResult = from_view(test_view("abc"))
+    $assert(grow.status == Status.status_ok, "自追加用例构造")
+    $assert(reserve(&grow.value, 16) == Status.status_ok, "自追加前 reserve")
+    let grow_view View = as_view(&grow.value)
+    $assert(append(&grow.value, grow_view) == Status.status_ok, "整串自追加应成功")
+    $assert(view_equal(as_view(&grow.value), test_view("abcabc")), "整串自追加结果")
+    let grow_sub ViewResult = slice(as_view(&grow.value), 1, 4)
+    $assert(grow_sub.status == Status.status_ok, "自追加子视图应成功")
+    $assert(append(&grow.value, grow_sub.value) == Status.status_ok, "子视图自追加应成功")
+    $assert(view_equal(as_view(&grow.value), test_view("abcabcbca")), "子视图自追加结果")
+
+    let expand StringResult = from_view(test_view("abcdef"))
+    $assert(expand.status == Status.status_ok, "扩容用例构造")
+    let expand_sub ViewResult = slice(as_view(&expand.value), 1, 4)
+    $assert(expand_sub.status == Status.status_ok, "扩容子视图应成功")
+    $assert(append(&expand.value, expand_sub.value) == Status.status_ok,
+        "扩容路径子视图自追加应成功")
+    $assert(view_equal(as_view(&expand.value), test_view("abcdefbcd")), "扩容自追加结果")
+    let expand_all View = as_view(&expand.value)
+    $assert(append(&expand.value, expand_all) == Status.status_ok, "扩容整串自追加应成功")
+    $assert(byte_length(&expand.value) == 18, "扩容整串自追加长度")
+    let expand_bytes View = as_view(&expand.value)
+    $assert(expand_bytes.data[0] == 'a' && expand_bytes.data[17] == 'd',
+        "扩容自追加首尾字节")
+
+    let overlap StringResult = from_view(test_view("abcdef"))
+    $assert(overlap.status == Status.status_ok, "重叠用例构造")
+    let overlap_sub ViewResult = slice(as_view(&overlap.value), 2, 5)
+    $assert(overlap_sub.status == Status.status_ok, "重叠子视图应成功")
+    $assert(assign(&overlap.value, overlap_sub.value) == Status.status_ok,
+        "重叠 assign 应成功")
+    $assert(view_equal(as_view(&overlap.value), test_view("cde")), "重叠 assign 结果")
+    release(&overlap.value)
+    release(&grow.value)
+    release(&expand.value)
+
+    let huge_data [1]u8
+    let huge View
+    huge.data = &huge_data[0]
+    huge.count = 9223372036854775807
+    let huge_result StringResult = from_view(huge)
+    $assert(huge_result.status == Status.status_overflow, "超长视图应报溢出")
+    let empty_string String = make()
+    $assert(reserve(&empty_string, 9223372036854775807) == Status.status_overflow,
+        "超长 reserve 应报溢出")
+    release(&cloned.value)
+}
+
+test "变换：concat 与 join" {
+    let empty_concat StringResult = concat(test_view(""), test_view(""))
+    $assert(empty_concat.status == Status.status_ok
+        && byte_length(&empty_concat.value) == 0, "空 concat 应得到空串")
+    let source [2]u8
+    source[0] = 'a'
+    source[1] = 'b'
+    let concat_result StringResult = concat(test_bytes(&source[0], 2), test_view("cd"))
+    $assert(concat_result.status == Status.status_ok
+        && view_equal(as_view(&concat_result.value), test_view("abcd")), "concat 内容")
+    source[0] = 'X'
+    $assert(view_equal(as_view(&concat_result.value), test_view("abcd")),
+        "concat 应独立存储")
+    release(&concat_result.value)
+
+    let no_parts []View
+    let empty_join StringResult = join(no_parts, test_view(","))
+    $assert(empty_join.status == Status.status_ok
+        && byte_length(&empty_join.value) == 0, "零片段 join 应为空")
+    let one [1]View
+    one[0] = test_view("solo")
+    let one_join StringResult = join(one.to_type([]View), test_view(","))
+    $assert(one_join.status == Status.status_ok
+        && view_equal(as_view(&one_join.value), test_view("solo")), "单片段 join")
+    let parts [3]View
+    parts[0] = test_view("a")
+    parts[1] = test_view("")
+    parts[2] = test_view("b")
+    let joined StringResult = join(parts.to_type([]View), test_view(","))
+    $assert(joined.status == Status.status_ok
+        && view_equal(as_view(&joined.value), test_view("a,,b")), "多片段 join")
+    let joined_empty_sep StringResult = join(parts.to_type([]View), test_view(""))
+    $assert(joined_empty_sep.status == Status.status_ok
+        && view_equal(as_view(&joined_empty_sep.value), test_view("ab")), "空分隔符 join")
+    let pair [2]View
+    pair[0] = test_view("a中")
+    pair[1] = test_view("b")
+    let joined_mid StringResult = join(pair.to_type([]View), test_view("中"))
+    $assert(joined_mid.status == Status.status_ok, "多字节分隔符 join 应成功")
+    $assert(byte_length(&joined_mid.value) == 8, "多字节分隔符 join 长度")
+    release(&joined.value)
+    release(&joined_empty_sep.value)
+    release(&joined_mid.value)
+    release(&one_join.value)
+    release(&empty_join.value)
+}
+
+test "变换：replace 与 ASCII 大小写" {
+    let replaced StringResult = replace_all(test_view("aaaa"), test_view("aa"),
+        test_view("b"))
+    $assert(replaced.status == Status.status_ok
+        && view_equal(as_view(&replaced.value), test_view("bb")), "非重叠替换")
+    let removed StringResult = replace_all(test_view("a-b-c"), test_view("-"),
+        test_view(""))
+    $assert(removed.status == Status.status_ok
+        && view_equal(as_view(&removed.value), test_view("abc")), "空替换删除")
+    let no_match StringResult = replace_all(test_view("abc"), test_view("z"),
+        test_view("y"))
+    $assert(no_match.status == Status.status_ok
+        && view_equal(as_view(&no_match.value), test_view("abc")), "无匹配保持原样")
+    $assert(replace_all(test_view("abc"), test_view(""), test_view("x")).status
+        == Status.status_invalid_argument, "空 old 应报参数错误")
+    let partial StringResult = replace(test_view("abcabc"), test_view("abc"),
+        test_view("xy"), 1)
+    $assert(partial.status == Status.status_ok
+        && view_equal(as_view(&partial.value), test_view("xyabc")), "限次替换")
+    let zero_limit StringResult = replace(test_view("abc"), test_view("a"),
+        test_view("z"), 0)
+    $assert(zero_limit.status == Status.status_ok
+        && view_equal(as_view(&zero_limit.value), test_view("abc")), "零次替换不改")
+    let triplet StringResult = replace_all(test_view("aaa"), test_view("aa"),
+        test_view("b"))
+    $assert(triplet.status == Status.status_ok
+        && view_equal(as_view(&triplet.value), test_view("ba")), "不重叠三连替换")
+    let too_long StringResult = replace_all(test_view("a"), test_view("ab"),
+        test_view("x"))
+    $assert(too_long.status == Status.status_ok
+        && view_equal(as_view(&too_long.value), test_view("a")), "模式比文本长时保持原样")
+
+    let nul_replacement [1]u8
+    nul_replacement[0] = 0
+    let nul_result StringResult = replace_all(test_view("a-a"), test_view("-"),
+        test_bytes(&nul_replacement[0], 1))
+    $assert(nul_result.status == Status.status_ok
+        && byte_length(&nul_result.value) == 3, "含 NUL 替换按 count 保存")
+    let nul_bytes View = as_view(&nul_result.value)
+    $assert(nul_bytes.data[1] == 0 && nul_bytes.data[2] == 'a', "含 NUL 替换字节")
+    release(&nul_result.value)
+    release(&replaced.value)
+    release(&removed.value)
+    release(&no_match.value)
+    release(&partial.value)
+    release(&zero_limit.value)
+    release(&triplet.value)
+    release(&too_long.value)
+
+    let mixed StringResult = lower_ascii(test_view("AbC!中"))
+    $assert(mixed.status == Status.status_ok, "lower_ascii 应成功")
+    let mixed_bytes View = as_view(&mixed.value)
+    $assert(mixed_bytes.count == 7, "lower_ascii 长度")
+    $assert(mixed_bytes.data[0] == 'a' && mixed_bytes.data[1] == 'b'
+        && mixed_bytes.data[2] == 'c' && mixed_bytes.data[3] == '!', "ASCII 小写")
+    $assert(mixed_bytes.data[4] == 228 && mixed_bytes.data[5] == 184
+        && mixed_bytes.data[6] == 173, "非 ASCII 字节保留")
+    let upper StringResult = upper_ascii(test_view("AbC!中"))
+    $assert(upper.status == Status.status_ok, "upper_ascii 应成功")
+    let upper_bytes View = as_view(&upper.value)
+    $assert(upper_bytes.data[0] == 'A' && upper_bytes.data[1] == 'B'
+        && upper_bytes.data[2] == 'C' && upper_bytes.data[4] == 228, "ASCII 大写")
+    let empty_lower StringResult = lower_ascii(test_view(""))
+    $assert(empty_lower.status == Status.status_ok
+        && byte_length(&empty_lower.value) == 0, "空串大小写转换")
+    release(&mixed.value)
+    release(&upper.value)
+    release(&empty_lower.value)
+
+    let stable [3]u8
+    stable[0] = 'a'
+    stable[1] = '-'
+    stable[2] = 'b'
+    let stable_result StringResult = replace_all(test_bytes(&stable[0], 3),
+        test_view("z"), test_view("y"))
+    $assert(stable_result.status == Status.status_ok, "无变化替换应成功")
+    stable[0] = 'X'
+    $assert(view_equal(as_view(&stable_result.value), test_view("a-b")),
+        "无变化替换仍独立存储")
+    release(&stable_result.value)
+
+    let guarded [5]u8
+    guarded[0] = 90
+    guarded[1] = 'A'
+    guarded[2] = 'B'
+    guarded[3] = 91
+    guarded[4] = 92
+    let guarded_result StringResult = lower_ascii(test_bytes(&guarded[1], 2))
+    $assert(guarded_result.status == Status.status_ok, "哨兵大小写转换应成功")
+    $assert(view_equal(as_view(&guarded_result.value), test_view("ab")), "哨兵转换结果")
+    $assert(guarded[0] == 90 && guarded[3] == 91 && guarded[4] == 92,
+        "转换不触碰哨兵字节")
+    release(&guarded_result.value)
+}
+
+test "UTF-8：校验矩阵与错误位置" {
+    let empty_info Utf8Info = utf8_validate(test_view(""))
+    $assert(empty_info.status == Status.status_ok && empty_info.rune_count == 0,
+        "空串校验")
+    let ascii_info Utf8Info = utf8_validate(test_view("abc"))
+    $assert(ascii_info.status == Status.status_ok && ascii_info.rune_count == 3,
+        "ASCII 校验")
+    let mixed_info Utf8Info = utf8_validate(test_view("hé中😀"))
+    $assert(mixed_info.status == Status.status_ok && mixed_info.rune_count == 4,
+        "混合 UTF-8 校验")
+    $assert(test_view("hé中😀").count == 10, "混合 UTF-8 字节长度")
+
+    let nul_text [3]u8
+    nul_text[0] = 'a'
+    nul_text[1] = 0
+    nul_text[2] = 'b'
+    let nul_info Utf8Info = utf8_validate(test_bytes(&nul_text[0], 3))
+    $assert(nul_info.status == Status.status_ok && nul_info.rune_count == 3, "NUL 校验")
+    let bom [3]u8
+    bom[0] = 239
+    bom[1] = 187
+    bom[2] = 191
+    let bom_info Utf8Info = utf8_validate(test_bytes(&bom[0], 3))
+    $assert(bom_info.status == Status.status_ok && bom_info.rune_count == 1, "BOM 校验")
+    let max_scalar [4]u8
+    max_scalar[0] = 244
+    max_scalar[1] = 143
+    max_scalar[2] = 191
+    max_scalar[3] = 191
+    let max_info Utf8Info = utf8_validate(test_bytes(&max_scalar[0], 4))
+    $assert(max_info.status == Status.status_ok && max_info.rune_count == 1,
+        "最大标量校验")
+
+    let cases [12][4]u8
+    let lengths [12]u64
+    lengths[0] = 2
+    cases[0][0] = 192
+    cases[0][1] = 128
+    lengths[1] = 3
+    cases[1][0] = 224
+    cases[1][1] = 128
+    cases[1][2] = 128
+    lengths[2] = 4
+    cases[2][0] = 240
+    cases[2][1] = 128
+    cases[2][2] = 128
+    cases[2][3] = 128
+    lengths[3] = 3
+    cases[3][0] = 237
+    cases[3][1] = 160
+    cases[3][2] = 128
+    lengths[4] = 3
+    cases[4][0] = 237
+    cases[4][1] = 191
+    cases[4][2] = 191
+    lengths[5] = 4
+    cases[5][0] = 244
+    cases[5][1] = 144
+    cases[5][2] = 128
+    cases[5][3] = 128
+    lengths[6] = 2
+    cases[6][0] = 195
+    cases[6][1] = 40
+    lengths[7] = 3
+    cases[7][0] = 228
+    cases[7][1] = 40
+    cases[7][2] = 173
+    lengths[8] = 4
+    cases[8][0] = 240
+    cases[8][1] = 40
+    cases[8][2] = 140
+    cases[8][3] = 188
+    lengths[9] = 1
+    cases[9][0] = 195
+    lengths[10] = 2
+    cases[10][0] = 228
+    cases[10][1] = 184
+    lengths[11] = 3
+    cases[11][0] = 240
+    cases[11][1] = 159
+    cases[11][2] = 152
+    let i int = 0
+    for i < 12 {
+        let info Utf8Info = utf8_validate(test_bytes(&cases[i][0], lengths[i]))
+        $assert(info.status == Status.status_invalid_utf8, "非法序列应被拒绝")
+        $assert(info.error_offset == 0, "非法序列错误偏移为 0")
+        i += 1
+    }
+    let invalid_start [1]u8
+    invalid_start[0] = 128
+    $assert(utf8_validate(test_bytes(&invalid_start[0], 1)).status
+        == Status.status_invalid_utf8, "0x80 首字节非法")
+    invalid_start[0] = 245
+    $assert(utf8_validate(test_bytes(&invalid_start[0], 1)).status
+        == Status.status_invalid_utf8, "0xF5 首字节非法")
+    invalid_start[0] = 255
+    $assert(utf8_validate(test_bytes(&invalid_start[0], 1)).status
+        == Status.status_invalid_utf8, "0xFF 首字节非法")
+
+    let later [4]u8
+    later[0] = 'a'
+    later[1] = 195
+    later[2] = 169
+    later[3] = 255
+    let later_info Utf8Info = utf8_validate(test_bytes(&later[0], 4))
+    $assert(later_info.status == Status.status_invalid_utf8
+        && later_info.error_offset == 3, "后续错误偏移指向非法字节")
+    let middle [5]u8
+    middle[0] = 'a'
+    middle[1] = 237
+    middle[2] = 160
+    middle[3] = 128
+    middle[4] = 'b'
+    let bad_info Utf8Info = utf8_validate(test_bytes(&middle[0], 5))
+    $assert(bad_info.status == Status.status_invalid_utf8
+        && bad_info.error_offset == 1, "中间错误偏移指向序列起点")
+    $assert(bad_info.rune_count == 0, "非法输入不产生码点统计")
+}
+
+test "UTF-8：utf8_next 遍历" {
+    let cursor u64 = 0
+    let a_next RuneResult = utf8_next(test_view("a"), &cursor)
+    $assert(a_next.status == Status.status_ok && a_next.rune == 97
+        && a_next.width == 1 && a_next.offset == 0 && cursor == 1, "ASCII 单步")
+    let a_end RuneResult = utf8_next(test_view("a"), &cursor)
+    $assert(a_end.status == Status.status_end && a_end.offset == 1
+        && a_end.width == 0, "结尾返回 end")
+    cursor = 0
+    let e_next RuneResult = utf8_next(test_view("é"), &cursor)
+    $assert(e_next.status == Status.status_ok && e_next.rune == 233
+        && e_next.width == 2 && cursor == 2, "两字节码点")
+    cursor = 0
+    let emoji_next RuneResult = utf8_next(test_view("😀"), &cursor)
+    $assert(emoji_next.status == Status.status_ok && emoji_next.rune == 128512
+        && emoji_next.width == 4 && cursor == 4, "四字节码点")
+    let nul_only [1]u8
+    nul_only[0] = 0
+    cursor = 0
+    let nul_next RuneResult = utf8_next(test_bytes(&nul_only[0], 1), &cursor)
+    $assert(nul_next.status == Status.status_ok && nul_next.rune == 0
+        && nul_next.width == 1 && cursor == 1, "NUL 码点")
+    let nul_end RuneResult = utf8_next(test_bytes(&nul_only[0], 1), &cursor)
+    $assert(nul_end.status == Status.status_end, "NUL 后结尾")
+    cursor = 2
+    let bounds_next RuneResult = utf8_next(test_view("a"), &cursor)
+    $assert(bounds_next.status == Status.status_bounds && bounds_next.offset == 2
+        && cursor == 2, "越界游标")
+    let null_cursor *u64 = 0
+    $assert(utf8_next(test_view("a"), null_cursor).status
+        == Status.status_invalid_argument, "空游标报参数错误")
+    cursor = 1
+    let cont_next RuneResult = utf8_next(test_view("é"), &cursor)
+    $assert(cont_next.status == Status.status_invalid_utf8
+        && cont_next.offset == 1 && cursor == 1, "续字节起点非法")
+    let invalid_text [1]u8
+    invalid_text[0] = 255
+    cursor = 0
+    let invalid_next RuneResult = utf8_next(test_bytes(&invalid_text[0], 1), &cursor)
+    $assert(invalid_next.status == Status.status_invalid_utf8
+        && invalid_next.offset == 0 && cursor == 0, "非法首字节起点非法")
+}
+
+test "UTF-8：append_rune" {
+    let value String = make()
+    $assert(append_rune(&value, 65) == Status.status_ok, "ASCII 追加")
+    $assert(append_rune(&value, 233) == Status.status_ok, "两字节追加")
+    $assert(append_rune(&value, 20013) == Status.status_ok, "三字节追加")
+    $assert(append_rune(&value, 128512) == Status.status_ok, "四字节追加")
+    let encoded View = as_view(&value)
+    $assert(encoded.count == 10, "追加后字节长度")
+    let expected [10]u8
+    expected[0] = 65
+    expected[1] = 195
+    expected[2] = 169
+    expected[3] = 228
+    expected[4] = 184
+    expected[5] = 173
+    expected[6] = 240
+    expected[7] = 159
+    expected[8] = 152
+    expected[9] = 128
+    $assert(view_equal(encoded, test_bytes(&expected[0], 10)), "追加字节序列")
+    let encoded_info Utf8Info = utf8_validate(encoded)
+    $assert(encoded_info.status == Status.status_ok && encoded_info.rune_count == 4,
+        "追加结果应合法")
+    $assert(append_rune(&value, 55296) == Status.status_invalid_utf8,
+        "代理项标量应拒绝")
+    $assert(append_rune(&value, 1114112) == Status.status_invalid_utf8,
+        "超出最大标量应拒绝")
+    $assert(byte_length(&value) == 10, "非法追加不改变长度")
+    $assert(append_rune(&value, 0) == Status.status_ok, "NUL 标量追加")
+    $assert(byte_length(&value) == 11 && as_view(&value).data[10] == 0,
+        "NUL 标量写入字节视图")
+    release(&value)
+}

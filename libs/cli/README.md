@@ -6,9 +6,8 @@
 [对照说明](../../docs/03-design/yh-cli与argparse差异.md)，
 分期与门禁见[实施方案](../../docs/02-plan/yh-cli标准库实施方案.md)。
 
-本文的使用说明全部按本目录的验收项目实跑过
-（`libs/cli/test/` 下的 clibasics/cliactions/clicommands/cliextensions/clihelp），
-片段可直接编译。
+本文的使用说明全部按本目录的验收项目实跑过（语义断言在
+`libs/cli/zz_tests_*.yh`，真实 argv/退出码在 `libs/cli/test/`），片段可直接编译。
 
 ## 目录
 
@@ -732,19 +731,22 @@ cli.destroy(&parser);      // 再释放声明树（递归释放子命令 parser�
 cli 的用例与 fixture 全部放在本目录，不与全局 `tests/` 耦合：
 
 ```sh
-python3 libs/cli/test/run.py                     # 自有验收，默认用仓库根 ./yh 与 libs/
+python3 libs/cli/test/run.py                     # 真实 argv/退出码：5 例
 python3 libs/cli/test/diff.py                    # 与 Python argparse 的差分验收
-python3 libs/cli/test/run.py --compiler ./yh --workdir tmp/cli-test
+just libs-test                                   # CI 独立阶段，含上面两个 runner
 ```
 
-- fixture：`libs/cli/test/{climodel,clibasics,cliactions,clicommands,cliextensions,
-  clihelp,cliwarnings,clidiff}`，各自是普通 `project.toml` 项目，也可以单独构建运行：
-  `cd libs/cli/test/cliactions && YH_STDLIB=<仓库>/libs <仓库>/yh run`。
-- runner 的 10 条用例：`cli0-model-abi`、`cli1-basics-selftest`、`cli1-pack-run`、
-  `cli1-pack-help`、`cli1-pack-missing`、`cli2-actions`、`cli3-commands`、
-  `cli4-extensions`、`cli5-help`、`cli6-warning-entry`。
+- **语义断言**在 `libs/cli/zz_tests_{basics,actions,commands,extensions,help}.yh`
+  （43 个 `test`），由 `cd libs && yh test cli` / `just test` /
+  `just selfhost-native` / `just libs-test` 执行；文件名必须 `zz_` 前缀
+  （类型声明在 `cli.yh`）。
+- fixture：`libs/cli/test/{climodel,clibasics,cliwarnings,clidiff}`；其余
+  selftest 夹具已迁入内建测试并删除（记录见
+  [YT4-P4](../../docs/01-finished/yh-YT4-P4-cli迁移-2026-10-25.md)）。
+- runner 的 5 条用例：`cli0-model-abi`、`cli1-pack-run`、`cli1-pack-help`、
+  `cli1-pack-missing`、`cli6-warning-entry`。
 - `diff.py` 用 `clidiff` 探针把 94 条 argv 同时交给 yh 与 Python 3.14 argparse，
   比较 status、各 dest 值与未消费 token；设计保留的差异在脚本里显式列出，
   只在新差异出现时返回非 0。
-- 仓库级门（不含 cli 专有用例）：`python3 tests/modules/build-check.py`、
-  `make test`、`make selfhost-native`。
+- 仓库级门：`just libs-test`（含 cli runner + diff）、`just test`、
+  `just selfhost-native`。

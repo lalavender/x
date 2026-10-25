@@ -294,7 +294,9 @@ Darwin 不使用 Linux raw6/getdents64，不承诺摆脱 dyld/libSystem，也不
   read_clock/sleep_time；`60_process.linux.yh`：process_id/fork_process
   （SIGCHLD + 空子栈 clone）/execute/wait_process（wait4 原始状态）/
   exit_process（exit_group）/send_signal 与 create_pipe（在 30_file）。
-- 用例：sysresult、sysraw、sysfiles、syseintr、sysprocess、sysmemory、systime、
-  sysdirs 在 Darwin（仅模型）与 Linux/arm64 原生运行通过；Linux/x64 只完成
-  语义检查，未宣称原生运行。
+- 用例：`sysresult` 的模型断言已迁入 `libs/sys/99_tests.yh`（2 test，
+  `yh test sys`）；sysraw/sysfiles/syseintr/sysprocess/sysmemory/systime/
+  sysdirs 仍是 Linux 专属外部用例，Linux/arm64 原生运行通过；Linux/x64 只
+  完成语义检查，未宣称原生运行。迁移记录见
+  [YT4-P5](../01-finished/yh-YT4-P5-os-sys-time迁移-2026-10-25.md)。
 - 未实现：duplicate_fd/fd_flags 与 Darwin 桥。

@@ -8,7 +8,7 @@
 
 usage: python3 tests/string/run.py [--compiler ./yh] [--stdlib ./libs]
                                   [--workdir tmp/string-test]
-                                  [--group model,view,...|all]
+                                  [--group model,interop,resources|all]
                                   [--opt-level 0|2]
 
 退出码：全部通过 0；构建失败、断言失败、超时或注入矩阵不完整均为 1。
@@ -29,11 +29,9 @@ PROJ = ROOT / "tests" / "modules" / "projects"
 
 # 组名 -> (fixture 目录, 成功输出行)。resources 单独处理。
 GROUPS = {
+    # view/owned/transform/utf8 的断言已迁入 libs/string/99_tests.yh；
+    # model 与 interop 保留为公开面/跨库消费者 smoke。
     "model": ("stringmodel", "string model ok\n"),
-    "view": ("stringview", "string view ok\n"),
-    "owned": ("stringowned", "string owned ok\n"),
-    "transform": ("stringtransform", "string transform ok\n"),
-    "utf8": ("stringutf8", "string utf8 ok\n"),
     "interop": ("stringinterop", "string interop ok\n"),
 }
 
@@ -175,7 +173,7 @@ def parse_args(argv):
     parser.add_argument("--workdir", default=str(ROOT / "tmp" / "string-test"),
                         help="临时工作目录")
     parser.add_argument("--group", default="all",
-                        help="逗号分隔组名或 all：model,view,owned,transform,"
+                        help="逗号分隔组名或 all：model,interop,"
                              "utf8,interop,resources")
     parser.add_argument("--opt-level", default="0", choices=("0", "2"),
                         help="优化级别 0 或 2")
@@ -196,8 +194,7 @@ def main(argv):
     workdir.mkdir(parents=True, exist_ok=True)
 
     if args.group == "all":
-        selected = ["model", "view", "owned", "transform", "utf8", "interop",
-                    "resources"]
+        selected = ["model", "interop", "resources"]
     else:
         selected = [item.strip() for item in args.group.split(",")
                     if item.strip()]

@@ -878,9 +878,11 @@ auto 由输出 fd 是否为终端和 NO_COLOR 决定，NO_COLOR 存在时关闭�
 本次仅交付文档，**尚未新增这些用例，也未运行 cli 编译或运行测试**。
 以下路径与检查是实施要求，详细任务见[实施方案](../02-plan/yh-cli标准库实施方案.md)。
 
-拟新增 `libs/cli/test/clibasics`、`cliactions`、`clicommands`、`cliextensions`、
-`clihelp`，均以 `.yh` 写应用和断言；通过 `YH_STDLIB` 加载真实库模块。
-临时参数文件、输出与构建产物统一放 `tmp/cli/`。
+语义断言已迁入 `libs/cli/zz_tests_{basics,actions,commands,extensions,help}.yh`
+（43 个 `test`，`yh test cli`）；真实 argv/退出码与 Python argparse 差分保留在
+`libs/cli/test/{climodel,clibasics,cliwarnings,clidiff}` + `run.py`/`diff.py`，
+由 `make libs-test` 执行。迁移记录见
+[YT4-P4](../01-finished/yh-YT4-P4-cli迁移-2026-10-25.md)。
 
 | 测试组 | 必须覆盖的行为 |
 | --- | --- |

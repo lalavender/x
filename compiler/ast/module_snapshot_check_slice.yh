@@ -14,17 +14,18 @@ import ir
 // ============================================================================
 
 const CHECKED_SLICE_MAGIC u64 = 0x31454C4353485948 // "YHSCLE1" 的低 64 位近似
-const CHECKED_SLICE_VERSION int = 2
+const CHECKED_SLICE_VERSION int = 3
 const CHECKED_SLICE_MAX_ROWS int = 1048576
 // 单函数 check 切片上限：编译器自身的超大函数超过它就跳过缓存，避免
 // worker 保存/装载多 MB 记录导致自举内存峰值失控。
 const CHECKED_SLICE_CACHE_MAX int = 1048576
-const CHECKED_SLICE_HEAD_WORDS int = 14
+const CHECKED_SLICE_HEAD_WORDS int = 16
 const CHECKED_SLICE_EXPR_WORDS int = 25
 const CHECKED_SLICE_STMT_WORDS int = 15
 const CHECKED_SLICE_EDGE_WORDS int = 2
 const CHECKED_SLICE_BIND_WORDS int = 12
 const CHECKED_SLICE_SYMBOL_WORDS int = 14
+const CHECKED_SLICE_STRING_WORDS int = 3
 
 // CheckedSliceSymbol：切片引用的符号描述；name 为名字池字节副本。
 struct CheckedSliceSymbol {
@@ -45,6 +46,15 @@ struct CheckedSliceSymbol {
     ast_binding_row int
 }
 
+// CheckedSliceString：切片携带的字符串登记项（label、quoted 与字节本体）。
+// check 命中会跳过函数检查，标签与字节池都不会再生成，必须随记录恢复。
+struct CheckedSliceString {
+    label int
+    quoted int
+    len int
+    name *u8
+}
+
 // CheckedFunctionSlice：反序列化后的单函数切片；导入前由 release 释放。
 struct CheckedFunctionSlice {
     expr_n int
@@ -53,6 +63,9 @@ struct CheckedFunctionSlice {
     binding_n int
     symbol_n int
     symbols *CheckedSliceSymbol
+    string_n int
+    string_bytes int
+    strings *CheckedSliceString
     file_path *char
     file_path_len int
     owner_decl int
@@ -111,19 +124,23 @@ fn checked_slice_root_loc(id int, base int, count int) int {
 
 // checked_slice_size：按计数计算编码长度；超限返回 -1。
 fn checked_slice_size(expr_n int, stmt_n int, edge_n int, binding_n int,
-    symbol_n int, symbol_name_bytes int, path_size int) int {
+    symbol_n int, symbol_name_bytes int, string_n int, string_bytes int,
+    path_size int) int {
     if (expr_n < 0 || expr_n > CHECKED_SLICE_MAX_ROWS
         || stmt_n <= 0 || stmt_n > CHECKED_SLICE_MAX_ROWS
         || edge_n < 0 || edge_n > CHECKED_SLICE_MAX_ROWS
         || binding_n < 0 || binding_n > CHECKED_SLICE_MAX_ROWS
         || symbol_n < 0 || symbol_n > CHECKED_SLICE_MAX_ROWS
         || symbol_name_bytes < 0 || symbol_name_bytes > 67108864
+        || string_n < 0 || string_n > CHECKED_SLICE_MAX_ROWS
+        || string_bytes < 0 || string_bytes > 67108864
         || path_size <= 0 || path_size > 65536) { return -1 }
     let words int = CHECKED_SLICE_HEAD_WORDS + expr_n * CHECKED_SLICE_EXPR_WORDS +
         stmt_n * CHECKED_SLICE_STMT_WORDS + edge_n * CHECKED_SLICE_EDGE_WORDS +
-        binding_n * CHECKED_SLICE_BIND_WORDS + symbol_n * CHECKED_SLICE_SYMBOL_WORDS
+        binding_n * CHECKED_SLICE_BIND_WORDS + symbol_n * CHECKED_SLICE_SYMBOL_WORDS +
+        string_n * CHECKED_SLICE_STRING_WORDS
     if (words > 67108864 / 8) { return -1 }
-    return words * 8 + symbol_name_bytes + path_size
+    return words * 8 + symbol_name_bytes + string_bytes + path_size
 }
 
 // checked_slice_validate：确认所有函数内引用都可局部化；失败返回 1（不缓存）。
@@ -236,6 +253,17 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
             return 1
         }
     }
+    // v3：类型与静态数据不随记录携带 —— 只有「本函数没有新建」才允许复用切片。
+    let snap_row int = ctx.decl_row
+    if (snap_row < 0 || snap_row >= checked_check_keys_n
+        || checked_check_type_first == 0 || checked_check_str_first == 0
+        || checked_check_static_first == 0) { return 1 }
+    let type_first int = checked_check_type_first[snap_row]
+    let str_first int = checked_check_str_first[snap_row]
+    let static_first int = checked_check_static_first[snap_row]
+    if (type_first < 0 || str_first < 0 || static_first < 0
+        || gen.ty_count() != type_first
+        || gen.static_data_count() != static_first) { return 1 }
     let expr_n int = ctx.expr_after - ctx.expr_first
     let stmt_n int = ctx.stmt_after - ctx.stmt_first
     let edge_n int = ctx.edge_after - ctx.edge_first
@@ -247,6 +275,24 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
         return -1
     }
     if (checked_slice_validate(store, &ctx) != 0) { return 1 }
+    // 字符串：本函数 expr 行引用到的数据标签（lowering 只用 expr.const_bits 查字符串），
+    // 按标签去重后随记录携带；不依赖「哪个阶段登记」。
+    let string_n int = 0
+    let string_bytes int = 0
+    let ei int = 0
+    for ei < expr_n {
+        let node AstExpr = store.expressions[ctx.expr_first + ei]
+        let slbl int = 0
+        let soff int = 0
+        let slen int = 0
+        let squoted int = 0
+        if (gen.data_str_lookup(node.const_bits.to_type(int), &soff, &slen, &squoted) != 0
+            && soff >= 0 && slen >= 0 && store.name_n - soff >= slen) {
+            string_n += 1
+            string_bytes += slen
+        }
+        ei += 1
+    }
     if (ctx.file_id < 0 || ctx.file_id >= store.file_n) { return -1 }
     let file gen.PFile = store.files[ctx.file_id]
     let path *char = (store.names + file.path_off).to_type(*char)
@@ -271,7 +317,7 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
         return symbol_status
     }
     let size int = checked_slice_size(expr_n, stmt_n, edge_n, binding_n,
-        symbol_n, symbol_name_bytes, path_size)
+        symbol_n, symbol_name_bytes, string_n, string_bytes, path_size)
     if (size < 0 || size > CHECKED_SLICE_CACHE_MAX) {
         free(symbol_used.to_type(*void)); free(symbol_order.to_type(*void))
         return 1
@@ -294,6 +340,8 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
     checked_slice_put_int(data, &cursor, ctx.token_after)
     checked_slice_put_int(data, &cursor,
         checked_slice_loc(ctx.body_stmt, ctx.stmt_first, stmt_n))
+    checked_slice_put_int(data, &cursor, string_n)
+    checked_slice_put_int(data, &cursor, string_bytes)
     let i int = 0
     for i < path_size {
         data[cursor] = i < path_len ? path[i].to_type(u8) : 0
@@ -422,6 +470,32 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
         }
         i += 1
     }
+    // 字符串段（v3）：命中时按 label 恢复登记，lowering 才能查到字节。
+    i = 0
+    for i < expr_n {
+        let node AstExpr = store.expressions[ctx.expr_first + i]
+        let slbl int = 0
+        let soff int = 0
+        let slen int = 0
+        let squoted int = 0
+        // 与计数循环用**同一个**谓词：任一条件不满足就不是可携带的字符串，
+        // 否则发射字节数会超出按计数分配的空间（曾导致堆破坏与自旋）。
+        if (gen.data_str_lookup(node.const_bits.to_type(int), &soff, &slen, &squoted) == 0
+            || soff < 0 || slen < 0 || store.name_n - soff < slen) {
+            i += 1
+            continue
+        }
+        checked_slice_put_int(data, &cursor, node.const_bits.to_type(int))
+        checked_slice_put_int(data, &cursor, slen)
+        checked_slice_put_int(data, &cursor, squoted)
+        let j2 int = 0
+        for j2 < slen {
+            data[cursor] = store.names[soff + j2]
+            cursor += 1
+            j2 += 1
+        }
+        i += 1
+    }
     out_data[0] = data; out_size[0] = cursor
     free(symbol_used.to_type(*void)); free(symbol_order.to_type(*void))
     return 0
@@ -441,6 +515,14 @@ fn checked_slice_release(slice *CheckedFunctionSlice) void {
     }
     if (slice.symbols != 0) { free(slice.symbols.to_type(*void)) }
     slice.symbols = 0.to_type(*CheckedSliceSymbol); slice.symbol_n = 0
+    let ri int = 0
+    for ri < slice.string_n {
+        if (slice.strings[ri].name != 0) { free(slice.strings[ri].name.to_type(*void)) }
+        ri += 1
+    }
+    if (slice.strings != 0) { free(slice.strings.to_type(*void)) }
+    slice.strings = 0.to_type(*CheckedSliceString); slice.string_n = 0
+    slice.string_bytes = 0
     if (slice.file_path != 0) { free(slice.file_path.to_type(*void)) }
     slice.file_path = 0.to_type(*char); slice.file_path_len = 0
     slice.exprs = 0.to_type(*AstExpr); slice.stmts = 0.to_type(*AstStmt)
@@ -460,6 +542,8 @@ fn checked_slice_parse(data *u8, size int, slice *CheckedFunctionSlice) int {
     slice.edges = 0.to_type(*AstStmtExpr); slice.bindings = 0.to_type(*AstBinding)
     slice.file_path = 0.to_type(*char); slice.file_path_len = 0
     slice.symbols = 0.to_type(*CheckedSliceSymbol); slice.symbol_n = 0
+    slice.strings = 0.to_type(*CheckedSliceString); slice.string_n = 0
+    slice.string_bytes = 0
     if (data == 0 || size < CHECKED_SLICE_HEAD_WORDS * 8) { return 1 }
     let cursor int = 0
     if (checked_slice_get_u64(data, &cursor) != CHECKED_SLICE_MAGIC
@@ -478,9 +562,11 @@ fn checked_slice_parse(data *u8, size int, slice *CheckedFunctionSlice) int {
     slice.token_first = checked_slice_get_int(data, &cursor)
     slice.token_after = checked_slice_get_int(data, &cursor)
     slice.body_stmt = checked_slice_get_int(data, &cursor)
+    slice.string_n = checked_slice_get_int(data, &cursor)
+    slice.string_bytes = checked_slice_get_int(data, &cursor)
     if (checked_slice_size(slice.expr_n, slice.stmt_n, slice.edge_n,
             slice.binding_n, slice.symbol_n, symbol_name_bytes,
-            path_size) != size) { return 1 }
+            slice.string_n, slice.string_bytes, path_size) != size) { return 1 }
     slice.file_path = malloc(path_size.to_type(u64)).to_type(*char)
     if (slice.file_path == 0) { return -1 }
     let pi int = 0
@@ -641,6 +727,32 @@ fn checked_slice_parse(data *u8, size int, slice *CheckedFunctionSlice) int {
         cursor += sym.name_len
         i += 1
     }
+    if (slice.string_n > 0) {
+        slice.strings = checked_zero_rows(slice.string_n,
+            sizeof(CheckedSliceString)).to_type(*CheckedSliceString)
+        if (slice.strings == 0) { checked_slice_release(slice); return -1 }
+        i = 0
+        for i < slice.string_n {
+            let item *CheckedSliceString = &slice.strings[i]
+            item.label = checked_slice_get_int(data, &cursor)
+            item.len = checked_slice_get_int(data, &cursor)
+            item.quoted = checked_slice_get_int(data, &cursor)
+            if (item.label <= 0 || item.len < 0 || size - cursor < item.len) {
+                checked_slice_release(slice); return 1
+            }
+            item.name = malloc(item.len.to_type(u64)).to_type(*u8)
+            if (item.len > 0 && item.name == 0) {
+                checked_slice_release(slice); return -1
+            }
+            let j2 int = 0
+            for j2 < item.len {
+                item.name[j2] = data[cursor + j2]
+                j2 += 1
+            }
+            cursor += item.len
+            i += 1
+        }
+    }
     if (cursor != size) { checked_slice_release(slice); return 1 }
     return 0
 }
@@ -765,6 +877,18 @@ pub fn checked_slice_import(data *u8, size int, decl_row_override int,
     for si < slice.symbol_n {
         if (slice.symbols[si].old_id >= max_old) { max_old = slice.symbols[si].old_id + 1 }
         si += 1
+    }
+    // v3：先按记录恢复字符串标签与字节，lowering 命中时才查得到「受检字节」。
+    let st int = 0
+    for st < slice.string_n {
+        let item *CheckedSliceString = &slice.strings[st]
+        let pool_off int = gen.tml_intern_str(item.name, 0, item.len)
+        if (pool_off < 0
+            || gen.data_str_restore(item.label, pool_off, item.len,
+                item.quoted) != 0) {
+            checked_slice_release(&slice); return -1
+        }
+        st += 1
     }
     let sym_map *int = malloc((max_old * sizeof(int)).to_type(u64)).to_type(*int)
     if (sym_map == 0) { checked_slice_release(&slice); return -1 }
@@ -1020,6 +1144,11 @@ let checked_check_cache_in *ir.IRFunctionCacheSet = 0
 let checked_check_cache_env u64 = 0
 let checked_check_keys *u8 = 0
 let checked_check_keys_n int = 0
+// pass2b 前的模块表规模快照（v3）：类型与静态数据不随切片携带，只有「本函数
+// 没有新建」时复用切片才安全；字符串则按这里的差值随记录携带。s
+let checked_check_type_first *int = 0
+let checked_check_str_first *int = 0
+let checked_check_static_first *int = 0
 
 // checked_check_cache_begin：挂接本轮只读 check 缓存；0 表示禁用。
 pub fn checked_check_cache_begin(cache_in *ir.IRFunctionCacheSet, env_key u64) void {
@@ -1029,6 +1158,19 @@ pub fn checked_check_cache_begin(cache_in *ir.IRFunctionCacheSet, env_key u64) v
     if (checked_check_keys_n > 0) {
         checked_check_keys = checked_zero_rows(checked_check_keys_n,
             ir.IR_FUNCTION_CACHE_KEY_SIZE).to_type(*u8)
+        checked_check_type_first = checked_zero_rows(checked_check_keys_n,
+            sizeof(int)).to_type(*int)
+        checked_check_str_first = checked_zero_rows(checked_check_keys_n,
+            sizeof(int)).to_type(*int)
+        checked_check_static_first = checked_zero_rows(checked_check_keys_n,
+            sizeof(int)).to_type(*int)
+        let i int = 0
+        for i < checked_check_keys_n {
+            checked_check_type_first[i] = -1
+            checked_check_str_first[i] = -1
+            checked_check_static_first[i] = -1
+            i += 1
+        }
     }
 }
 
@@ -1039,11 +1181,49 @@ pub fn checked_check_cache_end() void {
     // 键表保留到本 worker 的 capture 结束；worker 是短生命周期进程，不在此释放。
 }
 
+// checked_slice_snapshot：只记录该声明的模块表规模（v3 守卫用）。
+// 生产路径由 pass2b 前的 checked_check_store_key 顺带记录；测试前端（如
+// llvmlower fixture 的 capture 自测）没有该钩子，捕获前显式调用一次即可。
+pub fn checked_slice_snapshot(decl_row int) void {
+    if (decl_row < 0) { return }
+    // 测试前端没有 begin：按当前声明数惰性建表（-1 = 未记录）。
+    if (checked_check_keys_n <= decl_row) {
+        checked_check_keys_n = ast_decl_count > decl_row + 1 ? ast_decl_count : decl_row + 1
+        checked_check_type_first = checked_zero_rows(checked_check_keys_n,
+            sizeof(int)).to_type(*int)
+        checked_check_str_first = checked_zero_rows(checked_check_keys_n,
+            sizeof(int)).to_type(*int)
+        checked_check_static_first = checked_zero_rows(checked_check_keys_n,
+            sizeof(int)).to_type(*int)
+        if (checked_check_type_first == 0 || checked_check_str_first == 0
+            || checked_check_static_first == 0) { return }
+        let ri int = 0
+        for ri < checked_check_keys_n {
+            checked_check_type_first[ri] = -1
+            checked_check_str_first[ri] = -1
+            checked_check_static_first[ri] = -1
+            ri += 1
+        }
+    }
+    if (checked_check_type_first == 0 || checked_check_str_first == 0
+        || checked_check_static_first == 0) { return }
+    checked_check_type_first[decl_row] = gen.ty_count()
+    checked_check_str_first[decl_row] = gen.data_str_count()
+    checked_check_static_first[decl_row] = gen.static_data_count()
+}
+
 // checked_check_store_key：保存 pass2b 前的函数键（供 capture 使用）。
 pub fn checked_check_store_key(decl_row int, key *u8) void {
     if (key == 0 || decl_row < 0 || decl_row >= checked_check_keys_n
         || checked_check_keys == 0) { return }
     let base int = decl_row * ir.IR_FUNCTION_CACHE_KEY_SIZE
+    // v3：同一时刻记录模块表规模，capture 用差值判断能否复用切片。
+    if (checked_check_type_first != 0 && checked_check_str_first != 0
+        && checked_check_static_first != 0) {
+        checked_check_type_first[decl_row] = gen.ty_count()
+        checked_check_str_first[decl_row] = gen.data_str_count()
+        checked_check_static_first[decl_row] = gen.static_data_count()
+    }
     let i int = 0
     for i < ir.IR_FUNCTION_CACHE_KEY_SIZE {
         checked_check_keys[base + i] = key[i]

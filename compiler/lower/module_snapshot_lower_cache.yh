@@ -42,44 +42,56 @@ fn checked_cache_mix_tokens(l *CheckedLower, file_id int, first int, after int,
     return 0
 }
 
-// checked_cache_layout：把布局/签名事实混入函数键。任何类型或 ABI 变化都会
-// 保守地让全部函数失效；这比遗漏私有结构体布局依赖更安全。
+// checked_cache_mix_type_facts：混入一个类型的 ABI 相关事实（种类/大小/对齐）。
+//
+// 不能混入类型编号、elem/sub 这类 arena 下标：它们是 lazy intern 的产物，
+// 顺序取决于本轮检查了哪些函数，而 check 切片命中会少检查几个函数。
+fn checked_cache_mix_type_facts(l *CheckedLower, tid int, hash *u64) void {
+    ast.checked_cache_mix_int(hash, tid < 0 ? -1 : 0)
+    if (tid < 0 || tid >= l.store.type_n) { return }
+    let ty gen.CType = l.store.types[tid]
+    ast.checked_cache_mix_int(hash, ty.kind)
+    ast.checked_cache_mix_int(hash, ty.size)
+    ast.checked_cache_mix_int(hash, ty.align)
+}
+
+// checked_cache_layout：把「声明面」的布局与签名事实混入函数键。
+//
+// 旧实现混入整张类型表，包括函数体内局部数组/切片产生的 lazy 类型：那些类型
+// 取决于本轮检查过哪些函数，于是键依赖 check 缓存命中、命中又依赖键，形成环。
+// 实测同一份源码连续三次构建得到三种类型顺序，命中率因此为 0。
+// 现在只混声明声明的聚合（struct/union/enum）布局与函数签名：它们由声明文本
+// 与依赖接口决定、与检查顺序无关，且覆盖 ABI 相关变化（大小/对齐/参数类型）；
+// 声明文本变化由 checked_cache_module_facts、依赖接口由 env_key 覆盖。
 fn checked_cache_layout(l *CheckedLower, hash *u64) void {
-    ast.checked_cache_mix_int(hash, l.store.type_n)
     let i int = 0
-    for i < l.store.type_n {
-        let ty gen.CType = l.store.types[i]
-        ast.checked_cache_mix_int(hash, ty.kind)
-        ast.checked_cache_mix_int(hash, ty.size)
-        ast.checked_cache_mix_int(hash, ty.align)
-        ast.checked_cache_mix_int(hash, ty.elem)
-        ast.checked_cache_mix_int(hash, ty.len)
-        ast.checked_cache_mix_int(hash, ty.sub)
-        i += 1
-    }
-    ast.checked_cache_mix_int(hash, l.store.field_n)
-    i = 0
-    for i < l.store.field_n {
-        let field gen.SField = l.store.fields[i]
-        ast.checked_cache_mix_int(hash, field.name_len)
-        ast.checked_cache_mix_int(hash, field.type_id)
-        ast.checked_cache_mix_int(hash, field.offset)
-        i += 1
-    }
-    ast.checked_cache_mix_int(hash, l.store.sig_n)
-    i = 0
-    for i < l.store.sig_n {
-        ast.checked_cache_mix_int(hash, l.store.sig_abi[i])
-        ast.checked_cache_mix_int(hash, l.store.sig_ret[i])
-        ast.checked_cache_mix_int(hash, l.store.sig_np[i])
-        ast.checked_cache_mix_int(hash, l.store.sig_vararg[i])
-        ast.checked_cache_mix_int(hash, l.store.sig_first[i])
-        i += 1
-    }
-    ast.checked_cache_mix_int(hash, l.store.sig_param_n)
-    i = 0
-    for i < l.store.sig_param_n {
-        ast.checked_cache_mix_int(hash, l.store.sig_params[i])
+    for i < l.store.declaration_n {
+        let decl ast.AstDecl = l.store.declarations[i]
+        let kind int = decl.kind
+        ast.checked_cache_mix_int(hash, kind)
+        if (kind == gen.TK_STRUCT || kind == gen.TK_UNION || kind == gen.TK_ENUM) {
+            if (decl.sym_id >= 0 && decl.sym_id < l.store.symbol_n) {
+                checked_cache_mix_type_facts(l,
+                    l.store.symbols[decl.sym_id].type_id, hash)
+            }
+        } else if (kind == gen.TK_FN) {
+            if (decl.type_id >= 0 && decl.type_id < l.store.type_n) {
+                let fty gen.CType = l.store.types[decl.type_id]
+                let sig int = fty.sub
+                if (sig >= 0 && sig < l.store.sig_n) {
+                    checked_cache_mix_type_facts(l, l.store.sig_ret[sig], hash)
+                    ast.checked_cache_mix_int(hash, l.store.sig_np[sig])
+                    ast.checked_cache_mix_int(hash, l.store.sig_vararg[sig])
+                    ast.checked_cache_mix_int(hash, l.store.sig_abi[sig])
+                    let pi int = 0
+                    for pi < l.store.sig_np[sig] {
+                        checked_cache_mix_type_facts(l,
+                            l.store.sig_params[l.store.sig_first[sig] + pi], hash)
+                        pi += 1
+                    }
+                }
+            }
+        }
         i += 1
     }
 }

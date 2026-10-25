@@ -1,0 +1,519 @@
+module json
+
+import string
+
+// ============================================================================
+// 99_tests.yh —— json 标准库的语言内测试（YT4-P1）
+//
+// 只在 `yh test json` 中执行；生产构建不登记测试符号、不发射测试体。
+// 断言全部走 pub API（迁移阶段只调 pub，见 2026-10-25 决策 D7），来源是
+// tests/modules/projects/json{model,strings,numbers,containers,errors,files}
+// 的 114 个 ok()；逐条对照见 docs/01-finished/yh-YT4-P1-json迁移-2026-10-25.md。
+// 文件类用例使用 /tmp 下带 pid 的路径，逐例自建自清。
+// ============================================================================
+
+// jt_text_equals：比较 Text 与 NUL 结尾字节串的前 count 字节。
+fn jt_text_equals(text Text, expected *char, count u64) bool {
+    if (text.count != count) {
+        return false
+    }
+    let i u64 = 0
+    for i < count {
+        if (text.data[i] != expected[i].to_type(u8)) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// jt_encode_with：按缩进/排序选项写出根值。
+fn jt_encode_with(root Value, indent int, sort_keys int) EncodeResult {
+    let options WriteOptions
+    options.indent = indent
+    options.escape_non_ascii = 0
+    options.sort_keys = sort_keys
+    return encode_owned(root, options)
+}
+
+// jt_compact：返回紧凑、不转义非 ASCII、不排序的写出选项。
+fn jt_compact() WriteOptions {
+    let options WriteOptions
+    options.indent = 0
+    options.escape_non_ascii = 0
+    options.sort_keys = 0
+    return options
+}
+
+// jt_text_of：从拥有者 String 取借用 Text；调用方负责 release。
+fn jt_text_of(text *string.String) Text {
+    let view string.View = string.as_view(text)
+    let borrowed Text
+    borrowed.data = view.data
+    borrowed.count = view.count
+    return borrowed
+}
+
+// jt_encode_text：把根值紧凑写出为 Text 并返回拥有者。
+fn jt_encode_text(root Value, out *string.String) Text {
+    let encoded EncodeResult = encode_owned(root, jt_compact())
+    out[0] = encoded.text
+    return jt_text_of(out)
+}
+
+// jt_encode_root：紧凑写出；失败返回空 String。
+fn jt_encode_root(root Value, escape_non_ascii int) string.String {
+    let options WriteOptions = jt_compact()
+    options.escape_non_ascii = escape_non_ascii
+    let encoded EncodeResult = encode_owned(root, options)
+    if (encoded.status != write_ok) {
+        let empty string.String = string.make()
+        return empty
+    }
+    return encoded.text
+}
+
+// jt_bits_of：读取 f64 的 IEEE754 位模式。
+fn jt_bits_of(value f64) u64 {
+    let holder *f64 = malloc(8).to_type(*f64)
+    holder[0] = value
+    let view *u64 = holder.to_type(*u64)
+    let bits u64 = view[0]
+    free(holder.to_type(*void))
+    return bits
+}
+
+// jt_rejects：NUL 结尾输入必须被拒绝、错误码匹配且不留半成品文档。
+fn jt_rejects(text *char, code ErrorCode) bool {
+    let result ParseResult = parse_text(text)
+    if (result.status == parse_ok) {
+        release(&result.document)
+        return false
+    }
+    return result.error.code == code && result.document.handle == 0
+}
+
+// jt_rejects_bytes：显式长度输入同上。
+fn jt_rejects_bytes(data *u8, count u64, code ErrorCode) bool {
+    let result ParseResult = parse(data, count)
+    if (result.status == parse_ok) {
+        release(&result.document)
+        return false
+    }
+    return result.error.code == code && result.document.handle == 0
+}
+
+test "模型：根类型与空输入" {
+    let kinds [6]*char
+    let expected [6]ValueKind
+    kinds[0] = "{}"
+    kinds[1] = "[]"
+    kinds[2] = "null"
+    kinds[3] = "true"
+    kinds[4] = "1"
+    kinds[5] = "\"s\""
+    expected[0] = kind_object
+    expected[1] = kind_array
+    expected[2] = kind_null
+    expected[3] = kind_boolean
+    expected[4] = kind_number
+    expected[5] = kind_string
+    let i int = 0
+    for i < 6 {
+        let result ParseResult = parse_text(kinds[i])
+        $assert(result.status == parse_ok, "根类型解析应成功")
+        $assert(kind(root(&result.document)) == expected[i], "根类型应匹配")
+        release(&result.document)
+        i += 1
+    }
+
+    let empty Value
+    empty.handle = 0
+    $assert(kind(empty) == kind_invalid, "空视图应判为 invalid")
+    let span Span = value_span(empty)
+    $assert(span.offset == 0 && span.line == 0, "空视图位置应为 0")
+
+    let bad ParseResult = parse(0, 0)
+    $assert(bad.status == parse_syntax_error, "空输入应报语法错误")
+    $assert(bad.document.handle == 0, "失败不应产生文档")
+    $assert(bad.error.code == error_syntax, "空输入错误码")
+}
+
+test "模型：多文档、借用与位置" {
+    let first ParseResult = parse_text("{\"a\": 1}")
+    let second ParseResult = parse_text("{\"a\": 2}")
+    $assert(first.status == parse_ok && second.status == parse_ok, "两个文档都应解析成功")
+    let v1 i64 = 0
+    let v2 i64 = 0
+    as_i64(get(root(&first.document), "a").value, &v1)
+    as_i64(get(root(&second.document), "a").value, &v2)
+    $assert(v1 == 1 && v2 == 2, "两个文档应互不覆盖")
+    release(&first.document)
+    release(&second.document)
+    $assert(first.document.handle == 0, "释放后句柄应清零")
+    release(&first.document)
+    release(0)
+
+    let source [16]u8
+    source[0] = 123
+    source[1] = 34
+    source[2] = 107
+    source[3] = 34
+    source[4] = 58
+    source[5] = 55
+    source[6] = 125
+    let borrowed ParseResult = parse(&source[0], 7)
+    $assert(borrowed.status == parse_ok, "借用输入应解析成功")
+    let i int = 0
+    for i < 16 {
+        source[i] = 32
+        i += 1
+    }
+    let key LookupResult = get(root(&borrowed.document), "k")
+    let value i64 = 0
+    $assert(as_i64(key.value, &value) == query_ok, "改写输入后仍可查询")
+    $assert(value == 7, "解析只借用输入，值应保持不变")
+    release(&borrowed.document)
+
+    let located ParseResult = parse_text("{\n  \"k\": [1, 2]\n}")
+    let array LookupResult = get(root(&located.document), "k")
+    let array_span Span = value_span(array.value)
+    $assert(array_span.line == 2, "数组值位置行应为 2")
+    let second_item LookupResult = array_get(array.value, 1)
+    let item_span Span = value_span(second_item.value)
+    $assert(item_span.column == 12, "第二个元素列应为 12")
+    release(&located.document)
+}
+
+test "字符串：转义与 Unicode" {
+    let result ParseResult = parse_text("\"a\\nb\\t\\\"c\\\\d\\/e\"")
+    $assert(result.status == parse_ok, "转义输入应解析成功")
+    let out Text
+    as_text(root(&result.document), &out)
+    $assert(jt_text_equals(out, "a\nb\t\"c\\d/e", 10), "短转义解码")
+    release(&result.document)
+
+    let unicode ParseResult = parse_text("\"\\u0041\\u00e9\"")
+    $assert(unicode.status == parse_ok, "unicode 转义应解析成功")
+    let utext Text
+    as_text(root(&unicode.document), &utext)
+    $assert(utext.count == 3, "unicode 解码后为 3 字节")
+    $assert(utext.data[0] == 65, "U+0041 应解码为 A")
+    $assert(utext.data[1] == 195 && utext.data[2] == 169, "U+00E9 应解码为两字节")
+    release(&unicode.document)
+
+    let surrogate ParseResult = parse_text("\"\\uD83D\\uDE00\"")
+    $assert(surrogate.status == parse_ok, "代理对应解析成功")
+    let smile Text
+    as_text(root(&surrogate.document), &smile)
+    $assert(smile.count == 4, "代理对应解码为 4 字节")
+    $assert(smile.data[0] == 240 && smile.data[1] == 159, "代理对首两字节")
+    $assert(smile.data[2] == 152 && smile.data[3] == 128, "代理对末两字节")
+    release(&surrogate.document)
+}
+
+test "字符串：NUL 键与写出转义" {
+    let result ParseResult = parse_text("{\"a\\u0000b\": 1}")
+    $assert(result.status == parse_ok, "含 NUL 的键应解析成功")
+    let bytes [3]u8
+    bytes[0] = 97
+    bytes[1] = 0
+    bytes[2] = 98
+    let key Text
+    key.data = &bytes[0]
+    key.count = 3
+    let found LookupResult = object_get(root(&result.document), key)
+    $assert(found.status == query_ok, "NUL 键应能查到")
+    let value i64 = 0
+    as_i64(found.value, &value)
+    $assert(value == 1, "NUL 键值")
+    release(&result.document)
+
+    let plain ParseResult = parse_text("\"a\\nb/c\"")
+    let text string.String = jt_encode_root(root(&plain.document), 0)
+    $assert(jt_text_equals(jt_text_of(&text), "\"a\\nb/c\"", 8), "换行与斜杠的写出转义")
+    string.release(&text)
+    release(&plain.document)
+
+    let unicode ParseResult = parse_text("\"é\"")
+    let escaped string.String = jt_encode_root(root(&unicode.document), 1)
+    $assert(jt_text_equals(jt_text_of(&escaped), "\"\\u00e9\"", 8), "非 ASCII 转义")
+    string.release(&escaped)
+    release(&unicode.document)
+
+    let bad [2]u8
+    bad[0] = 255
+    bad[1] = 65
+    let none *string.String = 0
+    let null_builder Builder = builder_make(none, jt_compact())
+    $assert(builder_status(&null_builder) == write_argument_error, "空输出应报参数错误")
+    let buffer string.String = string.make()
+    let builder Builder = builder_make(&buffer, jt_compact())
+    let payload Text
+    payload.data = &bad[0]
+    payload.count = 2
+    $assert(write_string(&builder, payload) == write_invalid_utf8, "非法 UTF-8 应被拒绝")
+    $assert(string.byte_length(&buffer) == 0, "非法 UTF-8 应回滚缓冲")
+    string.release(&buffer)
+}
+
+test "数字：词素、i64 与 f64" {
+    let result ParseResult = parse_text("[1.0, 1e2, 1e400, -0]")
+    $assert(result.status == parse_ok, "数字词素应解析成功")
+    let text string.String = string.make()
+    let encoded Text = jt_encode_text(root(&result.document), &text)
+    $assert(jt_text_equals(encoded, "[1.0,1e2,1e400,-0]", 18), "数字词素原样往返")
+    string.release(&text)
+    release(&result.document)
+
+    let ints ParseResult = parse_text("[9223372036854775807, -9223372036854775808, 9223372036854775808, 1.0]")
+    $assert(ints.status == parse_ok, "i64 边界应解析成功")
+    let ints_root Value = root(&ints.document)
+    let max_item LookupResult = array_get(ints_root, 0)
+    let min_item LookupResult = array_get(ints_root, 1)
+    let over_item LookupResult = array_get(ints_root, 2)
+    let float_item LookupResult = array_get(ints_root, 3)
+    let value i64 = 0
+    $assert(as_i64(max_item.value, &value) == query_ok, "i64 max 可取")
+    $assert(value == 9223372036854775807, "i64 max 值")
+    $assert(as_i64(min_item.value, &value) == query_ok, "i64 min 可取")
+    $assert(value == -9223372036854775807 - 1, "i64 min 值")
+    $assert(as_i64(over_item.value, &value) == query_range_error, "i64 溢出应报范围错误")
+    $assert(as_i64(float_item.value, &value) == query_type_error, "小数形式不应取 i64")
+    $assert(is_integer(over_item.value) == 0, "溢出值不算整数")
+    $assert(is_integer(float_item.value) == 0, "小数形式不算整数")
+    $assert(is_integer(max_item.value) == 1, "i64 max 算整数")
+    release(&ints.document)
+
+    let floats ParseResult = parse_text("[0.1, 1e400, 1e-400, 2.5]")
+    $assert(floats.status == parse_ok, "浮点输入应解析成功")
+    let floats_root Value = root(&floats.document)
+    let tenth LookupResult = array_get(floats_root, 0)
+    let huge LookupResult = array_get(floats_root, 1)
+    let tiny LookupResult = array_get(floats_root, 2)
+    let fvalue f64 = 0.0
+    $assert(as_f64(tenth.value, &fvalue) == query_ok, "0.1 可取 f64")
+    $assert(jt_bits_of(fvalue) == 4591870180066957722, "0.1 的位模式")
+    $assert(as_f64(huge.value, &fvalue) == query_range_error, "1e400 应报范围错误")
+    $assert(as_f64(tiny.value, &fvalue) == query_ok, "1e-400 应取 0")
+    $assert(fvalue == 0.0, "1e-400 下溢为 0")
+    let lexeme Text
+    $assert(number_text(tenth.value, &lexeme) == query_ok, "number_text 状态")
+    $assert(jt_text_equals(lexeme, "0.1", 3), "number_text 保留词素")
+    release(&floats.document)
+}
+
+test "数字：写出形态与 NaN" {
+    let text string.String = string.make()
+    let builder Builder = builder_make(&text, jt_compact())
+    begin_array(&builder)
+    write_f64(&builder, 1.0)
+    write_f64(&builder, 0.5)
+    write_f64(&builder, -0.0)
+    write_i64(&builder, -9223372036854775807 - 1)
+    end_array(&builder)
+    $assert(builder_finish(&builder) == write_ok, "写出应成功")
+    $assert(jt_text_equals(jt_text_of(&text),
+        "[1.0,0.5,-0.0,-9223372036854775808]", 35), "整数与浮点写出形态")
+    string.release(&text)
+
+    let nan_text string.String = string.make()
+    let nan_builder Builder = builder_make(&nan_text, jt_compact())
+    let zero f64 = 0.0
+    let nan f64 = zero / zero
+    $assert(write_f64(&nan_builder, nan) == write_number_range, "NaN 应被拒绝")
+    $assert(string.byte_length(&nan_text) == 0, "NaN 应回滚缓冲")
+    string.release(&nan_text)
+}
+
+test "容器：嵌套、顺序与边界" {
+    let result ParseResult = parse_text("{\"a\":[{\"b\":1},{\"b\":2}],\"c\":true}")
+    $assert(result.status == parse_ok, "嵌套对象应解析成功")
+    let root_value Value = root(&result.document)
+    let total u64 = 0
+    $assert(count(root_value, &total) == query_ok, "对象 count 状态")
+    $assert(total == 2, "对象应有 2 个键")
+    let first_entry EntryResult = object_entry(root_value, 0)
+    $assert(jt_text_equals(first_entry.key, "a", 1), "第一个键应为 a")
+    let second_entry EntryResult = object_entry(root_value, 1)
+    $assert(jt_text_equals(second_entry.key, "c", 1), "第二个键应为 c")
+    let array LookupResult = get(root_value, "a")
+    let items u64 = 0
+    count(array.value, &items)
+    $assert(items == 2, "数组应有 2 个元素")
+    let second LookupResult = array_get(array.value, 1)
+    let b LookupResult = get(second.value, "b")
+    let value i64 = 0
+    $assert(as_i64(b.value, &value) == query_ok, "嵌套 b 可取")
+    $assert(value == 2, "嵌套 b 值")
+    release(&result.document)
+
+    let bounds ParseResult = parse_text("{\"a\":1}")
+    let bounds_root Value = root(&bounds.document)
+    let a LookupResult = get(bounds_root, "a")
+    $assert(get(bounds_root, "zzz").status == query_missing, "缺失键应报 missing")
+    let scalar_total u64 = 0
+    $assert(count(a.value, &scalar_total) == query_type_error, "对标量 count 应报类型错误")
+    $assert(array_get(bounds_root, 0).status == query_type_error, "对象上 array_get 应报类型错误")
+    $assert(object_entry(bounds_root, 5).status == query_bounds_error, "对象条目越界")
+    release(&bounds.document)
+}
+
+test "容器：缩进、排序与 builder 误用" {
+    let pretty ParseResult = parse_text("{\"a\":[1],\"b\":{}}")
+    let encoded EncodeResult = jt_encode_with(root(&pretty.document), 2, 0)
+    $assert(encoded.status == write_ok, "缩进写出应成功")
+    $assert(jt_text_equals(jt_text_of(&encoded.text),
+        "{\n  \"a\": [\n    1\n  ],\n  \"b\": {}\n}", 33), "缩进形态")
+    string.release(&encoded.text)
+    release(&pretty.document)
+
+    let sorted ParseResult = parse_text("{\"b\":1,\"a\":2}")
+    let sorted_out EncodeResult = jt_encode_with(root(&sorted.document), 0, 1)
+    $assert(sorted_out.status == write_ok, "排序写出应成功")
+    $assert(jt_text_equals(jt_text_of(&sorted_out.text), "{\"a\":2,\"b\":1}", 13), "排序后文本")
+    $assert(jt_text_equals(object_entry(root(&sorted.document), 0).key, "b", 1),
+        "排序不改文档顺序")
+    string.release(&sorted_out.text)
+    release(&sorted.document)
+
+    let text string.String = string.make()
+    let builder Builder = builder_make(&text, jt_compact())
+    begin_object(&builder)
+    $assert(key(&builder, Text{ data: "a".to_type(*u8), count: 1 }) == write_ok, "首个 key 应成功")
+    $assert(key(&builder, Text{ data: "b".to_type(*u8), count: 1 }) == write_state_error,
+        "连续两个 key 应被拒绝")
+    $assert(string.byte_length(&text) == 0, "拒绝后应回滚")
+    string.release(&text)
+
+    let scalar ParseResult = parse_text(" 42 ")
+    $assert(scalar.status == parse_ok, "顶层标量应解析成功")
+    let scalar_out EncodeResult = jt_encode_with(root(&scalar.document), 0, 0)
+    $assert(jt_text_equals(jt_text_of(&scalar_out.text), "42", 2), "顶层标量写出")
+    string.release(&scalar_out.text)
+    release(&scalar.document)
+}
+
+test "错误：编码与字符串" {
+    let bom [8]u8
+    bom[0] = 239
+    bom[1] = 187
+    bom[2] = 191
+    bom[3] = 123
+    bom[4] = 125
+    $assert(jt_rejects_bytes(&bom[0], 5, error_bom), "BOM 应被拒绝")
+
+    let invalid [3]u8
+    invalid[0] = 123
+    invalid[1] = 255
+    invalid[2] = 125
+    $assert(jt_rejects_bytes(&invalid[0], 3, error_utf8), "非法 UTF-8 应被拒绝")
+
+    let overlong [4]u8
+    overlong[0] = 34
+    overlong[1] = 192
+    overlong[2] = 175
+    overlong[3] = 34
+    $assert(jt_rejects_bytes(&overlong[0], 4, error_utf8), "过长编码应被拒绝")
+
+    $assert(jt_rejects("\"\\q\"", error_syntax), "非法转义")
+    $assert(jt_rejects("\"\\u12\"", error_syntax), "过短 unicode 转义")
+    $assert(jt_rejects("\"\\uD800\"", error_surrogate), "孤立高代理")
+    $assert(jt_rejects("\"\\uDC00\"", error_surrogate), "孤立低代理")
+    $assert(jt_rejects("\"abc", error_syntax), "未闭合字符串")
+
+    let control [4]u8
+    control[0] = 34
+    control[1] = 9
+    control[2] = 34
+    control[3] = 0
+    $assert(jt_rejects_bytes(&control[0], 3, error_syntax), "裸控制字符")
+}
+
+test "错误：数字 grammar" {
+    $assert(jt_rejects("+1", error_syntax), "正号")
+    $assert(jt_rejects("01", error_syntax), "前导零")
+    $assert(jt_rejects("1.", error_syntax), "尾随小数点")
+    $assert(jt_rejects(".1", error_syntax), "前导小数点")
+    $assert(jt_rejects("1e", error_syntax), "空指数")
+    $assert(jt_rejects("-", error_syntax), "孤立负号")
+    $assert(jt_rejects("1e+", error_syntax), "空带符号指数")
+}
+
+test "错误：结构、重复键与上限" {
+    $assert(jt_rejects("[1,]", error_syntax), "数组尾逗号")
+    $assert(jt_rejects("{\"a\":1,}", error_syntax), "对象尾逗号")
+    $assert(jt_rejects("truex", error_syntax), "字面量后缀")
+    $assert(jt_rejects("1 2", error_syntax), "多余内容")
+    $assert(jt_rejects("{a:1}", error_syntax), "裸键")
+    $assert(jt_rejects("[1 2]", error_syntax), "缺少逗号")
+    $assert(jt_rejects("{\"a\" 1}", error_syntax), "缺少冒号")
+    $assert(jt_rejects("[", error_syntax), "未闭合数组")
+    $assert(jt_rejects("{", error_syntax), "未闭合对象")
+
+    let duplicate ParseResult = parse_text("{\"k\":1,\"k\":2}")
+    $assert(duplicate.status == parse_syntax_error, "重复键应报语法错误")
+    $assert(duplicate.error.code == error_duplicate_key, "重复键错误码")
+    $assert(duplicate.error.has_related == 1, "重复键应关联首次出现")
+    $assert(duplicate.error.related.column == 2, "首次出现列")
+    $assert(duplicate.error.span.column == 8, "第二次出现列")
+    $assert(duplicate.document.handle == 0, "重复键不应产生文档")
+
+    let deep [601]u8
+    let i int = 0
+    for i < 300 {
+        deep[i] = 91
+        i += 1
+    }
+    for i < 600 {
+        deep[i] = 93
+        i += 1
+    }
+    deep[600] = 0
+    let depth ParseResult = parse(&deep[0], 600)
+    $assert(depth.status == parse_resource_error, "超深嵌套应报资源错误")
+    $assert(depth.error.code == error_resource_limit, "超深嵌套错误码")
+
+    let null_input ParseResult = parse(0, 5)
+    $assert(null_input.status == parse_argument_error, "空指针输入应报参数错误")
+    $assert(parse_text(0).status == parse_argument_error, "空指针文本应报参数错误")
+}
+
+test "文件：往返与 I/O 错误" {
+    let path *char = "/tmp/yh-json-test-files.json"
+    unlink(path)
+
+    let parsed ParseResult = parse_text("{\"name\":\"yh\",\"n\":[1,2,3]}")
+    $assert(parsed.status == parse_ok, "源文档应解析成功")
+    let source Value = root(&parsed.document)
+    $assert(write_file(path, source, jt_compact()) == write_ok, "写文件应成功")
+    let loaded ParseResult = read_file(path)
+    $assert(loaded.status == parse_ok, "读文件应成功")
+    let loaded_root Value = root(&loaded.document)
+    let name LookupResult = get(loaded_root, "name")
+    let out Text
+    $assert(as_text(name.value, &out) == query_ok, "读回的 name 可取")
+    $assert(out.count == 2 && out.data[0] == 121, "读回的 name 字节")
+    let numbers LookupResult = get(loaded_root, "n")
+    let total u64 = 0
+    $assert(count(numbers.value, &total) == query_ok, "读回的 n 计数状态")
+    $assert(total == 3, "读回的 n 应有 3 个元素")
+    let third LookupResult = array_get(numbers.value, 2)
+    let value i64 = 0
+    as_i64(third.value, &value)
+    $assert(value == 3, "读回的第三个元素")
+    release(&loaded.document)
+    release(&parsed.document)
+    unlink(path)
+
+    let missing ParseResult = read_file("/tmp/yh-json-does-not-exist.json")
+    $assert(missing.status == parse_io_error, "缺失文件应报 IO 错误")
+    $assert(missing.error.code == error_io, "缺失文件错误码")
+    $assert(missing.document.handle == 0, "缺失文件不应产生文档")
+    $assert(read_file(0).status == parse_argument_error, "空路径应报参数错误")
+
+    let scalar ParseResult = parse_text("1")
+    $assert(write_file("/nonexistent-yh-dir/out.json", root(&scalar.document),
+        jt_compact()) == write_io_error, "不可写路径应报 IO 错误")
+    release(&scalar.document)
+}

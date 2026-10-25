@@ -135,63 +135,32 @@ pub fn sem_num_is_float(start int, n int) int {
     return 0
 }
 
+// 宿主 C 运行库的十进制 → binary64：glibc 与 macOS libSystem 的 strtod 都
+// 按当前舍入模式做正确舍入（就近、平局取偶），避免旧实现「逐位乘十」在
+// 大指数（如 1.5e300）产生 1 ULP 偏差。词法器已校验字面量形状；这里只
+// 去掉 `_` 分隔符并补 NUL，再交给 strtod。
+// 依赖边界：编译器已链接宿主 libc（malloc/free 等）；E1 迁移到 libs/os 时
+// 需要给字面量解析提供等价的纯 yh 实现（见 todo）。
+@[extern] fn strtod(text *char, endptr *void) f64
+
 fn sem_parse_float_bits(start int, n int) i64 {
+    let buf *u8 = alloc((n + 1).to_type(u64))
+    if (buf == 0) { return fp64_bits(0.0) }
+    let at int = 0
     let i int = start
     let end int = start + n
-    let mant f64 = 0.0
-    let frac_scale f64 = 1.0
-    let in_frac int = 0
-    let exp int = 0
-    let exp_neg int = 0
     for i < end {
         let b u8 = g_state.task.c_src[i]
-        if (b == '_') {
-            i += 1
-            continue
-        }
-        if (b >= '0' && b <= '9') {
-            if (in_frac == 0) {
-                mant = mant * 10.0 + (b - '0').to_type(f64)
-            } else {
-                frac_scale = frac_scale * 10.0
-                mant = mant + (b - '0').to_type(f64) / frac_scale
-            }
-            i += 1
-            continue
-        }
-        if (b == '.') {
-            in_frac = 1
-            i += 1
-            continue
-        }
-        if (b == 'e' || b == 'E') {
-            i += 1
-            if (i < end && g_state.task.c_src[i] == '-') {
-                exp_neg = 1
-                i += 1
-            } else if (i < end && g_state.task.c_src[i] == '+') {
-                i += 1
-            }
-            for i < end && g_state.task.c_src[i] >= '0' && g_state.task.c_src[i] <= '9' {
-                exp = exp * 10 + (g_state.task.c_src[i] - '0').to_type(int)
-                i += 1
-            }
-            break
+        if (b != '_') {
+            buf[at] = b
+            at += 1
         }
         i += 1
     }
-    let k int = 0
-    let factor f64 = 1.0
-    for k < exp {
-        factor = factor * 10.0
-        k += 1
-    }
-    if (exp_neg != 0) {
-        mant = mant / factor
-    } else {
-        mant = mant * factor
-    }
-    return fp64_bits(mant)
+    buf[at] = 0
+    let value f64 = strtod(buf.to_type(*char), 0)
+    free(buf.to_type(*void))
+    return fp64_bits(value)
 }
 
 pub fn sem_string(start int, slen int, r *Res) int {

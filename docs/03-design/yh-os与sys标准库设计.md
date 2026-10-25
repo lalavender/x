@@ -256,8 +256,9 @@ OS7 编译器迁移和独立性验收、OS8 Darwin 新接口适配单列后续�
 
 - **OS0 已完成**：`libs/sys/00_types.yh` 提供 Timespec/is_error/error_code，
   `libs/os/00_model.yh` 提供 Error/ErrorKind、FdResult、IoResult、OpenOptions、
-  DirEntry 候选布局与初始化函数。`sysresult` 与 `osmodel` 用例在 Darwin 与
-  Linux/arm64 原生运行通过。
+  DirEntry 候选布局与初始化函数。`sysresult` 断言已迁入 `libs/sys/99_tests.yh`，
+  `os` 结果模型另见 `libs/os/99_tests.yh`；`osmodel` 仍作跨模块 smoke。
+  迁移记录见 [YT4-P5](../01-finished/yh-YT4-P5-os-sys-time迁移-2026-10-25.md)。
 - **OS1 首片已实现**：`libs/sys/10_constants.linux.{arm64,x64}.yh`、
   `20_raw.linux.yh`、`30_file.linux.yh` 提供 raw6 与文件/目录原语；
   `libs/os/file.linux.yh` 提供 `open_path/read_some/write_some/close_file/`
