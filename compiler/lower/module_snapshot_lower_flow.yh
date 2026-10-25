@@ -1,4 +1,5 @@
-module ast
+module lower
+import ast
 import gen
 import ir
 
@@ -27,7 +28,7 @@ fn checked_loop_carry_add(l *CheckedLower, loop *CheckedLoop, binding_id int) in
     if (binding_id < 0 || binding_id >= l.function_binding_count) { return -1 }
     if (loop.forin != 0 && (binding_id == loop.forin_elem
         || binding_id == loop.forin_index)) { return 0 }
-    let binding AstBinding = l.store.bindings[l.function_binding_first + binding_id]
+    let binding ast.AstBinding = l.store.bindings[l.function_binding_first + binding_id]
     if (binding.stmt_id > loop.stmt_id) { return 0 }
     let probe int = 0
     for 1 {
@@ -107,8 +108,8 @@ fn checked_lower_break_snapshot(l *CheckedLower, flow *CheckedFlow, index int) i
 
 // checked_binding_has_assign：只检查一个 let 绑定范围内是否有初始化赋值号。
 // 以同语句下一绑定的名字作为上界，避免前一个初始化误判后续的零初始化绑定。
-fn checked_binding_has_assign(l *CheckedLower, stmt *AstStmt,
-    binding *AstBinding) int {
+fn checked_binding_has_assign(l *CheckedLower, stmt *ast.AstStmt,
+    binding *ast.AstBinding) int {
     if (stmt.file_id < 0 || stmt.file_id >= l.store.file_n
         || binding.name_token < 0) { return 0 }
     let file gen.PFile = l.store.files[stmt.file_id]
@@ -147,7 +148,7 @@ fn checked_lower_merge(l *CheckedLower, flow *CheckedFlow, pred0 int, values0 *i
             i += 1
             continue
         }
-        let binding AstBinding = l.store.bindings[l.function_binding_first + i]
+        let binding ast.AstBinding = l.store.bindings[l.function_binding_first + i]
         let kind int = checked_lower_type(l, binding.sym_type_id)
         if (kind < 0) { return -1 }
         let phi int = ast_ir_b_add_phi(b, kind, 2)
@@ -163,17 +164,17 @@ fn checked_lower_merge(l *CheckedLower, flow *CheckedFlow, pred0 int, values0 *i
 // checked_lower_if：降低 if/else（else 允许接 if 形成链）；协议同 checked_lower_stmts。
 fn checked_lower_if(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     let b *AstIRBuilder = &l.builder
-    let stmt AstStmt = l.store.statements[stmt_id]
+    let stmt ast.AstStmt = l.store.statements[stmt_id]
     if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2 }
-    let edge AstStmtExpr = l.store.edges[stmt.first_expr]
+    let edge ast.AstStmtExpr = l.store.edges[stmt.first_expr]
     if (edge.next >= 0 || edge.expr_id < 0 || edge.expr_id >= l.store.expression_n) { return -2 }
     let then_stmt int = stmt.first_child
     if (then_stmt < 0 || then_stmt >= l.store.statement_n
-        || l.store.statements[then_stmt].kind != AST_STMT_BLOCK) { return -2 }
+        || l.store.statements[then_stmt].kind != ast.AST_STMT_BLOCK) { return -2 }
     let else_stmt int = l.store.statements[then_stmt].next_sibling
     if (else_stmt >= 0 && else_stmt != stmt.last_child) { return -2 }
-    if (else_stmt >= 0 && l.store.statements[else_stmt].kind != AST_STMT_BLOCK
-        && l.store.statements[else_stmt].kind != AST_STMT_IF) { return -2 }
+    if (else_stmt >= 0 && l.store.statements[else_stmt].kind != ast.AST_STMT_BLOCK
+        && l.store.statements[else_stmt].kind != ast.AST_STMT_IF) { return -2 }
     let cond int = checked_lower_cond(l, flow, edge.expr_id)
     if (cond == -2) { return -2 }
     if (cond < 0) { return -1 }
@@ -235,7 +236,7 @@ fn checked_lower_if(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     b.local_values = else_values
     ast_ir_b_enter_block(b, else_b)
     let fall_else int = 0
-    if (l.store.statements[else_stmt].kind == AST_STMT_BLOCK) {
+    if (l.store.statements[else_stmt].kind == ast.AST_STMT_BLOCK) {
         fall_else = checked_lower_stmts(l, flow, l.store.statements[else_stmt].first_child)
     } else {
         fall_else = checked_lower_stmts(l, flow, else_stmt)
@@ -296,7 +297,7 @@ fn checked_lower_if(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
 // checked_lower_goto：goto 语句；名字 token 是 goto 后的 IDENT（first+1）。
 // 目标块缺省新建（支持前向引用），当前路径以无条件分支终结，返回 0。
 fn checked_lower_goto(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
-    let stmt AstStmt = l.store.statements[stmt_id]
+    let stmt ast.AstStmt = l.store.statements[stmt_id]
     let block int = checked_label_token(l, stmt.file_id, stmt.first + 1, 1)
     if (block < 0) { return -1 }
     if (l.builder.cur_block < 0) { return 0 }
@@ -307,7 +308,7 @@ fn checked_lower_goto(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
 // checked_lower_label：label 语句；名字 token 是语句首 token，块缺省新建。
 // 贯穿路径先分支进标签块，再降低被标记的单条子语句（子语句无兄弟链）。
 fn checked_lower_label(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
-    let stmt AstStmt = l.store.statements[stmt_id]
+    let stmt ast.AstStmt = l.store.statements[stmt_id]
     let block int = checked_label_token(l, stmt.file_id, stmt.first, 1)
     if (block < 0) { return -1 }
     if (l.builder.cur_block >= 0) {
@@ -335,12 +336,12 @@ fn checked_lower_switch_path(values *int, blocks *int, count *int, binding_count
 // checked_lower_switch：降低 switch；先数分支并分配路径表，主体见 switch_body。
 // 返回协议与 checked_lower_stmt 一致；失败释放路径表，不发布部分结果。
 fn checked_lower_switch(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
-    let stmt AstStmt = l.store.statements[stmt_id]
+    let stmt ast.AstStmt = l.store.statements[stmt_id]
     let groups int = 0
     let scan int = stmt.first_child
     for scan >= 0 {
         if (scan >= l.store.statement_n
-            || l.store.statements[scan].kind != AST_STMT_CASE) { return -2 }
+            || l.store.statements[scan].kind != ast.AST_STMT_CASE) { return -2 }
         groups += 1
         scan = l.store.statements[scan].next_sibling
     }
@@ -368,9 +369,9 @@ fn checked_lower_switch(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
 fn checked_lower_switch_body(l *CheckedLower, flow *CheckedFlow, stmt_id int,
     path_values *int, path_blocks *int) int {
     let b *AstIRBuilder = &l.builder
-    let stmt AstStmt = l.store.statements[stmt_id]
+    let stmt ast.AstStmt = l.store.statements[stmt_id]
     if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2 }
-    let ctrl_edge AstStmtExpr = l.store.edges[stmt.first_expr]
+    let ctrl_edge ast.AstStmtExpr = l.store.edges[stmt.first_expr]
     if (ctrl_edge.next >= 0 || ctrl_edge.expr_id < 0
         || ctrl_edge.expr_id >= l.store.expression_n) { return -2 }
     let control int = checked_lower_expr_inner(l, flow, ctrl_edge.expr_id)
@@ -385,11 +386,11 @@ fn checked_lower_switch_body(l *CheckedLower, flow *CheckedFlow, stmt_id int,
     let group int = stmt.first_child
     let last_default int = 0
     for group >= 0 {
-        let group_stmt AstStmt = l.store.statements[group]
-        if (group_stmt.kind != AST_STMT_CASE || group_stmt.first_child < 0
+        let group_stmt ast.AstStmt = l.store.statements[group]
+        if (group_stmt.kind != ast.AST_STMT_CASE || group_stmt.first_child < 0
             || group_stmt.first_child >= l.store.statement_n) { return -2 }
-        let body_stmt AstStmt = l.store.statements[group_stmt.first_child]
-        if (body_stmt.kind != AST_STMT_BLOCK) { return -2 }
+        let body_stmt ast.AstStmt = l.store.statements[group_stmt.first_child]
+        if (body_stmt.kind != ast.AST_STMT_BLOCK) { return -2 }
         let next_group int = group_stmt.next_sibling
         let is_default int = group_stmt.op == gen.TK_DEFAULT ? 1 : 0
         last_default = is_default
@@ -406,7 +407,7 @@ fn checked_lower_switch_body(l *CheckedLower, flow *CheckedFlow, stmt_id int,
             let edge int = group_stmt.first_expr
             if (edge < 0 || after_b < 0) { return -2 }
             for 1 {
-                let e AstStmtExpr = l.store.edges[edge]
+                let e ast.AstStmtExpr = l.store.edges[edge]
                 if (e.expr_id < 0 || e.expr_id >= l.store.expression_n) { return -2 }
                 let value int = checked_lower_expr_inner(l, flow, e.expr_id)
                 if (value == -2) { return -2 }
@@ -478,7 +479,7 @@ fn checked_lower_switch_body(l *CheckedLower, flow *CheckedFlow, stmt_id int,
         }
         if (missing != 0) { b.local_values[mi] = -1; mi += 1; continue }
         if (same != 0 || path_count == 1) { b.local_values[mi] = first; mi += 1; continue }
-        let binding AstBinding = l.store.bindings[l.function_binding_first + mi]
+        let binding ast.AstBinding = l.store.bindings[l.function_binding_first + mi]
         let kind int = checked_lower_type(l, binding.sym_type_id)
         if (kind < 0) { return -1 }
         let phi int = ast_ir_b_add_phi(b, kind, path_count)
@@ -511,11 +512,11 @@ fn checked_lower_loop(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
 // header 无条件进入循环体，唯一出口是 break。调用方保证栈深未满。
 fn checked_lower_loop_body(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     let b *AstIRBuilder = &l.builder
-    let stmt AstStmt = l.store.statements[stmt_id]
+    let stmt ast.AstStmt = l.store.statements[stmt_id]
     if (flow.loop_depth >= CHECKED_LOOP_MAX) { return -2 }
     let is_forin int = stmt.first_binding >= 0 ? 1 : 0
     let has_condition int = is_forin != 0 || stmt.first_expr >= 0 ? 1 : 0
-    let edge AstStmtExpr
+    let edge ast.AstStmtExpr
     if (is_forin == 0 && has_condition != 0) {
         if (stmt.first_expr >= l.store.edge_n) { return -2 }
         edge = l.store.edges[stmt.first_expr]
@@ -523,7 +524,7 @@ fn checked_lower_loop_body(l *CheckedLower, flow *CheckedFlow, stmt_id int) int 
     }
     let body int = stmt.first_child
     if (body < 0 || body != stmt.last_child || body >= l.store.statement_n
-        || l.store.statements[body].kind != AST_STMT_BLOCK) { return -2 }
+        || l.store.statements[body].kind != ast.AST_STMT_BLOCK) { return -2 }
     let loop *CheckedLoop = &flow.loops[flow.loop_depth]
     loop.carry = 0; loop.carry_count = 0; loop.carry_cap = 0
     loop.carry_phis = 0; loop.break_blocks = 0; loop.break_vals = 0
@@ -620,7 +621,7 @@ fn checked_lower_loop_body(l *CheckedLower, flow *CheckedFlow, stmt_id int) int 
     }
     let ci int = 0
     for ci < loop.carry_count {
-        let binding AstBinding = l.store.bindings[l.function_binding_first + loop.carry[ci]]
+        let binding ast.AstBinding = l.store.bindings[l.function_binding_first + loop.carry[ci]]
         let kind int = checked_lower_type(l, binding.sym_type_id)
         if (kind < 0) { return -1 }
         let phi int = ast_ir_b_add_phi(b, kind, input_count)
@@ -740,7 +741,7 @@ fn checked_lower_loop_body(l *CheckedLower, flow *CheckedFlow, stmt_id int) int 
                 }
             }
             if (differ != 0) {
-                let binding2 AstBinding = l.store.bindings[l.function_binding_first + loop.carry[ej]]
+                let binding2 ast.AstBinding = l.store.bindings[l.function_binding_first + loop.carry[ej]]
                 let kind2 int = checked_lower_type(l, binding2.sym_type_id)
                 if (kind2 < 0) { return -1 }
                 let exit_phi int = ast_ir_b_add_phi(b, kind2, exit_base + loop.break_done)
@@ -803,9 +804,9 @@ fn checked_lower_continue(l *CheckedLower, flow *CheckedFlow) int {
 // checked_lower_stmt：降低单条语句；1 = 继续、0 = 路径终结、-2 = 首片不支持、-1 = 内部错误。
 fn checked_lower_stmt(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     let b *AstIRBuilder = &l.builder
-    let stmt AstStmt = l.store.statements[stmt_id]
+    let stmt ast.AstStmt = l.store.statements[stmt_id]
     l.last_token = stmt.first
-    if (stmt.kind == AST_STMT_DECL) {
+    if (stmt.kind == ast.AST_STMT_DECL) {
         let row int = stmt.first_binding
         let edge_cursor int = stmt.first_expr
         for row >= 0 {
@@ -813,29 +814,29 @@ fn checked_lower_stmt(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
             let status int = checked_lower_decl_binding(l, flow, stmt_id,
                 row, &edge_cursor, &value)
             if (status != 0) { return status }
-            let binding AstBinding = l.store.bindings[row]
+            let binding ast.AstBinding = l.store.bindings[row]
             if (value >= 0) { b.local_values[binding.id] = value }
             l.local_count += 1
             row = binding.next
         }
         return 1
     }
-    if (stmt.kind == AST_STMT_ASSIGN) { return checked_lower_assign(l, flow, stmt_id) }
-    if (stmt.kind == AST_STMT_EXPR) {
+    if (stmt.kind == ast.AST_STMT_ASSIGN) { return checked_lower_assign(l, flow, stmt_id) }
+    if (stmt.kind == ast.AST_STMT_EXPR) {
         if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2 }
-        let edge AstStmtExpr = l.store.edges[stmt.first_expr]
+        let edge ast.AstStmtExpr = l.store.edges[stmt.first_expr]
         if (edge.next >= 0 || edge.expr_id < 0 || edge.expr_id >= l.store.expression_n) { return -2 }
         let call_id int = edge.expr_id
-        let expression AstExpr = l.store.expressions[call_id]
+        let expression ast.AstExpr = l.store.expressions[call_id]
         // 语句位置允许括号包装调用；语义包装节点不应改变运行期调用效果。
-        for expression.kind == AST_EXPR_PRIMARY && expression.child0 >= 0 {
+        for expression.kind == ast.AST_EXPR_PRIMARY && expression.child0 >= 0 {
             call_id = expression.child0
             if (call_id >= l.store.expression_n) { return -2 }
             expression = l.store.expressions[call_id]
         }
         // 编译期断言、诊断和常量计算已由语义阶段执行；折叠后的纯常量无需运行期指令。
         if (expression.is_const != 0) { return 1 }
-        if (expression.kind != AST_EXPR_CALL) {
+        if (expression.kind != ast.AST_EXPR_CALL) {
             return -2
         }
         // 编译期 intrinsic 已在语义阶段执行，运行期 IR 不应再次发出调用。
@@ -853,7 +854,7 @@ fn checked_lower_stmt(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         }
         return 1
     }
-    if (stmt.kind == AST_STMT_RETURN) {
+    if (stmt.kind == ast.AST_STMT_RETURN) {
         if (stmt.first_expr < 0) {
             let return_sig int = l.store.types[l.store.declarations[l.function.decl_row].type_id].sub
             if (b.ret_ir_type != ir.IR_TY_VOID
@@ -862,7 +863,7 @@ fn checked_lower_stmt(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
             return 0
         }
         if (stmt.first_expr >= l.store.edge_n) { return -2 }
-        let edge2 AstStmtExpr = l.store.edges[stmt.first_expr]
+        let edge2 ast.AstStmtExpr = l.store.edges[stmt.first_expr]
         if (edge2.next >= 0 || edge2.expr_id < 0 || edge2.expr_id >= l.store.expression_n) { return -2 }
         let return_sig int = l.store.types[l.store.declarations[l.function.decl_row].type_id].sub
         let return_type int = l.store.sig_ret[return_sig]
@@ -882,21 +883,21 @@ fn checked_lower_stmt(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
         if (ast_ir_b_term_ret(b, stored) != 0) { return -1 }
         return 0
     }
-    if (stmt.kind == AST_STMT_BLOCK) {
+    if (stmt.kind == ast.AST_STMT_BLOCK) {
         return checked_lower_stmts(l, flow, stmt.first_child)
     }
-    if (stmt.kind == AST_STMT_COMPTIME) {
+    if (stmt.kind == ast.AST_STMT_COMPTIME) {
         let expanded int = checked_lower_comptime_for(l, flow, stmt_id)
         if (expanded != -3) { return expanded }
         return checked_lower_stmts(l, flow, stmt.first_child)
     }
-    if (stmt.kind == AST_STMT_IF) { return checked_lower_if(l, flow, stmt_id) }
-    if (stmt.kind == AST_STMT_SWITCH) { return checked_lower_switch(l, flow, stmt_id) }
-    if (stmt.kind == AST_STMT_GOTO) { return checked_lower_goto(l, flow, stmt_id) }
-    if (stmt.kind == AST_STMT_LABEL) { return checked_lower_label(l, flow, stmt_id) }
-    if (stmt.kind == AST_STMT_FOR) { return checked_lower_loop(l, flow, stmt_id) }
-    if (stmt.kind == AST_STMT_BREAK) { return checked_lower_break(l, flow) }
-    if (stmt.kind == AST_STMT_CONTINUE) { return checked_lower_continue(l, flow) }
+    if (stmt.kind == ast.AST_STMT_IF) { return checked_lower_if(l, flow, stmt_id) }
+    if (stmt.kind == ast.AST_STMT_SWITCH) { return checked_lower_switch(l, flow, stmt_id) }
+    if (stmt.kind == ast.AST_STMT_GOTO) { return checked_lower_goto(l, flow, stmt_id) }
+    if (stmt.kind == ast.AST_STMT_LABEL) { return checked_lower_label(l, flow, stmt_id) }
+    if (stmt.kind == ast.AST_STMT_FOR) { return checked_lower_loop(l, flow, stmt_id) }
+    if (stmt.kind == ast.AST_STMT_BREAK) { return checked_lower_break(l, flow) }
+    if (stmt.kind == ast.AST_STMT_CONTINUE) { return checked_lower_continue(l, flow) }
     return -2
 }
 
@@ -930,7 +931,7 @@ fn checked_lower_stmts(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     for 1 {
         if (stmt_id < 0) { return 1 }
         if (stmt_id >= l.store.statement_n) { return -1 }
-        let stmt AstStmt = l.store.statements[stmt_id]
+        let stmt ast.AstStmt = l.store.statements[stmt_id]
         let status int = checked_lower_stmt(l, flow, stmt_id)
         if (status == -2) { return -2 }
         if (status < 0) { return status }

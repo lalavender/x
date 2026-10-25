@@ -1,4 +1,5 @@
-module ast
+module lower
+import ast
 import gen
 import ir
 
@@ -26,7 +27,7 @@ fn checked_lower_object_type(l *CheckedLower, source_type int, depth int) int {
     } else if (ty.kind == gen.TY_STRUCT || ty.kind == gen.TY_UNION) {
         layout.kind = ty.kind == gen.TY_STRUCT ? ir.IR_MODULE_TY_STRUCT : ir.IR_MODULE_TY_UNION
         count = ty.len
-        fields = checked_zero_rows(count, sizeof(ir.IRModuleField)).to_type(*ir.IRModuleField)
+        fields = ast.checked_zero_rows(count, sizeof(ir.IRModuleField)).to_type(*ir.IRModuleField)
         if (count > 0 && fields == 0) { return -1 }
         let i int = 0
         for i < count {
@@ -50,7 +51,7 @@ fn checked_lower_global_value(l *CheckedLower, data *u8, source_type int,
     expr_id int, depth int) int {
     if (depth > 256 || expr_id < 0 || expr_id >= l.store.expression_n) { return -2 }
     let ty gen.CType = l.store.types[source_type]
-    let node AstExpr = l.store.expressions[expr_id]
+    let node ast.AstExpr = l.store.expressions[expr_id]
     l.last_token = node.first
     let kind int = checked_lower_kind(l.store, source_type)
     if (kind >= 0) {
@@ -66,17 +67,17 @@ fn checked_lower_global_value(l *CheckedLower, data *u8, source_type int,
         }
         return 0
     }
-    if (node.kind == AST_EXPR_PRIMARY && node.child0 >= 0) {
+    if (node.kind == ast.AST_EXPR_PRIMARY && node.child0 >= 0) {
         return checked_lower_global_value(l, data, source_type, node.child0, depth + 1)
     }
-    if (ty.kind == gen.TY_ARRAY && node.kind == AST_EXPR_ARRAY) {
+    if (ty.kind == gen.TY_ARRAY && node.kind == ast.AST_EXPR_ARRAY) {
         let pos int = ty.len
         let walk int = node.child0
         let stride int = l.store.types[ty.elem].size
         for walk >= 0 {
             if (walk >= l.store.expression_n || pos <= 0) { return -1 }
-            let link AstExpr = l.store.expressions[walk]
-            if (link.kind != AST_EXPR_ARG_LIST) { return -1 }
+            let link ast.AstExpr = l.store.expressions[walk]
+            if (link.kind != ast.AST_EXPR_ARG_LIST) { return -1 }
             pos -= 1
             let result int = checked_lower_global_value(l, data + pos * stride,
                 ty.elem, link.child1, depth + 1)
@@ -85,12 +86,12 @@ fn checked_lower_global_value(l *CheckedLower, data *u8, source_type int,
         }
         return pos == 0 ? 0 : -1
     }
-    if (ty.kind == gen.TY_STRUCT && node.kind == AST_EXPR_STRUCT_INIT) {
+    if (ty.kind == gen.TY_STRUCT && node.kind == ast.AST_EXPR_STRUCT_INIT) {
         let walk int = node.child0
         for walk >= 0 {
             if (walk >= l.store.expression_n) { return -1 }
-            let link AstExpr = l.store.expressions[walk]
-            if (link.kind != AST_EXPR_STRUCT_FIELD || link.op < ty.sub
+            let link ast.AstExpr = l.store.expressions[walk]
+            if (link.kind != ast.AST_EXPR_STRUCT_FIELD || link.op < ty.sub
                 || link.op >= ty.sub + ty.len) { return -1 }
             let field gen.SField = l.store.fields[link.op]
             let result int = checked_lower_global_value(l, data + field.offset,
@@ -107,7 +108,7 @@ fn checked_lower_global_value(l *CheckedLower, data *u8, source_type int,
 // 标量 const 没有运行期对象；没有初始化 AST 时仅接受 BSS 清单中的零初始化，
 // 因此 CT 聚合或接口重放的旧数据不会被误当成零。失败由 lower_module 回收候选。
 fn checked_lower_global_decl(l *CheckedLower, row int) int {
-    let node AstDecl = l.store.declarations[row]
+    let node ast.AstDecl = l.store.declarations[row]
     let sym gen.CSym = l.store.symbols[node.sym_id]
     let ty gen.CType = l.store.types[sym.type_id]
     if (node.sym_id >= 0 && node.sym_id < l.store.symbol_n
@@ -122,7 +123,7 @@ fn checked_lower_global_decl(l *CheckedLower, row int) int {
     }
     let mapped int = checked_lower_object_type(l, sym.type_id, 0)
     if (mapped < 0) { return mapped }
-    let data *u8 = checked_zero_rows(ty.size, 1).to_type(*u8)
+    let data *u8 = ast.checked_zero_rows(ty.size, 1).to_type(*u8)
     if (ty.size > 0 && data == 0) { return -1 }
     let result int = 0
     l.reason = "全局初始化缺少受检表达式（CT backing 尚未接入）"
@@ -157,7 +158,7 @@ fn checked_lower_global_decl(l *CheckedLower, row int) int {
 
 // checked_lower_global_ref：只以捕获时的全局属性识别模块对象，避免把被复用的
 // 局部符号槽当成全局。导入聚合字节尚不在快照时给出稳定的来源拒绝原因。
-fn checked_lower_global_ref(l *CheckedLower, node *AstExpr) int {
+fn checked_lower_global_ref(l *CheckedLower, node *ast.AstExpr) int {
     if ((node.sym_flags & gen.F_GLOBAL) == 0 || node.binding_row >= 0) { return -2 }
     if (node.sym_id < 0 || node.sym_id >= l.store.symbol_n || l.global_map[node.sym_id] == 0) {
         l.reason = "全局对象缺少受检数据（导入副本/CT backing 尚未接入）"
@@ -212,8 +213,8 @@ fn checked_lower_string_symbol(l *CheckedLower, sym_id int, depth int) int {
 // checked_lower_string：字符串标签只作为快照索引；原样 token 经解码成为匿名
 // internal constant 字节数组。按标签缓存模块符号，发现趟/真实趟及多个函数
 // 共用实体，绝不把旧标签数值转换成宿主地址。返回 canonical *char SSA 值。
-fn checked_lower_string(l *CheckedLower, node *AstExpr) int {
-    if (node.kind != AST_EXPR_PRIMARY) { return -2 }
+fn checked_lower_string(l *CheckedLower, node *ast.AstExpr) int {
+    if (node.kind != ast.AST_EXPR_PRIMARY) { return -2 }
     if (node.child0 >= 0) { return checked_lower_expr_inner(l, l.flow, node.child0) }
     if (node.op != gen.TOK_STRING
         && ((node.sym_flags & gen.F_GLOBAL) == 0
@@ -229,8 +230,8 @@ fn checked_lower_string(l *CheckedLower, node *AstExpr) int {
     if (row >= l.store.string_n) { l.reason = "字符串缺少受检字节"; return -2 }
     let added int = l.string_map[row] - 1
     if (added < 0) {
-        let str CheckedString = l.store.strings[row]
-        let data *u8 = checked_zero_rows(str.name_len + 1, 1).to_type(*u8)
+        let str ast.CheckedString = l.store.strings[row]
+        let data *u8 = ast.checked_zero_rows(str.name_len + 1, 1).to_type(*u8)
         if (data == 0) { return -1 }
         let src *u8 = l.store.names + str.name_off
         let count int = 0

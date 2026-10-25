@@ -11,9 +11,9 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
 拆分、A3 `api` 调用面、A4a–A4d 状态收敛、A5 前端装配收敛、A6 `testkit` 抽出），
 证据与数字见 [finish.md](finish.md)。当前基线由 `make arch-check` 守护：
 
-| 指标 | 当前（2026-10-25 实测） |
+| 指标 | 当前（B3 后，2026-10-25 实测） |
 |---|---|
-| 模块 / 文件 / 行数 | 12 / 116 / 52,342 |
+| 模块 / 文件 / 行数 | **13 / 118 / 52,398**（`ast` 3,278 + `lower` 5,815） |
 | `cmd` 占比 | 381 行，**0.7%** |
 | `gen.G()` 读点 | **165**（build 101、testkit 27、parse 21、main 5） |
 | 模块级可变 `let` | 183 |
@@ -36,12 +36,11 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   符号（须先抽进 `proj` 的 art 子簇），`project_link` 读 `toml_*` 模块级 globals
   （不能进 `link`，否则 `link → build` 成环）。顺序：art → `link` → `mb_link`
   阶段化 → `module_build` 拆 3 文件。
-- [ ] **B3 `lower` 独立**：待迁是 **15 文件 5,742 行**（`module_snapshot_lower*` +
-  `ast_ir*` + `ctx/forin/global/static/template`）。环只剩 **2 条边**（3 个 hash
-  helper + 1 个只被 `tests/modules/projects/llvmlower` 调用的等价性探针），
-  `ast/module_snapshot.yh` 实测 **0 处**调用 `lower_module`，生产驱动点已在
-  `build/llvm_pipeline.yh`。因此**不是流程重构，是一次纯搬迁 + 3 个 helper 下沉
-  + 1 个探针随迁**，可立即开工（B3-1 解环、B3-2 搬文件）。
+- [x] **B3 `lower` 独立**（2026-10-25 完成）：15 个 lowering 文件 + 探针共 16 个
+  迁入 `compiler/lower/`，`ast` 9,041 → **3,278**，`lower` 5,815；补 `pub`
+  `CheckedStorage`/`checked_zero_rows`/`checked_name_valid`/`checked_decl_restore`
+  （+ `cache_mix` 的 3 个混入原语）。`ast` 不再 import `lower`，依赖矩阵 13 模块
+  37 条边无环。证据见 [finish.md](finish.md) 2026-10-25 条目。
 
 ## 2026-10-21 重规划说明
 

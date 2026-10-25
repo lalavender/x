@@ -1,4 +1,5 @@
-module ast
+module lower
+import ast
 import gen
 import ir
 
@@ -32,7 +33,7 @@ fn checked_lower_report(l *CheckedLower, message *char) void {
             col = file.tokens[l.last_token].col
         }
         if (l.function.decl_row >= 0 && l.function.decl_row < l.store.declaration_n) {
-            let declaration AstDecl = l.store.declarations[l.function.decl_row]
+            let declaration ast.AstDecl = l.store.declarations[l.function.decl_row]
             if (declaration.sym_id >= 0 && declaration.sym_id < l.store.symbol_n) {
                 name = (l.store.names + l.store.symbols[declaration.sym_id].name_off).to_type(*char)
             }
@@ -70,7 +71,7 @@ fn checked_lower_runtime_name(flags int, length *int) *char {
 // checked_lower_name：构造自有逻辑名；模块内部加现行后缀，extern/C/入口 main 保持原名。
 // 导入函数名已在受检表达式中限定，F_EXTERN 保证不会重复附加当前模块后缀。
 fn checked_lower_name(l *CheckedLower, off int, length int, flags int, source_type int) *char {
-    if (checked_name_valid(l.store, off, length) == 0 || length <= 0) { return 0 }
+    if (ast.checked_name_valid(l.store, off, length) == 0 || length <= 0) { return 0 }
     let suffix int = l.store.suffix_len
     let source_name *char = (l.store.names + off).to_type(*char)
     let entry_main int = gen.cstr_eq(source_name, "main") != 0 &&
@@ -87,7 +88,7 @@ fn checked_lower_name(l *CheckedLower, off int, length int, flags int, source_ty
         ((flags & gen.F_EXTERN) == 0 || (flags & gen.F_MODULE_IMPORT) != 0) &&
         (flags & (gen.F_CABI | gen.F_INTRINSIC | gen.F_LINUX_SYSCALL)) == 0 &&
         entry_main == 0 ? 1 : 0
-    if (suffix > 0 && checked_name_valid(l.store, l.store.suffix_off, suffix) == 0) { return 0 }
+    if (suffix > 0 && ast.checked_name_valid(l.store, l.store.suffix_off, suffix) == 0) { return 0 }
     let version *char = versioned != 0 ? "$yhllvmv1" : ""
     let version_len int = versioned != 0 ? 9 : 0
     let result *char = malloc((name_len + suffix + version_len + 1).to_type(u64)).to_type(*char)
@@ -214,7 +215,7 @@ fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
 }
 
 // checked_lower_is_aggregate：源类型是否为聚合（数组/结构体/联合体/切片）。
-fn checked_lower_is_aggregate(store *CheckedStorage, source_type int) int {
+fn checked_lower_is_aggregate(store *ast.CheckedStorage, source_type int) int {
     if (source_type < 0 || source_type >= store.type_n) { return 0 }
     let kind int = store.types[source_type].kind
     return (kind == gen.TY_ARRAY || kind == gen.TY_STRUCT || kind == gen.TY_UNION
@@ -236,7 +237,7 @@ fn checked_lower_function_type(l *CheckedLower, source_type int) int {
     let count int = fixed_count + (vararg == 2 ? 1 : 0)
     let fields *ir.IRModuleField = 0
     if (count > 0) {
-        fields = checked_zero_rows(count, sizeof(ir.IRModuleField)).to_type(*ir.IRModuleField)
+        fields = ast.checked_zero_rows(count, sizeof(ir.IRModuleField)).to_type(*ir.IRModuleField)
         if (fields == 0) { return -1 }
     }
     let i int = 0
@@ -275,19 +276,19 @@ fn checked_lower_module_type(l *CheckedLower, source_type int) int {
 // checked_lower_mark_taken：扫描本函数表达式范围，标记 `&变量` 的绑定。
 // 只认 `&primary(变量)`；其他取址形态不标记，由表达式 lowering 带来源拒绝。
 fn checked_lower_mark_taken(l *CheckedLower) void {
-    let ctx *CheckedFunction = &l.function
+    let ctx *ast.CheckedFunction = &l.function
     // owner_decl 是文件内声明号；decl_row 是快照展平后的全局行号，不能混用。
     let owner_decl int = l.store.declarations[ctx.decl_row].decl_index
     let i int = ctx.expr_first
     for i < ctx.expr_after && i < l.store.expression_n {
-        let node AstExpr = l.store.expressions[i]
-        if (node.kind == AST_EXPR_UNARY && node.op == gen.TK_AMP && node.child0 >= 0) {
-            let child AstExpr = l.store.expressions[node.child0]
-            if (child.kind == AST_EXPR_PRIMARY && child.child0 < 0
+        let node ast.AstExpr = l.store.expressions[i]
+        if (node.kind == ast.AST_EXPR_UNARY && node.op == gen.TK_AMP && node.child0 >= 0) {
+            let child ast.AstExpr = l.store.expressions[node.child0]
+            if (child.kind == ast.AST_EXPR_PRIMARY && child.child0 < 0
                 && child.sym_kind == gen.SYM_VAR) {
                 let row int = checked_lower_binding(l, &child)
                 if (row >= 0) {
-                    let binding AstBinding = l.store.bindings[row]
+                    let binding ast.AstBinding = l.store.bindings[row]
                     if (binding.file_id == ctx.file_id
                         && binding.owner_decl == owner_decl && binding.id >= 0
                         && binding.id < l.function_binding_count) {
@@ -302,8 +303,8 @@ fn checked_lower_mark_taken(l *CheckedLower) void {
 
 // checked_lower_function：以快照绑定初始化纯 builder，产物经模块增建接口深拷贝后释放临时表。
 fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
-    let ctx *CheckedFunction = &l.function
-    let decl AstDecl = l.store.declarations[ctx.decl_row]
+    let ctx *ast.CheckedFunction = &l.function
+    let decl ast.AstDecl = l.store.declarations[ctx.decl_row]
     let sig int = l.store.types[decl.type_id].sub
     let count int = ctx.binding_after - ctx.binding_first
     let fixed_params int = l.store.sig_np[sig]
@@ -333,7 +334,7 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     }
     let i int = 0
     for i < count {
-        let binding AstBinding = l.store.bindings[ctx.binding_first + i]
+        let binding ast.AstBinding = l.store.bindings[ctx.binding_first + i]
         if (binding.id != i || (i < params) != (binding.is_param != 0)) {
             l.last_token = binding.name_token
             l.reason = "首片不支持此绑定类型或参数布局"
@@ -378,7 +379,7 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     let scan int = ctx.stmt_first
     for scan < ctx.stmt_after && scan < l.store.statement_n {
         let scan_kind int = l.store.statements[scan].kind
-        if (scan_kind == AST_STMT_GOTO || scan_kind == AST_STMT_LABEL) {
+        if (scan_kind == ast.AST_STMT_GOTO || scan_kind == ast.AST_STMT_LABEL) {
             l.has_goto = 1
             break
         }
@@ -390,8 +391,8 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
         // 预分配全部标签块：发现趟回滚不会丢块，goto 也能稳定复用同一目标。
         scan = ctx.stmt_first
         for scan < ctx.stmt_after && scan < l.store.statement_n {
-            let label_stmt AstStmt = l.store.statements[scan]
-            if (label_stmt.kind == AST_STMT_LABEL) {
+            let label_stmt ast.AstStmt = l.store.statements[scan]
+            if (label_stmt.kind == ast.AST_STMT_LABEL) {
                 if (checked_label_token(l, label_stmt.file_id, label_stmt.first, 1) < 0) {
                     ast_ir_b_release(b); return -1
                 }
@@ -411,8 +412,8 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     // 非逃逸切片字面量按表达式编号预分配，循环内复用同一块存储；直接返回者延迟分配。
     scan = ctx.expr_first
     for scan < ctx.expr_after && scan < l.store.expression_n {
-        let enode AstExpr = l.store.expressions[scan]
-        if (enode.kind == AST_EXPR_ARRAY && checked_lower_is_slice(l.store, enode.type_id) != 0) {
+        let enode ast.AstExpr = l.store.expressions[scan]
+        if (enode.kind == ast.AST_EXPR_ARRAY && checked_lower_is_slice(l.store, enode.type_id) != 0) {
             let sty gen.CType = l.store.types[enode.type_id]
             if (sty.elem < 0 || sty.elem >= l.store.type_n) {
                 ast_ir_b_release(b); return -2
@@ -447,7 +448,7 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     i = 0
     for i < count {
         if (l.taken[l.function_binding_first + i] == 0) { i += 1; continue }
-        let binding AstBinding = l.store.bindings[ctx.binding_first + i]
+        let binding ast.AstBinding = l.store.bindings[ctx.binding_first + i]
         let addr int = -1
         if (checked_lower_is_aggregate(l.store, binding.sym_type_id) != 0) {
             let aty gen.CType = l.store.types[binding.sym_type_id]
@@ -516,7 +517,7 @@ fn checked_lower_prepare_tables(l *CheckedLower, types *ir.IRType) int {
     if (result != 0) { return result }
     let declaration int = 0
     for declaration < l.store.declaration_n {
-        let node AstDecl = l.store.declarations[declaration]
+        let node ast.AstDecl = l.store.declarations[declaration]
         if (node.kind == gen.TK_LET || node.kind == gen.TK_CONST) {
             result = checked_lower_global_decl(l, declaration)
             if (result != 0) { return result }
@@ -533,7 +534,7 @@ fn checked_lower_declare_functions(l *CheckedLower) int {
     for i < l.store.function_n {
         l.function = l.store.functions[i]
         l.flow.loop_depth = 0
-        let node AstDecl = l.store.declarations[l.function.decl_row]
+        let node ast.AstDecl = l.store.declarations[l.function.decl_row]
         let symbol gen.CSym = l.store.symbols[node.sym_id]
         l.last_token = node.first
         if ((symbol.flags & gen.F_COMPTIME) == 0) {
@@ -566,7 +567,7 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType) int {
     for i < l.store.function_n {
         l.function = l.store.functions[i]
         l.flow.loop_depth = 0
-        let node AstDecl = l.store.declarations[l.function.decl_row]
+        let node ast.AstDecl = l.store.declarations[l.function.decl_row]
         let symbol gen.CSym = l.store.symbols[node.sym_id]
         l.last_token = node.first; l.reason = "首片不支持此语句或表达式"
         if ((symbol.flags & gen.F_COMPTIME) == 0) {
@@ -674,7 +675,7 @@ fn checked_lower_release(l *CheckedLower) void {
 
 // lower_module：无缓存入口，行为与 LA2b 完全相同；项目 worker 使用
 // lower_module_cached 接入函数级 IR 复用。
-pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
+pub fn lower_module(unit *ast.CheckedModule, out *ir.IRModule) int {
     return lower_module_impl(unit, out, 0, 0, 0, 0)
 }
 
@@ -682,7 +683,7 @@ pub fn lower_module(unit *CheckedModule, out *ir.IRModule) int {
 // cache_in/cache_out 由 cmd 装载与提交；env_key 由模块接口/目标/编译器环境算出。
 // stats 非空时写回 hits/misses/lowered，供 worker 汇总到 --stats。
 // 0 成功，1 首片不支持并带来源诊断，-1 内部错误；失败释放候选且保持零初始化 out 不变。
-pub fn lower_module_cached(unit *CheckedModule, out *ir.IRModule,
+pub fn lower_module_cached(unit *ast.CheckedModule, out *ir.IRModule,
     cache_in *ir.IRFunctionCacheSet, cache_out *ir.IRFunctionCacheSet,
     env_key u64, stats *CheckedLowerStats) int {
     if (stats != 0) {
@@ -693,7 +694,7 @@ pub fn lower_module_cached(unit *CheckedModule, out *ir.IRModule,
 }
 
 // lower_module_impl：prepare → declare → build（可查/写函数缓存）→ 模块 verifier。
-fn lower_module_impl(unit *CheckedModule, out *ir.IRModule,
+fn lower_module_impl(unit *ast.CheckedModule, out *ir.IRModule,
     cache_in *ir.IRFunctionCacheSet, cache_out *ir.IRFunctionCacheSet,
     env_key u64, stats *CheckedLowerStats) int {
     if (out == 0 || unit == 0 || unit.storage == 0) { return -1 }
@@ -707,7 +708,7 @@ fn lower_module_impl(unit *CheckedModule, out *ir.IRModule,
     target.little_endian = unit.target.little_endian; target.layout_version = unit.target.layout_version
     if (ir.ir_module_init(&candidate, &target) != 0) { return -1 }
     let l CheckedLower
-    l.store = unit.storage.to_type(*CheckedStorage); l.output = &candidate
+    l.store = unit.storage.to_type(*ast.CheckedStorage); l.output = &candidate
     l.function.decl_row = -1; l.function.file_id = -1
     l.last_token = 0; l.reason = "首片不支持此语句或表达式"
     l.function_binding_first = 0; l.function_binding_count = 0
@@ -726,15 +727,15 @@ fn lower_module_impl(unit *CheckedModule, out *ir.IRModule,
     flow.loop_depth = 0
     l.flow = &flow
     flow.loops = malloc((CHECKED_LOOP_MAX * sizeof(CheckedLoop)).to_type(u64)).to_type(*CheckedLoop)
-    l.source_map = checked_zero_rows(l.store.file_n, sizeof(int)).to_type(*int)
-    l.source_type_map = checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int)
-    l.function_type_map = checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int)
-    l.global_map = checked_zero_rows(l.store.symbol_n, sizeof(int)).to_type(*int)
-    l.string_map = checked_zero_rows(l.store.string_n, sizeof(int)).to_type(*int)
-    l.static_map = checked_zero_rows(l.store.static_data_n, sizeof(int)).to_type(*int)
-    l.taken = checked_zero_rows(l.store.binding_n, 1).to_type(*u8)
-    l.storage = checked_zero_rows(l.store.binding_n, sizeof(int)).to_type(*int)
-    l.slice_storage = checked_zero_rows(l.store.expression_n, sizeof(int)).to_type(*int)
+    l.source_map = ast.checked_zero_rows(l.store.file_n, sizeof(int)).to_type(*int)
+    l.source_type_map = ast.checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int)
+    l.function_type_map = ast.checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int)
+    l.global_map = ast.checked_zero_rows(l.store.symbol_n, sizeof(int)).to_type(*int)
+    l.string_map = ast.checked_zero_rows(l.store.string_n, sizeof(int)).to_type(*int)
+    l.static_map = ast.checked_zero_rows(l.store.static_data_n, sizeof(int)).to_type(*int)
+    l.taken = ast.checked_zero_rows(l.store.binding_n, 1).to_type(*u8)
+    l.storage = ast.checked_zero_rows(l.store.binding_n, sizeof(int)).to_type(*int)
+    l.slice_storage = ast.checked_zero_rows(l.store.expression_n, sizeof(int)).to_type(*int)
     l.labels = 0; l.label_count = 0; l.label_cap = 0; l.has_goto = 0
     let tables_ok int = 1
     if (l.store.type_n > 0 && (l.source_type_map == 0 || l.function_type_map == 0)) { tables_ok = 0 }

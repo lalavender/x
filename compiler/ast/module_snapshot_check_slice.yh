@@ -1117,3 +1117,38 @@ pub fn checked_check_cache_capture(unit *CheckedModule,
     }
     return 0
 }
+
+// checked_decl_restore：清空 AST arena 后按受检快照重建模块级声明骨架。
+//
+// 仅供函数切片与 lowering 的离线等价性探针（lower 模块）在重放切片前复位前端
+// 状态；生产构建路径不调用。探针不再直接读写 ast 的模块级数组，是本文件对
+// 「前端复位」唯一对外承诺。返回 0 成功、-1 快照不可用或声明登记失败。
+pub fn checked_decl_restore(unit *CheckedModule) int {
+    if (unit == 0 || unit.storage == 0) { return -1 }
+    let store *CheckedStorage = unit.storage.to_type(*CheckedStorage)
+    ast_expr_reset()
+    ast_stmt_reset()
+    ast_decl_reset()
+    ast_function_reset()
+    let tk *gen.TaskCtx = gen.task()
+    tk.c_active_file = 0
+    tk.c_file_decl_i = -1
+    tk.c_file_decls = gen.p_file(0).decls
+    tk.c_file_decl_n = gen.p_file(0).decl_n
+    if (ast_decl_add_file(0) != 0) { return -1 }
+    // 恢复模块级声明的语义字段（sym_id/type_id/init_expr 等）。
+    let i int = 0
+    for 1 {
+        if (i >= store.declaration_n) { break }
+        if (i < ast_decl_count) {
+            ast_decl_nodes[i].sym_id = store.declarations[i].sym_id
+            ast_decl_nodes[i].type_id = store.declarations[i].type_id
+            ast_decl_nodes[i].init_expr = store.declarations[i].init_expr
+            // 函数体由切片导入设置；非函数声明保持 store 的 -1。
+            ast_decl_nodes[i].body_stmt = store.declarations[i].kind == gen.TK_FN ?
+                -1 : store.declarations[i].body_stmt
+        }
+        i += 1
+    }
+    return 0
+}

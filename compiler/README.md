@@ -9,19 +9,20 @@
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
 version = `0.0.9`，source = `.`），按 **gen / builtin / lex / parse / ast /
-check / comptime / ir / backend / build / testkit / cmd** 组织。
-**2026-10-25 实测（`python3 tools/arch-check.py`）：十二个模块、116 个 `.yh`、
-52,342 行**：`gen` 5,690 · `parse` 9,707 · `build` 10,717 · `ast` 9,041 ·
-`comptime` 5,522 · `ir` 4,230 · `backend` 3,340 · `testkit` 1,515 · `lex` 1,069 ·
-`check` 958 · `cmd` 381 · `builtin` 172。
+check / comptime / lower / ir / backend / build / testkit / cmd** 组织。
+**2026-10-25 实测（`python3 tools/arch-check.py`）：十三个模块、118 个 `.yh`、
+52,398 行**：`gen` 5,690 · `parse` 9,709 · `build` 10,719 · `lower` 5,815 ·
+`comptime` 5,522 · `ir` 4,230 · `backend` 3,340 · `ast` 3,278 · `testkit` 1,515 ·
+`lex` 1,069 · `check` 958 · `cmd` 381 · `builtin` 172。
 
 各层来历：`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担
 AST 与快照的**只读一致性校验**（不是语义分析），`builtin/` 只放内置
 （prelude）函数登记表，`ir`（目标隔离 SSA）与其它模块同为根项目普通模块，
 `build/` 是 2026-10-24 A2c 自 `cmd/` 拆出的构建引擎（项目模型、调度、
 模块发射、缓存、链接、平台适配），`testkit/` 是同一批 A6 抽出的语言内测试
-执行器。`cmd/` 只剩 CLI 参数映射（`driver`）与调用面（`api`），381 行、
-占 0.7%。
+执行器，`lower/` 是 2026-10-25 B3-2 自 `ast/` 拆出的 lowering 阶段
+（`CheckedModule → IRModule`，此前 ast 9,041 行里混着 5,815 行变换代码）。
+`cmd/` 只剩 CLI 参数映射（`driver`）与调用面（`api`），381 行、占 0.7%。
 
 模块导出面按「只有别的模块真的用到才 `pub`」维护（2026-10-12 两轮：`pub`
 声明 1048 → 585，随后 `struct`/`union`/`enum` 的 `pub` 改为可选并私有化 12 个
@@ -112,7 +113,7 @@ make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test �
 | `parse/iface_ct.yh` | 编译期接口（`.s.ct`）发射与加载 |
 | `parse/iface_ct_map.yh` | `.s.ct` 正文改写的生成位置与原始位置映射 |
 
-**ast** —— AST 阶段（2026-10-12 自 parse 拆出，独立编译单元）
+**ast** —— AST 阶段与受检快照（2026-10-12 自 parse 拆出）
 
 | 文件 | 职责 |
 | --- | --- |
@@ -121,30 +122,36 @@ make test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test �
 | `ast/ast_stmt.yh` | `yh check` 语句树、绑定关联与编译期 `$for` 模板目录 |
 | `ast/ast_function.yh` | 函数在 AST arena 中的范围与绑定身份 |
 | `ast/ast_view.yh` | 为外部只读校验借出 arena 视图，不转移所有权 |
-| `ast/module_snapshot.yh` | `CheckedModule` 快照数据模型、捕获/释放与有界读取 |
+| `ast/cache_mix.yh` | 函数缓存键的 FNV-1a 64 原语（check 键与 IR 键共用唯一实现） |
+| `ast/module_snapshot.yh` | `CheckedModule`/`CheckedStorage` 快照数据模型、捕获/释放与有界读取 |
 | `ast/module_snapshot_view.yh` | 为外部快照校验借出只读视图，不转移所有权 |
-| `ast/module_snapshot_check_key.yh` | LA3.3 C3：pass2b 前的函数 check 键（当前未启用） |
-| `ast/module_snapshot_check_slice.yh` | LA3.3 C2/C3：函数级受检 AST 切片捕获/导入与离线往返探针 |
-| `ast/ast_ir.yh` | builder 指令表辅助（LL12：旧 SSA 编排已退役） |
-| `ast/ast_ir_build.yh` | 受支持函数的 AST → typed SSA 构造器 |
-| `ast/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
-| `ast/module_snapshot_ctx.yh` | 纯快照 lowering 的循环、控制流、标签与函数上下文 |
-| `ast/module_snapshot_lower.yh` | 模块来源/类型/符号准备、签名登记、逐函数构造与模块提交（LA2b） |
-| `ast/module_snapshot_lower_expr.yh` | 标量表达式、条件、三元、整数提升与转换 lowering |
-| `ast/module_snapshot_lower_call.yh` | 实参、副本、类型化变参、直接/间接调用 lowering |
-| `ast/module_snapshot_lower_flow.yh` | if/循环/switch/label-goto 与 phi 合流 lowering |
-| `ast/module_snapshot_lower_place.yh` | 绑定赋值、地址、下标与切片位置 lowering |
-| `ast/module_snapshot_lower_aggregate.yh` | 数组/结构体字面量、聚合存储与复制 lowering |
-| `ast/module_snapshot_lower_cache.yh` | 函数级 IR 缓存键：token 流、布局/签名与非函数声明事实 |
-| `ast/module_snapshot_forin.yh` | `for-in` 循环 lowering 辅助 |
-| `ast/module_snapshot_global.yh` | 全局对象类型、初始化值与引用 lowering |
-| `ast/module_snapshot_static.yh` | 静态数据、字符串与重定位 lowering 辅助 |
-| `ast/module_snapshot_template.yh` | 编译期 `$for` 模板 lowering 辅助 |
+| `ast/module_snapshot_check_key.yh` | pass2b 前的函数 check 键（LA3.3 C3） |
+| `ast/module_snapshot_check_slice.yh` | 函数级受检 AST 切片捕获/导入、前端复位（`checked_decl_restore`） |
 
-> `ast` 目前仍同时是「AST 数据结构」与「AST → IR lowering」两种职责的模块，
-> 其中 lowering 共 5,742 行（`module_snapshot_lower*` + `module_snapshot_ctx/
-> forin/global/static/template` + `ast_ir*`）。拆成独立 `lower` 模块的方案见
-> [构建态对象化与 build 拆分重新规划](../docs/02-plan/yh-构建态对象化与build拆分重新规划-2026-10-25.md) B3。
+**lower** —— 受检快照到语言 IR（2026-10-25 B3-2 自 `ast` 拆出，5,815 行）
+
+| 文件 | 职责 |
+| --- | --- |
+| `lower/module_snapshot_lower.yh` | 模块来源/类型/符号准备、签名登记、逐函数构造与模块提交（LA2b） |
+| `lower/module_snapshot_ctx.yh` | 纯快照 lowering 的循环、控制流、标签与函数上下文、`CheckedLowerStats` |
+| `lower/module_snapshot_lower_expr.yh` | 标量表达式、条件、三元、整数提升与转换 lowering |
+| `lower/module_snapshot_lower_call.yh` | 实参、副本、类型化变参、直接/间接调用 lowering |
+| `lower/module_snapshot_lower_flow.yh` | if/循环/switch/label-goto 与 phi 合流 lowering |
+| `lower/module_snapshot_lower_place.yh` | 绑定赋值、地址、下标与切片位置 lowering |
+| `lower/module_snapshot_lower_aggregate.yh` | 数组/结构体字面量、聚合存储与复制 lowering |
+| `lower/module_snapshot_lower_cache.yh` | 函数级 IR 缓存键：token 流、布局/签名与非函数声明事实 |
+| `lower/module_snapshot_forin.yh` | `for-in` 循环 lowering 辅助 |
+| `lower/module_snapshot_global.yh` | 全局对象类型、初始化值与引用 lowering |
+| `lower/module_snapshot_static.yh` | 静态数据、字符串与重定位 lowering 辅助 |
+| `lower/module_snapshot_template.yh` | 编译期 `$for` 模板 lowering 辅助 |
+| `lower/ast_ir.yh` | builder 指令表辅助（LL12：旧 SSA 编排已退役） |
+| `lower/ast_ir_build.yh` | 受支持函数的 AST → typed SSA 构造器 |
+| `lower/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
+| `lower/module_snapshot_lower_selftest.yh` | check 切片与 lowering 的离线等价性探针（唯一调用方是测试项目） |
+
+`lower` 只 import `ast`/`ir`/`gen`，**不得 import parse/check/build**；`ast` 也不得
+反向 import `lower`（由 `arch-check` 的 `ALLOWED` 强制）。拆分后 `ast` 从 9,041 行
+降到 3,278 行，此后所有 AST 侧改动都在 1/3 规模上进行。
 
 **check** —— AST arena 与独立快照的一致性校验
 
@@ -297,12 +304,12 @@ cmd/driver ─▶ cmd/api ─▶ build（扫描/索引/绑定/拓扑/调度）
 testkit ─▶ build（复用调度与产物路径，执行测试体）
 ```
 
-受检快照统一经 `ast/module_snapshot_lower*.yh` 降低为 `ir.IRModule`，再由
+受检快照统一经 `lower/module_snapshot_lower*.yh` 降低为 `ir.IRModule`，再由
 `backend/llvm_*.yh` 发 LLVM 文本，`build/llvm_pipeline.yh` 统一经内嵌桥原子
 发布对象/汇编；项目构建按函数复用
 `ir/ssa_module_40_function_cache.yh` 的迷你模块记录，
 `ssa_module_50_function_rebind.yh` 负责重绑定；旧「函数级 SSA + 汇编替换」链
-已删除，`ast/ast_ir*.yh` 只保留 builder 底层与共享调用缓冲。
+已删除，`lower/ast_ir*.yh` 只保留 builder 底层与共享调用缓冲。
 
 `compiler/ir/` 是独立的模块 IR 子项目，由 `compiler/project.toml` 以本地 path
 依赖引入，也由 `tests/modules/projects/irverify/` 直接依赖并运行验收。
@@ -329,14 +336,14 @@ testkit ─▶ build（复用调度与产物路径，执行测试体）
 
 后端分三层：前端语义（`gen/symbols.yh` + `gen/sem_*.yh` +
 `parse/parse_*.yh` + `ast/ast_*.yh` + `check/verify.yh`）→ 受检快照/模块 IR
-（`ast/module_snapshot*.yh`、`ir/ssa_module_*.yh`）→ LLVM 发射
+（`ast/module_snapshot*.yh`、`lower/module_snapshot_lower*.yh`、`ir/ssa_module_*.yh`）→ LLVM 发射
 （`backend/llvm_*.yh` + 内嵌桥）。前端不持有 ISA 状态；换目标 = 目标身份 +
 对应 LLVM 目标库。LL12 已删除 `em_*` 抽象机原语与旧 arm64 发射器，
 历史架构见[自举后端架构](../docs/03-design/yh-自举后端架构.md)。
 
 依赖方向由 `make arch-check` 强制（`tools/arch-check.py` 的 `ALLOWED`）：
-`gen`/`ir` 是依赖根，`parse`/`ast`/`check`/`comptime`/`backend` 在其上，
-`build` 装配全部下层，`cmd` 在最顶。当前 12 模块 33 条边、无环；实测与
+`gen`/`ir` 是依赖根，`parse`/`ast`/`check`/`comptime`/`lower`/`backend` 在其上，
+`build` 装配全部下层，`cmd` 在最顶。当前 13 模块 37 条边、无环；实测与
 结构性问题见[当前架构重新分析](../docs/03-design/yh-当前架构重新分析-2026-10-25.md)。
 
 ## 自编子集与已知边界

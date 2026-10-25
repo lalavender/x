@@ -23,6 +23,23 @@
   arm64/x64/非法版本与架构自测通过。工作区另有并行未提交的 B3 重构，未跑
   完整 `make test` / `make selfhost-native` 以免混入他人改动。
 
+## 2026-10-25 `lower` 独立（B3-1/B3-2）
+
+- **B3-1 解环**：3 个 FNV 混入原语从 `module_snapshot_lower_cache.yh` 下沉到
+  `ast/cache_mix.yh`（唯一定义，check 键与 IR 键共用）；`checked_slice_self_test`
+  从 `check_slice` 移到 `ast/module_snapshot_lower_selftest.yh`，为随 lowering
+  一起搬走做准备。零语义改动。
+- **B3-2 搬迁**：16 个文件 `git mv` 到 `compiler/lower/`（15 个 lowering + 探针），
+  改 `module lower` 与 `ast.` 前缀（333 处 / 56 个符号）；`ast` 补 3 个 `pub` 与
+  新入口 `checked_decl_restore`（探针不再直接读写 ast 模块级数组）。
+- **数字**：`ast` 9,041 → **3,278**（−63.7%），`lower` **5,815**，模块 12 → 13，
+  依赖边 33 → 37，总行数 52,342 → 52,398，`gen.G()` 仍 165、全局 `let` 仍 183。
+- **验证**：`make` / `make test` / `make selfhost-native`（project 126/126、固定点
+  逐字节一致）全绿；`make arch-check` 通过。
+- **顺带**：`tests/modules/projects/llvmlower/main/main.yh` 改 `import core.lower;`，
+  `tests/modules/build-check.py` 与 `tests/selfhost/llvm-lower.py` 的模块拷贝列表
+  补 `lower`。
+
 ## 2026-10-24 yh 字符串插值 I4 收口
 
 - **实现**：`string.View` 插值、O2 正例、`--syntax-check` 插值语法模式；

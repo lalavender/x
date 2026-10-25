@@ -34,18 +34,21 @@ ALLOWED = {
     "comptime": {"gen"},
     "builtin": {"gen"},
     "ast": {"gen", "comptime", "ir"},
+    # lower：CheckedModule → IRModule（2026-10-25 B3-2 自 ast 拆出）。
+    # 只吃受检快照，不得 import parse/check/build；ast 不得反向 import lower。
+    "lower": {"gen", "ir", "ast"},
     "check": {"gen", "ast"},
     "parse": {"gen", "lex", "comptime", "ast", "ir"},
     "backend": {"gen", "ir"},
     # build 是构建引擎（A2c 后承担项目模型 + 链接 + 调度 + 模块发射），
     # 位于前端/后端之上，可依赖全部下层；main 只剩 CLI 与测试执行器。
     "build": {"gen", "lex", "parse", "comptime", "ast", "check", "ir",
-              "backend", "builtin"},
+              "backend", "builtin", "lower"},
     # testkit：语言内测试执行器（yh test 子命令的实现），位于 build 之上。
     # 模块名不能叫 test——`test "..." {}` 是语言关键字。
     "testkit": {"gen", "parse", "build"},
     "main": {"gen", "lex", "comptime", "ast", "check", "parse", "ir",
-             "backend", "builtin", "build", "testkit"},
+             "backend", "builtin", "build", "testkit", "lower"},
 }
 
 # —— 预算（现状即上限，只减不增）——

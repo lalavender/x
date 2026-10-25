@@ -1,21 +1,22 @@
-module ast
+module lower
+import ast
 import gen
 import ir
 
 // checked_lower_forin_bindings：验证 for-in 绑定链并记录其稳定绑定 ID。
 // 解析器按元素、下标的顺序写入绑定表；源码顺序则是下标、元素。
-fn checked_lower_forin_bindings(l *CheckedLower, stmt AstStmt,
+fn checked_lower_forin_bindings(l *CheckedLower, stmt ast.AstStmt,
     loop *CheckedLoop, stmt_id int) int {
     if (stmt.first_binding < 0 || stmt.first_binding >= l.store.binding_n) { return -2 }
     let elem_row int = stmt.first_binding
-    let elem AstBinding = l.store.bindings[elem_row]
+    let elem ast.AstBinding = l.store.bindings[elem_row]
     if (elem.stmt_id != stmt_id || elem.is_param != 0 || elem.sym_kind != gen.SYM_VAR
         || elem.id < 0 || elem.id >= l.function_binding_count) { return -2 }
     loop.forin_elem = elem.id
     loop.forin_index = -1
     if (elem.next >= 0) {
         if (elem.next >= l.store.binding_n || elem.next != stmt.last_binding) { return -2 }
-        let index AstBinding = l.store.bindings[elem.next]
+        let index ast.AstBinding = l.store.bindings[elem.next]
         if (index.stmt_id != stmt_id || index.is_param != 0 || index.sym_kind != gen.SYM_VAR
             || index.id < 0 || index.id >= l.function_binding_count
             || index.id == elem.id) { return -2 }
@@ -32,8 +33,8 @@ fn checked_lower_forin_source(l *CheckedLower, flow *CheckedFlow, expr_id int,
     ptr_out *int, len_out *int, elem_out *int) int {
     let b *AstIRBuilder = &l.builder
     if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2 }
-    let node AstExpr = l.store.expressions[expr_id]
-    for node.kind == AST_EXPR_PRIMARY && node.child0 >= 0 {
+    let node ast.AstExpr = l.store.expressions[expr_id]
+    for node.kind == ast.AST_EXPR_PRIMARY && node.child0 >= 0 {
         expr_id = node.child0
         if (expr_id < 0 || expr_id >= l.store.expression_n) { return -2 }
         node = l.store.expressions[expr_id]
@@ -57,7 +58,7 @@ fn checked_lower_forin_source(l *CheckedLower, flow *CheckedFlow, expr_id int,
         len_out[0] = length
         return 0
     }
-    if (node.kind == AST_EXPR_SLICE && node.child0 >= 0
+    if (node.kind == ast.AST_EXPR_SLICE && node.child0 >= 0
         && node.child1 >= 0 && node.child2 >= 0) {
         let base_ptr int = -1
         let base_len int = -1
@@ -104,10 +105,10 @@ fn checked_lower_forin_source(l *CheckedLower, flow *CheckedFlow, expr_id int,
 // 来源和区间端点均在循环前序言求一次，发现趟与真实趟共享同一 SSA 值。
 fn checked_lower_forin_prepare(l *CheckedLower, flow *CheckedFlow,
     stmt_id int, loop *CheckedLoop) int {
-    let stmt AstStmt = l.store.statements[stmt_id]
+    let stmt ast.AstStmt = l.store.statements[stmt_id]
     if (checked_lower_forin_bindings(l, stmt, loop, stmt_id) != 0) { return -2 }
     if (stmt.first_expr < 0 || stmt.first_expr >= l.store.edge_n) { return -2 }
-    let first AstStmtExpr = l.store.edges[stmt.first_expr]
+    let first ast.AstStmtExpr = l.store.edges[stmt.first_expr]
     if (first.expr_id < 0 || first.expr_id >= l.store.expression_n) { return -2 }
     let second int = first.next
     loop.forin = 1
@@ -123,10 +124,10 @@ fn checked_lower_forin_prepare(l *CheckedLower, flow *CheckedFlow,
     loop.forin_stride = 0
     if (second >= 0) {
         if (second >= l.store.edge_n || l.store.edges[second].next >= 0) { return -2 }
-        let start_node AstExpr = l.store.expressions[first.expr_id]
-        let end_edge AstStmtExpr = l.store.edges[second]
+        let start_node ast.AstExpr = l.store.expressions[first.expr_id]
+        let end_edge ast.AstStmtExpr = l.store.edges[second]
         if (end_edge.expr_id < 0 || end_edge.expr_id >= l.store.expression_n) { return -2 }
-        let end_node AstExpr = l.store.expressions[end_edge.expr_id]
+        let end_node ast.AstExpr = l.store.expressions[end_edge.expr_id]
         let promoted int = checked_lower_promoted(l, start_node.type_id, end_node.type_id)
         if (promoted < 0 || ir.ir_integer_type(promoted) == 0) { return -2 }
         let range_kind int = ir.IR_TY_I64
@@ -143,10 +144,10 @@ fn checked_lower_forin_prepare(l *CheckedLower, flow *CheckedFlow,
         loop.forin_range_kind = range_kind
         loop.forin_elem_type = gen.TY_I32
         loop.forin_stride = 4
-        let elem AstBinding = l.store.bindings[stmt.first_binding]
+        let elem ast.AstBinding = l.store.bindings[stmt.first_binding]
         if (elem.sym_type_id < 0 || l.store.types[elem.sym_type_id].kind != gen.TY_I32) { return -2 }
         if (loop.forin_index >= 0) {
-            let index AstBinding = l.store.bindings[stmt.last_binding]
+            let index ast.AstBinding = l.store.bindings[stmt.last_binding]
             if (index.sym_type_id < 0 || l.store.types[index.sym_type_id].kind != gen.TY_I32) { return -2 }
         }
     } else {
@@ -157,10 +158,10 @@ fn checked_lower_forin_prepare(l *CheckedLower, flow *CheckedFlow,
         let status int = checked_lower_forin_source(l, flow, first.expr_id,
             &loop.forin_data, &loop.forin_length, &loop.forin_elem_type)
         if (status != 0) { return status }
-        let elem AstBinding = l.store.bindings[stmt.first_binding]
+        let elem ast.AstBinding = l.store.bindings[stmt.first_binding]
         if (elem.sym_type_id != loop.forin_elem_type) { return -2 }
         if (loop.forin_index >= 0) {
-            let index AstBinding = l.store.bindings[stmt.last_binding]
+            let index ast.AstBinding = l.store.bindings[stmt.last_binding]
             if (index.sym_type_id < 0 || l.store.types[index.sym_type_id].kind != gen.TY_I32) { return -2 }
         }
         loop.forin_stride = l.store.types[loop.forin_elem_type].size
@@ -203,7 +204,7 @@ fn checked_lower_forin_store(l *CheckedLower, flow *CheckedFlow,
     let b *AstIRBuilder = &l.builder
     if (binding_id < 0 || binding_id >= l.function_binding_count
         || value < 0 || value >= b.inst_count) { return -2 }
-    let binding AstBinding = l.store.bindings[l.function_binding_first + binding_id]
+    let binding ast.AstBinding = l.store.bindings[l.function_binding_first + binding_id]
     if (checked_lower_is_aggregate(l.store, binding.sym_type_id) != 0) {
         let dest int = checked_lower_storage(l, binding_id)
         if (dest < 0) { return -2 }
