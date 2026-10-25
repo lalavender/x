@@ -88,12 +88,12 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
 
 - [ ] **PC2c 缓存记录按函数内存膨胀**：v3 每个可缓存函数都带一份字符串字节副本，
   大模块的 `.fchk` 仍可能偏大；若需要可改为「按模块共享字符串池 + 引用计数」。
-- [ ] **PC3b 种子滚动**：`make` 仍由旧种子编译（冷编 24.6 s），−38% 要等滚种子后
+- [ ] **PC3b 种子滚动**：`just` 仍由旧种子编译（冷编 23–25 s），−50% 要等滚种子后
   才出现在 `make` 上。滚动前置：等到工作区并行改动落地（当前 `compiler/testkit` 有
   未完成改动）再执行 `make test` + `make selfhost-native` + `make seed`。
-  实测前置（2026-10-26，load≈4.0）：`make`（种子→compiler 冷编）**23.0 s**、13 模块；
+  实测前置（2026-10-26，load≈4.0）：`just`（种子→compiler 冷编）**23.0 s**、13 模块；
   `selfhost_snapshot_gate.py --verify-seed bin/yh-darwin-arm64` 通过；`strings yh` 无
-  `/Users/…` 构建机路径（滚种子不会被拒）。滚后预期 `make` 冷编进 ~11–12 s（种子拿到 PC3）。
+  `/Users/…` 构建机路径（滚种子不会被拒）。滚后预期 `just` 冷编进 ~11–12 s（种子拿到 PC3）。滚动命令为 `just seed`。
 - **2026-10-26 低负载复核（load≈4.5–5，见 [分析](02-plan/yh-编译器性能分析-2026-10-25.md) §14）**：
   冷编 11.2 s、全量重编（含写）**17.5 s**、热编 **1.14–1.21 s**、单函数改动中位 **3.9 s**、
   冷编后首次改 4.78 s。**热编 ≤1.5 s 与全量重编 ≤20 s 已达标**；单函数改动 ≤3 s
@@ -117,6 +117,21 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   接进 `make test-llvm-darwin`；Linux 的对应门未接（需先有 Linux 宿主记录验证）。
 - [ ] **LC3 F2-9 交叉**：Linux→Darwin 交叉仍需目标包自带 `libc++.tbd`
   （见 `03-design/yh-Darwin交叉编译遗留边界.md` §2）。
+
+### 工具链健壮性（2026-10-26 踩坑立项）
+
+- [ ] **RB1 worker 父死子退**：构建被中断（Ctrl-C / 超时 / harness abort）时，fork 出的模块
+  worker 不跟父进程退出，会变成 `ppid=1` 的孤儿继续烧 CPU（实测 5 个孤儿把 load 推到 195，
+  并连带卡死其它门禁）。父进程应转发 SIGINT/SIGTERM，或让 worker 监视父进程存活。
+- [ ] **RB2 门禁校验 staged 二进制新鲜度**：`justfile` 的 `stage-yh` 把仓库 `yh` 复制到
+  `$TMPDIR/yh-fast/yh`；宿主 `yh` 过期时门禁会拿旧副本跑十几分钟才失败（实测
+  `test-string` 卡 17 分钟）。stage 时比较 hash/mtime，不一致就重拷或告警。
+- [x] **RB3 Darwin/ARM64 守卫判据**（2026-10-26 修）：`just` 的 `arch()` 在 macOS 返回
+  `aarch64`，而 `test-llvm-darwin` / `selfhost-llvm-darwin` 的守卫拿它与 `arm64` 比较 →
+  在 Darwin/ARM64 上直接拒绝执行；改用已归一化的 `seed_arch`。
+- [x] **RB4 just 迁移后的门禁复核**（2026-10-26）：`just arch-check` 0.4 s ✅、
+  `just test` 0 FAIL ✅、`just selfhost-native` 122/122 + LA3 O0/O2 ✅、
+  `just test-llvm-darwin` 0 FAIL ✅（修 RB3 后）。用例数 124 → 122 是 YT4 迁移删掉旧夹具所致。
 
 ## 语言内测试（YT4 迁移与发版）
 

@@ -407,12 +407,12 @@ test-llvm-linux-arm64: stage-yh
 # O0/O2 固定点 + 自解析 + 全量语料 + Darwin 专项门 + 隔离 PATH）。
 # LL12 后种子即 LLVM 编出的过渡代 A，不再有 legacy 起点。
 selfhost-llvm-darwin:
-    @test "{{ host_os }}" = "macos" -a "{{ cpu }}" = "arm64" || { echo "错误: selfhost-llvm-darwin 要求 Darwin/ARM64"; exit 1; }
+    @test "{{ host_os }}" = "macos" -a "{{ seed_arch }}" = "arm64" || { echo "错误: selfhost-llvm-darwin 要求 Darwin/ARM64"; exit 1; }
     python3 "{{ root }}/tests/selfhost/llvm-darwin-selfhost.py" --seed "{{ seed_abs }}" --jobs {{ llvm_jobs }}
 
 # test-llvm-darwin：Darwin/ARM64 静态 SDK、弱桩兼容、LLVM 对象与 Apple ABI 探针。
 test-llvm-darwin: stage-yh
-    @test "{{ host_os }}" = "macos" -a "{{ cpu }}" = "arm64" || { echo "错误: test-llvm-darwin 要求 Darwin/ARM64"; exit 1; }
+    @test "{{ host_os }}" = "macos" -a "{{ seed_arch }}" = "arm64" || { echo "错误: test-llvm-darwin 要求 Darwin/ARM64"; exit 1; }
     python3 "{{ root }}/tests/selfhost/llvm-darwin-sdk.py"
     python3 "{{ root }}/tests/selfhost/llvm-darwin-host.py"
     python3 "{{ root }}/tools/link-closure.py" check --host darwin-aarch64

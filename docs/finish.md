@@ -86,7 +86,7 @@
   `tests/modules/projects/llvmfunctioncache` + LA3 脚本：该路径挂起即失败。
 - **验证**：`rm yh && make` 冷编 96.8 s；fixture 冷编 O0 2.18 s / O2 0.97 s；
   `python3 tests/selfhost/llvm-function-cache.py --compiler-path ./yh` 7.8 s
-  （此前无限）；`make test` 依次通过语法语料、运行语料、modules、
+  （此前无限）；`just test` 依次通过语法语料、运行语料、modules、
   libs、compiler-tests、fmt、code-stats，止于 arch-check。
 - **本轮未关闭**：
   1. LA3 `损坏记录` 断言 `check hits/misses/skipped` 期望 `(4,1,4)`、实际
@@ -102,7 +102,7 @@
 - **NP 定位**：只保留 **NP3**（受检契约与 lowering 解耦），NP0/NP1/NP2/NP4/NP5
   关闭。依据：NP1/NP2 的对象代码（`ir_simplify`、`ssa_inline`）已随 A0b/A0e 从
   `compiler/` 删除，NP4 由 ADR-0014 取代，NP0 的模式/计数口径并入现有
-  `make test` + O0/O2 + 自举门，NP5 交 LLVM 默认管线。
+  `just test` + O0/O2 + 自举门，NP5 交 LLVM 默认管线。
   [ADR-0011](adr/0011-yh采用Nanopass风格优化阶段契约.md) 状态改为「部分被
   ADR-0014 取代（2026-10-26），只保留 NP3」并附阶段处置表；
   [方案](02-plan/yh-Nanopass风格优化架构实施方案.md) 与
@@ -143,8 +143,8 @@
   [YT4 收口与门禁验证](01-finished/yh-YT4-收口与门禁验证-2026-10-25.md)。
 - 最终复验（仓库根，入口已迁移 justfile，make 仅转发）：
   `make libs-test` 122 passed + cli 5/5 + os 11/11+1/1 + libc 2/2；
-  `make libs-test-o2` 122 passed；`make test` exit 0（compiler-tests 4/4 等）；
-  `make selfhost-native` exit 0（cc3→cc4 固定点、cc4 自解析 119 文件、
+  `make libs-test-o2` 122 passed；`just test` exit 0（compiler-tests 4/4 等）；
+  `just selfhost-native` exit 0（cc3→cc4 固定点、cc4 自解析 119 文件、
   project cases 122/122）；`make test-num` 220/220；`git diff --check` 通过。
 - 延后项：YT2d-2（函数级 IR/check 缓存未用于测试构建）、D11 预期失败能力、
   astcheck 增量门槛跳过；编译器十进制字面量 1 ULP 偏差已于 2026-10-26 修复
@@ -162,8 +162,8 @@
 - 测试发现（2026-10-26 已修复）：编译器十进制字面量 `1.5e300` 曾比正确值多
   1 ULP（`num.parse_f64`/Python 一致）；修复与回归见上方 2026-10-26 条目。
 - 验证：`yh test num` 6/6；`make test-num` 220/220；`make libs-test`
-  **122 passed** + cli/os/libc；`make libs-test-o2` 122；`make test`
-  **73.0s**；`make selfhost-native` **153.5s / 122/122**。记录见
+  **122 passed** + cli/os/libc；`make libs-test-o2` 122；`just test`
+  **73.0s**；`just selfhost-native` **153.5s / 122/122**。记录见
   [YT4-P7](01-finished/yh-YT4-P7-num迁移-2026-10-25.md)。
 
 ## 2026-10-25 YT4-P6：irverify 迁入 `compiler/ir/zz_tests_verify.yh`
@@ -177,7 +177,7 @@
   探针（lower 不允许依赖 parse/check）、`llvmchecked`；`astcheck` 因
   `test-compiler-tests` 增量 19.7s > 10s 门槛跳过。记录见
   [YT4-P6](01-finished/yh-YT4-P6-编译器fixture迁移-2026-10-25.md)。
-- 验证：`compiler-tests` 4/4；`make test` 75.2s；`make selfhost-native`
+- 验证：`compiler-tests` 4/4；`just test` 75.2s；`just selfhost-native`
   192.1s / project cases 122/122。
 
 ## 2026-10-25 YT4-P5：os/sys/time 测试与 P0 收尾
@@ -188,10 +188,10 @@
   errno 分类映射）与 `libs/time/99_tests.yh`（单调时钟非负且不倒退）。
 - 保留 `libs/os/test/run.py`（FS/目录/进程 E2E、Linux 目标类型检查）与
   Linux 11 个 fixture；`osmodel`/`osio` smoke 不变。
-- P0 收尾：`tests/toml/run.py`、`tests/json/run.py` 与对应 `make test` 行已删；
+- P0 收尾：`tests/toml/run.py`、`tests/json/run.py` 与对应 `just test` 行已删；
   `tests/fmt/interp.py` 按 D11 保留为外部负例门。
-- 全门复验（LA3 已由并发会话收口）：`make test` **61.6s**；
-  `make selfhost-native` **148.8s / project cases 123/123**；
+- 全门复验（LA3 已由并发会话收口）：`just test` **61.6s**；
+  `just selfhost-native` **148.8s / project cases 123/123**；
   `make libs-test` **116 passed** + cli/os/libc；`make libs-test-o2` 116。
   记录见 [YT4-P5](01-finished/yh-YT4-P5-os-sys-time迁移-2026-10-25.md)。
 
@@ -208,7 +208,7 @@
   （cli 类型声明在 `cli.yh`）；`make libs-test` 的缺测试提示改为匹配
   `*tests*.yh`。
 - 验证：`yh test cli` 43/43；cli runner 5/5；`make libs-test` **109 passed**
-  + cli/os/libc 全绿；`make libs-test-o2` 109 passed；`make test` **60.5s**。
+  + cli/os/libc 全绿；`make libs-test-o2` 109 passed；`just test` **60.5s**。
   `selfhost-native` 仍停在另一会话的 LA3「损坏记录」期望，待其收口后复验。
 
 ## 2026-10-25 YT4-P2/P3：TOML 与 string 测试迁入库内
@@ -225,12 +225,12 @@
   resources/reference/install/complexity；`tests/string/run.py` 默认组改为
   model/interop/resources。记录见
   [YT4-P3](01-finished/yh-YT4-P3-string迁移-2026-10-25.md)。
-- **门禁**：`make test` **94.9s → 56.8s**（json/toml/string 三批迁移合计
+- **门禁**：`just test` **94.9s → 56.8s**（json/toml/string 三批迁移合计
   −38.1s）；`make libs-test` 66 passed + cli/os/libc 全绿；`yh -O2 test`
   66 passed；`make test-string` 26.6s → **16.7s**；`make test-toml`
   4.8s。arch-check 的 `max_build_lines` 因并发会话的 PC3 落地 +6
   （10730 → 10736）同步并注明理由。
-- **未复验**：`make selfhost-native` 停在
+- **未复验**：`just selfhost-native` 停在
   `tests/selfhost/llvm-function-cache.py` 的「损坏记录」期望
   （`(4,1,4)` vs 实际 `(5,0,5)`）；该脚本与 `compiler/ir/ssa_module_40*`、
   `module_snapshot_lower_cache*` 正被另一会话改动（PC 工作 WIP），
@@ -244,13 +244,13 @@
   并 `unlink` 清理。断言对照表见
   [YT4-P1 迁移记录](01-finished/yh-YT4-P1-json迁移-2026-10-25.md)。
 - **删除**：5 个纯断言夹具（jsonstrings/numbers/containers/errors/files）、
-  `tests/json/run.py`、`tests/json/` 与 `make test-json` 目标；`make test`
+  `tests/json/run.py`、`tests/json/` 与 `make test-json` 目标；`just test`
   不再跑 json runner。
 - **保留**：`jsonmodel` 作为公开面/链接 smoke，`build-check.py` 新增
   `j1-json-model`（`stdlib-run`，期望 `json model ok`）。
 - **验证**：`yh test json` 12/12；`make libs-test` 45 passed
-  （33 + 12）+ cli/os/libc 全绿；`make test` **94.9s → 76.9s**；
-  `make selfhost-native` 188.7s，project cases **128/128**；`git diff --check`
+  （33 + 12）+ cli/os/libc 全绿；`just test` **94.9s → 76.9s**；
+  `just selfhost-native` 188.7s，project cases **128/128**；`git diff --check`
   通过。
 
 ## 2026-10-25 YT4-0：libs 测试统一入口与 `yh test` 并发串行化
@@ -265,7 +265,7 @@
   串行化；持有者退出后按 `kill(pid, 0)` 清理陈旧锁，等待上限约 30 秒；
   `--list` 不建锁，`--no-run`/正常结束释放锁。arch-check 的
   `max_testkit_lines` 1515 → 1592（说明：同项目测试锁）。
-- **门禁入口**：`make test` 与 `make selfhost-native` 的 4/3 次按模块
+- **门禁入口**：`just test` 与 `just selfhost-native` 的 4/3 次按模块
   `yh test` 改为一次无选择器 `yh test --timeout 60`（33 例 3.0s）；新增
   `make libs-test`（缺测试提示 + `yh test` + `libs/cli/test/run.py` +
   `cli/test/diff.py` + `libs/os/test/run.py` + `libs/libc/test/run.py`）与
@@ -278,12 +278,29 @@
   [yh-test 测试布局与运行约定](03-design/yh-test测试布局与运行约定-2026-10-25.md)
   （文件命名/排序、平台文件、粒度、`/tmp` 资源、并发锁、门禁职责）；
   YT4 规划 §7.2/§8 同步为已交付，`docs/todo.md` 关闭 YT2d-3 与 YT4-0。
-- **验证**：`make test` 94.9s 绿；`make selfhost-native` 205s（两代固定点、
+- **验证**：`just test` 94.9s 绿；`just selfhost-native` 205s（两代固定点、
   自解析、项目用例 **127/127**）绿；`make libs-test` 36s（cli/diff/os/libc
   全绿）、`make libs-test-o2` 11s（33 例）；`tests/modules/test-check.py`
   34 项通过；`make test-compiler-tests` 3/3；同项目 4 并发 `yh test string`
   全部 5 passed；陈旧锁（pid 不存在）自动清理。
 
+
+## 2026-10-26 just 迁移后的门禁复核（+ 修 Darwin/ARM64 守卫）
+
+构建入口已由并行会话从 Makefile 迁到 **justfile**（`830d1d5`），本轮性能工作的门禁证据
+需要在新入口下重跑：
+
+- `just arch-check` 0.42 s ✅（预算 10786，未再增长）
+- `just test` **0 FAIL** ✅
+- `just selfhost-native` ✅（项目用例 **122/122**、LA3 缓存矩阵 O0/O2、两代固定点、自解析；
+  用例数 124 → 122 是同期 YT4 迁移删掉旧夹具所致）
+- `just test-llvm-darwin` ✅ —— **先修了迁移 bug**：`just` 的 `arch()` 在 macOS 返回
+  `aarch64`，而该门与 `selfhost-llvm-darwin` 的守卫拿它与 `arm64` 比较，在 Darwin/ARM64
+  上直接报「要求 Darwin/ARM64」拒绝执行；改用已归一化的 `seed_arch`（2 处）。
+
+同轮把 `docs/finish.md` 本轮条目、`docs/todo.md` 的 PC 条目、分析文档 §14 里的命令从
+`make …` 同步为 `just …`（历史条目保持原样），并立项 RB1（worker 父死子退）、
+RB2（门禁校验 staged 二进制新鲜度），修掉 RB3、复核 RB4。
 
 ## 2026-10-26 PC7a：大二进制改用 (size, mtime_ns) 身份哈希
 
@@ -301,7 +318,7 @@
 - **未动的部分**：`link-libs.manifest` 的归档摘要缓存本来就有效；剩余 ~0.5 s 是模块级
   `.o` 与 lld 的固定成本，属 PC7（函数级目标文件）范围。
 - **预算**：`max_build_lines` 10761 → 10786（PC7a 共享 helper 与两处调用 +25）。
-- **门禁**：`make test`、`make selfhost-native`（124/124、LA3 O0/O2）、`make test-llvm-darwin`、
+- **门禁**：`just test`、`just selfhost-native`（124/124、LA3 O0/O2）、`just test-llvm-darwin`、
   `arch-check` 全绿。
 
 ## 2026-10-26 性能目标收口（A3 + B，滚种子推迟）
@@ -320,7 +337,7 @@
   但与 PC7 独立，需先决定是否接受 make/ninja 级 mtime 信任。
 - **滚种子（PC3b）推迟**：三套门禁绿，但工作区有并行会话未提交改动
   （libs/json、testkit、.gitea、tests/toml），现在滚会一并烘进种子；等其落地后由用户确认。
-- **门禁**：`make test`、`make selfhost-native`（124/124、LA3 O0/O2）、`make test-llvm-darwin`、
+- **门禁**：`just test`、`just selfhost-native`（124/124、LA3 O0/O2）、`just test-llvm-darwin`、
   `arch-check` 全绿（本轮仅文档改动，未再动 `compiler/`）。
 
 ## 2026-10-26 PC2 v3：check 切片复用恢复（并修掉一个自旋死循环）
@@ -342,8 +359,8 @@
   并行会话的门禁（用旧的 staged 二进制）也一起卡死。`sample` 直接指到
   `checked_slice_capture`。修复：两个循环共用同一谓词。教训：同一份数据的「算尺寸」
   与「写字节」必须共用条件，否则先溢出再自旋，日志上什么都看不到。
-- **门禁**：`make test`、`make selfhost-native`（项目用例 **124/124**、LA3 O0/O2、
-  两代固定点）、`make test-llvm-darwin`、`arch-check` 全绿。
+- **门禁**：`just test`、`just selfhost-native`（项目用例 **124/124**、LA3 O0/O2、
+  两代固定点）、`just test-llvm-darwin`、`arch-check` 全绿。
 - **预算**：`max_build_lines` 10736 → 10761（PC2 v3 装载 +5、PC2b 回收 +20），
   原因即本条。
 
@@ -361,7 +378,7 @@
   （`gen` 201/201、`build` 268/268，`ir_functions` 数随并行改动略变）。
 - **测试**：`tests/modules/projects/llvmmodule` 新增三条断言（同内容合并、布局不同
   另起编号、名义名不同不合并），`llvm-module-ownership` 用例通过；
-  `llvm-function-cache.py` O0/O2 矩阵通过；`make test` 73 s 绿。
+  `llvm-function-cache.py` O0/O2 矩阵通过；`just test` 73 s 绿。
 - 说明：IR 层去重是纯收益（类型表更小、编号可比），不改变序列化/合并格式。
 
 ## 2026-10-25 PC4：capture 归因与校验去重
@@ -380,15 +397,15 @@
   `yh test string` 的 libs 构建在 lowering 阶段报
   `memory/memory.yh:5:19 alloc: 首片不支持此语句或表达式`，机制未定位
   （怀疑 `ir_fc_mark_symbol`/`ir_fc_visit_type` 对越界下标写 scratch），因此整体回退。
-- **门禁**：`make test` 100 s、`make selfhost-native` 228 s（项目用例 **128/128**、
-  LA3 缓存矩阵 O0/O2）、`make test-llvm-darwin` 42 s 全绿。
+- **门禁**：`just test` 100 s、`just selfhost-native` 228 s（项目用例 **128/128**、
+  LA3 缓存矩阵 O0/O2）、`just test-llvm-darwin` 42 s 全绿。
 - **环境**：门禁期间磁盘被 tmp 副本写满（`No space left on device`）导致一次
   `selfhost-native` 假失败；已清理约 6.5 GB 临时副本（`tmp/pc*`、`tmp/modcheck`、
   `tmp/yh-test`、`tmp/faststage`）。
 
 ## 2026-10-25 PC3：全冷构建不写函数级缓存
 
-- **动机**：`make` 每轮 `rm -rf compiler/.build`，冷编里 `capture`（每函数序列化
+- **动机**：`just` 每轮 `rm -rf compiler/.build`，冷编里 `capture`（每函数序列化
   迷你 IRModule）是纯成本；PC1 后单模块记录已从 28.7 MB 降到 8.4 MB，但冷编仍要
   为 1459 个函数全部写一遍。
 - **判据**：`<build>/manifest/link.manifest` 是「上一轮构建完成」的哨兵。它不存在
@@ -400,12 +417,12 @@
 - **结果**（候选 `./yh` 冷编 `compiler/`）：**23.9 s → 14.8 s（−38%）**，
   `.fir` 写入 1459 → **0**；冷编后首次改一个函数 6.4 s（缓存为空，全 miss 并落盘），
   再次改动 4.7 s（200/201 命中）。热编无改动不变（~2.4 s）。
-- **注意**：`make`（种子 `bin/yh-darwin-arm64` 编 `compiler/`）仍是 24.6 s，因为
-  种子还是旧编译器；**滚种子后 `make` 才会拿到这 −38%**。本次不滚种子：工作区
+- **注意**：`just`（种子 `bin/yh-darwin-arm64` 编 `compiler/`）仍是 24.6 s，因为
+  种子还是旧编译器；**滚种子后 `just` 才会拿到这 −38%**。本次不滚种子：工作区
   里有并行会话未完成的 `testkit` 改动，滚进去会污染种子。
 - **架构预算**：`build` +10 行（PC3 判据与读写分离的判据注释），
   `tools/arch-check.py` 的 `max_build_lines` 10720 → 10730（原因即本条）。
-- **门禁**：`make test` 88 s、`make test-llvm-darwin` 36 s、`make selfhost-native`
+- **门禁**：`just test` 88 s、`just test-llvm-darwin` 36 s、`just selfhost-native`
   206 s（LA3 缓存矩阵 O0/O2、项目用例 **127/127**、新增的 `pc1-function-cache-hits`
   五条断言含 `cold-no-write`）全绿。
 
@@ -429,7 +446,7 @@
   单函数改动 6.7–7.7 s → **4.2 s（200/201）**；`firc/yh-gen` 1206 记录/49 MB →
   **201/8.4 MB**；「清 `.build` 保留 `firc`」从内部错误变为 13.6 s 正常完成；
   冷编 23.9 s（`capture` 全量写入属 PC3）。
-- **门禁**：`make test` 78 s、`make test-llvm-darwin` 34 s、`make selfhost-native`
+- **门禁**：`just test` 78 s、`just test-llvm-darwin` 34 s、`just selfhost-native`
   224 s（两代固定点、自解析、LA3 缓存矩阵 O0/O2、项目用例 **127/127**）全绿；
   新增模块用例 `pc1-function-cache-hits`（冷编全 miss / 等价重编全命中 /
   单函数改动只失效该函数）。残留：类型 interning 去重（PC1b）、check 切片 v3。
@@ -439,18 +456,18 @@
 - **现象**：`cd compiler && ../bin/yh-darwin-arm64 build` 编完 13 个模块后链接失败，
   `ld64.lld: undefined symbol: __ZdlPv … referenced 32483 more times`（C++ 符号）。
 - **根因**：C++ 运行库参数 `-lc++` 只存在于 `selfhost-runtime.txt`，由
-  `tools/seed-build.py` 以 `YH_LINK_RUNTIME_FLAGS` 注入，所以只有 `make` 路径能链接；
+  `tools/seed-build.py` 以 `YH_LINK_RUNTIME_FLAGS` 注入，所以只有 `just` 路径能链接；
   而且即使补上 `-lc++`，随编译器分发的 SDK stub 也不含 libc++（`usr/lib` 只有
   `libSystem.tbd`）。
 - **修复**：`tools/llvm-darwin-host.py prepare` 把宿主 SDK 的
   `usr/lib/libc++.tbd` 复制进构建机闭包并记 `host.json.cxx_tbd`/`_sha256`，
   `tools/link-closure.py` 生成 `[link-darwin-arm64].cxx`；闭包已带 stub 时
   prepare 从运行库文件里去掉 `-lc++`，避免重复。`tools/link-closure.py check`
-  接进 `make test-llvm-darwin`；`tests/selfhost/llvm-darwin-host.py` 新增
+  接进 `just test-llvm-darwin`；`tests/selfhost/llvm-darwin-host.py` 新增
   stub 复制、运行库过滤、无 stub 回退三条契约（用显式目录注入，不动真实闭包）。
 - **验证**：`cd compiler && ../bin/yh-darwin-arm64 build`（无 SDKROOT、无
-  `YH_LINK_RUNTIME_FLAGS`，清 `.build`）成功，22.0 s；`make` 冷编 25.1 s；
-  `make test`（110 s）与 `make test-llvm-darwin`（36 s）全绿。
+  `YH_LINK_RUNTIME_FLAGS`，清 `.build`）成功，22.0 s；`just` 冷编 25.1 s；
+  `just test`（110 s）与 `just test-llvm-darwin`（36 s）全绿。
 
 ## 2026-10-25 编译器性能首轮归因
 
@@ -488,7 +505,7 @@
   后报错且无 `.part` 残留；`build-check.py` 全量门中 u1 用例通过（同轮其余
   失败是本地未导出 SDKROOT 导致的 `-lm` 链接环境问题）；头行正则对
   arm64/x64/非法版本与架构自测通过。工作区另有并行未提交的 B3 重构，未跑
-  完整 `make test` / `make selfhost-native` 以免混入他人改动。
+  完整 `just test` / `just selfhost-native` 以免混入他人改动。
 
 ## 2026-10-25 `lower` 独立（B3-1/B3-2）
 
@@ -501,7 +518,7 @@
   新入口 `checked_decl_restore`（探针不再直接读写 ast 模块级数组）。
 - **数字**：`ast` 9,041 → **3,278**（−63.7%），`lower` **5,815**，模块 12 → 13，
   依赖边 33 → 37，总行数 52,342 → 52,398，`gen.G()` 仍 165、全局 `let` 仍 183。
-- **验证**：`make` / `make test` / `make selfhost-native`（project 126/126、固定点
+- **验证**：`just` / `just test` / `just selfhost-native`（project 126/126、固定点
   逐字节一致）全绿；`make arch-check` 通过。
 - **顺带**：`tests/modules/projects/llvmlower/main/main.yh` 改 `import core.lower;`，
   `tests/modules/build-check.py` 与 `tests/selfhost/llvm-lower.py` 的模块拷贝列表
