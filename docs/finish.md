@@ -5,6 +5,24 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-25 CI 修复：TOML 语料下载重试 + x64 接口头断言
+
+- **现象**：Gitea `ci.yml` run 142（同样见 run 210）三端红：darwin-arm64 与
+  linux-arm64 都停在 `tests/toml/conformance.py --prepare`，linux-x86_64 报
+  `FAIL u1-attribute-free-iface-keeps-v1`。
+- **根因**：① 语料下载只尝试一次，GitHub 归档连接偶发
+  `UNEXPECTED_EOF_WHILE_READING` / `RemoteDisconnected` 就让门禁变红；
+  ② 接口头断言写死 `arch=arm64`，而 A0c2 起头行架构随目标写入，x86_64
+  目标的合法头行是 `arch=x64`。
+- **修复**：`tests/toml/conformance.py` 新增 `download_archive`（`.part` 原子
+  改名 + 4 次退避重试，失败转可读诊断）；`tests/modules/build-check.py` 的
+  u1 断言改为 `// yh-iface v1 arch=(arm64|x64) suffix=` 正则，不再绑定单一架构。
+- **验证**：`conformance.py --prepare` 真实下载通过；本地模拟断连时重试 2 次
+  后报错且无 `.part` 残留；`build-check.py` 全量门中 u1 用例通过（同轮其余
+  失败是本地未导出 SDKROOT 导致的 `-lm` 链接环境问题）；头行正则对
+  arm64/x64/非法版本与架构自测通过。工作区另有并行未提交的 B3 重构，未跑
+  完整 `make test` / `make selfhost-native` 以免混入他人改动。
+
 ## 2026-10-24 yh 字符串插值 I4 收口
 
 - **实现**：`string.View` 插值、O2 正例、`--syntax-check` 插值语法模式；

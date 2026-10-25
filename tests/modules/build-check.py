@@ -23,6 +23,7 @@ usage: python3 tests/modules/build-check.py [--compiler-path ./yh]
 import argparse
 import concurrent.futures
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -1510,8 +1511,11 @@ def main():
                    "r2b-session-interface-commit",
                    f"持久接口提交或本轮临时接口清理失败: "
                    f"persistent={len(persisted)}, session={len(session_files)}")
-            plain_v1 = all(p.read_text().startswith(
-                "// yh-iface v1 arch=arm64 suffix=") for p in persisted)
+            # 头行架构随目标走（arm64/x64），用例只看「v1 且无属性扩展」：
+            # 架构标记必须是支持值之一，但不得写死 arm64（x86_64 目标是 arch=x64）。
+            plain_v1 = all(
+                re.match(r"// yh-iface v1 arch=(arm64|x64) suffix=",
+                         p.read_text()) for p in persisted)
             report(plain_v1, "u1-attribute-free-iface-keeps-v1",
                    "无属性公开接口没有保持 v1 头行")
             if built.exists():

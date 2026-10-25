@@ -17,6 +17,7 @@
 import argparse
 import datetime
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -25,6 +26,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import time
 import urllib.request
 from pathlib import Path
 
@@ -36,6 +38,28 @@ CORPUS_URL = ("https://github.com/toml-lang/toml-test/archive/refs/tags/"
               f"v{CORPUS_VERSION}.tar.gz")
 DEFAULT_CORPUS = ROOT / "tmp" / "toml" / f"toml-test-{CORPUS_VERSION}" / "tests"
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "tomltestdecoder"
+# 下载重试次数：GitHub 归档下载在 CI 里偶发 TLS 提前断开/连接重置，单次失败
+# 不应让整条门禁变红（2026-10-25 darwin-arm64 与 linux-arm64 均因此失败）。
+DOWNLOAD_ATTEMPTS = 4
+
+
+def download_archive(url: str, dest: Path) -> None:
+    """下载到 .part 后原子改名；连接异常时退避重试，全部失败则抛出。"""
+    last: Exception | None = None
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        part = dest.with_name(dest.name + ".part")
+        try:
+            print(f"下载 {url}（第 {attempt}/{DOWNLOAD_ATTEMPTS} 次）")
+            with urllib.request.urlopen(url, timeout=120) as response:
+                part.write_bytes(response.read())
+            part.replace(dest)
+            return
+        except (urllib.request.URLError, OSError, http.client.HTTPException) as error:
+            last = error
+            part.unlink(missing_ok=True)
+            if attempt < DOWNLOAD_ATTEMPTS:
+                time.sleep(2 * attempt)
+    raise RuntimeError(f"下载失败（已重试 {DOWNLOAD_ATTEMPTS} 次）: {last}")
 
 
 def prepare() -> int:
@@ -44,9 +68,11 @@ def prepare() -> int:
     work.mkdir(parents=True, exist_ok=True)
     archive = work / f"toml-test-v{CORPUS_VERSION}.tar.gz"
     if not archive.exists():
-        print(f"下载 {CORPUS_URL}")
-        with urllib.request.urlopen(CORPUS_URL, timeout=120) as response:
-            archive.write_bytes(response.read())
+        try:
+            download_archive(CORPUS_URL, archive)
+        except RuntimeError as error:
+            print(error)
+            return 1
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     if digest != CORPUS_SHA256:
         print(f"语料 SHA-256 不匹配: {digest}")
