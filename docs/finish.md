@@ -285,6 +285,21 @@
   全部 5 passed；陈旧锁（pid 不存在）自动清理。
 
 
+## 2026-10-26 RB1（worker 父死子退）+ PF0/PF1（冻结语料与基线工具）
+
+- **RB1**：`module_worker` 在 fork 后记录父 pid（`mb_worker_parent_set`），并在函数入口与
+  整模块发射前检查 `getppid()`（`mb_worker_parent_alive`），父进程不在即退出。
+  实测：构建到 0.6 s 时 `kill -9` 父进程，4 个在跑的 worker **2.2 s 内全部退出**；此前
+  中断的构建会留下 `ppid=1` 的孤儿继续烧 CPU（曾把 load 推到 195 并连带卡死其它门禁）。
+  预算：`max_build_lines` 10786 → 10807（RB1 +19，含 `getppid` extern）。
+- **PF0/PF1**：新增 `tools/perf-baseline.py`，把 `compiler/` 复制成冻结语料并记录清单
+  SHA-256，跑冷编 / 全量重编（含写缓存）/ 热编 / 单函数改动四个场景，逐轮记录墙钟、
+  父进程阶段耗时、load1、IR/check 命中与 `.fir` 写入量，写 `tmp/perf/<run-id>/{raw.json,report.md}`；
+  `--ab PATH` 支持 A/B 成对交错与变化率。
+  首份基线（load≈4–5，3 轮）：冷编 **10.3 s**（schedule 8.2 + object 0.5 + link 1.1）、
+  全量重编 **16.1 s**、热编 **0.98 s**、单函数改动 **3.59 s**（IR 204 / check 38 命中）。
+- 均未改编译器语义；`just test` / `just selfhost-native` / `arch-check` 复跑全绿。
+
 ## 2026-10-26 PC3b：滚种子（冷编 23.0 s → 11.0 s）
 
 - **前置**：`just arch-check` / `just test`（0 FAIL）/ `just selfhost-native`（122/122、LA3 O0/O2）/
@@ -300,6 +315,7 @@
 - 顺带修（迁移 bug）：`_prepare` 是 `[private]` 且排在文件最前，`just` 的「第一个 recipe」规则
   让**裸 `just` 只跑 `_prepare`（空操作）**——`yh` 不存在时也不重建（实测 0.12 s、0 模块）。
   把 `default` / `all` 移到 `_prepare` 之前后，裸 `just` 恢复「源比 yh 新时冷编」（实测 11.40 s、13 模块）。
+- **RB1 之后再次滚动**（同一轮内）：`ea24f659…` → **`e52d208ccd03a96044e4c93d2c74d8913bfdec9fcf10c41ecb12348baa784e70`**，使种子与「带 worker 父存活检查」的当前源码一致；门禁在同一源码上已全绿。
 - 说明：种子不入库（`bin/` 由 `just fetch-seed` 获取），本次滚动只影响本机 `bin/`，哈希文件供校验。
 
 ## 2026-10-26 just 迁移后的门禁复核（+ 修 Darwin/ARM64 守卫）
