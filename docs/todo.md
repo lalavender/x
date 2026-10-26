@@ -46,6 +46,42 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   所需全部能力并达固定点后，才允许移除失去用途的旧入口；R2b 的线程池/文件对象/
   增量验收另外完成。
 
+## yh 命令行用 cli 重写（CLI-R，2026-10-27 方案）
+
+方案见[用 cli 标准库重写 yh 命令行](02-plan/yh-CLI用cli标准库重写实施方案-2026-10-27.md)：
+声明与解析收进 `libs/cli`，删除 `driver.yh` 的手写扫描与逐行 `usage()`，新形态与
+现有调用面逐字节等价（`--emit-module` 内部协议豁免）。实施前需拍板方案 §8 的 5 条
+取舍（段标题中文、全局选项双位置、legacy 别名、裸 `yh` 退出码、`--filter` 单值）。
+
+- [x] **CLI-R0 cli 前置**（2026-10-27 完成）：`HelpFormat` 增加
+  `section_positional/options/commands` 段标题（空指针用英文默认），
+  `build_help_text` 改读字段；用例 51 → 52。
+- [x] **CLI-R1 金标工具**（2026-10-27 完成）：`tools/cli-golden.py`，36 条 argv
+  （正常/组合/单文件/错误四组），独立 fixture 冷跑 + 归一化比较；当前 36/36。
+- [ ] **CLI-R1a 自举快照门扩展（R1 前置）**：编译器 import 标准库后，种子构建会
+  额外发布 `iface/yh_libs-{cli,io,os,memory,string,sys}.s.i/.s.ct` 与
+  `llvm/yh_libs-*.ll`，而 `tests/selfhost` 的期望集只按 compiler 自身模块生成。
+  二选一：按 import 闭包把它们加入期望集，或规定「外部项目模块只编译不发布产物」。
+  证据与基线核对见方案 §12。
+- [ ] **CLI-R1b 标准库依赖机制（R1 前置）**：编译器项目如何引用 `libs/cli`——
+  `[dependencies] libs = {path="../libs"}` + `import libs.cli`，还是依赖默认标准库
+  搜索；暂存目录里的二进制找不到默认 libs（`tools/compiler-tests.py` 需 `YH_STDLIB`）。
+- [ ] **CLI-R1c lowering 限制（R1 前置）**：紧跟聚合 `let` 的结构体字段赋值会触发
+  「首片不支持此聚合初始化形态」；临时绕过是 hoist 到局部，长期需在 lowering 侧支持。
+- [ ] **CLI-R1 骨架**：新增 `compiler/cmdline/`（`module cmdline`：子命令/选项/
+  `inherit` 全局 parent → `CliRequest`），`driver.yh` 只做分派。原型已跑通
+  （方案 §12，补丁在 `tmp/cli-migration/cli-r1-prototype.patch`），等 R1a–R1c 收口。
+- [ ] **CLI-R2 单文件形态迁移**：`--syntax-check`、`--emit-asm`、`-o` 两种次序、
+  `--emit-llvm` 全走 cli 结果，删除 `n == 2 / n == 3` 形态判断。
+- [ ] **CLI-R3 项目命令迁移**：`build/check/run/list/version/test` 的选项扫描改由 cli；
+  `--link`=`append`、`--timeout` 整型 + 1..3600 validator、`--backend`=`choices`、
+  `-O0/-O2` 互斥组；`api_*` 改为接收请求结构。
+- [ ] **CLI-R4 帮助与诊断收敛**：删 `usage()`，`yh --help`/`yh <cmd> --help` 由 cli
+  生成（中文段标题）；未知选项/缺值/互斥冲突统一走 cli 诊断；修正 tests 里对
+  usage 文本的断言。
+- [ ] **CLI-R5 收尾**：删 `drv_scan_target`/`drv_has_link_option` 等手写扫描；
+  legacy 别名保留且不告警；更新 `AGENTS.md` 使用段与设计文档；全绿后 `just seed`。
+
 ## 2026-10-21 重规划说明
 
 本轮按「LLVM 收尾完成 → 发布质量 → 标准库与工具链 → 后续任务 → 待决策」重排：

@@ -5,6 +5,27 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-27 CLI-R0：cli 段标题可配置 + yh CLI 等价性金标
+
+- **libs/cli**：`HelpFormat` 增 `section_positional`/`section_options`/
+  `section_commands`（空指针沿用英文默认），`help.yh` 的 `put_title` 改读字段；
+  这样 yh 重写命令行时能保留中文帮助段标题。用例 51 → 52。
+- **tools/cli-golden.py**（新）：同一批 argv 分别交给旧/新编译器，比较退出码 +
+  归一化输出（路径占位、`time_*` 归零、`yh-stats` 值隐藏、`[编译]/[缓存]…`
+  进度行按多重集合）；每个用例在独立 fixture 副本里冷跑。
+  当前 36 条用例 **36/36 通过**，其中 6 条是「新实现多打印一条诊断」的宽松项。
+- **规划**：新增 `docs/02-plan/yh-CLI用cli标准库重写实施方案-2026-10-27.md`
+  （现状盘点 + 目标形态 + 六期切片 + 金标设计 + 风险）；`docs/todo.md` 增 CLI-R0…R5。
+- **R1 原型（未入库）**：`cmdline` 模块 + cli 解析 + 分派改造在本机跑通
+  （`cli-golden` 36/36、`just test` 全绿、arch-check 通过：main 307 行、新模块
+  568 行并登记 `cmdline -> libs`），但 `just selfhost-native` 在「cc2 产物集合」
+  处失败：编译器 import 标准库后，种子构建会额外发布 6 个 `yh_libs-*` 模块的
+  `iface/.s.i` 与 `llvm/.ll`；同一seed 构建未改动 HEAD 时集合完全一致（0 多余/0 缺失），
+  证明差异来自新增的标准库依赖。三条前置问题与收口方式记在方案 §12，
+  原型补丁留在 `tmp/cli-migration/cli-r1-prototype.patch`。
+- **验证**：`cd libs && yh test` = 131 passed（cli:: 52）；`just test` 全绿
+  （含 arch-check 自测与真实树）。
+
 ## 2026-10-27 CLI-G 调查：帮助宽度自动被 C ABI 挡住（不改代码）
 
 目标：让 `HelpFormat.width = 0` 表示「取终端宽度 − 2」（argparse 行为）。结论是
