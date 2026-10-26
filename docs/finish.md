@@ -5,6 +5,29 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-27 CLI-R1：yh 命令行改用 libs/cli 解析（入库）
+
+- **新模块 `compiler/cmdline/`**（`module cmdline`，568 行）：`CliRequest` + 两个 parser
+  （project：`build/check/run/test/list/version`；file：`--syntax-check`/`--emit-asm`/`-o`），
+  全局选项（`--target/-target`、`--backend`、`-O0/-O2`、`--emit-llvm`、`--stats`、
+  `--legacy-system`）声明在公共 parent 再 `inherit`，保持「子命令前后都能写」。
+- **`cmd` 回到薄壳**：`api_*` 接收请求结构；`mb_cmd_build/run/list`、
+  `mb_run_test_command` 删除 argv 扫描、改接收已解析字段；`driver.yh` 只做
+  「请求 → 全局状态 → 分派」，`usage()` 移入 cmdline。`main` 307 行（预算 381 内）。
+- **依赖与门禁**：`compiler/project.toml` 增 `[dependencies] libs = {path = "../libs"}`，
+  `cmdline` 用 `import libs.cli`（绑定名仍 `cli`）；arch-check 登记
+  `cmdline -> libs`、`main -> cmdline`。`tools/selfhost_snapshot_gate.py` 增
+  `follow_dependencies` 开关与 `dependency_artifacts()`（依赖模块产物「允许出现但
+  不要求」），`native-selfhost.py` 只要求本地模块齐全。
+- **等价性**：`tools/cli-golden.py` 36 条 argv **36/36 通过**（6 条宽松项为
+  「新实现多打印一条诊断」）。
+- **踩坑记录**：切换编译器后必须清 `compiler/.build`——混用不同版本的对象/接口会给出
+  假诊断（把在用函数报成「函数未使用」、`-target linux` 的别名判定走错分支）。
+- **验证**（种子 `bin/yh-darwin-arm64`，`YH_LLVM_HOST=0` + `tmp/llvm-migration` 软链）：
+  `just test` 全绿；`just selfhost-native` 全绿（模块固定点 42 个产物一致、cc4 自解析
+  120 文件、CLI 冒烟、运行语料 360/361）；`just libs-test` 全绿；
+  `python3 tools/cli-golden.py` 36/36。
+
 ## 2026-10-27 CLI-R0：cli 段标题可配置 + yh CLI 等价性金标
 
 - **libs/cli**：`HelpFormat` 增 `section_positional`/`section_options`/

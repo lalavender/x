@@ -47,8 +47,11 @@ ALLOWED = {
     # testkit：语言内测试执行器（yh test 子命令的实现），位于 build 之上。
     # 模块名不能叫 test——`test "..." {}` 是语言关键字。
     "testkit": {"gen", "parse", "build"},
+    # cmdline：命令行声明与解析（CLI-R）。唯一允许依赖标准库 libs/cli 的模块，
+    # 这样 `cmd`（module main）自身保持「参数映射 + 调用面」，不直接引标准库。
+    "cmdline": {"gen", "libs"},
     "main": {"gen", "lex", "comptime", "ast", "check", "parse", "ir",
-             "backend", "builtin", "build", "testkit", "lower"},
+             "backend", "builtin", "build", "testkit", "lower", "cmdline"},
 }
 
 # —— 预算（现状即上限，只减不增）——

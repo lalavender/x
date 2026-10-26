@@ -58,24 +58,32 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   `build_help_text` 改读字段；用例 51 → 52。
 - [x] **CLI-R1 金标工具**（2026-10-27 完成）：`tools/cli-golden.py`，36 条 argv
   （正常/组合/单文件/错误四组），独立 fixture 冷跑 + 归一化比较；当前 36/36。
-- [ ] **CLI-R1a 自举快照门扩展（R1 前置）**：编译器 import 标准库后，种子构建会
-  额外发布 `iface/yh_libs-{cli,io,os,memory,string,sys}.s.i/.s.ct` 与
-  `llvm/yh_libs-*.ll`，而 `tests/selfhost` 的期望集只按 compiler 自身模块生成。
-  二选一：按 import 闭包把它们加入期望集，或规定「外部项目模块只编译不发布产物」。
-  证据与基线核对见方案 §12。
-- [ ] **CLI-R1b 标准库依赖机制（R1 前置）**：编译器项目如何引用 `libs/cli`——
-  `[dependencies] libs = {path="../libs"}` + `import libs.cli`，还是依赖默认标准库
-  搜索；暂存目录里的二进制找不到默认 libs（`tools/compiler-tests.py` 需 `YH_STDLIB`）。
-- [ ] **CLI-R1c lowering 限制（R1 前置）**：紧跟聚合 `let` 的结构体字段赋值会触发
-  「首片不支持此聚合初始化形态」；临时绕过是 hoist 到局部，长期需在 lowering 侧支持。
-- [ ] **CLI-R1 骨架**：新增 `compiler/cmdline/`（`module cmdline`：子命令/选项/
-  `inherit` 全局 parent → `CliRequest`），`driver.yh` 只做分派。原型已跑通
-  （方案 §12，补丁在 `tmp/cli-migration/cli-r1-prototype.patch`），等 R1a–R1c 收口。
-- [ ] **CLI-R2 单文件形态迁移**：`--syntax-check`、`--emit-asm`、`-o` 两种次序、
-  `--emit-llvm` 全走 cli 结果，删除 `n == 2 / n == 3` 形态判断。
-- [ ] **CLI-R3 项目命令迁移**：`build/check/run/list/version/test` 的选项扫描改由 cli；
-  `--link`=`append`、`--timeout` 整型 + 1..3600 validator、`--backend`=`choices`、
-  `-O0/-O2` 互斥组；`api_*` 改为接收请求结构。
+- [x] **CLI-R1a 自举快照门扩展**（2026-10-27 完成）：`expected_artifacts`/
+  `expected_llvm_artifacts` 增 `follow_dependencies` 开关，新增 `dependency_artifacts()`
+  作为「允许出现但不要求」的集合，`snapshot_errors(..., allowed=)` 据此判多余产物；
+  `native-selfhost.py` 只要求本地模块齐全。背景：编译器 import 标准库后，种子构建会
+  额外发布 `iface/yh_libs-*.s.i/.s.ct` 与 `llvm/yh_libs-*.ll`。
+- [x] **CLI-R1b 标准库依赖机制**（2026-10-27 完成）：`compiler/project.toml` 用
+  `[dependencies] libs = {path = "../libs"}`，`cmdline` 用跨项目导入
+  `import libs.cli`（绑定名仍为 `cli`）；暂存目录里的二进制不再依赖默认标准库搜索。
+- [x] **CLI-R1c lowering 限制**（2026-10-27 绕过）：紧跟聚合 `let` 的结构体字段赋值会触发
+  「首片不支持此聚合初始化形态」；落地时把 `Value`/`Default` hoist 到局部并去掉多余的
+  `suppress_default()`。**建议另立项**在 lowering 侧支持该形态。
+- [x] **CLI-R1 骨架**（2026-10-27 完成）：`compiler/cmdline/`（`module cmdline`，
+  `CliRequest` + project/file 两个 parser + `inherit` 全局 parent）；`api_*` 改接收
+  请求结构，`build`/`testkit` 删除选项扫描；`driver.yh` 只做分派（main 307 行，
+  arch-check 登记 `cmdline -> libs`/`main -> cmdline`）。证据见方案 §12。
+- [ ] **CLI-R1d lowering 聚合初始化（独立缺陷）**：`let x T = f()` 之后紧跟
+  `x.<struct字段> = <聚合表达式>` 会报「首片不支持此聚合初始化形态」（cli 声明里
+  踩到；临时靠 hoist 绕过）。在 `lower/module_snapshot_lower_place.yh` 的
+  `checked_lower_aggregate_store` 路径上支持该形态，并补最小用例。
+- [x] **CLI-R2 单文件形态迁移**（2026-10-27 随 R1 完成）：`--syntax-check`、
+  `--emit-asm`、`-o` 两种次序、`--emit-llvm` 全走 cli 结果，`n == 2 / n == 3`
+  的形态判断已删除（由 file parser + 模式位互斥表达）。
+- [x] **CLI-R3 项目命令迁移**（2026-10-27 随 R1 完成）：六个命令的选项扫描改由 cli
+  声明；`--link` 用 `append`、`--timeout` 用整型（范围在 driver 校验 1..3600）、
+  `-O0/-O2` 共用 `opt` dest 实现「最后出现者生效」（不是互斥组，保持旧语义）、
+  `--backend` 在 driver 校验取值；`api_*` 各函数改接收 `cmdline.CliRequest`。
 - [ ] **CLI-R4 帮助与诊断收敛**：删 `usage()`，`yh --help`/`yh <cmd> --help` 由 cli
   生成（中文段标题）；未知选项/缺值/互斥冲突统一走 cli 诊断；修正 tests 里对
   usage 文本的断言。
