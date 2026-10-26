@@ -232,7 +232,7 @@ fn register_help(state *parser_state) int {
 
 // new_state 分配并初始化一个 parser 状态；parent 非空表示子命令 parser。
 // 失败返回空指针，成功的状态由调用方交给公开句柄或父 parser 拥有。
-fn new_state(config ParserConfig, parent *parser_state, command_name *char) *parser_state {
+fn new_state(config ParserConfig, parent *parser_state) *parser_state {
     if (config.prog == 0 || config.prog[0] == 0) {
         return 0
     }
@@ -265,9 +265,7 @@ fn new_state(config ParserConfig, parent *parser_state, command_name *char) *par
     state.fromfile_prefix_chars = pool_dup(&state.mem, config.fromfile_prefix_chars)
     state.line_converter = config.line_converter
     state.line_user = config.line_user
-    state.command_name = pool_dup(&state.mem, command_name)
     state.parent = parent.to_type(*void)
-    state.owned_by_parent = 0
     state.frozen = 0
     state.failed = 0
     state.row_count = 0
@@ -280,6 +278,7 @@ fn new_state(config ParserConfig, parent *parser_state, command_name *char) *par
     state.slot_required = 0
     state.slot_title = 0
     state.slot_description = 0
+    state.slot_metavar = 0
     state.child_count = 0
     state.group_count = 0
     state.mutex_count = 0
@@ -306,7 +305,7 @@ pub fn init(p *Parser, config ParserConfig) int {
     if (p == 0 || p.handle != 0) {
         return -1
     }
-    let state *parser_state = new_state(config, 0, "")
+    let state *parser_state = new_state(config, 0)
     if (state == 0) {
         return -1
     }
@@ -320,7 +319,7 @@ fn add_argument_internal(state *parser_state, spec Argument) int {
         return -1
     }
     if (state.row_count >= MAX_ARGS) {
-        return set_config_error(state, "config_error", "参数个数超过本版本上限")
+        return set_config_error(state, CODE_CONFIG, "参数个数超过本版本上限")
     }
     let row arg_row
     row.used = 1
@@ -348,7 +347,6 @@ fn add_argument_internal(state *parser_state, spec Argument) int {
     row.deprecated = spec.deprecated.to_type(int)
     row.version_text = pool_dup(&state.mem, spec.version_text)
     row.metavars = copy_metavars(state, spec.metavars)
-    row.metavars_count = len(row.metavars)
     row.has_shape = 0
     row.shape_leaf = ValueKind.none.to_type(int)
     row.shape_depth = 0
@@ -360,27 +358,27 @@ fn add_argument_internal(state *parser_state, spec Argument) int {
     let positional int = spec.positional.to_type(int)
     let name *char = spec.name
     if (name == 0 || name[0] == 0) {
-        return set_config_error(state, "config_error", "参数名称不能为空")
+        return set_config_error(state, CODE_CONFIG, "参数名称不能为空")
     }
     if (positional == 0) {
         if (is_option_name(state.prefix_chars, name) == 0) {
-            return set_config_error(state, "config_error", "选项名称必须以注册前缀开头，且不能只由前缀组成")
+            return set_config_error(state, CODE_CONFIG, "选项名称必须以注册前缀开头，且不能只由前缀组成")
         }
     }
     let alias *char = spec.alias
     if (positional == 0 && alias != 0 && alias[0] != 0) {
         if (is_option_name(state.prefix_chars, alias) == 0) {
-            return set_config_error(state, "config_error", "选项别名必须以注册前缀开头，且不能只由前缀组成")
+            return set_config_error(state, CODE_CONFIG, "选项别名必须以注册前缀开头，且不能只由前缀组成")
         }
     }
     if (fill_row_names(state, &row, name, alias) != 0) {
-        return set_config_error(state, "config_error", "参数名称个数超过本版本上限")
+        return set_config_error(state, CODE_CONFIG, "参数名称个数超过本版本上限")
     }
     // boolean_optional 为双前缀长名称生成否定别名 --no-xxx（设计 §8.1）。
     if (positional == 0 && spec.action == Action.boolean_optional
         && name_is_long(state, name) != 0) {
         if (row.name_count >= MAX_NAMES) {
-            return set_config_error(state, "config_error", "参数名称个数超过本版本上限")
+            return set_config_error(state, CODE_CONFIG, "参数名称个数超过本版本上限")
         }
         let negative [MAX_TEXT]char
         negative[0] = name[0]
@@ -392,7 +390,7 @@ fn add_argument_internal(state *parser_state, spec Argument) int {
         let w int = 5
         for name[k] != 0 {
             if (w >= MAX_TEXT - 1) {
-                return set_config_error(state, "config_error", "boolean_optional 名称过长")
+                return set_config_error(state, CODE_CONFIG, "boolean_optional 名称过长")
             }
             negative[w] = name[k]
             w += 1
@@ -408,28 +406,27 @@ fn add_argument_internal(state *parser_state, spec Argument) int {
         row.dest = derive_dest(&state.mem, state.prefix_chars, name, alias)
     }
     if (row.dest == 0 || row.dest[0] == 0) {
-        return set_config_error(state, "config_error", "无法从参数名称推导 dest")
+        return set_config_error(state, CODE_CONFIG, "无法从参数名称推导 dest")
     }
     let choice_count int = len(spec.choices)
     if (choice_count > MAX_CHOICES) {
-        return set_config_error(state, "config_error", "choices 候选个数超过本版本上限")
+        return set_config_error(state, CODE_CONFIG, "choices 候选个数超过本版本上限")
     }
     row.choices = copy_choices(state, spec.choices)
-    row.choices_count = len(row.choices)
-    if (choice_count > 0 && row.choices_count == 0) {
-        return set_config_error(state, "resource", "登记 choices 时内存不足")
+    if (choice_count > 0 && len(row.choices) == 0) {
+        return set_config_error(state, CODE_RESOURCE, "登记 choices 时内存不足")
     }
     if (positional == 0 && name_len_is_numeric_short(state.prefix_chars, name) != 0) {
         state.numeric_short = 1
     }
     if (state.mem.failed != 0) {
-        return set_config_error(state, "resource", "登记参数时内存不足")
+        return set_config_error(state, CODE_RESOURCE, "登记参数时内存不足")
     }
     if (row.group != 0 && group_of(state, row.group) < 0) {
-        return set_config_error(state, "config_error", "参数引用了不存在的展示组")
+        return set_config_error(state, CODE_CONFIG, "参数引用了不存在的展示组")
     }
     if (row.mutex != 0 && mutex_of(state, row.mutex) < 0) {
-        return set_config_error(state, "config_error", "参数引用了不存在的互斥组")
+        return set_config_error(state, CODE_CONFIG, "参数引用了不存在的互斥组")
     }
     // 名称冲突：位置参数重名一律拒绝；选项按组级优先的 conflict 策略处理。
     let policy int = effective_conflict(state, row.group)
@@ -438,7 +435,7 @@ fn add_argument_internal(state *parser_state, spec Argument) int {
         let taken int = name_is_taken(state, row.names[j])
         if (taken >= 0) {
             if (positional != 0 || policy != Conflict.resolve.to_type(int)) {
-                return set_config_error(state, "config_error", "参数名称与已登记名称冲突")
+                return set_config_error(state, CODE_CONFIG, "参数名称与已登记名称冲突")
             }
             remove_name(state, taken, row.names[j])
         }
@@ -471,16 +468,16 @@ pub fn add_alias(p *Parser, argument int, name *char) int {
         return -1
     }
     if (name == 0 || name[0] == 0) {
-        return set_config_error(state, "config_error", "别名不能为空")
+        return set_config_error(state, CODE_CONFIG, "别名不能为空")
     }
     if (is_option_name(state.prefix_chars, name) == 0) {
-        return set_config_error(state, "config_error", "别名必须以注册前缀开头，且不能只由前缀组成")
+        return set_config_error(state, CODE_CONFIG, "别名必须以注册前缀开头，且不能只由前缀组成")
     }
     if (state.rows[index].name_count >= MAX_NAMES) {
-        return set_config_error(state, "config_error", "参数名称个数超过本版本上限")
+        return set_config_error(state, CODE_CONFIG, "参数名称个数超过本版本上限")
     }
     if (name_is_taken(state, name) >= 0) {
-        return set_config_error(state, "config_error", "别名与已登记名称冲突")
+        return set_config_error(state, CODE_CONFIG, "别名与已登记名称冲突")
     }
     state.rows[index].names[state.rows[index].name_count] = pool_dup(&state.mem, name)
     state.rows[index].name_count += 1
@@ -658,7 +655,7 @@ pub fn set_default(p *Parser, dest *char, value Value) int {
     let index int = override_of(state, dest)
     if (index < 0) {
         if (state.override_count >= MAX_ENTRIES) {
-            return set_config_error(state, "config_error", "set_default 的键个数超过本版本上限")
+            return set_config_error(state, CODE_CONFIG, "set_default 的键个数超过本版本上限")
         }
         index = state.override_count
         state.overrides[index].used = 1
@@ -669,7 +666,7 @@ pub fn set_default(p *Parser, dest *char, value Value) int {
     }
     state.overrides[index].value = value_clone(&state.mem, value)
     if (state.mem.failed != 0) {
-        return set_config_error(state, "resource", "set_default 复制默认值时内存不足")
+        return set_config_error(state, CODE_RESOURCE, "set_default 复制默认值时内存不足")
     }
     return 0
 }
@@ -717,15 +714,6 @@ pub fn get_default(p *Parser, dest *char, out *Value) int {
 // action_is_control 判断 action 是否为控制行为（help/version）。
 fn action_is_control(action int) int {
     if (action == Action.help.to_type(int) || action == Action.version.to_type(int)) {
-        return 1
-    }
-    return 0
-}
-
-// action_takes_values 判断 action 是否消费值。
-fn action_takes_values(action int) int {
-    if (action == Action.store.to_type(int) || action == Action.append.to_type(int)
-        || action == Action.extend.to_type(int) || action == Action.custom.to_type(int)) {
         return 1
     }
     return 0
@@ -883,7 +871,7 @@ fn check_shared_dest(state *parser_state) int {
                 if (other.used != 0 && cstr_equal(row.dest, other.dest) != 0) {
                     if (row_leaf_kind(row) != row_leaf_kind(other)
                         || row_depth(row) != row_depth(other)) {
-                        return set_config_error(state, "config_error",
+                        return set_config_error(state, CODE_CONFIG,
                             "同一 dest 的参数必须具有一致的值类型与列表形状")
                     }
                 }
@@ -897,8 +885,9 @@ fn check_shared_dest(state *parser_state) int {
 
 // check_choice_entries 校验 choices 不含序列或 none（设计：choices 只接受标量候选）。
 fn check_choice_entries(row *arg_row) int {
+    let count int = len(row.choices)
     let i int = 0
-    for i < row.choices_count {
+    for i < count {
         let kind int = row.choices[i].kind.to_type(int)
         if (kind == ValueKind.sequence.to_type(int) || kind == ValueKind.none.to_type(int)) {
             return 0
@@ -913,24 +902,24 @@ fn check_freeze(state *parser_state) int {
     // 子 parser 不得设置参数文件展开：选中命令前无法确定子命令配置。
     if (state.parent.to_type(*parser_state) != 0) {
         if (state.fromfile_prefix_chars != 0 && state.fromfile_prefix_chars[0] != 0) {
-            return set_config_error(state, "config_error",
+            return set_config_error(state, CODE_CONFIG,
                 "子命令 parser 不能设置参数文件前缀")
         }
         if (state.line_converter.to_type(*void) != 0) {
-            return set_config_error(state, "config_error",
+            return set_config_error(state, CODE_CONFIG,
                 "子命令 parser 不能设置参数文件逐行回调")
         }
     }
     if (check_template(state.usage, 0) != 0
         || check_template(state.description, 0) != 0
         || check_template(state.epilog, 0) != 0) {
-        return set_config_error(state, "config_error", "帮助模板含未知占位符")
+        return set_config_error(state, CODE_CONFIG, "帮助模板含未知占位符")
     }
     let c int = 0
     for c < state.child_count {
         let child *child_row = &state.children[c]
         if (child.used != 0 && check_template(child.help, 0) != 0) {
-            return set_config_error(state, "config_error", "帮助模板含未知占位符")
+            return set_config_error(state, CODE_CONFIG, "帮助模板含未知占位符")
         }
         c += 1
     }
@@ -941,25 +930,46 @@ fn check_freeze(state *parser_state) int {
         if (row.used != 0) {
             if (check_template(row.help, 1) != 0
                 || check_template(row.version_text, 0) != 0) {
-                return set_config_error(state, "config_error", "帮助模板含未知占位符")
+                return set_config_error(state, CODE_CONFIG, "帮助模板含未知占位符")
             }
             if (freeze_supports(row) == 0) {
-                return set_config_error(state, "config_error",
+                return set_config_error(state, CODE_CONFIG,
                     "该 action 与数量模型组合无效或尚未实现（见实施方案阶段表）")
             }
+            if (row.positional != 0 && row.required != 0) {
+                return set_config_error(state, CODE_CONFIG,
+                    "位置参数不能设置 required：必需性由 arity 决定")
+            }
+            if (row.positional == 0 && row.const_value.kind == ValueKind.none
+                && (row.action == Action.store_const.to_type(int)
+                    || row.action == Action.append_const.to_type(int))) {
+                return set_config_error(state, CODE_CONFIG,
+                    "store_const 与 append_const 需要显式 const")
+            }
+            if (len(row.metavars) > 0) {
+                if (row.metavar != 0 && row.metavar[0] != 0) {
+                    return set_config_error(state, CODE_CONFIG,
+                        "metavar 与 metavars 不能同时设置")
+                }
+                if (row.arity_kind != ArityKind.arity_exactly.to_type(int)
+                    || len(row.metavars) != row.arity_count) {
+                    return set_config_error(state, CODE_CONFIG,
+                        "metavars 只用于 exactly(n)，且个数必须等于 n")
+                }
+            }
             if (row.arity_kind == ArityKind.arity_exactly.to_type(int) && row.arity_count < 1) {
-                return set_config_error(state, "config_error", "exactly 的数量必须大于等于 1")
+                return set_config_error(state, CODE_CONFIG, "exactly 的数量必须大于等于 1")
             }
             if (check_choice_entries(row) == 0) {
-                return set_config_error(state, "config_error", "choices 只接受标量候选值")
+                return set_config_error(state, CODE_CONFIG, "choices 只接受标量候选值")
             }
             let arity int = effective_arity_kind(row)
             if (row.positional != 0) {
                 if (arity == ArityKind.arity_no_values.to_type(int)) {
-                    return set_config_error(state, "config_error", "位置参数不能不消费值")
+                    return set_config_error(state, CODE_CONFIG, "位置参数不能不消费值")
                 }
                 if (remainder_seen != 0) {
-                    return set_config_error(state, "config_error",
+                    return set_config_error(state, CODE_CONFIG,
                         "remainder 之后不能再声明位置参数")
                 }
                 if (arity == ArityKind.arity_remainder.to_type(int)) {

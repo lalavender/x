@@ -79,7 +79,7 @@ fn option_token_layer(ctx *parse_ctx, state *parser_state, args []*char,
     let eq int = token_has_equal(token)
     if (eq >= 0) {
         if (eq >= MAX_TEXT) {
-            result_set_error(result, ResultStatus.usage_error, "usage_error",
+            result_set_error(result, ResultStatus.usage_error, CODE_USAGE,
                 "选项名过长", 0, 0, *cursor)
             return -1
         }
@@ -98,7 +98,7 @@ fn option_token_layer(ctx *parse_ctx, state *parser_state, args []*char,
         let hits int = 0
         row_index = match_long_abbrev(state, name, &hits)
         if (row_index < 0 && hits > 1) {
-            result_set_error(result, ResultStatus.usage_error, "usage_error",
+            result_set_error(result, ResultStatus.usage_error, CODE_USAGE,
                 "选项缩写有多个候选", name, 0, *cursor)
             return -1
         }
@@ -115,7 +115,7 @@ fn option_token_layer(ctx *parse_ctx, state *parser_state, args []*char,
     }
     if (ctx.config.known == true) {
         if (ctx_record_unparsed(ctx, token) != 0) {
-            result_set_error(result, ResultStatus.resource_error, "resource_error",
+            result_set_error(result, ResultStatus.resource_error, CODE_RESOURCE,
                 "保留未知参数时内存不足", 0, 0, *cursor)
             return -1
         }
@@ -130,13 +130,13 @@ fn option_token_layer(ctx *parse_ctx, state *parser_state, args []*char,
             at = put_text(&buffer[0], at, "？")
             if (at > 0) {
                 buffer[at] = 0
-                result_set_error(result, ResultStatus.usage_error, "usage_error",
+                result_set_error(result, ResultStatus.usage_error, CODE_USAGE,
                     &buffer[0], token, 0, *cursor)
                 return -1
             }
         }
     }
-    result_set_error(result, ResultStatus.usage_error, "usage_error",
+    result_set_error(result, ResultStatus.usage_error, CODE_USAGE,
         "未知选项", token, 0, *cursor)
     return -1
 }
@@ -147,26 +147,31 @@ fn dispatch_command(ctx *parse_ctx, state *parser_state, args []*char,
     let token *char = args[cursor]
     let index int = find_child(state, token)
     if (index < 0) {
-        result_set_error(ctx.result, ResultStatus.usage_error, "usage_error",
-            "未知子命令", token, 0, cursor)
+        let buffer [MAX_HELP]char
+        let message *char = "未知子命令"
+        if (subcommand_message(state, token, &buffer[0]) >= 0) {
+            message = &buffer[0]
+        }
+        result_set_error(ctx.result, ResultStatus.usage_error, CODE_USAGE,
+            message, token, 0, cursor)
         return -1
     }
     let child *child_row = &state.children[index]
     if (child.deprecated != 0) {
         if (ctx_add_warning(ctx, "命令 ", child.name) != 0) {
-            result_set_error(ctx.result, ResultStatus.resource_error, "resource_error",
+            result_set_error(ctx.result, ResultStatus.resource_error, CODE_RESOURCE,
                 "记录弃用警告时内存不足", 0, 0, cursor)
             return -1
         }
     }
     if (ctx_push_path(ctx, child.name) != 0) {
-        result_set_error(ctx.result, ResultStatus.resource_error, "resource_error",
+        result_set_error(ctx.result, ResultStatus.resource_error, CODE_RESOURCE,
             "记录命令路径时内存不足", 0, 0, cursor)
         return -1
     }
     if (state.slot_dest != 0 && state.slot_dest[0] != 0) {
         if (write_named_text(ctx.result, state.slot_dest, child.name) != 0) {
-            result_set_error(ctx.result, ResultStatus.resource_error, "resource_error",
+            result_set_error(ctx.result, ResultStatus.resource_error, CODE_RESOURCE,
                 "写入子命令名时内存不足", 0, state.slot_dest, cursor)
             return -1
         }
@@ -210,7 +215,7 @@ fn emit_deprecated_warnings(ctx *parse_ctx) int {
                 && appeared_of(ctx.result, row.id) != 0) {
                 if (ctx_add_warning(ctx, "参数 ", row.names[0]) != 0) {
                     result_set_error(ctx.result, ResultStatus.resource_error,
-                        "resource_error", "记录弃用警告时内存不足", 0, row.dest, -1)
+                        CODE_RESOURCE, "记录弃用警告时内存不足", 0, row.dest, -1)
                     return -1
                 }
             }
@@ -225,7 +230,7 @@ fn emit_deprecated_warnings(ctx *parse_ctx) int {
 // 选中子命令后剩余的 token 全部交给子层，父层不再处理。
 fn parse_layer(ctx *parse_ctx, state *parser_state, args []*char, depth int) int {
     if (depth >= MAX_DEPTH) {
-        result_set_error(ctx.result, ResultStatus.config_error, "config_error",
+        result_set_error(ctx.result, ResultStatus.config_error, CODE_CONFIG,
             "子命令嵌套超过本版本上限", 0, 0, -1)
         return -1
     }
@@ -247,7 +252,7 @@ fn parse_layer(ctx *parse_ctx, state *parser_state, args []*char, depth int) int
     for cursor < len(args) {
         let token *char = args[cursor]
         if (token == 0) {
-            result_set_error(ctx.result, ResultStatus.usage_error, "usage_error",
+            result_set_error(ctx.result, ResultStatus.usage_error, CODE_USAGE,
                 "参数切片含空指针", 0, 0, cursor)
             return -1
         }
@@ -282,12 +287,13 @@ fn parse_layer(ctx *parse_ctx, state *parser_state, args []*char, depth int) int
                 let rest int = len(args) - cursor
                 if (rest > MAX_ARGC) {
                     result_set_error(ctx.result, ResultStatus.resource_error,
-                        "resource_error", "remainder 收集的参数个数超过本版本上限",
+                        CODE_RESOURCE, "remainder 收集的参数个数超过本版本上限",
                         0, row.dest, cursor)
                     return -1
                 }
                 let converted [MAX_ARGC]Value
-                let n int = convert_tokens(ctx.result, row, args[cursor..len(args)], &converted[0], cursor)
+                let n int = convert_tokens(state, ctx.result, row, args[cursor..len(args)],
+                    &converted[0], cursor)
                 if (n < 0) {
                     return -1
                 }
@@ -303,7 +309,7 @@ fn parse_layer(ctx *parse_ctx, state *parser_state, args []*char, depth int) int
             for cursor < len(args) && segment_count < MAX_ARGC {
                 let candidate *char = args[cursor]
                 if (candidate == 0) {
-                    result_set_error(ctx.result, ResultStatus.usage_error, "usage_error",
+                    result_set_error(ctx.result, ResultStatus.usage_error, CODE_USAGE,
                         "参数切片含空指针", 0, 0, cursor)
                     return -1
                 }
@@ -342,7 +348,7 @@ fn parse_layer(ctx *parse_ctx, state *parser_state, args []*char, depth int) int
         }
         if (unused > 0) {
             if (nth_positional(state, positional_cursor) >= 0) {
-                result_set_error(ctx.result, ResultStatus.usage_error, "usage_error",
+                result_set_error(ctx.result, ResultStatus.usage_error, CODE_USAGE,
                     "位置参数数量不匹配", 0, 0, -1)
                 return -1
             }
@@ -358,8 +364,14 @@ fn parse_layer(ctx *parse_ctx, state *parser_state, args []*char, depth int) int
                 }
                 return 0
             }
-            result_set_error(ctx.result, ResultStatus.usage_error, "usage_error",
-                "多余的位置参数", collected[collected_count - unused], 0, -1)
+            let buffer [MAX_HELP]char
+            let message *char = "多余的位置参数"
+            if (extra_args_message(collected[collected_count - unused..collected_count],
+                    &buffer[0]) >= 0) {
+                message = &buffer[0]
+            }
+            result_set_error(ctx.result, ResultStatus.usage_error, CODE_USAGE,
+                message, collected[collected_count - unused], 0, -1)
             return -1
         }
     }
@@ -381,7 +393,7 @@ fn tail_layer(ctx *parse_ctx, state *parser_state, args []*char,
         for at < len(args) {
             if (ctx_record_unparsed(ctx, args[at]) != 0) {
                 result_set_error(ctx.result, ResultStatus.resource_error,
-                    "resource_error", "保留未知参数时内存不足", 0, 0, at)
+                    CODE_RESOURCE, "保留未知参数时内存不足", 0, 0, at)
                 return -1
             }
             at += 1
@@ -389,8 +401,13 @@ fn tail_layer(ctx *parse_ctx, state *parser_state, args []*char,
         *cursor = at
         return 0
     }
-    result_set_error(ctx.result, ResultStatus.usage_error, "usage_error",
-        "多余的位置参数", args[*cursor], 0, *cursor)
+    let buffer [MAX_HELP]char
+    let message *char = "多余的位置参数"
+    if (extra_args_message(args[*cursor..len(args)], &buffer[0]) >= 0) {
+        message = &buffer[0]
+    }
+    result_set_error(ctx.result, ResultStatus.usage_error, CODE_USAGE,
+        message, args[*cursor], 0, *cursor)
     return -1
 }
 
@@ -398,7 +415,7 @@ fn tail_layer(ctx *parse_ctx, state *parser_state, args []*char,
 fn check_intermixed_support(ctx *parse_ctx, state *parser_state) int {
     let result *Result = ctx.result
     if (state.slot_used != 0) {
-        result_set_error(result, ResultStatus.config_error, "config_error",
+        result_set_error(result, ResultStatus.config_error, CODE_CONFIG,
             "混合模式不支持子命令", 0, 0, -1)
         return -1
     }
@@ -407,7 +424,7 @@ fn check_intermixed_support(ctx *parse_ctx, state *parser_state) int {
         let row *arg_row = &state.rows[i]
         if (row.used != 0
             && effective_arity_kind(row) == ArityKind.arity_remainder.to_type(int)) {
-            result_set_error(result, ResultStatus.config_error, "config_error",
+            result_set_error(result, ResultStatus.config_error, CODE_CONFIG,
                 "混合模式不支持 remainder", 0, row.dest, -1)
             return -1
         }
@@ -423,7 +440,7 @@ fn check_intermixed_support(ctx *parse_ctx, state *parser_state) int {
                 let other *arg_row = &state.rows[j]
                 if (other.used != 0 && cstr_equal(row.dest, other.dest) != 0
                     && row.positional != other.positional) {
-                    result_set_error(result, ResultStatus.config_error, "config_error",
+                    result_set_error(result, ResultStatus.config_error, CODE_CONFIG,
                         "混合模式下同一 dest 不能同时由选项与位置参数提供",
                         0, row.dest, -1)
                     return -1
@@ -453,7 +470,7 @@ fn check_intermixed_support(ctx *parse_ctx, state *parser_state) int {
                 j += 1
             }
             if (has_option != 0 && has_positional != 0) {
-                result_set_error(result, ResultStatus.config_error, "config_error",
+                result_set_error(result, ResultStatus.config_error, CODE_CONFIG,
                     "混合模式不支持同时含选项与位置成员的互斥组", 0, 0, -1)
                 return -1
             }
@@ -470,7 +487,7 @@ fn finish_layers(ctx *parse_ctx) int {
     for i < ctx.chain_count {
         let state *parser_state = ctx.chain[i]
         if (state.slot_used != 0 && state.slot_required != 0 && ctx.chain_slot[i] == 0) {
-            result_set_error(ctx.result, ResultStatus.usage_error, "usage_error",
+            result_set_error(ctx.result, ResultStatus.usage_error, CODE_USAGE,
                 "必须选择一个子命令", 0, state.slot_dest, -1)
             return -1
         }
@@ -522,12 +539,12 @@ fn parse_core(p *Parser, args []*char, config ParseConfig) Result {
     }
     let state *parser_state = parser_state_of(p)
     if (state == 0) {
-        result_set_error(&result, ResultStatus.config_error, "config_error",
+        result_set_error(&result, ResultStatus.config_error, CODE_CONFIG,
             "parser 未初始化", 0, 0, -1)
         return result
     }
     if (freeze(p) != 0) {
-        result_set_error(&result, ResultStatus.config_error, "config_error",
+        result_set_error(&result, ResultStatus.config_error, CODE_CONFIG,
             "parser 配置无效，freeze 失败", 0, 0, -1)
         return result
     }
@@ -546,7 +563,7 @@ fn parse_core(p *Parser, args []*char, config ParseConfig) Result {
     let warnings *warning_list_block = pool_alloc(&owner.mem,
         sizeof(warning_list_block).to_type(u64)).to_type(*warning_list_block)
     if (path == 0 || unparsed == 0 || warnings == 0) {
-        result_set_error(&result, ResultStatus.resource_error, "resource_error",
+        result_set_error(&result, ResultStatus.resource_error, CODE_RESOURCE,
             "解析上下文分配失败", 0, 0, -1)
         return result
     }
@@ -566,7 +583,7 @@ fn parse_core(p *Parser, args []*char, config ParseConfig) Result {
     let layer_rc int = parse_layer(&ctx, state, expanded, 0)
     // 弃用警告在控制请求与错误路径上也保留；成功路径随后再归并默认值。
     if (emit_deprecated_warnings(&ctx) != 0 && result.status == ResultStatus.ok) {
-        result_set_error(&result, ResultStatus.resource_error, "resource_error",
+        result_set_error(&result, ResultStatus.resource_error, CODE_RESOURCE,
             "记录弃用警告时内存不足", 0, 0, -1)
     }
     result.command_path = path.items[0..path.count]
@@ -617,13 +634,13 @@ pub fn parse_with(p *Parser, args []*char, config ParseConfig) Result {
 pub fn parse_main(p *Parser, argc int, argv **char) Result {
     if (argv == 0 || argc < 0) {
         let result Result = new_result()
-        result_set_error(&result, ResultStatus.config_error, "config_error",
+        result_set_error(&result, ResultStatus.config_error, CODE_CONFIG,
             "argc/argv 无效", 0, 0, -1)
         return result
     }
     if (argc - 1 > MAX_ARGC) {
         let result Result = new_result()
-        result_set_error(&result, ResultStatus.resource_error, "resource_error",
+        result_set_error(&result, ResultStatus.resource_error, CODE_RESOURCE,
             "命令行参数个数超过本版本上限", 0, 0, -1)
         return result
     }

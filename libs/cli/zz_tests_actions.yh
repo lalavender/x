@@ -551,3 +551,58 @@ test "动作：默认基值与选项 remainder" {
     release(&r4)
     destroy(&append_parser)
 }
+
+test "动作：位置 optional 默认值、未声明 dest 覆盖与 choices 默认值" {
+    // 位置参数的 '?' 未取到值时用默认值（argparse 语义）：不写 const、不计出现。
+    let parser Parser
+    $assert(init(&parser, parser_config("opt")) == 0, "parser 初始化")
+    let opt Argument = positional("opt")
+    opt.arity = optional()
+    opt.default_value = default_of(value_text("DEFAULT"))
+    opt.const_value = value_text("CONST")
+    let req Argument = positional("req")
+    $assert(add_argument(&parser, opt) >= 0 && add_argument(&parser, req) >= 0,
+        "两个位置参数注册")
+    let args [1]*char
+    args[0] = "a"
+    let r Result = parse(&parser, args[0..1])
+    $assert(r.status == ok && at_text_is(&r.values, "opt", "DEFAULT")
+        && at_text_is(&r.values, "req", "a") && provided(&r.values, "opt") == false,
+        "optional 位置参数用默认值且不计显式出现")
+    release(&r)
+    destroy(&parser)
+
+    // set_default 可以给尚未声明的 dest 设置业务标签（argparse set_defaults 语义）。
+    let p2 Parser
+    $assert(init(&p2, parser_config("label")) == 0, "第二个 parser 初始化")
+    $assert(set_default(&p2, "label", value_i64(7)) == 0, "set_default 未声明 dest")
+    let empty [1]*char
+    let r2 Result = parse(&p2, empty[0..0])
+    let label i64 = 0
+    $assert(r2.status == ok && contains(&r2.values, "label")
+        && get_i64(&r2.values, "label", &label) == 0 && label == 7,
+        "未声明 dest 的覆盖值进结果")
+    $assert(provided(&r2.values, "label") == false, "覆盖值不计显式出现")
+    release(&r2)
+    destroy(&p2)
+
+    // 默认值不参与 choices 校验（argparse 语义）。
+    let p3 Parser
+    $assert(init(&p3, parser_config("mode")) == 0, "第三个 parser 初始化")
+    let mode Argument = option("--mode", 0)
+    let choices [1]Value
+    choices[0] = value_text("fast")
+    mode.choices = choices.to_type([]Value)
+    mode.default_value = default_of(value_text("other"))
+    $assert(add_argument(&p3, mode) >= 0, "choices 参数注册")
+    let r3 Result = parse(&p3, empty[0..0])
+    $assert(r3.status == ok && at_text_is(&r3.values, "mode", "other"),
+        "默认值不在 choices 也接受")
+    let bad [1]*char
+    bad[0] = "--mode=other"
+    let r4 Result = parse(&p3, bad[0..1])
+    $assert(r4.status == usage_error, "显式值仍受 choices 约束")
+    release(&r4)
+    release(&r3)
+    destroy(&p3)
+}

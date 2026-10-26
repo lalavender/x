@@ -247,6 +247,34 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 - [ ] **E4 libc L0–L5**：按[分阶段候选方案](02-plan/yh-libc分阶段候选方案.md)
   推进，未授权全部实施。
 
+### cli 标准库复核遗留（2026-10-27）
+
+只读复核覆盖 `libs/cli` 生产代码 12 文件；已完成死代码清理、argparse 对齐批 1
+（语义：`set_default` 未声明 dest、位置 `optional` 默认值、槽 token 预留、
+`store_const` const 校验、位置参数 `required` 校验、默认值不参与 choices）与
+批 2（展示：choices `{a,b}`、`metavars`、槽 `{a,b} ...`/`title`/`description`/
+`metavar`、`boolean_optional` usage、`max_help_column`）、批 3（诊断：choices/子命令
+候选列表、`suggest_on_error` 覆盖 choices 与子命令、多余 token 全量列出）与
+CLI-B（`put_*` 短路契约、溢出 return resource_error）、CLI-D（构造器合并、诊断码
+常量、参数文件上限常量、测试助手复用 `libs/string`），见 [finish.md](finish.md)。
+以下为剩余项。
+
+- [ ] **CLI-C 文件与函数超规范**（2026-10-27 用户决定：**暂不拆文件**，后续再做）：
+  `help.yh` 1,685 行、`schema.yh` 1,067 行
+  （规范 500–1000）；>100 行的函数 4 个（`build_help_text`、`parse_layer`、
+  `add_argument_internal`、`build_usage_line`）。切分点已在分节注释里：`help.yh`
+  的拼接/转义/颜色/模板、`schema.yh` 的 `copy_*`/`check_freeze`；`MAX_HELP` 常量
+  应随其余容量常量回到 `cli.yh`。
+- [ ] **CLI-G 帮助宽度自动（依赖编译器先行）**：缺省固定 80（argparse 取终端宽度
+  −2）。2026-10-27 实测确认 libs 层做不了：Darwin 的 `ioctl` 是 C 变参入口，而
+  `@[extern]` 只支持定参，实参被放进寄存器导致 EFAULT（证据见
+  [finish.md](finish.md) 同日条目与 `libs/sys/30_file.darwin.yh` 的边界说明）。
+  2026-10-27 用户决定：**暂不动编译器，只保留本条记录**。
+  落地路径：1) 在 `compiler/backend/llvm_runtime.yh` 追加弱符号
+  `yh_terminal_columns()`（内部按正确变参 ABI 调 `ioctl(TIOCGWINSZ)`，两平台各自
+  请求号）；2) `libs/os` 加薄封装 `terminal_columns() int`；3) `HelpFormat.width = 0`
+  改「自动 = 列数 − 2，取不到回落 80」并补 pty 下的可复现门禁。
+
 ### NET/HTTP 网络与 HTTP 标准库（2026-10-24 决策完成；NET0–NET1 已交付，HTTP2–HTTP7 待实施）
 
 [设计](03-design/yh-http标准库设计-2026-10-24.md)与

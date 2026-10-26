@@ -26,6 +26,21 @@
 | `--rest a -x -- --help`（option remainder） | 全部为数据 | 同 |
 | `--version`，模板 `%(prog)s 1.0` | `diff 1.0` | 同 |
 | 自定义 usage `%(prog)s [options] src` | `usage: diff [options] src` | 同 |
+| 位置 `nargs='?'` 与后续必需位置同段 | `opt='DEFAULT'`，不计出现 | 同（2026-10-27 对齐：不再写 const） |
+| `set_defaults(undeclared=7)` | 结果里有 `undeclared=7` | 同（2026-10-27 对齐） |
+| `files='*'` + 子命令，`tool add` | `files=[] cmd='add'` | 同（段内为槽预留 1 个 token） |
+| `store_const` 缺 `const` | `ValueError` | config_error（类别顺序不同，都是声明期失败） |
+| 位置参数 `required=True` | `ValueError` | config_error |
+| 默认值不在 `choices` | 接受（choices 只校验命令行值） | 同（2026-10-27 放宽） |
+| `--mode` + `choices` | usage/帮助占位名 `{fast,slow}` | 同（2026-10-27 对齐） |
+| `nargs=2` + `metavar=('A','B')` | `--pair A B` | 同（`Argument.metavars`，要求个数 = n） |
+| 子命令槽 usage | `{add,list} ...` | 同（无方括号，带省略号） |
+| `add_subparsers(title=/description=/metavar=)` | 帮助段标题、说明、占位名 | 同（缺省标题为 `commands`） |
+| `BooleanOptionalAction` usage | `[--cache \| --no-cache]` | 同（2026-10-27 对齐） |
+| `HelpFormatter(max_help_position=N)` | 说明列起始列 | 同（`HelpFormat.max_help_column=N`；0 用段落默认 22/26） |
+| 非法 choices 诊断 | `invalid choice: 'fst', maybe you meant 'fast'? (choose from 'fast', 'slow')` | 「选项 --mode 的值不在候选集合中，是否想用 fast？（可选：fast, slow）」 | 同结构：候选列表 + 建议；措辞中文 |
+| 未知子命令诊断 | `invalid choice: 'ad' ... (choose from 'add', 'list')` | 「未知子命令 ad（可选：add, list）」+ 建议 | 同上 |
+| 多余 token 诊断 | `unrecognized arguments: b c` | 「多余的位置参数：b c」 | 同上，全量列出 |
 
 ## 2. 差异项与保留理由
 
@@ -44,6 +59,12 @@
 | 子命令前后全局选项 | 根选项在子命令前有效 | 同；「前后都要」用公共 parent 分别 `inherit` | 复制而非穿透，行为可预测（设计 §10.1） |
 | 参数文件注释 | `#` 无特殊含义 | 同；不做 shell 转义 | 逐行语义简单可移植；需要转义时用 `line_converter` |
 | 参数文件上限 | 无内置上限 | 深度/字节/token 三个上限，可经 `ParseConfig` 调整 | 展开必须有界，失败可定位（设计 §13） |
+| 位置参数与子命令槽共存 | 同段优先给子命令（`PARSER` 至少吃 1 个 token），单文件名的 `files='*'` 声明下 `tool name` 会报 invalid choice | 同段预留给槽 1 个 token，消息为「未知子命令 x（可选：add, list）」 | 对齐分配语义；候选列表在批 3 补齐 |
+| 帮助宽度缺省 | 终端宽度 −2 | 固定 80 | 需要更宽就显式 `width`；自动宽度被 C ABI 挡住（Darwin 的 `ioctl` 是变参入口，`@[extern]` 只支持定参），待编译器提供非变参 shim |
+| 帮助说明列缺省 | `max(24, 最长名称 + 2)` 动态 | 位置 22、其余 26（`max_help_column` 可覆盖） | 布局稳定；过长的名称按「至少 2 个空格」降级 |
+| choices 的说明附录 | 不额外展示 | 帮助说明后追加 ` (choices: a, b)` | 与 usage 的 `{a,b}` 互补，便于阅读 |
+| `HelpFormatter` 构造参数 | `prog`/`indent_increment`/`max_help_position`/`width` 都可调 | 只有 `width` 与 `max_help_column`；缩进固定 2 | 缩进 2 与 argparse 默认一致，暂不暴露 |
+| `get_default` 未知 dest | 返回 `None` | 返回 -1（并用 `contains` 区分键不存在） | yh 用返回码而非 `None` 表示「没有静态默认值」 |
 | `--unknown --help` | 先识别 help，退出 0 | 未知选项优先，usage_error 退出 2 | 设计 §14.3：已识别错误优先于后来的控制请求 |
 | known 模式未知短组合 | 应用已知前缀，剩余后缀留在 extras | 整 token 保留，不累计已知前缀 | README §9：避免只生效一半的短组合 |
 | deprecated 运行期提示 | 无内置 deprecated 概念 | 显式使用时经 `Result.warnings` 返回一条警告 | 设计 §14.3；不改变退出码 |
@@ -64,7 +85,7 @@
 
 ## 4. 差分维护
 
-- 值/诊断类别/退出码的对照由 `libs/cli/zz_tests_*.yh`（43 个 test）与
+- 值/诊断类别/退出码的对照由 `libs/cli/zz_tests_*.yh`（51 个 test）与
   `libs/cli/test/run.py`（真实 argv/退出码）共同承担；`cliwarnings` 保留在
   runner，`diff.py` 负责 94 条 argv 的 argparse 差分。迁移记录见
   [YT4-P4](../01-finished/yh-YT4-P4-cli迁移-2026-10-25.md)。

@@ -381,3 +381,51 @@ test "模式：initial 快照" {
     namespace_destroy(&preset)
     destroy(&root)
 }
+
+test "子命令：位置段为槽预留 token" {
+    let root Parser
+    $assert(init(&root, parser_config("tool")) == 0, "parser 初始化")
+    let files Argument = positional("files")
+    files.arity = zero_or_more()
+    $assert(add_argument(&root, files) >= 0, "位置参数注册")
+    let spec Subparsers = subparsers()
+    spec.dest = "cmd"
+    let slot int = add_subparsers(&root, spec)
+    $assert(slot >= 0 && add_parser(&root, slot, command("add")) != 0,
+        "子命令槽与命令注册")
+    let only_cmd [1]*char
+    only_cmd[0] = "add"
+    let r Result = parse(&root, only_cmd[0..1])
+    let list []Value
+    $assert(r.status == ok && ct_text_is(&r.values, "cmd", "add")
+        && get_list(&r.values, "files", &list) == 0 && len(list) == 0,
+        "唯一 token 归子命令（argparse PARSER 语义）")
+    release(&r)
+
+    let files_cmd [2]*char
+    files_cmd[0] = "x"
+    files_cmd[1] = "add"
+    let r2 Result = parse(&root, files_cmd[0..2])
+    $assert(r2.status == ok && ct_text_is(&r2.values, "cmd", "add")
+        && get_list(&r2.values, "files", &list) == 0 && len(list) == 1
+        && string.equals(list[0].data.text, "x") == 1, "多余 token 归位置参数")
+    release(&r2)
+
+    // 位置参数最低需求已占满整段时不预留：唯一个 token 仍是位置值。
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let need Argument = positional("need")
+    need.arity = one_or_more()
+    $assert(add_argument(&root2, need) >= 0, "one_or_more 位置参数注册")
+    let slot2 int = add_subparsers(&root2, subparsers())
+    $assert(slot2 >= 0 && add_parser(&root2, slot2, command("go")) != 0,
+        "第二个子命令槽注册")
+    let one [1]*char
+    one[0] = "go"
+    let r3 Result = parse(&root2, one[0..1])
+    $assert(r3.status == ok && get_list(&r3.values, "need", &list) == 0
+        && len(list) == 1, "最低需求占满时不预留 token")
+    release(&r3)
+    destroy(&root2)
+    destroy(&root)
+}

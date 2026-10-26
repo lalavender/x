@@ -156,6 +156,8 @@ output.default_value = cli.default_of(cli.value_text("a.bin"));
 - **dest 推导**：优先双前缀名称，去前缀并把 `-` 换成 `_`（`--dry-run` → `dry_run`）；
   显式 `dest` 优先。
 - **必需性**：`required=true` 的选项缺席 → usage_error；默认值不满足 required。
+  位置参数的必需性由 `arity` 决定，给它设 `required=true` 是 config_error（对齐 argparse）。
+- **常量**：`store_const`/`append_const` 必须给 `const_value`，缺了是 config_error。
 - **附着值**：`--output=a.bin` 与 `--output a.bin` 等价；`--output=` 得到显式空串。
 - **零参数选项不接受值**：`--flag=yes` 是 usage_error。
 
@@ -231,6 +233,10 @@ if (cli.get_list(&result.values, "tag", &list) == 0) {
   先解析一个列表，用 `get_value` 取出该值再交给 `default_of`，`add_argument` 会深复制。
 - `get_list` 返回借用视图：0 成功、-1 缺键、-2 类型不符（例如 `single` 的标量）。
 - `exactly(1)` 与 `single` 形状不同：前者是单元素列表，`get_text` 返回 -2。
+- 逐项占位名用 `metavars`（**只**用于 `exactly(n)`，个数必须等于 n，且不能与 `metavar`
+  同时设置）：`--nums 1 2` 显示为 `--nums LEFT RIGHT`。省略时按数量重复同一个占位名。
+- `choices` 缺省把候选集合作为占位名（argparse 的 `{a,b}` 形式）：`--mode {fast,slow}`；
+  显式 `metavar`/`metavars` 优先，候选约束照旧生效。
 - 列表元素上限见文末容量表（本版本 256）。
 
 ## 6. 位置参数
@@ -260,7 +266,14 @@ files + more_files（都是 zero_or_more）   输入 `a b`   → files=[a,b] mor
   不会因为后面的新段重新打开（新段里多出来的值报 usage_error）。
 - `remainder` 一旦轮到就吞掉其后全部 token（`--help`、`--`、选项样式都算数据）；
   选项形态的 remainder（`--rest a -x --`）同样全部收下。
+- `optional()` 位置参数没有取到值时用**默认值**（不写 `const_value`，也不计为显式出现），
+  与 argparse 的 `nargs='?'` 一致。
 - `single`/`one_or_more`/`exactly(n)` 位置参数不能靠默认值满足数量要求。
+- usage 里占位名按数量模型展开：`single` 一个、`exactly(n)` n 个、`zero_or_more` 写
+  `[FILE [FILE ...]]`、`one_or_more` 写 `FILE [FILE ...]`、`remainder` 只写 `...`。
+- 本层有子命令槽时，**整段 token 足够**（≥ 全部位置参数最低需求 + 1）会为槽预留一个
+  token：`files(zero_or_more) + 槽` 下 `tool add` 得到 `files=[] cmd=add`。
+  最低需求已占满整段时不预留（`files(one_or_more) + 槽` 下 `tool go` 仍是 `files=[go]`）。
 
 ## 7. 子命令与继承
 
@@ -286,8 +299,13 @@ printf("command=%s\n", result.command_path[0]);   // 规范名，别名输入也
 ```
 
 - **槽配置**：`spec.dest` 非空时把选中的规范命令名写进命名空间；
-  `spec.required = true` 时未选命令报 usage_error。
+  `spec.required = true` 时未选命令报 usage_error；`spec.title`/`spec.description`
+  决定帮助段标题与说明（缺省标题 `commands`）；`spec.metavar` 覆盖 usage 占位名
+  （缺省为 `{add,list}` 形式的规范命令名列表）。
+- **usage 形态**：槽写成 `{add,list} ...`（argparse 的 PARSER 语义，不加方括号）。
 - **作用范围**：根选项只在子命令之前有效；子命令之后只识别子 parser 的声明。
+- **与前缀位置参数共存**：槽前的可变位置参数不会吞掉子命令名——整段 token 满足
+  「位置参数最低需求 + 1」时为槽预留一个 token（`tool add` → `files=[] cmd=add`）。
 - **未知子命令**：即使 `known` 模式也是错误（槽不接受任意值）。
 - **默认值合成**：显式值优先；没有显式值时按「父 → 子」应用默认，子层默认覆盖父层默认。
 
@@ -442,6 +460,8 @@ cli.add_argument(&parser, shout);
   回调返回的切片不能指向自己的栈数组。
 - `validator` 也会在 `freeze` 时用于校验显式默认值与常量（失败是 config_error），
   所以不要依赖调用次数。
+- `choices` 只约束命令行显式值；默认值与常量不参与 choices 校验（与 argparse 一致），
+  需要严格约束时用 `validator`。
 - converter 输出类型不符 → usage_error；custom action 输出形状不符 → usage_error。
 
 ## 11. 自定义 action
@@ -575,12 +595,16 @@ config.help_format.show_defaults = true;      // 追加 "(default: ...)"
 config.help_format.width = 100;               // 折行宽度；0 不折行
 config.help_format.metavar_from_type = true;  // 无 metavar 时用 INT/UINT/FLOAT/BOOL
 config.help_format.preserve_description = true;
-config.help_format.max_help_column = 30;
+config.help_format.max_help_column = 30;      // 说明列起始列；0 用段落默认（位置 22、其余 26）
 config.color = cli.always;                    // never / automatic / always
-config.suggest_on_error = true;               // 未知选项给「是否想用 --xxx？」
+config.suggest_on_error = true;               // 未知选项/choices/子命令给「是否想用 X？」
 ```
 
+- 帮助/usage 文本上限 `MAX_HELP`（16384 字节）：超限时 `format_help`/`format_usage`
+  返回 `resource_error` 且 `text` 为空指针，不返回截断文本。
 - `Color.automatic` 用 `os.is_terminal` 检测，非终端或检测失败时无色降级。
+- `boolean_optional` 在 usage 里写成 `[--cache | --no-cache]`，帮助列写成
+  `--cache, --no-cache`；子命令段按 argparse 的排法先给 `{add,list}` 再给各命令说明。
 - 帮助段落顺序固定：usage → description → positional → options → 用户组 →
   commands → epilog；`hidden` 参数不出现在帮助但继续参与匹配。
 - 帮助/诊断文本里的控制字节与非法 UTF-8 输出为 `\xHH`。
@@ -595,6 +619,10 @@ config.suggest_on_error = true;               // 未知选项给「是否想用 
 | `usage_error` | 输入不满足声明（缺值、未知选项、坏值、互斥冲突等） | 2 |
 | `config_error` | 声明无效或不支持（freeze 失败） | 1 |
 | `resource_error` | 内存不足、参数文件读取失败、超限 | 1 |
+
+`Diagnostic.code` 的稳定取值有对应常量，应用应比较常量而不是文案：
+`cli.CODE_USAGE`、`cli.CODE_CONFIG`、`cli.CODE_RESOURCE`（分别等价于
+`"usage_error"`、`"config_error"`、`"resource_error"`）。
 
 ```yh
 let result cli.Result = cli.parse(&parser, args);
@@ -613,6 +641,10 @@ if (result.status != cli.ok) {
 }
 ```
 
+- 诊断文案带上下文（对齐 argparse）：choices 不匹配写「选项 --mode 的值不在候选集合中
+  （可选：fast, slow）」，未知子命令写「未知子命令 ad（可选：add, list）」，
+  多余的位置参数列出全部剩余 token（「多余的位置参数：b c」）。
+  开启 `suggest_on_error` 后，choices 与子命令也会追加「是否想用 X？」（编辑距离 ≤ 2）。
 - 类型化 getter 的错误码：`0` 成功、`-1` 缺键、`-2` 类型不符（不做隐式转换）。
 - 声明阶段的错误是**粘滞**的：第一次失败后 `add_argument` 继续返回 -1，
   诊断用 `cli.last_error(&parser)` 读取，直到 `destroy` 才能重新 `init`。
@@ -630,6 +662,8 @@ cli.destroy(&parser);      // 再释放声明树（递归释放子命令 parser�
 
 - `add_argument` / `register_*` / `set_default` 会**深复制**传入的文本、候选、
   默认值与常量；注册完成后原存储即可释放。
+- `set_default` 也可以给**尚未声明**的 dest 设置值（`argparse` 的 `set_defaults` 语义）；
+  该键在解析结果里存在、`provided` 为 false，并且不会覆盖 `initial`。
 - 结果独立于 parser：`destroy` 之后再读 `result.values` 里的文本仍然有效
   （结果自带池）；`release` 释放结果全部存储。
 - 重复解析是隔离的：同一个 parser 连续 `parse`，第二次不会继承第一次的显式值。
@@ -676,6 +710,7 @@ cli.destroy(&parser);      // 再释放声明树（递归释放子命令 parser�
 
 - **声明**：`parser_config`、`option`、`positional`、`help_format`、`subparsers`、
   `command`、`group`、`parse_config`。
+- **诊断码**：`CODE_USAGE`、`CODE_CONFIG`、`CODE_RESOURCE`。
 - **值**：`value_none/text/i64/u64/f64/bool`、`default_of`、`suppress_default`、
   `inherit_default`、`value_shape`。
 - **数量**：`infer_arity`、`single`、`exactly`、`optional`、`zero_or_more`、
@@ -702,8 +737,8 @@ cli.destroy(&parser);      // 再释放声明树（递归释放子命令 parser�
   列表，`destroy` parser 之后仍可读结果，`release` 释放结果全部存储。
 - 零值 `destroy`/`release`/`release_text` 安全；`init` 要求句柄为零值或已 destroy；
   首次配置错误粘滞保留，直到 destroy。
-- 默认值层级：action 固有缺省 → 参数/组/parser 策略 → `set_default` 覆盖 →
-  子命令默认（父到子覆盖）→ `initial`（不被默认值覆盖）→ 显式 action。
+- 默认值层级：action 固有缺省 → 参数/组/parser 策略 → `set_default` 覆盖（含未声明
+  dest）→ 子命令默认（父到子覆盖）→ `initial`（不被默认值覆盖）→ 显式 action。
 - `provided`/`occurrences` 只统计显式出现；`contains` 区分「键不存在」与「显式 none」。
 - 类型化 getter 不做隐式转换：缺键返回 -1，类型不符返回 -2。
 - 退出契约：`parse_main_or_exit` 成功才返回；help/version 退出 0，
@@ -714,7 +749,8 @@ cli.destroy(&parser);      // 再释放声明树（递归释放子命令 parser�
 `MAX_ARGS=64`、`MAX_NAMES=4`、`MAX_ENTRIES=128`、`MAX_LIST=256`、`MAX_CHOICES=64`、
 `MAX_CHILDREN=32`、`MAX_ALIASES=8`、`MAX_GROUPS=16`、`MAX_MUTEX=16`、`MAX_DEPTH=8`、
 `MAX_TYPES=8`、`MAX_ACTIONS=8`、`MAX_ARGC=128`、`MAX_TEXT=1024`、`MAX_HELP=16384`、
-`MAX_METAVARS=16`、`MAX_FILE_TOKENS=4096`、`MAX_FILE_LINE=4096`。
+`MAX_METAVARS=16`、`MAX_FILE_TOKENS=4096`、`MAX_FILE_LINE=4096`、
+`MAX_FILE_DEPTH=16`、`MAX_FILE_BYTES=1048576`。
 超出上限返回带诊断的失败，不静默截断。
 
 ## 未实现与已知边界
@@ -737,7 +773,7 @@ just libs-test                                   # CI 独立阶段，含上面�
 ```
 
 - **语义断言**在 `libs/cli/zz_tests_{basics,actions,commands,extensions,help}.yh`
-  （43 个 `test`），由 `cd libs && yh test cli` / `just test` /
+  （51 个 `test`），由 `cd libs && yh test cli` / `just test` /
   `just selfhost-native` / `just libs-test` 执行；文件名必须 `zz_` 前缀
   （类型声明在 `cli.yh`）。
 - fixture：`libs/cli/test/{climodel,clibasics,cliwarnings,clidiff}`；其余
