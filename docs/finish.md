@@ -5,6 +5,43 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-26 B1-2：目标/配置收进 `proj.Cfg`，`canon` 改显式出参
+
+- **目标/编译期配置的存储归 `proj`，类型仍留在 `gen`**：新增 `gen.TargetCfg`
+  （`target`/`host_target`/`target_explicit`/`dialect`/`opt_level`/`emit_kind`/
+  `emit_text_path`/`module_mode`/`is_entry_mod`），`GenState` 删掉这 9 个字段只留
+  `c_cfg` 指针，实体在 `proj.ProjectCtx.cfg`（`proj.cfg()`）；driver 在
+  `proj.init()` 后 `gen.bind_cfg(proj.cfg())` 绑定，`gen` 内部读点改 `cfg().<字段>`。
+  **为什么不按方案 §2.3 直接搬给 `proj`**：`gen` 自己也在读这些字段（`gen/target.yh`
+  `c_dialect` 3 处、`c_module_mode` 3、`c_host_target` 2、`c_target` 3 等），而 `gen`
+  是 `proj` 的下层。指针绑定让「`proj` 唯一持有 + `gen` 只读指针」两全。
+- **未绑定调用方的兼容路径**：`compiler/` 的 `test` 块与 `tests/` 的 fixture 直接
+  `import gen`，不会走 driver。`gen` 保一个模块私有回退实例，`state_init()` **只在
+  未绑定时**重置它（绑定后绝不重置，否则会抹掉 `--target`/`-O2`）；默认值只有一份
+  实现 `gen.target_cfg_defaults`，`proj.init()` 也调它。
+- **`canon` 取消隐式出参**：`proj.canon(base_off, base_len, rel, out_off, out_len)`，
+  `ProjectCtx` 删除 `canon_off`/`canon_len`。原先这对字段既是 `canon` 的结果、又被
+  `mb_mod_tag` 当模块标签暂存（两个含义共用一个全局槽，症状是路径串位而不崩）。
+  现在每个用到路径暂存的函数持有自己的局部 `c_off`/`c_len`；跨函数返回值改出参：
+  `mb_build_dir(..., out_len)`、`pj_find_root(..., out_len)`、
+  `pj_c_path(..., out_off, out_len)`。
+- **迁移中抓到一处真实的隐式依赖**：`pj_load_c_config` 依赖 `pj_c_path` 写全局游标
+  再读它（`let path_off int = c_off`）——改成局部后 C 源路径变空，
+  `clang: error: no input files`。按「谁产生谁出参」改成 `pj_c_path` 返回路径（这正是
+  B1-2 要消灭的形态），并用脚本扫出「读 `c_off/c_len` 但自己既不调 `canon` 也不调
+  `mb_mod_tag`」的函数确认只剩这一处。
+- **实测**：`gen.G()` 115 → **98**（build 66 → 50）；`proj` 762 → 775、`gen` 5538 →
+  5584（`TargetCfg` + 默认值实现）、`main` 383 → 387（绑定两行）、`testkit` 1578 →
+  1585；模块级可变 `let` 187 → 188（回退实例）。预算按实测调整：`max_g_call_sites`
+  115→98、`max_build_lines` 10236→10265、`max_file_lines` 2236→2261、
+  `max_testkit_lines` 1578→1585、`max_module_lines` 383→387。**这些上浮是显式状态
+  的代价，B2 拆 `build` 后必须回落**。
+- **测试**：`astcheck`/`llvmfront`/`llvmtarget`/`llvmlower`/`llvmchecked` 五个 fixture
+  补 `proj.init()` + `gen.bind_cfg(proj.cfg())` 与 `import proj`；`build-check` 的
+  `llvmtarget`/`llvmfront` 拷贝清单加 `proj`。
+- **验证**：`just test` 全绿；`just selfhost-native` 全绿（cc3→cc4 固定点 42 个产物
+  逐字节一致、cc4 自解析、项目验收 122/122、libs 测试）。
+
 ## 2026-10-26 B1-1：项目模型迁入 `proj` 模块（build 拆分第一台阶）
 
 - **按 [构建态对象化与 build 拆分重新规划](../02-plan/yh-构建态对象化与build拆分重新规划-2026-10-25.md)

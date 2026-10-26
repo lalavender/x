@@ -11,43 +11,40 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
 拆分、A3 `api` 调用面、A4a–A4d 状态收敛、A5 前端装配收敛、A6 `testkit` 抽出），
 证据与数字见 [finish.md](finish.md)。当前基线由 `make arch-check` 守护：
 
-| 指标 | 当前（B1-1 后，2026-10-26 实测） |
+| 指标 | 当前（B1-2 后，2026-10-26 实测） |
 |---|---|
-| 模块 / 文件 / 行数 | **14 / 121 / 53,580**（`proj` 762 + `ast` 3,463 + `lower` 5,835） |
-| `cmd` 占比 | 383 行，**0.7%** |
-| `gen.G()` 读点 | **115**（build 66、parse 21、testkit 12、main 5） |
-| 模块级可变 `let` | 187 |
+| 模块 / 文件 / 行数 | **14 / 121 / 53,673**（`proj` 775 + `ast` 3,463 + `lower` 5,835） |
+| `cmd` 占比 | 387 行，**0.7%** |
+| `gen.G()` 读点 | **98**（build 50、parse 21、testkit 12、main 5） |
+| 模块级可变 `let` | 188（含 `gen` 未绑定回退实例） |
 | 容量安全追加项 | 45（下界） |
-| 最大模块 / 文件 / 函数 | build 10,242 / `module_build` 2,236 / `mb_link` 674 |
+| 最大模块 / 文件 / 函数 | build 10,265 / `module_build` 2,261 / `mb_link` 674 |
 
 顺序按 [构建态对象化与 build 拆分重新规划](02-plan/yh-构建态对象化与build拆分重新规划-2026-10-25.md)
 修正为 **B3 → B1 → B2**：B3 与 B1/B2 零文件重叠、可并行，B1+B2 才「是同一件事的
 两个面」（改两遍），B3 不是。规模也按该文实测修正（lower 是 15 文件 5,742 行，
-不是 10 文件 4,739 行）。
+不是 10 文件 4,739 行）。B1 的动机是**字段偏移膨胀与读点归属**，不是线程安全——
+当前是 `fork` + `waitpid` 的进程池（并发 4，COW 隔离，无锁）。
 
 - [x] **B1-1 `proj` 模块成立**（2026-10-26 完成）：项目/模块/文件三张表 + 导入平行
-  数组 + 7 个表类型 + 测试/扫描配置 + 路径游标从 `gen.GenState`、`build.PjState`
-  收进 `compiler/proj/`（`proj.ctx()` 唯一实例，`proj.add_*` 唯一写者）；
-  `build/project_state.yh` 删除、`pj_dir_add` 并入 `build/project.yh`；前端窄口
-  `proj.file()/file_count()/test_file_selected()`。`gen.G()` 165 → 115，
-  `build` 10,807 → 10,242，`gen` 5,686 → 5,538。证据见 [finish.md](finish.md)。
-- [ ] **B1-2..B1-4 `BuildCtx` 对象化**（原 B1 剩余台阶）：`build` 仍有 66 个
-  `gen.G()` 读点，集中在统计（`c_stats_*`）与目标/配置（`c_target` 56）。
-  B1-2 把目标/配置迁 `proj.Cfg` 并让 `pj_canon` 改显式出参；B1-3 建
-  `build` 私有的 `BuildCtx` 收 50 个模块级 `let`；B1-4 收尾 testkit/cmd/parse
-  残余读点并撤掉 `gen.G()` 的 pub（目标 0 调用点）。
-  动机是**字段偏移膨胀与读点归属**，不是线程安全——当前是 `fork` + `waitpid`
-  的进程池（并发 4，COW 隔离，无锁）。
-  **B1-2 的实测约束（2026-10-26）**：方案 §2.3 把目标/配置（`c_target` 等）
-  直接划给 `proj`，但 `gen` 自己也在读这些字段（`gen/target.yh` 等：`c_target`
-  3 处、`c_dialect` 3、`c_module_mode` 3、`c_host_target` 2、`c_opt_level` 1、
-  `c_emit_kind` 1），而 `gen` 是 `proj` 的下层、不能 import `proj`。可行做法是
-  「`proj.Cfg` 持有存储 + `gen` 只持指针」：`gen` 保留 `c_target *TargetInfo`
-  这类指针字段，由 driver 在 `proj.init()` 后用 `gen.bind_target(&cfg.target, …)`
-  绑定（指针类型仍是 `gen.TargetInfo`，无反向依赖）；`gen` 内部读点改成解引用，
-  构建层读 `proj.ctx().cfg.*`。这么做之前要先确认 `TargetInfo` 的生命周期只在
-  一次进程内（当前是 BSS 单例，成立）。
-- [ ] **B2 拆分 `build`**：`build` 已 10,242 行、最大文件 `module_build` 2,236、
+  数组 + 7 个表类型 + 测试/扫描配置从 `gen.GenState`、`build.PjState` 收进
+  `compiler/proj/`（`proj.ctx()` 唯一实例，`proj.add_*` 唯一写者）；前端窄口
+  `proj.file()/file_count()/test_file_selected()`。`gen.G()` 165 → 115、
+  `build` 10,807 → 10,242、`gen` 5,686 → 5,538。证据见 [finish.md](finish.md)。
+- [x] **B1-2 目标/配置与 `canon` 显式化**（2026-10-26 完成）：`gen.TargetCfg`
+  类型 + `proj.ProjectCtx.cfg` 实体 + `gen.bind_cfg` 指针绑定（未绑定走宿主默认
+  回退实例）；`proj.canon` 改 `(…, out_off, out_len)`，`mb_build_dir`/
+  `pj_find_root`/`pj_c_path` 一并出参化。`gen.G()` 115 → 98。证据见
+  [finish.md](finish.md)。
+- [ ] **B1-3 `BuildCtx` 收 build 进程级状态**：`build` 还有 50 个 `gen.G()` 读点，
+  实测分两桶：**31 个函数只读 `gs.task.*`**（改 `gen.task()` 窄口，零语义改动）、
+  **18 个函数读统计/会话字段**（`c_stats_*` + `c_front_cache`/`c_ir_cache_salt`/
+  `c_firc_write_off`；按 B1-2 的指针绑定模式落成 `gen.CompileStats` + `BuildCtx`
+  存储）；`build` 自己的 50 个模块级 `let`（会话 5、计时 5、调度 2、`mb_dep_*` 9、
+  toml 11、link_inputs 11、pathstk 2、worker 1）里跨文件共享的部分收进 `BuildCtx`。
+- [ ] **B1-4 关闭 `gen.G()`**：testkit 12 / parse 21 / main 5 的残余读点改窄口后把
+  `G()` 从 `pub` 撤掉（目标全仓 0 调用点），漏改处由编译器报错兜底。
+- [ ] **B2 拆分 `build`**：`build` 已 10,265 行、最大文件 `module_build` 2,261、
   最大函数 `mb_link` 674。前置有两条硬约束：链接簇依赖发射簇的 6 个产物路径/键
   符号（须先抽进 `proj` 的 art 子簇），`project_link` 读 `toml_*` 模块级 globals
   （不能进 `link`，否则 `link → build` 成环）。顺序：art（B2-1）→ `link`（B2-2）→
