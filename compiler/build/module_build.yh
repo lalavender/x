@@ -33,49 +33,39 @@ import proj
 // 暂时调用独立宿主工具，R3 后续会迁入自有 OS 适配层。
 // ============================================================================
 
-// c_argv0：自身可执行路径（argv[0] 借用，不复制），用于编译器指纹。
-let c_argv0 *char = 0
-let mb_iface_suffix *char = 0
+// bc().argv0：自身可执行路径（argv[0] 借用，不复制），用于编译器指纹。
 
 // mb_set_argv0 / mb_set_iface_suffix：两个跨模块只写全局的受控写入口。
 // 跨模块全局不能直接导出（yh 的 pub 只用于 fn/const/struct/union/enum），
 // 而这两个值分别由 CLI 入口（自身路径）与内部子进程协议（接口后缀）设置，
 // 因此各给一个 setter，避免为了两个赋值把整块状态外移。
 pub fn mb_set_argv0(p *char) void {
-    c_argv0 = p
+    bc().argv0 = p
 }
 
 pub fn mb_set_iface_suffix(p *char) void {
-    mb_iface_suffix = p
+    bc().iface_suffix = p
 }
 
-let mb_compiler_fingerprint u64 = 0
-let mb_compiler_fingerprint_ready int = 0
-let mb_stats_build_start_ns u64 = 0
-let mb_stats_project_ns u64 = 0
-let mb_stats_schedule_ns u64 = 0
-let mb_stats_object_ns u64 = 0
-let mb_stats_link_ns u64 = 0
 
 // mb_mix_compiler_fingerprint：每进程读取一次编译器二进制，后续模块只混入指纹。
 fn mb_mix_compiler_fingerprint(h *u64) int {
-    let gs *gen.GenState = gen.G()
-    if (mb_compiler_fingerprint_ready == 0) {
-        mb_compiler_fingerprint = mb_hash_init()
-        let binary *char = c_argv0
-        if (mb_self_path != 0) {
-            binary = mb_self_path
+    if (bc().compiler_fingerprint_ready == 0) {
+        bc().compiler_fingerprint = mb_hash_init()
+        let binary *char = bc().argv0
+        if (bc().self_path != 0) {
+            binary = bc().self_path
         }
         // PC7a：按 (size, mtime_ns) 取身份，不再每轮重哈希 ~70 MB 的编译器自身。
-        if (mb_mix_file_identity(&mb_compiler_fingerprint, binary) != 0) { return -1 }
-        mb_compiler_fingerprint_ready = 1
-        if (gs.c_stats_enabled != 0) {
-            gs.c_stats_compiler_hashes += 1
+        if (mb_mix_file_identity(&bc().compiler_fingerprint, binary) != 0) { return -1 }
+        bc().compiler_fingerprint_ready = 1
+        if (gen.stats().enabled != 0) {
+            gen.stats().compiler_hashes += 1
         }
     }
     let shift int = 0
     for shift < 64 {
-        mb_fnv(h, ((mb_compiler_fingerprint >> shift) & 255).to_type(u8))
+        mb_fnv(h, ((bc().compiler_fingerprint >> shift) & 255).to_type(u8))
         shift += 8
     }
     return 0
@@ -236,15 +226,6 @@ pub fn mb_mkdir(dir *char) int {
 // mb_dep_*：模块导入的去重清单（按解析结果模块下标去重）。
 // bind/bindlen = 绑定名（诊断用）；ifoff = 接口路径；mod = 解析模块下标；
 // mi = 该模块接口加载后的 ModInfo 下标（mb_emit_module 填写）。
-let mb_dep_bind *int = 0
-let mb_dep_bindlen *int = 0
-let mb_dep_ifoff *int = 0
-let mb_dep_ctoff *int = 0
-let mb_dep_mod *int = 0
-let mb_dep_mi *int = 0
-let mb_dep_n int = 0
-let mb_dep_cap int = 0
-let mb_dep_base int = 0    // 本模块接口加载前 c_mod_n 基线
 
 // mb_mod_tag：模块产物的唯一文件名标签 <sanitize(pj)>-<module>。
 // 同名模块可能来自不同项目（KEY.MOD 导入），文件名必须含项目。
@@ -578,14 +559,14 @@ fn mb_check_clear_ifaces(build_off int, build_len int, count int) void {
 // 返回 1 = 新追加，0 = 已存在，-1 = 内存失败。
 fn mb_dep_push(target int, bind_off int, bind_len int) int {
     let k int = 0
-    for k < mb_dep_n {
-        if (mb_dep_mod[k] == target) {
+    for k < bc().dep_n {
+        if (bc().dep_mod[k] == target) {
             return 0
         }
         k += 1
     }
-    if (mb_dep_n == mb_dep_cap) {
-        let ncap int = mb_dep_cap * 2
+    if (bc().dep_n == bc().dep_cap) {
+        let ncap int = bc().dep_cap * 2
         if (ncap == 0) {
             ncap = 8
         }
@@ -593,63 +574,63 @@ fn mb_dep_push(target int, bind_off int, bind_len int) int {
         if (na == 0) {
             return gen.fail("内存分配失败")
         }
-        if (mb_dep_n > 0) {
-            memcpy(na, mb_dep_bind, (mb_dep_n * sizeof(int)).to_type(u64))
+        if (bc().dep_n > 0) {
+            memcpy(na, bc().dep_bind, (bc().dep_n * sizeof(int)).to_type(u64))
         }
-        free(mb_dep_bind)
-        mb_dep_bind = na
+        free(bc().dep_bind)
+        bc().dep_bind = na
         let nb *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
         if (nb == 0) {
             return gen.fail("内存分配失败")
         }
-        if (mb_dep_n > 0) {
-            memcpy(nb, mb_dep_bindlen, (mb_dep_n * sizeof(int)).to_type(u64))
+        if (bc().dep_n > 0) {
+            memcpy(nb, bc().dep_bindlen, (bc().dep_n * sizeof(int)).to_type(u64))
         }
-        free(mb_dep_bindlen)
-        mb_dep_bindlen = nb
+        free(bc().dep_bindlen)
+        bc().dep_bindlen = nb
         let nc *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
         if (nc == 0) {
             return gen.fail("内存分配失败")
         }
-        if (mb_dep_n > 0) {
-            memcpy(nc, mb_dep_ifoff, (mb_dep_n * sizeof(int)).to_type(u64))
+        if (bc().dep_n > 0) {
+            memcpy(nc, bc().dep_ifoff, (bc().dep_n * sizeof(int)).to_type(u64))
         }
-        free(mb_dep_ifoff)
-        mb_dep_ifoff = nc
+        free(bc().dep_ifoff)
+        bc().dep_ifoff = nc
         let nct *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
         if (nct == 0) { return gen.fail("内存分配失败") }
-        if (mb_dep_n > 0) {
-            memcpy(nct, mb_dep_ctoff, (mb_dep_n * sizeof(int)).to_type(u64))
+        if (bc().dep_n > 0) {
+            memcpy(nct, bc().dep_ctoff, (bc().dep_n * sizeof(int)).to_type(u64))
         }
-        free(mb_dep_ctoff)
-        mb_dep_ctoff = nct
+        free(bc().dep_ctoff)
+        bc().dep_ctoff = nct
         let ndm *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
         if (ndm == 0) {
             return gen.fail("内存分配失败")
         }
-        if (mb_dep_n > 0) {
-            memcpy(ndm, mb_dep_mod, (mb_dep_n * sizeof(int)).to_type(u64))
+        if (bc().dep_n > 0) {
+            memcpy(ndm, bc().dep_mod, (bc().dep_n * sizeof(int)).to_type(u64))
         }
-        free(mb_dep_mod)
-        mb_dep_mod = ndm
+        free(bc().dep_mod)
+        bc().dep_mod = ndm
         let ndi *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
         if (ndi == 0) {
             return gen.fail("内存分配失败")
         }
-        if (mb_dep_n > 0) {
-            memcpy(ndi, mb_dep_mi, (mb_dep_n * sizeof(int)).to_type(u64))
+        if (bc().dep_n > 0) {
+            memcpy(ndi, bc().dep_mi, (bc().dep_n * sizeof(int)).to_type(u64))
         }
-        free(mb_dep_mi)
-        mb_dep_mi = ndi
-        mb_dep_cap = ncap
+        free(bc().dep_mi)
+        bc().dep_mi = ndi
+        bc().dep_cap = ncap
     }
-    mb_dep_bind[mb_dep_n] = bind_off
-    mb_dep_bindlen[mb_dep_n] = bind_len
-    mb_dep_mod[mb_dep_n] = target
-    mb_dep_mi[mb_dep_n] = -1
-    mb_dep_ifoff[mb_dep_n] = -1
-    mb_dep_ctoff[mb_dep_n] = -1
-    mb_dep_n += 1
+    bc().dep_bind[bc().dep_n] = bind_off
+    bc().dep_bindlen[bc().dep_n] = bind_len
+    bc().dep_mod[bc().dep_n] = target
+    bc().dep_mi[bc().dep_n] = -1
+    bc().dep_ifoff[bc().dep_n] = -1
+    bc().dep_ctoff[bc().dep_n] = -1
+    bc().dep_n += 1
     return 1
 }
 
@@ -677,7 +658,7 @@ fn mb_dep_order_rank(m int) int {
 fn mb_module_iface_deps(m int, build_off int, build_len int) int {
     let c_off int = 0
     let c_len int = 0
-    mb_dep_n = 0
+    bc().dep_n = 0
     let fi int = 0
     for fi < proj.ctx().mods[m].file_n {
         let f int = proj.ctx().mods[m].files[fi]
@@ -699,8 +680,8 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
     for changed != 0 {
         changed = 0
         let ei int = 0
-        for ei < mb_dep_n {
-            let em int = mb_dep_mod[ei]
+        for ei < bc().dep_n {
+            let em int = bc().dep_mod[ei]
             let efi int = 0
             for efi < proj.ctx().mods[em].file_n {
                 let ef int = proj.ctx().mods[em].files[efi]
@@ -731,15 +712,15 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
         }
     }
     let si int = 0
-    for si < mb_dep_n {
+    for si < bc().dep_n {
         let best int = si
-        let bv int = mb_dep_order_rank(mb_dep_mod[si])
+        let bv int = mb_dep_order_rank(bc().dep_mod[si])
         if (bv < 0) {
             return gen.fail("内部错误：依赖模块不在拓扑序中")
         }
         let sj int = si + 1
-        for sj < mb_dep_n {
-            let rv int = mb_dep_order_rank(mb_dep_mod[sj])
+        for sj < bc().dep_n {
+            let rv int = mb_dep_order_rank(bc().dep_mod[sj])
             if (rv < 0) {
                 return gen.fail("内部错误：依赖模块不在拓扑序中")
             }
@@ -750,30 +731,30 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
             sj += 1
         }
         if (best != si) {
-            let t1 int = mb_dep_bind[si]
-            mb_dep_bind[si] = mb_dep_bind[best]
-            mb_dep_bind[best] = t1
-            let t2 int = mb_dep_bindlen[si]
-            mb_dep_bindlen[si] = mb_dep_bindlen[best]
-            mb_dep_bindlen[best] = t2
-            let t3 int = mb_dep_ifoff[si]
-            mb_dep_ifoff[si] = mb_dep_ifoff[best]
-            mb_dep_ifoff[best] = t3
-            let tct int = mb_dep_ctoff[si]
-            mb_dep_ctoff[si] = mb_dep_ctoff[best]
-            mb_dep_ctoff[best] = tct
-            let t4 int = mb_dep_mod[si]
-            mb_dep_mod[si] = mb_dep_mod[best]
-            mb_dep_mod[best] = t4
-            let t5 int = mb_dep_mi[si]
-            mb_dep_mi[si] = mb_dep_mi[best]
-            mb_dep_mi[best] = t5
+            let t1 int = bc().dep_bind[si]
+            bc().dep_bind[si] = bc().dep_bind[best]
+            bc().dep_bind[best] = t1
+            let t2 int = bc().dep_bindlen[si]
+            bc().dep_bindlen[si] = bc().dep_bindlen[best]
+            bc().dep_bindlen[best] = t2
+            let t3 int = bc().dep_ifoff[si]
+            bc().dep_ifoff[si] = bc().dep_ifoff[best]
+            bc().dep_ifoff[best] = t3
+            let tct int = bc().dep_ctoff[si]
+            bc().dep_ctoff[si] = bc().dep_ctoff[best]
+            bc().dep_ctoff[best] = tct
+            let t4 int = bc().dep_mod[si]
+            bc().dep_mod[si] = bc().dep_mod[best]
+            bc().dep_mod[best] = t4
+            let t5 int = bc().dep_mi[si]
+            bc().dep_mi[si] = bc().dep_mi[best]
+            bc().dep_mi[best] = t5
         }
         si += 1
     }
     let di int = 0
-    for di < mb_dep_n {
-        if (mb_mod_tag(mb_dep_mod[di], &c_off, &c_len) != 0) {
+    for di < bc().dep_n {
+        if (mb_mod_tag(bc().dep_mod[di], &c_off, &c_len) != 0) {
             return -1
         }
         let pbuf [760]u8
@@ -785,16 +766,16 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
         pbuf[pn] = 0
         let chosen *char = gen.arr_cstr(pbuf)
         let iface_session int = 0
-        if (mb_iface_suffix != 0) {
+        if (bc().iface_suffix != 0) {
             let session [760]u8
             let sn int = 0
             sn = gen.append_str(session, sn, gen.arr_cstr(pbuf))
-            sn = gen.append_str(session, sn, mb_iface_suffix)
+            sn = gen.append_str(session, sn, bc().iface_suffix)
             session[sn] = 0
             let ready [760]u8
             let rn int = gen.append_str(&ready[0], 0, gen.arr_cstr(pbuf))
             rn = gen.append_str(&ready[0], rn, ".ready")
-            rn = gen.append_str(&ready[0], rn, mb_iface_suffix)
+            rn = gen.append_str(&ready[0], rn, bc().iface_suffix)
             ready[rn] = 0
             if (proj.file_exists(gen.arr_cstr(&ready[0])) != 0
                 && proj.file_exists(gen.arr_cstr(session)) != 0) {
@@ -811,16 +792,16 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
         if (po < 0) {
             return -1
         }
-        mb_dep_ifoff[di] = po
+        bc().dep_ifoff[di] = po
         let ctpath [1000]u8
-        if (mb_module_ctiface_plain_path(mb_dep_mod[di], build_off,
+        if (mb_module_ctiface_plain_path(bc().dep_mod[di], build_off,
                 build_len, ctpath) != 0) { return -1 }
         let ctn int = strlen(gen.arr_cstr(ctpath)).to_type(int)
-        if (mb_iface_suffix != 0 && iface_session != 0) {
+        if (bc().iface_suffix != 0 && iface_session != 0) {
             let session_ct [1000]u8
             let csn int = gen.append_str(session_ct, 0,
                 gen.arr_cstr(ctpath))
-            csn = gen.append_str(session_ct, csn, mb_iface_suffix)
+            csn = gen.append_str(session_ct, csn, bc().iface_suffix)
             session_ct[csn] = 0
             ctn = csn
             let k2 int = 0
@@ -831,10 +812,10 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
         }
         let cto int = gen.tml_intern_str(ctpath, 0, ctn)
         if (cto < 0) { return -1 }
-        mb_dep_ctoff[di] = cto
+        bc().dep_ctoff[di] = cto
         di += 1
     }
-    return mb_dep_n
+    return bc().dep_n
 }
 
 // mb_open_out：以宿主平台正确的旗标打开输出文件（覆盖写；交叉目标不影响
@@ -854,7 +835,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     build_len int, pid_out *int, key_out *u8) int {
     let c_off int = 0
     let c_len int = 0
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let sfx_off int = -1
     let sfx_len int = 0
     if (pj_mod_suffix(proj.ctx().mods[m].proj, m, &sfx_off, &sfx_len) != 0) {
@@ -927,28 +908,28 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     // check 不读取或更新正式构建 manifest 与缓存。yh test 用独立的构建目录
     // （tmp/yh-test）与扩展键（见下方 c_test_key），既不复用生产对象，也能在
     // 选中测试集合不变时增量复用测试对象。
-    if (gs.task.c_check_only != 0) {
+    if (tk.c_check_only != 0) {
         if (mb_spawn_indexed_module(m, root_off, root_len,
                 gen.arr_cstr(asmdir), 0, pid_out) != 0) {
             return gen.fail("无法启动项目检查/测试 worker")
         }
-        gs.c_stats_workers += 1
+        gen.stats().workers += 1
         return 0
     }
     // —— manifest 哈希（U5）——
     let h u64 = mb_hash_init()
     let hi int = 0
     for hi < sfx_len {
-        mb_fnv(&h, gs.task.np_data[sfx_off + hi])
+        mb_fnv(&h, tk.np_data[sfx_off + hi])
         hi += 1
     }
     mb_fnv(&h, ('0' + is_entry).to_type(u8))
     mb_fnv(&h, '\n')
-    mb_fnv(&h, ('0' + gs.task.c_legacy_system).to_type(u8))
+    mb_fnv(&h, ('0' + tk.c_legacy_system).to_type(u8))
     mb_fnv(&h, '\n')
     // yh test：测试对象还取决于「本轮选中了哪些测试」，把选择摘要与协议版本
     // 并入键。生产构建不混入，且两种构建目录本身互不相通。
-    if (gs.task.c_test_mode != 0) {
+    if (tk.c_test_mode != 0) {
         mb_fnv(&h, 'T')
         mb_fnv(&h, 'S')
         let key_tag *char = "yh-test-key-1"
@@ -1022,20 +1003,20 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         return -1
     }
     let di int = 0
-    for di < mb_dep_n {
-        if (proj.file_exists(proj.pool_str(mb_dep_ifoff[di])) == 0
-            || proj.file_exists(proj.pool_str(mb_dep_ctoff[di])) == 0) {
+    for di < bc().dep_n {
+        if (proj.file_exists(proj.pool_str(bc().dep_ifoff[di])) == 0
+            || proj.file_exists(proj.pool_str(bc().dep_ctoff[di])) == 0) {
             // 依赖接口缺失：视为需要重编译
-            di = mb_dep_n + 1
+            di = bc().dep_n + 1
             break
         }
-        if (mb_hash_file(&h, proj.pool_str(mb_dep_ifoff[di])) != 0
-            || mb_hash_file(&h, proj.pool_str(mb_dep_ctoff[di])) != 0) {
+        if (mb_hash_file(&h, proj.pool_str(bc().dep_ifoff[di])) != 0
+            || mb_hash_file(&h, proj.pool_str(bc().dep_ctoff[di])) != 0) {
             return -1
         }        di += 1
     }
     let deps_ok int = 1
-    if (di == mb_dep_n + 1) {
+    if (di == bc().dep_n + 1) {
         deps_ok = 0
     }
     // 编译器身份：对自身二进制 FNV（滚动代次下热缓存必需）
@@ -1074,10 +1055,10 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         // 长度检查挡住布局变更。**改布局时必须同时改长度或键组成**。
         let manifest_len int = 64
         if (gen.read_source(gen.arr_cstr(mpath)) == 0
-            && gs.task.c_src_len == manifest_len) {
+            && tk.c_src_len == manifest_len) {
             let saved_manifest [64]u8
             let si int = 0
-            for si < manifest_len { saved_manifest[si] = gs.task.c_src[si]; si += 1 }
+            for si < manifest_len { saved_manifest[si] = tk.c_src[si]; si += 1 }
             let same int = 1
             let ci int = 0
             for ci < wn {
@@ -1144,10 +1125,10 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     }
     // —— 子进程编译（提供方项目根 + 主项目根） ——
     if (mb_spawn_indexed_module(m, root_off, root_len, gen.arr_cstr(asmdir),
-            mb_compiler_fingerprint, pid_out) != 0) {
+            bc().compiler_fingerprint, pid_out) != 0) {
         return gen.fail("无法启动模块编译 worker")
     }
-    gs.c_stats_workers += 1
+    gen.stats().workers += 1
     return 0
 }
 
@@ -1263,8 +1244,8 @@ fn mb_module_iface_path(m int, build_off int, build_len int, out *u8) int {
     }
     let n int = 0
     n = gen.append_str(out, n, gen.arr_cstr(plain))
-    if (mb_iface_suffix != 0) {
-        n = gen.append_str(out, n, mb_iface_suffix)
+    if (bc().iface_suffix != 0) {
+        n = gen.append_str(out, n, bc().iface_suffix)
     }
     out[n] = 0
     return 0
@@ -1296,8 +1277,8 @@ fn mb_module_ctiface_path(m int, build_off int, build_len int,
     }
     let n int = 0
     n = gen.append_str(out, n, gen.arr_cstr(plain))
-    if (mb_iface_suffix != 0) {
-        n = gen.append_str(out, n, mb_iface_suffix)
+    if (bc().iface_suffix != 0) {
+        n = gen.append_str(out, n, bc().iface_suffix)
     }
     out[n] = 0
     return 0
@@ -1313,8 +1294,8 @@ fn mb_module_ready_path(m int, build_off int, build_len int, out *u8) int {
     let n int = 0
     n = gen.append_str(out, n, gen.arr_cstr(plain))
     n = gen.append_str(out, n, ".ready")
-    if (mb_iface_suffix != 0) {
-        n = gen.append_str(out, n, mb_iface_suffix)
+    if (bc().iface_suffix != 0) {
+        n = gen.append_str(out, n, bc().iface_suffix)
     }
     out[n] = 0
     return 0
@@ -1432,9 +1413,9 @@ fn mb_file_head_bind(fi int) int {
         let target int = proj.ctx().imp_mod[found]
         let mi int = -1
         let di int = 0
-        for di < mb_dep_n {
-            if (mb_dep_mod[di] == target) {
-                mi = mb_dep_base + di
+        for di < bc().dep_n {
+            if (bc().dep_mod[di] == target) {
+                mi = bc().dep_base + di
                 break
             }
             di += 1
@@ -1476,9 +1457,8 @@ fn mb_file_head_bind(fi int) int {
 
 // mb_pass1_file：pass 1 从只读词法快照登记一个源文件（含头解析与绑定）。
 fn mb_pass1_file(path *char, fi int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_stats_enabled != 0) {
-        gs.c_stats_pass1 += 1
+    if (gen.stats().enabled != 0) {
+        gen.stats().pass1 += 1
     }
     if (mb_restore_front_file(path, fi) != 0) {
         return -1
@@ -1491,39 +1471,39 @@ fn mb_pass1_file(path *char, fi int) int {
 
 // mb_restore_front_file：将当前解析器切换到项目索引时保存的只读快照。
 pub fn mb_restore_front_file(path *char, fi int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_front_cache == 0 || proj.ctx().files[fi].source == 0
+    let tk *gen.TaskCtx = gen.task()
+    if (gen.stats().front_cache == 0 || proj.ctx().files[fi].source == 0
         || proj.ctx().files[fi].tokens == 0) {
         return gen.fail("内部错误：模块 worker 缺少前端文件快照")
     }
-    gs.task.c_src = proj.ctx().files[fi].source
-    gs.task.c_src_len = proj.ctx().files[fi].source_len
-    gs.task.c_toks = proj.ctx().files[fi].tokens
-    gs.task.c_tok_n = proj.ctx().files[fi].token_n
-    gs.task.c_tok_cap = proj.ctx().files[fi].token_n
-    gs.task.c_file_decls = proj.ctx().files[fi].decls
-    gs.task.c_file_decl_n = proj.ctx().files[fi].decl_n
-    gs.task.c_file_decl_i = -1
-    gs.task.c_file_indexed = 1
-    gs.task.c_active_file = fi
-    gs.task.c_pos = 0
+    tk.c_src = proj.ctx().files[fi].source
+    tk.c_src_len = proj.ctx().files[fi].source_len
+    tk.c_toks = proj.ctx().files[fi].tokens
+    tk.c_tok_n = proj.ctx().files[fi].token_n
+    tk.c_tok_cap = proj.ctx().files[fi].token_n
+    tk.c_file_decls = proj.ctx().files[fi].decls
+    tk.c_file_decl_n = proj.ctx().files[fi].decl_n
+    tk.c_file_decl_i = -1
+    tk.c_file_indexed = 1
+    tk.c_active_file = fi
+    tk.c_pos = 0
     if (gen.set_source_path(path) != 0) {
         return -1
     }
-    gs.task.c_spec = 0
-    gs.task.c_ctx_block = 0
+    tk.c_spec = 0
+    tk.c_ctx_block = 0
     return 0
 }
 
 // mb_pass2_file：复用模块文件快照执行全局、CT 捕获/布局常量子遍或函数子遍。
 // 1 全局初始化，2 CT 正文捕获，3 布局请求登记，4 布局 const 求值，0 普通函数。
 fn mb_pass2_file(path *char, fi int, is_globals int) int {
-    let gs *gen.GenState = gen.G()
-    if (is_globals == 1 && gs.c_stats_enabled != 0) {
-        gs.c_stats_globals += 1
+    let tk *gen.TaskCtx = gen.task()
+    if (is_globals == 1 && gen.stats().enabled != 0) {
+        gen.stats().globals += 1
     }
-    if (is_globals == 0 && gs.c_stats_enabled != 0) {
-        gs.c_stats_functions += 1
+    if (is_globals == 0 && gen.stats().enabled != 0) {
+        gen.stats().functions += 1
     }
     if (mb_restore_front_file(path, fi) != 0) {
         return -1
@@ -1549,9 +1529,9 @@ fn mb_pass2_file(path *char, fi int, is_globals int) int {
         }
         // 未使用导入检查（U3）：本文件编译完后仍为零使用的导入报错
         let i int = 0
-        for i < gs.task.mod_import_n {
-            if (gs.task.mod_import_used[i] == 0) {
-                return gen.err_lc(gs.task.mod_imports[i].line, gs.task.mod_imports[i].col,
+        for i < tk.mod_import_n {
+            if (tk.mod_import_used[i] == 0) {
+                return gen.err_lc(tk.mod_imports[i].line, tk.mod_imports[i].col,
                     "导入未使用（同文件没有任何限定名引用）")
             }
             i += 1
@@ -1618,10 +1598,10 @@ fn mb_check_binding_clash(m int) int {
 // <build>/asm/<tag>（RS3b）。
 pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
     main_off int, main_len int, out_dir *char, ir_cache_salt u64) int {
-    let gs *gen.GenState = gen.G()
-    gs.c_front_cache = 1
-    gs.task.c_ast_capture = 0
-    gs.c_ir_cache_salt = ir_cache_salt
+    let tk *gen.TaskCtx = gen.task()
+    gen.stats().front_cache = 1
+    tk.c_ast_capture = 0
+    gen.stats().ir_cache_salt = ir_cache_salt
     if (mb_load_stdlib() != 0) {
         return -1
     }
@@ -1643,90 +1623,90 @@ pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
 
 // mb_print_stats：开发验收时输出当前进程的阶段计数；默认构建保持静默。
 pub fn mb_print_stats() void {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_stats_enabled == 0) {
+    let tk *gen.TaskCtx = gen.task()
+    if (gen.stats().enabled == 0) {
         return
     }
     let buf [1024]u8
     let n int = 0
     n = gen.append_str(buf, n, "yh-stats lex=")
-    n = gen.append_int(buf, n, gs.c_stats_lex)
+    n = gen.append_int(buf, n, gen.stats().lex)
     n = gen.append_str(buf, n, " syntax=")
-    n = gen.append_int(buf, n, gs.c_stats_syntax)
+    n = gen.append_int(buf, n, gen.stats().syntax)
     n = gen.append_str(buf, n, " index=")
-    n = gen.append_int(buf, n, gs.c_stats_index)
+    n = gen.append_int(buf, n, gen.stats().index)
     n = gen.append_str(buf, n, " pass1=")
-    n = gen.append_int(buf, n, gs.c_stats_pass1)
+    n = gen.append_int(buf, n, gen.stats().pass1)
     n = gen.append_str(buf, n, " globals=")
-    n = gen.append_int(buf, n, gs.c_stats_globals)
+    n = gen.append_int(buf, n, gen.stats().globals)
     n = gen.append_str(buf, n, " functions=")
-    n = gen.append_int(buf, n, gs.c_stats_functions)
+    n = gen.append_int(buf, n, gen.stats().functions)
     n = gen.append_str(buf, n, " ir_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_functions)
+    n = gen.append_int(buf, n, gen.stats().ir_functions)
     n = gen.append_str(buf, n, " ir_cache_hits=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_cache_hits)
+    n = gen.append_int(buf, n, gen.stats().ir_cache_hits)
     n = gen.append_str(buf, n, " ir_cache_misses=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_cache_misses)
+    n = gen.append_int(buf, n, gen.stats().ir_cache_misses)
     n = gen.append_str(buf, n, " ir_lowered=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_lowered)
+    n = gen.append_int(buf, n, gen.stats().ir_lowered)
     n = gen.append_str(buf, n, " ast_nodes=")
-    n = gen.append_int(buf, n, gs.task.c_stats_ast_nodes)
+    n = gen.append_int(buf, n, tk.c_stats_ast_nodes)
     n = gen.append_str(buf, n, " stmt_nodes=")
-    n = gen.append_int(buf, n, gs.task.c_stats_stmt_nodes)
+    n = gen.append_int(buf, n, tk.c_stats_stmt_nodes)
     n = gen.append_str(buf, n, " decl_nodes=")
-    n = gen.append_int(buf, n, gs.task.c_stats_decl_nodes)
+    n = gen.append_int(buf, n, tk.c_stats_decl_nodes)
     n = gen.append_str(buf, n, " ast_refs=")
-    n = gen.append_int(buf, n, gs.task.c_stats_ast_refs)
+    n = gen.append_int(buf, n, tk.c_stats_ast_refs)
     n = gen.append_str(buf, n, " ast_bindings=")
-    n = gen.append_int(buf, n, gs.task.c_stats_ast_bindings)
+    n = gen.append_int(buf, n, tk.c_stats_ast_bindings)
     n = gen.append_str(buf, n, " ast_functions=")
-    n = gen.append_int(buf, n, gs.task.c_stats_ast_functions)
+    n = gen.append_int(buf, n, tk.c_stats_ast_functions)
     n = gen.append_str(buf, n, " workers=")
-    n = gen.append_int(buf, n, gs.c_stats_workers)
+    n = gen.append_int(buf, n, gen.stats().workers)
     n = gen.append_str(buf, n, " workers_peak=")
-    n = gen.append_int(buf, n, mb_sched_peak)
+    n = gen.append_int(buf, n, bc().sched_peak)
     n = gen.append_str(buf, n, " iface_early=")
-    n = gen.append_int(buf, n, mb_sched_iface_early)
+    n = gen.append_int(buf, n, bc().sched_iface_early)
     n = gen.append_str(buf, n, " asm=")
-    n = gen.append_int(buf, n, gs.c_stats_asm)
+    n = gen.append_int(buf, n, gen.stats().asm)
     n = gen.append_str(buf, n, " link=")
-    n = gen.append_int(buf, n, gs.c_stats_link)
+    n = gen.append_int(buf, n, gen.stats().link)
     n = gen.append_str(buf, n, " compiler_hashes=")
-    n = gen.append_int(buf, n, gs.c_stats_compiler_hashes)
+    n = gen.append_int(buf, n, gen.stats().compiler_hashes)
     n = gen.append_str(buf, n, " time_project_ns=")
-    n = gen.append_i64(buf, n, mb_stats_project_ns.to_type(i64))
+    n = gen.append_i64(buf, n, bc().project_ns.to_type(i64))
     n = gen.append_str(buf, n, " time_schedule_ns=")
-    n = gen.append_i64(buf, n, mb_stats_schedule_ns.to_type(i64))
+    n = gen.append_i64(buf, n, bc().schedule_ns.to_type(i64))
     n = gen.append_str(buf, n, " time_object_ns=")
-    n = gen.append_i64(buf, n, mb_stats_object_ns.to_type(i64))
+    n = gen.append_i64(buf, n, bc().object_ns.to_type(i64))
     n = gen.append_str(buf, n, " time_link_ns=")
-    n = gen.append_i64(buf, n, mb_stats_link_ns.to_type(i64))
+    n = gen.append_i64(buf, n, bc().link_ns.to_type(i64))
     n = gen.append_str(buf, n, " time_total_ns=")
     let total_ns u64 = 0
-    if (mb_stats_build_start_ns != 0) {
+    if (bc().build_start_ns != 0) {
         let now u64 = cmd_clock_ns()
-        if (now >= mb_stats_build_start_ns) {
-            total_ns = now - mb_stats_build_start_ns
+        if (now >= bc().build_start_ns) {
+            total_ns = now - bc().build_start_ns
         }
     }
     n = gen.append_i64(buf, n, total_ns.to_type(i64))
     // 新覆盖字段追加在原统计行尾，保留已有性能工具的字段顺序和含义。
     n = gen.append_str(buf, n, " checked_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_checked_functions)
+    n = gen.append_int(buf, n, gen.stats().checked_functions)
     n = gen.append_str(buf, n, " backend_emitted_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_backend_emitted)
+    n = gen.append_int(buf, n, gen.stats().backend_emitted)
     n = gen.append_str(buf, n, " rejected_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_rejected)
+    n = gen.append_int(buf, n, gen.stats().ir_rejected)
     n = gen.append_str(buf, n, " backend_rejected_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_backend_rejected)
+    n = gen.append_int(buf, n, gen.stats().backend_rejected)
     n = gen.append_str(buf, n, " fallback_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_rejected + gs.c_stats_backend_rejected)
+    n = gen.append_int(buf, n, gen.stats().ir_rejected + gen.stats().backend_rejected)
     n = gen.append_str(buf, n, " check_cache_hits=")
-    n = gen.append_int(buf, n, gs.c_stats_check_cache_hits)
+    n = gen.append_int(buf, n, gen.stats().check_cache_hits)
     n = gen.append_str(buf, n, " check_cache_misses=")
-    n = gen.append_int(buf, n, gs.c_stats_check_cache_misses)
+    n = gen.append_int(buf, n, gen.stats().check_cache_misses)
     n = gen.append_str(buf, n, " check_skipped=")
-    n = gen.append_int(buf, n, gs.c_stats_check_cache_skipped)
+    n = gen.append_int(buf, n, gen.stats().check_cache_skipped)
     n = gen.append_byte(buf, n, '\n')
     gen.write_all(2, buf, n)
 }
@@ -1787,9 +1767,9 @@ fn mb_load_default_stdlib() int {
     if (mb_resolve_self_path() != 0) {
         return 0
     }
-    let self_len int = strlen(mb_self_path).to_type(int)
+    let self_len int = strlen(bc().self_path).to_type(int)
     let cut int = self_len
-    for cut > 0 && mb_self_path[cut - 1] != '/' {
+    for cut > 0 && bc().self_path[cut - 1] != '/' {
         cut -= 1
     }
     let dir [1200]u8
@@ -1797,7 +1777,7 @@ fn mb_load_default_stdlib() int {
     if (cut > 1) {
         let i int = 0
         for i < cut - 1 {
-            dir[dn] = mb_self_path[i].to_type(u8)
+            dir[dn] = bc().self_path[i].to_type(u8)
             dn += 1
             i += 1
         }
@@ -1873,7 +1853,7 @@ pub fn pj_topo_multi(pj int) int {
 // mb_cmd_build：构建项目；可选 --stats 输出当前构建与模块 worker 计数。
 // argc/argv 已剥离程序名；由 build/check 命令共用。
 pub fn mb_cmd_build(av **char, an int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (mb_resolve_self_path() != 0) {
         return 1
     }
@@ -1885,7 +1865,7 @@ pub fn mb_cmd_build(av **char, an int) int {
     let i int = 1
     for i < an {
         if (gen.cstr_eq(av[i], "--stats") != 0) {
-            gs.c_stats_enabled = 1
+            gen.stats().enabled = 1
             i += 1
             continue
         }
@@ -1934,21 +1914,21 @@ pub fn mb_cmd_build(av **char, an int) int {
         mod_arg_n += 1
         i += 1
     }
-    if (gs.task.c_check_only != 0 && li_select_count() > 0) {
+    if (tk.c_check_only != 0 && li_select_count() > 0) {
         gen.fail("yh check 不支持 --link")
         return 2
     }
-    mb_stats_build_start_ns = 0
-    mb_stats_project_ns = 0
-    mb_stats_schedule_ns = 0
-    mb_stats_object_ns = 0
-    mb_stats_link_ns = 0
-    if (gs.c_stats_enabled != 0) {
-        mb_stats_build_start_ns = cmd_clock_ns()
+    bc().build_start_ns = 0
+    bc().project_ns = 0
+    bc().schedule_ns = 0
+    bc().object_ns = 0
+    bc().link_ns = 0
+    if (gen.stats().enabled != 0) {
+        bc().build_start_ns = cmd_clock_ns()
     }
-    gs.task.c_path = "yh"
+    tk.c_path = "yh"
     // 父进程建立可继承的只读前端快照，fork worker 不再重扫项目源码。
-    gs.c_front_cache = 1
+    gen.stats().front_cache = 1
     if (mb_load_stdlib() != 0) {
         return 1
     }
@@ -2011,23 +1991,23 @@ pub fn mb_cmd_build(av **char, an int) int {
     if (mb_mkdir(proj.pool_str(build_off)) != 0) {
         return 1
     }
-    if (gs.c_stats_enabled != 0) {
-        mb_stats_project_ns = cmd_clock_ns() - mb_stats_build_start_ns
+    if (gen.stats().enabled != 0) {
+        bc().project_ns = cmd_clock_ns() - bc().build_start_ns
     }
     let schedule_start_ns u64 = 0
-    if (gs.c_stats_enabled != 0) {
+    if (gen.stats().enabled != 0) {
         schedule_start_ns = cmd_clock_ns()
     }
     if (mb_schedule_modules(count, root_off, root_len, build_off, build_len) != 0) {
-        if (gs.task.c_check_only != 0) {
+        if (tk.c_check_only != 0) {
             mb_check_clear_ifaces(build_off, build_len, count)
         }
         return 1
     }
-    if (gs.c_stats_enabled != 0) {
-        mb_stats_schedule_ns = cmd_clock_ns() - schedule_start_ns
+    if (gen.stats().enabled != 0) {
+        bc().schedule_ns = cmd_clock_ns() - schedule_start_ns
     }
-    if (gs.task.c_check_only != 0) {
+    if (tk.c_check_only != 0) {
         mb_check_clear_ifaces(build_off, build_len, count)
         pj_out_s("检查通过: ")
         pj_out_np(proj.ctx().projs[pj].name_off, proj.ctx().projs[pj].name_len)
@@ -2068,7 +2048,7 @@ pub fn mb_cmd_build(av **char, an int) int {
 // mb_cmd_run：yh run——构建清单 entry 并运行，返回程序退出码。
 // 支持与 build 相同的 --link 组选择；跨目标在本机运行前明确拒绝。
 pub fn mb_cmd_run(av **char, an int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (mb_resolve_self_path() != 0) {
         return 1
     }
@@ -2076,7 +2056,7 @@ pub fn mb_cmd_run(av **char, an int) int {
     let i int = 1
     for i < an {
         if (gen.cstr_eq(av[i], "--stats") != 0) {
-            gs.c_stats_enabled = 1
+            gen.stats().enabled = 1
             i += 1
             continue
         }
@@ -2101,8 +2081,8 @@ pub fn mb_cmd_run(av **char, an int) int {
         gen.fail_path("yh run 未知参数: ", av[i])
         return 2
     }
-    gs.task.c_path = "yh"
-    gs.c_front_cache = 1
+    tk.c_path = "yh"
+    gen.stats().front_cache = 1
     if (mb_load_stdlib() != 0) {
         return 1
     }
