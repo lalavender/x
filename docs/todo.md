@@ -73,10 +73,15 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   `CliRequest` + project/file 两个 parser + `inherit` 全局 parent）；`api_*` 改接收
   请求结构，`build`/`testkit` 删除选项扫描；`driver.yh` 只做分派（main 307 行，
   arch-check 登记 `cmdline -> libs`/`main -> cmdline`）。证据见方案 §12。
-- [ ] **CLI-R1d lowering 聚合初始化（独立缺陷）**：`let x T = f()` 之后紧跟
-  `x.<struct字段> = <聚合表达式>` 会报「首片不支持此聚合初始化形态」（cli 声明里
-  踩到；临时靠 hoist 绕过）。在 `lower/module_snapshot_lower_place.yh` 的
-  `checked_lower_aggregate_store` 路径上支持该形态，并补最小用例。
+- [ ] **CLI-R1d lowering 聚合初始化（常见但不复现，降级观察）**：CLI-R1 期间
+  `compiler/cmdline` 的声明代码曾报「首片不支持此聚合初始化形态」（
+  `lower/module_snapshot_lower_place.yh` 的 `checked_lower_aggregate_store` 返回非 0），
+  当时靠把 `Value`/`Default` 先 hoist 到局部绕过。2026-10-27 复查：用
+  `let spec cli.Argument = cli.option(...)` + `spec.default_value =
+  cli.suppress_default()`、嵌套 `cli.default_of(cli.value_i64(0))`、以及
+  `-o` + `dest` 的原始组合都无法在独立项目或 compiler 项目里复现（代码已改为
+  hoist 写法，且 `compiler/.build` 已冷清）。**暂不作为缺陷推进**：保留 hoist 作为
+  声明代码的推荐写法，若再次出现再按 lowering 缺陷立项并补最小用例。
 - [x] **CLI-R2 单文件形态迁移**（2026-10-27 随 R1 完成）：`--syntax-check`、
   `--emit-asm`、`-o` 两种次序、`--emit-llvm` 全走 cli 结果，`n == 2 / n == 3`
   的形态判断已删除（由 file parser + 模式位互斥表达）。
