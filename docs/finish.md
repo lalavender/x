@@ -5,6 +5,35 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-26 B1-3/B1-4：统计与会话状态独立，`gen.G()` 归零并关闭
+
+- **B1-3 统计独立成 `gen.CompileStats`**：25 个计数（`enabled`/`front_cache`/
+  `lex`/`syntax`/`index`/`pass1`/`globals`/`functions`/`ir_*`/`check_*`/
+  `backend_*`/`asm`/`link`/`compiler_hashes`/`ir_cache_salt`/`firc_write_off`/
+  `workers`）从 `GenState` 物理移出，读点统一 `gen.stats().<字段>`。
+  **没有按方案搬进 `build`**：写入方主要在 gen/lex/parse（前端），搬进 build 会
+  形成 build↔gen 双向耦合；独立结构 + 窄口已经达成「GenState 瘦身 + 读点归属」。
+  `GenState` 因此只剩 `c_cfg` 指针与 `task`。
+- **B1-3 `BuildCtx`**：新增 `compiler/build/build_ctx.yh`（按文件名序排最前），
+  把编译器路径/指纹/接口后缀（5）、阶段计时（5）、调度观测（2）、`mb_dep_*`
+  依赖表（9）共 21 个模块级 `let` 收进 `BuildCtx`，入口 `bc()`。模块级可变 `let`
+  188 → **169**；`build` 自己的 `gen.G()` 13 → 0。
+- **B1-4 关闭 `gen.G()`**：全仓 40 个「只读 `gs.task.*`」的函数改走 `gen.task()`
+  （parse 21、testkit 12、check 3、cmd 5、ast 2、comptime 2、lex 1 …）；
+  `parse/iface_ct_map` 的 4 个 helper 与 llvmlower fixture 的三个 helper 形参从
+  `*gen.GenState` 收窄成 `*gen.TaskCtx`；`gen/buffer` 内部最后一处 `G()` 改
+  `task()`。删除 `pub fn G()`，`GenState` 由 `pub struct` 降为模块私有。
+  **跨模块只剩三条窄口**：`gen.task()` / `gen.stats()` / `proj.ctx()`+`proj.cfg()`。
+- **门禁同步**：`max_g_call_sites` 49 → **0**（任何新增 `gen.G()` 立即红）、
+  `max_globals` 190 → **169**、`max_build_lines` 10,265 → 10,289（`BuildCtx`
+  结构体换掉 21 行 let 声明）。`arch-check` 的报告行在没有 `gen.G()` 时不再打印
+  空括号。
+- **迁移手法**：按「函数体 + 只读 `task`」两个条件做机械替换（有其它 `gs.` 读点的
+  函数不动，留给下一刀），每刀后跑 `just build`；`gen.task()` 与 `gen.G().task`
+  语义相同（同一个 `&g_state.task`），属零语义改动。
+- **验证**：`just test` 全绿；`just selfhost-native` 全绿（cc3→cc4 固定点 42 个
+  产物逐字节一致、cc4 自解析 122 个源文件、项目验收 122/122、libs 测试）。
+
 ## 2026-10-26 B1-2：目标/配置收进 `proj.Cfg`，`canon` 改显式出参
 
 - **目标/编译期配置的存储归 `proj`，类型仍留在 `gen`**：新增 `gen.TargetCfg`
