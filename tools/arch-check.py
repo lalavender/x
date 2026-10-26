@@ -67,7 +67,7 @@ BUDGETS = {
     "max_proj_lines": 800,         # proj（B1-1 新建：表/写者/路径与窄口）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
     "max_globals": 190,
-    "max_g_call_sites": 98,
+    "max_g_call_sites": 67,
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
