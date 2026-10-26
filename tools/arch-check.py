@@ -67,7 +67,7 @@ BUDGETS = {
     "max_proj_lines": 800,         # proj（B1-1 新建：表/写者/路径与窄口）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
     "max_globals": 169,
-    "max_g_call_sites": 67,
+    "max_g_call_sites": 0,      # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
@@ -231,7 +231,9 @@ def main():
     print(f"  最大函数 {max_func[0]} 行（{max_func[1]}）")
     g_top = "  ".join(f"{k}={v}" for k, v in
                       sorted(g_by_mod.items(), key=lambda x: -x[1])[:4])
-    print(f"  main 占比 {cmd_share}%；模块级可变 let {globals_n}；gen.G() 调用点 {g_calls}（{g_top}）")
+    g_detail = f"（{g_top}）" if g_top else ""
+    print(f"  main 占比 {cmd_share}%；模块级可变 let {globals_n}；"
+          f"gen.G() 调用点 {g_calls}{g_detail}")
     print(f"  未判空 malloc {len(unchecked)}；未接线 pub {len(unwired)}；"
           f"容量安全追加点 {cap_appends}")
 

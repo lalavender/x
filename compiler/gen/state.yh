@@ -5,15 +5,18 @@ module gen
 //
 // GenState 把原先 208 个跨模块 pub let 可变全局收进单一结构体：语言规则
 // 「let 不导出」后，可变状态的跨模块共享只能经指针进行。g_state 是模块
-// 私有实例（BSS 零初始化），G() 返回其地址供 parse/cmd/backend 限定访问
-// —— `gen.G().task.c_pos`；gen 模块内部直接写 `g_state.task.c_pos`。
+// 私有实例（BSS 零初始化）。跨模块只经窄口访问（B1-4 起不再导出 G()）：
+// `gen.task()` 拿每任务上下文、`gen.stats()` 拿统计、`gen.module_mode()` 等
+// 读构建开关；gen 模块内部直接写 `g_state.task.c_pos`。
 // 非零初始值由 state_init() 在编译入口显式设置（原声明初始化器迁移）。
 // ============================================================================
 
-// 域分类（RS1c，2026-10-19，见 docs/02-plan/yh-R2收尾实施计划.md）：
+// 域分类（RS1c，2026-10-19；B1 收口 2026-10-26）：
 // 每任务字段已**物理收敛**进 pub struct TaskCtx（g_state.task）——
-// worker 主路径与将来线程池以 *TaskCtx 为任务私有上下文；GenState 只
-// 保留进程级字段（构建配置/统计/项目索引/目标与 CLI）+ task 字段。
+// worker 主路径与将来线程池以 *TaskCtx 为任务私有上下文。
+// B1 之后 GenState 只剩两项：`c_cfg`（目标/配置的存储指针，实体在 proj）
+// 与 `task`；项目表在 proj.ProjectCtx、统计在 CompileStats。三个入口分别是
+// gen.cfg()（模块私有）、gen.task()/gen.stats()（跨模块窄口）。
 // 偏移变化说明：字段偏移进入机器码立即数，本步由固定点门（A==B）
 // 保证自洽，不与上一代产物对比。
 
@@ -236,8 +239,8 @@ pub struct TargetCfg {
 // 这些计数原先混在 GenState 里，让 GenState 多背 25 个字段（字段偏移膨胀，
 // 后端单条 add 逼近立即数上限）。它们没有「目标/项目」那样的跨模块所有者：
 // 前端（lex/parse/ast）与构建层（build/testkit）都在写，所以**留在 gen，
-// 但物理独立**成一个结构，读点统一走 `gen.stats().<字段>` 窄口——不再经
-// `gen.G()`，也不再让 GenState 变大。
+// 但物理独立**成一个结构，读点统一走 `gen.stats().<字段>` 窄口，不再让
+// GenState 变大。
 pub struct CompileStats {
     enabled int // 1 = 输出构建阶段计数（仅开发验收）
     front_cache int // 1 = worker 保存项目源与 token 快照
@@ -266,8 +269,9 @@ pub struct CompileStats {
     compiler_hashes int // 实际读取编译器二进制计算指纹的次数
 }
 
-// GenState：编译器全局状态（进程级）+ 任务私有上下文。字段全公开。
-pub struct GenState {
+// GenState：gen 模块私有状态（进程级）。B1 之后只剩目标/配置指针与任务上下文，
+// 跨模块不再直接访问它——前端走 gen.task()、统计走 gen.stats()、目标走 proj.cfg()。
+struct GenState {
     c_cfg *TargetCfg // [B1-2] 目标/配置的存储指针（实体在 proj.ProjectCtx.cfg）
     task TaskCtx // [RS1c] 每任务工作状态：g_state.task.<字段>
 }
@@ -278,11 +282,6 @@ let g_state GenState
 
 // g_stats：统计结构的进程内唯一实例（零初始化）。
 let g_stats CompileStats
-
-// G：返回编译器全局状态地址。parse/cmd/backend 经 gen.G() 限定访问。
-pub fn G() *GenState {
-    return &g_state
-}
 
 // task：当前任务的显式上下文（A4b）。
 //
