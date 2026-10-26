@@ -38,6 +38,15 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   残余读点并撤掉 `gen.G()` 的 pub（目标 0 调用点）。
   动机是**字段偏移膨胀与读点归属**，不是线程安全——当前是 `fork` + `waitpid`
   的进程池（并发 4，COW 隔离，无锁）。
+  **B1-2 的实测约束（2026-10-26）**：方案 §2.3 把目标/配置（`c_target` 等）
+  直接划给 `proj`，但 `gen` 自己也在读这些字段（`gen/target.yh` 等：`c_target`
+  3 处、`c_dialect` 3、`c_module_mode` 3、`c_host_target` 2、`c_opt_level` 1、
+  `c_emit_kind` 1），而 `gen` 是 `proj` 的下层、不能 import `proj`。可行做法是
+  「`proj.Cfg` 持有存储 + `gen` 只持指针」：`gen` 保留 `c_target *TargetInfo`
+  这类指针字段，由 driver 在 `proj.init()` 后用 `gen.bind_target(&cfg.target, …)`
+  绑定（指针类型仍是 `gen.TargetInfo`，无反向依赖）；`gen` 内部读点改成解引用，
+  构建层读 `proj.ctx().cfg.*`。这么做之前要先确认 `TargetInfo` 的生命周期只在
+  一次进程内（当前是 BSS 单例，成立）。
 - [ ] **B2 拆分 `build`**：`build` 已 10,242 行、最大文件 `module_build` 2,236、
   最大函数 `mb_link` 674。前置有两条硬约束：链接簇依赖发射簇的 6 个产物路径/键
   符号（须先抽进 `proj` 的 art 子簇），`project_link` 读 `toml_*` 模块级 globals
