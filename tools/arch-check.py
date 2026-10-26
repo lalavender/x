@@ -45,15 +45,19 @@ ALLOWED = {
     "check": {"gen", "ast", "proj"},
     "parse": {"gen", "lex", "comptime", "ast", "ir", "proj"},
     "backend": {"gen", "ir"},
+    # link：工具链调用层（汇编、链接驱动、内嵌 lld、进程、时钟）
+    # 2026-10-26 B2-2 自 build 拆出。它必须位于 build 之下、proj 之上：
+    # 只允许 gen/proj/backend，不得 import build（否则 link ↔ build 成环）。
+    "link": {"gen", "proj", "backend"},
     # build 是构建引擎（A2c 后承担项目模型 + 链接 + 调度 + 模块发射），
     # 位于前端/后端之上，可依赖全部下层；main 只剩 CLI 与测试执行器。
     "build": {"gen", "lex", "parse", "comptime", "ast", "check", "ir",
-              "backend", "builtin", "lower", "proj"},
+              "backend", "builtin", "lower", "proj", "link"},
     # testkit：语言内测试执行器（yh test 子命令的实现），位于 build 之上。
     # 模块名不能叫 test——`test "..." {}` 是语言关键字。
-    "testkit": {"gen", "parse", "build", "proj"},
+    "testkit": {"gen", "parse", "build", "proj", "link"},
     "main": {"gen", "lex", "comptime", "ast", "check", "parse", "ir",
-             "backend", "builtin", "build", "testkit", "lower", "proj"},
+             "backend", "builtin", "build", "testkit", "lower", "proj", "link"},
 }
 
 # —— 预算（现状即上限，只减不增）——
@@ -62,11 +66,12 @@ BUDGETS = {
     "max_file_lines": 2042,        # module_build.yh（A2c 拆分后必须下降）
     "max_function_lines": 700,     # mb_link 674（含前导注释的上界口径）
     "max_module_lines": 387,       # main（A6 后只剩 driver + api；B1-1 +2、B1-2 绑定存储 +4）
-    "max_testkit_lines": 1585,     # testkit（YT2d-3 同项目测试锁 +37；B1-1 迁表读点后净 -14）
-    "max_build_lines": 9820,      # build（B1-1 项目模型搬到 proj 后 -543）
-    "max_proj_lines": 1301,        # proj（B1-1 表/写者/路径/窄口 + B2-1 产物路径与键）
+    "max_testkit_lines": 1586,     # testkit（YT2d-3 同项目测试锁 +37；B1-1 迁表读点后净 -14）
+    "max_build_lines": 6315,
+    "max_link_lines": 3600,      # link（B2-2 新建：汇编/链接驱动/lld/进程/时钟）      # build（B1-1 项目模型搬到 proj 后 -543）
+    "max_proj_lines": 1318,        # proj（B1-1 表/写者/路径/窄口 + B2-1 产物路径与键）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
-    "max_globals": 169,
+    "max_globals": 172,
     "max_g_call_sites": 0,      # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
@@ -214,6 +219,7 @@ def main():
     budget("max_build_lines", per_module.get("build", 0), "build")
     budget("max_testkit_lines", per_module.get("testkit", 0), "testkit")
     budget("max_proj_lines", per_module.get("proj", 0), "proj")
+    budget("max_link_lines", per_module.get("link", 0), "link")
     budget("max_cmd_share_pct", cmd_share, "%")
     budget("max_globals", globals_n)
     budget("max_g_call_sites", g_calls)

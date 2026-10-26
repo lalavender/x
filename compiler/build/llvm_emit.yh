@@ -7,6 +7,7 @@ import ast
 import check
 import builtin
 import proj
+import link
 
 // ============================================================================
 // llvm_emit.yh —— LLVM 后端发射的驱动侧共用入口（LL3）
@@ -173,12 +174,12 @@ pub fn llvm_check_single_file(source_path *char, require_main int,
 // llvm_emit_single_file：单文件入口（--emit-asm / -o）在 LLVM 模式下的实现。
 // 调用方必须已完成会话初始化（state_init + 读源 + 语义表）；
 // 受检前端由 llvm_check_single_file 建立，本函数只负责 CLI 形态与产物发布。
-// link 非 0：产物是**可执行文件**（对象与可执行文件先写临时文件，验机后发布）；
-// link 为 0：产物是**对象文件**（kind=0）或汇编文本（kind=1）。
+// do_link 非 0：产物是**可执行文件**（对象与可执行文件先写临时文件，验机后发布）；
+// do_link 为 0：产物是**对象文件**（kind=0）或汇编文本（kind=1）。
 // text_path 非空时额外写出 LLVM 文本（"-" = 标准输出）。
 // 返回 0 成功、1 源/形态错误、-1 内部或桥失败。
 pub fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
-    text_path *char, link int) int {
+    text_path *char, do_link int) int {
     // 单文件 check 与编译共用同一条受检前端；调用方只做过读源与建表。
     let checked ast.CheckedModule
     let checked_status int = llvm_check_single_file(source_path, 1, &checked)
@@ -189,7 +190,7 @@ pub fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
     let emit_path *char = out_path
     let link_tmp [720]u8
     let link_tmp_path *char = 0.to_type(*char)
-    if (link != 0) {
+    if (do_link != 0) {
         on = gen.append_str(&object[0], on, out_path)
         on = gen.append_str(&object[0], on, ".yh-tmp.o")
         object[on] = 0
@@ -243,16 +244,16 @@ pub fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
     let emitted int = llvm_emit_module_to(&checked, kind, emit_path, text_path, &stats)
     ast.checked_module_release(&checked)
     if (emitted != 0) {
-        if (link != 0) { unlink(gen.arr_cstr(&object[0])) }
+        if (do_link != 0) { unlink(gen.arr_cstr(&object[0])) }
         else { unlink(out_path) }
         return -1
     }
-    if (link == 0) { return 0 }
+    if (do_link == 0) { return 0 }
     // 单文件链接沿用项目路径的目标选择；Linux x64/AArch64 有内嵌 lld 时不 fork cc。
     let link_rc int = -1
-    if (mb_lld_darwin_enabled() != 0) {
-        link_rc = mb_macho_link_single(gen.arr_cstr(&object[0]), link_tmp_path)
-    } else if (mb_lld_linux_enabled() != 0) {
+    if (link.mb_lld_darwin_enabled() != 0) {
+        link_rc = link.mb_macho_link_single(gen.arr_cstr(&object[0]), link_tmp_path)
+    } else if (link.mb_lld_linux_enabled() != 0) {
         let objects [2]*char
         objects[0] = gen.arr_cstr(&object[0])
         objects[1] = 0.to_type(*char)
@@ -260,11 +261,11 @@ pub fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
         extra_args[0] = "-no-pie"
         extra_args[1] = "-lm"
         extra_args[2] = 0.to_type(*char)
-        link_rc = mb_lld_link_worker(&objects[0], 1, &extra_args[0], 2,
+        link_rc = link.mb_lld_link_worker(&objects[0], 1, &extra_args[0], 2,
             link_tmp_path)
     } else {
         let cc_storage [1200]u8
-        let cc *char = mb_select_linker(&cc_storage[0])
+        let cc *char = link.mb_select_linker(&cc_storage[0])
         if (cc == 0) {
             unlink(gen.arr_cstr(&object[0]))
             return -1
@@ -281,7 +282,7 @@ pub fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
         } else {
             args[5] = 0.to_type(*char)
         }
-        link_rc = cmd_process_run(&args[0])
+        link_rc = link.cmd_process_run(&args[0])
     }
     unlink(gen.arr_cstr(&object[0]))
     if (link_rc == -2) {
@@ -292,12 +293,12 @@ pub fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
         unlink(link_tmp_path)
         return gen.fail_path("LLVM 产物链接失败: ", out_path)
     }
-    if (mb_object_machine_matches(link_tmp_path) == 0) {
+    if (link.mb_object_machine_matches(link_tmp_path) == 0) {
         unlink(link_tmp_path)
         return gen.fail_path("LLVM 链接产物架构与当前 target 不符: ", out_path)
     }
-    if (mb_lld_darwin_enabled() != 0
-        && mb_darwin_executable_matches(link_tmp_path) == 0) {
+    if (link.mb_lld_darwin_enabled() != 0
+        && link.mb_darwin_executable_matches(link_tmp_path) == 0) {
         unlink(link_tmp_path)
         return gen.fail_path("Darwin LLVM 链接产物版本或代码签名校验失败: ", out_path)
     }

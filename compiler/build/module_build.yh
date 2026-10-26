@@ -4,6 +4,7 @@ import parse
 import backend
 import ir
 import proj
+import link
 
 // ============================================================================
 // module_build.yh —— 项目构建管线（MOD-U4/U5）
@@ -21,7 +22,7 @@ import proj
 // 再加载已发布接口 → 两遍编译模块文件 → 产出
 // 按文件汇编（asm/<tag>/<file>.s + <tag>.stub.s）与接口 .s.i（pub 符号
 // GLOBAL、private LOCAL 且发 hidden 可见性、符号带 __proj__mod 后缀）
-// → mb_link 逐文件汇编成 obj/<tag>/<file>.o → 一次链接全部 .o。
+// → link.mb_link 逐文件汇编成 obj/<tag>/<file>.o → 一次链接全部 .o。
 //
 // 缓存（U5）：解析不缓存（每轮重解析——重绑定由构造保证）；对象缓存
 // 按 manifest 内容哈希：后缀+entry+各源文件内容+各依赖接口内容+版本
@@ -41,6 +42,7 @@ import proj
 // 因此各给一个 setter，避免为了两个赋值把整块状态外移。
 pub fn mb_set_argv0(p *char) void {
     bc().argv0 = p
+    link.set_argv0(p)
 }
 
 pub fn mb_set_iface_suffix(p *char) void {
@@ -57,7 +59,7 @@ fn mb_mix_compiler_fingerprint(h *u64) int {
             binary = bc().self_path
         }
         // PC7a：按 (size, mtime_ns) 取身份，不再每轮重哈希 ~70 MB 的编译器自身。
-        if (mb_mix_file_identity(&bc().compiler_fingerprint, binary) != 0) { return -1 }
+        if (link.mb_mix_file_identity(&bc().compiler_fingerprint, binary) != 0) { return -1 }
         bc().compiler_fingerprint_ready = 1
         if (gen.stats().enabled != 0) {
             gen.stats().compiler_hashes += 1
@@ -116,7 +118,7 @@ pub fn mb_mkdir(dir *char) int {
     subs[3] = "manifest"
     subs[4] = "ir"
     subs[5] = "llvm"
-    if (cmd_mkdirs(dir) != 0) {
+    if (link.cmd_mkdirs(dir) != 0) {
         return gen.fail_path("无法创建构建目录: ", dir)
     }
     let k int = 0
@@ -126,7 +128,7 @@ pub fn mb_mkdir(dir *char) int {
         n = gen.append_byte(path, n, '/')
         n = gen.append_str(path, n, subs[k])
         path[n] = 0
-        if (cmd_mkdirs(gen.arr_cstr(path)) != 0) {
+        if (link.cmd_mkdirs(gen.arr_cstr(path)) != 0) {
             return gen.fail_path("无法创建构建目录: ", dir)
         }
         k += 1
@@ -580,7 +582,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
             triple_i += 1
         }
         if (proj.cfg().target.os == gen.TARGET_OS_DARWIN) {
-            let min_os *char = cmd_darwin_min_os()
+            let min_os *char = link.cmd_darwin_min_os()
             if (min_os == 0) { return -1 }
             proj.fnv(&h, 0)
             triple_i = 0
@@ -676,7 +678,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
                 let object_hash u64 = proj.hash_init()
                 let object_digest [16]u8
                 if (proj.hash_file(&object_hash, artifact_path) != 0
-                    || mb_object_machine_matches(artifact_path) == 0) {
+                    || link.mb_object_machine_matches(artifact_path) == 0) {
                     same = 0
                 } else {
                     proj.hash_hex(object_hash, object_digest)
@@ -774,7 +776,7 @@ fn mb_manifest_commit(m int, build_off int, build_len int, key *u8) int {
         on = gen.append_str(&object[0], on, proj.pool_str(tag_off))
         on = gen.append_str(&object[0], on, ".o")
         object[on] = 0
-        if (mb_object_machine_matches(gen.arr_cstr(&object[0])) == 0) {
+        if (link.mb_object_machine_matches(gen.arr_cstr(&object[0])) == 0) {
             close(fd)
             unlink(gen.arr_cstr(tmp))
             return gen.fail("LLVM 对象缺失或目标架构错误，拒绝提交缓存")
@@ -1119,7 +1121,7 @@ fn mb_check_binding_clash(m int) int {
                 let on int = 0
                 on = gen.append_str(out, on, proj.pool_str(proj.ctx().files[f].path_off))
                 on = gen.append_byte(out, on, ':')
-                on = append_bytes_np(out, on, mo, n)
+                on = gen.append_np(out, on, mo, n)
                 on = gen.append_byte(out, on, '\n')
                 gen.write_all(2, out, on)
                 return -1
@@ -1218,13 +1220,13 @@ pub fn mb_print_stats() void {
     n = gen.append_str(buf, n, " time_schedule_ns=")
     n = gen.append_i64(buf, n, bc().schedule_ns.to_type(i64))
     n = gen.append_str(buf, n, " time_object_ns=")
-    n = gen.append_i64(buf, n, bc().object_ns.to_type(i64))
+    n = gen.append_i64(buf, n, link.object_ns().to_type(i64))
     n = gen.append_str(buf, n, " time_link_ns=")
-    n = gen.append_i64(buf, n, bc().link_ns.to_type(i64))
+    n = gen.append_i64(buf, n, link.link_ns().to_type(i64))
     n = gen.append_str(buf, n, " time_total_ns=")
     let total_ns u64 = 0
     if (bc().build_start_ns != 0) {
-        let now u64 = cmd_clock_ns()
+        let now u64 = link.cmd_clock_ns()
         if (now >= bc().build_start_ns) {
             total_ns = now - bc().build_start_ns
         }
@@ -1401,7 +1403,7 @@ pub fn mb_cmd_build(av **char, an int) int {
     let mod_arg_off int = -1
     let mod_arg_len int = 0
     let mod_arg_n int = 0
-    li_select_reset()
+    link.li_select_reset()
     let i int = 1
     for i < an {
         if (gen.cstr_eq(av[i], "--stats") != 0) {
@@ -1423,7 +1425,7 @@ pub fn mb_cmd_build(av **char, an int) int {
                 gen.fail("--link 组名只能包含字母、数字、_、-")
                 return 2
             }
-            if (li_select_add(lo, ll) != 0) { return -1 }
+            if (link.li_select_add(lo, ll) != 0) { return -1 }
             i += 2
             continue
         }
@@ -1454,17 +1456,16 @@ pub fn mb_cmd_build(av **char, an int) int {
         mod_arg_n += 1
         i += 1
     }
-    if (tk.c_check_only != 0 && li_select_count() > 0) {
+    if (tk.c_check_only != 0 && link.li_select_count() > 0) {
         gen.fail("yh check 不支持 --link")
         return 2
     }
     bc().build_start_ns = 0
     bc().project_ns = 0
     bc().schedule_ns = 0
-    bc().object_ns = 0
-    bc().link_ns = 0
+    link.reset_timings()
     if (gen.stats().enabled != 0) {
-        bc().build_start_ns = cmd_clock_ns()
+        bc().build_start_ns = link.cmd_clock_ns()
     }
     tk.c_path = "yh"
     // 父进程建立可继承的只读前端快照，fork worker 不再重扫项目源码。
@@ -1495,7 +1496,7 @@ pub fn mb_cmd_build(av **char, an int) int {
             let buf [128]u8
             let n int = 0
             n = gen.append_str(buf, n, "本项目没有模块: ")
-            n = append_bytes_np(buf, n, mod_arg_off, mod_arg_len)
+            n = gen.append_np(buf, n, mod_arg_off, mod_arg_len)
             let mo4 int = gen.tml_intern_str(buf, 0, n)
             if (mo4 < 0) {
                 return -1
@@ -1505,7 +1506,7 @@ pub fn mb_cmd_build(av **char, an int) int {
     } else {
         rootmod = pj_entry_mod(pj)
     }
-    if (rootmod < 0 && li_select_count() > 0) {
+    if (rootmod < 0 && link.li_select_count() > 0) {
         gen.fail("库项目没有可链接产物，--link 不适用")
         return 2
     }
@@ -1532,11 +1533,11 @@ pub fn mb_cmd_build(av **char, an int) int {
         return 1
     }
     if (gen.stats().enabled != 0) {
-        bc().project_ns = cmd_clock_ns() - bc().build_start_ns
+        bc().project_ns = link.cmd_clock_ns() - bc().build_start_ns
     }
     let schedule_start_ns u64 = 0
     if (gen.stats().enabled != 0) {
-        schedule_start_ns = cmd_clock_ns()
+        schedule_start_ns = link.cmd_clock_ns()
     }
     if (mb_schedule_modules(count, root_off, root_len, build_off, build_len) != 0) {
         if (tk.c_check_only != 0) {
@@ -1545,7 +1546,7 @@ pub fn mb_cmd_build(av **char, an int) int {
         return 1
     }
     if (gen.stats().enabled != 0) {
-        bc().schedule_ns = cmd_clock_ns() - schedule_start_ns
+        bc().schedule_ns = link.cmd_clock_ns() - schedule_start_ns
     }
     if (tk.c_check_only != 0) {
         mb_check_clear_ifaces(build_off, build_len, count)
@@ -1569,7 +1570,7 @@ pub fn mb_cmd_build(av **char, an int) int {
             for outbuf[on] != 0 { on += 1 }
         }
         outbuf[on] = 0
-        if (mb_link(gen.arr_cstr(outbuf), build_off, build_len, count, pj) != 0) {
+        if (link.mb_link(gen.arr_cstr(outbuf), build_off, build_len, count, pj) != 0) {
             return 1
         }
         pj_out_s("构建完成: ")
@@ -1592,7 +1593,7 @@ pub fn mb_cmd_run(av **char, an int) int {
     if (mb_resolve_self_path() != 0) {
         return 1
     }
-    li_select_reset()
+    link.li_select_reset()
     let i int = 1
     for i < an {
         if (gen.cstr_eq(av[i], "--stats") != 0) {
@@ -1614,7 +1615,7 @@ pub fn mb_cmd_run(av **char, an int) int {
                 gen.fail("--link 组名只能包含字母、数字、_、-")
                 return 2
             }
-            if (li_select_add(lo, ll) != 0) { return -1 }
+            if (link.li_select_add(lo, ll) != 0) { return -1 }
             i += 2
             continue
         }
@@ -1666,15 +1667,15 @@ pub fn mb_cmd_run(av **char, an int) int {
     let bn int = proj.default_binary_path(root_off, root_len, build_off,
         pj, &binbuf[0])
     if (bn < 0) { return 1 }
-    if (mb_link(gen.arr_cstr(binbuf), build_off, build_len, count, pj) != 0) {
+    if (link.mb_link(gen.arr_cstr(binbuf), build_off, build_len, count, pj) != 0) {
         return 1
     }
-    if (li_apply_runtime_env() != 0) { return 1 }
+    if (link.li_apply_runtime_env() != 0) { return 1 }
     // 运行（继承 stdout/stderr；退出码由 waitpid 状态字解码）。
     let args [2]*char
     args[0] = gen.arr_cstr(binbuf)
     args[1] = 0.to_type(*char)
-    let rc int = cmd_process_run(&args[0])
+    let rc int = link.cmd_process_run(&args[0])
     return rc < 0 ? 1 : rc
 }
 
