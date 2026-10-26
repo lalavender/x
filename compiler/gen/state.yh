@@ -242,36 +242,6 @@ pub struct GenState {
     c_stats_compiler_hashes int // 实际读取编译器二进制计算指纹的次数
     c_module_mode int // 1 = 模块模式（--emit-module）；单文件恒 0
     c_is_entry_mod int // 1 = 当前编译入口模块（main 不加后缀、须存在）
-    c_test_project int // yh test 的目标项目下标；-1 = 未启用
-    c_test_key u64 // 本轮选中测试集合的摘要，参与测试构建的模块键
-    c_scan_file_off int // 源码扫描只接受该绝对路径（单文件测试模式）；-1 = 全量
-    c_scan_file_len int
-    c_test_mod_filter int // 只检查该模块的测试；-1 = 项目内全部模块
-    c_test_file_filter int // 只检查该文件的测试；-1 = 全部文件
-    p_projs *PProj
-    p_proj_n int
-    p_proj_cap int
-    p_mods *PMod
-    p_mod_n int
-    p_mod_cap int
-    p_files *PFile
-    p_file_n int
-    p_file_cap int
-    p_imp_file *int // 所属文件下标
-    p_imp_off *int // 查找名（模块名）池偏移；点分导入取 MOD 段
-    p_imp_len *int
-    p_imp_key_off *int // 跨项目依赖键池偏移；同项目 -1
-    p_imp_key_len *int
-    p_imp_alias_off *int // 绑定名（别名）池偏移
-    p_imp_alias_len *int
-    p_imp_line *int // 导入声明位置（源文件内）
-    p_imp_col *int
-    p_imp_mod *int // 解析结果模块下标；-1 未解析
-    p_imp_test_only *int // 1 = 该导入只在 test 体内使用（生产构建跳过）
-    p_imp_n int
-    p_imp_cap int
-    p_stdlib int // 标准库项目下标（YH_STDLIB；-1 未设置）
-    p_state *int // 项目装载状态（0 未装载 1 装载中 2 完成）
     c_dialect int
     c_target TargetInfo // 当前输出目标；$if、源文件筛选、后端与缓存共用。
     c_target_explicit int // 1 = CLI 显式给了 --target；项目 os/arch 不再改写目标。
@@ -301,39 +271,12 @@ pub fn task() *TaskCtx {
     return &g_state.task
 }
 
-// p_file / p_file_count / module_mode：前端需要的**窄口**构建期只读访问。
-//
-// 前端（parse/ast）只用这几个构建期字段：当前文件表项（诊断路径、声明槽）、
-// 文件数、模块模式标志。给窄口而不是把字段搬进 TaskCtx——TaskCtx 是"每任务
-// 工作状态"，文件表与目标属于构建态，混在一起会让 RS1d 的线程模型失去边界。
-pub fn p_file(i int) *PFile {
-    return &g_state.p_files[i]
-}
-
-pub fn p_file_count() int {
-    return g_state.p_file_n
-}
-
+// module_mode：模块模式开关（前端窄口）。
+// 项目表与测试/扫描配置已迁入 proj 模块（B1-1）：文件表读口在
+// compiler/proj/proj_20_path.yh，gen 不再转发项目模型（gen 是 proj 的下层，
+// 不能反向依赖）。
 pub fn module_mode() int {
     return g_state.c_module_mode
-}
-
-// test_file_selected：该文件是否属于本轮 yh test 要检查的目标（已应用模块/文件过滤）。
-//
-// 把"测试执行器的选择条件"收在 gen 一处，前端只问"这个文件要不要登记测试声明"，
-// 不必知道 `--filter` 的存在——此前 parse/ast 各抄了一份判断并直接读
-// `c_test_project`/`c_test_mod_filter`/`c_test_file_filter`，属层次倒置。
-// 依赖与标准库里的 test 声明一律返回 0：它们不会走测试体解析，登记了就会留下
-// 没有函数体的受检声明。
-pub fn test_file_selected(fi int) int {
-    if (g_state.task.c_test_mode == 0 || g_state.c_test_project < 0) { return 0 }
-    if (fi < 0 || fi >= g_state.p_file_n) { return 0 }
-    let m int = g_state.p_files[fi].mod
-    if (m < 0 || m >= g_state.p_mod_n) { return 0 }
-    if (g_state.p_mods[m].proj != g_state.c_test_project) { return 0 }
-    if (g_state.c_test_mod_filter >= 0 && g_state.c_test_mod_filter != m) { return 0 }
-    if (g_state.c_test_file_filter >= 0 && g_state.c_test_file_filter != fi) { return 0 }
-    return 1
 }
 
 
@@ -538,12 +481,6 @@ pub fn state_init() void {
     g_state.task.c_ct_diag_stmt = 0
     g_state.task.mod_name_off = -1
     g_state.task.c_sym_sfx_off = -1
-    g_state.p_stdlib = -1
-    g_state.c_test_project = -1
-    g_state.c_scan_file_off = -1
-    g_state.c_scan_file_len = 0
-    g_state.c_test_mod_filter = -1
-    g_state.c_test_file_filter = -1
     g_state.c_dialect = TG_DIALECT_GNU
     g_state.c_target_explicit = 0
     target_host_info(&g_state.c_host_target)

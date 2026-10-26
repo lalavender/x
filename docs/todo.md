@@ -11,31 +11,38 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
 拆分、A3 `api` 调用面、A4a–A4d 状态收敛、A5 前端装配收敛、A6 `testkit` 抽出），
 证据与数字见 [finish.md](finish.md)。当前基线由 `make arch-check` 守护：
 
-| 指标 | 当前（B3 后，2026-10-25 实测） |
+| 指标 | 当前（B1-1 后，2026-10-26 实测） |
 |---|---|
-| 模块 / 文件 / 行数 | **13 / 118 / 52,398**（`ast` 3,278 + `lower` 5,815） |
-| `cmd` 占比 | 381 行，**0.7%** |
-| `gen.G()` 读点 | **165**（build 101、testkit 27、parse 21、main 5） |
-| 模块级可变 `let` | 183 |
+| 模块 / 文件 / 行数 | **14 / 121 / 53,580**（`proj` 762 + `ast` 3,463 + `lower` 5,835） |
+| `cmd` 占比 | 383 行，**0.7%** |
+| `gen.G()` 读点 | **115**（build 66、parse 21、testkit 12、main 5） |
+| 模块级可变 `let` | 187 |
 | 容量安全追加项 | 45（下界） |
-| 最大模块 / 文件 / 函数 | build 10,717 / `module_build` 2,242 / `mb_link` 674 |
+| 最大模块 / 文件 / 函数 | build 10,242 / `module_build` 2,236 / `mb_link` 674 |
 
 顺序按 [构建态对象化与 build 拆分重新规划](02-plan/yh-构建态对象化与build拆分重新规划-2026-10-25.md)
 修正为 **B3 → B1 → B2**：B3 与 B1/B2 零文件重叠、可并行，B1+B2 才「是同一件事的
 两个面」（改两遍），B3 不是。规模也按该文实测修正（lower 是 15 文件 5,742 行，
 不是 10 文件 4,739 行）。
 
-- [ ] **B1 `BuildCtx` 对象化**：`build` 剩余 101 个 `gen.G()` 读点集中在
-  `p_projs`(204 次)/`p_mods`(124)/`p_files`(69)/`c_target`(56)。`build` 是项目模型
-  所有者，继续加窄口是本末倒置；应把项目表/目标/统计收进显式上下文对象。
+- [x] **B1-1 `proj` 模块成立**（2026-10-26 完成）：项目/模块/文件三张表 + 导入平行
+  数组 + 7 个表类型 + 测试/扫描配置 + 路径游标从 `gen.GenState`、`build.PjState`
+  收进 `compiler/proj/`（`proj.ctx()` 唯一实例，`proj.add_*` 唯一写者）；
+  `build/project_state.yh` 删除、`pj_dir_add` 并入 `build/project.yh`；前端窄口
+  `proj.file()/file_count()/test_file_selected()`。`gen.G()` 165 → 115，
+  `build` 10,807 → 10,242，`gen` 5,686 → 5,538。证据见 [finish.md](finish.md)。
+- [ ] **B1-2..B1-4 `BuildCtx` 对象化**（原 B1 剩余台阶）：`build` 仍有 66 个
+  `gen.G()` 读点，集中在统计（`c_stats_*`）与目标/配置（`c_target` 56）。
+  B1-2 把目标/配置迁 `proj.Cfg` 并让 `pj_canon` 改显式出参；B1-3 建
+  `build` 私有的 `BuildCtx` 收 50 个模块级 `let`；B1-4 收尾 testkit/cmd/parse
+  残余读点并撤掉 `gen.G()` 的 pub（目标 0 调用点）。
   动机是**字段偏移膨胀与读点归属**，不是线程安全——当前是 `fork` + `waitpid`
-  的进程池（并发 4，COW 隔离，无锁）。分两个台阶：B1-1/B1-2 数据面（`proj`），
-  B1-3/B1-4 读点面（`BuildCtx` + `gen.G()` 归零）。
-- [ ] **B2 拆分 `build`**：`build` 已 10,717 行、最大文件 `module_build` 2,242、
+  的进程池（并发 4，COW 隔离，无锁）。
+- [ ] **B2 拆分 `build`**：`build` 已 10,242 行、最大文件 `module_build` 2,236、
   最大函数 `mb_link` 674。前置有两条硬约束：链接簇依赖发射簇的 6 个产物路径/键
   符号（须先抽进 `proj` 的 art 子簇），`project_link` 读 `toml_*` 模块级 globals
-  （不能进 `link`，否则 `link → build` 成环）。顺序：art → `link` → `mb_link`
-  阶段化 → `module_build` 拆 3 文件。
+  （不能进 `link`，否则 `link → build` 成环）。顺序：art（B2-1）→ `link`（B2-2）→
+  `mb_link` 阶段化（B2-3）→ `module_build` 拆 3 文件（B2-4）→ 预算收口（B2-5）。
 - [ ] **NP3 受检契约与 lowering 解耦**（2026-10-26 定位决定后唯一保留的 NP 阶段）：
   按[方案 §6](02-plan/yh-Nanopass风格优化架构实施方案.md) 收口——封存
   CheckedFunction 的绑定/类型/符号/调用事实，生命周期由任务持有，不再由 lowering

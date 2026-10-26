@@ -5,6 +5,52 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-26 B1-1：项目模型迁入 `proj` 模块（build 拆分第一台阶）
+
+- **按 [构建态对象化与 build 拆分重新规划](../02-plan/yh-构建态对象化与build拆分重新规划-2026-10-25.md)
+  §3.1 的 P1 落地**：新增数据层模块 `compiler/proj/`（3 文件 762 行）：
+  `proj_00_model.yh`（7 个表类型 `PFile/PMod/PProj/PDep/PInput/PLinkItem/PLinkGroup`
+  + `ProjectCtx` + `proj.ctx()`/`proj.init()`）、`proj_10_table.yh`（唯一写者
+  `proj.add_project/add_module/add_project_module/add_module_file/add_file/add_import`
+  + 只读 `module_in_project`/`find_project_root`）、`proj_20_path.yh`
+  （`canon/pool_str/env_fetch/file_exists/set_root_project/is_root_project/diag`
+  + 前端窄口 `file/file_count/test_file_selected`）。
+- **`gen` 不再拥有项目模型**：`GenState` 删掉 22 个表字段（三张表 + 11 条导入平行
+  数组 + `p_stdlib`/`p_state`）与 6 个测试/扫描字段，`p_file/p_file_count/
+  test_file_selected` 三个窄口移出（gen 是 proj 的下层，不能反向依赖）；
+  `gen/state.yh` 5686 → 5538 行。`build/project_state.yh`（574 行）整文件删除，
+  `pj_dir_add` 并入 `build/project.yh`，`build.PjState` 被 `ProjectCtx` 取代。
+- **迁移是机械的、可审计的**：一次性脚本按「局部名 `proj` → `pj`（避免遮蔽新模块名）
+  → `gs.p_*`/`gen.G().p_*` 读点 → `pj_state()` → 函数前缀 → `gen.P*` 类型前缀 →
+  补 `import proj`」七步跑 30 个文件，再删掉 36 处因此变空的
+  `let gs *gen.GenState = gen.G()`。**没有留下任何影子字段或转发壳**。
+- **实测**（`python3 tools/arch-check.py`）：模块 13 → **14**、文件 119 → 121、
+  代码 53,529 → 53,580；`build` 10,807 → **10,242**、`gen` 5,686 → 5,538、
+  `proj` 762；`gen.G()` 165 → **115**（build 101 → 66、testkit 27 → 12，
+  parse/main 未动）；最大文件 2,241 → 2,236。
+- **`arch-check` 口径**：`ALLOWED` 新增 `proj: {gen}`（前端/构建共用数据层，
+  反向依赖即成环），`ast/check/parse/lower/build/testkit/main` 各加 `proj` 边；
+  `comptime` 也加了 `proj`——唯一读点是 `ct_layout_array_expr` 的文件下标越界检查，
+  走 `proj.file_count()` 而不是自己拿表（与方案 §2.2 的 `comptime:{gen}` 差一条边，
+  已在 ALLOWED 注释里写明理由）。预算按实测收紧：`max_build_lines` 10,807 →
+  10,242、`max_testkit_lines` 1,592 → 1,578、`max_file_lines` 2,242 → 2,236、
+  `max_g_call_sites` 165 → 115，新增 `max_proj_lines` 800；`max_module_lines`
+  381 → 383（driver 多了 `import proj` 与 `proj.init()` 各一行）。
+- **测试**：`tests/modules/projects/astcheck/main/main.yh` 改用 `proj.PFile` +
+  `proj.ctx().files`，并新增窄口断言（`proj.file_count()==1 && proj.file(0)==&files[0]`）；
+  `tests/modules/build-check.py` 的 `astcheck`/`llvmchecked`/`llvmlower` 三个 fixture
+  拷贝清单各加 `proj` 模块；`llvmchecked`/`llvmlower` fixture 的 `gs.p_files`
+  改写为 `proj.ctx().files`。
+- **验证**：`just test`（ANTLR + 语法 + 运行语料 122/122）全绿；
+  `just selfhost-native` 全绿——候选两代模块固定点（cc3→cc4，42 个产物）逐字节一致、
+  cc4 自解析 121 个源文件 OK、固定点探针 OK、项目验收 **122/122**、libs 测试全过。
+- **环境注意（下次跑门先看）**：本机 `$TMPDIR/yh-fast` 被同机多个 worktree
+  （`x`/`ratfish`/`llvm-*`）共用，`stage-yh` 会互相覆写 `yh` 副本，导致自举后续门
+  （lex-stats/cache/build-check）读到**别的分支的编译器**。并发时用私有目录：
+  `just FAST_DIR="$TMPDIR/yh-fast-b11" selfhost-native`。另：`FAST_STAGE=0` 时
+  `lex-stats` 会因仓库根 `yh` 能发现 `libs/` 标准库而多扫 101 个文件（期望 6 的用例
+  按「暂存副本」口径写的），该差异在 B1-1 之前的 HEAD 上同样存在，不是本次回归。
+
 ## 2026-10-26 CI 去掉 ANTLR：参考语法门只在本地开发跑
 
 - **改动**：`.gitea/workflows/ci.yml` 删除 `antlr` job（原为 Apple container 内

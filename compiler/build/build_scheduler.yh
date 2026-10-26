@@ -1,5 +1,6 @@
 module build
 import gen
+import proj
 
 // ============================================================================
 // build_scheduler.yh —— 有界快照 worker 进程池与 InterfaceReady 调度。
@@ -113,7 +114,7 @@ pub fn mb_resolve_self_path() int {
     }
     let path_off int = -1
     let path_len int = 0
-    if (pj_env_fetch("PATH", &path_off, &path_len) != 0) {
+    if (proj.env_fetch("PATH", &path_off, &path_len) != 0) {
         return gen.fail("无法解析编译器可执行路径")
     }
     let start int = 0
@@ -135,7 +136,7 @@ pub fn mb_resolve_self_path() int {
             n = gen.append_byte(candidate, n, '/')
             n = gen.append_str(candidate, n, c_argv0)
             candidate[n] = 0
-            if (pj_file_exists(gen.arr_cstr(candidate)) != 0) {
+            if (proj.file_exists(gen.arr_cstr(candidate)) != 0) {
                 mb_self_path = malloc((n + 1).to_type(u64)).to_type(*char)
                 if (mb_self_path == 0) {
                     return -1
@@ -159,7 +160,7 @@ pub fn mb_resolve_self_path() int {
 fn mb_sched_order_index(module_idx int, count int) int {
     let i int = 0
     for i < count {
-        if (pj_state().order[i] == module_idx) {
+        if (proj.ctx().order[i] == module_idx) {
             return i
         }
         i += 1
@@ -174,10 +175,10 @@ fn mb_sched_refresh_interfaces(states *int, count int,
     for i < count {
         if (states[i] == 1) {
             let path [700]u8
-            if (mb_module_ready_path(pj_state().order[i], build_off, build_len, &path[0]) != 0) {
+            if (mb_module_ready_path(proj.ctx().order[i], build_off, build_len, &path[0]) != 0) {
                 return -1
             }
-            if (pj_file_exists(gen.arr_cstr(&path[0])) != 0) {
+            if (proj.file_exists(gen.arr_cstr(&path[0])) != 0) {
                 states[i] = 2
             }
         }
@@ -205,7 +206,7 @@ fn mb_sched_deps_ready(module_idx int, states *int, count int,
             if (mb_module_ready_path(mb_dep_mod[di], build_off, build_len, &path[0]) != 0) {
                 return -1
             }
-            if (pj_file_exists(gen.arr_cstr(&path[0])) != 0) {
+            if (proj.file_exists(gen.arr_cstr(&path[0])) != 0) {
                 states[oi] = 2
             }
         }
@@ -220,10 +221,10 @@ fn mb_sched_deps_ready(module_idx int, states *int, count int,
             }
             early_out[0] = 1
         }
-        if (pj_file_exists(pj_pool_str(mb_dep_ifoff[di])) == 0) {
+        if (proj.file_exists(proj.pool_str(mb_dep_ifoff[di])) == 0) {
             return 0
         }
-        if (pj_file_exists(pj_pool_str(mb_dep_ctoff[di])) == 0) {
+        if (proj.file_exists(proj.pool_str(mb_dep_ctoff[di])) == 0) {
             return 0
         }
         di += 1
@@ -288,14 +289,14 @@ fn mb_sched_clear_interfaces(count int, build_off int,
     let i int = 0
     for i < count {
         let path [700]u8
-        if (mb_module_iface_path(pj_state().order[i], build_off, build_len, path) == 0) {
+        if (mb_module_iface_path(proj.ctx().order[i], build_off, build_len, path) == 0) {
             unlink(gen.arr_cstr(path))
         }
-        if (mb_module_ctiface_path(pj_state().order[i], build_off, build_len, path) == 0) {
+        if (mb_module_ctiface_path(proj.ctx().order[i], build_off, build_len, path) == 0) {
             unlink(gen.arr_cstr(path))
         }
         let ready [700]u8
-        if (mb_module_ready_path(pj_state().order[i], build_off, build_len, &ready[0]) == 0) {
+        if (mb_module_ready_path(proj.ctx().order[i], build_off, build_len, &ready[0]) == 0) {
             unlink(gen.arr_cstr(&ready[0]))
         }
         i += 1
@@ -318,10 +319,10 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
     // 上一轮没有完成链接（.build 刚被 make 清空）时不写函数级缓存：capture 占
     // 冷编约四成时间，写下的记录在下一轮清空后永远不会被读。
     let link_manifest [420]u8
-    let lmn int = gen.append_str(&link_manifest[0], 0, pj_pool_str(build_off))
+    let lmn int = gen.append_str(&link_manifest[0], 0, proj.pool_str(build_off))
     lmn = gen.append_str(&link_manifest[0], lmn, "/manifest/link.manifest")
     link_manifest[lmn] = 0
-    gs.c_firc_write_off = pj_file_exists(gen.arr_cstr(&link_manifest[0])) == 0 ? 1 : 0
+    gs.c_firc_write_off = proj.file_exists(gen.arr_cstr(&link_manifest[0])) == 0 ? 1 : 0
     let states *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
     let pids *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
     let keys *u8 = malloc((count * 16).to_type(u64)).to_type(*u8)
@@ -366,20 +367,20 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
                     if (gs.task.c_check_only != 0) {
                         pj_out_s("  [检查] ")
                     } else {
-                        if (mb_sched_publish_interface(pj_state().order[i], build_off,
+                        if (mb_sched_publish_interface(proj.ctx().order[i], build_off,
                                 build_len) != 0) {
                             failed = 1
                             break
                         }
-                        if (mb_manifest_commit(pj_state().order[i], build_off, build_len,
+                        if (mb_manifest_commit(proj.ctx().order[i], build_off, build_len,
                                 keys + (i * 16)) != 0) {
                             failed = 1
                             break
                         }
                         pj_out_s("  [编译] ")
                     }
-                    pj_out_np(gs.p_mods[pj_state().order[i]].name_off,
-                        gs.p_mods[pj_state().order[i]].name_len)
+                    pj_out_np(proj.ctx().mods[proj.ctx().order[i]].name_off,
+                        proj.ctx().mods[proj.ctx().order[i]].name_len)
                     pj_out_s("\n")
                 } else if (waited < 0) {
                     kill(pids[i], 15)
@@ -403,7 +404,7 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
         for i < count && active < 4 {
             if (states[i] == 0) {
                 let early int = 0
-                let ready int = mb_sched_deps_ready(pj_state().order[i], states, count,
+                let ready int = mb_sched_deps_ready(proj.ctx().order[i], states, count,
                     build_off, build_len, &early)
                 if (ready < 0) {
                     failed = 1
@@ -411,7 +412,7 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
                 }
                 if (ready != 0) {
                     let pid int = 0
-                    let started int = mb_compile_start(pj_state().order[i], root_off,
+                    let started int = mb_compile_start(proj.ctx().order[i], root_off,
                         root_len, build_off, build_len, &pid, keys + (i * 16))
                     if (started < 0) {
                         failed = 1

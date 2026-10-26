@@ -2,9 +2,10 @@ module testkit
 import gen
 import build
 import parse
+import proj
 
 struct TCase {
-    proj int
+    pj int
     mod int
     file int
     kind int        // 0 = 字符串行为测试，1 = 标识符文档测试
@@ -98,9 +99,9 @@ fn tc_np_less(off1 int, len1 int, off2 int, len2 int) int {
 // tc_rel_path：把文件绝对路径换算为项目根相对路径。
 fn tc_rel_path(file int, off *int, olen *int) void {
     let gs *gen.GenState = gen.G()
-    let poff int = gs.p_files[file].path_off
-    let plen int = gs.p_files[file].path_len
-    if (gs.c_scan_file_off >= 0) {
+    let poff int = proj.ctx().files[file].path_off
+    let plen int = proj.ctx().files[file].path_len
+    if (proj.ctx().scan_file_off >= 0) {
         // 单文件模式：显示文件名本身，而不是临时项目根之外的绝对路径。
         let base int = 0
         let i int = 0
@@ -131,10 +132,9 @@ fn tc_rel_path(file int, off *int, olen *int) void {
 
 // tc_identity：构造稳定身份 module::relpath::kind::name。
 fn tc_identity(c TCase, buf *u8) int {
-    let gs *gen.GenState = gen.G()
     let n int = 0
     let m int = c.mod
-    n = build.append_bytes_np(buf, n, gs.p_mods[m].name_off, gs.p_mods[m].name_len)
+    n = build.append_bytes_np(buf, n, proj.ctx().mods[m].name_off, proj.ctx().mods[m].name_len)
     n = gen.append_str(buf, n, "::")
     let poff int = 0
     let plen int = 0
@@ -178,7 +178,7 @@ fn tc_diag(file int, line int, col int, msg *char) int {
     let gs *gen.GenState = gen.G()
     let buf [1024]u8
     let n int = 0
-    n = build.append_bytes_np(&buf[0], n, gs.p_files[file].path_off, gs.p_files[file].path_len)
+    n = build.append_bytes_np(&buf[0], n, proj.ctx().files[file].path_off, proj.ctx().files[file].path_len)
     n = gen.append_byte(&buf[0], n, ':')
     n = gen.append_int(&buf[0], n, line)
     n = gen.append_byte(&buf[0], n, ':')
@@ -213,10 +213,9 @@ fn tc_push_decl(d TDecl) int {
 // tc_add_decl：把 PDecl 中可绑定的顶层声明（函数/常量/全局变量/类型）加入索引。
 fn tc_add_decl(mod int, file int, node gen.PDecl) int {
     if (node.kind == gen.TK_TEST) { return 0 }
-    let gs *gen.GenState = gen.G()
     let name_tok int = node.keyword + 1
-    if (name_tok >= node.end || name_tok >= gs.p_files[file].token_n) { return 0 }
-    let tok gen.Tok = gs.p_files[file].tokens[name_tok]
+    if (name_tok >= node.end || name_tok >= proj.ctx().files[file].token_n) { return 0 }
+    let tok gen.Tok = proj.ctx().files[file].tokens[name_tok]
     if (tok.kind != gen.TOK_IDENT) { return 0 }
     let noff int = gen.name_intern(tok.start, tok.len)
     if (noff < 0) { return -1 }
@@ -262,12 +261,11 @@ fn tc_push_case(c TCase) int {
 
 // tc_add_case：从 test PDecl 提取名称、种类、声明位置与 PDecl 编号。
 fn tc_add_case(mod int, file int, node gen.PDecl, decl_index int) int {
-    let gs *gen.GenState = gen.G()
     let name_tok int = node.keyword + 1
-    if (name_tok >= node.end || name_tok >= gs.p_files[file].token_n) {
+    if (name_tok >= node.end || name_tok >= proj.ctx().files[file].token_n) {
         return tc_diag(file, node.line, node.col, "test 声明的名称缺失")
     }
-    let tok gen.Tok = gs.p_files[file].tokens[name_tok]
+    let tok gen.Tok = proj.ctx().files[file].tokens[name_tok]
     let kind int = 0
     let start int = tok.start
     let nlen int = tok.len
@@ -287,7 +285,7 @@ fn tc_add_case(mod int, file int, node gen.PDecl, decl_index int) int {
     let noff int = gen.name_intern(start, nlen)
     if (noff < 0) { return -1 }
     let c TCase
-    c.proj = tc_root_proj
+    c.pj = tc_root_proj
     c.mod = mod
     c.file = file
     c.kind = kind
@@ -323,11 +321,10 @@ fn tc_lookup_decl(mod int, off int, olen int, out *TDecl) int {
 
 // tc_is_import_alias：名字是否为该文件的某个导入绑定名。
 fn tc_is_import_alias(file int, off int, olen int) int {
-    let gs *gen.GenState = gen.G()
     let i int = 0
-    for i < gs.p_imp_n {
-        if (gs.p_imp_file[i] == file
-            && tc_name_eq(gs.p_imp_alias_off[i], gs.p_imp_alias_len[i], off, olen) != 0) {
+    for i < proj.ctx().imp_n {
+        if (proj.ctx().imp_file[i] == file
+            && tc_name_eq(proj.ctx().imp_alias_off[i], proj.ctx().imp_alias_len[i], off, olen) != 0) {
             return 1
         }
         i += 1
@@ -337,11 +334,10 @@ fn tc_is_import_alias(file int, off int, olen int) int {
 
 // tc_case_less：稳定顺序：模块名、项目相对路径、行列、种类、名称。
 fn tc_case_less(a TCase, b TCase) int {
-    let gs *gen.GenState = gen.G()
-    let am int = gs.p_mods[a.mod].name_off
-    let al int = gs.p_mods[a.mod].name_len
-    let bm int = gs.p_mods[b.mod].name_off
-    let bl int = gs.p_mods[b.mod].name_len
+    let am int = proj.ctx().mods[a.mod].name_off
+    let al int = proj.ctx().mods[a.mod].name_len
+    let bm int = proj.ctx().mods[b.mod].name_off
+    let bl int = proj.ctx().mods[b.mod].name_len
     if (tc_name_eq(am, al, bm, bl) == 0) {
         return tc_np_less(am, al, bm, bl)
     }
@@ -389,7 +385,6 @@ fn tc_decl_kind_name(kind int) *char {
 
 // tc_print：按稳定顺序输出测试身份；filter_off < 0 表示不过滤。
 fn tc_print(filter_off int, filter_len int) int {
-    let gs *gen.GenState = gen.G()
     let shown int = 0
     let i int = 0
     for i < tc_case_n {
@@ -423,11 +418,11 @@ fn tc_print(filter_off int, filter_len int) int {
 // tc_release_file_decls：释放发现阶段建立的 PDecl 索引，worker 会重新建立。
 fn tc_release_file_decls(file int) void {
     let gs *gen.GenState = gen.G()
-    if (gs.p_files[file].decls != 0) {
-        free(gs.p_files[file].decls.to_type(*void))
+    if (proj.ctx().files[file].decls != 0) {
+        free(proj.ctx().files[file].decls.to_type(*void))
     }
-    gs.p_files[file].decls = 0
-    gs.p_files[file].decl_n = 0
+    proj.ctx().files[file].decls = 0
+    proj.ctx().files[file].decl_n = 0
     gs.task.c_file_decls = 0
     gs.task.c_file_decl_n = 0
     gs.task.c_file_decl_i = -1
@@ -437,7 +432,7 @@ fn tc_release_file_decls(file int) void {
 // 文件选择器仍索引所属模块的全部文件，保证跨文件/前向文档目标可绑定。
 fn tc_index_file(mod int, file int, add_tests int) int {
     let gs *gen.GenState = gen.G()
-    if (build.mb_restore_front_file(build.pj_pool_str(gs.p_files[file].path_off), file) != 0) {
+    if (build.mb_restore_front_file(proj.pool_str(proj.ctx().files[file].path_off), file) != 0) {
         return -1
     }
     gs.task.c_pos = 0
@@ -450,8 +445,8 @@ fn tc_index_file(mod int, file int, add_tests int) int {
         return -1
     }
     let i int = 0
-    for i < gs.p_files[file].decl_n {
-        let node gen.PDecl = gs.p_files[file].decls[i]
+    for i < proj.ctx().files[file].decl_n {
+        let node gen.PDecl = proj.ctx().files[file].decls[i]
         if (node.kind == gen.TK_TEST) {
             if (add_tests != 0) {
                 if (tc_add_case(mod, file, node, i) != 0) {
@@ -504,22 +499,21 @@ fn tc_bind_targets() int {
 }
 
 // tc_discover：发现目标项目/模块/文件的测试，返回用例数（-1 失败）。
-fn tc_discover(proj int, mod_filter int, file_filter int) int {
-    let gs *gen.GenState = gen.G()
+fn tc_discover(pj int, mod_filter int, file_filter int) int {
     tc_reset()
-    tc_root_proj = proj
-    tc_root_off = gs.p_projs[proj].root_off
-    tc_root_len = gs.p_projs[proj].root_len
+    tc_root_proj = pj
+    tc_root_off = proj.ctx().projs[pj].root_off
+    tc_root_len = proj.ctx().projs[pj].root_len
     let mi int = 0
-    for mi < gs.p_projs[proj].mod_n {
-        let m int = gs.p_projs[proj].mods[mi]
+    for mi < proj.ctx().projs[pj].mod_n {
+        let m int = proj.ctx().projs[pj].mods[mi]
         if (mod_filter >= 0 && mod_filter != m) {
             mi += 1
             continue
         }
         let fi int = 0
-        for fi < gs.p_mods[m].file_n {
-            let f int = gs.p_mods[m].files[fi]
+        for fi < proj.ctx().mods[m].file_n {
+            let f int = proj.ctx().mods[m].files[fi]
             let add_tests int = (file_filter < 0 || file_filter == f).to_type(int)
             if (tc_index_file(m, f, add_tests) != 0) {
                 return -1
@@ -537,10 +531,9 @@ fn tc_discover(proj int, mod_filter int, file_filter int) int {
 
 // tc_find_file：按规范化路径查找项目文件；未找到返回 -1。
 fn tc_find_file(off int, olen int) int {
-    let gs *gen.GenState = gen.G()
     let i int = 0
-    for i < gs.p_file_n {
-        if (tc_name_eq(gs.p_files[i].path_off, gs.p_files[i].path_len, off, olen) != 0) {
+    for i < proj.ctx().file_n {
+        if (tc_name_eq(proj.ctx().files[i].path_off, proj.ctx().files[i].path_len, off, olen) != 0) {
             return i
         }
         i += 1
@@ -564,14 +557,13 @@ fn tc_is_source_path(s *char) int {
 }
 
 // tc_select：解析模块或源文件选择器，写回模块/文件过滤下标。
-fn tc_select(proj int, s *char, mod_filter *int, file_filter *int) int {
-    let gs *gen.GenState = gen.G()
+fn tc_select(pj int, s *char, mod_filter *int, file_filter *int) int {
     if (tc_is_source_path(s) == 0) {
         let sl int = 0
         for s[sl] != 0 { sl += 1 }
         let mo int = gen.tml_intern_str(s.to_type(*u8), 0, sl)
         if (mo < 0) { return -1 }
-        let m int = build.pj_mod_in_proj(proj, mo, sl)
+        let m int = proj.module_in_project(pj, mo, sl)
         if (m < 0) {
             return gen.fail_path("本项目没有模块: ", s)
         }
@@ -580,17 +572,17 @@ fn tc_select(proj int, s *char, mod_filter *int, file_filter *int) int {
         return 0
     }
     let f int = -1
-    if (build.pj_canon(0, 0, s) == 0) {
-        f = tc_find_file(build.pj_state().canon_off, build.pj_state().canon_len)
+    if (proj.canon(0, 0, s) == 0) {
+        f = tc_find_file(proj.ctx().canon_off, proj.ctx().canon_len)
     }
-    if (f < 0 && build.pj_canon(gs.p_projs[proj].root_off,
-            gs.p_projs[proj].root_len, s) == 0) {
-        f = tc_find_file(build.pj_state().canon_off, build.pj_state().canon_len)
+    if (f < 0 && proj.canon(proj.ctx().projs[pj].root_off,
+            proj.ctx().projs[pj].root_len, s) == 0) {
+        f = tc_find_file(proj.ctx().canon_off, proj.ctx().canon_len)
     }
     if (f < 0) {
         return gen.fail_path("测试文件不属于当前项目: ", s)
     }
-    mod_filter[0] = gs.p_files[f].mod
+    mod_filter[0] = proj.ctx().files[f].mod
     file_filter[0] = f
     return 0
 }
@@ -622,7 +614,7 @@ fn tc_file_has_project(abs_path *char) int {
         }
         pn = gen.append_str(&probe[0], pn, "/project.toml")
         probe[pn] = 0
-        if (build.pj_file_exists(gen.arr_cstr(&probe[0])) != 0) { return 1 }
+        if (proj.file_exists(gen.arr_cstr(&probe[0])) != 0) { return 1 }
         // 上移一层：去掉最后一个路径段
         let slash int = -1
         let j int = 0
@@ -643,7 +635,6 @@ fn tc_file_has_project(abs_path *char) int {
 // 只接受该文件（相邻 .yh 不会被装入）。成功写回项目下标与根路径。
 fn tc_single_file_project(abs_path *char, proj_out *int,
     root_off *int, root_len *int) int {
-    let gs *gen.GenState = gen.G()
     let dir [1000]u8
     let dn int = 0
     let last int = -1
@@ -685,15 +676,15 @@ fn tc_single_file_project(abs_path *char, proj_out *int,
     for abs_path[alen] != 0 { alen += 1 }
     let aoff int = gen.tml_intern_str(abs_path.to_type(*u8), 0, alen)
     if (aoff < 0) { return -1 }
-    gs.c_scan_file_off = aoff
-    gs.c_scan_file_len = alen
-    if (build.pj_canon(0, 0, gen.arr_cstr(&rootb[0])) != 0) { return -1 }
-    let roff int = build.pj_state().canon_off
-    let rlen int = build.pj_state().canon_len
-    build.pj_set_root_project(roff, rlen)
-    let proj int = build.pj_load_project(roff, rlen)
-    if (proj < 0) { return -1 }
-    proj_out[0] = proj
+    proj.ctx().scan_file_off = aoff
+    proj.ctx().scan_file_len = alen
+    if (proj.canon(0, 0, gen.arr_cstr(&rootb[0])) != 0) { return -1 }
+    let roff int = proj.ctx().canon_off
+    let rlen int = proj.ctx().canon_len
+    proj.set_root_project(roff, rlen)
+    let pj int = build.pj_load_project(roff, rlen)
+    if (pj < 0) { return -1 }
+    proj_out[0] = pj
     root_off[0] = roff
     root_len[0] = rlen
     return 0
@@ -704,9 +695,9 @@ fn tc_single_file_project(abs_path *char, proj_out *int,
 // 并发执行会互相覆盖（实测会报「用例崩溃或缺少结果记录」）。这里用原子创建
 // 的锁文件把同项目运行串行化；不同项目互不影响。
 fn tc_test_lock_path(root_off int, root_len int, out *u8) int {
-    if (build.pj_canon(root_off, root_len, "tmp/yh-test") != 0) { return -1 }
+    if (proj.canon(root_off, root_len, "tmp/yh-test") != 0) { return -1 }
     let dir [900]u8
-    let dn int = gen.append_str(&dir[0], 0, build.pj_pool_str(build.pj_state().canon_off))
+    let dn int = gen.append_str(&dir[0], 0, proj.pool_str(proj.ctx().canon_off))
     dir[dn] = 0
     if (build.cmd_mkdirs(gen.arr_cstr(&dir[0])) != 0) { return -1 }
     dn = gen.append_str(&dir[0], dn, "/.lock")
@@ -872,31 +863,31 @@ pub fn mb_run_test_command(av **char, an int) int {
     }
     let root_off int = 0
     let root_len int = 0
-    let proj int = -1
+    let pj int = -1
     let mod_filter int = -1
     let file_filter int = -1
     if (single_file != 0) {
-        if (tc_single_file_project(gen.arr_cstr(&abs_file[0]), &proj,
+        if (tc_single_file_project(gen.arr_cstr(&abs_file[0]), &pj,
                 &root_off, &root_len) != 0) {
             return 1
         }
     } else {
         let root int = build.pj_find_root(0)
         if (root < 0) { return 1 }
-        root_off = build.pj_state().canon_off
-        root_len = build.pj_state().canon_len
-        build.pj_set_root_project(root_off, root_len)
-        proj = build.pj_load_project(root_off, root_len)
-        if (proj < 0) { return 1 }
+        root_off = proj.ctx().canon_off
+        root_len = proj.ctx().canon_len
+        proj.set_root_project(root_off, root_len)
+        pj = build.pj_load_project(root_off, root_len)
+        if (pj < 0) { return 1 }
         if (selector != 0) {
-            if (tc_select(proj, selector, &mod_filter, &file_filter) != 0) {
+            if (tc_select(pj, selector, &mod_filter, &file_filter) != 0) {
                 return 1
             }
         }
     }
-    let count int = tc_discover(proj, mod_filter, file_filter)
+    let count int = tc_discover(pj, mod_filter, file_filter)
     if (count < 0) { return 1 }
-    gs.c_test_key = tc_test_key(count)
+    proj.ctx().test_key = tc_test_key(count)
     // 发现阶段把 task token 指针停在最后一个项目文件的快照上；worker 随后
     // 加载接口时会复用 c_tok_cap 并可能 free(c_toks)。这里清空，避免释放
     // p_files 持有的只读 token 数组。
@@ -934,9 +925,9 @@ pub fn mb_run_test_command(av **char, an int) int {
         gen.fail("另一个 yh test 正在使用该项目的测试目录；请等待其结束或改用不同项目")
         return 1
     }
-    gs.c_test_project = proj
-    gs.c_test_mod_filter = mod_filter
-    gs.c_test_file_filter = file_filter
+    proj.ctx().test_project = pj
+    proj.ctx().test_mod_filter = mod_filter
+    proj.ctx().test_file_filter = file_filter
     if (no_run != 0) {
         // 只构建：发布被测模块的测试对象，不生成入口、不链接、不执行。
         if (build.pj_bind_imports() != 0) { return 1 }
@@ -944,13 +935,13 @@ pub fn mb_run_test_command(av **char, an int) int {
         if (mod_filter >= 0) {
             nmods = build.pj_topo(mod_filter)
         } else {
-            nmods = build.pj_topo_multi(proj)
+            nmods = build.pj_topo_multi(pj)
         }
         if (nmods < 0) { return 1 }
         let build_off int = build.mb_build_dir(root_off, root_len)
         if (build_off < 0) { return 1 }
-        let build_len int = build.pj_state().canon_len
-        if (build.mb_mkdir(build.pj_pool_str(build_off)) != 0) { return 1 }
+        let build_len int = proj.ctx().canon_len
+        if (build.mb_mkdir(proj.pool_str(build_off)) != 0) { return 1 }
         if (build.mb_schedule_modules(nmods, root_off, root_len, build_off, build_len) != 0) {
             return 1
         }
@@ -997,7 +988,7 @@ pub fn mb_run_test_command(av **char, an int) int {
         for gi + glimit < selected && tc_cases[order[gi + glimit]].mod == target {
             glimit += 1
         }
-        if (tc_build_and_run(proj, target, order, gi, glimit, root_off, root_len,
+        if (tc_build_and_run(pj, target, order, gi, glimit, root_off, root_len,
                 timeout_ms, &passed, &skipped, &failed) != 0) {
             free(order.to_type(*void))
             return 1
@@ -1094,10 +1085,9 @@ fn tc_buf_int(buf **u8, n *int, cap *int, value int) int {
 
 // tc_runner_mod_name：入口模块名 yh_test_<被测模块名>。
 fn tc_runner_mod_name(mod int, buf *u8) int {
-    let gs *gen.GenState = gen.G()
     let n int = 0
     n = gen.append_str(buf, n, "yh_test_")
-    n = build.append_bytes_np(buf, n, gs.p_mods[mod].name_off, gs.p_mods[mod].name_len)
+    n = build.append_bytes_np(buf, n, proj.ctx().mods[mod].name_off, proj.ctx().mods[mod].name_len)
     return n
 }
 
@@ -1182,9 +1172,8 @@ fn tc_write_file(path *char, data *u8, size int) int {
 
 // tc_gen_runner：生成入口模块源文件并登记到项目；返回入口模块下标（失败 -1）。
 // cases 的 [first, first+limit) 区间必须都属于 target 模块。
-fn tc_gen_runner(proj int, target int, order *int, first int, limit int,
+fn tc_gen_runner(pj int, target int, order *int, first int, limit int,
     root_off int, root_len int) int {
-    let gs *gen.GenState = gen.G()
     let text *u8 = 0
     let cap int = 0
     let tn int = 0
@@ -1196,8 +1185,8 @@ fn tc_gen_runner(proj int, target int, order *int, first int, limit int,
     if (tc_buf_puts(&text, &tn, &cap, "module ") != 0) { return -1 }
     if (tc_buf_np(&text, &tn, &cap, noff, nn) != 0) { return -1 }
     if (tc_buf_puts(&text, &tn, &cap, ";\n\nimport ") != 0) { return -1 }
-    if (tc_buf_np(&text, &tn, &cap, gs.p_mods[target].name_off,
-            gs.p_mods[target].name_len) != 0) { return -1 }
+    if (tc_buf_np(&text, &tn, &cap, proj.ctx().mods[target].name_off,
+            proj.ctx().mods[target].name_len) != 0) { return -1 }
     if (tc_buf_puts(&text, &tn, &cap,
             ";\n\nfn __yh_test_pass() void {\n    let rec [4]u8 = [89, 72, 84, 80]\n    write(3, (&rec[0]).to_type(*void), 4)\n}\n\n") != 0) { return -1 }
     if (tc_buf_puts(&text, &tn, &cap,
@@ -1208,8 +1197,8 @@ fn tc_gen_runner(proj int, target int, order *int, first int, limit int,
         if (tc_buf_puts(&text, &tn, &cap, "    if (id == ") != 0) { return -1 }
         if (tc_buf_int(&text, &tn, &cap, i) != 0) { return -1 }
         if (tc_buf_puts(&text, &tn, &cap, ") { ") != 0) { return -1 }
-        if (tc_buf_np(&text, &tn, &cap, gs.p_mods[target].name_off,
-                gs.p_mods[target].name_len) != 0) { return -1 }
+        if (tc_buf_np(&text, &tn, &cap, proj.ctx().mods[target].name_off,
+                proj.ctx().mods[target].name_len) != 0) { return -1 }
         if (tc_buf_puts(&text, &tn, &cap, ".__yh_test_") != 0) { return -1 }
         if (tc_buf_int(&text, &tn, &cap, c.file) != 0) { return -1 }
         if (tc_buf_puts(&text, &tn, &cap, "_") != 0) { return -1 }
@@ -1221,7 +1210,7 @@ fn tc_gen_runner(proj int, target int, order *int, first int, limit int,
     // 每个入口模块独占一个目录，避免「每目录一个模块」冲突。
     let dir [800]u8
     let dn int = 0
-    dn = gen.append_str(&dir[0], dn, build.pj_pool_str(root_off))
+    dn = gen.append_str(&dir[0], dn, proj.pool_str(root_off))
     dn = gen.append_str(&dir[0], dn, "/tmp/yh-test/gen/")
     dn = build.append_bytes_np(&dir[0], dn, noff, nn)
     dir[dn] = 0
@@ -1234,16 +1223,15 @@ fn tc_gen_runner(proj int, target int, order *int, first int, limit int,
     path[pn] = 0
     if (tc_write_file(gen.arr_cstr(&path[0]), text, tn) != 0) { return -1 }
     free(text.to_type(*void))
-    if (build.pj_index_file(gen.arr_cstr(&path[0]), proj) != 0) { return -1 }
-    return build.pj_mod_in_proj(proj, noff, nn)
+    if (build.pj_index_file(gen.arr_cstr(&path[0]), pj) != 0) { return -1 }
+    return proj.module_in_project(pj, noff, nn)
 }
 
 // tc_clear_entry：清空项目内所有入口标记（测试二进制由入口模块定义 main）。
-fn tc_clear_entry(proj int) void {
-    let gs *gen.GenState = gen.G()
+fn tc_clear_entry(pj int) void {
     let i int = 0
-    for i < gs.p_projs[proj].mod_n {
-        gs.p_mods[gs.p_projs[proj].mods[i]].is_entry = 0
+    for i < proj.ctx().projs[pj].mod_n {
+        proj.ctx().mods[proj.ctx().projs[pj].mods[i]].is_entry = 0
         i += 1
     }
 }
@@ -1368,7 +1356,7 @@ fn tc_test_key(count int) u64 {
 fn tc_jobs() int {
     let off int = -1
     let olen int = 0
-    if (build.pj_env_fetch("YH_TEST_JOBS", &off, &olen) != 0 || olen <= 0) {
+    if (proj.env_fetch("YH_TEST_JOBS", &off, &olen) != 0 || olen <= 0) {
         return 4
     }
     let gs *gen.GenState = gen.G()
@@ -1387,7 +1375,6 @@ fn tc_jobs() int {
 // tc_case_paths：为一个用例生成记录文件与日志文件路径（都放在 tmp 下）。
 fn tc_case_paths(bin *char, log_dir *char, mod_name_off int, mod_name_len int,
     i int, rec *u8, log *u8) void {
-    let gs *gen.GenState = gen.G()
     let rn int = gen.append_str(rec, 0, bin)
     rn = gen.append_str(rec, rn, ".rec.")
     rn = gen.append_int(rec, rn, i)
@@ -1453,47 +1440,46 @@ fn tc_report_case(c TCase, outcome int, rec_line int, rec_col int,
 }
 
 // tc_build_and_run：为 target 模块生成入口、构建测试二进制并逐例执行。
-fn tc_build_and_run(proj int, target int, order *int, first int, limit int,
+fn tc_build_and_run(pj int, target int, order *int, first int, limit int,
     root_off int, root_len int, timeout_ms int,
     passed *int, skipped *int, failed *int) int {
-    let gs *gen.GenState = gen.G()
-    let runner int = tc_gen_runner(proj, target, order, first, limit, root_off, root_len)
+    let runner int = tc_gen_runner(pj, target, order, first, limit, root_off, root_len)
     if (runner < 0) { return -1 }
-    tc_clear_entry(proj)
-    gs.p_mods[runner].is_entry = 1
+    tc_clear_entry(pj)
+    proj.ctx().mods[runner].is_entry = 1
     if (build.pj_bind_imports() != 0) { return -1 }
     let count int = build.pj_topo(runner)
     if (count < 0) { return -1 }
     let build_off int = build.mb_build_dir(root_off, root_len)
     if (build_off < 0) { return -1 }
-    let build_len int = build.pj_state().canon_len
-    if (build.mb_mkdir(build.pj_pool_str(build_off)) != 0) { return -1 }
+    let build_len int = proj.ctx().canon_len
+    if (build.mb_mkdir(proj.pool_str(build_off)) != 0) { return -1 }
     if (build.mb_schedule_modules(count, root_off, root_len, build_off, build_len) != 0) {
         return -1
     }
     let bin [900]u8
     let bn int = 0
-    bn = gen.append_str(&bin[0], bn, build.pj_pool_str(root_off))
+    bn = gen.append_str(&bin[0], bn, proj.pool_str(root_off))
     bn = gen.append_str(&bin[0], bn, "/tmp/yh-test/bin/")
-    bn = build.append_bytes_np(&bin[0], bn, gs.p_projs[proj].name_off,
-        gs.p_projs[proj].name_len)
+    bn = build.append_bytes_np(&bin[0], bn, proj.ctx().projs[pj].name_off,
+        proj.ctx().projs[pj].name_len)
     bn = gen.append_byte(&bin[0], bn, '-')
-    bn = build.append_bytes_np(&bin[0], bn, gs.p_mods[target].name_off,
-        gs.p_mods[target].name_len)
+    bn = build.append_bytes_np(&bin[0], bn, proj.ctx().mods[target].name_off,
+        proj.ctx().mods[target].name_len)
     bin[bn] = 0
     let bindir [900]u8
     let bdn int = 0
-    bdn = gen.append_str(&bindir[0], bdn, build.pj_pool_str(root_off))
+    bdn = gen.append_str(&bindir[0], bdn, proj.pool_str(root_off))
     bdn = gen.append_str(&bindir[0], bdn, "/tmp/yh-test/bin")
     bindir[bdn] = 0
     if (build.cmd_mkdirs(gen.arr_cstr(&bindir[0])) != 0) {
         return gen.fail("无法创建测试产物目录")
     }
-    if (build.mb_link(gen.arr_cstr(&bin[0]), build_off, build_len, count, proj) != 0) {
+    if (build.mb_link(gen.arr_cstr(&bin[0]), build_off, build_len, count, pj) != 0) {
         return -1
     }
     let log_dir [900]u8
-    let ldn int = gen.append_str(&log_dir[0], 0, build.pj_pool_str(root_off))
+    let ldn int = gen.append_str(&log_dir[0], 0, proj.pool_str(root_off))
     ldn = gen.append_str(&log_dir[0], ldn, "/tmp/yh-test/log")
     log_dir[ldn] = 0
     if (build.cmd_mkdirs(gen.arr_cstr(&log_dir[0])) != 0) {
@@ -1524,7 +1510,7 @@ fn tc_build_and_run(proj int, target int, order *int, first int, limit int,
             let recb [900]u8
             let logb [900]u8
             tc_case_paths(gen.arr_cstr(&bin[0]), gen.arr_cstr(&log_dir[0]),
-                gs.p_mods[target].name_off, gs.p_mods[target].name_len, idx,
+                proj.ctx().mods[target].name_off, proj.ctx().mods[target].name_len, idx,
                 &recb[0], &logb[0])
             pids[j] = tc_case_start(gen.arr_cstr(&bin[0]), gen.arr_cstr(&recb[0]),
                 gen.arr_cstr(&logb[0]), idx)
@@ -1567,7 +1553,7 @@ fn tc_build_and_run(proj int, target int, order *int, first int, limit int,
             let recb [900]u8
             let logb [900]u8
             tc_case_paths(gen.arr_cstr(&bin[0]), gen.arr_cstr(&log_dir[0]),
-                gs.p_mods[target].name_off, gs.p_mods[target].name_len, idx,
+                proj.ctx().mods[target].name_off, proj.ctx().mods[target].name_len, idx,
                 &recb[0], &logb[0])
             let outcome int = tc_case_result(gen.arr_cstr(&recb[0]),
                 codes[j], timeouts[j], &rlines[j], &rcols[j], &moffs[j],

@@ -333,7 +333,7 @@ def copy_proj(src, dst):
     shutil.copytree(src, dst)
     if src.name == "astcheck":
         # 探针直接使用当前编译器的 AST arena 与 check 实现。
-        for module in ("gen", "comptime", "ir", "backend", "ast", "check"):
+        for module in ("gen", "proj", "comptime", "ir", "backend", "ast", "check"):
             source = ROOT / "compiler" / module
             if source.is_dir():
                 ignore = shutil.ignore_patterns("llvm_bridge.yh") if module == "backend" else None
@@ -355,7 +355,7 @@ def copy_proj(src, dst):
         # 因此拷入时排除它（其余 backend 源码保持真实）。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "lex", "ast", "comptime", "ir", "backend", "check"):
+        for module in ("gen", "proj", "lex", "ast", "comptime", "ir", "backend", "check"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "checkedcore"\nsource = "."\n')
@@ -367,7 +367,7 @@ def copy_proj(src, dst):
         # fixture 作为同模块的第二个文件随 main/ 一起构建；同样排除桥绑定。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "lex", "ast", "parse", "comptime", "ir", "backend", "builtin", "check", "lower"):
+        for module in ("gen", "proj", "lex", "ast", "parse", "comptime", "ir", "backend", "builtin", "check", "lower"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "lowercore"\nsource = "."\n')

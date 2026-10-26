@@ -31,37 +31,43 @@ ALLOWED = {
     "gen": set(),
     "ir": set(),
     "lex": {"gen"},
-    "comptime": {"gen"},
+    # comptime 只有一处窄口读（待定数组长度时的文件下标越界检查），
+    # 走 proj.file_count() 而不是自己拿项目表。
+    "comptime": {"gen", "proj"},
     "builtin": {"gen"},
-    "ast": {"gen", "comptime", "ir"},
+    # proj：项目/模块/文件表 + 目标/构建配置（2026-10-26 B1-1 自 gen/build 拆出）。
+    # 它是前端与构建层共用的数据层，只允许依赖 gen；一旦反向依赖就成环。
+    "proj": {"gen"},
+    "ast": {"gen", "comptime", "ir", "proj"},
     # lower：CheckedModule → IRModule（2026-10-25 B3-2 自 ast 拆出）。
     # 只吃受检快照，不得 import parse/check/build；ast 不得反向 import lower。
-    "lower": {"gen", "ir", "ast"},
-    "check": {"gen", "ast"},
-    "parse": {"gen", "lex", "comptime", "ast", "ir"},
+    "lower": {"gen", "ir", "ast", "proj"},
+    "check": {"gen", "ast", "proj"},
+    "parse": {"gen", "lex", "comptime", "ast", "ir", "proj"},
     "backend": {"gen", "ir"},
     # build 是构建引擎（A2c 后承担项目模型 + 链接 + 调度 + 模块发射），
     # 位于前端/后端之上，可依赖全部下层；main 只剩 CLI 与测试执行器。
     "build": {"gen", "lex", "parse", "comptime", "ast", "check", "ir",
-              "backend", "builtin", "lower"},
+              "backend", "builtin", "lower", "proj"},
     # testkit：语言内测试执行器（yh test 子命令的实现），位于 build 之上。
     # 模块名不能叫 test——`test "..." {}` 是语言关键字。
-    "testkit": {"gen", "parse", "build"},
+    "testkit": {"gen", "parse", "build", "proj"},
     "main": {"gen", "lex", "comptime", "ast", "check", "parse", "ir",
-             "backend", "builtin", "build", "testkit", "lower"},
+             "backend", "builtin", "build", "testkit", "lower", "proj"},
 }
 
 # —— 预算（现状即上限，只减不增）——
 # 数值为 2026-10-24 实测；下调请同步改这里，上调需在 finish.md 说明理由。
 BUDGETS = {
-    "max_file_lines": 2242,        # module_build.yh（A2c 拆分后必须下降）
+    "max_file_lines": 2236,        # module_build.yh（A2c 拆分后必须下降）
     "max_function_lines": 700,     # mb_link 674（含前导注释的上界口径）
-    "max_module_lines": 381,       # main（A6 后只剩 driver + api）
-    "max_testkit_lines": 1592,     # testkit（YT2d-3 同项目测试锁 +37；后续应拆分而非增长）
-    "max_build_lines": 10807,      # build（PC3 +6、PC2 v3 +5、PC2b +20、PC7a +25、RB1 父存活检查 +19）
+    "max_module_lines": 383,       # main（A6 后只剩 driver + api；B1-1 import+init 各 +1）
+    "max_testkit_lines": 1578,     # testkit（YT2d-3 同项目测试锁 +37；B1-1 迁表读点后净 -14）
+    "max_build_lines": 10242,      # build（B1-1 项目模型搬到 proj 后 -543）
+    "max_proj_lines": 800,         # proj（B1-1 新建：表/写者/路径与窄口）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
     "max_globals": 190,
-    "max_g_call_sites": 165,
+    "max_g_call_sites": 115,
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
@@ -207,6 +213,7 @@ def main():
     budget("max_module_lines", per_module.get("main", 0), "main")
     budget("max_build_lines", per_module.get("build", 0), "build")
     budget("max_testkit_lines", per_module.get("testkit", 0), "testkit")
+    budget("max_proj_lines", per_module.get("proj", 0), "proj")
     budget("max_cmd_share_pct", cmd_share, "%")
     budget("max_globals", globals_n)
     budget("max_g_call_sites", g_calls)
