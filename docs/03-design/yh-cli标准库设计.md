@@ -749,7 +749,9 @@ hidden 参数不出现在 usage/help，但继续参与匹配、必需项和互�
 自动 usage 使用 [] 表示可选、() 表示必选互斥、| 表示互斥、... 表示可变数量。
 
 HelpFormat 提供正交配置：`preserve_description`、`preserve_all_text`、
-`show_defaults`、`metavar_from_type`、`width` 和 `max_help_column`。
+`show_defaults`、`metavar_from_type`、`width`、`max_help_column`，以及
+`usage_prefix`、`section_positional`、`section_options`、`section_commands`
+（文本可本地化；空指针用英文默认，与 argparse 的排版一致）。
 标准行为是折叠说明中的空白并换行；保留模式只调整缩进，不丢弃用户显式空行。
 实现先用确定的 UTF-8 字节宽度计量且不拆开有效编码序列；中文宽度不保证等于终端列宽。
 终端列宽精确计算不成为 CLI1 的隐式依赖，后续若需要单独设计 Unicode 宽度策略。

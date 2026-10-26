@@ -84,11 +84,15 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   声明；`--link` 用 `append`、`--timeout` 用整型（范围在 driver 校验 1..3600）、
   `-O0/-O2` 共用 `opt` dest 实现「最后出现者生效」（不是互斥组，保持旧语义）、
   `--backend` 在 driver 校验取值；`api_*` 各函数改接收 `cmdline.CliRequest`。
-- [ ] **CLI-R4 帮助与诊断收敛**：删 `usage()`，`yh --help`/`yh <cmd> --help` 由 cli
-  生成（中文段标题）；未知选项/缺值/互斥冲突统一走 cli 诊断；修正 tests 里对
-  usage 文本的断言。
-- [ ] **CLI-R5 收尾**：删 `drv_scan_target`/`drv_has_link_option` 等手写扫描；
-  legacy 别名保留且不告警；更新 `AGENTS.md` 使用段与设计文档；全绿后 `just seed`。
+- [x] **CLI-R4 帮助与诊断收敛**（2026-10-27 完成）：删除手写 `usage()`；
+  `yh --help`/`yh <cmd> --help` 由 cli 生成（`用法: ` 前缀 + 中文段标题，
+  help/version 控制结果写 stdout、退出 0）；解析失败打印「诊断 + cli usage」；
+  `libs/cli` 为此新增 `HelpFormat.usage_prefix` 与 optional 位置参数单层括号；
+  自举冒烟补 `--help` 断言，`cli-golden` 的文本类用例改宽松（10 条）。
+- [ ] **CLI-R5 收尾**：手写扫描已随 R1 删除、legacy 别名保留且不告警（已完成）；
+  `AGENTS.md`/`README`/设计文档已更新（已完成）。**剩余：滚种子 `just seed`**
+  （需在本机用正式种子跑通全门后执行；当前种子的闭包路径属于构建机，`just seed`
+  会拒绝带构建机路径的产物，需先 `just bootstrap` 或用发布种子复验）。
 
 ## 2026-10-21 重规划说明
 

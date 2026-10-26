@@ -30,6 +30,7 @@ pub const CLI_TEST int = 4
 pub const CLI_LIST int = 5
 pub const CLI_VERSION int = 6
 pub const CLI_FILE int = 7
+pub const CLI_CONTROL int = 8
 
 // 单文件形态的模式位（与 API_SYNTAX/API_ASM/API_EXE 语义一致）。
 pub const CLIFILE_NONE int = 0
@@ -60,6 +61,8 @@ pub struct CliRequest {
     contracts int
     resolve *char
     has_resolve int
+    usage cli.TextResult    // 解析失败时的 usage 文本（随请求释放）
+    has_usage int
 }
 
 // cli_common_add 声明全局选项；配置错误返回 -1。
@@ -157,11 +160,26 @@ fn cli_add_src(p *cli.Parser, name *char, dest *char, required int) int {
     return cli.add_argument(p, src)
 }
 
+// cli_command 构造带中文帮助配置的子命令（usage 前缀与段标题）。
+// 子 parser 的配置来自 Command.config，因此必须逐个设置，不能只改根 parser。
+fn cli_command(name *char, help *char) cli.Command {
+    let cmd cli.Command = cli.command(name)
+    cmd.help = help
+    cmd.config.help_format.usage_prefix = "用法: "
+    cmd.config.help_format.section_positional = "位置参数"
+    cmd.config.help_format.section_options = "选项"
+    cmd.config.help_format.section_commands = "命令"
+    return cmd
+}
+
 // cli_build_project 构造项目命令 parser；返回非 0 表示配置失败。
 fn cli_build_project(root *cli.Parser) int {
     let config cli.ParserConfig = cli.parser_config("yh")
-    config.add_help = false
+    config.add_help = true
     config.color = cli.never
+    config.description = "yh 编译器（玉衡）"
+    config.epilog = "单文件形态：yh --syntax-check <file.yh> | yh --emit-asm <file.yh> | yh [-o <out>] <file.yh>"
+    config.help_format.usage_prefix = "用法: "
     config.help_format.section_positional = "位置参数"
     config.help_format.section_options = "选项"
     config.help_format.section_commands = "命令"
@@ -185,8 +203,7 @@ fn cli_build_project(root *cli.Parser) int {
         return -1
     }
     // build
-    let build_cmd cli.Command = cli.command("build")
-    build_cmd.help = "构建当前项目"
+    let build_cmd cli.Command = cli_command("build", "构建当前项目")
     let build_p *cli.Parser = cli.add_parser(root, slot, build_cmd)
     if (build_p == 0 || cli.inherit(build_p, &common) != 0
         || cli_add_link(build_p) < 0 || cli_add_out(build_p) < 0
@@ -195,8 +212,7 @@ fn cli_build_project(root *cli.Parser) int {
         return -1
     }
     // check
-    let check_cmd cli.Command = cli.command("check")
-    check_cmd.help = "检查语义，不生成后端产物"
+    let check_cmd cli.Command = cli_command("check", "检查语义，不生成后端产物")
     let check_p *cli.Parser = cli.add_parser(root, slot, check_cmd)
     if (check_p == 0 || cli.inherit(check_p, &common) != 0
         || cli_add_src(check_p, "target", "check_target", 0) < 0) {
@@ -204,16 +220,14 @@ fn cli_build_project(root *cli.Parser) int {
         return -1
     }
     // run
-    let run_cmd cli.Command = cli.command("run")
-    run_cmd.help = "构建并运行 main 模块"
+    let run_cmd cli.Command = cli_command("run", "构建并运行 main 模块")
     let run_p *cli.Parser = cli.add_parser(root, slot, run_cmd)
     if (run_p == 0 || cli.inherit(run_p, &common) != 0 || cli_add_link(run_p) < 0) {
         cli.destroy(&common)
         return -1
     }
     // test
-    let test_cmd cli.Command = cli.command("test")
-    test_cmd.help = "发现、构建并执行语言内测试"
+    let test_cmd cli.Command = cli_command("test", "发现、构建并执行语言内测试")
     let test_p *cli.Parser = cli.add_parser(root, slot, test_cmd)
     if (test_p == 0 || cli.inherit(test_p, &common) != 0) {
         cli.destroy(&common)
@@ -242,8 +256,7 @@ fn cli_build_project(root *cli.Parser) int {
         return -1
     }
     // list
-    let list_cmd cli.Command = cli.command("list")
-    list_cmd.help = "列出模块或导入绑定"
+    let list_cmd cli.Command = cli_command("list", "列出模块或导入绑定")
     let list_p *cli.Parser = cli.add_parser(root, slot, list_cmd)
     if (list_p == 0 || cli.inherit(list_p, &common) != 0) {
         cli.destroy(&common)
@@ -257,8 +270,7 @@ fn cli_build_project(root *cli.Parser) int {
         return -1
     }
     // version
-    let version_cmd cli.Command = cli.command("version")
-    version_cmd.help = "显示项目名与版本"
+    let version_cmd cli.Command = cli_command("version", "显示项目名与版本")
     let version_p *cli.Parser = cli.add_parser(root, slot, version_cmd)
     if (version_p == 0 || cli.inherit(version_p, &common) != 0) {
         cli.destroy(&common)
@@ -278,8 +290,10 @@ fn cli_build_project(root *cli.Parser) int {
 // cli_build_file 构造单文件形态 parser；返回非 0 表示配置失败。
 fn cli_build_file(root *cli.Parser) int {
     let config cli.ParserConfig = cli.parser_config("yh")
-    config.add_help = false
+    config.add_help = true
     config.color = cli.never
+    config.description = "单文件形态"
+    config.help_format.usage_prefix = "用法: "
     config.help_format.section_positional = "位置参数"
     config.help_format.section_options = "选项"
     if (cli.init(root, config) != 0) {
@@ -431,7 +445,10 @@ pub fn parse_request(argc int, argv **char, req *CliRequest,
         return 0
     }
     let first int = cli_first_token(argc, argv)
-    let chained int = (first >= 0 && cli_is_command(argv[first]) != 0) ? 1 : 0
+    let wants_help int = (first >= 0 && (gen.cstr_eq(argv[first], "-h") != 0
+        || gen.cstr_eq(argv[first], "--help") != 0)) ? 1 : 0
+    let chained int = (wants_help != 0
+        || (first >= 0 && cli_is_command(argv[first]) != 0)) ? 1 : 0
     let parser cli.Parser
     let built int = 0
     if (chained != 0) {
@@ -444,13 +461,19 @@ pub fn parse_request(argc int, argv **char, req *CliRequest,
         return 1
     }
     req.result = cli.parse_main(&parser, argc, argv)
-    cli.destroy(&parser)
+    if (req.result.status == cli.help_requested
+        || req.result.status == cli.version_requested) {
+        req.command = CLI_CONTROL
+        cli.destroy(&parser)
+        return 0
+    }
     if (req.result.status != cli.ok) {
         cli_copy_message(&req.result, message, message_capacity)
-        if (req.result.status == cli.usage_error) {
-            return 2
-        }
-        return 1
+        req.usage = cli.format_usage(&parser)
+        req.has_usage = 1
+        let failed_usage int = (req.result.status == cli.usage_error) ? 2 : 1
+        cli.destroy(&parser)
+        return failed_usage
     }
     cli_take_globals(req)
     req.out = cli_read_text(req, "output")
@@ -483,6 +506,7 @@ pub fn parse_request(argc int, argv **char, req *CliRequest,
             req.contracts = cli_read_flag(req, "contracts")
         }
         req.has_src = (req.src != 0) ? 1 : 0
+        cli.destroy(&parser)
         if (cli_read_links(req) != 0) {
             return 1
         }
@@ -494,6 +518,9 @@ pub fn parse_request(argc int, argv **char, req *CliRequest,
     let syntax int = cli_read_flag(req, "syntax_check")
     let asm int = cli_read_flag(req, "emit_asm")
     if (syntax != 0 && asm != 0) {
+        req.usage = cli.format_usage(&parser)
+        req.has_usage = 1
+        cli.destroy(&parser)
         return 2
     }
     if (syntax != 0) {
@@ -503,57 +530,58 @@ pub fn parse_request(argc int, argv **char, req *CliRequest,
     } else if (req.out != 0) {
         req.file_mode = CLIFILE_EXE
     }
-    if (req.file_mode == CLIFILE_NONE) {
-        // 只有源文件、没有模式也没有 -o：对应旧实现 `n != 2` 的分支。
-        return 2
-    }
-    if (req.file_mode != CLIFILE_EXE && req.out != 0) {
-        return 2
-    }
-    if (req.file_mode == CLIFILE_EXE && req.out == 0) {
+    if (req.file_mode == CLIFILE_NONE
+        || (req.file_mode != CLIFILE_EXE && req.out != 0)
+        || (req.file_mode == CLIFILE_EXE && req.out == 0)) {
+        // 只有源文件没有模式、模式与 -o 不搭配、-o 缺文件：都按用法错误处理
+        // （对应旧实现 `n != 2` / `n == 3` 的边界）。
+        req.usage = cli.format_usage(&parser)
+        req.has_usage = 1
+        cli.destroy(&parser)
         return 2
     }
     req.command = CLI_FILE
+    cli.destroy(&parser)
     return 0
 }
 
 // release_request 释放请求持有的解析结果。
 pub fn release_request(req *CliRequest) void {
+    if (req.has_usage != 0) {
+        cli.release_text(&req.usage)
+    }
     cli.release(&req.result)
 }
 
-// usage：输出用法说明（文件描述符 2）。逐行写入：单行最长约 80 字节，
-// 远小于 256 缓冲；不可改回整段拼接——用法行会持续增加，总长曾超出
-// 512 字节固定缓冲导致栈溢出。
-pub fn usage() void {
-    let buf [256]u8
-    let n int = 0
-    n = gen.append_str(buf, 0, "用法: yh --syntax-check <file.yh>\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      yh --emit-asm <file.yh>\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      yh -o <out> <file.yh>\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      yh build [-o out] [module] [--link 组名]... [--stats] 项目构建\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      yh check <file.yh>       检查单文件语义，不要求 main\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      yh check [module]         检查项目语义，不生成后端产物\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      --legacy-system          显式启用兼容 shell system(cmd) 接口\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      --target <triple>         选择完整输出目标（LLVM）\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      yh run [--link 组名]...      构建并运行 main 模块\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      yh version                   显示当前项目名与版本\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      yh version --contracts       显示产物契约版本（key=value）\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      yh list [--resolve name]     列出模块/解释导入绑定\n")
-    gen.write_all(2, buf, n)
-    n = gen.append_str(buf, 0, "      yh test [模块|源文件] [--list] [--no-run] [--filter 子串] [--timeout 秒] [--emit-llvm]\n")
-    gen.write_all(2, buf, n)
+// print_usage 把请求里保存的 usage 文本写到 fd；没有文本返回 -1。
+pub fn print_usage(req *CliRequest, fd int) int {
+    if (req.has_usage == 0) {
+        return -1
+    }
+    return cli.render_text(&req.usage, fd)
+}
+
+// print_control 把 help/version 控制文本写到 fd；没有控制文本返回 -1。
+pub fn print_control(req *CliRequest, fd int) int {
+    if (req.result.control_text == 0) {
+        return -1
+    }
+    let length int = strlen(req.result.control_text).to_type(int)
+    return gen.write_all(fd, req.result.control_text.to_type(*u8), length)
+}
+
+// print_bare_help 为裸 `yh` 打印完整帮助（fd 2）：顶层帮助含全部子命令与单文件形态。
+pub fn print_bare_help(fd int) void {
+    let parser cli.Parser
+    if (cli_build_project(&parser) != 0) {
+        return
+    }
+    let help cli.TextResult = cli.format_help(&parser)
+    if (help.status == cli.ok) {
+        cli.render_text(&help, fd)
+    }
+    cli.release_text(&help)
+    cli.destroy(&parser)
 }
 
 // is_yh_source：判断路径是否以用户源文件后缀 .yh 结尾。

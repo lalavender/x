@@ -596,6 +596,10 @@ config.help_format.width = 100;               // 折行宽度；0 不折行
 config.help_format.metavar_from_type = true;  // 无 metavar 时用 INT/UINT/FLOAT/BOOL
 config.help_format.preserve_description = true;
 config.help_format.max_help_column = 30;      // 说明列起始列；0 用段落默认（位置 22、其余 26）
+config.help_format.usage_prefix = "用法: ";     // usage 行前缀；空指针用 "usage: "
+config.help_format.section_positional = "位置参数"; // 段标题；空指针用英文默认
+config.help_format.section_options = "选项";
+config.help_format.section_commands = "命令";
 config.color = cli.always;                    // never / automatic / always
 config.suggest_on_error = true;               // 未知选项/choices/子命令给「是否想用 X？」
 ```

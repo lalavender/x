@@ -136,8 +136,13 @@ just
 ./yh test --filter X --timeout 15  # 只跑身份含 X 的用例，单例超时 15 秒
 ./yh --syntax-check f.yh   # 只做词法/语法检查
 ./yh --emit-asm f.yh       # 发射汇编
-./yh f.yh -o out           # 单文件编译并链接
+./yh f.yh -o out           # 单文件编译并链接（-o 也可写在文件前，--output 等价）
+./yh --help                # 顶层帮助（由 libs/cli 生成）；yh <命令> --help 看单项
 ```
+
+命令行解析自 CLI-R（2026-10-27）起由 `libs/cli` 承担：声明在
+`compiler/cmdline/`（`module cmdline`），`compiler/cmd/` 只做「请求 → 分派」。
+帮助文本由库生成（`用法: ` 前缀 + 中文段标题），`-h/--help` 是新增能力。
 
 ## 构建与测试
 

@@ -5,6 +5,25 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-27 CLI-R4：yh 帮助/诊断改由 libs/cli 生成
+
+- **删除手写 `usage()`**：`yh`、`yh <命令>` 的帮助与解析失败的 usage 全部由
+  `libs/cli` 的 `format_help`/`format_usage` 生成，`cmdline` 里 `print_bare_help`/
+  `print_usage`/`print_control` 三个薄封装负责落 fd。
+- **`-h/--help` 成为正式能力**：顶层帮助列全部子命令与单文件形态说明，子命令帮助
+  由 `Command.config` 的 `help_format` 决定（中文段标题 `位置参数/选项/命令`，
+  usage 前缀 `用法: `），help/version 控制结果写 stdout、退出 0。
+- **libs/cli 两处小增强**：`HelpFormat.usage_prefix`（默认 `usage: `）与
+  optional 位置参数只套一层方括号（`[module]` 而非 `[[module]]`）；cli 用例 52 → 54。
+- **冒烟与金标**：`tests/selfhost/native-selfhost.py` 的 CLI 冒烟补 `--help`
+  （退出 0 + 用法 + 命令名）；`tools/cli-golden.py` 的文本类用例改为宽松
+  （10 条，均为「usage/help 文本按设计改变」），行为类仍严格 36/36。
+- **文档**：`AGENTS.md` 使用段、`README`、`libs/cli/README.md`（配置项）、
+  `docs/03-design/yh-cli标准库设计.md`（HelpFormat 配置面）。
+- **验证**（种子 `bin/yh-darwin-arm64`）：`just test` 全绿；`just selfhost-native`
+  全绿（固定点 42 产物、cc4 自解析、CLI 冒烟含 `--help`、运行语料 360/361）；
+  `just libs-test` 全绿；`tools/cli-golden.py` 36/36（10 条宽松为文本变化）。
+
 ## 2026-10-27 CLI-R1：yh 命令行改用 libs/cli 解析（入库）
 
 - **新模块 `compiler/cmdline/`**（`module cmdline`，568 行）：`CliRequest` + 两个 parser
