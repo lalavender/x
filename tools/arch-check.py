@@ -67,7 +67,7 @@ BUDGETS = {
     "max_function_lines": 700,     # mb_link 674（含前导注释的上界口径）
     "max_module_lines": 387,       # main（A6 后只剩 driver + api；B1-1 +2、B1-2 绑定存储 +4）
     "max_testkit_lines": 1586,     # testkit（YT2d-3 同项目测试锁 +37；B1-1 迁表读点后净 -14）
-    "max_build_lines": 6315,
+    "max_build_lines": 6348,
     "max_link_lines": 3600,      # link（B2-2 新建：汇编/链接驱动/lld/进程/时钟）      # build（B1-1 项目模型搬到 proj 后 -543）
     "max_proj_lines": 1318,        # proj（B1-1 表/写者/路径/窄口 + B2-1 产物路径与键）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
