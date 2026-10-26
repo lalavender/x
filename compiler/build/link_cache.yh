@@ -48,26 +48,26 @@ fn mb_write_manifest(path *char, data *u8, data_len int) int {
 fn mb_object_machine_matches(path *char) int {
     let gs *gen.GenState = gen.G()
     if (gen.read_source(path) != 0 || gs.task.c_src_len < 20) { return 0 }
-    if (gs.c_target.os == gen.TARGET_OS_LINUX) {
+    if (proj.cfg().target.os == gen.TARGET_OS_LINUX) {
         if (gs.task.c_src[0] != 127 || gs.task.c_src[1] != 'E' || gs.task.c_src[2] != 'L'
             || gs.task.c_src[3] != 'F' || gs.task.c_src[4] != 2 || gs.task.c_src[5] != 1) {
             return 0
         }
         let machine int = gs.task.c_src[18].to_type(int) |
             (gs.task.c_src[19].to_type(int) << 8)
-        if (gs.c_target.arch == gen.TARGET_ARCH_X64) { return machine == 62 ? 1 : 0 }
-        if (gs.c_target.arch == gen.TARGET_ARCH_ARM64) { return machine == 183 ? 1 : 0 }
+        if (proj.cfg().target.arch == gen.TARGET_ARCH_X64) { return machine == 62 ? 1 : 0 }
+        if (proj.cfg().target.arch == gen.TARGET_ARCH_ARM64) { return machine == 183 ? 1 : 0 }
         return 0
     }
-    if (gs.c_target.os == gen.TARGET_OS_DARWIN && gs.task.c_src_len >= 8
+    if (proj.cfg().target.os == gen.TARGET_OS_DARWIN && gs.task.c_src_len >= 8
         && gs.task.c_src[0] == 207 && gs.task.c_src[1] == 250
         && gs.task.c_src[2] == 237 && gs.task.c_src[3] == 254) {
         let cpu int = gs.task.c_src[4].to_type(int) |
             (gs.task.c_src[5].to_type(int) << 8) |
             (gs.task.c_src[6].to_type(int) << 16) |
             (gs.task.c_src[7].to_type(int) << 24)
-        if (gs.c_target.arch == gen.TARGET_ARCH_X64) { return cpu == 16777223 ? 1 : 0 }
-        if (gs.c_target.arch == gen.TARGET_ARCH_ARM64) { return cpu == 16777228 ? 1 : 0 }
+        if (proj.cfg().target.arch == gen.TARGET_ARCH_X64) { return cpu == 16777223 ? 1 : 0 }
+        if (proj.cfg().target.arch == gen.TARGET_ARCH_ARM64) { return cpu == 16777228 ? 1 : 0 }
     }
     return 0
 }
@@ -320,10 +320,9 @@ fn mb_hash_tool_identity(hash *u64, command *char) int {
 // 目标 ELF 的启动文件、动态加载器与默认库由固定宿主 GCC 的 -### 配置生成；
 // 两架构各自在对应宿主构建，不共享架构专用模板。
 fn mb_lld_linux_enabled() int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_target.os != gen.TARGET_OS_LINUX
-        || (gs.c_target.arch != gen.TARGET_ARCH_X64
-            && gs.c_target.arch != gen.TARGET_ARCH_ARM64)) {
+    if (proj.cfg().target.os != gen.TARGET_OS_LINUX
+        || (proj.cfg().target.arch != gen.TARGET_ARCH_X64
+            && proj.cfg().target.arch != gen.TARGET_ARCH_ARM64)) {
         return 0
     }
     let identity *char = backend.llvm_lld_identity()
@@ -536,7 +535,7 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
     // Darwin 的链接驱动是 clang，不接受下面这批 GCC 专用查询
     // （实测 `clang: error: unknown argument: '-print-sysroot'` 后整轮构建失败）。
     // 目标为 Darwin 时清空清单跳过整轮：签名只保留驱动器路径与环境变量。
-    if (gs.c_target.os == gen.TARGET_OS_DARWIN) { fixed_queries[0] = 0.to_type(*char) }
+    if (proj.cfg().target.os == gen.TARGET_OS_DARWIN) { fixed_queries[0] = 0.to_type(*char) }
     let qi int = 0
     for fixed_queries[qi] != 0 {
         let argv [3]*char
@@ -745,8 +744,8 @@ fn mb_select_linker(out *u8) *char {
     let gs *gen.GenState = gen.G()
     let selected *char = "gcc"
     if (gen.tg_darwin() != 0) { selected = "clang" }
-    if (gs.c_target.os == gen.TARGET_OS_LINUX
-        && gs.c_target.arch == gen.TARGET_ARCH_X64) {
+    if (proj.cfg().target.os == gen.TARGET_OS_LINUX
+        && proj.cfg().target.arch == gen.TARGET_ARCH_X64) {
         selected = "/usr/bin/gcc"
     }
     let env_off int = -1
@@ -777,6 +776,8 @@ fn mb_darwin_selfhost_enabled() int {
 
 pub fn mb_link(out_path *char, build_off int, build_len int,
     count int, root_proj int) int {
+    let c_off int = 0
+    let c_len int = 0
     let gs *gen.GenState = gen.G()
     let use_lld int = mb_lld_linux_enabled()
     let use_macho int = mb_lld_darwin_enabled()
@@ -836,7 +837,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     let i int = 0
     for i < count {
         let m int = proj.ctx().order[i]
-        if (mb_mod_tag(m, &proj.ctx().canon_off, &proj.ctx().canon_len) != 0) {
+        if (mb_mod_tag(m, &c_off, &c_len) != 0) {
             return -1
         }
         if (llvm_objects != 0) {
@@ -848,7 +849,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
         let odn int = 0
         odn = gen.append_str(objdir, odn, proj.pool_str(build_off))
         odn = gen.append_str(objdir, odn, "/obj/")
-        odn = gen.append_str(objdir, odn, proj.pool_str(proj.ctx().canon_off))
+        odn = gen.append_str(objdir, odn, proj.pool_str(c_off))
         objdir[odn] = 0
         if (cmd_mkdirs(gen.arr_cstr(&objdir[0])) != 0) {
             return gen.fail_path("无法创建对象目录: ", gen.arr_cstr(&objdir[0]))
@@ -1010,18 +1011,18 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     }
     mb_fnv(&hlink, ('0' + gs.task.c_legacy_system).to_type(u8))
     let target_i int = 0
-    for gs.c_target.triple[target_i] != 0 {
-        mb_fnv(&hlink, gs.c_target.triple[target_i].to_type(u8))
+    for proj.cfg().target.triple[target_i] != 0 {
+        mb_fnv(&hlink, proj.cfg().target.triple[target_i].to_type(u8))
         target_i += 1
     }
     mb_fnv(&hlink, 0)
     target_i = 0
-    for gs.c_target.data_layout[target_i] != 0 {
-        mb_fnv(&hlink, gs.c_target.data_layout[target_i].to_type(u8))
+    for proj.cfg().target.data_layout[target_i] != 0 {
+        mb_fnv(&hlink, proj.cfg().target.data_layout[target_i].to_type(u8))
         target_i += 1
     }
     mb_fnv(&hlink, '1'.to_type(u8))
-    mb_fnv(&hlink, ('0' + gs.c_opt_level).to_type(u8))
+    mb_fnv(&hlink, ('0' + proj.cfg().opt_level).to_type(u8))
     if (use_lld != 0) {
         if (mb_hash_lld_identity(&hlink, c_projects, c_project_n) != 0) { return -1 }
     } else if (use_macho != 0) {
@@ -1045,11 +1046,11 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     for i < count {
         let m int = proj.ctx().order[i]
         if (llvm_objects != 0) {
-            if (mb_mod_tag(m, &proj.ctx().canon_off, &proj.ctx().canon_len) != 0) {
+            if (mb_mod_tag(m, &c_off, &c_len) != 0) {
                 return -1
             }
-            let tagoff int = proj.ctx().canon_off
-            let taglen int = proj.ctx().canon_len
+            let tagoff int = c_off
+            let taglen int = c_len
             let ti int = 0
             for ti < taglen {
                 mb_fnv(&hlink, gs.task.np_data[tagoff + ti])
@@ -1249,7 +1250,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     for i < count {
         let m int = proj.ctx().order[i]
         if (llvm_objects != 0) {
-            if (mb_mod_tag(m, &proj.ctx().canon_off, &proj.ctx().canon_len) != 0) {
+            if (mb_mod_tag(m, &c_off, &c_len) != 0) {
                 free(args.to_type(*void))
                 free(paths.to_type(*void))
                 free(cpaths.to_type(*void))
@@ -1260,7 +1261,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
             let n int = 0
             n = gen.append_str(row, n, proj.pool_str(build_off))
             n = gen.append_str(row, n, "/obj/")
-            n = gen.append_str(row, n, proj.pool_str(proj.ctx().canon_off))
+            n = gen.append_str(row, n, proj.pool_str(c_off))
             n = gen.append_str(row, n, ".o")
             row[n] = 0
             args[next_arg] = row.to_type(*char)
@@ -1313,7 +1314,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     // Linux/ELF 的静态库循环引用由同一个 --start-group 覆盖；共享库也放入
     // group，保持声明顺序。Darwin 没有等价 group，按声明顺序直接传入。
     if (link_lib_n > 0) {
-        let elv int = gs.c_target.os == gen.TARGET_OS_LINUX ? 1 : 0
+        let elv int = proj.cfg().target.os == gen.TARGET_OS_LINUX ? 1 : 0
         if (elv != 0) {
             args[next_arg] = use_lld != 0 ? "--start-group" : "-Wl,--start-group"
             next_arg += 1
@@ -1374,7 +1375,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     }
     // Linux：glibc 把数学函数放在独立的 libm 里，libs/math 与标准库用到
     // cos/pow 等；Darwin 的 libSystem 已包含（宿主链接命令按宿主平台取）。
-    if (gs.c_target.os == gen.TARGET_OS_LINUX) {
+    if (proj.cfg().target.os == gen.TARGET_OS_LINUX) {
         args[next_arg] = "-lm"
         next_arg += 1
     } else if (use_macho != 0) {

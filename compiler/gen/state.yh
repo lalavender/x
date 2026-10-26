@@ -213,6 +213,24 @@ pub struct TaskCtx {
     c_front_checked int // 1：受检前端阶段，禁止旧 text/body/data/bss 输出。
 }
 
+// TargetCfg：目标与编译期配置（B1-2，2026-10-26）。
+//
+// 存储归属 proj（proj.ProjectCtx.cfg，单一存储），**类型定义留在 gen**：
+// 前端/后端要按字段做布局与 ABI 判断，而 gen 是 proj 的下层、不能 import proj。
+// gen 只持一个 c_cfg 指针，由 driver 在 proj.init() 后 gen.bind_cfg(proj.cfg())
+// 绑定；fork 出的 worker 通过 COW 继承。任何模块都不得再存一份副本。
+pub struct TargetCfg {
+    target TargetInfo // 当前输出目标；$if、源文件筛选、后端与缓存共用。
+    host_target TargetInfo // 编译器构建时固化的进程身份，不随 --target 改写。
+    target_explicit int // 1 = CLI 显式给了 --target；项目 os/arch 不再改写目标。
+    dialect int // 当前汇编方言（TG_DIALECT_*）
+    opt_level int // LLVM 优化级别：0（默认 O0）或 2（显式 -O2）；其他值由 CLI 拒绝。
+    emit_kind int // 1 = LLVM 文本（.ll），0 = 目标文件（对象/汇编由目标决定）。
+    emit_text_path *char // 非空且 emit_kind=1 时把 LLVM 文本写入该路径（诊断/审阅用）。
+    module_mode int // 1 = 模块模式（--emit-module）；单文件恒 0
+    is_entry_mod int // 1 = 当前编译入口模块（main 不加后缀、须存在）
+}
+
 // GenState：编译器全局状态（进程级）+ 任务私有上下文。字段全公开。
 pub struct GenState {
     c_stats_enabled int // 1 = 输出构建阶段计数（仅开发验收）
@@ -240,15 +258,7 @@ pub struct GenState {
     c_stats_asm int // 实际调用外部汇编器的次数
     c_stats_link int // 实际调用外部链接器的次数
     c_stats_compiler_hashes int // 实际读取编译器二进制计算指纹的次数
-    c_module_mode int // 1 = 模块模式（--emit-module）；单文件恒 0
-    c_is_entry_mod int // 1 = 当前编译入口模块（main 不加后缀、须存在）
-    c_dialect int
-    c_target TargetInfo // 当前输出目标；$if、源文件筛选、后端与缓存共用。
-    c_target_explicit int // 1 = CLI 显式给了 --target；项目 os/arch 不再改写目标。
-    c_host_target TargetInfo // 编译器构建时固化的进程身份，不随 --target 改写。
-    c_opt_level int // LLVM 优化级别：0（默认 O0）或 2（显式 -O2）；其他值由 CLI 拒绝。
-    c_emit_kind int // 1 = LLVM 文本（.ll），0 = 目标文件（对象/汇编由目标决定）。
-    c_emit_text_path *char // 非空且 emit_kind=1 时把 LLVM 文本写入该路径（诊断/审阅用）。
+    c_cfg *TargetCfg // [B1-2] 目标/配置的存储指针（实体在 proj.ProjectCtx.cfg）
     task TaskCtx // [RS1c] 每任务工作状态：g_state.task.<字段>
 }
 
@@ -271,12 +281,50 @@ pub fn task() *TaskCtx {
     return &g_state.task
 }
 
-// module_mode：模块模式开关（前端窄口）。
+// module_mode / is_entry_mod：模块模式窄口（前端不需要知道目标与配置住在哪）。
 // 项目表与测试/扫描配置已迁入 proj 模块（B1-1）：文件表读口在
 // compiler/proj/proj_20_path.yh，gen 不再转发项目模型（gen 是 proj 的下层，
-// 不能反向依赖）。
+// 不能反向依赖）。目标/配置（B1-2）的存储也在 proj，gen 只经 c_cfg 指针读。
 pub fn module_mode() int {
-    return g_state.c_module_mode
+    return cfg().module_mode
+}
+
+pub fn is_entry_mod() int {
+    return cfg().is_entry_mod
+}
+
+// bind_cfg：把目标/配置的存储（proj.ProjectCtx.cfg）绑定到 gen。
+// 必须在任何需要目标的代码之前调用（driver 在 proj.init() 之后）。
+pub fn bind_cfg(pointer *TargetCfg) void {
+    g_state.c_cfg = pointer
+}
+
+// g_cfg_fallback：未绑定时的目标/配置存储。
+//
+// 谁的进程里没有 proj：单模块嵌入（compiler 的 test 块、tests/ 下的 fixture
+// 直接 import gen）只调 gen.state_init()。它们需要一个可写的宿主默认目标，
+// 否则读第一个字段就崩。绑定之后该实例被彻底搁置（不再读写），不存在双写。
+let g_cfg_fallback TargetCfg
+
+// cfg：目标/配置读写口（模块私有）：已绑定用 proj 的存储，否则用宿主默认实例。
+fn cfg() *TargetCfg {
+    if (g_state.c_cfg == 0) { return &g_cfg_fallback }
+    return g_state.c_cfg
+}
+
+// target_cfg_defaults：把一份目标/配置重置为「宿主身份 + CLI 默认值」。
+// 唯一实现，proj.init() 与 state_init()（未绑定分支）都调它，避免两份默认值漂移。
+pub fn target_cfg_defaults(out *TargetCfg) void {
+    out.target_explicit = 0
+    out.opt_level = 0
+    out.emit_kind = 0
+    out.emit_text_path = 0
+    out.module_mode = 0
+    out.is_entry_mod = 0
+    out.dialect = TG_DIALECT_GNU
+    target_host_info(&out.host_target)
+    out.target = out.host_target
+    if (out.target.os == TARGET_OS_DARWIN) { out.dialect = TG_DIALECT_DARWIN }
 }
 
 
@@ -481,11 +529,9 @@ pub fn state_init() void {
     g_state.task.c_ct_diag_stmt = 0
     g_state.task.mod_name_off = -1
     g_state.task.c_sym_sfx_off = -1
-    g_state.c_dialect = TG_DIALECT_GNU
-    g_state.c_target_explicit = 0
-    target_host_info(&g_state.c_host_target)
-    g_state.c_target = g_state.c_host_target
-    if (g_state.c_target.os == TARGET_OS_DARWIN) { g_state.c_dialect = TG_DIALECT_DARWIN }
+    // 目标/配置只在「尚未绑定」时初始化宿主默认值：绑定后由 proj 持有，
+    // 这里绝不能重置（否则会抹掉 driver 已经解析的 --target / -O2）。
+    if (g_state.c_cfg == 0) { target_cfg_defaults(&g_cfg_fallback) }
 }
 
 // hexval：十六进制字符转数值（LL12：从退役的 emit_arm64 迁入，语义层共用）。

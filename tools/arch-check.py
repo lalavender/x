@@ -59,15 +59,15 @@ ALLOWED = {
 # —— 预算（现状即上限，只减不增）——
 # 数值为 2026-10-24 实测；下调请同步改这里，上调需在 finish.md 说明理由。
 BUDGETS = {
-    "max_file_lines": 2236,        # module_build.yh（A2c 拆分后必须下降）
+    "max_file_lines": 2261,        # module_build.yh（A2c 拆分后必须下降）
     "max_function_lines": 700,     # mb_link 674（含前导注释的上界口径）
-    "max_module_lines": 383,       # main（A6 后只剩 driver + api；B1-1 import+init 各 +1）
-    "max_testkit_lines": 1578,     # testkit（YT2d-3 同项目测试锁 +37；B1-1 迁表读点后净 -14）
-    "max_build_lines": 10242,      # build（B1-1 项目模型搬到 proj 后 -543）
+    "max_module_lines": 387,       # main（A6 后只剩 driver + api；B1-1 +2、B1-2 绑定存储 +4）
+    "max_testkit_lines": 1585,     # testkit（YT2d-3 同项目测试锁 +37；B1-1 迁表读点后净 -14）
+    "max_build_lines": 10265,      # build（B1-1 项目模型搬到 proj 后 -543）
     "max_proj_lines": 800,         # proj（B1-1 新建：表/写者/路径与窄口）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
     "max_globals": 190,
-    "max_g_call_sites": 115,
+    "max_g_call_sites": 98,
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。

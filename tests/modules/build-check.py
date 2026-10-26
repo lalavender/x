@@ -346,7 +346,9 @@ def copy_proj(src, dst):
             '[project]\nos = "host"\narch = "host"\nname = "yh_ir"\nsource = "."\n')
     if src.name in ("llvmtarget", "llvmfront"):
         # 目标模型测试复用实际 gen 源码，并以项目依赖检验公开类型/接口。
+        # B1-2 起目标/配置的存储归 proj（gen 只持指针），因此也要拷 proj。
         shutil.copytree(ROOT / "compiler" / "gen", dst / "gen")
+        shutil.copytree(ROOT / "compiler" / "proj", dst / "proj")
         (dst / "gen" / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n')
     if src.name == "llvmchecked":

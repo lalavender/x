@@ -149,39 +149,44 @@ const MB_TAG_MAX int = 120
 
 // mb_build_dir：构建目录 = <root>/.build/targets/<triple>/llvm/O<n>；
 // check 模式用 <root>/.build/check（LL12：不再有旧后端目录）。
-pub fn mb_build_dir(root_off int, root_len int) int {
+pub fn mb_build_dir(root_off int, root_len int, out_len *int) int {
+    let c_off int = 0
+    let c_len int = 0
     let gs *gen.GenState = gen.G()
     let rc int = 0
     if (gs.task.c_test_mode != 0) {
         // 测试检查与生产 .build 隔离；接口/会话文件只落在项目 tmp 下。
-        rc = proj.canon(root_off, root_len, "tmp/yh-test/check")
+        rc = proj.canon(root_off, root_len, "tmp/yh-test/check", &c_off, &c_len)
     } else if (gs.task.c_check_only != 0) {
-        rc = proj.canon(root_off, root_len, ".build/check")
+        rc = proj.canon(root_off, root_len, ".build/check", &c_off, &c_len)
     } else {
         let target_dir [256]u8
         let n int = gen.append_str(&target_dir[0], 0, ".build/targets/")
-        n = gen.append_str(&target_dir[0], n, gs.c_target.triple)
+        n = gen.append_str(&target_dir[0], n, proj.cfg().target.triple)
         n = gen.append_str(&target_dir[0], n, "/llvm/O")
-        n = gen.append_int(&target_dir[0], n, gs.c_opt_level)
+        n = gen.append_int(&target_dir[0], n, proj.cfg().opt_level)
         target_dir[n] = 0
-        rc = proj.canon(root_off, root_len, (&target_dir[0]).to_type(*char))
+        rc = proj.canon(root_off, root_len, (&target_dir[0]).to_type(*char), &c_off, &c_len)
     }
     if (rc != 0) {
         return -1
     }
-    if (proj.ctx().canon_len > MB_BUILD_DIR_MAX) {
+    if (c_len > MB_BUILD_DIR_MAX) {
         return gen.fail_path("项目路径过长：构建目录超过 400 字节，请缩短项目根路径: ",
-            proj.pool_str(proj.ctx().canon_off))
+            proj.pool_str(c_off))
     }
-    return proj.ctx().canon_off
+    out_len[0] = c_len
+    return c_off
 }
 
 // mb_default_binary_path：默认可执行文件留在项目 .build 根目录，中间缓存
 // 按目标与优化级别隔离（LL12：唯一后端）。
 fn mb_default_binary_path(root_off int, root_len int, build_off int,
     project int, out *u8) int {
-    if (proj.canon(root_off, root_len, ".build") != 0) { return -1 }
-    let dir_off int = proj.ctx().canon_off
+    let c_off int = 0
+    let c_len int = 0
+    if (proj.canon(root_off, root_len, ".build", &c_off, &c_len) != 0) { return -1 }
+    let dir_off int = c_off
     let n int = gen.append_str(out, 0, proj.pool_str(dir_off))
     n = gen.append_byte(out, n, '/')
     n = append_bytes_np(out, n, proj.ctx().projs[project].name_off,
@@ -192,10 +197,12 @@ fn mb_default_binary_path(root_off int, root_len int, build_off int,
 
 // mb_sub_dir：.build 下子目录路径（asm/obj/iface/manifest），intern 后返回。
 fn mb_sub_dir(build_off int, build_len int, sub *char) int {
-    if (proj.canon(build_off, build_len, sub) != 0) {
+    let c_off int = 0
+    let c_len int = 0
+    if (proj.canon(build_off, build_len, sub, &c_off, &c_len) != 0) {
         return -1
     }
-    return proj.ctx().canon_off
+    return c_off
 }
 
 // mb_mkdir：确保构建目录存在。
@@ -328,11 +335,13 @@ fn mb_asm_stem_base(path_off int, out *u8) int {
 // 因此三个及以上连环重名也稳定。worker 写 asm/<tag>/<stem>.s、mb_link 读
 // obj/<tag>/<stem>.o，两边由同一函数派生才能对上。
 fn mb_asm_stems(m int, stems *u8, lens *int) int {
+    let c_off int = 0
+    let c_len int = 0
     let gs *gen.GenState = gen.G()
     // 保留名：<tag>.stub
-    if (mb_mod_tag(m, &proj.ctx().canon_off, &proj.ctx().canon_len) != 0) { return -1 }
-    let tag_off int = proj.ctx().canon_off
-    let tag_len int = proj.ctx().canon_len
+    if (mb_mod_tag(m, &c_off, &c_len) != 0) { return -1 }
+    let tag_off int = c_off
+    let tag_len int = c_len
     let reserved [160]u8
     let rn int = 0
     let ti int = 0
@@ -443,12 +452,14 @@ fn mb_asm_stems(m int, stems *u8, lens *int) int {
 // mpath = 同目录 .manifest（对象缓存）；不需要的路径传 0。
 fn mb_module_obj_row(m int, build_off int, build_len int, row_k int,
     spath *u8, opath *u8, mpath *u8) int {
+    let c_off int = 0
+    let c_len int = 0
     let gs *gen.GenState = gen.G()
-    if (mb_mod_tag(m, &proj.ctx().canon_off, &proj.ctx().canon_len) != 0) {
+    if (mb_mod_tag(m, &c_off, &c_len) != 0) {
         return -1
     }
-    let tag_off int = proj.ctx().canon_off
-    let tag_len int = proj.ctx().canon_len
+    let tag_off int = c_off
+    let tag_len int = c_len
     let stem [160]u8
     let sn int = 0
     if (row_k < proj.ctx().mods[m].file_n) {
@@ -664,6 +675,8 @@ fn mb_dep_order_rank(m int) int {
 //   3. 按本轮拓扑序排序——mangle 类型名要求提供方接口先于引用方登记；
 //   4. 统一构造接口路径（本轮会话接口优先于持久缓存）。
 fn mb_module_iface_deps(m int, build_off int, build_len int) int {
+    let c_off int = 0
+    let c_len int = 0
     mb_dep_n = 0
     let fi int = 0
     for fi < proj.ctx().mods[m].file_n {
@@ -760,14 +773,14 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
     }
     let di int = 0
     for di < mb_dep_n {
-        if (mb_mod_tag(mb_dep_mod[di], &proj.ctx().canon_off, &proj.ctx().canon_len) != 0) {
+        if (mb_mod_tag(mb_dep_mod[di], &c_off, &c_len) != 0) {
             return -1
         }
         let pbuf [760]u8
         let pn int = 0
         pn = gen.append_str(pbuf, pn, proj.pool_str(build_off))
         pn = gen.append_str(pbuf, pn, "/iface/")
-        pn = gen.append_str(pbuf, pn, proj.pool_str(proj.ctx().canon_off))
+        pn = gen.append_str(pbuf, pn, proj.pool_str(c_off))
         pn = gen.append_str(pbuf, pn, ".s.i")
         pbuf[pn] = 0
         let chosen *char = gen.arr_cstr(pbuf)
@@ -839,6 +852,8 @@ pub fn mb_open_out(path *char) int {
 // 游标，故由调用方先取好）。
 fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     build_len int, pid_out *int, key_out *u8) int {
+    let c_off int = 0
+    let c_len int = 0
     let gs *gen.GenState = gen.G()
     let sfx_off int = -1
     let sfx_len int = 0
@@ -848,16 +863,16 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     let is_entry int = proj.ctx().mods[m].is_entry
     // 产物目录 = .build/asm/<tag>/（tag 含项目，防同名冲突；RS3b 起每模块
     // 一个目录，内含每文件 .s 与 <tag>.stub.s 运行时桩对象）
-    if (mb_mod_tag(m, &proj.ctx().canon_off, &proj.ctx().canon_len) != 0) {
+    if (mb_mod_tag(m, &c_off, &c_len) != 0) {
         return -1
     }
-    let tag_off int = proj.ctx().canon_off
-    if (proj.canon(build_off, build_len, "asm") != 0) {
+    let tag_off int = c_off
+    if (proj.canon(build_off, build_len, "asm", &c_off, &c_len) != 0) {
         return -1
     }
     let asmdir [900]u8
     let an int = 0
-    an = gen.append_str(asmdir, an, proj.pool_str(proj.ctx().canon_off))
+    an = gen.append_str(asmdir, an, proj.pool_str(c_off))
     an = gen.append_byte(asmdir, an, '/')
     an = gen.append_str(asmdir, an, proj.pool_str(tag_off))
     asmdir[an] = 0
@@ -867,19 +882,19 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     if (mb_llvm_module_paths(m, root_off, root_len, &cache_artifact[0],
             &ignored_text[0]) != 0) { return -1 }
     artifact_path = gen.arr_cstr(&cache_artifact[0])
-    if (proj.canon(build_off, build_len, "iface") != 0) {
+    if (proj.canon(build_off, build_len, "iface", &c_off, &c_len) != 0) {
         return -1
     }
     let ipath [600]u8
     let in2 int = 0
-    in2 = gen.append_str(ipath, in2, proj.pool_str(proj.ctx().canon_off))
+    in2 = gen.append_str(ipath, in2, proj.pool_str(c_off))
     in2 = gen.append_byte(ipath, in2, '/')
     in2 = gen.append_str(ipath, in2, proj.pool_str(tag_off))
     in2 = gen.append_str(ipath, in2, ".s.i")
     ipath[in2] = 0
     let ctpath [600]u8
     let ctn int = 0
-    ctn = gen.append_str(ctpath, ctn, proj.pool_str(proj.ctx().canon_off))
+    ctn = gen.append_str(ctpath, ctn, proj.pool_str(c_off))
     ctn = gen.append_byte(ctpath, ctn, '/')
     ctn = gen.append_str(ctpath, ctn, proj.pool_str(tag_off))
     ctn = gen.append_str(ctpath, ctn, ".s.ct")
@@ -899,12 +914,12 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         return -1
     }
     unlink(gen.arr_cstr(&session_ready[0]))
-    if (proj.canon(build_off, build_len, "manifest") != 0) {
+    if (proj.canon(build_off, build_len, "manifest", &c_off, &c_len) != 0) {
         return -1
     }
     let mpath [600]u8
     let mn int = 0
-    mn = gen.append_str(mpath, mn, proj.pool_str(proj.ctx().canon_off))
+    mn = gen.append_str(mpath, mn, proj.pool_str(c_off))
     mn = gen.append_byte(mpath, mn, '/')
     mn = gen.append_str(mpath, mn, proj.pool_str(tag_off))
     mn = gen.append_str(mpath, mn, ".manifest")
@@ -950,23 +965,23 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         }
     }
     let triple_i int = 0
-        for gs.c_target.triple[triple_i] != 0 {
-            mb_fnv(&h, gs.c_target.triple[triple_i].to_type(u8))
+        for proj.cfg().target.triple[triple_i] != 0 {
+            mb_fnv(&h, proj.cfg().target.triple[triple_i].to_type(u8))
             triple_i += 1
         }
         mb_fnv(&h, 0)
         triple_i = 0
-        for gs.c_target.data_layout[triple_i] != 0 {
-            mb_fnv(&h, gs.c_target.data_layout[triple_i].to_type(u8))
+        for proj.cfg().target.data_layout[triple_i] != 0 {
+            mb_fnv(&h, proj.cfg().target.data_layout[triple_i].to_type(u8))
             triple_i += 1
         }
         mb_fnv(&h, 0)
         triple_i = 0
-        for gs.c_target.abi[triple_i] != 0 {
-            mb_fnv(&h, gs.c_target.abi[triple_i].to_type(u8))
+        for proj.cfg().target.abi[triple_i] != 0 {
+            mb_fnv(&h, proj.cfg().target.abi[triple_i].to_type(u8))
             triple_i += 1
         }
-        mb_fnv(&h, ('0' + gs.c_opt_level).to_type(u8))
+        mb_fnv(&h, ('0' + proj.cfg().opt_level).to_type(u8))
         let bridge_version *char = backend.llvm_bridge_version()
         triple_i = 0
         for bridge_version[triple_i] != 0 {
@@ -979,7 +994,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
             mb_fnv(&h, bridge_abi[triple_i].to_type(u8))
             triple_i += 1
         }
-        if (gs.c_target.os == gen.TARGET_OS_DARWIN) {
+        if (proj.cfg().target.os == gen.TARGET_OS_DARWIN) {
             let min_os *char = cmd_darwin_min_os()
             if (min_os == 0) { return -1 }
             mb_fnv(&h, 0)
@@ -1138,16 +1153,18 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
 
 // mb_manifest_commit：worker 完整成功后原子提交模块缓存键。
 fn mb_manifest_commit(m int, build_off int, build_len int, key *u8) int {
-    if (mb_mod_tag(m, &proj.ctx().canon_off, &proj.ctx().canon_len) != 0) {
+    let c_off int = 0
+    let c_len int = 0
+    if (mb_mod_tag(m, &c_off, &c_len) != 0) {
         return -1
     }
-    let tag_off int = proj.ctx().canon_off
-    if (proj.canon(build_off, build_len, "manifest") != 0) {
+    let tag_off int = c_off
+    if (proj.canon(build_off, build_len, "manifest", &c_off, &c_len) != 0) {
         return -1
     }
     let mpath [600]u8
     let mn int = 0
-    mn = gen.append_str(mpath, mn, proj.pool_str(proj.ctx().canon_off))
+    mn = gen.append_str(mpath, mn, proj.pool_str(c_off))
     mn = gen.append_byte(mpath, mn, '/')
     mn = gen.append_str(mpath, mn, proj.pool_str(tag_off))
     mn = gen.append_str(mpath, mn, ".manifest")
@@ -1220,15 +1237,17 @@ fn mb_manifest_commit(m int, build_off int, build_len int, key *u8) int {
 // mb_module_iface_plain_path：返回持久接口路径，不附加本轮后缀。
 fn mb_module_iface_plain_path(m int, build_off int, build_len int,
     out *u8) int {
-    if (mb_mod_tag(m, &proj.ctx().canon_off, &proj.ctx().canon_len) != 0) {
+    let c_off int = 0
+    let c_len int = 0
+    if (mb_mod_tag(m, &c_off, &c_len) != 0) {
         return -1
     }
-    let tag_off int = proj.ctx().canon_off
-    if (proj.canon(build_off, build_len, "iface") != 0) {
+    let tag_off int = c_off
+    if (proj.canon(build_off, build_len, "iface", &c_off, &c_len) != 0) {
         return -1
     }
     let n int = 0
-    n = gen.append_str(out, n, proj.pool_str(proj.ctx().canon_off))
+    n = gen.append_str(out, n, proj.pool_str(c_off))
     n = gen.append_byte(out, n, '/')
     n = gen.append_str(out, n, proj.pool_str(tag_off))
     n = gen.append_str(out, n, ".s.i")
@@ -1254,11 +1273,13 @@ fn mb_module_iface_path(m int, build_off int, build_len int, out *u8) int {
 // mb_module_ctiface_plain_path：返回持久 CT 正文接口路径。
 fn mb_module_ctiface_plain_path(m int, build_off int, build_len int,
     out *u8) int {
-    if (mb_mod_tag(m, &proj.ctx().canon_off, &proj.ctx().canon_len) != 0) { return -1 }
-    let tag_off int = proj.ctx().canon_off
-    if (proj.canon(build_off, build_len, "iface") != 0) { return -1 }
+    let c_off int = 0
+    let c_len int = 0
+    if (mb_mod_tag(m, &c_off, &c_len) != 0) { return -1 }
+    let tag_off int = c_off
+    if (proj.canon(build_off, build_len, "iface", &c_off, &c_len) != 0) { return -1 }
     let n int = 0
-    n = gen.append_str(out, n, proj.pool_str(proj.ctx().canon_off))
+    n = gen.append_str(out, n, proj.pool_str(c_off))
     n = gen.append_byte(out, n, '/')
     n = gen.append_str(out, n, proj.pool_str(tag_off))
     n = gen.append_str(out, n, ".s.ct")
@@ -1724,17 +1745,19 @@ pub fn mb_intern_arg(s *char, olen *int) int {
 // 返回 1 表示已装载，0 表示该候选不存在，-1 表示候选存在但装载失败。
 // 只接受带 project.toml 的目录；不猜测库名，也不把任意模块目录当标准库。
 fn mb_try_default_stdlib(dir *char, suffix *char) int {
+    let c_off int = 0
+    let c_len int = 0
     let gs *gen.GenState = gen.G()
     let path [1200]u8
     let n int = 0
     n = gen.append_str(path, n, dir)
     n = gen.append_str(path, n, suffix)
     path[n] = 0
-    if (proj.canon(0, 0, gen.arr_cstr(path)) != 0) {
+    if (proj.canon(0, 0, gen.arr_cstr(path), &c_off, &c_len) != 0) {
         return 0
     }
-    let cand_off int = proj.ctx().canon_off
-    let cand_len int = proj.ctx().canon_len
+    let cand_off int = c_off
+    let cand_len int = c_len
     let manifest [1200]u8
     let mn int = 0
     let i int = 0
@@ -1806,6 +1829,8 @@ fn mb_load_default_stdlib() int {
 // YH_STDLIB 非空时优先且失败不回退；为空/未设置时按可执行文件附近布局
 // 查找默认标准库（仓库 <root>/libs、bin 种子相邻 libs 或安装 share/yh/libs）。
 pub fn mb_load_stdlib() int {
+    let c_off int = 0
+    let c_len int = 0
     if (proj.ctx().stdlib >= 0) {
         return 0
     }
@@ -1817,10 +1842,10 @@ pub fn mb_load_stdlib() int {
     if (olen == 0) {
         return mb_load_default_stdlib()
     }
-    if (proj.canon(0, 0, proj.pool_str(off)) != 0) {
+    if (proj.canon(0, 0, proj.pool_str(off), &c_off, &c_len) != 0) {
         return -1
     }
-    let s int = pj_load_project(proj.ctx().canon_off, proj.ctx().canon_len)
+    let s int = pj_load_project(c_off, c_len)
     if (s < 0) {
         return -1
     }
@@ -1927,13 +1952,13 @@ pub fn mb_cmd_build(av **char, an int) int {
     if (mb_load_stdlib() != 0) {
         return 1
     }
-    let root int = pj_find_root(0)
+    // 根路径长度由 pj_find_root 出参返回（不再依赖全局游标）。
+    let root_len int = 0
+    let root int = pj_find_root(0, &root_len)
     if (root < 0) {
         return 1
     }
-    // 捕获根路径（后续 canon 调用会改写全局游标）
-    let root_off int = proj.ctx().canon_off
-    let root_len int = proj.ctx().canon_len
+    let root_off int = root
     proj.set_root_project(root_off, root_len)
     let pj int = pj_load_project(root_off, root_len)
     if (pj < 0) {
@@ -1978,11 +2003,11 @@ pub fn mb_cmd_build(av **char, an int) int {
         }
     }
     // 构建目录
-    let build_off int = mb_build_dir(root_off, root_len)
+    let build_len int = 0
+    let build_off int = mb_build_dir(root_off, root_len, &build_len)
     if (build_off < 0) {
         return 1
     }
-    let build_len int = proj.ctx().canon_len
     if (mb_mkdir(proj.pool_str(build_off)) != 0) {
         return 1
     }
@@ -2081,12 +2106,12 @@ pub fn mb_cmd_run(av **char, an int) int {
     if (mb_load_stdlib() != 0) {
         return 1
     }
-    let root int = pj_find_root(0)
+    let root_len int = 0
+    let root int = pj_find_root(0, &root_len)
     if (root < 0) {
         return 1
     }
-    let root_off int = proj.ctx().canon_off
-    let root_len int = proj.ctx().canon_len
+    let root_off int = root
     proj.set_root_project(root_off, root_len)
     let pj int = pj_load_project(root_off, root_len)
     if (pj < 0) {
@@ -2106,11 +2131,11 @@ pub fn mb_cmd_run(av **char, an int) int {
     if (count < 0) {
         return 1
     }
-    let build_off int = mb_build_dir(root_off, root_len)
+    let build_len int = 0
+    let build_off int = mb_build_dir(root_off, root_len, &build_len)
     if (build_off < 0) {
         return 1
     }
-    let build_len int = proj.ctx().canon_len
     if (mb_mkdir(proj.pool_str(build_off)) != 0) {
         return 1
     }
@@ -2164,12 +2189,12 @@ pub fn mb_print_contracts() int {
 }
 
 pub fn mb_print_version(quiet int) int {
-    let root int = pj_find_root(quiet)
+    let root_len int = 0
+    let root int = pj_find_root(quiet, &root_len)
     if (root < 0) {
         return 1
     }
-    let root_off int = proj.ctx().canon_off
-    let root_len int = proj.ctx().canon_len
+    let root_off int = root
     let pj int = pj_load_project(root_off, root_len)
     if (pj < 0) {
         return 1
@@ -2218,12 +2243,12 @@ pub fn mb_cmd_list(av **char, an int) int {
     if (mb_load_stdlib() != 0) {
         return 1
     }
-    let root int = pj_find_root(0)
+    let root_len int = 0
+    let root int = pj_find_root(0, &root_len)
     if (root < 0) {
         return 1
     }
-    let root_off int = proj.ctx().canon_off
-    let root_len int = proj.ctx().canon_len
+    let root_off int = root
     proj.set_root_project(root_off, root_len)
     let pj int = pj_load_project(root_off, root_len)
     if (pj < 0) {

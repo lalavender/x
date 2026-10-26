@@ -33,7 +33,9 @@ fn pj_input_push(items **proj.PInput, count *int, capacity *int,
 
 // pj_c_path：验证项目相对路径、扩展名和文件存在性，返回规范化路径。
 fn pj_c_path(pj int, item_off int, item_len int, suffix *char,
-    line int) int {
+    line int, out_off *int, out_len *int) int {
+    let c_off int = 0
+    let c_len int = 0
     let gs *gen.GenState = gen.G()
     if (item_len == 0 || gs.task.np_data[item_off] == '/') {
         return proj.diag(proj.ctx().projs[pj].root_off, line,
@@ -79,11 +81,13 @@ fn pj_c_path(pj int, item_off int, item_len int, suffix *char,
     }
     rel[item_len] = 0
     if (proj.canon(proj.ctx().projs[pj].root_off,
-        proj.ctx().projs[pj].root_len, gen.arr_cstr(rel)) != 0) { return -1 }
-    if (proj.file_exists(proj.pool_str(proj.ctx().canon_off)) == 0) {
+        proj.ctx().projs[pj].root_len, gen.arr_cstr(rel), &c_off, &c_len) != 0) { return -1 }
+    if (proj.file_exists(proj.pool_str(c_off)) == 0) {
         return proj.diag(proj.ctx().projs[pj].root_off, line,
             "[c] 配置路径对应的文件不存在")
     }
+    out_off[0] = c_off
+    out_len[0] = c_len
     return 0
 }
 
@@ -143,9 +147,10 @@ fn pj_load_c_config(pj int, sec int) int {
             let n int = item.sval_len
             if (kind == 1 || kind == 2) {
                 let suffix *char = kind == 1 ? ".c" : ".o"
-                if (pj_c_path(pj, off, n, suffix, val.line) != 0) { return -1 }
-                let path_off int = proj.ctx().canon_off
-                let path_len int = proj.ctx().canon_len
+                let path_off int = 0
+                let path_len int = 0
+                if (pj_c_path(pj, off, n, suffix, val.line,
+                    &path_off, &path_len) != 0) { return -1 }
                 if (kind == 1) {
                     if (pj_input_push(&proj.ctx().projs[pj].c_sources,
                         &proj.ctx().projs[pj].c_source_n,
@@ -170,6 +175,8 @@ fn pj_load_c_config(pj int, sec int) int {
 }
 
 pub fn pj_load_project(root_off int, root_len int) int {
+    let c_off int = 0
+    let c_len int = 0
     let gs *gen.GenState = gen.G()
     // 依赖环 / 重复装载
     let known int = proj.find_project_root(root_off, root_len)
@@ -255,11 +262,11 @@ pub fn pj_load_project(root_off int, root_len int) int {
     if (got == 1) {
         srcname = proj.pool_str(so)
     }
-    if (proj.canon(root_off, root_len, srcname) != 0) {
+    if (proj.canon(root_off, root_len, srcname, &c_off, &c_len) != 0) {
         return -1
     }
-    proj.ctx().projs[me].src_off = proj.ctx().canon_off
-    proj.ctx().projs[me].src_len = proj.ctx().canon_len
+    proj.ctx().projs[me].src_off = c_off
+    proj.ctx().projs[me].src_len = c_len
     // version（可选，仅供 yh version 展示）
     got = toml_sec_str(sec, "version", &so, &sl)
     if (got < 0) {
@@ -345,10 +352,10 @@ pub fn pj_load_project(root_off int, root_len int) int {
             }
             let path_off int = snap_path_off[di]
             // 依赖项目根 = 规范化(root + path)
-            if (proj.canon(root_off, root_len, proj.pool_str(path_off)) != 0) {
+            if (proj.canon(root_off, root_len, proj.pool_str(path_off), &c_off, &c_len) != 0) {
                 return -1
             }
-            let dep int = pj_load_project(proj.ctx().canon_off, proj.ctx().canon_len)
+            let dep int = pj_load_project(c_off, c_len)
             if (dep < 0) {
                 return -1
             }
@@ -498,6 +505,8 @@ fn pj_scan_is_target(path *char) int {
 }
 
 fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir int, pj int) int {
+    let c_off int = 0
+    let c_len int = 0
     let gs *gen.GenState = gen.G()
     if (is_dir != 0) {
         // 单文件模式（yh test <项目外文件>）不进入任何子目录，也不装入相邻文件。
@@ -513,11 +522,11 @@ fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir 
             k2 += 1
         }
         nm[nn] = 0
-        if (proj.canon(dir_off, dir_len, gen.arr_cstr(nm)) != 0) {
+        if (proj.canon(dir_off, dir_len, gen.arr_cstr(nm), &c_off, &c_len) != 0) {
             return -1
         }
-        let sub_off int = proj.ctx().canon_off
-        let sub_len int = proj.ctx().canon_len
+        let sub_off int = c_off
+        let sub_len int = c_len
         // 嵌套项目边界：含 mod.toml 的子目录属于另一项目，不进入
         let probe [1100]u8
         let pn int = 0
@@ -583,13 +592,13 @@ fn pj_source_target_match(name_start int, name_len int) int {
         let start int = dot + 1
         let n int = end - start
         if (pj_target_tag_is(start, n, "linux") != 0) {
-            if (gs.c_target.os != gen.TARGET_OS_LINUX) { return 0 }
+            if (proj.cfg().target.os != gen.TARGET_OS_LINUX) { return 0 }
         } else if (pj_target_tag_is(start, n, "darwin") != 0) {
-            if (gs.c_target.os != gen.TARGET_OS_DARWIN) { return 0 }
+            if (proj.cfg().target.os != gen.TARGET_OS_DARWIN) { return 0 }
         } else if (pj_target_tag_is(start, n, "arm64") != 0) {
-            if (gs.c_target.arch != gen.TARGET_ARCH_ARM64) { return 0 }
+            if (proj.cfg().target.arch != gen.TARGET_ARCH_ARM64) { return 0 }
         } else if (pj_target_tag_is(start, n, "x64") != 0) {
-            if (gs.c_target.arch != gen.TARGET_ARCH_X64) { return 0 }
+            if (proj.cfg().target.arch != gen.TARGET_ARCH_X64) { return 0 }
         } else { return 1 }
         end = dot
     }
