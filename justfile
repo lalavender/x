@@ -81,10 +81,15 @@ FAST_STAGE := env_var_or_default("FAST_STAGE", "1")
 fast_stage := if FAST_STAGE == "" { "1" } else { FAST_STAGE }
 tmpdir := if env_var_or_default("TMPDIR", "") == "" { "/tmp" } else { env_var_or_default("TMPDIR", "/tmp") }
 run_id := env_var_or_default("GITHUB_RUN_ID", "")
-# 每次 CI run 独占一个快速目录：同机并发跑多个 run 时共用 /tmp/yh-fast 会让
-# stage-yh 互相覆盖（release 与分支门同时跑时出现过 selfhost 探针读错二进制）。
-FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast" + (if run_id == "" { "" } else { "-" + run_id }))
-fast_dir := if FAST_DIR == "" { tmpdir + "/yh-fast" } else { FAST_DIR }
+# 每个 worktree + 每个 CI run 独占一个快速目录：
+#   - 同机并发跑多个 run 时共用 /tmp/yh-fast 会让 stage-yh 互相覆盖（release 与
+#     分支门同时跑时出现过 selfhost 探针读错二进制）；
+#   - 同一台机器上的多个 git worktree 也共享 $TMPDIR，共用 yh-fast 会把 staged
+#     编译器与 darwin-sdk 软链指向别的工作区（实测 llvm-2 的 just test 跑到了
+#     llvm-3 的二进制上，报出与本仓库无关的语料失败）。用仓库路径短哈希区分。
+worktree_tag := `printf '%s' "{{root}}" | python3 -c "import hashlib,sys;print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:8])"`
+FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast-" + worktree_tag + (if run_id == "" { "" } else { "-" + run_id }))
+fast_dir := if FAST_DIR == "" { tmpdir + "/yh-fast-" + worktree_tag } else { FAST_DIR }
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
 yh_run := if fast_stage == "1" { absolute_path(fast_dir + "/yh") } else { yh_abs }
 run_work_flag := if fast_stage == "1" { "--workdir " + absolute_path(fast_dir + "/yh-run-work") } else { "" }

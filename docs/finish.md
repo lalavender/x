@@ -5,6 +5,28 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-27 修 llvm-host 缓存路径 bug + justfile 暂存目录隔离 + 滚种子
+
+- **`tools/llvm-darwin-host.py` / `tools/llvm-host.py`**：新增 `describe()`，把
+  `Path.relative_to(ROOT)` 换成「仓库内显示相对路径、仓库外显示绝对路径」。
+  闭包默认落在 `$YH_LLVM_CACHE`（`$HOME/Documents/x/tmp/llvm-migration`，仓库外），
+  原实现会在 `just llvm-host` 失败时抛 `ValueError: ... is not in the subpath of ...`，
+  把真正的原因（SDK/bridge 摘要不匹配）盖掉。身份记录里的
+  `selfhost_flags_file`/`selfhost_runtime_file`/`cxx_tbd` 也一并改用 `describe()`：
+  消费方按 `ROOT / value` 读取，绝对路径在 pathlib 下同样成立。
+- **`justfile` 暂存目录按 worktree 隔离**：`FAST_DIR` 缺省从 `$TMPDIR/yh-fast` 改为
+  `$TMPDIR/yh-fast-<仓库路径 sha256 前 8 位>`。同一台机器的多个 worktree 共享
+  `$TMPDIR`，原先会互相覆盖 staged 编译器与 `darwin-sdk` 软链——实测 llvm-2 的
+  `just test` 跑在 llvm-3 的二进制上（3 条 `pass/` 用例报「函数未使用」，
+  `darwin-sdk` 软链指向 llvm-3），排除后全绿。CI 的 `GITHUB_RUN_ID` 后缀保留。
+- **滚种子**：`just bootstrap`（复用本机固定闭包）冷编 → `just test`、`just
+  selfhost-native` 全绿（固定点 42 产物、cc4 自解析、CLI 冒烟、运行语料 360/361、
+  project cases 122/122）→ `just seed` 更新 `bin/yh-darwin-arm64`
+  （SHA-256 `0ac4586a4a8aa9ab8eca0e3bb500ffa7593443a308890c9e177b3d4ceb2e41ba`）。
+  随后用**新种子**重新冷编（`rm -rf compiler/.build && just`）并再跑
+  `just selfhost-native` 全绿——新种子自带用 `libs/cli` 解析的命令行与
+  `yh --help`/`yh <命令> --help`。
+
 ## 2026-10-27 CLI-R4：yh 帮助/诊断改由 libs/cli 生成
 
 - **删除手写 `usage()`**：`yh`、`yh <命令>` 的帮助与解析失败的 usage 全部由

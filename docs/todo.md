@@ -94,10 +94,11 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   help/version 控制结果写 stdout、退出 0）；解析失败打印「诊断 + cli usage」；
   `libs/cli` 为此新增 `HelpFormat.usage_prefix` 与 optional 位置参数单层括号；
   自举冒烟补 `--help` 断言，`cli-golden` 的文本类用例改宽松（10 条）。
-- [ ] **CLI-R5 收尾**：手写扫描已随 R1 删除、legacy 别名保留且不告警（已完成）；
-  `AGENTS.md`/`README`/设计文档已更新（已完成）。**剩余：滚种子 `just seed`**
-  （需在本机用正式种子跑通全门后执行；当前种子的闭包路径属于构建机，`just seed`
-  会拒绝带构建机路径的产物，需先 `just bootstrap` 或用发布种子复验）。
+- [x] **CLI-R5 收尾**（2026-10-27 完成）：手写扫描随 R1 删除、legacy 别名保留且
+  不告警；`AGENTS.md`/`README`/设计文档已更新；`just bootstrap` 后 `just test` +
+  `just selfhost-native` 全绿并 `just seed` 滚种子
+  （`bin/yh-darwin-arm64` SHA-256 `0ac4586a…`），随后用新种子重编再跑
+  `selfhost-native` 复验通过。
 
 ## 2026-10-21 重规划说明
 
