@@ -5,6 +5,39 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-26 B2-1/B2-2/B2-4：`proj` 收产物键、`link` 成模块、`module_build` 拆三
+
+- **B2-1 产物路径与缓存键 → `proj/proj_40_art.yh`（526 行，16 函数）**：FNV 哈希
+  （hash_init/fnv/hash_file/hash_hex）、目录布局（build_dir/sub_dir/
+  default_binary_path + 路径预算常量）、模块键与文件名（mod_tag/asm_stem_base/
+  asm_stems/module_obj_row）、接口路径（module_iface_*/module_ctiface_*）、open_out。
+  这几个符号原本被发射簇与链接簇共用，是 B2-2 的硬前置。保持「纯计算」：
+  不建目录、不调外部工具、不读 `BuildCtx`——会话后缀改成显式 `suffix` 参数，
+  `default_binary_path` 不再借 build 的 `append_bytes_np`。
+- **B2-2 链接簇 → `compiler/link/`（7 文件 3,531 行 + 新增 context.yh）**：
+  `link_cache`/`link_inputs`/`darwin_link`/`process`/`clock.*` 从 build 迁出，
+  `module build` → `module link`；`arch-check` 新增 `link: {gen, proj, backend}`
+  （**不得 import build**，否则成环）。为解掉三处反向依赖，把落点放在下层：
+  `pl_target_code_current` → `proj.target_code_current()`、
+  `append_bytes_np` → `gen.append_np()`、本层计时从 `BuildCtx` 移进
+  `link/context.yh`（`link.object_ns()/link.link_ns()/reset_timings()`，
+  argv0 由 `mb_set_argv0` 转交 `link.set_argv0`）。`project_link.yh` 仍留 build
+  （读 `toml_*` globals）。顺带修 `llvm_emit_single_file` 的形参 `link int`
+  → `do_link`（与模块名冲突）与 testkit 的 `build.realpath` → `link.realpath`。
+- **B2-4 `module_build` 拆三**：`module_build`（命令面与标准库装载 690）/
+  `module_emit`（单模块发射流水线 711）/ `module_cache`（缓存身份与依赖表 414），
+  同模块内搬家，无 import 变化。
+- **实测**：模块 14 → **15**、文件 122 → 126、代码 53,714 → 53,854；
+  `build` 10,289 → **6,348**（B2 的目标 ≈6,000 基本达成）、`link` 3,531、
+  `proj` 775 → 1,318；依赖边 46 → 51；`gen.G()` 保持 0；模块级 `let` 169 → 172
+  （`link` 三个会话量）。预算：`max_build_lines` 10,289→6,348、
+  新增 `max_link_lines` 3,600、`max_proj_lines` 1,318、`max_globals` 172。
+- **验证**（每一步都单独跑过双门）：`just test` 全绿；`just selfhost-native`
+  全绿——候选固定点 45 个产物逐字节一致、cc4 自解析 126 个源文件、项目验收 122/122。
+- **B2-3（`mb_link` 阶段化）未做**：676 行、20+ 处「4 连 free」错误分支，阶段间
+  共享 30+ 局部量，属本轮风险最高的一项，需要单独一轮完整双门与产物逐字节对照；
+  已在 [todo.md](todo.md) 立项并写明方案，B2-5（预算收口）随后。
+
 ## 2026-10-26 B1-3/B1-4：统计与会话状态独立，`gen.G()` 归零并关闭
 
 - **B1-3 统计独立成 `gen.CompileStats`**：25 个计数（`enabled`/`front_cache`/

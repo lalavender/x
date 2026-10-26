@@ -11,14 +11,14 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
 拆分、A3 `api` 调用面、A4a–A4d 状态收敛、A5 前端装配收敛、A6 `testkit` 抽出），
 证据与数字见 [finish.md](finish.md)。当前基线由 `make arch-check` 守护：
 
-| 指标 | 当前（B1 完成后，2026-10-26 实测） |
+| 指标 | 当前（B2-1/2/4 后，2026-10-26 实测） |
 |---|---|
-| 模块 / 文件 / 行数 | **14 / 122 / 53,714**（`proj` 775 + `ast` 3,463 + `lower` 5,835） |
+| 模块 / 文件 / 行数 | **15 / 126 / 53,854**（`build` 6,348 + `parse` 9,710 + `link` 3,531） |
 | `cmd` 占比 | 387 行，**0.7%** |
 | `gen.G()` 读点 | **0**（`G()` 已删除，`GenState` 降为 `gen` 模块私有） |
-| 模块级可变 `let` | 169 |
-| 容量安全追加项 | 45（下界） |
-| 最大模块 / 文件 / 函数 | build 10,289 / `module_build` 2,241 / `mb_link` 676 |
+| 模块级可变 `let` | 172 |
+| 容量安全追加项 | 46（下界） |
+| 最大模块 / 文件 / 函数 | parse 9,710 / `parse_expr` 2,042 / `mb_link` 676 |
 
 顺序按 [构建态对象化与 build 拆分重新规划](02-plan/yh-构建态对象化与build拆分重新规划-2026-10-25.md)
 修正为 **B3 → B1 → B2**：B3 与 B1/B2 零文件重叠、可并行，B1+B2 才「是同一件事的
@@ -45,11 +45,23 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   的函数改走 `gen.task()`，`parse/iface_ct_map` 四个 helper 与 llvmlower fixture
   的形参从 `*gen.GenState` 收窄成 `*gen.TaskCtx`；删除 `pub fn G()`，`GenState`
   降为模块私有。全仓 `gen.G()` 调用点 **0**（arch-check 预算同步改 0）。
-- [ ] **B2 拆分 `build`**：`build` 已 10,289 行、最大文件 `module_build` 2,241、
-  最大函数 `mb_link` 674。前置有两条硬约束：链接簇依赖发射簇的 6 个产物路径/键
-  符号（须先抽进 `proj` 的 art 子簇），`project_link` 读 `toml_*` 模块级 globals
-  （不能进 `link`，否则 `link → build` 成环）。顺序：art（B2-1）→ `link`（B2-2）→
-  `mb_link` 阶段化（B2-3）→ `module_build` 拆 3 文件（B2-4）→ 预算收口（B2-5）。
+- [x] **B2-1 产物路径与键（art）抽进 `proj`**（2026-10-26 完成）：哈希原语、
+  构建目录布局、模块标记/对象名词干、对象与接口路径共 16 个函数 → `proj/proj_40_art.yh`；
+  链接簇不再引用 `mb_mod_tag`/`mb_module_obj_row`/`mb_fnv`（B2-2 的硬前置）。
+- [x] **B2-2 链接簇拆成 `link` 模块**（2026-10-26 完成）：`link_cache`/
+  `link_inputs`/`darwin_link`/`process`/`clock.*` 7 文件迁入 `compiler/link/`，
+  新增 `link/context.yh` 持有 argv0 与本层计时；`pl_target_code_current` →
+  `proj.target_code_current`、`append_bytes_np` → `gen.append_np`。
+  模块 14 → 15，`build` 9,820 → 6,315、`link` 3,531；`link → build` 不存在。
+  `project_link.yh` 仍留 build（读 `toml_*` globals）。
+- [x] **B2-4 `module_build` 拆 3 文件**（2026-10-26 完成）：`module_build`（命令面
+  690）、`module_emit`（发射流水线 711）、`module_cache`（缓存键/依赖表 414）。
+- [ ] **B2-3 `mb_link` 阶段化**（唯一剩余）：676 行、20+ 处「4 连 free」错误分支。
+  方案：`LinkPlan`/`LinkArgs` 收 30+ 局部量 → 5 个 ≤160 行阶段
+  （prepare/objects/args/exec/publish）+ 统一释放；验收 `max_function_lines`
+  ≤260，且同一输入下 `obj/` 与二进制逐字节不变。**风险最高的一项**：
+  阶段间共享量多，漏一个会静默用默认值；需要单独一轮完整双门验证。
+- [ ] **B2-5 预算收口**：B2-3 完成后把实测值写回 `BUDGETS` 并补 finish 记录。
 - [ ] **NP3 受检契约与 lowering 解耦**（2026-10-26 定位决定后唯一保留的 NP 阶段）：
   按[方案 §6](02-plan/yh-Nanopass风格优化架构实施方案.md) 收口——封存
   CheckedFunction 的绑定/类型/符号/调用事实，生命周期由任务持有，不再由 lowering
