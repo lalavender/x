@@ -8,6 +8,25 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-10-28 0.0.11-rc.2 发布完成（含两处既有回归修复）
+
+- **发布**：tag `0.0.11-rc.2` → Gitea `release.yml` run 176 三端全绿后 publish 成功：
+  <https://github.com/lalavender/x/releases/tag/0.0.11-rc.2>（prerelease）。
+  资产：darwin-arm64 23,680,755 B、linux-arm64 40,680,913 B、linux-x86_64 40,719,472 B
+  + 各自 `.sha256`（publish 阶段校验远端大小与本地一致）。
+- **首发失败与修复（两处既有回归）**：
+  1. `test-llvm-darwin` 的 RB5 位级可复现失败——B2-3 拆 `LinkPlan` 时，Mach-O 的
+     暂存子目录（`<dir>/.yh-tmp.<pid>/<basename>`，让 codesign identifier 只取
+     basename）随后被 ELF 的 `<out>.yh-tmp.<pid>` 无条件覆盖，pid 重回 identifier。
+     修复：该覆盖只在 `use_macho == 0` 时执行。
+  2. linux 两个 job 死在 `justfile` 的裸 `unexport YH_BUILD_CACHE`——容器内 Ubuntu
+     just 1.21 解析失败；改成 `export YH_BUILD_CACHE := ""`（空值对编译器等价于未设置，
+     已在 `yh-ci:ubuntu24` 镜像里 `just --list` 验证）。
+- **发布二进制验收**：`rm -rf bin && just fetch-seed` 取回 rc.2 种子
+  （sha256 `5a9735c9…bc69c`）→ `just` 构建通过 → `just test` 133 passed/0 failed →
+  `just selfhost-native` 全绿（48 产物固定点、129 文件自解析、124/124）。
+- **分支**：`llvm`（默认，含本次修复）已推送；`arm64`/`main` 保留；无临时分支。
+
 ## 2026-10-28 修复 RB5 回归（Darwin 产物位级可复现）
 
 - **症状**：`just test-llvm-darwin` 在 `llvm-darwin-link.py` 的 RB5 断言失败

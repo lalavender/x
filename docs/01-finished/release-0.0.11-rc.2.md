@@ -100,6 +100,23 @@ rc.2 第一次打 tag 时三端全红，两处都是**既有回归**，已在本
 - 专项门：`darwin-dead-strip.py` 4/4、`opt-level.py` 4/4、`size-report` 比值 1.063 ≤ 1.2、
   `llvm-function-cache.py` O0/O2 六场景全绿（含损坏记录仍判 miss）。
 
+## 发布结果（2026-10-28）
+
+- Release：<https://github.com/lalavender/x/releases/tag/0.0.11-rc.2>（prerelease）
+- 三端资产（`release.yml` run 176，三端 job 全绿后 publish 成功）：
+
+| 资产 | 大小 | SHA-256 |
+| --- | --- | --- |
+| `yh-0.0.11-rc.2-darwin-arm64.tar.gz` | 23,680,755 B | `5a9735c9996aec6e…c93bc69c`（内含 `yh-darwin-arm64`） |
+| `yh-0.0.11-rc.2-linux-arm64.tar.gz` | 40,680,913 B | `4535fcaf98430479…b9343e7c2b` |
+| `yh-0.0.11-rc.2-linux-x86_64.tar.gz` | 40,719,472 B | `e21eb1b3b7aa8c41…41db5d42` |
+
+- **发布二进制验收**（按发版流程，`rm -rf bin && just fetch-seed` 取回 rc.2 种子
+  `yh-darwin-arm64` sha256 `5a9735c9…bc69c`）：`just` 用该种子构建通过、
+  `just test` **133 passed / 0 failed**、`just selfhost-native` 全绿
+  （48 产物固定点、129 文件自解析、124/124）。
+- 种子链：`0.0.10` → `0.0.11-rc.1` → **`0.0.11-rc.2`**（下一版 rc 以此为种子）。
+
 ## 平台与资产
 
 - 三端资产由 `release.yml` 构建：`darwin-arm64`、`linux-arm64`、`linux-x86_64`
