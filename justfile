@@ -101,9 +101,11 @@ modcheck_work_flag := if fast_stage == "1" { "--workdir " + absolute_path(fast_d
 # 文件仍在 compiler/.build，缓存位置不改变产物位置。
 BUILD_CACHE := env_var_or_default("YH_BUILD_CACHE", "")
 build_cache := if BUILD_CACHE == "" { "" } else { absolute_path(BUILD_CACHE) }
-# 门禁脚本按项目内 .build 布局断言，统一在本 justfile 内剥掉该变量；
+# 门禁脚本按项目内 .build 布局断言，统一在本 justfile 内清空该变量；
 # 需要缓存的 build/dev 再显式传给编译器。
-unexport YH_BUILD_CACHE
+# 用 `export … := ""` 而不是裸 `unexport`：空值对编译器等价于未设置（olen==0 走缺省），
+# 而容器内的 Ubuntu just 不认裸 `unexport`（release rc.2 的 linux job 就死在这一行）。
+export YH_BUILD_CACHE := ""
 
 # SELFHOST_WORKDIR/SELFHOST_KEEP 供 Release CI 保留 cc4 自举候选：
 #   just selfhost-native SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
