@@ -8,6 +8,20 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-10-28 修复 RB5 回归（Darwin 产物位级可复现）
+
+- **症状**：`just test-llvm-darwin` 在 `llvm-darwin-link.py` 的 RB5 断言失败
+  （「同一源码重复链接的 Darwin 可执行文件不可位级复现」），release rc.2 三端全红。
+- **根因**：B2-3 把 `mb_link` 拆成 `LinkPlan` 阶段时，`mb_link_prepare` 先按 RB5
+  算出 Mach-O 暂存子目录 `p.link_tmp`（`<dir>/.yh-tmp.<pid>/<basename>`，identifier
+  只取 basename），紧接着**又无条件**用 ELF 的 `<out>.yh-tmp.<pid>` 覆盖了一次，
+  RB5 的子目录方案被冲掉，identifier 重新带上 pid。
+- **修复**：把那段覆盖包进 `if (p.use_macho == 0)`（只给 ELF 用），Mach-O 沿用
+  `mb_macho_link_stage` 的结果；`arch-check` 预算 link 3758 → 3763。
+- **验证**：`llvm-darwin-link.py` 通过（22 项 PASS）、`just test-llvm-darwin` 全绿、
+  `just test` 133 passed/0 failed、`just selfhost-native` 全绿（48 产物固定点、
+  129 文件自解析、124/124）。
+
 ## 2026-10-28 0.0.11-rc.2 准备（发布说明 + 全门复核）
 
 - **发布说明**：新增 `docs/01-finished/release-0.0.11-rc.2.md`，覆盖 rc.1 之后的
