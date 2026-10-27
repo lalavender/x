@@ -603,6 +603,40 @@ pub fn mb_macho_tmp_discard(stage int, dir *u8, file *char) void {
     if (stage != 0 && dir != 0 && dir[0] != 0) { rmdir((&dir[0]).to_type(*char)) }
 }
 
+// mb_darwin_strip_enabled：是否给 ld64.lld 加 -x（剥离局部符号表，缺省关）。
+// 只用于 release 打包：删掉局部符号表项（不是代码），实测再省约 3.6%；
+// `YH_LINK_STRIP=1/on/true/yes` 打开。
+fn mb_darwin_strip_enabled() int {
+    let off int = -1
+    let olen int = 0
+    if (proj.env_fetch("YH_LINK_STRIP", &off, &olen) != 0 || olen == 0) { return 0 }
+    let first char = gen.np_cstr(off)[0]
+    if (first == '1' || first == 'y' || first == 'Y' || first == 't' || first == 'T') {
+        return 1
+    }
+    return 0
+}
+
+// mb_darwin_dead_strip_enabled：是否给 ld64.lld 加 -dead_strip（缺省开启）。
+//
+// 缺省开：链接后按符号可达性回收未引用的 stdlib 函数与字符串字面量；
+// 否则「整模块一个对象」的链接粒度会让每个用 fmt 的程序背上整个
+// string/os/sys 闭包（J6-L1 实测 hello 级程序 155,872 B → 89,632 B）。
+// `YH_LINK_DEAD_STRIP=0/off/no/false`（只看首字符 0/n/N/f/F）关闭，用于对照与回退。
+fn mb_darwin_dead_strip_enabled() int {
+    let off int = -1
+    let olen int = 0
+    if (proj.env_fetch("YH_LINK_DEAD_STRIP", &off, &olen) != 0 || olen == 0) {
+        return 1
+    }
+    let first char = gen.np_cstr(off)[0]
+    if (first == '0' || first == 'n' || first == 'N'
+        || first == 'f' || first == 'F') {
+        return 0
+    }
+    return 1
+}
+
 // mb_macho_link_prefix：给单文件与项目链接写入一致的 ld64.lld 固定参数。
 // output 必须是调用方持有的临时文件名，成功后由父进程验证并原子发布。
 fn mb_macho_link_prefix(argv **char, output *char) int {
@@ -628,6 +662,13 @@ fn mb_macho_link_prefix(argv **char, output *char) int {
     argv[count] = "-syslibroot"; count += 1
     argv[count] = sdk_root; count += 1
     argv[count] = "-pie"; count += 1
+    // J6-L1/L4：死代码回收与（可选）局部符号表剥离；两者都参与链接键。
+    if (mb_darwin_dead_strip_enabled() != 0) {
+        argv[count] = "-dead_strip"; count += 1
+    }
+    if (mb_darwin_strip_enabled() != 0) {
+        argv[count] = "-x"; count += 1
+    }
     argv[count] = "-adhoc_codesign"; count += 1
     argv[count] = "-o"; count += 1
     argv[count] = output; count += 1
@@ -861,6 +902,9 @@ fn mb_hash_macho_identity(hash *u64, projects *int,
     let sdk_root *char = cmd_darwin_sdk_root()
     let sdk_identity *char = cmd_darwin_sdk_identity()
     let min_os *char = cmd_darwin_min_os()
+    // 链接参数里由环境控制的两项也进键：-dead_strip 缺省开、-x 缺省关。
+    proj.fnv(hash, mb_darwin_dead_strip_enabled().to_type(u8))
+    proj.fnv(hash, mb_darwin_strip_enabled().to_type(u8))
     if (identity == 0 || identity[0] == 0 || sdk_root == 0
         || sdk_identity == 0 || min_os == 0) {
         return gen.fail("当前编译器缺少有效的 Darwin LLVM 链接身份")

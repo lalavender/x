@@ -255,6 +255,38 @@ fn llvm_cast(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, next *int) v
     }
 }
 
+// llvm_alloca_inst：发射一条字节分配（i8 数组形态，对齐由 lowering 的源布局给出）。
+// 只在 llvm_function_allocas 里调用：所有 ALLOCA 统一在入口块发射一次。
+fn llvm_alloca_inst(inst *ir.IRInst, out *LLVMOutput) void {
+    llvm_text(out, "  "); llvm_value(out, inst.result_id)
+    llvm_text(out, " = alloca i8, i64 "); llvm_number(out, inst.imm.to_type(u64))
+    llvm_text(out, ", align "); llvm_number(out, inst.aux.to_type(u64))
+    llvm_byte(out, '\n')
+}
+
+// llvm_function_allocas：把全函数的 ALLOCA 统一提到入口块发射。
+//
+// lowering 在调用点为聚合临时就地发 ALLOCA（聚合实参副本、结构体返回值槽、
+// 变参打包、切片字面量后备数组）。若这些指令留在循环体块里，每次迭代都会
+// 再分配一份栈空间且不会回收，几十万次迭代后栈溢出。yh 的 ALLOCA 都是
+// **常量大小、按调用期存活**的临时对象，提升到入口块后每个槽位只分发一次、
+// 跨迭代复用，语义不变且栈占用有上界。
+fn llvm_function_allocas(function *ir.IRModuleFunction, out *LLVMOutput) void {
+    let b int = 0
+    for b < function.body.block_count {
+        let block ir.IRBlock = function.body.blocks[b]
+        let i int = 0
+        for i < block.inst_count {
+            let inst ir.IRInst = function.body.insts[block.first_inst + i]
+            if (inst.op == ir.IR_OP_ALLOCA) {
+                llvm_alloca_inst(&inst, out)
+            }
+            i += 1
+        }
+        b += 1
+    }
+}
+
 // llvm_instruction：发射已支持的标量/内存指令；unit 提供 GLOB_ADDR 的稳定模块逻辑名。
 // 预检排除尚未支持的聚合值，未知操作不能静默忽略。
 fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
@@ -273,11 +305,8 @@ fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
         return
     }
     if (inst.op == ir.IR_OP_ALLOCA) {
-        // 字节分配：统一按 i8 数组发射，对齐由 lowering 的源布局给出。
-        llvm_text(out, "  "); llvm_value(out, inst.result_id)
-        llvm_text(out, " = alloca i8, i64 "); llvm_number(out, inst.imm.to_type(u64))
-        llvm_text(out, ", align "); llvm_number(out, inst.aux.to_type(u64))
-        llvm_byte(out, '\n')
+        // ALLOCA 已由 llvm_function_allocas 统一在入口块发射（避免循环内就地
+        // alloca 造成栈随迭代增长）；这里按位置跳过，不能重复发射。
         return
     }
     if (inst.op == ir.IR_OP_GEP) {
@@ -568,19 +597,40 @@ fn llvm_function(unit *ir.IRModule, function *ir.IRModuleFunction, out *LLVMOutp
     let map int = llvm_map(out, symbol.source, symbol.offset, function.symbol)
     llvm_text(out, "define ")
     if (symbol.linkage == ir.IR_MODULE_LINK_PRIVATE) { llvm_text(out, "internal ") }
-    llvm_signature(unit, &symbol, out, 1); llvm_text(out, " {\n"); llvm_map_end(out, map)
+    llvm_signature(unit, &symbol, out, 1)
+    // ELF：每函数独立 section，供链接期 --gc-sections 逐函数回收。
+    if (llvm_elf_sections(unit) != 0) {
+        llvm_text(out, " section \"")
+        llvm_section_name(out, ".text.", symbol.name)
+        llvm_text(out, "\"")
+    }
+    llvm_text(out, " {\n"); llvm_map_end(out, map)
     let next int = 0; let b int = 0
     for b < function.body.block_count {
         let block ir.IRBlock = function.body.blocks[b]
         llvm_byte(out, 'b'); llvm_number(out, b.to_type(u64)); llvm_text(out, ":\n")
+        // 入口块要先把全函数 ALLOCA 一次发完，后续块内不再发；但 LLVM 要求
+        // PHI 聚在块首，所以插入点取入口块的前导 PHI 之后（无 PHI 时即块首）。
+        let phi_end int = 0
+        if (b == 0) {
+            for phi_end < block.inst_count {
+                if (function.body.insts[block.first_inst + phi_end].op != ir.IR_OP_PHI) {
+                    break
+                }
+                phi_end += 1
+            }
+        }
         let i int = 0
         for i < block.inst_count {
+            if (b == 0 && i == phi_end) { llvm_function_allocas(function, out) }
             let index int = block.first_inst + i
             let loc ir.IRModuleLoc = function.locs[index]
             map = llvm_map(out, loc.source, loc.offset, function.symbol)
             llvm_instruction(unit, &symbol, out, &function.body, &function.body.insts[index], &next)
             llvm_map_end(out, map); i += 1
         }
+        // 入口块只有 PHI（或为空）时，插入点落在指令循环之后。
+        if (b == 0 && phi_end >= block.inst_count) { llvm_function_allocas(function, out) }
         map = llvm_map(out, symbol.source, symbol.offset, function.symbol)
         llvm_terminator(unit, &symbol, out, &function.body, &block, &next); llvm_map_end(out, map)
         b += 1

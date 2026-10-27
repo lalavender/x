@@ -72,8 +72,8 @@ BUDGETS = {
     "max_testkit_lines": 1586,     # testkit（YT2d-3 同项目测试锁 +37；B1-1 迁表读点后净 -14）
     "max_build_lines": 6647,      # build（B1/B2 拆分口径；+232 来自合入 0.0.11-rc 线的
                                   # UF1 unused_function.yh，见 finish.md 2026-10-28）
-    "max_link_lines": 3711,      # link（B2-2 新建 + B2-3 mb_link 阶段化 LinkPlan 后 3,657）
-    "max_proj_lines": 1353,        # proj（B1-1 表/路径 + B2-1 产物键 + YH_BUILD_CACHE 缓存根）
+    "max_link_lines": 3758,      # link（B2-2 新建 + B2-3 mb_link 阶段化 LinkPlan 后 3,657）
+    "max_proj_lines": 1384,        # proj（B1-1 表/路径 + B2-1 产物键 + YH_BUILD_CACHE 缓存根）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
     "max_globals": 172,
     "max_g_call_sites": 0,      # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到

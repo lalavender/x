@@ -174,6 +174,8 @@ runtime_test := if llvm_host == "darwin-aarch64" { "python3 " + root + "/tests/s
 cache_test := if llvm_host == "darwin-aarch64" { "python3 " + root + "/tests/selfhost/llvm-darwin-cache.py --compiler-path " + yh } else if llvm_host == "linux-x86_64" { "python3 " + root + "/tests/selfhost/llvm-cache.py --compiler-path " + yh } else if llvm_host == "linux-aarch64" { "python3 " + root + "/tests/selfhost/llvm-cache.py --compiler-path " + yh + " --target aarch64-unknown-linux-gnu" } else { "python3 " + root + "/tests/selfhost/link-cache.py --compiler-path " + yh }
 modcheck_flags := if llvm_host == "" { "" } else { "--backend llvm" }
 selfhost_flags_test := if llvm_host == "darwin-aarch64" { "python3 " + root + "/tests/selfhost/llvm-darwin-selfhost-flags.py --compiler-path " + yh_run } else { "true" }
+# 链接死代码回收门（J6-L1）：Darwin 缺省 -dead_strip 生效、可回退、进链接键。
+dead_strip_test := if llvm_host == "darwin-aarch64" { "python3 " + root + "/tests/selfhost/darwin-dead-strip.py --compiler-path " + yh_run } else { "true" }
 
 # 默认目标：源比 yh 新时冷编，否则什么都不做（等价旧 make 默认目标）。
 default: _ensure_built
@@ -271,6 +273,7 @@ test: stage-yh
     python3 "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" {{ run_work_flag }}
     python3 "{{ root }}/tests/modules/test-check.py" --compiler-path "{{ yh_run }}"
     python3 "{{ root }}/tests/build-cache/check.py" --compiler-path "{{ yh_run }}"
+    python3 "{{ root }}/tests/modules/opt-level.py" --compiler-path "{{ yh_run }}" --workdir "{{ root }}/tmp/dep-opt"
     @cd "{{ root }}/libs" && "{{ yh_run }}" test --timeout 60
     python3 "{{ root }}/tools/compiler-tests.py" --compiler-path "{{ yh_run }}"
     python3 "{{ root }}/tests/fmt/interp.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/fmt-interp"
@@ -286,6 +289,10 @@ quick: stage-yh
 
 # test-all：旧入口别名，等价 test。
 test-all: test
+
+# size-report：产物体积报告（J6 度量物，软门；不进门禁）。
+size-report: stage-yh
+    python3 "{{ root }}/tools/size-report.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/size-report"
 
 # test-toml：TOML 测试（API/所有权/资源/文件断言已迁入 libs/toml/99_tests.yh）。
 test-toml: stage-yh
@@ -371,6 +378,7 @@ selfhost-native: stage-yh
     python3 "{{ root }}/tests/selfhost/lex-stats.py" --compiler-path "{{ yh_run }}"
     {{ runtime_test }}
     {{ selfhost_flags_test }}
+    {{ dead_strip_test }}
     python3 "{{ root }}/tests/selfhost/check-command.py" --compiler-path "{{ yh_run }}"
     python3 "{{ root }}/tests/selfhost/llvm-architecture.py" --compiler-path "{{ yh_run }}"
     python3 "{{ root }}/tests/selfhost/llvm-function-cache.py" --compiler-path "{{ yh_run }}"

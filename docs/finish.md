@@ -948,6 +948,118 @@ cases 122/122）。
   `lex-stats` 会因仓库根 `yh` 能发现 `libs/` 标准库而多扫 101 个文件（期望 6 的用例
   按「暂存副本」口径写的），该差异在 B1-1 之前的 HEAD 上同样存在，不是本次回归。
 
+## 2026-10-27 J6 收尾：Linux section 化 + release 剥离 + 体积度量
+
+- **L2（Linux 死代码回收）**：`backend/llvm_module.yh` 新增
+  `llvm_elf_sections`（目标 key 1/2 = ELF）与 `llvm_section_name`（`$`→`_S`、
+  `.`→`_D`）；ELF 下每个函数发 `section ".text.<mangled>"`、每个全局发
+  `.rodata./.data.` 独立 section；`build/link_cache.yh` 对 Linux 目标追加
+  `--gc-sections`（内嵌 lld）/`-Wl,--gc-sections`（系统 cc）。Darwin 不变（实测
+  Darwin `.ll` 无新增 section，Mach-O 按符号原子回收）。验证：`--target
+  aarch64-unknown-linux-gnu --emit-llvm` 的 ELF IR 中 fmt=61 / io=32 条函数
+  section，ELF 对象节表出现 `.text.main`/`.text.memcpy`/`.text.memset`。本机无
+  Linux 链接环境（`container run` 启动即报错），端到端收益留给 Linux CI。
+- **L4（release 剥离与自身度量）**：`YH_LINK_STRIP=1` 给 ld64.lld 加 `-x`
+  （缺省关，计入链接键）；fmt hello `53,424 → 52,576 B（−1.6%）`。编译器自身：
+  cc2（由种子链接）`70,815,568 B`/93,995 符号 → cc3/cc4（由新编译器链接）
+  `65,112,448 B`/79,168 符号，**−8.1%**——`-dead_strip` 对自举产物确实有效
+  （之前用 `just build` 对比得到「无变化」是因为那一步由种子链接）。
+  拆 fmt 模块仍不做（与「fmt 不扩 API」边界冲突，且已无必要）。
+- **度量物**：`tests/perf/fmt-size/{printf-hello,fmt-hello}` 两个最小项目 +
+  `tools/size-report.py`（Darwin 读 `size -m`、Linux 读 `size -A`，输出表格或
+  JSON；`--budget-ratio` 软门，`--strict` 才失败），入口 `just size-report`。
+  当前读数：printf `50,256 B` / fmt `53,424 B`，比值 **1.063**（上限 1.2）。
+- **预算**：`tools/arch-check.py` 的 `max_build_lines` 10878 → 10904（L2/L4 +26）。
+- **验证**：`just test` 全绿；`SELFHOST_KEEP=1 FAST_DIR=<repo>/tmp/yh-fast just
+  selfhost-native` 退出码 0（cc3→cc4 固定点、全量语料、新门、122/122 项目
+  用例）。**注意**：共享 `$TMPDIR/yh-fast` 会被并发会话覆盖（曾因一次陈旧
+  分期编译器报出不属于本树的 `函数未使用` 诊断），跑主门建议把 `FAST_DIR`
+  指到仓库内。
+- **滚种子**：`just seed` 已把验证过的 `yh` 写入 `bin/yh-darwin-arm64`
+  （70,404,016 B，SHA-256 `34511ff2…`）；新种子已自测：能编出 hello、能
+  `build compiler/` 全项目。
+
+## 2026-10-27 依赖项目单独 O2：fmt 版产物降到 71 KB（J6-L3）
+
+- **背景**：L1 的 `-dead_strip` 之后 fmt 版 hello 仍有 89,632 B，`__text` 35,732。
+  可达集是真实调用链（`print`→`output_values`→`append_value`→浮点/spec 分支→
+  `string`/`io`/`os`/`sys`），大部分代码在 O0 下逐条发射。
+- **改动**：新增 `pj_module_opt_level(m)`（`build/project_state.yh`）：依赖/
+  标准库项目取 2、根项目沿用命令行值；`YH_DEP_OPT=0` 回退。接入三处，保证
+  开↔关不会复用旧产物：
+  1. 对象发射：`llvm_pipeline.yh` 的 `llvm_emit_publish` / `llvm_emit_module_to(_cached)`
+     新增 `opt_level` 参数，由 `module_worker.yh` 传 `pj_module_opt_level(m)`，
+     单文件路径仍传 `gs.c_opt_level`；
+  2. 模块 manifest 键与函数 IR 环境键改用同一判定（`module_build.yh`、
+     `function_ir_cache.yh`）。
+- **效果**（macOS/arm64）：fmt hello 项目 `89,632 → 71,008 B`（`__text`
+  35,732 → 12,516）；只用 fmt 少量叶子的项目 53,696 B，已经落回 printf 版
+  50,256 B 的同一档（差 3.4 KB，主要是 `__DATA_CONST`/`__DATA` 两页未变）。
+  libs 作为根项目跑 `just libs-test` 时仍为 O0，`libs-test-o2` 仍全 O2。
+- **新门**：`tests/modules/opt-level.py`（已接 `just test`）：依赖默认比
+  `YH_DEP_OPT=0` 小、两种配置行为一致、关闭→缺省不复用旧对象、无依赖项目
+  两种配置产物体积一致（证明开关不碰根项目）。
+- **顺带修复（工具链）**：`tools/llvm-darwin-host.py` 的记录路径改为
+  `recorded_path`/`resolve_recorded`——当 `YH_LLVM_CACHE` 指向仓库外（justfile
+  导出外部缓存根）时，`relative_to(ROOT)` 会抛 `ValueError` 使
+  `just selfhost-native` 在闭包检测阶段直接失败。现在仓库内仍写相对路径，
+  仓库外写绝对路径，读取方统一还原。
+- **架构预算**：`max_build_lines` 10846 → 10878（本项 +32），
+  `max_g_call_sites` 165 → 166（`pj_module_opt_level` 读模块表 +1）。
+- **验证**：`just`（种子冷编）→ `just test` 全层绿（含新门）→
+  `just selfhost-native` 退出码 0（cc3→cc4 固定点、全量语料、122/122 项目用例）。
+- **后续**：L2（Linux `--gc-sections` + 函数级 section）、L4（`-x`、编译器
+  自身 dead_strip、`fmt` 可达面瘦身）仍在 J6 下。
+
+## 2026-10-27 Darwin 链接缺省 -dead_strip：fmt 版产物体积回到 printf 基线（J6-L1）
+
+- **背景**：yh 的链接粒度是「一个模块一个对象」。没有死代码回收时，用 fmt
+  打印的程序会把整个 string/os/sys 闭包中未引用的函数与字符串字面量带进
+  产物：hello 级程序 O0 实测 155,888 B / `__text` 85,032，而 printf 单文件
+  只有 50,256 B / 1,872——这是「输出全部走 fmt」的硬成本。
+- **改动**：`compiler/build/darwin_link.yh` 新增
+  `mb_darwin_dead_strip_enabled`（缺省开，`YH_LINK_DEAD_STRIP=0/off/no/false`
+  关闭）与 `mb_macho_dead_strip_flag`；`mb_macho_link_prefix` 在 `-adhoc_codesign`
+  之后追加 `-dead_strip`；`mb_hash_macho_identity` 把开关状态计入链接键，
+  避免关→开或开→关命中旧链接缓存（argv 容量 20 已够：14 + 1 + 2 参数）。
+- **效果**：fmt 版 hello 155,888 → **89,632 B**（−42.5%），`__text` 85,032 →
+  38,432，`__stubs` 504 → 72；未引用的 `utf8_next`/`replace_all`/`change_dir`
+  等符号不再进入产物。再叠 O2 可到 54,616 B（接近 printf 的 50,256 B，留作 L3）。
+- **新门**：`tests/selfhost/darwin-dead-strip.py`（已接 `just selfhost-native`
+  的 `dead_strip_test`）：① 缺省链接回收未引用函数符号；②
+  `YH_LINK_DEAD_STRIP=0` 符号重新出现且产物可运行；③ 两种配置 stdout 一致；
+  ④ 先构建关闭态再构建缺省态仍为已回收，证明开关进入链接键。
+- **架构预算**：`tools/arch-check.py` 的 `max_build_lines` 10807 → 10846
+  （本项在 build 模块新增 39 行：判定与取参两个小函数 + 两处接线）。
+- **验证**：`just`（种子冷编）→ `just test`（全层绿，含 arch-check 自测 2/2）→
+  `just selfhost-native` 退出码 0（cc3→cc4 固定点、全量语料、新门、122/122
+  项目用例）。
+- **后续**：L2（Linux `--gc-sections` + 函数级 section）、L3（stdlib 单 O2）、
+  L4（`-x` / 编译器自身 dead_strip）仍在 `docs/todo.md` J6 下待做。
+
+## 2026-10-27 修循环内调用期 ALLOCA 栈泄漏（I4-7）
+
+- **缺陷**：聚合实参副本、结构体返回值槽、变参打包与切片后备数组的 ALLOCA
+  由 lowering 在**调用点所在块**发出。这类调用落在循环体里时，每次迭代都会
+  再分配一份栈空间且不回收，累积到 main 线程 8 MB 栈后段错误；与 `-O0/-O2`
+  无关，也不是 fmt 的问题。纯 yh 最小复现：
+  `for i < 600000 { take([make_big(i), make_big(i)]) }`（56 字节结构体）在旧
+  编译器上约 3.7 万次迭代崩溃；同一形态的 `fmt.print([of_int(i), …])` 在 4 万
+  次迭代崩溃，恰好是「输出全部走 fmt」迁移的惯用写法，故列为迁移前置缺陷。
+- **修复**：`compiler/backend/llvm_scalar.yh` 新增 `llvm_function_allocas`，在
+  入口块一次性发射全函数 ALLOCA、原位置跳过（`llvm_instruction` 的 ALLOCA
+  分支改为不发射）；槽位跨迭代复用，栈占用变为常量级。`compiler/ir/ssa.yh`
+  的 `IR_OP_ALLOCA` 注释补上语义约束：常量大小、按调用期存活，不得表达按
+  迭代增长的存储。
+- **回归**：新增 `tests/yh-run/run/207-call-temp-stack-growth.yh`（60 万次迭代
+  + 聚合实参 + 切片字面量元素，红 → 绿）；`tmp/leak3.yh` 形态直接复现也转绿。
+- **验证**：`just`（种子冷编）→ `just test`（run 361/362，1 例平台跳过；fail
+  137/137；modules 与 libs 全绿）→ `just selfhost-native` 全绿（cc3→cc4 模块
+  固定点、全量语料、122/122 项目用例）。IR 复查：`fmt.print([...])` 主函数的
+  四条 ALLOCA 已全部落在 `b0`，循环块 `b3` 不再分配。
+- **后续**：产物体积的独立立项见 `docs/todo.md` J6（L1 `-dead_strip` → L2
+  Linux section 化 + `--gc-sections` → L3 stdlib O2）；种子未滚（需用户确认）。
+
 ## 2026-10-26 CI 去掉 ANTLR：参考语法门只在本地开发跑
 
 - **改动**：`.gitea/workflows/ci.yml` 删除 `antlr` job（原为 Apple container 内
