@@ -8,7 +8,7 @@
 #
 #   just                 源文件比 yh 新时冷编（等价旧 make 默认目标）
 #   just build           强制冷编
-#   just dev             增量构建（保留 compiler/.build）
+#   just dev             增量构建（保留 .build / BUILD_CACHE 缓存）
 #   just seed            滚种子：写入当前宿主平台种子并记录 SHA-256
 #   just test            三层回归（ANTLR + 编译器语法 + 运行语义）
 #   just quick           日常迭代门（ANTLR + 编译器语法语料，约 20s）
@@ -81,14 +81,29 @@ FAST_STAGE := env_var_or_default("FAST_STAGE", "1")
 fast_stage := if FAST_STAGE == "" { "1" } else { FAST_STAGE }
 tmpdir := if env_var_or_default("TMPDIR", "") == "" { "/tmp" } else { env_var_or_default("TMPDIR", "/tmp") }
 run_id := env_var_or_default("GITHUB_RUN_ID", "")
-# 每次 CI run 独占一个快速目录：同机并发跑多个 run 时共用 /tmp/yh-fast 会让
-# stage-yh 互相覆盖（release 与分支门同时跑时出现过 selfhost 探针读错二进制）。
-FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast" + (if run_id == "" { "" } else { "-" + run_id }))
-fast_dir := if FAST_DIR == "" { tmpdir + "/yh-fast" } else { FAST_DIR }
+# 每个 worktree + 每个 CI run 独占一个快速目录：
+#   - 同机并发跑多个 run 时共用 /tmp/yh-fast 会让 stage-yh 互相覆盖（release 与
+#     分支门同时跑时出现过 selfhost 探针读错二进制）；
+#   - 同一台机器上的多个 git worktree 也共享 $TMPDIR，共用 yh-fast 会把 staged
+#     编译器与 darwin-sdk 软链指向别的工作区（实测 llvm-2 的 just test 跑到了
+#     llvm-3 的二进制上，报出与本仓库无关的语料失败）。用仓库路径短哈希区分。
+worktree_tag := `printf '%s' "{{root}}" | python3 -c "import hashlib,sys;print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:8])"`
+FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast-" + worktree_tag + (if run_id == "" { "" } else { "-" + run_id }))
+fast_dir := if FAST_DIR == "" { tmpdir + "/yh-fast-" + worktree_tag } else { FAST_DIR }
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
 yh_run := if fast_stage == "1" { absolute_path(fast_dir + "/yh") } else { yh_abs }
 run_work_flag := if fast_stage == "1" { "--workdir " + absolute_path(fast_dir + "/yh-run-work") } else { "" }
 modcheck_work_flag := if fast_stage == "1" { "--workdir " + absolute_path(fast_dir + "/modcheck") } else { "" }
+
+# 构建缓存根（2026-10-28）：缺省用项目内 compiler/.build；显式 BUILD_CACHE
+# （或环境变量 YH_BUILD_CACHE）时，整套缓存树（targets/check 与 asm/obj/...）
+# 落到该目录。同一台机器的多个 worktree 各指一处即可互不覆盖；默认可执行
+# 文件仍在 compiler/.build，缓存位置不改变产物位置。
+BUILD_CACHE := env_var_or_default("YH_BUILD_CACHE", "")
+build_cache := if BUILD_CACHE == "" { "" } else { absolute_path(BUILD_CACHE) }
+# 门禁脚本按项目内 .build 布局断言，统一在本 justfile 内剥掉该变量；
+# 需要缓存的 build/dev 再显式传给编译器。
+unexport YH_BUILD_CACHE
 
 # SELFHOST_WORKDIR/SELFHOST_KEEP 供 Release CI 保留 cc4 自举候选：
 #   just selfhost-native SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
@@ -173,16 +188,17 @@ _prepare:
     @mkdir -p "{{ root }}/tmp"
     @if [ "{{ cache_root }}" != "{{ root }}/tmp/llvm-migration" ]; then ln -sfn "{{ cache_root }}" "{{ root }}/tmp/llvm-migration"; fi
 
-# build：强制冷编（清除 compiler/.build，从种子完整重编）。
+# build：强制冷编（清除 compiler/.build 与 BUILD_CACHE，从种子完整重编）。
 build: verify-seed _prepare
     rm -rf "{{ root }}/compiler/.build"
-    python3 "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
+    @if [ -n "{{ build_cache }}" ]; then rm -rf "{{ build_cache }}"; fi
+    YH_BUILD_CACHE="{{ build_cache }}" python3 "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
 
-# dev：开发迭代用增量构建。与 build 的差别是不删除 compiler/.build，
+# dev：开发迭代用增量构建。与 build 的差别是不删除 .build / BUILD_CACHE，
 # 让编译器自己的对象/IR 缓存命中未变模块；只用于本地迭代，
 # 不用于种子候选与固定点验收（那些必须冷编）。
 dev: verify-seed _prepare
-    python3 "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
+    YH_BUILD_CACHE="{{ build_cache }}" python3 "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
 
 # verify-seed：核对种子哈希（水合/复制损坏时尽早失败）。
 verify-seed:
@@ -254,6 +270,7 @@ test: stage-yh
     python3 "{{ root }}/tests/yh/check.py" --compiler --compiler-path "{{ yh_run }}"
     python3 "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" {{ run_work_flag }}
     python3 "{{ root }}/tests/modules/test-check.py" --compiler-path "{{ yh_run }}"
+    python3 "{{ root }}/tests/build-cache/check.py" --compiler-path "{{ yh_run }}"
     @cd "{{ root }}/libs" && "{{ yh_run }}" test --timeout 60
     python3 "{{ root }}/tools/compiler-tests.py" --compiler-path "{{ yh_run }}"
     python3 "{{ root }}/tests/fmt/interp.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/fmt-interp"
@@ -449,10 +466,11 @@ arch-check:
 test-arch-check:
     python3 "{{ root }}/tests/tools/arch-check/check.py"
 
-# clean：删除 yh 与编译器缓存（保留 tmp 下的 LLVM 闭包缓存）。
+# clean：删除 yh 与编译器缓存（含 BUILD_CACHE；保留 tmp 下的 LLVM 闭包缓存）。
 clean:
     rm -f "{{ yh }}"
     rm -rf "{{ root }}/compiler/.build" "{{ root }}/tmp/selfbuild-gate" "{{ root }}/tmp/selfhost" "{{ root }}/tmp/modcheck"
+    @if [ -n "{{ build_cache }}" ]; then rm -rf "{{ build_cache }}"; fi
 
 # help：列出全部可运行目标（等价 just --list）。
 help:
@@ -485,5 +503,5 @@ _ensure_built:
       if [ "$need" = 0 ] && [ -n "$(find compiler -maxdepth 2 -name '*.yh' -newer "$target" -print -quit)" ]; then need=1; fi
     fi
     if [ "$need" = 1 ]; then
-      exec just SEED="{{ seed }}" SEED_DEST="{{ seed_dest }}" YH_LLVM_HOST="{{ YH_LLVM_HOST }}" YH_LLVM_CACHE="{{ cache_root }}" build
+      exec just SEED="{{ seed }}" SEED_DEST="{{ seed_dest }}" YH_LLVM_HOST="{{ YH_LLVM_HOST }}" YH_LLVM_CACHE="{{ cache_root }}" YH_BUILD_CACHE="{{ build_cache }}" build
     fi

@@ -72,6 +72,60 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   所需全部能力并达固定点后，才允许移除失去用途的旧入口；R2b 的线程池/文件对象/
   增量验收另外完成。
 
+## yh 命令行用 cli 重写（CLI-R，2026-10-27 方案）
+
+方案见[用 cli 标准库重写 yh 命令行](02-plan/yh-CLI用cli标准库重写实施方案-2026-10-27.md)：
+声明与解析收进 `libs/cli`，删除 `driver.yh` 的手写扫描与逐行 `usage()`，新形态与
+现有调用面逐字节等价（`--emit-module` 内部协议豁免）。实施前需拍板方案 §8 的 5 条
+取舍（段标题中文、全局选项双位置、legacy 别名、裸 `yh` 退出码、`--filter` 单值）。
+
+- [x] **CLI-R0 cli 前置**（2026-10-27 完成）：`HelpFormat` 增加
+  `section_positional/options/commands` 段标题（空指针用英文默认），
+  `build_help_text` 改读字段；用例 51 → 52。
+- [x] **CLI-R1 金标工具**（2026-10-27 完成）：`tools/cli-golden.py`，36 条 argv
+  （正常/组合/单文件/错误四组），独立 fixture 冷跑 + 归一化比较；当前 36/36。
+- [x] **CLI-R1a 自举快照门扩展**（2026-10-27 完成）：`expected_artifacts`/
+  `expected_llvm_artifacts` 增 `follow_dependencies` 开关，新增 `dependency_artifacts()`
+  作为「允许出现但不要求」的集合，`snapshot_errors(..., allowed=)` 据此判多余产物；
+  `native-selfhost.py` 只要求本地模块齐全。背景：编译器 import 标准库后，种子构建会
+  额外发布 `iface/yh_libs-*.s.i/.s.ct` 与 `llvm/yh_libs-*.ll`。
+- [x] **CLI-R1b 标准库依赖机制**（2026-10-27 完成）：`compiler/project.toml` 用
+  `[dependencies] libs = {path = "../libs"}`，`cmdline` 用跨项目导入
+  `import libs.cli`（绑定名仍为 `cli`）；暂存目录里的二进制不再依赖默认标准库搜索。
+- [x] **CLI-R1c lowering 限制**（2026-10-27 绕过）：紧跟聚合 `let` 的结构体字段赋值会触发
+  「首片不支持此聚合初始化形态」；落地时把 `Value`/`Default` hoist 到局部并去掉多余的
+  `suppress_default()`。**建议另立项**在 lowering 侧支持该形态。
+- [x] **CLI-R1 骨架**（2026-10-27 完成）：`compiler/cmdline/`（`module cmdline`，
+  `CliRequest` + project/file 两个 parser + `inherit` 全局 parent）；`api_*` 改接收
+  请求结构，`build`/`testkit` 删除选项扫描；`driver.yh` 只做分派（main 307 行，
+  arch-check 登记 `cmdline -> libs`/`main -> cmdline`）。证据见方案 §12。
+- [ ] **CLI-R1d lowering 聚合初始化（常见但不复现，降级观察）**：CLI-R1 期间
+  `compiler/cmdline` 的声明代码曾报「首片不支持此聚合初始化形态」（
+  `lower/module_snapshot_lower_place.yh` 的 `checked_lower_aggregate_store` 返回非 0），
+  当时靠把 `Value`/`Default` 先 hoist 到局部绕过。2026-10-27 复查：用
+  `let spec cli.Argument = cli.option(...)` + `spec.default_value =
+  cli.suppress_default()`、嵌套 `cli.default_of(cli.value_i64(0))`、以及
+  `-o` + `dest` 的原始组合都无法在独立项目或 compiler 项目里复现（代码已改为
+  hoist 写法，且 `compiler/.build` 已冷清）。**暂不作为缺陷推进**：保留 hoist 作为
+  声明代码的推荐写法，若再次出现再按 lowering 缺陷立项并补最小用例。
+- [x] **CLI-R2 单文件形态迁移**（2026-10-27 随 R1 完成）：`--syntax-check`、
+  `--emit-asm`、`-o` 两种次序、`--emit-llvm` 全走 cli 结果，`n == 2 / n == 3`
+  的形态判断已删除（由 file parser + 模式位互斥表达）。
+- [x] **CLI-R3 项目命令迁移**（2026-10-27 随 R1 完成）：六个命令的选项扫描改由 cli
+  声明；`--link` 用 `append`、`--timeout` 用整型（范围在 driver 校验 1..3600）、
+  `-O0/-O2` 共用 `opt` dest 实现「最后出现者生效」（不是互斥组，保持旧语义）、
+  `--backend` 在 driver 校验取值；`api_*` 各函数改接收 `cmdline.CliRequest`。
+- [x] **CLI-R4 帮助与诊断收敛**（2026-10-27 完成）：删除手写 `usage()`；
+  `yh --help`/`yh <cmd> --help` 由 cli 生成（`用法: ` 前缀 + 中文段标题，
+  help/version 控制结果写 stdout、退出 0）；解析失败打印「诊断 + cli usage」；
+  `libs/cli` 为此新增 `HelpFormat.usage_prefix` 与 optional 位置参数单层括号；
+  自举冒烟补 `--help` 断言，`cli-golden` 的文本类用例改宽松（10 条）。
+- [x] **CLI-R5 收尾**（2026-10-27 完成）：手写扫描随 R1 删除、legacy 别名保留且
+  不告警；`AGENTS.md`/`README`/设计文档已更新；`just bootstrap` 后 `just test` +
+  `just selfhost-native` 全绿并 `just seed` 滚种子
+  （`bin/yh-darwin-arm64` SHA-256 `0ac4586a…`），随后用新种子重编再跑
+  `selfhost-native` 复验通过。
+
 ## 2026-10-21 重规划说明
 
 本轮按「LLVM 收尾完成 → 发布质量 → 标准库与工具链 → 后续任务 → 待决策」重排：
@@ -272,6 +326,34 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
   运行时依赖，完成 SYS5–SYS6 的消费者迁移、固定点与独立环境验收。
 - [ ] **E4 libc L0–L5**：按[分阶段候选方案](02-plan/yh-libc分阶段候选方案.md)
   推进，未授权全部实施。
+
+### cli 标准库复核遗留（2026-10-27）
+
+只读复核覆盖 `libs/cli` 生产代码 12 文件；已完成死代码清理、argparse 对齐批 1
+（语义：`set_default` 未声明 dest、位置 `optional` 默认值、槽 token 预留、
+`store_const` const 校验、位置参数 `required` 校验、默认值不参与 choices）与
+批 2（展示：choices `{a,b}`、`metavars`、槽 `{a,b} ...`/`title`/`description`/
+`metavar`、`boolean_optional` usage、`max_help_column`）、批 3（诊断：choices/子命令
+候选列表、`suggest_on_error` 覆盖 choices 与子命令、多余 token 全量列出）与
+CLI-B（`put_*` 短路契约、溢出 return resource_error）、CLI-D（构造器合并、诊断码
+常量、参数文件上限常量、测试助手复用 `libs/string`），见 [finish.md](finish.md)。
+以下为剩余项。
+
+- [ ] **CLI-C 文件与函数超规范**（2026-10-27 用户决定：**暂不拆文件**，后续再做）：
+  `help.yh` 1,685 行、`schema.yh` 1,067 行
+  （规范 500–1000）；>100 行的函数 4 个（`build_help_text`、`parse_layer`、
+  `add_argument_internal`、`build_usage_line`）。切分点已在分节注释里：`help.yh`
+  的拼接/转义/颜色/模板、`schema.yh` 的 `copy_*`/`check_freeze`；`MAX_HELP` 常量
+  应随其余容量常量回到 `cli.yh`。
+- [ ] **CLI-G 帮助宽度自动（依赖编译器先行）**：缺省固定 80（argparse 取终端宽度
+  −2）。2026-10-27 实测确认 libs 层做不了：Darwin 的 `ioctl` 是 C 变参入口，而
+  `@[extern]` 只支持定参，实参被放进寄存器导致 EFAULT（证据见
+  [finish.md](finish.md) 同日条目与 `libs/sys/30_file.darwin.yh` 的边界说明）。
+  2026-10-27 用户决定：**暂不动编译器，只保留本条记录**。
+  落地路径：1) 在 `compiler/backend/llvm_runtime.yh` 追加弱符号
+  `yh_terminal_columns()`（内部按正确变参 ABI 调 `ioctl(TIOCGWINSZ)`，两平台各自
+  请求号）；2) `libs/os` 加薄封装 `terminal_columns() int`；3) `HelpFormat.width = 0`
+  改「自动 = 列数 − 2，取不到回落 80」并补 pty 下的可复现门禁。
 
 ### NET/HTTP 网络与 HTTP 标准库（2026-10-24 决策完成；NET0–NET1 已交付，HTTP2–HTTP7 待实施）
 

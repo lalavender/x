@@ -39,6 +39,20 @@ class NotReady(RuntimeError):
     """固定 Darwin LLVM 宿主尚未准备好，可由 auto 模式回退。"""
 
 
+def describe(path):
+    """把路径显示为相对仓库的短形式；在仓库外（如 $YH_LLVM_CACHE）时返回绝对路径。
+
+    Darwin 闭包默认落在 $HOME/Documents/x/tmp/llvm-migration（仓库外），
+    此时 Path.relative_to(ROOT) 会抛 ValueError——身份记录与日志都必须能同时
+    服务「仓库内 tmp/」与「仓库外缓存根」两种布局。
+    """
+    path = Path(path)
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def digest(path):
     """分块计算桥、SDK 或可执行文件的 SHA-256。"""
     with Path(path).open("rb") as source:
@@ -63,7 +77,7 @@ def run(command, label, timeout=None):
     (directory / f"{label}.stderr").write_text(result.stderr, encoding="utf-8")
     if result.returncode:
         raise RuntimeError(f"{label} 失败（{result.returncode}）：{result.stderr[-3000:]}; "
-                           f"日志位于 {directory.relative_to(ROOT)}")
+                           f"日志位于 {describe(directory)}")
     return result
 
 
@@ -92,7 +106,7 @@ def write_selfhost_flags(record, directory=None):
     path = selfhost_flags_path(directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(selfhost_flags_text(record["selfhost_link_flags"]), encoding="utf-8")
-    record["selfhost_flags_file"] = str(path.relative_to(ROOT))
+    record["selfhost_flags_file"] = describe(path)
     record["selfhost_flags_sha256"] = digest(path)
     runtime = [flag for flag in record["selfhost_link_flags"]
                if flag != "-force_load" and not flag.startswith("/")]
@@ -102,7 +116,7 @@ def write_selfhost_flags(record, directory=None):
         runtime = [flag for flag in runtime if flag != "-lc++"]
     runtime_path = selfhost_runtime_path(directory)
     runtime_path.write_text(selfhost_flags_text(runtime), encoding="utf-8")
-    record["selfhost_runtime_file"] = str(runtime_path.relative_to(ROOT))
+    record["selfhost_runtime_file"] = describe(runtime_path)
     record["selfhost_runtime_sha256"] = digest(runtime_path)
     return path
 
@@ -126,7 +140,7 @@ def write_cxx_stub(record, directory=None):
     path = cxx_stub_path(directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(source.read_bytes())
-    record["cxx_tbd"] = str(path.relative_to(ROOT))
+    record["cxx_tbd"] = describe(path)
     record["cxx_tbd_sha256"] = digest(path)
 
 
@@ -425,8 +439,8 @@ def build_host(jobs):
         "sdk_builder_sha256": digest(SDK_BUILDER),
         "bridge_source_sha256": digest(BRIDGE), "bridge_header_sha256": digest(BRIDGE_HEADER),
         "lld_bridge_source_sha256": digest(LLD_BRIDGE), "bridge_sha256": digest(archive),
-        "bridge_archive": str(archive.relative_to(ROOT)),
-        "sdk_prefix": str(SDK_PREFIX.relative_to(ROOT)),
+        "bridge_archive": describe(archive),
+        "sdk_prefix": describe(SDK_PREFIX),
         "llvm_archives": {path.name: digest(path) for path in libraries},
         "lld_archives": {name: digest(SDK_PREFIX / "lib" / name) for name in LLD_ARCHIVES},
         "link_flags": flags, "selfhost_link_flags": selfhost_flags,
@@ -448,7 +462,7 @@ def check(full=True):
     """核对 host 配置与当前桥/SDK身份；full 模式同时重算静态库摘要。"""
     path = workdir() / "host.json"
     if not path.is_file():
-        return [f"缺少 Darwin LLVM host 身份记录：{path.relative_to(ROOT)}"]
+        return [f"缺少 Darwin LLVM host 身份记录：{describe(path)}"]
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
         sdk = json.loads(SDK_RECORD.read_text(encoding="utf-8"))

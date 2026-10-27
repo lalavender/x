@@ -5,6 +5,309 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-28 构建缓存目录可指定（YH_BUILD_CACHE）
+
+- **编译器（合入 llvm 的 B1/B2 结构后）**：`compiler/proj/proj_40_art.yh` 新增
+  `cache_root()` 并改写 `build_dir()`——`YH_BUILD_CACHE` 非空时整套缓存树
+  （`targets/...`、`check/` 与 asm/obj/iface/manifest/ir/llvm 子目录）落在该目录，
+  空/未设置时仍是项目内 `.build`；测试模式仍固定 `tmp/yh-test/check`。
+  `compiler/build/module_build.yh` 新增 `mb_ensure_binary_dir()`，独立确保项目
+  `.build` 存在，默认可执行文件位置不随缓存迁移而变。
+- **合入 llvm 分支（同日）**：先提交 llvm 工作区已有的 B2-3（`mb_link` →
+  `LinkPlan` + 六阶段、失败路径统一释放，`link` 3,657 行），再把 llvm-2 的 7 个
+  提交合入。6 个冲突按「保留 B1/B2 结构、重放 CLI-R」解决：`gen.G()` 改
+  `gen.task()`/`gen.stats()`/`proj.cfg()`/`proj.ctx()`，`--link`/`--resolve`/
+  `-o`/模块/`--timeout` 等从 argv 扫描改为 `CliRequest` 字段，缓存根落在
+  `proj` 的 art 层；预算按实测更新（`max_link_lines` 3,657、`max_proj_lines`
+  1,353）。
+- **justfile**：`BUILD_CACHE`（环境变量 `YH_BUILD_CACHE`）贯通 `build`/`dev`/
+  `clean` 与 `_ensure_built` 的子 `just`；冷编时连同缓存根一起清。门禁脚本按
+  项目内 `.build` 断言，`unexport YH_BUILD_CACHE` 让 `test`/`selfhost-native`
+  始终在缺省布局下跑，不受用户缓存位置影响。
+- **测试**：新增 `tests/build-cache/check.py`（接入 `just test`）：设置
+  `YH_BUILD_CACHE` 后对象落在缓存根、项目内无 `.build/targets`，二次构建增量
+  命中；不设置时回到缺省 `.build/targets`。
+- **验证**：`just test` 全绿（运行语料 360/361、新增 build-cache 4/4、arch-check
+  通过）；`just selfhost-native` 全绿（模块固定点 42 产物一致、cc4 自解析 120
+  文件、CLI 冒烟含 `--help`、运行语料 360/361、project cases 122/122）。滚种子
+  `bin/yh-darwin-arm64`（SHA-256 `1591d13b16140e7ecaa7ad30034ccdf1d05003cc358e843f5462c3b9a8b643fc`）
+  后复验：新种子下 `YH_BUILD_CACHE=/tmp/yhbc-real just build` 把 21 个对象写进
+  指定目录、`compiler/.build` 不出现；`just dev` 1.4 s 全部 `[缓存]` 命中；
+  冷编回缺省布局后再跑 `just selfhost-native` 全绿。带
+  `YH_BUILD_CACHE=/tmp/yhbc-gate just test` 也全绿：门禁自身的项目构建仍落在
+  各自的 `.build`，没有往该目录写入（只有顶层 `_ensure_built` 的构建会用它）。
+
+**合入后的 llvm 分支复验**（合并提交）：`just test` 全绿（语料 360/361、
+build-cache 4/4、arch-check 通过：16 模块 54,456 行、`gen.G()` 0、main 318 行）；
+`just selfhost-native` 全绿（候选固定点 48 个产物逐字节一致、cc4 自解析 127 个
+源文件、CLI 冒烟含 `--help`、运行语料 360/361、LA3 函数级缓存矩阵、project
+cases 122/122）。
+
+## 2026-10-27 修 llvm-host 缓存路径 bug + justfile 暂存目录隔离 + 滚种子
+
+- **`tools/llvm-darwin-host.py` / `tools/llvm-host.py`**：新增 `describe()`，把
+  `Path.relative_to(ROOT)` 换成「仓库内显示相对路径、仓库外显示绝对路径」。
+  闭包默认落在 `$YH_LLVM_CACHE`（`$HOME/Documents/x/tmp/llvm-migration`，仓库外），
+  原实现会在 `just llvm-host` 失败时抛 `ValueError: ... is not in the subpath of ...`，
+  把真正的原因（SDK/bridge 摘要不匹配）盖掉。身份记录里的
+  `selfhost_flags_file`/`selfhost_runtime_file`/`cxx_tbd` 也一并改用 `describe()`：
+  消费方按 `ROOT / value` 读取，绝对路径在 pathlib 下同样成立。
+- **`justfile` 暂存目录按 worktree 隔离**：`FAST_DIR` 缺省从 `$TMPDIR/yh-fast` 改为
+  `$TMPDIR/yh-fast-<仓库路径 sha256 前 8 位>`。同一台机器的多个 worktree 共享
+  `$TMPDIR`，原先会互相覆盖 staged 编译器与 `darwin-sdk` 软链——实测 llvm-2 的
+  `just test` 跑在 llvm-3 的二进制上（3 条 `pass/` 用例报「函数未使用」，
+  `darwin-sdk` 软链指向 llvm-3），排除后全绿。CI 的 `GITHUB_RUN_ID` 后缀保留。
+- **滚种子**：`just bootstrap`（复用本机固定闭包）冷编 → `just test`、`just
+  selfhost-native` 全绿（固定点 42 产物、cc4 自解析、CLI 冒烟、运行语料 360/361、
+  project cases 122/122）→ `just seed` 更新 `bin/yh-darwin-arm64`
+  （SHA-256 `0ac4586a4a8aa9ab8eca0e3bb500ffa7593443a308890c9e177b3d4ceb2e41ba`）。
+  随后用**新种子**重新冷编（`rm -rf compiler/.build && just`）并再跑
+  `just selfhost-native` 全绿——新种子自带用 `libs/cli` 解析的命令行与
+  `yh --help`/`yh <命令> --help`。
+
+## 2026-10-27 CLI-R4：yh 帮助/诊断改由 libs/cli 生成
+
+- **删除手写 `usage()`**：`yh`、`yh <命令>` 的帮助与解析失败的 usage 全部由
+  `libs/cli` 的 `format_help`/`format_usage` 生成，`cmdline` 里 `print_bare_help`/
+  `print_usage`/`print_control` 三个薄封装负责落 fd。
+- **`-h/--help` 成为正式能力**：顶层帮助列全部子命令与单文件形态说明，子命令帮助
+  由 `Command.config` 的 `help_format` 决定（中文段标题 `位置参数/选项/命令`，
+  usage 前缀 `用法: `），help/version 控制结果写 stdout、退出 0。
+- **libs/cli 两处小增强**：`HelpFormat.usage_prefix`（默认 `usage: `）与
+  optional 位置参数只套一层方括号（`[module]` 而非 `[[module]]`）；cli 用例 52 → 54。
+- **冒烟与金标**：`tests/selfhost/native-selfhost.py` 的 CLI 冒烟补 `--help`
+  （退出 0 + 用法 + 命令名）；`tools/cli-golden.py` 的文本类用例改为宽松
+  （10 条，均为「usage/help 文本按设计改变」），行为类仍严格 36/36。
+- **文档**：`AGENTS.md` 使用段、`README`、`libs/cli/README.md`（配置项）、
+  `docs/03-design/yh-cli标准库设计.md`（HelpFormat 配置面）。
+- **验证**（种子 `bin/yh-darwin-arm64`）：`just test` 全绿；`just selfhost-native`
+  全绿（固定点 42 产物、cc4 自解析、CLI 冒烟含 `--help`、运行语料 360/361）；
+  `just libs-test` 全绿；`tools/cli-golden.py` 36/36（10 条宽松为文本变化）。
+
+## 2026-10-27 CLI-R1：yh 命令行改用 libs/cli 解析（入库）
+
+- **新模块 `compiler/cmdline/`**（`module cmdline`，568 行）：`CliRequest` + 两个 parser
+  （project：`build/check/run/test/list/version`；file：`--syntax-check`/`--emit-asm`/`-o`），
+  全局选项（`--target/-target`、`--backend`、`-O0/-O2`、`--emit-llvm`、`--stats`、
+  `--legacy-system`）声明在公共 parent 再 `inherit`，保持「子命令前后都能写」。
+- **`cmd` 回到薄壳**：`api_*` 接收请求结构；`mb_cmd_build/run/list`、
+  `mb_run_test_command` 删除 argv 扫描、改接收已解析字段；`driver.yh` 只做
+  「请求 → 全局状态 → 分派」，`usage()` 移入 cmdline。`main` 307 行（预算 381 内）。
+- **依赖与门禁**：`compiler/project.toml` 增 `[dependencies] libs = {path = "../libs"}`，
+  `cmdline` 用 `import libs.cli`（绑定名仍 `cli`）；arch-check 登记
+  `cmdline -> libs`、`main -> cmdline`。`tools/selfhost_snapshot_gate.py` 增
+  `follow_dependencies` 开关与 `dependency_artifacts()`（依赖模块产物「允许出现但
+  不要求」），`native-selfhost.py` 只要求本地模块齐全。
+- **等价性**：`tools/cli-golden.py` 36 条 argv **36/36 通过**（6 条宽松项为
+  「新实现多打印一条诊断」）。
+- **踩坑记录**：切换编译器后必须清 `compiler/.build`——混用不同版本的对象/接口会给出
+  假诊断（把在用函数报成「函数未使用」、`-target linux` 的别名判定走错分支）。
+- **验证**（种子 `bin/yh-darwin-arm64`，`YH_LLVM_HOST=0` + `tmp/llvm-migration` 软链）：
+  `just test` 全绿；`just selfhost-native` 全绿（模块固定点 42 个产物一致、cc4 自解析
+  120 文件、CLI 冒烟、运行语料 360/361）；`just libs-test` 全绿；
+  `python3 tools/cli-golden.py` 36/36。
+
+## 2026-10-27 CLI-R0：cli 段标题可配置 + yh CLI 等价性金标
+
+- **libs/cli**：`HelpFormat` 增 `section_positional`/`section_options`/
+  `section_commands`（空指针沿用英文默认），`help.yh` 的 `put_title` 改读字段；
+  这样 yh 重写命令行时能保留中文帮助段标题。用例 51 → 52。
+- **tools/cli-golden.py**（新）：同一批 argv 分别交给旧/新编译器，比较退出码 +
+  归一化输出（路径占位、`time_*` 归零、`yh-stats` 值隐藏、`[编译]/[缓存]…`
+  进度行按多重集合）；每个用例在独立 fixture 副本里冷跑。
+  当前 36 条用例 **36/36 通过**，其中 6 条是「新实现多打印一条诊断」的宽松项。
+- **规划**：新增 `docs/02-plan/yh-CLI用cli标准库重写实施方案-2026-10-27.md`
+  （现状盘点 + 目标形态 + 六期切片 + 金标设计 + 风险）；`docs/todo.md` 增 CLI-R0…R5。
+- **R1 原型（未入库）**：`cmdline` 模块 + cli 解析 + 分派改造在本机跑通
+  （`cli-golden` 36/36、`just test` 全绿、arch-check 通过：main 307 行、新模块
+  568 行并登记 `cmdline -> libs`），但 `just selfhost-native` 在「cc2 产物集合」
+  处失败：编译器 import 标准库后，种子构建会额外发布 6 个 `yh_libs-*` 模块的
+  `iface/.s.i` 与 `llvm/.ll`；同一seed 构建未改动 HEAD 时集合完全一致（0 多余/0 缺失），
+  证明差异来自新增的标准库依赖。三条前置问题与收口方式记在方案 §12，
+  原型补丁留在 `tmp/cli-migration/cli-r1-prototype.patch`。
+- **验证**：`cd libs && yh test` = 131 passed（cli:: 52）；`just test` 全绿
+  （含 arch-check 自测与真实树）。
+
+## 2026-10-27 CLI-G 调查：帮助宽度自动被 C ABI 挡住（不改代码）
+
+目标：让 `HelpFormat.width = 0` 表示「取终端宽度 − 2」（argparse 行为）。结论是
+**当前编译器能力下无法在 libs 层安全实现**，因此只记录证据并立项，不发布半可用代码。
+
+- **实测链路**：在 `libs/os` 加 `terminal_columns`（`@[extern] fn ioctl(fd int,
+  request u64, argument *void) int` + `winsize`），pty（24×40）下运行 yh 产物：
+  - `nm -u` 确认导入真实 `_ioctl`；反汇编确认 `w0=1`、`w1=0x40087468`、`x2=栈上缓冲`；
+  - 结果仍为 `rc=-1, errno=14`（EFAULT），即内核收到的指针是垃圾；
+  - 同一 pty、同一请求号下用 C 调用（`ioctl(1, TIOCGWINSZ, &w)`）得到 `rc=0, 24×40`。
+- **根因**：Darwin/arm64 的 C 变参实参必须走栈，而 yh 的 `@[extern]` 只支持定参
+  （`libs/sys/30_file.darwin.yh` 开头已记录同一约束，`open/openat/fcntl` 因此只走
+  prelude 的变参登记）。`ioctl` 是变参入口，定参声明把第三个实参放进 x2，libSystem
+  却从栈上取 → EFAULT。Linux 侧同类声明按 AAPCS64 会读到 x2，但 x86_64 SysV 又要求
+  变参调用设置 `al`，同样不能靠 libs 层保证。
+- **处理**：删除实验性的 `libs/os/15_terminal.{linux,darwin}.yh`，`cli` 的
+  `HelpFormat.width` 语义与默认值（80、0=不折行）保持原样；差异文档维持「帮助宽度
+  缺省固定 80」这一条，并补上根因。自动宽度的落地路径记入
+  [todo](todo.md) 的 CLI-G（需先在编译器后端提供非变参 shim）。
+- **验证**：回退后 `cd libs && yh test` = **130 passed / 0 failed**；
+  `--filter cli::` = 51 passed；`run.py` 5/5；`diff.py` 0 未知差异。
+
+## 2026-10-27 cli 标准库去重与常量（复核 CLI-D）
+
+- **构造器合并**：`option()`/`positional()` 两份 31 行逐字段初始化合并为
+  `new_argument(name, positional)` + 两个薄包装（后者只差 `alias`、`positional`
+  与默认 arity），`cli.yh` 少 ~45 行重复。
+- **诊断码常量化**：新增 `cli.CODE_USAGE`/`CODE_CONFIG`/`CODE_RESOURCE`
+  （取值 `usage_error`/`config_error`/`resource_error`），替换各文件里 122 处字面量；
+  顺带把 8 处写成 `"resource"` 的内存失败诊断统一为 `resource_error`
+  （此前 `Diagnostic.code` 在同类失败上取值不一致）。
+- **参数文件上限常量化**：`parse_config()` 里的 `16`/`1048576` 改为新增的
+  `MAX_FILE_DEPTH`/`MAX_FILE_BYTES`（与 `MAX_FILE_TOKENS`/`MAX_FILE_LINE` 同族）。
+- **测试助手去重**：`zz_tests_help.yh` 的 `hp_contains`/`hp_index_of` 改为委托
+  `string.contains`/`string.find`（新增 `import string`），删掉手写双循环 ~45 行。
+- **用例**：新增「错误：诊断码常量与类别一致」——usage 错误码等于 `CODE_USAGE`、
+  配置错误码等于 `CODE_CONFIG`；cli 内嵌测试 50 → **51**。
+- **文档**：`libs/cli/README.md`（诊断码常量、容量表补两个上限、公开 API）、
+  `docs/03-design/yh-cli标准库设计.md`（§14.3 错误码常量）。
+- **验证**（种子 `bin/yh-darwin-arm64`）：`cd libs && yh test` = **130 passed /
+  0 failed**；`--filter cli::` = 51 passed；`libs/cli/test/run.py` 5/5；
+  `diff.py` = 91/94 一致、3 条已知差异、0 未知差异。
+
+## 2026-10-27 cli 帮助拼接的越界兜底与去重（复核 CLI-B）
+
+- **短路契约**：`help.yh` 的 23 个拼接函数（`put_text`/`put_char`/`put_int`/
+  `put_spaces`/`put_hex_byte`/`put_escaped`/`put_color`/`put_color_end`/
+  `put_value_text`/`put_choices_metavar`/`put_metavar_at`/`put_value_pattern`/
+  `put_template`/`put_template_wrapped`/`put_wrapped`/`put_single_synopsis`/
+  `put_mutex_synopsis`/`put_slot_names`/`put_slot_pattern`/`put_row_names`/
+  `append_help_row`/`put_title`/`put_break`）开头统一 `if (at < 0) { return -1 }`：
+  一旦越界，后续追加全部变成空操作。
+- **修掉 3 处潜在越界**（`at=-1` 当下标继续写）：`put_escaped` 内 `put_hex_byte`
+  后直接 `continue`；`layer.yh` 的建议文本三段串联；`ctx_add_warning` 的弃用警告前缀。
+  现在这三处即使漏判也只会整段失败，不会踩内存。
+- **删除 76 处重复判空**：仅保留「返回值参与算术」（`append_help_row` 的名称宽度、
+  `build_usage_line` 等）与「用 `at` 写 NUL」（`build_help_text`/`build_usage_text`/
+  `build_version_text`/消息构造）的检查；`help.yh` 1,844 → **1,685 行**，
+  `if (at < 0)` 由 144 处降到 91 处。
+- **溢出行为**：新增用例「帮助：文本溢出返回 resource_error」——`description` 与
+  子命令 `help` 超过 `MAX_HELP` 时 `format_help` 返回 `resource_error` 且 `text`
+  为空指针（此前该路径只会打印越界写后的垃圾内容）。
+- **验证**（种子 `bin/yh-darwin-arm64`）：`cd libs && yh test` = **129 passed /
+  0 failed**；`--filter cli::` = 50 passed；`libs/cli/test/run.py` 5/5；
+  `diff.py` = 91/94 一致、3 条已知差异、0 未知差异。
+
+## 2026-10-27 cli 库对齐 argparse：批次 3（诊断与建议）
+
+四项诊断缺口对齐（对照 Python 3.14 argparse 的 `error()` 文案）：
+
+- **choices 不匹配列候选**：`parse.yh` 的 `convert_tokens` 增加 `state` 参数，
+  改用新增 `choices_message` 构造「选项 --mode 的值不在候选集合中（可选：fast, slow）」。
+- **未知子命令列候选**：`layer.yh` 的 `dispatch_command` 改用 `subcommand_message`
+  （「未知子命令 ad（可选：add, list）」），替代固定文案。
+- **`suggest_on_error` 扩展到 choices 与子命令**：新增 `suggest_choice`/`suggest_command`
+  （复用 `edit_distance`，阈值 2、取最优 1 个），文案追加「是否想用 X？」；
+  未知选项的建议逻辑不变。
+- **多余位置 token 全量列出**：新增 `put_extra_args`/`extra_args_message`
+  （「多余的位置参数：b c」），`tail_layer` 与 intermixed 收集路径共用；
+  超出 `MAX_HELP` 缓冲时退化为不加列表的短消息。
+- **用例**：`zz_tests_help.yh` 新增「choices、子命令与多余 token 的诊断候选」
+  （含 `suggest_on_error` 开/关两组断言）；cli 内嵌测试 48 → **49**。
+- **文档**：`libs/cli/README.md`（§13 `suggest_on_error`、§14 诊断文案）、
+  `docs/03-design/yh-cli标准库设计.md`（§14 诊断实现状态）、
+  `docs/03-design/yh-cli与argparse差异.md`（新增 3 条一致项，测试数 49）。
+- **验证**（种子 `bin/yh-darwin-arm64`）：`cd libs && yh test` = **128 passed /
+  0 failed**；`--filter cli::` = 49 passed；`libs/cli/test/run.py` 5/5；
+  `diff.py` = 91/94 一致、3 条已知差异、0 未知差异。
+
+## 2026-10-27 cli 库对齐 argparse：批次 2（帮助/usage 展示）
+
+六项展示缺口全部接通，均与 Python 3.14 argparse 的 `format_usage`/`format_help` 逐字对照：
+
+- **choices 占位名**：`row_metavar` 之外新增 `put_metavar_at`/`put_choices_metavar`，
+  缺省渲染 `{fast,slow}`（usage 与帮助列一致），显式 `metavar`/`metavars` 优先；
+  real 候选没有格式化器，退回类型名（`FLOAT`）。
+- **逐项占位名 `metavars`**：只对 `exactly(n)` 有效，freeze 校验「个数 = n」且不能与
+  `metavar` 同时设置；`--pair LEFT RIGHT` 逐项展开。
+- **数量模型占位名**：新增 `put_value_pattern`，按 argparse 的 `_format_args` 语义写
+  `single` 一个、`exactly(n)` n 个、`*` → `[X [X ...]]`、`+` → `X [X ...]`、
+  `remainder` → `...`（旧实现的 `...` 追加逻辑并入该函数）。
+- **子命令槽**：`Subparsers.metavar` 新增字段（`slot_metavar` 落库），usage 写成
+  `{add,list} ...`（旧为 `[COMMAND]`/`COMMAND`，无省略号）；`title`/`description`
+  终于生效：帮助段用自定义标题、说明行、`{add,list}` 占位行，命令行缩进 4 并按
+  `help_column` 对齐；显式 `metavar` 覆盖命令名列表。
+- **`boolean_optional` usage**：写成 `[--cache | --no-cache]`（旧只写 `[--cache]`）。
+- **`HelpFormat.max_help_column` 接通**：`help_column(state, fallback)` 统一取
+  「显式值 > 段落默认（位置 22、其余 26）」，位置/选项/用户组/命令段全部改用它。
+- **用例**：`zz_tests_help.yh` 新增「choices 占位名与槽标题/说明/占位名」「max_help_column
+  与 boolean_optional usage」两组，旧 metavar 用例补 usage 断言；新增 `hp_line_column`
+  助手量说明列。cli 内嵌测试 46 → **48**。
+- **文档**：`libs/cli/README.md`（§5 metavars/choices、§6 usage 形态、§7 槽
+  title/description/metavar 与 usage、§13 max_help_column/boolean_optional）、
+  `docs/03-design/yh-cli标准库设计.md`（§10.1 Subparsers、§14.1 实现状态）、
+  `docs/03-design/yh-cli与argparse差异.md`（新增 7 条一致项，补充「帮助宽度缺省」
+  「说明列缺省」「choices 说明附录」三条保留差异）。
+- **验证**（种子 `bin/yh-darwin-arm64`）：`cd libs && yh test` = **127 passed /
+  0 failed**；`--filter cli::` = 48 passed；`libs/cli/test/run.py` 5/5；
+  `diff.py` = 91/94 一致、3 条已知差异、0 未知差异。
+- **未做**：帮助宽度仍固定 80（不读终端宽度）；诊断候选列表与 `suggest_on_error`
+  的 choices/子命令覆盖留在批 3（todo CLI-F）。
+
+## 2026-10-27 cli 库对齐 argparse：批次 1（语义正确性）
+
+六项与 Python 3.14 argparse 实测对照后补齐/修正的行为：
+
+- **`set_default` 未声明 dest 现在进结果**（argparse `set_defaults` 语义）：
+  `apply_defaults` 新增覆盖项逆回写（`parse.yh`），设计 §8.3/§7 早已承诺「可为尚无
+  参数的键设置业务标签」，但旧实现只遍历已声明 `rows`，实测 `contains=0`。
+  新值 `provided=false`，不覆盖 `initial`。
+- **位置 `optional()` 未取到值时用默认值**（argparse `nargs='?'`）：旧实现写入
+  `const_value` 并计 `provided=1`；现不写 const、不计出现，交给默认值层级。
+  实测 `opt='DEFAULT'`（对齐），不再是 `CONST`。
+- **位置段为子命令槽预留 token**：整段 token ≥「全部位置参数最低需求 + 1」时为槽
+  保留 1 个（argparse `PARSER` 语义）；`files='*'` + 槽下 `tool add` 得
+  `files=[] cmd=add`（旧行为是 `files=['add']` 且不选命令），最低需求占满时不预留
+  （`files='+'` + 槽，`tool go` 仍得 `files=[go]`）。设计 §10.1 早就写「保留槽…最低
+  数量」，实现现在与契约一致。
+- **`store_const`/`append_const` 缺 `const` 报 config_error**（argparse 在
+  `add_argument` 报 ValueError）；`boolean_optional` 等零参数 action 不受影响。
+- **位置参数设 `required=true` 报 config_error**（argparse ValueError）；
+  必需性仍由 arity 决定。
+- **默认值/常量不参与 choices 校验**（argparse 语义，choices 只约束命令行显式值）：
+  `declared_value_ok` 只保留 validator；显式值仍受 choices 约束（同一测试覆盖）。
+- **用例**：`zz_tests_actions.yh`（位置 `optional` 默认值 + 未声明 dest + choices
+  默认值）、`zz_tests_commands.yh`（槽 token 预留，含 `one_or_more` 不预留的反例）、
+  `zz_tests_extensions.yh`（缺 const / 位置 `required` / 带 const 正常写入）。
+  cli 内嵌测试 43 → **46**。
+- **文档**：`libs/cli/README.md`（§3 必需性与常量、§6 分配规则、§7 槽共存、§10 choices、
+  §15 `set_default`、契约要点）、`docs/03-design/yh-cli标准库设计.md`（§8.1/8.2/8.3、
+  §9.3、§10.1）、`docs/03-design/yh-cli与argparse差异.md`（§1 新增 6 条一致项与
+  槽共存的保留差异、测试数 46）。
+- **验证**（种子 `bin/yh-darwin-arm64`）：`cd libs && yh test` = **125 passed /
+  0 failed**；`--filter cli::` = 46 passed；`libs/cli/test/run.py` 5/5；
+  `diff.py` = 91/94 与 argparse 一致、3 条已知差异、0 未知差异；
+  `tmp/cli-gap/` 探针对六项逐条与 Python 3.14.6 对照。
+
+## 2026-10-27 cli 标准库死代码清理（复核 P1 项）
+
+- **删除零调用函数**：`libs/cli/help.yh` 的 `text_visible_width`（31 行，帮助宽度已按
+  字节近似，无调用者）；`libs/cli/schema.yh` 的 `action_takes_values`（8 行，0 调用，
+  且漏了 `store_const`/`append_const`/`count`，与 `action_is_zero_value` 语义冲突）。
+- **删除只写不读的私有字段**：`mutex_row.members`/`member_count`（互斥校验实际按
+  `result_owner.appeared` 计数）、`child_row.slot`、`parser_state.command_name`
+  （连带 `new_state` 的第三个参数与两处调用点）、`parser_state.owned_by_parent`
+  （`destroy_state` 无条件递归子节点）、`arg_row.metavars_count`、
+  `arg_row.choices_count`（5 个读点改为 `len(row.choices)`，与 `value_in_choices`
+  既有写法一致）。
+- **净变化**：`libs/cli` 生产代码 6,846 → 6,793 行（`cli.yh` 893→886、
+  `help.yh` 1,474→1,443、`schema.yh` 1,057→1,045、`commands.yh` 319→316）；
+  `git diff --stat` = 9 插入 / 62 删除。
+- **未动**：`Argument.metavars`、`Subparsers.title|description`、
+  `HelpFormat.max_help_column` 是「已公开但未接线」的**行为缺口**而非死代码，
+  补实现与删 API 需先决策，已记入 [todo](todo.md) 的 CLI-A。
+- **验证**（种子 `bin/yh-darwin-arm64`，哈希与 `bin/yh-darwin-arm64.sha256` 一致）：
+  `cd libs && yh test` = **122 passed / 0 failed**；`--filter cli::` = 43 passed；
+  `libs/cli/test/run.py` = 5/5；`libs/cli/test/diff.py` = 91/94 与 argparse 一致、
+  3 条已知差异、0 未知差异。删除 `libs/tmp/yh-test` 后复跑一次，确认 `cli` 模块
+  重新编译（而非命中旧缓存）后仍全绿。
+
 ## 2026-10-26 B2-1/B2-2/B2-4：`proj` 收产物键、`link` 成模块、`module_build` 拆三
 
 - **B2-1 产物路径与缓存键 → `proj/proj_40_art.yh`（526 行，16 函数）**：FNV 哈希

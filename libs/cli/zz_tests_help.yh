@@ -1,5 +1,7 @@
 module cli
 
+import string
+
 // ============================================================================
 // zz_tests_help.yh —— cli CLI5 帮助/颜色/模板/警告行为的语言内测试（YT4-P4e）
 //
@@ -8,45 +10,28 @@ module cli
 // 文件名以 zz_ 开头：类型声明在 cli.yh，必须排在它之后。
 // ============================================================================
 
-// hp_contains：在 NUL 串里查找子串；找到返回 true。
+// hp_contains：在 NUL 串里查找子串；找到返回 true（委托 string.contains）。
 fn hp_contains(haystack *char, needle *char) bool {
-    if (haystack == 0 || needle == 0) {
+    let left string.ViewResult = string.view_cstr(haystack)
+    let right string.ViewResult = string.view_cstr(needle)
+    if (left.status != string.status_ok || right.status != string.status_ok) {
         return false
     }
-    let i int = 0
-    for haystack[i] != 0 {
-        let j int = 0
-        for 1 {
-            if (needle[j] == 0) {
-                return true
-            }
-            if (haystack[i + j] == 0 || haystack[i + j] != needle[j]) {
-                break
-            }
-            j += 1
-        }
-        i += 1
-    }
-    return false
+    return string.contains(left.value, right.value)
 }
 
-// hp_index_of：返回子串首次出现的偏移；没有返回 -1。
+// hp_index_of：返回子串首次出现的偏移；没有返回 -1（委托 string.find）。
 fn hp_index_of(haystack *char, needle *char) int {
-    let i int = 0
-    for haystack[i] != 0 {
-        let j int = 0
-        for 1 {
-            if (needle[j] == 0) {
-                return i
-            }
-            if (haystack[i + j] == 0 || haystack[i + j] != needle[j]) {
-                break
-            }
-            j += 1
-        }
-        i += 1
+    let left string.ViewResult = string.view_cstr(haystack)
+    let right string.ViewResult = string.view_cstr(needle)
+    if (left.status != string.status_ok || right.status != string.status_ok) {
+        return -1
     }
-    return -1
+    let found string.IndexResult = string.find(left.value, right.value)
+    if (found.found == false) {
+        return -1
+    }
+    return found.index.to_type(int)
 }
 
 // hp_has_byte：串里是否出现某个字节值。
@@ -62,6 +47,21 @@ fn hp_has_byte(text *char, value int) bool {
         i += 1
     }
     return false
+}
+
+// hp_line_column：needle 在 text 中首次出现时的列号（行首为 0）；找不到返回 -1。
+fn hp_line_column(text *char, needle *char) int {
+    let at int = hp_index_of(text, needle)
+    if (at < 0) {
+        return -1
+    }
+    let column int = 0
+    let i int = at - 1
+    for i >= 0 && text[i] != '\n' {
+        column += 1
+        i -= 1
+    }
+    return column
 }
 
 // hp_empty_args：返回一个空参数切片。
@@ -190,7 +190,7 @@ test "帮助：metavar 与互斥组 usage" {
     let usage TextResult = format_usage(&root)
     $assert(usage.status == ok && hp_contains(usage.text, "PATH"), "metavar 出现在 usage")
     $assert(hp_contains(usage.text, "--json | --yaml"), "互斥组 usage 形式")
-    $assert(hp_contains(usage.text, "COMMAND"), "子命令占位名")
+    $assert(hp_contains(usage.text, "{build} ..."), "子命令槽占位名为命令名列表")
     release_text(&usage)
     destroy(&root)
 
@@ -203,10 +203,84 @@ test "帮助：metavar 与互斥组 usage" {
     names[1] = "RIGHT"
     pair.metavars = names.to_type([]*char)
     $assert(add_argument(&root2, pair) >= 0, "metavars 参数注册")
+    let usage2 TextResult = format_usage(&root2)
+    $assert(usage2.status == ok && hp_contains(usage2.text, "[--pair LEFT RIGHT]"),
+        "元组 metavar 逐项出现在 usage")
+    release_text(&usage2)
     let help TextResult = format_help(&root2)
-    $assert(help.status == ok && hp_contains(help.text, "--pair"), "metavars 帮助")
+    $assert(help.status == ok && hp_contains(help.text, "--pair LEFT RIGHT"),
+        "元组 metavar 出现在帮助列")
     release_text(&help)
     destroy(&root2)
+}
+
+test "帮助：choices 占位名与槽标题/说明/占位名" {
+    let root Parser
+    let config ParserConfig = parser_config("tool")
+    config.color = never
+    $assert(init(&root, config) == 0, "parser 初始化")
+    let mode Argument = option("--mode", "-m")
+    mode.help = "模式"
+    let choices [2]Value
+    choices[0] = value_text("fast")
+    choices[1] = value_text("slow")
+    mode.choices = choices.to_type([]Value)
+    $assert(add_argument(&root, mode) >= 0, "choices 参数注册")
+    let spec Subparsers = subparsers()
+    spec.title = "命令集"
+    spec.description = "可用子命令"
+    let slot int = add_subparsers(&root, spec)
+    $assert(slot >= 0, "子命令槽注册")
+    $assert(add_parser(&root, slot, command("add")) != 0
+        && add_parser(&root, slot, command("list")) != 0, "两个子命令注册")
+
+    let usage TextResult = format_usage(&root)
+    $assert(hp_contains(usage.text, "[--mode {fast,slow}]"), "choices 进 usage metavar")
+    $assert(hp_contains(usage.text, "{add,list} ..."), "槽占位名为命令名列表")
+    release_text(&usage)
+    let help TextResult = format_help(&root)
+    $assert(help.status == ok
+        && hp_contains(help.text, "--mode, -m {fast,slow}"), "choices 进帮助列")
+    $assert(hp_contains(help.text, "命令集:") && hp_contains(help.text, "可用子命令")
+        && hp_contains(help.text, "{add,list}"), "槽标题/说明/占位名")
+    release_text(&help)
+    destroy(&root)
+
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let spec2 Subparsers = subparsers()
+    spec2.metavar = "CMD"
+    let slot2 int = add_subparsers(&root2, spec2)
+    $assert(slot2 >= 0 && add_parser(&root2, slot2, command("go")) != 0,
+        "第二个槽注册")
+    let usage2 TextResult = format_usage(&root2)
+    $assert(usage2.status == ok && hp_contains(usage2.text, "CMD ..."),
+        "显式槽 metavar 覆盖命令名列表")
+    release_text(&usage2)
+    destroy(&root2)
+}
+
+test "帮助：max_help_column 与 boolean_optional usage" {
+    let root Parser
+    let config ParserConfig = parser_config("t")
+    config.color = never
+    config.help_format.max_help_column = 40
+    $assert(init(&root, config) == 0, "parser 初始化")
+    let cache Argument = option("--cache", 0)
+    cache.action = boolean_optional
+    cache.help = "缓存"
+    $assert(add_argument(&root, cache) >= 0, "boolean_optional 注册")
+    let usage TextResult = format_usage(&root)
+    $assert(usage.status == ok
+        && hp_contains(usage.text, "[--cache | --no-cache]"), "boolean_optional usage 组合")
+    release_text(&usage)
+    let help TextResult = format_help(&root)
+    $assert(help.status == ok
+        && hp_line_column(help.text, "缓存") == 40
+        && hp_line_column(help.text, "显示帮助并退出") == 40,
+        "max_help_column 决定说明列（默认 26）")
+    release_text(&help)
+    destroy(&root)
 }
 
 test "帮助：颜色策略与自动降级" {
@@ -376,4 +450,196 @@ test "帮助：模板、坏模板与 deprecated 警告" {
         && len(help_result.warnings) == 1, "帮助路径也保留弃用警告")
     release(&help_result)
     destroy(&warn_parser)
+}
+
+test "帮助：choices、子命令与多余 token 的诊断候选" {
+    let root Parser
+    let config ParserConfig = parser_config("tool")
+    config.add_help = false
+    $assert(init(&root, config) == 0, "parser 初始化")
+    let mode Argument = option("--mode", 0)
+    let choices [2]Value
+    choices[0] = value_text("fast")
+    choices[1] = value_text("slow")
+    mode.choices = choices.to_type([]Value)
+    $assert(add_argument(&root, mode) >= 0, "choices 参数注册")
+    let spec Subparsers = subparsers()
+    let slot int = add_subparsers(&root, spec)
+    $assert(slot >= 0 && add_parser(&root, slot, command("add")) != 0
+        && add_parser(&root, slot, command("list")) != 0, "子命令注册")
+
+    let bad [1]*char
+    bad[0] = "--mode=medium"
+    let r Result = parse(&root, bad[0..1])
+    $assert(r.status == usage_error && hp_contains(r.error.message, "fast, slow"),
+        "choices 诊断列出候选")
+    $assert(hp_contains(r.error.message, "是否想用") == false, "默认不给建议")
+    release(&r)
+
+    let sub [1]*char
+    sub[0] = "ad"
+    let r2 Result = parse(&root, sub[0..1])
+    $assert(r2.status == usage_error && hp_contains(r2.error.message, "add, list"),
+        "未知子命令诊断列出候选")
+    release(&r2)
+    destroy(&root)
+
+    // suggest_on_error 覆盖 choices 与子命令（argparse 3.14 语义）
+    let root2 Parser
+    let c2 ParserConfig = parser_config("tool2")
+    c2.add_help = false
+    c2.suggest_on_error = true
+    $assert(init(&root2, c2) == 0, "第二个 parser 初始化")
+    let mode2 Argument = option("--mode", 0)
+    mode2.choices = choices.to_type([]Value)
+    $assert(add_argument(&root2, mode2) >= 0, "第二个 choices 参数注册")
+    let spec2 Subparsers = subparsers()
+    let slot2 int = add_subparsers(&root2, spec2)
+    $assert(slot2 >= 0 && add_parser(&root2, slot2, command("add")) != 0
+        && add_parser(&root2, slot2, command("list")) != 0, "第二个子命令注册")
+    let typo [1]*char
+    typo[0] = "--mode=fst"
+    let r3 Result = parse(&root2, typo[0..1])
+    $assert(r3.status == usage_error && hp_contains(r3.error.message, "是否想用 fast"),
+        "choices 拼写建议")
+    release(&r3)
+    let typo2 [1]*char
+    typo2[0] = "ad"
+    let r4 Result = parse(&root2, typo2[0..1])
+    $assert(r4.status == usage_error && hp_contains(r4.error.message, "是否想用 add"),
+        "子命令拼写建议")
+    release(&r4)
+    destroy(&root2)
+
+    // 多余 token 全量列出
+    let root3 Parser
+    let c3 ParserConfig = parser_config("tool3")
+    c3.add_help = false
+    $assert(init(&root3, c3) == 0, "第三个 parser 初始化")
+    let src Argument = positional("src")
+    $assert(add_argument(&root3, src) >= 0, "位置参数注册")
+    let extra [3]*char
+    extra[0] = "a"
+    extra[1] = "b"
+    extra[2] = "c"
+    let r5 Result = parse(&root3, extra[0..3])
+    $assert(r5.status == usage_error && hp_contains(r5.error.message, "b c"),
+        "多余 token 全量列出")
+    release(&r5)
+    destroy(&root3)
+}
+
+test "帮助：文本溢出返回 resource_error" {
+    // 超过 MAX_HELP 的说明文本必须整体失败，不能把 -1 偏移当成下标继续写。
+    let big [MAX_HELP + 512]char
+    let i int = 0
+    for i < MAX_HELP + 256 {
+        big[i] = 'a'
+        i += 1
+    }
+    big[MAX_HELP + 256] = 0
+
+    let root Parser
+    let config ParserConfig = parser_config("tool")
+    config.description = &big[0]
+    $assert(init(&root, config) == 0, "parser 初始化")
+    let help TextResult = format_help(&root)
+    $assert(help.status == resource_error && help.text == 0,
+        "超长说明报 resource_error 且无文本")
+    release_text(&help)
+    destroy(&root)
+
+    // 子命令 help 走独立的展开缓冲，溢出同样必须失败。
+    let root2 Parser
+    $assert(init(&root2, parser_config("tool2")) == 0, "第二个 parser 初始化")
+    let slot int = add_subparsers(&root2, subparsers())
+    $assert(slot >= 0, "子命令槽注册")
+    let cmd Command = command("go")
+    cmd.help = &big[0]
+    $assert(add_parser(&root2, slot, cmd) != 0, "超长 help 的子命令注册")
+    let help2 TextResult = format_help(&root2)
+    $assert(help2.status == resource_error && help2.text == 0,
+        "子命令 help 溢出报 resource_error")
+    release_text(&help2)
+    destroy(&root2)
+}
+
+test "帮助：段标题可配置（缺省英文，显式中文）" {
+    let root Parser
+    let config ParserConfig = parser_config("tool")
+    config.color = never
+    $assert(init(&root, config) == 0, "parser 初始化")
+    $assert(add_argument(&root, positional("src")) >= 0, "位置参数注册")
+    $assert(add_argument(&root, option("--out", 0)) >= 0, "选项注册")
+    let slot int = add_subparsers(&root, subparsers())
+    $assert(slot >= 0 && add_parser(&root, slot, command("go")) != 0, "子命令注册")
+    let def_help TextResult = format_help(&root)
+    $assert(def_help.status == ok
+        && hp_contains(def_help.text, "positional arguments:")
+        && hp_contains(def_help.text, "options:")
+        && hp_contains(def_help.text, "commands:"), "缺省标题是英文")
+    release_text(&def_help)
+    destroy(&root)
+
+    let root2 Parser
+    let c2 ParserConfig = parser_config("tool2")
+    c2.color = never
+    c2.help_format.section_positional = "位置参数"
+    c2.help_format.section_options = "选项"
+    c2.help_format.section_commands = "子命令"
+    $assert(init(&root2, c2) == 0, "第二个 parser 初始化")
+    $assert(add_argument(&root2, positional("src")) >= 0, "位置参数注册")
+    $assert(add_argument(&root2, option("--out", 0)) >= 0, "选项注册")
+    let slot2 int = add_subparsers(&root2, subparsers())
+    $assert(slot2 >= 0 && add_parser(&root2, slot2, command("go")) != 0, "子命令注册")
+    let zh_help TextResult = format_help(&root2)
+    $assert(zh_help.status == ok
+        && hp_contains(zh_help.text, "位置参数:")
+        && hp_contains(zh_help.text, "选项:")
+        && hp_contains(zh_help.text, "子命令:"), "显式标题生效")
+    $assert(hp_contains(zh_help.text, "positional arguments:") == false, "英文标题不再出现")
+    release_text(&zh_help)
+    destroy(&root2)
+}
+
+test "帮助：usage 前缀可配置（缺省英文，显式中文）" {
+    let root Parser
+    let config ParserConfig = parser_config("tool")
+    config.color = never
+    $assert(init(&root, config) == 0, "parser 初始化")
+    $assert(add_argument(&root, positional("src")) >= 0, "位置参数注册")
+    let def_usage TextResult = format_usage(&root)
+    $assert(def_usage.status == ok && hp_contains(def_usage.text, "usage: tool"),
+        "缺省 usage 前缀")
+    release_text(&def_usage)
+    destroy(&root)
+
+    let root2 Parser
+    let c2 ParserConfig = parser_config("tool2")
+    c2.color = never
+    c2.help_format.usage_prefix = "用法: "
+    $assert(init(&root2, c2) == 0, "第二个 parser 初始化")
+    $assert(add_argument(&root2, positional("src")) >= 0, "位置参数注册")
+    let zh_usage TextResult = format_usage(&root2)
+    $assert(zh_usage.status == ok && hp_contains(zh_usage.text, "用法: tool2"),
+        "显式 usage 前缀生效")
+    $assert(hp_contains(zh_usage.text, "usage: tool2") == false, "英文前缀不再出现")
+    release_text(&zh_usage)
+    destroy(&root2)
+}
+
+test "帮助：optional 位置参数只出现一对括号" {
+    let root Parser
+    let config ParserConfig = parser_config("tool")
+    config.color = never
+    $assert(init(&root, config) == 0, "parser 初始化")
+    let mod Argument = positional("module")
+    mod.arity = optional()
+    $assert(add_argument(&root, mod) >= 0, "optional 位置参数注册")
+    let usage TextResult = format_usage(&root)
+    $assert(usage.status == ok && hp_contains(usage.text, "[module]")
+        && hp_contains(usage.text, "[[module]]") == false,
+        "optional 位置只套一层方括号")
+    release_text(&usage)
+    destroy(&root)
 }

@@ -56,9 +56,12 @@ ALLOWED = {
     # testkit：语言内测试执行器（yh test 子命令的实现），位于 build 之上。
     # 模块名不能叫 test——`test "..." {}` 是语言关键字。
     "testkit": {"gen", "parse", "build", "proj", "link"},
+    # cmdline：命令行声明与解析（CLI-R）。唯一允许依赖标准库 libs/cli 的模块，
+    # 这样 `cmd`（module main）自身保持「参数映射 + 调用面」，不直接引标准库。
+    "cmdline": {"gen", "libs"},
     "main": {"gen", "lex", "comptime", "ast", "check", "parse", "ir",
-             "backend", "builtin", "build", "testkit", "lower", "proj", "link"},
-}
+             "backend", "builtin", "build", "testkit", "lower", "proj", "link",
+             "cmdline"},}
 
 # —— 预算（现状即上限，只减不增）——
 # 数值为 2026-10-24 实测；下调请同步改这里，上调需在 finish.md 说明理由。
@@ -68,8 +71,8 @@ BUDGETS = {
     "max_module_lines": 387,       # main（A6 后只剩 driver + api；B1-1 +2、B1-2 绑定存储 +4）
     "max_testkit_lines": 1586,     # testkit（YT2d-3 同项目测试锁 +37；B1-1 迁表读点后净 -14）
     "max_build_lines": 6348,
-    "max_link_lines": 3600,      # link（B2-2 新建：汇编/链接驱动/lld/进程/时钟）      # build（B1-1 项目模型搬到 proj 后 -543）
-    "max_proj_lines": 1318,        # proj（B1-1 表/写者/路径/窄口 + B2-1 产物路径与键）
+    "max_link_lines": 3657,      # link（B2-2 新建 + B2-3 mb_link 阶段化 LinkPlan 后 3,657）
+    "max_proj_lines": 1353,        # proj（B1-1 表/路径 + B2-1 产物键 + YH_BUILD_CACHE 缓存根）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
     "max_globals": 172,
     "max_g_call_sites": 0,      # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到

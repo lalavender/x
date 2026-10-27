@@ -93,7 +93,8 @@ gitignore 的 `bin/` 并核对哈希。
   - `docs/finish.md` 只保留最近三天条目（靠前为最新）；更早条目归档到
     `docs/01-finished/finish-历史归档-<起>至<止>.md`，新增条目写在最前。
 - `tests/yh/` 语法语料、`tests/yh-run/` 语义运行语料、
-  `tests/modules/` 模块语料与项目验收、`tests/selfhost/` 自举探针
+  `tests/modules/` 模块语料与项目验收、`tests/selfhost/` 自举探针、
+  `tests/build-cache/` 构建缓存位置（`YH_BUILD_CACHE`）验收
 - `tools/` 门禁脚本与 yh-explorer
 - `tmp/` 全部临时产物（已 gitignore）
 
@@ -139,8 +140,13 @@ just
 ./yh test --filter X --timeout 15  # 只跑身份含 X 的用例，单例超时 15 秒
 ./yh --syntax-check f.yh   # 只做词法/语法检查
 ./yh --emit-asm f.yh       # 发射汇编
-./yh f.yh -o out           # 单文件编译并链接
+./yh f.yh -o out           # 单文件编译并链接（-o 也可写在文件前，--output 等价）
+./yh --help                # 顶层帮助（由 libs/cli 生成）；yh <命令> --help 看单项
 ```
+
+命令行解析自 CLI-R（2026-10-27）起由 `libs/cli` 承担：声明在
+`compiler/cmdline/`（`module cmdline`），`compiler/cmd/` 只做「请求 → 分派」。
+帮助文本由库生成（`用法: ` 前缀 + 中文段标题），`-h/--help` 是新增能力。
 
 ## 构建与测试
 
@@ -164,6 +170,16 @@ just seed               # 滚种子（仅在全绿后；拒绝带构建机路径
 标注平台专属项（`linux`、`linux-x64`、`darwin-arm64` 等，`<os>` 匹配该 OS 的
 所有架构），不匹配的记 `SKIP`、不算失败也不影响退出码；没有该指令的是共有用例。
 `just test-llvm` 是 Linux/x86_64 专属门，其他宿主会直接拒绝而不是降级运行。
+
+**构建缓存位置（2026-10-28）**：编译器构建的中间缓存默认在 `compiler/.build`；
+设置 `YH_BUILD_CACHE=<目录>`（或 `just BUILD_CACHE=<目录> build`）后整套缓存树
+（`targets/...`、`check/` 与 asm/obj/iface/manifest/ir/llvm 六个子目录）迁到该
+目录，同一台机器的多个 worktree 各指一处即可互不覆盖；默认可执行文件仍在
+`compiler/.build`，缓存位置不改变产物位置。`just test`/`just selfhost-native`
+等门禁脚本按项目内 `.build` 布局断言，justfile 对它们统一剥掉该变量，只有
+`build`/`dev` 把它显式传给编译器，因此缓存位置不影响门禁结果。该变量由
+**正在执行构建的那一代编译器**读取：滚种子前的旧种子不认识它，需等
+`just seed` 之后的新种子生效。
 
 CI 由 **Gitea Actions** 承担（2026-10-22 起；替代原 CircleCI 分支门与本机 Jenkins）：
 

@@ -65,24 +65,58 @@ pub fn hash_file(h *u64, path *char) int {
 
 // build_dir：构建目录 = <root>/.build/targets/<triple>/llvm/O<n>；
 // check 模式用 <root>/.build/check（LL12：不再有旧后端目录）。
-pub fn build_dir(root_off int, root_len int, out_len *int) int {
+// cache_root：构建缓存根目录 = YH_BUILD_CACHE（非空时）或 <root>/.build。
+//
+// 缓存树（targets/ 与 check/）整体落在该目录，便于同一台机器上的多个
+// worktree 各指一处（例如本地快速盘），互不覆盖。相对路径按进程 cwd 解析
+// （宿主 open 语义），建议传绝对路径。结果经 out_len 显式返回。
+pub fn cache_root(root_off int, root_len int, out_len *int) int {
+    let off int = -1
+    let olen int = 0
+    if (env_fetch("YH_BUILD_CACHE", &off, &olen) < 0) {
+        return -1
+    }
     let c_off int = 0
     let c_len int = 0
+    if (olen == 0) {
+        if (canon(root_off, root_len, ".build", &c_off, &c_len) != 0) {
+            return -1
+        }
+    } else {
+        if (canon(off, olen, "", &c_off, &c_len) != 0) {
+            return -1
+        }
+    }
+    out_len[0] = c_len
+    return c_off
+}
+
+// build_dir：构建目录 = <cache>/targets/<triple>/llvm/O<n>；
+// check 模式用 <cache>/check（LL12：不再有旧后端目录）。
+// 测试模式始终落在项目 tmp/yh-test/check，避免测试与生产缓存混用。
+pub fn build_dir(root_off int, root_len int, out_len *int) int {
+    let base_len int = 0
+    let base_off int = cache_root(root_off, root_len, &base_len)
+    if (base_off < 0) {
+        return -1
+    }
     let tk *gen.TaskCtx = gen.task()
+    let c_off int = 0
+    let c_len int = 0
     let rc int = 0
     if (tk.c_test_mode != 0) {
-        // 测试检查与生产 .build 隔离；接口/会话文件只落在项目 tmp 下。
+        // 测试检查与生产缓存隔离；接口/会话文件只落在项目 tmp 下。
         rc = canon(root_off, root_len, "tmp/yh-test/check", &c_off, &c_len)
     } else if (tk.c_check_only != 0) {
-        rc = canon(root_off, root_len, ".build/check", &c_off, &c_len)
+        rc = canon(base_off, base_len, "check", &c_off, &c_len)
     } else {
         let target_dir [256]u8
-        let n int = gen.append_str(&target_dir[0], 0, ".build/targets/")
+        let n int = gen.append_str(&target_dir[0], 0, "targets/")
         n = gen.append_str(&target_dir[0], n, cfg().target.triple)
         n = gen.append_str(&target_dir[0], n, "/llvm/O")
         n = gen.append_int(&target_dir[0], n, cfg().opt_level)
         target_dir[n] = 0
-        rc = canon(root_off, root_len, (&target_dir[0]).to_type(*char), &c_off, &c_len)
+        rc = canon(base_off, base_len, (&target_dir[0]).to_type(*char), &c_off, &c_len)
     }
     if (rc != 0) {
         return -1
@@ -106,7 +140,8 @@ pub fn sub_dir(build_off int, build_len int, sub *char) int {
 }
 
 // default_binary_path：默认可执行文件留在项目 .build 根目录，中间缓存
-// 按目标与优化级别隔离（LL12：唯一后端）。
+// 按目标与优化级别隔离（LL12：唯一后端）。缓存根被 YH_BUILD_CACHE 迁走后
+// 产物位置不变；目录创建由 build 的 mb_ensure_binary_dir 负责（本文件纯计算）。
 pub fn default_binary_path(root_off int, root_len int, build_off int,
     project int, out *u8) int {
     let c_off int = 0

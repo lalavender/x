@@ -70,6 +70,15 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def describe(path: Path) -> str:
+    """把路径显示为相对仓库的短形式；在仓库外（$YH_LLVM_CACHE）时返回绝对路径。"""
+    path = Path(path)
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def workdir(host: str) -> Path:
     """宿主产物的固定目录：tmp/llvm-migration/llvm-host-<host>/。"""
     return WORK_ROOT / f"llvm-host-{host}"
@@ -79,7 +88,7 @@ def identity(host: str) -> dict:
     """读取身份记录；缺失或不可解析时按未准备处理。"""
     path = workdir(host) / "host.json"
     if not path.is_file():
-        raise NotReady(f"缺少身份记录 {path.relative_to(ROOT)}")
+        raise NotReady(f"缺少身份记录 {describe(path)}")
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
@@ -165,7 +174,7 @@ def prepare(host: str) -> None:
         print(result.stdout.rstrip(), file=sys.stderr)
     if result.returncode != 0:
         detail = result.stderr.strip() or f"退出码 {result.returncode}"
-        raise RuntimeError(f"构建静态 LLVM 宿主失败（{BUILDER.relative_to(ROOT)} "
+        raise RuntimeError(f"构建静态 LLVM 宿主失败（{describe(BUILDER)} "
                            f"--host {host}）：{detail}")
 
 
