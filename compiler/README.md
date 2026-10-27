@@ -10,9 +10,9 @@
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
 version = `0.0.10`，source = `.`），按 **gen / builtin / lex / parse / ast /
 check / comptime / lower / ir / backend / build / testkit / cmd** 组织。
-**2026-10-25 实测（`python3 tools/arch-check.py`）：十三个模块、118 个 `.yh`、
-52,398 行**：`gen` 5,690 · `parse` 9,709 · `build` 10,719 · `lower` 5,815 ·
-`comptime` 5,522 · `ir` 4,230 · `backend` 3,340 · `ast` 3,278 · `testkit` 1,515 ·
+**2026-10-27 实测（`python3 tools/arch-check.py`）：十三个模块、120 个 `.yh`、
+53,545 行**：`gen` 5,621 · `parse` 9,699 · `build` 11,015 · `lower` 5,819 ·
+`comptime` 5,517 · `ir` 5,005 · `ast` 3,433 · `backend` 3,264 · `testkit` 1,592 ·
 `lex` 1,069 · `check` 958 · `cmd` 381 · `builtin` 172。
 
 各层来历：`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担
@@ -32,6 +32,17 @@ AST 与快照的**只读一致性校验**（不是语义分析），`builtin/` �
 只保留 `main` 为 `pub`。规则见
 [导出面收缩设计](../docs/03-design/yh-编译器模块导出面收缩设计.md)与
 [模块私有类型设计](../docs/03-design/yh-模块私有类型设计.md)。
+
+**未使用函数是编译错误（UF1，2026-10-27）**：本模块声明、既没 `pub` 也没
+`extern`/C ABI 的函数定义，如果整个模块的源码里除了声明名本身没有任何同名
+标识符，`build`/`run`/`test` 与单文件编译都直接报
+「函数未使用（本模块没有任何引用；请删除或改为 pub）」。实现是
+`build/unused_function.yh` 在 pass1 之后、pass2 之前对模块全部文件做一次
+token 扫描（按名字，不按解析期引用标记）：函数级 check 切片命中时正文不会
+重新解析、`$f(...)` 编译期调用在普通函数体里直接折成常量、生产构建不解析
+`test` 正文，三者都会让「引用标记」在增量构建里缺项，而 token 扫描只会漏报
+（同名局部变量遮蔽、递归自引用算作已使用），不会把合法程序判死。`pub`（含
+入口 `main` 与 `test` 生成符号）与 `@[extern]` 的 C ABI 回调目标天然跳过。
 
 ```
 bin/yh-<平台>-<架构>（Release 种子）──yh build──▶ yh ──自编──▶ yh'（固定点：模块 .s/.s.i 逐字节相同）

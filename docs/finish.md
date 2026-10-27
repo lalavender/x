@@ -1,9 +1,87 @@
 # finish
 
-滚动日志：只保留最近三天（当前为 2026-10-22 ～ 2026-10-24）的交付记录，靠前条目为最新状态。
+滚动日志：只保留最近三天（当前为 2026-10-24 ～ 2026-10-27）的交付记录，靠前条目为最新状态。
 更早的 384 条（2026-09-27 ～ 2026-10-21）已归档在
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
+
+## 2026-10-27 未使用函数直接报错（UF1）：检查进 pass1，清掉 24 个死函数
+
+- **需求**（用户）：分析当前编译器后，让「没有被使用的函数」直接报错，并顺手把这批
+  死代码清掉。
+- **规则**：本模块声明、既没 `pub` 也没 `extern`/C ABI 的函数定义，如果整个模块的
+  源码里除了它自己的声明名之外没有任何同名标识符，`build`/`run`/`test` 与单文件
+  编译都报 `函数未使用（本模块没有任何引用；请删除或改为 pub）`。`pub`（含入口
+  `main` 与 `test` 生成符号）、`extern`（无正文）、`@[extern]` 带正文的 C ABI 回调
+  目标（按 C 名字导出，可能只被同项目 C 源调用）一律跳过。
+- **实现**：新增 `compiler/build/unused_function.yh`（222 行），在 pass1 之后、pass2
+  之前对模块全部文件做一遍 token 扫描：候选来自顶层声明索引（`PDecl.keyword + 1`
+  是名字 token）与符号表（`SYM_FN` + `F_GLOBAL` − `F_PUB`/`F_EXTERN`/`F_CABI`），
+  命中用首字节过滤 + 名字字节比较，跳过声明自身的名字 token。调用点两处：
+  `module_worker.yh`（模块路径，传 `p_mods[m].files` 与 `sym_base`）与
+  `llvm_emit.yh`（单文件路径把该文件当整个模块）。
+- **为什么按 token 而不是解析期引用标记**：三条路径都会让「引用标记」在增量构建里
+  漏记——函数级 check 切片命中时正文不重新解析（`parse_decl` 直接 `continue`）；
+  普通函数体里的 `$f(...)` 编译期调用折成常量、不留引用节点；生产构建按设计不解析
+  `test` 正文（只在 test 里用到的私有辅助会被误判）。token 扫描对这三条都成立，
+  方向是保守的：只会漏报（同名局部变量遮蔽、递归自引用算作已使用），不会把合法
+  程序判死。代价与后续精确化已立项在 `docs/todo.md`（UF1 精确化）。
+- **清掉的死代码（24 个，全部是 LL12 退役旧发射器/历史迭代的遗留）**：
+  `gen`：`abi_c_signature`、`ty_name_text`、`tg_sym_prefix`、`tg_is_2byte`、
+  `tg_is_8byte`、`tg_align_scalar`；`backend`：`llvm_abi_emit_c_aggregate_call`（旧
+  C 聚合 ABI 发射，76 行）；`comptime`：`ct_invoke`；`ast`：
+  `ast_comptime_for_find_binding`、`ast_comptime_for_info`；`parse`：
+  `ct_enum_pending_reset`、`ct_enum_pending_count`；`lower`：`checked_lower_error`、
+  `checked_lower_expr`（薄包装，正文版本才是调用面）；`build`：`li_kind`、
+  `mb_sub_dir`、`pj_source_cat`；`libs`：`cli.text_visible_width`、
+  `cli.action_takes_values`、`json.utf8_is_scalar`、`toml.p_at_end`、
+  `toml.p_current`、`libc.text_len`、`libc.is_digit`。
+- **语料**：新增 `tests/yh-run/fail/168-unused-function.yh`（`fail-contains:
+  函数未使用`）与 `tests/yh-run/pass/10-unused-function-scope.yh`（`pub` 未用、
+  函数值引用、只在 `test` 正文里用到的私有辅助都不算未使用）；新增模块级 fixture
+  `tests/modules/projects/unusedfn`（依赖项目里的 `ufmath` 模块，`helper` 只在同包
+  另一个文件里被调用 → 通过；`dead` 项目的孤儿私有函数 → 报错），并在
+  `build-check.py` 加 `uf1-module-scope-use`(42) 与 `uf1-unused-function`。
+  依赖模块特意叫 `ufmath`：`json`/`math` 这类名字已被标准库 `libs/` 占用，
+  `import math` 会解析到标准库而不是 fixture 的依赖项目（旧的 `basic`/`u5-rebind`
+  探针正是因为 `libs/json` 上线而偶尔解析到标准库，与本轮无关）。
+- **fixture 因新规则做的调整**（都不是功能变更）：`ytestsem` 库项目里那个不叫入口的
+  `main` 改 `pub`；`llvmarchitecture/cases/library.yh` 的 `product`/`layout_bytes`
+  改 `pub`；`irfront`、`tokenreplay` 里只为 IR/形状检查存在的私有函数由 `main`
+  以零净贡献引用；`scheduler`/`scheduler-diamond` 生成的 600 个 `private_NNNN` 改
+  `pub`，且「私有正文失败阻止链接」那条探针改用 `pub broken_entry` 引用
+  `broken_private`，避免被 UF1 先拦下来、让断言仍然验证正文检查失败；
+  `tests/yh-run/pass/06..08`、`run/181` 则让 `main` 真正引用原本悬空的声明。
+- **预算**：`tools/arch-check.py` 的 `max_build_lines` 10,807 → 11,015（UF1 新增
+  222 行、删掉本模块 3 个死函数共 25 行，故本模块净 +197；本文件即理由）；`compiler/README.md` 的规模数字与 `docs/todo.md` 的基线表同步到
+  2026-10-27 实测（13 模块 / 120 文件 / 53,545 行）。
+- **验证（本机 Darwin/arm64）**：`just`（种子冷编）→ `./yh` 自编 `compiler/`（新检查
+  生效后先报 17 个、逐个清到 0）；`just test` 全绿（语法 49/49、运行 362/363 含 1
+  SKIP、pass 9/9）；`just libs-test` 全绿（122 PASS）；`just selfhost-native` 全绿：
+  cc3/cc4 固定点 39 产物一致、cc4 自解析 120 文件、运行语料 362/363、模块语料
+  19/19、`build-check` **124/124**（含新增 `uf1-module-scope-use` 与
+  `uf1-unused-function`）、LA3 函数级 IR 缓存矩阵 O0/O2 全通过、LA0 架构基线通过；
+  `python3 tools/arch-check.py` 与 `tests/tools/arch-check/check.py`（自测 2/2）通过。
+- **实现细节：检查不能改名字池**。首版用 `tml_intern_str` + `sym_lookup_off` 把
+  声明名映射到符号，名字池因此变长，连带改变了后续阶段的池布局：`LA3` 函数级
+  缓存矩阵的「插入新函数」从预期的 check 4 命中 1 未命中变成 0 命中 5 未命中。
+  现在改为在 `[sym_base, c_sym_n)` 里按字节比较直接找符号（`uf_symbol_for_decl`），
+  检查对 GenState 只读，缓存键恢复稳定。**教训：pass1/pass2 之间的任何检查都不要
+  往名字池/类型表里追加东西。**
+- **环境提示**：直接执行 `python3 tests/modules/build-check.py` 而不是走 `just`
+  会缺 `SDKROOT`（justfile 从固定 SDK 记录导出），于是 cinterop 的 `-lm`、
+  `os6-default-stdlib` 的 `_nanosleep`/`_getpid`、`r2b-fork-worker-space-paths` 的
+  `arm64e.x1` TAPI 都会链接失败；这 14 例不是回归。走 `just selfhost-native`
+  才是门禁口径。`LA3` 的插入探针也改成自递归形态（`fn extra() int { return
+  extra(); }`）：新函数没有外部调用方，不改签名表，名字扫描又算已使用，正好保住
+  矩阵原本的 4 命中 1 未命中口径。另外本轮共享 LLVM 闭包缓存
+  （`~/Documents/x/tmp/llvm-migration/llvm-host-darwin-aarch64/host.json`）里的
+  `host_builder_sha256` 是旧脚本身份（与当前 `tools/llvm-darwin-host.py`
+  `ae9e23b5…` 不符），导致 `auto` 模式试图重建闭包并在 `relative_to` 上报错；
+  按当前脚本摘要修正该字段（原件备份在 `tmp/host.json.bak`）后闭包被正常复用，
+  未重建任何 LLVM 产物。
+- **未做**：不加 `@[keep]`/`@[allow(unused)]` 一类逃生属性（`pub` 已足够，符合
+  极简原则）；不检查 `const`/`let`/类型的未使用（本轮需求只到函数）。
 
 ## 2026-10-26 CI 去掉 ANTLR：参考语法门只在本地开发跑
 

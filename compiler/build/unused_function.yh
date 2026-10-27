@@ -1,0 +1,222 @@
+module build
+import gen
+
+// ============================================================================
+// unused_function.yh —— 未使用函数检查（UF1）
+//
+// 规则：本模块自己声明、既没有 `pub` 也不是 `extern`/C ABI 的函数定义，
+// 如果整个模块的源码里除了它自己的声明名之外没有任何同名标识符，就报
+// 「函数未使用」。`pub` 是导出面（main 与 test 生成符号也按 pub 登记），
+// 由其他模块/测试使用，天然跳过；`extern` 没有正文，也跳过；`@[extern]`
+// 带正文的回调目标按 C 符号导出，可能只被同项目的 C 源调用，同样跳过。
+//
+// 为什么按 token 而不是按解析期的引用标记：
+//   * pass2 的函数正文可以走 check 切片缓存（命中后整个正文不解析），
+//     「解析时标记引用」在增量构建里必然缺项，会把活函数判死；
+//   * 普通函数体里的 `$f(...)` 编译期调用在语义阶段直接折成常量，
+//     不留下引用节点；
+//   * 生产构建按设计不解析 test 正文，只在 test 里用到的私有辅助函数
+//     会被误判。
+// 因此这里用「模块内出现过同名标识符」这一保守判据：只会漏报（同名的
+// 局部变量/字段遮蔽、递归自引用算作已使用），不会把合法程序判死。
+//
+// 检查在 pass1（符号与顶层声明索引齐备）之后、pass2 之前执行，跨文件的
+// 使用同样计入；单文件编译以该文件为整个「模块」。
+// ============================================================================
+
+// UfCand：一条候选记录（本模块私有函数定义）。
+struct UfCand {
+    sym int      // 函数符号下标
+    name_off int // 名字池偏移
+    name_len int // 名字字节长度
+    file_id int  // 声明所在文件（诊断路径）
+    line int     // 声明名 token 的 1 基行
+    col int      // 声明名 token 的 1 基列
+}
+
+// uf_decl_name_token：声明索引里 `fn` 关键字右边的名字 token 下标。
+// 非函数声明、或名字位置不是标识符时返回 -1。
+fn uf_decl_name_token(fi int, di int) int {
+    let file *gen.PFile = gen.p_file(fi)
+    if (file.decls == 0 || di < 0 || di >= file.decl_n) { return -1 }
+    let decl gen.PDecl = file.decls[di]
+    if (decl.kind != gen.TK_FN) { return -1 }
+    let nt int = decl.keyword + 1
+    if (nt >= decl.end || nt >= file.token_n) { return -1 }
+    if (file.tokens[nt].kind != gen.TOK_IDENT) { return -1 }
+    if (file.tokens[nt].len <= 0) { return -1 }
+    return nt
+}
+
+// uf_is_candidate：符号是否是本模块自己的私有函数定义（可被报未使用）。
+// C ABI 函数（`@[extern]`，含带正文的回调目标）不参与：它的符号按 C 名字
+// 导出，可能只被同项目的 C 源或外部调用方引用，本模块源码里看不到引用。
+fn uf_is_candidate(sym int, sym_base int) int {
+    let t *gen.TaskCtx = gen.task()
+    if (sym < sym_base || sym >= t.c_sym_n) { return 0 }
+    if (t.c_syms[sym].kind != gen.SYM_FN) { return 0 }
+    let fl int = t.c_syms[sym].flags
+    if ((fl & gen.F_GLOBAL) == 0) { return 0 }
+    if ((fl & (gen.F_PUB | gen.F_EXTERN | gen.F_CABI)) != 0) { return 0 }
+    return 1
+}
+
+// uf_bytes_eq：两个字节缓冲的 [start,len) 区间逐字节比较（相等返回 1）。
+fn uf_bytes_eq(a *u8, a_start int, b *u8, b_start int, n int) int {
+    let i int = 0
+    for i < n {
+        if (a[a_start + i] != b[b_start + i]) { return 0 }
+        i += 1
+    }
+    return 1
+}
+
+// uf_symbol_for_decl：在 [sym_base, c_sym_n) 里按名字字节找该声明的函数符号。
+// 不用名字池 intern：检查跑在 pass1 与 pass2 之间，名字池增大会改变后续
+// 阶段的池布局，可能影响函数级缓存键的稳定性（实测会让 check 缓存全 miss）。
+fn uf_symbol_for_decl(fi int, tok *gen.Tok, sym_base int) int {
+    let t *gen.TaskCtx = gen.task()
+    let file *gen.PFile = gen.p_file(fi)
+    let sym int = t.c_sym_n - 1
+    for sym >= sym_base {
+        if (uf_is_candidate(sym, sym_base) != 0
+            && t.c_syms[sym].name_len == tok.len
+            && uf_bytes_eq(file.source, tok.start, t.np_data,
+                t.c_syms[sym].name_off, tok.len) != 0) {
+            return sym
+        }
+        sym -= 1
+    }
+    return -1
+}
+
+// uf_collect：从文件集合的顶层声明索引里收集私有函数候选（返回候选数）。
+fn uf_collect(files *int, file_n int, sym_base int, cands *UfCand,
+    used *u8, mask *u8) int {
+    let t *gen.TaskCtx = gen.task()
+    let cand_n int = 0
+    let fi_i int = 0
+    for fi_i < file_n {
+        let fi int = files[fi_i]
+        let file *gen.PFile = gen.p_file(fi)
+        let di int = 0
+        for di < file.decl_n {
+            let nt int = uf_decl_name_token(fi, di)
+            if (nt < 0) { di += 1; continue }
+            let tok gen.Tok = file.tokens[nt]
+            let sym int = uf_symbol_for_decl(fi, &tok, sym_base)
+            if (sym < 0) { di += 1; continue }
+            // 同一符号只收一次（模块内不允许重名，这里只作防御）。
+            let dup int = 0
+            let dj int = 0
+            for dj < cand_n {
+                if (cands[dj].sym == sym) { dup = 1 }
+                dj += 1
+            }
+            if (dup != 0) { di += 1; continue }
+            cands[cand_n].sym = sym
+            cands[cand_n].name_off = t.c_syms[sym].name_off
+            cands[cand_n].name_len = tok.len
+            cands[cand_n].file_id = fi
+            cands[cand_n].line = tok.line
+            cands[cand_n].col = tok.col
+            used[cand_n] = 0
+            // 首字节过滤表：绝大多数 token 一次查表就被排除。
+            mask[file.source[tok.start].to_type(int)] = 1
+            cand_n += 1
+            di += 1
+        }
+        fi_i += 1
+    }
+    return cand_n
+}
+
+// uf_scan_file：在单个文件的 token 流里标记候选的使用。
+// 跳过函数声明的名字 token（声明本身不算使用）。返回剩余未使用数。
+fn uf_scan_file(fi int, cands *UfCand, used *u8, mask *u8, cand_n int,
+    remaining int) int {
+    let t *gen.TaskCtx = gen.task()
+    let file *gen.PFile = gen.p_file(fi)
+    let dn int = 0
+    let ti int = 0
+    for ti < file.token_n {
+        if (remaining == 0) { break }
+        // 声明按 keyword 升序，游标随 token 前进单向推进。
+        for dn < file.decl_n {
+            if (file.decls[dn].keyword + 1 >= ti) { break }
+            dn += 1
+        }
+        let skip int = 0
+        if (dn < file.decl_n && file.decls[dn].kind == gen.TK_FN
+            && file.decls[dn].keyword + 1 == ti) { skip = 1 }
+        let tok gen.Tok = file.tokens[ti]
+        if (skip == 0 && tok.kind == gen.TOK_IDENT && tok.len > 0
+            && mask[file.source[tok.start].to_type(int)] != 0) {
+            let ci int = 0
+            for ci < cand_n {
+                if (used[ci] == 0 && cands[ci].name_len == tok.len
+                    && uf_bytes_eq(file.source, tok.start, t.np_data,
+                        cands[ci].name_off, tok.len) != 0) {
+                    used[ci] = 1
+                    remaining -= 1
+                }
+                ci += 1
+            }
+        }
+        ti += 1
+    }
+    return remaining
+}
+
+// unused_function_report：检查给定文件集合里声明的私有函数是否被引用。
+// files 是模块的文件号数组；sym_base 是本模块 pass1 起点的符号下标
+// （单文件编译传 0）。有未使用函数时逐条报错并返回 -1，否则返回 0。
+pub fn unused_function_report(files *int, file_n int, sym_base int) int {
+    let gs *gen.GenState = gen.G()
+    let t *gen.TaskCtx = gen.task()
+    let room int = t.c_sym_n - sym_base
+    if (files == 0 || file_n <= 0 || room <= 0) { return 0 }
+    let cands *UfCand = malloc((room * sizeof(UfCand)).to_type(u64)).to_type(*UfCand)
+    let used *u8 = malloc(room.to_type(u64)).to_type(*u8)
+    let mask *u8 = malloc(256.to_type(u64)).to_type(*u8)
+    if (cands == 0 || used == 0 || mask == 0) {
+        if (cands != 0) { free(cands.to_type(*void)) }
+        if (used != 0) { free(used.to_type(*void)) }
+        if (mask != 0) { free(mask.to_type(*void)) }
+        return gen.fail("内存分配失败")
+    }
+    let mi int = 0
+    for mi < 256 {
+        mask[mi] = 0
+        mi += 1
+    }
+    let cand_n int = uf_collect(files, file_n, sym_base, cands, used, mask)
+    if (cand_n < 0) {
+        free(cands.to_type(*void)); free(used.to_type(*void))
+        free(mask.to_type(*void))
+        return -1
+    }
+    let remaining int = cand_n
+    let fi_i int = 0
+    for fi_i < file_n {
+        if (remaining == 0) { break }
+        remaining = uf_scan_file(files[fi_i], cands, used, mask, cand_n, remaining)
+        fi_i += 1
+    }
+    if (remaining != 0) {
+        let ri int = 0
+        for ri < cand_n {
+            if (used[ri] == 0) {
+                gen.set_source_path(pj_pool_str(gs.p_files[cands[ri].file_id].path_off))
+                gen.err_lc(cands[ri].line, cands[ri].col,
+                    "函数未使用（本模块没有任何引用；请删除或改为 pub）")
+            }
+            ri += 1
+        }
+    }
+    free(cands.to_type(*void))
+    free(used.to_type(*void))
+    free(mask.to_type(*void))
+    if (remaining != 0) { return -1 }
+    return 0
+}
