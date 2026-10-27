@@ -326,9 +326,11 @@ cases 122/122）。
   `just build` + `arch-check` 通过（`link` 3,531 → 3,657，新增 `LinkPlan` 结构）；
   `just test` 全绿（ANTLR + 语法 49/49 + 运行语料 122/122 + compiler 内嵌测试 +
   libs）；`tests/modules/build-check.py --backend llvm` **122/122**（暂存副本口径）。
-  未跑 `selfhost-native` 全门：共享 LLVM 闭包缓存已被另一分支的
-  `tools/llvm-darwin-host.py` 重新准备（bridge 哈希 3098a81f → a09fc268），
-  独立 worktree 的闭包自检过不去；固定点门待主 worktree 归位后补跑。
+  当时未在**隔离 worktree** 跑 `selfhost-native` 全门：共享 LLVM 闭包缓存已被
+  另一分支的 `tools/llvm-darwin-host.py` 重新准备（bridge 哈希 3098a81f →
+  a09fc268），隔离副本的闭包自检过不去。**归位后在主 worktree 补跑，双门全绿**：
+  `just test` 0 失败；`just selfhost-native` 0 失败——候选两代固定点
+  48 个产物逐字节一致、cc4 自解析 127 个源文件、项目验收 122/122、libs 测试全过。
 - **B2-5 预算收口**：`max_function_lines` 700 → **360**（实测最大函数已是
   `lower/module_snapshot_lower_expr` 的 360，`mb_link_query_identity` 274、
   阶段函数 ≤167）；`max_link_lines` 3,657、`max_build_lines` 6,308、
