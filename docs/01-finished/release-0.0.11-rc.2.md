@@ -75,10 +75,26 @@
    （构建缓存目录）、`YH_DEP_OPT`、`YH_LINK_DEAD_STRIP`、`YH_LINK_STRIP`；
    `FAST_DIR` 默认按 workspace 隔离（`$TMPDIR/yh-fast-<hash>[-run_id]`）。
 
-## 验证（本机 macOS/arm64，llvm 分支 `190bf9c`）
+## rc.2 首发失败与修复（2026-10-28）
+
+rc.2 第一次打 tag 时三端全红，两处都是**既有回归**，已在本版修掉：
+
+1. **Darwin RB5 位级可复现**（`test-llvm-darwin` 失败）：B2-3 把 `mb_link` 拆成
+   `LinkPlan` 阶段时，`mb_link_prepare` 先按 RB5 算出 Mach-O 暂存子目录
+   （`<dir>/.yh-tmp.<pid>/<basename>`，让 ad-hoc 签名的 identifier 只取 basename），
+   随后又无条件用 ELF 的 `<out>.yh-tmp.<pid>` 覆盖，pid 重新进入 identifier，
+   同源两次链接产物哈希不同。修复：该覆盖只在 `use_macho == 0` 时执行。
+2. **容器内 just 版本**（`linux-arm64`/`x86_64` 失败）：`justfile` 里的裸
+   `unexport YH_BUILD_CACHE` 在 Ubuntu 24.04 的 **just 1.21** 上解析失败
+   （`Expected '*', ':', '$', '=', identifier, or '+', but found end of line`）。
+   修复：改成 `export YH_BUILD_CACHE := ""`——空值对编译器等价于未设置（走项目内
+   `.build`），门禁语义不变，旧 just 也能解析（已在 `yh-ci:ubuntu24` 镜像里
+   `just --list` 验证）。
+
+## 验证（本机 macOS/arm64，llvm 分支）
 
 - `just` 构建通过；`just arch-check` 通过（16 模块 / 129 文件 / 55,206 行，预算按实测）。
-- `just test`：**133 passed / 0 failed**。
+- `just test`：**133 passed / 0 failed**；`just test-llvm-darwin`：22 项 PASS。
 - `just selfhost-native`：模块固定点 cc3→cc4（48 产物）一致、cc4 自解析 **129** 文件、
   固定点探针 OK、项目语料 **124/124**。
 - 专项门：`darwin-dead-strip.py` 4/4、`opt-level.py` 4/4、`size-report` 比值 1.063 ≤ 1.2、
