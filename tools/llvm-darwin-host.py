@@ -66,6 +66,19 @@ def display_path(path):
         return path
 
 
+def record_path(path):
+    """身份记录里的路径字段：仓库内写相对路径，仓库外写绝对路径。
+
+    记录消费者统一用 ROOT / record["..."] 拼接，pathlib 对绝对路径会直接
+    返回原值，因此两种形态都可用；缓存根在仓库外（CI executor 或直接指向
+    主 worktree 的 tmp/llvm-migration）时不再抛 ValueError。
+    """
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def run(command, label, timeout=None):
     """执行工具并保存 stdout/stderr；失败时指出 tmp 日志位置。"""
     directory = workdir()
@@ -105,7 +118,7 @@ def write_selfhost_flags(record, directory=None):
     path = selfhost_flags_path(directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(selfhost_flags_text(record["selfhost_link_flags"]), encoding="utf-8")
-    record["selfhost_flags_file"] = str(path.relative_to(ROOT))
+    record["selfhost_flags_file"] = record_path(path)
     record["selfhost_flags_sha256"] = digest(path)
     runtime = [flag for flag in record["selfhost_link_flags"]
                if flag != "-force_load" and not flag.startswith("/")]
@@ -115,7 +128,7 @@ def write_selfhost_flags(record, directory=None):
         runtime = [flag for flag in runtime if flag != "-lc++"]
     runtime_path = selfhost_runtime_path(directory)
     runtime_path.write_text(selfhost_flags_text(runtime), encoding="utf-8")
-    record["selfhost_runtime_file"] = str(runtime_path.relative_to(ROOT))
+    record["selfhost_runtime_file"] = record_path(runtime_path)
     record["selfhost_runtime_sha256"] = digest(runtime_path)
     return path
 
@@ -139,7 +152,7 @@ def write_cxx_stub(record, directory=None):
     path = cxx_stub_path(directory)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(source.read_bytes())
-    record["cxx_tbd"] = str(path.relative_to(ROOT))
+    record["cxx_tbd"] = record_path(path)
     record["cxx_tbd_sha256"] = digest(path)
 
 
@@ -438,8 +451,8 @@ def build_host(jobs):
         "sdk_builder_sha256": digest(SDK_BUILDER),
         "bridge_source_sha256": digest(BRIDGE), "bridge_header_sha256": digest(BRIDGE_HEADER),
         "lld_bridge_source_sha256": digest(LLD_BRIDGE), "bridge_sha256": digest(archive),
-        "bridge_archive": str(archive.relative_to(ROOT)),
-        "sdk_prefix": str(SDK_PREFIX.relative_to(ROOT)),
+        "bridge_archive": record_path(archive),
+        "sdk_prefix": record_path(SDK_PREFIX),
         "llvm_archives": {path.name: digest(path) for path in libraries},
         "lld_archives": {name: digest(SDK_PREFIX / "lib" / name) for name in LLD_ARCHIVES},
         "link_flags": flags, "selfhost_link_flags": selfhost_flags,
@@ -461,7 +474,7 @@ def check(full=True):
     """核对 host 配置与当前桥/SDK身份；full 模式同时重算静态库摘要。"""
     path = workdir() / "host.json"
     if not path.is_file():
-        return [f"缺少 Darwin LLVM host 身份记录：{path.relative_to(ROOT)}"]
+        return [f"缺少 Darwin LLVM host 身份记录：{display_path(path)}"]
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
         sdk = json.loads(SDK_RECORD.read_text(encoding="utf-8"))
@@ -600,6 +613,16 @@ def main(argv):
     if args.command == "prepare":
         if args.jobs < 1:
             raise RuntimeError("LLVM 并行构建数必须大于零")
+        # 幂等：记录与磁盘一致就直接复用（AGENTS：just bootstrap = 幂等
+        # just llvm-host + 冷编）。只有记录缺失或身份不符才真正重建。
+        problems = check(full=True)
+        if not problems:
+            record = json.loads((workdir() / "host.json").read_text(encoding="utf-8"))
+            print(json.dumps({"host": HOST, "reused": True,
+                              "bridge_sha256": record["bridge_sha256"],
+                              "sdk_host_sha256": record["sdk_host_sha256"],
+                              "probe": record["bridge_probe"]}, ensure_ascii=False))
+            return 0
         record = build_host(args.jobs)
         print(json.dumps({"host": HOST, "bridge_sha256": record["bridge_sha256"],
                           "sdk_host_sha256": record["sdk_host_sha256"],
