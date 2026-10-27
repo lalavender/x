@@ -8,7 +8,6 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
-
 ## 2026-10-28 合并性能 WIP（PF2/PL1/RB5/YH_WORKERS）到 B1/B2 树
 
 把主工作区的临时分支 `tmp/main-wip-20261028`（性能基线 PF1b–PF3、PL1 缓存优化、
@@ -198,6 +197,11 @@ cases 122/122）。
   从 10982 上调到 11034，理由写进 `tools/arch-check.py` 的 BUDGETS 注释。
 - **门禁**：`just test`、`just selfhost-native` 全绿；`just arch-check` 通过。
 
+滚动日志：只保留最近三天（当前为 2026-10-24 ～ 2026-10-27）的交付记录，靠前条目为最新状态。
+更早的 384 条（2026-09-27 ～ 2026-10-21）已归档在
+[finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
+超出窗口的条目迁入同一个归档文件，新增条目写在最前。
+
 ## 2026-10-27/28 0.0.11-rc.1 发布准备 + 三处 CI 闭包缓存修复
 
 - **滚种子**：`just seed` 覆盖 `bin/yh-darwin-arm64`（未入库），当前种子即 0.0.11
@@ -231,6 +235,19 @@ cases 122/122）。
 - **环境**：`just llvm-host` 幂等化后本地/CI 都不再重建闭包；闭包记录里的
   `host_builder_sha256` 每次改 `tools/llvm-darwin-host.py` 需重新基线（本轮改了三次，
   最终记录与磁盘一致，`check(full=True)` 为空）。
+- **本 workspace 私有闭包**：并发会话反复重建共享闭包的 `libyh-llvm-bridge.a`
+  并改写 `host.json`，身份记录几分钟就被打花（`check` 报「构建器已变化」，CI 于是
+  试图重建 SDK）。因此建了同源私有闭包
+  `~/Documents/x/tmp/llvm-migration-llvm-3`（`darwin-sdk` 软链共享的只读 SDK，
+  host 目录为 232 KB 的实体副本，记录重新基线为 `tmp/llvm-migration/...` 别名路径），
+  两个 workflow 的缓存步骤改为按候选顺序选目录：
+  显式 `YH_LLVM_CACHE` → 私有闭包 → 共享闭包，命中即 `ln -sfn` 到 `tmp/llvm-migration`。
+- **环境**：`just llvm-host` 幂等化后本地/CI 都不再重建闭包；闭包记录里的
+  `host_builder_sha256` 每次改 `tools/llvm-darwin-host.py` 需重新基线（本轮改了四次，
+  最终记录与磁盘一致，`check(full=True)` 为空、`tools/link-closure.py check
+  --host darwin-aarch64` PASS）；`record_path()` 必须把路径写成
+  `tmp/llvm-migration/...` 别名，否则 `[link-darwin-arm64]` 的 bridge 会被
+  link-closure 误分类到 support 组。
 - **待办**：tag 推送后由 `release.yml` 三端构建 + `publish-release.py` 发布
   prerelease；结果以 Release 与 CI 记录为准。发布后用 rc 二进制做
   `rm -rf bin && just fetch-seed → just → just test → just selfhost-native` 验收，
@@ -1154,4 +1171,3 @@ RB2（门禁校验 staged 二进制新鲜度），修掉 RB3、复核 RB4。
   另起编号、名义名不同不合并），`llvm-module-ownership` 用例通过；
   `llvm-function-cache.py` O0/O2 矩阵通过；`just test` 73 s 绿。
 - 说明：IR 层去重是纯收益（类型表更小、编号可比），不改变序列化/合并格式。
-

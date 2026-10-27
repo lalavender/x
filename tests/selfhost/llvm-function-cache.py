@@ -222,7 +222,11 @@ def one_level(compiler, opt):
 
         # 插入第 5 个函数：签名事实进函数键（调用方 ABI 依赖被调方签名），
         # 声明集合变化按设计保守失效整模块——新函数可能被任何旧函数调用。
-        append(main, "\nfn extra() int {\n    return 5;\n}\n")
+        # 新函数没有任何外部调用方：私有 + 无引用会被 UF1（未使用函数检查）
+        # 判死，所以写成自递归形态（UF1 按名字判使用，自引用算已使用）。签名
+        # () int 与既有 text_marker 相同，不新增类型/签名表项，其余 4 个函数的
+        # check 键因此保持稳定（期望 4 命中 1 未命中）。
+        append(main, "\nfn extra() int {\n    return extra();\n}\n")
         inserted, _, _ = build(project, compiler, opt)
         expect(inserted, (0, 5, 5), (4, 1, 4), "插入新函数")
 

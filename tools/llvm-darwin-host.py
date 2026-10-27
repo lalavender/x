@@ -601,6 +601,16 @@ def main(argv):
     if args.command == "prepare":
         if args.jobs < 1:
             raise RuntimeError("LLVM 并行构建数必须大于零")
+        # 幂等：记录与磁盘一致就直接复用（AGENTS：just bootstrap = 幂等
+        # just llvm-host + 冷编）。只有记录缺失或身份不符才真正重建。
+        problems = check(full=True)
+        if not problems:
+            record = json.loads((workdir() / "host.json").read_text(encoding="utf-8"))
+            print(json.dumps({"host": HOST, "reused": True,
+                              "bridge_sha256": record["bridge_sha256"],
+                              "sdk_host_sha256": record["sdk_host_sha256"],
+                              "probe": record["bridge_probe"]}, ensure_ascii=False))
+            return 0
         record = build_host(args.jobs)
         print(json.dumps({"host": HOST, "bridge_sha256": record["bridge_sha256"],
                           "sdk_host_sha256": record["sdk_host_sha256"],
