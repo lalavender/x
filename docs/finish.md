@@ -5,6 +5,44 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-27/28 0.0.11-rc.1 发布准备 + 三处 CI 闭包缓存修复
+
+- **滚种子**：`just seed` 覆盖 `bin/yh-darwin-arm64`（未入库），当前种子即 0.0.11
+  编译器（sha256 `3d1f1c9e…`），后续本地构建直接跑 UF1 检查。
+- **发版分支**：`0.0.11-rc` 从 `0.0.10-release` 切出（0.0.10 已正式发布，补上
+  落在 release 分支的发布说明），cherry-pick UF1 提交；`compiler/project.toml` 版本
+  0.0.10 → **0.0.11**（rc 期即写目标正式号）；新增
+  `docs/01-finished/release-0.0.11-rc.1.md`（含「不兼容变更：私有且无引用的函数
+  会编译失败」与升级指引）；打 annotated tag `0.0.11-rc.1` 推 Gitea。
+- **CI 首次推送（run 156/157）darwin 任务 30 s 内失败，三个独立根因**：
+  1. `ci.yml`/`release.yml` 用 `${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}`
+     拼缓存根，而 runner（host 模式）会把 HOME 覆写成 `.cache/act/<id>/tmp/<uuid>`，
+     `-d` 永远为假 → 走 `just llvm-host` 现场重建；重建时没有 `SDKROOT`，宿主默认
+     SDK 已是 27.x（`libSystem.tbd` 含 `arm64e.x1`），内嵌 lld 21 直接拒收。
+     改为顶层 `env: YH_LLVM_CACHE` 钉死宿主缓存绝对路径 +
+     `cache="$(python3 tools/llvm_cache.py)"`（显式 env → 本仓库 tmp → 主 worktree）。
+  2. `llvm-darwin-host.py prepare` 无条件 `build_host()`，与 AGENTS「幂等
+     `just llvm-host`」不符 → 现在先 `check(full=True)`，一致就打印
+     `"reused": true` 复用。
+  3. `build_host`/`write_selfhost_flags`/`write_cxx_stub`/`check` 用
+     `path.relative_to(ROOT)` 记录路径，缓存根在仓库外（CI executor、直接指向主
+     worktree 缓存）时抛 `ValueError`，把「build-sdk 失败」变成 traceback
+     （run 518）。新增 `record_path()`（仓库内相对、仓库外绝对；消费者
+     `ROOT / record[...]` 两种形态都成立）与 `display_path()`。
+- **并发会话踩坑**：本机另一个会话（`~/Documents/x`、`cichlid` worktree）在同一
+  `TMPDIR/yh-fast` 与同一 LLVM 闭包缓存上跑门禁，会覆盖暂存编译器（`yh-fast/yh`）
+  和闭包记录——我这边一度出现「同一提交 build-check 124/124」与「123/124 + 假红」
+  交替、以及 `host.json` 摘要与磁盘不一致。定位后改用私有
+  `FAST_DIR=$PWD/tmp/yh-fast` 跑门禁，并重新基线闭包记录（`bridge_sha256` 等按磁盘
+  现值重算）；CI 侧则用固定 `YH_LLVM_CACHE` 避开 HOME 覆写。
+- **环境**：`just llvm-host` 幂等化后本地/CI 都不再重建闭包；闭包记录里的
+  `host_builder_sha256` 每次改 `tools/llvm-darwin-host.py` 需重新基线（本轮改了三次，
+  最终记录与磁盘一致，`check(full=True)` 为空）。
+- **待办**：tag 推送后由 `release.yml` 三端构建 + `publish-release.py` 发布
+  prerelease；结果以 Release 与 CI 记录为准。发布后用 rc 二进制做
+  `rm -rf bin && just fetch-seed → just → just test → just selfhost-native` 验收，
+  再合并到 `0.0.11-release` 打正式 tag。
+
 ## 2026-10-27 未使用函数直接报错（UF1）：检查进 pass1，清掉 24 个死函数
 
 - **需求**（用户）：分析当前编译器后，让「没有被使用的函数」直接报错，并顺手把这批
