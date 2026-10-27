@@ -242,16 +242,53 @@ cases 122/122）。
   host 目录为 232 KB 的实体副本，记录重新基线为 `tmp/llvm-migration/...` 别名路径），
   两个 workflow 的缓存步骤改为按候选顺序选目录：
   显式 `YH_LLVM_CACHE` → 私有闭包 → 共享闭包，命中即 `ln -sfn` 到 `tmp/llvm-migration`。
+- **私有闭包要装齐三端**：私有闭包最初只有 darwin host 目录，容器任务挂载它
+  后找不到 `llvm-host-linux-*` → 尝试联网下载 → `LLVM 宿主：HTTP Error 404`
+  （run 163 的 linux-arm64 即此）。现在用 `cp -al` 把共享的
+  `llvm-host-linux-{aarch64,x86_64}`、`sdk` 与 `.deb` 硬链进私有闭包（同卷零成本，
+  容器里是真实文件，不是悬空软链），三端 `status` 均为 ready。
+  同时给 `tools/llvm-host.py` 的 `identity()`/错误消息补 `display_path()`，
+  仓库外缓存根不再抛 `ValueError`。
+- **记录里的 link_flags 必须走 canonical 路径**：私有闭包的 `host.json` 是从共享
+  闭包复制的，`link_flags` 里的归档路径带着 `tmp/llvm-migration-llvm-3/` 时，
+  `tools/link-closure.py` 的 `tmp/llvm-migration/` 标记匹配不上 → 派生出的
+  lld/llvm 组为空 → `[link-darwin-arm64].lld 与宿主记录不一致`（run 164/165）。
+  把 `link_flags` 归一回 `.../tmp/llvm-migration/...`（并按 `selfhost_link_flags`
+  补齐归档、保留 `-lc++`）后 `link-closure.py check --host darwin-aarch64` PASS。
 - **环境**：`just llvm-host` 幂等化后本地/CI 都不再重建闭包；闭包记录里的
   `host_builder_sha256` 每次改 `tools/llvm-darwin-host.py` 需重新基线（本轮改了四次，
   最终记录与磁盘一致，`check(full=True)` 为空、`tools/link-closure.py check
   --host darwin-aarch64` PASS）；`record_path()` 必须把路径写成
   `tmp/llvm-migration/...` 别名，否则 `[link-darwin-arm64]` 的 bridge 会被
   link-closure 误分类到 support 组。
-- **待办**：tag 推送后由 `release.yml` 三端构建 + `publish-release.py` 发布
-  prerelease；结果以 Release 与 CI 记录为准。发布后用 rc 二进制做
-  `rm -rf bin && just fetch-seed → just → just test → just selfhost-native` 验收，
-  再合并到 `0.0.11-release` 打正式 tag。
+- **发布结果**：tag `0.0.11-rc.1` 推送后 `release.yml`（run **168**）五 job 全绿，
+  `publish` 创建 prerelease 并上传三端资产
+  （`yh-0.0.11-rc.1-{darwin-arm64,linux-arm64,linux-x86_64}.tar.gz` + `.sha256`）：
+  https://github.com/lalavender/x/releases/tag/0.0.11-rc.1 。
+  分支门 `ci.yml`（run **167**）三平台同样全绿（darwin-arm64 / linux-arm64 /
+  linux-x86_64 各完整跑完语料 + `SKIP_CORPUS=1 selfhost-native`）。
+- **rc 二进制验收**（AGENTS 第 3 步）：`rm -rf bin` →
+  `GH_TOKEN=… GITHUB_REPOSITORY=lalavender/x just fetch-seed`（取到 rc.1 的
+  darwin-arm64 种子，sha256 `c7d230f0…`、自报 `yh 0.0.11`）→ `just`（冷编）→
+  `just test`（三层回归全绿）→ `just selfhost-native`（固定点、自解析、语料、
+  `build-check` 124/124 全绿）。三项均 EXIT=0。
+- **合入主分区 `llvm`**：`merge/llvm-0.0.11` = `gitea/llvm`(8b1e7e1) + `--no-ff`
+  `0.0.11-rc`。两处冲突/问题按如下处理：
+  1. `tools/llvm-host.py`：另一条线已用 `describe()` 修了同一个「仓库外缓存根
+     relative_to 抛错」的问题，取他们的实现（语义等价），丢掉我的 `display_path`；
+  2. `tools/link-closure.py`：记录里的归档路径可能是本仓库 / 主 worktree /
+     容器挂载点 / 私有闭包（`tmp/llvm-migration-<后缀>/`）四种布局，新增
+     `canon_archive()` 统一归一到 `tmp/llvm-migration/...`，并把归档来源扩到
+     `selfhost_link_flags`（新世代记录只留这一份）——`llvm` 线原状是
+     `[link-darwin-arm64].lld 与宿主记录不一致`，合入后该项 PASS。
+- **合入后的门禁**：`just`、`just test` 全绿（TEST=0）；`just test-llvm-darwin`
+  21 项 PASS 后停在 RB5「同一源码重复链接的 Darwin 可执行文件不可位级复现」——
+  该断言是 `llvm` 线自己新加、尚未完成的 RB5 工作，用他们自己的编译器在
+  `gitea/llvm` 独立复现同样失败，与本轮 UF1/rc 无关；`llvm` 分支 CI（run 166）
+  本来就红，本轮合入把它从「link-closure 早停」推进到「21 项 PASS + RB5 待收口」。
+- **下一步**：RB5 由 `llvm` 线收口后跑绿；随后 `git merge --no-ff 0.0.11-rc` →
+  `0.0.11-release`、打正式 tag `0.0.11`（正式 tag 必须落在 release 分支上）；
+  发完删 `0.0.11-rc`、保留 `0.0.11-release`。
 
 ## 2026-10-27 未使用函数直接报错（UF1）：检查进 pass1，清掉 24 个死函数
 
