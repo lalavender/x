@@ -5,6 +5,60 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)（归档文件按批追加，标题保留首批日期区间）。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
+2026-10-25 及更早的条目仍只在归档文件里。
+
+
+## 2026-10-28 合并性能 WIP（PF2/PL1/RB5/YH_WORKERS）到 B1/B2 树
+
+把主工作区的临时分支 `tmp/main-wip-20261028`（性能基线 PF1b–PF3、PL1 缓存优化、
+RB5 Mach-O 链接暂存、`YH_WORKERS`、`stats_print.yh`）合到 B1/B2 之后的 `llvm` 树。
+两个方向都改过同一批文件，逐项对齐如下（**以 B1/B2 的分层为准，把性能改动搬进新结构**）：
+
+- **时钟统一到 `gen.clock_ns`**：性能分支把 `cmd_clock_ns` 从 build 移到 `gen`
+  （`lower`/`ir` 也要计时，它们只能依赖 `gen`），B1/B2 侧则把它移到了 `link`。
+  合并保留 `compiler/gen/clock.*.yh` 作为唯一实现，删除 `compiler/link/clock.*.yh`，
+  `link`/`build`/`testkit` 的调用改 `gen.clock_ns()`。
+- **PF2 四段归因 → `BuildCtx`**：`mb_stats_{front,lower,irbuild,bridge}_ns` 是构建会话量，
+  改为 `bc().front_ns/lower_ns/irbuild_ns/bridge_ns`（原为模块级 `let`）。
+- **PL1 lowering 细分 → `gen.CompileStats`**：8 个 `c_stats_lower_*_ns` 与其它统计同源，
+  落成 `gen.stats().lower_*_ns`（写入点在 `llvm_pipeline`，读取点在 `stats_print`）。
+- **`stats_print.yh` 适配新 API**：`gs.c_stats_*` → `gen.stats().*`、`gs.task.c_stats_*` →
+  `gen.task().c_stats_*`、`mb_stats_*` → `bc()`/`link.object_ns()`/`link.link_ns()`、
+  `mb_sched_*` → `bc().sched_*`；同时删掉 `module_build.yh` 里重复的 `mb_print_stats`
+  （B2-4 拆分时留在那边的那份）。
+- **RB5 Mach-O 链接暂存搬进 `LinkPlan`**：新增 `link_dir[1000]`/`macho_stage`，暂存位置在
+  `mb_link_args` 里决定（Mach-O 用 `.yh-tmp.<pid>/<basename>` 让 codesign identifier
+  只取决于产物名），`link_tmp` 放大到 1000；丢弃统一由 `mb_link_release` 调
+  `mb_macho_tmp_discard`（B2-3 的「单一释放口」正好承接这件事）。
+- **`YH_WORKERS` → `BuildCtx`**：`bc().sched_limit/sched_limit_ready`；读取走
+  `proj.env_fetch` 而不是 libc `getenv`（`getenv` 的 extern 声明随 `link_inputs` 变成了
+  `link` 私有，`build` 不应再依赖它）。
+- **预算按合并后实测重置**：`max_build_lines` 6,415、`max_link_lines` 3,711
+  （性能打点 + `stats_print` 抽出 + RB5 暂存），其余不变。
+- **验证**：`just build` 通过；`just test` 0 失败；`just selfhost-native` 全绿——
+  候选两代固定点 **48 个产物逐字节一致**、cc4 自解析 **128 个源文件**、项目验收
+  **122/122**；`arch-check` 通过（16 模块 / 128 文件 / 55,148 行、`gen.G()` 0、
+  `let` 172）。RB5 的价值也在这次自举里体现：同一源码两次构建的 `yh` 二进制一致。
+
+## 2026-10-28 性能：PL1d2b 探路并证伪（保持代码精简）
+
+- **问题**：`ir_verify` 占 lowering 17%、2.97 ms/函数。静态看有两处逐指令/逐 use 的
+  线性扫描（`ir_find_value_type`、`ir_find_value_position`），理论上让校验退化成 O(n²)。
+- **做法**：实现「值→类型表」+「值位置表」并把 verifier 内部（`ir_verify` 的
+  `value_types`、`ir_use_dominates` 的 `pos_block/pos_inst`）改为查表；
+  用 `--stats` 的 `time_lower_verify_ns` 前后对比（同一过程、各 2 轮）。
+- **结果：无可测收益** —— verify 占 lowering **17.2% → 17.0%**（绝对值下降来自机器变安静）。
+  真实函数只有 100–500 条指令，扫描量 <2%，verify 的时间在真正的逐指令类型/操作数校验
+  与支配性定点计算上。**按「不做无收益的投机优化」回退**，`ssa.yh`/`ssa_call.yh`
+  恢复原状（`git diff` 为空）。
+- **保留**：同日的 PL1d2 首片（去掉每模块第二次全量 verify、新增 `ir_module_sealed`）
+  仍是净收益（A/B 冷编 −10.6%、单函数 −13.3%）。
+- **后续（PL1d2b 只剩两条路）**：① 换支配性算法（Cooper-Harvey-Kennedy 或 bitset 定点）；
+  ② 论证「发布构建关闭模块 verify」的替代门（它是 lowering 之后唯一语义兜底）。
+- **门禁**：`just test` 0 失败、`just selfhost-native` 全绿（固定点一致、自解析 123 文件、
+  project cases 122/122）、`just arch-check` 通过、`llvm-function-cache.py` 六场景全绿。
+
 ## 2026-10-28 构建缓存目录可指定（YH_BUILD_CACHE）
 
 - **编译器（合入 llvm 的 B1/B2 结构后）**：`compiler/proj/proj_40_art.yh` 新增
@@ -42,6 +96,223 @@ build-cache 4/4、arch-check 通过：16 模块 54,456 行、`gen.G()` 0、main 
 `just selfhost-native` 全绿（候选固定点 48 个产物逐字节一致、cc4 自解析 127 个
 源文件、CLI 冒烟含 `--help`、运行语料 360/361、LA3 函数级缓存矩阵、project
 cases 122/122）。
+
+## 2026-10-27/28 性能收口：PL1f3 回退、PL1d2 首片、PC2c 改判
+
+- **PL1f3 回退（有结论）**：机器安静后 5 对 A/B 显示 `cache 合并` 785.3 vs 777.3 ms、
+  单函数墙钟反而 +5% —— 增建路径几乎没有命中机会，**无收益**，按规矩回退
+  `ir_module_append_symbol`/`append_type`，merge 恢复走带查重的 `add_*`。
+- **PL1d2 首片（已完成）**：一次性实验（临时允许 `ir→gen` 计时，量完回退）测到
+  `ir_module_verify_function` 累计 **5.33 s**，而 lowering 侧只记 **2.72 s** —— 每模块
+  被完整 verify 两次；定位到后端 `llvm_emit_module` 的防御性重复。改为廉价谓词
+  `ir_module_sealed`（只查非空+版本），语义校验仍由生产者负责。A/B：冷编 **−10.6%**、
+  单函数改动 **−13.3%**、worker 累计 **−16.5%**。函数体 `ir_verify` 占
+  verify_function 的 83%（2.97 ms/函数），记 PL1d2b。
+- **PC2c 改判**：纯计数探针（不涉及时钟）显示每条记录 payload 25.1 KB 中名字字节只占
+  **0.7%**，真正占体积的是**每条 75 个类型条目**（capture 吞吐 1.91 MB/s）。字符串池
+  改造收益可忽略；改为立 **PC2d 按模块共享类型表**（格式 v3 级，目标 25 KB→~5 KB/
+  条，capture 13.4→5–6 ms/条）。
+- **门禁**：`just test` 0 失败、`just selfhost-native` 全绿、`just arch-check` 通过、
+  `llvm-function-cache.py` O0/O2 六场景全绿（用 F1 的 workspace 隔离 `FAST_DIR`）。
+
+## 2026-10-27 性能 PL1d/e/f + PL3：缓存序列化提速与精确内存
+
+- **PL1e（capture 提速，已完成）**：`ir_module_serialize_alloc` 一次 prepare
+  （verify+plan）后直接分配写出，替掉「serialized_size + serialize」的**两次**
+  verify+plan；capture 再走 `ir_module_serialize_alloc_trusted`（mini 模块是本进程
+  忠实重编号，记录只在整模块 verify+emit 成功后才 `firc_commit` 落盘）。capture
+  从 **19.3 → 13.7 ms/函数**（同过程单机），成对 A/B capture 累计 **−13.2%**；
+  编码字节不变。
+- **PL1d（verify 去 O(n²)，已完成两处）**：符号名唯一性改开放寻址哈希（碰撞仍比
+  字符串）、「每个定义恰一实体」改计数数组（越界显式拒绝）。verify 2.88 → **2.68 s
+  （−7%）**；小模块是白赚，大模块正是 PL2「每函数 verify 成本涨 3.9×」的元凶。
+  逐函数指令校验（≈1.8 ms/函数）未优化，已立 PL1d2。
+- **PL1f（命中跳过语义 verify，部分完成）**：记录头 32→40 字节加 payload FNV-1a、
+  格式版本 1→2；校验和通过后走 `ir_module_deserialize_trusted`（仍解析 + 规模 +
+  规范编码校验；合并后整模块仍完整 verify）。单函数改动场景 `cache 合并` 段
+  **−8.0%**（A/B）。merge 剩余成本在类型/符号线性查找，已立 PL1f2。
+- **PL3（精确内存口径，已完成）**：`perf-baseline.py --mem {footprint,rss}`——Darwin
+  用 `proc_pid_rusage` 的 `ri_phys_footprint`（不重复计入共享干净页），Linux 用
+  `VmHWM` 高水位；`--rss` 保留旧名。冷编进程树 **418.8 MB**、热编 **230.1 MB**；
+  同一进程 footprint 12.5 MB vs RSS 24.4 MB。cgroup `memory.peak` 未接（PL3b）。
+- **测量环境**：本轮后半程另一会话在 `llvm-3` worktree 自举（3×`yh` 各 ~100% CPU），
+  load1 7–38；结论只采信**成对 A/B**与**load 不敏感**的内存数据，详见报告。
+- **PL1f2（合并查找索引）**：merge 内为每条记录建一次目标模块索引（名字→符号、
+  结构键→类型；键覆盖 `ir_fc_type_equiv` 的全部字段，哈希只缩候选、命中仍用原比较
+  函数；依赖未映射时退化线性；模块 ≤64 规模时关闭）。单函数改动的 `cache 合并` 段
+  **940.1 vs 1029.3 ms（−8.7%）**（3 对 A/B）。剩余：`ir_module_add_symbol`/`add_type`
+  的线性查重（PL1f3）。
+- **PL1f3（增建绕过线性查重）**：新增 `ir_module_append_symbol` / `ir_module_append_type`
+  （调用方保证不存在同名/等价项），merge 在索引确认未命中后改走它们，每次 add 从
+  O(S)/O(T) 降到 O(1)。**收益未验证**（复测 load≈16，A/B 抖动 13–26%），若安静环境
+  确认无收益即回退（调用点仅 merge 两处）。
+- **F1（FAST_DIR 隔离）**：`justfile` 默认快速目录改为
+  `$TMPDIR/yh-fast-<workspace 哈希>[-run_id]`，修掉同机多 worktree 互相覆盖 `yh_run`
+  导致的探针假失败；`FAST_DIR` 仍可显式覆盖。
+- **门禁假失败（已由 F1 修复，值得记住）**：`FAST_DIR` 默认 `$TMPDIR/yh-fast` 曾是**跨 worktree 共享**的，
+  同机另一个会话的 `just test` 会把 `yh_run` 换掉，探针于是报「stats 缺少阶段归因字段」。
+  用私有 `FAST_DIR` 重跑：`just test` 122 passed/0 failed、`just selfhost-native` 全绿
+  （固定点一致、自解析 123 文件、project cases 122/122）。已记 todo F1：默认路径应带
+  workspace 标识。
+- **验证**：`llvm-function-cache.py` 六场景 O0/O2 全绿（含损坏记录仍判 miss）；
+  `just`、`just arch-check` 通过。
+
+## 2026-10-27 性能 PL1c：capture 成本定位到序列化（2.05 MB/s）
+
+- **结论**：[capture 序列化归因](01-finished/yh-capture序列化归因PL1c-2026-10-27.md)。
+  写缓存构建的 capture 共 28.42 s / 1476 函数 = **19.3 ms/函数**，三段为
+  闭包标记 1.9% / 迷你模块构造 30.4% / **序列化写缓冲 65.5%**；写出 38.08 MB ⇒
+  **2.05 MB/s**，指向 `ir_module_serialize` 内部的线性查表/增长拷贝，而不是闭包扫描。
+  合成语料（仅 int）0.83–1.91 ms/函数，真实语料贵 10 倍——成本跟「每条记录要编码的
+  闭包体积」走。
+- **方法**：`ir` 不允许依赖 `gen`（架构门），所以三段计时只在**一次性实验**里临时加
+  `timing` 出参 + `gen.clock_ns()`；量完立即回退，`just`、`just arch-check` 重新通过。
+  主线工具仍只输出 capture 总量（`--stats` 的 4+8 段字段不变）。
+- **优化改写**：原计划让 PC2c（共享字符串池）扛 capture，现在改为
+  **PL1e `ir_module_serialize` 提速**（最高优先，2.05 MB/s → ≥100 MB/s 量级）+
+  PL1f 缓存合并（增量 4.9 ms/条）；PC2c 降级成 PL1e 的实现手段。已写入 todo。
+- **顺带**：`perf-scaling.py` 增加 `--write-cache`（删对象不删 `link.manifest`），
+  可复现「写缓存路径」的 capture 与每函数成本；`gen/clock.*.yh` 成为 build/lower
+  共用的单调时钟（lower 不再自留一份）。
+
+## 2026-10-27 性能 PL1：lowering 拆到函数级（含 PL2 超线性归因）
+
+- **交付**：[lowering 内部归因](01-finished/yh-lowering内部归因PL1-2026-10-27.md)。
+  `--stats` 在既有四段后再追加 8 段：`time_lower_{prep,decl,build,verify}_ns` 与
+  build 内的 `{lookup,cache,fn,capture}_ns`；`perf-baseline.py` 出「lowering 细分」表，
+  `perf-scaling.py` 增加「其中 verify / 其中真 lowering」两列；门禁
+  （`tests/selfhost/llvm-function-cache.py`）断言 8 字段存在且子区间之和不超过父区间。
+- **结论**（`tmp/perf/20261027-000451`，20 轮，load1 中位 5.85）：冷编 lowering
+  16420.9 ms = 真 lowering **12270.2（74.7%）** + verify **3089.4（18.8%）** +
+  缓存查表 650.4（4.0%）+ prep 196.1 + decl 181.2，符号查找只有 21.7 ms（0.13%）。
+  全量重编（写缓存）的 lowering 里 **capture 23591.2 ms**，占该场景 worker 累计
+  46671.4 ms 的 **50.5%**；单函数改动的 lowering 1148.7 ms 里 **缓存合并 998.0 ms
+  （86.9%）**、真 lowering 只有 0.5 ms（204 个缓存函数 ≈ 4.9 ms/个）。
+- **PL2 答案**：单模块函数数超线性不是符号查找，而是 verify 的每函数成本
+  0.055→0.216 ms（3.9×，64→512 函数）叠加真 lowering 2.0×，合计每函数 2.9×。
+- **新优化顺序**（写入 todo）：capture 序列化 → verify 成本（需先确认关闭后仍有门）
+  → 缓存合并 → 真 lowering 内部再拆。
+- **架构预算**：8 个计时值放 `GenState`（`c_stats_lower_*_ns`）而非模块级 `let`
+  （`max_globals` 保持 193）；`mb_print_stats` 整体抽到新文件 `build/stats_print.yh`，
+  `module_build.yh` 2296 → 2181 行。`max_build_lines` 按「只减不增，上调须说明」的规矩
+  从 10982 上调到 11034，理由写进 `tools/arch-check.py` 的 BUDGETS 注释。
+- **门禁**：`just test`、`just selfhost-native` 全绿；`just arch-check` 通过。
+
+## 2026-10-27/28 0.0.11-rc.1 发布准备 + 三处 CI 闭包缓存修复
+
+- **滚种子**：`just seed` 覆盖 `bin/yh-darwin-arm64`（未入库），当前种子即 0.0.11
+  编译器（sha256 `3d1f1c9e…`），后续本地构建直接跑 UF1 检查。
+- **发版分支**：`0.0.11-rc` 从 `0.0.10-release` 切出（0.0.10 已正式发布，补上
+  落在 release 分支的发布说明），cherry-pick UF1 提交；`compiler/project.toml` 版本
+  0.0.10 → **0.0.11**（rc 期即写目标正式号）；新增
+  `docs/01-finished/release-0.0.11-rc.1.md`（含「不兼容变更：私有且无引用的函数
+  会编译失败」与升级指引）；打 annotated tag `0.0.11-rc.1` 推 Gitea。
+- **CI 首次推送（run 156/157）darwin 任务 30 s 内失败，三个独立根因**：
+  1. `ci.yml`/`release.yml` 用 `${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}`
+     拼缓存根，而 runner（host 模式）会把 HOME 覆写成 `.cache/act/<id>/tmp/<uuid>`，
+     `-d` 永远为假 → 走 `just llvm-host` 现场重建；重建时没有 `SDKROOT`，宿主默认
+     SDK 已是 27.x（`libSystem.tbd` 含 `arm64e.x1`），内嵌 lld 21 直接拒收。
+     改为顶层 `env: YH_LLVM_CACHE` 钉死宿主缓存绝对路径 +
+     `cache="$(python3 tools/llvm_cache.py)"`（显式 env → 本仓库 tmp → 主 worktree）。
+  2. `llvm-darwin-host.py prepare` 无条件 `build_host()`，与 AGENTS「幂等
+     `just llvm-host`」不符 → 现在先 `check(full=True)`，一致就打印
+     `"reused": true` 复用。
+  3. `build_host`/`write_selfhost_flags`/`write_cxx_stub`/`check` 用
+     `path.relative_to(ROOT)` 记录路径，缓存根在仓库外（CI executor、直接指向主
+     worktree 缓存）时抛 `ValueError`，把「build-sdk 失败」变成 traceback
+     （run 518）。新增 `record_path()`（仓库内相对、仓库外绝对；消费者
+     `ROOT / record[...]` 两种形态都成立）与 `display_path()`。
+- **并发会话踩坑**：本机另一个会话（`~/Documents/x`、`cichlid` worktree）在同一
+  `TMPDIR/yh-fast` 与同一 LLVM 闭包缓存上跑门禁，会覆盖暂存编译器（`yh-fast/yh`）
+  和闭包记录——我这边一度出现「同一提交 build-check 124/124」与「123/124 + 假红」
+  交替、以及 `host.json` 摘要与磁盘不一致。定位后改用私有
+  `FAST_DIR=$PWD/tmp/yh-fast` 跑门禁，并重新基线闭包记录（`bridge_sha256` 等按磁盘
+  现值重算）；CI 侧则用固定 `YH_LLVM_CACHE` 避开 HOME 覆写。
+- **环境**：`just llvm-host` 幂等化后本地/CI 都不再重建闭包；闭包记录里的
+  `host_builder_sha256` 每次改 `tools/llvm-darwin-host.py` 需重新基线（本轮改了三次，
+  最终记录与磁盘一致，`check(full=True)` 为空）。
+- **待办**：tag 推送后由 `release.yml` 三端构建 + `publish-release.py` 发布
+  prerelease；结果以 Release 与 CI 记录为准。发布后用 rc 二进制做
+  `rm -rf bin && just fetch-seed → just → just test → just selfhost-native` 验收，
+  再合并到 `0.0.11-release` 打正式 tag。
+
+## 2026-10-27 未使用函数直接报错（UF1）：检查进 pass1，清掉 24 个死函数
+
+- **需求**（用户）：分析当前编译器后，让「没有被使用的函数」直接报错，并顺手把这批
+  死代码清掉。
+- **规则**：本模块声明、既没 `pub` 也没 `extern`/C ABI 的函数定义，如果整个模块的
+  源码里除了它自己的声明名之外没有任何同名标识符，`build`/`run`/`test` 与单文件
+  编译都报 `函数未使用（本模块没有任何引用；请删除或改为 pub）`。`pub`（含入口
+  `main` 与 `test` 生成符号）、`extern`（无正文）、`@[extern]` 带正文的 C ABI 回调
+  目标（按 C 名字导出，可能只被同项目 C 源调用）一律跳过。
+- **实现**：新增 `compiler/build/unused_function.yh`（222 行），在 pass1 之后、pass2
+  之前对模块全部文件做一遍 token 扫描：候选来自顶层声明索引（`PDecl.keyword + 1`
+  是名字 token）与符号表（`SYM_FN` + `F_GLOBAL` − `F_PUB`/`F_EXTERN`/`F_CABI`），
+  命中用首字节过滤 + 名字字节比较，跳过声明自身的名字 token。调用点两处：
+  `module_worker.yh`（模块路径，传 `p_mods[m].files` 与 `sym_base`）与
+  `llvm_emit.yh`（单文件路径把该文件当整个模块）。
+- **为什么按 token 而不是解析期引用标记**：三条路径都会让「引用标记」在增量构建里
+  漏记——函数级 check 切片命中时正文不重新解析（`parse_decl` 直接 `continue`）；
+  普通函数体里的 `$f(...)` 编译期调用折成常量、不留引用节点；生产构建按设计不解析
+  `test` 正文（只在 test 里用到的私有辅助会被误判）。token 扫描对这三条都成立，
+  方向是保守的：只会漏报（同名局部变量遮蔽、递归自引用算作已使用），不会把合法
+  程序判死。代价与后续精确化已立项在 `docs/todo.md`（UF1 精确化）。
+- **清掉的死代码（24 个，全部是 LL12 退役旧发射器/历史迭代的遗留）**：
+  `gen`：`abi_c_signature`、`ty_name_text`、`tg_sym_prefix`、`tg_is_2byte`、
+  `tg_is_8byte`、`tg_align_scalar`；`backend`：`llvm_abi_emit_c_aggregate_call`（旧
+  C 聚合 ABI 发射，76 行）；`comptime`：`ct_invoke`；`ast`：
+  `ast_comptime_for_find_binding`、`ast_comptime_for_info`；`parse`：
+  `ct_enum_pending_reset`、`ct_enum_pending_count`；`lower`：`checked_lower_error`、
+  `checked_lower_expr`（薄包装，正文版本才是调用面）；`build`：`li_kind`、
+  `mb_sub_dir`、`pj_source_cat`；`libs`：`cli.text_visible_width`、
+  `cli.action_takes_values`、`json.utf8_is_scalar`、`toml.p_at_end`、
+  `toml.p_current`、`libc.text_len`、`libc.is_digit`。
+- **语料**：新增 `tests/yh-run/fail/168-unused-function.yh`（`fail-contains:
+  函数未使用`）与 `tests/yh-run/pass/10-unused-function-scope.yh`（`pub` 未用、
+  函数值引用、只在 `test` 正文里用到的私有辅助都不算未使用）；新增模块级 fixture
+  `tests/modules/projects/unusedfn`（依赖项目里的 `ufmath` 模块，`helper` 只在同包
+  另一个文件里被调用 → 通过；`dead` 项目的孤儿私有函数 → 报错），并在
+  `build-check.py` 加 `uf1-module-scope-use`(42) 与 `uf1-unused-function`。
+  依赖模块特意叫 `ufmath`：`json`/`math` 这类名字已被标准库 `libs/` 占用，
+  `import math` 会解析到标准库而不是 fixture 的依赖项目（旧的 `basic`/`u5-rebind`
+  探针正是因为 `libs/json` 上线而偶尔解析到标准库，与本轮无关）。
+- **fixture 因新规则做的调整**（都不是功能变更）：`ytestsem` 库项目里那个不叫入口的
+  `main` 改 `pub`；`llvmarchitecture/cases/library.yh` 的 `product`/`layout_bytes`
+  改 `pub`；`irfront`、`tokenreplay` 里只为 IR/形状检查存在的私有函数由 `main`
+  以零净贡献引用；`scheduler`/`scheduler-diamond` 生成的 600 个 `private_NNNN` 改
+  `pub`，且「私有正文失败阻止链接」那条探针改用 `pub broken_entry` 引用
+  `broken_private`，避免被 UF1 先拦下来、让断言仍然验证正文检查失败；
+  `tests/yh-run/pass/06..08`、`run/181` 则让 `main` 真正引用原本悬空的声明。
+- **预算**：`tools/arch-check.py` 的 `max_build_lines` 10,807 → 11,015（UF1 新增
+  222 行、删掉本模块 3 个死函数共 25 行，故本模块净 +197；本文件即理由）；`compiler/README.md` 的规模数字与 `docs/todo.md` 的基线表同步到
+  2026-10-27 实测（13 模块 / 120 文件 / 53,545 行）。
+- **验证（本机 Darwin/arm64）**：`just`（种子冷编）→ `./yh` 自编 `compiler/`（新检查
+  生效后先报 17 个、逐个清到 0）；`just test` 全绿（语法 49/49、运行 362/363 含 1
+  SKIP、pass 9/9）；`just libs-test` 全绿（122 PASS）；`just selfhost-native` 全绿：
+  cc3/cc4 固定点 39 产物一致、cc4 自解析 120 文件、运行语料 362/363、模块语料
+  19/19、`build-check` **124/124**（含新增 `uf1-module-scope-use` 与
+  `uf1-unused-function`）、LA3 函数级 IR 缓存矩阵 O0/O2 全通过、LA0 架构基线通过；
+  `python3 tools/arch-check.py` 与 `tests/tools/arch-check/check.py`（自测 2/2）通过。
+- **实现细节：检查不能改名字池**。首版用 `tml_intern_str` + `sym_lookup_off` 把
+  声明名映射到符号，名字池因此变长，连带改变了后续阶段的池布局：`LA3` 函数级
+  缓存矩阵的「插入新函数」从预期的 check 4 命中 1 未命中变成 0 命中 5 未命中。
+  现在改为在 `[sym_base, c_sym_n)` 里按字节比较直接找符号（`uf_symbol_for_decl`），
+  检查对 GenState 只读，缓存键恢复稳定。**教训：pass1/pass2 之间的任何检查都不要
+  往名字池/类型表里追加东西。**
+- **环境提示**：直接执行 `python3 tests/modules/build-check.py` 而不是走 `just`
+  会缺 `SDKROOT`（justfile 从固定 SDK 记录导出），于是 cinterop 的 `-lm`、
+  `os6-default-stdlib` 的 `_nanosleep`/`_getpid`、`r2b-fork-worker-space-paths` 的
+  `arm64e.x1` TAPI 都会链接失败；这 14 例不是回归。走 `just selfhost-native`
+  才是门禁口径。`LA3` 的插入探针也改成自递归形态（`fn extra() int { return
+  extra(); }`）：新函数没有外部调用方，不改签名表，名字扫描又算已使用，正好保住
+  矩阵原本的 4 命中 1 未命中口径。另外本轮共享 LLVM 闭包缓存
+  （`~/Documents/x/tmp/llvm-migration/llvm-host-darwin-aarch64/host.json`）里的
+  `host_builder_sha256` 是旧脚本身份（与当前 `tools/llvm-darwin-host.py`
+  `ae9e23b5…` 不符），导致 `auto` 模式试图重建闭包并在 `relative_to` 上报错；
+  按当前脚本摘要修正该字段（原件备份在 `tmp/host.json.bak`）后闭包被正常复用，
+  未重建任何 LLVM 产物。
+- **未做**：不加 `@[keep]`/`@[allow(unused)]` 一类逃生属性（`pub` 已足够，符合
+  极简原则）；不检查 `const`/`let`/类型的未使用（本轮需求只到函数）。
 
 ## 2026-10-27 修 llvm-host 缓存路径 bug + justfile 暂存目录隔离 + 滚种子
 
@@ -307,6 +578,144 @@ cases 122/122）。
   `libs/cli/test/run.py` = 5/5；`libs/cli/test/diff.py` = 91/94 与 argparse 一致、
   3 条已知差异、0 未知差异。删除 `libs/tmp/yh-test` 后复跑一次，确认 `cli` 模块
   重新编译（而非命中旧缓存）后仍全绿。
+
+## 2026-10-26 性能测试 PF2–PF4：阶段归因、失效矩阵、规模/并发与性能任务
+
+- **PF2 归因**（[报告](01-finished/yh-编译器性能归因与失效矩阵PF2-2026-10-26.md) +
+  [口径](02-plan/yh-编译器性能归因口径-2026-10-26.md)）：`--stats` 行尾新增
+  `time_front_ns/time_lower_ns/time_irbuild_ns/time_bridge_ns`（worker 内四段互斥累计），
+  `perf-baseline.py` 出归因表并加 `--rss`/`--opt`。O0 冷编 worker 累计 23.5 s：
+  lowering **66%**、IR 构造 20%、内嵌桥 8%、前端 6%；O2 冷编 30.7 s 中内嵌桥 **73%**
+  （LLVM 优化），单函数改动 7.55 s（桥 3.59 s）⇒ 落 PC7 函数级目标文件。
+- **PF2 失效矩阵**：新增 `tools/perf-invalidation.py`，三模块工程 × 6 场景全通过
+  （仅注释 3/0 命中、私有体 2/1、公有接口 0/5、编译期常量 0/5、缺对象复用 3/0、
+  缺缓存 0/3 且不假命中），判据是程序输出 + 每模块对象 SHA-256 与清缓存构建一致。
+- **PF2 内存**：`--rss` 进程树采样（200 ms，默认关，单独跑）：冷编 405–434 MB、
+  热编 138–254 MB、单函数改动 398–447 MB（采样峰值，共享页重复计入）。
+- **PF3 规模/并发**（[报告](01-finished/yh-编译器规模与并发扩展PF3-2026-10-26.md)）：
+  `tools/perf-scaling.py` 三轴合成工程；函数数 8× → 8.0× 墙钟但 schedule 14.9×
+  （单模块每函数成本翻倍），模块数 8× → 3.5×，依赖深度 8× → 8.1×。
+  `YH_WORKERS`（1..32，默认 4）成为并发入口：1/2/4/8 → 27.1/17.3/11.7/11.1 s
+  （1.00/1.56/2.32/2.43×），8 worker 只多 5% 却把总工作量抬 58%。
+- **PF4 性能任务**：`.gitea/workflows/perf.yml`（手动 + 每日 02:00，出报告并归档
+  30 天，**只有测量无效才变红**）、`tools/perf-batch-check.py` 一句话结论、
+  [噪声校准与判定规则](03-design/yh-性能回归判定与噪声校准-2026-10-26.md)
+  （五批同条件定出噪声下限 ±2.2%；5% 标记 → 复测 → bootstrap CI 下界 >1.05 且两批
+  复现 → 立 todo）。未设硬门。
+- **门禁**：`tests/selfhost/llvm-function-cache.py` 新增「四段字段存在且非负、冷编全为正」
+  断言；`just test` 与 `just selfhost-native` 全绿（project cases 122/122）。
+- **已知缺陷修正**：priming 不能删 `manifest/link.manifest`（它是「本轮可写函数缓存」
+  开关，删了会让 priming 退化成冷编、写不出 `.fir`，之后「0 命中」全是假象）。
+
+## 2026-10-26 RB5：Darwin 产物位级可复现（链接暂存目录）
+
+- **根因**：`ld64.lld` 的 `-adhoc_codesign` 把**输出文件 basename** 写进 codesign
+  identifier。项目链接先把产物链到 `<out>.yh-tmp.<pid>` 再 rename 发布，pid 因此进了
+  签名——同源两次构建的产物哈希不同（改前 `just build` 两次：`f051d37a…` / `00627e3e…`，
+  同为 70,815,456 字节，`Identifier=yh.yh-tmp.54072`）。固定点门禁比较的是模块产物
+  （`.s`/`.s.i`/`.o`），所以一直没暴露；受影响的是「同源同构」与发行可比性。
+- **改动**（只动 Darwin/ARM64 项目链接的暂存位置）：
+  - `compiler/build/darwin_link.yh` 新增 `mb_macho_tmp_split`（把暂存位置拆成
+    `<out 目录>/.yh-tmp.<pid>/<basename>`：与产物同文件系统保证 rename 仍是原子的，
+    子目录按 pid 隔离并发构建，basename 与最终产物一致 → identifier 只取决于产物名）、
+    `mb_macho_link_stage`（建目录；pid 复用留下同名残骸时先清残留再重试，避免把崩溃
+    残骸当成链接错误）、`mb_macho_tmp_discard`（删残余产物 + `rmdir`），并声明
+    `@[extern] fn rmdir`。
+  - `compiler/build/link_cache.yh` 的 `mb_link`：非 Mach-O 路径（Linux lld / cc）保持
+    `<out>.yh-tmp.<pid>` 不变；Mach-O 路径改用暂存子目录，`mb_link` 的 5 条失败路径与
+    成功发布后统一走 `mb_macho_tmp_discard`（失败不再留空目录，`mb_link` 674 → 688 行）。
+  - **范围**：单文件 `-o` 形态的临时名 `<out>.yh-link-tmp` 不含 pid、本就位级可复现
+    （`Identifier=abc.yh-link-tmp` 恒定），未改；ELF 产物不含文件名，未改。
+- **证据**：
+  - 同一 fixture 项目反复链接：改前（旧种子）`c6b2f66…` → `7ff4cdb…`、
+    `Identifier=llvmdarwinlink.yh-tmp.29628`；改后两次均 **`b1c4a60f…`**、
+    `Identifier=llvmdarwinlink`，`.build/` 无 `*.yh-tmp.*` 残留。
+  - 编译器本体：用带 RB5 的编译器两次构建 compiler（输出各自的 `yh`）→ 均
+    **`c24ee9be…`**、`Identifier=yh`。
+  - 滚种子后（种子 `dadcad16…`）两次冷编 `just build` → 均 **`5a73120f…`**、
+    `Identifier=yh`，端到端「同源同构」成立。
+- **回归**：`tests/selfhost/llvm-darwin-link.py` 的 O2 项目段新增三条断言——删产物后
+  重链必须位级一致、`codesign` identifier 必须**整行等于**产物名（旧形态
+  `Identifier=<产物>.yh-tmp.<pid>` 只是以产物名开头，子串判定会漏掉 pid 后缀）、
+  成功链接后 `.build` 不得残留 `*.yh-tmp.*`。该文件是进程级链接门（需真实 lld/签名），
+  故用 Python 门而非 `.yh` 语料。
+- **预算**：`max_build_lines` 10807 → 10982（RB5 +110：darwin_link +86、link_cache
+  +29/−11，含 pid 复用重试；同批并入并行 PF 失效统计的 +65）、`max_file_lines`
+  2242 → 2262、`max_globals` 190 → 193（后两项来自 PF 失效矩阵统计，非 RB5）；
+  `max_function_lines` 上限不动（mb_link 688）。
+- **门禁**（同一源码、滚种子前后各一轮）：`just arch-check` ✅、`just test` 0 FAIL ✅、
+  `just selfhost-native` 122/122 + LA3 O0/O2 ✅、`just test-llvm-darwin` ✅。
+- **文档**：`03-design/yh-macOS-LLVM后端接入设计.md` §6 补「暂存路径契约」；`docs/todo.md`
+  的 RB5 关闭。
+- **注意**：种子滚动把并行会话尚未提交的 PF 统计改动一并固化；这些改动已在同一棵树
+  上通过全部门禁。
+
+## 2026-10-26 新增 yh 编码规范
+
+- **交付**：[yh 编码规范](03-design/yh-编码规范.md)（386 行）。把散落在
+  `docs/yh.g4`、`docs/03-design/00-语义边界-0.0.1.md`、ADR-0013、`AGENTS.md`
+  与 `compiler/`、`libs/` 既有写法里的编码约定收敛成一份可执行规范：排版
+  （换行终结语句、括号外续行运算符必须在行尾、`} else {`、单行守卫）、命名
+  （snake_case / PascalCase / UPPER_SNAKE、编译器前缀属历史遗留）、类型与转换
+  （隐式只允许整数加宽）、可见性与模块（导出面收缩、私有类型）、控制流（只有
+  `for`、无 fallthrough、不用 `goto`）、注释、文件组织（500–1000 行、banner、
+  测试文件命名）、错误处理与资源、字符串插值、测试、编译期，附提交前清单与
+  「规则 → 依据」对照表。**§2 命名**拆成 2.1 函数 / 2.2 变量两节并全部落到实测数据
+  （动词频次表、概念词表 `count`/`len`/`cap`/`off`/`id`/`kind`/`status`、输出参数
+  `out` 201 处、缩写分档 `i`/`j`/`k`/`n`/`gs`/`tk`、字段单位后缀 `_count`/`_len`/
+  `_cap`/`_off`/`_size`/`_id`、谓词 `is_*`/`*_ok` 按模块返回 `int` 或 `bool`）；初稿
+  「缩写只准 `i`/`n`」「谓词一律 bool」两条与现状不符，已按实测改正
+  （`j` 125、`k` 80、`is_*` 18 处 int vs 2 处 bool）。
+- **§7 文件命名（2026-10-26 用户决定）**：**文件名就是内容名，不用数字排序前缀**
+  （`reader.yh`、`ssa_module_model.yh`，不写 `10_view.yh`/`00_types.yh`）。顺序不靠
+  编号：模块内按文件名字节序处理、声明必须先于使用，所以被依赖的声明放语义名靠前
+  的文件（`base.yh`/`defs.yh`/`types.yh`），拿不到就合并进使用者；测试文件统一
+  `zz_tests*.yh`。实测依据：同模块 `api.yh` 用 `types.yh` 的 `Point` 报
+  「未知类型（类型必须先定义）」（`pj_dir_less` 按文件名字节序，见
+  `compiler/build/project_index.yh:429`）。**存量 `00_`/`10_`/`99_` 文件不改名**——
+  改名会改模块内处理顺序，属独立任务；数字前缀字节序在字母之前，新老共存不冲突。
+  同步把 [yh test 测试布局与运行约定](03-design/yh-test测试布局与运行约定-2026-10-25.md)
+  §1/§2 的推荐名改成 `zz_tests*.yh`，避免两处说法打架。
+- **负面验证（写文档时自证，不是新代码）**：`./yh check` 实测确认了三条容易写错的
+  规则——隐式转换矩阵（整数加宽可以，窄化/同宽异号/整数↔bool/浮点互转必须
+  `.to_type`，诊断文案原样引用）；`-1` 隐式加宽到 `u64` 得 `18446744073709551615`；
+  括号外行首运算符被拆成两条语句（`a` 得 `1` 而非 `3`，编译无警告）。另核实
+  `let a = 1` 报「此处需要一个类型」、`[0]int` 报「数组长度必须为正」、`while`
+  报错、`goto` 在 `compiler/`+`libs/` 中 0 处使用、`${}` 需 `import fmt` 且仅在
+  项目模式可用。文档内全部相对链接已逐条校验可解析。
+- **接入 `AGENTS.md`**：`## 代码规范` 开头加一句指向本规范（只做入口，不抄细则），
+  原有硬要求条目原样保留——细则改动只改规范一处，避免两处说法漂移。
+- **边界**：纯文档，不改语法、不改代码、不动种子，故不新增 `tests/` 用例（无行为
+  变更）；规范里标 **[建议]** 的项（行长 ≤100、缩写表、TODO 写法）不进任何门禁，
+  门禁仍是 `just test` / `just selfhost-native`。
+
+## 2026-10-26 性能测试 PF1b：20 轮正式基线 + 产物质量
+
+- **交付**：[基线报告](01-finished/yh-编译器性能基线PF1b-2026-10-26.md)。本机
+  Darwin/arm64（8 核，load1 峰值 7.47/告警线 8.0）四场景各 20 轮（3 轮不计分预热）：冷编
+  **10.07 s**、全量重编 **16.78 s**、热编 **0.98 s**、单函数改动 **3.58 s**（IR 204 命中 /
+  check 38 命中）；产物 6 个用例 × O0/O2，O2 运行时间快 1.8–8.9×、`.text` 小 1.77–2.39×。
+- **工具**：`tools/perf-baseline.py` 新增 `--warmup`/`--timeout`、MAD 与 load1 峰值、
+  `corpus_version`、整批 `validity`（失败/超时/**缺统计行**/缺编译器即 `invalid` 且明说
+  不得下结论）；`run_build()` 先查 `time_*_ns`/`ir_*`/`check_*` 是否存在，缺失写
+  `error=缺统计：…` 而不是静默归零（方案 §6）；run-id 撞秒自动加 `-2` 后缀，避免同秒
+  两次运行互相覆盖。**修掉 A/B 污染**——旧实现两侧共用一份语料，交错 probe 让 hot 报
+  18.9 s（真值 1.05 s），现两侧各用独立副本并校验哈希一致。新增 `tools/perf-product.py`
+  （O0/O2 运行时间 + `.text`/只读/文件大小，checksum 由 Python 参照实现独立算出，
+  `--append-to` 并入同 run-id 报告）与 `tests/perf/bench-*.yh` 六个用例（循环/数组/排序/
+  FNV 哈希/结构体切片/递归调用，均带内部自检，并在缺省输入下自校验冻结的期望 checksum）。
+- **语言事实**（写进 `tests/perf/README.md`）：`int` 是 32 位，种子与累加器须显式
+  `i64`/`u64`（否则溢出成负数，本轮真踩到）；结构体数组不能直接切片，先 `to_type([]T)`。
+- **验证**：正式批 `tmp/perf/20261026-204539/`（raw.json + report.md + product.json/md +
+  bin/；四场景各 20 样本，validity ok，report.md 含逐轮 load1/墙钟与 O0/O2 产物表）；
+  另三批复核 `193043`/`195432`/`202140`，四批中位差 −0.0%~+2.2%（批间噪声 ≤2.2%，与
+  load1 上升同向）。负向路径留证：`204512`（假编译器退出 0 无统计行 → 全记缺统计、
+  invalid、表格 `—`）、`204530`（编译器路径不存在 → invalid，exit 1）、`204530-2`
+  （`--timeout 1` → 四场景全超时 invalid）。手工 `otool -l` 核对 `.text` 与 `size -m`
+  一致（bench-call-O2 = 1752 B）；`just test` 0 FAIL、`just selfhost-native` 全绿
+  （固定点一致、自解析 119 文件 OK、project cases 122/122）。
+- **边界**：不设硬门、不接 CI（PF4）；未测 Linux/x86_64；未采内存（单进程 RSS 不等于
+  并行总内存）；场景成组执行而非 A/B 交错（本轮无对照二进制）。
 
 ## 2026-10-26 B2-3/B2-5：`mb_link` 阶段化（LinkPlan）与预算收口
 

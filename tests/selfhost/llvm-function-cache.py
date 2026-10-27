@@ -74,6 +74,37 @@ def parse_stats(proc):
     require(len(workers) == 1,
             f"应只有一个含函数计数的 worker，实际 {len(workers)}：{rows}", proc)
     row = workers[0]
+    # PF2 阶段归因字段：存在性也是接口契约，缺字段直接判失败（-1 表示未输出）。
+    stage_ns = {
+        "front": int(row.get("time_front_ns", "-1")),
+        "lower": int(row.get("time_lower_ns", "-1")),
+        "irbuild": int(row.get("time_irbuild_ns", "-1")),
+        "bridge": int(row.get("time_bridge_ns", "-1")),
+    }
+    require(all(value >= 0 for value in stage_ns.values()),
+            f"stats 缺少阶段归因字段：{stage_ns}", proc)
+    # PL1：lowering 细分字段；前四段之和必须 ≤ time_lower_ns（互斥子区间），
+    # build 内四段之和也必须 ≤ time_lower_build_ns。
+    lower_ns = {
+        "prep": int(row.get("time_lower_prep_ns", "-1")),
+        "decl": int(row.get("time_lower_decl_ns", "-1")),
+        "build": int(row.get("time_lower_build_ns", "-1")),
+        "verify": int(row.get("time_lower_verify_ns", "-1")),
+        "lookup": int(row.get("time_lower_lookup_ns", "-1")),
+        "cache": int(row.get("time_lower_cache_ns", "-1")),
+        "fn": int(row.get("time_lower_fn_ns", "-1")),
+        "capture": int(row.get("time_lower_capture_ns", "-1")),
+    }
+    require(all(value >= 0 for value in lower_ns.values()),
+            f"stats 缺少 lowering 细分字段：{lower_ns}", proc)
+    outer = lower_ns["prep"] + lower_ns["decl"] + lower_ns["build"] + lower_ns["verify"]
+    require(outer <= stage_ns["lower"] * 1.02,
+            f"lowering 四段之和 {outer} 超出 time_lower_ns {stage_ns['lower']}", proc)
+    inner = (lower_ns["lookup"] + lower_ns["cache"] + lower_ns["fn"]
+             + lower_ns["capture"])
+    require(inner <= lower_ns["build"] * 1.02,
+            f"build 内四段之和 {inner} 超出 time_lower_build_ns {lower_ns['build']}",
+            proc)
     return {
         "hits": int(row.get("ir_cache_hits", "-1")),
         "misses": int(row.get("ir_cache_misses", "-1")),
@@ -82,6 +113,7 @@ def parse_stats(proc):
         "check_hits": int(row.get("check_cache_hits", "-1")),
         "check_misses": int(row.get("check_cache_misses", "-1")),
         "check_skipped": int(row.get("check_skipped", "-1")),
+        "stage_ns": stage_ns,
     }
 
 
@@ -156,6 +188,9 @@ def one_level(compiler, opt):
 
         cold, cold_object, cold_text = build(project, compiler, opt)
         expect(cold, (0, 4, 4), (0, 4, 0), "冷编")
+        # PF2：冷编四段归因都应产生正时耗（前段/ lowering / IR 构造 / 内嵌桥）。
+        require(min(cold["stage_ns"].values()) > 0,
+                f"冷编阶段归因应全为正：{cold['stage_ns']}")
         cold_object_hash = digest(cold_object)
         cold_text_hash = digest(cold_text)
         # PC3：全冷构建（.build 刚清空）不写函数缓存，避免冷编付 capture 成本。

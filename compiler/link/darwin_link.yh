@@ -507,6 +507,102 @@ pub fn mb_lld_darwin_enabled() int {
     return 1
 }
 
+// rmdir(path *char) int —— 仅用于清理 Darwin 链接暂存目录（prelude 未登记该符号）。
+@[extern] fn rmdir(path *char) int
+
+// mb_macho_tmp_split：为 Darwin/ARM64 链接准备「暂存子目录 + 最终 basename」路径。
+//
+// lld 的 -adhoc_codesign 用**输出文件的 basename** 生成 codesign identifier。
+// 若沿用 ELF 那套 `<out>.yh-tmp.<pid>` 当 -o，identifier 就带上 pid，同一源码
+// 两次构建的产物大小与哈希都不同（RB5），发行可比性被破坏。这里把临时产物放进
+// `<out 所在目录>/.yh-tmp.<pid>/` 并沿用最终 basename：identifier 只取决于产物
+// 名；子目录按 pid 隔离并发构建；子目录与产物同文件系统，rename 仍是原子的。
+//
+// out_path：最终产物路径（相对/绝对均可）；dir_out/file_out 由调用方提供缓冲。
+// 返回 0 成功；-1 表示入参为空、pid 异常或路径超出缓冲区（调用方给带上下文的错误）。
+pub fn mb_macho_tmp_split(out_path *char, dir_cap int, dir_out *u8,
+    file_cap int, file_out *u8) int {
+    if (out_path == 0 || dir_out == 0 || file_out == 0) { return -1 }
+    let total int = strlen(out_path).to_type(int)
+    if (total <= 0) { return -1 }
+    // 最后一个 '/' 之后是 basename；dir 前缀保留末尾的 '/'。
+    let cut int = 0
+    let i int = 0
+    for i < total {
+        if (out_path[i] == '/') { cut = i + 1 }
+        i += 1
+    }
+    let pid int = getpid()
+    if (pid <= 0) { return -1 }
+    let pid_digits int = 1
+    let scaled int = pid
+    for scaled >= 10 {
+        scaled = scaled / 10
+        pid_digits += 1
+    }
+    let marker_len int = 9   // "/.yh-tmp." 的字节数
+    let dir_len int = cut + marker_len + pid_digits
+    let file_len int = dir_len + 1 + (total - cut)
+    if (dir_len >= dir_cap || file_len >= file_cap) { return -1 }
+    let n int = 0
+    i = 0
+    for i < cut {
+        dir_out[n] = out_path[i].to_type(u8)
+        n += 1
+        i += 1
+    }
+    n = gen.append_str(dir_out, n, "/.yh-tmp.")
+    n = gen.append_int(dir_out, n, pid)
+    dir_out[n] = 0
+    i = 0
+    for i < n {
+        file_out[i] = dir_out[i]
+        i += 1
+    }
+    file_out[i] = '/'
+    i += 1
+    let j int = cut
+    for j < total {
+        file_out[i] = out_path[j].to_type(u8)
+        i += 1
+        j += 1
+    }
+    file_out[i] = 0
+    return 0
+}
+
+// mb_macho_link_stage：为 Darwin raw lld 链接准备「暂存子目录 + 暂存产物路径」。
+//
+// 返回 1 = 暂存目录已就绪（file 为 `<dir>/<basename>`）；返回 -1 = 已写诊断
+// （产物路径过长或建目录失败）。调用方发布或失败后必须调用
+// mb_macho_tmp_discard 收尾，否则会留下空目录。
+pub fn mb_macho_link_stage(out_path *char, dir *u8, dir_cap int,
+    file *u8, file_cap int) int {
+    if (mb_macho_tmp_split(out_path, dir_cap, dir, file_cap, file) != 0) {
+        return gen.fail_path("Darwin 链接产物路径过长: ", out_path)
+    }
+    if (mkdir(gen.arr_cstr(dir), 493) != 0) {
+        // pid 复用：上一轮被强杀的进程可能留下同名暂存目录/文件，
+        // 清掉残留后再试一次，避免把崩溃残骸当成链接错误。
+        unlink(gen.arr_cstr(file))
+        rmdir(gen.arr_cstr(dir))
+        if (mkdir(gen.arr_cstr(dir), 493) != 0) {
+            return gen.fail_path("无法创建 Darwin 链接暂存目录: ", out_path)
+        }
+    }
+    return 1
+}
+
+// mb_macho_tmp_discard：收尾一次链接的暂存位置。
+//
+// stage 为 0 表示调用方走非 raw lld 路径（Linux 的 `<out>.yh-tmp.<pid>` 文件），
+// 只删文件；stage 非 0 表示 Darwin 暂存子目录，删残余产物后再移除目录，
+// 失败路径因此不会留下空目录。所有错误都被忽略：收尾不改变链接结论。
+pub fn mb_macho_tmp_discard(stage int, dir *u8, file *char) void {
+    if (file != 0 && file[0] != 0) { unlink(file) }
+    if (stage != 0 && dir != 0 && dir[0] != 0) { rmdir((&dir[0]).to_type(*char)) }
+}
+
 // mb_macho_link_prefix：给单文件与项目链接写入一致的 ld64.lld 固定参数。
 // output 必须是调用方持有的临时文件名，成功后由父进程验证并原子发布。
 fn mb_macho_link_prefix(argv **char, output *char) int {

@@ -800,7 +800,9 @@ struct LinkPlan {
     link_start_ns u64
     // —— 链接键与路径 ——
     hlink u64
-    link_tmp [900]u8
+    link_tmp [1000]u8 // Mach-O 走 .yh-tmp.<pid>/<basename> 暂存（RB5：codesign identifier 只看 basename）
+    link_dir [1000]u8 // 上面的暂存子目录
+    macho_stage int // 1 = 已建暂存目录（失败/收尾时 rmdir）
     link_manifest [620]u8
     // —— argv 与路径行缓冲 ——
     args **char
@@ -825,6 +827,9 @@ struct LinkPlan {
 
 // mb_link_release：释放一次链接计划持有的堆内存（各阶段不再各自 free）。
 fn mb_link_release(p *LinkPlan) void {
+    // RB5：Mach-O 的暂存子目录与临时产物都在这里收尾（rename 成功后 unlink 是空操作）。
+    mb_macho_tmp_discard(p.macho_stage, &p.link_dir[0],
+        (&p.link_tmp[0]).to_type(*char))
     if (p.c_projects != 0) { free(p.c_projects.to_type(*void)) }
     if (p.args != 0) { free(p.args.to_type(*void)) }
     if (p.paths != 0) { free(p.paths.to_type(*void)) }
@@ -864,7 +869,7 @@ fn mb_link_prepare(p *LinkPlan) int {
     }
     p.object_start_ns = 0
     if (gen.stats().enabled != 0) {
-        p.object_start_ns = cmd_clock_ns()
+        p.object_start_ns = gen.clock_ns()
     }
     // 两步链接（用户规划：.build/asm → .build/obj → 链接）
     p.cc = mb_select_linker(&p.cc_storage[0])
@@ -1059,8 +1064,8 @@ fn mb_link_objects(p *LinkPlan) int {
     }
     p.link_start_ns = 0
     if (gen.stats().enabled != 0) {
-        lk_object_ns = cmd_clock_ns() - p.object_start_ns
-        p.link_start_ns = cmd_clock_ns()
+        lk_object_ns = gen.clock_ns() - p.object_start_ns
+        p.link_start_ns = gen.clock_ns()
     }
     return 0
 }
@@ -1219,7 +1224,7 @@ fn mb_link_key(p *LinkPlan) int {
     }
     if (link_hit != 0) {
         if (gen.stats().enabled != 0) {
-            lk_link_ns = cmd_clock_ns() - p.link_start_ns
+            lk_link_ns = gen.clock_ns() - p.link_start_ns
         }
         return 1
     }
@@ -1266,6 +1271,19 @@ fn mb_link_args(p *LinkPlan) int {
             p.library_search_storage[p.library_search_len] = 0
         }
     }
+    // Darwin/ARM64 走内嵌 lld 时产物带 ad-hoc 签名，identifier 取自输出 basename：
+    // 临时文件名不能带 pid，否则同源两次构建的哈希不同（RB5），改放暂存子目录。
+    if (p.use_macho != 0) {
+        p.macho_stage = mb_macho_link_stage(p.out_path, &p.link_dir[0], 1000,
+            &p.link_tmp[0], 1000)
+        if (p.macho_stage < 0) { return -1 }
+    } else {
+        let tmp_len int = gen.append_str(&p.link_tmp[0], 0, p.out_path)
+        tmp_len = gen.append_str(&p.link_tmp[0], tmp_len, ".yh-tmp.")
+        tmp_len = gen.append_int(&p.link_tmp[0], tmp_len, getpid())
+        p.link_tmp[tmp_len] = 0
+    }
+    unlink((&p.link_tmp[0]).to_type(*char))
     p.argc = p.total_rows + p.c_object_n + p.c_lib_n + p.link_lib_n * 2 +
         li_runtime_count() + 24 +
         (p.library_search_count * 2) +
@@ -1516,7 +1534,7 @@ fn mb_link_exec(p *LinkPlan) int {
         return -1
     }
     if (gen.stats().enabled != 0) {
-        lk_link_ns = cmd_clock_ns() - p.link_start_ns
+        lk_link_ns = gen.clock_ns() - p.link_start_ns
     }
     return 0
     return 0

@@ -290,8 +290,8 @@ fn ir_module_verify_function(unit *IRModule, value *IRModuleFunction) int {
     if (value.symbol < 0 || value.symbol >= unit.symbol_count || value.body.target_id != unit.target.key
         || value.type_map_count != value.body.type_count || value.type_map_count <= 0 || value.type_map == 0
         || value.loc_count != value.body.inst_count || value.loc_count < 0
-        || value.loc_count > 0 && value.locs == 0 || value.loc_count == 0 && value.locs != 0
-        || ir_verify(&value.body) != 0) { return -1 }
+        || value.loc_count > 0 && value.locs == 0 || value.loc_count == 0 && value.locs != 0) { return -1 }
+    if (ir_verify(&value.body) != 0) { return -1 }
     let symbol IRModuleSymbol = unit.symbols[value.symbol]
     if (symbol.kind != IR_MODULE_SYMBOL_FUNCTION || symbol.defined != 1 || symbol.abi != value.body.abi) { return -1 }
     let i int = 0
@@ -456,6 +456,59 @@ fn ir_module_verify_function(unit *IRModule, value *IRModuleFunction) int {
 
 // ir_module_verify：封闭完整模块的目标、来源、布局、唯一逻辑符号、数据实体与函数 IR。
 // 返回 0 或 -1；验证不改变模块内容，不初始化 LLVM，也不访问 gen/旧机器输出。
+// ir_module_verify_symbol_names：用开放寻址哈希表检查符号名唯一性。
+// 语义与原先的两两比较完全一致（同名即拒绝），复杂度从 O(n²) 次字符串比较
+// 降到期望 O(n)；哈希碰撞时仍做完整字符串比较，不靠哈希值下结论。
+// 返回 0 表示唯一，-1 表示重名或内存不足。
+fn ir_module_verify_symbol_names(unit *IRModule) int {
+    let n int = unit.symbol_count
+    if (n < 2) { return 0 }
+    let table_n int = 2
+    for table_n < n * 2 {
+        if (table_n > 1073741824) { break }
+        table_n *= 2
+    }
+    let slots *int = malloc((table_n * sizeof(int)).to_type(u64)).to_type(*int)
+    if (slots == 0) { return -1 }
+    let k int = 0
+    for k < table_n { slots[k] = 0; k += 1 }
+    let mask u64 = (table_n - 1).to_type(u64)
+    let i int = 0
+    for i < n {
+        let h u64 = 0
+        if (ir_module_fnv_text(IR_MODULE_FNV_BASIS, unit.symbols[i].name, &h) != 0) {
+            free(slots.to_type(*void))
+            return -1
+        }
+        let pos u64 = h & mask
+        let placed int = 0
+        for placed == 0 {
+            let slot int = slots[pos.to_type(int)]
+            if (slot == 0) {
+                slots[pos.to_type(int)] = i + 1
+                placed = 1
+            } else if (ir_module_str_eq(unit.symbols[i].name,
+                    unit.symbols[slot - 1].name) != 0) {
+                free(slots.to_type(*void))
+                return -1
+            } else {
+                // 线性探测；表容量 >= 2n 且最多 n 个元素，必然有空位。
+                pos = (pos + 1) & mask
+            }
+        }
+        i += 1
+    }
+    free(slots.to_type(*void))
+    return 0
+}
+
+// ir_module_sealed：只检查模块头结构（非空、版本匹配），不做任何遍历。
+// 给「生产者已完整 verify、消费方只需拒绝半初始化模块」的路径用（如后端发射）。
+pub fn ir_module_sealed(unit *IRModule) int {
+    if (unit == 0 || unit.version != IR_MODULE_VERSION) { return 0 }
+    return 1
+}
+
 pub fn ir_module_verify(unit *IRModule) int {
     if (unit == 0 || unit.version != IR_MODULE_VERSION || ir_module_target_ok(&unit.target) == 0
         || ir_module_table_ok(unit.sources.to_type(*void), unit.source_count, unit.source_capacity, sizeof(IRModuleSource)) == 0
@@ -488,24 +541,49 @@ pub fn ir_module_verify(unit *IRModule) int {
     i = 0
     for i < unit.symbol_count {
         if (ir_module_verify_symbol(unit, &unit.symbols[i]) != 0) { return -1 }
-        let j int = 0
-        for j < i { if (ir_module_str_eq(unit.symbols[i].name, unit.symbols[j].name) != 0) { return -1 } j += 1 }
         i += 1
     }
+    // PL1d：符号名唯一性改用哈希表。原来的两两比较是 O(n²) 次字符串比较，
+    // 真实模块有几百到上千个符号（含依赖），verify 因此成为 lowering 里的大项
+    // （冷编 18.8%），且「每函数成本」随模块变大而涨（PL2 的超线性来源之一）。
+    if (ir_module_verify_symbol_names(unit) != 0) { return -1 }
     i = 0
     for i < unit.global_count { if (ir_module_verify_global(unit, &unit.globals[i]) != 0) { return -1 } i += 1 }
     i = 0
     for i < unit.function_count { if (ir_module_verify_function(unit, &unit.functions[i]) != 0) { return -1 } i += 1 }
     // 每个定义恰有一个实体，每个声明没有实体；同时排除重复 body/global 绑定。
+    // PL1d：按符号下标一次计数（O(符号+全局+函数)），不再对每个符号各扫一遍全局与函数。
+    let entity *int = 0
+    if (unit.symbol_count > 0) {
+        entity = malloc((unit.symbol_count * sizeof(int)).to_type(u64)).to_type(*int)
+        if (entity == 0) { return -1 }
+        i = 0
+        for i < unit.symbol_count { entity[i] = 0; i += 1 }
+    }
     i = 0
-    for i < unit.symbol_count {
-        let entities int = 0
-        let j int = 0
-        for j < unit.global_count { if (unit.globals[j].symbol == i) { entities += 1 } j += 1 }
-        j = 0
-        for j < unit.function_count { if (unit.functions[j].symbol == i) { entities += 1 } j += 1 }
-        if (entities != unit.symbols[i].defined) { return -1 }
+    for i < unit.global_count {
+        let owner int = unit.globals[i].symbol
+        if (owner < 0 || owner >= unit.symbol_count) {
+            free(entity.to_type(*void)); return -1
+        }
+        entity[owner] += 1
         i += 1
     }
+    i = 0
+    for i < unit.function_count {
+        let owner int = unit.functions[i].symbol
+        if (owner < 0 || owner >= unit.symbol_count) {
+            free(entity.to_type(*void)); return -1
+        }
+        entity[owner] += 1
+        i += 1
+    }
+    i = 0
+    for i < unit.symbol_count {
+        let ok int = entity[i] == unit.symbols[i].defined
+        i += 1
+        if (ok == 0) { free(entity.to_type(*void)); return -1 }
+    }
+    free(entity.to_type(*void))
     return 0
 }

@@ -18,12 +18,14 @@ module ir
 // ============================================================================
 
 // 缓存格式版本：外层头或迷你模块语义变化时递增。
-pub const IR_FUNCTION_CACHE_VERSION int = 1
+// v2（PL1f）：外层头增加 payload 的 FNV-1a 校验和（32 → 40 字节），命中装载时
+// 用它判断记录是否完整，从而跳过对迷你模块的整段语义 verify（结构与规模仍校验）。
+pub const IR_FUNCTION_CACHE_VERSION int = 2
 // 缓存键长度：16 个十六进制字符 + 结尾零。
 pub const IR_FUNCTION_CACHE_KEY_HEX int = 16
 pub const IR_FUNCTION_CACHE_KEY_SIZE int = 17
-// 外层头字节数。
-const IR_FUNCTION_CACHE_HEAD int = 32
+// 外层头字节数：magic、版本、env_key、payload 长度、payload 校验和。
+const IR_FUNCTION_CACHE_HEAD int = 40
 // 外层 magic：小端写出后为 "YHFNC1" 的低 48 位加零。
 const IR_FUNCTION_CACHE_MAGIC u64 = 0x31434E465948
 
@@ -581,25 +583,35 @@ pub fn ir_function_cache_capture(unit *IRModule, function_index int, env_key u64
                 // 迷你模块同理：合并后的模块由 lower 的 ir_module_verify 统一验证，
                 // 损坏记录在反序列化/合并阶段就会被拒绝，这里不再逐条校验。
                 if (result == 0) {
-                    let payload_size int = ir_module_serialized_size(&mini)
-                    if (payload_size <= 0
-                        || payload_size > IR_MODULE_SERIAL_MAX_TOTAL - IR_FUNCTION_CACHE_HEAD) {
+                    // PL1e：一次 prepare（verify + plan）拿到完整编码，不再
+                    // 「serialized_size + serialize」各跑一遍 verify/plan。
+                    let payload *u8 = 0
+                    let payload_size int = 0
+                    if (ir_module_serialize_alloc_trusted(&mini, &payload,
+                            &payload_size) != 0
+                        || payload_size <= 0) {
+                        result = -1
+                    } else if (payload_size > IR_MODULE_SERIAL_MAX_TOTAL - IR_FUNCTION_CACHE_HEAD) {
+                        free(payload.to_type(*void))
                         result = -1
                     } else {
                         let total int = IR_FUNCTION_CACHE_HEAD + payload_size
                         let data *u8 = malloc(total.to_type(u64)).to_type(*u8)
-                        if (data == 0) { result = -1 } else {
+                        if (data == 0) {
+                            free(payload.to_type(*void)); result = -1
+                        } else {
                             let cursor int = 0
                             ir_fc_put_u64(data, &cursor, IR_FUNCTION_CACHE_MAGIC)
                             ir_fc_put_u64(data, &cursor, IR_FUNCTION_CACHE_VERSION.to_type(u64))
                             ir_fc_put_u64(data, &cursor, env_key)
                             ir_fc_put_u64(data, &cursor, payload_size.to_type(u64))
-                            if (ir_module_serialize(&mini, data + IR_FUNCTION_CACHE_HEAD,
-                                    payload_size) != payload_size) {
-                                free(data.to_type(*void)); result = -1
-                            } else {
-                                out_data[0] = data; out_size[0] = total
-                            }
+                            ir_fc_put_u64(data, &cursor,
+                                ir_module_fnv_bytes(IR_MODULE_FNV_BASIS, payload,
+                                    payload_size))
+                            memcpy(data + IR_FUNCTION_CACHE_HEAD,
+                                payload.to_type(*void), payload_size.to_type(u64))
+                            free(payload.to_type(*void))
+                            out_data[0] = data; out_size[0] = total
                         }
                     }
                 }

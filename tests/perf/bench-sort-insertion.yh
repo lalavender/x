@@ -1,0 +1,117 @@
+// 排序基准：512 槽插入排序，重复 argv[1] 轮（缺省 300）。
+// 每轮从冻结的乱序副本重排，保证各轮工作量相同；输出 checksum=<加权和>。
+// 元素是 32 位 int（0..99999）；种子与加权和用 i64 防溢出。
+
+const SLOTS int = 512
+const MOD i64 = 1000000007
+
+// parse_count：十进制文本转 int；非法字符视为整体非法，回退 fallback。
+fn parse_count(text *char, fallback int) int {
+    let value int = 0
+    let i int = 0
+    if (text == 0 || text[0] == 0) {
+        return fallback
+    }
+    for text[i] != 0 {
+        // char → u8 → int 显式逐级转换；48/57 是 '0'/'9' 的码位。
+        let c int = text[i].to_type(u8).to_type(int)
+        if (c < 48 || c > 57) {
+            return fallback
+        }
+        value = value * 10 + (c - 48)
+        i += 1
+    }
+    return value
+}
+
+// lcg_next：64 位线性同余发生器（同 bench-array-scan），恒为正。
+fn lcg_next(seed i64) i64 {
+    return (seed * 1103515245 + 12345) % 2147483648
+}
+
+// insertion_sort：原地插入排序；切片视图直接改写调用方数组。
+fn insertion_sort(s []int) void {
+    let n int = len(s)
+    let i int = 1
+    for i < n {
+        let v int = s[i]
+        let j int = i - 1
+        for j >= 0 && s[j] > v {
+            s[j + 1] = s[j]
+            j -= 1
+        }
+        s[j + 1] = v
+        i += 1
+    }
+}
+
+// is_sorted：非递减自检，返回 1 表示有序。
+fn is_sorted(s []int) int {
+    let n int = len(s)
+    let i int = 1
+    for i < n {
+        if (s[i - 1] > s[i]) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+fn main(argc int, argv **char) int {
+    let rounds int = 1800
+    if (argc > 1) {
+        let parsed int = parse_count(argv[1], 0)
+        if (parsed > 0) {
+            rounds = parsed
+        }
+    }
+    // 冻结的乱序输入：每个元素 0..99999，同一份数据每轮复用。
+    let src [SLOTS]int
+    let seed i64 = 987654321
+    let j int = 0
+    for j < SLOTS {
+        seed = lcg_next(seed)
+        src[j] = (seed % 100000).to_type(int)
+        j += 1
+    }
+    let work [SLOTS]int
+    let work_view []int = work.to_type([]int)
+    let src_view []int = src.to_type([]int)
+    let r int = 0
+    for r < rounds {
+        j = 0
+        for j < SLOTS {
+            work[j] = src[j]
+            j += 1
+        }
+        insertion_sort(work_view)
+        if (is_sorted(work_view) == 0) {
+            printf("自检失败：排序结果未有序\n")
+            return 3
+        }
+        r += 1
+    }
+    // checksum：排序结果的加权和；同时校验排序前后元素和不变（只换序不丢元素）。
+    let checksum i64 = 0
+    let total_src i64 = 0
+    let total_sorted i64 = 0
+    j = 0
+    for j < SLOTS {
+        checksum = (checksum + work[j].to_type(i64) * (j + 1).to_type(i64)) % MOD
+        total_src = (total_src + src[j].to_type(i64)) % MOD
+        total_sorted = (total_sorted + work[j].to_type(i64)) % MOD
+        j += 1
+    }
+    if (total_src != total_sorted) {
+        printf("自检失败：排序前后元素和不一致\n")
+        return 4
+    }
+    // 自检：缺省规模下 checksum 必须等于参照实现（tools/perf-product.py）冻结的值。
+    if (rounds == 1800 && checksum != 759005353) {
+        printf("自检失败：checksum 与期望值不一致\n")
+        return 5
+    }
+    printf("checksum=%lld\n", checksum)
+    return 0
+}

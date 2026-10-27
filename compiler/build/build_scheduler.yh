@@ -11,12 +11,43 @@ import link
 // ============================================================================
 
 
+// mb_sched_worker_limit：worker 上限，默认 4（合入 perf WIP 的 PF3 开关）。
+// `YH_WORKERS` 可在 1..32 内覆盖，供并发扩展性测量；非法/缺省值回落到 4，
+// 避免环境变量把构建打坏。父进程读一次后缓存在 BuildCtx 里。
+fn mb_sched_worker_limit() int {
+    if (bc().sched_limit_ready != 0) { return bc().sched_limit }
+    bc().sched_limit_ready = 1
+    bc().sched_limit = 4
+    // 走 proj 的环境向量读口（driver 已把 envp 交进来），不额外声明 libc getenv。
+    let off int = -1
+    let len int = 0
+    if (proj.env_fetch("YH_WORKERS", &off, &len) != 0 || len == 0) {
+        return bc().sched_limit
+    }
+    let tk *gen.TaskCtx = gen.task()
+    let value int = 0
+    let i int = 0
+    for i < len {
+        let c int = tk.np_data[off + i].to_type(int)
+        if (c < 48 || c > 57) { return bc().sched_limit }
+        value = value * 10 + (c - 48)
+        if (value > 32) { return bc().sched_limit }
+        i += 1
+    }
+    if (value >= 1) { bc().sched_limit = value }
+    return bc().sched_limit
+}
+
 // mb_sched_reset_worker_stats：子进程继承项目快照，但阶段计数只记录模块自身。
 fn mb_sched_reset_worker_stats() void {
     let tk *gen.TaskCtx = gen.task()
     bc().build_start_ns = 0
     bc().project_ns = 0
     bc().schedule_ns = 0
+    bc().front_ns = 0
+    bc().lower_ns = 0
+    bc().irbuild_ns = 0
+    bc().bridge_ns = 0
     link.reset_timings()
     gen.stats().lex = 0
     gen.stats().syntax = 0
@@ -35,6 +66,14 @@ fn mb_sched_reset_worker_stats() void {
     gen.stats().backend_emitted = 0
     gen.stats().ir_rejected = 0
     gen.stats().backend_rejected = 0
+    gen.stats().lower_prep_ns = 0
+    gen.stats().lower_decl_ns = 0
+    gen.stats().lower_build_ns = 0
+    gen.stats().lower_verify_ns = 0
+    gen.stats().lower_lookup_ns = 0
+    gen.stats().lower_cache_ns = 0
+    gen.stats().lower_fn_ns = 0
+    gen.stats().lower_capture_ns = 0
     tk.c_ir_reject_reason = 0
     gen.stats().workers = 0
     gen.stats().asm = 0
@@ -399,7 +438,7 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
             break
         }
         i = 0
-        for i < count && active < 4 {
+        for i < count && active < mb_sched_worker_limit() {
             if (states[i] == 0) {
                 let early int = 0
                 let ready int = mb_sched_deps_ready(proj.ctx().order[i], states, count,
