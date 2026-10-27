@@ -1,0 +1,95 @@
+name: perf
+# 性能基线（Gitea Actions，本机 host 模式 runner）。
+#
+# 刻意**不设性能硬门**（2026-10-26 用户决定）：本 workflow 只负责在安静时段
+# 重测并把报告作为构建资产归档，回退判断按
+# docs/03-design/yh-性能回归判定与噪声校准-2026-10-26.md 的流程另立项。
+# 只有「测量本身失败」（构建不过、批次 invalid、报告缺失）才让 job 变红。
+#
+# 触发：手动（可调轮数）与每日 02:00（本机时区为 UTC+8，cron 用 UTC 18:00）。
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 每场景计分轮数
+        default: "20"
+      runs:
+        description: 产物每档轮数
+        default: "5"
+  schedule:
+    - cron: "0 18 * * *"
+
+env:
+  SEED_REPO: lalavender/x
+
+jobs:
+  darwin-baseline:
+    runs-on: macos-arm64
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.YH_GITHUB_TOKEN }}
+      YH_LLVM_HOST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: 复用 LLVM 闭包缓存
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          cache="${YH_LLVM_CACHE:-$HOME/Documents/x/tmp/llvm-migration}"
+          if [ -d "$cache" ]; then
+            ln -sfn "$cache" tmp/llvm-migration
+            for f in "$cache"/llvm-host-darwin-*/selfhost-flags.txt; do
+              [ -f "$f" ] || continue
+              perl -pi -e "s#/Users/[^\s]*?/tmp/llvm-migration/#$cache/#g" "$f"
+            done
+            echo "复用闭包缓存：$cache"
+          else
+            just llvm-host
+          fi
+      - name: 取种子
+        run: python3 tools/fetch-release-seed.py --platform darwin-arm64 --repo "$SEED_REPO"
+      - name: 准备闭包并冷编
+        run: just bootstrap
+      - name: 编译体验基线（默认 20 轮 + 3 轮预热）
+        env:
+          ITERATIONS: ${{ inputs.iterations }}
+        run: |
+          set -euo pipefail
+          # 定时触发时 inputs 为空，统一用 shell 兜底（不依赖表达式真值语义）。
+          iterations="${ITERATIONS:-20}"
+          python3 tools/perf-baseline.py --iterations "$iterations" --warmup 3 \
+            | tee tmp/perf-last.log
+      - name: 并入产物质量（O0/O2）
+        env:
+          RUNS: ${{ inputs.runs }}
+        run: |
+          set -euo pipefail
+          runs="${RUNS:-5}"
+          run_id=$(ls -1 tmp/perf | grep -E '^[0-9]{8}-[0-9]{6}(-[0-9]+)?$' | sort | tail -1)
+          echo "run-id=$run_id" >> "$GITHUB_STEP_SUMMARY"
+          python3 tools/perf-product.py --runs "$runs" --warmup 2 \
+            --outdir "tmp/perf/$run_id" --append-to "tmp/perf/$run_id/report.md"
+      - name: 校验批次有效性
+        run: |
+          set -euo pipefail
+          run_id=$(ls -1 tmp/perf | grep -E '^[0-9]{8}-[0-9]{6}(-[0-9]+)?$' | sort | tail -1)
+          echo "run-id=$run_id" >> "$GITHUB_STEP_SUMMARY"
+          # 测量无效（缺统计/超时/checksum 不符）→ job 变红；性能回退不在这里判。
+          python3 tools/perf-batch-check.py "tmp/perf/$run_id"
+      - name: 归档报告资产
+        if: always()
+        # 资产上传是尽力而为：本仓库此前只用过 actions/checkout，upload-artifact
+        # 在该 runner 上的可用性未验证，不能让上传失败盖过「测量是否有效」这个信号。
+        # 报告同时经 tee 落在 job 日志里，作为兜底。
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-report-${{ github.run_id }}
+          path: |
+            tmp/perf/*/raw.json
+            tmp/perf/*/report.md
+            tmp/perf/*/product.json
+            tmp/perf/*/product.md
+            tmp/perf-last.log
+          if-no-files-found: warn
+          retention-days: 30

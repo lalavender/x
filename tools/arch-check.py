@@ -54,13 +54,15 @@ ALLOWED = {
 # —— 预算（现状即上限，只减不增）——
 # 数值为 2026-10-24 实测；下调请同步改这里，上调需在 finish.md 说明理由。
 BUDGETS = {
-    "max_file_lines": 2242,        # module_build.yh（A2c 拆分后必须下降）
-    "max_function_lines": 700,     # mb_link 674（含前导注释的上界口径）
+    "max_file_lines": 2262,        # module_build.yh（A2c 拆分后必须下降；+20 来自 PF 失效矩阵统计）
+    "max_function_lines": 700,     # mb_link 688（含前导注释的上界口径）
     "max_module_lines": 381,       # main（A6 后只剩 driver + api）
     "max_testkit_lines": 1592,     # testkit（YT2d-3 同项目测试锁 +37；后续应拆分而非增长）
-    "max_build_lines": 10807,      # build（PC3 +6、PC2 v3 +5、PC2b +20、PC7a +25、RB1 父存活检查 +19）
+    "max_build_lines": 11034,      # build（…、RB1 +19、RB5 +110、PF 失效统计 +65、
+                                   #        PL1 lowering 细分：+8 字段 / +9 累积 /
+                                   #        抽出 stats_print.yh）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
-    "max_globals": 190,
+    "max_globals": 193,            # PF 失效矩阵/并发统计新增 3 个模块级计数器
     "max_g_call_sites": 165,
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,

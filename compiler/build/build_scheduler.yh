@@ -11,6 +11,30 @@ import gen
 let mb_sched_peak int = 0
 let mb_sched_iface_early int = 0
 let mb_self_path *char = 0 // PATH 启动时用于读取编译器指纹。
+let mb_sched_limit int = 0
+let mb_sched_limit_ready int = 0
+
+// mb_sched_worker_limit：worker 上限，默认 4。
+// `YH_WORKERS` 可在 1..32 内覆盖，供 PF3 并发扩展性测量；非法/缺省值回落
+// 到 4，避免环境变量把构建打坏。父进程读一次后缓存。
+fn mb_sched_worker_limit() int {
+    if (mb_sched_limit_ready != 0) { return mb_sched_limit }
+    mb_sched_limit_ready = 1
+    mb_sched_limit = 4
+    let raw *char = getenv("YH_WORKERS")
+    if (raw == 0) { return mb_sched_limit }
+    let value int = 0
+    let i int = 0
+    for raw[i] != 0 {
+        let c int = raw[i].to_type(u8).to_type(int)
+        if (c < 48 || c > 57) { return mb_sched_limit }
+        value = value * 10 + (c - 48)
+        if (value > 32) { return mb_sched_limit }
+        i += 1
+    }
+    if (value >= 1) { mb_sched_limit = value }
+    return mb_sched_limit
+}
 
 // mb_sched_reset_worker_stats：子进程继承项目快照，但阶段计数只记录模块自身。
 fn mb_sched_reset_worker_stats() void {
@@ -20,6 +44,18 @@ fn mb_sched_reset_worker_stats() void {
     mb_stats_schedule_ns = 0
     mb_stats_object_ns = 0
     mb_stats_link_ns = 0
+    mb_stats_front_ns = 0
+    mb_stats_lower_ns = 0
+    mb_stats_irbuild_ns = 0
+    mb_stats_bridge_ns = 0
+    gs.c_stats_lower_prep_ns = 0
+    gs.c_stats_lower_decl_ns = 0
+    gs.c_stats_lower_build_ns = 0
+    gs.c_stats_lower_verify_ns = 0
+    gs.c_stats_lower_lookup_ns = 0
+    gs.c_stats_lower_cache_ns = 0
+    gs.c_stats_lower_fn_ns = 0
+    gs.c_stats_lower_capture_ns = 0
     gs.c_stats_lex = 0
     gs.c_stats_syntax = 0
     gs.c_stats_index = 0
@@ -400,7 +436,7 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
             break
         }
         i = 0
-        for i < count && active < 4 {
+        for i < count && active < mb_sched_worker_limit() {
             if (states[i] == 0) {
                 let early int = 0
                 let ready int = mb_sched_deps_ready(pj_state().order[i], states, count,

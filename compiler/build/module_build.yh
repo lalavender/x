@@ -55,6 +55,13 @@ let mb_stats_project_ns u64 = 0
 let mb_stats_schedule_ns u64 = 0
 let mb_stats_object_ns u64 = 0
 let mb_stats_link_ns u64 = 0
+// PF2 阶段归因：worker 内四段累计。并行构建时各行相加是「累计工作量」，
+// 不是增钟；四段互斥（不包含链链路与文本写出），与 schedule 重叠部分的解释
+// 见 docs/02-plan/yh-编译器性能归因口径-2026-10-26.md。
+let mb_stats_front_ns u64 = 0   // 前端：pass1 / pass2 / bind / check（含编译期求值）
+let mb_stats_lower_ns u64 = 0   // lowering：受检快照 → IRModule（含函数级 IR 缓存恢复）
+let mb_stats_irbuild_ns u64 = 0 // yh 侧构造 LLVM IR 文本
+let mb_stats_bridge_ns u64 = 0  // 内嵌桥：LLVM 解析 / 优化 / 目标码生成 / 写对象
 
 // mb_mix_compiler_fingerprint：每进程读取一次编译器二进制，后续模块只混入指纹。
 fn mb_mix_compiler_fingerprint(h *u64) int {
@@ -1621,95 +1628,6 @@ pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
 
 // —— 父进程：build / run ——
 
-// mb_print_stats：开发验收时输出当前进程的阶段计数；默认构建保持静默。
-pub fn mb_print_stats() void {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_stats_enabled == 0) {
-        return
-    }
-    let buf [1024]u8
-    let n int = 0
-    n = gen.append_str(buf, n, "yh-stats lex=")
-    n = gen.append_int(buf, n, gs.c_stats_lex)
-    n = gen.append_str(buf, n, " syntax=")
-    n = gen.append_int(buf, n, gs.c_stats_syntax)
-    n = gen.append_str(buf, n, " index=")
-    n = gen.append_int(buf, n, gs.c_stats_index)
-    n = gen.append_str(buf, n, " pass1=")
-    n = gen.append_int(buf, n, gs.c_stats_pass1)
-    n = gen.append_str(buf, n, " globals=")
-    n = gen.append_int(buf, n, gs.c_stats_globals)
-    n = gen.append_str(buf, n, " functions=")
-    n = gen.append_int(buf, n, gs.c_stats_functions)
-    n = gen.append_str(buf, n, " ir_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_functions)
-    n = gen.append_str(buf, n, " ir_cache_hits=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_cache_hits)
-    n = gen.append_str(buf, n, " ir_cache_misses=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_cache_misses)
-    n = gen.append_str(buf, n, " ir_lowered=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_lowered)
-    n = gen.append_str(buf, n, " ast_nodes=")
-    n = gen.append_int(buf, n, gs.task.c_stats_ast_nodes)
-    n = gen.append_str(buf, n, " stmt_nodes=")
-    n = gen.append_int(buf, n, gs.task.c_stats_stmt_nodes)
-    n = gen.append_str(buf, n, " decl_nodes=")
-    n = gen.append_int(buf, n, gs.task.c_stats_decl_nodes)
-    n = gen.append_str(buf, n, " ast_refs=")
-    n = gen.append_int(buf, n, gs.task.c_stats_ast_refs)
-    n = gen.append_str(buf, n, " ast_bindings=")
-    n = gen.append_int(buf, n, gs.task.c_stats_ast_bindings)
-    n = gen.append_str(buf, n, " ast_functions=")
-    n = gen.append_int(buf, n, gs.task.c_stats_ast_functions)
-    n = gen.append_str(buf, n, " workers=")
-    n = gen.append_int(buf, n, gs.c_stats_workers)
-    n = gen.append_str(buf, n, " workers_peak=")
-    n = gen.append_int(buf, n, mb_sched_peak)
-    n = gen.append_str(buf, n, " iface_early=")
-    n = gen.append_int(buf, n, mb_sched_iface_early)
-    n = gen.append_str(buf, n, " asm=")
-    n = gen.append_int(buf, n, gs.c_stats_asm)
-    n = gen.append_str(buf, n, " link=")
-    n = gen.append_int(buf, n, gs.c_stats_link)
-    n = gen.append_str(buf, n, " compiler_hashes=")
-    n = gen.append_int(buf, n, gs.c_stats_compiler_hashes)
-    n = gen.append_str(buf, n, " time_project_ns=")
-    n = gen.append_i64(buf, n, mb_stats_project_ns.to_type(i64))
-    n = gen.append_str(buf, n, " time_schedule_ns=")
-    n = gen.append_i64(buf, n, mb_stats_schedule_ns.to_type(i64))
-    n = gen.append_str(buf, n, " time_object_ns=")
-    n = gen.append_i64(buf, n, mb_stats_object_ns.to_type(i64))
-    n = gen.append_str(buf, n, " time_link_ns=")
-    n = gen.append_i64(buf, n, mb_stats_link_ns.to_type(i64))
-    n = gen.append_str(buf, n, " time_total_ns=")
-    let total_ns u64 = 0
-    if (mb_stats_build_start_ns != 0) {
-        let now u64 = cmd_clock_ns()
-        if (now >= mb_stats_build_start_ns) {
-            total_ns = now - mb_stats_build_start_ns
-        }
-    }
-    n = gen.append_i64(buf, n, total_ns.to_type(i64))
-    // 新覆盖字段追加在原统计行尾，保留已有性能工具的字段顺序和含义。
-    n = gen.append_str(buf, n, " checked_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_checked_functions)
-    n = gen.append_str(buf, n, " backend_emitted_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_backend_emitted)
-    n = gen.append_str(buf, n, " rejected_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_rejected)
-    n = gen.append_str(buf, n, " backend_rejected_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_backend_rejected)
-    n = gen.append_str(buf, n, " fallback_functions=")
-    n = gen.append_int(buf, n, gs.c_stats_ir_rejected + gs.c_stats_backend_rejected)
-    n = gen.append_str(buf, n, " check_cache_hits=")
-    n = gen.append_int(buf, n, gs.c_stats_check_cache_hits)
-    n = gen.append_str(buf, n, " check_cache_misses=")
-    n = gen.append_int(buf, n, gs.c_stats_check_cache_misses)
-    n = gen.append_str(buf, n, " check_skipped=")
-    n = gen.append_int(buf, n, gs.c_stats_check_cache_skipped)
-    n = gen.append_byte(buf, n, '\n')
-    gen.write_all(2, buf, n)
-}
 
 // mb_intern_arg：命令行参数字符串入名字池，返回偏移（长度出参）。
 pub fn mb_intern_arg(s *char, olen *int) int {
@@ -1922,6 +1840,19 @@ pub fn mb_cmd_build(av **char, an int) int {
     mb_stats_schedule_ns = 0
     mb_stats_object_ns = 0
     mb_stats_link_ns = 0
+    mb_stats_front_ns = 0
+    mb_stats_lower_ns = 0
+    mb_stats_irbuild_ns = 0
+    mb_stats_bridge_ns = 0
+    // PL1 计时改存 GenState（见 gen/state.yh），避免模块级全局继续增长。
+    gs.c_stats_lower_prep_ns = 0
+    gs.c_stats_lower_decl_ns = 0
+    gs.c_stats_lower_build_ns = 0
+    gs.c_stats_lower_verify_ns = 0
+    gs.c_stats_lower_lookup_ns = 0
+    gs.c_stats_lower_cache_ns = 0
+    gs.c_stats_lower_fn_ns = 0
+    gs.c_stats_lower_capture_ns = 0
     if (gs.c_stats_enabled != 0) {
         mb_stats_build_start_ns = cmd_clock_ns()
     }

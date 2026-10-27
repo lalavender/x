@@ -494,6 +494,52 @@ pub fn ir_module_serialize(unit *IRModule, data *u8, capacity int) int {
     return cursor == plan.total_bytes ? cursor : -1
 }
 
+// ir_module_serialize_alloc：一次 prepare（verify + plan）后直接分配并写出完整编码。
+// 供函数级缓存使用：原「serialized_size + serialize」两步会把 verify 与 plan 各跑
+// 两次，而这两步都是 O(模块规模) 的全量扫描（PL1e 实测占 capture 的大头）。
+// 成功返回 0 并交出 out_data 所有权；任何失败都不写出参。
+pub fn ir_module_serialize_alloc(unit *IRModule, out_data **u8, out_size *int) int {
+    return ir_module_serialize_alloc_mode(unit, 1, out_data, out_size)
+}
+
+// ir_module_serialize_alloc_trusted：跳过 ir_module_verify，只做规模检查后编码。
+// **只给函数级缓存用**：那里的 mini 模块是本进程从已验证模块忠实重编号出来的，
+// 而且记录只在整模块 verify + emit 成功后才由 firc_commit 落盘——坏记录不会写盘，
+// 即使写了，装载侧 ir_module_deserialize 仍会完整校验并当作 miss。
+// 省下的是每条记录一次 O(模块规模) 的 verify（PL1e 实测占 capture 约三成）。
+pub fn ir_module_serialize_alloc_trusted(unit *IRModule, out_data **u8,
+    out_size *int) int {
+    return ir_module_serialize_alloc_mode(unit, 0, out_data, out_size)
+}
+
+// ir_module_serialize_alloc_mode：verify=1 走 prepare（先校后算），
+// verify=0 只算布局；两条路径的编码字节完全一致。
+fn ir_module_serialize_alloc_mode(unit *IRModule, verify int,
+    out_data **u8, out_size *int) int {
+    if (unit == 0 || out_data == 0 || out_size == 0) { return -1 }
+    out_data[0] = 0; out_size[0] = 0
+    let plan IRModulePlan
+    let prepared int = 0
+    if (verify != 0) {
+        prepared = ir_module_prepare(unit, &plan)
+    } else if (ir_module_plan(unit, &plan) != 0) {
+        prepared = -1
+    }
+    if (prepared != 0 || plan.total_bytes <= 0) { return -1 }
+    let data *u8 = ir_module_alloc_zero(plan.total_bytes).to_type(*u8)
+    if (data == 0) { return -1 }
+    let cursor int = 0
+    if (ir_module_write_fixed(unit, &plan, data, &cursor) != 0
+        || ir_module_write_blobs(unit, data, &cursor) != 0
+        || cursor != plan.total_bytes) {
+        free(data.to_type(*void))
+        return -1
+    }
+    out_data[0] = data
+    out_size[0] = plan.total_bytes
+    return 0
+}
+
 // ir_module_get_u64：读取一个小端 64 位字；调用方保证剩余输入足够。
 fn ir_module_get_u64(data *u8, cursor *int) u64 {
     let value u64 = 0
@@ -842,6 +888,19 @@ fn ir_module_canonical(unit *IRModule, size int) int {
 // 重定位与函数体、定义与实体一一对应）；任何失败都释放全部部分分配并把
 // out 恢复为零初始化。out 进入时必须已是零初始化，且不得被并发使用。
 pub fn ir_module_deserialize(out *IRModule, data *u8, size int) int {
+    return ir_module_deserialize_mode(out, data, size, 1)
+}
+
+// ir_module_deserialize_trusted：不跑语义 verify 的反序列化。
+// **只给函数级缓存装载用**：调用方已用记录头里的 FNV 校验过 payload 完整性，
+// 且记录只在本进程整模块 verify + emit 成功后落盘。结构、规模、规范编码
+// （ir_module_canonical）仍全部校验，合并后的整模块在 lower 结束时会完整 verify。
+pub fn ir_module_deserialize_trusted(out *IRModule, data *u8, size int) int {
+    return ir_module_deserialize_mode(out, data, size, 0)
+}
+
+// ir_module_deserialize_mode：verify=1 时在结构校验后再跑语义 verify。
+fn ir_module_deserialize_mode(out *IRModule, data *u8, size int, verify int) int {
     if (out == 0 || data == 0 || size < IR_MODULE_SERIAL_HEAD_WORDS * 8) { return -1 }
     if (out.version != 0 || out.sources != 0 || out.types != 0 || out.symbols != 0
         || out.globals != 0 || out.functions != 0 || out.target.triple != 0
@@ -858,7 +917,7 @@ pub fn ir_module_deserialize(out *IRModule, data *u8, size int) int {
     if (step == 0) { step = ir_module_read_blobs(out, &sizes, &plan, data, size, &cursor) }
     if (step == 0 && cursor != size) { step = -1 }
     if (step == 0) { step = ir_module_canonical(out, size) }
-    if (step == 0) { step = ir_module_verify(out) }
+    if (step == 0 && verify != 0) { step = ir_module_verify(out) }
     ir_module_blob_sizes_close(&sizes)
     if (step != 0) { ir_module_release(out); return -1 }
     return 0

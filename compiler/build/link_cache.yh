@@ -1187,6 +1187,22 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
             library_search_storage[library_search_len] = 0
         }
     }
+    // Darwin/ARM64 走内嵌 lld 时产物带 ad-hoc 签名，identifier 取自输出 basename：
+    // 临时文件名不能带 pid，否则同源两次构建的哈希不同（RB5），改放暂存子目录。
+    let link_tmp [1000]u8
+    let link_dir [1000]u8
+    let macho_stage int = 0
+    if (use_macho != 0) {
+        macho_stage = mb_macho_link_stage(out_path, &link_dir[0], 1000,
+            &link_tmp[0], 1000)
+        if (macho_stage < 0) { return -1 }
+    } else {
+        let tmp_len int = gen.append_str(&link_tmp[0], 0, out_path)
+        tmp_len = gen.append_str(&link_tmp[0], tmp_len, ".yh-tmp.")
+        tmp_len = gen.append_int(&link_tmp[0], tmp_len, getpid())
+        link_tmp[tmp_len] = 0
+    }
+    unlink((&link_tmp[0]).to_type(*char))
     let argc int = total_rows + c_object_n + c_lib_n + link_lib_n * 2 +
         li_runtime_count() + 24 +
         (library_search_count * 2) +
@@ -1200,14 +1216,9 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
         if (paths != 0) { free(paths.to_type(*void)) }
         if (cpaths != 0) { free(cpaths.to_type(*void)) }
         if (libpaths != 0) { free(libpaths.to_type(*void)) }
+        mb_macho_tmp_discard(macho_stage, &link_dir[0], (&link_tmp[0]).to_type(*char))
         return gen.fail("链接 argv 缓冲分配失败")
     }
-    let link_tmp [900]u8
-    let tmp_len int = gen.append_str(&link_tmp[0], 0, out_path)
-    tmp_len = gen.append_str(&link_tmp[0], tmp_len, ".yh-tmp.")
-    tmp_len = gen.append_int(&link_tmp[0], tmp_len, getpid())
-    link_tmp[tmp_len] = 0
-    unlink((&link_tmp[0]).to_type(*char))
     let next_arg int = 0
     if (use_macho != 0) {
         next_arg = mb_macho_link_prefix(args, (&link_tmp[0]).to_type(*char))
@@ -1216,6 +1227,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
             free(paths.to_type(*void))
             free(cpaths.to_type(*void))
             free(libpaths.to_type(*void))
+            mb_macho_tmp_discard(macho_stage, &link_dir[0], (&link_tmp[0]).to_type(*char))
             return -1
         }
         let search_i int = 0
@@ -1415,26 +1427,28 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     free(cpaths.to_type(*void))
     free(libpaths.to_type(*void))
     if (link_rc == -2) {
-        unlink((&link_tmp[0]).to_type(*char))
+        mb_macho_tmp_discard(macho_stage, &link_dir[0], (&link_tmp[0]).to_type(*char))
         return gen.fail("lld 不可重入：链接 worker 已结束，未发布输出")
     }
     if (link_rc != 0) {
-        unlink((&link_tmp[0]).to_type(*char))
+        mb_macho_tmp_discard(macho_stage, &link_dir[0], (&link_tmp[0]).to_type(*char))
         return gen.fail_path("链接失败: ", out_path)
     }
     if (mb_object_machine_matches((&link_tmp[0]).to_type(*char)) == 0) {
-        unlink((&link_tmp[0]).to_type(*char))
+        mb_macho_tmp_discard(macho_stage, &link_dir[0], (&link_tmp[0]).to_type(*char))
         return gen.fail_path("链接产物架构与当前 target 不符: ", out_path)
     }
     if (use_macho != 0
         && mb_darwin_executable_matches((&link_tmp[0]).to_type(*char)) == 0) {
-        unlink((&link_tmp[0]).to_type(*char))
+        mb_macho_tmp_discard(macho_stage, &link_dir[0], (&link_tmp[0]).to_type(*char))
         return gen.fail_path("Darwin 链接产物版本或代码签名校验失败: ", out_path)
     }
     if (rename((&link_tmp[0]).to_type(*char), out_path) != 0) {
-        unlink((&link_tmp[0]).to_type(*char))
+        mb_macho_tmp_discard(macho_stage, &link_dir[0], (&link_tmp[0]).to_type(*char))
         return gen.fail_path("无法发布链接产物: ", out_path)
     }
+    // 发布成功后收尾暂存目录（产物已 rename 走，只剩空目录）。
+    mb_macho_tmp_discard(macho_stage, &link_dir[0], (&link_tmp[0]).to_type(*char))
     let final_hash u64 = mb_hash_init()
     if (mb_hash_file(&final_hash, out_path) != 0) {
         return -1

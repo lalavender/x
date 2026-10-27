@@ -401,7 +401,14 @@ fn llvm_globals(unit *ir.IRModule, out *LLVMOutput, live *u8) void {
 // llvm_emit_module：只消费经过 verifier 的封闭模块；全量预检后用私有临时输出构建。
 // 成功释放旧输出并一次性转移所有权；失败保持调用方 out 原值，绝不调用旧 ARM 后端。
 pub fn llvm_emit_module(unit *ir.IRModule, target *gen.TargetInfo, out *LLVMOutput) int {
-    if (out == 0 || ir.ir_module_verify(unit) != 0) { return gen.fail("LLVM 模块未通过 IR verifier") }
+    // PL1d2：这里原本再跑一次完整 ir_module_verify。但每个模块到达后端之前都已由
+    // 生产者验证过（lowering 提交前 verifies / ir_module_deserialize 的装载路径），
+    // 同一份 IR 在一个构建里被完整 verify **两次**——实测函数体校验累计 5.33 s，而
+    // lowering 侧只记到 2.72 s。这里只留廉价的结构前置检查；语义校验由生产者负责，
+    // 发射前的 llvm_preflight / llvm_target_same 仍会拒绝结构不完整的模块。
+    if (out == 0 || ir.ir_module_sealed(unit) == 0) {
+        return gen.fail("LLVM 模块未通过 IR verifier")
+    }
     if (llvm_target_same(unit, target) == 0) { return llvm_reject(unit, 0, 0, "完整目标身份不一致或平台尚不支持") }
     if (llvm_preflight(unit) != 0) { return -1 }
     let temporary LLVMOutput

@@ -81,9 +81,14 @@ FAST_STAGE := env_var_or_default("FAST_STAGE", "1")
 fast_stage := if FAST_STAGE == "" { "1" } else { FAST_STAGE }
 tmpdir := if env_var_or_default("TMPDIR", "") == "" { "/tmp" } else { env_var_or_default("TMPDIR", "/tmp") }
 run_id := env_var_or_default("GITHUB_RUN_ID", "")
-# 每次 CI run 独占一个快速目录：同机并发跑多个 run 时共用 /tmp/yh-fast 会让
-# stage-yh 互相覆盖（release 与分支门同时跑时出现过 selfhost 探针读错二进制）。
-FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast" + (if run_id == "" { "" } else { "-" + run_id }))
+# 快速目录必须「一次构建一个」：stage-yh 会把 yh 拷进去给各探针用。
+# 两类串扰都实测发生过：
+#   1) 同机并发跑多个 CI run（release 与分支门）→ 由 run_id 后缀隔离；
+#   2) 同机多个 worktree 并行开发（2026-10-27 实测）→ 由 workspace 路径哈希隔离，
+#      否则别的 worktree 的 `just test` 会把 yh_run 换成它自己的二进制，
+#      探针就会读错 `--stats` 字段。
+workspace_key := `python3 -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:8])" "{{ root }}"`
+FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast-" + workspace_key + (if run_id == "" { "" } else { "-" + run_id }))
 fast_dir := if FAST_DIR == "" { tmpdir + "/yh-fast" } else { FAST_DIR }
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
 yh_run := if fast_stage == "1" { absolute_path(fast_dir + "/yh") } else { yh_abs }

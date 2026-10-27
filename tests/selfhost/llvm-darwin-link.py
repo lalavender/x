@@ -165,6 +165,26 @@ def main():
         verify_executable(f"project-O{level}", product, project_env, args.min_os)
         if level == 2:
             product_hash = file_hash(product)
+            # RB5：同源重复链接必须位级一致。lld 的 ad-hoc 签名把输出 basename
+            # 写进 codesign identifier，临时产物名若带 pid 就会漏进产物内容。
+            product.unlink()
+            relinked = run("project-relink", [str(compiler), "--backend", "llvm",
+                "--target", "aarch64-apple-darwin", "-O2", "build"],
+                project_env, cwd=project)
+            require(relinked.returncode == 0 and product.is_file(),
+                    f"重复链接失败：{relinked.stderr[-3000:]}")
+            require(file_hash(product) == product_hash,
+                    "同一源码重复链接的 Darwin 可执行文件不可位级复现")
+            identifier = run("project-identifier", ["codesign", "-dvvv", str(product)],
+                             project_env)
+            # 必须整行相等：旧实现的 `Identifier=<产物>.yh-tmp.<pid>` 只是以产物名开头，
+            # 用子串判定会漏掉 pid 后缀。
+            require(re.search(rf"^Identifier={re.escape(product.name)}$",
+                              identifier.stderr + identifier.stdout, re.M) is not None,
+                    "Darwin 可执行文件的 codesign identifier 不等于产物名："
+                    f"{identifier.stderr[-1000:]}")
+            leftovers = list((project / ".build").rglob("*.yh-tmp.*"))
+            require(not leftovers, f"成功链接留下未发布临时产物：{leftovers}")
             manifests = list(project.rglob("link.manifest"))
             require(len(manifests) == 1, "多模块项目没有唯一成功链接 manifest")
             manifest = manifests[0]
