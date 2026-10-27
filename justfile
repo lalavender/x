@@ -503,5 +503,5 @@ _ensure_built:
       if [ "$need" = 0 ] && [ -n "$(find compiler -maxdepth 2 -name '*.yh' -newer "$target" -print -quit)" ]; then need=1; fi
     fi
     if [ "$need" = 1 ]; then
-      exec just SEED="{{ seed }}" SEED_DEST="{{ seed_dest }}" YH_LLVM_HOST="{{ YH_LLVM_HOST }}" YH_LLVM_CACHE="{{ cache_root }}" YH_BUILD_CACHE="{{ build_cache }}" build
+      exec env YH_BUILD_CACHE="{{ build_cache }}" just SEED="{{ seed }}" SEED_DEST="{{ seed_dest }}" YH_LLVM_HOST="{{ YH_LLVM_HOST }}" YH_LLVM_CACHE="{{ cache_root }}" build
     fi
