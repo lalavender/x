@@ -146,24 +146,51 @@ fn mb_hash_file(h *u64, path *char) int {
 const MB_BUILD_DIR_MAX int = 400
 const MB_TAG_MAX int = 120
 
-// mb_build_dir：构建目录 = <root>/.build/targets/<triple>/llvm/O<n>；
-// check 模式用 <root>/.build/check（LL12：不再有旧后端目录）。
+// mb_cache_root：构建缓存根目录 = YH_BUILD_CACHE（非空时）或 <root>/.build。
+//
+// 缓存树（targets/check 与 asm/obj/iface/manifest/ir/llvm 六个子目录）整体
+// 落在该目录，便于同一台机器上的多个 worktree 各指一处（例如本地快速盘），
+// 互不覆盖。相对路径按进程 cwd 解析（宿主 open 语义），建议传绝对路径。
+// 结果经 pj_canon 写入 pj_state().canon_off/len，成功返回 0。
+fn mb_cache_root(root_off int, root_len int) int {
+    let off int = -1
+    let olen int = 0
+    if (pj_env_fetch("YH_BUILD_CACHE", &off, &olen) < 0) {
+        return -1
+    }
+    if (olen == 0) {
+        return pj_canon(root_off, root_len, ".build")
+    }
+    return pj_canon(off, olen, "")
+}
+
+// mb_build_dir：构建目录 = <cache>/targets/<triple>/llvm/O<n>；
+// check 模式用 <cache>/check（LL12：不再有旧后端目录）。
+// 测试模式始终落在项目 tmp/yh-test/check，避免测试与生产缓存混用。
 pub fn mb_build_dir(root_off int, root_len int) int {
     let gs *gen.GenState = gen.G()
     let rc int = 0
     if (gs.task.c_test_mode != 0) {
         // 测试检查与生产 .build 隔离；接口/会话文件只落在项目 tmp 下。
         rc = pj_canon(root_off, root_len, "tmp/yh-test/check")
-    } else if (gs.task.c_check_only != 0) {
-        rc = pj_canon(root_off, root_len, ".build/check")
     } else {
-        let target_dir [256]u8
-        let n int = gen.append_str(&target_dir[0], 0, ".build/targets/")
-        n = gen.append_str(&target_dir[0], n, gs.c_target.triple)
-        n = gen.append_str(&target_dir[0], n, "/llvm/O")
-        n = gen.append_int(&target_dir[0], n, gs.c_opt_level)
-        target_dir[n] = 0
-        rc = pj_canon(root_off, root_len, (&target_dir[0]).to_type(*char))
+        // 先算缓存根并取出偏移：第二次 pj_canon 会覆盖 canon_off/len。
+        if (mb_cache_root(root_off, root_len) != 0) {
+            return -1
+        }
+        let base_off int = pj_state().canon_off
+        let base_len int = pj_state().canon_len
+        if (gs.task.c_check_only != 0) {
+            rc = pj_canon(base_off, base_len, "check")
+        } else {
+            let target_dir [256]u8
+            let n int = gen.append_str(&target_dir[0], 0, "targets/")
+            n = gen.append_str(&target_dir[0], n, gs.c_target.triple)
+            n = gen.append_str(&target_dir[0], n, "/llvm/O")
+            n = gen.append_int(&target_dir[0], n, gs.c_opt_level)
+            target_dir[n] = 0
+            rc = pj_canon(base_off, base_len, (&target_dir[0]).to_type(*char))
+        }
     }
     if (rc != 0) {
         return -1
@@ -176,12 +203,16 @@ pub fn mb_build_dir(root_off int, root_len int) int {
 }
 
 // mb_default_binary_path：默认可执行文件留在项目 .build 根目录，中间缓存
-// 按目标与优化级别隔离（LL12：唯一后端）。
+// 按目标与优化级别隔离（LL12：唯一后端）。缓存根可被 YH_BUILD_CACHE 迁走
+// （见 mb_cache_root），产物位置不变，因此这里独立确保 .build 存在。
 fn mb_default_binary_path(root_off int, root_len int, build_off int,
     project int, out *u8) int {
     let gs *gen.GenState = gen.G()
     if (pj_canon(root_off, root_len, ".build") != 0) { return -1 }
     let dir_off int = pj_state().canon_off
+    if (cmd_mkdirs(pj_pool_str(dir_off)) != 0) {
+        return gen.fail_path("无法创建产物目录: ", pj_pool_str(dir_off))
+    }
     let n int = gen.append_str(out, 0, pj_pool_str(dir_off))
     n = gen.append_byte(out, n, '/')
     n = append_bytes_np(out, n, gs.p_projs[project].name_off,

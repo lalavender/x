@@ -5,6 +5,30 @@
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
+## 2026-10-28 构建缓存目录可指定（YH_BUILD_CACHE）
+
+- **编译器**：`compiler/build/module_build.yh` 新增 `mb_cache_root()`——`YH_BUILD_CACHE`
+  非空时整套缓存树（`targets/...`、`check/` 与 asm/obj/iface/manifest/ir/llvm）
+  落在该目录，空/未设置时仍是项目内 `.build`；测试模式仍固定
+  `tmp/yh-test/check`。`mb_default_binary_path()` 独立确保项目 `.build` 存在，
+  默认可执行文件位置不随缓存迁移而变。
+- **justfile**：`BUILD_CACHE`（环境变量 `YH_BUILD_CACHE`）贯通 `build`/`dev`/
+  `clean` 与 `_ensure_built` 的子 `just`；冷编时连同缓存根一起清。门禁脚本按
+  项目内 `.build` 断言，`unexport YH_BUILD_CACHE` 让 `test`/`selfhost-native`
+  始终在缺省布局下跑，不受用户缓存位置影响。
+- **测试**：新增 `tests/build-cache/check.py`（接入 `just test`）：设置
+  `YH_BUILD_CACHE` 后对象落在缓存根、项目内无 `.build/targets`，二次构建增量
+  命中；不设置时回到缺省 `.build/targets`。
+- **验证**：`just test` 全绿（运行语料 360/361、新增 build-cache 4/4、arch-check
+  通过）；`just selfhost-native` 全绿（模块固定点 42 产物一致、cc4 自解析 120
+  文件、CLI 冒烟含 `--help`、运行语料 360/361、project cases 122/122）。滚种子
+  `bin/yh-darwin-arm64`（SHA-256 `1591d13b16140e7ecaa7ad30034ccdf1d05003cc358e843f5462c3b9a8b643fc`）
+  后复验：新种子下 `YH_BUILD_CACHE=/tmp/yhbc-real just build` 把 21 个对象写进
+  指定目录、`compiler/.build` 不出现；`just dev` 1.4 s 全部 `[缓存]` 命中；
+  冷编回缺省布局后再跑 `just selfhost-native` 全绿。带
+  `YH_BUILD_CACHE=/tmp/yhbc-gate just test` 也全绿：门禁自身的项目构建仍落在
+  各自的 `.build`，没有往该目录写入（只有顶层 `_ensure_built` 的构建会用它）。
+
 ## 2026-10-27 修 llvm-host 缓存路径 bug + justfile 暂存目录隔离 + 滚种子
 
 - **`tools/llvm-darwin-host.py` / `tools/llvm-host.py`**：新增 `describe()`，把
