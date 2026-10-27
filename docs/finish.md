@@ -61,10 +61,19 @@
   --host darwin-aarch64` PASS）；`record_path()` 必须把路径写成
   `tmp/llvm-migration/...` 别名，否则 `[link-darwin-arm64]` 的 bridge 会被
   link-closure 误分类到 support 组。
-- **待办**：tag 推送后由 `release.yml` 三端构建 + `publish-release.py` 发布
-  prerelease；结果以 Release 与 CI 记录为准。发布后用 rc 二进制做
-  `rm -rf bin && just fetch-seed → just → just test → just selfhost-native` 验收，
-  再合并到 `0.0.11-release` 打正式 tag。
+- **发布结果**：tag `0.0.11-rc.1` 推送后 `release.yml`（run **168**）五 job 全绿，
+  `publish` 创建 prerelease 并上传三端资产
+  （`yh-0.0.11-rc.1-{darwin-arm64,linux-arm64,linux-x86_64}.tar.gz` + `.sha256`）：
+  https://github.com/lalavender/x/releases/tag/0.0.11-rc.1 。
+  分支门 `ci.yml`（run **167**）三平台同样全绿（darwin-arm64 / linux-arm64 /
+  linux-x86_64 各完整跑完语料 + `SKIP_CORPUS=1 selfhost-native`）。
+- **rc 二进制验收**（AGENTS 第 3 步）：`rm -rf bin` →
+  `GH_TOKEN=… GITHUB_REPOSITORY=lalavender/x just fetch-seed`（取到 rc.1 的
+  darwin-arm64 种子，sha256 `c7d230f0…`、自报 `yh 0.0.11`）→ `just`（冷编）→
+  `just test`（三层回归全绿）→ `just selfhost-native`（固定点、自解析、语料、
+  `build-check` 124/124 全绿）。三项均 EXIT=0。
+- **下一步**：`git merge --no-ff 0.0.11-rc` → `0.0.11-release`，打正式 tag `0.0.11`
+  （正式 tag 必须落在 release 分支上）；发完删 `0.0.11-rc`、保留 `0.0.11-release`。
 
 ## 2026-10-27 未使用函数直接报错（UF1）：检查进 pass1，清掉 24 个死函数
 
