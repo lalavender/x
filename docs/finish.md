@@ -35,9 +35,19 @@
   交替、以及 `host.json` 摘要与磁盘不一致。定位后改用私有
   `FAST_DIR=$PWD/tmp/yh-fast` 跑门禁，并重新基线闭包记录（`bridge_sha256` 等按磁盘
   现值重算）；CI 侧则用固定 `YH_LLVM_CACHE` 避开 HOME 覆写。
+- **本 workspace 私有闭包**：并发会话反复重建共享闭包的 `libyh-llvm-bridge.a`
+  并改写 `host.json`，身份记录几分钟就被打花（`check` 报「构建器已变化」，CI 于是
+  试图重建 SDK）。因此建了同源私有闭包
+  `~/Documents/x/tmp/llvm-migration-llvm-3`（`darwin-sdk` 软链共享的只读 SDK，
+  host 目录为 232 KB 的实体副本，记录重新基线为 `tmp/llvm-migration/...` 别名路径），
+  两个 workflow 的缓存步骤改为按候选顺序选目录：
+  显式 `YH_LLVM_CACHE` → 私有闭包 → 共享闭包，命中即 `ln -sfn` 到 `tmp/llvm-migration`。
 - **环境**：`just llvm-host` 幂等化后本地/CI 都不再重建闭包；闭包记录里的
-  `host_builder_sha256` 每次改 `tools/llvm-darwin-host.py` 需重新基线（本轮改了三次，
-  最终记录与磁盘一致，`check(full=True)` 为空）。
+  `host_builder_sha256` 每次改 `tools/llvm-darwin-host.py` 需重新基线（本轮改了四次，
+  最终记录与磁盘一致，`check(full=True)` 为空、`tools/link-closure.py check
+  --host darwin-aarch64` PASS）；`record_path()` 必须把路径写成
+  `tmp/llvm-migration/...` 别名，否则 `[link-darwin-arm64]` 的 bridge 会被
+  link-closure 误分类到 support 组。
 - **待办**：tag 推送后由 `release.yml` 三端构建 + `publish-release.py` 发布
   prerelease；结果以 Release 与 CI 记录为准。发布后用 rc 二进制做
   `rm -rf bin && just fetch-seed → just → just test → just selfhost-native` 验收，

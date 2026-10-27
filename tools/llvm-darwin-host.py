@@ -67,15 +67,23 @@ def display_path(path):
 
 
 def record_path(path):
-    """身份记录里的路径字段：仓库内写相对路径，仓库外写绝对路径。
+    """身份记录里的路径字段：统一写成仓库内可解析的相对路径。
 
-    记录消费者统一用 ROOT / record["..."] 拼接，pathlib 对绝对路径会直接
-    返回原值，因此两种形态都可用；缓存根在仓库外（CI executor 或直接指向
-    主 worktree 的 tmp/llvm-migration）时不再抛 ValueError。
+    缓存根可能经 ROOT/tmp/llvm-migration 符号链接来自仓库外（主 worktree、
+    CI executor），此时真实路径不在 ROOT 下；仍按这个固定别名记录，保证
+    tools/link-closure.py 与 project.toml 的 [link-<目标>] 组口径不变
+    （记录里混入绝对路径会让 bridge 归档被误分类到 support 组）。
+    只有连别名都对不上时才退回绝对路径。
     """
     try:
         return str(path.relative_to(ROOT))
     except ValueError:
+        pass
+    alias = Path("tmp/llvm-migration")
+    try:
+        rel = path.relative_to((ROOT / alias).resolve())
+        return f"{alias.as_posix()}/{rel.as_posix()}"
+    except (ValueError, OSError):
         return str(path)
 
 
