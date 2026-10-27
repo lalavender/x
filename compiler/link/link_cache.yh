@@ -762,82 +762,163 @@ fn mb_darwin_selfhost_enabled() int {
     return gen.task().np_data[off] == '1' ? 1 : 0
 }
 
-pub fn mb_link(out_path *char, build_off int, build_len int,
-    count int, root_proj int) int {
-    let c_off int = 0
-    let c_len int = 0
+// ============================================================================
+// LinkPlan 与 mb_link 的六个阶段（B2-3，2026-10-26）
+//
+// 原来 676 行的 mb_link 把「准备 → 逐模块对象 → 链接键 → argv → 库参数 →
+// 执行发布」全部塞在一个函数里，20 多处错误分支各自复制 4 连 free。
+// 现在：一次链接的可变量全在 LinkPlan（调用方栈上），6 个阶段各 ≤160 行、
+// 只返回 0/-1，**不释放**；`mb_link` 在任一步失败或成功收尾时统一
+// `mb_link_release`。语句顺序与原来逐行对应，行为不变。
+// ============================================================================
+
+// LinkPlan：一次链接的完整计划（入参、会话标量、argv 与路径缓冲）。
+// 生命周期 = mb_link 一次调用；栈上分配，指针交给各阶段（阶段不拥有内存）。
+struct LinkPlan {
+    // —— 入参 ——
+    out_path *char
+    build_off int
+    build_len int
+    count int
+    root_proj int
+    // —— 目标与链接方式 ——
+    use_lld int
+    use_macho int
+    selfhost_on int
+    selfhost_flag_n int
+    llvm_objects int
+    // —— 链接器与 C 项目输入 ——
+    cc_storage [1200]u8
+    cc *char
+    c_projects *int
+    c_project_n int
+    c_object_n int
+    c_lib_n int
+    link_lib_n int
+    // —— 计时 ——
+    object_start_ns u64
+    link_start_ns u64
+    // —— 链接键与路径 ——
+    hlink u64
+    link_tmp [900]u8
+    link_manifest [620]u8
+    // —— argv 与路径行缓冲 ——
+    args **char
+    paths *u8
+    cpaths *u8
+    libpaths *u8
+    argc int
+    total_rows int
+    next_arg int
+    object_start int
+    extra_start int
+    object_count int
+    extra_count int
+    row_fill int
+    library_search_storage [4096]u8
+    library_search_len int
+    library_search_count int
+    // —— 路径暂存（mod_tag 结果） ——
+    c_off int
+    c_len int
+}
+
+// mb_link_release：释放一次链接计划持有的堆内存（各阶段不再各自 free）。
+fn mb_link_release(p *LinkPlan) void {
+    if (p.c_projects != 0) { free(p.c_projects.to_type(*void)) }
+    if (p.args != 0) { free(p.args.to_type(*void)) }
+    if (p.paths != 0) { free(p.paths.to_type(*void)) }
+    if (p.cpaths != 0) { free(p.cpaths.to_type(*void)) }
+    if (p.libpaths != 0) { free(p.libpaths.to_type(*void)) }
+    p.c_projects = 0
+    p.args = 0
+    p.paths = 0
+    p.cpaths = 0
+    p.libpaths = 0
+}
+
+// mb_link_prepare：环境与自举闭包自检、选链接器、装配 C 项目输入。
+// 返回 0 成功、-1 失败（诊断已输出）。
+fn mb_link_prepare(p *LinkPlan) int {
+    p.c_off = 0
+    p.c_len = 0
     let tk *gen.TaskCtx = gen.task()
-    let use_lld int = mb_lld_linux_enabled()
-    let use_macho int = mb_lld_darwin_enabled()
+    p.use_lld = mb_lld_linux_enabled()
+    p.use_macho = mb_lld_darwin_enabled()
     // 自举闭包由构建机提供：优先读 YH_LLVM_SELFHOST_FLAGS 指向的文件，
     // 未提供时桥内烘焙常量作为过渡回退。负数是文件不可读，0 是没有任何闭包
     // （新种子不再烘焙绝对路径），两种情况都要立刻给出可操作诊断。
-    let selfhost_on int = li_manifest_mode(root_proj) != 0 ?
+    p.selfhost_on = li_manifest_mode(p.root_proj) != 0 ?
         0 : mb_darwin_selfhost_enabled()
-    let selfhost_flag_n int = 0
+    p.selfhost_flag_n = 0
     // 内嵌 lld 的 Linux 与 Darwin 都从同一运行时闭包文件读取桥/静态 LLVM；
     // 自举时必须先证明闭包存在，不能让空闭包静默链接出不可发射的二进代。
-    if ((use_macho != 0 || use_lld != 0) && selfhost_on != 0) {
-        selfhost_flag_n = backend.llvm_lld_selfhost_flag_count()
-        if (selfhost_flag_n < 0) {
+    if ((p.use_macho != 0 || p.use_lld != 0) && p.selfhost_on != 0) {
+        p.selfhost_flag_n = backend.llvm_lld_selfhost_flag_count()
+        if (p.selfhost_flag_n < 0) {
             return gen.fail("自举链接闭包文件不可读：检查 YH_LLVM_SELFHOST_FLAGS（每行一个链接参数）")
         }
-        if (selfhost_flag_n == 0) {
+        if (p.selfhost_flag_n == 0) {
             return gen.fail("自举链接缺少 LLVM 闭包：先运行 make llvm-host，或用 YH_LLVM_SELFHOST_FLAGS 指定闭包文件")
         }
     }
-    let object_start_ns u64 = 0
+    p.object_start_ns = 0
     if (gen.stats().enabled != 0) {
-        object_start_ns = cmd_clock_ns()
+        p.object_start_ns = cmd_clock_ns()
     }
     // 两步链接（用户规划：.build/asm → .build/obj → 链接）
-    let cc_storage [1200]u8
-    let cc *char = mb_select_linker(&cc_storage[0])
-    if (cc == 0) { return -1 }
+    p.cc = mb_select_linker(&p.cc_storage[0])
+    if (p.cc == 0) { return -1 }
     let project_capacity int = proj.ctx().proj_n > 0 ? proj.ctx().proj_n : 1
     // LLVM 后端：worker 已用内嵌桥把每个模块直接发成目标命名空间的 obj/<tag>.o，
     // 没有 .s 中间产物，因此跳过「汇编 → 目标」步，链接参数直接收这些对象。
-    let llvm_objects int = 1
-    let c_projects *int = malloc((project_capacity * sizeof(int)).to_type(u64)) .
+    p.llvm_objects = 1
+    p.c_projects = malloc((project_capacity * sizeof(int)).to_type(u64)) .
         to_type(*int)
-    if (c_projects == 0) { return gen.fail("C 项目顺序表内存分配失败") }
-    let c_project_n int = 0
-    if (mb_c_project_order(root_proj, c_projects, &c_project_n,
+    if (p.c_projects == 0) { return gen.fail("C 项目顺序表内存分配失败") }
+    p.c_project_n = 0
+    if (mb_c_project_order(p.root_proj, p.c_projects, &p.c_project_n,
         project_capacity) != 0) { return -1 }
-    let c_object_n int = 0
-    let c_lib_n int = 0
+    p.c_object_n = 0
+    p.c_lib_n = 0
     let cpi int = 0
-    for cpi < c_project_n {
-        let cproj int = c_projects[cpi]
-        c_object_n += proj.ctx().projs[cproj].c_source_n + proj.ctx().projs[cproj].c_object_n
-        c_lib_n += proj.ctx().projs[cproj].c_lib_n
+    for cpi < p.c_project_n {
+        let cproj int = p.c_projects[cpi]
+        p.c_object_n += proj.ctx().projs[cproj].c_source_n + proj.ctx().projs[cproj].c_object_n
+        p.c_lib_n += proj.ctx().projs[cproj].c_lib_n
         cpi += 1
     }
-    if (li_prepare(root_proj, build_off, build_len) != 0) {
+    if (li_prepare(p.root_proj, p.build_off, p.build_len) != 0) {
         return -1
     }
-    let link_lib_n int = li_count()
-    if (mb_c_compile_sources(c_projects, c_project_n, build_off, cc) != 0) {
+    p.link_lib_n = li_count()
+    if (mb_c_compile_sources(p.c_projects, p.c_project_n, p.build_off, p.cc) != 0) {
         return -1
     }
+    return 0
+}
+
+// mb_link_objects：逐模块产出/校验对象文件，并结束对象阶段计时。
+fn mb_link_objects(p *LinkPlan) int {
+    let tk *gen.TaskCtx = gen.task()
     // 步骤 1：逐模块汇编为 .o（RS3b：每模块 N+1 个对象——N 个文件 + 1 个
     // 运行时桩；文件对象键只含本文件 .s 内容，兄弟文件 private 变更不影响）
     let i int = 0
-    for i < count {
+    for i < p.count {
         let m int = proj.ctx().order[i]
-        if (proj.mod_tag(m, &c_off, &c_len) != 0) {
+        if (proj.mod_tag(m, &p.c_off, &p.c_len) != 0) {
             return -1
         }
-        if (llvm_objects != 0) {
+        if (p.llvm_objects != 0) {
             // LLVM 模式：对象已由 worker 发布，这里只登记路径（不重新汇编）。
             i += 1
             continue
         }
         let objdir [900]u8
         let odn int = 0
-        odn = gen.append_str(objdir, odn, proj.pool_str(build_off))
+        odn = gen.append_str(objdir, odn, proj.pool_str(p.build_off))
         odn = gen.append_str(objdir, odn, "/obj/")
-        odn = gen.append_str(objdir, odn, proj.pool_str(c_off))
+        odn = gen.append_str(objdir, odn, proj.pool_str(p.c_off))
         objdir[odn] = 0
         if (cmd_mkdirs(gen.arr_cstr(&objdir[0])) != 0) {
             return gen.fail_path("无法创建对象目录: ", gen.arr_cstr(&objdir[0]))
@@ -847,7 +928,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
             let spath [900]u8
             let opath [900]u8
             let obj_manifest [950]u8
-            if (proj.module_obj_row(m, build_off, build_len, rowk,
+            if (proj.module_obj_row(m, p.build_off, p.build_len, rowk,
                     &spath[0], &opath[0], &obj_manifest[0]) != 0) {
                 return -1
             }
@@ -856,16 +937,16 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
                 return -1
             }
             let ci int = 0
-            for cc[ci] != 0 {
-                proj.fnv(&h, cc[ci].to_type(u8))
+            for p.cc[ci] != 0 {
+                proj.fnv(&h, p.cc[ci].to_type(u8))
                 ci += 1
             }
-            // 键里带上真实命令前缀：换工具链（cc ↔ yh_link）必然换键，
-            // 否则会拿 cc 产出的旧对象当命中。
+            // 键里带上真实命令前缀：换工具链（p.cc ↔ yh_link）必然换键，
+            // 否则会拿 p.cc 产出的旧对象当命中。
             let tool_buf [1200]u8
             tool_buf[0] = 0
             let use_yh int = mb_asm_tool(&tool_buf[0])
-            let cmd0 *char = cc
+            let cmd0 *char = p.cc
             if (use_yh != 0) {
                 cmd0 = gen.arr_cstr(&tool_buf[0])
             }
@@ -928,37 +1009,37 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
             }
             if (object_hit == 0) {
                 unlink(gen.arr_cstr(obj_manifest))
-                let args [8]*char
+                let asm_args [8]*char
                 if (use_yh != 0) {
                     // yh_link asm -t darwin -o <obj> <src>（Linux 目标不带 -t，
                     // yh_link 的默认目标就是 ELF64）
-                    args[0] = gen.arr_cstr(&tool_buf[0])
-                    args[1] = "asm"
+                    asm_args[0] = gen.arr_cstr(&tool_buf[0])
+                    asm_args[1] = "asm"
                     if (gen.tg_darwin() != 0) {
-                        args[2] = "-t"
-                        args[3] = "darwin"
-                        args[4] = "-o"
-                        args[5] = gen.arr_cstr(opath)
-                        args[6] = gen.arr_cstr(spath)
-                        args[7] = 0.to_type(*char)
+                        asm_args[2] = "-t"
+                        asm_args[3] = "darwin"
+                        asm_args[4] = "-o"
+                        asm_args[5] = gen.arr_cstr(opath)
+                        asm_args[6] = gen.arr_cstr(spath)
+                        asm_args[7] = 0.to_type(*char)
                     } else {
-                        args[2] = "-o"
-                        args[3] = gen.arr_cstr(opath)
-                        args[4] = gen.arr_cstr(spath)
-                        args[5] = 0.to_type(*char)
+                        asm_args[2] = "-o"
+                        asm_args[3] = gen.arr_cstr(opath)
+                        asm_args[4] = gen.arr_cstr(spath)
+                        asm_args[5] = 0.to_type(*char)
                     }
                 } else {
-                    args[0] = cc
-                    args[1] = "-c"
-                    args[2] = gen.arr_cstr(spath)
-                    args[3] = "-o"
-                    args[4] = gen.arr_cstr(opath)
-                    args[5] = 0.to_type(*char)
+                    asm_args[0] = p.cc
+                    asm_args[1] = "-c"
+                    asm_args[2] = gen.arr_cstr(spath)
+                    asm_args[3] = "-o"
+                    asm_args[4] = gen.arr_cstr(opath)
+                    asm_args[5] = 0.to_type(*char)
                 }
                 if (gen.stats().enabled != 0) {
                     gen.stats().asm += 1
                 }
-                if (cmd_process_run(&args[0]) != 0) {
+                if (cmd_process_run(&asm_args[0]) != 0) {
                     return gen.fail_path("汇编失败: ", gen.arr_cstr(spath))
                 }
                 let object_hash u64 = proj.hash_init()
@@ -976,77 +1057,83 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
         }
         i += 1
     }
-    let link_start_ns u64 = 0
+    p.link_start_ns = 0
     if (gen.stats().enabled != 0) {
-        lk_object_ns = cmd_clock_ns() - object_start_ns
-        link_start_ns = cmd_clock_ns()
+        lk_object_ns = cmd_clock_ns() - p.object_start_ns
+        p.link_start_ns = cmd_clock_ns()
     }
+    return 0
+}
+
+// mb_link_key：计算链接键与 manifest 路径；命中缓存返回 1（无需链接）。
+fn mb_link_key(p *LinkPlan) int {
+    let tk *gen.TaskCtx = gen.task()
     // 最终链接键包括目标、参数、输出路径、模块顺序与全部对象内容。
-    let hlink u64 = proj.hash_init()
+    p.hlink = proj.hash_init()
     let cci int = 0
-    for cc[cci] != 0 {
-        proj.fnv(&hlink, cc[cci].to_type(u8))
+    for p.cc[cci] != 0 {
+        proj.fnv(&p.hlink, p.cc[cci].to_type(u8))
         cci += 1
     }
-    let link_flags *char = use_lld != 0 ?
+    let link_flags *char = p.use_lld != 0 ?
         " lld-in-process -no-pie -o" : " -no-pie -o"
-    if (use_macho != 0) { link_flags = " ld64.lld-in-process -pie -adhoc_codesign -o" }
+    if (p.use_macho != 0) { link_flags = " ld64.lld-in-process -pie -adhoc_codesign -o" }
     if (gen.tg_darwin() != 0) {
         link_flags = " -o"
-        proj.fnv(&hlink, 'D')
+        proj.fnv(&p.hlink, 'D')
     } else {
-        proj.fnv(&hlink, 'L')
+        proj.fnv(&p.hlink, 'L')
     }
-    proj.fnv(&hlink, ('0' + tk.c_legacy_system).to_type(u8))
+    proj.fnv(&p.hlink, ('0' + tk.c_legacy_system).to_type(u8))
     let target_i int = 0
     for proj.cfg().target.triple[target_i] != 0 {
-        proj.fnv(&hlink, proj.cfg().target.triple[target_i].to_type(u8))
+        proj.fnv(&p.hlink, proj.cfg().target.triple[target_i].to_type(u8))
         target_i += 1
     }
-    proj.fnv(&hlink, 0)
+    proj.fnv(&p.hlink, 0)
     target_i = 0
     for proj.cfg().target.data_layout[target_i] != 0 {
-        proj.fnv(&hlink, proj.cfg().target.data_layout[target_i].to_type(u8))
+        proj.fnv(&p.hlink, proj.cfg().target.data_layout[target_i].to_type(u8))
         target_i += 1
     }
-    proj.fnv(&hlink, '1'.to_type(u8))
-    proj.fnv(&hlink, ('0' + proj.cfg().opt_level).to_type(u8))
-    if (use_lld != 0) {
-        if (mb_hash_lld_identity(&hlink, c_projects, c_project_n) != 0) { return -1 }
-    } else if (use_macho != 0) {
-        if (mb_hash_macho_identity(&hlink, c_projects, c_project_n) != 0) { return -1 }
+    proj.fnv(&p.hlink, '1'.to_type(u8))
+    proj.fnv(&p.hlink, ('0' + proj.cfg().opt_level).to_type(u8))
+    if (p.use_lld != 0) {
+        if (mb_hash_lld_identity(&p.hlink, p.c_projects, p.c_project_n) != 0) { return -1 }
+    } else if (p.use_macho != 0) {
+        if (mb_hash_macho_identity(&p.hlink, p.c_projects, p.c_project_n) != 0) { return -1 }
     } else {
-        if (mb_hash_tool_identity(&hlink, cc) != 0) { return -1 }
-        if (mb_link_query_identity(&hlink, cc,
-            c_projects, c_project_n, build_off) != 0) { return -1 }
+        if (mb_hash_tool_identity(&p.hlink, p.cc) != 0) { return -1 }
+        if (mb_link_query_identity(&p.hlink, p.cc,
+            p.c_projects, p.c_project_n, p.build_off) != 0) { return -1 }
     }
     let lfi int = 0
     for link_flags[lfi] != 0 {
-        proj.fnv(&hlink, link_flags[lfi].to_type(u8))
+        proj.fnv(&p.hlink, link_flags[lfi].to_type(u8))
         lfi += 1
     }
     let oi int = 0
-    for out_path[oi] != 0 {
-        proj.fnv(&hlink, out_path[oi].to_type(u8))
+    for p.out_path[oi] != 0 {
+        proj.fnv(&p.hlink, p.out_path[oi].to_type(u8))
         oi += 1
     }
-    i = 0
-    for i < count {
+    let i int = 0
+    for i < p.count {
         let m int = proj.ctx().order[i]
-        if (llvm_objects != 0) {
-            if (proj.mod_tag(m, &c_off, &c_len) != 0) {
+        if (p.llvm_objects != 0) {
+            if (proj.mod_tag(m, &p.c_off, &p.c_len) != 0) {
                 return -1
             }
-            let tagoff int = c_off
-            let taglen int = c_len
+            let tagoff int = p.c_off
+            let taglen int = p.c_len
             let ti int = 0
             for ti < taglen {
-                proj.fnv(&hlink, tk.np_data[tagoff + ti])
+                proj.fnv(&p.hlink, tk.np_data[tagoff + ti])
                 ti += 1
             }
             let opath [900]u8
             let on3 int = 0
-            on3 = gen.append_str(opath, on3, proj.pool_str(build_off))
+            on3 = gen.append_str(opath, on3, proj.pool_str(p.build_off))
             on3 = gen.append_str(opath, on3, "/obj/")
             on3 = gen.append_str(opath, on3, proj.pool_str(tagoff))
             on3 = gen.append_str(opath, on3, ".o")
@@ -1055,7 +1142,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
                 return gen.fail_path("目标文件架构与当前 target 不符: ",
                     gen.arr_cstr(opath))
             }
-            if (proj.hash_file(&hlink, gen.arr_cstr(opath)) != 0) {
+            if (proj.hash_file(&p.hlink, gen.arr_cstr(opath)) != 0) {
                 return -1
             }
             i += 1
@@ -1065,42 +1152,41 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
         let rowk int = 0
         for rowk <= proj.ctx().mods[m].file_n {
             let opath [900]u8
-            if (proj.module_obj_row(m, build_off, build_len, rowk, 0,
+            if (proj.module_obj_row(m, p.build_off, p.build_len, rowk, 0,
                     &opath[0], 0) != 0) {
                 return -1
             }
             let opi int = 0
             for opath[opi] != 0 {
-                proj.fnv(&hlink, opath[opi].to_type(u8))
+                proj.fnv(&p.hlink, opath[opi].to_type(u8))
                 opi += 1
             }
-            proj.fnv(&hlink, 0)
+            proj.fnv(&p.hlink, 0)
             if (mb_object_machine_matches(gen.arr_cstr(opath)) == 0) {
                 return gen.fail_path("目标文件架构与当前 target 不符: ",
                     gen.arr_cstr(opath))
             }
-            if (proj.hash_file(&hlink, gen.arr_cstr(opath)) != 0) {
+            if (proj.hash_file(&p.hlink, gen.arr_cstr(opath)) != 0) {
                 return -1
             }
             rowk += 1
         }
         i += 1
     }
-    if (mb_c_input_hash(&hlink, c_projects, c_project_n, build_off) != 0) {
+    if (mb_c_input_hash(&p.hlink, p.c_projects, p.c_project_n, p.build_off) != 0) {
         return -1
     }
-    li_hash(&hlink)
+    li_hash(&p.hlink)
     let link_want [16]u8
-    proj.hash_hex(hlink, link_want)
-    let link_manifest [620]u8
+    proj.hash_hex(p.hlink, link_want)
     let lmn int = 0
-    lmn = gen.append_str(link_manifest, lmn, proj.pool_str(build_off))
-    lmn = gen.append_str(link_manifest, lmn, "/manifest/link.manifest")
-    link_manifest[lmn] = 0
+    lmn = gen.append_str(p.link_manifest, lmn, proj.pool_str(p.build_off))
+    lmn = gen.append_str(p.link_manifest, lmn, "/manifest/link.manifest")
+    p.link_manifest[lmn] = 0
     // manifest 同时校验输出文件内容，避免跳过被用户覆盖的产物。
     let link_hit int = 0
-    if (proj.file_exists(out_path) != 0 && proj.file_exists(gen.arr_cstr(link_manifest)) != 0
-        && gen.read_source(gen.arr_cstr(link_manifest)) == 0 && tk.c_src_len == 32) {
+    if (proj.file_exists(p.out_path) != 0 && proj.file_exists(gen.arr_cstr(p.link_manifest)) != 0
+        && gen.read_source(gen.arr_cstr(p.link_manifest)) == 0 && tk.c_src_len == 32) {
         let key_matches int = 1
         let sk int = 0
         for sk < 16 {
@@ -1117,7 +1203,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
             sk2 += 1
         }
         let hout u64 = proj.hash_init()
-        if (key_matches != 0 && proj.hash_file(&hout, out_path) == 0) {
+        if (key_matches != 0 && proj.hash_file(&hout, p.out_path) == 0) {
             let output_key [16]u8
             proj.hash_hex(hout, output_key)
             let j int = 0
@@ -1133,223 +1219,217 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     }
     if (link_hit != 0) {
         if (gen.stats().enabled != 0) {
-            lk_link_ns = cmd_clock_ns() - link_start_ns
+            lk_link_ns = cmd_clock_ns() - p.link_start_ns
         }
-        return 0
+        return 1
     }
+    return 0
+}
+
+// mb_link_args：统计对象行数、分配 argv 缓冲、装配对象与 C 输入参数。
+fn mb_link_args(p *LinkPlan) int {
+    let tk *gen.TaskCtx = gen.task()
     // 步骤 2：链接全部 .o
     // 对象行数 = 各模块（文件数 + 1 个桩）；LLVM 模式每模块 1 个。
-    let total_rows int = 0
-    i = 0
-    for i < count {
+    p.total_rows = 0
+    let i int = 0
+    for i < p.count {
         let m0 int = proj.ctx().order[i]
-        if (llvm_objects != 0) {
-            total_rows += 1
+        if (p.llvm_objects != 0) {
+            p.total_rows += 1
         } else {
-            total_rows += proj.ctx().mods[m0].file_n + 1
+            p.total_rows += proj.ctx().mods[m0].file_n + 1
         }
         i += 1
     }
-    if (total_rows < 1) { total_rows = 1 }
-    let library_search_storage [4096]u8
-    let library_search_len int = 0
-    let library_search_count int = 0
-    if (use_macho != 0) {
+    if (p.total_rows < 1) { p.total_rows = 1 }
+    p.library_search_len = 0
+    p.library_search_count = 0
+    if (p.use_macho != 0) {
         let search_off int = -1
-        if (proj.env_fetch("LIBRARY_PATH", &search_off, &library_search_len) != 0) {
+        if (proj.env_fetch("LIBRARY_PATH", &search_off, &p.library_search_len) != 0) {
             return -1
         }
-        if (library_search_len >= 4095) {
+        if (p.library_search_len >= 4095) {
             return gen.fail("LIBRARY_PATH 超过 Darwin 链接路径限制")
         }
-        if (library_search_len > 0) {
-            library_search_count = 1
+        if (p.library_search_len > 0) {
+            p.library_search_count = 1
             let search_i int = 0
-            for search_i < library_search_len {
-                library_search_storage[search_i] = tk.np_data[search_off + search_i]
-                if (library_search_storage[search_i] == ':') {
-                    library_search_count += 1
+            for search_i < p.library_search_len {
+                p.library_search_storage[search_i] = tk.np_data[search_off + search_i]
+                if (p.library_search_storage[search_i] == ':') {
+                    p.library_search_count += 1
                 }
                 search_i += 1
             }
-            library_search_storage[library_search_len] = 0
+            p.library_search_storage[p.library_search_len] = 0
         }
     }
-    let argc int = total_rows + c_object_n + c_lib_n + link_lib_n * 2 +
+    p.argc = p.total_rows + p.c_object_n + p.c_lib_n + p.link_lib_n * 2 +
         li_runtime_count() + 24 +
-        (library_search_count * 2) +
-        selfhost_flag_n
-    let args **char = gen.alloc((argc * sizeof(*char)).to_type(u64)).to_type(**char)
-    let paths *u8 = malloc((total_rows * 900).to_type(u64)).to_type(*u8)
-    let cpaths *u8 = malloc(((c_object_n > 0 ? c_object_n : 1) * 700).to_type(u64)).to_type(*u8)
-    let libpaths *u8 = malloc(((c_lib_n > 0 ? c_lib_n : 1) * 128).to_type(u64)).to_type(*u8)
-    if (args == 0 || paths == 0 || cpaths == 0 || libpaths == 0) {
-        if (args != 0) { free(args.to_type(*void)) }
-        if (paths != 0) { free(paths.to_type(*void)) }
-        if (cpaths != 0) { free(cpaths.to_type(*void)) }
-        if (libpaths != 0) { free(libpaths.to_type(*void)) }
+        (p.library_search_count * 2) +
+        p.selfhost_flag_n
+    p.args = gen.alloc((p.argc * sizeof(*char)).to_type(u64)).to_type(**char)
+    p.paths = malloc((p.total_rows * 900).to_type(u64)).to_type(*u8)
+    p.cpaths = malloc(((p.c_object_n > 0 ? p.c_object_n : 1) * 700).to_type(u64)).to_type(*u8)
+    p.libpaths = malloc(((p.c_lib_n > 0 ? p.c_lib_n : 1) * 128).to_type(u64)).to_type(*u8)
+    if (p.args == 0 || p.paths == 0 || p.cpaths == 0 || p.libpaths == 0) {
         return gen.fail("链接 argv 缓冲分配失败")
     }
-    let link_tmp [900]u8
-    let tmp_len int = gen.append_str(&link_tmp[0], 0, out_path)
-    tmp_len = gen.append_str(&link_tmp[0], tmp_len, ".yh-tmp.")
-    tmp_len = gen.append_int(&link_tmp[0], tmp_len, getpid())
-    link_tmp[tmp_len] = 0
-    unlink((&link_tmp[0]).to_type(*char))
-    let next_arg int = 0
-    if (use_macho != 0) {
-        next_arg = mb_macho_link_prefix(args, (&link_tmp[0]).to_type(*char))
-        if (next_arg < 0) {
-            free(args.to_type(*void))
-            free(paths.to_type(*void))
-            free(cpaths.to_type(*void))
-            free(libpaths.to_type(*void))
+    let tmp_len int = gen.append_str(&p.link_tmp[0], 0, p.out_path)
+    tmp_len = gen.append_str(&p.link_tmp[0], tmp_len, ".yh-tmp.")
+    tmp_len = gen.append_int(&p.link_tmp[0], tmp_len, getpid())
+    p.link_tmp[tmp_len] = 0
+    unlink((&p.link_tmp[0]).to_type(*char))
+    p.next_arg = 0
+    if (p.use_macho != 0) {
+        p.next_arg = mb_macho_link_prefix(p.args, (&p.link_tmp[0]).to_type(*char))
+        if (p.next_arg < 0) {
             return -1
         }
         let search_i int = 0
         let search_start int = 0
-        for search_i <= library_search_len && library_search_len > 0 {
-            if (search_i == library_search_len || library_search_storage[search_i] == ':') {
+        for search_i <= p.library_search_len && p.library_search_len > 0 {
+            if (search_i == p.library_search_len || p.library_search_storage[search_i] == ':') {
                 let empty int = search_i == search_start ? 1 : 0
-                library_search_storage[search_i] = 0
-                args[next_arg] = "-L"; next_arg += 1
-                args[next_arg] = empty != 0 ?
-                    "." : (&library_search_storage[search_start]).to_type(*char)
-                next_arg += 1
+                p.library_search_storage[search_i] = 0
+                p.args[p.next_arg] = "-L"; p.next_arg += 1
+                p.args[p.next_arg] = empty != 0 ?
+                    "." : (&p.library_search_storage[search_start]).to_type(*char)
+                p.next_arg += 1
                 search_start = search_i + 1
             }
             search_i += 1
         }
-    } else if (use_lld == 0) {
-        args[next_arg] = cc
-        next_arg += 1
+    } else if (p.use_lld == 0) {
+        p.args[p.next_arg] = p.cc
+        p.next_arg += 1
         if (gen.tg_darwin() == 0) {
-            args[next_arg] = "-no-pie"
-            next_arg += 1
+            p.args[p.next_arg] = "-no-pie"
+            p.next_arg += 1
         }
-        args[next_arg] = "-o"
-        next_arg += 1
-        args[next_arg] = (&link_tmp[0]).to_type(*char)
-        next_arg += 1
+        p.args[p.next_arg] = "-o"
+        p.next_arg += 1
+        p.args[p.next_arg] = (&p.link_tmp[0]).to_type(*char)
+        p.next_arg += 1
     }
-    let object_start int = next_arg
-    let row_fill int = 0
+    p.object_start = p.next_arg
+    p.row_fill = 0
     i = 0
-    for i < count {
+    for i < p.count {
         let m int = proj.ctx().order[i]
-        if (llvm_objects != 0) {
-            if (proj.mod_tag(m, &c_off, &c_len) != 0) {
-                free(args.to_type(*void))
-                free(paths.to_type(*void))
-                free(cpaths.to_type(*void))
-                free(libpaths.to_type(*void))
+        if (p.llvm_objects != 0) {
+            if (proj.mod_tag(m, &p.c_off, &p.c_len) != 0) {
                 return -1
             }
-            let row *u8 = paths + (row_fill * 900)
+            let row *u8 = p.paths + (p.row_fill * 900)
             let n int = 0
-            n = gen.append_str(row, n, proj.pool_str(build_off))
+            n = gen.append_str(row, n, proj.pool_str(p.build_off))
             n = gen.append_str(row, n, "/obj/")
-            n = gen.append_str(row, n, proj.pool_str(c_off))
+            n = gen.append_str(row, n, proj.pool_str(p.c_off))
             n = gen.append_str(row, n, ".o")
             row[n] = 0
-            args[next_arg] = row.to_type(*char)
-            next_arg += 1
-            row_fill += 1
+            p.args[p.next_arg] = row.to_type(*char)
+            p.next_arg += 1
+            p.row_fill += 1
             i += 1
             continue
         }
         let rowk int = 0
         for rowk <= proj.ctx().mods[m].file_n {
-            let row *u8 = paths + (row_fill * 900)
-            if (proj.module_obj_row(m, build_off, build_len, rowk, 0, row, 0) != 0) {
-                free(args.to_type(*void))
-                free(paths.to_type(*void))
-                free(cpaths.to_type(*void))
-                free(libpaths.to_type(*void))
+            let row *u8 = p.paths + (p.row_fill * 900)
+            if (proj.module_obj_row(m, p.build_off, p.build_len, rowk, 0, row, 0) != 0) {
                 return -1
             }
-            args[next_arg] = row.to_type(*char)
-            next_arg += 1
-            row_fill += 1
+            p.args[p.next_arg] = row.to_type(*char)
+            p.next_arg += 1
+            p.row_fill += 1
             rowk += 1
         }
         i += 1
     }
     let cp int = 0
     let cpath_i int = 0
-    for cp < c_project_n {
-        let cproj int = c_projects[cp]
+    for cp < p.c_project_n {
+        let cproj int = p.c_projects[cp]
         let si2 int = 0
         for si2 < proj.ctx().projs[cproj].c_source_n {
-            let row2 *u8 = cpaths + (cpath_i * 700)
-            mb_c_obj_path(build_off, cproj, si2, row2)
-            args[next_arg] = row2.to_type(*char)
-            next_arg += 1
+            let row2 *u8 = p.cpaths + (cpath_i * 700)
+            mb_c_obj_path(p.build_off, cproj, si2, row2)
+            p.args[p.next_arg] = row2.to_type(*char)
+            p.next_arg += 1
             cpath_i += 1
             si2 += 1
         }
         let oi2 int = 0
         for oi2 < proj.ctx().projs[cproj].c_object_n {
-            args[next_arg] = proj.pool_str(proj.ctx().projs[cproj].c_objects[oi2].path_off)
-            next_arg += 1
+            p.args[p.next_arg] = proj.pool_str(proj.ctx().projs[cproj].c_objects[oi2].path_off)
+            p.next_arg += 1
             oi2 += 1
         }
         cp += 1
     }
-    let object_count int = next_arg - object_start
-    let extra_start int = next_arg
+    p.object_count = p.next_arg - p.object_start
+    return 0
+}
+
+// mb_link_libs：[link] 组、[c].libs、运行时与系统库参数。
+fn mb_link_libs(p *LinkPlan) int {
+    let tk *gen.TaskCtx = gen.task()
+    p.extra_start = p.next_arg
     // [link] 库紧跟在 yh/C 对象之后、[c].libs 和系统库之前。
     // Linux/ELF 的静态库循环引用由同一个 --start-group 覆盖；共享库也放入
     // group，保持声明顺序。Darwin 没有等价 group，按声明顺序直接传入。
-    if (link_lib_n > 0) {
+    if (p.link_lib_n > 0) {
         let elv int = proj.cfg().target.os == gen.TARGET_OS_LINUX ? 1 : 0
         if (elv != 0) {
-            args[next_arg] = use_lld != 0 ? "--start-group" : "-Wl,--start-group"
-            next_arg += 1
+            p.args[p.next_arg] = p.use_lld != 0 ? "--start-group" : "-Wl,--start-group"
+            p.next_arg += 1
         }
         let whole_on int = 0
         let lb int = 0
-        for lb < link_lib_n {
+        for lb < p.link_lib_n {
             let want_whole int = elv != 0 ? li_whole(lb) : 0
             if (elv != 0 && want_whole != whole_on) {
                 if (want_whole != 0) {
-                    args[next_arg] = use_lld != 0 ? "--whole-archive" : "-Wl,--whole-archive"
+                    p.args[p.next_arg] = p.use_lld != 0 ? "--whole-archive" : "-Wl,--whole-archive"
                 } else {
-                    args[next_arg] = use_lld != 0 ? "--no-whole-archive" : "-Wl,--no-whole-archive"
+                    p.args[p.next_arg] = p.use_lld != 0 ? "--no-whole-archive" : "-Wl,--no-whole-archive"
                 }
-                next_arg += 1
+                p.next_arg += 1
                 whole_on = want_whole
             }
             if (elv == 0 && li_whole(lb) != 0) {
-                args[next_arg] = "-force_load"
-                next_arg += 1
+                p.args[p.next_arg] = "-force_load"
+                p.next_arg += 1
             }
-            args[next_arg] = li_path(lb)
-            next_arg += 1
+            p.args[p.next_arg] = li_path(lb)
+            p.next_arg += 1
             lb += 1
         }
         if (elv != 0) {
             if (whole_on != 0) {
-                args[next_arg] = use_lld != 0 ? "--no-whole-archive" : "-Wl,--no-whole-archive"
-                next_arg += 1
+                p.args[p.next_arg] = p.use_lld != 0 ? "--no-whole-archive" : "-Wl,--no-whole-archive"
+                p.next_arg += 1
             }
-            args[next_arg] = use_lld != 0 ? "--end-group" : "-Wl,--end-group"
-            next_arg += 1
+            p.args[p.next_arg] = p.use_lld != 0 ? "--end-group" : "-Wl,--end-group"
+            p.next_arg += 1
         }
     }
-    cp = 0
+    let cp int = 0
     let libpath_i int = 0
-    for cp < c_project_n {
-        let cproj2 int = c_projects[cp]
+    for cp < p.c_project_n {
+        let cproj2 int = p.c_projects[cp]
         let li2 int = 0
         for li2 < proj.ctx().projs[cproj2].c_lib_n {
             let lib proj.PInput = proj.ctx().projs[cproj2].c_libs[li2]
-            let row3 *u8 = libpaths + (libpath_i * 128)
+            let row3 *u8 = p.libpaths + (libpath_i * 128)
             let ln int = gen.append_str(row3, 0, "-l")
             ln = gen.append_np(row3, ln, lib.path_off, lib.path_len)
             row3[ln] = 0
-            args[next_arg] = row3.to_type(*char)
-            next_arg += 1
+            p.args[p.next_arg] = row3.to_type(*char)
+            p.next_arg += 1
             libpath_i += 1
             li2 += 1
         }
@@ -1357,84 +1437,130 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     }
     let rt int = 0
     for rt < li_runtime_count() {
-        args[next_arg] = li_runtime_flag(rt)
-        next_arg += 1
+        p.args[p.next_arg] = li_runtime_flag(rt)
+        p.next_arg += 1
         rt += 1
     }
     // Linux：glibc 把数学函数放在独立的 libm 里，libs/math 与标准库用到
     // cos/pow 等；Darwin 的 libSystem 已包含（宿主链接命令按宿主平台取）。
     if (proj.cfg().target.os == gen.TARGET_OS_LINUX) {
-        args[next_arg] = "-lm"
-        next_arg += 1
-    } else if (use_macho != 0) {
+        p.args[p.next_arg] = "-lm"
+        p.next_arg += 1
+    } else if (p.use_macho != 0) {
         // 编译器自举：Darwin raw lld argv 由 yh 侧拼装，需要把桥与
         // LLVM/lld 静态闭包以 force_load 形式追加；普通程序不注入。
-        if (selfhost_on != 0) {
-            if (next_arg + selfhost_flag_n > argc) {
+        if (p.selfhost_on != 0) {
+            if (p.next_arg + p.selfhost_flag_n > p.argc) {
                 return gen.fail("Darwin 自举链接参数超出 argv 容量")
             }
             let fi int = 0
-            for fi < selfhost_flag_n {
+            for fi < p.selfhost_flag_n {
                 let flag *char = backend.llvm_lld_selfhost_flag(fi)
                 if (flag == 0 || flag[0] == 0) {
                     return gen.fail("Darwin 自举链接参数无效")
                 }
-                args[next_arg] = flag
-                next_arg += 1
+                p.args[p.next_arg] = flag
+                p.next_arg += 1
                 fi += 1
             }
         }
-        args[next_arg] = "-lSystem"
-        next_arg += 1
+        p.args[p.next_arg] = "-lSystem"
+        p.next_arg += 1
     }
-    let extra_count int = next_arg - extra_start
-    if (use_lld == 0 && use_macho == 0) { args[next_arg] = 0.to_type(*char) }
+    return 0
+}
+
+// mb_link_exec：执行链接、校验产物架构/签名、原子发布并写回 manifest。
+fn mb_link_exec(p *LinkPlan) int {
+    let tk *gen.TaskCtx = gen.task()
+    p.extra_count = p.next_arg - p.extra_start
+    if (p.use_lld == 0 && p.use_macho == 0) { p.args[p.next_arg] = 0.to_type(*char) }
     if (gen.stats().enabled != 0) {
         gen.stats().link += 1
     }
-    let link_rc int = use_macho != 0 ?
-        mb_macho_link_worker(args, next_arg) :
-        use_lld != 0 ?
-            mb_lld_link_worker(args + object_start, object_count,
-                args + extra_start, extra_count, (&link_tmp[0]).to_type(*char)) :
-            cmd_process_run(&args[0])
-    free(args.to_type(*void))
-    free(paths.to_type(*void))
-    free(cpaths.to_type(*void))
-    free(libpaths.to_type(*void))
+    let link_rc int = p.use_macho != 0 ?
+        mb_macho_link_worker(p.args, p.next_arg) :
+        p.use_lld != 0 ?
+            mb_lld_link_worker(p.args + p.object_start, p.object_count,
+                p.args + p.extra_start, p.extra_count, (&p.link_tmp[0]).to_type(*char)) :
+            cmd_process_run(&p.args[0])
     if (link_rc == -2) {
-        unlink((&link_tmp[0]).to_type(*char))
+        unlink((&p.link_tmp[0]).to_type(*char))
         return gen.fail("lld 不可重入：链接 worker 已结束，未发布输出")
     }
     if (link_rc != 0) {
-        unlink((&link_tmp[0]).to_type(*char))
-        return gen.fail_path("链接失败: ", out_path)
+        unlink((&p.link_tmp[0]).to_type(*char))
+        return gen.fail_path("链接失败: ", p.out_path)
     }
-    if (mb_object_machine_matches((&link_tmp[0]).to_type(*char)) == 0) {
-        unlink((&link_tmp[0]).to_type(*char))
-        return gen.fail_path("链接产物架构与当前 target 不符: ", out_path)
+    if (mb_object_machine_matches((&p.link_tmp[0]).to_type(*char)) == 0) {
+        unlink((&p.link_tmp[0]).to_type(*char))
+        return gen.fail_path("链接产物架构与当前 target 不符: ", p.out_path)
     }
-    if (use_macho != 0
-        && mb_darwin_executable_matches((&link_tmp[0]).to_type(*char)) == 0) {
-        unlink((&link_tmp[0]).to_type(*char))
-        return gen.fail_path("Darwin 链接产物版本或代码签名校验失败: ", out_path)
+    if (p.use_macho != 0
+        && mb_darwin_executable_matches((&p.link_tmp[0]).to_type(*char)) == 0) {
+        unlink((&p.link_tmp[0]).to_type(*char))
+        return gen.fail_path("Darwin 链接产物版本或代码签名校验失败: ", p.out_path)
     }
-    if (rename((&link_tmp[0]).to_type(*char), out_path) != 0) {
-        unlink((&link_tmp[0]).to_type(*char))
-        return gen.fail_path("无法发布链接产物: ", out_path)
+    if (rename((&p.link_tmp[0]).to_type(*char), p.out_path) != 0) {
+        unlink((&p.link_tmp[0]).to_type(*char))
+        return gen.fail_path("无法发布链接产物: ", p.out_path)
     }
     let final_hash u64 = proj.hash_init()
-    if (proj.hash_file(&final_hash, out_path) != 0) {
+    if (proj.hash_file(&final_hash, p.out_path) != 0) {
         return -1
     }
     let link_saved [32]u8
-    proj.hash_hex(hlink, link_saved)
+    proj.hash_hex(p.hlink, link_saved)
     proj.hash_hex(final_hash, &link_saved[16])
-    if (mb_write_manifest(gen.arr_cstr(link_manifest), link_saved, 32) != 0) {
+    if (mb_write_manifest(gen.arr_cstr(p.link_manifest), link_saved, 32) != 0) {
         return -1
     }
     if (gen.stats().enabled != 0) {
-        lk_link_ns = cmd_clock_ns() - link_start_ns
+        lk_link_ns = cmd_clock_ns() - p.link_start_ns
     }
+    return 0
+    return 0
+}
+
+// mb_link：链接一次构建的全部对象。五个阶段各返回 0/-1，失败时统一释放。
+pub fn mb_link(out_path *char, build_off int, build_len int,
+    count int, root_proj int) int {
+    let p LinkPlan
+    p.out_path = out_path
+    p.build_off = build_off
+    p.build_len = build_len
+    p.count = count
+    p.root_proj = root_proj
+    p.llvm_objects = 1
+    if (mb_link_prepare(&p) != 0) {
+        mb_link_release(&p)
+        return -1
+    }
+    if (mb_link_objects(&p) != 0) {
+        mb_link_release(&p)
+        return -1
+    }
+    let hit int = mb_link_key(&p)
+    if (hit < 0) {
+        mb_link_release(&p)
+        return -1
+    }
+    if (hit != 0) {
+        mb_link_release(&p)
+        return 0
+    }
+    if (mb_link_args(&p) != 0) {
+        mb_link_release(&p)
+        return -1
+    }
+    if (mb_link_libs(&p) != 0) {
+        mb_link_release(&p)
+        return -1
+    }
+    if (mb_link_exec(&p) != 0) {
+        mb_link_release(&p)
+        return -1
+    }
+    mb_link_release(&p)
     return 0
 }
