@@ -42,6 +42,13 @@
   host 目录为 232 KB 的实体副本，记录重新基线为 `tmp/llvm-migration/...` 别名路径），
   两个 workflow 的缓存步骤改为按候选顺序选目录：
   显式 `YH_LLVM_CACHE` → 私有闭包 → 共享闭包，命中即 `ln -sfn` 到 `tmp/llvm-migration`。
+- **私有闭包要装齐三端**：私有闭包最初只有 darwin host 目录，容器任务挂载它
+  后找不到 `llvm-host-linux-*` → 尝试联网下载 → `LLVM 宿主：HTTP Error 404`
+  （run 163 的 linux-arm64 即此）。现在用 `cp -al` 把共享的
+  `llvm-host-linux-{aarch64,x86_64}`、`sdk` 与 `.deb` 硬链进私有闭包（同卷零成本，
+  容器里是真实文件，不是悬空软链），三端 `status` 均为 ready。
+  同时给 `tools/llvm-host.py` 的 `identity()`/错误消息补 `display_path()`，
+  仓库外缓存根不再抛 `ValueError`。
 - **环境**：`just llvm-host` 幂等化后本地/CI 都不再重建闭包；闭包记录里的
   `host_builder_sha256` 每次改 `tools/llvm-darwin-host.py` 需重新基线（本轮改了四次，
   最终记录与磁盘一致，`check(full=True)` 为空、`tools/link-closure.py check
