@@ -8,6 +8,22 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-10-28 0.0.11-rc.2 准备（发布说明 + 全门复核）
+
+- **发布说明**：新增 `docs/01-finished/release-0.0.11-rc.2.md`，覆盖 rc.1 之后的
+  45 个提交：B1（`gen.G()`=0 / `CompileStats` / `BuildCtx`）、B2（16 模块、
+  build 6,637、link/proj 拆分）、CLI-R（命令行走 `libs/cli`）、
+  PF1b–PF4 + PL1（阶段归因、缓存 v2 与 13.7 ms/函数 capture、去掉重复 verify
+  −10.6% 冷编）、I4-7（ALLOCA 栈泄漏）与 J6-L1..L4（dead_strip / ELF gc-sections /
+  依赖 O2 / strip，fmt 体积比 1.063）。
+- **兼容性**：缓存格式 v2（首次重建）、依赖项目缺省 O2（`YH_DEP_OPT=0` 回退）、
+  Darwin 缺省 `-dead_strip`（`YH_LINK_DEAD_STRIP=0` 回退）、`--stats` 新增 12 字段、
+  新增 `YH_WORKERS`/`YH_BUILD_CACHE`/`YH_LINK_STRIP`，`FAST_DIR` 按 workspace 隔离。
+- **种子链**：`0.0.10` → `0.0.11-rc.1` → `0.0.11-rc.2`；分支收敛为
+  `llvm`（默认）/`arm64`/`main`。
+- **复核**：`just test` 133 passed/0 failed、`just selfhost-native`（48 产物固定点、
+  129 文件自解析、124/124）、`just arch-check`、fmt 专项门与缓存矩阵全绿。
+
 ## 2026-10-28 合并性能 WIP（PF2/PL1/RB5/YH_WORKERS）到 B1/B2 树
 
 把主工作区的临时分支 `tmp/main-wip-20261028`（性能基线 PF1b–PF3、PL1 缓存优化、
