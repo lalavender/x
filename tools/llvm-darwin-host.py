@@ -53,6 +53,19 @@ def has_macos_build_version(load_commands):
                      re.MULTILINE) is not None
 
 
+def display_path(path):
+    """日志/产物路径的展示形式：在仓库内时用相对路径，否则给绝对路径。
+
+    闭包缓存（YH_LLVM_CACHE / 主 worktree 的 tmp/llvm-migration）可能落在
+    当前仓库之外（CI runner、新 worktree 都如此），此时 Path.relative_to 会抛
+    ValueError，把一条正常的工具失败诊断变成 traceback。
+    """
+    try:
+        return path.relative_to(ROOT)
+    except ValueError:
+        return path
+
+
 def run(command, label, timeout=None):
     """执行工具并保存 stdout/stderr；失败时指出 tmp 日志位置。"""
     directory = workdir()
@@ -63,7 +76,7 @@ def run(command, label, timeout=None):
     (directory / f"{label}.stderr").write_text(result.stderr, encoding="utf-8")
     if result.returncode:
         raise RuntimeError(f"{label} 失败（{result.returncode}）：{result.stderr[-3000:]}; "
-                           f"日志位于 {directory.relative_to(ROOT)}")
+                           f"日志位于 {display_path(directory)}")
     return result
 
 
