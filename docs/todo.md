@@ -9,7 +9,7 @@
 A0a–A6 已全部完成并通过双门禁（表达式嵌套守卫、`ir/ssa_inline` 删除、A0c 路径预算、
 A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版本、A2a–A2c 模块
 拆分、A3 `api` 调用面、A4a–A4d 状态收敛、A5 前端装配收敛、A6 `testkit` 抽出），
-证据与数字见 [finish.md](finish.md)。当前基线由 `make arch-check` 守护：
+证据与数字见 [finish.md](finish.md)。当前基线由 `just arch-check` 守护：
 
 | 指标 | 当前（B1/B2 完成后，2026-10-26 实测，含合入的 llvm-2） |
 |---|---|
