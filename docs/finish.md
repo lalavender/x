@@ -49,6 +49,12 @@
   容器里是真实文件，不是悬空软链），三端 `status` 均为 ready。
   同时给 `tools/llvm-host.py` 的 `identity()`/错误消息补 `display_path()`，
   仓库外缓存根不再抛 `ValueError`。
+- **记录里的 link_flags 必须走 canonical 路径**：私有闭包的 `host.json` 是从共享
+  闭包复制的，`link_flags` 里的归档路径带着 `tmp/llvm-migration-llvm-3/` 时，
+  `tools/link-closure.py` 的 `tmp/llvm-migration/` 标记匹配不上 → 派生出的
+  lld/llvm 组为空 → `[link-darwin-arm64].lld 与宿主记录不一致`（run 164/165）。
+  把 `link_flags` 归一回 `.../tmp/llvm-migration/...`（并按 `selfhost_link_flags`
+  补齐归档、保留 `-lc++`）后 `link-closure.py check --host darwin-aarch64` PASS。
 - **环境**：`just llvm-host` 幂等化后本地/CI 都不再重建闭包；闭包记录里的
   `host_builder_sha256` 每次改 `tools/llvm-darwin-host.py` 需重新基线（本轮改了四次，
   最终记录与磁盘一致，`check(full=True)` 为空、`tools/link-closure.py check
