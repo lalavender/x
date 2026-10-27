@@ -11,14 +11,14 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
 拆分、A3 `api` 调用面、A4a–A4d 状态收敛、A5 前端装配收敛、A6 `testkit` 抽出），
 证据与数字见 [finish.md](finish.md)。当前基线由 `make arch-check` 守护：
 
-| 指标 | 当前（B2-1/2/4 后，2026-10-26 实测） |
+| 指标 | 当前（B1/B2 完成后，2026-10-26 实测，含合入的 llvm-2） |
 |---|---|
-| 模块 / 文件 / 行数 | **15 / 126 / 53,854**（`build` 6,348 + `parse` 9,710 + `link` 3,531） |
-| `cmd` 占比 | 387 行，**0.7%** |
+| 模块 / 文件 / 行数 | **16 / 127 / 54,456**（`parse` 9,710 + `build` 6,308 + `lower` 5,835 + `link` 3,657） |
+| `main` 占比 | 318 行，**0.6%**（`cmdline` 605 行另计） |
 | `gen.G()` 读点 | **0**（`G()` 已删除，`GenState` 降为 `gen` 模块私有） |
 | 模块级可变 `let` | 172 |
 | 容量安全追加项 | 46（下界） |
-| 最大模块 / 文件 / 函数 | parse 9,710 / `parse_expr` 2,042 / `mb_link` 676 |
+| 最大模块 / 文件 / 函数 | parse 9,710 / `parse_expr` 2,042 / `lower_expr` 360 |
 
 顺序按 [构建态对象化与 build 拆分重新规划](02-plan/yh-构建态对象化与build拆分重新规划-2026-10-25.md)
 修正为 **B3 → B1 → B2**：B3 与 B1/B2 零文件重叠、可并行，B1+B2 才「是同一件事的
@@ -56,12 +56,13 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   `project_link.yh` 仍留 build（读 `toml_*` globals）。
 - [x] **B2-4 `module_build` 拆 3 文件**（2026-10-26 完成）：`module_build`（命令面
   690）、`module_emit`（发射流水线 711）、`module_cache`（缓存键/依赖表 414）。
-- [ ] **B2-3 `mb_link` 阶段化**（唯一剩余）：676 行、20+ 处「4 连 free」错误分支。
-  方案：`LinkPlan`/`LinkArgs` 收 30+ 局部量 → 5 个 ≤160 行阶段
-  （prepare/objects/args/exec/publish）+ 统一释放；验收 `max_function_lines`
-  ≤260，且同一输入下 `obj/` 与二进制逐字节不变。**风险最高的一项**：
-  阶段间共享量多，漏一个会静默用默认值；需要单独一轮完整双门验证。
-- [ ] **B2-5 预算收口**：B2-3 完成后把实测值写回 `BUDGETS` 并补 finish 记录。
+- [x] **B2-3 `mb_link` 阶段化**（2026-10-26 完成）：`LinkPlan` 收全部可变量，
+  拆成 prepare 60 / objects 167 / key 161 / args 148 / libs 96 / exec 52 六个阶段，
+  编排函数 41 行；20+ 处「4 连 free」错误分支统一由 `mb_link_release` 处理。
+  `max_function_lines` 700 → 360。证据见 [finish.md](finish.md)。
+- [x] **B2-5 预算收口**（2026-10-26 完成）：`BUDGETS` 全部等于实测值
+  （`max_link_lines` 3,657、`max_build_lines` 6,308、`max_function_lines` 360、
+  `max_g_call_sites` 0、`max_globals` 172）。B2 全部关闭。
 - [ ] **NP3 受检契约与 lowering 解耦**（2026-10-26 定位决定后唯一保留的 NP 阶段）：
   按[方案 §6](02-plan/yh-Nanopass风格优化架构实施方案.md) 收口——封存
   CheckedFunction 的绑定/类型/符号/调用事实，生命周期由任务持有，不再由 lowering

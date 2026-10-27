@@ -67,7 +67,7 @@ ALLOWED = {
 # 数值为 2026-10-24 实测；下调请同步改这里，上调需在 finish.md 说明理由。
 BUDGETS = {
     "max_file_lines": 2042,        # module_build.yh（A2c 拆分后必须下降）
-    "max_function_lines": 700,     # mb_link 674（含前导注释的上界口径）
+    "max_function_lines": 360,     # mb_link 674（含前导注释的上界口径）
     "max_module_lines": 387,       # main（A6 后只剩 driver + api；B1-1 +2、B1-2 绑定存储 +4）
     "max_testkit_lines": 1586,     # testkit（YT2d-3 同项目测试锁 +37；B1-1 迁表读点后净 -14）
     "max_build_lines": 6348,

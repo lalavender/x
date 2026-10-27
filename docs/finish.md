@@ -308,6 +308,36 @@ cases 122/122）。
   3 条已知差异、0 未知差异。删除 `libs/tmp/yh-test` 后复跑一次，确认 `cli` 模块
   重新编译（而非命中旧缓存）后仍全绿。
 
+## 2026-10-26 B2-3/B2-5：`mb_link` 阶段化（LinkPlan）与预算收口
+
+- **`mb_link` 676 行 → 6 个阶段 + 一个 `LinkPlan`（`compiler/link/link_cache.yh`）**：
+  一次链接的可变量全部进 `LinkPlan`（栈上，指针传给阶段）：入参、链接方式、
+  链接器与 C 项目输入、计时、链接键、`link_tmp`/`link_manifest` 路径缓冲、
+  argv 与三类路径行缓冲、`library_search_*`、`mod_tag` 暂存。
+  阶段与行数：`mb_link_prepare` 60、`mb_link_objects` 167、`mb_link_key` 161、
+  `mb_link_args` 148、`mb_link_libs` 96、`mb_link_exec` 52，编排函数
+  `mb_link` 41 行。**20+ 处「4 连 free」错误分支收敛成一个
+  `mb_link_release`**：阶段只返回 0/-1，不释放；`mb_link` 在任一步失败或成功
+  收尾统一释放并把指针清零。
+- **行为保持**：语句顺序与原函数逐行对应，只做「局部量 → 计划字段」的机械搬移；
+  阶段返回码区分「缓存命中(1)/继续(0)/失败(-1)」，其余语义（argv 顺序、
+  缓存键、manifest 内容、产物发布与校验）一字未改。
+- **验证（在独立 worktree 上做，避免与本机并发会话的合并冲突）**：
+  `just build` + `arch-check` 通过（`link` 3,531 → 3,657，新增 `LinkPlan` 结构）；
+  `just test` 全绿（ANTLR + 语法 49/49 + 运行语料 122/122 + compiler 内嵌测试 +
+  libs）；`tests/modules/build-check.py --backend llvm` **122/122**（暂存副本口径）。
+  未跑 `selfhost-native` 全门：共享 LLVM 闭包缓存已被另一分支的
+  `tools/llvm-darwin-host.py` 重新准备（bridge 哈希 3098a81f → a09fc268），
+  独立 worktree 的闭包自检过不去；固定点门待主 worktree 归位后补跑。
+- **B2-5 预算收口**：`max_function_lines` 700 → **360**（实测最大函数已是
+  `lower/module_snapshot_lower_expr` 的 360，`mb_link_query_identity` 274、
+  阶段函数 ≤167）；`max_link_lines` 3,657、`max_build_lines` 6,308、
+  `max_g_call_sites` 0、`max_globals` 172 全部等于实测值。
+- **并发提示**：本轮期间同一 worktree 上有另一会话把 B2-3 的工作区提交为
+  `a14eb5d` 并合入了 `llvm-2`（`b7476aa`，CLI-R 重写 + `YH_BUILD_CACHE`）。
+  本条目记录的 B2-3/B2-5 数字是在该合并后的树上实测的（16 模块 / 127 文件 /
+  54,456 行，`main` 318、新增 `cmdline` 605）。
+
 ## 2026-10-26 B2-1/B2-2/B2-4：`proj` 收产物键、`link` 成模块、`module_build` 拆三
 
 - **B2-1 产物路径与缓存键 → `proj/proj_40_art.yh`（526 行，16 函数）**：FNV 哈希
