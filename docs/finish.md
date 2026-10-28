@@ -8,6 +8,82 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-10-28 NP3 能力矩阵实测与裁剪（不新增后端能力）
+
+- **做了什么**：用 35 个单文件探针（`tmp/np3/probe/`，3 秒超时）实测「受检 →
+  SSA → LLVM」实际覆盖，回答「NP3 还要补什么」：28 通过 / 7 被拒，归并为
+  **4 个真实缺口**。结果落成 [能力矩阵](03-design/yh-受检到LLVM能力矩阵-2026-10-28.md)。
+- **结论**：方案 §6.4 列的能力（嵌套循环、for-in、switch/goto、指针/内存、转换、
+  聚合、浮点、各类调用）**基本已成立**，无需「补齐覆盖」这一大块工作。
+- **新发现（4 项缺口，当日全部修复）**：
+  - **G1** `let p *fn(int, int) int = &f` 生成 `alloca void`；根因是
+    `checked_lower_pointer_kind` 把不透明指针值映成 `IR_TY_PTR + IR_TY_PTR`
+    （元素类型退化 void）。**todo 的 D1（goto 函数里的函数指针）只是同一缺陷的
+    一种形态——不需要 goto 就能复现**，D1 条目已按此修正。
+  - **G2** 聚合三目初始化 `let p Pair = c ? a : b` 报「首片不支持此聚合初始化形态」
+    （`checked_lower_aggregate_store` 缺 TERNARY，与 CLI-R1c/R1d 同族）。
+  - **G3** 浮点全局（`let GF f64 = 1.5` / 无初始化）被 `llvm_preflight` 拒绝。
+  - **G4** `switch` 控制表达式为 `bool` 被拒（`IR_OP_EQ` 本就支持，只是类型检查写窄了）。
+- **注释纠偏**：`ast_ir_build.yh` 与 `module_snapshot_lower_flow.yh` 里「本切片
+  不支持嵌套循环」与实际 `CheckedLoop` 循环栈矛盾，已改写（这类失真会直接导致
+  重复实现已存在的特性或误判「还有旧发射兜底」）。
+- **范围裁剪（用户决定）**：只保留矩阵 + 真实缺口 + 文档收口；**不做**缓存键上移
+  与 `gen` 分层。理由已量化写入 todo：前者只是把同一段哈希/查表挪位置（冷编
+  lowering 里缓存查表 4.0%，PL1 实测 650.4 ms / 30 s 量级构建），改造点却在单函数
+  改动场景占 86.9% 的热路径（PL1：缓存合并 998.0 / 1148.7 ms），且 PL1f3 有
+  「无收益按规矩回退」的先例；后者属 `gen` 分层（G2 推迟，`parse` 272 / `ast` 121
+  处引用级），收益未测量。
+- **回归**：`tests/yh-run/run/208-lowering-coverage-matrix.yh`（聚合初始化/赋值来源、
+  嵌套 for-in 与多 break/continue、二维数组字面量、切片字段、聚合调用、9 参数、
+  字段取址链、返回切片字面量、enum switch、前后向 goto、转换矩阵、union 字面量、
+  短路副作用与全局计数、浮点/指针取址、顶层结构体/切片全局）。
+- **G1 修复（当日）**：`*fn(...)` 绑定的存储地址是一条 `result_type = IR_TY_PTR` 的
+  `IR_OP_ADDR`，而 canonical `IR_TY_PTR` 的 `elem` 规范编号是 `IR_TY_VOID`，
+  ADDR 发射照抄元素类型就写出 `alloca void` 被 LLVM 拒绝。修在
+  `backend/llvm_scalar.yh`：元素为 `VOID` 的不透明指针槽按指针宽度发
+  `alloca ptr, align 8`。**todo 的 D1（goto 函数里的函数指针绑定）是同一缺陷，
+  不需要 goto 即可复现，已随之关闭**。回归 `run/209-fnptr-address.yh`（含 D1 形态）。
+- **顺带修诊断再改支持**：`&函数名` 以前落到全局对象分支报「全局对象缺少受检数据」
+  （与事实无关）；先改成可操作诊断，随后按 G1b 真正实现（物化 8 字节函数值槽），
+  诊断用例 `fail/169` 随之删除。
+- **G2 修复（当日）**：`checked_lower_aggregate_store` 新增 `AST_EXPR_TERNARY`——
+  聚合没有 SSA 值，两条分支各自写入同一目标存储、建 then/else/join 三块，不建 phi。
+  所有调用点自动受益：`let` 初始化、同型赋值、聚合返回、结构体字段/数组元素、
+  切片视图三目。回归 `run/210-ternary-aggregate-lowering.yh`（循环体内、if 分支内、
+  嵌套三目、切片视图，O0/O2）。
+- **G3 修复（当日）**：两处缺陷叠加——① `llvm_preflight` 按符号类型直接拒绝
+  f32/f64 全局（全局本就按原始字节发射，拒绝多余）；② f32 全局读回 0：常量浮点在
+  所有折叠路径以 f64 位模式保存，而 `parse_global_static_scalar` 按宽度直接写字节，
+  4 字节对象只截到低 4 字节。修复：写静态标量前按目标类型窄化（新增
+  `gen.fp32_bits`，`ct_ir_float.yh` 的同名实现改为调用它）；顺带解除
+  `parse_global_init.yh` 里「f32 元素的全局初始化暂不支持」的保守守卫。
+  回归 `run/211-float-globals.yh`。
+- **G1b 实现（当日）**：`&函数名` 不再拒绝——函数值本身是不透明指针，但 `&f` 要求
+  真实内存对象，故分配 8 字节槽、写入 `FN_ADDR`、返回槽地址（IR verifier 的
+  「VOID 元素指针存函数值」例外规则本来就有，无新 IR 形式）。覆盖 `let p = &add`、
+  `apply(&add, …)`、先声明后赋值，并入 `run/209-fnptr-address.yh`。
+- **G2b 实现（当日）**：`(c ? a : b).y` 这类「聚合三目结果直接取字段/下标」
+  在 `checked_lower_lvalue_ptr` 新增 `TERNARY`/`CTIF` 分支——按聚合大小/对齐发
+  ALLOCA、把选中分支写进去，再走普通左值偏移。临时槽由后端提到入口块（I4-7），
+  30 万次迭代探针确认无栈增长。并入 `run/210-ternary-aggregate-lowering.yh`。
+- **G4 实现（当日）**：`switch <bool>` 改为支持——控制值本来就用 `IR_OP_EQ` 逐个
+  比较，bool 与整数同构，拒绝只是类型检查写成 `ir_integer_type`。新增
+  `run/212-switch-bool-control.yh`（含 default、循环内、表达式控制）。
+  原 `fail/169`、`fail/170` 两个「拒绝行为」用例在能力补上后删除。
+- **NP3 关闭**：能力矩阵**零被拒**（33 构造 + 5 变体，O0/O2）；方案 §6 逐条对照
+  见 [todo](todo.md) 的收口说明——受检快照/函数级缓存早已落地，控制流分片补齐了
+  三目与取址，`ir` 无 import，旧发射已在 LL12 删除；「预检分离」因已无可达
+  `UNSUPPORTED` 会变成死代码而不做，「缓存键上移」与「`gen` 分层」按 0 收益/未测量
+  的裁剪决定不做。
+- **验证**：`just test` 133 passed/0 failed；`just selfhost-native` 全绿
+  （固定点 cc3→cc4 一致、自解析 OK、124/124 项目用例）；yh-run 368/369
+  （1 例平台跳过，run 220 / fail 138）。
+- **种子**：全绿后 `just seed` 滚种子，`bin/yh-darwin-arm64` 更新
+  （sha256 `2b18995f…79bf7`），新种子冷编 `just` 通过。
+- **交付**：代码 10 个文件；能力矩阵文档
+  [yh-受检到LLVM能力矩阵-2026-10-28](../03-design/yh-受检到LLVM能力矩阵-2026-10-28.md)；
+  回归 `run/208`–`run/212`。
+
 ## 2026-10-28 0.0.11 正式版发布完成
 
 - **发布**：tag `0.0.11`（打在默认分支 `llvm`）→ Gitea `release.yml` 三端全绿后 publish 成功：

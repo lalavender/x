@@ -4,6 +4,8 @@
 [finish.md](finish.md) 与 [01-finished/](01-finished/)；方案文档在
 [02-plan/](02-plan/)，取舍见 [adr/](adr/)。
 
+图例：P0 发布质量与主线；P1 标准库与工具链；P2 长期与按需；⏸ 用户暂缓；❓ 待决策。
+
 ## 2026-10-27 未使用函数检查（UF1）后续
 
 UF1 已生效（`build/unused_function.yh`，见 [finish.md](finish.md) 与
@@ -16,102 +18,12 @@ UF1 已生效（`build/unused_function.yh`，见 [finish.md](finish.md) 与
   的 global 符号表已按名字重绑定，但正文命中时不做解析），否则增量构建会把
   活函数判死；`$f(...)` 编译期调用与生产构建的 `test` 正文也要单独补登记。
 
-## 2026-10-24 架构优化（只列未完成）
-
-A0a–A6 已全部完成并通过双门禁（表达式嵌套守卫、`ir/ssa_inline` 删除、A0c 路径预算、
-A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版本、A2a–A2c 模块
-拆分、A3 `api` 调用面、A4a–A4d 状态收敛、A5 前端装配收敛、A6 `testkit` 抽出），
-证据与数字见 [finish.md](finish.md)。当前基线由 `just arch-check` 守护：
-
-| 指标 | 当前（B1/B2 + 性能线 + 0.0.11-rc 合并后，2026-10-28 实测） |
-|---|---|
-| 模块 / 文件 / 行数 | **16 / 129 / 55,206**（`parse` 9,700 + `build` 6,647 + `lower` 5,902 + `link` 3,705） |
-| `main` 占比 | 318 行，**0.6%**（`cmdline` 605 行另计） |
-| `gen.G()` 读点 | **0**（`G()` 已删除，`GenState` 降为 `gen` 模块私有） |
-| 模块级可变 `let` | 172 |
-| 容量安全追加项 | 46（下界） |
-| 最大模块 / 文件 / 函数 | parse 9,700 / `parse_expr` 2,042 / `lower_expr` 360 |
-
-顺序按 [构建态对象化与 build 拆分重新规划](02-plan/yh-构建态对象化与build拆分重新规划-2026-10-25.md)
-修正为 **B3 → B1 → B2**：B3 与 B1/B2 零文件重叠、可并行，B1+B2 才「是同一件事的
-两个面」（改两遍），B3 不是。规模也按该文实测修正（lower 是 15 文件 5,742 行，
-不是 10 文件 4,739 行）。B1 的动机是**字段偏移膨胀与读点归属**，不是线程安全——
-当前是 `fork` + `waitpid` 的进程池（并发 4，COW 隔离，无锁）。
-
-- [x] **B1-1 `proj` 模块成立**（2026-10-26 完成）：项目/模块/文件三张表 + 导入平行
-  数组 + 7 个表类型 + 测试/扫描配置从 `gen.GenState`、`build.PjState` 收进
-  `compiler/proj/`（`proj.ctx()` 唯一实例，`proj.add_*` 唯一写者）；前端窄口
-  `proj.file()/file_count()/test_file_selected()`。`gen.G()` 165 → 115、
-  `build` 10,807 → 10,242、`gen` 5,686 → 5,538。证据见 [finish.md](finish.md)。
-- [x] **B1-2 目标/配置与 `canon` 显式化**（2026-10-26 完成）：`gen.TargetCfg`
-  类型 + `proj.ProjectCtx.cfg` 实体 + `gen.bind_cfg` 指针绑定（未绑定走宿主默认
-  回退实例）；`proj.canon` 改 `(…, out_off, out_len)`，`mb_build_dir`/
-  `pj_find_root`/`pj_c_path` 一并出参化。`gen.G()` 115 → 98。证据见
-  [finish.md](finish.md)。
-- [x] **B1-3 统计与会话状态独立**（2026-10-26 完成）：25 个统计计数从
-  `GenState` 移出成 `gen.CompileStats` + `gen.stats()` 窄口（写入方在前端，没搬进
-  `build` 以免 build↔gen 双向耦合）；`build` 的会话身份/阶段计时/调度观测/依赖表
-  21 个模块级 `let` 收进 `compiler/build/build_ctx.yh` 的 `BuildCtx`（`bc()`）。
-  模块级 `let` 188 → 169，build 侧 `gen.G()` 13 → 0。
-- [x] **B1-4 关闭 `gen.G()`**（2026-10-26 完成）：剩余 40 个「只读 `gs.task.*`」
-  的函数改走 `gen.task()`，`parse/iface_ct_map` 四个 helper 与 llvmlower fixture
-  的形参从 `*gen.GenState` 收窄成 `*gen.TaskCtx`；删除 `pub fn G()`，`GenState`
-  降为模块私有。全仓 `gen.G()` 调用点 **0**（arch-check 预算同步改 0）。
-- [x] **B2-1 产物路径与键（art）抽进 `proj`**（2026-10-26 完成）：哈希原语、
-  构建目录布局、模块标记/对象名词干、对象与接口路径共 16 个函数 → `proj/proj_40_art.yh`；
-  链接簇不再引用 `mb_mod_tag`/`mb_module_obj_row`/`mb_fnv`（B2-2 的硬前置）。
-- [x] **B2-2 链接簇拆成 `link` 模块**（2026-10-26 完成）：`link_cache`/
-  `link_inputs`/`darwin_link`/`process`/`clock.*` 7 文件迁入 `compiler/link/`，
-  新增 `link/context.yh` 持有 argv0 与本层计时；`pl_target_code_current` →
-  `proj.target_code_current`、`append_bytes_np` → `gen.append_np`。
-  模块 14 → 15，`build` 9,820 → 6,315、`link` 3,531；`link → build` 不存在。
-  `project_link.yh` 仍留 build（读 `toml_*` globals）。
-- [x] **B2-4 `module_build` 拆 3 文件**（2026-10-26 完成）：`module_build`（命令面
-  690）、`module_emit`（发射流水线 711）、`module_cache`（缓存键/依赖表 414）。
-- [x] **B2-3 `mb_link` 阶段化**（2026-10-26 完成）：`LinkPlan` 收全部可变量，
-  拆成 prepare 60 / objects 167 / key 161 / args 148 / libs 96 / exec 52 六个阶段，
-  编排函数 41 行；20+ 处「4 连 free」错误分支统一由 `mb_link_release` 处理。
-  `max_function_lines` 700 → 360。证据见 [finish.md](finish.md)。
-- [x] **B2-5 预算收口**（2026-10-26 完成）：`BUDGETS` 全部等于实测值
-  （`max_link_lines` 3,657、`max_build_lines` 6,308、`max_function_lines` 360、
-  `max_g_call_sites` 0、`max_globals` 172）。B2 全部关闭。
-- [ ] **NP3 受检契约与 lowering 解耦**（2026-10-26 定位决定后唯一保留的 NP 阶段）：
-  按[方案 §6](02-plan/yh-Nanopass风格优化架构实施方案.md) 收口——封存
-  CheckedFunction 的绑定/类型/符号/调用事实，生命周期由任务持有，不再由 lowering
-  查 parser 游标或可复用 gen 槽；按控制流切片做语言规范化，逐项声明移除/新增形式并
-  保留源位置与求值顺序；把「源码形态支持预检」与「构造」分离，缓存/后端调用移到
-  协调适配层（`ir` 不向上依赖）；补嵌套循环、for-in、switch/goto、指针/内存、转换、
-  聚合、浮点与各类调用；受支持函数只走一次受检 → SSA → 后端。验收：新路径覆盖自编
-  所需全部能力并达固定点后，才允许移除失去用途的旧入口；R2b 的线程池/文件对象/
-  增量验收另外完成。
-
-## yh 命令行用 cli 重写（CLI-R，2026-10-27 方案）
+## CLI-R 遗留（2026-10-27 方案）
 
 方案见[用 cli 标准库重写 yh 命令行](02-plan/yh-CLI用cli标准库重写实施方案-2026-10-27.md)：
-声明与解析收进 `libs/cli`，删除 `driver.yh` 的手写扫描与逐行 `usage()`，新形态与
-现有调用面逐字节等价（`--emit-module` 内部协议豁免）。实施前需拍板方案 §8 的 5 条
-取舍（段标题中文、全局选项双位置、legacy 别名、裸 `yh` 退出码、`--filter` 单值）。
+声明与解析已收进 `libs/cli`，`driver.yh` 的手写扫描与逐行 `usage()` 已删除，
+argv 形态与旧调用面逐字节等价。只剩下面一条观察项。
 
-- [x] **CLI-R0 cli 前置**（2026-10-27 完成）：`HelpFormat` 增加
-  `section_positional/options/commands` 段标题（空指针用英文默认），
-  `build_help_text` 改读字段；用例 51 → 52。
-- [x] **CLI-R1 金标工具**（2026-10-27 完成）：`tools/cli-golden.py`，36 条 argv
-  （正常/组合/单文件/错误四组），独立 fixture 冷跑 + 归一化比较；当前 36/36。
-- [x] **CLI-R1a 自举快照门扩展**（2026-10-27 完成）：`expected_artifacts`/
-  `expected_llvm_artifacts` 增 `follow_dependencies` 开关，新增 `dependency_artifacts()`
-  作为「允许出现但不要求」的集合，`snapshot_errors(..., allowed=)` 据此判多余产物；
-  `native-selfhost.py` 只要求本地模块齐全。背景：编译器 import 标准库后，种子构建会
-  额外发布 `iface/yh_libs-*.s.i/.s.ct` 与 `llvm/yh_libs-*.ll`。
-- [x] **CLI-R1b 标准库依赖机制**（2026-10-27 完成）：`compiler/project.toml` 用
-  `[dependencies] libs = {path = "../libs"}`，`cmdline` 用跨项目导入
-  `import libs.cli`（绑定名仍为 `cli`）；暂存目录里的二进制不再依赖默认标准库搜索。
-- [x] **CLI-R1c lowering 限制**（2026-10-27 绕过）：紧跟聚合 `let` 的结构体字段赋值会触发
-  「首片不支持此聚合初始化形态」；落地时把 `Value`/`Default` hoist 到局部并去掉多余的
-  `suppress_default()`。**建议另立项**在 lowering 侧支持该形态。
-- [x] **CLI-R1 骨架**（2026-10-27 完成）：`compiler/cmdline/`（`module cmdline`，
-  `CliRequest` + project/file 两个 parser + `inherit` 全局 parent）；`api_*` 改接收
-  请求结构，`build`/`testkit` 删除选项扫描；`driver.yh` 只做分派（main 307 行，
-  arch-check 登记 `cmdline -> libs`/`main -> cmdline`）。证据见方案 §12。
 - [ ] **CLI-R1d lowering 聚合初始化（常见但不复现，降级观察）**：CLI-R1 期间
   `compiler/cmdline` 的声明代码曾报「首片不支持此聚合初始化形态」（
   `lower/module_snapshot_lower_place.yh` 的 `checked_lower_aggregate_store` 返回非 0），
@@ -121,45 +33,9 @@ A0d `gen.alloc`、A0e `ir_simplify`、A0c2 缓冲容量化、A1b/A1c 契约版�
   `-o` + `dest` 的原始组合都无法在独立项目或 compiler 项目里复现（代码已改为
   hoist 写法，且 `compiler/.build` 已冷清）。**暂不作为缺陷推进**：保留 hoist 作为
   声明代码的推荐写法，若再次出现再按 lowering 缺陷立项并补最小用例。
-- [x] **CLI-R2 单文件形态迁移**（2026-10-27 随 R1 完成）：`--syntax-check`、
-  `--emit-asm`、`-o` 两种次序、`--emit-llvm` 全走 cli 结果，`n == 2 / n == 3`
-  的形态判断已删除（由 file parser + 模式位互斥表达）。
-- [x] **CLI-R3 项目命令迁移**（2026-10-27 随 R1 完成）：六个命令的选项扫描改由 cli
-  声明；`--link` 用 `append`、`--timeout` 用整型（范围在 driver 校验 1..3600）、
-  `-O0/-O2` 共用 `opt` dest 实现「最后出现者生效」（不是互斥组，保持旧语义）、
-  `--backend` 在 driver 校验取值；`api_*` 各函数改接收 `cmdline.CliRequest`。
-- [x] **CLI-R4 帮助与诊断收敛**（2026-10-27 完成）：删除手写 `usage()`；
-  `yh --help`/`yh <cmd> --help` 由 cli 生成（`用法: ` 前缀 + 中文段标题，
-  help/version 控制结果写 stdout、退出 0）；解析失败打印「诊断 + cli usage」；
-  `libs/cli` 为此新增 `HelpFormat.usage_prefix` 与 optional 位置参数单层括号；
-  自举冒烟补 `--help` 断言，`cli-golden` 的文本类用例改宽松（10 条）。
-- [x] **CLI-R5 收尾**（2026-10-27 完成）：手写扫描随 R1 删除、legacy 别名保留且
-  不告警；`AGENTS.md`/`README`/设计文档已更新；`just bootstrap` 后 `just test` +
-  `just selfhost-native` 全绿并 `just seed` 滚种子
-  （`bin/yh-darwin-arm64` SHA-256 `0ac4586a…`），随后用新种子重编再跑
-  `selfhost-native` 复验通过。
-
-## 2026-10-21 重规划说明
-
-本轮按「LLVM 收尾完成 → 发布质量 → 标准库与工具链 → 后续任务 → 待决策」重排：
-
-- **LL12 已完成并关闭**：旧机器发射（`emit_arm64`/旧 arm64 后端/四缓冲/旧 SSA
-  替换链/C ABI 发射层）全部删除，`--backend legacy` 一刀拒绝，`compiler/`
-  净减 6516 行；证据见
-  [完成报告](01-finished/yh-LL12退役旧机器发射-2026-10-21.md)。C4/C5 的两个
-  小尾巴（`-target` 简写别名、`asm-symbols-safe` 与 `legacy_bytes` 断言）本轮
-  一并处理。
-- **LL11 性能门移出本文件**：20 轮对照、回退归因与发行性能口径由**专门的性能
-  任务**承担，不在 LLVM 收尾内重复。
-- **R2b 硬门后置**：RS2/RS3/R2c 与增量/冷编时间移入「后续任务」，不再作为
-  LLVM 收尾的前置条件。
-- **GitHub Actions 移除**：`.github/workflows/ci.yml` 与 `release.yml` 已删除，
-  多平台回归与发布由 CircleCI 承担；需要时从 git 历史还原。
-- 已完成的旧条目（LL0–LL10、LL9L、F1、F2-0/3–8/10、三平台默认切换与种子滚动、
-  标准库 OS0–OS6、STAT0–STAT3、语料平台筛选、CircleCI 三端与 tag Release 首发、
-  编译器已知缺陷 11 项、旧后端 3 个已知缺陷）不再列出。
-
-图例：P0 发布质量与主线；P1 标准库与工具链；P2 长期与按需；⏸ 用户暂缓；❓ 待决策。
+  2026-10-28 起聚合存储的来源面已扩大（新增聚合三目与三目结果取址，
+  `tests/yh-run/run/210` 覆盖调用/字段/下标/三目来源），复现概率进一步下降；
+  如再现先看 `checked_lower_aggregate_store` 的来源分支。
 
 ## 编译器性能测试（2026-10-23 方案）
 
@@ -176,64 +52,12 @@ O0 冷编 worker 累计 23.5 s 里 lowering 66%、IR 构造 20%、内嵌桥 8%�
 注意：各批次语料/二进制 SHA-256 不同（加打点、加 `YH_WORKERS`、期间另有会话改链接层），
 报告里都有「批次身份」表——跨批只比段落结构与同批内比值。未完成：
 
-- [x] **PL1 lowering 内部细分**（2026-10-27 完成，见
-  [lowering 内部归因](01-finished/yh-lowering内部归因PL1-2026-10-27.md)）：
-  `--stats` 再追加 8 个字段（prep/decl/build/verify + build 内 lookup/cache/fn/capture），
-  `perf-baseline.py` 出「lowering 细分」表、`perf-scaling.py` 出 verify/真 lowering 列，
-  门禁断言四段与四段内之和不超过父区间。结论：冷编 lowering 里真 lowering 74.7%、
-  verify 18.8%、缓存查表 4.0%、符号查找 0.13%；写缓存时 **capture 23.6 s**
-  （worker 累计 50.5%）；单函数改动的 lowering 里 **缓存合并 86.9%**（204 函数 4.9 ms/个）。
-- [x] **PL2 单模块函数数超线性**（2026-10-27 同日回答）：不是符号查找（0.13%），
-  而是 verify 的每函数成本 3.9×（64→512 函数 0.055→0.216 ms）+ 真 lowering 2.0×，
-  合起来每函数 lowering 2.9×。见同一份报告 §1。
-- [x] **PL1c capture 内部分解**（2026-10-27 完成，见
-  [capture 序列化归因](01-finished/yh-capture序列化归因PL1c-2026-10-27.md)）：
-  一次性实验（临时允许 `ir→gen`，量完已回退）测到 capture 28.42 s/1476 函数 =
-  **19.3 ms/函数**，其中闭包标记 1.9%、迷你模块构造 30.4%、**序列化写缓冲 65.5%**；
-  写出 38.08 MB ⇒ **2.05 MB/s**，说明瓶颈在 `ir_module_serialize` 内部（疑似每条记录内
-  的线性查表/增长拷贝），不是闭包扫描。合成语料（只有 int）是 0.83–1.91 ms/函数，
-  真实语料贵 10 倍，因为记录要编码的闭包大得多。
-- [x] **PL1e capture 序列化提速**（2026-10-27 完成，见
-  [缓存提速与精确内存](01-finished/yh-缓存提速与精确内存PL1def-2026-10-27.md)）：
-  `ir_module_serialize_alloc`（一次 prepare 后直接分配写出）替掉「size + serialize」
-  两次 verify+plan；capture 再走 `ir_module_serialize_alloc_trusted`（mini 模块是本进程
-  忠实重编号，记录只在整模块 verify+emit 成功后才落盘）。capture 从 19.3 → **13.7
-  ms/函数**（单机同过程），成对 A/B capture 累计 −13.2%。编码字节不变。
-- [x] **PL1d 模块 verify 去 O(n²)**（2026-10-27 完成，同上报告）：符号名唯一性改哈希表
-  （碰撞仍比字符串）、「每定义恰一实体」改计数数组；verify 2.88 → 2.68 s（−7%），
-  小模块是白赚，大模块正是 PL2 超线性的元凶。**逐函数指令校验（≈1.8 ms/函数）未优化。**
-- [x] **PL3 精确内存口径**（2026-10-27 完成，同上报告）：`--mem {footprint,rss}`
-  （`--rss` 保留旧名）——Darwin 用 `proc_pid_rusage` 的 `ri_phys_footprint`（不重复计入
-  共享干净页），Linux 用 `VmHWM`（内核高水位，采样不低估）。冷编 418.8 MB、热编
-  230.1 MB；同一进程 footprint 12.5 MB vs RSS 24.4 MB。
-- [x] **PL1f 命中装载跳过语义 verify**（部分完成，见同一报告）：记录头 32→40 字节加 payload FNV、
-  格式版本 1→2；校验和通过后走 `ir_module_deserialize_trusted`（仍解析 + 规模 + 规范编码
-  校验，合并后整模块仍 verify）。单函数改动场景 `cache 合并` 段 −8.0%（A/B，load≈28）。
-- [x] **PL1f2 合并查找索引**（2026-10-27 完成，见
-  [缓存提速与精确内存](01-finished/yh-缓存提速与精确内存PL1def-2026-10-27.md) §3.1）：
-  merge 内为每条记录建一次 `IRMergeIndex`（名字→符号、结构键→类型，键覆盖等价比较的
-  全部字段；哈希只缩候选、命中仍用原比较函数）。单函数改动的 `cache 合并` 段
-  **940.1 vs 1029.3 ms（−8.7%）**（A/B）。
-- [x] **PL1f3 增建绕过线性查重**（2026-10-27 完成）：新增
-  `ir_module_append_symbol` / `ir_module_append_type`（调用方保证不存在同名/等价项），
-  merge 在索引确认未命中后改走它们，每次 add 从 O(S)/O(T) 降到 O(1)。
-  **收益未验证**（复测时 load≈16，A/B 抖动 13–26%，读数落在噪声里）；
-  若安静环境确认无收益，回退这两个 API（调用点仅 merge 两处）。
-
-- [x] **PL1d2 首片：去掉每模块第二次全量 verify**（2026-10-27 完成，见
-  [缓存提速与精确内存](01-finished/yh-缓存提速与精确内存PL1def-2026-10-27.md) §3.2）：
-  一次性实验测到 verify_function 累计 5.33 s 而 lowering 侧只记 2.72 s（每模块 verify
-  两次），定位到后端发射前的防御性重复；改为廉价谓词 `ir_module_sealed`。
-  A/B：冷编 **−10.6%**、单函数 **−13.3%**、worker 累计 **−16.5%**。
 - [ ] **PL1d2b `ir_verify` 内部（便宜的方案已排除）**：函数体 SSA 校验占
   verify_function 的 83%（2.97 ms/函数）。已实现并实测「值→类型表」+「值位置表」把
   两处 O(n²) 扫描降为 O(n)——verify 占 lowering **17.2% → 17.0%，无可测收益**，已回退
   （真实函数 100–500 条指令，扫描 <2%）。只剩两条路：① 换支配性算法
   （Cooper-Harvey-Kennedy / bitset 定点）；② 论证「发布构建关闭模块 verify」的替代门
   （它是 lowering 之后唯一语义兜底）。
-- [x] **F1 `FAST_DIR` 跨 worktree 串扰**（2026-10-27 完成）：`justfile` 的默认快速目录
-  改成 `$TMPDIR/yh-fast-<workspace 路径哈希前 8 位>[-run_id]`（仍可被 `FAST_DIR` 覆盖）。
-  验证：本 worktree 得到 `yh-fast-9649a19c`，与旧的共享 `yh-fast` 及他人的目录隔离。
 - [ ] **PL3b cgroup 峰值**：Linux cgroup v2 `memory.peak`（需要可写 cgroup 层级）。
   **本机不可验证**（Darwin 无 cgroup），留到 Linux 宿主/容器里接；Darwin 侧只能采样。
 
@@ -247,9 +71,6 @@ O0 冷编 worker 累计 23.5 s 里 lowering 66%、IR 构造 20%、内嵌桥 8%�
 lowering 66% / IR 构造 20% / 内嵌桥 8% / 前端 6%（见上面的 PF2 报告），
 `capture` 不再是瓶颈。以下保留仍未关闭的项，按收益排序：
 
-- [x] **PC2c 定性完成（前提不成立）**（2026-10-27，见同上报告 §3.3）：计数探针显示
-  每条记录 payload **25.1 KB** 里名字字节只有 **0.2 KB（0.7%）**，真正占体积的是
-  **每条 75 个类型条目**；字符串池改造收益可忽略。
 - [ ] **PC2d 按模块共享类型表**（取代 PC2c，格式 v3 级）：记录改为引用模块级类型池
   （池带版本/校验），目标把 25.1 KB/条降到 ~5 KB，capture 13.4 → 5–6 ms/条。
   依赖：类型池文件的原子提交与失效规则要一起设计。
@@ -654,20 +475,6 @@ prelude `printf`（H.I3 的按需扩展仍独立）。
     `compiler/gen/target.yh` 的 emit_arm64 说明仍指旧后端；`libs/libc/README.md`
     称函数指针不支持（LLVM ABI 已支持）；`AGENTS.md` 的 x64 种子说明与
     Makefile 现状不一致。按实际行为刷新或标为历史。
-  - [x] **I4-7 循环内调用期 ALLOCA 泄漏栈**（2026-10-27 记录并修复）：聚合实参
-    副本、结构体返回值槽、变参打包与切片后备数组的 ALLOCA 由 lowering 在
-    **调用点所在块**发出；落在循环体里就每次迭代再分配一份栈且不回收，累积到
-    8 MB 栈后段错误。最小复现（纯 yh，不依赖 stdlib）：
-    `for i < 600000 { take([make_big(i), make_big(i)]) }`（56 字节结构体）在旧
-    编译器上约 3.7 万次迭代崩；同形态 `fmt.print([of_int(i), …])` 在 4 万次迭代
-    崩——正是「输出全部走 fmt」迁移的惯用写法。修复：`backend/llvm_scalar.yh`
-    新增 `llvm_function_allocas`，把全函数 ALLOCA 统一在**入口块**发一次、原位置
-    跳过（槽位跨迭代复用）；`ir/ssa.yh` 的 `IR_OP_ALLOCA` 注释写明「常量大小、
-    按调用期存活」的语义约束。回归：
-    `tests/yh-run/run/207-call-temp-stack-growth.yh`（60 万次，红 → 绿）；
-    `just test` 361/362（1 例平台跳过）、`just selfhost-native` 全绿
-    （cc3→cc4 固定点 + 122/122 项目用例）。详见
-    [完成记录](01-finished/yh-I4-7循环内调用期ALLOCA栈泄漏-2026-10-27.md)。
 
 ## 后续任务：文件对象、线程池与性能（LA4/LA5）
 
@@ -691,56 +498,10 @@ LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
   printf 单文件 50,256 B / `__text` 1,872；fmt 项目 155,872 B / 85,032；
   `-dead_strip` 后 89,632 B（−42.5%）；O2+`-dead_strip` 后 54,616 B（+8.7%）。
   主因不是 fmt 代码规模，而是「模块整对象链接 + 无死代码回收 + O0」。
-  分期（按 ROI）：
-  - [x] **L1** Darwin 链接加 `-dead_strip`（2026-10-27 完成）：`build/darwin_link.yh`
-    新增 `mb_darwin_dead_strip_enabled` / `mb_macho_dead_strip_flag`，缺省在
-    `mb_macho_link_prefix` 的 argv 里加 `-dead_strip`（`YH_LINK_DEAD_STRIP=0`
-    回退）；开关同时计入 `mb_hash_macho_identity` 链接键（不然开→关会命中旧
-    缓存）。实测 hello 级 fmt 程序 155,888 → **89,632 B**（−42.5%）。新门
-    `tests/selfhost/darwin-dead-strip.py`（缺省回收 / 回退保留 / 行为一致 /
-    开关进链接键，4 项）已接入 `just selfhost-native`。`tools/arch-check.py` 的
-    `max_build_lines` 10807 → 10846（本项 +39，已在 finish.md 说明）。
-  - [x] **L2** Linux `--gc-sections` + 每函数/每全局独立 section（2026-10-27 实现）：
-    `backend/llvm_module.yh` 新增 `llvm_elf_sections`/`llvm_section_name`，ELF
-    目标下每个函数发 `section ".text.<mangled>"`、每个全局发 `.rodata./.data.`
-    独立 section；`build/link_cache.yh` 对 Linux 目标追加 `--gc-sections`
-    （内嵌 lld）或 `-Wl,--gc-sections`（系统 cc）。Darwin 路径不变（Mach-O 按
-    符号原子回收，实测 Darwin `.ll` 无新增 section）。验证：`--target
-    aarch64-unknown-linux-gnu --emit-llvm` 的 ELF IR 有 61/32/… 条函数 section，
-    ELF 对象节表出现 `.text.main`/`.text.memcpy` 等（本机无 Linux 链接环境，
-    端到端收益待 Linux CI 用 `just test-llvm-linux-arm64` 复核）。
-  - [x] **L3** 依赖项目单独 O2（2026-10-27 完成）：`pj_module_opt_level`（在
-    `build/project_state.yh`）按「模块所属项目是否根项目」给出代码生成优化级——
-    依赖/标准库取 2、根项目沿用命令行值；`YH_DEP_OPT=0` 回退。接入点：对象发射
-    （`llvm_pipeline.yh` 的 `opt_level` 参数）、模块 manifest 键（`module_build.yh`）
-    与函数 IR 环境键（`function_ir_cache.yh`），因此开↔关不会复用旧对象。
-    实测（fmt hello 项目）：依赖 O0 89,632 B / `__text` 35,732 → 依赖 O2
-    **71,008 B** / `__text` 12,516；只用 fmt 少量叶子的语料 53,696 B（≈ printf 版）。
-    libs 作为根项目跑测试时仍是 O0（`just libs-test` 口径不变），`libs-test-o2` 全 O2。
-    新门 `tests/modules/opt-level.py`（4 项：依赖更小 / 行为一致 / 开关进键 /
-    根项目不受影响）已接入 `just test`。
-  - [x] **L4**（收尾，2026-10-27）release 剥离与自身度量：
-    `YH_LINK_STRIP=1` 给 ld64.lld 加 `-x`（缺省关，计入链接键）；实测 fmt hello
-    53,424 → 52,576 B（−1.6%）。编译器自身度量（cc2 由种子链接 / cc3 由新编译器
-    链接）：`70,815,568 → 65,112,448 B（−8.1%）`，文本符号 93,995 → 79,168。
-    拆 fmt 模块（缩小可达面）仍**不做**：与「fmt 不扩 API」的边界冲突，且
-    L1+L3 后 fmt hello 只比 printf hello 大 6.3%（见下条度量物）。
-  - [x] 度量物（2026-10-27）：`tests/perf/fmt-size/`（printf/fmt 两个 hello
-    fixture）+ `tools/size-report.py`（`size -m`/`size -A` → 表格/JSON，软门
-    `--budget-ratio`，`--strict` 才失败），入口 `just size-report`。当前读数：
-    printf 50,256 B / fmt 53,424 B，比值 1.063。
+  L1（Darwin `-dead_strip`）、L3（O2 缺省开优化）、L4（release `-x` 剥离）已落地：
+  fmt hello 由 155,888 B 降到 53,424 B，与 printf hello 的比值 **1.063**。
   - [ ] **L2 后续（Linux 端到端）**：在 Linux CI 上量 ELF 的 `--gc-sections`
     实际回收率，并按需调整；本地容器运行时不可用（`container run` 启动即报错）。
-
-#### 已知缺陷（LA0 复现）
-
-- [ ] **D1 goto 函数中的函数指针绑定**：含 `goto`/`label` 的函数里
-  `let f fn(int) int = add_one` 被按内存驻留处理时生成 `alloca void`，
-  LLVM 报 `void type only allowed for function results`。最小复现：
-  `fn add_one(v int) int { return v + 1 }`
-  `fn main() int { goto done; done: let f fn(int) int = add_one; return f(41) == 42 ? 0 : 1 }`
-  （`tests/modules/projects/llvmarchitecture/cases/lowering.yh` 暂将 goto 与
-  函数指针放在独立函数，未降低断言）。需单独立项修复并补回归。
 
 ## 接口特性（IF1–IF5，方案待评审）
 
@@ -763,13 +524,14 @@ LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
 
 当前无未决项。2026-10-26 用户已决定两项，记录如下。
 
-- **NP 定位（原 ❓1，已决定）**：**只保留 NP3**（受检契约与 lowering 解耦），
-  NP0/NP1/NP2/NP4/NP5 关闭——NP0 口径并入现有 `make test` + O0/O2 + 自举门；
-  NP1/NP2 的对象代码（`ir_simplify`、`ssa_inline`）已删除；NP4 由 ADR-0014
-  取代；NP5 交 LLVM 默认管线。ADR-0011 已标注部分被取代，
+- **NP 定位（原 ❓1，已决定并已收口）**：**只保留 NP3**（受检契约与 lowering
+  解耦），NP0/NP1/NP2/NP4/NP5 关闭——NP0 口径并入现有 `just test` + O0/O2 +
+  自举门；NP1/NP2 的对象代码（`ir_simplify`、`ssa_inline`）已删除；NP4 由
+  ADR-0014 取代；NP5 交 LLVM 默认管线。ADR-0011 已标注部分被取代，
   [方案](02-plan/yh-Nanopass风格优化架构实施方案.md) 与
-  [设计](03-design/yh-Nanopass风格优化架构.md) 已改状态；NP3 作为唯一保留
-  阶段记入「2026-10-24 架构优化」小节。
+  [设计](03-design/yh-Nanopass风格优化架构.md) 已改状态。NP3 已于 2026-10-28
+  关闭（覆盖矩阵零被拒，证据见 finish.md 与
+  [能力矩阵](03-design/yh-受检到LLVM能力矩阵-2026-10-28.md)），本文件不再列其子项。
 - **字面量只读化（原 ❓3，已决定：改语义）**：字面量进只读段 + 静态可判定的
   写入改编译期诊断，见 H1。
 
