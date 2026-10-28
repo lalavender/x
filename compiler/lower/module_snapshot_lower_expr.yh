@@ -355,6 +355,50 @@ fn checked_lower_function_addr(l *CheckedLower, node *ast.AstExpr) int {
     return inst
 }
 
+// checked_lower_address_of：取地址运算（`&`）。
+// 左值分成四类：函数名、模块全局对象、字段/下标/解引用左值、普通变量绑定。
+// 返回值协议与表达式 lowering 相同（指令编号、-2 不支持、-1 内部错误）。
+fn checked_lower_address_of(l *CheckedLower, flow *CheckedFlow, node *ast.AstExpr) int {
+    let b *AstIRBuilder = &l.builder
+    let child ast.AstExpr = l.store.expressions[node.child0]
+    if (child.kind == ast.AST_EXPR_PRIMARY && child.child0 < 0
+        && child.sym_kind == gen.SYM_FN && (child.sym_flags & gen.F_GLOBAL) != 0
+        && child.binding_row < 0) {
+        // 函数名取址：函数值本身已是不透明指针，`&f` 要求一个真实内存对象。
+        // 分配 8 字节槽、写入函数地址，返回槽地址——与「先 let 再 &」语义一致，
+        // 槽由后端统一提到入口块，函数存活期内有效。
+        let fnaddr int = checked_lower_function_addr(l, &child)
+        if (fnaddr < 0) { return fnaddr }
+        let slot int = ast_ir_b_add_alloca(b, 8, 8)
+        if (slot < 0) { return -1 }
+        if (ast_ir_b_add_store(b, slot, fnaddr) < 0) { return -1 }
+        return slot
+    }
+    if (child.kind == ast.AST_EXPR_PRIMARY && child.child0 < 0
+        && (child.sym_flags & gen.F_GLOBAL) != 0 && child.binding_row < 0) {
+        return checked_lower_global_ref(l, &child)
+    }
+    if (child.kind == ast.AST_EXPR_INDEX || child.kind == ast.AST_EXPR_MEMBER
+        || (child.kind == ast.AST_EXPR_UNARY && child.op == gen.TK_STAR)) {
+        let pointer int = checked_lower_lvalue_ptr(l, flow, node.child0)
+        if (pointer == -2) { return -2 }
+        if (pointer < 0) { return -1 }
+        let want int = checked_lower_type(l, node.type_id)
+        if (want >= 0 && b.insts[pointer].result_type != want) { return -2 }
+        return pointer
+    }
+    if (child.kind != ast.AST_EXPR_PRIMARY || child.child0 >= 0
+        || child.sym_kind != gen.SYM_VAR) { return -2 }
+    let row int = checked_lower_binding(l, &child)
+    if (row < 0) { return -2 }
+    let binding ast.AstBinding = l.store.bindings[row]
+    let storage int = checked_lower_storage(l, binding.id)
+    if (storage < 0) { return -2 }
+    let want int = checked_lower_type(l, node.type_id)
+    if (want < 0 || b.insts[storage].result_type != want) { return -2 }
+    return storage
+}
+
 // checked_lower_expr_inner：表达式降低主体；协议与 checked_lower_expr 相同。
 fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int {
     let b *AstIRBuilder = &l.builder
@@ -520,33 +564,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
             if (length < 0) { return -1 }
             return checked_lower_adjust(l, length, want)
         }
-        if (node.op == gen.TK_AMP) {
-            // 取地址：变量（含聚合存储）、指针解引用与数组下标。
-            let child ast.AstExpr = l.store.expressions[node.child0]
-            if (child.kind == ast.AST_EXPR_PRIMARY && child.child0 < 0
-                && (child.sym_flags & gen.F_GLOBAL) != 0 && child.binding_row < 0) {
-                return checked_lower_global_ref(l, &child)
-            }
-            if (child.kind == ast.AST_EXPR_INDEX || child.kind == ast.AST_EXPR_MEMBER
-                || (child.kind == ast.AST_EXPR_UNARY && child.op == gen.TK_STAR)) {
-                let pointer int = checked_lower_lvalue_ptr(l, flow, node.child0)
-                if (pointer == -2) { return -2 }
-                if (pointer < 0) { return -1 }
-                let want int = checked_lower_type(l, node.type_id)
-                if (want >= 0 && b.insts[pointer].result_type != want) { return -2 }
-                return pointer
-            }
-            if (child.kind != ast.AST_EXPR_PRIMARY || child.child0 >= 0
-                || child.sym_kind != gen.SYM_VAR) { return -2 }
-            let row int = checked_lower_binding(l, &child)
-            if (row < 0) { return -2 }
-            let binding ast.AstBinding = l.store.bindings[row]
-            let storage int = checked_lower_storage(l, binding.id)
-            if (storage < 0) { return -2 }
-            let want int = checked_lower_type(l, node.type_id)
-            if (want < 0 || b.insts[storage].result_type != want) { return -2 }
-            return storage
-        }
+        if (node.op == gen.TK_AMP) { return checked_lower_address_of(l, flow, &node) }
         if (node.op == gen.TK_STAR) {
             // 解引用：指针元素类型必须与表达式类型一致。
             let want int = checked_lower_type(l, node.type_id)

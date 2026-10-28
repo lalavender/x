@@ -200,6 +200,34 @@ fn checked_lower_aggregate_store(l *CheckedLower, flow *CheckedFlow, dest int,
             return checked_lower_slice_header(l, flow, dest, source_type, inner_node.child0)
         }
     }
+    if (inner_node.kind == ast.AST_EXPR_TERNARY) {
+        // 聚合条件表达式没有 SSA 值：两条分支各自写入同一目标存储，因此不需要 phi。
+        // 分支里只降低聚合来源（字面量/变量/字段/下标/解引用/调用），不求值
+        // 会被 phi 合流影响的标量值，所以不复制 local_values。
+        if (inner_node.child0 < 0 || inner_node.child1 < 0 || inner_node.child2 < 0) {
+            return -2
+        }
+        let cond int = checked_lower_cond(l, flow, inner_node.child0)
+        if (cond == -2) { return -2 }
+        if (cond < 0) { return -1 }
+        let then_block int = ast_ir_b_alloc_block(b)
+        let else_block int = ast_ir_b_alloc_block(b)
+        let join_block int = ast_ir_b_alloc_block(b)
+        if (then_block < 0 || else_block < 0 || join_block < 0) { return -1 }
+        if (ast_ir_b_term_cond(b, cond, then_block, else_block) != 0) { return -1 }
+        ast_ir_b_enter_block(b, then_block)
+        let then_status int = checked_lower_aggregate_store(l, flow, dest, source_type,
+            inner_node.child1)
+        if (then_status != 0) { return then_status }
+        if (ast_ir_b_term_br(b, join_block) != 0) { return -1 }
+        ast_ir_b_enter_block(b, else_block)
+        let else_status int = checked_lower_aggregate_store(l, flow, dest, source_type,
+            inner_node.child2)
+        if (else_status != 0) { return else_status }
+        if (ast_ir_b_term_br(b, join_block) != 0) { return -1 }
+        ast_ir_b_enter_block(b, join_block)
+        return 0
+    }
     if (inner_node.kind == ast.AST_EXPR_ARRAY) {
         let result int = checked_lower_array_literal(l, flow, dest, source_type, inner)
         if (result == -2) { l.reason = "首片：聚合数组字面量 lowering 形态无效" }

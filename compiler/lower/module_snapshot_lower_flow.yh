@@ -17,7 +17,7 @@ import proj
 // 记录位置，形态之外返回 -2（首片不支持），由 lower_module 统一报告。
 //
 // 状态分三类，均由 CheckedFlow 持有，不写回快照：
-//   * 循环：携带绑定与 break/continue 目标（嵌套循环明确不支持）；
+//   * 循环：携带绑定与 break/continue 目标，按 CheckedLoop 栈逐层嵌套；
 //   * 合流：if 两臂的值副本与 phi 建点；
 //   * 调用：当前函数的目标与实参临时表。
 // ============================================================================
@@ -379,7 +379,12 @@ fn checked_lower_switch_body(l *CheckedLower, flow *CheckedFlow, stmt_id int,
     if (control == -2) { return -2 }
     if (control < 0) { return -1 }
     let control_kind int = b.insts[control].result_type
-    if (ir.ir_integer_type(b.types[control_kind].kind) == 0) { return -2 }
+    // 控制值用 EQ 比较，bool 走 i8 的相等比较即可，与整数同构。
+    if (ir.ir_integer_type(b.types[control_kind].kind) == 0
+        && b.types[control_kind].kind != ir.IR_TY_BOOL) {
+        l.reason = "switch 控制表达式必须是整数、枚举或 bool 类型"
+        return -2
+    }
     let main_values *int = b.local_values
     let path_count int = 0
     let exit_b int = ast_ir_b_alloc_block(b)
@@ -414,7 +419,12 @@ fn checked_lower_switch_body(l *CheckedLower, flow *CheckedFlow, stmt_id int,
                 if (value == -2) { return -2 }
                 if (value < 0) { return -1 }
                 let value_kind int = b.insts[value].result_type
-                if (ir.ir_integer_type(b.types[value_kind].kind) == 0) { return -2 }
+                if (ir.ir_integer_type(b.types[value_kind].kind) == 0
+                    && b.types[value_kind].kind != ir.IR_TY_BOOL) {
+                    l.last_token = l.store.expressions[e.expr_id].first
+                    l.reason = "switch 的 case 值必须是整数、枚举或 bool 常量"
+                    return -2
+                }
                 if (value_kind != control_kind) {
                     value = checked_lower_adjust(l, value, control_kind)
                     if (value < 0) { return -2 }
