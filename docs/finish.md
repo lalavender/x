@@ -8,6 +8,19 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-10-28 0.0.11 正式版发布完成
+
+- **发布**：tag `0.0.11`（打在默认分支 `llvm`）→ Gitea `release.yml` 三端全绿后 publish 成功：
+  <https://github.com/lalavender/x/releases/tag/0.0.11>（正式版，非 prerelease）。
+  资产：darwin-arm64 23,680,756 B / linux-arm64 40,680,912 B / linux-x86_64 40,719,466 B
+  + 各自 `.sha256`；publish 阶段校验远端大小与本地一致。
+- **发布二进制验收**：`rm -rf bin && just fetch-seed` 取到 0.0.11 种子
+  （sha256 `5a9735c9…bc69c`，与 rc.2 种子**逐字节相同**）→ `just` 通过 →
+  `just test` 133 passed/0 failed → `just selfhost-native` 全绿（48 产物固定点、
+  129 文件自解析、124/124）。
+- **说明**：正式版代码与已验收的 `0.0.11-rc.2` 完全一致（差异仅发布文档）；
+  分支保持 `llvm`（默认）/`arm64`/`main`，未再建 `<ver>-release`。
+
 ## 2026-10-28 0.0.11 正式版发布（tag 打在 llvm）
 
 - **发布说明**：`docs/01-finished/release-0.0.11.md`（CLI-R 命令行重写、B1/B2 架构收敛、

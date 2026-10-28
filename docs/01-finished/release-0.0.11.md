@@ -80,6 +80,23 @@ tag 直接打在默认分支 `llvm`（分支已收敛为 `llvm` / `arm64` / `mai
   `just test-llvm-darwin`（22 项 PASS）、fmt 专项门（`darwin-dead-strip` 4/4、
   `opt-level` 4/4）、缓存矩阵 O0/O2 六场景全绿。
 
+## 发布结果（2026-10-28）
+
+- Release：<https://github.com/lalavender/x/releases/tag/0.0.11>（**正式版**，非 prerelease）
+- 流水线：`prepare` → `darwin-arm64` / `linux-arm64` / `linux-x86_64` 三端全绿 → `publish`
+  成功（远端资产大小与本地一致）。
+
+| 资产 | 大小 | SHA-256 |
+| --- | --- | --- |
+| `yh-0.0.11-darwin-arm64.tar.gz` | 23,680,756 B | `766254a944cf1826…f700c1092c0` |
+| `yh-0.0.11-linux-arm64.tar.gz` | 40,680,912 B | `2a2563f70840c52e…b7ed058f840` |
+| `yh-0.0.11-linux-x86_64.tar.gz` | 40,719,466 B | `6acfecc673f98c47…405144af2dcd` |
+
+- **发布二进制验收**：`rm -rf bin && just fetch-seed` 取到 **0.0.11** 种子
+  （`yh-darwin-arm64` sha256 `5a9735c9…bc69c`，与 rc.2 种子**逐字节相同**——同一份代码
+  由同一代种子构建，位级可复现）→ `just` 构建通过 → `just test` **133 passed / 0 failed**
+  → `just selfhost-native` 全绿（48 产物固定点、129 文件自解析、项目语料 124/124）。
+
 ## 已知边界
 
 - **CLI-R1d**：lowering 在「紧跟聚合 `let` 的结构体字段赋值」上有缺陷，常见输入**不复现**，
