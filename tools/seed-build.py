@@ -24,6 +24,7 @@ HOST_DRIVERS = {
     "darwin-aarch64": ROOT / "tools/llvm-darwin-host.py",
     "linux-x86_64": ROOT / "tools/llvm-host.py",
     "linux-aarch64": ROOT / "tools/llvm-host.py",
+    "windows-x86_64": ROOT / "tools/llvm-windows-host.py",
 }
 
 

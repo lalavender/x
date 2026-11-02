@@ -326,6 +326,12 @@ fn li_kind_from_path(off int, plen int) int {
         if (li_ends_with(off, plen, ".dylib") != 0) { return 2 }
         if (li_ends_with(off, plen, ".tbd") != 0) { return 2 }
     }
+    if (gs.c_target.os == gen.TARGET_OS_WINDOWS) {
+        // COFF 的 .lib 既可能是静态库也可能是导入库，两者都是 ar 归档（kind=1）；
+        // .dll 是 PE 共享镜像（kind=2）。.a 由上面的通用分支覆盖（mingw 风格导入库）。
+        if (li_ends_with(off, plen, ".lib") != 0) { return 1 }
+        if (li_ends_with(off, plen, ".dll") != 0) { return 2 }
+    }
     return 0
 }
 
@@ -411,6 +417,24 @@ fn li_check_format(proj int, group *gen.PLinkGroup, item *gen.PLinkItem,
         }
         return 0
     }
+    if (gs.c_target.os == gen.TARGET_OS_WINDOWS) {
+        // PE：MZ → e_lfanew → "PE  " → IMAGE_FILE_MACHINE_AMD64(0x8664)。
+        if (n < 64 || head[0] != 'M' || head[1] != 'Z') {
+            return li_error(proj, group, item, "DLL 不是 PE 文件")
+        }
+        let pe_off int = head[60].to_type(int) | (head[61].to_type(int) << 8) |
+            (head[62].to_type(int) << 16) | (head[63].to_type(int) << 24)
+        if (pe_off < 0 || pe_off + 6 > n || head[pe_off] != 'P'
+            || head[pe_off + 1] != 'E' || head[pe_off + 2] != 0
+            || head[pe_off + 3] != 0) {
+            return li_error(proj, group, item, "DLL 缺少 PE 签名")
+        }
+        let pe_machine int = head[pe_off + 4].to_type(int) | (head[pe_off + 5].to_type(int) << 8)
+        if (pe_machine != 0x8664) {
+            return li_error(proj, group, item, "DLL 架构与当前目标不符")
+        }
+        return 0
+    }
     if (li_ends_with(orig_off, orig_len, ".tbd") != 0) {
         if (n < 4 || head[0] != '-' || head[1] != '-' || head[2] != '-') {
             return li_error(proj, group, item, ".tbd 不是非空文本 stub")
@@ -427,7 +451,14 @@ fn li_check_format(proj int, group *gen.PLinkGroup, item *gen.PLinkItem,
 fn li_build_path(proj int, item *gen.PLinkItem, out *u8, cap int) int {
     let gs *gen.GenState = gen.G()
     let n int = 0
-    if (gs.task.np_data[item.orig_off] != '/') {
+    let absolute int = 0
+    if (gs.task.np_data[item.orig_off] == '/') { absolute = 1 }
+    // Windows 绝对路径（X:/… 或 X:\…）同样直接使用：MSVC 的静态 CRT 与
+    // 构建机上的 LLVM 归档都在仓库外，只能按绝对路径引用（W2-2c）。
+    if (item.orig_len >= 3 && gs.task.np_data[item.orig_off + 1] == ':'
+        && (gs.task.np_data[item.orig_off + 2] == '/'
+            || gs.task.np_data[item.orig_off + 2] == 92)) { absolute = 1 }
+    if (absolute == 0) {
         let root *char = pj_pool_str(gs.p_projs[proj].root_off)
         let i int = 0
         for root[i] != 0 {

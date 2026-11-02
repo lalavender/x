@@ -1,0 +1,206 @@
+module main;
+
+import os;
+
+// Windows 目录/当前目录 E2E（W2-7）。与 Linux 的 osdirs 分工：
+//   * Linux 侧覆盖 getdents64 原始记录的解析与损坏防护；
+//   * 这里覆盖 FindFirstFileA/FindNextFileA 路径：条目数量多于一批、目录与
+//     普通文件的类型判定、空目录立即结束、重复关闭幂等、cwd 读写。
+// 目录项顺序不作断言（Windows 的返回顺序由文件系统决定）。
+
+let dir_path *char = ".yh-osdirwin";
+let empty_path *char = ".yh-osdirwin-empty";
+let sub_path *char = ".yh-osdirwin/sub";
+let sub_file *char = ".yh-osdirwin/sub/inside.txt";
+let missing_path *char = ".yh-osdirwin-missing";
+
+// file_path 把序号拼进目录下的文件名（借用静态缓冲，长度固定两位）。
+fn file_path(number int, buffer *u8, capacity int) *char {
+    let prefix *char = ".yh-osdirwin/f";
+    let i int = 0;
+    for prefix[i] != 0 {
+        if (i >= capacity - 3) { return 0; }
+        buffer[i] = prefix[i].to_type(u8);
+        i += 1;
+    }
+    buffer[i] = (48 + number / 10).to_type(u8);
+    buffer[i + 1] = (48 + number % 10).to_type(u8);
+    buffer[i + 2] = 0;
+    return buffer.to_type(*char);
+}
+
+// create_file 通过新 os 文件接口创建一个空文件。
+fn create_file(path *char, code int) int {
+    let options os.OpenOptions = os.write_options();
+    let opened os.FdResult = os.open_path(path, options);
+    if (opened.fd < 0 || opened.error.kind != os.error_none) {
+        return code;
+    }
+    if (os.close_file(opened.fd).kind != os.error_none) {
+        return code + 1;
+    }
+    return 0;
+}
+
+// cleanup 尽力清理本用例的文件与目录，忽略清理错误。
+fn cleanup() void {
+    let name [64]u8;
+    let i int = 0;
+    for i < 40 {
+        let path *char = file_path(i, &name[0], 64);
+        if (path != 0) { os.remove_path(path); }
+        i += 1;
+    }
+    os.remove_path(sub_file);
+    os.remove_dir_path(sub_path);
+    os.remove_dir_path(empty_path);
+    os.remove_dir_path(dir_path);
+}
+
+// entry_equals 比较借用条目名称与 NUL 结尾期望串。
+fn entry_equals(entry os.DirEntry, wanted *char) int {
+    let i int = 0;
+    for wanted[i] != 0 {
+        if (i.to_type(u64) >= entry.name_len
+            || entry.name[i] != wanted[i].to_type(u8)) {
+            return 0;
+        }
+        i += 1;
+    }
+    return (i.to_type(u64) == entry.name_len).to_type(int);
+}
+
+// scan_dir 枚举目录：40 个文件 + 1 个子目录，核对数量与类型。
+fn scan_dir() int {
+    let buffer [64]u8;
+    let opened os.DirReaderResult = os.open_dir(dir_path, buffer[0..64]);
+    if (opened.reader.active != 1 || opened.error.kind != os.error_none) {
+        return 10;
+    }
+    let total int = 0;
+    let files int = 0;
+    let dirs int = 0;
+    for 1 == 1 {
+        let item os.DirEntryResult = os.next_entry(&opened.reader);
+        if (item.status == os.dir_entry_error) {
+            os.close_dir(&opened.reader);
+            return 11;
+        }
+        if (item.status == os.dir_entry_end) { break; }
+        total += 1;
+        if (entry_equals(item.entry, "sub") != 0) {
+            if (item.entry.kind != os.dir_directory) {
+                os.close_dir(&opened.reader);
+                return 12;
+            }
+            dirs += 1;
+        } else if (item.entry.kind == os.dir_file) {
+            files += 1;
+        }
+    }
+    if (os.close_dir(&opened.reader).kind != os.error_none) { return 13; }
+    // 重复关闭是幂等成功，且不能误关 stdin。
+    if (os.close_dir(&opened.reader).kind != os.error_none) { return 14; }
+    if (total != 41 || files != 40 || dirs != 1) { return 15; }
+    return 0;
+}
+
+// scan_empty 空目录必须立刻返回 dir_entry_end。
+fn scan_empty() int {
+    let buffer [64]u8;
+    let opened os.DirReaderResult = os.open_dir(empty_path, buffer[0..64]);
+    if (opened.reader.active != 1) { return 20; }
+    let item os.DirEntryResult = os.next_entry(&opened.reader);
+    if (item.status != os.dir_entry_end) {
+        os.close_dir(&opened.reader);
+        return 21;
+    }
+    if (os.close_dir(&opened.reader).kind != os.error_none) { return 22; }
+    return 0;
+}
+
+// check_missing 打开不存在的目录必须报 not_found。
+fn check_missing() int {
+    let buffer [64]u8;
+    let opened os.DirReaderResult = os.open_dir(missing_path, buffer[0..64]);
+    if (opened.reader.active != 0
+        || opened.error.kind != os.error_not_found) {
+        return 30;
+    }
+    return 0;
+}
+
+// check_cwd 读取 cwd、进入目录再退回，验证 get_cwd/change_dir 往返。
+// 相对路径只在“当前目录”下有意义，因此进入 dir_path 后只用 ".." 返回。
+fn check_cwd() int {
+    let before [512]u8;
+    let first os.IoResult = os.get_cwd(before[0..512]);
+    if (first.error.kind != os.error_none || first.count == 0) { return 40; }
+    if (os.change_dir(dir_path).kind != os.error_none) { return 41; }
+    let inside [512]u8;
+    let inside_result os.IoResult = os.get_cwd(inside[0..512]);
+    if (inside_result.error.kind != os.error_none) { return 42; }
+    // 进入目录后 cwd 必须变化（长度或内容之一）。
+    if (inside_result.count == first.count) {
+        let same int = 1;
+        let i int = 0;
+        for i < first.count.to_type(int) {
+            if (before[i] != inside[i]) { same = 0; }
+            i += 1;
+        }
+        if (same != 0) { return 43; }
+    }
+    if (os.change_dir("..").kind != os.error_none) { return 44; }
+    let after [512]u8;
+    let after_result os.IoResult = os.get_cwd(after[0..512]);
+    if (after_result.error.kind != os.error_none) { return 45; }
+    if (after_result.count != first.count) { return 46; }
+    let k int = 0;
+    for k < first.count.to_type(int) {
+        if (before[k] != after[k]) { return 47; }
+        k += 1;
+    }
+    return 0;
+}
+
+// main 组装夹具、逐项检查，任何失败都先清理再返回诊断码。
+pub fn main() int {
+    cleanup();
+    if (os.make_dir(dir_path, 493).kind != os.error_none) { return 1; }
+    if (os.make_dir(empty_path, 493).kind != os.error_none) {
+        cleanup();
+        return 2;
+    }
+    if (os.make_dir(sub_path, 493).kind != os.error_none) {
+        cleanup();
+        return 3;
+    }
+    let rc int = create_file(sub_file, 4);
+    if (rc != 0) {
+        cleanup();
+        return rc;
+    }
+    let name [64]u8;
+    let i int = 0;
+    for i < 40 {
+        let path *char = file_path(i, &name[0], 64);
+        if (path == 0) {
+            cleanup();
+            return 5;
+        }
+        rc = create_file(path, 6);
+        if (rc != 0) {
+            cleanup();
+            return rc;
+        }
+        i += 1;
+    }
+    rc = scan_dir();
+    if (rc == 0) { rc = scan_empty(); }
+    if (rc == 0) { rc = check_missing(); }
+    if (rc == 0) { rc = check_cwd(); }
+    cleanup();
+    if (rc != 0) { return rc; }
+    printf("os dirs win ok\n");
+    return 0;
+}

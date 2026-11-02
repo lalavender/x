@@ -3,6 +3,21 @@ import gen
 
 // process.yh —— 编译器用显式 argv 启动宿主进程，不经过命令解释器。
 
+// mb_can_fork：本机是否支持 fork 式进程隔离。Windows 没有 fork，模块 worker
+// 退化为「在本进程里串行编译」（worker 入口自带会话重置，见 build_scheduler）。
+// 这是启动 W2 的最小步骤；真正的 CreateProcess 重入（W2-4b）后续再做。
+pub fn mb_can_fork() int {
+    // 测试钩子：YH_NO_FORK=1 在 Linux/Darwin 上强制串行路径，用来验证 Windows
+    // 宿主的构建流程（否则只有 Windows 机器能覆盖这段代码）。
+    let off int = -1
+    let len int = 0
+    if (pj_env_fetch("YH_NO_FORK", &off, &len) == 0) {
+        if (len == 1 && gen.task().np_data[off] == '1') { return 0 }
+    }
+    $if (windows) { return 0 }
+    $else { return 1 }
+}
+
 // cmd_mkdir_if_missing：调用宿主 mkdir API；若目录已存在则确认它确为目录。
 fn cmd_mkdir_if_missing(path *char) int {
     if (path == 0) {
@@ -63,6 +78,10 @@ pub fn cmd_mkdirs(path *char) int {
     return 0
 }
 
+// yh_win_spawn_capture：Windows 侧「运行 argv 并把 stdout 写到文件」的包装
+// （compiler/llvm/windows_shim.c）。仅无 fork 宿主使用，其余平台不引用。
+@[extern] fn yh_win_spawn_capture(argv **char, argc int, path *char) int
+
 // cmd_process_status：把 waitpid 的状态字转换为普通退出码或信号退出码。
 pub fn cmd_process_status(pid int) int {
     let status int = 0
@@ -80,15 +99,22 @@ pub fn cmd_process_run(argv **char) int {
     if (argv == 0 || argv[0] == 0) {
         return -1
     }
-    let pid int = fork()
-    if (pid < 0) {
-        return -1
+    // Windows 没有 fork/exec：直接 CreateProcessA 并等待（yh run / C 源工具）。
+    $if (windows) {
+        let count int = 0
+        for argv[count] != 0 { count += 1 }
+        return yh_win_spawn_wait(argv, count)
+    } $else {
+        let pid int = fork()
+        if (pid < 0) {
+            return -1
+        }
+        if (pid == 0) {
+            execvp(argv[0], argv)
+            exit(127)
+        }
+        return cmd_process_status(pid)
     }
-    if (pid == 0) {
-        execvp(argv[0], argv)
-        exit(127)
-    }
-    return cmd_process_status(pid)
 }
 
 // cmd_process_capture：在不经过 shell 的前提下捕获子进程标准输出。
@@ -100,30 +126,39 @@ pub fn cmd_process_capture(argv **char, capture_path *char,
         || output == 0 || capacity <= 0) {
         return -1
     }
-    let pid int = fork()
-    if (pid < 0) {
-        return -1
-    }
-    if (pid == 0) {
-        let flags int = 0x241
-        if (gen.tg_host_darwin() != 0) {
-            flags = 0x601
+    $if (windows) {
+        let count int = 0
+        for argv[count] != 0 { count += 1 }
+        if (yh_win_spawn_capture(argv, count, capture_path) != 0) {
+            unlink(capture_path)
+            return -1
         }
-        let out_fd int = open(capture_path, flags, 0x1a4)
-        if (out_fd < 0) {
-            exit(126)
+    } $else {
+        let pid int = fork()
+        if (pid < 0) {
+            return -1
         }
-        if (dup2(out_fd, 1) < 0) {
+        if (pid == 0) {
+            let flags int = 0x241
+            if (gen.tg_host_darwin() != 0) {
+                flags = 0x601
+            }
+            let out_fd int = open(capture_path, flags, 0x1a4)
+            if (out_fd < 0) {
+                exit(126)
+            }
+            if (dup2(out_fd, 1) < 0) {
+                close(out_fd)
+                exit(126)
+            }
             close(out_fd)
-            exit(126)
+            execvp(argv[0], argv)
+            exit(127)
         }
-        close(out_fd)
-        execvp(argv[0], argv)
-        exit(127)
-    }
-    if (cmd_process_status(pid) != 0) {
-        unlink(capture_path)
-        return -1
+        if (cmd_process_status(pid) != 0) {
+            unlink(capture_path)
+            return -1
+        }
     }
     let in_fd int = open(capture_path, 0)
     if (in_fd < 0) {

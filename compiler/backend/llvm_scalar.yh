@@ -644,18 +644,51 @@ fn llvm_function(unit *ir.IRModule, function *ir.IRModuleFunction, out *LLVMOutp
     let map int = llvm_map(out, symbol.source, symbol.offset, function.symbol)
     llvm_text(out, "define ")
     if (symbol.linkage == ir.IR_MODULE_LINK_PRIVATE) { llvm_text(out, "internal ") }
-    llvm_signature(unit, &symbol, out, 1); llvm_text(out, " {\n"); llvm_map_end(out, map)
-    let next int = 0; let b int = 0
+    llvm_signature(unit, &symbol, out, 1)
+    // Windows/x64 的栈页探测保持开启（LLVM 对大帧发 call __chkstk）：
+    // 该符号由 SDK 的 yh_chkstk.obj 提供（compiler/windows-sdk/chkstk.c，
+    // 导出 __yh_chkstk，经 /alternatename 接手零 CRT 的 __chkstk；
+    // W1-3c），不再用 no-stack-arg-probe 关探测、也不再限制帧大小。
+    llvm_text(out, " {\n"); llvm_map_end(out, map)
+    let next int = 0
+    // 入口块标签 + **全部 alloca 提升**：LLVM 把非入口块的 alloca 当动态分配处理
+    // （Windows 上会调 __chkstk，且布局与期望不一致——2026-10-27 W1 踩过：聚合
+    // 临时值直接作为 printf 实参时崩溃）。yh 的 IR_OP_ALLOCA 尺寸恒为常量、
+    // 生命周期为函数级（C 式局部变量），因此提到入口块不改变语义。
+    llvm_byte(out, 'b'); llvm_number(out, 0.to_type(u64)); llvm_text(out, ":\n")
+    let hoist_block int = 0
+    for hoist_block < function.body.block_count {
+        let hoist_n int = function.body.blocks[hoist_block].inst_count
+        let hoist_i int = 0
+        for hoist_i < hoist_n {
+            let hoist_index int = function.body.blocks[hoist_block].first_inst + hoist_i
+            if (function.body.insts[hoist_index].op == ir.IR_OP_ALLOCA) {
+                let hoist_loc ir.IRModuleLoc = function.locs[hoist_index]
+                map = llvm_map(out, hoist_loc.source, hoist_loc.offset, function.symbol)
+                llvm_instruction(unit, &symbol, out, &function.body,
+                    &function.body.insts[hoist_index], &next)
+                llvm_map_end(out, map)
+            }
+            hoist_i += 1
+        }
+        hoist_block += 1
+    }
+    let b int = 0
     for b < function.body.block_count {
         let block ir.IRBlock = function.body.blocks[b]
-        llvm_byte(out, 'b'); llvm_number(out, b.to_type(u64)); llvm_text(out, ":\n")
+        if (b != 0) {
+            llvm_byte(out, 'b'); llvm_number(out, b.to_type(u64)); llvm_text(out, ":\n")
+        }
         let i int = 0
         for i < block.inst_count {
             let index int = block.first_inst + i
-            let loc ir.IRModuleLoc = function.locs[index]
-            map = llvm_map(out, loc.source, loc.offset, function.symbol)
-            llvm_instruction(unit, &symbol, out, &function.body, &function.body.insts[index], &next)
-            llvm_map_end(out, map); i += 1
+            let inst ir.IRInst = function.body.insts[index]
+            if (inst.op != ir.IR_OP_ALLOCA) {
+                map = llvm_map(out, function.locs[index].source, function.locs[index].offset, function.symbol)
+                llvm_instruction(unit, &symbol, out, &function.body, &inst, &next)
+                llvm_map_end(out, map)
+            }
+            i += 1
         }
         map = llvm_map(out, symbol.source, symbol.offset, function.symbol)
         llvm_terminator(unit, &symbol, out, &function.body, &block, &next); llvm_map_end(out, map)

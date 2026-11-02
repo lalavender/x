@@ -42,11 +42,13 @@ docker 或 sysroot 不可用时全部打印 SKIP，不算失败。
 
 import argparse
 import concurrent.futures
+import json
 import os
 import platform
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent          # tests/yh-run
@@ -112,8 +114,10 @@ def compile_src(src, out, cross=False, compiler=None):
             "-B", str(SYSROOT),
         ]
     try:
+        # errors="replace"：编译器诊断可能含被截断的多字节序列（缓冲上限截断），
+        # 门禁自身不能因此抛 UnicodeDecodeError 而不是报用例失败。
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=COMPILE_TIMEOUT)
+                              errors="replace", timeout=COMPILE_TIMEOUT)
         return proc, False
     except subprocess.TimeoutExpired:
         return None, True
@@ -325,6 +329,48 @@ def check_run_case(path, cross, out):
     return "PASS", ""
 
 
+# 交叉目标验收的清单收集（--emit-manifest）：编译在本机做，运行交给目标机器。
+MANIFEST_LOCK = threading.Lock()
+MANIFEST: list[dict] = []
+
+
+def compile_only(path, cross, out):
+    """只看「能否为本目标编出可执行文件」并产出运行清单条目（不执行）。
+
+    与 check_run_case 的区别仅在于跳过运行与比对：期望值原样写进清单，
+    由 tests/windows/run-exe.py 在真实目标机上核对（跨机验收，W1-7）。
+    """
+    proc, timed_out = compile_src(path, out, cross)
+    if timed_out:
+        return "FAIL", "编译超时", None
+    if proc.returncode != 0:
+        why = "编译器崩溃（" + signal_name(proc.returncode) + "）"             if proc.returncode < 0 else f"编译失败（退出码 {proc.returncode}）"
+        return "FAIL", why + "\n    " + "\n    ".join(diag_tail(proc)), None
+    if not out.exists():
+        return "FAIL", f"编译器未产出 {out.name}", None
+    expect_lines, exit_code, problems = parse_expectations(path)
+    if problems:
+        return "FAIL", "；".join(problems), None
+    stdin_bytes, argv_extra = parse_stdin_argv(path)
+    # 清单里存仓库相对路径：编译侧与运行侧可能不是同一台机器/挂载点。
+    absolute = out if out.is_absolute() else (Path.cwd() / out)
+    try:
+        exe_rel = str(absolute.resolve().relative_to(ROOT))
+    except ValueError:
+        return "FAIL", f"产物不在仓库内（--workdir 需在 {ROOT} 下）：{out}", None
+    entry = {
+        "name": f"run/{path.name}",
+        "exe": exe_rel,
+        "expected_stdout": "\n".join(expect_lines) + ("\n" if expect_lines else ""),
+        "expected_exit": exit_code,
+    }
+    if stdin_bytes is not None:
+        entry["stdin_hex"] = stdin_bytes.hex()
+    if argv_extra:
+        entry["argv"] = argv_extra
+    return "PASS", "", entry
+
+
 def check_fail_case(path, cross, out):
     """fail/ 用例：编译须干净拒绝；可选 fail-contains 约束诊断类别。"""
     proc, timed_out = compile_src(path, out, cross)
@@ -386,6 +432,11 @@ def main():
                         help="显式选择 LLVM 优化级别")
     parser.add_argument("--workdir", default=str(DEFAULT_WORK),
                         help="产物目录（缺省 tmp/yh-run-work；并发运行时各自指定）")
+    parser.add_argument("--run-platform", default=None,
+                        help="显式指定运行平台标签（如 windows-x64）：本机只编译，"
+                             "运行交给目标机（跨机验收）")
+    parser.add_argument("--emit-manifest", default=None,
+                        help="把 run/ 用例的编译产物与期望写进 JSON 清单，不执行")
     parser.add_argument("--filter", default="",
                         help="只跑相对路径含任一子串的用例（逗号分隔；自举差分子集用）")
     parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
@@ -432,7 +483,7 @@ def main():
 
     # 每个用例一个独立产物路径（组名 + 文件名），并发执行时互不覆盖。
     # 第六项 skip_reason 非空表示平台不匹配：不执行，直接记 SKIP（不计失败）。
-    actual_platform = host_platform_tag(args.cross)
+    actual_platform = args.run_platform or host_platform_tag(args.cross)
     tasks = []
     for name, directory, checker in groups:
         for path in list_cases(directory):
@@ -454,6 +505,12 @@ def main():
         name, rel, path, out, checker, skip_reason = task
         if skip_reason:
             return (name, rel, "SKIP", skip_reason)
+        if args.emit_manifest and name == "run":
+            status, detail, entry = compile_only(path, args.cross, out)
+            if entry is not None:
+                with MANIFEST_LOCK:
+                    MANIFEST.append(entry)
+            return (name, rel, status, detail)
         status, detail = checker(path, args.cross, out)
         return (name, rel, status, detail)
 
@@ -495,6 +552,18 @@ def main():
         print(f"{name}: 通过 {n_pass}/{len(rows)}"
               + (f"，失败 {n_fail}" if n_fail else "")
               + (f"，跳过 {n_skip}" if n_skip else ""))
+    if args.emit_manifest:
+        manifest_path = Path(args.emit_manifest)
+        if not manifest_path.is_absolute():
+            manifest_path = ROOT / manifest_path
+        MANIFEST.sort(key=lambda item: item["name"])
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps({
+            "target": args.target or "",
+            "run_platform": actual_platform,
+            "cases": MANIFEST,
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"运行清单：{manifest_path}（{len(MANIFEST)} 例，运行平台 {actual_platform}）")
     mode = f"交叉 ELF（{actual_platform}）" if args.cross else f"{actual_platform} 原生"
     if args.backend or args.target or args.opt_level:
         mode = f"{args.backend or '默认后端'} / {args.target or '默认目标'} / " \

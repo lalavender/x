@@ -34,6 +34,7 @@ PLATFORMS = {
     "linux-arm64": ("yh-linux-arm64", "bin/yh-linux-arm64"),
     "linux-x86_64": ("yh-linux-x64", "bin/yh-linux-x64"),
     "darwin-arm64": ("yh-darwin-arm64", "bin/yh-darwin-arm64"),
+    "windows-x64": ("yh-windows-x64", "bin/yh-windows-x64"),
 }
 
 

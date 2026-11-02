@@ -1,0 +1,63 @@
+module build
+import gen
+
+// pj_os_dir_list：Windows/x64 宿主侧的目录枚举（W2-3a）。
+//
+// 用 Win32 的 FindFirstFileA/FindNextFileA 而不是 syscall：Windows 没有稳定的
+// 目录枚举系统调用 ABI。WIN32_FIND_DATAA 的布局（ANSI 版，共 320 字节）：
+//   +0  dwFileAttributes      +4  ftCreationTime(8)
+//   +12 ftLastAccessTime(8)   +20 ftLastWriteTime(8)
+//   +28 nFileSizeHigh         +32 nFileSizeLow
+//   +36 dwReserved0           +40 dwReserved1
+//   +44 cFileName[260]        +304 cAlternateFileName[14]
+// 只读属性位 0x10（FILE_ATTRIBUTE_DIRECTORY）与 cFileName，其余字段不用。
+//
+// 命名/过滤约定与其它平台一致：名称复制进名字池（pj_dir_add 负责）、
+// 以 '.' 开头的项被 pj_dir_add 跳过（因此 "."/".." 不必单独处理）。
+@[extern] fn FindFirstFileA(pattern *char, data *u8) i64
+@[extern] fn FindNextFileA(handle i64, data *u8) i32
+@[extern] fn FindClose(handle i64) i32
+
+// pj_windows_find_handle_invalid：INVALID_HANDLE_VALUE 在 64 位上等于 -1。
+fn pj_windows_find_handle_invalid(handle i64) int {
+    return handle == -1 ? 1 : 0
+}
+
+// pj_os_dir_list：枚举 dir 下的直接子项，按类型填入 entries/count/cap。
+// 目录不存在、没有权限或 Win32 调用失败时给出带路径的诊断。
+fn pj_os_dir_list(dir *char, entries **PJDirEntry,
+    count *int, cap *int) int {
+    // 模式 = "<dir>/*"：Win32 只接受反斜杠或正斜杠，此处统一用 '/'
+    // （Win32 API 接受 '/'，与编译器内部路径约定一致）。
+    let pattern [1100]u8
+    let pn int = gen.append_str(&pattern[0], 0, dir)
+    if (pn > 0 && pattern[pn - 1] == '/') { pn -= 1 }
+    pn = gen.append_str(&pattern[0], pn, "/*")
+    pattern[pn] = 0
+    // 320 字节的 WIN32_FIND_DATAA，对齐 8。
+    let data [320]u8
+    let handle i64 = FindFirstFileA(gen.arr_cstr(&pattern[0]), &data[0])
+    if (pj_windows_find_handle_invalid(handle) != 0) {
+        return gen.fail_path("无法打开目录: ", dir)
+    }
+    let failed int = 0
+    for 1 == 1 {
+        let attrs int = data[0].to_type(int) | (data[1].to_type(int) << 8) |
+            (data[2].to_type(int) << 16) | (data[3].to_type(int) << 24)
+        let is_dir int = (attrs & 0x10) != 0 ? 1 : 0
+        // cFileName 从偏移 44 开始，最长 259 字节 + NUL。
+        let name *u8 = &data[44]
+        let name_len int = 0
+        for name[name_len] != 0 && name_len < 260 { name_len += 1 }
+        if (pj_dir_add(entries, count, cap, name, name_len, is_dir) != 0) {
+            failed = 1
+            break
+        }
+        if (FindNextFileA(handle, &data[0]) == 0) { break }
+    }
+    FindClose(handle)
+    if (failed != 0) {
+        return gen.fail_path("无法读取目录: ", dir)
+    }
+    return 0
+}

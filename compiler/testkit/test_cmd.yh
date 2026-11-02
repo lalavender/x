@@ -3,6 +3,11 @@ import gen
 import build
 import parse
 
+// Windows 测试用例启动器（compiler/llvm/windows_shim.c）：stdout/stderr → 日志、
+// stdin = NUL、YH_TEST_RECORD → 断言记录；返回进程表索引（当 pid 用）。
+@[extern] fn yh_win_spawn_test(argv **char, argc int, record_path *char,
+    log_path *char) int
+
 struct TCase {
     proj int
     mod int
@@ -95,6 +100,45 @@ fn tc_np_less(off1 int, len1 int, off2 int, len2 int) int {
     return (len1 < len2).to_type(int)
 }
 
+// Windows 命令行是 ANSI（本机 ACP=GBK）：`yh test --filter 中文` 到达进程时字节
+// 已经不是 UTF-8，直接和源码里的 UTF-8 文本比较永远不匹配。这里按 ACP 解成
+// UTF-16 再转 UTF-8（只用于 --filter 的文本，其他 argv 仍按 ANSI 交给文件 API）。
+@[extern] fn MultiByteToWideChar(codepage u32, flags u32, src *u8, srclen int,
+    dst *u16, dstlen int) int
+@[extern] fn WideCharToMultiByte(codepage u32, flags u32, src *u16, srclen int,
+    dst *u8, dstlen int, default_char *u8, used *int) int
+
+// tc_filter_utf8：把 --filter 文本规整为 UTF-8，返回字节数（失败 -1）。
+fn tc_filter_utf8(src *char, out *u8, cap int) int {
+    let n int = 0
+    for src[n] != 0 { n += 1 }
+    if (gen.tg_host_windows() == 0) {
+        if (n >= cap) { return -1 }
+        let i int = 0
+        for i < n {
+            out[i] = src[i].to_type(u8)
+            i += 1
+        }
+        out[n] = 0
+        return n
+    }
+    let wide [1024]u16
+    let wn int = MultiByteToWideChar(0, 0, src.to_type(*u8), n, &wide[0], 1024)
+    if (wn <= 0) { return -1 }
+    let on int = WideCharToMultiByte(65001, 0, &wide[0], wn, out, cap - 1, 0, 0)
+    if (on <= 0 || on >= cap) { return -1 }
+    out[on] = 0
+    return on
+}
+
+// tc_is_sep：路径分隔符判定。Windows 的绝对路径是 `C:\dir\file.yh`，只认 '/'
+// 会把整段路径当成文件名（单文件测试与向上找 project.toml 都依赖最后一段）。
+fn tc_is_sep(c int) int {
+    if (c == '/') { return 1 }
+    if (gen.tg_host_windows() != 0 && c == 92) { return 1 }
+    return 0
+}
+
 // tc_rel_path：把文件绝对路径换算为项目根相对路径。
 fn tc_rel_path(file int, off *int, olen *int) void {
     let gs *gen.GenState = gen.G()
@@ -105,7 +149,7 @@ fn tc_rel_path(file int, off *int, olen *int) void {
         let base int = 0
         let i int = 0
         for i < plen {
-            if (gs.task.np_data[poff + i] == '/') { base = i + 1 }
+            if (tc_is_sep(gs.task.np_data[poff + i].to_type(int)) != 0) { base = i + 1 }
             i += 1
         }
         off[0] = poff + base
@@ -113,7 +157,7 @@ fn tc_rel_path(file int, off *int, olen *int) void {
         return
     }
     let start int = 0
-    if (plen > tc_root_len && gs.task.np_data[poff + tc_root_len] == '/') {
+    if (plen > tc_root_len && tc_is_sep(gs.task.np_data[poff + tc_root_len].to_type(int)) != 0) {
         let same int = 1
         let i int = 0
         for i < tc_root_len {
@@ -604,7 +648,7 @@ fn tc_file_has_project(abs_path *char) int {
     let i int = 0
     for abs_path[i] != 0 {
         dir[i] = abs_path[i].to_type(u8)
-        if (abs_path[i] == '/') { last = i }
+        if (tc_is_sep(abs_path[i].to_type(int)) != 0) { last = i }
         i += 1
     }
     if (last <= 0) { return 0 }
@@ -627,7 +671,7 @@ fn tc_file_has_project(abs_path *char) int {
         let slash int = -1
         let j int = 0
         for j < dn {
-            if (dir[j] == '/') { slash = j }
+            if (tc_is_sep(dir[j].to_type(int)) != 0) { slash = j }
             j += 1
         }
         if (slash <= 0) { return 0 }
@@ -650,7 +694,7 @@ fn tc_single_file_project(abs_path *char, proj_out *int,
     let i int = 0
     for abs_path[i] != 0 {
         dir[i] = abs_path[i].to_type(u8)
-        if (abs_path[i] == '/') { last = i }
+        if (tc_is_sep(abs_path[i].to_type(int)) != 0) { last = i }
         i += 1
     }
     if (last <= 0) { return gen.fail("单文件测试需要绝对路径") }
@@ -669,7 +713,7 @@ fn tc_single_file_project(abs_path *char, proj_out *int,
     let mcap int = 0
     let mn int = 0
     if (tc_buf_puts(&manifest, &mn, &mcap, "[project]\nos = \"host\"\narch = \"host\"\nname = \"yh_test_single\"\nsource = \"") != 0) { return -1 }
-    if (tc_buf_puts(&manifest, &mn, &mcap, dir_str) != 0) { return -1 }
+    if (tc_buf_path(&manifest, &mn, &mcap, dir_str) != 0) { return -1 }
     if (tc_buf_puts(&manifest, &mn, &mcap, "\"\n") != 0) { return -1 }
     let mpath [1100]u8
     let mpn int = gen.append_str(&mpath[0], 0, gen.arr_cstr(&rootb[0]))
@@ -680,10 +724,18 @@ fn tc_single_file_project(abs_path *char, proj_out *int,
         return -1
     }
     free(manifest.to_type(*void))
-    // 只在源码扫描时接受这一个文件。
+    // 只在源码扫描时接受这一个文件。pj 的规范路径用 '/'，Windows 的反斜杠要先
+    // 归整，否则扫描过滤器与索引路径对不上（相邻文件会被错误装入）。
+    let norm [1100]u8
     let alen int = 0
-    for abs_path[alen] != 0 { alen += 1 }
-    let aoff int = gen.tml_intern_str(abs_path.to_type(*u8), 0, alen)
+    for abs_path[alen] != 0 {
+        let ch u8 = abs_path[alen].to_type(u8)
+        if (ch == 92) { ch = '/' }
+        norm[alen] = ch
+        alen += 1
+    }
+    norm[alen] = 0
+    let aoff int = gen.tml_intern_str(&norm[0], 0, alen)
     if (aoff < 0) { return -1 }
     gs.c_scan_file_off = aoff
     gs.c_scan_file_len = alen
@@ -821,9 +873,13 @@ pub fn mb_run_test_command(av **char, an int) int {
                 gen.fail("--filter 需要一个子串")
                 return 2
             }
-            let fl int = 0
-            for av[i + 1][fl] != 0 { fl += 1 }
-            let fo int = gen.tml_intern_str(av[i + 1].to_type(*u8), 0, fl)
+            let fbuf [1024]u8
+            let fl int = tc_filter_utf8(av[i + 1], &fbuf[0], 1024)
+            if (fl < 0) {
+                gen.fail("--filter 文本无法转换为 UTF-8")
+                return 2
+            }
+            let fo int = gen.tml_intern_str(&fbuf[0], 0, fl)
             if (fo < 0) { return -1 }
             filter_off = fo
             filter_len = fl
@@ -1048,6 +1104,23 @@ fn tc_buf_puts(buf **u8, n *int, cap *int, s *char) int {
     return 0
 }
 
+// tc_buf_path：向缓冲追加路径，并把 Windows 反斜杠规整为 '/'。
+// TOML 基本字符串里反斜杠是转义字符，`source = "C:\dir"` 会报不支持的转义序列。
+fn tc_buf_path(buf **u8, n *int, cap *int, s *char) int {
+    let slen int = 0
+    for s[slen] != 0 { slen += 1 }
+    if (gen.out_grow(buf, n[0], cap, n[0] + slen) != 0) { return -1 }
+    let i int = 0
+    for i < slen {
+        let ch u8 = s[i].to_type(u8)
+        if (ch == 92) { ch = '/' }
+        buf[0][n[0]] = ch
+        n[0] += 1
+        i += 1
+    }
+    return 0
+}
+
 // tc_buf_np：向缓冲追加名字池区间。
 fn tc_buf_np(buf **u8, n *int, cap *int, off int, olen int) int {
     let gs *gen.GenState = gen.G()
@@ -1201,7 +1274,7 @@ fn tc_gen_runner(proj int, target int, order *int, first int, limit int,
     if (tc_buf_puts(&text, &tn, &cap,
             ";\n\nfn __yh_test_pass() void {\n    let rec [4]u8 = [89, 72, 84, 80]\n    write(3, (&rec[0]).to_type(*void), 4)\n}\n\n") != 0) { return -1 }
     if (tc_buf_puts(&text, &tn, &cap,
-            "fn main(argc int, argv **char) int {\n    if (argc < 2) { return 2 }\n    let id int = argv[1][0].to_type(int) - 97\n") != 0) { return -1 }
+            "fn main(argc int, argv **char) int {\n    if (argc < 2) { return 2 }\n    let id int = 0\n    let digit int = 0\n    for argv[1][digit] != 0 {\n        if (argv[1][digit] < 48 || argv[1][digit] > 57) { return 2 }\n        id = id * 10 + (argv[1][digit].to_type(int) - 48)\n        digit += 1\n    }\n") != 0) { return -1 }
     let i int = 0
     for i < limit {
         let c TCase = tc_cases[order[first + i]]
@@ -1211,7 +1284,7 @@ fn tc_gen_runner(proj int, target int, order *int, first int, limit int,
         if (tc_buf_np(&text, &tn, &cap, gs.p_mods[target].name_off,
                 gs.p_mods[target].name_len) != 0) { return -1 }
         if (tc_buf_puts(&text, &tn, &cap, ".__yh_test_") != 0) { return -1 }
-        if (tc_buf_int(&text, &tn, &cap, c.file) != 0) { return -1 }
+        if (tc_buf_int(&text, &tn, &cap, tc_file_ordinal(target, c.file)) != 0) { return -1 }
         if (tc_buf_puts(&text, &tn, &cap, "_") != 0) { return -1 }
         if (tc_buf_int(&text, &tn, &cap, c.decl) != 0) { return -1 }
         if (tc_buf_puts(&text, &tn, &cap, "(); __yh_test_pass(); return 0 }\n") != 0) { return -1 }
@@ -1248,37 +1321,45 @@ fn tc_clear_entry(proj int) void {
     }
 }
 
-// tc_case_start：fork 并启动单个用例，返回子进程 pid（失败 -1）。
+// tc_case_start：启动单个用例，返回 pid（失败 -1）。
 // 结果记录写 fd 3，用例 stdout/stderr 写日志文件；父进程不等待。
+// Windows 没有 fork/exec/dup2：由 windows_shim 的 CreateProcessA 完成重定向，
+// 记录路径经 YH_TEST_RECORD 传给子进程（Windows 运行时 fd 3 首次写入时打开）。
 fn tc_case_start(binary *char, rec_path *char, log_path *char, letter int) int {
-    let fd int = build.mb_open_out(rec_path)
-    if (fd < 0) { return -1 }
-    let log_fd int = build.mb_open_out(log_path)
-    if (log_fd < 0) {
-        if (fd != 3) { close(fd) }
-        return -1
-    }
     let argv [3]*char
-    let id [2]u8
-    id[0] = (97 + letter).to_type(u8)
-    id[1] = 0
+    // 用例号是十进制文本（入口按十进制解析）；不再用单字节字母，
+    // 避免 >= 31 号用例的 argv 在 Windows ANSI 命令行往返中损坏。
+    let id [16]u8
+    let idn int = gen.append_int(&id[0], 0, letter)
+    id[idn] = 0
     argv[0] = binary
     argv[1] = gen.arr_cstr(&id[0])
     argv[2] = 0.to_type(*char)
-    let pid int = fork()
-    if (pid == 0) {
-        // fd 3 = 结果记录，1/2 = 用例日志。先复制日志到 1/2，再把记录放到 3，
-        // 最后关闭大于 2 的原始描述符（3 可能被其中一次 open 占用）。
-        if (dup2(log_fd, 1) < 0 || dup2(log_fd, 2) < 0) { exit(126) }
-        if (dup2(fd, 3) < 0) { exit(126) }
-        if (log_fd > 2 && log_fd != 3) { close(log_fd) }
-        if (fd > 2 && fd != 3 && fd != log_fd) { close(fd) }
-        execv(binary, &argv[0])
-        exit(127)
+    $if (windows) {
+        return yh_win_spawn_test(&argv[0], 2, rec_path, log_path)
+    } $else {
+        let fd int = build.mb_open_out(rec_path)
+        if (fd < 0) { return -1 }
+        let log_fd int = build.mb_open_out(log_path)
+        if (log_fd < 0) {
+            if (fd != 3) { close(fd) }
+            return -1
+        }
+        let pid int = fork()
+        if (pid == 0) {
+            // fd 3 = 结果记录，1/2 = 用例日志。先复制日志到 1/2，再把记录放到 3，
+            // 最后关闭大于 2 的原始描述符（3 可能被其中一次 open 占用）。
+            if (dup2(log_fd, 1) < 0 || dup2(log_fd, 2) < 0) { exit(126) }
+            if (dup2(fd, 3) < 0) { exit(126) }
+            if (log_fd > 2 && log_fd != 3) { close(log_fd) }
+            if (fd > 2 && fd != 3 && fd != log_fd) { close(fd) }
+            execv(binary, &argv[0])
+            exit(127)
+        }
+        if (fd != 3) { close(fd) }
+        if (log_fd > 2 && log_fd != 3 && log_fd != fd) { close(log_fd) }
+        return pid
     }
-    if (fd != 3) { close(fd) }
-    if (log_fd > 2 && log_fd != 3 && log_fd != fd) { close(log_fd) }
-    return pid
 }
 
 // tc_case_result：读取一个用例的结果记录并判定。
@@ -1382,6 +1463,21 @@ fn tc_jobs() int {
         i += 1
     }
     return value < 1 ? 1 : value
+}
+
+// tc_file_ordinal：文件在目标模块里的序号。
+// 测试函数名是 `__yh_test_<模块内文件序号>_<文件内声明序号>`：父进程生成入口、
+// 模块 worker 生成测试函数，两者必须用同一套编号；全局文件号在无 fork 的
+// Windows 模块子进程里可能不同（子进程重新装载索引），因此统一用模块内序号。
+fn tc_file_ordinal(mod int, file int) int {
+    let gs *gen.GenState = gen.G()
+    if (mod < 0 || mod >= gs.p_mod_n) { return file }
+    let i int = 0
+    for i < gs.p_mods[mod].file_n {
+        if (gs.p_mods[mod].files[i] == file) { return i }
+        i += 1
+    }
+    return file
 }
 
 // tc_case_paths：为一个用例生成记录文件与日志文件路径（都放在 tmp 下）。

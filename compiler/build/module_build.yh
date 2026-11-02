@@ -1597,7 +1597,8 @@ fn mb_check_binding_clash(m int) int {
 // （构建目录基准，接口路径与父进程一致）；out_dir：按文件汇编目录
 // <build>/asm/<tag>（RS3b）。
 pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
-    main_off int, main_len int, out_dir *char, ir_cache_salt u64) int {
+    main_off int, main_len int, out_dir *char, ir_cache_salt u64,
+    extra *char) int {
     let gs *gen.GenState = gen.G()
     gs.c_front_cache = 1
     gs.task.c_ast_capture = 0
@@ -1609,12 +1610,45 @@ pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
     if (proj < 0) {
         return -1
     }
+    // --emit-module 的独立子进程（Windows 无 fork 路径）必须自己装载主项目并
+    // 重建拓扑序：mb_module_iface_deps 用 pj_state().order 的 rank 排序依赖。
+    let main_proj int = pj_load_project(main_off, main_len)
+    if (main_proj < 0) {
+        return -1
+    }
+    if (gs.task.c_test_mode != 0) {
+        // --emit-module 子进程（Windows）重走测试模式时，测试项目就是主项目；
+        // runner 会 import 目标模块，父进程已清掉入口标记，子进程也要清。
+        gs.c_test_project = main_proj
+        let ci int = 0
+        for ci < gs.p_projs[main_proj].mod_n {
+            gs.p_mods[gs.p_projs[main_proj].mods[ci]].is_entry = 0
+            ci += 1
+        }
+    }
+    if (extra != 0) {
+        // 测试 runner 由 testkit 生成在项目 tmp/ 下（不在 source 根扫描范围），
+        // 独立子进程必须显式把它加进索引，否则「模块不在索引中」。
+        if (pj_index_file(extra, proj) != 0) { return -1 }
+    }
     if (pj_bind_imports() != 0) {
+        return -1
+    }
+    let rootmod int = pj_entry_mod(main_proj)
+    let order_n int = rootmod >= 0 ? pj_topo(rootmod) : pj_topo_multi(main_proj)
+    if (order_n < 0) {
         return -1
     }
     let m int = pj_mod_in_proj(proj, mod_off, mod_len)
     if (m < 0) {
         return gen.fail("内部错误：模块不在索引中")
+    }
+    // 测试 runner 是入口模块：testkit 在父进程里置 is_entry=1（test_cmd.yh），
+    // 独立子进程重新装载索引后必须做同样标记。否则 main 会被加上模块后缀
+    // （checked_lower_name 的 entry_main 判定），零 CRT 入口桩不发射，
+    // Windows 链接报 undefined mainCRTStartup。
+    if (extra != 0 && gs.task.c_test_mode != 0) {
+        gs.p_mods[m].is_entry = 1
     }
     return mb_emit_indexed_module(m, main_off, main_len, out_dir, ir_cache_salt)
 }
@@ -1728,7 +1762,17 @@ fn mb_try_default_stdlib(dir *char, suffix *char) int {
     let gs *gen.GenState = gen.G()
     let path [1200]u8
     let n int = 0
-    n = gen.append_str(path, n, dir)
+    // Windows 的 exe 目录来自 GetFullPathNameA（反斜杠），suffix 里是 '/'；
+    // pj_canon 按 '/' 切段，混合分隔符会让 `..` 解析失效（安装布局
+    // <root>/bin/yh + <root>/share/yh/libs 曾因此找不到标准库）。
+    // 统一成 '/'：Win32 API 同样接受。
+    let i0 int = 0
+    for dir[i0] != 0 {
+        if (n + 1 >= 1200) { return 0 }
+        path[n] = dir[i0] == 92 ? 47 : dir[i0].to_type(u8)
+        n += 1
+        i0 += 1
+    }
     n = gen.append_str(path, n, suffix)
     path[n] = 0
     if (pj_canon(0, 0, gen.arr_cstr(path)) != 0) {
@@ -1768,7 +1812,7 @@ fn mb_load_default_stdlib() int {
     }
     let self_len int = strlen(mb_self_path).to_type(int)
     let cut int = self_len
-    for cut > 0 && mb_self_path[cut - 1] != '/' {
+    for cut > 0 && mb_self_path[cut - 1] != '/' && mb_self_path[cut - 1] != 92 {
         cut -= 1
     }
     let dir [1200]u8

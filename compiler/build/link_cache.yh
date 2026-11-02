@@ -43,10 +43,30 @@ fn mb_write_manifest(path *char, data *u8, data_len int) int {
 }
 
 // mb_object_machine_matches：校验对象或程序头与当前目标的文件格式和 machine 一致。
-// Linux 只接受 ELF64 little-endian，Darwin 只接受 Mach-O 64 little-endian。
+// Linux 只接受 ELF64 little-endian，Darwin 只接受 Mach-O 64 little-endian，
+// Windows 接受 COFF 对象（machine 在文件头偏移 0）与 PE 可执行文件（MZ → e_lfanew → PE）。
 fn mb_object_machine_matches(path *char) int {
     let gs *gen.GenState = gen.G()
     if (gen.read_source(path) != 0 || gs.task.c_src_len < 20) { return 0 }
+    if (gs.c_target.os == gen.TARGET_OS_WINDOWS) {
+        // IMAGE_FILE_MACHINE_AMD64 = 0x8664；首版只接 x64。
+        if (gs.c_target.arch != gen.TARGET_ARCH_X64) { return 0 }
+        if (gs.task.c_src[0] == 'M' && gs.task.c_src[1] == 'Z' && gs.task.c_src_len >= 64) {
+            let pe_off int = gs.task.c_src[60].to_type(int) |
+                (gs.task.c_src[61].to_type(int) << 8) |
+                (gs.task.c_src[62].to_type(int) << 16) |
+                (gs.task.c_src[63].to_type(int) << 24)
+            if (pe_off < 0 || pe_off + 6 > gs.task.c_src_len) { return 0 }
+            if (gs.task.c_src[pe_off] != 'P' || gs.task.c_src[pe_off + 1] != 'E'
+                || gs.task.c_src[pe_off + 2] != 0 || gs.task.c_src[pe_off + 3] != 0) { return 0 }
+            let pe_machine int = gs.task.c_src[pe_off + 4].to_type(int) |
+                (gs.task.c_src[pe_off + 5].to_type(int) << 8)
+            return pe_machine == 0x8664 ? 1 : 0
+        }
+        let coff_machine int = gs.task.c_src[0].to_type(int) |
+            (gs.task.c_src[1].to_type(int) << 8)
+        return coff_machine == 0x8664 ? 1 : 0
+    }
     if (gs.c_target.os == gen.TARGET_OS_LINUX) {
         if (gs.task.c_src[0] != 127 || gs.task.c_src[1] != 'E' || gs.task.c_src[2] != 'L'
             || gs.task.c_src[3] != 'F' || gs.task.c_src[4] != 2 || gs.task.c_src[5] != 1) {
@@ -746,6 +766,9 @@ fn mb_select_linker(out *u8) *char {
     let gs *gen.GenState = gen.G()
     let selected *char = "gcc"
     if (gen.tg_darwin() != 0) { selected = "clang" }
+    // Windows 目标：[c].sources 用 clang 编（LLVM 自带 COFF 后端，clang 在 Windows
+    // 宿主上默认就是 x86_64-pc-windows-msvc）。msvcrt 环境没有 gcc。
+    if (gs.c_target.os == gen.TARGET_OS_WINDOWS) { selected = "clang" }
     if (gs.c_target.os == gen.TARGET_OS_LINUX
         && gs.c_target.arch == gen.TARGET_ARCH_X64) {
         selected = "/usr/bin/gcc"
@@ -781,6 +804,14 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     let gs *gen.GenState = gen.G()
     let use_lld int = mb_lld_linux_enabled()
     let use_macho int = mb_lld_darwin_enabled()
+    // W1-5：Windows/x64 走内嵌 lld 的 WinLink 驱动（PE/COFF，零 CRT）。
+    let use_coff int = mb_lld_windows_enabled()
+    let windows_import_lib [1200]u8
+    let windows_chkstk [1200]u8
+    windows_import_lib[0] = 0
+    windows_chkstk[0] = 0
+    if (use_coff != 0 && mb_windows_link_inputs(&windows_import_lib[0], 1200,
+            &windows_chkstk[0], 1200) != 0) { return -1 }
     // 自举闭包由构建机提供：优先读 YH_LLVM_SELFHOST_FLAGS 指向的文件，
     // 未提供时桥内烘焙常量作为过渡回退。负数是文件不可读，0 是没有任何闭包
     // （新种子不再烘焙绝对路径），两种情况都要立刻给出可操作诊断。
@@ -1003,9 +1034,12 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     let link_flags *char = use_lld != 0 ?
         " lld-in-process -no-pie -o" : " -no-pie -o"
     if (use_macho != 0) { link_flags = " ld64.lld-in-process -pie -adhoc_codesign -o" }
+    if (use_coff != 0) { link_flags = " lld-link-in-process /Brepro /nodefaultlib /out" }
     if (gen.tg_darwin() != 0) {
         link_flags = " -o"
         mb_fnv(&hlink, 'D')
+    } else if (use_coff != 0) {
+        mb_fnv(&hlink, 'C')
     } else {
         mb_fnv(&hlink, 'L')
     }
@@ -1027,6 +1061,9 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
         if (mb_hash_lld_identity(&hlink, c_projects, c_project_n) != 0) { return -1 }
     } else if (use_macho != 0) {
         if (mb_hash_macho_identity(&hlink, c_projects, c_project_n) != 0) { return -1 }
+    } else if (use_coff != 0) {
+        if (mb_hash_coff_identity(&hlink, gen.arr_cstr(&windows_import_lib[0]),
+                gen.arr_cstr(&windows_chkstk[0])) != 0) { return -1 }
     } else {
         if (mb_hash_tool_identity(&hlink, cc) != 0) { return -1 }
         if (mb_link_query_identity(&hlink, cc,
@@ -1188,7 +1225,7 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
         }
     }
     let argc int = total_rows + c_object_n + c_lib_n + link_lib_n * 2 +
-        li_runtime_count() + 24 +
+        li_runtime_count() + 26 +
         (library_search_count * 2) +
         selfhost_flag_n
     let args **char = gen.alloc((argc * sizeof(*char)).to_type(u64)).to_type(**char)
@@ -1209,7 +1246,14 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
     link_tmp[tmp_len] = 0
     unlink((&link_tmp[0]).to_type(*char))
     let next_arg int = 0
-    if (use_macho != 0) {
+    let coff_out [960]u8
+    if (use_coff != 0) {
+        let cn int = gen.append_str(&coff_out[0], 0, "/out:")
+        cn = gen.append_str(&coff_out[0], cn, (&link_tmp[0]).to_type(*char))
+        coff_out[cn] = 0
+        next_arg = mb_coff_link_prefix(args, gen.arr_cstr(&coff_out[0]),
+            gen.arr_cstr(&windows_import_lib[0]), gen.arr_cstr(&windows_chkstk[0]))
+    } else if (use_macho != 0) {
         next_arg = mb_macho_link_prefix(args, (&link_tmp[0]).to_type(*char))
         if (next_arg < 0) {
             free(args.to_type(*void))
@@ -1356,6 +1400,16 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
         let li2 int = 0
         for li2 < gs.p_projs[cproj2].c_lib_n {
             let lib gen.PInput = gs.p_projs[cproj2].c_libs[li2]
+            // Windows/COFF 没有 `-l<name>` 语义（也没有 libm）：`[c].libs` 里的
+            // POSIX 系统库直接跳过并提示一次，符号要由 C 源或 SDK 闭包自己提供。
+            if (gs.c_target.os == gen.TARGET_OS_WINDOWS) {
+                let hint [96]u8
+                let hn int = gen.append_str(&hint[0], 0,
+                    "yh: 提示：Windows 目标忽略 [c].libs 项（无 -l 语义）\n")
+                gen.write_all(2, &hint[0], hn)
+                li2 += 1
+                continue
+            }
             let row3 *u8 = libpaths + (libpath_i * 128)
             let ln int = gen.append_str(row3, 0, "-l")
             ln = append_bytes_np(row3, ln, lib.path_off, lib.path_len)
@@ -1400,11 +1454,13 @@ pub fn mb_link(out_path *char, build_off int, build_len int,
         next_arg += 1
     }
     let extra_count int = next_arg - extra_start
-    if (use_lld == 0 && use_macho == 0) { args[next_arg] = 0.to_type(*char) }
+    if (use_lld == 0 && use_macho == 0 && use_coff == 0) { args[next_arg] = 0.to_type(*char) }
     if (gs.c_stats_enabled != 0) {
         gs.c_stats_link += 1
     }
-    let link_rc int = use_macho != 0 ?
+    let link_rc int = use_coff != 0 ?
+        mb_coff_link_worker(args, next_arg, (&link_tmp[0]).to_type(*char)) :
+        use_macho != 0 ?
         mb_macho_link_worker(args, next_arg) :
         use_lld != 0 ?
             mb_lld_link_worker(args + object_start, object_count,

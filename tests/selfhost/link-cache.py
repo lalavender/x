@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -42,12 +43,89 @@ def stat_counts(result: subprocess.CompletedProcess) -> tuple[int, int, int]:
     return tuple(sum(item[index] for item in counts) for index in range(3))
 
 
+def windows_main(compiler: Path) -> int:
+    """Windows 版本：编译器内嵌 LLVM/lld，全程不调用外部汇编器/链接器。
+
+    因此 `--stats` 的 asm 恒为 0（它统计的是**外部**汇编器调用），改用 link 计数
+    与对象内容身份验证同一组缓存边界：
+      冷编 link=1；热编 link=0 且对象字节不变；损坏对象 → link=1；
+      损坏可执行文件 → link=1；函数变化 → link=1。
+    """
+    temp_root = ROOT / "tmp"
+    temp_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="link-cache-", dir=temp_root) as temp:
+        work = Path(temp)
+        project = work / "project"
+        shutil.copytree(FIXTURE, project)
+        output = work / "program"
+        env = dict(os.environ)
+
+        def links(result):
+            return stat_counts(result)[1]
+
+        def object_digests():
+            return {str(path.relative_to(project)): path.read_bytes()
+                    for path in (project / ".build").rglob("*.o")}
+
+        def run_program(code, label):
+            done = subprocess.run([str(output)], check=False)
+            if done.returncode != code:
+                print(f"{label}：程序退出码 {done.returncode}，期望 {code}")
+                return False
+            return True
+
+        cold = run_build(compiler, project, output, env)
+        if cold.returncode != 0 or links(cold) != 1:
+            print(f"冷构建统计不符：link={links(cold)} {cold.stderr[-400:]}")
+            return 1
+        cold_objects = object_digests()
+        if not cold_objects:
+            print("冷构建没有产出目标文件")
+            return 1
+        if not run_program(42, "冷构建"):
+            return 1
+
+        hot = run_build(compiler, project, output, env)
+        if hot.returncode != 0 or links(hot) != 0:
+            print(f"热构建未复用对象/链接结果：link={links(hot)} {hot.stderr[-400:]}")
+            return 1
+        if object_digests() != cold_objects:
+            print("热构建重写了目标文件（应当完全复用）")
+            return 1
+
+        victim = sorted((project / ".build").rglob("*.o"))[0]
+        victim_key = str(victim.relative_to(project))
+        victim.write_bytes(b"corrupt object")
+        repaired = run_build(compiler, project, output, env)
+        # 重编是必需的；重编后对象字节与冷编一致，因此链接仍可命中（link=0）。
+        if repaired.returncode != 0:
+            print(f"损坏对象后构建失败：{repaired.stderr[-400:]}")
+            return 1
+        if object_digests().get(victim_key) != cold_objects[victim_key]:
+            print("损坏对象未被重建回原内容")
+            return 1
+        if not run_program(42, "对象修复后"):
+            return 1
+
+        output.write_bytes(b"corrupt executable")
+        relinked = run_build(compiler, project, output, env)
+        if relinked.returncode != 0 or links(relinked) != 1:
+            print(f"损坏程序未按只重链修复：link={links(relinked)} {relinked.stderr[-400:]}")
+            return 1
+        if not run_program(42, "程序修复后"):
+            return 1
+    print("对象与链接缓存：热构建 0 次链接且对象不变，损坏对象被重建、损坏程序重链 1 次（内嵌 LLVM/lld）")
+    return 0
+
+
 def main() -> int:
     """冷构建、热构建和依赖函数变化三次测量缓存边界。"""
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler-path", default=str(ROOT / "yh"))
     args = parser.parse_args()
     compiler = Path(args.compiler_path).resolve()
+    if sys.platform.startswith("win"):
+        return windows_main(compiler)
     # 汇编步用系统 cc；门要验证的是**缓存边界**，不是「用的是哪个汇编器」，
     # 因此统一按 assemble/link 两类计数。
     real_tools = {name: shutil.which(name) for name in ("gcc", "clang")}

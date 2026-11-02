@@ -191,7 +191,218 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
 
 - [ ] **B1 Windows/x86_64**：MSVC ABI/LLP64、COFF/PE 链接、Windows OS 桥
   （文件/目录/Unicode/进程/时间/内存/启动入口）；原生构建与运行，不以 WSL
-  冒充 Windows 支持。
+  冒充 Windows 支持。**2026-10-27 已出方案并拆片**，见
+  [Windows/x86_64 LLVM 后端接入实施方案](02-plan/yh-Windows-x86_64-LLVM后端接入实施方案-2026-10-27.md)：
+  W0 前置（目标标记两代顺序）→ W1 交叉目标（8 片）→ W2 原生宿主（7 片）→ W3 矩阵。
+  **D1/D2/D3 已确认（2026-10-27）：MSVC ABI + 零 CRT + W1→W2**；并行编排见方案 §12
+  （七条 lane、四个串行热点文件、工作树/缓存隔离规则）。
+
+  **已核实的地基**（勿重复实现）：桥已放行 `x86_64-pc-windows-msvc`
+  （`compiler/llvm/bridge.c:119`）；内嵌 lld 已注册 COFF 驱动
+  （`lld_bridge.cpp:19–21,191`）且 LL9L 探针已出 PE（`tests/selfhost/llvm-lld.py`）；
+  构建目录按 triple 隔离（`module_build.yh:149`）。
+
+  - [x] **W0-1 WSL 编译环境**（2026-10-27 完成）：`Ubuntu-26.04` + **原生
+    `linux-x86_64` 种子**（不需 qemu/交叉 gcc）；5 项环境适配：proxy
+    `127.0.0.1:7897`、`libxml2.so.2` 兼容软链（种子按 24.04 构建）、`gcc-13`（种子烘焙
+    的 crt 路径）、`clang`（runtime-memory 审计）、`XDG_RUNTIME_DIR`（`/run/user`
+    noexec 导致 just shebang 配方 EACCES）。数字：llvm-host 99 s、冷编 37 s、
+    `selfhost-native` 321 s 全绿。详见 `docs/finish.md`。
+  - [x] **W0-1b 并行安全**（2026-10-27 完成）：每条 lane 一个 `git worktree`（`just` 会冷编
+    并覆写根 `yh`、`stage-yh` 会覆写 `FAST_DIR`、`.build`/`tmp` 共享）；`YH_LLVM_CACHE`
+    共享只读，`FAST_DIR` 每 lane 唯一；W0-2a 滚种子已在干净工作树上完成。
+  - [x] **W0-2a 目标标记两代顺序**（2026-10-27 完成并已滚种子）：`TARGET_OS_WINDOWS`、
+    `ct_target_symbol` 认 `windows`、`pj_source_target_match` 认 `windows` 后缀；
+    用例 `tests/yh/positive/74-*` + `tests/yh-run/run/207-*`；语法 82/82、反例 49/49、
+    运行 358/362；arch-check `max_build_lines` 10807→10809（+2，目标表必要分支，已写明理由）。
+    种子：`5ef7612e…` → `0757ebcc…`，新种子重跑 `selfhost-native` 360 s 全绿。
+    **now 源码可写 `$if (windows)`。**
+  - [ ] **W0-3 决策冻结**（2026-10-27 完成）：D1/D2/D3 已写入方案 §3 并记入
+    `docs/finish.md`：D1 = `x86_64-pc-windows-msvc`、D2 = 零 CRT（只依赖 KERNEL32）、
+    D3 = W1 交叉目标先行 → W2 原生宿主。
+  - [x] **W0-4 文档卫生（2026-10-27 复核：误报，无需订正）**：早先看到的「n」是
+    `rg -rn "Windows"` 里 `-r n`（replace）把匹配替换成 `n` 的**命令输出**，不是文件内容；
+    `03-design/yh-LLVM后端替换设计.md`、`02-plan/yh-LLVM后端替换实施方案.md` 原文均为
+    「Windows」。教训：`rg` 的 `-r` 是替换，查匹配不要带 `-r`。
+  - [x] **W1-1 目标身份**（2026-10-27 完成）：`TARGET_OS_WINDOWS` + `x86_64-pc-windows-msvc`
+    表项（`abi=win64-msvc`、clang oracle 核对的 `data_layout`）、`target_select_os_arch`；
+    **同时补 `ir/ssa_module_00_model.yh` 的第二份目标表**（key=5，否则 lowering 静默失败）。
+  - [x] **W1-2 Win64 ABI 门**（2026-10-27 完成，W1-2b 另计）：`llvm_target_same` 白名单、
+    `llvm_abi_supported` 的 win64 分支（标量/指针放行，按值聚合给目标级诊断）、`printf`
+    裸变参放行；clang oracle 结论（i8/i16 无 signext、≤8 字节聚合强转成 i64）已写进注释。
+  - [x] **W1-2b Win64 按值聚合**（2026-10-27 完成）：`llvm_abi_classify` 的 win64 分支
+    （1/2/4/8 字节 → 单 INTEGER 分片，其余 MEMORY）、MEMORY 参数发普通 `ptr`（SysV 仍 byval）、
+    `llvm_abi_supported` 放行 struct/union。新门 `just test-windows-abi` 用 clang 编的 C 桩
+    做真实互操作（4/8/12 字节 + 纯浮点，参数与返回），Windows 侧实跑通过。
+  - [x] **W1-3 Windows 运行时与入口**（2026-10-27 完成）：新 `backend/llvm_windows_runtime.yh`
+    （HeapAlloc/HeapFree、`GetStdHandle`+`WriteFile` 的 printf、write/exit 薄层）、`/entry:main`
+    入口、`llvm_runtime.yh` 拆出平台无关 printf emit；另修两处 MSVC ABI 细节：自定
+    `@_fltused`、**alloca 全量提升到入口块**（修“聚合实参直接进 printf 崩溃”），并留
+    `no-stack-arg-probe` 兜底超大静态帧。
+  - [x] **W1-4 导入库与 SDK stub**（2026-10-27 完成，lane B）：`compiler/windows-sdk/`
+    （`def/kernel32.def` 9 条最小导出面 + `manifest.json` 带 `def_sha256` + `README.md`）、
+    `tools/windows-sdk.py`（generate/check/paths；生成器优先级 `llvm-dlltool` →
+    `lld-link /lib` → `lib.exe`，前两者产物逐字节相同）、
+    `tests/selfhost/llvm-windows-sdk.py`（清单↔def、两次生成字节相同、符号面
+    `X`+`__imp_X`、探针只依赖 KERNEL32 且在 Windows 上实跑）、`just windows-sdk` /
+    `just test-windows-sdk`。仓内只放文本 `.def` + manifest，`.lib` 构建期生成
+    （根 `.gitignore` 忽略 `*.lib`）。**本机全绿**：`rc=0`，探针 PE 实跑输出
+    `windows-sdk-probe` 与退出码 5。**剩余**：编译器侧消费（查找顺序 + 注入
+    `kernel32.lib`）归 W1-5；CI 接线归 W1-7。
+  - [x] **W1-5 COFF/PE 链接**（2026-10-27 完成）：新 `build/windows_link.yh`（SDK 查找、
+    固定模板 `/Brepro /nodefaultlib /subsystem:console /entry:main`、一次性子进程跑内嵌
+    lld WinLink 驱动）、`mb_link` + 单文件 `-o` 接入、`mb_object_machine_matches` 加
+    COFF/PE 分支；门 `just test-windows-target` + Windows 侧 `tests/windows/run-exe.py` 全绿。
+  - [x] **W1-6 清单目标节与库格式**（2026-10-27 完成）：`project.os="windows"` 合法、
+    `[link-windows-x64]`/`[link-windows-arm64]` 与 `pl_target_code_current` 接入；
+    `link_inputs` 支持 `.lib`（ar 归档，kind=1）与 `.dll`（PE + machine 0x8664 校验）；
+    `tests/modules/projects/linkbad` 的非法节名负例改用 `[link-windows-sparc]`；
+    门禁 `just test-windows-target` 新增两个库输入断言（合法 `.lib` 可链接、非 PE 的 `.dll` 被拒）。
+  - [x] **W1-7 跨机门禁**（2026-10-27 完成主体）：`tests/yh-run/check.py` 加
+    `--run-platform` / `--emit-manifest`（只编译 + 写清单），`tests/windows/run-exe.py` 在真
+    Windows 执行比对；just 目标 `test-windows-target`（6 例专项）、`test-windows-corpus`
+    （编译侧全量）、`run-windows-corpus`（Windows 侧）。实测 **202 例语料在 Windows 全过**，
+    Linux/Darwin 主门未回归。**剩余**：CI 接线（windows job 跑这两个目标）、
+    `// platform: windows-x64` 这类正向用例（现在靠“无标签 + run-platform 推导”覆盖）。
+  - [x] **W1-3b Windows read/argv/exit**（2026-10-27 完成）：`read`（GetStdHandle(-10)+
+    ReadFile）、`mainCRTStartup`（GetCommandLineA 解析 argv）+ `/entry:mainCRTStartup`、
+    `exit/_Exit` 走链接期 `/alternatename` 映射到 ExitProcess。已解除 `21-main-argv`、
+    `16/17/18-read-*`（18 仍因 `/dev/null` 保持标注）、`51-noreturn-exit`、
+    `pass/07-noreturn-branches` 的标注；Windows 侧语料 **206/206**。
+  - [x] **W1-3d Windows 文件 API**（2026-10-27 完成）：fd 表（`linkonce_odr [64 x i64]`）+
+    `open/close/read/write/mkdir/unlink/rename` 的 Win32 映射（POSIX flags → CreateFileA
+    的 access/disposition，O_APPEND 用 SetFilePointer 模拟）；门禁新增 `file_api` 往返用例，
+    Windows 侧 7/7。**仍缺**：`errno` 语义（当前只返回 -1）、`/dev/null` 类设备名映射、
+    目录句柄与管道继承（`18-read-empty-badfd` 因此仍标平台）。
+  - [x] **CI 接线**（2026-10-27）：linux-arm64 容器内跑 `test-windows-sdk` /
+    `test-windows-target` / `test-windows-corpus`；镜像加 `llvm-18 lld-18` + 工具软链。
+    **运行侧**仍只在真 Windows 上跑（`just run-windows-corpus`），待 W2 的 windows runner。
+  - [x] **W1-3c（守护片）**（2026-10-27）：实测帧阈值——16 KB 帧可用、**32 KB 必崩**；
+    `llvm_frame_guard` 在 win64 下统计每函数 alloca 总量，**>16 KB 编译期拒绝**并给
+    「改堆分配」诊断；`just test-windows-target` 加大栈帧负例；`"no-stack-arg-probe"` 保留。
+    `29-stress-capacity` 的 `// platform: linux darwin` 现在有明确原因。
+  - [x] **W1-3c（真修）**（2026-10-27 完成）：`compiler/windows-sdk/chkstk.c` 的 naked-asm 桩
+    经 `just windows-sdk`（clang）编成 `__chkstk.obj` 随 SDK 分发；链接固定带上它，
+    `"no-stack-arg-probe"` 与 16 KB 帧上限**均已移除**。`29-stress-capacity`（160 KB 帧）
+    解除标注并在 Windows 跑对 → 语料 **207/207**。
+  - [ ] **W1-2b-2 CRT extern 互操作决策**（详见下文 W2 段的同名条目）：`@[extern]` 的
+    libc 函数（abs/strtoul/_Exit/…）在零 CRT 下没有解析目标。`abs`/`putchar`/`_Exit`/
+    `isatty`/`rmdir`/`usleep` 已由 SDK 支撑对象 + `/alternatename` 解决；
+    `strtod/cos/pow/lrint/dup2/system` 仍待决策（`build-check.py` 的 `WINDOWS_SKIP`）。
+  - [x] **W1-8 设计文档**（2026-10-27 完成）：新增
+    `docs/03-design/yh-Windows-LLVM后端设计.md`——目标身份（两份表）、Win64 ABI 边界、
+    零 CRT 运行时契约、入口/argv、链接模板与导入库查找、**六个必记坑**（PIC 重定位、
+    `_fltused`、`declare`+`define`、alloca 提升、栈帧上限、COFF 必须 COMDAT）、不支持边界与平台差异表、
+    门禁两侧分工。`docs/yh.g4` 未动（无语法变化）。
+  - [x] **W2-1 宿主身份**（2026-10-28 完成）：`target_host_info` 的 `$if (windows)`；
+    新增 `gen.tg_host_windows()`（编译期按目标/宿主身份选择）用于 PATH 分隔符、
+    路径分隔符等宿主文件操作；`mb_resolve_self_path` 认反斜杠且按 `;` 切 PATH，
+    `mb_load_default_stdlib` 认反斜杠。open 旗标沿用非 Darwin（Linux 位值）分支，
+    Windows 运行时按同一套 POSIX 位解释，因此三处二选一无需第三分支。
+  - [x] **W2-3a 宿主文件**（2026-10-27）：`build/project_dir.windows.x64.yh`
+    （FindFirstFileA + 手写 WIN32_FIND_DATAA 布局）、`build/clock.windows.x64.yh`
+    （QueryPerformanceCounter，先秒+余数再换算防溢出）、`backend/llvm_bind.windows.yh`；
+    编译器整套源码 `yh check --target x86_64-pc-windows-msvc` 通过。
+  - [ ] **W2-0 流程前置（挡合入）**：`$if (windows)` / `*.windows.*.yh` 需要「认识 windows
+    标记」的**发布种子**；当前只有本地滚过的种子（W0-2a），Release 0.0.10 不认识 →
+    正式合入 W2 改动前必须发 0.0.11-rc（种子来自上一个 Release）。
+  - [ ] **W2-2 windows-x86_64 静态 LLVM/lld SDK 分发**（2026-11-02：`just llvm-host`
+    已能校验并记录该闭包的身份，但归档本身仍在仓库外）：本机已用 MSVC 构建出
+    1.7 GB / 121 个 `.lib` 的静态闭包（`-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`、
+    `LLVM_TARGETS_TO_BUILD=X86;AArch64`、`LLVM_ENABLE_PROJECTS=lld`，关闭 tests/examples/
+    benchmarks/docs/zlib/zstd/libxml2）。**剩余**：`vendor/llvm/sdk.lock.json`、
+    `tests/selfhost/llvm-host.py` HOSTS、`tools/llvm-host.py` shim 与 Release 资产化
+    （闭包不入库，与 Darwin SDK 同处理）。
+  - [x] **W2-2c Windows 宿主闭包与 yh.exe**（2026-10-28 完成）：
+    - **桥**：`bridge.c` 的 Windows 适配（InitOnceExecuteOnce、`_unlink`/`_write`/`_close`、
+      `STDOUT_FILENO`、`ssize_t`、`mkstemp`→`_mktemp_s+_open(O_CREAT|_O_EXCL)`）；
+      新增 `compiler/llvm/windows_shim.c`（stat/realpath/setenv/usleep/
+      fork/waitpid/kill 垫片 + `CreateProcessA` 的 `yh_win_spawn_wait`）；
+      `clang-cl /MT` 编三对象，`lib.exe` 打成 `tmp/winhost/libyh-llvm-bridge.lib`。
+    - **清单**：`[link-windows-x64]` = bridge 1 + lld 6 + llvm 114 + support 15
+      （libcmt/libcpmt/libvcruntime/libucrt/oldnames/comsuppw + kernel32/ntdll/ole32/
+      oleaut32/uuid/advapi32/shell32/user32/psapi）；**去掉 `LLVM-C.lib`**（那是
+      DLL 导入库，会把 yh.exe 变成依赖 LLVM-C.dll 的进程，实测崩溃）。
+      `[c] sources` 从 project.toml 移除：桥已由清单强定义提供，Windows 上的弱桩
+      还会与静态 CRT/桥冲突。
+    - **COFF 链接语义**：weak 运行时/`_fltused`/fd 全局都加 `comdat any`（COFF 的
+      weak 不能合并同名定义，lld-link 会报 duplicate symbol）；`open` 加
+      FILE_FLAG_BACKUP_SEMANTICS（允许 open 目录，`path/.` 探目录可用）；
+      fd 表改为扫空槽复用（原来只增不减，>64 次 open 后必失败）。
+    - **入口与栈探测**：发射的零 CRT 入口改名为 `__yh_zero_crt_start`，
+      `/entry:mainCRTStartup` + `/alternatename:mainCRTStartup=__yh_zero_crt_start`：
+      有静态 CRT 时用 CRT 启动（C++ 静态构造/argv/envp/stdio），零 CRT 时才落到自备桩。
+      栈探测桩改名 `__yh_chkstk`（导出符号），`/alternatename:__chkstk=__yh_chkstk`，
+      静态 CRT 自带 `__chkstk` 时不会重复定义。
+    - **无 fork 链接**：`mb_coff_link_worker` 在无 fork 宿主进程内跑 lld；lld 的输出
+      句柄活到进程退出（fopen 会 EACCES），因此直接写最终路径，跳过格式复核与
+      链接缓存哈希（下轮必重链，产物完整）。
+    - **结果**：交叉 yh.exe → 原生自编两代固定点 `0969209e…`；`bin/yh-windows-x64`
+      已落盘（W2-6）。
+  - [x] **W2-2b Windows 宿主的运行库策略**（2026-10-28 完成）：静态
+    `libcmt + libcpmt + libvcruntime + libucrt + oldnames + comsuppw + 系统导入库`；
+    实测导入表只有 ADVAPI32/KERNEL32/ntdll/ole32/OLEAUT32/SHELL32，不需 VC++
+    可再发行包。`__chkstk`/入口用 alternatename 同时兼容静态 CRT 与零 CRT。
+  - [x] **W2-3 宿主 OS 桥**（2026-10-28 完成）：`project_dir.windows.x64.yh`、
+    `clock.windows.x64.yh`、`backend/llvm_bind.windows.yh`，宿主 prelude 的
+    open/read/write/close/mkdir/unlink/rename/getpid/getppid 由 Windows 运行时发射；
+    `open` 目录语义与 fd 表复用在 W2-2c 一并修好。
+  - [x] **W2-4a 修复**（2026-10-28 完成）：Windows 模块编译改为**每模块一次性子进程**
+    ——`mb_spawn_module_child` 用 `CreateProcessA` 重入 `--emit-module`，父进程等
+    退出后按 pid=0 走完成分支；子进程自己装载主项目并重建拓扑序。不再串行复用
+    前端状态，W2-4a 的「stage 7 快照污染」从结构上消失。原生两代固定点已验证。
+  - [ ] **W2-4b 链接与测试的进程模型（部分完成）**：**lld worker 已改为
+    `CreateProcessA` 重入 `yh --lld-link <rsp>`**（2026-11-02 修通：子进程 stdout 必须接
+    NUL、stderr 写文件再由父进程回放，见设计文档 §6.8；原生两代固定点已用它产出）。
+    **剩余**：`cmd_process_run/capture` 与 testkit 的用例子进程仍走 fork/exec
+    （垫片返回 -1），因此 `yh run` 与 Windows 上的 `yh test` 还不能执行用例。
+  - [x] **W2-5 just/取种（2026-11-02 完成）**：`host_os == "windows"` 的 `py`/`seed_platform`/
+    `PYTHONUTF8`、种子 `bin/yh-windows-x64`、`seed_platform=windows-x64`、
+    `llvm_host=windows-x86_64` + `tools/llvm-windows-host.py`（闭包身份记录与失效检测）、
+    `seed`/`install` 把 `windows-sdk` 放到 `<exe_dir>/windows-sdk`。
+  - [ ] **W2-5b CI 的 `windows-x64` job**：`.gitea/workflows/ci.yml` 目前只有
+    `macos-arm64`/`linux-arm64` 两个 runner label，没有 Windows runner 可挂；
+    需要先注册 runner（或改用 Windows 容器/云 runner），再补 job：取种 →
+    `just llvm-host` → `just build` → 两代固定点 → `just test-windows-target` +
+    `just run-windows-corpus`。**在此之前 Windows 运行侧证据只能本地手工产出。**
+  - [x] **W2-6 首个 Windows 种子**（2026-10-28 完成）：`bin/yh-windows-x64`
+    SHA-256 `0969209e9b213f4d4998c48c913119fcf3c0cf06db373cbac0722e5d111905a9`；
+    先由交叉 yh.exe 引导、再用它自编一次得到逐字节相同的产物。首次手工写入
+    `bin/`（just 的 Windows 宿主分支归 W2-5）。
+  - [ ] **W2-8 COFF 整库加载（新发现）**：`[link-options-windows-x64] whole` 现在会
+    变成 Darwin 的 `-force_load`，lld-link 只告警并忽略。两条路：实现
+    `/wholearchive:<path>`（需在 mb_link 里拼单参数 + 新缓冲，函数行数超预算），
+    或保持「桥入口均被直接引用、不整库加载」。当前走后者（project.toml 不写该节，
+    `pl_options_code_from_section` 已认 windows 项，留作后续）。
+  - [x] **W2-7 标准库平台变体（2026-11-02 完成）**：`libs/sys`（errno/常量/文件/内存/
+    时间/进程/套接字桩）、`libs/os`（目录/进程）、`libs/time`、`libs/json`、`libs/toml`
+    的 `.windows.yh` 全部落地；`os.platform()` 认 windows；SDK 导入面 +14 条；新增
+    `tests/modules/projects/osdirswin/`、`tests/yh-run/run/213-windows-fd-errors.yh`
+    （`// platform: windows`）与 `build-check.py` 的 `OS_WINDOWS_CASES`（6 个夹具）。
+    **`just test` 在 Windows 首次全绿**（语法 82/82、反例 49/49、运行 208/208、
+    fail 137/137、pass 9/9、libs 122/122、compiler-tests 4/4、arch-check 通过；
+    固定点 `621d03d3…`）。同轮修掉的真缺陷见 finish.md（负 fd、`_fltused` O2 丢弃、
+    测试入口单字节用例号、`--scan-file` 误约束标准库、`yh run` 相对路径、
+    `YH_TEST_RECORD` 竞态）。
+  - [x] **W2-9 Windows 双主门收口（2026-11-03 完成）**：`just test` 与
+    `just selfhost-native` 在 Windows 上同时全绿（project cases 128/128，固定点
+    `5313b53b…`）。修掉的缺陷：冷/暖标记没传给子进程（`--no-firc`）、`[c].sources`
+    用 clang、`-lm` 跳过、安装布局标准库发现的混合分隔符、外部命令的 PATH 启动、
+    退出码 8 位语义、`abs`/`putchar` 提供者。细节见 finish.md。
+    **门禁按平台分流**：`llvm-function-cache.py` 通过；`link-cache.py` 增加
+    `windows_main`（内嵌后端没有外部汇编器，改按 link 计数 + 对象字节验证）；
+    `build-check.py` 增加 `WINDOWS_SKIP`（22 例宿主 libc/libm/POSIX 边界）。
+  - [ ] **W1-2b-2 零 CRT vs UCRT 决策（当前挡住 22 个 build-check 用例）**：
+    现状是零 CRT（只链 kernel32），因此 `strtod/abs/cos/pow/lrint/dup2/system`
+    这类 C 库符号在 Windows 用户程序里不存在：`libs/math`（sqrt/sin/cos/pow）、
+    `libs/libc`（abs 已由 SDK 支撑对象提供）与 C 互操作夹具都受影响。两条路：
+    (a) 保持零 CRT，把需要的符号逐个用 yh 或 SDK 支撑对象实现（math 尤其昂贵）；
+    (b) 接 UCRT 导入库（`ucrtbase.dll`），一次解决全部 C 符号，代价是用户程序依赖
+    `ucrtbase.dll`（与方案 D2 冲突）。**决定后再删 `build-check.py` 的 `WINDOWS_SKIP`。**
+  - [ ] **W2-8 COFF 整库加载**：`/wholearchive:` 未实现（Darwin 的 `-force_load` 会被
+    lld-link 忽略）。当前桥入口都被直接引用、不需要整库；若要支持，在 `mb_link` 里把
+    `[link-options-*].whole` 拼成单参数 `/wholearchive:<path>`（需新缓冲，函数行数超预算，
+    随 B2 的 link 簇拆出一起做）。
 - [ ] **B2 macOS/x86_64、Windows/ARM64**：对应目标 ABI、库、OS 适配与各自原生
   种子；四格分别完成运行/自举/性能验收。
 

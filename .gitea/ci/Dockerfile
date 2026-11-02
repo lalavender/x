@@ -7,6 +7,8 @@
 #   * xz-utils：解包种子与 LLVM SDK 归档
 #   * libxml2-dev / zlib1g-dev / libzstd-dev：内嵌 LLVM 静态链接依赖
 #   * clang：Linux/x86_64 模拟端与 LLVM 桥的 C/C++ 驱动
+#   * llvm-18：Windows 目标的导入库生成（llvm-dlltool）与导入面核对
+#     （llvm-readobj/llvm-nm）；编译器自身用内嵌 lld，不需要这些 CLI 参与链接
 #
 # 用法（arm64 原生）：
 #   container build -t yh-ci:ubuntu24 -f .gitea/ci/Dockerfile .
@@ -19,7 +21,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
         build-essential binutils python3 xz-utils just \
-        libxml2-dev zlib1g-dev libzstd-dev clang ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+        libxml2-dev zlib1g-dev libzstd-dev clang ca-certificates llvm-18 lld-18 \
+    && rm -rf /var/lib/apt/lists/* \
+    && for tool in llvm-dlltool llvm-readobj llvm-nm lld-link; do \
+         if [ -x "/usr/bin/$tool-18" ]; then ln -sf "/usr/bin/$tool-18" "/usr/local/bin/$tool"; fi; \
+       done
 
 WORKDIR /work

@@ -1,0 +1,65 @@
+module sys
+
+// Windows 的 errno 桥：kernel32 的入口失败时返回 0/-1 并把 Win32 错误码写在
+// 线程私有的 GetLastError 槽；sys 对外仍保持与 Linux/Darwin 相同的 -errno 契约，
+// 调用方只看 is_error/error_code，不需要知道目标平台用的是哪种报错方式。
+//
+// 本文件位于 00_types.yh 之后、各平台实现文件之前，只供 sys 内部使用，
+// 不进入公开导出面。Win32 错误码（ERROR_*）与 POSIX errno 是两套编号，这里
+// 只在本平台做一次翻译，对外一律用 10_constants.windows.x64.yh 里的 POSIX 值。
+//
+// 前提：调用方必须在**刚失败的系统调用之后**立即调用 errno_value，中间不能再
+// 调用任何可能覆盖 GetLastError 的函数（常量表只做整数比较，不调系统 API）。
+
+@[extern] fn GetLastError() u32
+
+// win32_posix_errno：把本次 ERROR_* 翻译成 sys 对外使用的 POSIX errno。
+// 只登记 os/net 真正会分类的码；其余统一归到 EIO（而不是伪造 EINVAL）。
+fn win32_posix_errno(code u32) int {
+    if (code == 2 || code == 3) {
+        return ENOENT
+    }
+    if (code == 5 || code == 32) {
+        return EACCES
+    }
+    if (code == 6) {
+        return EBADF
+    }
+    if (code == 8 || code == 14) {
+        return ENOMEM
+    }
+    if (code == 80 || code == 183) {
+        return EEXIST
+    }
+    if (code == 87) {
+        return EINVAL
+    }
+    if (code == 109 || code == 232) {
+        return EPIPE
+    }
+    if (code == 122) {
+        return ERANGE
+    }
+    if (code == 145) {
+        return ENOTEMPTY
+    }
+    if (code == 267) {
+        return ENOTDIR
+    }
+    return EIO
+}
+
+// errno_value 读取当前线程的正错误号；只在刚失败的调用之后使用。
+fn errno_value() int {
+    return win32_posix_errno(GetLastError())
+}
+
+// errno_result 把 -1 返回值归一化为 sys 契约的 -errno，其他值原样返回。
+// 只适用于返回 -1 表示失败的入口（打开/读写/关闭/目录操作）；
+// 地址型结果（VirtualAlloc）由调用方判 0 后自行取 errno。
+fn errno_result(result i64) i64 {
+    if (result == -1) {
+        return (0 - errno_value()).to_type(i64)
+    }
+    return result
+}

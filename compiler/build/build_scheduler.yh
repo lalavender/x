@@ -12,6 +12,10 @@ let mb_sched_peak int = 0
 let mb_sched_iface_early int = 0
 let mb_self_path *char = 0 // PATH 启动时用于读取编译器指纹。
 
+// yh_win_spawn_wait：Windows 侧 CreateProcessA 包装（compiler/llvm/windows_shim.c）。
+// 仅无 fork 宿主使用；其余平台不引用，符号不会进入链接。
+@[extern] fn yh_win_spawn_wait(argv **char, argc int) int
+
 // mb_sched_reset_worker_stats：子进程继承项目快照，但阶段计数只记录模块自身。
 fn mb_sched_reset_worker_stats() void {
     let gs *gen.GenState = gen.G()
@@ -52,10 +56,119 @@ fn mb_sched_reset_worker_stats() void {
     mb_sched_iface_early = 0
 }
 
+// mb_spawn_module_child：无 fork 宿主（Windows）把模块编译放进一次性子进程。
+// 子进程重走 --emit-module 协议（重新索引项目，前端状态天然干净），父进程
+// 等到退出后按 pid=0 走「已完成」分支。argv 沿用父进程的目标/优化/会话参数。
+fn mb_spawn_module_child(module_idx int, root_off int, root_len int,
+    out_dir *char, ir_cache_salt u64) int {
+    let gs *gen.GenState = gen.G()
+    let mod int = module_idx
+    if (mod < 0 || mod >= gs.p_mod_n) { return -1 }
+    let name_buf [160]u8
+    let nn int = gs.p_mods[mod].name_len
+    if (nn <= 0 || nn >= 160) { return -1 }
+    let ni int = 0
+    for ni < nn {
+        name_buf[ni] = gs.task.np_data[gs.p_mods[mod].name_off + ni]
+        ni += 1
+    }
+    name_buf[nn] = 0
+    let prov int = gs.p_mods[mod].proj
+    let args [24]*char
+    let ai int = 0
+    args[ai] = 0.to_type(*char); ai += 1
+    args[ai] = "--emit-module"; ai += 1
+    args[ai] = (&name_buf[0]).to_type(*char); ai += 1
+    args[ai] = pj_pool_str(gs.p_projs[prov].root_off); ai += 1
+    args[ai] = pj_pool_str(root_off); ai += 1
+    args[ai] = "-o"; ai += 1
+    args[ai] = out_dir; ai += 1
+    if (mb_iface_suffix != 0) {
+        args[ai] = "--iface-suffix"; ai += 1
+        args[ai] = mb_iface_suffix; ai += 1
+    }
+    let hex [17]u8
+    if (ir_cache_salt != 0) {
+        mb_hash_hex(ir_cache_salt, &hex[0])
+        hex[16] = 0
+        args[ai] = "--ir-key"; ai += 1
+        args[ai] = (&hex[0]).to_type(*char); ai += 1
+    }
+    args[ai] = "--target"; ai += 1
+    args[ai] = gs.c_target.triple; ai += 1
+    args[ai] = gs.c_opt_level == 2 ? "-O2" : "-O0"; ai += 1
+    if (gs.c_emit_kind != 0) { args[ai] = "--emit-llvm"; ai += 1 }
+    if (gs.task.c_check_only != 0) { args[ai] = "--check-only"; ai += 1 }
+    if (gs.task.c_test_mode != 0) {
+        args[ai] = "--test-mode"; ai += 1
+        // testkit 生成的 runner 在项目 tmp/ 下，子进程重新扫描时看不到它。
+        if (gs.p_mods[mod].file_n > 0 && gs.p_mods[mod].name_len >= 8) {
+            let name *char = pj_pool_str(gs.p_mods[mod].name_off)
+            if (name[0] == 'y' && name[1] == 'h' && name[2] == '_'
+                && name[3] == 't' && name[4] == 'e' && name[5] == 's'
+                && name[6] == 't' && name[7] == '_') {
+                let first int = gs.p_mods[mod].files[0]
+                args[ai] = "--extra-file"; ai += 1
+                args[ai] = pj_pool_str(gs.p_files[first].path_off); ai += 1
+            }
+        }
+    }
+    if (gs.c_stats_enabled != 0) { args[ai] = "--stats"; ai += 1 }
+    // 全冷构建不写函数级 IR 缓存（PC3）的判定在父进程的调度器里做
+    // （c_firc_write_off = 链接清单不存在）。无 fork 宿主的模块编译在独立子进程，
+    // 必须把该判定显式带过去，否则子进程会把冷编的缓存记录写下来——下一轮
+    // 清空 .build 后那些记录永远不会被读，且“首轮重编应全部 miss”的期望会反转。
+    if (gs.c_firc_write_off != 0) { args[ai] = "--no-firc"; ai += 1 }
+    // 单文件测试（yh test <项目外文件>）的扫描过滤要在子进程重建：子进程自己
+    // 重新装载项目，不传就会把相邻 .yh 也装进来（Windows 无 fork 的 re-exec 路径）。
+    let scan_buf [1100]u8
+    if (gs.c_scan_file_off >= 0 && gs.c_scan_file_len > 0
+        && gs.c_scan_file_len < 1100) {
+        let si int = 0
+        for si < gs.c_scan_file_len {
+            scan_buf[si] = gs.task.np_data[gs.c_scan_file_off + si]
+            si += 1
+        }
+        scan_buf[gs.c_scan_file_len] = 0
+        args[ai] = "--scan-file"; ai += 1
+        args[ai] = (&scan_buf[0]).to_type(*char); ai += 1
+    }
+    args[ai] = 0.to_type(*char)
+    if (mb_resolve_self_path() != 0) { return -1 }
+    args[0] = mb_self_path
+    $if (windows) {
+        return yh_win_spawn_wait(&args[0], ai)
+    } $else {
+        return -1
+    }
+}
+
 // mb_spawn_indexed_module：fork 当前已索引项目快照，子进程独占语义状态并编译模块。
 // out_dir：本模块的按文件汇编目录 <build>/asm/<tag>（RS3b）。
 fn mb_spawn_indexed_module(module_idx int, root_off int, root_len int,
     out_dir *char, ir_cache_salt u64, pid_out *int) int {
+    if (mb_can_fork() == 0) {
+        // 无 fork 宿主（Windows，W2-4b）：每个模块经 --emit-module 起一次性
+        // 子进程，前端状态不跨模块复用（串行进程内复用会污染符号/文件快照）。
+        $if (windows) {
+            if (mb_spawn_module_child(module_idx, root_off, root_len,
+                    out_dir, ir_cache_salt) != 0) {
+                return -1
+            }
+            pid_out[0] = 0
+            return 0
+        }
+        $else {
+            // Linux/Darwin 的 YH_NO_FORK=1 测试钩子：维持原有的进程内串行
+            // 路径（W2-4a 已知 stage 7 未修，仅用于探针）。
+            if (mb_emit_indexed_module(module_idx, root_off, root_len,
+                    out_dir, ir_cache_salt) != 0) {
+                return -1
+            }
+            pid_out[0] = 0
+            return 0
+        }
+    }
     let child int = fork()
     if (child < 0) {
         return -1
@@ -101,7 +214,7 @@ pub fn mb_resolve_self_path() int {
     let has_slash int = 0
     let i int = 0
     for c_argv0[i] != 0 {
-        if (c_argv0[i] == '/') {
+        if (c_argv0[i] == '/' || c_argv0[i] == 92) {
             has_slash = 1
             break
         }
@@ -118,8 +231,10 @@ pub fn mb_resolve_self_path() int {
     }
     let start int = 0
     let end int = 0
+    let windows int = gen.tg_host_windows()
+    let separator u8 = windows != 0 ? ';' : ':'
     for end <= path_len {
-        if (end == path_len || tk.np_data[path_off + end] == ':') {
+        if (end == path_len || tk.np_data[path_off + end] == separator) {
             let candidate [1200]u8
             let n int = 0
             if (end == start) {
@@ -235,14 +350,15 @@ fn mb_sched_deps_ready(module_idx int, states *int, count int,
 fn mb_sched_cancel_workers(states *int, pids *int, count int) void {
     let i int = 0
     for i < count {
-        if (states[i] == 1 || states[i] == 2) {
+        // 串行宿主的 pid 是 0：kill(0, sig) 会打到整个进程组，必须跳过。
+        if ((states[i] == 1 || states[i] == 2) && pids[i] != 0) {
             kill(pids[i], 15)
         }
         i += 1
     }
     i = 0
     for i < count {
-        if (states[i] == 1 || states[i] == 2) {
+        if ((states[i] == 1 || states[i] == 2) && pids[i] != 0) {
             let status int = 0
             waitpid(pids[i], &status, 0)
             states[i] = 4
@@ -352,7 +468,9 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
         for i < count {
             if (states[i] == 1 || states[i] == 2) {
                 let status int = 0
-                let waited int = waitpid(pids[i], &status, 1)
+                // 串行宿主（Windows）的模块在 mb_spawn_indexed_module 里同步完成，
+                // pid 为 0，不需要 waitpid —— 直接进入发布/提交分支。
+                let waited int = pids[i] == 0 ? 0 : waitpid(pids[i], &status, 1)
                 if (waited == pids[i]) {
                     active -= 1
                     progress = 1

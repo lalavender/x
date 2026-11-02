@@ -1,0 +1,68 @@
+module sys
+
+// Windows 时钟与睡眠原语：输出结构为 Timespec，时间为 i64 秒 + 纳秒。
+//
+// CLOCK_REALTIME 用 GetSystemTimeAsFileTime：FILETIME 是 1601-01-01 起的
+// 100 纳秒计数，换成 Unix 纪元需要减去 11644473600 秒。
+// CLOCK_MONOTONIC 用 QueryPerformanceCounter/Frequency（不受系统时间调整影响）。
+// sleep_time 用 Sleep 毫秒轮转（向上取整，避免纳秒被截成 0 变成忙等）。
+
+@[extern] fn GetSystemTimeAsFileTime(output *u64) void
+@[extern] fn QueryPerformanceCounter(value *i64) i32
+@[extern] fn QueryPerformanceFrequency(value *i64) i32
+@[extern] fn Sleep(milliseconds u32) void
+
+// FILETIME_UNIX_EPOCH 是 1601-01-01 到 1970-01-01 的 100 纳秒计数。
+const FILETIME_UNIX_EPOCH u64 = 116444736000000000
+
+// read_clock 读取 clock_id 对应时钟到 output；成功返回 0，失败返回 -EINVAL。
+pub fn read_clock(clock_id int, output *Timespec) i64 {
+    if (clock_id == CLOCK_REALTIME) {
+        let ticks u64 = 0
+        GetSystemTimeAsFileTime(&ticks)
+        if (ticks < FILETIME_UNIX_EPOCH) {
+            output.sec = 0
+            output.nsec = 0
+            return (0 - EINVAL).to_type(i64)
+        }
+        let unix_100ns u64 = ticks - FILETIME_UNIX_EPOCH
+        output.sec = (unix_100ns / 10000000).to_type(i64)
+        output.nsec = ((unix_100ns % 10000000) * 100).to_type(i64)
+        return 0
+    }
+    if (clock_id == CLOCK_MONOTONIC) {
+        let counter i64 = 0
+        let frequency i64 = 0
+        if (QueryPerformanceCounter(&counter) == 0
+            || QueryPerformanceFrequency(&frequency) == 0 || frequency <= 0) {
+            output.sec = 0
+            output.nsec = 0
+            return (0 - EINVAL).to_type(i64)
+        }
+        output.sec = counter / frequency
+        output.nsec = (counter % frequency) * 1000000000 / frequency
+        return 0
+    }
+    output.sec = 0
+    output.nsec = 0
+    return (0 - EINVAL).to_type(i64)
+}
+
+// sleep_time 睡眠 request 指定的时长；remaining 在 Windows 上没有意义
+// （Sleep 不会被信号中断），始终写 0 并返回 0。非法时长返回 -EINVAL。
+pub fn sleep_time(request *Timespec, remaining *Timespec) i64 {
+    if (request.sec < 0 || request.nsec < 0 || request.nsec > 999999999) {
+        return (0 - EINVAL).to_type(i64)
+    }
+    if (remaining != 0) {
+        remaining.sec = 0
+        remaining.nsec = 0
+    }
+    // 向上取整到毫秒：不足 1 毫秒的睡眠至少睡 1 毫秒，避免变成忙等。
+    let nanos i64 = request.sec * 1000000000 + request.nsec
+    let millis i64 = (nanos + 999999) / 1000000
+    if (millis > 0) {
+        Sleep(millis.to_type(u32))
+    }
+    return 0
+}

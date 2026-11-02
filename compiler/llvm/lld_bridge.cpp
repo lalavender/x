@@ -190,9 +190,18 @@ int invoke_lld(const std::vector<const char *> &arguments, char *diagnostic,
       {lld::Darwin, &lld::macho::link},
       {lld::WinLink, &lld::coff::link},
   };
-  const lld::Result result = lld::lldMain(args, llvm::outs(), error_stream, drivers);
+  // 链接 worker（有 fork 宿主的子进程、无 fork 宿主的 `--lld-link` 子进程）
+  // 只跑一次链接：诊断直接进 stderr。原因：lld 的 fatal() 会用 Process::Exit
+  // 直接结束进程，此时缓冲区里的诊断还没回传给调用方，链接失败就完全静默
+  // （Windows 上实测只看到「链接失败」，没有 lld 给出的原因）。
+  const bool direct_stderr = std::getenv("YH_LLD_STDERR") != nullptr;
+  llvm::raw_ostream &lld_stderr =
+      direct_stderr ? static_cast<llvm::raw_ostream &>(llvm::errs()) :
+                      static_cast<llvm::raw_ostream &>(error_stream);
+  const lld::Result result = lld::lldMain(args, llvm::outs(), lld_stderr, drivers);
   error_stream.flush();
-  copy_diagnostic(errors, diagnostic, capacity);
+  if (!direct_stderr)
+    copy_diagnostic(errors, diagnostic, capacity);
   if (result.retCode == 0)
     return 0;
   if (!result.canRunAgain) {

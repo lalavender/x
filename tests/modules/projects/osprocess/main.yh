@@ -3,11 +3,33 @@ module main;
 import os;
 import sys;
 
-// 本用例只在 Linux 宿主运行，覆盖精确路径 spawn、exec 失败握手、wait 状态
-// 解码、exit_now 与失败子进程回收。子模式复用同一可执行文件，不依赖 PATH
-// 或 shell；父进程通过 argv[0] 指定精确路径。
+// 覆盖精确路径 spawn、exec 失败握手、wait 状态解码、exit_now 与失败子进程回收。
+// 子模式复用同一可执行文件，不依赖 PATH 或 shell；父进程通过 argv[0] 指定精确路径。
+//
+// 平台差异（W2-7）：
+//   * POSIX 信号：Windows 没有信号，os.wait 只报 wait_exited，check_signal 跳过；
+//   * WNOHANG 的 wait4(-1)：Windows 的 sys.wait_process 是 -ENOSYS，check_no_zombies 跳过；
+//   * 没有执行位：Windows 用 PE 格式判定，坏镜像的错误分类是 error_other。
 
 let noexec_path *char = ".yh-osprocess-noexec";
+
+// has_posix_signals：Windows 没有 POSIX 信号与 wait4(-1)，返回 0。
+fn has_posix_signals() int {
+    $if (windows) {
+        return 0
+    }
+    return 1
+}
+
+// noexec_error_ok：非可执行文件的错误分类是否符合本平台预期。
+// POSIX 由 exec 返回 EACCES（permission_denied）；Windows 没有执行位，
+// CreateProcessA 对非 PE 文件报 ERROR_BAD_EXE_FORMAT，归到 error_other。
+fn noexec_error_ok(kind os.ErrorKind) int {
+    $if (windows) {
+        return kind == os.error_other ? 1 : 0
+    }
+    return kind == os.error_permission_denied ? 1 : 0
+}
 
 // str_equals 比较两个 NUL 结尾字节串。
 fn str_equals(left *char, right *char) int {
@@ -94,8 +116,9 @@ fn check_noexec(envp **char) int {
     }
     let child_argv [3]*char = [noexec_path, "child", 0];
     let spawned os.PidResult = os.spawn(noexec_path, &child_argv[0], envp);
-    if (spawned.pid != -1
-        || spawned.error.kind != os.error_permission_denied) {
+    // POSIX 由 exec 返回 EACCES（permission_denied）；Windows 没有执行位，
+    // CreateProcessA 对非 PE 文件报 ERROR_BAD_EXE_FORMAT，归到 error_other。
+    if (spawned.pid != -1 || noexec_error_ok(spawned.error.kind) == 0) {
         return 42;
     }
     return 0;
@@ -132,10 +155,12 @@ pub fn main(argc int, argv **char, envp **char) int {
         cleanup();
         return rc;
     }
-    rc = check_signal(argv, envp);
-    if (rc != 0) {
-        cleanup();
-        return rc;
+    if (has_posix_signals() != 0) {
+        rc = check_signal(argv, envp);
+        if (rc != 0) {
+            cleanup();
+            return rc;
+        }
     }
     rc = check_missing(envp);
     if (rc != 0) {
@@ -147,10 +172,12 @@ pub fn main(argc int, argv **char, envp **char) int {
         cleanup();
         return rc;
     }
-    rc = check_no_zombies();
-    cleanup();
-    if (rc != 0) {
-        return rc;
+    if (has_posix_signals() != 0) {
+        rc = check_no_zombies();
+        if (rc != 0) {
+            cleanup();
+            return rc;
+        }
     }
     printf("os process ok\n");
     return 0;

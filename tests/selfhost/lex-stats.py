@@ -4,6 +4,7 @@
 import argparse
 import re
 import shutil
+import sys
 import subprocess
 import tempfile
 from pathlib import Path
@@ -58,7 +59,23 @@ def main() -> int:
         # 父进程为四个文件只建一次索引；fork worker 继承只读快照，main
         # 额外词法分析 mathx 的 .s.i 和 .s.ct。每个模块仍执行相同语义遍。
         expected = (6, 9, 4, 4, 4, 4, 2)
-        if len(rows) != 3 or totals != expected or len(parent_timing) != 1:
+        if sys.platform.startswith("win"):
+            # Windows 没有 fork：每个模块是一个 `--emit-module` 子进程，各自重新
+            # 装载项目并重建索引，因此 lex/index 计数高于「父进程索引一次、fork
+            # 快照继承」的 POSIX 路径。这里只锁定与平台无关的部分：
+            # 三个进程、语法遍/top-level 遍计数、worker 数，并要求 lex/index 不
+            # 少于 POSIX 值（多出来的是子进程重建索引）。
+            counts_ok = (len(rows) == 3
+                         and totals[1] == expected[1]
+                         and totals[0] >= expected[0]
+                         and totals[2] >= expected[2]
+                         and totals[3:] == expected[3:])
+            if not counts_ok or len(parent_timing) != 1:
+                print(f"阶段计数错误：进程数={len(rows)}，总计={totals}，"
+                      f"期望（Windows 无 fork）≥{expected} 且尾部相等")
+                print(output_text[-2000:])
+                return 1
+        elif len(rows) != 3 or totals != expected or len(parent_timing) != 1:
             print(f"阶段计数错误：进程数={len(rows)}，总计={totals}，期望={expected}")
             print(output_text[-2000:])
             return 1
@@ -80,8 +97,19 @@ def main() -> int:
         warm_timing = [tuple(int(value) for value in match)
                        for match in TIMING_RE.findall(warm.stdout + warm.stderr)]
         warm_expected = (4, 0, 4, 0, 0, 0, 0)
-        if warm.returncode != 0 or len(warm_rows) != 1 or warm_rows[0] != warm_expected:
-            print(f"热缓存仍进入声明解析/worker：行={warm_rows}，期望={warm_expected}\n"
+        if sys.platform.startswith("win"):
+            # 无 fork 宿主没有「父进程索引一次、fork 快照继承」的复用：热构建
+            # 仍会整份扫描建索引（lex/index 大于 POSIX 值），但不应再启动模块
+            # worker（workers=0），也不应进入声明解析/全局/函数登记。
+            warm_ok = (warm.returncode == 0 and len(warm_rows) == 1
+                       and warm_rows[0][0] > 0 and warm_rows[0][2] > 0
+                       and warm_rows[0][3:] == (0, 0, 0, 0))
+        else:
+            warm_ok = (warm.returncode == 0 and len(warm_rows) == 1
+                       and warm_rows[0] == warm_expected)
+        if not warm_ok:
+            print(f"热缓存仍进入声明解析/worker：行={warm_rows}，期望={warm_expected}"
+                  f"（Windows 只要求 workers=0 且声明遍为 0）\n"
                   f"{(warm.stdout + warm.stderr)[-1200:]}")
             return 1
         if len(warm_timing) != 1 or min(warm_timing[0]) <= 0 \

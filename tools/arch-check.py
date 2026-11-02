@@ -54,14 +54,27 @@ ALLOWED = {
 # —— 预算（现状即上限，只减不增）——
 # 数值为 2026-10-24 实测；下调请同步改这里，上调需在 finish.md 说明理由。
 BUDGETS = {
-    "max_file_lines": 2242,        # module_build.yh（A2c 拆分后必须下降）
-    "max_function_lines": 700,     # mb_link 674（含前导注释的上界口径）
-    "max_module_lines": 381,       # main（A6 后只剩 driver + api）
-    "max_testkit_lines": 1592,     # testkit（YT2d-3 同项目测试锁 +37；后续应拆分而非增长）
-    "max_build_lines": 10807,      # build（PC3 +6、PC2 v3 +5、PC2b +20、PC7a +25、RB1 父存活检查 +19）
-    "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
+    "max_file_lines": 2285,        # module_build.yh（A2c 拆分后必须下降；W2-4b --emit-module
+                                   # 独立子进程重建主项目与拓扑序 +10）
+    "max_function_lines": 709,     # mb_link 709：W1-3c 起 Windows 链接闭包（导入库 + 栈探测桩）
+                                   # 在 mb_link 里解析，W2-4b 无 fork 直接写最终产物 +12；
+                                   # B2 拆 link 簇时随之下沉
+    "max_module_lines": 410,       # main（A6 后只剩 driver + api；W2-4a/W2-4b 的子进程入口分派 +24；
+                                   # W2-9 --no-firc 与 --emit-module 参数上限 +5）
+    "max_testkit_lines": 1688,     # testkit（YT2d-3 同项目测试锁 +37；W2-4b 模块子进程测试模式与
+                                   # 入口标记 +79；W2-7 十进制用例号 +17；后续应拆分而非增长）
+    "max_build_lines": 11627,      # build（PC3 +6、PC2 v3 +5、PC2b +20、PC7a +25、RB1 父存活检查 +19、
+                                   # W0-2a windows 标记 +2；W1-5 build/windows_link.yh +260；W1-3b 入口 +6；
+                                   # W1-6 link_inputs 的 .lib/.dll 分支 +24；W1-3c 栈探测桩 +26；W2-1/W2-3a 宿主文件 +80；W2-4a 串行分支与 pid 守卫 +34；
+                                   # W2-2c/W2-4b 子进程模块、无 fork 直接输出与链接头注释 +122；
+                                   # 2026-11-02 链接子进程的 stdout/stderr 重定向 + 诊断回放 +50、W2-7 单文件测试的
+                                   # scan-filter 收窄（pj_scan_applies）+42；W2-9 冷缓存标记/标准库路径
+                                   # 规范化/-lm 跳过 +32（见 finish）
+                                   # ——随 B2 的 link 簇拆出下沉）
+    "max_cmd_share_pct": 1,        # 405 / 51484 ≈ 0.8%
     "max_globals": 190,
-    "max_g_call_sites": 165,
+    "max_g_call_sites": 172,      # W1-5 windows：SDK 查找 + COFF 链接分派各 1 处；W2-4b 模块子进程 1 处；
+                                   # W2-7 单文件测试的 pj_scan_applies 判定 3 处
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。

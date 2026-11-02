@@ -1,0 +1,364 @@
+module build
+import gen
+import backend
+
+// yh_win_spawn_link：Windows 侧「跑一次 lld 链接子进程」的包装
+// （compiler/llvm/windows_shim.c）。stdout 固定接 NUL、stderr 写 stderr_path。
+@[extern] fn yh_win_spawn_link(argv **char, argc int, stderr_path *char) int
+
+// ============================================================================
+// windows_link.yh —— Windows/x64（PE/COFF）链接：内嵌 lld 的 WinLink 驱动（W1-5）
+//
+// 与 darwin_link.yh 同层（平台链接配置 + 一次链接的执行），由 link_cache.yh 的
+// mb_link 按目标分派。三条硬约束：
+//
+//   1. **零 CRT 用户程序**：不 `/defaultlib` 任何库；运行时由
+//      backend/llvm_windows_runtime.yh 自己发射（HeapAlloc/WriteFile）。
+//      编译器自举时由 [link-windows-x64] 显式提供静态 CRT 组（W2）。
+//   2. **零 CRT 的唯一外部依赖是 KERNEL32.dll**：导入库由 tools/windows-sdk.py 从
+//      compiler/windows-sdk/def/*.def 生成（不入库，见根 .gitignore 的 *.lib）。
+//   3. **可复现**：固定 `/Brepro`（实测两次链接字节相同）与 `/nologo`。
+//
+// 入口采用双形态：`/entry:mainCRTStartup` 优先指向静态 CRT 的启动代码；若闭包
+// 里没有 CRT（零 CRT 用户程序），`/alternatename:mainCRTStartup=__yh_zero_crt_start`
+// 把它落到运行时发射的自备桩（GetCommandLineA 解析 argv）。`__chkstk` 同理：
+// 静态 CRT 自带，零 CRT 时 /alternatename 落到 SDK 桩的 `__yh_chkstk`。
+//
+// 链接器进程：有 fork 的宿主在一次性子进程里跑内嵌 lld（lld 状态不可重入）；
+// Windows 无 fork 时在当前进程跑，并把 `/out:` 直接指向最终路径（lld 的输出
+// 句柄活到进程退出，父进程无法再读/改名）。
+// ============================================================================
+
+// mb_windows_sdk_lib_dir：解析 Windows 导入库目录。
+// 顺序：$YH_WINDOWS_SDK/lib → 可执行文件同级的 compiler/windows-sdk/lib（开发树）
+// → 同级的 tmp/llvm-migration/windows-sdk/lib（tools/windows-sdk.py 的默认 --out）
+// → <exe>/windows-sdk/lib（安装形态）。判定条件是**真的存在 kernel32.lib**。
+fn mb_windows_sdk_lib_dir(out *u8, capacity int) int {
+    let gs *gen.GenState = gen.G()
+    let env_off int = -1
+    let env_len int = 0
+    if (pj_env_fetch("YH_WINDOWS_SDK", &env_off, &env_len) != 0) { return -1 }
+    if (env_len > 0) {
+        let n int = 0
+        let k int = 0
+        for k < env_len {
+            if (n + 2 >= capacity) { return gen.fail("YH_WINDOWS_SDK 路径过长") }
+            out[n] = gs.task.np_data[env_off + k]
+            n += 1
+            k += 1
+        }
+        n = gen.append_str(out, n, "/lib")
+        out[n] = 0
+        if (pj_file_exists(gen.arr_cstr(out)) != 0) {
+            let probe [1200]u8
+            let pn int = gen.append_str(&probe[0], 0, gen.arr_cstr(out))
+            let pn2 int = gen.append_str(&probe[0], pn, "/kernel32.lib")
+            probe[pn2] = 0
+            if (pj_file_exists(gen.arr_cstr(&probe[0])) != 0) { return 0 }
+        }
+        return gen.fail("YH_WINDOWS_SDK 下没有 lib/kernel32.lib：先跑 python3 tools/windows-sdk.py generate")
+    }
+    // 没有显式 SDK：按可执行文件位置猜开发树/安装树（与 Darwin bundle 同思路）。
+    // 宿主路径可能是 Windows 反斜杠（`C:\dir\yh`）：两种分隔符都算。
+    let slash int = -1
+    let i int = 0
+    for c_argv0[i] != 0 {
+        if (c_argv0[i] == '/' || c_argv0[i] == 92) { slash = i }
+        i += 1
+    }
+    let prefixes [3]*char
+    prefixes[0] = "/compiler/windows-sdk/lib"
+    prefixes[1] = "/tmp/llvm-migration/windows-sdk/lib"
+    prefixes[2] = "/windows-sdk/lib"
+    let which int = 0
+    for which < 3 {
+        if (slash >= 0) {
+            let n int = 0
+            let k int = 0
+            for k <= slash {
+                out[n] = c_argv0[k].to_type(u8)
+                n += 1
+                k += 1
+            }
+            let pi int = 0
+            for prefixes[which][pi] != 0 {
+                if (n + 2 >= capacity) { return gen.fail("导入库路径过长") }
+                out[n] = prefixes[which][pi].to_type(u8)
+                n += 1
+                pi += 1
+            }
+            out[n] = 0
+            let probe [1200]u8
+            let pn int = gen.append_str(&probe[0], 0, gen.arr_cstr(out))
+            let pn2 int = gen.append_str(&probe[0], pn, "/kernel32.lib")
+            probe[pn2] = 0
+            if (pj_file_exists(gen.arr_cstr(&probe[0])) != 0) { return 0 }
+        }
+        which += 1
+    }
+    return gen.fail("找不到 Windows 导入库：设 YH_WINDOWS_SDK 或先跑 python3 tools/windows-sdk.py generate")
+}
+
+// mb_windows_sdk_file：拼出 <sdk>/lib/<name> 的完整路径。
+// 供 mb_link/单文件链接取 kernel32.lib 与栈探测桩；返回 0 成功，否则 -1（诊断已写）。
+fn mb_windows_sdk_file(name *char, out *u8, capacity int) int {
+    let sdk_dir [1000]u8
+    if (mb_windows_sdk_lib_dir(&sdk_dir[0], 1000) != 0) { return -1 }
+    let n int = gen.append_str(out, 0, gen.arr_cstr(&sdk_dir[0]))
+    n = gen.append_byte(out, n, '/')
+    n = gen.append_str(out, n, name)
+    out[n] = 0
+    return 0
+}
+
+// mb_windows_link_inputs：一次取齐 COFF 链接的两个外来输入（导入库 + 栈探测桩）。
+// 返回 0 成功；否则 -1（诊断已写）。
+fn mb_windows_link_inputs(import_lib *u8, lib_cap int, chkstk_obj *u8, obj_cap int) int {
+    if (mb_windows_sdk_file("kernel32.lib", import_lib, lib_cap) != 0) { return -1 }
+    return mb_windows_sdk_file("yh_chkstk.obj", chkstk_obj, obj_cap)
+}
+
+// mb_lld_windows_enabled：Windows/x64 目标且当前 yh 内嵌 lld 时启用进程内 COFF 链接。
+fn mb_lld_windows_enabled() int {
+    let gs *gen.GenState = gen.G()
+    if (gs.c_target.os != gen.TARGET_OS_WINDOWS
+        || gs.c_target.arch != gen.TARGET_ARCH_X64) {
+        return 0
+    }
+    let identity *char = backend.llvm_lld_identity()
+    if (identity == 0 || identity[0] == 0) { return 0 }
+    return 1
+}
+
+// mb_coff_link_prefix：写入固定前缀（lld-link 驱动、可复现、零 CRT、console 子系统），
+// 返回下一个空位。入口固定为 mainCRTStartup：闭包里有静态 CRT 时由 libcmt 提供
+// （负责 C++ 静态构造、argv/envp、stdio 与退出码）；零 CRT 用户程序则由
+// /alternatename 落到运行时发射的 __yh_zero_crt_start（GetCommandLineA 解 argv，W1-3b）。
+// 同理 __chkstk：静态 CRT 自带，零 CRT 时落到 SDK 桩的 __yh_chkstk。
+// out_arg 是调用方拼好的 "/out:<临时路径>"。
+// 返回下一个空位（20）；调用方持有 import_lib/chkstk_obj 缓冲，路径必须活到 link 调用。
+fn mb_coff_link_prefix(args **char, out_arg *char, import_lib *char, chkstk_obj *char) int {
+    args[0] = "lld-link"
+    args[1] = "-flavor"
+    args[2] = "link"
+    args[3] = "/nologo"
+    args[4] = "/Brepro"
+    args[5] = "/nodefaultlib"
+    args[6] = "/subsystem:console"
+    args[7] = "/entry:mainCRTStartup"
+    // 零 CRT 没有 libc：exit/_Exit 用 linker 的 alternatename 映射到 kernel32
+    args[8] = "/alternatename:exit=ExitProcess"
+    args[9] = "/alternatename:_Exit=ExitProcess"
+    // 两个「有 CRT 用 CRT、没 CRT 用自有实现」的符号（同上 alternatename 语义）。
+    args[10] = "/alternatename:__chkstk=__yh_chkstk"
+    args[11] = "/alternatename:mainCRTStartup=__yh_zero_crt_start"
+    args[12] = out_arg
+    // 零 CRT 的两个外来输入：kernel32 导入库（解析 __imp_*）与栈探测桩
+    // （LLVM 对 >4KB 的帧会发 call __chkstk，W1-3c）。
+    args[13] = import_lib
+    args[14] = chkstk_obj
+    // usleep / isatty / rmdir 由 SDK 桩对象提供：预置库已 declare，不能再 define。
+    // 三个都用 alternatename，静态 CRT 存在时（编译器自举）仍用 CRT 的实现。
+    args[15] = "/alternatename:usleep=__yh_usleep"
+    args[16] = "/alternatename:isatty=__yh_isatty"
+    args[17] = "/alternatename:rmdir=__yh_rmdir"
+    // libc 基础符号：零 CRT 用户程序没有 libc，abs/putchar 由 SDK 支撑对象提供；
+    // 静态 CRT 存在时（编译器自举）仍用 CRT 的版本。
+    args[18] = "/alternatename:abs=__yh_abs"
+    args[19] = "/alternatename:putchar=__yh_putchar"
+    return 20
+}
+
+// mb_hash_coff_identity：把 COFF 链接身份并入缓存键。
+// 内容 = lld 身份串 + 固定模板文本 + kernel32.lib 与栈探测桩的内容摘要
+// （改名/换生成器/换编译器都会换键）。
+fn mb_hash_coff_identity(hash *u64, import_lib *char, chkstk_obj *char) int {
+    let identity *char = backend.llvm_lld_identity()
+    if (identity == 0 || identity[0] == 0) { return gen.fail("内嵌 lld 不可用") }
+    let i int = 0
+    for identity[i] != 0 {
+        mb_fnv(hash, identity[i].to_type(u8))
+        i += 1
+    }
+    mb_fnv(hash, 0)
+    let template *char = "lld-link -flavor link /nologo /Brepro /nodefaultlib /subsystem:console /entry:mainCRTStartup /alternatename:exit=ExitProcess /alternatename:_Exit=ExitProcess /alternatename:__chkstk=__yh_chkstk /alternatename:mainCRTStartup=__yh_zero_crt_start /alternatename:usleep=__yh_usleep"
+    i = 0
+    for template[i] != 0 {
+        mb_fnv(hash, template[i].to_type(u8))
+        i += 1
+    }
+    mb_fnv(hash, 0)
+    i = 0
+    for import_lib[i] != 0 {
+        mb_fnv(hash, import_lib[i].to_type(u8))
+        i += 1
+    }
+    mb_fnv(hash, 0)
+    if (mb_hash_file(hash, import_lib) != 0) {
+        return gen.fail_path("无法读取 Windows 导入库: ", import_lib)
+    }
+    if (mb_hash_file(hash, chkstk_obj) != 0) {
+        return gen.fail_path("无法读取 Windows 栈探测桩: ", chkstk_obj)
+    }
+    return 0
+}
+
+// mb_coff_link_child：--lld-link 子进程入口。响应文件每行一个 argv（路径不含换行），
+// 子进程只做一次 lld 链接并退出；父进程等退出后再读/改名产物，句柄已随进程关闭。
+// 这样 Windows 也能沿用「临时产物 → 验机 → rename → 链接缓存」的通用流程。
+pub fn mb_coff_link_child(path *char) int {
+    // 读响应文件失败必须出声：父进程只会看到「链接失败」，子进程静默退 1 会让
+    // 定位变成猜谜。
+    if (gen.read_source(path) != 0) {
+        return gen.fail_path("无法读取 COFF 链接响应文件: ", path)
+    }
+    let gs *gen.GenState = gen.G()
+    let n int = gs.task.c_src_len
+    if (n <= 0) { return gen.fail("COFF 链接响应文件为空") }
+    let cap int = n / 2 + 4
+    let args **char = gen.alloc((cap * sizeof(*char)).to_type(u64)).to_type(**char)
+    if (args == 0) { return gen.fail("COFF 链接参数分配失败") }
+    let count int = 0
+    let start int = 0
+    let i int = 0
+    for i < n {
+        if (gs.task.c_src[i] == '\n') {
+            gs.task.c_src[i] = 0
+            if (i > start) {
+                args[count] = (gs.task.c_src + start).to_type(*char)
+                count += 1
+            }
+            start = i + 1
+        }
+        i += 1
+    }
+    if (count <= 0) { return gen.fail("COFF 链接响应文件没有参数") }
+    let diag [backend.LLVM_LLD_DIAG]u8
+    let rc int = backend.llvm_lld_link_argv(&args[0], count,
+        (&diag[0]).to_type(*char))
+    if (rc != 0) {
+        if (diag[0] != 0) {
+            gen.write_all(2, &diag[0], strlen((&diag[0]).to_type(*char)).to_type(int))
+            gen.write_all(2, "\n".to_type(*u8), 1)
+        } else {
+            // 空诊断会让链接失败完全静默；至少报出 lld 返回码，便于定位。
+            let msg [96]u8
+            let mn int = gen.append_str(&msg[0], 0, "内嵌 lld 链接失败（返回码 ")
+            mn = gen.append_int(&msg[0], mn, rc)
+            mn = gen.append_str(&msg[0], mn, "）\n")
+            gen.write_all(2, &msg[0], mn)
+        }
+        return 1
+    }
+    return 0
+}
+
+// mb_coff_write_rsp：把 lld argv 写成响应文件（每行一个参数，末尾也留换行）。
+// 参数里出现换行（Windows 路径不允许）时拒绝，避免子进程误拆。
+fn mb_coff_write_rsp(path *char, argv **char, argc int) int {
+    let fd int = mb_open_out(path)
+    if (fd < 0) { return -1 }
+    let failed int = 0
+    let i int = 0
+    for i < argc {
+        let arg *char = argv[i]
+        let len int = strlen(arg).to_type(int)
+        let j int = 0
+        for j < len {
+            if (arg[j] == '\n') { failed = 1 }
+            j += 1
+        }
+        if (failed == 0 && gen.write_all(fd, arg.to_type(*u8), len) != 0) { failed = 1 }
+        if (failed == 0 && gen.write_all(fd, "\n".to_type(*u8), 1) != 0) { failed = 1 }
+        i += 1
+    }
+    let cl int = close(fd)
+    if (failed != 0 || cl != 0) {
+        unlink(path)
+        return -1
+    }
+    return 0
+}
+
+// mb_coff_forward_diag：把链接子进程的 stderr 文件转发到本进程 stderr 后删除。
+// 子进程不能继承父进程的 stderr（见 windows_shim.c 的 yh_win_spawn_link），
+// 因此诊断先落文件，链接结束后由这里回放——失败信息不会丢。
+fn mb_coff_forward_diag(path *char) int {
+    let fd int = open(path, 0x0, 0)
+    if (fd < 0) { return -1 }
+    let buf [2048]u8
+    let rc int = 0
+    let n i64 = read(fd, &buf[0], 2048)
+    for n > 0 {
+        if (gen.write_all(2, &buf[0], n.to_type(int)) != 0) { rc = -1 }
+        n = read(fd, &buf[0], 2048)
+    }
+    close(fd)
+    unlink(path)
+    return rc
+}
+
+// mb_coff_link_worker：执行内嵌 lld 的 WinLink 驱动。
+// 返回 0 成功、-1 失败（诊断已写）、-2 lld 要求结束进程（不可重入）。
+// 有 fork 的宿主直接 fork；无 fork 的 Windows 重入 `yh --lld-link <响应文件>`，
+// 子进程退出后父进程才读/改名产物（lld 的输出句柄活到进程退出）。
+fn mb_coff_link_worker(argv **char, argc int, output *char) int {
+    if (output == 0 || argc <= 0) { return gen.fail("COFF 链接参数无效") }
+    // 链接 worker 只跑一次链接：让 lld 的诊断直接进 stderr（子进程继承）。
+    // 否则 lld 的 fatal() 会在诊断回传前就结束进程，失败信息丢失。
+    setenv("YH_LLD_STDERR", "1", 1)
+    if (mb_can_fork() == 0) {
+        $if (windows) {
+            let rsp [1100]u8
+            let rn int = gen.append_str(&rsp[0], 0, output)
+            let rn2 int = gen.append_str(&rsp[0], rn, ".rsp.")
+            let rn3 int = gen.append_int(&rsp[0], rn2, getpid())
+            rsp[rn3] = 0
+            if (mb_coff_write_rsp(gen.arr_cstr(&rsp[0]), argv, argc) != 0) {
+                return gen.fail("无法写 COFF 链接响应文件")
+            }
+            if (mb_resolve_self_path() != 0) {
+                unlink(gen.arr_cstr(&rsp[0]))
+                return gen.fail("无法解析编译器自身路径")
+            }
+            let spawn_args [4]*char
+            spawn_args[0] = mb_self_path
+            spawn_args[1] = "--lld-link"
+            spawn_args[2] = gen.arr_cstr(&rsp[0])
+            spawn_args[3] = 0.to_type(*char)
+            // 子进程的 stderr 落到旁边的 .err 文件（不能继承管道，见
+            // windows_shim.c 的 yh_win_spawn_link 注释）；退出后把内容转发到
+            // 本进程的 stderr，用户看到的诊断与 in-process 链接一致。
+            let errp [1200]u8
+            let en int = gen.append_str(&errp[0], 0, gen.arr_cstr(&rsp[0]))
+            en = gen.append_str(&errp[0], en, ".err")
+            errp[en] = 0
+            let rc int = yh_win_spawn_link(&spawn_args[0], 3, gen.arr_cstr(&errp[0]))
+            mb_coff_forward_diag(gen.arr_cstr(&errp[0]))
+            unlink(gen.arr_cstr(&rsp[0]))
+            return rc == 0 ? 0 : -1
+        } $else {
+            return gen.fail("无 fork 宿主只有 Windows 已接线")
+        }
+    }
+    let child int = fork()
+    if (child < 0) { return gen.fail("无法启动内嵌 lld worker") }
+    if (child == 0) {
+        let diagnostic [backend.LLVM_LLD_DIAG]u8
+        let status int = backend.llvm_lld_link_argv(argv, argc,
+            (&diagnostic[0]).to_type(*char))
+        if (status != 0) {
+            if (diagnostic[0] != 0) {
+                gen.write_all(2, &diagnostic[0],
+                    strlen((&diagnostic[0]).to_type(*char)).to_type(int))
+                gen.write_all(2, "\n".to_type(*u8), 1)
+            }
+            if (status == -2) { exit(253) }
+            exit(1)
+        }
+        exit(0)
+    }
+    let status int = cmd_process_status(child)
+    if (status == 253) { return -2 }
+    return status == 0 ? 0 : -1
+}

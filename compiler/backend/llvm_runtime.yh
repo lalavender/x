@@ -63,6 +63,20 @@ pub fn llvm_runtime_supplies_symbol(unit *ir.IRModule, name *char) int {
         || gen.cstr_eq(name, "printf") != 0 || gen.cstr_eq(name, "linux_syscall6") != 0) {
         return 1
     }
+    // Windows/x64 零 CRT：write/read/exit/_Exit 也由本模块的 Windows 运行时定义，
+    // 声明阶段必须跳过它们——LLVM 不允许同名 declare + define（2026-10-27 W1-3b）。
+    if (gen.cstr_eq(unit.target.abi, "win64-msvc") != 0) {
+        // 只列「运行时真的给出定义」的名字：LLVM 不允许同名 declare + define。
+        // exit/_Exit 由链接期 /alternatename 解析到 ExitProcess，因此仍按普通
+        // 外部符号声明（否则调用点会缺声明）。
+        if (gen.cstr_eq(name, "write") != 0 || gen.cstr_eq(name, "read") != 0
+            || gen.cstr_eq(name, "open") != 0 || gen.cstr_eq(name, "close") != 0
+            || gen.cstr_eq(name, "mkdir") != 0 || gen.cstr_eq(name, "unlink") != 0
+            || gen.cstr_eq(name, "rename") != 0
+            || gen.cstr_eq(name, "getpid") != 0 || gen.cstr_eq(name, "getppid") != 0) {
+            return 1
+        }
+    }
     // yh test 断言运行时：由本模块发射弱定义（见 llvm_runtime_write_test_assert）。
     if (gen.cstr_eq(name, "__yh_test_assert") != 0) { return 1 }
     return 0
@@ -83,11 +97,33 @@ fn llvm_runtime_aggregate_copy(unit *ir.IRModule) int {
     return 0
 }
 
-// llvm_runtime_write_memcpy：按目标发射 memcpy 定义；n==0 直接返回，复制按字节推进。
-fn llvm_runtime_write_memcpy(out *LLVMOutput, hidden int) void {
+// llvm_runtime_weak_signature：发射 weak 定义签名。
+// ELF/Mach-O 的 weak 定义会被链接器自然合并；COFF 的 weak 是「带备用符号的
+// 弱外部」，同名多份会被 lld-link 判成 duplicate symbol。因此 Windows 目标
+// 额外发射 `$<name> = comdat any` 并把函数挂到同名 COMDAT，多模块各自携带
+// 的运行时在链接时只保留一份。
+fn llvm_runtime_weak_signature(out *LLVMOutput, name *char, hidden int,
+    win64 int, signature *char) void {
+    if (win64 != 0) {
+        llvm_text(out, "$")
+        llvm_text(out, name)
+        llvm_text(out, " = comdat any\n")
+    }
     llvm_text(out, "define weak ")
     if (hidden != 0) { llvm_text(out, "hidden ") }
-    llvm_text(out, "ptr @memcpy(ptr %dst, ptr %src, i64 %n) noinline nounwind optnone nobuiltin {\n")
+    llvm_text(out, signature)
+    if (win64 != 0) {
+        llvm_text(out, " comdat($")
+        llvm_text(out, name)
+        llvm_text(out, ")")
+    }
+    llvm_text(out, " {\n")
+}
+
+// llvm_runtime_write_memcpy：按目标发射 memcpy 定义；n==0 直接返回，复制按字节推进。
+fn llvm_runtime_write_memcpy(out *LLVMOutput, hidden int, win64 int) void {
+    llvm_runtime_weak_signature(out, "memcpy", hidden, win64,
+        "ptr @memcpy(ptr %dst, ptr %src, i64 %n) noinline nounwind optnone nobuiltin")
     llvm_text(out, "entry:\n  %empty = icmp eq i64 %n, 0\n  br i1 %empty, label %done, label %loop\n")
     llvm_text(out, "loop:\n  %i = phi i64 [ 0, %entry ], [ %next, %loop ]\n")
     llvm_text(out, "  %d = getelementptr i8, ptr %dst, i64 %i\n")
@@ -101,10 +137,9 @@ fn llvm_runtime_write_memcpy(out *LLVMOutput, hidden int) void {
 
 // llvm_runtime_write_memmove：大聚合的 LLVM intrinsic 可能降为 libcall；提供不
 // 依赖 libc 的前后向字节循环。禁止循环惯用法重新生成对自身的递归调用。
-fn llvm_runtime_write_memmove(out *LLVMOutput, hidden int) void {
-    llvm_text(out, "define weak ")
-    if (hidden != 0) { llvm_text(out, "hidden ") }
-    llvm_text(out, "ptr @memmove(ptr %dst, ptr %src, i64 %n) noinline nounwind optnone nobuiltin {\n")
+fn llvm_runtime_write_memmove(out *LLVMOutput, hidden int, win64 int) void {
+    llvm_runtime_weak_signature(out, "memmove", hidden, win64,
+        "ptr @memmove(ptr %dst, ptr %src, i64 %n) noinline nounwind optnone nobuiltin")
     llvm_text(out, "entry:\n  %empty = icmp eq i64 %n, 0\n  %same = icmp eq ptr %dst, %src\n")
     llvm_text(out, "  %skip = or i1 %empty, %same\n  br i1 %skip, label %done, label %direction\n")
     llvm_text(out, "direction:\n  %backward = icmp ugt ptr %dst, %src\n")
@@ -123,10 +158,9 @@ fn llvm_runtime_write_memmove(out *LLVMOutput, hidden int) void {
 }
 
 // llvm_runtime_write_memset：按目标发射 memset 定义；value 截断为低 8 位并逐字节填充。
-fn llvm_runtime_write_memset(out *LLVMOutput, hidden int) void {
-    llvm_text(out, "define weak ")
-    if (hidden != 0) { llvm_text(out, "hidden ") }
-    llvm_text(out, "ptr @memset(ptr %dst, i32 %value, i64 %n) noinline nounwind optnone nobuiltin {\n")
+fn llvm_runtime_write_memset(out *LLVMOutput, hidden int, win64 int) void {
+    llvm_runtime_weak_signature(out, "memset", hidden, win64,
+        "ptr @memset(ptr %dst, i32 %value, i64 %n) noinline nounwind optnone nobuiltin")
     llvm_text(out, "entry:\n  %empty = icmp eq i64 %n, 0\n  br i1 %empty, label %done, label %loop\n")
     llvm_text(out, "loop:\n  %i = phi i64 [ 0, %entry ], [ %next, %loop ]\n")
     llvm_text(out, "  %d = getelementptr i8, ptr %dst, i64 %i\n")
@@ -138,10 +172,9 @@ fn llvm_runtime_write_memset(out *LLVMOutput, hidden int) void {
 }
 
 // llvm_runtime_write_strlen：按目标发射 strlen 定义；loop 携带当前下标，scan 只推进计数。
-fn llvm_runtime_write_strlen(out *LLVMOutput, hidden int) void {
-    llvm_text(out, "define weak ")
-    if (hidden != 0) { llvm_text(out, "hidden ") }
-    llvm_text(out, "i64 @strlen(ptr %s) noinline nounwind optnone nobuiltin {\n")
+fn llvm_runtime_write_strlen(out *LLVMOutput, hidden int, win64 int) void {
+    llvm_runtime_weak_signature(out, "strlen", hidden, win64,
+        "i64 @strlen(ptr %s) noinline nounwind optnone nobuiltin")
     llvm_text(out, "entry:\n  br label %loop\n")
     llvm_text(out, "loop:\n  %i = phi i64 [ 0, %entry ], [ %next, %scan ]\n")
     llvm_text(out, "  %p = getelementptr i8, ptr %s, i64 %i\n")
@@ -191,9 +224,17 @@ fn llvm_runtime_write_free(out *LLVMOutput, arm64 int) void {
     llvm_text(out, "done:\n  ret void\n}\n\n")
 }
 
-// llvm_runtime_write_printf_support：按 syscall 短写循环输出，并累计成功字节数。
-// write 号在 x86_64 为 1、AArch64 为 64。
+// llvm_runtime_write_printf_support：Linux/Darwin 的 printf 辅助（syscall 短写循环 +
+// 跨平台 emit/整数格式化）。Windows 只用后一半：短写改由 WriteFile 实现
+// （backend/llvm_windows_runtime.yh），不共享这里的前半。
 fn llvm_runtime_write_printf_support(out *LLVMOutput, arm64 int) void {
+    llvm_runtime_write_printf_write_syscall(out, arm64)
+    llvm_runtime_write_printf_emit(out)
+}
+
+// llvm_runtime_write_printf_write_syscall：按 syscall 短写循环输出，并累计成功字节数。
+// write 号在 x86_64 为 1、AArch64 为 64。
+fn llvm_runtime_write_printf_write_syscall(out *LLVMOutput, arm64 int) void {
     llvm_text(out, "define internal i64 @yh_printf_write(ptr %data, i64 %len) noinline nounwind optnone nobuiltin {\nentry:\n")
     llvm_text(out, "  %empty = icmp eq i64 %len, 0\n  br i1 %empty, label %done, label %loop\nloop:\n")
     llvm_text(out, "  %written = phi i64 [ 0, %entry ], [ %next, %advance ]\n")
@@ -204,6 +245,10 @@ fn llvm_runtime_write_printf_support(out *LLVMOutput, arm64 int) void {
     llvm_text(out, "  %failed = icmp sle i64 %chunk, 0\n  br i1 %failed, label %error, label %advance\nadvance:\n")
     llvm_text(out, "  %next = add i64 %written, %chunk\n  %complete = icmp uge i64 %next, %len\n")
     llvm_text(out, "  br i1 %complete, label %done, label %loop\ndone:\n  ret i64 %len\nerror:\n  ret i64 -1\n}\n\n")
+}
+
+// llvm_runtime_write_printf_emit：平台无关的输出管道与十进制整数格式化（依 @yh_printf_write）。
+fn llvm_runtime_write_printf_emit(out *LLVMOutput) void {
     llvm_text(out, "define internal i32 @yh_printf_emit(ptr %data, i64 %len, ptr %count) noinline nounwind optnone nobuiltin {\nentry:\n")
     llvm_text(out, "  %result = call i64 @yh_printf_write(ptr %data, i64 %len)\n  %failed = icmp slt i64 %result, 0\n")
     llvm_text(out, "  br i1 %failed, label %error, label %account\naccount:\n  %old = load i64, ptr %count, align 8\n")
@@ -259,12 +304,12 @@ fn llvm_runtime_write_va_helper(out *LLVMOutput, arm64 int) void {
 
 // llvm_runtime_write_printf：支持现行格式集合；格式字符串和 %s 都按 UTF-8 字节输出。
 // arm64 同时选择 32 字节 Linux va_list 与显式寄存器槽/栈槽读取。
-fn llvm_runtime_write_printf(out *LLVMOutput, hidden int, arm64 int) void {
+fn llvm_runtime_write_printf(out *LLVMOutput, hidden int, arm64 int, win64 int) void {
     llvm_text(out, "declare void @llvm.va_start(ptr)\ndeclare void @llvm.va_end(ptr)\n\n")
     llvm_runtime_write_va_helper(out, arm64)
-    llvm_text(out, "define weak ")
-    if (hidden != 0) { llvm_text(out, "hidden ") }
-    llvm_text(out, "i32 @printf(ptr %fmt, ...) noinline nounwind optnone nobuiltin {\nentry:\n")
+    llvm_runtime_weak_signature(out, "printf", hidden, win64,
+        "i32 @printf(ptr %fmt, ...) noinline nounwind optnone nobuiltin")
+    llvm_text(out, "entry:\n")
     llvm_text(out, "  %args = alloca ["); llvm_number(out, arm64 != 0 ? 32 : 24)
     llvm_text(out, " x i8], align 8\n  %count = alloca i64, align 8\n")
     llvm_text(out, "  %character = alloca [1 x i8], align 1\n  %unknown = alloca [2 x i8], align 1\n")
@@ -345,16 +390,18 @@ fn llvm_runtime_write_printf(out *LLVMOutput, hidden int, arm64 int) void {
 // 条件为假时向 fd 3 写 12 字节失败记录（'Y' 'H' 'T' 'F' + line + col，
 // 小端 i32），随后 exit(1)；条件为真直接返回。记录通道与 stdout/stderr 分离，
 // 父进程据此同时得到失败位置与「未被断言捕获的退出」的区别。
-fn llvm_runtime_write_test_assert(unit *ir.IRModule, out *LLVMOutput) void {
+fn llvm_runtime_write_test_assert(unit *ir.IRModule, out *LLVMOutput,
+    win64 int) void {
     // 模块里可能已引用 write/exit（用户测试体调用它们）。Darwin 的 printf 运行时
-    // 支持本身会声明 @write；Linux 版 printf 走 syscall、不声明它，因此仅在
-    // 「既没引用 write、也没有 Darwin printf 支持」时补声明，避免重复声明。
+    // 支持本身会声明 @write；Windows 运行时由 support 发射 write 定义；Linux 版
+    // printf 走 syscall、不声明它，因此仅在「三边都没有」时补声明，避免
+    // declare + define 同名冲突。
     let darwin_write int = 0
     if (gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
         && llvm_runtime_named(unit, "printf") != 0) {
         darwin_write = 1
     }
-    if (llvm_runtime_named(unit, "write") == 0 && darwin_write == 0) {
+    if (llvm_runtime_named(unit, "write") == 0 && darwin_write == 0 && win64 == 0) {
         llvm_text(out, "declare i64 @write(i32, ptr, i64)\n")
     }
     if (llvm_runtime_named(unit, "exit") == 0) {
@@ -362,7 +409,8 @@ fn llvm_runtime_write_test_assert(unit *ir.IRModule, out *LLVMOutput) void {
     }
     // 记录布局（72 字节）：0..3 magic，4..7 line，8..11 col，12..71 消息
     // （NUL 填充，最长 60 字节）。条件为假时写记录并 exit(1)。
-    llvm_text(out, "define weak void @__yh_test_assert(i8 %cond, i32 %line, i32 %col, ptr %msg) noinline nounwind optnone {\n")
+    llvm_runtime_weak_signature(out, "__yh_test_assert", 0, win64,
+        "void @__yh_test_assert(i8 %cond, i32 %line, i32 %col, ptr %msg) noinline nounwind optnone")
     llvm_text(out, "entry:\n  %failed = icmp eq i8 %cond, 0\n")
     llvm_text(out, "  br i1 %failed, label %report, label %done\n")
     llvm_text(out, "report:\n  %rec = alloca [72 x i8], align 4\n")
@@ -409,6 +457,8 @@ fn llvm_runtime_write_test_assert(unit *ir.IRModule, out *LLVMOutput) void {
 pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
     let darwin int = gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0 ? 1 : 0
     let arm64 int = gen.cstr_eq(unit.target.abi, "aapcs64") != 0 ? 1 : 0
+    // Windows/x64 不走 syscall：malloc/printf/write 全部经 Win32 API（W1-3）。
+    let win64 int = gen.cstr_eq(unit.target.abi, "win64-msvc") != 0 ? 1 : 0
     let emit_memcpy int = (llvm_runtime_defined(unit, "memcpy") == 0).to_type(int)
     let emit_memset int = (llvm_runtime_defined(unit, "memset") == 0).to_type(int)
     let emit_strlen int = (llvm_runtime_defined(unit, "strlen") == 0).to_type(int)
@@ -420,7 +470,7 @@ pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
         && llvm_runtime_defined(unit, "__yh_runtime_free") == 0).to_type(int)
     let emit_printf int = (llvm_runtime_named(unit, "printf") != 0
         && llvm_runtime_defined(unit, "printf") == 0).to_type(int)
-    let needs_syscall int = darwin == 0 && (emit_malloc != 0 || emit_free != 0
+    let needs_syscall int = darwin == 0 && win64 == 0 && (emit_malloc != 0 || emit_free != 0
         || emit_printf != 0 || llvm_runtime_named(unit, "linux_syscall6") != 0) ? 1 : 0
     let emit_syscall int = (needs_syscall != 0
         && llvm_runtime_defined(unit, "linux_syscall6") == 0).to_type(int)
@@ -432,18 +482,23 @@ pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
     llvm_byte(out, '\n')
     if (darwin != 0) {
         llvm_apple_runtime_write_support(unit, out, emit_malloc, emit_free, emit_printf)
+    } else if (win64 != 0) {
+        // W1-3：HeapAlloc/WriteFile 版运行时；同时按需补 write/exit 薄层，
+        // 让 yh test 的断言记录（fd 3 → 标准错误）不需要另写一套发射。
+        llvm_windows_runtime_write_support(unit, out, emit_malloc, emit_free,
+            emit_printf, emit_test_assert)
     } else {
         if (emit_syscall != 0) { llvm_runtime_write_syscall(out, arm64) }
         if (emit_malloc != 0) { llvm_runtime_write_malloc(out, arm64) }
         if (emit_free != 0) { llvm_runtime_write_free(out, arm64) }
         if (emit_printf != 0) { llvm_runtime_write_printf_support(out, arm64) }
     }
-    if (emit_printf != 0) { llvm_runtime_write_printf(out, darwin, arm64) }
-    if (emit_memcpy != 0) { llvm_runtime_write_memcpy(out, darwin) }
-    if (emit_memset != 0) { llvm_runtime_write_memset(out, darwin) }
-    if (emit_strlen != 0) { llvm_runtime_write_strlen(out, darwin) }
-    if (emit_move != 0) { llvm_runtime_write_memmove(out, darwin) }
-    if (emit_test_assert != 0) { llvm_runtime_write_test_assert(unit, out) }
+    if (emit_printf != 0) { llvm_runtime_write_printf(out, darwin, arm64, win64) }
+    if (emit_memcpy != 0) { llvm_runtime_write_memcpy(out, darwin, win64) }
+    if (emit_memset != 0) { llvm_runtime_write_memset(out, darwin, win64) }
+    if (emit_strlen != 0) { llvm_runtime_write_strlen(out, darwin, win64) }
+    if (emit_move != 0) { llvm_runtime_write_memmove(out, darwin, win64) }
+    if (emit_test_assert != 0) { llvm_runtime_write_test_assert(unit, out, win64) }
     llvm_text(out, "\n@llvm.used = appending global [")
     llvm_number(out, emitted.to_type(u64))
     llvm_text(out, " x ptr] [")

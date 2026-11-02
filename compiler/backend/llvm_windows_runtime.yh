@@ -1,0 +1,584 @@
+module backend
+import ir
+
+// ============================================================================
+// llvm_windows_runtime.yh —— Windows/x64（win64-msvc，零 CRT）运行时发射（W1-3）
+//
+// 与 llvm_apple_runtime.yh 同层：只负责「本平台怎么触达系统」，由
+// llvm_runtime.yh 的 llvm_runtime_memory_text 按 abi 分派。契约与 Linux 版一致：
+//
+//   __yh_runtime_malloc(size i64) ptr   —— HeapAlloc(GetProcessHeap()) 分配，
+//                                          头部 16 字节空间保证用户指针 16 字节对齐
+//   __yh_runtime_free(p ptr) void       —— HeapFree，NULL 无操作
+//   printf(fmt ptr, ...) i32            —— 弱定义；输出走 GetStdHandle(-11)+WriteFile
+//   write(fd i32, buf ptr, n i64) i64   —— 薄层：fd 1 → 标准输出，其余 → 标准错误
+//   exit/_Exit                          —— 不定义：链接期 /alternatename 映射到 ExitProcess
+//
+// 为什么不用 libc：方案 D2 选了零 CRT，只依赖 KERNEL32.dll（导入库见
+// compiler/windows-sdk/，由 tools/windows-sdk.py 从 .def 生成）。
+//
+// 契约细节（与 Linux 版保持同一语义，避免两套行为）：
+//   * weak + comdat any + llvm.used：COFF 的 weak 不能合并同名定义，必须挂 COMDAT；
+//     多模块各带一份时链接器只保留一份（代价：用户同名强定义不能共存）；
+//   * optnone/noinline/nobuiltin：阻止 O2 把逐字节循环改写成对自身的 libcall；
+//   * malloc 的 0 字节按 1 字节处理，溢出检查与 Linux 版相同（size > -17 即失败）。
+// ============================================================================
+
+// llvm_windows_runtime_declare：按需声明用到的 kernel32 入口。
+// 参数类型按 Win64 C 类型映射：HANDLE/指针 → ptr，DWORD → i32，
+// SIZE_T → i64，BOOL → i32。x64 Windows 只有一个调用约定，都用 ccc。
+fn llvm_windows_runtime_declare(out *LLVMOutput, emit_malloc int, emit_free int,
+    emit_printf int, emit_write int) void {
+    if (emit_malloc != 0 || emit_free != 0) {
+        llvm_text(out, "declare ptr @GetProcessHeap()\n")
+        llvm_text(out, "declare ptr @HeapAlloc(ptr, i32, i64)\n")
+        llvm_text(out, "declare i32 @HeapFree(ptr, i32, ptr)\n")
+    }
+    if (emit_printf != 0 || emit_write != 0) {
+        llvm_text(out, "declare ptr @GetStdHandle(i32)\n")
+        llvm_text(out, "declare i32 @WriteFile(ptr, ptr, i32, ptr, ptr)\n")
+        // read 与 printf/write 共用 GetStdHandle；ReadFile 一并声明。
+        llvm_text(out, "declare i32 @ReadFile(ptr, ptr, i32, ptr, ptr)\n")
+    }
+}
+
+// llvm_windows_runtime_write_malloc：HeapAlloc 实现；头部 16 字节记录总长，
+// 用户指针 = 基址 + 16（HeapAlloc 在 x64 上按 16 字节对齐，偏移后仍对齐）。
+fn llvm_windows_runtime_write_malloc(out *LLVMOutput) void {
+    llvm_runtime_weak_signature(out, "__yh_runtime_malloc", 0, 1,
+        "ptr @__yh_runtime_malloc(i64 %size) noinline nounwind optnone nobuiltin")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %overflow = icmp ugt i64 %size, -17\n  br i1 %overflow, label %fail, label %prepare\nprepare:\n")
+    llvm_text(out, "  %zero = icmp eq i64 %size, 0\n  %payload = select i1 %zero, i64 1, i64 %size\n")
+    llvm_text(out, "  %total = add i64 %payload, 16\n  %heap = call ptr @GetProcessHeap()\n")
+    llvm_text(out, "  %raw = call ptr @HeapAlloc(ptr %heap, i32 0, i64 %total)\n")
+    llvm_text(out, "  %missing = icmp eq ptr %raw, null\n  br i1 %missing, label %fail, label %success\nsuccess:\n")
+    llvm_text(out, "  store i64 %total, ptr %raw, align 8\n")
+    llvm_text(out, "  %user = getelementptr i8, ptr %raw, i64 16\n  ret ptr %user\n")
+    llvm_text(out, "fail:\n  ret ptr null\n}\n\n")
+}
+
+// llvm_windows_runtime_write_free：NULL 无操作；其余回到 16 字节头部交给 HeapFree。
+fn llvm_windows_runtime_write_free(out *LLVMOutput) void {
+    llvm_runtime_weak_signature(out, "__yh_runtime_free", 0, 1,
+        "void @__yh_runtime_free(ptr %user) noinline nounwind optnone nobuiltin")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %null = icmp eq ptr %user, null\n  br i1 %null, label %done, label %release\nrelease:\n")
+    llvm_text(out, "  %base = getelementptr i8, ptr %user, i64 -16\n  %heap = call ptr @GetProcessHeap()\n")
+    llvm_text(out, "  %ignored = call i32 @HeapFree(ptr %heap, i32 0, ptr %base)\n  br label %done\n")
+    llvm_text(out, "done:\n  ret void\n}\n\n")
+}
+
+// llvm_windows_runtime_write_printf_write：printf 的输出原语（WriteFile 短写循环）。
+// 与 Linux 版同一契约：成功返回 %len，任一失败返回 -1；控制台与管道都由 WriteFile
+// 处理（测试门通过管道重定向捕获，按字节比较，不做 CRLF 翻译）。
+fn llvm_windows_runtime_write_printf_write(out *LLVMOutput) void {
+    llvm_text(out, "define internal i64 @yh_printf_write(ptr %data, i64 %len) noinline nounwind optnone nobuiltin {\nentry:\n")
+    llvm_text(out, "  %handle = call ptr @GetStdHandle(i32 -11)\n  %written_slot = alloca i32, align 4\n")
+    llvm_text(out, "  %empty = icmp eq i64 %len, 0\n  br i1 %empty, label %done, label %loop\nloop:\n")
+    llvm_text(out, "  %written = phi i64 [ 0, %entry ], [ %next, %step ]\n")
+    llvm_text(out, "  %cursor = getelementptr i8, ptr %data, i64 %written\n  %left = sub i64 %len, %written\n")
+    llvm_text(out, "  %chunk = trunc i64 %left to i32\n  store i32 0, ptr %written_slot, align 4\n")
+    llvm_text(out, "  %ok = call i32 @WriteFile(ptr %handle, ptr %cursor, i32 %chunk, ptr %written_slot, ptr null)\n")
+    llvm_text(out, "  %failed = icmp eq i32 %ok, 0\n  br i1 %failed, label %error, label %advance\nadvance:\n")
+    llvm_text(out, "  %wrote = load i32, ptr %written_slot, align 4\n  %wrote64 = zext i32 %wrote to i64\n")
+    llvm_text(out, "  %stuck = icmp eq i64 %wrote64, 0\n  br i1 %stuck, label %error, label %step\nstep:\n")
+    llvm_text(out, "  %next = add i64 %written, %wrote64\n  %complete = icmp uge i64 %next, %len\n")
+    llvm_text(out, "  br i1 %complete, label %done, label %loop\ndone:\n  ret i64 %len\nerror:\n  ret i64 -1\n}\n\n")
+}
+
+
+
+
+
+// llvm_windows_runtime_write_entry：argv 支持（W1-3b）。
+// Win64 入口不传参数，所以发射零 CRT 入口桩 __yh_zero_crt_start：GetCommandLineA → 一个极简
+// 命令行解析器（双引号成组、空格分隔、连续空格忽略）→ 调 main(argc, argv) →
+// ExitProcess(返回值)。main 无参时多余的两个实参在 x64 ABI 下被忽略，因此同一入口
+// 对 `fn main()` 与 `fn main(argc int, argv **char)` 都成立。
+// 缓冲区是模块内 internal 全局（只在本模块定义 main 时才发射），不依赖 CRT。
+fn llvm_windows_runtime_write_entry(out *LLVMOutput) void {
+    llvm_text(out, "declare void @ExitProcess(i32)\n\n")
+    llvm_text(out, "@__yh_cmdline = internal global [8192 x i8] zeroinitializer\n")
+    llvm_text(out, "@__yh_argv = internal global [256 x ptr] zeroinitializer\n")
+    llvm_text(out, "declare ptr @GetCommandLineA()\n")
+    llvm_text(out, "\n")
+    llvm_text(out, "define internal ptr @__yh_build_argv(ptr %argc_out) noinline nounwind optnone {\n")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %i_p = alloca i64, align 8\n")
+    llvm_text(out, "  %o_p = alloca i64, align 8\n")
+    llvm_text(out, "  %argc_p = alloca i32, align 4\n")
+    llvm_text(out, "  %q_p = alloca i1, align 1\n")
+    llvm_text(out, "  %s_p = alloca i1, align 1\n")
+    llvm_text(out, "  store i64 0, ptr %i_p, align 8\n")
+    llvm_text(out, "  store i64 0, ptr %o_p, align 8\n")
+    llvm_text(out, "  store i32 0, ptr %argc_p, align 4\n")
+    llvm_text(out, "  store i1 false, ptr %q_p, align 1\n")
+    llvm_text(out, "  store i1 false, ptr %s_p, align 1\n")
+    llvm_text(out, "  %line = call ptr @GetCommandLineA()\n")
+    llvm_text(out, "  %bufp = getelementptr [8192 x i8], ptr @__yh_cmdline, i64 0, i64 0\n")
+    llvm_text(out, "  %argvp = getelementptr [256 x ptr], ptr @__yh_argv, i64 0, i64 0\n")
+    llvm_text(out, "  br label %loop\n")
+    llvm_text(out, "loop:\n")
+    llvm_text(out, "  %i0 = load i64, ptr %i_p, align 8\n")
+    llvm_text(out, "  %sp = getelementptr i8, ptr %line, i64 %i0\n")
+    llvm_text(out, "  %c = load i8, ptr %sp, align 1\n")
+    llvm_text(out, "  %end = icmp eq i8 %c, 0\n")
+    llvm_text(out, "  br i1 %end, label %finish, label %body\n")
+    llvm_text(out, "body:\n")
+    llvm_text(out, "  %isq = icmp eq i8 %c, 34\n")
+    llvm_text(out, "  br i1 %isq, label %quote, label %space\n")
+    llvm_text(out, "quote:\n")
+    llvm_text(out, "  %q0 = load i1, ptr %q_p, align 1\n")
+    llvm_text(out, "  %q1 = xor i1 %q0, true\n")
+    llvm_text(out, "  store i1 %q1, ptr %q_p, align 1\n")
+    llvm_text(out, "  %i1 = add i64 %i0, 1\n")
+    llvm_text(out, "  store i64 %i1, ptr %i_p, align 8\n")
+    llvm_text(out, "  br label %loop\n")
+    llvm_text(out, "space:\n")
+    llvm_text(out, "  %isspace = icmp eq i8 %c, 32\n")
+    llvm_text(out, "  %q2 = load i1, ptr %q_p, align 1\n")
+    llvm_text(out, "  %nq = xor i1 %q2, true\n")
+    llvm_text(out, "  %issep = and i1 %isspace, %nq\n")
+    llvm_text(out, "  br i1 %issep, label %sep, label %copy\n")
+    llvm_text(out, "sep:\n")
+    llvm_text(out, "  %s0 = load i1, ptr %s_p, align 1\n")
+    llvm_text(out, "  br i1 %s0, label %sep_close, label %sep_skip\n")
+    llvm_text(out, "sep_close:\n")
+    llvm_text(out, "  %o0 = load i64, ptr %o_p, align 8\n")
+    llvm_text(out, "  %tp = getelementptr i8, ptr %bufp, i64 %o0\n")
+    llvm_text(out, "  store i8 0, ptr %tp, align 1\n")
+    llvm_text(out, "  %o1 = add i64 %o0, 1\n")
+    llvm_text(out, "  store i64 %o1, ptr %o_p, align 8\n")
+    llvm_text(out, "  store i1 false, ptr %s_p, align 1\n")
+    llvm_text(out, "  %i2 = add i64 %i0, 1\n")
+    llvm_text(out, "  store i64 %i2, ptr %i_p, align 8\n")
+    llvm_text(out, "  br label %loop\n")
+    llvm_text(out, "sep_skip:\n")
+    llvm_text(out, "  %i3 = add i64 %i0, 1\n")
+    llvm_text(out, "  store i64 %i3, ptr %i_p, align 8\n")
+    llvm_text(out, "  br label %loop\n")
+    llvm_text(out, "copy:\n")
+    llvm_text(out, "  %s1 = load i1, ptr %s_p, align 1\n")
+    llvm_text(out, "  br i1 %s1, label %write, label %begin\n")
+    llvm_text(out, "begin:\n")
+    llvm_text(out, "  %argc0 = load i32, ptr %argc_p, align 4\n")
+    llvm_text(out, "  %aidx = zext i32 %argc0 to i64\n")
+    llvm_text(out, "  %slot = getelementptr ptr, ptr %argvp, i64 %aidx\n")
+    llvm_text(out, "  %o2 = load i64, ptr %o_p, align 8\n")
+    llvm_text(out, "  %startp = getelementptr i8, ptr %bufp, i64 %o2\n")
+    llvm_text(out, "  store ptr %startp, ptr %slot, align 8\n")
+    llvm_text(out, "  %argc1 = add i32 %argc0, 1\n")
+    llvm_text(out, "  store i32 %argc1, ptr %argc_p, align 4\n")
+    llvm_text(out, "  store i1 true, ptr %s_p, align 1\n")
+    llvm_text(out, "  br label %write\n")
+    llvm_text(out, "write:\n")
+    llvm_text(out, "  %o3 = load i64, ptr %o_p, align 8\n")
+    llvm_text(out, "  %wp = getelementptr i8, ptr %bufp, i64 %o3\n")
+    llvm_text(out, "  store i8 %c, ptr %wp, align 1\n")
+    llvm_text(out, "  %o4 = add i64 %o3, 1\n")
+    llvm_text(out, "  store i64 %o4, ptr %o_p, align 8\n")
+    llvm_text(out, "  %i4 = add i64 %i0, 1\n")
+    llvm_text(out, "  store i64 %i4, ptr %i_p, align 8\n")
+    llvm_text(out, "  br label %loop\n")
+    llvm_text(out, "finish:\n")
+    llvm_text(out, "  %s2 = load i1, ptr %s_p, align 1\n")
+    llvm_text(out, "  br i1 %s2, label %tail, label %argv_null\n")
+    llvm_text(out, "tail:\n")
+    llvm_text(out, "  %o5 = load i64, ptr %o_p, align 8\n")
+    llvm_text(out, "  %tp2 = getelementptr i8, ptr %bufp, i64 %o5\n")
+    llvm_text(out, "  store i8 0, ptr %tp2, align 1\n")
+    llvm_text(out, "  %o6 = add i64 %o5, 1\n")
+    llvm_text(out, "  store i64 %o6, ptr %o_p, align 8\n")
+    llvm_text(out, "  br label %argv_null\n")
+    llvm_text(out, "argv_null:\n")
+    llvm_text(out, "  %argc2 = load i32, ptr %argc_p, align 4\n")
+    llvm_text(out, "  store i32 %argc2, ptr %argc_out, align 4\n")
+    llvm_text(out, "  %aidx2 = zext i32 %argc2 to i64\n")
+    llvm_text(out, "  %slot2 = getelementptr ptr, ptr %argvp, i64 %aidx2\n")
+    llvm_text(out, "  store ptr null, ptr %slot2, align 8\n")
+    llvm_text(out, "  ret ptr %argvp\n")
+    llvm_text(out, "}\n")
+    llvm_text(out, "\n")
+    llvm_text(out, "define void @__yh_zero_crt_start() noinline nounwind optnone {\n")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %argc_slot = alloca i32, align 4\n")
+    llvm_text(out, "  %argv = call ptr @__yh_build_argv(ptr %argc_slot)\n")
+    llvm_text(out, "  %argc = load i32, ptr %argc_slot, align 4\n")
+    llvm_text(out, "  %fn = bitcast ptr @main to ptr\n")
+    llvm_text(out, "  %rc = call i32 %fn(i32 %argc, ptr %argv)\n")
+    llvm_text(out, "  call void @ExitProcess(i32 %rc)\n")
+    llvm_text(out, "  unreachable\n")
+    llvm_text(out, "}\n")
+}
+
+// llvm_windows_runtime_write_pids：getpid/getppid 的 Windows 实现（W2-4a）。
+// 编译器用 getpid 拼会话后缀与临时文件名；串行构建路径不 fork，因此 getppid
+// 返回 0（mb_worker_parent_alive 在「未设置父检查」时直接视为存活）。
+fn llvm_windows_runtime_write_pids(out *LLVMOutput) void {
+    llvm_text(out, "declare i32 @GetCurrentProcessId()\n\n")
+    llvm_runtime_weak_signature(out, "getpid", 0, 1,
+        "i32 @getpid() noinline nounwind optnone")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %pid = call i32 @GetCurrentProcessId()\n  ret i32 %pid\n}\n\n")
+    llvm_runtime_weak_signature(out, "getppid", 0, 1,
+        "i32 @getppid() noinline nounwind optnone")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  ret i32 0\n}\n\n")
+}
+
+// llvm_windows_runtime_write_files：POSIX fd 面（W1-3d）。
+//
+// 契约（与 Linux 版一致，仅列差异）：
+//   open(path, flags, ...) —— flags 按 POSIX 位解释：0x1 O_WRONLY / 0x2 O_RDWR /
+//                            0x40 O_CREAT / 0x200 O_TRUNC / 0x400 O_APPEND；
+//                            Windows 侧映射 GENERIC_READ|WRITE + CREATE_ALWAYS /
+//                            OPEN_ALWAYS / TRUNCATE_EXISTING / OPEN_EXISTING，
+//                            O_APPEND 用 SetFilePointer(末尾) 模拟；成功返回 fd>=3，失败 -1。
+//   close(fd)              —— 0/1/2 是标准流（不关闭），>=3 关句柄并清槽。
+//   read/write(fd, ...)    —— fd 0/1/2 为标准流，>=3 走 fd 表；write 走短写循环。
+//   mkdir/unlink/rename    —— CreateDirectoryA / DeleteFileA / MoveFileExA(替换)。
+//
+// fd 表是 linkonce_odr + comdat 全局（多模块各带一份也只会保留一份），槽 0..63 对应 fd 3..66；
+// 分配时扫描空槽复用（与 POSIX fd 语义一致，不能只增不减）；
+// 句柄以 i64 保存，0 表示空槽。故意不做继承、管道与目录句柄（W2-7 需要时再加）。
+fn llvm_windows_runtime_write_files(out *LLVMOutput) void {
+    // 多模块各自携带时 linkonce_odr 仍不够：COFF 需要显式 COMDAT 才合并（
+    // 否则 lld-link 报 duplicate symbol）。
+    llvm_text(out, "$__yh_fd_handles = comdat any\n")
+    llvm_text(out, "@__yh_fd_handles = linkonce_odr global [64 x i64] zeroinitializer, comdat($__yh_fd_handles)\n")
+    llvm_text(out, "declare ptr @CreateFileA(ptr, i32, i32, ptr, i32, i32, ptr)\n")
+    llvm_text(out, "declare i32 @CloseHandle(ptr)\n")
+    llvm_text(out, "declare i32 @DeleteFileA(ptr)\n")
+    llvm_text(out, "declare i32 @CreateDirectoryA(ptr, ptr)\n")
+    llvm_text(out, "declare i32 @MoveFileExA(ptr, ptr, i32)\n")
+    llvm_text(out, "declare i32 @SetFilePointer(ptr, i32, ptr, i32)\n")
+    llvm_text(out, "declare i32 @GetEnvironmentVariableA(ptr, ptr, i32)\n")
+    // yh test：断言记录路径。子进程由 testkit 用 YH_TEST_RECORD 指定；
+    // fd 3 首次写入时据此创建/截断文件（Windows 无法继承进程内 fd 表）。
+    llvm_text(out, "@.yh_test_record_name = private unnamed_addr constant [15 x i8] c\"YH_TEST_RECORD\\00\"\n")
+    llvm_text(out, "\n")
+    llvm_text(out, "define internal i64 @__yh_fd3_record() noinline nounwind optnone {\n")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %path = alloca [1024 x i8], align 1\n")
+    llvm_text(out, "  %count = call i32 @GetEnvironmentVariableA(ptr @.yh_test_record_name, ptr %path, i32 1024)\n")
+    llvm_text(out, "  %missing = icmp sle i32 %count, 0\n")
+    llvm_text(out, "  br i1 %missing, label %fail, label %open\n")
+    llvm_text(out, "open:\n")
+    // GENERIC_WRITE(0x40000000) | share 3 | CREATE_ALWAYS(2) | FILE_ATTRIBUTE_NORMAL(0x80)
+    llvm_text(out, "  %handle = call ptr @CreateFileA(ptr %path, i32 1073741824, i32 3, ptr null, i32 2, i32 128, ptr null)\n")
+    llvm_text(out, "  %raw = ptrtoint ptr %handle to i64\n")
+    llvm_text(out, "  %bad = icmp eq i64 %raw, -1\n")
+    llvm_text(out, "  br i1 %bad, label %fail, label %seek\n")
+    llvm_text(out, "seek:\n")
+    llvm_text(out, "  %ignored = call i32 @SetFilePointer(ptr %handle, i32 0, ptr null, i32 2)\n")
+    llvm_text(out, "  %base = getelementptr [64 x i64], ptr @__yh_fd_handles, i64 0, i64 0\n")
+    llvm_text(out, "  store i64 %raw, ptr %base, align 8\n")
+    llvm_text(out, "  ret i64 %raw\n")
+    llvm_text(out, "fail:\n")
+    llvm_text(out, "  ret i64 0\n")
+    llvm_text(out, "}\n")
+    llvm_text(out, "\n")
+    llvm_text(out, "define internal i64 @__yh_fd_get(i32 %fd) noinline nounwind optnone {\n")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %idx = sub i32 %fd, 3\n")
+    llvm_text(out, "  %lo = icmp sge i32 %idx, 0\n")
+    llvm_text(out, "  %hi = icmp slt i32 %idx, 64\n")
+    llvm_text(out, "  %valid = and i1 %lo, %hi\n")
+    llvm_text(out, "  br i1 %valid, label %get, label %bad\n")
+    llvm_text(out, "get:\n")
+    llvm_text(out, "  %base = getelementptr [64 x i64], ptr @__yh_fd_handles, i64 0, i64 0\n")
+    llvm_text(out, "  %idx64 = sext i32 %idx to i64\n")
+    llvm_text(out, "  %slot = getelementptr i64, ptr %base, i64 %idx64\n")
+    llvm_text(out, "  %handle = load i64, ptr %slot, align 8\n")
+    llvm_text(out, "  ret i64 %handle\n")
+    llvm_text(out, "bad:\n")
+    llvm_text(out, "  ret i64 0\n")
+    llvm_text(out, "}\n")
+    llvm_text(out, "\n")
+    llvm_text(out, "define internal i32 @__yh_fd_new(i64 %handle) noinline nounwind optnone {\n")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %base = getelementptr [64 x i64], ptr @__yh_fd_handles, i64 0, i64 0\n")
+    llvm_text(out, "  br label %scan\n")
+    llvm_text(out, "scan:\n")
+    llvm_text(out, "  %i = phi i32 [ 0, %entry ], [ %next, %taken ]\n")
+    llvm_text(out, "  %full = icmp sge i32 %i, 64\n")
+    llvm_text(out, "  br i1 %full, label %fail, label %check\n")
+    llvm_text(out, "check:\n")
+    llvm_text(out, "  %idx = sext i32 %i to i64\n")
+    llvm_text(out, "  %slot = getelementptr i64, ptr %base, i64 %idx\n")
+    llvm_text(out, "  %cur = load i64, ptr %slot, align 8\n")
+    llvm_text(out, "  %free = icmp eq i64 %cur, 0\n")
+    llvm_text(out, "  br i1 %free, label %store, label %taken\n")
+    llvm_text(out, "store:\n")
+    llvm_text(out, "  store i64 %handle, ptr %slot, align 8\n")
+    llvm_text(out, "  %fd = add i32 %i, 3\n")
+    llvm_text(out, "  ret i32 %fd\n")
+    llvm_text(out, "taken:\n")
+    llvm_text(out, "  %next = add i32 %i, 1\n")
+    llvm_text(out, "  br label %scan\n")
+    llvm_text(out, "fail:\n")
+    llvm_text(out, "  ret i32 -1\n")
+    llvm_text(out, "}\n")
+    llvm_text(out, "\n")
+    llvm_runtime_weak_signature(out, "open", 0, 1,
+        "i32 @open(ptr %path, i32 %flags, ...) noinline nounwind optnone nobuiltin")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %wwr = and i32 %flags, 1\n")
+    llvm_text(out, "  %wrdwr = and i32 %flags, 2\n")
+    llvm_text(out, "  %wany = or i32 %wwr, %wrdwr\n")
+    llvm_text(out, "  %is_write = icmp ne i32 %wany, 0\n")
+    llvm_text(out, "  %access = select i1 %is_write, i32 1073741824, i32 -2147483648\n")
+    llvm_text(out, "  %cbit = and i32 %flags, 64\n")
+    llvm_text(out, "  %has_create = icmp ne i32 %cbit, 0\n")
+    llvm_text(out, "  %tbit = and i32 %flags, 512\n")
+    llvm_text(out, "  %has_trunc = icmp ne i32 %tbit, 0\n")
+    llvm_text(out, "  %ebit = and i32 %flags, 128\n")
+    llvm_text(out, "  %has_excl = icmp ne i32 %ebit, 0\n")
+    llvm_text(out, "  br i1 %has_create, label %with_create, label %without_create\n")
+    llvm_text(out, "with_create:\n")
+    llvm_text(out, "  br i1 %has_excl, label %d_create_new, label %create_choice\n")
+    llvm_text(out, "create_choice:\n")
+    llvm_text(out, "  br i1 %has_trunc, label %d_create_always, label %d_open_always\n")
+    llvm_text(out, "without_create:\n")
+    llvm_text(out, "  br i1 %has_trunc, label %d_truncate, label %d_open_existing\n")
+    llvm_text(out, "d_create_new:\n")
+    llvm_text(out, "  br label %join\n")
+    llvm_text(out, "d_create_always:\n")
+    llvm_text(out, "  br label %join\n")
+    llvm_text(out, "d_open_always:\n")
+    llvm_text(out, "  br label %join\n")
+    llvm_text(out, "d_truncate:\n")
+    llvm_text(out, "  br label %join\n")
+    llvm_text(out, "d_open_existing:\n")
+    llvm_text(out, "  br label %join\n")
+    llvm_text(out, "join:\n")
+    llvm_text(out, "  %disp = phi i32 [ 1, %d_create_new ], [ 2, %d_create_always ], [ 4, %d_open_always ], [ 5, %d_truncate ], [ 3, %d_open_existing ]\n")
+    // FILE_ATTRIBUTE_NORMAL(0x80) | FILE_FLAG_BACKUP_SEMANTICS(0x02000000)：
+    // POSIX 允许 open 目录（编译器用 open(path+"/.") 探测目录是否存在）。
+    llvm_text(out, "  %handle = call ptr @CreateFileA(ptr %path, i32 %access, i32 3, ptr null, i32 %disp, i32 33554560, ptr null)\n")
+    llvm_text(out, "  %raw = ptrtoint ptr %handle to i64\n")
+    llvm_text(out, "  %bad = icmp eq i64 %raw, -1\n")
+    llvm_text(out, "  br i1 %bad, label %fail, label %opened\n")
+    llvm_text(out, "opened:\n")
+    llvm_text(out, "  %abit = and i32 %flags, 1024\n")
+    llvm_text(out, "  %has_append = icmp ne i32 %abit, 0\n")
+    llvm_text(out, "  %append = and i1 %has_append, %is_write\n")
+    llvm_text(out, "  br i1 %append, label %seek_end, label %store\n")
+    llvm_text(out, "seek_end:\n")
+    llvm_text(out, "  %ignored = call i32 @SetFilePointer(ptr %handle, i32 0, ptr null, i32 2)\n")
+    llvm_text(out, "  br label %store\n")
+    llvm_text(out, "store:\n")
+    llvm_text(out, "  %fd = call i32 @__yh_fd_new(i64 %raw)\n")
+    llvm_text(out, "  %full = icmp slt i32 %fd, 0\n")
+    llvm_text(out, "  br i1 %full, label %close_it, label %done\n")
+    llvm_text(out, "close_it:\n")
+    llvm_text(out, "  %drop = call i32 @CloseHandle(ptr %handle)\n")
+    llvm_text(out, "  ret i32 -1\n")
+    llvm_text(out, "done:\n")
+    llvm_text(out, "  ret i32 %fd\n")
+    llvm_text(out, "fail:\n")
+    llvm_text(out, "  ret i32 -1\n")
+    llvm_text(out, "}\n")
+    llvm_text(out, "\n")
+    llvm_runtime_weak_signature(out, "close", 0, 1,
+        "i32 @close(i32 %fd) noinline nounwind optnone nobuiltin")
+    llvm_text(out, "entry:\n")
+    // 负 fd 是非法描述符（POSIX：EBADF），不能当成“标准描述符”静默成功；
+    // os.close_fd(-1) 之类的调用必须返回 -1。
+    llvm_text(out, "  %negative = icmp slt i32 %fd, 0\n")
+    llvm_text(out, "  br i1 %negative, label %fail, label %classify\n")
+    llvm_text(out, "classify:\n")
+    llvm_text(out, "  %std = icmp slt i32 %fd, 3\n")
+    llvm_text(out, "  br i1 %std, label %done, label %file\n")
+    llvm_text(out, "file:\n")
+    llvm_text(out, "  %idx = sub i32 %fd, 3\n")
+    llvm_text(out, "  %lo = icmp sge i32 %idx, 0\n")
+    llvm_text(out, "  %hi = icmp slt i32 %idx, 64\n")
+    llvm_text(out, "  %valid = and i1 %lo, %hi\n")
+    llvm_text(out, "  br i1 %valid, label %get, label %fail\n")
+    llvm_text(out, "get:\n")
+    llvm_text(out, "  %base = getelementptr [64 x i64], ptr @__yh_fd_handles, i64 0, i64 0\n")
+    llvm_text(out, "  %idx64 = sext i32 %idx to i64\n")
+    llvm_text(out, "  %slot = getelementptr i64, ptr %base, i64 %idx64\n")
+    llvm_text(out, "  %raw = load i64, ptr %slot, align 8\n")
+    llvm_text(out, "  %none = icmp eq i64 %raw, 0\n")
+    llvm_text(out, "  br i1 %none, label %fail, label %release\n")
+    llvm_text(out, "release:\n")
+    llvm_text(out, "  store i64 0, ptr %slot, align 8\n")
+    llvm_text(out, "  %handle = inttoptr i64 %raw to ptr\n")
+    llvm_text(out, "  %rc = call i32 @CloseHandle(ptr %handle)\n")
+    llvm_text(out, "  %bad = icmp eq i32 %rc, 0\n")
+    llvm_text(out, "  br i1 %bad, label %fail, label %done\n")
+    llvm_text(out, "done:\n")
+    llvm_text(out, "  ret i32 0\n")
+    llvm_text(out, "fail:\n")
+    llvm_text(out, "  ret i32 -1\n")
+    llvm_text(out, "}\n")
+    llvm_text(out, "\n")
+    llvm_runtime_weak_signature(out, "read", 0, 1,
+        "i64 @read(i32 %fd, ptr %buf, i64 %len) noinline nounwind optnone nobuiltin")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %slot = alloca i32, align 4\n")
+    llvm_text(out, "  %is_in = icmp eq i32 %fd, 0\n")
+    llvm_text(out, "  br i1 %is_in, label %stdin, label %other\n")
+    llvm_text(out, "stdin:\n")
+    llvm_text(out, "  %in_handle = call ptr @GetStdHandle(i32 -10)\n")
+    llvm_text(out, "  br label %do_read\n")
+    llvm_text(out, "other:\n")
+    llvm_text(out, "  %is_file = icmp sge i32 %fd, 3\n")
+    llvm_text(out, "  br i1 %is_file, label %file, label %fail\n")
+    llvm_text(out, "file:\n")
+    llvm_text(out, "  %raw = call i64 @__yh_fd_get(i32 %fd)\n")
+    llvm_text(out, "  %none = icmp eq i64 %raw, 0\n")
+    llvm_text(out, "  br i1 %none, label %fail, label %have\n")
+    llvm_text(out, "have:\n")
+    llvm_text(out, "  %file_handle = inttoptr i64 %raw to ptr\n")
+    llvm_text(out, "  br label %do_read\n")
+    llvm_text(out, "do_read:\n")
+    llvm_text(out, "  %handle = phi ptr [ %in_handle, %stdin ], [ %file_handle, %have ]\n")
+    llvm_text(out, "  %chunk = trunc i64 %len to i32\n")
+    llvm_text(out, "  store i32 0, ptr %slot, align 4\n")
+    llvm_text(out, "  %ok = call i32 @ReadFile(ptr %handle, ptr %buf, i32 %chunk, ptr %slot, ptr null)\n")
+    llvm_text(out, "  %failed = icmp eq i32 %ok, 0\n")
+    llvm_text(out, "  br i1 %failed, label %fail, label %done\n")
+    llvm_text(out, "done:\n")
+    llvm_text(out, "  %count = load i32, ptr %slot, align 4\n")
+    llvm_text(out, "  %count64 = zext i32 %count to i64\n")
+    llvm_text(out, "  ret i64 %count64\n")
+    llvm_text(out, "fail:\n")
+    llvm_text(out, "  ret i64 -1\n")
+    llvm_text(out, "}\n")
+    llvm_text(out, "\n")
+    llvm_runtime_weak_signature(out, "write", 0, 1,
+        "i64 @write(i32 %fd, ptr %buf, i64 %len) noinline nounwind optnone nobuiltin")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %written_slot = alloca i32, align 4\n")
+    llvm_text(out, "  %is_out = icmp eq i32 %fd, 1\n")
+    llvm_text(out, "  %is_err = icmp eq i32 %fd, 2\n")
+    llvm_text(out, "  %is_std = or i1 %is_out, %is_err\n")
+    llvm_text(out, "  br i1 %is_std, label %std, label %other\n")
+    llvm_text(out, "std:\n")
+    llvm_text(out, "  %code = select i1 %is_out, i32 -11, i32 -12\n")
+    llvm_text(out, "  %std_handle = call ptr @GetStdHandle(i32 %code)\n")
+    llvm_text(out, "  br label %loop_init\n")
+    llvm_text(out, "other:\n")
+    llvm_text(out, "  %is_file = icmp sge i32 %fd, 3\n")
+    llvm_text(out, "  br i1 %is_file, label %file, label %fail\n")
+    llvm_text(out, "file:\n")
+    llvm_text(out, "  %raw = call i64 @__yh_fd_get(i32 %fd)\n")
+    llvm_text(out, "  %none = icmp eq i64 %raw, 0\n")
+    // fd 3 是 yh test 的断言记录：进程内 fd 表不能跨 CreateProcess 继承，
+    // 子进程首次写 fd 3 时按 YH_TEST_RECORD 打开记录文件。
+    llvm_text(out, "  %is_record = icmp eq i32 %fd, 3\n")
+    llvm_text(out, "  %lazy = and i1 %none, %is_record\n")
+    llvm_text(out, "  br i1 %lazy, label %record, label %check\n")
+    llvm_text(out, "record:\n")
+    llvm_text(out, "  %new = call i64 @__yh_fd3_record()\n")
+    llvm_text(out, "  %no_record = icmp eq i64 %new, 0\n")
+    llvm_text(out, "  br i1 %no_record, label %fail, label %have_record\n")
+    llvm_text(out, "have_record:\n")
+    llvm_text(out, "  %record_handle = inttoptr i64 %new to ptr\n")
+    llvm_text(out, "  br label %loop_init\n")
+    llvm_text(out, "check:\n")
+    llvm_text(out, "  br i1 %none, label %fail, label %have\n")
+    llvm_text(out, "have:\n")
+    llvm_text(out, "  %file_handle = inttoptr i64 %raw to ptr\n")
+    llvm_text(out, "  br label %loop_init\n")
+    llvm_text(out, "loop_init:\n")
+    llvm_text(out, "  %handle = phi ptr [ %std_handle, %std ], [ %file_handle, %have ], [ %record_handle, %have_record ]\n")
+    llvm_text(out, "  %empty = icmp eq i64 %len, 0\n")
+    llvm_text(out, "  br i1 %empty, label %done, label %loop\n")
+    llvm_text(out, "loop:\n")
+    llvm_text(out, "  %written = phi i64 [ 0, %loop_init ], [ %next, %step ]\n")
+    llvm_text(out, "  %cursor = getelementptr i8, ptr %buf, i64 %written\n")
+    llvm_text(out, "  %left = sub i64 %len, %written\n")
+    llvm_text(out, "  %chunk = trunc i64 %left to i32\n")
+    llvm_text(out, "  store i32 0, ptr %written_slot, align 4\n")
+    llvm_text(out, "  %ok = call i32 @WriteFile(ptr %handle, ptr %cursor, i32 %chunk, ptr %written_slot, ptr null)\n")
+    llvm_text(out, "  %failed = icmp eq i32 %ok, 0\n")
+    llvm_text(out, "  br i1 %failed, label %fail, label %advance\n")
+    llvm_text(out, "advance:\n")
+    llvm_text(out, "  %wrote = load i32, ptr %written_slot, align 4\n")
+    llvm_text(out, "  %wrote64 = zext i32 %wrote to i64\n")
+    llvm_text(out, "  %stuck = icmp eq i64 %wrote64, 0\n")
+    llvm_text(out, "  br i1 %stuck, label %fail, label %step\n")
+    llvm_text(out, "step:\n")
+    llvm_text(out, "  %next = add i64 %written, %wrote64\n")
+    llvm_text(out, "  %complete = icmp uge i64 %next, %len\n")
+    llvm_text(out, "  br i1 %complete, label %done, label %loop\n")
+    llvm_text(out, "done:\n")
+    llvm_text(out, "  ret i64 %len\n")
+    llvm_text(out, "fail:\n")
+    llvm_text(out, "  ret i64 -1\n")
+    llvm_text(out, "}\n")
+    llvm_text(out, "\n")
+    llvm_runtime_weak_signature(out, "mkdir", 0, 1,
+        "i32 @mkdir(ptr %path, i32 %mode) noinline nounwind optnone nobuiltin")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %ok = call i32 @CreateDirectoryA(ptr %path, ptr null)\n")
+    llvm_text(out, "  %bad = icmp eq i32 %ok, 0\n")
+    llvm_text(out, "  %rc = select i1 %bad, i32 -1, i32 0\n")
+    llvm_text(out, "  ret i32 %rc\n")
+    llvm_text(out, "}\n")
+    llvm_text(out, "\n")
+    llvm_runtime_weak_signature(out, "unlink", 0, 1,
+        "i32 @unlink(ptr %path) noinline nounwind optnone nobuiltin")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %ok = call i32 @DeleteFileA(ptr %path)\n")
+    llvm_text(out, "  %bad = icmp eq i32 %ok, 0\n")
+    llvm_text(out, "  %rc = select i1 %bad, i32 -1, i32 0\n")
+    llvm_text(out, "  ret i32 %rc\n")
+    llvm_text(out, "}\n")
+    llvm_text(out, "\n")
+    llvm_runtime_weak_signature(out, "rename", 0, 1,
+        "i32 @rename(ptr %from, ptr %to) noinline nounwind optnone nobuiltin")
+    llvm_text(out, "entry:\n")
+    llvm_text(out, "  %ok = call i32 @MoveFileExA(ptr %from, ptr %to, i32 1)\n")
+    llvm_text(out, "  %bad = icmp eq i32 %ok, 0\n")
+    llvm_text(out, "  %rc = select i1 %bad, i32 -1, i32 0\n")
+    llvm_text(out, "  ret i32 %rc\n")
+    llvm_text(out, "}\n")
+}
+
+// llvm_windows_runtime_write_support：补上模块引用但自身未定义的平台入口。
+// emit_* 由 llvm_runtime_memory_text 预先判定（同名强定义优先，不重复发射）。
+// write/exit 在断言运行时也会用到，故 emit_test_assert 时一并补齐。
+pub fn llvm_windows_runtime_write_support(unit *ir.IRModule, out *LLVMOutput,
+    emit_malloc int, emit_free int, emit_printf int, emit_test_assert int) void {
+    // 先算齐「模块引用但自身未定义」的平台入口（同名强定义优先，不重复发射）。
+    let emit_io int = 0
+    let emit_files int = 0
+    if (llvm_runtime_named(unit, "write") != 0 && llvm_runtime_defined(unit, "write") == 0) { emit_io = 1 }
+    if (llvm_runtime_named(unit, "read") != 0 && llvm_runtime_defined(unit, "read") == 0) { emit_io = 1 }
+    if (llvm_runtime_named(unit, "open") != 0 && llvm_runtime_defined(unit, "open") == 0) { emit_files = 1 }
+    if (llvm_runtime_named(unit, "close") != 0 && llvm_runtime_defined(unit, "close") == 0) { emit_files = 1 }
+    if (llvm_runtime_named(unit, "mkdir") != 0 && llvm_runtime_defined(unit, "mkdir") == 0) { emit_files = 1 }
+    if (llvm_runtime_named(unit, "unlink") != 0 && llvm_runtime_defined(unit, "unlink") == 0) { emit_files = 1 }
+    if (llvm_runtime_named(unit, "rename") != 0 && llvm_runtime_defined(unit, "rename") == 0) { emit_files = 1 }
+    if (emit_test_assert != 0 && llvm_runtime_defined(unit, "write") == 0) { emit_io = 1 }
+    // read/write/open/close 共用同一张 fd 表与同一组内核入口，打包发射。
+    if (emit_io != 0) { emit_files = 1 }
+    // 声明必须在发射之前一次给全（读/写共用 GetStdHandle/WriteFile/ReadFile）。
+    llvm_windows_runtime_declare(out, emit_malloc, emit_free, emit_printf, emit_files)
+    if (emit_malloc != 0) { llvm_windows_runtime_write_malloc(out) }
+    if (emit_free != 0) { llvm_windows_runtime_write_free(out) }
+    if (emit_printf != 0) {
+        llvm_windows_runtime_write_printf_write(out)
+        llvm_runtime_write_printf_emit(out)
+    }
+    if (emit_files != 0) { llvm_windows_runtime_write_files(out) }
+    let emit_pids int = 0
+    if (llvm_runtime_named(unit, "getpid") != 0 && llvm_runtime_defined(unit, "getpid") == 0) {
+        emit_pids = 1
+    }
+    if (llvm_runtime_named(unit, "getppid") != 0 && llvm_runtime_defined(unit, "getppid") == 0) {
+        emit_pids = 1
+    }
+    if (emit_pids != 0) { llvm_windows_runtime_write_pids(out) }
+    // 本模块定义了 main（可执行入口）时补零 CRT 入口桩：Win64 入口不传参数，
+    // argv 由 GetCommandLineA 解析后转发（见 llvm_windows_runtime_write_entry）。
+    // 链接时 /entry:mainCRTStartup 优先指向静态 CRT 的启动代码；只有闭包里没有
+    // CRT（零 CRT 用户程序）时，/alternatename 才把它落到本桩。
+    if (llvm_runtime_defined(unit, "main") != 0) { llvm_windows_runtime_write_entry(out) }
+}

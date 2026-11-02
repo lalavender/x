@@ -47,6 +47,17 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# Windows 的内嵌 lld 走 ANSI 命令行/响应文件：非 ASCII 路径（中文目录名）
+# 无法表达，链接阶段会失败。这里在 Windows 上把工作区名换成 ASCII，
+# 其余平台仍用非 ASCII 名字覆盖“字节安全”这一层（Linux/Darwin 是 UTF-8 字节路径）。
+WINDOWS_HOST = sys.platform.startswith("win")
+
+
+def work_name(prefix, ascii_name):
+    """返回本平台的工作区目录名：Windows 用 ASCII，其它平台用原名。"""
+    return ascii_name if WINDOWS_HOST else prefix
+
+
 def run(cmd, cwd, env=None, timeout=1800):
     """用 argv 调用命令，保留 stdout/stderr 供断言与失败摘要。"""
     return subprocess.run([str(item) for item in cmd], cwd=cwd, env=env,
@@ -59,7 +70,10 @@ def require(condition, message, proc=None):
         return
     detail = ""
     if proc is not None:
-        detail = f"\n退出码: {proc.returncode}\nstdout:\n{proc.stdout[-2000:]}\nstderr:\n{proc.stderr[-2000:]}"
+        # 超时/启动失败时 stdout/stderr 可能是 None，不能直接切片。
+        stdout = (proc.stdout or "")[-2000:]
+        stderr = (proc.stderr or "")[-2000:]
+        detail = f"\n退出码: {proc.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     raise Failure(message + detail)
 
 
@@ -127,7 +141,8 @@ def build_and_run(compiler: Path, project: Path, opt: int, extra=()):
 
 def case_entries(compiler: Path, opt: int, work: Path, baseline=None, fixture=FIXTURE):
     """入口行为：单文件/项目/run、文本/汇编、失败发布与 oracle 摘要。"""
-    project = copy_fixture(work / "入口 工作区" / "project", fixture)
+    project = copy_fixture(work / work_name("入口 工作区", "entry-work") / "project",
+                           fixture)
     source = project / "cases" / "entry.yh"
     out = work / "entry.bin"
     proc = run([compiler, f"-O{opt}", "-o", out, source], project)
@@ -186,7 +201,7 @@ def case_entries(compiler: Path, opt: int, work: Path, baseline=None, fixture=FI
 
 def case_check(compiler: Path, opt: int, work: Path, baseline=None):
     """check 行为：库文件无需 main、负例定位、无工具 PATH、无后端产物。"""
-    project = copy_fixture(work / "检查 工作区" / "project")
+    project = copy_fixture(work / work_name("检查 工作区", "check-work") / "project")
     before = set(file_manifest(project))
 
     proc = run([compiler, f"-O{opt}", "check", project / "cases" / "library.yh"], project)
@@ -257,7 +272,7 @@ def case_check(compiler: Path, opt: int, work: Path, baseline=None):
 
 def case_lowering(compiler: Path, opt: int, work: Path, baseline=None):
     """lowering/semantics fixture：运行结果、LLVM 文本与基线对照。"""
-    project = copy_fixture(work / "lowering 工作区" / "project")
+    project = copy_fixture(work / work_name("lowering 工作区", "lowering-work") / "project")
     summary = {}
     for name in ("lowering", "semantics"):
         source = project / "cases" / f"{name}.yh"
@@ -307,7 +322,8 @@ def run_cases(compiler: Path, opt: int, selected: str, baseline=None):
     """跑选中类别的全部用例，返回摘要；写文件一律在本临时工作区。"""
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="la0-", dir=WORK_ROOT) as temp:
-        work = Path(temp) / "含 空格"
+        # Windows 的内嵌 lld 只认 ANSI 路径：工作区名用 ASCII（仍带空格）。
+        work = Path(temp) / work_name("含 空格", "work with space")
         work.mkdir(parents=True)
         summary = {"opt": opt}
         if selected in ("entries", "all"):

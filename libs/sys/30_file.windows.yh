@@ -1,0 +1,172 @@
+module sys
+
+// Windows 文件原语：每次只执行一次系统调用，返回结果或 -errno。
+//
+// 实现方式：文件描述符与打开标志交给编译器运行时发射的 prelude 入口
+// （open/read/write/close/mkdir/unlink/rename，见
+// compiler/backend/llvm_windows_runtime.yh），它们统一维护进程内 fd 表并用
+// Win32 实现；失败时返回 -1，本层立刻把 GetLastError 翻译成 -errno。
+// 这样 os 的两个入口（os.yh 的 prelude 直调、file.yh 的 sys 新接口）共享同一张
+// fd 表，不会出现两个编号空间。
+//
+// 与 Linux 的差异（都是平台事实，不做模拟）：
+//   * 没有 *at 语义：dir_fd 只接受 AT_FDCWD，其他值返回 -ENOSYS；
+//   * 没有 getdents64：目录枚举由 FindFirstFileA/FindNextFileA 承担，
+//     接口见 30_directory.windows.yh 的 find_* 原语；
+//   * 没有匿名管道 fd：create_pipe 返回 -ENOSYS，进程创建由 os 层用
+//     CreateProcessA 直接完成，不走 fork + 错误管道握手。
+
+// Windows 的当前目录/子目录操作直接用 kernel32（SDK 导入库已导出）。
+@[extern] fn GetCurrentDirectoryA(capacity u32, buffer *char) u32
+@[extern] fn SetCurrentDirectoryA(path *char) i32
+@[extern] fn RemoveDirectoryA(path *char) i32
+
+// open_at 按 POSIX 位值的 flags 打开路径，成功返回 fd，失败返回 -errno。
+// mode 只在 O_CREAT 时生效；Windows 用默认 ACL，运行时不使用该值。
+pub fn open_at(dir_fd int, path *char, flags int, mode u32) i64 {
+    if (dir_fd != AT_FDCWD) {
+        return (0 - ENOSYS).to_type(i64)
+    }
+    let fd int = open(path, flags, mode.to_type(int))
+    return errno_result(fd.to_type(i64))
+}
+
+// read_fd 从 fd 读取至多 count 字节到调用方缓冲区；0 表示 EOF，失败返回 -errno。
+// 允许短读；是否循环由上层决定。
+pub fn read_fd(fd int, buffer *void, count u64) i64 {
+    if (fd < 0) {
+        return (0 - EBADF).to_type(i64)
+    }
+    return errno_result(read(fd, buffer, count))
+}
+
+// write_fd 向 fd 写入至多 count 字节，返回实际写入字节数，失败返回 -errno。
+// 运行时的 write 会循环到写完或失败，因此通常等于 count。
+pub fn write_fd(fd int, buffer *void, count u64) i64 {
+    if (fd < 0) {
+        return (0 - EBADF).to_type(i64)
+    }
+    return errno_result(write(fd, buffer, count))
+}
+
+// close_fd 关闭 fd，成功返回 0，失败返回 -errno；失败后 fd 不可再用。
+pub fn close_fd(fd int) i64 {
+    if (fd < 0) {
+        return (0 - EBADF).to_type(i64)
+    }
+    return errno_result(close(fd).to_type(i64))
+}
+
+// create_dir_at 创建单层目录；mode 由 Windows 默认 ACL 忽略。
+pub fn create_dir_at(dir_fd int, path *char, mode u32) i64 {
+    if (dir_fd != AT_FDCWD) {
+        return (0 - ENOSYS).to_type(i64)
+    }
+    return errno_result(mkdir(path, mode.to_type(int)).to_type(i64))
+}
+
+// remove_at 删除路径：flags 为 0 删文件，AT_REMOVEDIR 删空目录（不递归）。
+pub fn remove_at(dir_fd int, path *char, flags int) i64 {
+    if (dir_fd != AT_FDCWD) {
+        return (0 - ENOSYS).to_type(i64)
+    }
+    if (flags == AT_REMOVEDIR) {
+        // RemoveDirectoryA 返回 BOOL（1 成功），不能直接交给 errno_result。
+        if (RemoveDirectoryA(path) != 0) {
+            return 0
+        }
+        return (0 - errno_value()).to_type(i64)
+    }
+    return errno_result(unlink(path).to_type(i64))
+}
+
+// rename_at 重命名为新路径。Windows 的 rename 走 MoveFileExA(REPLACE_EXISTING)，
+// 因此目标已存在时覆盖（与 POSIX rename 同义）；跨卷移动由系统决定。
+pub fn rename_at(old_dir_fd int, old_path *char,
+    new_dir_fd int, new_path *char) i64 {
+    if (old_dir_fd != AT_FDCWD || new_dir_fd != AT_FDCWD) {
+        return (0 - ENOSYS).to_type(i64)
+    }
+    return errno_result(rename(old_path, new_path).to_type(i64))
+}
+
+// get_cwd 把当前工作目录写入调用方缓冲区（含结尾 NUL）。
+// 返回写入字节数（含 NUL）；容量不足返回 -ERANGE，不隐式扩容。
+pub fn get_cwd(buffer *char, capacity u64) i64 {
+    if (capacity == 0 || capacity > 0xffffffff) {
+        return (0 - ERANGE).to_type(i64)
+    }
+    let written u32 = GetCurrentDirectoryA(capacity.to_type(u32), buffer)
+    if (written == 0) {
+        return (0 - errno_value()).to_type(i64)
+    }
+    // GetCurrentDirectoryA 在缓冲不足时返回所需长度（不含 NUL）。
+    if (written.to_type(u64) >= capacity) {
+        return (0 - ERANGE).to_type(i64)
+    }
+    return (written.to_type(i64) + 1)
+}
+
+// change_dir 修改进程当前工作目录，成功返回 0，失败返回 -errno。
+pub fn change_dir(path *char) i64 {
+    if (SetCurrentDirectoryA(path) != 0) {
+        return 0
+    }
+    return (0 - errno_value()).to_type(i64)
+}
+
+// getdents64 在 Windows 上没有对应物：目录枚举走 find_* 原语。
+// 保留同名入口让跨平台代码链接得过，但调用即失败。
+pub fn getdents64(fd int, buffer *void, count u64) i64 {
+    return (0 - ENOSYS).to_type(i64)
+}
+
+// create_pipe 在 Windows 上没有 fd 语义的等价物（CreatePipe 返回句柄，
+// 而本运行时的 fd 表只登记文件句柄）。os 的 Windows 进程实现直接使用
+// CreateProcessA，不依赖管道握手，因此这里返回 -ENOSYS。
+pub fn create_pipe(output *int, flags int) i64 {
+    return (0 - ENOSYS).to_type(i64)
+}
+
+// find_first 用 NUL 结尾模式（支持 * 与 ?）开始枚举，data 必须是
+// FIND_DATA_SIZE 字节的可写缓冲；成功返回正的查找句柄，失败返回 -errno。
+// 句柄必须由 find_close 释放；data 的内容在下次 find_next 前有效。
+@[extern] fn FindFirstFileA(pattern *char, data *u8) i64
+@[extern] fn FindNextFileA(handle i64, data *u8) i32
+@[extern] fn FindClose(handle i64) i32
+
+// FIND_DATA_SIZE 是 WIN32_FIND_DATAA 的真实长度（含备用短名），
+// 调用方按它准备缓冲，避免 kernel32 越界写入。
+pub const FIND_DATA_SIZE int = 320
+
+// INVALID_HANDLE_VALUE 是 FindFirstFileA 的失败返回值。
+const INVALID_FIND_HANDLE i64 = -1
+
+// find_first 开始一次目录枚举；pattern 形如 `dir\*`。
+pub fn find_first(pattern *char, data *u8) i64 {
+    let handle i64 = FindFirstFileA(pattern, data)
+    if (handle == INVALID_FIND_HANDLE) {
+        return (0 - errno_value()).to_type(i64)
+    }
+    return handle
+}
+
+// find_next 取下一个条目：1 表示 data 已填好，0 表示枚举结束，负数是 -errno。
+// ERROR_NO_MORE_FILES(18) 是正常的结束信号，不当作错误。
+pub fn find_next(handle i64, data *u8) i64 {
+    if (FindNextFileA(handle, data) != 0) {
+        return 1
+    }
+    if (GetLastError() == 18) {
+        return 0
+    }
+    return (0 - errno_value()).to_type(i64)
+}
+
+// find_close 释放查找句柄，成功返回 0，失败返回 -errno。
+pub fn find_close(handle i64) i64 {
+    if (FindClose(handle) != 0) {
+        return 0
+    }
+    return (0 - errno_value()).to_type(i64)
+}

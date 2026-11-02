@@ -36,6 +36,9 @@ COMPILER = ROOT / "compiler"
 WORK = ROOT / "tmp" / "selfhost"
 HOST_DRIVER = ROOT / "tools" / "llvm-host.py"
 HOST_DRIVER_DARWIN = ROOT / "tools" / "llvm-darwin-host.py"
+# Windows 宿主没有链接包装器（闭包直接写在 [link-windows-x64]），驱动只做
+# 闭包身份校验与记录（tools/llvm-windows-host.py，W2-5/W2-7）。
+HOST_DRIVER_WINDOWS = ROOT / "tools" / "llvm-windows-host.py"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "tools"))
 from selfhost_snapshot_gate import (default_seed, expected_artifacts,
@@ -65,6 +68,9 @@ def host_triple() -> str:
     if sys.platform == "darwin":
         return "aarch64-apple-darwin" if machine in ("arm64", "aarch64") \
             else "x86_64-apple-darwin"
+    if sys.platform.startswith("win"):
+        # Windows 宿主只有 x86_64 目标（W1/W2）；arm64 未接入。
+        return "x86_64-pc-windows-msvc"
     if machine in ("x86_64", "amd64"):
         return "x86_64-unknown-linux-gnu"
     return "aarch64-unknown-linux-gnu"
@@ -77,7 +83,10 @@ def llvm_shim_for_seed(seed: Path):
     链接参数的闭包文件）。闭包路径属于构建机，不再烘焙进种子。
     """
     name = seed.name
-    if "darwin" in name:
+    if "windows" in name:
+        host = "windows-x86_64"
+        driver = HOST_DRIVER_WINDOWS
+    elif "darwin" in name:
         host = "darwin-aarch64"
         driver = HOST_DRIVER_DARWIN
     elif "linux" in name:
@@ -128,6 +137,29 @@ def seed_supports_llvm(seed: Path) -> bool:
         "    free(p.to_type(*void));\n"
         "    return 0;\n"
         "}\n", encoding="utf-8")
+    if sys.platform.startswith("win"):
+        # Windows 种子的**单文件** `-o` 链接不可用（W2-2c 的已知边界：进程内
+        # lld 的输出句柄活到进程退出，随后回读产物失败），而 cc2 用的是
+        # `build`（项目路径）。因此 Windows 上用项目探针判定同一个问题。
+        project = WORK / "seed-llvm-probe-project"
+        source = project / "src"
+        source.mkdir(parents=True, exist_ok=True)
+        (project / "project.toml").write_text(
+            "[project]\nos = \"host\"\narch = \"host\"\n"
+            "name = \"seedprobe\"\nsource = \"src\"\n", encoding="utf-8")
+        (source / "main.yh").write_text(probe.read_text(encoding="utf-8"),
+                                        encoding="utf-8")
+        built = run([str(seed), "--backend", "llvm", "--target", host_triple(),
+                     "build"], cwd=project)
+        binary = project / ".build" / "seedprobe"
+        if built.returncode != 0 or not binary.is_file():
+            return False
+        # 项目产物名取自 project.name（没有扩展名）；Windows 上运行无扩展名的
+        # PE 依赖 CreateProcess 的隐式 .exe 规则，复制成 .exe 更稳。
+        executable = project / ".build" / "seedprobe.exe"
+        shutil.copyfile(binary, executable)
+        execution = run([str(executable)])
+        return execution.returncode == 0 and execution.stdout.strip() == "A"
     result = run([str(seed), "--backend", "llvm", "--target", host_triple(),
                   "-o", str(binary), str(probe)])
     if result.returncode != 0 or not binary.is_file():
@@ -305,7 +337,8 @@ def main() -> int:
     llvm_mode = args.backend == "llvm" or (
         args.backend == "auto" and (
             (sys.platform == "linux" and machine in ("x86_64", "amd64", "aarch64", "arm64"))
-            or (sys.platform == "darwin" and machine in ("arm64", "aarch64"))))
+            or (sys.platform == "darwin" and machine in ("arm64", "aarch64"))
+            or (sys.platform.startswith("win") and machine in ("x86_64", "amd64"))))
     SELFHOST_LLVM = llvm_mode
     if not llvm_mode:
         print("FAIL 该宿主没有 LLVM 自举后端（LL12 已退役 legacy）")

@@ -496,11 +496,34 @@ fn pj_scan_is_target(path *char) int {
     return 1
 }
 
+// pj_scan_applies：--scan-file 是否适用于该项目。
+// 单文件测试的扫描过滤只约束**被测项目**（扫描文件位于其源码根之下）；
+// 标准库与依赖项目的文件必须整份索引，否则无 fork 宿主（Windows）的模块
+// 子进程里会出现“模块不存在: string/memory”。
+fn pj_scan_applies(proj int) int {
+    let gs *gen.GenState = gen.G()
+    if (gs.c_scan_file_off < 0) { return 0 }
+    if (proj < 0 || proj >= gs.p_proj_n) { return 0 }
+    let root_off int = gs.p_projs[proj].src_off
+    let root_len int = gs.p_projs[proj].src_len
+    if (root_len <= 0 || root_len > gs.c_scan_file_len) { return 0 }
+    let i int = 0
+    for i < root_len {
+        if (gs.task.np_data[root_off + i]
+            != gs.task.np_data[gs.c_scan_file_off + i]) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
 fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir int, proj int) int {
     let gs *gen.GenState = gen.G()
     if (is_dir != 0) {
-        // 单文件模式（yh test <项目外文件>）不进入任何子目录，也不装入相邻文件。
-        if (gs.c_scan_file_off >= 0) { return 0 }
+        // 单文件模式（yh test <项目外文件>）不进入任何子目录，也不装入相邻文件；
+        // 只对被测项目生效（见 pj_scan_applies）。
+        if (pj_scan_applies(proj) != 0) { return 0 }
         if (pj_scan_skip_dir(name_start, name_len) != 0) { return 0 }
         // 子目录相对路径：<dir>/<name>，规范化后递归
         let nm [300]u8
@@ -550,7 +573,8 @@ fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir 
     }
     full[flen2] = 0
     // 单文件模式：只接受选中的那一个文件，其它相邻 .yh 一律忽略。
-    if (pj_scan_is_target(gen.arr_cstr(&full[0])) == 0) { return 0 }
+    if (pj_scan_applies(proj) != 0
+        && pj_scan_is_target(gen.arr_cstr(&full[0])) == 0) { return 0 }
     // 读文件并解析模块头（诊断指向被扫文件）
     let save_path *char = gs.task.c_path
     gs.task.c_path = gen.arr_cstr(full)
@@ -571,7 +595,8 @@ fn pj_target_tag_is(start int, n int, tag *char) int {
 }
 
 // pj_source_target_match：从 .yh 前向左读取目标后缀段，OS/架构均须匹配当前 TargetInfo。
-// 支持已有 .linux/.darwin 和新增 .arm64/.x64 的组合；遇到普通文件名段即结束。
+// 标记：.linux/.darwin/.windows（OS）与 .arm64/.x64（架构）；未识别段按普通文件名接受
+// ——所以新增 `*.windows.yh` 前必须先在此登记，否则会被所有目标编入（方案 §4.2）。
 fn pj_source_target_match(name_start int, name_len int) int {
     let gs *gen.GenState = gen.G()
     let end int = name_start + name_len - 3
@@ -585,8 +610,9 @@ fn pj_source_target_match(name_start int, name_len int) int {
             if (gs.c_target.os != gen.TARGET_OS_LINUX) { return 0 }
         } else if (pj_target_tag_is(start, n, "darwin") != 0) {
             if (gs.c_target.os != gen.TARGET_OS_DARWIN) { return 0 }
-        } else if (pj_target_tag_is(start, n, "arm64") != 0) {
-            if (gs.c_target.arch != gen.TARGET_ARCH_ARM64) { return 0 }
+        } else if (pj_target_tag_is(start, n, "windows") != 0) {
+            if (gs.c_target.os != gen.TARGET_OS_WINDOWS) { return 0 }
+        } else if (pj_target_tag_is(start, n, "arm64") != 0) {            if (gs.c_target.arch != gen.TARGET_ARCH_ARM64) { return 0 }
         } else if (pj_target_tag_is(start, n, "x64") != 0) {
             if (gs.c_target.arch != gen.TARGET_ARCH_X64) { return 0 }
         } else { return 1 }

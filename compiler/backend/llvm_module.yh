@@ -159,7 +159,10 @@ fn llvm_target_same(unit *ir.IRModule, target *gen.TargetInfo) int {
         || !(target.os == gen.TARGET_OS_LINUX
             || target.os == gen.TARGET_OS_DARWIN
                 && target.arch == gen.TARGET_ARCH_ARM64
-                && gen.cstr_eq(target.abi, "darwin-aapcs64") != 0)
+                && gen.cstr_eq(target.abi, "darwin-aapcs64") != 0
+            || target.os == gen.TARGET_OS_WINDOWS
+                && target.arch == gen.TARGET_ARCH_X64
+                && gen.cstr_eq(target.abi, "win64-msvc") != 0)
         || target.os != expected.os || target.arch != expected.arch
         || target.pointer_bits != expected.pointer_bits || target.little_endian != expected.little_endian
         || target.layout_version != expected.layout_version
@@ -172,6 +175,31 @@ fn llvm_target_same(unit *ir.IRModule, target *gen.TargetInfo) int {
         unit.target.layout_version == target.layout_version
 }
 
+// llvm_runtime_symbol_unsupported：目标是否**缺少**该裸运行时入口的自有弱定义。
+// Linux x86_64/AArch64 与 Darwin/ARM64 已有完整运行时；Windows/x64 在 W1-3 提供
+// malloc/free/printf（HeapAlloc/WriteFile 版），但**永远没有** linux_syscall6
+// （Windows 无稳定 syscall ABI，必须经 Win32 API）。
+fn llvm_runtime_symbol_unsupported(unit *ir.IRModule, symbol *ir.IRModuleSymbol) int {
+    let abi *char = unit.target.abi
+    if (gen.cstr_eq(abi, "sysv-amd64") != 0 || gen.cstr_eq(abi, "aapcs64") != 0) {
+        return 0
+    }
+    if (gen.cstr_eq(symbol.name, "linux_syscall6") != 0) { return 1 }
+    if (gen.cstr_eq(abi, "darwin-aapcs64") != 0 || gen.cstr_eq(abi, "win64-msvc") != 0) {
+        // lowering 会把 prelude 的 malloc/free 重命名为 __yh_runtime_malloc/_free
+        // （lower/module_snapshot_lower.yh），所以两种名字都算「平台已知入口」。
+        if (gen.cstr_eq(symbol.name, "malloc") != 0) { return 0 }
+        if (gen.cstr_eq(symbol.name, "__yh_runtime_malloc") != 0) { return 0 }
+        if (gen.cstr_eq(symbol.name, "free") != 0) { return 0 }
+        if (gen.cstr_eq(symbol.name, "__yh_runtime_free") != 0) { return 0 }
+        if (gen.cstr_eq(symbol.name, "printf") != 0) { return 0 }
+        // 其余未定义符号是用户 extern/libc 调用，交由链接期解析——这里只能拒绝
+        // 平台**明知没有**的入口（linux_syscall6），不能把用户 external 一并拒掉。
+        return 0
+    }
+    return 0
+}
+
 // llvm_preflight：在分配输出前封闭全部类型/签名/指令，不支持时带真实来源并拒绝整模块。
 fn llvm_preflight(unit *ir.IRModule) int {
     let i int = 0
@@ -179,15 +207,9 @@ fn llvm_preflight(unit *ir.IRModule) int {
         let symbol ir.IRModuleSymbol = unit.symbols[i]
         let kind int = unit.types[symbol.type_id].kind
         if (symbol.kind == ir.IR_MODULE_SYMBOL_FUNCTION && symbol.defined == 0
-            && gen.cstr_eq(unit.target.abi, "sysv-amd64") == 0
-            && gen.cstr_eq(unit.target.abi, "aapcs64") == 0
-            && (gen.cstr_eq(symbol.name, "linux_syscall6") != 0
-                || gen.cstr_eq(unit.target.abi, "darwin-aapcs64") == 0
-                    && (gen.cstr_eq(symbol.name, "malloc") != 0
-                        || gen.cstr_eq(symbol.name, "free") != 0
-                        || gen.cstr_eq(symbol.name, "printf") != 0))) {
+            && llvm_runtime_symbol_unsupported(unit, &symbol) != 0) {
             return llvm_reject(unit, symbol.source, symbol.offset,
-                "当前 LLVM 自有完整运行时仅支持 Linux x86_64/AArch64")
+                "当前目标的 LLVM 自有运行时未提供该入口（malloc/free/printf 或 linux_syscall6）")
         }
         if (symbol.kind == ir.IR_MODULE_SYMBOL_GLOBAL) {
             if (symbol.defined == 0) {
@@ -222,6 +244,12 @@ fn llvm_preflight(unit *ir.IRModule) int {
         }
         if (symbol.kind == ir.IR_MODULE_SYMBOL_FUNCTION
             && llvm_abi_supported(unit, &symbol) == 0) {
+            // Windows/x64：标量与 C 按值聚合（含 >8 字节的按引用形态）都已支持
+            // （W1-2b，与 clang 的 C 桩互操作）。剩余不支持的只有用户裸 C 变参。
+            if (gen.cstr_eq(unit.target.abi, "win64-msvc") != 0) {
+                return llvm_reject(unit, symbol.source, symbol.offset,
+                    "Windows 目标的 C ABI 不支持用户裸变参（prelude 的 printf/open 除外）")
+            }
             return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持该 ABI 签名")
         }
         if (gen.cstr_eq(symbol.name, "memmove") != 0 && llvm_runtime_aggregate_copy(unit) != 0) {
@@ -333,8 +361,14 @@ fn llvm_signature(unit *ir.IRModule, symbol *ir.IRModuleSymbol, out *LLVMOutput,
             llvm_abi_classify(unit, symbol.params[i], &info)
             if (physical > 0) { llvm_text(out, ", ") }
             if (info.memory != 0) {
-                llvm_text(out, "ptr byval("); llvm_abi_memory_type(unit, symbol.params[i], out)
-                llvm_text(out, ") align "); llvm_number(out, ty.align.to_type(u64))
+                // SysV 用 byval 让后端自己复制；Windows/x64 按 MSVC 语义传普通指针
+                // （clang oracle：12 字节 struct 参数是 `ptr`，没有 byval）。
+                if (llvm_abi_is_win64(unit) != 0) {
+                    llvm_text(out, "ptr")
+                } else {
+                    llvm_text(out, "ptr byval("); llvm_abi_memory_type(unit, symbol.params[i], out)
+                    llvm_text(out, ") align "); llvm_number(out, ty.align.to_type(u64))
+                }
                 if (definition != 0) { llvm_text(out, " %p"); llvm_number(out, physical.to_type(u64)) }
                 physical += 1
             } else {
@@ -421,6 +455,16 @@ pub fn llvm_emit_module(unit *ir.IRModule, target *gen.TargetInfo, out *LLVMOutp
     llvm_mark_global_usage(unit, live)
     llvm_globals(unit, &temporary, live)
     free(live.to_type(*void))
+    // MSVC ABI：x86 后端在 COFF 对象里引用 _fltused（CRT 的浮点使用标记）。
+    // 零 CRT 下没有 CRT 定义它，lld-link 会报 undefined symbol: _fltused；
+    // 自举时静态 CRT 也提供它。这里发 linkonce_odr + comdat：多模块只保留一份，
+    // 且静态 CRT 的 fltused 成员不会被拉入（避免 duplicate symbol）。
+    // 同时登记到 llvm.compiler.used：linkonce_odr 是可丢弃定义，-O2 的 GlobalDCE
+    // 会在“本对象没引用 _fltused”时删掉它，而引用方常常是**另一个**对象
+    // （含浮点的模块），lld-link 随即报 undefined symbol（O0 不复现）。
+    if (gen.cstr_eq(unit.target.abi, "win64-msvc") != 0) {
+        llvm_text(&temporary, "$_fltused = comdat any\n@_fltused = linkonce_odr global i32 0, comdat($_fltused)\n@llvm.compiler.used = appending global [1 x ptr] [ptr @_fltused], section \"llvm.metadata\"\n")
+    }
     // 聚合副本的源/目标可能别名；独立于用户 memcpy 的不重叠运行时契约。
     llvm_text(&temporary, "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)\n")
     llvm_text(&temporary, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n")

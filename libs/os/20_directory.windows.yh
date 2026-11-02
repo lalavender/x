@@ -1,0 +1,283 @@
+module os
+
+import sys
+
+// Windows 目录读取与当前目录接口。
+//
+// 与 Linux 的差异：Windows 没有 getdents64 那类“原始目录记录流”，枚举靠
+// FindFirstFileA/FindNextFileA 把一条 WIN32_FIND_DATAA 填进缓冲。因此本读取器
+// 不再借用调用方缓冲解析记录，而是：
+//   * 模式串 `path\*` 与 WIN32_FIND_DATAA 缓冲都用 malloc 分配，close_dir 释放；
+//   * 条目名称借用 WIN32_FIND_DATAA 里的 cFileName（下一次 next_entry 前有效），
+//     与其它平台“名称只到下次调用”的契约一致；
+//   * 类型来自 dwFileAttributes 的 FILE_ATTRIBUTE_DIRECTORY 位。
+// 调用方传入的 buffer 只用于参数校验（空缓冲仍是非法参数），保持三平台同签名。
+
+// DirEntryStatus 区分“一个条目 / 已结束 / 失败”三种结果。
+pub enum DirEntryStatus {
+    dir_entry_ok
+    dir_entry_end
+    dir_entry_error
+}
+
+// DirReader 保存查找句柄、模式串与 WIN32_FIND_DATAA 缓冲。
+// 字段公开是为了让读取器可放在调用方栈上；调用方不得直接改写字段，
+// 生命周期结束必须调用 close_dir。active == 0 表示未打开或已关闭。
+// `fd` 槽存的是 FindFirstFileA 的 64 位句柄（Windows 没有目录 fd）；
+// 字段名与 Linux/Darwin 保持一致，跨平台用例（osdirs 的零值/关闭断言）
+// 因此不需要平台分支。
+pub struct DirReader {
+    fd i64
+    pattern *u8
+    data *u8
+    name *u8
+    name_len u64
+    kind DirKind
+    active int
+}
+
+// DirReaderResult 是 open_dir 的结果：成功时 reader.active == 1，
+// 失败时 handle 为 -1 且 error 给出显式分类。
+pub struct DirReaderResult {
+    reader DirReader
+    error Error
+}
+
+// DirEntryResult 是 next_entry 的结果：status 为 dir_entry_ok 时 entry 有效，
+// dir_entry_end 表示目录结束，dir_entry_error 时 error 有效。
+pub struct DirEntryResult {
+    status DirEntryStatus
+    entry DirEntry
+    error Error
+}
+
+// WIN32_FIND_DATAA 的字段偏移（与 kernel32 的布局一致）：
+// dwFileAttributes@0，cFileName@44（最长 260 字节，含结尾 NUL）。
+const FIND_ATTRIBUTES_OFFSET int = 0
+const FIND_NAME_OFFSET int = 44
+const FIND_NAME_CAPACITY int = 260
+// FILE_ATTRIBUTE_DIRECTORY：目录条目。
+const FILE_ATTRIBUTE_DIRECTORY u32 = 0x10
+
+// empty_entry 返回无效条目的零值视图，供结束/失败结果使用。
+fn empty_entry() DirEntry {
+    return DirEntry{ name: 0, name_len: 0, kind: dir_unknown }
+}
+
+// reader_failure 构造未打开状态的读取器结果。
+fn reader_failure(error Error) DirReaderResult {
+    let reader DirReader
+    reader.fd = -1
+    reader.pattern = 0
+    reader.data = 0
+    reader.name = 0
+    reader.name_len = 0
+    reader.kind = dir_unknown
+    reader.active = 0
+    return DirReaderResult{ reader: reader, error: error }
+}
+
+// dir_error 构造失败的条目结果，entry 固定为空视图。
+fn dir_error(error Error) DirEntryResult {
+    return DirEntryResult{
+        status: dir_entry_error,
+        entry: empty_entry(),
+        error: error
+    }
+}
+
+// dir_end 构造目录结束结果，没有错误。
+fn dir_end() DirEntryResult {
+    return DirEntryResult{
+        status: dir_entry_end,
+        entry: empty_entry(),
+        error: no_error()
+    }
+}
+
+// entry_name_len 计算 cFileName 的字节长度（以 NUL 结尾，不含 NUL）。
+fn entry_name_len(data *u8) int {
+    let length int = 0
+    for length < FIND_NAME_CAPACITY && data[FIND_NAME_OFFSET + length] != 0 {
+        length += 1
+    }
+    return length
+}
+
+// entry_is_dot 判断名称是否为 "." 或 ".."（Windows 枚举不返回，防御性跳过）。
+fn entry_is_dot(name *u8, length int) int {
+    if (length == 1 && name[0] == 46) {
+        return 1
+    }
+    if (length == 2 && name[0] == 46 && name[1] == 46) {
+        return 1
+    }
+    return 0
+}
+
+// make_pattern 把目录路径拼成 FindFirstFileA 的模式串 `path\*`。
+// 路径已以分隔符结尾时不重复添加；返回值由调用方 free。
+fn make_pattern(path *char) *u8 {
+    let path_len int = 0
+    for path[path_len] != 0 {
+        path_len += 1
+    }
+    let separator int = path_len > 0 && (path[path_len - 1] == 92
+        || path[path_len - 1] == 47) ? 0 : 1
+    let pattern *u8 = malloc((path_len + separator + 2).to_type(u64)).to_type(*u8)
+    if (pattern == 0) {
+        return 0
+    }
+    let i int = 0
+    for i < path_len {
+        pattern[i] = path[i].to_type(u8)
+        i += 1
+    }
+    if (separator != 0) {
+        pattern[i] = 92
+        i += 1
+    }
+    pattern[i] = 42
+    pattern[i + 1] = 0
+    return pattern
+}
+
+// open_dir 按 NUL 结尾路径打开目录；buffer 只用于校验（非空即可）。
+// 成功返回 active 读取器，查找句柄与缓冲的所有权交给读取器。
+pub fn open_dir(path *char, buffer []u8) DirReaderResult {
+    if (len(buffer) == 0) {
+        return reader_failure(make_error(error_invalid_argument, 0))
+    }
+    let pattern *u8 = make_pattern(path)
+    if (pattern == 0) {
+        return reader_failure(make_error(error_other, 0))
+    }
+    let data *u8 = malloc(FIND_DATA_SIZE_U64).to_type(*u8)
+    if (data == 0) {
+        free(pattern.to_type(*void))
+        return reader_failure(make_error(error_other, 0))
+    }
+    let handle i64 = sys.find_first(pattern.to_type(*char), data)
+    if (sys.is_error(handle) != 0) {
+        let code int = sys.error_code(handle)
+        free(data.to_type(*void))
+        free(pattern.to_type(*void))
+        return reader_failure(error_from_native(code))
+    }
+    let reader DirReader
+    reader.fd = handle
+    reader.pattern = pattern
+    reader.data = data
+    reader.name = data + FIND_NAME_OFFSET
+    reader.name_len = entry_name_len(data).to_type(u64)
+    reader.kind = dir_kind_of(data)
+    reader.active = 1
+    return DirReaderResult{ reader: reader, error: no_error() }
+}
+
+// FIND_DATA_SIZE_U64 是 WIN32_FIND_DATAA 的分配长度（sys 的常量转 u64）。
+const FIND_DATA_SIZE_U64 u64 = 320
+
+// dir_kind_of 把 dwFileAttributes 映射为公开分类。
+// 目录位为 1 时是目录；其余（含重解析点、设备）保留 unknown，
+// 调用方不得自行猜测为普通文件。
+fn dir_kind_of(data *u8) DirKind {
+    let attributes u32 = data[FIND_ATTRIBUTES_OFFSET].to_type(u32) |
+        (data[FIND_ATTRIBUTES_OFFSET + 1].to_type(u32) << 8) |
+        (data[FIND_ATTRIBUTES_OFFSET + 2].to_type(u32) << 16) |
+        (data[FIND_ATTRIBUTES_OFFSET + 3].to_type(u32) << 24)
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return dir_directory
+    }
+    return dir_file
+}
+
+// next_entry 返回目录中的下一个条目，跳过 "." 与 ".."。
+// first == 0 时先检查 FindFirstFileA 已填好的首条，之后用 FindNextFileA。
+pub fn next_entry(reader *DirReader) DirEntryResult {
+    if (reader.active == 0) {
+        return dir_error(make_error(error_invalid_argument, 0))
+    }
+    for 1 == 1 {
+        // 首条由 open_dir 的 FindFirstFileA 已经填好；后续条目每次前进一条。
+        let status i64 = 1
+        if (reader.name_len != 0) {
+            // 首条只消费一次：清掉标记后走 FindNextFileA。
+            reader.name_len = 0
+        } else {
+            status = sys.find_next(reader.fd, reader.data)
+        }
+        if (sys.is_error(status) != 0) {
+            let code int = sys.error_code(status)
+            return dir_error(error_from_native(code))
+        }
+        if (status == 0) {
+            return dir_end()
+        }
+        let length int = entry_name_len(reader.data)
+        if (length == 0) {
+            return dir_end()
+        }
+        reader.name = reader.data + FIND_NAME_OFFSET
+        if (entry_is_dot(reader.name, length) != 0) {
+            continue
+        }
+        let entry DirEntry
+        entry.name = reader.name
+        entry.name_len = length.to_type(u64)
+        entry.kind = dir_kind_of(reader.data)
+        return DirEntryResult{
+            status: dir_entry_ok,
+            entry: entry,
+            error: no_error()
+        }
+    }
+    return dir_error(make_error(error_other, 0))
+}
+
+// close_dir 关闭目录并释放在 open_dir 里分配的缓冲；重复关闭是幂等的。
+pub fn close_dir(reader *DirReader) Error {
+    if (reader.active == 0) {
+        reader.fd = -1
+        return no_error()
+    }
+    let result i64 = sys.find_close(reader.fd)
+    if (reader.data != 0) {
+        free(reader.data.to_type(*void))
+    }
+    if (reader.pattern != 0) {
+        free(reader.pattern.to_type(*void))
+    }
+    reader.fd = -1
+    reader.pattern = 0
+    reader.data = 0
+    reader.name = 0
+    reader.name_len = 0
+    reader.kind = dir_unknown
+    reader.active = 0
+    return error_from_result(result)
+}
+
+// get_cwd 把进程当前工作目录写入调用方缓冲，成功时写入结尾 NUL。
+// 返回的 count 不包含终止 NUL；缓冲不足返回 error_invalid_argument
+// （原生 ERANGE），不隐式扩容。
+pub fn get_cwd(buffer []u8) IoResult {
+    if (len(buffer) == 0) {
+        return io_error(error_invalid_argument, 0)
+    }
+    let result i64 = sys.get_cwd(slice_address_char(buffer), len(buffer))
+    if (sys.is_error(result) != 0) {
+        let code int = sys.error_code(result)
+        return io_error(error_kind_for(code), code)
+    }
+    if (result <= 0) {
+        return io_error(error_other, 0)
+    }
+    return io_ok((result - 1).to_type(u64))
+}
+
+// change_dir 修改进程全局当前工作目录，成功返回 no_error。
+// 路径为 NUL 结尾字节串；该操作影响整个进程，多线程调用方需自行同步。
+pub fn change_dir(path *char) Error {
+    return error_from_result(sys.change_dir(path))
+}

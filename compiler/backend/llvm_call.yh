@@ -29,6 +29,12 @@ fn llvm_abi_is_aapcs64(unit *ir.IRModule) int {
         gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0 ? 1 : 0
 }
 
+// llvm_abi_is_win64：Windows/x64（MSVC ABI）。首版只支持标量/指针的 C ABI，
+// 按值聚合需要专门的 Win64 分类与强转（见 llvm_abi_supported 的说明）。
+fn llvm_abi_is_win64(unit *ir.IRModule) int {
+    return gen.cstr_eq(unit.target.abi, "win64-msvc") != 0 ? 1 : 0
+}
+
 // llvm_abi_is_linux_aapcs64：只用于 Linux 目标的运行时/变参分支，避免把
 // Darwin 已有的 libSystem 路径混入。
 fn llvm_abi_is_linux_aapcs64(unit *ir.IRModule) int {
@@ -140,13 +146,27 @@ fn llvm_abi_classify_walk(unit *ir.IRModule, type_id int, base int,
     return -1
 }
 
-// llvm_abi_classify：取得 SysV 首两个八字节分类；>16 字节对象完整归入 MEMORY。
+// llvm_abi_classify：按目标求 C 聚合的传递形态。
+//   SysV amd64：首两个八字节分类，>16 字节 MEMORY；
+//   Windows/x64（MSVC ABI）：**只有 1/2/4/8 字节的聚合**按整数寄存器传（含纯浮点聚合，
+//   clang oracle：struct{float}→i32、struct{float,float}→i64），其余一律按引用
+//   （参数是普通 ptr、返回值用 hidden sret）。这条规则与 SysV 完全不同，不能复用分片逻辑。
 fn llvm_abi_classify(unit *ir.IRModule, type_id int, out *LLVMABIInfo) int {
     if (unit == 0 || out == 0 || type_id < 0 || type_id >= unit.type_count) { return -1 }
     let empty LLVMABIInfo
     out[0] = empty
     let ty ir.IRModuleType = unit.types[type_id]
     if (ty.size <= 0) { return -1 }
+    if (llvm_abi_is_win64(unit) != 0) {
+        if (ty.size == 1 || ty.size == 2 || ty.size == 4 || ty.size == 8) {
+            out.chunk_count = 1
+            out.class0 = LLVM_ABI_CLASS_INTEGER
+            out.size0 = ty.size
+            return 0
+        }
+        out.memory = 1
+        return 0
+    }
     if (ty.size > 16) { out.memory = 1; return 0 }
     out.chunk_count = (ty.size + 7) / 8
     if (llvm_abi_classify_walk(unit, type_id, 0, out, 0) != 0) { return -1 }
@@ -178,6 +198,12 @@ fn llvm_abi_supported(unit *ir.IRModule, symbol *ir.IRModuleSymbol) int {
         let aarch64_open int = symbol.variadic == 1 &&
             llvm_abi_is_linux_aapcs64(unit) != 0 &&
             gen.cstr_eq(symbol.name, "open") != 0
+        // Windows/x64 放行 prelude 的 printf 与 open（两者都是运行时自己发射的裸变参）；
+        // 用户源码的裸 C 变参仍拒绝。
+        let win64_printf int = symbol.variadic == 1 && llvm_abi_is_win64(unit) != 0 &&
+            gen.cstr_eq(symbol.name, "printf") != 0
+        let win64_open int = symbol.variadic == 1 && llvm_abi_is_win64(unit) != 0 &&
+            gen.cstr_eq(symbol.name, "open") != 0
         if ((darwin_open != 0 || aarch64_open != 0)
             && (symbol.param_count != 2
                 || unit.types[symbol.params[0]].kind < ir.IR_TY_PTR
@@ -186,13 +212,42 @@ fn llvm_abi_supported(unit *ir.IRModule, symbol *ir.IRModuleSymbol) int {
                 || unit.types[symbol.type_id].kind != ir.IR_TY_I32)) { return 0 }
         return symbol.variadic == 0 || symbol.variadic == 2 ||
             sysv_printf != 0 || darwin_printf != 0 || darwin_open != 0 ||
-            aarch64_printf != 0 || aarch64_open != 0 ? 1 : 0
+            aarch64_printf != 0 || aarch64_open != 0 || win64_printf != 0 ||
+            win64_open != 0 ? 1 : 0
     }
     if (symbol.abi != gen.ABI_C || symbol.variadic < 0 || symbol.variadic > 1) { return 0 }
     let darwin int = gen.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0
     let sysv int = gen.cstr_eq(unit.target.abi, "sysv-amd64") != 0
     let aarch64 int = gen.cstr_eq(unit.target.abi, "aapcs64") != 0
-    if (darwin == 0 && sysv == 0 && aarch64 == 0) { return 0 }
+    let win64 int = llvm_abi_is_win64(unit)
+    if (darwin == 0 && sysv == 0 && aarch64 == 0 && win64 == 0) { return 0 }
+    // Windows/x64（W1-2 首版）：只放行标量/指针/函数指针与 prelude 的 printf 裸变参。
+    // 依据 clang 21.1.8 oracle（2026-10-27）：
+    //   * i8/i16 参数不带 signext/zeroext（与 SysV 相反）；
+    //   * ≤8 字节按值聚合被强制成整数寄存器（IR 里直接是 i64），
+    //     需要专门分类+强转，否则 yh 漏出的 struct 参数与 MSVC 侧不一致。
+    // 因此按值聚合/裸 C 变参在此明确拒绝（诊断在 llvm_module.yh 的 preflight）。
+    if (win64 != 0) {
+        // W1-2b：标量、指针与 **C 按值聚合**（struct/union，任意大小）都放行；
+        // 聚合的寄存器/引用形态由 llvm_abi_classify 的 win64 分支决定。
+        // 仍拒绝用户裸 C 变参（prelude 的 printf/open 走上面的 yh ABI 分支）。
+        if (symbol.variadic == 1) { return 0 }
+        let result_kind int = unit.types[symbol.type_id].kind
+        let result_ok int = 0
+        if (result_kind == ir.IR_TY_VOID) { result_ok = 1 }
+        if (llvm_abi_c_scalar(result_kind) != 0) { result_ok = 1 }
+        if (result_kind == ir.IR_MODULE_TY_STRUCT) { result_ok = 1 }
+        if (result_kind == ir.IR_MODULE_TY_UNION) { result_ok = 1 }
+        if (result_ok == 0) { return 0 }
+        let w int = 0
+        for w < symbol.param_count {
+            let kind int = unit.types[symbol.params[w]].kind
+            if (llvm_abi_c_scalar(kind) == 0 && kind != ir.IR_MODULE_TY_STRUCT
+                && kind != ir.IR_MODULE_TY_UNION) { return 0 }
+            w += 1
+        }
+        return 1
+    }
     // 用户 C 裸变参在 Linux/AArch64 仍不开放；固定参数和已知 prelude 走上面的
     // yh ABI 分支。这样不会把未实现的 AAPCS64 变参规则当成已支持。
     if (aarch64 != 0 && symbol.variadic != 0) { return 0 }
@@ -280,6 +335,8 @@ fn llvm_indirect_call_symbol(unit *ir.IRModule, call *ir.IRCall,
 // Linux/AArch64 不写 signext/zeroext：AAPCS64 只规定窄参数扩展到位宽 32 位，
 // 与 GCC 生成的 C 调用方一致；LLVM 的 signext 是更强的寄存器级承诺，O2 下会让
 // 后端省略 64 位符号扩展，导致 C→YH 的 i16/u8 参数读到高位垃圾。
+// Windows/x64（win64-msvc）同样不写：clang 21.1.8 oracle 实测 MSVC ABI 的 i8/i16
+// 参数/返回值均无 signext/zeroext（与此处 sysv 分支相反），所以本函数自然返回 0。
 fn llvm_abi_attr_kind(unit *ir.IRModule, abi int, kind int) int {
     if (unit == 0 || abi != gen.ABI_C
         || gen.cstr_eq(unit.target.abi, "aapcs64") != 0
