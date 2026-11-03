@@ -31,6 +31,17 @@
 - [ ] **Windows testkit 断言位置/提前退出（P0，W2-9 遗留）**：
       `tests/modules/test-check.py` 的 `execute-fail*` 在 Windows 上把断言位置记成
       编码残值、提前退出被归到崩溃分支；需等源码闭包重建后的完整输出再定型修法。
+- [ ] **Windows CI 已知红门（P0，均非 CI 迁移引入，属 W2-9 遗留）**：
+      1) testkit 断言行号（`YHTF` 记录 offset 4 为指针残值、col 正确）与崩溃退出码归类；
+      2) `--emit-asm` stdout 路径在 Windows 必失败（`test-windows-target`、
+         `llvm-architecture`、`build-check:p1-emit-asm-form`），设计 §6.9 已登记；
+      3) 仓库外项目目录构建失败（`foreign-fs-build`；Windows CI 的 workdir 已改仓库内，
+         但该门本身在 Windows 上不可用）；
+      4) `libs-test` 的 `net` 模块 `--emit-module --test-mode` worker 以 -1 退出，
+         伴随「函数未使用」误判；
+      5) `modules/build-check` 的 `os6-default-stdlib`、`os4-os-process-win` 失败。
+      修完这些 Windows job 才能全绿；当前 Windows job 已按设计移除
+      `test-windows-target`（R3），其余门保持全量。
 
 ## 2026-10-27 未使用函数检查（UF1）后续
 
