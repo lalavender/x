@@ -86,7 +86,10 @@ yh_abs := absolute_path("yh")
 # 665ms→464ms、整用例 939ms→703ms（约 −25%）。FAST_STAGE=0 关闭暂存。
 FAST_STAGE := env_var_or_default("FAST_STAGE", "1")
 fast_stage := if FAST_STAGE == "" { "1" } else { FAST_STAGE }
-tmpdir := if env_var_or_default("TMPDIR", "") == "" { "/tmp" } else { env_var_or_default("TMPDIR", "/tmp") }
+# 快速暂存目录：Linux/macOS 用 /tmp（或 $TMPDIR）；Windows 必须落在仓库内——
+# just 的 absolute_path() 会把 "/tmp" 展开成 "C:\tmp"（不存在），而且 Windows 上的
+# 编译器只能编仓库目录里的项目，workdir 在 %TEMP% 会报「无法创建构建目录」。
+tmpdir := if host_os == "windows" { root + "/tmp" } else if env_var_or_default("TMPDIR", "") == "" { "/tmp" } else { env_var_or_default("TMPDIR", "/tmp") }
 run_id := env_var_or_default("GITHUB_RUN_ID", "")
 # 每个 worktree + 每个 CI run 独占一个快速目录：
 #   - 同机并发跑多个 run 时共用 /tmp/yh-fast 会让 stage-yh 互相覆盖（release 与

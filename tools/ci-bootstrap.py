@@ -42,6 +42,7 @@ Windows 种子已按 HEAD 重编并上传到 0.0.11（`yh-0.0.11-windows-x64.tar
 """
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -124,8 +125,12 @@ def strip_sections(text: str) -> str:
     return "".join(kept)
 
 
-def backup_originals(state_dir: Path, files: list[Path], manifest_text: str) -> dict[str, str]:
-    """把即将改动的文件与清单原文写到 <staged>/orig/，返回恢复用的相对路径清单。"""
+def backup_originals(state_dir: Path, files: list[Path], manifest_bytes: bytes) -> dict[str, str]:
+    """把即将改动的文件与清单原文写到 <staged>/orig/，返回恢复用的相对路径清单。
+
+    清单按**字节**备份/恢复：Linux/macOS 的 checkout 是 LF，但本地副本可能带 CRLF，
+    文本读写会把行尾规范化，恢复后就不是逐字节原文了。
+    """
     originals = state_dir / "orig"
     shutil.rmtree(originals, ignore_errors=True)
     originals.mkdir(parents=True)
@@ -136,7 +141,7 @@ def backup_originals(state_dir: Path, files: list[Path], manifest_text: str) -> 
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
         recorded[relative] = "file"
-    (originals / "project.toml").write_text(manifest_text, encoding="utf-8")
+    (originals / "project.toml").write_bytes(manifest_bytes)
     recorded["project.toml"] = "manifest"
     (state_dir / "pending.json").write_text(
         json.dumps({"files": recorded}, ensure_ascii=False, indent=2) + "\n",
@@ -217,7 +222,7 @@ def bootstrap(seed: Path, output: Path, staged: Path, keep_staged: bool) -> int:
     other_marker = OTHER_MARKER[system]
     staged.mkdir(parents=True, exist_ok=True)
     restore_from_backup(staged)  # 上次进程被强杀时先把源码恢复干净
-    original_manifest = MANIFEST.read_text(encoding="utf-8")
+    original_manifest = MANIFEST.read_bytes()
     backup = backup_originals(staged, variant_sources() + marker_sources(), original_manifest)
     staged_yh = staged / "yh1"
     try:
@@ -227,6 +232,12 @@ def bootstrap(seed: Path, output: Path, staged: Path, keep_staged: bool) -> int:
         # 无论第 1 代成败，都立刻按盘上备份恢复，后续步骤看到的一定是原始工程。
         restore_from_backup(staged)
     run_stage("第 2 代（全量 HEAD 冷编）", staged_yh, output, llvm_host)
+    # verify-seed（selfhost_snapshot_gate.py --verify-seed）要求种子旁有 <种子>.sha256；
+    # 这里按与 fetch-release-seed.py 相同的格式补写，供自举门 `SEED=…/yh` 使用。
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    (output.parent / f"{output.name}.sha256").write_text(
+        f"{digest}  {output.name}\n", encoding="utf-8")
+    print(f"[ci-bootstrap] 已写 {output.name}.sha256（{digest[:16]}…）", flush=True)
     if not keep_staged:
         shutil.rmtree(staged, ignore_errors=True)
     print(f"[ci-bootstrap] 完成：{output}\n"

@@ -60,6 +60,11 @@ SECTION = "link-windows-x64"
 # 归档组与清单同名：bridge 是 yh 自己的桥，lld/llvm 由源码构建，support 是
 # MSVC 静态 CRT 与 Windows SDK 导入库（随 VS/SDK 安装，必须每次从本机取）。
 GROUPS = ("bridge", "lld", "llvm", "support")
+# vswhere 是 VS 安装器固定提供的定位工具：托管 runner 上 CMake 自带的 VS 探测曾失败
+# （2026-11-03 CI 实测 "could not find any instance of Visual Studio"），显式把实例
+# 路径经 CMAKE_GENERATOR_INSTANCE 传给 CMake 即可绕过探测。
+VSWHERE = (Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+           / "Microsoft Visual Studio/Installer/vswhere.exe")
 # 桥的三个 COFF 对象：与 docs/03-design/yh-Windows-LLVM后端设计.md §13 记录的命令一致。
 BRIDGE_OBJECTS = (
     ("bridge.c", "bridge.obj", ("/TC",)),
@@ -275,16 +280,40 @@ def cmake_definitions(build: dict) -> list[str]:
     return definitions
 
 
+def visual_studio_instance() -> str:
+    """用 vswhere 定位带 C++ 工具链的 VS 实例；找不到返回空串（让 CMake 自行探测）。"""
+    if not VSWHERE.is_file():
+        return ""
+    result = subprocess.run(
+        [str(VSWHERE), "-latest", "-products", "*",
+         "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+         "-property", "installationPath"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
 def configure_and_build(source: Path, lock: dict, jobs: int) -> Path:
     """CMake 配置 + Release 构建，返回 `<构建树>/Release/lib`。"""
     build_spec = lock["windows_build"]
     generator = build_spec.get("generator", "Visual Studio 17 2022")
     work = work_root()
     build_dir = work / "build"
+    instance = visual_studio_instance()
+    definitions = list(cmake_definitions(build_spec))
+    if instance:
+        definitions.append(f"-DCMAKE_GENERATOR_INSTANCE={instance}")
+        print(f"  Visual Studio 实例：{instance}")
     print(f"CMake 配置（{generator}，{build_spec['build_type']}，/MT）…")
-    run(["cmake", "-G", generator, "-A", build_spec.get("architecture", "x64"),
-         *cmake_definitions(build_spec), "-S", source / "llvm", "-B", build_dir],
-        "cmake-configure", cwd=work)
+    try:
+        run(["cmake", "-G", generator, "-A", build_spec.get("architecture", "x64"),
+             *definitions, "-S", source / "llvm", "-B", build_dir],
+            "cmake-configure", cwd=work)
+    except RuntimeError as error:
+        raise RuntimeError(
+            f"{error}\n诊断：cmake={shutil.which('cmake')}；"
+            f"vswhere={VSWHERE if VSWHERE.is_file() else '<缺失>'}；"
+            f"VS 实例={instance or '<vswhere 未找到带 C++ 工具链的实例>'}") from error
     print(f"CMake 构建（{jobs} 路并行，首次约 30–90 分钟）…")
     run(["cmake", "--build", build_dir, "--config", build_spec["build_type"],
          "--parallel", str(jobs)], "cmake-build", cwd=work)
