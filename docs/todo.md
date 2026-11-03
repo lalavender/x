@@ -39,7 +39,11 @@
          但该门本身在 Windows 上不可用）；
       4) `libs-test` 的 `net` 模块 `--emit-module --test-mode` worker 以 -1 退出，
          伴随「函数未使用」误判；
-      5) `modules/build-check` 的 `os6-default-stdlib`、`os4-os-process-win` 失败。
+      5) `modules/build-check` 的 `os6-default-stdlib`、`os4-os-process-win` 失败；
+      6) `tests/selfhost/runtime-memory.py` 内部自编 `compiler/` 的 `run()` 超时固定
+         120s，Windows 冷缓存下实测 76.7s 单项、`native-selfhost` 刚清 `.build` 后
+         总耗时超过 120s → `TimeoutExpired`（R8，2026-11-03 定位；修法：按平台放宽
+         timeout 或复用已构建缓存，证据 `tmp/selfhost4/5.log`、`tmp/rm-probe.py`）。
       修完这些 Windows job 才能全绿；当前 Windows job 已按设计移除
       `test-windows-target`（R3），其余门保持全量。
 
