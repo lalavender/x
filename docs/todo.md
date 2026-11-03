@@ -6,6 +6,32 @@
 
 图例：P0 发布质量与主线；P1 标准库与工具链；P2 长期与按需；⏸ 用户暂缓；❓ 待决策。
 
+## 2026-11-03 CI 迁移到 GitHub Actions（已提交，待滚种子后实跑验收）
+
+`.github/workflows/{ci,release,perf}.yml` 已落地（四端 GitHub 托管 runner、无容器），
+`.gitea/` 已删除。分支 `ci/github-actions` 上完成了本机与 WSL 证据链；
+**GitHub 上的四端 job 按用户要求暂停到「本次滚种子」完成后再跑**。
+
+- [ ] **实跑验收（P0）**：滚种子完成后触发 `ci.yml`，四端 job 全绿；再验证
+      `release.yml`（打 rc tag）与 `perf.yml`（workflow_dispatch）首次实跑。
+- [ ] **移除过渡期自举桥（P0）**：0.0.11 的 Linux/macOS 种子早于 W2（不认识
+      `windows` comptime 标记、15 个 `*.windows.*.yh` 变体与 `[link-windows-x64]`），
+      CI 暂用 `just bootstrap-bridge`（`tools/ci-bootstrap.py`，两代冷编）。含 W2
+      种子的新 Release 发布后：ci.yml/release.yml 切回 `just bootstrap`、自举门改回
+      默认种子，删除 `tools/ci-bootstrap.py`、`just bootstrap-bridge` 与本条。
+      桥存活期内 `compiler/`、`libs/` 源码必须保持可被 0.0.11 解析（`$if (windows)`
+      由桥改写；相邻字符串字面量拼接等新语法会直接编不过——2026-11-03 已被一次
+      相邻字面量拼接打红）。
+- [ ] **Windows 种子过渡资产**：`yh-0.0.11-windows-x64.tar.gz`（本机按 HEAD 重编的
+      Windows 种子，sha256 `0969209e…`）是追加到已发布 0.0.11 的资产，不是该版正式
+      产物；下一版 Release 正常产出 Windows 资产后改用常规取种。
+- [ ] **Windows 闭包 CI 冷启动成本（P1）**：Windows 静态 LLVM/lld 闭包由 CI 机器
+      源码 MSVC `/MT` 构建（首次约 1 小时、563 MB，actions/cache 命中后秒级）。
+      需要降低冷启动时按 C1 做固定 SDK 预编译分发。
+- [ ] **Windows testkit 断言位置/提前退出（P0，W2-9 遗留）**：
+      `tests/modules/test-check.py` 的 `execute-fail*` 在 Windows 上把断言位置记成
+      编码残值、提前退出被归到崩溃分支；需等源码闭包重建后的完整输出再定型修法。
+
 ## 2026-10-27 未使用函数检查（UF1）后续
 
 UF1 已生效（`build/unused_function.yh`，见 [finish.md](finish.md) 与
@@ -317,11 +343,12 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
     `PYTHONUTF8`、种子 `bin/yh-windows-x64`、`seed_platform=windows-x64`、
     `llvm_host=windows-x86_64` + `tools/llvm-windows-host.py`（闭包身份记录与失效检测）、
     `seed`/`install` 把 `windows-sdk` 放到 `<exe_dir>/windows-sdk`。
-  - [ ] **W2-5b CI 的 `windows-x64` job**：`.gitea/workflows/ci.yml` 目前只有
-    `macos-arm64`/`linux-arm64` 两个 runner label，没有 Windows runner 可挂；
-    需要先注册 runner（或改用 Windows 容器/云 runner），再补 job：取种 →
-    `just llvm-host` → `just build` → 两代固定点 → `just test-windows-target` +
-    `just run-windows-corpus`。**在此之前 Windows 运行侧证据只能本地手工产出。**
+  - [ ] **W2-5b CI 的 `windows-x64` job（2026-11-03 已接线，待实跑）**：
+    `.github/workflows/ci.yml` 已加 `windows-x64`（windows-latest）job：取种 →
+    `just llvm-host`（MSVC `/MT` 源码构建闭包，actions/cache）→ `just build` →
+    `just test` → `SKIP_CORPUS=1 selfhost-native` → `test-windows-target` /
+    `test-windows-corpus` / `run-windows-corpus`。实跑验收与剩余 testkit 断言位置
+    问题见「2026-11-03 CI 迁移到 GitHub Actions」段；闭包冷启动成本见该段。
   - [x] **W2-6 首个 Windows 种子**（2026-10-28 完成）：`bin/yh-windows-x64`
     SHA-256 `0969209e9b213f4d4998c48c913119fcf3c0cf06db373cbac0722e5d111905a9`；
     先由交叉 yh.exe 引导、再用它自编一次得到逐字节相同的产物。首次手工写入

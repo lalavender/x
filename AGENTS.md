@@ -63,14 +63,13 @@ gitignore 的 `bin/` 并核对哈希。
   `compiler/project.toml` 的 `[link-darwin-arm64].cxx`，因此
   `cd compiler && ../bin/yh-darwin-arm64 build`（不设 `SDKROOT`、不设
   `YH_LINK_RUNTIME_FLAGS`）可以独立链接；标准构建仍走 `just`。
-- **本地/CI 分工（2026-10-19 用户决定，2026-10-22 调整）**：在 Linux 或 macOS 上开发，
+- **本地/CI 分工（2026-10-19 用户决定，2026-11-03 调整）**：在 Linux 或 macOS 上开发，
   本地只需保证**本平台**门禁绿（`just test` + `just selfhost-native`；运行语料已按
   `// platform:` 头部指令筛选，平台专属门如 `just test-llvm` 在别的宿主会
-  明确拒绝而不是要求本地跑通）。**完整多平台回归由 Gitea Actions 承担**
-  （见下文 CI 说明）：推送 `arm64`/`llvm`/`main` 自动跑
-  linux-arm64（主门）与 darwin-arm64；linux-x86_64（LLVM 全门）只在 tag 发布时跑；
-  **tag 发布同样由 Gitea Actions 的 `release.yml` 承担**。GitHub Actions 已于
-  2026-10-21 移除（`.github/workflows/` 删除，需要时从 git 历史还原）。
+  明确拒绝而不是要求本地跑通）。**完整多平台回归由 GitHub Actions 承担**
+  （见下文 CI 说明）：推送 `llvm`/`main`/`arm64` 与 `<ver>-rc` 自动并行跑
+  linux-x64、linux-arm64、darwin-arm64、windows-x64；linux-x86_64 的 LLVM 全门
+  只在 tag 发布时跑；**tag 发布同样由 GitHub Actions 的 `release.yml` 承担**。
   本地不要为其他平台预跑门禁，也不要因 CI 红灯阻塞本地迭代——CI 红灯按
   todo 立项再修。`just libs-test`（libs 全部测试）是 CI 的独立阶段；改到
   标准库时建议本地顺带跑一次，但日常主门仍是 `just test` +
@@ -182,33 +181,48 @@ just seed               # 滚种子（仅在全绿后；拒绝带构建机路径
 **正在执行构建的那一代编译器**读取：滚种子前的旧种子不认识它，需等
 `just seed` 之后的新种子生效。
 
-CI 由 **Gitea Actions** 承担（2026-10-22 起；替代原 CircleCI 分支门与本机 Jenkins）：
+CI 由 **GitHub Actions** 承担（2026-11-03 起；替代 Gitea Actions 与本机 Jenkins）：
 
-- **仓库与 runner**：`http://localhost:3000/yh/yh`，runner 是 `gitea-runner` 5.2 的
-  **host 模式**实例 `yh-local`（labels `macos-arm64` / `linux-arm64`，宿主为
-  macOS/arm64）。本机无 docker，workflow 里不用 `container:` 语法；Linux 任务由
-  脚本自行调 Apple `container`。
-- **`ci.yml`（分支门）**：`arm64`/`llvm`/`main` 与 `<ver>-rc`/`<ver>-release`
-  分支 push → 并行跑 Darwin/arm64（宿主原生）、Linux/AArch64（Apple
-  container 内原生）、Linux/x86_64（Apple container 内模拟）；每端先取最新
-  Release 种子，再 `just bootstrap`、平台专项门、第 2/3 层语料与
+- **仓库与 runner**：GitHub `lalavender/x`（public）；全部用 GitHub 托管 runner，
+  **不用容器**：`ubuntu-24.04`（Linux/x86_64）、`ubuntu-24.04-arm`（Linux/AArch64）、
+  `macos-15`（Darwin/ARM64）、`windows-latest`（Windows/x86_64）。
+  不要用 `ubuntu-latest`：它已滚到 26.04（libxml2 SONAME 与 0.0.11 种子不兼容；
+  gcc15/gnu23 还会把 C 侧 `strtol` 重定向到 glibc 的 C23 变体，libs 的 C ABI 用例会红）。
+- **`ci.yml`（分支门）**：push 到 `llvm`/`main`/`arm64` 与 `<ver>-rc`、PR 触发四端并行：
+  取上一版 Release 种子 → 准备本机 LLVM 闭包 → 平台专项门 + 全量语料 +
   `just SKIP_CORPUS=1 selfhost-native`。**ANTLR 参考语法门只在本地开发跑**
-  （`just test` / `just quick`），CI 不为它装 Java + jar，只用编译器的
-  `--syntax-check` 模式（2026-10-26 用户决定）。
-- **`release.yml`（发布）**：版本 tag（`x.y.z`、`x.y.z-rc.N`）push → 三端顺序
-  构建（Darwin 原生 → Linux/AArch64 容器原生 → Linux/x86_64 容器模拟）、cc4 打包、
-  `tools/publish-release.py` 发布 GitHub Release；其他 tag（如 `seed-*`）跳过。
-- **凭据**：仓库 secret `YH_GITHUB_TOKEN`（取种与发布）。取种脚本必须显式
-  `--repo lalavender/x`——Gitea 会把 `GITHUB_REPOSITORY` 覆写成 `yh/yh`。
-- **缓存**：host 模式直接复用宿主 `$YH_LLVM_CACHE`（缺省
-  `$HOME/Documents/x/tmp/llvm-migration`）并 symlink 进 workspace；**不要删这个
-  目录**，只清理 `tmp/` 里其他旧产物，否则首次 `just bootstrap` 会重新准备
-  LLVM 闭包。
-- **磁盘**：完整三端约需 15–20 GB；x86_64 是容器模拟，不能等同原生 CI 证据。
-- **已退役**：GitHub Actions（2026-10-21 删除）、本机 Jenkins（2026-10-22 删除，
-  `Jenkinsfile` 与 `tools/jenkins/` 一并移除，发布脚本改为
-  `tools/publish-release.py`）；`.circleci/config.yml` 仅留作云端真机参照，不再
-  作为门禁。
+  （`just test` / `just quick`），CI 只用编译器的 `--syntax-check` 模式
+  （2026-10-26 用户决定）。`workflow_dispatch` 手动触发不取消在跑的长闭包构建。
+- **闭包策略（2026-11-03 用户决定：闭包不上传 Release，由 CI 机器自行准备）**：
+  Linux 从 `vendor/llvm/sdk.lock.json` 的 Ubuntu deb 取静态 LLVM/lld（分钟级）；
+  Darwin 源码构建 LLVM 21.1.8（首次约 68 分钟，actions/cache 命中后秒级）；
+  Windows 源码 MSVC `/MT` 构建（首次约 1 小时级，命中缓存后秒级；闭包落在
+  `tmp/llvm-migration/windows-llvm-closure/`，约 563 MB）。缓存键只按构建器/桥
+  源码分键，闭包正确性由各自的身份 check 负责，不由缓存键承担。
+- **`release.yml`（发布）**：版本 tag（`x.y.z`、`x.y.z-rc.N`）push → 四端并行
+  构建、cc4 打包、`tools/publish-release.py` 发布 GitHub Release；其他 tag
+  （如 `seed-*`）跳过；`docs/01-finished/release-<tag>.md` 缺失即失败。
+- **`perf.yml`（性能基线）**：每日 02:00（UTC+8）与手动触发；只出报告资产，不设硬门。
+- **凭据**：`secrets.GITHUB_TOKEN` 即可（同仓库取种与发布），不再需要自定义
+  `YH_GITHUB_TOKEN`；取种脚本用默认 `GITHUB_REPOSITORY`。
+- **过渡期（W2 种子，2026-11-03）**：0.0.11 的 Linux/macOS 种子早于 W2，不认识
+  `windows` comptime 标记、`*.windows.*.yh` 平台变体与 `[link-windows-x64]`，
+  无法直接冷编 HEAD。CI 因此用 `just bootstrap-bridge`（`tools/ci-bootstrap.py`）：
+  先把源码临时改成旧种子可解析的等价形态编出 yh1，再用 yh1 全量冷编 HEAD，
+  并写出 `bin/<平台种子名>` 供自举门使用（`llvm_host` 与 `native-selfhost.py`
+  都按种子文件名推断平台）。**约束**：桥存活期内 `compiler/` 与 `libs/` 源码必须
+  保持可被 0.0.11 解析——`$if (windows)` 由桥改写，但相邻字符串字面量拼接这类
+  新语法会直接编不过。含 W2 种子的 Release 发布后，删除桥接线与
+  `tools/ci-bootstrap.py`（见 docs/todo.md）。
+- **种子**：分支/tag 流水线一律取「最新带该平台资产的 Release（含 rc，排除当前
+  tag）」。Windows 种子以 `yh-0.0.11-windows-x64.tar.gz` 补进 0.0.11（过渡，
+  因为 W2 合入时未先发版）；种子不入库，取种用 `tools/fetch-release-seed.py`。
+- **磁盘/时长**：macos-15 约 44 GiB 可用、3 核 7 GiB 内存（`LLVM_JOBS=2`）；
+  windows-latest 约 28 GiB 可用、4 核 16 GiB；linux 4 核 16 GiB。四端冷启动约
+  3–4 小时；缓存命中后 Linux 约 25–45 分钟、Darwin/Windows 约 20–40 分钟。
+- **已退役**：Gitea Actions（2026-11-03 删除 `.gitea/`，git 历史保留）、
+  本机 Jenkins（2026-10-22 删除，`Jenkinsfile` 与 `tools/jenkins/` 一并移除）；
+  `.circleci/config.yml` 仅留作云端真机参照，不再作为门禁。
 
 ## 版本与发布（每版本 rc/release 分支）
 
@@ -217,14 +231,15 @@ CI 由 **Gitea Actions** 承担（2026-10-22 起；替代原 CircleCI 分支门�
 rc 与正式版是同一提交。完整方案见
 [分版本 rc/release 分支发版流程](docs/02-plan/yh-分版本rc与release分支发版流程方案-2026-10-21.md)。
 
-**当前状态（2026-10-22）**：tag 发布已由 Gitea Actions 的 `release.yml` 承担；
-rc/prerelease 与正式 tag 的 `<ver>-release` 祖先校验尚未落地（R1–R3/R5 未
-关闭），本节描述的是目标流程。
+**当前状态（2026-11-03）**：tag 发布由 GitHub Actions 的 `release.yml` 承担（四端
+并行 + cc4 打包 + `tools/publish-release.py`）；rc/prerelease 与正式 tag 的
+`<ver>-release` 祖先校验尚未落地（R1–R3/R5 未关闭），本节描述的是目标流程
+（尤其第 2 步「四端」与第 3 步的 Windows 种子验收仍按目标写）。
 
 1. 在 `<ver>-rc` 上开发；写 `docs/01-finished/release-<ver>-rc.N.md`；本地
    `just test` + `just selfhost-native` 全绿。
-2. 打 `git tag -a <ver>-rc.N` → 三端 tag 流水线构建并发布 prerelease Release
-   （带三端种子资产）。非版本号 tag 不触发发布。
+2. 打 `git tag -a <ver>-rc.N` → 四端 tag 流水线构建并发布 prerelease Release
+   （带四端种子资产）。非版本号 tag 不触发发布。
 3. **用发布出去的 rc 二进制验收**：`rm -rf bin && just fetch-seed` → `just` →
    `just test` → `just selfhost-native`（两代固定点）。
 4. 验收不过就回 `<ver>-rc` 修，打下一个 rc（种子自动取上一个 rc）。
