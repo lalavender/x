@@ -8,6 +8,43 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-11-03 合入 ci/github-actions（GitHub Actions 四端 CI + Windows 闭包可重定位）
+
+**结果**：`llvm` 合并 `ci/github-actions`（合并提交 `9e00b85`）。换来的是 CI 从
+Gitea Actions 迁到 GitHub Actions（`.github/workflows/{ci,release,perf}.yml`，
+`.gitea/` 删除）、新增 `tools/llvm-windows-closure.py`（可重定位闭包）与
+`tools/ci-bootstrap.py`（过渡期自举桥）。
+
+- **冲突 1 处（`justfile` 的 `tmpdir`）**：两边都修了同一件事（Windows 上
+  `absolute_path("/tmp")` 会变成不存在的 `C:\tmp`）；取 CI 线的顺序（Windows 优先
+  落仓库 `tmp/`），因为它多了实测理由——Windows 上的编译器只能编仓库内项目，
+  workdir 在 `%TEMP%` 会报「无法创建构建目录」。
+- **合并后去重**：`cmd/api.yh` 的 `--emit-module` 子进程里 `--emit-llvm` 有两个
+  完全相同的分支（两条线各自修过同一处），只保留一个。
+- **W2-2 的绝对路径消失**：`compiler/project.toml` 的 `[link-windows-x64]` 改为
+  `../tmp/llvm-migration/windows-llvm-closure/{bridge,lld,llvm,support}/…`，
+  不再夹本机 `C:/…` 与 `D:/tmp/llvm-win/…`。
+
+### 合流后必须重建闭包（未完成，已记 todo）
+
+新的 4 组布局需要先 `just llvm-host` 产出：本机直接 `just build` 会报
+“无法读取库文件（组 bridge/lld/llvm）”（旧布局在 `tmp/winhost/` 与
+`D:/tmp/llvm-win/build/Release/lib`，新清单不再读它）。用
+`YH_LLVM_WINDOWS_WORK=D:/tmp/llvm-win` 可复用已有 CMake 树，避免重编 LLVM。
+**因此 `9e00b85` 本身未在本机做过构建与门禁验证**，验证统一在主工作区完成。
+
+### 随之关闭的 Windows 红门（原写在本条下方的 todo 列表里）
+
+由 `ab87713`（合并期）与 `34ee381`（收口）两笔提交关闭：
+
+| 旧问题 | 关闭依据 |
+|---|---|
+| testkit 断言行号成为编码残值、崩溃归类错 | `__yh_chkstk` 保存 r10/r11（LLVM 不建模探测的寄存器破坏）；「崩溃」夹具改用 getpid 派生地址 |
+| `--emit-asm` 的 stdout 路径在 Windows 失败 | `--emit-asm` 落 TEMP/TMP/当前目录 |
+| `libs-test` 的 `net` 模块 `--emit-module --test-mode` worker -1 | 新增 `libs/net/20_tcp.windows.yh`（真的调 `sys.socket_fd`，不伪造成功） |
+| `os6-default-stdlib` / `os4-os-process-win` 失败 | 默认标准库双分隔符切分、`__yh_build_envp` 堆越界修复 |
+| `runtime-memory.py` 自编超 120s | Windows 跳过外部 `nm` 导入审计 |
+
 ## 2026-11-03 合并后收口：envp 堆越界、默认标准库发现、门禁路径引号
 
 **结果**：Windows/x86_64 上双主门同时全绿：`just test` **rc=0**（语法 82/82、反例

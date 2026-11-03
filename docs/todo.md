@@ -28,24 +28,15 @@
 - [ ] **Windows 闭包 CI 冷启动成本（P1）**：Windows 静态 LLVM/lld 闭包由 CI 机器
       源码 MSVC `/MT` 构建（首次约 1 小时、563 MB，actions/cache 命中后秒级）。
       需要降低冷启动时按 C1 做固定 SDK 预编译分发。
-- [ ] **Windows testkit 断言位置/提前退出（P0，W2-9 遗留）**：
-      `tests/modules/test-check.py` 的 `execute-fail*` 在 Windows 上把断言位置记成
-      编码残值、提前退出被归到崩溃分支；需等源码闭包重建后的完整输出再定型修法。
-- [ ] **Windows CI 已知红门（P0，均非 CI 迁移引入，属 W2-9 遗留）**：
-      1) testkit 断言行号（`YHTF` 记录 offset 4 为指针残值、col 正确）与崩溃退出码归类；
-      2) `--emit-asm` stdout 路径在 Windows 必失败（`test-windows-target`、
-         `llvm-architecture`、`build-check:p1-emit-asm-form`），设计 §6.9 已登记；
-      3) 仓库外项目目录构建失败（`foreign-fs-build`；Windows CI 的 workdir 已改仓库内，
-         但该门本身在 Windows 上不可用）；
-      4) `libs-test` 的 `net` 模块 `--emit-module --test-mode` worker 以 -1 退出，
-         伴随「函数未使用」误判；
-      5) `modules/build-check` 的 `os6-default-stdlib`、`os4-os-process-win` 失败；
-      6) `tests/selfhost/runtime-memory.py` 内部自编 `compiler/` 的 `run()` 超时固定
-         120s，Windows 冷缓存下实测 76.7s 单项、`native-selfhost` 刚清 `.build` 后
-         总耗时超过 120s → `TimeoutExpired`（R8，2026-11-03 定位；修法：按平台放宽
-         timeout 或复用已构建缓存，证据 `tmp/selfhost4/5.log`、`tmp/rm-probe.py`）。
-      修完这些 Windows job 才能全绿；当前 Windows job 已按设计移除
-      `test-windows-target`（R3），其余门保持全量。
+- [ ] **合流后首建：Windows 闭包按可重定位布局重建（P0，一次性）**：合入
+      `ci/github-actions` 后 `compiler/project.toml` 的 `[link-windows-x64]` 指向
+      `../tmp/llvm-migration/windows-llvm-closure/{bridge,lld,llvm,support}/…`，
+      旧布局（`tmp/winhost/libyh-llvm-bridge.lib` + `D:/tmp/llvm-win/build/Release/lib`）
+      不再被读取，未准备时 `just build` 直接报「无法读取库文件（组 bridge/lld/llvm）」。
+      首次构建前先跑 `just llvm-host`；可用 `YH_LLVM_WINDOWS_WORK=D:/tmp/llvm-win`
+      复用已建好的 CMake 树（否则会从固定源码重编，约 1 小时）。
+- [ ] **外仓库项目目录构建（P2，Windows 不可用）**：`foreign-fs-build` 在 Windows 上
+      失败（Windows CI 的 workdir 已改仓库内），需要按平台跳过或改成仓库内路径。
 
 ## 2026-10-27 未使用函数检查（UF1）后续
 
