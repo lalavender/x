@@ -259,6 +259,15 @@ llvm-host-status:
 # bootstrap：准备固定 LLVM 宿主（幂等）后冷编，首次/换机的一条命令。
 bootstrap: llvm-host _ensure_built
 
+# bootstrap-bridge：过渡期自举桥。0.0.11 Release 的 Linux/macOS 种子不认识 W2 的
+# `*.windows.*.yh` 平台变体与 `[link-windows-x64]` 清单节，无法直接冷编 HEAD：
+# 本配方先用旧种子「过滤 Windows 平台文件」编出一代编译器，再用它全量冷编 HEAD。
+# Windows 种子已按 HEAD 重编（0.0.11-windows-x64），不需要本桥。
+# 等含 W2 种子的 Release 发布后，本配方与 tools/ci-bootstrap.py 一起删除
+# （见 docs/todo.md 的过渡期条目）。自举门请显式 `SEED=绝对路径/yh`。
+bootstrap-bridge: llvm-host _prepare verify-seed
+    {{ py }} "{{ root }}/tools/ci-bootstrap.py" run --staged "{{ root }}/tmp/ci-bootstrap"
+
 # seed：滚种子——把刚构建并验证过的 yh 覆盖入库种子。
 # 只应在 just test 与 just selfhost-native 全绿后执行（不作为依赖，
 # 防止未验证产物污染种子）。

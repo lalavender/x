@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""把三端构建产物发布到 GitHub Release。
+"""把四端构建产物发布到 GitHub Release。
 
-由 Gitea Actions 的发布 workflow（.gitea/workflows/release.yml）调用：
+由 GitHub Actions 的发布 workflow（.github/workflows/release.yml）调用：
 
   python3 tools/publish-release.py --repo lalavender/x --tag 0.0.8 \
       --dist dist --notes docs/01-finished/release-0.0.8.md
 
 约定：
-  - 资产名：yh-<tag>-<platform>.tar.gz + .sha256；
-  - 三端资产缺一即失败（不允许发布半套 Release）；
+  - 资产名：yh-<tag>-<platform>.tar.gz + .sha256（platform 取 PLATFORMS）；
+  - 四端资产缺一即失败（不允许发布半套 Release）；
+  - 发布说明 docs/01-finished/release-<tag>.md 缺失或为空即失败
+    （rc 与正式版都必须写，不允许静默兜底文案）；
   - tag 含 `-rc.` 时发布 prerelease；
   - Release 已存在时先删除同名资产再上传，保证可重跑。
 
-环境变量 GITHUB_TOKEN 必填（repo 权限）。
+环境变量 GITHUB_TOKEN 必填（repo 权限）；仓库名取 --repo 或 GITHUB_REPOSITORY。
 """
 
 import argparse
@@ -28,7 +30,10 @@ from pathlib import Path
 
 API = "https://api.github.com"
 UPLOAD_API = "https://uploads.github.com"
-PLATFORMS = ("linux-arm64", "linux-x86_64", "darwin-arm64")
+# 平台资产键：必须与 fetch-release-seed.py 的 PLATFORMS 及 release.yml 的
+# 打包名一致。linux-x86_64 对应 release.yml 里的 linux-x64 job（历史资产名
+# 就是 yh-<tag>-linux-x86_64.tar.gz，不要改名），windows-x64 是四端新增项。
+PLATFORMS = ("linux-arm64", "linux-x86_64", "darwin-arm64", "windows-x64")
 
 
 class PublishError(RuntimeError):
@@ -97,7 +102,7 @@ def upload_asset(repo, token, release_id, path):
 
 
 def collect_assets(dist, tag):
-    """校验三端 tar.gz 与 .sha256 齐全，返回待上传文件列表。"""
+    """校验四端 tar.gz 与 .sha256 齐全，返回待上传文件列表。"""
     safe_tag = tag.replace("/", "_")
     files = []
     missing = []
@@ -116,12 +121,17 @@ def collect_assets(dist, tag):
 
 
 def read_notes(path):
-    """优先用仓库里的 release 说明；缺失时用统一兜底文案。"""
-    if path and path.is_file():
-        text = path.read_text(encoding="utf-8").strip()
-        if text:
-            return text
-    return "自举构建：Linux/AArch64、Linux/x86_64、Darwin/ARM64"
+    """读取仓库里的 release 说明；缺失或为空即失败（不允许静默兜底）。
+
+    发布规则（AGENTS「版本与发布」）：rc 与正式版都必须写
+    docs/01-finished/release-<tag>.md，缺失即发布失败。
+    """
+    if not path.is_file():
+        raise PublishError(f"缺少发布说明文件：{path}")
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise PublishError(f"发布说明文件为空：{path}")
+    return text
 
 
 def main(argv):
@@ -129,7 +139,8 @@ def main(argv):
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""))
     parser.add_argument("--tag", required=True)
     parser.add_argument("--dist", type=Path, default=Path("dist"))
-    parser.add_argument("--notes", type=Path)
+    parser.add_argument("--notes", type=Path, required=True,
+                        help="发布说明文件（docs/01-finished/release-<tag>.md），缺失即失败")
     parser.add_argument("--prerelease", action="store_true",
                         help="强制 prerelease；缺省按 tag 是否含 -rc. 自动判断")
     args = parser.parse_args(argv)
@@ -143,6 +154,9 @@ def main(argv):
         return 1
 
     try:
+        # 先读发布说明：缺失/为空即失败，即使 Release 已存在（重跑）也不放过，
+        # 避免旧版本「有 Release 就不检查说明文件」的静默兜底。
+        notes = read_notes(args.notes)
         files = collect_assets(args.dist, args.tag)
         prerelease = args.prerelease or "-rc." in args.tag
         release = find_release(args.repo, token, args.tag)
@@ -150,7 +164,7 @@ def main(argv):
             payload = {
                 "tag_name": args.tag,
                 "name": args.tag,
-                "body": read_notes(args.notes),
+                "body": notes,
                 "draft": False,
                 "prerelease": prerelease,
             }

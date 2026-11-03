@@ -1,0 +1,462 @@
+name: release
+# 版本 tag 发布（GitHub Actions，四平台原生托管 runner）。
+#
+# 结构：prepare 校验 tag → 四个平台 job 并行「取种 → 闭包 → 平台门 → 自举门 →
+# 打包 artifact」→ publish 汇总发布 GitHub Release。
+#
+# 只认 x.y.z 与 x.y.z-rc.N；其他 tag（如 seed-*）由 prepare 判定后整体跳过。
+# 种子一律取「最新带该平台资产的 Release（排除当前 tag）」：rc.N 用 rc.N-1、
+# 正式版用该版最后一个 rc（与分支门同一规则）。
+#
+# 资产名沿用既有约定：linux-arm64 / linux-x86_64 / darwin-arm64 / windows-x64
+# （= publish-release.py 与 fetch-release-seed.py 的 PLATFORMS 键），因此
+# linux-x64 这个 job 产出的资产叫 yh-<tag>-linux-x86_64.tar.gz，不要改名。
+#
+# 动作版本、runner 版本与闭包缓存 key/restore-keys 与 `.github/workflows/ci.yml`
+# 保持一致：缓存条目是同一个存储，key 相同才能两边互相命中。
+on:
+  push:
+    tags: ['*']
+
+# 工作流默认只读；只有 publish 需要写 Release。
+permissions:
+  contents: read
+
+env:
+  LLVM_JOBS: "2"
+  # Windows 上 Python 默认 GBK，门禁脚本都用 text=True 读编译器输出。
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      ok: ${{ steps.ver.outputs.ok }}
+    steps:
+      # 只读 ref 名，不需要检出源码。
+      - name: 校验版本 tag
+        id: ver
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+            echo "版本 tag：$tag"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+            echo "跳过：$tag 不是版本 tag（只发布 x.y.z 与 x.y.z-rc.N）"
+          fi
+
+  # ------------------------------------------------------------------------
+  # 四端构建：各 job 自取种子、准备本机 LLVM 闭包、跑平台门、冷编并自举，
+  # 最后把 cc4（自举门最终候选）打成 yh-<tag>-<platform>.tar.gz（成员名必须是
+  # 无扩展名的 yh，fetch-release-seed.py 的 extract_yh 只认这个名字）。
+  #
+  # TODO(W2 平台文件): 0.0.11 的 Linux/macOS 种子编不了当前 HEAD，需要先跑
+  # Lead 提供的一次性自举桥（过滤 W2 平台文件）。桥脚本到位后接在各平台 job
+  # 的「取上一版种子」之后、闭包/冷编之前；在那之前不要自行发明包名。
+  # ------------------------------------------------------------------------
+
+  linux-x64:
+    needs: prepare
+    if: needs.prepare.outputs.ok == '1'
+    # 固定 24.04：ubuntu-latest 已滚到 26.04（libxml2 SONAME 变了，种子跑不起来）。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+
+      - name: 安装构建依赖
+        # libxml2/zlib/zstd：种子与内嵌宿主按动态库链接，缺 runtime 会 127。
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential binutils libxml2-dev zlib1g-dev libzstd-dev
+
+      - name: 取上一版种子
+        run: |
+          set -euo pipefail
+          python3 tools/fetch-release-seed.py --platform linux-x86_64 --exclude-tag "$TAG"
+
+      - name: 准备闭包
+        run: just llvm-host
+      - name: 过渡期自举桥（0.0.11 种子不认识 W2 平台文件）
+        run: just bootstrap-bridge
+
+      - name: Linux/x86_64 LLVM 全门
+        # AGENTS 约定：linux-x86_64 的 LLVM 全门只在 tag 发布时跑，就落在这里。
+        # test-llvm 已含语法语料、运行语料 O0/O2、模块/项目 O0/O2 与专项门。
+        run: just test-llvm
+
+      - name: 自举门 → 取出 cc4 → 打包资产
+        run: |
+          set -euo pipefail
+          just SEED="$PWD/yh" SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost selfhost-native
+          # cc4 是自举门最终候选。这里不静默假设产物名：先找无扩展名，再找
+          # .exe（Windows 链接器可能补扩展名），都没有就显式失败。
+          cc4=""
+          for cand in dist/selfhost/cc4 dist/selfhost/cc4.exe; do
+            if [ -f "$cand" ]; then cc4="$cand"; break; fi
+          done
+          if [ -z "$cc4" ]; then
+            echo "FAIL 自举门未产出 cc4（dist/selfhost 下没有 cc4 或 cc4.exe）" >&2
+            ls -la dist/selfhost >&2 || true
+            exit 1
+          fi
+          echo "自举候选：$cc4"
+          cp "$cc4" yh
+          rm -rf dist/selfhost
+          # 打包自检：产物必须支持换行终结（rc.4 曾打包出不含该特性的旧二进制）。
+          ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
+          name="yh-$TAG-linux-x86_64"
+          stage="dist/.stage-linux-x86_64"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp yh "$stage/yh"
+          tar -czf "dist/$name.tar.gz" -C "$stage" yh
+          rm -rf "$stage"
+          ( cd dist && sha256sum "$name.tar.gz" > "$name.sha256" )
+          ls -l "dist/$name.tar.gz" "dist/$name.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x64
+          path: |
+            dist/yh-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/yh-${{ github.ref_name }}-linux-x86_64.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-arm64:
+    needs: prepare
+    if: needs.prepare.outputs.ok == '1'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+
+      - name: 安装构建依赖
+        # libxml2/zlib/zstd：种子与内嵌宿主按动态库链接，缺 runtime 会 127。
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential binutils libxml2-dev zlib1g-dev libzstd-dev
+
+      - name: 取上一版种子
+        run: |
+          set -euo pipefail
+          python3 tools/fetch-release-seed.py --platform linux-arm64 --exclude-tag "$TAG"
+
+      - name: 准备闭包
+        run: just llvm-host
+      - name: 过渡期自举桥（0.0.11 种子不认识 W2 平台文件）
+        run: just bootstrap-bridge
+
+      - name: Linux/AArch64 平台门
+        run: |
+          set -euo pipefail
+          just test-llvm-linux-arm64
+          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
+
+      - name: 自举门 → 取出 cc4 → 打包资产
+        run: |
+          set -euo pipefail
+          just SEED="$PWD/yh" SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost selfhost-native
+          # cc4 是自举门最终候选。这里不静默假设产物名：先找无扩展名，再找
+          # .exe（Windows 链接器可能补扩展名），都没有就显式失败。
+          cc4=""
+          for cand in dist/selfhost/cc4 dist/selfhost/cc4.exe; do
+            if [ -f "$cand" ]; then cc4="$cand"; break; fi
+          done
+          if [ -z "$cc4" ]; then
+            echo "FAIL 自举门未产出 cc4（dist/selfhost 下没有 cc4 或 cc4.exe）" >&2
+            ls -la dist/selfhost >&2 || true
+            exit 1
+          fi
+          echo "自举候选：$cc4"
+          cp "$cc4" yh
+          rm -rf dist/selfhost
+          ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
+          name="yh-$TAG-linux-arm64"
+          stage="dist/.stage-linux-arm64"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp yh "$stage/yh"
+          tar -czf "dist/$name.tar.gz" -C "$stage" yh
+          rm -rf "$stage"
+          ( cd dist && sha256sum "$name.tar.gz" > "$name.sha256" )
+          ls -l "dist/$name.tar.gz" "dist/$name.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-arm64
+          path: |
+            dist/yh-${{ github.ref_name }}-linux-arm64.tar.gz
+            dist/yh-${{ github.ref_name }}-linux-arm64.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  darwin-arm64:
+    needs: prepare
+    if: needs.prepare.outputs.ok == '1'
+    runs-on: macos-15
+    timeout-minutes: 360
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+
+      - name: 取上一版种子
+        run: |
+          set -euo pipefail
+          python3 tools/fetch-release-seed.py --platform darwin-arm64 --exclude-tag "$TAG"
+
+      # 缓存 key/restore-keys 与 ci.yml 完全一致：缓存条目不承担正确性，失效
+      # 判定交给 just llvm-host 的身份 check，这里只承担命中率。
+      - name: 恢复 Darwin 闭包缓存
+        id: closure-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: tmp/llvm-migration
+          key: llvm-darwin-${{ hashFiles('tools/llvm-darwin-sdk.py', 'tools/llvm-darwin-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp') }}
+          restore-keys: |
+            llvm-darwin-
+
+      - name: 准备 Darwin 闭包（缓存未命中时源码构建 LLVM）
+        run: just llvm-host
+
+      - name: 保存 Darwin 闭包缓存
+        if: success() && steps.closure-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tmp/llvm-migration
+          key: ${{ steps.closure-cache.outputs.cache-primary-key }}
+
+      - name: 过渡期自举桥（0.0.11 种子不认识 W2 平台文件，含冷编）
+        run: just bootstrap-bridge
+
+      - name: Darwin/arm64 平台门
+        run: |
+          set -euo pipefail
+          just test-llvm-darwin
+          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(sysctl -n hw.ncpu)"
+
+      - name: 自举门 → 取出 cc4 → 打包资产
+        run: |
+          set -euo pipefail
+          just SEED="$PWD/yh" SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost selfhost-native
+          # cc4 是自举门最终候选。这里不静默假设产物名：先找无扩展名，再找
+          # .exe（Windows 链接器可能补扩展名），都没有就显式失败。
+          cc4=""
+          for cand in dist/selfhost/cc4 dist/selfhost/cc4.exe; do
+            if [ -f "$cand" ]; then cc4="$cand"; break; fi
+          done
+          if [ -z "$cc4" ]; then
+            echo "FAIL 自举门未产出 cc4（dist/selfhost 下没有 cc4 或 cc4.exe）" >&2
+            ls -la dist/selfhost >&2 || true
+            exit 1
+          fi
+          echo "自举候选：$cc4"
+          cp "$cc4" yh
+          rm -rf dist/selfhost
+          ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
+          name="yh-$TAG-darwin-arm64"
+          stage="dist/.stage-darwin-arm64"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp yh "$stage/yh"
+          tar -czf "dist/$name.tar.gz" -C "$stage" yh
+          rm -rf "$stage"
+          ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.sha256" )
+          ls -l "dist/$name.tar.gz" "dist/$name.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-darwin-arm64
+          path: |
+            dist/yh-${{ github.ref_name }}-darwin-arm64.tar.gz
+            dist/yh-${{ github.ref_name }}-darwin-arm64.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-x64:
+    needs: prepare
+    if: needs.prepare.outputs.ok == '1'
+    runs-on: windows-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        # Windows 上统一用 Git Bash（just 配方本身就是 bash；python 命令是 python）。
+        shell: bash
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+      # 托管 runner 没有预装 just，由 action 装到 PATH（与 ci.yml 同版本）。
+      - uses: extractions/setup-just@v2
+
+      - name: 取上一版种子
+        run: |
+          set -euo pipefail
+          python tools/fetch-release-seed.py --platform windows-x64 --exclude-tag "$TAG"
+
+      # 缓存 key/restore-keys 与 ci.yml 完全一致（三个目录：闭包归档、身份记录、
+      # Windows SDK 导入库）。
+      - name: 恢复 Windows 闭包缓存
+        id: closure-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            tmp/llvm-migration/windows-llvm-closure
+            tmp/llvm-migration/llvm-host-windows-x86_64
+            tmp/llvm-migration/windows-sdk
+          key: llvm-windows-${{ hashFiles('tools/llvm-windows-closure.py', 'tools/llvm-windows-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp', 'compiler/llvm/windows_shim.c', 'compiler/project.toml') }}
+          restore-keys: |
+            llvm-windows-
+
+      - name: 准备 Windows 闭包（缓存未命中时 MSVC 源码构建 LLVM/lld）
+        run: just llvm-host
+
+      - name: 保存 Windows 闭包缓存
+        if: success() && steps.closure-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            tmp/llvm-migration/windows-llvm-closure
+            tmp/llvm-migration/llvm-host-windows-x86_64
+            tmp/llvm-migration/windows-sdk
+          key: ${{ steps.closure-cache.outputs.cache-primary-key }}
+
+      - name: 冷编
+        run: just build
+
+      - name: Windows/x64 平台门
+        # Windows 上 ANTLR 层默认关闭（YH_ANTLR=0），test 的其余层照跑。
+        run: just test
+
+      - name: 自举门 → 取出 cc4 → 打包资产
+        run: |
+          set -euo pipefail
+          just SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost selfhost-native
+          # cc4 是自举门最终候选。这里不静默假设产物名：先找无扩展名，再找
+          # .exe（Windows 链接器可能补扩展名），都没有就显式失败。
+          cc4=""
+          for cand in dist/selfhost/cc4 dist/selfhost/cc4.exe; do
+            if [ -f "$cand" ]; then cc4="$cand"; break; fi
+          done
+          if [ -z "$cc4" ]; then
+            echo "FAIL 自举门未产出 cc4（dist/selfhost 下没有 cc4 或 cc4.exe）" >&2
+            ls -la dist/selfhost >&2 || true
+            exit 1
+          fi
+          echo "自举候选：$cc4"
+          cp "$cc4" yh
+          rm -rf dist/selfhost
+          # 打包自检：产物必须支持换行终结（rc.4 曾打包出不含该特性的旧二进制）。
+          ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
+          name="yh-$TAG-windows-x64"
+          stage="dist/.stage-windows-x64"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          # tar 内成员名必须是 yh（无扩展名）：fetch-release-seed.py 的 extract_yh
+          # 只认名为 yh 的成员；Windows 的 yh.exe 在这里统一改名为 yh 再打包。
+          cp "$cc4" "$stage/yh"
+          tar -czf "dist/$name.tar.gz" -C "$stage" yh
+          rm -rf "$stage"
+          # Git Bash 的 coreutils 默认按 binary 模式写成 "<hash> *<name>"；这里统一
+          # 成仓库约定的 "<hash>  <name>"（与 fetch-release-seed.py 写种子哈希一致）。
+          ( cd dist && sha256sum "$name.tar.gz" | sed 's/ \*/  /' > "$name.sha256" )
+          ls -l "dist/$name.tar.gz" "dist/$name.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: |
+            dist/yh-${{ github.ref_name }}-windows-x64.tar.gz
+            dist/yh-${{ github.ref_name }}-windows-x64.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  # ------------------------------------------------------------------------
+  # 汇总发布：四个 artifact 齐了才发布；缺 release 说明文件直接失败。
+  # ------------------------------------------------------------------------
+  publish:
+    needs: [linux-x64, linux-arm64, darwin-arm64, windows-x64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载四端构建资产
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: 校验资产与发布说明齐全
+        run: |
+          set -euo pipefail
+          ls -l dist
+          # PLATFORMS 键（与 publish-release.py 一致）：linux-x86_64 对应 linux-x64 job。
+          for platform in linux-arm64 linux-x86_64 darwin-arm64 windows-x64; do
+            for suffix in tar.gz sha256; do
+              asset="dist/yh-$TAG-$platform.$suffix"
+              if [ ! -s "$asset" ]; then
+                echo "FAIL 缺少发布资产：$asset" >&2
+                exit 1
+              fi
+            done
+            # 压缩包必须恰好是一个名为 yh 的成员：fetch-release-seed.py 的
+            # extract_yh 只认这个名字（Windows 的 yh.exe 已在打包时改名）。
+            members=$(tar -tzf "dist/yh-$TAG-$platform.tar.gz")
+            if [ "$members" != "yh" ]; then
+              echo "FAIL $platform 资产成员异常，应为单个 yh：$members" >&2
+              exit 1
+            fi
+            # 校验和必须与下载到的包一致，资产被截断/覆盖要在这里就红。
+            ( cd dist && sha256sum -c "yh-$TAG-$platform.sha256" )
+          done
+          # 种子规则：rc 与正式版都要写发布说明，缺失即失败（不允许静默兜底）。
+          notes="docs/01-finished/release-$TAG.md"
+          if [ ! -s "$notes" ]; then
+            echo "FAIL 缺少发布说明：$notes（rc 与正式版都必须写）" >&2
+            exit 1
+          fi
+
+      - name: 发布 GitHub Release
+        run: |
+          set -euo pipefail
+          # GITHUB_REPOSITORY / GITHUB_TOKEN 由环境提供，脚本自行按 tag 判定
+          # prerelease（含 -rc. 即 prerelease）并做上传后大小校验。
+          python3 tools/publish-release.py \
+            --tag "$TAG" \
+            --dist dist \
+            --notes "docs/01-finished/release-$TAG.md"
