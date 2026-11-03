@@ -5,9 +5,12 @@
 ## 开发策略（必须遵守）
 
 **0.0.3 起仓库已删除 src/（C 版 stage0）与 bootstrap/，进入滚动自举**：
-编译器源码在 `compiler/`（gen/lex/parse/ast/check/comptime/builtin/ir/backend/
-build/testkit/cmd 十二个模块的 project.toml 项目；`build` 是构建引擎，
-`testkit` 是语言内测试执行器，`cmd` 只剩参数映射与调用面），
+编译器源码在 `compiler/`（gen/proj/lex/parse/ast/check/comptime/builtin/ir/
+backend/lower/link/build/testkit/cmdline/cmd 十六个模块的 project.toml 项目；
+`build` 是构建引擎，`proj` 是项目模型/目标与产物路径，`link` 是工具链调用层
+（汇编/链接/lld/进程/时钟），`lower` 是受检快照 → IR，`testkit` 是语言内测试
+执行器，`cmdline` 是 CLI 声明与解析（唯一允许依赖 `libs/cli` 的编译器模块），
+`cmd` 只剩参数映射与调用面），
 构建只依赖**宿主平台对应的种子**，种子统一按 `yh-<平台>-<架构>` 命名：
 macOS/arm64 用 `bin/yh-darwin-arm64`（Mach-O，SHA-256 见
 `bin/yh-darwin-arm64.sha256`），Linux/aarch64 用 `bin/yh-linux-arm64`（ELF，
@@ -33,7 +36,8 @@ gitignore 的 `bin/` 并核对哈希。
   新增 `.yh` 用例并运行 `just`。决策依据见 ADR-0006/0007。
 - **模块导出面**：只导出别的模块真的使用的声明（`pub` 同时决定 `.s.i` 接口
   与 `.globl`）；仅模块内使用的 `fn`/`const` 不写 `pub`，入口 `cmd/` 只保留
-  `main`。跨模块可变状态经 `pub fn` 访问（`gen.G()` 模式）。
+  `main`。跨模块可变状态经 `pub fn` 访问（B1 后的窄口：`gen.task()` 每任务状态、
+  `gen.stats()` 统计、`proj.ctx()`/`proj.cfg()` 项目与目标；`gen.G()` 已删除）。
 - **模块私有类型**（2026-10-12，ADR-0013）：`struct`/`union`/`enum` 的 `pub`
   可选，不带 `pub` 即模块私有（不进 `.s.i`、跨模块不可命名），且不得出现在
   本模块的 `pub` 签名、`pub` 字段或 `pub` 别名里。
@@ -90,7 +94,8 @@ gitignore 的 `bin/` 并核对哈希。
   - `docs/finish.md` 只保留最近三天条目（靠前为最新）；更早条目归档到
     `docs/01-finished/finish-历史归档-<起>至<止>.md`，新增条目写在最前。
 - `tests/yh/` 语法语料、`tests/yh-run/` 语义运行语料、
-  `tests/modules/` 模块语料与项目验收、`tests/selfhost/` 自举探针
+  `tests/modules/` 模块语料与项目验收、`tests/selfhost/` 自举探针、
+  `tests/build-cache/` 构建缓存位置（`YH_BUILD_CACHE`）验收
 - `tools/` 门禁脚本与 yh-explorer
 - `tmp/` 全部临时产物（已 gitignore）
 
@@ -136,8 +141,13 @@ just
 ./yh test --filter X --timeout 15  # 只跑身份含 X 的用例，单例超时 15 秒
 ./yh --syntax-check f.yh   # 只做词法/语法检查
 ./yh --emit-asm f.yh       # 发射汇编
-./yh f.yh -o out           # 单文件编译并链接
+./yh f.yh -o out           # 单文件编译并链接（-o 也可写在文件前，--output 等价）
+./yh --help                # 顶层帮助（由 libs/cli 生成）；yh <命令> --help 看单项
 ```
+
+命令行解析自 CLI-R（2026-10-27）起由 `libs/cli` 承担：声明在
+`compiler/cmdline/`（`module cmdline`），`compiler/cmd/` 只做「请求 → 分派」。
+帮助文本由库生成（`用法: ` 前缀 + 中文段标题），`-h/--help` 是新增能力。
 
 ## 构建与测试
 
@@ -161,6 +171,16 @@ just seed               # 滚种子（仅在全绿后；拒绝带构建机路径
 标注平台专属项（`linux`、`linux-x64`、`darwin-arm64` 等，`<os>` 匹配该 OS 的
 所有架构），不匹配的记 `SKIP`、不算失败也不影响退出码；没有该指令的是共有用例。
 `just test-llvm` 是 Linux/x86_64 专属门，其他宿主会直接拒绝而不是降级运行。
+
+**构建缓存位置（2026-10-28）**：编译器构建的中间缓存默认在 `compiler/.build`；
+设置 `YH_BUILD_CACHE=<目录>`（或 `just BUILD_CACHE=<目录> build`）后整套缓存树
+（`targets/...`、`check/` 与 asm/obj/iface/manifest/ir/llvm 六个子目录）迁到该
+目录，同一台机器的多个 worktree 各指一处即可互不覆盖；默认可执行文件仍在
+`compiler/.build`，缓存位置不改变产物位置。`just test`/`just selfhost-native`
+等门禁脚本按项目内 `.build` 布局断言，justfile 对它们统一剥掉该变量，只有
+`build`/`dev` 把它显式传给编译器，因此缓存位置不影响门禁结果。该变量由
+**正在执行构建的那一代编译器**读取：滚种子前的旧种子不认识它，需等
+`just seed` 之后的新种子生效。
 
 CI 由 **Gitea Actions** 承担（2026-10-22 起；替代原 CircleCI 分支门与本机 Jenkins）：
 
@@ -298,6 +318,11 @@ SEED=bin/yh-linux-arm64 SEED_DEST=bin/yh-linux-arm64 just seed
 ```
 
 ## 代码规范
+
+**写 `.yh` 代码前先读 [docs/03-design/yh-编码规范.md](docs/03-design/yh-编码规范.md)**
+——排版、命名、类型与转换（隐式只允许整数加宽）、可见性与模块、控制流、注释、
+文件组织、错误处理与资源、字符串、测试、编译期各处细则，以及提交前清单都在那里；
+本节只列不可让步的硬要求。
 
 - 结构体和函数都要有详细注释说明
 - 每个文件尽量保持在 500-1000 行

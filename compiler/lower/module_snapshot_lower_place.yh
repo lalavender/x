@@ -2,6 +2,7 @@ module lower
 import ast
 import gen
 import ir
+import proj
 
 // module_snapshot_lower_place.yh —— 纯快照绑定赋值、地址、下标与切片位置。
 //
@@ -293,7 +294,7 @@ fn checked_lower_member_field(l *CheckedLower, struct_type int, file_id int, tok
     if (ty.kind != gen.TY_STRUCT && ty.kind != gen.TY_UNION) { return -1 }
     if (file_id < 0 || file_id >= l.store.file_n || token < 0
         || token >= l.store.files[file_id].token_n) { return -1 }
-    let file gen.PFile = l.store.files[file_id]
+    let file proj.PFile = l.store.files[file_id]
     let start int = file.tokens[token].start
     let name_len int = file.tokens[token].len
     if (start < 0 || name_len <= 0 || start + name_len > file.source_len) { return -1 }
@@ -622,6 +623,18 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
             return -2
         }
         return storage
+    }
+    if ((node.kind == ast.AST_EXPR_TERNARY || node.kind == ast.AST_EXPR_CTIF)
+        && checked_lower_is_aggregate(l.store, node.type_id) != 0) {
+        // 聚合条件表达式没有稳定存储：分配临时槽并把选中分支的值写进去，
+        // 之后字段/下标访问的就是该槽（等价于 `let t = c ? a : b` 后再访问）。
+        let aty gen.CType = l.store.types[node.type_id]
+        if (aty.size <= 0 || aty.align <= 0) { return -2 }
+        let temp int = ast_ir_b_add_alloca(b, aty.size, aty.align)
+        if (temp < 0) { return -1 }
+        let stored int = checked_lower_aggregate_store(l, flow, temp, node.type_id, expr_id)
+        if (stored != 0) { return stored }
+        return temp
     }
     if (node.kind == ast.AST_EXPR_CALL
         && checked_lower_is_aggregate(l.store, node.type_id) != 0) {

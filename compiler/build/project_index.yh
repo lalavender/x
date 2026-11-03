@@ -2,6 +2,7 @@ module build
 import gen
 import lex
 import parse
+import proj
 
 // ============================================================================
 // project_index.yh —— 项目发现/索引/解析
@@ -9,16 +10,16 @@ import parse
 // ============================================================================
 
 // pj_input_push：追加一个 project.toml C 输入，按所属项目保留稳定顺序。
-fn pj_input_push(items **gen.PInput, count *int, capacity *int,
+fn pj_input_push(items **proj.PInput, count *int, capacity *int,
     off int, n int) int {
     if (count[0] == capacity[0]) {
         let ncap int = capacity[0] * 2
         if (ncap == 0) { ncap = 8 }
-        let next *gen.PInput = malloc(
-            (ncap * sizeof(gen.PInput)).to_type(u64)).to_type(*gen.PInput)
+        let next *proj.PInput = malloc(
+            (ncap * sizeof(proj.PInput)).to_type(u64)).to_type(*proj.PInput)
         if (next == 0) { return gen.fail("C 项目输入表内存分配失败") }
         if (count[0] > 0) {
-            memcpy(next, items[0], (count[0] * sizeof(gen.PInput)).to_type(u64))
+            memcpy(next, items[0], (count[0] * sizeof(proj.PInput)).to_type(u64))
         }
         if (items[0] != 0) { free(items[0].to_type(*void)) }
         items[0] = next
@@ -31,21 +32,23 @@ fn pj_input_push(items **gen.PInput, count *int, capacity *int,
 }
 
 // pj_c_path：验证项目相对路径、扩展名和文件存在性，返回规范化路径。
-fn pj_c_path(proj int, item_off int, item_len int, suffix *char,
-    line int) int {
-    let gs *gen.GenState = gen.G()
-    if (item_len == 0 || gs.task.np_data[item_off] == '/') {
-        return pj_proj_diag(gs.p_projs[proj].root_off, line,
+fn pj_c_path(pj int, item_off int, item_len int, suffix *char,
+    line int, out_off *int, out_len *int) int {
+    let c_off int = 0
+    let c_len int = 0
+    let tk *gen.TaskCtx = gen.task()
+    if (item_len == 0 || tk.np_data[item_off] == '/') {
+        return proj.diag(proj.ctx().projs[pj].root_off, line,
             "[c] 路径必须是非空的项目相对路径")
     }
     let seg_start int = 0
     let path_i int = 0
     for path_i <= item_len {
-        if (path_i == item_len || gs.task.np_data[item_off + path_i] == '/') {
+        if (path_i == item_len || tk.np_data[item_off + path_i] == '/') {
             if (path_i - seg_start == 2
-                && gs.task.np_data[item_off + seg_start] == '.'
-                && gs.task.np_data[item_off + seg_start + 1] == '.') {
-                return pj_proj_diag(gs.p_projs[proj].root_off, line,
+                && tk.np_data[item_off + seg_start] == '.'
+                && tk.np_data[item_off + seg_start + 1] == '.') {
+                return proj.diag(proj.ctx().projs[pj].root_off, line,
                     "[c] 路径不能含 .. 目录段")
             }
             seg_start = path_i + 1
@@ -55,34 +58,36 @@ fn pj_c_path(proj int, item_off int, item_len int, suffix *char,
     let suffix_len int = 0
     for suffix[suffix_len] != 0 { suffix_len += 1 }
     if (item_len <= suffix_len) {
-        return pj_proj_diag(gs.p_projs[proj].root_off, line,
+        return proj.diag(proj.ctx().projs[pj].root_off, line,
             "[c] 路径扩展名不符合 sources/objects 要求")
     }
     let i int = 0
     for i < suffix_len {
-        if (gs.task.np_data[item_off + item_len - suffix_len + i]
+        if (tk.np_data[item_off + item_len - suffix_len + i]
             != suffix[i].to_type(u8)) {
-            return pj_proj_diag(gs.p_projs[proj].root_off, line,
+            return proj.diag(proj.ctx().projs[pj].root_off, line,
                 "[c] 路径扩展名不符合 sources/objects 要求")
         }
         i += 1
     }
     let rel [1024]u8
     if (item_len >= 1024) {
-        return pj_proj_diag(gs.p_projs[proj].root_off, line, "[c] 路径过长")
+        return proj.diag(proj.ctx().projs[pj].root_off, line, "[c] 路径过长")
     }
     i = 0
     for i < item_len {
-        rel[i] = gs.task.np_data[item_off + i]
+        rel[i] = tk.np_data[item_off + i]
         i += 1
     }
     rel[item_len] = 0
-    if (pj_canon(gs.p_projs[proj].root_off,
-        gs.p_projs[proj].root_len, gen.arr_cstr(rel)) != 0) { return -1 }
-    if (pj_file_exists(pj_pool_str(pj_state().canon_off)) == 0) {
-        return pj_proj_diag(gs.p_projs[proj].root_off, line,
+    if (proj.canon(proj.ctx().projs[pj].root_off,
+        proj.ctx().projs[pj].root_len, gen.arr_cstr(rel), &c_off, &c_len) != 0) { return -1 }
+    if (proj.file_exists(proj.pool_str(c_off)) == 0) {
+        return proj.diag(proj.ctx().projs[pj].root_off, line,
             "[c] 配置路径对应的文件不存在")
     }
+    out_off[0] = c_off
+    out_len[0] = c_len
     return 0
 }
 
@@ -101,38 +106,38 @@ fn pj_c_lib_name(off int, n int) int {
 }
 
 // pj_load_c_config：在递归依赖装载前快照并验证 [c] 的三个字符串数组。
-fn pj_load_c_config(proj int, sec int) int {
-    let gs *gen.GenState = gen.G()
+fn pj_load_c_config(pj int, sec int) int {
+    let tk *gen.TaskCtx = gen.task()
     if (sec < 0) { return 0 }
     let vi int = 0
     for vi < toml_secs[sec].val_n {
         let val TomlVal = toml_secs[sec].vals[vi]
         let kind int = 0
-        if (val.key_len == 7 && gs.task.np_data[val.key_off] == 's'
-            && gs.task.np_data[val.key_off + 1] == 'o'
-            && gs.task.np_data[val.key_off + 2] == 'u'
-            && gs.task.np_data[val.key_off + 3] == 'r'
-            && gs.task.np_data[val.key_off + 4] == 'c'
-            && gs.task.np_data[val.key_off + 5] == 'e'
-            && gs.task.np_data[val.key_off + 6] == 's') { kind = 1 }
-        if (val.key_len == 7 && gs.task.np_data[val.key_off] == 'o'
-            && gs.task.np_data[val.key_off + 1] == 'b'
-            && gs.task.np_data[val.key_off + 2] == 'j'
-            && gs.task.np_data[val.key_off + 3] == 'e'
-            && gs.task.np_data[val.key_off + 4] == 'c'
-            && gs.task.np_data[val.key_off + 5] == 't'
-            && gs.task.np_data[val.key_off + 6] == 's') { kind = 2 }
-        if (val.key_len == 4 && gs.task.np_data[val.key_off] == 'l'
-            && gs.task.np_data[val.key_off + 1] == 'i'
-            && gs.task.np_data[val.key_off + 2] == 'b'
-            && gs.task.np_data[val.key_off + 3] == 's') { kind = 3 }
+        if (val.key_len == 7 && tk.np_data[val.key_off] == 's'
+            && tk.np_data[val.key_off + 1] == 'o'
+            && tk.np_data[val.key_off + 2] == 'u'
+            && tk.np_data[val.key_off + 3] == 'r'
+            && tk.np_data[val.key_off + 4] == 'c'
+            && tk.np_data[val.key_off + 5] == 'e'
+            && tk.np_data[val.key_off + 6] == 's') { kind = 1 }
+        if (val.key_len == 7 && tk.np_data[val.key_off] == 'o'
+            && tk.np_data[val.key_off + 1] == 'b'
+            && tk.np_data[val.key_off + 2] == 'j'
+            && tk.np_data[val.key_off + 3] == 'e'
+            && tk.np_data[val.key_off + 4] == 'c'
+            && tk.np_data[val.key_off + 5] == 't'
+            && tk.np_data[val.key_off + 6] == 's') { kind = 2 }
+        if (val.key_len == 4 && tk.np_data[val.key_off] == 'l'
+            && tk.np_data[val.key_off + 1] == 'i'
+            && tk.np_data[val.key_off + 2] == 'b'
+            && tk.np_data[val.key_off + 3] == 's') { kind = 3 }
         if (kind == 0) {
-            return pj_proj_diag(gs.p_projs[proj].root_off, val.line,
+            return proj.diag(proj.ctx().projs[pj].root_off, val.line,
                 "[c] 未知字段（仅支持 sources、objects、libs）")
         }
         if (val.kind != 4 || val.arr_first < 0 || val.arr_count < 0
             || val.arr_first + val.arr_count > toml_array_n) {
-            return pj_proj_diag(gs.p_projs[proj].root_off, val.line,
+            return proj.diag(proj.ctx().projs[pj].root_off, val.line,
                 "[c] sources、objects、libs 必须是字符串数组")
         }
         let ai int = 0
@@ -142,23 +147,24 @@ fn pj_load_c_config(proj int, sec int) int {
             let n int = item.sval_len
             if (kind == 1 || kind == 2) {
                 let suffix *char = kind == 1 ? ".c" : ".o"
-                if (pj_c_path(proj, off, n, suffix, val.line) != 0) { return -1 }
-                let path_off int = pj_state().canon_off
-                let path_len int = pj_state().canon_len
+                let path_off int = 0
+                let path_len int = 0
+                if (pj_c_path(pj, off, n, suffix, val.line,
+                    &path_off, &path_len) != 0) { return -1 }
                 if (kind == 1) {
-                    if (pj_input_push(&gs.p_projs[proj].c_sources,
-                        &gs.p_projs[proj].c_source_n,
-                        &gs.p_projs[proj].c_source_cap, path_off, path_len) != 0) { return -1 }
-                } else if (pj_input_push(&gs.p_projs[proj].c_objects,
-                    &gs.p_projs[proj].c_object_n,
-                    &gs.p_projs[proj].c_object_cap, path_off, path_len) != 0) { return -1 }
+                    if (pj_input_push(&proj.ctx().projs[pj].c_sources,
+                        &proj.ctx().projs[pj].c_source_n,
+                        &proj.ctx().projs[pj].c_source_cap, path_off, path_len) != 0) { return -1 }
+                } else if (pj_input_push(&proj.ctx().projs[pj].c_objects,
+                    &proj.ctx().projs[pj].c_object_n,
+                    &proj.ctx().projs[pj].c_object_cap, path_off, path_len) != 0) { return -1 }
             } else {
                 if (pj_c_lib_name(off, n) == 0) {
-                    return pj_proj_diag(gs.p_projs[proj].root_off, val.line,
+                    return proj.diag(proj.ctx().projs[pj].root_off, val.line,
                         "[c] libs 元素必须是普通系统库名")
                 }
-                if (pj_input_push(&gs.p_projs[proj].c_libs,
-                    &gs.p_projs[proj].c_lib_n, &gs.p_projs[proj].c_lib_cap,
+                if (pj_input_push(&proj.ctx().projs[pj].c_libs,
+                    &proj.ctx().projs[pj].c_lib_n, &proj.ctx().projs[pj].c_lib_cap,
                     off, n) != 0) { return -1 }
             }
             ai += 1
@@ -169,43 +175,45 @@ fn pj_load_c_config(proj int, sec int) int {
 }
 
 pub fn pj_load_project(root_off int, root_len int) int {
-    let gs *gen.GenState = gen.G()
+    let c_off int = 0
+    let c_len int = 0
+    let tk *gen.TaskCtx = gen.task()
     // 依赖环 / 重复装载
-    let known int = pj_proj_find_root(root_off, root_len)
+    let known int = proj.find_project_root(root_off, root_len)
     if (known >= 0) {
-        if (gs.p_state[known] == 1) {
-            pj_proj_diag(root_off, 0, "依赖环：项目正在装载中")
+        if (proj.ctx().state[known] == 1) {
+            proj.diag(root_off, 0, "依赖环：项目正在装载中")
             return -1
         }
         return known
     }
-    let me int = pj_proj_push(root_off, root_len)
+    let me int = proj.add_project(root_off, root_len)
     if (me < 0) {
         return -1
     }
-    let is_root int = pj_is_root_project(root_off, root_len)
+    let is_root int = proj.is_root_project(root_off, root_len)
     // p_state 平行扩容
-    let nst *int = malloc((gs.p_proj_cap * sizeof(int)).to_type(u64)).to_type(*int)
+    let nst *int = malloc((proj.ctx().proj_cap * sizeof(int)).to_type(u64)).to_type(*int)
     if (nst == 0) {
         return gen.fail("内存分配失败")
     }
-    if (gs.p_proj_n > 0) {
-        memcpy(nst, gs.p_state, ((gs.p_proj_n - 1) * sizeof(int)).to_type(u64))
+    if (proj.ctx().proj_n > 0) {
+        memcpy(nst, proj.ctx().state, ((proj.ctx().proj_n - 1) * sizeof(int)).to_type(u64))
     }
-    free(gs.p_state)
-    gs.p_state = nst
-    gs.p_state[me] = 1
+    free(proj.ctx().state)
+    proj.ctx().state = nst
+    proj.ctx().state[me] = 1
     // 读清单
     let mpath [1024]u8
     let mn int = 0
-    mn = gen.append_str(mpath, mn, pj_pool_str(root_off))
+    mn = gen.append_str(mpath, mn, proj.pool_str(root_off))
     mn = gen.append_str(mpath, mn, "/project.toml")
     mpath[mn] = 0
     if (gen.read_source(gen.arr_cstr(mpath)) != 0) {
         return -1
     }
-    t_src = gs.task.c_src
-    t_len = gs.task.c_src_len
+    t_src = tk.c_src
+    t_len = tk.c_src_len
     t_pos = 0
     t_line = 1
     t_file = gen.arr_cstr(mpath)
@@ -216,7 +224,7 @@ pub fn pj_load_project(root_off int, root_len int) int {
     // schema：[project]
     let sec int = toml_find_sec("project")
     if (sec < 0) {
-        return pj_proj_diag(root_off, 1, "缺少 [project] 节")
+        return proj.diag(root_off, 1, "缺少 [project] 节")
     }
     let so int = 0
     let sl int = 0
@@ -225,26 +233,26 @@ pub fn pj_load_project(root_off int, root_len int) int {
         return -1
     }
     if (got == 0 || sl == 0) {
-        return pj_proj_diag(root_off, toml_secs[sec].line, "project.name 必填且非空")
+        return proj.diag(root_off, toml_secs[sec].line, "project.name 必填且非空")
     }
     // name 必须是标识符：产物名与接口 tag 都由它派生，不允许分隔符
-    let nb0 u8 = gs.task.np_data[so]
+    let nb0 u8 = tk.np_data[so]
     if (!((nb0 >= 'a' && nb0 <= 'z') || (nb0 >= 'A' && nb0 <= 'Z') || nb0 == '_')) {
-        return pj_proj_diag(root_off, toml_secs[sec].line,
+        return proj.diag(root_off, toml_secs[sec].line,
             "project.name 必须是标识符（字母或下划线开头）")
     }
     let nk int = 0
     for nk < sl {
-        let cb u8 = gs.task.np_data[so + nk]
+        let cb u8 = tk.np_data[so + nk]
         if (!((cb >= 'a' && cb <= 'z') || (cb >= 'A' && cb <= 'Z')
             || (cb >= '0' && cb <= '9') || cb == '_')) {
-            return pj_proj_diag(root_off, toml_secs[sec].line,
+            return proj.diag(root_off, toml_secs[sec].line,
                 "project.name 只能是字母、数字与下划线")
         }
         nk += 1
     }
-    gs.p_projs[me].name_off = so
-    gs.p_projs[me].name_len = sl
+    proj.ctx().projs[me].name_off = so
+    proj.ctx().projs[me].name_len = sl
     // source（默认 src）
     got = toml_sec_str(sec, "source", &so, &sl)
     if (got < 0) {
@@ -252,21 +260,21 @@ pub fn pj_load_project(root_off int, root_len int) int {
     }
     let srcname *char = "src"
     if (got == 1) {
-        srcname = pj_pool_str(so)
+        srcname = proj.pool_str(so)
     }
-    if (pj_canon(root_off, root_len, srcname) != 0) {
+    if (proj.canon(root_off, root_len, srcname, &c_off, &c_len) != 0) {
         return -1
     }
-    gs.p_projs[me].src_off = pj_state().canon_off
-    gs.p_projs[me].src_len = pj_state().canon_len
+    proj.ctx().projs[me].src_off = c_off
+    proj.ctx().projs[me].src_len = c_len
     // version（可选，仅供 yh version 展示）
     got = toml_sec_str(sec, "version", &so, &sl)
     if (got < 0) {
         return -1
     }
     if (got == 1) {
-        gs.p_projs[me].ver_off = so
-        gs.p_projs[me].ver_len = sl
+        proj.ctx().projs[me].ver_off = so
+        proj.ctx().projs[me].ver_len = sl
     }
     // [project].os/arch：必填；host 表示跟随编译器宿主平台。
     if (pl_load_project_target(me, sec) != 0) { return -1 }
@@ -276,31 +284,31 @@ pub fn pj_load_project(root_off int, root_len int) int {
         let vo int = toml_secs[sec].vals[vi].key_off
         let vl int = toml_secs[sec].vals[vi].key_len
         let okf int = 0
-        if (vl == 4 && gs.task.np_data[vo] == 'n' && gs.task.np_data[vo + 1] == 'a'
-            && gs.task.np_data[vo + 2] == 'm' && gs.task.np_data[vo + 3] == 'e') { okf = 1 }
-        if (vl == 7 && gs.task.np_data[vo] == 'v' && gs.task.np_data[vo + 1] == 'e'
-            && gs.task.np_data[vo + 2] == 'r' && gs.task.np_data[vo + 3] == 's'
-            && gs.task.np_data[vo + 4] == 'i' && gs.task.np_data[vo + 5] == 'o'
-            && gs.task.np_data[vo + 6] == 'n') { okf = 1 }
-        if (vl == 6 && gs.task.np_data[vo] == 's' && gs.task.np_data[vo + 1] == 'o'
-            && gs.task.np_data[vo + 2] == 'u' && gs.task.np_data[vo + 3] == 'r'
-            && gs.task.np_data[vo + 4] == 'c' && gs.task.np_data[vo + 5] == 'e') { okf = 1 }
-        if (vl == 6 && gs.task.np_data[vo] == 'a' && gs.task.np_data[vo + 1] == 'u'
-            && gs.task.np_data[vo + 2] == 't' && gs.task.np_data[vo + 3] == 'h'
-            && gs.task.np_data[vo + 4] == 'o' && gs.task.np_data[vo + 5] == 'r') { okf = 1 }
-        if (vl == 2 && gs.task.np_data[vo] == 'o'
-            && gs.task.np_data[vo + 1] == 's') { okf = 1 }
-        if (vl == 4 && gs.task.np_data[vo] == 'a'
-            && gs.task.np_data[vo + 1] == 'r'
-            && gs.task.np_data[vo + 2] == 'c'
-            && gs.task.np_data[vo + 3] == 'h') { okf = 1 }
+        if (vl == 4 && tk.np_data[vo] == 'n' && tk.np_data[vo + 1] == 'a'
+            && tk.np_data[vo + 2] == 'm' && tk.np_data[vo + 3] == 'e') { okf = 1 }
+        if (vl == 7 && tk.np_data[vo] == 'v' && tk.np_data[vo + 1] == 'e'
+            && tk.np_data[vo + 2] == 'r' && tk.np_data[vo + 3] == 's'
+            && tk.np_data[vo + 4] == 'i' && tk.np_data[vo + 5] == 'o'
+            && tk.np_data[vo + 6] == 'n') { okf = 1 }
+        if (vl == 6 && tk.np_data[vo] == 's' && tk.np_data[vo + 1] == 'o'
+            && tk.np_data[vo + 2] == 'u' && tk.np_data[vo + 3] == 'r'
+            && tk.np_data[vo + 4] == 'c' && tk.np_data[vo + 5] == 'e') { okf = 1 }
+        if (vl == 6 && tk.np_data[vo] == 'a' && tk.np_data[vo + 1] == 'u'
+            && tk.np_data[vo + 2] == 't' && tk.np_data[vo + 3] == 'h'
+            && tk.np_data[vo + 4] == 'o' && tk.np_data[vo + 5] == 'r') { okf = 1 }
+        if (vl == 2 && tk.np_data[vo] == 'o'
+            && tk.np_data[vo + 1] == 's') { okf = 1 }
+        if (vl == 4 && tk.np_data[vo] == 'a'
+            && tk.np_data[vo + 1] == 'r'
+            && tk.np_data[vo + 2] == 'c'
+            && tk.np_data[vo + 3] == 'h') { okf = 1 }
         if (okf == 0) {
             let buf [64]u8
             let bn int = 0
             bn = gen.append_str(buf, bn, "project 未知字段: ")
             let k int = 0
             for k < vl {
-                buf[bn] = gs.task.np_data[vo + k]
+                buf[bn] = tk.np_data[vo + k]
                 bn += 1
                 k += 1
             }
@@ -308,7 +316,7 @@ pub fn pj_load_project(root_off int, root_len int) int {
             if (mo < 0) {
                 return -1
             }
-            return pj_proj_diag(root_off, toml_secs[sec].vals[vi].line, gen.np_cstr(mo))
+            return proj.diag(root_off, toml_secs[sec].vals[vi].line, gen.np_cstr(mo))
         }
         vi += 1
     }
@@ -339,45 +347,45 @@ pub fn pj_load_project(root_off int, root_len int) int {
             let key_len int = snap_key_len[di]
             let dep_line int = snap_line[di]
             if (snap_path_off[di] < 0) {
-                return pj_proj_diag(root_off, dep_line,
+                return proj.diag(root_off, dep_line,
                     "依赖必须是 { path = \"...\" } 表")
             }
             let path_off int = snap_path_off[di]
             // 依赖项目根 = 规范化(root + path)
-            if (pj_canon(root_off, root_len, pj_pool_str(path_off)) != 0) {
+            if (proj.canon(root_off, root_len, proj.pool_str(path_off), &c_off, &c_len) != 0) {
                 return -1
             }
-            let dep int = pj_load_project(pj_state().canon_off, pj_state().canon_len)
+            let dep int = pj_load_project(c_off, c_len)
             if (dep < 0) {
                 return -1
             }
             // 登记依赖
-            if (gs.p_projs[me].dep_n == gs.p_projs[me].dep_cap) {
-                let ncap int = gs.p_projs[me].dep_cap * 2
+            if (proj.ctx().projs[me].dep_n == proj.ctx().projs[me].dep_cap) {
+                let ncap int = proj.ctx().projs[me].dep_cap * 2
                 if (ncap == 0) {
                     ncap = 8
                 }
-                let nd *gen.PDep = malloc((ncap * sizeof(gen.PDep)).to_type(u64)).to_type(*gen.PDep)
+                let nd *proj.PDep = malloc((ncap * sizeof(proj.PDep)).to_type(u64)).to_type(*proj.PDep)
                 if (nd == 0) {
                     return gen.fail("内存分配失败")
                 }
-                if (gs.p_projs[me].dep_n > 0) {
-                    memcpy(nd, gs.p_projs[me].deps, (gs.p_projs[me].dep_n * sizeof(gen.PDep)).to_type(u64))
+                if (proj.ctx().projs[me].dep_n > 0) {
+                    memcpy(nd, proj.ctx().projs[me].deps, (proj.ctx().projs[me].dep_n * sizeof(proj.PDep)).to_type(u64))
                 }
-                free(gs.p_projs[me].deps)
-                gs.p_projs[me].deps = nd
-                gs.p_projs[me].dep_cap = ncap
+                free(proj.ctx().projs[me].deps)
+                proj.ctx().projs[me].deps = nd
+                proj.ctx().projs[me].dep_cap = ncap
             }
-            gs.p_projs[me].deps[gs.p_projs[me].dep_n].key_off = key_off
-            gs.p_projs[me].deps[gs.p_projs[me].dep_n].key_len = key_len
-            gs.p_projs[me].deps[gs.p_projs[me].dep_n].proj = dep
-            gs.p_projs[me].deps[gs.p_projs[me].dep_n].line = dep_line
-            gs.p_projs[me].dep_n += 1
+            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].key_off = key_off
+            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].key_len = key_len
+            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].proj = dep
+            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].line = dep_line
+            proj.ctx().projs[me].dep_n += 1
             di += 1
         }
     }
     // 扫描源码根
-    if (pj_scan_source(gs.p_projs[me].src_off, gs.p_projs[me].src_len, me) != 0) {
+    if (pj_scan_source(proj.ctx().projs[me].src_off, proj.ctx().projs[me].src_len, me) != 0) {
         return -1
     }
     // 测试专用导入分类：必须在 pj_bind_imports 之前完成，生产构建据此跳过
@@ -388,27 +396,27 @@ pub fn pj_load_project(root_off int, root_len int) int {
     // 入口模块：模块名为 main 的那个（模块名与目录名无关；同名模块跨目录
     // 合并为一个，故至多命中一次）
     let mi int = 0
-    for mi < gs.p_projs[me].mod_n {
-        let um int = gs.p_projs[me].mods[mi]
-        if (gs.p_mods[um].name_len == 4
-            && gs.task.np_data[gs.p_mods[um].name_off] == 'm'
-            && gs.task.np_data[gs.p_mods[um].name_off + 1] == 'a'
-            && gs.task.np_data[gs.p_mods[um].name_off + 2] == 'i'
-            && gs.task.np_data[gs.p_mods[um].name_off + 3] == 'n') {
-            gs.p_mods[um].is_entry = 1
+    for mi < proj.ctx().projs[me].mod_n {
+        let um int = proj.ctx().projs[me].mods[mi]
+        if (proj.ctx().mods[um].name_len == 4
+            && tk.np_data[proj.ctx().mods[um].name_off] == 'm'
+            && tk.np_data[proj.ctx().mods[um].name_off + 1] == 'a'
+            && tk.np_data[proj.ctx().mods[um].name_off + 2] == 'i'
+            && tk.np_data[proj.ctx().mods[um].name_off + 3] == 'n') {
+            proj.ctx().mods[um].is_entry = 1
             break
         }
         mi += 1
     }
-    gs.p_state[me] = 2
+    proj.ctx().state[me] = 2
     return me
 }
 
-fn pj_scan_source(dir_off int, dir_len int, proj int) int {
+fn pj_scan_source(dir_off int, dir_len int, pj int) int {
     let entries *PJDirEntry = 0.to_type(*PJDirEntry)
     let es_n int = 0
     let es_cap int = 0
-    if (pj_os_dir_list(pj_pool_str(dir_off), &entries, &es_n, &es_cap) != 0) {
+    if (pj_os_dir_list(proj.pool_str(dir_off), &entries, &es_n, &es_cap) != 0) {
         if (entries != 0) { free(entries.to_type(*void)) }
         return -1
     }
@@ -416,7 +424,7 @@ fn pj_scan_source(dir_off int, dir_len int, proj int) int {
     let e int = 0
     for e < es_n {
         if (pj_scan_entry(dir_off, dir_len, entries[e].name_off,
-            entries[e].name_len, entries[e].is_dir, proj) != 0) {
+            entries[e].name_len, entries[e].is_dir, pj) != 0) {
             free(entries.to_type(*void))
             return -1
         }
@@ -481,14 +489,14 @@ fn pj_scan_skip_dir(name_start int, name_len int) int {
 
 // pj_scan_is_target：单文件模式下，path 是否就是被选中的那个文件。
 fn pj_scan_is_target(path *char) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_scan_file_off < 0) { return 1 }
+    let tk *gen.TaskCtx = gen.task()
+    if (proj.ctx().scan_file_off < 0) { return 1 }
     let n int = 0
     for path[n] != 0 { n += 1 }
-    if (n != gs.c_scan_file_len) { return 0 }
+    if (n != proj.ctx().scan_file_len) { return 0 }
     let i int = 0
     for i < n {
-        if (gs.task.np_data[gs.c_scan_file_off + i] != path[i].to_type(u8)) {
+        if (tk.np_data[proj.ctx().scan_file_off + i] != path[i].to_type(u8)) {
             return 0
         }
         i += 1
@@ -497,20 +505,20 @@ fn pj_scan_is_target(path *char) int {
 }
 
 // pj_scan_applies：--scan-file 是否适用于该项目。
-// 单文件测试的扫描过滤只约束**被测项目**（扫描文件位于其源码根之下）；
-// 标准库与依赖项目的文件必须整份索引，否则无 fork 宿主（Windows）的模块
-// 子进程里会出现“模块不存在: string/memory”。
-fn pj_scan_applies(proj int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_scan_file_off < 0) { return 0 }
-    if (proj < 0 || proj >= gs.p_proj_n) { return 0 }
-    let root_off int = gs.p_projs[proj].src_off
-    let root_len int = gs.p_projs[proj].src_len
-    if (root_len <= 0 || root_len > gs.c_scan_file_len) { return 0 }
+// 单文件测试的扫描过滤只约束**被测项目**（扫描文件位于其源码根之下）；标准库与
+// 依赖项目的文件必须整份索引，否则无 fork 宿主（Windows）的模块子进程里会出现
+// “模块不存在: string/memory”——子进程会重新装载索引，父进程的 fork 路径不会。
+fn pj_scan_applies(project int) int {
+    let ctx *proj.ProjectCtx = proj.ctx()
+    let tk *gen.TaskCtx = gen.task()
+    if (ctx.scan_file_off < 0) { return 0 }
+    if (project < 0 || project >= ctx.proj_n) { return 0 }
+    let root_off int = ctx.projs[project].src_off
+    let root_len int = ctx.projs[project].src_len
+    if (root_len <= 0 || root_len > ctx.scan_file_len) { return 0 }
     let i int = 0
     for i < root_len {
-        if (gs.task.np_data[root_off + i]
-            != gs.task.np_data[gs.c_scan_file_off + i]) {
+        if (tk.np_data[root_off + i] != tk.np_data[ctx.scan_file_off + i]) {
             return 0
         }
         i += 1
@@ -518,68 +526,70 @@ fn pj_scan_applies(proj int) int {
     return 1
 }
 
-fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir int, proj int) int {
-    let gs *gen.GenState = gen.G()
+fn pj_scan_entry(dir_off int, dir_len int, name_start int, name_len int, is_dir int, pj int) int {
+    let c_off int = 0
+    let c_len int = 0
+    let tk *gen.TaskCtx = gen.task()
     if (is_dir != 0) {
-        // 单文件模式（yh test <项目外文件>）不进入任何子目录，也不装入相邻文件；
+        // 单文件模式（yh test <项目外文件>）不进入任何子目录，也不装入相邻文件。
         // 只对被测项目生效（见 pj_scan_applies）。
-        if (pj_scan_applies(proj) != 0) { return 0 }
+        if (pj_scan_applies(pj) != 0) { return 0 }
         if (pj_scan_skip_dir(name_start, name_len) != 0) { return 0 }
         // 子目录相对路径：<dir>/<name>，规范化后递归
         let nm [300]u8
         let nn int = 0
         let k2 int = 0
         for k2 < name_len {
-            nm[nn] = gs.task.np_data[name_start + k2]
+            nm[nn] = tk.np_data[name_start + k2]
             nn += 1
             k2 += 1
         }
         nm[nn] = 0
-        if (pj_canon(dir_off, dir_len, gen.arr_cstr(nm)) != 0) {
+        if (proj.canon(dir_off, dir_len, gen.arr_cstr(nm), &c_off, &c_len) != 0) {
             return -1
         }
-        let sub_off int = pj_state().canon_off
-        let sub_len int = pj_state().canon_len
+        let sub_off int = c_off
+        let sub_len int = c_len
         // 嵌套项目边界：含 mod.toml 的子目录属于另一项目，不进入
         let probe [1100]u8
         let pn int = 0
-        pn = gen.append_str(probe, pn, pj_pool_str(sub_off))
+        pn = gen.append_str(probe, pn, proj.pool_str(sub_off))
         pn = gen.append_str(probe, pn, "/project.toml")
         probe[pn] = 0
-        if (pj_file_exists(gen.arr_cstr(probe)) != 0) {
+        if (proj.file_exists(gen.arr_cstr(probe)) != 0) {
             return 0
         }
-        return pj_scan_source(sub_off, sub_len, proj)
+        return pj_scan_source(sub_off, sub_len, pj)
     }
     if (pj_source_target_match(name_start, name_len) == 0) {
         return 0
     }
     // .yh 后缀检查
-    if (name_len < 3 || gs.task.np_data[name_start + name_len - 3] != '.'
-        || gs.task.np_data[name_start + name_len - 2] != 'y' || gs.task.np_data[name_start + name_len - 1] != 'h') {
+    if (name_len < 3 || tk.np_data[name_start + name_len - 3] != '.'
+        || tk.np_data[name_start + name_len - 2] != 'y' || tk.np_data[name_start + name_len - 1] != 'h') {
         return 0
     }
     // 完整路径 = <dir>/<name>
     let full [1100]u8
     let flen2 int = 0
-    flen2 = gen.append_str(full, flen2, pj_pool_str(dir_off))
+    flen2 = gen.append_str(full, flen2, proj.pool_str(dir_off))
     full[flen2] = '/'
     flen2 += 1
     let k int = 0
     for k < name_len {
-        full[flen2] = gs.task.np_data[name_start + k]
+        full[flen2] = tk.np_data[name_start + k]
         flen2 += 1
         k += 1
     }
     full[flen2] = 0
-    // 单文件模式：只接受选中的那一个文件，其它相邻 .yh 一律忽略。
-    if (pj_scan_applies(proj) != 0
+    // 单文件模式：只接受选中的那一个文件，其它相邻 .yh 一律忽略（只对被测项目生效）。
+    if (pj_scan_applies(pj) != 0
         && pj_scan_is_target(gen.arr_cstr(&full[0])) == 0) { return 0 }
     // 读文件并解析模块头（诊断指向被扫文件）
-    let save_path *char = gs.task.c_path
-    gs.task.c_path = gen.arr_cstr(full)
-    let r int = pj_index_file(gen.arr_cstr(full), proj)
-    gs.task.c_path = save_path
+    let save_path *char = tk.c_path
+    tk.c_path = gen.arr_cstr(full)
+    let r int = pj_index_file(gen.arr_cstr(full), pj)
+    tk.c_path = save_path
     return r
 }
 
@@ -598,23 +608,24 @@ fn pj_target_tag_is(start int, n int, tag *char) int {
 // 标记：.linux/.darwin/.windows（OS）与 .arm64/.x64（架构）；未识别段按普通文件名接受
 // ——所以新增 `*.windows.yh` 前必须先在此登记，否则会被所有目标编入（方案 §4.2）。
 fn pj_source_target_match(name_start int, name_len int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let end int = name_start + name_len - 3
     for end > name_start {
         let dot int = end - 1
-        for dot >= name_start && gs.task.np_data[dot] != '.' { dot -= 1 }
+        for dot >= name_start && tk.np_data[dot] != '.' { dot -= 1 }
         if (dot < name_start) { return 1 }
         let start int = dot + 1
         let n int = end - start
         if (pj_target_tag_is(start, n, "linux") != 0) {
-            if (gs.c_target.os != gen.TARGET_OS_LINUX) { return 0 }
+            if (proj.cfg().target.os != gen.TARGET_OS_LINUX) { return 0 }
         } else if (pj_target_tag_is(start, n, "darwin") != 0) {
-            if (gs.c_target.os != gen.TARGET_OS_DARWIN) { return 0 }
+            if (proj.cfg().target.os != gen.TARGET_OS_DARWIN) { return 0 }
         } else if (pj_target_tag_is(start, n, "windows") != 0) {
-            if (gs.c_target.os != gen.TARGET_OS_WINDOWS) { return 0 }
-        } else if (pj_target_tag_is(start, n, "arm64") != 0) {            if (gs.c_target.arch != gen.TARGET_ARCH_ARM64) { return 0 }
+            if (proj.cfg().target.os != gen.TARGET_OS_WINDOWS) { return 0 }
+        } else if (pj_target_tag_is(start, n, "arm64") != 0) {
+            if (proj.cfg().target.arch != gen.TARGET_ARCH_ARM64) { return 0 }
         } else if (pj_target_tag_is(start, n, "x64") != 0) {
-            if (gs.c_target.arch != gen.TARGET_ARCH_X64) { return 0 }
+            if (proj.cfg().target.arch != gen.TARGET_ARCH_X64) { return 0 }
         } else { return 1 }
         end = dot
     }
@@ -624,7 +635,7 @@ fn pj_source_target_match(name_start int, name_len int) int {
 // pj_synth_module_name：从文件路径派生标识符模块名（去目录、去 .yh、非法字符转 _，
 // 首字符非字母时前置 _）。写入 task 的 mod_name_off/mod_name_len 并置 has_module。
 fn pj_synth_module_name(path *char) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let base int = 0
     let i int = 0
     for path[i] != 0 {
@@ -664,23 +675,23 @@ fn pj_synth_module_name(path *char) int {
     }
     let off int = gen.tml_intern_str(&tmp[0], 0, n)
     if (off < 0) { return -1 }
-    gs.task.mod_name_off = off
-    gs.task.mod_name_len = n
-    gs.task.mod_has_module = 1
+    tk.mod_name_off = off
+    tk.mod_name_len = n
+    tk.mod_has_module = 1
     return 0
 }
 
-pub fn pj_index_file(path *char, proj int) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_stats_enabled != 0) {
-        gs.c_stats_index += 1
+pub fn pj_index_file(path *char, pj int) int {
+    let tk *gen.TaskCtx = gen.task()
+    if (gen.stats().enabled != 0) {
+        gen.stats().index += 1
     }
     if (gen.read_source(path) != 0) {
         return -1
     }
-    gs.task.c_tok_n = 0
-    gs.task.c_pos = 0
-    gs.task.c_errors = 0
+    tk.c_tok_n = 0
+    tk.c_pos = 0
+    tk.c_errors = 0
     if (lex.lex_all() != 0) {
         return -1
     }
@@ -688,17 +699,17 @@ pub fn pj_index_file(path *char, proj int) int {
     if (parse.mod_parse_head() != 0) {
         return -1
     }
-    if (gs.task.mod_has_module == 0 && gs.c_scan_file_off >= 0
+    if (tk.mod_has_module == 0 && proj.ctx().scan_file_off >= 0
         && pj_scan_is_target(path) != 0) {
         // 单文件测试：文件可以省略 module 头，用文件名派生一个模块名。
         if (pj_synth_module_name(path) != 0) { return -1 }
     }
-    if (gs.task.mod_has_module == 0) {
+    if (tk.mod_has_module == 0) {
         // 源码根内的文件必须声明模块（旧单文件形态不属于项目源码根）
-        gs.task.c_errors += 1
+        tk.c_errors += 1
         let buf [256]u8
         let n int = 0
-        n = gen.append_str(buf, n, gs.task.c_path)
+        n = gen.append_str(buf, n, tk.c_path)
         n = gen.append_str(buf, n, ":1:1: 错误: 项目源码内的文件必须以 module 声明开头\n")
         gen.write_all(2, buf, n)
         return -1
@@ -706,13 +717,13 @@ pub fn pj_index_file(path *char, proj int) int {
     // 查找/创建模块
     let mod int = -1
     let mi int = 0
-    for mi < gs.p_mod_n {
-        if (gs.p_mods[mi].proj == proj && gs.p_mods[mi].name_len == gs.task.mod_name_len
-            && gs.task.np_data[gs.p_mods[mi].name_off] == gs.task.np_data[gs.task.mod_name_off]) {
+    for mi < proj.ctx().mod_n {
+        if (proj.ctx().mods[mi].proj == pj && proj.ctx().mods[mi].name_len == tk.mod_name_len
+            && tk.np_data[proj.ctx().mods[mi].name_off] == tk.np_data[tk.mod_name_off]) {
             let match int = 1
             let j int = 1
-            for j < gs.task.mod_name_len {
-                if (gs.task.np_data[gs.p_mods[mi].name_off + j] != gs.task.np_data[gs.task.mod_name_off + j]) {
+            for j < tk.mod_name_len {
+                if (tk.np_data[proj.ctx().mods[mi].name_off + j] != tk.np_data[tk.mod_name_off + j]) {
                     match = 0
                     break
                 }
@@ -726,11 +737,11 @@ pub fn pj_index_file(path *char, proj int) int {
         mi += 1
     }
     if (mod < 0) {
-        mod = pj_mod_push(gs.task.mod_name_off, gs.task.mod_name_len, proj)
+        mod = proj.add_module(tk.mod_name_off, tk.mod_name_len, pj)
         if (mod < 0) {
             return -1
         }
-        if (pj_proj_add_mod(proj, mod) != 0) {
+        if (proj.add_project_module(pj, mod) != 0) {
             return -1
         }
     }
@@ -743,44 +754,44 @@ pub fn pj_index_file(path *char, proj int) int {
     if (poff < 0) {
         return -1
     }
-    let fidx int = pj_file_push(poff, plen, mod)
+    let fidx int = proj.add_file(poff, plen, mod)
     if (fidx < 0) {
         return -1
     }
-    if (gs.c_front_cache != 0) {
-        let toks *gen.Tok = malloc((gs.task.c_tok_n * sizeof(gen.Tok)).to_type(u64)).to_type(*gen.Tok)
+    if (gen.stats().front_cache != 0) {
+        let toks *gen.Tok = malloc((tk.c_tok_n * sizeof(gen.Tok)).to_type(u64)).to_type(*gen.Tok)
         if (toks == 0) {
             return gen.fail("内存分配失败")
         }
-        memcpy(toks, gs.task.c_toks, (gs.task.c_tok_n * sizeof(gen.Tok)).to_type(u64))
-        gs.p_files[fidx].source = gs.task.c_src
-        gs.p_files[fidx].source_len = gs.task.c_src_len
-        gs.p_files[fidx].tokens = toks
-        gs.p_files[fidx].token_n = gs.task.c_tok_n
+        memcpy(toks, tk.c_toks, (tk.c_tok_n * sizeof(gen.Tok)).to_type(u64))
+        proj.ctx().files[fidx].source = tk.c_src
+        proj.ctx().files[fidx].source_len = tk.c_src_len
+        proj.ctx().files[fidx].tokens = toks
+        proj.ctx().files[fidx].token_n = tk.c_tok_n
     }
-    if (pj_mod_add_file(mod, fidx) != 0) {
+    if (proj.add_module_file(mod, fidx) != 0) {
         return -1
     }
     // 目录唯一模块检查：同目录内只允许一个模块（用户规划）
     let di int = 0
-    for di < gs.p_file_n {
-        let dn int = gs.p_files[di].path_len
-        let dl int = pj_dir_prefix_len(gs.p_files[di].path_off, dn)
+    for di < proj.ctx().file_n {
+        let dn int = proj.ctx().files[di].path_len
+        let dl int = pj_dir_prefix_len(proj.ctx().files[di].path_off, dn)
         let nl int = pj_dir_prefix_len(poff, plen)
-        if (dl == nl && pj_same_np(gs.p_files[di].path_off, dl, poff, dl)
-            && gs.p_files[di].mod != mod) {
+        if (dl == nl && pj_same_np(proj.ctx().files[di].path_off, dl, poff, dl)
+            && proj.ctx().files[di].mod != mod) {
             let buf [512]u8
             let bn int = 0
             bn = gen.append_str(buf, bn, "同目录存在另一个模块（每目录一个模块）: ")
-            bn = append_bytes_np(buf, bn, gs.p_mods[mod].name_off, gs.p_mods[mod].name_len)
+            bn = gen.append_np(buf, bn, proj.ctx().mods[mod].name_off, proj.ctx().mods[mod].name_len)
             bn = gen.append_str(buf, bn, " 与 ")
-            bn = append_bytes_np(buf, bn, gs.p_mods[gs.p_files[di].mod].name_off,
-                gs.p_mods[gs.p_files[di].mod].name_len)
+            bn = gen.append_np(buf, bn, proj.ctx().mods[proj.ctx().files[di].mod].name_off,
+                proj.ctx().mods[proj.ctx().files[di].mod].name_len)
             let mo int = gen.tml_intern_str(buf, 0, bn)
             if (mo < 0) {
                 return -1
             }
-            gs.task.c_errors += 1
+            tk.c_errors += 1
             let out [600]u8
             let on int = 0
             on = gen.append_str(out, on, gen.np_cstr(mo))
@@ -792,11 +803,11 @@ pub fn pj_index_file(path *char, proj int) int {
     }
     // 导入记录
     let ii int = 0
-    for ii < gs.task.mod_import_n {
-        if (pj_imp_push(fidx, gs.task.mod_imports[ii].name_off, gs.task.mod_imports[ii].name_len,
-            gs.task.mod_imports[ii].proj_key_off, gs.task.mod_imports[ii].proj_key_len,
-            gs.task.mod_imports[ii].alias_off, gs.task.mod_imports[ii].alias_len,
-            gs.task.mod_imports[ii].line, gs.task.mod_imports[ii].col) != 0) {
+    for ii < tk.mod_import_n {
+        if (proj.add_import(fidx, tk.mod_imports[ii].name_off, tk.mod_imports[ii].name_len,
+            tk.mod_imports[ii].proj_key_off, tk.mod_imports[ii].proj_key_len,
+            tk.mod_imports[ii].alias_off, tk.mod_imports[ii].alias_len,
+            tk.mod_imports[ii].line, tk.mod_imports[ii].col) != 0) {
             return -1
         }
         ii += 1
@@ -839,16 +850,16 @@ fn pj_same_np(o1 int, l1 int, o2 int, l2 int) int {
 
 // pj_imp_alias_match：文件 f 的第 ti 个 token 是否等于导入 ii 的绑定名。
 fn pj_imp_alias_match(f int, ti int, ii int) int {
-    let gs *gen.GenState = gen.G()
-    let tok gen.Tok = gs.p_files[f].tokens[ti]
-    let n int = gs.p_imp_alias_len[ii]
+    let tk *gen.TaskCtx = gen.task()
+    let tok gen.Tok = proj.ctx().files[f].tokens[ti]
+    let n int = proj.ctx().imp_alias_len[ii]
     if (tok.kind != gen.TOK_IDENT || tok.len != n) {
         return 0
     }
     let j int = 0
     for j < n {
-        if (gs.p_files[f].source[tok.start + j]
-            != gs.task.np_data[gs.p_imp_alias_off[ii] + j]) {
+        if (proj.ctx().files[f].source[tok.start + j]
+            != tk.np_data[proj.ctx().imp_alias_off[ii] + j]) {
             return 0
         }
         j += 1
@@ -859,8 +870,7 @@ fn pj_imp_alias_match(f int, ti int, ii int) int {
 // pj_mark_test_tokens：把文件 f 中每个顶层 test 声明的块体 token 标记为 1。
 // 用于区分「只在 test 体内使用」的导入；只扫描 token，不做语义解析。
 fn pj_mark_test_tokens(f int) *u8 {
-    let gs *gen.GenState = gen.G()
-    let n int = gs.p_files[f].token_n
+    let n int = proj.ctx().files[f].token_n
     if (n <= 0) { return 0 }
     let marks *u8 = malloc(n.to_type(u64)).to_type(*u8)
     if (marks == 0) { return 0 }
@@ -872,7 +882,7 @@ fn pj_mark_test_tokens(f int) *u8 {
     let depth int = 0
     i = 0
     for i < n {
-        let k int = gs.p_files[f].tokens[i].kind
+        let k int = proj.ctx().files[f].tokens[i].kind
         if (k == gen.TK_LBRACE) {
             depth += 1
             i += 1
@@ -884,20 +894,20 @@ fn pj_mark_test_tokens(f int) *u8 {
             continue
         }
         if (depth == 0 && k == gen.TK_TEST
-            && (i == 0 || gs.p_files[f].tokens[i - 1].kind != gen.TK_DOT)) {
+            && (i == 0 || proj.ctx().files[f].tokens[i - 1].kind != gen.TK_DOT)) {
             let j int = i + 1
             for j < n {
-                let jk int = gs.p_files[f].tokens[j].kind
+                let jk int = proj.ctx().files[f].tokens[j].kind
                 if (jk == gen.TK_LBRACE || jk == gen.TK_SEMI || jk == gen.TOK_EOF) {
                     break
                 }
                 j += 1
             }
-            if (j < n && gs.p_files[f].tokens[j].kind == gen.TK_LBRACE) {
+            if (j < n && proj.ctx().files[f].tokens[j].kind == gen.TK_LBRACE) {
                 let d int = 0
                 let e int = j
                 for e < n {
-                    let ek int = gs.p_files[f].tokens[e].kind
+                    let ek int = proj.ctx().files[f].tokens[e].kind
                     if (ek == gen.TK_LBRACE) { d += 1 }
                     if (ek == gen.TK_RBRACE) {
                         d -= 1
@@ -921,36 +931,35 @@ fn pj_mark_test_tokens(f int) *u8 {
     return marks
 }
 
-// pj_classify_test_imports：为项目 proj 的每条导入分类 test_only。
+// pj_classify_test_imports：为项目 pj 的每条导入分类 test_only。
 // 仅当绑定名以 `alias.` 形式出现，且所有出现都在该文件的 test 块体内，
 // 才标记为测试专用；生产构建随后跳过该导入的绑定、依赖边和未使用诊断。
-fn pj_classify_test_imports(proj int) int {
-    let gs *gen.GenState = gen.G()
+fn pj_classify_test_imports(pj int) int {
     let mi int = 0
-    for mi < gs.p_projs[proj].mod_n {
-        let m int = gs.p_projs[proj].mods[mi]
+    for mi < proj.ctx().projs[pj].mod_n {
+        let m int = proj.ctx().projs[pj].mods[mi]
         let fi int = 0
-        for fi < gs.p_mods[m].file_n {
-            let f int = gs.p_mods[m].files[fi]
+        for fi < proj.ctx().mods[m].file_n {
+            let f int = proj.ctx().mods[m].files[fi]
             let marks *u8 = pj_mark_test_tokens(f)
             if (marks == 0) {
-                if (gs.p_files[f].token_n > 0) { return gen.fail("内存分配失败") }
+                if (proj.ctx().files[f].token_n > 0) { return gen.fail("内存分配失败") }
                 fi += 1
                 continue
             }
             let ii int = 0
-            for ii < gs.p_imp_n {
-                if (gs.p_imp_file[ii] != f) {
+            for ii < proj.ctx().imp_n {
+                if (proj.ctx().imp_file[ii] != f) {
                     ii += 1
                     continue
                 }
                 let inside int = 0
                 let outside int = 0
                 let ti int = 0
-                let n int = gs.p_files[f].token_n
+                let n int = proj.ctx().files[f].token_n
                 for ti + 1 < n {
-                    if (gs.p_files[f].tokens[ti].kind == gen.TOK_IDENT
-                        && gs.p_files[f].tokens[ti + 1].kind == gen.TK_DOT
+                    if (proj.ctx().files[f].tokens[ti].kind == gen.TOK_IDENT
+                        && proj.ctx().files[f].tokens[ti + 1].kind == gen.TK_DOT
                         && pj_imp_alias_match(f, ti, ii) != 0) {
                         if (marks[ti] != 0) {
                             inside = 1
@@ -961,7 +970,7 @@ fn pj_classify_test_imports(proj int) int {
                     }
                     ti += 1
                 }
-                gs.p_imp_test_only[ii] = (inside != 0 && outside == 0).to_type(int)
+                proj.ctx().imp_test_only[ii] = (inside != 0 && outside == 0).to_type(int)
                 ii += 1
             }
             free(marks.to_type(*void))

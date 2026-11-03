@@ -55,82 +55,6 @@ fn llvm_abi_store_piece(out *LLVMOutput, body *ir.IRFunction, pointer int,
     llvm_text(out, ", align 1\n")
 }
 
-// llvm_abi_emit_c_aggregate_call：发射 C 聚合返回的 SysV coercion 或 hidden sret 调用。
-fn llvm_abi_emit_c_aggregate_call(unit *ir.IRModule, out *LLVMOutput,
-    body *ir.IRFunction, inst *ir.IRInst, call *ir.IRCall,
-    symbol *ir.IRModuleSymbol, next *int) void {
-    let result_type int = symbol.type_id
-    let result ir.IRModuleType = unit.types[result_type]
-    let result_info LLVMABIInfo
-    llvm_abi_classify(unit, result_type, &result_info)
-    let hidden int = 1
-    let output_buffer int = body.call_args[call.arg_first].value
-    let call_result int = -1
-    if (result_info.memory == 0) { call_result = llvm_new_temp(out, next) }
-    llvm_text(out, "call ")
-    if (result_info.memory != 0) { llvm_text(out, "void") }
-    else { llvm_signature_return(unit, result_type, out) }
-    llvm_text(out, " @"); llvm_quote(out,
-        body.call_symbols + call.symbol_first, call.symbol_len); llvm_byte(out, '(')
-    let physical int = 0
-    if (result_info.memory != 0) {
-        llvm_text(out, "ptr sret("); llvm_abi_memory_type(unit, result_type, out)
-        llvm_text(out, ") align "); llvm_number(out, result.align.to_type(u64)); llvm_byte(out, ' ')
-        llvm_value(out, output_buffer); physical = 1
-    }
-    let logical int = 0
-    for logical < symbol.param_count {
-        if (physical > 0) { llvm_text(out, ", ") }
-        let argument ir.IRCallArg = body.call_args[call.arg_first + logical + hidden]
-        let param_type_id int = symbol.params[logical]
-        let param ir.IRModuleType = unit.types[param_type_id]
-        if (param.kind == ir.IR_MODULE_TY_STRUCT || param.kind == ir.IR_MODULE_TY_UNION) {
-            let info LLVMABIInfo
-            llvm_abi_classify(unit, param_type_id, &info)
-            if (info.memory != 0) {
-                llvm_text(out, "ptr byval("); llvm_abi_memory_type(unit, param_type_id, out)
-                llvm_text(out, ") align "); llvm_number(out, param.align.to_type(u64))
-                llvm_byte(out, ' '); llvm_value(out, argument.value); physical += 1
-            } else {
-                let piece int = 0
-                for piece < info.chunk_count {
-                    if (piece > 0) { llvm_text(out, ", ") }
-                    let value int = llvm_abi_load_piece(out, body, argument.value, &info, piece, next)
-                    let class int = piece == 0 ? info.class0 : info.class1
-                    let size int = piece == 0 ? info.size0 : info.size1
-                    llvm_abi_piece_type(out, class, size); llvm_byte(out, ' '); llvm_temp(out, value)
-                    physical += 1; piece += 1
-                }
-            }
-        } else {
-            let kind int = param.kind
-            let attr int = llvm_abi_attr_kind(unit, call.abi, kind)
-            llvm_abi_type(out, call.abi, kind, param.bits)
-            if (attr == 1) { llvm_text(out, " signext") }
-            else if (attr == 2) { llvm_text(out, " zeroext") }
-            llvm_byte(out, ' '); llvm_value(out, argument.value); physical += 1
-        }
-        logical += 1
-    }
-    llvm_byte(out, ')'); llvm_byte(out, '\n')
-    if (result_info.memory == 0) {
-        let piece int = 0
-        for piece < result_info.chunk_count {
-            let value int = call_result
-            let is_temp int = 1
-            if (result_info.chunk_count > 1) {
-                value = llvm_new_temp(out, next)
-                llvm_text(out, "extractvalue "); llvm_signature_return(unit, result_type, out)
-                llvm_byte(out, ' '); llvm_temp(out, call_result); llvm_text(out, ", ")
-                llvm_number(out, piece.to_type(u64)); llvm_byte(out, '\n')
-            }
-            llvm_abi_store_piece(out, body, output_buffer, &result_info, piece,
-                value, is_temp, next)
-            piece += 1
-        }
-    }
-}
-
 // llvm_signed：bool 与无符号整数按零扩展，有符号整数按符号扩展。
 fn llvm_signed(kind int) int {
     return kind >= ir.IR_TY_I8 && kind <= ir.IR_TY_I64
@@ -331,6 +255,38 @@ fn llvm_cast(out *LLVMOutput, body *ir.IRFunction, inst *ir.IRInst, next *int) v
     }
 }
 
+// llvm_alloca_inst：发射一条字节分配（i8 数组形态，对齐由 lowering 的源布局给出）。
+// 只在 llvm_function_allocas 里调用：所有 ALLOCA 统一在入口块发射一次。
+fn llvm_alloca_inst(inst *ir.IRInst, out *LLVMOutput) void {
+    llvm_text(out, "  "); llvm_value(out, inst.result_id)
+    llvm_text(out, " = alloca i8, i64 "); llvm_number(out, inst.imm.to_type(u64))
+    llvm_text(out, ", align "); llvm_number(out, inst.aux.to_type(u64))
+    llvm_byte(out, '\n')
+}
+
+// llvm_function_allocas：把全函数的 ALLOCA 统一提到入口块发射。
+//
+// lowering 在调用点为聚合临时就地发 ALLOCA（聚合实参副本、结构体返回值槽、
+// 变参打包、切片字面量后备数组）。若这些指令留在循环体块里，每次迭代都会
+// 再分配一份栈空间且不会回收，几十万次迭代后栈溢出。yh 的 ALLOCA 都是
+// **常量大小、按调用期存活**的临时对象，提升到入口块后每个槽位只分发一次、
+// 跨迭代复用，语义不变且栈占用有上界。
+fn llvm_function_allocas(function *ir.IRModuleFunction, out *LLVMOutput) void {
+    let b int = 0
+    for b < function.body.block_count {
+        let block ir.IRBlock = function.body.blocks[b]
+        let i int = 0
+        for i < block.inst_count {
+            let inst ir.IRInst = function.body.insts[block.first_inst + i]
+            if (inst.op == ir.IR_OP_ALLOCA) {
+                llvm_alloca_inst(&inst, out)
+            }
+            i += 1
+        }
+        b += 1
+    }
+}
+
 // llvm_instruction：发射已支持的标量/内存指令；unit 提供 GLOB_ADDR 的稳定模块逻辑名。
 // 预检排除尚未支持的聚合值，未知操作不能静默忽略。
 fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
@@ -349,11 +305,8 @@ fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
         return
     }
     if (inst.op == ir.IR_OP_ALLOCA) {
-        // 字节分配：统一按 i8 数组发射，对齐由 lowering 的源布局给出。
-        llvm_text(out, "  "); llvm_value(out, inst.result_id)
-        llvm_text(out, " = alloca i8, i64 "); llvm_number(out, inst.imm.to_type(u64))
-        llvm_text(out, ", align "); llvm_number(out, inst.aux.to_type(u64))
-        llvm_byte(out, '\n')
+        // ALLOCA 已由 llvm_function_allocas 统一在入口块发射（避免循环内就地
+        // alloca 造成栈随迭代增长）；这里按位置跳过，不能重复发射。
         return
     }
     if (inst.op == ir.IR_OP_GEP) {
@@ -382,11 +335,15 @@ fn llvm_instruction(unit *ir.IRModule, symbol *ir.IRModuleSymbol,
     }
     if (inst.op == ir.IR_OP_ADDR) {
         // 局部存储取址：按指针元素发 alloca，对齐取元素自然对齐（未知取 1）。
+        // 元素为 VOID 时该地址是「不透明指针值的槽」（canonical *void 与函数值
+        // 共用 IR_TY_PTR 编码，其 elem 规范编号为 VOID）：按指针宽度分配一个槽，
+        // 不能照抄元素种类发 `alloca void`（LLVM 拒绝）。
         let pointee ir.IRType = body.types[body.types[inst.result_type].elem]
-        let align int = pointee.bits / 8
+        let opaque int = pointee.kind == ir.IR_TY_VOID ? 1 : 0
+        let align int = opaque != 0 ? 8 : pointee.bits / 8
         if (align < 1) { align = 1 }
         llvm_text(out, "  "); llvm_value(out, inst.result_id); llvm_text(out, " = alloca ")
-        llvm_type(out, pointee.kind, pointee.bits)
+        if (opaque != 0) { llvm_text(out, "ptr") } else { llvm_type(out, pointee.kind, pointee.bits) }
         llvm_text(out, ", align "); llvm_number(out, align.to_type(u64)); llvm_byte(out, '\n')
         return
     }
@@ -645,51 +602,39 @@ fn llvm_function(unit *ir.IRModule, function *ir.IRModuleFunction, out *LLVMOutp
     llvm_text(out, "define ")
     if (symbol.linkage == ir.IR_MODULE_LINK_PRIVATE) { llvm_text(out, "internal ") }
     llvm_signature(unit, &symbol, out, 1)
-    // Windows/x64 的栈页探测保持开启（LLVM 对大帧发 call __chkstk）：
-    // 该符号由 SDK 的 yh_chkstk.obj 提供（compiler/windows-sdk/chkstk.c，
-    // 导出 __yh_chkstk，经 /alternatename 接手零 CRT 的 __chkstk；
-    // W1-3c），不再用 no-stack-arg-probe 关探测、也不再限制帧大小。
-    llvm_text(out, " {\n"); llvm_map_end(out, map)
-    let next int = 0
-    // 入口块标签 + **全部 alloca 提升**：LLVM 把非入口块的 alloca 当动态分配处理
-    // （Windows 上会调 __chkstk，且布局与期望不一致——2026-10-27 W1 踩过：聚合
-    // 临时值直接作为 printf 实参时崩溃）。yh 的 IR_OP_ALLOCA 尺寸恒为常量、
-    // 生命周期为函数级（C 式局部变量），因此提到入口块不改变语义。
-    llvm_byte(out, 'b'); llvm_number(out, 0.to_type(u64)); llvm_text(out, ":\n")
-    let hoist_block int = 0
-    for hoist_block < function.body.block_count {
-        let hoist_n int = function.body.blocks[hoist_block].inst_count
-        let hoist_i int = 0
-        for hoist_i < hoist_n {
-            let hoist_index int = function.body.blocks[hoist_block].first_inst + hoist_i
-            if (function.body.insts[hoist_index].op == ir.IR_OP_ALLOCA) {
-                let hoist_loc ir.IRModuleLoc = function.locs[hoist_index]
-                map = llvm_map(out, hoist_loc.source, hoist_loc.offset, function.symbol)
-                llvm_instruction(unit, &symbol, out, &function.body,
-                    &function.body.insts[hoist_index], &next)
-                llvm_map_end(out, map)
-            }
-            hoist_i += 1
-        }
-        hoist_block += 1
+    // ELF：每函数独立 section，供链接期 --gc-sections 逐函数回收。
+    if (llvm_elf_sections(unit) != 0) {
+        llvm_text(out, " section \"")
+        llvm_section_name(out, ".text.", symbol.name)
+        llvm_text(out, "\"")
     }
-    let b int = 0
+    llvm_text(out, " {\n"); llvm_map_end(out, map)
+    let next int = 0; let b int = 0
     for b < function.body.block_count {
         let block ir.IRBlock = function.body.blocks[b]
-        if (b != 0) {
-            llvm_byte(out, 'b'); llvm_number(out, b.to_type(u64)); llvm_text(out, ":\n")
+        llvm_byte(out, 'b'); llvm_number(out, b.to_type(u64)); llvm_text(out, ":\n")
+        // 入口块要先把全函数 ALLOCA 一次发完，后续块内不再发；但 LLVM 要求
+        // PHI 聚在块首，所以插入点取入口块的前导 PHI 之后（无 PHI 时即块首）。
+        let phi_end int = 0
+        if (b == 0) {
+            for phi_end < block.inst_count {
+                if (function.body.insts[block.first_inst + phi_end].op != ir.IR_OP_PHI) {
+                    break
+                }
+                phi_end += 1
+            }
         }
         let i int = 0
         for i < block.inst_count {
+            if (b == 0 && i == phi_end) { llvm_function_allocas(function, out) }
             let index int = block.first_inst + i
-            let inst ir.IRInst = function.body.insts[index]
-            if (inst.op != ir.IR_OP_ALLOCA) {
-                map = llvm_map(out, function.locs[index].source, function.locs[index].offset, function.symbol)
-                llvm_instruction(unit, &symbol, out, &function.body, &inst, &next)
-                llvm_map_end(out, map)
-            }
-            i += 1
+            let loc ir.IRModuleLoc = function.locs[index]
+            map = llvm_map(out, loc.source, loc.offset, function.symbol)
+            llvm_instruction(unit, &symbol, out, &function.body, &function.body.insts[index], &next)
+            llvm_map_end(out, map); i += 1
         }
+        // 入口块只有 PHI（或为空）时，插入点落在指令循环之后。
+        if (b == 0 && phi_end >= block.inst_count) { llvm_function_allocas(function, out) }
         map = llvm_map(out, symbol.source, symbol.offset, function.symbol)
         llvm_terminator(unit, &symbol, out, &function.body, &block, &next); llvm_map_end(out, map)
         b += 1

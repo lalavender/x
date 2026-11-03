@@ -1,0 +1,238 @@
+// expect: np3=ok
+// NP3 受检→SSA→LLVM 覆盖矩阵回归（2026-10-28 探针实测后固化）。
+// 目的：把「已是支持形态」的构造锁成门，避免能力矩阵漂移成文档里的猜测。
+// 覆盖：聚合初始化来源（调用/字段/下标）、聚合赋值来源、嵌套 for-in 与多
+// break/continue、二维数组字面量、含切片字段的结构体、聚合按值调用、9 参数
+// 调用、字段取址链、返回切片字面量、enum 作 switch、前向/后向 goto、显式转换、
+// union 字面量、嵌套聚合赋值、短路副作用与全局计数、浮点/指针绑定取址、
+// 顶层结构体/切片全局。
+enum Op {
+    add
+    sub
+}
+
+union Val {
+    i int
+    b u8
+}
+
+struct Pair {
+    x int
+    y int
+}
+
+struct Inner {
+    a int
+}
+
+struct Outer {
+    inner Inner
+    b int
+}
+
+struct Box {
+    p Pair
+    tag int
+}
+
+struct Bag {
+    items []int
+    n int
+}
+
+let GLOBAL_PAIR Pair = Pair{ x: 4, y: 5 }
+let GLOBAL_SLICE []int = [1, 2, 3]
+let HITS int = 0
+
+// pair_of：聚合返回，供「let 用调用结果初始化」与聚合赋值使用。
+fn pair_of(a int, b int) Pair { return Pair{ x: a, y: b } }
+
+// addp：聚合按值传参 + 聚合返回 + 混合标量调用。
+fn addp(p Pair, k int) Pair { return Pair{ x: p.x + k, y: p.y + k } }
+
+// nine：9 个参数的直接调用。
+fn nine(a int, b int, c int, d int, e int, f int, g int, h int, i int) int {
+    return a + b + c + d + e + f + g + h + i
+}
+
+// slice_of：返回切片字面量，验证逃逸存储。
+fn slice_of(n int) []int { return [n, n + 1, n + 2] }
+
+// make_slice：函数返回视图切片。
+fn make_slice(n int) []int {
+    let a [4]int = [1, 2, 3, 4]
+    return a[0..n]
+}
+
+// total：用户变参函数（yh ABI vararg）。
+fn total(vals ...int) int {
+    let n int = len(vals)
+    let i int = 0
+    let s int = 0
+    for i < n {
+        s += vals[i]
+        i += 1
+    }
+    return s
+}
+
+// scan：同一循环多个 break/continue 站点。
+fn scan(a [4]int, stop int) int {
+    let i int = 0
+    let acc int = 0
+    for i < 4 {
+        if (a[i] == stop) { break }
+        if (a[i] < 0) {
+            i += 1
+            continue
+        }
+        acc += a[i]
+        i += 1
+    }
+    return acc
+}
+
+// run_op：enum 作 switch 控制与 case 值。
+fn run_op(op Op, a int, b int) int {
+    switch op {
+        case Op.add { return a + b }
+        case Op.sub { return a - b }
+    }
+    return 0
+}
+
+// bump：短路右侧的副作用调用。
+fn bump() int {
+    HITS += 1
+    return 1
+}
+
+// check_aggregate_init：聚合初始化与赋值来源矩阵。
+fn check_aggregate_init() int {
+    let made Pair = pair_of(3, 4)
+    if (made.x != 3 || made.y != 4) { return 1 }
+    let outer Outer = Outer{ inner: Inner{ a: 9 }, b: 1 }
+    let from_field Inner = outer.inner
+    if (from_field.a != 9) { return 2 }
+    let arr [2]Pair = [Pair{ x: 1, y: 2 }, Pair{ x: 3, y: 4 }]
+    let from_index Pair = arr[1]
+    if (from_index.x != 3) { return 3 }
+    let box Box
+    box.p = pair_of(5, 6)
+    if (box.p.y != 6) { return 4 }
+    box.p = arr[0]
+    if (box.p.x != 1) { return 5 }
+    let elems [2]Pair
+    elems[0] = pair_of(7, 8)
+    elems[0].x = 11
+    if (elems[0].x != 11 || elems[0].y != 8) { return 6 }
+    return 0
+}
+
+// check_aggregate_values：聚合值传递、内存驻留与字面量。
+fn check_aggregate_values() int {
+    let base Pair = Pair{ x: 1, y: 2 }
+    let chained Pair = addp(addp(base, 3), 4)
+    if (chained.x != 8 || chained.y != 9) { return 1 }
+    if (nine(1, 2, 3, 4, 5, 6, 7, 8, 9) != 45) { return 2 }
+    if (total(1, 2, 3) != 6) { return 3 }
+    let matrix [2][2]int = [[1, 2], [3, 4]]
+    if (matrix[1][0] != 3) { return 4 }
+    let v Val = Val{ i: 258 }
+    if (v.b != 2) { return 5 }
+    let o Outer = Outer{ inner: Inner{ a: 1 } }
+    let field_ptr *int = &o.inner.a
+    *field_ptr = 42
+    if (o.inner.a != 42) { return 6 }
+    if (GLOBAL_PAIR.y != 5 || len(GLOBAL_SLICE) != 3 || GLOBAL_SLICE[2] != 3) { return 7 }
+    let f f64 = 1.5
+    let fp *f64 = &f
+    *fp = 2.5
+    if (f != 2.5) { return 8 }
+    let x int = 1
+    let xp *int = &x
+    let xpp **int = &xp
+    **xpp = 7
+    if (x != 7) { return 9 }
+    return 0
+}
+
+// check_slices：切片字面量与视图返回。
+fn check_slices() int {
+    let escaped []int = slice_of(4)
+    if (len(escaped) != 3 || escaped[0] != 4) { return 1 }
+    let view []int = make_slice(3)
+    if (len(view) != 3 || view[2] != 3) { return 2 }
+    let a [3]int = [1, 2, 3]
+    let s []int = a[0..3]
+    let bag Bag = Bag{ items: s, n: 3 }
+    if (bag.n != 3 || len(bag.items) != 3) { return 3 }
+    return 0
+}
+
+// check_flow：嵌套 for-in、多 break/continue、switch、goto、短路副作用。
+fn check_flow() int {
+    let a [3]int = [1, 2, 3]
+    let b [2]int = [10, 20]
+    let s int = 0
+    for v in a {
+        for w in b {
+            if (w == 20) { break }
+            s += v * w
+        }
+        if (v == 2) { continue }
+    }
+    if (s != 60) { return 1 }
+    let mixed [4]int = [1, -2, 3, 4]
+    if (scan(mixed, 4) != 4) { return 2 }
+    if (run_op(Op.add, 5, 3) != 8 || run_op(Op.sub, 5, 3) != 2) { return 3 }
+    let zero int = 0
+    if (zero != 0 && bump() != 0) { return 4 }
+    if (HITS != 0) { return 5 }
+    let one int = 1
+    if (!(one != 0 && bump() == 1 && HITS == 1)) { return 6 }
+    let gx int = 0
+    goto forward_done
+    gx = 1
+forward_done:
+    if (gx != 0) { return 7 }
+    let i int = 0
+    let n int = 0
+loop_top:
+    if (i >= 3) { goto loop_done }
+    n += i
+    i += 1
+    goto loop_top
+loop_done:
+    if (n != 3) { return 8 }
+    return 0
+}
+
+// check_casts：显式转换矩阵（窄化、浮点互转、指针）。
+fn check_casts() int {
+    let wide i64 = 300
+    if (wide.to_type(u8) != 44) { return 1 }
+    let f f64 = 3.9
+    let truncated int = f.to_type(int)
+    if (truncated != 3 || truncated.to_type(f64) != 3.0) { return 2 }
+    let x int = 7
+    let bytes *u8 = (&x).to_type(*u8)
+    if (bytes[0] != 7) { return 3 }
+    return 0
+}
+
+// main：合并四组断言，失败码直接标出分组。
+fn main() int {
+    let group int = check_aggregate_init()
+    if (group != 0) { return 10 + group }
+    group = check_aggregate_values()
+    if (group != 0) { return 20 + group }
+    group = check_slices()
+    if (group != 0) { return 30 + group }
+    group = check_flow()
+    if (group != 0) { return 40 + group }
+    group = check_casts()
+    if (group != 0) { return 50 + group }
+    printf("np3=ok\n")
+    return 0
+}

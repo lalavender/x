@@ -137,6 +137,12 @@ platform_version、显式 syslibroot、PIE、libSystem、ad-hoc 签名及受检�
 后原子发布。单文件、项目、worker 共用配置与发布协议。平台驱动回落保留为显式
 选择；内嵌 lld 失败不能静默改走系统 clang。签名使用 lld 的既有能力并实际验证。
 
+**暂存路径契约（RB5，2026-10-26）**：`-adhoc_codesign` 把**输出文件 basename** 写进
+codesign identifier，所以链接临时产物不能把 pid 拼进文件名——否则同源两次构建的产物
+哈希不同。Darwin 项目链接统一写到 `<out 目录>/.yh-tmp.<pid>/<basename>`：与产物同
+文件系统保证 rename 原子，子目录按 pid 隔离并发，发布或失败后删除空目录；pid 复用
+留下的残留先清理再建目录。单文件 `-o` 形态的 `<out>.yh-link-tmp` 不含 pid，保持不变。
+
 交叉构建区分 A 的运行库与 B 的运行库：Linux A 中的 ELF 版 LLVM 执行代码生成，
 链接 B 必须使用 Darwin/ARM64 LLVM/桥归档。自举 manifest 按 B 的运行宿主选择，
 路径可重定位，搬到 Mac 后重新解析构建输入；不得把 Linux 绝对归档路径固化为 B

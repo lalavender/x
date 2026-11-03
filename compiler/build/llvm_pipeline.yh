@@ -5,6 +5,8 @@ import check
 import ir
 import lower
 import backend
+import proj
+import link
 
 // ============================================================================
 // llvm_pipeline.yh —— 已验证受检快照到 LLVM 文本/对象/汇编的共用驱动（LA1a）
@@ -57,8 +59,8 @@ fn llvm_emit_reason(unit *ir.IRModule, source int, offset int, reason *char) voi
 // llvm_emit_with_target：Linux 沿用 v1；Darwin 使用已校验会话配置调用带部署版本的 v2。
 fn llvm_emit_with_target(text *char, length int, triple *char, opt_level int,
     kind int, path *char, reason *char) int {
-    if (gen.G().c_target.os == gen.TARGET_OS_DARWIN) {
-        let min_os *char = cmd_darwin_min_os()
+    if (proj.cfg().target.os == gen.TARGET_OS_DARWIN) {
+        let min_os *char = link.cmd_darwin_min_os()
         if (min_os == 0) { return -1 }
         return backend.llvm_bridge_emit_v2(text, length, triple, min_os,
             opt_level, kind, path, reason)
@@ -86,8 +88,8 @@ fn llvm_emit_verify_checked_snapshot(unit *ast.CheckedModule) int {
 
 // llvm_emit_add_deployment_metadata：为 Darwin LLVM 文本补充与桥接器一致的规范化最低系统版本。
 fn llvm_emit_add_deployment_metadata(output *backend.LLVMOutput) int {
-    if (gen.G().c_target.os != gen.TARGET_OS_DARWIN) { return 0 }
-    let min_os *char = cmd_darwin_min_os()
+    if (proj.cfg().target.os != gen.TARGET_OS_DARWIN) { return 0 }
+    let min_os *char = link.cmd_darwin_min_os()
     if (min_os == 0) { return -1 }
     return backend.llvm_output_add_macos_min_os(output, min_os)
 }
@@ -105,19 +107,38 @@ fn llvm_prepare_module_cached(unit *ast.CheckedModule, mod_ir *ir.IRModule,
     output *backend.LLVMOutput, cache_in *ir.IRFunctionCacheSet,
     cache_out *ir.IRFunctionCacheSet, env_key u64,
     lower_stats *lower.CheckedLowerStats) int {
-    let gs *gen.GenState = gen.G()
+    // PF2：lowering 段（含函数级 IR 缓存恢复）单独计时，失败也计入已花时间。
+    let lower_start_ns u64 = gen.clock_ns()
     let lowered int = lower.lower_module_cached(unit, mod_ir, cache_in, cache_out,
         env_key, lower_stats)
+    bc().lower_ns += gen.clock_ns() - lower_start_ns
+    // PL1：lowering 内部四段（prep/decl/build/verify）取自 lower 自己的计时，
+    // 这里是唯一读点；stats 为空（--emit-llvm 文本路径）时不计。
+    if (lower_stats != 0) {
+        gen.stats().lower_prep_ns += lower_stats.prep_ns
+        gen.stats().lower_decl_ns += lower_stats.decl_ns
+        gen.stats().lower_build_ns += lower_stats.build_ns
+        gen.stats().lower_verify_ns += lower_stats.verify_ns
+        gen.stats().lower_lookup_ns += lower_stats.lookup_ns
+        gen.stats().lower_cache_ns += lower_stats.cache_ns
+        gen.stats().lower_fn_ns += lower_stats.fn_ns
+        gen.stats().lower_capture_ns += lower_stats.capture_ns
+    }
     if (lowered != 0) {
         // lower_module 已按首片契约写好带来源的拒绝诊断，这里不再重复。
         return lowered
     }
-    gs.c_stats_checked_functions += mod_ir.function_count
-    if (backend.llvm_emit_module(mod_ir, &gs.c_target, output) != 0) {
+    gen.stats().checked_functions += mod_ir.function_count
+    // PF2：yh 侧构造 LLVM IR 文本单独计时（不含内嵌桥的解析/优化/发射）。
+    let irbuild_start_ns u64 = gen.clock_ns()
+    let built int = backend.llvm_emit_module(mod_ir, &proj.cfg().target, output)
+    if (built != 0) {
         ir.ir_module_release(mod_ir)
         return -1
     }
-    if (llvm_emit_add_deployment_metadata(output) != 0) {
+    let meta int = llvm_emit_add_deployment_metadata(output)
+    bc().irbuild_ns += gen.clock_ns() - irbuild_start_ns
+    if (meta != 0) {
         backend.llvm_output_release(output)
         ir.ir_module_release(mod_ir)
         return -1
@@ -129,11 +150,10 @@ fn llvm_prepare_module_cached(unit *ast.CheckedModule, mod_ir *ir.IRModule,
 // 返回 0 成功、-1 写失败。单文件/文本专用路径把它视为致命，对象路径只报告。
 fn llvm_emit_write_text(output *backend.LLVMOutput, text_path *char) int {
     if (output == 0 || text_path == 0) { return 0 }
-    let gs *gen.GenState = gen.G()
     if (gen.cstr_eq(text_path, "-") != 0) {
         return gen.write_all(1, output.text, output.length) == 0 ? 0 : -1
     }
-    let flags int = gs.c_host_target.os == gen.TARGET_OS_DARWIN ? 0x601 : 0x241
+    let flags int = proj.cfg().host_target.os == gen.TARGET_OS_DARWIN ? 0x601 : 0x241
     let fd int = open(text_path, flags, 0x1a4)
     if (fd < 0) {
         gen.fail_path("无法创建 LLVM 文本: ", text_path)
@@ -169,20 +189,23 @@ fn llvm_emit_temp_path(buffer *u8, path *char) int {
 // kind：0 = 对象，1 = 汇编。成功返回 0；桥失败返回 1（reason 有效，可能为空）；
 // 路径/机器格式/rename 失败返回 -1（已写诊断）。
 fn llvm_emit_publish(output *backend.LLVMOutput, kind int, out_path *char,
-    reason *char) int {
-    let gs *gen.GenState = gen.G()
+    reason *char, opt_level int) int {
     let temporary [1024]u8
     if (llvm_emit_temp_path(&temporary[0], out_path) != 0) {
         return gen.fail_path("LLVM 产物路径过长: ", out_path)
     }
     unlink(gen.arr_cstr(&temporary[0]))
-    if (llvm_emit_with_target(output.text.to_type(*char), output.length,
-            gs.c_target.triple, gs.c_opt_level, kind,
-            gen.arr_cstr(&temporary[0]), reason) != 0) {
+    // PF2：内嵌桥段（LLVM 解析 / 优化 / 目标码生成 / 写对象）单独计时。
+    let bridge_start_ns u64 = gen.clock_ns()
+    let bridged int = llvm_emit_with_target(output.text.to_type(*char),
+        output.length, proj.cfg().target.triple, opt_level, kind,
+        gen.arr_cstr(&temporary[0]), reason)
+    bc().bridge_ns += gen.clock_ns() - bridge_start_ns
+    if (bridged != 0) {
         unlink(gen.arr_cstr(&temporary[0]))
         return 1
     }
-    if (kind == 0 && mb_object_machine_matches(gen.arr_cstr(&temporary[0])) == 0) {
+    if (kind == 0 && link.mb_object_machine_matches(gen.arr_cstr(&temporary[0])) == 0) {
         unlink(gen.arr_cstr(&temporary[0]))
         return gen.fail_path("LLVM 桥发出的对象架构与 target 不符: ", out_path)
     }
@@ -198,17 +221,16 @@ fn llvm_emit_publish(output *backend.LLVMOutput, kind int, out_path *char,
 // 额外写出 LLVM 文本（审阅/差分用，失败不致命）。
 // 返回 0 成功、-1 失败（诊断已写 stderr，且不发布任何产物）。
 fn llvm_emit_module_to(unit *ast.CheckedModule, kind int, out_path *char,
-    text_path *char, stats *LLVMEmitResult) int {
+    text_path *char, stats *LLVMEmitResult, opt_level int) int {
     return llvm_emit_module_to_cached(unit, kind, out_path, text_path, stats,
-        0, 0, 0, 0)
+        0, 0, 0, 0, opt_level)
 }
 
 // llvm_emit_module_to_cached：LA3 项目 worker 使用的带函数缓存版本。
 fn llvm_emit_module_to_cached(unit *ast.CheckedModule, kind int, out_path *char,
     text_path *char, stats *LLVMEmitResult, cache_in *ir.IRFunctionCacheSet,
     cache_out *ir.IRFunctionCacheSet, env_key u64,
-    lower_stats *lower.CheckedLowerStats) int {
-    let gs *gen.GenState = gen.G()
+    lower_stats *lower.CheckedLowerStats, opt_level int) int {
     let mod_ir ir.IRModule
     let output backend.LLVMOutput
     let prepared int = llvm_prepare_module_cached(unit, &mod_ir, &output,
@@ -218,7 +240,7 @@ fn llvm_emit_module_to_cached(unit *ast.CheckedModule, kind int, out_path *char,
     llvm_emit_write_text(&output, text_path)
     let reason [backend.LLVM_BRIDGE_DIAG]u8
     let published int = llvm_emit_publish(&output, kind, out_path,
-        (&reason[0]).to_type(*char))
+        (&reason[0]).to_type(*char), opt_level)
     if (published != 0) {
         if (published == 1) {
             // 桥失败：按模块第一个来源定位，便于把 LLVM 错误映射回 yh 源码。
@@ -238,7 +260,7 @@ fn llvm_emit_module_to_cached(unit *ast.CheckedModule, kind int, out_path *char,
         stats.emitted = output.emitted
         stats.text_length = output.length
     }
-    gs.c_stats_backend_emitted += output.emitted
+    gen.stats().backend_emitted += output.emitted
     backend.llvm_output_release(&output)
     ir.ir_module_release(&mod_ir)
     return 0
@@ -249,7 +271,6 @@ fn llvm_emit_module_to_cached(unit *ast.CheckedModule, kind int, out_path *char,
 // 返回 0 成功、1 首片不支持（lowering 已给来源诊断）、-1 内部错误。
 fn llvm_emit_text_only(unit *ast.CheckedModule, text_path *char,
     stats *LLVMEmitResult) int {
-    let gs *gen.GenState = gen.G()
     let mod_ir ir.IRModule
     let output backend.LLVMOutput
     let prepared int = llvm_prepare_module(unit, &mod_ir, &output)
@@ -259,7 +280,7 @@ fn llvm_emit_text_only(unit *ast.CheckedModule, text_path *char,
         stats.emitted = output.emitted
         stats.text_length = output.length
     }
-    gs.c_stats_backend_emitted += output.emitted
+    gen.stats().backend_emitted += output.emitted
     backend.llvm_output_release(&output)
     ir.ir_module_release(&mod_ir)
     return status

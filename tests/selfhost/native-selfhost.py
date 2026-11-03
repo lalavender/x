@@ -41,7 +41,8 @@ HOST_DRIVER_DARWIN = ROOT / "tools" / "llvm-darwin-host.py"
 HOST_DRIVER_WINDOWS = ROOT / "tools" / "llvm-windows-host.py"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "tools"))
-from selfhost_snapshot_gate import (default_seed, expected_artifacts,
+from selfhost_snapshot_gate import (default_seed, dependency_artifacts,
+                                    expected_artifacts,
                                     expected_llvm_artifacts,
                                     expected_seed_flat_artifacts,
                                     save_llvm_snapshot, save_snapshot)
@@ -218,8 +219,8 @@ def run(cmd, cwd=None, shim=False, seed_link=False):
                           text=True, timeout=1800, env=environment)
 
 
-def build(cc, out, generation, expected, compatible=(), llvm_mode=False,
-          seed_link=False):
+def build(cc, out, generation, expected, allowed=(), compatible=(),
+          llvm_mode=False, seed_link=False):
     """冷编一代，并在共享的 .build 被后续代覆盖前保存其产物。
 
     llvm_mode=True 时显式选择 LLVM 后端并保存 .ll/接口快照；默认仍按
@@ -244,7 +245,7 @@ def build(cc, out, generation, expected, compatible=(), llvm_mode=False,
         snapshot = save_llvm_snapshot(bdir, WORK / "snapshots" / generation)
     else:
         snapshot = save_snapshot(bdir, WORK / "snapshots" / generation)
-    errors = snapshot_errors([(generation, snapshot)], expected)
+    errors = snapshot_errors([(generation, snapshot)], expected, allowed)
     if errors:
         for compatible_expected in compatible:
             if not snapshot_errors([(generation, snapshot)], compatible_expected):
@@ -276,16 +277,21 @@ def run_cli_probe(cc):
     """CLI 冒烟：裸调用与坏参数必须打印完整用法并以用法错误码 2 退出。"""
     ok = True
     r = run([cc])
-    # 末行必须出现，防止用法输出被截断；信号死亡时 returncode 为负值。
+    # 帮助必须完整（用法行 + 命令列表），防止输出被截断；信号死亡时返回负值。
     if r.returncode != 2 or "用法: yh" not in r.stderr \
-            or "yh list" not in r.stderr:
+            or "build" not in r.stderr or "list" not in r.stderr:
         print(f"FAIL cli 裸调用：rc={r.returncode}, stderr 尾部：{r.stderr[-120:]}")
         ok = False
     r = run([cc, "--bogus-flag", "x.yh"])
     if r.returncode != 2 or "用法: yh" not in r.stderr:
         print(f"FAIL cli 坏参数：rc={r.returncode}, stderr 尾部：{r.stderr[-120:]}")
         ok = False
-    print("CLI 冒烟（裸调用/坏参数，用法完整且退出码 2）："
+    # CLI-R4：`--help` 是新增能力，正文写 stdout、退出 0，且列出子命令。
+    r = run([cc, "--help"])
+    if r.returncode != 0 or "用法: yh" not in r.stdout or "build" not in r.stdout:
+        print(f"FAIL cli --help：rc={r.returncode}, stdout 尾部：{r.stdout[-120:]}")
+        ok = False
+    print("CLI 冒烟（裸调用/坏参数/--help，用法完整且退出码正确）："
           + ("OK" if ok else "FAIL"))
     return ok
 
@@ -348,18 +354,21 @@ def main() -> int:
         return 1
 
     ok = True
-    expected = expected_llvm_artifacts(COMPILER)
+    # 依赖项目（libs）的模块按需发布，允许出现但不要求；本地模块必须齐全。
+    allowed = dependency_artifacts(COMPILER, llvm=True)
+    expected = expected_llvm_artifacts(COMPILER, follow_dependencies=False)
     seed_flat = expected_seed_flat_artifacts(COMPILER)
-    d2 = build(seed, WORK / "cc2", "cc2", expected, llvm_mode=True, seed_link=True)
-    d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected, llvm_mode=True)
-    d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected, llvm_mode=True)
+    d2 = build(seed, WORK / "cc2", "cc2", expected, allowed,
+               llvm_mode=True, seed_link=True)
+    d3 = build(WORK / "cc2", WORK / "cc3", "cc3", expected, allowed, llvm_mode=True)
+    d4 = build(WORK / "cc3", WORK / "cc4", "cc4", expected, allowed, llvm_mode=True)
     print(f"cc2/cc3/cc4 构建完成（种子 = {seed}）")
 
     # 最终候选相邻两代必须达到固定点。
-    transition = snapshot_errors([("cc2", d2), ("cc3", d3)], expected)
+    transition = snapshot_errors([("cc2", d2), ("cc3", d3)], expected, allowed)
     if transition:
         print(f"种子迁移后续跑验证：cc2→cc3 有 {len(transition)} 项内容变化")
-    errors = snapshot_errors([("cc3", d3), ("cc4", d4)], expected)
+    errors = snapshot_errors([("cc3", d3), ("cc4", d4)], expected, allowed)
     if errors:
         print("FAIL 模块固定点：", "；".join(errors))
         ok = False

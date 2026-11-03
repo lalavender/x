@@ -1,44 +1,20 @@
 module build
 import gen
+import proj
 
 // ============================================================================
 // project_resolve.yh —— 项目发现/索引/解析
 // 自 parse_decl.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
 // ============================================================================
 
-pub fn pj_mod_in_proj(proj int, off int, olen int) int {
-    let gs *gen.GenState = gen.G()
-    let i int = 0
-    for i < gs.p_projs[proj].mod_n {
-        let m int = gs.p_projs[proj].mods[i]
-        if (gs.p_mods[m].name_len == olen
-            && gs.task.np_data[gs.p_mods[m].name_off] == gs.task.np_data[off]) {
-            let match int = 1
-            let j int = 1
-            for j < olen {
-                if (gs.task.np_data[gs.p_mods[m].name_off + j] != gs.task.np_data[off + j]) {
-                    match = 0
-                    break
-                }
-                j += 1
-            }
-            if (match != 0) {
-                return m
-            }
-        }
-        i += 1
-    }
-    return -1
-}
 
 // pj_entry_mod：项目的入口模块下标（模块名 main，pj_load_project 已标记
 // is_entry 并保证至多一个）；无 main 模块即库项目，返回 -1。
-pub fn pj_entry_mod(proj int) int {
-    let gs *gen.GenState = gen.G()
+pub fn pj_entry_mod(pj int) int {
     let i int = 0
-    for i < gs.p_projs[proj].mod_n {
-        let m int = gs.p_projs[proj].mods[i]
-        if (gs.p_mods[m].is_entry != 0) {
+    for i < proj.ctx().projs[pj].mod_n {
+        let m int = proj.ctx().projs[pj].mods[i]
+        if (proj.ctx().mods[m].is_entry != 0) {
             return m
         }
         i += 1
@@ -47,30 +23,30 @@ pub fn pj_entry_mod(proj int) int {
 }
 
 pub fn pj_bind_imports() int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let i int = 0
-    for i < gs.p_imp_n {
-        let f int = gs.p_imp_file[i]
-        let proj int = gs.p_mods[gs.p_files[f].mod].proj
+    for i < proj.ctx().imp_n {
+        let f int = proj.ctx().imp_file[i]
+        let pj int = proj.ctx().mods[proj.ctx().files[f].mod].proj
         // 生产构建跳过 test 专用导入；测试模式只对目标项目绑定它们。
         // 依赖/标准库的测试与测试专用依赖不进入本轮测试图。
-        if (gs.p_imp_test_only[i] != 0
-            && (gs.task.c_test_mode == 0 || proj != gs.c_test_project)) {
+        if (proj.ctx().imp_test_only[i] != 0
+            && (tk.c_test_mode == 0 || pj != proj.ctx().test_project)) {
             i += 1
             continue
         }
-        let off int = gs.p_imp_off[i]
-        let olen int = gs.p_imp_len[i]
+        let off int = proj.ctx().imp_off[i]
+        let olen int = proj.ctx().imp_len[i]
         // 跨项目限定导入 KEY.MOD：直接解析到依赖键对应项目，不走三层
-        if (gs.p_imp_key_off[i] >= 0) {
-            let koff int = gs.p_imp_key_off[i]
-            let klen int = gs.p_imp_key_len[i]
+        if (proj.ctx().imp_key_off[i] >= 0) {
+            let koff int = proj.ctx().imp_key_off[i]
+            let klen int = proj.ctx().imp_key_len[i]
             let dk int = -1
             let di int = 0
-            for di < gs.p_projs[proj].dep_n {
-                if (pj_same_np(gs.p_projs[proj].deps[di].key_off,
-                    gs.p_projs[proj].deps[di].key_len, koff, klen) != 0) {
-                    dk = gs.p_projs[proj].deps[di].proj
+            for di < proj.ctx().projs[pj].dep_n {
+                if (pj_same_np(proj.ctx().projs[pj].deps[di].key_off,
+                    proj.ctx().projs[pj].deps[di].key_len, koff, klen) != 0) {
+                    dk = proj.ctx().projs[pj].deps[di].proj
                     break
                 }
                 di += 1
@@ -79,33 +55,33 @@ pub fn pj_bind_imports() int {
                 let kbuf [128]u8
                 let kn int = 0
                 kn = gen.append_str(kbuf, kn, "依赖键不存在: ")
-                kn = append_bytes_np(kbuf, kn, koff, klen)
+                kn = gen.append_np(kbuf, kn, koff, klen)
                 let kmo int = gen.tml_intern_str(kbuf, 0, kn)
                 if (kmo < 0) {
                     return -1
                 }
                 return imp_diag(i, gen.np_cstr(kmo))
             }
-            let km int = pj_mod_in_proj(dk, off, olen)
-            if (km < 0 || gs.p_mods[km].is_entry != 0) {
+            let km int = proj.module_in_project(dk, off, olen)
+            if (km < 0 || proj.ctx().mods[km].is_entry != 0) {
                 let kbuf2 [160]u8
                 let kn2 int = 0
                 kn2 = gen.append_str(kbuf2, kn2, "依赖项目没有可导入的该模块: ")
-                kn2 = append_bytes_np(kbuf2, kn2, off, olen)
+                kn2 = gen.append_np(kbuf2, kn2, off, olen)
                 let kmo2 int = gen.tml_intern_str(kbuf2, 0, kn2)
                 if (kmo2 < 0) {
                     return -1
                 }
                 return imp_diag(i, gen.np_cstr(kmo2))
             }
-            gs.p_imp_mod[i] = km
+            proj.ctx().imp_mod[i] = km
             i += 1
             continue
         }
         // 第 1 层：本项目
-        let m int = pj_mod_in_proj(proj, off, olen)
+        let m int = proj.module_in_project(pj, off, olen)
         if (m >= 0) {
-            if (gs.p_mods[m].is_entry != 0) {
+            if (proj.ctx().mods[m].is_entry != 0) {
                 let buf [128]u8
                 let n int = 0
                 n = gen.append_str_cap(buf, 128, n, "入口模块不可作为库导入: ")
@@ -116,15 +92,15 @@ pub fn pj_bind_imports() int {
                 }
                 return imp_diag(i, gen.np_cstr(mo))
             }
-            gs.p_imp_mod[i] = m
+            proj.ctx().imp_mod[i] = m
             i += 1
             continue
         }
         // 第 2 层：标准库
-        if (gs.p_stdlib >= 0) {
-            m = pj_mod_in_proj(gs.p_stdlib, off, olen)
+        if (proj.ctx().stdlib >= 0) {
+            m = proj.module_in_project(proj.ctx().stdlib, off, olen)
             if (m >= 0) {
-                gs.p_imp_mod[i] = m
+                proj.ctx().imp_mod[i] = m
                 i += 1
                 continue
             }
@@ -133,10 +109,10 @@ pub fn pj_bind_imports() int {
         let found int = -1
         let count int = 0
         let di int = 0
-        for di < gs.p_projs[proj].dep_n {
-            let dp int = gs.p_projs[proj].deps[di].proj
-            let cm int = pj_mod_in_proj(dp, off, olen)
-            if (cm >= 0 && gs.p_mods[cm].is_entry == 0) {
+        for di < proj.ctx().projs[pj].dep_n {
+            let dp int = proj.ctx().projs[pj].deps[di].proj
+            let cm int = proj.module_in_project(dp, off, olen)
+            if (cm >= 0 && proj.ctx().mods[cm].is_entry == 0) {
                 count += 1
                 found = cm
             }
@@ -146,7 +122,7 @@ pub fn pj_bind_imports() int {
             let buf3 [256]u8
             let n3 int = 0
             n3 = gen.append_str(buf3, n3, "模块名歧义（多个直接依赖提供）: ")
-            n3 = append_bytes_np(buf3, n3, off, olen)
+            n3 = gen.append_np(buf3, n3, off, olen)
             let mo3 int = gen.tml_intern_str(buf3, 0, n3)
             if (mo3 < 0) {
                 return -1
@@ -154,14 +130,14 @@ pub fn pj_bind_imports() int {
             return imp_diag(i, gen.np_cstr(mo3))
         }
         if (count == 1) {
-            gs.p_imp_mod[i] = found
+            proj.ctx().imp_mod[i] = found
             i += 1
             continue
         }
         let buf2 [192]u8
         let n2 int = 0
         n2 = gen.append_str(buf2, n2, "模块不存在: ")
-        n2 = append_bytes_np(buf2, n2, off, olen)
+        n2 = gen.append_np(buf2, n2, off, olen)
         n2 = gen.append_str(buf2, n2, "（已搜索 本项目 → 标准库 → 直接依赖）")
         let mo2 int = gen.tml_intern_str(buf2, 0, n2)
         if (mo2 < 0) {
@@ -172,32 +148,21 @@ pub fn pj_bind_imports() int {
     return 0
 }
 
-pub fn append_bytes_np(buf *u8, n int, off int, olen int) int {
-    let gs *gen.GenState = gen.G()
-    let i int = 0
-    for i < olen {
-        buf[n] = gs.task.np_data[off + i]
-        n += 1
-        i += 1
-    }
-    return n
-}
-
 fn imp_diag(i int, msg *char) int {
-    let gs *gen.GenState = gen.G()
-    let f int = gs.p_imp_file[i]
+    let tk *gen.TaskCtx = gen.task()
+    let f int = proj.ctx().imp_file[i]
     let buf [512]u8
     let n int = 0
-    n = gen.append_str_cap(buf, 512, n, pj_pool_str(gs.p_files[f].path_off))
+    n = gen.append_str_cap(buf, 512, n, proj.pool_str(proj.ctx().files[f].path_off))
     n = gen.append_byte_cap(buf, 512, n, ':')
-    n = gen.append_int_cap(buf, 512, n, gs.p_imp_line[i])
+    n = gen.append_int_cap(buf, 512, n, proj.ctx().imp_line[i])
     n = gen.append_byte_cap(buf, 512, n, ':')
-    n = gen.append_int_cap(buf, 512, n, gs.p_imp_col[i])
+    n = gen.append_int_cap(buf, 512, n, proj.ctx().imp_col[i])
     n = gen.append_str_cap(buf, 512, n, ": 错误: ")
     n = gen.append_str_cap(buf, 512, n, msg)
     n = gen.append_byte_cap(buf, 512, n, '\n')
     gen.write_all(2, buf, n)
-    gs.task.c_errors += 1
+    tk.c_errors += 1
     return -1
 }
 
@@ -207,23 +172,22 @@ fn imp_diag(i int, msg *char) int {
 let pj_pathstk *int = 0    // 访问路径栈（环诊断）
 let pj_pathstk_n int = 0
 fn pj_mod_edge(m int, e int) int {
-    let gs *gen.GenState = gen.G()
     let seen int = 0
     let fi int = 0
-    for fi < gs.p_mods[m].file_n {
-        let f int = gs.p_mods[m].files[fi]
+    for fi < proj.ctx().mods[m].file_n {
+        let f int = proj.ctx().mods[m].files[fi]
         let ii int = 0
-        for ii < gs.p_imp_n {
-            if (gs.p_imp_file[ii] == f && gs.p_imp_mod[ii] >= 0) {
-                let target int = gs.p_imp_mod[ii]
+        for ii < proj.ctx().imp_n {
+            if (proj.ctx().imp_file[ii] == f && proj.ctx().imp_mod[ii] >= 0) {
+                let target int = proj.ctx().imp_mod[ii]
                 // 是否已作为更早的边出现过
                 let done int = 0
                 let fi2 int = 0
-                for fi2 < gs.p_mods[m].file_n {
-                    let f2 int = gs.p_mods[m].files[fi2]
+                for fi2 < proj.ctx().mods[m].file_n {
+                    let f2 int = proj.ctx().mods[m].files[fi2]
                     let ii2 int = 0
-                    for ii2 < gs.p_imp_n {
-                        if (gs.p_imp_file[ii2] == f2 && gs.p_imp_mod[ii2] == target) {
+                    for ii2 < proj.ctx().imp_n {
+                        if (proj.ctx().imp_file[ii2] == f2 && proj.ctx().imp_mod[ii2] == target) {
                             if (ii2 < ii || fi2 < fi) {
                                 done = 1
                             }
@@ -251,11 +215,11 @@ fn pj_mod_edge(m int, e int) int {
 }
 
 pub fn pj_dfs(m int) int {
-    let gs *gen.GenState = gen.G()
-    if (pj_state().mark[m] == 2) {
+    let tk *gen.TaskCtx = gen.task()
+    if (proj.ctx().mark[m] == 2) {
         return 0
     }
-    if (pj_state().mark[m] == 1) {
+    if (proj.ctx().mark[m] == 1) {
         // 环：路径栈中从 m 开始的链
         let buf [512]u8
         let n int = 0
@@ -269,25 +233,25 @@ pub fn pj_dfs(m int) int {
         }
         let k int = start
         for k < pj_pathstk_n {
-            n = append_bytes_np(buf, n, gs.p_mods[pj_pathstk[k]].name_off, gs.p_mods[pj_pathstk[k]].name_len)
+            n = gen.append_np(buf, n, proj.ctx().mods[pj_pathstk[k]].name_off, proj.ctx().mods[pj_pathstk[k]].name_len)
             n = gen.append_str(buf, n, " -> ")
             k += 1
         }
-        n = append_bytes_np(buf, n, gs.p_mods[m].name_off, gs.p_mods[m].name_len)
+        n = gen.append_np(buf, n, proj.ctx().mods[m].name_off, proj.ctx().mods[m].name_len)
         let mo int = gen.tml_intern_str(buf, 0, n)
         if (mo < 0) {
             return -1
         }
-        gs.task.c_errors += 1
+        tk.c_errors += 1
         let out [600]u8
         let on int = 0
         on = gen.append_str(out, on, "yh: ")
-        on = append_bytes_np(out, on, mo, n)
+        on = gen.append_np(out, on, mo, n)
         on = gen.append_byte(out, on, '\n')
         gen.write_all(2, out, on)
         return -1
     }
-    pj_state().mark[m] = 1
+    proj.ctx().mark[m] = 1
     pj_pathstk[pj_pathstk_n] = m
     pj_pathstk_n += 1
     let e int = 0
@@ -302,34 +266,33 @@ pub fn pj_dfs(m int) int {
         e += 1
     }
     pj_pathstk_n -= 1
-    pj_state().mark[m] = 2
-    pj_state().order[pj_state().order_n] = m
-    pj_state().order_n += 1
+    proj.ctx().mark[m] = 2
+    proj.ctx().order[proj.ctx().order_n] = m
+    proj.ctx().order_n += 1
     return 0
 }
 
 pub fn pj_topo(root int) int {
-    let gs *gen.GenState = gen.G()
     // 标记数组按需扩容
-    if (gs.p_mod_n > 0) {
-        let nm *int = malloc((gs.p_mod_n * sizeof(int)).to_type(u64)).to_type(*int)
+    if (proj.ctx().mod_n > 0) {
+        let nm *int = malloc((proj.ctx().mod_n * sizeof(int)).to_type(u64)).to_type(*int)
         if (nm == 0) {
             gen.fail("内存分配失败")
             return -1
         }
-        if (pj_state().mark != 0) {
-            free(pj_state().mark)
+        if (proj.ctx().mark != 0) {
+            free(proj.ctx().mark)
         }
-        pj_state().mark = nm
-        let ord *int = malloc((gs.p_mod_n * sizeof(int)).to_type(u64)).to_type(*int)
+        proj.ctx().mark = nm
+        let ord *int = malloc((proj.ctx().mod_n * sizeof(int)).to_type(u64)).to_type(*int)
         if (ord == 0) {
             return gen.fail("内存分配失败")
         }
-        if (pj_state().order != 0) {
-            free(pj_state().order)
+        if (proj.ctx().order != 0) {
+            free(proj.ctx().order)
         }
-        pj_state().order = ord
-        let stk *int = malloc((gs.p_mod_n * sizeof(int)).to_type(u64)).to_type(*int)
+        proj.ctx().order = ord
+        let stk *int = malloc((proj.ctx().mod_n * sizeof(int)).to_type(u64)).to_type(*int)
         if (stk == 0) {
             return gen.fail("内存分配失败")
         }
@@ -339,27 +302,27 @@ pub fn pj_topo(root int) int {
         pj_pathstk = stk
     }
     let i int = 0
-    for i < gs.p_mod_n {
-        pj_state().mark[i] = 0
+    for i < proj.ctx().mod_n {
+        proj.ctx().mark[i] = 0
         i += 1
     }
-    pj_state().order_n = 0
+    proj.ctx().order_n = 0
     pj_pathstk_n = 0
     if (pj_dfs(root) != 0) {
         return -1
     }
-    return pj_state().order_n
+    return proj.ctx().order_n
 }
 
-pub fn pj_mod_suffix(proj int, mod int, off *int, olen *int) int {
-    let gs *gen.GenState = gen.G()
+pub fn pj_mod_suffix(pj int, mod int, off *int, olen *int) int {
+    let tk *gen.TaskCtx = gen.task()
     let tmp [512]u8
     let n int = 0
     n = gen.append_byte(tmp, n, '_')
     n = gen.append_byte(tmp, n, '_')
     let i int = 0
-    for i < gs.p_projs[proj].name_len {
-        let b u8 = gs.task.np_data[gs.p_projs[proj].name_off + i]
+    for i < proj.ctx().projs[pj].name_len {
+        let b u8 = tk.np_data[proj.ctx().projs[pj].name_off + i]
         if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
             || (b >= '0' && b <= '9') || b == '_')) {
             b = '_'
@@ -371,8 +334,8 @@ pub fn pj_mod_suffix(proj int, mod int, off *int, olen *int) int {
     n = gen.append_byte(tmp, n, '_')
     n = gen.append_byte(tmp, n, '_')
     i = 0
-    for i < gs.p_mods[mod].name_len {
-        let b2 u8 = gs.task.np_data[gs.p_mods[mod].name_off + i]
+    for i < proj.ctx().mods[mod].name_len {
+        let b2 u8 = tk.np_data[proj.ctx().mods[mod].name_off + i]
         if (!((b2 >= 'a' && b2 <= 'z') || (b2 >= 'A' && b2 <= 'Z')
             || (b2 >= '0' && b2 <= '9') || b2 == '_')) {
             b2 = '_'
@@ -393,8 +356,8 @@ pub fn pj_mod_suffix(proj int, mod int, off *int, olen *int) int {
 }
 
 pub fn pj_out_np(off int, olen int) void {
-    let gs *gen.GenState = gen.G()
-    gen.write_all(1, gs.task.np_data + off, olen)
+    let tk *gen.TaskCtx = gen.task()
+    gen.write_all(1, tk.np_data + off, olen)
 }
 
 pub fn pj_out_s(s *char) void {
@@ -405,37 +368,25 @@ pub fn pj_out_s(s *char) void {
     gen.write_all(1, s.to_type(*u8), n)
 }
 
-fn pj_source_cat(importer int, m int) *char {
-    let gs *gen.GenState = gen.G()
-    if (gs.p_mods[m].proj == importer) {
-        return "本地"
-    }
-    if (gs.p_mods[m].proj == gs.p_stdlib) {
-        return "标准库"
-    }
-    return "第三方"
-}
-
 pub fn pj_cmd_list(root int, resolve_off int, resolve_len int, has_resolve int) int {
-    let gs *gen.GenState = gen.G()
     pj_out_s("项目 ")
-    pj_out_np(gs.p_projs[root].name_off, gs.p_projs[root].name_len)
+    pj_out_np(proj.ctx().projs[root].name_off, proj.ctx().projs[root].name_len)
     pj_out_s("（源码根 ")
-    pj_out_np(gs.p_projs[root].src_off, gs.p_projs[root].src_len)
+    pj_out_np(proj.ctx().projs[root].src_off, proj.ctx().projs[root].src_len)
     pj_out_s("）\n")
     let i int = 0
-    for i < gs.p_projs[root].mod_n {
-        let m int = gs.p_projs[root].mods[i]
+    for i < proj.ctx().projs[root].mod_n {
+        let m int = proj.ctx().projs[root].mods[i]
         pj_out_s("  模块 ")
-        pj_out_np(gs.p_mods[m].name_off, gs.p_mods[m].name_len)
-        if (gs.p_mods[m].is_entry != 0) {
+        pj_out_np(proj.ctx().mods[m].name_off, proj.ctx().mods[m].name_len)
+        if (proj.ctx().mods[m].is_entry != 0) {
             pj_out_s("（入口）")
         }
         pj_out_s("\n")
         let fi int = 0
-        for fi < gs.p_mods[m].file_n {
+        for fi < proj.ctx().mods[m].file_n {
             pj_out_s("    ")
-            pj_out_np(gs.p_files[gs.p_mods[m].files[fi]].path_off, gs.p_files[gs.p_mods[m].files[fi]].path_len)
+            pj_out_np(proj.ctx().files[proj.ctx().mods[m].files[fi]].path_off, proj.ctx().files[proj.ctx().mods[m].files[fi]].path_len)
             pj_out_s("\n")
             fi += 1
         }
@@ -448,17 +399,17 @@ pub fn pj_cmd_list(root int, resolve_off int, resolve_len int, has_resolve int) 
     pj_out_np(resolve_off, resolve_len)
     pj_out_s("\n")
     // 按当前项目上下文演示三层搜索
-    let rm int = pj_mod_in_proj(root, resolve_off, resolve_len)
+    let rm int = proj.module_in_project(root, resolve_off, resolve_len)
     let cat *char = 0
     if (rm >= 0) {
-        if (gs.p_mods[rm].is_entry != 0) {
+        if (proj.ctx().mods[rm].is_entry != 0) {
             pj_out_s("  命中本项目入口模块（不可导入）\n")
             return 1
         }
         cat = "本地"
     }
-    if (rm < 0 && gs.p_stdlib >= 0) {
-        rm = pj_mod_in_proj(gs.p_stdlib, resolve_off, resolve_len)
+    if (rm < 0 && proj.ctx().stdlib >= 0) {
+        rm = proj.module_in_project(proj.ctx().stdlib, resolve_off, resolve_len)
         if (rm >= 0) {
             cat = "标准库"
         }
@@ -467,9 +418,9 @@ pub fn pj_cmd_list(root int, resolve_off int, resolve_len int, has_resolve int) 
         let count int = 0
         let found int = -1
         let di int = 0
-        for di < gs.p_projs[root].dep_n {
-            let cm int = pj_mod_in_proj(gs.p_projs[root].deps[di].proj, resolve_off, resolve_len)
-            if (cm >= 0 && gs.p_mods[cm].is_entry == 0) {
+        for di < proj.ctx().projs[root].dep_n {
+            let cm int = proj.module_in_project(proj.ctx().projs[root].deps[di].proj, resolve_off, resolve_len)
+            if (cm >= 0 && proj.ctx().mods[cm].is_entry == 0) {
                 count += 1
                 found = cm
             }
@@ -491,12 +442,12 @@ pub fn pj_cmd_list(root int, resolve_off int, resolve_len int, has_resolve int) 
     pj_out_s("  来源: ")
     pj_out_s(cat)
     pj_out_s("  项目: ")
-    pj_out_np(gs.p_projs[gs.p_mods[rm].proj].name_off, gs.p_projs[gs.p_mods[rm].proj].name_len)
+    pj_out_np(proj.ctx().projs[proj.ctx().mods[rm].proj].name_off, proj.ctx().projs[proj.ctx().mods[rm].proj].name_len)
     pj_out_s("\n")
     let fi2 int = 0
-    for fi2 < gs.p_mods[rm].file_n {
+    for fi2 < proj.ctx().mods[rm].file_n {
         pj_out_s("    ")
-        pj_out_np(gs.p_files[gs.p_mods[rm].files[fi2]].path_off, gs.p_files[gs.p_mods[rm].files[fi2]].path_len)
+        pj_out_np(proj.ctx().files[proj.ctx().mods[rm].files[fi2]].path_off, proj.ctx().files[proj.ctx().mods[rm].files[fi2]].path_len)
         pj_out_s("\n")
         fi2 += 1
     }
@@ -504,8 +455,8 @@ pub fn pj_cmd_list(root int, resolve_off int, resolve_len int, has_resolve int) 
 }
 
 // pj_find_root：从当前目录向上最多 32 层找 project.toml，结果写入
-// pj_state().canon_off/pj_state().canon_len。quiet=1 时找不到不报诊断（usage 顺手显示版本用）。
-pub fn pj_find_root(quiet int) int {
+// out_len 写出根路径长度。quiet=1 时找不到不报诊断（usage 顺手显示版本用）。
+pub fn pj_find_root(quiet int, out_len *int) int {
     let depth int = 0
     for depth <= 32 {
         // 组装候选路径：depth 个 "../" + "project.toml"
@@ -529,14 +480,13 @@ pub fn pj_find_root(quiet int) int {
         n = gen.append_str(cand, n, gen.arr_cstr(rootb))
         n = gen.append_str(cand, n, "/project.toml")
         cand[n] = 0
-        if (pj_file_exists(gen.arr_cstr(cand)) != 0) {
+        if (proj.file_exists(gen.arr_cstr(cand)) != 0) {
             // 根直接入池（相对前缀本身已规范）
             let off int = gen.tml_intern_str(rootb, 0, rn)
             if (off < 0) {
                 return -1
             }
-            pj_state().canon_off = off
-            pj_state().canon_len = rn
+            out_len[0] = rn
             return off
         }
         depth += 1

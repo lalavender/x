@@ -7,6 +7,8 @@ import check
 import builtin
 import ir
 import lower
+import proj
+import link
 
 // module_worker.yh：在 fork 继承的项目快照上初始化私有语义状态并编译单个模块。
 
@@ -29,26 +31,26 @@ fn mb_verify_checked_snapshot(unit *ast.CheckedModule) int {
 
 // mb_llvm_module_paths：算出本模块的 LLVM 产物路径与审阅文本路径。
 // 对象放在当前目标命名空间的 obj/<tag>.o，文本放在 llvm/<tag>.ll；
-// 两者都用 mb_mod_tag 生成的项目+模块标记防同名冲突。
+// 两者都用 proj.mod_tag 生成的项目+模块标记防同名冲突。
 // 返回 0 成功；任一缓冲不足或标记失败返回 -1。
 fn mb_llvm_module_paths(m int, main_off int, main_len int,
     obj_out *u8, text_out *u8) int {
-    let build_off int = mb_build_dir(main_off, main_len)
+    let build_len int = 0
+    let build_off int = proj.build_dir(main_off, main_len, &build_len)
     if (build_off < 0) { return -1 }
-    let build_len int = pj_state().canon_len
     let tag_off int = -1
     let tag_len int = 0
-    if (mb_mod_tag(m, &tag_off, &tag_len) != 0) { return -1 }
+    if (proj.mod_tag(m, &tag_off, &tag_len) != 0) { return -1 }
     let n int = 0
-    n = gen.append_str(obj_out, n, pj_pool_str(build_off))
+    n = gen.append_str(obj_out, n, proj.pool_str(build_off))
     n = gen.append_str(obj_out, n, "/obj/")
-    n = gen.append_str(obj_out, n, pj_pool_str(tag_off))
+    n = gen.append_str(obj_out, n, proj.pool_str(tag_off))
     n = gen.append_str(obj_out, n, ".o")
     obj_out[n] = 0
     n = 0
-    n = gen.append_str(text_out, n, pj_pool_str(build_off))
+    n = gen.append_str(text_out, n, proj.pool_str(build_off))
     n = gen.append_str(text_out, n, "/llvm/")
-    n = gen.append_str(text_out, n, pj_pool_str(tag_off))
+    n = gen.append_str(text_out, n, proj.pool_str(tag_off))
     n = gen.append_str(text_out, n, ".ll")
     text_out[n] = 0
     return 0
@@ -62,7 +64,6 @@ fn mb_llvm_emit_module(m int, main_off int, main_len int,
     cache_in *ir.IRFunctionCacheSet, cache_out *ir.IRFunctionCacheSet,
     env_key u64, lower_stats *lower.CheckedLowerStats, check_dir *char,
     check_env u64) int {
-    let gs *gen.GenState = gen.G()
     let obj_path [700]u8
     let text_path [700]u8
     if (mb_llvm_module_paths(m, main_off, main_len, &obj_path[0], &text_path[0]) != 0) {
@@ -94,10 +95,10 @@ fn mb_llvm_emit_module(m int, main_off int, main_len int,
         }
     }
     // 文本路径只在 --emit-llvm 时给出；对象始终发布，构建步才能继续链接。
-    let text_out *char = gs.c_emit_kind == 1 ? gen.arr_cstr(&text_path[0]) : 0.to_type(*char)
+    let text_out *char = proj.cfg().emit_kind == 1 ? gen.arr_cstr(&text_path[0]) : 0.to_type(*char)
     let status int = llvm_emit_module_to_cached(&checked, 0,
         gen.arr_cstr(&obj_path[0]), text_out, 0, cache_in, cache_out,
-        env_key, lower_stats)
+        env_key, lower_stats, proj.module_opt_level(m))
     ast.checked_module_release(&checked)
     if (status == 0 && check_env != 0 && check_capture == 0) {
         firc_check_commit(check_dir, &check_out)
@@ -129,66 +130,68 @@ fn mb_worker_parent_alive() int {
 // 参数 out_dir/ir_cache_salt 是旧按文件汇编路径的遗留，待 C2 清理调用链。
 fn mb_emit_indexed_module(m int, main_off int, main_len int,
     out_dir *char, ir_cache_salt u64) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     if (mb_worker_parent_alive() == 0) { return -1 }
+    // PF2：前端段（pass1 / pass2 / bind / check，含编译期求值）计时起点。
+    let front_start_ns u64 = gen.clock_ns()
     // worker 只走受检前端：check 与 LLVM 发射共用同一条语义遍历。
     if (gen.front_checked_begin() != 0) {
         return -1
     }
     comptime.ct_reset()
-    gs.c_front_cache = 1
-    gs.task.c_ast_capture = 0
-    gs.c_ir_cache_salt = ir_cache_salt
-    gs.task.c_errors = 0
+    gen.stats().front_cache = 1
+    tk.c_ast_capture = 0
+    gen.stats().ir_cache_salt = ir_cache_salt
+    tk.c_errors = 0
     let sfx_off int = -1
     let sfx_len int = 0
-    if (m < 0 || m >= gs.p_mod_n
-        || pj_mod_suffix(gs.p_mods[m].proj, m, &sfx_off, &sfx_len) != 0) {
+    if (m < 0 || m >= proj.ctx().mod_n
+        || pj_mod_suffix(proj.ctx().mods[m].proj, m, &sfx_off, &sfx_len) != 0) {
         return -1
     }
-    gs.c_module_mode = 1
-    gs.c_is_entry_mod = gs.p_mods[m].is_entry
-    gs.task.c_sym_sfx_off = sfx_off
-    gs.task.c_sym_sfx_len = sfx_len
+    proj.cfg().module_mode = 1
+    proj.cfg().is_entry_mod = proj.ctx().mods[m].is_entry
+    tk.c_sym_sfx_off = sfx_off
+    tk.c_sym_sfx_len = sfx_len
     if (gen.sem_init_tables() != 0) {
         return -1
     }
     if (builtin.front_prepare() != 0) {
         return -1
     }
-    let build_off int = mb_build_dir(main_off, main_len)
+    let build_len int = 0
+    let build_off int = proj.build_dir(main_off, main_len, &build_len)
     if (build_off < 0) {
         return -1
     }
     // RS3b：按文件汇编目录（父进程只创建到 asm/ 一级）
-    if (gs.task.c_check_only == 0 && cmd_mkdirs(out_dir) != 0) {
+    if (tk.c_check_only == 0 && link.cmd_mkdirs(out_dir) != 0) {
         return gen.fail_path("无法创建汇编目录: ", out_dir)
     }
-    let build_len int = pj_state().canon_len
     if (mb_module_iface_deps(m, build_off, build_len) < 0) {
         return -1
     }
     let di int = 0
-    for di < mb_dep_n {
-        if (gen.set_source_path(pj_pool_str(mb_dep_ifoff[di])) != 0) {
+    for di < bc().dep_n {
+        if (gen.set_source_path(proj.pool_str(bc().dep_ifoff[di])) != 0) {
             return -1
         }
-        if (parse.iface_load(pj_pool_str(mb_dep_ifoff[di]),
-                mb_dep_bind[di], mb_dep_bindlen[di]) < 0) {
+        if (parse.iface_load(proj.pool_str(bc().dep_ifoff[di]),
+                bc().dep_bind[di], bc().dep_bindlen[di]) < 0) {
             return -1
         }
         di += 1
     }
-    gs.task.c_ast_capture = 1
+    tk.c_ast_capture = 1
     ast.ast_expr_reset()
     ast.ast_stmt_reset()
     ast.ast_decl_reset()
     ast.ast_function_reset()
     let cti int = 0
-    for cti < mb_dep_n {
-        if (gen.set_source_path(pj_pool_str(mb_dep_ctoff[cti])) != 0
-            || parse.iface_ct_load(pj_pool_str(mb_dep_ctoff[cti]),
-                mb_dep_base + cti) != 0) {
+    for cti < bc().dep_n {
+        if (gen.set_source_path(proj.pool_str(bc().dep_ctoff[cti])) != 0
+            || parse.iface_ct_load(proj.pool_str(bc().dep_ctoff[cti]),
+                bc().dep_base + cti) != 0) {
             return -1
         }
         cti += 1
@@ -200,37 +203,37 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
         return -1
     }
     let afi int = 0
-    for afi < gs.p_mods[m].file_n {
-        let decl_fi int = gs.p_mods[m].files[afi]
-        if (mb_restore_front_file(pj_pool_str(gs.p_files[decl_fi].path_off),
+    for afi < proj.ctx().mods[m].file_n {
+        let decl_fi int = proj.ctx().mods[m].files[afi]
+        if (mb_restore_front_file(proj.pool_str(proj.ctx().files[decl_fi].path_off),
                 decl_fi) != 0 || mb_file_head_bind(decl_fi) != 0
             || parse.decl_index_file(decl_fi) != 0
-            || mb_restore_front_file(pj_pool_str(gs.p_files[decl_fi].path_off),
+            || mb_restore_front_file(proj.pool_str(proj.ctx().files[decl_fi].path_off),
                 decl_fi) != 0 || ast.ast_decl_add_file(decl_fi) != 0) {
             return -1
         }
         afi += 1
     }
-    let sym_base int = gs.task.c_sym_n
-    let tname_base int = gs.task.t_name_n
-    gs.task.c_compile = 1
-    gs.task.c_pass = 1
+    let sym_base int = tk.c_sym_n
+    let tname_base int = tk.t_name_n
+    tk.c_compile = 1
+    tk.c_pass = 1
     let fi int = 0
-    for fi < gs.p_mods[m].file_n {
-        let file_id int = gs.p_mods[m].files[fi]
-        if (mb_pass1_file(pj_pool_str(gs.p_files[file_id].path_off),
+    for fi < proj.ctx().mods[m].file_n {
+        let file_id int = proj.ctx().mods[m].files[fi]
+        if (mb_pass1_file(proj.pool_str(proj.ctx().files[file_id].path_off),
                 file_id) != 0) {
             return -1
         }
         fi += 1
     }
-    if (gs.task.c_errors > 0) {
+    if (tk.c_errors > 0) {
         return -1
     }
     let bind_i int = 0
-    for bind_i < gs.p_mods[m].file_n {
-        let bind_fi int = gs.p_mods[m].files[bind_i]
-        if (mb_restore_front_file(pj_pool_str(gs.p_files[bind_fi].path_off),
+    for bind_i < proj.ctx().mods[m].file_n {
+        let bind_fi int = proj.ctx().mods[m].files[bind_i]
+        if (mb_restore_front_file(proj.pool_str(proj.ctx().files[bind_fi].path_off),
                 bind_fi) != 0 || ast.ast_decl_bind_file(bind_fi) != 0) {
             return -1
         }
@@ -239,27 +242,33 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     if (mb_check_binding_clash(m) != 0) {
         return -1
     }
-    if (gs.c_is_entry_mod != 0) {
+    if (proj.cfg().is_entry_mod != 0) {
         // yh test 允许入口模块没有 main（仅检查测试）；生产构建仍强制 main。
-        if (gs.task.c_test_mode != 0) {
+        if (tk.c_test_mode != 0) {
             if (gen.sem_check_main_optional() != 0) { return -1 }
         } else if (gen.sem_check_main() != 0) {
             return -1
         }
     }
-    gs.task.c_pass = 2
+    // UF1（合入 0.0.11-rc）：pass1 已登记本模块全部符号与顶层声明索引，
+    // 先报未使用的私有函数，不必等正文编译完（跨文件使用同样计入）。
+    if (unused_function_report(proj.ctx().mods[m].files,
+            proj.ctx().mods[m].file_n, sym_base) != 0) {
+        return -1
+    }
+    tk.c_pass = 2
     let fi_ct int = 0
-    for fi_ct < gs.p_mods[m].file_n {
-        let file_ct int = gs.p_mods[m].files[fi_ct]
-        if (mb_pass2_file(pj_pool_str(gs.p_files[file_ct].path_off),
+    for fi_ct < proj.ctx().mods[m].file_n {
+        let file_ct int = proj.ctx().mods[m].files[fi_ct]
+        if (mb_pass2_file(proj.pool_str(proj.ctx().files[file_ct].path_off),
                 file_ct, 2) != 0) { return -1 }
         fi_ct += 1
     }
-    if (gs.task.c_errors > 0) { return -1 }
+    if (tk.c_errors > 0) { return -1 }
     let fi_ct_layout int = 0
-    for fi_ct_layout < gs.p_mods[m].file_n {
-        let file_id int = gs.p_mods[m].files[fi_ct_layout]
-        if (mb_pass2_file(pj_pool_str(gs.p_files[file_id].path_off),
+    for fi_ct_layout < proj.ctx().mods[m].file_n {
+        let file_id int = proj.ctx().mods[m].files[fi_ct_layout]
+        if (mb_pass2_file(proj.pool_str(proj.ctx().files[file_id].path_off),
                 file_id, 3) != 0) { return -1 }
         fi_ct_layout += 1
     }
@@ -269,11 +278,11 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
             comptime.ct_layout_pending_count()
         if (pending_before == 0) { break }
         let fi_layout_eval int = 0
-        for fi_layout_eval < gs.p_mods[m].file_n {
-            let file_id int = gs.p_mods[m].files[fi_layout_eval]
-            if (mb_pass2_file(pj_pool_str(gs.p_files[file_id].path_off),
+        for fi_layout_eval < proj.ctx().mods[m].file_n {
+            let file_id int = proj.ctx().mods[m].files[fi_layout_eval]
+            if (mb_pass2_file(proj.pool_str(proj.ctx().files[file_id].path_off),
                     file_id, 4) != 0) { return -1 }
-            if (mb_restore_front_file(pj_pool_str(gs.p_files[file_id].path_off),
+            if (mb_restore_front_file(proj.pool_str(proj.ctx().files[file_id].path_off),
                     file_id) != 0 || mb_file_head_bind(file_id) != 0
                 || parse.parse_source_ct_layout_exprs() != 0) { return -1 }
             fi_layout_eval += 1
@@ -292,27 +301,28 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
             return -1
         }
     }
-    if (comptime.ct_layout_resolve() != 0 || gs.task.c_errors > 0) { return -1 }
+    if (comptime.ct_layout_resolve() != 0 || tk.c_errors > 0) { return -1 }
     // 延迟的枚举判别值：此时编译期函数正文已捕获，可以真实求值。
     if (parse.ct_enum_pending_run() != 0) { return -1 }
     // 全局初始化（mode 1）：ST/CT 数据登记，供受检快照消费。
     let fi2 int = 0
-    for fi2 < gs.p_mods[m].file_n {
-        let file_id int = gs.p_mods[m].files[fi2]
-        if (mb_pass2_file(pj_pool_str(gs.p_files[file_id].path_off),
+    for fi2 < proj.ctx().mods[m].file_n {
+        let file_id int = proj.ctx().mods[m].files[fi2]
+        if (mb_pass2_file(proj.pool_str(proj.ctx().files[file_id].path_off),
                 file_id, 1) != 0) {
             return -1
         }
         fi2 += 1
     }
-    if (gs.task.c_errors > 0) {
+    if (tk.c_errors > 0) {
         return -1
     }
     let ctpath [700]u8
     let ipath [700]u8
-    if (mb_module_ctiface_path(m, build_off, build_len, ctpath) != 0
+    if (proj.module_ctiface_path(m, build_off, build_len, bc().iface_suffix,
+            ctpath) != 0
         || parse.iface_ct_emit(gen.arr_cstr(ctpath), sym_base) != 0
-        || mb_module_iface_path(m, build_off, build_len, ipath) != 0
+        || proj.module_iface_path(m, build_off, build_len, bc().iface_suffix, ipath) != 0
         || parse.iface_emit(gen.arr_cstr(ipath), sym_base, tname_base) != 0) {
         return -1
     }
@@ -333,7 +343,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     let check_env u64 = 0
     let check_cache_on int = 0
     // PC2 v3：切片携带本函数字符串登记并守卫类型/静态数据规模，可重新装载。
-    if (gs.task.c_check_only == 0 && gs.task.c_test_mode == 0) {
+    if (tk.c_check_only == 0 && tk.c_test_mode == 0) {
         firc_check_load(gen.arr_cstr(&firc_dir[0]), &check_in)
         if (firc_env_key(m, build_off, build_len, &check_env) != 0) {
             ir.ir_function_cache_set_release(&check_in)
@@ -343,9 +353,9 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
         check_cache_on = 1
     }
     let fi3 int = 0
-    for fi3 < gs.p_mods[m].file_n {
-        let file_id int = gs.p_mods[m].files[fi3]
-        if (mb_pass2_file(pj_pool_str(gs.p_files[file_id].path_off),
+    for fi3 < proj.ctx().mods[m].file_n {
+        let file_id int = proj.ctx().mods[m].files[fi3]
+        if (mb_pass2_file(proj.pool_str(proj.ctx().files[file_id].path_off),
                 file_id, 0) != 0) {
             if (check_cache_on != 0) { ast.checked_check_cache_end() }
             ir.ir_function_cache_set_release(&check_in)
@@ -355,20 +365,20 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     }
     if (check_cache_on != 0) {
         ast.checked_check_cache_end()
-        let total int = gs.task.c_stats_ast_functions
-        let hits int = gs.c_stats_check_cache_hits
-        gs.c_stats_check_cache_misses = total > hits ? total - hits : 0
+        let total int = tk.c_stats_ast_functions
+        let hits int = gen.stats().check_cache_hits
+        gen.stats().check_cache_misses = total > hits ? total - hits : 0
     }
     ir.ir_function_cache_set_release(&check_in)
     // yh test：全部普通函数登记完成后检查目标项目的测试体。测试体只在
     // 各自模块内解析，依赖/标准库的测试不进入本轮。
-    if (gs.task.c_test_mode != 0 && gs.p_mods[m].proj == gs.c_test_project
-        && (gs.c_test_mod_filter < 0 || gs.c_test_mod_filter == m)) {
+    if (tk.c_test_mode != 0 && proj.ctx().mods[m].proj == proj.ctx().test_project
+        && (proj.ctx().test_mod_filter < 0 || proj.ctx().test_mod_filter == m)) {
         let fit int = 0
-        for fit < gs.p_mods[m].file_n {
-            let fit_file int = gs.p_mods[m].files[fit]
-            if (gs.c_test_file_filter < 0 || gs.c_test_file_filter == fit_file) {
-                if (mb_pass2_file(pj_pool_str(gs.p_files[fit_file].path_off),
+        for fit < proj.ctx().mods[m].file_n {
+            let fit_file int = proj.ctx().mods[m].files[fit]
+            if (proj.ctx().test_file_filter < 0 || proj.ctx().test_file_filter == fit_file) {
+                if (mb_pass2_file(proj.pool_str(proj.ctx().files[fit_file].path_off),
                         fit_file, 5) != 0) {
                     return -1
                 }
@@ -376,7 +386,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
             fit += 1
         }
     }
-    if (gs.task.c_errors > 0) {
+    if (tk.c_errors > 0) {
         return -1
     }
     let view ast.AstView
@@ -396,9 +406,11 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
         return gen.fail("内部错误：函数 AST 上下文校验失败")
     }
     if (check_result != 0) { return -1 }
+    // PF2：前端段到 check 通过为止（含 check-only 路径）；后续 lower/IR/桥另计。
+    bc().front_ns += gen.clock_ns() - front_start_ns
     // check 也通过真实受检快照边界，确认合法输入不依赖旧输出或可变语义表。
     // LLVM 编译继续 lowering 并发布对象；check 只验证受检快照，不触发后端发射。
-    if (gs.task.c_check_only != 0) {
+    if (tk.c_check_only != 0) {
         let checked ast.CheckedModule
         if (gen.front_checked_verify() != 0
             || ast.checked_module_capture(&checked) != 0) { return -1 }
@@ -414,7 +426,7 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     let cache_in ir.IRFunctionCacheSet
     let cache_out ir.IRFunctionCacheSet
     let env_key u64 = 0
-    if (gs.task.c_test_mode == 0) {
+    if (tk.c_test_mode == 0) {
         firc_load(gen.arr_cstr(&firc_dir[0]), &cache_in)
         if (firc_env_key(m, build_off, build_len, &env_key) != 0) {
             ir.ir_function_cache_set_release(&cache_in)
@@ -424,17 +436,17 @@ fn mb_emit_indexed_module(m int, main_off int, main_len int,
     if (mb_worker_parent_alive() == 0) { return -1 }
     let lower_stats lower.CheckedLowerStats
     // 全冷构建不写函数级缓存（PC3）：cache_out 传空，capture 与 firc_commit 同跳。
-    let cache_out_p *ir.IRFunctionCacheSet = gs.c_firc_write_off != 0 ?
+    let cache_out_p *ir.IRFunctionCacheSet = gen.stats().firc_write_off != 0 ?
         0.to_type(*ir.IRFunctionCacheSet) : &cache_out
     // LLVM 后端：受检快照 → 模块 IR（可复用函数 IR）→ LLVM 文本 → 内嵌桥发布对象。
     let emitted int = mb_llvm_emit_module(m, main_off, main_len, &cache_in,
         cache_out_p, env_key, &lower_stats, gen.arr_cstr(&firc_dir[0]),
         check_cache_on != 0 ? check_env : 0)
-    gs.c_stats_ir_functions += lower_stats.hits + lower_stats.misses
-    gs.c_stats_ir_cache_hits += lower_stats.hits
-    gs.c_stats_ir_cache_misses += lower_stats.misses
-    gs.c_stats_ir_lowered += lower_stats.lowered
-    if (emitted == 0 && gs.task.c_test_mode == 0 && cache_out_p != 0) {
+    gen.stats().ir_functions += lower_stats.hits + lower_stats.misses
+    gen.stats().ir_cache_hits += lower_stats.hits
+    gen.stats().ir_cache_misses += lower_stats.misses
+    gen.stats().ir_lowered += lower_stats.lowered
+    if (emitted == 0 && tk.c_test_mode == 0 && cache_out_p != 0) {
         firc_commit(gen.arr_cstr(&firc_dir[0]), &cache_out)
     }
     ir.ir_function_cache_set_release(&cache_in)

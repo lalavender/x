@@ -215,10 +215,8 @@ fn llvm_preflight(unit *ir.IRModule) int {
             if (symbol.defined == 0) {
                 return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持未定义全局")
             }
-            // 模块聚合编号与函数私有指针变体重叠；全局按原始字节发射，单独核对对象类型。
-            if (kind == ir.IR_TY_F32 || kind == ir.IR_TY_F64) {
-                return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持浮点全局")
-            }
+            // 全局对象按原始字节发射（llvm_globals），浮点位型不需要单独的类型分支：
+            // 初始化字节已由 lowering 写入 global.data，读取端按 IR_TY_F32/F64 LOAD。
         } else if (kind > ir.IR_TY_PTR && ir.ir_float_type(kind) == 0
             && !(symbol.abi == ir.IR_ABI_YH_LLVM_V1
                 && kind >= ir.IR_MODULE_TY_STRUCT && kind <= ir.IR_MODULE_TY_SLICE)
@@ -406,6 +404,36 @@ fn llvm_signature(unit *ir.IRModule, symbol *ir.IRModuleSymbol, out *LLVMOutput,
     llvm_byte(out, ')')
 }
 
+// llvm_elf_sections：ELF 目标是否按函数/全局拆 section。
+//
+// Mach-O 的 -dead_strip 按符号原子回收，不需要拆 section；ELF 的 --gc-sections
+// 是**section 粒度**，不拆就只能整模块丢弃，等于没有回收。因此 ELF 下每个函数
+// 与每个全局各自一个 section（等价 -ffunction-sections/-fdata-sections）。
+fn llvm_elf_sections(unit *ir.IRModule) int {
+    // 目标 key 见 ir_module_target_expected：1/2 = Linux（ELF），3/4 = Darwin（Mach-O）。
+    let key int = unit.target.key
+    return key == 1 || key == 2 ? 1 : 0
+}
+
+// llvm_section_name：把符号名转成 section 名后缀。
+// mangling 只用到 [A-Za-z0-9_$] 与全局的 ".LDn"：$ → _S、. → _D 后仍然唯一，
+// 且只含 ELF 允许的字符。
+fn llvm_section_name(out *LLVMOutput, prefix *char, name *char) void {
+    llvm_text(out, prefix)
+    let i int = 0
+    for name[i] != 0 {
+        let ch int = name[i].to_type(int)
+        if (ch == '$'.to_type(int)) {
+            llvm_text(out, "_S")
+        } else if (ch == '.'.to_type(int)) {
+            llvm_text(out, "_D")
+        } else {
+            llvm_byte(out, ch.to_type(u8))
+        }
+        i += 1
+    }
+}
+
 // llvm_globals：无重定位对象保持字节数组；有重定位对象按精确偏移发射 packed
 // 字节段/指针段，保留布局填充、链接可变性与显式对齐，不写入旧数据标签数值。
 fn llvm_globals(unit *ir.IRModule, out *LLVMOutput, live *u8) void {
@@ -425,6 +453,12 @@ fn llvm_globals(unit *ir.IRModule, out *LLVMOutput, live *u8) void {
                 llvm_data_parts(unit, &global, out, 0); llvm_byte(out, ' ')
                 llvm_data_parts(unit, &global, out, 1)
             }
+            if (llvm_elf_sections(unit) != 0) {
+                llvm_text(out, ", section \"")
+                llvm_section_name(out, symbol.mutable != 0 ? ".data." : ".rodata.",
+                    symbol.name)
+                llvm_text(out, "\"")
+            }
             llvm_text(out, ", align "); llvm_number(out, global.align.to_type(u64))
             llvm_byte(out, '\n'); llvm_map_end(out, map)
         }
@@ -435,7 +469,14 @@ fn llvm_globals(unit *ir.IRModule, out *LLVMOutput, live *u8) void {
 // llvm_emit_module：只消费经过 verifier 的封闭模块；全量预检后用私有临时输出构建。
 // 成功释放旧输出并一次性转移所有权；失败保持调用方 out 原值，绝不调用旧 ARM 后端。
 pub fn llvm_emit_module(unit *ir.IRModule, target *gen.TargetInfo, out *LLVMOutput) int {
-    if (out == 0 || ir.ir_module_verify(unit) != 0) { return gen.fail("LLVM 模块未通过 IR verifier") }
+    // PL1d2：这里原本再跑一次完整 ir_module_verify。但每个模块到达后端之前都已由
+    // 生产者验证过（lowering 提交前 verifies / ir_module_deserialize 的装载路径），
+    // 同一份 IR 在一个构建里被完整 verify **两次**——实测函数体校验累计 5.33 s，而
+    // lowering 侧只记到 2.72 s。这里只留廉价的结构前置检查；语义校验由生产者负责，
+    // 发射前的 llvm_preflight / llvm_target_same 仍会拒绝结构不完整的模块。
+    if (out == 0 || ir.ir_module_sealed(unit) == 0) {
+        return gen.fail("LLVM 模块未通过 IR verifier")
+    }
     if (llvm_target_same(unit, target) == 0) { return llvm_reject(unit, 0, 0, "完整目标身份不一致或平台尚不支持") }
     if (llvm_preflight(unit) != 0) { return -1 }
     let temporary LLVMOutput

@@ -1,5 +1,6 @@
-module build
+module link
 import gen
+import proj
 import backend
 
 // yh_win_spawn_link：Windows 侧「跑一次 lld 链接子进程」的包装
@@ -10,7 +11,7 @@ import backend
 // windows_link.yh —— Windows/x64（PE/COFF）链接：内嵌 lld 的 WinLink 驱动（W1-5）
 //
 // 与 darwin_link.yh 同层（平台链接配置 + 一次链接的执行），由 link_cache.yh 的
-// mb_link 按目标分派。三条硬约束：
+// mb_link 各阶段按目标分派（use_coff）。本文件因此属于 link 模块。三条硬约束：
 //
 //   1. **零 CRT 用户程序**：不 `/defaultlib` 任何库；运行时由
 //      backend/llvm_windows_runtime.yh 自己发射（HeapAlloc/WriteFile）。
@@ -34,27 +35,27 @@ import backend
 // → 同级的 tmp/llvm-migration/windows-sdk/lib（tools/windows-sdk.py 的默认 --out）
 // → <exe>/windows-sdk/lib（安装形态）。判定条件是**真的存在 kernel32.lib**。
 fn mb_windows_sdk_lib_dir(out *u8, capacity int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let env_off int = -1
     let env_len int = 0
-    if (pj_env_fetch("YH_WINDOWS_SDK", &env_off, &env_len) != 0) { return -1 }
+    if (proj.env_fetch("YH_WINDOWS_SDK", &env_off, &env_len) != 0) { return -1 }
     if (env_len > 0) {
         let n int = 0
         let k int = 0
         for k < env_len {
             if (n + 2 >= capacity) { return gen.fail("YH_WINDOWS_SDK 路径过长") }
-            out[n] = gs.task.np_data[env_off + k]
+            out[n] = tk.np_data[env_off + k]
             n += 1
             k += 1
         }
         n = gen.append_str(out, n, "/lib")
         out[n] = 0
-        if (pj_file_exists(gen.arr_cstr(out)) != 0) {
+        if (proj.file_exists(gen.arr_cstr(out)) != 0) {
             let probe [1200]u8
             let pn int = gen.append_str(&probe[0], 0, gen.arr_cstr(out))
             let pn2 int = gen.append_str(&probe[0], pn, "/kernel32.lib")
             probe[pn2] = 0
-            if (pj_file_exists(gen.arr_cstr(&probe[0])) != 0) { return 0 }
+            if (proj.file_exists(gen.arr_cstr(&probe[0])) != 0) { return 0 }
         }
         return gen.fail("YH_WINDOWS_SDK 下没有 lib/kernel32.lib：先跑 python3 tools/windows-sdk.py generate")
     }
@@ -62,8 +63,8 @@ fn mb_windows_sdk_lib_dir(out *u8, capacity int) int {
     // 宿主路径可能是 Windows 反斜杠（`C:\dir\yh`）：两种分隔符都算。
     let slash int = -1
     let i int = 0
-    for c_argv0[i] != 0 {
-        if (c_argv0[i] == '/' || c_argv0[i] == 92) { slash = i }
+    for argv0()[i] != 0 {
+        if (argv0()[i] == '/' || argv0()[i] == 92) { slash = i }
         i += 1
     }
     let prefixes [3]*char
@@ -76,7 +77,7 @@ fn mb_windows_sdk_lib_dir(out *u8, capacity int) int {
             let n int = 0
             let k int = 0
             for k <= slash {
-                out[n] = c_argv0[k].to_type(u8)
+                out[n] = argv0()[k].to_type(u8)
                 n += 1
                 k += 1
             }
@@ -92,7 +93,7 @@ fn mb_windows_sdk_lib_dir(out *u8, capacity int) int {
             let pn int = gen.append_str(&probe[0], 0, gen.arr_cstr(out))
             let pn2 int = gen.append_str(&probe[0], pn, "/kernel32.lib")
             probe[pn2] = 0
-            if (pj_file_exists(gen.arr_cstr(&probe[0])) != 0) { return 0 }
+            if (proj.file_exists(gen.arr_cstr(&probe[0])) != 0) { return 0 }
         }
         which += 1
     }
@@ -119,10 +120,10 @@ fn mb_windows_link_inputs(import_lib *u8, lib_cap int, chkstk_obj *u8, obj_cap i
 }
 
 // mb_lld_windows_enabled：Windows/x64 目标且当前 yh 内嵌 lld 时启用进程内 COFF 链接。
-fn mb_lld_windows_enabled() int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_target.os != gen.TARGET_OS_WINDOWS
-        || gs.c_target.arch != gen.TARGET_ARCH_X64) {
+pub fn mb_lld_windows_enabled() int {
+    let tk *gen.TaskCtx = gen.task()
+    if (proj.cfg().target.os != gen.TARGET_OS_WINDOWS
+        || proj.cfg().target.arch != gen.TARGET_ARCH_X64) {
         return 0
     }
     let identity *char = backend.llvm_lld_identity()
@@ -177,27 +178,27 @@ fn mb_hash_coff_identity(hash *u64, import_lib *char, chkstk_obj *char) int {
     if (identity == 0 || identity[0] == 0) { return gen.fail("内嵌 lld 不可用") }
     let i int = 0
     for identity[i] != 0 {
-        mb_fnv(hash, identity[i].to_type(u8))
+        proj.fnv(hash, identity[i].to_type(u8))
         i += 1
     }
-    mb_fnv(hash, 0)
+    proj.fnv(hash, 0)
     let template *char = "lld-link -flavor link /nologo /Brepro /nodefaultlib /subsystem:console /entry:mainCRTStartup /alternatename:exit=ExitProcess /alternatename:_Exit=ExitProcess /alternatename:__chkstk=__yh_chkstk /alternatename:mainCRTStartup=__yh_zero_crt_start /alternatename:usleep=__yh_usleep"
     i = 0
     for template[i] != 0 {
-        mb_fnv(hash, template[i].to_type(u8))
+        proj.fnv(hash, template[i].to_type(u8))
         i += 1
     }
-    mb_fnv(hash, 0)
+    proj.fnv(hash, 0)
     i = 0
     for import_lib[i] != 0 {
-        mb_fnv(hash, import_lib[i].to_type(u8))
+        proj.fnv(hash, import_lib[i].to_type(u8))
         i += 1
     }
-    mb_fnv(hash, 0)
-    if (mb_hash_file(hash, import_lib) != 0) {
+    proj.fnv(hash, 0)
+    if (proj.hash_file(hash, import_lib) != 0) {
         return gen.fail_path("无法读取 Windows 导入库: ", import_lib)
     }
-    if (mb_hash_file(hash, chkstk_obj) != 0) {
+    if (proj.hash_file(hash, chkstk_obj) != 0) {
         return gen.fail_path("无法读取 Windows 栈探测桩: ", chkstk_obj)
     }
     return 0
@@ -212,8 +213,8 @@ pub fn mb_coff_link_child(path *char) int {
     if (gen.read_source(path) != 0) {
         return gen.fail_path("无法读取 COFF 链接响应文件: ", path)
     }
-    let gs *gen.GenState = gen.G()
-    let n int = gs.task.c_src_len
+    let tk *gen.TaskCtx = gen.task()
+    let n int = tk.c_src_len
     if (n <= 0) { return gen.fail("COFF 链接响应文件为空") }
     let cap int = n / 2 + 4
     let args **char = gen.alloc((cap * sizeof(*char)).to_type(u64)).to_type(**char)
@@ -222,10 +223,10 @@ pub fn mb_coff_link_child(path *char) int {
     let start int = 0
     let i int = 0
     for i < n {
-        if (gs.task.c_src[i] == '\n') {
-            gs.task.c_src[i] = 0
+        if (tk.c_src[i] == '\n') {
+            tk.c_src[i] = 0
             if (i > start) {
-                args[count] = (gs.task.c_src + start).to_type(*char)
+                args[count] = (tk.c_src + start).to_type(*char)
                 count += 1
             }
             start = i + 1
@@ -253,10 +254,32 @@ pub fn mb_coff_link_child(path *char) int {
     return 0
 }
 
+// mb_coff_link_single：单文件链接的 COFF 入口（`yh file.yh -o out`）。
+// 装配固定前缀 + 一个对象后交给链接 worker；build 模块只调用这一个窄口，
+// 不直接拼 lld argv（前缀/导入库/栈桩属 link 的实现细节）。
+pub fn mb_coff_link_single(object *char, out_path *char) int {
+    let import_lib [1200]u8
+    let chkstk_obj [1200]u8
+    if (mb_windows_link_inputs(&import_lib[0], 1200, &chkstk_obj[0], 1200) != 0) {
+        return -1
+    }
+    let out_arg [900]u8
+    let oan int = gen.append_str(&out_arg[0], 0, "/out:")
+    oan = gen.append_str(&out_arg[0], oan, out_path)
+    out_arg[oan] = 0
+    let coff_argv [24]*char
+    let cn int = mb_coff_link_prefix(&coff_argv[0], gen.arr_cstr(&out_arg[0]),
+        gen.arr_cstr(&import_lib[0]), gen.arr_cstr(&chkstk_obj[0]))
+    if (cn < 0) { return -1 }
+    coff_argv[cn] = object
+    cn += 1
+    return mb_coff_link_worker(&coff_argv[0], cn, out_path)
+}
+
 // mb_coff_write_rsp：把 lld argv 写成响应文件（每行一个参数，末尾也留换行）。
 // 参数里出现换行（Windows 路径不允许）时拒绝，避免子进程误拆。
 fn mb_coff_write_rsp(path *char, argv **char, argc int) int {
-    let fd int = mb_open_out(path)
+    let fd int = proj.open_out(path)
     if (fd < 0) { return -1 }
     let failed int = 0
     let i int = 0
@@ -317,12 +340,14 @@ fn mb_coff_link_worker(argv **char, argc int, output *char) int {
             if (mb_coff_write_rsp(gen.arr_cstr(&rsp[0]), argv, argc) != 0) {
                 return gen.fail("无法写 COFF 链接响应文件")
             }
-            if (mb_resolve_self_path() != 0) {
+            // 子进程就是编译器自身：用 link 模块的 argv0 窄口（与 Darwin 一致）。
+            // 相对路径在子进程继承同一 cwd 时同样可用，垫片会把分隔符规范化。
+            if (argv0() == 0 || argv0()[0] == 0) {
                 unlink(gen.arr_cstr(&rsp[0]))
                 return gen.fail("无法解析编译器自身路径")
             }
             let spawn_args [4]*char
-            spawn_args[0] = mb_self_path
+            spawn_args[0] = argv0()
             spawn_args[1] = "--lld-link"
             spawn_args[2] = gen.arr_cstr(&rsp[0])
             spawn_args[3] = 0.to_type(*char)

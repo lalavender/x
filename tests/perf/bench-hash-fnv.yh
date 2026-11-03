@@ -1,0 +1,90 @@
+// 哈希基准：对由 LCG 生成的 n 个字节做 FNV-1a 32 位哈希（argv[1] 控制字节数）。
+// 覆盖异或 + 乘法 + 取模的混合热点；输出 checksum=<哈希值>。
+// FNV 的乘加必须无符号：h、字节与掩码都用 u64，用 % 4294967296 截断到 32 位。
+
+const OFFSET u64 = 2166136261
+const PRIME u64 = 16777619
+const SEED0 i64 = 1013904223
+const WRAP u64 = 4294967296
+
+// parse_count：十进制文本转 int；非法字符视为整体非法，回退 fallback。
+fn parse_count(text *char, fallback int) int {
+    let value int = 0
+    let i int = 0
+    if (text == 0 || text[0] == 0) {
+        return fallback
+    }
+    for text[i] != 0 {
+        // char → u8 → int 显式逐级转换；48/57 是 '0'/'9' 的码位。
+        let c int = text[i].to_type(u8).to_type(int)
+        if (c < 48 || c > 57) {
+            return fallback
+        }
+        value = value * 10 + (c - 48)
+        i += 1
+    }
+    return value
+}
+
+// lcg_next：字节流的唯一来源，保证主循环与自检函数看到同一串字节。
+fn lcg_next(seed i64) i64 {
+    return (seed * 1103515245 + 12345) % 2147483648
+}
+
+// fnv_step：一次 FNV-1a 步进（异或后乘质数，再截断到 32 位）。
+fn fnv_step(h u64, b u64) u64 {
+    return ((h ^ b) * PRIME) % WRAP
+}
+
+// fnv_over：从 SEED0 开始独立重放前 limit 个字节并哈希，用于自检。
+fn fnv_over(limit int) u64 {
+    let h u64 = OFFSET
+    let seed i64 = SEED0
+    let i int = 0
+    for i < limit {
+        seed = lcg_next(seed)
+        let b u64 = ((seed / 65536) % 256).to_type(u64)
+        h = fnv_step(h, b)
+        i += 1
+    }
+    return h
+}
+
+fn main(argc int, argv **char) int {
+    let n int = 36000000
+    if (argc > 1) {
+        let parsed int = parse_count(argv[1], 0)
+        if (parsed > 0) {
+            n = parsed
+        }
+    }
+    let h u64 = OFFSET
+    let seed i64 = SEED0
+    let snapshot u64 = 0
+    let i int = 0
+    for i < n {
+        seed = lcg_next(seed)
+        let b u64 = ((seed / 65536) % 256).to_type(u64)
+        h = fnv_step(h, b)
+        if (i == 1023) {
+            snapshot = h
+        }
+        i += 1
+    }
+    // 自检：32 位截断必须成立，且独立重放前 1024 字节要得到同一个中间值。
+    if (h >= WRAP) {
+        printf("自检失败：哈希超出 32 位\n")
+        return 3
+    }
+    if (n > 1024 && fnv_over(1024) != snapshot) {
+        printf("自检失败：独立重放不一致\n")
+        return 4
+    }
+    // 自检：缺省规模下 checksum 必须等于参照实现（tools/perf-product.py）冻结的值。
+    if (n == 36000000 && h != 331382977) {
+        printf("自检失败：checksum 与期望值不一致\n")
+        return 5
+    }
+    printf("checksum=%llu\n", h)
+    return 0
+}

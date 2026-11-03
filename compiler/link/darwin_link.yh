@@ -1,6 +1,7 @@
-module build
+module link
 import gen
 import backend
+import proj
 
 // DarwinLinkConfig：保存一次编译进程使用的 Darwin SDK 与部署身份；字符串由本模块持有。
 struct DarwinLinkConfig {
@@ -155,7 +156,7 @@ fn cmd_darwin_sdk_settings(root *char, version *u8, identity *u8,
 
 // cmd_darwin_sdk_discover：原生 Darwin 未指定 SDKROOT 时从 xcrun 发现 SDK 路径。
 fn cmd_darwin_sdk_discover(output *u8) int {
-    if (gen.G().c_host_target.os != gen.TARGET_OS_DARWIN) {
+    if (proj.cfg().host_target.os != gen.TARGET_OS_DARWIN) {
         return gen.fail("Darwin 交叉编译必须显式设置 SDKROOT")
     }
     if (cmd_mkdirs("tmp/llvm-migration/darwin-sdk") != 0) {
@@ -190,11 +191,11 @@ fn cmd_darwin_bundle_ok(root *u8) int {
     let n int = gen.append_str(&path[0], 0, gen.arr_cstr(root))
     n = gen.append_str(&path[0], n, "/SDKSettings.json")
     path[n] = 0
-    if (pj_file_exists(gen.arr_cstr(&path[0])) == 0) { return 0 }
+    if (proj.file_exists(gen.arr_cstr(&path[0])) == 0) { return 0 }
     n = gen.append_str(&path[0], 0, gen.arr_cstr(root))
     n = gen.append_str(&path[0], n, "/usr/lib/libSystem.tbd")
     path[n] = 0
-    return pj_file_exists(gen.arr_cstr(&path[0]))
+    return proj.file_exists(gen.arr_cstr(&path[0]))
 }
 
 // cmd_darwin_copy_root：把已校验的候选路径写入调用方缓冲。
@@ -215,7 +216,7 @@ fn cmd_darwin_copy_root(candidate *char, root *u8, length *int) int {
 fn cmd_darwin_bundled_sdk(root *u8, length *int) int {
     let env_off int = -1
     let env_len int = 0
-    if (pj_env_fetch("YH_DARWIN_SDK", &env_off, &env_len) == 0 && env_len > 0) {
+    if (proj.env_fetch("YH_DARWIN_SDK", &env_off, &env_len) == 0 && env_len > 0) {
         if (env_len >= 4096) { return -1 }
         let i int = 0
         for i < env_len {
@@ -229,17 +230,17 @@ fn cmd_darwin_bundled_sdk(root *u8, length *int) int {
     }
     let dir [4096]u8
     let dir_len int = 0
-    if (c_argv0 != 0) {
+    if (argv0() != 0) {
         let slash int = -1
         let i int = 0
-        for c_argv0[i] != 0 {
-            if (c_argv0[i] == '/') { slash = i }
+        for argv0()[i] != 0 {
+            if (argv0()[i] == '/') { slash = i }
             i += 1
         }
         if (slash >= 0) {
             i = 0
             for i <= slash {
-                dir[i] = c_argv0[i].to_type(u8)
+                dir[i] = argv0()[i].to_type(u8)
                 i += 1
             }
             dir_len = slash + 1
@@ -285,16 +286,15 @@ fn cmd_darwin_bundled_sdk(root *u8, length *int) int {
 // 显式值代表用户意图，拼错时即使只 emit asm/object 也应立即失败；未设置时
 // emit-only 路径不因缺少 SDK 而失败。
 fn cmd_darwin_sdk_validate_explicit() int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_target.os != gen.TARGET_OS_DARWIN) { return 0 }
+    if (proj.cfg().target.os != gen.TARGET_OS_DARWIN) { return 0 }
     let root_off int; let root_len int
-    if (pj_env_fetch("SDKROOT", &root_off, &root_len) != 0) {
+    if (proj.env_fetch("SDKROOT", &root_off, &root_len) != 0) {
         return gen.fail("读取 SDKROOT 环境失败")
     }
     if (root_len == 0) { return 0 }
     if (root_len >= 4000) { return gen.fail("SDKROOT 路径过长") }
     let root [4096]u8
-    let source *char = pj_pool_str(root_off)
+    let source *char = proj.pool_str(root_off)
     let i int = 0
     for i < root_len { root[i] = source[i].to_type(u8); i += 1 }
     root[root_len] = 0
@@ -314,15 +314,14 @@ fn cmd_darwin_sdk_validate_explicit() int {
 // cmd_darwin_min_os_configure：解析并校验部署版本，不要求 SDK 存在。
 // 编译/`--emit-asm`/`--emit-llvm` 只需要目标 minOS；SDK 仅链接期需要。
 fn cmd_darwin_min_os_configure() int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_target.os != gen.TARGET_OS_DARWIN) { return 0 }
+    if (proj.cfg().target.os != gen.TARGET_OS_DARWIN) { return 0 }
     if (cmd_darwin_link_config.min_ready != 0) { return 0 }
 
     let min_off int; let min_len int
-    if (pj_env_fetch("MACOSX_DEPLOYMENT_TARGET", &min_off, &min_len) != 0) {
+    if (proj.env_fetch("MACOSX_DEPLOYMENT_TARGET", &min_off, &min_len) != 0) {
         return gen.fail("读取 MACOSX_DEPLOYMENT_TARGET 环境失败")
     }
-    let min_source *char = min_len > 0 ? pj_pool_str(min_off) : "14.0.0"
+    let min_source *char = min_len > 0 ? proj.pool_str(min_off) : "14.0.0"
     if (min_len == 0) { min_len = 6 }
     if (cmd_darwin_version(min_source.to_type(*u8), min_len,
             &cmd_darwin_link_config.min_os[0],
@@ -340,20 +339,19 @@ fn cmd_darwin_min_os_configure() int {
 // cmd_darwin_link_configure：按会话快照 SDKROOT 与 MACOSX_DEPLOYMENT_TARGET。
 // SDKROOT 有值时绝不回退 xcrun；只有链接/缓存身份路径需要本函数。
 fn cmd_darwin_link_configure() int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_target.os != gen.TARGET_OS_DARWIN) { return 0 }
+    if (proj.cfg().target.os != gen.TARGET_OS_DARWIN) { return 0 }
     if (cmd_darwin_link_config.ready != 0) { return 0 }
     if (cmd_darwin_min_os_configure() != 0) { return -1 }
 
     let root_off int; let root_len int
-    if (pj_env_fetch("SDKROOT", &root_off, &root_len) != 0) {
+    if (proj.env_fetch("SDKROOT", &root_off, &root_len) != 0) {
         return gen.fail("读取 SDKROOT 环境失败")
     }
     let root [4096]u8
     let root_length int = 0
     if (root_len > 0) {
         if (root_len >= 4000) { return gen.fail("SDKROOT 路径过长") }
-        let source *char = pj_pool_str(root_off)
+        let source *char = proj.pool_str(root_off)
         let i int = 0
         for i < root_len { root[i] = source[i].to_type(u8); i += 1 }
         root[root_len] = 0
@@ -364,7 +362,7 @@ fn cmd_darwin_link_configure() int {
         let bundle_length int = 0
         if (cmd_darwin_bundled_sdk(&root[0], &bundle_length) == 0) {
             root_length = bundle_length
-        } else if (gs.c_host_target.os == gen.TARGET_OS_DARWIN) {
+        } else if (proj.cfg().host_target.os == gen.TARGET_OS_DARWIN) {
             root_length = cmd_darwin_sdk_discover(&root[0])
             if (root_length <= 0) { return -1 }
         } else {
@@ -392,7 +390,7 @@ fn cmd_darwin_link_configure() int {
 
 // cmd_darwin_min_os：返回已校验、由会话配置持有的 LLVM v2 部署版本字符串。
 // 不要求 SDK：asm/object 发射可先于链接、也可在无 SDK 的交叉主机完成。
-fn cmd_darwin_min_os() *char {
+pub fn cmd_darwin_min_os() *char {
     if (cmd_darwin_min_os_configure() != 0) { return 0 }
     return (&cmd_darwin_link_config.min_os[0]).to_type(*char)
 }
@@ -425,7 +423,7 @@ fn mb_macho_u32(data *u8, offset int) int {
 
 // mb_darwin_executable_matches：验证 ld64.lld 输出是 arm64 可执行文件，且部署版本与签名完整。
 // 检查 Mach-O load command 字节，避免仅凭 magic 或外部工具成功码发布错误目标。
-fn mb_darwin_executable_matches(path *char) int {
+pub fn mb_darwin_executable_matches(path *char) int {
     let tk *gen.TaskCtx = gen.task()
     if (gen.read_source(path) != 0 || tk.c_src_len < 32) { return 0 }
     let data *u8 = tk.c_src
@@ -493,20 +491,149 @@ fn mb_darwin_executable_matches(path *char) int {
 
 // mb_lld_darwin_enabled：仅在 Darwin/ARM64 LLVM 目标且内嵌 lld 可用时走生产 Mach-O 链接。
 // 用户显式指定 YH_CC 时保持独立的外部链接路径，不覆盖其工具选择。
-fn mb_lld_darwin_enabled() int {
-    let gs *gen.GenState = gen.G()
-    if (gs.c_target.os != gen.TARGET_OS_DARWIN
-        || gs.c_target.arch != gen.TARGET_ARCH_ARM64) {
+pub fn mb_lld_darwin_enabled() int {
+    if (proj.cfg().target.os != gen.TARGET_OS_DARWIN
+        || proj.cfg().target.arch != gen.TARGET_ARCH_ARM64) {
         return 0
     }
     let override_off int = -1
     let override_len int = 0
-    if (pj_env_fetch("YH_CC", &override_off, &override_len) == 0
+    if (proj.env_fetch("YH_CC", &override_off, &override_len) == 0
         && override_len > 0) {
         return 0
     }
     let identity *char = backend.llvm_lld_identity()
     if (identity == 0 || identity[0] == 0) { return 0 }
+    return 1
+}
+
+// rmdir(path *char) int —— 仅用于清理 Darwin 链接暂存目录（prelude 未登记该符号）。
+@[extern] fn rmdir(path *char) int
+
+// mb_macho_tmp_split：为 Darwin/ARM64 链接准备「暂存子目录 + 最终 basename」路径。
+//
+// lld 的 -adhoc_codesign 用**输出文件的 basename** 生成 codesign identifier。
+// 若沿用 ELF 那套 `<out>.yh-tmp.<pid>` 当 -o，identifier 就带上 pid，同一源码
+// 两次构建的产物大小与哈希都不同（RB5），发行可比性被破坏。这里把临时产物放进
+// `<out 所在目录>/.yh-tmp.<pid>/` 并沿用最终 basename：identifier 只取决于产物
+// 名；子目录按 pid 隔离并发构建；子目录与产物同文件系统，rename 仍是原子的。
+//
+// out_path：最终产物路径（相对/绝对均可）；dir_out/file_out 由调用方提供缓冲。
+// 返回 0 成功；-1 表示入参为空、pid 异常或路径超出缓冲区（调用方给带上下文的错误）。
+pub fn mb_macho_tmp_split(out_path *char, dir_cap int, dir_out *u8,
+    file_cap int, file_out *u8) int {
+    if (out_path == 0 || dir_out == 0 || file_out == 0) { return -1 }
+    let total int = strlen(out_path).to_type(int)
+    if (total <= 0) { return -1 }
+    // 最后一个 '/' 之后是 basename；dir 前缀保留末尾的 '/'。
+    let cut int = 0
+    let i int = 0
+    for i < total {
+        if (out_path[i] == '/') { cut = i + 1 }
+        i += 1
+    }
+    let pid int = getpid()
+    if (pid <= 0) { return -1 }
+    let pid_digits int = 1
+    let scaled int = pid
+    for scaled >= 10 {
+        scaled = scaled / 10
+        pid_digits += 1
+    }
+    let marker_len int = 9   // "/.yh-tmp." 的字节数
+    let dir_len int = cut + marker_len + pid_digits
+    let file_len int = dir_len + 1 + (total - cut)
+    if (dir_len >= dir_cap || file_len >= file_cap) { return -1 }
+    let n int = 0
+    i = 0
+    for i < cut {
+        dir_out[n] = out_path[i].to_type(u8)
+        n += 1
+        i += 1
+    }
+    n = gen.append_str(dir_out, n, "/.yh-tmp.")
+    n = gen.append_int(dir_out, n, pid)
+    dir_out[n] = 0
+    i = 0
+    for i < n {
+        file_out[i] = dir_out[i]
+        i += 1
+    }
+    file_out[i] = '/'
+    i += 1
+    let j int = cut
+    for j < total {
+        file_out[i] = out_path[j].to_type(u8)
+        i += 1
+        j += 1
+    }
+    file_out[i] = 0
+    return 0
+}
+
+// mb_macho_link_stage：为 Darwin raw lld 链接准备「暂存子目录 + 暂存产物路径」。
+//
+// 返回 1 = 暂存目录已就绪（file 为 `<dir>/<basename>`）；返回 -1 = 已写诊断
+// （产物路径过长或建目录失败）。调用方发布或失败后必须调用
+// mb_macho_tmp_discard 收尾，否则会留下空目录。
+pub fn mb_macho_link_stage(out_path *char, dir *u8, dir_cap int,
+    file *u8, file_cap int) int {
+    if (mb_macho_tmp_split(out_path, dir_cap, dir, file_cap, file) != 0) {
+        return gen.fail_path("Darwin 链接产物路径过长: ", out_path)
+    }
+    if (mkdir(gen.arr_cstr(dir), 493) != 0) {
+        // pid 复用：上一轮被强杀的进程可能留下同名暂存目录/文件，
+        // 清掉残留后再试一次，避免把崩溃残骸当成链接错误。
+        unlink(gen.arr_cstr(file))
+        rmdir(gen.arr_cstr(dir))
+        if (mkdir(gen.arr_cstr(dir), 493) != 0) {
+            return gen.fail_path("无法创建 Darwin 链接暂存目录: ", out_path)
+        }
+    }
+    return 1
+}
+
+// mb_macho_tmp_discard：收尾一次链接的暂存位置。
+//
+// stage 为 0 表示调用方走非 raw lld 路径（Linux 的 `<out>.yh-tmp.<pid>` 文件），
+// 只删文件；stage 非 0 表示 Darwin 暂存子目录，删残余产物后再移除目录，
+// 失败路径因此不会留下空目录。所有错误都被忽略：收尾不改变链接结论。
+pub fn mb_macho_tmp_discard(stage int, dir *u8, file *char) void {
+    if (file != 0 && file[0] != 0) { unlink(file) }
+    if (stage != 0 && dir != 0 && dir[0] != 0) { rmdir((&dir[0]).to_type(*char)) }
+}
+
+// mb_darwin_strip_enabled：是否给 ld64.lld 加 -x（剥离局部符号表，缺省关）。
+// 只用于 release 打包：删掉局部符号表项（不是代码），实测再省约 3.6%；
+// `YH_LINK_STRIP=1/on/true/yes` 打开。
+fn mb_darwin_strip_enabled() int {
+    let off int = -1
+    let olen int = 0
+    if (proj.env_fetch("YH_LINK_STRIP", &off, &olen) != 0 || olen == 0) { return 0 }
+    let first char = gen.np_cstr(off)[0]
+    if (first == '1' || first == 'y' || first == 'Y' || first == 't' || first == 'T') {
+        return 1
+    }
+    return 0
+}
+
+// mb_darwin_dead_strip_enabled：是否给 ld64.lld 加 -dead_strip（缺省开启）。
+//
+// 缺省开：链接后按符号可达性回收未引用的 stdlib 函数与字符串字面量；
+// 否则「整模块一个对象」的链接粒度会让每个用 fmt 的程序背上整个
+// string/os/sys 闭包（J6-L1 实测 hello 级程序 155,872 B → 89,632 B）。
+// `YH_LINK_DEAD_STRIP=0/off/no/false`（只看首字符 0/n/N/f/F）关闭，用于对照与回退。
+fn mb_darwin_dead_strip_enabled() int {
+    let off int = -1
+    let olen int = 0
+    if (proj.env_fetch("YH_LINK_DEAD_STRIP", &off, &olen) != 0 || olen == 0) {
+        return 1
+    }
+    let first char = gen.np_cstr(off)[0]
+    if (first == '0' || first == 'n' || first == 'N'
+        || first == 'f' || first == 'F') {
+        return 0
+    }
     return 1
 }
 
@@ -520,7 +647,7 @@ fn mb_macho_link_prefix(argv **char, output *char) int {
     let sdk_version *char = cmd_darwin_sdk_version()
     let min_os *char = cmd_darwin_min_os()
     if (sdk_root == 0 || sdk_version == 0 || min_os == 0) { return -1 }
-    let system_hash u64 = mb_hash_init()
+    let system_hash u64 = proj.hash_init()
     if (mb_hash_macho_library(&system_hash, sdk_root, "System", 1) != 0) {
         return -1
     }
@@ -535,6 +662,13 @@ fn mb_macho_link_prefix(argv **char, output *char) int {
     argv[count] = "-syslibroot"; count += 1
     argv[count] = sdk_root; count += 1
     argv[count] = "-pie"; count += 1
+    // J6-L1/L4：死代码回收与（可选）局部符号表剥离；两者都参与链接键。
+    if (mb_darwin_dead_strip_enabled() != 0) {
+        argv[count] = "-dead_strip"; count += 1
+    }
+    if (mb_darwin_strip_enabled() != 0) {
+        argv[count] = "-x"; count += 1
+    }
     argv[count] = "-adhoc_codesign"; count += 1
     argv[count] = "-o"; count += 1
     argv[count] = output; count += 1
@@ -567,7 +701,7 @@ fn mb_macho_link_worker(argv **char, argc int) int {
 }
 
 // mb_macho_link_single：链接一个 Darwin/ARM64 对象，供单文件 LLVM 命令共用项目参数。
-fn mb_macho_link_single(object *char, output *char) int {
+pub fn mb_macho_link_single(object *char, output *char) int {
     if (object == 0 || output == 0) { return gen.fail("Darwin 单文件链接输入无效") }
     let argv [20]*char
     let count int = mb_macho_link_prefix(&argv[0], output)
@@ -670,13 +804,13 @@ fn mb_macho_tbd_hash_stub(hash *u64, sdk_root *char, name *char, depth int) int 
     } else {
         path[pn] = 0
     }
-    if (stripped != 0 && pj_file_exists(gen.arr_cstr(&path[0])) != 0) {
+    if (stripped != 0 && proj.file_exists(gen.arr_cstr(&path[0])) != 0) {
         // 用 stub 内容与它的解析路径共同入键：内容变化必须失效，同内容
         // 不同路径也保持可区分（便于诊断 SDK 切换）。
         let pi int = 0
-        for path[pi] != 0 { mb_fnv(hash, path[pi]); pi += 1 }
-        mb_fnv(hash, 0)
-        if (mb_hash_file(hash, gen.arr_cstr(&path[0])) != 0) { return -1 }
+        for path[pi] != 0 { proj.fnv(hash, path[pi]); pi += 1 }
+        proj.fnv(hash, 0)
+        if (proj.hash_file(hash, gen.arr_cstr(&path[0])) != 0) { return -1 }
         return mb_macho_tbd_closure(hash, sdk_root, gen.arr_cstr(&path[0]), depth + 1)
     }
     // 回退到原名（可能是 .tbd 直接给出，或 SDK 内放了真实 .dylib/.a）。
@@ -687,13 +821,13 @@ fn mb_macho_tbd_hash_stub(hash *u64, sdk_root *char, name *char, depth int) int 
         pn = gen.append_str(&path[0], pn, name)
     }
     path[pn] = 0
-    if (pj_file_exists(gen.arr_cstr(&path[0])) != 0) {
+    if (proj.file_exists(gen.arr_cstr(&path[0])) != 0) {
         let pi int = 0
-        for path[pi] != 0 { mb_fnv(hash, path[pi]); pi += 1 }
-        mb_fnv(hash, 0)
-        return mb_hash_file(hash, gen.arr_cstr(&path[0]))
+        for path[pi] != 0 { proj.fnv(hash, path[pi]); pi += 1 }
+        proj.fnv(hash, 0)
+        return proj.hash_file(hash, gen.arr_cstr(&path[0]))
     }
-    mb_fnv(hash, 255)
+    proj.fnv(hash, 255)
     return 0
 }
 
@@ -724,8 +858,8 @@ fn mb_hash_macho_library(hash *u64, sdk_root *char, name *char,
     required int) int {
     if (sdk_root == 0 || name == 0) { return gen.fail("Darwin 链接库身份无效") }
     let i int = 0
-    for name[i] != 0 { mb_fnv(hash, name[i].to_type(u8)); i += 1 }
-    mb_fnv(hash, 0)
+    for name[i] != 0 { proj.fnv(hash, name[i].to_type(u8)); i += 1 }
+    proj.fnv(hash, 0)
     let path [4096]u8
     let stem int = 0
     stem = gen.append_str(&path[0], stem, sdk_root)
@@ -737,13 +871,13 @@ fn mb_hash_macho_library(hash *u64, sdk_root *char, name *char,
     for suffix < 3 {
         let length int = gen.append_str(&path[0], stem, suffixes[suffix])
         path[length] = 0
-        if (pj_file_exists(gen.arr_cstr(path)) != 0) {
+        if (proj.file_exists(gen.arr_cstr(path)) != 0) {
             let j int = 0
             for gen.arr_cstr(path)[j] != 0 {
-                mb_fnv(hash, gen.arr_cstr(path)[j].to_type(u8)); j += 1
+                proj.fnv(hash, gen.arr_cstr(path)[j].to_type(u8)); j += 1
             }
-            mb_fnv(hash, 0)
-            if (mb_hash_file(hash, gen.arr_cstr(path)) != 0) { return -1 }
+            proj.fnv(hash, 0)
+            if (proj.hash_file(hash, gen.arr_cstr(path)) != 0) { return -1 }
             // 只有动态 stub 有 reexport 语义；静态 .a 内容已完整入键。
             if (suffix == 0) {
                 return mb_macho_tbd_closure(hash, sdk_root,
@@ -756,31 +890,34 @@ fn mb_hash_macho_library(hash *u64, sdk_root *char, name *char,
     if (required != 0) {
         return gen.fail_path("Darwin SDK 缺少链接库: ", name)
     }
-    mb_fnv(hash, 255)
+    proj.fnv(hash, 255)
     return 0
 }
 
 // mb_hash_macho_identity：为 Darwin 最终链接键加入 lld、SDK/minOS 与系统库身份。
 fn mb_hash_macho_identity(hash *u64, projects *int,
     project_count int) int {
-    let gs *gen.GenState = gen.G()
+    let tk *gen.TaskCtx = gen.task()
     let identity *char = backend.llvm_lld_identity()
     let sdk_root *char = cmd_darwin_sdk_root()
     let sdk_identity *char = cmd_darwin_sdk_identity()
     let min_os *char = cmd_darwin_min_os()
+    // 链接参数里由环境控制的两项也进键：-dead_strip 缺省开、-x 缺省关。
+    proj.fnv(hash, mb_darwin_dead_strip_enabled().to_type(u8))
+    proj.fnv(hash, mb_darwin_strip_enabled().to_type(u8))
     if (identity == 0 || identity[0] == 0 || sdk_root == 0
         || sdk_identity == 0 || min_os == 0) {
         return gen.fail("当前编译器缺少有效的 Darwin LLVM 链接身份")
     }
     let i int = 0
-    for identity[i] != 0 { mb_fnv(hash, identity[i].to_type(u8)); i += 1 }
-    mb_fnv(hash, 0)
+    for identity[i] != 0 { proj.fnv(hash, identity[i].to_type(u8)); i += 1 }
+    proj.fnv(hash, 0)
     i = 0
-    for sdk_identity[i] != 0 { mb_fnv(hash, sdk_identity[i].to_type(u8)); i += 1 }
-    mb_fnv(hash, 0)
+    for sdk_identity[i] != 0 { proj.fnv(hash, sdk_identity[i].to_type(u8)); i += 1 }
+    proj.fnv(hash, 0)
     i = 0
-    for min_os[i] != 0 { mb_fnv(hash, min_os[i].to_type(u8)); i += 1 }
-    mb_fnv(hash, 0)
+    for min_os[i] != 0 { proj.fnv(hash, min_os[i].to_type(u8)); i += 1 }
+    proj.fnv(hash, 0)
     // 自举闭包来自构建机（YH_LLVM_SELFHOST_FLAGS 文件；过渡种子用桥内常量）：
     // 参数集合变化必须换链接键，否则会命中旧闭包链接出的产物。
     if (mb_darwin_selfhost_enabled() != 0) {
@@ -794,38 +931,38 @@ fn mb_hash_macho_identity(hash *u64, projects *int,
             if (flag == 0) { return gen.fail("自举链接闭包参数无效") }
             let sj int = 0
             for flag[sj] != 0 {
-                mb_fnv(hash, flag[sj].to_type(u8))
+                proj.fnv(hash, flag[sj].to_type(u8))
                 sj += 1
             }
-            mb_fnv(hash, 0)
+            proj.fnv(hash, 0)
             si += 1
         }
-        mb_fnv(hash, 253)
+        proj.fnv(hash, 253)
     }
     let settings [4096]u8
     i = gen.append_str(&settings[0], 0, sdk_root)
     i = gen.append_str(&settings[0], i, "/SDKSettings.json")
     settings[i] = 0
-    if (mb_hash_file(hash, gen.arr_cstr(settings)) != 0
+    if (proj.hash_file(hash, gen.arr_cstr(settings)) != 0
         || mb_hash_macho_library(hash, sdk_root, "System", 1) != 0) {
         return -1
     }
     let environment_off int = -1
     let environment_len int = 0
-    if (pj_env_fetch("LIBRARY_PATH", &environment_off, &environment_len) != 0) {
+    if (proj.env_fetch("LIBRARY_PATH", &environment_off, &environment_len) != 0) {
         return -1
     }
     i = 0
-    for i < environment_len { mb_fnv(hash, gs.task.np_data[environment_off + i]); i += 1 }
-    mb_fnv(hash, 254)
+    for i < environment_len { proj.fnv(hash, tk.np_data[environment_off + i]); i += 1 }
+    proj.fnv(hash, 254)
     let project_i int = 0
     for project_i < project_count {
         let project int = projects[project_i]
         let library_i int = 0
-        for library_i < gs.p_projs[project].c_lib_n {
-            let library gen.PInput = gs.p_projs[project].c_libs[library_i]
+        for library_i < proj.ctx().projs[project].c_lib_n {
+            let library proj.PInput = proj.ctx().projs[project].c_libs[library_i]
             let name [128]u8
-            let length int = append_bytes_np(&name[0], 0, library.path_off, library.path_len)
+            let length int = gen.append_np(&name[0], 0, library.path_off, library.path_len)
             name[length] = 0
             if (mb_hash_macho_library(hash, sdk_root, gen.arr_cstr(name), 0) != 0) {
                 return -1

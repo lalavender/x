@@ -49,6 +49,165 @@ fn ir_fc_type_equiv(unit *IRModule, current int, mini *IRModule, candidate int,
     return 1
 }
 
+// —— PL1f2：一次合并用的目标模块索引 ——
+//
+// merge 原先对每条记录的每个类型都线性扫目标模块的类型表（结构等价比较），
+// 对每个符号再线性扫符号表；单函数改动的 204 条记录因此是 O(记录 × 模块规模 ×
+// 闭包规模)。索引把「目标模块侧」的扫描降到一次建表，之后按哈希探测、命中再
+// 用原有比较函数确认，语义不变（哈希只用来缩小候选，不做最终判断）。
+struct IRMergeIndex {
+    symbol_slots *int // 名字哈希 → symbol+1；0 表示空
+    symbol_cap int
+    type_slots *int // 结构键 → type+1；0 表示空
+    type_cap int
+}
+
+// ir_merge_cap：开放寻址表容量：≥ 2n 的 2 的幂，最小 8；超限返回 0。
+fn ir_merge_cap(count int) int {
+    let cap int = 8
+    for cap < count * 2 {
+        if (cap > 1073741824) { return 0 }
+        cap *= 2
+    }
+    return cap
+}
+
+// ir_fc_key_u64：把 64 位值并入结构键（FNV-1a）。
+fn ir_fc_key_u64(state u64, value u64) u64 {
+    return (state ^ value) * IR_MODULE_FNV_PRIME
+}
+
+// ir_fc_key_text：把名字并入结构键；失败时保持原状态（保守退化）。
+fn ir_fc_key_text(state u64, text *char) u64 {
+    let h u64 = 0
+    if (ir_module_fnv_text(state, text, &h) != 0) { return state }
+    return h
+}
+
+// ir_fc_target_type_key：目标类型自身的结构键。字段与等价比较覆盖的范围一致：
+// 名字、kind/bits/size/align/count/abi/variadic、field_count、elem、字段(类型,偏移)。
+fn ir_fc_target_type_key(unit *IRModule, index int) u64 {
+    let t IRModuleType = unit.types[index]
+    let h u64 = IR_MODULE_FNV_BASIS
+    h = ir_fc_key_text(h, t.name)
+    h = ir_fc_key_u64(h, t.kind.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.bits.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.size.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.align.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.count.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.abi.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.variadic.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, (t.elem + 1).to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.field_count.to_type(i64).to_type(u64))
+    let fi int = 0
+    for fi < t.field_count {
+        h = ir_fc_key_u64(h, t.fields[fi].type_id.to_type(i64).to_type(u64))
+        h = ir_fc_key_u64(h, t.fields[fi].offset.to_type(i64).to_type(u64))
+        fi += 1
+    }
+    return h
+}
+
+// ir_fc_mini_type_key：迷你类型的结构键——依赖项先经 type_map 映射成目标下标，
+// 这样键与目标类型的键同构。有未映射依赖时返回 -1（调用方退化为线性扫描）。
+fn ir_fc_mini_type_key(mini *IRModule, candidate int, type_map *int,
+    out *u64) int {
+    if (out == 0 || candidate < 0 || candidate >= mini.type_count) { return -1 }
+    let t IRModuleType = mini.types[candidate]
+    let h u64 = IR_MODULE_FNV_BASIS
+    h = ir_fc_key_text(h, t.name)
+    h = ir_fc_key_u64(h, t.kind.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.bits.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.size.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.align.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.count.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.abi.to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.variadic.to_type(i64).to_type(u64))
+    let elem int = t.elem
+    if (elem >= 0) {
+        if (elem >= mini.type_count || type_map[elem] < 0) { return -1 }
+        elem = type_map[elem]
+    }
+    h = ir_fc_key_u64(h, (elem + 1).to_type(i64).to_type(u64))
+    h = ir_fc_key_u64(h, t.field_count.to_type(i64).to_type(u64))
+    let fi int = 0
+    for fi < t.field_count {
+        let field_type int = t.fields[fi].type_id
+        if (field_type < 0 || field_type >= mini.type_count
+            || type_map[field_type] < 0) { return -1 }
+        h = ir_fc_key_u64(h, type_map[field_type].to_type(i64).to_type(u64))
+        h = ir_fc_key_u64(h, t.fields[fi].offset.to_type(i64).to_type(u64))
+        fi += 1
+    }
+    out[0] = h
+    return 0
+}
+
+// ir_merge_index_open：为目标模块建符号/类型索引；规模太小则保持关闭（cap=0）。
+fn ir_merge_index_open(idx *IRMergeIndex, unit *IRModule) int {
+    idx.symbol_slots = 0; idx.symbol_cap = 0
+    idx.type_slots = 0; idx.type_cap = 0
+    if (unit.symbol_count + unit.type_count <= 64) { return 0 }
+    let cap int = ir_merge_cap(unit.symbol_count)
+    if (cap == 0) { return -1 }
+    idx.symbol_cap = cap
+    idx.symbol_slots = malloc((cap * sizeof(int)).to_type(u64)).to_type(*int)
+    if (idx.symbol_slots == 0) { return -1 }
+    let i int = 0
+    for i < cap { idx.symbol_slots[i] = 0; i += 1 }
+    let mask u64 = (cap - 1).to_type(u64)
+    i = 0
+    for i < unit.symbol_count {
+        let h u64 = 0
+        if (ir_module_fnv_text(IR_MODULE_FNV_BASIS, unit.symbols[i].name, &h) != 0) {
+            return -1
+        }
+        let pos u64 = h & mask
+        let placed int = 0
+        for placed == 0 {
+            if (idx.symbol_slots[pos.to_type(int)] == 0) {
+                idx.symbol_slots[pos.to_type(int)] = i + 1
+                placed = 1
+            } else {
+                pos = (pos + 1) & mask
+            }
+        }
+        i += 1
+    }
+    cap = ir_merge_cap(unit.type_count)
+    if (cap == 0) { return -1 }
+    idx.type_cap = cap
+    idx.type_slots = malloc((cap * sizeof(int)).to_type(u64)).to_type(*int)
+    if (idx.type_slots == 0) { return -1 }
+    i = 0
+    for i < cap { idx.type_slots[i] = 0; i += 1 }
+    let tmask u64 = (cap - 1).to_type(u64)
+    i = 0
+    for i < unit.type_count {
+        let h u64 = ir_fc_target_type_key(unit, i)
+        let pos u64 = h & tmask
+        let placed int = 0
+        for placed == 0 {
+            if (idx.type_slots[pos.to_type(int)] == 0) {
+                idx.type_slots[pos.to_type(int)] = i + 1
+                placed = 1
+            } else {
+                pos = (pos + 1) & tmask
+            }
+        }
+        i += 1
+    }
+    return 0
+}
+
+// ir_merge_index_close：释放索引；对未打开（cap=0）的索引安全。
+fn ir_merge_index_close(idx *IRMergeIndex) void {
+    if (idx.symbol_slots != 0) { free(idx.symbol_slots.to_type(*void)) }
+    if (idx.type_slots != 0) { free(idx.type_slots.to_type(*void)) }
+    idx.symbol_slots = 0; idx.symbol_cap = 0
+    idx.type_slots = 0; idx.type_cap = 0
+}
+
 // ir_fc_find_type：在模块类型表中查找结构等价的类型；找不到返回 -1。
 fn ir_fc_find_type(unit *IRModule, mini *IRModule, candidate int,
     type_map *int) int {
@@ -56,6 +215,54 @@ fn ir_fc_find_type(unit *IRModule, mini *IRModule, candidate int,
     for i < unit.type_count {
         if (ir_fc_type_equiv(unit, i, mini, candidate, type_map) != 0) { return i }
         i += 1
+    }
+    return -1
+}
+
+// ir_fc_index_find_type：走索引的类型查找；键不可算（依赖未映射）时退化为线性。
+// 命中仍用 ir_fc_type_equiv 确认，索引只缩小候选范围。
+fn ir_fc_index_find_type(idx *IRMergeIndex, unit *IRModule, mini *IRModule,
+    candidate int, type_map *int) int {
+    if (idx.type_cap == 0) {
+        return ir_fc_find_type(unit, mini, candidate, type_map)
+    }
+    let key u64 = 0
+    if (ir_fc_mini_type_key(mini, candidate, type_map, &key) != 0) {
+        return ir_fc_find_type(unit, mini, candidate, type_map)
+    }
+    let mask u64 = (idx.type_cap - 1).to_type(u64)
+    let pos u64 = key & mask
+    let probe int = 0
+    for probe < idx.type_cap {
+        let slot int = idx.type_slots[pos.to_type(int)]
+        if (slot == 0) { return -1 }
+        if (ir_fc_type_equiv(unit, slot - 1, mini, candidate, type_map) != 0) {
+            return slot - 1
+        }
+        pos = (pos + 1) & mask
+        probe += 1
+    }
+    return -1
+}
+
+// ir_fc_index_find_symbol：走索引的符号名查找；索引关闭时退化为线性。
+fn ir_fc_index_find_symbol(idx *IRMergeIndex, unit *IRModule, name *char) int {
+    if (idx.symbol_cap == 0) { return ir_fc_find_symbol_name(unit, name) }
+    let h u64 = 0
+    if (ir_module_fnv_text(IR_MODULE_FNV_BASIS, name, &h) != 0) {
+        return ir_fc_find_symbol_name(unit, name)
+    }
+    let mask u64 = (idx.symbol_cap - 1).to_type(u64)
+    let pos u64 = h & mask
+    let probe int = 0
+    for probe < idx.symbol_cap {
+        let slot int = idx.symbol_slots[pos.to_type(int)]
+        if (slot == 0) { return -1 }
+        if (ir_module_str_eq(unit.symbols[slot - 1].name, name) != 0) {
+            return slot - 1
+        }
+        pos = (pos + 1) & mask
+        probe += 1
     }
     return -1
 }
@@ -154,13 +361,19 @@ pub fn ir_function_cache_merge(unit *IRModule, data *u8, size int, env_key u64,
     let version u64 = ir_fc_get_u64(data, &cursor)
     let record_env u64 = ir_fc_get_u64(data, &cursor)
     let payload_raw u64 = ir_fc_get_u64(data, &cursor)
+    let payload_fnv u64 = ir_fc_get_u64(data, &cursor)
     if (magic != IR_FUNCTION_CACHE_MAGIC
         || version != IR_FUNCTION_CACHE_VERSION.to_type(u64)
         || record_env != env_key || payload_raw > 0x7FFFFFFFFFFFFFFF) { return 1 }
     let payload_size int = payload_raw.to_type(int)
     if (payload_size != size - IR_FUNCTION_CACHE_HEAD) { return 1 }
+    // PL1f：先按 FNV 校验 payload 完整性。校验和由本进程写出、覆盖全部字节，
+    // 因此通过后可以跳过迷你模块的整段语义 verify（结构/规模/规范编码仍校验）；
+    // 合并后的整模块在 lower 结束时仍会 ir_module_verify，坏记录不会静默通过。
+    if (ir_module_fnv_bytes(IR_MODULE_FNV_BASIS, data + IR_FUNCTION_CACHE_HEAD,
+            payload_size) != payload_fnv) { return 1 }
     let mini IRModule
-    if (ir_module_deserialize(&mini, data + IR_FUNCTION_CACHE_HEAD,
+    if (ir_module_deserialize_trusted(&mini, data + IR_FUNCTION_CACHE_HEAD,
             payload_size) != 0) { return 1 }
     let result int = 1
     if (ir_fc_target_same(&unit.target, &mini.target) == 0
@@ -176,6 +389,12 @@ pub fn ir_function_cache_merge(unit *IRModule, data *u8, size int, env_key u64,
             || ir_module_str_eq(mini.symbols[mini_symbol].name, expected_name) == 0) {
             result = 1
         } else {
+            // PL1f2：为本条记录建一次目标模块索引（规模小则内部关闭、退化为线性）。
+            let index IRMergeIndex
+            if (ir_merge_index_open(&index, unit) != 0) {
+                ir_merge_index_close(&index)
+                return -1
+            }
             // 来源先映射，符号与函数位置才能引用当前模块。
             let type_map *int = malloc((mini.type_count * sizeof(int)).to_type(u64)).to_type(*int)
             let symbol_map *int = malloc((mini.symbol_count * sizeof(int)).to_type(u64)).to_type(*int)
@@ -211,7 +430,8 @@ pub fn ir_function_cache_merge(unit *IRModule, data *u8, size int, env_key u64,
                         }
                     }
                     if (result == 0) {
-                        let found int = ir_fc_find_type(unit, &mini, i, type_map)
+                        let found int = ir_fc_index_find_type(&index, unit, &mini,
+                            i, type_map)
                         if (found >= 0) {
                             type_map[i] = found
                         } else {
@@ -242,7 +462,8 @@ pub fn ir_function_cache_merge(unit *IRModule, data *u8, size int, env_key u64,
                         }
                     }
                     if (result == 0) {
-                        let found int = ir_fc_find_symbol_name(unit, sym.name)
+                        let found int = ir_fc_index_find_symbol(&index, unit,
+                            sym.name)
                         if (found >= 0) {
                             if (ir_fc_symbol_compatible(unit, found, &mini, i,
                                     type_map) == 0) { result = 1 }
@@ -374,6 +595,7 @@ pub fn ir_function_cache_merge(unit *IRModule, data *u8, size int, env_key u64,
                     }
                 }
             }
+            ir_merge_index_close(&index)
             if (type_map != 0) { free(type_map.to_type(*void)) }
             if (symbol_map != 0) { free(symbol_map.to_type(*void)) }
         }

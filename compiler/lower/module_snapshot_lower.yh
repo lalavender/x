@@ -2,6 +2,7 @@ module lower
 import ast
 import gen
 import ir
+import proj
 
 // ============================================================================
 // module_snapshot_lower.yh —— 受检快照到语言 IR 的模块级装配（LA2a/LA2b）
@@ -26,7 +27,7 @@ fn checked_lower_report(l *CheckedLower, message *char) void {
     let name *char = "<模块>"
     let file_id int = l.function.file_id
     if (l.store != 0 && file_id >= 0 && file_id < l.store.file_n) {
-        let file gen.PFile = l.store.files[file_id]
+        let file proj.PFile = l.store.files[file_id]
         path = (l.store.names + file.path_off).to_type(*char)
         if (l.last_token >= 0 && l.last_token < file.token_n) {
             line = file.tokens[l.last_token].line
@@ -48,12 +49,6 @@ fn checked_lower_report(l *CheckedLower, message *char) void {
     n = gen.append_str_limit(buffer, n, 2046, message)
     n = gen.append_byte(buffer, n, '\n')
     gen.write_all(2, buffer, n)
-}
-
-// checked_lower_error：内部错误统一诊断并返回 -1，不能借用 gen.fail 的进程状态。
-fn checked_lower_error(l *CheckedLower, message *char) int {
-    checked_lower_report(l, message)
-    return -1
 }
 
 // checked_lower_runtime_name：隔离 yh 分配器符号，避免覆盖内嵌 LLVM 的 libc 分配器。
@@ -203,7 +198,7 @@ fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
     i = 0
     for i < l.store.file_n {
         l.source_map[i] = -1
-        let file gen.PFile = l.store.files[i]
+        let file proj.PFile = l.store.files[i]
         if (file.source != 0) {
             l.source_map[i] = ir.ir_module_add_source(l.output,
                 (l.store.names + file.path_off).to_type(*char), file.source, file.source_len)
@@ -562,7 +557,8 @@ fn checked_lower_declare_functions(l *CheckedLower) int {
 //   * 匿名全局/重定位：static_data 行、按 label 去重的字符串与模块 global reloc；
 //   * 来源：source_map、函数 locs 与 token 偏移，命中后必须按当前源码重建位置。
 // 其他函数体不是每个函数的输入依赖；缓存键不能整模块源码哈希。
-fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType) int {
+fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
+    timing *LowerTiming) int {
     let i int = 0
     for i < l.store.function_n {
         l.function = l.store.functions[i]
@@ -571,6 +567,9 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType) int {
         let symbol gen.CSym = l.store.symbols[node.sym_id]
         l.last_token = node.first; l.reason = "首片不支持此语句或表达式"
         if ((symbol.flags & gen.F_COMPTIME) == 0) {
+            // PL1b：符号名构造 + 线性符号查找。这里的查找是 O(函数数)，
+            // 单模块放很多函数时会变成 O(n²)——PL2 的超线性就有它一份。
+            let t_lookup u64 = gen.clock_ns()
             let name *char = checked_lower_name(l, symbol.name_off, symbol.name_len,
                 symbol.flags, node.type_id)
             if (name == 0) {
@@ -590,8 +589,12 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType) int {
                 l.reason = "内部错误：函数符号缺失"
                 return -1
             }
+            if (timing != 0) {
+                timing.lookup_ns += lower_elapsed(t_lookup, gen.clock_ns())
+            }
             // LA3：函数键只覆盖本函数 token 流与模块环境；命中时合并迷你模块，
             // 未命中才重新 lowering。cache 禁用时行为与 LA2b 完全相同。
+            let t_cache u64 = gen.clock_ns()
             let key [ir.IR_FUNCTION_CACHE_KEY_SIZE]u8
             let cacheable int = 0
             if (l.cache_enabled != 0
@@ -611,6 +614,9 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType) int {
                             free(name.to_type(*void))
                             return -1
                         }
+                        if (timing != 0) {
+                            timing.cache_ns += lower_elapsed(t_cache, gen.clock_ns())
+                        }
                         free(name.to_type(*void))
                         i += 1
                         continue
@@ -622,13 +628,22 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType) int {
                 }
                 l.cache_misses += 1
             }
+            if (timing != 0) {
+                timing.cache_ns += lower_elapsed(t_cache, gen.clock_ns())
+            }
+            let t_fn u64 = gen.clock_ns()
             let result int = checked_lower_function(l, found, types)
+            if (timing != 0) {
+                timing.fn_ns += lower_elapsed(t_fn, gen.clock_ns())
+            }
             if (result != 0) {
                 free(name.to_type(*void))
                 return result
             }
             l.cache_lowered += 1
             if (cacheable != 0 && l.cache_out != 0) {
+                // 未命中后把本函数 IR 序列化进缓存（PC2 v3）：写缓存构建的大头。
+                let t_capture u64 = gen.clock_ns()
                 let data *u8 = 0
                 let size int = 0
                 let captured int = ir.ir_function_cache_capture(l.output,
@@ -643,6 +658,9 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType) int {
                 } else if (captured < 0) {
                     free(name.to_type(*void))
                     return -1
+                }
+                if (timing != 0) {
+                    timing.capture_ns += lower_elapsed(t_capture, gen.clock_ns())
                 }
             }
             free(name.to_type(*void))
@@ -688,9 +706,18 @@ pub fn lower_module_cached(unit *ast.CheckedModule, out *ir.IRModule,
     env_key u64, stats *CheckedLowerStats) int {
     if (stats != 0) {
         stats.hits = 0; stats.misses = 0; stats.lowered = 0
+        stats.prep_ns = 0; stats.decl_ns = 0; stats.build_ns = 0; stats.verify_ns = 0
+        stats.lookup_ns = 0; stats.cache_ns = 0; stats.fn_ns = 0
+        stats.capture_ns = 0
     }
     let result int = lower_module_impl(unit, out, cache_in, cache_out, env_key, stats)
     return result
+}
+
+// lower_elapsed：两个单调时刻的差；时钟失败（0）或逆序时返回 0，
+// 避免把「时钟不可用」记成巨大的正延迟。
+fn lower_elapsed(start u64, end u64) u64 {
+    return end >= start ? end - start : 0
 }
 
 // lower_module_impl：prepare → declare → build（可查/写函数缓存）→ 模块 verifier。
@@ -753,11 +780,32 @@ fn lower_module_impl(unit *ast.CheckedModule, out *ir.IRModule,
     // 先建立 canonical 类型映射与模块来源，函数签名才能在符号表里登记模块类型下标。
     if (l.source_map != 0 && l.source_type_map != 0 && flow.loops != 0
         && tables_ok != 0) {
+        // PL1：四段互斥计时；时钟失败（0）时 lower_elapsed 给 0，不会出负数。
+        let t0 u64 = gen.clock_ns()
         result = checked_lower_prepare_tables(&l, &types[0])
+        let t1 u64 = gen.clock_ns()
         if (result == 0) { result = checked_lower_declare_functions(&l) }
-        if (result == 0) { result = checked_lower_build_functions(&l, &types[0]) }
+        let t2 u64 = gen.clock_ns()
+        let timing LowerTiming
+        timing.lookup_ns = 0; timing.cache_ns = 0; timing.fn_ns = 0
+        timing.capture_ns = 0
+        if (result == 0) {
+            result = checked_lower_build_functions(&l, &types[0], &timing)
+        }
+        let t3 u64 = gen.clock_ns()
         if (result == 0 && ir.ir_module_verify(&candidate) != 0) {
             result = -1; l.reason = "内部错误：模块校验失败"
+        }
+        let t4 u64 = gen.clock_ns()
+        if (stats != 0) {
+            stats.prep_ns += lower_elapsed(t0, t1)
+            stats.decl_ns += lower_elapsed(t1, t2)
+            stats.build_ns += lower_elapsed(t2, t3)
+            stats.verify_ns += lower_elapsed(t3, t4)
+            stats.lookup_ns += timing.lookup_ns
+            stats.cache_ns += timing.cache_ns
+            stats.fn_ns += timing.fn_ns
+            stats.capture_ns += timing.capture_ns
         }
     }
     if (stats != 0) {

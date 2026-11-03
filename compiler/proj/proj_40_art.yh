@@ -1,0 +1,584 @@
+module proj
+import gen
+
+// ============================================================================
+// proj_40_art.yh —— 构建产物路径与缓存键（B2-1，2026-10-26）
+//
+// 一次构建里「产物落在哪个路径、用什么键标识」的全部纯计算：构建目录布局、
+// 模块标记（tag）、按文件对象名词干、对象/接口/CT 接口路径、以及 FNV 哈希与
+// 十六进制编码。它们原先散在 `build/module_build.yh` 与 `build/link_cache.yh`，
+// 被**发射簇**（module_build/module_worker）与**链接簇**（link_cache/
+// link_inputs/darwin_link）同时使用，是 B2-2 把链接簇拆成 `link` 模块的硬前置：
+// 两簇都依赖的边界必须先落到两簇之下（这里），`link` 才能不反向 import build。
+//
+// 本文件只做计算与读取：不创建目录、不调用外部工具、不读构建上下文
+// （目录创建与发布仍留在 build 的 `mb_mkdir`/`mb_iface_*`）。路径拼接一律写进
+// 调用方给的定长缓冲，长度预算由 MB_BUILD_DIR_MAX / MB_TAG_MAX 守住。
+// ============================================================================
+
+// MB_BUILD_DIR_MAX / MB_TAG_MAX：路径预算。
+//
+// 项目名与模块名都来自用户输入，`mod_tag` 用 [512]u8 临时缓冲拼接，
+// 派生的接口/对象路径又写进 600/700/900 字节的定长缓冲。两个名字不限长时
+// 会写穿栈（且 `gen.append_str` 不做容量检查）。这里在源头设预算：
+//   构建目录 ≤ 400，标记 ≤ 120，派生路径最长 400 + 7 + 120 + 5 + 1 = 533，
+//   低于最小的 600 字节缓冲；超限给出可操作诊断而不是崩溃。
+pub const MB_BUILD_DIR_MAX int = 400
+pub const MB_TAG_MAX int = 120
+
+// hash_init：返回缓存指纹 v2 的 FNV 初始值，使旧版缓存自然失效。
+pub fn hash_init() u64 {
+    let hi u64 = 3421674725
+    let lo u64 = 2216829733
+    return (hi << 32) | lo
+}
+
+// fnv：把一个字节混入 FNV-1a 64 位哈希。
+pub fn fnv(h *u64, b u8) void {
+    h[0] = h[0] ^ b.to_type(u64)
+    h[0] = h[0] * 1099511628211
+}
+
+// hash_file：按对齐的 64 位读取混入文件内容，尾部不足八字节按字节处理。
+// read_source 使用 malloc 对齐缓冲；支持的 Darwin/Linux arm64 与 x64 主机均为小端。
+// 读取失败返回 -1。
+pub fn hash_file(h *u64, path *char) int {
+    let tk *gen.TaskCtx = gen.task()
+    if (gen.read_source(path) != 0) {
+        return -1
+    }
+    let i int = 0
+    let words *u64 = tk.c_src.to_type(*u64)
+    for i + 8 <= tk.c_src_len {
+        let word u64 = words[i / 8]
+        h[0] = h[0] ^ word
+        h[0] = h[0] * 1099511628211
+        i += 8
+    }
+    for i < tk.c_src_len {
+        h[0] = h[0] ^ tk.c_src[i].to_type(u64)
+        h[0] = h[0] * 1099511628211
+        i += 1
+    }
+    return 0
+}
+
+// build_dir：构建目录 = <root>/.build/targets/<triple>/llvm/O<n>；
+// check 模式用 <root>/.build/check（LL12：不再有旧后端目录）。
+// cache_root：构建缓存根目录 = YH_BUILD_CACHE（非空时）或 <root>/.build。
+//
+// 缓存树（targets/ 与 check/）整体落在该目录，便于同一台机器上的多个
+// worktree 各指一处（例如本地快速盘），互不覆盖。相对路径按进程 cwd 解析
+// （宿主 open 语义），建议传绝对路径。结果经 out_len 显式返回。
+pub fn cache_root(root_off int, root_len int, out_len *int) int {
+    let off int = -1
+    let olen int = 0
+    if (env_fetch("YH_BUILD_CACHE", &off, &olen) < 0) {
+        return -1
+    }
+    let c_off int = 0
+    let c_len int = 0
+    if (olen == 0) {
+        if (canon(root_off, root_len, ".build", &c_off, &c_len) != 0) {
+            return -1
+        }
+    } else {
+        if (canon(off, olen, "", &c_off, &c_len) != 0) {
+            return -1
+        }
+    }
+    out_len[0] = c_len
+    return c_off
+}
+
+// build_dir：构建目录 = <cache>/targets/<triple>/llvm/O<n>；
+// check 模式用 <cache>/check（LL12：不再有旧后端目录）。
+// 测试模式始终落在项目 tmp/yh-test/check，避免测试与生产缓存混用。
+pub fn build_dir(root_off int, root_len int, out_len *int) int {
+    let base_len int = 0
+    let base_off int = cache_root(root_off, root_len, &base_len)
+    if (base_off < 0) {
+        return -1
+    }
+    let tk *gen.TaskCtx = gen.task()
+    let c_off int = 0
+    let c_len int = 0
+    let rc int = 0
+    if (tk.c_test_mode != 0) {
+        // 测试检查与生产缓存隔离；接口/会话文件只落在项目 tmp 下。
+        rc = canon(root_off, root_len, "tmp/yh-test/check", &c_off, &c_len)
+    } else if (tk.c_check_only != 0) {
+        rc = canon(base_off, base_len, "check", &c_off, &c_len)
+    } else {
+        let target_dir [256]u8
+        let n int = gen.append_str(&target_dir[0], 0, "targets/")
+        n = gen.append_str(&target_dir[0], n, cfg().target.triple)
+        n = gen.append_str(&target_dir[0], n, "/llvm/O")
+        n = gen.append_int(&target_dir[0], n, cfg().opt_level)
+        target_dir[n] = 0
+        rc = canon(base_off, base_len, (&target_dir[0]).to_type(*char), &c_off, &c_len)
+    }
+    if (rc != 0) {
+        return -1
+    }
+    if (c_len > MB_BUILD_DIR_MAX) {
+        return gen.fail_path("项目路径过长：构建目录超过 400 字节，请缩短项目根路径: ",
+            pool_str(c_off))
+    }
+    out_len[0] = c_len
+    return c_off
+}
+
+// sub_dir：.build 下子目录路径（asm/obj/iface/manifest），intern 后返回。
+pub fn sub_dir(build_off int, build_len int, sub *char) int {
+    let c_off int = 0
+    let c_len int = 0
+    if (canon(build_off, build_len, sub, &c_off, &c_len) != 0) {
+        return -1
+    }
+    return c_off
+}
+
+// default_binary_path：默认可执行文件留在项目 .build 根目录，中间缓存
+// 按目标与优化级别隔离（LL12：唯一后端）。缓存根被 YH_BUILD_CACHE 迁走后
+// 产物位置不变；目录创建由 build 的 mb_ensure_binary_dir 负责（本文件纯计算）。
+pub fn default_binary_path(root_off int, root_len int, build_off int,
+    project int, out *u8) int {
+    let c_off int = 0
+    let c_len int = 0
+    if (canon(root_off, root_len, ".build", &c_off, &c_len) != 0) { return -1 }
+    let dir_off int = c_off
+    let n int = gen.append_str(out, 0, pool_str(dir_off))
+    n = gen.append_byte(out, n, '/')
+    let name_off int = ctx().projs[project].name_off
+    let name_len int = ctx().projs[project].name_len
+    let ni int = 0
+    for ni < name_len {
+        out[n] = gen.task().np_data[name_off + ni]
+        n += 1
+        ni += 1
+    }
+    out[n] = 0
+    return n
+}
+
+// mod_tag：模块产物的唯一文件名标签 <sanitize(pj)>-<module>。
+// 同名模块可能来自不同项目（KEY.MOD 导入），文件名必须含项目。
+pub fn mod_tag(m int, off *int, olen *int) int {
+    let tk *gen.TaskCtx = gen.task()
+    let proj_len int = ctx().projs[ctx().mods[m].proj].name_len
+    let mod_len int = ctx().mods[m].name_len
+    // 标记 = 项目名 + '-' + 模块名。两个名字都来自用户输入：先按预算拒绝，
+    // 否则下面的 [512]u8 临时缓冲会被写穿（见 MB_TAG_MAX 注释）。
+    if (proj_len + mod_len + 1 > MB_TAG_MAX) {
+        return gen.fail("模块名过长：项目名与模块名合计超过 120 字节")
+    }
+    let tmp [512]u8
+    let n int = 0
+    let i int = 0
+    for i < ctx().projs[ctx().mods[m].proj].name_len {
+        let b u8 = tk.np_data[ctx().projs[ctx().mods[m].proj].name_off + i]
+        if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+            || (b >= '0' && b <= '9') || b == '_')) {
+            b = '_'
+        }
+        tmp[n] = b
+        n += 1
+        i += 1
+    }
+    tmp[n] = '-'
+    n += 1
+    i = 0
+    for i < ctx().mods[m].name_len {
+        let b2 u8 = tk.np_data[ctx().mods[m].name_off + i]
+        if (!((b2 >= 'a' && b2 <= 'z') || (b2 >= 'A' && b2 <= 'Z')
+            || (b2 >= '0' && b2 <= '9') || b2 == '_')) {
+            b2 = '_'
+        }
+        tmp[n] = b2
+        n += 1
+        i += 1
+    }
+    tmp[n] = 0
+    off[0] = gen.tml_intern_str(tmp, 0, n)
+    olen[0] = n
+    if (off[0] < 0) {
+        return -1
+    }
+    return 0
+}
+
+// asm_stem_base：把源文件路径（池偏移）的基名（去 .yh 后缀）清洗为
+// 安全的文件名词干。非 [A-Za-z0-9_] 字节替换为 '_'（与 mod_tag 同一套
+// 清洗规则），超过 120 字节截断。返回干长度（>= 0）。
+pub fn asm_stem_base(path_off int, out *u8) int {
+    let tk *gen.TaskCtx = gen.task()
+    let path *char = pool_str(path_off)
+    let start int = 0
+    let n int = 0
+    for path[n] != 0 {
+        if (path[n] == '/') { start = n + 1 }
+        n += 1
+    }
+    let end int = n
+    if (end - start >= 3 && path[end - 3] == '.' && path[end - 2] == 'y'
+        && path[end - 1] == 'h') {
+        end -= 3
+    }
+    let bn int = 0
+    let i int = start
+    for i < end && bn < 120 {
+        let b u8 = path[i].to_type(u8)
+        if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+            || (b >= '0' && b <= '9') || b == '_')) {
+            b = '_'
+        }
+        out[bn] = b
+        bn += 1
+        i += 1
+    }
+    if (bn == 0) {
+        out[0] = '_'
+        bn = 1
+    }
+    return bn
+}
+
+// asm_stems：一次性派生模块全部源文件的按文件对象名词干（RS3b）。
+// stems 为 file_n × 160 字节缓冲（第 i 个文件名干在 stems + i*160，NUL 结尾），
+// lens[i] 为长度。清洗后重名（如 a-b.yh 与 a_b.yh）时追加 _2/_3 保证唯一；
+// 保留名 <tag>.stub（运行时桩对象）同样避开。与此前已派生名逐一比较，
+// 因此三个及以上连环重名也稳定。worker 写 asm/<tag>/<stem>.s、link.mb_link 读
+// obj/<tag>/<stem>.o，两边由同一函数派生才能对上。
+pub fn asm_stems(m int, stems *u8, lens *int) int {
+    let c_off int = 0
+    let c_len int = 0
+    let tk *gen.TaskCtx = gen.task()
+    // 保留名：<tag>.stub
+    if (mod_tag(m, &c_off, &c_len) != 0) { return -1 }
+    let tag_off int = c_off
+    let tag_len int = c_len
+    let reserved [160]u8
+    let rn int = 0
+    let ti int = 0
+    for ti < tag_len {
+        reserved[rn] = tk.np_data[tag_off + ti]
+        rn += 1
+        ti += 1
+    }
+    let dot *char = ".stub"
+    let di int = 0
+    for dot[di] != 0 {
+        reserved[rn] = dot[di].to_type(u8)
+        rn += 1
+        di += 1
+    }
+    let idx int = 0
+    for idx < ctx().mods[m].file_n {
+        let fi int = ctx().mods[m].files[idx]
+        let base [160]u8
+        let bn int = asm_stem_base(ctx().files[fi].path_off, &base[0])
+        if (bn < 0) { return -1 }
+        let cand [160]u8
+        let cn int = bn
+        let ci int = 0
+        for ci < bn {
+            cand[ci] = base[ci]
+            ci += 1
+        }
+        // 候选名：base，重名时 base_2、base_3……
+        let k int = 2
+        for k < 1000 {
+            cn = bn
+            ci = 0
+            for ci < bn {
+                cand[ci] = base[ci]
+                ci += 1
+            }
+            if (k > 2) {
+                cand[cn] = '_'
+                cn += 1
+                let digits [8]u8
+                let dn int = 0
+                let v int = k - 1
+                for v > 0 {
+                    digits[dn] = ((v % 10) + 48).to_type(u8)
+                    dn += 1
+                    v /= 10
+                }
+                for dn > 0 {
+                    dn -= 1
+                    cand[cn] = digits[dn]
+                    cn += 1
+                }
+            }
+            let clash int = 0
+            if (cn == rn) {
+                let same int = 1
+                let t int = 0
+                for t < cn {
+                    if (cand[t] != reserved[t]) {
+                        same = 0
+                        break
+                    }
+                    t += 1
+                }
+                if (same != 0) { clash = 1 }
+            }
+            let j int = 0
+            for j < idx && clash == 0 {
+                let other *u8 = stems + (j * 160)
+                if (lens[j] == cn) {
+                    let same2 int = 1
+                    let t2 int = 0
+                    for t2 < cn {
+                        if (other[t2] != cand[t2]) {
+                            same2 = 0
+                            break
+                        }
+                        t2 += 1
+                    }
+                    if (same2 != 0) { clash = 1 }
+                }
+                j += 1
+            }
+            if (clash == 0) { break }
+            k += 1
+        }
+        if (k >= 1000) {
+            return gen.fail("内部错误：无法派生唯一的汇编文件名")
+        }
+        let dst *u8 = stems + (idx * 160)
+        let c2 int = 0
+        for c2 < cn {
+            dst[c2] = cand[c2]
+            c2 += 1
+        }
+        dst[cn] = 0
+        lens[idx] = cn
+        idx += 1
+    }
+    return 0
+}
+
+// module_obj_row：枚举一个模块的按文件对象行（RS3b：N 个文件 + 1 个运行时桩）。
+// row_k < file_n → 第 row_k 个源文件对象（内部调 asm_stems 派生文件名干，
+// 与 worker 写侧同一函数保证一致）；row_k == file_n → 桩对象（<tag>.stub）。
+// spath = <build>/asm/<tag>/<stem>.s，opath = <build>/obj/<tag>/<stem>.o，
+// mpath = 同目录 .manifest（对象缓存）；不需要的路径传 0。
+pub fn module_obj_row(m int, build_off int, build_len int, row_k int,
+    spath *u8, opath *u8, mpath *u8) int {
+    let c_off int = 0
+    let c_len int = 0
+    let tk *gen.TaskCtx = gen.task()
+    if (mod_tag(m, &c_off, &c_len) != 0) {
+        return -1
+    }
+    let tag_off int = c_off
+    let tag_len int = c_len
+    let stem [160]u8
+    let sn int = 0
+    if (row_k < ctx().mods[m].file_n) {
+        let stems *u8 = malloc((ctx().mods[m].file_n * 160).to_type(u64)).to_type(*u8)
+        let lens *int = malloc((ctx().mods[m].file_n * sizeof(int)).to_type(u64)).to_type(*int)
+        if (stems == 0 || lens == 0) {
+            if (stems != 0) { free(stems.to_type(*void)) }
+            if (lens != 0) { free(lens.to_type(*void)) }
+            return gen.fail("内存分配失败")
+        }
+        let ok int = asm_stems(m, stems, lens)
+        if (ok == 0) {
+            sn = lens[row_k]
+            let src *u8 = stems + (row_k * 160)
+            let si int = 0
+            for si < sn {
+                stem[si] = src[si]
+                si += 1
+            }
+        }
+        free(stems.to_type(*void))
+        free(lens.to_type(*void))
+        if (ok != 0) { return -1 }
+    } else {
+        // 桩对象名词干 = <tag>.stub
+        let ti int = 0
+        for ti < tag_len {
+            stem[ti] = tk.np_data[tag_off + ti]
+            ti += 1
+        }
+        let dot *char = ".stub"
+        let di int = 0
+        for dot[di] != 0 {
+            stem[ti] = dot[di].to_type(u8)
+            ti += 1
+            di += 1
+        }
+        sn = ti
+    }
+    if (spath != 0) {
+        let pn int = 0
+        pn = gen.append_str(spath, pn, pool_str(build_off))
+        pn = gen.append_str(spath, pn, "/asm/")
+        pn = gen.append_str(spath, pn, pool_str(tag_off))
+        pn = gen.append_byte(spath, pn, '/')
+        let si2 int = 0
+        for si2 < sn {
+            spath[pn] = stem[si2]
+            pn += 1
+            si2 += 1
+        }
+        pn = gen.append_str(spath, pn, ".s")
+        spath[pn] = 0
+    }
+    if (opath != 0 || mpath != 0) {
+        let on int = 0
+        if (opath != 0) {
+            on = gen.append_str(opath, on, pool_str(build_off))
+            on = gen.append_str(opath, on, "/obj/")
+            on = gen.append_str(opath, on, pool_str(tag_off))
+            on = gen.append_byte(opath, on, '/')
+        }
+        let si3 int = 0
+        for si3 < sn {
+            if (opath != 0) { opath[on] = stem[si3]; on += 1 }
+            si3 += 1
+        }
+        if (opath != 0) {
+            on = gen.append_str(opath, on, ".o")
+            opath[on] = 0
+        }
+        if (mpath != 0) {
+            let mn int = 0
+            mn = gen.append_str(mpath, mn, pool_str(build_off))
+            mn = gen.append_str(mpath, mn, "/obj/")
+            mn = gen.append_str(mpath, mn, pool_str(tag_off))
+            mn = gen.append_byte(mpath, mn, '/')
+            let si4 int = 0
+            for si4 < sn {
+                mpath[mn] = stem[si4]
+                mn += 1
+                si4 += 1
+            }
+            mn = gen.append_str(mpath, mn, ".manifest")
+            mpath[mn] = 0
+        }
+    }
+    return 0
+}
+
+// module_iface_plain_path：返回持久接口路径，不附加本轮后缀。
+pub fn module_iface_plain_path(m int, build_off int, build_len int,
+    out *u8) int {
+    let c_off int = 0
+    let c_len int = 0
+    if (mod_tag(m, &c_off, &c_len) != 0) {
+        return -1
+    }
+    let tag_off int = c_off
+    if (canon(build_off, build_len, "iface", &c_off, &c_len) != 0) {
+        return -1
+    }
+    let n int = 0
+    n = gen.append_str(out, n, pool_str(c_off))
+    n = gen.append_byte(out, n, '/')
+    n = gen.append_str(out, n, pool_str(tag_off))
+    n = gen.append_str(out, n, ".s.i")
+    out[n] = 0
+    return 0
+}
+
+// module_iface_path：返回本轮接口路径；后缀隔离并发构建会话。
+pub fn module_iface_path(m int, build_off int, build_len int,
+    suffix *char, out *u8) int {
+    let plain [700]u8
+    if (module_iface_plain_path(m, build_off, build_len, plain) != 0) {
+        return -1
+    }
+    let n int = 0
+    n = gen.append_str(out, n, gen.arr_cstr(plain))
+    if (suffix != 0) {
+        n = gen.append_str(out, n, suffix)
+    }
+    out[n] = 0
+    return 0
+}
+
+// module_ctiface_plain_path：返回持久 CT 正文接口路径。
+pub fn module_ctiface_plain_path(m int, build_off int, build_len int,
+    out *u8) int {
+    let c_off int = 0
+    let c_len int = 0
+    if (mod_tag(m, &c_off, &c_len) != 0) { return -1 }
+    let tag_off int = c_off
+    if (canon(build_off, build_len, "iface", &c_off, &c_len) != 0) { return -1 }
+    let n int = 0
+    n = gen.append_str(out, n, pool_str(c_off))
+    n = gen.append_byte(out, n, '/')
+    n = gen.append_str(out, n, pool_str(tag_off))
+    n = gen.append_str(out, n, ".s.ct")
+    out[n] = 0
+    return 0
+}
+
+// module_ctiface_path：返回带本轮会话后缀的 CT 正文接口路径。
+pub fn module_ctiface_path(m int, build_off int, build_len int,
+    suffix *char, out *u8) int {
+    let plain [700]u8
+    if (module_ctiface_plain_path(m, build_off, build_len, plain) != 0) {
+        return -1
+    }
+    let n int = 0
+    n = gen.append_str(out, n, gen.arr_cstr(plain))
+    if (suffix != 0) {
+        n = gen.append_str(out, n, suffix)
+    }
+    out[n] = 0
+    return 0
+}
+
+// open_out：以宿主平台正确的旗标打开输出文件（覆盖写；交叉目标不影响
+// 宿主文件操作，见 gen.tg_host_darwin）。
+pub fn open_out(path *char) int {
+    let flg int = 0x241
+    if (gen.tg_host_darwin() != 0) {
+        flg = 0x601
+    }
+    return open(path, flg, 0x1a4)
+}
+
+// hash_hex：把 64 位内容指纹格式化为固定长度十六进制串。
+pub fn hash_hex(h u64, out *u8) int {
+    let digits *char = "0123456789abcdef"
+    let n int = 0
+    let shift int = 60
+    for shift >= 0 {
+        out[n] = digits[((h >> shift) & 15).to_type(int)].to_type(u8)
+        n += 1
+        shift -= 4
+    }
+    return n
+}
+
+
+// target_code_current：当前输出目标在 [link-<os>-<arch>] 组编码里的编号
+// （0 保留给公共 [link] 组；1..4 见 project.toml 的链接组约定）。
+// 原先在 build/project_link.yh：它是纯目标映射，链接输入筛选与工程链接都要用，
+// B2-2 起落在 proj 以避免 `link` 反向依赖 build。
+pub fn target_code_current() int {
+    if (cfg().target.os == gen.TARGET_OS_LINUX) {
+        if (cfg().target.arch == gen.TARGET_ARCH_ARM64) { return 1 }
+        if (cfg().target.arch == gen.TARGET_ARCH_X64) { return 2 }
+    }
+    if (cfg().target.os == gen.TARGET_OS_DARWIN) {
+        if (cfg().target.arch == gen.TARGET_ARCH_ARM64) { return 3 }
+        if (cfg().target.arch == gen.TARGET_ARCH_X64) { return 4 }
+    }
+    // W1-6：Windows 目标组（0.0.12 起）。编码 5/6 与清单节名
+    // [link-windows-x64] / [link-windows-arm64] 一一对应。
+    if (cfg().target.os == gen.TARGET_OS_WINDOWS) {
+        if (cfg().target.arch == gen.TARGET_ARCH_X64) { return 5 }
+        if (cfg().target.arch == gen.TARGET_ARCH_ARM64) { return 6 }
+    }
+    return -1
+}
+

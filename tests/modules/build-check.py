@@ -347,6 +347,11 @@ case("u3-private-type-pointer-in-pub", "fail", "privtype", "badptr",
      msg="pub 接口引用了非 pub 类型")
 case("u3-duplicate-decl", "fail", "dupdecl", "host", msg="重定义")
 case("u3-unused-import", "fail", "unusedimp", "host", msg="导入未使用")
+# —— UF1（2026-10-27）：未使用函数检查 ——
+# 同包跨文件的私有调用算「已使用」（math.helper 只在 another.yh 里被调用）；
+# 孤立且没 pub 的私有函数在模块构建里也必须报错。
+case("uf1-module-scope-use", "run", "unusedfn", "host", 42)
+case("uf1-unused-function", "fail", "unusedfn", "dead", msg="函数未使用")
 case("u3-import-clash", "fail", "clashname", "host", msg="导入名冲突")
 # —— PC1（2026-10-25）：函数级 IR 缓存命中率回归 ——
 # 键里混入 arena 下标时实测全量 miss；这里固定三条断言：冷编全 miss、
@@ -410,7 +415,7 @@ def copy_proj(src, dst):
     shutil.copytree(src, dst)
     if src.name == "astcheck":
         # 探针直接使用当前编译器的 AST arena 与 check 实现。
-        for module in ("gen", "comptime", "ir", "backend", "ast", "check"):
+        for module in ("gen", "proj", "comptime", "ir", "backend", "ast", "check"):
             source = ROOT / "compiler" / module
             if source.is_dir():
                 ignore = shutil.ignore_patterns("llvm_bridge.yh") if module == "backend" else None
@@ -423,7 +428,9 @@ def copy_proj(src, dst):
             '[project]\nos = "host"\narch = "host"\nname = "yh_ir"\nsource = "."\n')
     if src.name in ("llvmtarget", "llvmfront"):
         # 目标模型测试复用实际 gen 源码，并以项目依赖检验公开类型/接口。
+        # B1-2 起目标/配置的存储归 proj（gen 只持指针），因此也要拷 proj。
         shutil.copytree(ROOT / "compiler" / "gen", dst / "gen")
+        shutil.copytree(ROOT / "compiler" / "proj", dst / "proj")
         (dst / "gen" / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n')
     if src.name == "llvmchecked":
@@ -432,7 +439,7 @@ def copy_proj(src, dst):
         # 因此拷入时排除它（其余 backend 源码保持真实）。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "lex", "ast", "comptime", "ir", "backend", "check"):
+        for module in ("gen", "proj", "lex", "ast", "comptime", "ir", "backend", "check"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "checkedcore"\nsource = "."\n')
@@ -444,7 +451,7 @@ def copy_proj(src, dst):
         # fixture 作为同模块的第二个文件随 main/ 一起构建；同样排除桥绑定。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "lex", "ast", "parse", "comptime", "ir", "backend", "builtin", "check", "lower"):
+        for module in ("gen", "proj", "lex", "ast", "parse", "comptime", "ir", "backend", "builtin", "check", "lower"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "lowercore"\nsource = "."\n')
@@ -1651,7 +1658,7 @@ def main():
         if c["kind"] == "scheduler":
             api_source = dst / "src" / "api" / "api.yh"
             extra = "".join(
-                f"fn private_{i:04d}() int {{ return {i % 10}; }}\n"
+                f"pub fn private_{i:04d}() int {{ return {i % 10}; }}\n"
                 for i in range(600)
             )
             api_source.write_text(api_source.read_text() + "\n" + extra)
@@ -1690,8 +1697,12 @@ def main():
 
             # 接口成功发布后，提供方私有函数仍可能检查失败；本轮不得链接。
             built.unlink(missing_ok=True)
+            # 私有函数体内引用未定义名字：检查必须在 pass2 报错并阻止链接。
+            # 用一个 pub 入口引用它，避免被 UF1（未使用函数检查）先拦下来，
+            # 保证这条断言仍然验证「正文检查失败」而不是「未使用」。
             api_source.write_text(api_source.read_text() +
-                                  "\nfn broken_private() int { return missing_name; }\n")
+                                  "\nfn broken_private() int { return missing_name; }\n"
+                                  "pub fn broken_entry() int { return broken_private(); }\n")
             failed_build = sh([compiler, "build"], cwd=dst)
             report(failed_build.returncode != 0 and not built.exists(),
                    "r2b-worker-failure-stops-link",
@@ -1729,7 +1740,7 @@ def main():
         if c["kind"] == "scheduler-diamond":
             base_source = dst / "src" / "base" / "base.yh"
             extra = "".join(
-                f"fn private_{i:04d}() int {{ return {i % 10}; }}\n"
+                f"pub fn private_{i:04d}() int {{ return {i % 10}; }}\n"
                 for i in range(600)
             )
             base_source.write_text(base_source.read_text() + "\n" + extra)

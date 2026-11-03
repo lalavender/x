@@ -31,6 +31,14 @@ const MAX_FILE_LINE int = 4096   // 参数文件单行长度上限（本版本�
 const MAX_METAVARS int = 16      // exactly(n) 的逐项占位名上限
 const MAX_ARGC int = 128     // argv 适配一次处理的参数个数
 const MAX_TEXT int = 1024    // 单条诊断/帮助文本的字节上限（含结尾 NUL）
+const MAX_FILE_DEPTH int = 16      // 参数文件包含深度上限（parse_config 初值）
+const MAX_FILE_BYTES int = 1048576 // 参数文件累计读取字节上限（parse_config 初值）
+
+// —— 诊断码（Diagnostic.code 的稳定取值）——
+// 应用应按常量比较，不要依赖 message 文本；类别语义见设计 §14.3。
+pub const CODE_CONFIG *char = "config_error"     // 声明无效或不受支持
+pub const CODE_USAGE *char = "usage_error"       // 输入不满足声明
+pub const CODE_RESOURCE *char = "resource_error" // 分配失败或参数文件读取失败
 
 // ValueKind 标识 Value 当前使用的载荷成员；none 是显式空值。
 pub enum ValueKind {
@@ -202,6 +210,10 @@ pub struct HelpFormat {
     metavar_from_type bool    // 无 metavar 时按值类型推导占位名
     width int                 // 目标宽度；0 表示不换行
     max_help_column int       // 说明文本起始列上限；0 表示按 width 推导
+    section_positional *char  // 位置参数段标题；空指针用 "positional arguments"
+    section_options *char     // 选项段标题；空指针用 "options"
+    section_commands *char    // 子命令段标题；空指针用 "commands"
+    usage_prefix *char        // usage 行前缀；空指针用 "usage: "
 }
 
 // Conflict 是重复名称的处理策略。
@@ -238,8 +250,9 @@ pub struct ParserConfig {
 // Subparsers 是子命令槽的配置；每个 parser 最多一个槽。
 pub struct Subparsers {
     dest *char        // 非空时把选中命令的规范名存入 namespace
-    title *char       // 帮助段标题
+    title *char       // 帮助段标题；空指针时用 "commands"
     description *char // 帮助段说明
+    metavar *char     // usage 占位名；空指针时用 {命令名列表}
     required bool     // 是否必须选择一个子命令
 }
 
@@ -452,6 +465,10 @@ pub fn help_format() HelpFormat {
     format.metavar_from_type = true
     format.width = 80
     format.max_help_column = 0
+    format.section_positional = 0
+    format.section_options = 0
+    format.section_commands = 0
+    format.usage_prefix = 0
     return format
 }
 
@@ -554,46 +571,19 @@ pub fn parser_config(prog *char) ParserConfig {
     return config
 }
 
-// option 创建选项声明；无别名时 alias 传空串。
-pub fn option(name *char, alias *char) Argument {
-    let spec Argument
-    spec.name = name
-    spec.alias = alias
-    spec.dest = 0
-    spec.action = Action.store
-    spec.value_kind = ValueKind.text
-    spec.arity = infer_arity()
-    spec.default_value = inherit_default()
-    spec.const_value = value_none()
-    let no_choices []Value
-    spec.choices = no_choices
-    spec.required = false
-    spec.help = 0
-    spec.hidden = false
-    spec.positional = false
-    spec.metavar = 0
-    spec.group = 0
-    spec.mutex = 0
-    spec.user = 0
-    spec.type_name = 0
-    spec.action_name = 0
-    spec.output_shape = 0
-    spec.deprecated = false
-    spec.version_text = 0
-    let no_metavars []*char
-    spec.metavars = no_metavars
-    return spec
-}
-
-// positional 创建位置参数声明；名称同时用作 dest。
-pub fn positional(name *char) Argument {
+// new_argument 构造一条声明的默认字段；positional 决定名称用途与默认数量模型。
+fn new_argument(name *char, positional int) Argument {
     let spec Argument
     spec.name = name
     spec.alias = 0
     spec.dest = 0
     spec.action = Action.store
     spec.value_kind = ValueKind.text
-    spec.arity = single()
+    if (positional != 0) {
+        spec.arity = single()
+    } else {
+        spec.arity = infer_arity()
+    }
     spec.default_value = inherit_default()
     spec.const_value = value_none()
     let no_choices []Value
@@ -601,7 +591,7 @@ pub fn positional(name *char) Argument {
     spec.required = false
     spec.help = 0
     spec.hidden = false
-    spec.positional = true
+    spec.positional = (positional != 0)
     spec.metavar = 0
     spec.group = 0
     spec.mutex = 0
@@ -616,12 +606,25 @@ pub fn positional(name *char) Argument {
     return spec
 }
 
-// subparsers 创建子命令槽配置；默认不必需，dest/title/description 可后设。
+// option 创建选项声明；无别名时 alias 传空串。
+pub fn option(name *char, alias *char) Argument {
+    let spec Argument = new_argument(name, 0)
+    spec.alias = alias
+    return spec
+}
+
+// positional 创建位置参数声明；名称同时用作 dest。
+pub fn positional(name *char) Argument {
+    return new_argument(name, 1)
+}
+
+// subparsers 创建子命令槽配置；默认不必需，dest/title/description/metavar 可后设。
 pub fn subparsers() Subparsers {
     let spec Subparsers
     spec.dest = 0
     spec.title = 0
     spec.description = 0
+    spec.metavar = 0
     spec.required = false
     return spec
 }
@@ -654,8 +657,8 @@ pub fn parse_config() ParseConfig {
     config.mode = ParseMode.normal
     config.known = false
     config.initial = 0
-    config.file_max_depth = 16
-    config.file_max_bytes = 1048576
+    config.file_max_depth = MAX_FILE_DEPTH
+    config.file_max_bytes = MAX_FILE_BYTES
     config.file_max_tokens = MAX_FILE_TOKENS
     return config
 }
@@ -703,20 +706,17 @@ struct group_row {
     conflict int
 }
 
-// mutex_row 是互斥组；members 保存成员在 rows 里的下标（freeze 时收集）。
+// mutex_row 是互斥组；成员关系由 arg_row.mutex 反查，校验按结果里的 appeared 计数。
 struct mutex_row {
     used int
     id int
     required int
     group int
-    member_count int
-    members [MAX_ARGS]int
 }
 
 // child_row 是一条子命令：名字、别名与归父 parser 所有的子状态。
 struct child_row {
     used int
-    slot int
     name *char
     aliases [MAX_ALIASES]*char
     alias_count int
@@ -766,7 +766,6 @@ struct arg_row {
     help *char
     metavar *char
     choices []Value     // 借用 parser 池里的候选值副本
-    choices_count int
     group int           // 展示组 ID；0 表示未分组
     mutex int           // 互斥组 ID；0 表示未加入
     converter fn(*ConvertContext, *Value, *Diagnostic, *void) int
@@ -781,7 +780,6 @@ struct arg_row {
     deprecated int
     version_text *char
     metavars []*char
-    metavars_count int
 }
 
 // type_reg 是一条已注册类型：名字与转换回调。
@@ -828,15 +826,14 @@ struct parser_state {
     override_count int
     numeric_short int        // 1 = 注册了数字型短选项（关闭负数特判）
     conflict int             // parser 级冲突策略
-    command_name *char       // 本层规范命令名（根为空串）
     parent *void             // 父 parser_state；根为 0
-    owned_by_parent int      // 1 = 归父所有，destroy 由父递归执行
     slot_used int
     slot_id int
     slot_dest *char
     slot_required int
     slot_title *char
     slot_description *char
+    slot_metavar *char
     children [MAX_CHILDREN]child_row
     child_count int
     groups [MAX_GROUPS]group_row
@@ -856,6 +853,10 @@ struct parser_state {
     format_metavar_from_type int
     format_width int
     format_max_help_column int
+    title_positional *char
+    title_options *char
+    title_commands *char
+    usage_prefix *char
     color int
 }
 

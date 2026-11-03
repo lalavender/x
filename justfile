@@ -8,7 +8,7 @@
 #
 #   just                 源文件比 yh 新时冷编（等价旧 make 默认目标）
 #   just build           强制冷编
-#   just dev             增量构建（保留 compiler/.build）
+#   just dev             增量构建（保留 .build / BUILD_CACHE 缓存）
 #   just seed            滚种子：写入当前宿主平台种子并记录 SHA-256
 #   just test            三层回归（ANTLR + 编译器语法 + 运行语义）
 #   just quick           日常迭代门（ANTLR + 编译器语法语料，约 20s）
@@ -55,7 +55,8 @@ cpu := arch()
 # Python 解释器命令。Windows 上 `python3` 常是 Microsoft Store 的占位符
 # （执行即返回 49，无输出），因此 Windows 宿主默认用 `python`；PY 仍可显式覆盖。
 py_default := if host_os == "windows" { "python" } else { "python3" }
-PY := env_var_or_default("PY", py_default)
+# 导出给反引号表达式与配方里的子 shell 使用（just 变量不能直接写进 `...`）。
+export PY := env_var_or_default("PY", py_default)
 py := if PY == "" { py_default } else { PY }
 
 # 种子文件名按「yh-<平台>-<架构>」：Darwin/arm64 → darwin-arm64，
@@ -87,16 +88,33 @@ FAST_STAGE := env_var_or_default("FAST_STAGE", "1")
 fast_stage := if FAST_STAGE == "" { "1" } else { FAST_STAGE }
 tmpdir := if env_var_or_default("TMPDIR", "") == "" { "/tmp" } else { env_var_or_default("TMPDIR", "/tmp") }
 run_id := env_var_or_default("GITHUB_RUN_ID", "")
-# 每次 CI run 独占一个快速目录：同机并发跑多个 run 时共用 /tmp/yh-fast 会让
-# stage-yh 互相覆盖（release 与分支门同时跑时出现过 selfhost 探针读错二进制）。
-FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast" + (if run_id == "" { "" } else { "-" + run_id }))
-fast_dir := if FAST_DIR == "" { tmpdir + "/yh-fast" } else { FAST_DIR }
+# 每个 worktree + 每个 CI run 独占一个快速目录：
+#   - 同机并发跑多个 run 时共用 /tmp/yh-fast 会让 stage-yh 互相覆盖（release 与
+#     分支门同时跑时出现过 selfhost 探针读错二进制）；
+#   - 同一台机器上的多个 git worktree 也共享 $TMPDIR，共用 yh-fast 会把 staged
+#     编译器与 darwin-sdk 软链指向别的工作区（实测 llvm-2 的 just test 跑到了
+#     llvm-3 的二进制上，报出与本仓库无关的语料失败）。用仓库路径短哈希区分。
+# 反引号里拿不到 just 变量（本 justfile 的 shell 带 -u），所以按平台写死解释器名：
+# Windows 用 python（python3 常是 Store 占位符），其他平台用 python3。
+worktree_tag := if host_os == "windows" { `printf '%s' "{{root}}" | python -c "import hashlib,sys;print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:8])"` } else { `printf '%s' "{{root}}" | python3 -c "import hashlib,sys;print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:8])"` }
+FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast-" + worktree_tag + (if run_id == "" { "" } else { "-" + run_id }))
+fast_dir := if FAST_DIR == "" { tmpdir + "/yh-fast-" + worktree_tag } else { FAST_DIR }
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
 yh_run := if fast_stage == "1" { absolute_path(fast_dir + "/yh") } else { yh_abs }
-# 路径一律加双引号：Windows 的 workdir 带反斜杠，未加引号时 bash 会把
-# \U、\A 这类序列当转义吃掉（实测 cc2 的输出路径变成 C:Users...）。
-run_work_flag := if fast_stage == "1" { "--workdir " + quote(absolute_path(fast_dir + "/yh-run-work")) } else { "" }
-modcheck_work_flag := if fast_stage == "1" { "--workdir " + quote(absolute_path(fast_dir + "/modcheck")) } else { "" }
+run_work_flag := if fast_stage == "1" { "--workdir " + absolute_path(fast_dir + "/yh-run-work") } else { "" }
+modcheck_work_flag := if fast_stage == "1" { "--workdir " + absolute_path(fast_dir + "/modcheck") } else { "" }
+
+# 构建缓存根（2026-10-28）：缺省用项目内 compiler/.build；显式 BUILD_CACHE
+# （或环境变量 YH_BUILD_CACHE）时，整套缓存树（targets/check 与 asm/obj/...）
+# 落到该目录。同一台机器的多个 worktree 各指一处即可互不覆盖；默认可执行
+# 文件仍在 compiler/.build，缓存位置不改变产物位置。
+BUILD_CACHE := env_var_or_default("YH_BUILD_CACHE", "")
+build_cache := if BUILD_CACHE == "" { "" } else { absolute_path(BUILD_CACHE) }
+# 门禁脚本按项目内 .build 布局断言，统一在本 justfile 内清空该变量；
+# 需要缓存的 build/dev 再显式传给编译器。
+# 用 `export … := ""` 而不是裸 `unexport`：空值对编译器等价于未设置（olen==0 走缺省），
+# 而容器内的 Ubuntu just 不认裸 `unexport`（release rc.2 的 linux job 就死在这一行）。
+export YH_BUILD_CACHE := ""
 
 # SELFHOST_WORKDIR/SELFHOST_KEEP 供 Release CI 保留 cc4 自举候选：
 #   just selfhost-native SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
@@ -147,6 +165,15 @@ export YH_LLVM_CACHE := cache_root
 windows_sdk := cache_root + "/windows-sdk"
 export YH_WINDOWS_SDK := if host_os == "windows" { windows_sdk } else { "" }
 
+# Windows 的默认 locale 是 GBK，而门禁脚本都用 text=True 读编译器输出；
+# 强制 Python UTF-8 模式，避免中文诊断在子进程管道里解码失败。
+export PYTHONUTF8 := "1"
+
+# ANTLR 参考语法门：需要 Java + antlr jar。Windows 宿主默认关闭（与 CI 口径一致：
+# 参考层不是每台机器都具备的前置），显式 YH_ANTLR=1 可强制运行。
+ANTLR := env_var_or_default("YH_ANTLR", if host_os == "windows" { "0" } else { "1" })
+antlr := if ANTLR == "" { if host_os == "windows" { "0" } else { "1" } } else { ANTLR }
+
 # Darwin 测试/自举统一使用随编译器分发的 SDK stub；显式 SDKROOT 仍优先。
 # 固定 SDK 一旦准备好，就用它记录里的 SDKROOT：自举闭包末尾的 -lc++ 只能由
 # 宿主真实 SDK 解析（bundled stub 不含 libc++）。SDKROOT 为空串时编译器按
@@ -169,19 +196,12 @@ install_prog := if INSTALL == "" { "install" } else { INSTALL }
 prefix_root := destdir + prefix
 
 # 每平台专项门的命令：变量替旧 Makefile 里的条件赋值。
-runtime_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-runtime.py --compiler-path " + quote(yh_run) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + quote(yh_run) + " --llvm-x64" } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-linux-arm64.py --compiler-path " + quote(yh_run) } else { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + quote(yh_run) }
-cache_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + quote(yh) + " --target aarch64-unknown-linux-gnu" } else { py + " " + quote(root) + "/tests/selfhost/link-cache.py --compiler-path " + quote(yh) }
+runtime_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-runtime.py --compiler-path " + yh_run } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + yh_run + " --llvm-x64" } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-linux-arm64.py --compiler-path " + yh_run } else { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + yh_run }
+cache_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-cache.py --compiler-path " + yh } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + yh } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + yh + " --target aarch64-unknown-linux-gnu" } else { py + " " + quote(root) + "/tests/selfhost/link-cache.py --compiler-path " + yh }
 modcheck_flags := if llvm_host == "" { "" } else { "--backend llvm" }
-selfhost_flags_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-selfhost-flags.py --compiler-path " + quote(yh_run) } else { "true" }
-
-# Windows 的默认 locale 是 GBK，而门禁脚本都用 text=True 读编译器输出；
-# 强制 Python UTF-8 模式，避免中文诊断在子进程管道里解码失败（3.15 起默认如此）。
-export PYTHONUTF8 := "1"
-
-# ANTLR 参考语法门：需要 Java + antlr jar。Windows 宿主默认关闭（与 CI 口径一致：
-# 参考层不是每台机器都具备的前置），显式 YH_ANTLR=1 可强制运行。
-ANTLR := env_var_or_default("YH_ANTLR", if host_os == "windows" { "0" } else { "1" })
-antlr := if ANTLR == "" { if host_os == "windows" { "0" } else { "1" } } else { ANTLR }
+selfhost_flags_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-selfhost-flags.py --compiler-path " + yh_run } else { "true" }
+# 链接死代码回收门（J6-L1）：Darwin 缺省 -dead_strip 生效、可回退、进链接键。
+dead_strip_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin-dead-strip.py --compiler-path " + yh_run } else { "true" }
 
 # 默认目标：源比 yh 新时冷编，否则什么都不做（等价旧 make 默认目标）。
 default: _ensure_built
@@ -196,16 +216,23 @@ _prepare:
     @mkdir -p "{{ root }}/tmp"
     @a=$(cd "{{ root }}/tmp/llvm-migration" 2>/dev/null && pwd -P); b=$(cd "{{ cache_root }}" 2>/dev/null && pwd -P); if [ "$a" != "$b" ]; then ln -sfn "{{ cache_root }}" "{{ root }}/tmp/llvm-migration"; fi
 
-# build：强制冷编（清除 compiler/.build，从种子完整重编）。
+# _prepare_windows_sdk：Windows 宿主构建/测试前保证导入库已生成（否则种子链接
+# yh.exe 与用户程序都会报找不到 kernel32.lib）。非 Windows 宿主不做任何事。
+[private]
+_prepare_windows_sdk:
+    @if [ "{{ host_os }}" = "windows" ]; then "{{ py }}" "{{ root }}/tools/windows-sdk.py" generate >/dev/null; fi
+
+# build：强制冷编（清除 compiler/.build 与 BUILD_CACHE，从种子完整重编）。
 build: verify-seed _prepare _prepare_windows_sdk
     rm -rf "{{ root }}/compiler/.build"
-    {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
+    @if [ -n "{{ build_cache }}" ]; then rm -rf "{{ build_cache }}"; fi
+    YH_BUILD_CACHE="{{ build_cache }}" {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
 
-# dev：开发迭代用增量构建。与 build 的差别是不删除 compiler/.build，
+# dev：开发迭代用增量构建。与 build 的差别是不删除 .build / BUILD_CACHE，
 # 让编译器自己的对象/IR 缓存命中未变模块；只用于本地迭代，
 # 不用于种子候选与固定点验收（那些必须冷编）。
 dev: verify-seed _prepare _prepare_windows_sdk
-    {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
+    YH_BUILD_CACHE="{{ build_cache }}" {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
 
 # verify-seed：核对种子哈希（水合/复制损坏时尽早失败）。
 verify-seed:
@@ -280,7 +307,7 @@ uninstall:
 # 先写 .tmp 再 mv，避免并发读到半个 70MB 二进制。
 stage-yh: _prepare_windows_sdk _ensure_built
     @if [ "{{ fast_stage }}" = "1" ]; then mkdir -p "{{ fast_dir }}"; cp -f "{{ yh }}" "{{ yh_run }}.tmp" && mv -f "{{ yh_run }}.tmp" "{{ yh_run }}"; fi
-    @YH_STAGE_PATH="{{ yh_run }}" {{ py }} -c "import os;p=os.environ['YH_STAGE_PATH'];st=os.stat(p);print('编译器:',p,st.st_size,'bytes mtime=',int(st.st_mtime))"
+    @YH_STAGE_PATH="{{ yh_run }}" {{ py }} -c "import os;p=os.environ['YH_STAGE_PATH'];st=os.stat(p);print(f'编译器: {p} {st.st_size} bytes mtime={int(st.st_mtime)}')" 
     @if [ "{{ host_os }}" = "macos" ] && [ "{{ fast_stage }}" = "1" ]; then ln -sfn "{{ root }}/compiler/darwin-sdk" "{{ fast_dir }}/darwin-sdk"; fi
 
 # test：三层回归——ANTLR 参考语法 + 编译器语法模式 + 运行语义语料。
@@ -290,6 +317,8 @@ test: stage-yh
     {{ py }} "{{ root }}/tests/yh/check.py" --compiler --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" {{ run_work_flag }}
     {{ py }} "{{ root }}/tests/modules/test-check.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/build-cache/check.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/modules/opt-level.py" --compiler-path "{{ yh_run }}" --workdir "{{ root }}/tmp/dep-opt"
     @cd "{{ root }}/libs" && "{{ yh_run }}" test --timeout 60
     {{ py }} "{{ root }}/tools/compiler-tests.py" --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tests/fmt/interp.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/fmt-interp"
@@ -305,6 +334,10 @@ quick: stage-yh
 
 # test-all：旧入口别名，等价 test。
 test-all: test
+
+# size-report：产物体积报告（J6 度量物，软门；不进门禁）。
+size-report: stage-yh
+    {{ py }} "{{ root }}/tools/size-report.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/size-report"
 
 # test-toml：TOML 测试（API/所有权/资源/文件断言已迁入 libs/toml/99_tests.yh）。
 test-toml: stage-yh
@@ -390,6 +423,7 @@ selfhost-native: stage-yh
     {{ py }} "{{ root }}/tests/selfhost/lex-stats.py" --compiler-path "{{ yh_run }}"
     {{ runtime_test }}
     {{ selfhost_flags_test }}
+    {{ dead_strip_test }}
     {{ py }} "{{ root }}/tests/selfhost/check-command.py" --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tests/selfhost/llvm-architecture.py" --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tests/selfhost/llvm-function-cache.py" --compiler-path "{{ yh_run }}"
@@ -465,46 +499,6 @@ test-llvm-darwin: stage-yh
     {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-link.py" --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tools/llvm-darwin-host.py" status --host darwin-aarch64
 
-# —— Windows 目标（W1-4）：导入库 stub ——
-# 仓库只保存文本 .def 与 manifest（compiler/windows-sdk/）；.lib 按需生成到缓存根，
-# 因为仓库根 .gitignore 把 *.lib 当构建产物。编译器侧消费（链接模板）在 W1-5。
-
-# windows-sdk：按清单生成 Windows 导入库（kernel32.lib 等）。
-windows-sdk:
-    "{{ py }}" "{{ root }}/tools/windows-sdk.py" generate
-
-# _prepare_windows_sdk：Windows 宿主构建/测试前保证导入库已生成（否则种子链接
-# yh.exe 与用户程序都会报找不到 kernel32.lib）。非 Windows 宿主不做任何事。
-[private]
-_prepare_windows_sdk:
-    @if [ "{{ host_os }}" = "windows" ]; then "{{ py }}" "{{ root }}/tools/windows-sdk.py" generate >/dev/null; fi
-
-# test-windows-sdk：W1-4 门禁——def 与清单一致、生成确定性、导入面只含 KERNEL32。
-test-windows-sdk:
-    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-sdk.py"
-
-# test-windows-abi：W1-2b 门禁——Win64 按值聚合与 clang 编出的 C 桩互操作（4/8/12 字节 + 纯浮点）。
-test-windows-abi: stage-yh windows-sdk
-    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-abi.py" --compiler-path "{{ yh_run }}" --sdk-root "{{ root }}/tmp/llvm-migration/windows-sdk" --workdir "{{ root }}/tmp/llvm-windows-abi" --manifest-out "{{ root }}/tmp/windows-abi/manifest.json"
-
-# test-windows-target：W1 目标门——交叉出 COFF/PE、零 CRT 运行时、导入面、可复现性、负例。
-# **编译侧目标**：在 WSL/Linux/macOS（能跑现有种子）执行；运行侧另跑 run-exe.py。
-# 同时写出运行清单（tmp/windows-target/manifest.json），供 Windows 侧跑：
-#   python3 tests/windows/run-exe.py --manifest tmp/windows-target/manifest.json
-test-windows-target: stage-yh windows-sdk
-    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-target.py" --compiler-path "{{ yh_run }}" --manifest-out "{{ root }}/tmp/windows-target/manifest.json" --workdir "{{ root }}/tmp/windows-target"
-
-# test-windows-corpus：整份运行语料按 Windows 目标交叉编译并写清单（编译侧，W1-7）。
-# 编译侧只需 LLVM 闭包 + 导入库；运行交给 run-windows-corpus（真 Windows）。
-test-windows-corpus: stage-yh windows-sdk
-    YH_WINDOWS_SDK="{{ root }}/tmp/llvm-migration/windows-sdk" "{{ py }}" "{{ root }}/tests/yh-run/check.py"         --compiler "{{ yh_run }}" --target x86_64-pc-windows-msvc --run-platform windows-x64         --emit-manifest "{{ root }}/tmp/windows-corpus/manifest.json"         --workdir "{{ root }}/tmp/windows-corpus" --jobs {{ llvm_jobs }} --quiet
-
-# run-windows-corpus：在真实 Windows 上执行上一步的清单（运行侧）。
-# 只在 Windows 侧跑（WSL 里跨解释器调用会撞 UNC cwd 限制）：清单是仓库相对路径，
-# 跨机器/跨挂载点都能用；WSL 侧只负责 test-windows-corpus。
-run-windows-corpus:
-    "{{ py }}" "{{ root }}/tests/windows/run-exe.py" --manifest "{{ root }}/tmp/windows-corpus/manifest.json"
-
 # explorer：启动 yh Compiler Explorer（本地浏览器图形界面）。
 explorer:
     {{ py }} "{{ root }}/tools/yh-explorer.py"
@@ -525,10 +519,11 @@ arch-check:
 test-arch-check:
     {{ py }} "{{ root }}/tests/tools/arch-check/check.py"
 
-# clean：删除 yh 与编译器缓存（保留 tmp 下的 LLVM 闭包缓存）。
+# clean：删除 yh 与编译器缓存（含 BUILD_CACHE；保留 tmp 下的 LLVM 闭包缓存）。
 clean:
     rm -f "{{ yh }}"
     rm -rf "{{ root }}/compiler/.build" "{{ root }}/tmp/selfbuild-gate" "{{ root }}/tmp/selfhost" "{{ root }}/tmp/modcheck"
+    @if [ -n "{{ build_cache }}" ]; then rm -rf "{{ build_cache }}"; fi
 
 # help：列出全部可运行目标（等价 just --list）。
 help:
@@ -561,6 +556,5 @@ _ensure_built:
       if [ "$need" = 0 ] && [ -n "$(find compiler -maxdepth 2 -name '*.yh' -newer "$target" -print -quit)" ]; then need=1; fi
     fi
     if [ "$need" = 1 ]; then
-      exec just SEED="{{ seed }}" SEED_DEST="{{ seed_dest }}" YH_LLVM_HOST="{{ YH_LLVM_HOST }}" YH_LLVM_CACHE="{{ cache_root }}" build
+      exec env YH_BUILD_CACHE="{{ build_cache }}" just SEED="{{ seed }}" SEED_DEST="{{ seed_dest }}" YH_LLVM_HOST="{{ YH_LLVM_HOST }}" YH_LLVM_CACHE="{{ cache_root }}" build
     fi
-

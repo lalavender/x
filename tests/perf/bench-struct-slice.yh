@@ -1,0 +1,99 @@
+// 结构体与切片传递基准：Vec3 数组按切片视图传参，重复 argv[1] 轮（缺省 200）。
+// 覆盖结构体字段读、切片视图传参与 for-in 遍历；输出 checksum=<加权和>。
+
+const LANES int = 1024
+const MOD int = 1000000007
+
+// Vec3：三个 int 字段，24 字节、跨 8 字节边界。
+struct Vec3 {
+    x int
+    y int
+    z int
+}
+
+// lcg_next：填充用的 64 位线性同余发生器（int 是 32 位，种子必须用 i64）。
+fn lcg_next(seed i64) i64 {
+    return (seed * 1103515245 + 12345) % 2147483648
+}
+
+// scale_sum：对切片内每个元素算 (x + 2y + 3z) * k 后累加取模。
+fn scale_sum(vs []Vec3, k int) int {
+    let total int = 0
+    for v in vs {
+        total = (total + (v.x + v.y * 2 + v.z * 3) * k) % MOD
+    }
+    return total
+}
+
+// index_sum：与 scale_sum 等价的显式下标写法，供自检交叉核对。
+fn index_sum(vs []Vec3, from int, to int, k int) int {
+    let total int = 0
+    let i int = from
+    for i < to {
+        total = (total + (vs[i].x + vs[i].y * 2 + vs[i].z * 3) * k) % MOD
+        i += 1
+    }
+    return total
+}
+
+// parse_count：十进制文本转 int；非法字符视为整体非法，回退 fallback。
+fn parse_count(text *char, fallback int) int {
+    let value int = 0
+    let i int = 0
+    if (text == 0 || text[0] == 0) {
+        return fallback
+    }
+    for text[i] != 0 {
+        // char → u8 → int 显式逐级转换；48/57 是 '0'/'9' 的码位。
+        let c int = text[i].to_type(u8).to_type(int)
+        if (c < 48 || c > 57) {
+            return fallback
+        }
+        value = value * 10 + (c - 48)
+        i += 1
+    }
+    return value
+}
+
+fn main(argc int, argv **char) int {
+    let rounds int = 16000
+    if (argc > 1) {
+        let parsed int = parse_count(argv[1], 0)
+        if (parsed > 0) {
+            rounds = parsed
+        }
+    }
+    let points [LANES]Vec3
+    let seed i64 = 20240101
+    let j int = 0
+    for j < LANES {
+        seed = lcg_next(seed)
+        let x int = (seed % 1000).to_type(int)
+        seed = lcg_next(seed)
+        let y int = (seed % 1000).to_type(int)
+        seed = lcg_next(seed)
+        let z int = (seed % 1000).to_type(int)
+        points[j] = Vec3{ x: x, y: y, z: z }
+        j += 1
+    }
+    // 数组先转成切片视图，再按区间取子视图（结构体数组不直接切片）。
+    let whole []Vec3 = points.to_type([]Vec3)
+    let checksum int = 0
+    let r int = 0
+    for r < rounds {
+        checksum = (checksum + scale_sum(whole, r + 1)) % MOD
+        r += 1
+    }
+    // 自检：整段用显式下标重算一次，切片的 for-in 与下标读必须一致。
+    if (scale_sum(whole, 3) != index_sum(whole, 0, LANES, 3)) {
+        printf("自检失败：切片遍历与下标读取不一致\n")
+        return 3
+    }
+    // 自检：缺省规模下 checksum 必须等于参照实现（tools/perf-product.py）冻结的值。
+    if (rounds == 16000 && checksum != 9354506) {
+        printf("自检失败：checksum 与期望值不一致\n")
+        return 5
+    }
+    printf("checksum=%d\n", checksum)
+    return 0
+}

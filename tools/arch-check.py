@@ -31,50 +31,55 @@ ALLOWED = {
     "gen": set(),
     "ir": set(),
     "lex": {"gen"},
-    "comptime": {"gen"},
+    # comptime 只有一处窄口读（待定数组长度时的文件下标越界检查），
+    # 走 proj.file_count() 而不是自己拿项目表。
+    "comptime": {"gen", "proj"},
     "builtin": {"gen"},
-    "ast": {"gen", "comptime", "ir"},
+    # proj：项目/模块/文件表 + 目标/构建配置（2026-10-26 B1-1 自 gen/build 拆出）。
+    # 它是前端与构建层共用的数据层，只允许依赖 gen；一旦反向依赖就成环。
+    "proj": {"gen"},
+    "ast": {"gen", "comptime", "ir", "proj"},
     # lower：CheckedModule → IRModule（2026-10-25 B3-2 自 ast 拆出）。
     # 只吃受检快照，不得 import parse/check/build；ast 不得反向 import lower。
-    "lower": {"gen", "ir", "ast"},
-    "check": {"gen", "ast"},
-    "parse": {"gen", "lex", "comptime", "ast", "ir"},
+    "lower": {"gen", "ir", "ast", "proj"},
+    "check": {"gen", "ast", "proj"},
+    "parse": {"gen", "lex", "comptime", "ast", "ir", "proj"},
     "backend": {"gen", "ir"},
+    # link：工具链调用层（汇编、链接驱动、内嵌 lld、进程、时钟）
+    # 2026-10-26 B2-2 自 build 拆出。它必须位于 build 之下、proj 之上：
+    # 只允许 gen/proj/backend，不得 import build（否则 link ↔ build 成环）。
+    "link": {"gen", "proj", "backend"},
     # build 是构建引擎（A2c 后承担项目模型 + 链接 + 调度 + 模块发射），
     # 位于前端/后端之上，可依赖全部下层；main 只剩 CLI 与测试执行器。
     "build": {"gen", "lex", "parse", "comptime", "ast", "check", "ir",
-              "backend", "builtin", "lower"},
+              "backend", "builtin", "lower", "proj", "link"},
     # testkit：语言内测试执行器（yh test 子命令的实现），位于 build 之上。
     # 模块名不能叫 test——`test "..." {}` 是语言关键字。
-    "testkit": {"gen", "parse", "build"},
+    "testkit": {"gen", "parse", "build", "proj", "link"},
+    # cmdline：命令行声明与解析（CLI-R）。唯一允许依赖标准库 libs/cli 的模块，
+    # 这样 `cmd`（module main）自身保持「参数映射 + 调用面」，不直接引标准库。
+    "cmdline": {"gen", "libs"},
     "main": {"gen", "lex", "comptime", "ast", "check", "parse", "ir",
-             "backend", "builtin", "build", "testkit", "lower"},
-}
+             "backend", "builtin", "build", "testkit", "lower", "proj", "link",
+             "cmdline"},}
 
 # —— 预算（现状即上限，只减不增）——
 # 数值为 2026-10-24 实测；下调请同步改这里，上调需在 finish.md 说明理由。
 BUDGETS = {
-    "max_file_lines": 2285,        # module_build.yh（A2c 拆分后必须下降；W2-4b --emit-module
-                                   # 独立子进程重建主项目与拓扑序 +10）
-    "max_function_lines": 709,     # mb_link 709：W1-3c 起 Windows 链接闭包（导入库 + 栈探测桩）
-                                   # 在 mb_link 里解析，W2-4b 无 fork 直接写最终产物 +12；
-                                   # B2 拆 link 簇时随之下沉
-    "max_module_lines": 410,       # main（A6 后只剩 driver + api；W2-4a/W2-4b 的子进程入口分派 +24；
-                                   # W2-9 --no-firc 与 --emit-module 参数上限 +5）
-    "max_testkit_lines": 1688,     # testkit（YT2d-3 同项目测试锁 +37；W2-4b 模块子进程测试模式与
-                                   # 入口标记 +79；W2-7 十进制用例号 +17；后续应拆分而非增长）
-    "max_build_lines": 11627,      # build（PC3 +6、PC2 v3 +5、PC2b +20、PC7a +25、RB1 父存活检查 +19、
-                                   # W0-2a windows 标记 +2；W1-5 build/windows_link.yh +260；W1-3b 入口 +6；
-                                   # W1-6 link_inputs 的 .lib/.dll 分支 +24；W1-3c 栈探测桩 +26；W2-1/W2-3a 宿主文件 +80；W2-4a 串行分支与 pid 守卫 +34；
-                                   # W2-2c/W2-4b 子进程模块、无 fork 直接输出与链接头注释 +122；
-                                   # 2026-11-02 链接子进程的 stdout/stderr 重定向 + 诊断回放 +50、W2-7 单文件测试的
-                                   # scan-filter 收窄（pj_scan_applies）+42；W2-9 冷缓存标记/标准库路径
-                                   # 规范化/-lm 跳过 +32（见 finish）
-                                   # ——随 B2 的 link 簇拆出下沉）
-    "max_cmd_share_pct": 1,        # 405 / 51484 ≈ 0.8%
-    "max_globals": 190,
-    "max_g_call_sites": 172,      # W1-5 windows：SDK 查找 + COFF 链接分派各 1 处；W2-4b 模块子进程 1 处；
-                                   # W2-7 单文件测试的 pj_scan_applies 判定 3 处
+    "max_file_lines": 2042,        # module_build.yh（A2c 拆分后必须下降）
+    "max_function_lines": 360,     # mb_link 674（含前导注释的上界口径）
+    "max_module_lines": 387,       # main（A6 后只剩 driver + api；B1-1 +2、B1-2 绑定存储 +4）
+    "max_testkit_lines": 1617,     # testkit（YT2d-3 +37；B1-1 迁表后 -14；W2-7 无 fork 子进程的
+                                   # 十进制用例号/模块内文件序号/--filter UTF-8 规整 +31）
+    "max_build_lines": 6946,      # build（B1/B2 拆分口径；+232 UF1；W2 的 windows 目标/宿主文件、
+                                  # 模块子进程与 cold 标记 +299，见 finish.md 2026-11-03）
+    "max_link_lines": 4272,      # link（B2-2 新建 + B2-3 阶段化 3,657；W1-5/W2 的 COFF 链接
+                                 # （windows_link.yh 前缀/SDK/子进程 worker）与 .lib/.dll 输入校验 +509）
+    "max_proj_lines": 1396,        # proj（B1-1 表/路径 + B2-1 产物键 + YH_BUILD_CACHE 缓存根；
+                                   # W1-6 windows 目标组 5/6 与盘符绝对路径 +12）
+    "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
+    "max_globals": 172,
+    "max_g_call_sites": 0,      # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
@@ -220,6 +225,8 @@ def main():
     budget("max_module_lines", per_module.get("main", 0), "main")
     budget("max_build_lines", per_module.get("build", 0), "build")
     budget("max_testkit_lines", per_module.get("testkit", 0), "testkit")
+    budget("max_proj_lines", per_module.get("proj", 0), "proj")
+    budget("max_link_lines", per_module.get("link", 0), "link")
     budget("max_cmd_share_pct", cmd_share, "%")
     budget("max_globals", globals_n)
     budget("max_g_call_sites", g_calls)
@@ -237,7 +244,9 @@ def main():
     print(f"  最大函数 {max_func[0]} 行（{max_func[1]}）")
     g_top = "  ".join(f"{k}={v}" for k, v in
                       sorted(g_by_mod.items(), key=lambda x: -x[1])[:4])
-    print(f"  main 占比 {cmd_share}%；模块级可变 let {globals_n}；gen.G() 调用点 {g_calls}（{g_top}）")
+    g_detail = f"（{g_top}）" if g_top else ""
+    print(f"  main 占比 {cmd_share}%；模块级可变 let {globals_n}；"
+          f"gen.G() 调用点 {g_calls}{g_detail}")
     print(f"  未判空 malloc {len(unchecked)}；未接线 pub {len(unwired)}；"
           f"容量安全追加点 {cap_appends}")
 

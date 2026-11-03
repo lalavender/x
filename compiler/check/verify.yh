@@ -1,13 +1,14 @@
 module check
 import ast
 import gen
+import proj
 
 // 本模块只读 AstView 借用的 arena；不修改、不释放 AST 或解析状态。
 
 // check_expr：确认 AST 源范围、同文件子节点和后序编号完整。
 fn check_expr(view *ast.AstView) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_ast_capture == 0) {
+    let gs *gen.TaskCtx = gen.task()
+    if (gs.c_ast_capture == 0) {
         return 0
     }
     let i int = 0
@@ -19,17 +20,17 @@ fn check_expr(view *ast.AstView) int {
             return -1
         }
         if (node.kind != ast.AST_EXPR_ARG_LIST && node.kind != ast.AST_EXPR_STRUCT_FIELD
-            && (node.type_id < 0 || node.type_id >= gs.task.t_type_n)) {
+            && (node.type_id < 0 || node.type_id >= gs.t_type_n)) {
             return -1
         }
-        if (node.file_id >= gs.p_file_n || node.owner_decl < 0
-            || node.owner_decl >= gs.p_files[node.file_id].decl_n
+        if (node.file_id >= proj.ctx().file_n || node.owner_decl < 0
+            || node.owner_decl >= proj.ctx().files[node.file_id].decl_n
             || (node.is_const != 0 && node.is_const != 1)
             || (node.is_lit != 0 && node.is_lit != 1)
             || (node.lit_big != 0 && node.lit_big != 1)) {
             return gen.fail("内部错误：表达式 AST 绑定或常量事实无效")
         }
-        if (node.layout_type_id < -1 || node.layout_type_id >= gs.task.t_type_n
+        if (node.layout_type_id < -1 || node.layout_type_id >= gs.t_type_n
             || (node.layout_type_id >= 0
                 && (node.kind != ast.AST_EXPR_PRIMARY || node.op != gen.TK_SIZEOF))) {
             return gen.fail("内部错误：表达式 AST sizeof 布局依赖无效")
@@ -40,7 +41,7 @@ fn check_expr(view *ast.AstView) int {
                 || node.sym_flags != 0 || node.sym_offset != 0
                 || node.binding_row != -1))
             || (node.sym_id >= 0 && (node.sym_type_id < 0
-                || node.sym_type_id >= gs.task.t_type_n
+                || node.sym_type_id >= gs.t_type_n
                 || node.sym_kind < gen.SYM_VAR || node.sym_kind > gen.SYM_FN))) {
             return gen.fail("内部错误：表达式 AST 符号快照无效")
         }
@@ -80,8 +81,8 @@ fn check_expr(view *ast.AstView) int {
         }
         if (node.kind == ast.AST_EXPR_STRUCT_INIT
             && (node.child0 < 0 || node.child1 >= 0 || node.child2 >= 0
-                || (gs.task.t_types[node.type_id].kind != gen.TY_STRUCT
-                    && gs.task.t_types[node.type_id].kind != gen.TY_UNION))) {
+                || (gs.t_types[node.type_id].kind != gen.TY_STRUCT
+                    && gs.t_types[node.type_id].kind != gen.TY_UNION))) {
             return gen.fail("内部错误：结构体/联合体初始化 AST 形态无效")
         }
         let j int = 0
@@ -107,8 +108,8 @@ fn check_expr(view *ast.AstView) int {
 
 // check_stmt：检查父子树、根链、表达式边与源码区间的一致性。
 fn check_stmt(view *ast.AstView) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_ast_capture == 0) {
+    let gs *gen.TaskCtx = gen.task()
+    if (gs.c_ast_capture == 0) {
         return 0
     }
     if (view.stmt_current != -1 || view.expr_parse_depth != 0) {
@@ -224,18 +225,18 @@ fn check_stmt(view *ast.AstView) int {
     for bi < view.binding_count {
         let binding ast.AstBinding = view.bindings[bi]
         if (binding.id < 0 || binding.sym_id < 0 || binding.sym_type_id < 0
-            || binding.sym_type_id >= gs.task.t_type_n
+            || binding.sym_type_id >= gs.t_type_n
             || (binding.sym_kind != gen.SYM_VAR && binding.sym_kind != gen.SYM_CONST)
-            || binding.file_id < 0 || binding.file_id >= gs.p_file_n
+            || binding.file_id < 0 || binding.file_id >= proj.ctx().file_n
             || binding.owner_decl < 0
-            || binding.owner_decl >= gs.p_files[binding.file_id].decl_n
-            || (gs.p_files[binding.file_id].decls[binding.owner_decl].kind
+            || binding.owner_decl >= proj.ctx().files[binding.file_id].decl_n
+            || (proj.ctx().files[binding.file_id].decls[binding.owner_decl].kind
                 != gen.TK_FN
-                && gs.p_files[binding.file_id].decls[binding.owner_decl].kind
+                && proj.ctx().files[binding.file_id].decls[binding.owner_decl].kind
                 != gen.TK_TEST)
-            || binding.name_token < gs.p_files[binding.file_id].decls[binding.owner_decl].start
-            || binding.name_token >= gs.p_files[binding.file_id].decls[binding.owner_decl].end
-            || gs.p_files[binding.file_id].tokens[binding.name_token].kind != gen.TOK_IDENT
+            || binding.name_token < proj.ctx().files[binding.file_id].decls[binding.owner_decl].start
+            || binding.name_token >= proj.ctx().files[binding.file_id].decls[binding.owner_decl].end
+            || proj.ctx().files[binding.file_id].tokens[binding.name_token].kind != gen.TOK_IDENT
             || (binding.is_param != 0 && binding.is_param != 1)
             || (binding.is_param != 0 && (binding.stmt_id != -1
                 || (binding.sym_flags & gen.F_PARAM) == 0))
@@ -348,16 +349,16 @@ fn check_decl(view *ast.AstView) int {
 
 // check_function：确认 arena 切片不重叠，且每条引用留在所属函数内。
 fn check_function(view *ast.AstView) int {
-    let gs *gen.GenState = gen.G()
-    if (gs.task.c_ast_capture == 0) { return 0 }
+    let gs *gen.TaskCtx = gen.task()
+    if (gs.c_ast_capture == 0) { return 0 }
     if (view.function_active != 0 || view.function_count > view.function_cap) {
         return gen.fail("内部错误：函数 AST 上下文未封存")
     }
     let i int = 0
     for i < view.function_count {
         let ctx ast.AstFunctionContext = view.function_nodes[i]
-        if (ctx.file_id < 0 || ctx.file_id >= gs.p_file_n || ctx.owner_decl < 0
-            || ctx.owner_decl >= gs.p_files[ctx.file_id].decl_n
+        if (ctx.file_id < 0 || ctx.file_id >= proj.ctx().file_n || ctx.owner_decl < 0
+            || ctx.owner_decl >= proj.ctx().files[ctx.file_id].decl_n
             || ctx.decl_row < 0 || ctx.decl_row >= view.decl_count
             || ctx.expr_first < 0 || ctx.expr_after < ctx.expr_first
             || ctx.expr_after > view.expr_count || ctx.stmt_first < 0

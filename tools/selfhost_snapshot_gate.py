@@ -61,7 +61,7 @@ def _matches_platform(stem: str, system: str, arch: str) -> bool:
     return True
 
 
-def expected_artifacts(project: Path):
+def expected_artifacts(project: Path, follow_dependencies: bool = True):
     """按 project.toml 的本地项目边界与显式 path 依赖发现完整产物集。
 
     RS3b 按文件对象布局：每个源文件一个 asm/<tag>/<stem>.s（stem 为去 .yh
@@ -127,7 +127,7 @@ def expected_artifacts(project: Path):
         dependencies = re.search(
             r"(?ms)^\[dependencies\]\s*(.*?)(?=^\[|\Z)", manifest
         )
-        if dependencies:
+        if dependencies and follow_dependencies:
             for dependency in re.finditer(
                 r'^\s*[A-Za-z_][A-Za-z0-9_-]*\s*=\s*\{[^}]*?\bpath\s*=\s*"([^"]+)"[^}]*\}',
                 dependencies.group(1), re.MULTILINE,
@@ -139,15 +139,48 @@ def expected_artifacts(project: Path):
     return collect(project, set())
 
 
-def expected_llvm_artifacts(project: Path):
-    """把同一项目模块集合映射为 LLVM 文本与接口快照路径（llvm/<tag>.ll）。"""
+def _llvm_view(paths):
+    """把 asm 产物集合映射为 LLVM 文本视图（llvm/<tag>.ll），接口路径原样保留。"""
     result = set()
-    for path in expected_artifacts(project):
+    for path in paths:
         if path.startswith("asm/") and path.endswith(".stub.s"):
             tag = path[len("asm/"):-len(".stub.s")].split("/")[0]
             result.add(f"llvm/{tag}.ll")
         elif not path.startswith("asm/"):
             result.add(path)
+    return result
+
+
+def expected_llvm_artifacts(project: Path, follow_dependencies: bool = True):
+    """把同一项目模块集合映射为 LLVM 文本与接口快照路径（llvm/<tag>.ll）。"""
+    return _llvm_view(expected_artifacts(project, follow_dependencies))
+
+
+def dependency_paths(project: Path):
+    """返回 project.toml 里 [dependencies] 的本地 path 依赖（已解析的绝对路径）。"""
+    manifest = (project / "project.toml").read_text()
+    section = re.search(r"(?ms)^\[dependencies\]\s*(.*?)(?=^\[|\Z)", manifest)
+    if not section:
+        return []
+    result = []
+    for dependency in re.finditer(
+        r'^\s*[A-Za-z_][A-Za-z0-9_-]*\s*=\s*\{[^}]*?\bpath\s*=\s*"([^"]+)"[^}]*\}',
+        section.group(1), re.MULTILINE,
+    ):
+        result.append((project / dependency.group(1)).resolve())
+    return result
+
+
+def dependency_artifacts(project: Path, llvm: bool = False):
+    """返回 path 依赖项目的模块产物集合。
+
+    依赖项目的模块按需编译：该项目实际 import 了哪些模块才会被发布，
+    因此这些产物「允许出现但不要求」，由 snapshot_errors 的 allowed 参数承载。
+    """
+    result = set()
+    for dependency in dependency_paths(project):
+        paths = expected_artifacts(dependency, follow_dependencies=False)
+        result.update(_llvm_view(paths) if llvm else paths)
     return result
 
 
@@ -291,7 +324,7 @@ def llvm_snapshot_errors(snapshot, expected, triple: str):
     return errors
 
 
-def snapshot_errors(snapshots, expected):
+def snapshot_errors(snapshots, expected, allowed=frozenset()):
     """拒绝空快照、缺失/多余产物及相邻代内容差异。"""
     errors = []
     if not expected:
@@ -309,14 +342,14 @@ def snapshot_errors(snapshots, expected):
             if not contents[path] and not path.startswith("asm/"):
                 errors.append(f"{name} 产物为空：{path}")
         missing = expected - actual
-        extra = actual - expected
+        extra = actual - expected - set(allowed)
         if missing:
             errors.append(f"{name} 缺少产物：{', '.join(sorted(missing))}")
         if extra:
             errors.append(f"{name} 有非预期产物：{', '.join(sorted(extra))}")
 
     for (left_name, left), (right_name, right) in zip(snapshots, snapshots[1:]):
-        for path in sorted(expected & set(left) & set(right)):
+        for path in sorted((expected | set(allowed)) & set(left) & set(right)):
             if left[path] != right[path]:
                 errors.append(f"{left_name} 与 {right_name} 内容不一致：{path}")
     return errors

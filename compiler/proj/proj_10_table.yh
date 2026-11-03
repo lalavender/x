@@ -1,0 +1,323 @@
+module proj
+import gen
+
+// ============================================================================
+// proj_10_table.yh —— 项目表唯一写者（B1-1，2026-10-26）
+//
+// 三张表（项目/模块/文件）与导入平行数组的登记入口全部收在本文件：
+// 只有这里的 proj_add_* 会改变表规模与内容，构建层的扫描器（build 模块的
+// project_index/project_resolve）只调用这些函数，不直接写 ProjectCtx。
+//
+// 扩容统一走"翻倍 + memcpy + free"；分配失败由 gen.fail 报告并返回 -1，
+// 调用方按 -1 向上传播（保持原 build/project_state.yh 的语义）。
+// ============================================================================
+
+// add_project：登记一个项目，返回其在 projs 中的下标；内存不足返回 -1。
+pub fn add_project(root_off int, root_len int) int {
+    if (g_proj.proj_n == g_proj.proj_cap) {
+        let ncap int = g_proj.proj_cap * 2
+        if (ncap == 0) {
+            ncap = 8
+        }
+        let nd *PProj = malloc((ncap * sizeof(PProj)).to_type(u64)).to_type(*PProj)
+        if (nd == 0) {
+            gen.fail("内存分配失败")
+            return -1
+        }
+        if (g_proj.proj_n > 0) {
+            memcpy(nd, g_proj.projs, (g_proj.proj_n * sizeof(PProj)).to_type(u64))
+        }
+        free(g_proj.projs)
+        g_proj.projs = nd
+        g_proj.proj_cap = ncap
+    }
+    g_proj.projs[g_proj.proj_n].root_off = root_off
+    g_proj.projs[g_proj.proj_n].root_len = root_len
+    g_proj.projs[g_proj.proj_n].name_off = -1
+    g_proj.projs[g_proj.proj_n].name_len = 0
+    g_proj.projs[g_proj.proj_n].src_off = -1
+    g_proj.projs[g_proj.proj_n].src_len = 0
+    g_proj.projs[g_proj.proj_n].ver_off = -1
+    g_proj.projs[g_proj.proj_n].ver_len = 0
+    g_proj.projs[g_proj.proj_n].os_code = 0
+    g_proj.projs[g_proj.proj_n].arch_code = 0
+    g_proj.projs[g_proj.proj_n].deps = 0
+    g_proj.projs[g_proj.proj_n].dep_n = 0
+    g_proj.projs[g_proj.proj_n].dep_cap = 0
+    g_proj.projs[g_proj.proj_n].mods = 0
+    g_proj.projs[g_proj.proj_n].mod_n = 0
+    g_proj.projs[g_proj.proj_n].mod_cap = 0
+    g_proj.projs[g_proj.proj_n].c_sources = 0
+    g_proj.projs[g_proj.proj_n].c_source_n = 0
+    g_proj.projs[g_proj.proj_n].c_source_cap = 0
+    g_proj.projs[g_proj.proj_n].c_objects = 0
+    g_proj.projs[g_proj.proj_n].c_object_n = 0
+    g_proj.projs[g_proj.proj_n].c_object_cap = 0
+    g_proj.projs[g_proj.proj_n].c_libs = 0
+    g_proj.projs[g_proj.proj_n].c_lib_n = 0
+    g_proj.projs[g_proj.proj_n].c_lib_cap = 0
+    g_proj.projs[g_proj.proj_n].link_groups = 0
+    g_proj.projs[g_proj.proj_n].link_group_n = 0
+    g_proj.projs[g_proj.proj_n].link_group_cap = 0
+    g_proj.proj_n += 1
+    return g_proj.proj_n - 1
+}
+
+// find_project_root：按根路径查已登记项目，未找到返回 -1。
+pub fn find_project_root(root_off int, root_len int) int {
+    let i int = 0
+    for i < g_proj.proj_n {
+        if (g_proj.projs[i].root_len == root_len
+            && gen.task().np_data[g_proj.projs[i].root_off]
+                == gen.task().np_data[root_off]) {
+            let match int = 1
+            let j int = 1
+            for j < root_len {
+                if (gen.task().np_data[g_proj.projs[i].root_off + j]
+                    != gen.task().np_data[root_off + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return i
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// add_module：登记一个模块，返回其在 mods 中的下标；内存不足返回 -1。
+pub fn add_module(name_off int, name_len int, proj int) int {
+    if (g_proj.mod_n == g_proj.mod_cap) {
+        let ncap int = g_proj.mod_cap * 2
+        if (ncap == 0) {
+            ncap = 16
+        }
+        let nd *PMod = malloc((ncap * sizeof(PMod)).to_type(u64)).to_type(*PMod)
+        if (nd == 0) {
+            gen.fail("内存分配失败")
+            return -1
+        }
+        if (g_proj.mod_n > 0) {
+            memcpy(nd, g_proj.mods, (g_proj.mod_n * sizeof(PMod)).to_type(u64))
+        }
+        free(g_proj.mods)
+        g_proj.mods = nd
+        g_proj.mod_cap = ncap
+    }
+    g_proj.mods[g_proj.mod_n].name_off = name_off
+    g_proj.mods[g_proj.mod_n].name_len = name_len
+    g_proj.mods[g_proj.mod_n].proj = proj
+    g_proj.mods[g_proj.mod_n].files = 0
+    g_proj.mods[g_proj.mod_n].file_n = 0
+    g_proj.mods[g_proj.mod_n].file_cap = 0
+    g_proj.mods[g_proj.mod_n].is_entry = 0
+    g_proj.mod_n += 1
+    return g_proj.mod_n - 1
+}
+
+// add_project_module：把模块下标追加进项目的模块表。
+pub fn add_project_module(proj int, mod int) int {
+    if (g_proj.projs[proj].mod_n == g_proj.projs[proj].mod_cap) {
+        let ncap int = g_proj.projs[proj].mod_cap * 2
+        if (ncap == 0) {
+            ncap = 8
+        }
+        let nd *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd == 0) {
+            return gen.fail("内存分配失败")
+        }
+        if (g_proj.projs[proj].mod_n > 0) {
+            memcpy(nd, g_proj.projs[proj].mods,
+                (g_proj.projs[proj].mod_n * sizeof(int)).to_type(u64))
+        }
+        free(g_proj.projs[proj].mods)
+        g_proj.projs[proj].mods = nd
+        g_proj.projs[proj].mod_cap = ncap
+    }
+    g_proj.projs[proj].mods[g_proj.projs[proj].mod_n] = mod
+    g_proj.projs[proj].mod_n += 1
+    return 0
+}
+
+// add_module_file：把文件下标追加进模块的文件表。
+pub fn add_module_file(mod int, file int) int {
+    if (g_proj.mods[mod].file_n == g_proj.mods[mod].file_cap) {
+        let ncap int = g_proj.mods[mod].file_cap * 2
+        if (ncap == 0) {
+            ncap = 8
+        }
+        let nd *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd == 0) {
+            return gen.fail("内存分配失败")
+        }
+        if (g_proj.mods[mod].file_n > 0) {
+            memcpy(nd, g_proj.mods[mod].files,
+                (g_proj.mods[mod].file_n * sizeof(int)).to_type(u64))
+        }
+        free(g_proj.mods[mod].files)
+        g_proj.mods[mod].files = nd
+        g_proj.mods[mod].file_cap = ncap
+    }
+    g_proj.mods[mod].files[g_proj.mods[mod].file_n] = file
+    g_proj.mods[mod].file_n += 1
+    return 0
+}
+
+// add_file：登记一个源文件，返回其在 files 中的下标；内存不足返回 -1。
+pub fn add_file(path_off int, path_len int, mod int) int {
+    if (g_proj.file_n == g_proj.file_cap) {
+        let ncap int = g_proj.file_cap * 2
+        if (ncap == 0) {
+            ncap = 32
+        }
+        let nd *PFile = malloc((ncap * sizeof(PFile)).to_type(u64)).to_type(*PFile)
+        if (nd == 0) {
+            gen.fail("内存分配失败")
+            return -1
+        }
+        if (g_proj.file_n > 0) {
+            memcpy(nd, g_proj.files, (g_proj.file_n * sizeof(PFile)).to_type(u64))
+        }
+        free(g_proj.files)
+        g_proj.files = nd
+        g_proj.file_cap = ncap
+    }
+    g_proj.files[g_proj.file_n].path_off = path_off
+    g_proj.files[g_proj.file_n].path_len = path_len
+    g_proj.files[g_proj.file_n].mod = mod
+    g_proj.files[g_proj.file_n].source = 0
+    g_proj.files[g_proj.file_n].source_len = 0
+    g_proj.files[g_proj.file_n].tokens = 0
+    g_proj.files[g_proj.file_n].token_n = 0
+    g_proj.files[g_proj.file_n].decls = 0
+    g_proj.files[g_proj.file_n].decl_n = 0
+    g_proj.file_n += 1
+    return g_proj.file_n - 1
+}
+
+// add_import：登记一条文件导入（绑定期解析）。
+// name=查找名（模块名，点分导入取 MOD 段），key=跨项目依赖键（-1/0 同项目），
+// alias=绑定名。11 条平行数组按块同步扩容。
+pub fn add_import(file int, off int, olen int, koff int, klen int,
+    aoff int, alen int, line int, col int) int {
+    if (g_proj.imp_n == g_proj.imp_cap) {
+        let ncap int = g_proj.imp_cap * 2
+        if (ncap == 0) {
+            ncap = 32
+        }
+        let nd0 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd0 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        let nd1 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd1 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        let nd2 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd2 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        let nd3 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd3 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        let nd4 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd4 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        let nd5 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd5 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        let nd6 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd6 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        let nd7 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd7 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        let nd8 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd8 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        let nd9 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd9 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        let nd10 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd10 == 0) {
+            return gen.fail("内存分配失败")
+        }
+        if (g_proj.imp_n > 0) {
+            let cnt u64 = (g_proj.imp_n * sizeof(int)).to_type(u64)
+            memcpy(nd0, g_proj.imp_file, cnt)
+            memcpy(nd1, g_proj.imp_off, cnt)
+            memcpy(nd2, g_proj.imp_len, cnt)
+            memcpy(nd3, g_proj.imp_key_off, cnt)
+            memcpy(nd4, g_proj.imp_key_len, cnt)
+            memcpy(nd5, g_proj.imp_alias_off, cnt)
+            memcpy(nd6, g_proj.imp_alias_len, cnt)
+            memcpy(nd7, g_proj.imp_line, cnt)
+            memcpy(nd8, g_proj.imp_col, cnt)
+            memcpy(nd9, g_proj.imp_mod, cnt)
+            memcpy(nd10, g_proj.imp_test_only, cnt)
+        }
+        free(g_proj.imp_file); g_proj.imp_file = nd0
+        free(g_proj.imp_off); g_proj.imp_off = nd1
+        free(g_proj.imp_len); g_proj.imp_len = nd2
+        free(g_proj.imp_key_off); g_proj.imp_key_off = nd3
+        free(g_proj.imp_key_len); g_proj.imp_key_len = nd4
+        free(g_proj.imp_alias_off); g_proj.imp_alias_off = nd5
+        free(g_proj.imp_alias_len); g_proj.imp_alias_len = nd6
+        free(g_proj.imp_line); g_proj.imp_line = nd7
+        free(g_proj.imp_col); g_proj.imp_col = nd8
+        free(g_proj.imp_mod); g_proj.imp_mod = nd9
+        free(g_proj.imp_test_only); g_proj.imp_test_only = nd10
+        g_proj.imp_cap = ncap
+    }
+    g_proj.imp_file[g_proj.imp_n] = file
+    g_proj.imp_off[g_proj.imp_n] = off
+    g_proj.imp_len[g_proj.imp_n] = olen
+    g_proj.imp_key_off[g_proj.imp_n] = koff
+    g_proj.imp_key_len[g_proj.imp_n] = klen
+    g_proj.imp_alias_off[g_proj.imp_n] = aoff
+    g_proj.imp_alias_len[g_proj.imp_n] = alen
+    g_proj.imp_line[g_proj.imp_n] = line
+    g_proj.imp_col[g_proj.imp_n] = col
+    g_proj.imp_mod[g_proj.imp_n] = -1
+    g_proj.imp_test_only[g_proj.imp_n] = 0
+    g_proj.imp_n += 1
+    return 0
+}
+
+// module_in_project：在项目自己的模块表里按名字查模块，找不到返回 -1。
+// 名字比较走名字池字节（与登记时同一个池），不做字符串复制。
+pub fn module_in_project(proj int, off int, olen int) int {
+    let i int = 0
+    for i < g_proj.projs[proj].mod_n {
+        let m int = g_proj.projs[proj].mods[i]
+        if (g_proj.mods[m].name_len == olen
+            && gen.task().np_data[g_proj.mods[m].name_off] == gen.task().np_data[off]) {
+            let match int = 1
+            let j int = 1
+            for j < olen {
+                if (gen.task().np_data[g_proj.mods[m].name_off + j]
+                    != gen.task().np_data[off + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return m
+            }
+        }
+        i += 1
+    }
+    return -1
+}

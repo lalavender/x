@@ -463,7 +463,9 @@ boolean_optional 缺省 none；应用可显式设 true/false。生成名称同�
 在自定义前缀下按双前缀长名称生成，例如 `++cache/++no-cache`。
 count 遇到 i64 溢出返回 usage_error，不回绕。
 append/extend 有非空列表默认值时先深复制，再追加；重复 parse 不修改声明中的列表。
-required 依据显式出现判断，即使默认值有效也不能满足必需选项。
+required 依据显式出现判断，即使默认值有效也不能满足必需选项；`required` 只对选项
+有意义，给位置参数设置 `required=true` 是 config_error（必需性由 arity 决定）。
+`store_const`/`append_const` 必须显式提供 `const_value`，缺失是 config_error。
 
 最终形状的推导：store 使用 value_kind 和 arity；append 在本次值外再包一层列表；
 extend 产生一层 value_kind 列表；store_const 使用 const 自身形状，append_const 再加一层。
@@ -482,7 +484,9 @@ custom 的输出形状独立于它消费 token 的 value_kind。控制 action �
 choices 按**转换后的标量类型和值**匹配，多值参数逐项检查；不同 kind 不相等。
 choices 不接受列表或 none；无候选用空切片表达，不代表“任何值都不允许”。
 默认值和 const 是已经带类型的值，不再次当成命令行字符串转换。
-freeze 检查其形状和类型；其 choices/validator 约束也要满足，失败为 config_error。
+freeze 检查其形状和类型；其 validator 约束也要满足，失败为 config_error。
+与 argparse 一致，choices 只约束命令行显式值：默认值和 const 不参与 choices 校验
+（需要严格约束时用 validator）。
 缺省 none、被 suppress 的键不送入值 validator。
 
 ### 8.3 默认值合并
@@ -492,7 +496,8 @@ freeze 检查其形状和类型；其 choices/validator 约束也要满足，失
 1. action 固有缺省：通常 none；store_true=false、store_false=true；列表数量依声明。
 2. parser 和参数组的 argument_default；参数组覆盖 parser。
 3. 参数本身的显式 default 或 suppress。
-4. 同一 parser 的 `set_default(dest, value)`；覆盖前述声明默认值。
+4. 同一 parser 的 `set_default(dest, value)`；覆盖前述声明默认值；
+   dest 尚无声明时也写入结果（argparse `set_defaults` 语义）。
 5. 选中子命令的同名默认值；从根到叶依次覆盖，只加入选中路径的键。
 6. `ParseConfig.initial`；仅作为初始值，不满足 required 或 mutex。
 7. 当前命令行中的显式 action；按 token 顺序生效。
@@ -559,6 +564,8 @@ append/extend/count 基于初始值累计；类型不符在相应 parser 开始�
 variable + required single 遇到 `a b`，为后者保留 b。
 
 普通模式按选项边界分段匹配位置参数；已经完成的可变位置参数不会因为后面的新段重新打开。
+位置段中存在子命令槽时，整段 token 数量满足「全部位置参数最低需求 + 1」即为槽预留
+一个 token（argparse `PARSER` 语义）；最低需求已占满整段时不预留，槽不消费。
 混合模式先提取已识别选项，再把剩余位置值整体匹配；仍保留原始 token 来源和 action 次序。
 例如声明 `command`、`rest=*` 和 `--level`：
 
@@ -575,15 +582,16 @@ freeze 拒绝 remainder 后继续声明位置参数或子命令。
 
 | 签名 | 契约 |
 | --- | --- |
-| `subparsers() Subparsers` | 创建配置，默认不必需，dest/title/description 可设置 |
+| `subparsers() Subparsers` | 创建配置，默认不必需，dest/title/description/metavar 可设置 |
 | `add_subparsers(p *Parser, spec Subparsers) int` | 返回正数槽 ID；每个 parser 最多一个槽 |
 | `command(name *char) Command` | 创建子命令声明，可配置 aliases、help、deprecated、config |
 | `add_parser(p *Parser, slot int, spec Command) *Parser` | 创建归父 parser 所有的子句柄；失败空指针 |
 | `inherit(p *Parser, parent *Parser) int` | 复制 parent 的参数、默认值和组；0 成功、-1 失败 |
 
 子命令槽占据一个位置，之后的 token 交给子 parser；可递归形成 `tool remote add`。
-槽前允许固定或可变位置参数，按第 9 节保留槽及后续最低数量；不通过搜索已知命令名来
-跳过前面的值。槽后禁止再声明父级位置参数；需要这些参数时放到子命令里。
+槽前允许固定或可变位置参数：整段 token 充足时为槽保留一个（见 §9.3），不足时
+位置参数优先；不通过搜索已知命令名来跳过前面的值。槽后禁止再声明父级位置参数；
+需要这些参数时放到子命令里。
 
 根选项只在子命令之前有效；子命令后只识别子 parser 声明的选项。
 希望前后都支持的“全局参数”，使用无自动帮助的公共 parent 分别 inherit 到各级，
@@ -741,7 +749,9 @@ hidden 参数不出现在 usage/help，但继续参与匹配、必需项和互�
 自动 usage 使用 [] 表示可选、() 表示必选互斥、| 表示互斥、... 表示可变数量。
 
 HelpFormat 提供正交配置：`preserve_description`、`preserve_all_text`、
-`show_defaults`、`metavar_from_type`、`width` 和 `max_help_column`。
+`show_defaults`、`metavar_from_type`、`width`、`max_help_column`，以及
+`usage_prefix`、`section_positional`、`section_options`、`section_commands`
+（文本可本地化；空指针用英文默认，与 argparse 的排版一致）。
 标准行为是折叠说明中的空白并换行；保留模式只调整缩进，不丢弃用户显式空行。
 实现先用确定的 UTF-8 字节宽度计量且不拆开有效编码序列；中文宽度不保证等于终端列宽。
 终端列宽精确计算不成为 CLI1 的隐式依赖，后续若需要单独设计 Unicode 宽度策略。
@@ -750,6 +760,18 @@ metavar 覆盖自动占位名；metavars 只用于 exactly(n)，列表长度必�
 choices 缺省以候选集合展示；显式 metavar 优先，候选约束仍存在。
 文本模板支持 `%(prog)s/%(dest)s/%(default)s/%(type)s/%%`；不提供任意格式化执行。
 未知模板占位符在 freeze 报配置错误；默认值渲染转义控制字符，避免破坏帮助布局。
+
+**拼接契约（2026-10-27）**：`put_*` 系列在 `at < 0` 时短路返回 -1，调用点只在
+「返回值参与算术」或「用 at 写 NUL」时显式判错；整段文本超过 `MAX_HELP` 时
+`format_*` 返回 resource_error，不返回截断结果。
+
+**实现状态（2026-10-27，诊断）**：choices 与未知子命令的诊断都带候选列表
+（「可选：a, b」），`suggest_on_error` 覆盖未知选项、choices 与子命令（给出距离 ≤ 2
+的最优候选 1 个），多余位置 token 全量列出。
+
+**实现状态（2026-10-27）**：choices 占位名 `{a,b}`、`metavars` 逐项占位名、
+子命令槽的 `{a,b} ...`/`metavar`/`title`/`description`、`boolean_optional` 的
+`[--cache | --no-cache]` 与 `max_help_column` 已接通；帮助宽度仍固定 80（不读终端宽度）。
 
 **实现状态（2026-10-22）**：usage/description/epilog/help/version_text 的模板展开、
 自定义 usage（含空串抑制）与 `version_text` 已实现；usage/description/epilog/
@@ -792,7 +814,9 @@ deprecated 参数/命令显式使用时生成一条警告，`render` 写到 erro
 已经归入 remainder 的 --help 不触发帮助。
 
 使用错误输出 usage 和一条主诊断；根本性配置错误不伪装成用户输入错误。
-error.code 保持稳定枚举，message 只是展示文本，测试不能只靠字符串判断错误类别。
+error.code 保持稳定枚举（实现提供 `cli.CODE_USAGE`/`CODE_CONFIG`/`CODE_RESOURCE`
+常量，取值 `usage_error`/`config_error`/`resource_error`），message 只是展示文本，
+测试不能只靠字符串判断错误类别。
 建议错误类别至少包括 unknown_option、ambiguous_option、missing_value、bad_value、
 invalid_choice、missing_required、mutex_conflict、unknown_command、invalid_schema、
 incompatible_mode、out_of_memory、argument_file_error、argument_file_limit。
@@ -800,8 +824,8 @@ incompatible_mode、out_of_memory、argument_file_error、argument_file_limit。
 
 deprecated 参数或命令只有被显式使用时才产生 warning；每个声明每次 parse 最多一次。
 warning 不改变退出码；普通 parse* 将其返回，由调用者决定是否展示。
-suggest_on_error 只针对未知名称、字符串候选和子命令生成确定排序的有限候选，最多 3 个；
-候选计算只影响文案，不修改接受的输入。
+suggest_on_error 只针对未知名称、字符串候选和子命令生成确定排序的有限候选，最多 3 个
+（当前实现取距离最小的 1 个）；候选计算只影响文案，不修改接受的输入。
 
 format_* 始终无 ANSI；输出函数遵循 Color。never 不探测终端，always 显式着色；
 auto 由输出 fd 是否为终端和 NO_COLOR 决定，NO_COLOR 存在时关闭。
@@ -879,7 +903,7 @@ auto 由输出 fd 是否为终端和 NO_COLOR 决定，NO_COLOR 存在时关闭�
 以下路径与检查是实施要求，详细任务见[实施方案](../02-plan/yh-cli标准库实施方案.md)。
 
 语义断言已迁入 `libs/cli/zz_tests_{basics,actions,commands,extensions,help}.yh`
-（43 个 `test`，`yh test cli`）；真实 argv/退出码与 Python argparse 差分保留在
+（51 个 `test`，`yh test cli`）；真实 argv/退出码与 Python argparse 差分保留在
 `libs/cli/test/{climodel,clibasics,cliwarnings,clidiff}` + `run.py`/`diff.py`，
 由 `make libs-test` 执行。迁移记录见
 [YT4-P4](../01-finished/yh-YT4-P4-cli迁移-2026-10-25.md)。

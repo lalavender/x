@@ -31,31 +31,59 @@ def relative(path: str) -> str:
     return "../" + path
 
 
+def canon_archive(text: str) -> str | None:
+    """把任意布局的闭包归档路径归一成仓库内 `tmp/llvm-migration/...` 形式。
+
+    记录可能来自：本仓库 `tmp/llvm-migration`、主 worktree 的同一路径、容器挂载点
+    （`/work/tmp/llvm-migration`）或某个 workspace 的私有闭包
+    （`tmp/llvm-migration-<后缀>/`）。只有归一到 canonical 前缀，才能与
+    `compiler/project.toml` 里 `../tmp/llvm-migration/...` 的条目比较。
+    无法归一（例如系统库）时返回 None。
+    """
+    path = Path(text)
+    if not path.is_absolute():
+        path = ROOT / path
+    try:
+        return path.absolute().relative_to(ROOT.absolute()).as_posix()
+    except ValueError:
+        pass
+    marker = "tmp/llvm-migration"
+    raw = path.as_posix()
+    if marker not in raw:
+        return None
+    tail = raw.split(marker, 1)[1]
+    if not tail.startswith("/"):
+        slash = tail.find("/")
+        if slash < 0:
+            return None
+        tail = tail[slash:]
+    return f"{marker}/{tail.lstrip('/')}"
+
+
 def archive_paths(record: dict) -> dict[str, list[str]]:
     """从宿主记录分类 bridge/lld/llvm/support 归档。"""
-    sdk_prefix = Path(record.get("sdk_prefix", ""))
-    bridge = record.get("bridge_archive", "")
+    bridge = canon_archive(record.get("bridge_archive", "")) or ""
     groups = {"bridge": [bridge] if bridge else [], "lld": [], "llvm": [], "support": []}
+    # 归档来源两处都要看：
+    #   * link_flags：clang 驱动用的 -Wl,-force_load,<归档>（旧世代记录的形态）；
+    #   * selfhost_link_flags：种子自举链接用的 -force_load <归档> 对（新世代记录
+    #     只保留这一份，link_flags 只剩 -isysroot/部署版本与 -lc++）。
+    # 两份都归一成 canonical 归档路径，去重后分组：记录世代的差异不影响结论。
+    flags: list[str] = []
     for flag in record.get("link_flags", []):
         if flag.startswith("-Wl,-force_load,"):
-            flag = flag[len("-Wl,-force_load,"):]
+            flags.append(flag[len("-Wl,-force_load,"):])
+    selfhost = list(record.get("selfhost_link_flags", []))
+    for index, flag in enumerate(selfhost[:-1]):
+        if flag == "-force_load":
+            flags.append(selfhost[index + 1])
+    for flag in flags:
         if not flag.endswith(".a"):
             continue
-        path = Path(flag)
-        if not path.is_absolute():
-            path = ROOT / path
-        try:
-            rel = path.absolute().relative_to(ROOT.absolute()).as_posix()
-        except ValueError:
-            # 闭包来自另一个 worktree 的符号链接时，按 tmp/llvm-migration 后缀映射。
-            marker = "tmp/llvm-migration/"
-            text = path.as_posix()
-            if marker not in text:
-                continue
-            rel = marker + text.split(marker, 1)[1]
-        name = path.name
-        if rel == bridge:
+        rel = canon_archive(flag)
+        if rel is None or rel == bridge:
             continue
+        name = Path(rel).name
         if name.startswith("liblld"):
             groups["lld"].append(rel)
         elif name.startswith("libLLVM"):
