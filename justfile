@@ -248,7 +248,7 @@ fetch-seed:
 # 首次需要联网取固定 SDK；之后只用缓存包，可离线重跑。
 llvm-host:
     @test -n "{{ llvm_host }}" || { echo "错误: 当前种子 {{ seed }} 没有对应的固定 LLVM SDK"; exit 1; }
-    @if [ "{{ llvm_host }}" = "darwin-aarch64" ]; then {{ py }} "{{ root }}/tools/llvm-darwin-host.py" prepare --host "{{ llvm_host }}" --jobs {{ llvm_jobs }}; elif [ "{{ llvm_host }}" = "windows-x86_64" ]; then {{ py }} "{{ root }}/tools/llvm-windows-host.py" prepare --host "{{ llvm_host }}"; else {{ py }} "{{ root }}/tools/llvm-host.py" prepare --host "{{ llvm_host }}"; fi
+    @if [ "{{ llvm_host }}" = "darwin-aarch64" ]; then {{ py }} "{{ root }}/tools/llvm-darwin-host.py" prepare --host "{{ llvm_host }}" --jobs {{ llvm_jobs }}; elif [ "{{ llvm_host }}" = "windows-x86_64" ]; then {{ py }} "{{ root }}/tools/llvm-windows-closure.py" build --jobs {{ llvm_jobs }}; else {{ py }} "{{ root }}/tools/llvm-host.py" prepare --host "{{ llvm_host }}"; fi
 
 # llvm-host-status：离线复核固定闭包是否仍与身份记录一致（不改任何文件）。
 # Windows 目标用 tools/llvm-windows-host.py 的 status（归档缺失/内容变化退 3）；
@@ -498,6 +498,40 @@ test-llvm-darwin: stage-yh
     {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-selfhost-flags.py" --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-link.py" --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tools/llvm-darwin-host.py" status --host darwin-aarch64
+
+# —— Windows 目标（W1-4）：导入库 stub ——
+# 仓库只保存文本 .def 与 manifest（compiler/windows-sdk/）；.lib 按需生成到缓存根，
+# 因为仓库根 .gitignore 把 *.lib 当构建产物。编译器侧消费（链接模板）在 W1-5。
+
+# windows-sdk：按清单生成 Windows 导入库（kernel32.lib 等）。
+windows-sdk:
+    "{{ py }}" "{{ root }}/tools/windows-sdk.py" generate
+
+# test-windows-sdk：W1-4 门禁——def 与清单一致、生成确定性、导入面只含 KERNEL32。
+test-windows-sdk:
+    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-sdk.py"
+
+# test-windows-abi：W1-2b 门禁——Win64 按值聚合与 clang 编出的 C 桩互操作（4/8/12 字节 + 纯浮点）。
+test-windows-abi: stage-yh windows-sdk
+    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-abi.py" --compiler-path "{{ yh_run }}" --sdk-root "{{ windows_sdk }}" --workdir "{{ root }}/tmp/llvm-windows-abi" --manifest-out "{{ root }}/tmp/windows-abi/manifest.json"
+
+# test-windows-target：W1 目标门——交叉出 COFF/PE、零 CRT 运行时、导入面、可复现性、负例。
+# **编译侧目标**：在 WSL/Linux/macOS（能跑现有种子）执行；运行侧另跑 run-exe.py。
+# 同时写出运行清单（tmp/windows-target/manifest.json），供 Windows 侧跑：
+#   python3 tests/windows/run-exe.py --manifest tmp/windows-target/manifest.json
+test-windows-target: stage-yh windows-sdk
+    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-target.py" --compiler-path "{{ yh_run }}" --manifest-out "{{ root }}/tmp/windows-target/manifest.json" --workdir "{{ root }}/tmp/windows-target"
+
+# test-windows-corpus：整份运行语料按 Windows 目标交叉编译并写清单（编译侧，W1-7）。
+# 编译侧只需 LLVM 闭包 + 导入库；运行交给 run-windows-corpus（真 Windows）。
+test-windows-corpus: stage-yh windows-sdk
+    YH_WINDOWS_SDK="{{ windows_sdk }}" "{{ py }}" "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" --target x86_64-pc-windows-msvc --run-platform windows-x64 --emit-manifest "{{ root }}/tmp/windows-corpus/manifest.json" --workdir "{{ root }}/tmp/windows-corpus" --jobs {{ llvm_jobs }} --quiet
+
+# run-windows-corpus：在真实 Windows 上执行上一步的清单（运行侧）。
+# 只在 Windows 侧跑（WSL 里跨解释器调用会撞 UNC cwd 限制）：清单是仓库相对路径，
+# 跨机器/跨挂载点都能用；WSL 侧只负责 test-windows-corpus。
+run-windows-corpus:
+    "{{ py }}" "{{ root }}/tests/windows/run-exe.py" --manifest "{{ root }}/tmp/windows-corpus/manifest.json"
 
 # explorer：启动 yh Compiler Explorer（本地浏览器图形界面）。
 explorer:
