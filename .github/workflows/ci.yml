@@ -1,0 +1,251 @@
+name: ci
+# 分支门（GitHub Actions 托管 runner，原生三端 + Linux 双架构，无容器）。
+#
+# 平台矩阵（2026-11-03 迁移）：
+#   linux-x64    ubuntu-latest       Linux/x86_64 原生
+#   linux-arm64  ubuntu-24.04-arm    Linux/AArch64 原生（含 Windows 目标编译侧门）
+#   darwin-arm64 macos-15            Darwin/ARM64 原生
+#   windows-x64  windows-latest      Windows/x86_64 原生
+#
+# 闭包策略（用户决定：闭包不上传 Release，由 CI 机器自行准备）：
+#   Linux   从 vendor/llvm/sdk.lock.json 的 Ubuntu deb 取静态 LLVM/lld（分钟级）；
+#   Darwin  源码构建 LLVM 21.1.8（首次 1–2 小时，actions/cache 复用）；
+#   Windows 源码 MSVC /MT 构建静态 LLVM/lld（首次 2–3 小时，actions/cache 复用）。
+# Windows 种子来自 0.0.11 Release 的 yh-0.0.11-windows-x64.tar.gz（过渡方案，
+# 见 docs/todo.md；下一版 Release 起由 release.yml 正常产出）。
+#
+# 触发：push 到 llvm/main/arm64 与 <ver>-rc 分支；PR；手动。tag 发布见 release.yml。
+# ANTLR 参考语法门只在本地跑（just test / just quick），CI 用编译器 --syntax-check。
+on:
+  push:
+    branches:
+      - llvm
+      - main
+      - arm64
+      - '*-rc'
+  pull_request:
+    branches:
+      - llvm
+      - main
+      - arm64
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # 推送/PR 取消旧运行；手动 dispatch 不取消（长闭包构建时允许并行排查）。
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+  LLVM_JOBS: "2"
+
+jobs:
+  linux-x64:
+    # 固定 24.04：ubuntu-latest 已滚到 26.04（libxml2 SONAME 变了，0.0.11 种子跑不起来；
+    # 26.04 的 gcc15/gnu23 还会把 C 侧 strtol 重定向到 glibc 的 C23 变体，libs 的
+    # C ABI 用例会红——所以不要改用 ubuntu-latest）。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: 安装构建依赖
+        # libxml2/zlib/zstd：种子与内嵌宿主按动态库链接，缺 runtime 会 127。
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential binutils libxml2-dev zlib1g-dev libzstd-dev
+      - name: 取种子
+        run: python3 tools/fetch-release-seed.py --platform linux-x86_64
+      - name: 准备闭包
+        run: just llvm-host
+      - name: 过渡期自举桥（0.0.11 种子不认识 W2 平台文件）
+        run: just bootstrap-bridge
+      - name: 语法与运行语料
+        run: |
+          set -euo pipefail
+          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
+      - name: 模块项目语料
+        run: python3 tests/modules/check.py --compiler-path "$PWD/yh" --quiet
+      - name: libs 测试（独立阶段）
+        run: just libs-test
+      - name: 自举主门（语料已单独跑）
+        run: just SEED="$PWD/bin/yh-linux-x64" SKIP_CORPUS=1 selfhost-native
+
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: 安装构建依赖（含 Windows 目标门所需的 llvm-18 工具）
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential binutils clang llvm-18 lld-18 \
+            libxml2-dev zlib1g-dev libzstd-dev
+          # 编译器自身用内嵌 lld；这里只需要 def→lib 与导入面核对工具。
+          # llvm-ar/llvm-lib 也被门禁脚本按无后缀名查找（noble 只给 -18 后缀名）。
+          for tool in llvm-dlltool llvm-readobj llvm-nm llvm-ar llvm-lib lld-link; do
+            if [ -x "/usr/bin/$tool-18" ]; then sudo ln -sf "/usr/bin/$tool-18" "/usr/local/bin/$tool"; fi
+          done
+      - name: 取种子
+        run: python3 tools/fetch-release-seed.py --platform linux-arm64
+      - name: 准备 TOML 一致性语料
+        run: python3 tests/toml/conformance.py --prepare
+      - name: 准备闭包
+        run: just llvm-host
+      - name: 过渡期自举桥（0.0.11 种子不认识 W2 平台文件）
+        run: just bootstrap-bridge
+      - name: Linux/AArch64 LLVM 运行时与 C ABI 门
+        run: just test-llvm-linux-arm64
+      - name: 语法与运行语料
+        run: |
+          set -euo pipefail
+          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
+      - name: libs 测试（独立阶段）
+        run: |
+          set -euo pipefail
+          just libs-test
+          just libs-test-o2
+      - name: Windows 目标（编译侧）
+        # 运行侧在真 Windows 上由 windows-x64 job 的 run-windows-corpus 覆盖：
+        # 导入库 stub、COFF/PE 目标门、C 按值聚合互操作（与 clang 桩对照）、整份语料交叉编译。
+        run: |
+          set -euo pipefail
+          just test-windows-sdk
+          just test-windows-target
+          just test-windows-abi
+          just test-windows-corpus
+      - name: TOML API 与一致性门
+        run: |
+          set -euo pipefail
+          just test-toml
+          just test-toml-conformance
+          just test-toml-injection
+          just test-toml-install
+          just test-string
+          just test-string-install
+          just test-num
+      - name: 自举主门（语料已单独跑）
+        run: just SEED="$PWD/bin/yh-linux-arm64" SKIP_CORPUS=1 selfhost-native
+
+  darwin-arm64:
+    runs-on: macos-15
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: 取种子
+        run: python3 tools/fetch-release-seed.py --platform darwin-arm64
+      - name: 恢复 Darwin 闭包缓存
+        id: closure-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: tmp/llvm-migration
+          # 只按构建器与桥源码分键：sdk.lock.json/身份记录变化时 just llvm-host
+          # 的 check 会自行判定失效并重建（缓存键不承担正确性，只承担命中率）。
+          key: llvm-darwin-${{ hashFiles('tools/llvm-darwin-sdk.py', 'tools/llvm-darwin-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp') }}
+          restore-keys: |
+            llvm-darwin-
+      - name: 准备 Darwin 闭包（缓存未命中时源码构建 LLVM）
+        run: just llvm-host
+      - name: 保存 Darwin 闭包缓存
+        if: success() && steps.closure-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tmp/llvm-migration
+          key: ${{ steps.closure-cache.outputs.cache-primary-key }}
+      - name: 过渡期自举桥（0.0.11 种子不认识 W2 平台文件，含冷编）
+        run: just bootstrap-bridge
+      - name: Darwin 专项门
+        run: just test-llvm-darwin
+      - name: 语法与运行语料
+        run: |
+          set -euo pipefail
+          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
+          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(sysctl -n hw.ncpu)"
+      - name: libs 测试（独立阶段）
+        run: just libs-test
+      - name: TOML API 与一致性门
+        run: |
+          set -euo pipefail
+          python3 tests/toml/conformance.py --prepare
+          just test-toml
+          just test-toml-conformance
+          just test-toml-injection
+          just test-toml-install
+          just test-string
+          just test-string-install
+          just test-num
+      - name: 自举主门（语料已单独跑）
+        run: just SEED="$PWD/bin/yh-darwin-arm64" SKIP_CORPUS=1 selfhost-native
+
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LLVM_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: 取种子（0.0.11 Release 的 Windows 种子）
+        run: python tools/fetch-release-seed.py --platform windows-x64
+      - name: 恢复 Windows 闭包缓存
+        id: closure-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            tmp/llvm-migration/windows-llvm-closure
+            tmp/llvm-migration/llvm-host-windows-x86_64
+            tmp/llvm-migration/windows-sdk
+          key: llvm-windows-${{ hashFiles('tools/llvm-windows-closure.py', 'tools/llvm-windows-host.py', 'compiler/llvm/bridge.c', 'compiler/llvm/bridge.h', 'compiler/llvm/lld_bridge.cpp', 'compiler/llvm/windows_shim.c', 'compiler/project.toml') }}
+          restore-keys: |
+            llvm-windows-
+      - name: 准备 Windows 闭包（缓存未命中时 MSVC 源码构建 LLVM/lld）
+        run: just llvm-host
+      - name: 保存 Windows 闭包缓存
+        if: success() && steps.closure-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            tmp/llvm-migration/windows-llvm-closure
+            tmp/llvm-migration/llvm-host-windows-x86_64
+            tmp/llvm-migration/windows-sdk
+          key: ${{ steps.closure-cache.outputs.cache-primary-key }}
+      - name: 冷编
+        run: just build
+      - name: 全量回归（语法 + 运行语料 + 模块 + libs + arch-check）
+        run: just test
+      - name: 自举主门（语料已单独跑）
+        run: just SKIP_CORPUS=1 selfhost-native
+      - name: Windows 目标编译侧门
+        # `test-windows-target` 不在这里跑：它含 `--emit-asm` stdout 路径，Windows
+        # 零 CRT 下暂不支持（设计 §6.9 已登记，W2-9 遗留），归在 linux-arm64 job
+        # 的交叉编译侧门；Windows 这里只验证整份语料交叉编译 + 本机执行。
+        run: |
+          set -euo pipefail
+          just test-windows-corpus
+      - name: Windows 运行侧（执行上一步清单）
+        run: just run-windows-corpus

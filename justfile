@@ -86,10 +86,11 @@ yh_abs := absolute_path("yh")
 # 665ms→464ms、整用例 939ms→703ms（约 −25%）。FAST_STAGE=0 关闭暂存。
 FAST_STAGE := env_var_or_default("FAST_STAGE", "1")
 fast_stage := if FAST_STAGE == "" { "1" } else { FAST_STAGE }
-# Windows 上没有 `/tmp`：just 的 absolute_path() 会把 `/tmp/yh-fast-x` 折成
-# `C:\tmp\yh-fast-x`，而该目录不存在（stage-yh 直接 cp 失败）。因此 Windows
-# 缺省落在仓库 tmp/ 下（与「临时产物一律放 tmp/」一致，且随 worktree 隔离）。
-tmpdir := if env_var_or_default("TMPDIR", "") != "" { env_var_or_default("TMPDIR", "/tmp") } else if host_os == "windows" { root + "/tmp" } else { "/tmp" }
+# 快速暂存目录：Linux/macOS 用 /tmp（或 $TMPDIR）；Windows 必须落在仓库内——
+# just 的 absolute_path() 会把 "/tmp" 展开成 "C:\tmp"（不存在，stage-yh 的 cp 会失败），
+# 而且 Windows 上的编译器只能编仓库目录里的项目，workdir 在 %TEMP% 会报
+# 「无法创建构建目录」。
+tmpdir := if host_os == "windows" { root + "/tmp" } else if env_var_or_default("TMPDIR", "") == "" { "/tmp" } else { env_var_or_default("TMPDIR", "/tmp") }
 run_id := env_var_or_default("GITHUB_RUN_ID", "")
 # 每个 worktree + 每个 CI run 独占一个快速目录：
 #   - 同机并发跑多个 run 时共用 /tmp/yh-fast 会让 stage-yh 互相覆盖（release 与
@@ -155,7 +156,12 @@ seed_file := file_name(seed)
 seed_has_arm := if replace(seed_file, "arm64", "") == seed_file { if replace(seed_file, "aarch64", "") == seed_file { "0" } else { "1" } } else { "1" }
 seed_has_x64 := if replace(seed_file, "x64", "") == seed_file { "0" } else { "1" }
 seed_has_darwin_arm := if replace(seed_file, "darwin-arm64", "") == seed_file { "0" } else { "1" }
-llvm_host := if host_os == "linux" { if seed_has_arm == "1" { "linux-aarch64" } else if seed_has_x64 == "1" { "linux-x86_64" } else { "" } } else if host_os == "macos" { if seed_has_darwin_arm == "1" { "darwin-aarch64" } else { "" } } else if host_os == "windows" { if seed_has_x64 == "1" { "windows-x86_64" } else { "" } } else { "" }
+seed_llvm_host := if host_os == "linux" { if seed_has_arm == "1" { "linux-aarch64" } else if seed_has_x64 == "1" { "linux-x86_64" } else { "" } } else if host_os == "macos" { if seed_has_darwin_arm == "1" { "darwin-aarch64" } else { "" } } else if host_os == "windows" { if seed_has_x64 == "1" { "windows-x86_64" } else { "" } } else { "" }
+# 种子文件名不带平台标记时（过渡期自举桥产出的根目录 yh、或显式 SEED=./yh），
+# 按**构建宿主**选固定闭包：桥第 2 代的自举链接必须带内嵌桥归档，否则报
+# lld_bridge 的未定义符号（2026-11-03 WSL 实测）。显式平台种子仍以文件名为准。
+host_llvm_host := if host_os == "linux" { if cpu == "aarch64" { "linux-aarch64" } else if cpu == "arm64" { "linux-aarch64" } else { "linux-x86_64" } } else if host_os == "macos" { "darwin-aarch64" } else if host_os == "windows" { "windows-x86_64" } else { "" }
+llvm_host := if seed_llvm_host == "" { host_llvm_host } else { seed_llvm_host }
 YH_LLVM_HOST := env_var_or_default("YH_LLVM_HOST", "auto")
 llvm_mode := if YH_LLVM_HOST == "1" { "require" } else if YH_LLVM_HOST == "0" { "off" } else { "auto" }
 llvm_host_flags := if llvm_host == "" { "" } else { "--llvm-host " + llvm_host + " --llvm-mode " + llvm_mode }
@@ -203,6 +209,8 @@ install_prog := if INSTALL == "" { "install" } else { INSTALL }
 prefix_root := destdir + prefix
 
 # 每平台专项门的命令：变量替旧 Makefile 里的条件赋值。
+# 编译器路径一律经 quote()：Windows 的绝对路径带反斜杠与盘符，裸拼进 shell 会被
+# bash 吃掉反斜杠（`C:\Users\...` → `C:Users...`），门禁报 FileNotFoundError。
 runtime_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-runtime.py --compiler-path " + quote(yh_run) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + quote(yh_run) + " --llvm-x64" } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-linux-arm64.py --compiler-path " + quote(yh_run) } else { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + quote(yh_run) }
 cache_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + quote(yh) + " --target aarch64-unknown-linux-gnu" } else { py + " " + quote(root) + "/tests/selfhost/link-cache.py --compiler-path " + quote(yh) }
 modcheck_flags := if llvm_host == "" { "" } else { "--backend llvm" }
@@ -255,7 +263,7 @@ fetch-seed:
 # 首次需要联网取固定 SDK；之后只用缓存包，可离线重跑。
 llvm-host:
     @test -n "{{ llvm_host }}" || { echo "错误: 当前种子 {{ seed }} 没有对应的固定 LLVM SDK"; exit 1; }
-    @if [ "{{ llvm_host }}" = "darwin-aarch64" ]; then {{ py }} "{{ root }}/tools/llvm-darwin-host.py" prepare --host "{{ llvm_host }}" --jobs {{ llvm_jobs }}; elif [ "{{ llvm_host }}" = "windows-x86_64" ]; then {{ py }} "{{ root }}/tools/llvm-windows-host.py" prepare --host "{{ llvm_host }}"; else {{ py }} "{{ root }}/tools/llvm-host.py" prepare --host "{{ llvm_host }}"; fi
+    @if [ "{{ llvm_host }}" = "darwin-aarch64" ]; then {{ py }} "{{ root }}/tools/llvm-darwin-host.py" prepare --host "{{ llvm_host }}" --jobs {{ llvm_jobs }}; elif [ "{{ llvm_host }}" = "windows-x86_64" ]; then {{ py }} "{{ root }}/tools/llvm-windows-closure.py" build --jobs {{ llvm_jobs }}; else {{ py }} "{{ root }}/tools/llvm-host.py" prepare --host "{{ llvm_host }}"; fi
 
 # llvm-host-status：离线复核固定闭包是否仍与身份记录一致（不改任何文件）。
 # Windows 目标用 tools/llvm-windows-host.py 的 status（归档缺失/内容变化退 3）；
@@ -265,6 +273,15 @@ llvm-host-status:
 
 # bootstrap：准备固定 LLVM 宿主（幂等）后冷编，首次/换机的一条命令。
 bootstrap: llvm-host _ensure_built
+
+# bootstrap-bridge：过渡期自举桥。0.0.11 Release 的 Linux/macOS 种子不认识 W2 的
+# `*.windows.*.yh` 平台变体与 `[link-windows-x64]` 清单节，无法直接冷编 HEAD：
+# 本配方先用旧种子「过滤 Windows 平台文件」编出一代编译器，再用它全量冷编 HEAD。
+# Windows 种子已按 HEAD 重编（0.0.11-windows-x64），不需要本桥。
+# 等含 W2 种子的 Release 发布后，本配方与 tools/ci-bootstrap.py 一起删除
+# （见 docs/todo.md 的过渡期条目）。自举门请显式 `SEED=绝对路径/yh`。
+bootstrap-bridge: llvm-host _prepare verify-seed
+    {{ py }} "{{ root }}/tools/ci-bootstrap.py" run --staged "{{ root }}/tmp/ci-bootstrap"
 
 # seed：滚种子——把刚构建并验证过的 yh 覆盖入库种子。
 # 只应在 just test 与 just selfhost-native 全绿后执行（不作为依赖，
@@ -505,6 +522,40 @@ test-llvm-darwin: stage-yh
     {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-selfhost-flags.py" --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-link.py" --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tools/llvm-darwin-host.py" status --host darwin-aarch64
+
+# —— Windows 目标（W1-4）：导入库 stub ——
+# 仓库只保存文本 .def 与 manifest（compiler/windows-sdk/）；.lib 按需生成到缓存根，
+# 因为仓库根 .gitignore 把 *.lib 当构建产物。编译器侧消费（链接模板）在 W1-5。
+
+# windows-sdk：按清单生成 Windows 导入库（kernel32.lib 等）。
+windows-sdk:
+    "{{ py }}" "{{ root }}/tools/windows-sdk.py" generate
+
+# test-windows-sdk：W1-4 门禁——def 与清单一致、生成确定性、导入面只含 KERNEL32。
+test-windows-sdk:
+    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-sdk.py"
+
+# test-windows-abi：W1-2b 门禁——Win64 按值聚合与 clang 编出的 C 桩互操作（4/8/12 字节 + 纯浮点）。
+test-windows-abi: stage-yh windows-sdk
+    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-abi.py" --compiler-path "{{ yh_run }}" --sdk-root "{{ windows_sdk }}" --workdir "{{ root }}/tmp/llvm-windows-abi" --manifest-out "{{ root }}/tmp/windows-abi/manifest.json"
+
+# test-windows-target：W1 目标门——交叉出 COFF/PE、零 CRT 运行时、导入面、可复现性、负例。
+# **编译侧目标**：在 WSL/Linux/macOS（能跑现有种子）执行；运行侧另跑 run-exe.py。
+# 同时写出运行清单（tmp/windows-target/manifest.json），供 Windows 侧跑：
+#   python3 tests/windows/run-exe.py --manifest tmp/windows-target/manifest.json
+test-windows-target: stage-yh windows-sdk
+    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-target.py" --compiler-path "{{ yh_run }}" --manifest-out "{{ root }}/tmp/windows-target/manifest.json" --workdir "{{ root }}/tmp/windows-target"
+
+# test-windows-corpus：整份运行语料按 Windows 目标交叉编译并写清单（编译侧，W1-7）。
+# 编译侧只需 LLVM 闭包 + 导入库；运行交给 run-windows-corpus（真 Windows）。
+test-windows-corpus: stage-yh windows-sdk
+    YH_WINDOWS_SDK="{{ windows_sdk }}" "{{ py }}" "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" --target x86_64-pc-windows-msvc --run-platform windows-x64 --emit-manifest "{{ root }}/tmp/windows-corpus/manifest.json" --workdir "{{ root }}/tmp/windows-corpus" --jobs {{ llvm_jobs }} --quiet
+
+# run-windows-corpus：在真实 Windows 上执行上一步的清单（运行侧）。
+# 只在 Windows 侧跑（WSL 里跨解释器调用会撞 UNC cwd 限制）：清单是仓库相对路径，
+# 跨机器/跨挂载点都能用；WSL 侧只负责 test-windows-corpus。
+run-windows-corpus:
+    "{{ py }}" "{{ root }}/tests/windows/run-exe.py" --manifest "{{ root }}/tmp/windows-corpus/manifest.json"
 
 # explorer：启动 yh Compiler Explorer（本地浏览器图形界面）。
 explorer:

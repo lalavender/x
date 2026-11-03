@@ -19,8 +19,10 @@ CRT）由 MSVC/cmake 在 Windows 上构建，归档直接写进 `compiler/projec
 `just bootstrap` 只会打印「当前种子没有对应的固定 LLVM SDK」，看不出真实原因
 （闭包路径失效 / MSVC 升级导致 CRT 路径变化 / 归档被清理）。
 
-把闭包搬进缓存根并用 Release 资产分发属于 W2-2，尚未完成；在此之前本脚本把
-「仓库外的绝对路径」当成事实记录下来，只保证**失效可发现、错误可行动**。
+闭包本体由 `tools/llvm-windows-closure.py` 准备到缓存根的
+`windows-llvm-closure/{bridge,lld,llvm,support}`，清单里写的是指向那里的 canonical
+相对路径；本脚本只负责**证明它还在、内容没变**：归档缺失或内容变化都能被发现，
+错误提示指向可执行的下一步，而不是让链接阶段报天书。
 
 退出码：0 成功；3 未准备或身份失效；1 其他错误。
 """
@@ -59,8 +61,9 @@ def record_path() -> Path:
 def closure_archives() -> dict[str, list[Path]]:
     """从项目清单读出 `[link-windows-x64]` 四组归档的绝对路径。
 
-    相对路径按仓库根解析（与编译器的解释一致：清单里的相对路径相对 `compiler/`），
-    这样将来闭包搬进 `tmp/llvm-migration` 后本脚本无需改动。
+    相对路径按 `compiler/` 解析（与编译器的解释一致），所以清单里的 canonical
+    条目 `../tmp/llvm-migration/windows-llvm-closure/<组>/<文件名>` 无论缓存根
+    落在仓库内还是仓库外，都能按仓库内路径解析到同一处。
     """
     with MANIFEST.open("rb") as source:
         manifest = tomllib.load(source)
@@ -111,14 +114,14 @@ def failure_hint(missing: dict[str, list[str]]) -> str:
     for group, paths in missing.items():
         lines.append(f"  {group}：缺 {len(paths)} 个，例如 {paths[0]}")
     if "support" in missing:
-        lines.append("  support 组来自本机 MSVC 安装：确认 Visual Studio 14.41 仍在原位，"
-                     "或按新路径重新生成 [link-windows-x64]")
+        lines.append("  support 组来自本机 MSVC 与 Windows SDK：升级 VS/SDK 后重新运行 "
+                     "just llvm-host（tools/llvm-windows-closure.py 会用 vswhere 重新复制）")
     if "lld" in missing or "llvm" in missing:
-        lines.append("  静态 LLVM/lld 闭包：重建 SDK（W2-2）或恢复 "
-                     "$YH_LLVM_CACHE 下的归档")
+        lines.append("  静态 LLVM/lld 闭包缺失：运行 just llvm-host 从固定源码重建"
+                     "（或恢复 $YH_LLVM_CACHE 下的 windows-llvm-closure）")
     if "bridge" in missing:
-        lines.append("  桥归档：clang-cl /MT 编 bridge.c + lld_bridge.cpp + windows_shim.c，"
-                     "lib.exe 打包后写回 [link-windows-x64] 的 bridge 组")
+        lines.append("  桥归档缺失：运行 just llvm-host——它会用 clang-cl /MT 编 "
+                     "bridge.c + lld_bridge.cpp + windows_shim.c 并打包到闭包里")
     return "\n".join(lines)
 
 
