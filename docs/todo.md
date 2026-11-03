@@ -35,6 +35,21 @@
       不再被读取，未准备时 `just build` 直接报「无法读取库文件（组 bridge/lld/llvm）」。
       首次构建前先跑 `just llvm-host`；可用 `YH_LLVM_WINDOWS_WORK=D:/tmp/llvm-win`
       复用已建好的 CMake 树（否则会从固定源码重编，约 1 小时）。
+- [ ] **`--emit-asm` 单文件汇编在 Windows 上发布失败（P0，合流后在主工作区复现）**：
+      命令 `yh -O0 --emit-asm <file.yh>`（`api_single_file` 走 `llvm_emit_single_file`，
+      out="-"、kind=1）报 `<file>:2:1: 错误: LLVM 后端: 内嵌 LLVM：目标文件原子写入失败`。
+      同一份源码在合流前的 `llvm-2` 工作区（闭包在 `tmp/winhost/`、用
+      `tmp/rebuild-bridge.bat` 现场编桥）能通过 `tests/selfhost/llvm-architecture.py`；
+      合流后闭包换成 `windows-llvm-closure/bridge/` 就失败，而
+      `compiler/llvm/bridge.c` 与 `compiler/build/llvm_emit.yh` 在两次之间**没有差异**
+      （`git diff 34ee381 HEAD` 为空）。
+      已排除：① 临时目录不存在——把 `TEMP`/`TMP` 显式指向
+      `C:\Users\…\AppData\Local\Temp` 仍然失败；② `TEMP=/tmp` 这类 POSIX 残留
+      （加过「只接受 `X:\…`」的守卫，未解决，已回退）。
+      下一步：在 `publish_buffer` 的四个失败点（`_mktemp_s` / `_open` / `write` /
+      `MoveFileExA`）加临时诊断，并对比两条桥编译命令行（旧：`tmp/rebuild-bridge.bat`；
+      新：`tools/llvm-windows-closure.py build_bridge`），怀疑 `/MT` 或
+      `MOVEFILE_WRITE_THROUGH` 在两条编译线下行为不同。
 - [ ] **外仓库项目目录构建（P2，Windows 不可用）**：`foreign-fs-build` 在 Windows 上
       失败（Windows CI 的 workdir 已改仓库内），需要按平台跳过或改成仓库内路径。
 
