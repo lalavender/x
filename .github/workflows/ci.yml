@@ -35,7 +35,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # 推送/PR 取消旧运行；手动 dispatch 不取消（长闭包构建时允许并行排查）。
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
 
 env:
   PYTHONUTF8: "1"
@@ -44,7 +45,8 @@ env:
 
 jobs:
   linux-x64:
-    runs-on: ubuntu-latest
+    # 固定 24.04：ubuntu-latest 已滚到 26.04（libxml2 SONAME 变了，0.0.11 种子跑不起来）。
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,10 +55,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
       - name: 安装构建依赖
+        # libxml2/zlib/zstd：种子与内嵌宿主按动态库链接，缺 runtime 会 127。
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends build-essential binutils
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential binutils libxml2-dev zlib1g-dev libzstd-dev
       - name: 取种子
         run: python3 tools/fetch-release-seed.py --platform linux-x86_64
       - name: 准备闭包并冷编
@@ -87,7 +91,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            build-essential binutils clang llvm-18 lld-18
+            build-essential binutils clang llvm-18 lld-18 \
+            libxml2-dev zlib1g-dev libzstd-dev
           # 编译器自身用内嵌 lld；这里只需要 def→lib 与导入面核对工具。
           for tool in llvm-dlltool llvm-readobj llvm-nm lld-link; do
             if [ -x "/usr/bin/$tool-18" ]; then sudo ln -sf "/usr/bin/$tool-18" "/usr/local/bin/$tool"; fi
