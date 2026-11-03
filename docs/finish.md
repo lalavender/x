@@ -1,12 +1,111 @@
 # finish
 
-滚动日志：只保留最近三天（当前为 2026-10-26 ～ 2026-10-28）的交付记录，靠前条目为最新状态。
+滚动日志：只保留最近三天（当前为 2026-11-01 ～ 2026-11-03）的交付记录，靠前条目为最新状态。
 更早的 475 条（2026-09-27 ～ 2026-10-25）已归档在
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)（归档文件按批追加，标题保留首批日期区间）。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
 
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
+
+## 2026-11-03 合并后收口：envp 堆越界、默认标准库发现、门禁路径引号
+
+**结果**：Windows/x86_64 上双主门同时全绿：`just test` **rc=0**（语法 82/82、反例
+49/49、运行 363/372（跳过 9）、fail 138/138、pass 10/10、libs 133/133、
+compiler-tests 4/4、arch-check 通过），`SKIP_CORPUS=1 just selfhost-native` **rc=0**
+（project cases **130/130**，两代模块固定点 cc3→cc4 共 48 个产物逐字节一致）。
+
+### 3 个真缺陷
+
+1. **`__yh_build_envp` 越界一个指针位**（`compiler/windows-sdk/chkstk.c`）：首版按条目数
+   分配 `count` 个槽却写 `envp[count] = 0`。子进程启动即损坏堆（`0xC0000374`），
+   而且在 O0 时**不一定当场崩**，于是表现为三类看似无关的随机失败：
+   `os.spawn(argv[0], argv, envp)` 访问违例 `3221225477`、`yh test` 大量用例
+   「崩溃或缺少结果记录」（记录文件只剩 4 字节魔数、甚至完全不落盘）、
+   并行 `build-check` 的冷热构建偶发 `rc=1`。定位手法：用 C 夹具把 `yh test` 的
+   子进程改成手工 `CreateProcessA`（自定义环境块）复现——子进程打印完首行即以
+   `0xC0000374` 退出。修法：两趟扫描（先数条目、再按序填）并分配 `count + 1`。
+2. **默认标准库发现在 Windows 上恒失败**（`compiler/build/module_build.yh`）：
+   `mb_load_default_stdlib` 只按 `/` 切可执行文件路径取 exe 目录，但 Windows 的
+   `argv[0]` 是 `C:\...\bin\yh` 形式，`cut` 落到 0、`dir` 退化成 `.`，于是
+   `<exe>/libs`、`<exe>/../libs`、`<exe>/../share/yh/libs` 三个候选全部落空
+   （`install` 布局与 `bin/` 种子旁布局都走不通，只有显式 `YH_STDLIB` 才能用）。
+   修法：切分同时认 `'/'` 与 `'\\'`。
+3. **justfile 的 `--workdir` 未 `quote()`**：Windows 路径带反斜杠，直接拼进 recipe
+   会被 shell 当转义符吃掉，Python 收到 `C:UsersAdministrator...` 这种相对路径，
+   于是在仓库根建出 `UsersAdministratorAppDataLocalTempyh-fast-…` 垃圾目录
+   （两个 worktree 都有）。修法：`run_work_flag`/`modcheck_work_flag` 走 `quote()`
+   （与 `selfhost_work_flag` 一致），并清掉已生成的垃圾目录。
+
+### 门禁侧调整
+
+- `tests/modules/build-check.py`：`default-stdlib-run` 的安装布局在 Windows 上
+  额外复制 `<exe>/windows-sdk`（`YH_WINDOWS_SDK` 优先，否则闭包缓存目录），
+  否则装好的编译器只报「找不到 Windows 导入库」，默认发现无法验证。
+- `tools/arch-check.py`：`max_build_lines` 6946 → 6949（默认标准库分隔符修复）。
+- `justfile`：`tmpdir` 在 Windows 缺省落 `<repo>/tmp`——just 的 `absolute_path()`
+  会把 `/tmp/yh-fast-x` 折成 `C:\tmp\yh-fast-x`，而该目录不存在，`stage-yh` 的
+  `cp` 直接失败（Linux/macOS 不受影响）。
+
+## 2026-11-03 合并 W2（Windows 原生宿主 + 标准库平台变体）到主线 llvm
+
+**结果**：`llvm-2` 的 Windows 工作以合并提交 `ab87713` 合入 `llvm`
+（父：`cc5f7dc` W2 分支 + `67c4f6a` 主线 0.0.11/B2/NP3），主工作区 `Desktop/x`
+前移到同一点。合并后在 Windows 上 `just test` 重新全绿，两代固定点
+`ca4b1aee02a64d58…` 逐字节相同。
+
+### 冲突与语义重对齐（17 个文件）
+
+- **`ct_target.yh`（最关键）**：自动合并把 `windows` 分支并进了 `arm64`，`$if (windows)`
+  因此恒为假——主线会静默丢掉全部 Windows 路径，自编出的编译器 `fork()`/spawn 全部
+  失效（表现为「无法启动模块编译 worker」且无任何诊断）。恢复分支链后自举立即恢复。
+- **`build/link_cache.yh` → `link/link_cache.yh`**：主线把 `mb_link` 阶段化
+  （`LinkPlan` + prepare/objects/key/args/libs/exec）。Windows 链接按阶段接入：
+  `use_coff` 与 SDK 输入在 prepare、COFF 前缀在 args、身份哈希在 key、
+  `mb_coff_link_worker` 在 exec。`windows_link.yh` 从 `build` 迁到 `link`
+  （`mb_link` 在 link，反向依赖成环），并新增 `mb_coff_link_single` 给单文件链接用。
+- **`module_build` → `module_emit`**：`--emit-module` 子进程自己装载主项目、重建
+  拓扑序、标入口模块；`--no-firc` 传冷构建判定；`--target`/`-O0` 在 api 层落
+  `proj.cfg()`（子进程不经 cli 解析）。
+- **目标/路径**：`gs.c_target` → `proj.cfg().target`；`[link-windows-x64]` 节名 →
+  编码 5/6；`.lib/.dll` 输入校验；盘符绝对路径（`proj.canon`、`li_build_path`）。
+- **justfile**：Windows 分支接到合并后的配方；反引号里取不到 just 变量（shell 带
+  `-u`），`worktree_tag`/`cache_root` 按平台写死解释器名；`stage-yh` 的内联 python
+  改走环境变量（反斜杠会打断单引号字符串）。
+
+### 合并引入并修掉的 5 个缺陷
+
+1. **`__yh_chkstk` 破坏 r10/r11**（`compiler/windows-sdk/chkstk.c`）：LLVM 把页探测
+   当序言的一部分发射，**不按 call 建模寄存器破坏**，寄存器分配器会把活值留在
+   r10/r11 上跨过探测。合并后的断言 lowering 把 `%line` 暂存在 r10d → `$assert`
+   记录里的行号变成 `0x1F6FFDF8` 这类垃圾（列号在 r8d 所以正常）。修法：桩内
+   `push/pop` 保存 r10/r11（与 MSVC `chkstk.asm` 同契约）。
+2. **`--emit-llvm` 没传给模块子进程**（`cmd/api.yh`）：`yh test --emit-llvm` 的子进程
+   以 usage(2) 退出，测试构建没有 `.ll` → `emit-llvm` 与 `test-bodies-lowered` 两例
+   失败。修法：子进程参数解析接受 `--emit-llvm` 并置 `cfg().emit_kind`。
+3. **`libs/net` 缺 Windows 实现**（主线新加的 UF1 未使用函数检查）：Windows 目标上只有
+   模型层被编入，`stream_zero/listener_zero/error_from_result` 无人引用被判死代码。
+   修法：新增 `libs/net/20_tcp.windows.yh`——真的调用一次 `sys.socket_fd` 并把
+   `-ENOSYS` 按统一映射转成 `status_unsupported`（不伪造 native_code=0）。
+4. **测试夹具依赖 UB**（`tests/modules/projects/ytestfail`）：「崩溃不算通过」用空指针
+   写，而空指针写是 UB，LLVM 在 O0 也会删掉它（实测编译成 `nop`）→ 用例正常返回被
+   误判 PASS。修法：地址改为由 `getpid()` 派生（后端无法证明不可写），store 一定发射。
+5. **`tc_case_start` 的 Windows 分支在合并中丢失**：主线的 `fork/dup2/execv` 版本覆盖了
+   `CreateProcess` 版本，Windows 上 `fork()` 返回 -1 → 所有用例「崩溃或缺少结果记录」。
+   修法：恢复 Windows 分支（CreateProcess + 显式环境块 + 十进制用例号），POSIX 分支
+   保持主线的 fd 3 复制语义。
+
+### 验证（Windows/x86_64 原生）
+
+| 项 | 结果 |
+|---|---|
+| 两代固定点 | `ca4b1aee02a64d58…`（A == B） |
+| `just test` | **rc=0**：语法 82/82、反例 49/49、运行 363/372（跳过 9）、fail 138/138、pass 10/10、libs **133/133**、compiler-tests 4/4、arch-check 通过 |
+| `just selfhost-native` | 合并后重跑（见 todo 的 W2-9 条目） |
+
+**遗留**：`bin/` 种子不入库（主工作区已本地复制 `bin/yh-windows-x64` 与闭包软链）；
+CI 构建合并后的代码需要先发一个认识 `windows` 标记的种子（W2-0）；
+`[link-windows-x64]` 仍是本机绝对路径（W2-2）。
 
 ## 2026-10-28 NP3 能力矩阵实测与裁剪（不新增后端能力）
 

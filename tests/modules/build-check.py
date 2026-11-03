@@ -1171,6 +1171,14 @@ def main():
             installed_compiler = bin_dir / Path(compiler).name
             try:
                 shutil.copy2(compiler, installed_compiler)
+                # Windows 安装布局还带 `<exe>/windows-sdk`（just install 会复制），
+                # 里面是零 CRT 的 kernel32 导入库；不复制的话装好的编译器只会报
+                # 「找不到 Windows 导入库」，默认标准库发现的结论就无从验证。
+                if sys.platform == "win32":
+                    sdk_env = os.environ.get("YH_WINDOWS_SDK", "")
+                    sdk = Path(sdk_env) if sdk_env else ROOT / "tmp" / "llvm-migration" / "windows-sdk"
+                    if (sdk / "lib" / "kernel32.lib").is_file():
+                        shutil.copytree(sdk, bin_dir / "windows-sdk", dirs_exist_ok=True)
                 shutil.copytree(ROOT / "libs", libs_dir,
                                 ignore=shutil.ignore_patterns(".build"))
                 run = sh([str(installed_compiler), "run"],

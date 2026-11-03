@@ -86,7 +86,10 @@ yh_abs := absolute_path("yh")
 # 665ms→464ms、整用例 939ms→703ms（约 −25%）。FAST_STAGE=0 关闭暂存。
 FAST_STAGE := env_var_or_default("FAST_STAGE", "1")
 fast_stage := if FAST_STAGE == "" { "1" } else { FAST_STAGE }
-tmpdir := if env_var_or_default("TMPDIR", "") == "" { "/tmp" } else { env_var_or_default("TMPDIR", "/tmp") }
+# Windows 上没有 `/tmp`：just 的 absolute_path() 会把 `/tmp/yh-fast-x` 折成
+# `C:\tmp\yh-fast-x`，而该目录不存在（stage-yh 直接 cp 失败）。因此 Windows
+# 缺省落在仓库 tmp/ 下（与「临时产物一律放 tmp/」一致，且随 worktree 隔离）。
+tmpdir := if env_var_or_default("TMPDIR", "") != "" { env_var_or_default("TMPDIR", "/tmp") } else if host_os == "windows" { root + "/tmp" } else { "/tmp" }
 run_id := env_var_or_default("GITHUB_RUN_ID", "")
 # 每个 worktree + 每个 CI run 独占一个快速目录：
 #   - 同机并发跑多个 run 时共用 /tmp/yh-fast 会让 stage-yh 互相覆盖（release 与
@@ -101,8 +104,12 @@ FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast-" + worktree_tag +
 fast_dir := if FAST_DIR == "" { tmpdir + "/yh-fast-" + worktree_tag } else { FAST_DIR }
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
 yh_run := if fast_stage == "1" { absolute_path(fast_dir + "/yh") } else { yh_abs }
-run_work_flag := if fast_stage == "1" { "--workdir " + absolute_path(fast_dir + "/yh-run-work") } else { "" }
-modcheck_work_flag := if fast_stage == "1" { "--workdir " + absolute_path(fast_dir + "/modcheck") } else { "" }
+# 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
+# --workdir 必须 quote()：Windows 路径带反斜杠，直接拼进 recipe 会被 sh 当成转义
+# 符吃掉，于是 Python 收到 `C:UsersAdministrator...` 这种相对路径，在仓库根下
+# 建出一个 `UsersAdministratorAppDataLocalTempyh-fast-…` 垃圾目录（2026-11-03 实测）。
+run_work_flag := if fast_stage == "1" { "--workdir " + quote(absolute_path(fast_dir + "/yh-run-work")) } else { "" }
+modcheck_work_flag := if fast_stage == "1" { "--workdir " + quote(absolute_path(fast_dir + "/modcheck")) } else { "" }
 
 # 构建缓存根（2026-10-28）：缺省用项目内 compiler/.build；显式 BUILD_CACHE
 # （或环境变量 YH_BUILD_CACHE）时，整套缓存树（targets/check 与 asm/obj/...）
@@ -196,12 +203,12 @@ install_prog := if INSTALL == "" { "install" } else { INSTALL }
 prefix_root := destdir + prefix
 
 # 每平台专项门的命令：变量替旧 Makefile 里的条件赋值。
-runtime_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-runtime.py --compiler-path " + yh_run } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + yh_run + " --llvm-x64" } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-linux-arm64.py --compiler-path " + yh_run } else { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + yh_run }
-cache_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-cache.py --compiler-path " + yh } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + yh } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + yh + " --target aarch64-unknown-linux-gnu" } else { py + " " + quote(root) + "/tests/selfhost/link-cache.py --compiler-path " + yh }
+runtime_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-runtime.py --compiler-path " + quote(yh_run) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + quote(yh_run) + " --llvm-x64" } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-linux-arm64.py --compiler-path " + quote(yh_run) } else { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + quote(yh_run) }
+cache_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + quote(yh) + " --target aarch64-unknown-linux-gnu" } else { py + " " + quote(root) + "/tests/selfhost/link-cache.py --compiler-path " + quote(yh) }
 modcheck_flags := if llvm_host == "" { "" } else { "--backend llvm" }
-selfhost_flags_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-selfhost-flags.py --compiler-path " + yh_run } else { "true" }
+selfhost_flags_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-selfhost-flags.py --compiler-path " + quote(yh_run) } else { "true" }
 # 链接死代码回收门（J6-L1）：Darwin 缺省 -dead_strip 生效、可回退、进链接键。
-dead_strip_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin-dead-strip.py --compiler-path " + yh_run } else { "true" }
+dead_strip_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin-dead-strip.py --compiler-path " + quote(yh_run) } else { "true" }
 
 # 默认目标：源比 yh 新时冷编，否则什么都不做（等价旧 make 默认目标）。
 default: _ensure_built

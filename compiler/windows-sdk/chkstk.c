@@ -1,7 +1,14 @@
 /* yh Windows/x64 栈探测桩：实现 MSVC ABI 的 __chkstk 契约。
  * 调用方把要分配的字节数放在 RAX，调用本函数后自己 sub rsp, rax。
  * 本函数必须：按页触碰 [rsp-size, rsp) 的每个页（触发 guard page 增长栈），
- * 且不改变 RAX/RSP；可自由使用 volatile 寄存器（r10/r11）。
+ * 且**除 RAX 外不改变任何寄存器**——包括 r10/r11。
+ *
+ * 为什么 r10/r11 也要保存：LLVM 把页探测当序言的一部分发射，**不按 call
+ * 建模它的寄存器破坏**，寄存器分配器因此会把活值留在 r10/r11 上跨过探测。
+ * 实测（2026-11-03，合并后主线）：`__yh_test_assert` 把 i32 %line 暂存在 r10d，
+ * 紧接着 `call __chkstk`，桩把 r10 当临时寄存器 → 断言记录的行号变成
+ * 0x1F6FFDF8 这类垃圾值（列号在 r8d 里所以正常）。MSVC 的 chkstk.asm 同样
+ * 保存 r10/r11，就是为这个契约。
  *
  * 符号不叫 __chkstk：静态 CRT 自带 __chkstk（自举时必须用 CRT 的那份）。
  * 链接模板用 /alternatename:__chkstk=__yh_chkstk，只有零 CRT 时才落到本桩。
@@ -18,6 +25,8 @@
  * 栈溢出）。这里照 MSVC 的形态：size < 4096 直接走尾段。 */
 __attribute__((naked, used)) void __yh_chkstk(void) {
     __asm__ volatile(
+        "pushq %r10\n\t"
+        "pushq %r11\n\t"
         "movq %rsp, %r10\n\t"
         "movq %rax, %r11\n\t"
         "cmpq $4096, %r11\n\t"
@@ -31,7 +40,61 @@ __attribute__((naked, used)) void __yh_chkstk(void) {
         "2:\n\t"
         "subq %r11, %r10\n\t"
         "testq %r10, (%r10)\n\t"
+        "popq %r11\n\t"
+        "popq %r10\n\t"
         "ret\n\t");
+}
+
+/* __yh_build_envp：把宿主环境块转成 `char *envp[]`（零 CRT 入口给 main 的第三参）。
+ *
+ * 为什么需要它：Windows 的零 CRT 入口 `__yh_zero_crt_start` 只解析 argv；用户写
+ * `fn main(argc int, argv **char, envp **char)` 时第三参就是寄存器里的垃圾值
+ * （实测合并后 os.spawn(argv[0], argv, envp) 直接访问违例）。POSIX 的 CRT 一直
+ * 会填 envp，这里把同一契约补上：GetEnvironmentStringsA 的块是连续的
+ * `K=V + NUL` 项 + 结尾双 NUL，只需要把每项起点收集成指针数组（字符串本身继续
+ * 借用宿主块，进程生命周期内有效，因此不释放块）。
+ * 分配走 HeapAlloc（与运行时 malloc 同一来源），失败时返回只有结尾 NUL 的空数组。 */
+__declspec(dllimport) char *__stdcall GetEnvironmentStringsA(void);
+__declspec(dllimport) void *__stdcall GetProcessHeap(void);
+__declspec(dllimport) void *__stdcall HeapAlloc(void *heap, unsigned long flags,
+                                                unsigned long long bytes);
+
+char **__yh_build_envp(void) {
+    char *block = GetEnvironmentStringsA();
+    // 两趟扫描：先数条目（块形如 `K=V\0` 重复 + 结尾双 NUL），再按同样顺序填指针。
+    // 数组必须多留 1 个位置放结尾空指针——曾经只按条目数分配、再写 envp[count] = 0，
+    // 越界一个指针位，子进程随后在堆上崩溃（0xC0000374，表现为 yh test 的
+    // 「崩溃或缺少结果记录」与 os.spawn 访问违例，且随时序时好时坏）。
+    unsigned long long count = 0;
+    if (block != 0 && block[0] != 0) {
+        char *cursor = block;
+        for (;;) {
+            count += 1;
+            while (*cursor != 0) {
+                cursor += 1;
+            }
+            cursor += 1;
+            if (*cursor == 0) {
+                break;
+            }
+        }
+    }
+    char **envp = (char **)HeapAlloc(GetProcessHeap(), 0, (count + 1) * sizeof(char *));
+    if (envp == 0) {
+        return 0;
+    }
+    unsigned long long index = 0;
+    char *cursor = block;
+    while (index < count) {
+        envp[index] = cursor;
+        index += 1;
+        while (*cursor != 0) {
+            cursor += 1;
+        }
+        cursor += 1;
+    }
+    envp[count] = 0;
+    return envp;
 }
 
 /* __yh_close_handle：关闭内核句柄的零 CRT 入口（os.wait 用）。

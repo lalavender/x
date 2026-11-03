@@ -69,9 +69,10 @@ BUDGETS = {
     "max_file_lines": 2042,        # module_build.yh（A2c 拆分后必须下降）
     "max_function_lines": 360,     # mb_link 674（含前导注释的上界口径）
     "max_module_lines": 387,       # main（A6 后只剩 driver + api；B1-1 +2、B1-2 绑定存储 +4）
-    "max_testkit_lines": 1617,     # testkit（YT2d-3 +37；B1-1 迁表后 -14；W2-7 无 fork 子进程的
-                                   # 十进制用例号/模块内文件序号/--filter UTF-8 规整 +31）
-    "max_build_lines": 6946,      # build（B1/B2 拆分口径；+232 UF1；W2 的 windows 目标/宿主文件、
+    "max_testkit_lines": 1624,     # testkit（YT2d-3 +37；B1-1 迁表后 -14；W2-7 无 fork 子进程的
+                                   # 十进制用例号/模块内文件序号/--filter UTF-8 规整 +31；
+                                   # 合并后 tc_case_start 的 Windows 分支（CreateProcess 重入）+7）
+    "max_build_lines": 6949,      # build（B1/B2 拆分口径；+232 UF1；W2 的 windows 目标/宿主文件、
                                   # 模块子进程与 cold 标记 +299，见 finish.md 2026-11-03）
     "max_link_lines": 4272,      # link（B2-2 新建 + B2-3 阶段化 3,657；W1-5/W2 的 COFF 链接
                                  # （windows_link.yh 前缀/SDK/子进程 worker）与 .lib/.dll 输入校验 +509）

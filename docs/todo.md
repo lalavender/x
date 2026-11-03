@@ -356,10 +356,6 @@ prerelease 并带三端种子，正式 tag 只允许打在对应 release 分支�
     (a) 保持零 CRT，把需要的符号逐个用 yh 或 SDK 支撑对象实现（math 尤其昂贵）；
     (b) 接 UCRT 导入库（`ucrtbase.dll`），一次解决全部 C 符号，代价是用户程序依赖
     `ucrtbase.dll`（与方案 D2 冲突）。**决定后再删 `build-check.py` 的 `WINDOWS_SKIP`。**
-  - [ ] **W2-8 COFF 整库加载**：`/wholearchive:` 未实现（Darwin 的 `-force_load` 会被
-    lld-link 忽略）。当前桥入口都被直接引用、不需要整库；若要支持，在 `mb_link` 里把
-    `[link-options-*].whole` 拼成单参数 `/wholearchive:<path>`（需新缓冲，函数行数超预算，
-    随 B2 的 link 簇拆出一起做）。
 - [ ] **B2 macOS/x86_64、Windows/ARM64**：对应目标 ABI、库、OS 适配与各自原生
   种子；四格分别完成运行/自举/性能验收。
 

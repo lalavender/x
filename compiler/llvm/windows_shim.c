@@ -347,7 +347,7 @@ static char *yh_env_with(const char *name, const char *value) {
     }
     memcpy(block, parent, parent_len);
     FreeEnvironmentStringsA(parent);
-    /* 覆盖第一个收尾 NUL，追加 name=value 后再补两个 NUL。 */
+    /* 覆盖块结束符（parent_len-1），追加 name=value 后再补两个 NUL。 */
     char *cursor = block + parent_len - 1;
     memcpy(cursor, name, name_len);
     cursor += name_len;

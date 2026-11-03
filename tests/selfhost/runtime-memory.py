@@ -117,6 +117,17 @@ def main():
         print(f"FAIL 自有格式化输出: {execution.stdout!r}")
         return 1
 
+    if sys.platform.startswith("win"):
+        # Windows/PE：下面整段是 ELF/Mach-O 的 `nm -u` 导入审计（
+        # 「产物不得从 C runtime 导入 malloc/free/…」），PE 的导入表语义不同，
+        # 且最后一步要冷编整个 compiler/ 再 nm 它（Windows 上每模块一个子进程，
+        # 远超 120s 的 sanity 上限）。可移植部分（构建 + 运行 + 精确输出）已经
+        # 在本函数上半段验证；编译器自身的闭包边界由 selfhost-native 的
+        # cc2/cc3/cc4 与 llvm-isolation 覆盖。
+        print("自有运行时：格式化、函数值、按需发射裁剪通过"
+              "（Windows：nm 导入审计属 ELF/Mach-O，跳过）")
+        return 0
+
     imports = run(["nm", "-u", str(binary)], WORK)
     if imports.returncode != 0:
         print(f"FAIL 检查未定义符号: rc={imports.returncode}\n{imports.stderr[-800:]}")
