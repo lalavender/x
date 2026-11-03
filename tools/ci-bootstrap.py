@@ -217,7 +217,7 @@ def run_stage(label: str, compiler: Path, output: Path, llvm_host: str) -> None:
 
 def bootstrap(seed: Path, output: Path, staged: Path, keep_staged: bool) -> int:
     """两代自举：先编出认识 W2 标记的 yh1，再用它全量冷编 HEAD。"""
-    llvm_host, _suffix = host_ids()
+    llvm_host, suffix = host_ids()
     system = platform.system()
     other_marker = OTHER_MARKER[system]
     staged.mkdir(parents=True, exist_ok=True)
@@ -238,6 +238,17 @@ def bootstrap(seed: Path, output: Path, staged: Path, keep_staged: bool) -> int:
     (output.parent / f"{output.name}.sha256").write_text(
         f"{digest}  {output.name}\n", encoding="utf-8")
     print(f"[ci-bootstrap] 已写 {output.name}.sha256（{digest[:16]}…）", flush=True)
+    # 自举门还要一份**带平台名**的种子：justfile 的 llvm_host 与
+    # tests/selfhost/native-selfhost.py 的 llvm_shim_for_seed() 都按种子文件名
+    # 推断平台，根目录 `yh` 不含平台标记会退化成「无闭包参数」并链接失败。
+    # 写成 bin/<平台种子名> 后，后续 `just SEED="$PWD/bin/yh-<平台>-<架构>"` 可用；
+    # CI 的 bin/ 里原本是 Release 种子，这里被本次 HEAD 产物覆盖是预期行为。
+    seed_out = ROOT / "bin" / f"yh-{suffix}"
+    seed_out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(output, seed_out)
+    (ROOT / "bin" / f"yh-{suffix}.sha256").write_text(
+        f"{digest}  {seed_out.name}\n", encoding="utf-8")
+    print(f"[ci-bootstrap] 已写平台种子：{seed_out}", flush=True)
     if not keep_staged:
         shutil.rmtree(staged, ignore_errors=True)
     print(f"[ci-bootstrap] 完成：{output}\n"

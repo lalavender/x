@@ -151,7 +151,12 @@ seed_file := file_name(seed)
 seed_has_arm := if replace(seed_file, "arm64", "") == seed_file { if replace(seed_file, "aarch64", "") == seed_file { "0" } else { "1" } } else { "1" }
 seed_has_x64 := if replace(seed_file, "x64", "") == seed_file { "0" } else { "1" }
 seed_has_darwin_arm := if replace(seed_file, "darwin-arm64", "") == seed_file { "0" } else { "1" }
-llvm_host := if host_os == "linux" { if seed_has_arm == "1" { "linux-aarch64" } else if seed_has_x64 == "1" { "linux-x86_64" } else { "" } } else if host_os == "macos" { if seed_has_darwin_arm == "1" { "darwin-aarch64" } else { "" } } else if host_os == "windows" { if seed_has_x64 == "1" { "windows-x86_64" } else { "" } } else { "" }
+seed_llvm_host := if host_os == "linux" { if seed_has_arm == "1" { "linux-aarch64" } else if seed_has_x64 == "1" { "linux-x86_64" } else { "" } } else if host_os == "macos" { if seed_has_darwin_arm == "1" { "darwin-aarch64" } else { "" } } else if host_os == "windows" { if seed_has_x64 == "1" { "windows-x86_64" } else { "" } } else { "" }
+# 种子文件名不带平台标记时（过渡期自举桥产出的根目录 yh、或显式 SEED=./yh），
+# 按**构建宿主**选固定闭包：桥第 2 代的自举链接必须带内嵌桥归档，否则报
+# lld_bridge 的未定义符号（2026-11-03 WSL 实测）。显式平台种子仍以文件名为准。
+host_llvm_host := if host_os == "linux" { if cpu == "aarch64" { "linux-aarch64" } else if cpu == "arm64" { "linux-aarch64" } else { "linux-x86_64" } } else if host_os == "macos" { "darwin-aarch64" } else if host_os == "windows" { "windows-x86_64" } else { "" }
+llvm_host := if seed_llvm_host == "" { host_llvm_host } else { seed_llvm_host }
 YH_LLVM_HOST := env_var_or_default("YH_LLVM_HOST", "auto")
 llvm_mode := if YH_LLVM_HOST == "1" { "require" } else if YH_LLVM_HOST == "0" { "off" } else { "auto" }
 llvm_host_flags := if llvm_host == "" { "" } else { "--llvm-host " + llvm_host + " --llvm-mode " + llvm_mode }
