@@ -68,13 +68,22 @@ ALLOWED = {
 BUDGETS = {
     "max_file_lines": 2042,        # module_build.yh（A2c 拆分后必须下降）
     "max_function_lines": 360,     # mb_link 674（含前导注释的上界口径）
-    "max_module_lines": 387,       # main（A6 后只剩 driver + api；B1-1 +2、B1-2 绑定存储 +4）
+    "max_module_lines": 461,       # main（P1 一命令一文件：driver 分派 + common 前奏 +
+                                   # 8 个 cmd_*.yh；api.yh 删除；+71 全为 9 个新文件头
+                                   # 注释，逻辑行数不变；依赖边 55 条不变；见 finish.md
+                                   # 2026-11-05 与 docs/03-design 模块架构目标设计 §4；
+                                   # +3 VENC：driver 首行 gen.console_utf8_init() 调用，
+                                   # Windows 控制台切 65001 码页显示中文）
     "max_testkit_lines": 1632,     # testkit（YT2d-3 +37；B1-1 迁表后 -14；W2-7 无 fork 子进程的
                                    # 十进制用例号/模块内文件序号/--filter UTF-8 规整 +31；
                                    # 合并后 tc_case_start 的 Windows 分支（CreateProcess 重入）+7）
-    "max_build_lines": 6953,      # build（B1/B2 拆分口径；+232 UF1；W2 的 windows 目标/宿主文件、
+    "max_build_lines": 6990,      # build（B1/B2 拆分口径；+232 UF1；W2 的 windows 目标/宿主文件、
                                   # 模块子进程与 cold 标记 +299，见 finish.md 2026-11-03；
-                                  # +4 合入 ci/github-actions 的 Windows 闭包/CI 适配）
+                                  # +4 合入 ci/github-actions 的 Windows 闭包/CI 适配；
+                                  # +23 VTEST：pj_name_is_test + pj_dir_less 测试文件后置
+                                  # 排序规则，见 finish.md 2026-11-05；
+                                  # +14 P0-A：--emit-asm 临时目录 CWD 优先 + TEMP 兜底
+                                  # 重试，见 finish.md 2026-11-05）
     "max_link_lines": 4272,      # link（B2-2 新建 + B2-3 阶段化 3,657；W1-5/W2 的 COFF 链接
                                  # （windows_link.yh 前缀/SDK/子进程 worker）与 .lib/.dll 输入校验 +509）
     "max_proj_lines": 1396,        # proj（B1-1 表/路径 + B2-1 产物键 + YH_BUILD_CACHE 缓存根；
@@ -238,6 +247,20 @@ def main():
     if cap_appends < BUDGETS["min_cap_appends"]:
         problems.append(
             f"min_cap_appends 低于基线：{cap_appends} < {BUDGETS['min_cap_appends']}")
+
+    # —— 版本一致性（VCONST，2026-11-05）：cmdline 的 YH_VERSION_TEXT
+    # 编码进二进制供 `yh --version` 使用，必须与 compiler/project.toml 的
+    # project.version 一致，防止滚版本时只改一处。
+    toml_text = (ROOT / "compiler" / "project.toml").read_text(encoding="utf-8")
+    mtoml = re.search(r'^version\s*=\s*"([^"]+)"', toml_text, re.M)
+    mconst = re.search(r'YH_VERSION_TEXT \*char = "yh ([^"]+)"',
+                       (SRC / "cmdline" / "cmdline.yh").read_text(encoding="utf-8"))
+    if not mtoml or not mconst:
+        problems.append("版本一致性：找不到 project.toml version 或 YH_VERSION_TEXT 常量")
+    elif mtoml.group(1) != mconst.group(1):
+        problems.append(
+            f"版本不一致：project.toml={mtoml.group(1)} "
+            f"cmdline.YH_VERSION_TEXT={mconst.group(1)}")
 
     # —— 3. 报告 ——
     print(f"模块 {len(mods)} 个，文件 {len(modname)} 个，代码 {total_lines} 行")

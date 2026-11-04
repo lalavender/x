@@ -34,7 +34,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 # 编译器子进程环境：main 会填入 YH_WINDOWS_SDK，使暂存副本（/tmp/yh-fast/yh）也能
-# 找到导入库（它不在仓库树里，猜不到 compiler/windows-sdk 的相对位置）。
+# 找到导入库（它不在仓库树里，猜不到 vendor/windows-sdk 的相对位置）。
 COMPILER_ENV: dict[str, str] = {}
 
 # 用例：名字 → (源码, 期望 stdout, 期望退出码)。

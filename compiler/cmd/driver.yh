@@ -2,11 +2,10 @@ module main
 import gen
 import build
 import proj
-import link
 import cmdline
 
 // ============================================================================
-// driver.yh —— 命令行入口：只做 argv → 请求的映射
+// driver.yh —— 命令行入口：只做 argv → 请求的映射与分派（P1，2026-11-05）。
 //
 // 输出接口（docs/02-plan/yh-自举实施方案-v2.md §3）：
 //     yh --syntax-check <file.yh>   纯语法检查：合法静默退出 0，
@@ -14,30 +13,30 @@ import cmdline
 //     yh --emit-asm <file.yh>       发射当前目标汇编到标准输出
 //                                   （经 LLVM 后端；GNU 语法，按目标汇编器处理）
 //     yh -o <out> <file.yh>         编译并链接为可执行文件
+//     yh build|check|run|test|list|version [...]
 //
-// 执行一律委托 api.yh（A3）：本文件不直接调用前端、后端或构建实现。
+// 一命令一文件（docs/03-design/yh-模块架构目标设计-2026-11-05.md §4）：
+// 执行委托 cmd_*.yh（build/run/test/list/version/single/emit_module/
+// lld_link），共享前奏与形态常量在 common.yh。本文件不直接调用前端、
+// 后端或构建实现，只负责：
+//     1) 会话前奏与内部子进程协议识别（豁免 cli，私有 ABI）；
+//     2) 全局选项落状态（backend/target/opt/emit/stats/legacy-system）；
+//     3) 按命令分派（每分支一行调用）。
+// CLI-R（2026-10-27）：argv 的声明与解析在 cmdline 模块（libs/cli）。
 // 退出码：0 成功；1 源文件语法/语义错误或读入失败；2 用法错误。
-//
-// CLI-R（2026-10-27）：argv 的声明与解析在 cmdline 模块（libs/cli），本文件只做
-// 「请求 → 全局状态 → 分派」。豁免：内部子进程协议 `--emit-module` 仍按位置手写
-// 识别（私有 ABI，不进用户 help，见文档 §4.3）。
 // ============================================================================
 
-// main：解析命令行并交给 api.yh 执行。
+// main：解析命令行并交给各 cmd_*.yh 执行。
 // 形态（全局选项在子命令前后都能写，由 cli 的 inherit 保证）：
 //   yh build|check|run|test|list|version [...]
 //   yh --syntax-check <file.yh> / --emit-asm <file.yh> / [-o <out>] <file.yh>
 pub fn main(argc int, argv **char, envp **char) int {
-    let gs *gen.TaskCtx = gen.task()
-    // 编译会话入口：恢复 GenState 与项目模型的非零初始值（原 pub let 初始化器迁移）
-    gen.state_init()
-    proj.init()
-    // 目标/配置的存储归 proj（B1-2）：gen 只持指针，必须先绑定再读目标。
-    gen.bind_cfg(proj.cfg())
-    // 自身路径（项目构建的子进程再入用）
-    build.mb_set_argv0(argv[0])
-    // 直接读取操作系统传入的环境向量，避免调用 printenv 等宿主工具。
-    proj.ctx().envp = envp
+    // 控制台 UTF-8（VENC）：Windows 下切 65001 码页，诊断/帮助的中文才
+    // 不乱码；其他平台为空实现。必须在任何输出之前。
+    gen.console_utf8_init()
+    // 编译会话前奏：恢复 GenState、初始化项目模型、绑定目标/配置、
+    // 记录自身路径与操作系统环境向量（见 common.yh cmd_session_init）。
+    cmd_session_init(argv[0], envp)
 
     // 内部子进程协议：`--emit-module <mod> <prov> <root> -o <dir> [...]`（豁免 cli）。
     // 上界 23（= 去掉程序名后的 22 项）：可选参数最多 --iface-suffix、--ir-key、
@@ -47,10 +46,10 @@ pub fn main(argc int, argv **char, envp **char) int {
         && gen.cstr_eq(argv[5], "-o") != 0) {
         return api_emit_module(argv + 1, argc - 1)
     }
-    // 内部子进程协议：`--lld-link <响应文件>`（Windows 无 fork 的 COFF 链接 worker；
-    // 响应文件每行一个 argv，由 link/windows_link.yh 的 mb_coff_write_rsp 写出）。
+    // 内部子进程协议：`--lld-link <响应文件>`（Windows 无 fork 的 COFF 链接
+    // worker；响应文件每行一个 argv，由 link/windows_link.yh 写出）。
     if (argc == 3 && gen.cstr_eq(argv[1], "--lld-link") != 0) {
-        return link.mb_coff_link_child(argv[2])
+        return api_lld_link(argv[2])
     }
 
     // 裸 yh：完整帮助 + 当前项目版本，退出 2（保持旧契约）。
@@ -78,7 +77,7 @@ pub fn main(argc int, argv **char, envp **char) int {
         return 0
     }
 
-    // 全局选项落进 GenState（诊断文本与旧手写扫描一致）。
+    // —— 全局选项落进状态（诊断文本与旧手写扫描一致）——
     if (req.backend != 0) {
         if (gen.cstr_eq(req.backend, "legacy") != 0) {
             gen.fail("legacy 后端已在 LL12 退役；LLVM 是唯一代码生成后端")
@@ -112,68 +111,32 @@ pub fn main(argc int, argv **char, envp **char) int {
         gen.stats().enabled = 1
     }
     if (req.legacy_system != 0) {
+        let gs *gen.TaskCtx = gen.task()
         gs.c_legacy_system = 1
     }
 
+    // —— 按命令分派（一命令一文件；req 生命周期归 driver，统一释放）——
+    let rc int = 0
     if (req.command == cmdline.CLI_FILE) {
-        let form int = API_ASM
-        if (req.file_mode == cmdline.CLIFILE_SYNTAX) {
-            form = API_SYNTAX
-        } else if (req.file_mode == cmdline.CLIFILE_EXE) {
-            form = API_EXE
-        } else if (proj.cfg().emit_kind == 1) {
-            form = API_LLVM_TEXT
-        }
-        let out_path *char = 0
-        if (form == API_EXE) {
-            out_path = req.out
-        }
-        let rc int = api_single_file(req.src, form, out_path)
-        cmdline.release_request(&req)
-        return rc
-    }
-    if (req.command == cmdline.CLI_CHECK && req.has_src != 0
+        rc = api_single_file_request(&req)
+    } else if (req.command == cmdline.CLI_CHECK && req.has_src != 0
         && cmdline.is_yh_source(req.src) != 0) {
-        let rc int = api_single_file(req.src, API_CHECK, 0)
-        cmdline.release_request(&req)
-        return rc
+        // yh check <file.yh>：源文件形态，走单文件检查。
+        rc = api_check_source(req.src)
+    } else if (req.command == cmdline.CLI_CHECK) {
+        // yh check [module]：项目态检查。
+        rc = api_check_project(&req)
+    } else if (req.command == cmdline.CLI_BUILD) {
+        rc = api_build(&req)
+    } else if (req.command == cmdline.CLI_RUN) {
+        rc = api_run(&req)
+    } else if (req.command == cmdline.CLI_TEST) {
+        rc = api_test(&req)
+    } else if (req.command == cmdline.CLI_LIST) {
+        rc = api_list(&req)
+    } else {
+        rc = api_version(&req)
     }
-    if (req.command == cmdline.CLI_BUILD || req.command == cmdline.CLI_CHECK) {
-        if (req.command == cmdline.CLI_CHECK) {
-            gs.c_check_only = 1
-        }
-        let rc int = api_build(&req)
-        if (rc == 2) {
-            cmdline.print_usage(&req, 2)
-        }
-        cmdline.release_request(&req)
-        return rc
-    }
-    if (req.command == cmdline.CLI_RUN) {
-        let rc int = api_run(&req)
-        cmdline.release_request(&req)
-        return rc
-    }
-    if (req.command == cmdline.CLI_TEST) {
-        if (req.timeout_secs < 1 || req.timeout_secs > 3600) {
-            gen.fail("--timeout 需要 1..3600 之间的秒数")
-            cmdline.print_usage(&req, 2)
-            cmdline.release_request(&req)
-            return 2
-        }
-        let rc int = api_test(&req)
-        if (rc == 2) {
-            cmdline.print_usage(&req, 2)
-        }
-        cmdline.release_request(&req)
-        return rc
-    }
-    if (req.command == cmdline.CLI_LIST) {
-        let rc int = api_list(&req)
-        cmdline.release_request(&req)
-        return rc
-    }
-    let rc int = api_version(&req)
     cmdline.release_request(&req)
     return rc
 }

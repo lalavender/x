@@ -1,0 +1,83 @@
+module main
+import gen
+import proj
+import cmdline
+import build
+import ast
+import lex
+import parse
+
+// ============================================================================
+// cmd_single.yh —— 单文件命令（P1 一命令一文件，2026-11-05）。
+//
+// 覆盖形态：
+//     yh --syntax-check <file.yh>   词法/语法检查，合法静默退出 0
+//     yh --emit-asm <file.yh>       目标汇编到标准输出（经 LLVM 后端）
+//     yh --emit-llvm <file.yh>      LLVM 文本到标准输出
+//     yh -o <out> <file.yh>         编译并链接为可执行文件
+//     yh check <file.yh>            完整前端检查（不要求 main）
+// 契约：退出码见 common.yh；单文件各形态共用 api_open_source 前奏与
+// build.llvm_check_single_file 受检前端。
+// ============================================================================
+
+// api_single_file：单文件所有形态的唯一实现入口。
+// out_path 仅在 API_EXE 时使用；其余形态传 0。
+fn api_single_file(path *char, form int, out_path *char) int {
+    let gs *gen.TaskCtx = gen.task()
+    if (api_open_source(path) != 0) {
+        return 1
+    }
+    if (form == API_SYNTAX) {
+        if (lex.lex_all() != 0) { return 1 }
+        if (parse.parse_source() != 0) { return 1 }
+        if (gs.c_errors > 0) { return 1 }
+        return 0
+    }
+    if (form == API_CHECK) {
+        // 库文件不要求 main；失败保留受检前端写的原诊断。
+        gs.c_check_only = 1
+        let checked ast.CheckedModule
+        let status int = build.llvm_check_single_file(path, 0, &checked)
+        if (status != 0) { return status }
+        ast.checked_module_release(&checked)
+        let output [32]u8
+        let n int = gen.append_str(output, 0, "检查通过\n")
+        return gen.write_all(1, output, n) == 0 ? 0 : 1
+    }
+    let rc int = 0
+    if (form == API_ASM) {
+        // 汇编：out="-"、kind=1，由桥产出汇编文本再回显。
+        rc = build.llvm_emit_single_file(path, "-", 1, 0, 0)
+    } else if (form == API_LLVM_TEXT) {
+        // 只写 LLVM 文本：out 为空 = 不发布产物，text="-" 写标准输出。
+        rc = build.llvm_emit_single_file(path, 0.to_type(*char), 0, "-", 0)
+    } else if (form == API_EXE) {
+        rc = build.llvm_emit_single_file(path, out_path, 0, proj.cfg().emit_text_path, 1)
+    } else {
+        return 2
+    }
+    if (rc == 0) { build.mb_print_stats() }
+    return rc
+}
+
+// api_single_file_request：CLI_FILE 请求 → 形态选择 → api_single_file。
+fn api_single_file_request(req *cmdline.CliRequest) int {
+    let form int = API_ASM
+    if (req.file_mode == cmdline.CLIFILE_SYNTAX) {
+        form = API_SYNTAX
+    } else if (req.file_mode == cmdline.CLIFILE_EXE) {
+        form = API_EXE
+    } else if (proj.cfg().emit_kind == 1) {
+        form = API_LLVM_TEXT
+    }
+    let out_path *char = 0
+    if (form == API_EXE) {
+        out_path = req.out
+    }
+    return api_single_file(req.src, form, out_path)
+}
+
+// api_check_source：yh check <file.yh>（源文件形态的项目外检查）。
+fn api_check_source(src *char) int {
+    return api_single_file(src, API_CHECK, 0)
+}

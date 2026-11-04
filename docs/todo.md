@@ -8,6 +8,11 @@
 
 ## 2026-11-03 CI 迁移到 GitHub Actions（已提交，待滚种子后实跑验收）
 
+> **2026-11-05**：本段 P0 条目的解决方案与排序已立项，见
+> [yh-P0收尾与发布顺序实施方案](02-plan/yh-P0收尾与发布顺序实施方案-2026-11-05.md)
+> （含 2026-11-05 `.test.yh` 改名 × 0.0.11 桥解析约束的新冲突与处理：gen-1
+> staging 临时加回测试文件排序前缀，main 树保持无前缀不动）。
+
 `.github/workflows/{ci,release,perf}.yml` 已落地（四端 GitHub 托管 runner、无容器），
 `.gitea/` 已删除。分支 `ci/github-actions` 上完成了本机与 WSL 证据链；
 **GitHub 上的四端 job 按用户要求暂停到「本次滚种子」完成后再跑**。
@@ -28,28 +33,25 @@
 - [ ] **Windows 闭包 CI 冷启动成本（P1）**：Windows 静态 LLVM/lld 闭包由 CI 机器
       源码 MSVC `/MT` 构建（首次约 1 小时、563 MB，actions/cache 命中后秒级）。
       需要降低冷启动时按 C1 做固定 SDK 预编译分发。
-- [ ] **合流后首建：Windows 闭包按可重定位布局重建（P0，一次性）**：合入
-      `ci/github-actions` 后 `compiler/project.toml` 的 `[link-windows-x64]` 指向
-      `../tmp/llvm-migration/windows-llvm-closure/{bridge,lld,llvm,support}/…`，
-      旧布局（`tmp/winhost/libyh-llvm-bridge.lib` + `D:/tmp/llvm-win/build/Release/lib`）
-      不再被读取，未准备时 `just build` 直接报「无法读取库文件（组 bridge/lld/llvm）」。
-      首次构建前先跑 `just llvm-host`；可用 `YH_LLVM_WINDOWS_WORK=D:/tmp/llvm-win`
-      复用已建好的 CMake 树（否则会从固定源码重编，约 1 小时）。
-- [ ] **`--emit-asm` 单文件汇编在 Windows 上发布失败（P0，合流后在主工作区复现）**：
-      命令 `yh -O0 --emit-asm <file.yh>`（`api_single_file` 走 `llvm_emit_single_file`，
-      out="-"、kind=1）报 `<file>:2:1: 错误: LLVM 后端: 内嵌 LLVM：目标文件原子写入失败`。
-      同一份源码在合流前的 `llvm-2` 工作区（闭包在 `tmp/winhost/`、用
-      `tmp/rebuild-bridge.bat` 现场编桥）能通过 `tests/selfhost/llvm-architecture.py`；
-      合流后闭包换成 `windows-llvm-closure/bridge/` 就失败，而
-      `compiler/llvm/bridge.c` 与 `compiler/build/llvm_emit.yh` 在两次之间**没有差异**
-      （`git diff 34ee381 HEAD` 为空）。
-      已排除：① 临时目录不存在——把 `TEMP`/`TMP` 显式指向
-      `C:\Users\…\AppData\Local\Temp` 仍然失败；② `TEMP=/tmp` 这类 POSIX 残留
-      （加过「只接受 `X:\…`」的守卫，未解决，已回退）。
-      下一步：在 `publish_buffer` 的四个失败点（`_mktemp_s` / `_open` / `write` /
-      `MoveFileExA`）加临时诊断，并对比两条桥编译命令行（旧：`tmp/rebuild-bridge.bat`；
-      新：`tools/llvm-windows-closure.py build_bridge`），怀疑 `/MT` 或
-      `MOVEFILE_WRITE_THROUGH` 在两条编译线下行为不同。
+- [x] **合流后首建：Windows 闭包按可重定位布局重建（P0，一次性）**：已完成
+      （2026-11-05 复核）。闭包四组齐备于
+      `tmp/llvm-migration/windows-llvm-closure/{bridge,lld,llvm,support}`
+      （bridge 1、lld 6、llvm 114、support 15），`compiler/project.toml`
+      的 `[link-windows-x64]` 136 处引用全部指向新布局；`just llvm-host`
+      幂等复用验证通过（identity `7218e0cb…`）。当日证据：多次冷编
+      （`just build`/`just dev`/seed-build ×N/`ci-bootstrap` 两代自举）、
+      固定点逐字节相同、种子滚动（`bin/yh-windows-x64` sha `2d9693b0…`）
+      全部在新布局上完成；Lane A 还实测了 `D:/tmp/llvm-win` 旧 CMake 树
+      复用路径（作桥编译的 include 来源）。
+- [x] **`--emit-asm` 单文件汇编在 Windows 上发布失败（P0）**：已修复（2026-11-05，
+      Lane A）。根因：失败点不在 MoveFileExA，而在 `%TEMP%` 下的 `_mktemp_s/_open`
+      ——本机安全策略拒绝「不受信任的新编译 exe」在 %TEMP% 创建文件（探针矩阵：
+      同旗标在仓库 tmp/ 成功、%TEMP% 一律 EACCES 13；受信任的 python 写 %TEMP%
+      正常）。修复：`llvm_emit.yh` 的 `--emit-asm` 临时目录 Windows 上改当前目录
+      优先、TEMP/TMP 兜底重试（POSIX 保持 /tmp 优先）；桥 `publish_buffer` 各
+      失败点带 errno/GetLastError 诊断（`[mkstemp 失败 errno=13]`）。验收：
+      `llvm-architecture.py` LA0 O0/O2 通过、`just test` 全量绿、固定点逐字节
+      相同、种子已重滚。证据见 [01-finished/yh-P0-emit-asm修复](01-finished/yh-P0-emit-asm修复-2026-11-05.md)。
 - [ ] **外仓库项目目录构建（P2，Windows 不可用）**：`foreign-fs-build` 在 Windows 上
       失败（Windows CI 的 workdir 已改仓库内），需要按平台跳过或改成仓库内路径。
 
@@ -561,7 +563,7 @@ StackFallback 后置。块统一取自 prelude 堆，不新增 `sys` 依赖，�
 [方案](02-plan/yh-io标准库实施方案-2026-10-24.md)已把 `libs/io` 从"只有四个写侧
 接口"扩展为完整读写层：`read_all`/`read_file`/`write_bytes`/`write_file` 与调用方
 缓冲的 `Reader`/`Writer`（行读取、显式 flush），保留
-`write_all_result`/`write_all`/`print`/`println` 原签名。`libs/io/99_tests.yh`
+`write_all_result`/`write_all`/`print`/`println` 原签名。`libs/io/tests.test.yh`
 7 个用例通过，`yh test io` 已接入 `make test`/`make selfhost-native`/
 `make test-lib-tests`。以下只留未完成项。
 
@@ -620,7 +622,7 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
 [ADR-0019](adr/0019-yh-JSON标准库独立文档模型与词素保真数字.md)已落地首期：
 `libs/json/` 12 个源文件（reader + writer + 查询 + 文件读写），
 `libs/num/` 提供十进制 ↔ binary64 与最短往返格式化；
-六组断言已迁入 `libs/json/99_tests.yh`（12 个 test / 127 条断言，见
+六组断言已迁入 `libs/json/tests.test.yh`（12 个 test / 127 条断言，见
 [迁移记录](01-finished/yh-YT4-P1-json迁移-2026-10-25.md)），`jsonmodel`
 保留为 `build-check.py` 的公开面 smoke；原 `tests/json/run.py` 与
 `make test-json` 已删除，由 `yh test json` / `make libs-test` 取代。口径：

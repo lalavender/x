@@ -196,7 +196,7 @@ def run(cmd, cwd=None, shim=False, seed_link=False):
             if sdk_root and (Path(sdk_root) / "SDKSettings.json").is_file():
                 environment["SDKROOT"] = sdk_root
     if sys.platform == "darwin" and "YH_DARWIN_SDK" not in environment:
-        bundle = ROOT / "compiler/darwin-sdk"
+        bundle = ROOT / "vendor/darwin-sdk"
         if bundle.is_dir():
             environment["YH_DARWIN_SDK"] = str(bundle)
     if shim and SHIM_DIR is not None:

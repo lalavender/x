@@ -1,0 +1,81 @@
+module main
+import gen
+import proj
+import build
+
+// ============================================================================
+// cmd_emit_module.yh —— 内部子进程协议
+// `--emit-module <mod> <prov> <root> -o <dir> [...]`（P1 一命令一文件）。
+// 不经过 cli 解析（私有 ABI，不进用户 help，见 docs/02-plan/yh-自举实施
+// 方案-v2.md §4.3）；位置参数已由 driver 规整为 av[1..5]，其余选项在
+// av[6..n)。
+// ============================================================================
+
+// api_emit_module：模块子进程入口——解析父进程透传选项后发射单模块。
+fn api_emit_module(av **char, n int) int {
+    let gs *gen.TaskCtx = gen.task()
+    let cache_salt u64 = 0
+    let extra *char = 0
+    let fi int = 6
+    for fi < n {
+        if (gen.cstr_eq(av[fi], "--stats") != 0) {
+            gen.stats().enabled = 1
+        } else if (gen.cstr_eq(av[fi], "--emit-llvm") != 0) {
+            // 父进程调度器在 emit_kind != 0 时会把 --emit-llvm 传给模块子进程
+            // （build_scheduler 的 worker argv）；`yh test --emit-llvm` 与门禁的
+            // 「测试构建产物」检查也依赖它。子进程不经过 cli 解析，这里漏掉就会
+            // 按默认对象形态发射，固定点快照与 .ll 诊断都不一致。
+            proj.cfg().emit_kind = 1
+        } else if (gen.cstr_eq(av[fi], "--check-only") != 0) {
+            gs.c_check_only = 1
+        } else if (gen.cstr_eq(av[fi], "--ir-key") != 0 && fi + 1 < n) {
+            if (build.mb_parse_hex(av[fi + 1], &cache_salt) != 0) {
+                return 2
+            }
+            fi += 1
+        } else if (gen.cstr_eq(av[fi], "--iface-suffix") != 0 && fi + 1 < n) {
+            build.mb_set_iface_suffix(av[fi + 1])
+            fi += 1
+        } else if (gen.cstr_eq(av[fi], "--target") != 0 && fi + 1 < n) {
+            // 无 fork 宿主的模块子进程不经过 cli 解析，目标由父进程显式传入；
+            // 不在这里落 cfg 的话，子进程会按宿主默认目标发射（与父进程不一致）。
+            if (gen.target_select(av[fi + 1]) != 0) { return 2 }
+            fi += 1
+        } else if (gen.cstr_eq(av[fi], "-O0") != 0) {
+            proj.cfg().opt_level = 0
+        } else if (gen.cstr_eq(av[fi], "-O2") != 0) {
+            proj.cfg().opt_level = 2
+        } else if (gen.cstr_eq(av[fi], "--test-mode") != 0) {
+            gs.c_test_mode = 1
+        } else if (gen.cstr_eq(av[fi], "--no-firc") != 0) {
+            // 父进程调度器判定「全冷构建，不写函数级 IR 缓存」（PC3）后传给
+            // 无 fork 宿主的模块子进程；子进程自己看不到父进程的链接清单状态。
+            gen.stats().firc_write_off = 1
+        } else if (gen.cstr_eq(av[fi], "--extra-file") != 0 && fi + 1 < n) {
+            extra = av[fi + 1]
+            fi += 1
+        } else if (gen.cstr_eq(av[fi], "--scan-file") != 0 && fi + 1 < n) {
+            // 单文件测试的扫描过滤（父进程 c_scan_file 的传递；见 build_scheduler）。
+            let scan_len int = 0
+            let scan_off int = build.mb_intern_arg(av[fi + 1], &scan_len)
+            if (scan_off < 0) { return 1 }
+            proj.ctx().scan_file_off = scan_off
+            proj.ctx().scan_file_len = scan_len
+            fi += 1
+        } else {
+            return 2
+        }
+        fi += 1
+    }
+    let mlen int = 0
+    let rlen int = 0
+    let blen int = 0
+    let mo int = build.mb_intern_arg(av[1], &mlen)
+    let ro int = build.mb_intern_arg(av[2], &rlen)
+    let bo int = build.mb_intern_arg(av[3], &blen)
+    if (mo < 0 || ro < 0 || bo < 0) {
+        return 1
+    }
+    return build.mb_emit_module(mo, mlen, ro, rlen, bo, blen, av[5], cache_salt,
+        extra)
+}

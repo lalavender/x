@@ -85,7 +85,7 @@
 
 ## 4. 差分维护
 
-- 值/诊断类别/退出码的对照由 `libs/cli/zz_tests_*.yh`（51 个 test）与
+- 值/诊断类别/退出码的对照由 `libs/cli/*.test.yh`（51 个 test）与
   `libs/cli/test/run.py`（真实 argv/退出码）共同承担；`cliwarnings` 保留在
   runner，`diff.py` 负责 94 条 argv 的 argparse 差分。迁移记录见
   [YT4-P4](../01-finished/yh-YT4-P4-cli迁移-2026-10-25.md)。

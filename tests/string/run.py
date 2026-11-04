@@ -29,7 +29,7 @@ PROJ = ROOT / "tests" / "modules" / "projects"
 
 # 组名 -> (fixture 目录, 成功输出行)。resources 单独处理。
 GROUPS = {
-    # view/owned/transform/utf8 的断言已迁入 libs/string/99_tests.yh；
+    # view/owned/transform/utf8 的断言已迁入 libs/string/tests.test.yh；
     # model 与 interop 保留为公开面/跨库消费者 smoke。
     "model": ("stringmodel", "string model ok\n"),
     "interop": ("stringinterop", "string interop ok\n"),

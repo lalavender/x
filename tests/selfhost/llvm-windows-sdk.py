@@ -3,7 +3,7 @@
 
 校验四件事，缺一不可：
 
-1. **清单 ↔ .def 一致**：`compiler/windows-sdk/manifest.json` 的 `exports` 与
+1. **清单 ↔ .def 一致**：`vendor/windows-sdk/manifest.json` 的 `exports` 与
    `.def` 的 `EXPORTS` 段逐项相等，`def_sha256` 与文件内容相符（防「改了 def 忘同步」）；
 2. **生成确定性**：同一 `.def` 生成两次到不同目录，逐字节相同（`.lib` 里的时间戳必须为 0，
    否则 `rb5`-类「同源不同字节」问题会从链接期冒出来）；
@@ -37,7 +37,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parents[2]
-BUNDLE = ROOT / "compiler/windows-sdk"
+BUNDLE = ROOT / "vendor/windows-sdk"
 WORK = ROOT / "tmp/windows-sdk-gate"
 SDK_TOOL = ROOT / "tools/windows-sdk.py"
 
@@ -251,7 +251,7 @@ def main() -> int:
     if problems:
         for problem in problems:
             print(f"失败：{problem}", file=sys.stderr)
-        print("修复：检查 compiler/windows-sdk/{manifest.json,def/*.def} 与 LLVM 工具链",
+        print("修复：检查 vendor/windows-sdk/{manifest.json,def/*.def} 与 LLVM 工具链",
               file=sys.stderr)
         return 1
     print("W1-4 门禁通过：def 与 manifest 一致、生成确定性、符号面限定、探针只依赖 "

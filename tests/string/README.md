@@ -6,7 +6,7 @@
 ## 迁移后的分工
 
 `view`/`owned`/`transform`/`utf8` 的行为断言已迁入
-`libs/string/99_tests.yh`（由 `yh test string`、`just test` /
+`libs/string/tests.test.yh`（由 `yh test string`、`just test` /
 `just selfhost-native`、`just libs-test` 执行）；记录见
 [YT4-P3](../01-finished/yh-YT4-P3-string迁移-2026-10-25.md)。
 

@@ -4,7 +4,7 @@
 门禁要点：
 - 清空 SDKROOT/YH_DARWIN_SDK，PATH 只放会记录调用并退出的假工具；
 - 编译并运行一个纯 .yh 程序，断言 Mach-O、LC_BUILD_VERSION 的 sdk 来自
-  `compiler/darwin-sdk/manifest.json`（26.4），且没有任何外部工具调用；
+  `vendor/darwin-sdk/manifest.json`（26.4），且没有任何外部工具调用；
 - 显式 SDKROOT 仍覆盖 bundle（宿主 SDK 版本）。
 """
 
@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BUNDLE = ROOT / "compiler/darwin-sdk"
+BUNDLE = ROOT / "vendor/darwin-sdk"
 WORK = ROOT / "tmp/llvm-migration/darwin-bundled-sdk"
 PROBE = ROOT / "tests/selfhost/llvm-darwin-fixedpoint.yh"
 TRIPLE = "aarch64-apple-darwin"

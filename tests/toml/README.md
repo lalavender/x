@@ -1,6 +1,6 @@
 # tests/toml —— TOML 外部验收门
 
-TOML 的 **API/所有权/资源/文件断言已迁入 `libs/toml/99_tests.yh`**（11 个
+TOML 的 **API/所有权/资源/文件断言已迁入 `libs/toml/tests.test.yh`**（11 个
 `test`、154 条 `$assert`，由 `yh test toml` / `just test` /
 `just selfhost-native` / `just libs-test` 执行）；迁移记录见
 [YT4-P2](../01-finished/yh-YT4-P2-toml迁移-2026-10-25.md)。

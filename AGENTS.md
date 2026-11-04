@@ -22,7 +22,7 @@ gitignore 的 `bin/` 并核对哈希。
 - **构建入口是 just**（`justfile` 是唯一真源，仓库已无 `Makefile`；
   `just --list` 列出全部目标与说明）。
   日常构建：`just`（= 宿主种子对 `compiler/` 项目 `yh build`，冷编，
-  产出根目录 `yh`）；日常验证以 `just selfhost-native` 为主门
+  产出根目录 `yh`，Windows 宿主为 `yh.exe`）；日常验证以 `just selfhost-native` 为主门
   （两代模块固定点 + 自解析 + 全量语法/运行语料 + modules/项目验收）。
 - 滚种子：`just test` 与 `just selfhost-native` 全绿后执行 `just seed`
   （把新 yh 覆盖到 `bin/yh-<平台>-<架构>` 并更新哈希）。源码无法在仓库内独立
@@ -54,7 +54,7 @@ gitignore 的 `bin/` 并核对哈希。
   四缓冲/旧 SSA 替换链/C ABI 发射层删除，`compiler/` 净减 6516 行），
   `--backend legacy` 拒绝执行，LLVM 是唯一代码生成后端；证据见
   `docs/01-finished/yh-LL12退役旧机器发射-2026-10-21.md`。
-  **Darwin SDK stub**：`compiler/darwin-sdk/` 随编译器分发（Zig 式，
+  **Darwin SDK stub**：`vendor/darwin-sdk/` 随编译器分发（Zig 式，
   SDK 26.4）；链接查找 `SDKROOT` → `YH_DARWIN_SDK` → 可执行文件附近 bundle →
   原生 `xcrun`。C 源/libc++/目标包/frameworks 等遗留见
   `docs/03-design/yh-Darwin交叉编译遗留边界.md`。
@@ -133,6 +133,7 @@ just
 ./yh build                 # 构建当前项目（产物名取 project.name）
 ./yh run                   # 构建并运行 main 模块
 ./yh version               # 项目名与版本
+./yh --version             # 编译器版本（编码进二进制，不读 project.toml）
 ./yh list [--resolve name] # 列出模块/解释导入绑定
 ./yh test --list           # 只列出测试身份与文档目标
 ./yh test                  # 发现、构建并逐例执行测试

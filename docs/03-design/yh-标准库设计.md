@@ -227,7 +227,7 @@ BOM、重复键、孤立代理、尾逗号与尾随内容。设计见
 [实施方案](../02-plan/yh-JSON标准库实施方案-2026-10-24.md)，取舍见
 [ADR-0019](../adr/0019-yh-JSON标准库独立文档模型与词素保真数字.md)。
 状态：**首期已实现**（reader + writer + 查询 + 文件读写），已在
-`libs/project.toml` 注册；六组 API/文件断言已迁入 `libs/json/99_tests.yh`
+`libs/project.toml` 注册；六组 API/文件断言已迁入 `libs/json/tests.test.yh`
 （`yh test json`，`jsonmodel` 保留为 smoke）。未完成项（一致性语料、注入门、
 安装门）见 [todo](../todo.md)。
 

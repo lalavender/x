@@ -1,12 +1,108 @@
 # finish
 
-滚动日志：只保留最近三天（当前为 2026-11-01 ～ 2026-11-03）的交付记录，靠前条目为最新状态。
-更早的 475 条（2026-09-27 ～ 2026-10-25）已归档在
+滚动日志：只保留最近三天（当前为 2026-11-03 ～ 2026-11-05）的交付记录，靠前条目为最新状态。
+更早的条目（2026-09-27 ～ 2026-10-25）已归档在
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)（归档文件按批追加，标题保留首批日期区间）。
 超出窗口的条目迁入同一个归档文件，新增条目写在最前。
+当前文件内 2026-10-28 ～ 2026-11-02 段的归档迁移待办（与 README 过期同批，见 2026-11-04 架构分析）。
 
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
+
+## 2026-11-05 P0-B1：CI 自举桥适配 VTEST（Windows 纳入桥引导）
+
+**结果**：[yh-CI自举桥VTEST适配-2026-11-05](01-finished/yh-CI自举桥VTEST适配-2026-11-05.md)。
+`ci-bootstrap.py` 新增测试文件改名 staging（gen-1 临时 `zz_` 前缀，gen-2
+原样 HEAD；纳入备份/恢复/崩溃恢复），Windows 宿主纳入桥引导（跳过变体/
+标记/链接节改写）；`ci.yml` windows-x64 job 的 `just build` 切换为
+`just bootstrap-bridge`。Windows 本机端到端两代自举 3m54s，产物与已滚
+种子逐字节一致。Lane B 剩余：B3 CI 实跑（需推送）→ B4 Release → B5 删桥。
+
+## 2026-11-05 P0-A：`--emit-asm` Windows 失败修复
+
+**结果**：[yh-P0-emit-asm修复-2026-11-05](01-finished/yh-P0-emit-asm修复-2026-11-05.md)。
+根因不在 MoveFileExA：探针矩阵定位到本机安全策略拒绝不受信任 exe 在
+%TEMP% 创建文件（同旗标仓库目录成功）。修复：`--emit-asm` Windows 临时
+目录改 CWD 优先 + TEMP 兜底（llvm_emit.yh）；桥 `publish_buffer` 失败点
+带 errno 诊断（bridge.c，长期保留）。验收：llvm-architecture LA0 O0/O2
+通过、固定点逐字节相同、种子重滚、`just test` 绿；`max_build_lines`
+6976 → 6990。todo.md P0-1 已勾选。
+
+## 2026-11-05 P0 收尾与发布顺序方案立项
+
+**结果**：[yh-P0收尾与发布顺序实施方案](02-plan/yh-P0收尾与发布顺序实施方案-2026-11-05.md)。
+取证收窄 `--emit-asm` 失败面（`out="-"` 只走 stdout `_write` 循环，不经过
+mkstemp/MoveFileExA，聚焦 /MT 双 CRT 与 errno 诊断）；给出 CI 验收/删桥的
+发布顺序线（B1–B6），并把 2026-11-05 `.test.yh` 改名 × 0.0.11 桥解析约束
+的冲突解法（gen-1 staging 临时加回排序前缀）纳入。todo.md CI 段已挂方案链接。
+
+## 2026-11-05 Windows 控制台中文显示（切 65001 码页）
+
+**结果**：[yh-Windows控制台UTF8显示-2026-11-05](01-finished/yh-Windows控制台UTF8显示-2026-11-05.md)。
+driver 启动时调 `gen.console_utf8_init()`（Windows：`SetConsoleOutputCP/
+SetConsoleCP(65001)`，经 kernel32 extern；linux/darwin 空实现），
+`chcp` 实测 936 → 65001 且会话保持，PowerShell 中文帮助/诊断不再乱码。
+固定点逐字节相同，Windows 种子已重滚；`max_module_lines` 458 → 461。
+
+## 2026-11-05 Windows 编译器产物改为 `yh.exe`
+
+**结果**：[yh-Windows编译器产物yh-exe-2026-11-05](01-finished/yh-Windows编译器产物yh-exe-2026-11-05.md)。
+实测 PowerShell 对无扩展名 `yh` 报「无法在管道中间运行文档」（进程未启动）；
+justfile 的 `yh`/`yh_run` 在 Windows 宿主改为 `yh.exe`（种子名不变，
+`bin/yh-windows-x64` 由 CreateProcess 调用不受影响）。PowerShell 实测
+`.\yh.exe --version` 通过。
+
+## 2026-11-05 测试文件统一 `.test.yh` 后缀（废止 zz_/99_ 前缀）
+
+**结果**：[yh-测试文件test后缀-2026-11-05](01-finished/yh-测试文件test后缀-2026-11-05.md)。
+编译器新增 `pj_name_is_test` + `pj_dir_less` 测试文件后置排序（VTEST）；
+16 个测试文件改为 `<主题>.test.yh` / `tests.test.yh`；约定文档（编码规范、
+test 测试布局）与全部引用同步。**两代自举**过渡：中间名 → yh-1 → 最终名 →
+yh-2，固定点 yh-2≡yh-3 逐字节相同；Windows 种子已滚。
+**⚠️ 跨平台窗口**：Release 旧种子构建本树会报「未知类型」，需协调发版。
+
+## 2026-11-05 `yh --version` 版本编码进二进制
+
+**结果**：[yh-版本编码进二进制-2026-11-05](01-finished/yh-版本编码进二进制-2026-11-05.md)。
+`YH_VERSION_TEXT` 常量（cmdline）+ `--version` 参数（inherit 全覆盖，
+不读 project.toml）；顺带修复 libs/cli `argument_from_row` 丢
+`version_text` 的 bug（inherit 后回退 prog 名）并补回归测试；
+arch-check 新增 toml↔常量版本一致性断言。`yh version` 子命令项目语义
+不变。libs/cli 测试 55/55。
+
+## 2026-11-05 P1：cmd 一命令一文件
+
+**结果**：[yh-cmd一命令一文件-2026-11-05](01-finished/yh-cmd一命令一文件-2026-11-05.md)。
+`cmd/` 重组为 10 文件：`driver.yh` 只剩分派，`api.yh` 删除，新增
+`common.yh` + 8 个 `cmd_*.yh`；`api_*` 全部转模块私有，导出面只剩 `main`。
+无行为变化（--timeout 校验、rc==2 用法补印、会话前奏次序均原样迁移）。
+架构目标见 [yh-模块架构目标设计-2026-11-05](03-design/yh-模块架构目标设计-2026-11-05.md) §4。
+`max_module_lines` 387 → 458（+71 全为文件头注释，逻辑行不变，边 55 不变）。
+
+## 2026-11-05 SDK 迁移 vendor
+
+**结果**：[yh-SDK迁移vendor-2026-11-05](01-finished/yh-SDK迁移vendor-2026-11-05.md)。
+`compiler/{darwin,windows}-sdk` → `vendor/`（git mv 保历史；windows 侧先核对
+未跟踪副本逐字节一致后去重）。同步编译器运行时查找（`darwin_link.yh`
+suffixes、`windows_link.yh` prefixes）、justfile 5 处、tools 2 个、selfhost
+测试 4 个、AGENTS.md。**实测**：清空 `YH_WINDOWS_SDK`/`YH_DARWIN_SDK` 后
+仓库根 `yh` 经 exe 相对路径命中 `vendor/windows-sdk/lib` 完成链接并运行成功。
+`compiler/` 回归纯 yh 模块目录。
+
+## 2026-11-04 当前架构重新分析（只读取证）
+
+**结果**：[yh-当前架构重新分析-2026-11-04](03-design/yh-当前架构重新分析-2026-11-04.md)。
+`python tools/arch-check.py` 实测 **16 模块 / 134 文件 / 57,274 行 / 55 边，检查通过**。
+对 10-25 基线的核心结论：B1（`proj` 1,396 行）/ B2（`link` 4,272 行）/ B1-4
+（`gen.G()` 165 → 0）全部落地；`build` 单体 10,717 → 6,953 行。
+
+- **新增顶格项两处**：`link` 4,272 = `max_link_lines`（W2 Windows 链接 +509 推满）、
+  `parse/parse_expr.yh` 2,042 = `max_file_lines`；建议文件级拆分解除。
+- **漂移复发**：`compiler/README.md` 10-27 人工同步后再次过期（仍写 13 模块 /
+  53,545 行，缺 `proj`/`link`/`cmdline`）；建议把模块表纳入 `arch-check` 断言。
+- **未动旧账**：`testkit → build` 仍有 13 处 `mb_*`/`cmd_*` 引用；五处契约常量
+  仍分散（期间 `IR_FUNCTION_CACHE_VERSION` 1→2 兑现过一次升级成本）；
+  `module_worker.yh:130` 废参数链待 C2。
 
 ## 2026-11-03 合入 ci/github-actions（GitHub Actions 四端 CI + Windows 闭包可重定位）
 
@@ -771,7 +867,7 @@ cases 122/122）。
   （此前 `Diagnostic.code` 在同类失败上取值不一致）。
 - **参数文件上限常量化**：`parse_config()` 里的 `16`/`1048576` 改为新增的
   `MAX_FILE_DEPTH`/`MAX_FILE_BYTES`（与 `MAX_FILE_TOKENS`/`MAX_FILE_LINE` 同族）。
-- **测试助手去重**：`zz_tests_help.yh` 的 `hp_contains`/`hp_index_of` 改为委托
+- **测试助手去重**：`help.test.yh` 的 `hp_contains`/`hp_index_of` 改为委托
   `string.contains`/`string.find`（新增 `import string`），删掉手写双循环 ~45 行。
 - **用例**：新增「错误：诊断码常量与类别一致」——usage 错误码等于 `CODE_USAGE`、
   配置错误码等于 `CODE_CONFIG`；cli 内嵌测试 50 → **51**。
@@ -818,7 +914,7 @@ cases 122/122）。
 - **多余位置 token 全量列出**：新增 `put_extra_args`/`extra_args_message`
   （「多余的位置参数：b c」），`tail_layer` 与 intermixed 收集路径共用；
   超出 `MAX_HELP` 缓冲时退化为不加列表的短消息。
-- **用例**：`zz_tests_help.yh` 新增「choices、子命令与多余 token 的诊断候选」
+- **用例**：`help.test.yh` 新增「choices、子命令与多余 token 的诊断候选」
   （含 `suggest_on_error` 开/关两组断言）；cli 内嵌测试 48 → **49**。
 - **文档**：`libs/cli/README.md`（§13 `suggest_on_error`、§14 诊断文案）、
   `docs/03-design/yh-cli标准库设计.md`（§14 诊断实现状态）、
@@ -846,7 +942,7 @@ cases 122/122）。
 - **`boolean_optional` usage**：写成 `[--cache | --no-cache]`（旧只写 `[--cache]`）。
 - **`HelpFormat.max_help_column` 接通**：`help_column(state, fallback)` 统一取
   「显式值 > 段落默认（位置 22、其余 26）」，位置/选项/用户组/命令段全部改用它。
-- **用例**：`zz_tests_help.yh` 新增「choices 占位名与槽标题/说明/占位名」「max_help_column
+- **用例**：`help.test.yh` 新增「choices 占位名与槽标题/说明/占位名」「max_help_column
   与 boolean_optional usage」两组，旧 metavar 用例补 usage 断言；新增 `hp_line_column`
   助手量说明列。cli 内嵌测试 46 → **48**。
 - **文档**：`libs/cli/README.md`（§5 metavars/choices、§6 usage 形态、§7 槽
@@ -882,9 +978,9 @@ cases 122/122）。
   必需性仍由 arity 决定。
 - **默认值/常量不参与 choices 校验**（argparse 语义，choices 只约束命令行显式值）：
   `declared_value_ok` 只保留 validator；显式值仍受 choices 约束（同一测试覆盖）。
-- **用例**：`zz_tests_actions.yh`（位置 `optional` 默认值 + 未声明 dest + choices
-  默认值）、`zz_tests_commands.yh`（槽 token 预留，含 `one_or_more` 不预留的反例）、
-  `zz_tests_extensions.yh`（缺 const / 位置 `required` / 带 const 正常写入）。
+- **用例**：`actions.test.yh`（位置 `optional` 默认值 + 未声明 dest + choices
+  默认值）、`commands.test.yh`（槽 token 预留，含 `one_or_more` 不预留的反例）、
+  `extensions.test.yh`（缺 const / 位置 `required` / 带 const 正常写入）。
   cli 内嵌测试 43 → **46**。
 - **文档**：`libs/cli/README.md`（§3 必需性与常量、§6 分配规则、§7 槽共存、§10 choices、
   §15 `set_default`、契约要点）、`docs/03-design/yh-cli标准库设计.md`（§8.1/8.2/8.3、
@@ -1009,12 +1105,12 @@ cases 122/122）。
   （`reader.yh`、`ssa_module_model.yh`，不写 `10_view.yh`/`00_types.yh`）。顺序不靠
   编号：模块内按文件名字节序处理、声明必须先于使用，所以被依赖的声明放语义名靠前
   的文件（`base.yh`/`defs.yh`/`types.yh`），拿不到就合并进使用者；测试文件统一
-  `zz_tests*.yh`。实测依据：同模块 `api.yh` 用 `types.yh` 的 `Point` 报
+  `*.test.yh`。实测依据：同模块 `api.yh` 用 `types.yh` 的 `Point` 报
   「未知类型（类型必须先定义）」（`pj_dir_less` 按文件名字节序，见
   `compiler/build/project_index.yh:429`）。**存量 `00_`/`10_`/`99_` 文件不改名**——
   改名会改模块内处理顺序，属独立任务；数字前缀字节序在字母之前，新老共存不冲突。
   同步把 [yh test 测试布局与运行约定](03-design/yh-test测试布局与运行约定-2026-10-25.md)
-  §1/§2 的推荐名改成 `zz_tests*.yh`，避免两处说法打架。
+  §1/§2 的推荐名改成 `*.test.yh`，避免两处说法打架。
 - **负面验证（写文档时自证，不是新代码）**：`./yh check` 实测确认了三条容易写错的
   规则——隐式转换矩阵（整数加宽可以，窄化/同宽异号/整数↔bool/浮点互转必须
   `.to_type`，诊断文案原样引用）；`-1` 隐式加宽到 `u64` 得 `18446744073709551615`；

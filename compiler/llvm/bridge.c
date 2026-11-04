@@ -12,12 +12,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 /* 宿主平台适配（W2）：Linux/Darwin 用 pthread_once + unlink；
  * Windows 用 InitOnceExecuteOnce + _unlink。桥只在初始化目标注册表时用一次
  * 「只执行一次」语义，两者等价。
  * 编译 yh 自身时链接静态 CRT（/MT），因此这里可以直接用 Win32 API。 */
 static void initialize_targets(void);
+
+/* publish_detail：最近一次 publish_buffer 失败点的可读描述（A2 诊断，2026-11-05）。
+ * 只在失败路径写入，供 yh 侧把原因拼进 diagnostic；成功路径保持为空。 */
+static char publish_detail[160];
+
+static void set_publish_detail(const char *stage, long code) {
+    snprintf(publish_detail, sizeof(publish_detail), "%s 失败(返回=%ld errno=%d)",
+             stage, code, errno);
+}
 
 #ifdef _WIN32
 #include <io.h>
@@ -36,9 +46,14 @@ typedef intptr_t ssize_t;
 #include <fcntl.h>
 #include <sys/stat.h>
 static int yh_mkstemp(char *template_path) {
-    if (_mktemp_s(template_path, strlen(template_path) + 1) != 0) return -1;
-    return _open(template_path, _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY,
-                 _S_IREAD | _S_IWRITE);
+    if (_mktemp_s(template_path, strlen(template_path) + 1) != 0) {
+        set_publish_detail("_mktemp_s", -1);
+        return -1;
+    }
+    int fd = _open(template_path, _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY,
+                   _S_IREAD | _S_IWRITE);
+    if (fd < 0) set_publish_detail("_open", (long)fd);
+    return fd;
 }
 /* yh_replace_file：原子发布要用 POSIX rename 的覆盖语义；MSVCRT 的 rename 在
  * 目标已存在时直接失败（增量重建对象必踩），因此 Windows 走 MoveFileExA。 */
@@ -96,6 +111,10 @@ const char *yh_llvm_version(void) {
     return LLVM_VERSION_STRING;
 }
 
+/* publish_detail：最近一次 publish_buffer 失败点的可读描述（A2 诊断，2026-11-05）。
+ * 只在失败路径写入，供 yh 侧把原因拼进 diagnostic；成功路径保持为空。
+ * 定义在 _WIN32 分支的 yh_mkstemp 之前（两个分支共用）。 */
+
 /* publish_buffer：同目录临时写入后 rename；任何失败都不破坏既有有效产物。 */
 static int publish_buffer(const char *path, LLVMMemoryBufferRef buffer) {
     size_t path_length = strlen(path);
@@ -105,28 +124,53 @@ static int publish_buffer(const char *path, LLVMMemoryBufferRef buffer) {
         size_t done = 0;
         while (done < length) {
             ssize_t written = write(STDOUT_FILENO, bytes + done, length - done);
-            if (written <= 0) return -1;
+            if (written <= 0) {
+                set_publish_detail("stdout write", (long)written);
+                return -1;
+            }
             done += (size_t)written;
         }
         return 0;
     }
     char *temporary = malloc(path_length + sizeof(".yh-llvm-XXXXXX"));
-    if (!temporary) return -1;
+    if (!temporary) {
+        set_publish_detail("malloc", 0);
+        return -1;
+    }
     memcpy(temporary, path, path_length);
     memcpy(temporary + path_length, ".yh-llvm-XXXXXX", sizeof(".yh-llvm-XXXXXX"));
     int fd = yh_mkstemp(temporary);
-    if (fd < 0) { free(temporary); return -1; }
+    if (fd < 0) {
+        set_publish_detail("mkstemp", (long)fd);
+        free(temporary);
+        return -1;
+    }
     const char *bytes = LLVMGetBufferStart(buffer);
     size_t length = LLVMGetBufferSize(buffer);
     size_t done = 0;
     int result = 0;
     while (done < length) {
         ssize_t written = write(fd, bytes + done, length - done);
-        if (written <= 0) { result = -1; break; }
+        if (written <= 0) {
+            set_publish_detail("file write", (long)written);
+            result = -1;
+            break;
+        }
         done += (size_t)written;
     }
-    if (close(fd)) result = -1;
-    if (!result && yh_replace_file(temporary, path)) result = -1;
+    if (close(fd)) {
+        set_publish_detail("close", -1);
+        result = -1;
+    }
+    if (!result && yh_replace_file(temporary, path)) {
+#ifdef _WIN32
+        snprintf(publish_detail, sizeof(publish_detail),
+                 "MoveFileExA 失败(GetLastError=%lu)", GetLastError());
+#else
+        set_publish_detail("rename", -1);
+#endif
+        result = -1;
+    }
     if (result) yh_unlink(temporary);
     free(temporary);
     return result;
@@ -254,6 +298,10 @@ static int llvm_emit(const char *text, uint64_t length, const char *triple,
             kind == 0 ? LLVMObjectFile : LLVMAssemblyFile, &message, &object)) goto llvm_error;
     if (publish_buffer(output, object)) {
         copy_diagnostic(diagnostic, capacity, "内嵌 LLVM：目标文件原子写入失败");
+        size_t used = strlen(diagnostic);
+        if (publish_detail[0] && used + 1 < capacity) {
+            snprintf(diagnostic + used, capacity - used, " [%s]", publish_detail);
+        }
         goto cleanup;
     }
     result = 0;

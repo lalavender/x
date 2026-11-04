@@ -115,7 +115,7 @@ cd libs && yh test json   # 12 个 test：parse/查询/写出/错误/文件
 just test-json            # 历史 target 已删除，改用 yh test json / just libs-test
 ```
 
-行为断言在 `libs/json/99_tests.yh`；`jsonmodel` 是
+行为断言在 `libs/json/tests.test.yh`；`jsonmodel` 是
 `tests/modules/projects/` 下保留的公开面 smoke（`build-check.py` 的
 `j1-json-model`）。迁移记录见
 [YT4-P1](../../docs/01-finished/yh-YT4-P1-json迁移-2026-10-25.md)。

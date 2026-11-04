@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成/校验随编译器分发的 Darwin SDK 链接 stub（compiler/darwin-sdk）。
+"""生成/校验随编译器分发的 Darwin SDK 链接 stub（vendor/darwin-sdk）。
 
 只复制 Mach-O 链接所需的 TAPI stub 与最小 SDKSettings.json，不复制完整
 Apple SDK（头文件、libc++、frameworks 仍属遗留边界，见
@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT = ROOT / "compiler/darwin-sdk"
+DEFAULT_OUTPUT = ROOT / "vendor/darwin-sdk"
 KNOWN_UNSUPPORTED = "arm64e.x1"
 
 

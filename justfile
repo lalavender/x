@@ -77,8 +77,9 @@ seed_dest_abs := absolute_path(seed_dest)
 # 不入库，开发机先执行 just fetch-seed 或显式设置 SEED。
 seed_platform := if host_os == "macos" { "darwin-arm64" } else if host_os == "windows" { "windows-x64" } else if seed_arch == "arm64" { "linux-arm64" } else { "linux-x86_64" }
 
-yh := root + "/yh"
-yh_abs := absolute_path("yh")
+yh := if host_os == "windows" { root + "/yh.exe" } else { root + "/yh" }
+yh_ext := if host_os == "windows" { "/yh.exe" } else { "/yh" }
+yh_abs := absolute_path(yh)
 
 # 快速暂存目录（2026-10-15）：语料门每个用例都要 exec 一遍 70MB 量级的编译器，
 # 仓库挂在 9p/网络盘上时每次读二进制要 0.2–0.4s。把编译器与语料产物放到系统
@@ -104,7 +105,7 @@ worktree_tag := if host_os == "windows" { `printf '%s' "{{root}}" | python -c "i
 FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast-" + worktree_tag + (if run_id == "" { "" } else { "-" + run_id }))
 fast_dir := if FAST_DIR == "" { tmpdir + "/yh-fast-" + worktree_tag } else { FAST_DIR }
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
-yh_run := if fast_stage == "1" { absolute_path(fast_dir + "/yh") } else { yh_abs }
+yh_run := if fast_stage == "1" { absolute_path(fast_dir + yh_ext) } else { yh_abs }
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
 # --workdir 必须 quote()：Windows 路径带反斜杠，直接拼进 recipe 会被 sh 当成转义
 # 符吃掉，于是 Python 收到 `C:UsersAdministrator...` 这种相对路径，在仓库根下
@@ -196,7 +197,7 @@ cache = subprocess.check_output([sys.executable, "tools/llvm_cache.py"], text=Tr
 record = os.path.join(cache, "darwin-sdk", "sdk-darwin-aarch64", "host.json")
 print(json.load(open(record))["sdk_root"] if os.path.isfile(record) else "")' 2>/dev/null || true` } else { "" }
 export SDKROOT := sdkroot
-darwin_sdk := if host_os == "macos" { absolute_path("compiler/darwin-sdk") } else { "" }
+darwin_sdk := if host_os == "macos" { absolute_path("vendor/darwin-sdk") } else { "" }
 export YH_DARWIN_SDK := darwin_sdk
 
 # 安装位置；DESTDIR 用作打包根（just install DESTDIR=/tmp/root PREFIX=/usr）。
@@ -311,8 +312,8 @@ install: _ensure_built
     )
     if [[ "$(uname -s)" == Darwin ]]; then
       {{ install_prog }} -d "{{ prefix_root }}/share/yh/darwin-sdk/usr/lib"
-      {{ install_prog }} -m644 compiler/darwin-sdk/usr/lib/libSystem.tbd "{{ prefix_root }}/share/yh/darwin-sdk/usr/lib/"
-      {{ install_prog }} -m644 compiler/darwin-sdk/SDKSettings.json compiler/darwin-sdk/manifest.json compiler/darwin-sdk/README.md "{{ prefix_root }}/share/yh/darwin-sdk/"
+      {{ install_prog }} -m644 vendor/darwin-sdk/usr/lib/libSystem.tbd "{{ prefix_root }}/share/yh/darwin-sdk/usr/lib/"
+      {{ install_prog }} -m644 vendor/darwin-sdk/SDKSettings.json vendor/darwin-sdk/manifest.json vendor/darwin-sdk/README.md "{{ prefix_root }}/share/yh/darwin-sdk/"
     fi
     # Windows：导入库随可执行文件分发（编译器按 <exe>/windows-sdk/lib 查找）。
     if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
@@ -332,7 +333,7 @@ uninstall:
 stage-yh: _prepare_windows_sdk _ensure_built
     @if [ "{{ fast_stage }}" = "1" ]; then mkdir -p "{{ fast_dir }}"; cp -f "{{ yh }}" "{{ yh_run }}.tmp" && mv -f "{{ yh_run }}.tmp" "{{ yh_run }}"; fi
     @YH_STAGE_PATH="{{ yh_run }}" {{ py }} -c "import os;p=os.environ['YH_STAGE_PATH'];st=os.stat(p);print(f'编译器: {p} {st.st_size} bytes mtime={int(st.st_mtime)}')" 
-    @if [ "{{ host_os }}" = "macos" ] && [ "{{ fast_stage }}" = "1" ]; then ln -sfn "{{ root }}/compiler/darwin-sdk" "{{ fast_dir }}/darwin-sdk"; fi
+    @if [ "{{ host_os }}" = "macos" ] && [ "{{ fast_stage }}" = "1" ]; then ln -sfn "{{ root }}/vendor/darwin-sdk" "{{ fast_dir }}/darwin-sdk"; fi
 
 # test：三层回归——ANTLR 参考语法 + 编译器语法模式 + 运行语义语料。
 # 语料门的编译器一律用暂存副本 yh_run；ANTLR 层在单进程内解析，不需要编译器。
@@ -363,7 +364,7 @@ test-all: test
 size-report: stage-yh
     {{ py }} "{{ root }}/tools/size-report.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/size-report"
 
-# test-toml：TOML 测试（API/所有权/资源/文件断言已迁入 libs/toml/99_tests.yh）。
+# test-toml：TOML 测试（API/所有权/资源/文件断言已迁入 libs/toml/tests.test.yh）。
 test-toml: stage-yh
     @cd "{{ root }}/libs" && "{{ yh_run }}" test toml --timeout 60
 
@@ -415,9 +416,9 @@ test-fmt-install:
 
 # libs-test：libs/ 自有测试（test 块 + 库级外部 runner），CI 独立阶段。
 # 平台差异全部由编译器按 *.linux.yh/*.darwin.yh 选择，target 不带平台参数；
-# 缺 99_tests*.yh 的库只提示、不阻断（2026-10-25 决策 D9）。
+# 缺 *.test.yh 的库只提示、不阻断（2026-10-25 决策 D9）。
 libs-test: stage-yh
-    @cd "{{ root }}/libs" && for d in */; do case "$d" in tmp/) continue;; esac; ls "$d"*tests*.yh >/dev/null 2>&1 || echo "提示：libs/${d%/} 还没有测试文件（99_tests*.yh 或 zz_tests*.yh）"; done
+    @cd "{{ root }}/libs" && for d in */; do case "$d" in tmp/) continue;; esac; ls "$d"*.test.yh >/dev/null 2>&1 || echo "提示：libs/${d%/} 还没有测试文件（*.test.yh）"; done
     @cd "{{ root }}/libs" && "{{ yh_run }}" test --timeout 60
     {{ py }} "{{ root }}/libs/cli/test/run.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-cli"
     {{ py }} "{{ root }}/libs/cli/test/diff.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-cli-diff"
@@ -524,7 +525,7 @@ test-llvm-darwin: stage-yh
     {{ py }} "{{ root }}/tools/llvm-darwin-host.py" status --host darwin-aarch64
 
 # —— Windows 目标（W1-4）：导入库 stub ——
-# 仓库只保存文本 .def 与 manifest（compiler/windows-sdk/）；.lib 按需生成到缓存根，
+# 仓库只保存文本 .def 与 manifest（vendor/windows-sdk/）；.lib 按需生成到缓存根，
 # 因为仓库根 .gitignore 把 *.lib 当构建产物。编译器侧消费（链接模板）在 W1-5。
 
 # windows-sdk：按清单生成 Windows 导入库（kernel32.lib 等）。

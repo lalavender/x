@@ -1,0 +1,51 @@
+module main
+import gen
+import build
+import proj
+
+// ============================================================================
+// common.yh —— cmd 模块共享前奏（A3；P1 一命令一文件，2026-11-05）。
+//
+// 退出码契约（全部命令遵守）：0 成功；1 源文件语法/语义错误或读入失败；
+// 2 用法错误；-1 内部或桥失败；诊断写 fd 2。
+//
+// 命令文件划分（一命令一文件，见 docs/03-design/yh-模块架构目标设计-2026-11-05.md §4）：
+//     cmd_build.yh  cmd_run.yh  cmd_test.yh  cmd_list.yh  cmd_version.yh
+//     cmd_single.yh  cmd_emit_module.yh  cmd_lld_link.yh
+// driver.yh 只做「argv → 请求 → 分派」；本文件提供各命令共用的会话前奏
+// 与单文件形态常量。cmd 模块导出面只有 main（api_*/cmd_* 均模块私有）。
+// ============================================================================
+
+// —— 单文件形态（api_single_file 的 form 参数）——
+const API_SYNTAX int = 1      // 只做词法/语法检查
+const API_CHECK int = 2       // 完整前端检查，不要求 main
+const API_ASM int = 3         // 目标汇编到标准输出
+const API_LLVM_TEXT int = 4   // LLVM 文本到标准输出（--emit-llvm）
+const API_EXE int = 5         // 编译并链接为可执行文件
+
+// cmd_session_init：编译会话前奏，所有命令入口共用。
+// 次序固定：恢复 GenState 非零初始值（原 pub let 初始化器迁移）→ 项目模型
+// 初始化 → 目标/配置绑定（存储归 proj（B1-2）：gen 只持指针，必须先绑定
+// 再读目标）→ 自身路径（项目构建的子进程再入用）→ 环境向量直接取自
+// 操作系统传入值（避免调用 printenv 等宿主工具）。
+fn cmd_session_init(argv0 *char, envp **char) void {
+    gen.state_init()
+    proj.init()
+    gen.bind_cfg(proj.cfg())
+    build.mb_set_argv0(argv0)
+    proj.ctx().envp = envp
+}
+
+// api_open_source：单文件形态共用前奏——登记路径、读源、建语义表。
+// 调用方必须已执行 cmd_session_init（driver 入口已做）。
+fn api_open_source(path *char) int {
+    let gs *gen.TaskCtx = gen.task()
+    gs.c_path = path
+    if (gen.read_source(path) != 0) {
+        return 1
+    }
+    if (gen.sem_init_tables() != 0) {
+        return 1
+    }
+    return 0
+}

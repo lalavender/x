@@ -234,21 +234,13 @@ pub fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
     if (gen.cstr_eq(out_path, "-") != 0) {
         let temporary [512]u8
         let tn int = 0
-        // 临时目录：非 Windows 用 /tmp；Windows 没有 /tmp（`/tmp/...` 会被当成
-        // 当前盘符下的路径而无法创建），改取 TEMP/TMP，两者都没时用当前目录
-        // （文件名带 pid，并发唯一；写完立即删除）。
+        // 临时目录顺序（VENC，2026-11-05）：文件名带 pid 并发唯一，写完立即删除。
+        // Windows：先当前目录（仓库/项目目录始终可写；部分主机的安全策略拒绝
+        //   不受信任的新编译 exe 在 %TEMP% 创建文件——桥诊断 [mkstemp errno=13]），
+        //   失败再退 TEMP/TMP（经 proj 环境窄口，不引入 getenv 依赖）。
+        // 非 Windows：/tmp 优先（旧行为），失败再退当前目录。
         if (gen.tg_host_windows() != 0) {
-            // TEMP/TMP 走 proj 的环境窄口（不引入 getenv 依赖）：依次尝试，
-            // 都没有时退到当前目录。
-            let root_buf [512]u8
-            let rn int = mb_env_to_buf("TEMP", &root_buf[0], 512)
-            if (rn <= 0) { rn = mb_env_to_buf("TMP", &root_buf[0], 512) }
-            if (rn > 0) {
-                tn = gen.append_str(&temporary[0], 0, gen.arr_cstr(&root_buf[0]))
-                tn = gen.append_str(&temporary[0], tn, "/yh-llvm-asm-")
-            } else {
-                tn = gen.append_str(&temporary[0], 0, ".yh-llvm-asm-")
-            }
+            tn = gen.append_str(&temporary[0], 0, ".yh-llvm-asm-")
         } else {
             tn = gen.append_str(&temporary[0], 0, "/tmp/yh-llvm-asm-")
         }
@@ -257,6 +249,28 @@ pub fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
         temporary[tn] = 0
         let asm int = llvm_emit_module_to(&checked, kind, gen.arr_cstr(&temporary[0]),
             text_path, &stats, proj.cfg().opt_level)
+        if (asm != 0) {
+            // 首选目录不可写：换兜底目录重试一次（诊断随失败路径打印，成功静默）。
+            unlink(gen.arr_cstr(&temporary[0]))
+            if (gen.tg_host_windows() != 0) {
+                let root_buf [512]u8
+                let rn int = mb_env_to_buf("TEMP", &root_buf[0], 512)
+                if (rn <= 0) { rn = mb_env_to_buf("TMP", &root_buf[0], 512) }
+                if (rn > 0) {
+                    tn = gen.append_str(&temporary[0], 0, gen.arr_cstr(&root_buf[0]))
+                    tn = gen.append_str(&temporary[0], tn, "/yh-llvm-asm-")
+                } else {
+                    tn = gen.append_str(&temporary[0], 0, ".yh-llvm-asm-")
+                }
+            } else {
+                tn = gen.append_str(&temporary[0], 0, ".yh-llvm-asm-")
+            }
+            tn = gen.append_int(&temporary[0], tn, getpid())
+            tn = gen.append_str(&temporary[0], tn, ".s")
+            temporary[tn] = 0
+            asm = llvm_emit_module_to(&checked, kind, gen.arr_cstr(&temporary[0]),
+                text_path, &stats, proj.cfg().opt_level)
+        }
         ast.checked_module_release(&checked)
         if (asm != 0) {
             unlink(gen.arr_cstr(&temporary[0]))

@@ -4,7 +4,7 @@
 用固定种子生成二进制位模式与十进制文本，生成一个临时 yh 项目，把
 `num.parse_f64` 的位模式与 `num.format_f64` 的往返输出打印出来，再与 Python
 的 float()/repr() 语义逐项比较。覆盖有限值、负零、次正规、最大有限值与
-随机 64 位模式；语法/范围分类由 libs/num/zz_tests.yh 覆盖。
+随机 64 位模式；语法/范围分类由 libs/num/tests.test.yh 覆盖。
 
 usage: python3 tests/num/reference.py [--compiler ./yh] [--stdlib ./libs]
                                       [--workdir tmp/num-reference]

@@ -7,7 +7,7 @@
 分期与门禁见[实施方案](../../docs/02-plan/yh-cli标准库实施方案.md)。
 
 本文的使用说明全部按本目录的验收项目实跑过（语义断言在
-`libs/cli/zz_tests_*.yh`，真实 argv/退出码在 `libs/cli/test/`），片段可直接编译。
+`libs/cli/*.test.yh`，真实 argv/退出码在 `libs/cli/test/`），片段可直接编译。
 
 ## 目录
 
@@ -776,9 +776,9 @@ python3 libs/cli/test/diff.py                    # 与 Python argparse 的差分
 just libs-test                                   # CI 独立阶段，含上面两个 runner
 ```
 
-- **语义断言**在 `libs/cli/zz_tests_{basics,actions,commands,extensions,help}.yh`
+- **语义断言**在 `libs/cli/{actions,basics,commands,extensions,help}.test.yh`
   （51 个 `test`），由 `cd libs && yh test cli` / `just test` /
-  `just selfhost-native` / `just libs-test` 执行；文件名必须 `zz_` 前缀
+  `just selfhost-native` / `just libs-test` 执行；后缀必须 `.test.yh`（排序由编译器保证，测试文件一律排在非测试文件之后）
   （类型声明在 `cli.yh`）。
 - fixture：`libs/cli/test/{climodel,clibasics,cliwarnings,clidiff}`；其余
   selftest 夹具已迁入内建测试并删除（记录见

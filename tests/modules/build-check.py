@@ -244,12 +244,12 @@ case("s1-libs-io-write", "stdlib-run", "libsio", ".", 23,
      stdout="yh libs io ok\n")
 case("s2-libs-core-modules", "stdlib-run", "libsbase", ".", 0,
      stdout="yh libs base ok\n")
-# —— ST1/ST6：string 公开面与跨库 smoke（断言已迁入 libs/string/99_tests.yh） ——
+# —— ST1/ST6：string 公开面与跨库 smoke（断言已迁入 libs/string/tests.test.yh） ——
 case("st1-string-model", "stdlib-run", "stringmodel", ".", 0,
      stdout="string model ok\n")
 case("st6-string-interop", "stdlib-run", "stringinterop", ".", 0,
      stdout="string interop ok\n")
-# —— JSON：断言已迁入 libs/json/99_tests.yh，这里保留公开面/链接 smoke ——
+# —— JSON：断言已迁入 libs/json/tests.test.yh，这里保留公开面/链接 smoke ——
 case("j1-json-model", "stdlib-run", "jsonmodel", ".", 0,
      stdout="json model ok\n")
 # —— FMT/I：字符串插值端到端（文本/表达式/字段/下标/uint/i64/spec/转义） ——

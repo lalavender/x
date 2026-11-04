@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """tools/windows-sdk.py —— Windows 导入库（SDK stub）生成与校验（W1-4）。
 
-仓库只保存**文本** `.def`（`compiler/windows-sdk/def/*.def`）与清单
-（`compiler/windows-sdk/manifest.json`）。`.lib` 是 COFF 归档，按仓库根
+仓库只保存**文本** `.def`（`vendor/windows-sdk/def/*.def`）与清单
+（`vendor/windows-sdk/manifest.json`）。`.lib` 是 COFF 归档，按仓库根
 `.gitignore`（`*.lib`）属构建产物，因此按需生成到缓存目录，不入库。
 
 生成器优先级：`llvm-dlltool -m i386:x86-64` → `lld-link /lib /def:` → `lib.exe`。
@@ -17,14 +17,14 @@
 
 解析顺序（编译器 W1-5 必须镜像同一顺序）：
     1. `$YH_WINDOWS_SDK` —— 指向含 `lib/` 与 `manifest.json` 的 SDK 根；
-    2. 仓库 bundle `compiler/windows-sdk`（本地开发时可直接 `--out` 到它）；
+    2. 仓库 bundle `vendor/windows-sdk`（本地开发时可直接 `--out` 到它）；
     3. 都没有时给出可操作诊断，**不静默回退**到系统 Windows SDK。
 
 用法示例：
 
     python3 tools/windows-sdk.py generate              # 写到缓存目录
     python3 tools/windows-sdk.py check                 # 校验已生成产物
-    python3 tools/windows-sdk.py generate --out compiler/windows-sdk
+    python3 tools/windows-sdk.py generate --out vendor/windows-sdk
 
 退出码：0 成功；1 失败（带可执行下一步）；2 用法错误。
 """
@@ -48,7 +48,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from llvm_cache import cache_root  # noqa: E402
 
 # bundle：仓库内的文本 SDK（源文件 + 清单），永远是身份的来源。
-BUNDLE = ROOT / "compiler/windows-sdk"
+BUNDLE = ROOT / "vendor/windows-sdk"
 # 生成产物的默认位置：与 LLVM 闭包同级的缓存根，避免污染工作树。
 DEFAULT_OUT = cache_root() / "windows-sdk"
 
