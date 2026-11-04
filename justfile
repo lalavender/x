@@ -278,10 +278,12 @@ bootstrap: llvm-host _ensure_built
 # bootstrap-bridge：过渡期自举桥。0.0.11 Release 的 Linux/macOS 种子不认识 W2 的
 # `*.windows.*.yh` 平台变体与 `[link-windows-x64]` 清单节，无法直接冷编 HEAD：
 # 本配方先用旧种子「过滤 Windows 平台文件」编出一代编译器，再用它全量冷编 HEAD。
-# Windows 种子已按 HEAD 重编（0.0.11-windows-x64），不需要本桥。
+# Windows 宿主同样需要本桥（0.0.11-windows 种子按字典序扫描，无法解析改名后的
+# .test.yh），且第 1 代冷编要链接 yh1.exe，须先保证 kernel32.lib 已生成——
+# 故依赖 _prepare_windows_sdk（2026-11-05 CI run 41906793341 修复）。
 # 等含 W2 种子的 Release 发布后，本配方与 tools/ci-bootstrap.py 一起删除
 # （见 docs/todo.md 的过渡期条目）。自举门请显式 `SEED=绝对路径/yh`。
-bootstrap-bridge: llvm-host _prepare verify-seed
+bootstrap-bridge: llvm-host _prepare _prepare_windows_sdk verify-seed
     {{ py }} "{{ root }}/tools/ci-bootstrap.py" run --staged "{{ root }}/tmp/ci-bootstrap"
 
 # seed：滚种子——把刚构建并验证过的 yh 覆盖入库种子。
