@@ -4,6 +4,36 @@
 [finish.md](finish.md) 与 [01-finished/](01-finished/)；方案文档在
 [02-plan/](02-plan/)，取舍见 [adr/](adr/)。
 
+
+
+- 添加string类型
+- 添加类型推导
+- 添加接口功能
+- 添加错误，当前错误提示功能太简陋
+- project.toml 添加[env]
+
+
+## 2026-11-05 VENC-2 遗留：Windows CRT 层文件路径仍按 ACP（P2）
+
+> 已完成部分见 [yh-VENC2-Windows-CRT入口argv修复](01-finished/yh-VENC2-Windows-CRT入口argv修复-2026-11-05.md)。
+
+`gen/argv.windows.yh` 已把进程内 argv 统一为 UTF-8（`GetCommandLineW` →
+65001），`--filter 中文` 等**参数文本**在 CRT 入口下也正确。但 CRT 的文件
+API（`open`/`CreateFileA` 等）仍按进程 ACP 解释路径字节：
+
+- 现象：本机（ACP=936）`yh --syntax-check "tmp/中文目录/探针.yh"` 在
+  VENC-2 之前能读源文件（argv 是 GBK 字节、CRT 也按 GBK 解释），VENC-2
+  之后 argv 是 UTF-8、CRT 仍按 GBK → `无法打开文件`；
+- 这不是本次 CI 失败面：CI 全部路径为 ASCII；且修复前中文路径整体也不可用
+  （源文件能开，但 `-o` 输出/链接阶段的中文路径必挂，实测
+  `LLVM 产物链接失败: tmp/…/old.exe`）；
+- 未做的原因：完整修复需要让整个 CRT 进程说 UTF-8（把 SDK 里现成的
+  `lib/yh-utf8.manifest` 以 `/MANIFEST:EMBED /MANIFESTINPUT:` 接进 lld 链接，
+  涉及项目链接层与固定点/多平台回归），或把所有 Windows 路径 API 逐个改成
+  `*W` 版本，改动面与风险都超出「修 CI filter 用例」的范围；
+- [ ] 待立项：嵌入 UTF-8 activeCodePage 清单（或等价的 CRT 层方案），补齐
+      中文源码路径、`-o` 输出路径与诊断路径的 Windows 端到端验收用例。
+
 图例：P0 发布质量与主线；P1 标准库与工具链；P2 长期与按需；⏸ 用户暂缓；❓ 待决策。
 
 ## 2026-11-03 CI 迁移到 GitHub Actions（已提交，待滚种子后实跑验收）

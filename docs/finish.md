@@ -9,6 +9,23 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-11-05 VENC-2：Windows CRT 入口 argv 重建（CI filter 用例真正根因）
+
+**结果**：[yh-VENC2-Windows-CRT入口argv修复-2026-11-05](01-finished/yh-VENC2-Windows-CRT入口argv修复-2026-11-05.md)。
+CI run 41941536106 windows-x64 的 `test-check.py` list-filter/execute-filter
+失败，根因不在零 CRT 入口桩（0b1ba2f/VENC 已修）：自举编译器链 libcmt，
+入口是 CRT 的 mainCRTStartup，argv 经 `__getmainargs` → `GetCommandLineA`
+按 ACP 取得——1252 上中文一步变 `?`，`/alternatename` 兜底只在无 CRT 时
+生效（windows_link.yh 双形态入口，本机调试实锤 yh.exe 自身 argv 为 GBK
+字节）。修复：新增 `gen/argv.{windows,linux,darwin}.yh`，Windows 在 main
+最前用 `GetCommandLineW` + `WideCharToMultiByte(65001)` 原地重建 UTF-8
+argc/argv（解析语义与零 CRT 桩一致；零 CRT 入口后为幂等直通；失败保持
+原 argv），driver 先重建再消费。验收：test-check.py 38/38 全过（CI 上
+36+2 失败），`just test` 除 arch-check 预算外全绿；预算上调
+`max_module_lines` 461 → 469（driver +8 行：重建调用与注释）、
+`max_globals` 172 → 174（argv.windows.yh 的 argv_line/argv_vec 两个静态
+缓冲）。
+
 ## 2026-11-05 P0-B1：CI 自举桥适配 VTEST（Windows 纳入桥引导）
 
 **结果**：[yh-CI自举桥VTEST适配-2026-11-05](01-finished/yh-CI自举桥VTEST适配-2026-11-05.md)。

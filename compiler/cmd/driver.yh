@@ -34,26 +34,34 @@ pub fn main(argc int, argv **char, envp **char) int {
     // 控制台 UTF-8（VENC）：Windows 下切 65001 码页，诊断/帮助的中文才
     // 不乱码；其他平台为空实现。必须在任何输出之前。
     gen.console_utf8_init()
+    // argv UTF-8（VENC-2，2026-11-05）：自举编译器链 libcmt，入口是 CRT 的
+    // mainCRTStartup，argv 经 GetCommandLineA 按 ACP 取得——英文 runner（1252）
+    // 上中文参数在源头变 '?'，testkit --filter 中文由此永不匹配。Windows 下
+    // 用宽命令行原地重建 UTF-8 argc/argv（零 CRT 入口之后是幂等直通）；
+    // 其他平台为空实现。必须在任何 argv 消费（含内部子进程协议识别）之前。
+    let rargc int = argc
+    let rargv **char = argv
+    gen.argv_utf8_rebuild(&rargc, &rargv)
     // 编译会话前奏：恢复 GenState、初始化项目模型、绑定目标/配置、
     // 记录自身路径与操作系统环境向量（见 common.yh cmd_session_init）。
-    cmd_session_init(argv[0], envp)
+    cmd_session_init(rargv[0], envp)
 
     // 内部子进程协议：`--emit-module <mod> <prov> <root> -o <dir> [...]`（豁免 cli）。
     // 上界 23（= 去掉程序名后的 22 项）：可选参数最多 --iface-suffix、--ir-key、
     // --check-only、--test-mode、--extra-file/--scan-file、--no-firc（4 个值参数 +
     // 5 个开关）；Windows 无 fork 的模块子进程会把这些全带上，旧的 13 会误判。
-    if (argc >= 7 && argc <= 23 && gen.cstr_eq(argv[1], "--emit-module") != 0
-        && gen.cstr_eq(argv[5], "-o") != 0) {
-        return api_emit_module(argv + 1, argc - 1)
+    if (rargc >= 7 && rargc <= 23 && gen.cstr_eq(rargv[1], "--emit-module") != 0
+        && gen.cstr_eq(rargv[5], "-o") != 0) {
+        return api_emit_module(rargv + 1, rargc - 1)
     }
     // 内部子进程协议：`--lld-link <响应文件>`（Windows 无 fork 的 COFF 链接
     // worker；响应文件每行一个 argv，由 link/windows_link.yh 写出）。
-    if (argc == 3 && gen.cstr_eq(argv[1], "--lld-link") != 0) {
-        return api_lld_link(argv[2])
+    if (rargc == 3 && gen.cstr_eq(rargv[1], "--lld-link") != 0) {
+        return api_lld_link(rargv[2])
     }
 
     // 裸 yh：完整帮助 + 当前项目版本，退出 2（保持旧契约）。
-    if (argc <= 1) {
+    if (rargc <= 1) {
         cmdline.print_bare_help(2)
         build.mb_print_version(1)
         return 2
@@ -61,7 +69,7 @@ pub fn main(argc int, argv **char, envp **char) int {
 
     let req cmdline.CliRequest
     let message [1024]char
-    let status int = cmdline.parse_request(argc, argv, &req, &message[0], 1024)
+    let status int = cmdline.parse_request(rargc, rargv, &req, &message[0], 1024)
     if (status != 0) {
         if (message[0] != 0) {
             gen.fail(&message[0])

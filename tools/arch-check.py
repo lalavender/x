@@ -68,12 +68,15 @@ ALLOWED = {
 BUDGETS = {
     "max_file_lines": 2042,        # module_build.yh（A2c 拆分后必须下降）
     "max_function_lines": 360,     # mb_link 674（含前导注释的上界口径）
-    "max_module_lines": 461,       # main（P1 一命令一文件：driver 分派 + common 前奏 +
+    "max_module_lines": 469,       # main（P1 一命令一文件：driver 分派 + common 前奏 +
                                    # 8 个 cmd_*.yh；api.yh 删除；+71 全为 9 个新文件头
                                    # 注释，逻辑行数不变；依赖边 55 条不变；见 finish.md
                                    # 2026-11-05 与 docs/03-design 模块架构目标设计 §4；
                                    # +3 VENC：driver 首行 gen.console_utf8_init() 调用，
-                                   # Windows 控制台切 65001 码页显示中文）
+                                   # Windows 控制台切 65001 码页显示中文；
+                                   # +8 VENC-2：driver 入口 gen.argv_utf8_rebuild() 调用
+                                   # 与注释——CRT 入口（libcmt）的 argv 是 ACP 字节，
+                                   # Windows 下用宽命令行重建 UTF-8，见 finish.md 同日）
     "max_testkit_lines": 1632,     # testkit（YT2d-3 +37；B1-1 迁表后 -14；W2-7 无 fork 子进程的
                                    # 十进制用例号/模块内文件序号/--filter UTF-8 规整 +31；
                                    # 合并后 tc_case_start 的 Windows 分支（CreateProcess 重入）+7）
@@ -89,7 +92,9 @@ BUDGETS = {
     "max_proj_lines": 1396,        # proj（B1-1 表/路径 + B2-1 产物键 + YH_BUILD_CACHE 缓存根；
                                    # W1-6 windows 目标组 5/6 与盘符绝对路径 +12）
     "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
-    "max_globals": 172,
+    "max_globals": 174,            # +2 VENC-2：argv.windows.yh 的 argv_line（UTF-8 命令行
+                                   # 缓冲）与 argv_vec（参数指针表）两个模块级静态，
+                                   # CRT 入口下重建 UTF-8 argv 的存储，见 finish.md 同日
     "max_g_call_sites": 0,      # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
