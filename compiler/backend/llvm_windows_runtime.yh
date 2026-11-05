@@ -99,9 +99,15 @@ fn llvm_windows_runtime_write_printf_write(out *LLVMOutput) void {
 // 缓冲区是模块内 internal 全局（只在本模块定义 main 时才发射），不依赖 CRT。
 fn llvm_windows_runtime_write_entry(out *LLVMOutput) void {
     llvm_text(out, "declare void @ExitProcess(i32)\n\n")
-    llvm_text(out, "@__yh_cmdline = internal global [8192 x i8] zeroinitializer\n")
+    // VENC（2026-11-05）：命令行取宽字符版再转 UTF-8。原 GetCommandLineA 走
+    // 系统 ANSI 码页——英文 runner（1252）上中文参数变 '?' 不可逆丢失，
+    // 中文 Windows（GBK）上与源码内 UTF-8 文本比较也不匹配。UTF-8 是
+    // 进程内唯一文本编码，入口层一次转换后所有 argv 消费者（testkit
+    // --filter、文件路径、转发参数）都拿到 UTF-8。
+    llvm_text(out, "@__yh_cmdline = internal global [24576 x i8] zeroinitializer\n")
     llvm_text(out, "@__yh_argv = internal global [256 x ptr] zeroinitializer\n")
-    llvm_text(out, "declare ptr @GetCommandLineA()\n")
+    llvm_text(out, "declare ptr @GetCommandLineW()\n")
+    llvm_text(out, "declare i32 @WideCharToMultiByte(i32, i32, ptr, i32, ptr, i32, ptr, ptr)\n")
     // 零 CRT 入口的第三参：SDK 支撑对象把宿主环境块转成 char*[]（见 chkstk.c）。
     llvm_text(out, "declare ptr @__yh_build_envp()\n")
     llvm_text(out, "\n")
@@ -117,13 +123,18 @@ fn llvm_windows_runtime_write_entry(out *LLVMOutput) void {
     llvm_text(out, "  store i32 0, ptr %argc_p, align 4\n")
     llvm_text(out, "  store i1 false, ptr %q_p, align 1\n")
     llvm_text(out, "  store i1 false, ptr %s_p, align 1\n")
-    llvm_text(out, "  %line = call ptr @GetCommandLineA()\n")
-    llvm_text(out, "  %bufp = getelementptr [8192 x i8], ptr @__yh_cmdline, i64 0, i64 0\n")
+    llvm_text(out, "  %line = call ptr @GetCommandLineW()\n")
+    llvm_text(out, "  %bufp = getelementptr [24576 x i8], ptr @__yh_cmdline, i64 0, i64 0\n")
     llvm_text(out, "  %argvp = getelementptr [256 x ptr], ptr @__yh_argv, i64 0, i64 0\n")
+    llvm_text(out, "  %n8 = call i32 @WideCharToMultiByte(i32 65001, i32 0, ptr %line, i32 -1, ptr %bufp, i32 24575, ptr null, ptr null)\n")
+    llvm_text(out, "  %conv_ok = icmp sgt i32 %n8, 0\n")
+    llvm_text(out, "  br i1 %conv_ok, label %loop, label %conv_fail\n")
+    llvm_text(out, "conv_fail:\n")
+    llvm_text(out, "  store i8 0, ptr %bufp, align 1\n")
     llvm_text(out, "  br label %loop\n")
     llvm_text(out, "loop:\n")
     llvm_text(out, "  %i0 = load i64, ptr %i_p, align 8\n")
-    llvm_text(out, "  %sp = getelementptr i8, ptr %line, i64 %i0\n")
+    llvm_text(out, "  %sp = getelementptr i8, ptr %bufp, i64 %i0\n")
     llvm_text(out, "  %c = load i8, ptr %sp, align 1\n")
     llvm_text(out, "  %end = icmp eq i8 %c, 0\n")
     llvm_text(out, "  br i1 %end, label %finish, label %body\n")

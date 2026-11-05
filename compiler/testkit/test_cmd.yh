@@ -102,43 +102,27 @@ fn tc_np_less(off1 int, len1 int, off2 int, len2 int) int {
     return (len1 < len2).to_type(int)
 }
 
-// Windows 命令行是 ANSI（本机 ACP=GBK）：`yh test --filter 中文` 到达进程时字节
-// 已经不是 UTF-8，直接和源码里的 UTF-8 文本比较永远不匹配。这里按 ACP 解成
-// UTF-16 再转 UTF-8（只用于 --filter 的文本，其他 argv 仍按 ANSI 交给文件 API）。
-@[extern] fn MultiByteToWideChar(codepage u32, flags u32, src *u8, srclen int,
-    dst *u16, dstlen int) int
-@[extern] fn WideCharToMultiByte(codepage u32, flags u32, src *u16, srclen int,
-    dst *u8, dstlen int, default_char *u8, used *int) int
+// Windows 命令行曾是 ANSI（GetCommandLineA，本机 ACP=GBK）：`yh test --filter 中文`
+// 到达进程时字节不是 UTF-8，与源码里的 UTF-8 文本比较永远不匹配。2026-11-05 起
+// 零 CRT 入口桩改用 GetCommandLineW + WideCharToMultiByte(65001)——argv 从源头
+// 就是 UTF-8，本函数退化为直通复制（保留以统一容量检查路径）。
+// 历史：曾在这里做 ACP→UTF-8 转换（tc_filter_utf8 旧实现），但英文 runner 的
+// ACP=1252 下中文在 GetCommandLineA 一步就已变成 '?'，源头丢失不可逆。
 
 // tc_filter_utf8：把 --filter 文本规整为 UTF-8，返回字节数（失败 -1）。
 fn tc_filter_utf8(src *char, out *u8, cap int) int {
     let n int = 0
     for src[n] != 0 { n += 1 }
-    if (gen.tg_host_windows() == 0) {
-        if (n >= cap) { return -1 }
-        let i int = 0
-        for i < n {
-            out[i] = src[i].to_type(u8)
-            i += 1
-        }
-        out[n] = 0
-        return n
+    // 入口桩已保证 argv 是 UTF-8（见 llvm_windows_runtime_write_entry），
+    // 全平台统一直通复制；旧的 ACP→UTF-8 转换随 GetCommandLineA 一并退役。
+    if (n >= cap) { return -1 }
+    let i int = 0
+    for i < n {
+        out[i] = src[i].to_type(u8)
+        i += 1
     }
-    // Windows 专属的 ACP→UTF-8 转换必须用编译期 `$if (windows)` 包住：
-    // 运行时守卫只决定走哪条分支，非 Windows 目标的 object 里仍会保留对
-    // MultiByteToWideChar/WideCharToMultiByte 的引用，Linux/Darwin 链接时报
-    // 「undefined symbol」（2026-11-03 CI 桥第 1 代链接失败即此处）。
-    $if (windows) {
-        let wide [1024]u16
-        let wn int = MultiByteToWideChar(0, 0, src.to_type(*u8), n, &wide[0], 1024)
-        if (wn <= 0) { return -1 }
-        let on int = WideCharToMultiByte(65001, 0, &wide[0], wn, out, cap - 1, 0, 0)
-        if (on <= 0 || on >= cap) { return -1 }
-        out[on] = 0
-        return on
-    }
-    // 非 Windows 宿主在函数开头已返回，这里只是让分支在编译期收尾。
-    return -1
+    out[n] = 0
+    return n
 }
 
 // tc_is_sep：路径分隔符判定。Windows 的绝对路径是 `C:\dir\file.yh`，只认 '/'
