@@ -105,7 +105,7 @@ Darwin 本地不要求预跑 Linux 门；如专项安排交叉语义检查，输
 
 **文件：**
 
-- 新增 `libs/sys/00_types.yh`、`10_constants.linux.{arm64,x64}.yh`、`20_raw.linux.yh`。
+- 新增 `libs/sys/base.yh`、`constants.linux.{arm64,x64}.yh`、`raw.linux.yh`。
 - 新增 `tests/modules/projects/sysraw/{project.toml,src/main.yh}`。
 - 扩展 sysresult 和测试入口；按实际测试类型接入 `tests/modules/build-check.py`。
 - `libs/project.toml` 已有 sys 预留项；不新增无功能的配置字段或第二份清单。
@@ -132,7 +132,7 @@ Darwin 本地不要求预跑 Linux 门；如专项安排交叉语义检查，输
 
 **文件：**
 
-- 新增 `libs/sys/30_file.linux.yh`。
+- 新增 `libs/sys/file.linux.yh`。
 - 新增 `tests/modules/projects/sysfiles/{project.toml,src/main.yh}`。
 - 新增 `tests/modules/projects/sysdirs/{project.toml,src/main.yh}`。
 - 扩展 `tests/selfhost/syscalls.py`。
@@ -160,7 +160,7 @@ Darwin 本地不要求预跑 Linux 门；如专项安排交叉语义检查，输
 
 **文件：**
 
-- 新增 `libs/sys/40_memory.linux.yh`、`50_time.linux.yh`。
+- 新增 `libs/sys/memory.linux.yh`、`time.linux.yh`。
 - 新增 `tests/modules/projects/sysmemory/{project.toml,src/main.yh}`。
 - 新增 `tests/modules/projects/systime/{project.toml,src/main.yh}`。
 - 扩展测试入口的实际页大小/环境记录。
@@ -187,7 +187,7 @@ Darwin 本地不要求预跑 Linux 门；如专项安排交叉语义检查，输
 
 **文件：**
 
-- 新增 `libs/sys/60_process.linux.yh`。
+- 新增 `libs/sys/process.linux.yh`。
 - 新增 `tests/modules/projects/sysprocess/{project.toml,src/main.yh}`。
 - 新增 `tests/modules/projects/sysexit/{project.toml,src/main.yh}`。
 - 扩展测试入口的超时、进程组清理与指定退出码判定。
@@ -287,8 +287,8 @@ libc、动态库装载器、GC、异常或线程功能作为闭环前置。
 
 **文件：**
 
-- 新增 `libs/sys/10_constants.darwin.yh`、`20_native.darwin.yh` 及逐项实际
-  就绪的 `30_file/40_memory/50_time/60_process.darwin.yh`。
+- 新增 `libs/sys/constants.darwin.yh`、`20_native.darwin.yh` 及逐项实际
+  就绪的 `file/memory/time/process.darwin.yh`。
 - 新增 `tests/modules/projects/sysdarwin/`、对应 Linux/Darwin 契约回归。
 - 将 Darwin 上层与编译器消费者逐项迁到审核后的 sys 桥。
 

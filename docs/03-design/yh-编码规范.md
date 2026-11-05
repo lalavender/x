@@ -306,7 +306,7 @@ pub fn buf_write(b *Buf, text *char) int {
 
   说清三件事：本文件做什么、**明确不做什么**、与相邻文件的分工。
 - **[强制] 文件名就是内容名，不加数字排序前缀**：`buffer.yh`、`reader.yh`、
-  `parser.yh`、`ssa_module_model.yh`，不写 `10_view.yh`、`00_types.yh`。
+  `parser.yh`、`ssa_module_model.yh`，不写 `view.yh`、`base.yh`。
   名字要能望文知内容（模块名可作前缀，如编译器内的 `模块_主题.yh`）。
 - **[强制] 顺序靠名字本身解决，不靠数字。** 模块内按**文件名字节序**处理，
   声明必须先于使用（跨文件提前引用报「未知类型（类型必须先定义）」），所以：
@@ -319,9 +319,9 @@ pub fn buf_write(b *Buf, text *char) int {
   测试体引用生产声明不依赖文件名字典序（`zz_`/`99_` 排序前缀废止）。
   整库一个测试文件叫 `tests.test.yh`；按主题拆分为 `<主题>.test.yh`
   （如 cli 的 `actions.test.yh`、`basics.test.yh`）。
-- **[建议] 存量带数字前缀的文件不改名**（`libs/` 的 `00_model.yh`、
-  `10_read.yh`）：改名会改变模块内处理顺序，属于独立任务；新增文件按
-  上面两条命名，字节序上数字前缀排在字母之前，两者共存不冲突。
+- **[强制] 共享声明放字节序最前的语义名文件（惯例 `base.yh`）**：模块内
+  共享类型/常量先于消费者编译，`libs/` 已全部取消数字前缀（2026-11-06）；
+  重命名必须同时核对文件名字节序与依赖顺序。
 - **[强制] 平台差异用编译期文件选择**（`xx.linux.yh` / `xx.darwin.yh`），
   不在函数体里写 if 平台分支。
 - **[强制] 不把「数据模型 + 算法 + 输出格式」塞进同一个文件。**
@@ -333,7 +333,7 @@ pub fn buf_write(b *Buf, text *char) int {
 | 场景 | 形状 | 例 |
 | --- | --- | --- |
 | 编译器内部 | 返回 `int`：0 成功 / -1 失败，失败即诊断 | `gen.fail` / `gen.err_tok` / `gen.sem_err` |
-| 标准库 / 库代码 | 返回 `XxxResult`，`xxx_result_ok` / `xxx_result_error` 构造 | `libs/string/10_view.yh`（存量命名） |
+| 标准库 / 库代码 | 返回 `XxxResult`，`xxx_result_ok` / `xxx_result_error` 构造 | `libs/string/view.yh`（存量命名） |
 
 - **[强制] 不吞错。** 失败要么就地诊断（中文、指明文件名:行号或参数名），要么
   原样上抛。禁止「失败了但返回 0」。

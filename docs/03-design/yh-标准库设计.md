@@ -36,7 +36,7 @@ YH_STDLIB=/path/to/yh/libs yh run
 | `print(text *char) int` | 将 NUL 结尾字符串写到标准输出，不追加换行；成功返回 0，失败返回 -1 |
 | `println(text *char) int` | 写字符串并追加一个换行；成功返回 0，失败返回 -1 |
 
-IO0–IO4 新增（`00_model.yh`/`10_read.yh`/`20_write.yh`）：
+IO0–IO4 新增（`base.yh`/`read.yh`/`write.yh`）：
 
 | 组 | API |
 | --- | --- |
@@ -166,9 +166,9 @@ Linux/x64 与 Linux/arm64 按现有后端分别复用 `linux_syscall6`，提供 
 采用显式项目依赖。不把静态 ELF/编译器独立验收作为文件 API 可用的前置。
 macOS/arm64 后续适配审核的系统 OS API，披露 dyld/libSystem 依赖。
 
-当前已实现 `00_types.yh`、Linux 两种 ISA 的常量、`20_raw.linux.yh`、文件/目录/
-cwd/pipe（`30_file`）、内存（`40_memory`）、时间（`50_time`）与进程
-（`60_process`）原语；Darwin 桥仍待实施。未迁移本文已有 API。静态 ELF、
+当前已实现 `base.yh`、Linux 两种 ISA 的常量、`raw.linux.yh`、文件/目录/
+cwd/pipe（`file`）、内存（`memory`）、时间（`time`）与进程
+（`process`）原语；Darwin 桥仍待实施。未迁移本文已有 API。静态 ELF、
 启动入口和连续自编须与自有工具链共同验收。
 
 ## cli（2026-10-18 设计；CLI0–CLI5 已实现，2026-10-19）
@@ -200,10 +200,10 @@ cwd/pipe（`30_file`）、内存（`40_memory`）、时间（`50_time`）与进�
 和结构化诊断；不依赖 compiler/gen，不修改 yh 语法。写入后置。
 
 已注册模块并在 `libs/project.toml` 登记。实际文件按编译顺序：
-`00_types.yh`（公开类型/预算）、`10_storage.yh`（私有池/节点/容器）、
-`20_utf8.yh`、`30_numbers.yh`（整数与精确 binary64）、`40_datetime.yh`、
-`45_parser_state.yh`、`46_strings.yh`、`50_parse.yh`（文档/键/表语义）、
-`60_query.yh`、`70_files.linux.yh`/`70_files.darwin.yh`、`90_api.yh`。
+`base.yh`（公开类型/预算）、`document.yh`（私有池/节点/容器）、
+`encoding.yh`、`numbers.yh`（整数与精确 binary64）、`datetime.yh`、
+`lexer.yh`、`strings.yh`、`parse.yh`（文档/键/表语义）、
+`query.yh`、`file.linux.yh`/`file.darwin.yh`、`surface.yh`。
 
 固定 toml-test v2.2.0 的 1.1 decoder 清单通过 681/681（有效 214、非法 467），
 六组 `.yh` API/所有权/资源/文件用例与 `make test`/`make selfhost-native`
@@ -227,7 +227,7 @@ BOM、重复键、孤立代理、尾逗号与尾随内容。设计见
 [实施方案](../02-plan/yh-JSON标准库实施方案-2026-10-24.md)，取舍见
 [ADR-0019](../adr/0019-yh-JSON标准库独立文档模型与词素保真数字.md)。
 状态：**首期已实现**（reader + writer + 查询 + 文件读写），已在
-`libs/project.toml` 注册；六组 API/文件断言已迁入 `libs/json/tests.test.yh`
+`libs/project.toml` 注册；六组 API/文件断言已迁入 `libs/json/json.test.yh`
 （`yh test json`，`jsonmodel` 保留为 smoke）。未完成项（一致性语料、注入门、
 安装门）见 [todo](../todo.md)。
 

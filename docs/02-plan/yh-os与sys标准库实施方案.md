@@ -28,23 +28,23 @@ OS6 的默认发现复用已有 todo，不把安装打包变成 OS1 文件能力
 ```text
 libs/os/
   os.yh                         现有入口与平台信息，兼容导出保留
-  00_model.yh                   Error、结果、OpenOptions、DirEntry（OS0/OS1，已实现）
-  10_errors.linux.yh            Linux 错误归一化与切片地址帮助（OS1/OS2，私有）
+  base.yh                   Error、结果、OpenOptions、DirEntry（OS0/OS1，已实现）
+  errors.linux.yh            Linux 错误归一化与切片地址帮助（OS1/OS2，私有）
   file.linux.yh                 新文件接口与必要兼容转换（OS1，已实现）
-  20_directory.linux.yh         目录读取器与 cwd（OS2，已实现）
+  directory.linux.yh         目录读取器与 cwd（OS2，已实现）
   environment.yh               显式 envp 查询（OS3，已实现）
   process.linux.yh              spawn/wait/exit（OS4，已实现）
   compat.linux.yh               Linux 旧接口（迁移时提取）
   compat.darwin.yh              Darwin 旧接口（迁移时提取）
 libs/sys/
-  00_types.yh                   结果区间、Timespec（已实现）
-  10_constants.linux.x64.yh      x64 编号、标志和 ABI 常量（已实现）
-  10_constants.linux.arm64.yh    ARM64 编号、标志和 ABI 常量（已实现）
-  20_raw.linux.yh               转发现有 linux_syscall6（已实现）
-  30_file.linux.yh              文件与目录原语（OS1 子集已实现）
-  40_memory.linux.yh            mmap/munmap（已实现）
-  50_time.linux.yh              clock/nanosleep（已实现）
-  60_process.linux.yh           进程原语（已实现）
+  base.yh                   结果区间、Timespec（已实现）
+  constants.linux.x64.yh      x64 编号、标志和 ABI 常量（已实现）
+  constants.linux.arm64.yh    ARM64 编号、标志和 ABI 常量（已实现）
+  raw.linux.yh               转发现有 linux_syscall6（已实现）
+  file.linux.yh              文件与目录原语（OS1 子集已实现）
+  memory.linux.yh            mmap/munmap（已实现）
+  time.linux.yh              clock/nanosleep（已实现）
+  process.linux.yh           进程原语（已实现）
 ```
 
 所有 `.yh` 文件分别声明 module os/sys，不依赖另一份 project.toml。排序能力先在

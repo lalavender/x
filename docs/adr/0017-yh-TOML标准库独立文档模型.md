@@ -58,5 +58,6 @@
 2026-10-23 已通过六组 API 断言、精确浮点差分、toml-test v2.2.0 官方 decoder
 集 681/681、124 个池分配失败点与低预算强制失败、`make install` 后仓库外导入，
 以及 `make test` 与 `make selfhost-native`；T6/T7 仍未关闭。
-实际文件使用 `00_types.yh` … `90_api.yh` 数字前缀保证类型定义顺序，公共 API
+实际文件使用 `base.yh` … `surface.yh` 的语义名（已取消数字前缀），
+由文件名字节序保证类型定义先于使用，公共 API
 与设计 §4 一致，没有新增写入/格式化 API。

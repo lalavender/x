@@ -515,7 +515,7 @@ Windows 没有 `fork/execv/waitpid/dup2`。三个消费者：
 
 ### W2-7 标准库的平台变体
 
-- `libs/os`：`20_directory.windows.yh`、`30_process.windows.yh`；
+- `libs/os`：`directory.windows.yh`、`process.windows.yh`；
 - `libs/sys`：`errno/constants/raw/file/memory/time/process` 的 windows 变体
   （首版只覆盖 `os`/`io`/`fmt`/`string` 实际用到的面）；
 - `libs/libc`：确认无平台强依赖（若有，补 windows 分支）；

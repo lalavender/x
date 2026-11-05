@@ -351,7 +351,7 @@ Windows target 8/8、ABI 1/1、语料 208/208；Linux 主门与 `selfhost-native
 
 **errno 契约不变**：对外仍是 POSIX 编号的 `-errno`，Windows 的 `GetLastError()`
 （`ERROR_FILE_NOT_FOUND`/`ERROR_ACCESS_DENIED`/`ERROR_DIR_NOT_EMPTY` 等）在
-`libs/sys/05_errno.windows.yh` 里翻译一次，`os`/`net` 的错误分类因此不需要平台分支。
+`libs/sys/errno.windows.yh` 里翻译一次，`os`/`net` 的错误分类因此不需要平台分支。
 
 **另外三个只在 Windows 出现、容易被误判为“库写错”的点**：
 
@@ -385,7 +385,7 @@ Windows 目标按方案 D2 走**零 CRT**：用户程序只链 `kernel32.lib` + 
 | `lrint` 等 C 数学 | `u3-c-*`（7 例） | C 互操作夹具的 C 桩需要 libm |
 | `dup2` | `r3-dup2-os-api` | POSIX fd 语义，运行时 fd 表没有 dup2 |
 | `system()` | `r3-system-compat-*`（3 例） | POSIX shell 语义 |
-| Winsock | `net0`/`net1` | `libs/sys/70_socket.windows.yh` 目前是 `-ENOSYS` 桩 |
+| Winsock | `net0`/`net1` | `libs/sys/socket.windows.yh` 目前是 `-ENOSYS` 桩 |
 | `ar`/`.a` + `--start-group` | `link-static-groups`（4 例） | ELF/Darwin 归档组；COFF 的 `.lib` 由 `test-windows-target` 覆盖 |
 | `envp` | `r3-envp-main` | Windows 入口目前只构造 argv（`__yh_build_argv`） |
 

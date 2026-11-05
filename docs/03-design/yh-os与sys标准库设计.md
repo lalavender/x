@@ -145,8 +145,9 @@ Result<T> 或全局 last_error。
 同名，模块内定义会被判为顶层符号重定义，因此实际接口改用上表名字。语义与
 所有权不变，旧 `open_file/read_fd/write_fd/close_fd/...` 继续保留在 os.yh。
 
-实现落在 `libs/os/00_model.yh`（结果与选项）和 `libs/os/file.linux.yh`
-（Linux 文件适配）。数字前缀保证同模块内类型先于平台实现文件编译。
+实现落在 `libs/os/base.yh`（结果与选项）和 `libs/os/file.linux.yh`
+（Linux 文件适配）。模块按文件名字节序编译，`base.yh`（类型）在字节序上先于
+各平台实现文件，因此类型先于使用。
 io 的 `write_all_result` 复用 `os.write_once(fd, buffer *void, count u64) IoResult`；
 Linux 版本映射 sys -errno，Darwin 使用 prelude write 的兼容入口（native_code 0）。
 
@@ -254,18 +255,18 @@ OS7 编译器迁移和独立性验收、OS8 Darwin 新接口适配单列后续�
 
 ## 9. 已实施状态（2026-10-21）
 
-- **OS0 已完成**：`libs/sys/00_types.yh` 提供 Timespec/is_error/error_code，
-  `libs/os/00_model.yh` 提供 Error/ErrorKind、FdResult、IoResult、OpenOptions、
+- **OS0 已完成**：`libs/sys/base.yh` 提供 Timespec/is_error/error_code，
+  `libs/os/base.yh` 提供 Error/ErrorKind、FdResult、IoResult、OpenOptions、
   DirEntry 候选布局与初始化函数。`sysresult` 断言已迁入 `libs/sys/tests.test.yh`，
   `os` 结果模型另见 `libs/os/tests.test.yh`；`osmodel` 仍作跨模块 smoke。
   迁移记录见 [YT4-P5](../01-finished/yh-YT4-P5-os-sys-time迁移-2026-10-25.md)。
-- **OS1 首片已实现**：`libs/sys/10_constants.linux.{arm64,x64}.yh`、
-  `20_raw.linux.yh`、`30_file.linux.yh` 提供 raw6 与文件/目录原语；
+- **OS1 首片已实现**：`libs/sys/constants.linux.{arm64,x64}.yh`、
+  `raw.linux.yh`、`file.linux.yh` 提供 raw6 与文件/目录原语；
   `libs/os/file.linux.yh` 提供 `open_path/read_some/write_some/close_file/`
   `make_dir/remove_path/remove_dir_path/rename_path`。Linux 用例覆盖创建、写入、
   读取、EOF、追加、独占、重命名、目录删除、ENOENT/EEXIST/EBADF 与非法选项。
-- **OS2 目录/cwd 已实现**：`libs/sys/30_file.linux.yh` 增加 getdents64/
-  get_cwd/change_dir；`libs/os/20_directory.linux.yh` 提供 DirReader、
+- **OS2 目录/cwd 已实现**：`libs/sys/file.linux.yh` 增加 getdents64/
+  get_cwd/change_dir；`libs/os/directory.linux.yh` 提供 DirReader、
   next_entry、close_dir、get_cwd、change_dir。`sysdirs` 与 `osdirs` 在
   Linux/arm64 原生通过，覆盖多批读取、空目录、长名称、小缓冲、坏 fd、
   ENOTDIR/ERANGE、DT_UNKNOWN、损坏记录、重复关闭与 cwd 恢复。
