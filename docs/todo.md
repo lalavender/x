@@ -13,9 +13,16 @@
 - project.toml 添加[env]
 
 
-## 2026-11-05 VENC-2 遗留：Windows CRT 层文件路径仍按 ACP（P2）
+## 2026-11-05 VENC-2 遗留：Windows CRT 层文件路径仍按 ACP（P1，CI 已条件跳过）
 
 > 已完成部分见 [yh-VENC2-Windows-CRT入口argv修复](01-finished/yh-VENC2-Windows-CRT入口argv修复-2026-11-05.md)。
+> **2026-11-05 升级 P1**：修好 filter 后 CI 首次跑到 `selfhost-native` 第 10 步
+> （此前 5 次 run 全部 `step9=failure/skipped → step10=skipped`），暴露
+> `build-check.py` 的 `r3-directory-filenames-are-byte-safe` 与
+> `r3-directory-enumeration-grows-past-one-batch` 两例在英文 runner（ACP=1252）
+> 必然失败：`FindFirstFileA` 把 `雪` 变 `?`，CRT `open()` 按 ACP 打不开。
+> 已按 `GetACP()` 精确跳过（仅 ACP 无法编码该字符时；本机 936 / UTF-8 ACP
+> 仍照常实测），**不是修复**，见 [CI 二次红灯处理](01-finished/yh-CI二次红灯-ACP目录扫描-2026-11-05.md)。
 
 `gen/argv.windows.yh` 已把进程内 argv 统一为 UTF-8（`GetCommandLineW` →
 65001），`--filter 中文` 等**参数文本**在 CRT 入口下也正确。但 CRT 的文件

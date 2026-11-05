@@ -211,8 +211,44 @@ WINDOWS_SKIP_PREFIX = {
 }
 
 
+WINDOWS_ACP_LOSSY_CASES = (
+    "r3-directory-filenames-are-byte-safe",
+    "r3-directory-enumeration-grows-past-one-batch",
+)
+
+
+def windows_acp_lossy(text="雪"):
+    """Windows 进程 ACP 无法表示 text 时返回该 ACP 编号，否则返回 None。
+
+    project_dir.windows.x64.yh 的目录枚举用 FindFirstFileA、gen.read_source
+    用 CRT open()，两者都按进程 ACP 解释路径字节：英文 runner 的 ACP=1252
+    会把「雪」替换成 '?'（不可逆），编译器随后打不开这个文件，两个 R3
+    目录扫描用例必然失败。ACP=936（GBK）或 65001（UTF-8 manifest）能表示，
+    仍照常实测——这是既有 Windows 路径层遗留（W2-9 / VENC-2 P2），不是
+    用例本身失效。判定用 kernel32.GetACP() 而非 locale，避免 Windows 上
+    Python 文件系统编码恒为 UTF-8 的假阴性。
+    """
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+        acp = int(ctypes.windll.kernel32.GetACP())
+        text.encode("cp" + str(acp))
+    except UnicodeEncodeError:
+        return acp
+    except Exception:
+        # 拿不到 ACP 或未知码页：不擅自跳过，保留原断言结果。
+        return None
+    return None
+
+
 def windows_skip_reason(name: str):
-    """Windows 零 CRT 下应跳过的用例原因；不跳过返回 None。"""
+    """Windows 零 CRT / ACP 边界下应跳过的用例原因；不跳过返回 None。"""
+    if name in WINDOWS_ACP_LOSSY_CASES:
+        acp = windows_acp_lossy()
+        if acp is not None:
+            return (f"Windows 目录枚举 FindFirstFileA：进程 ACP={acp} 无法表示"
+                    "非 ASCII 文件名（W2-9 / VENC-2 遗留，见 docs/todo.md）")
     reason = WINDOWS_SKIP.get(name)
     if reason:
         return reason

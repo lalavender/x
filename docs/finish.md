@@ -9,6 +9,19 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-11-05 CI 二次红灯：Windows ACP 目录扫描（按 ACP 精确跳过）
+
+**结果**：[yh-CI二次红灯-ACP目录扫描](01-finished/yh-CI二次红灯-ACP目录扫描-2026-11-05.md)。
+`b6fafa7` 推上后 run 41952142547 的 windows-x64 **第 9 步已 success**（filter
+修复在 CI 得到验证），三平台 job 全绿；第 10 步「自举主门」首次跑到（此前
+5 次 run 全部 skipped），暴露 `build-check.py` 两个 R3 目录扫描用例在英文
+runner（ACP=1252）必然失败：`FindFirstFileA` 把 `雪` 变 `?`、CRT `open()`
+按 ACP 打不开。与 VENC-2 无关（本机 936 下修复前后编译器均 rc=0），是已登记
+的「CRT 文件路径仍按 ACP」遗留。按用户决策用 `kernel32.GetACP()` 精确跳过：
+仅当 ACP 无法编码该字符时 SKIP 两例，936/65001/932 仍照常实测；单测覆盖
+四种 ACP + 手工对照。**这是隔离环境差异，不是修复**；根治（目录枚举改 W +
+`_wopen`，或嵌入 UTF-8 manifest）升级为 todo.md 的 P1 项。
+
 ## 2026-11-05 VENC-2：Windows CRT 入口 argv 重建（CI filter 用例真正根因）
 
 **结果**：[yh-VENC2-Windows-CRT入口argv修复-2026-11-05](01-finished/yh-VENC2-Windows-CRT入口argv修复-2026-11-05.md)。
