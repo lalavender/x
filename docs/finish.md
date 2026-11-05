@@ -309,6 +309,26 @@ tag 打在 release 分支上；`0.0.12-rc` 的 ci.yml 分支门同轮四端 succ
 恢复到 `ab244e3`（tag 0.0.12-rc.3）内容，llvm 分支门 run 42075976931 恢复绿。
 正式版基线取 tag `0.0.12-rc.3`（`ab244e3`），不含该误提交。
 
+## 2026-11-06 发布 0.0.12 正式版（rc.3 种子验收 + rc/release 分支）
+
+**结果**：[release-0.0.12](01-finished/release-0.0.12.md)。
+以 0.0.12-rc.3（tag/commit ab244e3，四端流水线 run 42062242047 全绿、8 个资产）
+为基线：`0.0.12-rc` 线上只加版号与发布说明，本机用发布出去的 rc.3 种子做验收后，
+`--no-ff` 合入 `0.0.12-release` 并打 `0.0.12`。
+
+本地验收（Windows/x64 宿主，种子 `bin/yh-windows-x64` = rc.3，sha256
+`d6721853…`）：`just fetch-seed` → `just build`（冷编，`yh --version` = 0.0.12）→
+`just test`（三层回归全绿）→ `just selfhost-native`（cc3→cc4 固定点 48 产物一致、
+自解析 148 文件、探针、CLI 冒烟、语法语料 49/49 反例、运行语料 363/372
+windows-x64 原生、后续各门）。本机两处环境垫片：`python3` 是 Microsoft Store 桩，
+用 `tmp/pyshim/python3.exe` 垫片跑语料；`foreign-fs-build.py` 受本机安全策略
+（不受信 exe 不能写 %TEMP%）限制，以 `TEMP` 指向仓库内目录等价通过——真实跨
+文件系统证据由 CI 四端承担。
+
+另修一处误提交：`1927f95`（rc.3 结论文档提交）把当时暂存区里另一个任务的
+`libs/json` 去前缀改名一并带入，导致 `json/api.yh` 早于 `types.yh` 编不过；
+已用 `2281445` 把 `libs/json` 恢复到 ab244e3 内容（llvm 已推送）。
+
 ## 2026-11-05 发布打包步骤引用已删除路径：release.yml windows 端 cp 失败
 
 **结果**：[release-0.0.12-rc.3](01-finished/release-0.0.12-rc.3.md)。
