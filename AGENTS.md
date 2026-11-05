@@ -223,7 +223,7 @@ CI 由 **GitHub Actions** 承担（2026-11-03 起；替代 Gitea Actions 与本�
   3–4 小时；缓存命中后 Linux 约 25–45 分钟、Darwin/Windows 约 20–40 分钟。
 - **已退役**：Gitea Actions（2026-11-03 删除 `.gitea/`，git 历史保留）、
   本机 Jenkins（2026-10-22 删除，`Jenkinsfile` 与 `tools/jenkins/` 一并移除）；
-  `.circleci/config.yml` 仅留作云端真机参照，不再作为门禁。
+  CircleCI（2026-11-05 删除 `.circleci/config.yml`，不再作为门禁）。
 
 ## 版本与发布（每版本 rc/release 分支）
 
