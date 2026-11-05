@@ -47,8 +47,11 @@ windows 红。
   `tar -tzf` 的成员名为 `yh`（`fetch-release-seed.py` 的 `extract_yh` 只认这个名字）。
 - rc.2 已证明上一轮的桥接修复有效：本次 run 的 step 8「过渡期自举桥」success、
   step 9「Windows/x64 平台门」success。
-- rc.3 发布流水线：四端取上一版种子（rc.1/rc.2 均未产出 Release 资产，仍取 0.0.11）
-  → 准备本机闭包 → 过渡期自举桥 → 平台门 → 自举门 → 滚 cc4 → 打包上传。
+- rc.3 发布流水线（run 42062242047，commit ab244e3）：**四端全绿，Release 已产出**。
+  各 job 从取种到打包全 success，windows-x64 的步骤 8（自举桥）/9（平台门）/10（自举门 +
+  打包）均通过；publish 校验四端资产与发布说明后成功发布 prerelease。
+  资产：`yh-0.0.12-rc.3-{darwin-arm64,linux-arm64,linux-x86_64,windows-x64}.tar.gz`
+  与各自 `.sha256`（8 个文件）。
 
 ## 已知边界
 
