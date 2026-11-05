@@ -3,7 +3,7 @@
 `import json;` 提供 RFC 8259 的读写：解析内存/文件为只读值树，按真实类型
 取值并定位错误；从值树或增量 builder 写出紧凑或缩进文本。
 
-设计见 [docs/03-design/yh-JSON标准库设计-2026-10-24.md](../../docs/03-design/yh-JSON标准库设计-2026-10-24.md)，
+设计见 [docs/03-design/yh-JSON标准库设计.md](../../docs/03-design/yh-JSON标准库设计.md)，
 分期见 [实施方案](../../docs/02-plan/yh-JSON标准库实施方案-2026-10-24.md)，
 取舍见 [ADR-0019](../../docs/adr/0019-yh-JSON标准库独立文档模型与词素保真数字.md)。
 
@@ -66,7 +66,7 @@ json.builder_finish(&b)
 `lex` → `parse` → `query` → `render` → `serialize` → `stream.*`（平台文件读写）→
 `surface`（公开入口）；`json.test.yh` 按 `.test.yh` 规则固定排最后。新增文件
 必须让自己的名字落在这条拓扑序里，细节见
-[设计文档 §2](../../docs/03-design/yh-JSON标准库设计-2026-10-24.md)。
+[设计文档 §2](../../docs/03-design/yh-JSON标准库设计.md)。
 
 ## 数字语义（与 toml 不同）
 

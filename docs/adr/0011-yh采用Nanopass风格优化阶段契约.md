@@ -48,7 +48,7 @@
 `make` 和针对性回归，每阶段 `make test` 与 `make selfhost-native` 全绿。
 无有效语义证据、回退掩盖新路径或产物不确定时不滚种子。
 
-详见[架构设计](../03-design/yh-Nanopass风格优化架构.md)与
+详见[架构设计 §7](../03-design/yh-架构设计.md)与
 [实施方案](../02-plan/yh-Nanopass风格优化架构实施方案.md)。
 
 ## 2026-10-26 定位决定

@@ -231,5 +231,5 @@ duplicate_fd/fd_flags 与编译器迁移（OS7）仍待后续；旧 os/io/time �
 保持原契约。Darwin 的变参入口（openat/fcntl 第三实参）要等 C ABI 支持
 变参后再补齐，当前按上面的限制显式报错。网络的上层（net 的
 `Endpoint`/TCP 封装、http 的消息模型与两端）按
-[HTTP 标准库设计](../../docs/03-design/yh-http标准库设计-2026-10-24.md) 的
+[HTTP 标准库设计](../../docs/03-design/yh-http标准库设计.md) 的
 M1–M7 推进，本层只到 NET0。

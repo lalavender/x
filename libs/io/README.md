@@ -2,7 +2,7 @@
 
 `import io;` 提供字节流的完整读写：整段读写、按行读取、调用方缓冲的
 `Reader`/`Writer`，并保留 2026-10 之前的四个写侧兼容接口。设计见
-[`docs/03-design/yh-io标准库设计-2026-10-24.md`](../../docs/03-design/yh-io标准库设计-2026-10-24.md)，
+[`docs/03-design/yh-io标准库设计.md`](../../docs/03-design/yh-io标准库设计.md)，
 分期与验收见
 [`docs/02-plan/yh-io标准库实施方案-2026-10-24.md`](../../docs/02-plan/yh-io标准库实施方案-2026-10-24.md)。
 

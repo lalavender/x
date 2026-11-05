@@ -1,7 +1,7 @@
 # fmt（R2）
 
 yh 标准库的格式化运行时。设计见
-[`docs/03-design/yh-fmt标准库设计-2026-10-23.md`](../../docs/03-design/yh-fmt标准库设计-2026-10-23.md)，
+[`docs/03-design/yh-fmt标准库设计.md`](../../docs/03-design/yh-fmt标准库设计.md)，
 分期见
 [`docs/02-plan/yh-fmt标准库实施方案-2026-10-23.md`](../../docs/02-plan/yh-fmt标准库实施方案-2026-10-23.md)。
 

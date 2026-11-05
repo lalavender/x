@@ -8,6 +8,68 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-06 缓存与 Go 构建缓存对比
+
+新增 [缓存与 Go 构建缓存对比](02-plan/yh-缓存与Go构建缓存对比-2026-11-06.md)：
+对照 Go `GOCACHE` 的 ActionID/OutputID/content store，列出 yh 四层缓存的差异、
+P0–P2 优化项（哈希宽度、工具身份、路径/环境、全局 content store、文件级对象、
+清理/锁/调试、测试/远程缓存）与目标模型，并标注不建议照搬 Go 的点。
+在 [缓存设计](03-design/yh-缓存设计.md) §15 增加入口。纯文档变更。
+
+## 2026-11-06 缓存设计文档
+
+新增 [缓存设计](03-design/yh-缓存设计.md)：记录当前模块对象、函数 check 切片、
+函数 IR、链接四层缓存，以及 InterfaceReady/session、键/manifest、失效矩阵、
+冷构建/check/test 差异、原子性与并发边界、当前问题与目标 `build/cache/`。
+在 [架构设计](03-design/yh-架构设计.md) §4.4 与 `compiler/README.md` 增加入口。
+纯文档变更，无代码/门禁影响。
+
+## 2026-11-06 03-design 文档去日期化
+
+**结果**：`docs/03-design/` 的 16 份带 `-YYYY-MM-DD` 后缀的文件改为稳定文件名；
+39 份文档在标题下增加 `修改时间：2026-11-06`，并删除旧的 `日期：` 元数据行与标题日期，只保留修改时间。全仓引用（README、compiler/README、
+docs/02-plan、docs/01-finished、ADR、libs/tests 注释等）同步替换，链接检查通过。
+纯文档变更，无代码/门禁影响。
+
+## 2026-11-06 编译流程参考文档
+
+新增 [编译流程-当前实现](03-design/yh-编译流程-当前实现.md)：从
+`yh build` 开始记录 CLI → 项目装载 → 调度 → worker 前端/check/lower/LLVM/对象
+→ 链接的当前实现，附缓存、产物、命令变体、当前边界与 F0–F7/S0–S6 调整对照。
+同步在 [架构设计](03-design/yh-架构设计.md) §1.2 与 `compiler/README.md` 增加入口。
+纯文档变更，无代码/门禁影响。
+
+## 2026-11-06 arch-check 停止按代码行数阻断
+
+**结果**：`tools/arch-check.py` 删除 `max_file_lines`、`max_function_lines`、
+`max_module_lines`、`max_testkit_lines`、`max_build_lines`、`max_link_lines`、
+`max_proj_lines`、`max_cmd_share_pct` 八个行数预算；报告不再聚合/打印行数。
+代码规模统一由 `just code-stats` 单独统计。保留依赖矩阵/环、模块级可变 `let`、
+`gen.G()`、未判空 `malloc`、未接线 `pub`、容量安全追加点与版本一致性。
+
+- 自测三路：真实树通过；注入越界 import 报错；追加 4000 空行仍通过（证明不再按
+  行数阻断），`tests/tools/arch-check/check.py` 输出 3/3。
+- 同步：`docs/03-design/yh-架构设计.md` §5.3/§9.5/§10/附录 B、`justfile` 注释。
+- 验证：`just test` 中 arch-check 自测 3/3 + 真实树通过。
+
+## 2026-11-06 架构文档合并为单一真源
+
+**结果**：新增 [架构设计](03-design/yh-架构设计.md)（910 行），合并 26 份架构分析/
+目标设计/代码复核/差距分析文档并删除原文件；`docs/03-design` 从 63 份降到 38 份。
+新文档覆盖：系统全景、16 模块目录职责、依赖矩阵、阶段/产物/缓存/状态契约、现状
+问题、目标架构（support/sema、build/cache、proj、cmd、平台抽象、前端分叉）、关键
+决策、Rust/Zig 差距与优先级、迁移路线、架构守护、开放问题，以及被合并文档索引。
+
+- 同步：`AGENTS.md` 目录说明、`compiler/README.md` 模块表（16/148/57,540/55 边）、
+  `docs/todo.md`/`docs/finish.md`/ADR/02-plan 的引用、`tools/arch-check.py` 注释、
+  `compiler/{cmd,gen}` 中指向旧文档的注释。
+- 修正：`compiler/README.md` 的 13 模块/120 文件/53,545 行旧读数；`cmd` 仍写
+  `api.yh` 的旧表。
+- 未合并：语言语义、标准库、平台 ABI、编码规范、测试语法等领域文档继续保留；
+  它们是领域设计/契约，不是架构分析。
+- 验证：`just` 冷编、`just test`、`just selfhost-native` 全绿（固定点 + 自解析 +
+  语料 + 项目验收 124/124）。
+
 ## 2026-11-06 发布线退役：0.0.12-release 回灌 llvm、默认分支改为 llvm、删 rc/release 分支
 
 **结果**：`llvm` 成为唯一主线与 GitHub 默认分支；`<ver>-rc`/`<ver>-release` 两条
@@ -140,8 +202,8 @@ P0 段保留一段说明（撤下原因 + 重新计划用的现状取证：Linux
 `.yh` 可用但需显式 `SDKROOT`；带 `[c] sources`、交叉产编译器候选、macOS→Linux
 均不可用）。设计材料不删：`03-design/yh-Darwin交叉编译遗留边界.md` 加状态行
 （并注明 `compiler/darwin-sdk/` 已迁 `vendor/darwin-sdk/`），
-`03-design/yh-对标Zig工业级编译器差距分析-2026-10-25.md` §4 的「待办 A2 F2-9」
-改为已撤下。todo 的未完成项由 103 条降到 99 条。
+`03-design/yh-架构设计.md` §8.3 的「明确不做」不再列
+交叉编译任务（已撤下）。todo 的未完成项由 103 条降到 99 条。
 
 ## 2026-11-06 todo 清账：删除全部已完成项，只留未完成与待决策
 
@@ -245,13 +307,13 @@ toml 的 `lexer`（游标/诊断/空白注释）与 `parse` 的关系同理：`p
 ## 2026-11-06 清理 `deliverables/`：两份 2026-10-24 产出迁入 docs/03-design
 
 `deliverables/` 是 2026-10-24 一次 AI 会话（gstack 工作流）的交付目录，全仓库无构建、
-门禁或文档引用它（只 `docs/03-design/yh-代码复核-2026-10-24.md` 提过一句"与本次复核无关"）。
+门禁或文档引用它（旧架构文档提过一句"与本次复核无关"，该文已并入 `docs/03-design/yh-架构设计.md`）。
 按 AGENTS.md 的目录约定，把两份 md 迁入 `docs/03-design/` 后删除该目录：
 
 | 原路径 | 新路径 |
 | --- | --- |
-| `deliverables/gstack/yh-explorer-design-system-spec-2026-10-24.md` | `docs/03-design/yh-Explorer设计系统规范-2026-10-24.md` |
-| `deliverables/gstack/raw/product-review-arch-2026-10-24.md` | `docs/03-design/yh-系统架构与长期演进设计-产品评审-2026-10-24.md` |
+| `deliverables/gstack/yh-explorer-design-system-spec-2026-10-24.md` | `docs/03-design/yh-Explorer设计系统规范.md` |
+| `deliverables/gstack/raw/product-review-arch-2026-10-24.md` | 已合并入 `docs/03-design/yh-架构设计.md` |
 
 设计规范里引用的配套 HTML（`deliverables/gstack/yh-explorer-design-system-2026-10-24.html`）
 从未入库、仓库内不存在，迁入时把该行改写为说明，不留断链。纯文档搬迁，无代码与门禁影响。
@@ -278,7 +340,7 @@ toml 的 `lexer`（游标/诊断/空白注释）与 `parse` 的关系同理：`p
 顺序论证：`base` < `digits` < `document` < `encoding` < `lex` < `parse` <
 `query` < `render` < `serialize` < `stream.*` < `surface`，逐级满足类型/常量
 依赖；`stream` 调 `surface.parse` 属函数前引用（今天 75_files→surface 同样如此）。
-只改名、未搬移任何声明。同步更新 `docs/03-design/yh-JSON标准库设计-2026-10-24.md`
+只改名、未搬移任何声明。同步更新 `docs/03-design/yh-JSON标准库设计.md`
 （§2 目录树 + §9 实现落点）、`libs/json/README.md`、`docs/03-design/yh-标准库设计.md`、
 `docs/todo.md` 与 `tests/modules/build-check.py` 的文件引用。
 验收：`cd libs && ../yh.exe test json` **12 passed; 0 skipped; 0 failed**。
@@ -457,7 +519,7 @@ arch-check 新增 toml↔常量版本一致性断言。`yh version` 子命令项
 `cmd/` 重组为 10 文件：`driver.yh` 只剩分派，`api.yh` 删除，新增
 `common.yh` + 8 个 `cmd_*.yh`；`api_*` 全部转模块私有，导出面只剩 `main`。
 无行为变化（--timeout 校验、rc==2 用法补印、会话前奏次序均原样迁移）。
-架构目标见 [yh-模块架构目标设计-2026-11-05](03-design/yh-模块架构目标设计-2026-11-05.md) §4。
+架构目标见 [架构设计 §6.4](03-design/yh-架构设计.md)。
 `max_module_lines` 387 → 458（+71 全为文件头注释，逻辑行不变，边 55 不变）。
 
 ## 2026-11-05 SDK 迁移 vendor
@@ -472,7 +534,7 @@ suffixes、`windows_link.yh` prefixes）、justfile 5 处、tools 2 个、selfho
 
 ## 2026-11-04 当前架构重新分析（只读取证）
 
-**结果**：[yh-当前架构重新分析-2026-11-04](03-design/yh-当前架构重新分析-2026-11-04.md)。
+**结果**：架构复核已合并入 [架构设计](03-design/yh-架构设计.md)。
 `python tools/arch-check.py` 实测 **16 模块 / 134 文件 / 57,274 行 / 55 边，检查通过**。
 对 10-25 基线的核心结论：B1（`proj` 1,396 行）/ B2（`link` 4,272 行）/ B1-4
 （`gen.G()` 165 → 0）全部落地；`build` 单体 10,717 → 6,953 行。

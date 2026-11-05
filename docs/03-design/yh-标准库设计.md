@@ -1,5 +1,7 @@
 # yh 标准库设计
 
+修改时间：2026-11-06
+
 本文记录 `libs/` 项目的标准库源码与当前 API 契约。标准库是普通 yh 项目，
 使用 `project.toml` 管理；项目模式下仍由编译器的标准库搜索层绑定，而不是
 把 prelude 内建声明当成标准库模块。
@@ -55,7 +57,7 @@ EINTR 不自动重试；`Reader`/`Writer` 错误粘滞，`writer_flush` 仅在
 `read_all` 用 `status_ok` 表示确认到达 EOF，输出恰好填满时返回
 `status_truncated`（零分配下无法在不读一个字节的前提下确认 EOF）。
 
-设计见 [io 标准库设计](yh-io标准库设计-2026-10-24.md)，IO0–IO6 分期见
+设计见 [io 标准库设计](yh-io标准库设计.md)，IO0–IO6 分期见
 [实施方案](../02-plan/yh-io标准库实施方案-2026-10-24.md)，用法见
 [`libs/io/README.md`](../../libs/io/README.md)。IO5（toml 读文件迁移）与
 IO6（seek/copy，依赖 `os` 补 `lseek`/`fstat`）尚未实施。
@@ -71,7 +73,7 @@ IO6（seek/copy，依赖 `os` 补 `lseek`/`fstat`）尚未实施。
 本模块只包装现有 yh 运行时分配与复制入口；所有权由调用方管理，不引入隐式分配。
 `alloc` 结果至少 16 字节对齐，`alloc(0)` 返回非空地址，`copy` 不处理重叠区间。
 
-2026-10-23 新增[内存管理标准库设计](yh-memory标准库设计-2026-10-23.md)与
+2026-10-23 新增[内存管理标准库设计](yh-memory标准库设计.md)与
 [实施方案](../02-plan/yh-memory标准库实施方案-2026-10-23.md)，按 Zig
 `std.mem.Allocator`/`std.heap` 的能力分层规划：保持上述签名不变，补
 `reallocate`（显式 `old_size`）、`FixedBuffer`（调用方缓冲区、LIFO
@@ -106,7 +108,7 @@ resize/free）、增强 Arena（几何增长、reset 模式、LIFO 回收、capa
 `0x7ffffffffffffffe`，查找/切分/替换首版最坏 `O(n*m)`。Unicode 大小写折叠、
 规范化、字素边界、正则与格式化仍后置。
 
-设计见 [string 标准库设计](yh-string标准库设计-2026-10-23.md)，分期与验收见
+设计见 [string 标准库设计](yh-string标准库设计.md)，分期与验收见
 [实施方案](../02-plan/yh-string标准库实施方案-2026-10-23.md)，使用说明见
 [`libs/string/README.md`](../../libs/string/README.md)。
 
@@ -223,7 +225,7 @@ cwd/pipe（`file`）、内存（`memory`）、时间（`time`）与进程
 词素**，由 `as_i64`/`as_f64`/`is_integer` 在取值时显式询问；文档模型两库各自
 独立，只把十进制 ↔ binary64 转换抽到 `libs/num` 共用。严格 profile 拒绝
 BOM、重复键、孤立代理、尾逗号与尾随内容。设计见
-[yh-JSON标准库设计](yh-JSON标准库设计-2026-10-24.md)，分期见
+[yh-JSON标准库设计](yh-JSON标准库设计.md)，分期见
 [实施方案](../02-plan/yh-JSON标准库实施方案-2026-10-24.md)，取舍见
 [ADR-0019](../adr/0019-yh-JSON标准库独立文档模型与词素保真数字.md)。
 状态：**首期已实现**（reader + writer + 查询 + 文件读写），已在
@@ -248,8 +250,8 @@ BOM、重复键、孤立代理、尾逗号与尾随内容。设计见
 Go 的 `%` 格式串与 `Printf` 族。语言没有 `any`/接口/反射，插值只支持
 整数、`f64`、`bool`、`*char`/`string.View` 等标量文本类型，复合值不自动
 格式化。首版限制、spec 子集与错误语义见
-[字符串插值设计](yh-字符串插值设计-2026-10-23.md)；运行时 API 见
-[fmt 标准库设计](yh-fmt标准库设计-2026-10-23.md)；R0–R3/I0–I5 分期见
+[字符串插值设计](yh-字符串插值设计.md)；运行时 API 见
+[fmt 标准库设计](yh-fmt标准库设计.md)；R0–R3/I0–I5 分期见
 [实施方案](../02-plan/yh-fmt标准库实施方案-2026-10-23.md)。当前状态：
 `libs/fmt/` 7 个源文件与语言层插值均已落地（R0–R3、I0–I4），O0/O2、
 `--syntax-check` 语法模式与仓库外安装导入均通过；I5 可选扩展未做。
@@ -265,7 +267,7 @@ HTTPS 由**可选**的 `libs/tls`（M6，链接系统 OpenSSL）提供，`http` 
 明文项目零 C 依赖；DNS 用纯 yh 实现（M5）；服务端首期只有单进程串行 accept，
 并发等并发标准库落地后另立条目；HTTP/2、HTTP/3、gzip 明确不做。范围、12 条
 解析规则、默认限制、M0–M7 分期与 libcurl 评估见
-[HTTP 标准库设计](yh-http标准库设计-2026-10-24.md)，跨模块边界见
+[HTTP 标准库设计](yh-http标准库设计.md)，跨模块边界见
 [ADR-0018](../adr/0018-yh网络与HTTP标准库分层.md)。当前状态是规划：三个模块
 目录尚未创建，`libs/project.toml` 未注册，`libs/sys` 也还没有 socket 原语。
 

@@ -1,6 +1,6 @@
 # string 标准库专项测试
 
-对应[设计](../../docs/03-design/yh-string标准库设计-2026-10-23.md)与
+对应[设计](../../docs/03-design/yh-string标准库设计.md)与
 [ST0–ST6 分期](../../docs/02-plan/yh-string标准库实施方案-2026-10-23.md)。
 
 ## 迁移后的分工

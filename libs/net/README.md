@@ -1,7 +1,7 @@
 # net
 
 yh 标准库的网络模块：地址文本解析 + TCP 连接/监听。设计见
-[`docs/03-design/yh-http标准库设计-2026-10-24.md`](../../docs/03-design/yh-http标准库设计-2026-10-24.md)，
+[`docs/03-design/yh-http标准库设计.md`](../../docs/03-design/yh-http标准库设计.md)，
 分期见同文件 §14（NET1 已交付）。完整 API 见 [doc.yh](doc.yh)。
 
 - 只做「地址 + TCP」：不含 DNS（NET5）与 TLS（NET6，由 `libs/tls` 接入 http）。

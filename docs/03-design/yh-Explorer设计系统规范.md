@@ -1,5 +1,7 @@
 # yh Explorer 设计系统规范
 
+修改时间：2026-11-06
+
 > 版本 `1.0.0` · 2026-10-24 · 适用对象 `tools/yh-explorer.html`（648 行单文件）
 > 配套可运行页面（原 `deliverables/gstack/` 下）未入库、仓库内不存在，仅本规范文本保留；
 > 2026-11-06 由 `deliverables/gstack/` 迁入本目录。

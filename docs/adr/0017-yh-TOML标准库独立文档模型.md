@@ -50,7 +50,7 @@
 
 ## 验证与关联
 
-见[完整设计](../03-design/yh-TOML标准库设计-2026-10-23.md)和
+见[完整设计](../03-design/yh-TOML标准库设计.md)和
 [T0–T7 分期](../02-plan/yh-TOML标准库实施方案-2026-10-23.md)。
 语法以 [TOML 1.1.0](https://toml.io/en/v1.1.0) 为准；测试协议用
 [toml-test v2.2.0](https://github.com/toml-lang/toml-test/tree/v2.2.0)。

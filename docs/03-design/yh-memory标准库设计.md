@@ -1,6 +1,8 @@
 # yh memory 标准库设计
 
-日期：2026-10-23（第二版，参考 Zig `std.mem.Allocator` 与 `std.heap`）。
+修改时间：2026-11-06
+
+版本：第二版，参考 Zig `std.mem.Allocator` 与 `std.heap`。
 状态：**设计（未实施，等待确认）**。
 目标：在 `libs/memory` 固化现有堆 API，并按 Zig 标准库的分配器分层补齐
 `FixedBuffer`、增强 `Arena`、把 `FixedPool` 改为“Arena + 空闲链”，同时给出

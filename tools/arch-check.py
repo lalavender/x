@@ -4,9 +4,12 @@
 检查三件事，缺一不可：
 
 1. **依赖矩阵**：模块间 import 必须落在允许边内，且无环。
-2. **预算**：文件/函数/模块行数、模块级可变全局、`gen.G()` 读点、
-   未判空 `malloc`、未接线 `pub fn` 不得越过当前基线（只减不增）。
-3. **报告**：当前数值一览，便于在 release 记录里跟踪趋势。
+2. **状态/资源预算**：模块级可变全局、`gen.G()` 读点、未判空 `malloc`、
+   未接线 `pub fn`、容量安全追加点不得越过当前基线（只减不增）。
+3. **报告**：依赖边与状态读数一览，便于 release 记录跟踪趋势。
+
+代码行数不在本工具里检查：规模统计由 `just code-stats` 单独报告，
+`arch-check` 只守依赖方向与状态/资源纪律。
 
 用法：
     python3 tools/arch-check.py            # 报告 + 违规即失败
@@ -25,7 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "compiler"
 
 # —— 允许的依赖边（消费者 -> 被依赖）——
-# 与 docs/03-design/yh-系统架构与长期演进设计-2026-10-24.md §4.1 对齐。
+# 与 docs/03-design/yh-架构设计.md §3.1 对齐。
 # 新增边必须同时更新此处与设计文档；`main` 是 CLI/构建驱动，位于最上层。
 ALLOWED = {
     "gen": set(),
@@ -63,39 +66,11 @@ ALLOWED = {
              "backend", "builtin", "build", "testkit", "lower", "proj", "link",
              "cmdline"},}
 
-# —— 预算（现状即上限，只减不增）——
-# 数值为 2026-10-24 实测；下调请同步改这里，上调需在 finish.md 说明理由。
+# —— 状态/资源预算（现状即上限，只减不增；不含代码行数）——
+# 代码规模由 `just code-stats` 单独报告，本工具不按行数阻断。
 BUDGETS = {
-    "max_file_lines": 2042,        # module_build.yh（A2c 拆分后必须下降）
-    "max_function_lines": 360,     # mb_link 674（含前导注释的上界口径）
-    "max_module_lines": 469,       # main（P1 一命令一文件：driver 分派 + common 前奏 +
-                                   # 8 个 cmd_*.yh；api.yh 删除；+71 全为 9 个新文件头
-                                   # 注释，逻辑行数不变；依赖边 55 条不变；见 finish.md
-                                   # 2026-11-05 与 docs/03-design 模块架构目标设计 §4；
-                                   # +3 VENC：driver 首行 gen.console_utf8_init() 调用，
-                                   # Windows 控制台切 65001 码页显示中文；
-                                   # +8 VENC-2：driver 入口 gen.argv_utf8_rebuild() 调用
-                                   # 与注释——CRT 入口（libcmt）的 argv 是 ACP 字节，
-                                   # Windows 下用宽命令行重建 UTF-8，见 finish.md 同日）
-    "max_testkit_lines": 1632,     # testkit（YT2d-3 +37；B1-1 迁表后 -14；W2-7 无 fork 子进程的
-                                   # 十进制用例号/模块内文件序号/--filter UTF-8 规整 +31；
-                                   # 合并后 tc_case_start 的 Windows 分支（CreateProcess 重入）+7）
-    "max_build_lines": 6990,      # build（B1/B2 拆分口径；+232 UF1；W2 的 windows 目标/宿主文件、
-                                  # 模块子进程与 cold 标记 +299，见 finish.md 2026-11-03；
-                                  # +4 合入 ci/github-actions 的 Windows 闭包/CI 适配；
-                                  # +23 VTEST：pj_name_is_test + pj_dir_less 测试文件后置
-                                  # 排序规则，见 finish.md 2026-11-05；
-                                  # +14 P0-A：--emit-asm 临时目录 CWD 优先 + TEMP 兜底
-                                  # 重试，见 finish.md 2026-11-05）
-    "max_link_lines": 4272,      # link（B2-2 新建 + B2-3 阶段化 3,657；W1-5/W2 的 COFF 链接
-                                 # （windows_link.yh 前缀/SDK/子进程 worker）与 .lib/.dll 输入校验 +509）
-    "max_proj_lines": 1396,        # proj（B1-1 表/路径 + B2-1 产物键 + YH_BUILD_CACHE 缓存根；
-                                   # W1-6 windows 目标组 5/6 与盘符绝对路径 +12）
-    "max_cmd_share_pct": 1,        # 381 / 51484 ≈ 0.7%
-    "max_globals": 174,            # +2 VENC-2：argv.windows.yh 的 argv_line（UTF-8 命令行
-                                   # 缓冲）与 argv_vec（参数指针表）两个模块级静态，
-                                   # CRT 入口下重建 UTF-8 argv 的存储，见 finish.md 同日
-    "max_g_call_sites": 0,      # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到
+    "max_globals": 174,        # 模块级可变 let（2026-11-06 基线）
+    "max_g_call_sites": 0,     # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
@@ -177,11 +152,7 @@ def main():
         if color.get(m, 0) == 0:
             dfs(m, [])
 
-    # —— 2. 预算 ——
-    total_lines = 0
-    per_module = {}
-    max_file = (0, "")
-    all_funcs = []
+    # —— 2. 状态/资源预算（代码行数不在这里检查）——
     globals_n = 0
     g_calls = 0
     g_by_mod = {}
@@ -192,16 +163,7 @@ def main():
     for f in sorted(modname):
         text = read(f)
         lines = text.splitlines()
-        n = len(lines)
-        total_lines += n
         m = modname[f]
-        per_module[m] = per_module.get(m, 0) + n
-        if n > max_file[0]:
-            max_file = (n, str(f.relative_to(SRC.parent)))
-        starts = [i for i, l in enumerate(lines) if re.match(r"^(pub )?fn ", l)]
-        for j, i in enumerate(starts):
-            end = starts[j + 1] if j + 1 < len(starts) else len(lines)
-            all_funcs.append((end - i, f"{f.relative_to(SRC.parent)}:{i + 1}"))
         globals_n += len(re.findall(r"^let [A-Za-z_]", text, re.M))
         cap_appends += len(re.findall(r"append_[a-z_]+_cap\(", text))
         gm = len(re.findall(r"gen\.G\(\)", text))
@@ -228,22 +190,11 @@ def main():
         for mm in re.finditer(r"^(?:pub )?fn ([A-Za-z_][A-Za-z0-9_]*)", text, re.M):
             decl_pub.setdefault(mm.group(1), f)
 
-    max_func = max(all_funcs) if all_funcs else (0, "")
-    cmd_share = round(per_module.get("main", 0) * 100 / max(total_lines, 1))
-
     def budget(name, actual, detail=""):
         limit = BUDGETS[name]
         if actual > limit:
             problems.append(f"{name} 超预算：{actual} > {limit} {detail}")
 
-    budget("max_file_lines", max_file[0], max_file[1])
-    budget("max_function_lines", max_func[0], max_func[1])
-    budget("max_module_lines", per_module.get("main", 0), "main")
-    budget("max_build_lines", per_module.get("build", 0), "build")
-    budget("max_testkit_lines", per_module.get("testkit", 0), "testkit")
-    budget("max_proj_lines", per_module.get("proj", 0), "proj")
-    budget("max_link_lines", per_module.get("link", 0), "link")
-    budget("max_cmd_share_pct", cmd_share, "%")
     budget("max_globals", globals_n)
     budget("max_g_call_sites", g_calls)
     budget("max_unchecked_malloc", len(unchecked), ",".join(unchecked[:3]))
@@ -267,16 +218,13 @@ def main():
             f"版本不一致：project.toml={mtoml.group(1)} "
             f"cmdline.YH_VERSION_TEXT={mconst.group(1)}")
 
-    # —— 3. 报告 ——
-    print(f"模块 {len(mods)} 个，文件 {len(modname)} 个，代码 {total_lines} 行")
-    print("  行数：" + "  ".join(f"{m}={per_module[m]}" for m in sorted(per_module)))
-    print(f"  依赖边 {len(edges)} 条；最大文件 {max_file[0]} 行（{max_file[1]}）")
-    print(f"  最大函数 {max_func[0]} 行（{max_func[1]}）")
+    # —— 3. 报告（代码规模见 `just code-stats`）——
+    print(f"模块 {len(mods)} 个，文件 {len(modname)} 个")
+    print(f"  依赖边 {len(edges)} 条")
     g_top = "  ".join(f"{k}={v}" for k, v in
                       sorted(g_by_mod.items(), key=lambda x: -x[1])[:4])
     g_detail = f"（{g_top}）" if g_top else ""
-    print(f"  main 占比 {cmd_share}%；模块级可变 let {globals_n}；"
-          f"gen.G() 调用点 {g_calls}{g_detail}")
+    print(f"  模块级可变 let {globals_n}；gen.G() 调用点 {g_calls}{g_detail}")
     print(f"  未判空 malloc {len(unchecked)}；未接线 pub {len(unwired)}；"
           f"容量安全追加点 {cap_appends}")
 

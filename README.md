@@ -325,5 +325,5 @@ just libs-test          # 标准库测试
 - 数组转切片不做生命周期证明。
 - C 互操作按值只接受标量、函数指针与非空 `extern` struct/union。见 [extern 自动 C ABI](docs/03-design/yh-extern自动C-ABI设计.md)。
 - 编译器拒绝切片、顶层按值数组与普通 yh 聚合作为 C ABI 参数。
-- 用户 C 裸变参：跳过，设计决定不做。见[设计稿](docs/03-design/yh-用户裸C变参交互设计-2026-11-05.md)。
+- 用户 C 裸变参：跳过，设计决定不做。见[设计稿](docs/03-design/yh-用户裸C变参交互设计.md)。
 - Windows CRT 的文件 API 按 ACP 解释路径。见 [docs/todo.md](docs/todo.md) 的 VENC-2 遗留。

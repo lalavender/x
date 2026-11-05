@@ -9,30 +9,31 @@
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
 source = `.`；版本号以 [project.toml](project.toml) 的 `version` 与
-`cmdline/cmdline.yh` 的 `YH_VERSION_TEXT` 为准，两处必须与发布 tag 一致），按 **gen / builtin / lex / parse / ast /
-check / comptime / lower / ir / backend / build / testkit / cmd** 组织。
-**2026-10-27 实测（`python3 tools/arch-check.py`）：十三个模块、120 个 `.yh`、
-53,545 行**：`gen` 5,621 · `parse` 9,699 · `build` 11,015 · `lower` 5,819 ·
-`comptime` 5,517 · `ir` 5,005 · `ast` 3,433 · `backend` 3,264 · `testkit` 1,592 ·
-`lex` 1,069 · `check` 958 · `cmd` 381 · `builtin` 172。
+`cmdline/cmdline.yh` 的 `YH_VERSION_TEXT` 为准，两处必须与发布 tag 一致），按
+**gen / builtin / lex / parse / ast / check / comptime / lower / ir / backend /
+link / build / proj / testkit / cmdline / cmd** 组织。
+**2026-11-06 实测（`python3 tools/arch-check.py`）：十六个模块、148 个 `.yh`、
+57,540 行、55 条依赖边**：`parse` 9,718 · `build` 6,990 · `lower` 5,971 ·
+`gen` 5,799 · `comptime` 5,518 · `ir` 5,384 · `link` 4,272 · `backend` 4,149 ·
+`ast` 3,438 · `testkit` 1,616 · `proj` 1,396 · `lex` 1,069 · `check` 960 ·
+`cmdline` 619 · `cmd` 469 · `builtin` 172。
 
 各层来历：`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担
 AST 与快照的**只读一致性校验**（不是语义分析），`builtin/` 只放内置
 （prelude）函数登记表，`ir`（目标隔离 SSA）与其它模块同为根项目普通模块，
-`build/` 是 2026-10-24 A2c 自 `cmd/` 拆出的构建引擎（项目模型、调度、
-模块发射、缓存、链接、平台适配），`testkit/` 是同一批 A6 抽出的语言内测试
-执行器，`lower/` 是 2026-10-25 B3-2 自 `ast/` 拆出的 lowering 阶段
-（`CheckedModule → IRModule`，此前 ast 9,041 行里混着 5,815 行变换代码）。
-`cmd/` 只剩 CLI 参数映射（`driver`）与调用面（`api`），381 行、占 0.7%。
+`build/` 是 2026-10-24 A2c 自 `cmd/` 拆出的构建引擎（调度、模块发射、缓存、
+LLVM 流水线），`proj/` 是项目模型/扫描/产物路径，`link/` 是工具链调用层，
+`testkit/` 是语言内测试执行器，`lower/` 是 2026-10-25 B3-2 自 `ast/` 拆出的
+lowering 阶段（`CheckedModule → IRModule`）。`cmd/` 只剩参数映射与调用面，
+一命令一文件，469 行、占 0.8%。
 
-模块导出面按「只有别的模块真的用到才 `pub`」维护（2026-10-12 两轮：`pub`
-声明 1048 → 585，随后 `struct`/`union`/`enum` 的 `pub` 改为可选并私有化 12 个
-模块内部类型，接口 `.s.i` 63,160 → 39,990 → 36,633 字节）：仅模块内使用的
-`fn`/`const`/类型不写 `pub`（`pub` 同时决定接口导出与 `.globl`）；私有类型
-不得出现在本模块的 `pub` 签名、`pub` 字段或 `pub` 别名里；入口模块 `cmd/`
-只保留 `main` 为 `pub`。规则见
-[导出面收缩设计](../docs/03-design/yh-编译器模块导出面收缩设计.md)与
-[模块私有类型设计](../docs/03-design/yh-模块私有类型设计.md)。
+**目录职责、依赖规则、阶段契约与迁移路线以
+[`docs/03-design/yh-架构设计.md`](../docs/03-design/yh-架构设计.md) 为唯一真源**；
+本文只保留构建/验证命令与自举子集说明。模块导出面按「只有别的模块真的用到才
+`pub`」维护（2026-10-12 两轮：`pub` 声明 1048 → 585，接口 `.s.i` 63,160 →
+36,633 字节）：仅模块内使用的 `fn`/`const`/类型不写 `pub`；私有类型不得出现在
+本模块的 `pub` 签名、`pub` 字段或 `pub` 别名里；入口模块 `cmd/` 只保留 `main`
+为 `pub`。规则见 [模块私有类型设计](../docs/03-design/yh-模块私有类型设计.md)。
 
 **未使用函数是编译错误（UF1，2026-10-27）**：本模块声明、既没 `pub` 也没
 `extern`/C ABI 的函数定义，如果整个模块的源码里除了声明名本身没有任何同名
@@ -253,33 +254,41 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | `backend/llvm_bridge.yh` | 内嵌 LLVM 静态桥的 yh 侧绑定与诊断读取 |
 | `backend/llvm_bind.darwin.yh` / `.linux.yh` | 桥的 C ABI 声明（按目标二选一） |
 
-**build** —— 构建引擎（2026-10-24 A2c 自 `cmd/` 抽出）
+**build** —— 构建引擎（流水线）
 
 | 文件 | 职责 |
 | --- | --- |
-| `build/module_build.yh` | 项目构建管线：扫描/索引/两遍文件处理/不变量/清单/CLI 命令（2,242 行，待拆） |
+| `build/build_ctx.yh` | 会话级构建上下文（BuildCtx） |
 | `build/build_scheduler.yh` | 有界快照 worker 进程池与 InterfaceReady 调度 |
+| `build/module_build.yh` | 单模块构建驱动（573 行；扫描/两遍处理/清单/标准库装载） |
 | `build/module_worker.yh` | fork 继承项目快照后初始化私有语义状态并编译单模块 |
-| `build/llvm_emit.yh` | 单文件受检前端与 CLI 形态转换 |
-| `build/llvm_pipeline.yh` | 已验证快照 → IRModule → LLVM 文本/对象/汇编的共用驱动与原子发布 |
-| `build/function_ir_cache.yh` | 函数级 check 切片与 IR 缓存的命令侧 I/O（`.fchk`/`.fir`/索引） |
-| `build/link_cache.yh` | 模块对象与最终程序的内容缓存、内嵌 lld/外部驱动链接、`mb_link` |
-| `build/link_inputs.yh` | `--link` 选择、库文件 realpath/格式/摘要检查与 argv 素材 |
-| `build/darwin_link.yh` | Darwin 链接驱动、SDK/部署身份与 frameworks 参数 |
-| `build/process.yh` | 用 `fork/execvp/waitpid` 按 argv 启动宿主进程，不经 shell |
-| `build/project.yh` | 项目扫描的目录项模型（平台无关） |
-| `build/project_state.yh` | 项目状态：根发现、源码根扫描、模块索引 |
-| `build/project_index.yh` | 清单 schema 校验与字段提取（name/version/author/source/os/arch/dependencies） |
-| `build/project_link.yh` | `[project].os/arch` 与 `[link]` / `[link-<os>-<arch>]` 结构校验 |
-| `build/project_resolve.yh` | 三层来源解析（当前项目 / 标准库 / 直接依赖）与 import 绑定 |
-| `build/toml.yh` | `project.toml` 解析与 schema 诊断（未知字段、必填项、行号） |
-| `build/project_dir.darwin.yh` | `getattrlistbulk` 批量目录枚举 |
-| `build/project_dir.linux.arm64.yh` / `.linux.x64.yh` | `openat`/`getdents64` 目录枚举 |
-| `build/clock.darwin.yh` | Darwin 单调时钟 `clock_gettime` |
-| `build/clock.linux.arm64.yh` / `.linux.x64.yh` | Linux 时钟 syscall 封装 |
+| `build/module_emit.yh` | 模块产物发射与原子发布 |
+| `build/module_cache.yh` | 模块缓存键、依赖表与接口就绪 |
+| `build/function_ir_cache.yh` | 函数级 check 切片与 IR 缓存的命令侧 I/O |
+| `build/llvm_pipeline.yh` | 已验证快照 → IRModule → LLVM 文本/对象/汇编的共用驱动 |
+| `build/llvm_emit.yh` | 单文件受检前端与 LLVM 发射 |
+| `build/stats_print.yh` | `--stats` 统计输出 |
+| `build/unused_function.yh` | 未用函数裁剪（UF1） |
+| `build/project*.yh`、`build/toml.yh`、`build/project_dir.*.yh` | 项目扫描/清单/目录枚举；目标态迁入 `proj/` |
 
-平台专属文件按**目标标签匹配文件名段**选择（`pj_target_tag_is`），不是
-`#ifdef`；新增平台要在 `gen/target.yh` 之后补 `project_dir`/`clock` 两组文件。
+**link** —— 工具链调用层（B2）
+
+| 文件 | 职责 |
+| --- | --- |
+| `link/context.yh` | argv0 与链接阶段计时 |
+| `link/link_cache.yh` | 模块对象与最终程序的内容缓存 |
+| `link/link_inputs.yh` | `--link` 选择、库文件检查与 argv 素材 |
+| `link/darwin_link.yh` / `link/windows_link.yh` | 平台链接驱动与 SDK/前缀 |
+| `link/process.yh` | `fork/execvp/waitpid` 启动宿主进程，不经 shell |
+
+**proj** —— 项目模型/表/产物路径（B1）
+
+| 文件 | 职责 |
+| --- | --- |
+| `proj/proj_00_model.yh` | 项目/模块/文件三张表与扫描游标 |
+| `proj/proj_10_table.yh` | 表访问与写者登记 |
+| `proj/proj_20_path.yh` | 路径/模块标记 |
+| `proj/proj_40_art.yh` | 产物路径、缓存键与哈希原语 |
 
 **testkit** —— 语言内测试执行器（`yh test` 的实现）
 
@@ -288,15 +297,23 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | `testkit/test_cmd.yh` | 测试发现、文档目标绑定、模块/文件选择、测试体降低与对象发布（YT1/YT2a） |
 
 模块名不能叫 `test`——`test "..." {}` 是语言关键字。`testkit` 位于 `build`
-之上，但当前直接使用了 `mb_link`/`mb_build_dir` 等 28 个 `build` 内部符号，
-属待收敛的层间泄漏（见架构复核 A6）。
+之上，但当前直接使用了 15 处 `mb_*`/`cmd_*`（8 个符号）等 `build` 内部引用，
+属待收敛的层间泄漏（见[架构设计](../docs/03-design/yh-架构设计.md) §5.2 A6）。
 
-**cmd** —— CLI 与调用面（A6 后只剩两个文件）
+**cmd** —— CLI 与调用面（P1 后一命令一文件，10 个文件）
 
 | 文件 | 职责 |
 | --- | --- |
-| `cmd/driver.yh` | `main(argc, argv, envp)` 与参数 → 请求映射，不做实际执行 |
-| `cmd/api.yh` | 调用面：单文件（语法/检查/汇编/LLVM 文本/可执行）与项目（build/run/test/list/version） |
+| `cmd/driver.yh` | `main(argc, argv, envp)`、内部子进程协议识别与分派，不做实际执行 |
+| `cmd/common.yh` | 命令共享前奏、`API_*` 形态常量、退出码契约 |
+| `cmd/cmd_build.yh` | `yh build` / `yh check` |
+| `cmd/cmd_run.yh` | `yh run` |
+| `cmd/cmd_test.yh` | `yh test`（含 `--timeout` 校验） |
+| `cmd/cmd_list.yh` | `yh list [--resolve]` |
+| `cmd/cmd_version.yh` | `yh version` / `--contracts` |
+| `cmd/cmd_single.yh` | 单文件五形态：`--syntax-check` / `--emit-asm` / `--emit-llvm` / `-o` / check-with-src |
+| `cmd/cmd_emit_module.yh` | 内部子进程协议 `--emit-module` |
+| `cmd/cmd_lld_link.yh` | 内部子进程协议 `--lld-link` |
 
 普通配置默认不登记 `system(cmd)`；`--legacy-system` 为迁移期显式兼容开关。
 自举构建使用默认配置。编译器入口接收 `envp`，直接读取 `PATH` 与
@@ -351,12 +368,14 @@ testkit ─▶ build（复用调度与产物路径，执行测试体）
 （`ast/module_snapshot*.yh`、`lower/module_snapshot_lower*.yh`、`ir/ssa_module_*.yh`）→ LLVM 发射
 （`backend/llvm_*.yh` + 内嵌桥）。前端不持有 ISA 状态；换目标 = 目标身份 +
 对应 LLVM 目标库。LL12 已删除 `em_*` 抽象机原语与旧 arm64 发射器，
-历史架构见[自举后端架构](../docs/03-design/yh-自举后端架构.md)。
+系统架构与迁移路线见[架构设计](../docs/03-design/yh-架构设计.md)。
+逐阶段当前流程见[编译流程-当前实现](../docs/03-design/yh-编译流程-当前实现.md)。
+缓存层次与键/manifest 见[缓存设计](../docs/03-design/yh-缓存设计.md)。
 
 依赖方向由 `just arch-check` 强制（`tools/arch-check.py` 的 `ALLOWED`）：
 `gen`/`ir` 是依赖根，`parse`/`ast`/`check`/`comptime`/`lower`/`backend` 在其上，
-`build` 装配全部下层，`cmd` 在最顶。当前 13 模块 37 条边、无环；实测与
-结构性问题见[当前架构重新分析](../docs/03-design/yh-当前架构重新分析-2026-10-25.md)。
+`proj`/`build` 装配下层，`cmd` 在最顶。当前 16 模块 55 条边、无环；目录职责、
+依赖矩阵与结构性问题见[架构设计](../docs/03-design/yh-架构设计.md)。
 
 ## 自编子集与已知边界
 
@@ -365,7 +384,7 @@ testkit ─▶ build（复用调度与产物路径，执行测试体）
 `for 1 { }`）、赋值与位运算、`sizeof(T)`、prelude 的
 open/read/write/close/malloc/free/memcpy/strlen/exit。
 
-**已知边界**（详见 [自举后端架构 §7](../docs/03-design/yh-自举后端架构.md)）：
+**已知边界**（详见 [架构设计](../docs/03-design/yh-架构设计.md) §5.5）：
 
 - 切片越界与生命周期运行时防护不做（[ADR-0001](../docs/adr/0001-yh数组按值调用边界.md) 既定）。
 - 浮点参数超过 8 个（超出 d0-d7）未实现。

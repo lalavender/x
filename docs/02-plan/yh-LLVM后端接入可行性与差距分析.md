@@ -3,8 +3,7 @@
 日期：2026-10-14。状态：**分析稿，未动任何编译器代码**；结论供决策，实施任务在
 决策后另立实施方案。
 核对基准：工作区当前源码（`git log -1 = e7ed840`，工作区有未提交改动）、
-`docs/todo.md`、`docs/03-design/yh-自举后端架构.md`、
-`docs/03-design/yh-Nanopass风格优化架构.md`。
+`docs/todo.md`、`docs/03-design/yh-架构设计.md`。
 
 后续方向（2026-10-14）：用户已明确目标为最终替换后端，本轮仅授权方案交付。
 当前处理入口为 [问题清单](yh-LLVM后端替换问题清单.md) 与
@@ -36,7 +35,7 @@
    `LLVM_MC` → Homebrew 默认 → clang 集成汇编器（`asm/tests/check_corpus.py:30-77`）。
 5. 若目标只是"多一个 CPU 架构"，**自写 x64 发射器可能比接入 LLVM 更省**；
    若目标是"拿到优化器与寄存器分配"，要同时决定
-   [NP4/NP5](../03-design/yh-Nanopass风格优化架构.md)（自家机器 IR + 线性扫描 + SCCP/LVN）
+   [NP4/NP5](../03-design/yh-架构设计.md)（自家机器 IR + 线性扫描 + SCCP/LVN）
    是否取消——否则是同一件事做两遍。
 
 ---
@@ -64,7 +63,7 @@
 关键事实：
 
 - **前端与发射耦合**：`gen/emit_arm64.yh` 是前端唯一的目标发射器，
-  前端只调用 `em_*` 抽象机原语（`docs/03-design/yh-自举后端架构.md:42-58`）。
+  前端只调用 `em_*` 抽象机原语（[架构设计 §6.9](../03-design/yh-架构设计.md)）。
   换目标在文档里的契约是"**新 `target_<isa>.yh` + 新 `emit_<isa>.yh`**"，
   即"再写一个汇编发射器"，不是"换成 LLVM"。
 - **SSA 是旁路补丁，不是主干**：受支持函数先由旧发射器发射，再用
@@ -221,7 +220,7 @@ LLVM 工具链**齐备**：`clang 21.1.8`、`llc 21.1.8`、`llvm-as`、`opt`、`
   `i64`/`ptr` 签名（yh 的 yh-ABI 本来就是"8 字节槽"模型，
   `backend/arm64_call.yh:54-62`）；C ABI 才用 LLVM 原生类型。
   浮点参数必须用 `float/double` 声明，才能落 d0-d7 并保持
-  "整型/浮点各自计数"的既有规则（`docs/03-design/yh-自举后端架构.md:132-137`）。
+  "整型/浮点各自计数"的既有规则（[架构设计 §6.9](../03-design/yh-架构设计.md)）。
 - 必须新增：**ABI 等价差分门**（同一签名分别经旧发射器 / SSA / LLVM / clang C 四方互调）。
 
 ### R3 语义未锁定（高危，跨目标会真的分叉）
@@ -268,7 +267,7 @@ LLVM 的 `unreachable` 是"此路不通"的**优化假设**，会让 `-O2` 删�
 ### R8 自举与种子滚动（中危）
 
 - 若 LLVM 成为唯一后端：`make`/`make seed` 从此**必须**有 clang/LLVM；
-  Linux CI 与 Darwin CI 都要装；`docs/03-design/yh-自举后端架构.md` 里
+  Linux CI 与 Darwin CI 都要装；`docs/03-design/yh-架构设计.md` 里
   "构建失败时的种子链"叙事要重写。
 - 编译器源码本身要能被**上一代种子**编译（滚动自举）：新发射器代码必须落在
   种子可编子集内，且默认关闭时完全惰性。
@@ -292,7 +291,7 @@ LLVM 的 `unreachable` 是"此路不通"的**优化假设**，会让 `-O2` 删�
 
 ### R11 与 NP 优化架构重复投入（策略级）
 
-`docs/03-design/yh-Nanopass风格优化架构.md:74-103、219-236` 已经规划了
+[架构设计 §7/§8.3](../03-design/yh-架构设计.md) 记录了
 C/N/S/M/E/R 六阶段、机器 IR、线性扫描寄存器分配、SCCP/LVN。
 LLVM 提供的正是这部分。**两者不能都做**：先选一个，另一个降级或取消，
 否则同一收益做两遍、两套中间表示互相牵制。
@@ -374,4 +373,4 @@ Windows 还额外需要 PE/COFF 链接链（走 clang/lld 则可绕过 `yh_asm`/
 | 语料驱动与期望注释 | `tests/yh-run/check.py:1-31、55-69` |
 | oracle 发现顺序先例 | `asm/tests/check_corpus.py:30-77` |
 | 待补 lowering 清单 | `docs/todo.md:206-217` |
-| 换目标契约 / NP 阶段规划 | `docs/03-design/yh-自举后端架构.md:33-58`、`docs/03-design/yh-Nanopass风格优化架构.md:74-103、217-236` |
+| 换目标契约 / NP 阶段规划 | [架构设计 §6.9/§7/§8.3](../03-design/yh-架构设计.md) |

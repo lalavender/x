@@ -5,7 +5,7 @@
 用户已确认六项决策：首期含服务端、TLS 允许链接系统 OpenSSL、DNS 走纯 yh、
 并发模型后置、服务端 `Date` 先补 `time`、补本 ADR。本 ADR 固化其中跨模块、
 长期有效的五条边界；实施细节见
-[HTTP 标准库设计](../03-design/yh-http标准库设计-2026-10-24.md)。
+[HTTP 标准库设计](../03-design/yh-http标准库设计.md)。
 
 ## 背景
 
@@ -76,7 +76,7 @@
 ## 验证与关联
 
 设计、12 条解析规则、默认限制、文件布局、M0–M7 分期与测试矩阵见
-[HTTP 标准库设计](../03-design/yh-http标准库设计-2026-10-24.md)。关闭本 ADR
+[HTTP 标准库设计](../03-design/yh-http标准库设计.md)。关闭本 ADR
 需要：M0 负例 errno 映射、M1 环回 echo、M2 与 Python 参考字节逐字节一致、
 M3/M4 双向 e2e、M5 hosts/resolv.conf、M6 五类 TLS 用例在 Linux 与 Darwin
 各跑一遍，以及 `make test` / `make selfhost-native` 全绿。当前状态是**未实施**：

@@ -85,11 +85,15 @@ gitignore 的 `bin/` 并核对哈希。
 
 ## 目录
 
-- `compiler/` —— 编译器源码（gen/lex/parse/ast/comptime/cmd/ir/backend 多模块的项目）
+- `compiler/` —— 编译器源码（gen/lex/parse/ast/check/comptime/lower/ir/backend/link/build/proj/testkit/cmdline/cmd/builtin 多模块的项目；架构见 `docs/03-design/yh-架构设计.md`）
 - `bin/` —— 种子目录（**不入库**，`just fetch-seed` 从最新 Release 下载
   `yh-<平台>-<架构>` 与哈希）
-- `docs/03-design/` 语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
+- `docs/03-design/` 架构与语法设计、`docs/02-plan/` 计划、`docs/01-finished/` 完成、
   `docs/adr/` 决策、`docs/finish.md` 完成流水、`docs/todo.md` 待办
+  - **系统/编译器架构唯一文档：`docs/03-design/yh-架构设计.md`**（目录职责、
+    依赖矩阵、阶段契约、迁移路线）；其余 03-design 文档是领域设计/契约。
+  - `docs/03-design/` 文件名不带日期；每份文档标题下写 `修改时间：YYYY-MM-DD`，
+    修改时更新该行；文件名保持稳定，避免频繁改名断链。
   - `docs/finish.md` 只保留最近三天条目（靠前为最新）；更早条目归档到
     `docs/01-finished/finish-历史归档-<起>至<止>.md`，新增条目写在最前。
 - `tests/yh/` 语法语料、`tests/yh-run/` 语义运行语料、

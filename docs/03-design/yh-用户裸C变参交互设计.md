@@ -1,10 +1,12 @@
 # yh 用户裸 C 变参交互设计
 
+修改时间：2026-11-06
+
 状态：分析/设计稿（2026-11-05，未实施；不改变仓库现状）
 目标平台：Linux/x86_64、Linux/AArch64、macOS/ARM64、Windows/x86_64
 相关：[extern 自动 C ABI](yh-extern自动C-ABI设计.md)、
 [属性系统与 C 互操作](yh-属性系统与C互操作.md)、
-[受检到 LLVM 能力矩阵](yh-受检到LLVM能力矩阵-2026-10-28.md)
+[受检到 LLVM 能力矩阵](yh-受检到LLVM能力矩阵.md)
 
 ## 0. 结论摘要
 

@@ -1,5 +1,7 @@
 # yh Windows/x86_64 LLVM 后端接入实施方案
 
+> **2026-11-06 口径更新**：`arch-check` 已取消代码行数预算（`max_file_lines`、`max_function_lines`、`max_*_lines`、`max_cmd_share_pct`）；本文中的行数目标保留为历史设计指标，不再作为门禁。代码规模只由 `just code-stats` 报告。
+
 > 执行状态（2026-10-27）：用户立项「开始规划 Windows x86 后端，本机刚好可以验证」。
 > **本文件只做方案与切片划分，尚未修改任何 `compiler/` 源码**；§3 的三个决策未确认前
 > 不开工。已确认/否决的决策请直接在本节改写，并把切片勾选进度同步到 `docs/todo.md`。

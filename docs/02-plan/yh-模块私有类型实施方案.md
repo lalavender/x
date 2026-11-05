@@ -109,7 +109,7 @@ modules 18/18、项目验收 93/93）全绿。收益：接口 39,990 → **36,63
 ### P5 文档刷新
 
 [00-语义边界-0.0.1](../03-design/00-语义边界-0.0.1.md) 的 pub 一节、
-[Go 风格模块与包设计](../03-design/yh-Go风格模块与包设计.md) §5.1（回到"非 pub 类型 = 模块私有"
+[架构设计 §3.3](../03-design/yh-架构设计.md)（回到"非 pub 类型 = 模块私有"
 的原设计）、`docs/yh.g4` 注释、[compiler/README.md](../../compiler/README.md)、
 `AGENTS.md`（导出面规则补类型可见性一句）、`docs/todo.md`、`docs/finish.md` 与
 `docs/01-finished/` 完成报告。

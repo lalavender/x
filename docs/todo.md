@@ -13,6 +13,167 @@
 - 添加错误，当前错误提示功能太简陋
 - project.toml 添加[env]
 
+## 2026-11-06 缓存优化（P0，最高优先级）
+
+用户 2026-11-06 指定最高优先级。依据
+[缓存与 Go 构建缓存对比](02-plan/yh-缓存与Go构建缓存对比-2026-11-06.md) 与
+[缓存设计](03-design/yh-缓存设计.md)：先修键的正确性，再做全局 content store、
+文件级对象与运维；不先继续堆更多函数缓存。
+
+- [ ] **C0 键审计与统一 schema（P0）**：列出 module/check/IR/link 四层键的全部
+  输入；把 check/IR 两套重复序列抽成公共 key builder；加 key schema version；
+  产出 miss 原因表（改哪个输入会让哪层失效）。
+- [ ] **C1 哈希升级（P0）**：FNV64 → 128/256-bit（共享/远程用 SHA-256）；bump
+  `CHECKED_SLICE_VERSION`、`IR_FUNCTION_CACHE_VERSION`、模块缓存 tag、link
+  manifest 版本，做一次性失效；补碰撞/损坏拒绝用例。
+- [ ] **C2 工具/闭包身份（P0）**：编译器、lld、bridge、SDK 用内容哈希或 build ID，
+  不再用 `(size, mtime)`；每构建只算一次；审计 selfhost 闭包身份。
+- [ ] **C3 路径/环境（P0）**：语义键去掉绝对源路径；locs 独立；提供
+  `--trimpath`/相对路径模式；显式 `CacheInputs` 白名单（`YH_*`、SDK、
+  selfhost flags），不读隐式环境。
+- [ ] **C4 cache_context + action/content store（P1）**：
+  `build/cache/cache_context` 统一键/manifest/原子提交/统计；
+  `actions/<ActionID> → outputs`、`outputs/<OutputID>`；项目 `.build` 只留索引；
+  原子 entry + 文件锁；跨 worktree/项目共享。
+- [ ] **C5 文件级对象（P1）**：优先每个 `.yh` 一个 `.o`（不是每函数 `.o`）；
+  单文件改动只重发该文件 LLVM，链接复用其余对象；函数 check/IR 缓存保留。
+- [ ] **C6 清理/锁/可观测（P1）**：`yh clean --cache`/`yh cache trim`；
+  `YH_CACHE_DEBUG` 输出 ActionID/键组成/miss 原因；`YH_CACHE_VERIFY`；
+  同项目并发构建锁。
+- [ ] **C7 测试/远程缓存（P2，后置）**：测试结果缓存默认不做，opt-in 且跟踪
+  env/文件访问；`YH_CACHEPROG` 远程缓存最后做，需强哈希/校验/清理。
+
+执行顺序：C0 → C1 → C2 → C3 → C4 → C5 → C6；C7 等 C0–C4 稳定后再评估。
+验收：每个切片 `just` + `just test` + `just selfhost-native`；补命中/失效矩阵
+用例；旧缓存版本必须拒绝；不改产物语义；固定点通过。
+风险：哈希/键变更导致全量失效；文件级对象触及 LLVM/链接；全局缓存并发/清理；
+自举种子与 selfhost 闭包。
+
+## 2026-11-06 前端两遍化：parse 纯语法 + check 语义分析（P0，待 ADR）
+
+方向已定（用户 2026-11-06）：语义分析统一收进 `check`；`parse` 只做语法并产出
+AST；comptime 语法在 parse 之后展开；`lower` 只消费受检结果。目标管线：
+
+```text
+lex → parse(纯语法) → AST
+    → check.resolve（导入/声明/类型/枚举成员/字段/常量，供 CT）
+    → check.expand（comptime AST→AST：$if/$for/$field/$compile_*/插值）
+    → check.full（名字/类型/可见性/初始化/控制流）→ CheckedModule/HIR
+    → lower → IR
+```
+
+关键约束：**CT 展开不能严格早于所有语义分析**。`$for values/fields`、`$field`、
+`@[comptime]`、插值 spec 都需要声明/类型环境；因此 `check` 内部是
+`resolve → expand → full` 三段，而不是 `parse → expand → check` 三个独立模块。
+若坚持 expand 在任何 check 之前，只能支持纯字面量 CT，现有 `$for values/fields`
+与 `@[comptime]` 无法保留；不建议。`@[comptime]` 还要求先检查/捕获其正文才能
+执行，因此 `check` 内部实际是 `resolve → 检查 CT 函数 → expand → full`；expand
+可能迭代（生成的新声明重新 resolve），需要展开预算/上限。
+
+- [ ] **F0 ADR + spike**：定义 AST/HIR/`CheckedModule` 契约；选聚合字面量、
+  `$for values/fields`、字符串插值 3 个语法点验证“纯语法 AST 可表示”；确定
+  `iface`/`.s.ct`/CT 布局从 `parse` 迁到 `check` 的边界。
+- [ ] **F1 语法 AST**：`ast` 回归纯语法（kind/op/span/children）；CT 语法节点归
+  `ast`；`CheckedModule`/快照/HIR 迁到 `check`（或新 `hir`）；移除
+  `ast -> comptime` 边。
+- [ ] **F2 parse 纯语法**：移除 `gen.sem_*`、`ast_expr_set_semantics`、`proj`
+  依赖；`parse_decl` 的 pass1/pass2、声明索引、test/entry 选择上移 build/check；
+  `iface`/`iface_ct`/`parse_ct_layout` 移出 parse。
+- [ ] **F3 check.resolve**：导入、声明、类型、枚举成员、结构体字段、常量值环境；
+  供 CT 展开与后续 full check 使用。
+- [ ] **F4 check.expand**：comptime AST→AST；`$if/$for values/fields/$field/
+  $compile_error/warn`、插值 spec；`@[comptime]` 函数由 check 类型检查、
+  comptime 执行；展开产生的新声明重新进入 resolve。
+- [ ] **F5 check.full**：名字/类型/转换/可见性/初始化/控制流检查；产出
+  `CheckedModule`/HIR；现有 `check.verify` 降为结构 verifier 子阶段。
+- [ ] **F6 lower 切换**：只消费新 `CheckedModule`/HIR；旧语义动作路径保留用于
+  差分，逐特性对比 AST/诊断/IR，再删旧路径。
+- [ ] **F7 收口**：固定点、全语料、`arch-check` 边更新、文档/ADR、滚种子。
+
+验收：每阶段 `just` + `just test` + `just selfhost-native`；纯移动/契约阶段
+产物逐字节一致；行为变更单独切片；最终固定点 + 全量语料 + 模块验收。
+风险：自举种子、CT 需要类型环境、诊断/错误恢复、lower 契约、ast/comptime 循环。
+
+## 2026-11-06 gen 职责拆分：token/sema/check/state/support/target（P0，待 ADR）
+
+用户 2026-11-06 确认目标映射：`gen` 不再作为万能底座，按下面六条线归位。注意两处
+修正：**类型/符号属于语义模型 `sema`，不能放 `lex`**；**`TaskCtx` 不能直接放
+`build`/`proj`**（放 build 会成环，放 proj 会破坏只读项目模型），必须按阶段拆上下文。
+
+| `gen` 内容 | 目标 | 说明 |
+|---|---|---|
+| `TK_*`/`TOK_*`/`Tok` | `token`/`syntax`（或 `lex`） | 词法/语法共享词汇，窄接口 |
+| `PDecl` | `ast`/`syntax` | 声明索引属语法层 |
+| `Res` | 删除 / `check` 内部 | 语义动作结果，两遍化后不再跨阶段 |
+| `CType`/`SField`/`TName`/`CSym`/`ModInfo` | `sema` | 语义模型，不是词法 |
+| `TY_*`/`SYM_*`/`F_*`/类型规则 | `sema` | `comptime` 依赖 `sema`，不依赖 `check` |
+| `symbols.yh` | `sema` | 名字池/类型表/符号表/常量折叠，保持一个内核 |
+| `sem_*.yh` | `check` | 语义分析（resolve/expand/full） |
+| `TaskCtx` | 拆成 `ParseCtx`/`AstStore`/`CheckCtx`/`CtCtx`/`BuildCtx`/`LinkCtx` | 按生命周期，不集中到 build/proj |
+| `GenState` | 删除 | driver/session 初始化，按阶段建上下文 |
+| `TargetCfg` | `proj`/`target` | 项目目标配置 |
+| `buffer.yh` | `support` | 后续评估换 `libs/string`/`fmt` |
+| `fail`/`err_tok`/`sem_err`/`warn_lc` | `diag` | 编译器契约：span/错误码/severity/渲染 |
+| `clock.*`/`console.*`/`argv.*` | `support/host` | 后续可换 `libs/os`/`libs/time` |
+| `target*.yh`/`abi_c.yh` | `target` / `target/abi` | 目标身份/数据模型/ABI，不是标准库 |
+| `static_data.yh`/`front_stage.yh` | `sema`/`check`/`lower` | 按消费者归位 |
+| `builtin` prelude 登记 | `sema`/`check` | 内置函数登记属语义层 |
+
+目标依赖（`support` 被所有阶段 import 是合理的；它必须是窄接口）：
+
+```text
+token → support
+lex → token, support
+parse → token, ast, support
+ast → token, support
+sema → support
+check → ast, sema, comptime, diag, support, proj
+comptime → sema, support
+lower → check/HIR, ir, target, support
+backend → ir, target, support
+proj → support, target
+build → proj, check, lower, backend, link, support
+link → target, support
+cmdline → support, libs.cli
+cmd → 全部
+```
+
+- [ ] **S0 ADR + 归属表 + 守卫**：冻结 `support`/`diag`/`target`/`token`/`sema`/
+  `check` 的接口与 `ALLOWED`；`arch-check` 改为递归扫描并按 `module` 声明分组
+  （否则 `cmd/yh/cli`、`build/cache` 等子目录会绕过检查）；列出 183 个 `gen`
+  `pub` 的消费者/去向。
+- [ ] **S1 support/diag/target**：迁 `buffer`、`fail`/`err_tok`/`warn_lc`、
+  `clock.*`、`console.*`、`argv.*`、`target*`、`abi_c`；先让 `cmdline` 摆脱
+  `gen`（只差 `cstr_eq`/`write_all`），再让 `link`/`build`/`proj`/`backend`
+  改走 `support`/`target`/`diag`。
+- [ ] **S2 token/PDecl**：token 词汇与 `Tok` 归 `token`/`lex`；`PDecl` 归
+  `ast`/`syntax`；`parse`/`ast`/`check` 只依赖窄 token 接口。
+- [ ] **S3 sema 模型**：`CType`/`SField`/`TName`/`CSym`/`ModInfo`、`TY_*`/
+  `SYM_*`/`F_*`、`symbols.yh` 的类型/符号/常量折叠迁 `sema`；`comptime` 先改
+  `comptime → sema`，**不得** `comptime → check`。
+- [ ] **S4 状态拆分**：`TaskCtx` 188 字段按生命周期拆到 `ParseCtx`/`AstStore`/
+  `CheckCtx`/`CtCtx`/`BuildCtx`/`LinkCtx`；`GenState` 删除；`proj` 保持只读；
+  `build` 只持 `BuildCtx`。禁止把 `TaskCtx` 整体搬进 build/proj。
+- [ ] **S5 check 接语义分析**：`sem_*`、`Res`、`CheckCtx` 迁 `check`；实现
+  `check.resolve → 检查 CT 函数 → check.expand → check.full`；与前端两遍化
+  F3–F5 合并验收；`parse` 纯语法、`ast` 纯语法。
+- [ ] **S6 gen 收尾**：删除 `gen`（或保留极薄兼容层）；`arch-check` 更新
+  `ALLOWED`/预算；固定点、全语料、种子、文档/ADR。
+
+验收：每阶段 `just` + `just test` + `just selfhost-native`；纯移动/契约阶段产物
+逐字节一致；行为变更单独切片；最终固定点 + 全量语料 + 模块验收；`gen` 的 183 个
+`pub` 全部有去向，无新增模块级可变状态。
+风险：自举种子、`TaskCtx` 拆分触及所有阶段、`check ↔ comptime` 环（类型规则必须
+在 `sema`）、stdlib 闭包（`clock/console/argv` 先经 `support` 包装，不直接进 libs）、
+`arch-check` 子目录漏检。
+
+## 2026-11-06 架构文档守护（P1）
+
+- [ ] **AD1 README/架构表断言**：把 `compiler/README.md` 的模块表、`docs/03-design/yh-架构设计.md`
+  的目录职责表与 `tools/arch-check.py` 实测对齐，漂移即红灯（终结 README 反复过期）。
+- [ ] **AD2 Markdown 链接检查**：合并/删除文档后自动检查相对链接；历史归档中的旧文件名
+  以架构文档附录 A 说明，不要求全部可解析。
+
 ## 2026-11-05 VENC-2 遗留：Windows CRT 层文件路径仍按 ACP（P1，CI 已条件跳过）
 
 > 已完成部分见 [yh-VENC2-Windows-CRT入口argv修复](01-finished/yh-VENC2-Windows-CRT入口argv修复-2026-11-05.md)。
@@ -87,7 +248,7 @@ API（`open`/`CreateFileA` 等）仍按进程 ACP 解释路径字节：
 ## 2026-10-27 未使用函数检查（UF1）后续
 
 UF1 已生效（`build/unused_function.yh`，见 [finish.md](finish.md) 与
-[模块与包设计](03-design/yh-Go风格模块与包设计.md)）。当前实现按「模块内出现过
+[模块与包设计](03-design/yh-模块与项目管理设计.md)）。当前实现按「模块内出现过
 同名标识符」判使用，方向是保守（宁漏报不误报）。
 
 - [ ] **UF1 精确化**：把「按名字的 token 扫描」升级为「按解析身份的引用集合」，
@@ -123,7 +284,7 @@ PF0–PF4 已全部落地（**不设硬门**，CI 只出报告与资产），口
 [PF1b 基线](01-finished/yh-编译器性能基线PF1b-2026-10-26.md)、
 [PF2 归因/失效矩阵](01-finished/yh-编译器性能归因与失效矩阵PF2-2026-10-26.md)、
 [PF3 规模/并发](01-finished/yh-编译器规模与并发扩展PF3-2026-10-26.md) 与
-[噪声校准与判定规则](03-design/yh-性能回归判定与噪声校准-2026-10-26.md)。
+[噪声校准与判定规则](03-design/yh-性能回归判定与噪声校准.md)。
 当前基线：冷编 10.1 s / 全量重编 16.8 s / 热编 0.98 s / 单函数改动 3.6 s（O0，20 轮），
 O0 冷编 worker 累计 23.5 s 里 lowering 66%、IR 构造 20%、内嵌桥 8%、前端 6%。
 
@@ -164,7 +325,7 @@ lowering 66% / IR 构造 20% / 内嵌桥 8% / 前端 6%（见上面的 PF2 报�
   在取指针之前（扩容 realloc 会让旧指针失效）。
 - [ ] **PC7 函数级目标文件**（单函数改动的 ≤3 s 与 O2 的整模块重优化都只能靠它；
   本轮确认立项）：可行性见
-  [函数级目标文件可行性](03-design/yh-函数级目标文件可行性-2026-10-26.md)。
+  [架构设计 §4.6](03-design/yh-架构设计.md)。
   量化依据（PF2 + PL1）：O0 单函数改动 3.6 s 里，模块级 LLVM 发射（object）≈0.5 s、
   链接 ≈1.3 s，其余是 lowering/缓存合并；**O2 单函数改动 7.55 s，其中内嵌桥 3.59 s**
   （整模块 LLVM 优化被重跑）。方案 A（每函数一个 `.o`）或 B（桥批处理，需改桥 ABI →
@@ -178,7 +339,7 @@ lowering 66% / IR 构造 20% / 内嵌桥 8% / 前端 6%（见上面的 PF2 报�
   接进 `make test-llvm-darwin`；Linux 的对应门未接（需先有 Linux 宿主记录验证）。
 ## 语言内测试（YT4 迁移与发版）
 
-[设计提案](03-design/yh-test语言内测试设计-2026-10-23.md)、
+[设计提案](03-design/yh-test语言内测试设计.md)、
 [实施分期](02-plan/yh-test分阶段实施方案-2026-10-23.md)与
 [2026-10-25 迁移分析与决策](02-plan/yh-test语法迁移既有测试分析与规划-2026-10-25.md)
 （取代 10-23 版）已整理。**YT0–YT3b、YT2d、YT1.1 与 YT4-P0～P7 已全部完成**：
@@ -227,7 +388,7 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
 > 带 `[c] sources` 报「C 目标文件架构与当前 target 不符」、交叉产编译器候选与
 > macOS→Linux 方向均不可用；细节见
 > [Darwin 交叉遗留边界](03-design/yh-Darwin交叉编译遗留边界.md)
-> 与[对标 Zig 差距分析](03-design/yh-对标Zig工业级编译器差距分析-2026-10-25.md) §4。
+> 与[架构设计 §8.2](03-design/yh-架构设计.md)。
 
 ### B. 平台矩阵（原 F3/F4）
 
@@ -341,7 +502,7 @@ CLI-B（`put_*` 短路契约、溢出 return resource_error）、CLI-D（构造�
 
 ### NET/HTTP 网络与 HTTP 标准库（2026-10-24 决策完成；NET0–NET1 已交付，HTTP2–HTTP7 待实施）
 
-[设计](03-design/yh-http标准库设计-2026-10-24.md)与
+[设计](03-design/yh-http标准库设计.md)与
 [ADR-0018](adr/0018-yh网络与HTTP标准库分层.md)已定稿。仓库此前无任何 HTTP
 实现，`libs/sys` 无 socket 原语、`libs/os` 明确不承诺网络，故按
 「sys socket → net → http」三级推进。已确认：**首期含服务端**、**TLS 走可选
@@ -378,7 +539,7 @@ Linux 生效；`read`/`write` 与 prelude 重名，net 用 `read_some`/`write_so
 
 ### MEM 内存管理标准库（2026-10-23 设计第二版；M0–M6 待实施）
 
-[设计](03-design/yh-memory标准库设计-2026-10-23.md)与
+[设计](03-design/yh-memory标准库设计.md)与
 [方案](02-plan/yh-memory标准库实施方案-2026-10-23.md)已按 Zig
 `std.mem.Allocator`/`std.heap` 的能力分层整理。保持现有
 `alloc`/`release`/`copy` 签名；新增 `reallocate`（调用方显式提供 `old_size`）、
@@ -409,7 +570,7 @@ StackFallback 后置。块统一取自 prelude 堆，不新增 `sys` 依赖，�
 
 ### IO 字节流标准库（2026-10-24 设计；IO0–IO4 已完成）
 
-[设计](03-design/yh-io标准库设计-2026-10-24.md)与
+[设计](03-design/yh-io标准库设计.md)与
 [方案](02-plan/yh-io标准库实施方案-2026-10-24.md)已把 `libs/io` 从"只有四个写侧
 接口"扩展为完整读写层：`read_all`/`read_file`/`write_bytes`/`write_file` 与调用方
 缓冲的 `Reader`/`Writer`（行读取、显式 flush），保留
@@ -467,7 +628,7 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
 
 ### JSON 标准库（2026-10-24 设计；J1–J3/J6 已实现，J4/J5/J7 待做）
 
-[设计](03-design/yh-JSON标准库设计-2026-10-24.md)、
+[设计](03-design/yh-JSON标准库设计.md)、
 [方案](02-plan/yh-JSON标准库实施方案-2026-10-24.md)与
 [ADR-0019](adr/0019-yh-JSON标准库独立文档模型与词素保真数字.md)已落地首期：
 `libs/json/` 12 个源文件（reader + writer + 查询 + 文件读写），
@@ -502,8 +663,8 @@ RFC 8259 完整语法 + 严格 profile（拒绝 BOM/重复键/孤立代理/尾�
 用户决定：字符串格式化采用 V 式插值 `"…${expr:spec}…"`，结果为
 `string.String`；首版不实现 Go 的 `%` 格式串与 `Printf` 族（是否保留为
 次级 API 待确认）。语言设计见
-[字符串插值设计](03-design/yh-字符串插值设计-2026-10-23.md)，运行时见
-[fmt 标准库设计](03-design/yh-fmt标准库设计-2026-10-23.md)，
+[字符串插值设计](03-design/yh-字符串插值设计.md)，运行时见
+[fmt 标准库设计](03-design/yh-fmt标准库设计.md)，
 [方案](02-plan/yh-fmt标准库实施方案-2026-10-23.md)列出 R0–R3（fmt）与
 I0–I5（语言）；R0–R3 与 I0–I3 已实施，语言插值已端到端可用。fmt 不改
 prelude `printf`（H.I3 的按需扩展仍独立）。
@@ -513,7 +674,7 @@ prelude `printf`（H.I3 的按需扩展仍独立）。
 
 ### G. C/C++ 桥迁移到 yh
 
-见[可行性分析](01-finished/yh-C与C++代码重写可行性分析-2026-10-20.md)。
+见 `docs/01-finished/` 的 C/C++ 重写历史记录（原独立分析文件已缺失，按需从 git 历史取回）。
 
 - [ ] **G1** 迁移 `compiler/llvm/bridge.c` 到 yh（LLVM 生命周期、初始化同步、
   有界诊断、原子发布），补正式 `.yh` 对等用例与错误路径。
@@ -589,12 +750,12 @@ LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
 [01-finished/](01-finished/)；以下只保留未完成项。
 
 - [ ] **J2 / LA4 文件级对象**：按
-  [LLVM 文件对象与提交清单设计](03-design/yh-LLVM文件对象与提交清单设计-2026-10-22.md)
+  [架构设计 §4.4/§5.4](03-design/yh-架构设计.md)
   实施 LA4.1 分区模型 → LA4.2 hidden 跨对象私有身份 → LA4.3 文件对象键/manifest
   /原子提交 → LA4.4 删除/重命名/runtime/损坏/并发回归。完成前默认仍为单模块对象。
 - [ ] **J3 RS5 收口报告**：依赖 J2，复核优化覆盖与文件对象缓存提交协议。
 - [ ] **J4 / LA5 线程池**：按
-  [显式上下文与线程池设计](03-design/yh-LLVM显式上下文与线程池设计-2026-10-22.md)
+  [架构设计 §1.4/§4.5](03-design/yh-架构设计.md)
   收口 FrontendTask/AstStore/CtContext/CacheContext/Diagnostics，再接宿主线程桥
   与固定线程池；完成前继续 fork/COW，不宣称线程安全。
 - [ ] **J5 增量/冷编时间**：单函数 200ms、冷编 1s 目标未达；当前仍整模块
@@ -636,9 +797,9 @@ LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
   自举门；NP1/NP2 的对象代码（`ir_simplify`、`ssa_inline`）已删除；NP4 由
   ADR-0014 取代；NP5 交 LLVM 默认管线。ADR-0011 已标注部分被取代，
   [方案](02-plan/yh-Nanopass风格优化架构实施方案.md) 与
-  [设计](03-design/yh-Nanopass风格优化架构.md) 已改状态。NP3 已于 2026-10-28
+  [架构设计 §7](03-design/yh-架构设计.md) 已记录。NP3 已于 2026-10-28
   关闭（覆盖矩阵零被拒，证据见 finish.md 与
-  [能力矩阵](03-design/yh-受检到LLVM能力矩阵-2026-10-28.md)），本文件不再列其子项。
+  [能力矩阵](03-design/yh-受检到LLVM能力矩阵.md)），本文件不再列其子项。
 - **字面量只读化（原 ❓3，已决定：改语义）**：字面量进只读段 + 静态可判定的
   写入改编译期诊断，见 H1。
 

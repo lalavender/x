@@ -1,7 +1,7 @@
 # string
 
 yh 标准库的字节字符串模块。设计见
-[`docs/03-design/yh-string标准库设计-2026-10-23.md`](../../docs/03-design/yh-string标准库设计-2026-10-23.md)，
+[`docs/03-design/yh-string标准库设计.md`](../../docs/03-design/yh-string标准库设计.md)，
 分期与验收见
 [`docs/02-plan/yh-string标准库实施方案-2026-10-23.md`](../../docs/02-plan/yh-string标准库实施方案-2026-10-23.md)。
 

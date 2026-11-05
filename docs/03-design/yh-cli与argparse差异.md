@@ -1,6 +1,8 @@
 # yh cli 与 Python argparse 差异
 
-日期：2026-10-19。参照基线：[Python 3.14 argparse 官方文档](https://docs.python.org/3.14/library/argparse.html)。
+修改时间：2026-11-06
+
+参照基线：[Python 3.14 argparse 官方文档](https://docs.python.org/3.14/library/argparse.html)。
 本文只记录**可观察差异**与保留理由；逐项能力对应见
 [cli 设计](yh-cli标准库设计.md) 第 3 节，实现状态见
 [实施方案](../02-plan/yh-cli标准库实施方案.md)。

@@ -561,7 +561,7 @@ code-stats:
 test-code-stats:
     {{ py }} "{{ root }}/tests/tools/yh-code-stats/check.py"
 
-# arch-check：依赖矩阵 + 预算守护；test-arch-check 验证守护本身能抓到违规。
+# arch-check：依赖矩阵 + 状态/资源守护；test-arch-check 验证守护本身能抓到违规。
 arch-check:
     {{ py }} "{{ root }}/tools/arch-check.py"
 

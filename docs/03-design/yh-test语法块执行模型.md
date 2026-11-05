@@ -1,7 +1,9 @@
 # yh test 语法块执行模型（分析提案）
 
-日期：2026-10-23。状态：**YT0 语法与 YT1 发现/无运行检查已实施；执行模型尚未实现**。
-承接[语言内测试设计](yh-test语言内测试设计-2026-10-23.md)，保留字符串行为测试、
+修改时间：2026-11-06
+
+状态：**YT0 语法与 YT1 发现/无运行检查已实施；执行模型尚未实现**。
+承接[语言内测试设计](yh-test语言内测试设计.md)，保留字符串行为测试、
 标识符文档测试及统一 `$assert`。本文伪代码仅解释生成结构，不是可直接编译的 yh。
 当前编译器识别并索引 test 声明，`yh test --list` 完成发现与文档目标绑定，
 `yh test --no-run` 以临时函数上下文检查测试体语义；生产构建仍跳过测试体。
@@ -179,9 +181,9 @@ test_program_entry(case_id, report_channel):
 | [PDecl](../../compiler/gen/model.yh) / [parse_decl](../../compiler/parse/parse_decl.yh) | YT0 已把 test 纳入顶层范围索引；YT1 在 `cmd/test_cmd.yh` 建立测试身份并绑定文档目标 |
 | [parse_comptime](../../compiler/parse/parse_comptime.yh) / [parse_stmt](../../compiler/parse/parse_stmt.yh) | 已有编译期断言检查与立即诊断；YT0 在生产构建只对 test 体做语法解析，运行时断言分流仍待 YT2 |
 | [CheckedModule](../../compiler/ast/module_snapshot.yh) / [check](../../compiler/check/checked_module.yh) | 自有受检函数、语句与来源；需保存并验证测试/断言事实 |
-| [lowering](../../compiler/ast/module_snapshot_lower.yh) / [LLVM 流水线](../../compiler/cmd/llvm_pipeline.yh) | 已有函数降低和对象生成；复用普通分支/调用，补测试入口身份 |
+| [lowering](../../compiler/lower/module_snapshot_lower.yh) / [LLVM 流水线](../../compiler/build/llvm_pipeline.yh) | 已有函数降低和对象生成；复用普通分支/调用，补测试入口身份 |
 | [main 检查](../../compiler/gen/sem_decl.yh) | 有必需/可选 main 检查；还需独立测试启动入口及统一链接重绑定 |
-| [process](../../compiler/cmd/process.yh) / [scheduler](../../compiler/cmd/build_scheduler.yh) | 已有 fork/exec、日志重定向与非阻塞等待；尚无测试结果协议和逐例超时 runner |
+| [process](../../compiler/link/process.yh) / [scheduler](../../compiler/build/build_scheduler.yh) | 已有 fork/exec、日志重定向与非阻塞等待；尚无测试结果协议和逐例超时 runner |
 
 测试阶段、断言节点版本与入口身份属于编译语义环境，必须进入生产/测试
 隔离和函数级缓存规则。不能复用已经按编译期诊断消费过 `$assert` 的旧受检
