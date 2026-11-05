@@ -223,14 +223,19 @@ CI 由 **GitHub Actions** 承担（2026-11-03 起；替代 Gitea Actions 与本�
 ## 版本与发布（每版本 rc/release 分支）
 
 每个版本两条分支：`<ver>-rc` 是开发与候选线；`<ver>-release` 只收合并、不含直接
-提交。`compiler/project.toml` 的 `version` 在 rc 期就写目标正式号，因此最后一个
-rc 与正式版是同一提交。完整方案见
+提交。版本号有两处手写来源且**必须与 tag 完全一致**：`compiler/project.toml` 的
+`version` 与 `compiler/cmdline/cmdline.yh` 的 `YH_VERSION_TEXT`（`--version` 只读
+后者）。rc 期写 rc 号（如 `0.0.12-rc.3`），正式发布时在 `<ver>-release` 上把它们
+改成正式号，因此**正式版比最后一个 rc 多一个版号提交**；`release.yml` 的 prepare
+会校验 tag 与这两处一致，不一致直接红。完整方案见
 [分版本 rc/release 分支发版流程](docs/02-plan/yh-分版本rc与release分支发版流程方案-2026-10-21.md)。
 
-**当前状态（2026-11-03）**：tag 发布由 GitHub Actions 的 `release.yml` 承担（四端
-并行 + cc4 打包 + `tools/publish-release.py`）；rc/prerelease 与正式 tag 的
-`<ver>-release` 祖先校验尚未落地（R1–R3/R5 未关闭），本节描述的是目标流程
-（尤其第 2 步「四端」与第 3 步的 Windows 种子验收仍按目标写）。
+**当前状态（2026-11-06）**：tag 发布由 GitHub Actions 的 `release.yml` 承担（四端
+并行 + cc4 打包 + `tools/publish-release.py`）。prepare 已做三道校验：tag 形态、
+版本号三处一致、正式 tag 必须是 `<ver>-release` 的祖先；`workflow_dispatch` 可带
+`tag` + `dry_run=true` 演练（四端照常构建、跳过 publish）。仍未落地：发布分支不
+回灌开发线（`<ver>-release` 的版号提交不进 `llvm`）、GitHub 分支保护的 required
+status check 未确认。
 
 1. 在 `<ver>-rc` 上开发；写 `docs/01-finished/release-<ver>-rc.N.md`；本地
    `just test` + `just selfhost-native` 全绿。

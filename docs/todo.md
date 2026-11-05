@@ -190,11 +190,32 @@ lowering 66% / IR 构造 20% / 内嵌桥 8% / 前端 6%（见上面的 PF2 报�
 prerelease 并带四端种子，正式 tag 只允许打在对应 release 分支上。方案见
 [分版本 rc/release 分支发版流程](02-plan/yh-分版本rc与release分支发版流程方案-2026-10-21.md)。
 
-- [ ] **R2 CI 改造**：`release.yml` 已用正则守卫只认 `x.y.z`/`x.y.z-rc.N`（等价
-  tag filter），`publish-release.py` 已支持 `--prerelease`；**剩余**正式 tag 的
-  「必须落在 `<ver>-release` 上」祖先校验。
-- [ ] **R4 版本漂移修复**：`compiler/README.md` 与
-  `tools/compiler-performance.py:208` 写死的 `0.0.5` 改为从清单读取或前缀断言。
+**2026-11-06 已收口（原 R2/R4）**：`release.yml` 的 prepare 现在做三道校验——tag
+形态、tag 与两处版本号（`compiler/project.toml` + `YH_VERSION_TEXT`）一致、正式 tag
+必须是 `<ver>-release` 的祖先；并新增 `workflow_dispatch`（`tag` + `dry_run`）用于
+演练。`ci.yml` 的 `push`/`pull_request` 都覆盖 `*-rc`/`*-release`。版本漂移两处
+（`compiler/README.md`、`tools/compiler-performance.py`）已改为读清单。
+
+- [ ] **V1 发布线回灌开发线（P0）**：`<ver>-release` 上的版号提交与
+  `release-<tag>.md` 从不回到 `llvm`（实测 `git merge-base --is-ancestor 0.0.12
+  origin/llvm` 为假，`llvm` 的 `project.toml` 仍是 `0.0.12-rc.3`、也没有
+  `release-0.0.12.md`），于是"下一版从哪个提交切、版号从哪个基线滚"没有成文规则。
+  需定：发布后是否 `git merge --no-ff <ver>-release` 回 `llvm`，或只 cherry-pick
+  版号与发布说明两个提交。
+- [ ] **V2 版本号单一真源（P2）**：`compiler/project.toml` 与
+  `compiler/cmdline/cmdline.yh` 的 `YH_VERSION_TEXT` 仍是两处手写（发布前由 CI 校验
+  一致）。可选：构建期从 project.toml 生成常量，或反过来让 `--version` 读清单。
+- [ ] **V3 release.yml 首跑（P0）**：8 处 `just bootstrap-bridge` → `just build` 的
+  替换只在 `ci.yml` 验证过，release 侧四端 job 尚未实跑；用新增的
+  `workflow_dispatch` + `dry_run=true` 对 `0.0.12` 演练一次（四端构建 + artifact，
+  不写 Release）。
+- [ ] **V4 分支与保护（P1）**：远端仍留 `0.0.8-rc`、`0.0.8-release`、`arm64`、
+  `ci/github-actions`、`ci/probe-github`；另外 GitHub 分支保护是否要求 ci status
+  （默认分支 `0.0.12-release` 尤其需要）未在仓库设置里确认。
+- [ ] **V5 种子与发布资产一致性（P2）**：本机 `bin/` 种子可能停在旧 rc（实测
+  `bin/yh-windows-x64` 是 `d6721853…`，官方 0.0.12 资产是 `8db806ab…`），
+  "发布二进制验收"记录容易与实际种子对不上；取种后应核对 sha 与 Release 资产并把
+  该断言写进验收脚本。
 
 ## P0 发布质量：平台、CI 与分发
 

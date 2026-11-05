@@ -8,7 +8,8 @@
 > `just selfhost-native` 为主门。
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
-version = `0.0.11`，source = `.`），按 **gen / builtin / lex / parse / ast /
+source = `.`；版本号以 [project.toml](project.toml) 的 `version` 与
+`cmdline/cmdline.yh` 的 `YH_VERSION_TEXT` 为准，两处必须与发布 tag 一致），按 **gen / builtin / lex / parse / ast /
 check / comptime / lower / ir / backend / build / testkit / cmd** 组织。
 **2026-10-27 实测（`python3 tools/arch-check.py`）：十三个模块、120 个 `.yh`、
 53,545 行**：`gen` 5,621 · `parse` 9,699 · `build` 11,015 · `lower` 5,819 ·

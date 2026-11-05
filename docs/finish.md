@@ -8,6 +8,29 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-06 版本与发布流程收口：tag/版本号/落点三道校验 + dry-run 演练入口
+
+`docs/todo.md`「版本与发布流程（P0 前置）」的 R2、R4 关闭，并把三条未登记问题
+登记为 V1–V5。改动只涉及 CI 声明、脚本与文档，未动 `.yh` 源码。
+
+| 文件 | 改动 |
+| --- | --- |
+| `.github/workflows/release.yml` | `prepare` 从「只读 ref 名」改为 `fetch-depth: 0` 检出 + 三道校验：① tag 形态；② tag 与 `compiler/project.toml` 的 `version`、`compiler/cmdline/cmdline.yh` 的 `YH_VERSION_TEXT` **完全一致**（`--version` 只读后者，漏改会产出自报版本错的不可撤销资产）；③ 正式 tag 必须是 `<ver>-release` 的祖先（`git merge-base --is-ancestor`，rc 候选线跳过）。新增 `workflow_dispatch`（`tag` 必填 + `dry_run` 默认 true）；五处 `TAG` 统一取 prepare 解析结果，四个平台 job 与 publish 的检出改为显式 tag，publish 在 `dry_run` 时跳过 |
+| `.github/workflows/ci.yml` | `pull_request.branches` 补 `'*-rc'`/`'*-release'`（`push` 侧已由 `cc915fa` 补），发布线与候选线的合并 PR 不再无门 |
+| `compiler/README.md` | 删掉写死的 `version = 0.0.11`，改为指向 `project.toml` 并说明两处版本号必须与 tag 一致 |
+| `tools/compiler-performance.py` | `verify_function_change` 不再断言 `"yh 0.0.5"`，改为从 `compiler/project.toml` 读版本号再断言输出（该脚本无门引用，此前属一跑就崩的休眠坏账） |
+| `AGENTS.md` | 修正「rc 与正式版是同一提交」的错误表述（实际正式版比最后一个 rc 多一个版号提交），并把「祖先校验尚未落地」更新为已落地 + 剩余项 |
+| `docs/todo.md` | 删 R2/R4（已收口），新增 V1（发布线不回灌 `llvm`）、V2（版本号两处手写）、V3（release.yml 四端 job 首跑）、V4（残留分支与分支保护）、V5（种子 sha 与发布资产一致性） |
+
+校验（本机，无网络/无 CI 环境下的等价验证）：
+- 三个 workflow 通过 `yaml.safe_load`；prepare 的 `run:` 体 `bash -n` 通过；
+- 把 prepare 逻辑抽成脚本、在 `0.0.12` 与 `0.0.12-rc.3` 两个 tag 的临时 worktree 上
+  实跑：正式 tag 通过（含 `0.0.12-release` 祖先校验）、rc tag 跳过落点校验；
+- 反例：worktree 在 `0.0.12-rc.3` 而 tag 传 `0.0.12` → 「版本号不一致」失败；
+  把远端 `0.0.12-release` 指到一个不在该分支的提交 → 「不是 0.0.12-release 的
+  祖先」失败；
+- `tools/compiler-performance.py` 通过 `py_compile`。
+
 ## 2026-11-06 CI 口径对齐：`*-release` 触发与 perf 首跑记录
 
 `docs/todo.md` 的「2026-11-03 CI 迁移」段已无待修的工程项，剩下三处文字与

@@ -17,6 +17,17 @@ name: release
 on:
   push:
     tags: ['*']
+  # 演练入口：dispatch 时当前 ref 是分支，必须显式给 tag 输入。
+  # dry_run=true 时四端照常构建并上传 artifact，但跳过 publish。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 版本 tag（如 0.0.13-rc.1），必须与源码里的版本号一致
+        required: true
+      dry_run:
+        description: 只构建不发布
+        type: boolean
+        default: true
 
 # 工作流默认只读；只有 publish 需要写 Release。
 permissions:
@@ -31,23 +42,82 @@ env:
 jobs:
   prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     outputs:
       ok: ${{ steps.ver.outputs.ok }}
+      tag: ${{ steps.ver.outputs.tag }}
+      dry: ${{ steps.ver.outputs.dry }}
+    env:
+      TAG_INPUT: ${{ inputs.tag }}
+      DRY_INPUT: ${{ inputs.dry_run }}
     steps:
-      # 只读 ref 名，不需要检出源码。
-      - name: 校验版本 tag
+      # 需要源码：版本号一致性与 tag 落点都要读树、走 git 历史。
+      - name: 检出待发布提交
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      # 三道校验，任一不过即红：tag 形态、版本号三处一致、正式 tag 落在发布分支上。
+      - name: 校验版本 tag、版本号一致性与发布分支落点
         id: ver
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
-          if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-            echo "ok=1" >> "$GITHUB_OUTPUT"
-            echo "版本 tag：$tag"
-          else
+          tag="${TAG_INPUT:-$GITHUB_REF_NAME}"
+          if [[ -z "${TAG_INPUT:-}" && "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "FAIL workflow_dispatch 必须提供 tag 输入（如 0.0.13-rc.1）" >&2
+            exit 1
+          fi
+          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
             echo "ok=0" >> "$GITHUB_OUTPUT"
             echo "跳过：$tag 不是版本 tag（只发布 x.y.z 与 x.y.z-rc.N）"
+            exit 0
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          # 1) 版本号三处一致：tag、project.toml、编进二进制的 YH_VERSION_TEXT。
+          #    --version 只读 YH_VERSION_TEXT，漏改会出现「tag 是正式版、二进制自报 rc」，
+          #    而 Release 资产发布后不可改，所以必须在构建前拦住。
+          version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' compiler/project.toml | head -n1)
+          text=$(sed -n 's/.*YH_VERSION_TEXT \*char = "yh \([^"]*\)".*/\1/p' compiler/cmdline/cmdline.yh | head -n1)
+          if [[ -z "$version" || -z "$text" ]]; then
+            echo "FAIL 读不到版本号：project.toml='$version' YH_VERSION_TEXT='$text'" >&2
+            exit 1
+          fi
+          if [[ "$version" != "$tag" || "$text" != "$tag" ]]; then
+            echo "FAIL 版本号不一致：tag=$tag project.toml=$version --version=$text" >&2
+            echo "      先改两处版本号再打 tag（Release 资产不可改）" >&2
+            exit 1
+          fi
+          echo "版本号一致：$tag"
+
+          # 2) 正式 tag 必须落在 <ver>-release 上；rc 候选线（*-rc.*）不要求。
+          case "$tag" in
+            *-rc.*)
+              echo "rc 候选：跳过发布分支落点校验"
+              ;;
+            *)
+              branch="${tag}-release"
+              # 取不到时区分不了"分支不存在"与"网络抖动"，两种情况都按不通过处理：
+              # 正式发布不能因为一次网络失败就放过落点校验。
+              if ! git fetch --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch" >/dev/null 2>&1; then
+                echo "FAIL 无法获取分支 $branch（网络失败或分支不存在）：正式 tag 必须打在 <ver>-release 上" >&2
+                exit 1
+              fi
+              commit=$(git rev-parse --verify "refs/tags/$tag^{commit}" 2>/dev/null || git rev-parse HEAD)
+              if ! git merge-base --is-ancestor "$commit" "refs/remotes/origin/$branch"; then
+                echo "FAIL tag $tag（$commit）不是 $branch 的祖先：正式版只能从发布分支打 tag" >&2
+                exit 1
+              fi
+              echo "落点校验通过：$tag 在 $branch 上"
+              ;;
+          esac
+
+          dry=0
+          if [[ "${DRY_INPUT:-false}" == "true" ]]; then dry=1; fi
+          echo "dry=$dry" >> "$GITHUB_OUTPUT"
+          echo "ok=1" >> "$GITHUB_OUTPUT"
+          echo "版本 tag：$tag（dry_run=$dry）"
 
   # ------------------------------------------------------------------------
   # 四端构建：各 job 自取种子、准备本机 LLVM 闭包、跑平台门、冷编并自举，
@@ -65,11 +135,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.prepare.outputs.tag }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       LLVM_JOBS: "4"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: extractions/setup-just@v2
 
       - name: 安装构建依赖
@@ -140,11 +212,13 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.prepare.outputs.tag }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       LLVM_JOBS: "4"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: extractions/setup-just@v2
 
       - name: 安装构建依赖
@@ -216,11 +290,13 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 360
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.prepare.outputs.tag }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       LLVM_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: extractions/setup-just@v2
 
       - name: 取上一版种子
@@ -307,11 +383,13 @@ jobs:
         # Windows 上统一用 Git Bash（just 配方本身就是 bash；python 命令是 python）。
         shell: bash
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.prepare.outputs.tag }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       LLVM_JOBS: "4"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       # 托管 runner 没有预装 just，由 action 装到 PATH（与 ci.yml 同版本）。
       - uses: extractions/setup-just@v2
 
@@ -402,17 +480,21 @@ jobs:
   # 汇总发布：四个 artifact 齐了才发布；缺 release 说明文件直接失败。
   # ------------------------------------------------------------------------
   publish:
-    needs: [linux-x64, linux-arm64, darwin-arm64, windows-x64]
+    needs: [prepare, linux-x64, linux-arm64, darwin-arm64, windows-x64]
+    # dry_run（演练）只到四端构建与 artifact 为止，不写 Release。
+    if: needs.prepare.outputs.dry != '1'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.prepare.outputs.tag }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: 下载四端构建资产
         uses: actions/download-artifact@v4

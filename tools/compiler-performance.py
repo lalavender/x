@@ -201,16 +201,27 @@ def make_project(work: Path) -> Path:
     return project
 
 
+def compiler_version() -> str:
+    """从 compiler/project.toml 读版本号，不在脚本里写死。"""
+    manifest = ROOT / "compiler" / "project.toml"
+    match = re.search(r'^version\s*=\s*"([^"]*)"', manifest.read_text(encoding="utf-8"),
+                      re.MULTILINE)
+    if not match:
+        raise RuntimeError(f"{manifest} 缺少 version")
+    return match.group(1)
+
+
 def verify_function_change(binary: Path, cwd: Path, changed: bool) -> None:
     """运行生成的编译器，确认函数体变化产生可观察的行为变化。"""
     result = subprocess.run([str(binary), "version"], cwd=cwd,
                             capture_output=True, text=True, timeout=30)
     output = result.stdout + result.stderr
+    expected = f"yh {compiler_version()}"
     if changed:
         if result.returncode == 0 or "未找到 project.toml" not in output:
             raise RuntimeError("变化后的函数体未改变编译器行为")
-    elif result.returncode != 0 or "yh 0.0.5" not in output:
-        raise RuntimeError("恢复原函数体后编译器行为未恢复")
+    elif result.returncode != 0 or expected not in output:
+        raise RuntimeError(f"恢复原函数体后编译器行为未恢复（期望输出含 {expected!r}）")
 
 
 def summarize(samples: list[dict]) -> dict:
