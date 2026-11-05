@@ -9,6 +9,24 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-11-06 删除过渡期自举桥：四端流水线切回 `just build`
+
+**结果**：0.0.12 已发布四端种子（含 Windows 正常资产），种子认识 `windows`
+comptime 标记、`*.windows.*.yh` 平台变体、`[link-windows-x64]` 清单节与
+`.test.yh` 测试排序，过渡桥的存在前提消失：
+
+- `.github/workflows/ci.yml`、`.github/workflows/release.yml` 四端 job 的
+  「过渡期自举桥」步骤全部改回「冷编」`just build`；
+- `justfile` 删除 `bootstrap-bridge` 配方与注释；
+- 删除 `tools/ci-bootstrap.py`；
+- AGENTS.md 的「过渡期（W2 种子）」条目替换为「种子门（不再需要过渡桥）」，
+  「种子」条目去掉 0.0.11 Windows 过渡资产说明；docs/todo.md 删除
+  「移除过渡期自举桥」与「Windows 种子过渡资产」两条。
+
+本地验证：用 0.0.12 种子（`bin/yh-windows-x64`，sha256 `d6721853…` 同 rc.3 内容，
+正式版资产已验证）在独立 worktree 跑 `just build` 冷编 → `yh --version`；
+四端 `just build` 的真实门由 ci.yml 分支门确认。
+
 ## 2026-11-06 发布 0.0.12 正式版（rc.3 基线 + 发布二进制验收）
 
 **结果**：GitHub Release

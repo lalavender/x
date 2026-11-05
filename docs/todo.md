@@ -56,17 +56,8 @@ API（`open`/`CreateFileA` 等）仍按进程 ACP 解释路径字节：
 
 - [ ] **实跑验收（P0）**：滚种子完成后触发 `ci.yml`，四端 job 全绿；再验证
       `release.yml`（打 rc tag）与 `perf.yml`（workflow_dispatch）首次实跑。
-- [ ] **移除过渡期自举桥（P0）**：0.0.11 的 Linux/macOS 种子早于 W2（不认识
-      `windows` comptime 标记、15 个 `*.windows.*.yh` 变体与 `[link-windows-x64]`），
-      CI 暂用 `just bootstrap-bridge`（`tools/ci-bootstrap.py`，两代冷编）。含 W2
-      种子的新 Release 发布后：ci.yml/release.yml 切回 `just bootstrap`、自举门改回
-      默认种子，删除 `tools/ci-bootstrap.py`、`just bootstrap-bridge` 与本条。
-      桥存活期内 `compiler/`、`libs/` 源码必须保持可被 0.0.11 解析（`$if (windows)`
-      由桥改写；相邻字符串字面量拼接等新语法会直接编不过——2026-11-03 已被一次
-      相邻字面量拼接打红）。
-- [ ] **Windows 种子过渡资产**：`yh-0.0.11-windows-x64.tar.gz`（本机按 HEAD 重编的
-      Windows 种子，sha256 `0969209e…`）是追加到已发布 0.0.11 的资产，不是该版正式
-      产物；下一版 Release 正常产出 Windows 资产后改用常规取种。
+      （ci.yml 与 release.yml 已实跑全绿：2026-11-05 run 42081736645 /
+      42081751704；`perf.yml` 首次实跑仍待确认。）
 - [ ] **Windows 闭包 CI 冷启动成本（P1）**：Windows 静态 LLVM/lld 闭包由 CI 机器
       源码 MSVC `/MT` 构建（首次约 1 小时、563 MB，actions/cache 命中后秒级）。
       需要降低冷启动时按 C1 做固定 SDK 预编译分发。

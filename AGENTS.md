@@ -206,18 +206,13 @@ CI 由 **GitHub Actions** 承担（2026-11-03 起；替代 Gitea Actions 与本�
 - **`perf.yml`（性能基线）**：每日 02:00（UTC+8）与手动触发；只出报告资产，不设硬门。
 - **凭据**：`secrets.GITHUB_TOKEN` 即可（同仓库取种与发布），不再需要自定义
   `YH_GITHUB_TOKEN`；取种脚本用默认 `GITHUB_REPOSITORY`。
-- **过渡期（W2 种子，2026-11-03）**：0.0.11 的 Linux/macOS 种子早于 W2，不认识
-  `windows` comptime 标记、`*.windows.*.yh` 平台变体与 `[link-windows-x64]`，
-  无法直接冷编 HEAD。CI 因此用 `just bootstrap-bridge`（`tools/ci-bootstrap.py`）：
-  先把源码临时改成旧种子可解析的等价形态编出 yh1，再用 yh1 全量冷编 HEAD，
-  并写出 `bin/<平台种子名>` 供自举门使用（`llvm_host` 与 `native-selfhost.py`
-  都按种子文件名推断平台）。**约束**：桥存活期内 `compiler/` 与 `libs/` 源码必须
-  保持可被 0.0.11 解析——`$if (windows)` 由桥改写，但相邻字符串字面量拼接这类
-  新语法会直接编不过。含 W2 种子的 Release 发布后，删除桥接线与
-  `tools/ci-bootstrap.py`（见 docs/todo.md）。
+- **种子门（2026-11-06 起不再需要过渡桥）**：0.0.12 Release 已发布四端种子（含
+  Windows 正常资产），种子认识 `windows` comptime 标记、`*.windows.*.yh` 平台
+  变体、`[link-windows-x64]` 清单节与 `.test.yh` 测试文件排序，因此四端流水线
+  直接 `just build` 冷编；过渡期的 `just bootstrap-bridge` 与
+  `tools/ci-bootstrap.py` 已删除（过程见 docs/finish.md）。
 - **种子**：分支/tag 流水线一律取「最新带该平台资产的 Release（含 rc，排除当前
-  tag）」。Windows 种子以 `yh-0.0.11-windows-x64.tar.gz` 补进 0.0.11（过渡，
-  因为 W2 合入时未先发版）；种子不入库，取种用 `tools/fetch-release-seed.py`。
+  tag）」；种子不入库，取种用 `tools/fetch-release-seed.py`。
 - **磁盘/时长**：macos-15 约 44 GiB 可用、3 核 7 GiB 内存（`LLVM_JOBS=2`）；
   windows-latest 约 28 GiB 可用、4 核 16 GiB；linux 4 核 16 GiB。四端冷启动约
   3–4 小时；缓存命中后 Linux 约 25–45 分钟、Darwin/Windows 约 20–40 分钟。
