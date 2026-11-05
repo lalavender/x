@@ -163,9 +163,6 @@ lowering 66% / IR 构造 20% / 内嵌桥 8% / 前端 6%（见上面的 PF2 报�
   `cd compiler && ../bin/yh-linux-arm64 build` 不设环境变量就能链接。
 - [ ] **LC2 闭包清单门扩展到 Linux**：`tools/link-closure.py check --host …` 目前只
   接进 `make test-llvm-darwin`；Linux 的对应门未接（需先有 Linux 宿主记录验证）。
-- [ ] **LC3 F2-9 交叉**：Linux→Darwin 交叉仍需目标包自带 `libc++.tbd`
-  （见 `03-design/yh-Darwin交叉编译遗留边界.md` §2）。
-
 ## 语言内测试（YT4 迁移与发版）
 
 [设计提案](03-design/yh-test语言内测试设计-2026-10-23.md)、
@@ -196,12 +193,13 @@ prerelease 并带四端种子，正式 tag 只允许打在对应 release 分支�
 
 ## P0 发布质量：平台、CI 与分发
 
-### A. F2 收尾与 F1 可选后续
-
-- [ ] **A2 F2-9 Linux/x64 交叉产 Mac 候选**：目标版 LLVM/桥依赖注入、Linux 上的
-  Mach-O 交叉链接配置、Mac 原生候选固定点；SDK bundle 已完成，主项未实施。
-- [ ] **A3 F1-6 可选**：x64 专用 `llvm-selfhost.py` 参数化到 ARM64；跨宿主
-  （x64 上跑 arm64 种子）链接模板策略单独立项。
+> **交叉编译任务已撤下（2026-11-06）**：Linux→Darwin 交叉（用户程序与编译器
+> 候选）、跨宿主自举与 Darwin 交叉边界相关条目已从本文件删除，等待重新立项。
+> 重新计划时的现状取证：Linux 交叉产 Mach-O 对纯 `.yh` 程序可用（需显式 SDKROOT），
+> 带 `[c] sources` 报「C 目标文件架构与当前 target 不符」、交叉产编译器候选与
+> macOS→Linux 方向均不可用；细节见
+> [Darwin 交叉遗留边界](03-design/yh-Darwin交叉编译遗留边界.md)
+> 与[对标 Zig 差距分析](03-design/yh-对标Zig工业级编译器差距分析-2026-10-25.md) §4。
 
 ### B. 后续平台（原 F3/F4）
 
@@ -239,8 +237,6 @@ prerelease 并带四端种子，正式 tag 只允许打在对应 release 分支�
   或按实际 SDK 裁剪目标列表。
 - [ ] **C4 `make dev` 增量**：归档身份目前按路径计，SDK 原地重建需清缓存或补
   内容哈希。
-- [ ] **C5 Darwin 交叉边界**：C 源/libc++/目标包/frameworks 的剩余边界，见
-  [遗留边界](03-design/yh-Darwin交叉编译遗留边界.md)。
 
 ### D. CI 与本地环境
 

@@ -1,5 +1,8 @@
 # yh Darwin 交叉编译遗留边界（2026-10-19）
 
+> **状态（2026-11-06）**：本文件对应的 todo 任务（A2 F2-9、A3 F1-6、LC3、C5）已撤下，等待重新立项。
+> 本文保留为边界与取证材料；其中 `compiler/darwin-sdk/` 路径已迁到 `vendor/darwin-sdk/`。
+
 ## 范围
 
 F2-10 已把 **Mach-O 链接所需的 libSystem stub** 随编译器分发
