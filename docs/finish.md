@@ -21,6 +21,10 @@ project cases 130/130）。根因是 windows job 的打包 shell 沿用了旧写
 `[ -f dist/selfhost/cc4 ]` 命中却 cp 失败，是 MSYS 的 `.exe` 后缀魔法（第一次 cp
 实际产出 `yh.exe`）。已用本机 Git coreutils 复现旧写法报错、验证新写法打包成员名
 为 `yh`；版本升 0.0.12-rc.3。rc.2 同时证明上一轮桥接修复有效（step 8/9 均 success）。
+**rc.3 结果**：run 42062242047 四端全绿（windows-x64 步骤 8/9/10 全 success），
+publish 成功，Release `0.0.12-rc.3` 已发布 8 个资产（四端 tar.gz + sha256）。
+下一步是用发布出去的 rc.3 种子做 `rm -rf bin && just fetch-seed → just → just test →
+just selfhost-native` 验收（见发版流程第 3 步）。
 
 ## 2026-11-05 发布流水线 Windows 端红灯：release.yml 漏接自举桥
 
