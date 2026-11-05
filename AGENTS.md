@@ -189,7 +189,7 @@ CI 由 **GitHub Actions** 承担（2026-11-03 起；替代 Gitea Actions 与本�
   `macos-15`（Darwin/ARM64）、`windows-latest`（Windows/x86_64）。
   不要用 `ubuntu-latest`：它已滚到 26.04（libxml2 SONAME 与 0.0.11 种子不兼容；
   gcc15/gnu23 还会把 C 侧 `strtol` 重定向到 glibc 的 C23 变体，libs 的 C ABI 用例会红）。
-- **`ci.yml`（分支门）**：push 到 `llvm`/`main`/`arm64` 与 `<ver>-rc`、PR 触发四端并行：
+- **`ci.yml`（分支门）**：push 到 `llvm`/`main`/`arm64`、PR 触发四端并行：
   取上一版 Release 种子 → 准备本机 LLVM 闭包 → 平台专项门 + 全量语料 +
   `just SKIP_CORPUS=1 selfhost-native`。**ANTLR 参考语法门只在本地开发跑**
   （`just test` / `just quick`），CI 只用编译器的 `--syntax-check` 模式
@@ -220,40 +220,39 @@ CI 由 **GitHub Actions** 承担（2026-11-03 起；替代 Gitea Actions 与本�
   本机 Jenkins（2026-10-22 删除，`Jenkinsfile` 与 `tools/jenkins/` 一并移除）；
   CircleCI（2026-11-05 删除 `.circleci/config.yml`，不再作为门禁）。
 
-## 版本与发布（每版本 rc/release 分支）
+## 版本与发布（单主线 `llvm`）
 
-每个版本两条分支：`<ver>-rc` 是开发与候选线；`<ver>-release` 只收合并、不含直接
-提交。版本号有两处手写来源且**必须与 tag 完全一致**：`compiler/project.toml` 的
+**主线（2026-11-06 用户决定）**：`llvm` 是唯一开发线与 GitHub 默认分支。每版本
+`<ver>-rc`/`<ver>-release` 两条分支的流程已退役，远端 `0.0.12-release`、`0.0.8-rc`、
+`0.0.8-release` 已删除（tag 全保留）；0.0.12 是最后一个走分支流程的版本，其
+`0.0.12-release` 已 `--no-ff` 回灌 `llvm`。旧方案
+[分版本 rc/release 分支发版流程](docs/02-plan/yh-分版本rc与release分支发版流程方案-2026-10-21.md)
+只作历史记录保留，不再执行。
+
+版本号有两处手写来源且**必须与 tag 完全一致**：`compiler/project.toml` 的
 `version` 与 `compiler/cmdline/cmdline.yh` 的 `YH_VERSION_TEXT`（`--version` 只读
-后者）。rc 期写 rc 号（如 `0.0.12-rc.3`），正式发布时在 `<ver>-release` 上把它们
-改成正式号，因此**正式版比最后一个 rc 多一个版号提交**；`release.yml` 的 prepare
-会校验 tag 与这两处一致，不一致直接红。完整方案见
-[分版本 rc/release 分支发版流程](docs/02-plan/yh-分版本rc与release分支发版流程方案-2026-10-21.md)。
+后者）。rc 期写 rc 号（如 `0.0.13-rc.1`），正式发布前改成正式号并在主线提交。
+`release.yml` 的 prepare 校验 tag 形态、tag 与这两处版本号一致，正式 tag 还必须是
+`llvm` 的祖先，不一致直接红。
+
+1. 在 `llvm` 上开发；写 `docs/01-finished/release-<tag>.md`（rc 与正式都要写）；
+   本地 `just test` + `just selfhost-native` 全绿。
+2. 改两处版本号、提交 `llvm`，再打 `git tag -a <ver>` → `release.yml` 四端并行构建、
+   cc4 打包、发布 Release（rc tag 发 prerelease，资产同样含四端种子）。
+3. **用发布出去的二进制验收**：`rm -rf bin && just fetch-seed` → `just` →
+   `just test` → `just selfhost-native`（两代固定点）。
+4. 验收不过就在 `llvm` 上修、发下一个 rc（种子自动取上一个 Release）；禁止修改已
+   发布 Release 的资产。
 
 **当前状态（2026-11-06）**：tag 发布由 GitHub Actions 的 `release.yml` 承担（四端
-并行 + cc4 打包 + `tools/publish-release.py`）。prepare 已做三道校验：tag 形态、
-版本号三处一致、正式 tag 必须是 `<ver>-release` 的祖先；`workflow_dispatch` 可带
-`tag` + `dry_run=true` 演练（四端照常构建、跳过 publish）。仍未落地：发布分支不
-回灌开发线（`<ver>-release` 的版号提交不进 `llvm`）、GitHub 分支保护的 required
-status check 未确认。
-
-1. 在 `<ver>-rc` 上开发；写 `docs/01-finished/release-<ver>-rc.N.md`；本地
-   `just test` + `just selfhost-native` 全绿。
-2. 打 `git tag -a <ver>-rc.N` → 四端 tag 流水线构建并发布 prerelease Release
-   （带四端种子资产）。非版本号 tag 不触发发布。
-3. **用发布出去的 rc 二进制验收**：`rm -rf bin && just fetch-seed` → `just` →
-   `just test` → `just selfhost-native`（两代固定点）。
-4. 验收不过就回 `<ver>-rc` 修，打下一个 rc（种子自动取上一个 rc）。
-5. `git merge --no-ff <ver>-rc` 到 `<ver>-release`，再打 `git tag -a <ver>`
-   发正式版；正式 tag 必须落在 `<ver>-release` 上（CI 校验），否则拒绝发布。
-6. 发完删 `<ver>-rc`、保留 `<ver>-release`；默认分支为最新 `<ver>-release`。
+并行 + cc4 打包 + `tools/publish-release.py`）；prepare 的三道校验为 tag 形态、
+版本号三处一致、正式 tag 在主线上；`workflow_dispatch` 可带 `tag` + `dry_run=true`
+演练（四端照常构建、跳过 publish）。仍未落地：GitHub 分支保护的 required status
+check 未确认（默认分支已是 `llvm`）。
 
 种子规则：分支与 tag 流水线一律取**最新带资产的 Release（含 rc，排除当前 tag）**，
-所以 rc.N 用 rc.N−1、正式版用该版最后一个 rc 编译出来。禁止修改已发布 Release
-的资产（要改就发新 rc）；`release-<tag>.md` 缺失即发布失败（rc 与正式都要写）。
-
-迁移完成前（[todo](docs/todo.md) R1–R5 未关闭），分支门仍跑
-`arm64`/`llvm`/`main`；`<ver>-rc`/`<ver>-release` 分支同样触发。
+所以 rc.N 用 rc.N−1、正式版用该版最后一个 rc 编译出来。`release-<tag>.md` 缺失即
+发布失败。
 
 
 

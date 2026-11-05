@@ -8,6 +8,27 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-06 发布线退役：0.0.12-release 回灌 llvm、默认分支改为 llvm、删 rc/release 分支
+
+**结果**：`llvm` 成为唯一主线与 GitHub 默认分支；`<ver>-rc`/`<ver>-release` 两条
+分支流程结束（方案保留为历史记录）。0.0.12 是最后一个走分支流程的版本。
+
+- 回灌：`git merge --no-ff origin/0.0.12-release`（`701f5ff`）入 `llvm`，只带入正式
+  版号（`compiler/project.toml` + `YH_VERSION_TEXT` = `0.0.12`）与
+  `docs/01-finished/release-0.0.12.md`；`docs/finish.md` 取 `llvm` 侧条目（已含完整
+  发布记录与 `1927f95` 事故，为 release 线条目的超集），release 线的重复段已删。
+- 默认分支：GitHub 上从 `0.0.12-release` 改为 `llvm`（先改默认再删分支，否则 API
+  拒绝删除默认分支）。
+- 删分支：远端 `0.0.12-release`、`0.0.8-rc`、`0.0.8-release` 已删除；tag（含
+  `0.0.12-rc.1/2/3`、`0.0.12`）全部保留，发布历史不受影响。
+- 流水线：`ci.yml` 的 `push`/`pull_request` 去掉 `*-rc`/`*-release` 触发；
+  `release.yml` 的正式 tag 落点校验从「`<ver>-release` 的祖先」改为「`llvm` 的
+  祖先」——分支没了，直接在主线上打 tag。
+
+**已验证**（本机 macOS/ARM64）：`just` 冷编（`yh --version` = `yh 0.0.12`）、
+`just test`（语法语料 + 运行语料 + libs/compiler-tests/fmt 负例/code-stats/arch-check）
+与 `just selfhost-native`（两代固定点 + 自解析 + 模块/项目验收 124/124）均通过。
+
 ## 2026-11-06 四端 CI 首次在 libs 去前缀后全绿；perf 首跑卡在工具缺陷并修复
 
 **CI**：推送 `cc915fa`（含 `51882b1` libs 去前缀、`e5f61e0` 文档、`716a025` 文档
@@ -308,26 +329,6 @@ tag 打在 release 分支上；`0.0.12-rc` 的 ci.yml 分支门同轮四端 succ
 `Diagnostic`，llvm 分支门 run 42066720773 红灯。已用 `2281445` 把 `libs/json`
 恢复到 `ab244e3`（tag 0.0.12-rc.3）内容，llvm 分支门 run 42075976931 恢复绿。
 正式版基线取 tag `0.0.12-rc.3`（`ab244e3`），不含该误提交。
-
-## 2026-11-06 发布 0.0.12 正式版（rc.3 种子验收 + rc/release 分支）
-
-**结果**：[release-0.0.12](01-finished/release-0.0.12.md)。
-以 0.0.12-rc.3（tag/commit ab244e3，四端流水线 run 42062242047 全绿、8 个资产）
-为基线：`0.0.12-rc` 线上只加版号与发布说明，本机用发布出去的 rc.3 种子做验收后，
-`--no-ff` 合入 `0.0.12-release` 并打 `0.0.12`。
-
-本地验收（Windows/x64 宿主，种子 `bin/yh-windows-x64` = rc.3，sha256
-`d6721853…`）：`just fetch-seed` → `just build`（冷编，`yh --version` = 0.0.12）→
-`just test`（三层回归全绿）→ `just selfhost-native`（cc3→cc4 固定点 48 产物一致、
-自解析 148 文件、探针、CLI 冒烟、语法语料 49/49 反例、运行语料 363/372
-windows-x64 原生、后续各门）。本机两处环境垫片：`python3` 是 Microsoft Store 桩，
-用 `tmp/pyshim/python3.exe` 垫片跑语料；`foreign-fs-build.py` 受本机安全策略
-（不受信 exe 不能写 %TEMP%）限制，以 `TEMP` 指向仓库内目录等价通过——真实跨
-文件系统证据由 CI 四端承担。
-
-另修一处误提交：`1927f95`（rc.3 结论文档提交）把当时暂存区里另一个任务的
-`libs/json` 去前缀改名一并带入，导致 `json/api.yh` 早于 `types.yh` 编不过；
-已用 `2281445` 把 `libs/json` 恢复到 ab244e3 内容（llvm 已推送）。
 
 ## 2026-11-05 发布打包步骤引用已删除路径：release.yml windows 端 cp 失败
 
