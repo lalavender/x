@@ -22,8 +22,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "stringmodel"
 REQUIRED = [
-    "00_model.yh", "10_view.yh", "20_owned.yh", "30_transform.yh",
-    "40_utf8.yh", "doc.yh", "string.yh",
+    "base.yh", "view.yh", "owned.yh", "transform.yh",
+    "utf8.yh", "doc.yh", "string.yh",
 ]
 
 

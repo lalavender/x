@@ -169,7 +169,7 @@ if (sys.is_error(listener) == 0) {
 }
 ```
 
-- 结构：`PollFd`（8 字节）与 `Timeval`（16 字节）在 `00_types.yh`。
+- 结构：`PollFd`（8 字节）与 `Timeval`（16 字节）在 `base.yh`。
 - 原语：`socket_fd`、`connect_fd`、`bind_fd`、`listen_fd`、`accept_fd`、
   `get_socket_name`、`shutdown_fd`、`set_socket_option`、
   `get_socket_option`、`send_fd`、`recv_fd`、`poll_fds`。
@@ -206,23 +206,23 @@ if (sys.is_error(listener) == 0) {
 
 ```text
 libs/sys/
-  00_types.yh                  Timespec、is_error、error_code
-  05_errno.darwin.yh           __error 读取与 -errno 归一化
-  10_constants.linux.arm64.yh  AArch64 调用号、O_*、AT_*、errno
-  10_constants.linux.x64.yh    x86_64 调用号、O_*、AT_*、errno
-  10_constants.darwin.yh       Darwin O_*、AT_*、errno、映射/时钟、attrlist 位
-  20_raw.linux.yh              raw6 → linux_syscall6
-  30_file.linux.yh             文件/目录/cwd/pipe2
-  30_file.darwin.yh            文件/目录/cwd/pipe/getattrlistbulk 桥
-  40_memory.linux.yh           mmap/munmap（系统调用）
-  40_memory.darwin.yh          mmap/munmap（libSystem）
-  50_time.linux.yh             clock_gettime/nanosleep（系统调用）
-  50_time.darwin.yh            clock_gettime/nanosleep（libSystem）
-  60_process.linux.yh          PID/fork/exec/wait/exit/signal（系统调用）
-  60_process.darwin.yh         PID/fork/exec/wait/exit/signal/posix_spawn
-  70_socket.linux.yh           socket/connect/bind/listen/accept/poll（系统调用）
-  70_socket.darwin.yh          同一组原语的 libSystem 桥
-  doc.yh                       仅注释的完整 API 参考
+  base.yh                  Timespec、is_error、error_code
+  errno.darwin.yh          __error 读取与 -errno 归一化
+  constants.linux.arm64.yh AArch64 调用号、O_*、AT_*、errno
+  constants.linux.x64.yh   x86_64 调用号、O_*、AT_*、errno
+  constants.darwin.yh      Darwin O_*、AT_*、errno、映射/时钟、attrlist 位
+  raw.linux.yh             raw6 → linux_syscall6
+  file.linux.yh            文件/目录/cwd/pipe2
+  file.darwin.yh           文件/目录/cwd/pipe/getattrlistbulk 桥
+  memory.linux.yh          mmap/munmap（系统调用）
+  memory.darwin.yh         mmap/munmap（libSystem）
+  time.linux.yh            clock_gettime/nanosleep（系统调用）
+  time.darwin.yh           clock_gettime/nanosleep（libSystem）
+  process.linux.yh         PID/fork/exec/wait/exit/signal（系统调用）
+  process.darwin.yh        PID/fork/exec/wait/exit/signal/posix_spawn
+  socket.linux.yh          socket/connect/bind/listen/accept/poll（系统调用）
+  socket.darwin.yh         同一组原语的 libSystem 桥
+  doc.yh                   仅注释的完整 API 参考
 ```
 
 ## 未实施

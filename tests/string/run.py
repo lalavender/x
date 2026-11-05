@@ -86,7 +86,7 @@ def copy_stdlib(stdlib, destination):
 
 def set_fail_after(stdlib_copy, value):
     """把标准库副本的注入常量改成 value；找不到常量直接失败。"""
-    target = stdlib_copy / "string" / "00_model.yh"
+    target = stdlib_copy / "string" / "base.yh"
     text = target.read_text()
     updated, count = FAIL_CONST_RE.subn(
         f"const STRING_TEST_FAIL_AFTER int = {value}", text)

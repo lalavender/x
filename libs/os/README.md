@@ -227,15 +227,15 @@ remove_file/rename_file/is_terminal/process_id/terminate/platform/arch`
 
 ```text
 libs/os/
-  00_model.yh            Error/FdResult/IoResult/OpenOptions/DirEntry 等
-  10_errors.yh           私有错误归一化与切片地址帮助（跨平台）
-  file.yh                文件 API（经 sys，跨平台）
-  20_directory.linux.yh  DirReader/cwd（getdents64 记录）
-  20_directory.darwin.yh DirReader/cwd（getattrlistbulk 条目组）
-  30_process.linux.yh    spawn/wait/exit_now（fork + 错误管道）
-  30_process.darwin.yh   spawn/wait/exit_now（posix_spawn）
-  environment.yh         envp 查询（跨平台）
-  40_sleep.yh            旧 sleep_us（经 sys.sleep_time，跨平台）
-  os.yh                  旧接口兼容
-  doc.yh                 仅注释的完整 API 参考
+  base.yh             Error/FdResult/IoResult/OpenOptions/DirEntry 等
+  errors.yh           私有错误归一化与切片地址帮助（跨平台）
+  file.yh             文件 API（经 sys，跨平台）
+  directory.linux.yh  DirReader/cwd（getdents64 记录）
+  directory.darwin.yh DirReader/cwd（getattrlistbulk 条目组）
+  process.linux.yh    spawn/wait/exit_now（fork + 错误管道）
+  process.darwin.yh   spawn/wait/exit_now（posix_spawn）
+  environment.yh      envp 查询（跨平台）
+  sleep.yh            旧 sleep_us（经 sys.sleep_time，跨平台）
+  os.yh               旧接口兼容
+  doc.yh              仅注释的完整 API 参考
 ```

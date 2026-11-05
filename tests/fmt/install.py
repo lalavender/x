@@ -18,8 +18,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "fmtbasic"
-REQUIRED = ["00_model.yh", "10_value.yh", "20_spec.yh", "30_render.yh",
-            "40_float.yh", "50_output.yh", "tests.test.yh"]
+REQUIRED = ["base.yh", "value.yh", "directive.yh", "render.yh",
+            "float.yh", "output.yh", "tests.test.yh"]
 EXPECTED = "1212\n1212\nhi07\n"
 
 

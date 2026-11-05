@@ -23,7 +23,7 @@
 
 `model`/`interop` 把 fixture 复制到 `tmp/string-test/<组>` 后执行 `yh run`；
 `resources` 把 `libs` 复制到工作目录，逐次改写
-`libs/string/00_model.yh` 中的 `STRING_TEST_FAIL_AFTER` 常量后重建；
+`libs/string/base.yh` 中的 `STRING_TEST_FAIL_AFTER` 常量后重建；
 产品源码常量保持 `-1`。
 
 ## 命令

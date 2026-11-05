@@ -50,7 +50,7 @@ def inject_test_seam(libs: Path) -> None:
         "}\n",
         encoding="utf-8",
     )
-    storage = libs / "toml" / "10_storage.yh"
+    storage = libs / "toml" / "document.yh"
     text = storage.read_text(encoding="utf-8")
     original = ("if (TOML_TEST_FAIL_AFTER >= 0 && p.alloc_count"
                 " >= TOML_TEST_FAIL_AFTER) {")
@@ -63,7 +63,7 @@ def inject_test_seam(libs: Path) -> None:
 
 def set_budget(libs: Path, byte_count: int) -> None:
     """把临时标准库副本的单文档分配预算调低。"""
-    types = libs / "toml" / "00_types.yh"
+    types = libs / "toml" / "base.yh"
     text = types.read_text(encoding="utf-8")
     original = "const TOML_MAX_BYTES u64 = 134217728"
     replacement = f"const TOML_MAX_BYTES u64 = {byte_count}"

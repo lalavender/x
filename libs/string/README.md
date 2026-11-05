@@ -121,7 +121,7 @@ just test-string-o2    # O2 同组
 ```
 
 `resources` 组把标准库复制到 `tmp/`，逐次改写
-`libs/string/00_model.yh` 的 `STRING_TEST_FAIL_AFTER`，覆盖每个分配点的失败
+`libs/string/base.yh` 的 `STRING_TEST_FAIL_AFTER`，覆盖每个分配点的失败
 原子性。基本组同时登记在 `tests/modules/build-check.py` 的 `stdlib-run` 用例中。
 
 ## 内建测试

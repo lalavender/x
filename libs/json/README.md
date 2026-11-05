@@ -59,6 +59,15 @@ json.builder_finish(&b)
 `Document` 是单一所有者：成功解析后由调用者 `release`，释放后所有 `Value`/
 `Text` 视图失效。`encode_owned` 返回的 `string.String` 同样由调用者释放。
 
+## 文件布局
+
+模块内按**文件名字节序**编译，声明必须先于使用，因此文件名就是依赖顺序
+（不加数字前缀）：`base`（类型/常量）→ `digits` → `document` → `encoding` →
+`lex` → `parse` → `query` → `render` → `serialize` → `stream.*`（平台文件读写）→
+`surface`（公开入口）；`json.test.yh` 按 `.test.yh` 规则固定排最后。新增文件
+必须让自己的名字落在这条拓扑序里，细节见
+[设计文档 §2](../../docs/03-design/yh-JSON标准库设计-2026-10-24.md)。
+
 ## 数字语义（与 toml 不同）
 
 JSON 只有一个 number 类型，本库**只校验 grammar 并保存原始词素**：
@@ -115,7 +124,7 @@ cd libs && yh test json   # 12 个 test：parse/查询/写出/错误/文件
 just test-json            # 历史 target 已删除，改用 yh test json / just libs-test
 ```
 
-行为断言在 `libs/json/tests.test.yh`；`jsonmodel` 是
+行为断言在 `libs/json/json.test.yh`；`jsonmodel` 是
 `tests/modules/projects/` 下保留的公开面 smoke（`build-check.py` 的
 `j1-json-model`）。迁移记录见
 [YT4-P1](../../docs/01-finished/yh-YT4-P1-json迁移-2026-10-25.md)。

@@ -69,13 +69,13 @@ runner 在工作目录构建 `libs/libc/test/main.yh`，再取模块对象链接
 
 ```text
 libs/libc/
-  10_memory.yh   memmove/memset/memcmp/memchr
-  20_string.yh   strcmp/strncmp/strcpy/strncpy/strcat/strncat/
+  memory.yh   memmove/memset/memcmp/memchr
+  string.yh   strcmp/strncmp/strcpy/strncpy/strcat/strncat/
                  strchr/strrchr/strstr/strnlen/strspn/strcspn/strpbrk/
                  strcasecmp/strncasecmp/strlcpy/strlcat
-  30_convert.yh  atoi/atol/atoll/strtol/strtoul/abs/labs/llabs
-  40_sort.yh     qsort/bsearch（C ABI 比较回调）
-  doc.yh         仅注释的完整 API 参考
+  convert.yh  atoi/atol/atoll/strtol/strtoul/abs/labs/llabs
+  sort.yh     qsort/bsearch（C ABI 比较回调）
+  doc.yh      仅注释的完整 API 参考
 ```
 
 ## 未实现与硬边界
