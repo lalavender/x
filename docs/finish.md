@@ -9,6 +9,19 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-11-05 发布打包步骤引用已删除路径：release.yml windows 端 cp 失败
+
+**结果**：[release-0.0.12-rc.3](01-finished/release-0.0.12-rc.3.md)。
+0.0.12-rc.2（run 41966728220）三端成功、windows-x64 在第 10 步打包失败：
+`cp: cannot stat 'dist/selfhost/cc4': No such file or directory`。自举门本身全绿
+（固定点一致 48 个产物、自解析 148 文件 OK、探针 OK、compiler-tests 4/4、
+project cases 130/130）。根因是 windows job 的打包 shell 沿用了旧写法：
+`cp "$cc4" yh` 之后执行 `rm -rf dist/selfhost`，随后又从 `$cc4` 复制到 stage，
+源已不存在；linux/darwin 三端写的是 `cp yh "$stage/yh"`。日志中
+`[ -f dist/selfhost/cc4 ]` 命中却 cp 失败，是 MSYS 的 `.exe` 后缀魔法（第一次 cp
+实际产出 `yh.exe`）。已用本机 Git coreutils 复现旧写法报错、验证新写法打包成员名
+为 `yh`；版本升 0.0.12-rc.3。rc.2 同时证明上一轮桥接修复有效（step 8/9 均 success）。
+
 ## 2026-11-05 发布流水线 Windows 端红灯：release.yml 漏接自举桥
 
 **结果**：[release-0.0.12-rc.2](01-finished/release-0.0.12-rc.2.md)。
