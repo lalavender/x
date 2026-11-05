@@ -1,7 +1,8 @@
 # yh Explorer 设计系统规范
 
 > 版本 `1.0.0` · 2026-10-24 · 适用对象 `tools/yh-explorer.html`（648 行单文件）
-> 配套可运行页面：`deliverables/gstack/yh-explorer-design-system-2026-10-24.html`
+> 配套可运行页面（原 `deliverables/gstack/` 下）未入库、仓库内不存在，仅本规范文本保留；
+> 2026-11-06 由 `deliverables/gstack/` 迁入本目录。
 
 **一句话定位**：一套为「编译器工具界面」而生的暗色优先设计系统 —— 信息密度优先、诊断可读、状态诚实、键盘可达。
 

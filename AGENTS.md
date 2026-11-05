@@ -251,82 +251,7 @@ rc 与正式版是同一提交。完整方案见
 `arm64`/`llvm`/`main`；`<ver>-rc`/`<ver>-release` 分支同样触发。
 
 
-## Linux 环境验证（容器方案）
 
-需要 Linux 环境做测试/验证时（如验证 ELF 产物、预演 Linux CI、
-将来用 ELF 种子在 Linux 上自举），**优先使用容器，不搭完整虚拟机**：
-容器秒级启停、可直接挂载本仓库，日常验证不需要 VM 的完整内核与桌面。
-
-### 前提事实（先读再动手）
-
-- 入库种子按平台分文件：`bin/yh-darwin-arm64` 是 **darwin/arm64（Mach-O）**，不能
-  在 Linux 里运行（`Exec format error`）；`bin/yh-linux-arm64` 是
-  **linux/aarch64（ELF）**，2026-10-09 入库，Linux 容器/宿主内可直接跑
-  `yh build` 与自举门。
-- `just`（justfile）按宿主自动选种子：Linux/arm64 宿主取 `bin/yh-linux-arm64`；
-  **x86_64 Linux 宿主没有 x64 种子**（x64 后端未实施），须显式
-  `SEED=bin/yh-linux-arm64`（arm64 容器原生跑，或 x86_64 上配
-  qemu-user/binfmt 执行 arm64 ELF）。产物形态随宿主（Darwin →
-  Mach-O，Linux → ELF）。
-- 宿主是 Apple Silicon（darwin/arm64），系统 container 默认
-  arch=arm64 / os=linux，直接用 alpine/debian 等多架构 OCI 镜像即可，
-  原生 arm64 无模拟、性能接近原生；不要切 x86_64 走 Rosetta/qemu。
-
-### 操作方式
-
-容器运行时用 **macOS 系统自带 `container`（Apple Container），
-不用 docker**（下述命令已实测通过）：
-
-```bash
-# 服务未运行时先启动；若 run 长时间卡在 "Starting container"
-# 后报 XPC timeout，先 stop 再 start 重启服务（实测有效）
-container system start
-
-# 进入一次性 arm64 Linux 容器，仓库整体挂载到 /work（首次拉取镜像需网络）
-container run --rm -it -v "$PWD":/work -w /work alpine:latest sh
-
-# 容器内一次性装齐门禁所需工具（python3 跑门禁脚本，cc/ld 供链接）
-apk add python3 build-base libxml2-dev   # alpine；用 debian 镜像则：
-apt-get update && apt-get install -y python3 build-essential libxml2-dev
-```
-
-故障处理：卡死的容器用 `container ls -a` 查看、
-`container rm --force <id>` 清理；服务异常看 `container system logs`。
-
-Linux/arm64 容器内的自举验证（种子已入库；arm64 原生宿主缺省即选
-`bin/yh-linux-arm64`，无需覆盖）：
-
-```bash
-just test
-just selfhost-native
-# x86_64 宿主/CI 的等价形式（配 qemu-user/binfmt 后）：
-SEED=bin/yh-linux-arm64 just test
-SEED=bin/yh-linux-arm64 just selfhost-native
-```
-
-### 容器内验证的约束
-
-- 挂载目录的文件属主是宿主用户：容器内只做构建/测试，不做
-  `chown`/权限改写；容器内生成的临时产物一律放 `tmp/`，验证完清理。
-- **不要**把容器内编出的 yh 覆盖回 `bin/` 种子；滚种子只在本机
-  `just test` 与 `just selfhost-native` 全绿后执行 `just seed`。
-- 容器内验证结论（命令、镜像、结果）记入 `docs/finish.md`；
-  若发现 Linux 特有问题，先在 `docs/todo.md` 立项再修。
-
-### WSL（Windows 宿主）验证
-
-Windows 宿主按仓库规则在 WSL 内构建/验证（本机为 Ubuntu x86_64 +
-qemu-user/binfmt，交叉 gcc 包装在 `tmp/boot/crossbin/gcc`）：
-
-```bash
-export PATH="$PWD/tmp/boot/crossbin:$PATH"   # gcc → aarch64-linux-gnu-gcc
-export SEED=bin/yh-linux-arm64              # x86_64 宿主没有 x64 种子
-just
-just test
-just selfhost-native
-# 滚种子：x86_64 宿主必须显式 SEED_DEST，否则会写到 bin/yh-linux-x64
-SEED=bin/yh-linux-arm64 SEED_DEST=bin/yh-linux-arm64 just seed
-```
 
 ## 代码规范
 
@@ -335,13 +260,12 @@ SEED=bin/yh-linux-arm64 SEED_DEST=bin/yh-linux-arm64 just seed
 文件组织、错误处理与资源、字符串、测试、编译期各处细则，以及提交前清单都在那里；
 本节只列不可让步的硬要求。
 
+
 - 结构体和函数都要有详细注释说明
 - 每个文件尽量保持在 500-1000 行
 - 修改完代码都要构建验证
 - 每次修改代码完成之后都要在tests目录中生成.yh测试用例，并确保测试通过
-- Windows平台执行切换到wsl进行运行
 - 安装ripgrep，使用ripgrep进行搜索
-- 必须执行
 - 用中文回答，如果是代码用中文注释
 - 计划的任务记录在docs/todo.md
 - 完成的任务记录在docs/finish.md
