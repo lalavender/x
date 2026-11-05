@@ -206,35 +206,48 @@ prerelease 并带四端种子，正式 tag 只允许打在对应 release 分支�
 > [Darwin 交叉遗留边界](03-design/yh-Darwin交叉编译遗留边界.md)
 > 与[对标 Zig 差距分析](03-design/yh-对标Zig工业级编译器差距分析-2026-10-25.md) §4。
 
-### B. 后续平台（原 F3/F4）
+### B. 平台矩阵（原 F3/F4）
 
-- [ ] **B1 Windows/x86_64**：MSVC ABI/LLP64、COFF/PE 链接、Windows OS 桥
-  （文件/目录/Unicode/进程/时间/内存/启动入口）；原生构建与运行，不以 WSL
-  冒充 Windows 支持。**2026-10-27 已出方案并拆片**，见
-  [Windows/x86_64 LLVM 后端接入实施方案](02-plan/yh-Windows-x86_64-LLVM后端接入实施方案-2026-10-27.md)：
-  W0 前置（目标标记两代顺序）→ W1 交叉目标（8 片）→ W2 原生宿主（7 片）→ W3 矩阵。
-  **D1/D2/D3 已确认（2026-10-27）：MSVC ABI + 零 CRT + W1→W2**；并行编排见方案 §12
-  （七条 lane、四个串行热点文件、工作树/缓存隔离规则）。
+四格现状：Linux/x64、Linux/ARM64、Darwin/ARM64、Windows/x64 已交付（CI 四端绿、
+种子随 Release 发布）；Darwin/x64 与 Windows/ARM64 未接入。交叉编译任务已撤下
+（见本节前说明），因此 B2a 只在**原生 runner** 上验收。
 
-  **已核实的地基**（勿重复实现）：桥已放行 `x86_64-pc-windows-msvc`
-  （`compiler/llvm/bridge.c:119`）；内嵌 lld 已注册 COFF 驱动
-  （`lld_bridge.cpp:19–21,191`）且 LL9L 探针已出 PE（`tests/selfhost/llvm-lld.py`）；
-  构建目录按 triple 隔离（`module_build.yh:149`）。
-
-  - [ ] **W2-8 COFF 整库加载（新发现）**：`[link-options-windows-x64] whole` 现在会
-    变成 Darwin 的 `-force_load`，lld-link 只告警并忽略。两条路：实现
-    `/wholearchive:<path>`（需在 mb_link 里拼单参数 + 新缓冲，函数行数超预算），
-    或保持「桥入口均被直接引用、不整库加载」。当前走后者（project.toml 不写该节，
-    `pl_options_code_from_section` 已认 windows 项，留作后续）。
-  - [ ] **W1-2b-2 零 CRT vs UCRT 决策（当前挡住 22 个 build-check 用例）**：
-    现状是零 CRT（只链 kernel32），因此 `strtod/abs/cos/pow/lrint/dup2/system`
-    这类 C 库符号在 Windows 用户程序里不存在：`libs/math`（sqrt/sin/cos/pow）、
-    `libs/libc`（abs 已由 SDK 支撑对象提供）与 C 互操作夹具都受影响。两条路：
-    (a) 保持零 CRT，把需要的符号逐个用 yh 或 SDK 支撑对象实现（math 尤其昂贵）；
-    (b) 接 UCRT 导入库（`ucrtbase.dll`），一次解决全部 C 符号，代价是用户程序依赖
-    `ucrtbase.dll`（与方案 D2 冲突）。**决定后再删 `build-check.py` 的 `WINDOWS_SKIP`。**
-- [ ] **B2 macOS/x86_64、Windows/ARM64**：对应目标 ABI、库、OS 适配与各自原生
-  种子；四格分别完成运行/自举/性能验收。
+- [ ] **B1a 零 CRT vs UCRT 决策（P0）**：用户程序现在只链 kernel32，
+  `strtod/abs/cos/pow/lrint/dup2/system` 等 C 符号不存在 → `libs/math`
+  （sqrt/sin/cos/pow）不可用，`tests/modules/build-check.py:189-211` 有 22 例
+  `WINDOWS_SKIP`。两条路：(a) 保持零 CRT，用 yh 或 SDK 支撑对象逐个补（math 昂贵）；
+  (b) 接 UCRT 导入库 `ucrtbase.dll`，一次解决但违反方案 D2（用户程序依赖 UCRT）。
+  决策后删 `WINDOWS_SKIP`。
+- [ ] **B1b Winsock 接线（P0，当前未登记）**：`libs/sys/socket.windows.yh` 与
+  `libs/net/tcp.windows.yh` 一律返回 `-ENOSYS`，Windows 上 `net`/`http` 不可用。
+  需要 WSAStartup、SOCKET 进 fd 表、`SO_*` 换 Winsock 取值、`ioctlsocket` 的非阻塞
+  语义，并补 `// platform: windows` 的 loopback 用例（`net0`/`net1` 现被跳过）。
+- [ ] **B1c COFF 整库加载 + Win32 导出面扩展（P2）**：
+  `[link-options-windows-x64].whole` 被 lld-link 忽略（未实现 `/wholearchive`），
+  当前靠「桥入口均被直接引用」绕过，裁剪清单会静默少符号；
+  `vendor/windows-sdk/manifest.json` 只覆盖 KERNEL32 的 38 条导出，扩面需改 `.def`
+  → 同步 `exports`/`def_sha256` → 重新生成 `.lib`，目前无成文流程条目。
+- [ ] **B1d Windows 工程债（P1/P2）**：① windows job 补跑 `test-windows-target`
+  （原排除理由是「`--emit-asm` stdout 在零 CRT 下不支持」，实测已可用，PE 目标门
+  目前只有 linux-arm64 交叉侧覆盖）；② 补 Windows 性能基线（`perf.yml` 只有
+  macos-15 一端）；③ `windows-2022` pin 的长期方案（闭包 CMake 生成器写死
+  「Visual Studio 17 2022」，需改动态检测）。
+- [ ] **B2a macOS/x86_64 原生接入（P1）**：目标与 SDK 已就绪（`gen/target_info.yh:24`、
+  `ir/ssa_module_00_model.yh:173` 的 key=4、`libSystem.tbd` 的 `targets` 含
+  `x86_64-macos`），缺的是接线：`[link-darwin-x64]` 链接组（`compiler/project.toml`
+  只有 `link-darwin-arm64`）、x64 Darwin 闭包（`tools/llvm-darwin-host.py` 的
+  `HOST`/`SDK_PREFIX` 写死 aarch64）、`tests/selfhost/llvm-darwin-*.py` 的 arm64 断言
+  参数化、种子与取种（`justfile:78` 与 `tools/fetch-release-seed.py` 的 `PLATFORMS`）、
+  Intel Mac runner job（`macos-13`，需确认支持窗口）。验收必须在 Intel Mac 原生跑
+  + 原生自举，交叉产物不算数。
+- [ ] **B2b Windows/ARM64 可行性立项（P2，先证明再动手）**：① 目标身份
+  （`aarch64-pc-windows-msvc` 未登记：`target_resolve` 只认 x64、`target_host_info`
+  的 windows+arm64 直接 `return -1`、IR 第二份目标表无 key=6）；② ABI（现有 win64
+  分类按 x64 规则写死「1/2/4/8 字节→INTEGER，其余 MEMORY」，ARM64 的 HFA/寄存器
+  规则不同，需 clang oracle 核对）；③ SDK（`manifest.json` 锁 `machine 34404`、
+  `tools/windows-sdk.py` 的 `VALID_MACHINES` 只认 `0x8664`、`chkstk.c` 是 x64 asm）；
+  ④ arm64-windows 目标包（LLVM/lld/桥）；⑤ GitHub `windows-11-arm` 托管 runner
+  可用性（硬前置，可能直接卡死）。
 
 ### C. 分发与工具链体验
 

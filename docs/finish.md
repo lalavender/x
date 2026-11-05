@@ -29,6 +29,24 @@
 因此未重跑 `just test`/`just selfhost-native`；四端的真实门由推送后的 ci.yml 分支
 门给出，perf 的验收仍需 `workflow_dispatch`。
 
+## 2026-11-06 todo 平台段重写：B1 拆 4 条、B2 拆 2 条并补两条未登记缺口
+
+`docs/todo.md` 原 `B. 后续平台（原 F3/F4）` 只有 `B1 Windows/x86_64`（含 2 个子项）
+与 `B2 macOS/x86_64、Windows/ARM64` 一句「四格分别完成运行/自举/性能验收」，
+无法排期。按现状重写为 6 条：
+
+| 条目 | 性质 |
+| --- | --- |
+| B1a 零 CRT vs UCRT 决策 | P0；22 例 `WINDOWS_SKIP` + `libs/math` 不可用 |
+| B1b Winsock 接线 | **新增未登记缺口**；Windows 上 `net`/`http` 全 `-ENOSYS` |
+| B1c COFF 整库加载 + Win32 导出面扩展 | P2；无 `/wholearchive`；kernel32 仅 38 条导出、扩面无流程 |
+| B1d Windows 工程债 | windows job 漏跑 `test-windows-target`（排除理由已过期）、无性能基线、runner pin |
+| B2a macOS/x86_64 原生接入 | P1；目标/SDK 已就绪，缺 `[link-darwin-x64]`、x64 闭包、脚本参数化、种子/CI |
+| B2b Windows/ARM64 可行性立项 | P2；目标/ABI/SDK 机器码/目标包/runner 五项都要先证明 |
+
+同时给出四格现状（已交付四格 + 未接入两格）与「交叉任务已撤下，故 B2a 只在原生
+runner 验收」的前提，避免再被理解成可交叉验证。
+
 ## 2026-11-06 撤下交叉编译任务（A2/A3/LC3/C5），等待重新立项
 
 用户决定：交叉编译相关条目全部从 `docs/todo.md` 删除，后续重新计划。删除项：
