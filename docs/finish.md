@@ -9,6 +9,19 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-11-05 发布流水线 Windows 端红灯：release.yml 漏接自举桥
+
+**结果**：[release-0.0.12-rc.2](01-finished/release-0.0.12-rc.2.md)。
+0.0.12-rc.1（run 41957530693）四端仅 windows-x64 失败，job 127015942985 的
+「冷编」`just build` 报 `libs/cli/actions.test.yh:14:32: 错误: 未知类型（类型必须
+先定义）`。根因是接线遗漏而非编译器缺陷：rc.1 的 `release.yml` 里 linux-x64 /
+linux-arm64 / darwin-arm64 已改用 `just bootstrap-bridge`，只有 windows-x64 仍是
+`just build`；0.0.11-windows 种子早于 2026-11-05 的 VTEST（`.test.yh` 改名、排序
+前缀废止），按字典序把 `actions.test.yh` 排在定义 `pub struct Namespace` 的
+`cli.yh` 之前。修法同 `ci.yml`：windows job 改走 `just bootstrap-bridge`
+（staging 给 `*.test.yh` 临时加回 `zz_` 前缀），版本升 0.0.12-rc.2 并补发布说明。
+同一条修法已在分支门 run 41954793463 四端验证。
+
 ## 2026-11-05 CI 二次红灯：Windows ACP 目录扫描（按 ACP 精确跳过）
 
 **结果**：[yh-CI二次红灯-ACP目录扫描](01-finished/yh-CI二次红灯-ACP目录扫描-2026-11-05.md)。
