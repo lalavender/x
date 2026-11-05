@@ -67,6 +67,14 @@ API（`open`/`CreateFileA` 等）仍按进程 ACP 解释路径字节：
       「冷编」。根因是 `perf.yml` 当时没有接过渡自举桥（只有取种 + `just build`），
       0.0.11 种子编不动含 W2 语法的 HEAD；0.0.12 种子发布后该根因已自然失效，
       但**没有复跑过**，所以仍按未验收处理。
+      2026-11-06 复跑（run `42097618792`，commit `cc915fa`）取种与冷编已过，却卡在
+      下一步「编译体验基线」：`tools/perf-baseline.py` 的 `stage_corpus` 只复制
+      `compiler/`，而项目自 CLI-R 起把标准库写成显式依赖
+      （`libs = {path = "../libs"}`），副本里没有 `../libs` → 每轮立即以
+      `yh: 无法打开文件: ../libs/project.toml` 退出（exit 1、无 stats，四个场景
+      全部 20/20 失败）。已修（副本里补齐 `../libs`，同样忽略 `.build`/`tmp`），
+      但仍需再 dispatch 一轮拿到绿。已知边界：`corpus_sha256` 只描述 `compiler/`，
+      `libs` 改动不进语料版本号。
 - [ ] **Windows 闭包 CI 冷启动成本（P1）**：Windows 静态 LLVM/lld 闭包由 CI 机器
       源码 MSVC `/MT` 构建（首次约 1 小时、563 MB，actions/cache 命中后秒级）。
       闭包按 2026-11-03 决定不入 Release，因此只能靠缓存命中或自建 runner 镜像降本；

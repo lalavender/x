@@ -8,6 +8,40 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-06 四端 CI 首次在 libs 去前缀后全绿；perf 首跑卡在工具缺陷并修复
+
+**CI**：推送 `cc915fa`（含 `51882b1` libs 去前缀、`e5f61e0` 文档、`716a025` 文档
+与 CI 口径修正）后，分支门 run `42097604110` 四端全绿：windows-x64 14 min、
+darwin-arm64 8 min、linux-arm64 7 min、linux-x64 6 min（均为闭包缓存命中路径）。
+这是 libs 全库改名第一次过四端门。
+
+**perf 复跑**：run `42097618792`（`workflow_dispatch`，同 commit）的失败点变了——
+「取种子 → 恢复闭包 → 冷编」全 success（冷编 26 s，Darwin 闭包缓存与 ci.yml 互相
+命中），红在第 9 步「编译体验基线」：四个场景 20/20 失败、墙钟约 210–285 ms、
+无任何 stats，即构建进程立刻退出。
+
+**根因**（从归档的 `raw.json` 反查）：`stage_corpus` 只把 `compiler/` 复制到
+`work/<a|b>/compiler`，并把 `../tmp` 软链回仓库；但项目自 CLI-R（2026-10-27）
+起把标准库写成显式跨项目依赖：
+
+```toml
+[dependencies]
+libs = {path = "../libs"}
+```
+
+副本里没有 `../libs`，`yh build --stats` 每轮立刻以
+`yh: 无法打开文件: ../libs/project.toml` 退出（exit 1，无 `time_*`/`ir_*`/`check_*`
+统计行）。这个缺依赖从 CLI-R 起就存在，但一直没被跑到：上一次 perf 实跑
+（`41932809252`）在更早的「冷编」就红了。
+
+**修复**（`tools/perf-baseline.py` 的 `stage_corpus`）：副本里同时复制 `libs`
+（忽略 `.build`/`tmp`，避免历史产物污染 cold 场景），A/B 两份各自独立。
+`corpus_sha256` 仍只描述被测的 `compiler/` 语料（已在 docstring 注明边界）。
+
+**验证**：本机用 `yh.exe` 在 stage 出来的副本里跑 `yh build --stats` → exit 0
+并输出完整 stats 行（Windows 无软链权限，`../tmp` 那一层用目录 junction 代替）；
+`python -m py_compile` 通过。四端 perf 的真实结果待再 dispatch 一轮确认。
+
 ## 2026-11-06 版本与发布流程收口：tag/版本号/落点三道校验 + dry-run 演练入口
 
 `docs/todo.md`「版本与发布流程（P0 前置）」的 R2、R4 关闭，并把三条未登记问题

@@ -95,6 +95,18 @@ def stage_corpus(work: Path, name: str) -> Path:
 
     A/B 各用一份独立副本（`name` 为 a/b）：缓存与产物互不覆盖，否则交错的
     修改会互相污染，hot/单函数场景会退化成全量重编（方案 §5 第 2 条）。
+
+    语料目录只是 `compiler/`，但复制后仍须补齐它的同层依赖：
+
+    - `../tmp`：闭包与桥产物（软链到仓库 tmp，本次测量不重建）；
+    - `../libs`：标准库是显式跨项目依赖（`project.toml` 的
+      `libs = {path = "../libs"}`），缺了它每轮构建会立刻以
+      `yh: 无法打开文件: ../libs/project.toml` 退出——2026-11-06 的
+      perf run 42097618792 就是这样红的（当时 `perf.yml` 上一轮还失败在更早的
+      冷编步骤，所以这个缺依赖从 CLI-R 起一直没被跑到）。
+
+    `libs` 不计入 `corpus_sha256`（该哈希只描述被测的 `compiler/` 语料）：
+    标准库改动不会改变语料版本号，只会体现在耗时上。
     """
     base = work / name
     project = base / "compiler"
@@ -102,6 +114,13 @@ def stage_corpus(work: Path, name: str) -> Path:
         shutil.rmtree(project)
     base.mkdir(parents=True, exist_ok=True)
     shutil.copytree(CORPUS, project,
+                    ignore=shutil.ignore_patterns(".build", "tmp"))
+    # 依赖副本同样丢掉 .build/tmp：场景里的冷编只清 compiler/.build，
+    # 副本若带历史构建产物会污染 cold 场景。
+    libs = base / "libs"
+    if libs.exists():
+        shutil.rmtree(libs)
+    shutil.copytree(ROOT / "libs", libs,
                     ignore=shutil.ignore_patterns(".build", "tmp"))
     # 编译器项目把闭包路径写成 ../tmp/llvm-migration/…，副本需要同一个相对布局。
     link = base / "tmp"
