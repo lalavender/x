@@ -8,6 +8,27 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-06 CI 口径对齐：`*-release` 触发与 perf 首跑记录
+
+`docs/todo.md` 的「2026-11-03 CI 迁移」段已无待修的工程项，剩下三处文字与
+触发面与现状不一致，本次一并收口（只改 CI 声明与文档，不动编译器源码）：
+
+- `.github/workflows/ci.yml` 的 `push.branches` 补上 `'*-release'`：AGENTS 写的是
+  `<ver>-rc`/`<ver>-release` 分支同样触发，实际只有 `'*-rc'`，导致 0.0.12 合入
+  `0.0.12-release`（`701f5ff`）后没有任何分支门跑过。
+- 同文件 windows-x64 的步骤名从「取种子（0.0.11 Release 的 Windows 种子）」改为
+  「取种子（最新带 Windows 资产的 Release）」：0.0.12 起该资产由 `release.yml`
+  正常产出，不再有追加的过渡资产。
+- `docs/todo.md` 的 perf 条目补上失败事实：至今唯一一次运行是 run `41932809252`
+  （`schedule`，2026-11-04T23:19Z）的 `darwin-baseline` 第 8 步「冷编」，根因是
+  当时 `perf.yml` 未接过渡桥、0.0.11 种子编不动 W2 语法的 HEAD；0.0.12 种子后该
+  根因失效，但尚未复跑，仍按未验收处理。
+
+验证：`.github/workflows/ci.yml` 与 `perf.yml`、`release.yml` 均通过 PyYAML 解析
+（`yaml.safe_load`）；`git push --dry-run` 确认远端可接收。本轮未改 `.yh` 源码，
+因此未重跑 `just test`/`just selfhost-native`；四端的真实门由推送后的 ci.yml 分支
+门给出，perf 的验收仍需 `workflow_dispatch`。
+
 ## 2026-11-06 撤下交叉编译任务（A2/A3/LC3/C5），等待重新立项
 
 用户决定：交叉编译相关条目全部从 `docs/todo.md` 删除，后续重新计划。删除项：

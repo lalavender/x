@@ -62,6 +62,11 @@ API（`open`/`CreateFileA` 等）仍按进程 ACP 解释路径字节：
 - [ ] **`perf.yml` 首次实跑（P0）**：`workflow_dispatch` 跑一轮并核对归档资产
       （`tmp/perf/*/{raw.json,report.md,product.json,product.md}`）；同时确认与
       ci.yml 共用的 Darwin 闭包缓存 key 能互相命中。
+      现状：至今只跑过一次，且是红灯——run `41932809252`（`schedule`，
+      2026-11-04T23:19Z，0.0.11 种子时期）失败在 `darwin-baseline` 第 8 步
+      「冷编」。根因是 `perf.yml` 当时没有接过渡自举桥（只有取种 + `just build`），
+      0.0.11 种子编不动含 W2 语法的 HEAD；0.0.12 种子发布后该根因已自然失效，
+      但**没有复跑过**，所以仍按未验收处理。
 - [ ] **Windows 闭包 CI 冷启动成本（P1）**：Windows 静态 LLVM/lld 闭包由 CI 机器
       源码 MSVC `/MT` 构建（首次约 1 小时、563 MB，actions/cache 命中后秒级）。
       闭包按 2026-11-03 决定不入 Release，因此只能靠缓存命中或自建 runner 镜像降本；
