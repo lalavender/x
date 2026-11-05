@@ -9,6 +9,33 @@
 2026-10-28 起同时收录主工作区性能 WIP 分支（`tmp/main-wip-20261028`）的条目；
 2026-10-25 及更早的条目仍只在归档文件里。
 
+## 2026-11-06 发布 0.0.12 正式版（rc.3 基线 + 发布二进制验收）
+
+**结果**：GitHub Release
+[0.0.12](https://github.com/lalavender/x/releases/tag/0.0.12)（正式版，非 prerelease）。
+发布流水线 run 42081751704（tag `0.0.12`，commit `701f5ff`）**四端全绿**：
+prepare / linux-x64 / linux-arm64 / darwin-arm64 / windows-x64 / publish 全部 success，
+产出 8 个资产（四端 `tar.gz` + `sha256`，windows-x64 22.3 MB、darwin-arm64 23.3 MB、
+linux 两架构各约 40.7 MB）。本次种子取 0.0.12-rc.3（首个带资产的候选），
+所以四端都走「rc.3 种子 → 过渡期自举桥 → HEAD」链路。
+分支：`0.0.12-rc`（候选，commit `f87a747`）`--no-ff` 合入 `0.0.12-release`（`701f5ff`），
+tag 打在 release 分支上；`0.0.12-rc` 的 ci.yml 分支门同轮四端 success（run 42081736645）。
+
+**发布二进制验收**（发版流程第 3 步，Windows/x64 宿主）：`just fetch-seed` 取 rc.3 种子
+（sha256 `d6721853…`）→ `just build`（`yh --version` = `yh 0.0.12`）→ `just test`
+（三层回归 + 554 条 PASS + `arch-check`）→ `just selfhost-native`（cc3→cc4 固定点
+48 产物一致、自解析 148 文件、探针、CLI 冒烟、语法语料反例 49/49、运行语料
+363/372 windows-x64 原生、modules 19/19、compiler-tests 4/4、project cases 130/130）。
+本机两处垫片：`python3` 是 Microsoft Store 桩，用 `tmp/pyshim/python3.exe` 跑语料；
+`foreign-fs-build.py` 受本机安全策略（不受信 exe 不能写 `%TEMP%`）限制，以 `TEMP`
+指向仓库内目录等价通过，跨文件系统真值由 CI 承担。
+
+**过程事故与修复**：`1927f95`（rc.3 结论文档提交）把当时暂存区里另一个任务的
+`libs/json` 去前缀改名一并带进提交，导致 `json/api.yh:10` 早于 `types.yh` 引用
+`Diagnostic`，llvm 分支门 run 42066720773 红灯。已用 `2281445` 把 `libs/json`
+恢复到 `ab244e3`（tag 0.0.12-rc.3）内容，llvm 分支门 run 42075976931 恢复绿。
+正式版基线取 tag `0.0.12-rc.3`（`ab244e3`），不含该误提交。
+
 ## 2026-11-05 发布打包步骤引用已删除路径：release.yml windows 端 cp 失败
 
 **结果**：[release-0.0.12-rc.3](01-finished/release-0.0.12-rc.3.md)。
