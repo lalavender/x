@@ -58,78 +58,45 @@ lex → parse(纯语法) → AST
 产物逐字节一致；行为变更单独切片；最终固定点 + 全量语料 + 模块验收。
 风险：自举种子、CT 需要类型环境、诊断/错误恢复、lower 契约、ast/comptime 循环。
 
-## 2026-11-06 gen 职责拆分：token/sema/check/state/support/target（P0，待 ADR）
+## 2026-11-06 gen 职责拆分：token/sema/check/support/target（P0，ADR-0021）
 
-用户 2026-11-06 确认目标映射：`gen` 不再作为万能底座，按下面六条线归位。注意两处
-修正：**类型/符号属于语义模型 `sema`，不能放 `lex`**；**`TaskCtx` 不能直接放
-`build`/`proj`**（放 build 会成环，放 proj 会破坏只读项目模型），必须按阶段拆上下文。
+重新分析后的目标、归属表、状态拆分与验收口径见
+[ADR-0021](adr/0021-yh-gen职责拆分.md) 与
+[实施方案](02-plan/yh-gen职责拆分实施方案-2026-11-06.md)。要点：
 
-| `gen` 内容 | 目标 | 说明 |
-|---|---|---|
-| `TK_*`/`TOK_*`/`Tok` | `token`/`syntax`（或 `lex`） | 词法/语法共享词汇，窄接口 |
-| `PDecl` | `ast`/`syntax` | 声明索引属语法层 |
-| `Res` | 删除 / `check` 内部 | 语义动作结果，两遍化后不再跨阶段 |
-| `CType`/`SField`/`TName`/`CSym`/`ModInfo` | `sema` | 语义模型，不是词法 |
-| `TY_*`/`SYM_*`/`F_*`/类型规则 | `sema` | `comptime` 依赖 `sema`，不依赖 `check` |
-| `symbols.yh` | `sema` | 名字池/类型表/符号表/常量折叠，保持一个内核 |
-| `sem_*.yh` | `check` | 语义分析（resolve/expand/full） |
-| `TaskCtx` | 拆成 `ParseCtx`/`AstStore`/`CheckCtx`/`CtCtx`/`BuildCtx`/`LinkCtx` | 按生命周期，不集中到 build/proj |
-| `GenState` | 删除 | driver/session 初始化，按阶段建上下文 |
-| `TargetCfg` | `proj`/`target` | 项目目标配置 |
-| `buffer.yh` | `support` | 后续评估换 `libs/string`/`fmt` |
-| `fail`/`err_tok`/`sem_err`/`warn_lc` | `diag` | 编译器契约：span/错误码/severity/渲染 |
-| `clock.*`/`console.*`/`argv.*` | `support/host` | 后续可换 `libs/os`/`libs/time` |
-| `target*.yh`/`abi_c.yh` | `target` / `target/abi` | 目标身份/数据模型/ABI，不是标准库 |
-| `static_data.yh`/`front_stage.yh` | `sema`/`check`/`lower` | 按消费者归位 |
-| `builtin` prelude 登记 | `sema`/`check` | 内置函数登记属语义层 |
+- 目标模块 `support`/`diag`/`target`/`token`/`sema`/`check`；**不设 `state`
+  模块**，状态按所有者拆（`SourceCtx`/`PoolCtx`/`CompileStats`/`DiagCtx`/
+  `SemaCtx`/`CheckCtx`/`ParseCtx`/`BuildCtx`/`LinkCtx`）。
+- 三处修正：`fail`/`fail_path` 归 `support`（`diag` 只放有位置的 `err_lc`/
+  `warn_lc`）；`PDecl` 归 `token`（放 `ast` 会与 `proj` 成环）；`sema` 依赖
+  `support, diag, target, token`（不只 `support`）。
+- 顺序：G0 ADR/归属表/预算守卫 → G1 基础层 → G2 `sema` 模型 →
+  **G3（= F1–F5）`check` 接语义** → G4 状态收尾并删除 `gen`。
+  **G3/G4 不得早于 F5**：`parse` 仍驱动 `sem_*` 时搬 `check` 会造临时环。
+- 验收：同模块搬家 `.s/.s.i/.s.ct` 字节一致；跨模块搬家不要求编译器自身
+  `.s.i` 一致，改用固定点 + 全量语料等价；每阶段 `just` + `just test` +
+  `just selfhost-native`。
 
-目标依赖（`support` 被所有阶段 import 是合理的；它必须是窄接口）：
+- [ ] **G0**：落 ADR-0021 + 归属表；`arch-check` 加新模块边与 `gen` 预算
+  （`pub fn`/importers/`TaskCtx` 字段只减不增）；递归扫描按 `module` 分组；
+  核对 183 个 `pub fn` 全部有去向。
+- [ ] **G1**：`support`（缓冲/源/池/统计/宿主/`fail`）、`diag`（`err_lc`/
+  `warn_lc`）、`target`（身份/数据模型/`TargetCfg` 类型与绑定）、`token`
+  （词汇/`PDecl`；token 状态暂留 `gen`）；先让 `cmdline`/`cache`/`link`/
+  `proj` 脱 `gen`；`backend`/`lower`/`builtin` 先改走 `support`/`target`/
+  `token`，G2 再脱 `gen`；同步 test fixture 拷贝清单与
+  `compiler-tests.py` 模块列表。
+- [ ] **G2**：`sema` 接 `CType/SField/TName/CSym/ModInfo`、`TY_*/SYM_*/F_*`、
+  类型/符号/折叠/布局/ABI/静态数据/命名空间；`comptime → sema`；`gen` 只剩
+  `sem_*` 动作 + 残余 `TaskCtx`。
+- [ ] **G3**（与 F1–F5 合并）：`ast` 纯语法、`parse` 纯语法、`check.resolve →
+  CT 检查 → expand → full`；F5 后再删/迁旧 `sem_*`、`Res`、`CheckCtx`。
+- [ ] **G4**：F5 后重盘 `TaskCtx`，拆 token/lex/parse/check/build/link 上下文；
+  删 `GenState`/`gen`；刷新 arch-check、README/架构文档/统计，滚种子。
 
-```text
-token → support
-lex → token, support
-parse → token, ast, support
-ast → token, support
-sema → support
-check → ast, sema, comptime, diag, support, proj
-comptime → sema, support
-lower → check/HIR, ir, target, support
-backend → ir, target, support
-proj → support, target
-build → proj, check, lower, backend, link, support
-link → target, support
-cmdline → support, libs.cli
-cmd → 全部
-```
-
-- [ ] **S0 ADR + 归属表 + 守卫**：冻结 `support`/`diag`/`target`/`token`/`sema`/
-  `check` 的接口与 `ALLOWED`；`arch-check` 改为递归扫描并按 `module` 声明分组
-  （否则 `cmd/yh/cli`、`build/cache` 等子目录会绕过检查）；列出 183 个 `gen`
-  `pub` 的消费者/去向。
-- [ ] **S1 support/diag/target**：迁 `buffer`、`fail`/`err_tok`/`warn_lc`、
-  `clock.*`、`console.*`、`argv.*`、`target*`、`abi_c`；先让 `cmdline` 摆脱
-  `gen`（只差 `cstr_eq`/`write_all`），再让 `link`/`build`/`proj`/`backend`
-  改走 `support`/`target`/`diag`。
-- [ ] **S2 token/PDecl**：token 词汇与 `Tok` 归 `token`/`lex`；`PDecl` 归
-  `ast`/`syntax`；`parse`/`ast`/`check` 只依赖窄 token 接口。
-- [ ] **S3 sema 模型**：`CType`/`SField`/`TName`/`CSym`/`ModInfo`、`TY_*`/
-  `SYM_*`/`F_*`、`symbols.yh` 的类型/符号/常量折叠迁 `sema`；`comptime` 先改
-  `comptime → sema`，**不得** `comptime → check`。
-- [ ] **S4 状态拆分**：`TaskCtx` 188 字段按生命周期拆到 `ParseCtx`/`AstStore`/
-  `CheckCtx`/`CtCtx`/`BuildCtx`/`LinkCtx`；`GenState` 删除；`proj` 保持只读；
-  `build` 只持 `BuildCtx`。禁止把 `TaskCtx` 整体搬进 build/proj。
-- [ ] **S5 check 接语义分析**：`sem_*`、`Res`、`CheckCtx` 迁 `check`；实现
-  `check.resolve → 检查 CT 函数 → check.expand → check.full`；与前端两遍化
-  F3–F5 合并验收；`parse` 纯语法、`ast` 纯语法。
-- [ ] **S6 gen 收尾**：删除 `gen`（或保留极薄兼容层）；`arch-check` 更新
-  `ALLOWED`/预算；固定点、全语料、种子、文档/ADR。
-
-验收：每阶段 `just` + `just test` + `just selfhost-native`；纯移动/契约阶段产物
-逐字节一致；行为变更单独切片；最终固定点 + 全量语料 + 模块验收；`gen` 的 183 个
-`pub` 全部有去向，无新增模块级可变状态。
-风险：自举种子、`TaskCtx` 拆分触及所有阶段、`check ↔ comptime` 环（类型规则必须
-在 `sema`）、stdlib 闭包（`clock/console/argv` 先经 `support` 包装，不直接进 libs）、
-`arch-check` 子目录漏检。
+风险：`TaskCtx` 机械改写（281 `np_data`/166 `c_src`/330 `c_pos`）、`sema`
+偷读 parser 状态、fixture 拷贝漏新模块、跨模块 `.s.i` 不可比、`target` 第二份
+可写 cfg。缓解见实施方案 §7。
 
 ## 2026-11-06 架构文档守护（P1）
 
