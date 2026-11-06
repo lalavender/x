@@ -55,6 +55,9 @@ def default_environment():
             env["SDKROOT"] = value
     require(bool(env.get("SDKROOT")), "缺少 SDKROOT，无法验证默认链接")
     env["MACOSX_DEPLOYMENT_TARGET"] = "14.0.0"
+    # 这是默认后端/统计门，不是全局缓存门；必须冷编，否则全局 action
+    # 命中会让 checked_functions=0，误报“默认后端不是 LLVM”。
+    env["YH_CACHE"] = "off"
     return env
 
 

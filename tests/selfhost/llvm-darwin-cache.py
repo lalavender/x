@@ -102,6 +102,8 @@ def project_env(min_sdk, min_os="14.0.0"):
     env["SDKROOT"] = str(min_sdk)
     env["MACOSX_DEPLOYMENT_TARGET"] = min_os
     env.pop("YH_CC", None)
+    # 本门验证项目本地缓存键；全局 C4 缓存会掩盖本地 manifest/对象变化。
+    env["YH_CACHE"] = "off"
     return env
 
 
