@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """arch-check 自测：确认守护既能通过，也能真的抓到违规。
 
-失败模式是"永远通过"（正则腐烂、路径写错），所以五条路径都要测：
+失败模式是"永远通过"（正则腐烂、路径写错），所以六条路径都要测：
   1. 真实仓库树 → 0；
   2. 注入越界 import 的副本 → 非 0，且报出"越界依赖"；
   3. 子目录里的源码 → 仍被递归扫描并抓到越界；
-  4. gen 的 `pub fn` 预算 +1 → 非 0；
-  5. 追加大量空行的副本 → 仍 0（arch-check 不再检查代码行数）。
+  4. gen 的 `pub fn` 预算越界 → 非 0；
+  5. comptime 新增 gen 依赖 → 非 0；
+  6. 追加大量空行的副本 → 仍 0（arch-check 不再检查代码行数）。
 """
 
 import re
@@ -98,6 +99,20 @@ def main():
             print(r4.stdout[-800:], r4.stderr[-400:])
 
     with tempfile.TemporaryDirectory() as tmp:
+        root = copy_compiler(tmp, "comptime-gen")
+        victim = root / "compiler" / "comptime" / "ct_facts.yh"
+        victim.write_text(
+            victim.read_text(errors="ignore") +
+            "\nfn injected_dependency_probe() int { return gen.ty_lookup_name(0, 1) }\n",
+            encoding="utf-8")
+        r6 = run(root)
+        caught = r6.returncode != 0 and "comptime 新增 gen 依赖" in r6.stdout
+        print(("PASS" if caught else "FAIL") + " arch-check 抓 comptime 新增 gen 依赖")
+        if not caught:
+            failed += 1
+            print(r6.stdout[-800:], r6.stderr[-400:])
+
+    with tempfile.TemporaryDirectory() as tmp:
         root = copy_compiler(tmp, "long-file")
         victim = largest_source(root)
         victim.write_text(victim.read_text(errors="ignore") + "\n" * 4000,
@@ -109,7 +124,7 @@ def main():
             failed += 1
             print(r3.stdout[-800:], r3.stderr[-400:])
 
-    print(f"arch-check 自测: 通过 {5 - failed}/5")
+    print(f"arch-check 自测: 通过 {6 - failed}/6")
     return 1 if failed else 0
 
 

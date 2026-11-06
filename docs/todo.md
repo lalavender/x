@@ -145,6 +145,10 @@ lex → parse(纯语法) → AST
   `data_str_slots`/`data_str_n_slot`/`em_slots`/`em_n_slot`/
   `static_data_rows_slot`/`static_data_n_slot` 六个只读槽口。
   `comptime` 的 `gen.` 引用（去注释）降到 **56**，读型面清零。
+- [x] **F4 守卫（2026-11-06 完成）**：`arch-check` 新增
+  `GEN_SYMBOLS_FOR_COMPTIME` 白名单——`comptime` 只允许 19 个已知债务符号
+  （值规则 10、写型调用 5、符号查询 2、`task`/`TaskCtx`），新增即红灯；
+  自测加一条「注入新 gen 依赖必须被抓到」，6/6 通过。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

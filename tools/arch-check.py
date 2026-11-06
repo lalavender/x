@@ -90,6 +90,23 @@ BUDGETS = {
     "max_taskctx_fields": 150,  # gen/state.yh 的 TaskCtx 字段数（会话开关/声明索引迁出后）
 }
 
+# —— comptime → gen 的符号白名单（F4 收口；只减不增）——
+# comptime 不得依赖 gen 的语义表；下面每个符号都是待消除的已知债务，
+# 新增依赖即红灯。分组理由写在 docs/02-plan/yh-F4-... §7。
+GEN_SYMBOLS_FOR_COMPTIME = {
+    # 值规则（F4-5 路线 A：编译期值语义内核，阶段内保留）
+    "fp32_bits", "fp64_bits", "sem_can_assign", "sem_fold_const_binop",
+    "sem_fold_const_unary", "sem_fold_fp_to_int", "sem_fold_norm",
+    "sem_res_const", "sem_struct_finish", "Res",
+    # 写型调用（待改成「请求/应用」seam）
+    "static_data_add", "static_data_reloc", "static_data_reset",
+    "static_data_scalar", "ty_push_agg",
+    # 符号引用查询（待 F4-5 或镜像）
+    "sym_ct_lit_text", "sym_declared_before",
+    # 每任务上下文（GEN4 随 TaskCtx 拆分消除）
+    "task", "TaskCtx",
+}
+
 # 已知未接线但暂不删除的符号（当前为空；保留位置以便记录豁免）。
 UNWIRED_EXEMPT = set()
 
@@ -220,6 +237,8 @@ def main():
         if actual > limit:
             problems.append(f"{name} 超预算：{actual} > {limit} {detail}")
 
+    report = {}
+
     def taskctx_fields():
         """数 TaskCtx 的字段行（去注释/空行；数组字段也计一行）。"""
         text = read(SRC / "gen" / "state.yh")
@@ -237,6 +256,20 @@ def main():
 
     budget("max_globals", globals_n)
     budget("max_g_call_sites", g_calls)
+    # comptime → gen 符号白名单：只允许已知债务，新增即红灯。
+    ct_dir = SRC / "comptime"
+    if ct_dir.is_dir():
+        used = set()
+        for f in ct_dir.glob("*.yh"):
+            text = read(f)
+            for line in text.splitlines():
+                code = line.split("//")[0]
+                used |= set(re.findall(r"\bgen\.([A-Za-z_][A-Za-z0-9_]*)", code))
+        extra = sorted(used - GEN_SYMBOLS_FOR_COMPTIME)
+        if extra:
+            problems.append("comptime 新增 gen 依赖：" + ", ".join(extra))
+        report["comptime_gen"] = len(used)
+
     budget("max_gen_pub_fns", gen_pub_fns, "gen")
     budget("max_gen_importers", len(gen_importers), "import gen")
     budget("max_taskctx_fields", taskctx_fields(), "TaskCtx")
@@ -272,6 +305,9 @@ def main():
           f"TaskCtx 字段 {taskctx_fields()}")
     print(f"  未判空 malloc {len(unchecked)}；未接线 pub {len(unwired)}；"
           f"容量安全追加点 {cap_appends}")
+    if "comptime_gen" in report:
+        print(f"  comptime→gen 符号 {report['comptime_gen']}"
+              f"（白名单 {len(GEN_SYMBOLS_FOR_COMPTIME)}）")
 
     if problems:
         print("\n架构违规:")
