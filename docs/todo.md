@@ -139,6 +139,12 @@ lex → parse(纯语法) → AST
   `sem_fold_*`/`fp*_bits`/`sem_res_const`/`sem_struct_finish`/`Res`，F4-5）、
   `static_data_*`/`em_*`/`data_str_*`/`sym_*`（F4-3 剩余）、2 处 CT 侧建类型
   （`ty_push_agg`，需 check 侧 API）与 `gen.task()` 的剩余字段。
+- [x] **F4-3 收尾（2026-11-06 完成）**：字符串标签表、枚举成员表、静态数据
+  目录三组读型镜像（`ct_tables_bind` + `ct_data_str_lookup`/`ct_em_*`/
+  `ct_static_at`），全部走「槽」，表增长后自动跟随；`gen` 侧新增
+  `data_str_slots`/`data_str_n_slot`/`em_slots`/`em_n_slot`/
+  `static_data_rows_slot`/`static_data_n_slot` 六个只读槽口。
+  `comptime` 的 `gen.` 引用（去注释）降到 **56**，读型面清零。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

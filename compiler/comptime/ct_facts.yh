@@ -255,3 +255,123 @@ pub fn ct_err(msg *char) int {
     }
     return support.err_lc(tk.tokens[tk.pos].line, tk.tokens[tk.pos].col, msg)
 }
+
+// ---------------------------------------------------------------------------
+// 字符串标签 / 枚举成员 / 静态数据目录：只读镜像（同样绑定「槽」）
+// ---------------------------------------------------------------------------
+
+// CtStaticRow：gen.StaticDataObject 的镜像（不含 relocs 内容，只带指针与行数）。
+pub struct CtStaticRow {
+    sym_id int
+    label int
+    type_id int
+    elem_type int
+    count int
+    size int
+    align int
+    data *u8
+    relocs *void // 指向 gen 的 StaticDataReloc 数组（只转发给 check 使用）
+    reloc_n int
+}
+
+let ct_ds_lbl_slot **int = 0
+let ct_ds_off_slot **int = 0
+let ct_ds_len_slot **int = 0
+let ct_ds_q_slot **int = 0
+let ct_ds_n_slot *int = 0
+
+let ct_em_off_slot **int = 0
+let ct_em_len_slot **int = 0
+let ct_em_val_slot **i64 = 0
+let ct_em_ready_slot **int = 0
+let ct_em_n_slot *int = 0
+
+let ct_static_rows_slot **CtStaticRow = 0
+let ct_static_n_slot *int = 0
+
+// ct_tables_bind：绑定字符串标签、枚举成员、静态数据目录的槽。
+// 全部传「槽的地址」，表增长/搬迁后读时自动跟随。
+pub fn ct_tables_bind(ds_lbl **int, ds_off **int, ds_len **int, ds_q **int,
+    ds_n *int, em_off **int, em_len **int, em_val **i64, em_ready **int,
+    em_n *int, static_rows **CtStaticRow, static_n *int) void {
+    ct_ds_lbl_slot = ds_lbl
+    ct_ds_off_slot = ds_off
+    ct_ds_len_slot = ds_len
+    ct_ds_q_slot = ds_q
+    ct_ds_n_slot = ds_n
+    ct_em_off_slot = em_off
+    ct_em_len_slot = em_len
+    ct_em_val_slot = em_val
+    ct_em_ready_slot = em_ready
+    ct_em_n_slot = em_n
+    ct_static_rows_slot = static_rows
+    ct_static_n_slot = static_n
+}
+
+// pool_byte：读名字池第 off 字节（枚举成员名比较用）。
+fn pool_byte(off int) u8 {
+    return support.pool_ctx().data[off]
+}
+
+// ct_data_str_lookup：按数据标签查字符串字面式字节；1 命中、0 未命中。
+pub fn ct_data_str_lookup(lbl int, off *int, slen *int, quoted *int) int {
+    if (ct_ds_n_slot == 0) { return 0 }
+    let n int = ct_ds_n_slot[0]
+    let lbls *int = ct_ds_lbl_slot[0]
+    let i int = 0
+    for i < n {
+        if (lbls[i] == lbl) {
+            off[0] = ct_ds_off_slot[0][i]
+            slen[0] = ct_ds_len_slot[0][i]
+            quoted[0] = ct_ds_q_slot[0][i]
+            return 1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// ct_em_count：枚举成员登记行数。
+pub fn ct_em_count() int {
+    if (ct_em_n_slot == 0) { return 0 }
+    return ct_em_n_slot[0]
+}
+
+// ct_em_val / ct_em_ready：枚举成员的值与就绪位。
+pub fn ct_em_val(idx int) i64 { return ct_em_val_slot[0][idx] }
+pub fn ct_em_ready(idx int) int { return ct_em_ready_slot[0][idx] }
+
+// ct_em_find_src：按源码字节 [start,start+n) 反查枚举成员登记行；-1 未命中。
+pub fn ct_em_find_src(src *u8, start int, n int) int {
+    let rows int = ct_em_count()
+    let offs *int = ct_em_off_slot[0]
+    let lens *int = ct_em_len_slot[0]
+    let i int = 0
+    for i < rows {
+        if (lens[i] == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_byte(offs[i] + j) != src[start + j]) { match = 0; break }
+                j += 1
+            }
+            if (match != 0) { return i }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ct_static_count：静态数据目录行数。
+pub fn ct_static_count() int {
+    if (ct_static_n_slot == 0) { return 0 }
+    return ct_static_n_slot[0]
+}
+
+// ct_static_at：取第 row 行静态数据镜像；越界返回 0/1 状态。
+pub fn ct_static_at(row int, out *CtStaticRow) int {
+    if (ct_static_rows_slot == 0 || row < 0 || row >= ct_static_count()) { return -1 }
+    let rows *CtStaticRow = ct_static_rows_slot[0]
+    out[0] = rows[row]
+    return 0
+}
