@@ -115,6 +115,13 @@ lex → parse(纯语法) → AST
   逐行差分镜像与 `gen` 类型表（13 行）、验证表扩容后重新绑定读到新行，
   本机实跑 `ct-facts=ok rows=13`。谓词两处对齐（`is_integer` 含
   bool..u64+enum，`is_signed` 含 char..i64+enum）。
+- [x] **F4-1（2026-11-06 完成）**：镜像改为**绑定槽**（`&TaskCtx.t_types` +
+  `&TaskCtx.t_type_n`，读时解引用），因此表扩容/搬迁后无需重新同步；
+  `comptime` 的 44 处 `gen.ty_is_*` 与 19 处 `gen.CType` 字段读全部改镜像
+  （`ct_ty_is_*` / `ct_type_row`），未绑定时写诊断并终止（不静默算错）。
+  绑定点：`cmd/common`、`build/module_worker`、`llvm_emit` 与三个前端
+  fixture。`gen.` 引用 594→492。ctfacts fixture 增加「64 次类型扩容后不
+  重新绑定仍读到新行」的断言，实跑通过。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

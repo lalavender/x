@@ -197,7 +197,7 @@ python3 tools/compiler-tests.py --compiler-path ./yh
 
 | 文件 | 职责 |
 | --- | --- |
-| `comptime/ct_facts.yh` | CT 执行器的零拷贝类型镜像（`CtTypeRow`/`CT_TY_*`/谓词），由 `check.ct_types_sync` 绑定 |
+| `comptime/ct_facts.yh` | CT 执行器的零拷贝类型镜像（`CtTypeRow`/`CT_TY_*`/谓词）；绑定「槽」，扩容免疫 |
 | `comptime/ct_00_model.yh` | 编译期 token、函数、整数值与求值游标模型 |
 | `comptime/ct_registry.yh` | 编译期函数正文快照、按符号登记/查询与展开预算 |
 | `comptime/ct_enum.yh` | 枚举成员按声明顺序查询，供编译期 `values` 展开 |

@@ -355,7 +355,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
                 return 0
             }
             // 浮点字面量按 IEEE754 位模式保存，类型仍由 type_id 决定。
-            if (gen.ty_is_float(expr.type_id) != 0) {
+            if (ct_ty_is_float(expr.type_id) != 0) {
                 out.value = ct_fp_norm(expr.type_id, expr.fval_bits)
                 out.is_lit = 0
                 out.lit_big = 0
@@ -394,8 +394,8 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
                 || (element == 0 && (place.slot < 0 || place.slot >= frame.local_n))
                 || (element != 0 && (place.index < 0
                     || place.index >= place.aggregate.count))
-                || (gen.ty_is_integer(place.type_id) == 0
-                    && gen.ty_is_float(place.type_id) == 0)
+                || (ct_ty_is_integer(place.type_id) == 0
+                    && ct_ty_is_float(place.type_id) == 0)
                 || expr.type_id < 0 || expr.type_id >= tk.t_type_n
                 || tk.t_types[expr.type_id].kind != gen.TY_PTR
                 || tk.t_types[expr.type_id].elem != place.type_id) {
@@ -432,7 +432,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
                 || expr.type_id != gen.TY_I32) {
                 return gen.sem_err("内部错误：编译期 len 类型无效")
             }
-            let source_type gen.CType = tk.t_types[value.type_id]
+            let source_type CtTypeRow = ct_type_row(value.type_id)
             if (source_type.kind != gen.TY_ARRAY
                 && source_type.kind != gen.TY_SLICE) {
                 return gen.sem_err("编译期 len 只支持数组或切片")
@@ -456,7 +456,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
         if (expr.op == token.TK_BANG) {
             out.type_id = expr.type_id
             out.value = (value.value == 0).to_type(i64)
-        } else if (gen.ty_is_float(value.type_id) != 0) {
+        } else if (ct_ty_is_float(value.type_id) != 0) {
             if (expr.op == token.TK_MINUS) {
                 out.value = ct_fp_neg(value.value)
             } else if (expr.op == token.TK_PLUS) {
@@ -491,12 +491,12 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
         if (expr.op == token.TK_ANDAND || expr.op == token.TK_OROR) {
             out.type_id = gen.TY_BOOL
             out.value = (right.value != 0).to_type(i64)
-        } else if (gen.ty_is_float(left.type_id) != 0) {
+        } else if (ct_ty_is_float(left.type_id) != 0) {
             if (ct_fp_binop_norm(expr.op, left.type_id, left.value,
                     right.value, &out.value) != 0) { return -1 }
             out.type_id = expr.type_id
         } else if (gen.task().t_types[left.type_id].kind == gen.TY_PTR
-            && gen.ty_is_integer(right.type_id) != 0
+            && ct_ty_is_integer(right.type_id) != 0
             && (expr.op == token.TK_PLUS || expr.op == token.TK_MINUS)) {
             // 指针 ± 整数：按 CtValue 槽步进，结果仍是指向存活帧的地址值。
             let steps i64 = right.value
@@ -505,12 +505,12 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             if (out.value == 0) { return -1 }
             out.type_id = expr.type_id
         } else if (gen.task().t_types[right.type_id].kind == gen.TY_PTR
-            && gen.ty_is_integer(left.type_id) != 0
+            && ct_ty_is_integer(left.type_id) != 0
             && expr.op == token.TK_PLUS) {
             out.value = ct_ir_pointer_offset(right.value, left.value)
             if (out.value == 0) { return -1 }
             out.type_id = expr.type_id
-        } else if (gen.ty_is_integer(left.type_id) != 0 && gen.ty_is_integer(right.type_id) != 0) {
+        } else if (ct_ty_is_integer(left.type_id) != 0 && ct_ty_is_integer(right.type_id) != 0) {
             let right_value i64 = right.value
             if (right.is_lit != 0
                 && gen.sem_can_assign(left.type_id, right.type_id, right.is_lit,
@@ -609,9 +609,9 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
     if (expr.kind == 10) {
         let value CtValue
         if (ct_ir_eval_expr(frame, expr.child0, &value) != 0) { return -1 }
-        let dst_float int = gen.ty_is_float(expr.type_id)
-        let src_float int = gen.ty_is_float(value.type_id)
-        if (gen.ty_is_integer(expr.type_id) == 0 && dst_float == 0) {
+        let dst_float int = ct_ty_is_float(expr.type_id)
+        let src_float int = ct_ty_is_float(value.type_id)
+        if (ct_ty_is_integer(expr.type_id) == 0 && dst_float == 0) {
             return gen.sem_err("编译期只支持整数或浮点类型转换")
         }
         out.type_id = expr.type_id
@@ -839,7 +839,7 @@ fn ct_ir_exec_typed_for(frame *CtFrame, stmt_id int, stmt CtStmt,
     if (lo_id < 0 || hi_id < 0
         || ct_ir_eval_expr(frame, lo_id, &lo) != 0
         || ct_ir_eval_expr(frame, hi_id, &hi) != 0) { return -1 }
-    if (gen.ty_is_integer(lo.type_id) == 0 || gen.ty_is_integer(hi.type_id) == 0
+    if (ct_ty_is_integer(lo.type_id) == 0 || ct_ty_is_integer(hi.type_id) == 0
         || gen.sem_can_assign(gen.TY_I32, lo.type_id, lo.is_lit,
             lo.value, lo.lit_big) != 0
         || gen.sem_can_assign(gen.TY_I32, hi.type_id, hi.is_lit,
@@ -891,7 +891,7 @@ fn ct_ir_exec_switch(frame *CtFrame, stmt_id int, stmt CtStmt,
     if (control_id < 0 || ct_ir_eval_expr(frame, control_id, &control) != 0) {
         return -1
     }
-    if (gen.ty_is_integer(control.type_id) == 0) {
+    if (ct_ty_is_integer(control.type_id) == 0) {
         return gen.sem_err("编译期 switch 控制值必须是整数")
     }
     let default_body int = -1
@@ -926,7 +926,7 @@ fn ct_ir_exec_switch(frame *CtFrame, stmt_id int, stmt CtStmt,
                 if (ct_ir_eval_expr(frame, ct_ir_edges[edge].expr_id, &value) != 0) {
                     return -1
                 }
-                if (gen.ty_is_integer(value.type_id) == 0) {
+                if (ct_ty_is_integer(value.type_id) == 0) {
                     return gen.sem_err("编译期 switch case 值必须是整数")
                 }
                 if (control.value == value.value) {
@@ -957,7 +957,7 @@ fn ct_ir_exec_forin_range(frame *CtFrame, stmt_id int, stmt CtStmt,
     if (lo_id < 0 || hi_id < 0
         || ct_ir_eval_expr(frame, lo_id, &lo) != 0
         || ct_ir_eval_expr(frame, hi_id, &hi) != 0) { return -1 }
-    if (gen.ty_is_integer(lo.type_id) == 0 || gen.ty_is_integer(hi.type_id) == 0
+    if (ct_ty_is_integer(lo.type_id) == 0 || ct_ty_is_integer(hi.type_id) == 0
         || gen.sem_can_assign(gen.TY_I32, lo.type_id, lo.is_lit,
             lo.value, lo.lit_big) != 0
         || gen.sem_can_assign(gen.TY_I32, hi.type_id, hi.is_lit,
@@ -1289,7 +1289,7 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
             return gen.sem_err("编译期聚合值不支持复合赋值")
         }
         let value i64 = rhs.value
-        let target_float int = gen.ty_is_float(target)
+        let target_float int = ct_ty_is_float(target)
         if (stmt.op != token.TK_ASSIGN) {
             let op int = ct_ir_assign_op(stmt.op)
             if (op == 0) { return -1 }
@@ -1299,7 +1299,7 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
             } else if (gen.sem_fold_const_binop(op, target, current.value,
                     rhs.value, &value) != 0) { return -1 }
         } else if (target_float != 0) {
-            if (gen.ty_is_float(rhs.type_id) == 0) {
+            if (ct_ty_is_float(rhs.type_id) == 0) {
                 value = ct_fp_convert(rhs.type_id, target, rhs.value)
             } else {
                 value = ct_fp_norm(target, rhs.value)
@@ -1393,8 +1393,8 @@ fn ct_eval_ir_body(item CtFunction, values *CtValue, out *CtValue,
                 ct_ir_frame_release(&frame)
                 return gen.sem_err("内部错误：编译期形参绑定不匹配")
             }
-            if (gen.ty_is_integer(binding.sym_type_id) != 0
-                || gen.ty_is_float(binding.sym_type_id) != 0) {
+            if (ct_ty_is_integer(binding.sym_type_id) != 0
+                || ct_ty_is_float(binding.sym_type_id) != 0) {
                 frame.locals[binding.id] = values[arg]
             } else if (ct_ir_param_copy(&frame, binding.sym_type_id,
                     &values[arg], &frame.locals[binding.id]) != 0) {

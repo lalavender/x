@@ -97,7 +97,7 @@ pub fn ct_ty_is_integer(tid int) int / ct_ty_is_float / ct_ty_is_signed / ct_ty_
 | 步 | 内容 | 验收 |
 | --- | --- | --- |
 | F4-0 ✅ | `ct_facts.yh` 镜像 + `check.ct_types_sync`/`ct_type_layout_ok` + `ctfacts` fixture 差分 | 已实跑 `ct-facts=ok rows=13` |
-| F4-1 | `ct_facts.yh` + `CtTypeRow` 镜像 + `check.ct_types_sync`/`ct_type_layout_ok`；`comptime` 的 58 处 `gen.ty_is_*` 与 18 处 `CType` 字段读改镜像 | `rg "gen\.ty_is_|gen\.CType" compiler/comptime` = 0；全语料一致 |
+| F4-1 | 镜像改绑定槽（扩容免疫）；`check.ct_types_sync`/`ct_type_layout_ok`；`comptime` 的 58 处 `gen.ty_is_*` 与 18 处 `CType` 字段读改镜像 | `rg "gen\.ty_is_|gen\.CType" compiler/comptime` = 0；全语料一致 |
 | F4-2 | `CtSymView`；`gen.CSym`/`SYM_*`/`F_*`/`sym_*` 改视图 | 同上 |
 | F4-3 | `CtStaticView` + 字符串标签视图；`static_data_*`/`data_str_*` 改视图 | 同上 |
 | F4-4 | 诊断改 `support.err_at`；`gen.sem_err`/`gen.task` 清零 | `rg "gen\." compiler/comptime` 只剩注释 |

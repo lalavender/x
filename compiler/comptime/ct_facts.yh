@@ -1,4 +1,5 @@
 module comptime
+import support
 
 // ============================================================================
 // ct_facts.yh —— CT 执行器读语义事实的零拷贝镜像
@@ -46,61 +47,77 @@ pub struct CtTypeRow {
     sub int // STRUCT 字段表起点 / FN 签名号
 }
 
-// ct_type_rows：当前绑定的类型表（只读借用，不拥有）；0 表示未绑定。
-let ct_type_rows *void = 0
-// ct_type_n：当前绑定的类型表行数。
-let ct_type_n int = 0
+// ct_rows_slot：指向「gen 的类型表指针字段」的地址（`**CType` 的槽），
+// 不是表本身。读的时候每次都解引用，因此表扩容/搬迁后仍然是最新指针。
+let ct_rows_slot *void = 0
+// ct_n_slot：指向「gen 的类型表行数字段」的地址；同样每次解引用。
+let ct_n_slot *int = 0
 
-// ct_types_bind：绑定类型表；rows 指向 gen 的 CType 数组，n 是行数。
-pub fn ct_types_bind(rows *void, n int) void {
-    ct_type_rows = rows
-    ct_type_n = n
+// ct_types_bind：绑定类型表的「槽」；rows_slot 是 `&TaskCtx.t_types`，
+// n_slot 是 `&TaskCtx.t_type_n`。绑定一次即对后续扩容免疫（每次读都解引用）。
+// 由 check.ct_types_sync() 在任务初始化时调用。
+pub fn ct_types_bind(rows_slot *void, n_slot *int) void {
+    ct_rows_slot = rows_slot
+    ct_n_slot = n_slot
 }
 
-// ct_types_bound：返回已绑定的行数；0 表示尚未绑定（调用方应报内部错误）。
+// ct_types_bound：当前类型表行数；0 表示尚未绑定。
 pub fn ct_types_bound() int {
-    return ct_type_n
+    if (ct_n_slot == 0) { return 0 }
+    return ct_n_slot[0]
+}
+
+// ct_rows：解引用槽得到当前类型表首址。
+// 未绑定是内部错误（入口忘了调 check.ct_types_sync）：写诊断后终止，
+// 绝不让调用方读到空表而静默算错。
+fn ct_rows() *CtTypeRow {
+    if (ct_rows_slot == 0 || ct_n_slot == 0) {
+        support.fail("内部错误：CT 类型表未绑定（缺 check.ct_types_sync）")
+        exit(1)
+    }
+    let slot **CtTypeRow = ct_rows_slot.to_type(**CtTypeRow)
+    return slot[0]
 }
 
 // ct_type_row：取第 tid 行镜像；调用方必须保证 0 <= tid < ct_types_bound()。
 pub fn ct_type_row(tid int) CtTypeRow {
-    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    let rows *CtTypeRow = ct_rows()
     return rows[tid]
 }
 
 // ct_ty_kind：类型种类（TY_*）。
 pub fn ct_ty_kind(tid int) int {
-    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    let rows *CtTypeRow = ct_rows()
     return rows[tid].kind
 }
 
 // ct_ty_size：类型的字节大小。
 pub fn ct_ty_size(tid int) int {
-    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    let rows *CtTypeRow = ct_rows()
     return rows[tid].size
 }
 
 // ct_ty_align：类型的字节对齐。
 pub fn ct_ty_align(tid int) int {
-    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    let rows *CtTypeRow = ct_rows()
     return rows[tid].align
 }
 
 // ct_ty_elem：指针/数组/切片的元素类型；其余为 -1。
 pub fn ct_ty_elem(tid int) int {
-    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    let rows *CtTypeRow = ct_rows()
     return rows[tid].elem
 }
 
 // ct_ty_len：数组长度或结构体字段数；其余为 -1。
 pub fn ct_ty_len(tid int) int {
-    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    let rows *CtTypeRow = ct_rows()
     return rows[tid].len
 }
 
 // ct_ty_sub：结构体字段表起点或函数签名号。
 pub fn ct_ty_sub(tid int) int {
-    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    let rows *CtTypeRow = ct_rows()
     return rows[tid].sub
 }
 
