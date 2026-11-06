@@ -84,8 +84,5 @@
 
 - `just test-libs` 是标准库测试唯一入口；旧 `libs-test`/`libs-test-o2`/`test-lib-tests` 已删除。
 - 缺 `*.test.yh` 的库只打印提示（决策 D9），不阻断。
-- `just test` / `just test-libs` 用 `[parallel]` 并行独立层/组；默认并行数为
-  CPU 数，`TEST_JOBS=N` 可覆盖，`TEST_JOBS=1` 恢复串行。每层内部单线程，
-  避免并发叠乘。
 - CI 的 darwin-arm64 / linux-arm64 / linux-x86_64 三个 job 各自调用同一个
   `just test-libs`；O2 已包含在目标内，不再按平台追加。

@@ -68,7 +68,6 @@
 
 ```bash
 just test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
-TEST_JOBS=8 just test   # 并行层数（默认 CPU 数；TEST_JOBS=1 串行）
 just bootstrap          # 首次/换机：准备固定 LLVM 闭包后冷编（一条命令，幂等）
 just selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
 just llvm-host          # 只准备本机固定 LLVM 闭包（不编编译器）

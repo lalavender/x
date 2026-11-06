@@ -8,27 +8,21 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
-## 2026-11-06 test/test-libs 并行执行
+## 2026-11-06 测试并行试验回退
 
-**结果**：`just test`、`just test-libs` 改为 `[parallel]` 聚合 recipe，
-`quick` 的两个独立层也并行；默认并行数为 CPU 数，`TEST_JOBS=N` 可覆盖，
-`TEST_JOBS=1` 恢复串行。每层/组内部单线程，避免与 just 层并发叠乘。
+**结果**：曾把 `test`/`test-libs` 拆成 `[parallel]` + 私有子 recipe，并用
+`TEST_JOBS` 控制并发。实测冷缓存 `just test` 121→47 s、`just test-libs`
+187→84 s，但热缓存、忙碌机器（load≈9）下提升有限，且引入 `libs` 复制与
+install 并发约束、额外 recipe 和调试成本。按用户决定回退为**串行 recipe**：
 
-- `test`、`test-libs` 保留为公开入口；实际依赖图分别在私有
-  `test-parallel`、`test-libs-parallel`，逐层拆成 `_test-*` / `_test-libs-*`
-  私有 recipe。
-- 外层 recipe 用嵌套 `just --jobs` 启动并行图，并显式透传 `SEED`、
-  `SEED_DEST`、`BUILD_CACHE`、`FAST_DIR`、`FAST_STAGE`、`YH_ANTLR`、
-  `YH_LLVM_HOST`、`YH_LLVM_CACHE`，保证 `just SEED=... test` 等覆盖不丢。
-- `_test-libs-o2`、TOML injection、string O0/O2 依赖 `_test-libs-blocks`：
-  这些脚本会复制 `libs/`，必须等 `libs/tmp/yh-test` 写完，避免 copy 与
-  testkit 临时文件竞争。
-- TOML/string/fmt 三个 install 门合并为一个串行子组，并用
-  `JUST_NO_DEPS=true` 调 `just install`，避免并行触发重复 `_ensure_built`
-  构建；`just install` 的 find 排除 `libs/tmp`，避免把测试临时文件带进安装树。
+- `test`、`quick`、`test-libs` 恢复顺序执行，不再使用 `[parallel]`/`TEST_JOBS`；
+- 保留 `test-libs` 合并、`tests/fmt/install.py` 清单修复，以及 `just install`
+  排除 `libs/tmp`；
+- 不保留 `JUST_NO_DEPS`、并行 install 子组和 `_test-*`/`_test-libs-*` 私有层。
 
-**验证**：`just build` 通过；`just test`、`just test-libs` 通过；
-`TEST_JOBS=8 just test`、`TEST_JOBS=8 just test-libs` 通过；
+**验证**：`just test-libs` 串行通过；`just test` 已恢复原串行 recipe，本轮因当前
+宿主固定 LLVM 闭包缺失（`tmp/llvm-migration` 无 `libyh-llvm-bridge.a`，SDK 27
+TAPI 不兼容）在 compiler-tests 阶段失败，属环境问题，恢复闭包后需复跑。
 `just --list` 仍为 28 个公开目标。
 
 ## 2026-11-06 标准库测试合并为 just test-libs

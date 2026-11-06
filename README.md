@@ -220,10 +220,9 @@ pub fn main() int {
 ## 测试
 
 ```sh
-just test               # 三层回归（默认按 CPU 数并行）
-just test-libs          # 全部标准库测试（默认按 CPU 数并行）
+just test               # 三层回归
+just test-libs          # 全部标准库测试
 just selfhost-native    # 自举主门
-TEST_JOBS=8 just test   # 指定并行层数；TEST_JOBS=1 串行
 ```
 
 - `just test` 有三层：

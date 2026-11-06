@@ -26,8 +26,6 @@
 #   just build SEED=bin/yh-linux-arm64
 #   just selfhost-native SKIP_CORPUS=1
 #   just install DESTDIR=/tmp/root PREFIX=/usr
-#   just TEST_JOBS=8 test         并行测试层数（默认 CPU 数；1 = 串行）
-#   just TEST_JOBS=8 test-libs    同上，用于标准库测试组
 # 环境变量形式同样生效（SKIP_CORPUS=1 just selfhost-native）。
 #
 # 内嵌静态 LLVM（LL3，见 docs/02-plan/yh-LLVM后端替换实施方案.md）：
@@ -139,9 +137,6 @@ selfhost_work_flag := if SELFHOST_WORKDIR == "" { if fast_stage == "1" { "--work
 # 那遍（约 1 分钟）。默认 0——门保持最严，重复跑一遍不省。
 SKIP_CORPUS := env_var_or_default("SKIP_CORPUS", "0")
 skip_corpus := if SKIP_CORPUS == "" { "0" } else { SKIP_CORPUS }
-# 并行测试的 recipe 数；默认按 CPU 数，TEST_JOBS=N 可调，1 恢复串行。
-TEST_JOBS := env_var_or_default("TEST_JOBS", "")
-test_jobs := if TEST_JOBS == "" { num_cpus() } else { TEST_JOBS }
 corpus_flag := if skip_corpus == "1" { "--skip-corpus" } else { "" }
 
 # LL10：x86_64 LLVM 语料与原生连续自举门。只在 Linux/x86_64 启动；
@@ -321,147 +316,54 @@ stage-yh: _prepare_windows_sdk _ensure_built
     @YH_STAGE_PATH="{{ yh_run }}" {{ py }} -c "import os;p=os.environ['YH_STAGE_PATH'];st=os.stat(p);print(f'编译器: {p} {st.st_size} bytes mtime={int(st.st_mtime)}')" 
     @if [ "{{ host_os }}" = "macos" ] && [ "{{ fast_stage }}" = "1" ]; then ln -sfn "{{ root }}/vendor/darwin-sdk" "{{ fast_dir }}/darwin-sdk"; fi
 
-# 默认按 CPU 数并行独立层，TEST_JOBS=N 可调，1 恢复串行；内部单线程避免并发叠乘。
-# test：三层回归（ANTLR + 编译器语法 + 运行语义）。
-test:
-    @SEED="{{ seed }}" SEED_DEST="{{ seed_dest }}" FAST_STAGE="{{ fast_stage }}" FAST_DIR="{{ FAST_DIR }}" YH_ANTLR="{{ antlr }}" YH_BUILD_CACHE="{{ build_cache }}" YH_LLVM_HOST="{{ YH_LLVM_HOST }}" YH_LLVM_CACHE="{{ cache_root }}" just --jobs {{ test_jobs }} test-parallel
-
-[private]
-[parallel]
-test-parallel: _test-antlr _test-syntax _test-run _test-modules _test-cache _test-opt _test-libs-blocks _test-compiler _test-fmt _test-global-cache _test-code-stats _test-arch-selftest _test-arch
-
-[private]
-_test-antlr:
+# test：三层回归——ANTLR 参考语法 + 编译器语法模式 + 运行语义语料。
+# 语料门的编译器一律用暂存副本 yh_run；ANTLR 层在单进程内解析，不需要编译器。
+test: stage-yh
     @if [ "{{ antlr }}" = "1" ]; then {{ py }} "{{ root }}/tests/yh/check.py"; else echo "跳过 ANTLR 参考语法层（YH_ANTLR={{ antlr }}）"; fi
-
-[private]
-_test-syntax: stage-yh
-    YH_CACHE=off {{ py }} "{{ root }}/tests/yh/check.py" --compiler --compiler-path "{{ yh_run }}" --jobs 1
-
-[private]
-_test-run: stage-yh
-    YH_CACHE=off {{ py }} "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" {{ run_work_flag }} --jobs 1
-
-[private]
-_test-modules: stage-yh
+    YH_CACHE=off {{ py }} "{{ root }}/tests/yh/check.py" --compiler --compiler-path "{{ yh_run }}"
+    YH_CACHE=off {{ py }} "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" {{ run_work_flag }}
     YH_CACHE=off {{ py }} "{{ root }}/tests/modules/test-check.py" --compiler-path "{{ yh_run }}"
-
-[private]
-_test-cache: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/tests/build-cache/check.py" --compiler-path "{{ yh_run }}"
-
-[private]
-_test-opt: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/tests/modules/opt-level.py" --compiler-path "{{ yh_run }}" --workdir "{{ root }}/tmp/dep-opt"
-
-[private]
-_test-libs-blocks: stage-yh
     @cd "{{ root }}/libs" && YH_CACHE=off "{{ yh_run }}" test --timeout 60
-
-[private]
-_test-compiler: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/tools/compiler-tests.py" --compiler-path "{{ yh_run }}"
-
-[private]
-_test-fmt: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/tests/fmt/interp.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/fmt-interp"
-
-[private]
-_test-global-cache: stage-yh
     {{ py }} "{{ root }}/tests/selfhost/llvm-global-cache.py" --compiler-path "{{ yh_run }}"
-
-[private]
-_test-code-stats:
     YH_CACHE=off {{ py }} "{{ root }}/tests/tools/yh-code-stats/check.py"
-
-[private]
-_test-arch-selftest:
     YH_CACHE=off {{ py }} "{{ root }}/tests/tools/arch-check/check.py"
-
-[private]
-_test-arch:
     YH_CACHE=off {{ py }} "{{ root }}/tools/arch-check.py"
 
-# quick：日常迭代门。只跑不依赖后端的语法语料，ANTLR 与编译器检查并行。
-[parallel]
-quick: _quick-antlr _quick-syntax
-
-[private]
-_quick-antlr:
+# quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
+# 秒级到十几秒；运行语义与自举门留给 test/full。
+quick: stage-yh
     @if [ "{{ antlr }}" = "1" ]; then {{ py }} "{{ root }}/tests/yh/check.py"; else echo "跳过 ANTLR 参考语法层（YH_ANTLR={{ antlr }}）"; fi
-
-[private]
-_quick-syntax: stage-yh
-    {{ py }} "{{ root }}/tests/yh/check.py" --compiler --compiler-path "{{ yh_run }}" --jobs 1
+    {{ py }} "{{ root }}/tests/yh/check.py" --compiler --compiler-path "{{ yh_run }}"
 
 # 缺 *.test.yh 的库只提示、不阻断（2026-10-25 决策 D9）。
-# test-libs：全部标准库测试；默认按 CPU 数并行，TEST_JOBS=N 可调，1 恢复串行。
-test-libs:
-    @SEED="{{ seed }}" SEED_DEST="{{ seed_dest }}" FAST_STAGE="{{ fast_stage }}" FAST_DIR="{{ FAST_DIR }}" YH_ANTLR="{{ antlr }}" YH_BUILD_CACHE="{{ build_cache }}" YH_LLVM_HOST="{{ YH_LLVM_HOST }}" YH_LLVM_CACHE="{{ cache_root }}" just --jobs {{ test_jobs }} test-libs-parallel
-
-[private]
-[parallel]
-test-libs-parallel: _test-libs-hint _test-libs-blocks _test-libs-cli _test-libs-os _test-libs-libc _test-libs-o2 _test-libs-toml-conformance _test-libs-toml-injection _test-libs-string-o0 _test-libs-string-o2 _test-libs-num _test-libs-fmt-interp _test-libs-installs
-
-[private]
-_test-libs-hint:
+# test-libs：全部标准库测试（test 块 O0/O2 + 外部 runner + TOML/string/num/fmt 专项/安装）。
+test-libs: stage-yh
     @cd "{{ root }}/libs" && for d in */; do case "$d" in tmp/) continue;; esac; ls "$d"*.test.yh >/dev/null 2>&1 || echo "提示：libs/${d%/} 还没有测试文件（*.test.yh）"; done
-
-[private]
-_test-libs-cli: stage-yh
+    @cd "{{ root }}/libs" && YH_CACHE=off "{{ yh_run }}" test --timeout 60
     YH_CACHE=off {{ py }} "{{ root }}/libs/cli/test/run.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-cli"
     YH_CACHE=off {{ py }} "{{ root }}/libs/cli/test/diff.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-cli-diff"
-
-[private]
-_test-libs-os: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/libs/os/test/run.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-os"
-
-[private]
-_test-libs-libc: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/libs/libc/test/run.py" --compiler "{{ yh_run }}" --workdir "{{ root }}/tmp/libs-libc"
-
-[private]
-_test-libs-o2: stage-yh _test-libs-blocks
     @rm -rf "{{ root }}/tmp/libs-o2"
     @cp -R "{{ root }}/libs" "{{ root }}/tmp/libs-o2"
     @rm -rf "{{ root }}/tmp/libs-o2/tmp" "{{ root }}/tmp/libs-o2/.build"
     @cd "{{ root }}/tmp/libs-o2" && YH_CACHE=off "{{ yh_run }}" -O2 test --timeout 60
-
-[private]
-_test-libs-toml-prepare:
     YH_CACHE=off {{ py }} "{{ root }}/tests/toml/conformance.py" --prepare
-
-[private]
-_test-libs-toml-conformance: stage-yh _test-libs-toml-prepare
     YH_CACHE=off {{ py }} "{{ root }}/tests/toml/conformance.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/toml-conformance"
-
-[private]
-_test-libs-toml-injection: stage-yh _test-libs-blocks
     YH_CACHE=off {{ py }} "{{ root }}/tests/toml/injection.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/toml-inject"
-
-[private]
-_test-libs-string-o0: stage-yh _test-libs-blocks
+    YH_CACHE=off {{ py }} "{{ root }}/tests/toml/install.py" --workdir "{{ root }}/tmp/toml-install"
     YH_CACHE=off {{ py }} "{{ root }}/tests/string/run.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/string-test" --opt-level 0
     YH_CACHE=off {{ py }} "{{ root }}/tests/string/reference.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/string-reference" --opt-level 0
-
-[private]
-_test-libs-string-o2: stage-yh _test-libs-blocks
     YH_CACHE=off {{ py }} "{{ root }}/tests/string/run.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/string-test-o2" --opt-level 2
     YH_CACHE=off {{ py }} "{{ root }}/tests/string/reference.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/string-reference-o2" --opt-level 2
-
-[private]
-_test-libs-num: stage-yh
+    YH_CACHE=off {{ py }} "{{ root }}/tests/string/install.py" --workdir "{{ root }}/tmp/string-install"
     YH_CACHE=off {{ py }} "{{ root }}/tests/num/reference.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/num-reference"
-
-[private]
-_test-libs-fmt-interp: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/tests/fmt/interp.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/fmt-interp"
-
-[private]
-_test-libs-installs: stage-yh
-    JUST_NO_DEPS=true YH_CACHE=off {{ py }} "{{ root }}/tests/toml/install.py" --workdir "{{ root }}/tmp/toml-install"
-    JUST_NO_DEPS=true YH_CACHE=off {{ py }} "{{ root }}/tests/string/install.py" --workdir "{{ root }}/tmp/string-install"
-    JUST_NO_DEPS=true YH_CACHE=off {{ py }} "{{ root }}/tests/fmt/install.py" --workdir "{{ root }}/tmp/fmt-install"
+    YH_CACHE=off {{ py }} "{{ root }}/tests/fmt/install.py" --workdir "{{ root }}/tmp/fmt-install"
 
 # selfhost-native：本机全套门（无需容器、无 stage0）。
 # 旧种子迁移代 + 候选两代固定点 + 自解析/语法/运行语料 + 项目验收。
