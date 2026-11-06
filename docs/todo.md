@@ -120,8 +120,9 @@ lex → parse(纯语法) → AST
   `comptime` 的 44 处 `gen.ty_is_*` 与 19 处 `gen.CType` 字段读全部改镜像
   （`ct_ty_is_*` / `ct_type_row`），未绑定时写诊断并终止（不静默算错）。
   绑定点：`cmd/common`、`build/module_worker`、`llvm_emit` 与三个前端
-  fixture。`gen.` 引用 594→492。ctfacts fixture 增加「64 次类型扩容后不
-  重新绑定仍读到新行」的断言，实跑通过。
+  fixture。ctfacts fixture 增加「64 次类型扩容后不重新绑定仍读到新行」的
+  断言，实跑通过。`comptime` 的 130 处 `gen.TY_*` 也换成 `CT_TY_*` 镜像常量，
+  `gen.` 引用 594→365。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

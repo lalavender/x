@@ -775,7 +775,8 @@ suffixes、`windows_link.yh` prefixes）、justfile 5 处、tools 2 个、selfho
   `check/checked_model.yh` 新增受检表分配的语言内测试；
   `gen/token_bridge.yh` 删除；`import gen` 14→13、`gen` pub 79→76。
 - **F4-1（本轮）**：CT 类型镜像改「绑定槽」，类型表扩容/搬迁后无需重绑；
-  `comptime` 的 44 处谓词与 19 处 `CType` 读改镜像（`gen.` 引用 594→492）。
+  `comptime` 的 44 处谓词、19 处 `CType` 读、130 处 `TY_*` 常量改镜像
+  （`gen.` 引用 594→365）。
 - **F4-0（本轮）**：`comptime/ct_facts.yh` 零拷贝类型镜像 + `check/ct_bind.yh`
   绑定点/形状守卫；`tests/modules/projects/ctfacts/` 差分 fixture 实跑通过。
 - **未完成**：F2（`parse` 纯语法）与 F4 其余步（`comptime` 纯 CT IR 执行器）未做，

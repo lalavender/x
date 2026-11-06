@@ -44,7 +44,7 @@ fn ct_ir_index_place(frame *CtFrame, expr_id int, place *CtPlace) int {
     }
     let kind int = tk.t_types[base.type_id].kind
     // 指针下标 p[i] 等价 *(p + i)：按槽步进后由存活帧校验解析目标槽。
-    if (kind == gen.TY_PTR) {
+    if (kind == CT_TY_PTR) {
         if (tk.t_types[base.type_id].elem != expr.type_id) {
             return gen.sem_err("编译期指针下标元素类型不匹配")
         }
@@ -60,7 +60,7 @@ fn ct_ir_index_place(frame *CtFrame, expr_id int, place *CtPlace) int {
         place.direct = target
         return 0
     }
-    if (kind != gen.TY_ARRAY && kind != gen.TY_SLICE) {
+    if (kind != CT_TY_ARRAY && kind != CT_TY_SLICE) {
         return gen.sem_err("编译期下标只支持数组、切片或标量指针")
     }
     let aggregate *CtAggregate = base.value.to_type(u64).to_type(*CtAggregate)
@@ -68,10 +68,10 @@ fn ct_ir_index_place(frame *CtFrame, expr_id int, place *CtPlace) int {
         || aggregate.elem_type < 0 || aggregate.elem_type >= tk.t_type_n
         || aggregate.elem_type != tk.t_types[base.type_id].elem
         || aggregate.elem_type != expr.type_id
-        || (kind == gen.TY_ARRAY && (aggregate.count != tk.t_types[base.type_id].len
+        || (kind == CT_TY_ARRAY && (aggregate.count != tk.t_types[base.type_id].len
                 || (ct_ty_is_integer(aggregate.elem_type) == 0
                     && ct_ir_array_supported(base.type_id, 0) == 0)))
-        || (kind == gen.TY_SLICE
+        || (kind == CT_TY_SLICE
             && ct_ir_slice_elem_supported(aggregate.elem_type, 0) == 0)) {
         // aggregate == 0 的典型来源是**全局聚合常量**（`.data`/`.bss` 里的存储）：它的值
         // 是数据段标签而不是 CtAggregate 对象指针，编译期尚未为之建模。给出明确诊断，
@@ -138,16 +138,16 @@ fn ct_ir_aggregate_view(frame *CtFrame, source *CtAggregate, start int,
 fn ct_ir_array_supported(type_id int, depth int) int {
     let tk *gen.TaskCtx = gen.task()
     if (depth >= 32 || type_id < 0 || type_id >= tk.t_type_n
-        || tk.t_types[type_id].kind != gen.TY_ARRAY) { return 0 }
+        || tk.t_types[type_id].kind != CT_TY_ARRAY) { return 0 }
     let array CtTypeRow = ct_type_row(type_id)
     if (array.len < 0 || array.len > 100000 || array.elem < 0
         || array.elem >= tk.t_type_n) { return 0 }
     if (ct_ty_is_integer(array.elem) != 0 || ct_ty_is_float(array.elem) != 0) { return 1 }
     let elem_kind int = tk.t_types[array.elem].kind
-    if (elem_kind == gen.TY_ARRAY) {
+    if (elem_kind == CT_TY_ARRAY) {
         return ct_ir_array_supported(array.elem, depth + 1)
     }
-    if (elem_kind == gen.TY_STRUCT) {
+    if (elem_kind == CT_TY_STRUCT) {
         return ct_ir_struct_supported(array.elem, depth + 1)
     }
     return 0
@@ -159,8 +159,8 @@ fn ct_ir_slice_elem_supported(type_id int, depth int) int {
     if (depth >= 32 || type_id < 0 || type_id >= tk.t_type_n) { return 0 }
     if (ct_ty_is_integer(type_id) != 0 || ct_ty_is_float(type_id) != 0) { return 1 }
     let kind int = tk.t_types[type_id].kind
-    if (kind == gen.TY_ARRAY) { return ct_ir_array_supported(type_id, depth) }
-    if (kind == gen.TY_STRUCT) { return ct_ir_struct_supported(type_id, depth) }
+    if (kind == CT_TY_ARRAY) { return ct_ir_array_supported(type_id, depth) }
+    if (kind == CT_TY_STRUCT) { return ct_ir_struct_supported(type_id, depth) }
     return 0
 }
 
@@ -171,15 +171,15 @@ pub fn ct_ir_param_supported(type_id int) int {
     let kind int = tk.t_types[type_id].kind
     if (ct_ty_is_integer(type_id) != 0 || ct_ty_is_float(type_id) != 0) { return 1 }
     // 指针形参只别名调用方帧的标量槽；指向指针或聚合的指针仍拒绝。
-    if (kind == gen.TY_PTR) {
+    if (kind == CT_TY_PTR) {
         return (ct_ty_is_integer(tk.t_types[type_id].elem) != 0
             || ct_ty_is_float(tk.t_types[type_id].elem) != 0).to_type(int)
     }
-    if (kind == gen.TY_ARRAY) { return ct_ir_array_supported(type_id, 0) }
-    if (kind == gen.TY_STRUCT || kind == gen.TY_UNION) {
+    if (kind == CT_TY_ARRAY) { return ct_ir_array_supported(type_id, 0) }
+    if (kind == CT_TY_STRUCT || kind == CT_TY_UNION) {
         return ct_ir_struct_supported(type_id, 0)
     }
-    if (kind == gen.TY_SLICE) {
+    if (kind == CT_TY_SLICE) {
         let elem int = tk.t_types[type_id].elem
         return ct_ir_slice_elem_supported(elem, 0)
     }
@@ -281,11 +281,11 @@ pub fn ct_ir_return_supported(type_id int) int {
     if (type_id < 0 || type_id >= tk.t_type_n) { return 0 }
     let kind int = tk.t_types[type_id].kind
     if (ct_ty_is_integer(type_id) != 0 || ct_ty_is_float(type_id) != 0) { return 1 }
-    if (kind == gen.TY_ARRAY) { return ct_ir_array_supported(type_id, 0) }
-    if (kind == gen.TY_STRUCT || kind == gen.TY_UNION) {
+    if (kind == CT_TY_ARRAY) { return ct_ir_array_supported(type_id, 0) }
+    if (kind == CT_TY_STRUCT || kind == CT_TY_UNION) {
         return ct_ir_struct_supported(type_id, 0)
     }
-    if (kind == gen.TY_SLICE) {
+    if (kind == CT_TY_SLICE) {
         return ct_ir_slice_elem_supported(tk.t_types[type_id].elem, 0)
     }
     return 0
@@ -295,17 +295,17 @@ pub fn ct_ir_return_supported(type_id int) int {
 fn ct_ir_slice_param_valid(type_id int, value *CtValue) int {
     let tk *gen.TaskCtx = gen.task()
     if (value == 0 || type_id < 0 || type_id >= tk.t_type_n
-        || tk.t_types[type_id].kind != gen.TY_SLICE
+        || tk.t_types[type_id].kind != CT_TY_SLICE
         || value.type_id < 0 || value.type_id >= tk.t_type_n) { return 0 }
     if (ct_ir_slice_elem_supported(tk.t_types[type_id].elem, 0) == 0) { return 0 }
     let actual CtTypeRow = ct_type_row(value.type_id)
-    if ((actual.kind != gen.TY_ARRAY && actual.kind != gen.TY_SLICE)
+    if ((actual.kind != CT_TY_ARRAY && actual.kind != CT_TY_SLICE)
         || actual.elem != tk.t_types[type_id].elem) { return 0 }
     let aggregate *CtAggregate = value.value.to_type(u64).to_type(*CtAggregate)
     if (aggregate == 0 || aggregate.count < 0 || aggregate.count > 100000
         || aggregate.elem_type != actual.elem
         || (aggregate.count > 0 && aggregate.values == 0)
-        || (actual.kind == gen.TY_ARRAY && aggregate.count != actual.len)) {
+        || (actual.kind == CT_TY_ARRAY && aggregate.count != actual.len)) {
         return 0
     }
     return 1
@@ -340,7 +340,7 @@ fn ct_ir_array_clone_mode(frame *CtFrame, type_id int,
     source *CtAggregate, copy_slices int) *CtAggregate {
     let tk *gen.TaskCtx = gen.task()
     if (type_id < 0 || type_id >= tk.t_type_n
-        || tk.t_types[type_id].kind != gen.TY_ARRAY) {
+        || tk.t_types[type_id].kind != CT_TY_ARRAY) {
         gen.sem_err("编译期数组复制目标必须是定长数组")
         return 0
     }
@@ -369,14 +369,14 @@ fn ct_ir_array_clone_mode(frame *CtFrame, type_id int,
         copy.values[i] = source.values[i]
         copy.values[i].type_id = array.elem
         let elem_kind int = tk.t_types[array.elem].kind
-        if (elem_kind == gen.TY_ARRAY) {
+        if (elem_kind == CT_TY_ARRAY) {
             let nested_source *CtAggregate = source.values[i].value .
                 to_type(u64).to_type(*CtAggregate)
             let nested_copy *CtAggregate = ct_ir_array_clone_mode(frame,
                 array.elem, nested_source, copy_slices)
             if (nested_copy == 0) { return 0 }
             copy.values[i].value = nested_copy.to_type(u64).to_type(i64)
-        } else if (elem_kind == gen.TY_STRUCT) {
+        } else if (elem_kind == CT_TY_STRUCT) {
             let nested_struct *CtAggregate = source.values[i].value .
                 to_type(u64).to_type(*CtAggregate)
             let struct_copy *CtAggregate = ct_ir_struct_clone_mode(frame,
@@ -424,8 +424,8 @@ fn ct_ir_slice_eval(frame *CtFrame, expr_id int, out *CtValue) int {
         return gen.sem_err("内部错误：编译期切片结果类型无效")
     }
     let result_type CtTypeRow = ct_type_row(expr.type_id)
-    if ((base_type.kind != gen.TY_ARRAY && base_type.kind != gen.TY_SLICE)
-        || result_type.kind != gen.TY_SLICE
+    if ((base_type.kind != CT_TY_ARRAY && base_type.kind != CT_TY_SLICE)
+        || result_type.kind != CT_TY_SLICE
         || base_type.elem != result_type.elem
         || ct_ir_slice_elem_supported(base_type.elem, 0) == 0) {
         return gen.sem_err("编译期切片只支持整数、浮点或受支持结构体元素")
@@ -433,7 +433,7 @@ fn ct_ir_slice_eval(frame *CtFrame, expr_id int, out *CtValue) int {
     let source *CtAggregate = base.value.to_type(u64).to_type(*CtAggregate)
     if (source == 0 || source.values == 0 || source.count < 0
         || source.count > 100000 || source.elem_type != base_type.elem
-        || (base_type.kind == gen.TY_ARRAY && source.count != base_type.len)) {
+        || (base_type.kind == CT_TY_ARRAY && source.count != base_type.len)) {
         return gen.sem_err("内部错误：编译期切片源存储无效")
     }
     if (start.value < 0 || end.value < 0
@@ -479,9 +479,9 @@ fn ct_ir_struct_field_supported(type_id int, depth int) int {
     if (type_id < 0 || type_id >= tk.t_type_n) { return 0 }
     if (ct_ty_is_integer(type_id) != 0 || ct_ty_is_float(type_id) != 0) { return 1 }
     let kind int = tk.t_types[type_id].kind
-    if (kind == gen.TY_ARRAY) { return ct_ir_array_supported(type_id, depth + 1) }
-    if (kind == gen.TY_STRUCT) { return ct_ir_struct_supported(type_id, depth + 1) }
-    if (kind == gen.TY_SLICE) {
+    if (kind == CT_TY_ARRAY) { return ct_ir_array_supported(type_id, depth + 1) }
+    if (kind == CT_TY_STRUCT) { return ct_ir_struct_supported(type_id, depth + 1) }
+    if (kind == CT_TY_SLICE) {
         return ct_ir_slice_elem_supported(tk.t_types[type_id].elem, depth + 1)
     }
     return 0
@@ -492,7 +492,7 @@ fn ct_ir_struct_field_supported(type_id int, depth int) int {
 fn ct_ir_union_supported(type_id int, depth int) int {
     let tk *gen.TaskCtx = gen.task()
     if (depth >= 32 || type_id < 0 || type_id >= tk.t_type_n
-        || tk.t_types[type_id].kind != gen.TY_UNION) { return 0 }
+        || tk.t_types[type_id].kind != CT_TY_UNION) { return 0 }
     let st CtTypeRow = ct_type_row(type_id)
     if (st.len <= 0 || st.len > 100000 || st.sub < 0
         || st.sub > tk.t_field_n || st.len > tk.t_field_n - st.sub) {
@@ -515,7 +515,7 @@ fn ct_ir_union_broadcast(aggregate *CtAggregate, index int, value i64) int {
     let tk *gen.TaskCtx = gen.task()
     if (aggregate == 0 || index < 0 || index >= aggregate.count) { return -1 }
     if (aggregate.elem_type < 0 || aggregate.elem_type >= tk.t_type_n
-        || tk.t_types[aggregate.elem_type].kind != gen.TY_UNION) { return 0 }
+        || tk.t_types[aggregate.elem_type].kind != CT_TY_UNION) { return 0 }
     let st CtTypeRow = ct_type_row(aggregate.elem_type)
     let i int = 0
     for i < st.len {
@@ -535,10 +535,10 @@ fn ct_ir_union_broadcast(aggregate *CtAggregate, index int, value i64) int {
 fn ct_ir_struct_supported(type_id int, depth int) int {
     let tk *gen.TaskCtx = gen.task()
     if (depth >= 32 || type_id < 0 || type_id >= tk.t_type_n) { return 0 }
-    if (tk.t_types[type_id].kind == gen.TY_UNION) {
+    if (tk.t_types[type_id].kind == CT_TY_UNION) {
         return ct_ir_union_supported(type_id, depth)
     }
-    if (tk.t_types[type_id].kind != gen.TY_STRUCT) { return 0 }
+    if (tk.t_types[type_id].kind != CT_TY_STRUCT) { return 0 }
     let st CtTypeRow = ct_type_row(type_id)
     if (st.len < 0 || st.len > 100000 || st.sub < 0
         || st.sub > tk.t_field_n || st.len > tk.t_field_n - st.sub) {
@@ -560,8 +560,8 @@ fn ct_ir_struct_eval(frame *CtFrame, expr_id int, out *CtValue) int {
     let expr CtExpr = ct_ir_exprs[expr_id]
     let tk *gen.TaskCtx = gen.task()
     if (expr.kind != 13 || expr.type_id < 0 || expr.type_id >= tk.t_type_n
-        || (tk.t_types[expr.type_id].kind != gen.TY_STRUCT
-            && tk.t_types[expr.type_id].kind != gen.TY_UNION)) {
+        || (tk.t_types[expr.type_id].kind != CT_TY_STRUCT
+            && tk.t_types[expr.type_id].kind != CT_TY_UNION)) {
         return gen.sem_err("编译期结构体字面量类型无效")
     }
     let st CtTypeRow = ct_type_row(expr.type_id)
@@ -569,7 +569,7 @@ fn ct_ir_struct_eval(frame *CtFrame, expr_id int, out *CtValue) int {
         || st.sub > tk.t_field_n || st.len > tk.t_field_n - st.sub) {
         return gen.sem_err("内部错误：编译期结构体字段范围无效")
     }
-    let is_union int = (tk.t_types[expr.type_id].kind == gen.TY_UNION).to_type(int)
+    let is_union int = (tk.t_types[expr.type_id].kind == CT_TY_UNION).to_type(int)
     if (ct_ir_struct_supported(expr.type_id, 0) == 0) {
         if (is_union != 0) {
             return gen.sem_err("编译期联合体字段只支持整数标量")
@@ -638,8 +638,8 @@ fn ct_ir_struct_eval(frame *CtFrame, expr_id int, out *CtValue) int {
             return -1
         }
         aggregate.values[field_index].type_id = target
-        if (tk.t_types[target].kind == gen.TY_STRUCT
-            || tk.t_types[target].kind == gen.TY_UNION) {
+        if (tk.t_types[target].kind == CT_TY_STRUCT
+            || tk.t_types[target].kind == CT_TY_UNION) {
             let source *CtAggregate = value.value.to_type(u64) .
                 to_type(*CtAggregate)
             let copy *CtAggregate = ct_ir_struct_clone(frame, target, source)
@@ -649,7 +649,7 @@ fn ct_ir_struct_eval(frame *CtFrame, expr_id int, out *CtValue) int {
                 return -1
             }
             aggregate.values[field_index].value = copy.to_type(u64).to_type(i64)
-        } else if (tk.t_types[target].kind == gen.TY_ARRAY) {
+        } else if (tk.t_types[target].kind == CT_TY_ARRAY) {
             let source *CtAggregate = value.value.to_type(u64).to_type(*CtAggregate)
             let copy *CtAggregate = ct_ir_array_clone(frame, target, source)
             if (copy == 0) {
@@ -658,7 +658,7 @@ fn ct_ir_struct_eval(frame *CtFrame, expr_id int, out *CtValue) int {
                 return -1
             }
             aggregate.values[field_index].value = copy.to_type(u64).to_type(i64)
-        } else if (tk.t_types[target].kind == gen.TY_SLICE) {
+        } else if (tk.t_types[target].kind == CT_TY_SLICE) {
             let view *CtAggregate = ct_ir_slice_clone_view(frame, target, &value)
             if (view == 0) {
                 free(order.to_type(*void))
@@ -697,8 +697,8 @@ fn ct_ir_struct_clone_mode(frame *CtFrame, type_id int,
     source *CtAggregate, copy_slices int) *CtAggregate {
     let tk *gen.TaskCtx = gen.task()
     if (type_id < 0 || type_id >= tk.t_type_n
-        || (tk.t_types[type_id].kind != gen.TY_STRUCT
-            && tk.t_types[type_id].kind != gen.TY_UNION)) {
+        || (tk.t_types[type_id].kind != CT_TY_STRUCT
+            && tk.t_types[type_id].kind != CT_TY_UNION)) {
         gen.sem_err("编译期结构体复制目标类型无效")
         return 0
     }
@@ -720,21 +720,21 @@ fn ct_ir_struct_clone_mode(frame *CtFrame, type_id int,
             return 0
         }
         copy.values[i] = source.values[i]
-        if (tk.t_types[field.type_id].kind == gen.TY_STRUCT) {
+        if (tk.t_types[field.type_id].kind == CT_TY_STRUCT) {
             let nested_source *CtAggregate = source.values[i].value .
                 to_type(u64).to_type(*CtAggregate)
             let nested_copy *CtAggregate = ct_ir_struct_clone_mode(frame,
                 field.type_id, nested_source, copy_slices)
             if (nested_copy == 0) { return 0 }
             copy.values[i].value = nested_copy.to_type(u64).to_type(i64)
-        } else if (tk.t_types[field.type_id].kind == gen.TY_ARRAY) {
+        } else if (tk.t_types[field.type_id].kind == CT_TY_ARRAY) {
             let array_source *CtAggregate = source.values[i].value .
                 to_type(u64).to_type(*CtAggregate)
             let array_copy *CtAggregate = ct_ir_array_clone_mode(frame,
                 field.type_id, array_source, copy_slices)
             if (array_copy == 0) { return 0 }
             copy.values[i].value = array_copy.to_type(u64).to_type(i64)
-        } else if (tk.t_types[field.type_id].kind == gen.TY_SLICE) {
+        } else if (tk.t_types[field.type_id].kind == CT_TY_SLICE) {
             if (ct_ir_slice_param_valid(field.type_id, &source.values[i]) == 0) {
                 gen.sem_err("内部错误：编译期结构体切片字段存储无效")
                 return 0
@@ -797,9 +797,9 @@ fn ct_ir_clone_value(frame *CtFrame, type_id int, source *CtValue,
     let aggregate *CtAggregate = source.value.to_type(u64) .
         to_type(*CtAggregate)
     let copy *CtAggregate = 0
-    if (kind == gen.TY_ARRAY) {
+    if (kind == CT_TY_ARRAY) {
         copy = ct_ir_array_clone_mode(frame, type_id, aggregate, copy_slices)
-    } else if (kind == gen.TY_STRUCT || kind == gen.TY_UNION) {
+    } else if (kind == CT_TY_STRUCT || kind == CT_TY_UNION) {
         copy = ct_ir_struct_clone_mode(frame, type_id, aggregate, copy_slices)
     }
     if (copy == 0) { return -1 }
@@ -837,8 +837,8 @@ fn ct_ir_member_place(frame *CtFrame, expr_id int,
     if (ct_ir_eval_expr(frame, expr.child0, &base) != 0) { return -1 }
     let tk *gen.TaskCtx = gen.task()
     if (base.type_id < 0 || base.type_id >= tk.t_type_n
-        || (tk.t_types[base.type_id].kind != gen.TY_STRUCT
-            && tk.t_types[base.type_id].kind != gen.TY_UNION)) {
+        || (tk.t_types[base.type_id].kind != CT_TY_STRUCT
+            && tk.t_types[base.type_id].kind != CT_TY_UNION)) {
         return gen.sem_err("编译期成员访问只支持本地结构体或联合体值")
     }
     let st CtTypeRow = ct_type_row(base.type_id)
@@ -906,7 +906,7 @@ fn ct_ir_member_read(frame *CtFrame, expr_id int, out *CtValue) int {
         if (ct_ir_eval_expr(frame, m_expr.child0, &m_base) != 0) { return -1 }
         let m_gs *gen.TaskCtx = gen.task()
         if (m_base.type_id >= 0 && m_base.type_id < m_gs.t_type_n
-            && m_gs.t_types[m_base.type_id].kind == gen.TY_ENUM) {
+            && m_gs.t_types[m_base.type_id].kind == CT_TY_ENUM) {
             let m_rel int = m_expr.after - frame.target.body_token_first - 1
             if (m_rel < 0 || m_rel >= frame.target.body_n) {
                 return gen.sem_err("内部错误：编译期枚举成员名源码范围无效")
@@ -947,7 +947,7 @@ fn ct_ir_lvalue(frame *CtFrame, expr_id int, place *CtPlace) int {
         if (ct_ir_eval_expr(frame, expr.child0, &pointer) != 0) { return -1 }
         let tk *gen.TaskCtx = gen.task()
         if (pointer.type_id < 0 || pointer.type_id >= tk.t_type_n
-            || tk.t_types[pointer.type_id].kind != gen.TY_PTR
+            || tk.t_types[pointer.type_id].kind != CT_TY_PTR
             || tk.t_types[pointer.type_id].elem != expr.type_id
             || (ct_ty_is_integer(expr.type_id) == 0
                 && ct_ty_is_float(expr.type_id) == 0)) {
@@ -1030,22 +1030,22 @@ fn ct_ir_param_copy(frame *CtFrame, type_id int, source *CtValue,
     out.type_id = type_id
     out.is_lit = 0
     out.lit_big = 0
-    if (kind == gen.TY_ARRAY) {
+    if (kind == CT_TY_ARRAY) {
         let aggregate *CtAggregate = source.value.to_type(u64) .
             to_type(*CtAggregate)
         let copy *CtAggregate = ct_ir_array_clone(frame, type_id, aggregate)
         if (copy == 0) { return -1 }
         out.value = copy.to_type(u64).to_type(i64)
-    } else if (kind == gen.TY_STRUCT || kind == gen.TY_UNION) {
+    } else if (kind == CT_TY_STRUCT || kind == CT_TY_UNION) {
         let aggregate2 *CtAggregate = source.value.to_type(u64) .
             to_type(*CtAggregate)
         let copy2 *CtAggregate = ct_ir_struct_clone(frame, type_id, aggregate2)
         if (copy2 == 0) { return -1 }
         out.value = copy2.to_type(u64).to_type(i64)
-    } else if (kind == gen.TY_SLICE
+    } else if (kind == CT_TY_SLICE
         && ct_ir_slice_param_valid(type_id, source) == 0) {
         return gen.sem_err("编译期切片形参需要有效的本地数组或切片视图")
-    } else if (kind == gen.TY_PTR && source.value != 0
+    } else if (kind == CT_TY_PTR && source.value != 0
         && ct_ir_pointer_target(source.value, tk.t_types[type_id].elem) == 0) {
         return gen.sem_err("编译期指针形参必须来自当前存活调用帧的标量局部取址")
     }
@@ -1063,11 +1063,11 @@ fn ct_ir_return_copy(source_frame *CtFrame, caller_frame *CtFrame,
     let kind int = tk.t_types[type_id].kind
     let aggregate *CtAggregate = value.value.to_type(u64).to_type(*CtAggregate)
     let copy *CtAggregate = 0
-    if (kind == gen.TY_ARRAY) {
+    if (kind == CT_TY_ARRAY) {
         copy = ct_ir_array_clone_mode(caller_frame, type_id, aggregate, 1)
-    } else if (kind == gen.TY_STRUCT || kind == gen.TY_UNION) {
+    } else if (kind == CT_TY_STRUCT || kind == CT_TY_UNION) {
         copy = ct_ir_struct_clone_mode(caller_frame, type_id, aggregate, 1)
-    } else if (kind == gen.TY_SLICE) {
+    } else if (kind == CT_TY_SLICE) {
         if (ct_ir_slice_param_valid(type_id, value) == 0) {
             return gen.sem_err("编译期切片返回值无效")
         }
