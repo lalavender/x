@@ -510,12 +510,12 @@ L0 支撑     support  diag  target  token
 | comptime | sema, support, diag, proj, token |
 | ast | token, support, comptime（F1 后；过渡期含 sema/proj/ir） |
 | check | ast, sema, comptime, token, target, diag, support, proj（快照/切片键在 check 时可含 ir/cache） |
-| parse | token, ast, lex, support, diag, proj, sema（F2 后；过渡期含 gen/comptime/ir） |
+| parse | token, ast, lex, support, diag（F2 后；过渡期含 gen/comptime/ir/sema/proj） |
 | lower | check/HIR, ast, ir, sema, target, token, support, proj, cache |
 | backend | ir, sema, target, support |
 | builtin | sema, target |
 | link | target, support, proj, backend, hash |
-| build | ast, backend, builtin, cache, check, comptime, diag, hash, ir, lex, libs, link, lower, parse, proj, sema, support, token, target（G3 前另含 gen） |
+| build | ast, backend, builtin, cache, check, comptime, diag, hash, ir, lex, libs, link, lower, parse, proj, sema, support, token, target（GEN3 前另含 gen） |
 | testkit | build, parse, link, proj, sema, support, token |
 | cmdline | support, libs/cli |
 | cmd | 全部（入口唯一例外） |
@@ -523,7 +523,7 @@ L0 支撑     support  diag  target  token
 现有 `import gen` 的边按符号实际归属 1:1 改写为 `import support`/`diag`/`target`/
 `token`/`sema`/`check`；除表中列出的边外不得新增。过渡期临时边
 （`gen → sema/support/diag/target/token`、`ast → sema`、`parse/lex/build/testkit/cmd → gen`）
-在 G3/G4 删除。F1 前 `ast` 仍 import `ir`
+在 GEN3/GEN4 删除。F1 前 `ast` 仍 import `ir`
 （`check_key`/`check_slice`）与 `proj`；F1 后快照/切片键迁 `check`（或 F0 决定的
 `hir`），目标矩阵才成立。目标矩阵是方向，不是当前状态；每个阶段必须保持依赖图无环。
 
@@ -643,19 +643,19 @@ cache/
 - **`sem_*` 不得先搬 `check`**：`parse` 在 F2 前仍驱动它们，先搬会制造
   `parse → check` 临时环；F5 重写后再迁/删。
 
-目标依赖矩阵见 §6.3。分步（G0–G4，与 todo 对齐）：
+目标依赖矩阵见 §6.3。分步（GEN0–GEN4，与 todo 对齐）：
 
-1. **G0**：ADR + 归属表 + `arch-check` 预算守卫（`gen` 的 `pub fn` 数、
+1. **GEN0**：ADR + 归属表 + `arch-check` 预算守卫（`gen` 的 `pub fn` 数、
    `import gen` 模块数、`TaskCtx` 字段数只减不增）；递归扫描按 `module` 分组。
-2. **G1**：`support`/`diag`/`target`/`token` 落地；先让 `cmdline`/`cache`/
+2. **GEN1**：`support`/`diag`/`target`/`token` 落地；先让 `cmdline`/`cache`/
    `link`/`proj` 摆脱 `gen`；`backend`/`lower`/`builtin` 先改走
-   `support`/`target`/`token`，G2 再脱 `gen`；最后改 `check`/`ast`/
+   `support`/`target`/`token`，GEN2 再脱 `gen`；最后改 `check`/`ast`/
    `comptime`/`testkit`/`build`/`lex`/`parse`。
-3. **G2**：`sema` 接类型/符号/折叠/布局/ABI/静态数据/命名空间；
+3. **GEN2**：`sema` 接类型/符号/折叠/布局/ABI/静态数据/命名空间；
    `comptime → sema`；`gen` 只剩 `sem_*` 动作 + 残余 `TaskCtx`。
-4. **G3**（与 F1–F5 合并）：`ast` 纯语法、`parse` 纯语法、`check.resolve → CT
+4. **GEN3**（与 F1–F5 合并）：`ast` 纯语法、`parse` 纯语法、`check.resolve → CT
    检查 → expand → full`；F5 后再删/迁旧 `sem_*`、`Res`、`CheckCtx`。
-5. **G4**：F5 后重盘 `TaskCtx`，拆 token/lex/parse/check/build/link 上下文；
+5. **GEN4**：F5 后重盘 `TaskCtx`，拆 token/lex/parse/check/build/link 上下文；
    删 `GenState`/`gen`；更新 `ALLOWED`/预算/文档/种子。
 
 验收口径：同模块文件搬家要求 `.s`/`.s.i`/`.s.ct` 逐字节一致；跨模块搬家**不**
@@ -767,7 +767,7 @@ check.resolve（先建声明/类型/常量环境）
 | 对象粒度 | 模块级唯一；文件级不做，函数级 `.o` 暂缓（ADR-0020） | 生效 | ADR-0020、LA3 |
 | 前端阶段 | 两遍化：`parse` 纯语法 → AST → `check`（resolve/expand/full）→ lower；当前仍是语义动作解析器 | **已决定，待迁移** | §6.10、todo F0–F7 |
 | CT 展开位置 | `check.resolve` 之后、`check.full` 之前；AST→AST；`comptime` 只做求值 | 已决定 | §6.10 |
-| `gen` 拆分 | 目标 `support`/`diag`/`target`/`token`/`sema`/`check`；G0–G4 分阶段；不五拆 `symbols.yh` | 目标 | ADR-0021 |
+| `gen` 拆分 | 目标 `support`/`diag`/`target`/`token`/`sema`/`check`；GEN0–GEN4 分阶段；不五拆 `symbols.yh` | 目标 | ADR-0021 |
 | 平台顺序 | Linux 优先；Windows/x64 已接入；Darwin 默认 LLVM | 生效 | AGENTS.md |
 | 标准库 | 独立 `libs/` 项目；编译器经三层来源接入；不是 prelude | 生效 | 标准库设计 |
 
@@ -816,7 +816,7 @@ check.resolve（先建声明/类型/常量环境）
 | --- | --- | --- | --- |
 | A1 | `link/link_cache.yh`（1,647 行）迁 `cache/` + `build/`；`link` 回到纯工具链调用层 | 中：缓存键/接口变化，固定点注意 | 无 |
 | A2 | `build/project*.yh` + `toml.yh` 迁 `proj/`；评估删除自研 TOML | 中：需先校验 `pj_*` 符号引用 | A1 |
-| A3 | `gen` 按 G0–G4 拆到 `support`/`diag`/`target`/`token`/`sema`/`check`；先 G1/G2，再 G3/G4（G3/G4 前置 F5） | 高：全仓 import/状态改写 | A1/A2、前端 F0–F7 |
+| A3 | `gen` 按 GEN0–GEN4 拆到 `support`/`diag`/`target`/`token`/`sema`/`check`；先 GEN1/GEN2，再 GEN3/GEN4（GEN3/GEN4 前置 F5） | 高：全仓 import/状态改写 | A1/A2、前端 F0–F7 |
 | A4 | `ast` 快照独立（P5，候选） | 中 | A3 |
 | A5 | `testkit` 15 处（8 个符号）`build` 内部引用改走 `proj`/`link` 窄口 | 小 | A1/A2 |
 | A6 | 平台 `TargetDesc` 描述符表 + 平台变体收敛 | 中 | A1–A3 |
@@ -938,8 +938,8 @@ check.resolve（先建声明/类型/常量环境）
    - 编译速度 → 先做缓存键/性能测量，不先拆前端；对象粒度已定（ADR-0020）；
    - 语言特性/工具 → B（前端契约）优先级上升；
    - 平台 → `TargetDesc` + 平台变体收敛优先。
-2. **`gen` 拆分按 2026-11-06 的 G0–G4 执行**：`support`/`diag`/`target`/`token`/
-   `sema`/`check` 六条线；`symbols.yh` 保持一个语义内核，不五拆。G3/G4 以 F5
+2. **`gen` 拆分按 2026-11-06 的 GEN0–GEN4 执行**：`support`/`diag`/`target`/`token`/
+   `sema`/`check` 六条线；`symbols.yh` 保持一个语义内核，不五拆。GEN3/GEN4 以 F5
    为前置；详细任务见 [ADR-0021](../adr/0021-yh-gen职责拆分.md) 与 `docs/todo.md`。
 3. **前端两遍化已决定，迁移顺序与边界待定**：F0 ADR 要冻结 AST/HIR/
    `CheckedModule` 契约、`check` 内部文件拆分、`iface`/CT 布局迁移边界；F0

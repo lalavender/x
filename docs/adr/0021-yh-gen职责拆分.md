@@ -1,6 +1,6 @@
 # ADR-0021：`gen` 职责拆分与模块所有权（token/sema/check/support/target）
 
-日期：2026-11-06。状态：**提议（重新分析）；G0–G2 可在确认后开工，G3/G4 以 F5 为前置**。
+日期：2026-11-06。状态：**提议（重新分析）；GEN0–GEN2 可在确认后开工，GEN3/GEN4 以 F5 为前置**。
 
 关联：[ADR-0007](0007-yh编译器使用源码模块.md)（源码模块）、
 [ADR-0009](0009-yh采用check与IR及早期并行.md)（check/IR/并行）、
@@ -62,13 +62,13 @@ comptime → sema, support, diag, proj, token
 ast      → token, support, comptime            （F1 后；过渡期可含 sema/proj/ir）
 check    → ast, sema, comptime, token, target, diag, support, proj
            （快照/切片键仍在 check 时可含 ir/cache）
-parse    → token, ast, lex, support, diag, proj, sema
-           （F2 后收紧；过渡期含 gen/comptime/ir）
+parse    → token, ast, lex, support, diag
+           （F2 后收紧；过渡期含 gen/comptime/ir/sema/proj）
 lower    → check/HIR, ast, ir, sema, target, token, support, proj, cache
 backend  → ir, sema, target, support
 builtin  → sema, target
 link     → target, support, proj, backend, hash
-build    → 下方全部 + gen（G3 前；G4 删除）
+build    → 下方全部 + gen（GEN3 前；GEN4 删除）
 testkit  → build, parse, link, proj, sema, support, token
 cmdline  → support, libs
 cmd      → 全部（入口唯一例外）
@@ -145,7 +145,7 @@ cmd      → 全部（入口唯一例外）
   字段与 `check.resolve → expand → full` 契约由 F0 ADR 冻结。
 - `CheckedModule` 契约默认随 `check` 走（生产者拥有输出契约），不新设
   `hir` 模块；若 F0 发现 `lower → check` 拉入过多依赖，再新 ADR 立 `hir`。
-- **G3/G4 不得早于 F5**：`parse` 还在驱动 `sem_*` 时把 `sem_*` 搬进 `check`
+- **GEN3/GEN4 不得早于 F5**：`parse` 还在驱动 `sem_*` 时把 `sem_*` 搬进 `check`
   会制造 `parse → check` 临时环，且这些函数会被 F2–F5 重写，搬家是白做。
 
 ### 7. 验收口径
@@ -173,10 +173,10 @@ cmd      → 全部（入口唯一例外）
 
 ## 后果
 
-- `gen` 在 G2 后从“万能底座”缩成前端动作 + 残余 `TaskCtx`；G3/G4 后删除。
+- `gen` 在 GEN2 后从“万能底座”缩成前端动作 + 残余 `TaskCtx`；GEN3/GEN4 后删除。
 - `support`/`diag`/`target`/`token`/`sema` 成为窄接口；`cmdline`/`cache`/`link`/
-  `proj`/`backend`/`lower`/`builtin` 在 G1/G2 先摆脱 `gen`。
-- 过渡期允许并记录以下临时边，G3/G4 必须消失：
+  `proj`/`backend`/`lower`/`builtin` 在 GEN1/GEN2 先摆脱 `gen`。
+- 过渡期允许并记录以下临时边，GEN3/GEN4 必须消失：
   `gen → sema/support/diag/target/token`、`ast → sema`（`Res`/快照）、
   `parse/lex/build/testkit/cmd → gen`。
 - 模块接口与缓存键会变化；编译器内部模块不承诺 `.s.i` 跨版本兼容，构建缓存
@@ -184,11 +184,11 @@ cmd      → 全部（入口唯一例外）
 - `tests/modules/build-check.py` 的模块拷贝清单、`tools/compiler-tests.py` 的
   模块列表必须随阶段更新；否则 fixture 会因缺少新模块而失败。
 
-## 开放问题（G0 前确认）
+## 开放问题（GEN0 前确认）
 
 1. `CheckedModule` 契约：`check` 直接拥有，还是 F0 另立 `hir`？本 ADR 默认前者。
 2. `builtin`：保留薄表（默认）还是并入 `sema`？（两者都不改变依赖方向。）
-3. token 状态（`c_toks`/`c_pos`/`err_tok`）：G1 随 `token` 一起搬，还是等 F2/G4
+3. token 状态（`c_toks`/`c_pos`/`err_tok`）：GEN1 随 `token` 一起搬，还是等 F2/GEN4
    与 parse 重写一起搬？本 ADR 默认后者，避免 308 处 `c_pos` 被改两次。
 4. `Res` 的最终形态：F5 删除，还是成为 HIR 的表达式结果节点？由 F0/F5 定。
 5. `err_tok`/`sem_err` 最终放 `check`（语义动作）还是 `diag`（显式传入 `Tok`）？

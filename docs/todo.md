@@ -70,28 +70,28 @@ lex → parse(纯语法) → AST
 - 三处修正：`fail`/`fail_path` 归 `support`（`diag` 只放有位置的 `err_lc`/
   `warn_lc`）；`PDecl` 归 `token`（放 `ast` 会与 `proj` 成环）；`sema` 依赖
   `support, diag, target, token`（不只 `support`）。
-- 顺序：G0 ADR/归属表/预算守卫 → G1 基础层 → G2 `sema` 模型 →
-  **G3（= F1–F5）`check` 接语义** → G4 状态收尾并删除 `gen`。
-  **G3/G4 不得早于 F5**：`parse` 仍驱动 `sem_*` 时搬 `check` 会造临时环。
+- 顺序：GEN0 ADR/归属表/预算守卫 → GEN1 基础层 → GEN2 `sema` 模型 →
+  **GEN3（= F1–F5）`check` 接语义** → GEN4 状态收尾并删除 `gen`。
+  **GEN3/GEN4 不得早于 F5**：`parse` 仍驱动 `sem_*` 时搬 `check` 会造临时环。
 - 验收：同模块搬家 `.s/.s.i/.s.ct` 字节一致；跨模块搬家不要求编译器自身
   `.s.i` 一致，改用固定点 + 全量语料等价；每阶段 `just` + `just test` +
   `just selfhost-native`。
 
-- [ ] **G0**：落 ADR-0021 + 归属表；`arch-check` 加新模块边与 `gen` 预算
+- [ ] **GEN0**：落 ADR-0021 + 归属表；`arch-check` 加新模块边与 `gen` 预算
   （`pub fn`/importers/`TaskCtx` 字段只减不增）；递归扫描按 `module` 分组；
   核对 183 个 `pub fn` 全部有去向。
-- [ ] **G1**：`support`（缓冲/源/池/统计/宿主/`fail`）、`diag`（`err_lc`/
+- [ ] **GEN1**：`support`（缓冲/源/池/统计/宿主/`fail`）、`diag`（`err_lc`/
   `warn_lc`）、`target`（身份/数据模型/`TargetCfg` 类型与绑定）、`token`
   （词汇/`PDecl`；token 状态暂留 `gen`）；先让 `cmdline`/`cache`/`link`/
   `proj` 脱 `gen`；`backend`/`lower`/`builtin` 先改走 `support`/`target`/
-  `token`，G2 再脱 `gen`；同步 test fixture 拷贝清单与
+  `token`，GEN2 再脱 `gen`；同步 test fixture 拷贝清单与
   `compiler-tests.py` 模块列表。
-- [ ] **G2**：`sema` 接 `CType/SField/TName/CSym/ModInfo`、`TY_*/SYM_*/F_*`、
+- [ ] **GEN2**：`sema` 接 `CType/SField/TName/CSym/ModInfo`、`TY_*/SYM_*/F_*`、
   类型/符号/折叠/布局/ABI/静态数据/命名空间；`comptime → sema`；`gen` 只剩
   `sem_*` 动作 + 残余 `TaskCtx`。
-- [ ] **G3**（与 F1–F5 合并）：`ast` 纯语法、`parse` 纯语法、`check.resolve →
+- [ ] **GEN3**（与 F1–F5 合并）：`ast` 纯语法、`parse` 纯语法、`check.resolve →
   CT 检查 → expand → full`；F5 后再删/迁旧 `sem_*`、`Res`、`CheckCtx`。
-- [ ] **G4**：F5 后重盘 `TaskCtx`，拆 token/lex/parse/check/build/link 上下文；
+- [ ] **GEN4**：F5 后重盘 `TaskCtx`，拆 token/lex/parse/check/build/link 上下文；
   删 `GenState`/`gen`；刷新 arch-check、README/架构文档/统计，滚种子。
 
 风险：`TaskCtx` 机械改写（281 `np_data`/166 `c_src`/330 `c_pos`）、`sema`
