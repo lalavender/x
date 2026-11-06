@@ -123,6 +123,12 @@ lex → parse(纯语法) → AST
   fixture。ctfacts fixture 增加「64 次类型扩容后不重新绑定仍读到新行」的
   断言，实跑通过。`comptime` 的 130 处 `gen.TY_*` 也换成 `CT_TY_*` 镜像常量，
   `gen.` 引用 594→365。
+- [x] **F4-2（2026-11-06 完成）**：`CtSymRow` 符号镜像 + `CT_SYM_*`/`CT_F_*`
+  镜像常量 + 符号表槽绑定；`comptime` 的 `tk.c_syms[i].*` / `tk.c_sym_n` /
+  `gen.SYM_*` / `gen.F_*` 全部改镜像（`ct_sym_row` / `ct_syms_bound`）。
+  `check.ct_facts_sync()` 一次绑定类型表 + 符号表；形状守卫扩展到 `CSym`
+  与 15 个符号常量。`comptime` 的 `gen.` 引用 365→340。
+  ctfacts fixture 增加真实符号行差分（`syms=1`），实跑通过。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

@@ -1,6 +1,8 @@
 module main
+import support
 import core.check
 import core.gen
+import core.token
 
 // main：验证 CT 执行器的零拷贝镜像与 gen 类型表逐行一致（F4-0 的形状守卫）。
 // 镜像读的是同一份内存，因此任何字段顺序/宽度/常量漂移都会在这里露出来。
@@ -8,7 +10,7 @@ fn main() int {
     gen.state_init()
     if (gen.sem_init_tables() != 0 || gen.ty_register_builtins() != 0) { return 1 }
     if (check.ct_type_layout_ok() == 0) { return 2 }
-    check.ct_types_sync()
+    check.ct_facts_sync()
     let n int = comptime_bound()
     if (n <= 0 || n != gen.task().t_type_n) { return 3 }
     let i int = 0
@@ -37,7 +39,31 @@ fn main() int {
     if (comptime_bound() != before + 65) { return 10 }
     let last gen.CType = gen.task().t_types[comptime_bound() - 1]
     if (check.ct_kind(comptime_bound() - 1) != last.kind) { return 11 }
-    printf("ct-facts=ok rows=%d\n", before)
+    // 符号表镜像：与类型表同一套「槽」语义（表增长后自动跟随）。
+    if (gen.scope_push() != 0) { return 14 }
+    support.src_ctx().data = "abc".to_type(*u8)
+    support.src_ctx().length = 3
+    // sym_push 会读「当前 token」的行列做声明位置：给一个最小 token 表。
+    let toks [1]token.Tok
+    toks[0].line = 1
+    toks[0].col = 1
+    token.ctx().tokens = &toks[0]
+    token.ctx().count = 1
+    token.ctx().cap = 1
+    token.ctx().pos = 0
+    if (gen.sym_push(0, 3, gen.SYM_VAR, gen.TY_I32, gen.F_GLOBAL) < 0) { return 15 }
+    let sn int = gen.task().c_sym_n
+    if (sn <= 0) { return 16 }
+    if (check.ct_syms_bound() != sn) { return 12 }
+    let si int = 0
+    for si < sn {
+        let sym gen.CSym = gen.task().c_syms[si]
+        if (check.ct_sym_kind(si) != sym.kind || check.ct_sym_type(si) != sym.type_id
+            || check.ct_sym_flags(si) != sym.flags
+            || check.ct_sym_ready(si) != sym.const_ready) { return 13 }
+        si += 1
+    }
+    printf("ct-facts=ok rows=%d syms=%d\n", before, sn)
     return 0
 }
 
