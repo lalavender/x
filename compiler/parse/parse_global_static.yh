@@ -1,4 +1,6 @@
 module parse
+import token
+import support
 import gen
 
 // parse_global_static_root：登记当前全局数据对象；接口重放对象带本地标签，普通
@@ -7,7 +9,7 @@ fn parse_global_static_root(sym_id int, type_id int) int {
     let t *gen.TaskCtx = gen.task()
     if (t.c_ct_iface_mode != 0) { return -2 }
     if (sym_id < 0 || sym_id >= t.c_sym_n || type_id < 0 || type_id >= t.t_type_n) {
-        return gen.fail("内部错误：静态全局对象身份无效")
+        return support.fail("内部错误：静态全局对象身份无效")
     }
     let label int = -1
     if (t.c_iface_load != 0) { label = t.c_syms[sym_id].cval.to_type(int) }
@@ -38,7 +40,7 @@ fn parse_global_static_scalar(row int, offset int, type_id int, bits i64) int {
     let t *gen.TaskCtx = gen.task()
     if (row == -2) { return 0 }
     if (row < 0) { return -1 }
-    if (type_id < 0 || type_id >= t.t_type_n) { return gen.fail("静态标量类型无效") }
+    if (type_id < 0 || type_id >= t.t_type_n) { return support.fail("静态标量类型无效") }
     let size int = t.t_types[type_id].size
     if (size < 1 || size > 8) { return gen.sem_err("静态标量宽度暂不支持") }
     let value i64 = t.t_types[type_id].kind == gen.TY_F32 ? gen.fp32_bits(bits) : bits
@@ -56,11 +58,11 @@ fn parse_global_static_pointer(row int, offset int, label int, addend i64) int {
 // 旧标签是会话内身份，不从任意非零整数推导指针地址。
 fn parse_global_static_string_target(first int, after int, value i64) int {
     let t *gen.TaskCtx = gen.task()
-    if (after == first + 1 && first >= 0 && first < t.c_tok_n
-        && t.c_toks[first].kind == gen.TOK_STRING) { return value.to_type(int) }
-    if (after != first + 1 || first < 0 || first >= t.c_tok_n
-        || t.c_toks[first].kind != gen.TOK_IDENT) { return 0 }
-    let sym_id int = gen.sym_lookup(t.c_toks[first].start, t.c_toks[first].len)
+    if (after == first + 1 && first >= 0 && first < token.ctx().count
+        && token.ctx().tokens[first].kind == token.TOK_STRING) { return value.to_type(int) }
+    if (after != first + 1 || first < 0 || first >= token.ctx().count
+        || token.ctx().tokens[first].kind != token.TOK_IDENT) { return 0 }
+    let sym_id int = gen.sym_lookup(token.ctx().tokens[first].start, token.ctx().tokens[first].len)
     if (sym_id < 0 || t.c_syms[sym_id].kind != gen.SYM_CONST
         || (t.c_syms[sym_id].flags & gen.F_ADDR) == 0) { return 0 }
     let off int = 0
@@ -74,16 +76,16 @@ fn parse_global_static_string_target(first int, after int, value i64) int {
 fn parse_global_static_string(start int, slen int, label int) int {
     let t *gen.TaskCtx = gen.task()
     if (t.c_ct_iface_mode != 0) { return 0 }
-    if (start < 0 || slen < 2 || start + slen > t.c_src_len || label <= 0) {
+    if (start < 0 || slen < 2 || start + slen > support.src_ctx().length || label <= 0) {
         return gen.sem_err("静态字符串源码范围无效")
     }
     let count int = 1
     let i int = start + 1
     let end int = start + slen - 1
     for i < end {
-        if (t.c_src[i] == '\\') {
+        if (support.src_ctx().data[i] == '\\') {
             if (i + 1 >= end) { return gen.sem_err("静态字符串转义不完整") }
-            if (t.c_src[i + 1] == 'x') { i += 4 }
+            if (support.src_ctx().data[i + 1] == 'x') { i += 4 }
             else { i += 2 }
         } else { i += 1 }
         count += 1
@@ -98,9 +100,9 @@ fn parse_global_static_string(start int, slen int, label int) int {
     i = start + 1
     let pos int = 0
     for i < end {
-        let value int = t.c_src[i].to_type(int)
-        if (t.c_src[i] == '\\') {
-            let escape u8 = t.c_src[i + 1]
+        let value int = support.src_ctx().data[i].to_type(int)
+        if (support.src_ctx().data[i] == '\\') {
+            let escape u8 = support.src_ctx().data[i + 1]
             if (escape == 'n') { value = 10 }
             else if (escape == 'r') { value = 13 }
             else if (escape == 't') { value = 9 }
@@ -114,7 +116,7 @@ fn parse_global_static_string(start int, slen int, label int) int {
             else if (escape == '\\') { value = 92 }
             else if (escape == '$') { value = 36 }
             else if (escape == 'x') {
-                value = gen.hexval(t.c_src[i + 2]) * 16 + gen.hexval(t.c_src[i + 3])
+                value = support.hexval(support.src_ctx().data[i + 2]) * 16 + support.hexval(support.src_ctx().data[i + 3])
                 i += 4
             }
             if (escape != 'x') { i += 2 }

@@ -1,4 +1,7 @@
 module parse
+import token
+import check
+import support
 import gen
 import comptime
 import ast
@@ -32,7 +35,7 @@ let px_nest_depth int = 0
 // （此时不增加计数，调用方不必回退）。
 fn px_nest_enter() int {
     if (px_nest_depth >= PX_NEST_MAX) {
-        return gen.err_tok("表达式嵌套层数超过上限 256")
+        return token.err_tok("表达式嵌套层数超过上限 256")
     }
     px_nest_depth += 1
     return 0
@@ -58,16 +61,16 @@ fn parse_expr(res *gen.Res) int {
 
 fn parse_expr_inner(res *gen.Res) int {
     let t *gen.TaskCtx = gen.task()
-    if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_IF) {
+    if (p_cur() == token.TK_DOLLAR && p_peek(1) == token.TK_IF) {
         // 与三元同等的 capture 语义：子表达式以 depth>0 解析（不会误挂语句
         // 表达式边），CTIF 节点本身在最外层 depth==0 时挂载。
-        if (t.c_ast_capture == 0) {
+        if (support.session().ast_capture == 0) {
             return parse_ct_if_expr(res)
         }
         ast.ast_expr_depth_add(1)
         let r int = parse_ct_if_expr(res)
         ast.ast_expr_depth_add(-1)
-        if (r == 0 && t.c_compile != 0 && res.ct_diag != 0
+        if (r == 0 && support.session().compile != 0 && res.ct_diag != 0
             && t.c_ct_diag_stmt == 0) {
             return gen.sem_err("编译期诊断只能作为独立语句")
         }
@@ -77,9 +80,9 @@ fn parse_expr_inner(res *gen.Res) int {
         }
         return r
     }
-    if (t.c_ast_capture == 0) {
+    if (support.session().ast_capture == 0) {
         let r int = parse_ternary(res)
-        if (r == 0 && t.c_compile != 0 && res.ct_diag != 0
+        if (r == 0 && support.session().compile != 0 && res.ct_diag != 0
             && t.c_ct_diag_stmt == 0) {
             return gen.sem_err("编译期诊断只能作为独立语句")
         }
@@ -88,7 +91,7 @@ fn parse_expr_inner(res *gen.Res) int {
     ast.ast_expr_depth_add(1)
     let r int = parse_ternary(res)
     ast.ast_expr_depth_add(-1)
-    if (r == 0 && t.c_compile != 0 && res.ct_diag != 0
+    if (r == 0 && support.session().compile != 0 && res.ct_diag != 0
         && t.c_ct_diag_stmt == 0) {
         return gen.sem_err("编译期诊断只能作为独立语句")
     }
@@ -109,29 +112,29 @@ fn parse_expr_inner(res *gen.Res) int {
 // 路径，与 `?:` 的赋值语义一致）。
 fn parse_ct_if_expr(res *gen.Res) int {
     let t *gen.TaskCtx = gen.task()
-    let typed int = (t.c_ct_prepare_active != 0 && t.c_ast_capture != 0).to_type(int)
-    let first int = t.c_pos
+    let typed int = (t.c_ct_prepare_active != 0 && support.session().ast_capture != 0).to_type(int)
+    let first int = token.ctx().pos
     let cond_ast int = -1
     let then_ast int = -1
     let else_ast int = -1
     p_adv()
     p_adv() // 消费 `$` 与 `if`
-    if (p_expect(gen.TK_LPAREN, "$if 条件必须带括号") != 0) { return -1 }
+    if (p_expect(token.TK_LPAREN, "$if 条件必须带括号") != 0) { return -1 }
     let cond gen.Res
     let saved_fold int = t.c_fold
     let saved_target_ctx int = t.c_ct_target_ctx
-    if (t.c_compile != 0 && typed == 0) {
+    if (support.session().compile != 0 && typed == 0) {
         t.c_fold += 1
         t.c_ct_target_ctx = 1
     }
     let cr int = parse_expr_iso(&cond)
-    if (t.c_compile != 0 && typed == 0) {
+    if (support.session().compile != 0 && typed == 0) {
         t.c_fold = saved_fold
         t.c_ct_target_ctx = saved_target_ctx
     }
-    if (cr != 0 || p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
+    if (cr != 0 || p_expect(token.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
     let selected int = -1
-    if (t.c_compile != 0) {
+    if (support.session().compile != 0) {
         if (sem_check_cond(&cond) != 0) { return -1 }
         if (typed == 0) {
             if (cond.is_const == 0) {
@@ -140,59 +143,59 @@ fn parse_ct_if_expr(res *gen.Res) int {
             selected = (cond.ival != 0).to_type(int)
         }
     }
-    if (t.c_ast_capture != 0) { cond_ast = cond.ast_id }
+    if (support.session().ast_capture != 0) { cond_ast = cond.ast_id }
     // then 分支：普通路径未选时静默发射但保留语义检查，不捕获 AST。
-    let saved_capture int = t.c_ast_capture
+    let saved_capture int = support.session().ast_capture
     let then gen.Res
-    if (typed == 0 && t.c_compile != 0 && selected == 0) {
-        t.c_ast_capture = 0
+    if (typed == 0 && support.session().compile != 0 && selected == 0) {
+        support.session().ast_capture = 0
     }
     if (parse_expr(&then) != 0) {
-        t.c_ast_capture = saved_capture
+        support.session().ast_capture = saved_capture
         return -1
     }
-    t.c_ast_capture = saved_capture
-    if (t.c_ast_capture != 0) { then_ast = then.ast_id }
-    if (p_cur() != gen.TK_DOLLAR || p_peek(1) != gen.TK_ELSE) {
-        return gen.err_tok("$if 表达式必须写 $else")
+    support.session().ast_capture = saved_capture
+    if (support.session().ast_capture != 0) { then_ast = then.ast_id }
+    if (p_cur() != token.TK_DOLLAR || p_peek(1) != token.TK_ELSE) {
+        return token.err_tok("$if 表达式必须写 $else")
     }
     p_adv()
     p_adv()
     // else 分支：普通路径选中 then 时静默发射，仍做完整语义检查。
     let els gen.Res
-    if (typed == 0 && t.c_compile != 0 && selected == 1) {
-        t.c_ast_capture = 0
+    if (typed == 0 && support.session().compile != 0 && selected == 1) {
+        support.session().ast_capture = 0
     }
     if (parse_expr(&els) != 0) {
-        t.c_ast_capture = saved_capture
+        support.session().ast_capture = saved_capture
         return -1
     }
-    t.c_ast_capture = saved_capture
-    if (t.c_ast_capture != 0) { else_ast = els.ast_id }
+    support.session().ast_capture = saved_capture
+    if (support.session().ast_capture != 0) { else_ast = els.ast_id }
     let merged int = -1
-    if (t.c_compile != 0 && ct_if_merge_type(&then, &els, &merged) != 0) {
+    if (support.session().compile != 0 && ct_if_merge_type(&then, &els, &merged) != 0) {
         return -1
     }
-    if (t.c_compile != 0) {
+    if (support.session().compile != 0) {
         if (typed == 0) {
             // 普通路径：结果取选中分支的值语义，类型用合流类型。
             let src gen.Res
             if (selected != 0) {
-                gen.sem_res_copy(&src, &then)
+                check.sem_res_copy(&src, &then)
             } else {
-                gen.sem_res_copy(&src, &els)
+                check.sem_res_copy(&src, &els)
             }
-            gen.sem_res_copy(res, &src)
+            check.sem_res_copy(res, &src)
             res.type_id = merged
             res.sym = -1
             res.layout_type_id = -1
             res.ct_diag = 0
         } else {
-            gen.sem_res_reset(res, merged)
+            check.sem_res_reset(res, merged)
         }
     }
-    if (t.c_ast_capture != 0
-        && ast.ast_expr_finish(res, ast.AST_EXPR_CTIF, gen.TK_IF, first,
+    if (support.session().ast_capture != 0
+        && ast.ast_expr_finish(res, ast.AST_EXPR_CTIF, token.TK_IF, first,
             cond_ast, then_ast, else_ast) != 0) { return -1 }
     return 0
 }
@@ -228,23 +231,23 @@ fn parse_array_literal(res *gen.Res, first int) int {
     let t *gen.TaskCtx = gen.task()
     let tid int = t.c_expect_tid
     t.c_expect_tid = -1
-    if (t.c_compile == 0) {
+    if (support.session().compile == 0) {
         // 语法模式：只消费元素 token
-        if (p_cur() != gen.TK_RBRACKET) {
+        if (p_cur() != token.TK_RBRACKET) {
             for 1 {
                 let d gen.Res
                 if (parse_expr_iso(&d) != 0) {
                     return -1
                 }
-                if (p_cur() == gen.TK_COMMA) {
+                if (p_cur() == token.TK_COMMA) {
                     p_adv()
-                    if (p_cur() == gen.TK_RBRACKET) { break }
+                    if (p_cur() == token.TK_RBRACKET) { break }
                     continue
                 }
                 break
             }
         }
-        return p_expect(gen.TK_RBRACKET, "期望 ']'")
+        return p_expect(token.TK_RBRACKET, "期望 ']'")
     }
     if (tid < 0) {
         return gen.sem_err("数组/切片字面量需要目标类型上下文（let 初始化或同型赋值）")
@@ -258,7 +261,7 @@ fn parse_array_literal(res *gen.Res, first int) int {
     let list int = -1
     // 解析元素并逐个压栈
     let count int = 0
-    if (p_cur() != gen.TK_RBRACKET) {
+    if (p_cur() != token.TK_RBRACKET) {
         for 1 {
             let e gen.Res
             let save_lv int = t.c_lvalue
@@ -274,22 +277,22 @@ fn parse_array_literal(res *gen.Res, first int) int {
             if (gen.sem_can_assign(elem, e.type_id, e.is_lit, e.ival, e.lit_big) != 0) {
                 return -1
             }
-            if (gen.sem_push_value(&e) != 0) {
+            if (check.sem_push_value(&e) != 0) {
                 return -1
             }
-            if (t.c_ast_capture != 0 && ast.ast_expr_args_append(&list, e.ast_id) != 0) {
+            if (support.session().ast_capture != 0 && ast.ast_expr_args_append(&list, e.ast_id) != 0) {
                 return -1
             }
             count += 1
-            if (p_cur() == gen.TK_COMMA) {
+            if (p_cur() == token.TK_COMMA) {
                 p_adv()
-                if (p_cur() == gen.TK_RBRACKET) { break }
+                if (p_cur() == token.TK_RBRACKET) { break }
                 continue
             }
             break
         }
     }
-    if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) {
+    if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) {
         return -1
     }
     if (fk == gen.TY_ARRAY && count != t.t_types[tid].len) {
@@ -298,12 +301,12 @@ fn parse_array_literal(res *gen.Res, first int) int {
     if (t.c_fold != 0) {
         return gen.sem_err("数组/切片字面量不是编译期常量")
     }
-    gen.sem_res_reset(res, tid)
+    check.sem_res_reset(res, tid)
     res.is_lit = 0
     res.is_const = 0
     t.c_res_is_addr = 1
-    if (t.c_ast_capture != 0
-        && ast.ast_expr_finish(res, ast.AST_EXPR_ARRAY, gen.TK_LBRACKET, first, list, -1, -1) != 0) {
+    if (support.session().ast_capture != 0
+        && ast.ast_expr_finish(res, ast.AST_EXPR_ARRAY, token.TK_LBRACKET, first, list, -1, -1) != 0) {
         return -1
     }
     return 0
@@ -312,20 +315,20 @@ fn parse_array_literal(res *gen.Res, first int) int {
 // parse_expr_iso：隔离上下文——「IDENT {」恒按结构体字面量处理。
 fn parse_expr_iso(res *gen.Res) int {
     let t *gen.TaskCtx = gen.task()
-    let save int = t.c_ctx_block
-    t.c_ctx_block = 0
+    let save int = ctx().ctx_block
+    ctx().ctx_block = 0
     let r int = parse_expr(res)
-    t.c_ctx_block = save
+    ctx().ctx_block = save
     return r
 }
 
 // parse_expr_blockctx：块跟随上下文——for/switch/case 头部表达式。
 fn parse_expr_blockctx(res *gen.Res) int {
     let t *gen.TaskCtx = gen.task()
-    let save int = t.c_ctx_block
-    t.c_ctx_block = 1
+    let save int = ctx().ctx_block
+    ctx().ctx_block = 1
     let r int = parse_expr(res)
-    t.c_ctx_block = save
+    ctx().ctx_block = save
     return r
 }
 
@@ -335,15 +338,15 @@ fn parse_ternary(res *gen.Res) int {
     if (parse_logical_or(res) != 0) {
         return -1
     }
-    if (p_cur() == gen.TK_QUEST) {
-        let first int = t.c_pos
+    if (p_cur() == token.TK_QUEST) {
+        let first int = token.ctx().pos
         let cond_ast int = -1
-        if (t.c_ast_capture != 0) {
+        if (support.session().ast_capture != 0) {
             cond_ast = res.ast_id
             first = ast.ast_expr_start(cond_ast)
         }
         p_adv()
-        if (gen.sem_ternary_cond(res) != 0) {
+        if (check.sem_ternary_cond(res) != 0) {
             return -1
         }
         let mid gen.Res
@@ -351,23 +354,23 @@ fn parse_ternary(res *gen.Res) int {
             return -1
         }
         let mid_ast int = mid.ast_id
-        if (p_expect(gen.TK_COLON, "期望 ':'") != 0) {
+        if (p_expect(token.TK_COLON, "期望 ':'") != 0) {
             return -1
         }
-        if (gen.sem_ternary_mid(res) != 0) {
+        if (check.sem_ternary_mid(res) != 0) {
             return -1
         }
         if (parse_expr(res) != 0) {
             return -1
         }
         let else_ast int = res.ast_id
-        if (gen.sem_ternary_end(res) != 0) {
+        if (check.sem_ternary_end(res) != 0) {
             return -1
         }
-        gen.sem_res_copy(res, &mid)
+        check.sem_res_copy(res, &mid)
         t.c_res_is_addr = 0
-        if (t.c_ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_TERNARY, gen.TK_QUEST,
+        if (support.session().ast_capture != 0
+            && ast.ast_expr_finish(res, ast.AST_EXPR_TERNARY, token.TK_QUEST,
                 first, cond_ast, mid_ast, else_ast) != 0) {
             return -1
         }
@@ -381,26 +384,26 @@ fn parse_logical_or(res *gen.Res) int {
     if (parse_logical_and(res) != 0) {
         return -1
     }
-    for p_cur() == gen.TK_OROR {
+    for p_cur() == token.TK_OROR {
         let left_ast int = -1
-        let first int = t.c_pos
-        if (t.c_ast_capture != 0) {
+        let first int = token.ctx().pos
+        if (support.session().ast_capture != 0) {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
         let op int = p_cur()
         p_adv()
-        if (gen.sem_shortcircuit(gen.TK_OROR, res) != 0) {
+        if (check.sem_shortcircuit(token.TK_OROR, res) != 0) {
             return -1
         }
         if (parse_logical_and(res) != 0) {
             return -1
         }
         let right_ast int = res.ast_id
-        if (gen.sem_shortcircuit_end(gen.TK_OROR, res) != 0) {
+        if (check.sem_shortcircuit_end(token.TK_OROR, res) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, right_ast, -1) != 0) {
             return -1
         }
@@ -414,26 +417,26 @@ fn parse_logical_and(res *gen.Res) int {
     if (parse_bit_or(res) != 0) {
         return -1
     }
-    for p_cur() == gen.TK_ANDAND {
+    for p_cur() == token.TK_ANDAND {
         let left_ast int = -1
-        let first int = t.c_pos
-        if (t.c_ast_capture != 0) {
+        let first int = token.ctx().pos
+        if (support.session().ast_capture != 0) {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
         let op int = p_cur()
         p_adv()
-        if (gen.sem_shortcircuit(gen.TK_ANDAND, res) != 0) {
+        if (check.sem_shortcircuit(token.TK_ANDAND, res) != 0) {
             return -1
         }
         if (parse_bit_or(res) != 0) {
             return -1
         }
         let right_ast int = res.ast_id
-        if (gen.sem_shortcircuit_end(gen.TK_ANDAND, res) != 0) {
+        if (check.sem_shortcircuit_end(token.TK_ANDAND, res) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, right_ast, -1) != 0) {
             return -1
         }
@@ -447,24 +450,24 @@ fn parse_bit_or(res *gen.Res) int {
     if (parse_bit_xor(res) != 0) {
         return -1
     }
-    for p_cur() == gen.TK_PIPE {
+    for p_cur() == token.TK_PIPE {
         let left_ast int = -1
-        let first int = t.c_pos
-        if (t.c_ast_capture != 0) {
+        let first int = token.ctx().pos
+        if (support.session().ast_capture != 0) {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
-        let op int = gen.TK_PIPE
+        let op int = token.TK_PIPE
         p_adv()
         let rhs gen.Res
-        if (gen.sem_push_value(res) != 0) { return -1 }
+        if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_bit_xor(&rhs) != 0) {
             return -1
         }
-        if (gen.sem_binop(gen.TK_PIPE, res, &rhs) != 0) {
+        if (check.sem_binop(token.TK_PIPE, res, &rhs) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1
         }
@@ -478,24 +481,24 @@ fn parse_bit_xor(res *gen.Res) int {
     if (parse_bit_and(res) != 0) {
         return -1
     }
-    for p_cur() == gen.TK_CARET {
+    for p_cur() == token.TK_CARET {
         let left_ast int = -1
-        let first int = t.c_pos
-        if (t.c_ast_capture != 0) {
+        let first int = token.ctx().pos
+        if (support.session().ast_capture != 0) {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
-        let op int = gen.TK_CARET
+        let op int = token.TK_CARET
         p_adv()
         let rhs gen.Res
-        if (gen.sem_push_value(res) != 0) { return -1 }
+        if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_bit_and(&rhs) != 0) {
             return -1
         }
-        if (gen.sem_binop(gen.TK_CARET, res, &rhs) != 0) {
+        if (check.sem_binop(token.TK_CARET, res, &rhs) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1
         }
@@ -509,24 +512,24 @@ fn parse_bit_and(res *gen.Res) int {
     if (parse_equality(res) != 0) {
         return -1
     }
-    for p_cur() == gen.TK_AMP {
+    for p_cur() == token.TK_AMP {
         let left_ast int = -1
-        let first int = t.c_pos
-        if (t.c_ast_capture != 0) {
+        let first int = token.ctx().pos
+        if (support.session().ast_capture != 0) {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
-        let op int = gen.TK_AMP
+        let op int = token.TK_AMP
         p_adv()
         let rhs gen.Res
-        if (gen.sem_push_value(res) != 0) { return -1 }
+        if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_equality(&rhs) != 0) {
             return -1
         }
-        if (gen.sem_binop(gen.TK_AMP, res, &rhs) != 0) {
+        if (check.sem_binop(token.TK_AMP, res, &rhs) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1
         }
@@ -540,24 +543,24 @@ fn parse_equality(res *gen.Res) int {
     if (parse_relational(res) != 0) {
         return -1
     }
-    for p_cur() == gen.TK_EQEQ || p_cur() == gen.TK_NEQ {
+    for p_cur() == token.TK_EQEQ || p_cur() == token.TK_NEQ {
         let op int = p_cur()
         let left_ast int = -1
-        let first int = t.c_pos
-        if (t.c_ast_capture != 0) {
+        let first int = token.ctx().pos
+        if (support.session().ast_capture != 0) {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
         p_adv()
         let rhs gen.Res
-        if (gen.sem_push_value(res) != 0) { return -1 }
+        if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_relational(&rhs) != 0) {
             return -1
         }
-        if (gen.sem_binop(op, res, &rhs) != 0) {
+        if (check.sem_binop(op, res, &rhs) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1
         }
@@ -571,24 +574,24 @@ fn parse_relational(res *gen.Res) int {
     if (parse_shift(res) != 0) {
         return -1
     }
-    for p_cur() == gen.TK_LT || p_cur() == gen.TK_LEQ || p_cur() == gen.TK_GT || p_cur() == gen.TK_GEQ {
+    for p_cur() == token.TK_LT || p_cur() == token.TK_LEQ || p_cur() == token.TK_GT || p_cur() == token.TK_GEQ {
         let op int = p_cur()
         let left_ast int = -1
-        let first int = t.c_pos
-        if (t.c_ast_capture != 0) {
+        let first int = token.ctx().pos
+        if (support.session().ast_capture != 0) {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
         p_adv()
         let rhs gen.Res
-        if (gen.sem_push_value(res) != 0) { return -1 }
+        if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_shift(&rhs) != 0) {
             return -1
         }
-        if (gen.sem_binop(op, res, &rhs) != 0) {
+        if (check.sem_binop(op, res, &rhs) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1
         }
@@ -602,24 +605,24 @@ fn parse_shift(res *gen.Res) int {
     if (parse_additive(res) != 0) {
         return -1
     }
-    for p_cur() == gen.TK_LSHIFT || p_cur() == gen.TK_RSHIFT {
+    for p_cur() == token.TK_LSHIFT || p_cur() == token.TK_RSHIFT {
         let op int = p_cur()
         let left_ast int = -1
-        let first int = t.c_pos
-        if (t.c_ast_capture != 0) {
+        let first int = token.ctx().pos
+        if (support.session().ast_capture != 0) {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
         p_adv()
         let rhs gen.Res
-        if (gen.sem_push_value(res) != 0) { return -1 }
+        if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_additive(&rhs) != 0) {
             return -1
         }
-        if (gen.sem_binop(op, res, &rhs) != 0) {
+        if (check.sem_binop(op, res, &rhs) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1
         }
@@ -633,24 +636,24 @@ fn parse_additive(res *gen.Res) int {
     if (parse_multiplicative(res) != 0) {
         return -1
     }
-    for p_cur() == gen.TK_PLUS || p_cur() == gen.TK_MINUS {
+    for p_cur() == token.TK_PLUS || p_cur() == token.TK_MINUS {
         let op int = p_cur()
         let left_ast int = -1
-        let first int = t.c_pos
-        if (t.c_ast_capture != 0) {
+        let first int = token.ctx().pos
+        if (support.session().ast_capture != 0) {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
         p_adv()
         let rhs gen.Res
-        if (gen.sem_push_value(res) != 0) { return -1 }
+        if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_multiplicative(&rhs) != 0) {
             return -1
         }
-        if (gen.sem_binop(op, res, &rhs) != 0) {
+        if (check.sem_binop(op, res, &rhs) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1
         }
@@ -664,24 +667,24 @@ fn parse_multiplicative(res *gen.Res) int {
     if (parse_unary(res) != 0) {
         return -1
     }
-    for p_cur() == gen.TK_STAR || p_cur() == gen.TK_SLASH || p_cur() == gen.TK_PERCENT {
+    for p_cur() == token.TK_STAR || p_cur() == token.TK_SLASH || p_cur() == token.TK_PERCENT {
         let op int = p_cur()
         let left_ast int = -1
-        let first int = t.c_pos
-        if (t.c_ast_capture != 0) {
+        let first int = token.ctx().pos
+        if (support.session().ast_capture != 0) {
             left_ast = res.ast_id
             first = ast.ast_expr_start(left_ast)
         }
         p_adv()
         let rhs gen.Res
-        if (gen.sem_push_value(res) != 0) { return -1 }
+        if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_unary(&rhs) != 0) {
             return -1
         }
-        if (gen.sem_binop(op, res, &rhs) != 0) {
+        if (check.sem_binop(op, res, &rhs) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_BINARY, op, first, left_ast, rhs.ast_id, -1) != 0) {
             return -1
         }
@@ -695,24 +698,24 @@ fn parse_multiplicative(res *gen.Res) int {
 fn parse_unary(res *gen.Res) int {
     let t *gen.TaskCtx = gen.task()
     let k int = p_cur()
-    if (k == gen.TK_MINUS || k == gen.TK_PLUS || k == gen.TK_BANG || k == gen.TK_TILDE) {
-        let first int = t.c_pos
+    if (k == token.TK_MINUS || k == token.TK_PLUS || k == token.TK_BANG || k == token.TK_TILDE) {
+        let first int = token.ctx().pos
         p_adv()
         if (parse_unary(res) != 0) {
             return -1
         }
         let child int = res.ast_id
-        if (gen.sem_unary(k, res) != 0) {
+        if (check.sem_unary(k, res) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, k, first, child, -1, -1) != 0) {
             return -1
         }
         return 0
     }
-    if (k == gen.TK_STAR) {
-        let first2 int = t.c_pos
+    if (k == token.TK_STAR) {
+        let first2 int = token.ctx().pos
         p_adv()
         let save int = t.c_lvalue
         t.c_lvalue = 0
@@ -722,17 +725,17 @@ fn parse_unary(res *gen.Res) int {
             return -1
         }
         let child2 int = res.ast_id
-        if (gen.sem_unary(gen.TK_STAR, res) != 0) {
+        if (check.sem_unary(token.TK_STAR, res) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, gen.TK_STAR, first2, child2, -1, -1) != 0) {
+        if (support.session().ast_capture != 0
+            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, token.TK_STAR, first2, child2, -1, -1) != 0) {
             return -1
         }
         return 0
     }
-    if (k == gen.TK_AMP) {
-        let first3 int = t.c_pos
+    if (k == token.TK_AMP) {
+        let first3 int = token.ctx().pos
         p_adv()
         let save2 int = t.c_lvalue
         // 取地址与「赋值目标」都是左值上下文，但只读性检查必须区分二者：
@@ -744,11 +747,11 @@ fn parse_unary(res *gen.Res) int {
             return -1
         }
         let child3 int = res.ast_id
-        if (gen.sem_unary(gen.TK_AMP, res) != 0) {
+        if (check.sem_unary(token.TK_AMP, res) != 0) {
             return -1
         }
-        if (t.c_ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, gen.TK_AMP, first3, child3, -1, -1) != 0) {
+        if (support.session().ast_capture != 0
+            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, token.TK_AMP, first3, child3, -1, -1) != 0) {
             return -1
         }
         return 0
@@ -764,21 +767,21 @@ fn parse_postfix(res *gen.Res) int {
     }
     for 1 {
         let k int = p_cur()
-        if (k == gen.TK_LPAREN) {
-            if (t.c_compile != 0 && res.sym >= 0 && res.sym < t.c_sym_n
+        if (k == token.TK_LPAREN) {
+            if (support.session().compile != 0 && res.sym >= 0 && res.sym < t.c_sym_n
                 && t.c_syms[res.sym].kind == gen.SYM_FN
                 && (t.c_syms[res.sym].flags & gen.F_COMPTIME) != 0) {
                 return gen.sem_err("编译期函数必须使用 $函数(...) 调用")
             }
             let base_ast int = -1
-            let first int = t.c_pos
-            if (t.c_ast_capture != 0) {
+            let first int = token.ctx().pos
+            if (support.session().ast_capture != 0) {
                 base_ast = res.ast_id
                 first = ast.ast_expr_start(base_ast)
             }
             // 调用：实参表为行内列表，不允许尾逗号
             p_adv()
-            let direct int = gen.sem_call_begin(res)
+            let direct int = check.sem_call_begin(res)
             if (direct < 0) {
                 return -1
             }
@@ -788,7 +791,7 @@ fn parse_postfix(res *gen.Res) int {
             // 会被误当签名号。
             let sig int = -1
             let np int = 0
-            if (direct == 1 && t.c_compile != 0 && res.type_id >= 0) {
+            if (direct == 1 && support.session().compile != 0 && res.type_id >= 0) {
                 if (t.t_types[res.type_id].kind == gen.TY_FN) {
                     sig = t.t_types[res.type_id].sub
                     np = t.t_sig_np[sig]
@@ -796,7 +799,7 @@ fn parse_postfix(res *gen.Res) int {
             }
             let argi int = 0
             let args int = -1
-            if (p_cur() != gen.TK_RPAREN) {
+            if (p_cur() != token.TK_RPAREN) {
                 for 1 {
                     let arg gen.Res
                     let save_exp2 int = t.c_expect_tid
@@ -808,44 +811,44 @@ fn parse_postfix(res *gen.Res) int {
                     if (pr != 0) {
                         return -1
                     }
-                    if (t.c_ast_capture != 0 && ast.ast_expr_args_append(&args, arg.ast_id) != 0) {
+                    if (support.session().ast_capture != 0 && ast.ast_expr_args_append(&args, arg.ast_id) != 0) {
                         return -1
                     }
                     argi += 1
-                    if (gen.sem_push_arg(&arg, res) != 0) {
+                    if (check.sem_push_arg(&arg, res) != 0) {
                         return -1
                     }
-                    if (p_cur() == gen.TK_COMMA) {
+                    if (p_cur() == token.TK_COMMA) {
                         p_adv()
                         continue
                     }
                     break
                 }
             }
-            if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+            if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
                 return -1
             }
-            if (gen.sem_call(res, res) != 0) {
+            if (check.sem_call(res, res) != 0) {
                 return -1
             }
-            if (t.c_ast_capture != 0
-                && ast.ast_expr_finish(res, ast.AST_EXPR_CALL, gen.TK_LPAREN,
+            if (support.session().ast_capture != 0
+                && ast.ast_expr_finish(res, ast.AST_EXPR_CALL, token.TK_LPAREN,
                     first, base_ast, args, -1) != 0) {
                 return -1
             }
             continue
         }
-        if (k == gen.TK_LBRACKET) {
+        if (k == token.TK_LBRACKET) {
             let base_ast2 int = -1
-            let first2 int = t.c_pos
-            if (t.c_ast_capture != 0) {
+            let first2 int = token.ctx().pos
+            if (support.session().ast_capture != 0) {
                 base_ast2 = res.ast_id
                 first2 = ast.ast_expr_start(base_ast2)
             }
             // 下标 / 切片表达式：基址压栈 → 首个下标表达式（恒为值，
             // 清 c_lvalue）→ 遇 '..' 为切片形态（再解析终点），否则普通下标
             p_adv()
-            if (gen.sem_push_value(res) != 0) { return -1 }
+            if (check.sem_push_value(res) != 0) { return -1 }
             let idx gen.Res
             let save_lv int = t.c_lvalue
             t.c_lvalue = 0
@@ -854,10 +857,10 @@ fn parse_postfix(res *gen.Res) int {
             if (ir != 0) {
                 return -1
             }
-            if (p_cur() == gen.TK_RANGE) {
+            if (p_cur() == token.TK_RANGE) {
                 // base[start..end]：start 压栈后解析 end（值在 x0）
                 p_adv()
-                if (gen.sem_push_value(&idx) != 0) { return -1 }
+                if (check.sem_push_value(&idx) != 0) { return -1 }
                 let eidx gen.Res
                 t.c_lvalue = 0
                 let er int = parse_expr(&eidx)
@@ -867,69 +870,69 @@ fn parse_postfix(res *gen.Res) int {
                 }
                 let start_ast int = idx.ast_id
                 let end_ast int = eidx.ast_id
-                if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) {
+                if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) {
                     return -1
                 }
-                if (gen.sem_slice(res, &idx, &eidx) != 0) {
+                if (check.sem_slice(res, &idx, &eidx) != 0) {
                     return -1
                 }
-                if (t.c_ast_capture != 0
-                    && ast.ast_expr_finish(res, ast.AST_EXPR_SLICE, gen.TK_RANGE,
+                if (support.session().ast_capture != 0
+                    && ast.ast_expr_finish(res, ast.AST_EXPR_SLICE, token.TK_RANGE,
                         first2, base_ast2, start_ast, end_ast) != 0) {
                     return -1
                 }
                 continue
             }
             let idx_ast int = idx.ast_id
-            if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) {
+            if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) {
                 return -1
             }
-            if (gen.sem_index(res, &idx) != 0) {
+            if (check.sem_index(res, &idx) != 0) {
                 return -1
             }
-            if (t.c_ast_capture != 0
-                && ast.ast_expr_finish(res, ast.AST_EXPR_INDEX, gen.TK_LBRACKET,
+            if (support.session().ast_capture != 0
+                && ast.ast_expr_finish(res, ast.AST_EXPR_INDEX, token.TK_LBRACKET,
                     first2, base_ast2, idx_ast, -1) != 0) {
                 return -1
             }
             continue
         }
-        if (k == gen.TK_DOT) {
+        if (k == token.TK_DOT) {
             let base_ast3 int = -1
-            let first3 int = t.c_pos
-            if (t.c_ast_capture != 0) {
+            let first3 int = token.ctx().pos
+            if (support.session().ast_capture != 0) {
                 base_ast3 = res.ast_id
                 first3 = ast.ast_expr_start(base_ast3)
             }
             p_adv()
-            if (p_cur() == gen.TK_TO_TYPE) {
+            if (p_cur() == token.TK_TO_TYPE) {
                 // .to_type(T)：参数是类型引用而非表达式
                 p_adv()
-                if (p_expect(gen.TK_LPAREN, "期望 '('") != 0) {
+                if (p_expect(token.TK_LPAREN, "期望 '('") != 0) {
                     return -1
                 }
                 let tid int = parse_type_ref()
                 if (tid < 0) {
                     return -1
                 }
-                if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+                if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
                     return -1
                 }
-                if (gen.sem_cast(res, tid) != 0) {
+                if (check.sem_cast(res, tid) != 0) {
                     return -1
                 }
-                if (t.c_ast_capture != 0
-                    && ast.ast_expr_finish(res, ast.AST_EXPR_CAST, gen.TK_TO_TYPE,
+                if (support.session().ast_capture != 0
+                    && ast.ast_expr_finish(res, ast.AST_EXPR_CAST, token.TK_TO_TYPE,
                         first3, base_ast3, -1, -1) != 0) {
                     return -1
                 }
                 continue
             }
             if (is_member_name(p_cur()) != 0) {
-                let start int = t.c_toks[t.c_pos].start
-                let n int = t.c_toks[t.c_pos].len
+                let start int = token.ctx().tokens[token.ctx().pos].start
+                let n int = token.ctx().tokens[token.ctx().pos].len
                 let meta_bits int = 0
-                if (t.c_compile != 0 && res.sym >= 0 && res.sym < t.c_sym_n) {
+                if (support.session().compile != 0 && res.sym >= 0 && res.sym < t.c_sym_n) {
                     meta_bits = t.c_syms[res.sym].flags &
                         (gen.F_ENUM_META | gen.F_FIELD_META)
                 }
@@ -944,10 +947,10 @@ fn parse_postfix(res *gen.Res) int {
                     if (field_name == 0 || n != 4) {
                         return gen.sem_err("字段元信息迭代变量只支持 .name")
                     }
-                    if (gen.sem_field_meta_name(res) != 0) { return -1 }
-                    if (t.c_ast_capture != 0) {
-                        let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, gen.TOK_STRING,
-                            first3, t.c_pos, res.type_id, -1, -1, -1)
+                    if (check.sem_field_meta_name(res) != 0) { return -1 }
+                    if (support.session().ast_capture != 0) {
+                        let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, token.TOK_STRING,
+                            first3, token.ctx().pos, res.type_id, -1, -1, -1)
                         if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) {
                             return -1
                         }
@@ -956,18 +959,18 @@ fn parse_postfix(res *gen.Res) int {
                     continue
                 }
                 if (enum_meta != 0) {
-                    let ast_op int = gen.TOK_NUMBER
+                    let ast_op int = token.TOK_NUMBER
                     if (enum_name != 0 && n == 4) {
-                        ast_op = gen.TOK_STRING
-                        if (gen.sem_enum_meta_name(res) != 0) { return -1 }
+                        ast_op = token.TOK_STRING
+                        if (check.sem_enum_meta_name(res) != 0) { return -1 }
                     } else if (enum_value != 0 && n == 5) {
-                        if (gen.sem_enum_meta_value(res) != 0) { return -1 }
+                        if (check.sem_enum_meta_value(res) != 0) { return -1 }
                     } else {
                         return gen.sem_err("枚举 values 迭代变量只支持 .name 和 .value")
                     }
-                    if (t.c_ast_capture != 0) {
+                    if (support.session().ast_capture != 0) {
                         let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, ast_op,
-                            first3, t.c_pos, res.type_id, -1, -1, -1)
+                            first3, token.ctx().pos, res.type_id, -1, -1, -1)
                         if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) {
                             return -1
                         }
@@ -975,21 +978,21 @@ fn parse_postfix(res *gen.Res) int {
                     }
                     continue
                 }
-                if (gen.sem_member(res, start, n) != 0) {
+                if (check.sem_member(res, start, n) != 0) {
                     return -1
                 }
-                if (t.c_ast_capture != 0
-                    && ast.ast_expr_finish(res, ast.AST_EXPR_MEMBER, gen.TK_DOT,
+                if (support.session().ast_capture != 0
+                    && ast.ast_expr_finish(res, ast.AST_EXPR_MEMBER, token.TK_DOT,
                         first3, base_ast3, -1, -1) != 0) {
                     return -1
                 }
                 continue
             }
-            return gen.err_tok("'.' 之后需要一个成员名")
+            return token.err_tok("'.' 之后需要一个成员名")
         }
         break
     }
-    if (t.c_compile != 0 && t.c_ct_meta_bare == 0
+    if (support.session().compile != 0 && ctx().ct_meta_bare == 0
         && res.sym >= 0 && res.sym < t.c_sym_n) {
         let bare_meta int = t.c_syms[res.sym].flags &
             (gen.F_ENUM_META | gen.F_FIELD_META)
@@ -1006,16 +1009,16 @@ fn parse_postfix(res *gen.Res) int {
 // parse_primary：基本表达式。进入时重置地址标记。
 fn parse_primary(res *gen.Res) int {
     let t *gen.TaskCtx = gen.task()
-    let first int = t.c_pos
+    let first int = token.ctx().pos
     let op int = p_cur()
     if (parse_primary_impl(res, first) != 0) {
         return -1
     }
-    if (t.c_ast_capture == 0) {
+    if (support.session().ast_capture == 0) {
         return 0
     }
     let child int = res.ast_id
-    let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, op, first, t.c_pos,
+    let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, op, first, token.ctx().pos,
         res.type_id, child, -1, -1)
     if (id < 0) {
         return -1
@@ -1043,40 +1046,40 @@ fn parse_comptime_pred_kind() int {
 // 路径返回，无需新增 typed IR kind。
 fn parse_comptime_pred(res *gen.Res, kind int) int {
     let t *gen.TaskCtx = gen.task()
-    let first int = t.c_pos
+    let first int = token.ctx().pos
     p_adv() // 谓词名
-    if (p_expect(gen.TK_LPAREN, "类型谓词期望 '('") != 0) { return -1 }
+    if (p_expect(token.TK_LPAREN, "类型谓词期望 '('") != 0) { return -1 }
     let x gen.Res
     let saved_fold int = t.c_fold
-    let saved_bare int = t.c_ct_meta_bare
+    let saved_bare int = ctx().ct_meta_bare
     // 谓词不求值实参：折叠上下文（如 $if 条件）下也按普通语义解析，
     // 只取静态类型；发射由 c_em_suppress 静默；允许裸元信息绑定
     // （`$is_type(f, T)` 的 f 是字段/枚举迭代绑定，只作类型引用）。
     t.c_fold = 0
-    t.c_ct_meta_bare += 1
+    ctx().ct_meta_bare += 1
     let xr int = parse_expr_iso(&x)
     t.c_fold = saved_fold
-    t.c_ct_meta_bare = saved_bare
+    ctx().ct_meta_bare = saved_bare
     if (xr != 0) { return -1 }
     let target int = -1
     if (kind == 1) {
-        if (p_expect(gen.TK_COMMA, "$is_type 需要第二个参数（类型）") != 0) { return -1 }
+        if (p_expect(token.TK_COMMA, "$is_type 需要第二个参数（类型）") != 0) { return -1 }
         target = parse_type_ref()
         if (target < 0) { return -1 }
     }
-    if (p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
+    if (p_expect(token.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
     let v int = 0
-    if (t.c_compile != 0) {
+    if (support.session().compile != 0) {
         if (kind == 1) { v = (x.type_id == target).to_type(int) }
         else if (kind == 2) { v = gen.ty_is_integer(x.type_id) }
         else { v = gen.ty_is_float(x.type_id) }
     }
     let c gen.Res
     if (gen.sem_res_const(&c, gen.TY_BOOL, v.to_type(i64)) != 0) { return -1 }
-    gen.sem_res_copy(res, &c)
+    check.sem_res_copy(res, &c)
     t.c_res_is_addr = 0
-    if (t.c_ast_capture != 0
-        && ast.ast_expr_finish(res, ast.AST_EXPR_PRIMARY, gen.TOK_IDENT, first,
+    if (support.session().ast_capture != 0
+        && ast.ast_expr_finish(res, ast.AST_EXPR_PRIMARY, token.TOK_IDENT, first,
             -1, -1, -1) != 0) { return -1 }
     return 0
 }
@@ -1089,22 +1092,22 @@ fn parse_comptime_pred(res *gen.Res, kind int) int {
 // 写入路径（ct_ir_lvalue）不识别该节点，因此赋值自然按只读拒绝。
 fn parse_comptime_field_access(res *gen.Res) int {
     let t *gen.TaskCtx = gen.task()
-    let first int = t.c_pos
+    let first int = token.ctx().pos
     p_adv() // 消费 field 名
-    if (p_expect(gen.TK_LPAREN, "$field 期望 '('") != 0) { return -1 }
+    if (p_expect(token.TK_LPAREN, "$field 期望 '('") != 0) { return -1 }
     let base gen.Res
     if (parse_expr_iso(&base) != 0) { return -1 }
-    if (p_expect(gen.TK_COMMA, "$field 需要第二个参数（字段名字符串）") != 0) {
+    if (p_expect(token.TK_COMMA, "$field 需要第二个参数（字段名字符串）") != 0) {
         return -1
     }
-    if (p_cur() != gen.TOK_STRING) {
-        return gen.err_tok("$field 的字段名必须是字符串字面量")
+    if (p_cur() != token.TOK_STRING) {
+        return token.err_tok("$field 的字段名必须是字符串字面量")
     }
-    let str_start int = t.c_toks[t.c_pos].start
-    let str_len int = t.c_toks[t.c_pos].len
+    let str_start int = token.ctx().tokens[token.ctx().pos].start
+    let str_len int = token.ctx().tokens[token.ctx().pos].len
     p_adv()
-    if (p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
-    if (t.c_compile == 0) { return 0 }
+    if (p_expect(token.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
+    if (support.session().compile == 0) { return 0 }
     if (str_len < 3) { return gen.sem_err("$field 的字段名不能为空") }
     let name_start int = str_start + 1
     let name_len int = str_len - 2
@@ -1127,7 +1130,7 @@ fn parse_comptime_field_access(res *gen.Res) int {
             let same int = 1
             let j int = 0
             for j < name_len {
-                if (t.np_data[fld.name_off + j] != t.c_src[name_start + j]) {
+                if (support.pool_ctx().data[fld.name_off + j] != support.src_ctx().data[name_start + j]) {
                     same = 0
                     break
                 }
@@ -1142,11 +1145,11 @@ fn parse_comptime_field_access(res *gen.Res) int {
     }
     if (field_index < 0) { return gen.sem_err("结构体没有该字段") }
     let base_ast int = base.ast_id
-    if (gen.sem_member(&base, name_start, name_len) != 0) { return -1 }
-    gen.sem_res_copy(res, &base)
-    if (t.c_ast_capture != 0) {
-        let id int = ast.ast_expr_add(ast.AST_EXPR_CTFIELD, gen.TOK_STRING, first,
-            t.c_pos, res.type_id, base_ast, -1, -1)
+    if (check.sem_member(&base, name_start, name_len) != 0) { return -1 }
+    check.sem_res_copy(res, &base)
+    if (support.session().ast_capture != 0) {
+        let id int = ast.ast_expr_add(ast.AST_EXPR_CTFIELD, token.TOK_STRING, first,
+            token.ctx().pos, res.type_id, base_ast, -1, -1)
         if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) { return -1 }
         ast.ast_expr_op_set(id, field_index)
         res.ast_id = id
@@ -1157,11 +1160,11 @@ fn parse_comptime_field_access(res *gen.Res) int {
 // parse_comptime_call：解析 $fn(args) 或 $module.fn(args)，并执行 CT 正文。
 fn parse_comptime_call(res *gen.Res) int {
     let t *gen.TaskCtx = gen.task()
-    let call_token int = t.c_pos
-    let call_line int = t.c_toks[call_token].line
-    let call_col int = t.c_toks[call_token].col
+    let call_token int = token.ctx().pos
+    let call_line int = token.ctx().tokens[call_token].line
+    let call_col int = token.ctx().tokens[call_token].col
     p_adv()
-    if (p_cur() != gen.TOK_IDENT) { return gen.err_tok("$ 后需要编译期函数名") }
+    if (p_cur() != token.TOK_IDENT) { return token.err_tok("$ 后需要编译期函数名") }
     let diag_kind int = parse_comptime_diag_kind()
     if (diag_kind != 0) {
         return parse_comptime_diag_call(res, diag_kind, call_line, call_col)
@@ -1173,27 +1176,27 @@ fn parse_comptime_call(res *gen.Res) int {
     if (p_tok_text_is("field", 5) != 0) {
         return parse_comptime_field_access(res)
     }
-    let alias_start int = t.c_toks[t.c_pos].start
-    let alias_len int = t.c_toks[t.c_pos].len
+    let alias_start int = token.ctx().tokens[token.ctx().pos].start
+    let alias_len int = token.ctx().tokens[token.ctx().pos].len
     let qualified int = 0
     let member_start int = alias_start
     let member_len int = alias_len
-    if (t.c_pos + 1 < t.c_tok_n
-        && t.c_toks[t.c_pos + 1].kind == gen.TK_DOT) {
+    if (token.ctx().pos + 1 < token.ctx().count
+        && token.ctx().tokens[token.ctx().pos + 1].kind == token.TK_DOT) {
         qualified = 1
         p_adv()
-        if (p_cur() != gen.TK_DOT) { return gen.err_tok("编译期模块调用期望 '.'") }
+        if (p_cur() != token.TK_DOT) { return token.err_tok("编译期模块调用期望 '.'") }
         p_adv()
-        if (p_cur() != gen.TOK_IDENT) {
-            return gen.err_tok("模块限定的编译期调用缺少函数名")
+        if (p_cur() != token.TOK_IDENT) {
+            return token.err_tok("模块限定的编译期调用缺少函数名")
         }
-        member_start = t.c_toks[t.c_pos].start
-        member_len = t.c_toks[t.c_pos].len
+        member_start = token.ctx().tokens[token.ctx().pos].start
+        member_len = token.ctx().tokens[token.ctx().pos].len
     }
     let sym int = -1
     let sig int = -1
     let np int = 0
-    if (t.c_compile != 0) {
+    if (support.session().compile != 0) {
         let signature_sym int = -1
         if (qualified == 0) {
             signature_sym = gen.sym_lookup(member_start, member_len)
@@ -1249,13 +1252,13 @@ fn parse_comptime_call(res *gen.Res) int {
         np = t.t_sig_np[sig]
     }
     p_adv()
-    if (p_expect(gen.TK_LPAREN, "编译期调用期望 '('") != 0) { return -1 }
+    if (p_expect(token.TK_LPAREN, "编译期调用期望 '('") != 0) { return -1 }
     let args [64]gen.Res
     let arg_n int = 0
     let defer_eval int = ((t.c_fn_flags & gen.F_COMPTIME) != 0).to_type(int)
-    if (p_cur() != gen.TK_RPAREN) {
+    if (p_cur() != token.TK_RPAREN) {
         for 1 {
-            if (arg_n >= 64) { return gen.err_tok("编译期调用实参过多") }
+            if (arg_n >= 64) { return token.err_tok("编译期调用实参过多") }
             let save_exp int = t.c_expect_tid
             if (sig >= 0 && arg_n < np) {
                 t.c_expect_tid = t.t_sig_params[t.t_sig_first[sig] + arg_n]
@@ -1273,9 +1276,9 @@ fn parse_comptime_call(res *gen.Res) int {
                 if (pk == gen.TY_STRUCT || pk == gen.TY_ARRAY) { agg_param = 1 }
                 if (pk == gen.TY_SLICE || pk == gen.TY_UNION) { agg_param = 1 }
                 let agg_lit int = 0
-                if (p_cur() == gen.TK_LBRACKET) { agg_lit = 1 }
-                if (p_cur() == gen.TOK_IDENT && t.c_pos + 1 < t.c_tok_n
-                    && t.c_toks[t.c_pos + 1].kind == gen.TK_LBRACE) { agg_lit = 1 }
+                if (p_cur() == token.TK_LBRACKET) { agg_lit = 1 }
+                if (p_cur() == token.TOK_IDENT && token.ctx().pos + 1 < token.ctx().count
+                    && token.ctx().tokens[token.ctx().pos + 1].kind == token.TK_LBRACE) { agg_lit = 1 }
                 if (agg_param != 0 && agg_lit != 0) {
                     // 结构体字面量且有对应形参类型时，先尝试在编译期临时构造区折出
                     // 聚合对象（顶层没有 CT 帧，这是唯一能在 pass1 拿到聚合值的路径）。
@@ -1302,11 +1305,11 @@ fn parse_comptime_call(res *gen.Res) int {
                 // 模型（comptime/ct_global_agg.yh），直接把模型对象指针当聚合实参，
                 // 与上面的字面量折叠走同一条 ct_call 协议。
                 if (agg_param != 0 && agg_lit == 0 && folded == 0
-                    && p_cur() == gen.TOK_IDENT && t.c_pos + 1 < t.c_tok_n
-                    && (t.c_toks[t.c_pos + 1].kind == gen.TK_COMMA
-                        || t.c_toks[t.c_pos + 1].kind == gen.TK_RPAREN)) {
-                    let astart int = t.c_toks[t.c_pos].start
-                    let alen int = t.c_toks[t.c_pos].len
+                    && p_cur() == token.TOK_IDENT && token.ctx().pos + 1 < token.ctx().count
+                    && (token.ctx().tokens[token.ctx().pos + 1].kind == token.TK_COMMA
+                        || token.ctx().tokens[token.ctx().pos + 1].kind == token.TK_RPAREN)) {
+                    let astart int = token.ctx().tokens[token.ctx().pos].start
+                    let alen int = token.ctx().tokens[token.ctx().pos].len
                     let asym int = gen.sym_lookup(astart, alen)
                     if (asym < 0) { return gen.sem_err("引用了未声明的名字") }
                     if (t.c_syms[asym].kind == gen.SYM_CONST) {
@@ -1314,7 +1317,7 @@ fn parse_comptime_call(res *gen.Res) int {
                         if (model == 0) {
                             return gen.sem_err("编译期实参里的全局聚合常量尚未在编译期建模（只支持标量元素的定长数组与标量字段结构体）")
                         }
-                        gen.sem_res_reset(&args[arg_n], t.c_syms[asym].type_id)
+                        check.sem_res_reset(&args[arg_n], t.c_syms[asym].type_id)
                         args[arg_n].is_const = 1
                         args[arg_n].ival = model
                         args[arg_n].sym = asym
@@ -1326,11 +1329,11 @@ fn parse_comptime_call(res *gen.Res) int {
             // 单字节指针形参只接受直接写在实参位置的字符串字面量：它的字节就在本
             // 编译单元里，可以就地登记只读池，不受提供方标签号编号影响。
             let arg_str_tok int = -1
-            if (p_cur() == gen.TOK_STRING) { arg_str_tok = t.c_pos }
+            if (p_cur() == token.TOK_STRING) { arg_str_tok = token.ctx().pos }
             if (folded != 0) {
                 // 实参已在上面折进编译期临时构造区，表达式已被消费完。
                 arg_n += 1
-                if (p_cur() != gen.TK_COMMA) { break }
+                if (p_cur() != token.TK_COMMA) { break }
                 p_adv()
                 continue
             }
@@ -1345,8 +1348,8 @@ fn parse_comptime_call(res *gen.Res) int {
                 if (pelem >= 0) {
                     if (arg_str_tok >= 0) {
                         let addr i64 = comptime.ct_pool_register_src(
-                            t.c_toks[arg_str_tok].start,
-                            t.c_toks[arg_str_tok].len, pelem)
+                            token.ctx().tokens[arg_str_tok].start,
+                            token.ctx().tokens[arg_str_tok].len, pelem)
                         if (addr == 0) { return -1 }
                         args[arg_n].is_const = 1
                         args[arg_n].ival = addr
@@ -1370,13 +1373,13 @@ fn parse_comptime_call(res *gen.Res) int {
                 }
             }
             arg_n += 1
-            if (p_cur() != gen.TK_COMMA) { break }
+            if (p_cur() != token.TK_COMMA) { break }
             p_adv()
         }
     }
-    if (p_expect(gen.TK_RPAREN, "编译期调用期望 ')' ") != 0) { return -1 }
-    if (t.c_compile == 0) {
-        gen.sem_res_reset(res, 0)
+    if (p_expect(token.TK_RPAREN, "编译期调用期望 ')' ") != 0) { return -1 }
+    if (support.session().compile == 0) {
+        check.sem_res_reset(res, 0)
         return 0
     }
     if ((t.c_fn_flags & gen.F_COMPTIME) != 0) {
@@ -1388,8 +1391,8 @@ fn parse_comptime_call(res *gen.Res) int {
                     args[ai].ival, args[ai].lit_big) != 0) { return -1 }
             ai += 1
         }
-        gen.sem_res_reset(res, t.t_sig_ret[sig])
-        if (t.c_ast_capture != 0 && t.c_ct_prepare_active != 0) {
+        check.sem_res_reset(res, t.t_sig_ret[sig])
+        if (support.session().ast_capture != 0 && t.c_ct_prepare_active != 0) {
             let args_ast int = -1
             let ai2 int = 0
             for ai2 < arg_n {
@@ -1399,8 +1402,8 @@ fn parse_comptime_call(res *gen.Res) int {
                 ai2 += 1
             }
             res.sym = sym
-            let call_ast int = ast.ast_expr_add(ast.AST_EXPR_CALL, gen.TK_DOLLAR,
-                call_token, t.c_pos, res.type_id, -1, args_ast, -1)
+            let call_ast int = ast.ast_expr_add(ast.AST_EXPR_CALL, token.TK_DOLLAR,
+                call_token, token.ctx().pos, res.type_id, -1, args_ast, -1)
             if (call_ast < 0 || ast.ast_expr_set_semantics(call_ast, res) != 0) {
                 return -1
             }
@@ -1421,13 +1424,13 @@ fn parse_comptime_call(res *gen.Res) int {
 fn p_ct_arg_array_literal(res *gen.Res, tid int) int {
     let t *gen.TaskCtx = gen.task()
     let at gen.CType = t.t_types[tid]
-    if (p_cur() != gen.TK_LBRACKET) { return 1 }
+    if (p_cur() != token.TK_LBRACKET) { return 1 }
     if (at.len <= 0 || at.len > 64) { return 1 }
     let vals [64]i64
     let tys [64]int
     p_adv()
     let idx int = 0
-    for p_cur() != gen.TK_RBRACKET {
+    for p_cur() != token.TK_RBRACKET {
         if (idx >= at.len) { return 1 }
         let ek int = t.t_types[at.elem].kind
         if (ek == gen.TY_ARRAY) {
@@ -1460,14 +1463,14 @@ fn p_ct_arg_array_literal(res *gen.Res, tid int) int {
         }
         tys[idx] = at.elem
         idx += 1
-        if (p_cur() != gen.TK_COMMA) { break }
+        if (p_cur() != token.TK_COMMA) { break }
         p_adv()
     }
-    if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) { return -1 }
+    if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) { return -1 }
     if (idx != at.len) { return 1 }
     let obj i64 = comptime.ct_arg_pool_agg(at.elem, &vals[0], &tys[0], at.len)
     if (obj == 0) { return -1 }
-    gen.sem_res_reset(res, tid)
+    check.sem_res_reset(res, tid)
     res.is_const = 1
     res.ival = obj
     return 0
@@ -1482,12 +1485,12 @@ fn p_ct_arg_array_literal(res *gen.Res, tid int) int {
 fn p_ct_arg_slice_literal(res *gen.Res, tid int) int {
     let t *gen.TaskCtx = gen.task()
     let st gen.CType = t.t_types[tid]
-    if (p_cur() != gen.TK_LBRACKET || st.kind != gen.TY_SLICE) { return 1 }
+    if (p_cur() != token.TK_LBRACKET || st.kind != gen.TY_SLICE) { return 1 }
     let vals [64]i64
     let tys [64]int
     p_adv()
     let idx int = 0
-    for p_cur() != gen.TK_RBRACKET {
+    for p_cur() != token.TK_RBRACKET {
         if (idx >= 64) { return 1 }
         let ek int = t.t_types[st.elem].kind
         if (ek == gen.TY_ARRAY) {
@@ -1520,13 +1523,13 @@ fn p_ct_arg_slice_literal(res *gen.Res, tid int) int {
         }
         tys[idx] = st.elem
         idx += 1
-        if (p_cur() != gen.TK_COMMA) { break }
+        if (p_cur() != token.TK_COMMA) { break }
         p_adv()
     }
-    if (p_expect(gen.TK_RBRACKET, "期望 ']'") != 0) { return -1 }
+    if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) { return -1 }
     let obj i64 = comptime.ct_arg_pool_agg(st.elem, &vals[0], &tys[0], idx)
     if (obj == 0) { return -1 }
-    gen.sem_res_reset(res, tid)
+    check.sem_res_reset(res, tid)
     res.is_const = 1
     res.ival = obj
     return 0
@@ -1538,22 +1541,22 @@ fn p_ct_arg_slice_literal(res *gen.Res, tid int) int {
 fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
     let t *gen.TaskCtx = gen.task()
     let st gen.CType = t.t_types[tid]
-    if (gen.ty_lookup_name(t.c_toks[t.c_pos].start,
-            t.c_toks[t.c_pos].len) != tid) {
+    if (gen.ty_lookup_name(token.ctx().tokens[token.ctx().pos].start,
+            token.ctx().tokens[token.ctx().pos].len) != tid) {
         return 1
     }
     let vals [64]i64
     let tys [64]int
     if (st.len > 64) { return 1 }
     p_adv()
-    if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) { return -1 }
+    if (p_expect(token.TK_LBRACE, "期望 '{'") != 0) { return -1 }
     let filled int = 0
-    for p_cur() != gen.TK_RBRACE {
-        if (p_cur() != gen.TOK_IDENT) {
-            return gen.err_tok("结构体字面量期望字段名")
+    for p_cur() != token.TK_RBRACE {
+        if (p_cur() != token.TOK_IDENT) {
+            return token.err_tok("结构体字面量期望字段名")
         }
-        let nstart int = t.c_toks[t.c_pos].start
-        let nlen int = t.c_toks[t.c_pos].len
+        let nstart int = token.ctx().tokens[token.ctx().pos].start
+        let nlen int = token.ctx().tokens[token.ctx().pos].len
         let fi int = -1
         let i int = 0
         for i < st.len {
@@ -1562,7 +1565,7 @@ fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
                 let same int = 1
                 let j int = 0
                 for j < nlen {
-                    if (t.np_data[field.name_off + j] != t.c_src[nstart + j]) {
+                    if (support.pool_ctx().data[field.name_off + j] != support.src_ctx().data[nstart + j]) {
                         same = 0
                         break
                     }
@@ -1579,7 +1582,7 @@ fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
             return 1
         }
         p_adv()
-        if (p_expect(gen.TK_COLON, "期望 ':'") != 0) { return -1 }
+        if (p_expect(token.TK_COLON, "期望 ':'") != 0) { return -1 }
         if (fk == gen.TY_ARRAY) {
             // 数组字段：递归折叠数组字面量。
             let ar2 gen.Res
@@ -1610,14 +1613,14 @@ fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
         }
         tys[fi] = field2.type_id
         filled += 1
-        if (p_cur() != gen.TK_COMMA) { break }
+        if (p_cur() != token.TK_COMMA) { break }
         p_adv()
     }
-    if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) { return -1 }
+    if (p_expect(token.TK_RBRACE, "期望 '}'") != 0) { return -1 }
     if (filled != st.len) { return 1 }
     let obj i64 = comptime.ct_arg_pool_agg(tid, &vals[0], &tys[0], st.len)
     if (obj == 0) { return -1 }
-    gen.sem_res_reset(res, tid)
+    check.sem_res_reset(res, tid)
     res.is_const = 1
     res.ival = obj
     return 0
@@ -1629,44 +1632,44 @@ fn parse_primary_impl(res *gen.Res, first int) int {
     t.c_res_is_addr = 0
     let k int = p_cur()
     // 当前 token 的源区间（各字面量分支共用；stage0 同级块禁同名局部）
-    let start int = t.c_toks[t.c_pos].start
-    let n int = t.c_toks[t.c_pos].len
-    if (k == gen.TK_DOLLAR) {
+    let start int = token.ctx().tokens[token.ctx().pos].start
+    let n int = token.ctx().tokens[token.ctx().pos].len
+    if (k == token.TK_DOLLAR) {
         return parse_comptime_call(res)
     }
-    if (k == gen.TOK_INTERP_BEGIN) {
+    if (k == token.TOK_INTERP_BEGIN) {
         return parse_interp(res)
     }
-    if (k == gen.TOK_NUMBER) {
+    if (k == token.TOK_NUMBER) {
         p_adv()
-        return gen.sem_number(start, n, res)
+        return check.sem_number(start, n, res)
     }
-    if (k == gen.TOK_STRING) {
+    if (k == token.TOK_STRING) {
         p_adv()
-        return gen.sem_string(start, n, res)
+        return check.sem_string(start, n, res)
     }
-    if (k == gen.TOK_CHAR) {
+    if (k == token.TOK_CHAR) {
         p_adv()
-        return gen.sem_char(start, n, res)
+        return check.sem_char(start, n, res)
     }
-    if (k == gen.TK_TRUE) {
+    if (k == token.TK_TRUE) {
         p_adv()
-        return gen.sem_bool(1, res)
+        return check.sem_bool(1, res)
     }
-    if (k == gen.TK_FALSE) {
+    if (k == token.TK_FALSE) {
         p_adv()
-        return gen.sem_bool(0, res)
+        return check.sem_bool(0, res)
     }
-    if (k == gen.TK_LPAREN) {
+    if (k == token.TK_LPAREN) {
         p_adv()
         if (parse_expr_iso(res) != 0) {
             return -1
         }
-        return p_expect(gen.TK_RPAREN, "期望 ')'")
+        return p_expect(token.TK_RPAREN, "期望 ')'")
     }
-    if (k == gen.TK_SIZEOF) {
+    if (k == token.TK_SIZEOF) {
         p_adv()
-        if (p_expect(gen.TK_LPAREN, "期望 '('") != 0) {
+        if (p_expect(token.TK_LPAREN, "期望 '('") != 0) {
             return -1
         }
         if (sizeof_starts_type() != 0) {
@@ -1675,10 +1678,10 @@ fn parse_primary_impl(res *gen.Res, first int) int {
             if (tid < 0) {
                 return -1
             }
-            if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+            if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
                 return -1
             }
-            return gen.sem_sizeof(tid, res)
+            return check.sem_sizeof(tid, res)
         }
         // sizeof(expr)：发射层静默求型（表达式不求值、不发码），
         // 取结果类型的大小。同型名的场景类型优先。
@@ -1690,38 +1693,38 @@ fn parse_primary_impl(res *gen.Res, first int) int {
         if (er.ct_diag != 0) {
             return gen.sem_err("编译期诊断只能作为独立语句")
         }
-        if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+        if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
             return -1
         }
-        return gen.sem_sizeof(er.type_id, res)
+        return check.sem_sizeof(er.type_id, res)
     }
-    if (k == gen.TK_LEN) {
+    if (k == token.TK_LEN) {
         p_adv()
-        if (p_expect(gen.TK_LPAREN, "期望 '('") != 0) {
+        if (p_expect(token.TK_LPAREN, "期望 '('") != 0) {
             return -1
         }
         if (parse_expr_iso(res) != 0) {
             return -1
         }
-        if (p_expect(gen.TK_RPAREN, "期望 ')'") != 0) {
+        if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
             return -1
         }
         let len_child int = res.ast_id
-        if (gen.sem_len(res) != 0) { return -1 }
-        if (t.c_ast_capture != 0
-            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, gen.TK_LEN, first,
+        if (check.sem_len(res) != 0) { return -1 }
+        if (support.session().ast_capture != 0
+            && ast.ast_expr_finish(res, ast.AST_EXPR_UNARY, token.TK_LEN, first,
                 len_child, -1, -1) != 0) { return -1 }
         return 0
     }
-    if (k == gen.TK_LBRACKET) {
+    if (k == token.TK_LBRACKET) {
         // 数组/切片字面量（目标类型来自 let 初始化/赋值上下文）
         p_adv()
         return parse_array_literal(res, first)
     }
-    if (k == gen.TOK_IDENT) {
+    if (k == token.TOK_IDENT) {
         return parse_ident_primary(res)
     }
-    return gen.err_tok("此处需要一个表达式")
+    return token.err_tok("此处需要一个表达式")
 }
 
 // parse_ident_primary：标识符作为基本表达式（含结构体字面量决策与
@@ -1729,16 +1732,16 @@ fn parse_primary_impl(res *gen.Res, first int) int {
 fn parse_ident_primary(res *gen.Res) int {
     let tk *gen.TaskCtx = gen.task()
     // 注意：stage0 中 if/while 体不开新词法作用域，同名局部必须提升到函数级
-    let istart int = tk.c_toks[tk.c_pos].start
-    let ilen int = tk.c_toks[tk.c_pos].len
-    if (tk.c_compile != 0 && tk.c_ct_target_ctx != 0) {
+    let istart int = token.ctx().tokens[token.ctx().pos].start
+    let ilen int = token.ctx().tokens[token.ctx().pos].len
+    if (support.session().compile != 0 && tk.c_ct_target_ctx != 0) {
         let target_name int = comptime.ct_target_symbol(istart, ilen, res)
         if (target_name != 0) {
             p_adv()
             return 0
         }
     }
-    if (tk.c_compile != 0 && p_peek(1) != gen.TK_LPAREN) {
+    if (support.session().compile != 0 && p_peek(1) != token.TK_LPAREN) {
         let direct_sym int = gen.sym_lookup(istart, ilen)
         if (direct_sym >= 0 && tk.c_syms[direct_sym].kind == gen.SYM_FN
             && (tk.c_syms[direct_sym].flags & gen.F_COMPTIME) != 0) {
@@ -1747,19 +1750,19 @@ fn parse_ident_primary(res *gen.Res) int {
     }
     // 枚举成员限定引用 `EnumName.member`：枚举类型名不是值，直接解析到成员常量。
     // 基名被局部/全局符号占用时保持原路径（词法作用域优先）。
-    if (tk.c_compile != 0 && p_peek(1) == gen.TK_DOT && p_peek(2) == gen.TOK_IDENT
+    if (support.session().compile != 0 && p_peek(1) == token.TK_DOT && p_peek(2) == token.TOK_IDENT
         && gen.sym_lookup(istart, ilen) < 0) {
         let etid int = gen.ty_lookup_name(istart, ilen)
         if (etid >= 0 && tk.t_types[etid].kind == gen.TY_ENUM) {
-            let mlen2 int = tk.c_toks[tk.c_pos + 2].len
-            let mstart int = tk.c_toks[tk.c_pos + 2].start
+            let mlen2 int = token.ctx().tokens[token.ctx().pos + 2].len
+            let mstart int = token.ctx().tokens[token.ctx().pos + 2].start
             let direct int = gen.sym_lookup(mstart, mlen2)
             let msym int = direct
             // 成员名被同名形参/局部变量遮蔽时，sym_lookup 命中的不是枚举成员；
             // 此时按名字在符号表里反查属于该枚举的成员符号（`.` 右侧总是成员名）。
             if (direct < 0
                 || (tk.c_syms[direct].flags & gen.F_ENUM_MEMBER) == 0) {
-                msym = gen.sym_find_enum_member(etid, tk.c_src, mstart, mlen2)
+                msym = gen.sym_find_enum_member(etid, support.src_ctx().data, mstart, mlen2)
             }
             // 不检查 const_ready：延迟求值的枚举成员被引用时可能还没回填，
             // 交给 sem_ident_val 给出「常量尚未就绪」这类准确诊断。
@@ -1768,37 +1771,37 @@ fn parse_ident_primary(res *gen.Res) int {
                 p_adv()
                 p_adv()
                 p_adv()
-                return gen.sem_ident_val(msym, res)
+                return check.sem_ident_val(msym, res)
             }
         }
     }
     // 模块限定名（编译模式）：名字解析失败且是当前文件的导入绑定
     //（局部声明按词法作用域遮蔽导入）。语法模式不解析（U1 行为）。
-    if (tk.c_compile != 0 && gen.module_mode() != 0 && p_peek(1) == gen.TK_DOT && p_peek(2) == gen.TOK_IDENT) {
+    if (support.session().compile != 0 && support.module_mode() != 0 && p_peek(1) == token.TK_DOT && p_peek(2) == token.TOK_IDENT) {
         if (gen.sym_lookup(istart, ilen) < 0) {
             let b int = gen.mod_file_binding(istart, ilen)
             if (b >= 0) {
                 // m.T { …：限定结构体字面量（仅非块跟随上下文）
-                if (p_peek(3) == gen.TK_LBRACE && tk.c_ctx_block == 0) {
+                if (p_peek(3) == token.TK_LBRACE && ctx().ctx_block == 0) {
                     return parse_module_struct_lit(res, b)
                 }
                 return parse_module_qualified(res, b, 0)
             }
         }
     }
-    if (p_peek(1) == gen.TK_LBRACE) {
-        if (tk.c_ctx_block != 0) {
+    if (p_peek(1) == token.TK_LBRACE) {
+        if (ctx().ctx_block != 0) {
             if (try_struct_init() == 0) {
                 return parse_struct_init_forced(res)
             }
             // 回退：该 '{' 是 for/switch/case 体，标识符保持裸形式
             p_adv()
-            return gen.sem_ident(istart, ilen, res)
+            return check.sem_ident(istart, ilen, res)
         }
         return parse_struct_init_forced(res)
     }
     p_adv()
-    return gen.sem_ident(istart, ilen, res)
+    return check.sem_ident(istart, ilen, res)
 }
 
 // parse_module_qualified：m.member 的模块成员访问（消费 m . member）。
@@ -1808,14 +1811,14 @@ fn parse_module_qualified(res *gen.Res, mi int, unused int) int {
     let t *gen.TaskCtx = gen.task()
     p_adv() // 绑定名
     p_adv() // '.'
-    let mstart int = t.c_toks[t.c_pos].start
-    let mlen int = t.c_toks[t.c_pos].len
-    let mline int = t.c_toks[t.c_pos].line
-    let mcol int = t.c_toks[t.c_pos].col
+    let mstart int = token.ctx().tokens[token.ctx().pos].start
+    let mlen int = token.ctx().tokens[token.ctx().pos].len
+    let mline int = token.ctx().tokens[token.ctx().pos].line
+    let mcol int = token.ctx().tokens[token.ctx().pos].col
     p_adv()
     let e int = gen.mod_ns_lookup(mi, mstart, mlen, 0)
     if (e < 0) {
-        return gen.err_lc(mline, mcol, "模块没有导出该名字（或它是类型名不能作值）")
+        return support.err_lc(mline, mcol, "模块没有导出该名字（或它是类型名不能作值）")
     }
     // 标记导入已使用（未使用导入检查在文件编译完后做）
     let i int = 0
@@ -1826,7 +1829,7 @@ fn parse_module_qualified(res *gen.Res, mi int, unused int) int {
         }
         i += 1
     }
-    return gen.sem_ident_val(t.c_mods[mi].ns[e].sym, res)
+    return check.sem_ident_val(t.c_mods[mi].ns[e].sym, res)
 }
 
 // parse_module_struct_lit：m.T { … } 限定结构体字面量（消费 m . T）。
@@ -1835,14 +1838,14 @@ fn parse_module_struct_lit(res *gen.Res, mi int) int {
     let t *gen.TaskCtx = gen.task()
     p_adv()
     p_adv()
-    let tstart int = t.c_toks[t.c_pos].start
-    let tlen int = t.c_toks[t.c_pos].len
-    let tline int = t.c_toks[t.c_pos].line
-    let tcol int = t.c_toks[t.c_pos].col
+    let tstart int = token.ctx().tokens[token.ctx().pos].start
+    let tlen int = token.ctx().tokens[token.ctx().pos].len
+    let tline int = token.ctx().tokens[token.ctx().pos].line
+    let tcol int = token.ctx().tokens[token.ctx().pos].col
     p_adv()
     let e int = gen.mod_ns_lookup(mi, tstart, tlen, 1)
     if (e < 0) {
-        return gen.err_lc(tline, tcol, "模块没有导出该类型")
+        return support.err_lc(tline, tcol, "模块没有导出该类型")
     }
     let tid int = t.c_mods[mi].ns[e].tid
     let i int = 0
@@ -1859,26 +1862,26 @@ fn parse_module_struct_lit(res *gen.Res, mi int) int {
 // try_struct_init：试探「IDENT { structInitBody }」成立且其后紧跟 '{'。
 fn try_struct_init() int {
     let t *gen.TaskCtx = gen.task()
-    let save int = t.c_pos
+    let save int = token.ctx().pos
     let save_fold int = t.c_fold
     let save_lit_off int = t.c_lit_off
     let save_fp int = t.c_fp_off
-    t.c_spec += 1
+    support.diag().spec += 1
     // 试探期只做语法判定：禁发码、禁分配槽（c_fold>0 让语义钩子短路）
-    if (t.c_compile != 0) {
+    if (support.session().compile != 0) {
         t.c_fold += 1
     }
     let dummy gen.Res
     let r int = parse_struct_init_forced(&dummy)
     let ok int = 0
-    if (r == 0 && p_cur() == gen.TK_LBRACE) {
+    if (r == 0 && p_cur() == token.TK_LBRACE) {
         ok = 1
     }
-    if (t.c_compile != 0) {
+    if (support.session().compile != 0) {
         t.c_fold -= 1
     }
-    t.c_spec -= 1
-    t.c_pos = save
+    support.diag().spec -= 1
+    token.ctx().pos = save
     t.c_fold = save_fold
     t.c_lit_off = save_lit_off
     t.c_fp_off = save_fp
@@ -1894,11 +1897,11 @@ fn parse_struct_init_forced(res *gen.Res) int {
     let t *gen.TaskCtx = gen.task()
     // 结构体字面量：IDENT '{' body '}'
     // 语法模式只消费 token；编译模式在临时槽构造聚合值，地址留 x0。
-    let start int = t.c_toks[t.c_pos].start
-    let nlen int = t.c_toks[t.c_pos].len
+    let start int = token.ctx().tokens[token.ctx().pos].start
+    let nlen int = token.ctx().tokens[token.ctx().pos].len
     p_adv()
     let tid int = 0
-    if (t.c_compile != 0) {
+    if (support.session().compile != 0) {
         if (t.c_fold != 0) {
             return gen.sem_err("结构体字面量不是编译期常量")
         }
@@ -1918,12 +1921,12 @@ fn parse_struct_init_forced(res *gen.Res) int {
 // 消费；本地路径与模块限定路径共用）。
 fn parse_struct_init_tid(tid int, res *gen.Res) int {
     let t *gen.TaskCtx = gen.task()
-    let init_first int = t.c_pos
-    if (p_expect(gen.TK_LBRACE, "期望 '{'") != 0) {
+    let init_first int = token.ctx().pos
+    if (p_expect(token.TK_LBRACE, "期望 '{'") != 0) {
         return -1
     }
-    if (t.c_compile != 0) {
-        if (gen.sem_struct_lit_begin(tid) < 0) {
+    if (support.session().compile != 0) {
+        if (check.sem_struct_lit_begin(tid) < 0) {
             return -1
         }
     }
@@ -1931,18 +1934,18 @@ fn parse_struct_init_tid(tid int, res *gen.Res) int {
     if (parse_struct_init_body(tid, &fields) != 0) {
         return -1
     }
-    if (p_expect(gen.TK_RBRACE, "期望 '}'") != 0) {
+    if (p_expect(token.TK_RBRACE, "期望 '}'") != 0) {
         return -1
     }
-    if (t.c_compile != 0) {
-        if (gen.sem_struct_lit_end(tid) != 0) {
+    if (support.session().compile != 0) {
+        if (check.sem_struct_lit_end(tid) != 0) {
             return -1
         }
-        gen.sem_res_reset(res, tid)
+        check.sem_res_reset(res, tid)
     }
-    if (t.c_ast_capture != 0) {
-        let id int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_INIT, gen.TK_LBRACE,
-            init_first, t.c_pos, tid, fields, -1, -1)
+    if (support.session().ast_capture != 0) {
+        let id int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_INIT, token.TK_LBRACE,
+            init_first, token.ctx().pos, tid, fields, -1, -1)
         if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) { return -1 }
         res.ast_id = id
     }
@@ -1953,36 +1956,36 @@ fn parse_struct_init_tid(tid int, res *gen.Res) int {
 // 强制非空；首元素第二个 token 为 ':' 即命名式；不得混写；允许尾逗号。
 fn parse_struct_init_body(tid int, fields *int) int {
     let t *gen.TaskCtx = gen.task()
-    if (p_cur() == gen.TK_RBRACE) {
-        return gen.err_tok("结构体字面量不能为空")
+    if (p_cur() == token.TK_RBRACE) {
+        return token.err_tok("结构体字面量不能为空")
     }
     let named int = 0
-    if (is_member_name(p_cur()) != 0 && p_peek(1) == gen.TK_COLON) {
+    if (is_member_name(p_cur()) != 0 && p_peek(1) == token.TK_COLON) {
         named = 1
     }
     let fv gen.Res
     let fpos int = 0
     for 1 {
-        let field_first int = t.c_pos
+        let field_first int = token.ctx().pos
         let fidx int = -1
         if (named != 0) {
             if (is_member_name(p_cur()) == 0) {
-                return gen.err_tok("命名式字面量需要字段名")
+                return token.err_tok("命名式字面量需要字段名")
             }
-            if (t.c_compile != 0 && t.c_fold == 0) {
-                let fs int = t.c_toks[t.c_pos].start
-                let fl int = t.c_toks[t.c_pos].len
-                fidx = gen.sem_lit_field_lookup(t.c_lit_tid, fs, fl)
+            if (support.session().compile != 0 && t.c_fold == 0) {
+                let fs int = token.ctx().tokens[token.ctx().pos].start
+                let fl int = token.ctx().tokens[token.ctx().pos].len
+                fidx = check.sem_lit_field_lookup(t.c_lit_tid, fs, fl)
                 if (fidx < 0) {
                     return gen.sem_err("结构体没有该字段")
                 }
             }
             p_adv()
-            if (p_expect(gen.TK_COLON, "期望 ':'") != 0) {
+            if (p_expect(token.TK_COLON, "期望 ':'") != 0) {
                 return -1
             }
             let saved_expect int = t.c_expect_tid
-            if (t.c_compile != 0 && t.c_fold == 0 && fidx >= 0) {
+            if (support.session().compile != 0 && t.c_fold == 0 && fidx >= 0) {
                 t.c_expect_tid = t.t_fields[fidx].type_id
             }
             if (parse_expr_iso(&fv) != 0) {
@@ -1991,7 +1994,7 @@ fn parse_struct_init_body(tid int, fields *int) int {
             }
             t.c_expect_tid = saved_expect
         } else {
-            if (t.c_compile != 0 && t.c_fold == 0) {
+            if (support.session().compile != 0 && t.c_fold == 0) {
                 if (fpos >= t.t_types[t.c_lit_tid].len) {
                     return gen.sem_err("位置式字面量字段过多")
                 }
@@ -1999,7 +2002,7 @@ fn parse_struct_init_body(tid int, fields *int) int {
                 fpos += 1
             }
             let saved_expect2 int = t.c_expect_tid
-            if (t.c_compile != 0 && t.c_fold == 0 && fidx >= 0) {
+            if (support.session().compile != 0 && t.c_fold == 0 && fidx >= 0) {
                 t.c_expect_tid = t.t_fields[fidx].type_id
             }
             if (parse_expr_iso(&fv) != 0) {
@@ -2008,30 +2011,30 @@ fn parse_struct_init_body(tid int, fields *int) int {
             }
             t.c_expect_tid = saved_expect2
         }
-        if (t.c_compile != 0 && t.c_fold == 0) {
+        if (support.session().compile != 0 && t.c_fold == 0) {
             t.c_lit_last_type = fv.type_id
             t.c_lit_last_lit = fv.is_lit
             t.c_lit_last_ival = fv.ival
-            if (gen.sem_struct_lit_field(t.c_lit_tid, fidx) != 0) {
+            if (check.sem_struct_lit_field(t.c_lit_tid, fidx) != 0) {
                 return -1
             }
         }
-        if (t.c_ast_capture != 0) {
+        if (support.session().ast_capture != 0) {
             if (fidx < 0 || fv.ast_id < 0) {
-                return gen.fail("内部错误：结构体初始化 AST 缺少字段或值")
+                return support.fail("内部错误：结构体初始化 AST 缺少字段或值")
             }
             let node_first int = field_first
             if (fields[0] >= 0) {
                 node_first = ast.ast_expr_first_of(fields[0])
             }
             let field_node int = ast.ast_expr_add(ast.AST_EXPR_STRUCT_FIELD, fidx,
-                node_first, t.c_pos, -1, fields[0], fv.ast_id, -1)
+                node_first, token.ctx().pos, -1, fields[0], fv.ast_id, -1)
             if (field_node < 0) { return -1 }
             fields[0] = field_node
         }
-        if (p_cur() == gen.TK_COMMA) {
+        if (p_cur() == token.TK_COMMA) {
             p_adv()
-            if (p_cur() == gen.TK_RBRACE) {
+            if (p_cur() == token.TK_RBRACE) {
                 break
             }
             continue

@@ -1,0 +1,81 @@
+module support
+
+// ============================================================================
+// source.yh —— 源文件整读与路径快照
+//
+// read_source 把文件读入 SourceCtx.data/length；set_source_path 把路径复制进
+// 可扩容 path_buf，SourceCtx.path 指向缓冲内部。二者都分配堆内存，失败写
+// 诊断并返回 -1。明确不做：不词法化、不切 token、不释放旧源缓冲。
+// ============================================================================
+
+// set_source_path：把当前文件路径复制进任务私有可扩容缓冲，避免可扩容
+// 字符串池搬迁后 path 悬空。成功返回 0；路径为空/分配失败返回 -1。
+pub fn set_source_path(path *char) int {
+    if (path == 0) {
+        return fail("源文件路径为空")
+    }
+    let n int = 0
+    for path[n] != 0 {
+        n += 1
+    }
+    let buf *u8 = task_buf_reserve(&src_ctx().path_buf, &src_ctx().path_buf_cap, n + 1)
+    if (buf == 0) {
+        return fail("路径快照缓冲分配失败")
+    }
+    let i int = 0
+    for i < n {
+        buf[i] = path[i].to_type(u8)
+        i += 1
+    }
+    buf[n] = 0
+    src_ctx().path = buf.to_type(*char)
+    return 0
+}
+
+// read_source：读取完整源文件到 SourceCtx.data/length。
+// 流程：open（O_RDONLY=0）→ 循环 read 到倍增缓冲（0 即 EOF，负数错误）→
+// close。缓冲初始 64 KiB，每次翻倍并整体拷贝；NUL 字节按普通字节保留。
+// 成功返回 0；任何一步失败释放资源、输出诊断并返回 -1。
+pub fn read_source(path *char) int {
+    let fd int = open(path, 0)
+    if (fd < 0) {
+        return fail_path("无法打开文件: ", path)
+    }
+    let cap int = 65536
+    let data *u8 = malloc(cap.to_type(u64)).to_type(*u8)
+    if (data == 0) {
+        close(fd)
+        return fail("内存分配失败")
+    }
+    let blen int = 0
+    for 1 {
+        // 保证至少 64 KiB 余量再读（read 一次最多取 64 KiB）
+        if (cap - blen < 65536) {
+            let ncap int = cap * 2
+            let nd *u8 = malloc(ncap.to_type(u64)).to_type(*u8)
+            if (nd == 0) {
+                free(data)
+                close(fd)
+                return fail("内存分配失败")
+            }
+            memcpy(nd, data, blen.to_type(u64))
+            free(data)
+            data = nd
+            cap = ncap
+        }
+        let n i64 = read(fd, data + blen, (cap - blen).to_type(u64))
+        if (n < 0) {
+            free(data)
+            close(fd)
+            return fail_path("读取失败: ", path)
+        }
+        if (n == 0) {
+            break
+        }
+        blen += n.to_type(int)
+    }
+    close(fd)
+    src_ctx().data = data
+    src_ctx().length = blen
+    return 0
+}

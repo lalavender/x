@@ -1,4 +1,6 @@
 module ast
+import token
+import support
 import gen
 import comptime
 
@@ -52,7 +54,7 @@ pub fn ast_function_reset() void {
     ast_function_edge_first = 0
     ast_function_binding_first = 0
     ast_function_asm_first = 0
-    tk.c_stats_ast_functions = 0
+    support.session().stats_ast_functions = 0
 }
 
 // ast_function_find_decl：查找文件声明身份对应的 AST 行；缺失时返回 -1。
@@ -73,20 +75,20 @@ fn ast_function_find_decl(file_id int, owner_decl int) int {
 // ast_function_begin：在函数语义遍历前记录各 arena 的私有起点。
 pub fn ast_function_begin(file_id int, owner_decl int) int {
     let tk *gen.TaskCtx = gen.task()
-    if (tk.c_ast_capture == 0) { return 0 }
-    if (ast_function_active != 0 || file_id != tk.c_active_file
-        || owner_decl != tk.c_file_decl_i) {
-        return gen.fail("内部错误：函数 AST 上下文嵌套或归属错误")
+    if (support.session().ast_capture == 0) { return 0 }
+    if (ast_function_active != 0 || file_id != support.session().active_file
+        || owner_decl != store().file_decl_i) {
+        return support.fail("内部错误：函数 AST 上下文嵌套或归属错误")
     }
     let decl_row int = ast_function_find_decl(file_id, owner_decl)
     if (decl_row < 0 && tk.c_ct_prepare_active != 0
-        && tk.c_file_indexed == 0) {
+        && store().file_indexed == 0) {
         // 单文件编译没有项目级 AstDecl；编译期准备过程用合成文件/声明身份。
     } else if (decl_row < 0
-        || (ast_decl_nodes[decl_row].kind != gen.TK_FN
-            && ast_decl_nodes[decl_row].kind != gen.TK_TEST)
+        || (ast_decl_nodes[decl_row].kind != token.TK_FN
+            && ast_decl_nodes[decl_row].kind != token.TK_TEST)
         || ast_decl_nodes[decl_row].body_stmt >= 0) {
-        return gen.fail("内部错误：函数 AST 上下文没有待解析的函数声明")
+        return support.fail("内部错误：函数 AST 上下文没有待解析的函数声明")
     }
     ast_function_active = 1
     ast_function_file = file_id
@@ -102,29 +104,29 @@ pub fn ast_function_begin(file_id int, owner_decl int) int {
 // ast_function_end：在函数通过语义遍历后封存只读 arena 范围。
 pub fn ast_function_end() int {
     let tk *gen.TaskCtx = gen.task()
-    if (tk.c_ast_capture == 0) { return 0 }
-    if (ast_function_active == 0 || ast_function_file != tk.c_active_file
-        || ast_function_owner != tk.c_file_decl_i) {
-        return gen.fail("内部错误：函数 AST 上下文结束位置错误")
+    if (support.session().ast_capture == 0) { return 0 }
+    if (ast_function_active == 0 || ast_function_file != support.session().active_file
+        || ast_function_owner != store().file_decl_i) {
+        return support.fail("内部错误：函数 AST 上下文结束位置错误")
     }
     let decl_row int = ast_function_find_decl(ast_function_file, ast_function_owner)
     let synthetic int = (decl_row < 0 && tk.c_ct_prepare_active != 0
-        && tk.c_file_indexed == 0).to_type(int)
+        && store().file_indexed == 0).to_type(int)
     if (synthetic == 0 && (decl_row < 0
         || ast_decl_nodes[decl_row].body_stmt < ast_function_stmt_first
         || ast_decl_nodes[decl_row].body_stmt >= ast_stmt_count)) {
-        return gen.fail("内部错误：函数 AST 上下文缺少函数体根")
+        return support.fail("内部错误：函数 AST 上下文缺少函数体根")
     }
     if (synthetic != 0 && (ast_function_stmt_first >= ast_stmt_count
         || ast_stmt_nodes[ast_function_stmt_first].kind != AST_STMT_BLOCK)) {
-        return gen.fail("内部错误：单文件编译期 AST 缺少函数体根")
+        return support.fail("内部错误：单文件编译期 AST 缺少函数体根")
     }
     if (ast_function_count == ast_function_cap) {
         let ncap int = ast_function_cap * 2
         if (ncap == 0) { ncap = 32 }
         let next *AstFunctionContext = malloc(
             (ncap * sizeof(AstFunctionContext)).to_type(u64)).to_type(*AstFunctionContext)
-        if (next == 0) { return gen.fail("函数 AST 上下文分配失败") }
+        if (next == 0) { return support.fail("函数 AST 上下文分配失败") }
         if (ast_function_count > 0) {
             memcpy(next, ast_function_nodes,
                 (ast_function_count * sizeof(AstFunctionContext)).to_type(u64))
@@ -142,7 +144,7 @@ pub fn ast_function_end() int {
     ast_function_nodes[row].token_first = synthetic != 0 ?
         tk.c_ct_prepare_first : ast_decl_nodes[decl_row].first
     ast_function_nodes[row].token_after = synthetic != 0 ?
-        tk.c_pos : ast_decl_nodes[decl_row].after
+        token.ctx().pos : ast_decl_nodes[decl_row].after
     ast_function_nodes[row].expr_first = ast_function_expr_first
     ast_function_nodes[row].expr_after = ast_expr_count
     ast_function_nodes[row].stmt_first = ast_function_stmt_first
@@ -156,7 +158,7 @@ pub fn ast_function_end() int {
     ast_function_nodes[row].asm_first = ast_function_asm_first
     ast_function_nodes[row].asm_after = 0
     ast_function_count += 1
-    tk.c_stats_ast_functions += 1
+    support.session().stats_ast_functions += 1
     ast_function_active = 0
     ast_function_file = -1
     ast_function_owner = -1
@@ -166,13 +168,13 @@ pub fn ast_function_end() int {
 // ast_function_ct_export：把刚封存的编译期函数 AST 切片导入 comptime 私有 arena。
 pub fn ast_function_ct_export(sym_id int) int {
     if (ast_function_count <= 0) {
-        return gen.fail("内部错误：编译期函数 AST 上下文缺失")
+        return support.fail("内部错误：编译期函数 AST 上下文缺失")
     }
     if (sizeof(AstExpr) != sizeof(comptime.CtExpr)
         || sizeof(AstStmt) != sizeof(comptime.CtStmt)
         || sizeof(AstStmtExpr) != sizeof(comptime.CtEdge)
         || sizeof(AstBinding) != sizeof(comptime.CtBinding)) {
-        return gen.fail("内部错误：编译期 IR 与前端 AST 布局不一致")
+        return support.fail("内部错误：编译期 IR 与前端 AST 布局不一致")
     }
     let ctx AstFunctionContext = ast_function_nodes[ast_function_count - 1]
     return comptime.ct_ir_import(sym_id,

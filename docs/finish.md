@@ -748,3 +748,34 @@ suffixes、`windows_link.yh` prefixes）、justfile 5 处、tools 2 个、selfho
 - **未动旧账**：`testkit → build` 仍有 13 处 `mb_*`/`cmd_*` 引用；五处契约常量
   仍分散（期间 `IR_FUNCTION_CACHE_VERSION` 1→2 兑现过一次升级成本）；
   `module_worker.yh:130` 废参数链待 C2。
+
+## 2026-11-06 gen 职责拆分 GEN0–GEN2（首轮）
+
+**结果**：ADR-0021 + 实施方案落地；`gen` 从 5,804 行 / 183 pub / 15 importers
+降到 **2,555 行 / 76 pub / 13 importers**，`TaskCtx` 189→155 字段。
+
+- **GEN0**：`arch-check` 递归扫描 + 新模块边 + `gen` 单调预算
+  （`pub fn`/importers/`TaskCtx` 字段/全局），自测 5/5。
+- **GEN1**：新增 `support`（源/池/统计/诊断/目标/ABI 常量/宿主平台/会话开关）
+  与 `token`（词汇/`PDecl`/token 状态/游标/`err_tok`/`is_assign_op`）；
+  `PDecl` 归 token 规避 `proj↔ast` 环；`fail` 与 `err_lc` 同置 support 避免环。
+- **GEN2/F1**：`CheckedModule`/`CheckedStorage`/视图/check 键/函数切片从 `ast`
+  迁 `check`；`ast` 只剩纯语法 arena（3,414→1,364 行）；新增
+  `ast/ast_store.yh`（arena 扩容入口）与 `ast/ast_view.yh` 完整视图。
+- **GEN2/F3 首片**：`sem_value`/`sem_expr`/`sem_decl`/`sem_flow`/
+  `sem_call_literal` 与 C ABI 算法迁 `check`；token 游标/入表/报错直连
+  `token.*`（删除 `gen/token_bridge.yh`），后端与 proj/link/cache 的
+  目标/ABI 常量改走 `support.*`；常量折叠/浮点/布局收尾集中
+  `gen/value_rules.yh`（`comptime` 共用）；C ABI 模型留 `gen/abi_model.yh`。
+- **验证**：`yh check` 全绿；arch-check 5/5；fixture 实跑通过
+  （support/token/llvmtarget/llvmfront/llvmchecked/llvmlower/astcheck）；
+  `just` 全模块编译通过，仅本机 Darwin LLVM host 闭包缺失导致链接失败
+  （环境问题，非本次改动）。
+- **GEN2 状态收尾片**：`parse.ParseCtx`（4 字段）落地、`TaskCtx` 155→150；
+  `check/checked_model.yh` 新增受检表分配的语言内测试；
+  `gen/token_bridge.yh` 删除；`import gen` 14→13、`gen` pub 79→76。
+- **F4-0（本轮）**：`comptime/ct_facts.yh` 零拷贝类型镜像 + `check/ct_bind.yh`
+  绑定点/形状守卫；`tests/modules/projects/ctfacts/` 差分 fixture 实跑通过。
+- **未完成**：F2（`parse` 纯语法）与 F4 其余步（`comptime` 纯 CT IR 执行器）未做，
+  因此 `CType/CSym/ty_*/sym_*/static_data/value_rules` 仍留 `gen`——`comptime`
+  仍直接依赖这些规则，先迁会成 `check ↔ comptime` 环。

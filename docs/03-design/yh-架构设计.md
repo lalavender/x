@@ -5,8 +5,8 @@
 状态：**现行唯一的系统/编译器架构文档**。本文合并并取代 2026-09-30 至 2026-11-05
 期间的架构分析、目标设计、代码复核、差距分析与迁移方案；被合并文件的清单见
 [附录 A](#附录-a已合并文档)。历史版本仍可从 git 历史取回。
-基线：`llvm` 分支（0.0.12 + C0–C6），`compiler/` 17 个 yh 模块 / 158 个 `.yh`
-/ 59,815 行 / 63 条依赖边；`python3 tools/arch-check.py` 全绿。
+基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1 + F1），`compiler/` 19 个 yh 模块 / 171 个
+`.yh` / 60,545 行 / 93 条依赖边；`python3 tools/arch-check.py` 全绿。
 
 > **文档边界**：本文只回答“系统怎么分层、模块负责什么、阶段契约是什么、下一步
 > 怎么改”。语言语义、标准库 API、平台 ABI、编码规范、测试语法仍是独立领域文档，
@@ -21,7 +21,7 @@
    `tools/arch-check.py` 强制。
 2. **真正的乱不在依赖环，而在“名字、所有权、契约”三件事**：
    - `gen` 同时是基础设施、语义模型、语义分析、C ABI 与平台层，15/17 个模块依赖它，
-     183 个 `pub fn`；
+     183 个 `pub fn`；拆分决定见 [ADR-0021](../adr/0021-yh-gen职责拆分.md)；
    - `parse` 不是纯 parser，它边解析边做语义动作并写 AST；`check` 当前仍是只读
      verifier；`ast` 不只装 AST，还装 `CheckedModule` 快照；
    - 会话状态分散在 `gen.state`、`proj.ctx`、`build.BuildCtx`、`link.context`，
@@ -33,6 +33,8 @@
    分阶段迁移；目录/缓存/`proj` 整形仍可先行。
 4. **不要现在做查询系统/LSP/线程池**：fork/COW 进程模型仍是正式执行器；
    线程池的前置是 AST/CT/诊断/缓存全部显式上下文化。当前没有证据证明收益大于成本。
+5. **Zig 对齐草案（待评审）**：§6.11 提出在 `parse` 与 `check` 之间增加
+   AstGen/UIR，并把 `check` 做成真正的 Sema；未批准前 F0–F7 仍是执行基线。
 
 ---
 
@@ -130,20 +132,22 @@ bin/yh-<平台>-<架构>（Release 种子）
 
 | 目录（模块） | 规模 | 实际职责 | 主要问题 |
 | --- | ---: | --- | --- |
-| `lex/`（lex） | 3 / 1,069 / 2 pub | 字节词法、布局（隐式 `;`）、字符串插值词法 | 干净；只依赖 `gen` |
-| `parse/`（parse） | 13 / 9,718 / 20 pub | 递归下降 + **语义动作** + AST 捕获 + 模块头/import + `.s.i`/`.s.ct` 接口读写 + CT 布局 | 名字只覆盖“解析”；`parse_expr.yh` 2,042 行，是当前最大文件（建议拆分）；依赖 ast/comptime/gen/ir/lex/proj |
-| `ast/`（ast） | 9 / 3,407 / 64 pub | AST arena/view + `CheckedModule` 快照、函数切片、检查缓存键 | 约 2.3k 行是“快照基础设施”，不是 AST；64 个 pub 偏多 |
-| `check/`（check） | 2 / 960 / 2 pub | 当前是**只读一致性校验**：范围、后序编号、快照完整性；目标（2026-11-06）是**语义分析入口**（resolve/expand/full） | 当前不是类型检查；语义仍在 `parse` + `gen.sem_*`；迁移见 todo F0–F7 |
-| `gen/`（gen） | 24 / 5,804 / **183 pub** | 语义状态 `TaskCtx/GenState`、名字池/类型/符号表、`sem_*`、C ABI、target、buffer/clock/console/argv/static_data/front_stage | **万能底座**：15/17 模块依赖；基础设施 + 语义 + ABI + 平台四类混居 |
-| `comptime/`（comptime） | 13 / 5,535 / 72 pub | 编译期 typed IR 执行器、布局图、枚举/全局聚合、静态数据 | 49 个模块级 `let`（全仓最多）；与 `gen` 的 CT 类型/值边界需要契约 |
-| `builtin/`（builtin） | 1 / 172 / 2 pub | prelude 名字登记表 | 干净；只依赖 `gen` |
+| `lex/`（lex） | 3 / 1,044 / 2 pub | 字节词法、布局（隐式 `;`）、字符串插值词法 | 依赖 support/token，仍读 gen 的 TaskCtx 源/词法状态 |
+| `parse/`（parse） | 14 / 9,776 / 22 pub | 递归下降 + **语义动作** + AST 捕获 + 模块头/import + `.s.i`/`.s.ct` 接口读写 + CT 布局 | 名字只覆盖“解析”；`parse_expr.yh` 2,042 行，是当前最大文件（建议拆分）；依赖 ast/comptime/gen/ir/lex/proj |
+| `ast/`（ast） | 6 / 1,364 / 81 pub | 纯语法 AST arena（expr/stmt/decl/function）、只读视图与 arena 扩容入口 | F1 已把快照/切片/键迁 check；pub 仍偏多 |
+| `check/`（check） | 12 / 5,224 / 92 pub | 受检契约（`CheckedModule`/视图/切片/键）+ 语义动作 `sem_*` + C ABI 分类 + arena/快照校验 | 语义动作已归位；类型/符号模型仍留 `gen`（`comptime` 依赖，待 F4）；`resolve/expand/full` 未落地 |
+| `support/`（support） | 16 / 1,185 / 37 pub | GEN1 基础层：源/池/统计/诊断/目标/ABI/字节工具 | 消费面已直连；不得塞语义 |
+| `token/`（token） | 3 / 265 / 4 pub | GEN1 词法/语法词汇：`Tok`/`TK_*`/`PDecl`/`TokenCtx`/游标/`is_assign_op`/`err_tok` | `gen` 暂留同名 type/const 别名；直接消费面后续收口 |
+| `gen/`（gen） | 8 / 2,550 / **76 pub** | 类型/符号表、值规则（折叠/布局/浮点）、static_data、ABI 模型、TaskCtx | 语义动作已迁 check；`comptime` 仍读其类型/值规则（F4 解锁后才能迁） |
+| `comptime/`（comptime） | 13 / 5,550 / 72 pub | 编译期 typed IR 执行器、布局图、枚举/全局聚合、静态数据 | 49 个模块级 `let`（全仓最多）；与 `gen` 的 CT 类型/值边界需要契约 |
+| `builtin/`（builtin） | 1 / 173 / 2 pub | prelude 名字登记表 | 干净；依赖 gen/support |
 | `cache/`（cache） | 7 / 1,031 / 34 pub | 缓存键、`ActionID`/`OutputID`、全局 content store、flock 平台封装 | C0/C4/C6 新增 |
 
 #### 中端、后端与工具链
 
 | 目录（模块） | 规模 | 实际职责 | 主要问题 |
 | --- | ---: | --- | --- |
-| `lower/`（lower） | 16 / 5,976 / 3 pub | `CheckedModule → IRModule`，按 expr/call/flow/place/aggregate 分片 | 干净（只 3 个 pub）；`module_snapshot_*` 前缀偏长 |
+| `lower/`（lower） | 16 / 5,998 / 3 pub | `CheckedModule → IRModule`，按 expr/call/flow/place/aggregate 分片 | 干净（只 3 个 pub）；`module_snapshot_*` 前缀偏长 |
 | `ir/`（ir） | 10 / 5,384 / 34 pub | SSA 模型、验证、序列化、函数级缓存、重绑定 | **最干净**：0 依赖、0 全局 `let`；增长最快，契约版本分散 |
 | `backend/`（backend） | 14 / 4,149 / 20 pub | IR → LLVM 文本、ABI 分类（Apple/ZABI/Windows）、桥绑定、运行时 | 干净；后端契约是“文本”而非对象 API（设计选择） |
 | `link/`（link） | 7 / 4,325 / 20 pub | 汇编/链接驱动、内嵌 lld、进程、时钟、**链接缓存 1,647 行** | 4,272 行，是当前最大模块（建议拆分）；缓存与工具链调用混居；平台链接分 darwin/windows |
@@ -153,7 +157,7 @@ bin/yh-<平台>-<架构>（Release 种子）
 | 目录（模块） | 规模 | 实际职责 | 主要问题 |
 | --- | ---: | --- | --- |
 | `proj/`（proj） | 4 / 1,464 / 42 pub | 项目/模块/文件三张表 + 目标/构建配置 + 产物键 + 缓存根 | 新枢纽（9 个模块依赖）；只依赖 `gen`；40 pub 偏多 |
-| `build/`（build） | 22 / 8,046 / 44 pub | 发现/索引/调度/模块发射/LLVM 流水线/缓存/全局 store、trim/verify/debug/项目装配/TOML/统计 | 仍过载；依赖 14 个模块；`project*`、`toml`、`cache` 三类还能下沉 |
+| `build/`（build） | 22 / 8,058 / 44 pub | 发现/索引/调度/模块发射/LLVM 流水线/缓存/全局 store、trim/verify/debug/项目装配/TOML/统计 | 仍过载；依赖 14 个模块；`project*`、`toml`、`cache` 三类还能下沉 |
 | `testkit/`（testkit） | 1 / 1,616 / 1 pub | `yh test` 发现、绑定、执行 | 15 处（8 个符号）直接引用 `build` 内部 `mb_*`/`cmd_*`，分层泄漏 |
 | `cmdline/`（cmdline） | 1 / 661 / 7 pub | CLI 声明与解析（`libs/cli`） | 干净；编译器里唯一 `→ libs` 边 |
 | `cmd/`（模块名 **main**） | 11 / 497 / 1 pub | argv → 请求映射 + 一命令一文件分派 | 干净；目录名 `cmd` 与模块名 `main` 不一致 |
@@ -241,8 +245,9 @@ main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, buil
 测试/入口               testkit  cmdline  cmd(main)
 ```
 
-- `ir` 不得 import 任何前端模块；`backend` 不得 import `ast`/`parse`/`comptime`；
-  `lower` 不得 import `parse`/`check`/`build`；`ast` 不得反向 import `lower`。
+- `ir` 不得 import 任何前端模块；`backend` 不得 import `ast`/`parse`/`comptime`/`check`；
+  `lower` 不得 import `parse`/`build`/`gen`，只消费 `check` 的 `CheckedModule` 契约；
+  `ast` 不得反向 import `lower`/`check`。
 - 任何模块不得 import `cmd`；`cmd` 只做参数映射与调用面。
 - `cmdline` 是唯一允许依赖标准库 `libs/cli` 的编译器模块。
 - `link` 必须位于 `build` 之下；`build` 不得被 `link` 反向 import。
@@ -301,6 +306,9 @@ main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, buil
 → check.full`；CT 语法在 resolve 之后展开，语义分析统一归 `check`。迁移见
 `docs/todo.md` 的 F0–F7；当前代码仍是语义动作解析器。
 
+> **草案补充（待评审）**：§6.11 拟在 AST 与 check 之间增加 AstGen/UIR，并把
+> `check.expand` 从 AST→AST 改为 UIR→UIR；批准前本表按现状/F0–F7 执行。
+
 ### 4.2 关键产物与契约
 
 | 契约 | 内容 | 稳定性 | 变更流程 |
@@ -313,6 +321,9 @@ main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, buil
 | `ArtifactKey`/manifest | 模块/对象/链接键：源码、依赖接口、目标/布局/ABI、编译器身份、桥版本 | **冻结后演进** | 版本号 + 失效矩阵 |
 | `TargetDesc` | triple、数据模型、ABI 分类、平台文件后缀、链接驱动 | **演进** | 描述符表 + 逐目标门 |
 | `Diagnostic` | 稳定错误码、位置、严重级、渲染 | **演进** | 错误码目录 + 文案快照 |
+
+> 草案 §6.11 拟增加 `UIR` 契约（逐文件、无类型、可序列化）；是否引入与放在
+> `ast` 内部还是独立 `uir` 模块，待评审。当前 `CheckedModule`/`IRModule` 不变。
 
 **契约版本化的最小要求**（尚未全部落地）：
 
@@ -481,55 +492,53 @@ main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, buil
 P5 是刻意克制：不引入通用插件框架、全仓库查询数据库或常驻守护进程。扩展点应是
 编译期确定的表，不是运行时加载的 `.so`——后者会破坏可重现构建、自举闭包与固定点。
 
-### 6.2 目标分层（17–18 模块方向）
+### 6.2 目标分层（17→18 模块）
 
 ```text
 L4 入口     cmd（一命令一文件，导出面只有 main）
 L3 驱动     build（纯流水线编排）  testkit  proj（项目模型/扫描/TOML/产物路径）
 L2 前端     lex  parse  ast
-L2 语义     sema（类型/符号模型）  check（resolve/expand/full）  comptime（CT 求值）
+L2 语义     check（语义动作 + 受检契约）  gen（类型/符号/值规则内核）  comptime（CT 求值）
 L1.5 变换   lower
 L1 中端     ir（不依赖任何 yh 模块）
 L1 后端     backend（LLVM 描述）  link（工具链调用，缓存移出）
-L0 支撑     support  diag  target  token
+L0 支撑     support（含诊断/目标身份）  token
 ```
 
-### 6.3 目标依赖矩阵（11-05 方向）
+### 6.3 目标依赖矩阵（2026-11-06，ADR-0021）
 
 | 模块 | 允许依赖 |
 | --- | --- |
 | support | 无 |
 | ir | 无 |
-| token | 无 |
-| target | 无 |
-| diag | support |
-| cache | support, token, target, hash |
-| lex | support, diag, token |
-| proj | support, target, token（+ 评估后可加 libs/toml） |
-| sema | support, diag, target, token |
-| comptime | sema, support, diag, proj, token |
-| ast | token, support, comptime（F1 后；过渡期含 sema/proj/ir） |
-| check | ast, sema, comptime, token, target, diag, support, proj（快照/切片键在 check 时可含 ir/cache） |
-| parse | token, ast, lex, support, diag（F2 后；过渡期含 gen/comptime/ir/sema/proj） |
-| lower | check/HIR, ast, ir, sema, target, token, support, proj, cache |
-| backend | ir, sema, target, support |
-| builtin | sema, target |
-| link | target, support, proj, backend, hash |
-| build | ast, backend, builtin, cache, check, comptime, diag, hash, ir, lex, libs, link, lower, parse, proj, sema, support, token, target（GEN3 前另含 gen） |
-| testkit | build, parse, link, proj, sema, support, token |
+| token | support |
+| cache | support, token, hash |
+| lex | support, token |
+| proj | support, token（+ 评估后可加 libs/toml） |
+| comptime | support, token, proj（纯 CT IR 执行器；不得 import check/gen/ast） |
+| ast | token, support（F1 后；过渡期含 comptime/proj/ir/gen） |
+| check | ast, comptime, token, support, proj, gen, cache, ir |
+| parse | token, ast, lex, support（F2 后；过渡期含 check/proj/gen/comptime/ir） |
+| lower | check, ast, ir, token, support, proj, cache |
+| backend | ir, support |
+| builtin | check, support |
+| link | support, proj, backend, hash |
+| build | ast, backend, builtin, cache, check, comptime, hash, ir, lex, libs, link, lower, parse, proj, support, token（GEN3 前另含 gen） |
+| testkit | build, parse, link, proj, support, token |
 | cmdline | support, libs/cli |
 | cmd | 全部（入口唯一例外） |
 
-现有 `import gen` 的边按符号实际归属 1:1 改写为 `import support`/`diag`/`target`/
-`token`/`sema`/`check`；除表中列出的边外不得新增。过渡期临时边
-（`gen → sema/support/diag/target/token`、`ast → sema`、`parse/lex/build/testkit/cmd → gen`）
-在 GEN3/GEN4 删除。F1 前 `ast` 仍 import `ir`
-（`check_key`/`check_slice`）与 `proj`；F1 后快照/切片键迁 `check`（或 F0 决定的
-`hir`），目标矩阵才成立。目标矩阵是方向，不是当前状态；每个阶段必须保持依赖图无环。
+现有 `import gen` 的边按符号实际归属 1:1 改写为 `import support`/`token`/
+`check`；除表中列出的边外不得新增。过渡期临时边
+（`gen → support/token/check`、`parse/build/testkit/cmd → gen`、
+`ast/check/comptime → gen`（捕获/残余））在 GEN3/GEN4 删除。F1 前 `ast` 仍
+import `ir`（`check_key`/`check_slice`）与 `proj`；F1 后快照/切片键迁 `check`。
+目标矩阵是方向，不是当前状态；每个阶段必须保持依赖图无环。
 
 2026-11-06 的前端两遍化决定会进一步调整：`check` 拥有语义分析与 CT 展开
-（需要 `comptime`），`lower` 消费 `check.CheckedModule`/HIR，`ast` 回归纯语法；
-本表的模块所有权已由 ADR-0021 冻结，F0 ADR 只冻结 AST/HIR/`CheckedModule` 契约。
+（需要 `comptime`），`lower` 消费 `check.CheckedModule`/HIR，`ast` 回归纯语法。
+`HIR` 是 `check` 的输出契约，不是新模块；本表的模块所有权已由 ADR-0021 冻结，
+F0 ADR 只冻结 AST/HIR/`CheckedModule` 契约。
 
 ### 6.4 `cmd/`：一命令一文件（已完成）
 
@@ -595,83 +604,82 @@ cache/
 
 ### 6.7 `gen` 职责拆分（2026-11-06 重新分析；ADR-0021）
 
-`gen` 不是一个模块，而是六类职责共用一个名字：token 词汇、语义模型、语义分析、
-任务状态、基础设施、target/ABI。重新分析后的决定见
-[ADR-0021](../adr/0021-yh-gen职责拆分.md)，执行计划见
-[yh-gen职责拆分实施方案-2026-11-06](../02-plan/yh-gen职责拆分实施方案-2026-11-06.md)。
-**不设 `state` 模块**：状态按所有者拆到 `support.SourceCtx`/`support.PoolCtx`/
-`support.CompileStats`/`diag.DiagCtx`/`target`/`sema.SemaCtx`/`check.CheckCtx`/
-`parse.ParseCtx`/`build.SessionCtx`/`link.LinkCtx`。
+按用户反馈收窄：**只新增 `support`/`token` 两个模块**；**语义分析全部归
+`check`**，不建 `sema`；`diag`/`target` 并入 `support`，`state`/`hir` 不建；
+复用现有 `lex`/`check`/`comptime`/`proj`/`builtin`。`token` 从 GEN1 开始
+（词汇 + `PDecl` + token 数组/游标 + `err_tok`）；`builtin` 保留内置函数/
+内置类型登记表。
 
 | `gen` 内容 | 目标 | 说明 |
 | --- | --- | --- |
-| `TK_*`/`TOK_*`/`Tok` | `token` | 词法/语法共享词汇；`token` 无 import |
-| `PDecl` | `token` | **不放 `ast`**：`proj.PFile` 持有声明索引，放 `ast` 会形成 `proj↔ast` 环 |
-| `is_assign_op` / `hexval` | `token` / `support` | token 区间判定 / 通用字节工具 |
-| `Res` | `sema`（过渡）→ 删除 / `check` 内部 | `ast`/`comptime` 在 F1/F5 前仍需它 |
-| `CType`/`SField`/`TName`/`CSym`/`ModInfo`/`ImportEnt`/`ModNsEnt`/`PubAggDeferred` | `sema` | 语义模型，不是词法 |
-| `TY_*`/`SYM_*`/`F_*`/`ABI_*`/`CT_DIAG_*` | `sema` | 语义枚举与标志 |
-| `symbols.yh` | 拆到 `support`（名字池）+ `sema`（类型/符号/折叠/命名空间） | 名字池是通用 intern 池，`proj/link/build` 也用，不能放 `sema` |
-| `sem_*.yh` | 纯类型规则 → `sema`；语义动作 → `check`（F5 后） | 不能整包先搬 `check` |
+| `TK_*`/`TOK_*`/`ATTR_*`/`Tok`/`PDecl` | `token` | 词法/语法共享词汇；`PDecl` 放 `token` 避免 `proj↔ast` 环 |
+| token 数组/游标/`err_tok`/`sem_err` | `token`（GEN1） | token 状态与词汇同批迁；`token → support` |
+| `Res` | `check`（过渡/最终删除） | `ast`/`comptime` 在 F1/F5 前消费 |
+| `CType`/`SField`/`TName`/`CSym`/`ModInfo`/`ImportEnt`/`ModNsEnt`/`PubAggDeferred` | `check` | 语义模型归语义分析模块 |
+| `TY_*`/`SYM_*`/`F_*`/`CT_DIAG_*` | `check` | 语义枚举与标志 |
+| `symbols.yh` | 拆到 `support`（名字池）+ `check`（类型/符号/折叠/命名空间） | 名字池是通用 intern 池 |
+| `sem_*.yh` | 全部 → `check`（F5 重写后迁） | 语义分析统一入口 |
 | `TaskCtx` | 按所有者拆上下文；**不设万能 `state`** | 不集中到 build/proj |
 | `GenState` | 删除 | 会话初始化按所有者分发 |
-| `TargetCfg` | 类型/默认值/绑定在 `target`；存储在 `proj` | 唯一存储，fork 前绑定 |
+| `TargetCfg` | 类型/默认值/绑定在 `support`；存储在 `proj` | 唯一存储，fork 前绑定 |
 | `buffer.yh` 追加/写出/分配 | `support` | 后续评估换 libs |
-| `read_source`/`set_source_path`/`fail`/`fail_path` | `support` | 无源码位置的 I/O 与致命错误 |
-| `err_lc`/`warn_lc` | `diag` | 带源码位置的诊断渲染 |
-| `err_tok`/`sem_err` | 暂留 `gen` → `check`（parse 用 `diag.err_at`） | 需要当前 token 游标；`token` 保持纯词汇，不反向依赖 `diag` |
+| `read_source`/`set_source_path`/`fail`/`fail_path` | `support` | I/O、路径、基础错误 |
+| `err_lc`/`warn_lc` | `support` | 诊断与基础错误同层，不拆 `diag` |
 | `clock.*`/`console.*`/`argv.*` | `support` | 后续可换 libs |
-| `target*.yh` | `target`（身份/数据模型/配置） | 结构体布局函数归 `sema` |
-| `abi_c.yh` | `sema` | C ABI 分类需要 `CType`；`target` 不能反向依赖 `sema` |
-| `static_data.yh`/`front_stage.yh` | `sema` / `check` | 按消费者归位 |
-| `builtin` prelude 登记 | `builtin → sema` | 保留薄表，不并入 `sema` |
+| `target*.yh` | `support`（身份/数据模型/配置/ABI 常量） | 结构体布局函数归 `check` |
+| `abi_c.yh`/`static_data.yh` | `check` | C ABI/静态数据需要 `CType` |
+| `front_stage.yh` | `check` | 受检阶段守卫 |
+| `builtin` prelude/内置类型登记 | `builtin` 保留，`builtin → check, support` | 内置函数 + 内置类型登记表；`ty_register_builtins` 实现在 `builtin` |
+
+**`support` 的角色**：L0 基础层，不是流水线阶段。会话初始化时绑定目标/源/
+统计/诊断；读源（lex 前）、词法/语法/检查、CT 展开、lower/backend、link/build
+各阶段按需调用缓冲/名字池/诊断/目标/时钟。它不持有类型/符号/分析状态。
+
+**`HIR` 不是模块**：它指 `check` 产出的受检契约（`CheckedModule` + AST 边表 +
+静态数据 + 目标身份），由 `lower` 消费；当前放在 `check/base.yh`，
+`lower → check`。只有未来出现“多个消费者只要契约、不要分析器”或
+`lower→check` 依赖失控时，才另立 `hir`。
 
 硬约束：
 
-- **类型/符号不能放 `lex`**：`lex` 是词法阶段，类型/符号是语义模型；放进去会让
-  `check`/`comptime` 反向依赖词法。
-- **`TaskCtx` 不能整体放 `build`/`proj`，也不新建万能 `state`**：放 `build` 会形成
-  `parse → build` 环；放 `proj` 会破坏只读项目模型；新 `state` 只是把 `gen` 改名。
-- **`check` 与 `comptime` 不能成环**：`check` 调 `comptime` 做 CT 展开；`comptime`
-  只依赖 `sema` 的类型规则，不依赖 `check`。
-- **`sema` 不 import `gen`/`proj`/`ast`/`parse`/`check`/`comptime`**：当前 token 位置、
-  声明可见性/形态由 `SemaCtx` 显式承载；诊断经 `diag`，不回调 parser。
-- **不要五拆 `symbols.yh`**：类型表、符号表、常量折叠、prelude 登记在同一个语义
-  内核里；按声明/类型/函数体分文件，不按 `pub` 数硬切。
-- **`fail`/`fail_path` 归 `support`，不归 `diag`**：`support` 的 I/O 需要报告错误；
-  若 `fail` 在 `diag`，会与 `diag → support`（路径/写出）成环。
-- **`sem_*` 不得先搬 `check`**：`parse` 在 F2 前仍驱动它们，先搬会制造
-  `parse → check` 临时环；F5 重写后再迁/删。
+- **只新增 2 个模块**：`support`/`token`；`sema` 不建，语义模型/规则/分析全部
+  进 `check`；`diag`/`target` 并入 `support`；`state`/`hir` 不建。
+- **`comptime` 必须是纯 CT IR 执行器**：只执行 `check.expand` 构造的 CT IR；
+  若继续调用类型规则/读 `CSym`，会形成 `check ↔ comptime` 环。F4 是前提。
+- **`check` 是唯一语义入口**：`CType/CSym/...`、折叠/布局/ABI/静态数据、
+  名字/类型检查、`resolve → expand → full` 都在 `check`。
+- **`TaskCtx` 不能整体放 `build`/`proj`，也不新建万能 `state`**。
+- **不要五拆 `symbols.yh`**：按所有权分文件，不按 `pub` 数硬切。
+- **`fail`/`err_lc` 同在 `support`**：基础层自足，不拆 `diag`。
+- **`sem_*` 不得先搬 `check`**：`parse` 在 F2 前仍驱动它们；F2/F5 后再迁/删。
+- **`ABI_YH`/`ABI_C` 放 `support`**：`backend` 不必 import 整个 `check`。
 
 目标依赖矩阵见 §6.3。分步（GEN0–GEN4，与 todo 对齐）：
 
 1. **GEN0**：ADR + 归属表 + `arch-check` 预算守卫（`gen` 的 `pub fn` 数、
    `import gen` 模块数、`TaskCtx` 字段数只减不增）；递归扫描按 `module` 分组。
-2. **GEN1**：`support`/`diag`/`target`/`token` 落地；先让 `cmdline`/`cache`/
-   `link`/`proj` 摆脱 `gen`；`backend`/`lower`/`builtin` 先改走
-   `support`/`target`/`token`，GEN2 再脱 `gen`；最后改 `check`/`ast`/
-   `comptime`/`testkit`/`build`/`lex`/`parse`。
-3. **GEN2**：`sema` 接类型/符号/折叠/布局/ABI/静态数据/命名空间；
-   `comptime → sema`；`gen` 只剩 `sem_*` 动作 + 残余 `TaskCtx`。
-4. **GEN3**（与 F1–F5 合并）：`ast` 纯语法、`parse` 纯语法、`check.resolve → CT
-   检查 → expand → full`；F5 后再删/迁旧 `sem_*`、`Res`、`CheckCtx`。
-5. **GEN4**：F5 后重盘 `TaskCtx`，拆 token/lex/parse/check/build/link 上下文；
+2. **GEN1**：`support`（工具/源/池/统计/宿主/诊断/目标/`ABI_*`）+ `token`
+   （词汇/`PDecl`/**状态/游标/`err_tok`**）；先让 `cmdline`/`cache`/`link`/
+   `proj`/`lex` 摆脱 `gen`；parse 的 `c_pos` 本阶段改完。
+3. **GEN2**（= F1–F5）：`ast`/`parse` 纯语法；`check` 接全部语义与
+   `CheckedModule`；`comptime` 收窄为纯 CT IR 执行器；残余字段归
+   `support/ast/check`；`gen` 只剩残余 `TaskCtx`。
+4. **GEN3**：清 `gen` 语义残片/空壳；`lower`/`builtin` 改 import `check`，
+   `backend` 用 `support.ABI_*`；`build`/`cmd` 改调 `check` 入口。
+5. **GEN4**：重盘 `TaskCtx`，拆 parse/check/build/link 残余上下文；
    删 `GenState`/`gen`；更新 `ALLOWED`/预算/文档/种子。
 
 验收口径：同模块文件搬家要求 `.s`/`.s.i`/`.s.ct` 逐字节一致；跨模块搬家**不**
 要求编译器自身 `.s.i` 一致（模块身份/符号后缀会变），以固定点 + 全量语料等价
 为准；每阶段 `just` + `just test` + `just selfhost-native`。
 
-### 6.8 `ast` 快照基础设施（P5，候选）
+### 6.8 `ast` 快照基础设施（2026-11-06 归 `check`）
 
 `module_snapshot*.yh` 是 `CheckedModule` 的捕获/视图/切片导入/检查缓存键，被
 `check`、`lower`、`build`、`cmd` 消费。**不能**搬进 `build`（`lower → build` 会
-成环）。两个选项：
-
-- **选项 A（默认）**：保留在 `ast`，接受命名噪音；
-- **选项 B**：新 `snapshot` 模块（依赖 `ast`/`ir`/`support`），`ast` 回归纯 AST。
-
-默认 A；待 P4 完成后按实际内聚痛感决定是否立项。
+成环）。F1 已决定：快照/切片键随 `CheckedModule` 从 `ast` 迁 `check`，`ast`
+回归纯语法。**不新建 `hir` 模块**：`HIR` 是 `check` 输出契约的称呼，放在
+`check/base.yh`；只有 F0 发现 `lower → check` 依赖失控时才另议。
 
 ### 6.9 平台抽象
 
@@ -748,7 +756,157 @@ check.resolve（先建声明/类型/常量环境）
 （聚合字面量、`$for values/fields`、字符串插值），验证纯语法 AST 可表示，再动
 `parse`。每阶段保持固定点；旧语义动作路径保留用于差分，逐特性切换后删除。
 
+> **与 §6.11 草案的关系**：若 §6.11 批准，本节的目标链路改为
+> `parse → AST → AstGen → UIR → check.resolve → check.expand(UIR) →
+> check.full → HIR → lower`，并在 F2/F3 之间插入 F2b；否则按原文 F0–F7 执行。
+
 ---
+
+### 6.11 Zig 对齐：AstGen/UIR/Sema（草案，待评审）
+
+状态：**草案，未批准**。当前实现与 F0–F7 不变；本节只用于评审“是否在
+`parse` 与 `check` 之间增加 AstGen/UIR，并把 `check` 做成真正的 Sema”。
+若批准，本节成为阶段 B 的目标流程，并在 F2/F3 之间插入 **F2b**；§6.10 的
+“`check.expand` AST→AST”相应改为“UIR→UIR”。本轮已确认两点：**CT 展开放
+UIR**；**暂不接受惰性 Sema**（`check.full` 仍检查模块内全部函数）。
+
+目标不是复制 Zig 的后端，而是复制它的前端分层：
+
+```text
+Parse → AST → AstGen → UIR（无类型）→ Sema → HIR（已分析）→ 后端
+```
+
+yh 保留 LLVM 唯一后端与内嵌 lld；只改前端与缓存粒度。
+
+```mermaid
+flowchart TD
+    A["源码"] --> B["lex<br/>token + 位置"]
+    B --> C["parse<br/>纯语法"]
+    C --> D["AST<br/>syntax only"]
+    D --> E["AstGen<br/>逐文件"]
+    E --> F["UIR<br/>无类型中间表示"]
+
+    F --> G["check.resolve<br/>导入/声明/类型/签名/常量/CT 布局"]
+    G --> H["check.expand<br/>CT 在 UIR 上展开"]
+    H <-->|执行 / 结果| I["comptime 执行器"]
+    H -.->|新声明重新 resolve| G
+    H --> J["发布 .s.i / .s.ct / ready"]
+    J --> K["check.full<br/>类型/转换/可见性/初始化/控制流"]
+    K --> L["HIR / CheckedModule<br/>已分析、类型化"]
+
+    L --> M["lower<br/>HIR → IRModule"]
+    M --> N["IRModule<br/>typed SSA"]
+    N --> O["LLVM 后端"]
+    O --> P["内嵌桥 → .o"]
+    P --> Q["内嵌 lld → 可执行文件 / 库"]
+```
+
+#### 6.11.1 阶段与契约
+
+| 阶段 | 输入 → 输出 | 负责 | 关键约束 |
+| --- | --- | --- | --- |
+| 语法 | token → AST | `parse` | 不解析符号/类型；不调用 `gen.sem_*`；保留 span |
+| AstGen | AST → UIR | `ast`（暂定） | 逐文件、纯函数；不读导入/目标；不生成符号 ID |
+| resolve | UIR + 依赖接口 → 类型/符号/签名环境 | `check` | 处理签名/类型/常量/CT 布局；只检查 `@[comptime]` 正文，不检查普通函数体 |
+| expand | 环境 + UIR → UIR | `check` + `comptime` | CT 展开；新声明重新 resolve；有迭代/预算上限 |
+| full | 展开后的 UIR + 环境 → HIR | `check` | 类型/转换/可见性/初始化/控制流；eager 检查模块内全部函数 |
+| lower | HIR → IRModule | `lower` | 只消费 HIR；不读 AST/parse 语义状态 |
+| 后端/链接 | IRModule → LLVM → .o → 可执行 | `backend`/`link` | 保持 LLVM + lld，不引入第二后端 |
+
+**UIR** 是 Zig ZIR 的对等层，建议先作为 `ast` 的内部契约，不急着新增模块：
+
+- 逐文件、无类型、无符号绑定；名字用 intern 字符串/文件内索引；
+- 表达式/语句/声明/CT 语法均为显式节点；
+- 源位置单独存 locs，不进入语义键；
+- 可序列化、带 `UIR_VERSION`；不含 arena 指针/进程地址/调度顺序；
+- 必须有独立 verifier：子节点越界、span 越界、跨文件引用都拒绝。
+
+**HIR** 是 Zig AIR 的对等物，不是新模块：它是 `check` 产出的受检契约。
+`CheckedModule` 保留为版本化容器/元数据，但 body 从 AST 快照改为 HIR；
+`lower` 只消费它。
+
+**UIR 与当前 `IRModule` 的关系**：两者不是同一层，也不是替代关系。
+
+| 层 | 类型状态 | 粒度 | 目标/ABI | 消费者 | 当前对应 |
+| --- | --- | --- | --- | --- | --- |
+| `UIR` | 无类型、无符号绑定、未解析名字 | 逐文件 | 无关 | `check.resolve/expand/full` | **新增**（Zig ZIR 对等） |
+| `HIR` | 已解析类型/符号、CT 已展开 | 模块 | 含类型布局/ABI 事实 | `lower` | `CheckedModule`/HIR |
+| `IRModule` | typed SSA、显式内存操作 | 模块 | 目标/优化相关 | `backend` | 现有 `ir.IRModule`，不变 |
+
+- `UIR` 不做 SSA、不做寄存器/内存 lowering；它是 Sema 的输入契约。
+- `IRModule` 是 `lower` 的输出、LLVM 后端的输入；当前 `.fir` 缓存的是
+  **函数级迷你 `IRModule`**，不是 UIR。
+- UIR 若落盘，使用独立缓存/扩展名（如 `.uir`），不要混用 `.fir`。
+- `lower` 的输入从“`CheckedModule` 里的 AST 快照”改为 HIR；`IRModule` 与
+  后端不变。
+
+#### 6.11.2 Sema 内部顺序
+
+```text
+check.resolve
+  → 建导入/声明/类型/枚举/字段/签名/常量/CT 布局环境
+  → 检查并捕获 @[comptime] 函数正文
+check.expand
+  → 在 UIR 上执行 CT（$if/$for/$field/插值/compile_*）
+  → 新声明重新 resolve，迭代到无 CT
+  → 发布 .s.i / .s.ct / ready
+check.full（eager）
+  → 检查模块内全部函数：类型/转换/可见性/初始化/控制流
+  → HIR
+```
+
+InterfaceReady 的时点从“parse pass1 之后”移到“resolve/expand 之后、full 之前”。
+这样仍能在函数体检查完成前发布接口；但 `.s.i/.s.ct` 依赖 Sema，不能更早。
+
+#### 6.11.3 缓存与并行
+
+| 缓存 | 键 | 命中后跳过 |
+| --- | --- | --- |
+| UIR 文件缓存 | 文件 token + UIR schema + 编译器身份 | parse + AstGen |
+| HIR 函数缓存 | UIR 函数 + 依赖 `.s.i/.s.ct` + target/ABI + 编译器 | check.full |
+| IR 函数缓存 | HIR + target/opt/ABI | lower |
+| 模块对象 | 模块源 + 依赖接口 + target/opt | 整个 worker |
+| 全局 C4 | ActionID/OutputID | 模块/函数 action |
+| 链接 | 对象集合 + 工具身份 | lld |
+
+- UIR 文件缓存是 target-independent，可跨目标复用；
+- HIR 缓存取代现有 `.fchk`（AST 受检切片）；`.fir` 继续保留；
+- `parse/AstGen` 可按文件并行；`check.resolve/expand/full` 仍以模块为单位，
+  状态共享较多；`check.full` 采用 eager 全函数检查，不按可达性惰性裁剪。
+
+#### 6.11.4 迁移切片
+
+在现有 F0–F7 中插入 F2b，不改变 GEN0–GEN4 的模块所有权：
+
+```text
+F0  ADR + AST/UIR/HIR 契约 + CT 节点与 UIR 版本
+F1  ast 纯语法
+F2  parse 纯语法
+F2b AstGen + UIR（含 verifier/序列化/--emit-uir）
+F3  check.resolve 消费 UIR
+F4  check.expand 在 UIR 上展开 CT
+F5  check.full → HIR
+F6  lower 切换为消费 HIR
+F7  删除旧语义动作路径、固定点、滚种子
+```
+
+每一步保留旧路径差分：同一输入比较 AST/UIR/HIR/IR/对象/诊断；纯移动切片要求
+产物字节一致，语义变化单独切片。每个切片都过 `just` + `just test` +
+`just selfhost-native`。
+
+#### 6.11.5 需要评审的取舍
+
+1. **UIR 放哪里**：先放 `ast` 内部（不新增模块，符合 ADR-0021）；若文件级
+   AstGen 缓存/并行收益成立，再抽 `uir` 模块（需要新 ADR）。
+2. **CT 语义（已定）**：`$for/$if` 继续走宏式展开，但展开位置定在 **UIR**：
+   UIR 保留 CT 节点，`check.expand` 负责 UIR→UIR；不是 Zig 的 Sema 内 comptime，
+   也不回到 AST→AST。
+3. **惰性 Sema（暂不接受）**：`check.full` 保持 eager，检查模块内全部函数，
+   维持现有未使用函数/诊断行为；惰性化不进入本方案。
+4. **接口就绪时点**：Sema 之后才能发 `.s.i/.s.ct`，模块并行会略降；用
+   resolve/expand 与 full 分离来保住“函数体未完成也能启动消费者”。
+5. **后端不跟抄**：Zig 的 self-hosted/LLVM/C 三后端不引入；LLVM/lld 不变。
+
 
 ## 7. 关键决策记录
 
@@ -758,6 +916,7 @@ check.resolve（先建声明/类型/常量环境）
 | 代码生成 | LLVM 是唯一后端；旧机器发射退役；lld 内嵌 | 生效 | ADR-0014、LL12 |
 | 优化架构 | Nanopass 只保留 NP3（受检契约与 lowering 解耦）；NP0/1/2/4/5 关闭；通用优化交给 LLVM | 生效 | ADR-0011 |
 | `check` 定位 | 目标：语义分析入口（resolve/expand/full）；当前仍是只读 verifier；迁移见 todo F0–F7 | 目标/待迁移 | 2026-11-06 决定 |
+| Zig 对齐前端 | 草案 §6.11：AstGen/UIR/Sema/HIR；是否引入 UIR 待评审 | 草案 | 2026-11-06 讨论 |
 | 模块私有类型 | `struct`/`union`/`enum` 的 `pub` 可选；私有类型不进 `.s.i` | 生效 | ADR-0013 |
 | 模块导出面 | 只导出别的模块真的使用的声明；`pub` 同时决定 `.s.i` 与 `.globl` | 生效 | ADR-0007、导出面收缩 |
 | 项目模型 | `project.toml` + `module` 声明 + 按名称导入；无 `internal` 特例 | 生效 | ADR-0005 |
@@ -767,7 +926,7 @@ check.resolve（先建声明/类型/常量环境）
 | 对象粒度 | 模块级唯一；文件级不做，函数级 `.o` 暂缓（ADR-0020） | 生效 | ADR-0020、LA3 |
 | 前端阶段 | 两遍化：`parse` 纯语法 → AST → `check`（resolve/expand/full）→ lower；当前仍是语义动作解析器 | **已决定，待迁移** | §6.10、todo F0–F7 |
 | CT 展开位置 | `check.resolve` 之后、`check.full` 之前；AST→AST；`comptime` 只做求值 | 已决定 | §6.10 |
-| `gen` 拆分 | 目标 `support`/`diag`/`target`/`token`/`sema`/`check`；GEN0–GEN4 分阶段；不五拆 `symbols.yh` | 目标 | ADR-0021 |
+| `gen` 拆分 | 目标只新增 `support`/`token`；语义分析全部归 `check`；`diag`/`target` 并入 `support`；复用 `lex`/`comptime`/`proj`/`builtin`；GEN0–GEN4 分阶段 | 目标 | ADR-0021 |
 | 平台顺序 | Linux 优先；Windows/x64 已接入；Darwin 默认 LLVM | 生效 | AGENTS.md |
 | 标准库 | 独立 `libs/` 项目；编译器经三层来源接入；不是 prelude | 生效 | 标准库设计 |
 
@@ -816,17 +975,19 @@ check.resolve（先建声明/类型/常量环境）
 | --- | --- | --- | --- |
 | A1 | `link/link_cache.yh`（1,647 行）迁 `cache/` + `build/`；`link` 回到纯工具链调用层 | 中：缓存键/接口变化，固定点注意 | 无 |
 | A2 | `build/project*.yh` + `toml.yh` 迁 `proj/`；评估删除自研 TOML | 中：需先校验 `pj_*` 符号引用 | A1 |
-| A3 | `gen` 按 GEN0–GEN4 拆到 `support`/`diag`/`target`/`token`/`sema`/`check`；先 GEN1/GEN2，再 GEN3/GEN4（GEN3/GEN4 前置 F5） | 高：全仓 import/状态改写 | A1/A2、前端 F0–F7 |
+| A3 | `gen` 按 GEN0–GEN4 拆到 `support`/`token`，语义归 `check`（`diag`/`target` 并入 `support`）；先 GEN1，再 GEN2/F5；GEN3/GEN4 收尾 | 高：全仓 import/状态改写 | A1/A2、前端 F0–F7 |
 | A4 | `ast` 快照独立（P5，候选） | 中 | A3 |
 | A5 | `testkit` 15 处（8 个符号）`build` 内部引用改走 `proj`/`link` 窄口 | 小 | A1/A2 |
 | A6 | 平台 `TargetDesc` 描述符表 + 平台变体收敛 | 中 | A1–A3 |
 
 ### 9.2 阶段 B：前端契约重构（高成本，单独决策）
 
-- `parse` 回归纯语法；`check` 承担 `resolve → expand → full`；`sema` 只提供
-  类型/符号模型与纯规则；`ast` 变无类型契约；`CheckedModule` 版本化；契约版本
-  统一入口。
+- `parse` 回归纯语法；`check` 承担类型/符号模型、纯规则与
+  `resolve → expand → full`；`ast` 变无类型契约；`CheckedModule` 版本化；契约
+  版本统一入口。
 - 前置：1 个语法 spike + ADR + 独立阶段；预计 8–10 次滚种子。
+- 若 §6.11 草案批准，阶段 B 增加 F2b（AstGen/UIR），`check.expand` 从 AST
+  改为 UIR；未批准则按 F0–F7 执行，不引入 UIR。
 - 不在 A 阶段夹带；不要为了“看起来像 lex→parse→check”而搬迁。
 
 ### 9.3 阶段 C：查询/会话架构（暂缓）
@@ -938,15 +1099,19 @@ check.resolve（先建声明/类型/常量环境）
    - 编译速度 → 先做缓存键/性能测量，不先拆前端；对象粒度已定（ADR-0020）；
    - 语言特性/工具 → B（前端契约）优先级上升；
    - 平台 → `TargetDesc` + 平台变体收敛优先。
-2. **`gen` 拆分按 2026-11-06 的 GEN0–GEN4 执行**：`support`/`diag`/`target`/`token`/
-   `sema`/`check` 六条线；`symbols.yh` 保持一个语义内核，不五拆。GEN3/GEN4 以 F5
-   为前置；详细任务见 [ADR-0021](../adr/0021-yh-gen职责拆分.md) 与 `docs/todo.md`。
-3. **前端两遍化已决定，迁移顺序与边界待定**：F0 ADR 要冻结 AST/HIR/
+2. **`gen` 拆分按 2026-11-06 的 GEN0–GEN4 执行**：只新增 `support`/`token`；
+   语义分析全部归 `check`，不建 `sema`；`diag`/`target` 并入 `support`，复用
+   现有 `lex`/`comptime`/`proj`/`builtin`；`symbols.yh` 保持一个语义内核，
+   不五拆。GEN2 起与 F1–F5 合并；详细任务见
+   [ADR-0021](../adr/0021-yh-gen职责拆分.md) 与 `docs/todo.md`。
+3. **前端两遍化已决定；是否再加 UIR/AstGen 待评审**：F0 ADR 要冻结 AST/
    `CheckedModule` 契约、`check` 内部文件拆分、`iface`/CT 布局迁移边界；F0
-   spike 要验证聚合字面量/`$for values/fields`/插值能被纯语法 AST 表示。见
-   `docs/todo.md` 的 F0–F7。
-4. **能接受几次滚种子？** A 约 4–5 次，B 8–10 次；每阶段必须冷编 + 固定点 +
-   全语料，不能合并阶段，否则回滚粒度消失。
+   spike 要验证聚合字面量/`$for values/fields`/插值能被纯语法 AST 表示。
+   §6.11 给出 Zig 对齐草案（含 UIR/AstGen）；批准后在 F0–F7 中插入 F2b，
+   未批准则按现有 F0–F7 执行。见 `docs/todo.md`。
+4. **能接受几次滚种子？** A 约 4–5 次，B 8–10 次；若 §6.11 的 UIR/F2b
+   批准，预计再增加 2–3 次；每阶段必须冷编 + 固定点 + 全语料，不能合并阶段，
+   否则回滚粒度消失。
 
 ---
 
@@ -1035,3 +1200,4 @@ just selfhost-native
 | --- | --- |
 | 2026-11-06 | 创建本文；合并 26 份架构分析/目标设计/代码复核/差距分析文档；确定“先 A 后 B、C 暂缓”的路线；把前端契约列为独立待决策 |
 | 2026-11-06 | `docs/03-design` 文件名去掉日期后缀；每份文档标题下增加“修改时间”，删除旧 `日期：` 元数据；全仓引用同步 |
+| 2026-11-06 | 新增 §6.11 Zig 对齐草案：AstGen/UIR/Sema/HIR、UIR 缓存与 F2b 迁移切片；待评审，不改变当前执行基线 |

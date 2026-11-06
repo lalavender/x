@@ -1,0 +1,65 @@
+module support
+
+// ============================================================================
+// diag.yh —— 带源码位置的诊断渲染
+//
+// err_lc/warn_lc 统一拼装 `<path>:<line>:<col>: 错误/警告: <msg>`，把推测解析、
+// 错误计数、行号偏移与编译期展开轨迹收在 DiagCtx。无位置的 fail/fail_path 在
+// buffer.yh。明确不做：不格式化语义错误码、不分配。
+// ============================================================================
+
+// append_ct_expand_trace：为展开体内诊断追加外层到内层的编译期循环值。
+fn append_ct_expand_trace(buf *u8, n int, limit int) int {
+    if (diag().ct_depth <= 0 || n >= limit - 600) { return n }
+    n = append_str_limit(buf, n, limit, " [编译期展开值: ")
+    let i int = 0
+    for i < diag().ct_depth {
+        if (i > 0) { n = append_str_limit(buf, n, limit, " -> ") }
+        n = append_int(buf, n, diag().ct_values[i])
+        i += 1
+    }
+    return append_str_limit(buf, n, limit, "]")
+}
+
+// err_lc：报告一条带位置的错误（1 基行列），计一次错误并返回 -1。
+// 推测解析期间静默：不打印、不计数，仅以返回值示意失败。
+pub fn err_lc(line int, col int, msg *char) int {
+    if (diag().spec > 0) {
+        return -1
+    }
+    diag().errors += 1
+    let buf [2048]u8
+    let limit int = 2047
+    let n int = 0
+    n = append_str_limit(buf, n, limit, src_ctx().path)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, line + diag().line_bias)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, col)
+    n = append_str_limit(buf, n, limit, ": 错误: ")
+    n = append_str_limit(buf, n, limit, msg)
+    n = append_ct_expand_trace(buf, n, limit)
+    if (n < limit) { n = append_byte(buf, n, '\n') }
+    else { buf[limit] = '\n'; n = limit + 1 }
+    write_all(2, buf, n)
+    return -1
+}
+
+// warn_lc：报告一条带位置的警告，不增加错误数；推测解析期间保持静默。
+pub fn warn_lc(line int, col int, msg *char) int {
+    if (diag().spec > 0) { return 0 }
+    let buf [2048]u8
+    let limit int = 2047
+    let n int = 0
+    n = append_str_limit(buf, n, limit, src_ctx().path)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, line + diag().line_bias)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, col)
+    n = append_str_limit(buf, n, limit, ": 警告: ")
+    n = append_str_limit(buf, n, limit, msg)
+    n = append_ct_expand_trace(buf, n, limit)
+    if (n < limit) { n = append_byte(buf, n, '\n') }
+    else { buf[limit] = '\n'; n = limit + 1 }
+    return write_all(2, &buf[0], n)
+}

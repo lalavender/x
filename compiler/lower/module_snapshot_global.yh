@@ -1,4 +1,7 @@
 module lower
+import token
+import check
+import support
 import ast
 import gen
 import ir
@@ -27,7 +30,7 @@ fn checked_lower_object_type(l *CheckedLower, source_type int, depth int) int {
     } else if (ty.kind == gen.TY_STRUCT || ty.kind == gen.TY_UNION) {
         layout.kind = ty.kind == gen.TY_STRUCT ? ir.IR_MODULE_TY_STRUCT : ir.IR_MODULE_TY_UNION
         count = ty.len
-        fields = ast.checked_zero_rows(count, sizeof(ir.IRModuleField)).to_type(*ir.IRModuleField)
+        fields = check.checked_zero_rows(count, sizeof(ir.IRModuleField)).to_type(*ir.IRModuleField)
         if (count > 0 && fields == 0) { return -1 }
         let i int = 0
         for i < count {
@@ -123,7 +126,7 @@ fn checked_lower_global_decl(l *CheckedLower, row int) int {
     }
     let mapped int = checked_lower_object_type(l, sym.type_id, 0)
     if (mapped < 0) { return mapped }
-    let data *u8 = ast.checked_zero_rows(ty.size, 1).to_type(*u8)
+    let data *u8 = check.checked_zero_rows(ty.size, 1).to_type(*u8)
     if (ty.size > 0 && data == 0) { return -1 }
     let result int = 0
     l.reason = "全局初始化缺少受检表达式（CT backing 尚未接入）"
@@ -201,7 +204,7 @@ fn checked_lower_string_symbol(l *CheckedLower, sym_id int, depth int) int {
     for i < l.store.symbol_n {
         let other gen.CSym = l.store.symbols[i]
         if (other.name_len == sym.const_expr_len && other.kind == gen.SYM_CONST
-            && gen.cstr_eq((l.store.names + other.name_off).to_type(*char),
+            && support.cstr_eq((l.store.names + other.name_off).to_type(*char),
                 (l.store.names + sym.const_expr_off).to_type(*char)) != 0) {
             return checked_lower_string_symbol(l, i, depth + 1)
         }
@@ -216,7 +219,7 @@ fn checked_lower_string_symbol(l *CheckedLower, sym_id int, depth int) int {
 fn checked_lower_string(l *CheckedLower, node *ast.AstExpr) int {
     if (node.kind != ast.AST_EXPR_PRIMARY) { return -2 }
     if (node.child0 >= 0) { return checked_lower_expr_inner(l, l.flow, node.child0) }
-    if (node.op != gen.TOK_STRING
+    if (node.op != token.TOK_STRING
         && ((node.sym_flags & gen.F_GLOBAL) == 0
             || checked_lower_string_symbol(l, node.sym_id, 0) == 0)) {
         l.reason = "非零指针缺少字符串来源，指针/整数转换尚未接入"
@@ -230,8 +233,8 @@ fn checked_lower_string(l *CheckedLower, node *ast.AstExpr) int {
     if (row >= l.store.string_n) { l.reason = "字符串缺少受检字节"; return -2 }
     let added int = l.string_map[row] - 1
     if (added < 0) {
-        let str ast.CheckedString = l.store.strings[row]
-        let data *u8 = ast.checked_zero_rows(str.name_len + 1, 1).to_type(*u8)
+        let str check.CheckedString = l.store.strings[row]
+        let data *u8 = check.checked_zero_rows(str.name_len + 1, 1).to_type(*u8)
         if (data == 0) { return -1 }
         let src *u8 = l.store.names + str.name_off
         let count int = 0
@@ -243,7 +246,7 @@ fn checked_lower_string(l *CheckedLower, node *ast.AstExpr) int {
             if (str.quoted != 0 && src[i] == '\\') {
                 value = checked_lower_string_byte(src[i + 1])
                 if (src[i + 1] == 'x') {
-                    value = gen.hexval(src[i + 2]) * 16 + gen.hexval(src[i + 3])
+                    value = support.hexval(src[i + 2]) * 16 + support.hexval(src[i + 3])
                     i += 4
                 } else { i += 2 }
             } else { i += 1 }
@@ -255,8 +258,8 @@ fn checked_lower_string(l *CheckedLower, node *ast.AstExpr) int {
         layout.size = count; layout.align = 1; layout.count = count
         let mapped int = ir.ir_module_add_type(l.output, "", &layout, 0, 0)
         let name [48]u8
-        let n int = gen.append_str(name, 0, ".LD")
-        n = gen.append_int(name, n, str.label); name[n] = 0
+        let n int = support.append_str(name, 0, ".LD")
+        n = support.append_int(name, n, str.label); name[n] = 0
         let symbol ir.IRModuleSymbol
         symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; symbol.type_id = mapped
         // 字符串经 *char 可写；不能用 LLVM constant 改变既有语言的存储契约。

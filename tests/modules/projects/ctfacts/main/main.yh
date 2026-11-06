@@ -1,0 +1,38 @@
+module main
+import core.check
+import core.gen
+
+// main：验证 CT 执行器的零拷贝镜像与 gen 类型表逐行一致（F4-0 的形状守卫）。
+// 镜像读的是同一份内存，因此任何字段顺序/宽度/常量漂移都会在这里露出来。
+fn main() int {
+    gen.state_init()
+    if (gen.sem_init_tables() != 0 || gen.ty_register_builtins() != 0) { return 1 }
+    if (check.ct_type_layout_ok() == 0) { return 2 }
+    check.ct_types_sync()
+    let n int = comptime_bound()
+    if (n <= 0 || n != gen.task().t_type_n) { return 3 }
+    let i int = 0
+    for i < n {
+        let row gen.CType = gen.task().t_types[i]
+        if (check.ct_kind(i) != row.kind || check.ct_size(i) != row.size
+            || check.ct_align(i) != row.align || check.ct_elem(i) != row.elem
+            || check.ct_len(i) != row.len || check.ct_sub(i) != row.sub) { return 4 }
+        if (check.ct_is_integer(i) != gen.ty_is_integer(i)
+            || check.ct_is_float(i) != gen.ty_is_float(i)
+            || check.ct_is_signed(i) != gen.ty_is_signed(i)) { return 5 }
+        i += 1
+    }
+    // 新增一行的场景：绑定后表扩容，重新 sync 必须读到新行（零拷贝语义）。
+    let before int = n
+    if (gen.ty_ptr(gen.TY_I32) < 0) { return 6 }
+    check.ct_types_sync()
+    if (comptime_bound() != before + 1) { return 7 }
+    if (check.ct_elem(before) != gen.TY_I32) { return 8 }
+    printf("ct-facts=ok rows=%d\n", before)
+    return 0
+}
+
+// comptime_bound / ct_*：跨模块转发，避免 main 直接依赖 comptime 模块名。
+fn comptime_bound() int {
+    return check.ct_types_bound()
+}

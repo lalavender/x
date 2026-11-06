@@ -1,4 +1,7 @@
 module parse
+import check
+import support
+import token
 
 import gen
 import ast
@@ -26,7 +29,7 @@ fn interp_intern(name *char, n int) int {
         buffer[i] = name[i].to_type(u8)
         i += 1
     }
-    return gen.tml_intern_str(&buffer[0], 0, n)
+    return support.tml_intern_str(&buffer[0], 0, n)
 }
 
 // interp_mark_import：把 fmt 导入标记为已使用，避免未使用导入告警。
@@ -52,28 +55,28 @@ fn interp_call(mi int, name_off int, name_len int, arg0 gen.Res,
         return gen.sem_err("fmt 模块缺少插值所需的导出函数")
     }
     let callee gen.Res
-    if (gen.sem_ident_val(tk.c_mods[mi].ns[e].sym, &callee) != 0) {
+    if (check.sem_ident_val(tk.c_mods[mi].ns[e].sym, &callee) != 0) {
         return -1
     }
-    if (gen.sem_call_begin(&callee) < 0) {
+    if (check.sem_call_begin(&callee) < 0) {
         return -1
     }
-    if (gen.sem_push_arg(&arg0, &callee) != 0) {
+    if (check.sem_push_arg(&arg0, &callee) != 0) {
         return -1
     }
     if (use_second != 0) {
-        if (gen.sem_push_arg(&arg1, &callee) != 0) {
+        if (check.sem_push_arg(&arg1, &callee) != 0) {
             return -1
         }
     }
-    if (gen.sem_call(&callee, res) != 0) {
+    if (check.sem_call(&callee, res) != 0) {
         return -1
     }
     interp_mark_import(mi)
-    if (tk.c_ast_capture == 0) {
+    if (support.session().ast_capture == 0) {
         return 0
     }
-    let callee_ast int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, gen.TOK_IDENT,
+    let callee_ast int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, token.TOK_IDENT,
         first, after, callee.type_id, -1, -1, -1)
     if (callee_ast < 0 || ast.ast_expr_set_semantics(callee_ast, &callee) != 0) {
         return -1
@@ -85,7 +88,7 @@ fn interp_call(mi int, name_off int, name_len int, arg0 gen.Res,
     if (use_second != 0 && ast.ast_expr_args_append(&args_ast, arg1.ast_id) != 0) {
         return -1
     }
-    let call_ast int = ast.ast_expr_add(ast.AST_EXPR_CALL, gen.TK_LPAREN,
+    let call_ast int = ast.ast_expr_add(ast.AST_EXPR_CALL, token.TK_LPAREN,
         first, after, res.type_id, callee_ast, args_ast, -1)
     if (call_ast < 0 || ast.ast_expr_set_semantics(call_ast, res) != 0) {
         return -1
@@ -98,13 +101,13 @@ fn interp_call(mi int, name_off int, name_len int, arg0 gen.Res,
 fn interp_raw_res(start int, length int, first int, after int,
     res *gen.Res) int {
     let tk *gen.TaskCtx = gen.task()
-    if (gen.sem_raw_string(start, length, res) != 0) {
+    if (check.sem_raw_string(start, length, res) != 0) {
         return -1
     }
-    if (tk.c_ast_capture == 0) {
+    if (support.session().ast_capture == 0) {
         return 0
     }
-    let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, gen.TOK_STRING,
+    let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, token.TOK_STRING,
         first, after, res.type_id, -1, -1, -1)
     if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) {
         return -1
@@ -181,7 +184,7 @@ fn interp_value_ctor(mi int, expr gen.Res, first int, after int,
     }
     let arg gen.Res = expr
     if (cast_tid >= 0) {
-        if (gen.sem_cast(&arg, cast_tid) != 0) {
+        if (check.sem_cast(&arg, cast_tid) != 0) {
             return -1
         }
     }
@@ -200,7 +203,7 @@ fn interp_spec_valid(type_id int, start int, length int) int {
     let zero int = 0
     let plus int = 0
     for i < length {
-        let b u8 = tk.c_src[start + i]
+        let b u8 = support.src_ctx().data[start + i]
         if (b == '-') { minus = 1; i += 1; continue }
         if (b == '0') { zero = 1; i += 1; continue }
         if (b == '+') { plus = 1; i += 1; continue }
@@ -209,7 +212,7 @@ fn interp_spec_valid(type_id int, start int, length int) int {
     let width int = 0
     let digits int = 0
     for i < length {
-        let b u8 = tk.c_src[start + i]
+        let b u8 = support.src_ctx().data[start + i]
         if (b < '0' || b > '9') { break }
         width = width * 10 + (b.to_type(int) - 48)
         if (width > 1048576) { return 0 }
@@ -218,11 +221,11 @@ fn interp_spec_valid(type_id int, start int, length int) int {
     }
     let precision int = 0
     let has_precision int = 0
-    if (i < length && tk.c_src[start + i] == '.') {
+    if (i < length && support.src_ctx().data[start + i] == '.') {
         i += 1
         digits = 0
         for i < length {
-            let b u8 = tk.c_src[start + i]
+            let b u8 = support.src_ctx().data[start + i]
             if (b < '0' || b > '9') { break }
             precision = precision * 10 + (b.to_type(int) - 48)
             if (precision > 1048576) { return 0 }
@@ -234,7 +237,7 @@ fn interp_spec_valid(type_id int, start int, length int) int {
     }
     let type_byte u8 = 0
     if (i < length) {
-        type_byte = tk.c_src[start + i]
+        type_byte = support.src_ctx().data[start + i]
         i += 1
     }
     if (i != length) { return 0 }
@@ -327,32 +330,32 @@ fn interp_join(mi int, acc *gen.Res, have *int, leaf gen.Res,
 // parse_interp：解析一个完整插值字面量并合成 fmt 调用树。
 fn parse_interp(res *gen.Res) int {
     let tk *gen.TaskCtx = gen.task()
-    let first int = tk.c_pos
+    let first int = token.ctx().pos
     // 语法模式只验证 token 结构与表达式语法；不解析 import、不做类型/spec
     // 语义，也不合成调用树。
-    if (tk.c_compile == 0) {
+    if (support.session().compile == 0) {
         p_adv() // INTERP_BEGIN
-        for p_cur() != gen.TOK_INTERP_END {
+        for p_cur() != token.TOK_INTERP_END {
             let k int = p_cur()
-            if (k == gen.TOK_INTERP_TEXT) {
+            if (k == token.TOK_INTERP_TEXT) {
                 p_adv()
                 continue
             }
-            if (k == gen.TOK_INTERP_EXPR_BEGIN) {
+            if (k == token.TOK_INTERP_EXPR_BEGIN) {
                 p_adv()
                 let dummy gen.Res
                 if (parse_expr(&dummy) != 0) { return -1 }
-                if (p_cur() != gen.TOK_INTERP_EXPR_END) {
-                    return gen.err_tok("插值表达式解析未在预期位置结束")
+                if (p_cur() != token.TOK_INTERP_EXPR_END) {
+                    return token.err_tok("插值表达式解析未在预期位置结束")
                 }
                 p_adv()
-                if (p_cur() == gen.TOK_INTERP_SPEC) { p_adv() }
+                if (p_cur() == token.TOK_INTERP_SPEC) { p_adv() }
                 continue
             }
-            return gen.err_tok("插值 token 序列非法")
+            return token.err_tok("插值 token 序列非法")
         }
         p_adv() // INTERP_END
-        gen.sem_res_reset(res, 0)
+        check.sem_res_reset(res, 0)
         return 0
     }
     let mi int = gen.mod_import_find("fmt", 3)
@@ -362,57 +365,57 @@ fn parse_interp(res *gen.Res) int {
     p_adv() // INTERP_BEGIN
     let acc gen.Res
     let have int = 0
-    for p_cur() != gen.TOK_INTERP_END {
+    for p_cur() != token.TOK_INTERP_END {
         let k int = p_cur()
-        if (k == gen.TOK_INTERP_TEXT) {
-            let token gen.Tok = tk.c_toks[tk.c_pos]
+        if (k == token.TOK_INTERP_TEXT) {
+            let tok token.Tok = token.ctx().tokens[token.ctx().pos]
             let leaf gen.Res
-            if (interp_text_leaf(mi, token.start, token.len, first,
-                    tk.c_pos + 1, &leaf) != 0) {
+            if (interp_text_leaf(mi, tok.start, tok.len, first,
+                    token.ctx().pos + 1, &leaf) != 0) {
                 return -1
             }
             p_adv()
             if (interp_join(mi, &acc, &have, leaf, first,
-                    tk.c_pos) != 0) {
+                    token.ctx().pos) != 0) {
                 return -1
             }
             continue
         }
-        if (k == gen.TOK_INTERP_EXPR_BEGIN) {
+        if (k == token.TOK_INTERP_EXPR_BEGIN) {
             p_adv()
             let expr gen.Res
             if (parse_expr(&expr) != 0) {
                 return -1
             }
-            if (p_cur() != gen.TOK_INTERP_EXPR_END) {
-                return gen.err_tok("插值表达式解析未在预期位置结束")
+            if (p_cur() != token.TOK_INTERP_EXPR_END) {
+                return token.err_tok("插值表达式解析未在预期位置结束")
             }
             p_adv()
             let spec_start int = -1
             let spec_len int = 0
             let use_spec int = 0
-            if (p_cur() == gen.TOK_INTERP_SPEC) {
-                let token gen.Tok = tk.c_toks[tk.c_pos]
-                spec_start = token.start
-                spec_len = token.len
+            if (p_cur() == token.TOK_INTERP_SPEC) {
+                let tok token.Tok = token.ctx().tokens[token.ctx().pos]
+                spec_start = tok.start
+                spec_len = tok.len
                 use_spec = 1
                 if (interp_spec_valid(expr.type_id, spec_start, spec_len) == 0) {
-                    return gen.err_lc(token.line, token.col, "非法格式说明符")
+                    return support.err_lc(tok.line, tok.col, "非法格式说明符")
                 }
                 p_adv()
             }
             let leaf gen.Res
             if (interp_value_leaf(mi, expr, spec_start, spec_len, use_spec,
-                    first, tk.c_pos, &leaf) != 0) {
+                    first, token.ctx().pos, &leaf) != 0) {
                 return -1
             }
             if (interp_join(mi, &acc, &have, leaf, first,
-                    tk.c_pos) != 0) {
+                    token.ctx().pos) != 0) {
                 return -1
             }
             continue
         }
-        return gen.err_tok("插值 token 序列非法")
+        return token.err_tok("插值 token 序列非法")
     }
     p_adv() // INTERP_END
     if (have == 0) {

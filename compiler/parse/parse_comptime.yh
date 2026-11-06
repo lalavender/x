@@ -1,4 +1,7 @@
 module parse
+import token
+import check
+import support
 import gen
 import comptime
 import ast
@@ -6,21 +9,21 @@ import ast
 // parse_comptime_block_end：查找从指定左花括号开始的匹配右花括号位置。
 fn parse_comptime_block_end(first int) int {
     let t *gen.TaskCtx = gen.task()
-    if (first < 0 || first >= t.c_tok_n || t.c_toks[first].kind != gen.TK_LBRACE) {
+    if (first < 0 || first >= token.ctx().count || token.ctx().tokens[first].kind != token.TK_LBRACE) {
         return -1
     }
     let depth int = 0
     let i int = first
-    for i < t.c_tok_n {
-        let kind int = t.c_toks[i].kind
-        if (kind == gen.TK_LBRACE) { depth += 1 }
-        if (kind == gen.TK_RBRACE) {
+    for i < token.ctx().count {
+        let kind int = token.ctx().tokens[i].kind
+        if (kind == token.TK_LBRACE) { depth += 1 }
+        if (kind == token.TK_RBRACE) {
             depth -= 1
             if (depth == 0) {
                 // 块闭合后紧跟的隐式终结符属于本块，由调用方跳过。
                 let after int = i + 1
-                if (after < t.c_tok_n && t.c_toks[after].kind == gen.TK_SEMI
-                    && t.c_toks[after].len == 0) { after += 1 }
+                if (after < token.ctx().count && token.ctx().tokens[after].kind == token.TK_SEMI
+                    && token.ctx().tokens[after].len == 0) { after += 1 }
                 return after
             }
         }
@@ -32,26 +35,26 @@ fn parse_comptime_block_end(first int) int {
 // parse_comptime_branch：选中分支正常检查/发码，未选分支只做语法检查。
 fn parse_comptime_branch(selected int) int {
     let t *gen.TaskCtx = gen.task()
-    let saved_compile int = t.c_compile
-    let saved_capture int = t.c_ast_capture
+    let saved_compile int = support.session().compile
+    let saved_capture int = support.session().ast_capture
     let saved_falls int = t.c_fn_falls
     if (selected != 1 || saved_compile == 0) {
-        t.c_compile = 0
-        t.c_ast_capture = 0
+        support.session().compile = 0
+        support.session().ast_capture = 0
     } else if (saved_capture != 0 && t.c_ct_prepare_active == 0) {
         comptime.ct_expansion_capture_enter()
     }
     let status int = 0
-    if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_IF) {
+    if (p_cur() == token.TK_DOLLAR && p_peek(1) == token.TK_IF) {
         status = parse_comptime_if()
     } else {
-        if (p_cur() != gen.TK_LBRACE) {
-            return gen.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置")
+        if (p_cur() != token.TK_LBRACE) {
+            return token.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置")
         }
         status = parse_block()
     }
-    t.c_compile = saved_compile
-    t.c_ast_capture = saved_capture
+    support.session().compile = saved_compile
+    support.session().ast_capture = saved_capture
     if (selected == 1 && saved_compile != 0 && saved_capture != 0
         && t.c_ct_prepare_active == 0) {
         comptime.ct_expansion_capture_leave()
@@ -72,29 +75,29 @@ fn parse_comptime_if() int {
 fn parse_comptime_if_body() int {
     let t *gen.TaskCtx = gen.task()
     let typed_if int = (t.c_ct_prepare_active != 0
-        && t.c_ast_capture != 0).to_type(int)
+        && support.session().ast_capture != 0).to_type(int)
     let parent_falls int = t.c_fn_falls
     p_adv()
-    if (p_expect(gen.TK_IF, "$ 后需要 if") != 0
-        || p_expect(gen.TK_LPAREN, "$if 条件必须带括号") != 0) { return -1 }
+    if (p_expect(token.TK_IF, "$ 后需要 if") != 0
+        || p_expect(token.TK_LPAREN, "$if 条件必须带括号") != 0) { return -1 }
     let cond gen.Res
     let saved_target_ctx int = t.c_ct_target_ctx
-    if (t.c_compile != 0 && typed_if == 0) {
+    if (support.session().compile != 0 && typed_if == 0) {
         t.c_fold += 1
         t.c_ct_target_ctx = 1
-    } else if (t.c_compile != 0) {
+    } else if (support.session().compile != 0) {
         t.c_ct_target_ctx = 1
     }
     let cr int = parse_expr_iso(&cond)
-    if (t.c_compile != 0 && typed_if == 0) {
+    if (support.session().compile != 0 && typed_if == 0) {
         t.c_fold -= 1
         t.c_ct_target_ctx = saved_target_ctx
-    } else if (t.c_compile != 0) {
+    } else if (support.session().compile != 0) {
         t.c_ct_target_ctx = saved_target_ctx
     }
-    if (cr != 0 || p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
+    if (cr != 0 || p_expect(token.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
     let selected int = -1
-    if (t.c_compile != 0) {
+    if (support.session().compile != 0) {
         if (sem_check_cond(&cond) != 0) { return -1 }
         if (typed_if == 0) {
             if (cond.is_const == 0) { return gen.sem_err("$if 条件必须是编译期常量") }
@@ -103,20 +106,20 @@ fn parse_comptime_if_body() int {
     }
     if (typed_if != 0) {
         t.c_fn_falls = 1
-        if (p_cur() != gen.TK_LBRACE) {
-            return gen.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置")
+        if (p_cur() != token.TK_LBRACE) {
+            return token.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置")
         }
         if (parse_block() != 0) { return -1 }
         let then_falls int = t.c_fn_falls
         let has_else int = 0
         let else_falls int = parent_falls
-        if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_ELSE) {
+        if (p_cur() == token.TK_DOLLAR && p_peek(1) == token.TK_ELSE) {
             has_else = 1
             p_adv()
             p_adv()
             t.c_fn_falls = 1
-            if (p_cur() != gen.TK_LBRACE) {
-                return gen.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置")
+            if (p_cur() != token.TK_LBRACE) {
+                return token.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置")
             }
             if (parse_block() != 0) { return -1 }
             else_falls = t.c_fn_falls
@@ -133,7 +136,7 @@ fn parse_comptime_if_body() int {
     let then_falls int = t.c_fn_falls
     let has_else int = 0
     let else_falls int = parent_falls
-    if (p_cur() == gen.TK_DOLLAR && p_peek(1) == gen.TK_ELSE) {
+    if (p_cur() == token.TK_DOLLAR && p_peek(1) == token.TK_ELSE) {
         has_else = 1
         p_adv()
         p_adv()
@@ -143,7 +146,7 @@ fn parse_comptime_if_body() int {
         if (parse_comptime_branch(else_selected) != 0) { return -1 }
         else_falls = t.c_fn_falls
     }
-    if (t.c_compile != 0) {
+    if (support.session().compile != 0) {
         if (selected == 1) { t.c_fn_falls = then_falls }
         else if (selected == 0 && has_else != 0) { t.c_fn_falls = else_falls }
         else { t.c_fn_falls = parent_falls }
@@ -169,19 +172,19 @@ fn parse_comptime_for() int {
 fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
     typed_for int) int {
     let t *gen.TaskCtx = gen.task()
-    let enum_start int = t.c_toks[t.c_pos].start
-    let enum_len int = t.c_toks[t.c_pos].len
+    let enum_start int = token.ctx().tokens[token.ctx().pos].start
+    let enum_len int = token.ctx().tokens[token.ctx().pos].len
     p_adv()
-    if (p_expect(gen.TK_DOT, "枚举 values 需要 '.'") != 0
-        || p_cur() != gen.TOK_IDENT || p_tok_text_is("values", 6) == 0) {
-        return gen.err_tok("$for 目前只支持 `枚举名.values` 元信息源")
+    if (p_expect(token.TK_DOT, "枚举 values 需要 '.'") != 0
+        || p_cur() != token.TOK_IDENT || p_tok_text_is("values", 6) == 0) {
+        return token.err_tok("$for 目前只支持 `枚举名.values` 元信息源")
     }
     p_adv()
-    if (p_cur() != gen.TK_LBRACE) { return gen.err_tok("枚举 values 后需要块") }
-    let body_first int = t.c_pos
+    if (p_cur() != token.TK_LBRACE) { return token.err_tok("枚举 values 后需要块") }
+    let body_first int = token.ctx().pos
     let body_after int = parse_comptime_block_end(body_first)
-    if (body_after < 0) { return gen.err_tok("$for 函数体缺少 '}'") }
-    if (t.c_compile == 0) { return parse_comptime_branch(-1) }
+    if (body_after < 0) { return token.err_tok("$for 函数体缺少 '}'") }
+    if (support.session().compile == 0) { return parse_comptime_branch(-1) }
 
     let enum_type int = gen.ty_lookup_name(enum_start, enum_len)
     if (enum_type < 0) { return gen.sem_err("$for values 来源不是已声明的类型") }
@@ -189,7 +192,7 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
         return gen.sem_err("$for values 来源必须是枚举类型")
     }
     let member_count int = comptime.ct_enum_member_count(enum_type)
-    if (member_count < 0) { return gen.fail("内部错误：枚举 values 成员表无效") }
+    if (member_count < 0) { return support.fail("内部错误：枚举 values 成员表无效") }
     if (member_count > 1024) { return gen.sem_err("单个枚举 values 展开超过 1024 次") }
     if (typed_for != 0 && ast.ast_stmt_current_now() >= 0) {
         // typed comptime 函数将每个枚举成员保存为 wrapper 下的独立块，
@@ -202,14 +205,14 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
     let ordinal int = 0
     for ordinal < member_count {
         let member int = comptime.ct_enum_member_at(enum_type, ordinal)
-        if (member < 0) { return gen.fail("内部错误：枚举 values 成员序号失效") }
+        if (member < 0) { return support.fail("内部错误：枚举 values 成员序号失效") }
         if (comptime.ct_charge_expansion(body_after - body_first) != 0
             || comptime.ct_for_boundary_value(ordinal.to_type(i64)) != 0) { return -1 }
-        if (typed_for != 0 && t.c_ast_capture != 0
+        if (typed_for != 0 && support.session().ast_capture != 0
             && comptime.ct_charge_expansion_ast_nodes(body_after - body_first) != 0) {
             return -1
         }
-        t.c_pos = body_first
+        token.ctx().pos = body_first
         gen.scope_push()
         let binding int = gen.sym_push(name_start, name_len,
             gen.SYM_CONST, enum_type, gen.F_ENUM_META)
@@ -217,18 +220,18 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
         t.c_syms[binding].offset = member
         t.c_syms[binding].cval = t.c_syms[member].cval
         t.c_syms[binding].const_ready = 1
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_binding_add(binding, name_token, 0) != 0) { return -1 }
         if (typed_for != 0) { t.c_fn_falls = 1 }
         if (parse_block() != 0) { return -1 }
-        if (t.c_pos != body_after) {
-            return gen.err_tok("内部错误：枚举 values 展开没有消费完整函数体")
+        if (token.ctx().pos != body_after) {
+            return token.err_tok("内部错误：枚举 values 展开没有消费完整函数体")
         }
         if (typed_for != 0) { t.c_fn_falls = parent_falls }
         gen.scope_pop()
         ordinal += 1
     }
-    t.c_pos = body_after
+    token.ctx().pos = body_after
     return 0
 }
 
@@ -239,19 +242,19 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
 fn parse_comptime_field_for(name_start int, name_len int, name_token int,
     typed_for int) int {
     let t *gen.TaskCtx = gen.task()
-    let owner_start int = t.c_toks[t.c_pos].start
-    let owner_len int = t.c_toks[t.c_pos].len
+    let owner_start int = token.ctx().tokens[token.ctx().pos].start
+    let owner_len int = token.ctx().tokens[token.ctx().pos].len
     p_adv()
-    if (p_expect(gen.TK_DOT, "字段元信息需要 '.'") != 0
-        || p_cur() != gen.TOK_IDENT || p_tok_text_is("fields", 6) == 0) {
-        return gen.err_tok("$for 只支持 `枚举名.values` 与 `类型名.fields` 元信息源")
+    if (p_expect(token.TK_DOT, "字段元信息需要 '.'") != 0
+        || p_cur() != token.TOK_IDENT || p_tok_text_is("fields", 6) == 0) {
+        return token.err_tok("$for 只支持 `枚举名.values` 与 `类型名.fields` 元信息源")
     }
     p_adv()
-    if (p_cur() != gen.TK_LBRACE) { return gen.err_tok("fields 后需要块") }
-    let body_first int = t.c_pos
+    if (p_cur() != token.TK_LBRACE) { return token.err_tok("fields 后需要块") }
+    let body_first int = token.ctx().pos
     let body_after int = parse_comptime_block_end(body_first)
-    if (body_after < 0) { return gen.err_tok("$for 函数体缺少 '}'") }
-    if (t.c_compile == 0) { return parse_comptime_branch(-1) }
+    if (body_after < 0) { return token.err_tok("$for 函数体缺少 '}'") }
+    if (support.session().compile == 0) { return parse_comptime_branch(-1) }
 
     let owner int = gen.ty_lookup_name(owner_start, owner_len)
     if (owner < 0) { return gen.sem_err("$for fields 来源不是已声明的类型") }
@@ -260,7 +263,7 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
         return gen.sem_err("$for fields 来源必须是结构体或联合体")
     }
     let field_count int = t.t_types[owner].len
-    if (field_count < 0) { return gen.fail("内部错误：字段表长度无效") }
+    if (field_count < 0) { return support.fail("内部错误：字段表长度无效") }
     if (field_count > 1024) { return gen.sem_err("单个 fields 展开超过 1024 次") }
     if (typed_for != 0 && ast.ast_stmt_current_now() >= 0) {
         ast.ast_stmt_node_op_set(ast.ast_stmt_current_now(), 0)
@@ -273,11 +276,11 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
         let field gen.SField = t.t_fields[t.t_types[owner].sub + index]
         if (comptime.ct_charge_expansion(body_after - body_first) != 0
             || comptime.ct_for_boundary_value(index.to_type(i64)) != 0) { return -1 }
-        if (typed_for != 0 && t.c_ast_capture != 0
+        if (typed_for != 0 && support.session().ast_capture != 0
             && comptime.ct_charge_expansion_ast_nodes(body_after - body_first) != 0) {
             return -1
         }
-        t.c_pos = body_first
+        token.ctx().pos = body_first
         gen.scope_push()
         let binding int = gen.sym_push(name_start, name_len,
             gen.SYM_CONST, field.type_id, gen.F_FIELD_META)
@@ -285,18 +288,18 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
         t.c_syms[binding].offset = index
         t.c_syms[binding].cval = owner.to_type(i64)
         t.c_syms[binding].const_ready = 1
-        if (t.c_ast_capture != 0
+        if (support.session().ast_capture != 0
             && ast.ast_binding_add(binding, name_token, 0) != 0) { return -1 }
         if (typed_for != 0) { t.c_fn_falls = 1 }
         if (parse_block() != 0) { return -1 }
-        if (t.c_pos != body_after) {
-            return gen.err_tok("内部错误：字段元信息展开没有消费完整函数体")
+        if (token.ctx().pos != body_after) {
+            return token.err_tok("内部错误：字段元信息展开没有消费完整函数体")
         }
         if (typed_for != 0) { t.c_fn_falls = parent_falls }
         gen.scope_pop()
         index += 1
     }
-    t.c_pos = body_after
+    token.ctx().pos = body_after
     return 0
 }
 
@@ -305,9 +308,9 @@ fn parse_comptime_template_safe(first int, after int) int {
     let t *gen.TaskCtx = gen.task()
     let i int = first
     for i < after {
-        let kind int = t.c_toks[i].kind
-        if (kind == gen.TK_DOLLAR || kind == gen.TK_CONST || kind == gen.TK_TYPE
-            || kind == gen.TK_STRUCT || kind == gen.TK_UNION || kind == gen.TK_ENUM) {
+        let kind int = token.ctx().tokens[i].kind
+        if (kind == token.TK_DOLLAR || kind == token.TK_CONST || kind == token.TK_TYPE
+            || kind == token.TK_STRUCT || kind == token.TK_UNION || kind == token.TK_ENUM) {
             return 0
         }
         i += 1
@@ -319,47 +322,47 @@ fn parse_comptime_template_safe(first int, after int) int {
 fn parse_comptime_for_body() int {
     let t *gen.TaskCtx = gen.task()
     let typed_for int = (t.c_ct_prepare_active != 0
-        && t.c_ast_capture != 0).to_type(int)
+        && support.session().ast_capture != 0).to_type(int)
     p_adv()
-    if (p_expect(gen.TK_FOR, "$ 后需要 for") != 0 || p_cur() != gen.TOK_IDENT) {
-        return gen.err_tok("$for 需要循环变量名")
+    if (p_expect(token.TK_FOR, "$ 后需要 for") != 0 || p_cur() != token.TOK_IDENT) {
+        return token.err_tok("$for 需要循环变量名")
     }
-    let name_start int = t.c_toks[t.c_pos].start
-    let name_len int = t.c_toks[t.c_pos].len
-    let name_token int = t.c_pos
+    let name_start int = token.ctx().tokens[token.ctx().pos].start
+    let name_len int = token.ctx().tokens[token.ctx().pos].len
+    let name_token int = token.ctx().pos
     p_adv()
-    if (p_expect(gen.TK_IN, "$for 变量后需要 in") != 0) { return -1 }
-    if (p_cur() == gen.TOK_IDENT && p_peek(1) == gen.TK_DOT) {
+    if (p_expect(token.TK_IN, "$for 变量后需要 in") != 0) { return -1 }
+    if (p_cur() == token.TOK_IDENT && p_peek(1) == token.TK_DOT) {
         // 元信息源按 `.` 之后的固定名分派：values（枚举）/ fields（结构体、联合体）。
-        let saved_pos int = t.c_pos
+        let saved_pos int = token.ctx().pos
         p_adv()
         p_adv()
         let src_fields int = p_tok_text_is("fields", 6)
-        t.c_pos = saved_pos
+        token.ctx().pos = saved_pos
         if (src_fields != 0) {
             return parse_comptime_field_for(name_start, name_len, name_token, typed_for)
         }
         return parse_comptime_enum_for(name_start, name_len, name_token, typed_for)
     }
-    if (p_expect(gen.TK_LPAREN, "$for 区间必须带括号") != 0) { return -1 }
+    if (p_expect(token.TK_LPAREN, "$for 区间必须带括号") != 0) { return -1 }
     let lo gen.Res
-    if (t.c_compile != 0 && typed_for == 0) { t.c_fold += 1 }
+    if (support.session().compile != 0 && typed_for == 0) { t.c_fold += 1 }
     let lr int = parse_expr_blockctx(&lo)
-    if (t.c_compile != 0 && typed_for == 0) { t.c_fold -= 1 }
-    if (lr != 0 || p_expect(gen.TK_RANGE, "$for 区间需要 '..'") != 0) { return -1 }
+    if (support.session().compile != 0 && typed_for == 0) { t.c_fold -= 1 }
+    if (lr != 0 || p_expect(token.TK_RANGE, "$for 区间需要 '..'") != 0) { return -1 }
     let hi gen.Res
-    if (t.c_compile != 0 && typed_for == 0) { t.c_fold += 1 }
+    if (support.session().compile != 0 && typed_for == 0) { t.c_fold += 1 }
     let hr int = parse_expr_blockctx(&hi)
-    if (t.c_compile != 0 && typed_for == 0) { t.c_fold -= 1 }
-    if (hr != 0 || p_expect(gen.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
-    if (p_cur() != gen.TK_LBRACE) { return gen.err_tok("$for 区间后需要块") }
-    let body_first int = t.c_pos
+    if (support.session().compile != 0 && typed_for == 0) { t.c_fold -= 1 }
+    if (hr != 0 || p_expect(token.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
+    if (p_cur() != token.TK_LBRACE) { return token.err_tok("$for 区间后需要块") }
+    let body_first int = token.ctx().pos
     let body_after int = parse_comptime_block_end(body_first)
-    if (body_after < 0) { return gen.err_tok("$for 函数体缺少 '}'") }
-    let use_template int = (t.c_ast_capture != 0 && typed_for == 0
+    if (body_after < 0) { return token.err_tok("$for 函数体缺少 '}'") }
+    let use_template int = (support.session().ast_capture != 0 && typed_for == 0
         && parse_comptime_template_safe(body_first, body_after) != 0).to_type(int)
     let template_stmt int = ast.ast_stmt_current_now()
-    if (t.c_compile == 0) { return parse_comptime_branch(-1) }
+    if (support.session().compile == 0) { return parse_comptime_branch(-1) }
     if (typed_for == 0 && (lo.is_const == 0 || hi.is_const == 0)) {
         return gen.sem_err("$for 区间边界必须是编译期常量")
     }
@@ -379,8 +382,8 @@ fn parse_comptime_for_body() int {
         if (ast.ast_binding_add(sym, name_token, 0) != 0) { return -1 }
         t.c_fn_falls = 1
         if (parse_block() != 0) { return -1 }
-        if (t.c_pos != body_after) {
-            return gen.err_tok("内部错误：编译期 typed $for 没有消费完整函数体")
+        if (token.ctx().pos != body_after) {
+            return token.err_tok("内部错误：编译期 typed $for 没有消费完整函数体")
         }
         t.c_fn_falls = parent_falls
         gen.scope_pop()
@@ -410,23 +413,23 @@ fn parse_comptime_for_body() int {
             && comptime.ct_charge_expansion_ast_nodes(template_node_cost) != 0) {
             return -1
         }
-        t.c_pos = body_first
+        token.ctx().pos = body_first
         gen.scope_push()
         let sym int = gen.sym_push(name_start, name_len, gen.SYM_CONST, gen.TY_I32, 0)
         if (sym < 0) { return -1 }
         t.c_syms[sym].cval = value
         t.c_syms[sym].const_ready = 1
-        let saved_capture int = t.c_ast_capture
-        if (use_template != 0 && value > lo.ival) { t.c_ast_capture = 0 }
-        if (t.c_ast_capture != 0 && ast.ast_binding_add(sym, name_token, 0) != 0) {
-            t.c_ast_capture = saved_capture
+        let saved_capture int = support.session().ast_capture
+        if (use_template != 0 && value > lo.ival) { support.session().ast_capture = 0 }
+        if (support.session().ast_capture != 0 && ast.ast_binding_add(sym, name_token, 0) != 0) {
+            support.session().ast_capture = saved_capture
             return -1
         }
         let branch_status int = parse_comptime_branch(1)
-        t.c_ast_capture = saved_capture
+        support.session().ast_capture = saved_capture
         if (branch_status != 0) { return -1 }
-        if (t.c_pos != body_after) {
-            return gen.err_tok("内部错误：$for 展开没有消费完整函数体")
+        if (token.ctx().pos != body_after) {
+            return token.err_tok("内部错误：$for 展开没有消费完整函数体")
         }
         if (use_template != 0 && value == lo.ival) {
             template_node_cost = (ast.ast_stmt_count_now() - template_stmt_base) +
@@ -435,7 +438,7 @@ fn parse_comptime_for_body() int {
             template_binding_after = ast.ast_binding_count_now()
             template_body_stmt = ast.ast_stmt_node_first_child_of(template_stmt)
             if (template_node_cost <= 0 || template_body_stmt < 0) {
-                return gen.fail("内部错误：编译期 `$for` typed AST 模板为空")
+                return support.fail("内部错误：编译期 `$for` typed AST 模板为空")
             }
         }
         gen.scope_pop()
@@ -444,15 +447,15 @@ fn parse_comptime_for_body() int {
     if (use_template != 0 && ast.ast_comptime_for_add(template_stmt,
         template_binding_base, template_binding_after, template_body_stmt,
         lo.ival, hi.ival, template_node_cost) < 0) { return -1 }
-    t.c_pos = body_after
+    token.ctx().pos = body_after
     return 0
 }
 
 // parse_comptime_control：分派函数体内的 $if 与 $for。
 fn parse_comptime_control() int {
-    if (p_peek(1) == gen.TK_IF) { return parse_comptime_if() }
-    if (p_peek(1) == gen.TK_FOR) { return parse_comptime_for() }
-    return gen.err_tok("语句位置的 $ 只支持 if 和 for")
+    if (p_peek(1) == token.TK_IF) { return parse_comptime_if() }
+    if (p_peek(1) == token.TK_FOR) { return parse_comptime_for() }
+    return token.err_tok("语句位置的 $ 只支持 if 和 for")
 }
 
 // parse_comptime_diag_kind：将当前诊断内建名映射为固定类别，不新增词法关键字。
@@ -466,15 +469,15 @@ fn parse_comptime_diag_kind() int {
 // parse_comptime_diag_kind_at：检查指定语句起点是否为诊断调用，并恢复解析游标。
 fn parse_comptime_diag_kind_at(first int) int {
     let t *gen.TaskCtx = gen.task()
-    if (first < 0 || first + 1 >= t.c_tok_n
-        || t.c_toks[first].kind != gen.TK_DOLLAR
-        || t.c_toks[first + 1].kind != gen.TOK_IDENT) {
+    if (first < 0 || first + 1 >= token.ctx().count
+        || token.ctx().tokens[first].kind != token.TK_DOLLAR
+        || token.ctx().tokens[first + 1].kind != token.TOK_IDENT) {
         return 0
     }
-    let saved int = t.c_pos
-    t.c_pos = first + 1
+    let saved int = token.ctx().pos
+    token.ctx().pos = first + 1
     let kind int = parse_comptime_diag_kind()
-    t.c_pos = saved
+    token.ctx().pos = saved
     return kind
 }
 
@@ -483,13 +486,13 @@ fn parse_comptime_diag_kind_at(first int) int {
 fn parse_test_assert_lit(res *gen.Res, tid int, value i64,
     first int, after int) int {
     let t *gen.TaskCtx = gen.task()
-    gen.sem_res_reset(res, tid)
+    check.sem_res_reset(res, tid)
     res.sym = -1
     res.is_const = 1
     res.is_lit = 1
     res.ival = value
-    if (t.c_ast_capture == 0) { return 0 }
-    let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, gen.TOK_NUMBER,
+    if (support.session().ast_capture == 0) { return 0 }
+    let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, token.TOK_NUMBER,
         first, after, tid, -1, -1, -1)
     if (id < 0 || ast.ast_expr_set_semantics(id, res) != 0) { return -1 }
     res.ast_id = id
@@ -504,19 +507,19 @@ fn parse_test_assert_call(res *gen.Res, condition *gen.Res, msg *gen.Res,
     let t *gen.TaskCtx = gen.task()
     let name *char = "__yh_test_assert"
     let nlen int = 16
-    let noff int = gen.tml_intern_str(name.to_type(*u8), 0, nlen)
+    let noff int = support.tml_intern_str(name.to_type(*u8), 0, nlen)
     if (noff < 0) { return -1 }
     let sym int = gen.sym_lookup_off(noff, nlen)
     if (sym < 0 || t.c_syms[sym].kind != gen.SYM_FN) {
         return gen.sem_err("内部错误：缺少 __yh_test_assert 运行时入口")
     }
     let callee gen.Res
-    gen.sem_res_reset(&callee, t.c_syms[sym].type_id)
+    check.sem_res_reset(&callee, t.c_syms[sym].type_id)
     callee.sym = sym
-    if (gen.sem_call_begin(&callee) != 1) {
+    if (check.sem_call_begin(&callee) != 1) {
         return gen.sem_err("内部错误：测试断言入口不是直接函数")
     }
-    if (gen.sem_push_arg(condition, &callee) != 0) { return -1 }
+    if (check.sem_push_arg(condition, &callee) != 0) { return -1 }
     // 生成的实参节点与实参链统一使用断言调用的 token 范围：实参链按追加
     // 顺序逐层包住前一项，若各实参范围互不包含会让父节点范围校验失败。
     let lit_first int = first
@@ -524,23 +527,23 @@ fn parse_test_assert_call(res *gen.Res, condition *gen.Res, msg *gen.Res,
     let line_res gen.Res
     if (parse_test_assert_lit(&line_res, gen.TY_I32, line.to_type(i64),
             lit_first, lit_last) != 0) { return -1 }
-    if (gen.sem_push_arg(&line_res, &callee) != 0) { return -1 }
+    if (check.sem_push_arg(&line_res, &callee) != 0) { return -1 }
     let col_res gen.Res
     if (parse_test_assert_lit(&col_res, gen.TY_I32, col.to_type(i64),
             lit_first, lit_last) != 0) { return -1 }
-    if (gen.sem_push_arg(&col_res, &callee) != 0) { return -1 }
-    if (gen.sem_push_arg(msg, &callee) != 0) { return -1 }
-    if (gen.sem_call(&callee, res) != 0) { return -1 }
-    if (t.c_ast_capture == 0) { return 0 }
+    if (check.sem_push_arg(&col_res, &callee) != 0) { return -1 }
+    if (check.sem_push_arg(msg, &callee) != 0) { return -1 }
+    if (check.sem_call(&callee, res) != 0) { return -1 }
+    if (support.session().ast_capture == 0) { return 0 }
     let args int = -1
     if (ast.ast_expr_assert_args_add(&args, condition.ast_id, line_res.ast_id,
             col_res.ast_id, msg.ast_id, first, after) != 0) { return -1 }
-    let callee_ast int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, gen.TOK_IDENT,
+    let callee_ast int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, token.TOK_IDENT,
         first, after, callee.type_id, -1, -1, -1)
     if (callee_ast < 0 || ast.ast_expr_set_semantics(callee_ast, &callee) != 0) {
         return -1
     }
-    let call_ast int = ast.ast_expr_add(ast.AST_EXPR_CALL, gen.TK_LPAREN,
+    let call_ast int = ast.ast_expr_add(ast.AST_EXPR_CALL, token.TK_LPAREN,
         first, after, res.type_id, callee_ast, args, -1)
     if (call_ast < 0 || ast.ast_expr_set_semantics(call_ast, res) != 0) {
         return -1
@@ -552,9 +555,9 @@ fn parse_test_assert_call(res *gen.Res, condition *gen.Res, msg *gen.Res,
 // parse_comptime_diag_call：解析诊断实参并返回待独立语句消费的 void 标记结果。
 fn parse_comptime_diag_call(res *gen.Res, kind int, line int, col int) int {
     let t *gen.TaskCtx = gen.task()
-    let first int = t.c_pos
+    let first int = token.ctx().pos
     p_adv() // 诊断名
-    if (p_expect(gen.TK_LPAREN, "编译期诊断调用期望 '('") != 0) { return -1 }
+    if (p_expect(token.TK_LPAREN, "编译期诊断调用期望 '('") != 0) { return -1 }
     let condition gen.Res
     let msg_start int = -1
     let msg_len int = 0
@@ -563,13 +566,13 @@ fn parse_comptime_diag_call(res *gen.Res, kind int, line int, col int) int {
         let ct_body int = (t.c_fn_flags & gen.F_COMPTIME) != 0
         // test 体里的断言是运行期检查（YT2 接执行器）；先按普通表达式
         // 解析，不做强制常量折叠，否则 helper(...) 会被误判为非常量。
-        if (t.c_compile != 0 && ct_body == 0 && t.c_test_body == 0) {
+        if (support.session().compile != 0 && ct_body == 0 && ctx().test_body == 0) {
             t.c_fold += 1
         }
         let cr int = parse_expr_iso(&condition)
         t.c_fold = saved_fold
         if (cr != 0) { return -1 }
-        if (t.c_compile != 0) {
+        if (support.session().compile != 0) {
             if (condition.ct_diag != 0) {
                 return gen.sem_err("编译期诊断不能嵌套使用")
             }
@@ -577,55 +580,55 @@ fn parse_comptime_diag_call(res *gen.Res, kind int, line int, col int) int {
                 return gen.sem_err("$assert 条件必须是 bool")
             }
             if (ct_body == 0 && condition.is_const == 0
-                && t.c_test_body == 0) {
+                && ctx().test_body == 0) {
                 return gen.sem_err("$assert 条件必须是编译期常量")
             }
         }
-        if (t.c_test_body != 0) {
+        if (ctx().test_body != 0) {
             // test 体：把断言降成运行期调用，消息可省略；调用本身是独立语句。
             let msg gen.Res
-            if (p_cur() == gen.TK_COMMA) {
+            if (p_cur() == token.TK_COMMA) {
                 p_adv()
-                if (p_cur() != gen.TOK_STRING) {
-                    return gen.err_tok("$assert 消息必须是字符串文字量")
+                if (p_cur() != token.TOK_STRING) {
+                    return token.err_tok("$assert 消息必须是字符串文字量")
                 }
                 if (parse_expr_iso(&msg) != 0) { return -1 }
             } else {
                 if (parse_test_assert_lit(&msg, gen.ty_ptr(gen.TY_CHAR), 0,
-                        first, t.c_pos) != 0) { return -1 }
+                        first, token.ctx().pos) != 0) { return -1 }
             }
-            if (p_expect(gen.TK_RPAREN, "编译期诊断调用期望 ')'") != 0) { return -1 }
+            if (p_expect(token.TK_RPAREN, "编译期诊断调用期望 ')'") != 0) { return -1 }
             return parse_test_assert_call(res, &condition, &msg, line, col,
-                first, t.c_pos)
+                first, token.ctx().pos)
         }
-        if (t.c_ast_capture != 0 && condition.ast_id >= 0
+        if (support.session().ast_capture != 0 && condition.ast_id >= 0
             && ast.ast_stmt_add_expr(condition.ast_id) != 0) { return -1 }
-        if (p_cur() == gen.TK_COMMA) {
+        if (p_cur() == token.TK_COMMA) {
             p_adv()
-            if (p_cur() != gen.TOK_STRING) {
-                return gen.err_tok("$assert 消息必须是字符串文字量")
+            if (p_cur() != token.TOK_STRING) {
+                return token.err_tok("$assert 消息必须是字符串文字量")
             }
-            msg_start = t.c_toks[t.c_pos].start
-            msg_len = t.c_toks[t.c_pos].len
+            msg_start = token.ctx().tokens[token.ctx().pos].start
+            msg_len = token.ctx().tokens[token.ctx().pos].len
             p_adv()
         }
     } else {
-        if (p_cur() != gen.TOK_STRING) {
-            return gen.err_tok("编译期诊断需要一个字符串文字量")
+        if (p_cur() != token.TOK_STRING) {
+            return token.err_tok("编译期诊断需要一个字符串文字量")
         }
-        msg_start = t.c_toks[t.c_pos].start
-        msg_len = t.c_toks[t.c_pos].len
+        msg_start = token.ctx().tokens[token.ctx().pos].start
+        msg_len = token.ctx().tokens[token.ctx().pos].len
         p_adv()
     }
-    if (p_expect(gen.TK_RPAREN, "编译期诊断调用期望 ')'") != 0) { return -1 }
-    gen.sem_res_reset(res, gen.TY_VOID)
+    if (p_expect(token.TK_RPAREN, "编译期诊断调用期望 ')'") != 0) { return -1 }
+    check.sem_res_reset(res, gen.TY_VOID)
     res.ct_diag = kind
     res.ct_diag_expr = kind == gen.CT_DIAG_ASSERT ? condition.ast_id : -1
     res.ct_diag_line = line
     res.ct_diag_col = col
     res.ct_diag_msg_start = msg_start
     res.ct_diag_msg_len = msg_len
-    if (kind == gen.CT_DIAG_ASSERT && t.c_compile != 0) {
+    if (kind == gen.CT_DIAG_ASSERT && support.session().compile != 0) {
         res.ival = (condition.ival != 0).to_type(i64)
     }
     return 0

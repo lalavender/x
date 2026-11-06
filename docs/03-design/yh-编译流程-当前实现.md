@@ -3,7 +3,7 @@
 修改时间：2026-11-06
 
 状态：**当前实现参考**，不是目标架构。
-基线：`llvm` 分支 0.0.12 + C0/C1，17 个 yh 模块，LLVM 唯一后端。
+基线：`llvm` 分支 0.0.12 + C0/C1 + GEN1，19 个 yh 模块，LLVM 唯一后端。
 用途：作为调整编译流程时的逐阶段对照表；目标架构见
 [架构设计](yh-架构设计.md) 与 `docs/todo.md` 的 F0–F7（前端两遍化）/
 GEN0–GEN4（`gen` 拆分）。
@@ -566,7 +566,7 @@ C4 起 `YH_CACHE` 指向全局 content store（默认平台缓存目录，`off` 
 | `check` | 只读结构 verifier | `check/verify.yh`、`mb_emit_indexed_module` 的 verify 段 |
 | CT 展开 | 在 parse 文件子遍中完成 | `parse_comptime`、`parse_ct_layout`、`mb_pass2_file` mode 2–4 |
 | `gen` 耦合 | 15/17 模块依赖；token/类型/状态/基础设施/target 混居 | `gen/model/symbols/state/buffer/target/sem_*` |
-| 状态 | `TaskCtx` 189 字段；`GenState` 全局 | `gen/state.yh`、`state_init`、worker 初始化 |
+| 状态 | `TaskCtx` 172 字段；`GenState` 全局 | `gen/state.yh`、`state_init`、worker 初始化 |
 | 接口 | `.s.i`/`.s.ct` 读写仍在 `parse` | `parse/iface*`、`mb_*_emit` |
 | 项目模型 | `proj` 只读；`build` 负责装载/扫描 | `build/project_index`、`proj_*` |
 | 缓存 | 模块/函数 check/函数 IR/链接分散 | `build/module_cache`、`function_ir_cache`、`link/link_cache` |
@@ -579,14 +579,14 @@ C4 起 `YH_CACHE` 指向全局 content store（默认平台缓存目录，`off` 
 | 调整 | 会动的阶段 | 对应 todo |
 | --- | --- | --- |
 | parse 只出语法 AST | §5.2–5.6 的 pass1/pass2、AST 写入、`gen.sem_*` | F1–F2 |
-| check 接语义分析 | §5.7 的 verify、`gen.sem_*` 去向、`CheckedModule` | F3–F5 / GEN3 |
+| check 接全部语义 | §5.7 的 verify、`gen.sem_*` 去向、`CheckedModule` | GEN2 / F1–F5 |
 | CT 展开独立 | §5.4 的 mode 2–4、`parse_comptime`、`parse_ct_layout` | F4 |
-| AST/HIR/CheckedModule 分层 | §5.2、§5.7、§5.9 | F1/F5/F6 |
-| token 词汇/`PDecl` 归 token | `gen/model` 的 `TK_*`/`Tok`/`PDecl`、lex/parse/ast/proj | GEN1 |
-| 类型/符号归 sema | `gen/symbols`、`CType/CSym/TY_*`、comptime | GEN2 |
+| AST/HIR/CheckedModule 分层 | §5.2、§5.7、§5.9；HIR 留在 `check`，不建模块 | F1/F5/F6 |
+| token 词汇/`PDecl`/状态/`err_tok` 归 token | `gen/model` 的 `TK_*`/`Tok`/`PDecl`、`c_pos`/`c_toks`、lex/parse/ast/proj | GEN1 |
+| 语义模型/规则归 check | `gen/symbols`、`CType/CSym/TY_*`、`sem_*` | GEN2/F5 |
 | TaskCtx 拆分 | §1.1 会话、§5.1 worker 初始化 | GEN1/GEN2/GEN4 |
-| support/diag/target 落地 | §2.1、§3、§5、§6 | GEN1 |
-| `fail` 归 support、位置诊断归 diag | §5 诊断、`buffer.yh` | GEN1 |
+| support 落地（工具/诊断/目标/ABI 常量） | §2.1、§3、§5、§6 | GEN1 |
+| `fail`/`err_lc` 同归 support，不拆 diag | §5 诊断、`buffer.yh` | GEN1 |
 | gen 删除 | 全部 import gen 的调用面 | GEN4 |
 | cache 收拢 | §4.2、§5.6、§5.9、§6.3 | 11-05 目标/后续 |
 | iface 移出 parse | §5.1、§5.5、§5.6 | F2/F3 |

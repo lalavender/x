@@ -1,0 +1,370 @@
+module check
+import gen
+import support
+
+// ============================================================================
+// sem_value.yh
+// 自 gen/sem.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
+// ============================================================================
+
+pub fn sem_res_reset(r *gen.Res, tid int) int {
+    r.type_id = tid
+    r.is_const = 0
+    r.ival = 0
+    r.sym = -1
+    r.is_lit = 0
+    r.lit_big = 0
+    r.fval_bits = 0
+    r.ast_id = -1
+    r.layout_type_id = -1
+    r.ct_diag = 0
+    r.ct_diag_expr = -1
+    r.ct_diag_line = 0
+    r.ct_diag_col = 0
+    r.ct_diag_msg_start = -1
+    r.ct_diag_msg_len = 0
+    return 0
+}
+
+
+pub fn sem_res_copy(dst *gen.Res, src *gen.Res) int {
+    dst.type_id = src.type_id
+    dst.is_const = src.is_const
+    dst.ival = src.ival
+    dst.sym = src.sym
+    dst.is_lit = src.is_lit
+    dst.lit_big = src.lit_big
+    dst.fval_bits = src.fval_bits
+    dst.ast_id = src.ast_id
+    dst.layout_type_id = src.layout_type_id
+    dst.ct_diag = src.ct_diag
+    dst.ct_diag_expr = src.ct_diag_expr
+    dst.ct_diag_line = src.ct_diag_line
+    dst.ct_diag_col = src.ct_diag_col
+    dst.ct_diag_msg_start = src.ct_diag_msg_start
+    dst.ct_diag_msg_len = src.ct_diag_msg_len
+    return 0
+}
+
+pub fn sem_number(start int, n int, r *gen.Res) int {
+    sem_res_reset(r, gen.TY_I32)
+    if (support.session().compile == 0) {
+        return 0
+    }
+    r.is_lit = 1
+    r.is_const = 1
+    // 浮点字面量（含 '.' 或指数）按 f64 处理
+    if (sem_num_is_float(start, n) != 0) {
+        r.type_id = gen.TY_F64
+        let bits i64 = sem_parse_float_bits(start, n)
+        // 位模式同时写入 ival 与 fval_bits：const 初始化按 ival 保存常量值，
+        // 浮点使用点读 fval_bits，两者必须一致。
+        r.ival = bits
+        r.fval_bits = bits
+        return 0
+    }
+    if (gen.sem_parse_number(start, n) != 0) {
+        return -1
+    }
+    r.ival = gen.task().c_fold_ival
+    r.lit_big = gen.task().c_fold_big
+    return 0
+}
+
+
+
+
+
+pub fn sem_num_is_float(start int, n int) int {
+    // 前缀进制字面量（0x/0X/0o/0O/0b/0B）恒为整数：其中的 e/E 是
+    // 十六进制数字而非浮点指数（对齐 docs/yh.g4 的 NUMBER 规则——
+    // 修复 0x1E、0xAA0103E0 等被误判为 f64 的缺陷）。
+    if (n >= 2 && support.src_ctx().data[start] == '0') {
+        let p2 u8 = support.src_ctx().data[start + 1]
+        if (p2 == 'x' || p2 == 'X' || p2 == 'o' || p2 == 'O' || p2 == 'b' || p2 == 'B') {
+            return 0
+        }
+    }
+    let i int = 0
+    for i < n {
+        let b u8 = support.src_ctx().data[start + i]
+        if (b == '.' || b == 'e' || b == 'E') {
+            // 前缀 0x/0o/0b 中的 x/o/b 不算
+            return 1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// 宿主 C 运行库的十进制 → binary64：glibc 与 macOS libSystem 的 strtod 都
+// 按当前舍入模式做正确舍入（就近、平局取偶），避免旧实现「逐位乘十」在
+// 大指数（如 1.5e300）产生 1 ULP 偏差。词法器已校验字面量形状；这里只
+// 去掉 `_` 分隔符并补 NUL，再交给 strtod。
+// 依赖边界：编译器已链接宿主 libc（malloc/free 等）；E1 迁移到 libs/os 时
+// 需要给字面量解析提供等价的纯 yh 实现（见 todo）。
+@[extern] fn strtod(text *char, endptr *void) f64
+
+fn sem_parse_float_bits(start int, n int) i64 {
+    let buf *u8 = support.alloc((n + 1).to_type(u64))
+    if (buf == 0) { return gen.fp64_bits(0.0) }
+    let at int = 0
+    let i int = start
+    let end int = start + n
+    for i < end {
+        let b u8 = support.src_ctx().data[i]
+        if (b != '_') {
+            buf[at] = b
+            at += 1
+        }
+        i += 1
+    }
+    buf[at] = 0
+    let value f64 = strtod(buf.to_type(*char), 0)
+    free(buf.to_type(*void))
+    return gen.fp64_bits(value)
+}
+
+pub fn sem_string(start int, slen int, r *gen.Res) int {
+    sem_res_reset(r, gen.ty_ptr(gen.TY_CHAR))
+    if (support.session().compile == 0) {
+        return 0
+    }
+    // LL12：标签只登记，字符串数据由后端快照按标签生成。
+    let lbl int = gen.task().c_data_n
+    gen.task().c_data_n += 1
+    // 登记标签 → 原样字节，供编译期过程与后端快照按标签号反查。
+    if (gen.data_str_add(lbl, start, slen) != 0) { return -1 }
+    r.is_const = 1
+    r.ival = lbl.to_type(i64)
+    return 0
+}
+
+// sem_raw_string：登记不含引号的字符串体（插值文本块/说明符）。
+// 与 sem_string 相同的数据标签路径，quoted=2 让解码器处理转义但不剥引号。
+pub fn sem_raw_string(start int, slen int, r *gen.Res) int {
+    sem_res_reset(r, gen.ty_ptr(gen.TY_CHAR))
+    if (support.session().compile == 0) {
+        return 0
+    }
+    let lbl int = gen.task().c_data_n
+    gen.task().c_data_n += 1
+    if (gen.data_str_add_body(lbl, start, slen) != 0) { return -1 }
+    r.is_const = 1
+    r.ival = lbl.to_type(i64)
+    return 0
+}
+
+pub fn sem_char(start int, clen int, r *gen.Res) int {
+    sem_res_reset(r, gen.TY_CHAR)
+    if (support.session().compile == 0) {
+        return 0
+    }
+    // 解码单一字符/转义单元（start+1 起）
+    let b u8 = support.src_ctx().data[start + 1]
+    let v int = b.to_type(int)
+    if (b == '\\') {
+        let e u8 = support.src_ctx().data[start + 2]
+        v = 0
+        if (e == 'n') { v = 10 }
+        if (e == 'r') { v = 13 }
+        if (e == 't') { v = 9 }
+        if (e == '0') { v = 0 }
+        if (e == 'a') { v = 7 }
+        if (e == 'b') { v = 8 }
+        if (e == 'f') { v = 12 }
+        if (e == 'v') { v = 11 }
+        if (e == '\'') { v = 39 }
+        if (e == '"') { v = 34 }
+        if (e == '\\') { v = 92 }
+        if (e == '$') { v = 36 }
+        if (e == 'x') {
+            v = support.hexval(support.src_ctx().data[start + 3]) * 16 + support.hexval(support.src_ctx().data[start + 4])
+        }
+    }
+    r.is_const = 1
+    r.is_lit = 1
+    r.ival = v.to_type(i64)
+    return 0
+}
+
+pub fn sem_bool(v int, r *gen.Res) int {
+    gen.sem_res_const(r, gen.TY_BOOL, v.to_type(i64))
+    if (support.session().compile == 0) {
+        return 0
+    }
+    return 0
+}
+
+pub fn sem_ident(start int, n int, r *gen.Res) int {
+    sem_res_reset(r, 0)
+    if (support.session().compile == 0) {
+        return 0
+    }
+    let idx int = gen.sym_lookup(start, n)
+    if (idx < 0) {
+        return gen.sem_err("引用了未声明的名字")
+    }
+    return sem_ident_val(idx, r)
+}
+
+pub fn sem_ident_val(idx int, r *gen.Res) int {
+    r.ast_id = -1
+    r.sym = idx
+    r.type_id = gen.task().c_syms[idx].type_id
+    let kind int = gen.task().c_syms[idx].kind
+    // 聚合常量（结构体/数组/切片/联合体）没有标量值：数据已发射到数据段，
+    // 与全局变量同路径按符号地址访问，不能走下面的立即数取值分支。
+    if (kind == gen.SYM_CONST) {
+        let ck int = gen.task().t_types[gen.task().c_syms[idx].type_id].kind
+        if (ck == gen.TY_STRUCT || ck == gen.TY_ARRAY || ck == gen.TY_SLICE || ck == gen.TY_UNION) {
+            // 聚合常量只读：**赋值目标**（c_lvalue == 1）直接拒绝。降级为变量语义只是
+            // 为了按符号地址读取，不能连可写性一起放开；取地址（c_lvalue >= 2）是合法的
+            // 只读引用，放行 —— 否则 `$f(&TABLE[0])` 这类编译期实参会被误拒。
+            if (gen.task().c_lvalue == 1) {
+                return gen.sem_err("不能给 const 聚合常量赋值")
+            }
+            // 导入的聚合常量：接口加载时物化了本单元副本（cval = 本地数据标签号），
+            // 按标签装载地址（与字符串指针常量同一路径），提供方符号不参与消费者链接。
+            if ((gen.task().c_syms[idx].flags & gen.F_EXTERN) != 0
+                && gen.task().c_syms[idx].cval != 0) {
+                gen.task().c_res_is_addr = 1
+                return 0
+            }
+            kind = gen.SYM_VAR
+        }
+    }
+    if (kind == gen.SYM_CONST) {
+        if ((gen.task().c_syms[idx].flags & (gen.F_ENUM_META | gen.F_FIELD_META)) != 0) {
+            // 元信息绑定（枚举 values / 结构体 fields）：本身不是值，
+            // 只能投影 .name/.value（枚举）或 .name（字段）或作类型谓词实参。
+            if (gen.task().c_syms[idx].const_ready == 0) {
+                return gen.sem_err("编译期元信息绑定尚未就绪")
+            }
+            return 0
+        }
+        if (gen.task().c_syms[idx].const_ready == 0) {
+            if (gen.task().c_ct_prepare_active != 0
+                && (gen.task().c_fn_flags & gen.F_COMPTIME) != 0) {
+                return 0
+            }
+            return gen.sem_err("编译期常量尚未就绪")
+        }
+        r.is_const = 1
+        r.ival = gen.task().c_syms[idx].cval
+        if ((gen.task().c_syms[idx].flags & gen.F_ADDR) != 0) {
+            // 指针常量：值是数据标签
+            return 0
+        }
+        if (gen.ty_is_float(r.type_id) != 0) {
+            r.fval_bits = gen.task().c_syms[idx].cval
+        }
+        return 0
+    }
+    if (kind == gen.SYM_FN) {
+        if (gen.task().c_fold != 0) {
+            return gen.sem_err("函数引用不是编译期常量")
+        }
+        gen.task().c_res_is_addr = 1
+        return 0
+    }
+    // 变量
+    if (gen.task().c_fold != 0) {
+        return gen.sem_err("变量不是编译期常量")
+    }
+    let tid int = gen.task().c_syms[idx].type_id
+    let k int = gen.task().t_types[tid].kind
+    let global int = ((gen.task().c_syms[idx].flags & gen.F_GLOBAL) != 0).to_type(int)
+    if (k == gen.TY_ARRAY || k == gen.TY_STRUCT || k == gen.TY_UNION || k == gen.TY_SLICE) {
+        // 聚合：值语义即地址（数组退化 / 结构体以地址使用）
+        gen.task().c_res_is_addr = 1
+        return 0
+    }
+    if (gen.task().c_lvalue != 0) {
+        gen.task().c_res_is_addr = 1
+        return 0
+    }
+    if (gen.ty_is_float(tid) != 0) {
+        gen.task().c_res_is_addr = 0
+        return 0
+    }
+    gen.task().c_res_is_addr = 0
+    return 0
+}
+
+// sem_enum_meta_value：把枚举 values 迭代绑定的 value 投影为只读枚举常量。
+pub fn sem_enum_meta_value(meta *gen.Res) int {
+    if (meta.sym < 0 || meta.sym >= gen.task().c_sym_n
+        || (gen.task().c_syms[meta.sym].flags & gen.F_ENUM_META) == 0) {
+        return gen.sem_err("枚举 values 元信息绑定无效")
+    }
+    if (gen.task().c_lvalue != 0) {
+        return gen.sem_err("枚举 values 成员只读")
+    }
+    let member int = gen.task().c_syms[meta.sym].offset
+    if (member < 0 || member >= gen.task().c_sym_n
+        || (gen.task().c_syms[member].flags & gen.F_ENUM_MEMBER) == 0
+        || gen.task().c_syms[member].const_ready == 0) {
+        return gen.sem_err("枚举 values 成员索引无效")
+    }
+    let tid int = gen.task().c_syms[member].type_id
+    let value i64 = gen.task().c_syms[member].cval
+    gen.sem_res_const(meta, tid, value)
+    return 0
+}
+
+// sem_enum_meta_name：把枚举 values 迭代绑定的 name 投影为静态 C 字符串。
+pub fn sem_enum_meta_name(meta *gen.Res) int {
+    if (meta.sym < 0 || meta.sym >= gen.task().c_sym_n
+        || (gen.task().c_syms[meta.sym].flags & gen.F_ENUM_META) == 0) {
+        return gen.sem_err("枚举 values 元信息绑定无效")
+    }
+    if (gen.task().c_lvalue != 0) {
+        return gen.sem_err("枚举 values 成员只读")
+    }
+    let member int = gen.task().c_syms[meta.sym].offset
+    if (member < 0 || member >= gen.task().c_sym_n
+        || (gen.task().c_syms[member].flags & gen.F_ENUM_MEMBER) == 0
+        || gen.task().c_syms[member].const_ready == 0) {
+        return gen.sem_err("枚举 values 成员索引无效")
+    }
+    // LL12：标签只登记，名称数据由快照生成。
+    let lbl int = gen.task().c_data_n
+    gen.task().c_data_n += 1
+    if (gen.data_str_add_pool(lbl, gen.task().c_syms[member].name_off,
+        gen.task().c_syms[member].name_len) != 0) { return -1 }
+    sem_res_reset(meta, gen.ty_ptr(gen.TY_CHAR))
+    meta.is_const = 1
+    meta.ival = lbl.to_type(i64)
+    return 0
+}
+
+// sem_field_meta_name：把 `$for f in T.fields` 迭代绑定的 name 投影为只读
+// 字段名静态 C 字符串。绑定槽位约定见 model.yh 的 gen.F_FIELD_META：
+// cval 存宿主结构体/联合体类型 id，offset 存字段下标。
+pub fn sem_field_meta_name(meta *gen.Res) int {
+    if (meta.sym < 0 || meta.sym >= gen.task().c_sym_n
+        || (gen.task().c_syms[meta.sym].flags & gen.F_FIELD_META) == 0) {
+        return gen.sem_err("字段元信息绑定无效")
+    }
+    if (gen.task().c_lvalue != 0) {
+        return gen.sem_err("字段元信息只读")
+    }
+    let owner int = gen.task().c_syms[meta.sym].cval.to_type(int)
+    let index int = gen.task().c_syms[meta.sym].offset
+    if (owner < 0 || owner >= gen.task().t_type_n
+        || (gen.task().t_types[owner].kind != gen.TY_STRUCT
+            && gen.task().t_types[owner].kind != gen.TY_UNION)
+        || index < 0 || index >= gen.task().t_types[owner].len) {
+        return gen.sem_err("字段元信息索引无效")
+    }
+    let field gen.SField = gen.task().t_fields[gen.task().t_types[owner].sub + index]
+    // LL12：标签只登记，名称数据由快照生成。
+    let lbl int = gen.task().c_data_n
+    gen.task().c_data_n += 1
+    if (gen.data_str_add_pool(lbl, field.name_off, field.name_len) != 0) { return -1 }
+    sem_res_reset(meta, gen.ty_ptr(gen.TY_CHAR))
+    meta.is_const = 1
+    meta.ival = lbl.to_type(i64)
+    return 0
+}

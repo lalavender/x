@@ -1,4 +1,6 @@
 module parse
+import token
+import support
 import gen
 import lex
 
@@ -26,7 +28,7 @@ let if_cap int = 0
 
 // if_put / if_puts / if_puti / if_puti64：接口文本写入。
 fn if_put(b u8) int {
-    if (gen.out_grow(&if_buf, if_len, &if_cap, if_len + 1) != 0) {
+    if (support.out_grow(&if_buf, if_len, &if_cap, if_len + 1) != 0) {
         return -1
     }
     if_buf[if_len] = b
@@ -81,7 +83,7 @@ fn if_put_np(off int, olen int) int {
     let t *gen.TaskCtx = gen.task()
     let i int = 0
     for i < olen {
-        if (if_put(t.np_data[off + i]) != 0) {
+        if (if_put(support.pool_ctx().data[off + i]) != 0) {
             return -1
         }
         i += 1
@@ -122,7 +124,7 @@ fn if_emit_type(tid int, own_name_base int) int {
         return if_emit_type(t.t_types[tid].elem, own_name_base)
     }
     if (k == gen.TY_FN) {
-        if (t.t_sig_abi[t.t_types[tid].sub] == gen.ABI_C
+        if (t.t_sig_abi[t.t_types[tid].sub] == support.ABI_C
             && if_puts("@[extern] ") != 0) { return -1 }
         if (if_puts("fn(") != 0) { return -1 }
         let sig int = t.t_types[tid].sub
@@ -171,7 +173,7 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
     let ti0 int = tname_base
     for ti0 < t.t_name_n {
         if (t.t_names[ti0].is_pub != 0
-            && (t.t_names[ti0].attrs & gen.ATTR_EXTERN) != 0) {
+            && (t.t_names[ti0].attrs & token.ATTR_EXTERN) != 0) {
             if (iface_version < 2) { iface_version = 2 }
         }
         ti0 += 1
@@ -196,7 +198,7 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
     } else if (iface_version == 2) {
         if (if_puts("// yh-iface v2 arch=") != 0) { return -1 }
     } else if (if_puts("// yh-iface v1 arch=") != 0) { return -1 }
-    if (if_puts(gen.target_arch_token()) != 0) { return -1 }
+    if (if_puts(support.target_arch_token()) != 0) { return -1 }
     if (if_puts(" suffix=") != 0) { return -1 }
     if (if_put_np(t.c_sym_sfx_off, t.c_sym_sfx_len) != 0) { return -1 }
     if (if_put('\n') != 0) { return -1 }
@@ -209,7 +211,7 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
         }
         let tid int = t.t_names[ti].type_id
         if (t.t_names[ti].form == 1 || t.t_names[ti].form == 2) {
-            if ((t.t_names[ti].attrs & gen.ATTR_EXTERN) != 0
+            if ((t.t_names[ti].attrs & token.ATTR_EXTERN) != 0
                 && if_puts("@[extern]\n") != 0) { return -1 }
             if (if_puts("pub ") != 0) { return -1 }
             if (t.t_names[ti].form == 1) {
@@ -236,7 +238,7 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
             }
             if (if_puts("}\n") != 0) { return -1 }
         } else if (t.t_names[ti].form == 3) {
-            if ((t.t_names[ti].attrs & gen.ATTR_EXTERN) != 0
+            if ((t.t_names[ti].attrs & token.ATTR_EXTERN) != 0
                 && if_puts("@[extern]\n") != 0) { return -1 }
             if (if_puts("pub enum ") != 0) { return -1 }
             if (if_put_np(t.t_names[ti].name_off, t.t_names[ti].name_len) != 0) { return -1 }
@@ -389,35 +391,35 @@ pub fn iface_emit(path *char, sym_base int, tname_base int) int {
             if (if_puts(";\n") != 0) { return -1 }
         } else if (t.c_syms[si2].kind == gen.SYM_VAR) {
             // 2026-10-02「let 不导出」：可变全局不再跨模块导出，接口停发
-            // pub let 行；编译器状态经 gen.task()/gen.stats() 窄口访问。
+            // pub let 行；编译器状态经 gen.task()/support.stats() 窄口访问。
         }
         si2 += 1
     }
     // 先写同目录临时文件，再 rename 发布完整接口；依赖调度器以文件出现
     // 作为 InterfaceReady 信号，不能让读取方看到半份接口。
     let flg int = 0x241
-    if (gen.tg_host_darwin() != 0) {
+    if (support.tg_host_darwin() != 0) {
         flg = 0x601
     }
     let tmp [700]u8
     let tn int = 0
-    tn = gen.append_str(tmp, tn, path)
-    tn = gen.append_str(tmp, tn, ".tmp.")
-    tn = gen.append_int(tmp, tn, getpid())
+    tn = support.append_str(tmp, tn, path)
+    tn = support.append_str(tmp, tn, ".tmp.")
+    tn = support.append_int(tmp, tn, getpid())
     tmp[tn] = 0
-    let fd int = open(gen.arr_cstr(tmp), flg, 0x1a4)
+    let fd int = open(support.arr_cstr(tmp), flg, 0x1a4)
     if (fd < 0) {
-        return gen.fail_path("无法创建接口文件: ", path)
+        return support.fail_path("无法创建接口文件: ", path)
     }
-    let write_rc int = gen.write_all(fd, if_buf, if_len)
+    let write_rc int = support.write_all(fd, if_buf, if_len)
     let close_rc int = close(fd)
     if (write_rc != 0 || close_rc != 0) {
-        unlink(gen.arr_cstr(tmp))
-        return gen.fail_path("写接口文件失败: ", path)
+        unlink(support.arr_cstr(tmp))
+        return support.fail_path("写接口文件失败: ", path)
     }
-    if (rename(gen.arr_cstr(tmp), path) != 0) {
-        unlink(gen.arr_cstr(tmp))
-        return gen.fail_path("发布接口文件失败: ", path)
+    if (rename(support.arr_cstr(tmp), path) != 0) {
+        unlink(support.arr_cstr(tmp))
+        return support.fail_path("发布接口文件失败: ", path)
     }
     return 0
 }
@@ -452,8 +454,8 @@ fn iface_lit_at(src *u8, n int, pos int, lit *char) int {
 // iface_arch_at：src[0..n) 从 pos 起的架构标记是否与当前目标一致；
 // 一致返回标记之后的位置，否则 -1。
 fn iface_arch_at(src *u8, n int, pos int) int {
-    let want *char = gen.target_arch_token()
-    let wlen int = gen.cstr_len(want)
+    let want *char = support.target_arch_token()
+    let wlen int = support.cstr_len(want)
     let k int = 0
     for k < wlen {
         if (pos + k >= n || src[pos + k] != want[k].to_type(u8)) {
@@ -468,13 +470,13 @@ fn iface_arch_at(src *u8, n int, pos int) int {
 // 成功返回 suffix 起点，失败返回 -1。
 fn iface_head_prefix_len() int {
     let t *gen.TaskCtx = gen.task()
-    return iface_head_prefix_len_at(t.c_src, t.c_src_len)
+    return iface_head_prefix_len_at(support.src_ctx().data, support.src_ctx().length)
 }
 
 // iface_head_prefix_len_at：纯函数版本（src + 长度），供内嵌测试直接构造输入。
 fn iface_head_prefix_len_at(src *u8, n int) int {
     if (iface_lit_at(src, n, 0, IFACE_HEAD_PREFIX) == 0) { return -1 }
-    let i int = gen.cstr_len(IFACE_HEAD_PREFIX)
+    let i int = support.cstr_len(IFACE_HEAD_PREFIX)
     let ver int = 0
     let digits int = 0
     for i < n {
@@ -487,10 +489,10 @@ fn iface_head_prefix_len_at(src *u8, n int) int {
         return -1
     }
     if (iface_lit_at(src, n, i, IFACE_HEAD_ARCH) == 0) { return -1 }
-    i = iface_arch_at(src, n, i + gen.cstr_len(IFACE_HEAD_ARCH))
+    i = iface_arch_at(src, n, i + support.cstr_len(IFACE_HEAD_ARCH))
     if (i < 0) { return -1 }
     if (iface_lit_at(src, n, i, IFACE_HEAD_SUFFIX) == 0) { return -1 }
-    return i + gen.cstr_len(IFACE_HEAD_SUFFIX)
+    return i + support.cstr_len(IFACE_HEAD_SUFFIX)
 }
 
 // iface_head_bad：头行不兼容的统一诊断（计一次错误并返回 -1）。
@@ -498,17 +500,17 @@ fn iface_head_bad(path *char) int {
     let t *gen.TaskCtx = gen.task()
     let buf [360]u8
     let n int = 0
-    n = gen.append_str_cap(buf, 360, n, "yh: 接口不兼容（头行须为 // yh-iface v")
-    n = gen.append_int_cap(buf, 360, n, IFACE_VERSION_MIN)
-    n = gen.append_str_cap(buf, 360, n, "..v")
-    n = gen.append_int_cap(buf, 360, n, IFACE_VERSION_MAX)
-    n = gen.append_str_cap(buf, 360, n, " arch=")
-    n = gen.append_str_cap(buf, 360, n, gen.target_arch_token())
-    n = gen.append_str_cap(buf, 360, n, " suffix=）: ")
-    n = gen.append_str_cap(buf, 360, n, path)
-    n = gen.append_byte_cap(buf, 360, n, '\n')
-    gen.write_all(2, buf, n)
-    t.c_errors += 1
+    n = support.append_str_cap(buf, 360, n, "yh: 接口不兼容（头行须为 // yh-iface v")
+    n = support.append_int_cap(buf, 360, n, IFACE_VERSION_MIN)
+    n = support.append_str_cap(buf, 360, n, "..v")
+    n = support.append_int_cap(buf, 360, n, IFACE_VERSION_MAX)
+    n = support.append_str_cap(buf, 360, n, " arch=")
+    n = support.append_str_cap(buf, 360, n, support.target_arch_token())
+    n = support.append_str_cap(buf, 360, n, " suffix=）: ")
+    n = support.append_str_cap(buf, 360, n, path)
+    n = support.append_byte_cap(buf, 360, n, '\n')
+    support.write_all(2, buf, n)
+    support.diag().errors += 1
     return -1
 }
 
@@ -522,20 +524,20 @@ fn iface_header_suffix(path *char, off *int, olen *int) int {
     }
     // suffix 到行尾
     let e int = s
-    for e < t.c_src_len && t.c_src[e] != '\n' {
+    for e < support.src_ctx().length && support.src_ctx().data[e] != '\n' {
         e += 1
     }
     if (e == s) {
-        t.c_errors += 1
+        support.diag().errors += 1
         let out2 [340]u8
         let on2 int = 0
-        on2 = gen.append_str(out2, on2, "yh: 接口头缺少 suffix: ")
-        on2 = gen.append_str(out2, on2, path)
-        on2 = gen.append_byte(out2, on2, '\n')
-        gen.write_all(2, out2, on2)
+        on2 = support.append_str(out2, on2, "yh: 接口头缺少 suffix: ")
+        on2 = support.append_str(out2, on2, path)
+        on2 = support.append_byte(out2, on2, '\n')
+        support.write_all(2, out2, on2)
         return -1
     }
-    let o int = gen.tml_intern_str(t.c_src, s, e - s)
+    let o int = support.tml_intern_str(support.src_ctx().data, s, e - s)
     if (o < 0) {
         return -1
     }
@@ -559,13 +561,13 @@ fn iface_emit_pub_agg_src(sym_id int) int {
     let cursor int = 0
     let i int = 0
     for i < srclen {
-        if (t.np_data[off + i] == 36 && i + 1 < srclen) {
+        if (support.pool_ctx().data[off + i] == 36 && i + 1 < srclen) {
             let j int = i + 1
-            let c0 int = t.np_data[off + j].to_type(int)
+            let c0 int = support.pool_ctx().data[off + j].to_type(int)
             if ((c0 >= 65 && c0 <= 90) || (c0 >= 97 && c0 <= 122) || c0 == 95) {
                 let k int = j + 1
                 for k < srclen {
-                    let cc int = t.np_data[off + k].to_type(int)
+                    let cc int = support.pool_ctx().data[off + k].to_type(int)
                     if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90)
                         || (cc >= 97 && cc <= 122) || cc == 95) {
                         k += 1
@@ -600,7 +602,7 @@ fn iface_emit_pub_agg_src(sym_id int) int {
 // bind_off/len：导入绑定名（=模块名）。返回 ModInfo 下标；失败 -1。
 pub fn iface_load(path *char, bind_off int, bind_len int) int {
     let t *gen.TaskCtx = gen.task()
-    if (gen.read_source(path) != 0) {
+    if (support.read_source(path) != 0) {
         return -1
     }
     let sfx_off int = -1
@@ -618,7 +620,7 @@ pub fn iface_load(path *char, bind_off int, bind_len int) int {
         }
         let nd *gen.ModInfo = malloc((ncap * sizeof(gen.ModInfo)).to_type(u64)).to_type(*gen.ModInfo)
         if (nd == 0) {
-            return gen.fail("内存分配失败")
+            return support.fail("内存分配失败")
         }
         if (t.c_mod_n > 0) {
             memcpy(nd, t.c_mods, (t.c_mod_n * sizeof(gen.ModInfo)).to_type(u64))
@@ -638,10 +640,10 @@ pub fn iface_load(path *char, bind_off int, bind_len int) int {
     t.c_mods[mi].ns_cap = 0
     t.c_mod_n += 1
     // 正文按 yh 源码登记：pass1 + pass2a（折叠常量；c_iface_load 抑制发射）
-    t.c_tok_n = 0
-    t.c_pos = 0
-    t.c_compile = 1
-    t.c_pass = 1
+    token.ctx().count = 0
+    token.ctx().pos = 0
+    support.session().compile = 1
+    support.session().pass = 1
     t.c_iface_load = 1
     let sym_base int = t.c_sym_n
     let tname_base int = t.t_name_n
@@ -657,17 +659,17 @@ pub fn iface_load(path *char, bind_off int, bind_len int) int {
         t.c_iface_load = 0
         return -1
     }
-    if (t.c_errors > 0) {
+    if (support.diag().errors > 0) {
         t.c_iface_load = 0
         return -1
     }
-    t.c_pos = 0
-    t.c_pass = 2
+    token.ctx().pos = 0
+    support.session().pass = 2
     if (parse_source_globals() != 0) {
         t.c_iface_load = 0
         return -1
     }
-    if (t.c_errors > 0) {
+    if (support.diag().errors > 0) {
         t.c_iface_load = 0
         return -1
     }
@@ -706,8 +708,8 @@ pub fn iface_load(path *char, bind_off int, bind_len int) int {
         ti += 1
     }
     // 恢复编译状态（调用方继续编译本模块源文件）
-    t.c_tok_n = 0
-    t.c_pos = 0
+    token.ctx().count = 0
+    token.ctx().pos = 0
     return mi
 }
 
@@ -721,7 +723,7 @@ fn mod_ns_add(mi int, name_off int, name_len int, sym int, tid int) int {
         }
         let nd *gen.ModNsEnt = malloc((ncap * sizeof(gen.ModNsEnt)).to_type(u64)).to_type(*gen.ModNsEnt)
         if (nd == 0) {
-            return gen.fail("内存分配失败")
+            return support.fail("内存分配失败")
         }
         if (t.c_mods[mi].ns_n > 0) {
             memcpy(nd, t.c_mods[mi].ns, (t.c_mods[mi].ns_n * sizeof(gen.ModNsEnt)).to_type(u64))
@@ -745,22 +747,22 @@ fn sym_mangle(si int, sfx_off int, sfx_len int) int {
     let nlen int = t.c_syms[si].name_len + sfx_len
     let tmp [512]u8
     if (nlen > 500) {
-        return gen.fail("符号名过长")
+        return support.fail("符号名过长")
     }
     let n int = 0
     let i int = 0
     for i < t.c_syms[si].name_len {
-        tmp[n] = t.np_data[t.c_syms[si].name_off + i]
+        tmp[n] = support.pool_ctx().data[t.c_syms[si].name_off + i]
         n += 1
         i += 1
     }
     i = 0
     for i < sfx_len {
-        tmp[n] = t.np_data[sfx_off + i]
+        tmp[n] = support.pool_ctx().data[sfx_off + i]
         n += 1
         i += 1
     }
-    let off int = gen.tml_intern_str(tmp, 0, n)
+    let off int = support.tml_intern_str(tmp, 0, n)
     if (off < 0) {
         return -1
     }
@@ -775,22 +777,22 @@ fn tname_mangle(ti int, sfx_off int, sfx_len int) int {
     let nlen int = t.t_names[ti].name_len + sfx_len
     let tmp [512]u8
     if (nlen > 500) {
-        return gen.fail("类型名过长")
+        return support.fail("类型名过长")
     }
     let n int = 0
     let i int = 0
     for i < t.t_names[ti].name_len {
-        tmp[n] = t.np_data[t.t_names[ti].name_off + i]
+        tmp[n] = support.pool_ctx().data[t.t_names[ti].name_off + i]
         n += 1
         i += 1
     }
     i = 0
     for i < sfx_len {
-        tmp[n] = t.np_data[sfx_off + i]
+        tmp[n] = support.pool_ctx().data[sfx_off + i]
         n += 1
         i += 1
     }
-    let off int = gen.tml_intern_str(tmp, 0, n)
+    let off int = support.tml_intern_str(tmp, 0, n)
     if (off < 0) {
         return -1
     }
@@ -804,19 +806,19 @@ fn tname_mangle(ti int, sfx_off int, sfx_len int) int {
 test "iface 头行版本区间与目标架构" {
     let buf [64]u8
     let n int = 0
-    n = gen.append_str(&buf[0], n, IFACE_HEAD_PREFIX)
-    n = gen.append_byte(&buf[0], n, '3')
-    n = gen.append_str(&buf[0], n, IFACE_HEAD_ARCH)
-    let arch *char = gen.target_arch_token()
-    n = gen.append_str(&buf[0], n, arch)
-    n = gen.append_str(&buf[0], n, IFACE_HEAD_SUFFIX)
-    n = gen.append_byte(&buf[0], n, 'x')
-    n = gen.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, IFACE_HEAD_PREFIX)
+    n = support.append_byte(&buf[0], n, '3')
+    n = support.append_str(&buf[0], n, IFACE_HEAD_ARCH)
+    let arch *char = support.target_arch_token()
+    n = support.append_str(&buf[0], n, arch)
+    n = support.append_str(&buf[0], n, IFACE_HEAD_SUFFIX)
+    n = support.append_byte(&buf[0], n, 'x')
+    n = support.append_byte(&buf[0], n, '\n')
     buf[n] = 0
     $assert(iface_head_prefix_len_at(&buf[0], n) > 0)
 
     // 版本 0 与 4 都在 [1,3] 之外。
-    let vpos int = gen.cstr_len(IFACE_HEAD_PREFIX)
+    let vpos int = support.cstr_len(IFACE_HEAD_PREFIX)
     buf[vpos] = '0'
     $assert(iface_head_prefix_len_at(&buf[0], n) < 0)
     buf[vpos] = '4'
@@ -824,14 +826,14 @@ test "iface 头行版本区间与目标架构" {
     buf[vpos] = '3'
 
     // 目标架构不符（任意目标下都改首字节为 Z）。
-    let apos int = vpos + 1 + gen.cstr_len(IFACE_HEAD_ARCH)
+    let apos int = vpos + 1 + support.cstr_len(IFACE_HEAD_ARCH)
     let keep u8 = buf[apos]
     buf[apos] = 'Z'
     $assert(iface_head_prefix_len_at(&buf[0], n) < 0)
     buf[apos] = keep
 
     // 截断到架构末尾（缺 " suffix="）与空输入。
-    let cut int = apos + gen.cstr_len(arch)
+    let cut int = apos + support.cstr_len(arch)
     $assert(iface_head_prefix_len_at(&buf[0], cut) < 0)
     $assert(iface_head_prefix_len_at(&buf[0], 0) < 0)
 }
@@ -839,15 +841,15 @@ test "iface 头行版本区间与目标架构" {
 test "ctiface 头行版本必须为 1" {
     let buf [64]u8
     let n int = 0
-    n = gen.append_str(&buf[0], n, CTIFACE_HEAD_PREFIX)
-    n = gen.append_byte(&buf[0], n, '1')
-    n = gen.append_str(&buf[0], n, IFACE_HEAD_ARCH)
-    n = gen.append_str(&buf[0], n, gen.target_arch_token())
-    n = gen.append_str(&buf[0], n, IFACE_HEAD_SUFFIX)
-    n = gen.append_byte(&buf[0], n, 'x')
-    n = gen.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, CTIFACE_HEAD_PREFIX)
+    n = support.append_byte(&buf[0], n, '1')
+    n = support.append_str(&buf[0], n, IFACE_HEAD_ARCH)
+    n = support.append_str(&buf[0], n, support.target_arch_token())
+    n = support.append_str(&buf[0], n, IFACE_HEAD_SUFFIX)
+    n = support.append_byte(&buf[0], n, 'x')
+    n = support.append_byte(&buf[0], n, '\n')
     buf[n] = 0
     $assert(iface_ct_head_prefix_len_at(&buf[0], n) > 0)
-    buf[gen.cstr_len(CTIFACE_HEAD_PREFIX)] = '2'
+    buf[support.cstr_len(CTIFACE_HEAD_PREFIX)] = '2'
     $assert(iface_ct_head_prefix_len_at(&buf[0], n) < 0)
 }

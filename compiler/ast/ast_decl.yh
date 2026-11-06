@@ -1,6 +1,25 @@
 module ast
+import token
+import support
 import gen
 import proj
+
+// AstStore：当前文件的只读声明索引与遍历游标（worker 持有）。
+// 索引由项目扫描/worker 建立，parse 遍历、ast 绑定、check 切片都从这里读。
+pub struct AstStore {
+    file_decls *token.PDecl // 当前文件顶层声明索引（借自 proj.PFile）
+    file_decl_n int // 索引条目数
+    file_decl_i int // 当前正解析的声明下标；-1 表示不在声明内
+    file_indexed int // 1 = token 表带项目扫描期声明索引
+}
+
+// g_store：当前任务的声明索引游标（零初始化）。
+let g_store AstStore
+
+// store：声明索引窄口；返回当前任务的 AstStore 指针。
+pub fn store() *AstStore {
+    return &g_store
+}
 
 // ============================================================================
 // ast_decl.yh —— 从已建顶层声明索引发布文件级声明 AST
@@ -47,25 +66,25 @@ pub fn ast_decl_reset() void {
     }
     ast_decl_file_first = 0
     ast_decl_file_cap = 0
-    tk.c_stats_decl_nodes = 0
+    support.session().stats_decl_nodes = 0
 }
 
 // ast_decl_add_file：把该文件现成的 PDecl 范围映射为只读声明节点。
 pub fn ast_decl_add_file(fi int) int {
     let tk *gen.TaskCtx = gen.task()
-    if (tk.c_ast_capture == 0) {
+    if (support.session().ast_capture == 0) {
         return 0
     }
-    if (fi < 0 || fi >= proj.file_count() || tk.c_active_file != fi
-        || tk.c_file_decls != proj.file(fi).decls) {
-        return gen.fail("内部错误：文件声明 AST 缺少对应的 PDecl 索引")
+    if (fi < 0 || fi >= proj.file_count() || support.session().active_file != fi
+        || store().file_decls != proj.file(fi).decls) {
+        return support.fail("内部错误：文件声明 AST 缺少对应的 PDecl 索引")
     }
     if (fi >= ast_decl_file_cap) {
         let ncap int = ast_decl_file_cap * 2
         if (ncap == 0) { ncap = 32 }
         for ncap <= fi { ncap = ncap * 2 }
         let next *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
-        if (next == 0) { return gen.fail("文件声明 AST 索引分配失败") }
+        if (next == 0) { return support.fail("文件声明 AST 索引分配失败") }
         let old int = 0
         for old < ast_decl_file_cap {
             next[old] = ast_decl_file_first[old]
@@ -82,18 +101,18 @@ pub fn ast_decl_add_file(fi int) int {
         ast_decl_file_cap = ncap
     }
     if (ast_decl_file_first[fi] >= 0) {
-        return gen.fail("内部错误：同一文件重复加入声明 AST")
+        return support.fail("内部错误：同一文件重复加入声明 AST")
     }
     ast_decl_file_first[fi] = ast_decl_count
     let i int = 0
-    for i < tk.c_file_decl_n {
-        let src gen.PDecl = tk.c_file_decls[i]
+    for i < store().file_decl_n {
+        let src token.PDecl = store().file_decls[i]
         if (ast_decl_count == ast_decl_cap) {
             let ncap int = ast_decl_cap * 2
             if (ncap == 0) { ncap = 32 }
             let next *AstDecl = malloc((ncap * sizeof(AstDecl)).to_type(u64)).to_type(*AstDecl)
             if (next == 0) {
-                return gen.fail("声明 AST 内存分配失败")
+                return support.fail("声明 AST 内存分配失败")
             }
             if (ast_decl_count > 0) {
                 memcpy(next, ast_decl_nodes,
@@ -109,18 +128,18 @@ pub fn ast_decl_add_file(fi int) int {
         let is_pub int = 0
         let scan int = src.start
         for scan < keyword {
-            if (tk.c_toks[scan].kind == gen.TK_PUB) { is_pub = 1 }
+            if (token.ctx().tokens[scan].kind == token.TK_PUB) { is_pub = 1 }
             scan += 1
         }
         let name_token int = keyword + 1
-        if (name_token >= src.end || tk.c_toks[name_token].kind != gen.TOK_IDENT) {
+        if (name_token >= src.end || token.ctx().tokens[name_token].kind != token.TOK_IDENT) {
             name_token = -1
         }
         let id int = ast_decl_count
         ast_decl_nodes[id].kind = src.kind
         ast_decl_nodes[id].first = src.start
         ast_decl_nodes[id].after = src.end
-        ast_decl_nodes[id].token_count = tk.c_tok_n
+        ast_decl_nodes[id].token_count = token.ctx().count
         ast_decl_nodes[id].file_id = fi
         ast_decl_nodes[id].decl_index = i
         ast_decl_nodes[id].line = src.line
@@ -132,7 +151,7 @@ pub fn ast_decl_add_file(fi int) int {
         ast_decl_nodes[id].type_id = -1
         ast_decl_nodes[id].init_expr = -1
         ast_decl_count += 1
-        tk.c_stats_decl_nodes += 1
+        support.session().stats_decl_nodes += 1
         i += 1
     }
     return 0
@@ -149,52 +168,52 @@ fn ast_decl_test_active(fi int) int {
 // 全局 let/const 同时绑定模块级符号（type_id 保持 -1：对象类型经符号表读取）。
 pub fn ast_decl_bind_file(fi int) int {
     let tk *gen.TaskCtx = gen.task()
-    if (tk.c_ast_capture == 0) { return 0 }
-    if (fi < 0 || fi >= proj.file_count() || tk.c_active_file != fi
-        || tk.c_toks == 0 || tk.c_file_decls != proj.file(fi).decls) {
-        return gen.fail("内部错误：函数声明绑定缺少当前文件 token 快照")
+    if (support.session().ast_capture == 0) { return 0 }
+    if (fi < 0 || fi >= proj.file_count() || support.session().active_file != fi
+        || token.ctx().tokens == 0 || store().file_decls != proj.file(fi).decls) {
+        return support.fail("内部错误：函数声明绑定缺少当前文件 token 快照")
     }
     let i int = 0
     for i < ast_decl_count {
         let node *AstDecl = &ast_decl_nodes[i]
-        if (node.file_id == fi && node.kind == gen.TK_FN) {
-            if (node.name_token < 0 || node.name_token >= tk.c_tok_n
-                || node.decl_index < 0 || node.decl_index >= tk.c_file_decl_n) {
-                return gen.fail("内部错误：函数声明绑定名字范围无效")
+        if (node.file_id == fi && node.kind == token.TK_FN) {
+            if (node.name_token < 0 || node.name_token >= token.ctx().count
+                || node.decl_index < 0 || node.decl_index >= store().file_decl_n) {
+                return support.fail("内部错误：函数声明绑定名字范围无效")
             }
-            let tok gen.Tok = tk.c_toks[node.name_token]
+            let tok token.Tok = token.ctx().tokens[node.name_token]
             let sym int = gen.sym_lookup(tok.start, tok.len)
             if (sym < 0 || tk.c_syms[sym].kind != gen.SYM_FN) {
-                return gen.fail("内部错误：函数声明未绑定到函数符号")
+                return support.fail("内部错误：函数声明未绑定到函数符号")
             }
             node.sym_id = sym
             node.type_id = tk.c_syms[sym].type_id
         }
-        if (node.file_id == fi && node.kind == gen.TK_TEST
+        if (node.file_id == fi && node.kind == token.TK_TEST
             && ast_decl_test_active(fi) != 0) {
             // test 体符号名是编译器生成的 __yh_test_<file>_<decl>，
             // 不能按源码里的字符串/标识符名字反查，改用 pass1 写在 PDecl 的符号。
-            if (node.decl_index < 0 || node.decl_index >= tk.c_file_decl_n) {
-                return gen.fail("内部错误：test 声明缺少 PDecl 身份")
+            if (node.decl_index < 0 || node.decl_index >= store().file_decl_n) {
+                return support.fail("内部错误：test 声明缺少 PDecl 身份")
             }
-            let sym int = tk.c_file_decls[node.decl_index].test_sym
+            let sym int = store().file_decls[node.decl_index].test_sym
             if (sym < 0 || sym >= tk.c_sym_n
                 || tk.c_syms[sym].kind != gen.SYM_FN) {
-                return gen.fail("内部错误：test 声明未绑定到测试函数符号")
+                return support.fail("内部错误：test 声明未绑定到测试函数符号")
             }
             node.sym_id = sym
             node.type_id = tk.c_syms[sym].type_id
         }
-        if (node.file_id == fi && (node.kind == gen.TK_LET || node.kind == gen.TK_CONST)) {
-            if (node.name_token < 0 || node.name_token >= tk.c_tok_n) {
-                return gen.fail("内部错误：全局声明绑定名字范围无效")
+        if (node.file_id == fi && (node.kind == token.TK_LET || node.kind == token.TK_CONST)) {
+            if (node.name_token < 0 || node.name_token >= token.ctx().count) {
+                return support.fail("内部错误：全局声明绑定名字范围无效")
             }
-            let gtok gen.Tok = tk.c_toks[node.name_token]
+            let gtok token.Tok = token.ctx().tokens[node.name_token]
             let gsym int = gen.sym_lookup(gtok.start, gtok.len)
             if (gsym < 0 || (tk.c_syms[gsym].kind != gen.SYM_VAR
                 && tk.c_syms[gsym].kind != gen.SYM_CONST)
                 || (tk.c_syms[gsym].flags & gen.F_GLOBAL) == 0) {
-                return gen.fail("内部错误：全局声明未绑定到模块级符号")
+                return support.fail("内部错误：全局声明未绑定到模块级符号")
             }
             node.sym_id = gsym
         }
@@ -206,26 +225,26 @@ pub fn ast_decl_bind_file(fi int) int {
 // ast_decl_attach_body：将刚解析的函数体根连接到其文件级函数声明。
 pub fn ast_decl_attach_body(fi int, decl_index int, stmt_id int) int {
     let tk *gen.TaskCtx = gen.task()
-    if (tk.c_ast_capture == 0) {
+    if (support.session().ast_capture == 0) {
         return 0
     }
     let i int = 0
     for i < ast_decl_count {
         if (ast_decl_nodes[i].file_id == fi && ast_decl_nodes[i].decl_index == decl_index) {
-            if ((ast_decl_nodes[i].kind != gen.TK_FN
-                    && ast_decl_nodes[i].kind != gen.TK_TEST)
+            if ((ast_decl_nodes[i].kind != token.TK_FN
+                    && ast_decl_nodes[i].kind != token.TK_TEST)
                 || ast_decl_nodes[i].body_stmt >= 0
                 || stmt_id < 0 || stmt_id >= ast_stmt_count
                 || ast_stmt_nodes[stmt_id].kind != AST_STMT_BLOCK
                 || ast_stmt_nodes[stmt_id].file_id != fi) {
-                return gen.fail("内部错误：函数声明与 AST 函数体不匹配")
+                return support.fail("内部错误：函数声明与 AST 函数体不匹配")
             }
             ast_decl_nodes[i].body_stmt = stmt_id
             return 0
         }
         i += 1
     }
-    return gen.fail("内部错误：找不到函数 AST 声明节点")
+    return support.fail("内部错误：找不到函数 AST 声明节点")
 }
 
 // ast_decl_attach_init：将全局 let/const 的初始化式根表达式挂到其文件级声明。
@@ -233,26 +252,26 @@ pub fn ast_decl_attach_body(fi int, decl_index int, stmt_id int) int {
 // （旧单文件路径在全局子遍保持 capture=0，不进入本函数）。
 pub fn ast_decl_attach_init(fi int, decl_index int, expr_id int) int {
     let tk *gen.TaskCtx = gen.task()
-    if (tk.c_ast_capture == 0 || decl_index < 0) {
+    if (support.session().ast_capture == 0 || decl_index < 0) {
         return 0
     }
     if (expr_id < 0 || expr_id >= ast_expr_count) {
-        return gen.fail("内部错误：全局初始化式 AST 根无效")
+        return support.fail("内部错误：全局初始化式 AST 根无效")
     }
     let i int = 0
     for i < ast_decl_count {
         if (ast_decl_nodes[i].file_id == fi && ast_decl_nodes[i].decl_index == decl_index) {
-            if ((ast_decl_nodes[i].kind != gen.TK_LET && ast_decl_nodes[i].kind != gen.TK_CONST)
+            if ((ast_decl_nodes[i].kind != token.TK_LET && ast_decl_nodes[i].kind != token.TK_CONST)
                 || ast_decl_nodes[i].init_expr >= 0
                 || ast_expr_nodes[expr_id].file_id != fi
                 || ast_expr_nodes[expr_id].first < ast_decl_nodes[i].first
                 || ast_expr_nodes[expr_id].after > ast_decl_nodes[i].after) {
-                return gen.fail("内部错误：全局声明与初始化式 AST 不匹配")
+                return support.fail("内部错误：全局声明与初始化式 AST 不匹配")
             }
             ast_decl_nodes[i].init_expr = expr_id
             return 0
         }
         i += 1
     }
-    return gen.fail("内部错误：找不到全局 AST 声明节点")
+    return support.fail("内部错误：找不到全局 AST 声明节点")
 }

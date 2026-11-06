@@ -1,0 +1,119 @@
+module check
+import gen
+import support
+
+// C ABI 的位置分类；种类常量与值/游标模型在 gen/abi_model.yh。
+
+// abi_c_cursor_init：开始一份独立签名分类，调用方显式指定目标平台。
+pub fn abi_c_cursor_init(c *gen.ABICursor, darwin int) void {
+    c.gpr = 0
+    c.fpr = 0
+    c.stack = 0
+    c.darwin = darwin
+}
+
+// abi_c_place：按 AAPCS64/Apple arm64 固定参数规则分配一个值。
+// HFA 先于大聚合处理；HFA/GPR 聚合均不拆分到寄存器与栈。
+pub fn abi_c_place(v *gen.ABIValue, c *gen.ABICursor, out *gen.ABIArg) void {
+    out.kind = gen.CABI_VOID
+    out.reg = 0
+    out.count = 0
+    out.stack = 0
+    out.indirect = 0
+    out.size = v.size
+    out.fp_size = v.fp_size
+    if (v.size == 0) { return }
+    let size int = v.size
+    let align int = v.align
+    if (v.fp_count > 0) {
+        if (c.fpr + v.fp_count <= 8) {
+            out.kind = gen.CABI_FPR
+            out.reg = c.fpr
+            out.count = v.fp_count
+            c.fpr += v.fp_count
+            return
+        }
+        c.fpr = 8
+    } else {
+        if (v.aggregate != 0 && size > 16) {
+            out.indirect = 1
+            size = 8
+            align = 8
+        }
+        let count int = (size + 7) / 8
+        if (align >= 16 && c.darwin == 0) { c.gpr = (c.gpr + 1) / 2 * 2 }
+        if (c.gpr + count <= 8) {
+            out.kind = gen.CABI_GPR
+            out.reg = c.gpr
+            out.count = count
+            c.gpr += count
+            return
+        }
+        c.gpr = 8
+    }
+    if (c.darwin == 0) {
+        if (align < 8) { align = 8 }
+        size = (size + 7) / 8 * 8
+    }
+    c.stack = (c.stack + align - 1) / align * align
+    out.kind = gen.CABI_STACK
+    out.stack = c.stack
+    c.stack += size
+}
+
+// abi_c_hfa：递归识别 f32/f64 同构聚合，返回 base_size*8+元素数；零为非 HFA。
+// 联合体按最大成员元素数分类；结构体按元素数相加，数组按长度相乘。
+fn abi_c_hfa(tid int) int {
+    let t gen.CType = gen.task().t_types[tid]
+    if (t.kind == gen.TY_F32 || t.kind == gen.TY_F64) { return t.size * 8 + 1 }
+    if (t.kind == gen.TY_ARRAY) {
+        let elem int = abi_c_hfa(t.elem)
+        let count int = (elem % 8) * t.len
+        if (elem == 0 || count < 1 || count > 4) { return 0 }
+        return elem / 8 * 8 + count
+    }
+    if (t.kind != gen.TY_STRUCT && t.kind != gen.TY_UNION) { return 0 }
+    let base int = 0
+    let count int = 0
+    let i int = 0
+    for i < t.len {
+        let part int = abi_c_hfa(gen.task().t_fields[t.sub + i].type_id)
+        if (part == 0) { return 0 }
+        if (base == 0) { base = part / 8 }
+        if (base != part / 8) { return 0 }
+        if (t.kind == gen.TY_UNION) {
+            if (part % 8 > count) { count = part % 8 }
+        } else {
+            count += part % 8
+        }
+        if (count > 4) { return 0 }
+        i += 1
+    }
+    if (count == 0 || t.size != base * count) { return 0 }
+    return base * 8 + count
+}
+
+// abi_c_describe：把前端类型布局转换为共享分类器输入，不进行任何发射。
+fn abi_c_describe(tid int, out *gen.ABIValue) void {
+    let t gen.CType = gen.task().t_types[tid]
+    out.size = t.size
+    out.align = t.align
+    out.aggregate = (t.kind == gen.TY_STRUCT || t.kind == gen.TY_UNION).to_type(int)
+    out.fp_size = 0
+    out.fp_count = 0
+    let hfa int = abi_c_hfa(tid)
+    if (hfa != 0) {
+        out.fp_size = hfa / 8
+        out.fp_count = hfa % 8
+    }
+}
+
+// abi_c_result：返回位置等同于首个参数的位置，普通大聚合的地址改用 x8。
+fn abi_c_result(tid int, out *gen.ABIArg) void {
+    let value gen.ABIValue
+    abi_c_describe(tid, &value)
+    let cursor gen.ABICursor
+    abi_c_cursor_init(&cursor, support.tg_darwin())
+    abi_c_place(&value, &cursor, out)
+    if (out.indirect != 0) { out.reg = 8 }
+}

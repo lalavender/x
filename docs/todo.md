@@ -38,7 +38,7 @@ lex → parse(纯语法) → AST
   `$for values/fields`、字符串插值 3 个语法点验证“纯语法 AST 可表示”；确定
   `iface`/`.s.ct`/CT 布局从 `parse` 迁到 `check` 的边界。
 - [ ] **F1 语法 AST**：`ast` 回归纯语法（kind/op/span/children）；CT 语法节点归
-  `ast`；`CheckedModule`/快照/HIR 迁到 `check`（或新 `hir`）；移除
+  `ast`；`CheckedModule`/快照/HIR 迁到 `check`（不新建 `hir`）；移除
   `ast -> comptime` 边。
 - [ ] **F2 parse 纯语法**：移除 `gen.sem_*`、`ast_expr_set_semantics`、`proj`
   依赖；`parse_decl` 的 pass1/pass2、声明索引、test/entry 选择上移 build/check；
@@ -58,45 +58,89 @@ lex → parse(纯语法) → AST
 产物逐字节一致；行为变更单独切片；最终固定点 + 全量语料 + 模块验收。
 风险：自举种子、CT 需要类型环境、诊断/错误恢复、lower 契约、ast/comptime 循环。
 
-## 2026-11-06 gen 职责拆分：token/sema/check/support/target（P0，ADR-0021）
+## 2026-11-06 gen 职责拆分：只新增 support/token，语义全归 check（P0，ADR-0021）
 
-重新分析后的目标、归属表、状态拆分与验收口径见
-[ADR-0021](adr/0021-yh-gen职责拆分.md) 与
-[实施方案](02-plan/yh-gen职责拆分实施方案-2026-11-06.md)。要点：
+按用户反馈收窄：**只新增 `support`/`token` 两个模块**；`sema` 不建，
+**语义分析全部归 `check`**；`diag`/`target` 并入 `support`，`state`/`hir` 不建；
+复用现有 `lex`/`check`/`comptime`/`proj`/`builtin`。`token` 从 GEN1 开始（词汇 +
+`PDecl` + token 状态 + `err_tok`）；`builtin` 保留内置函数/内置类型登记表。
+详见 [ADR-0021](adr/0021-yh-gen职责拆分.md) 与
+[实施方案](02-plan/yh-gen职责拆分实施方案-2026-11-06.md)。
 
-- 目标模块 `support`/`diag`/`target`/`token`/`sema`/`check`；**不设 `state`
-  模块**，状态按所有者拆（`SourceCtx`/`PoolCtx`/`CompileStats`/`DiagCtx`/
-  `SemaCtx`/`CheckCtx`/`ParseCtx`/`BuildCtx`/`LinkCtx`）。
-- 三处修正：`fail`/`fail_path` 归 `support`（`diag` 只放有位置的 `err_lc`/
-  `warn_lc`）；`PDecl` 归 `token`（放 `ast` 会与 `proj` 成环）；`sema` 依赖
-  `support, diag, target, token`（不只 `support`）。
-- 顺序：GEN0 ADR/归属表/预算守卫 → GEN1 基础层 → GEN2 `sema` 模型 →
-  **GEN3（= F1–F5）`check` 接语义** → GEN4 状态收尾并删除 `gen`。
-  **GEN3/GEN4 不得早于 F5**：`parse` 仍驱动 `sem_*` 时搬 `check` 会造临时环。
-- 验收：同模块搬家 `.s/.s.i/.s.ct` 字节一致；跨模块搬家不要求编译器自身
-  `.s.i` 一致，改用固定点 + 全量语料等价；每阶段 `just` + `just test` +
-  `just selfhost-native`。
+- `support`（L0，非流水线阶段）：缓冲/源/池/统计/宿主 + `fail`/`err_lc` 诊断 +
+  目标身份/`TargetCfg` + `ABI_*` 常量；在会话初始化、读源、各阶段缓冲/诊断、
+  lower/backend 目标、link/build 路径/时钟时调用。
+- `token`（L0.5）：`Tok`/`TK_*`/`TOK_*`/`ATTR_*`/`PDecl` + token 数组/游标 +
+  `err_tok`/`sem_err`；依赖 `support`。
+- `check`（语义唯一入口）：`CType/CSym/...`、类型/符号/折叠/布局/ABI/静态数据、
+  `resolve → expand → full`、`CheckedModule`；`lower`/`builtin` 直接 import。
+- `comptime`：收窄为纯 CT IR 执行器，不 import `check`；否则成环。
+- `HIR` 不是模块：指 `check` 产出的 `CheckedModule` 受检契约，`lower → check`。
 
-- [ ] **GEN0**：落 ADR-0021 + 归属表；`arch-check` 加新模块边与 `gen` 预算
-  （`pub fn`/importers/`TaskCtx` 字段只减不增）；递归扫描按 `module` 分组；
-  核对 183 个 `pub fn` 全部有去向。
-- [ ] **GEN1**：`support`（缓冲/源/池/统计/宿主/`fail`）、`diag`（`err_lc`/
-  `warn_lc`）、`target`（身份/数据模型/`TargetCfg` 类型与绑定）、`token`
-  （词汇/`PDecl`；token 状态暂留 `gen`）；先让 `cmdline`/`cache`/`link`/
-  `proj` 脱 `gen`；`backend`/`lower`/`builtin` 先改走 `support`/`target`/
-  `token`，GEN2 再脱 `gen`；同步 test fixture 拷贝清单与
-  `compiler-tests.py` 模块列表。
-- [ ] **GEN2**：`sema` 接 `CType/SField/TName/CSym/ModInfo`、`TY_*/SYM_*/F_*`、
-  类型/符号/折叠/布局/ABI/静态数据/命名空间；`comptime → sema`；`gen` 只剩
-  `sem_*` 动作 + 残余 `TaskCtx`。
-- [ ] **GEN3**（与 F1–F5 合并）：`ast` 纯语法、`parse` 纯语法、`check.resolve →
-  CT 检查 → expand → full`；F5 后再删/迁旧 `sem_*`、`Res`、`CheckCtx`。
-- [ ] **GEN4**：F5 后重盘 `TaskCtx`，拆 token/lex/parse/check/build/link 上下文；
-  删 `GenState`/`gen`；刷新 arch-check、README/架构文档/统计，滚种子。
+- [x] **GEN0**（2026-11-06 完成）：ADR/归属表；`arch-check` 递归扫描 +
+  `support/token` 边 + `gen` 预算（`pub fn`/importers/`TaskCtx` 字段只减不增；
+  `max_globals` 174）；自测 5/5。
+- [x] **GEN1（2026-11-06 完成）**：`support` 已接 buffer/源/池/统计/诊断/
+  目标/`ABI_*`，消费面直连；`token` 已接词汇/`PDecl`/token 状态与游标/
+  `err_tok`；`TaskCtx` 189→172；`gen` 143 pub/14 importers。support/token、
+  llvmtarget/llvmfront fixture 通过；`yh check`、`yh test support/token
+  --no-run`、arch-check 5/5 通过。本机缺 Darwin SDK 固定闭包，`just` 链接门
+  待环境；`gen.Tok`/`TK_*` 别名留到 GEN2 随语义迁移一起收。
+- [x] **GEN2/F1 第二片（2026-11-06 完成）**：会话开关/模式位迁
+  `support.SessionCtx`（13 字段），当前文件声明索引迁 `ast.AstStore`
+  （4 字段）；`TaskCtx` 172→155，`gen` 4,866→4,848 行；astcheck/
+  llvmchecked/llvmlower 实跑通过。
+- [x] **GEN2/F1（2026-11-06 完成）**：`CheckedModule`/`CheckedStorage`/视图/
+  check 键/函数切片从 `ast` 迁入 `check`（`checked_model`/`checked_view`/
+  `checked_key`/`checked_slice`/`verify_checked`）；`ast` 只剩纯语法 arena
+  （3,414→1,347 行），新增 `ast/ast_store.yh` 提供 5 个 arena 扩容入口；
+  `check` 963→3,082 行。fixture（llvmchecked/llvmlower/astcheck）实跑通过。
+- [x] **GEN2/F3 首片（2026-11-06 完成）**：语义动作 `sem_value`/`sem_expr`/
+  `sem_decl`/`sem_flow`/`sem_call_literal` 与 `abi_c` 算法从 `gen` 迁入
+  `check`（`parse`/`build` 改用 `check.sem_*`）；C ABI 数据模型留在
+  `gen/abi_model.yh`（`TaskCtx` 持有 `ABICursor`）；常量折叠/浮点/布局收尾
+  集中到 `gen/value_rules.yh` 供 `comptime` 共用。`gen` 4,848→2,555 行、
+  pub fn 143→76、importers 14→13；`check` 3,082→5,199 行。宿主平台 `clock/console/argv`
+  迁 `support`。fixture（support/token/llvmtarget/llvmfront/llvmchecked/
+  llvmlower/astcheck）实跑通过。
+- [x] **GEN2 状态收尾片（2026-11-06 完成）**：`parse` 得到自己的
+  `parse.ParseCtx`（`test_body`/`ct_meta_bare`/`ctx_block`/`ir_reject_reason`），
+  `TaskCtx` 155→150；`gen/token_bridge.yh` 删除（token 全部直连），
+  `backend`/`proj`/`link`/`cache` 的目标与 ABI 常量改走 `support`，
+  `import gen` 14→13。
+- [x] **F4-0（2026-11-06 完成）**：`comptime/ct_facts.yh` 零拷贝镜像
+  （`CtTypeRow` + `CT_TY_*` 镜像常量 + 6 个字段读口 + 3 个谓词），
+  `check/ct_bind.yh` 提供唯一绑定点 `ct_types_sync()` 与形状守卫
+  `ct_type_layout_ok()`；新 fixture `tests/modules/projects/ctfacts/`
+  逐行差分镜像与 `gen` 类型表（13 行）、验证表扩容后重新绑定读到新行，
+  本机实跑 `ct-facts=ok rows=13`。谓词两处对齐（`is_integer` 含
+  bool..u64+enum，`is_signed` 含 char..i64+enum）。
+- [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
+  [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
+  方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`
+  与 gen 结构逐字段同序，指针 + 行数绑定，不复制表——解析期类型表会增长，
+  复制必然过期）。**前置 F4-0**：把 `comptime` 的公开 API 收进 `check` 的
+  薄包装（`check.ct_*` 转发并先 `ct_types_sync()`），`parse` 改调
+  `check.ct_*`；这样「绑定点」只有一个，F4-1..F4-4 才能安全机械替换。
+  **F4-0b（F4-1 的前置，必须先做）**：`comptime` 的类型表指针随时可能因
+  `gen.ty_push` 重新分配而失效，因此镜像必须在**每次表增长后**重新绑定；
+  `gen` 不能 import `comptime`，唯一合法绑定点是 `check`。做法：把
+  `comptime` 的公开 API 收进 `check.ct_*` 薄包装（转发前 `ct_types_sync()`），
+  `parse` 改调 `check.ct_*`；这一步不成立就替换谓词会出现 use-after-free。
+  然后 F4-1（44 处谓词 + 19 处 `CType` 读 → 镜像）、F4-2（`CSym`/`SYM_*`）、
+  F4-3（`static_data`/`data_str`）、F4-4（诊断/`gen.task`）、F4-5（折叠请求）。
+  完成后把 `CType/CSym/ty_*/sym_*`、`static_data`、`value_rules` 迁 `check`。
+- [ ] **GEN2/F2（未开始）**：`parse` 纯语法——`sem_*` 调用链改为「先出语法
+  AST、再 `check.resolve`」；`parse_decl` pass1/pass2、声明索引、test/entry
+  选择上移 build/check；`iface`/`iface_ct`/`parse_ct_layout` 移出 parse。
+- [ ] **GEN3**：清 `gen` 语义残片/空壳；`lower`/`builtin` 改 import `check`，
+  `backend` 用 `support.ABI_*`；`build`/`cmd` 改调 `check` 入口。
+- [ ] **GEN4**：重盘 `TaskCtx`，拆 parse/check/build/link 残余上下文；删
+  `GenState`/`gen`；刷新 arch-check、README/架构文档/统计，滚种子。
 
-风险：`TaskCtx` 机械改写（281 `np_data`/166 `c_src`/330 `c_pos`）、`sema`
-偷读 parser 状态、fixture 拷贝漏新模块、跨模块 `.s.i` 不可比、`target` 第二份
-可写 cfg。缓解见实施方案 §7。
+风险：`check` 变大（模型+分析+CT 驱动）、`comptime` 仍调类型规则会成环、
+`support` 被塞成“小 gen”、`TaskCtx` 机械改写（281 `np_data`/166 `c_src`/
+330 `c_pos`）、fixture 拷贝漏新模块、跨模块 `.s.i` 不可比。缓解见实施方案 §7。
 
 ## 2026-11-06 架构文档守护（P1）
 
@@ -184,7 +228,7 @@ UF1 已生效（`build/unused_function.yh`，见 [finish.md](finish.md) 与
 
 - [ ] **UF1 精确化**：把「按名字的 token 扫描」升级为「按解析身份的引用集合」，
   覆盖两个已知漏报：同名局部变量/字段遮蔽、递归但无外部引用的孤立函数。
-  前置条件是把引用事实随函数级 check 切片携带（`module_snapshot_check_slice.yh`
+  前置条件是把引用事实随函数级 check 切片携带（`check/checked_slice.yh`
   的 global 符号表已按名字重绑定，但正文命中时不做解析），否则增量构建会把
   活函数判死；`$f(...)` 编译期调用与生产构建的 `test` 正文也要单独补登记。
 

@@ -1,4 +1,5 @@
 module build
+import support
 
 import gen
 import proj
@@ -52,14 +53,14 @@ fn mb_cache_join(out *u8, capacity int, base *char, suffix *char) int {
 // Windows 只看 LOCALAPPDATA；Linux 优先 XDG_CACHE_HOME，其次 HOME/.cache；
 // Darwin 使用 ~/Library/Caches。HOME 缺失时对应平台回退为未启用。
 fn mb_cache_default_root(out *u8, capacity int) int {
-    if (gen.tg_host_windows() != 0) {
+    if (support.tg_host_windows() != 0) {
         let app_off int = -1
         let app_len int = 0
         if (proj.env_fetch("LOCALAPPDATA", &app_off, &app_len) != 0
             || app_len <= 0) { return -1 }
         return mb_cache_join(out, capacity, proj.pool_str(app_off), "yh/cache")
     }
-    if (gen.tg_host_darwin() == 0) {
+    if (support.tg_host_darwin() == 0) {
         let xdg_off int = -1
         let xdg_len int = 0
         if (proj.env_fetch("XDG_CACHE_HOME", &xdg_off, &xdg_len) != 0) {
@@ -74,14 +75,14 @@ fn mb_cache_default_root(out *u8, capacity int) int {
     if (proj.env_fetch("HOME", &home_off, &home_len) != 0) { return -1 }
     let home *char = proj.pool_str(home_off)
     if (home_len <= 0) { return -1 }
-    if (gen.tg_host_darwin() != 0) {
+    if (support.tg_host_darwin() != 0) {
         return mb_cache_join(out, capacity, home, "Library/Caches/yh")
     }
     let home_cache [cache.CACHE_ROOT_MAX + 32]u8
     if (mb_cache_join(&home_cache[0], cache.CACHE_ROOT_MAX + 32, home, ".cache") != 0) {
         return -1
     }
-    return mb_cache_join(out, capacity, gen.arr_cstr(&home_cache[0]), "yh")
+    return mb_cache_join(out, capacity, support.arr_cstr(&home_cache[0]), "yh")
 }
 
 // mb_cache_debug_action：YH_CACHE_DEBUG 下输出标签 + ActionID（64 hex）。
@@ -89,7 +90,7 @@ pub fn mb_cache_debug_action(label *char, action_id *u8) void {
     if (bc().cache_debug == 0 || action_id == 0) { return }
     let hex [cache.CACHE_ID_TEXT]u8
     if (hash.sha256_hex(action_id, &hex[0]) != 0) { return }
-    printf("[cache] %s %s\n", label, gen.arr_cstr(&hex[0]))
+    printf("[cache] %s %s\n", label, support.arr_cstr(&hex[0]))
 }
 
 // mb_project_lock：同项目构建锁。锁文件在 <root>/.build/yh-build.lock，
@@ -102,15 +103,15 @@ fn mb_project_lock(root_off int, root_len int) int {
     }
     let dir [cache.CACHE_ROOT_MAX + 64]u8
     let dn int = 0
-    dn = gen.append_str(&dir[0], dn, proj.pool_str(c_off))
+    dn = support.append_str(&dir[0], dn, proj.pool_str(c_off))
     dir[dn] = 0
-    if (link.cmd_mkdirs(gen.arr_cstr(&dir[0])) != 0) { return -1 }
+    if (link.cmd_mkdirs(support.arr_cstr(&dir[0])) != 0) { return -1 }
     let lock_path [cache.CACHE_ROOT_MAX + 96]u8
     let ln int = 0
-    ln = gen.append_str(&lock_path[0], ln, proj.pool_str(c_off))
-    ln = gen.append_str(&lock_path[0], ln, "/yh-build.lock")
+    ln = support.append_str(&lock_path[0], ln, proj.pool_str(c_off))
+    ln = support.append_str(&lock_path[0], ln, "/yh-build.lock")
     lock_path[ln] = 0
-    let fd int = proj.open_out(gen.arr_cstr(&lock_path[0]))
+    let fd int = proj.open_out(support.arr_cstr(&lock_path[0]))
     if (fd < 0) { return -1 }
     if (cache.cache_lock_file(fd) != 0) {
         close(fd)
@@ -142,7 +143,7 @@ pub fn mb_cache_init() void {
             bc().cache_debug = 1
         }
     }
-    if (tk.c_check_only != 0 || tk.c_test_mode != 0) {
+    if (support.session().check_only != 0 || support.session().test_mode != 0) {
         cache.store_disable(store)
         return
     }
@@ -156,7 +157,7 @@ pub fn mb_cache_init() void {
     let enabled int = 1
     if (olen > 0) {
         let value *char = proj.pool_str(off)
-        if (gen.cstr_eq(value, "off") != 0) {
+        if (support.cstr_eq(value, "off") != 0) {
             cache.store_disable(store)
             return
         }
@@ -166,7 +167,7 @@ pub fn mb_cache_init() void {
         }
         let i int = 0
         for i < olen {
-            root[i] = gen.task().np_data[off + i]
+            root[i] = support.pool_ctx().data[off + i]
             i += 1
         }
         root[olen] = 0
@@ -184,12 +185,12 @@ pub fn mb_cache_init() void {
             max_size = parsed
         }
     }
-    if (cache.store_init(store, gen.arr_cstr(&root[0]), enabled, max_size) != 0) {
+    if (cache.store_init(store, support.arr_cstr(&root[0]), enabled, max_size) != 0) {
         cache.store_disable(store)
         return
     }
     // 目录必须存在；任何一步失败都关闭缓存，保持“miss 安全”。
-    if (link.cmd_mkdirs(gen.arr_cstr(&root[0])) != 0) {
+    if (link.cmd_mkdirs(support.arr_cstr(&root[0])) != 0) {
         cache.store_disable(store)
         return
     }
@@ -202,8 +203,8 @@ pub fn mb_cache_init() void {
     for i < 4 {
         let path [cache.CACHE_ROOT_MAX + 64]u8
         if (mb_cache_join(&path[0], cache.CACHE_ROOT_MAX + 64,
-                gen.arr_cstr(&root[0]), dirs[i]) != 0
-            || link.cmd_mkdirs(gen.arr_cstr(&path[0])) != 0) {
+                support.arr_cstr(&root[0]), dirs[i]) != 0
+            || link.cmd_mkdirs(support.arr_cstr(&path[0])) != 0) {
             cache.store_disable(store)
             return
         }
@@ -211,8 +212,8 @@ pub fn mb_cache_init() void {
     }
     let lock_path [cache.CACHE_ROOT_MAX + 64]u8
     if (mb_cache_join(&lock_path[0], cache.CACHE_ROOT_MAX + 64,
-            gen.arr_cstr(&root[0]), "v1/lock") == 0) {
-        let fd int = proj.open_out(gen.arr_cstr(&lock_path[0]))
+            support.arr_cstr(&root[0]), "v1/lock") == 0) {
+        let fd int = proj.open_out(support.arr_cstr(&lock_path[0]))
         if (fd >= 0) { close(fd) }
     }
 }
@@ -282,11 +283,11 @@ pub fn mb_cache_publish_module(m int, build_off int, build_len int,
     entries[1].role = cache.OUTPUT_IFACE
     entries[2].role = cache.OUTPUT_CT_IFACE
     let sizes [3]u64
-    if (cache.store_put_file(store, gen.arr_cstr(&object_path[0]),
+    if (cache.store_put_file(store, support.arr_cstr(&object_path[0]),
             &entries[0].id[0], &sizes[0]) != 0
-        || cache.store_put_file(store, gen.arr_cstr(&iface_path[0]),
+        || cache.store_put_file(store, support.arr_cstr(&iface_path[0]),
             &entries[1].id[0], &sizes[1]) != 0
-        || cache.store_put_file(store, gen.arr_cstr(&ct_path[0]),
+        || cache.store_put_file(store, support.arr_cstr(&ct_path[0]),
             &entries[2].id[0], &sizes[2]) != 0) {
         return -1
     }
@@ -349,11 +350,11 @@ pub fn mb_cache_lookup_module(m int, build_off int, build_len int,
         || mb_module_path(m, build_off, build_len, "iface", ".s.ct",
             &ct_path[0], 1200) != 0) { return 0 }
     if (cache.store_get_file(store, &entries[object_i].id[0],
-            gen.arr_cstr(&object_path[0])) != 1
+            support.arr_cstr(&object_path[0])) != 1
         || cache.store_get_file(store, &entries[iface_i].id[0],
-            gen.arr_cstr(&iface_path[0])) != 1
+            support.arr_cstr(&iface_path[0])) != 1
         || cache.store_get_file(store, &entries[ct_i].id[0],
-            gen.arr_cstr(&ct_path[0])) != 1) {
+            support.arr_cstr(&ct_path[0])) != 1) {
         mb_cache_debug_action("module global miss (output corrupt/missing)", action_id)
         return 0
     }

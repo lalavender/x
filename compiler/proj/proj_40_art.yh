@@ -1,4 +1,5 @@
 module proj
+import support
 import gen
 
 // ============================================================================
@@ -20,7 +21,7 @@ import gen
 //
 // 项目名与模块名都来自用户输入，`mod_tag` 用 [512]u8 临时缓冲拼接，
 // 派生的接口/对象路径又写进 600/700/900 字节的定长缓冲。两个名字不限长时
-// 会写穿栈（且 `gen.append_str` 不做容量检查）。这里在源头设预算：
+// 会写穿栈（且 `support.append_str` 不做容量检查）。这里在源头设预算：
 //   构建目录 ≤ 400，标记 ≤ 120，派生路径最长 400 + 7 + 120 + 5 + 1 = 533，
 //   低于最小的 600 字节缓冲；超限给出可操作诊断而不是崩溃。
 pub const MB_BUILD_DIR_MAX int = 400
@@ -44,19 +45,19 @@ pub fn fnv(h *u64, b u8) void {
 // 读取失败返回 -1。
 pub fn hash_file(h *u64, path *char) int {
     let tk *gen.TaskCtx = gen.task()
-    if (gen.read_source(path) != 0) {
+    if (support.read_source(path) != 0) {
         return -1
     }
     let i int = 0
-    let words *u64 = tk.c_src.to_type(*u64)
-    for i + 8 <= tk.c_src_len {
+    let words *u64 = support.src_ctx().data.to_type(*u64)
+    for i + 8 <= support.src_ctx().length {
         let word u64 = words[i / 8]
         h[0] = h[0] ^ word
         h[0] = h[0] * 1099511628211
         i += 8
     }
-    for i < tk.c_src_len {
-        h[0] = h[0] ^ tk.c_src[i].to_type(u64)
+    for i < support.src_ctx().length {
+        h[0] = h[0] ^ support.src_ctx().data[i].to_type(u64)
         h[0] = h[0] * 1099511628211
         i += 1
     }
@@ -104,17 +105,17 @@ pub fn build_dir(root_off int, root_len int, out_len *int) int {
     let c_off int = 0
     let c_len int = 0
     let rc int = 0
-    if (tk.c_test_mode != 0) {
+    if (support.session().test_mode != 0) {
         // 测试检查与生产缓存隔离；接口/会话文件只落在项目 tmp 下。
         rc = canon(root_off, root_len, "tmp/yh-test/check", &c_off, &c_len)
-    } else if (tk.c_check_only != 0) {
+    } else if (support.session().check_only != 0) {
         rc = canon(base_off, base_len, "check", &c_off, &c_len)
     } else {
         let target_dir [256]u8
-        let n int = gen.append_str(&target_dir[0], 0, "targets/")
-        n = gen.append_str(&target_dir[0], n, cfg().target.triple)
-        n = gen.append_str(&target_dir[0], n, "/llvm/O")
-        n = gen.append_int(&target_dir[0], n, cfg().opt_level)
+        let n int = support.append_str(&target_dir[0], 0, "targets/")
+        n = support.append_str(&target_dir[0], n, cfg().target.triple)
+        n = support.append_str(&target_dir[0], n, "/llvm/O")
+        n = support.append_int(&target_dir[0], n, cfg().opt_level)
         target_dir[n] = 0
         rc = canon(base_off, base_len, (&target_dir[0]).to_type(*char), &c_off, &c_len)
     }
@@ -122,7 +123,7 @@ pub fn build_dir(root_off int, root_len int, out_len *int) int {
         return -1
     }
     if (c_len > MB_BUILD_DIR_MAX) {
-        return gen.fail_path("项目路径过长：构建目录超过 400 字节，请缩短项目根路径: ",
+        return support.fail_path("项目路径过长：构建目录超过 400 字节，请缩短项目根路径: ",
             pool_str(c_off))
     }
     out_len[0] = c_len
@@ -148,13 +149,13 @@ pub fn default_binary_path(root_off int, root_len int, build_off int,
     let c_len int = 0
     if (canon(root_off, root_len, ".build", &c_off, &c_len) != 0) { return -1 }
     let dir_off int = c_off
-    let n int = gen.append_str(out, 0, pool_str(dir_off))
-    n = gen.append_byte(out, n, '/')
+    let n int = support.append_str(out, 0, pool_str(dir_off))
+    n = support.append_byte(out, n, '/')
     let name_off int = ctx().projs[project].name_off
     let name_len int = ctx().projs[project].name_len
     let ni int = 0
     for ni < name_len {
-        out[n] = gen.task().np_data[name_off + ni]
+        out[n] = support.pool_ctx().data[name_off + ni]
         n += 1
         ni += 1
     }
@@ -171,13 +172,13 @@ pub fn mod_tag(m int, off *int, olen *int) int {
     // 标记 = 项目名 + '-' + 模块名。两个名字都来自用户输入：先按预算拒绝，
     // 否则下面的 [512]u8 临时缓冲会被写穿（见 MB_TAG_MAX 注释）。
     if (proj_len + mod_len + 1 > MB_TAG_MAX) {
-        return gen.fail("模块名过长：项目名与模块名合计超过 120 字节")
+        return support.fail("模块名过长：项目名与模块名合计超过 120 字节")
     }
     let tmp [512]u8
     let n int = 0
     let i int = 0
     for i < ctx().projs[ctx().mods[m].proj].name_len {
-        let b u8 = tk.np_data[ctx().projs[ctx().mods[m].proj].name_off + i]
+        let b u8 = support.pool_ctx().data[ctx().projs[ctx().mods[m].proj].name_off + i]
         if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
             || (b >= '0' && b <= '9') || b == '_')) {
             b = '_'
@@ -190,7 +191,7 @@ pub fn mod_tag(m int, off *int, olen *int) int {
     n += 1
     i = 0
     for i < ctx().mods[m].name_len {
-        let b2 u8 = tk.np_data[ctx().mods[m].name_off + i]
+        let b2 u8 = support.pool_ctx().data[ctx().mods[m].name_off + i]
         if (!((b2 >= 'a' && b2 <= 'z') || (b2 >= 'A' && b2 <= 'Z')
             || (b2 >= '0' && b2 <= '9') || b2 == '_')) {
             b2 = '_'
@@ -200,7 +201,7 @@ pub fn mod_tag(m int, off *int, olen *int) int {
         i += 1
     }
     tmp[n] = 0
-    off[0] = gen.tml_intern_str(tmp, 0, n)
+    off[0] = support.tml_intern_str(tmp, 0, n)
     olen[0] = n
     if (off[0] < 0) {
         return -1
@@ -262,7 +263,7 @@ pub fn asm_stems(m int, stems *u8, lens *int) int {
     let rn int = 0
     let ti int = 0
     for ti < tag_len {
-        reserved[rn] = tk.np_data[tag_off + ti]
+        reserved[rn] = support.pool_ctx().data[tag_off + ti]
         rn += 1
         ti += 1
     }
@@ -346,7 +347,7 @@ pub fn asm_stems(m int, stems *u8, lens *int) int {
             k += 1
         }
         if (k >= 1000) {
-            return gen.fail("内部错误：无法派生唯一的汇编文件名")
+            return support.fail("内部错误：无法派生唯一的汇编文件名")
         }
         let dst *u8 = stems + (idx * 160)
         let c2 int = 0
@@ -384,7 +385,7 @@ pub fn module_obj_row(m int, build_off int, build_len int, row_k int,
         if (stems == 0 || lens == 0) {
             if (stems != 0) { free(stems.to_type(*void)) }
             if (lens != 0) { free(lens.to_type(*void)) }
-            return gen.fail("内存分配失败")
+            return support.fail("内存分配失败")
         }
         let ok int = asm_stems(m, stems, lens)
         if (ok == 0) {
@@ -403,7 +404,7 @@ pub fn module_obj_row(m int, build_off int, build_len int, row_k int,
         // 桩对象名词干 = <tag>.stub
         let ti int = 0
         for ti < tag_len {
-            stem[ti] = tk.np_data[tag_off + ti]
+            stem[ti] = support.pool_ctx().data[tag_off + ti]
             ti += 1
         }
         let dot *char = ".stub"
@@ -417,26 +418,26 @@ pub fn module_obj_row(m int, build_off int, build_len int, row_k int,
     }
     if (spath != 0) {
         let pn int = 0
-        pn = gen.append_str(spath, pn, pool_str(build_off))
-        pn = gen.append_str(spath, pn, "/asm/")
-        pn = gen.append_str(spath, pn, pool_str(tag_off))
-        pn = gen.append_byte(spath, pn, '/')
+        pn = support.append_str(spath, pn, pool_str(build_off))
+        pn = support.append_str(spath, pn, "/asm/")
+        pn = support.append_str(spath, pn, pool_str(tag_off))
+        pn = support.append_byte(spath, pn, '/')
         let si2 int = 0
         for si2 < sn {
             spath[pn] = stem[si2]
             pn += 1
             si2 += 1
         }
-        pn = gen.append_str(spath, pn, ".s")
+        pn = support.append_str(spath, pn, ".s")
         spath[pn] = 0
     }
     if (opath != 0 || mpath != 0) {
         let on int = 0
         if (opath != 0) {
-            on = gen.append_str(opath, on, pool_str(build_off))
-            on = gen.append_str(opath, on, "/obj/")
-            on = gen.append_str(opath, on, pool_str(tag_off))
-            on = gen.append_byte(opath, on, '/')
+            on = support.append_str(opath, on, pool_str(build_off))
+            on = support.append_str(opath, on, "/obj/")
+            on = support.append_str(opath, on, pool_str(tag_off))
+            on = support.append_byte(opath, on, '/')
         }
         let si3 int = 0
         for si3 < sn {
@@ -444,22 +445,22 @@ pub fn module_obj_row(m int, build_off int, build_len int, row_k int,
             si3 += 1
         }
         if (opath != 0) {
-            on = gen.append_str(opath, on, ".o")
+            on = support.append_str(opath, on, ".o")
             opath[on] = 0
         }
         if (mpath != 0) {
             let mn int = 0
-            mn = gen.append_str(mpath, mn, pool_str(build_off))
-            mn = gen.append_str(mpath, mn, "/obj/")
-            mn = gen.append_str(mpath, mn, pool_str(tag_off))
-            mn = gen.append_byte(mpath, mn, '/')
+            mn = support.append_str(mpath, mn, pool_str(build_off))
+            mn = support.append_str(mpath, mn, "/obj/")
+            mn = support.append_str(mpath, mn, pool_str(tag_off))
+            mn = support.append_byte(mpath, mn, '/')
             let si4 int = 0
             for si4 < sn {
                 mpath[mn] = stem[si4]
                 mn += 1
                 si4 += 1
             }
-            mn = gen.append_str(mpath, mn, ".manifest")
+            mn = support.append_str(mpath, mn, ".manifest")
             mpath[mn] = 0
         }
     }
@@ -479,10 +480,10 @@ pub fn module_iface_plain_path(m int, build_off int, build_len int,
         return -1
     }
     let n int = 0
-    n = gen.append_str(out, n, pool_str(c_off))
-    n = gen.append_byte(out, n, '/')
-    n = gen.append_str(out, n, pool_str(tag_off))
-    n = gen.append_str(out, n, ".s.i")
+    n = support.append_str(out, n, pool_str(c_off))
+    n = support.append_byte(out, n, '/')
+    n = support.append_str(out, n, pool_str(tag_off))
+    n = support.append_str(out, n, ".s.i")
     out[n] = 0
     return 0
 }
@@ -495,9 +496,9 @@ pub fn module_iface_path(m int, build_off int, build_len int,
         return -1
     }
     let n int = 0
-    n = gen.append_str(out, n, gen.arr_cstr(plain))
+    n = support.append_str(out, n, support.arr_cstr(plain))
     if (suffix != 0) {
-        n = gen.append_str(out, n, suffix)
+        n = support.append_str(out, n, suffix)
     }
     out[n] = 0
     return 0
@@ -512,10 +513,10 @@ pub fn module_ctiface_plain_path(m int, build_off int, build_len int,
     let tag_off int = c_off
     if (canon(build_off, build_len, "iface", &c_off, &c_len) != 0) { return -1 }
     let n int = 0
-    n = gen.append_str(out, n, pool_str(c_off))
-    n = gen.append_byte(out, n, '/')
-    n = gen.append_str(out, n, pool_str(tag_off))
-    n = gen.append_str(out, n, ".s.ct")
+    n = support.append_str(out, n, pool_str(c_off))
+    n = support.append_byte(out, n, '/')
+    n = support.append_str(out, n, pool_str(tag_off))
+    n = support.append_str(out, n, ".s.ct")
     out[n] = 0
     return 0
 }
@@ -528,19 +529,19 @@ pub fn module_ctiface_path(m int, build_off int, build_len int,
         return -1
     }
     let n int = 0
-    n = gen.append_str(out, n, gen.arr_cstr(plain))
+    n = support.append_str(out, n, support.arr_cstr(plain))
     if (suffix != 0) {
-        n = gen.append_str(out, n, suffix)
+        n = support.append_str(out, n, suffix)
     }
     out[n] = 0
     return 0
 }
 
 // open_out：以宿主平台正确的旗标打开输出文件（覆盖写；交叉目标不影响
-// 宿主文件操作，见 gen.tg_host_darwin）。
+// 宿主文件操作，见 support.tg_host_darwin）。
 pub fn open_out(path *char) int {
     let flg int = 0x241
-    if (gen.tg_host_darwin() != 0) {
+    if (support.tg_host_darwin() != 0) {
         flg = 0x601
     }
     return open(path, flg, 0x1a4)
@@ -565,19 +566,19 @@ pub fn hash_hex(h u64, out *u8) int {
 // 原先在 build/project_link.yh：它是纯目标映射，链接输入筛选与工程链接都要用，
 // B2-2 起落在 proj 以避免 `link` 反向依赖 build。
 pub fn target_code_current() int {
-    if (cfg().target.os == gen.TARGET_OS_LINUX) {
-        if (cfg().target.arch == gen.TARGET_ARCH_ARM64) { return 1 }
-        if (cfg().target.arch == gen.TARGET_ARCH_X64) { return 2 }
+    if (cfg().target.os == support.TARGET_OS_LINUX) {
+        if (cfg().target.arch == support.TARGET_ARCH_ARM64) { return 1 }
+        if (cfg().target.arch == support.TARGET_ARCH_X64) { return 2 }
     }
-    if (cfg().target.os == gen.TARGET_OS_DARWIN) {
-        if (cfg().target.arch == gen.TARGET_ARCH_ARM64) { return 3 }
-        if (cfg().target.arch == gen.TARGET_ARCH_X64) { return 4 }
+    if (cfg().target.os == support.TARGET_OS_DARWIN) {
+        if (cfg().target.arch == support.TARGET_ARCH_ARM64) { return 3 }
+        if (cfg().target.arch == support.TARGET_ARCH_X64) { return 4 }
     }
     // W1-6：Windows 目标组（0.0.12 起）。编码 5/6 与清单节名
     // [link-windows-x64] / [link-windows-arm64] 一一对应。
-    if (cfg().target.os == gen.TARGET_OS_WINDOWS) {
-        if (cfg().target.arch == gen.TARGET_ARCH_X64) { return 5 }
-        if (cfg().target.arch == gen.TARGET_ARCH_ARM64) { return 6 }
+    if (cfg().target.os == support.TARGET_OS_WINDOWS) {
+        if (cfg().target.arch == support.TARGET_ARCH_X64) { return 5 }
+        if (cfg().target.arch == support.TARGET_ARCH_ARM64) { return 6 }
     }
     return -1
 }

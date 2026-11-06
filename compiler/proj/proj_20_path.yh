@@ -1,4 +1,5 @@
 module proj
+import support
 import gen
 
 // ============================================================================
@@ -16,7 +17,7 @@ import gen
 
 // pool_str：把名字池偏移转换成 C 字符串指针（池字节保证 NUL 结尾）。
 pub fn pool_str(off int) *char {
-    return (gen.task().np_data + off).to_type(*char)
+    return (support.pool_ctx().data + off).to_type(*char)
 }
 
 // env_fetch：在 OS 传入的 envp 中精确匹配 name= 前缀，并把值 intern 到
@@ -43,7 +44,7 @@ pub fn env_fetch(name *char, off *int, olen *int) int {
             for value[value_len] != 0 {
                 value_len += 1
             }
-            let value_off int = gen.tml_intern_str(value.to_type(*u8), 0, value_len)
+            let value_off int = support.tml_intern_str(value.to_type(*u8), 0, value_len)
             if (value_off < 0) {
                 return -1
             }
@@ -55,7 +56,7 @@ pub fn env_fetch(name *char, off *int, olen *int) int {
     }
     let empty [1]u8
     empty[0] = 0
-    let empty_off int = gen.tml_intern_str(empty, 0, 0)
+    let empty_off int = support.tml_intern_str(empty, 0, 0)
     if (empty_off < 0) {
         return -1
     }
@@ -89,7 +90,7 @@ fn dep_opt_enabled() int {
     let off int = -1
     let olen int = 0
     if (env_fetch("YH_DEP_OPT", &off, &olen) != 0 || olen == 0) { return 1 }
-    let first char = gen.np_cstr(off)[0]
+    let first char = support.np_cstr(off)[0]
     if (first == '0' || first == 'n' || first == 'N'
         || first == 'f' || first == 'F') {
         return 0
@@ -118,7 +119,7 @@ pub fn is_root_project(off int, plen int) int {
     if (g_proj.root_len != plen) { return 0 }
     let i int = 0
     for i < plen {
-        if (gen.task().np_data[g_proj.root_off + i] != gen.task().np_data[off + i]) { return 0 }
+        if (support.pool_ctx().data[g_proj.root_off + i] != support.pool_ctx().data[off + i]) { return 0 }
         i += 1
     }
     return 1
@@ -142,14 +143,14 @@ pub fn canon(base_off int, base_len int, rel *char,
     }
     // Windows 绝对路径是 `C:/dir`（无反斜杠前缀）：盘符前缀同样不拼 base，
     // 否则单文件测试的 `source = "C:/..."` 会被拼到临时项目根后面。
-    if (use_rel_only == 0 && gen.tg_host_windows() != 0 && rel[1] == ':'
+    if (use_rel_only == 0 && support.tg_host_windows() != 0 && rel[1] == ':'
         && ((rel[0] >= 'a' && rel[0] <= 'z') || (rel[0] >= 'A' && rel[0] <= 'Z'))) {
         use_rel_only = 1
     }
     if (use_rel_only == 0) {
         let i int = 0
         for i < base_len {
-            raw[rn] = gen.task().np_data[base_off + i]
+            raw[rn] = support.pool_ctx().data[base_off + i]
             rn += 1
             i += 1
         }
@@ -164,7 +165,7 @@ pub fn canon(base_off int, base_len int, rel *char,
         rn += 1
         j += 1
         if (rn >= 1023) {
-            return gen.fail("路径过长")
+            return support.fail("路径过长")
         }
     }
     raw[rn] = 0
@@ -197,7 +198,7 @@ pub fn canon(base_off int, base_len int, rel *char,
             }
         }
         if (sn >= 128 || sl > 255) {
-            return gen.fail("路径过长")
+            return support.fail("路径过长")
         }
         let k int = 0
         for k < sl {
@@ -217,7 +218,7 @@ pub fn canon(base_off int, base_len int, rel *char,
             tn = 1
         } else {
             tmp[0] = '.'
-            let o int = gen.tml_intern_str(tmp, 0, 1)
+            let o int = support.tml_intern_str(tmp, 0, 1)
             if (o < 0) {
                 return -1
             }
@@ -245,7 +246,7 @@ pub fn canon(base_off int, base_len int, rel *char,
         si += 1
     }
     tmp[tn] = 0
-    out_off[0] = gen.tml_intern_str(tmp, 0, tn)
+    out_off[0] = support.tml_intern_str(tmp, 0, tn)
     out_len[0] = tn
     if (out_off[0] < 0) {
         return -1
@@ -257,14 +258,14 @@ pub fn canon(base_off int, base_len int, rel *char,
 pub fn diag(root_off int, line int, msg *char) int {
     let buf [1024]u8
     let n int = 0
-    n = gen.append_str(buf, n, pool_str(root_off))
-    n = gen.append_str(buf, n, "/project.toml:")
-    n = gen.append_int(buf, n, line)
-    n = gen.append_str(buf, n, ": 错误: ")
-    n = gen.append_str(buf, n, msg)
-    n = gen.append_byte(buf, n, '\n')
-    gen.write_all(2, buf, n)
-    gen.task().c_errors += 1
+    n = support.append_str(buf, n, pool_str(root_off))
+    n = support.append_str(buf, n, "/project.toml:")
+    n = support.append_int(buf, n, line)
+    n = support.append_str(buf, n, ": 错误: ")
+    n = support.append_str(buf, n, msg)
+    n = support.append_byte(buf, n, '\n')
+    support.write_all(2, buf, n)
+    support.diag().errors += 1
     return -1
 }
 
@@ -297,7 +298,7 @@ pub fn file_rel_path(fi int, out *u8, capacity int) int {
             let same int = 1
             let i int = 0
             for i < root_len {
-                if (tk.np_data[file.path_off + i] != tk.np_data[root_off + i]) {
+                if (support.pool_ctx().data[file.path_off + i] != support.pool_ctx().data[root_off + i]) {
                     same = 0
                     break
                 }
@@ -305,10 +306,10 @@ pub fn file_rel_path(fi int, out *u8, capacity int) int {
             }
             if (same != 0) {
                 let root_slash int = (root_len > 0
-                    && tk.np_data[root_off + root_len - 1] == '/') ? 1 : 0
+                    && support.pool_ctx().data[root_off + root_len - 1] == '/') ? 1 : 0
                 if (file.path_len == root_len || root_slash != 0) {
                     start = root_len
-                } else if (tk.np_data[file.path_off + root_len] == '/') {
+                } else if (support.pool_ctx().data[file.path_off + root_len] == '/') {
                     start = root_len + 1
                 }
             }
@@ -318,7 +319,7 @@ pub fn file_rel_path(fi int, out *u8, capacity int) int {
     let i int = start
     for i < file.path_len {
         if (n + 1 >= capacity) { return -1 }
-        out[n] = tk.np_data[file.path_off + i]
+        out[n] = support.pool_ctx().data[file.path_off + i]
         n += 1
         i += 1
     }
@@ -339,7 +340,7 @@ pub fn file_locs_path(fi int, out *u8, capacity int) int {
     if (file.path_len + 1 > capacity) { return -1 }
     let i int = 0
     for i < file.path_len {
-        out[i] = tk.np_data[file.path_off + i]
+        out[i] = support.pool_ctx().data[file.path_off + i]
         i += 1
     }
     out[file.path_len] = 0
@@ -351,7 +352,7 @@ pub fn file_locs_path(fi int, out *u8, capacity int) int {
 // 登记测试声明"，不必知道 `--filter` 的存在。依赖与标准库里的 test 声明
 // 一律返回 0：它们不会走测试体解析，登记了就会留下没有函数体的受检声明。
 pub fn test_file_selected(fi int) int {
-    if (gen.task().c_test_mode == 0 || g_proj.test_project < 0) { return 0 }
+    if (support.session().test_mode == 0 || g_proj.test_project < 0) { return 0 }
     if (fi < 0 || fi >= g_proj.file_n) { return 0 }
     let m int = g_proj.files[fi].mod
     if (m < 0 || m >= g_proj.mod_n) { return 0 }

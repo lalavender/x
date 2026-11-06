@@ -1,0 +1,240 @@
+module check
+import token
+import gen
+import support
+
+// ============================================================================
+// sem_decl.yh
+// 自 gen/sem.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
+// ============================================================================
+
+pub fn sem_fn_begin(idx int) int {
+    gen.task().c_fn_sym = idx
+    gen.task().c_fn_flags = gen.task().c_syms[idx].flags
+    gen.task().c_fn_falls = 1
+    gen.task().c_expr_noreturn = 0
+    gen.task().c_fn_ret = gen.task().t_types[gen.task().c_syms[idx].type_id].elem
+    // LL12：标签、栈槽、序言与体缓冲等机器状态由 LLVM lowering 生成，
+    // 语义层只保留类型事实与诊断状态。
+    gen.task().c_temp_off = 0
+    gen.task().c_fp_tmp_off = 0
+    gen.task().c_glabel_n = 0
+    gen.task().c_spill_n = 0
+    gen.task().c_aggparam_n = 0
+    gen.task().c_fp_argn = 0
+    gen.task().c_ret_ptr_off = 0
+    gen.task().c_ret_agg_val = 0
+    abi_c_cursor_init(&gen.task().c_cabi_cursor, support.tg_darwin())
+    gen.task().c_fp_off = 16
+    // 聚合返回：记录间接返回事实，返回缓冲地址由 lowering 处理。
+    let rk int = gen.task().t_types[gen.task().c_fn_ret].kind
+    let indirect_ret int = 1
+    if ((gen.task().c_fn_flags & gen.F_CABI) != 0) {
+        let result gen.ABIArg
+        abi_c_result(gen.task().c_fn_ret, &result)
+        indirect_ret = result.indirect
+    }
+    if (indirect_ret != 0 && (rk == gen.TY_STRUCT || rk == gen.TY_UNION
+        || rk == gen.TY_ARRAY || rk == gen.TY_SLICE)) {
+        gen.task().c_ret_agg = 1
+    } else {
+        gen.task().c_ret_agg = 0
+    }
+    gen.scope_push()
+    return 0
+}
+
+pub fn sem_declare_param(start int, n int, tid int, regidx int) int {
+    if (gen.ty_has_opaque_value(tid) != 0) {
+        return gen.sem_err("不透明 C 类型只能通过指针传递")
+    }
+    // LL12：C ABI 的寄存器/栈分类由 LLVM lowering 处理，语义层只登记参数。
+    let pk int = gen.task().t_types[tid].kind
+    let is_agg int = ((pk == gen.TY_ARRAY) || (pk == gen.TY_STRUCT) || (pk == gen.TY_UNION)
+                      || (pk == gen.TY_SLICE)).to_type(int)
+    let idx int = gen.sym_push(start, n, gen.SYM_VAR, tid, gen.F_PARAM)
+    if (idx < 0) {
+        return -1
+    }
+    if (is_agg != 0) {
+        // 聚合按值：形参持有调用方副本；独立副本与栈槽由 lowering 生成。
+        gen.task().c_syms[idx].flags |= gen.F_AGGPARAM
+        gen.task().c_aggparam_n += 1
+        return 0
+    }
+    if (gen.ty_is_float(tid) != 0) {
+        // yh 内部函数的浮点参数上限由旧 ABI 约定决定；C 函数按 lowering 的
+        // ABI 分类处理（HFA 逐成员占寄存器，不受此上限约束）。
+        if ((gen.task().c_fn_flags & gen.F_CABI) == 0) {
+            if (gen.task().c_fp_argn >= support.TG_ARG_REGS) {
+                return gen.sem_err("过多的浮点参数暂不支持")
+            }
+            gen.task().c_fp_argn += 1
+        }
+        return 0
+    }
+    return 0
+}
+
+pub fn sem_fn_end() int {
+    if (sem_glabels_verify() != 0) {
+        return -1
+    }
+    if ((gen.task().c_fn_flags & gen.F_NORETURN) != 0) {
+        if (gen.task().c_fn_ret != gen.TY_VOID) {
+            return gen.sem_err("noreturn 函数必须返回 void")
+        }
+        if (gen.task().c_fn_falls != 0) {
+            return gen.sem_err("noreturn 函数存在正常落底路径")
+        }
+    }
+    // LL12：落底返回、prologue、聚合参数入口拷贝与 epilogue 由 lowering 生成。
+    gen.scope_pop()
+    return 0
+}
+
+// sem_add_field：为 struct/union 登记一个字段（pass 1）。
+// pub struct 一等化后字段一律公开，is_pub 恒 1（.s.i 接口按此发射）。
+pub fn sem_add_field(stid int, start int, n int, ftid int) int {
+    if (gen.ty_has_opaque_value(ftid) != 0) {
+        return gen.sem_err("不透明 C 类型只能通过指针使用")
+    }
+    let fk int = gen.task().t_types[ftid].kind
+    if ((gen.ty_name_attrs(stid) & token.ATTR_EXTERN) != 0 && gen.ty_c_layout(ftid) == 0) {
+        return gen.sem_err("extern struct/union 字段不是 C 兼容布局类型")
+    }
+    if ((fk == gen.TY_STRUCT || fk == gen.TY_UNION) && gen.task().t_types[ftid].size == 0) {
+        return gen.sem_err("字段使用了不完整的类型")
+    }
+    if (gen.task().t_field_n == gen.task().t_field_cap) {
+        let ncap int = gen.task().t_field_cap * 2
+        if (ncap == 0) {
+            ncap = 64
+        }
+        let nd *gen.SField = malloc((ncap * sizeof(gen.SField)).to_type(u64)).to_type(*gen.SField)
+        if (nd == 0) {
+            return support.fail("内存分配失败")
+        }
+        if (gen.task().t_field_n > 0) {
+            memcpy(nd, gen.task().t_fields, (gen.task().t_field_n * sizeof(gen.SField)).to_type(u64))
+        }
+        free(gen.task().t_fields)
+        gen.task().t_fields = nd
+        gen.task().t_field_cap = ncap
+    }
+    let off int = support.name_intern(start, n)
+    if (off < 0) {
+        return -1
+    }
+    gen.task().t_fields[gen.task().t_field_n].name_off = off
+    gen.task().t_fields[gen.task().t_field_n].name_len = n
+    gen.task().t_fields[gen.task().t_field_n].type_id = ftid
+    gen.task().t_fields[gen.task().t_field_n].offset = 0
+    gen.task().t_fields[gen.task().t_field_n].is_pub = 1
+    gen.task().t_field_n += 1
+    gen.task().t_types[stid].len = gen.task().t_field_n - gen.task().t_types[stid].sub
+    return 0
+}
+
+
+fn sem_field_lookup(stid int, start int, n int) int {
+    let st int = gen.task().t_types[stid].sub
+    let nf int = gen.task().t_types[stid].len
+    let i int = 0
+    for i < nf {
+        let f int = st + i
+        if (gen.task().t_fields[f].name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (support.pool_ctx().data[gen.task().t_fields[f].name_off + j] != support.src_ctx().data[start + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return f
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// sem_check_main_common：校验程序入口返回 int，并接受无参数、argc/argv 或
+// argc/argv/envp 三种形态；指针参数必须是 **char。require=0 用于库文件
+// check：main 不存在时放行，但存在就必须满足同一签名规则。
+fn sem_check_main_common(require int) int {
+    let mname int = support.name_intern_lit("main")
+    let i int = gen.task().c_sym_n - 1
+    let found int = -1
+    for i >= 0 {
+        if (gen.task().c_syms[i].name_len == 4) {
+            let match int = 1
+            let j int = 0
+            for j < 4 {
+                if (support.pool_ctx().data[gen.task().c_syms[i].name_off + j] != support.pool_ctx().data[mname + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                found = i
+                break
+            }
+        }
+        i -= 1
+    }
+    if (found < 0) {
+        if (require == 0) { return 0 }
+        return gen.sem_err("缺少 main 函数")
+    }
+    if (gen.task().c_syms[found].kind != gen.SYM_FN) {
+        return gen.sem_err("main 必须是函数")
+    }
+    let sig int = gen.task().t_types[gen.task().c_syms[found].type_id].sub
+    let np int = gen.task().t_sig_np[sig]
+    let ret int = gen.task().t_sig_ret[sig]
+    if (ret != gen.TY_I32) {
+        return gen.sem_err("main 必须返回 int")
+    }
+    if (np == 0) {
+        return 0
+    }
+    if (np == 2) {
+        let p0 int = gen.task().t_sig_params[gen.task().t_sig_first[sig]]
+        let p1 int = gen.task().t_sig_params[gen.task().t_sig_first[sig] + 1]
+        let inner int = gen.task().t_types[p1].elem
+        if (p0 == gen.TY_I32 && gen.task().t_types[p1].kind == gen.TY_PTR
+            && gen.task().t_types[inner].kind == gen.TY_PTR
+            && gen.task().t_types[gen.task().t_types[inner].elem].kind == gen.TY_CHAR) {
+            return 0
+        }
+    }
+    if (np == 3) {
+        let p0 int = gen.task().t_sig_params[gen.task().t_sig_first[sig]]
+        let p1 int = gen.task().t_sig_params[gen.task().t_sig_first[sig] + 1]
+        let p2 int = gen.task().t_sig_params[gen.task().t_sig_first[sig] + 2]
+        let a1 int = gen.task().t_types[p1].elem
+        let a2 int = gen.task().t_types[p2].elem
+        if (p0 == gen.TY_I32 && gen.task().t_types[p1].kind == gen.TY_PTR
+            && gen.task().t_types[a1].kind == gen.TY_PTR && gen.task().t_types[gen.task().t_types[a1].elem].kind == gen.TY_CHAR
+            && gen.task().t_types[p2].kind == gen.TY_PTR
+            && gen.task().t_types[a2].kind == gen.TY_PTR && gen.task().t_types[gen.task().t_types[a2].elem].kind == gen.TY_CHAR) {
+            return 0
+        }
+    }
+    return gen.sem_err("main 签名必须是 ()、(argc int, argv **char) 或再带 envp **char")
+}
+
+// sem_check_main：程序编译/项目入口检查，缺少 main 即失败。
+pub fn sem_check_main() int {
+    return sem_check_main_common(1)
+}
+
+// sem_check_main_optional：单文件库 check 使用；main 可缺席，但存在时仍校验签名。
+pub fn sem_check_main_optional() int {
+    return sem_check_main_common(0)
+}

@@ -1,4 +1,7 @@
 module lower
+import token
+import check
+import support
 import ast
 import gen
 import ir
@@ -41,15 +44,15 @@ fn checked_lower_report(l *CheckedLower, message *char) void {
             }
         }
     }
-    n = gen.append_str_limit(buffer, n, 1400, path)
-    n = gen.append_byte(buffer, n, ':'); n = gen.append_int(buffer, n, line)
-    n = gen.append_byte(buffer, n, ':'); n = gen.append_int(buffer, n, col)
-    n = gen.append_str(buffer, n, ": LLVM lowering ")
-    n = gen.append_str_limit(buffer, n, 1700, name)
-    n = gen.append_str(buffer, n, ": ")
-    n = gen.append_str_limit(buffer, n, 2046, message)
-    n = gen.append_byte(buffer, n, '\n')
-    gen.write_all(2, buffer, n)
+    n = support.append_str_limit(buffer, n, 1400, path)
+    n = support.append_byte(buffer, n, ':'); n = support.append_int(buffer, n, line)
+    n = support.append_byte(buffer, n, ':'); n = support.append_int(buffer, n, col)
+    n = support.append_str(buffer, n, ": LLVM lowering ")
+    n = support.append_str_limit(buffer, n, 1700, name)
+    n = support.append_str(buffer, n, ": ")
+    n = support.append_str_limit(buffer, n, 2046, message)
+    n = support.append_byte(buffer, n, '\n')
+    support.write_all(2, buffer, n)
 }
 
 // checked_lower_runtime_name：隔离 yh 分配器符号，避免覆盖内嵌 LLVM 的 libc 分配器。
@@ -67,10 +70,10 @@ fn checked_lower_runtime_name(flags int, length *int) *char {
 // checked_lower_name：构造自有逻辑名；模块内部加现行后缀，extern/C/入口 main 保持原名。
 // 导入函数名已在受检表达式中限定，F_EXTERN 保证不会重复附加当前模块后缀。
 fn checked_lower_name(l *CheckedLower, off int, length int, flags int, source_type int) *char {
-    if (ast.checked_name_valid(l.store, off, length) == 0 || length <= 0) { return 0 }
+    if (check.checked_name_valid(l.store, off, length) == 0 || length <= 0) { return 0 }
     let suffix int = l.store.suffix_len
     let source_name *char = (l.store.names + off).to_type(*char)
-    let entry_main int = gen.cstr_eq(source_name, "main") != 0 &&
+    let entry_main int = support.cstr_eq(source_name, "main") != 0 &&
         (l.store.is_entry != 0 || l.store.suffix_len == 0)
     if ((flags & (gen.F_EXTERN | gen.F_CABI | gen.F_INTRINSIC | gen.F_LINUX_SYSCALL)) != 0
         || entry_main != 0) { suffix = 0 }
@@ -80,11 +83,11 @@ fn checked_lower_name(l *CheckedLower, off int, length int, flags int, source_ty
     let name_len int = runtime_name != 0 ? runtime_name_len : length
     let source_sig int = source_type >= 0 && source_type < l.store.type_n &&
         l.store.types[source_type].kind == gen.TY_FN ? l.store.types[source_type].sub : -1
-    let versioned int = source_sig >= 0 && l.store.sig_abi[source_sig] == gen.ABI_YH &&
+    let versioned int = source_sig >= 0 && l.store.sig_abi[source_sig] == support.ABI_YH &&
         ((flags & gen.F_EXTERN) == 0 || (flags & gen.F_MODULE_IMPORT) != 0) &&
         (flags & (gen.F_CABI | gen.F_INTRINSIC | gen.F_LINUX_SYSCALL)) == 0 &&
         entry_main == 0 ? 1 : 0
-    if (suffix > 0 && ast.checked_name_valid(l.store, l.store.suffix_off, suffix) == 0) { return 0 }
+    if (suffix > 0 && check.checked_name_valid(l.store, l.store.suffix_off, suffix) == 0) { return 0 }
     let version *char = versioned != 0 ? "$yhllvmv1" : ""
     let version_len int = versioned != 0 ? 9 : 0
     let result *char = malloc((name_len + suffix + version_len + 1).to_type(u64)).to_type(*char)
@@ -108,7 +111,7 @@ fn checked_lower_signature(l *CheckedLower, off int, length int, flags int,
         | gen.F_RUNTIME_MALLOC | gen.F_RUNTIME_FREE | gen.F_RUNTIME_PRINTF)
     let syscall int = flags & gen.F_LINUX_SYSCALL
     if (vararg == 1 && (flags & (gen.F_EXTERN | gen.F_INTRINSIC)) == 0
-        || vararg == 2 && l.store.sig_abi[sig] != gen.ABI_YH
+        || vararg == 2 && l.store.sig_abi[sig] != support.ABI_YH
         || (flags & gen.F_INTRINSIC) != 0 && runtime == 0 && syscall == 0) {
         return -2
     }
@@ -135,7 +138,7 @@ fn checked_lower_signature(l *CheckedLower, off int, length int, flags int,
     let symbol ir.IRModuleSymbol
     symbol.kind = ir.IR_MODULE_SYMBOL_FUNCTION
     symbol.type_id = ret
-    symbol.abi = l.store.sig_abi[sig] == gen.ABI_YH ?
+    symbol.abi = l.store.sig_abi[sig] == support.ABI_YH ?
         ir.IR_ABI_YH_LLVM_V1 : l.store.sig_abi[sig]
     symbol.variadic = l.store.sig_vararg[sig]
     symbol.no_return = ((flags & gen.F_NORETURN) != 0).to_type(int)
@@ -204,7 +207,7 @@ fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
             let loc_path [1024]u8
             if (proj.file_locs_path(i, &loc_path[0], 1024) < 0) { return -1 }
             l.source_map[i] = ir.ir_module_add_source(l.output,
-                gen.arr_cstr(&loc_path[0]), file.source, file.source_len)
+                support.arr_cstr(&loc_path[0]), file.source, file.source_len)
             if (l.source_map[i] < 0) { return -1 }
         }
         i += 1
@@ -213,7 +216,7 @@ fn checked_lower_tables(l *CheckedLower, types *ir.IRType) int {
 }
 
 // checked_lower_is_aggregate：源类型是否为聚合（数组/结构体/联合体/切片）。
-fn checked_lower_is_aggregate(store *ast.CheckedStorage, source_type int) int {
+fn checked_lower_is_aggregate(store *check.CheckedStorage, source_type int) int {
     if (source_type < 0 || source_type >= store.type_n) { return 0 }
     let kind int = store.types[source_type].kind
     return (kind == gen.TY_ARRAY || kind == gen.TY_STRUCT || kind == gen.TY_UNION
@@ -231,11 +234,11 @@ fn checked_lower_function_type(l *CheckedLower, source_type int) int {
     if (result_type < 0) { return result_type }
     let fixed_count int = l.store.sig_np[sig]
     let vararg int = l.store.sig_vararg[sig]
-    if (vararg == 1 || vararg == 2 && l.store.sig_abi[sig] != gen.ABI_YH) { return -2 }
+    if (vararg == 1 || vararg == 2 && l.store.sig_abi[sig] != support.ABI_YH) { return -2 }
     let count int = fixed_count + (vararg == 2 ? 1 : 0)
     let fields *ir.IRModuleField = 0
     if (count > 0) {
-        fields = ast.checked_zero_rows(count, sizeof(ir.IRModuleField)).to_type(*ir.IRModuleField)
+        fields = check.checked_zero_rows(count, sizeof(ir.IRModuleField)).to_type(*ir.IRModuleField)
         if (fields == 0) { return -1 }
     }
     let i int = 0
@@ -251,7 +254,7 @@ fn checked_lower_function_type(l *CheckedLower, source_type int) int {
     layout.size = l.output.target.pointer_bits / 8
     layout.align = layout.size
     layout.elem = result_type
-    layout.abi = l.store.sig_abi[sig] == gen.ABI_YH ?
+    layout.abi = l.store.sig_abi[sig] == support.ABI_YH ?
         ir.IR_ABI_YH_LLVM_V1 : l.store.sig_abi[sig]
     layout.variadic = l.store.sig_vararg[sig]
     let added int = ir.ir_module_add_type(l.output, "", &layout, fields, count)
@@ -274,13 +277,13 @@ fn checked_lower_module_type(l *CheckedLower, source_type int) int {
 // checked_lower_mark_taken：扫描本函数表达式范围，标记 `&变量` 的绑定。
 // 只认 `&primary(变量)`；其他取址形态不标记，由表达式 lowering 带来源拒绝。
 fn checked_lower_mark_taken(l *CheckedLower) void {
-    let ctx *ast.CheckedFunction = &l.function
+    let ctx *check.CheckedFunction = &l.function
     // owner_decl 是文件内声明号；decl_row 是快照展平后的全局行号，不能混用。
     let owner_decl int = l.store.declarations[ctx.decl_row].decl_index
     let i int = ctx.expr_first
     for i < ctx.expr_after && i < l.store.expression_n {
         let node ast.AstExpr = l.store.expressions[i]
-        if (node.kind == ast.AST_EXPR_UNARY && node.op == gen.TK_AMP && node.child0 >= 0) {
+        if (node.kind == ast.AST_EXPR_UNARY && node.op == token.TK_AMP && node.child0 >= 0) {
             let child ast.AstExpr = l.store.expressions[node.child0]
             if (child.kind == ast.AST_EXPR_PRIMARY && child.child0 < 0
                 && child.sym_kind == gen.SYM_VAR) {
@@ -301,7 +304,7 @@ fn checked_lower_mark_taken(l *CheckedLower) void {
 
 // checked_lower_function：以快照绑定初始化纯 builder，产物经模块增建接口深拷贝后释放临时表。
 fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
-    let ctx *ast.CheckedFunction = &l.function
+    let ctx *check.CheckedFunction = &l.function
     let decl ast.AstDecl = l.store.declarations[ctx.decl_row]
     let sig int = l.store.types[decl.type_id].sub
     let count int = ctx.binding_after - ctx.binding_first
@@ -312,7 +315,7 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     let aggregate_return int = checked_lower_is_aggregate(l.store, return_type)
     let ret int = aggregate_return != 0 ? ir.IR_TY_VOID : checked_lower_kind(l.store, return_type)
     if (ret < 0 || count < params || vararg == 1
-        || vararg == 2 && l.store.sig_abi[sig] != gen.ABI_YH) { return -2 }
+        || vararg == 2 && l.store.sig_abi[sig] != support.ABI_YH) { return -2 }
     l.return_buffer = -1
     l.function_binding_first = ctx.binding_first
     l.function_binding_count = count
@@ -483,7 +486,7 @@ fn checked_lower_function(l *CheckedLower, symbol int, types *ir.IRType) int {
     if (status == 1 && (ret != ir.IR_TY_VOID || aggregate_return != 0)) { ast_ir_b_release(b); return -2 }
     if (status == 1 && ast_ir_b_term_ret(b, -1) != 0) { ast_ir_b_release(b); return -1 }
     let body ir.IRFunction
-    body.abi = l.store.sig_abi[sig] == gen.ABI_YH ?
+    body.abi = l.store.sig_abi[sig] == support.ABI_YH ?
         ir.IR_ABI_YH_LLVM_V1 : l.store.sig_abi[sig]; body.target_id = l.output.target.key
     body.ret_type = ret; body.types = types; body.type_count = ir.IR_TY_LAST + 1
     body.insts = b.insts; body.inst_count = b.inst_count
@@ -516,7 +519,7 @@ fn checked_lower_prepare_tables(l *CheckedLower, types *ir.IRType) int {
     let declaration int = 0
     for declaration < l.store.declaration_n {
         let node ast.AstDecl = l.store.declarations[declaration]
-        if (node.kind == gen.TK_LET || node.kind == gen.TK_CONST) {
+        if (node.kind == token.TK_LET || node.kind == token.TK_CONST) {
             result = checked_lower_global_decl(l, declaration)
             if (result != 0) { return result }
         }
@@ -572,7 +575,7 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
         if ((symbol.flags & gen.F_COMPTIME) == 0) {
             // PL1b：符号名构造 + 线性符号查找。这里的查找是 O(函数数)，
             // 单模块放很多函数时会变成 O(n²)——PL2 的超线性就有它一份。
-            let t_lookup u64 = gen.clock_ns()
+            let t_lookup u64 = support.clock_ns()
             let name *char = checked_lower_name(l, symbol.name_off, symbol.name_len,
                 symbol.flags, node.type_id)
             if (name == 0) {
@@ -582,7 +585,7 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
             let found int = -1
             let j int = 0
             for j < l.output.symbol_count {
-                if (gen.cstr_eq(l.output.symbols[j].name, name) != 0) {
+                if (support.cstr_eq(l.output.symbols[j].name, name) != 0) {
                     found = j; break
                 }
                 j += 1
@@ -593,11 +596,11 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
                 return -1
             }
             if (timing != 0) {
-                timing.lookup_ns += lower_elapsed(t_lookup, gen.clock_ns())
+                timing.lookup_ns += lower_elapsed(t_lookup, support.clock_ns())
             }
             // LA3：函数键只覆盖本函数 token 流与模块环境；命中时合并迷你模块，
             // 未命中才重新 lowering。cache 禁用时行为与 LA2b 完全相同。
-            let t_cache u64 = gen.clock_ns()
+            let t_cache u64 = support.clock_ns()
             let key [ir.IR_FUNCTION_CACHE_KEY_SIZE]u8
             let cacheable int = 0
             if (l.cache_enabled != 0
@@ -606,7 +609,7 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
             }
             if (cacheable != 0) {
                 let entry *ir.IRFunctionCacheEntry = ir.ir_function_cache_set_find(
-                    l.cache_in, gen.arr_cstr(&key[0]))
+                    l.cache_in, support.arr_cstr(&key[0]))
                 let data *u8 = 0
                 let size int = 0
                 let owned int = 0
@@ -616,7 +619,7 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
                 } else {
                     // 本地索引/记录缺失时查全局 content store；IR 键同时是
                     // ActionID，命中后仍走同一套 merge 校验。
-                    if (cache.store_lookup(cache.store_task(), gen.arr_cstr(&key[0]),
+                    if (cache.store_lookup(cache.store_task(), support.arr_cstr(&key[0]),
                             cache.OUTPUT_IR, &data, &size) == 1) {
                         owned = 1
                     }
@@ -628,12 +631,12 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
                         l.cache_hits += 1
                         if (owned != 0) { free(data.to_type(*void)) }
                         if (ir.ir_function_cache_set_add(l.cache_out,
-                                gen.arr_cstr(&key[0]), 0, 0) != 0) {
+                                support.arr_cstr(&key[0]), 0, 0) != 0) {
                             free(name.to_type(*void))
                             return -1
                         }
                         if (timing != 0) {
-                            timing.cache_ns += lower_elapsed(t_cache, gen.clock_ns())
+                            timing.cache_ns += lower_elapsed(t_cache, support.clock_ns())
                         }
                         free(name.to_type(*void))
                         i += 1
@@ -648,12 +651,12 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
                 l.cache_misses += 1
             }
             if (timing != 0) {
-                timing.cache_ns += lower_elapsed(t_cache, gen.clock_ns())
+                timing.cache_ns += lower_elapsed(t_cache, support.clock_ns())
             }
-            let t_fn u64 = gen.clock_ns()
+            let t_fn u64 = support.clock_ns()
             let result int = checked_lower_function(l, found, types)
             if (timing != 0) {
-                timing.fn_ns += lower_elapsed(t_fn, gen.clock_ns())
+                timing.fn_ns += lower_elapsed(t_fn, support.clock_ns())
             }
             if (result != 0) {
                 free(name.to_type(*void))
@@ -662,14 +665,14 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
             l.cache_lowered += 1
             if (cacheable != 0 && l.cache_out != 0) {
                 // 未命中后把本函数 IR 序列化进缓存（PC2 v3）：写缓存构建的大头。
-                let t_capture u64 = gen.clock_ns()
+                let t_capture u64 = support.clock_ns()
                 let data *u8 = 0
                 let size int = 0
                 let captured int = ir.ir_function_cache_capture(l.output,
                     l.output.function_count - 1, l.cache_env, &data, &size)
                 if (captured == 0) {
                     if (ir.ir_function_cache_set_add(l.cache_out,
-                            gen.arr_cstr(&key[0]), data, size) != 0) {
+                            support.arr_cstr(&key[0]), data, size) != 0) {
                         free(data.to_type(*void))
                         free(name.to_type(*void))
                         return -1
@@ -679,7 +682,7 @@ fn checked_lower_build_functions(l *CheckedLower, types *ir.IRType,
                     return -1
                 }
                 if (timing != 0) {
-                    timing.capture_ns += lower_elapsed(t_capture, gen.clock_ns())
+                    timing.capture_ns += lower_elapsed(t_capture, support.clock_ns())
                 }
             }
             free(name.to_type(*void))
@@ -712,7 +715,7 @@ fn checked_lower_release(l *CheckedLower) void {
 
 // lower_module：无缓存入口，行为与 LA2b 完全相同；项目 worker 使用
 // lower_module_cached 接入函数级 IR 复用。
-pub fn lower_module(unit *ast.CheckedModule, out *ir.IRModule) int {
+pub fn lower_module(unit *check.CheckedModule, out *ir.IRModule) int {
     return lower_module_impl(unit, out, 0, 0, 0, 0)
 }
 
@@ -720,7 +723,7 @@ pub fn lower_module(unit *ast.CheckedModule, out *ir.IRModule) int {
 // cache_in/cache_out 由 cmd 装载与提交；env_key 由模块接口/目标/编译器环境算出。
 // stats 非空时写回 hits/misses/lowered，供 worker 汇总到 --stats。
 // 0 成功，1 首片不支持并带来源诊断，-1 内部错误；失败释放候选且保持零初始化 out 不变。
-pub fn lower_module_cached(unit *ast.CheckedModule, out *ir.IRModule,
+pub fn lower_module_cached(unit *check.CheckedModule, out *ir.IRModule,
     cache_in *ir.IRFunctionCacheSet, cache_out *ir.IRFunctionCacheSet,
     env_key u64, stats *CheckedLowerStats) int {
     if (stats != 0) {
@@ -740,7 +743,7 @@ fn lower_elapsed(start u64, end u64) u64 {
 }
 
 // lower_module_impl：prepare → declare → build（可查/写函数缓存）→ 模块 verifier。
-fn lower_module_impl(unit *ast.CheckedModule, out *ir.IRModule,
+fn lower_module_impl(unit *check.CheckedModule, out *ir.IRModule,
     cache_in *ir.IRFunctionCacheSet, cache_out *ir.IRFunctionCacheSet,
     env_key u64, stats *CheckedLowerStats) int {
     if (out == 0 || unit == 0 || unit.storage == 0) { return -1 }
@@ -754,7 +757,7 @@ fn lower_module_impl(unit *ast.CheckedModule, out *ir.IRModule,
     target.little_endian = unit.target.little_endian; target.layout_version = unit.target.layout_version
     if (ir.ir_module_init(&candidate, &target) != 0) { return -1 }
     let l CheckedLower
-    l.store = unit.storage.to_type(*ast.CheckedStorage); l.output = &candidate
+    l.store = unit.storage.to_type(*check.CheckedStorage); l.output = &candidate
     l.function.decl_row = -1; l.function.file_id = -1
     l.last_token = 0; l.reason = "首片不支持此语句或表达式"
     l.function_binding_first = 0; l.function_binding_count = 0
@@ -777,15 +780,15 @@ fn lower_module_impl(unit *ast.CheckedModule, out *ir.IRModule,
     flow.loop_depth = 0
     l.flow = &flow
     flow.loops = malloc((CHECKED_LOOP_MAX * sizeof(CheckedLoop)).to_type(u64)).to_type(*CheckedLoop)
-    l.source_map = ast.checked_zero_rows(l.store.file_n, sizeof(int)).to_type(*int)
-    l.source_type_map = ast.checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int)
-    l.function_type_map = ast.checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int)
-    l.global_map = ast.checked_zero_rows(l.store.symbol_n, sizeof(int)).to_type(*int)
-    l.string_map = ast.checked_zero_rows(l.store.string_n, sizeof(int)).to_type(*int)
-    l.static_map = ast.checked_zero_rows(l.store.static_data_n, sizeof(int)).to_type(*int)
-    l.taken = ast.checked_zero_rows(l.store.binding_n, 1).to_type(*u8)
-    l.storage = ast.checked_zero_rows(l.store.binding_n, sizeof(int)).to_type(*int)
-    l.slice_storage = ast.checked_zero_rows(l.store.expression_n, sizeof(int)).to_type(*int)
+    l.source_map = check.checked_zero_rows(l.store.file_n, sizeof(int)).to_type(*int)
+    l.source_type_map = check.checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int)
+    l.function_type_map = check.checked_zero_rows(l.store.type_n, sizeof(int)).to_type(*int)
+    l.global_map = check.checked_zero_rows(l.store.symbol_n, sizeof(int)).to_type(*int)
+    l.string_map = check.checked_zero_rows(l.store.string_n, sizeof(int)).to_type(*int)
+    l.static_map = check.checked_zero_rows(l.store.static_data_n, sizeof(int)).to_type(*int)
+    l.taken = check.checked_zero_rows(l.store.binding_n, 1).to_type(*u8)
+    l.storage = check.checked_zero_rows(l.store.binding_n, sizeof(int)).to_type(*int)
+    l.slice_storage = check.checked_zero_rows(l.store.expression_n, sizeof(int)).to_type(*int)
     l.labels = 0; l.label_count = 0; l.label_cap = 0; l.has_goto = 0
     let tables_ok int = 1
     if (l.store.type_n > 0 && (l.source_type_map == 0 || l.function_type_map == 0)) { tables_ok = 0 }
@@ -802,22 +805,22 @@ fn lower_module_impl(unit *ast.CheckedModule, out *ir.IRModule,
     if (l.source_map != 0 && l.source_type_map != 0 && flow.loops != 0
         && tables_ok != 0) {
         // PL1：四段互斥计时；时钟失败（0）时 lower_elapsed 给 0，不会出负数。
-        let t0 u64 = gen.clock_ns()
+        let t0 u64 = support.clock_ns()
         result = checked_lower_prepare_tables(&l, &types[0])
-        let t1 u64 = gen.clock_ns()
+        let t1 u64 = support.clock_ns()
         if (result == 0) { result = checked_lower_declare_functions(&l) }
-        let t2 u64 = gen.clock_ns()
+        let t2 u64 = support.clock_ns()
         let timing LowerTiming
         timing.lookup_ns = 0; timing.cache_ns = 0; timing.fn_ns = 0
         timing.capture_ns = 0
         if (result == 0) {
             result = checked_lower_build_functions(&l, &types[0], &timing)
         }
-        let t3 u64 = gen.clock_ns()
+        let t3 u64 = support.clock_ns()
         if (result == 0 && ir.ir_module_verify(&candidate) != 0) {
             result = -1; l.reason = "内部错误：模块校验失败"
         }
-        let t4 u64 = gen.clock_ns()
+        let t4 u64 = support.clock_ns()
         if (stats != 0) {
             stats.prep_ns += lower_elapsed(t0, t1)
             stats.decl_ns += lower_elapsed(t1, t2)

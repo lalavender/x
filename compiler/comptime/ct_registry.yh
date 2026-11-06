@@ -1,4 +1,6 @@
 module comptime
+import token
+import support
 import gen
 import proj
 
@@ -48,7 +50,7 @@ pub fn ct_reset() void {
     ct_eval_depth = 0
     ct_control_depth = 0
     ct_for_boundary_depth = 0
-    tk.c_ct_expand_depth = 0
+    support.diag().ct_depth = 0
 }
 
 // ct_enter_control：进入一层编译期结构控制，并限制嵌套深度为 32。
@@ -73,9 +75,9 @@ pub fn ct_for_boundary_enter(loop_depth int) int {
         return gen.sem_err("编译期 for 嵌套超过 32 层")
     }
     ct_for_boundary_bases[ct_for_boundary_depth] = loop_depth
-    ct_for_trace_bases[ct_for_boundary_depth] = tk.c_ct_expand_depth
+    ct_for_trace_bases[ct_for_boundary_depth] = support.diag().ct_depth
     ct_for_boundary_depth += 1
-    tk.c_ct_expand_values[ct_for_boundary_depth - 1] = 0
+    support.diag().ct_values[ct_for_boundary_depth - 1] = 0
     return 0
 }
 
@@ -83,10 +85,10 @@ pub fn ct_for_boundary_enter(loop_depth int) int {
 pub fn ct_for_boundary_value(value i64) int {
     let tk *gen.TaskCtx = gen.task()
     if (ct_for_boundary_depth <= 0 || ct_for_boundary_depth > 32) {
-        return gen.fail("内部错误：编译期 for 展开值没有对应边界")
+        return support.fail("内部错误：编译期 for 展开值没有对应边界")
     }
-    tk.c_ct_expand_values[ct_for_boundary_depth - 1] = value.to_type(int)
-    tk.c_ct_expand_depth = ct_for_boundary_depth
+    support.diag().ct_values[ct_for_boundary_depth - 1] = value.to_type(int)
+    support.diag().ct_depth = ct_for_boundary_depth
     return 0
 }
 
@@ -94,7 +96,7 @@ pub fn ct_for_boundary_value(value i64) int {
 pub fn ct_for_boundary_leave() void {
     let tk *gen.TaskCtx = gen.task()
     if (ct_for_boundary_depth > 0) {
-        tk.c_ct_expand_depth = ct_for_trace_bases[ct_for_boundary_depth - 1]
+        support.diag().ct_depth = ct_for_trace_bases[ct_for_boundary_depth - 1]
         ct_for_boundary_depth -= 1
     }
 }
@@ -103,7 +105,7 @@ pub fn ct_for_boundary_leave() void {
 pub fn ct_validate_loop_exit(loop_depth int, kind int) int {
     if (ct_for_boundary_depth == 0
         || loop_depth > ct_for_boundary_bases[ct_for_boundary_depth - 1]) { return 0 }
-    if (kind == gen.TK_BREAK) {
+    if (kind == token.TK_BREAK) {
         return gen.sem_err("编译期 $for 不能跨出展开边界执行 break")
     }
     return gen.sem_err("编译期 $for 不能跨出展开边界执行 continue")
@@ -131,7 +133,7 @@ pub fn ct_charge_expansion_ast_node() int {
 
 // ct_charge_expansion_ast_nodes：按已捕获模板的逻辑实例数批量计入 AST 预算。
 pub fn ct_charge_expansion_ast_nodes(count int) int {
-    if (count < 0) { return gen.fail("内部错误：编译期 AST 模板节点数无效") }
+    if (count < 0) { return support.fail("内部错误：编译期 AST 模板节点数无效") }
     if (count > 100000 - ct_expansion_size) {
         return gen.sem_err("编译期 for 展开 AST 节点超过 100000")
     }
@@ -142,7 +144,7 @@ pub fn ct_charge_expansion_ast_nodes(count int) int {
 // ct_charge_expansion：限制展开轮数；无 AST 捕获时兼用保守 token 规模预算。
 pub fn ct_charge_expansion(body_token_count int) int {
     let tk *gen.TaskCtx = gen.task()
-    if (tk.c_ast_capture == 0
+    if (support.session().ast_capture == 0
         && (body_token_count < 0 || body_token_count > 100000)) {
         return gen.sem_err("编译期 for 展开语法规模超过 100000")
     }
@@ -150,10 +152,10 @@ pub fn ct_charge_expansion(body_token_count int) int {
     if (ct_expansion_count > 100000) {
         return gen.sem_err("编译期 for 总展开次数超过 100000")
     }
-    if (tk.c_ast_capture == 0 && body_token_count > 100000 - ct_expansion_size) {
+    if (support.session().ast_capture == 0 && body_token_count > 100000 - ct_expansion_size) {
         return gen.sem_err("编译期 for 展开语法规模超过 100000")
     }
-    if (tk.c_ast_capture == 0) { ct_expansion_size += body_token_count }
+    if (support.session().ast_capture == 0) { ct_expansion_size += body_token_count }
     return 0
 }
 
@@ -162,7 +164,7 @@ fn ct_grow() int {
     let ncap int = ct_function_cap * 2
     if (ncap == 0) { ncap = 16 }
     let next *CtFunction = malloc((ncap * sizeof(CtFunction)).to_type(u64)).to_type(*CtFunction)
-    if (next == 0) { return gen.fail("编译期函数目录分配失败") }
+    if (next == 0) { return support.fail("编译期函数目录分配失败") }
     if (ct_function_n > 0) {
         memcpy(next, ct_functions, (ct_function_n * sizeof(CtFunction)).to_type(u64))
     }
@@ -177,12 +179,12 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     param_n int, ret_type int, body_first int, body_after int) int {
     let tk *gen.TaskCtx = gen.task()
     if (sym_id < 0 || sym_id >= tk.c_sym_n || param_n < 0 || param_n > 64
-        || body_first < 0 || body_after <= body_first || body_after > tk.c_tok_n) {
-        return gen.fail("内部错误：编译期函数登记范围无效")
+        || body_first < 0 || body_after <= body_first || body_after > token.ctx().count) {
+        return support.fail("内部错误：编译期函数登记范围无效")
     }
     if (ct_function_n == ct_function_cap && ct_grow() != 0) { return -1 }
     let row int = ct_function_n
-    let nbytes int = tk.c_src_len + 1
+    let nbytes int = support.src_ctx().length + 1
     let src *u8 = malloc(nbytes.to_type(u64)).to_type(*u8)
     let body_n int = body_after - body_first
     let body *CtToken = malloc((body_n * sizeof(CtToken)).to_type(u64)).to_type(*CtToken)
@@ -193,14 +195,14 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     let use_loc int = 0
     // 从 .s.ct 导入的 CT 函数已经带定义源码路径（c_ct_origin_active），
     // 不能改写成当前解析文件；只有真实源文件登记才套用 trimpath/locs 路径。
-    if (tk.c_ct_origin_active == 0 && tk.c_active_file >= 0
-        && tk.c_active_file < proj.file_count()) {
-        path_len = proj.file_locs_path(tk.c_active_file, &loc_path[0], 1024)
+    if (tk.c_ct_origin_active == 0 && support.session().active_file >= 0
+        && support.session().active_file < proj.file_count()) {
+        path_len = proj.file_locs_path(support.session().active_file, &loc_path[0], 1024)
         if (path_len < 0) { path_len = 0 }
         if (path_len > 0) { use_loc = 1 }
     }
-    if (path_len <= 0 && tk.c_path != 0) {
-        for tk.c_path[path_len] != 0 { path_len += 1 }
+    if (path_len <= 0 && support.src_ctx().path != 0) {
+        for support.src_ctx().path[path_len] != 0 { path_len += 1 }
     }
     let src_path *u8 = 0
     if (path_len > 0) {
@@ -228,28 +230,28 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
         if (src_path != 0) { free(src_path.to_type(*void)) }
         if (params != 0) { free(params.to_type(*void)) }
         if (imports != 0) { free(imports.to_type(*void)) }
-        return gen.fail("编译期函数快照分配失败")
+        return support.fail("编译期函数快照分配失败")
     }
-    memcpy(src, tk.c_src, tk.c_src_len.to_type(u64))
-    src[tk.c_src_len] = 0
+    memcpy(src, support.src_ctx().data, support.src_ctx().length.to_type(u64))
+    src[support.src_ctx().length] = 0
     let path_i int = 0
     for path_i < path_len {
         if (use_loc != 0) {
             src_path[path_i] = loc_path[path_i]
         } else {
-            src_path[path_i] = tk.c_path[path_i].to_type(u8)
+            src_path[path_i] = support.src_ctx().path[path_i].to_type(u8)
         }
         path_i += 1
     }
     if (src_path != 0) { src_path[path_len] = 0 }
     let ti int = 0
     for ti < body_n {
-        let token gen.Tok = tk.c_toks[body_first + ti]
-        body[ti].kind = token.kind
-        body[ti].start = token.start
-        body[ti].len = token.len
-        body[ti].line = token.line
-        body[ti].col = token.col
+        let tok token.Tok = token.ctx().tokens[body_first + ti]
+        body[ti].kind = tok.kind
+        body[ti].start = tok.start
+        body[ti].len = tok.len
+        body[ti].line = tok.line
+        body[ti].col = tok.col
         ti += 1
     }
     let i int = 0
@@ -280,11 +282,11 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     ct_functions[row].src = src
     ct_functions[row].src_path = src_path
     ct_functions[row].src_path_len = path_len
-    ct_functions[row].src_body_line = tk.c_toks[body_first].line
+    ct_functions[row].src_body_line = token.ctx().tokens[body_first].line
     if (tk.c_ct_origin_active != 0) {
         ct_functions[row].src_body_line = tk.c_ct_origin_line
     }
-    ct_functions[row].src_line_bias = tk.c_diag_line_bias
+    ct_functions[row].src_line_bias = support.diag().line_bias
     ct_functions[row].body = body
     ct_functions[row].body_n = body_n
     ct_functions[row].body_token_first = body_first
@@ -335,7 +337,7 @@ pub fn ct_iface_call_target(row int, token_index int) int {
     let i int = item.ir_expr_first
     for i < item.ir_expr_after {
         let expr CtExpr = ct_ir_exprs[i]
-        if (expr.kind == 5 && expr.op == gen.TK_DOLLAR
+        if (expr.kind == 5 && expr.op == token.TK_DOLLAR
             && expr.first == token_index) {
             return expr.sym_id
         }
@@ -416,8 +418,8 @@ pub fn ct_iface_local_type_target(row int, token_index int) int {
             // token_index 是绝对 token 下标；body[] 以函数体左花括号为 0 基。
             let rel int = token_index - item.body_token_first
             if (rel >= 0 && rel < item.body_n
-                && (item.body[rel].kind == gen.TK_IN
-                    || item.body[rel].kind == gen.TK_COMMA)) {
+                && (item.body[rel].kind == token.TK_IN
+                    || item.body[rel].kind == token.TK_COMMA)) {
                 return -1
             }
             return binding.sym_type_id
@@ -434,7 +436,7 @@ pub fn ct_iface_call_count(row int) int {
     let count int = 0
     let i int = item.ir_expr_first
     for i < item.ir_expr_after {
-        if (ct_ir_exprs[i].kind == 5 && ct_ir_exprs[i].op == gen.TK_DOLLAR) {
+        if (ct_ir_exprs[i].kind == 5 && ct_ir_exprs[i].op == token.TK_DOLLAR) {
             count += 1
         }
         i += 1
@@ -450,7 +452,7 @@ pub fn ct_iface_call_at(row int, ordinal int) int {
     let i int = item.ir_expr_first
     for i < item.ir_expr_after {
         let expr CtExpr = ct_ir_exprs[i]
-        if (expr.kind == 5 && expr.op == gen.TK_DOLLAR) {
+        if (expr.kind == 5 && expr.op == token.TK_DOLLAR) {
             if (seen == ordinal) { return expr.sym_id }
             seen += 1
         }

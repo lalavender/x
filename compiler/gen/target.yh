@@ -1,88 +1,12 @@
 module gen
 
 // ============================================================================
-// target.yh —— 目标数据模型与目标身份（多平台接入缝之一）
+// target.yh —— 结构体/联合体布局（过渡）
 //
-// 分层（见 docs/03-design/yh-架构设计.md §3、§6.9）：
-//
-//   前端语义 symbols.yh（平台无关）
-//        │  只引用本文件的数据模型常量/布局函数
-//        ▼
-//   目标数据模型 target.yh（本文件：字长/对齐/布局规则 + 目标身份）
-//        │  换平台第一步：提供新目标的数据模型与 target_info 条目
-//        ▼
-//   LLVM 发射 backend/llvm_*.yh（目标库/ABI 分类/运行时；LL12 后唯一后端）
-//
-// 目标平台文件按 <name>.<os>[.<arch>].yh 命名；换目标 = 目标身份 + 对应
-// LLVM 目标库 + 平台变体，不再新增 emit_<isa>.yh。
-// 当前支持：darwin/arm64、linux/arm64、linux/x86_64、windows/x86_64。
+// 目标身份、TargetCfg、tg_* 查询与 ABI 常量已迁 support；本文件只保留
+// tg_layout_struct，因为它直接读 TaskCtx 的类型/字段表。GEN2 起语义归 check
+// 后，布局函数随类型表迁 check。
 // ============================================================================
-
-// —— 标量数据模型（字节） ——
-const TG_PTR_SIZE int = 8      // 指针 8 字节（LP64）
-const TG_INT_SIZE int = 4      // yh 的 int / i32 = 4 字节（默认整数类型）
-const TG_CHAR_SIZE int = 1     // char / bool / i8 / u8 = 1 字节
-const TG_SHORT_SIZE int = 2    // i16 / u16
-pub const TG_LONG_SIZE int = 8     // i64 / u64
-pub const TG_ENUM_SIZE int = 4     // enum 底层为 4 字节有符号整数
-
-// —— 栈与调用约定（前端在几处需要知道的量化约束） ——
-const TG_STACK_ALIGN int = 16  // sp 在调用点必须 16 字节对齐
-const TG_ARG_REGS int = 8      // 整型/指针参数的寄存器个数（x0..x7）
-const TG_VALUE_SLOT int = 16   // 值栈一个槽的字节数（保持 sp 对齐）
-
-// —— 汇编方言（段/符号/取址写法的差异，AArch64 指令本身相同） ——
-//
-// 同一台 AArch64 上的两大方言：
-//   GNU/Linux（as + gcc）：符号无前缀，取址写 `adrp/add :lo12:`，
-//                           链接 libc 符号可直接 `adrp/add`（静态链接）。
-//   Darwin（as + clang）： C 符号统一加 `_` 前缀，取址写
-//                           `adrp/add @PAGE/@PAGEOFF`；自定义段/外部符号
-//                           必须走 GOT：`adrp/ldr @GOTPAGE/@GOTPAGEOFF`。
-// 由驱动按 -target 选择；指令发射器只查询下面的 tg_dialect_* 判定，
-// 不硬编码方言字符串。
-pub const TG_DIALECT_GNU int = 0     // AArch64 GNU/Linux（默认）
-pub const TG_DIALECT_DARWIN int = 1  // AArch64 Darwin/Mach-O
-
-// gen.cfg().dialect：当前汇编方言（由驱动在启动时设置）。放在模型层供发射器查询。
-
-// tg_darwin：是否 Darwin 方言（符号加 `_`、取址用 @PAGE、外部走 GOT）。
-pub fn tg_darwin() int {
-    return (cfg().dialect == TG_DIALECT_DARWIN).to_type(int)
-}
-
-// target_arch_token：接口头行里的架构标记，与 project.arch 的写法一致。
-// 头行架构必须随目标变化：此前两处写入端把它硬编码成 arm64，一旦接入
-// x64 目标，头行会"说谎"，读取端又只比对字面量，等于失去目标校验。
-pub fn target_arch_token() *char {
-    if (cfg().target.arch == TARGET_ARCH_X64) {
-        return "x64"
-    }
-    return "arm64"
-}
-
-// tg_host_darwin：**宿主**平台探测（进程实际运行的操作系统）——macOS 独有的
-// 系统 plist（Linux 无此路径）。与 tg_darwin（输出目标方言）区分：
-// open 旗标、目录类宿主文件操作按**宿主内核**语义取值，交叉目标
-// （-target darwin）不得改变宿主文件操作（Linux 内核不认 Darwin 的
-// O_CREAT 位值，0x601 在 Linux 上是 O_APPEND 组合）。
-pub fn tg_host_darwin() int {
-    let fd int = open("/System/Library/CoreServices/SystemVersion.plist", 0)
-    if (fd >= 0) {
-        close(fd)
-        return 1
-    }
-    return 0
-}
-
-// tg_host_windows：**宿主**操作系统是否为 Windows。与 tg_windows（输出目标
-// 方言）区分：本函数用于 PATH 分隔符、路径分隔符等**运行在本机的编译器自身**
-// 的文件操作。构建时目标就是产物将来的宿主（自举交叉编译），所以用 $if
-// 编译期选择即可；运行时不受 --target 影响。
-pub fn tg_host_windows() int {
-    $if (windows) { return 1 }
-    $else { return 0 }
-}
 
 // tg_layout_struct：计算一个 struct/union 的字段布局。
 // fields 是已登记的字段（type_id 已填），填写 offset 并把结果写入

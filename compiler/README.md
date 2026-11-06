@@ -10,15 +10,17 @@
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
 source = `.`；版本号以 [project.toml](project.toml) 的 `version` 与
 `cmdline/cmdline.yh` 的 `YH_VERSION_TEXT` 为准，两处必须与发布 tag 一致），按
-**gen / builtin / lex / parse / ast / check / comptime / lower / ir / backend /
-link / build / proj / cache / testkit / cmdline / cmd** 组织。
-**2026-11-06 实测（`python3 tools/arch-check.py`）：十七个模块、158 个 `.yh`、
-59,815 行、63 条依赖边**：`parse` 9,718 · `build` 8,046 · `lower` 5,976 ·
-`gen` 5,804 · `comptime` 5,535 · `ir` 5,385 · `link` 4,325 · `backend` 4,149 ·
-`ast` 3,407 · `testkit` 1,616 · `proj` 1,464 · `lex` 1,069 · `cache` 1,031 ·
-`check` 960 · `cmdline` 661 · `cmd` 497 · `builtin` 172。
+**support / token / gen / builtin / lex / parse / ast / check / comptime /
+lower / ir / backend / link / build / proj / cache / testkit / cmdline / cmd** 组织。
+**2026-11-06 GEN1+F1/F3 实测（`python3 tools/arch-check.py`）：十九个模块、
+171 个 `.yh`、60,545 行、93 条依赖边**：`parse` 9,776 · `build` 8,062 ·
+`lower` 5,998 · `comptime` 5,550 · `ir` 5,385 · `check` 5,224 · `link` 4,329 ·
+`backend` 4,149 · `gen` 2,550 · `testkit` 1,619 · `proj` 1,467 · `ast` 1,368 ·
+`support` 1,185 · `lex` 1,046 · `cache` 1,032 · `cmdline` 661 · `cmd` 502 ·
+`token` 265 · `builtin` 173。
 
-各层来历：`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担
+各层来历：`support/` 与 `token/` 是 2026-11-06 GEN1 自 `gen` 拆出的基础层
+（缓冲/统计与 token 词汇/游标），`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担
 AST 与快照的**只读一致性校验**（不是语义分析），`builtin/` 只放内置
 （prelude）函数登记表，`ir`（目标隔离 SSA）与其它模块同为根项目普通模块，
 `build/` 是 2026-10-24 A2c 自 `cmd/` 拆出的构建引擎（调度、模块发射、缓存、
@@ -86,9 +88,10 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 
 ## 内建测试
 
-`gen/buffer.yh`、`lex/layout.yh`、`parse/parse_type.yh` 含 `test` 块，覆盖
-纯函数边界（`hexval`、`is_assign_op`、`lex_can_end`、`is_member_name`、
-`is_type_start`）。运行：
+`support/buffer.yh`、`token/op.yh`、`check/checked_model.yh`、`lex/layout.yh`、
+`parse/parse_type.yh` 含
+`test` 块，覆盖纯函数边界（`append_int`/`hexval`、`is_assign_op`、`lex_can_end`、
+`is_member_name`、`is_type_start`）。运行：
 
 ```bash
 python3 tools/compiler-tests.py --compiler-path ./yh
@@ -112,6 +115,7 @@ python3 tools/compiler-tests.py --compiler-path ./yh
 
 | 文件 | 职责 |
 | --- | --- |
+| `parse/base.yh` | 解析器私有 `ParseCtx`（test 体模式、CT 元信息、表达式块上下文、拒绝阶段） |
 | `parse/parse_type.yh` | 类型引用解析 + 解析器共用游标工具 |
 | `parse/parse_expr.yh` | 表达式优先级链、后缀链、structInit 与「字面量 vs 块」消解 |
 | `parse/parse_stmt.yh` | 语句：块/if/for/switch/return/goto/标签/赋值 |
@@ -135,7 +139,7 @@ python3 tools/compiler-tests.py --compiler-path ./yh
 | `cache/lock.{darwin,linux,windows}.yh` | 同项目/全局写锁的 flock 平台封装（Windows 后置） |
 | `cache/*.test.yh` | 键长度/稳定性/action 隔离与 store 参数测试 |
 
-**ast** —— AST 阶段与受检快照（2026-10-12 自 parse 拆出）
+**ast** —— 纯语法 AST arena（快照已于 GEN1/F1 迁 check）
 
 | 文件 | 职责 |
 | --- | --- |
@@ -143,11 +147,8 @@ python3 tools/compiler-tests.py --compiler-path ./yh
 | `ast/ast_expr.yh` | `yh check` typed 表达式 AST、绑定与常量快照 |
 | `ast/ast_stmt.yh` | `yh check` 语句树、绑定关联与编译期 `$for` 模板目录 |
 | `ast/ast_function.yh` | 函数在 AST arena 中的范围与绑定身份 |
-| `ast/ast_view.yh` | 为外部只读校验借出 arena 视图，不转移所有权 |
-| `ast/module_snapshot.yh` | `CheckedModule`/`CheckedStorage` 快照数据模型、捕获/释放与有界读取 |
-| `ast/module_snapshot_view.yh` | 为外部快照校验借出只读视图，不转移所有权 |
-| `ast/module_snapshot_check_key.yh` | pass2b 前的函数 check 键（SHA-256，C0/C1） |
-| `ast/module_snapshot_check_slice.yh` | 函数级受检 AST 切片捕获/导入、前端复位（`checked_decl_restore`） |
+| `ast/ast_view.yh` | 为外部只读校验借出 arena 视图（含容量/声明索引），不转移所有权 |
+| `ast/ast_store.yh` | 受检切片重放用的 5 个 arena 扩容入口；指针/容量仍由 ast 拥有 |
 
 **lower** —— 受检快照到语言 IR（2026-10-25 B3-2 自 `ast` 拆出，5,815 行）
 
@@ -170,21 +171,33 @@ python3 tools/compiler-tests.py --compiler-path ./yh
 | `lower/ast_ir_call.yh` | 固定参数直接调用的目标符号、变长实参与 AST 降低 |
 | `lower/module_snapshot_lower_selftest.yh` | check 切片与 lowering 的离线等价性探针（唯一调用方是测试项目） |
 
-`lower` 只 import `ast`/`ir`/`gen`，**不得 import parse/check/build**；`ast` 也不得
-反向 import `lower`（由 `arch-check` 的 `ALLOWED` 强制）。拆分后 `ast` 从 9,041 行
-降到 3,278 行，此后所有 AST 侧改动都在 1/3 规模上进行。
+`lower` 只 import `check`/`ast`/`ir`/`support`，**不得 import parse/build**；`ast` 也不得
+反向 import `lower`/`check`（由 `arch-check` 的 `ALLOWED` 强制）。F1 把快照迁出后
+`ast` 只剩 1,347 行纯 AST arena。
 
-**check** —— AST arena 与独立快照的一致性校验
+**check** —— 语义入口与受检契约（F1 起拥有 `CheckedModule` 快照）
 
 | 文件 | 职责 |
 | --- | --- |
+| `check/checked_model.yh` | `CheckedModule`/`CheckedStorage` 数据模型、捕获/释放与有界读取 |
+| `check/ct_bind.yh` | CT 事实绑定的唯一入口 `ct_types_sync` + 形状守卫 `ct_type_layout_ok` |
+| `check/checked_view.yh` | 借出只读快照视图（`CheckedModuleView`），不转移所有权 |
+| `check/checked_key.yh` | pass2b 前的函数 check 键（SHA-256，C0/C1） |
+| `check/checked_slice.yh` | 函数级受检 AST 切片捕获/导入、前端复位（`checked_decl_restore`） |
 | `check/verify.yh` | 按固定顺序只读校验表达式、语句、声明与函数上下文 arena |
-| `check/checked_module.yh` | 只读校验 `CheckedModule` 快照；由调用方在 lowering 前调用 |
+| `check/sem_value.yh` | 字面量/标识符求值、`Res` 构造与值类别 |
+| `check/sem_expr.yh` | 表达式语义：下标、成员、运算、转换、切片 |
+| `check/sem_decl.yh` | 声明语义：符号登记、参数/返回事实、main 检查 |
+| `check/sem_flow.yh` | 控制流语义：赋值、循环、goto/标签与可达性 |
+| `check/sem_call_literal.yh` | 调用点语义：实参检查、变参打包记录、结构体字面量 |
+| `check/abi_c.yh` | C ABI 位置分类（值/游标模型在 `gen/abi_model.yh`） |
+| `check/verify_checked.yh` | 只读校验 `CheckedModule` 快照；由调用方在 lowering 前调用 |
 
 **comptime** —— 编译期函数登记与受限求值
 
 | 文件 | 职责 |
 | --- | --- |
+| `comptime/ct_facts.yh` | CT 执行器的零拷贝类型镜像（`CtTypeRow`/`CT_TY_*`/谓词），由 `check.ct_types_sync` 绑定 |
 | `comptime/ct_00_model.yh` | 编译期 token、函数、整数值与求值游标模型 |
 | `comptime/ct_registry.yh` | 编译期函数正文快照、按符号登记/查询与展开预算 |
 | `comptime/ct_enum.yh` | 枚举成员按声明顺序查询，供编译期 `values` 展开 |
@@ -219,24 +232,48 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 是唯一被导出的原语），运行时函数体在 `backend/llvm_runtime.yh` /
 `backend/llvm_apple_runtime.yh` 按需发射。
 
-**gen** —— 共享内核：状态、类型/符号表、语义与目标描述
+**support** —— L0 基础内核：缓冲/源/池/统计/诊断/目标
 
 | 文件 | 职责 |
 | --- | --- |
-| `gen/model.yh` | token 常量、类型/符号常量、Tok/Res/CType/CSym 等结构 |
-| `gen/state.yh` | `GenState`（64 字段，进程级）+ `TaskCtx`（188 字段，每编译单元）与 `G()` |
-| `gen/front_stage.yh` | 受检前端阶段的进入/校验/退出（LL12 后旧输出缓冲已删除） |
-| `gen/buffer.yh` | 源文件整读（open/read/close）、汇编输出缓冲、诊断、字节写出 |
-| `gen/symbols.yh` | 名字池、类型表、符号/作用域、类型兼容、常量折叠、prelude 符号表原语 |
+| `support/base.yh` | `SourceCtx`/`PoolCtx`/`DiagCtx`/`SessionCtx`/`CompileStats`/`TargetInfo`/`TargetCfg` 与单例 |
+| `support/buffer.yh` | `append_*`/`write_all`/`alloc`/`out_grow`/`fail`/`fail_path`/`hexval`/路径缓冲 |
+| `support/pool.yh` | 名字池 intern、`np_cstr`、`append_np*` |
+| `support/source.yh` | `read_source`/`set_source_path` |
+| `support/diag.yh` | `err_lc`/`warn_lc` 与 CT 展开轨迹 |
+| `support/target.yh` | `TargetInfo`/`TargetCfg` 解析、`tg_*`、`bind_cfg`、`ABI_*` |
+
+`support` 不是流水线阶段：会话初始化绑定目标/源/统计/诊断，读源前、词法/语法/
+检查、lower/backend、link/build 各阶段按需调用。它不持有类型/符号/分析状态。
+
+**token** —— 词法/语法共享词汇与 token 表游标
+
+| 文件 | 职责 |
+| --- | --- |
+| `token/base.yh` | `TK_*`/`TOK_*`/`ATTR_*`、`Tok`、`PDecl`、`TokenCtx` |
+| `token/tokens.yh` | token 数组倍增扩容 `push`、当前游标 `ctx()` |
+| `token/op.yh` | `is_assign_op` 纯 token 区间判定 |
+
+`gen/model.yh` 暂时保留 `gen.Tok`/`gen.TK_*` 等别名，调用面逐步改 `token.*`。
+
+**gen** —— 语义内核的残余：类型/符号表、值规则、静态数据与每任务状态
+
+| 文件 | 职责 |
+| --- | --- |
+| `gen/model.yh` | token/目标别名、类型/符号常量、Res/CType/CSym 等结构 |
+| `gen/state.yh` | `GenState`（仅 task）+ `TaskCtx`（150 字段）、`state_init`、`data_str_*`/`em_*` 表 |
+| `gen/symbols.yh` | 名字池之外的类型表、符号/作用域、兼容/提升、`mod_*` 命名空间查询 |
+| `gen/value_rules.yh` | 浮点位模式、常量折叠、`sem_res_const`、`sem_struct_finish`（comptime 共用） |
+| `gen/abi_model.yh` | C ABI 分类的数据模型：`ABIValue`/`ABICursor`/`ABIArg` + `CABI_*` |
 | `gen/static_data.yh` | 独占静态数据、64 位指针槽与重定位登记 |
-| `gen/target.yh` | 目标数据模型：字长、对齐、结构体布局（**换平台的第一步**） |
-| `gen/target_info.yh` | 宿主 triple 严格解析与目标身份选择 |
-| `gen/abi_c.yh` | 共享 AArch64 C ABI 分类：值描述、HFA、寄存器与目标栈布局 |
-| `gen/sem_value.yh` | 字面量/标识符求值、常量折叠与值类别（LL12：无发射） |
-| `gen/sem_expr.yh` | 表达式语义：下标、成员、运算、转换、切片（LL12：无发射） |
-| `gen/sem_decl.yh` | 声明语义：符号登记、结构体布局与函数参数/返回事实 |
-| `gen/sem_flow.yh` | 控制流语义：类型检查、循环上下文与可达性（LL12：无跳转发射） |
-| `gen/sem_call_literal.yh` | 调用点语义：实参检查、变参打包记录与结果形态（LL12：无搬运） |
+| `gen/target.yh` | 仅 `tg_layout_struct`（读类型/字段表） |
+| `gen/front_stage.yh` | 受检前端阶段的进入/校验/退出 |
+| `support/clock.*`、`console.*`、`argv.*` | 宿主平台（GEN1 迁出 gen） |
+
+`gen` 不再有 `token_bridge`：token 游标/入表/报错已全部直连 `token.*`。
+
+语义动作（`sem_*`）与 `abi_c` 算法已迁 `check`；`comptime` 仍直接调用
+`gen` 的类型/值规则（F4 之前无法解除），因此这些规则必须留在 `gen`。
 
 **ir / backend** —— 受检函数的独立表示与目标发射
 
@@ -376,7 +413,7 @@ testkit ─▶ build（复用调度与产物路径，执行测试体）
 
 后端分三层：前端语义（`gen/symbols.yh` + `gen/sem_*.yh` +
 `parse/parse_*.yh` + `ast/ast_*.yh` + `check/verify.yh`）→ 受检快照/模块 IR
-（`ast/module_snapshot*.yh`、`lower/module_snapshot_lower*.yh`、`ir/ssa_module_*.yh`）→ LLVM 发射
+（`check/checked_*.yh`、`lower/module_snapshot_lower*.yh`、`ir/ssa_module_*.yh`）→ LLVM 发射
 （`backend/llvm_*.yh` + 内嵌桥）。前端不持有 ISA 状态；换目标 = 目标身份 +
 对应 LLVM 目标库。LL12 已删除 `em_*` 抽象机原语与旧 arm64 发射器，
 系统架构与迁移路线见[架构设计](../docs/03-design/yh-架构设计.md)。

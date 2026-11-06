@@ -1,4 +1,7 @@
 module lower
+import token
+import check
+import support
 import ast
 import gen
 import ir
@@ -10,7 +13,7 @@ import proj
 // CheckedStorage，不访问 GenState、旧汇编缓冲或可变语义表。
 
 // checked_lower_kind：将快照整数/bool 映射为函数私有 canonical 类型；其余形态返回 -1。
-fn checked_lower_kind(store *ast.CheckedStorage, source_type int) int {
+fn checked_lower_kind(store *check.CheckedStorage, source_type int) int {
     if (source_type < 0 || source_type >= store.type_n) { return -1 }
     let kind int = store.types[source_type].kind
     if (kind == gen.TY_FN) { return ir.IR_TY_FN_PTR }
@@ -203,7 +206,7 @@ fn checked_lower_literal_retype(l *CheckedLower, value int, node *ast.AstExpr, w
         return checked_lower_adjust(l, value, want)
     }
     let literal_bits i64 = node.const_bits
-    if (node.kind == ast.AST_EXPR_UNARY && node.op == gen.TK_MINUS
+    if (node.kind == ast.AST_EXPR_UNARY && node.op == token.TK_MINUS
         && node.child0 >= 0 && node.child0 < l.store.expression_n) {
         let operand ast.AstExpr = l.store.expressions[node.child0]
         if (operand.is_lit != 0) {
@@ -336,7 +339,7 @@ fn checked_lower_function_addr(l *CheckedLower, node *ast.AstExpr) int {
     let source gen.CSym = l.store.symbols[node.sym_id]
     if (source.kind != gen.SYM_FN || source.type_id != node.sym_type_id
         || source.name_len != node.sym_name_len
-        || gen.cstr_eq((l.store.names + source.name_off).to_type(*char),
+        || support.cstr_eq((l.store.names + source.name_off).to_type(*char),
             (l.store.names + node.sym_name_off).to_type(*char)) == 0) { return -2 }
     let signature int = checked_lower_module_type(l, node.sym_type_id)
     if (signature < 0) { return signature }
@@ -379,7 +382,7 @@ fn checked_lower_address_of(l *CheckedLower, flow *CheckedFlow, node *ast.AstExp
         return checked_lower_global_ref(l, &child)
     }
     if (child.kind == ast.AST_EXPR_INDEX || child.kind == ast.AST_EXPR_MEMBER
-        || (child.kind == ast.AST_EXPR_UNARY && child.op == gen.TK_STAR)) {
+        || (child.kind == ast.AST_EXPR_UNARY && child.op == token.TK_STAR)) {
         let pointer int = checked_lower_lvalue_ptr(l, flow, node.child0)
         if (pointer == -2) { return -2 }
         if (pointer < 0) { return -1 }
@@ -469,8 +472,8 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     // 仍可能保留转换前位型，必须走逐节点转换；括号也先解包，不能越过 CAST。
     if (node.is_const != 0 && checked_lower_type(l, node.type_id) >= 0
         && (node.kind == ast.AST_EXPR_PRIMARY
-            || node.kind == ast.AST_EXPR_UNARY && (node.op == gen.TK_LEN
-                || node.op == gen.TK_SIZEOF || node.is_lit != 0)
+            || node.kind == ast.AST_EXPR_UNARY && (node.op == token.TK_LEN
+                || node.op == token.TK_SIZEOF || node.is_lit != 0)
             || node.kind == ast.AST_EXPR_MEMBER && l.store.types[node.type_id].kind == gen.TY_ENUM)) {
         let kind int = checked_lower_type(l, node.type_id)
         if (kind >= ir.IR_TY_PTR) {
@@ -553,7 +556,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     }
     if (node.kind == ast.AST_EXPR_UNARY) {
         if (node.child0 < 0) { return -2 }
-        if (node.op == gen.TK_LEN) {
+        if (node.op == token.TK_LEN) {
             // 数组长度由语义阶段折叠为常量；这里只支持运行期切片长度。
             let operand_type int = l.store.expressions[node.child0].type_id
             if (checked_lower_is_slice(l.store, operand_type) == 0) { return -2 }
@@ -564,8 +567,8 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
             if (length < 0) { return -1 }
             return checked_lower_adjust(l, length, want)
         }
-        if (node.op == gen.TK_AMP) { return checked_lower_address_of(l, flow, &node) }
-        if (node.op == gen.TK_STAR) {
+        if (node.op == token.TK_AMP) { return checked_lower_address_of(l, flow, &node) }
+        if (node.op == token.TK_STAR) {
             // 解引用：指针元素类型必须与表达式类型一致。
             let want int = checked_lower_type(l, node.type_id)
             if (want < 0) { return -2 }
@@ -582,7 +585,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         let inner int = checked_lower_expr_inner(l, flow, node.child0)
         if (inner == -2) { return -2 }
         if (inner < 0) { return -1 }
-        if (node.op == gen.TK_BANG) {
+        if (node.op == token.TK_BANG) {
             let kind int = b.insts[inner].result_type
             if (ir.ir_const_type(kind) == 0) { return -2 }
             let zero int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, kind, -1, -1, 0)
@@ -591,7 +594,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
             if (compared < 0) { return -1 }
             return checked_lower_adjust(l, compared, want)
         }
-        if (node.op == gen.TK_TILDE) {
+        if (node.op == token.TK_TILDE) {
             let kind int = b.insts[inner].result_type
             if (kind == ir.IR_TY_BOOL) {
                 inner = checked_lower_adjust(l, inner, ir.IR_TY_I32)
@@ -607,7 +610,7 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
             if (all_ones < 0 || inverted < 0) { return -1 }
             return checked_lower_adjust(l, inverted, want)
         }
-        if (node.op == gen.TK_MINUS) {
+        if (node.op == token.TK_MINUS) {
             let kind int = b.insts[inner].result_type
             if (kind == ir.IR_TY_BOOL) {
                 inner = checked_lower_adjust(l, inner, ir.IR_TY_I32)
@@ -628,18 +631,18 @@ fn checked_lower_expr_inner(l *CheckedLower, flow *CheckedFlow, expr_id int) int
     }
     if (node.kind != ast.AST_EXPR_BINARY || node.child0 < 0 || node.child1 < 0) { return -2 }
     // 短路求值：与旧构造器同一协议，两侧经条件归一化后由合流 phi 汇合。
-    if (node.op == gen.TK_OROR || node.op == gen.TK_ANDAND) {
+    if (node.op == token.TK_OROR || node.op == token.TK_ANDAND) {
         let left int = checked_lower_cond(l, flow, node.child0)
         if (left == -2) { return -2 }
         if (left < 0) { return -1 }
         let short_value int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_BOOL, -1, -1,
-            node.op == gen.TK_OROR ? 1 : 0)
+            node.op == token.TK_OROR ? 1 : 0)
         if (short_value < 0) { return -1 }
         let pre_block int = b.cur_block
         let rhs_block int = ast_ir_b_alloc_block(b)
         let join_block int = ast_ir_b_alloc_block(b)
         if (rhs_block < 0 || join_block < 0) { return -1 }
-        if (node.op == gen.TK_OROR) {
+        if (node.op == token.TK_OROR) {
             if (ast_ir_b_term_cond(b, left, join_block, rhs_block) != 0) { return -1 }
         } else {
             if (ast_ir_b_term_cond(b, left, rhs_block, join_block) != 0) { return -1 }
@@ -752,12 +755,12 @@ fn checked_lower_pointer_math(l *CheckedLower, node *ast.AstExpr, base int, inde
     if (stride <= 0) { return -2 }
     let offset int = checked_lower_adjust(l, index, ir.IR_TY_U64)
     if (offset < 0) { return -2 }
-    if (node.op == gen.TK_MINUS) {
+    if (node.op == token.TK_MINUS) {
         let zero int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64, -1, -1, 0)
         if (zero < 0) { return -1 }
         offset = ast_ir_b_add_inst(b, ir.IR_OP_SUB, ir.IR_TY_U64, zero, offset, 0)
         if (offset < 0) { return -1 }
-    } else if (node.op != gen.TK_PLUS) { return -2 }
+    } else if (node.op != token.TK_PLUS) { return -2 }
     let stride_value int = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
         -1, -1, stride.to_type(i64))
     if (stride_value < 0) { return -1 }
@@ -769,22 +772,22 @@ fn checked_lower_pointer_math(l *CheckedLower, node *ast.AstExpr, base int, inde
 
 // checked_lower_binop：算术/位/比较运算符映射；不支持的一律 0 以下。
 fn checked_lower_binop(op int) int {
-    if (op == gen.TK_PLUS) { return ir.IR_OP_ADD }
-    if (op == gen.TK_MINUS) { return ir.IR_OP_SUB }
-    if (op == gen.TK_STAR) { return ir.IR_OP_MUL }
-    if (op == gen.TK_SLASH) { return ir.IR_OP_DIV }
-    if (op == gen.TK_PERCENT) { return ir.IR_OP_REM }
-    if (op == gen.TK_AMP) { return ir.IR_OP_BAND }
-    if (op == gen.TK_PIPE) { return ir.IR_OP_BOR }
-    if (op == gen.TK_CARET) { return ir.IR_OP_BXOR }
-    if (op == gen.TK_LSHIFT) { return ir.IR_OP_SHL }
-    if (op == gen.TK_RSHIFT) { return ir.IR_OP_SHR }
-    if (op == gen.TK_EQEQ) { return ir.IR_OP_EQ }
-    if (op == gen.TK_NEQ) { return ir.IR_OP_NE }
-    if (op == gen.TK_LT) { return ir.IR_OP_LT }
-    if (op == gen.TK_LEQ) { return ir.IR_OP_LE }
-    if (op == gen.TK_GT) { return ir.IR_OP_GT }
-    if (op == gen.TK_GEQ) { return ir.IR_OP_GE }
+    if (op == token.TK_PLUS) { return ir.IR_OP_ADD }
+    if (op == token.TK_MINUS) { return ir.IR_OP_SUB }
+    if (op == token.TK_STAR) { return ir.IR_OP_MUL }
+    if (op == token.TK_SLASH) { return ir.IR_OP_DIV }
+    if (op == token.TK_PERCENT) { return ir.IR_OP_REM }
+    if (op == token.TK_AMP) { return ir.IR_OP_BAND }
+    if (op == token.TK_PIPE) { return ir.IR_OP_BOR }
+    if (op == token.TK_CARET) { return ir.IR_OP_BXOR }
+    if (op == token.TK_LSHIFT) { return ir.IR_OP_SHL }
+    if (op == token.TK_RSHIFT) { return ir.IR_OP_SHR }
+    if (op == token.TK_EQEQ) { return ir.IR_OP_EQ }
+    if (op == token.TK_NEQ) { return ir.IR_OP_NE }
+    if (op == token.TK_LT) { return ir.IR_OP_LT }
+    if (op == token.TK_LEQ) { return ir.IR_OP_LE }
+    if (op == token.TK_GT) { return ir.IR_OP_GT }
+    if (op == token.TK_GEQ) { return ir.IR_OP_GE }
     return -1
 }
 
@@ -873,7 +876,7 @@ fn checked_lower_symbol(l *CheckedLower, name *char, source_type int, result int
     let symbol ir.IRModuleSymbol
     symbol.kind = ir.IR_MODULE_SYMBOL_FUNCTION
     symbol.type_id = checked_lower_module_type(l, l.store.sig_ret[sig])
-    symbol.abi = l.store.sig_abi[sig] == gen.ABI_YH ?
+    symbol.abi = l.store.sig_abi[sig] == support.ABI_YH ?
         ir.IR_ABI_YH_LLVM_V1 : l.store.sig_abi[sig]
     symbol.variadic = l.store.sig_vararg[sig]
     symbol.no_return = ((flags & gen.F_NORETURN) != 0).to_type(int)
@@ -900,6 +903,6 @@ fn checked_lower_offset(l *CheckedLower, file_id int, token int) int {
 
 // checked_lower_name_is_main：入口模块的 main 不加模块后缀。
 fn checked_lower_name_is_main(l *CheckedLower, off int, length int) int {
-    if (length != 4 || ast.checked_name_valid(l.store, off, length) == 0) { return 0 }
-    return gen.cstr_eq((l.store.names + off).to_type(*char), "main")
+    if (length != 4 || check.checked_name_valid(l.store, off, length) == 0) { return 0 }
+    return support.cstr_eq((l.store.names + off).to_type(*char), "main")
 }

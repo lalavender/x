@@ -1,0 +1,186 @@
+module support
+
+// ============================================================================
+// base.yh —— L0 基础层的共享类型与单例
+//
+// 这里只声明字节缓冲/源文件/名字池/统计的所有权结构，以及进程内唯一实例。
+// 具体读写函数在 buffer.yh、pool.yh、source.yh；本文件不含算法。
+// 生命周期：进程级；fork worker 通过 COW 继承，各 worker 独立写自己的副本。
+// ============================================================================
+
+// SourceCtx：当前任务的源文件字节与路径快照。
+// data/length 由 source.read 分配并持有到任务结束；path 指向 path_buf 内部，
+// path_buf 扩容后必须重新取 path（set_source_path 负责）。
+pub struct SourceCtx {
+    data *u8 // 源文件字节（malloc；任务生命期持有）
+    length int // 源字节长度（不含额外 NUL）
+    path *char // 当前源路径（指向 path_buf，不单独分配）
+    path_buf *u8 // 路径快照缓冲（堆分配倍增扩容）
+    path_buf_cap int // 路径快照容量
+}
+
+// PoolCtx：通用名字/字符串 intern 池。符号名、类型名、模块名、路径都放这里；
+// 表内只存池偏移与长度。池内字节带 NUL 结尾，便于调试与 np_cstr。
+pub struct PoolCtx {
+    data *u8 // intern 池（malloc；倍增扩容）
+    length int // 已用字节数（含每个名字的结尾 NUL）
+    cap int // 已分配容量
+}
+
+// DiagCtx：诊断的进程级开关与计数。
+// spec>0 表示推测解析，诊断静默且不计数；errors 是已报告错误数；
+// line_bias 是 .s.ct 来源映射的行号偏移；ct_* 是编译期 for 展开轨迹。
+pub struct DiagCtx {
+    spec int // 推测解析深度（>0 静默）
+    errors int // 已报告错误数
+    line_bias int // 诊断行号映射偏移
+    ct_depth int // 当前编译期 for 展开深度
+    ct_values [32]int // 外层到内层的展开值
+}
+
+// —— 目标身份与数据模型（换平台第一步） ——
+pub const TARGET_OS_LINUX int = 1
+pub const TARGET_OS_DARWIN int = 2
+pub const TARGET_OS_WINDOWS int = 3
+pub const TARGET_ARCH_ARM64 int = 1
+pub const TARGET_ARCH_X64 int = 2
+
+// TargetInfo：完整代码生成目标身份；字符串借用编译器静态常量，不拥有堆内存。
+pub struct TargetInfo {
+    triple *char
+    data_layout *char
+    os int
+    arch int
+    abi *char
+    pointer_bits int
+    little_endian int
+    layout_version int
+}
+
+// —— 标量数据模型/调用约定/方言（字节与 ABI 量化约束） ——
+pub const TG_PTR_SIZE int = 8
+pub const TG_INT_SIZE int = 4
+pub const TG_CHAR_SIZE int = 1
+pub const TG_SHORT_SIZE int = 2
+pub const TG_LONG_SIZE int = 8
+pub const TG_ENUM_SIZE int = 4
+pub const TG_STACK_ALIGN int = 16
+pub const TG_ARG_REGS int = 8
+pub const TG_VALUE_SLOT int = 16
+pub const TG_DIALECT_GNU int = 0
+pub const TG_DIALECT_DARWIN int = 1
+pub const ABI_YH int = 0
+pub const ABI_C int = 1
+
+// TargetCfg：目标/编译期配置；实体存储在 proj.ProjectCtx.cfg，support 只持指针。
+// 字段顺序是 ABI/缓存键的一部分，不重排。
+pub struct TargetCfg {
+    target TargetInfo
+    host_target TargetInfo
+    target_explicit int
+    dialect int
+    opt_level int
+    trimpath int
+    emit_kind int
+    emit_asm int
+    emit_text_path *char
+    module_mode int
+    is_entry_mod int
+}
+
+// SessionCtx：一次编译/构建的会话开关与模式位。
+// 这些开关由 driver/worker 设置、前端与构建层只读；不随函数重置。
+pub struct SessionCtx {
+    compile int // 0 = 纯语法模式（--syntax-check）；1 = 编译模式
+    pass int // 1 = 顶层扫描登记；2 = 函数体编译与全局初始化
+    check_only int // 1 = 项目 check 模式，只做语义检查，不生成后端产物
+    test_mode int // 1 = yh test 模式；解析测试体语义并跳过生产缓存
+    legacy_system int // 1 = 兼容配置显式开放 system
+    ast_capture int // 1 = worker 同遍历记录表达式、语句和声明 AST
+    active_file int // 当前前端快照文件编号，AST 源映射使用
+    stats_ast_nodes int // 当前 worker 构造的表达式 AST 节点数
+    stats_ast_refs int // 当前 worker 保存的表达式符号引用数
+    stats_stmt_nodes int // 当前 worker 构造的语句 AST 节点数
+    stats_ast_bindings int // 当前 worker 捕获的参数与局部绑定数
+    stats_ast_functions int // 当前 worker 封存的函数级 AST 上下文数
+    stats_decl_nodes int // 当前 worker 构造的文件级声明 AST 节点数
+}
+
+// CompileStats：一次编译/构建的统计与观测计数。
+// 由前端与构建层共同写，读点统一走 support.stats()。
+pub struct CompileStats {
+    enabled int // 1 = 输出构建阶段计数（仅开发验收）
+    front_cache int // 1 = worker 保存项目源与 token 快照
+    lex int // 本进程实际词法扫描次数
+    syntax int // worker 声明索引中的顶层声明数量
+    index int // 项目文件索引次数
+    pass1 int // 模块声明遍历的文件数
+    globals int // 模块全局初始化遍历的文件数
+    functions int // 模块函数体遍历的文件数
+    ir_functions int // 本次构建实际生成并校验的 SSA 函数数
+    ir_cache_hits int // 通过输入键和校验器复用的函数 IR 数
+    ir_cache_misses int // 本次重新降低并验证的函数 IR 数
+    ir_lowered int // 实际调用函数 lowering 的函数数（不含命中复用）
+    check_cache_hits int // 受检 AST 切片命中的函数数
+    check_cache_misses int // 实际执行 pass2b 检查的函数数
+    check_cache_skipped int // 跳过 pass2b 的函数数
+    checked_functions int // 实际参与运行期 lowering 的受检函数数，不含 comptime
+    backend_emitted int // 后端返回成功、确实替换旧汇编的函数数
+    ir_rejected int // 前端 lowering 子集不支持的函数数
+    backend_rejected int // SSA 已验证但机器后端不支持的函数数
+    ir_cache_salt u64 // 父构建器传入的编译器二进制指纹
+    firc_write_off int // 1 = 本轮不写函数级 IR 缓存（全冷构建，见 build_scheduler）
+    workers int // 父构建器启动的模块 worker 数
+    asm int // 实际调用外部汇编器的次数
+    link int // 实际调用外部链接器的次数
+    compiler_hashes int // 实际读取编译器二进制计算指纹的次数
+    // PL1：lowering 细分计时（worker 内累计，纳秒）。
+    lower_prep_ns u64
+    lower_decl_ns u64
+    lower_build_ns u64
+    lower_verify_ns u64
+    lower_lookup_ns u64
+    lower_cache_ns u64
+    lower_fn_ns u64
+    lower_capture_ns u64
+}
+
+// SupportCtx：support 的单例。把统计/源/名字池收在一个结构里，
+// 避免每类状态各占一个模块级 `let`；新增基础状态加到本结构。
+pub struct SupportCtx {
+    stats CompileStats
+    src SourceCtx
+    pool PoolCtx
+    diag DiagCtx
+    session SessionCtx
+    cfg *TargetCfg
+    fallback TargetCfg
+}
+
+// g_support：进程内唯一的 support 状态（零初始化）。
+let g_support SupportCtx
+
+// stats：编译统计窄口；返回单例中的 stats 指针。
+pub fn stats() *CompileStats {
+    return &g_support.stats
+}
+
+// src_ctx：源文件上下文窄口；返回单例中的 src 指针。
+pub fn src_ctx() *SourceCtx {
+    return &g_support.src
+}
+
+// pool_ctx：名字池上下文窄口；返回单例中的 pool 指针。
+pub fn pool_ctx() *PoolCtx {
+    return &g_support.pool
+}
+
+// session：会话开关窄口；返回单例中的 session 指针。
+pub fn session() *SessionCtx {
+    return &g_support.session
+}
+
+// diag：诊断上下文窄口；返回单例中的 diag 指针。
+pub fn diag() *DiagCtx {
+    return &g_support.diag
+}

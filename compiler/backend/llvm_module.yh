@@ -1,5 +1,5 @@
 module backend
-import gen
+import support
 import ir
 
 // llvm_output_release：释放输出独占的两个缓冲并归零，允许空指针及重复释放。
@@ -16,7 +16,7 @@ fn llvm_byte(out *LLVMOutput, byte u8) void {
     if (out.failed != 0) { return }
     if (out.length >= 67108862) { out.failed = 1; return }
     if (out.capacity <= out.length + 1) {
-        if (gen.out_grow(&out.text, out.capacity, &out.capacity, out.length + 2) != 0) {
+        if (support.out_grow(&out.text, out.capacity, &out.capacity, out.length + 2) != 0) {
             out.failed = 1; return
         }
     }
@@ -36,12 +36,12 @@ fn llvm_text(out *LLVMOutput, text *char) void {
 // 注释不改变 LLVM 目标身份或机器码；调用方仅对 Darwin 输出调用本函数。
 pub fn llvm_output_add_macos_min_os(out *LLVMOutput, min_os *char) int {
     if (out == 0 || out.text == 0 || min_os == 0 || min_os[0] == 0) {
-        return gen.fail("Darwin LLVM 部署版本元数据无效")
+        return support.fail("Darwin LLVM 部署版本元数据无效")
     }
     llvm_text(out, "; yh-macos-min-os = ")
     llvm_text(out, min_os)
     llvm_byte(out, '\n')
-    if (out.failed != 0) { return gen.fail("Darwin LLVM 部署版本元数据缓冲失败") }
+    if (out.failed != 0) { return support.fail("Darwin LLVM 部署版本元数据缓冲失败") }
     return 0
 }
 
@@ -105,7 +105,7 @@ fn llvm_map_end(out *LLVMOutput, index int) void {
 
 // llvm_reject：直接从模块来源计算 1 基行列，不依赖 lexer 或 GenState 中的临时源码。
 fn llvm_reject(unit *ir.IRModule, source int, offset int, message *char) int {
-    if (unit == 0 || source < 0 || source >= unit.source_count) { return gen.fail(message) }
+    if (unit == 0 || source < 0 || source >= unit.source_count) { return support.fail(message) }
     let input ir.IRModuleSource = unit.sources[source]
     let line int = 1; let column int = 1; let i int = 0
     for i < offset && i < input.length {
@@ -113,13 +113,13 @@ fn llvm_reject(unit *ir.IRModule, source int, offset int, message *char) int {
         i += 1
     }
     let buffer [2048]u8
-    let n int = gen.append_str_limit(&buffer[0], 0, 1800, input.path)
-    n = gen.append_byte(&buffer[0], n, ':'); n = gen.append_int(&buffer[0], n, line)
-    n = gen.append_byte(&buffer[0], n, ':'); n = gen.append_int(&buffer[0], n, column)
-    n = gen.append_str_limit(&buffer[0], n, 2046, ": 错误: LLVM 首片：")
-    n = gen.append_str_limit(&buffer[0], n, 2046, message)
-    n = gen.append_byte(&buffer[0], n, '\n')
-    gen.write_all(2, &buffer[0], n)
+    let n int = support.append_str_limit(&buffer[0], 0, 1800, input.path)
+    n = support.append_byte(&buffer[0], n, ':'); n = support.append_int(&buffer[0], n, line)
+    n = support.append_byte(&buffer[0], n, ':'); n = support.append_int(&buffer[0], n, column)
+    n = support.append_str_limit(&buffer[0], n, 2046, ": 错误: LLVM 首片：")
+    n = support.append_str_limit(&buffer[0], n, 2046, message)
+    n = support.append_byte(&buffer[0], n, '\n')
+    support.write_all(2, &buffer[0], n)
     return -1
 }
 
@@ -147,29 +147,29 @@ fn llvm_abi_type(out *LLVMOutput, abi int, kind int, bits int) void {
     if (kind == ir.IR_MODULE_TY_FUNCTION || kind == ir.IR_TY_FN_PTR) {
         llvm_text(out, "ptr"); return
     }
-    if (abi == gen.ABI_C && kind == ir.IR_TY_BOOL) { llvm_text(out, "i1"); return }
+    if (abi == support.ABI_C && kind == ir.IR_TY_BOOL) { llvm_text(out, "i1"); return }
     llvm_type(out, kind, bits)
 }
 
 // llvm_target_same：完整核对传入目标、标准目标以及模块身份，不能只用数值 target_id。
-fn llvm_target_same(unit *ir.IRModule, target *gen.TargetInfo) int {
-    let expected gen.TargetInfo
+fn llvm_target_same(unit *ir.IRModule, target *support.TargetInfo) int {
+    let expected support.TargetInfo
     if (target == 0 || target.triple == 0 || target.data_layout == 0 || target.abi == 0
-        || gen.target_resolve(target.triple, &expected) != 0
-        || !(target.os == gen.TARGET_OS_LINUX
-            || target.os == gen.TARGET_OS_DARWIN
-                && target.arch == gen.TARGET_ARCH_ARM64
-                && gen.cstr_eq(target.abi, "darwin-aapcs64") != 0
-            || target.os == gen.TARGET_OS_WINDOWS
-                && target.arch == gen.TARGET_ARCH_X64
-                && gen.cstr_eq(target.abi, "win64-msvc") != 0)
+        || support.target_resolve(target.triple, &expected) != 0
+        || !(target.os == support.TARGET_OS_LINUX
+            || target.os == support.TARGET_OS_DARWIN
+                && target.arch == support.TARGET_ARCH_ARM64
+                && support.cstr_eq(target.abi, "darwin-aapcs64") != 0
+            || target.os == support.TARGET_OS_WINDOWS
+                && target.arch == support.TARGET_ARCH_X64
+                && support.cstr_eq(target.abi, "win64-msvc") != 0)
         || target.os != expected.os || target.arch != expected.arch
         || target.pointer_bits != expected.pointer_bits || target.little_endian != expected.little_endian
         || target.layout_version != expected.layout_version
-        || gen.cstr_eq(target.data_layout, expected.data_layout) == 0 || gen.cstr_eq(target.abi, expected.abi) == 0) { return 0 }
-    return gen.cstr_eq(unit.target.triple, target.triple) != 0 &&
-        gen.cstr_eq(unit.target.data_layout, target.data_layout) != 0 &&
-        gen.cstr_eq(unit.target.abi, target.abi) != 0 &&
+        || support.cstr_eq(target.data_layout, expected.data_layout) == 0 || support.cstr_eq(target.abi, expected.abi) == 0) { return 0 }
+    return support.cstr_eq(unit.target.triple, target.triple) != 0 &&
+        support.cstr_eq(unit.target.data_layout, target.data_layout) != 0 &&
+        support.cstr_eq(unit.target.abi, target.abi) != 0 &&
         unit.target.pointer_bits == target.pointer_bits &&
         unit.target.little_endian == target.little_endian &&
         unit.target.layout_version == target.layout_version
@@ -181,18 +181,18 @@ fn llvm_target_same(unit *ir.IRModule, target *gen.TargetInfo) int {
 // （Windows 无稳定 syscall ABI，必须经 Win32 API）。
 fn llvm_runtime_symbol_unsupported(unit *ir.IRModule, symbol *ir.IRModuleSymbol) int {
     let abi *char = unit.target.abi
-    if (gen.cstr_eq(abi, "sysv-amd64") != 0 || gen.cstr_eq(abi, "aapcs64") != 0) {
+    if (support.cstr_eq(abi, "sysv-amd64") != 0 || support.cstr_eq(abi, "aapcs64") != 0) {
         return 0
     }
-    if (gen.cstr_eq(symbol.name, "linux_syscall6") != 0) { return 1 }
-    if (gen.cstr_eq(abi, "darwin-aapcs64") != 0 || gen.cstr_eq(abi, "win64-msvc") != 0) {
+    if (support.cstr_eq(symbol.name, "linux_syscall6") != 0) { return 1 }
+    if (support.cstr_eq(abi, "darwin-aapcs64") != 0 || support.cstr_eq(abi, "win64-msvc") != 0) {
         // lowering 会把 prelude 的 malloc/free 重命名为 __yh_runtime_malloc/_free
         // （lower/module_snapshot_lower.yh），所以两种名字都算「平台已知入口」。
-        if (gen.cstr_eq(symbol.name, "malloc") != 0) { return 0 }
-        if (gen.cstr_eq(symbol.name, "__yh_runtime_malloc") != 0) { return 0 }
-        if (gen.cstr_eq(symbol.name, "free") != 0) { return 0 }
-        if (gen.cstr_eq(symbol.name, "__yh_runtime_free") != 0) { return 0 }
-        if (gen.cstr_eq(symbol.name, "printf") != 0) { return 0 }
+        if (support.cstr_eq(symbol.name, "malloc") != 0) { return 0 }
+        if (support.cstr_eq(symbol.name, "__yh_runtime_malloc") != 0) { return 0 }
+        if (support.cstr_eq(symbol.name, "free") != 0) { return 0 }
+        if (support.cstr_eq(symbol.name, "__yh_runtime_free") != 0) { return 0 }
+        if (support.cstr_eq(symbol.name, "printf") != 0) { return 0 }
         // 其余未定义符号是用户 extern/libc 调用，交由链接期解析——这里只能拒绝
         // 平台**明知没有**的入口（linux_syscall6），不能把用户 external 一并拒掉。
         return 0
@@ -220,7 +220,7 @@ fn llvm_preflight(unit *ir.IRModule) int {
         } else if (kind > ir.IR_TY_PTR && ir.ir_float_type(kind) == 0
             && !(symbol.abi == ir.IR_ABI_YH_LLVM_V1
                 && kind >= ir.IR_MODULE_TY_STRUCT && kind <= ir.IR_MODULE_TY_SLICE)
-            && !(symbol.abi == gen.ABI_C
+            && !(symbol.abi == support.ABI_C
                 && (kind == ir.IR_MODULE_TY_STRUCT || kind == ir.IR_MODULE_TY_UNION))
             && kind != ir.IR_MODULE_TY_FUNCTION
             || kind <= ir.IR_TY_PTR && llvm_type_supported(kind) == 0) {
@@ -232,7 +232,7 @@ fn llvm_preflight(unit *ir.IRModule) int {
             if (param_kind > ir.IR_TY_PTR && ir.ir_float_type(param_kind) == 0
                 && !(symbol.abi == ir.IR_ABI_YH_LLVM_V1
                     && param_kind >= ir.IR_MODULE_TY_STRUCT && param_kind <= ir.IR_MODULE_TY_SLICE)
-                && !(symbol.abi == gen.ABI_C
+                && !(symbol.abi == support.ABI_C
                     && (param_kind == ir.IR_MODULE_TY_STRUCT || param_kind == ir.IR_MODULE_TY_UNION))
                 && param_kind != ir.IR_MODULE_TY_FUNCTION
                 || param_kind <= ir.IR_TY_PTR && llvm_type_supported(param_kind) == 0) {
@@ -244,13 +244,13 @@ fn llvm_preflight(unit *ir.IRModule) int {
             && llvm_abi_supported(unit, &symbol) == 0) {
             // Windows/x64：标量与 C 按值聚合（含 >8 字节的按引用形态）都已支持
             // （W1-2b，与 clang 的 C 桩互操作）。剩余不支持的只有用户裸 C 变参。
-            if (gen.cstr_eq(unit.target.abi, "win64-msvc") != 0) {
+            if (support.cstr_eq(unit.target.abi, "win64-msvc") != 0) {
                 return llvm_reject(unit, symbol.source, symbol.offset,
                     "Windows 目标的 C ABI 不支持用户裸变参（prelude 的 printf/open 除外）")
             }
             return llvm_reject(unit, symbol.source, symbol.offset, "尚不支持该 ABI 签名")
         }
-        if (gen.cstr_eq(symbol.name, "memmove") != 0 && llvm_runtime_aggregate_copy(unit) != 0) {
+        if (support.cstr_eq(symbol.name, "memmove") != 0 && llvm_runtime_aggregate_copy(unit) != 0) {
             if (symbol.kind != ir.IR_MODULE_SYMBOL_FUNCTION || kind != ir.IR_TY_PTR
                 || symbol.param_count != 3 || unit.types[symbol.params[0]].kind != ir.IR_TY_PTR
                 || unit.types[symbol.params[1]].kind != ir.IR_TY_PTR
@@ -314,14 +314,14 @@ fn llvm_signature_return(unit *ir.IRModule, type_id int, out *LLVMOutput) void {
 
 // llvm_signature：声明/定义共用签名；C 聚合按 SysV coercion/hidden sret/byval 发射。
 fn llvm_signature(unit *ir.IRModule, symbol *ir.IRModuleSymbol, out *LLVMOutput, definition int) void {
-    if (symbol.abi == gen.ABI_C
+    if (symbol.abi == support.ABI_C
         && llvm_abi_is_aapcs64(unit) != 0
         && llvm_abi_has_c_aggregate(unit, symbol) != 0) {
         llvm_apple_abi_signature(unit, symbol, out, definition)
         return
     }
     let result ir.IRModuleType = unit.types[symbol.type_id]
-    let c_aggregate_return int = symbol.abi == gen.ABI_C &&
+    let c_aggregate_return int = symbol.abi == support.ABI_C &&
         (result.kind == ir.IR_MODULE_TY_STRUCT || result.kind == ir.IR_MODULE_TY_UNION) ? 1 : 0
     let c_result_info LLVMABIInfo
     if (c_aggregate_return != 0) { llvm_abi_classify(unit, symbol.type_id, &c_result_info) }
@@ -352,7 +352,7 @@ fn llvm_signature(unit *ir.IRModule, symbol *ir.IRModuleSymbol, out *LLVMOutput,
     let i int = 0
     for i < symbol.param_count {
         let ty ir.IRModuleType = unit.types[symbol.params[i]]
-        let c_aggregate_param int = symbol.abi == gen.ABI_C &&
+        let c_aggregate_param int = symbol.abi == support.ABI_C &&
             (ty.kind == ir.IR_MODULE_TY_STRUCT || ty.kind == ir.IR_MODULE_TY_UNION) ? 1 : 0
         if (c_aggregate_param != 0) {
             let info LLVMABIInfo
@@ -468,14 +468,14 @@ fn llvm_globals(unit *ir.IRModule, out *LLVMOutput, live *u8) void {
 
 // llvm_emit_module：只消费经过 verifier 的封闭模块；全量预检后用私有临时输出构建。
 // 成功释放旧输出并一次性转移所有权；失败保持调用方 out 原值，绝不调用旧 ARM 后端。
-pub fn llvm_emit_module(unit *ir.IRModule, target *gen.TargetInfo, out *LLVMOutput) int {
+pub fn llvm_emit_module(unit *ir.IRModule, target *support.TargetInfo, out *LLVMOutput) int {
     // PL1d2：这里原本再跑一次完整 ir_module_verify。但每个模块到达后端之前都已由
     // 生产者验证过（lowering 提交前 verifies / ir_module_deserialize 的装载路径），
     // 同一份 IR 在一个构建里被完整 verify **两次**——实测函数体校验累计 5.33 s，而
     // lowering 侧只记到 2.72 s。这里只留廉价的结构前置检查；语义校验由生产者负责，
     // 发射前的 llvm_preflight / llvm_target_same 仍会拒绝结构不完整的模块。
     if (out == 0 || ir.ir_module_sealed(unit) == 0) {
-        return gen.fail("LLVM 模块未通过 IR verifier")
+        return support.fail("LLVM 模块未通过 IR verifier")
     }
     if (llvm_target_same(unit, target) == 0) { return llvm_reject(unit, 0, 0, "完整目标身份不一致或平台尚不支持") }
     if (llvm_preflight(unit) != 0) { return -1 }
@@ -491,7 +491,7 @@ pub fn llvm_emit_module(unit *ir.IRModule, target *gen.TargetInfo, out *LLVMOutp
     let live *u8 = malloc(live_size.to_type(u64)).to_type(*u8)
     if (live == 0) {
         llvm_output_release(&temporary)
-        return gen.fail("LLVM 全局可达性缓冲分配失败")
+        return support.fail("LLVM 全局可达性缓冲分配失败")
     }
     llvm_mark_global_usage(unit, live)
     llvm_globals(unit, &temporary, live)
@@ -503,7 +503,7 @@ pub fn llvm_emit_module(unit *ir.IRModule, target *gen.TargetInfo, out *LLVMOutp
     // 同时登记到 llvm.compiler.used：linkonce_odr 是可丢弃定义，-O2 的 GlobalDCE
     // 会在“本对象没引用 _fltused”时删掉它，而引用方常常是**另一个**对象
     // （含浮点的模块），lld-link 随即报 undefined symbol（O0 不复现）。
-    if (gen.cstr_eq(unit.target.abi, "win64-msvc") != 0) {
+    if (support.cstr_eq(unit.target.abi, "win64-msvc") != 0) {
         llvm_text(&temporary, "$_fltused = comdat any\n@_fltused = linkonce_odr global i32 0, comdat($_fltused)\n@llvm.compiler.used = appending global [1 x ptr] [ptr @_fltused], section \"llvm.metadata\"\n")
     }
     // 聚合副本的源/目标可能别名；独立于用户 memcpy 的不重叠运行时契约。
@@ -531,7 +531,7 @@ pub fn llvm_emit_module(unit *ir.IRModule, target *gen.TargetInfo, out *LLVMOutp
     for i < unit.function_count { llvm_function(unit, &unit.functions[i], &temporary); i += 1 }
     // LL8a：内存运行时入口（weak 定义 + llvm.used）；模块已有同名符号时让位。
     llvm_runtime_memory_text(unit, &temporary)
-    if (temporary.failed != 0) { llvm_output_release(&temporary); return gen.fail("LLVM 文本或来源映射缓冲分配失败/过大") }
+    if (temporary.failed != 0) { llvm_output_release(&temporary); return support.fail("LLVM 文本或来源映射缓冲分配失败/过大") }
     llvm_output_release(out)
     out[0] = temporary
     return 0

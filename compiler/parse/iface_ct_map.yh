@@ -1,4 +1,6 @@
 module parse
+import token
+import support
 import gen
 import comptime
 
@@ -56,7 +58,7 @@ fn iface_ct_col_grow() int {
     let next *IfaceCtColMap = malloc(
         (next_cap * sizeof(IfaceCtColMap)).to_type(u64)) .
         to_type(*IfaceCtColMap)
-    if (next == 0) { return gen.fail("CT 列映射分配失败") }
+    if (next == 0) { return support.fail("CT 列映射分配失败") }
     if (if_ct_col_n > 0) {
         memcpy(next, if_ct_col_maps,
             (if_ct_col_n * sizeof(IfaceCtColMap)).to_type(u64))
@@ -164,12 +166,12 @@ fn iface_ct_col_digit(byte u8) int {
 // iface_ct_col_read_number：读取一个以空格分隔的非负十进制整数。
 fn iface_ct_col_read_number(tk *gen.TaskCtx, pos *int, end int,
     value *int) int {
-    for pos[0] < end && tk.c_src[pos[0]] == ' ' { pos[0] += 1 }
+    for pos[0] < end && support.src_ctx().data[pos[0]] == ' ' { pos[0] += 1 }
     if (pos[0] >= end) { return -1 }
     let number int = 0
     let digits int = 0
-    for pos[0] < end && tk.c_src[pos[0]] != ' ' {
-        let digit int = iface_ct_col_digit(tk.c_src[pos[0]])
+    for pos[0] < end && support.src_ctx().data[pos[0]] != ' ' {
+        let digit int = iface_ct_col_digit(support.src_ctx().data[pos[0]])
         if (digit < 0 || number > 100000000) { return -1 }
         number = number * 10 + digit
         digits += 1
@@ -188,7 +190,7 @@ fn iface_ct_col_parse(tk *gen.TaskCtx, start int, end int) int {
     if (end - start < prefix_len) { return 0 }
     let i int = 0
     for i < prefix_len {
-        if (tk.c_src[start + i] != prefix[i].to_type(u8)) { return 0 }
+        if (support.src_ctx().data[start + i] != prefix[i].to_type(u8)) { return 0 }
         i += 1
     }
     let pos int = start + prefix_len
@@ -198,14 +200,14 @@ fn iface_ct_col_parse(tk *gen.TaskCtx, start int, end int) int {
             &if_ct_col_body_col) != 0
         || count > 8192 || if_ct_col_body_col <= 0) {
         iface_ct_col_reset()
-        return gen.fail_path("CT 列映射格式无效: ", tk.c_path)
+        return support.fail_path("CT 列映射格式无效: ", support.src_ctx().path)
     }
     if (count > 0) {
         if_ct_col_maps = malloc((count * sizeof(IfaceCtColMap)).to_type(u64)) .
             to_type(*IfaceCtColMap)
         if (if_ct_col_maps == 0) {
             iface_ct_col_reset()
-            return gen.fail("CT 列映射分配失败")
+            return support.fail("CT 列映射分配失败")
         }
         if_ct_col_cap = count
     }
@@ -237,15 +239,15 @@ fn iface_ct_col_parse(tk *gen.TaskCtx, start int, end int) int {
             || row.src_after_line - row.src_start_line
                 != row.gen_after_line - row.gen_start_line) {
             iface_ct_col_reset()
-            return gen.fail_path("CT 列映射条目无效: ", tk.c_path)
+            return support.fail_path("CT 列映射条目无效: ", support.src_ctx().path)
         }
         if_ct_col_maps[i] = row
         i += 1
     }
-    for pos < end && tk.c_src[pos] == ' ' { pos += 1 }
+    for pos < end && support.src_ctx().data[pos] == ' ' { pos += 1 }
     if (pos != end) {
         iface_ct_col_reset()
-        return gen.fail_path("CT 列映射尾部无效: ", tk.c_path)
+        return support.fail_path("CT 列映射尾部无效: ", support.src_ctx().path)
     }
     if_ct_col_n = count
     return 1
@@ -256,22 +258,22 @@ fn iface_ct_col_apply(tk *gen.TaskCtx, body_token int,
     body_after int, origin_line int) int {
     if (if_ct_col_n <= 0) { return 0 }
     let count int = body_after - body_token
-    if (count <= 0) { return gen.fail("CT 列映射函数体范围无效") }
+    if (count <= 0) { return support.fail("CT 列映射函数体范围无效") }
     if_ct_col_saved = malloc((count * sizeof(IfaceCtTokPosition)).to_type(u64)) .
         to_type(*IfaceCtTokPosition)
-    if (if_ct_col_saved == 0) { return gen.fail("CT token 位置快照分配失败") }
-    let brace_line int = tk.c_toks[body_token].line
-    let brace_col int = tk.c_toks[body_token].col
+    if (if_ct_col_saved == 0) { return support.fail("CT token 位置快照分配失败") }
+    let brace_line int = token.ctx().tokens[body_token].line
+    let brace_col int = token.ctx().tokens[body_token].col
     let i int = 0
     for i < count {
         let token_index int = body_token + i
         if_ct_col_saved[i].index = token_index
-        if_ct_col_saved[i].line = tk.c_toks[token_index].line
-        if_ct_col_saved[i].col = tk.c_toks[token_index].col
+        if_ct_col_saved[i].line = token.ctx().tokens[token_index].line
+        if_ct_col_saved[i].col = token.ctx().tokens[token_index].col
         if_ct_col_saved_n += 1
-        let token_line int = tk.c_toks[token_index].line - brace_line
-        let original_col int = tk.c_toks[token_index].col
-        let token_col int = tk.c_toks[token_index].col
+        let token_line int = token.ctx().tokens[token_index].line - brace_line
+        let original_col int = token.ctx().tokens[token_index].col
+        let token_col int = token.ctx().tokens[token_index].col
         if (token_line == 0) { token_col -= brace_col }
         let edit int = 0
         let mapped int = 0
@@ -286,13 +288,13 @@ fn iface_ct_col_apply(tk *gen.TaskCtx, body_token int,
                     && token_col < row.gen_end_col)).to_type(int)
             if (after_start != 0 && before_end != 0) {
                 let source_line int = origin_line + row.src_start_line
-                tk.c_toks[token_index].line = source_line -
-                    tk.c_diag_line_bias
+                token.ctx().tokens[token_index].line = source_line -
+                    support.diag().line_bias
                 let source_col int = row.src_start_col
                 if (row.src_start_line == 0) {
-                    tk.c_toks[token_index].col = if_ct_col_body_col +
+                    token.ctx().tokens[token_index].col = if_ct_col_body_col +
                         source_col
-                } else { tk.c_toks[token_index].col = source_col }
+                } else { token.ctx().tokens[token_index].col = source_col }
                 mapped = 1
                 break
             }
@@ -304,11 +306,11 @@ fn iface_ct_col_apply(tk *gen.TaskCtx, body_token int,
             edit += 1
         }
         if (mapped == 0) {
-            tk.c_toks[token_index].col = original_col + col_delta
+            token.ctx().tokens[token_index].col = original_col + col_delta
         }
-        if (mapped == 0 && tk.c_toks[token_index].col <= 0) {
-            return gen.err_lc(tk.c_toks[token_index].line,
-                tk.c_toks[token_index].col, "CT 列映射产生无效列号")
+        if (mapped == 0 && token.ctx().tokens[token_index].col <= 0) {
+            return support.err_lc(token.ctx().tokens[token_index].line,
+                token.ctx().tokens[token_index].col, "CT 列映射产生无效列号")
         }
         i += 1
     }
@@ -320,9 +322,9 @@ fn iface_ct_col_restore(tk *gen.TaskCtx) void {
     let i int = 0
     for i < if_ct_col_saved_n {
         let token_index int = if_ct_col_saved[i].index
-        if (token_index >= 0 && token_index < tk.c_tok_n) {
-            tk.c_toks[token_index].line = if_ct_col_saved[i].line
-            tk.c_toks[token_index].col = if_ct_col_saved[i].col
+        if (token_index >= 0 && token_index < token.ctx().count) {
+            token.ctx().tokens[token_index].line = if_ct_col_saved[i].line
+            token.ctx().tokens[token_index].col = if_ct_col_saved[i].col
         }
         i += 1
     }

@@ -1,4 +1,5 @@
 module build
+import support
 import gen
 import parse
 import ir
@@ -28,7 +29,7 @@ import link
 //
 // 项目名与模块名都来自用户输入，`proj.mod_tag` 用 [512]u8 临时缓冲拼接，
 // 派生的接口/对象路径又写进 600/700/900 字节的定长缓冲。两个名字不限长时
-// 会写穿栈（且 `gen.append_str` 不做容量检查）。这里在源头设预算：
+// 会写穿栈（且 `support.append_str` 不做容量检查）。这里在源头设预算：
 //   构建目录 ≤ 400，标记 ≤ 120，派生路径最长 400 + 7 + 120 + 5 + 1 = 533，
 //   低于最小的 600 字节缓冲；超限给出可操作诊断而不是崩溃。
 const MB_BUILD_DIR_MAX int = 400
@@ -78,7 +79,7 @@ pub fn mb_intern_arg(s *char, olen *int) int {
         sl += 1
     }
     olen[0] = sl
-    return gen.tml_intern_str(s.to_type(*u8), 0, sl)
+    return support.tml_intern_str(s.to_type(*u8), 0, sl)
 }
 
 // mb_try_default_stdlib：尝试 dir+suffix 下的标准库项目。
@@ -101,9 +102,9 @@ fn mb_try_default_stdlib(dir *char, suffix *char) int {
         n += 1
         i0 += 1
     }
-    n = gen.append_str(path, n, suffix)
+    n = support.append_str(path, n, suffix)
     path[n] = 0
-    if (proj.canon(0, 0, gen.arr_cstr(path), &c_off, &c_len) != 0) {
+    if (proj.canon(0, 0, support.arr_cstr(path), &c_off, &c_len) != 0) {
         return 0
     }
     let cand_off int = c_off
@@ -112,13 +113,13 @@ fn mb_try_default_stdlib(dir *char, suffix *char) int {
     let mn int = 0
     let i int = 0
     for i < cand_len {
-        manifest[mn] = tk.np_data[cand_off + i]
+        manifest[mn] = support.pool_ctx().data[cand_off + i]
         mn += 1
         i += 1
     }
-    mn = gen.append_str(manifest, mn, "/project.toml")
+    mn = support.append_str(manifest, mn, "/project.toml")
     manifest[mn] = 0
-    if (proj.file_exists(gen.arr_cstr(manifest)) == 0) {
+    if (proj.file_exists(support.arr_cstr(manifest)) == 0) {
         return 0
     }
     let loaded int = pj_load_project(cand_off, cand_len)
@@ -162,15 +163,15 @@ fn mb_load_default_stdlib() int {
         dn = 1
     }
     dir[dn] = 0
-    let found int = mb_try_default_stdlib(gen.arr_cstr(dir), "/libs")
+    let found int = mb_try_default_stdlib(support.arr_cstr(dir), "/libs")
     if (found != 0) {
         return found < 0 ? -1 : 0
     }
-    found = mb_try_default_stdlib(gen.arr_cstr(dir), "/../libs")
+    found = mb_try_default_stdlib(support.arr_cstr(dir), "/../libs")
     if (found != 0) {
         return found < 0 ? -1 : 0
     }
-    found = mb_try_default_stdlib(gen.arr_cstr(dir), "/../share/yh/libs")
+    found = mb_try_default_stdlib(support.arr_cstr(dir), "/../share/yh/libs")
     if (found != 0) {
         return found < 0 ? -1 : 0
     }
@@ -233,7 +234,7 @@ fn mb_ensure_binary_dir(root_off int, root_len int) int {
         return -1
     }
     if (link.cmd_mkdirs(proj.pool_str(c_off)) != 0) {
-        return gen.fail_path("无法创建产物目录: ", proj.pool_str(c_off))
+        return support.fail_path("无法创建产物目录: ", proj.pool_str(c_off))
     }
     return 0
 }
@@ -246,10 +247,10 @@ pub fn mb_select_links(links []*char) int {
         let link_arg *char = links[i]
         let ll int = 0
         for link_arg[ll] != 0 { ll += 1 }
-        let lo int = gen.tml_intern_str(link_arg.to_type(*u8), 0, ll)
+        let lo int = support.tml_intern_str(link_arg.to_type(*u8), 0, ll)
         if (lo < 0) { return -1 }
         if (pl_group_name_ok(lo, ll) == 0) {
-            gen.fail("--link 组名只能包含字母、数字、_、-")
+            support.fail("--link 组名只能包含字母、数字、_、-")
             return 2
         }
         if (link.li_select_add(lo, ll) != 0) { return -1 }
@@ -278,26 +279,26 @@ pub fn mb_cmd_build(out_path *char, module_arg *char, has_module int, links []*c
     if (has_module != 0 && module_arg != 0) {
         let sl int = 0
         for module_arg[sl] != 0 { sl += 1 }
-        let mo int = gen.tml_intern_str(module_arg.to_type(*u8), 0, sl)
+        let mo int = support.tml_intern_str(module_arg.to_type(*u8), 0, sl)
         if (mo < 0) { return -1 }
         mod_arg_off = mo
         mod_arg_len = sl
         mod_arg_n = 1
     }
-    if (tk.c_check_only != 0 && link.li_select_count() > 0) {
-        gen.fail("yh check 不支持 --link")
+    if (support.session().check_only != 0 && link.li_select_count() > 0) {
+        support.fail("yh check 不支持 --link")
         return 2
     }
     bc().build_start_ns = 0
     bc().project_ns = 0
     bc().schedule_ns = 0
     link.reset_timings()
-    if (gen.stats().enabled != 0) {
-        bc().build_start_ns = gen.clock_ns()
+    if (support.stats().enabled != 0) {
+        bc().build_start_ns = support.clock_ns()
     }
-    tk.c_path = "yh"
+    support.src_ctx().path = "yh"
     // 父进程建立可继承的只读前端快照，fork worker 不再重扫项目源码。
-    gen.stats().front_cache = 1
+    support.stats().front_cache = 1
     if (mb_load_stdlib() != 0) {
         return 1
     }
@@ -323,19 +324,19 @@ pub fn mb_cmd_build(out_path *char, module_arg *char, has_module int, links []*c
         if (rootmod < 0) {
             let buf [128]u8
             let n int = 0
-            n = gen.append_str(buf, n, "本项目没有模块: ")
-            n = gen.append_np(buf, n, mod_arg_off, mod_arg_len)
-            let mo4 int = gen.tml_intern_str(buf, 0, n)
+            n = support.append_str(buf, n, "本项目没有模块: ")
+            n = support.append_np(buf, n, mod_arg_off, mod_arg_len)
+            let mo4 int = support.tml_intern_str(buf, 0, n)
             if (mo4 < 0) {
                 return -1
             }
-            return gen.fail(gen.np_cstr(mo4))
+            return support.fail(support.np_cstr(mo4))
         }
     } else {
         rootmod = pj_entry_mod(pj)
     }
     if (rootmod < 0 && link.li_select_count() > 0) {
-        gen.fail("库项目没有可链接产物，--link 不适用")
+        support.fail("库项目没有可链接产物，--link 不适用")
         return 2
     }
     // topo（依赖序）
@@ -360,23 +361,23 @@ pub fn mb_cmd_build(out_path *char, module_arg *char, has_module int, links []*c
     if (mb_mkdir(proj.pool_str(build_off)) != 0) {
         return 1
     }
-    if (gen.stats().enabled != 0) {
-        bc().project_ns = gen.clock_ns() - bc().build_start_ns
+    if (support.stats().enabled != 0) {
+        bc().project_ns = support.clock_ns() - bc().build_start_ns
     }
     let schedule_start_ns u64 = 0
-    if (gen.stats().enabled != 0) {
-        schedule_start_ns = gen.clock_ns()
+    if (support.stats().enabled != 0) {
+        schedule_start_ns = support.clock_ns()
     }
     if (mb_schedule_modules(count, root_off, root_len, build_off, build_len) != 0) {
-        if (tk.c_check_only != 0) {
+        if (support.session().check_only != 0) {
             mb_check_clear_ifaces(build_off, build_len, count)
         }
         return 1
     }
-    if (gen.stats().enabled != 0) {
-        bc().schedule_ns = gen.clock_ns() - schedule_start_ns
+    if (support.stats().enabled != 0) {
+        bc().schedule_ns = support.clock_ns() - schedule_start_ns
     }
-    if (tk.c_check_only != 0) {
+    if (support.session().check_only != 0) {
         mb_check_clear_ifaces(build_off, build_len, count)
         pj_out_s("检查通过: ")
         pj_out_np(proj.ctx().projs[pj].name_off, proj.ctx().projs[pj].name_len)
@@ -389,7 +390,7 @@ pub fn mb_cmd_build(out_path *char, module_arg *char, has_module int, links []*c
         let outbuf [620]u8
         let on int = 0
         if (out_arg != 0) {
-            on = gen.append_str(outbuf, on, out_arg)
+            on = support.append_str(outbuf, on, out_arg)
         } else {
             // 无 -o：产物名取清单 project.name
             if (mb_ensure_binary_dir(root_off, root_len) != 0) { return 1 }
@@ -399,11 +400,11 @@ pub fn mb_cmd_build(out_path *char, module_arg *char, has_module int, links []*c
             for outbuf[on] != 0 { on += 1 }
         }
         outbuf[on] = 0
-        if (link.mb_link(gen.arr_cstr(outbuf), build_off, build_len, count, pj) != 0) {
+        if (link.mb_link(support.arr_cstr(outbuf), build_off, build_len, count, pj) != 0) {
             return 1
         }
         pj_out_s("构建完成: ")
-        pj_out_s(gen.arr_cstr(outbuf))
+        pj_out_s(support.arr_cstr(outbuf))
         pj_out_s("\n")
         mb_print_stats()
         return 0
@@ -427,8 +428,8 @@ pub fn mb_cmd_run(links []*char) int {
     if (link_rc != 0) {
         return link_rc
     }
-    tk.c_path = "yh"
-    gen.stats().front_cache = 1
+    support.src_ctx().path = "yh"
+    support.stats().front_cache = 1
     if (mb_load_stdlib() != 0) {
         return 1
     }
@@ -443,11 +444,11 @@ pub fn mb_cmd_run(links []*char) int {
     if (pj < 0) {
         return 1
     }
-    if (gen.target_matches_host() == 0) {
-        return gen.fail("yh run 的目标平台必须与宿主一致；跨目标请用 yh build")
+    if (support.target_matches_host() == 0) {
+        return support.fail("yh run 的目标平台必须与宿主一致；跨目标请用 yh build")
     }
     if (pj_entry_mod(pj) < 0) {
-        return gen.fail("库项目没有入口，无法 run（需要一个 module main;）")
+        return support.fail("库项目没有入口，无法 run（需要一个 module main;）")
     }
     if (pj_bind_imports() != 0) {
         return 1
@@ -473,13 +474,13 @@ pub fn mb_cmd_run(links []*char) int {
     let bn int = proj.default_binary_path(root_off, root_len, build_off,
         pj, &binbuf[0])
     if (bn < 0) { return 1 }
-    if (link.mb_link(gen.arr_cstr(binbuf), build_off, build_len, count, pj) != 0) {
+    if (link.mb_link(support.arr_cstr(binbuf), build_off, build_len, count, pj) != 0) {
         return 1
     }
     if (link.li_apply_runtime_env() != 0) { return 1 }
     // 运行（继承 stdout/stderr；退出码由 waitpid 状态字解码）。
     let args [2]*char
-    args[0] = gen.arr_cstr(binbuf)
+    args[0] = support.arr_cstr(binbuf)
     args[1] = 0.to_type(*char)
     let rc int = link.cmd_process_run(&args[0])
     return rc < 0 ? 1 : rc
@@ -495,23 +496,23 @@ pub fn mb_cmd_run(links []*char) int {
 pub fn mb_print_contracts() int {
     let buf [512]u8
     let n int = 0
-    n = gen.append_str(&buf[0], n, "iface-min=")
-    n = gen.append_int(&buf[0], n, parse.IFACE_VERSION_MIN)
-    n = gen.append_byte(&buf[0], n, '\n')
-    n = gen.append_str(&buf[0], n, "iface-max=")
-    n = gen.append_int(&buf[0], n, parse.IFACE_VERSION_MAX)
-    n = gen.append_byte(&buf[0], n, '\n')
-    n = gen.append_str(&buf[0], n, "ctiface=")
-    n = gen.append_int(&buf[0], n, parse.CTIFACE_VERSION)
-    n = gen.append_byte(&buf[0], n, '\n')
-    n = gen.append_str(&buf[0], n, "ir-function=")
-    n = gen.append_int(&buf[0], n, ir.IR_SERIAL_VERSION)
-    n = gen.append_byte(&buf[0], n, '\n')
-    n = gen.append_str(&buf[0], n, "ir-module=")
-    n = gen.append_int(&buf[0], n, ir.IR_MODULE_SERIAL_VERSION)
-    n = gen.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, "iface-min=")
+    n = support.append_int(&buf[0], n, parse.IFACE_VERSION_MIN)
+    n = support.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, "iface-max=")
+    n = support.append_int(&buf[0], n, parse.IFACE_VERSION_MAX)
+    n = support.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, "ctiface=")
+    n = support.append_int(&buf[0], n, parse.CTIFACE_VERSION)
+    n = support.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, "ir-function=")
+    n = support.append_int(&buf[0], n, ir.IR_SERIAL_VERSION)
+    n = support.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, "ir-module=")
+    n = support.append_int(&buf[0], n, ir.IR_MODULE_SERIAL_VERSION)
+    n = support.append_byte(&buf[0], n, '\n')
     buf[n] = 0
-    pj_out_s(gen.arr_cstr(&buf[0]))
+    pj_out_s(support.arr_cstr(&buf[0]))
     return 0
 }
 
@@ -546,12 +547,12 @@ pub fn mb_cmd_list(resolve *char, has_resolve int) int {
     if (has_resolve != 0 && resolve != 0) {
         let sl int = 0
         for resolve[sl] != 0 { sl += 1 }
-        let mo int = gen.tml_intern_str(resolve.to_type(*u8), 0, sl)
+        let mo int = support.tml_intern_str(resolve.to_type(*u8), 0, sl)
         if (mo < 0) { return -1 }
         resolve_off = mo
         resolve_len = sl
     }
-    tk.c_path = "yh"
+    support.src_ctx().path = "yh"
     if (mb_load_stdlib() != 0) {
         return 1
     }

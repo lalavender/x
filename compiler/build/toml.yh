@@ -1,4 +1,5 @@
 module build
+import support
 import gen
 
 // ============================================================================
@@ -61,47 +62,47 @@ let t_file *char = 0       // 诊断用清单路径（借调用方，不复制�
 fn tml_err(line int, msg *char) int {
     let buf [512]u8
     let n int = 0
-    n = gen.append_str_cap(buf, 512, n, t_file)
-    n = gen.append_byte_cap(buf, 512, n, ':')
-    n = gen.append_int_cap(buf, 512, n, line)
-    n = gen.append_str_cap(buf, 512, n, ": 错误: ")
-    n = gen.append_str_cap(buf, 512, n, msg)
-    n = gen.append_byte_cap(buf, 512, n, '\n')
-    gen.write_all(2, buf, n)
+    n = support.append_str_cap(buf, 512, n, t_file)
+    n = support.append_byte_cap(buf, 512, n, ':')
+    n = support.append_int_cap(buf, 512, n, line)
+    n = support.append_str_cap(buf, 512, n, ": 错误: ")
+    n = support.append_str_cap(buf, 512, n, msg)
+    n = support.append_byte_cap(buf, 512, n, '\n')
+    support.write_all(2, buf, n)
     return -1
 }
 
 // tml_intern：把 [start,start+n) 字节 intern 进名字池并带 NUL（调试用）。
 fn tml_intern(start int, n int) int {
     let tk *gen.TaskCtx = gen.task()
-    let off int = tk.np_len
+    let off int = support.pool_ctx().length
     let i int = 0
     // name_intern 从 c_src 取字节；project.toml 不在 c_src，手工入池
-    let need int = tk.np_len + n + 1
-    if (need > tk.np_cap) {
-        let ncap int = tk.np_cap * 2
+    let need int = support.pool_ctx().length + n + 1
+    if (need > support.pool_ctx().cap) {
+        let ncap int = support.pool_ctx().cap * 2
         if (ncap < need) {
             ncap = need
         }
         let nd *u8 = malloc(ncap.to_type(u64)).to_type(*u8)
         if (nd == 0) {
-            gen.fail("内存分配失败")
+            support.fail("内存分配失败")
             return -1
         }
-        if (tk.np_len > 0) {
-            memcpy(nd, tk.np_data, tk.np_len.to_type(u64))
+        if (support.pool_ctx().length > 0) {
+            memcpy(nd, support.pool_ctx().data, support.pool_ctx().length.to_type(u64))
         }
-        free(tk.np_data)
-        tk.np_data = nd
-        tk.np_cap = ncap
+        free(support.pool_ctx().data)
+        support.pool_ctx().data = nd
+        support.pool_ctx().cap = ncap
     }
     for i < n {
-        tk.np_data[tk.np_len] = t_src[start + i]
-        tk.np_len += 1
+        support.pool_ctx().data[support.pool_ctx().length] = t_src[start + i]
+        support.pool_ctx().length += 1
         i += 1
     }
-    tk.np_data[tk.np_len] = 0
-    tk.np_len += 1
+    support.pool_ctx().data[support.pool_ctx().length] = 0
+    support.pool_ctx().length += 1
     return off
 }
 
@@ -143,12 +144,12 @@ fn tml_sec_find(name_off int, name_len int) int {
     let i int = 0
     for i < toml_sec_n {
         if (toml_secs[i].name_len == name_len
-            && tk.np_data[toml_secs[i].name_off] == tk.np_data[name_off]) {
+            && support.pool_ctx().data[toml_secs[i].name_off] == support.pool_ctx().data[name_off]) {
             // 节名较短，逐字节比较
             let match int = 1
             let j int = 1
             for j < name_len {
-                if (tk.np_data[toml_secs[i].name_off + j] != tk.np_data[name_off + j]) {
+                if (support.pool_ctx().data[toml_secs[i].name_off + j] != support.pool_ctx().data[name_off + j]) {
                     match = 0
                     break
                 }
@@ -179,7 +180,7 @@ fn tml_sec_push(name_start int, name_len int) int {
         }
         let nd *TomlSec = malloc((ncap * sizeof(TomlSec)).to_type(u64)).to_type(*TomlSec)
         if (nd == 0) {
-            return gen.fail("内存分配失败")
+            return support.fail("内存分配失败")
         }
         if (toml_sec_n > 0) {
             memcpy(nd, toml_secs, (toml_sec_n * sizeof(TomlSec)).to_type(u64))
@@ -207,7 +208,7 @@ fn tml_val_push(sec int, v *TomlVal) int {
         }
         let nd *TomlVal = malloc((ncap * sizeof(TomlVal)).to_type(u64)).to_type(*TomlVal)
         if (nd == 0) {
-            return gen.fail("内存分配失败")
+            return support.fail("内存分配失败")
         }
         if (toml_secs[sec].val_n > 0) {
             memcpy(nd, toml_secs[sec].vals, (toml_secs[sec].val_n * sizeof(TomlVal)).to_type(u64))
@@ -250,7 +251,7 @@ fn tml_string(v *TomlVal) int {
             return tml_err(v.line, "字符串未终结")
         }
         v.kind = 1
-        v.sval_off = gen.tml_intern_str(t_src, start, t_pos - start)
+        v.sval_off = support.tml_intern_str(t_src, start, t_pos - start)
         v.sval_len = t_pos - start
         t_pos += 1
         return 0
@@ -262,7 +263,7 @@ fn tml_string(v *TomlVal) int {
         let b u8 = t_src[t_pos]
         if (b == '"') {
             v.kind = 1
-            v.sval_off = gen.tml_intern_str(tmp, 0, n)
+            v.sval_off = support.tml_intern_str(tmp, 0, n)
             v.sval_len = n
             t_pos += 1
             return 0
@@ -357,7 +358,7 @@ fn tml_array_push(off int, n int) int {
         if (ncap == 0) { ncap = 16 }
         let next *TomlArrayItem = malloc(
             (ncap * sizeof(TomlArrayItem)).to_type(u64)).to_type(*TomlArrayItem)
-        if (next == 0) { return gen.fail("TOML 字符串数组内存分配失败") }
+        if (next == 0) { return support.fail("TOML 字符串数组内存分配失败") }
         if (toml_array_n > 0) {
             memcpy(next, toml_array_items,
                 (toml_array_n * sizeof(TomlArrayItem)).to_type(u64))
@@ -543,7 +544,7 @@ fn toml_find_sec(name *char) int {
             let match int = 1
             let j int = 0
             for j < n {
-                if (tk.np_data[toml_secs[i].name_off + j] != name[j].to_type(u8)) {
+                if (support.pool_ctx().data[toml_secs[i].name_off + j] != name[j].to_type(u8)) {
                     match = 0
                     break
                 }
@@ -575,7 +576,7 @@ fn toml_sec_str(sec int, key *char, off *int, olen *int) int {
             let match int = 1
             let j int = 0
             for j < n {
-                if (tk.np_data[toml_secs[sec].vals[i].key_off + j] != key[j].to_type(u8)) {
+                if (support.pool_ctx().data[toml_secs[sec].vals[i].key_off + j] != key[j].to_type(u8)) {
                     match = 0
                     break
                 }
@@ -585,13 +586,13 @@ fn toml_sec_str(sec int, key *char, off *int, olen *int) int {
                 if (toml_secs[sec].vals[i].kind != 1) {
                     let buf [64]u8
                     let m int = 0
-                    m = gen.append_str(buf, m, "字段必须是字符串: ")
-                    m = gen.append_str(buf, m, key)
-                    let mo int = gen.tml_intern_str(buf, 0, m)
+                    m = support.append_str(buf, m, "字段必须是字符串: ")
+                    m = support.append_str(buf, m, key)
+                    let mo int = support.tml_intern_str(buf, 0, m)
                     if (mo < 0) {
                         return -1
                     }
-                    return tml_err(toml_secs[sec].vals[i].line, gen.np_cstr(mo))
+                    return tml_err(toml_secs[sec].vals[i].line, support.np_cstr(mo))
                 }
                 off[0] = toml_secs[sec].vals[i].sval_off
                 olen[0] = toml_secs[sec].vals[i].sval_len

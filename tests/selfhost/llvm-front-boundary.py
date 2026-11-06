@@ -59,8 +59,18 @@ def main():
     project = WORK / "model"
     shutil.rmtree(project, ignore_errors=True)
     shutil.copytree(ROOT / "tests/modules/projects/llvmtarget", project)
+    shutil.copytree(ROOT / "compiler/support", project / "support")
+    (project / "support/project.toml").write_text(
+        '[project]\nos = "host"\narch = "host"\nname = "support"\nsource = "."\n')
+    shutil.copytree(ROOT / "compiler/token", project / "token")
+    (project / "token/project.toml").write_text(
+        '[project]\nos = "host"\narch = "host"\nname = "token"\nsource = "."\n'
+        '[dependencies]\nsupport = { path = "../support" }\n')
     shutil.copytree(ROOT / "compiler/gen", project / "gen")
-    (project / "gen/project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n')
+    (project / "gen/project.toml").write_text(
+        '[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n'
+        '[dependencies]\nsupport = { path = "../support" }\n'
+        'token = { path = "../token" }\n')
     result = run([str(compiler), "build"], cwd=project)
     assert result.returncode == 0, result.stdout + result.stderr
     result = run([str(project / ".build/llvmtarget")])

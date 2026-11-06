@@ -1,4 +1,5 @@
 module gen
+import support
 
 // ============================================================================
 // state.yh —— gen 模块编译器全局状态包（pub let 废除 2026-10-02）
@@ -6,8 +7,8 @@ module gen
 // GenState 把原先 208 个跨模块 pub let 可变全局收进单一结构体：语言规则
 // 「let 不导出」后，可变状态的跨模块共享只能经指针进行。g_state 是模块
 // 私有实例（BSS 零初始化）。跨模块只经窄口访问（B1-4 起不再导出 G()）：
-// `gen.task()` 拿每任务上下文、`gen.stats()` 拿统计、`gen.module_mode()` 等
-// 读构建开关；gen 模块内部直接写 `g_state.task.c_pos`。
+// `gen.task()` 拿每任务上下文、`support.stats()` 拿统计、`support.module_mode()` 等
+// 读构建开关；gen 模块内部直接写 `token.ctx().pos`。
 // 非零初始值由 state_init() 在编译入口显式设置（原声明初始化器迁移）。
 // ============================================================================
 
@@ -16,7 +17,7 @@ module gen
 // worker 主路径与将来线程池以 *TaskCtx 为任务私有上下文。
 // B1 之后 GenState 只剩两项：`c_cfg`（目标/配置的存储指针，实体在 proj）
 // 与 `task`；项目表在 proj.ProjectCtx、统计在 CompileStats。三个入口分别是
-// gen.cfg()（模块私有）、gen.task()/gen.stats()（跨模块窄口）。
+// support.cfg()（模块私有）、gen.task()/support.stats()（跨模块窄口）。
 // 偏移变化说明：字段偏移进入机器码立即数，本步由固定点门（A==B）
 // 保证自洽，不与上一代产物对比。
 
@@ -26,33 +27,13 @@ module gen
 // worker 线程私有持有（RS1d 改 *TaskCtx 显式传递）。
 pub struct TaskCtx {
 
-    c_src *u8 // 源文件字节（read_source 分配，进程生命期持有）
-    c_src_len int // 源字节长度
     lx_line int // 词法扫描当前行号（1 基）
     lx_lstart int // 当前行首字节下标（用于换算列号）
-    c_toks *Tok // token 数组首址（malloc）
-    c_tok_n int // 已存 token 数
-    c_tok_cap int // 已分配槽位数
-    c_ir_reject_reason int // 最近函数的拒绝阶段：1上下文、2签名、3绑定、4返回、5函数体、6语句表达式、7落底
-    c_pos int // 当前 token 下标（解析游标）
-    c_spec int // 推测解析深度：>0 时诊断静默且不计数
-    c_ctx_block int // 表达式块上下文：1 表示该表达式之后可能紧跟
-    c_file_decls *PDecl // 当前文件只读顶层声明索引（项目 worker）
-    c_file_decl_n int // 当前文件声明索引数量
-    c_file_decl_i int // 当前正解析声明的索引（函数签名跳过函数体用）
-    c_file_indexed int // 1 = 当前 token 表带项目扫描期声明索引
-    c_errors int // 已报告的错误数（推测解析不计入）
-    c_path *char // 当前源文件路径（借自 argv，不复制不释放）
-    c_path_buf *u8 // [任务私有] worker 路径快照（堆分配倍增扩容），避免名字池扩容后诊断指针失效
-    c_path_buf_cap int // 路径快照缓冲容量；任务生命期持有不释放，进程退出统一回收
     c_ct_iface_mode int // 1 = 正在读取 .s.ct，允许识别生成的来源映射注释
     c_ct_origin_active int // 1 = 当前声明从 .s.ct 来源映射切换到定义源码
     c_ct_origin_line int // 当前 CT 函数定义源码体起始行
     c_ct_origin_buf *u8 // [任务私有] .s.ct 来源映射解码路径（堆分配倍增扩容），独立于 sidecar 路径
     c_ct_origin_buf_cap int // 来源映射路径缓冲容量；同样任务生命期持有
-    c_diag_line_bias int // err_lc/warn_lc 当前行号映射偏移
-    c_compile int // 0 = 纯语法模式（--syntax-check）；1 = 编译模式
-    c_pass int // 1 = 顶层扫描登记；2 = 函数体编译与全局初始化
     t_types *CType
     t_type_n int
     t_type_cap int
@@ -87,26 +68,10 @@ pub struct TaskCtx {
     c_ct_diag_stmt int // >0：当前完整表达式语句可消费编译期诊断结果
     c_ct_prepare_active int // >0：当前正在 pass2a 前捕获 comptime 函数 typed IR
     c_ct_prepare_first int // 当前待捕获编译期函数在文件 token 表中的起点
-    c_ct_expand_depth int // 当前错误/警告所在的编译期 for 展开深度
-    c_ct_expand_values [32]int // 外层到内层的编译期 for 当前迭代值
-    c_em_suppress int // >0：发射层整体静默（sizeof(expr) 求型用）
-    c_check_only int // 1：项目 check 模式，只做语义检查，不生成后端缓冲
     cache_store *void // C4：build 的 CacheStore 指针；cache.store_task 读取
-    c_test_mode int // 1：yh test 模式；解析测试体语义并跳过生产缓存
-    c_test_body int // 1：当前正在检查 test 声明体（$assert 允许运行期条件）
-    c_legacy_system int // 1：兼容配置显式开放 system；默认独立配置不登记它
-    c_ast_capture int // 1：worker 同遍历记录表达式、语句和声明 AST
-    c_ct_meta_bare int // >0：允许裸元信息绑定作类型谓词实参（$is_type(f, T)）
     c_pub_agg_dep *PubAggDeferred // 导入侧延迟执行的 pub $ 聚合常量登记表
     c_pub_agg_dep_n int
     c_pub_agg_dep_cap int
-    c_active_file int // 当前前端快照文件编号，AST 源映射使用
-    c_stats_ast_nodes int // 当前 worker 构造的表达式 AST 节点数
-    c_stats_ast_refs int // 当前 worker 保存的表达式符号引用数
-    c_stats_stmt_nodes int // 当前 worker 构造的语句 AST 节点数
-    c_stats_ast_bindings int // 当前 worker 捕获的参数与局部绑定数
-    c_stats_ast_functions int // 当前 worker 封存的函数级 AST 上下文数
-    c_stats_decl_nodes int // 当前 worker 构造的文件级声明 AST 节点数
     c_expect_tid int // 数组/切片字面量的目标类型（let 初始化/赋值上下文）
     c_data_n int // 匿名数据标签计数（字符串字面量）；0 保留为 NULL
     c_layout_size int // tg_layout_struct 的多值返回出参（大小）
@@ -169,9 +134,6 @@ pub struct TaskCtx {
     c_decl_pub int // 当前顶层声明是否带 pub
     c_decl_attrs int // 当前顶层声明属性位（ATTR_*）
     c_name_form int // 当前类型登记形态：0=type 别名 1=struct 2=union 3=enum
-    np_data *u8
-    np_len int
-    np_cap int
     c_fold_ival i64 // 最近一次数字字面量的位型值
     c_fold_big int // 1 = 字面量超出 i64 正数域
     sc_lbl_false int
@@ -217,76 +179,9 @@ pub struct TaskCtx {
     c_front_checked int // 1：受检前端阶段，禁止旧 text/body/data/bss 输出。
 }
 
-// TargetCfg：目标与编译期配置（B1-2，2026-10-26）。
-//
-// 存储归属 proj（proj.ProjectCtx.cfg，单一存储），**类型定义留在 gen**：
-// 前端/后端要按字段做布局与 ABI 判断，而 gen 是 proj 的下层、不能 import proj。
-// gen 只持一个 c_cfg 指针，由 driver 在 proj.init() 后 gen.bind_cfg(proj.cfg())
-// 绑定；fork 出的 worker 通过 COW 继承。任何模块都不得再存一份副本。
-pub struct TargetCfg {
-    target TargetInfo // 当前输出目标；$if、源文件筛选、后端与缓存共用。
-    host_target TargetInfo // 编译器构建时固化的进程身份，不随 --target 改写。
-    target_explicit int // 1 = CLI 显式给了 --target；项目 os/arch 不再改写目标。
-    dialect int // 当前汇编方言（TG_DIALECT_*）
-    opt_level int // LLVM 优化级别：0（默认 O0）或 2（显式 -O2）；其他值由 CLI 拒绝。
-    trimpath int // 1 = IR/locs 来源路径用项目相对路径（--trimpath）
-    emit_kind int // 1 = 额外保留 LLVM 文本（.ll）到构建目录；0 = 只在内存使用。
-    emit_asm int // 1 = 额外保留汇编（.s）到构建目录；0 = 不额外发射。
-    emit_text_path *char // 非空且 emit_kind=1 时把 LLVM 文本写入该路径（诊断/审阅用）。
-    module_mode int // 1 = 模块模式（--emit-module）；单文件恒 0
-    is_entry_mod int // 1 = 当前编译入口模块（main 不加后缀、须存在）
-}
-
-// CompileStats：一次编译/构建的统计与观测计数（B1-3，2026-10-26）。
-//
-// 这些计数原先混在 GenState 里，让 GenState 多背 25 个字段（字段偏移膨胀，
-// 后端单条 add 逼近立即数上限）。它们没有「目标/项目」那样的跨模块所有者：
-// 前端（lex/parse/ast）与构建层（build/testkit）都在写，所以**留在 gen，
-// 但物理独立**成一个结构，读点统一走 `gen.stats().<字段>` 窄口，不再让
-// GenState 变大。
-pub struct CompileStats {
-    enabled int // 1 = 输出构建阶段计数（仅开发验收）
-    front_cache int // 1 = worker 保存项目源与 token 快照
-    lex int // 本进程实际词法扫描次数
-    syntax int // worker 声明索引中的顶层声明数量
-    index int // 项目文件索引次数
-    pass1 int // 模块声明遍历的文件数
-    globals int // 模块全局初始化遍历的文件数
-    functions int // 模块函数体遍历的文件数
-    ir_functions int // 本次构建实际生成并校验的 SSA 函数数
-    ir_cache_hits int // 通过输入键和校验器复用的函数 IR 数
-    ir_cache_misses int // 本次重新降低并验证的函数 IR 数
-    ir_lowered int // 实际调用函数 lowering 的函数数（不含命中复用）
-    check_cache_hits int // 受检 AST 切片命中的函数数
-    check_cache_misses int // 实际执行 pass2b 检查的函数数
-    check_cache_skipped int // 跳过 pass2b 的函数数
-    checked_functions int // 实际参与运行期 lowering 的受检函数数，不含 comptime
-    backend_emitted int // 后端返回成功、确实替换旧汇编的函数数
-    ir_rejected int // 前端 lowering 子集不支持的函数数
-    backend_rejected int // SSA 已验证但机器后端不支持的函数数
-    ir_cache_salt u64 // 父构建器传入的编译器二进制指纹
-    firc_write_off int // 1 = 本轮不写函数级 IR 缓存（全冷构建，见 build_scheduler）
-    workers int // 父构建器启动的模块 worker 数
-    asm int // 实际调用外部汇编器的次数
-    link int // 实际调用外部链接器的次数
-    compiler_hashes int // 实际读取编译器二进制计算指纹的次数
-    // PL1（合入 perf WIP）：lowering 细分计时（worker 内累计，纳秒）。
-    // 前四段互斥覆盖 lowering，后四段覆盖 build 内部；写在 stats 里而不是
-    // 模块级 let，避免继续抬高 max_globals。
-    lower_prep_ns u64
-    lower_decl_ns u64
-    lower_build_ns u64
-    lower_verify_ns u64
-    lower_lookup_ns u64
-    lower_cache_ns u64
-    lower_fn_ns u64
-    lower_capture_ns u64
-}
-
 // GenState：gen 模块私有状态（进程级）。B1 之后只剩目标/配置指针与任务上下文，
-// 跨模块不再直接访问它——前端走 gen.task()、统计走 gen.stats()、目标走 proj.cfg()。
+// 跨模块不再直接访问它——前端走 gen.task()、统计走 support.stats()、目标走 proj.cfg()。
 struct GenState {
-    c_cfg *TargetCfg // [B1-2] 目标/配置的存储指针（实体在 proj.ProjectCtx.cfg）
     task TaskCtx // [RS1c] 每任务工作状态：g_state.task.<字段>
 }
 
@@ -294,8 +189,6 @@ struct GenState {
 // g_state：gen 模块私有状态实例（零初始化）。
 let g_state GenState
 
-// g_stats：统计结构的进程内唯一实例（零初始化）。
-let g_stats CompileStats
 
 // task：当前任务的显式上下文（A4b）。
 //
@@ -307,58 +200,7 @@ pub fn task() *TaskCtx {
     return &g_state.task
 }
 
-// stats：统计与观测计数的窄口（前端与构建层共用；不再经 GenState 访问）。
-pub fn stats() *CompileStats {
-    return &g_stats
-}
 
-// module_mode / is_entry_mod：模块模式窄口（前端不需要知道目标与配置住在哪）。
-// 项目表与测试/扫描配置已迁入 proj 模块（B1-1）：文件表读口在
-// compiler/proj/proj_20_path.yh，gen 不再转发项目模型（gen 是 proj 的下层，
-// 不能反向依赖）。目标/配置（B1-2）的存储也在 proj，gen 只经 c_cfg 指针读。
-pub fn module_mode() int {
-    return cfg().module_mode
-}
-
-pub fn is_entry_mod() int {
-    return cfg().is_entry_mod
-}
-
-// bind_cfg：把目标/配置的存储（proj.ProjectCtx.cfg）绑定到 gen。
-// 必须在任何需要目标的代码之前调用（driver 在 proj.init() 之后）。
-pub fn bind_cfg(pointer *TargetCfg) void {
-    g_state.c_cfg = pointer
-}
-
-// g_cfg_fallback：未绑定时的目标/配置存储。
-//
-// 谁的进程里没有 proj：单模块嵌入（compiler 的 test 块、tests/ 下的 fixture
-// 直接 import gen）只调 gen.state_init()。它们需要一个可写的宿主默认目标，
-// 否则读第一个字段就崩。绑定之后该实例被彻底搁置（不再读写），不存在双写。
-let g_cfg_fallback TargetCfg
-
-// cfg：目标/配置读写口（模块私有）：已绑定用 proj 的存储，否则用宿主默认实例。
-fn cfg() *TargetCfg {
-    if (g_state.c_cfg == 0) { return &g_cfg_fallback }
-    return g_state.c_cfg
-}
-
-// target_cfg_defaults：把一份目标/配置重置为「宿主身份 + CLI 默认值」。
-// 唯一实现，proj.init() 与 state_init()（未绑定分支）都调它，避免两份默认值漂移。
-pub fn target_cfg_defaults(out *TargetCfg) void {
-    out.target_explicit = 0
-    out.opt_level = 0
-    out.trimpath = 0
-    out.emit_kind = 0
-    out.emit_asm = 0
-    out.emit_text_path = 0
-    out.module_mode = 0
-    out.is_entry_mod = 0
-    out.dialect = TG_DIALECT_GNU
-    target_host_info(&out.host_target)
-    out.target = out.host_target
-    if (out.target.os == TARGET_OS_DARWIN) { out.dialect = TG_DIALECT_DARWIN }
-}
 
 
 
@@ -377,7 +219,7 @@ let c_data_str_quoted [DATA_STR_CAP]int
 // 字节 intern 进名字池（np_data），消费侧（ct_pool_adopt_label）按同一个池取字节。
 pub fn data_str_add(lbl int, start int, slen int) int {
     if (c_data_str_n >= DATA_STR_CAP) { return -1 }
-    let off int = name_intern(start, slen)
+    let off int = support.name_intern(start, slen)
     if (off < 0) { return -1 }
     return data_str_add_entry(lbl, off, slen, 1)
 }
@@ -390,7 +232,7 @@ pub fn data_str_add_pool(lbl int, off int, slen int) int {
 // data_str_add_body：登记不含首尾引号的字符串体；quoted=2 让解码器仍处理
 // 转义，但不剥引号。插值字面文本/说明符使用该模式直接引用源码区间。
 pub fn data_str_add_body(lbl int, start int, slen int) int {
-    let off int = name_intern(start, slen)
+    let off int = support.name_intern(start, slen)
     if (off < 0) { return -1 }
     return data_str_add_entry(lbl, off, slen, 2)
 }
@@ -398,7 +240,7 @@ pub fn data_str_add_body(lbl int, start int, slen int) int {
 // data_str_add_entry：登记池内字节，并标记其是否含有源码字符串引号与转义。
 fn data_str_add_entry(lbl int, off int, slen int, quoted int) int {
     if (c_data_str_n >= DATA_STR_CAP || off < 0 || slen < 0
-        || off > g_state.task.np_len || slen > g_state.task.np_len - off) { return -1 }
+        || off > support.pool_ctx().length || slen > support.pool_ctx().length - off) { return -1 }
     c_data_str_lbl[c_data_str_n] = lbl
     c_data_str_off[c_data_str_n] = off
     c_data_str_len[c_data_str_n] = slen
@@ -487,7 +329,7 @@ fn em_name_eq(idx int, src *u8, start int, n int) int {
     let off int = em_name_off[idx]
     let i int = 0
     for i < n {
-        let a int = g_state.task.np_data[off + i].to_type(int)
+        let a int = support.pool_ctx().data[off + i].to_type(int)
         let b int = src[start + i].to_type(int)
         if (a != b) { return 0 }
         i += 1
@@ -507,8 +349,8 @@ pub fn em_find_src(src *u8, start int, n int) int {
 }
 
 // em_find：按前端当前源文件（c_src）的名字字节反查登记项下标。
-fn em_find(start int, n int) int {
-    return em_find_src(g_state.task.c_src, start, n)
+pub fn em_find(start int, n int) int {
+    return em_find_src(support.src_ctx().data, start, n)
 }
 
 // sym_find_enum_member：在符号表里按名字找属于枚举类型 etid 的成员符号。
@@ -523,7 +365,7 @@ pub fn sym_find_enum_member(etid int, src *u8, start int, n int) int {
             let off int = candidate.name_off
             let j int = 0
             for j < n {
-                if (g_state.task.np_data[off + j].to_type(int)
+                if (support.pool_ctx().data[off + j].to_type(int)
                     != src[start + j].to_type(int)) {
                     break
                 }
@@ -552,8 +394,7 @@ pub fn em_get_ready(idx int) int {
 pub fn state_init() void {
     static_data_reset()
     g_state.task.lx_line = 1
-    g_state.task.c_file_decl_i = -1
-    g_state.task.c_active_file = -1
+    support.session().active_file = -1
     g_state.task.c_expect_tid = -1
     g_state.task.c_data_n = 1
     c_data_str_n = 0
@@ -562,18 +403,4 @@ pub fn state_init() void {
     g_state.task.c_ct_diag_stmt = 0
     g_state.task.mod_name_off = -1
     g_state.task.c_sym_sfx_off = -1
-    // 目标/配置只在「尚未绑定」时初始化宿主默认值：绑定后由 proj 持有，
-    // 这里绝不能重置（否则会抹掉 driver 已经解析的 --target / -O2）。
-    if (g_state.c_cfg == 0) { target_cfg_defaults(&g_cfg_fallback) }
-}
-
-// hexval：十六进制字符转数值（LL12：从退役的 emit_arm64 迁入，语义层共用）。
-pub fn hexval(b u8) int {
-    if (b >= '0' && b <= '9') {
-        return (b - '0').to_type(int)
-    }
-    if (b >= 'a' && b <= 'f') {
-        return ((b - 'a') + 10).to_type(int)
-    }
-    return ((b - 'A') + 10).to_type(int)
 }

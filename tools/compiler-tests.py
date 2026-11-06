@@ -11,7 +11,7 @@ compiler/ 项目在 `[link-*]` 里声明了内嵌 LLVM 桥/lld 闭包，测试�
 
 用法：
     python3 tools/compiler-tests.py --compiler-path ./yh
-    python3 tools/compiler-tests.py --compiler-path ./yh --modules gen lex parse
+    python3 tools/compiler-tests.py --compiler-path ./yh --modules support token check lex parse
 
 退出码：全部通过 0；任一模块失败或被跳过 1；环境准备失败时按提示处理。
 """
@@ -27,7 +27,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPILER = ROOT / "compiler"
-DEFAULT_MODULES = ["gen", "lex", "parse", "ir", "cache", "link"]
+DEFAULT_MODULES = ["support", "token", "check", "lex", "parse", "ir", "cache", "link"]
 
 HOST_DRIVERS = {
     "darwin-aarch64": "llvm-darwin-host.py",

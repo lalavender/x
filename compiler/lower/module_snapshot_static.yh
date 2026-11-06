@@ -1,27 +1,29 @@
 module lower
+import check
+import support
 import ast
 import gen
 import ir
 
 // checked_lower_static_name：来源符号保留本模块逻辑名，导入副本与匿名 backing
 // 使用不可导出的本地名，避免两个模块的相同私有常量/数据标签冲突。
-fn checked_lower_static_name(l *CheckedLower, row int, object *ast.CheckedStaticData) *char {
+fn checked_lower_static_name(l *CheckedLower, row int, object *check.CheckedStaticData) *char {
     if (object != 0 && object.sym_id >= 0 && object.sym_id < l.store.symbol_n) {
         let sym gen.CSym = l.store.symbols[object.sym_id]
         if ((sym.flags & gen.F_EXTERN) == 0) {
             return checked_lower_name(l, sym.name_off, sym.name_len, sym.flags, -1)
         }
         let name [64]u8
-        let n int = gen.append_str(name, 0, ".LI")
-        n = gen.append_int(name, n, row); name[n] = 0
+        let n int = support.append_str(name, 0, ".LI")
+        n = support.append_int(name, n, row); name[n] = 0
         let owned *char = malloc((n + 1).to_type(u64)).to_type(*char)
         if (owned == 0) { return 0 }
         memcpy(owned, &name[0], (n + 1).to_type(u64))
         return owned
     }
     let name [48]u8
-    let n int = gen.append_str(name, 0, ".LD")
-    n = gen.append_int(name, n, object.label); name[n] = 0
+    let n int = support.append_str(name, 0, ".LD")
+    n = support.append_int(name, n, object.label); name[n] = 0
     let owned *char = malloc((n + 1).to_type(u64)).to_type(*char)
     if (owned == 0) { return 0 }
     memcpy(owned, &name[0], (n + 1).to_type(u64))
@@ -30,7 +32,7 @@ fn checked_lower_static_name(l *CheckedLower, row int, object *ast.CheckedStatic
 
 // checked_lower_static_location：静态实体必须引用模块自有来源；有原声明时采用
 // 其文件/字节位置，匿名字符串与 CT backing 退到模块首个有效来源的开头。
-fn checked_lower_static_location(l *CheckedLower, object *ast.CheckedStaticData,
+fn checked_lower_static_location(l *CheckedLower, object *check.CheckedStaticData,
     source_out *int, offset_out *int) int {
     source_out[0] = -1; offset_out[0] = 0
     if (object != 0 && object.sym_id >= 0 && object.sym_id < l.store.symbol_n) {
@@ -56,7 +58,7 @@ fn checked_lower_static_location(l *CheckedLower, object *ast.CheckedStaticData,
 }
 
 // checked_lower_static_type：把根对象或匿名定长 backing 的已知布局映射到模块类型表。
-fn checked_lower_static_type(l *CheckedLower, object *ast.CheckedStaticData) int {
+fn checked_lower_static_type(l *CheckedLower, object *check.CheckedStaticData) int {
     if (object.type_id >= 0) { return checked_lower_object_type(l, object.type_id, 0) }
     if (object.elem_type < 0 || object.elem_type >= l.store.type_n) { return -1 }
     let elem int = checked_lower_object_type(l, object.elem_type, 0)
@@ -72,10 +74,10 @@ fn checked_lower_static_type(l *CheckedLower, object *ast.CheckedStaticData) int
 fn checked_lower_static_add_string(l *CheckedLower, row int) int {
     if (row < 0 || row >= l.store.string_n) { return -1 }
     if (l.string_map[row] > 0) { return l.string_map[row] - 1 }
-    let str ast.CheckedString = l.store.strings[row]
+    let str check.CheckedString = l.store.strings[row]
     if (str.name_off < 0 || str.name_len < 0
         || (str.quoted == 1 && str.name_len < 2)) { return -1 }
-    let data *u8 = ast.checked_zero_rows(str.name_len + 1, 1).to_type(*u8)
+    let data *u8 = check.checked_zero_rows(str.name_len + 1, 1).to_type(*u8)
     if (data == 0) { return -1 }
     let src *u8 = l.store.names + str.name_off
     let count int = 0
@@ -86,7 +88,7 @@ fn checked_lower_static_add_string(l *CheckedLower, row int) int {
         if (str.quoted != 0 && src[i] == '\\') {
             value = checked_lower_string_byte(src[i + 1])
             if (src[i + 1] == 'x') {
-                value = gen.hexval(src[i + 2]) * 16 + gen.hexval(src[i + 3])
+                value = support.hexval(src[i + 2]) * 16 + support.hexval(src[i + 3])
                 i += 4
             } else { i += 2 }
         } else { i += 1 }
@@ -98,8 +100,8 @@ fn checked_lower_static_add_string(l *CheckedLower, row int) int {
     layout.size = count; layout.align = 1; layout.count = count
     let mapped int = ir.ir_module_add_type(l.output, "", &layout, 0, 0)
     let name [48]u8
-    let n int = gen.append_str(name, 0, ".LD")
-    n = gen.append_int(name, n, str.label); name[n] = 0
+    let n int = support.append_str(name, 0, ".LD")
+    n = support.append_int(name, n, str.label); name[n] = 0
     let symbol ir.IRModuleSymbol
     symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; symbol.type_id = mapped
     symbol.linkage = ir.IR_MODULE_LINK_PRIVATE; symbol.defined = 1; symbol.mutable = 1
@@ -122,7 +124,7 @@ fn checked_lower_static_add_string(l *CheckedLower, row int) int {
 fn checked_lower_static_label(l *CheckedLower, label int) int {
     let i int = 0
     for i < l.store.static_data_n {
-        let object ast.CheckedStaticData = l.store.static_data[i]
+        let object check.CheckedStaticData = l.store.static_data[i]
         if (object.label == label && l.static_map[i] > 0) { return l.static_map[i] - 1 }
         i += 1
     }
@@ -139,7 +141,7 @@ fn checked_lower_static_label(l *CheckedLower, label int) int {
 fn checked_lower_static_data(l *CheckedLower) int {
     let row int = 0
     for row < l.store.static_data_n {
-        let object ast.CheckedStaticData = l.store.static_data[row]
+        let object check.CheckedStaticData = l.store.static_data[row]
         if (object.sym_id >= 0 && object.sym_id < l.store.symbol_n) {
             let declaration int = 0
             for declaration < l.store.declaration_n {
@@ -194,8 +196,8 @@ fn checked_lower_static_data(l *CheckedLower) int {
     }
     row = 0
     for row < l.store.static_data_n {
-        let object ast.CheckedStaticData = l.store.static_data[row]
-        let relocs *ir.IRModuleReloc = ast.checked_zero_rows(object.reloc_n,
+        let object check.CheckedStaticData = l.store.static_data[row]
+        let relocs *ir.IRModuleReloc = check.checked_zero_rows(object.reloc_n,
             sizeof(ir.IRModuleReloc)).to_type(*ir.IRModuleReloc)
         if (object.reloc_n > 0 && relocs == 0) {
             l.reason = "静态对象重定位表分配失败"; return -1

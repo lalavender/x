@@ -31,67 +31,85 @@ SRC = ROOT / "compiler"
 # 与 docs/03-design/yh-架构设计.md §3.1 对齐。
 # 新增边必须同时更新此处与设计文档；`main` 是 CLI/构建驱动，位于最上层。
 ALLOWED = {
-    "gen": set(),
+    # GEN1 过渡：gen 的 support 桥只转发基础工具；迁移完成后删除这条边。
+    "gen": {"support", "token"},
     "ir": set(),
+    # support：L0 基础内核（缓冲/源/池/统计/诊断/目标/ABI 常量）。
+    # 无 import，所有模块都可依赖它。
+    "support": set(),
+    # token：词法/语法共享词汇 + token 数组/游标；只依赖 support。
+    "token": {"support"},
     # cache：缓存键 schema / ActionID / OutputID 原语。只依赖 gen 与标准库 hash，
     # 位于前端与构建层之下，避免 check↔lower 为了共用键原语互相 import。
-    "cache": {"gen", "hash"},
-    "lex": {"gen"},
+    "cache": {"gen", "hash", "support", "token"},
+    "lex": {"gen", "token", "support"},
     # comptime 只有一处窄口读（待定数组长度时的文件下标越界检查），
     # 走 proj.file_count() 而不是自己拿项目表。
-    "comptime": {"gen", "proj"},
-    "builtin": {"gen"},
+    "comptime": {"gen", "proj", "token", "support"},
+    "builtin": {"gen", "support"},
     # proj：项目/模块/文件表 + 目标/构建配置（2026-10-26 B1-1 自 gen/build 拆出）。
     # 它是前端与构建层共用的数据层，只允许依赖 gen；一旦反向依赖就成环。
-    "proj": {"gen"},
-    "ast": {"gen", "comptime", "ir", "proj", "cache"},
+    "proj": {"gen", "support", "token"},
+    "ast": {"gen", "comptime", "proj", "support", "token"},
     # lower：CheckedModule → IRModule（2026-10-25 B3-2 自 ast 拆出）。
     # 只吃受检快照，不得 import parse/check/build；ast 不得反向 import lower。
-    "lower": {"gen", "ir", "ast", "proj", "cache"},
-    "check": {"gen", "ast", "proj"},
-    "parse": {"gen", "lex", "comptime", "ast", "ir", "proj"},
-    "backend": {"gen", "ir"},
+    "lower": {"gen", "ir", "ast", "proj", "cache", "support", "check", "token"},
+    "check": {"ast", "gen", "proj", "token", "support", "cache", "ir", "comptime"},
+    "parse": {"gen", "lex", "comptime", "ast", "ir", "proj", "token", "support", "check"},
+    "backend": {"gen", "ir", "support"},
     # link：工具链调用层（汇编、链接驱动、内嵌 lld、进程、时钟）
     # 2026-10-26 B2-2 自 build 拆出。它必须位于 build 之下、proj 之上：
     # 只允许 gen/proj/backend，不得 import build（否则 link ↔ build 成环）。
-    "link": {"gen", "proj", "backend", "hash"},
+    "link": {"gen", "proj", "backend", "hash", "support"},
     # build 是构建引擎（A2c 后承担项目模型 + 链接 + 调度 + 模块发射），
     # 位于前端/后端之上，可依赖全部下层；main 只剩 CLI 与测试执行器。
     "build": {"gen", "lex", "parse", "comptime", "ast", "check", "ir",
-              "backend", "builtin", "lower", "proj", "link", "hash", "cache", "libs"},
+              "backend", "builtin", "lower", "proj", "link", "hash", "cache", "libs", "token", "support"},
     # testkit：语言内测试执行器（yh test 子命令的实现），位于 build 之上。
     # 模块名不能叫 test——`test "..." {}` 是语言关键字。
-    "testkit": {"gen", "parse", "build", "proj", "link"},
+    "testkit": {"gen", "parse", "build", "proj", "link", "token", "support", "ast"},
     # cmdline：命令行声明与解析（CLI-R）。唯一允许依赖标准库 libs/cli 的模块，
     # 这样 `cmd`（module main）自身保持「参数映射 + 调用面」，不直接引标准库。
-    "cmdline": {"gen", "libs"},
+    "cmdline": {"gen", "libs", "support"},
     "main": {"gen", "lex", "comptime", "ast", "check", "parse", "ir",
              "backend", "builtin", "build", "testkit", "lower", "proj", "link",
-             "cmdline"},}
+             "cmdline", "support"},}
 
 # —— 状态/资源预算（现状即上限，只减不增；不含代码行数）——
 # 代码规模由 `just code-stats` 单独报告，本工具不按行数阻断。
 BUDGETS = {
-    "max_globals": 174,        # 模块级可变 let（2026-11-06 基线）
+    "max_globals": 178,        # + comptime 的 CT 事实镜像（指针 + 行数，F4-0）
     "max_g_call_sites": 0,     # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
     "min_cap_appends": 45,
+    # GEN0（ADR-0021）：gen 拆分只减不增的三项预算。
+    "max_gen_pub_fns": 76,     # gen 内 `pub fn` 文本声明数（平台变体重复）
+    "max_gen_importers": 13,    # import gen 的模块数
+    "max_taskctx_fields": 150,  # gen/state.yh 的 TaskCtx 字段数（会话开关/声明索引迁出后）
 }
 
 # 已知未接线但暂不删除的符号（当前为空；保留位置以便记录豁免）。
 UNWIRED_EXEMPT = set()
 
 
-def module_files():
-    mods = {}
-    for d in sorted(SRC.iterdir()):
-        if not d.is_dir() or d.name.startswith(".") or d.name == "tmp":
+def source_files():
+    """递归列出 compiler/ 下的 .yh，跳过构建缓存与临时目录。"""
+    files = []
+    for f in sorted(SRC.rglob("*.yh")):
+        rel = f.relative_to(SRC)
+        if any(part in (".build", "tmp") for part in rel.parts):
             continue
-        yh = list(d.glob("*.yh"))
-        if yh:
-            mods[d.name] = yh
+        files.append(f)
+    return files
+
+
+def module_files():
+    """按 `module` 声明分组；子目录里的源码不会绕过依赖检查。"""
+    mods = {}
+    for f in source_files():
+        mods.setdefault(declared_module(f), []).append(f)
     return mods
 
 
@@ -162,12 +180,16 @@ def main():
     cap_appends = 0
     unchecked = []
     decl_pub = {}
+    gen_pub_fns = 0
+    gen_importers = {m for (m, dep) in edges if dep == "gen"}
 
     for f in sorted(modname):
         text = read(f)
         lines = text.splitlines()
         m = modname[f]
         globals_n += len(re.findall(r"^let [A-Za-z_]", text, re.M))
+        if m == "gen":
+            gen_pub_fns += len(re.findall(r"^pub fn ", text, re.M))
         cap_appends += len(re.findall(r"append_[a-z_]+_cap\(", text))
         gm = len(re.findall(r"gen\.G\(\)", text))
         g_calls += gm
@@ -198,8 +220,26 @@ def main():
         if actual > limit:
             problems.append(f"{name} 超预算：{actual} > {limit} {detail}")
 
+    def taskctx_fields():
+        """数 TaskCtx 的字段行（去注释/空行；数组字段也计一行）。"""
+        text = read(SRC / "gen" / "state.yh")
+        m = re.search(r"pub struct TaskCtx \{(.*?)\n\}", text, re.S)
+        if not m:
+            return 0
+        count = 0
+        for line in m.group(1).splitlines():
+            code = line.split("//")[0].strip()
+            if not code:
+                continue
+            if re.match(r"[A-Za-z_][A-Za-z0-9_]*\s+", code):
+                count += 1
+        return count
+
     budget("max_globals", globals_n)
     budget("max_g_call_sites", g_calls)
+    budget("max_gen_pub_fns", gen_pub_fns, "gen")
+    budget("max_gen_importers", len(gen_importers), "import gen")
+    budget("max_taskctx_fields", taskctx_fields(), "TaskCtx")
     budget("max_unchecked_malloc", len(unchecked), ",".join(unchecked[:3]))
     unwired = [s for s in UNWIRED_EXEMPT if s]
     budget("max_unwired_pub", len(unwired))
@@ -228,6 +268,8 @@ def main():
                       sorted(g_by_mod.items(), key=lambda x: -x[1])[:4])
     g_detail = f"（{g_top}）" if g_top else ""
     print(f"  模块级可变 let {globals_n}；gen.G() 调用点 {g_calls}{g_detail}")
+    print(f"  gen pub fn {gen_pub_fns}；import gen 模块 {len(gen_importers)}；"
+          f"TaskCtx 字段 {taskctx_fields()}")
     print(f"  未判空 malloc {len(unchecked)}；未接线 pub {len(unwired)}；"
           f"容量安全追加点 {cap_appends}")
 

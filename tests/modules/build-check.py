@@ -331,6 +331,9 @@ case("r2b-ast-check-module", "run", "astcheck", ".", 0)
 case("llvm-float-cross-module", "run", "llvmfloat", ".", 0)
 case("llvm-yh-cross-module-call", "run", "llvmyhimport", ".", 0)
 case("llvm-cabi-scalar-cross-module", "run", "llvmabi", ".", 0)
+case("support-buffer-tools", "run", "support", ".", 0)
+case("f4-ct-facts-mirror", "run", "ctfacts", ".", 0)
+case("token-state-cursor", "run", "token", ".", 0)
 case("llvm-target-identity", "run", "llvmtarget", ".", 0)
 case("llvm-front-zero-output", "run", "llvmfront", ".", 0)
 case("llvm-module-ownership", "run", "llvmmodule", ".", 0)
@@ -462,7 +465,7 @@ def copy_proj(src, dst):
     shutil.copytree(src, dst)
     if src.name == "astcheck":
         # 探针直接使用当前编译器的 AST arena 与 check 实现。
-        for module in ("gen", "proj", "comptime", "ir", "backend", "ast", "check", "cache"):
+        for module in ("gen", "proj", "support", "token", "comptime", "ir", "backend", "ast", "check", "cache"):
             source = ROOT / "compiler" / module
             if source.is_dir():
                 ignore = shutil.ignore_patterns("llvm_bridge.yh") if module == "backend" else None
@@ -477,34 +480,70 @@ def copy_proj(src, dst):
         shutil.copytree(ROOT / "compiler" / "ir", dst / "ir")
         (dst / "ir" / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "yh_ir"\nsource = "."\n')
+    if src.name == "support":
+        # GEN1：support 是真实模块，fixture 以路径依赖消费其公开字节工具。
+        shutil.copytree(ROOT / "compiler" / "support", dst / "support")
+        (dst / "support" / "project.toml").write_text(
+            '[project]\nos = "host"\narch = "host"\nname = "support"\nsource = "."\n')
+    if src.name == "token":
+        # GEN1：token 依赖 support；放进 token 依赖项目内保持单项目发现。
+        shutil.copytree(ROOT / "compiler" / "token", dst / "token")
+        shutil.copytree(ROOT / "compiler" / "support", dst / "token" / "support")
+        (dst / "token" / "project.toml").write_text(
+            '[project]\nos = "host"\narch = "host"\nname = "token"\nsource = "."\n')
     if src.name in ("llvmtarget", "llvmfront"):
-        # 目标模型测试复用实际 gen 源码，并以项目依赖检验公开类型/接口。
-        # B1-2 起目标/配置的存储归 proj（gen 只持指针），因此也要拷 proj。
+        # 目标模型测试复用实际 gen/proj 源码，并以项目依赖检验公开类型/接口。
+        # GEN1 起 gen → support/token；三者各自成项目，路径指向同一份 support。
+        shutil.copytree(ROOT / "compiler" / "support", dst / "support")
+        (dst / "support" / "project.toml").write_text(
+            '[project]\nos = "host"\narch = "host"\nname = "support"\nsource = "."\n')
+        shutil.copytree(ROOT / "compiler" / "token", dst / "token")
+        (dst / "token" / "project.toml").write_text(
+            '[project]\nos = "host"\narch = "host"\nname = "token"\nsource = "."\n'
+            '[dependencies]\nsupport = { path = "../support" }\n')
         shutil.copytree(ROOT / "compiler" / "gen", dst / "gen")
-        shutil.copytree(ROOT / "compiler" / "proj", dst / "proj")
         (dst / "gen" / "project.toml").write_text(
-            '[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n')
+            '[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n'
+            '[dependencies]\nsupport = { path = "../support" }\n'
+            'token = { path = "../token" }\n')
+        shutil.copytree(ROOT / "compiler" / "proj", dst / "proj")
+        (dst / "proj" / "project.toml").write_text(
+            '[project]\nos = "host"\narch = "host"\nname = "proj"\nsource = "."\n'
+            '[dependencies]\nsupport = { path = "../support" }\n'
+            'token = { path = "../token" }\ngen = { path = "../gen" }\n')
+    if src.name == "ctfacts":
+        # F4-0：验证 CT 零拷贝镜像与 gen 类型表逐行一致（含表扩容后重新绑定）。
+        core = dst / "compiler"
+        core.mkdir()
+        for module in ("gen", "proj", "support", "token", "comptime", "ir", "backend",
+                       "ast", "check", "cache"):
+            shutil.copytree(ROOT / "compiler" / module, core / module,
+                            ignore=shutil.ignore_patterns("llvm_bridge.yh"))
+        shutil.copytree(ROOT / "libs" / "hash", core / "hash",
+                        ignore=shutil.ignore_patterns(".build"))
+        (core / "project.toml").write_text(
+            '[project]\nos = "host"\narch = "host"\nname = "ctfactscore"\nsource = "."\n')
     if src.name == "llvmchecked":
         # 快照 fixture 消费真实 AST/语义实现，并在模块内构造和释放原 arena。
         # backend 里的 llvm_bridge.yh 只声明内嵌桥的 C ABI，fixture 不链接桥，
         # 因此拷入时排除它（其余 backend 源码保持真实）。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "proj", "lex", "ast", "comptime", "ir", "backend", "check", "cache"):
+        for module in ("gen", "proj", "support", "token", "lex", "ast", "comptime", "ir", "backend", "check", "cache"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         shutil.copytree(ROOT / "libs" / "hash", core / "hash",
                         ignore=shutil.ignore_patterns(".build"))
         (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "checkedcore"\nsource = "."\n')
-        # 快照 fixture 的导出签名引用 CheckedModule；module_snapshot.yh 的句点
-        # 排在下划线前，因而其类型声明先于 module_snapshot_fixture.yh。
-        shutil.copyfile(src / "fixture.yh", core / "ast" / "module_snapshot_fixture.yh")
+        # 快照 fixture 现在属于 check 模块；文件名排在 checked_model.yh 之后，
+        # 保证 CheckedModule 等类型先声明。
+        shutil.copyfile(src / "fixture.yh", core / "check" / "checked_snapshot_fixture.yh")
     if src.name == "llvmlower":
         # 纯快照 lowering fixture 复用真实前端（parse/lex）与 lowering 实现，
         # fixture 作为同模块的第二个文件随 main/ 一起构建；同样排除桥绑定。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "proj", "lex", "ast", "parse", "comptime", "ir", "backend", "builtin", "check", "lower", "cache"):
+        for module in ("gen", "proj", "support", "token", "lex", "ast", "parse", "comptime", "ir", "backend", "builtin", "check", "lower", "cache"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         shutil.copytree(ROOT / "libs" / "hash", core / "hash",

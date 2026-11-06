@@ -1,6 +1,6 @@
-# ADR-0021：`gen` 职责拆分与模块所有权（token/sema/check/support/target）
+# ADR-0021：`gen` 职责拆分——新增 support/token，语义分析全部归 `check`
 
-日期：2026-11-06。状态：**提议（重新分析）；GEN0–GEN2 可在确认后开工，GEN3/GEN4 以 F5 为前置**。
+日期：2026-11-06。状态：**GEN0/GEN1/F1 完成；GEN2/F3 首片完成（`sem_*` 与 ABI 算法迁 check）；F2/F4 待做**。
 
 关联：[ADR-0007](0007-yh编译器使用源码模块.md)（源码模块）、
 [ADR-0009](0009-yh采用check与IR及早期并行.md)（check/IR/并行）、
@@ -20,176 +20,183 @@
 | `TaskCtx` | 189 字段；427 处 `task()` 调用、63 个文件引用 | 状态与阶段强耦合 |
 | 跨模块访问集中度 | `c_pos` 330、`np_data` 281、`t_types` 422、`c_syms` 354、`c_src` 166、`stats()` 132 | 拆状态是主要成本，不是拆文件 |
 
-`gen` 不是“一个模块”，而是六类职责共用一个名字：词法/语法词汇、语义模型、
-语义动作、每任务状态、基础设施（缓冲/宿主）、目标与 ABI。它同时是依赖根，
-任何模块都能 import 它，导致词法、诊断、项目和目标都被迫穿过同一个名字。
-2026-11-06 的前端两遍化决定（`parse` 纯语法、`check` 收语义）进一步要求
-`gen` 不再承担语义动作与语义模型的公共入口。
+用户 2026-11-06 明确：**不要为每类职责都新建模块，优先复用现有模块；语义分析
+全部归 `check`，不建 `sema`；`token` 从 GEN1 开始；`builtin` 保留内置函数和
+内置类型；不新设 `hir` 模块。**
 
 ## 决定
 
-### 1. 拆分目标与分层
-
-拆成 `support`/`diag`/`target`/`token`/`sema`/`check` 六条线；**不设 `state`
-模块**。状态跟随所有者，以阶段上下文或模块内单例存在：
+### 1. 只新增两个模块
 
 ```text
-L0 支撑    support（缓冲/宿主/名字池/统计/源读取）
-           diag（带源码位置的诊断）      token（token 词汇/声明索引）
-           target（目标身份/数据模型/目标配置）
-L1 语义    sema（类型/符号/常量折叠/布局/ABI/静态数据）
-L2 前端    lex  parse  ast  check（resolve/expand/full）  comptime（CT 求值）
-L1.5 变换  lower（消费 check/HIR → IR）
-L1 中端    ir（不依赖任何 yh 模块）
-L1 后端    backend（LLVM 描述）  link（工具链调用）
-L3 驱动    build  testkit  proj
-L4 入口    cmd（一命令一文件，导出面只有 main）
+新增：support（L0 基础内核）  token（L0.5 词法/语法词汇与游标）
+复用：lex  parse  ast  check  comptime  lower  ir  backend  link  proj  cache
+      builtin  testkit  build  cmdline  cmd
+不设：sema  diag  target  state  hir
 ```
 
-目标允许边（每阶段只允许收紧，不允许新增表中没有的边）：
+| 模块 | 职责 | 依赖 |
+| --- | --- | --- |
+| `support` | 缓冲/写出/分配、名字池、源读取、统计、宿主平台（clock/console/argv）、**诊断**（`fail`/`fail_path`/`err_lc`/`warn_lc`）、**目标身份/数据模型/`TargetCfg`/`ABI_YH`/`ABI_C`** | 无 |
+| `token` | `TK_*`/`TOK_*`/`ATTR_*`/`Tok`/`PDecl`、token 数组与游标（`err_tok` 随后续诊断迁移） | `support` |
+| `check` | **全部语义分析**：类型/符号/枚举/静态数据/常量折叠/布局/C ABI 分类/名字解析 + `resolve → expand → full` + `CheckedModule`/HIR 契约 | `ast`, `comptime`, `token`, `support`, `proj`（快照键可含 `ir`/`cache`） |
+| `comptime` | **纯 CT IR 执行器**：执行 check 构造的 CT IR，不持有类型规则/不 import `check` | `support`, `token`, `proj` |
+
+`diag` 并入 `support`（`fail` 与 `err_lc` 同属基础层，避免 `support↔diag` 环）；
+`target` 并入 `support`（目标身份/数据模型是基础数据，`proj` 只存 `TargetCfg`
+实例）；`sema` 不设，语义模型/规则/分析全部在 `check`；`state` 不设；`hir` 不设。
+
+### 2. 目标依赖矩阵
 
 ```text
 support  → （无）
 ir       → （无）
-token    → （无）
-target   → （无）
-diag     → support
-cache    → support, token, target, hash
-lex      → support, diag, token
-proj     → support, target, token
-sema     → support, diag, target, token
-comptime → sema, support, diag, proj, token
-ast      → token, support                       （F1 后；过渡期含 sema/comptime/proj/ir）
-check    → ast, sema, comptime, token, target, diag, support, proj
-           （快照/切片键仍在 check 时可含 ir/cache）
-parse    → token, ast, lex, support, diag
-           （F2 后收紧；过渡期含 gen/comptime/ir/sema/proj）
-lower    → check/HIR, ast, ir, sema, target, token, support, proj, cache
-backend  → ir, sema, target, support
-builtin  → sema, target
-link     → target, support, proj, backend, hash
+token    → support
+cache    → support, token, hash
+lex      → support, token
+proj     → support, token
+comptime → support, token, proj          （纯执行器；不得 import check/gen/ast）
+ast      → token, support                （F1 后；过渡期含 comptime/proj/ir/gen）
+check    → ast, comptime, token, support, proj（快照/切片键可含 ir/cache）
+parse    → token, ast, lex, support      （F2 后；过渡期含 check/proj/gen/comptime/ir）
+lower    → check, ast, ir, token, support, proj, cache
+backend  → ir, support
+builtin  → check, support
+link     → support, proj, backend, hash
 build    → 下方全部 + gen（GEN3 前；GEN4 删除）
-testkit  → build, parse, link, proj, sema, support, token
+testkit  → build, parse, link, proj, support, token
 cmdline  → support, libs
 cmd      → 全部（入口唯一例外）
 ```
 
-### 2. 所有权映射
+### 3. 所有权映射
 
 | `gen` 内容 | 去向 | 判定 |
 | --- | --- | --- |
-| `TK_*`/`TOK_*`/`Tok` | `token` | 词法/语法共享词汇；`token` 不依赖任何模块 |
-| `PDecl` | `token` | token 区间 + 声明种类；**不放 `ast`**，否则 `proj→ast` 与 `ast→proj` 成环 |
-| `is_assign_op`/`hexval` | `token` / `support` | 前者是 token 区间判定；后者是通用字节工具 |
-| `CType`/`SField`/`TName`/`CSym`/`ModInfo`/`ImportEnt`/`ModNsEnt`/`PubAggDeferred` | `sema` | 语义模型 |
-| `TY_*`/`SYM_*`/`F_*`/`ABI_*`/`CT_DIAG_*` | `sema` | 语义枚举与标志 |
-| `symbols.yh` | 拆到 `support`（名字池）+ `sema`（类型/符号/折叠/命名空间） | 名字池是通用 intern 池，`proj/link/build` 也用；不能放 `sema` |
-| `Res` | `sema`（过渡）→ 删除/`check` 内部 | `ast`、`comptime` 在 F1/F5 前仍需它 |
-| `sem_*.yh` | **纯类型规则** → `sema`；**语义动作** → `check`（F5 后） | 不能整包搬 `check`；`comptime` 依赖类型规则 |
-| `CType`/`SField` 布局（`tg_layout_struct`） | `sema` | 布局是类型规则，不是目标身份 |
-| `abi_c.yh` | `sema` | C ABI 分类需要 `CType`；`target` 不能反向依赖 `sema` |
-| `static_data.yh` | `sema` | 静态数据对象是语义数据；`ast/check/comptime/lower/parse` 消费 |
-| `target.yh`/`target_info.yh` | `target`（身份/数据模型/配置） | 布局函数留 `sema` |
-| `TargetCfg` | 类型/默认值/绑定点在 `target`；**存储仍在 `proj`** | `proj` 是唯一存储；`target` 只持一个绑定指针 |
-| `clock.*`/`console.*`/`argv.*` | `support` | 宿主平台层；后续可换 `libs/os`/`libs/time` |
-| `buffer.yh` 的追加/写出/分配 | `support` | 纯字节基础设施 |
-| `read_source`/`set_source_path`/`fail`/`fail_path` | `support` | 无源码位置的 I/O 与致命错误 |
-| `err_lc`/`warn_lc` | `diag` | 带源码位置的诊断渲染 |
-| `err_tok`/`sem_err` | 暂留 `gen` → `check`（parse 用 `diag.err_at`） | 需要“当前 token”游标；`token` 保持纯词汇，不反向依赖 `diag` |
-| `front_stage.yh` | `check` | 受检阶段的进入/退出守卫 |
-| `builtin` prelude 登记 | `builtin` 保留，改 `builtin → sema` | 不并入 `sema`，保持 prelude 表独立 |
-| `state.yh` 的 `TaskCtx` | 按簇拆到 `support.SourceCtx`/`support.PoolCtx`/`support.CompileStats`/`diag.DiagCtx`/`target`/`sema.SemaCtx`/`check.CheckCtx`/`parse.ParseCtx`/`build.SessionCtx` | 不整体搬 `build`/`proj`，不设万能 `state` |
+| `TK_*`/`TOK_*`/`ATTR_*`/`Tok`/`PDecl` | `token` | 词法/语法共享词汇；`PDecl` 放 `token` 避免 `proj↔ast` 环 |
+| token 数组/游标（`c_toks`/`c_pos` 等） | `token` | **GEN1 已搬**；`err_tok`/`sem_err` 随 `err_lc`/DiagCtx 迁移 |
+| `CType`/`SField`/`TName`/`CSym`/`ModInfo`/`ImportEnt`/`ModNsEnt`/`PubAggDeferred` | `check` | 语义模型属于语义分析模块 |
+| `TY_*`/`SYM_*`/`F_*`/`CT_DIAG_*`/`Res` | `check` | 语义枚举/标志/过渡结果 |
+| `symbols.yh` | `support`（名字池）+ `check`（类型/符号/折叠/命名空间） | 名字池是通用 intern 池，`proj/link/build` 也用 |
+| `sem_*.yh` | 全部 → `check`（F5 重写后迁） | 语义分析统一入口 |
+| `tg_layout_struct` / `abi_c.yh` / `static_data.yh` | `check` | 布局/ABI/静态数据是语义规则 |
+| `target.yh`/`target_info.yh` | `support` | 目标身份/数据模型/`TargetCfg`/ABI 常量 |
+| `buffer.yh` 追加/写出/分配 | `support` | 纯字节基础设施 |
+| `read_source`/`set_source_path`/名字池 | `support` | I/O、路径、intern |
+| `fail`/`fail_path`/`err_lc`/`warn_lc` | `support` | 诊断与基础错误同层，避免环 |
+| `clock.*`/`console.*`/`argv.*` | `support` | 宿主平台 |
+| `front_stage.yh` | `check` | 受检阶段守卫 |
+| `builtin` prelude/内置类型登记 | `builtin` 保留，`builtin → check, support` | 内置函数 + 内置类型登记表；`ty_register_builtins` 实现放 `builtin`，调 `check.ty_push` |
+| `state.yh` 的 `TaskCtx` | `support.SourceCtx/PoolCtx/CompileStats/DiagCtx`、`token.TokenCtx`、`check.CheckCtx/SemaCtx`、`parse.ParseCtx`、`build.SessionCtx`、`lex.LexCtx` | 不整体搬 `build`/`proj`，不设万能 `state` |
 | `GenState` | 删除 | 会话初始化按所有者分发 |
 
-### 3. 三处关键修正（与旧 todo 映射不同）
+### 4. 关键修正
 
-1. **`fail`/`fail_path` 归 `support`，不归 `diag`**。`support.read_source`/`alloc`
-   需要报告 I/O/内存错误；若 `fail` 在 `diag`，则 `support → diag` 与
-   `diag → support`（路径/写出）成环。带位置的 `err_lc`/`warn_lc` 才归 `diag`。
-2. **`PDecl` 归 `token`，不归 `ast`**。`proj.PFile` 持有声明索引，而 `ast`
-   当前依赖 `proj`；`proj → ast` + `ast → proj` 会成环。`token` 是两者共同的下层。
-3. **`TaskCtx` 不能等到其他阶段都完成后再一次性五拆**。`support`/`diag`/`sema`
-   的函数需要各自的存储，叶子状态（源/池/统计/诊断）必须在相应模块落地时一起
-   搬走；剩余的 parse/check 动作状态在 F5 重写后再拆，避免拆完又被删。
+1. **只新增 2 个模块**：`support`/`token`；`sema` 不建，语义模型/规则/分析
+   全部进 `check`；`diag`/`target` 并入 `support`；`state`/`hir` 不建。
+2. **`check` 是唯一语义入口**：`CType/CSym/...`、常量折叠、布局、C ABI、
+   静态数据、名字/类型检查都在 `check`；`lower`/`builtin` 直接 import `check`。
+3. **`comptime` 必须是纯 CT IR 执行器**：只执行 check 构造的 CT IR；若它继续
+   调用类型规则/读 `CSym`，就会形成 `check ↔ comptime` 环。F4 的
+   “check.expand 构造 CT IR、comptime 执行” 是这条边的前提。
+4. **`token` 从 GEN1 开始**：词汇、`PDecl`、token 数组/游标已迁；`err_tok`/
+   `sem_err` 随诊断迁移；parse 的 `c_pos` 改写一次完成。
+5. **`fail`/`err_lc` 同在 `support`**：基础层自足，不需要 `diag` 模块。
+6. **`PDecl` 归 `token`**：`proj.PFile` 持有声明索引，放 `ast` 会形成 `proj↔ast` 环。
+7. **`ABI_YH`/`ABI_C` 放 `support`**：`backend` 只需调用约定常量，不需要
+   import 整个 `check`；`F_*`/`SYM_*` 等符号标志仍在 `check`。
+8. **不建 `hir`**：`HIR` 指 `check` 产出的受检契约，不是新模块；`lower → check`。
+9. **跨模块搬家不要求编译器自身 `.s.i` 字节一致**：模块身份/符号后缀会变；
+   用固定点 + 全量语料等价，同模块文件搬家才要求字节一致。
 
-### 4. `sema` 的边界
+### 5. `support` 的作用与所处步骤
 
-- `sema` 只放**模型 + 纯规则**：类型表、符号/作用域、常量折叠、类型兼容/提升、
-  布局、C ABI 分类、静态数据、枚举成员表、模块命名空间查询、字符串标签表。
-- `sema` **不得** import `gen`/`proj`/`ast`/`parse`/`check`/`comptime`/`lower`。
-  需要当前 token 位置时，由调用方写入 `SemaCtx` 的声明位置或显式传参；
-  诊断经 `diag` 发出，不回调 parser。
-- `comptime → sema`，`check → comptime`，**不得** `comptime → check`。
-- `sem_*` 的语义动作（调用、赋值、控制流、字面量、声明）在 F5 前继续留
-  `gen`；F5 后在原文件上重写/迁 `check`，不先做一次“搬家再重写”。
+`support` 不是流水线阶段，是 **L0 基础层**；所有阶段 import 它，但只在需要时
+调用。它在编译流程中的位置：
 
-### 5. 状态原则
+| 步骤 | support 提供 | 调用方 |
+| --- | --- | --- |
+| 会话初始化 | `target_defaults`/`bind_cfg`、`source_init`/`stats_init`/`diag_init` | `cmd/common`、`build` worker |
+| 读源（lex 前） | `read_source`/`set_source_path`、路径缓冲 | `build`、`proj`、`testkit` |
+| 词法/语法/检查 | 名字池、`append_*`、`err_lc`/`fail`、`stats` | `lex`/`parse`/`check`/`comptime` |
+| CT 展开 | 源/名字池/诊断/目标标记 | `check.expand`、`comptime` |
+| lower/backend | 缓冲/写出、目标身份/ABI、统计 | `lower`、`backend` |
+| 链接/构建 | 路径/名字池、`clock_ns`、`fail`、宿主检测 | `link`、`build`、`cache` |
+| CLI | `append_*`/`cstr_eq`/`write_all` | `cmdline`、`cmd` |
 
-- 每个上下文只有一个所有者；`proj` 保持只读项目模型，`build` 只持
-  `BuildCtx`/会话开关，`link` 只持 `LinkCtx`。
-- 新模块用**一个单例上下文**承载自己的状态（`g_support`/`g_diag`/`g_target`/
-  `g_sema`），不要每张表加一个模块级 `let`；`arch-check` 的 `max_globals`
-  不得因拆分上升。
-- 禁止把 189 字段的 `TaskCtx` 整体搬进 `build`/`proj`/新 `state` 模块；
-  那只是把依赖根改名，拆分成本不会减少。
-- 目标配置：`proj` 持有唯一 `TargetCfg` 存储，`target.bind_cfg()` 在 worker
-  fork 前绑定一次；`target` 不保留第二份可写副本（未绑定时的 fallback 只服务
-  单模块测试）。
-- `state_init`/`sem_init_tables` 按所有者拆成 `support.source_init`、
-  `support.stats_init`、`diag.init`、`target.defaults`、`sema.init`、
-  `check.init`、`comptime.reset`，由入口按固定顺序调用。
+一句话：**support 是“编译器自己的 libc + 目标描述 + 诊断底座”**，不是语义层；
+它不持有类型/符号/分析状态。
 
-### 6. 与前端两遍化的关系
+### 6. `sema` 与 `HIR` 的去向
 
-- 本 ADR 只决定**模块所有权与依赖边**；`AST`/`HIR`/`CheckedModule` 的具体
-  字段与 `check.resolve → expand → full` 契约由 F0 ADR 冻结。
-- `CheckedModule` 契约默认随 `check` 走（生产者拥有输出契约），不新设
-  `hir` 模块；若 F0 发现 `lower → check` 拉入过多依赖，再新 ADR 立 `hir`。
-- **GEN3/GEN4 不得早于 F5**：`parse` 还在驱动 `sem_*` 时把 `sem_*` 搬进 `check`
-  会制造 `parse → check` 临时环，且这些函数会被 F2–F5 重写，搬家是白做。
+- **不建 `sema`**：`check` 就是语义分析模块。类型模型与纯规则放
+  `check/base.yh`（含 `CheckedModule`/快照类型）、`check/types.yh`、`check/symbols.yh`、
+  `check/fold.yh`、`check/layout.yh`、`check/cabi.yh`、
+  `check/static.yh`；分析入口 `check/resolve.yh`、
+  `check/expand.yh`、`check/full.yh`。
+- **`comptime` 不 import `check`**：它只做 CT IR 执行；CT IR 的类型/布局/
+  静态数据事实由 `check.expand` 构造并写入节点。若执行器需要类型规则、
+  `CSym`/`static_data_*`/`em_*`/`sym_*`，说明 F4 还没完成。
+- **`HIR` 不是模块**：它是 `check` 输出的受检契约（`CheckedModule` + AST 边表 +
+  静态数据 + 目标身份），`lower` 消费；只有未来多消费者只要契约时才抽 `hir`。
 
-### 7. 验收口径
+### 7. 状态原则
 
-- 同模块内文件搬家：该模块 `.s`/`.s.i`/`.s.ct` 逐字节一致。
-- 跨模块搬家：**不要求编译器自身 `.s.i` 逐字节一致**（模块身份/符号后缀会变）；
-  以「旧/新编译器编译同一用户语料的产物与行为一致 + cc3/cc4 固定点 + 全量
-  `tests/yh`/`tests/yh-run`/`tests/modules`」为准。
-- 每阶段：`just` + `just test` + `just selfhost-native`；门禁默认 `YH_CACHE=off`。
-- `arch-check` 增加单调预算：`gen` 的 `pub fn` 数、`import gen` 模块数、
-  `TaskCtx` 字段数只减不增；新增模块的边必须先在 `ALLOWED` 中登记。
+- 每个上下文一个所有者；`proj` 保持只读项目模型，`build` 只持 `BuildCtx`，
+  `link` 只持 `LinkCtx`。
+- 新模块各用一个单例上下文：`g_support`（源/池/统计/诊断/目标）、`g_token`
+  （token 数组/游标）；`check` 的 `CheckCtx`/`SemaCtx` 承载类型/符号/动作状态。
+- `proj` 持有唯一 `TargetCfg` 存储，`support.bind_cfg()` 在 worker fork 前绑定；
+  `support` 的 fallback 只服务单模块测试。
+- 会话初始化顺序：`support.source_init → support.stats_init → support.diag_init
+  → support.target_defaults → support.bind_cfg(proj.cfg()) → token.init →
+  check.init → builtin.front_prepare → comptime.reset`。
+
+### 8. 与前端两遍化、验收
+
+- 本 ADR 只决定模块所有权/依赖边；AST/HIR/`CheckedModule` 字段与
+  `check.resolve → expand → full` 契约由 F0 冻结。
+- **GEN2 起与 F1–F5 合并**：`parse` 仍驱动 `sem_*` 时不能把语义搬进 `check`
+  （会造 `parse → check` 临时环），必须先让 parse 纯语法。
+- 同模块文件搬家：`.s`/`.s.i`/`.s.ct` 字节一致；跨模块搬家：固定点 + 全量语料
+  等价，不比较编译器自身 `.s.i`。
+- 每阶段 `just` + `just test` + `just selfhost-native`；门禁 `YH_CACHE=off`。
+- `arch-check` 加单调预算：`gen` 的 `pub fn` 数、`import gen` 模块数、
+  `TaskCtx` 字段数只减不增；`max_globals` 176（ast/parse 两个阶段单例）。
 
 ## 备选与被否决的方案
 
 | 方案 | 结论 | 理由 |
 | --- | --- | --- |
-| 类型/符号放 `lex` | 否决 | `check`/`comptime` 会反向依赖词法阶段；`lex` 是变换不是模型 |
-| 新建万能 `state` 模块装 `TaskCtx` | 否决 | 只是把 `gen` 改名成新的依赖根；390 处字段访问不变，最终仍要拆 |
+| 新建 `sema` 模块 | 否决 | 用户要求语义分析全部归 `check`；多一个模块只增加 import 面 |
+| 新建 `diag`/`target` 模块 | 否决 | 基础层数据并入 `support` 即可 |
+| 新建万能 `state` 模块 | 否决 | 只是把 `gen` 改名；字段访问不变 |
+| 新建 `hir` 模块 | 暂不 | `check` 已拥有输出契约 |
+| `comptime` 继续调用类型规则 | 否决 | 会与 `check` 成环；F4 必须把类型/布局事实放进 CT IR |
+| 类型/符号放 `lex` | 否决 | `check`/`comptime` 会反向依赖词法阶段 |
 | `TaskCtx` 整体搬 `build`/`proj` | 否决 | `parse → build` 成环；`proj` 只读模型被破坏 |
-| `sem_*` 先整体搬 `check` | 否决 | `parse → check` 临时环；F5 会重写，搬家是重复劳动 |
-| 把 `symbols.yh` 按 `pub` 数五拆 | 否决 | 类型表/符号表/折叠共享同一语义内核；按所有权分文件，不按导出行数 |
-| `fail` 归 `diag` | 否决 | `support` 的 I/O 需要 `fail`，会与 `diag → support` 成环 |
+| `sem_*` 先搬 `check` | 否决 | `parse → check` 临时环；F2/F5 后再迁 |
+| 把 `symbols.yh` 按 `pub` 数五拆 | 否决 | 按所有权分文件 |
+| `fail` 单独放 `diag` | 否决 | 基础 I/O 需要 `fail`，会成环 |
 | `PDecl` 归 `ast` | 否决 | `proj` 持有声明索引，`proj→ast` 与 `ast→proj` 成环 |
-| 新设 `hir` 模块 | 暂缓 | 默认 `check` 拥有 `CheckedModule`；由 F0 决定是否值得多一层 |
+| `builtin` 并入 `check` | 否决 | 用户明确保留内置函数/内置类型登记表 |
 
 ## 后果
 
-- `gen` 在 GEN2 后从“万能底座”缩成前端动作 + 残余 `TaskCtx`；GEN3/GEN4 后删除。
-- `support`/`diag`/`target`/`token`/`sema` 成为窄接口；`cmdline`/`cache`/`link`/
-  `proj`/`backend`/`lower`/`builtin` 在 GEN1/GEN2 先摆脱 `gen`。
-- 过渡期允许并记录以下临时边，GEN3/GEN4 必须消失：
-  `gen → sema/support/diag/target/token`、`ast → sema`（`Res`/快照）、
-  `parse/lex/build/testkit/cmd → gen`。
-- 模块接口与缓存键会变化；编译器内部模块不承诺 `.s.i` 跨版本兼容，构建缓存
-  按新模块身份自然失效。
+- 模块数 17 → 18（新增 `support`/`token`，删除 `gen`）；`check` 变大，但它是
+  唯一语义入口，文件按 `check/base` … `check/full` 分。
+- `comptime` 职责收窄为纯 CT IR 执行器；F4 必须完成类型/布局事实的传递。
+- `lower`/`builtin` 直接 import `check`；`backend` 只 import `support` 的
+  ABI/目标常量，不拉入整个 `check`。
+- 过渡期临时边（GEN3/GEN4 删除）：`gen → support/token/check`、
+  `parse/build/testkit/cmd → gen`、`ast/check/comptime → gen`（残余字段）。
+- 模块接口/缓存键会变；编译器内部模块不承诺 `.s.i` 跨版本兼容。
 - `tests/modules/build-check.py` 的模块拷贝清单、`tools/compiler-tests.py` 的
-  模块列表必须随阶段更新；否则 fixture 会因缺少新模块而失败。
+  模块列表随阶段更新；fixture 的 `import gen` 改新模块。
 
-## 开放问题（GEN0 前确认）
+## 开放问题
 
-1. `CheckedModule` 契约：`check` 直接拥有，还是 F0 另立 `hir`？本 ADR 默认前者。
-2. `builtin`：保留薄表（默认）还是并入 `sema`？（两者都不改变依赖方向。）
-3. token 状态（`c_toks`/`c_pos`/`err_tok`）：GEN1 随 `token` 一起搬，还是等 F2/GEN4
-   与 parse 重写一起搬？本 ADR 默认后者，避免 308 处 `c_pos` 被改两次。
-4. `Res` 的最终形态：F5 删除，还是成为 HIR 的表达式结果节点？由 F0/F5 定。
-5. `err_tok`/`sem_err` 最终放 `check`（语义动作）还是 `diag`（显式传入 `Tok`）？
-   本 ADR 默认 `check`；两者都不让 `token` 反向依赖 `diag`。
+1. `check` 变大后是否接受“语义模型 + 语义分析 + CT 展开驱动”同模块？
+   （用户已明确语义分析归 check；这是直接结果。）
+2. `support` 同时装“基础工具 + 诊断 + 目标/ABI”是否接受？若希望更窄，只能
+   重新拆出 `diag`/`target`，模块数会回升。

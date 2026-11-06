@@ -20,10 +20,19 @@ def main():
     if project.exists():
         shutil.rmtree(project)
     shutil.copytree(ROOT / "tests/modules/projects/llvmfront", project)
+    shutil.copytree(ROOT / "compiler/support", project / "support")
+    (project / "support/project.toml").write_text(
+        '[project]\nos = "host"\narch = "host"\nname = "support"\nsource = "."\n', encoding="utf-8")
+    shutil.copytree(ROOT / "compiler/token", project / "token")
+    (project / "token/project.toml").write_text(
+        '[project]\nos = "host"\narch = "host"\nname = "token"\nsource = "."\n'
+        '[dependencies]\nsupport = { path = "../support" }\n', encoding="utf-8")
     shutil.copytree(ROOT / "compiler/gen", project / "gen",
                     ignore=shutil.ignore_patterns(".build"))
     (project / "gen/project.toml").write_text(
-        '[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n', encoding="utf-8")
+        '[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n'
+        '[dependencies]\nsupport = { path = "../support" }\n'
+        'token = { path = "../token" }\n', encoding="utf-8")
     result = subprocess.run([str(compiler), "build"], cwd=project,
                             env=os.environ.copy(), capture_output=True, text=True)
     (work / "build.log").write_text(result.stdout + result.stderr, encoding="utf-8")

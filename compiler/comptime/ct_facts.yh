@@ -1,0 +1,124 @@
+module comptime
+
+// ============================================================================
+// ct_facts.yh —— CT 执行器读语义事实的零拷贝镜像
+//
+// 执行器需要类型/符号/静态数据的「形状」，但不得 import gen（否则
+// check → comptime → check 成环）。这里用与 gen 结构**逐字段同序同宽**的
+// 镜像结构 + 「指针 + 行数」绑定：调用方（check）在进入 CT 前把
+// gen.task().t_types 等表的指针交进来，执行器按镜像读，不复制、不拥有。
+//
+// 为什么不用复制：解析期类型表会持续增长，复制会立刻过期；指针绑定只写两个
+// 标量，表扩容后重新绑定即可。形状漂移由 check.ct_type_layout_ok() 断言。
+// 明确不做：不分配、不释放、不校验下标（调用方保证 tid 在 [0,n)）。
+// ============================================================================
+
+// ---- 类型种类镜像常量：数值必须与 gen/model.yh 的 TY_* 一致 ----
+// check.ct_type_layout_ok() 会逐项断言，漂移即编译/测试失败。
+pub const CT_TY_VOID int = 0
+pub const CT_TY_BOOL int = 1
+pub const CT_TY_CHAR int = 2
+pub const CT_TY_I8 int = 3
+pub const CT_TY_I16 int = 4
+pub const CT_TY_I32 int = 5
+pub const CT_TY_I64 int = 6
+pub const CT_TY_U8 int = 7
+pub const CT_TY_U16 int = 8
+pub const CT_TY_U32 int = 9
+pub const CT_TY_U64 int = 10
+pub const CT_TY_F32 int = 11
+pub const CT_TY_F64 int = 12
+pub const CT_TY_PTR int = 13
+pub const CT_TY_ARRAY int = 14
+pub const CT_TY_SLICE int = 15
+pub const CT_TY_STRUCT int = 16
+pub const CT_TY_UNION int = 17
+pub const CT_TY_ENUM int = 18
+pub const CT_TY_FN int = 19
+
+// CtTypeRow：gen.CType 的镜像。字段顺序与宽度必须与 gen.CType 完全一致。
+pub struct CtTypeRow {
+    kind int // TY_* 种类（与 gen 同值）
+    size int // 字节大小
+    align int // 字节对齐
+    elem int // PTR/ARRAY/SLICE 的元素类型；其余 -1
+    len int // ARRAY 长度 / STRUCT 字段数；其余 -1
+    sub int // STRUCT 字段表起点 / FN 签名号
+}
+
+// ct_type_rows：当前绑定的类型表（只读借用，不拥有）；0 表示未绑定。
+let ct_type_rows *void = 0
+// ct_type_n：当前绑定的类型表行数。
+let ct_type_n int = 0
+
+// ct_types_bind：绑定类型表；rows 指向 gen 的 CType 数组，n 是行数。
+pub fn ct_types_bind(rows *void, n int) void {
+    ct_type_rows = rows
+    ct_type_n = n
+}
+
+// ct_types_bound：返回已绑定的行数；0 表示尚未绑定（调用方应报内部错误）。
+pub fn ct_types_bound() int {
+    return ct_type_n
+}
+
+// ct_type_row：取第 tid 行镜像；调用方必须保证 0 <= tid < ct_types_bound()。
+pub fn ct_type_row(tid int) CtTypeRow {
+    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    return rows[tid]
+}
+
+// ct_ty_kind：类型种类（TY_*）。
+pub fn ct_ty_kind(tid int) int {
+    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    return rows[tid].kind
+}
+
+// ct_ty_size：类型的字节大小。
+pub fn ct_ty_size(tid int) int {
+    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    return rows[tid].size
+}
+
+// ct_ty_align：类型的字节对齐。
+pub fn ct_ty_align(tid int) int {
+    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    return rows[tid].align
+}
+
+// ct_ty_elem：指针/数组/切片的元素类型；其余为 -1。
+pub fn ct_ty_elem(tid int) int {
+    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    return rows[tid].elem
+}
+
+// ct_ty_len：数组长度或结构体字段数；其余为 -1。
+pub fn ct_ty_len(tid int) int {
+    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    return rows[tid].len
+}
+
+// ct_ty_sub：结构体字段表起点或函数签名号。
+pub fn ct_ty_sub(tid int) int {
+    let rows *CtTypeRow = ct_type_rows.to_type(*CtTypeRow)
+    return rows[tid].sub
+}
+
+// ct_ty_is_integer：整数类（bool..u64 与 enum），与 gen.ty_is_integer 同定义。
+pub fn ct_ty_is_integer(tid int) int {
+    let k int = ct_ty_kind(tid)
+    if (k >= CT_TY_BOOL && k <= CT_TY_U64) { return 1 }
+    return (k == CT_TY_ENUM).to_type(int)
+}
+
+// ct_ty_is_signed：有符号整数类（char..i64 与 enum），与 gen.ty_is_signed 同定义。
+pub fn ct_ty_is_signed(tid int) int {
+    let k int = ct_ty_kind(tid)
+    return ((k >= CT_TY_CHAR && k <= CT_TY_I64) || k == CT_TY_ENUM).to_type(int)
+}
+
+// ct_ty_is_float：f32/f64。
+pub fn ct_ty_is_float(tid int) int {
+    let k int = ct_ty_kind(tid)
+    return (k == CT_TY_F32 || k == CT_TY_F64).to_type(int)
+}

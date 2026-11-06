@@ -1,0 +1,80 @@
+module check
+import comptime
+import gen
+
+// ============================================================================
+// ct_bind.yh —— CT 执行器事实绑定的唯一入口
+//
+// `comptime` 不能 import gen（check → comptime → check 会成环），所以它读的是
+// 零拷贝镜像（见 comptime/ct_facts.yh）。绑定点收在本文件：任何进入 CT 执行
+// 的路径都先调 ct_types_sync()，把当前类型表指针与行数交给镜像。
+//
+// 同时提供形状守卫 ct_type_layout_ok()：镜像结构/常量与 gen 不一致时立刻失败。
+// ============================================================================
+
+// ct_types_sync：把当前类型表指针与行数绑定到 CT 镜像；0 = 未绑定（空表）。
+pub fn ct_types_sync() void {
+    let tk *gen.TaskCtx = gen.task()
+    comptime.ct_types_bind(tk.t_types.to_type(*void), tk.t_type_n)
+}
+
+// ct_type_layout_ok：镜像与 gen 逐项一致返回 1，否则 0。
+// 覆盖 struct 尺寸与全部 TY_* 常量值；字段顺序由 struct 定义保证。
+pub fn ct_type_layout_ok() int {
+    if (sizeof(gen.CType) != sizeof(comptime.CtTypeRow)) { return 0 }
+    if (gen.TY_VOID != comptime.CT_TY_VOID || gen.TY_BOOL != comptime.CT_TY_BOOL
+        || gen.TY_CHAR != comptime.CT_TY_CHAR || gen.TY_I8 != comptime.CT_TY_I8
+        || gen.TY_I16 != comptime.CT_TY_I16 || gen.TY_I32 != comptime.CT_TY_I32
+        || gen.TY_I64 != comptime.CT_TY_I64 || gen.TY_U8 != comptime.CT_TY_U8
+        || gen.TY_U16 != comptime.CT_TY_U16 || gen.TY_U32 != comptime.CT_TY_U32
+        || gen.TY_U64 != comptime.CT_TY_U64 || gen.TY_F32 != comptime.CT_TY_F32
+        || gen.TY_F64 != comptime.CT_TY_F64 || gen.TY_PTR != comptime.CT_TY_PTR
+        || gen.TY_ARRAY != comptime.CT_TY_ARRAY || gen.TY_SLICE != comptime.CT_TY_SLICE
+        || gen.TY_STRUCT != comptime.CT_TY_STRUCT || gen.TY_UNION != comptime.CT_TY_UNION
+        || gen.TY_ENUM != comptime.CT_TY_ENUM || gen.TY_FN != comptime.CT_TY_FN) { return 0 }
+    return 1
+}
+
+// yh test：镜像与 gen 类型表逐行一致（差分）。生产构建不登记。
+test "ct 镜像与 gen 类型表逐行一致" {
+    gen.state_init()
+    if (gen.sem_init_tables() != 0 || gen.ty_register_builtins() != 0) { return }
+    if (ct_type_layout_ok() == 0) { return }
+    ct_types_sync()
+    let n int = comptime.ct_types_bound()
+    if (n <= 0 || n != gen.task().t_type_n) { return }
+    let i int = 0
+    for i < n {
+        let row gen.CType = gen.task().t_types[i]
+        if (comptime.ct_ty_kind(i) != row.kind) { return }
+        if (comptime.ct_ty_size(i) != row.size) { return }
+        if (comptime.ct_ty_align(i) != row.align) { return }
+        if (comptime.ct_ty_elem(i) != row.elem) { return }
+        if (comptime.ct_ty_len(i) != row.len) { return }
+        if (comptime.ct_ty_sub(i) != row.sub) { return }
+        if (comptime.ct_ty_is_integer(i) != gen.ty_is_integer(i)) { return }
+        if (comptime.ct_ty_is_float(i) != gen.ty_is_float(i)) { return }
+        if (comptime.ct_ty_is_signed(i) != gen.ty_is_signed(i)) { return }
+        i += 1
+    }
+}
+
+// —— 供外部（fixture/验证）读取镜像的窄口，避免它们直接 import comptime ——
+
+// ct_types_bound：已绑定行数；0 表示未绑定。
+pub fn ct_types_bound() int {
+    return comptime.ct_types_bound()
+}
+
+// ct_kind / ct_size / ct_align / ct_elem / ct_len / ct_sub：镜像行字段。
+pub fn ct_kind(tid int) int { return comptime.ct_ty_kind(tid) }
+pub fn ct_size(tid int) int { return comptime.ct_ty_size(tid) }
+pub fn ct_align(tid int) int { return comptime.ct_ty_align(tid) }
+pub fn ct_elem(tid int) int { return comptime.ct_ty_elem(tid) }
+pub fn ct_len(tid int) int { return comptime.ct_ty_len(tid) }
+pub fn ct_sub(tid int) int { return comptime.ct_ty_sub(tid) }
+
+// ct_is_integer / ct_is_float / ct_is_signed：镜像谓词。
+pub fn ct_is_integer(tid int) int { return comptime.ct_ty_is_integer(tid) }
+pub fn ct_is_float(tid int) int { return comptime.ct_ty_is_float(tid) }
+pub fn ct_is_signed(tid int) int { return comptime.ct_ty_is_signed(tid) }

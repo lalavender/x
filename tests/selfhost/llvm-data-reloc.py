@@ -69,13 +69,25 @@ def main():
     for name in ("gen", "ir"):
         shutil.copytree(ROOT / f"compiler/{name}", project / name)
         (project / name / "project.toml").write_text(f'[project]\nos = "host"\narch = "host"\nname = "{name}"\nsource = "."\n')
+    shutil.copytree(ROOT / "compiler/support", project / "support")
+    (project / "support/project.toml").write_text(
+        '[project]\nos = "host"\narch = "host"\nname = "support"\nsource = "."\n')
+    shutil.copytree(ROOT / "compiler/token", project / "token")
+    (project / "token/project.toml").write_text(
+        '[project]\nos = "host"\narch = "host"\nname = "token"\nsource = "."\n'
+        '[dependencies]\nsupport = { path = "../support" }\n')
+    (project / "gen/project.toml").write_text(
+        '[project]\nos = "host"\narch = "host"\nname = "gen"\nsource = "."\n'
+        '[dependencies]\nsupport = { path = "../support" }\n'
+        'token = { path = "../token" }\n')
     (project / "backend").mkdir()
     for source in (ROOT / "compiler/backend").glob("llvm_*.yh"):
         if source.name != "llvm_bridge.yh":
             shutil.copy2(source, project / "backend" / source.name)
     (project / "backend/project.toml").write_text(
         '[project]\nos = "host"\narch = "host"\nname = "backend"\nsource = "."\n'
-        '[dependencies]\ngen = { path = "../gen" }\nir = { path = "../ir" }\n')
+        '[dependencies]\ngen = { path = "../gen" }\nir = { path = "../ir" }\n'
+        'support = { path = "../support" }\n')
     result = run([str(Path(args.compiler_path).resolve()), "build"], cwd=project)
     (WORK / "build.log").write_text(result.stdout + result.stderr)
     assert result.returncode == 0, result.stdout + result.stderr

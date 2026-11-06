@@ -1,4 +1,6 @@
 module build
+import token
+import support
 import gen
 import proj
 
@@ -40,11 +42,11 @@ struct UfCand {
 fn uf_decl_name_token(fi int, di int) int {
     let file *proj.PFile = &proj.ctx().files[fi]
     if (file.decls == 0 || di < 0 || di >= file.decl_n) { return -1 }
-    let decl gen.PDecl = file.decls[di]
-    if (decl.kind != gen.TK_FN) { return -1 }
+    let decl token.PDecl = file.decls[di]
+    if (decl.kind != token.TK_FN) { return -1 }
     let nt int = decl.keyword + 1
     if (nt >= decl.end || nt >= file.token_n) { return -1 }
-    if (file.tokens[nt].kind != gen.TOK_IDENT) { return -1 }
+    if (file.tokens[nt].kind != token.TOK_IDENT) { return -1 }
     if (file.tokens[nt].len <= 0) { return -1 }
     return nt
 }
@@ -75,14 +77,14 @@ fn uf_bytes_eq(a *u8, a_start int, b *u8, b_start int, n int) int {
 // uf_symbol_for_decl：在 [sym_base, c_sym_n) 里按名字字节找该声明的函数符号。
 // 不用名字池 intern：检查跑在 pass1 与 pass2 之间，名字池增大会改变后续
 // 阶段的池布局，可能影响函数级缓存键的稳定性（实测会让 check 缓存全 miss）。
-fn uf_symbol_for_decl(fi int, tok *gen.Tok, sym_base int) int {
+fn uf_symbol_for_decl(fi int, tok *token.Tok, sym_base int) int {
     let t *gen.TaskCtx = gen.task()
     let file *proj.PFile = &proj.ctx().files[fi]
     let sym int = t.c_sym_n - 1
     for sym >= sym_base {
         if (uf_is_candidate(sym, sym_base) != 0
             && t.c_syms[sym].name_len == tok.len
-            && uf_bytes_eq(file.source, tok.start, t.np_data,
+            && uf_bytes_eq(file.source, tok.start, support.pool_ctx().data,
                 t.c_syms[sym].name_off, tok.len) != 0) {
             return sym
         }
@@ -104,7 +106,7 @@ fn uf_collect(files *int, file_n int, sym_base int, cands *UfCand,
         for di < file.decl_n {
             let nt int = uf_decl_name_token(fi, di)
             if (nt < 0) { di += 1; continue }
-            let tok gen.Tok = file.tokens[nt]
+            let tok token.Tok = file.tokens[nt]
             let sym int = uf_symbol_for_decl(fi, &tok, sym_base)
             if (sym < 0) { di += 1; continue }
             // 同一符号只收一次（模块内不允许重名，这里只作防御）。
@@ -148,15 +150,15 @@ fn uf_scan_file(fi int, cands *UfCand, used *u8, mask *u8, cand_n int,
             dn += 1
         }
         let skip int = 0
-        if (dn < file.decl_n && file.decls[dn].kind == gen.TK_FN
+        if (dn < file.decl_n && file.decls[dn].kind == token.TK_FN
             && file.decls[dn].keyword + 1 == ti) { skip = 1 }
-        let tok gen.Tok = file.tokens[ti]
-        if (skip == 0 && tok.kind == gen.TOK_IDENT && tok.len > 0
+        let tok token.Tok = file.tokens[ti]
+        if (skip == 0 && tok.kind == token.TOK_IDENT && tok.len > 0
             && mask[file.source[tok.start].to_type(int)] != 0) {
             let ci int = 0
             for ci < cand_n {
                 if (used[ci] == 0 && cands[ci].name_len == tok.len
-                    && uf_bytes_eq(file.source, tok.start, t.np_data,
+                    && uf_bytes_eq(file.source, tok.start, support.pool_ctx().data,
                         cands[ci].name_off, tok.len) != 0) {
                     used[ci] = 1
                     remaining -= 1
@@ -183,7 +185,7 @@ pub fn unused_function_report(files *int, file_n int, sym_base int) int {
         if (cands != 0) { free(cands.to_type(*void)) }
         if (used != 0) { free(used.to_type(*void)) }
         if (mask != 0) { free(mask.to_type(*void)) }
-        return gen.fail("内存分配失败")
+        return support.fail("内存分配失败")
     }
     let mi int = 0
     for mi < 256 {
@@ -207,8 +209,8 @@ pub fn unused_function_report(files *int, file_n int, sym_base int) int {
         let ri int = 0
         for ri < cand_n {
             if (used[ri] == 0) {
-                gen.set_source_path(proj.pool_str(proj.ctx().files[cands[ri].file_id].path_off))
-                gen.err_lc(cands[ri].line, cands[ri].col,
+                support.set_source_path(proj.pool_str(proj.ctx().files[cands[ri].file_id].path_off))
+                support.err_lc(cands[ri].line, cands[ri].col,
                     "函数未使用（本模块没有任何引用；请删除或改为 pub）")
             }
             ri += 1

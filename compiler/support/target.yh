@@ -1,0 +1,193 @@
+module support
+
+// ============================================================================
+// target.yh —— 目标身份、目标配置与宿主/方言判定
+//
+// target_resolve 严格解析支持的 triple；TargetCfg 实体在 proj，support 只持
+// 绑定指针与单模块 fallback。tg_* 查询当前目标/宿主；target_defaults 是唯一
+// 默认值实现。明确不做：结构体布局（tg_layout_struct 仍在前端 gen，等 check
+// 接管语义后迁 check）。
+// ============================================================================
+
+// cfg：目标/配置读写口；已绑定时用 proj 的存储，否则用宿主默认实例。
+pub fn cfg() *TargetCfg {
+    if (g_support.cfg == 0) {
+        // 单模块嵌入没有 proj.init：首次读目标时给 fallback 宿主默认值。
+        if (g_support.fallback.target.triple == 0) {
+            target_cfg_defaults(&g_support.fallback)
+        }
+        return &g_support.fallback
+    }
+    return g_support.cfg
+}
+
+// bind_cfg：把目标/配置存储（proj.ProjectCtx.cfg）绑定到 support。
+// 必须在任何需要目标的代码之前调用（driver 在 proj.init() 之后）。
+pub fn bind_cfg(pointer *TargetCfg) void {
+    g_support.cfg = pointer
+}
+
+// target_cfg_defaults：把一份目标/配置重置为「宿主身份 + CLI 默认值」。
+pub fn target_cfg_defaults(out *TargetCfg) void {
+    out.target_explicit = 0
+    out.opt_level = 0
+    out.trimpath = 0
+    out.emit_kind = 0
+    out.emit_asm = 0
+    out.emit_text_path = 0
+    out.module_mode = 0
+    out.is_entry_mod = 0
+    out.dialect = TG_DIALECT_GNU
+    target_host_info(&out.host_target)
+    out.target = out.host_target
+    if (out.target.os == TARGET_OS_DARWIN) { out.dialect = TG_DIALECT_DARWIN }
+}
+
+// module_mode / is_entry_mod：构建模式窄口（供前端查询）。
+pub fn module_mode() int {
+    return cfg().module_mode
+}
+
+pub fn is_entry_mod() int {
+    return cfg().is_entry_mod
+}
+
+// tg_darwin：是否 Darwin 方言（符号加 `_`、取址用 @PAGE、外部走 GOT）。
+pub fn tg_darwin() int {
+    return (cfg().dialect == TG_DIALECT_DARWIN).to_type(int)
+}
+
+// target_arch_token：接口头行里的架构标记，与 project.arch 的写法一致。
+// 头行架构必须随目标变化：此前两处写入端把它硬编码成 arm64，一旦接入
+// x64 目标，头行会"说谎"，读取端又只比对字面量，等于失去目标校验。
+pub fn target_arch_token() *char {
+    if (cfg().target.arch == TARGET_ARCH_X64) {
+        return "x64"
+    }
+    return "arm64"
+}
+
+// tg_host_darwin：**宿主**平台探测（进程实际运行的操作系统）——macOS 独有的
+// 系统 plist（Linux 无此路径）。与 tg_darwin（输出目标方言）区分：
+// open 旗标、目录类宿主文件操作按**宿主内核**语义取值，交叉目标
+// （-target darwin）不得改变宿主文件操作（Linux 内核不认 Darwin 的
+// O_CREAT 位值，0x601 在 Linux 上是 O_APPEND 组合）。
+pub fn tg_host_darwin() int {
+    let fd int = open("/System/Library/CoreServices/SystemVersion.plist", 0)
+    if (fd >= 0) {
+        close(fd)
+        return 1
+    }
+    return 0
+}
+
+// tg_host_windows：**宿主**操作系统是否为 Windows。与 tg_windows（输出目标
+// 方言）区分：本函数用于 PATH 分隔符、路径分隔符等**运行在本机的编译器自身**
+// 的文件操作。构建时目标就是产物将来的宿主（自举交叉编译），所以用 $if
+// 编译期选择即可；运行时不受 --target 影响。
+pub fn tg_host_windows() int {
+    $if (windows) { return 1 }
+    $else { return 0 }
+}
+
+
+
+// target_resolve：严格解析当前支持的完整 triple，成功填出参，失败保持出参原值。
+// LLVM 21.1.8 的布局已用固定版本 oracle 核对；这里查静态数据，check 不初始化 LLVM。
+// Windows/x64 的 data_layout 是 2026-10-27 用本机 clang 21.1.8
+// （`clang --target=x86_64-pc-windows-msvc -S -emit-llvm`）实测值，不要手抄别处。
+pub fn target_resolve(triple *char, out *TargetInfo) int {
+    let target TargetInfo
+    target.pointer_bits = 64
+    target.little_endian = 1
+    target.layout_version = 1
+    if (cstr_eq(triple, "x86_64-unknown-linux-gnu") != 0) {
+        target.triple = "x86_64-unknown-linux-gnu"
+        target.os = TARGET_OS_LINUX
+        target.arch = TARGET_ARCH_X64
+        target.abi = "sysv-amd64"
+        target.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+    } else if (cstr_eq(triple, "aarch64-unknown-linux-gnu") != 0) {
+        target.triple = "aarch64-unknown-linux-gnu"
+        target.os = TARGET_OS_LINUX
+        target.arch = TARGET_ARCH_ARM64
+        target.abi = "aapcs64"
+        target.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"
+    } else if (cstr_eq(triple, "x86_64-apple-darwin") != 0) {
+        target.triple = "x86_64-apple-darwin"
+        target.os = TARGET_OS_DARWIN
+        target.arch = TARGET_ARCH_X64
+        target.abi = "darwin-amd64"
+        target.data_layout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+    } else if (cstr_eq(triple, "aarch64-apple-darwin") != 0) {
+        target.triple = "aarch64-apple-darwin"
+        target.os = TARGET_OS_DARWIN
+        target.arch = TARGET_ARCH_ARM64
+        target.abi = "darwin-aapcs64"
+        target.data_layout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+    } else if (cstr_eq(triple, "x86_64-pc-windows-msvc") != 0) {
+        // 首版 Windows 只接 x64 + MSVC ABI（零 CRT 路线，见方案 §3 D1/D2）。
+        target.triple = "x86_64-pc-windows-msvc"
+        target.os = TARGET_OS_WINDOWS
+        target.arch = TARGET_ARCH_X64
+        target.abi = "win64-msvc"
+        target.data_layout = "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+    } else { return -1 }
+    out[0] = target
+    return 0
+}
+
+// target_host_info：构建编译器时选择并固化进程身份，运行时输出 --target 不改变这些分支。
+// 启动种子只需认识已有 arm64/darwin 标记；生成原生 x64 编译器时自动选择其 $else。
+pub fn target_host_info(out *TargetInfo) int {
+    $if (darwin) {
+        $if (arm64) { return target_resolve("aarch64-apple-darwin", out) }
+        $else { return target_resolve("x86_64-apple-darwin", out) }
+    } $else $if (windows) {
+        // Windows 宿主（W2-1）：首版只接 x64；arm64 宿主留给矩阵收尾阶段。
+        $if (arm64) { return -1 }
+        $else { return target_resolve("x86_64-pc-windows-msvc", out) }
+    } $else {
+        $if (arm64) { return target_resolve("aarch64-unknown-linux-gnu", out) }
+        $else { return target_resolve("x86_64-unknown-linux-gnu", out) }
+    }
+}
+
+// target_select：只更新输出目标及过渡期旧汇编方言，不能写宿主身份。
+pub fn target_select(triple *char) int {
+    let target TargetInfo
+    if (target_resolve(triple, &target) != 0) { return -1 }
+    cfg().target = target
+    cfg().dialect = target.os == TARGET_OS_DARWIN ? TG_DIALECT_DARWIN : TG_DIALECT_GNU
+    return 0
+}
+
+// target_select_os_arch：按项目清单的 os/arch 选择目标；0 表示使用宿主身份。
+// 只允许已支持的 Linux/Darwin × ARM64/x64 与 Windows × x64 组合。
+pub fn target_select_os_arch(os int, arch int) int {
+    if (os == 0) { os = cfg().host_target.os }
+    if (arch == 0) { arch = cfg().host_target.arch }
+    if (os == TARGET_OS_LINUX) {
+        if (arch == TARGET_ARCH_ARM64) { return target_select("aarch64-unknown-linux-gnu") }
+        if (arch == TARGET_ARCH_X64) { return target_select("x86_64-unknown-linux-gnu") }
+        return -1
+    }
+    if (os == TARGET_OS_DARWIN) {
+        if (arch == TARGET_ARCH_ARM64) { return target_select("aarch64-apple-darwin") }
+        if (arch == TARGET_ARCH_X64) { return target_select("x86_64-apple-darwin") }
+        return -1
+    }
+    // Windows：首版只有 x64；ARM64 留给矩阵收尾阶段（方案 §8 W3）。
+    if (os == TARGET_OS_WINDOWS) {
+        if (arch == TARGET_ARCH_X64) { return target_select("x86_64-pc-windows-msvc") }
+        return -1
+    }
+    return -1
+}
+
+// target_matches_host：当前输出目标是否与编译器宿主平台一致。
+pub fn target_matches_host() int {
+    if (cfg().target.os != cfg().host_target.os) { return 0 }
+    if (cfg().target.arch != cfg().host_target.arch) { return 0 }
+    return 1
+}
