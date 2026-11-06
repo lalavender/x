@@ -132,6 +132,13 @@ lex → parse(纯语法) → AST
 - [x] **F4-3 首片（2026-11-06 完成）**：`CtFieldRow` 字段表镜像 +
   `CT_DIAG_*` 镜像常量；`comptime` 的 `gen.SField` 与 `gen.CT_DIAG_*` 全部
   改镜像。`gen.` 引用 340→322。
+- [x] **F4-4 首片（2026-11-06 完成）**：`comptime` 自建 `ct_err`（位置取 token
+  游标，表缺失退化无位置诊断）替代 183 处 `gen.sem_err`；类型/字段/符号表
+  读取全部走已绑定镜像（含 `gen.task().t_types[...]` 直读）。`comptime` 的
+  `gen.` 引用（去注释）从 322 降到 **62**，只剩：值规则（`sem_can_assign`/
+  `sem_fold_*`/`fp*_bits`/`sem_res_const`/`sem_struct_finish`/`Res`，F4-5）、
+  `static_data_*`/`em_*`/`data_str_*`/`sym_*`（F4-3 剩余）、2 处 CT 侧建类型
+  （`ty_push_agg`，需 check 侧 API）与 `gen.task()` 的剩余字段。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

@@ -6,7 +6,6 @@ import proj
 
 // ct_reset：释放当前编译单元登记的函数体快照，防止模块 worker 交叉污染。
 pub fn ct_reset() void {
-    let tk *gen.TaskCtx = gen.task()
     // 编译单元结束后不能把前一模块的静态对象带入下一次受检快照。
     gen.static_data_reset()
     ct_layout_reset()
@@ -58,7 +57,7 @@ pub fn ct_enter_control() int {
     ct_control_depth += 1
     if (ct_control_depth > 32) {
         ct_control_depth -= 1
-        return gen.sem_err("编译期结构嵌套超过 32 层")
+        return ct_err("编译期结构嵌套超过 32 层")
     }
     return 0
 }
@@ -70,9 +69,8 @@ pub fn ct_leave_control() void {
 
 // ct_for_boundary_enter：记录展开开始时的运行期循环深度，阻止跳转逃出展开体。
 pub fn ct_for_boundary_enter(loop_depth int) int {
-    let tk *gen.TaskCtx = gen.task()
     if (ct_for_boundary_depth >= 32) {
-        return gen.sem_err("编译期 for 嵌套超过 32 层")
+        return ct_err("编译期 for 嵌套超过 32 层")
     }
     ct_for_boundary_bases[ct_for_boundary_depth] = loop_depth
     ct_for_trace_bases[ct_for_boundary_depth] = support.diag().ct_depth
@@ -83,7 +81,6 @@ pub fn ct_for_boundary_enter(loop_depth int) int {
 
 // ct_for_boundary_value：记录当前展开层的迭代值，供诊断输出展开来源。
 pub fn ct_for_boundary_value(value i64) int {
-    let tk *gen.TaskCtx = gen.task()
     if (ct_for_boundary_depth <= 0 || ct_for_boundary_depth > 32) {
         return support.fail("内部错误：编译期 for 展开值没有对应边界")
     }
@@ -94,7 +91,6 @@ pub fn ct_for_boundary_value(value i64) int {
 
 // ct_for_boundary_leave：退出一层区间展开边界。
 pub fn ct_for_boundary_leave() void {
-    let tk *gen.TaskCtx = gen.task()
     if (ct_for_boundary_depth > 0) {
         support.diag().ct_depth = ct_for_trace_bases[ct_for_boundary_depth - 1]
         ct_for_boundary_depth -= 1
@@ -106,9 +102,9 @@ pub fn ct_validate_loop_exit(loop_depth int, kind int) int {
     if (ct_for_boundary_depth == 0
         || loop_depth > ct_for_boundary_bases[ct_for_boundary_depth - 1]) { return 0 }
     if (kind == token.TK_BREAK) {
-        return gen.sem_err("编译期 $for 不能跨出展开边界执行 break")
+        return ct_err("编译期 $for 不能跨出展开边界执行 break")
     }
-    return gen.sem_err("编译期 $for 不能跨出展开边界执行 continue")
+    return ct_err("编译期 $for 不能跨出展开边界执行 continue")
 }
 
 // ct_expansion_capture_enter：标记所选普通函数展开体正在生成稳定 AST 节点。
@@ -125,7 +121,7 @@ pub fn ct_expansion_capture_leave() void {
 pub fn ct_charge_expansion_ast_node() int {
     if (ct_expansion_ast_depth <= 0) { return 0 }
     if (ct_expansion_size >= 100000) {
-        return gen.sem_err("编译期 for 展开 AST 节点超过 100000")
+        return ct_err("编译期 for 展开 AST 节点超过 100000")
     }
     ct_expansion_size += 1
     return 0
@@ -135,7 +131,7 @@ pub fn ct_charge_expansion_ast_node() int {
 pub fn ct_charge_expansion_ast_nodes(count int) int {
     if (count < 0) { return support.fail("内部错误：编译期 AST 模板节点数无效") }
     if (count > 100000 - ct_expansion_size) {
-        return gen.sem_err("编译期 for 展开 AST 节点超过 100000")
+        return ct_err("编译期 for 展开 AST 节点超过 100000")
     }
     ct_expansion_size += count
     return 0
@@ -143,17 +139,16 @@ pub fn ct_charge_expansion_ast_nodes(count int) int {
 
 // ct_charge_expansion：限制展开轮数；无 AST 捕获时兼用保守 token 规模预算。
 pub fn ct_charge_expansion(body_token_count int) int {
-    let tk *gen.TaskCtx = gen.task()
     if (support.session().ast_capture == 0
         && (body_token_count < 0 || body_token_count > 100000)) {
-        return gen.sem_err("编译期 for 展开语法规模超过 100000")
+        return ct_err("编译期 for 展开语法规模超过 100000")
     }
     ct_expansion_count += 1
     if (ct_expansion_count > 100000) {
-        return gen.sem_err("编译期 for 总展开次数超过 100000")
+        return ct_err("编译期 for 总展开次数超过 100000")
     }
     if (support.session().ast_capture == 0 && body_token_count > 100000 - ct_expansion_size) {
-        return gen.sem_err("编译期 for 展开语法规模超过 100000")
+        return ct_err("编译期 for 展开语法规模超过 100000")
     }
     if (support.session().ast_capture == 0) { ct_expansion_size += body_token_count }
     return 0
@@ -177,7 +172,6 @@ fn ct_grow() int {
 // ct_register：登记函数签名并复制正文源/token，供后续常量初始化稳定求值。
 pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     param_n int, ret_type int, body_first int, body_after int) int {
-    let tk *gen.TaskCtx = gen.task()
     if (sym_id < 0 || sym_id >= ct_syms_bound() || param_n < 0 || param_n > 64
         || body_first < 0 || body_after <= body_first || body_after > token.ctx().count) {
         return support.fail("内部错误：编译期函数登记范围无效")
@@ -193,6 +187,7 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     let loc_path [1024]u8
     let path_len int = 0
     let use_loc int = 0
+    let tk *gen.TaskCtx = gen.task()
     // 从 .s.ct 导入的 CT 函数已经带定义源码路径（c_ct_origin_active），
     // 不能改写成当前解析文件；只有真实源文件登记才套用 trimpath/locs 路径。
     if (tk.c_ct_origin_active == 0 && support.session().active_file >= 0
@@ -472,39 +467,39 @@ pub fn ct_is_prepared(sym_id int) int {
 fn ct_invoke_in_frame(caller *CtFrame, sym_id int, args *CtValue,
     arg_n int, out *CtValue) int {
     let row int = ct_find(sym_id)
-    if (row < 0) { return gen.sem_err("编译期函数正文不在当前编译单元中") }
+    if (row < 0) { return ct_err("编译期函数正文不在当前编译单元中") }
     let target CtFunction = ct_functions[row]
     if (ct_layout_function_sym_pending(sym_id) != 0) {
-        return gen.sem_err("编译期函数引用了尚未完成布局的类型")
+        return ct_err("编译期函数引用了尚未完成布局的类型")
     }
-    if (arg_n != target.param_n) { return gen.sem_err("编译期调用实参数量与函数签名不符") }
+    if (arg_n != target.param_n) { return ct_err("编译期调用实参数量与函数签名不符") }
     if (ct_ir_return_supported(target.ret_type) == 0) {
-        return gen.sem_err("编译期函数返回值类型不受支持")
+        return ct_err("编译期函数返回值类型不受支持")
     }
     let typed int = (target.ir_ready != 0 && target.ir_supported != 0).to_type(int)
-    let return_kind int = gen.task().t_types[target.ret_type].kind
+    let return_kind int = ct_type_row(target.ret_type).kind
     let aggregate_return int = ((return_kind == CT_TY_ARRAY
         || return_kind == CT_TY_STRUCT || return_kind == CT_TY_SLICE
         || return_kind == CT_TY_UNION).to_type(int))
     if (aggregate_return != 0 && (caller == 0 || typed == 0)) {
-        return gen.sem_err("编译期聚合返回只支持嵌套 typed IR 调用")
+        return ct_err("编译期聚合返回只支持嵌套 typed IR 调用")
     }
     let call_values [64]CtValue
     let i int = 0
     for i < arg_n {
         let param_type int = target.params[i].type_id
         if (ct_ir_param_supported(param_type) == 0) {
-            return gen.sem_err("编译期函数形参类型不受支持")
+            return ct_err("编译期函数形参类型不受支持")
         }
         if (ct_ty_is_integer(param_type) == 0 && ct_ty_is_float(param_type) == 0
             && typed == 0) {
-            return gen.sem_err("编译期聚合或指针形参要求函数具有受支持的 typed IR 正文")
+            return ct_err("编译期聚合或指针形参要求函数具有受支持的 typed IR 正文")
         }
         if (gen.sem_can_assign(param_type, args[i].type_id,
                 args[i].is_lit, args[i].value, args[i].lit_big) != 0) { return -1 }
-        if (gen.task().t_types[param_type].kind == CT_TY_SLICE
+        if (ct_type_row(param_type).kind == CT_TY_SLICE
             && ct_ir_slice_param_valid(param_type, &args[i]) == 0) {
-            return gen.sem_err("编译期切片形参需要有效的本地数组或切片视图")
+            return ct_err("编译期切片形参需要有效的本地数组或切片视图")
         }
         call_values[i] = args[i]
         if (ct_pool_adopt_label(&call_values[i]) != 0) { return -1 }
@@ -514,7 +509,7 @@ fn ct_invoke_in_frame(caller *CtFrame, sym_id int, args *CtValue,
         i += 1
     }
     if (ct_eval_depth >= 64) {
-        return gen.sem_err("编译期函数调用深度超过 64 层")
+        return ct_err("编译期函数调用深度超过 64 层")
     }
     ct_eval_depth += 1
     let value CtValue
@@ -539,10 +534,10 @@ fn ct_invoke_in_frame(caller *CtFrame, sym_id int, args *CtValue,
 pub fn ct_call(sym_id int, args *gen.Res, arg_n int, out *gen.Res) int {
     let tk *gen.TaskCtx = gen.task()
     let values [64]CtValue
-    if (arg_n < 0 || arg_n > 64) { return gen.sem_err("编译期调用实参数量无效") }
+    if (arg_n < 0 || arg_n > 64) { return ct_err("编译期调用实参数量无效") }
     let i int = 0
     for i < arg_n {
-        if (args[i].is_const == 0) { return gen.sem_err("编译期调用的实参必须是常量") }
+        if (args[i].is_const == 0) { return ct_err("编译期调用的实参必须是常量") }
         values[i].type_id = args[i].type_id
         values[i].value = args[i].ival
         values[i].is_lit = args[i].is_lit
@@ -560,7 +555,7 @@ pub fn ct_call(sym_id int, args *gen.Res, arg_n int, out *gen.Res) int {
         ct_ir_aggregate_free_all(&result_frame)
         return -1
     }
-    let result_kind int = tk.t_types[value.type_id].kind
+    let result_kind int = ct_type_row(value.type_id).kind
     if (result_kind == CT_TY_ARRAY || result_kind == CT_TY_STRUCT
         || result_kind == CT_TY_SLICE || result_kind == CT_TY_UNION) {
         ct_ir_result_pool_keep(&result_frame)
@@ -590,27 +585,27 @@ pub fn ct_call(sym_id int, args *gen.Res, arg_n int, out *gen.Res) int {
 // ct_unsupported_diagnostic：按捕获时记录的原因码报告不受支持的正文构造。
 fn ct_unsupported_diagnostic(code int) int {
     if (code == 100) {
-        return gen.sem_err("编译期函数正文的类型声明不在受支持的 typed IR 子集内")
+        return ct_err("编译期函数正文的类型声明不在受支持的 typed IR 子集内")
     }
     if (code == 200) {
-        return gen.sem_err("编译期函数正文的 goto 语句不在受支持的 typed IR 子集内")
+        return ct_err("编译期函数正文的 goto 语句不在受支持的 typed IR 子集内")
     }
     if (code == 300) {
-        return gen.sem_err("编译期函数正文的标签语句不在受支持的 typed IR 子集内")
+        return ct_err("编译期函数正文的标签语句不在受支持的 typed IR 子集内")
     }
     if (code == 400) {
-        return gen.sem_err("编译期函数正文的编译期语句不在受支持的 typed IR 子集内")
+        return ct_err("编译期函数正文的编译期语句不在受支持的 typed IR 子集内")
     }
     if (code == 500) {
-        return gen.sem_err("编译期函数正文含不在受支持的 typed IR 子集内的语句")
+        return ct_err("编译期函数正文含不在受支持的 typed IR 子集内的语句")
     }
     if (code == 600) {
-        return gen.sem_err("编译期函数正文含不在受支持的 typed IR 子集内的表达式")
+        return ct_err("编译期函数正文含不在受支持的 typed IR 子集内的表达式")
     }
     if (code == 700) {
-        return gen.sem_err("编译期函数正文含缺少类型的表达式（typed IR 子集要求完整类型）")
+        return ct_err("编译期函数正文含缺少类型的表达式（typed IR 子集要求完整类型）")
     }
-    return gen.sem_err("编译期函数正文不在受支持的 typed IR 子集内")
+    return ct_err("编译期函数正文不在受支持的 typed IR 子集内")
 }
 
 // —— pub 聚合常量（$ 调用初始化）的闭包可达种子 ——
@@ -623,7 +618,7 @@ let ct_pub_agg_fn_n int = 0
 // ct_pub_agg_fn_add：登记一个 pub 聚合常量初始化式调用的编译期函数。
 pub fn ct_pub_agg_fn_add(sym_id int) int {
     if (sym_id < 0 || ct_pub_agg_fn_n >= 64) {
-        return gen.sem_err("pub 聚合常量的编译期调用目标超过 64 个")
+        return ct_err("pub 聚合常量的编译期调用目标超过 64 个")
     }
     let i int = 0
     for i < ct_pub_agg_fn_n {

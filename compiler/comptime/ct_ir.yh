@@ -234,7 +234,7 @@ pub fn ct_ir_import(sym_id int, expr_src *CtExpr, expr_first int, expr_n int,
 fn ct_ir_tick() int {
     ct_ir_steps += 1
     if (ct_ir_steps > 100000) {
-        return gen.sem_err("编译期函数执行步骤超过 100000")
+        return ct_err("编译期函数执行步骤超过 100000")
     }
     return 0
 }
@@ -258,11 +258,11 @@ fn ct_ir_args_fill(frame *CtFrame, list_id int, args *CtValue,
     count *int) int {
     if (list_id < 0) { return 0 }
     if (list_id >= frame.target.ir_expr_after) {
-        return gen.sem_err("内部错误：编译期调用实参节点越界")
+        return ct_err("内部错误：编译期调用实参节点越界")
     }
     let list CtExpr = ct_ir_exprs[list_id]
     if (list.kind != 6) {
-        if (*count >= 64) { return gen.sem_err("编译期调用实参数量超过 64") }
+        if (*count >= 64) { return ct_err("编译期调用实参数量超过 64") }
         if (ct_ir_eval_expr(frame, list_id, &args[*count]) != 0) { return -1 }
         *count += 1
         return 0
@@ -280,18 +280,17 @@ fn ct_ir_args_fill(frame *CtFrame, list_id int, args *CtValue,
 fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
     if (ct_ir_tick() != 0) { return -1 }
     if (expr_id < frame.target.ir_expr_first || expr_id >= frame.target.ir_expr_after) {
-        return gen.sem_err("内部错误：编译期表达式引用越出函数 IR")
+        return ct_err("内部错误：编译期表达式引用越出函数 IR")
     }
     let expr CtExpr = ct_ir_exprs[expr_id]
     if (expr.kind == 1) {
         if (expr.layout_type_id >= 0) {
-            let tk *gen.TaskCtx = gen.task()
-            if (expr.layout_type_id >= tk.t_type_n
-                || tk.t_types[expr.layout_type_id].size < 0) {
-                return gen.sem_err("编译期 sizeof 依赖的类型布局尚未就绪")
+            if (expr.layout_type_id >= ct_types_bound()
+                || ct_type_row(expr.layout_type_id).size < 0) {
+                return ct_err("编译期 sizeof 依赖的类型布局尚未就绪")
             }
             out.type_id = expr.type_id
-            out.value = tk.t_types[expr.layout_type_id].size.to_type(i64)
+            out.value = ct_type_row(expr.layout_type_id).size.to_type(i64)
             out.is_lit = 0
             out.lit_big = 0
             return 0
@@ -301,13 +300,12 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             && expr.binding_row < frame.target.ir_binding_after) {
             let slot int = ct_ir_bindings[expr.binding_row].id
             if (slot < 0 || slot >= frame.local_n) {
-                return gen.sem_err("内部错误：编译期局部槽编号无效")
+                return ct_err("内部错误：编译期局部槽编号无效")
             }
             *out = frame.locals[slot]
             return 0
         }
         if (expr.sym_kind == CT_SYM_CONST && expr.sym_id >= 0) {
-            let tk *gen.TaskCtx = gen.task()
             if (expr.sym_id < ct_syms_bound() && ct_sym_row(expr.sym_id).const_ready != 0) {
                 if ((ct_sym_row(expr.sym_id).flags & CT_F_ADDR) != 0) {
                     // 字符串字面量指针常量：用保存的原样字节登记只读池后返回池地址。
@@ -326,7 +324,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
                         out.lit_big = 0
                         return 0
                     }
-                    return gen.sem_err("编译期求值不支持指针常量")
+                    return ct_err("编译期求值不支持指针常量")
                 }
                 // 全局聚合常量：用前端在语义阶段建好的编译期模型（元素值）代替
                 // 数据段标签，编译期读下标/字段/迭代/传参因此走既有聚合路径。
@@ -373,21 +371,20 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             out.lit_big = 0
             return 0
         }
-        return gen.sem_err("编译期表达式引用了不支持的运行期值")
+        return ct_err("编译期表达式引用了不支持的运行期值")
     }
     if (expr.kind == 2) {
         if (expr.op == token.TK_AMP) {
             let place CtPlace
             if (expr.child0 < 0) {
-                return gen.sem_err("编译期取址只支持当前帧中的标量局部变量或标量聚合元素")
+                return ct_err("编译期取址只支持当前帧中的标量局部变量或标量聚合元素")
             }
             if (ct_ir_lvalue(frame, expr.child0, &place) != 0) { return -1 }
-            let tk *gen.TaskCtx = gen.task()
             // 联合体各字段共享存储，编译期槽彼此独立，取址别名语义无法保持。
             if (place.aggregate != 0 && place.aggregate.elem_type >= 0
-                && place.aggregate.elem_type < tk.t_type_n
-                && tk.t_types[place.aggregate.elem_type].kind == CT_TY_UNION) {
-                return gen.sem_err("编译期联合体字段不支持取址")
+                && place.aggregate.elem_type < ct_types_bound()
+                && ct_type_row(place.aggregate.elem_type).kind == CT_TY_UNION) {
+                return ct_err("编译期联合体字段不支持取址")
             }
             let element int = (place.aggregate != 0).to_type(int)
             if (place.direct != 0
@@ -396,10 +393,10 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
                     || place.index >= place.aggregate.count))
                 || (ct_ty_is_integer(place.type_id) == 0
                     && ct_ty_is_float(place.type_id) == 0)
-                || expr.type_id < 0 || expr.type_id >= tk.t_type_n
-                || tk.t_types[expr.type_id].kind != CT_TY_PTR
-                || tk.t_types[expr.type_id].elem != place.type_id) {
-                return gen.sem_err("编译期取址只支持当前帧中的标量局部变量或标量聚合元素")
+                || expr.type_id < 0 || expr.type_id >= ct_types_bound()
+                || ct_type_row(expr.type_id).kind != CT_TY_PTR
+                || ct_type_row(expr.type_id).elem != place.type_id) {
+                return ct_err("编译期取址只支持当前帧中的标量局部变量或标量聚合元素")
             }
             out.type_id = expr.type_id
             if (element != 0) {
@@ -416,7 +413,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             let place2 CtPlace
             if (ct_ir_lvalue(frame, expr_id, &place2) != 0) { return -1 }
             if (place2.direct == 0) {
-                return gen.sem_err("内部错误：编译期解引用没有局部值槽")
+                return ct_err("内部错误：编译期解引用没有局部值槽")
             }
             out.type_id = place2.direct.type_id
             out.value = place2.direct.value
@@ -427,15 +424,14 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
         let value CtValue
         if (ct_ir_eval_expr(frame, expr.child0, &value) != 0) { return -1 }
         if (expr.op == token.TK_LEN) {
-            let tk *gen.TaskCtx = gen.task()
-            if (value.type_id < 0 || value.type_id >= tk.t_type_n
+            if (value.type_id < 0 || value.type_id >= ct_types_bound()
                 || expr.type_id != CT_TY_I32) {
-                return gen.sem_err("内部错误：编译期 len 类型无效")
+                return ct_err("内部错误：编译期 len 类型无效")
             }
             let source_type CtTypeRow = ct_type_row(value.type_id)
             if (source_type.kind != CT_TY_ARRAY
                 && source_type.kind != CT_TY_SLICE) {
-                return gen.sem_err("编译期 len 只支持数组或切片")
+                return ct_err("编译期 len 只支持数组或切片")
             }
             let aggregate *CtAggregate = value.value.to_type(u64) .
                 to_type(*CtAggregate)
@@ -445,7 +441,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
                 || (aggregate.count > 0 && aggregate.values == 0)
                 || (source_type.kind == CT_TY_ARRAY
                     && aggregate.count != source_type.len)) {
-                return gen.sem_err("内部错误：编译期 len 聚合存储无效")
+                return ct_err("内部错误：编译期 len 聚合存储无效")
             }
             out.type_id = expr.type_id
             out.value = aggregate.count.to_type(i64)
@@ -462,7 +458,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             } else if (expr.op == token.TK_PLUS) {
                 out.value = ct_fp_norm(expr.type_id, value.value)
             } else {
-                return gen.sem_err("编译期浮点只支持一元正负号")
+                return ct_err("编译期浮点只支持一元正负号")
             }
             out.type_id = expr.type_id
         } else {
@@ -495,7 +491,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             if (ct_fp_binop_norm(expr.op, left.type_id, left.value,
                     right.value, &out.value) != 0) { return -1 }
             out.type_id = expr.type_id
-        } else if (gen.task().t_types[left.type_id].kind == CT_TY_PTR
+        } else if (ct_type_row(left.type_id).kind == CT_TY_PTR
             && ct_ty_is_integer(right.type_id) != 0
             && (expr.op == token.TK_PLUS || expr.op == token.TK_MINUS)) {
             // 指针 ± 整数：按 CtValue 槽步进，结果仍是指向存活帧的地址值。
@@ -504,7 +500,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             out.value = ct_ir_pointer_offset(left.value, steps)
             if (out.value == 0) { return -1 }
             out.type_id = expr.type_id
-        } else if (gen.task().t_types[right.type_id].kind == CT_TY_PTR
+        } else if (ct_type_row(right.type_id).kind == CT_TY_PTR
             && ct_ty_is_integer(left.type_id) != 0
             && expr.op == token.TK_PLUS) {
             out.value = ct_ir_pointer_offset(right.value, left.value)
@@ -525,7 +521,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
             let equal int = (left.value == right.value).to_type(int)
             out.value = (expr.op == token.TK_EQEQ ? equal : 1 - equal).to_type(i64)
         } else {
-            return gen.sem_err("编译期二元运算要求整数或 bool 比较")
+            return ct_err("编译期二元运算要求整数或 bool 比较")
         }
         out.is_lit = 0
         out.lit_big = 0
@@ -561,31 +557,30 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
         return 0
     }
     if (expr.kind == 11) {
-        let tk *gen.TaskCtx = gen.task()
-        if (expr.type_id < 0 || expr.type_id >= tk.t_type_n) {
-            return gen.sem_err("内部错误：编译期数组字面量缺少类型")
+        if (expr.type_id < 0 || expr.type_id >= ct_types_bound()) {
+            return ct_err("内部错误：编译期数组字面量缺少类型")
         }
-        let kind int = tk.t_types[expr.type_id].kind
+        let kind int = ct_type_row(expr.type_id).kind
         if (kind != CT_TY_ARRAY && kind != CT_TY_SLICE) {
-            return gen.sem_err("编译期数组字面量目标必须是数组或切片")
+            return ct_err("编译期数组字面量目标必须是数组或切片")
         }
-        let elem_type int = tk.t_types[expr.type_id].elem
+        let elem_type int = ct_type_row(expr.type_id).elem
         if ((kind == CT_TY_ARRAY
                 && ct_ir_array_supported(expr.type_id, 0) == 0)
             || (kind == CT_TY_SLICE
                 && ct_ir_slice_elem_supported(elem_type, 0) == 0)) {
-            return gen.sem_err("编译期数组字面量只支持整数、浮点或受支持结构体切片元素及受支持定长数组元素")
+            return ct_err("编译期数组字面量只支持整数、浮点或受支持结构体切片元素及受支持定长数组元素")
         }
         let count int = ct_ir_array_item_count(frame, expr.child0)
         if (count < 0 || count > 100000
-            || (kind == CT_TY_ARRAY && count != tk.t_types[expr.type_id].len)) {
-            return gen.sem_err("编译期数组字面量元素数量无效或超过 100000")
+            || (kind == CT_TY_ARRAY && count != ct_type_row(expr.type_id).len)) {
+            return ct_err("编译期数组字面量元素数量无效或超过 100000")
         }
         let aggregate *CtAggregate = ct_ir_aggregate_new(frame, elem_type, count)
         if (aggregate == 0) { return -1 }
         let next int = count
         if (ct_ir_array_fill(frame, expr.child0, aggregate, &next) != 0) { return -1 }
-        if (next != 0) { return gen.sem_err("内部错误：编译期数组元素数量不匹配") }
+        if (next != 0) { return ct_err("内部错误：编译期数组元素数量不匹配") }
         out.type_id = expr.type_id
         out.value = aggregate.to_type(u64).to_type(i64)
         out.is_lit = 0
@@ -612,7 +607,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
         let dst_float int = ct_ty_is_float(expr.type_id)
         let src_float int = ct_ty_is_float(value.type_id)
         if (ct_ty_is_integer(expr.type_id) == 0 && dst_float == 0) {
-            return gen.sem_err("编译期只支持整数或浮点类型转换")
+            return ct_err("编译期只支持整数或浮点类型转换")
         }
         out.type_id = expr.type_id
         if (dst_float != 0 || src_float != 0) {
@@ -624,7 +619,7 @@ fn ct_ir_eval_expr(frame *CtFrame, expr_id int, out *CtValue) int {
         out.lit_big = 0
         return 0
     }
-    return gen.sem_err("编译期 typed IR 遇到不支持的表达式节点")
+    return ct_err("编译期 typed IR 遇到不支持的表达式节点")
 }
 
 // ct_ir_array_item_count：统计捕获的数组元素链长度，并拒绝越出当前函数的表达式引用。
@@ -652,7 +647,7 @@ fn ct_ir_aggregate_new(frame *CtFrame, elem_type int,
     count int) *CtAggregate {
     if (count < 0 || count > 100000
         || frame.aggregate_element_count > 100000 - count) {
-        gen.sem_err("编译期调用帧聚合元素超过 100000 个")
+        ct_err("编译期调用帧聚合元素超过 100000 个")
         return 0
     }
     let aggregate *CtAggregate = malloc(sizeof(CtAggregate).to_type(u64)) .
@@ -681,7 +676,7 @@ fn ct_ir_aggregate_new(frame *CtFrame, elem_type int,
 fn ct_ir_array_fill_one(frame *CtFrame, expr_id int,
     aggregate *CtAggregate, next *int) int {
     if (*next <= 0 || *next > aggregate.count) {
-        return gen.sem_err("内部错误：编译期数组元素写入越界")
+        return ct_err("内部错误：编译期数组元素写入越界")
     }
     let value CtValue
     if (ct_ir_eval_expr(frame, expr_id, &value) != 0
@@ -690,8 +685,7 @@ fn ct_ir_array_fill_one(frame *CtFrame, expr_id int,
     let index int = *next - 1
     aggregate.values[index] = value
     aggregate.values[index].type_id = aggregate.elem_type
-    let tk *gen.TaskCtx = gen.task()
-    let elem_kind int = tk.t_types[aggregate.elem_type].kind
+    let elem_kind int = ct_type_row(aggregate.elem_type).kind
     if (elem_kind == CT_TY_ARRAY) {
         let source *CtAggregate = value.value.to_type(u64).to_type(*CtAggregate)
         let copy *CtAggregate = ct_ir_array_clone(frame, aggregate.elem_type, source)
@@ -721,7 +715,7 @@ fn ct_ir_array_fill(frame *CtFrame, list_id int, aggregate *CtAggregate,
     for node_id >= 0 {
         if (node_id < frame.target.ir_expr_first
             || node_id >= frame.target.ir_expr_after) {
-            return gen.sem_err("内部错误：编译期数组元素引用越界")
+            return ct_err("内部错误：编译期数组元素引用越界")
         }
         let node CtExpr = ct_ir_exprs[node_id]
         if (node.kind == 6) {
@@ -774,22 +768,22 @@ fn ct_ir_exec_diag(frame *CtFrame, stmt_id int, stmt CtStmt) int {
     let after int = stmt.after - frame.target.body_token_first
     if (kind != CT_DIAG_ASSERT && kind != CT_DIAG_ERROR
         && kind != CT_DIAG_WARN) {
-        return gen.sem_err("编译期 typed IR 诊断类别无效")
+        return ct_err("编译期 typed IR 诊断类别无效")
     }
     if (relative < 0 || after <= relative || after > frame.target.body_n
         || frame.target.body[relative].kind != token.TK_DOLLAR) {
-        return gen.sem_err("内部错误：编译期诊断源码范围无效")
+        return ct_err("内部错误：编译期诊断源码范围无效")
     }
     let value i64 = 0
     if (kind == CT_DIAG_ASSERT) {
         let cond_id int = ct_ir_expr_edge(stmt_id, 0)
         let condition CtValue
-        if (cond_id < 0) { return gen.sem_err("内部错误：编译期 $assert 缺少条件表达式") }
+        if (cond_id < 0) { return ct_err("内部错误：编译期 $assert 缺少条件表达式") }
         if (ct_ir_eval_expr(frame, cond_id, &condition) != 0) {
             return -1
         }
         if (condition.type_id != CT_TY_BOOL) {
-            return gen.sem_err("编译期函数中的 $assert 条件必须是 bool")
+            return ct_err("编译期函数中的 $assert 条件必须是 bool")
         }
         value = condition.value
     }
@@ -805,7 +799,7 @@ fn ct_ir_exec_diag(frame *CtFrame, stmt_id int, stmt CtStmt) int {
         ti += 1
     }
     if (kind != CT_DIAG_ASSERT && msg_start < 0) {
-        return gen.sem_err("内部错误：编译期诊断缺少消息字符串")
+        return ct_err("内部错误：编译期诊断缺少消息字符串")
     }
     let dollar CtToken = frame.target.body[relative]
     return ct_diag_emit_source(kind, value, dollar.line, dollar.col,
@@ -844,27 +838,27 @@ fn ct_ir_exec_typed_for(frame *CtFrame, stmt_id int, stmt CtStmt,
             lo.value, lo.lit_big) != 0
         || gen.sem_can_assign(CT_TY_I32, hi.type_id, hi.is_lit,
             hi.value, hi.lit_big) != 0) {
-        return gen.sem_err("编译期 typed $for 区间边界必须可赋给 i32")
+        return ct_err("编译期 typed $for 区间边界必须可赋给 i32")
     }
     let binding_id int = stmt.first_binding
     if (binding_id < frame.target.ir_binding_first
         || binding_id >= frame.target.ir_binding_after) {
-        return gen.sem_err("内部错误：编译期 typed $for 缺少循环绑定")
+        return ct_err("内部错误：编译期 typed $for 缺少循环绑定")
     }
     let binding CtBinding = ct_ir_bindings[binding_id]
     if (binding.id < 0 || binding.id >= frame.local_n
         || binding.sym_type_id != CT_TY_I32
         || binding.sym_kind != CT_SYM_CONST) {
-        return gen.sem_err("内部错误：编译期 typed $for 循环绑定无效")
+        return ct_err("内部错误：编译期 typed $for 循环绑定无效")
     }
     let body int = stmt.first_child
-    if (body < 0) { return gen.sem_err("编译期 typed $for 缺少循环体") }
+    if (body < 0) { return ct_err("编译期 typed $for 缺少循环体") }
     let value i64 = lo.value
     let end i64 = hi.value
     let iterations int = 0
     for value < end {
         if (iterations >= 1024) {
-            return gen.sem_err("单个编译期 typed $for 区间超过 1024 次")
+            return ct_err("单个编译期 typed $for 区间超过 1024 次")
         }
         if (ct_ir_tick() != 0) { return -1 }
         frame.locals[binding.id].type_id = CT_TY_I32
@@ -892,7 +886,7 @@ fn ct_ir_exec_switch(frame *CtFrame, stmt_id int, stmt CtStmt,
         return -1
     }
     if (ct_ty_is_integer(control.type_id) == 0) {
-        return gen.sem_err("编译期 switch 控制值必须是整数")
+        return ct_err("编译期 switch 控制值必须是整数")
     }
     let default_body int = -1
     let selected_body int = -1
@@ -900,17 +894,17 @@ fn ct_ir_exec_switch(frame *CtFrame, stmt_id int, stmt CtStmt,
     for case_id >= 0 {
         if (case_id < frame.target.ir_stmt_first
             || case_id >= frame.target.ir_stmt_after) {
-            return gen.sem_err("内部错误：编译期 switch case 越出函数 IR")
+            return ct_err("内部错误：编译期 switch case 越出函数 IR")
         }
         let case_stmt CtStmt = ct_ir_stmts[case_id]
         if (case_stmt.kind != 14) {
-            return gen.sem_err("内部错误：编译期 switch 子节点不是 case")
+            return ct_err("内部错误：编译期 switch 子节点不是 case")
         }
         let body int = case_stmt.first_child
         if (body >= 0 && (body < frame.target.ir_stmt_first
             || body >= frame.target.ir_stmt_after
             || ct_ir_stmts[body].kind != 1)) {
-            return gen.sem_err("内部错误：编译期 switch case 缺少语句块")
+            return ct_err("内部错误：编译期 switch case 缺少语句块")
         }
         if (case_stmt.op == token.TK_DEFAULT) {
             if (default_body < 0) { default_body = body }
@@ -920,14 +914,14 @@ fn ct_ir_exec_switch(frame *CtFrame, stmt_id int, stmt CtStmt,
                 if (edge >= frame.target.ir_edge_after
                     || ct_ir_edges[edge].expr_id < frame.target.ir_expr_first
                     || ct_ir_edges[edge].expr_id >= frame.target.ir_expr_after) {
-                    return gen.sem_err("内部错误：编译期 switch case 值引用越界")
+                    return ct_err("内部错误：编译期 switch case 值引用越界")
                 }
                 let value CtValue
                 if (ct_ir_eval_expr(frame, ct_ir_edges[edge].expr_id, &value) != 0) {
                     return -1
                 }
                 if (ct_ty_is_integer(value.type_id) == 0) {
-                    return gen.sem_err("编译期 switch case 值必须是整数")
+                    return ct_err("编译期 switch case 值必须是整数")
                 }
                 if (control.value == value.value) {
                     selected_body = body
@@ -937,7 +931,7 @@ fn ct_ir_exec_switch(frame *CtFrame, stmt_id int, stmt CtStmt,
             }
             if (selected_body >= 0) { break }
         } else {
-            return gen.sem_err("内部错误：编译期 switch case 类别无效")
+            return ct_err("内部错误：编译期 switch case 类别无效")
         }
         case_id = case_stmt.next_sibling
     }
@@ -962,31 +956,31 @@ fn ct_ir_exec_forin_range(frame *CtFrame, stmt_id int, stmt CtStmt,
             lo.value, lo.lit_big) != 0
         || gen.sem_can_assign(CT_TY_I32, hi.type_id, hi.is_lit,
             hi.value, hi.lit_big) != 0) {
-        return gen.sem_err("编译期 for-in 区间边界必须可赋给 i32")
+        return ct_err("编译期 for-in 区间边界必须可赋给 i32")
     }
     let elem_id int = stmt.first_binding
     if (elem_id < frame.target.ir_binding_first
         || elem_id >= frame.target.ir_binding_after) {
-        return gen.sem_err("内部错误：编译期 for-in 缺少元素绑定")
+        return ct_err("内部错误：编译期 for-in 缺少元素绑定")
     }
     let elem CtBinding = ct_ir_bindings[elem_id]
     if (elem.id < 0 || elem.id >= frame.local_n
         || elem.sym_type_id != CT_TY_I32 || elem.sym_kind != CT_SYM_VAR) {
-        return gen.sem_err("内部错误：编译期 for-in 元素绑定无效")
+        return ct_err("内部错误：编译期 for-in 元素绑定无效")
     }
     let index_id int = elem.next
     if (index_id >= frame.target.ir_binding_after) {
-        return gen.sem_err("内部错误：编译期 for-in 下标绑定越界")
+        return ct_err("内部错误：编译期 for-in 下标绑定越界")
     }
     if (index_id >= 0) {
         let index CtBinding = ct_ir_bindings[index_id]
         if (index.next >= 0 || index.id < 0 || index.id >= frame.local_n
             || index.sym_type_id != CT_TY_I32 || index.sym_kind != CT_SYM_VAR) {
-            return gen.sem_err("内部错误：编译期 for-in 下标绑定无效")
+            return ct_err("内部错误：编译期 for-in 下标绑定无效")
         }
     }
     let body int = stmt.first_child
-    if (body < 0) { return gen.sem_err("编译期 for-in 缺少循环体") }
+    if (body < 0) { return ct_err("编译期 for-in 缺少循环体") }
     let value i64 = gen.sem_fold_norm(CT_TY_I32, lo.value)
     let end i64 = gen.sem_fold_norm(CT_TY_I32, hi.value)
     let ordinal i64 = 0
@@ -1020,43 +1014,42 @@ fn ct_ir_exec_forin_aggregate(frame *CtFrame, stmt_id int, stmt CtStmt,
     let expr_id int = ct_ir_expr_edge(stmt_id, 0)
     let iterable CtValue
     if (expr_id < 0 || ct_ir_eval_expr(frame, expr_id, &iterable) != 0) { return -1 }
-    let tk *gen.TaskCtx = gen.task()
-    if (iterable.type_id < 0 || iterable.type_id >= tk.t_type_n) {
-        return gen.sem_err("编译期 for-in 迭代值缺少类型")
+    if (iterable.type_id < 0 || iterable.type_id >= ct_types_bound()) {
+        return ct_err("编译期 for-in 迭代值缺少类型")
     }
-    let kind int = tk.t_types[iterable.type_id].kind
+    let kind int = ct_type_row(iterable.type_id).kind
     if (kind != CT_TY_ARRAY && kind != CT_TY_SLICE) {
-        return gen.sem_err("编译期 for-in 需要数组、切片或整数区间")
+        return ct_err("编译期 for-in 需要数组、切片或整数区间")
     }
     let aggregate *CtAggregate = iterable.value.to_type(u64).to_type(*CtAggregate)
     if (aggregate == 0 || aggregate.count < 0 || aggregate.count > 100000
-        || aggregate.elem_type != tk.t_types[iterable.type_id].elem) {
-        return gen.sem_err("内部错误：编译期数组/切片存储无效")
+        || aggregate.elem_type != ct_type_row(iterable.type_id).elem) {
+        return ct_err("内部错误：编译期数组/切片存储无效")
     }
     let elem_id int = stmt.first_binding
     if (elem_id < frame.target.ir_binding_first
         || elem_id >= frame.target.ir_binding_after) {
-        return gen.sem_err("内部错误：编译期 for-in 缺少元素绑定")
+        return ct_err("内部错误：编译期 for-in 缺少元素绑定")
     }
     let elem CtBinding = ct_ir_bindings[elem_id]
     if (elem.id < 0 || elem.id >= frame.local_n
         || elem.sym_type_id != aggregate.elem_type || elem.sym_kind != CT_SYM_VAR) {
-        return gen.sem_err("内部错误：编译期 for-in 元素绑定类型无效")
+        return ct_err("内部错误：编译期 for-in 元素绑定类型无效")
     }
     let index_id int = elem.next
     if (index_id >= 0 && (index_id < frame.target.ir_binding_first
         || index_id >= frame.target.ir_binding_after)) {
-        return gen.sem_err("内部错误：编译期 for-in 下标绑定越界")
+        return ct_err("内部错误：编译期 for-in 下标绑定越界")
     }
     if (index_id >= 0) {
         let index CtBinding = ct_ir_bindings[index_id]
         if (index.next >= 0 || index.id < 0 || index.id >= frame.local_n
             || index.sym_type_id != CT_TY_I32 || index.sym_kind != CT_SYM_VAR) {
-            return gen.sem_err("内部错误：编译期 for-in 下标绑定无效")
+            return ct_err("内部错误：编译期 for-in 下标绑定无效")
         }
     }
     let body int = stmt.first_child
-    if (body < 0) { return gen.sem_err("编译期 for-in 缺少循环体") }
+    if (body < 0) { return ct_err("编译期 for-in 缺少循环体") }
     let ordinal int = 0
     for ordinal < aggregate.count {
         if (ct_ir_tick() != 0) { return -1 }
@@ -1089,7 +1082,7 @@ fn ct_ir_decl_initializer(frame *CtFrame, stmt CtStmt,
     for cursor < limit {
         let relative int = cursor - frame.target.body_token_first
         if (relative < 0 || relative >= frame.target.body_n) {
-            return gen.sem_err("内部错误：编译期局部声明 token 越界")
+            return ct_err("内部错误：编译期局部声明 token 越界")
         }
         if (frame.target.body[relative].kind == token.TK_ASSIGN) {
             assign_token = cursor
@@ -1101,18 +1094,18 @@ fn ct_ir_decl_initializer(frame *CtFrame, stmt CtStmt,
     let edge int = stmt.first_expr
     for edge >= 0 {
         if (edge >= ct_ir_edge_n) {
-            return gen.sem_err("内部错误：编译期声明表达式边越界")
+            return ct_err("内部错误：编译期声明表达式边越界")
         }
         let expr_id int = ct_ir_edges[edge].expr_id
         if (expr_id < frame.target.ir_expr_first
             || expr_id >= frame.target.ir_expr_after) {
-            return gen.sem_err("内部错误：编译期声明表达式引用越界")
+            return ct_err("内部错误：编译期声明表达式引用越界")
         }
         if (ct_ir_exprs[expr_id].first > assign_token
             && ct_ir_exprs[expr_id].first < limit) { return expr_id }
         edge = ct_ir_edges[edge].next
     }
-    return gen.sem_err("内部错误：编译期局部初始化器缺少表达式节点")
+    return ct_err("内部错误：编译期局部初始化器缺少表达式节点")
 }
 
 // ct_ir_exec_stmt：执行一个 typed IR 语句，flow 为普通、返回、break 或 continue。
@@ -1120,7 +1113,7 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
     flow *int) int {
     if (ct_ir_tick() != 0) { return -1 }
     if (stmt_id < frame.target.ir_stmt_first || stmt_id >= frame.target.ir_stmt_after) {
-        return gen.sem_err("内部错误：编译期语句引用越出函数 IR")
+        return ct_err("内部错误：编译期语句引用越出函数 IR")
     }
     let stmt CtStmt = ct_ir_stmts[stmt_id]
     *flow = 0
@@ -1156,7 +1149,7 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
         for binding >= 0 {
             let row CtBinding = ct_ir_bindings[binding]
             if (row.id < 0 || row.id >= frame.local_n) {
-                return gen.sem_err("内部错误：编译期局部声明槽无效")
+                return ct_err("内部错误：编译期局部声明槽无效")
             }
             let limit int = stmt.after
             if (row.next >= 0) { limit = ct_ir_bindings[row.next].name_token }
@@ -1168,7 +1161,7 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
                 let target int = row.sym_type_id
                 if (gen.sem_can_assign(target, value.type_id, value.is_lit,
                         value.value, value.lit_big) != 0) { return -1 }
-                let target_kind int = gen.task().t_types[target].kind
+                let target_kind int = ct_type_row(target).kind
                 if (target_kind == CT_TY_ARRAY) {
                     let source *CtAggregate = value.value.to_type(u64) .
                         to_type(*CtAggregate)
@@ -1238,7 +1231,7 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
                 if (ct_ir_eval_expr(frame, cond_id, &condition) != 0) { return -1 }
                 if (condition.value == 0) { return 0 }
             }
-            if (body < 0) { return gen.sem_err("编译期 for 缺少循环体") }
+            if (body < 0) { return ct_err("编译期 for 缺少循环体") }
             let loop_flow int = 0
             if (ct_ir_exec_stmt(frame, body, out, &loop_flow) != 0) { return -1 }
             if (loop_flow == 1) { *flow = 1; return 0 }
@@ -1259,15 +1252,15 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
         let rhs_id int = ct_ir_expr_edge(stmt_id, 1)
         let place CtPlace
         if (rhs_id < 0 || ct_ir_lvalue(frame, lhs_id, &place) != 0) {
-            return gen.sem_err("编译期赋值只支持可写局部变量或受支持聚合元素")
+            return ct_err("编译期赋值只支持可写局部变量或受支持聚合元素")
         }
         // 字符串字面量字节池只读：解引用读取允许，写入统一在此拒绝。
         if (place.direct != 0 && ct_pool_hit(place.direct.to_type(i64)) != 0) {
-            return gen.sem_err("编译期不能写入字符串字面量指针常量")
+            return ct_err("编译期不能写入字符串字面量指针常量")
         }
         // 全局聚合常量的编译期模型只读：解引用读取允许，写入统一在此拒绝。
         if (place.direct != 0 && ct_global_agg_hit(place.direct.to_type(i64)) != 0) {
-            return gen.sem_err("编译期不能写入全局聚合常量（编译期模型只读）")
+            return ct_err("编译期不能写入全局聚合常量（编译期模型只读）")
         }
         let rhs CtValue
         if (ct_ir_eval_expr(frame, rhs_id, &rhs) != 0) { return -1 }
@@ -1283,10 +1276,10 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
             current = frame.locals[place.slot]
         }
         let target int = place.type_id
-        let target_kind int = gen.task().t_types[target].kind
+        let target_kind int = ct_type_row(target).kind
         if ((target_kind == CT_TY_STRUCT || target_kind == CT_TY_ARRAY
                 || target_kind == CT_TY_UNION) && stmt.op != token.TK_ASSIGN) {
-            return gen.sem_err("编译期聚合值不支持复合赋值")
+            return ct_err("编译期聚合值不支持复合赋值")
         }
         let value i64 = rhs.value
         let target_float int = ct_ty_is_float(target)
@@ -1336,7 +1329,7 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
             // 防御：前端已拒绝 const 聚合赋值的直接形态，经指针的写入走上面的
             // direct 分支；这里再拦一次，保证模型聚合永远不可写。
             if (ct_global_agg_owns(place.aggregate) != 0) {
-                return gen.sem_err("编译期不能写入全局聚合常量（编译期模型只读）")
+                return ct_err("编译期不能写入全局聚合常量（编译期模型只读）")
             }
             place.aggregate.values[place.index] = updated
             // 联合体写入后把同一存储按各字段类型重解释到其他槽。
@@ -1355,7 +1348,7 @@ fn ct_ir_exec_stmt(frame *CtFrame, stmt_id int, out *CtValue,
         }
         return 0
     }
-    return gen.sem_err("编译期 typed IR 遇到不支持的语句节点")
+    return ct_err("编译期 typed IR 遇到不支持的语句节点")
 }
 
 // ct_eval_ir_body：按函数 typed IR 执行局部绑定、循环、赋值与 return。
@@ -1367,7 +1360,7 @@ fn ct_eval_ir_body(item CtFunction, values *CtValue, out *CtValue,
     frame.aggregate_element_count = 0
     frame.local_n = item.ir_binding_after - item.ir_binding_first
     if (frame.local_n < 0 || frame.local_n > 4096) {
-        return gen.sem_err("编译期函数局部变量超过 4096 个")
+        return ct_err("编译期函数局部变量超过 4096 个")
     }
     let alloc_n int = frame.local_n
     if (alloc_n == 0) { alloc_n = 1 }
@@ -1391,7 +1384,7 @@ fn ct_eval_ir_body(item CtFunction, values *CtValue, out *CtValue,
         if (binding.is_param != 0) {
             if (arg >= item.param_n || binding.id < 0 || binding.id >= frame.local_n) {
                 ct_ir_frame_release(&frame)
-                return gen.sem_err("内部错误：编译期形参绑定不匹配")
+                return ct_err("内部错误：编译期形参绑定不匹配")
             }
             if (ct_ty_is_integer(binding.sym_type_id) != 0
                 || ct_ty_is_float(binding.sym_type_id) != 0) {
@@ -1407,7 +1400,7 @@ fn ct_eval_ir_body(item CtFunction, values *CtValue, out *CtValue,
     }
     if (arg != item.param_n) {
         ct_ir_frame_release(&frame)
-        return gen.sem_err("内部错误：编译期函数缺少形参绑定")
+        return ct_err("内部错误：编译期函数缺少形参绑定")
     }
     let flow int = 0
     let status int = ct_ir_exec_stmt(&frame, item.ir_body_stmt, out, &flow)
@@ -1417,9 +1410,9 @@ fn ct_eval_ir_body(item CtFunction, values *CtValue, out *CtValue,
     }
     if (flow != 1) {
         ct_ir_frame_release(&frame)
-        return gen.sem_err("编译期函数执行路径没有返回值")
+        return ct_err("编译期函数执行路径没有返回值")
     }
-    let return_kind int = gen.task().t_types[item.ret_type].kind
+    let return_kind int = ct_type_row(item.ret_type).kind
     if (return_kind == CT_TY_ARRAY || return_kind == CT_TY_STRUCT
         || return_kind == CT_TY_UNION
         || return_kind == CT_TY_SLICE) {
@@ -1435,17 +1428,16 @@ fn ct_eval_ir_body(item CtFunction, values *CtValue, out *CtValue,
 // ct_ir_register_string_pool：把本编译单元内的字符串字面量指针常量登记为只读字节池。
 // 只处理与当前源文件同批次的表达式（token_count 相同），跨模块转发的正文保持原拒绝路径。
 fn ct_ir_register_string_pool(expr_dst int, expr_n int) int {
-    let tk *gen.TaskCtx = gen.task()
     let i int = 0
     for i < expr_n {
         let e *CtExpr = &ct_ir_exprs[expr_dst + i]
         ct_ir_expr_pool[expr_dst + i] = 0
-        if (e.is_const != 0 && e.type_id >= 0 && e.type_id < tk.t_type_n
-            && tk.t_types[e.type_id].kind == CT_TY_PTR
+        if (e.is_const != 0 && e.type_id >= 0 && e.type_id < ct_types_bound()
+            && ct_type_row(e.type_id).kind == CT_TY_PTR
             && e.token_count == token.ctx().count && e.after == e.first + 1
             && e.first >= 0 && e.first < token.ctx().count
             && token.ctx().tokens[e.first].kind == token.TOK_STRING) {
-            let elem int = tk.t_types[e.type_id].elem
+            let elem int = ct_type_row(e.type_id).elem
             if (elem == CT_TY_CHAR || elem == CT_TY_U8 || elem == CT_TY_I8) {
                 ct_ir_expr_pool[expr_dst + i] = ct_pool_register(support.src_ctx().data,
                     token.ctx().tokens[e.first].start, token.ctx().tokens[e.first].len, elem,
@@ -1462,7 +1454,7 @@ fn ct_ir_register_string_pool(expr_dst int, expr_n int) int {
 // 重复登记时复用既有区间（循环里反复引用同一常量不会耗尽池段），失败返回 0。
 fn ct_pool_register(src *u8, start int, slen int, elem int, key i64) i64 {
     if (slen < 2) {
-        gen.sem_err("编译期字符串字面量为空")
+        ct_err("编译期字符串字面量为空")
         return 0
     }
     let dup int = 0
@@ -1473,7 +1465,7 @@ fn ct_pool_register(src *u8, start int, slen int, elem int, key i64) i64 {
         dup += 1
     }
     if (ct_pool_span_n >= 64) {
-        gen.sem_err("编译期字符串字面量过多")
+        ct_err("编译期字符串字面量过多")
         return 0
     }
     let bytes *u8 = malloc(slen.to_type(u64)).to_type(*u8)
@@ -1569,10 +1561,9 @@ fn ct_pool_reset() void {
 
 // ct_pool_elem_of：指针类型指向单字节元素（char/u8/i8）时返回元素类型，否则 -1。
 pub fn ct_pool_elem_of(type_id int) int {
-    let tk *gen.TaskCtx = gen.task()
-    if (type_id < 0 || type_id >= tk.t_type_n) { return -1 }
-    if (tk.t_types[type_id].kind != CT_TY_PTR) { return -1 }
-    let elem int = tk.t_types[type_id].elem
+    if (type_id < 0 || type_id >= ct_types_bound()) { return -1 }
+    if (ct_type_row(type_id).kind != CT_TY_PTR) { return -1 }
+    let elem int = ct_type_row(type_id).elem
     if (elem == CT_TY_CHAR || elem == CT_TY_U8 || elem == CT_TY_I8) { return elem }
     return -1
 }
@@ -1581,7 +1572,6 @@ pub fn ct_pool_elem_of(type_id int) int {
 // 顶层或普通函数里的编译期调用实参由前端直接求值，不经过 typed IR 捕获，
 // 只能按标签号在常量表里反查原样字节并登记池；查不到时保持原值不动。
 fn ct_pool_adopt_label(value *CtValue) int {
-    let tk *gen.TaskCtx = gen.task()
     let elem int = ct_pool_elem_of(value.type_id)
     if (elem < 0 || value.value <= 0) { return 0 }
     let i int = 0

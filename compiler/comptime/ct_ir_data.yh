@@ -13,57 +13,55 @@ fn ct_ir_data_zero(size int) int {
 // LL12：标签、延迟队列与 .xword 文本已删除；数据由 ct_static_data_record 登记。
 fn ct_ir_data_slice(type_id int, value *CtValue,
     aggregate *CtAggregate) int {
-    let tk *gen.TaskCtx = gen.task()
     if (ct_ir_slice_param_valid(type_id, value) == 0 || aggregate == 0
         || aggregate.count < 0 || aggregate.count > 100000
-        || aggregate.elem_type != tk.t_types[type_id].elem
+        || aggregate.elem_type != ct_type_row(type_id).elem
         || (aggregate.count > 0 && aggregate.values == 0)) {
-        return gen.sem_err("顶层编译期切片存储无效")
+        return ct_err("顶层编译期切片存储无效")
     }
     return 0
 }
 
 // ct_ir_data_value：递归校验当前执行器支持的标量、数组、结构体和切片。
 fn ct_ir_data_value(type_id int, value *CtValue, depth int) int {
-    let tk *gen.TaskCtx = gen.task()
-    if (value == 0 || depth > 32 || type_id < 0 || type_id >= tk.t_type_n
+    if (value == 0 || depth > 32 || type_id < 0 || type_id >= ct_types_bound()
         || value.type_id != type_id) {
-        return gen.sem_err("顶层编译期聚合类型或嵌套深度无效")
+        return ct_err("顶层编译期聚合类型或嵌套深度无效")
     }
     if (ct_ty_is_integer(type_id) != 0 || ct_ty_is_float(type_id) != 0) {
         // LL12：标量数据由 ct_static_data_record 登记，不再发 .data 字节。
         return 0
     }
-    let kind int = tk.t_types[type_id].kind
+    let kind int = ct_type_row(type_id).kind
     let aggregate *CtAggregate = value.value.to_type(u64).to_type(*CtAggregate)
     if (kind == CT_TY_SLICE) {
         return ct_ir_data_slice(type_id, value, aggregate)
     }
     if (kind == CT_TY_ARRAY) {
         if (ct_ir_array_supported(type_id, 0) == 0 || aggregate == 0
-            || aggregate.count != tk.t_types[type_id].len
-            || aggregate.elem_type != tk.t_types[type_id].elem
+            || aggregate.count != ct_type_row(type_id).len
+            || aggregate.elem_type != ct_type_row(type_id).elem
             || (aggregate.count > 0 && aggregate.values == 0)) {
-            return gen.sem_err("顶层编译期定长数组存储无效")
+            return ct_err("顶层编译期定长数组存储无效")
         }
-        let elem int = tk.t_types[type_id].elem
+        let elem int = ct_type_row(type_id).elem
         let cursor int = 0
         let i int = 0
         for i < aggregate.count {
             if (ct_ir_data_value(elem, &aggregate.values[i], depth + 1) != 0) {
                 return -1
             }
-            cursor += tk.t_types[elem].size
+            cursor += ct_type_row(elem).size
             i += 1
         }
-        return ct_ir_data_zero(tk.t_types[type_id].size - cursor)
+        return ct_ir_data_zero(ct_type_row(type_id).size - cursor)
     }
     if (kind == CT_TY_STRUCT) {
         if (ct_ir_struct_supported(type_id, 0) == 0 || aggregate == 0
             || aggregate.elem_type != type_id
-            || aggregate.count != tk.t_types[type_id].len
+            || aggregate.count != ct_type_row(type_id).len
             || (aggregate.count > 0 && aggregate.values == 0)) {
-            return gen.sem_err("顶层编译期结构体存储无效")
+            return ct_err("顶层编译期结构体存储无效")
         }
         let st CtTypeRow = ct_type_row(type_id)
         let cursor int = 0
@@ -74,12 +72,12 @@ fn ct_ir_data_value(type_id int, value *CtValue, depth int) int {
                 || ct_ir_data_zero(field.offset - cursor) != 0
                 || ct_ir_data_value(field.type_id, &aggregate.values[i],
                     depth + 1) != 0) { return -1 }
-            cursor = field.offset + tk.t_types[field.type_id].size
+            cursor = field.offset + ct_type_row(field.type_id).size
             i += 1
         }
         return ct_ir_data_zero(st.size - cursor)
     }
-    return gen.sem_err("顶层编译期数据只支持标量、定长数组、结构体或受支持元素切片")
+    return ct_err("顶层编译期数据只支持标量、定长数组、结构体或受支持元素切片")
 }
 
 // ct_ir_data_emit_temp：为运行期表达式登记匿名静态对象并返回数据标签。
@@ -106,10 +104,9 @@ fn ct_ir_data_bind_iface_label(sym_id int) void {
 
 // ct_ir_data_emit_global：把全局初始化中的 CT 聚合和 backing 写入目标数据区。
 pub fn ct_ir_data_emit_global(sym_id int, type_id int, value *CtValue) int {
-    let tk *gen.TaskCtx = gen.task()
     if (sym_id < 0 || sym_id >= ct_syms_bound() || value == 0
         || value.type_id != type_id || ct_ir_return_supported(type_id) == 0) {
-        return gen.sem_err("全局编译期聚合初始化类型无效")
+        return ct_err("全局编译期聚合初始化类型无效")
     }
     ct_ir_data_bind_iface_label(sym_id)
     let label int = (ct_sym_row(sym_id).flags & CT_F_EXTERN) != 0 ?

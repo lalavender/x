@@ -1,5 +1,4 @@
 module comptime
-import gen
 
 // ============================================================================
 // ct_global_agg.yh —— 全局聚合常量（顶层 const 数组/结构体）的编译期模型
@@ -34,14 +33,13 @@ let ct_global_agg_n int = 0
 // 结构体。指针（含字符串元素）、切片、联合体不建模：前端的全局初始化对它们
 // 要么拒绝，要么只能给出数据标签，建模会得到错误的元素值。
 pub fn ct_global_agg_modelable(type_id int, depth int) int {
-    let tk *gen.TaskCtx = gen.task()
-    if (depth >= 32 || type_id < 0 || type_id >= tk.t_type_n) { return 0 }
+    if (depth >= 32 || type_id < 0 || type_id >= ct_types_bound()) { return 0 }
     if (ct_ty_is_integer(type_id) != 0 || ct_ty_is_float(type_id) != 0) {
         return 1
     }
-    let kind int = tk.t_types[type_id].kind
+    let kind int = ct_type_row(type_id).kind
     if (kind == CT_TY_ARRAY) {
-        let elem int = tk.t_types[type_id].elem
+        let elem int = ct_type_row(type_id).elem
         return (ct_ty_is_integer(elem) != 0 || ct_ty_is_float(elem) != 0) .
             to_type(int)
     }
@@ -49,7 +47,7 @@ pub fn ct_global_agg_modelable(type_id int, depth int) int {
         let st CtTypeRow = ct_type_row(type_id)
         let i int = 0
         for i < st.len {
-            if (ct_global_agg_modelable(tk.t_fields[st.sub + i].type_id,
+            if (ct_global_agg_modelable(ct_field_row(st.sub + i).type_id,
                     depth + 1) == 0) { return 0 }
             i += 1
         }
@@ -63,7 +61,6 @@ pub fn ct_global_agg_modelable(type_id int, depth int) int {
 // 类型、结构体传自身类型。结构体按字段类型逐个预置类型，命名式字面量漏写的
 // 字段因此得到正确的零值类型。
 pub fn ct_global_agg_new(elem_type int, count int) i64 {
-    let tk *gen.TaskCtx = gen.task()
     let aggregate *CtAggregate = ct_ir_aggregate_new(&ct_global_pool,
         elem_type, count)
     if (aggregate == 0) { return 0 }
@@ -75,7 +72,7 @@ pub fn ct_global_agg_new(elem_type int, count int) i64 {
     for i < count {
         let slot_type int = elem_type
         if (struct_like != 0 && i < st.len) {
-            slot_type = tk.t_fields[st.sub + i].type_id
+            slot_type = ct_field_row(st.sub + i).type_id
         }
         aggregate.values[i].type_id = slot_type
         aggregate.values[i].value = 0
@@ -100,7 +97,7 @@ fn ct_global_agg_slot(obj i64, index int) *CtValue {
 pub fn ct_global_agg_set(obj i64, index int, type_id int, value i64) int {
     let slot *CtValue = ct_global_agg_slot(obj, index)
     if (slot == 0) {
-        return gen.sem_err("内部错误：全局聚合常量模型写入越界")
+        return ct_err("内部错误：全局聚合常量模型写入越界")
     }
     slot.type_id = type_id
     slot.value = ct_ir_norm_scalar(type_id, value)
@@ -114,7 +111,7 @@ pub fn ct_global_agg_set_obj(obj i64, index int, type_id int,
     child i64) int {
     let slot *CtValue = ct_global_agg_slot(obj, index)
     if (slot == 0 || child == 0) {
-        return gen.sem_err("内部错误：全局聚合常量嵌套模型写入越界")
+        return ct_err("内部错误：全局聚合常量嵌套模型写入越界")
     }
     slot.type_id = type_id
     slot.value = child
@@ -127,7 +124,7 @@ pub fn ct_global_agg_set_obj(obj i64, index int, type_id int,
 // 时覆盖旧对象，保持「最后一个模型生效」。
 pub fn ct_global_agg_register(sym_id int, obj i64) int {
     if (sym_id < 0 || obj == 0) {
-        return gen.sem_err("内部错误：全局聚合常量模型登记参数无效")
+        return ct_err("内部错误：全局聚合常量模型登记参数无效")
     }
     let i int = 0
     for i < ct_global_agg_n {
@@ -138,7 +135,7 @@ pub fn ct_global_agg_register(sym_id int, obj i64) int {
         i += 1
     }
     if (ct_global_agg_n >= ct_global_agg_cap) {
-        return gen.sem_err("全局聚合常量过多（编译期模型上限 1024 个）")
+        return ct_err("全局聚合常量过多（编译期模型上限 1024 个）")
     }
     ct_global_aggs[ct_global_agg_n].sym_id = sym_id
     ct_global_aggs[ct_global_agg_n].obj = obj
