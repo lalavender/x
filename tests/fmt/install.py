@@ -19,7 +19,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "fmtbasic"
 REQUIRED = ["base.yh", "value.yh", "directive.yh", "render.yh",
-            "float.yh", "output.yh", "tests.test.yh"]
+            "float.yh", "output.yh", "fmt.test.yh"]
 EXPECTED = "1212\n1212\nhi07\n"
 
 

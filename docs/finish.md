@@ -8,13 +8,221 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
-## 2026-11-06 缓存与 Go 构建缓存对比
+## 2026-11-06 test/test-libs 并行执行
 
-新增 [缓存与 Go 构建缓存对比](02-plan/yh-缓存与Go构建缓存对比-2026-11-06.md)：
-对照 Go `GOCACHE` 的 ActionID/OutputID/content store，列出 yh 四层缓存的差异、
-P0–P2 优化项（哈希宽度、工具身份、路径/环境、全局 content store、文件级对象、
-清理/锁/调试、测试/远程缓存）与目标模型，并标注不建议照搬 Go 的点。
-在 [缓存设计](03-design/yh-缓存设计.md) §15 增加入口。纯文档变更。
+**结果**：`just test`、`just test-libs` 改为 `[parallel]` 聚合 recipe，
+`quick` 的两个独立层也并行；默认并行数为 CPU 数，`TEST_JOBS=N` 可覆盖，
+`TEST_JOBS=1` 恢复串行。每层/组内部单线程，避免与 just 层并发叠乘。
+
+- `test`、`test-libs` 保留为公开入口；实际依赖图分别在私有
+  `test-parallel`、`test-libs-parallel`，逐层拆成 `_test-*` / `_test-libs-*`
+  私有 recipe。
+- 外层 recipe 用嵌套 `just --jobs` 启动并行图，并显式透传 `SEED`、
+  `SEED_DEST`、`BUILD_CACHE`、`FAST_DIR`、`FAST_STAGE`、`YH_ANTLR`、
+  `YH_LLVM_HOST`、`YH_LLVM_CACHE`，保证 `just SEED=... test` 等覆盖不丢。
+- `_test-libs-o2`、TOML injection、string O0/O2 依赖 `_test-libs-blocks`：
+  这些脚本会复制 `libs/`，必须等 `libs/tmp/yh-test` 写完，避免 copy 与
+  testkit 临时文件竞争。
+- TOML/string/fmt 三个 install 门合并为一个串行子组，并用
+  `JUST_NO_DEPS=true` 调 `just install`，避免并行触发重复 `_ensure_built`
+  构建；`just install` 的 find 排除 `libs/tmp`，避免把测试临时文件带进安装树。
+
+**验证**：`just build` 通过；`just test`、`just test-libs` 通过；
+`TEST_JOBS=8 just test`、`TEST_JOBS=8 just test-libs` 通过；
+`just --list` 仍为 28 个公开目标。
+
+## 2026-11-06 标准库测试合并为 just test-libs
+
+**结果**：删除 `libs-test`、`libs-test-o2`、`test-toml`、
+`test-toml-conformance`、`test-toml-injection`、`test-toml-install`、
+`test-string`、`test-string-o2`、`test-string-install`、`test-num`，合并为唯一
+入口 `just test-libs`。新目标覆盖：
+
+- 全部 `libs/` test 块 O0（缺 `*.test.yh` 提示）；
+- cli/os/libc 外部 runner（`libs/cli/test/{run,diff}.py`、`libs/os/test/run.py`、
+  `libs/libc/test/run.py`）；
+- 全部 test 块 O2（`tmp/libs-o2` 独立项目根）；
+- TOML 一致性/注入/安装、string O0/O2 行为与参考差分/安装、num 参考差分、
+  fmt 插值负例/安装后导入；
+- 所有编译器调用统一 `YH_CACHE=off`，避免测试污染全局缓存。
+
+CI 的 linux-x64、linux-arm64、darwin-arm64 三个 job 改调 `just test-libs`；
+TOML 一致性语料准备移入目标内（`--prepare` 幂等）。Windows job 保持
+`just test`（其平台专属外部 runner 暂未纳入）。
+
+**顺手修复**：`tests/fmt/install.py` 的必需文件仍写 `tests.test.yh`，实际文件
+已改名 `fmt.test.yh`，导致该安装门第一次真正接入时失败；修正清单与
+`fmt.test.yh` 文件头。
+
+**文档**：`AGENTS.md`、`README.md`、`libs/{string,toml,cli,fmt,io,json}/README.md`、
+`tests/{string,toml}/README.md`、`docs/03-design/yh-{编码规范,test语言内测试设计,
+test测试布局与运行约定,io标准库设计,cli标准库设计}.md`、`docs/todo.md`、
+`.github/workflows/ci.yml` 同步。
+
+**验证**：`just test-libs` 通过（含 O0/O2 test 块、runner、TOML/string/num/fmt
+专项与安装门）；`just test` 通过；`just --list` 现为 28 个公开目标。
+
+## 2026-11-06 just 入口清理：删除 15 个重复/孤儿目标
+
+**结果**：从 `justfile` 删除 A/B 两批 recipe，`just --list` 由 53 个公开目标降到
+37 个：
+
+- 纯别名/重复：`all`、`test-all`、`help`、`test-arch-check`、`test-code-stats`、
+  `test-lib-tests`；
+- 已被主门覆盖或长期不跑：`test-compiler-tests`、`test-fmt-interp`、
+  `test-fmt-install`、`size-report`、`test-string-complexity`、`llvm-isolation`、
+  `selfhost-llvm`、`selfhost-llvm-darwin`、`llvm-host-status`；
+- `stage-yh` 加 `[private]`，从帮助隐藏但保留为内部依赖；删除只服务
+  `selfhost-llvm` 的 `LLVM_SEED` 变量。
+
+底层脚本不删：`tools/compiler-tests.py`、`tools/size-report.py`、
+`tests/fmt/install.py`、`tests/string/complexity.py`、
+`tests/selfhost/llvm-isolation.py`、`tests/selfhost/llvm-selfhost.py`、
+`tests/selfhost/llvm-darwin-selfhost.py` 仍可按需直接运行；
+`llvm-host-status` 的 Windows 诊断可用 `tools/llvm-windows-host.py status`。
+
+**文档**：`AGENTS.md`、`README.md`、`compiler/README.md`、`libs/{fmt,string,io}/README.md`、
+`tests/string/README.md`、`docs/03-design/yh-test{语言内测试设计,测试布局与运行约定}.md`、
+`docs/03-design/yh-io标准库设计.md`、`docs/todo.md` 的引用同步改为 `just libs-test` /
+`just test` / 直接脚本；`02-plan` 历史方案保留旧名称。
+
+**验证**：`just --list` 37 个目标；`just --dry-run test` 通过；`just test` 通过
+（140 + compiler/cache/link + 语料 + arch-check）。
+
+## 2026-11-06 build 产物保留开关：--emit-llvm / --emit-asm
+
+**结果**：`--emit-llvm` 与 `--emit-asm` 归入 `yh build` 子命令，二者使用方式一致，
+只在 build 阶段额外保留产物：
+
+- 默认构建：LLVM 文本只在内存中传给内嵌桥，不写 `.ll`，也不写 `.s`；
+- `yh build --emit-llvm`：额外写 `<build>/llvm/<project>-<module>.ll`；
+- `yh build --emit-asm`：额外写 `<build>/asm/<project>-<module>.s`（对象发布后
+  用同一份 LLVM 文本再调用一次桥，只在显式请求时多付一次 codegen）；
+- 两者可同时使用；对象、可执行文件与链接行为不变；
+- 模块缓存命中时若本次请求的 `.ll`/`.s` 缺失，退回 worker 补写；存在则照常命中。
+
+单文件 `yh --emit-asm/--emit-llvm f.yh` 与 `yh test --emit-llvm` 保持原有
+stdout/审阅行为，不做改动。CLI 声明上，build 子命令新增两个开关；测试与单文件
+parser 各自显式声明原有 `--emit-llvm`，不再依赖全局 common。
+
+**实现**：`gen.TargetCfg.emit_asm`；`cmdline` 的 build 子命令选项；`driver`
+落配置；`build_scheduler` 的 `--emit-module` 协议传递；`module_worker` 计算
+`asm/<tag>.s`；`llvm_pipeline` 在对象发布后追加汇编发布；`module_emit` 的缓存
+命中条件检查请求产物存在。
+
+**验证**：`just build`；`just test`（140 通过）；`llvm-architecture --case
+entries` O0/O2（含默认不落 `.ll/.s`、`--emit-llvm`、`--emit-asm`、删产物后缓存
+命中补写、两开关并用、对象/程序仍正常）；`llvm-function-cache` O0/O2；
+`yh test --no-run --emit-llvm`；临时项目手工矩阵。`native-selfhost.py` 通过
+cc2/cc3/cc4 固定点、自解析与语料；`just selfhost-native` 后续模块门在当前
+工作区仍受并行 C4 改动与宿主 SDK 27 TAPI/C interop 环境影响（u5 缓存用例、
+`-lm`、`arm64e.x1`），需在稳定树复跑。
+
+**顺手修复**：当前工作区 C4 改动留下的 `mb_mix_compiler_identity` 未定义与
+`module_emit` 缺 `hash` import 使自举无法构建；补成 `cache.Key` 混入 32 字节
+编译器内容身份，并以 `mb_compiler_identity_ensure` 复用一次哈希。该修复不属于
+emit 开关，但不做则当前树无法编译。
+
+## 2026-11-06 撤销文件级对象缓存规划
+
+**结果**：按用户决定，删除 C5 文件级对象（每个 `.yh` 一个 `.o`）与 LA4 的后续
+实施规划；对象粒度停在模块级，PC7 函数级 `.o` 暂缓。增量继续由函数 check
+切片 + 函数 IR 缓存承担，后端整模块发射与链接复用是接受的成本。新增
+[ADR-0020](adr/0020-yh对象粒度停在模块级.md) 记录取舍与量化依据
+（O0 单函数 3.6 s 中发射约 0.5 s、链接约 1.3 s、前端/lowering 约 1.8 s；
+O2 单函数 7.55 s 中桥约 3.59 s；函数级 `.o` 会使桥调用从 13 次量级升到约
+1460 次）。
+
+**文档**：`docs/todo.md` 删除 C5/J2/J3 并加入「设计决定不做」；缓存方案删除
+C5 与文件对象键/验收/风险；Go 对比把 §3.6 改为模块级结论；缓存设计、架构
+设计、缓存键审计、LLVM 架构方案、极致速度路线与 2026-11-03 盘点同步标注
+撤销/暂缓。`cache.ACTION_FILE`/`OUTPUT_SUPPORT` 代码常量保留为 schema 预留，
+本次无代码变更。
+
+**验证**：文档一致性检索（`rg` 检查 C5/LA4/文件对象只出现在撤销记录）；
+未改代码，不触发构建。
+
+## 2026-11-06 缓存 C6：trim/锁/可观测
+
+**结果**：新增 `compiler/build/cache_admin.yh` 与 `yh cache info|clean|trim|verify`：
+info 输出根、actions/outputs 数、总大小与上限；clean 清空 actions/outputs/tmp；
+trim 按 mtime 从旧到新删除未被任何 action 引用的 output；verify 全量检查
+action 编码、OutputID 内容、缺失/损坏与孤儿 output。新增
+`cache/lock.{darwin,linux,windows}.yh`：POSIX `flock` 实现同项目构建锁与
+全局 cache 写锁（Windows 占位后置）；`YH_CACHE_DEBUG=1` 输出模块 ActionID、
+local/global hit/miss 与函数 action 的 miss 原因。trim/clean 持全局写锁，
+读取路径仍按 OutputID 校验；缓存运维失败不把构建判失败。
+
+**测试**：`tests/selfhost/llvm-global-cache.py` 扩展 debug、verify 损坏/孤儿、
+trim（`YH_CACHE_MAX_SIZE=1K`）、clean、同项目并发构建；`just test` 通过；
+`just selfhost-native` 125/125 通过（固定点 51 产物、cc4 自解析 158 文件）。
+宿主种子已滚。
+
+## 2026-11-06 缓存 C4：全局 content store 与 action cache
+
+**结果**：新增 `compiler/cache/cache_store.yh`（v1/actions、outputs、tmp、lock；
+SHA-256 OutputID、原子 put/get、读取重算摘要、action entry 二进制编解码、
+`YH_CACHE_MAX_SIZE` 解析）与 `compiler/build/cache_global.yh`（YH_CACHE 默认
+路径/off、模块产物发布/物化、全局 miss 回退）。模块键改为 SHA-256 ActionID，
+本地 manifest 改为 128 字节（ActionID + 三个 OutputID），`.build/index/<tag>`
+只存 64 hex ActionID；跨目录无 `.build` 时按 ActionID 命中并物化 obj/.s.i/.s.ct。
+函数 check/IR action 通过 `firc_global_publish`/`store_lookup` 接入全局 store，
+本地记录缺失时可回退读取并物化。损坏 OutputID 校验失败按 miss，重新发布时
+自愈。
+
+**测试**：新增 `tests/selfhost/llvm-global-cache.py`（布局、去重、跨目录命中、
+函数 action、损坏回退、`YH_CACHE=off`），接入 `just test` 与
+`just selfhost-native`；测试门禁统一 `YH_CACHE=off` 隔离历史缓存断言，仅 C4
+专项使用显式缓存目录；更新 Darwin/LLVM 缓存脚本读取 128 字节二进制 manifest。
+`just test` 通过；`just selfhost-native` 125/125 通过（固定点 51 产物、cc4
+自解析 153 文件）。宿主种子已滚。
+
+## 2026-11-06 缓存 C3：路径与环境规范化
+
+**结果**：函数 check/IR 语义键改用项目相对路径；新增 `proj.file_rel_path` /
+`proj.file_locs_path`；check 切片 v5 保存相对路径并按键查找当前文件。新增
+`cache.CacheInputs` 白名单（target/ABI/opt/trimpath），SDK/selfhost/工具链在进入
+键前先解析成内容身份。新增 `--trimpath`：IR 来源表、LLVM `source_filename` 与
+CT 来源映射使用项目相对路径；模块键/函数环境键纳入 trimpath 模式。schema 升到 3，
+模块 tag 升到 `yh-iface-cache-5-ct`，函数环境标签 `yh-firc-env-3`。
+
+**验证**：新增 `tests/selfhost/llvm-path-cache.py`（搬目录后 check/IR 全命中、
+trimpath 两目录 `.ll` 逐字节一致、未开 trimpath 保留绝对路径、YH_WORKERS 非白名单
+不失效、Darwin `YH_LINK_STRIP` 白名单变化重新链接）；`just test` 通过；
+`just selfhost-native` 全绿（固定点 51 产物、cc4 自解析 150 文件、项目用例
+125/125）。宿主种子已滚。
+
+## 2026-11-06 缓存 C2：工具/闭包内容身份
+
+**结果**：`BuildCtx` 增加 32 字节 `compiler_identity`，每个构建进程只对编译器
+二进制做一次 SHA-256；模块键混入完整 32 字节，`compiler_fingerprint` 仍是由
+摘要派生的 64 位值，供 worker 环境键使用。`link.mb_mix_file_identity` 从
+`(size, mtime_ns)` 改为文件内容 SHA-256，外部链接器/驱动身份随内容变化；
+lld/bridge/SDK 继续使用内容身份（lld 身份串为 SHA-256，SDK/默认库按内容摘要）。
+新增 `compiler/link/link_inputs.test.yh`：同内容重复读取/重写身份不变，同长度
+不同内容身份必变。
+
+**验证**：`just build`；`just test`（compiler-tests 新增 cache/link 模块）；
+`just selfhost-native` 全绿（固定点 51 产物、cc4 自解析 150 文件、项目用例
+125/125）；编译器 touch/复制后目标项目仍命中 `[缓存]`。宿主种子已滚
+（`bin/yh-darwin-arm64`）。
+
+## 2026-11-06 缓存 C0/C1：键审计 + SHA-256
+
+**结果**：新增 `libs/hash/sha256.yh` 纯 yh 流式 SHA-256（NIST 向量、55/56/63/64/65
+字节边界、未填满末尾块、百万字节与单字节 update）；新增 `compiler/cache/` 模块
+（`CACHE_SCHEMA_VERSION=2`、`ACTION_*`、32 字节/64 hex `ActionID`、`key_init_function`
+公共前缀、token/整数/文本长度分帧）。函数 check/IR 键从 FNV 16 hex 迁移到
+SHA-256 64 hex；check 保留类型/签名表事实，IR 使用逐声明布局，两者用不同 action
+种类。旧函数缓存按长度/版本/tag 拒绝：`IR_FUNCTION_CACHE_VERSION=3`、
+`CHECKED_SLICE_VERSION=4`、`yh-firc-env-2`、模块 tag `yh-iface-cache-4-ct`。
+
+**验证**：`just build`；`just test`（含 libs 140 用例、arch-check 17 模块/59 边）；
+`tests/selfhost/llvm-function-cache.py` O0/O2 全矩阵；新增 `tests/modules/projects/hashsha`
+与 build-check 用例；`cd compiler && ../yh test cache`；65 MB 编译器 SHA-256
+约 0.74 s（含进程启动）。宿主种子已滚（`bin/yh-darwin-arm64`）。新增
+[缓存键审计](03-design/yh-缓存键审计.md)，同步缓存设计/架构/compiler README/
+实施方案/todo。
 
 ## 2026-11-06 缓存设计文档
 

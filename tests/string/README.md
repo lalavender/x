@@ -7,7 +7,7 @@
 
 `view`/`owned`/`transform`/`utf8` 的行为断言已迁入
 `libs/string/tests.test.yh`（由 `yh test string`、`just test` /
-`just selfhost-native`、`just libs-test` 执行）；记录见
+`just selfhost-native`、`just test-libs` 执行）；记录见
 [YT4-P3](../01-finished/yh-YT4-P3-string迁移-2026-10-25.md)。
 
 本目录只保留 `yh test` 表达不了的项：
@@ -33,10 +33,7 @@ python3 tests/string/run.py --compiler ./yh --stdlib ./libs \
   --workdir tmp/string-test --group all --opt-level 0
 python3 tests/string/run.py --compiler ./yh --stdlib ./libs \
   --workdir tmp/string-test --group resources --opt-level 2
-just test-string         # O0 全组 + 参考差分
-just test-string-o2      # O2 全组 + 参考差分
-just test-string-install # just install 后从仓库外、无 YH_STDLIB 导入 string
-just test-string-complexity # 直接匹配耗时探针（只记录，不设固定耗时门）
+just test-libs            # 全部标准库测试（含 string O0/O2 与安装验收）
 ```
 
 `tests/string/install.py` 检查安装树包含 7 个 string 源码，并把 `stringmodel`
@@ -48,7 +45,7 @@ unknown/空选组、构建失败、超时、缺 fixture、未知输出都记为�
 `tests/string/reference.py` 用固定种子生成 92 个用例，把
 concat/join/replace/lower_ascii/upper_ascii/utf8_validate/utf8_next/
 append_rune 的实际输出与 Python bytes/str 语义逐项比较；生成项目只写
-`--workdir`。`just test-string` 先跑七组行为断言，再跑参考差分。
+`--workdir`。`just test-libs` 的 string 组先跑七组行为断言，再跑参考差分。
 
 基本组同时登记在 `tests/modules/build-check.py` 的 `stdlib-run` 用例中，
 由 `just selfhost-native` 的项目门覆盖；失败注入与参考差分留在专项门。

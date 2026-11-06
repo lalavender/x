@@ -2,8 +2,8 @@
 
 修改时间：2026-11-06
 
-状态：**当前实现设计**，记录 `yh build` 的四层缓存与接口就绪机制；目标态
-（`build/cache/` 统一实现、链接驱动与缓存分离）见
+状态：**当前实现设计（C0–C4 已落地）**，记录 `yh build` 的四层缓存、全局
+content store 与接口就绪机制；链接驱动分离等剩余目标见
 [架构设计](yh-架构设计.md) §6.5 与 `docs/todo.md` 的 S0–S6。
 
 ---
@@ -86,6 +86,7 @@ InterfaceReady
     iface/<project>-<module>.ready
     obj/<project>-<module>.o
     llvm/<project>-<module>.ll
+    asm/<project>-<module>.s
     manifest/<project>-<module>.manifest
     firc/<project>-<module>/
       index
@@ -107,6 +108,21 @@ InterfaceReady
 
 `YH_BUILD_CACHE` 只迁中间缓存树，不改变默认可执行文件位置。
 
+C4 新增全局内容寻址缓存（默认开启，`YH_CACHE=off` 关闭）：
+
+```text
+~/.cache/yh/ 或 ~/Library/Caches/yh/ 或 %LOCALAPPDATA%\yh\cache\
+  v1/actions/<ActionID>   输出角色 → OutputID 列表（二进制）
+  v1/outputs/<OutputID>   实际字节（相同内容只存一份）
+  v1/tmp/                 原子提交临时文件
+  v1/lock                 全局写锁（C6 flock）
+```
+
+模块 obj/.s.i/.s.ct 与函数 `.fchk`/`.fir` 内容进入 outputs；最终可执行文件
+仍只写项目 `.build`。读取时重算 OutputID；损坏/缺失按 miss。项目
+`.build/index/<tag>` 只存 64 hex ActionID。C6 增加同项目构建锁、全局写锁、
+`yh cache info/clean/trim/verify`、按大小/年龄 trim 与 `YH_CACHE_DEBUG`。
+
 ---
 
 ## 4. 模块接口/对象缓存
@@ -122,8 +138,13 @@ iface/<tag>.s.ct
 manifest/<tag>.manifest
 ```
 
+`--emit-llvm`/`--emit-asm` 额外发布的 `llvm/<tag>.ll`、`asm/<tag>.s` 是审阅
+产物，不进入 manifest；缓存命中时若本次显式请求的产物缺失，退回 worker 补写。
+
 LLVM 路径下对象是**模块级** `<tag>.o`；`module_obj_row` 的按文件对象路径是旧
 路径遗留，`mb_link_objects` 在 `llvm_objects != 0` 时跳过，不参与当前构建。
+2026-11-06 决定（[ADR-0020](../adr/0020-yh对象粒度停在模块级.md)）：对象粒度停在
+模块级；文件级对象不做，函数级 `.o` 暂缓；该旧路径仅保留兼容，不再扩展。
 
 ### 4.2 键
 
@@ -132,34 +153,36 @@ LLVM 路径下对象是**模块级** `<tag>.o`；`module_obj_row` 的按文件�
 - 本模块全部源文件内容；
 - 依赖模块 `.s.i` / `.s.ct` 内容（传递闭包）；
 - target triple / data layout / ABI；
-- `O0/O2`；
-- 编译器自身二进制指纹；
+- `O0/O2` 与 `--trimpath` 模式；
+- 编译器自身二进制内容身份；
 - LLVM 桥版本与桥 ABI；
 - Darwin 部署目标/PIC；
 - 模块符号后缀、入口标记、`legacy_system`；
 - `yh test` 的测试选择摘要（仅测试模式）。
 
-编译器指纹由 `mb_mix_compiler_fingerprint` 计算；PC7a 后按
-`(size, mtime_ns)` 取身份，不再每轮重哈希约 70 MB 的编译器自身。
+编译器身份由 `mb_mix_compiler_fingerprint` 计算：C2 起每进程只对编译器二进制
+做一次 SHA-256，模块键混入完整 32 字节；`(size, mtime_ns)` 不再参与身份。
 
 ### 4.3 manifest
 
-模块 manifest 是 **64 字节**：
+模块 manifest 是 **128 字节**（C4）：
 
 ```text
-[0..16)   模块键
-[16..32)  对象内容摘要
-[32..48)  .s.i 内容摘要
-[48..64)  .s.ct 内容摘要
+[0..32)   模块 ActionID（SHA-256）
+[32..64)  对象 OutputID
+[64..96)  .s.i OutputID
+[96..128) .s.ct OutputID
 ```
 
 命中必须同时满足：
 
 1. 四个文件存在；
-2. manifest 键等于期望键；
-3. 对象摘要匹配；
-4. `.s.i` / `.s.ct` 摘要匹配；
-5. 对象机器架构匹配（`mb_object_machine_matches`）。
+2. manifest 的 ActionID 等于期望键；
+3. 对象 OutputID 与内容摘要匹配；
+4. `.s.i` / `.s.ct` 的 OutputID 匹配；
+5. 对象机器架构匹配（`mb_object_machine_matches`）；
+6. 本次显式请求的 `.ll` / `.s` 存在（只有 `build --emit-llvm/--emit-asm` 检查，
+   不参与 manifest）。
 
 命中打印 `[缓存] <module>`，返回 `1`，不启动 worker。
 
@@ -199,16 +222,18 @@ LLVM 路径下对象是**模块级** `<tag>.o`；`module_obj_row` 的按文件�
 
 `checked_gen_function_key` 在 pass2b 之前计算，混入：
 
-- schema 标签 `yh-firc-1`；
+- 统一 schema（`CACHE_SCHEMA_VERSION` + `ACTION_CHECK` + `"function"`）；
 - check 环境键（依赖接口、target、ABI、O 级别、编译器身份、桥版本）；
 - target key / pointer bits / layout version / ABI；
-- 源路径；
-- 类型/字段/签名布局；
-- 源码级 `const` 的常量值/标志；
+- 项目相对源路径（绝对路径不进入键）；
+- GenState 类型/字段/签名表；
+- 源码级 `const` 的常量值/标志（类型只混 ABI 事实）；
 - 本模块非函数声明 token 流；
 - 本函数 token 流。
 
-注释/空白由词法器剥离，不进入键；其他函数体不进入本函数键。
+注释/空白由词法器剥离，不进入键；其他函数体不进入本函数键。键是 SHA-256
+64 位十六进制；target/ABI/opt/trimpath 由 `cache.CacheInputs` 白名单固定，
+源文件路径按项目相对路径进入。逐输入审计见[缓存键审计](yh-缓存键审计.md)。
 
 ### 5.3 命中与导入
 
@@ -222,7 +247,7 @@ pass2b 解析每个声明时：
 
 ### 5.4 记录与限制
 
-- 切片版本：`CHECKED_SLICE_VERSION = 3`；
+- 切片版本：`CHECKED_SLICE_VERSION = 5`；切片内文件路径为项目相对路径。
 - 单函数切片上限：1 MiB；
 - 本轮切片总上限：16 MiB；
 - 含 `$for` 模板等不适合切片的函数跳过缓存；
@@ -255,21 +280,24 @@ pass2b 解析每个声明时：
 payload：单函数及其类型/符号/全局/来源闭包的迷你 IRModule
 ```
 
-`IR_FUNCTION_CACHE_VERSION = 2`。
+`IR_FUNCTION_CACHE_VERSION = 3`。
 
 ### 6.3 键
 
 `checked_function_key` 混入：
 
-- `yh-firc-1` 标签；
-- 模块环境键 `env_key`；
+- 统一 schema（`CACHE_SCHEMA_VERSION` + `ACTION_IR` + `"function"`）；
+- 模块环境键 `env_key`（标签 `yh-firc-env-3`）；
 - target key / pointer bits / layout version / ABI；
-- 源路径；
+- 项目相对源路径（绝对路径不进入键）；
 - 声明面的布局与签名事实（只混 struct/union/enum 布局与函数签名，不混整张
   类型表）；
-- 源码级 `const` 常量事实；
+- 源码级 `const` 常量事实（类型只混 ABI 事实）；
 - 本模块非函数声明 token 流；
 - 本函数 token 流。
+
+键是 SHA-256 64 位十六进制。check 与 IR 使用不同 action 种类，不要求两份键
+字节相等。
 
 `env_key` 来自 `firc_env_key`：
 
@@ -297,7 +325,8 @@ payload：单函数及其类型/符号/全局/来源闭包的迷你 IRModule
 5. 失败/损坏 → 按 miss 重新 lowering。
 
 **关键边界**：函数 IR 缓存只跳过 lowering；`backend.llvm_emit_module` 仍对整
-模块生成 LLVM 文本。单函数改动仍会重跑整模块 LLVM 发射。
+模块生成 LLVM 文本。单函数改动仍会重跑整模块 LLVM 发射；对象粒度已固定在
+模块级，这是接受的成本（[ADR-0020](../adr/0020-yh对象粒度停在模块级.md)）。
 
 ### 6.5 提交
 
@@ -412,7 +441,7 @@ prepare → objects → key → args → libs → exec
 1. **模块缓存按整模块源内容失效**：改注释也会让模块缓存 miss，worker 仍会跑；
    但函数 check/IR 缓存可以继续 hit。
 2. **函数 IR 缓存只省 lowering，不省整模块 LLVM 发射**：单函数改动仍会重跑
-   整模块后端。
+   整模块后端；对象粒度固定模块级（ADR-0020），不通过文件/函数对象解决。
 
 ---
 
@@ -473,25 +502,32 @@ prepare → objects → key → args → libs → exec
 
 | 问题 | 证据 | 目标方向 |
 | --- | --- | --- |
-| 三套缓存各自实现 | `module_cache`、`function_ir_cache`、`link_cache` | `build/cache/` + 公共 `cache_context` |
+| 三套缓存各自实现 | `module_cache`、`function_ir_cache`、`link_cache` | C4 已抽 `cache/cache_store` + `build/cache_global`；link 待 C6 |
 | `link_cache` 混了链接驱动 | 1,647 行，含 `mb_link` 六段 | 缓存键/manifest 与 lld 调用分离 |
-| 函数缓存不减少 LLVM 代码生成 | `lower` 命中后 `backend.llvm_emit_module` 仍整模块 | 文件/函数级对象另行立项 |
-| 模块对象是模块级 | `obj/<tag>.o` | 单函数改动仍重发整模块对象 |
-| 编译器指纹用 size/mtime | `mb_mix_compiler_fingerprint` | 需要更强身份时改全量哈希/签名 |
-| check/IR 键逻辑重复 | `ast/module_snapshot_check_key` 与 `lower/module_snapshot_lower_cache` | 抽公共键序列，防两套分叉 |
-| 版本常量分散 | 模块缓存 tag、`CHECKED_SLICE_VERSION=3`、`IR_FUNCTION_CACHE_VERSION=2`、link manifest 无显式版本 | 统一 `yh version --contracts`/缓存版本表 |
-| 并发协调不足 | module/link manifest 最后写者赢 | 构建锁或按 session 的提交协议 |
+| 函数缓存不减少 LLVM 代码生成 | `lower` 命中后 `backend.llvm_emit_module` 仍整模块 | 不做文件/函数级对象；接受整模块发射（ADR-0020） |
+| 模块对象是模块级 | `obj/<tag>.o` | 最终粒度；单函数改动重发模块对象是接受的成本 |
+| ~~编译器指纹用 size/mtime~~ | `mb_mix_compiler_fingerprint` | C2 已改为 SHA-256 内容身份 |
+| check/IR 键逻辑重复 | `ast/module_snapshot_check_key` 与 `lower/module_snapshot_lower_cache` | C0 已抽 `cache.Key` 公共前缀/token/长度分帧；声明面事实按阶段保留 |
+| 版本常量分散 | 模块缓存 tag、`CACHE_SCHEMA_VERSION=3`、`CHECKED_SLICE_VERSION=5`、`IR_FUNCTION_CACHE_VERSION=3`、link manifest 无显式版本 | 统一 `yh version --contracts`/缓存版本表 |
+| 并发协调不足 | module/link manifest 最后写者赢 | C6 已加同项目构建锁 + 全局 cache 写锁 |
+| 缓存无限增长 | outputs 只增不减 | C6 `trim` 按大小/年龄回收无引用 output |
+| 故障不可见 | 只有读到损坏才知道 | C6 `verify` 全量检查 + `YH_CACHE_DEBUG` |
+
+C0–C6 的键组成、ActionID/OutputID 编码与四类 action 失效矩阵见
+[缓存键审计](yh-缓存键审计.md)（`ACTION_FILE` 为预留常量，不启用）；
+实现流水见 [finish.md](../finish.md) 的缓存 C0–C6 条目。
 
 目标结构（详见架构设计 §6.5）：
 
 ```text
+cache/
+  cache_key.yh            统一 schema/ActionID/OutputID/公共键原语
+  cache_store.yh          全局 content store：actions/outputs/tmp、原子 put/get
 build/
-  cache/
-    cache_context.yh      公共键/manifest/原子提交/统计
-    module_cache.yh       模块 iface/对象缓存
-    function_ir_cache.yh  函数 check/IR 缓存 I/O
-    link_cache.yh         链接缓存键/manifest（不含 lld 驱动）
-    snapshot_cache.yh     受检快照缓存（占位，后置）
+  cache_global.yh         YH_CACHE 初始化、模块发布/物化、全局 miss 回退
+  module_cache.yh         模块 iface/对象缓存
+  function_ir_cache.yh    函数 check/IR 缓存 I/O
+  link_cache.yh           链接缓存键/manifest（不含 lld 驱动；C6 再迁 store）
 ```
 
 `link` 只保留链接驱动/lld/进程/时钟；`proj_40_art` 继续拥有产物路径与哈希原语。
@@ -502,11 +538,12 @@ build/
 
 | 项 | 当前值 | 位置 |
 | --- | ---: | --- |
-| 模块缓存 tag | `"yh-iface-cache-3-ct"` | `build/module_emit.yh` |
-| check 切片 | `CHECKED_SLICE_VERSION = 3` | `ast/module_snapshot_check_slice.yh` |
-| 函数 IR 缓存 | `IR_FUNCTION_CACHE_VERSION = 2` | `ir/ssa_module_40_function_cache.yh` |
+| 模块缓存 tag | `"yh-iface-cache-5-ct"` | `build/module_emit.yh` |
+| 缓存键 schema | `CACHE_SCHEMA_VERSION = 3` | `cache/cache_key.yh` |
+| check 切片 | `CHECKED_SLICE_VERSION = 5` | `ast/module_snapshot_check_slice.yh` |
+| 函数 IR 缓存 | `IR_FUNCTION_CACHE_VERSION = 3` | `ir/ssa_module_40_function_cache.yh` |
 | 函数缓存记录头 | 40 字节 | `ir/ssa_module_40_function_cache.yh` |
-| 模块 manifest | 64 字节 | `build/module_cache.yh` |
+| 模块 manifest | 128 字节（4×SHA-256） | `build/module_cache.yh` |
 | link manifest | 32 字节 | `link/link_cache.yh` |
 | 接口版本 | `IFACE_VERSION_MIN/MAX` 1–3 | `parse/iface.yh` |
 | 编译期接口 | `CTIFACE_VERSION = 1` | `parse/iface.yh` |
@@ -519,6 +556,9 @@ build/
 
 | 内容 | 文件 |
 | --- | --- |
+| 缓存键 schema/ActionID | `compiler/cache/cache_key.yh` |
+| 全局 content store | `compiler/cache/cache_store.yh` |
+| 全局缓存接线 | `compiler/build/cache_global.yh` |
 | 模块缓存键/依赖/manifest | `compiler/build/module_cache.yh` |
 | 模块缓存命中判断 | `compiler/build/module_emit.yh::mb_compile_start` |
 | 函数缓存 I/O | `compiler/build/function_ir_cache.yh` |
@@ -537,13 +577,11 @@ build/
 
 ## 15. 设计结论
 
-与 Go `GOCACHE` 的逐项对照、优化优先级与目标 action/content 模型见
-[缓存与 Go 构建缓存对比](../02-plan/yh-缓存与Go构建缓存对比-2026-11-06.md)。
-
 - 当前缓存是“模块对象 + 函数 check 切片 + 函数 IR + 链接”四层独立缓存。
-- 模块级缓存最有效：命中直接跳过整个 worker。
-- 函数级缓存只省前端/lowering，不省整模块 LLVM 发射；这是后续文件/函数对象
-  立项的动机。
+- 模块级缓存最有效：命中直接跳过整个 worker；对象粒度固定模块级，文件级
+  对象不做、函数级 `.o` 暂缓（[ADR-0020](../adr/0020-yh对象粒度停在模块级.md)）。
+- 函数级缓存只省前端/lowering，不省整模块 LLVM 发射；这是明确接受的成本，
+  不是待补的缺口。
 - 当前实现能保证单次构建的原子发布与损坏回退，但缓存实现分散、版本入口分散、
   并发提交没有全局协调。
 - 调整缓存时优先保持本文的不变量，再按 `build/cache/` 目标收拢。

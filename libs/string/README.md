@@ -116,8 +116,10 @@ if (string.split(text, comma, &iter) == string.status_ok) {
 ## 测试
 
 ```bash
-just test-string       # O0：model/view/owned/transform/utf8/interop/resources
-just test-string-o2    # O2 同组
+just test-libs         # 全部标准库测试（含 string O0/O2 与安装验收）
+# 单跑 string：
+python3 tests/string/run.py --compiler ./yh --stdlib ./libs \
+  --workdir tmp/string-test --group all --opt-level 0
 ```
 
 `resources` 组把标准库复制到 `tmp/`，逐次改写
@@ -128,4 +130,4 @@ just test-string-o2    # O2 同组
 
 `tests.test.yh` 包含 5 条 `test` 块（视图比较、前后缀与查找、无分配切分、
 拥有者增长、UTF-8 校验）。用 `yh test string`（在 `libs/` 目录）或
-`just test-lib-tests` 运行；生产构建不会登记或发射这些测试。
+`just test-libs` 运行；生产构建不会登记或发射这些测试。

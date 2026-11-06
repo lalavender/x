@@ -1,5 +1,6 @@
 module comptime
 import gen
+import proj
 
 // ct_reset：释放当前编译单元登记的函数体快照，防止模块 worker 交叉污染。
 pub fn ct_reset() void {
@@ -185,8 +186,20 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     let src *u8 = malloc(nbytes.to_type(u64)).to_type(*u8)
     let body_n int = body_after - body_first
     let body *CtToken = malloc((body_n * sizeof(CtToken)).to_type(u64)).to_type(*CtToken)
+    // 来源路径：默认保留绝对路径供诊断；`--trimpath` 时用项目相对路径，
+    // 让 .s.ct / CT 诊断不随项目搬迁变化。
+    let loc_path [1024]u8
     let path_len int = 0
-    if (tk.c_path != 0) {
+    let use_loc int = 0
+    // 从 .s.ct 导入的 CT 函数已经带定义源码路径（c_ct_origin_active），
+    // 不能改写成当前解析文件；只有真实源文件登记才套用 trimpath/locs 路径。
+    if (tk.c_ct_origin_active == 0 && tk.c_active_file >= 0
+        && tk.c_active_file < proj.file_count()) {
+        path_len = proj.file_locs_path(tk.c_active_file, &loc_path[0], 1024)
+        if (path_len < 0) { path_len = 0 }
+        if (path_len > 0) { use_loc = 1 }
+    }
+    if (path_len <= 0 && tk.c_path != 0) {
         for tk.c_path[path_len] != 0 { path_len += 1 }
     }
     let src_path *u8 = 0
@@ -221,7 +234,11 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     src[tk.c_src_len] = 0
     let path_i int = 0
     for path_i < path_len {
-        src_path[path_i] = tk.c_path[path_i].to_type(u8)
+        if (use_loc != 0) {
+            src_path[path_i] = loc_path[path_i]
+        } else {
+            src_path[path_i] = tk.c_path[path_i].to_type(u8)
+        }
         path_i += 1
     }
     if (src_path != 0) { src_path[path_len] = 0 }

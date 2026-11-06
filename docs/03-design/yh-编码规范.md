@@ -382,8 +382,7 @@ pub fn buf_write(b *Buf, text *char) int {
 - **[强制]** 测试不联网、不依赖仓库外路径；文件用例在 `/tmp` 下按用例名区分路径
   并自建自清（逐例是独立进程，并行时路径不能撞）。
 - **[强制]** 负例断言具体错误，不只看「退出码非 0」。
-- **[建议]** 改标准库时顺带跑 `just libs-test`；改标准库的 `test` 块性能敏感代码
-  再跑 `just libs-test-o2`。
+- **[建议]** 改标准库时顺带跑 `just test-libs`（已含 O0/O2、外部 runner 与专项/安装验收）。
 
 ## 11. 编译期
 
@@ -401,7 +400,7 @@ pub fn buf_write(b *Buf, text *char) int {
 
 - [ ] 构建验证通过：项目模式下 `./yh check`（无参数），单文件用 `./yh check <文件>`；
   改编译器再跑 `just`。
-- [ ] `just test` 通过；改标准库再跑 `just libs-test`；自举相关跑 `just selfhost-native`。
+- [ ] `just test` 通过；改标准库再跑 `just test-libs`；自举相关跑 `just selfhost-native`。
 - [ ] 新增行为有 `.yh` 用例，且用例名说清行为。
 - [ ] 新增/修改的 `fn`、`struct` 有中文注释，覆盖参数、返回码、副作用、边界。
 - [ ] 新增导出面上每个 `pub` 都真的被别的模块使用。

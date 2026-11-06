@@ -11,12 +11,12 @@
 source = `.`；版本号以 [project.toml](project.toml) 的 `version` 与
 `cmdline/cmdline.yh` 的 `YH_VERSION_TEXT` 为准，两处必须与发布 tag 一致），按
 **gen / builtin / lex / parse / ast / check / comptime / lower / ir / backend /
-link / build / proj / testkit / cmdline / cmd** 组织。
-**2026-11-06 实测（`python3 tools/arch-check.py`）：十六个模块、148 个 `.yh`、
-57,540 行、55 条依赖边**：`parse` 9,718 · `build` 6,990 · `lower` 5,971 ·
-`gen` 5,799 · `comptime` 5,518 · `ir` 5,384 · `link` 4,272 · `backend` 4,149 ·
-`ast` 3,438 · `testkit` 1,616 · `proj` 1,396 · `lex` 1,069 · `check` 960 ·
-`cmdline` 619 · `cmd` 469 · `builtin` 172。
+link / build / proj / cache / testkit / cmdline / cmd** 组织。
+**2026-11-06 实测（`python3 tools/arch-check.py`）：十七个模块、158 个 `.yh`、
+59,815 行、63 条依赖边**：`parse` 9,718 · `build` 8,046 · `lower` 5,976 ·
+`gen` 5,804 · `comptime` 5,535 · `ir` 5,385 · `link` 4,325 · `backend` 4,149 ·
+`ast` 3,407 · `testkit` 1,616 · `proj` 1,464 · `lex` 1,069 · `cache` 1,031 ·
+`check` 960 · `cmdline` 661 · `cmd` 497 · `builtin` 172。
 
 各层来历：`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担
 AST 与快照的**只读一致性校验**（不是语义分析），`builtin/` 只放内置
@@ -91,7 +91,7 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 `is_type_start`）。运行：
 
 ```bash
-just test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test 语法）
+python3 tools/compiler-tests.py --compiler-path ./yh
 ```
 
 测试体走与普通函数相同的 CheckedModule→SSA→LLVM 路径，但只在测试模式下登记，
@@ -126,6 +126,15 @@ just test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test �
 | `parse/iface_ct.yh` | 编译期接口（`.s.ct`）发射与加载 |
 | `parse/iface_ct_map.yh` | `.s.ct` 正文改写的生成位置与原始位置映射 |
 
+**cache** —— 缓存键 schema 与 ActionID/OutputID（2026-11-06 C0/C1）
+
+| 文件 | 职责 |
+| --- | --- |
+| `cache/cache_key.yh` | 统一 schema、SHA-256 键前缀、token/整数/文本混入、ActionID 十六进制 |
+| `cache/cache_store.yh` | 全局 content store：actions/outputs/tmp、原子 put/get、OutputID 校验 |
+| `cache/lock.{darwin,linux,windows}.yh` | 同项目/全局写锁的 flock 平台封装（Windows 后置） |
+| `cache/*.test.yh` | 键长度/稳定性/action 隔离与 store 参数测试 |
+
 **ast** —— AST 阶段与受检快照（2026-10-12 自 parse 拆出）
 
 | 文件 | 职责 |
@@ -135,10 +144,9 @@ just test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test �
 | `ast/ast_stmt.yh` | `yh check` 语句树、绑定关联与编译期 `$for` 模板目录 |
 | `ast/ast_function.yh` | 函数在 AST arena 中的范围与绑定身份 |
 | `ast/ast_view.yh` | 为外部只读校验借出 arena 视图，不转移所有权 |
-| `ast/cache_mix.yh` | 函数缓存键的 FNV-1a 64 原语（check 键与 IR 键共用唯一实现） |
 | `ast/module_snapshot.yh` | `CheckedModule`/`CheckedStorage` 快照数据模型、捕获/释放与有界读取 |
 | `ast/module_snapshot_view.yh` | 为外部快照校验借出只读视图，不转移所有权 |
-| `ast/module_snapshot_check_key.yh` | pass2b 前的函数 check 键（LA3.3 C3） |
+| `ast/module_snapshot_check_key.yh` | pass2b 前的函数 check 键（SHA-256，C0/C1） |
 | `ast/module_snapshot_check_slice.yh` | 函数级受检 AST 切片捕获/导入、前端复位（`checked_decl_restore`） |
 
 **lower** —— 受检快照到语言 IR（2026-10-25 B3-2 自 `ast` 拆出，5,815 行）
@@ -152,7 +160,7 @@ just test-compiler-tests   # tools/compiler-tests.py（需要种子支持 test �
 | `lower/module_snapshot_lower_flow.yh` | if/循环/switch/label-goto 与 phi 合流 lowering |
 | `lower/module_snapshot_lower_place.yh` | 绑定赋值、地址、下标与切片位置 lowering |
 | `lower/module_snapshot_lower_aggregate.yh` | 数组/结构体字面量、聚合存储与复制 lowering |
-| `lower/module_snapshot_lower_cache.yh` | 函数级 IR 缓存键：token 流、布局/签名与非函数声明事实 |
+| `lower/module_snapshot_lower_cache.yh` | 函数级 IR 缓存键：token 流、逐声明布局与非函数声明事实 |
 | `lower/module_snapshot_forin.yh` | `for-in` 循环 lowering 辅助 |
 | `lower/module_snapshot_global.yh` | 全局对象类型、初始化值与引用 lowering |
 | `lower/module_snapshot_static.yh` | 静态数据、字符串与重定位 lowering 辅助 |
@@ -259,6 +267,8 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | 文件 | 职责 |
 | --- | --- |
 | `build/build_ctx.yh` | 会话级构建上下文（BuildCtx） |
+| `build/cache_global.yh` | `YH_CACHE` 初始化、模块产物发布/物化、全局 miss 回退、项目锁 |
+| `build/cache_admin.yh` | `yh cache info/clean/trim/verify`、trim/verify 与 debug 输出 |
 | `build/build_scheduler.yh` | 有界快照 worker 进程池与 InterfaceReady 调度 |
 | `build/module_build.yh` | 单模块构建驱动（573 行；扫描/两遍处理/清单/标准库装载） |
 | `build/module_worker.yh` | fork 继承项目快照后初始化私有语义状态并编译单模块 |
@@ -309,6 +319,7 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | `cmd/cmd_build.yh` | `yh build` / `yh check` |
 | `cmd/cmd_run.yh` | `yh run` |
 | `cmd/cmd_test.yh` | `yh test`（含 `--timeout` 校验） |
+| `cmd/cmd_cache.yh` | `yh cache info/clean/trim/verify`（C6） |
 | `cmd/cmd_list.yh` | `yh list [--resolve]` |
 | `cmd/cmd_version.yh` | `yh version` / `--contracts` |
 | `cmd/cmd_single.yh` | 单文件五形态：`--syntax-check` / `--emit-asm` / `--emit-llvm` / `-o` / check-with-src |
@@ -374,7 +385,7 @@ testkit ─▶ build（复用调度与产物路径，执行测试体）
 
 依赖方向由 `just arch-check` 强制（`tools/arch-check.py` 的 `ALLOWED`）：
 `gen`/`ir` 是依赖根，`parse`/`ast`/`check`/`comptime`/`lower`/`backend` 在其上，
-`proj`/`build` 装配下层，`cmd` 在最顶。当前 16 模块 55 条边、无环；目录职责、
+`proj`/`build` 装配下层，`cmd` 在最顶。当前 17 模块 61 条边、无环；目录职责、
 依赖矩阵与结构性问题见[架构设计](../docs/03-design/yh-架构设计.md)。
 
 ## 自编子集与已知边界

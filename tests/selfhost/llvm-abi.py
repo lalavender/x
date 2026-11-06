@@ -151,7 +151,7 @@ def main():
         project_env = dict(os.environ)
         project_env["PATH"] = "/usr/bin:" + project_env.get("PATH", "")
         built = run([compiler, "--backend", "llvm", "--target", TARGET,
-                     f"-O{level}", "--emit-llvm", "build"], cwd=project, env=project_env)
+                     f"-O{level}", "build", "--emit-llvm"], cwd=project, env=project_env)
         require(built.returncode == 0,
                 f"O{level} 跨模块 LLVM C ABI 构建失败\n{built.stderr[-2000:]}")
         module_ir = list((project / ".build" / "llvm").glob("*.ll"))
@@ -204,7 +204,7 @@ def main():
         normal_decl = "@[extern]\npub fn c_returns() void;"
         require(noreturn_decl in original_bridge, "noreturn 项目缺少跨模块声明")
         noreturn_build = run([compiler, "--backend", "llvm", "--target", TARGET,
-                              f"-O{level}", "--emit-llvm", "build"],
+                              f"-O{level}", "build", "--emit-llvm"],
                              cwd=noreturn_project, env=project_env)
         require(noreturn_build.returncode == 0,
                 f"O{level} 跨模块 noreturn 构建失败\n{noreturn_build.stderr[-1600:]}")
@@ -228,14 +228,14 @@ def main():
         bridge_source.write_text(original_bridge.replace(callback_decl, callback_c_decl, 1),
                                  encoding="utf-8")
         mismatch_build = run([compiler, "--backend", "llvm", "--target", TARGET,
-                              f"-O{level}", "--emit-llvm", "build"],
+                              f"-O{level}", "build", "--emit-llvm"],
                              cwd=noreturn_project, env=project_env)
         require(mismatch_build.returncode != 0
                 and "错误:" in mismatch_build.stdout + mismatch_build.stderr,
                 f"O{level} 函数接口 ABI 变化后未拒绝 YH callback 实参")
         bridge_source.write_text(original_bridge, encoding="utf-8")
         restored_build = run([compiler, "--backend", "llvm", "--target", TARGET,
-                              f"-O{level}", "--emit-llvm", "build"],
+                              f"-O{level}", "build", "--emit-llvm"],
                              cwd=noreturn_project, env=project_env)
         require(restored_build.returncode == 0,
                 f"O{level} 恢复 callback ABI 接口后构建失败\n{restored_build.stderr[-1600:]}")
@@ -248,7 +248,7 @@ def main():
         bridge_source.write_text(original_bridge.replace(noreturn_decl, normal_decl, 1),
                                  encoding="utf-8")
         normal_build = run([compiler, "--backend", "llvm", "--target", TARGET,
-                            f"-O{level}", "--emit-llvm", "build"],
+                            f"-O{level}", "build", "--emit-llvm"],
                            cwd=noreturn_project, env=project_env)
         require(normal_build.returncode == 0,
                 f"O{level} 移除 noreturn 属性后增量构建失败\n{normal_build.stderr[-1600:]}")
@@ -267,7 +267,7 @@ def main():
 
         bridge_source.write_text(original_bridge, encoding="utf-8")
         restored_build = run([compiler, "--backend", "llvm", "--target", TARGET,
-                              f"-O{level}", "--emit-llvm", "build"],
+                              f"-O{level}", "build", "--emit-llvm"],
                              cwd=noreturn_project, env=project_env)
         require(restored_build.returncode == 0,
                 f"O{level} 恢复 noreturn 属性后增量构建失败\n{restored_build.stderr[-1600:]}")
@@ -283,7 +283,7 @@ def main():
         bool_project = WORK / f"bool-project-O{level}"
         shutil.copytree(BOOL_PROJECT, bool_project)
         built = run([compiler, "--backend", "llvm", "--target", TARGET,
-                     f"-O{level}", "--emit-llvm", "build"], cwd=bool_project, env=project_env)
+                     f"-O{level}", "build", "--emit-llvm"], cwd=bool_project, env=project_env)
         require(built.returncode == 0,
                 f"O{level} 跨模块 LLVM C bool 构建失败\n{built.stderr[-2000:]}")
         bool_ir = list((bool_project / ".build" / "llvm").glob("*.ll"))

@@ -264,7 +264,7 @@ def build_candidate(compiler: Path, label: str, level: str, work: Path,
         shutil.rmtree(COMPILER / ".build")
     output = work / "candidates" / f"yh-{label}-O{level}"
     command = [str(compiler), "--backend", "llvm", "--target", TRIPLE,
-               f"-O{level}", "--emit-llvm", "--stats", "build", "-o", str(output)]
+               f"-O{level}", "--stats", "build", "--emit-llvm", "-o", str(output)]
     result = run(command, cwd=COMPILER, env=env)
     log_result(work, f"{label}-O{level}-build", result)
     if result.returncode != 0:

@@ -4,12 +4,13 @@ import ir
 import backend
 import proj
 import link
+import cache
 
 // ============================================================================
 // function_ir_cache.yh —— 函数级 IR 缓存的命令侧 I/O（LA3）
 //
 // 缓存目录：<build>/firc/<tag>/
-//   index      每行一个 16 位十六进制键；只列本次构建实际参与缓存的函数
+//   index      每行一个 64 位十六进制键；只列本次构建实际参与缓存的函数
 //   <key>.fir 函数缓存记录（32 字节外层头 + 迷你 IRModule）
 //
 // 装载失败、索引损坏或记录缺失都按 miss 处理，不影响构建；提交只在模块完整
@@ -77,6 +78,61 @@ fn firc_read(path *char, out_data **u8, out_size *int) int {
 const FIRC_RECORD_LIMIT int = 4194304
 const FIRC_SET_LIMIT int = 268435456
 
+// firc_role：check 记录用 OUTPUT_CHECK，IR 记录用 OUTPUT_IR。
+fn firc_role(suffix *char) int {
+    if (suffix == 0 || suffix[2] == 'c') { return cache.OUTPUT_CHECK }
+    return cache.OUTPUT_IR
+}
+
+// firc_global_load：按函数 ActionID 从全局 action 读取记录内容并校验 OutputID。
+// 1 = 命中，0 = miss/缓存关闭/损坏。
+fn firc_global_load(key *char, role int, out_data **u8,
+    out_size *int) int {
+    let store *cache.CacheStore = &bc().cache_store
+    if (cache.store_enabled(store) == 0) { return 0 }
+    let action_id [cache.CACHE_ID_SIZE]u8
+    if (cache.id_parse_hex(key, &action_id[0]) != 0) { return 0 }
+    let entries [4]cache.CacheEntry
+    let count int = 0
+    if (cache.store_action_get(store, &action_id[0], &entries[0], 4,
+            &count) != 1) {
+        if (bc().cache_debug != 0) {
+            printf("[cache] function %s global miss\n", key)
+        }
+        return 0
+    }
+    let i int = 0
+    for i < count {
+        if (entries[i].role == role) {
+            let hit int = cache.store_get_bytes(store, &entries[i].id[0],
+                out_data, out_size)
+            if (bc().cache_debug != 0) {
+                printf("[cache] function %s global %s\n", key,
+                    hit == 1 ? "hit" : "corrupt")
+            }
+            return hit
+        }
+        i += 1
+    }
+    return 0
+}
+
+// firc_global_publish：把记录内容发布到全局 outputs 与 action entry；失败静默。
+fn firc_global_publish(key *char, role int, data *u8, size int) void {
+    let store *cache.CacheStore = &bc().cache_store
+    if (cache.store_enabled(store) == 0 || data == 0 || size <= 0) { return }
+    let action_id [cache.CACHE_ID_SIZE]u8
+    if (cache.id_parse_hex(key, &action_id[0]) != 0) { return }
+    let entry cache.CacheEntry
+    entry.role = role
+    entry.size = 0
+    let out_size u64 = 0
+    if (cache.store_put_bytes(store, data, size, &entry.id[0],
+            &out_size) != 0) { return }
+    entry.size = out_size
+    cache.store_action_put(store, &action_id[0], &entry, 1)
+}
+
 // firc_load_kind：按记录后缀/索引名读取缓存集合；损坏退化为空/部分集合。
 fn firc_load_kind(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
     index_name *char) int {
@@ -109,7 +165,16 @@ fn firc_load_kind(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
                     let record *u8 = 0
                     let record_size int = 0
                     if (firc_read(gen.arr_cstr(&record_path[0]), &record,
-                            &record_size) != 0) {
+                            &record_size) == 0) {
+                        // 本地记录缺失时查全局 content store；读出内容经
+                        // OutputID 校验后再物化回本地，后续加载直接走本地。
+                        if (firc_global_load(gen.arr_cstr(&key[0]),
+                                firc_role(suffix), &record, &record_size) == 1) {
+                            firc_write_atomic(gen.arr_cstr(&record_path[0]),
+                                record, record_size)
+                        }
+                    }
+                    if (record != 0) {
                         // 旧的 16 MiB 总额会让大模块稳定丢掉约三成记录。
                         if (record_size > FIRC_RECORD_LIMIT
                             || loaded_total + record_size > FIRC_SET_LIMIT) {
@@ -213,6 +278,9 @@ fn firc_commit_kind(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
                 || firc_write_atomic(gen.arr_cstr(&record_path[0]),
                     set.entries[i].data, set.entries[i].size) != 0) {
                 gen.fail_path("无法写函数缓存记录: ", key)
+            } else {
+                firc_global_publish(key, firc_role(suffix),
+                    set.entries[i].data, set.entries[i].size)
             }
         }
         let j int = 0
@@ -261,7 +329,7 @@ fn firc_env_key_common(m int, build_off int, build_len int, out *u64,
     include_current int) int {
     out[0] = 0
     let h u64 = proj.hash_init()
-    if (firc_hash_text(&h, "yh-firc-env-1") != 0
+    if (firc_hash_text(&h, "yh-firc-env-3") != 0
         || firc_hash_text(&h, proj.cfg().target.triple) != 0
         || firc_hash_text(&h, proj.cfg().target.data_layout) != 0
         || firc_hash_text(&h, proj.cfg().target.abi) != 0) { return -1 }
@@ -269,6 +337,7 @@ fn firc_env_key_common(m int, build_off int, build_len int, out *u64,
     proj.fnv(&h, proj.cfg().target.little_endian.to_type(u8))
     proj.fnv(&h, proj.cfg().target.layout_version.to_type(u8))
     proj.fnv(&h, ('0' + proj.module_opt_level(m)).to_type(u8))
+    proj.fnv(&h, ('0' + proj.cfg().trimpath).to_type(u8))
     let salt u64 = gen.stats().ir_cache_salt
     let si int = 0
     for si < 8 { proj.fnv(&h, ((salt >> (si * 8)) & 255).to_type(u8)); si += 1 }

@@ -1,0 +1,82 @@
+module cache
+
+// ============================================================================
+// cache_key.test.yh —— C0 ActionID 编码与 schema 前缀测试
+//
+// 只由 `cd compiler && ../yh test cache` 执行；验证 64 位十六进制输出、
+// 不同 action 种类不同键、同一输入稳定，以及 schema 版本进入键。
+// ============================================================================
+
+// ck_eq：比较两段 64 位十六进制摘要。
+fn ck_eq(a *u8, b *u8) int {
+    let i int = 0
+    for i < CACHE_ID_HEX {
+        if (a[i] != b[i]) { return 0 }
+        i += 1
+    }
+    return 1
+}
+
+// ck_len：返回 NUL 结尾字符串长度，用于核对 64 位十六进制。
+fn ck_len(text *u8) int {
+    let i int = 0
+    for text[i] != 0 { i += 1 }
+    return i
+}
+
+test "ActionID：常量与整数混入" {
+    $assert(ACTION_CHECK != ACTION_IR, "action 常量必须不同")
+    let k Key
+    let a [CACHE_ID_TEXT]u8
+    let b [CACHE_ID_TEXT]u8
+    $assert(key_init(&k, ACTION_CHECK, "probe") == 0, "init 3")
+    $assert(key_mix_int(&k, 3) == 0, "mix 3")
+    $assert(key_finish_hex(&k, &a[0]) == 0, "finish 3")
+    $assert(key_init(&k, ACTION_CHECK, "probe") == 0, "init 4")
+    $assert(key_mix_int(&k, 4) == 0, "mix 4")
+    $assert(key_finish_hex(&k, &b[0]) == 0, "finish 4")
+    $assert(ck_eq(&a[0], &b[0]) == 0, "整数混入必须区分")
+    let bytes [1]u8
+    bytes[0] = 3
+    $assert(key_init(&k, ACTION_CHECK, "probe") == 0, "init bytes 3")
+    $assert(key_mix_bytes(&k, &bytes[0], 1) == 0, "mix bytes 3")
+    $assert(key_finish_hex(&k, &a[0]) == 0, "finish bytes 3")
+    bytes[0] = 4
+    $assert(key_init(&k, ACTION_CHECK, "probe") == 0, "init bytes 4")
+    $assert(key_mix_bytes(&k, &bytes[0], 1) == 0, "mix bytes 4")
+    $assert(key_finish_hex(&k, &b[0]) == 0, "finish bytes 4")
+    $assert(ck_eq(&a[0], &b[0]) == 0, "字节混入必须区分")
+}
+
+test "ActionID：长度、稳定性与 action 隔离" {
+    let check_key [CACHE_ID_TEXT]u8
+    let check_again [CACHE_ID_TEXT]u8
+    let ir_key [CACHE_ID_TEXT]u8
+    let k Key
+    $assert(key_init(&k, ACTION_CHECK, "function") == 0, "init check")
+    $assert(key_mix_text(&k, "abc") == 0, "mix")
+    $assert(key_finish_hex(&k, &check_key[0]) == 0, "finish check")
+    $assert(ck_len(&check_key[0]) == CACHE_ID_HEX, "64 位十六进制")
+    $assert(key_init(&k, ACTION_CHECK, "function") == 0, "init again")
+    $assert(key_mix_text(&k, "abc") == 0, "mix again")
+    $assert(key_finish_hex(&k, &check_again[0]) == 0, "finish again")
+    $assert(ck_eq(&check_key[0], &check_again[0]) == 1, "同输入稳定")
+    $assert(key_init(&k, ACTION_IR, "function") == 0, "init ir")
+    $assert(key_mix_text(&k, "abc") == 0, "mix ir")
+    $assert(key_finish_hex(&k, &ir_key[0]) == 0, "finish ir")
+    $assert(ck_eq(&check_key[0], &ir_key[0]) == 0, "action 种类必须隔离")
+}
+
+test "ActionID：长度分帧避免拼接歧义" {
+    let ab [CACHE_ID_TEXT]u8
+    let a_b [CACHE_ID_TEXT]u8
+    let k Key
+    $assert(key_init(&k, ACTION_FILE, "file") == 0, "init ab")
+    $assert(key_mix_text(&k, "ab") == 0, "mix ab")
+    $assert(key_finish_hex(&k, &ab[0]) == 0, "finish ab")
+    $assert(key_init(&k, ACTION_FILE, "file") == 0, "init a")
+    $assert(key_mix_text(&k, "a") == 0, "mix a")
+    $assert(key_mix_text(&k, "b") == 0, "mix b")
+    $assert(key_finish_hex(&k, &a_b[0]) == 0, "finish a+b")
+    $assert(ck_eq(&ab[0], &a_b[0]) == 0, "两段文本与一段文本必须不同")
+}

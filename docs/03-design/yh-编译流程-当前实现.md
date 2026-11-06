@@ -3,7 +3,7 @@
 修改时间：2026-11-06
 
 状态：**当前实现参考**，不是目标架构。
-基线：`llvm` 分支 0.0.12，16 个 yh 模块，LLVM 唯一后端。
+基线：`llvm` 分支 0.0.12 + C0/C1，17 个 yh 模块，LLVM 唯一后端。
 用途：作为调整编译流程时的逐阶段对照表；目标架构见
 [架构设计](yh-架构设计.md) 与 `docs/todo.md` 的 F0–F7（前端两遍化）/
 S0–S6（`gen` 拆分）。
@@ -84,10 +84,13 @@ yh build
 6. 全局选项落状态：
    - `--target` → `gen.target_select()`，并置 `target_explicit`；
    - `--opt` → `proj.cfg().opt_level`；
-   - `--emit-llvm` → `proj.cfg().emit_kind = 1`；
+   - `--emit-llvm` → `proj.cfg().emit_kind = 1`（仅 build；额外保留 `.ll`）；
+   - `--emit-asm` → `proj.cfg().emit_asm = 1`（仅 build；额外保留 `.s`）；
+   - `--trimpath` → `proj.cfg().trimpath = 1`（IR/CT 来源使用项目相对路径）；
    - `--stats` → `gen.stats().enabled = 1`；
    - `--backend legacy` 直接拒绝（LL12 后 LLVM 唯一）。
-7. 按命令分派：`build` → `api_build()`，`check` → `api_check_project()`。
+7. 按命令分派：`build` → `api_build()`，`check` → `api_check_project()`，
+   `cache` → `api_cache()`（`info/clean/trim/verify`）。
 
 ### 2.2 `cmd/cmd_build.yh`
 
@@ -220,7 +223,7 @@ InterfaceReady 可以在提供方私有函数体完成前发布，消费者提�
 - 依赖 `.s.i` / `.s.ct` 内容；
 - target triple / data layout / ABI；
 - `O0/O2`；
-- 编译器自身二进制指纹；
+- 编译器自身二进制的 SHA-256 内容身份（C2，每进程一次）；
 - LLVM 桥版本与桥 ABI；
 - Darwin 部署目标/PIC；
 - `yh test` 的测试选择摘要（仅测试模式）。
@@ -403,7 +406,8 @@ llvm_emit_module_to_cached()
 1. `lower.lower_module_cached()`：`CheckedModule → IRModule`，按函数命中 IR 缓存。
 2. `backend.llvm_emit_module()`：`IRModule → LLVM 文本`。
 3. `llvm_emit_add_deployment_metadata()`。
-4. 可选写 `.ll` 文本（`--emit-llvm` / 审阅）。
+4. 可选写 `.ll` 文本（`build --emit-llvm` / 审阅）。
+5. 可选再调用一次桥写 `.s` 汇编（`build --emit-asm`；对象已发布后追加）。
 
 ### 5.10 内嵌桥 → 对象
 
@@ -493,7 +497,8 @@ worker 成功后父进程：
     iface/<project>-<module>.s.ct
     iface/<project>-<module>.ready
     obj/<project>-<module>.o
-    llvm/<project>-<module>.ll           # --emit-llvm / 审阅
+    llvm/<project>-<module>.ll           # build --emit-llvm / 审阅
+    asm/<project>-<module>.s             # build --emit-asm / 审阅
     manifest/<project>-<module>.manifest
     firc/<project>-<module>/...          # 函数 check/IR 缓存
     manifest/link.manifest               # 链接缓存键/摘要
@@ -502,6 +507,8 @@ worker 成功后父进程：
 ```
 
 `YH_BUILD_CACHE=<dir>` 迁移中间缓存树；默认可执行文件仍在 `.build`。
+C4 起 `YH_CACHE` 指向全局 content store（默认平台缓存目录，`off` 关闭），
+模块/函数中间产物按 ActionID 发布；本地 `.build/index/<tag>` 只存 ActionID。
 
 ---
 
@@ -513,6 +520,7 @@ worker 成功后父进程：
 | 函数 check 切片 | `firc/...` `.fchk` + `index.check` | 函数 token 流 + 布局/签名事实 | 跳过函数重解析/重检查 |
 | 函数 IR | `firc/...` `.fir` + `index` | 上述 + 环境键 | 跳过 lowering |
 | 链接 | `manifest/link.manifest` | 工具/lld 身份 + target + 对象 + 输出 + 库 | 跳过 lld |
+| 全局 store | `$YH_CACHE/v1/{actions,outputs}` | ActionID + OutputID（SHA-256） | 跨目录复用中间产物 |
 | 测试 | `tmp/yh-test` | 模块键 + 测试选择摘要 | 仅测试构建 |
 
 缓存原则：
@@ -557,7 +565,7 @@ worker 成功后父进程：
 | 前端阶段 | `parse` 边解析边做语义动作并写 AST | `parse_*`、`gen.sem_*`、`ast.ast_expr_set_semantics` |
 | `check` | 只读结构 verifier | `check/verify.yh`、`mb_emit_indexed_module` 的 verify 段 |
 | CT 展开 | 在 parse 文件子遍中完成 | `parse_comptime`、`parse_ct_layout`、`mb_pass2_file` mode 2–4 |
-| `gen` 耦合 | 14/16 模块依赖；token/类型/状态/基础设施/target 混居 | `gen/model/symbols/state/buffer/target/sem_*` |
+| `gen` 耦合 | 15/17 模块依赖；token/类型/状态/基础设施/target 混居 | `gen/model/symbols/state/buffer/target/sem_*` |
 | 状态 | `TaskCtx` 188 字段；`GenState` 全局 | `gen/state.yh`、`state_init`、worker 初始化 |
 | 接口 | `.s.i`/`.s.ct` 读写仍在 `parse` | `parse/iface*`、`mb_*_emit` |
 | 项目模型 | `proj` 只读；`build` 负责装载/扫描 | `build/project_index`、`proj_*` |

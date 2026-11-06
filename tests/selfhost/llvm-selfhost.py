@@ -187,7 +187,7 @@ def build_candidate(compiler: Path, label: str, level: str, work: Path,
                    TRIPLE, "--opt-level", level, "--emit-llvm", "--stats"]
     else:
         command = [str(compiler), "--backend", "llvm", "--target", TRIPLE,
-                   f"-O{level}", "--emit-llvm", "--stats", "build", "-o",
+                   f"-O{level}", "--stats", "build", "--emit-llvm", "-o",
                    str(output)]
     result = run(command, cwd=COMPILER, env=env)
     log_result(work, f"{label}-O{level}-build", result)

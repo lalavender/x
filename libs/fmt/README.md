@@ -119,7 +119,7 @@ string.release(&text)
 ```bash
 cd libs && ../yh test fmt --timeout 60
 # 或
-just test-lib-tests
+just test-libs
 ```
 
 R3 覆盖构造器、整数/浮点默认与 spec、字符串/bool 对齐、rune 宽度、

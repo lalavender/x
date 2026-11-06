@@ -14,9 +14,11 @@ import gen
 // 两个 parser（对应 driver 的历史分派方式）：
 //   project —— `build/check/run/test/list/version` 六个子命令；
 //   file    —— 单文件形态（`--syntax-check`、`--emit-asm`、`-o`）。
-// 全局选项（`--target/-target`、`--backend`、`-O0/-O2`、`--emit-llvm`、`--stats`、
+// 全局选项（`--target/-target`、`--backend`、`-O0/-O2`、`--stats`、
 // `--legacy-system`）声明在公共 parent 上再 inherit 进子 parser，因此
-// 「子命令前后都能写」与旧的手写扫描一致。
+// 「子命令前后都能写」与旧的手写扫描一致。`--emit-llvm`/`--emit-asm` 是
+// build 的产物保留开关；test 与单文件保留各自的 `--emit-llvm`/`--emit-asm`
+// 形态（stdout），行为不变。
 //
 // 豁免：内部子进程协议 `--emit-module` 不经过本模块（见 driver.yh）。
 // ============================================================================
@@ -31,6 +33,7 @@ pub const CLI_LIST int = 5
 pub const CLI_VERSION int = 6
 pub const CLI_FILE int = 7
 pub const CLI_CONTROL int = 8
+pub const CLI_CACHE int = 9
 
 // YH_VERSION_TEXT：编译器自身版本，编码进二进制（VCONST，2026-11-05）。
 // `yh --version` 直接输出该常量，不读 project.toml；必须与
@@ -55,7 +58,9 @@ pub struct CliRequest {
     backend *char          // --backend（0 表示未提供）
     opt_level int          // -O0/-O2，最后出现者生效
     emit_llvm int
+    emit_asm int
     stats int
+    trimpath int
     legacy_system int
     link_count int
     links [16]*char        // --link 组名（借用 argv）
@@ -115,16 +120,17 @@ fn cli_common_add(common *cli.Parser) int {
     if (cli.add_argument(common, o2) < 0) {
         return -1
     }
-    let emit_llvm cli.Argument = cli.option("--emit-llvm", 0)
-    emit_llvm.action = cli.store_true
-    emit_llvm.help = "只写 LLVM 文本（每模块一个 .ll）"
-    if (cli.add_argument(common, emit_llvm) < 0) {
-        return -1
-    }
     let stats cli.Argument = cli.option("--stats", 0)
     stats.action = cli.store_true
     stats.help = "打印构建统计"
     if (cli.add_argument(common, stats) < 0) {
+        return -1
+    }
+    let trimpath cli.Argument = cli.option("--trimpath", 0)
+    trimpath.dest = "trimpath"
+    trimpath.action = cli.store_true
+    trimpath.help = "IR/locs 使用项目相对路径，忽略源码目录前缀"
+    if (cli.add_argument(common, trimpath) < 0) {
         return -1
     }
     let legacy cli.Argument = cli.option("--legacy-system", 0)
@@ -219,8 +225,18 @@ fn cli_build_project(root *cli.Parser) int {
     // build
     let build_cmd cli.Command = cli_command("build", "构建当前项目")
     let build_p *cli.Parser = cli.add_parser(root, slot, build_cmd)
+    let build_emit_llvm cli.Argument = cli.option("--emit-llvm", 0)
+    build_emit_llvm.dest = "emit_llvm"
+    build_emit_llvm.action = cli.store_true
+    build_emit_llvm.help = "保留 LLVM 文本到缓存目录（每模块一个 .ll）"
+    let build_emit_asm cli.Argument = cli.option("--emit-asm", 0)
+    build_emit_asm.dest = "emit_asm"
+    build_emit_asm.action = cli.store_true
+    build_emit_asm.help = "保留汇编到缓存目录（每模块一个 .s）"
     if (build_p == 0 || cli.inherit(build_p, &common) != 0
         || cli_add_link(build_p) < 0 || cli_add_out(build_p) < 0
+        || cli.add_argument(build_p, build_emit_llvm) < 0
+        || cli.add_argument(build_p, build_emit_asm) < 0
         || cli_add_src(build_p, "module", "module", 0) < 0) {
         cli.destroy(&common)
         return -1
@@ -255,6 +271,10 @@ fn cli_build_project(root *cli.Parser) int {
     no_run.dest = "no_run"
     no_run.action = cli.store_true
     no_run.help = "只构建不执行"
+    let test_emit_llvm cli.Argument = cli.option("--emit-llvm", 0)
+    test_emit_llvm.dest = "emit_llvm"
+    test_emit_llvm.action = cli.store_true
+    test_emit_llvm.help = "额外写出每个模块的 LLVM 文本（审阅测试降低）"
     let filter cli.Argument = cli.option("--filter", 0)
     filter.metavar = "SUBSTR"
     filter.help = "只跑身份含该子串的用例"
@@ -264,6 +284,7 @@ fn cli_build_project(root *cli.Parser) int {
     timeout.help = "单例超时秒数（1..3600）"
     timeout.default_value = cli.default_of(cli.value_i64(15))
     if (cli.add_argument(test_p, list_opt) < 0 || cli.add_argument(test_p, no_run) < 0
+        || cli.add_argument(test_p, test_emit_llvm) < 0
         || cli.add_argument(test_p, filter) < 0 || cli.add_argument(test_p, timeout) < 0
         || cli_add_src(test_p, "selector", "selector", 0) < 0) {
         cli.destroy(&common)
@@ -280,6 +301,14 @@ fn cli_build_project(root *cli.Parser) int {
     resolve.metavar = "NAME"
     resolve.help = "解释该导入名的绑定来源"
     if (cli.add_argument(list_p, resolve) < 0) {
+        cli.destroy(&common)
+        return -1
+    }
+    // cache
+    let cache_cmd cli.Command = cli_command("cache", "查看/清理全局缓存（info/clean/trim/verify）")
+    let cache_p *cli.Parser = cli.add_parser(root, slot, cache_cmd)
+    if (cache_p == 0 || cli.inherit(cache_p, &common) != 0
+        || cli_add_src(cache_p, "action", "cache_action", 0) < 0) {
         cli.destroy(&common)
         return -1
     }
@@ -329,7 +358,12 @@ fn cli_build_file(root *cli.Parser) int {
     asm.dest = "emit_asm"
     asm.action = cli.store_true
     asm.help = "发射当前目标汇编到标准输出"
+    let emit_llvm cli.Argument = cli.option("--emit-llvm", 0)
+    emit_llvm.dest = "emit_llvm"
+    emit_llvm.action = cli.store_true
+    emit_llvm.help = "LLVM 文本到标准输出"
     if (cli.add_argument(root, syntax) < 0 || cli.add_argument(root, asm) < 0
+        || cli.add_argument(root, emit_llvm) < 0
         || cli_add_out(root) < 0 || cli_add_src(root, "file", "file", 1) < 0) {
         cli.destroy(&common)
         return -1
@@ -342,7 +376,8 @@ fn cli_build_file(root *cli.Parser) int {
 fn cli_is_command(token *char) int {
     if (gen.cstr_eq(token, "build") != 0 || gen.cstr_eq(token, "check") != 0
         || gen.cstr_eq(token, "run") != 0 || gen.cstr_eq(token, "test") != 0
-        || gen.cstr_eq(token, "list") != 0 || gen.cstr_eq(token, "version") != 0) {
+        || gen.cstr_eq(token, "list") != 0 || gen.cstr_eq(token, "cache") != 0
+        || gen.cstr_eq(token, "version") != 0) {
         return 1
     }
     return 0
@@ -359,8 +394,8 @@ fn cli_first_token(argc int, argv **char) int {
             continue
         }
         if (gen.cstr_eq(argv[i], "-O0") != 0 || gen.cstr_eq(argv[i], "-O2") != 0
-            || gen.cstr_eq(argv[i], "--emit-llvm") != 0
             || gen.cstr_eq(argv[i], "--stats") != 0
+            || gen.cstr_eq(argv[i], "--trimpath") != 0
             || gen.cstr_eq(argv[i], "--legacy-system") != 0) {
             i += 1
             continue
@@ -432,13 +467,17 @@ fn cli_read_links(req *CliRequest) int {
     return 0
 }
 
-// cli_take_globals 把全局选项写进 CliRequest（target/opt/emit_llvm/stats/legacy）。
+// cli_take_globals 把全局选项写进 CliRequest（target/opt/emit/stats/legacy）。
+// emit_llvm/emit_asm 在 build 子命令、test 与单文件 parser 中分别声明；
+// 这里统一读取，未声明的命令得到 0。
 fn cli_take_globals(req *CliRequest) void {
     req.target = cli_read_text(req, "target")
     req.backend = cli_read_text(req, "backend")
     req.opt_level = cli_read_i64(req, "opt", 0).to_type(int)
     req.emit_llvm = cli_read_flag(req, "emit_llvm")
+    req.emit_asm = cli_read_flag(req, "emit_asm")
     req.stats = cli_read_flag(req, "stats")
+    req.trimpath = cli_read_flag(req, "trimpath")
     req.legacy_system = cli_read_flag(req, "legacy_system")
 }
 
@@ -511,6 +550,9 @@ pub fn parse_request(argc int, argv **char, req *CliRequest,
             req.no_run = cli_read_flag(req, "no_run")
             req.filter = cli_read_text(req, "filter")
             req.timeout_secs = cli_read_i64(req, "timeout", 15).to_type(int)
+        } else if (gen.cstr_eq(token, "cache") != 0) {
+            req.command = CLI_CACHE
+            req.src = cli_read_text(req, "cache_action")
         } else if (gen.cstr_eq(token, "list") != 0) {
             req.command = CLI_LIST
             req.resolve = cli_read_text(req, "resolve")

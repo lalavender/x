@@ -40,6 +40,7 @@ WORK = ROOT / "tmp" / "modcheck"
 DEFAULT_JOBS = max(1, min(4, os.cpu_count() or 1))
 COMPILER_PATH = None
 COMPILER_FLAGS = []
+COMPILER_BUILD_FLAGS = []
 COMPILER_BACKEND = None
 COMPILER_TARGET = None
 COMPILER_OPT_LEVEL = None
@@ -103,7 +104,15 @@ def sh(cmd, cwd, env=None):
         is_compiler = executable == str(COMPILER_PATH) or executable == "yh"
         if is_compiler and COMPILER_FLAGS:
             cmd[1:1] = COMPILER_FLAGS
+        if is_compiler and COMPILER_BUILD_FLAGS:
+            try:
+                build_at = cmd.index("build")
+            except ValueError:
+                build_at = -1
+            if build_at >= 0:
+                cmd[build_at + 1:build_at + 1] = COMPILER_BUILD_FLAGS
     e = dict(__import__("os").environ)
+    e.setdefault("YH_CACHE", "off")
     if env:
         e.update(env)
     # WSL 的 ARM64 过渡种子经 QEMU 执行 LLVM 项目构建时，O2 大型用例
@@ -280,6 +289,8 @@ case("s1-libs-io-write", "stdlib-run", "libsio", ".", 23,
      stdout="yh libs io ok\n")
 case("s2-libs-core-modules", "stdlib-run", "libsbase", ".", 0,
      stdout="yh libs base ok\n")
+case("hash-sha256", "stdlib-run", "hashsha", ".", 0,
+     stdout="hash sha256 ok\n")
 # —— ST1/ST6：string 公开面与跨库 smoke（断言已迁入 libs/string/tests.test.yh） ——
 case("st1-string-model", "stdlib-run", "stringmodel", ".", 0,
      stdout="string model ok\n")
@@ -451,11 +462,15 @@ def copy_proj(src, dst):
     shutil.copytree(src, dst)
     if src.name == "astcheck":
         # 探针直接使用当前编译器的 AST arena 与 check 实现。
-        for module in ("gen", "proj", "comptime", "ir", "backend", "ast", "check"):
+        for module in ("gen", "proj", "comptime", "ir", "backend", "ast", "check", "cache"):
             source = ROOT / "compiler" / module
             if source.is_dir():
                 ignore = shutil.ignore_patterns("llvm_bridge.yh") if module == "backend" else None
                 shutil.copytree(source, dst / module, ignore=ignore)
+        # C0 起 ast 依赖 cache，cache 依赖标准库 hash；fixture 复制真实模块时
+        # 必须把这两层一起带上，否则会在模块解析阶段报 cache/hash 不存在。
+        shutil.copytree(ROOT / "libs" / "hash", dst / "hash",
+                        ignore=shutil.ignore_patterns(".build"))
     if src.name in ("irfront", "llvmmodule"):
         # ir 现为编译器根项目普通模块（不带清单）；fixture 仍以路径依赖
         # 方式复用其源码测跨项目解析，拷入后补最小清单使其可被发现。
@@ -475,9 +490,11 @@ def copy_proj(src, dst):
         # 因此拷入时排除它（其余 backend 源码保持真实）。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "proj", "lex", "ast", "comptime", "ir", "backend", "check"):
+        for module in ("gen", "proj", "lex", "ast", "comptime", "ir", "backend", "check", "cache"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
+        shutil.copytree(ROOT / "libs" / "hash", core / "hash",
+                        ignore=shutil.ignore_patterns(".build"))
         (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "checkedcore"\nsource = "."\n')
         # 快照 fixture 的导出签名引用 CheckedModule；module_snapshot.yh 的句点
         # 排在下划线前，因而其类型声明先于 module_snapshot_fixture.yh。
@@ -487,15 +504,17 @@ def copy_proj(src, dst):
         # fixture 作为同模块的第二个文件随 main/ 一起构建；同样排除桥绑定。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "proj", "lex", "ast", "parse", "comptime", "ir", "backend", "builtin", "check", "lower"):
+        for module in ("gen", "proj", "lex", "ast", "parse", "comptime", "ir", "backend", "builtin", "check", "lower", "cache"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
+        shutil.copytree(ROOT / "libs" / "hash", core / "hash",
+                        ignore=shutil.ignore_patterns(".build"))
         (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "lowercore"\nsource = "."\n')
         shutil.copyfile(src / "fixture.yh", dst / "main" / "fixture.yh")
 
 
 def main():
-    global WORK, COMPILER_PATH, COMPILER_FLAGS, COMPILER_BACKEND
+    global WORK, COMPILER_PATH, COMPILER_FLAGS, COMPILER_BUILD_FLAGS, COMPILER_BACKEND
     global COMPILER_TARGET, COMPILER_OPT_LEVEL
     ap = argparse.ArgumentParser()
     ap.add_argument("--compiler-path", default=str(ROOT / "yh"))
@@ -534,6 +553,7 @@ def main():
         if not COMPILER_OPT_LEVEL:
             COMPILER_OPT_LEVEL = "0"
     COMPILER_FLAGS = []
+    COMPILER_BUILD_FLAGS = []
     if args.backend:
         COMPILER_FLAGS += ["--backend", args.backend]
     if args.target:
@@ -541,7 +561,8 @@ def main():
     if args.opt_level:
         COMPILER_FLAGS += [f"-O{args.opt_level}"]
     if args.backend == "llvm":
-        COMPILER_FLAGS += ["--stats", "--emit-llvm"]
+        COMPILER_FLAGS += ["--stats"]
+        COMPILER_BUILD_FLAGS += ["--emit-llvm"]
     WORK = Path(args.workdir)
     WORK.mkdir(parents=True, exist_ok=True)
     if not sys.platform.startswith("linux") and not args.quiet:
@@ -1941,6 +1962,9 @@ def main():
                        f"{prepared_space.stderr[-300:]} "
                        f"{space_run.stderr[-400:] if space_run else ''}")
             if c["name"] == "u1-extern-abs-module":
+                # run 形态不会自动带 --emit-llvm；显式补一次 build，确保下面的
+                # noreturn 检查读到本轮 LLVM 文本（fresh workdir 没有旧 .ll）。
+                sh([compiler, "build"], cwd=dst / c["sub"])
                 ir_files = list((artifact_root(dst / c["sub"]) / "ir").glob("*.ir"))
                 asm_files = backend_text_files(dst / c["sub"])
                 asm = "\n".join(path.read_text() for path in asm_files)

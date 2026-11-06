@@ -121,7 +121,7 @@ JSON 只有一个 number 类型，本库**只校验 grammar 并保存原始词�
 
 ```bash
 cd libs && yh test json   # 12 个 test：parse/查询/写出/错误/文件
-just test-json            # 历史 target 已删除，改用 yh test json / just libs-test
+just test-json            # 历史 target 已删除，改用 yh test json / just test-libs
 ```
 
 行为断言在 `libs/json/json.test.yh`；`jsonmodel` 是

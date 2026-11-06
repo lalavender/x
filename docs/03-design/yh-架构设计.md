@@ -5,8 +5,8 @@
 状态：**现行唯一的系统/编译器架构文档**。本文合并并取代 2026-09-30 至 2026-11-05
 期间的架构分析、目标设计、代码复核、差距分析与迁移方案；被合并文件的清单见
 [附录 A](#附录-a已合并文档)。历史版本仍可从 git 历史取回。
-基线：`llvm` 分支 `5b166a9`（0.0.12），`compiler/` 16 个 yh 模块 / 148 个 `.yh`
-/ 57,540 行 / 55 条依赖边；`python3 tools/arch-check.py` 全绿。
+基线：`llvm` 分支（0.0.12 + C0–C6），`compiler/` 17 个 yh 模块 / 158 个 `.yh`
+/ 59,815 行 / 63 条依赖边；`python3 tools/arch-check.py` 全绿。
 
 > **文档边界**：本文只回答“系统怎么分层、模块负责什么、阶段契约是什么、下一步
 > 怎么改”。语言语义、标准库 API、平台 ABI、编码规范、测试语法仍是独立领域文档，
@@ -16,17 +16,17 @@
 
 ## 0. 结论摘要
 
-1. **分层方向是对的**：16 个模块的显式 import 图无环，`gen` 与 `ir` 是依赖根，
+1. **分层方向是对的**：17 个模块的显式 import 图无环，`gen` 与 `ir` 是依赖根，
    `proj` 是项目数据层，`build` 是总装层，`cmd` 只做参数映射与分派。依赖矩阵由
    `tools/arch-check.py` 强制。
 2. **真正的乱不在依赖环，而在“名字、所有权、契约”三件事**：
-   - `gen` 同时是基础设施、语义模型、语义分析、C ABI 与平台层，14/16 个模块依赖它，
+   - `gen` 同时是基础设施、语义模型、语义分析、C ABI 与平台层，15/17 个模块依赖它，
      183 个 `pub fn`；
    - `parse` 不是纯 parser，它边解析边做语义动作并写 AST；`check` 当前仍是只读
      verifier；`ast` 不只装 AST，还装 `CheckedModule` 快照；
    - 会话状态分散在 `gen.state`、`proj.ctx`、`build.BuildCtx`、`link.context`，
      缓存分散在 `build/module_cache`、`build/function_ir_cache`、`link/link_cache`；
-   - 契约版本是五处独立常量，没有统一入口。
+   - 契约版本是六处独立常量，没有统一入口。
 3. **前端两遍化已决定（2026-11-06）**：`parse` 只出语法 AST，语义分析统一收进
    `check`（`check.resolve → check.expand → check.full`），CT 语法在 resolve 之后
    展开；`lower` 只消费受检结果。这是高成本重构，按 `docs/todo.md` 的 F0–F7
@@ -132,31 +132,32 @@ bin/yh-<平台>-<架构>（Release 种子）
 | --- | ---: | --- | --- |
 | `lex/`（lex） | 3 / 1,069 / 2 pub | 字节词法、布局（隐式 `;`）、字符串插值词法 | 干净；只依赖 `gen` |
 | `parse/`（parse） | 13 / 9,718 / 20 pub | 递归下降 + **语义动作** + AST 捕获 + 模块头/import + `.s.i`/`.s.ct` 接口读写 + CT 布局 | 名字只覆盖“解析”；`parse_expr.yh` 2,042 行，是当前最大文件（建议拆分）；依赖 ast/comptime/gen/ir/lex/proj |
-| `ast/`（ast） | 10 / 3,438 / 67 pub | AST arena/view + `CheckedModule` 快照、函数切片、检查缓存键 | 约 2.3k 行是“快照基础设施”，不是 AST；67 个 pub 偏多 |
+| `ast/`（ast） | 9 / 3,407 / 64 pub | AST arena/view + `CheckedModule` 快照、函数切片、检查缓存键 | 约 2.3k 行是“快照基础设施”，不是 AST；64 个 pub 偏多 |
 | `check/`（check） | 2 / 960 / 2 pub | 当前是**只读一致性校验**：范围、后序编号、快照完整性；目标（2026-11-06）是**语义分析入口**（resolve/expand/full） | 当前不是类型检查；语义仍在 `parse` + `gen.sem_*`；迁移见 todo F0–F7 |
-| `gen/`（gen） | 24 / 5,799 / **183 pub** | 语义状态 `TaskCtx/GenState`、名字池/类型/符号表、`sem_*`、C ABI、target、buffer/clock/console/argv/static_data/front_stage | **万能底座**：14/16 模块依赖；基础设施 + 语义 + ABI + 平台四类混居 |
-| `comptime/`（comptime） | 13 / 5,518 / 72 pub | 编译期 typed IR 执行器、布局图、枚举/全局聚合、静态数据 | 49 个模块级 `let`（全仓最多）；与 `gen` 的 CT 类型/值边界需要契约 |
+| `gen/`（gen） | 24 / 5,804 / **183 pub** | 语义状态 `TaskCtx/GenState`、名字池/类型/符号表、`sem_*`、C ABI、target、buffer/clock/console/argv/static_data/front_stage | **万能底座**：15/17 模块依赖；基础设施 + 语义 + ABI + 平台四类混居 |
+| `comptime/`（comptime） | 13 / 5,535 / 72 pub | 编译期 typed IR 执行器、布局图、枚举/全局聚合、静态数据 | 49 个模块级 `let`（全仓最多）；与 `gen` 的 CT 类型/值边界需要契约 |
 | `builtin/`（builtin） | 1 / 172 / 2 pub | prelude 名字登记表 | 干净；只依赖 `gen` |
+| `cache/`（cache） | 7 / 1,031 / 34 pub | 缓存键、`ActionID`/`OutputID`、全局 content store、flock 平台封装 | C0/C4/C6 新增 |
 
 #### 中端、后端与工具链
 
 | 目录（模块） | 规模 | 实际职责 | 主要问题 |
 | --- | ---: | --- | --- |
-| `lower/`（lower） | 16 / 5,971 / 3 pub | `CheckedModule → IRModule`，按 expr/call/flow/place/aggregate 分片 | 干净（只 3 个 pub）；`module_snapshot_*` 前缀偏长 |
+| `lower/`（lower） | 16 / 5,976 / 3 pub | `CheckedModule → IRModule`，按 expr/call/flow/place/aggregate 分片 | 干净（只 3 个 pub）；`module_snapshot_*` 前缀偏长 |
 | `ir/`（ir） | 10 / 5,384 / 34 pub | SSA 模型、验证、序列化、函数级缓存、重绑定 | **最干净**：0 依赖、0 全局 `let`；增长最快，契约版本分散 |
 | `backend/`（backend） | 14 / 4,149 / 20 pub | IR → LLVM 文本、ABI 分类（Apple/ZABI/Windows）、桥绑定、运行时 | 干净；后端契约是“文本”而非对象 API（设计选择） |
-| `link/`（link） | 6 / 4,272 / 20 pub | 汇编/链接驱动、内嵌 lld、进程、时钟、**链接缓存 1,647 行** | 4,272 行，是当前最大模块（建议拆分）；缓存与工具链调用混居；平台链接分 darwin/windows |
+| `link/`（link） | 7 / 4,325 / 20 pub | 汇编/链接驱动、内嵌 lld、进程、时钟、**链接缓存 1,647 行** | 4,272 行，是当前最大模块（建议拆分）；缓存与工具链调用混居；平台链接分 darwin/windows |
 
 #### 项目、构建与入口
 
 | 目录（模块） | 规模 | 实际职责 | 主要问题 |
 | --- | ---: | --- | --- |
-| `proj/`（proj） | 4 / 1,396 / 40 pub | 项目/模块/文件三张表 + 目标/构建配置 + 产物键 + 缓存根 | 新枢纽（9 个模块依赖）；只依赖 `gen`；40 pub 偏多 |
-| `build/`（build） | 20 / 6,990 / 35 pub | 发现/索引/调度/模块发射/LLVM 流水线/缓存/项目装配/TOML/统计 | 仍过载；依赖 12 个模块；`project*`、`toml`、`cache` 三类还能下沉 |
+| `proj/`（proj） | 4 / 1,464 / 42 pub | 项目/模块/文件三张表 + 目标/构建配置 + 产物键 + 缓存根 | 新枢纽（9 个模块依赖）；只依赖 `gen`；40 pub 偏多 |
+| `build/`（build） | 22 / 8,046 / 44 pub | 发现/索引/调度/模块发射/LLVM 流水线/缓存/全局 store、trim/verify/debug/项目装配/TOML/统计 | 仍过载；依赖 14 个模块；`project*`、`toml`、`cache` 三类还能下沉 |
 | `testkit/`（testkit） | 1 / 1,616 / 1 pub | `yh test` 发现、绑定、执行 | 15 处（8 个符号）直接引用 `build` 内部 `mb_*`/`cmd_*`，分层泄漏 |
-| `cmdline/`（cmdline） | 1 / 619 / 7 pub | CLI 声明与解析（`libs/cli`） | 干净；编译器里唯一 `→ libs` 边 |
-| `cmd/`（模块名 **main**） | 10 / 469 / 1 pub | argv → 请求映射 + 一命令一文件分派 | 干净；目录名 `cmd` 与模块名 `main` 不一致 |
-| `llvm/`（不是 yh 模块） | 6 个 C/C++ 文件 | `bridge.c/h`、`lld_bridge.cpp`、`windows_shim.c`、stub；由 `tools/llvm-*host.py` 编进闭包 | 隐性“第 17 个模块”；不在 arch-check 依赖图，只靠闭包哈希守护 |
+| `cmdline/`（cmdline） | 1 / 661 / 7 pub | CLI 声明与解析（`libs/cli`） | 干净；编译器里唯一 `→ libs` 边 |
+| `cmd/`（模块名 **main**） | 11 / 497 / 1 pub | argv → 请求映射 + 一命令一文件分派 | 干净；目录名 `cmd` 与模块名 `main` 不一致 |
+| `llvm/`（不是 yh 模块） | 6 个 C/C++ 文件 | `bridge.c/h`、`lld_bridge.cpp`、`windows_shim.c`、stub；由 `tools/llvm-*host.py` 编进闭包 | 隐性“第 18 个模块”；不在 arch-check 依赖图，只靠闭包哈希守护 |
 
 `compiler/.build/`、`compiler/tmp/`、`compiler/.codegraph/` 是构建缓存、临时产物与
 代码图 DB，不是源码。
@@ -172,23 +173,24 @@ bin/yh-<平台>-<架构>（Release 种子）
 
 | 模块 | 出度 | 入度 | 模块级 `let` | `pub fn` |
 | --- | ---: | ---: | ---: | ---: |
-| gen | 0 | 14 | 18 | 183 |
+| gen | 0 | 15 | 18 | 183 |
 | ir | 0 | 5 | 0 | 34 |
 | proj | 1 | 9 | 1 | 40 |
 | parse | 6 | 3 | 19 | 20 |
-| ast | 4 | 5 | 43 | 67 |
+| ast | 5 | 5 | 43 | 64 |
 | comptime | 2 | 3 | 49 | 72 |
-| lower | 4 | 1 | 2 | 3 |
+| cache | 2 | 3 | 0 | 34 |
+| lower | 5 | 1 | 2 | 3 |
 | backend | 2 | 2 | 0 | 20 |
-| link | 3 | 3 | 18 | 20 |
-| build | 12 | 2 | 15 | 35 |
+| link | 4 | 3 | 18 | 20 |
+| build | 15 | 2 | 15 | 44 |
 | testkit | 5 | 1 | 9 | 1 |
 | lex | 1 | 3 | 0 | 2 |
 | check | 3 | 1 | 0 | 2 |
 | cmdline | 2 | 1 | 0 | 7 |
 | cmd | 9 | 0 | 0 | 1 |
 | builtin | 1 | 1 | 0 | 2 |
-| 合计 | 55 条边 | — | 174 | — |
+| 合计 | 63 条边 | — | 174 | — |
 
 ---
 
@@ -203,13 +205,14 @@ lex        → gen
 comptime   → gen, proj
 builtin    → gen
 proj       → gen
-ast        → gen, comptime, ir, proj
-lower      → gen, ir, ast, proj
+cache      → gen, hash（标准库）
+ast        → gen, comptime, ir, proj, cache
+lower      → gen, ir, ast, proj, cache
 check      → gen, ast, proj
 parse      → gen, lex, comptime, ast, ir, proj
 backend    → gen, ir
-link       → gen, proj, backend
-build      → gen, lex, parse, comptime, ast, check, ir, backend, builtin, lower, proj, link
+link       → gen, proj, backend, hash（标准库）
+build      → gen, lex, parse, comptime, ast, check, ir, backend, builtin, lower, proj, link, hash, cache, libs（os）
 testkit    → gen, parse, build, proj, link
 cmdline    → gen, libs
 main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, build,
@@ -320,7 +323,7 @@ main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, buil
 3. 缓存键把 `schema_version` 纳入哈希（现在只有编译器指纹）。
 4. `yh version --contracts` 输出契约版本集合，便于 CI 与外部工具协商。
 
-### 4.3 当前契约版本（五处独立常量）
+### 4.3 当前契约版本（六处独立常量）
 
 | 契约 | 常量 | 当前值 | 位置 |
 | --- | --- | ---: | --- |
@@ -328,7 +331,8 @@ main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, buil
 | 编译期接口 | `CTIFACE_VERSION` | 1 | `parse/iface.yh` |
 | SSA 函数编码 | `IR_SERIAL_VERSION` | 9 | `ir/ssa_serialize.yh` |
 | 模块 IR 编码 | `IR_MODULE_SERIAL_VERSION` | 3 | `ir/ssa_module_30_serialize.yh` |
-| 函数缓存 | `IR_FUNCTION_CACHE_VERSION` | 2 | `ir/ssa_module_40_function_cache.yh` |
+| 缓存键 schema | `CACHE_SCHEMA_VERSION` | 3 | `cache/cache_key.yh` |
+| 函数缓存 | `IR_FUNCTION_CACHE_VERSION` | 3 | `ir/ssa_module_40_function_cache.yh` |
 
 读取端各自校验、各自拒绝；升级一处不会提示其余四处。这是“契约没有统一入口”，
 不是“完全没有版本号”。下一步应建立统一注册表，至少让 `yh version` 能列出全部版本。
@@ -338,14 +342,18 @@ main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, buil
 | 层 | 产物 | 键 | 状态 |
 | --- | --- | --- | --- |
 | 模块接口 | `.s.i` / `.s.ct` / `ready` | 源内容 + 接口版本区间 + 目标 + 符号后缀 | 已用：InterfaceReady 调度 |
-| 函数 check 切片 | `.fchk` + `index.check` | 函数 token 流 + 布局/签名事实 | 已用 |
-| 函数 IR | `.fir` + `index` | 同上 + 环境键 | 已用；版本 2 |
+| 函数 check 切片 | `.fchk` + `index.check` | SHA-256 + 相对路径：函数 token 流 + 类型/签名表 | 已用；schema 3 / slice v5 |
+| 函数 IR | `.fir` + `index` | SHA-256 + 相对路径：逐声明布局 + 环境键 | 已用；版本 3 |
+| 全局 content store | `v1/actions` + `v1/outputs` | ActionID + OutputID（SHA-256） | C4 已用：module/check/IR |
 | 对象/链接 | `obj/<tag>.o`、最终程序 | 内容哈希 + 编译器指纹 + 闭包身份 | 已用 |
-| 文件级对象 | — | — | **未落地**：仍按模块发一个 `.o` |
+
+对象粒度停在模块级：文件级对象不做，函数级 `.o` 暂缓（[ADR-0020](../adr/0020-yh对象粒度停在模块级.md)）。
 
 缓存规则（目标态，强制）：
 
-1. 任何新增缓存必须放 `build/cache/`，实现文件不得调用流水线文件。
+1. 缓存键/schema/编码放 `cache/`（前端与构建层共享）；构建侧 store/提交与
+   manifest 编排放 `build/`。实现文件不得调用流水线文件，也不得再出现第五套
+   私有键。
 2. 每个缓存必须声明：键组成、失效条件、存储路径（经 `proj` 的产物路径与缓存键层，
    不自行拼路径）。
 3. 命中/未命中必须进 `stats`；`YH_BUILD_CACHE` 语义不变（只迁缓存位置，不改变
@@ -371,21 +379,24 @@ main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, buil
 是则必须是每任务态（`TaskCtx` 或模块私有上下文）；不是则归构建会话/目标/符号表。
 `gen.G()` 已归零，但字段读次数仍高，不能靠“加窄口”代替状态归位。
 
-### 4.6 对象粒度与增量选项（结论，不展开实现）
+### 4.6 对象粒度（结论）
 
-单函数改动 ≤3 s 的唯一路径是让“只改一个函数”不再重发整模块。四个候选：
+2026-11-06 决定（[ADR-0020](../adr/0020-yh对象粒度停在模块级.md)）：对象粒度停在
+**模块级**，每个模块一个 `.o`。不做文件级对象（每个 `.yh` 一个 `.o`）；
+函数级 `.o`（PC7）暂缓，不进入当前路线。
 
-| 方案 | 做法 | 预期单函数改动 | 风险/代价 |
-| --- | --- | --- | --- |
-| A 函数级 `.o` | 每函数一个 `.o`；链接收 N 个对象 | ~1.4–1.8 s | 1460 个对象的链接/目录开销；桥调用次数从 13 → 1460 |
-| B 函数级 `.o` + 桥批处理 | 一次桥调用接收多段函数文本，共享 LLVM 上下文 | 同上，且避免 N 次初始化 | 需扩 C 桥 ABI（`compiler/llvm/bridge.h`），改桥 ABI 要滚种子 |
-| C 增量 `.o` 重写 | 仍按模块发 `.o`，用 `ld -r`/对象合并避免全模块重发 | 需 LLVM 侧按函数替换，不可行 | — |
-| D 只做摘要缓存 | `(size, mtime)` 复用摘要 | 3.9 → ~3.5 s（不达标） | 接受 mtime 信任 |
+理由：
 
-当前结论：A/B 都能进 3 s 档，但都动到发射与链接两层；B 还要改桥 ABI。函数级 IR
-缓存（已落地）只减少 lowering，不减少整模块 LLVM 代码生成。落地前单函数改动停在
-~3.5–3.9 s（O0）/ ~7.5 s（O2），`≤3 s` 不作为当前承诺。方案 D 可立即做且语义不变，
-为后续任何粒度改进保留收益。
+- 模块对象缓存命中已跳过整个 worker；文件级对象只在模块失效后提供二级复用。
+- 前端仍是模块级 parse/check/CT，文件对象不减少同模块其他文件的前端工作；
+  函数 check 切片与函数 IR 缓存已覆盖函数级增量。
+- 函数级 `.o` 的桥调用会从 13 次量级升到约 1460 次，固定开销可能抵消收益。
+- 文件级对象需要 hidden linkage、按文件发射、N 对象链接与提交协议，复杂度和
+  风险高；O0 单函数改动 3.6 s 中发射约 0.5 s、链接约 1.3 s，收益集中在函数
+  缓存负责的约 1.8 s 前端/lowering。
+
+接受的结果：单函数/单文件改动仍重发整模块 LLVM 并重跑链接；`≤3 s` 不作为
+当前承诺。只有未来测量证明整模块发射重新成为主瓶颈，才以新 ADR 重新评估。
 
 ---
 
@@ -413,13 +424,13 @@ main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, buil
 | --- | --- | --- | --- |
 | S1 | 驱动与内核未分离 | 已大体解决：`build`/`proj`/`link`/`cmd` 拆分；`testkit → build` 仍有 15 处（8 个符号）内部引用 | 部分 |
 | S2 | 状态隐式且进程级 | 174 个模块级 `let`；`G()` 已归零但字段读仍多；无线程隔离 | 部分 |
-| S3 | 产物契约未版本化 | 五处独立常量；`.s.i` 已支持区间，IR/缓存各自相等判定 | 部分 |
+| S3 | 产物契约未版本化 | 六处独立常量；`.s.i` 已支持区间，IR/缓存各自相等判定 | 部分 |
 | A1 | `build` 仍过载 | 6,990 行；project*/toml/cache 可下沉 | 未解决 |
 | A3 | `gen` 无内部分层 | 183 `pub fn`、14 入度、基础设施+语义+ABI+平台混居 | 未解决 |
-| A4 | 文档与代码漂移 | 2026-11-06 已把 `compiler/README.md` 模块表改为实测 16/148/57,540；README 断言尚未加入 `arch-check` | 部分 |
+| A4 | 文档与代码漂移 | 2026-11-06 已把 `compiler/README.md` 模块表改为实测 17/158/59,815；README 断言尚未加入 `arch-check` | 部分 |
 | A6 | `testkit → build` 泄漏 | 15 处（8 个符号）`mb_*`/`cmd_*` 直接引用 | 未解决 |
 | A7 | 平台适配靠文件复制 | `clock`/`project_dir`/`argv`/`console`/`llvm_bind`/`*_runtime` 各 4 份 | 未解决 |
-| A8 | 增量粒度停在函数级 | 函数 check/IR 缓存已用；文件级对象未落地；`module_worker` 废参数链仍在 | 未解决 |
+| A8 | 增量粒度 | 函数 check/IR 缓存已用；对象粒度固定模块级（ADR-0020）；`module_worker` 废参数链仍在 | 部分 |
 
 ### 5.3 规模观察项（仅记录，不阻断）
 
@@ -535,9 +546,11 @@ cmd/
 1 源/语义错误、2 用法错误、-1 内部或桥失败。新增命令 = 新增一个 `cmd_<命令>.yh`
 + driver 一行分派 + cmdline 声明。
 
-### 6.5 `build/` + `build/cache/`
+### 6.5 `build/` + `cache/`
 
 ```text
+cache/                  ← 前端与构建层共享的键实现（C0 已建）
+  cache_key.yh          统一 schema、ActionID/OutputID、公共键前缀/token/长度分帧
 build/
   build_ctx.yh          会话级构建上下文
   build_scheduler.yh    模块调度（fork / no-fork worker，PC3 冷构建判定）
@@ -548,13 +561,13 @@ build/
   llvm_emit.yh          单文件 LLVM 发射
   stats_print.yh        统计输出
   unused_function.yh    未用函数裁剪
-  cache/                ← 全部缓存唯一实现地（新增）
-    cache_context.yh      公共层：键（u64 salt / hex）、manifest 读写、命中校验、
-                          mtime/哈希失效、命中统计上报
-    module_cache.yh       模块 iface/产物缓存（自 build/ 根迁入）
-    function_ir_cache.yh  函数级 IR 缓存（自 build/ 根迁入）
-    link_cache.yh         链接缓存（自 link/ 迁入；link 只留工具链调用）
-    snapshot_cache.yh     受检快照检查缓存宿主侧策略（占位，随 P2 或后置）
+  cache_global.yh       YH_CACHE 初始化、模块发布/物化、全局 miss 回退
+  module_cache.yh       模块 iface/产物缓存
+  function_ir_cache.yh  函数 check/IR 缓存 I/O
+  link_cache.yh         链接缓存键/manifest（不含 lld 驱动）
+cache/
+  cache_key.yh          统一 schema/ActionID/OutputID/公共键原语
+  cache_store.yh        全局 content store：actions/outputs/tmp/lock、atomic put/get
 ```
 
 缓存规则见 §4.4。`link_cache.yh` 是唯一跨模块搬家：`link` 模块职责收窄为
@@ -743,7 +756,7 @@ check.resolve（先建声明/类型/常量环境）
 | 包管理 | 本地路径依赖 + 三层来源（本项目 → 标准库 → 直接依赖）；无中央 registry | 生效 | 模块与项目管理设计 |
 | 扩展点 | 静态注册表，不做动态插件/常驻守护进程/查询数据库 | 生效 | 10-24 系统架构 |
 | 并发 | fork/COW 进程 worker；lld 一次性子进程；线程池待上下文隔离 | 生效 | 10-25/LA5 |
-| 函数级缓存 | 函数 check 切片 + 函数 IR 缓存已用；文件/函数对象未落地 | 部分 | LA3/LA4 |
+| 对象粒度 | 模块级唯一；文件级不做，函数级 `.o` 暂缓（ADR-0020） | 生效 | ADR-0020、LA3 |
 | 前端阶段 | 两遍化：`parse` 纯语法 → AST → `check`（resolve/expand/full）→ lower；当前仍是语义动作解析器 | **已决定，待迁移** | §6.10、todo F0–F7 |
 | CT 展开位置 | `check.resolve` 之后、`check.full` 之前；AST→AST；`comptime` 只做求值 | 已决定 | §6.10 |
 | `gen` 拆分 | 目标 `support`/`diag`/`target`/`token`/`sema`/`check`；S0–S6 分阶段；不五拆 `symbols.yh` | 目标 | 2026-11-06 映射 |
@@ -793,7 +806,7 @@ check.resolve（先建声明/类型/常量环境）
 
 | 阶段 | 内容 | 风险 | 前置 |
 | --- | --- | --- | --- |
-| A1 | `link/link_cache.yh`（1,647 行）迁 `build/cache/`；`link` 回到纯工具链调用层 | 中：缓存键/接口变化，固定点注意 | 无 |
+| A1 | `link/link_cache.yh`（1,647 行）迁 `cache/` + `build/`；`link` 回到纯工具链调用层 | 中：缓存键/接口变化，固定点注意 | 无 |
 | A2 | `build/project*.yh` + `toml.yh` 迁 `proj/`；评估删除自研 TOML | 中：需先校验 `pj_*` 符号引用 | A1 |
 | A3 | `gen` 按 S0–S6 拆到 `support`/`diag`/`target`/`token`/`sema`/`check`；先 S1/S2/S3，再 S4/S5/S6 | 高：全仓 import/状态改写 | A1/A2、前端 F0–F7 |
 | A4 | `ast` 快照独立（P5，候选） | 中 | A3 |
@@ -828,7 +841,7 @@ check.resolve（先建声明/类型/常量环境）
 2. `link` 文件级拆分（platform/link_driver/coff），降低当前最大模块规模；
 3. `compiler/README.md` 模块表改为实测数据，并纳入 `arch-check` 断言；
 4. `testkit` 的 15 处（8 个符号）`mb_*`/`cmd_*` 引用改走 `proj`/`link` 窄口；
-5. 契约版本统一入口（至少 `yh version --contracts` 列出五处版本）。
+5. 契约版本统一入口（至少 `yh version --contracts` 列出六处版本）。
 
 ### 9.6 风险
 
@@ -881,7 +894,7 @@ check.resolve（先建声明/类型/常量环境）
 | --- | --- |
 | `compiler/README.md` 模块表与 `arch-check` 实测一致 | 终结 README 漂移（N3） |
 | 目录职责表与 `compiler/` 实际模块集合一致 | 新增/删除模块必须同步本文 |
-| 缓存实现只能在 `build/cache/` | 防止第四套缓存出现 |
+| 缓存键在 `cache/`、提交在 `build/` | 防止第四套缓存出现 |
 | `testkit` 不得新增对 `build` 内部符号的引用 | 守住 A6 |
 | 契约版本统一注册表 | 让 `yh version --contracts` 可核对 |
 | 平台变体文件数量与目标数匹配 | 防止第 5 份复制悄悄出现 |
@@ -912,7 +925,7 @@ check.resolve（先建声明/类型/常量环境）
 1. **“混乱”具体指哪种痛？** 读代码找不到该改哪 / 改一个功能牵动很多模块 /
    编译慢 / 加 Windows 和平台 / 想上 LSP 和工具。不同答案对应不同顺序：
    - 可读性/耦合 → A（缓存/proj/gen）；
-   - 编译速度 → 先做缓存键/对象粒度/性能测量，不先拆前端；
+   - 编译速度 → 先做缓存键/性能测量，不先拆前端；对象粒度已定（ADR-0020）；
    - 语言特性/工具 → B（前端契约）优先级上升；
    - 平台 → `TargetDesc` + 平台变体收敛优先。
 2. **`gen` 拆分按 2026-11-06 的 S0–S6 映射执行**：`support`/`diag`/`target`/`token`/
@@ -960,6 +973,10 @@ check.resolve（先建声明/类型/常量环境）
 | `yh-自举后端架构.md` | §1.3、§4.1、§5.5（旧 emit_arm64 细节已随 LL12 退役，不再保留） |
 | `yh-自举能力边界.md` | §1.3（内容已指向自举统一方案，无独立结论） |
 | `yh-Go风格模块与包设计.md` | §7（已被 `project.toml` 模块/项目管理设计取代） |
+
+`yh-函数级目标文件可行性` 与 `yh-LLVM文件对象与提交清单设计` 的对象粒度内容已不再
+采用（[ADR-0020](../adr/0020-yh对象粒度停在模块级.md)）；其中仍有效的缓存/提交部分
+见本文 §4.4/§5.4。
 
 未合并、继续保留的领域设计/契约（不是架构分析文档）：
 

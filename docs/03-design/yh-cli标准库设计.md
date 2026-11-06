@@ -907,7 +907,7 @@ auto 由输出 fd 是否为终端和 NO_COLOR 决定，NO_COLOR 存在时关闭�
 语义断言已迁入 `libs/cli/zz_tests_{basics,actions,commands,extensions,help}.yh`
 （51 个 `test`，`yh test cli`）；真实 argv/退出码与 Python argparse 差分保留在
 `libs/cli/test/{climodel,clibasics,cliwarnings,clidiff}` + `run.py`/`diff.py`，
-由 `make libs-test` 执行。迁移记录见
+由 `just test-libs` 执行。迁移记录见
 [YT4-P4](../01-finished/yh-YT4-P4-cli迁移-2026-10-25.md)。
 
 | 测试组 | 必须覆盖的行为 |

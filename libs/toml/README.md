@@ -181,16 +181,13 @@ stdout/stderr、不退出进程；`read_file` 的 I/O 错误在 Linux 通过
 ## 验收
 
 ```bash
+just test-libs                             # 全部标准库测试（含 TOML 专项）
+# 单跑：
 cd libs && yh test toml                    # API/所有权/资源/文件断言（11 test）
-just test-toml                             # 同上
 python3 tests/toml/conformance.py --prepare  # 首次：取固定 toml-test v2.2.0
 python3 tests/toml/conformance.py          # 官方 tagged JSON decoder 门
 python3 tests/toml/injection.py            # 124 个池分配失败点 + 预算门
 python3 tests/toml/install.py              # just install 后仓库外导入
-just test-toml
-just test-toml-conformance
-just test-toml-injection
-just test-toml-install
 ```
 
 固定语料为 toml-test v2.2.0 的 `files-toml-1.1.0` 清单：214 个有效文件比较

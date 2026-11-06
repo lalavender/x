@@ -33,6 +33,9 @@ SRC = ROOT / "compiler"
 ALLOWED = {
     "gen": set(),
     "ir": set(),
+    # cache：缓存键 schema / ActionID / OutputID 原语。只依赖 gen 与标准库 hash，
+    # 位于前端与构建层之下，避免 check↔lower 为了共用键原语互相 import。
+    "cache": {"gen", "hash"},
     "lex": {"gen"},
     # comptime 只有一处窄口读（待定数组长度时的文件下标越界检查），
     # 走 proj.file_count() 而不是自己拿项目表。
@@ -41,21 +44,21 @@ ALLOWED = {
     # proj：项目/模块/文件表 + 目标/构建配置（2026-10-26 B1-1 自 gen/build 拆出）。
     # 它是前端与构建层共用的数据层，只允许依赖 gen；一旦反向依赖就成环。
     "proj": {"gen"},
-    "ast": {"gen", "comptime", "ir", "proj"},
+    "ast": {"gen", "comptime", "ir", "proj", "cache"},
     # lower：CheckedModule → IRModule（2026-10-25 B3-2 自 ast 拆出）。
     # 只吃受检快照，不得 import parse/check/build；ast 不得反向 import lower。
-    "lower": {"gen", "ir", "ast", "proj"},
+    "lower": {"gen", "ir", "ast", "proj", "cache"},
     "check": {"gen", "ast", "proj"},
     "parse": {"gen", "lex", "comptime", "ast", "ir", "proj"},
     "backend": {"gen", "ir"},
     # link：工具链调用层（汇编、链接驱动、内嵌 lld、进程、时钟）
     # 2026-10-26 B2-2 自 build 拆出。它必须位于 build 之下、proj 之上：
     # 只允许 gen/proj/backend，不得 import build（否则 link ↔ build 成环）。
-    "link": {"gen", "proj", "backend"},
+    "link": {"gen", "proj", "backend", "hash"},
     # build 是构建引擎（A2c 后承担项目模型 + 链接 + 调度 + 模块发射），
     # 位于前端/后端之上，可依赖全部下层；main 只剩 CLI 与测试执行器。
     "build": {"gen", "lex", "parse", "comptime", "ast", "check", "ir",
-              "backend", "builtin", "lower", "proj", "link"},
+              "backend", "builtin", "lower", "proj", "link", "hash", "cache", "libs"},
     # testkit：语言内测试执行器（yh test 子命令的实现），位于 build 之上。
     # 模块名不能叫 test——`test "..." {}` 是语言关键字。
     "testkit": {"gen", "parse", "build", "proj", "link"},

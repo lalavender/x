@@ -2,6 +2,7 @@
 """LL9 项目缓存门：目标隔离、工具身份、对象校验与失败发布。"""
 
 import argparse
+import hashlib
 import os
 import platform
 import shutil
@@ -27,18 +28,6 @@ def machine(path):
     if len(data) < 20 or data[:4] != b"\x7fELF":
         return -1
     return struct.unpack_from("<H", data, 18)[0]
-
-
-def content_hash(data):
-    """按编译器 manifest 约定计算 FNV，复现可配对的损坏 machine 输入。"""
-    value = 3421674725 << 32 | 2216829733
-    full = len(data) // 8 * 8
-    for offset in range(0, full, 8):
-        value = ((value ^ int.from_bytes(data[offset:offset + 8], "little"))
-                 * 1099511628211) & 0xFFFFFFFFFFFFFFFF
-    for byte in data[full:]:
-        value = ((value ^ byte) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
-    return f"{value:016x}".encode()
 
 
 def build(compiler, project, output, env, target=None, level=0):
@@ -103,6 +92,7 @@ def main():
     write_link_wrapper(wrapper, gcc, "v1")
     wrapper.chmod(0o755)
     env = dict(os.environ)
+    env.setdefault("YH_CACHE", "off")
     env["YH_CC"] = str(wrapper)
     env["YH_LLVM_CACHE_LOG"] = str(log)
     output = work / "程序 输出"
@@ -161,7 +151,8 @@ def main():
     wrong_object = obj.read_bytes()
     wrong_obj.write_bytes(wrong_object)
     paired = bytearray(wrong_manifest.read_bytes())
-    paired[16:] = content_hash(wrong_object)
+    # C4 manifest：ActionID 32 + obj 32 + .s.i 32 + .s.ct 32。
+    paired[32:64] = hashlib.sha256(wrong_object).digest()
     wrong_manifest.write_bytes(paired)
     wrong_machine = build(compiler, project, output, env, target=wrong_name)
     assert wrong_machine.returncode != 0 and "[编译] main" in wrong_machine.stdout, \

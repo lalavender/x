@@ -133,11 +133,12 @@ def main() -> int:
         command += ["--target", args.target]
     if args.opt_level:
         command += [f"-O{args.opt_level}"]
-    if args.emit_llvm:
-        command.append("--emit-llvm")
     if args.stats:
         command.append("--stats")
-    command += ["build", "-o", str(output)]
+    command += ["build"]
+    if args.emit_llvm:
+        command.append("--emit-llvm")
+    command += ["-o", str(output)]
     result = subprocess.run(command, cwd=project, check=False, env=environment)
     return result.returncode
 

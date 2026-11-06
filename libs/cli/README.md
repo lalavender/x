@@ -773,12 +773,12 @@ cli 的用例与 fixture 全部放在本目录，不与全局 `tests/` 耦合：
 ```sh
 python3 libs/cli/test/run.py                     # 真实 argv/退出码：5 例
 python3 libs/cli/test/diff.py                    # 与 Python argparse 的差分验收
-just libs-test                                   # CI 独立阶段，含上面两个 runner
+just test-libs                                   # CI 独立阶段，含上面两个 runner
 ```
 
 - **语义断言**在 `libs/cli/{actions,basics,commands,extensions,help}.test.yh`
   （51 个 `test`），由 `cd libs && yh test cli` / `just test` /
-  `just selfhost-native` / `just libs-test` 执行；后缀必须 `.test.yh`（排序由编译器保证，测试文件一律排在非测试文件之后）
+  `just selfhost-native` / `just test-libs` 执行；后缀必须 `.test.yh`（排序由编译器保证，测试文件一律排在非测试文件之后）
   （类型声明在 `cli.yh`）。
 - fixture：`libs/cli/test/{climodel,clibasics,cliwarnings,clidiff}`；其余
   selftest 夹具已迁入内建测试并删除（记录见
@@ -788,5 +788,5 @@ just libs-test                                   # CI 独立阶段，含上面�
 - `diff.py` 用 `clidiff` 探针把 94 条 argv 同时交给 yh 与 Python 3.14 argparse，
   比较 status、各 dest 值与未消费 token；设计保留的差异在脚本里显式列出，
   只在新差异出现时返回非 0。
-- 仓库级门：`just libs-test`（含 cli runner + diff）、`just test`、
+- 仓库级门：`just test-libs`（含 cli runner + diff）、`just test`、
   `just selfhost-native`。

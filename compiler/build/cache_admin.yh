@@ -1,0 +1,568 @@
+module build
+
+import gen
+import link
+import cache
+import hash
+import libs.os
+
+// ============================================================================
+// cache_admin.yh —— C6：全局缓存的 info/clean/trim/verify
+//
+// 只操作 <YH_CACHE>/v1 下的 actions/outputs/tmp；最终可执行文件不在全局缓存，
+// 因此这些命令不会碰项目 .build。clean/trim 持全局写锁，verify/info 只读。
+// trim 只删除没有被任何 action 引用的 output；动作表本身留给 clean/后续 GC。
+// ============================================================================
+
+// CacheFile：目录条目的固定 64 hex 名称 + size/mtime。
+struct CacheFile {
+    name [cache.CACHE_ID_TEXT]u8
+    size u64
+    mtime u64
+}
+
+// IdSet：OutputID 引用集；开放寻址，容量按 action 最大输出数预留。
+struct IdSet {
+    slots *u8
+    used *u8
+    capacity int
+    count int
+}
+
+// admin_out：把一行文本写到 stdout；失败不影响命令结果。
+fn admin_out(text *char) void {
+    printf("%s\n", text)
+}
+
+// admin_join：root/sub/name 拼成路径；name 为 0 时只到 sub。
+fn admin_join(root *char, sub *char, name *u8, name_len int,
+    out *u8, capacity int) int {
+    if (root == 0 || sub == 0 || out == 0 || capacity <= 1) { return -1 }
+    let n int = 0
+    let i int = 0
+    for root[i] != 0 {
+        if (n + 1 >= capacity) { return -1 }
+        out[n] = root[i].to_type(u8)
+        n += 1
+        i += 1
+    }
+    if (n > 0 && out[n - 1] != '/') {
+        if (n + 1 >= capacity) { return -1 }
+        out[n] = '/'
+        n += 1
+    }
+    i = 0
+    for sub[i] != 0 {
+        if (n + 1 >= capacity) { return -1 }
+        out[n] = sub[i].to_type(u8)
+        n += 1
+        i += 1
+    }
+    if (name != 0) {
+        if (n + 1 >= capacity) { return -1 }
+        out[n] = '/'
+        n += 1
+        i = 0
+        for i < name_len {
+            if (n + 1 >= capacity) { return -1 }
+            out[n] = name[i]
+            n += 1
+            i += 1
+        }
+    }
+    out[n] = 0
+    return 0
+}
+
+// admin_list_dir：列出 <root>/v1/<sub> 下 64 hex 的普通文件并读取 size/mtime。
+// 成功返回 1（空目录也算成功）；目录打不开返回 0。调用方 free 输出数组。
+fn admin_list_dir(store *cache.CacheStore, sub *char,
+    out_files **CacheFile, out_count *int) int {
+    out_files[0] = 0
+    out_count[0] = 0
+    if (store == 0) { return 0 }
+    let dir [cache.CACHE_ROOT_MAX + 128]u8
+    if (admin_join(gen.arr_cstr(&store.root[0]), sub, 0, 0,
+            &dir[0], cache.CACHE_ROOT_MAX + 128) != 0) { return 0 }
+    let buffer [16384]u8
+    let opened os.DirReaderResult = os.open_dir(gen.arr_cstr(&dir[0]),
+        buffer[0..16384])
+    if (opened.reader.active == 0) { return 0 }
+    let files *CacheFile = 0
+    let count int = 0
+    let capacity int = 0
+    for 1 {
+        let result os.DirEntryResult = os.next_entry(&opened.reader)
+        if (result.status == os.dir_entry_end) { break }
+        if (result.status == os.dir_entry_error) { break }
+        let name_len int = result.entry.name_len.to_type(int)
+        if (name_len != cache.CACHE_ID_HEX) { continue }
+        if (count == capacity) {
+            let next_capacity int = capacity == 0 ? 16 : capacity * 2
+            let next *CacheFile = malloc(
+                (next_capacity * sizeof(CacheFile)).to_type(u64)).to_type(*CacheFile)
+            if (next == 0) { break }
+            if (count > 0) {
+                memcpy(next, files, (count * sizeof(CacheFile)).to_type(u64))
+            }
+            if (files != 0) { free(files.to_type(*void)) }
+            files = next
+            capacity = next_capacity
+        }
+        let path [cache.CACHE_ROOT_MAX + 256]u8
+        if (admin_join(gen.arr_cstr(&store.root[0]), sub,
+                result.entry.name, name_len, &path[0],
+                cache.CACHE_ROOT_MAX + 256) != 0) { continue }
+        let size u64 = 0
+        let mtime u64 = 0
+        if (link.mb_file_stat(gen.arr_cstr(&path[0]), &size, &mtime) != 0) {
+            continue
+        }
+        let i int = 0
+        for i < name_len {
+            files[count].name[i] = result.entry.name[i]
+            i += 1
+        }
+        files[count].name[name_len] = 0
+        files[count].size = size
+        files[count].mtime = mtime
+        count += 1
+    }
+    os.close_dir(&opened.reader)
+    out_files[0] = files
+    out_count[0] = count
+    return 1
+}
+
+// admin_release_files：释放 admin_list_dir 的结果。
+fn admin_release_files(files *CacheFile) void {
+    if (files != 0) { free(files.to_type(*void)) }
+}
+
+// admin_sum_size：统计文件数组总字节数。
+fn admin_sum_size(files *CacheFile, count int) u64 {
+    let total u64 = 0
+    let i int = 0
+    for i < count {
+        total += files[i].size
+        i += 1
+    }
+    return total
+}
+
+// admin_unlink_dir：删除 <root>/v1/<sub> 下所有普通文件；0 = 成功。
+fn admin_unlink_dir(store *cache.CacheStore, sub *char) int {
+    if (store == 0) { return -1 }
+    let dir [cache.CACHE_ROOT_MAX + 128]u8
+    if (admin_join(gen.arr_cstr(&store.root[0]), sub, 0, 0,
+            &dir[0], cache.CACHE_ROOT_MAX + 128) != 0) { return -1 }
+    let buffer [16384]u8
+    let opened os.DirReaderResult = os.open_dir(gen.arr_cstr(&dir[0]),
+        buffer[0..16384])
+    if (opened.reader.active == 0) { return 0 }
+    for 1 {
+        let result os.DirEntryResult = os.next_entry(&opened.reader)
+        if (result.status != os.dir_entry_ok) { break }
+        let name_len int = result.entry.name_len.to_type(int)
+        let path [cache.CACHE_ROOT_MAX + 256]u8
+        if (admin_join(gen.arr_cstr(&store.root[0]), sub,
+                result.entry.name, name_len, &path[0],
+                cache.CACHE_ROOT_MAX + 256) == 0) {
+            unlink(gen.arr_cstr(&path[0]))
+        }
+    }
+    os.close_dir(&opened.reader)
+    return 0
+}
+
+// idset_hash：取 OutputID 前 8 字节做开放寻址初始槽。
+fn idset_hash(set *IdSet, id *u8) int {
+    let value u64 = 0
+    let i int = 0
+    for i < 8 {
+        value = value | (id[i].to_type(u64) << (i * 8))
+        i += 1
+    }
+    return (value & 0x7FFFFFFFFFFFFFFF).to_type(int) & (set.capacity - 1)
+}
+
+// idset_init：按预计引用数分配；0 = 成功。
+fn idset_init(set *IdSet, expected int) int {
+    set.count = 0
+    let capacity int = 16
+    for capacity < expected * 2 && capacity < 1048576 {
+        capacity = capacity * 2
+    }
+    set.capacity = capacity
+    set.slots = malloc((capacity * cache.CACHE_ID_SIZE).to_type(u64)).to_type(*u8)
+    set.used = malloc(capacity.to_type(u64)).to_type(*u8)
+    if (set.slots == 0 || set.used == 0) {
+        if (set.slots != 0) { free(set.slots.to_type(*void)) }
+        if (set.used != 0) { free(set.used.to_type(*void)) }
+        set.slots = 0; set.used = 0; set.capacity = 0
+        return -1
+    }
+    let i int = 0
+    for i < capacity { set.used[i] = 0; i += 1 }
+    return 0
+}
+
+// idset_add：插入 OutputID；表满返回 -1（调用方保守停止回收）。
+fn idset_add(set *IdSet, id *u8) int {
+    if (set == 0 || set.slots == 0 || set.capacity <= 0) { return -1 }
+    let slot int = idset_hash(set, id)
+    let first int = slot
+    for 1 {
+        if (set.used[slot] == 0) {
+            let j int = 0
+            for j < cache.CACHE_ID_SIZE {
+                set.slots[slot * cache.CACHE_ID_SIZE + j] = id[j]
+                j += 1
+            }
+            set.used[slot] = 1
+            set.count += 1
+            return 0
+        }
+        let same int = 1
+        let j2 int = 0
+        for j2 < cache.CACHE_ID_SIZE {
+            if (set.slots[slot * cache.CACHE_ID_SIZE + j2] != id[j2]) {
+                same = 0
+                break
+            }
+            j2 += 1
+        }
+        if (same != 0) { return 0 }
+        slot = (slot + 1) & (set.capacity - 1)
+        if (slot == first) { return -1 }
+    }
+    return -1
+}
+
+// idset_has：OutputID 是否在引用集中。
+fn idset_has(set *IdSet, id *u8) int {
+    if (set == 0 || set.slots == 0 || set.capacity <= 0) { return 0 }
+    let slot int = idset_hash(set, id)
+    let first int = slot
+    for 1 {
+        if (set.used[slot] == 0) { return 0 }
+        let same int = 1
+        let j int = 0
+        for j < cache.CACHE_ID_SIZE {
+            if (set.slots[slot * cache.CACHE_ID_SIZE + j] != id[j]) {
+                same = 0
+                break
+            }
+            j += 1
+        }
+        if (same != 0) { return 1 }
+        slot = (slot + 1) & (set.capacity - 1)
+        if (slot == first) { return 0 }
+    }
+    return 0
+}
+
+// idset_release：释放引用集。
+fn idset_release(set *IdSet) void {
+    if (set == 0) { return }
+    if (set.slots != 0) { free(set.slots.to_type(*void)) }
+    if (set.used != 0) { free(set.used.to_type(*void)) }
+    set.slots = 0; set.used = 0; set.capacity = 0; set.count = 0
+}
+
+// admin_collect_refs：把所有 action entry 的 OutputID 收进引用集。
+// action 文件损坏时跳过；0 = 成功。
+fn admin_collect_refs(store *cache.CacheStore, set *IdSet) int {
+    let actions *CacheFile = 0
+    let action_count int = 0
+    if (admin_list_dir(store, "v1/actions", &actions, &action_count) == 0) {
+        return 0
+    }
+    let i int = 0
+    for i < action_count {
+        let action_id [cache.CACHE_ID_SIZE]u8
+        if (cache.id_parse_hex(gen.arr_cstr(&actions[i].name[0]),
+                &action_id[0]) == 0) {
+            let entries [cache.CACHE_ACTION_MAX_ENTRIES]cache.CacheEntry
+            let count int = 0
+            if (cache.store_action_get(store, &action_id[0], &entries[0],
+                    cache.CACHE_ACTION_MAX_ENTRIES, &count) == 1) {
+                let j int = 0
+                for j < count {
+                    if (idset_add(set, &entries[j].id[0]) != 0) {
+                        admin_release_files(actions)
+                        return -1
+                    }
+                    j += 1
+                }
+            }
+        }
+        i += 1
+    }
+    admin_release_files(actions)
+    return 0
+}
+
+// admin_byte_text：把字节数写进 512 字节文本缓冲，返回可见行。
+fn admin_byte_text(buf *u8, n int, value u64) int {
+    n = gen.append_i64(buf, n, value.to_type(i64))
+    n = gen.append_str(buf, n, " bytes")
+    return n
+}
+
+// mb_cache_info：打印根、开关、大小与条目数；0 = 成功。
+pub fn mb_cache_info() int {
+    mb_cache_init()
+    let store *cache.CacheStore = &bc().cache_store
+    let root *char = gen.arr_cstr(&store.root[0])
+    if (cache.store_enabled(store) == 0) {
+        admin_out("YH_CACHE: disabled")
+        return 0
+    }
+    let actions *CacheFile = 0
+    let action_count int = 0
+    admin_list_dir(store, "v1/actions", &actions, &action_count)
+    let outs *CacheFile = 0
+    let out_count int = 0
+    admin_list_dir(store, "v1/outputs", &outs, &out_count)
+    let total u64 = admin_sum_size(outs, out_count) + admin_sum_size(actions, action_count)
+    let buf [cache.CACHE_ROOT_MAX + 512]u8
+    let n int = 0
+    n = gen.append_str(&buf[0], n, "YH_CACHE: ")
+    n = gen.append_str(&buf[0], n, root)
+    n = gen.append_str(&buf[0], n, "\nactions: ")
+    n = gen.append_int(&buf[0], n, action_count)
+    n = gen.append_str(&buf[0], n, "\noutputs: ")
+    n = gen.append_int(&buf[0], n, out_count)
+    n = gen.append_str(&buf[0], n, "\nsize: ")
+    n = admin_byte_text(&buf[0], n, total)
+    n = gen.append_str(&buf[0], n, "\nmax: ")
+    n = admin_byte_text(&buf[0], n, store.max_size)
+    buf[n] = 0
+    admin_out(gen.arr_cstr(&buf[0]))
+    admin_release_files(actions)
+    admin_release_files(outs)
+    return 0
+}
+
+// mb_cache_clean：清空 actions/outputs/tmp，保留目录与 lock。
+pub fn mb_cache_clean() int {
+    mb_cache_init()
+    let store *cache.CacheStore = &bc().cache_store
+    if (cache.store_enabled(store) == 0) {
+        admin_out("YH_CACHE: disabled")
+        return 0
+    }
+    let lock_fd int = cache.store_begin_write(store)
+    if (lock_fd < 0) {
+        admin_out("YH_CACHE: 无法取得写锁")
+        return 1
+    }
+    admin_unlink_dir(store, "v1/actions")
+    admin_unlink_dir(store, "v1/outputs")
+    admin_unlink_dir(store, "v1/tmp")
+    cache.store_end_write(lock_fd)
+    admin_out("YH_CACHE: clean 完成")
+    return 0
+}
+
+// mb_cache_trim：按 mtime 从旧到新删除未被 action 引用的 output，直到 <= 上限。
+pub fn mb_cache_trim() int {
+    mb_cache_init()
+    let store *cache.CacheStore = &bc().cache_store
+    if (cache.store_enabled(store) == 0) {
+        admin_out("YH_CACHE: disabled")
+        return 0
+    }
+    let lock_fd int = cache.store_begin_write(store)
+    if (lock_fd < 0) {
+        admin_out("YH_CACHE: 无法取得写锁")
+        return 1
+    }
+    let outs *CacheFile = 0
+    let count int = 0
+    admin_list_dir(store, "v1/outputs", &outs, &count)
+    let total u64 = admin_sum_size(outs, count)
+    if (total <= store.max_size) {
+        let buf [512]u8
+        let n int = 0
+        n = gen.append_str(&buf[0], n, "YH_CACHE: 已在上限内，")
+        n = admin_byte_text(&buf[0], n, total)
+        buf[n] = 0
+        admin_out(gen.arr_cstr(&buf[0]))
+        admin_release_files(outs)
+        cache.store_end_write(lock_fd)
+        return 0
+    }
+    let refs IdSet
+    let probe_actions *CacheFile = 0
+    let probe_count int = 0
+    admin_list_dir(store, "v1/actions", &probe_actions, &probe_count)
+    admin_release_files(probe_actions)
+    if (idset_init(&refs, probe_count * 16) != 0
+        || admin_collect_refs(store, &refs) != 0) {
+        idset_release(&refs)
+        admin_release_files(outs)
+        cache.store_end_write(lock_fd)
+        admin_out("YH_CACHE: 引用集分配失败，放弃 trim")
+        return 1
+    }
+    // 按 mtime 插入排序（旧在前）；trim 是低频运维命令，不用引入排序库。
+    let i int = 1
+    for i < count {
+        let current CacheFile = outs[i]
+        let j int = i
+        for j > 0 && outs[j - 1].mtime > current.mtime {
+            outs[j] = outs[j - 1]
+            j -= 1
+        }
+        outs[j] = current
+        i += 1
+    }
+    let removed u64 = 0
+    let removed_count int = 0
+    i = 0
+    for i < count && total > store.max_size {
+        if (idset_has(&refs, &outs[i].name[0]) == 0) {
+            let path [cache.CACHE_ROOT_MAX + 256]u8
+            if (admin_join(gen.arr_cstr(&store.root[0]), "v1/outputs",
+                    &outs[i].name[0], cache.CACHE_ID_HEX, &path[0],
+                    cache.CACHE_ROOT_MAX + 256) == 0) {
+                unlink(gen.arr_cstr(&path[0]))
+                if (total >= outs[i].size) { total -= outs[i].size } else { total = 0 }
+                removed += outs[i].size
+                removed_count += 1
+            }
+        }
+        i += 1
+    }
+    let buf [512]u8
+    let n int = 0
+    n = gen.append_str(&buf[0], n, "YH_CACHE: trim 删除 ")
+    n = gen.append_int(&buf[0], n, removed_count)
+    n = gen.append_str(&buf[0], n, " 个 output，")
+    n = admin_byte_text(&buf[0], n, removed)
+    n = gen.append_str(&buf[0], n, "，剩余 ")
+    n = admin_byte_text(&buf[0], n, total)
+    buf[n] = 0
+    admin_out(gen.arr_cstr(&buf[0]))
+    idset_release(&refs)
+    admin_release_files(outs)
+    cache.store_end_write(lock_fd)
+    return total > store.max_size ? 1 : 0
+}
+
+// mb_cache_verify：全量检查 action 编码、OutputID 内容与孤儿 output。
+pub fn mb_cache_verify() int {
+    mb_cache_init()
+    let store *cache.CacheStore = &bc().cache_store
+    if (cache.store_enabled(store) == 0) {
+        admin_out("YH_CACHE: disabled")
+        return 0
+    }
+    let actions *CacheFile = 0
+    let action_count int = 0
+    admin_list_dir(store, "v1/actions", &actions, &action_count)
+    let refs IdSet
+    if (idset_init(&refs, action_count * 16) != 0) {
+        admin_release_files(actions)
+        admin_out("YH_CACHE: verify 引用集分配失败")
+        return 1
+    }
+    let bad_actions int = 0
+    let missing int = 0
+    let corrupt int = 0
+    let checked int = 0
+    let i int = 0
+    for i < action_count {
+        let action_id [cache.CACHE_ID_SIZE]u8
+        if (cache.id_parse_hex(gen.arr_cstr(&actions[i].name[0]),
+                &action_id[0]) != 0) {
+            bad_actions += 1
+            i += 1
+            continue
+        }
+        let entries [cache.CACHE_ACTION_MAX_ENTRIES]cache.CacheEntry
+        let count int = 0
+        if (cache.store_action_get(store, &action_id[0], &entries[0],
+                cache.CACHE_ACTION_MAX_ENTRIES, &count) != 1) {
+            bad_actions += 1
+            i += 1
+            continue
+        }
+        let j int = 0
+        for j < count {
+            if (idset_add(&refs, &entries[j].id[0]) != 0) {
+                bad_actions += 1
+            }
+            let path [cache.CACHE_ROOT_MAX + 256]u8
+            if (cache.store_output_path(store, &entries[j].id[0], &path[0],
+                    cache.CACHE_ROOT_MAX + 256) != 0) {
+                missing += 1
+            } else {
+                let digest [cache.CACHE_ID_SIZE]u8
+                if (hash.sha256_file(gen.arr_cstr(&path[0]), &digest[0]) != 0) {
+                    missing += 1
+                } else {
+                    checked += 1
+                    let k int = 0
+                    let same int = 1
+                    for k < cache.CACHE_ID_SIZE {
+                        if (digest[k] != entries[j].id[k]) { same = 0 }
+                        k += 1
+                    }
+                    if (same == 0) { corrupt += 1 }
+                }
+            }
+            j += 1
+        }
+        i += 1
+    }
+    let outs *CacheFile = 0
+    let out_count int = 0
+    admin_list_dir(store, "v1/outputs", &outs, &out_count)
+    let orphan int = 0
+    i = 0
+    for i < out_count {
+        let id [cache.CACHE_ID_SIZE]u8
+        if (cache.id_parse_hex(gen.arr_cstr(&outs[i].name[0]), &id[0]) == 0
+            && idset_has(&refs, &id[0]) == 0) {
+            orphan += 1
+        }
+        i += 1
+    }
+    let buf [512]u8
+    let n int = 0
+    n = gen.append_str(&buf[0], n, "YH_CACHE: actions=")
+    n = gen.append_int(&buf[0], n, action_count)
+    n = gen.append_str(&buf[0], n, " bad=")
+    n = gen.append_int(&buf[0], n, bad_actions)
+    n = gen.append_str(&buf[0], n, " outputs=")
+    n = gen.append_int(&buf[0], n, out_count)
+    n = gen.append_str(&buf[0], n, " checked=")
+    n = gen.append_int(&buf[0], n, checked)
+    n = gen.append_str(&buf[0], n, " missing=")
+    n = gen.append_int(&buf[0], n, missing)
+    n = gen.append_str(&buf[0], n, " corrupt=")
+    n = gen.append_int(&buf[0], n, corrupt)
+    n = gen.append_str(&buf[0], n, " orphan=")
+    n = gen.append_int(&buf[0], n, orphan)
+    buf[n] = 0
+    admin_out(gen.arr_cstr(&buf[0]))
+    idset_release(&refs)
+    admin_release_files(actions)
+    admin_release_files(outs)
+    return (bad_actions + missing + corrupt + orphan) == 0 ? 0 : 1
+}
+
+// mb_cache_command：分派 yh cache <action>；缺省 info，未知动作返回 2。
+pub fn mb_cache_command(action *char) int {
+    if (action == 0 || action[0] == 0 || gen.cstr_eq(action, "info") != 0) {
+        return mb_cache_info()
+    }
+    if (gen.cstr_eq(action, "clean") != 0) { return mb_cache_clean() }
+    if (gen.cstr_eq(action, "trim") != 0) { return mb_cache_trim() }
+    if (gen.cstr_eq(action, "verify") != 0) { return mb_cache_verify() }
+    gen.fail("未知 cache 动作（可用: info、clean、trim、verify）")
+    return 2
+}

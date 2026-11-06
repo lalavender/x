@@ -118,7 +118,7 @@ def llvm_text_for_file(compiler: Path, source: Path, opt: int, cwd: Path) -> str
 def llvm_text_for_project(compiler: Path, project: Path, opt: int):
     """构建项目并收集 .build 下的 LLVM 文本，按相对路径排序。"""
     shutil.rmtree(project / ".build", ignore_errors=True)
-    proc = run([compiler, f"-O{opt}", "--emit-llvm", "build"], project)
+    proc = run([compiler, f"-O{opt}", "build", "--emit-llvm"], project)
     require(proc.returncode == 0, f"项目 LLVM 文本构建失败：{project}", proc)
     root = project / ".build"
     texts = {}
@@ -137,6 +137,78 @@ def build_and_run(compiler: Path, project: Path, opt: int, extra=()):
     if build.returncode != 0 or not binary.exists():
         return build, None
     return build, run([binary], project)
+
+
+def emitted_artifacts(project: Path, suffix: str):
+    """列出项目 .build 下指定后缀的文件（.ll 或 .s）。"""
+    root = project / ".build"
+    return sorted(path for path in root.rglob(f"*{suffix}") if path.is_file())
+
+
+def case_emit_artifacts(compiler: Path, opt: int, work: Path, baseline=None):
+    """build 的 --emit-llvm/--emit-asm 产物保留与缓存命中补写。"""
+    project = copy_fixture(work / work_name("产物 工作区", "emit-work") / "project")
+    build = [compiler, f"-O{opt}", "build"]
+
+    # 两个开关只属于 build 子命令；写在 build 之前必须按用法错误拒绝。
+    for early in ("--emit-llvm", "--emit-asm"):
+        bad = run([compiler, f"-O{opt}", early, "build"], project)
+        require(bad.returncode != 0,
+                f"{early} 写在 build 之前仍被接受", bad)
+
+    # 默认：LLVM 文本只在内存中使用，不保留 .ll/.s。
+    proc = run([*build], project)
+    require(proc.returncode == 0, "默认构建失败", proc)
+    require(not emitted_artifacts(project, ".ll"),
+            f"默认构建不应保留 .ll：{emitted_artifacts(project, '.ll')}", proc)
+    require(not emitted_artifacts(project, ".s"),
+            f"默认构建不应保留 .s：{emitted_artifacts(project, '.s')}", proc)
+
+    # --emit-llvm：只额外保留 .ll。
+    proc = run([*build, "--emit-llvm"], project)
+    require(proc.returncode == 0, "--emit-llvm 构建失败", proc)
+    require(emitted_artifacts(project, ".ll"),
+            "--emit-llvm 没有保留 .ll", proc)
+    require(not emitted_artifacts(project, ".s"),
+            f"--emit-llvm 不应保留 .s：{emitted_artifacts(project, '.s')}", proc)
+
+    # 模块缓存命中但 .ll 被删掉：必须补写，而不是跳过 worker。
+    for path in emitted_artifacts(project, ".ll"):
+        path.unlink()
+    proc = run([*build, "--emit-llvm"], project)
+    require(proc.returncode == 0, "--emit-llvm 缓存命中补写失败", proc)
+    require(emitted_artifacts(project, ".ll"),
+            "--emit-llvm 在缓存命中时没有补写 .ll", proc)
+
+    # --emit-asm：只额外保留 .s（先清掉上一轮的 .ll）。
+    for path in emitted_artifacts(project, ".ll"):
+        path.unlink()
+    proc = run([*build, "--emit-asm"], project)
+    require(proc.returncode == 0, "--emit-asm 构建失败", proc)
+    require(emitted_artifacts(project, ".s"),
+            "--emit-asm 没有保留 .s", proc)
+    require(not emitted_artifacts(project, ".ll"),
+            f"--emit-asm 不应保留 .ll：{emitted_artifacts(project, '.ll')}", proc)
+
+    # 模块缓存命中但 .s 被删掉：必须补写。
+    for path in emitted_artifacts(project, ".s"):
+        path.unlink()
+    proc = run([*build, "--emit-asm"], project)
+    require(proc.returncode == 0, "--emit-asm 缓存命中补写失败", proc)
+    require(emitted_artifacts(project, ".s"),
+            "--emit-asm 在缓存命中时没有补写 .s", proc)
+
+    # 两个开关可同时使用；对象/可执行文件仍正常发布与运行。
+    proc = run([*build, "--emit-llvm", "--emit-asm"], project)
+    require(proc.returncode == 0, "同时请求 .ll/.s 构建失败", proc)
+    require(emitted_artifacts(project, ".ll") and emitted_artifacts(project, ".s"),
+            "同时请求时 .ll/.s 未同时保留", proc)
+    binary = project / ".build" / PROJECT_NAME
+    require(binary.is_file(), "保留产物后没有发布可执行文件", proc)
+    ran = run([binary], project)
+    require(ran.returncode == 42,
+            f"保留产物后程序返回 {ran.returncode}，期望 42", ran)
+    return {"emit-llvm": "ok", "emit-asm": "ok"}
 
 
 def case_entries(compiler: Path, opt: int, work: Path, baseline=None, fixture=FIXTURE):
@@ -328,6 +400,7 @@ def run_cases(compiler: Path, opt: int, selected: str, baseline=None):
         summary = {"opt": opt}
         if selected in ("entries", "all"):
             summary.update(case_entries(compiler, opt, work, baseline))
+            summary.update(case_emit_artifacts(compiler, opt, work))
         if selected in ("check", "all"):
             summary.update(case_check(compiler, opt, work, baseline))
         if selected in ("lowering", "all"):

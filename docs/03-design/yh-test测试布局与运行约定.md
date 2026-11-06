@@ -11,7 +11,7 @@
 - 每个标准库的测试放在自己的目录：**文件后缀必须是 `.test.yh`**（VTEST，
   2026-11-05：`.test.yh` 是测试文件的唯一标识，`zz_`/`99_` 排序前缀废止）；
   不集中到统一大套件（2026-10-25 决策 D8）。
-- `make libs-test` 的缺测试提示匹配 `*.test.yh`。
+- `just test-libs` 的缺测试提示匹配 `*.test.yh`。
 - 单文件 `yh test path/to/file.yh` 已支持（YT1.1），用临时单模块项目，
   不装入相邻文件。
 - 外部 runner 只承担 `yh test` 表达不了的职责：外部语料一致性、参考实现
@@ -78,13 +78,14 @@
 
 | 门 | 内容 | 平台 |
 | --- | --- | --- |
-| `make test` | 语法/运行语料 + 模块 test-check + **无选择器** `yh test`（O0）+ 编译器测试 + TOML/JSON/fmt 外部门 | 本平台 |
-| `make selfhost-native` | 两代固定点 + 自解析 + 语料 + 项目验收 + 无选择器 `yh test`（O0） | 本平台 |
-| `make libs-test` | 缺测试提示 + `yh test`（O0）+ `libs/cli/test/run.py` + `cli/test/diff.py` + `libs/os/test/run.py` + `libs/libc/test/run.py` | 三端同一目标 |
-| `make libs-test-o2` | `tmp/libs-o2` 副本上的 `yh -O2 test` | 三端同一目标（CI 只在 linux-arm64 跑） |
-| `make test-num` | num 的 Python 参考差分（220 例，不进 `libs-test` 快跑） | darwin-arm64 + linux-arm64 |
+| `just test` | 语法/运行语料 + 模块 test-check + **无选择器** `yh test`（O0）+ 编译器测试 + TOML/JSON/fmt 外部门 | 本平台 |
+| `just selfhost-native` | 两代固定点 + 自解析 + 语料 + 项目验收 + 无选择器 `yh test`（O0） | 本平台 |
+| `just test-libs` | 全部标准库：缺测试提示 + `yh test`（O0/O2）+ cli/os/libc runner + TOML/string/num/fmt 专项与安装后导入 | Linux/Darwin CI 同一目标 |
 
-- `make test-lib-tests` 保留为 `libs-test` 的历史别名。
+- `just test-libs` 是标准库测试唯一入口；旧 `libs-test`/`libs-test-o2`/`test-lib-tests` 已删除。
 - 缺 `*.test.yh` 的库只打印提示（决策 D9），不阻断。
+- `just test` / `just test-libs` 用 `[parallel]` 并行独立层/组；默认并行数为
+  CPU 数，`TEST_JOBS=N` 可覆盖，`TEST_JOBS=1` 恢复串行。每层内部单线程，
+  避免并发叠乘。
 - CI 的 darwin-arm64 / linux-arm64 / linux-x86_64 三个 job 各自调用同一个
-  `make libs-test`；`libs-test-o2` 只在 linux-arm64 追加（决策 D4/D13）。
+  `just test-libs`；O2 已包含在目标内，不再按平台追加。

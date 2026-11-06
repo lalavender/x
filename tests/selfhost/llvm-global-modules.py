@@ -37,7 +37,7 @@ def main():
         project = WORK / f"O{level}"
         shutil.copytree(FIXTURE, project)
         command = [compiler, "--backend", "llvm", "--target", TARGET,
-                   f"-O{level}", "--emit-llvm", "build"]
+                   f"-O{level}", "build", "--emit-llvm"]
         built = run(command, project, build_env)
         (project / "build.log").write_text(built.stdout + built.stderr, encoding="utf-8")
         assert built.returncode == 0, (

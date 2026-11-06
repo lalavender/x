@@ -218,19 +218,20 @@ fn llvm_emit_publish(output *backend.LLVMOutput, kind int, out_path *char,
 
 // llvm_emit_module_to：把已由调用方校验且未修改的快照降低为模块 IR 并经内嵌桥发布产物。
 // kind：0 = 目标文件（对象），1 = 汇编文本；out_path 为产物路径，text_path 非空时
-// 额外写出 LLVM 文本（审阅/差分用，失败不致命）。
+// 额外写出 LLVM 文本（审阅/差分用，失败不致命），asm_path 非空时额外保留汇编
+// （--emit-asm，失败判失败）。
 // 返回 0 成功、-1 失败（诊断已写 stderr，且不发布任何产物）。
 fn llvm_emit_module_to(unit *ast.CheckedModule, kind int, out_path *char,
-    text_path *char, stats *LLVMEmitResult, opt_level int) int {
-    return llvm_emit_module_to_cached(unit, kind, out_path, text_path, stats,
-        0, 0, 0, 0, opt_level)
+    text_path *char, asm_path *char, stats *LLVMEmitResult, opt_level int) int {
+    return llvm_emit_module_to_cached(unit, kind, out_path, text_path, asm_path,
+        stats, 0, 0, 0, 0, opt_level)
 }
 
 // llvm_emit_module_to_cached：LA3 项目 worker 使用的带函数缓存版本。
 fn llvm_emit_module_to_cached(unit *ast.CheckedModule, kind int, out_path *char,
-    text_path *char, stats *LLVMEmitResult, cache_in *ir.IRFunctionCacheSet,
-    cache_out *ir.IRFunctionCacheSet, env_key u64,
-    lower_stats *lower.CheckedLowerStats, opt_level int) int {
+    text_path *char, asm_path *char, stats *LLVMEmitResult,
+    cache_in *ir.IRFunctionCacheSet, cache_out *ir.IRFunctionCacheSet,
+    env_key u64, lower_stats *lower.CheckedLowerStats, opt_level int) int {
     let mod_ir ir.IRModule
     let output backend.LLVMOutput
     let prepared int = llvm_prepare_module_cached(unit, &mod_ir, &output,
@@ -255,6 +256,28 @@ fn llvm_emit_module_to_cached(unit *ast.CheckedModule, kind int, out_path *char,
         backend.llvm_output_release(&output)
         ir.ir_module_release(&mod_ir)
         return -1
+    }
+    // --emit-asm：对象发布成功后再用同一份 LLVM 文本让桥发一次汇编。桥一次
+    // 只能出一种产物；这里只在显式请求时多付一次 codegen，换取缓存目录里的 .s。
+    if (asm_path != 0 && kind == 0) {
+        let asm_reason [backend.LLVM_BRIDGE_DIAG]u8
+        let asm_published int = llvm_emit_publish(&output, 1, asm_path,
+            (&asm_reason[0]).to_type(*char), opt_level)
+        if (asm_published != 0) {
+            if (asm_published == 1) {
+                let asm_source int = 0
+                let asm_offset int = 0
+                if (mod_ir.symbol_count > 0) {
+                    asm_source = mod_ir.symbols[0].source
+                    asm_offset = mod_ir.symbols[0].offset
+                }
+                llvm_emit_reason(&mod_ir, asm_source, asm_offset,
+                    (&asm_reason[0]).to_type(*char))
+            }
+            backend.llvm_output_release(&output)
+            ir.ir_module_release(&mod_ir)
+            return -1
+        }
     }
     if (stats != 0) {
         stats.emitted = output.emitted

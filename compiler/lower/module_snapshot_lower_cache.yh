@@ -1,112 +1,99 @@
 module lower
 import ast
 import gen
-import ir
 import proj
+import cache
 
 // ============================================================================
 // module_snapshot_lower_cache.yh —— 函数级缓存键（LA3）
 //
 // 键只由可跨进程复现的事实组成：
-//   * 编译器/格式 schema 标签；
+//   * schema 标签与 action 种类（cache.Key）；
 //   * 模块环境键（依赖接口、目标、O 级别、编译器身份，由 cmd 计算）；
 //   * 目标 key/指针位宽/布局版本/ABI；
-//   * 函数声明的 token 流（词法器不保留注释/空白，天然忽略注释变化）。
+//   * 声明面布局/签名事实、源码级 const 值；
+//   * 本模块非函数声明 token 流与本函数 token 流。
 //
-// 不把其他函数体或整模块源码混入每个函数键；函数体改动只改自己的 token 流。
-// token 下标、字符串标签等瞬时 arena ID 不进入键。
+// C0（2026-11-06）：与 ast/module_snapshot_check_key.yh 共用 cache.Key 序列，
+// 键从 FNV 16 位十六进制迁移到 SHA-256 64 位十六进制。不混 arena 类型编号；
+// 类型只混 kind/size/align，避免检查顺序影响键。
 // ============================================================================
 
-// checked_cache_mix_tokens：把一段 token 范围（种类+源字节）混入哈希。
-// 词法器不保留注释/空白，因此注释、空行与缩进变化不会改变函数键。
-fn checked_cache_mix_tokens(l *CheckedLower, file_id int, first int, after int,
-    hash *u64) int {
-    if (file_id < 0 || file_id >= l.store.file_n || first < 0 || after <= first) {
-        return -1
+// checked_store_mix_type：按受检存储的类型表混入 ABI 事实。
+fn checked_store_mix_type(store *ast.CheckedStorage, key *cache.Key, tid int) int {
+    if (store == 0 || tid < 0 || tid >= store.type_n) {
+        return cache.key_mix_type_facts(key, 0, 0, 0, 0)
     }
+    let ty gen.CType = store.types[tid]
+    return cache.key_mix_type_facts(key, 1, ty.kind, ty.size, ty.align)
+}
+
+// checked_mix_type：混入一个类型编号的 ABI 事实；非法编号按缺失处理。
+fn checked_mix_type(l *CheckedLower, key *cache.Key, tid int) int {
+    if (l == 0) { return cache.key_mix_type_facts(key, 0, 0, 0, 0) }
+    return checked_store_mix_type(l.store, key, tid)
+}
+
+// checked_mix_signature：混入函数签名事实（返回/参数 ABI、变参、签名种类）。
+fn checked_mix_signature(l *CheckedLower, key *cache.Key, sig int) int {
+    if (l == 0 || sig < 0 || sig >= l.store.sig_n) { return 0 }
+    if (checked_mix_type(l, key, l.store.sig_ret[sig]) != 0) { return -1 }
+    if (cache.key_mix_int(key, l.store.sig_np[sig]) != 0) { return -1 }
+    if (cache.key_mix_int(key, l.store.sig_vararg[sig]) != 0) { return -1 }
+    if (cache.key_mix_int(key, l.store.sig_abi[sig]) != 0) { return -1 }
+    let pi int = 0
+    for pi < l.store.sig_np[sig] {
+        if (checked_mix_type(l, key,
+                l.store.sig_params[l.store.sig_first[sig] + pi]) != 0) { return -1 }
+        pi += 1
+    }
+    return 0
+}
+
+// checked_cache_mix_tokens：把一段 token 范围（种类+长度+源字节）混入键。
+fn checked_cache_mix_tokens(l *CheckedLower, file_id int, first int, after int,
+    key *cache.Key) int {
+    if (l == 0 || file_id < 0 || file_id >= l.store.file_n) { return -1 }
     let file proj.PFile = l.store.files[file_id]
-    if (file.source == 0 || file.tokens == 0 || after > file.token_n) { return -1 }
-    let i int = first
-    for i < after {
-        let tok gen.Tok = file.tokens[i]
-        if (tok.start < 0 || tok.len < 0 || tok.start + tok.len > file.source_len) {
-            return -1
-        }
-        ast.checked_cache_mix_int(hash, tok.kind)
-        let j int = 0
-        for j < tok.len {
-            ast.checked_cache_mix_byte(hash, file.source[tok.start + j])
-            j += 1
+    if (file.source == 0 || file.tokens == 0) { return -1 }
+    return cache.key_mix_tokens(key, file.source, file.source_len, file.tokens,
+        file.token_n, first, after)
+}
+
+// checked_cache_layout：把「声明面」的布局与签名事实混入函数键。
+// IR 侧逐声明混 kind：aggregate 混类型事实，函数混签名事实；check 侧在
+// pass2b 前只能用整张类型/签名表，两者 action 种类不同。函数体内的 lazy
+// 类型不参与 IR 键，避免键依赖检查顺序。
+fn checked_cache_layout(l *CheckedLower, key *cache.Key) int {
+    let i int = 0
+    for i < l.store.declaration_n {
+        let decl ast.AstDecl = l.store.declarations[i]
+        let kind int = decl.kind
+        if (cache.key_mix_int(key, kind) != 0) { return -1 }
+        if (kind == gen.TK_STRUCT || kind == gen.TK_UNION || kind == gen.TK_ENUM) {
+            if (decl.sym_id >= 0 && decl.sym_id < l.store.symbol_n) {
+                if (checked_mix_type(l, key,
+                        l.store.symbols[decl.sym_id].type_id) != 0) { return -1 }
+            }
+        } else if (kind == gen.TK_FN) {
+            if (decl.type_id >= 0 && decl.type_id < l.store.type_n) {
+                let fty gen.CType = l.store.types[decl.type_id]
+                if (checked_mix_signature(l, key, fty.sub) != 0) { return -1 }
+            }
         }
         i += 1
     }
     return 0
 }
 
-// checked_cache_mix_type_facts：混入一个类型的 ABI 相关事实（种类/大小/对齐）。
-//
-// 不能混入类型编号、elem/sub 这类 arena 下标：它们是 lazy intern 的产物，
-// 顺序取决于本轮检查了哪些函数，而 check 切片命中会少检查几个函数。
-fn checked_cache_mix_type_facts(l *CheckedLower, tid int, hash *u64) void {
-    ast.checked_cache_mix_int(hash, tid < 0 ? -1 : 0)
-    if (tid < 0 || tid >= l.store.type_n) { return }
-    let ty gen.CType = l.store.types[tid]
-    ast.checked_cache_mix_int(hash, ty.kind)
-    ast.checked_cache_mix_int(hash, ty.size)
-    ast.checked_cache_mix_int(hash, ty.align)
-}
-
-// checked_cache_layout：把「声明面」的布局与签名事实混入函数键。
-//
-// 旧实现混入整张类型表，包括函数体内局部数组/切片产生的 lazy 类型：那些类型
-// 取决于本轮检查过哪些函数，于是键依赖 check 缓存命中、命中又依赖键，形成环。
-// 实测同一份源码连续三次构建得到三种类型顺序，命中率因此为 0。
-// 现在只混声明声明的聚合（struct/union/enum）布局与函数签名：它们由声明文本
-// 与依赖接口决定、与检查顺序无关，且覆盖 ABI 相关变化（大小/对齐/参数类型）；
-// 声明文本变化由 checked_cache_module_facts、依赖接口由 env_key 覆盖。
-fn checked_cache_layout(l *CheckedLower, hash *u64) void {
-    let i int = 0
-    for i < l.store.declaration_n {
-        let decl ast.AstDecl = l.store.declarations[i]
-        let kind int = decl.kind
-        ast.checked_cache_mix_int(hash, kind)
-        if (kind == gen.TK_STRUCT || kind == gen.TK_UNION || kind == gen.TK_ENUM) {
-            if (decl.sym_id >= 0 && decl.sym_id < l.store.symbol_n) {
-                checked_cache_mix_type_facts(l,
-                    l.store.symbols[decl.sym_id].type_id, hash)
-            }
-        } else if (kind == gen.TK_FN) {
-            if (decl.type_id >= 0 && decl.type_id < l.store.type_n) {
-                let fty gen.CType = l.store.types[decl.type_id]
-                let sig int = fty.sub
-                if (sig >= 0 && sig < l.store.sig_n) {
-                    checked_cache_mix_type_facts(l, l.store.sig_ret[sig], hash)
-                    ast.checked_cache_mix_int(hash, l.store.sig_np[sig])
-                    ast.checked_cache_mix_int(hash, l.store.sig_vararg[sig])
-                    ast.checked_cache_mix_int(hash, l.store.sig_abi[sig])
-                    let pi int = 0
-                    for pi < l.store.sig_np[sig] {
-                        checked_cache_mix_type_facts(l,
-                            l.store.sig_params[l.store.sig_first[sig] + pi], hash)
-                        pi += 1
-                    }
-                }
-            }
-        }
-        i += 1
-    }
-}
-
 // checked_cache_module_facts：混入本模块非函数声明（全局/常量/类型）的 token 流。
-// 运行期函数体不进入这里，因此单函数修改不会让其他函数失效；私有常量值变化
-// 仍会让读取它的函数保守 miss。
-fn checked_cache_module_facts(l *CheckedLower, hash *u64) int {
+fn checked_cache_module_facts(l *CheckedLower, key *cache.Key) int {
     let i int = 0
     for i < l.store.declaration_n {
         let decl ast.AstDecl = l.store.declarations[i]
         if (decl.kind != gen.TK_FN) {
             if (checked_cache_mix_tokens(l, decl.file_id, decl.first, decl.after,
-                    hash) != 0) { return -1 }
+                    key) != 0) { return -1 }
         }
         i += 1
     }
@@ -114,27 +101,30 @@ fn checked_cache_module_facts(l *CheckedLower, hash *u64) int {
 }
 
 // checked_cache_symbol_facts：把源码级 const 的常量值/标志混入函数键。
-// 依赖 CT 变化会改变本模块 const 的 cval；匿名数据/函数符号不参与，避免
-// pass2b 新增的静态数据标签让键在冷/热构建间漂移。
-fn checked_cache_symbol_facts(store *ast.CheckedStorage, hash *u64) void {
+// 类型只混 ABI 事实，不混 arena 类型编号。
+fn checked_cache_symbol_facts(store *ast.CheckedStorage, key *cache.Key) int {
     let i int = 0
     for i < store.declaration_n {
         let decl ast.AstDecl = store.declarations[i]
-        if (decl.kind == gen.TK_CONST && decl.sym_id >= 0 && decl.sym_id < store.symbol_n) {
+        if (decl.kind == gen.TK_CONST && decl.sym_id >= 0
+            && decl.sym_id < store.symbol_n) {
             let sym gen.CSym = store.symbols[decl.sym_id]
-            ast.checked_cache_mix_int(hash, sym.kind)
-            ast.checked_cache_mix_int(hash, sym.type_id)
-            ast.checked_cache_mix_int(hash, sym.flags)
-            ast.checked_cache_mix_int(hash, sym.cval.to_type(int))
-            ast.checked_cache_mix_int(hash, sym.const_ready)
-            ast.checked_cache_mix_int(hash, sym.const_expr_kind)
+            if (cache.key_mix_int(key, sym.kind) != 0) { return -1 }
+            if (checked_store_mix_type(store, key, sym.type_id) != 0) {
+                return -1
+            }
+            if (cache.key_mix_int(key, sym.flags) != 0) { return -1 }
+            if (cache.key_mix_int(key, sym.cval.to_type(int)) != 0) { return -1 }
+            if (cache.key_mix_int(key, sym.const_ready) != 0) { return -1 }
+            if (cache.key_mix_int(key, sym.const_expr_kind) != 0) { return -1 }
         }
         i += 1
     }
+    return 0
 }
 
-// checked_function_key：为快照中的一个函数生成 16 位十六进制缓存键。
-// 成功写 out[0..16] 与结尾零并返回 0；token 范围无效返回 -1（该函数跳过缓存）。
+// checked_function_key：为快照中的一个函数生成 64 位十六进制缓存键。
+// 成功写 out[0..64) 与结尾零并返回 0；token 范围无效返回 -1（该函数跳过缓存）。
 fn checked_function_key(l *CheckedLower, function_index int, env_key u64,
     out *u8) int {
     if (l == 0 || out == 0 || function_index < 0
@@ -146,30 +136,22 @@ fn checked_function_key(l *CheckedLower, function_index int, env_key u64,
         || ctx.token_after <= ctx.token_first || ctx.token_after > file.token_n) {
         return -1
     }
-    let hash u64 = 14695981039346656037
-    let tag *char = "yh-firc-1"
-    if (ast.checked_cache_mix_text(&hash, tag) != 0) { return -1 }
-    ast.checked_cache_mix_int(&hash, env_key.to_type(int))
-    ast.checked_cache_mix_int(&hash, l.cache_target_key)
-    ast.checked_cache_mix_int(&hash, l.cache_pointer_bits)
-    ast.checked_cache_mix_int(&hash, l.cache_layout_version)
-    if (ast.checked_cache_mix_text(&hash, l.cache_abi) != 0) { return -1 }
-    // 源路径进入键：项目搬移后不复用旧路径的 locs。
-    let path *char = (l.store.names + file.path_off).to_type(*char)
-    if (ast.checked_cache_mix_text(&hash, path) != 0) { return -1 }
-    checked_cache_layout(l, &hash)
-    checked_cache_symbol_facts(l.store, &hash)
-    if (checked_cache_module_facts(l, &hash) != 0) { return -1 }
+    let key cache.Key
+    let rel_path [1024]u8
+    if (proj.file_rel_path(ctx.file_id, &rel_path[0], 1024) < 0) { return -1 }
+    let inputs cache.CacheInputs
+    inputs.target_key = l.cache_target_key
+    inputs.pointer_bits = l.cache_pointer_bits
+    inputs.layout_version = l.cache_layout_version
+    inputs.abi = l.cache_abi
+    inputs.opt_level = l.cache_opt
+    inputs.trimpath = l.cache_trimpath
+    if (cache.key_init_function(&key, cache.ACTION_IR, env_key,
+            &inputs, gen.arr_cstr(&rel_path[0])) != 0) { return -1 }
+    if (checked_cache_layout(l, &key) != 0) { return -1 }
+    if (checked_cache_symbol_facts(l.store, &key) != 0) { return -1 }
+    if (checked_cache_module_facts(l, &key) != 0) { return -1 }
     if (checked_cache_mix_tokens(l, ctx.file_id, ctx.token_first,
-            ctx.token_after, &hash) != 0) { return -1 }
-    let digits *char = "0123456789abcdef"
-    let shift int = 60
-    let i int = 0
-    for i < ir.IR_FUNCTION_CACHE_KEY_HEX {
-        out[i] = digits[((hash >> shift) & 15).to_type(int)].to_type(u8)
-        shift -= 4
-        i += 1
-    }
-    out[ir.IR_FUNCTION_CACHE_KEY_HEX] = 0
-    return 0
+            ctx.token_after, &key) != 0) { return -1 }
+    return cache.key_finish_hex(&key, out)
 }

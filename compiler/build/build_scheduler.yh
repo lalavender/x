@@ -2,6 +2,7 @@ module build
 import gen
 import proj
 import link
+import cache
 
 // ============================================================================
 // build_scheduler.yh —— 有界快照 worker 进程池与 InterfaceReady 调度。
@@ -111,7 +112,7 @@ fn mb_spawn_module_child(module_idx int, root_off int, root_len int,
     }
     name_buf[nn] = 0
     let prov int = proj.ctx().mods[mod].proj
-    let args [24]*char
+    let args [32]*char
     let ai int = 0
     args[ai] = 0.to_type(*char); ai += 1
     args[ai] = "--emit-module"; ai += 1
@@ -134,7 +135,9 @@ fn mb_spawn_module_child(module_idx int, root_off int, root_len int,
     args[ai] = "--target"; ai += 1
     args[ai] = proj.cfg().target.triple; ai += 1
     args[ai] = proj.cfg().opt_level == 2 ? "-O2" : "-O0"; ai += 1
+    if (proj.cfg().trimpath != 0) { args[ai] = "--trimpath"; ai += 1 }
     if (proj.cfg().emit_kind != 0) { args[ai] = "--emit-llvm"; ai += 1 }
+    if (proj.cfg().emit_asm != 0) { args[ai] = "--emit-asm"; ai += 1 }
     if (tk.c_check_only != 0) { args[ai] = "--check-only"; ai += 1 }
     if (tk.c_test_mode != 0) {
         args[ai] = "--test-mode"; ai += 1
@@ -456,9 +459,25 @@ fn mb_sched_clear_interfaces(count int, build_off int,
     }
 }
 
-// mb_schedule_modules：最多并行四个 worker，接口 ready 后即可启动消费者。
-// 进程退出成功后才提交 manifest；失败或被取消的本轮不会进入最终链接。
+// mb_schedule_modules：同项目构建锁保护下的调度入口。
+// 锁只串行化同一项目；不同项目仍可并行。锁不可用时按原流程继续。
 pub fn mb_schedule_modules(count int, root_off int, root_len int,
+    build_off int, build_len int) int {
+    let tk *gen.TaskCtx = gen.task()
+    if (count <= 0 || tk.c_check_only != 0) {
+        return mb_schedule_modules_locked(count, root_off, root_len,
+            build_off, build_len)
+    }
+    let lock_fd int = mb_project_lock(root_off, root_len)
+    let rc int = mb_schedule_modules_locked(count, root_off, root_len,
+        build_off, build_len)
+    mb_project_unlock(lock_fd)
+    return rc
+}
+
+// mb_schedule_modules_locked：最多并行四个 worker，接口 ready 后即可启动消费者。
+// 进程退出成功后才提交 manifest；失败或被取消的本轮不会进入最终链接。
+fn mb_schedule_modules_locked(count int, root_off int, root_len int,
     build_off int, build_len int) int {
     let tk *gen.TaskCtx = gen.task()
     if (count <= 0) {
@@ -466,6 +485,7 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
         bc().sched_iface_early = 0
         return 0
     }
+    mb_cache_init()
     if (mb_sched_set_session() != 0) {
         return -1
     }
@@ -478,7 +498,7 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
     gen.stats().firc_write_off = proj.file_exists(gen.arr_cstr(&link_manifest[0])) == 0 ? 1 : 0
     let states *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
     let pids *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
-    let keys *u8 = malloc((count * 16).to_type(u64)).to_type(*u8)
+    let keys *u8 = malloc((count * cache.CACHE_ID_SIZE).to_type(u64)).to_type(*u8)
     if (states == 0 || pids == 0 || keys == 0) {
         free(states)
         free(pids)
@@ -528,7 +548,7 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
                             break
                         }
                         if (mb_manifest_commit(proj.ctx().order[i], build_off, build_len,
-                                keys + (i * 16)) != 0) {
+                                keys + (i * cache.CACHE_ID_SIZE)) != 0) {
                             failed = 1
                             break
                         }
@@ -568,7 +588,8 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
                 if (ready != 0) {
                     let pid int = 0
                     let started int = mb_compile_start(proj.ctx().order[i], root_off,
-                        root_len, build_off, build_len, &pid, keys + (i * 16))
+                        root_len, build_off, build_len, &pid,
+                        keys + (i * cache.CACHE_ID_SIZE))
                     if (started < 0) {
                         failed = 1
                         break

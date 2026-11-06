@@ -39,8 +39,11 @@ class Failure(Exception):
 
 def run(cmd, cwd, timeout=1800):
     """用 argv 调用命令并捕获输出。"""
+    environ = dict(os.environ)
+    environ.setdefault("YH_CACHE", "off")
     return subprocess.run([str(item) for item in cmd], cwd=cwd,
-                          capture_output=True, text=True, timeout=timeout)
+                          capture_output=True, text=True, timeout=timeout,
+                          env=environ)
 
 
 def require(condition, message, proc=None):
@@ -119,7 +122,7 @@ def parse_stats(proc):
 
 def build(project, compiler, opt):
     """带 --emit-llvm 构建并运行；返回 (统计, 对象路径, LLVM 文本路径)。"""
-    proc = run([compiler, f"-O{opt}", "--emit-llvm", "build", "--stats"], project)
+    proc = run([compiler, f"-O{opt}", "build", "--emit-llvm", "--stats"], project)
     require(proc.returncode == 0, f"O{opt} 项目构建失败", proc)
     binary = project / ".build" / BINARY
     require(binary.exists(), "构建未生成默认程序", proc)

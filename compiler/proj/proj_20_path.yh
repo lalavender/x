@@ -278,6 +278,74 @@ pub fn file_count() int {
     return g_proj.file_n
 }
 
+// file_rel_path：把文件相对其所属项目根的规范路径写入 out（NUL 结尾）。
+// 源文件在项目根之外（单文件测试等）时退回绝对路径，保证键仍可区分。
+// 返回字节长度，参数/容量非法返回 -1。路径统一用 '/' 分隔。
+pub fn file_rel_path(fi int, out *u8, capacity int) int {
+    if (out == 0 || capacity <= 1 || fi < 0 || fi >= g_proj.file_n) { return -1 }
+    let tk *gen.TaskCtx = gen.task()
+    let file PFile = g_proj.files[fi]
+    let pj int = -1
+    if (file.mod >= 0 && file.mod < g_proj.mod_n) {
+        pj = g_proj.mods[file.mod].proj
+    }
+    let start int = 0
+    if (pj >= 0 && pj < g_proj.proj_n) {
+        let root_off int = g_proj.projs[pj].root_off
+        let root_len int = g_proj.projs[pj].root_len
+        if (root_len > 0 && file.path_len >= root_len) {
+            let same int = 1
+            let i int = 0
+            for i < root_len {
+                if (tk.np_data[file.path_off + i] != tk.np_data[root_off + i]) {
+                    same = 0
+                    break
+                }
+                i += 1
+            }
+            if (same != 0) {
+                let root_slash int = (root_len > 0
+                    && tk.np_data[root_off + root_len - 1] == '/') ? 1 : 0
+                if (file.path_len == root_len || root_slash != 0) {
+                    start = root_len
+                } else if (tk.np_data[file.path_off + root_len] == '/') {
+                    start = root_len + 1
+                }
+            }
+        }
+    }
+    let n int = 0
+    let i int = start
+    for i < file.path_len {
+        if (n + 1 >= capacity) { return -1 }
+        out[n] = tk.np_data[file.path_off + i]
+        n += 1
+        i += 1
+    }
+    out[n] = 0
+    return n
+}
+
+// file_locs_path：写入 locs/IR source_filename 使用的路径。
+// 默认保留绝对路径（诊断可定位）；`--trimpath` 时用项目相对路径，使不同目录
+// 的同一源码产生相同的 LLVM 文本/来源表。返回字节长度，失败 -1。
+pub fn file_locs_path(fi int, out *u8, capacity int) int {
+    if (out == 0 || capacity <= 1 || fi < 0 || fi >= g_proj.file_n) { return -1 }
+    if (cfg().trimpath != 0) {
+        return file_rel_path(fi, out, capacity)
+    }
+    let tk *gen.TaskCtx = gen.task()
+    let file PFile = g_proj.files[fi]
+    if (file.path_len + 1 > capacity) { return -1 }
+    let i int = 0
+    for i < file.path_len {
+        out[i] = tk.np_data[file.path_off + i]
+        i += 1
+    }
+    out[file.path_len] = 0
+    return file.path_len
+}
+
 // test_file_selected：该文件是否属于本轮 yh test 要检查的目标（已应用模块/
 // 文件过滤）。把"测试执行器的选择条件"收在一处，前端只问"这个文件要不要
 // 登记测试声明"，不必知道 `--filter` 的存在。依赖与标准库里的 test 声明

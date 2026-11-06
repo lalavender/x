@@ -168,7 +168,7 @@ class Project:
         snap = {}
         for tag in ("llvmdarwincache-main", "llvmdarwincache-helper", "link"):
             path = self.manifest(tag)
-            snap[tag + ".manifest"] = path.read_text() if path.is_file() else None
+            snap[tag + ".manifest"] = path.read_bytes() if path.is_file() else None
         for tag in ("llvmdarwincache-main", "llvmdarwincache-helper"):
             path = self.object(tag)
             snap[tag + ".object"] = digest(path)
@@ -360,10 +360,10 @@ def run_suite(args, compiler, sdk_root, environment):
     built = build(compiler, damaged, env_a)
     require(built.returncode == 0, f"损坏矩阵基线失败：{built.stderr[-2000:]}")
     good = damaged.state()
-    damaged.manifest("llvmdarwincache-main").write_bytes(b"0" * 64)
+    damaged.manifest("llvmdarwincache-main").write_bytes(b"0" * 128)
     fixed = build(compiler, damaged, env_a)
     require(fixed.returncode == 0
-            and damaged.manifest("llvmdarwincache-main").read_text() ==
+            and damaged.manifest("llvmdarwincache-main").read_bytes() ==
             good["llvmdarwincache-main.manifest"],
             "manifest 损坏后未重新编译并恢复键值")
     damaged.object("llvmdarwincache-helper").write_bytes(b"not-an-object")
@@ -442,8 +442,10 @@ def main():
     args = parser.parse_args()
     compiler = Path(args.compiler_path).resolve()
     require(compiler.is_file(), f"编译器不存在：{compiler}")
-    sdk_root = find_sdk_root(dict(os.environ))
-    run_suite(args, compiler, sdk_root, dict(os.environ))
+    env = dict(os.environ)
+    env.setdefault("YH_CACHE", "off")
+    sdk_root = find_sdk_root(env)
+    run_suite(args, compiler, sdk_root, env)
     print("PASS Darwin/ARM64 LLVM 缓存身份：SDK 闭包、minOS、原子发布与并发")
 
 

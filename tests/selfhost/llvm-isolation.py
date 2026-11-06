@@ -143,7 +143,7 @@ def main() -> int:
         runtime_path = (ROOT / host_record["selfhost_runtime"]).resolve()
         result = sandbox([
             str(compiler), "--backend", "llvm", "--target", TRIPLE,
-            "--emit-llvm", "--stats", "build", "-o", str(cold),
+            "--stats", "build", "--emit-llvm", "-o", str(cold),
         ], ROOT / "compiler", env={"YH_LLVM_SELFHOST": "",
                                    "YH_LLVM_SELFHOST_FLAGS": "",
                                    "YH_LINK_MANIFEST_ONLY": "1",

@@ -29,12 +29,12 @@ fn mb_verify_checked_snapshot(unit *ast.CheckedModule) int {
     return gen.fail("受检模块快照校验失败")
 }
 
-// mb_llvm_module_paths：算出本模块的 LLVM 产物路径与审阅文本路径。
-// 对象放在当前目标命名空间的 obj/<tag>.o，文本放在 llvm/<tag>.ll；
-// 两者都用 proj.mod_tag 生成的项目+模块标记防同名冲突。
-// 返回 0 成功；任一缓冲不足或标记失败返回 -1。
+// mb_llvm_module_paths：算出本模块的 LLVM 对象、文本与汇编路径。
+// 对象放在 obj/<tag>.o，文本放在 llvm/<tag>.ll，汇编放在 asm/<tag>.s；
+// 三者都用 proj.mod_tag 生成的项目+模块标记防同名冲突。
+// asm_out/text_out 传 0 表示不需要该路径。返回 0 成功；标记失败返回 -1。
 fn mb_llvm_module_paths(m int, main_off int, main_len int,
-    obj_out *u8, text_out *u8) int {
+    obj_out *u8, text_out *u8, asm_out *u8) int {
     let build_len int = 0
     let build_off int = proj.build_dir(main_off, main_len, &build_len)
     if (build_off < 0) { return -1 }
@@ -53,6 +53,14 @@ fn mb_llvm_module_paths(m int, main_off int, main_len int,
     n = gen.append_str(text_out, n, proj.pool_str(tag_off))
     n = gen.append_str(text_out, n, ".ll")
     text_out[n] = 0
+    if (asm_out != 0) {
+        n = 0
+        n = gen.append_str(asm_out, n, proj.pool_str(build_off))
+        n = gen.append_str(asm_out, n, "/asm/")
+        n = gen.append_str(asm_out, n, proj.pool_str(tag_off))
+        n = gen.append_str(asm_out, n, ".s")
+        asm_out[n] = 0
+    }
     return 0
 }
 
@@ -66,7 +74,9 @@ fn mb_llvm_emit_module(m int, main_off int, main_len int,
     check_env u64) int {
     let obj_path [700]u8
     let text_path [700]u8
-    if (mb_llvm_module_paths(m, main_off, main_len, &obj_path[0], &text_path[0]) != 0) {
+    let asm_path [700]u8
+    if (mb_llvm_module_paths(m, main_off, main_len, &obj_path[0],
+            &text_path[0], &asm_path[0]) != 0) {
         return -1
     }
     let view ast.AstView
@@ -94,10 +104,11 @@ fn mb_llvm_emit_module(m int, main_off int, main_len int,
             gen.fail("函数 check 缓存捕获失败（本次不提交 check 缓存）")
         }
     }
-    // 文本路径只在 --emit-llvm 时给出；对象始终发布，构建步才能继续链接。
+    // 文本/汇编路径只在对应开关打开时给出；对象始终发布，构建步才能继续链接。
     let text_out *char = proj.cfg().emit_kind == 1 ? gen.arr_cstr(&text_path[0]) : 0.to_type(*char)
+    let asm_out *char = proj.cfg().emit_asm == 1 ? gen.arr_cstr(&asm_path[0]) : 0.to_type(*char)
     let status int = llvm_emit_module_to_cached(&checked, 0,
-        gen.arr_cstr(&obj_path[0]), text_out, 0, cache_in, cache_out,
+        gen.arr_cstr(&obj_path[0]), text_out, asm_out, 0, cache_in, cache_out,
         env_key, lower_stats, proj.module_opt_level(m))
     ast.checked_module_release(&checked)
     if (status == 0 && check_env != 0 && check_capture == 0) {

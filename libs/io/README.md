@@ -108,4 +108,4 @@ cd libs && ../yh test io --timeout 60
 
 `tests.test.yh` 覆盖整文件往返、缓冲写入、分行/空行/末行/超长截断、单字节读取、
 `read_all` 的 EOF 与截断、空缓冲非法参数、坏 fd 与缺失文件。门禁已接入
-`just test`、`just selfhost-native` 与 `just test-lib-tests`。
+`just test`、`just selfhost-native` 与 `just test-libs`。

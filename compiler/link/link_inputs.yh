@@ -1,6 +1,7 @@
 module link
 import gen
 import proj
+import hash
 
 // POSIX 文件/环境接口：直接声明 C ABI，避免把宿主路径语义塞进 prelude。
 @[extern] pub fn realpath(path *char, resolved *char) *char
@@ -509,24 +510,26 @@ fn li_stat_file(path *char, sec *u64, nsec *u64, size *u64) int {
     return 0
 }
 
-// mb_mix_file_identity：按 (size, mtime_ns) 混入文件身份（PC7a）。
-// 大二进制（链接器/驱动器/编译器自身，几十 MB）每轮重哈希要多花 ~0.5 s；这些位置
-// 只需要「文件换没换」的身份，不需要内容摘要，故用 size+mtime 代替内容哈希。
-pub fn mb_mix_file_identity(hash *u64, path *char) int {
+// mb_file_stat：读取文件 size/mtime\(ns\)；C6 trim/verify 使用。
+// 成功返回 0，读不到返回 -1。
+pub fn mb_file_stat(path *char, size *u64, mtime *u64) int {
     let sec u64 = 0
     let nsec u64 = 0
-    let size u64 = 0
-    if (li_stat_file(path, &sec, &nsec, &size) != 0) { return -1 }
-    let vals [3]u64
-    vals[0] = size; vals[1] = sec; vals[2] = nsec
-    let vi int = 0
-    for vi < 3 {
-        let vb int = 0
-        for vb < 8 {
-            proj.fnv(hash, ((vals[vi] >> (vb * 8)) & 255).to_type(u8))
-            vb += 1
-        }
-        vi += 1
+    if (li_stat_file(path, &sec, &nsec, size) != 0) { return -1 }
+    mtime[0] = sec * 1000000000 + nsec
+    return 0
+}
+
+// mb_mix_file_identity：把文件内容的 SHA-256 混入缓存身份（C2）。
+// touch、复制或换 mtime 不改变身份；内容变一个字节就会换键。调用方负责决定
+// 缓存粒度（编译器每构建一次，工具身份每链接一次），本函数不缓存结果。
+pub fn mb_mix_file_identity(out_hash *u64, path *char) int {
+    let digest [32]u8
+    if (hash.sha256_file(path, &digest[0]) != 0) { return -1 }
+    let i int = 0
+    for i < 32 {
+        proj.fnv(out_hash, digest[i])
+        i += 1
     }
     return 0
 }

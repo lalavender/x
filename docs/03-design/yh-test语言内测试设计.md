@@ -12,9 +12,9 @@
 支持 `--filter`（作用于执行）、`--timeout`、`libs/testing` 的 `fail/skip`、
 失败位置与消息报告；`--no-run` 只构建不执行，`--emit-llvm` 可审阅降低结果。
 标准库 `string` 已带内建测试（`libs/string/tests.test.yh`），由
-`make test-lib-tests` 与 `make test` / `make selfhost-native` 执行；
+`just test-libs` 与 `just test` / `just selfhost-native` 执行；
 `compiler/` 的 `gen`/`lex`/`parse` 模块也已带内嵌测试，由
-`make test-compiler-tests`（`tools/compiler-tests.py`）执行；该能力随
+`just test` 中的 `tools/compiler-tests.py` 执行；该能力随
 **0.0.9-rc.2** 交付（rc.1 的 `compiler/` 因种子不支持 test 语法而暂缓）。
 现有 `$assert` 仍只支持编译期断言。实施顺序见
 [分阶段方案](../02-plan/yh-test分阶段实施方案-2026-10-23.md)；块体降低、断言

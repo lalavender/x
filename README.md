@@ -220,9 +220,10 @@ pub fn main() int {
 ## 测试
 
 ```sh
-just test               # 三层回归
+just test               # 三层回归（默认按 CPU 数并行）
+just test-libs          # 全部标准库测试（默认按 CPU 数并行）
 just selfhost-native    # 自举主门
-just libs-test          # 标准库测试
+TEST_JOBS=8 just test   # 指定并行层数；TEST_JOBS=1 串行
 ```
 
 - `just test` 有三层：
@@ -230,7 +231,7 @@ just libs-test          # 标准库测试
   2. 同一批语料走编译器 `--syntax-check`。
   3. `tests/yh-run/check.py`：运行语义语料，含 run、fail、pass 三类。
 - `just selfhost-native` 覆盖两代固定点、自解析、全量语料、模块与项目验收。
-- `just libs-test` 运行 `libs/` 的 test 块与外部 runner。
+- `just test-libs` 运行全部标准库测试：`libs/` 的 test 块（O0/O2）、cli/os/libc 外部 runner，以及 TOML/string/num/fmt 专项与安装后仓库外导入。
 
 专项门：
 
@@ -240,16 +241,16 @@ just libs-test          # 标准库测试
 | `just test-llvm-linux-arm64` | Linux/AArch64 运行时与 C ABI（容器内） |
 | `just test-windows-sdk` | Windows 导入库与清单一致 |
 | `just test-windows-abi` | Win64 按值聚合的 C 互操作 |
-| `just test-string` | string 专项门 |
-| `just test-toml` | TOML 测试 |
-| `just test-num` | num 的 Python 参考差分 |
-| `just test-fmt-interp` | fmt 字符串插值负例 |
 
 ## 构建缓存与种子
 
 - 设置 `YH_BUILD_CACHE=<目录>` 后，缓存树迁到该目录。
 - 默认可执行文件仍在 `compiler/.build`。
 - 多个 worktree 各指一处缓存目录，互不覆盖。
+- C4 起 `YH_CACHE=<目录>` 指定全局中间产物缓存（默认平台缓存目录，
+  `YH_CACHE=off` 关闭）；只放 obj/.s.i/.s.ct/.fchk/.fir，最终程序仍在项目
+  `.build`。`yh cache info|clean|trim|verify` 做运维，`YH_CACHE_DEBUG=1`
+  输出 ActionID 与 miss 原因。
 - `just seed` 把已验证的 `yh` 覆盖到 `bin/yh-<平台>-<架构>`，并更新 `.sha256`。
 - 种子只在 `just test` 与 `just selfhost-native` 全绿后滚动。
 - `just fetch-seed` 从最新 GitHub Release 下载种子。
@@ -283,7 +284,7 @@ just libs-test          # 标准库测试
 
 ## 目录结构
 
-- `compiler/`：编译器源码，16 个模块。
+- `compiler/`：编译器源码，17 个模块。
   - `gen`：全局状态与共享工具
   - `lex`：词法与行尾归一化
   - `parse`：语法分析
@@ -296,6 +297,7 @@ just libs-test          # 标准库测试
   - `backend`：LLVM 发射
   - `build`：构建引擎
   - `proj`：项目模型与产物路径
+  - `cache`：缓存键 schema 与 ActionID/OutputID
   - `link`：汇编、链接与进程
   - `testkit`：语言内测试执行器
   - `cmdline`：CLI 声明与解析

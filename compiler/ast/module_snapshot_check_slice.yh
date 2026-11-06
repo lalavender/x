@@ -2,6 +2,7 @@ module ast
 import gen
 import ir
 import proj
+import cache
 
 // ============================================================================
 // module_snapshot_check_slice.yh —— 函数级受检 AST 切片（LA3.3 C2）
@@ -15,7 +16,7 @@ import proj
 // ============================================================================
 
 const CHECKED_SLICE_MAGIC u64 = 0x31454C4353485948 // "YHSCLE1" 的低 64 位近似
-const CHECKED_SLICE_VERSION int = 3
+const CHECKED_SLICE_VERSION int = 5
 const CHECKED_SLICE_MAX_ROWS int = 1048576
 // 单函数 check 切片上限：编译器自身的超大函数超过它就跳过缓存，避免
 // worker 保存/装载多 MB 记录导致自举内存峰值失控。
@@ -295,10 +296,11 @@ pub fn checked_slice_capture(unit *CheckedModule, function_index int,
         ei += 1
     }
     if (ctx.file_id < 0 || ctx.file_id >= store.file_n) { return -1 }
-    let file proj.PFile = store.files[ctx.file_id]
-    let path *char = (store.names + file.path_off).to_type(*char)
-    let path_len int = 0
-    for path[path_len] != 0 { path_len += 1 }
+    // 记录按项目相对路径保存：同源码搬目录后 check 切片仍能按当前文件找到。
+    let rel_path [1024]u8
+    let path_len int = proj.file_rel_path(ctx.file_id, &rel_path[0], 1024)
+    if (path_len < 0) { return -1 }
+    let path *char = gen.arr_cstr(&rel_path[0])
     let path_size int = path_len + 1
     let symbol_used *u8 = malloc(store.symbol_n.to_type(u64)).to_type(*u8)
     let symbol_order *int = malloc((store.symbol_n * sizeof(int)).to_type(u64)).to_type(*int)
@@ -826,19 +828,18 @@ fn checked_slice_grow_function(need int) int {
     return 0
 }
 
-// checked_slice_find_file：按路径查找当前 GenState 文件下标；找不到返回 -1。
+// checked_slice_find_file：按项目相对路径查找当前文件下标；找不到返回 -1。
 fn checked_slice_find_file(path *char) int {
-    let tk *gen.TaskCtx = gen.task()
     let path_len int = 0
     for path[path_len] != 0 { path_len += 1 }
+    let rel [1024]u8
     let i int = 0
     for i < proj.file_count() {
-        let file_p *proj.PFile = proj.file(i)
-        let file proj.PFile = file_p[0]
-        if (file.path_len == path_len) {
+        let rel_len int = proj.file_rel_path(i, &rel[0], 1024)
+        if (rel_len == path_len) {
             let j int = 0
             for j < path_len {
-                if (tk.np_data[file.path_off + j] != path[j].to_type(u8)) { break }
+                if (rel[j] != path[j].to_type(u8)) { break }
                 j += 1
             }
             if (j == path_len) { return i }
@@ -1256,6 +1257,20 @@ pub fn checked_check_cache_lookup(key *char, out_data **u8, out_size *int) int {
     if (checked_check_cache_in == 0 || key == 0) { return 0 }
     let entry *ir.IRFunctionCacheEntry = ir.ir_function_cache_set_find(
         checked_check_cache_in, key)
+    if (entry == 0 || entry.data == 0 || entry.size <= 0) {
+        // 本地索引/记录缺失时查全局 content store；check 键同时是 ActionID。
+        let global_data *u8 = 0
+        let global_size int = 0
+        let global_hit int = cache.store_lookup(cache.store_task(), key,
+            cache.OUTPUT_CHECK, &global_data, &global_size)
+        if (global_hit == 1) {
+            if (ir.ir_function_cache_set_add(checked_check_cache_in, key,
+                    global_data, global_size) != 0) {
+                free(global_data.to_type(*void))
+            }
+            entry = ir.ir_function_cache_set_find(checked_check_cache_in, key)
+        }
+    }
     if (entry == 0 || entry.data == 0 || entry.size <= 0) { return 0 }
     out_data[0] = entry.data
     out_size[0] = entry.size

@@ -1,0 +1,50 @@
+module link
+import gen
+import proj
+
+// ============================================================================
+// link_inputs.test.yh —— C2 文件内容身份测试
+//
+// 只由 `cd compiler && ../yh test link` 执行。验证：
+//   * 同一内容重复读取身份稳定；
+//   * 重写同内容（mtime 变化）身份不变；
+//   * 同长度不同内容身份必须变化。
+// ============================================================================
+
+// li_test_write：覆盖写一个测试文件；0 = 成功。
+fn li_test_write(path *char, text *char, count int) int {
+    let fd int = proj.open_out(path)
+    if (fd < 0) { return -1 }
+    let rc int = gen.write_all(fd, text.to_type(*u8), count)
+    if (close(fd) != 0) { return -1 }
+    return rc
+}
+
+// li_test_identity：计算测试文件的 64 位内容身份；0 表示读取失败。
+fn li_test_identity(path *char) u64 {
+    let digest u64 = proj.hash_init()
+    if (mb_mix_file_identity(&digest, path) != 0) { return 0 }
+    return digest
+}
+
+test "内容身份：touch/重写不变，内容变化必变" {
+    $assert(cmd_mkdirs("tmp") == 0, "创建测试目录")
+    let path [256]u8
+    let n int = gen.append_str(&path[0], 0, "tmp/link_identity_")
+    n = gen.append_int(&path[0], n, getpid())
+    n = gen.append_str(&path[0], n, ".bin")
+    path[n] = 0
+    let file *char = gen.arr_cstr(&path[0])
+    $assert(li_test_write(file, "abc", 3) == 0, "写测试文件")
+    let first u64 = li_test_identity(file)
+    let second u64 = li_test_identity(file)
+    $assert(first != 0, "首次读取失败")
+    $assert(first == second, "同内容重复读取必须稳定")
+    // 覆盖写同内容：mtime 变化，内容身份必须不变。
+    $assert(li_test_write(file, "abc", 3) == 0, "重写同内容")
+    $assert(li_test_identity(file) == first, "重写同内容不得改变身份")
+    // 同长度不同内容：身份必须变化。
+    $assert(li_test_write(file, "abd", 3) == 0, "写不同内容")
+    $assert(li_test_identity(file) != first, "内容变化必须改变身份")
+    unlink(file)
+}

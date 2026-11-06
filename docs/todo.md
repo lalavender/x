@@ -13,42 +13,6 @@
 - 添加错误，当前错误提示功能太简陋
 - project.toml 添加[env]
 
-## 2026-11-06 缓存优化（P0，最高优先级）
-
-用户 2026-11-06 指定最高优先级。依据
-[缓存与 Go 构建缓存对比](02-plan/yh-缓存与Go构建缓存对比-2026-11-06.md) 与
-[缓存设计](03-design/yh-缓存设计.md)：先修键的正确性，再做全局 content store、
-文件级对象与运维；不先继续堆更多函数缓存。
-
-- [ ] **C0 键审计与统一 schema（P0）**：列出 module/check/IR/link 四层键的全部
-  输入；把 check/IR 两套重复序列抽成公共 key builder；加 key schema version；
-  产出 miss 原因表（改哪个输入会让哪层失效）。
-- [ ] **C1 哈希升级（P0）**：FNV64 → 128/256-bit（共享/远程用 SHA-256）；bump
-  `CHECKED_SLICE_VERSION`、`IR_FUNCTION_CACHE_VERSION`、模块缓存 tag、link
-  manifest 版本，做一次性失效；补碰撞/损坏拒绝用例。
-- [ ] **C2 工具/闭包身份（P0）**：编译器、lld、bridge、SDK 用内容哈希或 build ID，
-  不再用 `(size, mtime)`；每构建只算一次；审计 selfhost 闭包身份。
-- [ ] **C3 路径/环境（P0）**：语义键去掉绝对源路径；locs 独立；提供
-  `--trimpath`/相对路径模式；显式 `CacheInputs` 白名单（`YH_*`、SDK、
-  selfhost flags），不读隐式环境。
-- [ ] **C4 cache_context + action/content store（P1）**：
-  `build/cache/cache_context` 统一键/manifest/原子提交/统计；
-  `actions/<ActionID> → outputs`、`outputs/<OutputID>`；项目 `.build` 只留索引；
-  原子 entry + 文件锁；跨 worktree/项目共享。
-- [ ] **C5 文件级对象（P1）**：优先每个 `.yh` 一个 `.o`（不是每函数 `.o`）；
-  单文件改动只重发该文件 LLVM，链接复用其余对象；函数 check/IR 缓存保留。
-- [ ] **C6 清理/锁/可观测（P1）**：`yh clean --cache`/`yh cache trim`；
-  `YH_CACHE_DEBUG` 输出 ActionID/键组成/miss 原因；`YH_CACHE_VERIFY`；
-  同项目并发构建锁。
-- [ ] **C7 测试/远程缓存（P2，后置）**：测试结果缓存默认不做，opt-in 且跟踪
-  env/文件访问；`YH_CACHEPROG` 远程缓存最后做，需强哈希/校验/清理。
-
-执行顺序：C0 → C1 → C2 → C3 → C4 → C5 → C6；C7 等 C0–C4 稳定后再评估。
-验收：每个切片 `just` + `just test` + `just selfhost-native`；补命中/失效矩阵
-用例；旧缓存版本必须拒绝；不改产物语义；固定点通过。
-风险：哈希/键变更导致全量失效；文件级对象触及 LLVM/链接；全局缓存并发/清理；
-自举种子与 selfhost 闭包。
-
 ## 2026-11-06 前端两遍化：parse 纯语法 + check 语义分析（P0，待 ADR）
 
 方向已定（用户 2026-11-06）：语义分析统一收进 `check`；`parse` 只做语法并产出
@@ -323,8 +287,9 @@ lowering 66% / IR 构造 20% / 内嵌桥 8% / 前端 6%（见上面的 PF2 报�
   libs 构建会在 lowering 阶段失败（`memory/memory.yh:5:19 alloc`），机制未定位；
   重做前先给 `ir_fc_mark_symbol`/`ir_fc_visit_type` 加边界断言。注意 `reserve` 必须
   在取指针之前（扩容 realloc 会让旧指针失效）。
-- [ ] **PC7 函数级目标文件**（单函数改动的 ≤3 s 与 O2 的整模块重优化都只能靠它；
-  本轮确认立项）：可行性见
+- [ ] **PC7 函数级目标文件（⏸ 暂缓）**：文件级对象撤销后，函数级 `.o` 是唯一
+  更细的对象粒度；但桥调用/链接对象数量代价高，2026-11-06 决定先不推进
+  （ADR-0020），单函数 ≤3 s 不再作为当前承诺。可行性见
   [架构设计 §4.6](03-design/yh-架构设计.md)。
   量化依据（PF2 + PL1）：O0 单函数改动 3.6 s 里，模块级 LLVM 发射（object）≈0.5 s、
   链接 ≈1.3 s，其余是 lowering/缓存合并；**O2 单函数改动 7.55 s，其中内嵌桥 3.59 s**
@@ -343,7 +308,7 @@ lowering 66% / IR 构造 20% / 内嵌桥 8% / 前端 6%（见上面的 PF2 报�
 [实施分期](02-plan/yh-test分阶段实施方案-2026-10-23.md)与
 [2026-10-25 迁移分析与决策](02-plan/yh-test语法迁移既有测试分析与规划-2026-10-25.md)
 （取代 10-23 版）已整理。**YT0–YT3b、YT2d、YT1.1 与 YT4-P0～P7 已全部完成**：
-每个标准库都有自己的测试文件（122 例），`libs-test`/`libs-test-o2` 与主门全绿；
+每个标准库都有自己的测试文件（122 例），`just test-libs` 与主门全绿；
 证据见 [YT4 收口与门禁验证](01-finished/yh-YT4-收口与门禁验证-2026-10-25.md)
 与各阶段 `01-finished/yh-YT4-*.md`。以下只保留延后项。
 
@@ -576,13 +541,12 @@ StackFallback 后置。块统一取自 prelude 堆，不新增 `sys` 依赖，�
 缓冲的 `Reader`/`Writer`（行读取、显式 flush），保留
 `write_all_result`/`write_all`/`print`/`println` 原签名。`libs/io/tests.test.yh`
 7 个用例通过，`yh test io` 已接入 `make test`/`make selfhost-native`/
-`make test-lib-tests`。以下只留未完成项。
+`just test-libs`。以下只留未完成项。
 
 - [ ] **IO5 toml 读文件迁移**：删除 `libs/toml/file.{linux,darwin}.yh` 的手写
   短读循环，改用 `io.read_file`；保留 `TOML_MAX_INPUT` 上限语义与
   `parse_io_error`/`parse_resource_error` 分类映射，先加断言锁定"恰好读满"与
-  "还有数据"的现有区分，再迁移。验收 `make test-toml` 与
-  `make test-toml-conformance`。
+  "还有数据"的现有区分，再迁移。验收 `just test-libs`。
 - [ ] **IO6 seek/copy（依赖 os）**：`os` 补 `lseek`/`fstat` 后再评估 `Reader` 的
   peek/seek 与零分配 `io.copy`；先出设计增量，不提前对外承诺。
 - [ ] **IO7 消费者迁移审计**：`cli/help.yh`、`examples/os-demo` 与编译器读文件的
@@ -636,7 +600,7 @@ reader，T0–T5（含 T4.1 分配失败/预算门与 T5.1 安装导入）已完
 六组断言已迁入 `libs/json/tests.test.yh`（12 个 test / 127 条断言，见
 [迁移记录](01-finished/yh-YT4-P1-json迁移-2026-10-25.md)），`jsonmodel`
 保留为 `build-check.py` 的公开面 smoke；原 `tests/json/run.py` 与
-`make test-json` 已删除，由 `yh test json` / `make libs-test` 取代。口径：
+`make test-json` 已删除，由 `yh test json` / `just test-libs` 取代。口径：
 RFC 8259 完整语法 + 严格 profile（拒绝 BOM/重复键/孤立代理/尾逗号）；
 单一 `kind_number` 且保存原始词素；文档模型与 `toml` 独立。
 以下只保留未完成项。
@@ -744,23 +708,19 @@ prelude `printf`（H.I3 的按需扩展仍独立）。
     称函数指针不支持（LLVM ABI 已支持）；`AGENTS.md` 的 x64 种子说明与
     Makefile 现状不一致。按实际行为刷新或标为历史。
 
-## 后续任务：文件对象、线程池与性能（LA4/LA5）
+## 后续任务：线程池与性能（LA5）
 
 LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
-[01-finished/](01-finished/)；以下只保留未完成项。
+[01-finished/](01-finished/)；LA4 文件对象已按 ADR-0020 撤销，以下只保留
+未完成项。
 
-- [ ] **J2 / LA4 文件级对象**：按
-  [架构设计 §4.4/§5.4](03-design/yh-架构设计.md)
-  实施 LA4.1 分区模型 → LA4.2 hidden 跨对象私有身份 → LA4.3 文件对象键/manifest
-  /原子提交 → LA4.4 删除/重命名/runtime/损坏/并发回归。完成前默认仍为单模块对象。
-- [ ] **J3 RS5 收口报告**：依赖 J2，复核优化覆盖与文件对象缓存提交协议。
 - [ ] **J4 / LA5 线程池**：按
   [架构设计 §1.4/§4.5](03-design/yh-架构设计.md)
   收口 FrontendTask/AstStore/CtContext/CacheContext/Diagnostics，再接宿主线程桥
   与固定线程池；完成前继续 fork/COW，不宣称线程安全。
 - [ ] **J5 增量/冷编时间**：单函数 200ms、冷编 1s 目标未达；当前仍整模块
-  lowering 与内嵌 LLVM 对象生成，耗时占比交专门性能任务重测；J2 缩小对象
-  重做范围。旧外部汇编器的耗时解释不适用于 LLVM 唯一后端。
+  lowering 与内嵌 LLVM 对象生成，耗时占比交专门性能任务重测；对象粒度固定
+  模块级（ADR-0020）。旧外部汇编器的耗时解释不适用于 LLVM 唯一后端。
 - [ ] **J6 产物体积：fmt 闭包不再放大成品**（2026-10-27 立项）：把「输出全部走
   fmt」后的体积回落到 printf 基线上。实测（macOS/arm64，hello 级程序，O0）：
   printf 单文件 50,256 B / `__text` 1,872；fmt 项目 155,872 B / 85,032；
@@ -818,6 +778,8 @@ LA0–LA3 已完成，历史与证据见 [finish.md](finish.md) 与
   `const T = $mk(); T[0]` 可用，不为此加特殊形态。
 - **恢复 `asm/`、`link/` 独立项目**：2026-10-20 用户决定删除，由 LLVM + 内嵌 lld
   取代，不重建。
+- **文件级对象缓存（C5/LA4）**：2026-11-06 用户决定撤销；对象粒度停在模块级，
+  增量由函数 check/IR 缓存承担，后端继续整模块发射（ADR-0020）。
 - **自研机器 IR / 寄存器分配 / 动态加载 libLLVM**：与 ADR-0014 冲突；JIT、LTO、
   32 位、ARM64EC 等无消费者扩展同样不做。
 - **以 WSL 代替 Windows 原生支持**：B1 需 Windows 原生构建与运行。

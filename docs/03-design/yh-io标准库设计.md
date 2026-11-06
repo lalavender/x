@@ -242,7 +242,7 @@ bounds/utf8 无关。复用 `os.Error` 与 `os.IoResult` 保持错误来源唯�
   `reader_read_byte`、`read_all` 的 EOF 与截断、空缓冲 `init` 的非法参数、
   坏 fd 的错误路径、`writer_flush` 后的 `writer_pending` 归零。
 - 门禁：`cd libs && ../yh test io`；已加入 `make test`、`make selfhost-native`
-  与 `make test-lib-tests`。
+  与 `just test-libs`。
 - 既有验收项目 `tests/modules/projects/libsio`、`osio`、`syseintr` 继续覆盖兼容
   接口，不改动其断言。
 - `read_file`/`write_file` 的文件用例写入 `/tmp` 下的进程唯一路径并在结束时删除，

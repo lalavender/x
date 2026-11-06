@@ -2,7 +2,7 @@
 
 TOML 的 **API/所有权/资源/文件断言已迁入 `libs/toml/tests.test.yh`**（11 个
 `test`、154 条 `$assert`，由 `yh test toml` / `just test` /
-`just selfhost-native` / `just libs-test` 执行）；迁移记录见
+`just selfhost-native` / `just test-libs` 执行）；迁移记录见
 [YT4-P2](../01-finished/yh-YT4-P2-toml迁移-2026-10-25.md)。
 
 本目录只保留 `yh test` 表达不了的外部门：
@@ -14,11 +14,13 @@ TOML 的 **API/所有权/资源/文件断言已迁入 `libs/toml/tests.test.yh`*
 | 安装导入 | `install.py` | `just install` 后从仓库外、无 `YH_STDLIB` 导入 toml |
 
 ```bash
+just test-libs                                  # 全部标准库测试（含 TOML 专项）
+# 单跑：
 python3 tests/toml/conformance.py --prepare    # 首次取固定语料（下载并核对 SHA-256）
-just test-toml-conformance
-just test-toml-injection
-just test-toml-install
-# API/文件行为：cd libs && yh test toml（或 just test-toml）
+python3 tests/toml/conformance.py
+python3 tests/toml/injection.py
+python3 tests/toml/install.py
+# API/文件行为：cd libs && yh test toml
 ```
 
 ## 一致性语料（T5）

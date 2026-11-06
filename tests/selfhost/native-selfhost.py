@@ -234,8 +234,10 @@ def build(cc, out, generation, expected, allowed=(), compatible=(),
     command = [str(cc)]
     triple = host_triple()
     if llvm_mode:
-        command += ["--backend", "llvm", "--target", triple, "--emit-llvm"]
+        command += ["--backend", "llvm", "--target", triple]
     command += ["build", "-o", str(out)]
+    if llvm_mode:
+        command += ["--emit-llvm"]
     r = run(command, cwd=COMPILER, shim=True, seed_link=seed_link)
     if r.returncode != 0:
         print(f"FAIL 构建 {out.name}:", r.stderr[-400:])

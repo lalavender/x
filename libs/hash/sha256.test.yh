@@ -1,0 +1,159 @@
+module hash
+
+// ============================================================================
+// sha256.test.yh —— SHA-256 NIST 向量与边界分块（C1）
+//
+// 只由 `yh test hash` / `just libs-test` 执行。期望值来自 FIPS 180-4 与
+// NIST CAVP 公开向量；55/56/64/65 字节覆盖填充长度边界。
+// ============================================================================
+
+// hs_eq：比较 64 位十六进制摘要文本。
+fn hs_eq(actual *u8, expected *char) bool {
+    let i int = 0
+    for i < 64 {
+        if (actual[i] != expected[i].to_type(u8)) { return false }
+        i += 1
+    }
+    return actual[64] == 0
+}
+
+// hs_text：一次性哈希 NUL 结尾文本。
+fn hs_text(text *char, out *u8) void {
+    let digest [32]u8
+    sha256_digest(text.to_type(*u8), strlen(text).to_type(u64), &digest[0])
+    sha256_hex(&digest[0], out)
+}
+
+test "NIST：空串、abc 与多块" {
+    let hex [65]u8
+    hs_text("", &hex[0])
+    $assert(hs_eq(&hex[0],
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "空串")
+    hs_text("abc", &hex[0])
+    $assert(hs_eq(&hex[0],
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        "abc")
+    hs_text("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", &hex[0])
+    $assert(hs_eq(&hex[0],
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"),
+        "两字节块")
+}
+
+test "填充边界：55/56/63/64/65" {
+    let data [65]u8
+    let i int = 0
+    for i < 65 {
+        data[i] = 'a'
+        i += 1
+    }
+    let hex [65]u8
+    let digest [32]u8
+    sha256_digest(&data[0], 55, &digest[0])
+    sha256_hex(&digest[0], &hex[0])
+    $assert(hs_eq(&hex[0],
+        "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"),
+        "55 字节")
+    sha256_digest(&data[0], 56, &digest[0])
+    sha256_hex(&digest[0], &hex[0])
+    $assert(hs_eq(&hex[0],
+        "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"),
+        "56 字节")
+    sha256_digest(&data[0], 63, &digest[0])
+    sha256_hex(&digest[0], &hex[0])
+    $assert(hs_eq(&hex[0],
+        "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34"),
+        "63 字节")
+    sha256_digest(&data[0], 64, &digest[0])
+    sha256_hex(&digest[0], &hex[0])
+    $assert(hs_eq(&hex[0],
+        "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"),
+        "64 字节")
+    sha256_digest(&data[0], 65, &digest[0])
+    sha256_hex(&digest[0], &hex[0])
+    $assert(hs_eq(&hex[0],
+        "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0"),
+        "65 字节")
+}
+
+test "流式分块与一次性结果一致" {
+    let data [127]u8
+    let i int = 0
+    for i < 127 {
+        data[i] = ('a' + i % 26).to_type(u8)
+        i += 1
+    }
+    let once [32]u8
+    sha256_digest(&data[0], 127, &once[0])
+    let ctx Sha256
+    sha256_init(&ctx)
+    $assert(sha256_update(&ctx, &data[0], 1) == 0, "第一段")
+    $assert(sha256_update(&ctx, &data[1], 63) == 0, "第二段")
+    $assert(sha256_update(&ctx, &data[64], 63) == 0, "第三段")
+    let streamed [32]u8
+    $assert(sha256_final(&ctx, &streamed[0]) == 0, "final")
+    let same int = 1
+    i = 0
+    for i < 32 {
+        if (once[i] != streamed[i]) { same = 0 }
+        i += 1
+    }
+    $assert(same == 1, "分块结果一致")
+    $assert(sha256_final(&ctx, &streamed[0]) != 0, "重复 final 必须失败")
+}
+
+test "流式：未填满的末尾块必须保留" {
+    let two [2]u8
+    two[0] = 3
+    two[1] = 4
+    let once [32]u8
+    sha256_digest(&two[0], 2, &once[0])
+    let ctx Sha256
+    sha256_init(&ctx)
+    $assert(sha256_update(&ctx, &two[0], 1) == 0, "第一字节")
+    $assert(sha256_update(&ctx, &two[1], 1) == 0, "第二字节")
+    let streamed [32]u8
+    $assert(sha256_final(&ctx, &streamed[0]) == 0, "final")
+    let same int = 1
+    let i int = 0
+    for i < 32 {
+        if (once[i] != streamed[i]) { same = 0 }
+        i += 1
+    }
+    $assert(same == 1, "两个单字节 update 必须等于一次性两字节")
+}
+
+test "百万字节 a" {
+    let data *u8 = malloc(1000000).to_type(*u8)
+    $assert(data != 0, "分配")
+    let i int = 0
+    for i < 1000000 {
+        data[i] = 'a'
+        i += 1
+    }
+    let digest [32]u8
+    $assert(sha256_digest(data, 1000000, &digest[0]) == 0, "digest")
+    let hex [65]u8
+    sha256_hex(&digest[0], &hex[0])
+    $assert(hs_eq(&hex[0],
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"),
+        "1,000,000 个 a")
+    free(data.to_type(*void))
+}
+
+test "单字节 update" {
+    let data [1]u8
+    let a [32]u8
+    let b [32]u8
+    data[0] = 3
+    sha256_digest(&data[0], 1, &a[0])
+    data[0] = 4
+    sha256_digest(&data[0], 1, &b[0])
+    let same int = 1
+    let i int = 0
+    for i < 32 {
+        if (a[i] != b[i]) { same = 0 }
+        i += 1
+    }
+    $assert(same == 0, "不同单字节必须不同摘要")
+}
