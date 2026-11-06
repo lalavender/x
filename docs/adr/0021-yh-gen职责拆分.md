@@ -59,7 +59,7 @@ lex      → support, diag, token
 proj     → support, target, token
 sema     → support, diag, target, token
 comptime → sema, support, diag, proj, token
-ast      → token, support, comptime            （F1 后；过渡期可含 sema/proj/ir）
+ast      → token, support                       （F1 后；过渡期含 sema/comptime/proj/ir）
 check    → ast, sema, comptime, token, target, diag, support, proj
            （快照/切片键仍在 check 时可含 ir/cache）
 parse    → token, ast, lex, support, diag
