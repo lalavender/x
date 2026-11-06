@@ -78,7 +78,7 @@ ALLOWED = {
 # —— 状态/资源预算（现状即上限，只减不增；不含代码行数）——
 # 代码规模由 `just code-stats` 单独报告，本工具不按行数阻断。
 BUDGETS = {
-    "max_globals": 180,        # + comptime 的 CT 事实镜像槽（类型/符号各 2 个，F4-0/2）
+    "max_globals": 182,        # + comptime 的 CT 事实镜像槽（类型/符号各 2 个，F4-0/2）
     "max_g_call_sites": 0,     # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,

@@ -129,6 +129,9 @@ lex → parse(纯语法) → AST
   `check.ct_facts_sync()` 一次绑定类型表 + 符号表；形状守卫扩展到 `CSym`
   与 15 个符号常量。`comptime` 的 `gen.` 引用 365→340。
   ctfacts fixture 增加真实符号行差分（`syms=1`），实跑通过。
+- [x] **F4-3 首片（2026-11-06 完成）**：`CtFieldRow` 字段表镜像 +
+  `CT_DIAG_*` 镜像常量；`comptime` 的 `gen.SField` 与 `gen.CT_DIAG_*` 全部
+  改镜像。`gen.` 引用 340→322。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`
