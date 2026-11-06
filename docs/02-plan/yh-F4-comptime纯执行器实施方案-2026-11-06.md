@@ -106,6 +106,49 @@ pub fn ct_ty_is_integer(tid int) int / ct_ty_is_float / ct_ty_is_signed / ct_ty_
 每步都是「纯移动 + 视图替换」，产物应逐字节一致；`just test` +
 `just selfhost-native` 全绿后才进下一步。
 
+
+## 7. 实施进展与剩余边界（2026-11-06 实测）
+
+已完成：F4-0、F4-1、F4-2、F4-3 首片（字段/诊断常量）、F4-4 首片。
+`comptime` 的 `gen.` 引用（去注释）从 **594 → 62**。
+
+剩余 62 处分两类，**都不是机械替换**：
+
+### 7.1 读型事实（可镜像，但需新的槽）
+
+| 剩余 | 数量 | 做法 |
+| --- | --- | --- |
+| `static_data_at` | 1 | 加 `CtStaticRow` 镜像（`sym_id/label/type_id/elem_type/count/size/align/data/relocs`） |
+| `em_find_src`/`em_get_val`/`em_get_ready` | 3 | 加 `CtEnumRow` 镜像（名字池偏移 + 值 + 就绪位） |
+| `data_str_lookup` | 1 | 加 `CtStringRow` 镜像（`label/off/len/quoted`） |
+| `sym_ct_lit_text`/`sym_declared_before` | 2 | 前者是「沿引用链找字面式」的规则，建议随 F4-5 走请求；后者读声明窗口，可镜像 `def_line/def_col` |
+
+### 7.2 写型调用（镜像做不到，必须走「请求/应用」）
+
+CT 执行期会**改写**前端语义表，只读镜像无法表达：
+
+| 剩余 | 数量 | 建议 |
+| --- | --- | --- |
+| `static_data_add`/`static_data_scalar`/`static_data_reloc`/`static_data_reset` | 5 | CT 把「静态数据请求」写进 `CtStaticRequest` 列表，由 `check` 在 expand 循环末尾统一应用 |
+| `ty_push_agg`/`ty_array` | 3 | 同理：CT 记录「需要这个数组/聚合类型」，由 `check` 建型并回填 type_id |
+| `sym_declared_before` 之外的 `sem_struct_finish` | 1 | 布局收尾改由 `check` 在 expand 后统一做 |
+
+### 7.3 值规则（F4-5）
+
+`sem_can_assign`(12)、`sem_fold_const_binop`(2)、`sem_fold_const_unary`(1)、
+`sem_fold_norm`(5)、`sem_fold_fp_to_int`(1)、`sem_res_const`(4)、
+`fp32_bits`/`fp64_bits`(8)、`Res`(3) ≈ **36 处**。
+
+两条路线：
+
+- **A（推荐，代价小）**：保留 `gen/value_rules.yh`（8 个纯值函数 + `Res` 类型），
+  在 ADR 登记为「编译期值语义内核，`comptime` 与其唯一允许的 gen 依赖」，
+  `arch-check` 把 `comptime → gen` 的允许符号白名单收紧到这 8 个。
+- **B（彻底，代价大）**：CT IR 增加 `CT_OP_FOLD_*` 节点，执行器只写操作数，
+  由 `check` 求值回填；`Res` 换成 `CtValue`。
+
+建议按 A 收口 F4，把 B 留到真正需要「CT 与前端折叠共用一套 IR」时再立项。
+
 ## 6. 风险
 
 | 风险 | 缓解 |
