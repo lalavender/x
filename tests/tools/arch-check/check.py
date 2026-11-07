@@ -84,8 +84,8 @@ def main():
         budget = int(re.search(r'"max_gen_pub_fns":\s*(\d+)',
                                TOOL.read_text(encoding="utf-8")).group(1))
         need = max(1, budget - actual + 1)
-        # state.yh 已在 GEN4 删除，注入目标换成 symbols.yh（gen 里最大的文件）。
-        victim = root / "compiler" / "gen" / "symbols.yh"
+        # gen 现在只有一个文件（value_rules.yh）：state.yh/symbols.yh 均已删除。
+        victim = sorted((root / "compiler" / "gen").glob("*.yh"))[-1]
         victim.write_text(
             victim.read_text(errors="ignore") +
             "\n" + "".join(
