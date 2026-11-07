@@ -528,6 +528,56 @@ L0 支撑     support（含诊断/目标身份）  token
 | cmdline | support, libs/cli |
 | cmd | 全部（入口唯一例外） |
 
+### 6.3.1 当前依赖实测与两条解锁链（2026-11-06）
+
+`gen` 仍是 13 个模块的依赖，但**按被依赖内容分成五类**（实测符号引用数，
+列内为该 gen 文件贡献的符号数）：
+
+| 模块 | model | state | symbols | value_rules | static_data | front_stage | abi_model |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| check | 46 | 17 | 24 | 6 | 6 | 0 | 7 |
+| parse | 47 | 7 | 28 | 3 | 3 | 0 | 0 |
+| lower | 41 | 0 | 0 | 0 | 1 | 0 | 0 |
+| builtin | 14 | 2 | 5 | 0 | 0 | 0 | 0 |
+| comptime | 1 | 2 | 4 | 8 | 4 | 0 | 0 |
+| build | 5 | 2 | 2 | 0 | 0 | 3 | 0 |
+| ast | 6 | 2 | 1 | 0 | 0 | 0 | 0 |
+| cmd | 0 | 3 | 1 | 0 | 0 | 0 | 0 |
+| lex / link / proj / testkit | 0 | 2 | 0 | 0 | 0 | 0 | 0 |
+| cache | 0 | 1 | 0 | 0 | 0 | 0 | 0 |
+
+按依赖**性质**归类，得到两条互不阻塞的解锁链：
+
+**链 A — F4 → 语义模型迁 `check`**（解锁 6 个模块）
+
+```text
+F4 完成（comptime 只剩 10 个值规则符号）
+  → gen/symbols + value_rules + static_data + model 的 TY_*/SYM_*/F_* 迁 check
+  → check/parse/builtin/ast/lower/comptime 全部脱 gen
+```
+
+- `lower` 只剩 41 个 `model` 常量、0 个函数 → 常量迁 `check` 后立刻脱 gen
+  （`lower → check` 已在允许边内）。
+- `builtin` 只剩 prelude 常量 + `ty_*`/`scope_push`/`prelude_add` → 同批迁。
+- `ast` 只剩 `Res`/`SYM_*`/`F_GLOBAL`/`TY_I32`/`sym_lookup` → 同批迁。
+- `check`/`parse` 是语义模型的主消费者，迁完后 `gen` 的 `pub fn` 从 82 降到
+  `front_stage` 3 个 + `state` 的 `task`/`state_init`。
+
+**链 B — GEN4 拆 `TaskCtx`**（解锁 7 个模块）
+
+```text
+TaskCtx 按所有者拆（SemaCtx→check / ParseCtx→parse / SourceCtx→support / …）
+  → lex/link/proj/testkit/cache/build/cmd 脱 gen
+```
+
+- 这 7 个模块对 gen 的依赖**只有** `gen.task()`/`gen.TaskCtx`（lex/link/proj/
+  testkit 各 2 个符号，cache 1 个）——完全不涉及语义模型。
+- 它们可以在 F4 之前就做：把用到的字段先移进各自上下文（如 `lex` 的
+  `lx_line` 已可迁 `lex.LexCtx`）。
+
+**与 ADR 的对应**：链 A = F4 + F3 剩余；链 B = GEN4。两者都完成后 `gen`
+只剩 `model` 的别名与极薄兼容层，即可删除（模块数 19 → 18）。
+
 现有 `import gen` 的边按符号实际归属 1:1 改写为 `import support`/`token`/
 `check`；除表中列出的边外不得新增。过渡期临时边
 （`gen → support/token/check`、`parse/build/testkit/cmd → gen`、

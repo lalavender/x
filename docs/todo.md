@@ -149,6 +149,11 @@ lex → parse(纯语法) → AST
   `GEN_SYMBOLS_FOR_COMPTIME` 白名单——`comptime` 只允许 19 个已知债务符号
   （值规则 10、写型调用 5、符号查询 2、`task`/`TaskCtx`），新增即红灯；
   自测加一条「注入新 gen 依赖必须被抓到」，6/6 通过。
+- [x] **依赖分析（2026-11-06）**：`gen` 的 13 个消费者按被依赖内容分成五类
+  （见架构设计 §6.3.1 实测表），确认两条互不阻塞的解锁链：
+  **链 A**（F4 → 语义模型迁 check）解锁 check/parse/builtin/ast/lower/comptime；
+  **链 B**（GEN4 拆 TaskCtx）解锁 lex/link/proj/testkit/cache/build/cmd
+  ——后者的 gen 依赖只有 `task`/`TaskCtx`，不涉及语义模型，可先做。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`
