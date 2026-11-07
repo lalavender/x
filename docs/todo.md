@@ -13,6 +13,37 @@
 - 添加错误，当前错误提示功能太简陋
 - project.toml 添加[env]
 
+## 2026-11-08 文档刷新发现（待处理）
+
+按 2026-11-08 的代码与实测刷新架构/模块职责/finish 时发现的问题。全部为实测复现，
+尚未修复；不改变业务代码。
+
+- [ ] **DR1 `just test` 红灯：函数缓存预热路径 AST 校验失败（P0）**：
+  `tests/selfhost/llvm-global-cache.py --compiler-path ./yh` 的 `primed` 构建返回
+  1，stderr 为 `yh: 内部错误：函数声明 AST 缺少函数体根` 与
+  `顶层声明 AST 校验失败`（`compiler/check/verify.yh:333`、
+  `compiler/build/module_worker.yh:419`）；stdout 带临时 `DBG decl/module verify`
+  输出。复现：`just test`（最后一门）。当前 HEAD 已带两笔诊断提交
+  （`39a62fa`、`f0c9323`），修复未收口。待确认：是否与 `804dc54` 的 CT 镜像
+  改直接基址相关；CI 是否同样红。
+- [ ] **DR2 清理临时 DBG 输出（P0）**：`compiler/ast/ast_stmt.yh:102`、
+  `compiler/check/verify.yh:322/326`、`compiler/build/module_worker.yh:416`
+  仍向 stdout 打印 `DBG ...`，污染 `yh check`/`yh build` 输出。DR1 修复后删除。
+- [ ] **DR3 全局缓存下的非确定失败（P1，待复现）**：一次 `just build`（`YH_CACHE`
+  默认开）后 `cd libs && ../yh check` 报
+  `sys/constants.linux.arm64.yh:8:24: 错误: 重复的顶层声明`；
+  `YH_CACHE=off just build` 重建后同一命令通过，随后再跑一次 cache-on
+  `just build` 也通过。未稳定复现，暂不判缺陷；复现时记录 `yh cache info`、
+  ActionID 与 `YH_CACHE_DEBUG=1` 的 miss 原因。
+- [ ] **DR4 gen 删除日期不一致（P2，待确认）**：`docs/todo.md` 写「F4 收尾：
+  gen 消失（2026-11-06 完成）」，而删除提交 `01cec48` 的时间是
+  2026-11-07 23:41。需作者确认是「实现日期 vs 提交日期」还是笔误。
+- [ ] **DR5 固定 LLVM 闭包准备不自动选 SDK（P2）**：本机 Command Line Tools
+  默认 SDK 27 的 `libSystem.tbd` 含 `arm64e.x1`，固定 LLVM 21.1.8 的 lld 拒绝
+  解析，使 `just llvm-host` 失败；2026-11-08 用
+  `SDKROOT=<Xcode>/MacOSX26.5.sdk` 重建通过（3,368 步）。待决策：是否让
+  `tools/llvm-darwin-host.py` 自动在可用 SDK 中回退到 26.x。
+
 ## 2026-11-06 前端两遍化：parse 纯语法 + check 语义分析（P0，待 ADR）
 
 方向已定（用户 2026-11-06）：语义分析统一收进 `check`；`parse` 只做语法并产出

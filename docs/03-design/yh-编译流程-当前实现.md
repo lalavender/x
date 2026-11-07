@@ -1,9 +1,9 @@
 # yh 当前编译流程（`yh build` 参考）
 
-修改时间：2026-11-06
+修改时间：2026-11-08
 
 状态：**当前实现参考**，不是目标架构。
-基线：`llvm` 分支 0.0.12 + C0/C1 + GEN1，19 个 yh 模块，LLVM 唯一后端。
+基线：`llvm` 分支 0.0.12 + C0/C1 + GEN1，18 个 yh 模块（`gen` 已于 2026-11-07 删除），LLVM 唯一后端。
 用途：作为调整编译流程时的逐阶段对照表；目标架构见
 [架构设计](yh-架构设计.md) 与 `docs/todo.md` 的 F0–F7（前端两遍化）/
 GEN0–GEN4（`gen` 拆分）。
@@ -69,12 +69,12 @@ yh build
 
 `main(argc, argv, envp)`：
 
-1. `gen.console_utf8_init()`：Windows 控制台切 UTF-8。
-2. `gen.argv_utf8_rebuild()`：Windows 用宽命令行重建 UTF-8 argv。
+1. `support.console_utf8_init()`：Windows 控制台切 UTF-8。
+2. `support.argv_utf8_rebuild()`：Windows 用宽命令行重建 UTF-8 argv。
 3. `cmd_session_init()`：
-   - `gen.state_init()` 恢复 `GenState` 非零初始值；
+   - `support.state_init()` 恢复 `support` 表的非零初始值；
    - `proj.init()` 初始化项目模型；
-   - `gen.bind_cfg(proj.cfg())` 绑定目标/配置；
+   - `support.bind_cfg(proj.cfg())` 绑定目标/配置；
    - `build.mb_set_argv0()`；
    - `proj.ctx().envp = envp`。
 4. 内部子进程协议：
@@ -82,12 +82,12 @@ yh build
    - `--lld-link`：Windows COFF 链接 worker。
 5. `cmdline.parse_request()`：`argv → CliRequest`。
 6. 全局选项落状态：
-   - `--target` → `gen.target_select()`，并置 `target_explicit`；
+   - `--target` → `support.target_select()`，并置 `target_explicit`；
    - `--opt` → `proj.cfg().opt_level`；
    - `--emit-llvm` → `proj.cfg().emit_kind = 1`（仅 build；额外保留 `.ll`）；
    - `--emit-asm` → `proj.cfg().emit_asm = 1`（仅 build；额外保留 `.s`）；
    - `--trimpath` → `proj.cfg().trimpath = 1`（IR/CT 来源使用项目相对路径）；
-   - `--stats` → `gen.stats().enabled = 1`；
+   - `--stats` → `support.stats().enabled = 1`；
    - `--backend legacy` 直接拒绝（LL12 后 LLVM 唯一）。
 7. 按命令分派：`build` → `api_build()`，`check` → `api_check_project()`，
    `cache` → `api_cache()`（`info/clean/trim/verify`）。
@@ -266,13 +266,13 @@ worker 会检查父进程存活，避免 Ctrl-C 后留下孤儿。
 
 ### 5.1 前端初始化
 
-1. `gen.front_checked_begin()`：进入受检前端模式。
+1. `support.front_checked_begin()`：进入受检前端模式。
 2. `comptime.ct_reset()`：清空编译期状态。
 3. 设置：
    - `proj.cfg().module_mode = 1`；
    - `proj.cfg().is_entry_mod`；
    - 模块符号后缀 `c_sym_sfx_off/len`。
-4. `gen.sem_init_tables()`：建立类型/符号/常量表。
+4. `check.sem_init_tables()`：建立类型/符号/常量表（原 `gen.sem_init_tables`）。
 5. `builtin.front_prepare()`：登记 prelude。
 6. `mb_module_iface_deps()`：收集依赖 `.s.i` / `.s.ct` 路径。
 7. 加载依赖接口：
@@ -313,7 +313,7 @@ pass1 登记：
 
 - `ast.ast_decl_bind_file()`：声明与导入绑定到 AST；
 - `mb_check_binding_clash()`：导入名与本模块顶层声明重名；
-- 入口模块 `gen.sem_check_main()`（测试模式允许无 main）；
+- 入口模块 `check.sem_check_main()`（测试模式允许无 main）；
 - `unused_function_report()`：UF1 未使用私有函数检查。
 
 ### 5.4 编译期展开 / 布局 / 全局初始化
@@ -349,7 +349,7 @@ mb_iface_write_ready()  → .ready
 2. `ast.checked_check_cache_begin()`。
 3. 对每个文件：
    - `mb_pass2_file(..., 0)` → `parse.parse_source_fns()`；
-   - 解析函数体，同时调用 `gen.sem_*` 做类型检查/符号绑定/常量折叠；
+   - 解析函数体，同时调用 `check.sem_*`（原 `gen.sem_*`）做类型检查/符号绑定/常量折叠；
    - 写 AST arena；
    - 命中 check 切片的函数跳过重解析。
 4. 未使用导入检查。
@@ -370,18 +370,18 @@ check.verify_module(&view)
 - 声明；
 - 函数上下文。
 
-**它不是类型检查器**；类型检查仍在 `parse` + `gen.sem_*`。
+**它不是类型检查器**；类型检查仍在 `parse` + `check.sem_*`（原 `gen.sem_*`）。
 
 ### 5.8 check-only 分支
 
 `yh check` / `--check-only`：
 
 ```text
-gen.front_checked_verify()
+support.front_checked_verify()
 ast.checked_module_capture()
 mb_verify_checked_snapshot()
 ast.checked_module_release()
-gen.front_checked_end()
+support.front_checked_end()
 ```
 
 返回，不 lower、不 LLVM、不链接。
@@ -393,7 +393,7 @@ gen.front_checked_end()
 ```text
 ast.ast_view()
 check.verify_module()
-gen.front_checked_verify()
+support.front_checked_verify()
 ast.checked_module_capture()      → CheckedModule 快照
 mb_verify_checked_snapshot()
 firc_load()                       → 函数级 IR 缓存
@@ -428,7 +428,7 @@ obj/<project>-<module>.o
 5. 成功后：
    - `firc_check_commit()`；
    - `firc_commit()`；
-6. `gen.front_checked_end()`。
+6. `support.front_checked_end()`。
 
 ---
 
@@ -562,11 +562,11 @@ C4 起 `YH_CACHE` 指向全局 content store（默认平台缓存目录，`off` 
 
 | 边界 | 当前事实 | 调整时看这里 |
 | --- | --- | --- |
-| 前端阶段 | `parse` 边解析边做语义动作并写 AST | `parse_*`、`gen.sem_*`、`ast.ast_expr_set_semantics` |
+| 前端阶段 | `parse` 边解析边做语义动作并写 AST | `parse_*`、`check.sem_*`（原 `gen.sem_*`）、`ast.ast_expr_set_semantics` |
 | `check` | 只读结构 verifier | `check/verify.yh`、`mb_emit_indexed_module` 的 verify 段 |
 | CT 展开 | 在 parse 文件子遍中完成 | `parse_comptime`、`parse_ct_layout`、`mb_pass2_file` mode 2–4 |
-| `gen` 耦合 | 15/17 模块依赖；token/类型/状态/基础设施/target 混居 | `gen/model/symbols/state/buffer/target/sem_*` |
-| 状态 | `TaskCtx` 172 字段；`GenState` 全局 | `gen/state.yh`、`state_init`、worker 初始化 |
+| `gen` 耦合 | 已消除（2026-11-07 `gen` 删除）：token/类型/状态/基础设施/target 分散到 `support`/`check`，越界由 `arch-check` 防守 | `support/*`、`check/symbols`、`check/ct_bind` |
+| 状态 | `TaskCtx` 字段 0；会话状态集中在 `support.session()`（`SessionCtx`），模块级可变 `let` 203 | `support/base.yh`、`state_init`、worker 初始化 |
 | 接口 | `.s.i`/`.s.ct` 读写仍在 `parse` | `parse/iface*`、`mb_*_emit` |
 | 项目模型 | `proj` 只读；`build` 负责装载/扫描 | `build/project_index`、`proj_*` |
 | 缓存 | 模块/函数 check/函数 IR/链接分散 | `build/module_cache`、`function_ir_cache`、`link/link_cache` |
@@ -578,8 +578,8 @@ C4 起 `YH_CACHE` 指向全局 content store（默认平台缓存目录，`off` 
 
 | 调整 | 会动的阶段 | 对应 todo |
 | --- | --- | --- |
-| parse 只出语法 AST | §5.2–5.6 的 pass1/pass2、AST 写入、`gen.sem_*` | F1–F2 |
-| check 接全部语义 | §5.7 的 verify、`gen.sem_*` 去向、`CheckedModule` | GEN2 / F1–F5 |
+| parse 只出语法 AST | §5.2–5.6 的 pass1/pass2、AST 写入、`check.sem_*` | F1–F2 |
+| check 接全部语义 | §5.7 的 verify、`check.sem_*` 去向、`CheckedModule` | GEN2 / F1–F5 |
 | CT 展开独立 | §5.4 的 mode 2–4、`parse_comptime`、`parse_ct_layout` | F4 |
 | AST/HIR/CheckedModule 分层 | §5.2、§5.7、§5.9；HIR 留在 `check`，不建模块 | F1/F5/F6 |
 | token 词汇/`PDecl`/状态/`err_tok` 归 token | `gen/model` 的 `TK_*`/`Tok`/`PDecl`、`c_pos`/`c_toks`、lex/parse/ast/proj | GEN1 |
@@ -587,7 +587,7 @@ C4 起 `YH_CACHE` 指向全局 content store（默认平台缓存目录，`off` 
 | TaskCtx 拆分 | §1.1 会话、§5.1 worker 初始化 | GEN1/GEN2/GEN4 |
 | support 落地（工具/诊断/目标/ABI 常量） | §2.1、§3、§5、§6 | GEN1 |
 | `fail`/`err_lc` 同归 support，不拆 diag | §5 诊断、`buffer.yh` | GEN1 |
-| gen 删除 | 全部 import gen 的调用面 | GEN4 |
+| gen 删除 | 全部 import gen 的调用面 | GEN4（已完成 2026-11-07） |
 | cache 收拢 | §4.2、§5.6、§5.9、§6.3 | 11-05 目标/后续 |
 | iface 移出 parse | §5.1、§5.5、§5.6 | F2/F3 |
 

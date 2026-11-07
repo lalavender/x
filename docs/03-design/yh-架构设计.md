@@ -1,12 +1,18 @@
 # yh 编译器架构设计
 
-修改时间：2026-11-06
+修改时间：2026-11-08
 
 状态：**现行唯一的系统/编译器架构文档**。本文合并并取代 2026-09-30 至 2026-11-05
 期间的架构分析、目标设计、代码复核、差距分析与迁移方案；被合并文件的清单见
 [附录 A](#附录-a已合并文档)。历史版本仍可从 git 历史取回。
-基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1 + F1），`compiler/` 19 个 yh 模块 / 171 个
-`.yh` / 60,545 行 / 93 条依赖边；`python3 tools/arch-check.py` 全绿。
+基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1–GEN4 + F4），`compiler/` 18 个 yh 模块 /
+178 个 `.yh` / 60,737 行 / 78 条依赖边（`python3 tools/arch-check.py` 2026-11-08
+实测，全绿；60,737 含临时诊断提交的 16 行，清理后为 60,721，见 `docs/todo.md` DR2）。
+
+> **阅读约定（2026-11-08）**：`compiler/gen/` 已于 2026-11-07 删除（模块 19→18，
+> `import gen` 归零）。文中凡以现在时描述 `gen` 的段落（§0.2、§4.1、§5.2、
+> §6.3.1–§6.3.2）都是该日期之前的**历史快照**，只解释当时的拆分动因；现行约束
+> 以 §3.1 允许边与 §6.3 矩阵为准——它们与 `tools/arch-check.py` 的 `ALLOWED` 逐条一致。
 
 > **文档边界**：本文只回答“系统怎么分层、模块负责什么、阶段契约是什么、下一步
 > 怎么改”。语言语义、标准库 API、平台 ABI、编码规范、测试语法仍是独立领域文档，
@@ -16,12 +22,14 @@
 
 ## 0. 结论摘要
 
-1. **分层方向是对的**：17 个模块的显式 import 图无环，`gen` 与 `ir` 是依赖根，
+1. **分层方向是对的**：18 个模块的显式 import 图无环，`support` 与 `ir` 是依赖根
+   （`gen` 已于 2026-11-07 删除），
    `proj` 是项目数据层，`build` 是总装层，`cmd` 只做参数映射与分派。依赖矩阵由
    `tools/arch-check.py` 强制。
 2. **真正的乱不在依赖环，而在“名字、所有权、契约”三件事**：
-   - `gen` 同时是基础设施、语义模型、语义分析、C ABI 与平台层，15/17 个模块依赖它，
-     183 个 `pub fn`；拆分决定见 [ADR-0021](../adr/0021-yh-gen职责拆分.md)；
+   - （历史）`gen` 曾是基础设施、语义模型、语义分析、C ABI 与平台层，15/17 个模块
+     依赖它、183 个 `pub fn`；拆分决定见 [ADR-0021](../adr/0021-yh-gen职责拆分.md)，
+     已于 2026-11-07 实施完毕（值内核迁 `support/value_kernel.yh`）；
    - `parse` 不是纯 parser，它边解析边做语义动作并写 AST；`check` 当前仍是只读
      verifier；`ast` 不只装 AST，还装 `CheckedModule` 快照；
    - 会话状态分散在 `gen.state`、`proj.ctx`、`build.BuildCtx`、`link.context`，
@@ -70,7 +78,7 @@ argv
                  └─ fork worker（上限 4，COW 继承只读项目快照）
                      lex
                        → parse 两遍（pass1 签名 / pass2a 全局 / pass2b 函数体）
-                       → gen.sem_*（语义表、类型布局、常量折叠）
+                       → check/symbols（语义表、类型布局、常量折叠；原 gen.sem_*）
                        → ast 捕获 CheckedModule（arena + 绑定 + 快照）
                        → check 只读校验
                        → lower：CheckedModule → ir.IRModule（函数级命中缓存）
@@ -117,9 +125,9 @@ bin/yh-<平台>-<架构>（Release 种子）
   COW 继承只读项目/token 快照，语义状态各自隔离。
 - `lld` 继续放一次性子进程，不进入共享线程；LLVM 每次调用使用私有
   Context/TargetMachine。
-- `gen.G()` 已归零；跨模块状态经 `gen.task()`/`gen.stats()`/`proj.ctx()`/
-  `build.BuildCtx`/`link.context` 访问。但模块级可变 `let` 仍有 174 处，
-  **“G() 归零”不等于“状态可线程化”**。
+- `gen` 已删除（2026-11-07）：跨模块状态经 `support.session()`/`proj.ctx()`/
+  `build.BuildCtx`/`link.context` 访问。但模块级可变 `let` 仍有 203 处
+  （`tools/arch-check.py` 2026-11-08 实测），**“会话入口显式化”不等于“状态可线程化”**。
 - 线程池/常驻编译/LSP 的前置：AST、CT、诊断、缓存全部显式上下文化；当前不做。
 
 ---
@@ -129,8 +137,8 @@ bin/yh-<平台>-<架构>（Release 种子）
 ### 2.1 目录表
 
 **逐模块职责、规模、依赖与内部拆分的唯一清单已迁到
-[`yh-模块职责-当前实现.md`](yh-模块职责-当前实现.md)**（2026-11-06 实测：
-18 个模块 / 178 个文件 / 60,665 行 / 79 条依赖边）。
+[`yh-模块职责-当前实现.md`](yh-模块职责-当前实现.md)**（2026-11-08 实测：
+18 个模块 / 178 个文件 / 60,737 行 / 78 条依赖边）。
 
 本节只保留分层意图：`support`/`ir` 是无依赖底座，`token`/`cache`/`lex`/`proj`/`ast`/
 `comptime` 依次叠到语义层，`check` 是语义中心，`parse` 是前端装配，
@@ -140,8 +148,8 @@ bin/yh-<平台>-<架构>（Release 种子）
 ### 2.2 一句话记忆
 
 **当前前端是 `lex → parse(语义动作 + ast 捕获) → check(验证) → lower`。
-`support` 是共享底座（状态与纯规则都在这里），`check` 是语义中心，`gen` 只剩
-编译期值内核的 3 个函数；`build` 是总装车间，`proj` 是数据层，`link` 是工具链
+`support` 是共享底座（状态与纯规则都在这里），`check` 是语义中心（值内核在
+`support/value_kernel.yh`，`gen` 已删除）；`build` 是总装车间，`proj` 是数据层，`link` 是工具链
 调用层，`cmd` 是薄入口。**
 
 （历史上「`parse` 纯语法化」的目标已评估为前端重构级，改为「核收缩」路线并落地：
@@ -168,7 +176,7 @@ lex        → support, token
 cmdline    → support, libs
 proj       → support, token
 ast        → support, token, proj, comptime
-comptime   → support, token, proj
+comptime   → support, token
 check      → support, ir, token, cache, proj, ast, comptime
 builtin    → support, check
 parse      → support, ir, token, lex, proj, ast, comptime, check
@@ -209,8 +217,8 @@ testkit   cmd               ← 测试 runner / CLI 分派
 ```
 
 - `support` 必须是叶子：任何反向依赖都会成环（`token` 也只能到 `support`）。
-- `comptime` 不得依赖 `check`（`check → comptime` 已存在）——这条决定了 `gen`
-  必须留在 `check` 之下。
+- `comptime` 不得依赖 `check`（`check → comptime` 已存在）——这条决定了它
+  必须留在 `check` 之下（2026-11-07 `gen` 删除后，该位置由 `support`/`token` 承载）。
 - `ir` 不得 import 任何前端模块；`backend` 不得 import `ast`/`parse`/`comptime`/`check`；
   `lower` 不得 import `parse`/`build`，只消费 `check` 的 `CheckedModule` 契约；
   `ast` 不得反向 import `lower`/`check`。
@@ -258,7 +266,7 @@ testkit   cmd               ← 测试 runner / CLI 分派
 | --- | --- | --- | --- |
 | 词法 | 源字节 → token、源位置 | 一次扫描；词法错误终止该单元 | `lex/` |
 | 语法 | token → 文件 AST、声明/函数索引 | 保留源位置与语法结构，不解析符号 | `parse/`（当前同时做语义动作；目标纯语法） |
-| 语义 | AST + 模块环境 + 目标数据模型 → 绑定和类型注解 | 解析名字、导入、类型、常量、成员和调用 | 当前 `parse/` + `gen.sem_*`；目标 `check.resolve/full` |
+| 语义 | AST + 模块环境 + 目标数据模型 → 绑定和类型注解 | 解析名字、导入、类型、常量、成员和调用 | 当前 `parse/` + `check/symbols.yh`（原 `gen.sem_*`）；目标 `check.resolve/full` |
 | check | 带注解的表示 → `CheckedModule`/`CheckedFunction` | 检查类型、转换、控制流、可见性、初始化 | `check/`（当前只读 verifier；目标语义分析入口） |
 | IR | 受检函数/全局 → typed SSA + 显式内存操作 | 只接收受检函数；不接收未受检函数 | `lower/` → `ir/` |
 | 后端 | SSA + 目标描述 → LLVM 文本/对象 | 语言语义保护、ABI 分类、LLVM 合法化 | `backend/` |
@@ -351,10 +359,11 @@ testkit   cmd               ← 测试 runner / CLI 分派
 | 目标数据模型、ABI 描述 | 目标实例 | 初始化后只读 |
 | 调度、缓存记录、输出提交 | 构建协调者 | 统一处理依赖和提交 |
 
-当前实现有 174 个模块级可变 `let`：`comptime` 49、`ast` 43、`parse` 19、`gen` 18、
-`build` 15、`testkit` 9，其余模块少量。判据：**fork 后子进程是否允许各自不同**。
+2026-11-08 实测有 203 个模块级可变 `let`（`tools/arch-check.py` 输出；`gen` 已删除，
+其原 18 处随值内核并入 `support`/`check`）。判据：**fork 后子进程是否允许各自不同**。
 是则必须是每任务态（`TaskCtx` 或模块私有上下文）；不是则归构建会话/目标/符号表。
-`gen.G()` 已归零，但字段读次数仍高，不能靠“加窄口”代替状态归位。
+状态入口已归位到 `support`/`proj`/`build`/`link` 的显式上下文，但字段读次数仍高，
+不能靠“加窄口”代替状态归位。
 
 ### 4.6 对象粒度（结论）
 
@@ -400,10 +409,10 @@ testkit   cmd               ← 测试 runner / CLI 分派
 | 编号 | 问题 | 证据 | 状态 |
 | --- | --- | --- | --- |
 | S1 | 驱动与内核未分离 | 已大体解决：`build`/`proj`/`link`/`cmd` 拆分；`testkit → build` 仍有 15 处（8 个符号）内部引用 | 部分 |
-| S2 | 状态隐式且进程级 | 174 个模块级 `let`；`G()` 已归零但字段读仍多；无线程隔离 | 部分 |
+| S2 | 状态隐式且进程级 | 203 个模块级 `let`（2026-11-08）；会话入口显式化但字段读仍多；无线程隔离 | 部分 |
 | S3 | 产物契约未版本化 | 六处独立常量；`.s.i` 已支持区间，IR/缓存各自相等判定 | 部分 |
 | A1 | `build` 仍过载 | 6,990 行；project*/toml/cache 可下沉 | 未解决 |
-| A3 | `gen` 无内部分层 | 183 `pub fn`、14 入度、基础设施+语义+ABI+平台混居 | 未解决 |
+| A3 | `gen` 无内部分层 | 183 `pub fn`、14 入度、基础设施+语义+ABI+平台混居 | 已解决（2026-11-07 `gen` 删除） |
 | A4 | 文档与代码漂移 | 2026-11-06 已把 `compiler/README.md` 模块表改为实测 17/158/59,815；README 断言尚未加入 `arch-check` | 部分 |
 | A6 | `testkit → build` 泄漏 | 15 处（8 个符号）`mb_*`/`cmd_*` 直接引用 | 未解决 |
 | A7 | 平台适配靠文件复制 | `clock`/`project_dir`/`argv`/`console`/`llvm_bind`/`*_runtime` 各 4 份 | 未解决 |
@@ -458,45 +467,44 @@ testkit   cmd               ← 测试 runner / CLI 分派
 P5 是刻意克制：不引入通用插件框架、全仓库查询数据库或常驻守护进程。扩展点应是
 编译期确定的表，不是运行时加载的 `.so`——后者会破坏可重现构建、自举闭包与固定点。
 
-### 6.2 目标分层（17→18 模块）
+### 6.2 分层（18 模块，当前实现）
 
 ```text
 L4 入口     cmd（一命令一文件，导出面只有 main）
 L3 驱动     build（纯流水线编排）  testkit  proj（项目模型/扫描/TOML/产物路径）
 L2 前端     lex  parse  ast
-L2 语义     check（语义动作 + 受检契约）  gen（类型/符号/值规则内核）  comptime（CT 求值）
+L2 语义     check（语义动作 + 受检契约）  comptime（CT 求值）；值内核在 support/value_kernel.yh
 L1.5 变换   lower
 L1 中端     ir（不依赖任何 yh 模块）
 L1 后端     backend（LLVM 描述）  link（工具链调用，缓存移出）
 L0 支撑     support（含诊断/目标身份）  token
 ```
 
-### 6.3 目标依赖矩阵（2026-11-06，ADR-0021）
+### 6.3 允许依赖矩阵（2026-11-08，与 `tools/arch-check.py` 的 `ALLOWED` 逐条一致）
 
 | 模块 | 允许依赖 |
 | --- | --- |
-| support | 无 |
-| ir | 无 |
+| support / ir | 无 |
 | token | support |
-| cache | support, token, hash |
+| cache | hash, support, token |
 | lex | support, token |
-| proj | support, token（+ 评估后可加 libs/toml） |
-| comptime | support, token, proj（纯 CT IR 执行器；不得 import check/gen/ast） |
-| ast | token, support（F1 后；过渡期含 comptime/proj/ir/gen） |
-| check | ast, comptime, token, support, proj, gen, cache, ir |
-| parse | token, ast, lex, support（F2 后；过渡期含 check/proj/gen/comptime/ir） |
-| lower | check, ast, ir, token, support, proj, cache |
-| backend | ir, support |
-| builtin | check, support |
+| proj | support, token |
+| comptime | support, token |
+| ast | support, token, proj, comptime |
+| check | support, ir, token, cache, proj, ast, comptime |
+| builtin | support, check |
+| parse | support, ir, token, lex, proj, ast, comptime, check |
+| lower | support, ir, token, cache, proj, ast, check |
+| backend | support, ir |
 | link | support, proj, backend, hash |
-| build | ast, backend, builtin, cache, check, comptime, hash, ir, lex, libs, link, lower, parse, proj, support, token（GEN3 前另含 gen） |
-| testkit | build, parse, link, proj, support, token |
+| build | support, ir, token, cache, lex, proj, ast, comptime, check, builtin, parse, lower, backend, link, hash, libs |
+| testkit | support, token, proj, ast, parse, link, build |
 | cmdline | support, libs/cli |
-| cmd | 全部（入口唯一例外） |
+| main（cmd） | 全部（入口唯一例外） |
 
-### 6.3.1 当前依赖实测与两条解锁链（2026-11-06）
+### 6.3.1 历史快照：依赖实测与两条解锁链（2026-11-06；`gen` 已于 2026-11-07 删除）
 
-`gen` 仍是 13 个模块的依赖，但**按被依赖内容分成五类**（实测符号引用数，
+当时 `gen` 仍是 13 个模块的依赖，按被依赖内容分成五类（实测符号引用数，
 列内为该 gen 文件贡献的符号数）：
 
 | 模块 | model | state | symbols | value_rules | static_data | front_stage | abi_model |
@@ -566,8 +574,8 @@ TaskCtx 按所有者拆（SemaCtx→check / ParseCtx→parse / SourceCtx→suppo
 用 codegraph 复核（`codegraph impact <symbol>`）应作为后续每次拆分的前置检查；
 它比 `rg` 多给出「受影响的函数集合」，便于判断一次拆分要改多少处。
 
-**与 ADR 的对应**：链 A = F4 + F3 剩余；链 B = GEN4。两者都完成后 `gen`
-只剩 `model` 的别名与极薄兼容层，即可删除（模块数 19 → 18）。
+**与 ADR 的对应**：链 A = F4 + F3 剩余；链 B = GEN4。两者均已完成（2026-11-07），
+`gen` 已删除（模块数 19 → 18），当前 78 条依赖边。
 
 现有 `import gen` 的边按符号实际归属 1:1 改写为 `import support`/`token`/
 `check`；除表中列出的边外不得新增。过渡期临时边

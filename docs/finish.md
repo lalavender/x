@@ -1,12 +1,110 @@
 # finish
 
-滚动日志：只保留最近三天（当前为 2026-11-04 ～ 2026-11-06）的交付记录，靠前条目为最新状态。
+滚动日志：只保留最近三天（当前为 2026-11-06 ～ 2026-11-08）的交付记录，靠前条目为最新状态。
 更早条目按批次归档在
 [finish 历史归档](01-finished/finish-历史归档-2026-09-27至2026-10-21.md)
 （文件名区间是首档范围，内容已含 2026-10-22 ～ 2026-11-03 的两批迁入条目）；新增条目写在最前。
 2026-11-06 清理：此前文件里残留 2026-09-27 ～ 2026-10-21 的 381 条归档副本
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
+
+## 2026-11-08 文档刷新：架构/模块职责对齐实测，测试红灯入账
+
+**结果**：按 2026-11-08 的代码与实测刷新文档，未改业务代码。
+
+- `docs/03-design/yh-架构设计.md`：基线改为 18 模块 / 178 文件 / 60,737 行 /
+  78 条依赖边（`arch-check` 实测）；新增「阅读约定」：`gen` 已于 2026-11-07
+  删除，§0.2、§4.1、§5.2、§6.3.1–§6.3.2 中描述 `gen` 的段落为历史快照；
+  §0、§1.2、§1.4、§2.1、§2.2、§3.1、§3.2、§4.1、§4.5、§5.2、§6.2、§6.3
+  按现行实现改正；§6.3 允许矩阵改为与 `tools/arch-check.py` 的 `ALLOWED`
+  逐条一致（`comptime` 不再依赖 `proj`）；§6.3.1 标为历史快照。
+- `docs/03-design/yh-模块职责-当前实现.md`：头部改为 178 文件 / 60,737 行 /
+  78 条依赖边（2026-11-08）；`comptime` 行的依赖改为 `support, token`；
+  §3 边数、§2 与 §6 的逐模块规模同步重测（60,737 含临时诊断 16 行，
+  清理后 60,721）。
+- `docs/todo.md`：新增「2026-11-08 文档刷新发现」DR1–DR5。
+- `docs/finish.md`：本条目与下方四条 11-07/11-08 记录。
+
+**验证**：`python3 tools/arch-check.py` 通过（18 模块 / 178 文件 / 78 边 /
+203 模块级可变 `let` / `import gen` 0 / `gen pub fn` 0）；
+`python3 tools/yh-code-stats.py` 178 文件 / 60,737 行（含临时诊断 16 行）；
+`just build` 通过
+（含一次 `YH_CACHE=off`）。`just test` 在最后一门
+`tests/selfhost/llvm-global-cache.py` 红（DR1），其前各层通过：语法正例
+82/82、反例 49/49，运行语料通过 370/372（跳过 2），modules 与 build-cache、
+opt-level 4/4，libs 140，compiler-tests 8/8，fmt 10/10。
+
+**影响**：文档数字与实测对齐；测试红灯和临时诊断代码进入 todo，不再被
+「F4 完成」的表述掩盖。
+
+**遗留**：DR1–DR5（见 `docs/todo.md`）。
+
+## 2026-11-07 ~ 11-08 gen 职责拆分收尾：模块删除（19→18）
+
+**结果**（提交 `52b4e66`、`01cec48`、`218d26c`、`979a0c0`）：删除
+`compiler/gen/`，值内核（`vk_*` + 消息表）下沉 `support/value_kernel.yh`，
+`check/value_kernel.yh` 与 `comptime/ct_diag.yh` 各自适配诊断；切断
+`comptime → proj` 边（文件表窄口改由 `parse` 传入）；新增
+`docs/03-design/yh-模块职责-当前实现.md` 并刷新架构文档；新增
+`tests/modules/projects/gen-split` fixture 覆盖拆分后六组公开面。
+
+**验证**（2026-11-08 复跑）：`python3 tools/arch-check.py` 通过，18 模块 /
+178 文件 / 78 边 / `import gen` 0；`just build` 通过。`just test` 后续红灯
+见 DR1，且无证据表明与本次拆分直接相关；红灯清除前不宣称整体完成。
+
+**影响**：模块数 19→18，所有 `import gen` 归零；`tools/arch-check.py` 的
+`ALLOWED` 删除 `gen` 项。
+
+**遗留**：DR1/DR2；`docs/todo.md` 记的「2026-11-06 完成」与删除提交日期
+（2026-11-07 23:41）不一致，待作者确认（DR4）。
+
+## 2026-11-08 comptime 镜像两修：写回指针视图 + 标签表直接基址
+
+**结果**（提交 `bf404ab`、`804dc54`）：`comptime/ct_facts.yh` 的镜像行写回
+改为指针视图（修复 CI 上编译期数组长度/结构体布局失效）；`check/ct_bind.yh`
+的字符串标签/枚举成员表改为直接持有基址（修复编译期字符串实参崩溃：读侧曾把
+标签号当二级指针）。`tests/modules/projects/gen-split` 增加对应用例。
+
+**验证**：两笔提交由 CI 失败触发；本地未确认当时的 CI 结论。2026-11-08 本机
+复跑 `just build` 通过，`just test` 红在 DR1（函数缓存预热路径）。本条只记
+「代码已提交、本机门禁未全绿」，不外推为全量通过。
+
+**影响**：改动编译器自身的 CT 表绑定与镜像写回，属于编译器内部行为；
+下游绿灯待 DR1 清除后补记。
+
+**遗留**：DR1（待确认是否与本次镜像改基址相关）。
+
+## 2026-11-08 本机固定 LLVM 闭包重建与门禁实测
+
+**结果**：本机 `tmp/llvm-migration/llvm-host-darwin-aarch64` 缺
+`libyh-llvm-bridge.a`，`just build` 报「库文件不存在或无法解析（组 bridge）」。
+根因是 Command Line Tools 默认 SDK 27 的 `libSystem.tbd` 含 `arm64e.x1`，固定
+LLVM 21.1.8 的 lld 无法解析。用 `SDKROOT=<Xcode>/MacOSX26.5.sdk` 重建 SDK
+（3,368 步）后，`just llvm-host` 返回 `reused: true`，`just build` 通过。
+
+**验证**：`just llvm-host`（bridge SHA-256 `52b60731…`，probe 输出 arm64
+Mach-O）；`just build` 3 次成功（其中一次 `YH_CACHE=off`）；`just test` 见
+DR1。`just code-stats`、`arch-check` 通过。
+
+**影响**：本机恢复可构建/可测试状态；闭包仍在 `tmp/`（不入库）。
+
+**遗留**：`just llvm-host` 不自动在 26.x/27 SDK 间择一，换机仍需手工设
+`SDKROOT`（DR5）。
+
+## 2026-11-08 项目级 pi：ste-zh 汇报规范 + docs-sync 模板补句
+
+**结果**：把用户级 `ste` skill 复制进项目 `.pi/skills/ste-zh/`（7 个文件，
+48K）；`SKILL.md` 的 `name` 由 `ste` 改为 `ste-zh`、触发词 `/ste` 改为
+`/ste-zh`，避免与 `~/.agents/skills/ste` 同名冲突（pi 遇同名只保留先发现者
+并告警）。`.pi/prompts/yh-docs-sync.md` 的「事实清单」步骤补「按照 ste-zh
+skills 的要求进行」。
+
+**验证**：frontmatter 合法（`name` 小写/连字符、与目录同名、`description` 在
+1024 字符内），正文引用的 `references/terminology.md` 存在；未起会话验证加载，
+需 `/reload` 或新会话在 project trust 后生效。
+
+**影响**：仅本地 agent 配置。`b6e4578` 已把 `.pi/skills/` 加入 `.gitignore`，
+文件不入库；需要团队共享时应改回入库或做成 pi 包。
 
 ## 2026-11-06 测试并行试验回退
 
