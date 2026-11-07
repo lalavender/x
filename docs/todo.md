@@ -232,8 +232,13 @@ lex → parse(纯语法) → AST
   **277 处**（`type_id` 104、`ival` 71、`sym` 31…），语法决策依赖语义结果，
   故「parse 纯语法 AST」属前端重构级，**不按原计划推进**；改为「核收缩」
   路线（`gen` 收缩为 comptime 必需的值语义内核，其余语义动作迁 `check`）。
-- [ ] **F2 / K1–K3 核收缩**：`gen` 只留 3 个折叠函数（pub fn ≤4），其余 24 个
-  语义动作迁 `check` → 方案见
+- [x] **F2 / K1–K2 核收缩（2026-11-06 完成）**：`gen` **28 → 3 pub fn**、
+  1,026 → **347 行**。25 个语义动作（`ty_*`/`sym_*`/`scope_*`/`fold_*`/
+  `sem_parse_number`/`sem_promote`/`sem_init_tables`/`prelude_add`）迁
+  `check/symbols.yh`（626 行）；`sem_lit_fits` 迁 `support`（纯谓词）。
+  `gen` 只留 comptime 必需的 `sem_can_assign` + 两个折叠函数。
+  `import gen` **6 → 3**（check/comptime/parse）、`parse→gen` **15 → 1**、
+  `builtin` 改依赖 `check`。判据见
   `docs/02-plan/yh-F2-parse纯语法化方案-2026-11-06.md`
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。

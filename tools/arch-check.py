@@ -46,7 +46,7 @@ ALLOWED = {
     # comptime 只有一处窄口读（待定数组长度时的文件下标越界检查），
     # 走 proj.file_count() 而不是自己拿项目表。
     "comptime": {"gen", "proj", "token", "support"},
-    "builtin": {"gen", "support"},
+    "builtin": {"gen", "support", "check"},
     # proj：项目/模块/文件表 + 目标/构建配置（2026-10-26 B1-1 自 gen/build 拆出）。
     # 它是前端与构建层共用的数据层，只允许依赖 gen；一旦反向依赖就成环。
     "proj": {"gen", "support", "token"},
@@ -103,12 +103,7 @@ GEN_SYMBOLS_FOR_COMPTIME = {
 # 目标：parse 只保留「必须带 token 位置诊断的语义动作」；常量/类型/诊断入口
 # 都必须走 support / token。注入新符号会被自测抓到。
 PARSE_SYMBOLS_FOR_GEN = {
-    # 符号/作用域表写入（带 token 位置诊断）
-    "sym_push", "sym_push_pool", "sym_declared_before", "scope_push", "scope_pop",
-    # 类型表写入与 C ABI 判定（带诊断）
-    "ty_push", "ty_ptr", "ty_array", "ty_slice", "ty_sig_param", "ty_fn_abi",
-    "ty_cabi_param", "ty_declare_name", "ty_add_name_attrs",
-    # 隐式转换判定
+    # 仅剩编译期值内核的兼容性判定（comptime 也要用，必须留在 check 之下）
     "sem_can_assign",
 }
 

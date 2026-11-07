@@ -511,6 +511,15 @@ def copy_proj(src, dst):
             '[project]\nos = "host"\narch = "host"\nname = "proj"\nsource = "."\n'
             '[dependencies]\nsupport = { path = "../support" }\n'
             'token = { path = "../token" }\ngen = { path = "../gen" }\n')
+        # F2-K2：语义动作（ty_*/sym_*/scope_*）已从 gen 迁到 check，前端 fixture
+        # 需要连 check 及其依赖（ast/comptime）一起拷贝，否则 import check 解析失败。
+        for mod, deps in (("ir", ""), ("cache", "support token gen"), ("comptime", "support token proj gen"), ("ast", "support token proj comptime gen"),
+                          ("check", "support token proj ast comptime gen ir cache")):
+            shutil.copytree(ROOT / "compiler" / mod, dst / mod)
+            lines = [f'[project]', 'os = "host"', 'arch = "host"', f'name = "{mod}"', 'source = "."', '', '[dependencies]']
+            for dep in deps.split():
+                lines.append(f'{dep} = {{ path = "../{dep}" }}')
+            (dst / mod / "project.toml").write_text("\n".join(lines) + "\n")
         # 链 B：lex 自带 LexCtx（词法游标），front_stage 初始化时会复位它。
         shutil.copytree(ROOT / "compiler" / "lex", dst / "lex")
         (dst / "lex" / "project.toml").write_text(
