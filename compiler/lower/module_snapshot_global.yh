@@ -3,7 +3,6 @@ import token
 import check
 import support
 import ast
-import gen
 import ir
 
 // checked_lower_object_type：为全局对象递归复制受检布局；标量与指针复用 canonical
@@ -11,30 +10,30 @@ import ir
 // 返回模块类型下标，-2 为本片不支持（浮点/切片等），-1 为分配或一致性错误。
 fn checked_lower_object_type(l *CheckedLower, source_type int, depth int) int {
     if (source_type < 0 || source_type >= l.store.type_n || depth > 256) { return -1 }
-    let ty gen.CType = l.store.types[source_type]
-    if (ty.kind == gen.TY_FN) { return checked_lower_module_type(l, source_type) }
+    let ty support.CType = l.store.types[source_type]
+    if (ty.kind == support.TY_FN) { return checked_lower_module_type(l, source_type) }
     if (l.source_type_map[source_type] >= 0) { return l.source_type_map[source_type] }
-    if (ty.kind == gen.TY_VOID) { return -2 }
+    if (ty.kind == support.TY_VOID) { return -2 }
     let layout ir.IRModuleType
     layout.size = ty.size; layout.align = ty.align; layout.elem = -1
     let fields *ir.IRModuleField = 0
     let count int = 0
-    if (ty.kind == gen.TY_ARRAY) {
+    if (ty.kind == support.TY_ARRAY) {
         layout.kind = ir.IR_MODULE_TY_ARRAY; layout.count = ty.len
         layout.elem = checked_lower_object_type(l, ty.elem, depth + 1)
         if (layout.elem < 0) { return layout.elem }
-    } else if (ty.kind == gen.TY_SLICE) {
+    } else if (ty.kind == support.TY_SLICE) {
         layout.kind = ir.IR_MODULE_TY_SLICE; layout.count = 0
         layout.elem = checked_lower_object_type(l, ty.elem, depth + 1)
         if (layout.elem < 0) { return layout.elem }
-    } else if (ty.kind == gen.TY_STRUCT || ty.kind == gen.TY_UNION) {
-        layout.kind = ty.kind == gen.TY_STRUCT ? ir.IR_MODULE_TY_STRUCT : ir.IR_MODULE_TY_UNION
+    } else if (ty.kind == support.TY_STRUCT || ty.kind == support.TY_UNION) {
+        layout.kind = ty.kind == support.TY_STRUCT ? ir.IR_MODULE_TY_STRUCT : ir.IR_MODULE_TY_UNION
         count = ty.len
         fields = check.checked_zero_rows(count, sizeof(ir.IRModuleField)).to_type(*ir.IRModuleField)
         if (count > 0 && fields == 0) { return -1 }
         let i int = 0
         for i < count {
-            let field gen.SField = l.store.fields[ty.sub + i]
+            let field support.SField = l.store.fields[ty.sub + i]
             let mapped int = checked_lower_object_type(l, field.type_id, depth + 1)
             if (mapped < 0) { free(fields.to_type(*void)); return mapped }
             fields[i].type_id = mapped; fields[i].offset = field.offset
@@ -53,13 +52,13 @@ fn checked_lower_object_type(l *CheckedLower, source_type int, depth int) int {
 fn checked_lower_global_value(l *CheckedLower, data *u8, source_type int,
     expr_id int, depth int) int {
     if (depth > 256 || expr_id < 0 || expr_id >= l.store.expression_n) { return -2 }
-    let ty gen.CType = l.store.types[source_type]
+    let ty support.CType = l.store.types[source_type]
     let node ast.AstExpr = l.store.expressions[expr_id]
     l.last_token = node.first
     let kind int = checked_lower_kind(l.store, source_type)
     if (kind >= 0) {
         if (node.is_const == 0 || ty.size <= 0 || ty.size > 8) { return -2 }
-        if (ty.kind == gen.TY_PTR && node.const_bits != 0) {
+        if (ty.kind == support.TY_PTR && node.const_bits != 0) {
             l.reason = "全局指针非零初始化需要指针重定位"; return -2
         }
         let bits u64 = node.const_bits.to_type(u64)
@@ -73,7 +72,7 @@ fn checked_lower_global_value(l *CheckedLower, data *u8, source_type int,
     if (node.kind == ast.AST_EXPR_PRIMARY && node.child0 >= 0) {
         return checked_lower_global_value(l, data, source_type, node.child0, depth + 1)
     }
-    if (ty.kind == gen.TY_ARRAY && node.kind == ast.AST_EXPR_ARRAY) {
+    if (ty.kind == support.TY_ARRAY && node.kind == ast.AST_EXPR_ARRAY) {
         let pos int = ty.len
         let walk int = node.child0
         let stride int = l.store.types[ty.elem].size
@@ -89,14 +88,14 @@ fn checked_lower_global_value(l *CheckedLower, data *u8, source_type int,
         }
         return pos == 0 ? 0 : -1
     }
-    if (ty.kind == gen.TY_STRUCT && node.kind == ast.AST_EXPR_STRUCT_INIT) {
+    if (ty.kind == support.TY_STRUCT && node.kind == ast.AST_EXPR_STRUCT_INIT) {
         let walk int = node.child0
         for walk >= 0 {
             if (walk >= l.store.expression_n) { return -1 }
             let link ast.AstExpr = l.store.expressions[walk]
             if (link.kind != ast.AST_EXPR_STRUCT_FIELD || link.op < ty.sub
                 || link.op >= ty.sub + ty.len) { return -1 }
-            let field gen.SField = l.store.fields[link.op]
+            let field support.SField = l.store.fields[link.op]
             let result int = checked_lower_global_value(l, data + field.offset,
                 field.type_id, link.child1, depth + 1)
             if (result != 0) { return result }
@@ -112,16 +111,16 @@ fn checked_lower_global_value(l *CheckedLower, data *u8, source_type int,
 // 因此 CT 聚合或接口重放的旧数据不会被误当成零。失败由 lower_module 回收候选。
 fn checked_lower_global_decl(l *CheckedLower, row int) int {
     let node ast.AstDecl = l.store.declarations[row]
-    let sym gen.CSym = l.store.symbols[node.sym_id]
-    let ty gen.CType = l.store.types[sym.type_id]
+    let sym support.CSym = l.store.symbols[node.sym_id]
+    let ty support.CType = l.store.types[sym.type_id]
     if (node.sym_id >= 0 && node.sym_id < l.store.symbol_n
         && l.global_map[node.sym_id] != 0) { return 0 }
-    if (sym.kind == gen.SYM_CONST && checked_lower_is_aggregate(l.store, sym.type_id) == 0) {
+    if (sym.kind == support.SYM_CONST && checked_lower_is_aggregate(l.store, sym.type_id) == 0) {
         return 0
     }
     l.function.decl_row = row; l.function.file_id = node.file_id
     l.last_token = node.first; l.reason = "本片不支持此全局对象类型"
-    if ((sym.flags & gen.F_EXTERN) != 0) {
+    if ((sym.flags & support.F_EXTERN) != 0) {
         l.reason = "导入的全局聚合副本缺少受检初始化数据"; return -2
     }
     let mapped int = checked_lower_object_type(l, sym.type_id, 0)
@@ -145,7 +144,7 @@ fn checked_lower_global_decl(l *CheckedLower, row int) int {
     if (name == 0) { free(data.to_type(*void)); return -1 }
     let symbol ir.IRModuleSymbol
     symbol.kind = ir.IR_MODULE_SYMBOL_GLOBAL; symbol.type_id = mapped
-    symbol.linkage = (sym.flags & gen.F_PUB) != 0 ? ir.IR_MODULE_LINK_EXTERNAL : ir.IR_MODULE_LINK_PRIVATE
+    symbol.linkage = (sym.flags & support.F_PUB) != 0 ? ir.IR_MODULE_LINK_EXTERNAL : ir.IR_MODULE_LINK_PRIVATE
     // const 约束绑定/直接左值；现有语言允许经裸指针改聚合存储，不能额外加只读页。
     symbol.defined = 1; symbol.mutable = 1
     symbol.source = l.source_map[node.file_id]
@@ -162,7 +161,7 @@ fn checked_lower_global_decl(l *CheckedLower, row int) int {
 // checked_lower_global_ref：只以捕获时的全局属性识别模块对象，避免把被复用的
 // 局部符号槽当成全局。导入聚合字节尚不在快照时给出稳定的来源拒绝原因。
 fn checked_lower_global_ref(l *CheckedLower, node *ast.AstExpr) int {
-    if ((node.sym_flags & gen.F_GLOBAL) == 0 || node.binding_row >= 0) { return -2 }
+    if ((node.sym_flags & support.F_GLOBAL) == 0 || node.binding_row >= 0) { return -2 }
     if (node.sym_id < 0 || node.sym_id >= l.store.symbol_n || l.global_map[node.sym_id] == 0) {
         l.reason = "全局对象缺少受检数据（导入副本/CT backing 尚未接入）"
         return -2
@@ -196,14 +195,14 @@ fn checked_lower_string_byte(value u8) int {
 // 恰好等于数据标签也不能冒充字符串。引用链使用快照名字与符号，最多 16 跳。
 fn checked_lower_string_symbol(l *CheckedLower, sym_id int, depth int) int {
     if (sym_id < 0 || sym_id >= l.store.symbol_n || depth >= 16) { return 0 }
-    let sym gen.CSym = l.store.symbols[sym_id]
-    if (sym.kind != gen.SYM_CONST || (sym.flags & gen.F_ADDR) == 0) { return 0 }
+    let sym support.CSym = l.store.symbols[sym_id]
+    if (sym.kind != support.SYM_CONST || (sym.flags & support.F_ADDR) == 0) { return 0 }
     if (sym.const_expr_kind == 2) { return 1 }
     if (sym.const_expr_kind != 3) { return 0 }
     let i int = 0
     for i < l.store.symbol_n {
-        let other gen.CSym = l.store.symbols[i]
-        if (other.name_len == sym.const_expr_len && other.kind == gen.SYM_CONST
+        let other support.CSym = l.store.symbols[i]
+        if (other.name_len == sym.const_expr_len && other.kind == support.SYM_CONST
             && support.cstr_eq((l.store.names + other.name_off).to_type(*char),
                 (l.store.names + sym.const_expr_off).to_type(*char)) != 0) {
             return checked_lower_string_symbol(l, i, depth + 1)
@@ -220,7 +219,7 @@ fn checked_lower_string(l *CheckedLower, node *ast.AstExpr) int {
     if (node.kind != ast.AST_EXPR_PRIMARY) { return -2 }
     if (node.child0 >= 0) { return checked_lower_expr_inner(l, l.flow, node.child0) }
     if (node.op != token.TOK_STRING
-        && ((node.sym_flags & gen.F_GLOBAL) == 0
+        && ((node.sym_flags & support.F_GLOBAL) == 0
             || checked_lower_string_symbol(l, node.sym_id, 0) == 0)) {
         l.reason = "非零指针缺少字符串来源，指针/整数转换尚未接入"
         return -2

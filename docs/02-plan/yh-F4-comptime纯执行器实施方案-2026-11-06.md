@@ -148,13 +148,14 @@ CT 执行期会**改写**前端语义表，只读镜像无法表达：
   由 `check` 求值回填；`Res` 换成 `CtValue`。
 
 **已采用 A 并在 `arch-check` 落地**：`GEN_SYMBOLS_FOR_COMPTIME` 白名单
-（只减不增；2026-11-06 由 19 降到 **14**），注入新依赖的副本会被自测抓到。
+（只减不增；2026-11-06 由 19 降到 **13**），注入新依赖的副本会被自测抓到。
 
 已摘除的债务（同一白名单只减不增）：
 
 | 符号 | 做法 |
 | --- | --- |
 | `sym_declared_before` | `ct_sym_declared_before` 直接在 `CtSymRow` 上判 `def_line/def_col`（镜像侧纯读） |
+| `Res` | 结构体下沉到 `support/model.yh`（语言模型，无任务态），`gen.Res` 变成同名别名 |
 | `static_data_add`/`static_data_reloc`/`static_data_reset`/`static_data_scalar` | 静态数据目录整体迁到 `support/static_data.yh`：它只依赖 `support`，却是 `gen`/`check`/`comptime`/`parse`/`lower` 的共同底层，放 `gen` 只会制造环。`StaticDataObject`/`StaticDataReloc` 随之改名 `support.*` |
 
 ## 6. 风险

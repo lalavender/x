@@ -177,6 +177,14 @@ lex → parse(纯语法) → AST
   lower 的共同底层，留 gen 必成环）；`StaticDataObject`/`StaticDataReloc` 改名
   `support.*`。`comptime→gen` 白名单 **18→14**，gen 从 8 文件/2,550 行/**82 pub**
   降到 7 文件/2,403 行/**74 pub**。不用「请求队列」方案，直接下沉更简单。
+- [x] **F4 / 语言模型下沉（2026-11-06 完成）**：`Res`/`CType`/`SField`/`CSym`
+  + `TY_*`/`SYM_*`/`F_*`（44 常量）下沉 `support/model.yh`；`gen/model.yh` 保留
+  同名 `pub type`/`pub const` 别名，迁移可分批。`lower` **完全脱离 gen**
+  （11 个文件改 `support.*`），`comptime` 的 `gen.Res` 清零，白名单 **14→13**，
+  `import gen` 模块 **7**。
+- [x] **F4 / 受检阶段位下沉（2026-11-06 完成）**：`gen/front_stage.yh` →
+  `support/front_stage.yh`（`session.front_checked`），`build/llvm_emit.yh`
+  不再 import gen；gen pub fn **74→71**，`TaskCtx` 146→145。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

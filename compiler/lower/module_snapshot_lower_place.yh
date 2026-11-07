@@ -3,7 +3,6 @@ import token
 import check
 import support
 import ast
-import gen
 import ir
 import proj
 
@@ -24,7 +23,7 @@ fn checked_lower_decl_binding(l *CheckedLower, flow *CheckedFlow, stmt_id int,
     }
     let binding ast.AstBinding = l.store.bindings[binding_row]
     if (binding.stmt_id != stmt_id || binding.is_param != 0
-        || (binding.sym_kind != gen.SYM_VAR && binding.sym_kind != gen.SYM_CONST)
+        || (binding.sym_kind != support.SYM_VAR && binding.sym_kind != support.SYM_CONST)
         || binding.id < 0
         || binding.id >= l.function_binding_count) {
         l.reason = "首片：let 绑定布局不匹配"
@@ -59,7 +58,7 @@ fn checked_lower_decl_binding(l *CheckedLower, flow *CheckedFlow, stmt_id int,
         // 源语义将未初始化局部零初始化；数组长度边不代表源码含有赋值表达式。
         if (checked_lower_is_aggregate(l.store, binding.sym_type_id) != 0) {
             let storage int = checked_lower_storage(l, binding.id)
-            let ty gen.CType = l.store.types[binding.sym_type_id]
+            let ty support.CType = l.store.types[binding.sym_type_id]
             if (storage < 0 || ast_ir_b_add_memset(&l.builder, storage, ty.size) < 0) {
                 return -1
             }
@@ -166,7 +165,7 @@ fn checked_lower_assign(l *CheckedLower, flow *CheckedFlow, stmt_id int) int {
     let want int = -1
     let lhs_source_type int = lhs.type_id
     if (lhs.kind == ast.AST_EXPR_PRIMARY && lhs.child0 < 0
-        && (lhs.sym_flags & gen.F_GLOBAL) != 0 && lhs.binding_row < 0) {
+        && (lhs.sym_flags & support.F_GLOBAL) != 0 && lhs.binding_row < 0) {
         want = checked_lower_type(l, lhs.type_id)
         if (want < 0) { return -2 }
         target = checked_lower_global_ref(l, &lhs)
@@ -293,8 +292,8 @@ fn checked_lower_value_copy(l *CheckedLower, flow *CheckedFlow) *int {
 // AST_EXPR_MEMBER 不携带字段下标，只能从名字文本与快照字段名池比对；找不到返回 -1。
 fn checked_lower_member_field(l *CheckedLower, struct_type int, file_id int, token int) int {
     if (struct_type < 0 || struct_type >= l.store.type_n) { return -1 }
-    let ty gen.CType = l.store.types[struct_type]
-    if (ty.kind != gen.TY_STRUCT && ty.kind != gen.TY_UNION) { return -1 }
+    let ty support.CType = l.store.types[struct_type]
+    if (ty.kind != support.TY_STRUCT && ty.kind != support.TY_UNION) { return -1 }
     if (file_id < 0 || file_id >= l.store.file_n || token < 0
         || token >= l.store.files[file_id].token_n) { return -1 }
     let file proj.PFile = l.store.files[file_id]
@@ -306,7 +305,7 @@ fn checked_lower_member_field(l *CheckedLower, struct_type int, file_id int, tok
     if (first < 0 || count < 0 || first + count > l.store.field_n) { return -1 }
     let i int = 0
     for i < count {
-        let f gen.SField = l.store.fields[first + i]
+        let f support.SField = l.store.fields[first + i]
         if (f.name_len == name_len && f.name_off >= 0
             && f.name_off + f.name_len <= l.store.name_n) {
             let j int = 0
@@ -324,7 +323,7 @@ fn checked_lower_member_field(l *CheckedLower, struct_type int, file_id int, tok
 // checked_lower_is_slice：源类型是否为切片。
 fn checked_lower_is_slice(store *check.CheckedStorage, source_type int) int {
     if (source_type < 0 || source_type >= store.type_n) { return 0 }
-    return (store.types[source_type].kind == gen.TY_SLICE).to_type(int)
+    return (store.types[source_type].kind == support.TY_SLICE).to_type(int)
 }
 
 // checked_lower_slice_ptr：求切片表达式的运行期数据指针（不透明指针）。
@@ -333,9 +332,9 @@ fn checked_lower_heap_alloc(l *CheckedLower, size int) int {
     if (size <= 0) { return -2 }
     let symbol_row int = 0
     for symbol_row < l.store.symbol_n {
-        let candidate gen.CSym = l.store.symbols[symbol_row]
-        if ((candidate.flags & gen.F_RUNTIME_MALLOC) != 0
-            && candidate.kind == gen.SYM_FN
+        let candidate support.CSym = l.store.symbols[symbol_row]
+        if ((candidate.flags & support.F_RUNTIME_MALLOC) != 0
+            && candidate.kind == support.SYM_FN
             && support.cstr_eq((l.store.names + candidate.name_off).to_type(*char), "malloc") != 0) {
             break
         }
@@ -345,9 +344,9 @@ fn checked_lower_heap_alloc(l *CheckedLower, size int) int {
         l.reason = "返回切片后备存储缺少 malloc 运行时入口"
         return -2
     }
-    let source gen.CSym = l.store.symbols[symbol_row]
+    let source support.CSym = l.store.symbols[symbol_row]
     if (source.type_id < 0 || source.type_id >= l.store.type_n
-        || l.store.types[source.type_id].kind != gen.TY_FN) {
+        || l.store.types[source.type_id].kind != support.TY_FN) {
         l.reason = "返回切片的 malloc 签名类型无效"
         return -2
     }
@@ -355,7 +354,7 @@ fn checked_lower_heap_alloc(l *CheckedLower, size int) int {
     if (sig < 0 || sig >= l.store.sig_n || l.store.sig_np[sig] != 1
         || l.store.sig_vararg[sig] != 0
         || l.store.sig_params[l.store.sig_first[sig]] < 0
-        || l.store.types[l.store.sig_params[l.store.sig_first[sig]]].kind != gen.TY_U64
+        || l.store.types[l.store.sig_params[l.store.sig_first[sig]]].kind != support.TY_U64
         || checked_lower_type(l, l.store.sig_ret[sig]) != ir.IR_TY_PTR) {
         l.reason = "返回切片的 malloc 签名与 u64 -> *void 不一致"
         return -2
@@ -389,7 +388,7 @@ fn checked_lower_slice_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int 
     }
     if (node.kind == ast.AST_EXPR_PRIMARY) {
         let storage int = -1
-        if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+        if ((node.sym_flags & support.F_GLOBAL) != 0 && node.binding_row < 0) {
             storage = checked_lower_global_ref(l, &node)
         } else {
             let row int = checked_lower_binding(l, &node)
@@ -429,8 +428,8 @@ fn checked_lower_slice_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int 
         if (base == -2) { return -2 }
         if (base < 0) { return -1 }
         // 步长取结果切片元素类型的大小。
-        let slice_ty gen.CType = l.store.types[node.type_id]
-        if (slice_ty.kind != gen.TY_SLICE || slice_ty.elem < 0 || slice_ty.elem >= l.store.type_n) {
+        let slice_ty support.CType = l.store.types[node.type_id]
+        if (slice_ty.kind != support.TY_SLICE || slice_ty.elem < 0 || slice_ty.elem >= l.store.type_n) {
             return -2
         }
         let stride int = l.store.types[slice_ty.elem].size
@@ -462,7 +461,7 @@ fn checked_lower_slice_len(l *CheckedLower, flow *CheckedFlow, expr_id int) int 
     }
     if (node.kind == ast.AST_EXPR_PRIMARY) {
         let storage int = -1
-        if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+        if ((node.sym_flags & support.F_GLOBAL) != 0 && node.binding_row < 0) {
             storage = checked_lower_global_ref(l, &node)
         } else {
             let row int = checked_lower_binding(l, &node)
@@ -558,8 +557,8 @@ fn checked_lower_slice_header(l *CheckedLower, flow *CheckedFlow, dest int,
     } else if (node.kind == ast.AST_EXPR_PRIMARY) {
         let source_type int = node.type_id
         if (source_type < 0 || source_type >= l.store.type_n) { return -2 }
-        let source_ty gen.CType = l.store.types[source_type]
-        if (source_ty.kind == gen.TY_ARRAY) {
+        let source_ty support.CType = l.store.types[source_type]
+        if (source_ty.kind == support.TY_ARRAY) {
             // 定长数组转切片只借用元素存储；数组字节不是切片的 {len, ptr} 头。
             src = checked_lower_lvalue_ptr(l, flow, inner)
             if (src == -2) { return -2 }
@@ -567,10 +566,10 @@ fn checked_lower_slice_header(l *CheckedLower, flow *CheckedFlow, dest int,
             len_value = ast_ir_b_add_inst(b, ir.IR_OP_CONST, ir.IR_TY_U64,
                 -1, -1, source_ty.len.to_type(i64))
             if (len_value < 0) { return -1 }
-        } else if (source_ty.kind == gen.TY_SLICE) {
+        } else if (source_ty.kind == support.TY_SLICE) {
             // 切片到切片复制完整描述符，底层元素仍共享。
             let src_storage int = -1
-            if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+            if ((node.sym_flags & support.F_GLOBAL) != 0 && node.binding_row < 0) {
                 src_storage = checked_lower_global_ref(l, &node)
             } else {
                 let row int = checked_lower_binding(l, &node)
@@ -607,7 +606,7 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
             && checked_lower_is_aggregate(l.store, node.type_id) != 0) {
             return checked_lower_expr_inner(l, flow, expr_id)
         }
-        if ((node.sym_flags & gen.F_GLOBAL) != 0 && node.binding_row < 0) {
+        if ((node.sym_flags & support.F_GLOBAL) != 0 && node.binding_row < 0) {
             return checked_lower_global_ref(l, &node)
         }
         if (node.sym_id < 0) {
@@ -631,7 +630,7 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         && checked_lower_is_aggregate(l.store, node.type_id) != 0) {
         // 聚合条件表达式没有稳定存储：分配临时槽并把选中分支的值写进去，
         // 之后字段/下标访问的就是该槽（等价于 `let t = c ? a : b` 后再访问）。
-        let aty gen.CType = l.store.types[node.type_id]
+        let aty support.CType = l.store.types[node.type_id]
         if (aty.size <= 0 || aty.align <= 0) { return -2 }
         let temp int = ast_ir_b_add_alloca(b, aty.size, aty.align)
         if (temp < 0) { return -1 }
@@ -671,8 +670,8 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
         if (node.kind == ast.AST_EXPR_CTFIELD) {
             if (struct_type < 0 || struct_type >= l.store.type_n || node.op < 0
                 || node.op >= l.store.field_n) { return -2 }
-            let aggregate gen.CType = l.store.types[struct_type]
-            if ((aggregate.kind != gen.TY_STRUCT && aggregate.kind != gen.TY_UNION)
+            let aggregate support.CType = l.store.types[struct_type]
+            if ((aggregate.kind != support.TY_STRUCT && aggregate.kind != support.TY_UNION)
                 || node.op < aggregate.sub || node.op >= aggregate.sub + aggregate.len) {
                 return -2
             }
@@ -681,7 +680,7 @@ fn checked_lower_lvalue_ptr(l *CheckedLower, flow *CheckedFlow, expr_id int) int
             field = checked_lower_member_field(l, struct_type, node.file_id, node.after - 1)
         }
         if (field < 0) { return -2 }
-        let f gen.SField = l.store.fields[field]
+        let f support.SField = l.store.fields[field]
         let kind int = checked_lower_type(l, f.type_id)
         let result_kind int = checked_lower_pointer_kind(kind)
         if (result_kind < 0) { return -2 }
