@@ -29,13 +29,13 @@ pub fn sem_fn_begin(idx int) int {
     // 聚合返回：记录间接返回事实，返回缓冲地址由 lowering 处理。
     let rk int = support.ms().types[support.fc().c_fn_ret].kind
     let indirect_ret int = 1
-    if ((support.fc().c_fn_flags & gen.F_CABI) != 0) {
+    if ((support.fc().c_fn_flags & support.F_CABI) != 0) {
         let result support.ABIArg
         abi_c_result(support.fc().c_fn_ret, &result)
         indirect_ret = result.indirect
     }
-    if (indirect_ret != 0 && (rk == gen.TY_STRUCT || rk == gen.TY_UNION
-        || rk == gen.TY_ARRAY || rk == gen.TY_SLICE)) {
+    if (indirect_ret != 0 && (rk == support.TY_STRUCT || rk == support.TY_UNION
+        || rk == support.TY_ARRAY || rk == support.TY_SLICE)) {
         support.fc().c_ret_agg = 1
     } else {
         support.fc().c_ret_agg = 0
@@ -45,29 +45,29 @@ pub fn sem_fn_begin(idx int) int {
 }
 
 pub fn sem_declare_param(start int, n int, tid int, regidx int) int {
-    if (gen.ty_has_opaque_value(tid) != 0) {
-        return gen.sem_err("不透明 C 类型只能通过指针传递")
+    if (support.ty_has_opaque_value(tid) != 0) {
+        return token.err_tok("不透明 C 类型只能通过指针传递")
     }
     // LL12：C ABI 的寄存器/栈分类由 LLVM lowering 处理，语义层只登记参数。
     let pk int = support.ms().types[tid].kind
-    let is_agg int = ((pk == gen.TY_ARRAY) || (pk == gen.TY_STRUCT) || (pk == gen.TY_UNION)
-                      || (pk == gen.TY_SLICE)).to_type(int)
-    let idx int = gen.sym_push(start, n, gen.SYM_VAR, tid, gen.F_PARAM)
+    let is_agg int = ((pk == support.TY_ARRAY) || (pk == support.TY_STRUCT) || (pk == support.TY_UNION)
+                      || (pk == support.TY_SLICE)).to_type(int)
+    let idx int = gen.sym_push(start, n, support.SYM_VAR, tid, support.F_PARAM)
     if (idx < 0) {
         return -1
     }
     if (is_agg != 0) {
         // 聚合按值：形参持有调用方副本；独立副本与栈槽由 lowering 生成。
-        support.ms().syms[idx].flags |= gen.F_AGGPARAM
+        support.ms().syms[idx].flags |= support.F_AGGPARAM
         support.fc().c_aggparam_n += 1
         return 0
     }
     if (support.ty_is_float(tid) != 0) {
         // yh 内部函数的浮点参数上限由旧 ABI 约定决定；C 函数按 lowering 的
         // ABI 分类处理（HFA 逐成员占寄存器，不受此上限约束）。
-        if ((support.fc().c_fn_flags & gen.F_CABI) == 0) {
+        if ((support.fc().c_fn_flags & support.F_CABI) == 0) {
             if (support.fc().c_fp_argn >= support.TG_ARG_REGS) {
-                return gen.sem_err("过多的浮点参数暂不支持")
+                return token.err_tok("过多的浮点参数暂不支持")
             }
             support.fc().c_fp_argn += 1
         }
@@ -80,12 +80,12 @@ pub fn sem_fn_end() int {
     if (sem_glabels_verify() != 0) {
         return -1
     }
-    if ((support.fc().c_fn_flags & gen.F_NORETURN) != 0) {
-        if (support.fc().c_fn_ret != gen.TY_VOID) {
-            return gen.sem_err("noreturn 函数必须返回 void")
+    if ((support.fc().c_fn_flags & support.F_NORETURN) != 0) {
+        if (support.fc().c_fn_ret != support.TY_VOID) {
+            return token.err_tok("noreturn 函数必须返回 void")
         }
         if (support.fc().c_fn_falls != 0) {
-            return gen.sem_err("noreturn 函数存在正常落底路径")
+            return token.err_tok("noreturn 函数存在正常落底路径")
         }
     }
     // LL12：落底返回、prologue、聚合参数入口拷贝与 epilogue 由 lowering 生成。
@@ -96,27 +96,27 @@ pub fn sem_fn_end() int {
 // sem_add_field：为 struct/union 登记一个字段（pass 1）。
 // pub struct 一等化后字段一律公开，is_pub 恒 1（.s.i 接口按此发射）。
 pub fn sem_add_field(stid int, start int, n int, ftid int) int {
-    if (gen.ty_has_opaque_value(ftid) != 0) {
-        return gen.sem_err("不透明 C 类型只能通过指针使用")
+    if (support.ty_has_opaque_value(ftid) != 0) {
+        return token.err_tok("不透明 C 类型只能通过指针使用")
     }
     let fk int = support.ms().types[ftid].kind
-    if ((gen.ty_name_attrs(stid) & token.ATTR_EXTERN) != 0 && gen.ty_c_layout(ftid) == 0) {
-        return gen.sem_err("extern struct/union 字段不是 C 兼容布局类型")
+    if ((support.ty_name_attrs(stid) & token.ATTR_EXTERN) != 0 && gen.ty_c_layout(ftid) == 0) {
+        return token.err_tok("extern struct/union 字段不是 C 兼容布局类型")
     }
-    if ((fk == gen.TY_STRUCT || fk == gen.TY_UNION) && support.ms().types[ftid].size == 0) {
-        return gen.sem_err("字段使用了不完整的类型")
+    if ((fk == support.TY_STRUCT || fk == support.TY_UNION) && support.ms().types[ftid].size == 0) {
+        return token.err_tok("字段使用了不完整的类型")
     }
     if (support.ms().field_n == support.ms().field_cap) {
         let ncap int = support.ms().field_cap * 2
         if (ncap == 0) {
             ncap = 64
         }
-        let nd *gen.SField = malloc((ncap * sizeof(gen.SField)).to_type(u64)).to_type(*gen.SField)
+        let nd *support.SField = malloc((ncap * sizeof(support.SField)).to_type(u64)).to_type(*support.SField)
         if (nd == 0) {
             return support.fail("内存分配失败")
         }
         if (support.ms().field_n > 0) {
-            memcpy(nd, support.ms().fields, (support.ms().field_n * sizeof(gen.SField)).to_type(u64))
+            memcpy(nd, support.ms().fields, (support.ms().field_n * sizeof(support.SField)).to_type(u64))
         }
         free(support.ms().fields)
         support.ms().fields = nd
@@ -189,16 +189,16 @@ fn sem_check_main_common(require int) int {
     }
     if (found < 0) {
         if (require == 0) { return 0 }
-        return gen.sem_err("缺少 main 函数")
+        return token.err_tok("缺少 main 函数")
     }
-    if (support.ms().syms[found].kind != gen.SYM_FN) {
-        return gen.sem_err("main 必须是函数")
+    if (support.ms().syms[found].kind != support.SYM_FN) {
+        return token.err_tok("main 必须是函数")
     }
     let sig int = support.ms().types[support.ms().syms[found].type_id].sub
     let np int = support.ms().sig_np[sig]
     let ret int = support.ms().sig_ret[sig]
-    if (ret != gen.TY_I32) {
-        return gen.sem_err("main 必须返回 int")
+    if (ret != support.TY_I32) {
+        return token.err_tok("main 必须返回 int")
     }
     if (np == 0) {
         return 0
@@ -207,9 +207,9 @@ fn sem_check_main_common(require int) int {
         let p0 int = support.ms().sig_params[support.ms().sig_first[sig]]
         let p1 int = support.ms().sig_params[support.ms().sig_first[sig] + 1]
         let inner int = support.ms().types[p1].elem
-        if (p0 == gen.TY_I32 && support.ms().types[p1].kind == gen.TY_PTR
-            && support.ms().types[inner].kind == gen.TY_PTR
-            && support.ms().types[support.ms().types[inner].elem].kind == gen.TY_CHAR) {
+        if (p0 == support.TY_I32 && support.ms().types[p1].kind == support.TY_PTR
+            && support.ms().types[inner].kind == support.TY_PTR
+            && support.ms().types[support.ms().types[inner].elem].kind == support.TY_CHAR) {
             return 0
         }
     }
@@ -219,14 +219,14 @@ fn sem_check_main_common(require int) int {
         let p2 int = support.ms().sig_params[support.ms().sig_first[sig] + 2]
         let a1 int = support.ms().types[p1].elem
         let a2 int = support.ms().types[p2].elem
-        if (p0 == gen.TY_I32 && support.ms().types[p1].kind == gen.TY_PTR
-            && support.ms().types[a1].kind == gen.TY_PTR && support.ms().types[support.ms().types[a1].elem].kind == gen.TY_CHAR
-            && support.ms().types[p2].kind == gen.TY_PTR
-            && support.ms().types[a2].kind == gen.TY_PTR && support.ms().types[support.ms().types[a2].elem].kind == gen.TY_CHAR) {
+        if (p0 == support.TY_I32 && support.ms().types[p1].kind == support.TY_PTR
+            && support.ms().types[a1].kind == support.TY_PTR && support.ms().types[support.ms().types[a1].elem].kind == support.TY_CHAR
+            && support.ms().types[p2].kind == support.TY_PTR
+            && support.ms().types[a2].kind == support.TY_PTR && support.ms().types[support.ms().types[a2].elem].kind == support.TY_CHAR) {
             return 0
         }
     }
-    return gen.sem_err("main 签名必须是 ()、(argc int, argv **char) 或再带 envp **char")
+    return token.err_tok("main 签名必须是 ()、(argc int, argv **char) 或再带 envp **char")
 }
 
 // sem_check_main：程序编译/项目入口检查，缺少 main 即失败。

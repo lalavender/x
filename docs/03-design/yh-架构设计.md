@@ -138,7 +138,7 @@ bin/yh-<平台>-<架构>（Release 种子）
 | `check/`（check） | 12 / 5,224 / 92 pub | 受检契约（`CheckedModule`/视图/切片/键）+ 语义动作 `sem_*` + C ABI 分类 + arena/快照校验 | 语义动作已归位；类型/符号模型仍留 `gen`（`comptime` 依赖，待 F4）；`resolve/expand/full` 未落地 |
 | `support/`（support） | 16 / 1,185 / 37 pub | GEN1 基础层：源/池/统计/诊断/目标/ABI/字节工具 | 消费面已直连；不得塞语义 |
 | `token/`（token） | 3 / 265 / 4 pub | GEN1 词法/语法词汇：`Tok`/`TK_*`/`PDecl`/`TokenCtx`/游标/`is_assign_op`/`err_tok` | `gen` 暂留同名 type/const 别名；直接消费面后续收口 |
-| `gen/`（gen） | 3 / 1,512 / **37 pub** | 语义内核：符号/类型表写入、带位置诊断的折叠 | 语义动作已迁 check；`comptime` 仍读其类型/值规则（F4 解锁后才能迁） |
+| `gen/`（gen） | 3 / 1,340 / **28 pub** | 语义内核：符号/类型表写入、带位置诊断的折叠 | 语义动作已迁 check；`comptime` 仍读其类型/值规则（F4 解锁后才能迁） |
 | `comptime/`（comptime） | 13 / 5,550 / 72 pub | 编译期 typed IR 执行器、布局图、枚举/全局聚合、静态数据 | 49 个模块级 `let`（全仓最多）；与 `gen` 的 CT 类型/值边界需要契约 |
 | `builtin/`（builtin） | 1 / 173 / 2 pub | prelude 名字登记表 | 干净；依赖 gen/support |
 | `cache/`（cache） | 7 / 1,031 / 34 pub | 缓存键、`ActionID`/`OutputID`、全局 content store、flock 平台封装 | C0/C4/C6 新增 |
@@ -593,7 +593,7 @@ TaskCtx 按所有者拆（SemaCtx→check / ParseCtx→parse / SourceCtx→suppo
   `cache.store_bind` 落地，`TaskCtx` 150→147），`import gen` 的模块
   从 13 降到 **8**（ast/build/builtin/check/cmd/comptime/lower/parse）。
 - **链 A 的规模是值规则的 4 个消费方**（`check`/`comptime`/`gen`/`parse`）；
-  `comptime` 已是白名单内的 3 个符号，`check`/`parse` 迁完即完成。
+  `comptime` 已是白名单内的 3 个符号、`parse` 15 个，`check` 迁完即完成。
 - 因此两条链的收尾都可以用「受影响符号数」当进度指标：
   链 B 从 306 → 0（TaskCtx 消失），链 A 从 4 个消费方 → 1（只剩 `check`）。
 

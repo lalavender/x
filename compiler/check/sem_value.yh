@@ -1,4 +1,5 @@
 module check
+import token
 import gen
 import support
 
@@ -7,7 +8,7 @@ import support
 // 自 gen/sem.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
 // ============================================================================
 
-pub fn sem_res_reset(r *gen.Res, tid int) int {
+pub fn sem_res_reset(r *support.Res, tid int) int {
     r.type_id = tid
     r.is_const = 0
     r.ival = 0
@@ -27,7 +28,7 @@ pub fn sem_res_reset(r *gen.Res, tid int) int {
 }
 
 
-pub fn sem_res_copy(dst *gen.Res, src *gen.Res) int {
+pub fn sem_res_copy(dst *support.Res, src *support.Res) int {
     dst.type_id = src.type_id
     dst.is_const = src.is_const
     dst.ival = src.ival
@@ -46,8 +47,8 @@ pub fn sem_res_copy(dst *gen.Res, src *gen.Res) int {
     return 0
 }
 
-pub fn sem_number(start int, n int, r *gen.Res) int {
-    sem_res_reset(r, gen.TY_I32)
+pub fn sem_number(start int, n int, r *support.Res) int {
+    sem_res_reset(r, support.TY_I32)
     if (support.session().compile == 0) {
         return 0
     }
@@ -55,7 +56,7 @@ pub fn sem_number(start int, n int, r *gen.Res) int {
     r.is_const = 1
     // 浮点字面量（含 '.' 或指数）按 f64 处理
     if (sem_num_is_float(start, n) != 0) {
-        r.type_id = gen.TY_F64
+        r.type_id = support.TY_F64
         let bits i64 = sem_parse_float_bits(start, n)
         // 位模式同时写入 ival 与 fval_bits：const 初始化按 ival 保存常量值，
         // 浮点使用点读 fval_bits，两者必须一致。
@@ -125,8 +126,8 @@ fn sem_parse_float_bits(start int, n int) i64 {
     return support.fp64_bits(value)
 }
 
-pub fn sem_string(start int, slen int, r *gen.Res) int {
-    sem_res_reset(r, gen.ty_ptr(gen.TY_CHAR))
+pub fn sem_string(start int, slen int, r *support.Res) int {
+    sem_res_reset(r, gen.ty_ptr(support.TY_CHAR))
     if (support.session().compile == 0) {
         return 0
     }
@@ -141,8 +142,8 @@ pub fn sem_string(start int, slen int, r *gen.Res) int {
 
 // sem_raw_string：登记不含引号的字符串体（插值文本块/说明符）。
 // 与 sem_string 相同的数据标签路径，quoted=2 让解码器处理转义但不剥引号。
-pub fn sem_raw_string(start int, slen int, r *gen.Res) int {
-    sem_res_reset(r, gen.ty_ptr(gen.TY_CHAR))
+pub fn sem_raw_string(start int, slen int, r *support.Res) int {
+    sem_res_reset(r, gen.ty_ptr(support.TY_CHAR))
     if (support.session().compile == 0) {
         return 0
     }
@@ -153,8 +154,8 @@ pub fn sem_raw_string(start int, slen int, r *gen.Res) int {
     return 0
 }
 
-pub fn sem_char(start int, clen int, r *gen.Res) int {
-    sem_res_reset(r, gen.TY_CHAR)
+pub fn sem_char(start int, clen int, r *support.Res) int {
+    sem_res_reset(r, support.TY_CHAR)
     if (support.session().compile == 0) {
         return 0
     }
@@ -186,71 +187,71 @@ pub fn sem_char(start int, clen int, r *gen.Res) int {
     return 0
 }
 
-pub fn sem_bool(v int, r *gen.Res) int {
-    support.sem_res_const(r, gen.TY_BOOL, v.to_type(i64))
+pub fn sem_bool(v int, r *support.Res) int {
+    support.sem_res_const(r, support.TY_BOOL, v.to_type(i64))
     if (support.session().compile == 0) {
         return 0
     }
     return 0
 }
 
-pub fn sem_ident(start int, n int, r *gen.Res) int {
+pub fn sem_ident(start int, n int, r *support.Res) int {
     sem_res_reset(r, 0)
     if (support.session().compile == 0) {
         return 0
     }
     let idx int = support.sym_lookup(start, n)
     if (idx < 0) {
-        return gen.sem_err("引用了未声明的名字")
+        return token.err_tok("引用了未声明的名字")
     }
     return sem_ident_val(idx, r)
 }
 
-pub fn sem_ident_val(idx int, r *gen.Res) int {
+pub fn sem_ident_val(idx int, r *support.Res) int {
     r.ast_id = -1
     r.sym = idx
     r.type_id = support.ms().syms[idx].type_id
     let kind int = support.ms().syms[idx].kind
     // 聚合常量（结构体/数组/切片/联合体）没有标量值：数据已发射到数据段，
     // 与全局变量同路径按符号地址访问，不能走下面的立即数取值分支。
-    if (kind == gen.SYM_CONST) {
+    if (kind == support.SYM_CONST) {
         let ck int = support.ms().types[support.ms().syms[idx].type_id].kind
-        if (ck == gen.TY_STRUCT || ck == gen.TY_ARRAY || ck == gen.TY_SLICE || ck == gen.TY_UNION) {
+        if (ck == support.TY_STRUCT || ck == support.TY_ARRAY || ck == support.TY_SLICE || ck == support.TY_UNION) {
             // 聚合常量只读：**赋值目标**（c_lvalue == 1）直接拒绝。降级为变量语义只是
             // 为了按符号地址读取，不能连可写性一起放开；取地址（c_lvalue >= 2）是合法的
             // 只读引用，放行 —— 否则 `$f(&TABLE[0])` 这类编译期实参会被误拒。
             if (support.fc().c_lvalue == 1) {
-                return gen.sem_err("不能给 const 聚合常量赋值")
+                return token.err_tok("不能给 const 聚合常量赋值")
             }
             // 导入的聚合常量：接口加载时物化了本单元副本（cval = 本地数据标签号），
             // 按标签装载地址（与字符串指针常量同一路径），提供方符号不参与消费者链接。
-            if ((support.ms().syms[idx].flags & gen.F_EXTERN) != 0
+            if ((support.ms().syms[idx].flags & support.F_EXTERN) != 0
                 && support.ms().syms[idx].cval != 0) {
                 support.fc().c_res_is_addr = 1
                 return 0
             }
-            kind = gen.SYM_VAR
+            kind = support.SYM_VAR
         }
     }
-    if (kind == gen.SYM_CONST) {
-        if ((support.ms().syms[idx].flags & (gen.F_ENUM_META | gen.F_FIELD_META)) != 0) {
+    if (kind == support.SYM_CONST) {
+        if ((support.ms().syms[idx].flags & (support.F_ENUM_META | support.F_FIELD_META)) != 0) {
             // 元信息绑定（枚举 values / 结构体 fields）：本身不是值，
             // 只能投影 .name/.value（枚举）或 .name（字段）或作类型谓词实参。
             if (support.ms().syms[idx].const_ready == 0) {
-                return gen.sem_err("编译期元信息绑定尚未就绪")
+                return token.err_tok("编译期元信息绑定尚未就绪")
             }
             return 0
         }
         if (support.ms().syms[idx].const_ready == 0) {
             if (support.fc().c_ct_prepare_active != 0
-                && (support.fc().c_fn_flags & gen.F_COMPTIME) != 0) {
+                && (support.fc().c_fn_flags & support.F_COMPTIME) != 0) {
                 return 0
             }
-            return gen.sem_err("编译期常量尚未就绪")
+            return token.err_tok("编译期常量尚未就绪")
         }
         r.is_const = 1
         r.ival = support.ms().syms[idx].cval
-        if ((support.ms().syms[idx].flags & gen.F_ADDR) != 0) {
+        if ((support.ms().syms[idx].flags & support.F_ADDR) != 0) {
             // 指针常量：值是数据标签
             return 0
         }
@@ -259,21 +260,21 @@ pub fn sem_ident_val(idx int, r *gen.Res) int {
         }
         return 0
     }
-    if (kind == gen.SYM_FN) {
+    if (kind == support.SYM_FN) {
         if (support.fc().c_fold != 0) {
-            return gen.sem_err("函数引用不是编译期常量")
+            return token.err_tok("函数引用不是编译期常量")
         }
         support.fc().c_res_is_addr = 1
         return 0
     }
     // 变量
     if (support.fc().c_fold != 0) {
-        return gen.sem_err("变量不是编译期常量")
+        return token.err_tok("变量不是编译期常量")
     }
     let tid int = support.ms().syms[idx].type_id
     let k int = support.ms().types[tid].kind
-    let global int = ((support.ms().syms[idx].flags & gen.F_GLOBAL) != 0).to_type(int)
-    if (k == gen.TY_ARRAY || k == gen.TY_STRUCT || k == gen.TY_UNION || k == gen.TY_SLICE) {
+    let global int = ((support.ms().syms[idx].flags & support.F_GLOBAL) != 0).to_type(int)
+    if (k == support.TY_ARRAY || k == support.TY_STRUCT || k == support.TY_UNION || k == support.TY_SLICE) {
         // 聚合：值语义即地址（数组退化 / 结构体以地址使用）
         support.fc().c_res_is_addr = 1
         return 0
@@ -291,19 +292,19 @@ pub fn sem_ident_val(idx int, r *gen.Res) int {
 }
 
 // sem_enum_meta_value：把枚举 values 迭代绑定的 value 投影为只读枚举常量。
-pub fn sem_enum_meta_value(meta *gen.Res) int {
+pub fn sem_enum_meta_value(meta *support.Res) int {
     if (meta.sym < 0 || meta.sym >= support.ms().sym_n
-        || (support.ms().syms[meta.sym].flags & gen.F_ENUM_META) == 0) {
-        return gen.sem_err("枚举 values 元信息绑定无效")
+        || (support.ms().syms[meta.sym].flags & support.F_ENUM_META) == 0) {
+        return token.err_tok("枚举 values 元信息绑定无效")
     }
     if (support.fc().c_lvalue != 0) {
-        return gen.sem_err("枚举 values 成员只读")
+        return token.err_tok("枚举 values 成员只读")
     }
     let member int = support.ms().syms[meta.sym].offset
     if (member < 0 || member >= support.ms().sym_n
-        || (support.ms().syms[member].flags & gen.F_ENUM_MEMBER) == 0
+        || (support.ms().syms[member].flags & support.F_ENUM_MEMBER) == 0
         || support.ms().syms[member].const_ready == 0) {
-        return gen.sem_err("枚举 values 成员索引无效")
+        return token.err_tok("枚举 values 成员索引无效")
     }
     let tid int = support.ms().syms[member].type_id
     let value i64 = support.ms().syms[member].cval
@@ -312,54 +313,54 @@ pub fn sem_enum_meta_value(meta *gen.Res) int {
 }
 
 // sem_enum_meta_name：把枚举 values 迭代绑定的 name 投影为静态 C 字符串。
-pub fn sem_enum_meta_name(meta *gen.Res) int {
+pub fn sem_enum_meta_name(meta *support.Res) int {
     if (meta.sym < 0 || meta.sym >= support.ms().sym_n
-        || (support.ms().syms[meta.sym].flags & gen.F_ENUM_META) == 0) {
-        return gen.sem_err("枚举 values 元信息绑定无效")
+        || (support.ms().syms[meta.sym].flags & support.F_ENUM_META) == 0) {
+        return token.err_tok("枚举 values 元信息绑定无效")
     }
     if (support.fc().c_lvalue != 0) {
-        return gen.sem_err("枚举 values 成员只读")
+        return token.err_tok("枚举 values 成员只读")
     }
     let member int = support.ms().syms[meta.sym].offset
     if (member < 0 || member >= support.ms().sym_n
-        || (support.ms().syms[member].flags & gen.F_ENUM_MEMBER) == 0
+        || (support.ms().syms[member].flags & support.F_ENUM_MEMBER) == 0
         || support.ms().syms[member].const_ready == 0) {
-        return gen.sem_err("枚举 values 成员索引无效")
+        return token.err_tok("枚举 values 成员索引无效")
     }
     // LL12：标签只登记，名称数据由快照生成。
     let lbl int = support.data_label_advance()
     if (support.data_str_add_pool(lbl, support.ms().syms[member].name_off,
         support.ms().syms[member].name_len) != 0) { return -1 }
-    sem_res_reset(meta, gen.ty_ptr(gen.TY_CHAR))
+    sem_res_reset(meta, gen.ty_ptr(support.TY_CHAR))
     meta.is_const = 1
     meta.ival = lbl.to_type(i64)
     return 0
 }
 
 // sem_field_meta_name：把 `$for f in T.fields` 迭代绑定的 name 投影为只读
-// 字段名静态 C 字符串。绑定槽位约定见 model.yh 的 gen.F_FIELD_META：
+// 字段名静态 C 字符串。绑定槽位约定见 model.yh 的 support.F_FIELD_META：
 // cval 存宿主结构体/联合体类型 id，offset 存字段下标。
-pub fn sem_field_meta_name(meta *gen.Res) int {
+pub fn sem_field_meta_name(meta *support.Res) int {
     if (meta.sym < 0 || meta.sym >= support.ms().sym_n
-        || (support.ms().syms[meta.sym].flags & gen.F_FIELD_META) == 0) {
-        return gen.sem_err("字段元信息绑定无效")
+        || (support.ms().syms[meta.sym].flags & support.F_FIELD_META) == 0) {
+        return token.err_tok("字段元信息绑定无效")
     }
     if (support.fc().c_lvalue != 0) {
-        return gen.sem_err("字段元信息只读")
+        return token.err_tok("字段元信息只读")
     }
     let owner int = support.ms().syms[meta.sym].cval.to_type(int)
     let index int = support.ms().syms[meta.sym].offset
     if (owner < 0 || owner >= support.ms().type_n
-        || (support.ms().types[owner].kind != gen.TY_STRUCT
-            && support.ms().types[owner].kind != gen.TY_UNION)
+        || (support.ms().types[owner].kind != support.TY_STRUCT
+            && support.ms().types[owner].kind != support.TY_UNION)
         || index < 0 || index >= support.ms().types[owner].len) {
-        return gen.sem_err("字段元信息索引无效")
+        return token.err_tok("字段元信息索引无效")
     }
-    let field gen.SField = support.ms().fields[support.ms().types[owner].sub + index]
+    let field support.SField = support.ms().fields[support.ms().types[owner].sub + index]
     // LL12：标签只登记，名称数据由快照生成。
     let lbl int = support.data_label_advance()
     if (support.data_str_add_pool(lbl, field.name_off, field.name_len) != 0) { return -1 }
-    sem_res_reset(meta, gen.ty_ptr(gen.TY_CHAR))
+    sem_res_reset(meta, gen.ty_ptr(support.TY_CHAR))
     meta.is_const = 1
     meta.ival = lbl.to_type(i64)
     return 0

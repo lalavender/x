@@ -1,4 +1,5 @@
 module check
+import token
 import gen
 import support
 
@@ -7,41 +8,41 @@ import support
 // 自 gen/sem.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
 // ============================================================================
 
-pub fn sem_call_begin(callee *gen.Res) int {
+pub fn sem_call_begin(callee *support.Res) int {
     if (support.session().compile == 0) {
         return 1
     }
     // 嵌套调用：记录本层实参基线与直接调用标志（内层不污染外层）
     if (support.fc().c_call_depth >= 64) {
-        return gen.sem_err("调用嵌套过深")
+        return token.err_tok("调用嵌套过深")
     }
     support.fc().c_call_base[support.fc().c_call_depth] = support.fc().c_arg_n
     support.fc().c_call_direct[support.fc().c_call_depth] = 0
     support.fc().c_call_abi[support.fc().c_call_depth] = support.ABI_YH
-    if (support.ms().types[callee.type_id].kind == gen.TY_FN) {
+    if (support.ms().types[callee.type_id].kind == support.TY_FN) {
         support.fc().c_call_abi[support.fc().c_call_depth] = support.ms().sig_abi[support.ms().types[callee.type_id].sub]
     }
     support.fc().c_call_depth += 1
     if (callee.sym >= 0) {
-        if (support.ms().syms[callee.sym].kind == gen.SYM_FN) {
+        if (support.ms().syms[callee.sym].kind == support.SYM_FN) {
             support.fc().c_call_direct[support.fc().c_call_depth - 1] = 1
             return 1
         }
     }
     if (support.fc().c_fold != 0) {
-        return gen.sem_err("函数调用不是编译期常量")
+        return token.err_tok("函数调用不是编译期常量")
     }
     return 0
 }
 
 // sem_push_arg：每个实参求值后立即保存标量或按值聚合副本，后续实参不能改变已求值的值。
 // callee 提供形参类型；数组退化为指针时仍保存原地址，切片副本只复制描述符、不复制元素。
-pub fn sem_push_arg(r *gen.Res, callee *gen.Res) int {
+pub fn sem_push_arg(r *support.Res, callee *support.Res) int {
     if (support.session().compile == 0) {
         return 0
     }
     if (support.fc().c_arg_n >= 256) {
-        return gen.sem_err("实参过多")
+        return token.err_tok("实参过多")
     }
     sem_res_copy(&support.fc().c_args[support.fc().c_arg_n], r)
     support.fc().c_argtys[support.fc().c_arg_n] = r.type_id
@@ -53,16 +54,16 @@ pub fn sem_push_arg(r *gen.Res, callee *gen.Res) int {
     let copy int = 0
     if (support.fc().c_call_depth > 0) {
         let depth int = support.fc().c_call_depth - 1
-        if (support.fc().c_call_abi[depth] == support.ABI_C && (kind == gen.TY_STRUCT || kind == gen.TY_UNION)) {
+        if (support.fc().c_call_abi[depth] == support.ABI_C && (kind == support.TY_STRUCT || kind == support.TY_UNION)) {
             copy = 1
         }
-        if (support.ms().types[callee.type_id].kind == gen.TY_FN) {
+        if (support.ms().types[callee.type_id].kind == support.TY_FN) {
             let sig int = support.ms().types[callee.type_id].sub
             let position int = support.fc().c_arg_n - support.fc().c_call_base[depth] - 1
             if (position < support.ms().sig_np[sig]) {
                 let want int = support.ms().sig_params[support.ms().sig_first[sig] + position]
                 if (support.ms().types[want].kind == kind
-                    && (kind == gen.TY_ARRAY || kind == gen.TY_SLICE || kind == gen.TY_STRUCT || kind == gen.TY_UNION)) {
+                    && (kind == support.TY_ARRAY || kind == support.TY_SLICE || kind == support.TY_STRUCT || kind == support.TY_UNION)) {
                     copy = 1
                 }
             }
@@ -73,13 +74,13 @@ pub fn sem_push_arg(r *gen.Res, callee *gen.Res) int {
 
 // sem_call：检查本层实参并发射调用。整数与浮点寄存器独立编号，
 // 混合实参先全部暂存，再分类装载，保证每个值栈槽只消费一次。
-pub fn sem_call(callee *gen.Res, r *gen.Res) int {
+pub fn sem_call(callee *support.Res, r *support.Res) int {
     if (support.session().compile == 0) {
         sem_res_reset(r, 0)
         return 0
     }
-    if (support.ms().types[callee.type_id].kind != gen.TY_FN) {
-        return gen.sem_err("被调用的表达式不是函数")
+    if (support.ms().types[callee.type_id].kind != support.TY_FN) {
+        return token.err_tok("被调用的表达式不是函数")
     }
     support.fc().c_call_depth -= 1
     let base int = support.fc().c_call_base[support.fc().c_call_depth]
@@ -91,16 +92,16 @@ pub fn sem_call(callee *gen.Res, r *gen.Res) int {
     let na int = support.fc().c_arg_n - base
     let noreturn int = 0
     if (direct != 0 && callee.sym >= 0
-        && (support.ms().syms[callee.sym].flags & gen.F_NORETURN) != 0) {
+        && (support.ms().syms[callee.sym].flags & support.F_NORETURN) != 0) {
         noreturn = 1
     }
     // vararg==2：类型化变参（末尾打包为切片）；==1：裸 C 变参（仅 prelude）
     if (vararg == 2) {
         if (na < np) {
-            return gen.sem_err("实参个数少于固定参数")
+            return token.err_tok("实参个数少于固定参数")
         }
     } else if (na < np || (na > np && vararg == 0)) {
-        return gen.sem_err("实参个数与函数签名不符")
+        return token.err_tok("实参个数与函数签名不符")
     }
     // 实参类型检查
     let first int = support.ms().sig_first[sig]
@@ -115,26 +116,26 @@ pub fn sem_call(callee *gen.Res, r *gen.Res) int {
         if (want >= 0) {
             // C ABI 回调的函数类型必须保存 C 调用约定；直接函数、变量、
             // 返回值和字段均按完整签名检查，普通 yh 函数不能穿过边界。
-            if (support.ms().types[want].kind == gen.TY_FN && support.ms().sig_abi[sig] == support.ABI_C) {
+            if (support.ms().types[want].kind == support.TY_FN && support.ms().sig_abi[sig] == support.ABI_C) {
                 let arg_tid int = support.fc().c_args[base + i].type_id
-                if (support.ms().types[arg_tid].kind != gen.TY_FN
+                if (support.ms().types[arg_tid].kind != support.TY_FN
                     || support.ms().sig_abi[support.ms().types[arg_tid].sub] != support.ABI_C) {
-                    return gen.sem_err("C ABI 回调实参必须是 extern 函数")
+                    return token.err_tok("C ABI 回调实参必须是 extern 函数")
                 }
             }
             // 数组实参按指针形参退化
             let wat int = support.fc().c_args[base + i].type_id
-            if (support.ms().types[wat].kind == gen.TY_ARRAY && support.ms().types[want].kind == gen.TY_PTR) {
-                if (support.ms().types[wat].elem != support.ms().types[want].elem && support.ms().types[want].elem != gen.TY_VOID) {
-                    return gen.sem_err("数组元素类型与指针形参不匹配")
+            if (support.ms().types[wat].kind == support.TY_ARRAY && support.ms().types[want].kind == support.TY_PTR) {
+                if (support.ms().types[wat].elem != support.ms().types[want].elem && support.ms().types[want].elem != support.TY_VOID) {
+                    return token.err_tok("数组元素类型与指针形参不匹配")
                 }
                 i += 1
                 continue
             }
             // 切片实参按切片形参（同元素类型；长度不参与相容判断）
-            if (support.ms().types[wat].kind == gen.TY_SLICE && support.ms().types[want].kind == gen.TY_SLICE) {
-                if (support.ms().types[wat].elem != support.ms().types[want].elem && support.ms().types[want].elem != gen.TY_VOID) {
-                    return gen.sem_err("切片元素类型不匹配")
+            if (support.ms().types[wat].kind == support.TY_SLICE && support.ms().types[want].kind == support.TY_SLICE) {
+                if (support.ms().types[wat].elem != support.ms().types[want].elem && support.ms().types[want].elem != support.TY_VOID) {
+                    return token.err_tok("切片元素类型不匹配")
                 }
                 i += 1
                 continue
@@ -153,22 +154,22 @@ pub fn sem_call(callee *gen.Res, r *gen.Res) int {
             let at2 int = support.fc().c_args[base + i].type_id
             let k2 int = support.ms().types[at2].kind
             if (support.ty_is_float(at2) != 0) {
-                return gen.sem_err("裸变参的浮点实参将在 B7 支持")
+                return token.err_tok("裸变参的浮点实参将在 B7 支持")
             }
-            if (k2 == gen.TY_STRUCT || k2 == gen.TY_UNION || k2 == gen.TY_ARRAY || k2 == gen.TY_SLICE) {
-                return gen.sem_err("聚合类型不能传给裸变参")
+            if (k2 == support.TY_STRUCT || k2 == support.TY_UNION || k2 == support.TY_ARRAY || k2 == support.TY_SLICE) {
+                return token.err_tok("聚合类型不能传给裸变参")
             }
         }
         i += 1
     }
     if (support.fc().c_fold != 0) {
-        return gen.sem_err("函数调用不是编译期常量")
+        return token.err_tok("函数调用不是编译期常量")
     }
     if (support.ms().sig_abi[sig] == support.ABI_C) {
         // LL12：C ABI 的寄存器/栈搬运由 lowering 处理，语义层只记录结果形态。
         let ret_c int = support.ms().sig_ret[sig]
-        let ret_agg_c int = (support.ms().types[ret_c].kind == gen.TY_STRUCT
-            || support.ms().types[ret_c].kind == gen.TY_UNION).to_type(int)
+        let ret_agg_c int = (support.ms().types[ret_c].kind == support.TY_STRUCT
+            || support.ms().types[ret_c].kind == support.TY_UNION).to_type(int)
         support.fc().c_arg_n = base
         sem_res_reset(r, ret_c)
         support.fc().c_res_is_addr = ret_agg_c
@@ -194,18 +195,18 @@ pub fn sem_call(callee *gen.Res, r *gen.Res) int {
         k += 1
     }
     if (nfp > support.TG_ARG_REGS) {
-        return gen.sem_err("过多的浮点参数暂不支持")
+        return token.err_tok("过多的浮点参数暂不支持")
     }
     let retk int = support.ms().types[ret].kind
     if (noreturn != 0) { support.fc().c_expr_noreturn = 1 }
     support.fc().c_arg_n = base
     sem_res_reset(r, ret)
-    support.fc().c_res_is_addr = (retk == gen.TY_STRUCT || retk == gen.TY_UNION
-        || retk == gen.TY_ARRAY || retk == gen.TY_SLICE).to_type(int)
+    support.fc().c_res_is_addr = (retk == support.TY_STRUCT || retk == support.TY_UNION
+        || retk == support.TY_ARRAY || retk == support.TY_SLICE).to_type(int)
     return 0
 }
 
-pub fn sem_return_value(r *gen.Res) int {
+pub fn sem_return_value(r *support.Res) int {
     if (support.session().compile == 0 || support.fc().c_fold != 0) {
         return 0
     }
@@ -224,12 +225,12 @@ pub fn sem_struct_lit_begin(tid int) int {
     if (support.session().compile == 0 || support.fc().c_fold != 0) {
         return 0
     }
-    if (gen.ty_is_opaque(tid) != 0) {
-        return gen.sem_err("不透明 C 类型不能构造实例")
+    if (support.ty_is_opaque(tid) != 0) {
+        return token.err_tok("不透明 C 类型不能构造实例")
     }
     // pub struct 一等化：字段一律公开，跨模块位置式构造不再检查字段 pub。
     if (support.fc().c_lit_depth >= 32) {
-        return gen.sem_err("结构体字面量嵌套过深")
+        return token.err_tok("结构体字面量嵌套过深")
     }
     let off int = 0
     // 保存外层字面量的定位状态，供嵌套字面量结束后恢复

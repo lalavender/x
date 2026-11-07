@@ -190,44 +190,11 @@ pub fn ty_fn(ret int, first int, np int, vararg int) int {
     return ty_fn_abi(ret, first, np, vararg, ABI_YH)
 }
 
-// ty_is_scalar：可放进寄存器的标量（整数/浮点/指针/fn）。
-pub fn ty_is_scalar(tid int) int {
-    let k int = support.ms().types[tid].kind
-    if (k == TY_PTR || k == TY_FN) {
-        return 1
-    }
-    if (k == TY_STRUCT || k == TY_UNION || k == TY_ARRAY || k == TY_SLICE || k == TY_VOID) {
-        return 0
-    }
-    return 1
-}
 
 // ============================================================================
 // 名字空间与符号表
 // ============================================================================
 
-// ty_lookup_name：按名字查类型。找不到返回 -1。
-pub fn ty_lookup_name(start int, n int) int {
-    let i int = support.ms().name_n - 1
-    for i >= 0 {
-        if (support.ms().names[i].name_len == n) {
-            let match int = 1
-            let j int = 0
-            for j < n {
-                if (support.pool_ctx().data[support.ms().names[i].name_off + j] != support.src_ctx().data[start + j]) {
-                    match = 0
-                    break
-                }
-                j += 1
-            }
-            if (match != 0) {
-                return support.ms().names[i].type_id
-            }
-        }
-        i -= 1
-    }
-    return -1
-}
 
 // ty_declare_name：登记类型名字（重复定义报错，含首次声明位置）。
 // is_pub/form 取自调用方设置的全局（support.fc().c_decl_pub / support.ms().name_form）。
@@ -298,18 +265,6 @@ pub fn ty_declare_name(off int, n int, tid int) int {
     return 0
 }
 
-// ty_name_attrs：合并同一底层类型的具名别名属性，保留 C/opaque 类型身份。
-pub fn ty_name_attrs(tid int) int {
-    let attrs int = 0
-    let i int = 0
-    for i < support.ms().name_n {
-        if (support.ms().names[i].type_id == tid) {
-            attrs |= support.ms().names[i].attrs
-        }
-        i += 1
-    }
-    return attrs
-}
 
 // ty_add_name_attrs：为刚登记的具名类型补充解析结束后才能确定的属性。
 pub fn ty_add_name_attrs(tid int, attrs int) int {
@@ -326,27 +281,14 @@ pub fn ty_add_name_attrs(tid int, attrs int) int {
     return 0
 }
 
-// ty_is_opaque：判断底层类型是否由 extern 空 struct/union 声明为不透明类型。
-pub fn ty_is_opaque(tid int) int {
-    return ((ty_name_attrs(tid) & ATTR_OPAQUE) != 0).to_type(int)
-}
 
-// ty_has_opaque_value：数组/切片等复合值不得把不透明 C 对象按值存储。
-pub fn ty_has_opaque_value(tid int) int {
-    if (ty_is_opaque(tid) != 0) { return 1 }
-    let kind int = support.ms().types[tid].kind
-    if (kind == TY_ARRAY || kind == TY_SLICE) {
-        return ty_has_opaque_value(support.ms().types[tid].elem)
-    }
-    return 0
-}
 
 // ty_cabi_scalar：可在 C ABI 固定参数与返回值中按值传递的标量。
 fn ty_cabi_scalar(tid int) int {
     let kind int = support.ms().types[tid].kind
     if (kind >= TY_BOOL && kind <= TY_F64) { return 1 }
     if (kind == TY_PTR) { return 1 }
-    if (kind == TY_ENUM && (ty_name_attrs(tid) & ATTR_EXTERN) != 0) { return 1 }
+    if (kind == TY_ENUM && (support.ty_name_attrs(tid) & ATTR_EXTERN) != 0) { return 1 }
     return 0
 }
 
@@ -377,10 +319,10 @@ pub fn ty_c_layout(tid int) int {
     if (kind == TY_FN) { return ty_cabi_param(tid) }
     if (kind == TY_ARRAY) { return ty_c_layout(support.ms().types[tid].elem) }
     if (kind == TY_ENUM) {
-        return ((ty_name_attrs(tid) & ATTR_EXTERN) != 0).to_type(int)
+        return ((support.ty_name_attrs(tid) & ATTR_EXTERN) != 0).to_type(int)
     }
     if (kind == TY_STRUCT || kind == TY_UNION) {
-        return ((ty_name_attrs(tid) & (ATTR_EXTERN | ATTR_OPAQUE)) == ATTR_EXTERN).to_type(int)
+        return ((support.ty_name_attrs(tid) & (ATTR_EXTERN | ATTR_OPAQUE)) == ATTR_EXTERN).to_type(int)
     }
     return 0
 }
@@ -865,123 +807,9 @@ pub fn prelude_add(name *char, ret int, np int, vararg int) int {
 // mod_ns_lookup：模块命名空间查条目（want_type=1 查类型名；
 // 自 parse/iface.yh 迁入使 parse_type/parse_expr 可直接调用——P3 解环）。
 
-// mod_ns_lookup：模块命名空间查条目下标。want_type=1 查类型名，否则查值。
-pub fn mod_ns_lookup(mi int, start int, n int, want_type int) int {
-    let i int = 0
-    for i < support.fs().mods[mi].ns_n {
-        if (support.fs().mods[mi].ns[i].name_len == n) {
-            let match int = 1
-            let j int = 0
-            for j < n {
-                if (support.pool_ctx().data[support.fs().mods[mi].ns[i].name_off + j] != support.src_ctx().data[start + j]) {
-                    match = 0
-                    break
-                }
-                j += 1
-            }
-            if (match != 0) {
-                if (want_type != 0) {
-                    if (support.fs().mods[mi].ns[i].tid >= 0) {
-                        return i
-                    }
-                    return -1
-                }
-                if (support.fs().mods[mi].ns[i].sym >= 0) {
-                    return i
-                }
-                return -1
-            }
-        }
-        i += 1
-    }
-    return -1
-}
 
 // mod_file_binding：当前文件导入表查绑定名（读 gen 的导入表全局；
 // 自 parse/parse_expr.yh 迁入供 sizeof_starts_type 限定类型判定——P3）。
 
-// mod_file_binding：当前文件导入表中查绑定名，返回 ModInfo 下标；无 -1。
-pub fn mod_file_binding(start int, n int) int {
-    if (support.fs().import_mod == 0) {
-        return -1
-    }
-    // 按绑定名（别名）匹配：限定调用的第一段标识符是别名
-    let i int = 0
-    for i < support.fs().import_n {
-        if (support.fs().import_mod[i] >= 0 && support.fs().imports[i].alias_len == n) {
-            let match int = 1
-            let j int = 0
-            for j < n {
-                if (support.pool_ctx().data[support.fs().imports[i].alias_off + j] != support.src_ctx().data[start + j]) {
-                    match = 0
-                    break
-                }
-                j += 1
-            }
-            if (match != 0) {
-                return support.fs().import_mod[i]
-            }
-        }
-        i += 1
-    }
-    return -1
-}
 
-// mod_import_find：按绑定名（别名）在文件导入表里查找模块；找不到返回 -1。
-// 供插值降级定位 fmt 的导入绑定，不依赖源码中的 token 位置。
-pub fn mod_import_find(name *char, n int) int {
-    if (support.fs().import_mod == 0) {
-        return -1
-    }
-    let i int = 0
-    for i < support.fs().import_n {
-        let ent ImportEnt = support.fs().imports[i]
-        if (support.fs().import_mod[i] >= 0 && ent.alias_len == n) {
-            let match int = 1
-            let j int = 0
-            for j < n {
-                if (support.pool_ctx().data[ent.alias_off + j] != name[j].to_type(u8)) {
-                    match = 0
-                    break
-                }
-                j += 1
-            }
-            if (match != 0) {
-                return support.fs().import_mod[i]
-            }
-        }
-        i += 1
-    }
-    return -1
-}
 
-// mod_ns_lookup_pool：按名字池中的名字查模块导出；语义同 mod_ns_lookup。
-// 供编译器合成的 fmt 调用使用（名字不来自源码 token）。
-pub fn mod_ns_lookup_pool(mi int, off int, n int, want_type int) int {
-    if (mi < 0 || mi >= support.fs().mod_n) {
-        return -1
-    }
-    let i int = 0
-    for i < support.fs().mods[mi].ns_n {
-        let ent ModNsEnt = support.fs().mods[mi].ns[i]
-        if (ent.name_len == n) {
-            let match int = 1
-            let j int = 0
-            for j < n {
-                if (support.pool_ctx().data[ent.name_off + j] != support.pool_ctx().data[off + j]) {
-                    match = 0
-                    break
-                }
-                j += 1
-            }
-            if (match != 0) {
-                if (want_type != 0) {
-                    return ent.tid >= 0 ? i : -1
-                }
-                return ent.sym >= 0 ? i : -1
-            }
-        }
-        i += 1
-    }
-    return -1
-}

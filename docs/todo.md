@@ -218,6 +218,13 @@ lex → parse(纯语法) → AST
   `gen/state.yh` 迁到 `support/tables.yh`，`gen.state_init` 变
   `support.session_reset()`；**`gen/state.yh` 删除**。`gen` pub fn 57→37、
   1,750→1,512 行；`parse→gen` 符号 27→22。
+- [x] **F2-2b 纯查询下沉（2026-11-06 完成）**：`ty_name_attrs`/`ty_is_opaque`/
+  `ty_is_scalar`/`ty_has_opaque_value`/`ty_lookup_name`/`mod_*`（9 个纯查询）迁
+  `support/symbols.yh`；`ATTR_*` 源头移到 `support/model.yh`（`token` 改为转发）。
+  `check`/`builtin`/`build` 的常量与类型引用切到 `support.*`、
+  `gen.sem_err` → `token.err_tok`。`parse→gen` 符号 **22 → 15**、
+  代码引用 93 → 61；`check` 的 gen 引用 308 → 30；`ast` 归零；
+  `gen` pub fn 37→28、行数 1,512→1,340。
 - [ ] **F2**：`parse` 纯语法化（语法 AST 先行、语义搬 check）→ 方案见
   `docs/02-plan/yh-F2-parse纯语法化方案-2026-11-06.md`
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
