@@ -593,7 +593,7 @@ TaskCtx 按所有者拆（SemaCtx→check / ParseCtx→parse / SourceCtx→suppo
   `cache.store_bind` 落地，`TaskCtx` 150→147），`import gen` 的模块
   从 13 降到 **8**（ast/build/builtin/check/cmd/comptime/lower/parse）。
 - **链 A 的规模是值规则的 4 个消费方**（`check`/`comptime`/`gen`/`parse`）；
-  `comptime` 已是白名单内的 19 个符号，`check`/`parse` 迁完即完成。
+  `comptime` 已是白名单内的 18 个符号，`check`/`parse` 迁完即完成。
 - 因此两条链的收尾都可以用「受影响符号数」当进度指标：
   链 B 从 306 → 0（TaskCtx 消失），链 A 从 4 个消费方 → 1（只剩 `check`）。
 

@@ -465,7 +465,7 @@ def copy_proj(src, dst):
     shutil.copytree(src, dst)
     if src.name == "astcheck":
         # 探针直接使用当前编译器的 AST arena 与 check 实现。
-        for module in ("gen", "proj", "support", "token", "comptime", "ir", "backend", "ast", "check", "cache"):
+        for module in ("gen", "proj", "support", "token", "lex", "comptime", "ir", "backend", "ast", "check", "cache"):
             source = ROOT / "compiler" / module
             if source.is_dir():
                 ignore = shutil.ignore_patterns("llvm_bridge.yh") if module == "backend" else None
@@ -511,11 +511,17 @@ def copy_proj(src, dst):
             '[project]\nos = "host"\narch = "host"\nname = "proj"\nsource = "."\n'
             '[dependencies]\nsupport = { path = "../support" }\n'
             'token = { path = "../token" }\ngen = { path = "../gen" }\n')
+        # 链 B：lex 自带 LexCtx（词法游标），front_stage 初始化时会复位它。
+        shutil.copytree(ROOT / "compiler" / "lex", dst / "lex")
+        (dst / "lex" / "project.toml").write_text(
+            '[project]\nos = "host"\narch = "host"\nname = "lex"\nsource = "."\n'
+            '[dependencies]\nsupport = { path = "../support" }\n'
+            'token = { path = "../token" }\n')
     if src.name == "ctfacts":
         # F4-0：验证 CT 零拷贝镜像与 gen 类型表逐行一致（含表扩容后重新绑定）。
         core = dst / "compiler"
         core.mkdir()
-        for module in ("gen", "proj", "support", "token", "comptime", "ir", "backend",
+        for module in ("gen", "proj", "support", "token", "lex", "comptime", "ir", "backend",
                        "ast", "check", "cache"):
             shutil.copytree(ROOT / "compiler" / module, core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))

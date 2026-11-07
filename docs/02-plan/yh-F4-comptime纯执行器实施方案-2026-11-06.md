@@ -148,7 +148,13 @@ CT 执行期会**改写**前端语义表，只读镜像无法表达：
   由 `check` 求值回填；`Res` 换成 `CtValue`。
 
 **已采用 A 并在 `arch-check` 落地**：`GEN_SYMBOLS_FOR_COMPTIME` 白名单
-（19 个符号，只减不增），注入新依赖的副本会被自测抓到。
+（只减不增；2026-11-06 由 19 降到 **18**），注入新依赖的副本会被自测抓到。
+
+已摘除的债务（同一白名单只减不增）：
+
+| 符号 | 做法 |
+| --- | --- |
+| `sym_declared_before` | `ct_sym_declared_before` 直接在 `CtSymRow` 上判 `def_line/def_col`（镜像侧纯读） |
 
 ## 6. 风险
 

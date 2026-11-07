@@ -164,6 +164,14 @@ lex → parse(纯语法) → AST
   `lex/link/proj/testkit/cache` 全部脱 gen，`import gen` 模块 **13→8**
   （ast/build/builtin/check/cmd/comptime/lower/parse），`TaskCtx` 148→147。
   codegraph 复核：`gen.task()` 调用点 250→237、受影响符号 306→287。
+- [x] **链 B 第三片（2026-11-06 完成）**：匿名数据标签计数 `c_data_n` 迁到
+  `support.data_label*`（`TaskCtx` 147→146）；`comptime` 的
+  `gen.sym_declared_before` 换成镜像侧 `ct_sym_declared_before`、
+  `ct_ir_place` 的类型表读改镜像，`comptime→gen` 白名单 **19→18**。
+  同时修正 fixture 收集器缺 `lex` 模块（`ctfacts`/`astcheck`/`llvmfront`/
+  `llvmtarget` 的 copytree 列表与 `project.toml` 依赖）。
+  `build-check.py` project cases **85→88**（基线 85，其余失败为本地
+  LLVM 迁移环境既有问题）。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`
