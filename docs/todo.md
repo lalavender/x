@@ -225,7 +225,15 @@ lex → parse(纯语法) → AST
   `gen.sem_err` → `token.err_tok`。`parse→gen` 符号 **22 → 15**、
   代码引用 93 → 61；`check` 的 gen 引用 308 → 30；`ast` 归零；
   `gen` pub fn 37→28、行数 1,512→1,340。
-- [ ] **F2**：`parse` 纯语法化（语法 AST 先行、语义搬 check）→ 方案见
+- [x] **F2-2c 删除 `gen/model.yh`（2026-11-06 完成）**：184 个导出在仓内已无
+  `gen.X` 引用；按定义模块自动改前缀（82→`support.`、102→`token.`）后删除，
+  `gen` 只剩 `symbols.yh`（815 行）+ `value_rules.yh`（211 行）。
+- [x] **F2-3a 可行性核查（2026-11-06）**：`parse` 内联读取 `Res` 语义字段
+  **277 处**（`type_id` 104、`ival` 71、`sym` 31…），语法决策依赖语义结果，
+  故「parse 纯语法 AST」属前端重构级，**不按原计划推进**；改为「核收缩」
+  路线（`gen` 收缩为 comptime 必需的值语义内核，其余语义动作迁 `check`）。
+- [ ] **F2 / K1–K3 核收缩**：`gen` 只留 3 个折叠函数（pub fn ≤4），其余 24 个
+  语义动作迁 `check` → 方案见
   `docs/02-plan/yh-F2-parse纯语法化方案-2026-11-06.md`
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
