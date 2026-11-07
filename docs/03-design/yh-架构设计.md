@@ -581,16 +581,17 @@ TaskCtx 按所有者拆（SemaCtx→check / ParseCtx→parse / SourceCtx→suppo
 
 | 查询 | 结果 |
 | --- | --- |
-| `codegraph callers gen.task` | **250 个调用点**，按模块：`parse` 150、`check` 66、`comptime` 10、`ast` 9、`gen` 5、`link` 4、`testkit` 2、`builtin` 2、`proj` 1、`cache` 1 |
-| `codegraph impact gen.task` | **306 个受影响符号**（跨 9 个模块） |
+| `codegraph callers gen.task` | **237 个调用点**，按模块：`parse` 149、`check` 66、`comptime` 9、`ast` 6、`gen` 5、`builtin` 2 |
+| `codegraph impact gen.task` | **约 290 个受影响符号**（跨 6 个模块） |
 | `codegraph callers sem_can_assign` | `check` / `comptime` / `gen` / `parse` |
 | `codegraph callers sem_fold_norm` / `sem_res_const` / `fp64_bits` | `check` / `comptime` / `gen`（`sem_res_const` 还有 `parse`） |
 
 结论（与 §6.3.1 一致，但量化了成本）：
 
-- **链 B 的规模就是 `gen.task()` 的 250 个调用点**，其中 `parse`(150)+`check`(66)
-  占 86%；`lex`/`link`/`proj`/`testkit`/`cache` 共 8 个点（已开始拆：
-  `lex.LexCtx` 已落地，`TaskCtx` 150→148）。
+- **链 B 的规模就是 `gen.task()` 的调用点**，其中 `parse`(149)+`check`(66) 占 91%；
+  `lex`/`link`/`proj`/`testkit`/`cache` **已全部清零**（`lex.LexCtx`、
+  `cache.store_bind` 落地，`TaskCtx` 150→147），`import gen` 的模块
+  从 13 降到 **8**（ast/build/builtin/check/cmd/comptime/lower/parse）。
 - **链 A 的规模是值规则的 4 个消费方**（`check`/`comptime`/`gen`/`parse`）；
   `comptime` 已是白名单内的 19 个符号，`check`/`parse` 迁完即完成。
 - 因此两条链的收尾都可以用「受影响符号数」当进度指标：

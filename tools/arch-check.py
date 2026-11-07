@@ -78,7 +78,7 @@ ALLOWED = {
 # —— 状态/资源预算（现状即上限，只减不增；不含代码行数）——
 # 代码规模由 `just code-stats` 单独报告，本工具不按行数阻断。
 BUDGETS = {
-    "max_globals": 195,        # + lex.LexCtx（词法游标迁出 TaskCtx）        # CT 读型镜像：字符串标签/枚举成员/静态数据目录各 2-5 个槽        # + comptime 的 CT 事实镜像槽（类型/符号各 2 个，F4-0/2）
+    "max_globals": 196,        # + cache.store 绑定（C4 从 TaskCtx.cache_store 迁出）        # + lex.LexCtx（词法游标迁出 TaskCtx）        # CT 读型镜像：字符串标签/枚举成员/静态数据目录各 2-5 个槽        # + comptime 的 CT 事实镜像槽（类型/符号各 2 个，F4-0/2）
     "max_g_call_sites": 0,     # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到
     "max_unchecked_malloc": 0,
     "max_unwired_pub": 0,
@@ -87,7 +87,7 @@ BUDGETS = {
     # GEN0（ADR-0021）：gen 拆分只减不增的三项预算。
     "max_gen_pub_fns": 82,     # gen 内 `pub fn` 文本声明数（平台变体重复）
     "max_gen_importers": 13,    # import gen 的模块数
-    "max_taskctx_fields": 148,  # gen/state.yh 的 TaskCtx 字段数（会话开关/声明索引迁出后）
+    "max_taskctx_fields": 147,  # gen/state.yh 的 TaskCtx 字段数（会话开关/声明索引迁出后）
 }
 
 # —— comptime → gen 的符号白名单（F4 收口；只减不增）——
