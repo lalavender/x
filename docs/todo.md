@@ -158,6 +158,12 @@ lex → parse(纯语法) → AST
   `TaskCtx` 150→148，`lex` 不再依赖 `gen.TaskCtx`；`lex.reset()` 并入会话
   初始化（`cmd/common` 与四个前端 fixture）。用 codegraph 量化链路：
   `gen.task()` 250 个调用点 / 306 个受影响符号（§6.3.2）。
+- [x] **链 B 第二片（2026-11-06 完成）**：`link`/`proj`/`testkit` 的 22 处空
+  `let tk *gen.TaskCtx` 删除；`cache` 改用 `cache.store_bind()` 取代
+  `TaskCtx.cache_store` 字段（C4 绑定不再经过 gen）。至此
+  `lex/link/proj/testkit/cache` 全部脱 gen，`import gen` 模块 **13→8**
+  （ast/build/builtin/check/cmd/comptime/lower/parse），`TaskCtx` 148→147。
+  codegraph 复核：`gen.task()` 调用点 250→237、受影响符号 306→287。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`
