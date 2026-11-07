@@ -126,75 +126,32 @@ bin/yh-<平台>-<架构>（Release 种子）
 
 ## 2. compiler/ 目录职责
 
-### 2.1 目录表（按当前源码实测）
+### 2.1 目录表
 
-#### 前端与语义
+**逐模块职责、规模、依赖与内部拆分的唯一清单已迁到
+[`yh-模块职责-当前实现.md`](yh-模块职责-当前实现.md)**（2026-11-06 实测：
+19 个模块 / 177 个文件 / 60,537 行 / 79 条依赖边）。
 
-| 目录（模块） | 规模 | 实际职责 | 主要问题 |
-| --- | ---: | --- | --- |
-| `lex/`（lex） | 3 / 1,044 / 2 pub | 字节词法、布局（隐式 `;`）、字符串插值词法 | 依赖 support/token，仍读 gen 的 TaskCtx 源/词法状态 |
-| `parse/`（parse） | 14 / 9,776 / 22 pub | 递归下降 + **语义动作** + AST 捕获 + 模块头/import + `.s.i`/`.s.ct` 接口读写 + CT 布局 | 名字只覆盖“解析”；`parse_expr.yh` 2,042 行，是当前最大文件（建议拆分）；依赖 ast/comptime/gen/ir/lex/proj |
-| `ast/`（ast） | 6 / 1,364 / 81 pub | 纯语法 AST arena（expr/stmt/decl/function）、只读视图与 arena 扩容入口 | F1 已把快照/切片/键迁 check；pub 仍偏多 |
-| `check/`（check） | 12 / 5,224 / 92 pub | 受检契约（`CheckedModule`/视图/切片/键）+ 语义动作 `sem_*` + C ABI 分类 + arena/快照校验 | 语义动作已归位；类型/符号模型仍留 `gen`（`comptime` 依赖，待 F4）；`resolve/expand/full` 未落地 |
-| `support/`（support） | 16 / 1,185 / 37 pub | GEN1 基础层：源/池/统计/诊断/目标/ABI/字节工具 | 消费面已直连；不得塞语义 |
-| `token/`（token） | 3 / 265 / 4 pub | GEN1 词法/语法词汇：`Tok`/`TK_*`/`PDecl`/`TokenCtx`/游标/`is_assign_op`/`err_tok` | `gen` 暂留同名 type/const 别名；直接消费面后续收口 |
-| `gen/`（gen） | 1 / 337 / **3 pub** | 编译期值内核：隐式转换判定 + 两个常量折叠（comptime 必需；待 F4 收尾删除） | 语义动作已迁 check；`comptime` 仍读其类型/值规则（F4 解锁后才能迁） |
-| `comptime/`（comptime） | 13 / 5,550 / 72 pub | 编译期 typed IR 执行器、布局图、枚举/全局聚合、静态数据 | 49 个模块级 `let`（全仓最多）；与 `gen` 的 CT 类型/值边界需要契约 |
-| `builtin/`（builtin） | 1 / 173 / 2 pub | prelude 名字登记表 | 干净；依赖 gen/support |
-| `cache/`（cache） | 7 / 1,031 / 34 pub | 缓存键、`ActionID`/`OutputID`、全局 content store、flock 平台封装 | C0/C4/C6 新增 |
-
-#### 中端、后端与工具链
-
-| 目录（模块） | 规模 | 实际职责 | 主要问题 |
-| --- | ---: | --- | --- |
-| `lower/`（lower） | 16 / 5,998 / 3 pub | `CheckedModule → IRModule`，按 expr/call/flow/place/aggregate 分片 | 干净（只 3 个 pub）；`module_snapshot_*` 前缀偏长 |
-| `ir/`（ir） | 10 / 5,384 / 34 pub | SSA 模型、验证、序列化、函数级缓存、重绑定 | **最干净**：0 依赖、0 全局 `let`；增长最快，契约版本分散 |
-| `backend/`（backend） | 14 / 4,149 / 20 pub | IR → LLVM 文本、ABI 分类（Apple/ZABI/Windows）、桥绑定、运行时 | 干净；后端契约是“文本”而非对象 API（设计选择） |
-| `link/`（link） | 7 / 4,325 / 20 pub | 汇编/链接驱动、内嵌 lld、进程、时钟、**链接缓存 1,647 行** | 4,272 行，是当前最大模块（建议拆分）；缓存与工具链调用混居；平台链接分 darwin/windows |
-
-#### 项目、构建与入口
-
-| 目录（模块） | 规模 | 实际职责 | 主要问题 |
-| --- | ---: | --- | --- |
-| `proj/`（proj） | 4 / 1,464 / 42 pub | 项目/模块/文件三张表 + 目标/构建配置 + 产物键 + 缓存根 | 新枢纽（9 个模块依赖）；只依赖 `gen`；40 pub 偏多 |
-| `build/`（build） | 22 / 8,058 / 44 pub | 发现/索引/调度/模块发射/LLVM 流水线/缓存/全局 store、trim/verify/debug/项目装配/TOML/统计 | 仍过载；依赖 14 个模块；`project*`、`toml`、`cache` 三类还能下沉 |
-| `testkit/`（testkit） | 1 / 1,616 / 1 pub | `yh test` 发现、绑定、执行 | 15 处（8 个符号）直接引用 `build` 内部 `mb_*`/`cmd_*`，分层泄漏 |
-| `cmdline/`（cmdline） | 1 / 661 / 7 pub | CLI 声明与解析（`libs/cli`） | 干净；编译器里唯一 `→ libs` 边 |
-| `cmd/`（模块名 **main**） | 11 / 497 / 1 pub | argv → 请求映射 + 一命令一文件分派 | 干净；目录名 `cmd` 与模块名 `main` 不一致 |
-| `llvm/`（不是 yh 模块） | 6 个 C/C++ 文件 | `bridge.c/h`、`lld_bridge.cpp`、`windows_shim.c`、stub；由 `tools/llvm-*host.py` 编进闭包 | 隐性“第 18 个模块”；不在 arch-check 依赖图，只靠闭包哈希守护 |
-
-`compiler/.build/`、`compiler/tmp/`、`compiler/.codegraph/` 是构建缓存、临时产物与
-代码图 DB，不是源码。
+本节只保留分层意图：`support`/`ir` 是无依赖底座，`token`/`cache`/`lex`/`proj`/`ast`/
+`comptime`/`gen` 依次叠到语义层，`check` 是语义中心，`parse` 是前端装配，
+`lower`→`backend`→`link`→`build` 是后端与构建链，`cmd`/`testkit`/`cmdline` 是入口。
+任何模块的新增依赖都必须同时更新 `tools/arch-check.py` 的 `ALLOWED` 与那份清单。
 
 ### 2.2 一句话记忆
 
-**当前前端是 `lex → parse(语义动作 + ast 捕获) → check(验证) → lower`；目标前端是
-`lex → parse(纯语法) → AST → check(resolve/expand/full) → lower`。`gen` 是所有层
-共享的语义/基础底座；`build` 是总装车间；`proj` 是数据层；`link` 是工具链调用层；
-`cmd` 是薄入口。**
+**当前前端是 `lex → parse(语义动作 + ast 捕获) → check(验证) → lower`。
+`support` 是共享底座（状态与纯规则都在这里），`check` 是语义中心，`gen` 只剩
+编译期值内核的 3 个函数；`build` 是总装车间，`proj` 是数据层，`link` 是工具链
+调用层，`cmd` 是薄入口。**
+
+（历史上「`parse` 纯语法化」的目标已评估为前端重构级，改为「核收缩」路线并落地：
+见 `docs/02-plan/yh-F2-parse纯语法化方案-2026-11-06.md` §3.5。）
 
 ### 2.3 耦合读数
 
-| 模块 | 出度 | 入度 | 模块级 `let` | `pub fn` |
-| --- | ---: | ---: | ---: | ---: |
-| gen | 0 | 15 | 18 | 183 |
-| ir | 0 | 5 | 0 | 34 |
-| proj | 1 | 9 | 1 | 40 |
-| parse | 6 | 3 | 19 | 20 |
-| ast | 5 | 5 | 43 | 64 |
-| comptime | 2 | 3 | 49 | 72 |
-| cache | 2 | 3 | 0 | 34 |
-| lower | 5 | 1 | 2 | 3 |
-| backend | 2 | 2 | 0 | 20 |
-| link | 4 | 3 | 18 | 20 |
-| build | 15 | 2 | 15 | 44 |
-| testkit | 5 | 1 | 9 | 1 |
-| lex | 1 | 3 | 0 | 2 |
-| check | 3 | 1 | 0 | 2 |
-| cmdline | 2 | 1 | 0 | 7 |
-| cmd | 9 | 0 | 0 | 1 |
-| builtin | 1 | 1 | 0 | 2 |
-| 合计 | 63 条边 | — | 174 | — |
+出度/入度、模块级 `let` 与 `pub fn` 的实测值随代码演进，统一由
+`tools/arch-check.py` 输出（`just` 与 CI 都跑它），逐模块快照见
+[`yh-模块职责-当前实现.md`](yh-模块职责-当前实现.md) §3 与 §6。
 
 ---
 
@@ -203,24 +160,25 @@ bin/yh-<平台>-<架构>（Release 种子）
 ### 3.1 允许的依赖边（`arch-check` 强制）
 
 ```text
-gen        → （无）
+support    → （无）
 ir         → （无）
-lex        → gen
-comptime   → gen, proj
-builtin    → gen
-proj       → gen
-cache      → gen, hash（标准库）
-ast        → gen, comptime, ir, proj, cache
-lower      → gen, ir, ast, proj, cache
-check      → gen, ast, proj
-parse      → gen, lex, comptime, ast, ir, proj
-backend    → gen, ir
-link       → gen, proj, backend, hash（标准库）
-build      → gen, lex, parse, comptime, ast, check, ir, backend, builtin, lower, proj, link, hash, cache, libs（os）
-testkit    → gen, parse, build, proj, link
-cmdline    → gen, libs
-main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, build,
-             testkit, lower, proj, link, cmdline
+token      → support
+cache      → support, token, gen, hash
+lex        → support, token, gen
+cmdline    → support, gen, libs
+proj       → support, token, gen
+ast        → support, token, proj, comptime, gen
+comptime   → support, token, proj, gen
+gen        → support, token
+check      → support, ir, token, cache, proj, ast, comptime, gen
+builtin    → support, gen, check
+parse      → support, ir, token, lex, proj, ast, comptime, gen, check
+lower      → support, ir, token, cache, proj, ast, gen, check
+backend    → support, ir, gen
+link       → support, proj, gen, backend, hash
+build      → support, ir, token, cache, lex, proj, ast, comptime, gen, check, builtin, parse, lower, backend, link, hash, libs
+testkit    → support, token, proj, ast, gen, parse, link, build
+main       → support, ir, lex, cmdline, proj, ast, comptime, gen, check, builtin, parse, lower, backend, link, build, testkit
 ```
 
 新增边必须同时改 `tools/arch-check.py` 的 `ALLOWED` 与本文；环数必须为 0。
@@ -228,25 +186,34 @@ main       → gen, lex, comptime, ast, check, parse, ir, backend, builtin, buil
 ### 3.2 分层与根
 
 ```text
-根（零业务依赖）        gen（共享内核）      ir（SSA）
-                              ↑                 ↑
-前端数据与语义          lex  ast  comptime  builtin
-                              ↑
-语法与准入              parse  check(verifier)
-                              ↑
-变换                    lower → ir
-                              ↑
-发射                    backend → ir, gen
-                              ↑
-工具链                  link → backend, proj, gen
-                              ↑
-项目/构建               proj  build
-                              ↑
-测试/入口               testkit  cmdline  cmd(main)
+support  ir                 ← 零依赖底座
+   ↑
+token  cache  lex  cmdline  ← 词汇/原语（cmdline 唯一可依赖 libs/cli）
+   ↑
+proj                        ← 项目/模块/文件表 + 目标配置
+   ↑
+ast   comptime   gen        ← 语法树 / CT 执行器 / 值内核（gen 只依赖 support+token）
+   ↑
+check   builtin             ← 语义中心 + 内建登记
+   ↑
+parse                       ← 前端装配（边解析边求值）
+   ↑
+lower → ir                  ← 受检快照 → SSA
+   ↑
+backend → ir                ← SSA → LLVM IR 文本
+   ↑
+link → backend, proj        ← 内嵌 lld / 平台链接
+   ↑
+build                       ← 构建编排（依赖全部下层）
+   ↑
+testkit   cmd               ← 测试 runner / CLI 分派
 ```
 
+- `support` 必须是叶子：任何反向依赖都会成环（`token` 也只能到 `support`）。
+- `comptime` 不得依赖 `check`（`check → comptime` 已存在）——这条决定了 `gen`
+  必须留在 `check` 之下。
 - `ir` 不得 import 任何前端模块；`backend` 不得 import `ast`/`parse`/`comptime`/`check`；
-  `lower` 不得 import `parse`/`build`/`gen`，只消费 `check` 的 `CheckedModule` 契约；
+  `lower` 不得 import `parse`/`build`，只消费 `check` 的 `CheckedModule` 契约；
   `ast` 不得反向 import `lower`/`check`。
 - 任何模块不得 import `cmd`；`cmd` 只做参数映射与调用面。
 - `cmdline` 是唯一允许依赖标准库 `libs/cli` 的编译器模块。

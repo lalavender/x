@@ -242,6 +242,10 @@ lex → parse(纯语法) → AST
   `docs/02-plan/yh-F2-parse纯语法化方案-2026-11-06.md`
 - [x] **gen 并单（2026-11-06）**：`gen/symbols.yh` 并入 `gen/value_rules.yh`，
   `gen` 现为**单文件 337 行 / 3 pub fn**（`sem_can_assign` + 两个折叠）。
+- [x] **模块职责文档（2026-11-06）**：新增
+  `docs/03-design/yh-模块职责-当前实现.md`（19 模块逐条职责/规模/依赖/内部拆分，
+  含 backend 文件分工、三条不可违反的依赖规则、已知结构债）；`架构设计.md`
+  §2.1/§2.3/§3.1/§3.2 改为指向该文档并按实测刷新（79 条边）。
 - [ ] **F4 收尾：让 `gen` 消失**（`support/value_kernel.yh` 返回错误码 + 三层
   各自格式化诊断）→ 方案见
   `docs/02-plan/yh-F4收尾-gen消失方案-2026-11-06.md`
