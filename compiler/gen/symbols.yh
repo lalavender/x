@@ -230,7 +230,7 @@ pub fn ty_lookup_name(start int, n int) int {
 }
 
 // ty_declare_name：登记类型名字（重复定义报错，含首次声明位置）。
-// is_pub/form 取自调用方设置的全局（g_state.task.c_decl_pub / support.ms().name_form）。
+// is_pub/form 取自调用方设置的全局（support.fc().c_decl_pub / support.ms().name_form）。
 pub fn ty_declare_name(off int, n int, tid int) int {
     let prev int = ty_lookup_name_off(off, n)
     if (prev >= 0) {
@@ -289,9 +289,9 @@ pub fn ty_declare_name(off int, n int, tid int) int {
     support.ms().names[support.ms().name_n].name_off = off
     support.ms().names[support.ms().name_n].name_len = n
     support.ms().names[support.ms().name_n].type_id = tid
-    support.ms().names[support.ms().name_n].is_pub = g_state.task.c_decl_pub
+    support.ms().names[support.ms().name_n].is_pub = support.fc().c_decl_pub
     support.ms().names[support.ms().name_n].form = support.ms().name_form
-    support.ms().names[support.ms().name_n].attrs = g_state.task.c_decl_attrs
+    support.ms().names[support.ms().name_n].attrs = support.fc().c_decl_attrs
     support.ms().names[support.ms().name_n].def_line = token.ctx().tokens[token.ctx().pos].line
     support.ms().names[support.ms().name_n].def_col = token.ctx().tokens[token.ctx().pos].col
     support.ms().name_n += 1
@@ -506,81 +506,8 @@ pub fn sym_push_pool(off int, n int, kind int, tid int, flags int) int {
     return idx
 }
 
-// sym_lookup_off：按名字池偏移查符号（池对池比较，供构建器诊断用）。
-// 只查全局层（support.ms().scope_start[0] 以下）。找不到返回 -1。
-// sym_ct_lit_text：把「字符串指针常量」沿引用链追到最终的字面式初始化文本。引用式
-// （`const A *char = B;`，kind 3）逐跳跟进，直到找到 kind 2 的字面式 —— 消费者看不到提供方的
-// 私有常量名，重放引用本身会在导入侧解析失败。跳数上限 16 兼作环与超深链的兜底
-// （`A -> B -> A` 这类环不会死循环）。成功填 out_off/out_len 返回 0，否则返回 1。
-pub fn sym_ct_lit_text(sym_id int, out_off *int, out_len *int) int {
-    if (sym_id < 0 || sym_id >= support.ms().sym_n) { return 1 }
-    let cur int = sym_id
-    let hops int = 0
-    for hops < 16 {
-        let kind int = support.ms().syms[cur].const_expr_kind
-        if (kind == 2) {
-            *out_off = support.ms().syms[cur].const_expr_off
-            *out_len = support.ms().syms[cur].const_expr_len
-            return 0
-        }
-        if (kind != 3) { return 1 }
-        let nxt int = sym_lookup_off(support.ms().syms[cur].const_expr_off,
-            support.ms().syms[cur].const_expr_len)
-        if (nxt < 0 || nxt >= support.ms().sym_n || nxt == cur) { return 1 }
-        if (support.ms().syms[nxt].kind != SYM_CONST
-            || (support.ms().syms[nxt].flags & F_ADDR) == 0) {
-            return 1
-        }
-        cur = nxt
-        hops += 1
-    }
-    return 1
-}
 
-pub fn sym_lookup_off(off int, n int) int {
-    let i int = support.ms().sym_n - 1
-    for i >= 0 {
-        if (support.ms().syms[i].name_len == n) {
-            let match int = 1
-            let j int = 0
-            for j < n {
-                if (support.pool_ctx().data[support.ms().syms[i].name_off + j] != support.pool_ctx().data[off + j]) {
-                    match = 0
-                    break
-                }
-                j += 1
-            }
-            if (match != 0) {
-                return i
-            }
-        }
-        i -= 1
-    }
-    return -1
-}
 
-// sym_lookup：当前作用域链内查找（符号按名字池比较）。找不到返回 -1。
-pub fn sym_lookup(start int, n int) int {
-    let i int = support.ms().sym_n - 1
-    for i >= 0 {
-        if (support.ms().syms[i].name_len == n) {
-            let match int = 1
-            let j int = 0
-            for j < n {
-                if (support.pool_ctx().data[support.ms().syms[i].name_off + j] != support.src_ctx().data[start + j]) {
-                    match = 0
-                    break
-                }
-                j += 1
-            }
-            if (match != 0) {
-                return i
-            }
-        }
-        i -= 1
-    }
-    return -1
-}
 
 // scope_push / scope_pop：进入/退出块作用域（退出即截断符号）。
 pub fn scope_push() int {
@@ -642,7 +569,7 @@ pub fn fold_unary(op int, a i64) i64 {
 }
 
 // sem_parse_number：解析数字字面量文本（十六/二/八/十进制与下划线），
-// 结果写 g_state.task.c_fold_ival（位型）与 g_state.task.c_fold_big（超出 i64 正数域标志）。
+// 结果写 support.fc().c_fold_ival（位型）与 support.fc().c_fold_big（超出 i64 正数域标志）。
 
 pub fn sem_parse_number(start int, n int) int {
     let i int = start
@@ -678,8 +605,8 @@ pub fn sem_parse_number(start int, n int) int {
         }
         i += 1
     }
-    g_state.task.c_fold_ival = v
-    g_state.task.c_fold_big = big
+    support.fc().c_fold_ival = v
+    support.fc().c_fold_big = big
     return 0
 }
 
@@ -869,51 +796,51 @@ pub fn sem_promote(a int, b int) int {
 pub fn sem_init_tables() int {
     let n4 u64 = (4 * 64).to_type(u64)
     support.ms().scope_start = support.alloc(n4).to_type(*int)
-    g_state.task.c_brk_stk = support.alloc(n4).to_type(*int)
-    g_state.task.c_cnt_stk = support.alloc(n4).to_type(*int)
-    g_state.task.c_loop_break_seen = support.alloc(n4).to_type(*int)
-    g_state.task.c_glabels = support.alloc((sizeof(GLabel) * 128).to_type(u64)).to_type(*GLabel)
-    g_state.task.c_args = support.alloc((sizeof(Res) * 256).to_type(u64)).to_type(*Res)
-    g_state.task.c_argtys = support.alloc((4 * 256).to_type(u64)).to_type(*int)
-    g_state.task.c_spill_reg = support.alloc((4 * 16).to_type(u64)).to_type(*int)
-    g_state.task.c_spill_off = support.alloc((4 * 16).to_type(u64)).to_type(*int)
-    g_state.task.c_spill_size = support.alloc((4 * 16).to_type(u64)).to_type(*int)
-    g_state.task.c_call_base = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_call_abi = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_call_direct = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_arg_agg = support.alloc((4 * 256).to_type(u64)).to_type(*int)
-    g_state.task.c_aggparam_indirect = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_aggparam_src = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_aggparam_dst = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_aggparam_size = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_lit_save_off = support.alloc((4 * 32).to_type(u64)).to_type(*int)
-    g_state.task.c_lit_save_tid = support.alloc((4 * 32).to_type(u64)).to_type(*int)
-    g_state.task.c_fi_kind = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_fi_cnt_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_fi_len_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_fi_data_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_fi_step_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_fi_elem_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_fi_idx_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.c_bss_syms = support.alloc((4 * 4096).to_type(u64)).to_type(*int)
-    g_state.task.sc_sc_false_stk = support.alloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.sc_sc_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.tn_else_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
-    g_state.task.tn_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
-    if (support.ms().scope_start == 0 || g_state.task.c_brk_stk == 0 || g_state.task.c_cnt_stk == 0
-        || g_state.task.c_loop_break_seen == 0
-        || g_state.task.c_glabels == 0 || g_state.task.c_args == 0 || g_state.task.c_argtys == 0
-        || g_state.task.c_spill_reg == 0 || g_state.task.c_spill_off == 0 || g_state.task.c_spill_size == 0
-        || g_state.task.c_call_base == 0
-        || g_state.task.c_call_abi == 0 || g_state.task.c_call_direct == 0 || g_state.task.c_arg_agg == 0
-        || g_state.task.c_aggparam_indirect == 0 || g_state.task.c_aggparam_src == 0 || g_state.task.c_aggparam_dst == 0 || g_state.task.c_aggparam_size == 0
-        || g_state.task.c_lit_save_off == 0 || g_state.task.c_lit_save_tid == 0
-        || g_state.task.c_fi_kind == 0 || g_state.task.c_fi_cnt_off == 0 || g_state.task.c_fi_len_off == 0
-        || g_state.task.c_fi_data_off == 0 || g_state.task.c_fi_step_off == 0
-        || g_state.task.c_fi_elem_off == 0 || g_state.task.c_fi_idx_off == 0
-        || g_state.task.c_bss_syms == 0
-        || g_state.task.sc_sc_false_stk == 0 || g_state.task.sc_sc_end_stk == 0
-        || g_state.task.tn_else_stk == 0 || g_state.task.tn_end_stk == 0) {
+    support.fc().c_brk_stk = support.alloc(n4).to_type(*int)
+    support.fc().c_cnt_stk = support.alloc(n4).to_type(*int)
+    support.fc().c_loop_break_seen = support.alloc(n4).to_type(*int)
+    support.fc().c_glabels = support.alloc((sizeof(GLabel) * 128).to_type(u64)).to_type(*GLabel)
+    support.fc().c_args = support.alloc((sizeof(Res) * 256).to_type(u64)).to_type(*Res)
+    support.fc().c_argtys = support.alloc((4 * 256).to_type(u64)).to_type(*int)
+    support.fc().c_spill_reg = support.alloc((4 * 16).to_type(u64)).to_type(*int)
+    support.fc().c_spill_off = support.alloc((4 * 16).to_type(u64)).to_type(*int)
+    support.fc().c_spill_size = support.alloc((4 * 16).to_type(u64)).to_type(*int)
+    support.fc().c_call_base = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_call_abi = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_call_direct = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_arg_agg = support.alloc((4 * 256).to_type(u64)).to_type(*int)
+    support.fc().c_aggparam_indirect = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_aggparam_src = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_aggparam_dst = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_aggparam_size = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_lit_save_off = support.alloc((4 * 32).to_type(u64)).to_type(*int)
+    support.fc().c_lit_save_tid = support.alloc((4 * 32).to_type(u64)).to_type(*int)
+    support.fc().c_fi_kind = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_fi_cnt_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_fi_len_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_fi_data_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_fi_step_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_fi_elem_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_fi_idx_off = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().c_bss_syms = support.alloc((4 * 4096).to_type(u64)).to_type(*int)
+    support.fc().sc_sc_false_stk = support.alloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().sc_sc_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().tn_else_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
+    support.fc().tn_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
+    if (support.ms().scope_start == 0 || support.fc().c_brk_stk == 0 || support.fc().c_cnt_stk == 0
+        || support.fc().c_loop_break_seen == 0
+        || support.fc().c_glabels == 0 || support.fc().c_args == 0 || support.fc().c_argtys == 0
+        || support.fc().c_spill_reg == 0 || support.fc().c_spill_off == 0 || support.fc().c_spill_size == 0
+        || support.fc().c_call_base == 0
+        || support.fc().c_call_abi == 0 || support.fc().c_call_direct == 0 || support.fc().c_arg_agg == 0
+        || support.fc().c_aggparam_indirect == 0 || support.fc().c_aggparam_src == 0 || support.fc().c_aggparam_dst == 0 || support.fc().c_aggparam_size == 0
+        || support.fc().c_lit_save_off == 0 || support.fc().c_lit_save_tid == 0
+        || support.fc().c_fi_kind == 0 || support.fc().c_fi_cnt_off == 0 || support.fc().c_fi_len_off == 0
+        || support.fc().c_fi_data_off == 0 || support.fc().c_fi_step_off == 0
+        || support.fc().c_fi_elem_off == 0 || support.fc().c_fi_idx_off == 0
+        || support.fc().c_bss_syms == 0
+        || support.fc().sc_sc_false_stk == 0 || support.fc().sc_sc_end_stk == 0
+        || support.fc().tn_else_stk == 0 || support.fc().tn_end_stk == 0) {
         return support.fail("内存分配失败")
     }
     return 0

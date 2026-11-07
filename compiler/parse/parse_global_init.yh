@@ -18,7 +18,6 @@ import ast
 // parse_global_bind_iface_label：接口加载时为导入聚合常量副本分配本地标签。
 // LL12：只登记 cval 与 c_data_n，不写 .globl/.LD 文本（与 CT 数据同规则）。
 fn parse_global_bind_iface_label(idx int) void {
-    let t *gen.TaskCtx = gen.task()
     if (support.session().iface_load != 0) {
         let lbl int = support.data_label()
         support.data_label_advance()
@@ -31,7 +30,6 @@ fn parse_global_bind_iface_label(idx int) void {
 // 通过 c_bind_idx 返回涉及的符号下标（无则为 -1）。
 let c_bind_idx int = -1
 fn parse_binding(global int, kind int) int {
-    let t *gen.TaskCtx = gen.task()
     c_bind_idx = -1
     if (p_cur() != token.TOK_IDENT) {
         return token.err_tok("此处需要一个变量名")
@@ -65,7 +63,7 @@ fn parse_binding(global int, kind int) int {
         // 零初始化聚合在 pass 2 走 .bss，带初始化器的聚合走
         // parse_global_init 的数据发射。
         let fl int = gen.F_GLOBAL
-        if (t.c_decl_pub != 0) {
+        if (support.fc().c_decl_pub != 0) {
             fl |= gen.F_PUB
         }
         idx = gen.sym_push(start, n, kind, tid, fl)
@@ -73,7 +71,7 @@ fn parse_binding(global int, kind int) int {
             return -1
         }
     } else if (global != 0) {
-        idx = gen.sym_lookup(start, n)
+        idx = support.sym_lookup(start, n)
         if (idx < 0) {
             return gen.sem_err("内部错误：全局符号丢失")
         }
@@ -133,7 +131,6 @@ fn parse_binding(global int, kind int) int {
 // 编译期不可得（数据在发射阶段才写出），所以跨模块 CT 闭包与 .s.i 导出都
 // 改为重放源文本、由导入侧重新解析/执行。范围由首尾 token 求得。
 fn record_aggregate_const_src(idx int, first int, after int, kind int) int {
-    let t *gen.TaskCtx = gen.task()
     if (after <= first) { return 0 }
     let start int = token.ctx().tokens[first].start
     let last int = after - 1
@@ -171,7 +168,6 @@ fn parse_global_string_ast(str_type int, first int, after int, lbl int) int {
 }
 
 fn parse_global_init(idx int, tid int, kind int) int {
-    let t *gen.TaskCtx = gen.task()
     // 初始化式的起始 token：聚合常量要按这个位置记下源文本（见 record_aggregate_const_src）。
     let init_pos int = token.ctx().pos
     let fk int = support.ms().types[tid].kind
@@ -250,10 +246,10 @@ fn parse_global_init(idx int, tid int, kind int) int {
         return 0
     }
     let init_token_first int = token.ctx().pos
-    t.c_fold += 1
+    support.fc().c_fold += 1
     let r gen.Res
     let rr int = parse_expr_iso(&r)
-    t.c_fold -= 1
+    support.fc().c_fold -= 1
     let init_token_after int = token.ctx().pos
     if (rr != 0) {
         return -1
@@ -353,7 +349,6 @@ fn parse_global_init(idx int, tid int, kind int) int {
 // 登记延迟执行项，由 module_worker 在接口闭包加载完成后统一执行。
 fn parse_global_comptime_aggregate_ex(idx int, tid int, kind int,
     init_pos int) int {
-    let tk *gen.TaskCtx = gen.task()
     let pub_ex int = (kind == gen.SYM_CONST && support.module_mode() != 0
         && (support.ms().syms[idx].flags & gen.F_PUB) != 0).to_type(int)
     if (support.session().iface_load != 0) {
@@ -378,7 +373,7 @@ fn parse_global_comptime_aggregate_ex(idx int, tid int, kind int,
         }
         let fname_start int = token.ctx().tokens[init_pos + 1].start
         let fname_len int = token.ctx().tokens[init_pos + 1].len
-        let fnsym int = gen.sym_lookup(fname_start, fname_len)
+        let fnsym int = support.sym_lookup(fname_start, fname_len)
         if (fnsym < 0 || (support.ms().syms[fnsym].flags & gen.F_COMPTIME) == 0
             || comptime.ct_pub_agg_fn_add(fnsym) != 0) { return -1 }
     }
@@ -399,26 +394,25 @@ fn parse_global_comptime_aggregate_ex(idx int, tid int, kind int,
 // pub_agg_deferred_add：登记导入侧 pub $ 聚合常量的延迟执行项（记录 .s.i
 // 路径与初始化式 token 起点）。执行见 pub_agg_deferred_run。
 fn pub_agg_deferred_add(idx int, first int) int {
-    let t *gen.TaskCtx = gen.task()
-    if (t.c_pub_agg_dep_n == t.c_pub_agg_dep_cap) {
-        let ncap int = t.c_pub_agg_dep_cap * 2
+    if (support.fc().c_pub_agg_dep_n == support.fc().c_pub_agg_dep_cap) {
+        let ncap int = support.fc().c_pub_agg_dep_cap * 2
         if (ncap == 0) { ncap = 8 }
         let nd *gen.PubAggDeferred = malloc(
             (ncap * sizeof(gen.PubAggDeferred)).to_type(u64)) .
             to_type(*gen.PubAggDeferred)
         if (nd == 0) { return support.fail("pub 聚合常量延迟表分配失败") }
-        if (t.c_pub_agg_dep_n > 0) {
-            memcpy(nd, t.c_pub_agg_dep,
-                (t.c_pub_agg_dep_n * sizeof(gen.PubAggDeferred))
+        if (support.fc().c_pub_agg_dep_n > 0) {
+            memcpy(nd, support.fc().c_pub_agg_dep,
+                (support.fc().c_pub_agg_dep_n * sizeof(gen.PubAggDeferred))
                     .to_type(u64))
         }
-        if (t.c_pub_agg_dep != 0) {
-            free(t.c_pub_agg_dep.to_type(*void))
+        if (support.fc().c_pub_agg_dep != 0) {
+            free(support.fc().c_pub_agg_dep.to_type(*void))
         }
-        t.c_pub_agg_dep = nd
-        t.c_pub_agg_dep_cap = ncap
+        support.fc().c_pub_agg_dep = nd
+        support.fc().c_pub_agg_dep_cap = ncap
     }
-    let item *gen.PubAggDeferred = &t.c_pub_agg_dep[t.c_pub_agg_dep_n]
+    let item *gen.PubAggDeferred = &support.fc().c_pub_agg_dep[support.fc().c_pub_agg_dep_n]
     let plen int = 0
     for support.src_ctx().path[plen] != 0 { plen += 1 }
     let poff int = support.tml_intern_str(support.src_ctx().path.to_type(*u8), 0, plen)
@@ -428,7 +422,7 @@ fn pub_agg_deferred_add(idx int, first int) int {
     item.after = -1
     item.path_off = poff
     item.path_len = plen
-    t.c_pub_agg_dep_n += 1
+    support.fc().c_pub_agg_dep_n += 1
     return 0
 }
 
@@ -437,10 +431,9 @@ fn pub_agg_deferred_add(idx int, first int) int {
 // 词法化后按登记的 token 起点解析初始化式并执行（建模 + 本地物化，
 // 与提供方 parse_global_comptime_aggregate 同一路径）。
 pub fn pub_agg_deferred_run() int {
-    let t *gen.TaskCtx = gen.task()
     let i int = 0
-    for i < t.c_pub_agg_dep_n {
-        let item gen.PubAggDeferred = t.c_pub_agg_dep[i]
+    for i < support.fc().c_pub_agg_dep_n {
+        let item gen.PubAggDeferred = support.fc().c_pub_agg_dep[i]
         if (item.sym < 0) { i += 1; continue }
         if (item.first < 0 || item.sym >= support.ms().sym_n
             || item.path_off <= 0 || item.path_len <= 0) {
@@ -466,7 +459,7 @@ pub fn pub_agg_deferred_run() int {
         support.session().iface_load = 0
         if (status != 0) { return -1 }
         support.ms().syms[item.sym].const_ready = 1
-        t.c_pub_agg_dep[i].sym = -1
+        support.fc().c_pub_agg_dep[i].sym = -1
         i += 1
     }
     return 0
@@ -474,11 +467,10 @@ pub fn pub_agg_deferred_run() int {
 
 // parse_global_comptime_aggregate：折叠顶层 CT 聚合结果并写入全局数据符号。
 fn parse_global_comptime_aggregate(idx int, tid int) int {
-    let t *gen.TaskCtx = gen.task()
-    t.c_fold += 1
+    support.fc().c_fold += 1
     let result gen.Res
     let status int = parse_expr_iso(&result)
-    t.c_fold -= 1
+    support.fc().c_fold -= 1
     if (status != 0) { return -1 }
     if (result.is_const == 0) {
         return gen.sem_err("全局聚合初始化必须是编译期聚合结果")
@@ -504,22 +496,21 @@ fn parse_global_comptime_aggregate(idx int, tid int) int {
 
 // parse_global_ct_const_probe：提前折叠已登记的简单 CT 整数常量供后续数组布局使用。
 fn parse_global_ct_const_probe(idx int, tid int) int {
-    let t *gen.TaskCtx = gen.task()
     if (p_cur() != token.TK_DOLLAR || p_peek(1) != token.TOK_IDENT) { return 0 }
     // 早期 token 探测只接受当前可解析的名字；可能前向引用的 CT 初始化器
     // 留给全部声明登记后的 typed 布局常量依赖调度。
     if (parse_global_ct_const_has_unready_name() != 0) { return 0 }
     let tok_pos int = token.ctx().pos + 1
-    let sym int = gen.sym_lookup(token.ctx().tokens[tok_pos].start, token.ctx().tokens[tok_pos].len)
+    let sym int = support.sym_lookup(token.ctx().tokens[tok_pos].start, token.ctx().tokens[tok_pos].len)
     if (sym < 0 || support.ms().syms[sym].kind != gen.SYM_FN
         || (support.ms().syms[sym].flags & gen.F_COMPTIME) == 0
         // 只在目标编译期函数已捕获 typed IR 时才提前折叠：pass1 期间一律让位给
         // pass2a 之后的 typed 布局常量依赖调度，避免使用第二套 token 解释器。
         || comptime.ct_is_prepared(sym) == 0) { return 0 }
-    t.c_fold += 1
+    support.fc().c_fold += 1
     let value gen.Res
     let status int = parse_expr_iso(&value)
-    t.c_fold -= 1
+    support.fc().c_fold -= 1
     if (status != 0) { return -1 }
     if (value.is_const == 0) {
         return gen.sem_err("全局整数常量初始化必须是编译期常量")
@@ -533,7 +524,6 @@ fn parse_global_ct_const_probe(idx int, tid int) int {
 
 // parse_global_ct_const_has_unready_name：检查简单早期探测是否会碰到未知或未就绪全局名。
 fn parse_global_ct_const_has_unready_name() int {
-    let gs *gen.TaskCtx = gen.task()
     let i int = token.ctx().pos
     let depth int = 0
     for i < token.ctx().count {
@@ -548,7 +538,7 @@ fn parse_global_ct_const_has_unready_name() int {
         if (kind == token.TOK_IDENT
             && (i == 0 || (token.ctx().tokens[i - 1].kind != token.TK_DOT
                 && token.ctx().tokens[i - 1].kind != token.TK_DOLLAR))) {
-            let sym int = gen.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
+            let sym int = support.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
             if (sym < 0) { return 1 }
             if (support.ms().syms[sym].kind == gen.SYM_CONST
                 && support.ms().syms[sym].const_ready == 0) { return 1 }
@@ -559,16 +549,15 @@ fn parse_global_ct_const_has_unready_name() int {
 }
 
 fn sem_global_zero(idx int, tid int) int {
-    let t *gen.TaskCtx = gen.task()
     if (support.session().iface_load != 0) {
         return 0
     }
-    if (t.c_bss_n >= 4096) {
+    if (support.fc().c_bss_n >= 4096) {
         return gen.sem_err("零初始化全局过多")
     }
-    support.ms().syms[idx].offset = t.c_bss_n
-    t.c_bss_syms[t.c_bss_n] = idx
-    t.c_bss_n += 1
+    support.ms().syms[idx].offset = support.fc().c_bss_n
+    support.fc().c_bss_syms[support.fc().c_bss_n] = idx
+    support.fc().c_bss_n += 1
     if (parse_global_static_root(idx, tid) == -1) { return -1 }
     return 0
 }
@@ -576,7 +565,6 @@ fn sem_global_zero(idx int, tid int) int {
 // parse_global_array_init：全局数组/切片字面量初始化（发射旧数据 + 可选 AST 捕获）。
 // ast_out 在捕获开启时写出 AST_EXPR_ARRAY 根（元素链与局部字面量同构），否则写 -1。
 fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) int {
-    let t *gen.TaskCtx = gen.task()
     let elem int = support.ms().types[tid].elem
     let esz int = support.ms().types[elem].size
     let first int = token.ctx().pos
@@ -621,10 +609,10 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
                 break
             }
             let elem_first int = token.ctx().pos
-            t.c_fold += 1
+            support.fc().c_fold += 1
             let e gen.Res
             let er int = parse_expr_iso(&e)
-            t.c_fold -= 1
+            support.fc().c_fold -= 1
             if (er != 0) {
                 return -1
             }
@@ -742,7 +730,6 @@ fn parse_global_array_init(idx int, tid int, fk int, ct_obj *i64, ast_out *int) 
 // parse_global_struct_init：全局结构体字面量初始化（发射旧数据 + 可选 AST 捕获）。
 // ast_out 在捕获开启时写出 AST_EXPR_STRUCT_INIT 根（字段链与局部字面量同构）。
 fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
-    let t *gen.TaskCtx = gen.task()
     if (p_cur() != token.TOK_IDENT) {
         return gen.sem_err("全局结构体初始化需要「类型名 { 字段 }」字面量")
     }
@@ -781,7 +768,6 @@ fn parse_global_struct_init(idx int, tid int, ct_obj i64, ast_out *int) int {
 // （捕获关闭时保持 -1）。链的构造次序与局部 parse_struct_init_body 完全一致。
 fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
     fields_out *int, static_row int) int {
-    let t *gen.TaskCtx = gen.task()
     if (p_cur() == token.TK_RBRACE) {
         return token.err_tok("结构体字面量不能为空")
     }
@@ -848,7 +834,6 @@ fn parse_global_struct_body(tid int, base int, cur *int, ct_obj i64,
 // ast_out 在捕获开启时写出该字段值的表达式根（嵌套结构体为 STRUCT_INIT），否则为 -1。
 fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
     ct_index int, ast_out *int, static_row int) int {
-    let t *gen.TaskCtx = gen.task()
     let ftid int = support.ms().fields[fidx].type_id
     let foff int = base + support.ms().fields[fidx].offset
     ast_out[0] = -1
@@ -927,10 +912,10 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             }
             r = 0
         } else {
-            t.c_fold += 1
+            support.fc().c_fold += 1
             let pv gen.Res
             let pr int = parse_expr_iso(&pv)
-            t.c_fold -= 1
+            support.fc().c_fold -= 1
             if (pr != 0) {
                 return -1
             }
@@ -948,10 +933,10 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             r = 0
         }
     } else if (support.ty_is_float(ftid) != 0) {
-        t.c_fold += 1
+        support.fc().c_fold += 1
         let fv2 gen.Res
         let fr int = parse_expr_iso(&fv2)
-        t.c_fold -= 1
+        support.fc().c_fold -= 1
         if (fr != 0) {
             return -1
         }
@@ -973,10 +958,10 @@ fn parse_global_field_value(fidx int, base int, cur *int, ct_obj i64,
             return -1
         }
     } else {
-        t.c_fold += 1
+        support.fc().c_fold += 1
         let v gen.Res
         let vr int = parse_expr_iso(&v)
-        t.c_fold -= 1
+        support.fc().c_fold -= 1
         if (vr != 0) {
             return -1
         }

@@ -1,6 +1,6 @@
 # GEN4：`TaskCtx` 按所有者拆分（方案评审稿）
 
-状态：**阶段 1–3 已完成**（2026-11-06）；阶段 4–6 待做
+状态：**阶段 1–6 已完成**（2026-11-06）：`TaskCtx` 145 → **0**
 上游：ADR-0021（gen 职责拆分）、`yh-F4-comptime纯执行器实施方案-2026-11-06.md`
 
 ## 1. 为什么现在做
@@ -99,20 +99,26 @@
 - `parse` 的 `p_decl_module` / `mod_import_push` 改成写 `support.fs()`
 - 验证：`build-check.py` 里所有多模块项目用例（`u2-*`/`u3-*`/`r2b-*`）必须与基线一致
 
-### 阶段 4：ABI 分类下沉 `check`（90 → 84）
+### 阶段 4：ABI 分类下沉（✅ 已完成，改落 `support`）
 
 - `c_cabi_cursor` + `c_aggparam_*` 并入 `check/abi_model.yh` 的 `ABIContext`
 - 验证：`cabi-*` 用例 + `llvmlower`（ABI 快照）
 
-### 阶段 5：发射计数下沉 `build`（84 → 82）
+### 阶段 5：发射计数（✅ 已完成：`c_bss_cap`/`c_lbl_n` 等已在阶段 1 删除，剩下 2 个 `c_bss_*` 随阶段 6 一起走）
 
 - `c_bss_*`（.bss 清单）、`c_fn_lbl` 相关并入 `build/emit_counters.yh`
 - 验证：`llvmprivate`（bss）、`r2a-*`（符号发射）
 
-### 阶段 6：解析临时态并入 `parse.ParseCtx`（82 → 0）
+### 阶段 6：解析临时态整体下沉 `support/task_ctx.yh`（85 → 0）✅ 已完成
 
-- 82 个字段按前缀分批搬：`c_lit_*` → `c_fi_*` → `sc_*`/`tn_*` → `c_call_*`/`c_arg_*`/
-  `c_ret_*` → `c_loop_*`/`c_spill_*` → `c_ct_*` → 其余
+**实际做法（一次性而非分批）**：原计划搬到 `parse.ParseCtx`，实测 85 个字段里
+**61 个被 `check` 读或写**，而 `parse` 依赖 `check`——搬进 `parse` 会让
+`check → parse` 成环。`ast` 也读 2 个。唯一无环落点是 `support`：
+新建 `support/task_ctx.yh`（`FrontCtx` + `fc()`），75 个字段原样搬、684 处
+`gen.task().X` / `g_state.task.X` 脚本改写为 `support.fc().X`。
+同时把 `ABICursor`/`ABIValue`/`CABI_*`（`gen/abi_model.yh`）与
+`PubAggDeferred`/`GLabel` 一并下沉 `support`，`gen/state.yh` 只留
+`data_str_*`/`em_*` 两张语义内核表，`TaskCtx`/`GenState`/`task()` 整体删除。
 - 每批一个提交；`parse` 内部改 `parse.ctx().xxx`，`check` 侧若仍要读，改用
   `parse.ctx()` 只读窄口（`parse → check` 不允许，故这些字段迁完前不得被 `check` 写）
 - 终局：`TaskCtx` 空 → 删 `gen/state.yh` 的 `TaskCtx`/`task()`，`gen` 只剩

@@ -201,6 +201,14 @@ lex → parse(纯语法) → AST
   带 token 位置诊断的 3 个折叠函数（`sem_fold_const_binop/unary`、
   `sem_can_assign`）留在 gen。`comptime→gen` 白名单 **10→4**，gen pub fn
   **71→61**，`TaskCtx` 出参 `c_layout_size/c_layout_align` 删除。
+- [x] **GEN4 阶段 4–6（2026-11-06 完成）**：`TaskCtx` **85 → 0**，`gen.task()`
+  与 `GenState` 整体删除。85 个前端瞬时字段下沉 `support/task_ctx.yh`
+  （`FrontCtx` + `fc()`，684 处访问点脚本改写）；`ABICursor`/`ABIValue`/`CABI_*`
+  与 `PubAggDeferred`/`GLabel` 同步下沉；符号只读查询
+  （`sym_lookup`/`sym_lookup_off`/`sym_ct_lit_text`）下沉
+  `support/symbols.yh`；`ast` 改用 `support.Res`/常量后**脱离 gen**。
+  白名单 4→3，`import gen` 模块 7→**6**，gen pub fn 61→**57**，gen 行数
+  2,009→**1,750**。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

@@ -25,7 +25,6 @@ import ast
 // scan_assign_ahead：从当前 token 扫描到 ';'，返回深度 0 处首个赋值
 // 运算符的 token 种类；无则返回 0。括号/花括号/方括号内不视为顶层。
 fn scan_assign_ahead() int {
-    let t *gen.TaskCtx = gen.task()
     let i int = token.ctx().pos
     let depth int = 0
     for i < token.ctx().count {
@@ -49,7 +48,6 @@ fn scan_assign_ahead() int {
 
 // sem_check_cond：条件上下文类型检查（标量且非浮点）。
 fn sem_check_cond(r *gen.Res) int {
-    let t *gen.TaskCtx = gen.task()
     if (support.session().compile == 0) {
         return 0
     }
@@ -64,7 +62,6 @@ fn sem_check_cond(r *gen.Res) int {
 
 // parse_block：'{' stmt* '}'。
 fn parse_block() int {
-    let t *gen.TaskCtx = gen.task()
     let own_ast int = 0
     let block_ast int = -1
     let top_root int = 0
@@ -102,7 +99,7 @@ fn parse_block() int {
         return -1
     }
     if (own_ast != 0 && top_root != 0 && ast.store().file_decl_i >= 0
-        && (t.c_ct_prepare_active == 0 || ast.store().file_indexed != 0)
+        && (support.fc().c_ct_prepare_active == 0 || ast.store().file_indexed != 0)
         && ast.ast_decl_attach_body(support.session().active_file, ast.store().file_decl_i, block_ast) != 0) {
         return -1
     }
@@ -111,7 +108,6 @@ fn parse_block() int {
 
 // parse_stmt_capture：仅供 check worker 包装一条语句并记录 AST 范围。
 fn parse_stmt_capture() int {
-    let t *gen.TaskCtx = gen.task()
     let first int = token.ctx().pos
     let op int = p_cur()
     let kind int = ast.AST_STMT_EXPR
@@ -126,7 +122,7 @@ fn parse_stmt_capture() int {
     if (op == token.TK_FOR) { kind = ast.AST_STMT_FOR }
     if (op == token.TK_DOLLAR && (p_peek(1) == token.TK_IF || p_peek(1) == token.TK_FOR)) {
         kind = ast.AST_STMT_COMPTIME
-        if (t.c_ct_prepare_active != 0 && support.session().ast_capture != 0) {
+        if (support.fc().c_ct_prepare_active != 0 && support.session().ast_capture != 0) {
             if (p_peek(1) == token.TK_IF) { typed_if = 1 }
             if (p_peek(1) == token.TK_FOR) { typed_for = 1 }
         }
@@ -165,7 +161,6 @@ fn parse_stmt_capture() int {
 
 // parse_stmt：按首 token 分派语句并调用现有语义钩子。
 fn parse_stmt_inner() int {
-    let t *gen.TaskCtx = gen.task()
     let k int = p_cur()
     if (k == token.TK_LBRACE) {
         return parse_block()
@@ -198,7 +193,7 @@ fn parse_stmt_inner() int {
     }
     if (k == token.TK_BREAK || k == token.TK_CONTINUE) {
         if (support.session().compile != 0
-            && comptime.ct_validate_loop_exit(t.c_loop_depth, k) != 0) { return -1 }
+            && comptime.ct_validate_loop_exit(support.fc().c_loop_depth, k) != 0) { return -1 }
         p_adv()
         let br int = 0
         if (k == token.TK_BREAK) {
@@ -242,14 +237,14 @@ fn parse_stmt_inner() int {
     let aop int = scan_assign_ahead()
     if (aop != 0) {
         let lres gen.Res
-        let save int = t.c_lvalue
-        t.c_lvalue += 1
+        let save int = support.fc().c_lvalue
+        support.fc().c_lvalue += 1
         let r int = parse_expr(&lres)
-        t.c_lvalue = save
+        support.fc().c_lvalue = save
         if (r != 0) {
             return -1
         }
-        if (support.session().compile != 0 && t.c_res_is_addr == 0) {
+        if (support.session().compile != 0 && support.fc().c_res_is_addr == 0) {
             return gen.sem_err("赋值目标必须是可寻址的表达式")
         }
         // 消费赋值运算符
@@ -260,13 +255,13 @@ fn parse_stmt_inner() int {
         // RHS 恒为值上下文（清 c_lvalue，避免 s[i] 被取地址）；
         // 数组/切片字面量以左值类型为目标类型上下文
         let rres gen.Res
-        let save_lv2 int = t.c_lvalue
-        t.c_lvalue = 0
-        let save_exp int = t.c_expect_tid
-        t.c_expect_tid = lres.type_id
+        let save_lv2 int = support.fc().c_lvalue
+        support.fc().c_lvalue = 0
+        let save_exp int = support.fc().c_expect_tid
+        support.fc().c_expect_tid = lres.type_id
         let rr int = parse_expr(&rres)
-        t.c_expect_tid = save_exp
-        t.c_lvalue = save_lv2
+        support.fc().c_expect_tid = save_exp
+        support.fc().c_lvalue = save_lv2
         if (rr != 0) {
             return -1
         }
@@ -281,16 +276,16 @@ fn parse_stmt_inner() int {
         return p_expect(token.TK_SEMI, "期望 ';'")
     }
     let res gen.Res
-    let saved_diag_stmt int = t.c_ct_diag_stmt
-    t.c_ct_diag_stmt = 1
+    let saved_diag_stmt int = support.fc().c_ct_diag_stmt
+    support.fc().c_ct_diag_stmt = 1
     let expr_status int = parse_expr(&res)
-    t.c_ct_diag_stmt = saved_diag_stmt
+    support.fc().c_ct_diag_stmt = saved_diag_stmt
     if (expr_status != 0) {
         return -1
     }
     if (p_expect(token.TK_SEMI, "期望 ';'") != 0) { return -1 }
     if (support.session().compile != 0 && res.ct_diag != 0
-        && (t.c_fn_flags & gen.F_COMPTIME) == 0
+        && (support.fc().c_fn_flags & gen.F_COMPTIME) == 0
         && !(ctx().test_body != 0
             && res.ct_diag == gen.CT_DIAG_ASSERT)) {
         return comptime.ct_diag_emit(res.ct_diag, res.ival,
@@ -302,34 +297,32 @@ fn parse_stmt_inner() int {
 
 // parse_stmt：隔离当前语句的调用效果，并更新函数顺序落底状态。
 fn parse_stmt() int {
-    let t *gen.TaskCtx = gen.task()
     let first_kind int = p_cur()
-    t.c_expr_noreturn = 0
+    support.fc().c_expr_noreturn = 0
     let status int = parse_stmt_inner()
     if (status != 0 || support.session().compile == 0) { return status }
     if (first_kind == token.TK_RETURN || first_kind == token.TK_BREAK
         || first_kind == token.TK_CONTINUE) {
-        t.c_fn_falls = 0
+        support.fc().c_fn_falls = 0
     } else if (first_kind != token.TK_IF && first_kind != token.TK_FOR
         && first_kind != token.TK_SWITCH && first_kind != token.TK_LBRACE
-        && t.c_expr_noreturn != 0) {
-        t.c_fn_falls = 0
+        && support.fc().c_expr_noreturn != 0) {
+        support.fc().c_fn_falls = 0
     }
     return 0
 }
 
 // parse_return：'return' expr? ';'。返回类型检查与收尾跳转由 sem 层管理。
 fn parse_return() int {
-    let t *gen.TaskCtx = gen.task()
     p_adv()
     if (support.session().compile != 0) {
-        if ((t.c_fn_flags & gen.F_NORETURN) != 0) {
+        if ((support.fc().c_fn_flags & gen.F_NORETURN) != 0) {
             return gen.sem_err("noreturn 函数定义不能包含 return")
         }
-        if (t.c_fn_ret == gen.TY_VOID && p_cur() != token.TK_SEMI) {
+        if (support.fc().c_fn_ret == gen.TY_VOID && p_cur() != token.TK_SEMI) {
             return gen.sem_err("void 函数不能返回值")
         }
-        if (t.c_fn_ret != gen.TY_VOID && p_cur() == token.TK_SEMI) {
+        if (support.fc().c_fn_ret != gen.TY_VOID && p_cur() == token.TK_SEMI) {
             return gen.sem_err("非 void 函数必须返回值")
         }
     }
@@ -338,15 +331,15 @@ fn parse_return() int {
         // 聚合字面量需要目标类型上下文：return 表达式的目标类型是函数返回类型
         // （与 let 初始化/赋值/调用实参一致，见 parse_array_literal）；非字面量
         // 表达式不受影响，随后的 sem_can_assign 仍做完整校验。
-        let save_expect int = t.c_expect_tid
-        t.c_expect_tid = t.c_fn_ret
+        let save_expect int = support.fc().c_expect_tid
+        support.fc().c_expect_tid = support.fc().c_fn_ret
         let rr int = parse_expr(&r)
-        t.c_expect_tid = save_expect
+        support.fc().c_expect_tid = save_expect
         if (rr != 0) {
             return -1
         }
         if (support.session().compile != 0) {
-            if (gen.sem_can_assign(t.c_fn_ret, r.type_id, r.is_lit, r.ival, r.lit_big) != 0) {
+            if (gen.sem_can_assign(support.fc().c_fn_ret, r.type_id, r.is_lit, r.ival, r.lit_big) != 0) {
                 return -1
             }
             if (check.sem_return_value(&r) != 0) {
@@ -360,8 +353,7 @@ fn parse_return() int {
 
 // parse_if：'if' '(' expr ')' block ('else' (ifStmt | block))?。
 fn parse_if() int {
-    let t *gen.TaskCtx = gen.task()
-    let parent_falls int = t.c_fn_falls
+    let parent_falls int = support.fc().c_fn_falls
     p_adv()
     if (p_expect(token.TK_LPAREN, "if 条件必须带括号") != 0) {
         return -1
@@ -378,14 +370,14 @@ fn parse_if() int {
     }
     let lbl_else int = 0
     let lbl_end int = 0
-    t.c_fn_falls = 1
+    support.fc().c_fn_falls = 1
     if (parse_block() != 0) {
         return -1
     }
-    let then_falls int = t.c_fn_falls
+    let then_falls int = support.fc().c_fn_falls
     if (p_cur() == token.TK_ELSE) {
         p_adv()
-        t.c_fn_falls = 1
+        support.fc().c_fn_falls = 1
         if (p_cur() == token.TK_IF) {
             let nested_if_result int = 0
             if (support.session().ast_capture != 0) {
@@ -401,19 +393,18 @@ fn parse_if() int {
                 return -1
             }
         }
-        let else_falls int = t.c_fn_falls
-        t.c_fn_falls = parent_falls != 0 &&
+        let else_falls int = support.fc().c_fn_falls
+        support.fc().c_fn_falls = parent_falls != 0 &&
             (then_falls != 0 || else_falls != 0) ? 1 : 0
         return 0
     }
-    t.c_fn_falls = parent_falls != 0 ? 1 : 0
+    support.fc().c_fn_falls = parent_falls != 0 ? 1 : 0
     return 0
 }
 
 // parse_for：三种形态（无限 / 条件 / for-in）。
 fn parse_for() int {
-    let t *gen.TaskCtx = gen.task()
-    let parent_falls int = t.c_fn_falls
+    let parent_falls int = support.fc().c_fn_falls
     p_adv()
     if (p_cur() == token.TK_LBRACE) {
         // 无限循环
@@ -424,14 +415,14 @@ fn parse_for() int {
                 return -1
             }
         }
-        t.c_fn_falls = 1
+        support.fc().c_fn_falls = 1
         if (parse_block() != 0) {
             return -1
         }
-        let loop_depth int = t.c_loop_depth
+        let loop_depth int = support.fc().c_loop_depth
         let has_break int = loop_depth > 0 ?
-            t.c_loop_break_seen[loop_depth - 1] : 0
-        t.c_fn_falls = parent_falls != 0 && has_break != 0 ? 1 : 0
+            support.fc().c_loop_break_seen[loop_depth - 1] : 0
+        support.fc().c_fn_falls = parent_falls != 0 && has_break != 0 ? 1 : 0
         if (support.session().compile != 0) {
             check.sem_loop_pop()
         }
@@ -497,7 +488,7 @@ fn parse_for() int {
                 if (sem_check_cond(&it) != 0) { return -1 }
                 if (sem_check_cond(&end_res) != 0) { return -1 }
                 // 终点（x0）存临时槽
-                t.c_end_tmp_off = 0
+                support.fc().c_end_tmp_off = 0
             }
             let lcond int = 0
             let lend int = 0
@@ -532,9 +523,9 @@ fn parse_for() int {
             if (check.sem_forin_set_bind(eoff, ioff) != 0) { return -1 }
             if (check.sem_forin_check(lend) != 0) { return -1 }
             if (check.sem_forin_load(&it, is_range) != 0) { return -1 }
-            t.c_fn_falls = 1
+            support.fc().c_fn_falls = 1
             if (parse_block() != 0) { return -1 }
-            t.c_fn_falls = parent_falls
+            support.fc().c_fn_falls = parent_falls
             if (check.sem_forin_step(lcond) != 0) { return -1 }
             gen.scope_pop()
             check.sem_forin_end()
@@ -559,11 +550,11 @@ fn parse_for() int {
             return -1
         }
     }
-    t.c_fn_falls = 1
+    support.fc().c_fn_falls = 1
     if (parse_block() != 0) {
         return -1
     }
-    t.c_fn_falls = parent_falls
+    support.fc().c_fn_falls = parent_falls
     if (support.session().compile != 0) {
         check.sem_loop_pop()
     }
@@ -578,7 +569,6 @@ fn parse_for() int {
 //   next:（下一个 case 的比较链开始处）
 // default 分支的块体无条件执行（排在源码位置）。
 fn parse_switch() int {
-    let t *gen.TaskCtx = gen.task()
     p_adv()
     let ctrl gen.Res
     if (parse_expr_blockctx(&ctrl) != 0) {
@@ -609,11 +599,11 @@ fn parse_switch() int {
             for 1 {
                 let cv gen.Res
                 if (support.session().compile != 0) {
-                    t.c_fold += 1
+                    support.fc().c_fold += 1
                 }
                 let r int = parse_expr_blockctx(&cv)
                 if (support.session().compile != 0) {
-                    t.c_fold -= 1
+                    support.fc().c_fold -= 1
                 }
                 if (r != 0) {
                     return -1

@@ -8,7 +8,6 @@ import ast
 
 // parse_comptime_block_end：查找从指定左花括号开始的匹配右花括号位置。
 fn parse_comptime_block_end(first int) int {
-    let t *gen.TaskCtx = gen.task()
     if (first < 0 || first >= token.ctx().count || token.ctx().tokens[first].kind != token.TK_LBRACE) {
         return -1
     }
@@ -34,14 +33,13 @@ fn parse_comptime_block_end(first int) int {
 
 // parse_comptime_branch：选中分支正常检查/发码，未选分支只做语法检查。
 fn parse_comptime_branch(selected int) int {
-    let t *gen.TaskCtx = gen.task()
     let saved_compile int = support.session().compile
     let saved_capture int = support.session().ast_capture
-    let saved_falls int = t.c_fn_falls
+    let saved_falls int = support.fc().c_fn_falls
     if (selected != 1 || saved_compile == 0) {
         support.session().compile = 0
         support.session().ast_capture = 0
-    } else if (saved_capture != 0 && t.c_ct_prepare_active == 0) {
+    } else if (saved_capture != 0 && support.fc().c_ct_prepare_active == 0) {
         comptime.ct_expansion_capture_enter()
     }
     let status int = 0
@@ -56,10 +54,10 @@ fn parse_comptime_branch(selected int) int {
     support.session().compile = saved_compile
     support.session().ast_capture = saved_capture
     if (selected == 1 && saved_compile != 0 && saved_capture != 0
-        && t.c_ct_prepare_active == 0) {
+        && support.fc().c_ct_prepare_active == 0) {
         comptime.ct_expansion_capture_leave()
     }
-    if (selected != 1 || saved_compile == 0) { t.c_fn_falls = saved_falls }
+    if (selected != 1 || saved_compile == 0) { support.fc().c_fn_falls = saved_falls }
     return status
 }
 
@@ -73,27 +71,26 @@ fn parse_comptime_if() int {
 
 // parse_comptime_if_body：解析一层编译期条件选择的语法和选中分支。
 fn parse_comptime_if_body() int {
-    let t *gen.TaskCtx = gen.task()
-    let typed_if int = (t.c_ct_prepare_active != 0
+    let typed_if int = (support.fc().c_ct_prepare_active != 0
         && support.session().ast_capture != 0).to_type(int)
-    let parent_falls int = t.c_fn_falls
+    let parent_falls int = support.fc().c_fn_falls
     p_adv()
     if (p_expect(token.TK_IF, "$ 后需要 if") != 0
         || p_expect(token.TK_LPAREN, "$if 条件必须带括号") != 0) { return -1 }
     let cond gen.Res
-    let saved_target_ctx int = t.c_ct_target_ctx
+    let saved_target_ctx int = support.fc().c_ct_target_ctx
     if (support.session().compile != 0 && typed_if == 0) {
-        t.c_fold += 1
-        t.c_ct_target_ctx = 1
+        support.fc().c_fold += 1
+        support.fc().c_ct_target_ctx = 1
     } else if (support.session().compile != 0) {
-        t.c_ct_target_ctx = 1
+        support.fc().c_ct_target_ctx = 1
     }
     let cr int = parse_expr_iso(&cond)
     if (support.session().compile != 0 && typed_if == 0) {
-        t.c_fold -= 1
-        t.c_ct_target_ctx = saved_target_ctx
+        support.fc().c_fold -= 1
+        support.fc().c_ct_target_ctx = saved_target_ctx
     } else if (support.session().compile != 0) {
-        t.c_ct_target_ctx = saved_target_ctx
+        support.fc().c_ct_target_ctx = saved_target_ctx
     }
     if (cr != 0 || p_expect(token.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
     let selected int = -1
@@ -105,35 +102,35 @@ fn parse_comptime_if_body() int {
         }
     }
     if (typed_if != 0) {
-        t.c_fn_falls = 1
+        support.fc().c_fn_falls = 1
         if (p_cur() != token.TK_LBRACE) {
             return token.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置")
         }
         if (parse_block() != 0) { return -1 }
-        let then_falls int = t.c_fn_falls
+        let then_falls int = support.fc().c_fn_falls
         let has_else int = 0
         let else_falls int = parent_falls
         if (p_cur() == token.TK_DOLLAR && p_peek(1) == token.TK_ELSE) {
             has_else = 1
             p_adv()
             p_adv()
-            t.c_fn_falls = 1
+            support.fc().c_fn_falls = 1
             if (p_cur() != token.TK_LBRACE) {
                 return token.err_tok("语句位置的 $if 后需要块；表达式形态的 $if (…) e1 $else e2 只能出现在表达式位置")
             }
             if (parse_block() != 0) { return -1 }
-            else_falls = t.c_fn_falls
+            else_falls = support.fc().c_fn_falls
         }
         if (has_else != 0) {
-            t.c_fn_falls = (parent_falls != 0
+            support.fc().c_fn_falls = (parent_falls != 0
                 && (then_falls != 0 || else_falls != 0)).to_type(int)
         } else {
-            t.c_fn_falls = parent_falls
+            support.fc().c_fn_falls = parent_falls
         }
         return 0
     }
     if (parse_comptime_branch(selected) != 0) { return -1 }
-    let then_falls int = t.c_fn_falls
+    let then_falls int = support.fc().c_fn_falls
     let has_else int = 0
     let else_falls int = parent_falls
     if (p_cur() == token.TK_DOLLAR && p_peek(1) == token.TK_ELSE) {
@@ -144,12 +141,12 @@ fn parse_comptime_if_body() int {
         if (selected == 0) { else_selected = 1 }
         if (selected < 0) { else_selected = -1 }
         if (parse_comptime_branch(else_selected) != 0) { return -1 }
-        else_falls = t.c_fn_falls
+        else_falls = support.fc().c_fn_falls
     }
     if (support.session().compile != 0) {
-        if (selected == 1) { t.c_fn_falls = then_falls }
-        else if (selected == 0 && has_else != 0) { t.c_fn_falls = else_falls }
-        else { t.c_fn_falls = parent_falls }
+        if (selected == 1) { support.fc().c_fn_falls = then_falls }
+        else if (selected == 0 && has_else != 0) { support.fc().c_fn_falls = else_falls }
+        else { support.fc().c_fn_falls = parent_falls }
     }
     return 0
 }
@@ -157,8 +154,7 @@ fn parse_comptime_if_body() int {
 // parse_comptime_for：按半开整数区间重复解析语句块，并为每次展开建立常量绑定。
 fn parse_comptime_for() int {
     if (comptime.ct_enter_control() != 0) { return -1 }
-    let t *gen.TaskCtx = gen.task()
-    if (comptime.ct_for_boundary_enter(t.c_loop_depth) != 0) {
+    if (comptime.ct_for_boundary_enter(support.fc().c_loop_depth) != 0) {
         comptime.ct_leave_control()
         return -1
     }
@@ -171,7 +167,6 @@ fn parse_comptime_for() int {
 // parse_comptime_enum_for：按枚举成员声明顺序展开 `E.values`。
 fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
     typed_for int) int {
-    let t *gen.TaskCtx = gen.task()
     let enum_start int = token.ctx().tokens[token.ctx().pos].start
     let enum_len int = token.ctx().tokens[token.ctx().pos].len
     p_adv()
@@ -201,7 +196,7 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
     }
     if (member_count == 0) { return parse_comptime_branch(0) }
 
-    let parent_falls int = t.c_fn_falls
+    let parent_falls int = support.fc().c_fn_falls
     let ordinal int = 0
     for ordinal < member_count {
         let member int = comptime.ct_enum_member_at(enum_type, ordinal)
@@ -222,12 +217,12 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
         support.ms().syms[binding].const_ready = 1
         if (support.session().ast_capture != 0
             && ast.ast_binding_add(binding, name_token, 0) != 0) { return -1 }
-        if (typed_for != 0) { t.c_fn_falls = 1 }
+        if (typed_for != 0) { support.fc().c_fn_falls = 1 }
         if (parse_block() != 0) { return -1 }
         if (token.ctx().pos != body_after) {
             return token.err_tok("内部错误：枚举 values 展开没有消费完整函数体")
         }
-        if (typed_for != 0) { t.c_fn_falls = parent_falls }
+        if (typed_for != 0) { support.fc().c_fn_falls = parent_falls }
         gen.scope_pop()
         ordinal += 1
     }
@@ -241,7 +236,6 @@ fn parse_comptime_enum_for(name_start int, name_len int, name_token int,
 // typed 路径把每个字段保存为 wrapper 下的独立块，普通路径逐轮解析并正常发码。
 fn parse_comptime_field_for(name_start int, name_len int, name_token int,
     typed_for int) int {
-    let t *gen.TaskCtx = gen.task()
     let owner_start int = token.ctx().tokens[token.ctx().pos].start
     let owner_len int = token.ctx().tokens[token.ctx().pos].len
     p_adv()
@@ -270,7 +264,7 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
     }
     if (field_count == 0) { return parse_comptime_branch(0) }
 
-    let parent_falls int = t.c_fn_falls
+    let parent_falls int = support.fc().c_fn_falls
     let index int = 0
     for index < field_count {
         let field gen.SField = support.ms().fields[support.ms().types[owner].sub + index]
@@ -290,12 +284,12 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
         support.ms().syms[binding].const_ready = 1
         if (support.session().ast_capture != 0
             && ast.ast_binding_add(binding, name_token, 0) != 0) { return -1 }
-        if (typed_for != 0) { t.c_fn_falls = 1 }
+        if (typed_for != 0) { support.fc().c_fn_falls = 1 }
         if (parse_block() != 0) { return -1 }
         if (token.ctx().pos != body_after) {
             return token.err_tok("内部错误：字段元信息展开没有消费完整函数体")
         }
-        if (typed_for != 0) { t.c_fn_falls = parent_falls }
+        if (typed_for != 0) { support.fc().c_fn_falls = parent_falls }
         gen.scope_pop()
         index += 1
     }
@@ -305,7 +299,6 @@ fn parse_comptime_field_for(name_start int, name_len int, name_token int,
 
 // parse_comptime_template_safe：限制模板首片不跨越逐轮语义变化的编译期结构。
 fn parse_comptime_template_safe(first int, after int) int {
-    let t *gen.TaskCtx = gen.task()
     let i int = first
     for i < after {
         let kind int = token.ctx().tokens[i].kind
@@ -320,8 +313,7 @@ fn parse_comptime_template_safe(first int, after int) int {
 
 // parse_comptime_for_body：解析一层编译期区间展开及其迭代绑定。
 fn parse_comptime_for_body() int {
-    let t *gen.TaskCtx = gen.task()
-    let typed_for int = (t.c_ct_prepare_active != 0
+    let typed_for int = (support.fc().c_ct_prepare_active != 0
         && support.session().ast_capture != 0).to_type(int)
     p_adv()
     if (p_expect(token.TK_FOR, "$ 后需要 for") != 0 || p_cur() != token.TOK_IDENT) {
@@ -346,14 +338,14 @@ fn parse_comptime_for_body() int {
     }
     if (p_expect(token.TK_LPAREN, "$for 区间必须带括号") != 0) { return -1 }
     let lo gen.Res
-    if (support.session().compile != 0 && typed_for == 0) { t.c_fold += 1 }
+    if (support.session().compile != 0 && typed_for == 0) { support.fc().c_fold += 1 }
     let lr int = parse_expr_blockctx(&lo)
-    if (support.session().compile != 0 && typed_for == 0) { t.c_fold -= 1 }
+    if (support.session().compile != 0 && typed_for == 0) { support.fc().c_fold -= 1 }
     if (lr != 0 || p_expect(token.TK_RANGE, "$for 区间需要 '..'") != 0) { return -1 }
     let hi gen.Res
-    if (support.session().compile != 0 && typed_for == 0) { t.c_fold += 1 }
+    if (support.session().compile != 0 && typed_for == 0) { support.fc().c_fold += 1 }
     let hr int = parse_expr_blockctx(&hi)
-    if (support.session().compile != 0 && typed_for == 0) { t.c_fold -= 1 }
+    if (support.session().compile != 0 && typed_for == 0) { support.fc().c_fold -= 1 }
     if (hr != 0 || p_expect(token.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
     if (p_cur() != token.TK_LBRACE) { return token.err_tok("$for 区间后需要块") }
     let body_first int = token.ctx().pos
@@ -374,18 +366,18 @@ fn parse_comptime_for_body() int {
         return -1
     }
     if (typed_for != 0) {
-        let parent_falls int = t.c_fn_falls
+        let parent_falls int = support.fc().c_fn_falls
         gen.scope_push()
         let sym int = gen.sym_push(name_start, name_len, gen.SYM_CONST, gen.TY_I32, 0)
         if (sym < 0) { return -1 }
         support.ms().syms[sym].const_ready = 0
         if (ast.ast_binding_add(sym, name_token, 0) != 0) { return -1 }
-        t.c_fn_falls = 1
+        support.fc().c_fn_falls = 1
         if (parse_block() != 0) { return -1 }
         if (token.ctx().pos != body_after) {
             return token.err_tok("内部错误：编译期 typed $for 没有消费完整函数体")
         }
-        t.c_fn_falls = parent_falls
+        support.fc().c_fn_falls = parent_falls
         gen.scope_pop()
         return 0
     }
@@ -468,7 +460,6 @@ fn parse_comptime_diag_kind() int {
 
 // parse_comptime_diag_kind_at：检查指定语句起点是否为诊断调用，并恢复解析游标。
 fn parse_comptime_diag_kind_at(first int) int {
-    let t *gen.TaskCtx = gen.task()
     if (first < 0 || first + 1 >= token.ctx().count
         || token.ctx().tokens[first].kind != token.TK_DOLLAR
         || token.ctx().tokens[first + 1].kind != token.TOK_IDENT) {
@@ -485,7 +476,6 @@ fn parse_comptime_diag_kind_at(first int) int {
 // line/col 与空消息没有源码 token，借用断言调用的 token 区间做来源范围。
 fn parse_test_assert_lit(res *gen.Res, tid int, value i64,
     first int, after int) int {
-    let t *gen.TaskCtx = gen.task()
     check.sem_res_reset(res, tid)
     res.sym = -1
     res.is_const = 1
@@ -504,12 +494,11 @@ fn parse_test_assert_lit(res *gen.Res, tid int, value i64,
 // 该符号是 prelude extern，由 yh test 生成的入口模块提供 C ABI 定义。
 fn parse_test_assert_call(res *gen.Res, condition *gen.Res, msg *gen.Res,
     line int, col int, first int, after int) int {
-    let t *gen.TaskCtx = gen.task()
     let name *char = "__yh_test_assert"
     let nlen int = 16
     let noff int = support.tml_intern_str(name.to_type(*u8), 0, nlen)
     if (noff < 0) { return -1 }
-    let sym int = gen.sym_lookup_off(noff, nlen)
+    let sym int = support.sym_lookup_off(noff, nlen)
     if (sym < 0 || support.ms().syms[sym].kind != gen.SYM_FN) {
         return gen.sem_err("内部错误：缺少 __yh_test_assert 运行时入口")
     }
@@ -554,7 +543,6 @@ fn parse_test_assert_call(res *gen.Res, condition *gen.Res, msg *gen.Res,
 
 // parse_comptime_diag_call：解析诊断实参并返回待独立语句消费的 void 标记结果。
 fn parse_comptime_diag_call(res *gen.Res, kind int, line int, col int) int {
-    let t *gen.TaskCtx = gen.task()
     let first int = token.ctx().pos
     p_adv() // 诊断名
     if (p_expect(token.TK_LPAREN, "编译期诊断调用期望 '('") != 0) { return -1 }
@@ -562,15 +550,15 @@ fn parse_comptime_diag_call(res *gen.Res, kind int, line int, col int) int {
     let msg_start int = -1
     let msg_len int = 0
     if (kind == gen.CT_DIAG_ASSERT) {
-        let saved_fold int = t.c_fold
-        let ct_body int = (t.c_fn_flags & gen.F_COMPTIME) != 0
+        let saved_fold int = support.fc().c_fold
+        let ct_body int = (support.fc().c_fn_flags & gen.F_COMPTIME) != 0
         // test 体里的断言是运行期检查（YT2 接执行器）；先按普通表达式
         // 解析，不做强制常量折叠，否则 helper(...) 会被误判为非常量。
         if (support.session().compile != 0 && ct_body == 0 && ctx().test_body == 0) {
-            t.c_fold += 1
+            support.fc().c_fold += 1
         }
         let cr int = parse_expr_iso(&condition)
-        t.c_fold = saved_fold
+        support.fc().c_fold = saved_fold
         if (cr != 0) { return -1 }
         if (support.session().compile != 0) {
             if (condition.ct_diag != 0) {

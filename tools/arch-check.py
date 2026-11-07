@@ -87,7 +87,7 @@ BUDGETS = {
     # GEN0（ADR-0021）：gen 拆分只减不增的三项预算。
     "max_gen_pub_fns": 82,     # gen 内 `pub fn` 文本声明数（平台变体重复）
     "max_gen_importers": 13,    # import gen 的模块数
-    "max_taskctx_fields": 85,  # gen/state.yh 的 TaskCtx 字段数（会话开关/声明索引迁出后）
+    "max_taskctx_fields": 0,  # gen/state.yh 的 TaskCtx 字段数（会话开关/声明索引迁出后）
 }
 
 # —— comptime → gen 的符号白名单（F4 收口；只减不增）——
@@ -97,7 +97,6 @@ GEN_SYMBOLS_FOR_COMPTIME = {
     # 值规则（F4-5 路线 A：编译期值语义内核，阶段内保留）
     "sem_can_assign", "sem_fold_const_binop", "sem_fold_const_unary",
     # 符号引用查询（待 F4-5 或镜像）
-    "sym_ct_lit_text",
 }
 
 # 已知未接线但暂不删除的符号（当前为空；保留位置以便记录豁免）。

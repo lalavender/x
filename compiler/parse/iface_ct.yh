@@ -10,7 +10,6 @@ import ast
 // 同一模块内所有闭包函数共用稳定后缀，避免与运行期符号或其他模块碰撞。
 fn iface_ct_name(sym_id int, suffix_off int, suffix_len int,
     name_off *int, name_len *int) int {
-    let t *gen.TaskCtx = gen.task()
     if (sym_id < 0 || sym_id >= support.ms().sym_n || suffix_off < 0
         || suffix_len < 0) {
         return support.fail("内部错误：CT 接口函数身份无效")
@@ -53,7 +52,6 @@ fn iface_ct_name(sym_id int, suffix_off int, suffix_len int,
 // iface_ct_export_name：由公开短名与提供方后缀推导对应隐藏正文名。
 fn iface_ct_export_name(mi int, ns_row int, name_off *int,
     name_len *int) int {
-    let t *gen.TaskCtx = gen.task()
     if (mi < 0 || mi >= support.fs().mod_n || ns_row < 0
         || ns_row >= support.fs().mods[mi].ns_n) {
         return support.fail("内部错误：公开 CT 接口条目无效")
@@ -85,7 +83,6 @@ fn iface_ct_export_name(mi int, ns_row int, name_off *int,
 // iface_ct_emit_type：发出 CT 正文签名使用的规范类型名。
 // 本地公开类型追加当前模块后缀；导入类型已经带提供方后缀。
 fn iface_ct_emit_type(tid int, suffix_off int, suffix_len int) int {
-    let t *gen.TaskCtx = gen.task()
     if (tid < 0 || tid >= support.ms().type_n) {
         return gen.sem_err("编译期正文引用了无效类型")
     }
@@ -167,7 +164,6 @@ fn iface_ct_emit_type(tid int, suffix_off int, suffix_len int) int {
 
 // iface_ct_source_type_id：按正文 token 名查找同模块具名类型，未命中返回 -1。
 fn iface_ct_source_type_id(src *u8, start int, token_len int) int {
-    let t *gen.TaskCtx = gen.task()
     let row int = 0
     for row < support.ms().name_n {
         let name gen.TName = support.ms().names[row]
@@ -189,7 +185,6 @@ fn iface_ct_source_type_id(src *u8, start int, token_len int) int {
 // iface_ct_qualified_type_target：按函数注册时的导入快照解析 alias.Type。
 fn iface_ct_qualified_type_target(item *comptime.CtFunction,
     alias_token int) int {
-    let t *gen.TaskCtx = gen.task()
     if (alias_token < 0 || alias_token + 2 >= item.body_n
         || item.body[alias_token].kind != token.TOK_IDENT
         || item.body[alias_token + 1].kind != token.TK_DOT
@@ -284,7 +279,6 @@ fn iface_ct_hex_value(byte u8) int {
 
 // iface_ct_origin_begin：按声明前的 sidecar 注释切换到函数定义源码路径与行号。
 fn iface_ct_origin_begin(token_index int) int {
-    let gs *gen.TaskCtx = gen.task()
     if (support.session().ct_iface_mode == 0) { return 0 }
     support.src_ctx().path = support.src_ctx().path_buf.to_type(*char)
     support.session().ct_origin_active = 0
@@ -353,8 +347,8 @@ fn iface_ct_origin_begin(token_index int) int {
     let path_len int = hex_len / 2
     // RS1b：来源映射路径快照改任务私有可扩容缓冲（原固定 [1024]u8，
     // 超长路径直接拒绝；现按需扩容，任务生命期持有）。
-    let obuf *u8 = support.task_buf_reserve(&gs.c_ct_origin_buf,
-                                        &gs.c_ct_origin_buf_cap,
+    let obuf *u8 = support.task_buf_reserve(&support.fc().c_ct_origin_buf,
+                                        &support.fc().c_ct_origin_buf_cap,
                                         path_len + 1)
     if (obuf == 0) {
         return support.fail_path("CT 来源映射路径缓冲分配失败: ", support.src_ctx().path)
@@ -380,7 +374,7 @@ fn iface_ct_origin_begin(token_index int) int {
     for col_start > 0 && support.src_ctx().data[col_start - 1] != '\n' {
         col_start -= 1
     }
-    let col_status int = iface_ct_col_parse(gs, col_start, col_end)
+    let col_status int = iface_ct_col_parse(col_start, col_end)
     if (col_status < 0) { return -1 }
     let body_after int = body_token
     let brace_depth int = 0
@@ -400,10 +394,10 @@ fn iface_ct_origin_begin(token_index int) int {
     support.session().ct_origin_active = 1
     support.session().ct_origin_line = origin_line
     support.diag().line_bias = origin_line - token.ctx().tokens[body_token].line
-    support.src_ctx().path = gs.c_ct_origin_buf.to_type(*char)
+    support.src_ctx().path = support.fc().c_ct_origin_buf.to_type(*char)
     if (col_status > 0
-        && iface_ct_col_apply(gs, body_token, body_after, origin_line) != 0) {
-        iface_ct_col_restore(gs)
+        && iface_ct_col_apply(body_token, body_after, origin_line) != 0) {
+        iface_ct_col_restore()
         support.session().ct_origin_active = 0
         support.diag().line_bias = 0
         support.src_ctx().path = support.src_ctx().path_buf.to_type(*char)
@@ -414,9 +408,8 @@ fn iface_ct_origin_begin(token_index int) int {
 
 // iface_ct_origin_end：恢复 sidecar 文件上下文，避免来源映射泄漏到下一声明。
 fn iface_ct_origin_end() void {
-    let gs *gen.TaskCtx = gen.task()
     if (support.session().ct_iface_mode == 0) { return }
-    iface_ct_col_restore(gs)
+    iface_ct_col_restore()
     support.src_ctx().path = support.src_ctx().path_buf.to_type(*char)
     support.session().ct_origin_active = 0
     support.diag().line_bias = 0
@@ -489,7 +482,6 @@ fn iface_ct_emit_body(row int, item *comptime.CtFunction) int {
                 let map_gen_start int = if_len
                 let name_off int = -1
                 let name_len int = 0
-                let t *gen.TaskCtx = gen.task()
                 if (iface_ct_name(target, support.fs().sym_sfx_off,
                         support.fs().sym_sfx_len, &name_off, &name_len) != 0
                     || if_put_np(name_off, name_len) != 0) { return -1 }
@@ -520,7 +512,6 @@ fn iface_ct_emit_body(row int, item *comptime.CtFunction) int {
                 if (if_put(item.src[copy_type]) != 0) { return -1 }
                 copy_type += 1
             }
-            let gs_type *gen.TaskCtx = gen.task()
             let map_gen_start int = if_len
             if (iface_ct_emit_type(local_type, support.fs().sym_sfx_off,
                     support.fs().sym_sfx_len) != 0) {
@@ -558,7 +549,6 @@ fn iface_ct_emit_body(row int, item *comptime.CtFunction) int {
                     copy_qualified += 1
                 }
                 let map_gen_start int = if_len
-                let gs_type *gen.TaskCtx = gen.task()
                 if (iface_ct_emit_type(qualified_type,
                         support.fs().sym_sfx_off,
                         support.fs().sym_sfx_len) != 0) { return -1 }
@@ -584,7 +574,6 @@ fn iface_ct_emit_body(row int, item *comptime.CtFunction) int {
                 }
                 let name_off_const int = -1
                 let name_len_const int = 0
-                let gs_const *gen.TaskCtx = gen.task()
                 let map_gen_start int = if_len
                 if (iface_ct_name(target_const, support.fs().sym_sfx_off,
                         support.fs().sym_sfx_len, &name_off_const,
@@ -624,7 +613,6 @@ fn iface_ct_emit_body(row int, item *comptime.CtFunction) int {
                     if (if_put(item.src[copy_type]) != 0) { return -1 }
                     copy_type += 1
                 }
-                let gs_type *gen.TaskCtx = gen.task()
                 let map_gen_start int = if_len
                 if (iface_ct_emit_type(target_type,
                         support.fs().sym_sfx_off, support.fs().sym_sfx_len) != 0) {
@@ -691,7 +679,6 @@ fn iface_ct_emit_u64_hex(value i64) int {
 // 0xfeedfacf 打成 -17958193、把 0x80000000 打成空的负号（导入侧报「字面量
 // 超出目标类型可表示范围」）。u64 的高位常量为保位型走十六进制。
 fn iface_emit_const_value(sym_id int) int {
-    let t *gen.TaskCtx = gen.task()
     let sym gen.CSym = support.ms().syms[sym_id]
     let kind int = support.ms().types[sym.type_id].kind
     if (kind == gen.TY_BOOL) {
@@ -709,7 +696,6 @@ fn iface_emit_const_value(sym_id int) int {
 // iface_ct_emit_const：把闭包读取的受支持常量写为稳定隐藏名字和值。
 fn iface_ct_emit_const(sym_id int, suffix_off int,
     suffix_len int) int {
-    let t *gen.TaskCtx = gen.task()
     let type_id int = -1
     if (sym_id < 0 || sym_id >= support.ms().sym_n
         || support.ms().syms[sym_id].kind != gen.SYM_CONST
@@ -765,7 +751,7 @@ fn iface_ct_emit_const(sym_id int, suffix_off int,
     if (string_ptr != 0) {
         let lit_off int = 0
         let lit_len int = 0
-        if (gen.sym_ct_lit_text(sym_id, &lit_off, &lit_len) != 0 || lit_len < 2) {
+        if (support.sym_ct_lit_text(sym_id, &lit_off, &lit_len) != 0 || lit_len < 2) {
             return gen.sem_err("跨模块 CT 闭包暂只支持直接或引用式的字符串字面量指针常量")
         }
         if (if_put_np(lit_off, lit_len) != 0) {
@@ -781,7 +767,6 @@ fn iface_ct_emit_const(sym_id int, suffix_off int,
 fn iface_ct_emit_function(row int, suffix_off int,
     suffix_len int) int {
     let item comptime.CtFunction = comptime.ct_iface_function(row)
-    let t *gen.TaskCtx = gen.task()
     if (item.sym_id < 0 || item.sym_id >= support.ms().sym_n) {
         return support.fail("内部错误：CT 接口函数符号越界")
     }
@@ -867,7 +852,6 @@ fn iface_ct_write(path *char) int {
 
 // iface_ct_emit：导出公开 CT 函数可达的本模块闭包并写入版本化 .s.ct。
 pub fn iface_ct_emit(path *char, sym_base int) int {
-    let t *gen.TaskCtx = gen.task()
     if_len = 0
     if (if_puts("// yh-ctiface v1 arch=") != 0
         || if_puts(support.target_arch_token()) != 0
@@ -1002,7 +986,6 @@ pub fn iface_ct_emit(path *char, sym_base int) int {
 // iface_ct_head_prefix_len：校验 .s.ct 头前缀（版本必须为 CTIFACE_VERSION，
 // 架构与当前目标一致），成功返回 suffix 起点，失败返回 -1。
 fn iface_ct_head_prefix_len() int {
-    let t *gen.TaskCtx = gen.task()
     return iface_ct_head_prefix_len_at(support.src_ctx().data, support.src_ctx().length)
 }
 
@@ -1028,7 +1011,6 @@ fn iface_ct_head_prefix_len_at(src *u8, n int) int {
 
 // iface_ct_header_valid：校验 .s.ct 版本/目标及其模块后缀身份。
 fn iface_ct_header_valid(path *char, mi int) int {
-    let t *gen.TaskCtx = gen.task()
     let prefix_len int = iface_ct_head_prefix_len()
     if (prefix_len < 0) {
         return support.fail_path("CT 接口版本或目标不兼容: ", path)
@@ -1057,7 +1039,6 @@ fn iface_ct_header_valid(path *char, mi int) int {
 // 快照到本函数栈缓冲，之后一律只用快照——否则正文签名不匹配诊断读悬垂指针会
 // 直接 SIGSEGV（实测：正文被改成 i64 且接口缓存命中时 100% 崩溃）。
 pub fn iface_ct_load(path *char, mi int) int {
-    let t *gen.TaskCtx = gen.task()
     let path_buf [1200]u8
     let path_n int = 0
     for path[path_n] != 0 && path_n < 1199 {
@@ -1121,7 +1102,7 @@ pub fn iface_ct_load(path *char, mi int) int {
                 support.session().ct_iface_mode = old_ct_iface
                 return -1
             }
-            let body_sym int = gen.sym_lookup_off(hidden_off, hidden_len)
+            let body_sym int = support.sym_lookup_off(hidden_off, hidden_len)
             if (body_sym < 0 || comptime.ct_find(body_sym) < 0
                 || support.ms().syms[body_sym].type_id
                     != support.ms().syms[public_sym].type_id) {

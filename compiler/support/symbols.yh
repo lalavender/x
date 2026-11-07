@@ -1,0 +1,85 @@
+module support
+
+// ============================================================================
+// symbols.yh —— 符号表的只读查询（从 gen/symbols.yh 下沉）
+//
+// 这三个函数只读符号表（ms().syms）与名字池，不写状态、不发诊断，因此放在
+// support 让 ast/build/comptime 无需 import gen 就能解析名字。
+// 写入路径（sym_push/scope_push/sym_push_pool）仍在 gen：它们要发 token 位置诊断。
+// ============================================================================
+
+pub fn sym_lookup_off(off int, n int) int {
+    let i int = ms().sym_n - 1
+    for i >= 0 {
+        if (ms().syms[i].name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[ms().syms[i].name_off + j] != pool_ctx().data[off + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return i
+            }
+        }
+        i -= 1
+    }
+    return -1
+}
+
+// sym_lookup：当前作用域链内查找（符号按名字池比较）。找不到返回 -1。
+pub fn sym_lookup(start int, n int) int {
+    let i int = ms().sym_n - 1
+    for i >= 0 {
+        if (ms().syms[i].name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[ms().syms[i].name_off + j] != src_ctx().data[start + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return i
+            }
+        }
+        i -= 1
+    }
+    return -1
+}
+
+// sym_lookup_off：按名字池偏移查符号（池对池比较，供构建器诊断用）。
+// 只查全局层（ms().scope_start[0] 以下）。找不到返回 -1。
+// sym_ct_lit_text：把「字符串指针常量」沿引用链追到最终的字面式初始化文本。引用式
+// （`const A *char = B;`，kind 3）逐跳跟进，直到找到 kind 2 的字面式 —— 消费者看不到提供方的
+// 私有常量名，重放引用本身会在导入侧解析失败。跳数上限 16 兼作环与超深链的兜底
+// （`A -> B -> A` 这类环不会死循环）。成功填 out_off/out_len 返回 0，否则返回 1。
+pub fn sym_ct_lit_text(sym_id int, out_off *int, out_len *int) int {
+    if (sym_id < 0 || sym_id >= ms().sym_n) { return 1 }
+    let cur int = sym_id
+    let hops int = 0
+    for hops < 16 {
+        let kind int = ms().syms[cur].const_expr_kind
+        if (kind == 2) {
+            *out_off = ms().syms[cur].const_expr_off
+            *out_len = ms().syms[cur].const_expr_len
+            return 0
+        }
+        if (kind != 3) { return 1 }
+        let nxt int = sym_lookup_off(ms().syms[cur].const_expr_off,
+            ms().syms[cur].const_expr_len)
+        if (nxt < 0 || nxt >= ms().sym_n || nxt == cur) { return 1 }
+        if (ms().syms[nxt].kind != SYM_CONST
+            || (ms().syms[nxt].flags & F_ADDR) == 0) {
+            return 1
+        }
+        cur = nxt
+        hops += 1
+    }
+    return 1
+}
