@@ -129,7 +129,7 @@ CT 执行期会**改写**前端语义表，只读镜像无法表达：
 
 | 剩余 | 数量 | 建议 |
 | --- | --- | --- |
-| `static_data_add`/`static_data_scalar`/`static_data_reloc`/`static_data_reset` | 5 | CT 把「静态数据请求」写进 `CtStaticRequest` 列表，由 `check` 在 expand 循环末尾统一应用 |
+| ~~`static_data_add`/`scalar`/`reloc`/`reset`~~ | 5 | ✅ 已由「目录下沉到 `support`」取代（不引入请求队列） |
 | `ty_push_agg`/`ty_array` | 3 | 同理：CT 记录「需要这个数组/聚合类型」，由 `check` 建型并回填 type_id |
 | `sym_declared_before` 之外的 `sem_struct_finish` | 1 | 布局收尾改由 `check` 在 expand 后统一做 |
 
@@ -148,13 +148,14 @@ CT 执行期会**改写**前端语义表，只读镜像无法表达：
   由 `check` 求值回填；`Res` 换成 `CtValue`。
 
 **已采用 A 并在 `arch-check` 落地**：`GEN_SYMBOLS_FOR_COMPTIME` 白名单
-（只减不增；2026-11-06 由 19 降到 **18**），注入新依赖的副本会被自测抓到。
+（只减不增；2026-11-06 由 19 降到 **14**），注入新依赖的副本会被自测抓到。
 
 已摘除的债务（同一白名单只减不增）：
 
 | 符号 | 做法 |
 | --- | --- |
 | `sym_declared_before` | `ct_sym_declared_before` 直接在 `CtSymRow` 上判 `def_line/def_col`（镜像侧纯读） |
+| `static_data_add`/`static_data_reloc`/`static_data_reset`/`static_data_scalar` | 静态数据目录整体迁到 `support/static_data.yh`：它只依赖 `support`，却是 `gen`/`check`/`comptime`/`parse`/`lower` 的共同底层，放 `gen` 只会制造环。`StaticDataObject`/`StaticDataReloc` 随之改名 `support.*` |
 
 ## 6. 风险
 

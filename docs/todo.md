@@ -172,6 +172,11 @@ lex → parse(纯语法) → AST
   `llvmtarget` 的 copytree 列表与 `project.toml` 依赖）。
   `build-check.py` project cases **85→88**（基线 85，其余失败为本地
   LLVM 迁移环境既有问题）。
+- [x] **F4 / 静态数据下沉（2026-11-06 完成）**：`gen/static_data.yh` 整体迁到
+  `support/static_data.yh`（只依赖 `support`，却是 gen/check/comptime/parse/
+  lower 的共同底层，留 gen 必成环）；`StaticDataObject`/`StaticDataReloc` 改名
+  `support.*`。`comptime→gen` 白名单 **18→14**，gen 从 8 文件/2,550 行/**82 pub**
+  降到 7 文件/2,403 行/**74 pub**。不用「请求队列」方案，直接下沉更简单。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

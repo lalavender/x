@@ -138,7 +138,7 @@ bin/yh-<平台>-<架构>（Release 种子）
 | `check/`（check） | 12 / 5,224 / 92 pub | 受检契约（`CheckedModule`/视图/切片/键）+ 语义动作 `sem_*` + C ABI 分类 + arena/快照校验 | 语义动作已归位；类型/符号模型仍留 `gen`（`comptime` 依赖，待 F4）；`resolve/expand/full` 未落地 |
 | `support/`（support） | 16 / 1,185 / 37 pub | GEN1 基础层：源/池/统计/诊断/目标/ABI/字节工具 | 消费面已直连；不得塞语义 |
 | `token/`（token） | 3 / 265 / 4 pub | GEN1 词法/语法词汇：`Tok`/`TK_*`/`PDecl`/`TokenCtx`/游标/`is_assign_op`/`err_tok` | `gen` 暂留同名 type/const 别名；直接消费面后续收口 |
-| `gen/`（gen） | 8 / 2,550 / **76 pub** | 类型/符号表、值规则（折叠/布局/浮点）、static_data、ABI 模型、TaskCtx | 语义动作已迁 check；`comptime` 仍读其类型/值规则（F4 解锁后才能迁） |
+| `gen/`（gen） | 7 / 2,403 / **74 pub** | 类型/符号表、值规则（折叠/布局/浮点）、ABI 模型、TaskCtx | 语义动作已迁 check；`comptime` 仍读其类型/值规则（F4 解锁后才能迁） |
 | `comptime/`（comptime） | 13 / 5,550 / 72 pub | 编译期 typed IR 执行器、布局图、枚举/全局聚合、静态数据 | 49 个模块级 `let`（全仓最多）；与 `gen` 的 CT 类型/值边界需要契约 |
 | `builtin/`（builtin） | 1 / 173 / 2 pub | prelude 名字登记表 | 干净；依赖 gen/support |
 | `cache/`（cache） | 7 / 1,031 / 34 pub | 缓存键、`ActionID`/`OutputID`、全局 content store、flock 平台封装 | C0/C4/C6 新增 |
@@ -702,7 +702,8 @@ cache/
 | `err_lc`/`warn_lc` | `support` | 诊断与基础错误同层，不拆 `diag` |
 | `clock.*`/`console.*`/`argv.*` | `support` | 后续可换 libs |
 | `target*.yh` | `support`（身份/数据模型/配置/ABI 常量） | 结构体布局函数归 `check` |
-| `abi_c.yh`/`static_data.yh` | `check` | C ABI/静态数据需要 `CType` |
+| `abi_c.yh` | `check` | C ABI 需要 `CType` |
+| `static_data.yh` | **`support`（已迁）** | 只依赖 `support`；被 `gen`/`check`/`comptime`/`parse`/`lower` 共用，放 `gen` 必然成环 |
 | `front_stage.yh` | `check` | 受检阶段守卫 |
 | `builtin` prelude/内置类型登记 | `builtin` 保留，`builtin → check, support` | 内置函数 + 内置类型登记表；`ty_register_builtins` 实现在 `builtin` |
 

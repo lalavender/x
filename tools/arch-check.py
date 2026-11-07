@@ -98,9 +98,8 @@ GEN_SYMBOLS_FOR_COMPTIME = {
     "fp32_bits", "fp64_bits", "sem_can_assign", "sem_fold_const_binop",
     "sem_fold_const_unary", "sem_fold_fp_to_int", "sem_fold_norm",
     "sem_res_const", "sem_struct_finish", "Res",
-    # 写型调用（待改成「请求/应用」seam）
-    "static_data_add", "static_data_reloc", "static_data_reset",
-    "static_data_scalar", "ty_push_agg",
+    # 写型调用（F4-5 剩余：类型表归 TaskCtx，待「请求/应用」seam）
+    "ty_push_agg",
     # 符号引用查询（待 F4-5 或镜像）
     "sym_ct_lit_text",
     # 每任务上下文（GEN4 随 TaskCtx 拆分消除）
