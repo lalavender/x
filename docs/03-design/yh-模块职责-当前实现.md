@@ -1,7 +1,7 @@
 # yh 编译器模块职责（当前实现）
 
-基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1–GEN4 + F2-K1/K2），**19 个模块 / 177 个文件 /
-60,537 行**，依赖边 79 条（不含标准库 `hash`/`libs`/`os`）。
+基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1–GEN4 + F2-K1/K2），**18 个模块 / 178 个文件 /
+60,665 行**，依赖边 79 条（不含标准库 `hash`/`libs`/`os`）。
 实测：2026-11-06。规模随代码演进，职责与本表的**分层与方向约束**是设计约束。
 
 本文是「每个模块干什么」的唯一清单；分层理由与历史决策见
@@ -16,7 +16,6 @@ L4  link（链接驱动）
 L3  backend（LLVM IR 发射）
 L2  lower（IR 降低）       parse（语法分析）   builtin（内建登记）
 L1  check（语义中心）      comptime（CT 执行器） ast（语法树）  proj（项目模型）
-L0.5 gen（编译期值内核）
 L0  support  token  ir  cache  lex
 ```
 
@@ -29,7 +28,7 @@ L0  support  token  ir  cache  lex
 
 | 模块 | 规模 | 依赖 | 职责与关键入口 |
 | --- | --- | --- | --- |
-| **support** | 27 / 2,740 | — | 叶子内核。①基础设施：源缓冲 `src_ctx`、名字池 `pool_ctx`、诊断 `fail`/`err_lc`/`fail_path`、`append_*`/`alloc`、会话开关 `session()`、目标身份 `TargetInfo`/`cfg()`、ABI 常量。②**跨层共享数据层**（GEN4/F2 下沉）：`ModelStore`(`ms()`，类型/签名/具名类型/符号/作用域表)、`FileScope`(`fs()`，模块归属+导入表)、`FrontCtx`(`fc()`，前端瞬时态 85 字段)、`tables`(字符串标签/枚举成员)、`symbols`(纯查询)、`value_rules`(纯值规则)、`layout`、`static_data`、`abi_model`、`front_stage`。③平台变体 `argv/clock/console.*` |
+| **support** | 28 / 3,151 | — | 叶子内核。①基础设施：源缓冲 `src_ctx`、名字池 `pool_ctx`、诊断 `fail`/`err_lc`/`fail_path`、`append_*`/`alloc`、会话开关 `session()`、目标身份 `TargetInfo`/`cfg()`、ABI 常量。②**跨层共享数据层**（GEN4/F2 下沉）：`ModelStore`(`ms()`，类型/签名/具名类型/符号/作用域表)、`FileScope`(`fs()`，模块归属+导入表)、`FrontCtx`(`fc()`，前端瞬时态 85 字段)、`tables`(字符串标签/枚举成员)、`symbols`(纯查询)、`value_rules`(纯值规则)、`value_kernel`(错误码式值内核)、`layout`、`static_data`、`abi_model`、`front_stage`。③平台变体 `argv/clock/console.*` |
 | **token** | 3 / 268 | support | 词法/语法共享词汇：`TK_*`/`TOK_*`/`ATTR_*` 常量、`Tok`、`PDecl`、token 数组与游标 `ctx()`、`err_tok`（唯一带位置诊断入口）、`is_assign_op` |
 | **ir** | 10 / 5,385 | — | 后端无关 SSA IR：`IRModule`/`IRFunction`/`IRInst`/类型与值模型、构建器、verifier、序列化（`ssa_module_*`）。不依赖任何模块 |
 | **cache** | 7 / 1,047 | support, token | 内容寻址缓存原语：ActionID/OutputID、缓存键 schema、全局 store（C4）、跨平台文件锁（C6）。位于 check/lower 之下，避免二者为共享键原语互相 import |
@@ -42,15 +41,14 @@ L0  support  token  ir  cache  lex
 | --- | --- | --- | --- |
 | **proj** | 4 / 1,457 | support, token | 项目模型：`project.toml` 解析、模块/文件表、三层名字解析（本项目 → 标准库 → 依赖）、产物与 `[link]` 配置。前端与构建层共用的数据层 |
 | **ast** | 6 / 1,342 | comptime, proj, support, token | 语法树 arena + 只读视图：声明索引、语句/表达式节点、函数上下文、绑定、捕获开关。**纯语法，不 import check**（check 依赖它） |
-| **comptime** | 14 / 5,934 | gen, proj, support, token | 编译期执行器：CT IR 模型与求值、布局图、静态数据、函数注册表、枚举/浮点、CT 诊断。语义事实经**零拷贝镜像** `ct_facts` 读（槽绑定，`check.ct_facts_sync` 填入），不 import check |
-| **check** | 14 / 6,001 | ast, cache, comptime, gen, ir, proj, support, token | **语义中心**：①类型/符号表操作 `symbols.yh`（F2-K2 自 gen 迁入的 25 个语义动作）②语法→语义两遍（`sem_*`）③C ABI 分类 `abi_c` ④受检快照 `CheckedModule`：捕获/校验/切片/键/视图 ⑤CT 镜像绑定点 `ct_bind` |
-| **gen** | 1 / 337 | support, token | **编译期值内核**（仅 3 个 pub fn）：`sem_can_assign` 隐式转换判定、`sem_fold_const_binop`/`sem_fold_const_unary` 常量折叠。留在此层的原因：`comptime` 需要它们，而 `comptime → check` 会成环；它们是唯一「带 token 位置诊断」的纯值规则 |
+| **comptime** | 14 / 5,956 | proj, support, token | 编译期执行器：CT IR 模型与求值、布局图、静态数据、函数注册表、枚举/浮点、CT 诊断。语义事实经**零拷贝镜像** `ct_facts` 读（槽绑定，`check.ct_facts_sync` 填入），不 import check |
+| **check** | 15 / 6,038 | ast, cache, comptime, ir, proj, support, token | **语义中心**：①类型/符号表操作 `symbols.yh`（F2-K2 自 gen 迁入的 25 个语义动作）②语法→语义两遍（`sem_*`）③C ABI 分类 `abi_c` ④受检快照 `CheckedModule`：捕获/校验/切片/键/视图 ⑤CT 镜像绑定点 `ct_bind` ⑥值内核诊断适配 `value_kernel.yh` |
 
 ### L2/L3 前端装配与降低
 
 | 模块 | 规模 | 依赖 | 职责与关键入口 |
 | --- | --- | --- | --- |
-| **parse** | 14 / 9,612 | ast, check, comptime, gen, ir, lex, proj, support, token | 语法分析：声明/语句/表达式/类型、comptime 语法、全局初始化、模块导入；**接口 `.s.i`/`.s.ct` 的发射与加载**也在这里。历史设计是「边解析边求值」——直接调用 `check`/`gen` 的语义动作（277 处 `Res` 语义耦合，见 §5） |
+| **parse** | 14 / 9,607 | ast, check, comptime, ir, lex, proj, support, token | 语法分析：声明/语句/表达式/类型、comptime 语法、全局初始化、模块导入；**接口 `.s.i`/`.s.ct` 的发射与加载**也在这里。历史设计是「边解析边求值」——直接调用 `check` 的语义动作（277 处 `Res` 语义耦合，见 §5） |
 | **builtin** | 1 / 171 | check, support | 语言内建：内建函数与内建类型登记、prelude 外部接口（含 Linux AArch64 `syscall6`） |
 | **lower** | 16 / 5,991 | ast, cache, check, ir, proj, support, token | `CheckedModule` → `IRModule`：SSA 降低（表达式/调用/控制流/for-in/全局与静态数据）。只吃快照，**不 import parse/build** |
 
@@ -80,11 +78,10 @@ L0  support  token  ir  cache  lex
 | cmdline | support |
 | proj | support, token |
 | ast | support, token, proj, comptime |
-| comptime | support, token, proj, gen |
-| gen | support, token |
-| check | support, token, proj, ast, comptime, cache, ir, gen |
+| comptime | support, token, proj |
+| check | support, token, proj, ast, comptime, cache, ir |
 | builtin | support, check |
-| parse | support, token, lex, proj, ast, comptime, check, ir, gen |
+| parse | support, token, lex, proj, ast, comptime, check, ir |
 | lower | support, token, proj, ast, check, cache, ir |
 | backend | support, ir |
 | link | support, proj, backend |
@@ -95,7 +92,7 @@ L0  support  token  ir  cache  lex
 **不可违反的三条**（越界即架构红灯）：
 
 1. `support` 必须是叶子（任何反向依赖都成环）
-2. `comptime` 不得依赖 `check`（`check → comptime` 已存在）——这条决定了 `gen` 必须留在 `check` 之下
+2. `comptime` 不得依赖 `check`（`check → comptime` 已存在）——值内核必须待在 `support` 这类叶子模块里
 3. `lower` 不得依赖 `parse`/`check` 的具体实现之外的东西，且 `ast` 不得反向依赖 `lower`
 
 ## 4. `backend` 内部分工
@@ -118,8 +115,8 @@ L0  support  token  ir  cache  lex
 
 | 债 | 现状 | 去向 |
 | --- | --- | --- |
-| `parse` 边解析边求值 | 内联读取 `Res` 语义字段 277 处（`type_id` 104、`ival` 71…），语法决策依赖语义结果 | 方案 `docs/02-plan/yh-F2-parse纯语法化方案-2026-11-06.md` §3.5：改为「核收缩」，**已落地**（`gen` 28→3 pub fn）；「纯语法 AST」确认属前端重构级，暂缓 |
-| `gen` 尚存 3 个 pub fn | 靠 `sem_err`(=`token.err_tok`) 报带位置诊断，`support` 不能 import token，故不能下沉 | 方案 `docs/02-plan/yh-F4收尾-gen消失方案-2026-11-06.md` 路线 A（函数返回错误码、三层各自格式化诊断） |
+| `parse` 边解析边求值 | 内联读取 `Res` 语义字段 277 处（`type_id` 104、`ival` 71…），语法决策依赖语义结果 | 方案 `docs/02-plan/yh-F2-parse纯语法化方案-2026-11-06.md` §3.5：改为「核收缩」，**已落地**（值内核迁 `support`，`gen` 已删除）；「纯语法 AST」确认属前端重构级，暂缓 |
+| ~~`gen` 尚存 3 个 pub fn~~ | **已解决（2026-11-06）**：按「错误码 + 调用层格式化」拆开，值内核下沉 `support/value_kernel.yh`，`gen` 模块删除 | `docs/02-plan/yh-F4收尾-gen消失方案-2026-11-06.md` 路线 A 已落地 |
 | `support` 内涵膨胀 | 2,740 行里有大量 GEN4/F2 下沉的状态与纯规则 | 有意为之：它是唯一无依赖模块，跨层共享数据的唯一无环落点；若将来拆分，必须保持「叶子」性质 |
 
 ## 6. 规模速查
@@ -134,5 +131,5 @@ L0  support  token  ir  cache  lex
 | ir | 10 | 5,385 | cache | 7 | 1,047 |
 | link | 7 | 4,296 | cmdline | 1 | 661 |
 | backend | 14 | 4,149 | cmd | 11 | 497 |
-| gen | 1 | 337 | token | 3 | 268 |
-| builtin | 1 | 171 | **合计** | **177** | **60,537** |
+ token | 3 | 268 |
+| builtin | 1 | 171 | **合计** | **178** | **60,665** |

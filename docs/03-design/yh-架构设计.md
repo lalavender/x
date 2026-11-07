@@ -130,10 +130,10 @@ bin/yh-<平台>-<架构>（Release 种子）
 
 **逐模块职责、规模、依赖与内部拆分的唯一清单已迁到
 [`yh-模块职责-当前实现.md`](yh-模块职责-当前实现.md)**（2026-11-06 实测：
-19 个模块 / 177 个文件 / 60,537 行 / 79 条依赖边）。
+18 个模块 / 178 个文件 / 60,665 行 / 79 条依赖边）。
 
 本节只保留分层意图：`support`/`ir` 是无依赖底座，`token`/`cache`/`lex`/`proj`/`ast`/
-`comptime`/`gen` 依次叠到语义层，`check` 是语义中心，`parse` 是前端装配，
+`comptime` 依次叠到语义层，`check` 是语义中心，`parse` 是前端装配，
 `lower`→`backend`→`link`→`build` 是后端与构建链，`cmd`/`testkit`/`cmdline` 是入口。
 任何模块的新增依赖都必须同时更新 `tools/arch-check.py` 的 `ALLOWED` 与那份清单。
 
@@ -163,22 +163,21 @@ bin/yh-<平台>-<架构>（Release 种子）
 support    → （无）
 ir         → （无）
 token      → support
-cache      → support, token, gen, hash
-lex        → support, token, gen
-cmdline    → support, gen, libs
-proj       → support, token, gen
-ast        → support, token, proj, comptime, gen
-comptime   → support, token, proj, gen
-gen        → support, token
-check      → support, ir, token, cache, proj, ast, comptime, gen
-builtin    → support, gen, check
-parse      → support, ir, token, lex, proj, ast, comptime, gen, check
-lower      → support, ir, token, cache, proj, ast, gen, check
-backend    → support, ir, gen
-link       → support, proj, gen, backend, hash
-build      → support, ir, token, cache, lex, proj, ast, comptime, gen, check, builtin, parse, lower, backend, link, hash, libs
-testkit    → support, token, proj, ast, gen, parse, link, build
-main       → support, ir, lex, cmdline, proj, ast, comptime, gen, check, builtin, parse, lower, backend, link, build, testkit
+cache      → support, token, hash
+lex        → support, token
+cmdline    → support, libs
+proj       → support, token
+ast        → support, token, proj, comptime
+comptime   → support, token, proj
+check      → support, ir, token, cache, proj, ast, comptime
+builtin    → support, check
+parse      → support, ir, token, lex, proj, ast, comptime, check
+lower      → support, ir, token, cache, proj, ast, check
+backend    → support, ir
+link       → support, proj, backend, hash
+build      → support, ir, token, cache, lex, proj, ast, comptime, check, builtin, parse, lower, backend, link, hash, libs
+testkit    → support, token, proj, ast, parse, link, build
+main       → support, ir, lex, cmdline, proj, ast, comptime, check, builtin, parse, lower, backend, link, build, testkit
 ```
 
 新增边必须同时改 `tools/arch-check.py` 的 `ALLOWED` 与本文；环数必须为 0。
@@ -192,7 +191,7 @@ token  cache  lex  cmdline  ← 词汇/原语（cmdline 唯一可依赖 libs/cli
    ↑
 proj                        ← 项目/模块/文件表 + 目标配置
    ↑
-ast   comptime   gen        ← 语法树 / CT 执行器 / 值内核（gen 只依赖 support+token）
+ast   comptime              ← 语法树 / CT 执行器
    ↑
 check   builtin             ← 语义中心 + 内建登记
    ↑

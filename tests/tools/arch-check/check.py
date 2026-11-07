@@ -75,40 +75,33 @@ def main():
             print(r3.stdout[-800:], r3.stderr[-400:])
 
     with tempfile.TemporaryDirectory() as tmp:
-        root = copy_compiler(tmp, "gen-budget")
-        # 预算按当前实测值只减不增：注入到「实际 + 1 > 预算」才该红灯，
-        # 所以先读预算与实际，再补足差额，避免测试随基线下降而失效。
-        gen_files = list((root / "compiler" / "gen").glob("*.yh"))
-        actual = sum(len(re.findall(r"(?m)^pub fn ", p.read_text(errors="ignore")))
-                     for p in gen_files)
-        budget = int(re.search(r'"max_gen_pub_fns":\s*(\d+)',
-                               TOOL.read_text(encoding="utf-8")).group(1))
-        need = max(1, budget - actual + 1)
-        # gen 现在只有一个文件（value_rules.yh）：state.yh/symbols.yh 均已删除。
-        victim = sorted((root / "compiler" / "gen").glob("*.yh"))[-1]
-        victim.write_text(
-            victim.read_text(errors="ignore") +
-            "\n" + "".join(
-                f"pub fn injected_budget_probe_{i}() int {{ return 0 }}\n"
-                for i in range(need)),
+        # gen 已随 F4 收尾删除：把 gen 目录塞回去（含超过预算的 pub fn）必须红灯。
+        root = copy_compiler(tmp, "gen-removed")
+        gen_dir = root / "compiler" / "gen"
+        gen_dir.mkdir(parents=True, exist_ok=True)
+        (gen_dir / "value_rules.yh").write_text(
+            "module gen\nimport support\n\n" +
+            "".join(f"pub fn injected_budget_probe_{i}() int {{ return 0 }}\n"
+                    for i in range(3)),
             encoding="utf-8")
         r4 = run(root)
-        caught = r4.returncode != 0 and "max_gen_pub_fns" in r4.stdout
-        print(("PASS" if caught else "FAIL") + " arch-check 抓 gen pub fn 预算")
+        caught = r4.returncode != 0 and "gen" in r4.stdout
+        print(("PASS" if caught else "FAIL") + " arch-check 抓已删除的 gen 模块回归")
         if not caught:
             failed += 1
             print(r4.stdout[-800:], r4.stderr[-400:])
 
     with tempfile.TemporaryDirectory() as tmp:
-        root = copy_compiler(tmp, "comptime-gen")
+        # gen 已删除后，最重要的硬约束是「comptime 不得依赖 check」（会成环）。
+        root = copy_compiler(tmp, "comptime-check")
         victim = root / "compiler" / "comptime" / "ct_facts.yh"
         victim.write_text(
             victim.read_text(errors="ignore") +
-            "\nfn injected_dependency_probe() int { return gen.ty_lookup_name(0, 1) }\n",
+            "\nimport check\nfn injected_dependency_probe() int { return check.ct_types_bound() }\n",
             encoding="utf-8")
         r6 = run(root)
-        caught = r6.returncode != 0 and "comptime 新增 gen 依赖" in r6.stdout
-        print(("PASS" if caught else "FAIL") + " arch-check 抓 comptime 新增 gen 依赖")
+        caught = r6.returncode != 0 and "comptime" in r6.stdout and "check" in r6.stdout
+        print(("PASS" if caught else "FAIL") + " arch-check 抓 comptime→check 越界")
         if not caught:
             failed += 1
             print(r6.stdout[-800:], r6.stderr[-400:])

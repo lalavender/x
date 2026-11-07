@@ -31,8 +31,7 @@ SRC = ROOT / "compiler"
 # 与 docs/03-design/yh-架构设计.md §3.1 对齐。
 # 新增边必须同时更新此处与设计文档；`main` 是 CLI/构建驱动，位于最上层。
 ALLOWED = {
-    # GEN1 过渡：gen 的 support 桥只转发基础工具；迁移完成后删除这条边。
-    "gen": {"support", "token"},
+    # F4 收尾：`gen` 模块已删除（值内核迁 support/value_kernel.yh）。
     "ir": set(),
     # support：L0 基础内核（缓冲/源/池/统计/诊断/目标/ABI 常量）。
     # 无 import，所有模块都可依赖它。
@@ -41,37 +40,37 @@ ALLOWED = {
     "token": {"support"},
     # cache：缓存键 schema / ActionID / OutputID 原语。只依赖 gen 与标准库 hash，
     # 位于前端与构建层之下，避免 check↔lower 为了共用键原语互相 import。
-    "cache": {"gen", "hash", "support", "token"},
-    "lex": {"gen", "token", "support"},
+    "cache": {"hash", "support", "token"},
+    "lex": {"token", "support"},
     # comptime 只有一处窄口读（待定数组长度时的文件下标越界检查），
     # 走 proj.file_count() 而不是自己拿项目表。
-    "comptime": {"gen", "proj", "token", "support"},
-    "builtin": {"gen", "support", "check"},
+    "comptime": {"proj", "token", "support"},
+    "builtin": {"support", "check"},
     # proj：项目/模块/文件表 + 目标/构建配置（2026-10-26 B1-1 自 gen/build 拆出）。
     # 它是前端与构建层共用的数据层，只允许依赖 gen；一旦反向依赖就成环。
-    "proj": {"gen", "support", "token"},
-    "ast": {"gen", "comptime", "proj", "support", "token"},
+    "proj": {"support", "token"},
+    "ast": {"comptime", "proj", "support", "token"},
     # lower：CheckedModule → IRModule（2026-10-25 B3-2 自 ast 拆出）。
     # 只吃受检快照，不得 import parse/check/build；ast 不得反向 import lower。
-    "lower": {"gen", "ir", "ast", "proj", "cache", "support", "check", "token"},
-    "check": {"ast", "gen", "proj", "token", "support", "cache", "ir", "comptime"},
-    "parse": {"gen", "lex", "comptime", "ast", "ir", "proj", "token", "support", "check"},
-    "backend": {"gen", "ir", "support"},
+    "lower": {"ir", "ast", "proj", "cache", "support", "check", "token"},
+    "check": {"ast", "proj", "token", "support", "cache", "ir", "comptime"},
+    "parse": {"lex", "comptime", "ast", "ir", "proj", "token", "support", "check"},
+    "backend": {"ir", "support"},
     # link：工具链调用层（汇编、链接驱动、内嵌 lld、进程、时钟）
     # 2026-10-26 B2-2 自 build 拆出。它必须位于 build 之下、proj 之上：
     # 只允许 gen/proj/backend，不得 import build（否则 link ↔ build 成环）。
-    "link": {"gen", "proj", "backend", "hash", "support"},
+    "link": {"proj", "backend", "hash", "support"},
     # build 是构建引擎（A2c 后承担项目模型 + 链接 + 调度 + 模块发射），
     # 位于前端/后端之上，可依赖全部下层；main 只剩 CLI 与测试执行器。
-    "build": {"gen", "lex", "parse", "comptime", "ast", "check", "ir",
+    "build": {"lex", "parse", "comptime", "ast", "check", "ir",
               "backend", "builtin", "lower", "proj", "link", "hash", "cache", "libs", "token", "support"},
     # testkit：语言内测试执行器（yh test 子命令的实现），位于 build 之上。
     # 模块名不能叫 test——`test "..." {}` 是语言关键字。
-    "testkit": {"gen", "parse", "build", "proj", "link", "token", "support", "ast"},
+    "testkit": {"parse", "build", "proj", "link", "token", "support", "ast"},
     # cmdline：命令行声明与解析（CLI-R）。唯一允许依赖标准库 libs/cli 的模块，
     # 这样 `cmd`（module main）自身保持「参数映射 + 调用面」，不直接引标准库。
-    "cmdline": {"gen", "libs", "support"},
-    "main": {"gen", "lex", "comptime", "ast", "check", "parse", "ir",
+    "cmdline": {"libs", "support"},
+    "main": {"lex", "comptime", "ast", "check", "parse", "ir",
              "backend", "builtin", "build", "testkit", "lower", "proj", "link",
              "cmdline", "support"},}
 
@@ -87,27 +86,21 @@ BUDGETS = {
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
     "min_cap_appends": 45,
     # GEN0（ADR-0021）：gen 拆分只减不增的三项预算。
-    "max_gen_pub_fns": 3,      # gen 只剩值内核 3 个 pub fn（F2-K2 后）
-    "max_gen_importers": 3,   # check/comptime/parse
+    "max_gen_pub_fns": 0,      # F4 收尾：gen 模块已删除
+    "max_gen_importers": 0,   # F4 收尾：import gen 归零
     "max_taskctx_fields": 0,  # gen/state.yh 的 TaskCtx 字段数（会话开关/声明索引迁出后）
 }
 
 # —— comptime → gen 的符号白名单（F4 收口；只减不增）——
 # comptime 不得依赖 gen 的语义表；下面每个符号都是待消除的已知债务，
 # 新增依赖即红灯。分组理由写在 docs/02-plan/yh-F4-... §7。
-GEN_SYMBOLS_FOR_COMPTIME = {
-    # 值规则（F4-5 路线 A：编译期值语义内核，阶段内保留）
-    "sem_can_assign", "sem_fold_const_binop", "sem_fold_const_unary",
-    # 符号引用查询（待 F4-5 或镜像）
-}
+# F4 收尾后 comptime/parse 都不得再出现 `gen.`：留空集合便于回归时快速定位。
+GEN_SYMBOLS_FOR_COMPTIME = set()
 
 # F2：parse 允许依赖的 gen 符号白名单（只减不增）。
 # 目标：parse 只保留「必须带 token 位置诊断的语义动作」；常量/类型/诊断入口
 # 都必须走 support / token。注入新符号会被自测抓到。
-PARSE_SYMBOLS_FOR_GEN = {
-    # 仅剩编译期值内核的兼容性判定（comptime 也要用，必须留在 check 之下）
-    "sem_can_assign",
-}
+PARSE_SYMBOLS_FOR_GEN = set()
 
 # 已知未接线但暂不删除的符号（当前为空；保留位置以便记录豁免）。
 UNWIRED_EXEMPT = set()
@@ -287,7 +280,7 @@ def main():
         problems.append("parse 新增 gen 依赖：" + ", ".join(parse_extra))
     report["parse_gen"] = len(parse_used)
 
-    budget("max_gen_pub_fns", gen_pub_fns, "gen")
+    budget("max_gen_pub_fns", gen_pub_fns)
     budget("max_gen_importers", len(gen_importers), "import gen")
     budget("max_taskctx_fields", taskctx_fields(), "TaskCtx")
     budget("max_unchecked_malloc", len(unchecked), ",".join(unchecked[:3]))

@@ -246,8 +246,12 @@ lex → parse(纯语法) → AST
   `docs/03-design/yh-模块职责-当前实现.md`（19 模块逐条职责/规模/依赖/内部拆分，
   含 backend 文件分工、三条不可违反的依赖规则、已知结构债）；`架构设计.md`
   §2.1/§2.3/§3.1/§3.2 改为指向该文档并按实测刷新（79 条边）。
-- [ ] **F4 收尾：让 `gen` 消失**（`support/value_kernel.yh` 返回错误码 + 三层
-  各自格式化诊断）→ 方案见
+- [x] **F4 收尾：`gen` 消失（2026-11-06 完成）**：按「错误码 + 调用层格式化」
+  把值内核下沉 `support/value_kernel.yh`（23 个 `VK_*` + `vk_msg` 消息表 +
+  `vk_can_assign`/`vk_fold_binop`/`vk_fold_unary`）；`check/value_kernel.yh` 与
+  `comptime/ct_diag.yh` 各自做诊断适配；运算符常量 `TK_*` 源头移 `support`
+  （`token` 转发）。**`compiler/gen/` 目录删除**，模块数 19→18，
+  `import gen` 3→0，两条白名单归零。方案见
   `docs/02-plan/yh-F4收尾-gen消失方案-2026-11-06.md`
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
