@@ -214,6 +214,10 @@ lex → parse(纯语法) → AST
   改 `support.*`，`gen.sem_err`（148 处）改 `token.err_tok`（实现完全相同）。
   4 个文件（`iface`/`parse_module`/`iface_ct`/`iface_ct_map`）脱离 `import gen`。
   新增 `PARSE_SYMBOLS_FOR_GEN` 白名单守卫（27，只减不增）+ 自测覆盖。
+- [x] **F2-2 内核表下沉（2026-11-06 完成）**：`data_str_*`/`em_*` 从
+  `gen/state.yh` 迁到 `support/tables.yh`，`gen.state_init` 变
+  `support.session_reset()`；**`gen/state.yh` 删除**。`gen` pub fn 57→37、
+  1,750→1,512 行；`parse→gen` 符号 27→22。
 - [ ] **F2**：`parse` 纯语法化（语法 AST 先行、语义搬 check）→ 方案见
   `docs/02-plan/yh-F2-parse纯语法化方案-2026-11-06.md`
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见

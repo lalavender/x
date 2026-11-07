@@ -248,8 +248,13 @@ def main():
     report = {}
 
     def taskctx_fields():
-        """数 TaskCtx 的字段行（去注释/空行；数组字段也计一行）。"""
-        text = read(SRC / "gen" / "state.yh")
+        """数 TaskCtx 的字段行（去注释/空行；数组字段也计一行）。
+
+        TaskCtx 已于 GEN4 拆除（字段迁 support/task_ctx.yh）；state.yh 不存在即 0。"""
+        p = SRC / "gen" / "state.yh"
+        if not p.exists():
+            return 0
+        text = read(p)
         m = re.search(r"pub struct TaskCtx \{(.*?)\n\}", text, re.S)
         if not m:
             return 0
