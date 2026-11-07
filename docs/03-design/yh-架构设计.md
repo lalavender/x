@@ -581,14 +581,14 @@ TaskCtx 按所有者拆（SemaCtx→check / ParseCtx→parse / SourceCtx→suppo
 
 | 查询 | 结果 |
 | --- | --- |
-| `codegraph callers gen.task` | **237 个调用点**，按模块：`parse` 149、`check` 66、`comptime` 9、`ast` 6、`gen` 5、`builtin` 2 |
-| `codegraph impact gen.task` | **约 290 个受影响符号**（跨 6 个模块） |
+| `codegraph callers gen.task` | **212 个调用点**，按模块：`parse` 148、`check` 54、`ast` 6、`gen` 2、`builtin` 2（**`comptime` 已清零**） |
+| `codegraph impact gen.task` | 约 260 个受影响符号（跨 5 个模块） |
 | `codegraph callers sem_can_assign` | `check` / `comptime` / `gen` / `parse` |
 | `codegraph callers sem_fold_norm` / `sem_res_const` / `fp64_bits` | `check` / `comptime` / `gen`（`sem_res_const` 还有 `parse`） |
 
 结论（与 §6.3.1 一致，但量化了成本）：
 
-- **链 B 的规模就是 `gen.task()` 的调用点**，其中 `parse`(149)+`check`(66) 占 91%；
+- **链 B 的规模就是 `gen.task()` 的调用点**，其中 `parse`(148)+`check`(54) 占 95%；
   `lex`/`link`/`proj`/`testkit`/`cache` **已全部清零**（`lex.LexCtx`、
   `cache.store_bind` 落地，`TaskCtx` 150→147），`import gen` 的模块
   从 13 降到 **8**（ast/build/builtin/check/cmd/comptime/lower/parse）。
