@@ -16,16 +16,21 @@ import gen
 // ct_types_sync：只绑定类型表槽（保留给只需要类型的调用方）。
 pub fn ct_types_sync() void {
     let tk *gen.TaskCtx = gen.task()
-    comptime.ct_types_bind((&tk.t_types).to_type(*void), &tk.t_type_n)
+    comptime.ct_types_bind((&support.ms().types).to_type(*void), &support.ms().type_n)
 }
 
 // ct_facts_sync：把类型表与符号表的「槽」一次绑定到 CT 镜像。
 // 只传槽地址（不是表内容），表扩容/搬迁后镜像自动读到最新值；每任务一次。
 pub fn ct_facts_sync() void {
     let tk *gen.TaskCtx = gen.task()
-    comptime.ct_types_bind((&tk.t_types).to_type(*void), &tk.t_type_n)
-    comptime.ct_syms_bind((&tk.c_syms).to_type(*void), &tk.c_sym_n)
-    comptime.ct_fields_bind((&tk.t_fields).to_type(*void), &tk.t_field_n)
+    comptime.ct_types_bind((&support.ms().types).to_type(*void), &support.ms().type_n)
+    comptime.ct_syms_bind((&support.ms().syms).to_type(*void), &support.ms().sym_n)
+    comptime.ct_fields_bind((&support.ms().fields).to_type(*void), &support.ms().field_n)
+    // 前端模式位：CT 读折叠开关、写结果寻址（两个标量槽）。
+    comptime.ct_mode_bind((&tk.c_fold).to_type(*void), (&tk.c_res_is_addr).to_type(*void))
+    // 文件导入表：CT 登记函数时要把导入别名一起带进 IR 目标描述。
+    comptime.ct_imports_bind((&tk.mod_imports).to_type(*void), &tk.mod_import_n,
+        (&tk.mod_import_mod).to_type(*void))
     // 字符串标签 / 枚举成员：gen 里的模块级表，用槽地址绑定。
     let ds_lbl **int
     let ds_off **int
@@ -46,6 +51,26 @@ pub fn ct_facts_sync() void {
         support.static_data_rows_slot().to_type(**comptime.CtStaticRow),
         support.static_data_n_slot())
 }
+
+// ct_import_count / ct_import_alias / ct_import_module：导入表镜像的只读窄口。
+// 供 fixture 做差分；生产路径由 comptime 内部直接读镜像。
+pub fn ct_import_count() int { return comptime.ct_import_count() }
+
+// ct_import_alias：第 i 行的绑定名池偏移与长度；越界返回 -1。
+pub fn ct_import_alias(i int, out_off *int, out_len *int) int {
+    if (i < 0 || i >= comptime.ct_import_count()) { return -1 }
+    let row comptime.CtImportRow = comptime.ct_import_row(i)
+    out_off[0] = row.alias_off
+    out_len[0] = row.alias_len
+    return 0
+}
+
+// ct_import_module：第 i 行绑定的模块编号（-1 = 未绑定）。
+pub fn ct_import_module(i int) int { return comptime.ct_import_module(i) }
+
+// ct_fold_mode / ct_res_is_addr_set：前端模式位槽的读写窄口。
+pub fn ct_fold_mode() int { return comptime.ct_fold_mode() }
+pub fn ct_res_is_addr_set(v int) void { comptime.ct_res_is_addr_set(v) }
 
 // ct_type_layout_ok：镜像与 gen 逐项一致返回 1，否则 0。
 // 覆盖 struct 尺寸与全部 TY_* 常量值；字段顺序由 struct 定义保证。
@@ -86,10 +111,10 @@ test "ct 镜像与 gen 类型表逐行一致" {
     if (ct_type_layout_ok() == 0) { return }
     ct_facts_sync()
     let n int = comptime.ct_types_bound()
-    if (n <= 0 || n != gen.task().t_type_n) { return }
+    if (n <= 0 || n != support.ms().type_n) { return }
     let i int = 0
     for i < n {
-        let row gen.CType = gen.task().t_types[i]
+        let row gen.CType = support.ms().types[i]
         if (comptime.ct_ty_kind(i) != row.kind) { return }
         if (comptime.ct_ty_size(i) != row.size) { return }
         if (comptime.ct_ty_align(i) != row.align) { return }
@@ -101,11 +126,11 @@ test "ct 镜像与 gen 类型表逐行一致" {
         if (comptime.ct_ty_is_signed(i) != gen.ty_is_signed(i)) { return }
         i += 1
     }
-    let sn int = gen.task().c_sym_n
+    let sn int = support.ms().sym_n
     if (comptime.ct_syms_bound() != sn) { return }
     let si int = 0
     for si < sn {
-        let row gen.CSym = gen.task().c_syms[si]
+        let row gen.CSym = support.ms().syms[si]
         if (comptime.ct_sym_row(si).kind != row.kind) { return }
         if (comptime.ct_sym_row(si).type_id != row.type_id) { return }
         if (comptime.ct_sym_row(si).flags != row.flags) { return }

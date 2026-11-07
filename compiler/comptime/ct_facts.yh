@@ -8,7 +8,7 @@ import token
 // 执行器需要类型/符号/静态数据的「形状」，但不得 import gen（否则
 // check → comptime → check 成环）。这里用与 gen 结构**逐字段同序同宽**的
 // 镜像结构 + 「指针 + 行数」绑定：调用方（check）在进入 CT 前把
-// gen.task().t_types 等表的指针交进来，执行器按镜像读，不复制、不拥有。
+// support.ms().types 等表的指针交进来，执行器按镜像读，不复制、不拥有。
 //
 // 为什么不用复制：解析期类型表会持续增长，复制会立刻过期；指针绑定只写两个
 // 标量，表扩容后重新绑定即可。形状漂移由 check.ct_type_layout_ok() 断言。
@@ -254,6 +254,81 @@ pub fn ct_field_row(idx int) CtFieldRow {
     let slot **CtFieldRow = ct_field_slot.to_type(**CtFieldRow)
     let rows *CtFieldRow = slot[0]
     return rows[idx]
+}
+
+// CtImportRow：ImportEnt 的镜像（文件导入表一行，8 个 int 字段同序同宽）。
+pub struct CtImportRow {
+    name_off int // 查找名（模块名）名字池偏移
+    name_len int
+    proj_key_off int // 跨项目导入的依赖键池偏移；同项目 -1
+    proj_key_len int
+    alias_off int // 绑定名池偏移
+    alias_len int
+    line int // 1 基行号
+    col int // 1 基列号
+}
+
+// ct_imp_slot / ct_imp_n_slot / ct_imp_mod_slot：导入表三张表的槽。
+let ct_imp_slot *void = 0
+let ct_imp_n_slot *int = 0
+let ct_imp_mod_slot *void = 0
+
+// ct_imports_bind：绑定文件导入表（`&TaskCtx.mod_imports` / `&mod_import_n` /
+// `&mod_import_mod`）。只传槽，表扩容后镜像自动跟随；每任务一次。
+pub fn ct_imports_bind(rows_slot *void, n_slot *int, mod_slot *void) void {
+    ct_imp_slot = rows_slot
+    ct_imp_n_slot = n_slot
+    ct_imp_mod_slot = mod_slot
+}
+
+// ct_import_count：当前文件导入表行数；未绑定为 0。
+pub fn ct_import_count() int {
+    if (ct_imp_n_slot == 0) { return 0 }
+    return ct_imp_n_slot[0]
+}
+
+// ct_import_row：第 idx 行导入镜像；调用方保证下标有效且已绑定。
+pub fn ct_import_row(idx int) CtImportRow {
+    if (ct_imp_slot == 0) {
+        support.fail("内部错误：CT 导入表未绑定（缺 check.ct_facts_sync）")
+        exit(1)
+    }
+    let slot **CtImportRow = ct_imp_slot.to_type(**CtImportRow)
+    let rows *CtImportRow = slot[0]
+    return rows[idx]
+}
+
+// ct_import_module：第 idx 个导入绑定的模块编号（-1 = 未绑定模块）。
+pub fn ct_import_module(idx int) int {
+    if (ct_imp_mod_slot == 0) { return -1 }
+    let slot **int = ct_imp_mod_slot.to_type(**int)
+    return slot[0][idx]
+}
+
+// —— 前端模式位：CT 只做「读折叠开关、写结果寻址性」两件事 ——
+// 两者都是 gen.TaskCtx 的标量字段；用槽绑定读写，执行器不再 import gen。
+let ct_fold_slot *void = 0 // &TaskCtx.c_fold（读）
+let ct_addr_slot *void = 0 // &TaskCtx.c_res_is_addr（写）
+
+// ct_mode_bind：绑定折叠开关与结果寻址位的槽；由 check.ct_facts_sync 调用。
+pub fn ct_mode_bind(fold_slot *void, addr_slot *void) void {
+    ct_fold_slot = fold_slot
+    ct_addr_slot = addr_slot
+}
+
+// ct_fold_mode：当前是否处于「只做常量折叠」模式；未绑定按 0 处理。
+pub fn ct_fold_mode() int {
+    if (ct_fold_slot == 0) { return 0 }
+    let slot *int = ct_fold_slot.to_type(*int)
+    return slot[0]
+}
+
+// ct_res_is_addr_set：把「刚求得的表达式在栈上留下地址」写回前端。
+// 未绑定时静默忽略（调用方一定在 ct_facts_sync 之后才进执行器）。
+pub fn ct_res_is_addr_set(v int) void {
+    if (ct_addr_slot == 0) { return }
+    let slot *int = ct_addr_slot.to_type(*int)
+    slot[0] = v
 }
 
 // ct_err：编译期诊断（带当前 token 位置），返回 -1 便于链式返回。

@@ -11,11 +11,11 @@ import ast
 fn iface_ct_name(sym_id int, suffix_off int, suffix_len int,
     name_off *int, name_len *int) int {
     let t *gen.TaskCtx = gen.task()
-    if (sym_id < 0 || sym_id >= t.c_sym_n || suffix_off < 0
+    if (sym_id < 0 || sym_id >= support.ms().sym_n || suffix_off < 0
         || suffix_len < 0) {
         return support.fail("内部错误：CT 接口函数身份无效")
     }
-    let sym gen.CSym = t.c_syms[sym_id]
+    let sym gen.CSym = support.ms().syms[sym_id]
     if (sym.name_len >= 7
         && support.pool_ctx().data[sym.name_off] == '_'
         && support.pool_ctx().data[sym.name_off + 1] == '_'
@@ -86,10 +86,10 @@ fn iface_ct_export_name(mi int, ns_row int, name_off *int,
 // 本地公开类型追加当前模块后缀；导入类型已经带提供方后缀。
 fn iface_ct_emit_type(tid int, suffix_off int, suffix_len int) int {
     let t *gen.TaskCtx = gen.task()
-    if (tid < 0 || tid >= t.t_type_n) {
+    if (tid < 0 || tid >= support.ms().type_n) {
         return gen.sem_err("编译期正文引用了无效类型")
     }
-    let kind int = t.t_types[tid].kind
+    let kind int = support.ms().types[tid].kind
     if (kind == gen.TY_VOID) { return if_puts("void") }
     if (kind == gen.TY_BOOL) { return if_puts("bool") }
     if (kind == gen.TY_CHAR) { return if_puts("char") }
@@ -105,55 +105,55 @@ fn iface_ct_emit_type(tid int, suffix_off int, suffix_len int) int {
     if (kind == gen.TY_F64) { return if_puts("f64") }
     if (kind == gen.TY_PTR) {
         if (if_put('*') != 0) { return -1 }
-        return iface_ct_emit_type(t.t_types[tid].elem, suffix_off,
+        return iface_ct_emit_type(support.ms().types[tid].elem, suffix_off,
             suffix_len)
     }
     if (kind == gen.TY_ARRAY) {
-        if (if_put('[') != 0 || if_puti(t.t_types[tid].len) != 0
+        if (if_put('[') != 0 || if_puti(support.ms().types[tid].len) != 0
             || if_put(']') != 0) { return -1 }
-        return iface_ct_emit_type(t.t_types[tid].elem, suffix_off,
+        return iface_ct_emit_type(support.ms().types[tid].elem, suffix_off,
             suffix_len)
     }
     if (kind == gen.TY_SLICE) {
         if (if_puts("[]") != 0) { return -1 }
-        return iface_ct_emit_type(t.t_types[tid].elem, suffix_off,
+        return iface_ct_emit_type(support.ms().types[tid].elem, suffix_off,
             suffix_len)
     }
     if (kind == gen.TY_FN) {
-        let sig int = t.t_types[tid].sub
-        if (t.t_sig_abi[sig] == support.ABI_C
+        let sig int = support.ms().types[tid].sub
+        if (support.ms().sig_abi[sig] == support.ABI_C
             && if_puts("@[extern] ") != 0) { return -1 }
         if (if_puts("fn(") != 0) { return -1 }
         let i int = 0
-        for i < t.t_sig_np[sig] {
+        for i < support.ms().sig_np[sig] {
             if (i > 0 && if_puts(", ") != 0) { return -1 }
             if (iface_ct_emit_type(
-                    t.t_sig_params[t.t_sig_first[sig] + i],
+                    support.ms().sig_params[support.ms().sig_first[sig] + i],
                     suffix_off, suffix_len) != 0) { return -1 }
             i += 1
         }
         if (if_put(')') != 0) { return -1 }
-        return iface_ct_emit_type(t.t_sig_ret[sig], suffix_off,
+        return iface_ct_emit_type(support.ms().sig_ret[sig], suffix_off,
             suffix_len)
     }
     let found int = -1
     let alias_found int = -1
     let i2 int = 0
-    for i2 < t.t_name_n {
-        if (t.t_names[i2].type_id == tid) {
-            if (t.t_names[i2].form != 0) { found = i2; break }
+    for i2 < support.ms().name_n {
+        if (support.ms().names[i2].type_id == tid) {
+            if (support.ms().names[i2].form != 0) { found = i2; break }
             if (alias_found < 0) { alias_found = i2 }
         }
         i2 += 1
     }
     if (found < 0) { found = alias_found }
     if (found < 0) { return gen.sem_err("CT 正文引用了未命名类型") }
-    if (t.t_home[tid] < 0) {
-        if (t.t_names[found].is_pub == 0) {
+    if (support.ms().home[tid] < 0) {
+        if (support.ms().names[found].is_pub == 0) {
             return gen.sem_err("跨模块 CT 正文暂不支持模块私有具名类型")
         }
-        if (if_put_np(t.t_names[found].name_off,
-                t.t_names[found].name_len) != 0) { return -1 }
+        if (if_put_np(support.ms().names[found].name_off,
+                support.ms().names[found].name_len) != 0) { return -1 }
         let i3 int = 0
         for i3 < suffix_len {
             if (if_put(support.pool_ctx().data[suffix_off + i3]) != 0) { return -1 }
@@ -161,16 +161,16 @@ fn iface_ct_emit_type(tid int, suffix_off int, suffix_len int) int {
         }
         return 0
     }
-    return if_put_np(t.t_names[found].name_off,
-        t.t_names[found].name_len)
+    return if_put_np(support.ms().names[found].name_off,
+        support.ms().names[found].name_len)
 }
 
 // iface_ct_source_type_id：按正文 token 名查找同模块具名类型，未命中返回 -1。
 fn iface_ct_source_type_id(src *u8, start int, token_len int) int {
     let t *gen.TaskCtx = gen.task()
     let row int = 0
-    for row < t.t_name_n {
-        let name gen.TName = t.t_names[row]
+    for row < support.ms().name_n {
+        let name gen.TName = support.ms().names[row]
         if (name.name_len == token_len) {
             let i int = 0
             for i < token_len {
@@ -285,9 +285,9 @@ fn iface_ct_hex_value(byte u8) int {
 // iface_ct_origin_begin：按声明前的 sidecar 注释切换到函数定义源码路径与行号。
 fn iface_ct_origin_begin(token_index int) int {
     let gs *gen.TaskCtx = gen.task()
-    if (gs.c_ct_iface_mode == 0) { return 0 }
+    if (support.session().ct_iface_mode == 0) { return 0 }
     support.src_ctx().path = support.src_ctx().path_buf.to_type(*char)
-    gs.c_ct_origin_active = 0
+    support.session().ct_origin_active = 0
     support.diag().line_bias = 0
     if (token_index < 0 || token_index >= token.ctx().count) {
         return support.fail("内部错误：CT 来源映射声明 token 越界")
@@ -397,14 +397,14 @@ fn iface_ct_origin_begin(token_index int) int {
         iface_ct_col_reset()
         return support.fail_path("CT 来源映射函数体不闭合: ", support.src_ctx().path)
     }
-    gs.c_ct_origin_active = 1
-    gs.c_ct_origin_line = origin_line
+    support.session().ct_origin_active = 1
+    support.session().ct_origin_line = origin_line
     support.diag().line_bias = origin_line - token.ctx().tokens[body_token].line
     support.src_ctx().path = gs.c_ct_origin_buf.to_type(*char)
     if (col_status > 0
         && iface_ct_col_apply(gs, body_token, body_after, origin_line) != 0) {
         iface_ct_col_restore(gs)
-        gs.c_ct_origin_active = 0
+        support.session().ct_origin_active = 0
         support.diag().line_bias = 0
         support.src_ctx().path = support.src_ctx().path_buf.to_type(*char)
         return -1
@@ -415,10 +415,10 @@ fn iface_ct_origin_begin(token_index int) int {
 // iface_ct_origin_end：恢复 sidecar 文件上下文，避免来源映射泄漏到下一声明。
 fn iface_ct_origin_end() void {
     let gs *gen.TaskCtx = gen.task()
-    if (gs.c_ct_iface_mode == 0) { return }
+    if (support.session().ct_iface_mode == 0) { return }
     iface_ct_col_restore(gs)
     support.src_ctx().path = support.src_ctx().path_buf.to_type(*char)
-    gs.c_ct_origin_active = 0
+    support.session().ct_origin_active = 0
     support.diag().line_bias = 0
 }
 
@@ -692,8 +692,8 @@ fn iface_ct_emit_u64_hex(value i64) int {
 // 超出目标类型可表示范围」）。u64 的高位常量为保位型走十六进制。
 fn iface_emit_const_value(sym_id int) int {
     let t *gen.TaskCtx = gen.task()
-    let sym gen.CSym = t.c_syms[sym_id]
-    let kind int = t.t_types[sym.type_id].kind
+    let sym gen.CSym = support.ms().syms[sym_id]
+    let kind int = support.ms().types[sym.type_id].kind
     if (kind == gen.TY_BOOL) {
         if (sym.cval == 0) {
             return if_puts("false")
@@ -711,16 +711,16 @@ fn iface_ct_emit_const(sym_id int, suffix_off int,
     suffix_len int) int {
     let t *gen.TaskCtx = gen.task()
     let type_id int = -1
-    if (sym_id < 0 || sym_id >= t.c_sym_n
-        || t.c_syms[sym_id].kind != gen.SYM_CONST
-        || t.c_syms[sym_id].const_ready == 0) {
+    if (sym_id < 0 || sym_id >= support.ms().sym_n
+        || support.ms().syms[sym_id].kind != gen.SYM_CONST
+        || support.ms().syms[sym_id].const_ready == 0) {
         return gen.sem_err("跨模块 CT 正文引用了不支持的模块常量")
     }
-    let sym gen.CSym = t.c_syms[sym_id]
+    let sym gen.CSym = support.ms().syms[sym_id]
     type_id = sym.type_id
-    let type_kind int = t.t_types[type_id].kind
+    let type_kind int = support.ms().types[type_id].kind
     let string_ptr int = (type_kind == gen.TY_PTR
-        && t.t_types[type_id].elem == gen.TY_CHAR
+        && support.ms().types[type_id].elem == gen.TY_CHAR
         && (sym.flags & gen.F_ADDR) != 0).to_type(int)
     // 聚合常量（kind 4/5）：重放初始化式源文本，导入侧按模块模式重新解析（私有聚合常量
     // 在第 47 轮已放行，所以导入侧能接受）。切片常量同样以源文本重放，导入侧按 count
@@ -746,7 +746,7 @@ fn iface_ct_emit_const(sym_id int, suffix_off int,
         || if_put_np(name_off, name_len) != 0 || if_put(' ') != 0
         || iface_ct_emit_type(sym.type_id, suffix_off, suffix_len) != 0
         || if_puts(" = ") != 0) { return -1 }
-    let kind int = t.t_types[sym.type_id].kind
+    let kind int = support.ms().types[sym.type_id].kind
     if (gen.ty_is_float(type_id) != 0) {
         if (sym.const_expr_kind != 1 || sym.const_expr_off < 0
             || sym.const_expr_len <= 0) {
@@ -782,7 +782,7 @@ fn iface_ct_emit_function(row int, suffix_off int,
     suffix_len int) int {
     let item comptime.CtFunction = comptime.ct_iface_function(row)
     let t *gen.TaskCtx = gen.task()
-    if (item.sym_id < 0 || item.sym_id >= t.c_sym_n) {
+    if (item.sym_id < 0 || item.sym_id >= support.ms().sym_n) {
         return support.fail("内部错误：CT 接口函数符号越界")
     }
     // 先在独立缓冲中完成正文改写，收集的列映射再写到函数声明之前。
@@ -883,8 +883,8 @@ pub fn iface_ct_emit(path *char, sym_base int) int {
     i = 0
     for i < count {
         let item comptime.CtFunction = comptime.ct_iface_function(i)
-        if (item.sym_id >= sym_base && item.sym_id < t.c_sym_n
-            && (t.c_syms[item.sym_id].flags
+        if (item.sym_id >= sym_base && item.sym_id < support.ms().sym_n
+            && (support.ms().syms[item.sym_id].flags
                 & (gen.F_COMPTIME | gen.F_PUB))
                 == (gen.F_COMPTIME | gen.F_PUB)) {
             reachable[i] = 1
@@ -900,7 +900,7 @@ pub fn iface_ct_emit(path *char, sym_base int) int {
         if (paf_row >= 0 && paf_row < count) {
             let paf_item comptime.CtFunction =
                 comptime.ct_iface_function(paf_row)
-            if (paf_item.sym_id >= sym_base && paf_item.sym_id < t.c_sym_n) {
+            if (paf_item.sym_id >= sym_base && paf_item.sym_id < support.ms().sym_n) {
                 reachable[paf_row] = 1
             }
         }
@@ -1068,11 +1068,11 @@ pub fn iface_ct_load(path *char, mi int) int {
     let stable_path *char = support.arr_cstr(&path_buf[0])
     let old_compile int = support.session().compile
     let old_pass int = support.session().pass
-    let old_iface int = t.c_iface_load
+    let old_iface int = support.session().iface_load
     let old_indexed int = ast.store().file_indexed
     let old_file int = support.session().active_file
     let old_decl int = ast.store().file_decl_i
-    let old_ct_iface int = t.c_ct_iface_mode
+    let old_ct_iface int = support.session().ct_iface_mode
     let old_data_count int = support.data_label()
     if (mi < 0 || mi >= t.c_mod_n || support.read_source(stable_path) != 0
         || iface_ct_header_valid(stable_path, mi) != 0) { return -1 }
@@ -1080,52 +1080,52 @@ pub fn iface_ct_load(path *char, mi int) int {
     token.ctx().pos = 0
     support.session().compile = 1
     support.session().pass = 1
-    t.c_iface_load = 0
+    support.session().iface_load = 0
     ast.store().file_indexed = 0
     support.session().active_file = 0
     ast.store().file_decl_i = 0
-    t.c_ct_iface_mode = 1
+    support.session().ct_iface_mode = 1
     if (lex.lex_all() != 0 || parse_source() != 0
         || support.diag().errors > 0) {
-        t.c_ct_iface_mode = old_ct_iface
+        support.session().ct_iface_mode = old_ct_iface
         return -1
     }
     support.session().pass = 2
     token.ctx().pos = 0
     // .s.ct 中的隐藏常量先折叠并就绪；c_iface_load 仅抑制数据段发射，
     // 随后恢复为普通前端状态以捕获 CT 函数正文。
-    t.c_iface_load = 1
+    support.session().iface_load = 1
     if (parse_source_globals() != 0 || support.diag().errors > 0) {
-        t.c_iface_load = old_iface
-        t.c_ct_iface_mode = old_ct_iface
+        support.session().iface_load = old_iface
+        support.session().ct_iface_mode = old_ct_iface
         support.data_label_set(old_data_count)
         return -1
     }
-    t.c_iface_load = old_iface
+    support.session().iface_load = old_iface
     // 闭包常量只供 typed 正文解析；字符串字面量不属于消费者运行期数据。
     support.data_label_set(old_data_count)
     // 全局 pass 已扫描至 EOF；函数 pass 必须从文件头重新遍历。
     token.ctx().pos = 0
     if (parse_source_ct_fns() != 0 || support.diag().errors > 0) {
-        t.c_ct_iface_mode = old_ct_iface
+        support.session().ct_iface_mode = old_ct_iface
         return -1
     }
     let ns int = 0
     for ns < t.c_mods[mi].ns_n {
         let public_sym int = t.c_mods[mi].ns[ns].sym
-        if (public_sym >= 0 && public_sym < t.c_sym_n
-            && (t.c_syms[public_sym].flags & gen.F_COMPTIME) != 0) {
+        if (public_sym >= 0 && public_sym < support.ms().sym_n
+            && (support.ms().syms[public_sym].flags & gen.F_COMPTIME) != 0) {
             let hidden_off int = -1
             let hidden_len int = 0
             if (iface_ct_export_name(mi, ns, &hidden_off, &hidden_len) != 0) {
-                t.c_ct_iface_mode = old_ct_iface
+                support.session().ct_iface_mode = old_ct_iface
                 return -1
             }
             let body_sym int = gen.sym_lookup_off(hidden_off, hidden_len)
             if (body_sym < 0 || comptime.ct_find(body_sym) < 0
-                || t.c_syms[body_sym].type_id
-                    != t.c_syms[public_sym].type_id) {
-                t.c_ct_iface_mode = old_ct_iface
+                || support.ms().syms[body_sym].type_id
+                    != support.ms().syms[public_sym].type_id) {
+                support.session().ct_iface_mode = old_ct_iface
                 return support.fail_path("公开 CT 函数与 .s.ct 正文签名不匹配: ",
                     stable_path)
             }
@@ -1140,10 +1140,10 @@ pub fn iface_ct_load(path *char, mi int) int {
     ast.ast_function_reset()
     support.session().compile = old_compile
     support.session().pass = old_pass
-    t.c_iface_load = old_iface
+    support.session().iface_load = old_iface
     ast.store().file_indexed = old_indexed
     support.session().active_file = old_file
     ast.store().file_decl_i = old_decl
-    t.c_ct_iface_mode = old_ct_iface
+    support.session().ct_iface_mode = old_ct_iface
     return 0
 }

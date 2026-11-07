@@ -209,12 +209,12 @@ pub fn sem_ident(start int, n int, r *gen.Res) int {
 pub fn sem_ident_val(idx int, r *gen.Res) int {
     r.ast_id = -1
     r.sym = idx
-    r.type_id = gen.task().c_syms[idx].type_id
-    let kind int = gen.task().c_syms[idx].kind
+    r.type_id = support.ms().syms[idx].type_id
+    let kind int = support.ms().syms[idx].kind
     // 聚合常量（结构体/数组/切片/联合体）没有标量值：数据已发射到数据段，
     // 与全局变量同路径按符号地址访问，不能走下面的立即数取值分支。
     if (kind == gen.SYM_CONST) {
-        let ck int = gen.task().t_types[gen.task().c_syms[idx].type_id].kind
+        let ck int = support.ms().types[support.ms().syms[idx].type_id].kind
         if (ck == gen.TY_STRUCT || ck == gen.TY_ARRAY || ck == gen.TY_SLICE || ck == gen.TY_UNION) {
             // 聚合常量只读：**赋值目标**（c_lvalue == 1）直接拒绝。降级为变量语义只是
             // 为了按符号地址读取，不能连可写性一起放开；取地址（c_lvalue >= 2）是合法的
@@ -224,8 +224,8 @@ pub fn sem_ident_val(idx int, r *gen.Res) int {
             }
             // 导入的聚合常量：接口加载时物化了本单元副本（cval = 本地数据标签号），
             // 按标签装载地址（与字符串指针常量同一路径），提供方符号不参与消费者链接。
-            if ((gen.task().c_syms[idx].flags & gen.F_EXTERN) != 0
-                && gen.task().c_syms[idx].cval != 0) {
+            if ((support.ms().syms[idx].flags & gen.F_EXTERN) != 0
+                && support.ms().syms[idx].cval != 0) {
                 gen.task().c_res_is_addr = 1
                 return 0
             }
@@ -233,15 +233,15 @@ pub fn sem_ident_val(idx int, r *gen.Res) int {
         }
     }
     if (kind == gen.SYM_CONST) {
-        if ((gen.task().c_syms[idx].flags & (gen.F_ENUM_META | gen.F_FIELD_META)) != 0) {
+        if ((support.ms().syms[idx].flags & (gen.F_ENUM_META | gen.F_FIELD_META)) != 0) {
             // 元信息绑定（枚举 values / 结构体 fields）：本身不是值，
             // 只能投影 .name/.value（枚举）或 .name（字段）或作类型谓词实参。
-            if (gen.task().c_syms[idx].const_ready == 0) {
+            if (support.ms().syms[idx].const_ready == 0) {
                 return gen.sem_err("编译期元信息绑定尚未就绪")
             }
             return 0
         }
-        if (gen.task().c_syms[idx].const_ready == 0) {
+        if (support.ms().syms[idx].const_ready == 0) {
             if (gen.task().c_ct_prepare_active != 0
                 && (gen.task().c_fn_flags & gen.F_COMPTIME) != 0) {
                 return 0
@@ -249,13 +249,13 @@ pub fn sem_ident_val(idx int, r *gen.Res) int {
             return gen.sem_err("编译期常量尚未就绪")
         }
         r.is_const = 1
-        r.ival = gen.task().c_syms[idx].cval
-        if ((gen.task().c_syms[idx].flags & gen.F_ADDR) != 0) {
+        r.ival = support.ms().syms[idx].cval
+        if ((support.ms().syms[idx].flags & gen.F_ADDR) != 0) {
             // 指针常量：值是数据标签
             return 0
         }
         if (gen.ty_is_float(r.type_id) != 0) {
-            r.fval_bits = gen.task().c_syms[idx].cval
+            r.fval_bits = support.ms().syms[idx].cval
         }
         return 0
     }
@@ -270,9 +270,9 @@ pub fn sem_ident_val(idx int, r *gen.Res) int {
     if (gen.task().c_fold != 0) {
         return gen.sem_err("变量不是编译期常量")
     }
-    let tid int = gen.task().c_syms[idx].type_id
-    let k int = gen.task().t_types[tid].kind
-    let global int = ((gen.task().c_syms[idx].flags & gen.F_GLOBAL) != 0).to_type(int)
+    let tid int = support.ms().syms[idx].type_id
+    let k int = support.ms().types[tid].kind
+    let global int = ((support.ms().syms[idx].flags & gen.F_GLOBAL) != 0).to_type(int)
     if (k == gen.TY_ARRAY || k == gen.TY_STRUCT || k == gen.TY_UNION || k == gen.TY_SLICE) {
         // 聚合：值语义即地址（数组退化 / 结构体以地址使用）
         gen.task().c_res_is_addr = 1
@@ -292,44 +292,44 @@ pub fn sem_ident_val(idx int, r *gen.Res) int {
 
 // sem_enum_meta_value：把枚举 values 迭代绑定的 value 投影为只读枚举常量。
 pub fn sem_enum_meta_value(meta *gen.Res) int {
-    if (meta.sym < 0 || meta.sym >= gen.task().c_sym_n
-        || (gen.task().c_syms[meta.sym].flags & gen.F_ENUM_META) == 0) {
+    if (meta.sym < 0 || meta.sym >= support.ms().sym_n
+        || (support.ms().syms[meta.sym].flags & gen.F_ENUM_META) == 0) {
         return gen.sem_err("枚举 values 元信息绑定无效")
     }
     if (gen.task().c_lvalue != 0) {
         return gen.sem_err("枚举 values 成员只读")
     }
-    let member int = gen.task().c_syms[meta.sym].offset
-    if (member < 0 || member >= gen.task().c_sym_n
-        || (gen.task().c_syms[member].flags & gen.F_ENUM_MEMBER) == 0
-        || gen.task().c_syms[member].const_ready == 0) {
+    let member int = support.ms().syms[meta.sym].offset
+    if (member < 0 || member >= support.ms().sym_n
+        || (support.ms().syms[member].flags & gen.F_ENUM_MEMBER) == 0
+        || support.ms().syms[member].const_ready == 0) {
         return gen.sem_err("枚举 values 成员索引无效")
     }
-    let tid int = gen.task().c_syms[member].type_id
-    let value i64 = gen.task().c_syms[member].cval
+    let tid int = support.ms().syms[member].type_id
+    let value i64 = support.ms().syms[member].cval
     gen.sem_res_const(meta, tid, value)
     return 0
 }
 
 // sem_enum_meta_name：把枚举 values 迭代绑定的 name 投影为静态 C 字符串。
 pub fn sem_enum_meta_name(meta *gen.Res) int {
-    if (meta.sym < 0 || meta.sym >= gen.task().c_sym_n
-        || (gen.task().c_syms[meta.sym].flags & gen.F_ENUM_META) == 0) {
+    if (meta.sym < 0 || meta.sym >= support.ms().sym_n
+        || (support.ms().syms[meta.sym].flags & gen.F_ENUM_META) == 0) {
         return gen.sem_err("枚举 values 元信息绑定无效")
     }
     if (gen.task().c_lvalue != 0) {
         return gen.sem_err("枚举 values 成员只读")
     }
-    let member int = gen.task().c_syms[meta.sym].offset
-    if (member < 0 || member >= gen.task().c_sym_n
-        || (gen.task().c_syms[member].flags & gen.F_ENUM_MEMBER) == 0
-        || gen.task().c_syms[member].const_ready == 0) {
+    let member int = support.ms().syms[meta.sym].offset
+    if (member < 0 || member >= support.ms().sym_n
+        || (support.ms().syms[member].flags & gen.F_ENUM_MEMBER) == 0
+        || support.ms().syms[member].const_ready == 0) {
         return gen.sem_err("枚举 values 成员索引无效")
     }
     // LL12：标签只登记，名称数据由快照生成。
     let lbl int = support.data_label_advance()
-    if (gen.data_str_add_pool(lbl, gen.task().c_syms[member].name_off,
-        gen.task().c_syms[member].name_len) != 0) { return -1 }
+    if (gen.data_str_add_pool(lbl, support.ms().syms[member].name_off,
+        support.ms().syms[member].name_len) != 0) { return -1 }
     sem_res_reset(meta, gen.ty_ptr(gen.TY_CHAR))
     meta.is_const = 1
     meta.ival = lbl.to_type(i64)
@@ -340,22 +340,22 @@ pub fn sem_enum_meta_name(meta *gen.Res) int {
 // 字段名静态 C 字符串。绑定槽位约定见 model.yh 的 gen.F_FIELD_META：
 // cval 存宿主结构体/联合体类型 id，offset 存字段下标。
 pub fn sem_field_meta_name(meta *gen.Res) int {
-    if (meta.sym < 0 || meta.sym >= gen.task().c_sym_n
-        || (gen.task().c_syms[meta.sym].flags & gen.F_FIELD_META) == 0) {
+    if (meta.sym < 0 || meta.sym >= support.ms().sym_n
+        || (support.ms().syms[meta.sym].flags & gen.F_FIELD_META) == 0) {
         return gen.sem_err("字段元信息绑定无效")
     }
     if (gen.task().c_lvalue != 0) {
         return gen.sem_err("字段元信息只读")
     }
-    let owner int = gen.task().c_syms[meta.sym].cval.to_type(int)
-    let index int = gen.task().c_syms[meta.sym].offset
-    if (owner < 0 || owner >= gen.task().t_type_n
-        || (gen.task().t_types[owner].kind != gen.TY_STRUCT
-            && gen.task().t_types[owner].kind != gen.TY_UNION)
-        || index < 0 || index >= gen.task().t_types[owner].len) {
+    let owner int = support.ms().syms[meta.sym].cval.to_type(int)
+    let index int = support.ms().syms[meta.sym].offset
+    if (owner < 0 || owner >= support.ms().type_n
+        || (support.ms().types[owner].kind != gen.TY_STRUCT
+            && support.ms().types[owner].kind != gen.TY_UNION)
+        || index < 0 || index >= support.ms().types[owner].len) {
         return gen.sem_err("字段元信息索引无效")
     }
-    let field gen.SField = gen.task().t_fields[gen.task().t_types[owner].sub + index]
+    let field gen.SField = support.ms().fields[support.ms().types[owner].sub + index]
     // LL12：标签只登记，名称数据由快照生成。
     let lbl int = support.data_label_advance()
     if (gen.data_str_add_pool(lbl, field.name_off, field.name_len) != 0) { return -1 }

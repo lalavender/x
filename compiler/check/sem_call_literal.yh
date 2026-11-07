@@ -18,12 +18,12 @@ pub fn sem_call_begin(callee *gen.Res) int {
     gen.task().c_call_base[gen.task().c_call_depth] = gen.task().c_arg_n
     gen.task().c_call_direct[gen.task().c_call_depth] = 0
     gen.task().c_call_abi[gen.task().c_call_depth] = support.ABI_YH
-    if (gen.task().t_types[callee.type_id].kind == gen.TY_FN) {
-        gen.task().c_call_abi[gen.task().c_call_depth] = gen.task().t_sig_abi[gen.task().t_types[callee.type_id].sub]
+    if (support.ms().types[callee.type_id].kind == gen.TY_FN) {
+        gen.task().c_call_abi[gen.task().c_call_depth] = support.ms().sig_abi[support.ms().types[callee.type_id].sub]
     }
     gen.task().c_call_depth += 1
     if (callee.sym >= 0) {
-        if (gen.task().c_syms[callee.sym].kind == gen.SYM_FN) {
+        if (support.ms().syms[callee.sym].kind == gen.SYM_FN) {
             gen.task().c_call_direct[gen.task().c_call_depth - 1] = 1
             return 1
         }
@@ -49,19 +49,19 @@ pub fn sem_push_arg(r *gen.Res, callee *gen.Res) int {
     if (gen.task().c_fold != 0) {
         return 0
     }
-    let kind int = gen.task().t_types[r.type_id].kind
+    let kind int = support.ms().types[r.type_id].kind
     let copy int = 0
     if (gen.task().c_call_depth > 0) {
         let depth int = gen.task().c_call_depth - 1
         if (gen.task().c_call_abi[depth] == support.ABI_C && (kind == gen.TY_STRUCT || kind == gen.TY_UNION)) {
             copy = 1
         }
-        if (gen.task().t_types[callee.type_id].kind == gen.TY_FN) {
-            let sig int = gen.task().t_types[callee.type_id].sub
+        if (support.ms().types[callee.type_id].kind == gen.TY_FN) {
+            let sig int = support.ms().types[callee.type_id].sub
             let position int = gen.task().c_arg_n - gen.task().c_call_base[depth] - 1
-            if (position < gen.task().t_sig_np[sig]) {
-                let want int = gen.task().t_sig_params[gen.task().t_sig_first[sig] + position]
-                if (gen.task().t_types[want].kind == kind
+            if (position < support.ms().sig_np[sig]) {
+                let want int = support.ms().sig_params[support.ms().sig_first[sig] + position]
+                if (support.ms().types[want].kind == kind
                     && (kind == gen.TY_ARRAY || kind == gen.TY_SLICE || kind == gen.TY_STRUCT || kind == gen.TY_UNION)) {
                     copy = 1
                 }
@@ -78,20 +78,20 @@ pub fn sem_call(callee *gen.Res, r *gen.Res) int {
         sem_res_reset(r, 0)
         return 0
     }
-    if (gen.task().t_types[callee.type_id].kind != gen.TY_FN) {
+    if (support.ms().types[callee.type_id].kind != gen.TY_FN) {
         return gen.sem_err("被调用的表达式不是函数")
     }
     gen.task().c_call_depth -= 1
     let base int = gen.task().c_call_base[gen.task().c_call_depth]
     let direct int = gen.task().c_call_direct[gen.task().c_call_depth]
-    let sig int = gen.task().t_types[callee.type_id].sub
-    let np int = gen.task().t_sig_np[sig]
-    let vararg int = gen.task().t_sig_vararg[sig]
-    let ret int = gen.task().t_sig_ret[sig]
+    let sig int = support.ms().types[callee.type_id].sub
+    let np int = support.ms().sig_np[sig]
+    let vararg int = support.ms().sig_vararg[sig]
+    let ret int = support.ms().sig_ret[sig]
     let na int = gen.task().c_arg_n - base
     let noreturn int = 0
     if (direct != 0 && callee.sym >= 0
-        && (gen.task().c_syms[callee.sym].flags & gen.F_NORETURN) != 0) {
+        && (support.ms().syms[callee.sym].flags & gen.F_NORETURN) != 0) {
         noreturn = 1
     }
     // vararg==2：类型化变参（末尾打包为切片）；==1：裸 C 变参（仅 prelude）
@@ -103,37 +103,37 @@ pub fn sem_call(callee *gen.Res, r *gen.Res) int {
         return gen.sem_err("实参个数与函数签名不符")
     }
     // 实参类型检查
-    let first int = gen.task().t_sig_first[sig]
+    let first int = support.ms().sig_first[sig]
     let i int = 0
     for i < na {
         let want int = 0
         if (i < np) {
-            want = gen.task().t_sig_params[first + i]
+            want = support.ms().sig_params[first + i]
         } else {
             want = -1
         }
         if (want >= 0) {
             // C ABI 回调的函数类型必须保存 C 调用约定；直接函数、变量、
             // 返回值和字段均按完整签名检查，普通 yh 函数不能穿过边界。
-            if (gen.task().t_types[want].kind == gen.TY_FN && gen.task().t_sig_abi[sig] == support.ABI_C) {
+            if (support.ms().types[want].kind == gen.TY_FN && support.ms().sig_abi[sig] == support.ABI_C) {
                 let arg_tid int = gen.task().c_args[base + i].type_id
-                if (gen.task().t_types[arg_tid].kind != gen.TY_FN
-                    || gen.task().t_sig_abi[gen.task().t_types[arg_tid].sub] != support.ABI_C) {
+                if (support.ms().types[arg_tid].kind != gen.TY_FN
+                    || support.ms().sig_abi[support.ms().types[arg_tid].sub] != support.ABI_C) {
                     return gen.sem_err("C ABI 回调实参必须是 extern 函数")
                 }
             }
             // 数组实参按指针形参退化
             let wat int = gen.task().c_args[base + i].type_id
-            if (gen.task().t_types[wat].kind == gen.TY_ARRAY && gen.task().t_types[want].kind == gen.TY_PTR) {
-                if (gen.task().t_types[wat].elem != gen.task().t_types[want].elem && gen.task().t_types[want].elem != gen.TY_VOID) {
+            if (support.ms().types[wat].kind == gen.TY_ARRAY && support.ms().types[want].kind == gen.TY_PTR) {
+                if (support.ms().types[wat].elem != support.ms().types[want].elem && support.ms().types[want].elem != gen.TY_VOID) {
                     return gen.sem_err("数组元素类型与指针形参不匹配")
                 }
                 i += 1
                 continue
             }
             // 切片实参按切片形参（同元素类型；长度不参与相容判断）
-            if (gen.task().t_types[wat].kind == gen.TY_SLICE && gen.task().t_types[want].kind == gen.TY_SLICE) {
-                if (gen.task().t_types[wat].elem != gen.task().t_types[want].elem && gen.task().t_types[want].elem != gen.TY_VOID) {
+            if (support.ms().types[wat].kind == gen.TY_SLICE && support.ms().types[want].kind == gen.TY_SLICE) {
+                if (support.ms().types[wat].elem != support.ms().types[want].elem && support.ms().types[want].elem != gen.TY_VOID) {
                     return gen.sem_err("切片元素类型不匹配")
                 }
                 i += 1
@@ -144,14 +144,14 @@ pub fn sem_call(callee *gen.Res, r *gen.Res) int {
             }
         } else if (vararg == 2) {
             // 类型化变参：尾部实参类型须与元素类型相容
-            let velem_t int = gen.task().t_types[gen.task().t_sig_params[first + np]].elem
+            let velem_t int = support.ms().types[support.ms().sig_params[first + np]].elem
             if (gen.sem_can_assign(velem_t, gen.task().c_args[base + i].type_id, gen.task().c_args[base + i].is_lit, gen.task().c_args[base + i].ival, gen.task().c_args[base + i].lit_big) != 0) {
                 return -1
             }
         } else {
             // 裸变参位置：整数/指针按 C 提升进寄存器
             let at2 int = gen.task().c_args[base + i].type_id
-            let k2 int = gen.task().t_types[at2].kind
+            let k2 int = support.ms().types[at2].kind
             if (gen.ty_is_float(at2) != 0) {
                 return gen.sem_err("裸变参的浮点实参将在 B7 支持")
             }
@@ -164,11 +164,11 @@ pub fn sem_call(callee *gen.Res, r *gen.Res) int {
     if (gen.task().c_fold != 0) {
         return gen.sem_err("函数调用不是编译期常量")
     }
-    if (gen.task().t_sig_abi[sig] == support.ABI_C) {
+    if (support.ms().sig_abi[sig] == support.ABI_C) {
         // LL12：C ABI 的寄存器/栈搬运由 lowering 处理，语义层只记录结果形态。
-        let ret_c int = gen.task().t_sig_ret[sig]
-        let ret_agg_c int = (gen.task().t_types[ret_c].kind == gen.TY_STRUCT
-            || gen.task().t_types[ret_c].kind == gen.TY_UNION).to_type(int)
+        let ret_c int = support.ms().sig_ret[sig]
+        let ret_agg_c int = (support.ms().types[ret_c].kind == gen.TY_STRUCT
+            || support.ms().types[ret_c].kind == gen.TY_UNION).to_type(int)
         gen.task().c_arg_n = base
         sem_res_reset(r, ret_c)
         gen.task().c_res_is_addr = ret_agg_c
@@ -179,7 +179,7 @@ pub fn sem_call(callee *gen.Res, r *gen.Res) int {
     // 类型化变参：尾部实参打包为切片参数（数据由 lowering 生成）。
     let na2 int = na
     if (vararg == 2) {
-        let vslice int = gen.task().t_sig_params[first + np]
+        let vslice int = support.ms().sig_params[first + np]
         // 尾部已变成切片参数，后续分类不能沿用第一个浮点变参的类型。
         gen.task().c_args[base + np].type_id = vslice
         na2 = np + 1
@@ -196,7 +196,7 @@ pub fn sem_call(callee *gen.Res, r *gen.Res) int {
     if (nfp > support.TG_ARG_REGS) {
         return gen.sem_err("过多的浮点参数暂不支持")
     }
-    let retk int = gen.task().t_types[ret].kind
+    let retk int = support.ms().types[ret].kind
     if (noreturn != 0) { gen.task().c_expr_noreturn = 1 }
     gen.task().c_arg_n = base
     sem_res_reset(r, ret)
@@ -245,9 +245,9 @@ pub fn sem_struct_lit_field(tid int, fidx int) int {
     if (support.session().compile == 0 || gen.task().c_fold != 0) {
         return 0
     }
-    let ftid int = gen.task().t_fields[fidx].type_id
-    let foff int = gen.task().t_fields[fidx].offset
-    let fk int = gen.task().t_types[ftid].kind
+    let ftid int = support.ms().fields[fidx].type_id
+    let foff int = support.ms().fields[fidx].offset
+    let fk int = support.ms().types[ftid].kind
     if (gen.sem_can_assign(ftid, gen.task().c_lit_last_type, gen.task().c_lit_last_lit, gen.task().c_lit_last_ival, 0) != 0) {
         return -1
     }

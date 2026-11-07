@@ -41,7 +41,7 @@ pub fn sem_forin_begin(it *gen.Res, is_range int, end_res *gen.Res) int {
     }
     // 数组/切片
     gen.task().c_fi_kind[d] = 0
-    let k int = gen.task().t_types[it.type_id].kind
+    let k int = support.ms().types[it.type_id].kind
     if (k == gen.TY_ARRAY) {
         // 先取地址再装 len：深帧 lea 的 movz x9 不能落在 len 已入 x9 之后
     } else if (k == gen.TY_SLICE) {
@@ -57,7 +57,7 @@ pub fn sem_forin_elem_type(it *gen.Res, is_range int) int {
         // 区间迭代绑定是默认整数类型 int（与 stage0 一致，便于 int 变量累加）
         return gen.TY_I32
     }
-    return gen.task().t_types[it.type_id].elem
+    return support.ms().types[it.type_id].elem
 }
 
 pub fn sem_forin_set_bind(elem_off int, idx_off int) int {
@@ -95,18 +95,18 @@ pub fn sem_forin_load(it *gen.Res, is_range int) int {
         return 0
     }
     // 数组/切片：值 = data[count]
-    let elem int = gen.task().t_types[it.type_id].elem
+    let elem int = support.ms().types[it.type_id].elem
     if (gen.task().c_fi_idx_off[d] >= 0) {
     }
     // 缩放下标 → data + i*size
-    let esz int = gen.task().t_types[elem].size
+    let esz int = support.ms().types[elem].size
     if (esz == 2) {
     } else if (esz == 4) {
     } else if (esz == 8) {
     } else if (esz != 1) {
     }
     if (gen.task().c_fi_elem_off[d] >= 0) {
-        let ek int = gen.task().t_types[elem].kind
+        let ek int = support.ms().types[elem].kind
         if (ek == gen.TY_STRUCT || ek == gen.TY_UNION || ek == gen.TY_ARRAY || ek == gen.TY_SLICE) {
             // 聚合元素：块拷贝进绑定槽。x0 = 元素地址（add 的结果），
             // 先取绑定槽地址（x10）再拷贝——深帧 lea 的 movz x9 不碰
@@ -157,14 +157,14 @@ pub fn sem_assign(op int, lres *gen.Res, rres *gen.Res) int {
         // 浮点赋值：值在 d0/s0
         if (op == token.TK_ASSIGN) {
             let fs *char = "d"
-            if (gen.task().t_types[lres.type_id].size == 4) { fs = "s" }
+            if (support.ms().types[lres.type_id].size == 4) { fs = "s" }
             return 0
         }
         // 复合赋值：右值（d0）存入专用临时槽；目标地址进出 x10 各两次
         //（每次 em_lea_local_to 都会覆盖 x10，目标地址先压栈保护、用后
         // 弹回；压/弹必须成对，此前弹空栈导致 d1 从垃圾地址装入）。
         let fs2 *char = "d"
-        if (gen.task().t_types[lres.type_id].size == 4) { fs2 = "s" }
+        if (support.ms().types[lres.type_id].size == 4) { fs2 = "s" }
         if (gen.task().c_fp_tmp_off == 0) {
             gen.task().c_fp_tmp_off = 0
         }
@@ -180,7 +180,7 @@ pub fn sem_assign(op int, lres *gen.Res, rres *gen.Res) int {
         // 聚合同型赋值 = 逐字节块拷贝（语义边界 §：数组同型赋值为值
         // 复制）。聚合的值语义即对象地址：x0 是源对象地址，x10 是目标
         // 地址；此前误走标量 store 只写前 8 字节。
-        let lk int = gen.task().t_types[lres.type_id].kind
+        let lk int = support.ms().types[lres.type_id].kind
         if (lk == gen.TY_STRUCT || lk == gen.TY_UNION || lk == gen.TY_ARRAY || lk == gen.TY_SLICE) {
             return 0
         }
@@ -206,13 +206,13 @@ pub fn sem_declare_local(start int, n int, tid int) int {
     if (gen.ty_has_opaque_value(tid) != 0) {
         return gen.sem_err("不透明 C 类型只能通过指针声明局部变量")
     }
-    let size int = gen.task().t_types[tid].size
+    let size int = support.ms().types[tid].size
     let idx int = gen.sym_push(start, n, gen.SYM_VAR, tid, 0)
     if (idx < 0) {
         return -1
     }
     let off int = 0
-    gen.task().c_syms[idx].offset = off
+    support.ms().syms[idx].offset = off
     // 零初始化（标量直接清零；聚合逐字节循环）
     if (size == 0) {
         return idx
@@ -235,19 +235,19 @@ pub fn sem_store_local_value(idx int, tid int) int {
     if (support.session().compile == 0) {
         return 0
     }
-    let k int = gen.task().t_types[tid].kind
+    let k int = support.ms().types[tid].kind
     if (k == gen.TY_STRUCT || k == gen.TY_UNION || k == gen.TY_ARRAY || k == gen.TY_SLICE) {
         // 聚合初始化：x0 = 源聚合地址 → 块拷贝进局部槽
-        let off int = gen.task().c_syms[idx].offset
+        let off int = support.ms().syms[idx].offset
         return 0
     }
     if (gen.ty_is_float(tid) != 0) {
         return 0
     }
-    let soff int = gen.task().c_syms[idx].offset
+    let soff int = support.ms().syms[idx].offset
     if (soff <= 255) {
         // 按大小选寄存器与助记符
-        let size int = gen.task().t_types[tid].size
+        let size int = support.ms().types[tid].size
         if (size == 8) {
         } else if (size == 4) {
         } else if (size == 2) {
@@ -260,13 +260,13 @@ pub fn sem_store_local_value(idx int, tid int) int {
 }
 
 pub fn sem_check_duplicate(start int, n int) int {
-    let i int = gen.task().c_sym_n - 1
-    for i >= gen.task().c_scope_start[gen.task().c_scope_n - 1] {
-        if (gen.task().c_syms[i].name_len == n) {
+    let i int = support.ms().sym_n - 1
+    for i >= support.ms().scope_start[support.ms().scope_n - 1] {
+        if (support.ms().syms[i].name_len == n) {
             let match int = 1
             let j int = 0
             for j < n {
-                if (support.pool_ctx().data[gen.task().c_syms[i].name_off + j] != support.src_ctx().data[start + j]) {
+                if (support.pool_ctx().data[support.ms().syms[i].name_off + j] != support.src_ctx().data[start + j]) {
                     match = 0
                     break
                 }

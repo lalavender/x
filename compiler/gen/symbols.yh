@@ -50,51 +50,9 @@ fn intvec_grow(vec **int, n int, cap *int) int {
 }
 
 // ty_push：向类型表追加条目，返回新类型编号。
-// g_state.task.t_home 平行数组同步增长（类型归属：-1 本地 / >=0 模块编号）。
+// support.ms().home 平行数组同步增长（类型归属：-1 本地 / >=0 模块编号）。
 pub fn ty_push(kind int, size int, align int, elem int, n int, sub int) int {
-    if (g_state.task.t_type_n == g_state.task.t_type_cap) {
-        let ncap int = g_state.task.t_type_cap * 2
-        if (ncap == 0) {
-            ncap = 64
-        }
-        let nd *CType = malloc((ncap * sizeof(CType)).to_type(u64)).to_type(*CType)
-        if (nd == 0) {
-            support.fail("内存分配失败")
-            return -1
-        }
-        if (g_state.task.t_type_n > 0) {
-            memcpy(nd, g_state.task.t_types, (g_state.task.t_type_n * sizeof(CType)).to_type(u64))
-        }
-        free(g_state.task.t_types)
-        g_state.task.t_types = nd
-        let nh *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
-        if (nh == 0) {
-            return support.fail("内存分配失败")
-        }
-        if (g_state.task.t_home_cap > 0) {
-            memcpy(nh, g_state.task.t_home, (g_state.task.t_home_cap * sizeof(int)).to_type(u64))
-        }
-        if (g_state.task.t_home_cap > 0) {
-            free(g_state.task.t_home)
-        }
-        g_state.task.t_home = nh
-        // 新扩容区间填 -1（本地）
-        let hi int = g_state.task.t_home_cap
-        for hi < ncap {
-            g_state.task.t_home[hi] = -1
-            hi += 1
-        }
-        g_state.task.t_home_cap = ncap
-        g_state.task.t_type_cap = ncap
-    }
-    g_state.task.t_types[g_state.task.t_type_n].kind = kind
-    g_state.task.t_types[g_state.task.t_type_n].size = size
-    g_state.task.t_types[g_state.task.t_type_n].align = align
-    g_state.task.t_types[g_state.task.t_type_n].elem = elem
-    g_state.task.t_types[g_state.task.t_type_n].len = n
-    g_state.task.t_types[g_state.task.t_type_n].sub = sub
-    g_state.task.t_type_n += 1
-    return g_state.task.t_type_n - 1
+    return support.model_type_push(kind, size, align, elem, n, sub)
 }
 
 // ty_register_builtins：登记 0..12 号内建类型（固定编号，勿改顺序）。
@@ -119,18 +77,14 @@ pub fn ty_register_builtins() int {
 // 与方案 §4 一致：保留 512 的聚合类型登记上限，超限必须干净报错，
 // 不能越界（对应 tests/yh-run/fail/12-wraps-too-many.yh）。
 pub fn ty_push_agg(kind int, size int, align int, elem int, n int, sub int) int {
-    if (g_state.task.c_aggtype_n >= 512) {
-        return sem_err("聚合类型登记过多（上限 512）")
-    }
-    g_state.task.c_aggtype_n += 1
-    return ty_push(kind, size, align, elem, n, sub)
+    return support.model_type_push_agg(kind, size, align, elem, n, sub)
 }
 
 // ty_ptr：指向 elem 的指针类型（按内容去重）。
 pub fn ty_ptr(elem int) int {
     let i int = 0
-    for i < g_state.task.t_type_n {
-        if (g_state.task.t_types[i].kind == TY_PTR && g_state.task.t_types[i].elem == elem) {
+    for i < support.ms().type_n {
+        if (support.ms().types[i].kind == TY_PTR && support.ms().types[i].elem == elem) {
             return i
         }
         i += 1
@@ -141,14 +95,14 @@ pub fn ty_ptr(elem int) int {
 // ty_array：[len] elem 定长数组类型（按内容去重）。
 pub fn ty_array(elem int, alen int) int {
     let i int = 0
-    for i < g_state.task.t_type_n {
-        if (g_state.task.t_types[i].kind == TY_ARRAY && g_state.task.t_types[i].elem == elem && g_state.task.t_types[i].len == alen) {
+    for i < support.ms().type_n {
+        if (support.ms().types[i].kind == TY_ARRAY && support.ms().types[i].elem == elem && support.ms().types[i].len == alen) {
             return i
         }
         i += 1
     }
-    let esz int = g_state.task.t_types[elem].size
-    let eal int = g_state.task.t_types[elem].align
+    let esz int = support.ms().types[elem].size
+    let eal int = support.ms().types[elem].align
     if (eal < 1) {
         eal = 1
     }
@@ -165,8 +119,8 @@ pub fn ty_array(elem int, alen int) int {
 // 去重按元素类型；元素类型参与同型判断（ADR-0001/0002）。
 pub fn ty_slice(elem int) int {
     let i int = 0
-    for i < g_state.task.t_type_n {
-        if (g_state.task.t_types[i].kind == TY_SLICE && g_state.task.t_types[i].elem == elem) {
+    for i < support.ms().type_n {
+        if (support.ms().types[i].kind == TY_SLICE && support.ms().types[i].elem == elem) {
             return i
         }
         i += 1
@@ -175,28 +129,28 @@ pub fn ty_slice(elem int) int {
 }
 
 // ty_sig_add：追加签名（返回/参数数/变参标志），返回签名号。
-// g_state.task.t_sig_first 由调用方在登记参数后填池内起始下标。
+// support.ms().sig_first 由调用方在登记参数后填池内起始下标。
 fn ty_sig_add(ret int, np int, vararg int) int {
-    if (intvec_grow(&g_state.task.t_sig_ret, g_state.task.t_sig_n, &g_state.task.t_sig_rcap) != 0) { return -1 }
-    if (intvec_grow(&g_state.task.t_sig_np, g_state.task.t_sig_n, &g_state.task.t_sig_ncap) != 0) { return -1 }
-    if (intvec_grow(&g_state.task.t_sig_vararg, g_state.task.t_sig_n, &g_state.task.t_sig_vcap) != 0) { return -1 }
-    if (intvec_grow(&g_state.task.t_sig_first, g_state.task.t_sig_n, &g_state.task.t_sig_fcap) != 0) { return -1 }
-    if (intvec_grow(&g_state.task.t_sig_abi, g_state.task.t_sig_n, &g_state.task.t_sig_acap) != 0) { return -1 }
-    g_state.task.t_sig_abi[g_state.task.t_sig_n] = ABI_YH
-    g_state.task.t_sig_ret[g_state.task.t_sig_n] = ret
-    g_state.task.t_sig_np[g_state.task.t_sig_n] = np
-    g_state.task.t_sig_vararg[g_state.task.t_sig_n] = vararg
-    g_state.task.t_sig_n += 1
-    return g_state.task.t_sig_n - 1
+    if (intvec_grow(&support.ms().sig_ret, support.ms().sig_n, &support.ms().sig_rcap) != 0) { return -1 }
+    if (intvec_grow(&support.ms().sig_np, support.ms().sig_n, &support.ms().sig_ncap) != 0) { return -1 }
+    if (intvec_grow(&support.ms().sig_vararg, support.ms().sig_n, &support.ms().sig_vcap) != 0) { return -1 }
+    if (intvec_grow(&support.ms().sig_first, support.ms().sig_n, &support.ms().sig_fcap) != 0) { return -1 }
+    if (intvec_grow(&support.ms().sig_abi, support.ms().sig_n, &support.ms().sig_acap) != 0) { return -1 }
+    support.ms().sig_abi[support.ms().sig_n] = ABI_YH
+    support.ms().sig_ret[support.ms().sig_n] = ret
+    support.ms().sig_np[support.ms().sig_n] = np
+    support.ms().sig_vararg[support.ms().sig_n] = vararg
+    support.ms().sig_n += 1
+    return support.ms().sig_n - 1
 }
 
 // ty_sig_param：向参数类型池追加一个参数类型。
 pub fn ty_sig_param(tid int) int {
-    if (intvec_grow(&g_state.task.t_sig_params, g_state.task.t_sigparam_n, &g_state.task.t_sigparam_cap) != 0) {
+    if (intvec_grow(&support.ms().sig_params, support.ms().sigparam_n, &support.ms().sigparam_cap) != 0) {
         return -1
     }
-    g_state.task.t_sig_params[g_state.task.t_sigparam_n] = tid
-    g_state.task.t_sigparam_n += 1
+    support.ms().sig_params[support.ms().sigparam_n] = tid
+    support.ms().sigparam_n += 1
     return 0
 }
 
@@ -204,14 +158,14 @@ pub fn ty_sig_param(tid int) int {
 // ty_fn_abi：按调用约定、返回与完整参数签名去重，禁止 C/yh 函数值混用。
 pub fn ty_fn_abi(ret int, first int, np int, vararg int, abi int) int {
     let i int = 0
-    for i < g_state.task.t_type_n {
-        if (g_state.task.t_types[i].kind == TY_FN) {
-            let s int = g_state.task.t_types[i].sub
-            if (g_state.task.t_sig_abi[s] == abi && g_state.task.t_sig_ret[s] == ret && g_state.task.t_sig_np[s] == np && g_state.task.t_sig_vararg[s] == vararg) {
+    for i < support.ms().type_n {
+        if (support.ms().types[i].kind == TY_FN) {
+            let s int = support.ms().types[i].sub
+            if (support.ms().sig_abi[s] == abi && support.ms().sig_ret[s] == ret && support.ms().sig_np[s] == np && support.ms().sig_vararg[s] == vararg) {
                 let match int = 1
                 let j int = 0
                 for j < np {
-                    if (g_state.task.t_sig_params[g_state.task.t_sig_first[s] + j] != g_state.task.t_sig_params[first + j]) {
+                    if (support.ms().sig_params[support.ms().sig_first[s] + j] != support.ms().sig_params[first + j]) {
                         match = 0
                         break
                     }
@@ -226,8 +180,8 @@ pub fn ty_fn_abi(ret int, first int, np int, vararg int, abi int) int {
     }
     let ns int = ty_sig_add(ret, np, vararg)
     if (ns < 0) { return -1 }
-    g_state.task.t_sig_abi[ns] = abi
-    g_state.task.t_sig_first[ns] = first
+    support.ms().sig_abi[ns] = abi
+    support.ms().sig_first[ns] = first
     return ty_push(TY_FN, TG_PTR_SIZE, TG_PTR_SIZE, ret, np, ns)
 }
 
@@ -238,7 +192,7 @@ pub fn ty_fn(ret int, first int, np int, vararg int) int {
 
 // ty_is_integer：整数类（含 bool/char/enum）。
 pub fn ty_is_integer(tid int) int {
-    let k int = g_state.task.t_types[tid].kind
+    let k int = support.ms().types[tid].kind
     if (k >= TY_BOOL && k <= TY_U64) {
         return 1
     }
@@ -247,19 +201,19 @@ pub fn ty_is_integer(tid int) int {
 
 // ty_is_signed：有符号整数类。
 pub fn ty_is_signed(tid int) int {
-    let k int = g_state.task.t_types[tid].kind
+    let k int = support.ms().types[tid].kind
     return ((k >= TY_CHAR && k <= TY_I64) || k == TY_ENUM).to_type(int)
 }
 
 // ty_is_float：浮点类。
 pub fn ty_is_float(tid int) int {
-    let k int = g_state.task.t_types[tid].kind
+    let k int = support.ms().types[tid].kind
     return ((k == TY_F32) || (k == TY_F64)).to_type(int)
 }
 
 // ty_is_scalar：可放进寄存器的标量（整数/浮点/指针/fn）。
 pub fn ty_is_scalar(tid int) int {
-    let k int = g_state.task.t_types[tid].kind
+    let k int = support.ms().types[tid].kind
     if (k == TY_PTR || k == TY_FN) {
         return 1
     }
@@ -275,20 +229,20 @@ pub fn ty_is_scalar(tid int) int {
 
 // ty_lookup_name：按名字查类型。找不到返回 -1。
 pub fn ty_lookup_name(start int, n int) int {
-    let i int = g_state.task.t_name_n - 1
+    let i int = support.ms().name_n - 1
     for i >= 0 {
-        if (g_state.task.t_names[i].name_len == n) {
+        if (support.ms().names[i].name_len == n) {
             let match int = 1
             let j int = 0
             for j < n {
-                if (support.pool_ctx().data[g_state.task.t_names[i].name_off + j] != support.src_ctx().data[start + j]) {
+                if (support.pool_ctx().data[support.ms().names[i].name_off + j] != support.src_ctx().data[start + j]) {
                     match = 0
                     break
                 }
                 j += 1
             }
             if (match != 0) {
-                return g_state.task.t_names[i].type_id
+                return support.ms().names[i].type_id
             }
         }
         i -= 1
@@ -297,19 +251,19 @@ pub fn ty_lookup_name(start int, n int) int {
 }
 
 // ty_declare_name：登记类型名字（重复定义报错，含首次声明位置）。
-// is_pub/form 取自调用方设置的全局（g_state.task.c_decl_pub / g_state.task.c_name_form）。
+// is_pub/form 取自调用方设置的全局（g_state.task.c_decl_pub / support.ms().name_form）。
 pub fn ty_declare_name(off int, n int, tid int) int {
     let prev int = ty_lookup_name_off(off, n)
     if (prev >= 0) {
         // 找到先前登记项的位置一并报告
-        let pi int = g_state.task.t_name_n - 1
+        let pi int = support.ms().name_n - 1
         for pi >= 0 {
-            if (g_state.task.t_names[pi].name_len == n
-                && support.pool_ctx().data[g_state.task.t_names[pi].name_off] == support.pool_ctx().data[off]) {
+            if (support.ms().names[pi].name_len == n
+                && support.pool_ctx().data[support.ms().names[pi].name_off] == support.pool_ctx().data[off]) {
                 let match int = 1
                 let j int = 1
                 for j < n {
-                    if (support.pool_ctx().data[g_state.task.t_names[pi].name_off + j] != support.pool_ctx().data[off + j]) {
+                    if (support.pool_ctx().data[support.ms().names[pi].name_off + j] != support.pool_ctx().data[off + j]) {
                         match = 0
                         break
                     }
@@ -325,9 +279,9 @@ pub fn ty_declare_name(off int, n int, tid int) int {
             let buf [128]u8
             let bn int = 0
             bn = support.append_str(buf, bn, "类型重定义（首次声明于 ")
-            bn = support.append_int(buf, bn, g_state.task.t_names[pi].def_line)
+            bn = support.append_int(buf, bn, support.ms().names[pi].def_line)
             bn = support.append_byte(buf, bn, ':')
-            bn = support.append_int(buf, bn, g_state.task.t_names[pi].def_col)
+            bn = support.append_int(buf, bn, support.ms().names[pi].def_col)
             bn = support.append_str(buf, bn, "）")
             let mo int = support.tml_intern_str(buf, 0, bn)
             if (mo < 0) {
@@ -337,8 +291,8 @@ pub fn ty_declare_name(off int, n int, tid int) int {
         }
         return token.err_tok("类型重定义")
     }
-    if (g_state.task.t_name_n == g_state.task.t_name_cap) {
-        let ncap int = g_state.task.t_name_cap * 2
+    if (support.ms().name_n == support.ms().name_cap) {
+        let ncap int = support.ms().name_cap * 2
         if (ncap == 0) {
             ncap = 64
         }
@@ -346,22 +300,22 @@ pub fn ty_declare_name(off int, n int, tid int) int {
         if (nd == 0) {
             return support.fail("内存分配失败")
         }
-        if (g_state.task.t_name_n > 0) {
-            memcpy(nd, g_state.task.t_names, (g_state.task.t_name_n * sizeof(TName)).to_type(u64))
+        if (support.ms().name_n > 0) {
+            memcpy(nd, support.ms().names, (support.ms().name_n * sizeof(TName)).to_type(u64))
         }
-        free(g_state.task.t_names)
-        g_state.task.t_names = nd
-        g_state.task.t_name_cap = ncap
+        free(support.ms().names)
+        support.ms().names = nd
+        support.ms().name_cap = ncap
     }
-    g_state.task.t_names[g_state.task.t_name_n].name_off = off
-    g_state.task.t_names[g_state.task.t_name_n].name_len = n
-    g_state.task.t_names[g_state.task.t_name_n].type_id = tid
-    g_state.task.t_names[g_state.task.t_name_n].is_pub = g_state.task.c_decl_pub
-    g_state.task.t_names[g_state.task.t_name_n].form = g_state.task.c_name_form
-    g_state.task.t_names[g_state.task.t_name_n].attrs = g_state.task.c_decl_attrs
-    g_state.task.t_names[g_state.task.t_name_n].def_line = token.ctx().tokens[token.ctx().pos].line
-    g_state.task.t_names[g_state.task.t_name_n].def_col = token.ctx().tokens[token.ctx().pos].col
-    g_state.task.t_name_n += 1
+    support.ms().names[support.ms().name_n].name_off = off
+    support.ms().names[support.ms().name_n].name_len = n
+    support.ms().names[support.ms().name_n].type_id = tid
+    support.ms().names[support.ms().name_n].is_pub = g_state.task.c_decl_pub
+    support.ms().names[support.ms().name_n].form = support.ms().name_form
+    support.ms().names[support.ms().name_n].attrs = g_state.task.c_decl_attrs
+    support.ms().names[support.ms().name_n].def_line = token.ctx().tokens[token.ctx().pos].line
+    support.ms().names[support.ms().name_n].def_col = token.ctx().tokens[token.ctx().pos].col
+    support.ms().name_n += 1
     return 0
 }
 
@@ -369,9 +323,9 @@ pub fn ty_declare_name(off int, n int, tid int) int {
 pub fn ty_name_attrs(tid int) int {
     let attrs int = 0
     let i int = 0
-    for i < g_state.task.t_name_n {
-        if (g_state.task.t_names[i].type_id == tid) {
-            attrs |= g_state.task.t_names[i].attrs
+    for i < support.ms().name_n {
+        if (support.ms().names[i].type_id == tid) {
+            attrs |= support.ms().names[i].attrs
         }
         i += 1
     }
@@ -382,9 +336,9 @@ pub fn ty_name_attrs(tid int) int {
 pub fn ty_add_name_attrs(tid int, attrs int) int {
     let found int = 0
     let i int = 0
-    for i < g_state.task.t_name_n {
-        if (g_state.task.t_names[i].type_id == tid) {
-            g_state.task.t_names[i].attrs |= attrs
+    for i < support.ms().name_n {
+        if (support.ms().names[i].type_id == tid) {
+            support.ms().names[i].attrs |= attrs
             found = 1
         }
         i += 1
@@ -401,16 +355,16 @@ pub fn ty_is_opaque(tid int) int {
 // ty_has_opaque_value：数组/切片等复合值不得把不透明 C 对象按值存储。
 pub fn ty_has_opaque_value(tid int) int {
     if (ty_is_opaque(tid) != 0) { return 1 }
-    let kind int = g_state.task.t_types[tid].kind
+    let kind int = support.ms().types[tid].kind
     if (kind == TY_ARRAY || kind == TY_SLICE) {
-        return ty_has_opaque_value(g_state.task.t_types[tid].elem)
+        return ty_has_opaque_value(support.ms().types[tid].elem)
     }
     return 0
 }
 
 // ty_cabi_scalar：可在 C ABI 固定参数与返回值中按值传递的标量。
 fn ty_cabi_scalar(tid int) int {
-    let kind int = g_state.task.t_types[tid].kind
+    let kind int = support.ms().types[tid].kind
     if (kind >= TY_BOOL && kind <= TY_F64) { return 1 }
     if (kind == TY_PTR) { return 1 }
     if (kind == TY_ENUM && (ty_name_attrs(tid) & ATTR_EXTERN) != 0) { return 1 }
@@ -421,16 +375,16 @@ fn ty_cabi_scalar(tid int) int {
 // 顶层数组不按值传递；切片和不透明值始终拒绝，数组仅可作为聚合字段。
 pub fn ty_cabi_param(tid int) int {
     if (ty_cabi_scalar(tid) != 0) { return 1 }
-    let kind int = g_state.task.t_types[tid].kind
+    let kind int = support.ms().types[tid].kind
     if (kind == TY_STRUCT || kind == TY_UNION) { return ty_c_layout(tid) }
     if (kind != TY_FN) { return 0 }
-    let sig int = g_state.task.t_types[tid].sub
-    if (g_state.task.t_sig_abi[sig] != ABI_C || g_state.task.t_sig_vararg[sig] != 0) { return 0 }
-    let ret int = g_state.task.t_sig_ret[sig]
+    let sig int = support.ms().types[tid].sub
+    if (support.ms().sig_abi[sig] != ABI_C || support.ms().sig_vararg[sig] != 0) { return 0 }
+    let ret int = support.ms().sig_ret[sig]
     if (ret != TY_VOID && ty_cabi_param(ret) == 0) { return 0 }
     let i int = 0
-    for i < g_state.task.t_sig_np[sig] {
-        if (ty_cabi_param(g_state.task.t_sig_params[g_state.task.t_sig_first[sig] + i]) == 0) { return 0 }
+    for i < support.ms().sig_np[sig] {
+        if (ty_cabi_param(support.ms().sig_params[support.ms().sig_first[sig] + i]) == 0) { return 0 }
         i += 1
     }
     return 1
@@ -438,11 +392,11 @@ pub fn ty_cabi_param(tid int) int {
 
 // ty_c_layout：判断值布局可否直接嵌入 extern struct/union 的 C 共享布局。
 pub fn ty_c_layout(tid int) int {
-    let kind int = g_state.task.t_types[tid].kind
+    let kind int = support.ms().types[tid].kind
     if (kind >= TY_BOOL && kind <= TY_F64) { return 1 }
     if (kind == TY_PTR) { return 1 }
     if (kind == TY_FN) { return ty_cabi_param(tid) }
-    if (kind == TY_ARRAY) { return ty_c_layout(g_state.task.t_types[tid].elem) }
+    if (kind == TY_ARRAY) { return ty_c_layout(support.ms().types[tid].elem) }
     if (kind == TY_ENUM) {
         return ((ty_name_attrs(tid) & ATTR_EXTERN) != 0).to_type(int)
     }
@@ -454,20 +408,20 @@ pub fn ty_c_layout(tid int) int {
 
 // ty_lookup_name_off：按池偏移查类型名（登记去重用）。
 fn ty_lookup_name_off(off int, n int) int {
-    let i int = g_state.task.t_name_n - 1
+    let i int = support.ms().name_n - 1
     for i >= 0 {
-        if (g_state.task.t_names[i].name_len == n) {
+        if (support.ms().names[i].name_len == n) {
             let match int = 1
             let j int = 0
             for j < n {
-                if (support.pool_ctx().data[g_state.task.t_names[i].name_off + j] != support.pool_ctx().data[off + j]) {
+                if (support.pool_ctx().data[support.ms().names[i].name_off + j] != support.pool_ctx().data[off + j]) {
                     match = 0
                     break
                 }
                 j += 1
             }
             if (match != 0) {
-                return g_state.task.t_names[i].type_id
+                return support.ms().names[i].type_id
             }
         }
         i -= 1
@@ -486,13 +440,13 @@ pub fn sym_push(start int, n int, kind int, tid int, flags int) int {
     if (support.cfg().module_mode != 0 && (flags & F_GLOBAL) != 0 && (flags & F_EXTERN) == 0) {
         // 模块模式：全局（含 enum 成员）重名报错；首次位置一并报告
         let di int = 0
-        for di < g_state.task.c_sym_n {
-            if ((g_state.task.c_syms[di].flags & F_GLOBAL) != 0 && g_state.task.c_syms[di].name_len == n
-                && support.pool_ctx().data[g_state.task.c_syms[di].name_off] == support.pool_ctx().data[off]) {
+        for di < support.ms().sym_n {
+            if ((support.ms().syms[di].flags & F_GLOBAL) != 0 && support.ms().syms[di].name_len == n
+                && support.pool_ctx().data[support.ms().syms[di].name_off] == support.pool_ctx().data[off]) {
                 let match int = 1
                 let j int = 1
                 for j < n {
-                    if (support.pool_ctx().data[g_state.task.c_syms[di].name_off + j] != support.pool_ctx().data[off + j]) {
+                    if (support.pool_ctx().data[support.ms().syms[di].name_off + j] != support.pool_ctx().data[off + j]) {
                         match = 0
                         break
                     }
@@ -503,9 +457,9 @@ pub fn sym_push(start int, n int, kind int, tid int, flags int) int {
                         let buf [128]u8
                         let bn int = 0
                         bn = support.append_str(buf, bn, "重复的顶层声明（首次声明于 ")
-                        bn = support.append_int(buf, bn, g_state.task.c_syms[di].def_line)
+                        bn = support.append_int(buf, bn, support.ms().syms[di].def_line)
                         bn = support.append_byte(buf, bn, ':')
-                        bn = support.append_int(buf, bn, g_state.task.c_syms[di].def_col)
+                        bn = support.append_int(buf, bn, support.ms().syms[di].def_col)
                         bn = support.append_str(buf, bn, "）")
                         let mo int = support.tml_intern_str(buf, 0, bn)
                         if (mo < 0) {
@@ -519,8 +473,8 @@ pub fn sym_push(start int, n int, kind int, tid int, flags int) int {
             di += 1
         }
     }
-    if (g_state.task.c_sym_n == g_state.task.c_sym_cap) {
-        let ncap int = g_state.task.c_sym_cap * 2
+    if (support.ms().sym_n == support.ms().sym_cap) {
+        let ncap int = support.ms().sym_cap * 2
         if (ncap == 0) {
             ncap = 256
         }
@@ -529,40 +483,40 @@ pub fn sym_push(start int, n int, kind int, tid int, flags int) int {
             support.fail("内存分配失败")
             return -1
         }
-        if (g_state.task.c_sym_n > 0) {
-            memcpy(nd, g_state.task.c_syms, (g_state.task.c_sym_n * sizeof(CSym)).to_type(u64))
+        if (support.ms().sym_n > 0) {
+            memcpy(nd, support.ms().syms, (support.ms().sym_n * sizeof(CSym)).to_type(u64))
         }
-        free(g_state.task.c_syms)
-        g_state.task.c_syms = nd
-        g_state.task.c_sym_cap = ncap
+        free(support.ms().syms)
+        support.ms().syms = nd
+        support.ms().sym_cap = ncap
     }
-    g_state.task.c_syms[g_state.task.c_sym_n].name_off = off
-    g_state.task.c_syms[g_state.task.c_sym_n].name_len = n
-    g_state.task.c_syms[g_state.task.c_sym_n].kind = kind
-    g_state.task.c_syms[g_state.task.c_sym_n].type_id = tid
-    g_state.task.c_syms[g_state.task.c_sym_n].offset = 0
-    g_state.task.c_syms[g_state.task.c_sym_n].flags = flags
-    g_state.task.c_syms[g_state.task.c_sym_n].cval = 0
-    g_state.task.c_syms[g_state.task.c_sym_n].const_ready = 0
-    g_state.task.c_syms[g_state.task.c_sym_n].const_expr_off = -1
-    g_state.task.c_syms[g_state.task.c_sym_n].const_expr_len = 0
-    g_state.task.c_syms[g_state.task.c_sym_n].const_expr_kind = 0
-    g_state.task.c_syms[g_state.task.c_sym_n].def_line = token.ctx().tokens[token.ctx().pos].line
-    g_state.task.c_syms[g_state.task.c_sym_n].def_col = token.ctx().tokens[token.ctx().pos].col
-    g_state.task.c_syms[g_state.task.c_sym_n].ast_binding_row = -1
-    g_state.task.c_sym_n += 1
-    return g_state.task.c_sym_n - 1
+    support.ms().syms[support.ms().sym_n].name_off = off
+    support.ms().syms[support.ms().sym_n].name_len = n
+    support.ms().syms[support.ms().sym_n].kind = kind
+    support.ms().syms[support.ms().sym_n].type_id = tid
+    support.ms().syms[support.ms().sym_n].offset = 0
+    support.ms().syms[support.ms().sym_n].flags = flags
+    support.ms().syms[support.ms().sym_n].cval = 0
+    support.ms().syms[support.ms().sym_n].const_ready = 0
+    support.ms().syms[support.ms().sym_n].const_expr_off = -1
+    support.ms().syms[support.ms().sym_n].const_expr_len = 0
+    support.ms().syms[support.ms().sym_n].const_expr_kind = 0
+    support.ms().syms[support.ms().sym_n].def_line = token.ctx().tokens[token.ctx().pos].line
+    support.ms().syms[support.ms().sym_n].def_col = token.ctx().tokens[token.ctx().pos].col
+    support.ms().syms[support.ms().sym_n].ast_binding_row = -1
+    support.ms().sym_n += 1
+    return support.ms().sym_n - 1
 }
 
 // sym_push_lit：以池内已有名字登记符号（prelude 用）。
 fn sym_push_lit(off int, n int, kind int, tid int, flags int) int {
-    let tmp int = g_state.task.c_sym_n
+    let tmp int = support.ms().sym_n
     let idx int = sym_push(0, 0, kind, tid, flags)
     if (idx < 0) {
         return -1
     }
-    g_state.task.c_syms[idx].name_off = off
-    g_state.task.c_syms[idx].name_len = n
+    support.ms().syms[idx].name_off = off
+    support.ms().syms[idx].name_len = n
     return idx
 }
 
@@ -574,28 +528,28 @@ pub fn sym_push_pool(off int, n int, kind int, tid int, flags int) int {
 }
 
 // sym_lookup_off：按名字池偏移查符号（池对池比较，供构建器诊断用）。
-// 只查全局层（g_state.task.c_scope_start[0] 以下）。找不到返回 -1。
+// 只查全局层（support.ms().scope_start[0] 以下）。找不到返回 -1。
 // sym_ct_lit_text：把「字符串指针常量」沿引用链追到最终的字面式初始化文本。引用式
 // （`const A *char = B;`，kind 3）逐跳跟进，直到找到 kind 2 的字面式 —— 消费者看不到提供方的
 // 私有常量名，重放引用本身会在导入侧解析失败。跳数上限 16 兼作环与超深链的兜底
 // （`A -> B -> A` 这类环不会死循环）。成功填 out_off/out_len 返回 0，否则返回 1。
 pub fn sym_ct_lit_text(sym_id int, out_off *int, out_len *int) int {
-    if (sym_id < 0 || sym_id >= g_state.task.c_sym_n) { return 1 }
+    if (sym_id < 0 || sym_id >= support.ms().sym_n) { return 1 }
     let cur int = sym_id
     let hops int = 0
     for hops < 16 {
-        let kind int = g_state.task.c_syms[cur].const_expr_kind
+        let kind int = support.ms().syms[cur].const_expr_kind
         if (kind == 2) {
-            *out_off = g_state.task.c_syms[cur].const_expr_off
-            *out_len = g_state.task.c_syms[cur].const_expr_len
+            *out_off = support.ms().syms[cur].const_expr_off
+            *out_len = support.ms().syms[cur].const_expr_len
             return 0
         }
         if (kind != 3) { return 1 }
-        let nxt int = sym_lookup_off(g_state.task.c_syms[cur].const_expr_off,
-            g_state.task.c_syms[cur].const_expr_len)
-        if (nxt < 0 || nxt >= g_state.task.c_sym_n || nxt == cur) { return 1 }
-        if (g_state.task.c_syms[nxt].kind != SYM_CONST
-            || (g_state.task.c_syms[nxt].flags & F_ADDR) == 0) {
+        let nxt int = sym_lookup_off(support.ms().syms[cur].const_expr_off,
+            support.ms().syms[cur].const_expr_len)
+        if (nxt < 0 || nxt >= support.ms().sym_n || nxt == cur) { return 1 }
+        if (support.ms().syms[nxt].kind != SYM_CONST
+            || (support.ms().syms[nxt].flags & F_ADDR) == 0) {
             return 1
         }
         cur = nxt
@@ -605,13 +559,13 @@ pub fn sym_ct_lit_text(sym_id int, out_off *int, out_len *int) int {
 }
 
 pub fn sym_lookup_off(off int, n int) int {
-    let i int = g_state.task.c_sym_n - 1
+    let i int = support.ms().sym_n - 1
     for i >= 0 {
-        if (g_state.task.c_syms[i].name_len == n) {
+        if (support.ms().syms[i].name_len == n) {
             let match int = 1
             let j int = 0
             for j < n {
-                if (support.pool_ctx().data[g_state.task.c_syms[i].name_off + j] != support.pool_ctx().data[off + j]) {
+                if (support.pool_ctx().data[support.ms().syms[i].name_off + j] != support.pool_ctx().data[off + j]) {
                     match = 0
                     break
                 }
@@ -628,13 +582,13 @@ pub fn sym_lookup_off(off int, n int) int {
 
 // sym_lookup：当前作用域链内查找（符号按名字池比较）。找不到返回 -1。
 pub fn sym_lookup(start int, n int) int {
-    let i int = g_state.task.c_sym_n - 1
+    let i int = support.ms().sym_n - 1
     for i >= 0 {
-        if (g_state.task.c_syms[i].name_len == n) {
+        if (support.ms().syms[i].name_len == n) {
             let match int = 1
             let j int = 0
             for j < n {
-                if (support.pool_ctx().data[g_state.task.c_syms[i].name_off + j] != support.src_ctx().data[start + j]) {
+                if (support.pool_ctx().data[support.ms().syms[i].name_off + j] != support.src_ctx().data[start + j]) {
                     match = 0
                     break
                 }
@@ -651,14 +605,14 @@ pub fn sym_lookup(start int, n int) int {
 
 // scope_push / scope_pop：进入/退出块作用域（退出即截断符号）。
 pub fn scope_push() int {
-    g_state.task.c_scope_start[g_state.task.c_scope_n] = g_state.task.c_sym_n
-    g_state.task.c_scope_n += 1
+    support.ms().scope_start[support.ms().scope_n] = support.ms().sym_n
+    support.ms().scope_n += 1
     return 0
 }
 
 pub fn scope_pop() int {
-    g_state.task.c_scope_n -= 1
-    g_state.task.c_sym_n = g_state.task.c_scope_start[g_state.task.c_scope_n]
+    support.ms().scope_n -= 1
+    support.ms().sym_n = support.ms().scope_start[support.ms().scope_n]
     return 0
 }
 
@@ -758,9 +712,9 @@ pub fn sem_parse_number(start int, n int) int {
 // 用于保持「普通全局 const 按声明顺序求值」的既有规则：只有声明在前的常量
 // 才允许在布局子遍提前求值，前向引用仍报「编译期常量尚未就绪」。
 pub fn sym_declared_before(sym int, line int, col int) int {
-    if (sym < 0 || sym >= g_state.task.c_sym_n) { return 0 }
-    let dl int = g_state.task.c_syms[sym].def_line
-    let dc int = g_state.task.c_syms[sym].def_col
+    if (sym < 0 || sym >= support.ms().sym_n) { return 0 }
+    let dl int = support.ms().syms[sym].def_line
+    let dc int = support.ms().syms[sym].def_col
     if (dl < line) { return 1 }
     if (dl == line && dc < col) { return 1 }
     return 0
@@ -769,7 +723,7 @@ pub fn sym_declared_before(sym int, line int, col int) int {
 // sem_lit_fits：字面量位型值是否落在整数类型可表示范围内。
 // ast 的 SSA 降低用它做**字面量适配**（与 sem_binop 同判据），故为 pub。
 pub fn sem_lit_fits(tid int, v i64) int {
-    let k int = g_state.task.t_types[tid].kind
+    let k int = support.ms().types[tid].kind
     if (k == TY_U8) { return ((v >= 0) && (v <= 255)).to_type(int) }
     if (k == TY_U16) { return ((v >= 0) && (v <= 65535)).to_type(int) }
     if (k == TY_U32) { return ((v >= 0) && (v <= 4294967295)).to_type(int) }
@@ -793,16 +747,16 @@ pub fn sem_can_assign(dst int, src int, is_lit int, ival i64, big int) int {
     if (dst == src) {
         return 0
     }
-    let dk int = g_state.task.t_types[dst].kind
-    let sk int = g_state.task.t_types[src].kind
+    let dk int = support.ms().types[dst].kind
+    let sk int = support.ms().types[src].kind
     // 聚合：同型已在上面通过；不同类型（含长度不同）一律拒绝
     if ((dk == TY_STRUCT || dk == TY_UNION || dk == TY_ARRAY || dk == TY_SLICE)
         && (sk == TY_STRUCT || sk == TY_UNION || sk == TY_ARRAY || sk == TY_SLICE)) {
         // 数组是结构化类型：编译期布局会为延迟长度表达式建立独立类型项，
         // 与同元素类型、同长度的既有数组项完全等价，按内容放行。
         if (dk == TY_ARRAY && sk == TY_ARRAY
-            && g_state.task.t_types[dst].elem == g_state.task.t_types[src].elem
-            && g_state.task.t_types[dst].len == g_state.task.t_types[src].len) {
+            && support.ms().types[dst].elem == support.ms().types[src].elem
+            && support.ms().types[dst].len == support.ms().types[src].len) {
             return 0
         }
         return sem_err("聚合类型不匹配（长度或元素类型不同）")
@@ -813,12 +767,12 @@ pub fn sem_can_assign(dst int, src int, is_lit int, ival i64, big int) int {
             return 0
         }
         if (sk == TY_PTR) {
-            if (g_state.task.t_types[dst].elem == TY_VOID || g_state.task.t_types[src].elem == TY_VOID) {
+            if (support.ms().types[dst].elem == TY_VOID || support.ms().types[src].elem == TY_VOID) {
                 return 0
             }
             return sem_err("指针类型不匹配（需要 .to_type 显式转换）")
         }
-        if (sk == TY_FN && g_state.task.t_types[dst].elem == TY_VOID) {
+        if (sk == TY_FN && support.ms().types[dst].elem == TY_VOID) {
             return 0
         }
         return sem_err("不能把非指针值赋给指针")
@@ -847,8 +801,8 @@ pub fn sem_can_assign(dst int, src int, is_lit int, ival i64, big int) int {
     if (ty_is_integer(dst) == 0 || ty_is_integer(src) == 0) {
         return sem_err("类型不匹配")
     }
-    let dsz int = g_state.task.t_types[dst].size
-    let ssz int = g_state.task.t_types[src].size
+    let dsz int = support.ms().types[dst].size
+    let ssz int = support.ms().types[src].size
     if (is_lit != 0) {
         if (big != 0 && dk != TY_U64) {
             return sem_err("字面量超出目标类型可表示范围")
@@ -878,8 +832,8 @@ pub fn sem_promote(a int, b int) int {
     if (a == b) {
         return a
     }
-    let ak int = g_state.task.t_types[a].kind
-    let bk int = g_state.task.t_types[b].kind
+    let ak int = support.ms().types[a].kind
+    let bk int = support.ms().types[b].kind
     if (ak == TY_BOOL) { a = TY_I32 }
     if (bk == TY_BOOL) { b = TY_I32 }
     if (ak == TY_CHAR) { a = TY_I32 }
@@ -890,20 +844,20 @@ pub fn sem_promote(a int, b int) int {
         return a
     }
     if (ty_is_float(a) != 0 && ty_is_float(b) != 0) {
-        if (g_state.task.t_types[a].size >= g_state.task.t_types[b].size) {
+        if (support.ms().types[a].size >= support.ms().types[b].size) {
             return a
         }
         return b
     }
     if (ty_is_float(a) != 0 || ty_is_float(b) != 0) {
         // 调用方已先行拒绝；此处返回较大一方兜底
-        if (g_state.task.t_types[a].size >= g_state.task.t_types[b].size) {
+        if (support.ms().types[a].size >= support.ms().types[b].size) {
             return a
         }
         return b
     }
-    let asz int = g_state.task.t_types[a].size
-    let bsz int = g_state.task.t_types[b].size
+    let asz int = support.ms().types[a].size
+    let bsz int = support.ms().types[b].size
     let aus int = (ty_is_signed(a) == 0).to_type(int)
     let bus int = (ty_is_signed(b) == 0).to_type(int)
     let size int = asz
@@ -935,7 +889,7 @@ pub fn sem_promote(a int, b int) int {
 // stage0 每个编译单元只允许一个全局数组字面量，因此这些表统一走堆。
 pub fn sem_init_tables() int {
     let n4 u64 = (4 * 64).to_type(u64)
-    g_state.task.c_scope_start = support.alloc(n4).to_type(*int)
+    support.ms().scope_start = support.alloc(n4).to_type(*int)
     g_state.task.c_brk_stk = support.alloc(n4).to_type(*int)
     g_state.task.c_cnt_stk = support.alloc(n4).to_type(*int)
     g_state.task.c_loop_break_seen = support.alloc(n4).to_type(*int)
@@ -967,7 +921,7 @@ pub fn sem_init_tables() int {
     g_state.task.sc_sc_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
     g_state.task.tn_else_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
     g_state.task.tn_end_stk = malloc((4 * 64).to_type(u64)).to_type(*int)
-    if (g_state.task.c_scope_start == 0 || g_state.task.c_brk_stk == 0 || g_state.task.c_cnt_stk == 0
+    if (support.ms().scope_start == 0 || g_state.task.c_brk_stk == 0 || g_state.task.c_cnt_stk == 0
         || g_state.task.c_loop_break_seen == 0
         || g_state.task.c_glabels == 0 || g_state.task.c_args == 0 || g_state.task.c_argtys == 0
         || g_state.task.c_spill_reg == 0 || g_state.task.c_spill_off == 0 || g_state.task.c_spill_size == 0
@@ -998,7 +952,7 @@ pub fn prelude_add(name *char, ret int, np int, vararg int) int {
     if (off < 0) {
         return -1
     }
-    let ftid int = ty_fn(ret, g_state.task.t_sigparam_n - np, np, vararg)
+    let ftid int = ty_fn(ret, support.ms().sigparam_n - np, np, vararg)
     return sym_push_lit(off, n, SYM_FN, ftid, F_EXTERN | F_PUB)
 }
 

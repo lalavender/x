@@ -185,6 +185,13 @@ lex → parse(纯语法) → AST
 - [x] **F4 / 受检阶段位下沉（2026-11-06 完成）**：`gen/front_stage.yh` →
   `support/front_stage.yh`（`session.front_checked`），`build/llvm_emit.yh`
   不再 import gen；gen pub fn **74→71**，`TaskCtx` 146→145。
+- [x] **GEN4 阶段 1–2（2026-11-06 完成）**：`TaskCtx` **145 → 101**。
+  阶段 1 删 5 个 LL12 遗留死字段；阶段 2 把类型/签名/具名类型/符号/作用域共 35 个
+  字段的**存储**下沉 `support/model_store.yh`（`ms()` + `model_type_push*`，
+  1,065 个读写点脚本迁移）；4 个前端模式位下沉 `support.session()`；
+  CT 补 `CtImportRow` 导入表镜像与折叠/寻址两个模式槽，`comptime` 不再出现
+  `gen.task()`/`TaskCtx`。白名单 13→10，gen pub fn 不变 71。
+  方案见 `docs/02-plan/yh-GEN4-TaskCtx拆分方案-2026-11-06.md`。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

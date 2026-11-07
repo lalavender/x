@@ -187,10 +187,9 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     let loc_path [1024]u8
     let path_len int = 0
     let use_loc int = 0
-    let tk *gen.TaskCtx = gen.task()
     // 从 .s.ct 导入的 CT 函数已经带定义源码路径（c_ct_origin_active），
     // 不能改写成当前解析文件；只有真实源文件登记才套用 trimpath/locs 路径。
-    if (tk.c_ct_origin_active == 0 && support.session().active_file >= 0
+    if (support.session().ct_origin_active == 0 && support.session().active_file >= 0
         && support.session().active_file < proj.file_count()) {
         path_len = proj.file_locs_path(support.session().active_file, &loc_path[0], 1024)
         if (path_len < 0) { path_len = 0 }
@@ -210,8 +209,8 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     }
     let import_n int = 0
     let ii int = 0
-    for ii < tk.mod_import_n {
-        if (tk.mod_import_mod[ii] >= 0) { import_n += 1 }
+    for ii < ct_import_count() {
+        if (ct_import_module(ii) >= 0) { import_n += 1 }
         ii += 1
     }
     if (import_n > 0) {
@@ -258,11 +257,12 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     }
     ii = 0
     let import_row int = 0
-    for ii < tk.mod_import_n {
-        let module_id int = tk.mod_import_mod[ii]
+    for ii < ct_import_count() {
+        let module_id int = ct_import_module(ii)
         if (module_id >= 0) {
-            imports[import_row].alias_off = tk.mod_imports[ii].alias_off
-            imports[import_row].alias_len = tk.mod_imports[ii].alias_len
+            let imp CtImportRow = ct_import_row(ii)
+            imports[import_row].alias_off = imp.alias_off
+            imports[import_row].alias_len = imp.alias_len
             imports[import_row].module_id = module_id
             import_row += 1
         }
@@ -278,8 +278,8 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     ct_functions[row].src_path = src_path
     ct_functions[row].src_path_len = path_len
     ct_functions[row].src_body_line = token.ctx().tokens[body_first].line
-    if (tk.c_ct_origin_active != 0) {
-        ct_functions[row].src_body_line = tk.c_ct_origin_line
+    if (support.session().ct_origin_active != 0) {
+        ct_functions[row].src_body_line = support.session().ct_origin_line
     }
     ct_functions[row].src_line_bias = support.diag().line_bias
     ct_functions[row].body = body
@@ -532,7 +532,6 @@ fn ct_invoke_in_frame(caller *CtFrame, sym_id int, args *CtValue,
 
 // ct_call：校验常量实参并执行 CT 函数，将最外层聚合结果保留或物化。
 pub fn ct_call(sym_id int, args *support.Res, arg_n int, out *support.Res) int {
-    let tk *gen.TaskCtx = gen.task()
     let values [64]CtValue
     if (arg_n < 0 || arg_n > 64) { return ct_err("编译期调用实参数量无效") }
     let i int = 0
@@ -559,15 +558,15 @@ pub fn ct_call(sym_id int, args *support.Res, arg_n int, out *support.Res) int {
     if (result_kind == CT_TY_ARRAY || result_kind == CT_TY_STRUCT
         || result_kind == CT_TY_SLICE || result_kind == CT_TY_UNION) {
         ct_ir_result_pool_keep(&result_frame)
-        if (tk.c_fold != 0) {
+        if (ct_fold_mode() != 0) {
             gen.sem_res_const(out, value.type_id, value.value)
-            tk.c_res_is_addr = 1
+            ct_res_is_addr_set(1)
             return 0
         }
         let label int = ct_ir_data_emit_temp(value.type_id, &value)
         if (label < 0) { return -1 }
         gen.sem_res_const(out, value.type_id, label.to_type(i64))
-        tk.c_res_is_addr = 1
+        ct_res_is_addr_set(1)
         return 0
     }
     ct_ir_aggregate_free_all(&result_frame)
@@ -575,10 +574,10 @@ pub fn ct_call(sym_id int, args *support.Res, arg_n int, out *support.Res) int {
     if (ct_ty_is_float(value.type_id) != 0) {
         // 浮点常量以 IEEE754 位模式同时写入 ival 与 fval_bits。
         out.fval_bits = value.value
-        tk.c_res_is_addr = 0
+        ct_res_is_addr_set(0)
         return 0
     }
-    tk.c_res_is_addr = 0
+    ct_res_is_addr_set(0)
     return 0
 }
 
