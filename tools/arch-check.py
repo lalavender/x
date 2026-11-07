@@ -42,9 +42,10 @@ ALLOWED = {
     # 位于前端与构建层之下，避免 check↔lower 为了共用键原语互相 import。
     "cache": {"hash", "support", "token"},
     "lex": {"token", "support"},
-    # comptime 只有一处窄口读（待定数组长度时的文件下标越界检查），
-    # 走 proj.file_count() 而不是自己拿项目表。
-    "comptime": {"proj", "token", "support"},
+    # comptime：纯 CT 执行器，只依赖 support/token（F4 收尾）。
+    # 文件表相关的两处窄口（locs 路径、文件下标上限）已改为由 parse 传入，
+    # 因此不再有 comptime → proj 边。
+    "comptime": {"token", "support"},
     "builtin": {"support", "check"},
     # proj：项目/模块/文件表 + 目标/构建配置（2026-10-26 B1-1 自 gen/build 拆出）。
     # 它是前端与构建层共用的数据层，只允许依赖 gen；一旦反向依赖就成环。

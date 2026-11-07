@@ -1,7 +1,6 @@
 module comptime
 import token
 import support
-import proj
 
 // ct_reset：释放当前编译单元登记的函数体快照，防止模块 worker 交叉污染。
 pub fn ct_reset() void {
@@ -170,7 +169,8 @@ fn ct_grow() int {
 
 // ct_register：登记函数签名并复制正文源/token，供后续常量初始化稳定求值。
 pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
-    param_n int, ret_type int, body_first int, body_after int) int {
+    param_n int, ret_type int, body_first int, body_after int,
+    locs_path *char, locs_len int) int {
     if (sym_id < 0 || sym_id >= ct_syms_bound() || param_n < 0 || param_n > 64
         || body_first < 0 || body_after <= body_first || body_after > token.ctx().count) {
         return support.fail("内部错误：编译期函数登记范围无效")
@@ -183,17 +183,11 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     let body *CtToken = malloc((body_n * sizeof(CtToken)).to_type(u64)).to_type(*CtToken)
     // 来源路径：默认保留绝对路径供诊断；`--trimpath` 时用项目相对路径，
     // 让 .s.ct / CT 诊断不随项目搬迁变化。
-    let loc_path [1024]u8
-    let path_len int = 0
-    let use_loc int = 0
-    // 从 .s.ct 导入的 CT 函数已经带定义源码路径（c_ct_origin_active），
-    // 不能改写成当前解析文件；只有真实源文件登记才套用 trimpath/locs 路径。
-    if (support.session().ct_origin_active == 0 && support.session().active_file >= 0
-        && support.session().active_file < proj.file_count()) {
-        path_len = proj.file_locs_path(support.session().active_file, &loc_path[0], 1024)
-        if (path_len < 0) { path_len = 0 }
-        if (path_len > 0) { use_loc = 1 }
-    }
+    // 路径由调用方算好传入（locs_path/locs_len）：执行器不认识项目文件表，
+    // 否则 comptime 就得依赖 proj，破坏「CT 执行器只依赖 support/token」。
+    let path_len int = locs_len
+    let use_loc int = (locs_len > 0).to_type(int)
+    if (locs_path == 0) { path_len = 0; use_loc = 0 }
     if (path_len <= 0 && support.src_ctx().path != 0) {
         for support.src_ctx().path[path_len] != 0 { path_len += 1 }
     }
@@ -230,7 +224,7 @@ pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
     let path_i int = 0
     for path_i < path_len {
         if (use_loc != 0) {
-            src_path[path_i] = loc_path[path_i]
+            src_path[path_i] = locs_path[path_i].to_type(u8)
         } else {
             src_path[path_i] = support.src_ctx().path[path_i].to_type(u8)
         }

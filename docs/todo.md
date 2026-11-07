@@ -191,7 +191,7 @@ lex → parse(纯语法) → AST
   1,065 个读写点脚本迁移）；4 个前端模式位下沉 `support.session()`；
   CT 补 `CtImportRow` 导入表镜像与折叠/寻址两个模式槽，`comptime` 不再出现
   `gen.task()`/`TaskCtx`。白名单 13→10，gen pub fn 不变 71。
-  方案见 `docs/02-plan/yh-GEN4-TaskCtx拆分方案-2026-11-06.md`。
+  方案见 `docs/01-finished/finish-F4-comptime纯执行器-2026-11-06.md`。
 - [x] **GEN4 阶段 3 + 值规则下沉（2026-11-06 完成）**：`TaskCtx` **101 → 85**。
   D 组模块/导入状态（14 字段）下沉 `support/file_scope.yh`（`fs()`，
   `ImportEnt`/`ModNsEnt`/`ModInfo` 同批）；`layout` 与纯值规则
@@ -239,11 +239,11 @@ lex → parse(纯语法) → AST
   `gen` 只留 comptime 必需的 `sem_can_assign` + 两个折叠函数。
   `import gen` **6 → 3**（check/comptime/parse）、`parse→gen` **15 → 1**、
   `builtin` 改依赖 `check`。判据见
-  `docs/02-plan/yh-F2-parse纯语法化方案-2026-11-06.md`
+  `docs/01-finished/yh-F2-核收缩与parse纯语法化结论-2026-11-06.md`
 - [x] **gen 并单（2026-11-06）**：`gen/symbols.yh` 并入 `gen/value_rules.yh`，
   `gen` 现为**单文件 337 行 / 3 pub fn**（`sem_can_assign` + 两个折叠）。
 - [x] **模块职责文档（2026-11-06）**：新增
-  `docs/03-design/yh-模块职责-当前实现.md`（19 模块逐条职责/规模/依赖/内部拆分，
+  `docs/03-design/yh-模块职责-当前实现.md`（18 模块逐条职责/规模/依赖/内部拆分，
   含 backend 文件分工、三条不可违反的依赖规则、已知结构债）；`架构设计.md`
   §2.1/§2.3/§3.1/§3.2 改为指向该文档并按实测刷新（79 条边）。
 - [x] **F4 收尾：`gen` 消失（2026-11-06 完成）**：按「错误码 + 调用层格式化」
@@ -252,25 +252,17 @@ lex → parse(纯语法) → AST
   `comptime/ct_diag.yh` 各自做诊断适配；运算符常量 `TK_*` 源头移 `support`
   （`token` 转发）。**`compiler/gen/` 目录删除**，模块数 19→18，
   `import gen` 3→0，两条白名单归零。方案见
-  `docs/02-plan/yh-F4收尾-gen消失方案-2026-11-06.md`
-- [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
-  [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
-  方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`
-  与 gen 结构逐字段同序，指针 + 行数绑定，不复制表——解析期类型表会增长，
-  复制必然过期）。**前置 F4-0**：把 `comptime` 的公开 API 收进 `check` 的
-  薄包装（`check.ct_*` 转发并先 `ct_types_sync()`），`parse` 改调
-  `check.ct_*`；这样「绑定点」只有一个，F4-1..F4-4 才能安全机械替换。
-  **F4-0b（F4-1 的前置，必须先做）**：`comptime` 的类型表指针随时可能因
-  `gen.ty_push` 重新分配而失效，因此镜像必须在**每次表增长后**重新绑定；
-  `gen` 不能 import `comptime`，唯一合法绑定点是 `check`。做法：把
-  `comptime` 的公开 API 收进 `check.ct_*` 薄包装（转发前 `ct_types_sync()`），
-  `parse` 改调 `check.ct_*`；这一步不成立就替换谓词会出现 use-after-free。
-  然后 F4-1（44 处谓词 + 19 处 `CType` 读 → 镜像）、F4-2（`CSym`/`SYM_*`）、
-  F4-3（`static_data`/`data_str`）、F4-4（诊断/`gen.task`）、F4-5（折叠请求）。
-  完成后把 `CType/CSym/ty_*/sym_*`、`static_data`、`value_rules` 迁 `check`。
-- [ ] **GEN2/F2（未开始）**：`parse` 纯语法——`sem_*` 调用链改为「先出语法
-  AST、再 `check.resolve`」；`parse_decl` pass1/pass2、声明索引、test/entry
-  选择上移 build/check；`iface`/`iface_ct`/`parse_ct_layout` 移出 parse。
+  `docs/01-finished/finish-F4-comptime纯执行器-2026-11-06.md`
+- [x] **F4 完成（2026-11-06）**：`comptime` 现在是纯 CT 执行器，只剩
+  `support`/`token` 两个依赖（`comptime → proj` 边也已切断：文件表相关的
+  `locs 路径` 与 `文件下标上限` 改由 `parse` 传入）。完成记录见
+  `docs/01-finished/finish-F4-comptime纯执行器-2026-11-06.md`。
+- [ ] **`parse` 纯语法化（已定案暂缓）**：`sem_*` 调用链改为「先出语法 AST、
+  再 `check.resolve`」；`parse_decl` pass1/pass2、声明索引、test/entry 选择上移
+  build/check；`iface`/`iface_ct`/`parse_ct_layout` 移出 parse。
+  评估结论：`parse` 内联读取 `Res` 语义字段 277 处，语法决策依赖语义结果，
+  属前端重构级，**暂不推进**；「核收缩」替代路线已完成。见
+  `docs/01-finished/yh-F2-核收缩与parse纯语法化结论-2026-11-06.md`。
 - [ ] **GEN3**：清 `gen` 语义残片/空壳；`lower`/`builtin` 改 import `check`，
   `backend` 用 `support.ABI_*`；`build`/`cmd` 改调 `check` 入口。
 - [ ] **GEN4**：重盘 `TaskCtx`，拆 parse/check/build/link 残余上下文；删
