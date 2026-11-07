@@ -192,6 +192,15 @@ lex → parse(纯语法) → AST
   CT 补 `CtImportRow` 导入表镜像与折叠/寻址两个模式槽，`comptime` 不再出现
   `gen.task()`/`TaskCtx`。白名单 13→10，gen pub fn 不变 71。
   方案见 `docs/02-plan/yh-GEN4-TaskCtx拆分方案-2026-11-06.md`。
+- [x] **GEN4 阶段 3 + 值规则下沉（2026-11-06 完成）**：`TaskCtx` **101 → 85**。
+  D 组模块/导入状态（14 字段）下沉 `support/file_scope.yh`（`fs()`，
+  `ImportEnt`/`ModNsEnt`/`ModInfo` 同批）；`layout` 与纯值规则
+  （`sem_fold_norm`/`sem_fold_fp_to_int`/`sem_fold_float_convert`/`fp32_bits`/
+  `fp64_bits`/`sem_res_const`/`ty_is_*`/`sem_struct_finish`）下沉
+  `support/value_rules.yh` + `support/layout.yh`，`gen/target.yh` 删除。
+  带 token 位置诊断的 3 个折叠函数（`sem_fold_const_binop/unary`、
+  `sem_can_assign`）留在 gen。`comptime→gen` 白名单 **10→4**，gen pub fn
+  **71→61**，`TaskCtx` 出参 `c_layout_size/c_layout_align` 删除。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

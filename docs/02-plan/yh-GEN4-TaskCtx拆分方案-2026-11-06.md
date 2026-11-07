@@ -1,6 +1,6 @@
 # GEN4：`TaskCtx` 按所有者拆分（方案评审稿）
 
-状态：**阶段 1–2 已完成**（2026-11-06）；阶段 3–6 待做
+状态：**阶段 1–3 已完成**（2026-11-06）；阶段 4–6 待做
 上游：ADR-0021（gen 职责拆分）、`yh-F4-comptime纯执行器实施方案-2026-11-06.md`
 
 ## 1. 为什么现在做
@@ -88,10 +88,15 @@
    → `comptime` 彻底不再出现 `gen.task()`/`TaskCtx`，**`TaskCtx` 101 字段、
    白名单 10**。
 
-### 阶段 3：模块/导入下沉 `proj`（105 → 90）
+### 阶段 3：模块/导入下沉（101 → 85）✅ 已完成（改落 `support` 而非 `proj`）
 
-- 新建 `compiler/proj/file_scope.yh`：`FileScope`（module 归属 + 导入表 + 已加载接口）
-- `parse` 的 `p_decl_module` / `mod_import_push` 改成写 `proj.file_scope()`
+- 新建 **`compiler/support/file_scope.yh`**：`FileScope`（module 归属 + 导入表 +
+  已加载接口）+ `fs()` + `fscope_reset()`；`ImportEnt`/`ModNsEnt`/`ModInfo`
+  三个结构体同批下沉（gen 留同名别名）。
+  **改动理由**：`gen/symbols.yh` 的限定名解析也要读写这些字段，放 `proj` 会让
+  `gen → proj`，反置「项目数据层在下」的既有分层；放 `support` 与
+  `model_store` 一致，零新增依赖边。
+- `parse` 的 `p_decl_module` / `mod_import_push` 改成写 `support.fs()`
 - 验证：`build-check.py` 里所有多模块项目用例（`u2-*`/`u3-*`/`r2b-*`）必须与基线一致
 
 ### 阶段 4：ABI 分类下沉 `check`（90 → 84）

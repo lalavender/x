@@ -1,0 +1,140 @@
+module support
+
+// ============================================================================
+// value_rules.yh —— 编译期值规则（纯函数部分）
+//
+// 从 gen/value_rules.yh 下沉：这些函数只依赖类型表（ms()）与整数/浮点
+// 位模式运算，**不发诊断、不读 token**，因此可以被 comptime 直接调用。
+// 带诊断的折叠函数（sem_fold_const_binop/unary、sem_fold_float_binop、
+// sem_struct_finish、sem_can_assign）仍留 gen：它们要 token 游标位置。
+// ============================================================================
+
+// ty_is_integer：整数类（bool..u64 与 enum）。
+pub fn ty_is_integer(tid int) int {
+    let k int = ms().types[tid].kind
+    if (k >= TY_BOOL && k <= TY_U64) { return 1 }
+    return (k == TY_ENUM).to_type(int)
+}
+
+// ty_is_signed：有符号整数类（char..i64 与 enum）。
+pub fn ty_is_signed(tid int) int {
+    let k int = ms().types[tid].kind
+    return ((k >= TY_CHAR && k <= TY_I64) || k == TY_ENUM).to_type(int)
+}
+
+// ty_is_float：f32/f64。
+pub fn ty_is_float(tid int) int {
+    let k int = ms().types[tid].kind
+    return (k == TY_F32 || k == TY_F64).to_type(int)
+}
+
+// sem_fold_norm：把常量按目标整数类型截断，并对有符号值做符号扩展。
+pub fn sem_fold_norm(tid int, value i64) i64 {
+    let bits int = ms().types[tid].size * 8
+    if (bits >= 64) { return value }
+    let mask u64 = (1.to_type(u64) << bits) - 1.to_type(u64)
+    let raw u64 = value.to_type(u64) & mask
+    if (ty_is_signed(tid) != 0) {
+        let sign u64 = 1.to_type(u64) << (bits - 1)
+        if ((raw & sign) != 0) { return (raw | ~mask).to_type(i64) }
+    }
+    return raw.to_type(i64)
+}
+
+// sem_fold_fp_to_int：按目标符号性向零转换到完整 64 位值域，再按源级目标宽度截断。
+// 常量折叠和 typed CT 共用，避免无符号高位先经过 i64 饱和而丢失；NaN/越界沿用宿主饱和规则。
+pub fn sem_fold_fp_to_int(tid int, value f64) i64 {
+    if (ty_is_signed(tid) != 0) { return sem_fold_norm(tid, value.to_type(i64)) }
+    return sem_fold_norm(tid, value.to_type(u64).to_type(i64))
+}
+
+// sem_fold_float_convert：常量浮点转换（整数↔浮点、浮点↔浮点），结果写位模式。
+pub fn sem_fold_float_convert(src_tid int, dst_tid int, bits i64) i64 {
+    let src_fp int = ty_is_float(src_tid)
+    let dst_fp int = ty_is_float(dst_tid)
+    if (src_fp != 0) {
+        let source f64 = fp64_from_bits(bits)
+        if (dst_fp != 0) { return fp64_norm_bits(dst_tid, source) }
+        return sem_fold_fp_to_int(dst_tid, source)
+    }
+    if (dst_fp == 0) { return bits }
+    let widened f64 = 0.0
+    if (ty_is_signed(src_tid) != 0) {
+        widened = bits.to_type(f64)
+    } else {
+        widened = bits.to_type(u64).to_type(f64)
+    }
+    return fp64_norm_bits(dst_tid, widened)
+}
+
+pub fn fp64_bits(v f64) i64 {
+    let holder *f64 = alloc(8).to_type(*f64)
+    holder[0] = v
+    let pb *i64 = holder.to_type(*i64)
+    let r i64 = pb[0]
+    free(holder.to_type(*void))
+    return r
+}
+
+// fp64_from_bits：把 IEEE754 位模式还原为宿主 f64，供常量折叠使用。
+pub fn fp64_from_bits(bits i64) f64 {
+    let holder *i64 = alloc(8).to_type(*i64)
+    holder[0] = bits
+    let view *f64 = holder.to_type(*f64)
+    let value f64 = view[0]
+    free(holder.to_type(*void))
+    return value
+}
+
+// fp32_bits：把 IEEE754 双精度位模式窄化为单精度 32 位模式（低位对齐）。
+// 编译期浮点值统一以双精度位模式保存（见 fp64_norm_bits），而 f32 对象的
+// 初始化字节只有 4 字节；直接截低 4 字节会丢掉指数位，必须真正转一次 f32。
+// 低层静态数据与 lowering 的全局初始化共用本函数，避免两份窄化实现漂移。
+pub fn fp32_bits(bits i64) i64 {
+    let holder *f32 = alloc(4).to_type(*f32)
+    if (holder == 0) { return 0 }
+    holder[0] = fp64_from_bits(bits).to_type(f32)
+    let view *i32 = holder.to_type(*i32)
+    let result i64 = view[0].to_type(i64)
+    free(holder.to_type(*void))
+    return result
+}
+
+// fp64_norm_bits：按目标浮点类型规范化位模式；f32 经一次往返窄化到单精度。
+pub fn fp64_norm_bits(tid int, value f64) i64 {
+    if (ms().types[tid].kind == TY_F32) {
+        return fp64_bits(value.to_type(f32).to_type(f64))
+    }
+    return fp64_bits(value)
+}
+
+pub fn sem_res_const(r *Res, tid int, v i64) int {
+    r.type_id = tid
+    r.is_const = 1
+    r.ival = v
+    r.sym = -1
+    r.is_lit = 0
+    r.lit_big = 0
+    r.ast_id = -1
+    r.layout_type_id = -1
+    r.ct_diag = 0
+    r.ct_diag_expr = -1
+    r.ct_diag_line = 0
+    r.ct_diag_col = 0
+    r.ct_diag_msg_start = -1
+    r.ct_diag_msg_len = 0
+    return 0
+}
+
+// sem_struct_finish：结构体/联合体字段登记完成后结算布局，写回类型行。
+// 布局算法在 support/model 的 layout.yh；本函数只做「读字段表 → 算 → 写回」。
+pub fn sem_struct_finish(stid int, is_union int) int {
+    let sub int = ms().types[stid].sub
+    let n int = ms().types[stid].len
+    let size int = 0
+    let align int = 0
+    if (model_layout_struct(sub, n, is_union, &size, &align) != 0) { return -1 }
+    ms().types[stid].size = size
+    ms().types[stid].align = align
+    return 0
+}

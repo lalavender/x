@@ -2,58 +2,23 @@ module gen
 import support
 
 // ============================================================================
-// value_rules.yh —— 编译期值规则：浮点位模式、常量折叠、结构体布局收尾
+// value_rules.yh —— 带诊断的编译期折叠规则（纯规则已下沉 support）
 //
-// 这些是「值与布局」的纯规则，被前端动作（sem_*.yh）与 comptime 执行器共用。
-// comptime 目前仍在 F4 之前直接调用它们，所以规则必须留在 comptime 的下层
-// （gen），不能随语义动作一起迁 check；F4 让 CT IR 自带类型/布局事实后再归位。
-// 明确不做：不读 token、不解析、不分配、不发诊断（除折叠错误）。
+// 纯值规则（浮点位模式、整数归一化、fp↔int 转换、sem_res_const、ty_is_*）
+// 已迁 support/value_rules.yh，因为 comptime 也要用它们而不得 import gen。
+// 这里只剩会发**带 token 位置诊断**的折叠函数：溢出/除零/类型不匹配要通过
+// gen.sem_err 报出 `file:line:col`，必须留在拥有 token 游标的这一层。
+// 明确不做：不读源码、不分配除折叠工作区以外的缓冲。
 // ============================================================================
 
-// sem_fold_norm：把常量按目标整数类型截断，并对有符号值做符号扩展。
-pub fn sem_fold_norm(tid int, value i64) i64 {
-    let bits int = support.ms().types[tid].size * 8
-    if (bits >= 64) { return value }
-    let mask u64 = (1.to_type(u64) << bits) - 1.to_type(u64)
-    let raw u64 = value.to_type(u64) & mask
-    if (ty_is_signed(tid) != 0) {
-        let sign u64 = 1.to_type(u64) << (bits - 1)
-        if ((raw & sign) != 0) { return (raw | ~mask).to_type(i64) }
-    }
-    return raw.to_type(i64)
-}
 
-// sem_fold_fp_to_int：按目标符号性向零转换到完整 64 位值域，再按源级目标宽度截断。
-// 常量折叠和 typed CT 共用，避免无符号高位先经过 i64 饱和而丢失；NaN/越界沿用宿主饱和规则。
-pub fn sem_fold_fp_to_int(tid int, value f64) i64 {
-    if (ty_is_signed(tid) != 0) { return sem_fold_norm(tid, value.to_type(i64)) }
-    return sem_fold_norm(tid, value.to_type(u64).to_type(i64))
-}
 
-// sem_fold_float_convert：常量浮点转换（整数↔浮点、浮点↔浮点），结果写位模式。
-pub fn sem_fold_float_convert(src_tid int, dst_tid int, bits i64) i64 {
-    let src_fp int = ty_is_float(src_tid)
-    let dst_fp int = ty_is_float(dst_tid)
-    if (src_fp != 0) {
-        let source f64 = fp64_from_bits(bits)
-        if (dst_fp != 0) { return fp64_norm_bits(dst_tid, source) }
-        return sem_fold_fp_to_int(dst_tid, source)
-    }
-    if (dst_fp == 0) { return bits }
-    let widened f64 = 0.0
-    if (ty_is_signed(src_tid) != 0) {
-        widened = bits.to_type(f64)
-    } else {
-        widened = bits.to_type(u64).to_type(f64)
-    }
-    return fp64_norm_bits(dst_tid, widened)
-}
 
 // sem_fold_float_binop：常量浮点算术与比较；值为 IEEE754 位模式，
 // 算术结果按目标类型窄化，比较结果写 0/1。
 fn sem_fold_float_binop(op int, tid int, left i64, right i64, result *i64) int {
-    let a f64 = fp64_from_bits(left)
-    let b f64 = fp64_from_bits(right)
+    let a f64 = support.fp64_from_bits(left)
+    let b f64 = support.fp64_from_bits(right)
     if (op == TK_EQEQ) { *result = (a == b).to_type(i64); return 0 }
     if (op == TK_NEQ) { *result = (a != b).to_type(i64); return 0 }
     // 初始宿主仍可能由旧种子发射 lt/le；显式有序守卫让第一代候选就遵守 NaN 契约。
@@ -67,20 +32,20 @@ fn sem_fold_float_binop(op int, tid int, left i64, right i64, result *i64) int {
     else if (op == TK_STAR) { value = a * b }
     else if (op == TK_SLASH) { value = a / b }
     else { return sem_err("浮点不支持该运算") }
-    *result = fp64_norm_bits(tid, value)
+    *result = support.fp64_norm_bits(tid, value)
     return 0
 }
 
 // sem_fold_const_binop：按 yh 整数类型执行有边界的常量二元运算。
 pub fn sem_fold_const_binop(op int, tid int, left i64, right i64, result *i64) int {
-    if (ty_is_float(tid) != 0) {
+    if (support.ty_is_float(tid) != 0) {
         return sem_fold_float_binop(op, tid, left, right, result)
     }
-    if (ty_is_integer(tid) == 0) { return sem_err("编译期算术运算要求整数") }
+    if (support.ty_is_integer(tid) == 0) { return sem_err("编译期算术运算要求整数") }
     let bits int = support.ms().types[tid].size * 8
-    let is_signed_ty int = ty_is_signed(tid)
-    let a i64 = sem_fold_norm(tid, left)
-    let b i64 = sem_fold_norm(tid, right)
+    let is_signed_ty int = support.ty_is_signed(tid)
+    let a i64 = support.sem_fold_norm(tid, left)
+    let b i64 = support.sem_fold_norm(tid, right)
     let is_cmp int = (op == TK_EQEQ || op == TK_NEQ || op == TK_LT || op == TK_LEQ
         || op == TK_GT || op == TK_GEQ).to_type(int)
     if (is_cmp != 0) {
@@ -128,11 +93,11 @@ pub fn sem_fold_const_binop(op int, tid int, left i64, right i64, result *i64) i
         else if (bits == 32) { max_u = 4294967295 }
         let ua u64 = a.to_type(u64)
         if (ua > (max_u >> count)) { return sem_err("编译期整数运算溢出") }
-        *result = sem_fold_norm(tid, (ua << count).to_type(i64))
+        *result = support.sem_fold_norm(tid, (ua << count).to_type(i64))
         return 0
     }
     if (op == TK_AMP || op == TK_PIPE || op == TK_CARET) {
-        *result = sem_fold_norm(tid, fold_binop(op, a, b))
+        *result = support.sem_fold_norm(tid, fold_binop(op, a, b))
         return 0
     }
     if (is_signed_ty != 0) {
@@ -177,13 +142,13 @@ pub fn sem_fold_const_binop(op int, tid int, left i64, right i64, result *i64) i
     let ub u64 = b.to_type(u64)
     if (op == TK_PLUS) {
         if (ua > max_u - ub) { return sem_err("编译期整数运算溢出") }
-        *result = sem_fold_norm(tid, (ua + ub).to_type(i64))
+        *result = support.sem_fold_norm(tid, (ua + ub).to_type(i64))
     } else if (op == TK_MINUS) {
         if (ua < ub) { return sem_err("编译期整数运算溢出") }
-        *result = sem_fold_norm(tid, (ua - ub).to_type(i64))
+        *result = support.sem_fold_norm(tid, (ua - ub).to_type(i64))
     } else if (op == TK_STAR) {
         if (ub != 0 && ua > max_u / ub) { return sem_err("编译期整数运算溢出") }
-        *result = sem_fold_norm(tid, (ua * ub).to_type(i64))
+        *result = support.sem_fold_norm(tid, (ua * ub).to_type(i64))
     } else if (op == TK_SLASH || op == TK_PERCENT) {
         if (ub == 0) { return sem_err("编译期除数不能为零") }
         if (op == TK_SLASH) { *result = (ua / ub).to_type(i64) }
@@ -197,7 +162,7 @@ pub fn sem_fold_const_binop(op int, tid int, left i64, right i64, result *i64) i
 // sem_fold_const_unary：按目标类型执行常量一元运算，并允许最小值的直接负数字面量。
 // 浮点取负走符号位翻转，避免生成冻结子集之外的 fneg。
 pub fn sem_fold_const_unary(op int, tid int, value i64, is_lit int, result *i64) int {
-    if (ty_is_float(tid) != 0) {
+    if (support.ty_is_float(tid) != 0) {
         if (op == TK_MINUS) {
             *result = value ^ (1.to_type(i64) << 63)
             return 0
@@ -205,10 +170,10 @@ pub fn sem_fold_const_unary(op int, tid int, value i64, is_lit int, result *i64)
         if (op == TK_PLUS) { *result = value; return 0 }
         return sem_err("浮点只支持一元 +/-")
     }
-    if (ty_is_integer(tid) == 0) { return sem_err("编译期一元运算要求整数") }
+    if (support.ty_is_integer(tid) == 0) { return sem_err("编译期一元运算要求整数") }
     let bits int = support.ms().types[tid].size * 8
-    let is_signed_ty int = ty_is_signed(tid)
-    let a i64 = sem_fold_norm(tid, value)
+    let is_signed_ty int = support.ty_is_signed(tid)
+    let a i64 = support.sem_fold_norm(tid, value)
     if (op == TK_MINUS) {
         if (is_signed_ty != 0) {
             let max_s i64 = 9223372036854775807
@@ -231,79 +196,15 @@ pub fn sem_fold_const_unary(op int, tid int, value i64, is_lit int, result *i64)
         return 0
     }
     if (op == TK_PLUS) { *result = a; return 0 }
-    if (op == TK_TILDE) { *result = sem_fold_norm(tid, ~a); return 0 }
+    if (op == TK_TILDE) { *result = support.sem_fold_norm(tid, ~a); return 0 }
     if (op == TK_BANG) { *result = (a == 0).to_type(i64); return 0 }
     *result = a
     return 0
 }
 
-pub fn fp64_bits(v f64) i64 {
-    let holder *f64 = support.alloc(8).to_type(*f64)
-    holder[0] = v
-    let pb *i64 = holder.to_type(*i64)
-    let r i64 = pb[0]
-    free(holder.to_type(*void))
-    return r
-}
 
-// fp64_from_bits：把 IEEE754 位模式还原为宿主 f64，供常量折叠使用。
-fn fp64_from_bits(bits i64) f64 {
-    let holder *i64 = support.alloc(8).to_type(*i64)
-    holder[0] = bits
-    let view *f64 = holder.to_type(*f64)
-    let value f64 = view[0]
-    free(holder.to_type(*void))
-    return value
-}
 
-// fp32_bits：把 IEEE754 双精度位模式窄化为单精度 32 位模式（低位对齐）。
-// 编译期浮点值统一以双精度位模式保存（见 fp64_norm_bits），而 f32 对象的
-// 初始化字节只有 4 字节；直接截低 4 字节会丢掉指数位，必须真正转一次 f32。
-// 低层静态数据与 lowering 的全局初始化共用本函数，避免两份窄化实现漂移。
-pub fn fp32_bits(bits i64) i64 {
-    let holder *f32 = support.alloc(4).to_type(*f32)
-    if (holder == 0) { return 0 }
-    holder[0] = fp64_from_bits(bits).to_type(f32)
-    let view *i32 = holder.to_type(*i32)
-    let result i64 = view[0].to_type(i64)
-    free(holder.to_type(*void))
-    return result
-}
 
-// fp64_norm_bits：按目标浮点类型规范化位模式；f32 经一次往返窄化到单精度。
-fn fp64_norm_bits(tid int, value f64) i64 {
-    if (support.ms().types[tid].kind == TY_F32) {
-        return fp64_bits(value.to_type(f32).to_type(f64))
-    }
-    return fp64_bits(value)
-}
 
-pub fn sem_res_const(r *Res, tid int, v i64) int {
-    r.type_id = tid
-    r.is_const = 1
-    r.ival = v
-    r.sym = -1
-    r.is_lit = 0
-    r.lit_big = 0
-    r.ast_id = -1
-    r.layout_type_id = -1
-    r.ct_diag = 0
-    r.ct_diag_expr = -1
-    r.ct_diag_line = 0
-    r.ct_diag_col = 0
-    r.ct_diag_msg_start = -1
-    r.ct_diag_msg_len = 0
-    return 0
-}
 
-pub fn sem_struct_finish(stid int, is_union int) int {
-    let sub int = support.ms().types[stid].sub
-    let n int = support.ms().types[stid].len
-    if (tg_layout_struct(sub, n, is_union) != 0) {
-        return -1
-    }
-    support.ms().types[stid].size = g_state.task.c_layout_size
-    support.ms().types[stid].align = g_state.task.c_layout_align
-    return 0
-}
 

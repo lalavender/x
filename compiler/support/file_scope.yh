@@ -1,0 +1,90 @@
+module support
+
+// ============================================================================
+// file_scope.yh —— 单个源文件的模块归属与导入表
+//
+// 这些字段原本是 gen.TaskCtx 的一部分（D 组：模块/导入）。它们被 parse（写）、
+// check（读接口名字空间）、comptime（CT 目标描述）、gen（限定名解析）共用；
+// 若放 proj，gen 就得反向依赖项目的上层，所以和 model_store 一样收在 support：
+// support 只持有数据与板结的读写入口，接口加载/名字解析逻辑仍在上层。
+// ============================================================================
+
+// ImportEnt：源文件的一条 import 声明。
+// 点分导入 `KEY.MOD` 时 name 存 MOD、proj_key 存 KEY；同项目导入 proj_key 为 -1。
+
+pub struct ImportEnt {
+    name_off int       // 查找名（模块名）名字池偏移；点分导入 KEY.MOD 时为 MOD
+    name_len int
+    proj_key_off int   // 跨项目导入 KEY.MOD 的依赖键池偏移；同项目 -1
+    proj_key_len int
+    alias_off int      // 绑定名（限定调用用的标识符）池偏移
+    alias_len int
+    line int           // 1 基行号（诊断用）
+    col int            // 1 基列号
+}
+
+// ModNsEnt：已加载接口的一个导出名字条目。
+// sym/type_id 恰有一个 >= 0：值/函数/常量走 sym，纯类型名走 type_id。
+pub struct ModNsEnt {
+    name_off int       // 短名（源码名）名字池偏移
+    name_len int
+    sym int            // 值/函数/常量符号下标；纯类型名为 -1
+    tid int            // 类型编号（类型名条目）；值条目 -1
+}
+
+// ModInfo：一个已绑定导入模块（每份接口一条，含导出名字表）。
+pub struct ModInfo {
+    bind_off int       // 绑定名（=模块名）池偏移
+    bind_len int
+    prefix_off int     // 接口头宣布的符号后缀（__proj__mod）池偏移
+    prefix_len int
+    home int           // 模块编号（ms().home 归属标记用）
+    ns *ModNsEnt       // 导出名字表（堆分配）
+    ns_n int
+    ns_cap int
+}
+
+// FileScope：单文件的模块归属 + 导入表 + 已加载接口集合。
+// 生命周期 = 一个编译单元（换文件时 fscope_reset），堆缓冲由导入推送路径扩容。
+pub struct FileScope {
+    has_module int // 1 = 文件带 module 归属声明（模块模式）
+    name_off int // 模块名名字池偏移（has_module 时有效）
+    name_len int
+    imports *ImportEnt // 本文件导入表（堆分配，import_push 扩容）
+    import_n int
+    import_cap int
+    import_mod *int // 与 imports 平行：导入绑定的 ModInfo 下标
+    import_used *int // 与 imports 平行：本文件是否用到该导入
+    mods *ModInfo // 当前编译单元已加载的导入模块
+    mod_n int
+    mod_cap int
+    mod_home_next int // 下一个模块编号（home 分配计数）
+    sym_sfx_off int // 本模块符号后缀（__proj__mod）池偏移；单文件 -1
+    sym_sfx_len int
+}
+
+// g_fscope：文件作用域单例（worker 进程内一份）。
+let g_fscope FileScope
+
+// fs：文件作用域窄口。
+pub fn fs() *FileScope {
+    return &g_fscope
+}
+
+// fscope_reset：把归属与导入表清零（state_init 调用；旧缓冲由持有方先释放）。
+pub fn fscope_reset() void {
+    g_fscope.has_module = 0
+    g_fscope.name_off = -1
+    g_fscope.name_len = 0
+    g_fscope.imports = 0
+    g_fscope.import_n = 0
+    g_fscope.import_cap = 0
+    g_fscope.import_mod = 0
+    g_fscope.import_used = 0
+    g_fscope.mods = 0
+    g_fscope.mod_n = 0
+    g_fscope.mod_cap = 0
+    g_fscope.mod_home_next = 0
+    g_fscope.sym_sfx_off = -1
+    g_fscope.sym_sfx_len = 0
+}
