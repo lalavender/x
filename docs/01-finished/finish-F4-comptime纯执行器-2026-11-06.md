@@ -85,10 +85,32 @@
 `tests/yh-run/fail/73..79` 的**位置前缀**尚未在重新构建的编译器上复验。
 恢复 `just` 后应第一时间补跑 `just test` 专门确认这 7 例。
 
-## 5. 相关文档
+## 5. GEN3 收尾（与 F4 同批完成的验收项）
+
+GEN3 的原判据是「清 `gen` 语义残片/空壳 + 调用面切换」。逐项核对：
+
+| GEN3 判据 | 结果 |
+| --- | --- |
+| `import gen` = 0（除 `gen` 自身） | ✅ 0 |
+| `gen` 行数 < 500 | ✅ 模块已删除（0） |
+| `lower` / `builtin` 改 import `check` | ✅ |
+| `backend` 用 `support.ABI_*` | ✅ |
+| `build` / `cmd` 改调 `check` 入口 | ✅（`check.checked_module_capture`/`verify`/`sem_init_tables`） |
+| 删除 `gen.front_stage`/`sem_*`/`ty_*`/`sym_*` | ✅ |
+| `arch-check` 收紧 `gen` 预算 | ✅ `max_gen_pub_fns`/`max_gen_importers` = 0 |
+| 新增 `tests/modules/projects/gen-split/` | ✅ 本轮补上（见下） |
+
+**新增 fixture `gen-split`（`gen3-split-narrow-ports`）**：只 `import
+support/token/check`，覆盖拆分出来的六组公开面——会话/语义表初始化、
+token 写入与游标、名字池 intern、类型表构造（ptr/array/slice）、目标身份解析、
+诊断入口（`err_lc` 计数 / `err_tok` 的 spec 静默）。任何 `gen.` 回归都会
+直接编译失败。注册在 `tests/modules/build-check.py`（用例数 128 → 129）。
+
+## 6. 相关文档
 
 - 模块职责清单：`docs/03-design/yh-模块职责-当前实现.md`
 - 架构分层与依赖规则：`docs/03-design/yh-架构设计.md`
 - 拆分动因：`docs/adr/0021-yh-gen职责拆分.md`
 - F2（`parse` 纯语法化）的可行性结论与「核收缩」替代路线：
   `docs/01-finished/yh-F2-核收缩与parse纯语法化结论-2026-11-06.md`
+- ADR-0021（gen 职责拆分，含 GEN0–GEN4 判据）：`docs/adr/0021-yh-gen职责拆分.md`

@@ -332,6 +332,7 @@ case("llvm-float-cross-module", "run", "llvmfloat", ".", 0)
 case("llvm-yh-cross-module-call", "run", "llvmyhimport", ".", 0)
 case("llvm-cabi-scalar-cross-module", "run", "llvmabi", ".", 0)
 case("support-buffer-tools", "run", "support", ".", 0)
+case("gen3-split-narrow-ports", "run", "gen-split", ".", 0)
 case("f4-ct-facts-mirror", "run", "ctfacts", ".", 0)
 case("token-state-cursor", "run", "token", ".", 0)
 case("llvm-target-identity", "run", "llvmtarget", ".", 0)
@@ -522,7 +523,20 @@ def copy_proj(src, dst):
             '[project]\nos = "host"\narch = "host"\nname = "lex"\nsource = "."\n'
             '[dependencies]\nsupport = { path = "../support" }\n'
             'token = { path = "../token" }\n')
-    if src.name == "ctfacts":
+    if src.name in ("ctfacts", "gen-split"):
+        # GEN3：拆分后的公开面回归——直接 import support/token/check，
+        # 需要与 ctfacts 同一套真实模块（check 的传递依赖一并拷入）。
+        core = dst / "compiler"
+        core.mkdir()
+        for module in ("proj", "support", "token", "lex", "comptime", "ir", "backend",
+                       "ast", "check", "cache"):
+            shutil.copytree(ROOT / "compiler" / module, core / module,
+                            ignore=shutil.ignore_patterns("llvm_bridge.yh"))
+        shutil.copytree(ROOT / "libs" / "hash", core / "hash",
+                        ignore=shutil.ignore_patterns(".build"))
+        (core / "project.toml").write_text(
+            '[project]\nos = "host"\narch = "host"\nname = "gensplitcore"\nsource = "."\n')
+    if src.name == "ctfacts_disabled":
         # F4-0：验证 CT 零拷贝镜像与 gen 类型表逐行一致（含表扩容后重新绑定）。
         core = dst / "compiler"
         core.mkdir()

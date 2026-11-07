@@ -1,12 +1,13 @@
 # ADR-0021：`gen` 职责拆分——新增 support/token，语义分析全部归 `check`
 
-日期：2026-11-06。状态：**GEN0/GEN1/F1 完成；GEN2/F3 首片完成（`sem_*` 与 ABI 算法迁 check）；F2/F4 待做**。
+日期：2026-11-06。状态：**已实施完成**（GEN0–GEN4 与 F2/F4 全部落地；`gen` 模块已删除，
+完成记录见 [finish-F4](../01-finished/finish-F4-comptime纯执行器-2026-11-06.md)）。
 
 关联：[ADR-0007](0007-yh编译器使用源码模块.md)（源码模块）、
 [ADR-0009](0009-yh采用check与IR及早期并行.md)（check/IR/并行）、
 [ADR-0020](0020-yh对象粒度停在模块级.md)（对象粒度）。
 前置方案：[todo](../todo.md) 的 F0–F7（前端两遍化）。
-实施计划：[yh-gen职责拆分实施方案-2026-11-06](../02-plan/yh-gen职责拆分实施方案-2026-11-06.md)。
+实施计划已随完成归档：[finish-F4](../01-finished/finish-F4-comptime纯执行器-2026-11-06.md)（含 GEN3 逐项核对与 GEN4 字段归属表）。
 
 ## 背景
 
@@ -29,10 +30,11 @@
 ### 1. 只新增两个模块
 
 ```text
-新增：support（L0 基础内核）  token（L0.5 词法/语法词汇与游标）
+新增：support（L0 基础内核，含共享数据层）  token（L0.5 词法/语法词汇与游标）
 复用：lex  parse  ast  check  comptime  lower  ir  backend  link  proj  cache
       builtin  testkit  build  cmdline  cmd
 不设：sema  diag  target  state  hir
+已删除：gen（GEN4 后由 support/token/check 承接）
 ```
 
 | 模块 | 职责 | 依赖 |
@@ -54,29 +56,29 @@ ir       → （无）
 token    → support
 cache    → support, token, hash
 lex      → support, token
-proj     → support, token
-comptime → support, token, proj          （纯执行器；不得 import check/gen/ast）
-ast      → token, support                （F1 后；过渡期含 comptime/proj/ir/gen）
-check    → ast, comptime, token, support, proj（快照/切片键可含 ir/cache）
-parse    → token, ast, lex, support      （F2 后；过渡期含 check/proj/gen/comptime/ir）
-lower    → check, ast, ir, token, support, proj, cache
-backend  → ir, support
-builtin  → check, support
-link     → support, proj, backend, hash
-build    → 下方全部 + gen（GEN3 前；GEN4 删除）
-testkit  → build, parse, link, proj, support, token
 cmdline  → support, libs
-cmd      → 全部（入口唯一例外）
+proj     → support, token
+ast      → support, token, proj, comptime
+comptime → support, token
+check    → support, ir, token, cache, proj, ast, comptime
+builtin  → support, check
+parse    → support, ir, token, lex, proj, ast, comptime, check
+lower    → support, ir, token, cache, proj, ast, check
+backend  → support, ir
+link     → support, proj, backend, hash
+build    → support, ir, token, cache, lex, proj, ast, comptime, check, builtin, parse, lower, backend, link, hash, libs
+testkit  → support, token, proj, ast, parse, link, build
+main     → support, ir, lex, cmdline, proj, ast, comptime, check, builtin, parse, lower, backend, link, build, testkit
 ```
 
 ### 3. 所有权映射
 
 | `gen` 内容 | 去向 | 判定 |
 | --- | --- | --- |
-| `TK_*`/`TOK_*`/`ATTR_*`/`Tok`/`PDecl` | `token` | 词法/语法共享词汇；`PDecl` 放 `token` 避免 `proj↔ast` 环 |
+| `TK_*`/`TOK_*`/`ATTR_*`/`Tok`/`PDecl` | `token`（`ATTR_*`/运算符码源头在 `support/model.yh`，`token` 转发） | 词法/语法共享词汇；`PDecl` 放 `token` 避免 `proj↔ast` 环 |
 | token 数组/游标（`c_toks`/`c_pos` 等） | `token` | **GEN1 已搬**；`err_tok`/`sem_err` 随 `err_lc`/DiagCtx 迁移 |
-| `CType`/`SField`/`TName`/`CSym`/`ModInfo`/`ImportEnt`/`ModNsEnt`/`PubAggDeferred` | `check` | 语义模型属于语义分析模块 |
-| `TY_*`/`SYM_*`/`F_*`/`CT_DIAG_*`/`Res` | `check` | 语义枚举/标志/过渡结果 |
+| `CType`/`SField`/`TName`/`CSym`/`ModInfo`/`ImportEnt`/`ModNsEnt`/`PubAggDeferred` | **`support`（最终落点）** | 跨 parse/check/comptime 共用；`check` 会与 `comptime` 成环，故以 `support/model`、`support/file_scope` 承接 |
+| `TY_*`/`SYM_*`/`F_*`/`CT_DIAG_*`/`Res` | **`support`** | 同上：跨层共享的语义枚举/标志/结果描述符 |
 | `symbols.yh` | `support`（名字池）+ `check`（类型/符号/折叠/命名空间） | 名字池是通用 intern 池，`proj/link/build` 也用 |
 | `sem_*.yh` | 全部 → `check`（F5 重写后迁） | 语义分析统一入口 |
 | `tg_layout_struct` / `abi_c.yh` / `static_data.yh` | `check` | 布局/ABI/静态数据是语义规则 |
@@ -183,13 +185,14 @@ cmd      → 全部（入口唯一例外）
 
 ## 后果
 
-- 模块数 17 → 18（新增 `support`/`token`，删除 `gen`）；`check` 变大，但它是
+- 模块数 17 → **18**（新增 `support`/`token`，GEN4 删除 `gen`）；`check` 变大，但它是
   唯一语义入口，文件按 `check/base` … `check/full` 分。
 - `comptime` 职责收窄为纯 CT IR 执行器；F4 必须完成类型/布局事实的传递。
 - `lower`/`builtin` 直接 import `check`；`backend` 只 import `support` 的
   ABI/目标常量，不拉入整个 `check`。
-- 过渡期临时边（GEN3/GEN4 删除）：`gen → support/token/check`、
-  `parse/build/testkit/cmd → gen`、`ast/check/comptime → gen`（残余字段）。
+- 过渡期临时边已在 GEN3/GEN4 全部删除：`gen` 模块不再存在，
+  `parse/build/testkit/cmd → gen`、`ast/check/comptime → gen` 均已归零。
+  现在 `comptime` 只依赖 `support/token`，值内核在 `support/value_kernel.yh`。
 - 模块接口/缓存键会变；编译器内部模块不承诺 `.s.i` 跨版本兼容。
 - `tests/modules/build-check.py` 的模块拷贝清单、`tools/compiler-tests.py` 的
   模块列表随阶段更新；fixture 的 `import gen` 改新模块。

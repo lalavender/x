@@ -263,8 +263,14 @@ lex → parse(纯语法) → AST
   评估结论：`parse` 内联读取 `Res` 语义字段 277 处，语法决策依赖语义结果，
   属前端重构级，**暂不推进**；「核收缩」替代路线已完成。见
   `docs/01-finished/yh-F2-核收缩与parse纯语法化结论-2026-11-06.md`。
-- [ ] **GEN3**：清 `gen` 语义残片/空壳；`lower`/`builtin` 改 import `check`，
-  `backend` 用 `support.ABI_*`；`build`/`cmd` 改调 `check` 入口。
+- [x] **GEN3（2026-11-06 完成）**：`gen` 语义残片/空壳已随 F4 收尾整体消失
+  （模块删除）；`lower`/`builtin` 改 import `check`、`backend` 用 `support.ABI_*`、
+  `build`/`cmd` 改调 `check` 入口；`arch-check` 的 `gen` 两条预算归零；
+  **新增 fixture `tests/modules/projects/gen-split/`**（用例
+  `gen3-split-narrow-ports`）覆盖拆分后的六组公开面：会话/语义表初始化、
+  token 写入与游标、名字池 intern、类型表构造、目标身份解析、诊断入口。
+  逐项核对见 `docs/01-finished/finish-F4-comptime纯执行器-2026-11-06.md` §5。
+- [x] **GEN4**：`TaskCtx` 189 → 0，`GenState`/`gen` 删除；字段归属表见同文档 §2.3。
 - [ ] **GEN4**：重盘 `TaskCtx`，拆 parse/check/build/link 残余上下文；删
   `GenState`/`gen`；刷新 arch-check、README/架构文档/统计，滚种子。
 

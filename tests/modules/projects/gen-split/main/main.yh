@@ -1,0 +1,63 @@
+module main
+import support
+import core.check
+import core.token
+
+// main：GEN3 的「拆分后窄口」回归——只 import support/token/check，
+// 逐层验证 GEN0–GEN4 拆分出来的公开面是否仍然可用、语义是否与拆分前一致：
+//   ① 会话/语义表初始化 ② token 表的写入与游标
+//   ③ 名字池 intern ④ 类型表构造（ptr/array/slice）
+//   ⑤ 目标身份解析 ⑥ 诊断入口（带位置 / 无位置）
+// gen 模块已删除，因此本 fixture 里出现任何 `gen.` 都会直接编译失败。
+fn main() int {
+    // ① 会话复位 + 语义表初始化（原 gen.state_init/sem_init_tables）
+    support.session_reset()
+    if (check.sem_init_tables() != 0) { return 1 }
+    if (check.ty_register_builtins() != 0) { return 2 }
+    if (support.ty_count() < 13) { return 3 }
+    if (support.ms().types[support.TY_I32].size != 4) { return 4 }
+
+    // ② token：写入 + 游标 + 带位置诊断（spec 模式静默，只验返回值）
+    if (token.push(token.TK_LET, 0, 3, 7, 5) != 0) { return 5 }
+    if (token.push(token.TOK_EOF, 3, 0, 8, 1) != 0) { return 6 }
+    if (token.ctx().count != 2) { return 7 }
+    if (token.ctx().tokens[0].kind != token.TK_LET || token.ctx().tokens[0].line != 7) { return 8 }
+    token.ctx().pos = 0
+    // 诊断渲染要读源文件名：先给一个稳定的路径，避免空指针。
+    support.src_ctx().path = "gen-split.yh"
+    support.diag().spec = 1
+    if (token.err_tok("probe") != -1) { return 9 }
+    // spec 模式下不打印、不计数
+    if (support.diag().errors != 0) { return 10 }
+    support.diag().spec = 0
+    if (support.err_lc(1, 2, "probe") != -1) { return 11 }
+    if (support.diag().errors != 1) { return 12 }
+
+    // ③ 名字池：intern 后能用池偏移取回原字节
+    support.src_ctx().data = "abc".to_type(*u8)
+    support.src_ctx().length = 3
+    let off int = support.name_intern(0, 3)
+    if (off < 0) { return 13 }
+    if (support.pool_ctx().data[off] != 'a' || support.pool_ctx().data[off + 2] != 'c') { return 14 }
+    if (token.ctx().pos != 0) { return 15 }
+
+    // ④ 类型表：ptr / array / slice 的构造结果
+    let p int = check.ty_ptr(support.TY_I32)
+    if (p < 0 || support.ms().types[p].kind != support.TY_PTR
+        || support.ms().types[p].elem != support.TY_I32) { return 16 }
+    let a int = check.ty_array(support.TY_U8, 4)
+    if (a < 0 || support.ms().types[a].kind != support.TY_ARRAY
+        || support.ms().types[a].len != 4 || support.ms().types[a].size != 4) { return 17 }
+    let s int = check.ty_slice(support.TY_I32)
+    if (s < 0 || support.ms().types[s].kind != support.TY_SLICE
+        || support.ms().types[s].size != 16) { return 18 }
+
+    // ⑤ 目标身份：拆分后 target 事实归 support（原 gen.target）
+    let target support.TargetInfo
+    if (support.target_resolve("aarch64-unknown-linux-gnu", &target) != 0) { return 19 }
+    if (target.os != support.TARGET_OS_LINUX || target.arch != support.TARGET_ARCH_ARM64) { return 20 }
+    if (support.cfg() == 0) { return 21 }
+    if (support.cfg().target.triple == 0) { return 22 }
+    printf("gen-split=ok\n")
+    return 0
+}
