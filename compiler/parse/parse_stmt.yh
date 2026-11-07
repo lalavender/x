@@ -47,15 +47,15 @@ fn scan_assign_ahead() int {
 }
 
 // sem_check_cond：条件上下文类型检查（标量且非浮点）。
-fn sem_check_cond(r *gen.Res) int {
+fn sem_check_cond(r *support.Res) int {
     if (support.session().compile == 0) {
         return 0
     }
     if (gen.ty_is_scalar(r.type_id) == 0) {
-        return gen.sem_err("条件必须是标量")
+        return token.err_tok("条件必须是标量")
     }
     if (support.ty_is_float(r.type_id) != 0) {
-        return gen.sem_err("浮点不能作条件（用 != 0 比较）")
+        return token.err_tok("浮点不能作条件（用 != 0 比较）")
     }
     return 0
 }
@@ -236,7 +236,7 @@ fn parse_stmt_inner() int {
     // 表达式语句 / 单目标赋值
     let aop int = scan_assign_ahead()
     if (aop != 0) {
-        let lres gen.Res
+        let lres support.Res
         let save int = support.fc().c_lvalue
         support.fc().c_lvalue += 1
         let r int = parse_expr(&lres)
@@ -245,7 +245,7 @@ fn parse_stmt_inner() int {
             return -1
         }
         if (support.session().compile != 0 && support.fc().c_res_is_addr == 0) {
-            return gen.sem_err("赋值目标必须是可寻址的表达式")
+            return token.err_tok("赋值目标必须是可寻址的表达式")
         }
         // 消费赋值运算符
         p_adv()
@@ -254,7 +254,7 @@ fn parse_stmt_inner() int {
         }
         // RHS 恒为值上下文（清 c_lvalue，避免 s[i] 被取地址）；
         // 数组/切片字面量以左值类型为目标类型上下文
-        let rres gen.Res
+        let rres support.Res
         let save_lv2 int = support.fc().c_lvalue
         support.fc().c_lvalue = 0
         let save_exp int = support.fc().c_expect_tid
@@ -275,7 +275,7 @@ fn parse_stmt_inner() int {
         }
         return p_expect(token.TK_SEMI, "期望 ';'")
     }
-    let res gen.Res
+    let res support.Res
     let saved_diag_stmt int = support.fc().c_ct_diag_stmt
     support.fc().c_ct_diag_stmt = 1
     let expr_status int = parse_expr(&res)
@@ -285,9 +285,9 @@ fn parse_stmt_inner() int {
     }
     if (p_expect(token.TK_SEMI, "期望 ';'") != 0) { return -1 }
     if (support.session().compile != 0 && res.ct_diag != 0
-        && (support.fc().c_fn_flags & gen.F_COMPTIME) == 0
+        && (support.fc().c_fn_flags & support.F_COMPTIME) == 0
         && !(ctx().test_body != 0
-            && res.ct_diag == gen.CT_DIAG_ASSERT)) {
+            && res.ct_diag == support.CT_DIAG_ASSERT)) {
         return comptime.ct_diag_emit(res.ct_diag, res.ival,
             res.ct_diag_line, res.ct_diag_col,
             res.ct_diag_msg_start, res.ct_diag_msg_len)
@@ -316,18 +316,18 @@ fn parse_stmt() int {
 fn parse_return() int {
     p_adv()
     if (support.session().compile != 0) {
-        if ((support.fc().c_fn_flags & gen.F_NORETURN) != 0) {
-            return gen.sem_err("noreturn 函数定义不能包含 return")
+        if ((support.fc().c_fn_flags & support.F_NORETURN) != 0) {
+            return token.err_tok("noreturn 函数定义不能包含 return")
         }
-        if (support.fc().c_fn_ret == gen.TY_VOID && p_cur() != token.TK_SEMI) {
-            return gen.sem_err("void 函数不能返回值")
+        if (support.fc().c_fn_ret == support.TY_VOID && p_cur() != token.TK_SEMI) {
+            return token.err_tok("void 函数不能返回值")
         }
-        if (support.fc().c_fn_ret != gen.TY_VOID && p_cur() == token.TK_SEMI) {
-            return gen.sem_err("非 void 函数必须返回值")
+        if (support.fc().c_fn_ret != support.TY_VOID && p_cur() == token.TK_SEMI) {
+            return token.err_tok("非 void 函数必须返回值")
         }
     }
     if (p_cur() != token.TK_SEMI) {
-        let r gen.Res
+        let r support.Res
         // 聚合字面量需要目标类型上下文：return 表达式的目标类型是函数返回类型
         // （与 let 初始化/赋值/调用实参一致，见 parse_array_literal）；非字面量
         // 表达式不受影响，随后的 sem_can_assign 仍做完整校验。
@@ -358,7 +358,7 @@ fn parse_if() int {
     if (p_expect(token.TK_LPAREN, "if 条件必须带括号") != 0) {
         return -1
     }
-    let cond gen.Res
+    let cond support.Res
     if (parse_expr_iso(&cond) != 0) {
         return -1
     }
@@ -465,12 +465,12 @@ fn parse_for() int {
                 p_adv()
                 p_adv()
             }
-            let it gen.Res
+            let it support.Res
             if (parse_expr_blockctx(&it) != 0) {
                 return -1
             }
             let is_range int = 0
-            let end_res gen.Res
+            let end_res support.Res
             let start_off int = 0
             if (p_cur() == token.TK_RANGE) {
                 is_range = 1
@@ -513,7 +513,7 @@ fn parse_for() int {
                 eoff = support.ms().syms[esym].offset
             }
             if (idx_start >= 0) {
-                let isym int = check.sem_declare_local(idx_start, idx_len, gen.TY_I32)
+                let isym int = check.sem_declare_local(idx_start, idx_len, support.TY_I32)
                 if (isym < 0) { return -1 }
                 if (support.session().ast_capture != 0 && ast.ast_binding_add(isym, idx_token, 0) != 0) {
                     return -1
@@ -541,7 +541,7 @@ fn parse_for() int {
             return -1
         }
     }
-    let cond gen.Res
+    let cond support.Res
     if (parse_expr_blockctx(&cond) != 0) {
         return -1
     }
@@ -570,14 +570,14 @@ fn parse_for() int {
 // default 分支的块体无条件执行（排在源码位置）。
 fn parse_switch() int {
     p_adv()
-    let ctrl gen.Res
+    let ctrl support.Res
     if (parse_expr_blockctx(&ctrl) != 0) {
         return -1
     }
     let slot int = 0
     if (support.session().compile != 0) {
         if (support.ty_is_integer(ctrl.type_id) == 0) {
-            return gen.sem_err("switch 控制值必须是整数")
+            return token.err_tok("switch 控制值必须是整数")
         }
     }
     if (p_expect(token.TK_LBRACE, "期望 '{'") != 0) {
@@ -597,7 +597,7 @@ fn parse_switch() int {
         if (is_case != 0) {
             p_adv()
             for 1 {
-                let cv gen.Res
+                let cv support.Res
                 if (support.session().compile != 0) {
                     support.fc().c_fold += 1
                 }
@@ -610,11 +610,11 @@ fn parse_switch() int {
                 }
                 if (support.session().compile != 0) {
                     if (cv.is_const == 0) {
-                        return gen.sem_err("case 值必须是编译期常量")
+                        return token.err_tok("case 值必须是编译期常量")
                     }
                     ncases += 1
                     if (ncases > 512) {
-                        return gen.sem_err("switch 分支过多（上限 512 个 case 值）")
+                        return token.err_tok("switch 分支过多（上限 512 个 case 值）")
                     }
                 }
                 if (p_cur() == token.TK_COMMA) {

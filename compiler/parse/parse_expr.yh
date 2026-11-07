@@ -50,7 +50,7 @@ fn px_nest_leave() void {
 }
 
 // parse_expr：表达式入口（= 条件表达式层；`$if` 表达式位于链最上层）。
-fn parse_expr(res *gen.Res) int {
+fn parse_expr(res *support.Res) int {
     if (px_nest_enter() != 0) {
         return -1
     }
@@ -59,7 +59,7 @@ fn parse_expr(res *gen.Res) int {
     return r
 }
 
-fn parse_expr_inner(res *gen.Res) int {
+fn parse_expr_inner(res *support.Res) int {
     if (p_cur() == token.TK_DOLLAR && p_peek(1) == token.TK_IF) {
         // 与三元同等的 capture 语义：子表达式以 depth>0 解析（不会误挂语句
         // 表达式边），CTIF 节点本身在最外层 depth==0 时挂载。
@@ -71,7 +71,7 @@ fn parse_expr_inner(res *gen.Res) int {
         ast.ast_expr_depth_add(-1)
         if (r == 0 && support.session().compile != 0 && res.ct_diag != 0
             && support.fc().c_ct_diag_stmt == 0) {
-            return gen.sem_err("编译期诊断只能作为独立语句")
+            return token.err_tok("编译期诊断只能作为独立语句")
         }
         if (r == 0 && res.ct_diag == 0 && ast.ast_expr_depth_now() == 0
             && ast.ast_stmt_add_expr(res.ast_id) != 0) {
@@ -83,7 +83,7 @@ fn parse_expr_inner(res *gen.Res) int {
         let r int = parse_ternary(res)
         if (r == 0 && support.session().compile != 0 && res.ct_diag != 0
             && support.fc().c_ct_diag_stmt == 0) {
-            return gen.sem_err("编译期诊断只能作为独立语句")
+            return token.err_tok("编译期诊断只能作为独立语句")
         }
         return r
     }
@@ -92,7 +92,7 @@ fn parse_expr_inner(res *gen.Res) int {
     ast.ast_expr_depth_add(-1)
     if (r == 0 && support.session().compile != 0 && res.ct_diag != 0
         && support.fc().c_ct_diag_stmt == 0) {
-        return gen.sem_err("编译期诊断只能作为独立语句")
+        return token.err_tok("编译期诊断只能作为独立语句")
     }
     if (r == 0 && res.ct_diag == 0 && ast.ast_expr_depth_now() == 0
         && ast.ast_stmt_add_expr(res.ast_id) != 0) {
@@ -109,7 +109,7 @@ fn parse_expr_inner(res *gen.Res) int {
 // 执行器（ct_ir kind 14）按 cond 的编译期值选支。合流按类型相等，
 // 字面量分支可向另一分支类型窄化/加宽（复用 sem_can_assign 的 is_lit
 // 路径，与 `?:` 的赋值语义一致）。
-fn parse_ct_if_expr(res *gen.Res) int {
+fn parse_ct_if_expr(res *support.Res) int {
     let typed int = (support.fc().c_ct_prepare_active != 0 && support.session().ast_capture != 0).to_type(int)
     let first int = token.ctx().pos
     let cond_ast int = -1
@@ -118,7 +118,7 @@ fn parse_ct_if_expr(res *gen.Res) int {
     p_adv()
     p_adv() // 消费 `$` 与 `if`
     if (p_expect(token.TK_LPAREN, "$if 条件必须带括号") != 0) { return -1 }
-    let cond gen.Res
+    let cond support.Res
     let saved_fold int = support.fc().c_fold
     let saved_target_ctx int = support.fc().c_ct_target_ctx
     if (support.session().compile != 0 && typed == 0) {
@@ -136,7 +136,7 @@ fn parse_ct_if_expr(res *gen.Res) int {
         if (sem_check_cond(&cond) != 0) { return -1 }
         if (typed == 0) {
             if (cond.is_const == 0) {
-                return gen.sem_err("$if 表达式条件必须是编译期常量")
+                return token.err_tok("$if 表达式条件必须是编译期常量")
             }
             selected = (cond.ival != 0).to_type(int)
         }
@@ -144,7 +144,7 @@ fn parse_ct_if_expr(res *gen.Res) int {
     if (support.session().ast_capture != 0) { cond_ast = cond.ast_id }
     // then 分支：普通路径未选时静默发射但保留语义检查，不捕获 AST。
     let saved_capture int = support.session().ast_capture
-    let then gen.Res
+    let then support.Res
     if (typed == 0 && support.session().compile != 0 && selected == 0) {
         support.session().ast_capture = 0
     }
@@ -160,7 +160,7 @@ fn parse_ct_if_expr(res *gen.Res) int {
     p_adv()
     p_adv()
     // else 分支：普通路径选中 then 时静默发射，仍做完整语义检查。
-    let els gen.Res
+    let els support.Res
     if (typed == 0 && support.session().compile != 0 && selected == 1) {
         support.session().ast_capture = 0
     }
@@ -177,7 +177,7 @@ fn parse_ct_if_expr(res *gen.Res) int {
     if (support.session().compile != 0) {
         if (typed == 0) {
             // 普通路径：结果取选中分支的值语义，类型用合流类型。
-            let src gen.Res
+            let src support.Res
             if (selected != 0) {
                 check.sem_res_copy(&src, &then)
             } else {
@@ -201,7 +201,7 @@ fn parse_ct_if_expr(res *gen.Res) int {
 // ct_if_merge_type：$if 表达式两分支的类型合流检查。
 // 两支类型相等 → 该类型；字面量分支可通过 sem_can_assign 的 is_lit 路径
 // 向另一分支类型窄化/加宽（与 `?:` 的赋值语义一致）；其余拒绝。
-fn ct_if_merge_type(then *gen.Res, els *gen.Res, merged *int) int {
+fn ct_if_merge_type(then *support.Res, els *support.Res, merged *int) int {
     if (then.type_id == els.type_id) {
         merged[0] = then.type_id
         return 0
@@ -218,21 +218,21 @@ fn ct_if_merge_type(then *gen.Res, els *gen.Res, merged *int) int {
         merged[0] = then.type_id
         return 0
     }
-    return gen.sem_err("$if 表达式两个分支的类型不一致")
+    return token.err_tok("$if 表达式两个分支的类型不一致")
 }
 
 // parse_array_literal：数组/切片字面量 '[' e1, e2, ... ']'。
 // 目标类型取自 c_expect_tid（let 初始化/赋值上下文预先设置）；无上下文
 // 干净拒绝。数组要求元素个数与长度一致；切片按元素个数建 {len, data}
 // 视图。元素先逐个求值压栈，再逆序弹入临时数组（与类型化变参打包同法）。
-fn parse_array_literal(res *gen.Res, first int) int {
+fn parse_array_literal(res *support.Res, first int) int {
     let tid int = support.fc().c_expect_tid
     support.fc().c_expect_tid = -1
     if (support.session().compile == 0) {
         // 语法模式：只消费元素 token
         if (p_cur() != token.TK_RBRACKET) {
             for 1 {
-                let d gen.Res
+                let d support.Res
                 if (parse_expr_iso(&d) != 0) {
                     return -1
                 }
@@ -247,11 +247,11 @@ fn parse_array_literal(res *gen.Res, first int) int {
         return p_expect(token.TK_RBRACKET, "期望 ']'")
     }
     if (tid < 0) {
-        return gen.sem_err("数组/切片字面量需要目标类型上下文（let 初始化或同型赋值）")
+        return token.err_tok("数组/切片字面量需要目标类型上下文（let 初始化或同型赋值）")
     }
     let fk int = support.ms().types[tid].kind
-    if (fk != gen.TY_ARRAY && fk != gen.TY_SLICE) {
-        return gen.sem_err("数组/切片字面量的目标必须是数组或切片类型")
+    if (fk != support.TY_ARRAY && fk != support.TY_SLICE) {
+        return token.err_tok("数组/切片字面量的目标必须是数组或切片类型")
     }
     let elem int = support.ms().types[tid].elem
     let esz int = support.ms().types[elem].size
@@ -260,7 +260,7 @@ fn parse_array_literal(res *gen.Res, first int) int {
     let count int = 0
     if (p_cur() != token.TK_RBRACKET) {
         for 1 {
-            let e gen.Res
+            let e support.Res
             let save_lv int = support.fc().c_lvalue
             let save_expect int = support.fc().c_expect_tid
             support.fc().c_lvalue = 0
@@ -292,11 +292,11 @@ fn parse_array_literal(res *gen.Res, first int) int {
     if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) {
         return -1
     }
-    if (fk == gen.TY_ARRAY && count != support.ms().types[tid].len) {
-        return gen.sem_err("数组字面量元素个数与数组长度不一致")
+    if (fk == support.TY_ARRAY && count != support.ms().types[tid].len) {
+        return token.err_tok("数组字面量元素个数与数组长度不一致")
     }
     if (support.fc().c_fold != 0) {
-        return gen.sem_err("数组/切片字面量不是编译期常量")
+        return token.err_tok("数组/切片字面量不是编译期常量")
     }
     check.sem_res_reset(res, tid)
     res.is_lit = 0
@@ -310,7 +310,7 @@ fn parse_array_literal(res *gen.Res, first int) int {
 }
 
 // parse_expr_iso：隔离上下文——「IDENT {」恒按结构体字面量处理。
-fn parse_expr_iso(res *gen.Res) int {
+fn parse_expr_iso(res *support.Res) int {
     let save int = ctx().ctx_block
     ctx().ctx_block = 0
     let r int = parse_expr(res)
@@ -319,7 +319,7 @@ fn parse_expr_iso(res *gen.Res) int {
 }
 
 // parse_expr_blockctx：块跟随上下文——for/switch/case 头部表达式。
-fn parse_expr_blockctx(res *gen.Res) int {
+fn parse_expr_blockctx(res *support.Res) int {
     let save int = ctx().ctx_block
     ctx().ctx_block = 1
     let r int = parse_expr(res)
@@ -328,7 +328,7 @@ fn parse_expr_blockctx(res *gen.Res) int {
 }
 
 // parse_ternary：cond ? a : b（右结合；两支经值栈汇合）。
-fn parse_ternary(res *gen.Res) int {
+fn parse_ternary(res *support.Res) int {
     if (parse_logical_or(res) != 0) {
         return -1
     }
@@ -343,7 +343,7 @@ fn parse_ternary(res *gen.Res) int {
         if (check.sem_ternary_cond(res) != 0) {
             return -1
         }
-        let mid gen.Res
+        let mid support.Res
         if (parse_expr(&mid) != 0) {
             return -1
         }
@@ -373,7 +373,7 @@ fn parse_ternary(res *gen.Res) int {
 }
 
 // parse_logical_or：a || b（短路）。
-fn parse_logical_or(res *gen.Res) int {
+fn parse_logical_or(res *support.Res) int {
     if (parse_logical_and(res) != 0) {
         return -1
     }
@@ -405,7 +405,7 @@ fn parse_logical_or(res *gen.Res) int {
 }
 
 // parse_logical_and：a && b（短路）。
-fn parse_logical_and(res *gen.Res) int {
+fn parse_logical_and(res *support.Res) int {
     if (parse_bit_or(res) != 0) {
         return -1
     }
@@ -437,7 +437,7 @@ fn parse_logical_and(res *gen.Res) int {
 }
 
 // parse_bit_or：a | b。
-fn parse_bit_or(res *gen.Res) int {
+fn parse_bit_or(res *support.Res) int {
     if (parse_bit_xor(res) != 0) {
         return -1
     }
@@ -450,7 +450,7 @@ fn parse_bit_or(res *gen.Res) int {
         }
         let op int = token.TK_PIPE
         p_adv()
-        let rhs gen.Res
+        let rhs support.Res
         if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_bit_xor(&rhs) != 0) {
             return -1
@@ -467,7 +467,7 @@ fn parse_bit_or(res *gen.Res) int {
 }
 
 // parse_bit_xor：a ^ b。
-fn parse_bit_xor(res *gen.Res) int {
+fn parse_bit_xor(res *support.Res) int {
     if (parse_bit_and(res) != 0) {
         return -1
     }
@@ -480,7 +480,7 @@ fn parse_bit_xor(res *gen.Res) int {
         }
         let op int = token.TK_CARET
         p_adv()
-        let rhs gen.Res
+        let rhs support.Res
         if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_bit_and(&rhs) != 0) {
             return -1
@@ -497,7 +497,7 @@ fn parse_bit_xor(res *gen.Res) int {
 }
 
 // parse_bit_and：a & b。
-fn parse_bit_and(res *gen.Res) int {
+fn parse_bit_and(res *support.Res) int {
     if (parse_equality(res) != 0) {
         return -1
     }
@@ -510,7 +510,7 @@ fn parse_bit_and(res *gen.Res) int {
         }
         let op int = token.TK_AMP
         p_adv()
-        let rhs gen.Res
+        let rhs support.Res
         if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_equality(&rhs) != 0) {
             return -1
@@ -527,7 +527,7 @@ fn parse_bit_and(res *gen.Res) int {
 }
 
 // parse_equality：a == b、a != b。
-fn parse_equality(res *gen.Res) int {
+fn parse_equality(res *support.Res) int {
     if (parse_relational(res) != 0) {
         return -1
     }
@@ -540,7 +540,7 @@ fn parse_equality(res *gen.Res) int {
             first = ast.ast_expr_start(left_ast)
         }
         p_adv()
-        let rhs gen.Res
+        let rhs support.Res
         if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_relational(&rhs) != 0) {
             return -1
@@ -557,7 +557,7 @@ fn parse_equality(res *gen.Res) int {
 }
 
 // parse_relational：a < b、<=、>、>=。
-fn parse_relational(res *gen.Res) int {
+fn parse_relational(res *support.Res) int {
     if (parse_shift(res) != 0) {
         return -1
     }
@@ -570,7 +570,7 @@ fn parse_relational(res *gen.Res) int {
             first = ast.ast_expr_start(left_ast)
         }
         p_adv()
-        let rhs gen.Res
+        let rhs support.Res
         if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_shift(&rhs) != 0) {
             return -1
@@ -587,7 +587,7 @@ fn parse_relational(res *gen.Res) int {
 }
 
 // parse_shift：a << b、a >> b。
-fn parse_shift(res *gen.Res) int {
+fn parse_shift(res *support.Res) int {
     if (parse_additive(res) != 0) {
         return -1
     }
@@ -600,7 +600,7 @@ fn parse_shift(res *gen.Res) int {
             first = ast.ast_expr_start(left_ast)
         }
         p_adv()
-        let rhs gen.Res
+        let rhs support.Res
         if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_additive(&rhs) != 0) {
             return -1
@@ -617,7 +617,7 @@ fn parse_shift(res *gen.Res) int {
 }
 
 // parse_additive：a + b、a - b（含指针 ± 整数）。
-fn parse_additive(res *gen.Res) int {
+fn parse_additive(res *support.Res) int {
     if (parse_multiplicative(res) != 0) {
         return -1
     }
@@ -630,7 +630,7 @@ fn parse_additive(res *gen.Res) int {
             first = ast.ast_expr_start(left_ast)
         }
         p_adv()
-        let rhs gen.Res
+        let rhs support.Res
         if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_multiplicative(&rhs) != 0) {
             return -1
@@ -647,7 +647,7 @@ fn parse_additive(res *gen.Res) int {
 }
 
 // parse_multiplicative：a * b、a / b、a % b。
-fn parse_multiplicative(res *gen.Res) int {
+fn parse_multiplicative(res *support.Res) int {
     if (parse_unary(res) != 0) {
         return -1
     }
@@ -660,7 +660,7 @@ fn parse_multiplicative(res *gen.Res) int {
             first = ast.ast_expr_start(left_ast)
         }
         p_adv()
-        let rhs gen.Res
+        let rhs support.Res
         if (check.sem_push_value(res) != 0) { return -1 }
         if (parse_unary(&rhs) != 0) {
             return -1
@@ -679,7 +679,7 @@ fn parse_multiplicative(res *gen.Res) int {
 // parse_unary：一元运算（可嵌套；后缀优先于一元）。
 // AMP 取地址：操作数按 lvalue 解析出地址；STAR 解引用：操作数恒按值
 // 解析（得到指针值），结果作为地址参与外层（c_lvalue 语义由钩子处理）。
-fn parse_unary(res *gen.Res) int {
+fn parse_unary(res *support.Res) int {
     let k int = p_cur()
     if (k == token.TK_MINUS || k == token.TK_PLUS || k == token.TK_BANG || k == token.TK_TILDE) {
         let first int = token.ctx().pos
@@ -743,7 +743,7 @@ fn parse_unary(res *gen.Res) int {
 }
 
 // parse_postfix：后缀链：调用、下标、.to_type(T)、.成员。
-fn parse_postfix(res *gen.Res) int {
+fn parse_postfix(res *support.Res) int {
     if (parse_primary(res) != 0) {
         return -1
     }
@@ -751,9 +751,9 @@ fn parse_postfix(res *gen.Res) int {
         let k int = p_cur()
         if (k == token.TK_LPAREN) {
             if (support.session().compile != 0 && res.sym >= 0 && res.sym < support.ms().sym_n
-                && support.ms().syms[res.sym].kind == gen.SYM_FN
-                && (support.ms().syms[res.sym].flags & gen.F_COMPTIME) != 0) {
-                return gen.sem_err("编译期函数必须使用 $函数(...) 调用")
+                && support.ms().syms[res.sym].kind == support.SYM_FN
+                && (support.ms().syms[res.sym].flags & support.F_COMPTIME) != 0) {
+                return token.err_tok("编译期函数必须使用 $函数(...) 调用")
             }
             let base_ast int = -1
             let first int = token.ctx().pos
@@ -774,7 +774,7 @@ fn parse_postfix(res *gen.Res) int {
             let sig int = -1
             let np int = 0
             if (direct == 1 && support.session().compile != 0 && res.type_id >= 0) {
-                if (support.ms().types[res.type_id].kind == gen.TY_FN) {
+                if (support.ms().types[res.type_id].kind == support.TY_FN) {
                     sig = support.ms().types[res.type_id].sub
                     np = support.ms().sig_np[sig]
                 }
@@ -783,7 +783,7 @@ fn parse_postfix(res *gen.Res) int {
             let args int = -1
             if (p_cur() != token.TK_RPAREN) {
                 for 1 {
-                    let arg gen.Res
+                    let arg support.Res
                     let save_exp2 int = support.fc().c_expect_tid
                     if (sig >= 0 && argi < np) {
                         support.fc().c_expect_tid = support.ms().sig_params[support.ms().sig_first[sig] + argi]
@@ -831,7 +831,7 @@ fn parse_postfix(res *gen.Res) int {
             // 清 c_lvalue）→ 遇 '..' 为切片形态（再解析终点），否则普通下标
             p_adv()
             if (check.sem_push_value(res) != 0) { return -1 }
-            let idx gen.Res
+            let idx support.Res
             let save_lv int = support.fc().c_lvalue
             support.fc().c_lvalue = 0
             let ir int = parse_expr(&idx)
@@ -843,7 +843,7 @@ fn parse_postfix(res *gen.Res) int {
                 // base[start..end]：start 压栈后解析 end（值在 x0）
                 p_adv()
                 if (check.sem_push_value(&idx) != 0) { return -1 }
-                let eidx gen.Res
+                let eidx support.Res
                 support.fc().c_lvalue = 0
                 let er int = parse_expr(&eidx)
                 support.fc().c_lvalue = save_lv
@@ -916,10 +916,10 @@ fn parse_postfix(res *gen.Res) int {
                 let meta_bits int = 0
                 if (support.session().compile != 0 && res.sym >= 0 && res.sym < support.ms().sym_n) {
                     meta_bits = support.ms().syms[res.sym].flags &
-                        (gen.F_ENUM_META | gen.F_FIELD_META)
+                        (support.F_ENUM_META | support.F_FIELD_META)
                 }
-                let enum_meta int = ((meta_bits & gen.F_ENUM_META) != 0).to_type(int)
-                let field_meta int = ((meta_bits & gen.F_FIELD_META) != 0).to_type(int)
+                let enum_meta int = ((meta_bits & support.F_ENUM_META) != 0).to_type(int)
+                let field_meta int = ((meta_bits & support.F_FIELD_META) != 0).to_type(int)
                 let enum_name int = (enum_meta != 0 && p_tok_text_is("name", 4) != 0).to_type(int)
                 let enum_value int = (enum_meta != 0 && p_tok_text_is("value", 5) != 0).to_type(int)
                 let field_name int = (field_meta != 0 && p_tok_text_is("name", 4) != 0).to_type(int)
@@ -927,7 +927,7 @@ fn parse_postfix(res *gen.Res) int {
                 if (field_meta != 0) {
                     // 字段元信息：只投影 .name（字段名字符串常量）。
                     if (field_name == 0 || n != 4) {
-                        return gen.sem_err("字段元信息迭代变量只支持 .name")
+                        return token.err_tok("字段元信息迭代变量只支持 .name")
                     }
                     if (check.sem_field_meta_name(res) != 0) { return -1 }
                     if (support.session().ast_capture != 0) {
@@ -948,7 +948,7 @@ fn parse_postfix(res *gen.Res) int {
                     } else if (enum_value != 0 && n == 5) {
                         if (check.sem_enum_meta_value(res) != 0) { return -1 }
                     } else {
-                        return gen.sem_err("枚举 values 迭代变量只支持 .name 和 .value")
+                        return token.err_tok("枚举 values 迭代变量只支持 .name 和 .value")
                     }
                     if (support.session().ast_capture != 0) {
                         let id int = ast.ast_expr_add(ast.AST_EXPR_PRIMARY, ast_op,
@@ -977,19 +977,19 @@ fn parse_postfix(res *gen.Res) int {
     if (support.session().compile != 0 && ctx().ct_meta_bare == 0
         && res.sym >= 0 && res.sym < support.ms().sym_n) {
         let bare_meta int = support.ms().syms[res.sym].flags &
-            (gen.F_ENUM_META | gen.F_FIELD_META)
-        if ((bare_meta & gen.F_FIELD_META) != 0) {
-            return gen.sem_err("字段元信息迭代变量必须访问 .name 或作类型谓词实参")
+            (support.F_ENUM_META | support.F_FIELD_META)
+        if ((bare_meta & support.F_FIELD_META) != 0) {
+            return token.err_tok("字段元信息迭代变量必须访问 .name 或作类型谓词实参")
         }
         if (bare_meta != 0) {
-            return gen.sem_err("枚举 values 迭代变量必须访问 .name 或 .value")
+            return token.err_tok("枚举 values 迭代变量必须访问 .name 或 .value")
         }
     }
     return 0
 }
 
 // parse_primary：基本表达式。进入时重置地址标记。
-fn parse_primary(res *gen.Res) int {
+fn parse_primary(res *support.Res) int {
     let first int = token.ctx().pos
     let op int = p_cur()
     if (parse_primary_impl(res, first) != 0) {
@@ -1025,11 +1025,11 @@ fn parse_comptime_pred_kind() int {
 // c_em_suppress 静默发射做完整语义检查）；结果恒为编译期布尔常量：
 // 普通路径直接折叠，typed 捕获记入常量节点后由执行器经 PRIMARY 常量
 // 路径返回，无需新增 typed IR kind。
-fn parse_comptime_pred(res *gen.Res, kind int) int {
+fn parse_comptime_pred(res *support.Res, kind int) int {
     let first int = token.ctx().pos
     p_adv() // 谓词名
     if (p_expect(token.TK_LPAREN, "类型谓词期望 '('") != 0) { return -1 }
-    let x gen.Res
+    let x support.Res
     let saved_fold int = support.fc().c_fold
     let saved_bare int = ctx().ct_meta_bare
     // 谓词不求值实参：折叠上下文（如 $if 条件）下也按普通语义解析，
@@ -1054,8 +1054,8 @@ fn parse_comptime_pred(res *gen.Res, kind int) int {
         else if (kind == 2) { v = support.ty_is_integer(x.type_id) }
         else { v = support.ty_is_float(x.type_id) }
     }
-    let c gen.Res
-    if (support.sem_res_const(&c, gen.TY_BOOL, v.to_type(i64)) != 0) { return -1 }
+    let c support.Res
+    if (support.sem_res_const(&c, support.TY_BOOL, v.to_type(i64)) != 0) { return -1 }
     check.sem_res_copy(res, &c)
     support.fc().c_res_is_addr = 0
     if (support.session().ast_capture != 0
@@ -1070,11 +1070,11 @@ fn parse_comptime_pred(res *gen.Res, kind int) int {
 // （值/地址形态、指针基底自动解引用都与 `.` 一致）；typed 捕获为
 // AST_EXPR_CTFIELD 节点（op = 按名字解析出的字段下标），执行器按下标读取。
 // 写入路径（ct_ir_lvalue）不识别该节点，因此赋值自然按只读拒绝。
-fn parse_comptime_field_access(res *gen.Res) int {
+fn parse_comptime_field_access(res *support.Res) int {
     let first int = token.ctx().pos
     p_adv() // 消费 field 名
     if (p_expect(token.TK_LPAREN, "$field 期望 '('") != 0) { return -1 }
-    let base gen.Res
+    let base support.Res
     if (parse_expr_iso(&base) != 0) { return -1 }
     if (p_expect(token.TK_COMMA, "$field 需要第二个参数（字段名字符串）") != 0) {
         return -1
@@ -1087,24 +1087,24 @@ fn parse_comptime_field_access(res *gen.Res) int {
     p_adv()
     if (p_expect(token.TK_RPAREN, "期望 ')' ") != 0) { return -1 }
     if (support.session().compile == 0) { return 0 }
-    if (str_len < 3) { return gen.sem_err("$field 的字段名不能为空") }
+    if (str_len < 3) { return token.err_tok("$field 的字段名不能为空") }
     let name_start int = str_start + 1
     let name_len int = str_len - 2
     let owner int = base.type_id
     if (owner >= 0 && owner < support.ms().type_n
-        && support.ms().types[owner].kind == gen.TY_PTR) {
+        && support.ms().types[owner].kind == support.TY_PTR) {
         owner = support.ms().types[owner].elem
     }
     if (owner < 0 || owner >= support.ms().type_n
-        || (support.ms().types[owner].kind != gen.TY_STRUCT
-            && support.ms().types[owner].kind != gen.TY_UNION)) {
-        return gen.sem_err("$field 的左侧不是结构体或结构体指针")
+        || (support.ms().types[owner].kind != support.TY_STRUCT
+            && support.ms().types[owner].kind != support.TY_UNION)) {
+        return token.err_tok("$field 的左侧不是结构体或结构体指针")
     }
     let field_index int = -1
     let nf int = support.ms().types[owner].len
     let i int = 0
     for i < nf {
-        let fld gen.SField = support.ms().fields[support.ms().types[owner].sub + i]
+        let fld support.SField = support.ms().fields[support.ms().types[owner].sub + i]
         if (fld.name_len == name_len) {
             let same int = 1
             let j int = 0
@@ -1122,7 +1122,7 @@ fn parse_comptime_field_access(res *gen.Res) int {
         }
         i += 1
     }
-    if (field_index < 0) { return gen.sem_err("结构体没有该字段") }
+    if (field_index < 0) { return token.err_tok("结构体没有该字段") }
     let base_ast int = base.ast_id
     if (check.sem_member(&base, name_start, name_len) != 0) { return -1 }
     check.sem_res_copy(res, &base)
@@ -1137,7 +1137,7 @@ fn parse_comptime_field_access(res *gen.Res) int {
 }
 
 // parse_comptime_call：解析 $fn(args) 或 $module.fn(args)，并执行 CT 正文。
-fn parse_comptime_call(res *gen.Res) int {
+fn parse_comptime_call(res *support.Res) int {
     let call_token int = token.ctx().pos
     let call_line int = token.ctx().tokens[call_token].line
     let call_col int = token.ctx().tokens[call_token].col
@@ -1182,31 +1182,31 @@ fn parse_comptime_call(res *gen.Res) int {
         } else {
             let mi int = gen.mod_file_binding(alias_start, alias_len)
             if (mi < 0) {
-                return gen.sem_err("编译期模块调用必须使用当前文件的导入绑定名")
+                return token.err_tok("编译期模块调用必须使用当前文件的导入绑定名")
             }
             let entry int = gen.mod_ns_lookup(mi, member_start,
                 member_len, 0)
             if (entry < 0) {
-                return gen.sem_err("模块没有导出该编译期函数")
+                return token.err_tok("模块没有导出该编译期函数")
             }
             signature_sym = support.fs().mods[mi].ns[entry].sym
             if (signature_sym < 0 || signature_sym >= support.ms().sym_n
-                || support.ms().syms[signature_sym].kind != gen.SYM_FN) {
-                return gen.sem_err("$module.fn 的目标必须是公开函数")
+                || support.ms().syms[signature_sym].kind != support.SYM_FN) {
+                return token.err_tok("$module.fn 的目标必须是公开函数")
             }
             // 模块可见性由 .s.i 决定；执行身份改为私有 .s.ct 正文符号。
-            if ((support.ms().syms[signature_sym].flags & gen.F_COMPTIME) != 0) {
+            if ((support.ms().syms[signature_sym].flags & support.F_COMPTIME) != 0) {
                 let hidden_off int = -1
                 let hidden_len int = 0
                 if (iface_ct_export_name(mi, entry, &hidden_off,
                         &hidden_len) != 0) { return -1 }
                 sym = support.sym_lookup_off(hidden_off, hidden_len)
                 if (sym < 0 || comptime.ct_find(sym) < 0) {
-                    return gen.sem_err("公开编译期函数缺少匹配的 .s.ct 正文")
+                    return token.err_tok("公开编译期函数缺少匹配的 .s.ct 正文")
                 }
                 if (support.ms().syms[sym].type_id
                     != support.ms().syms[signature_sym].type_id) {
-                    return gen.sem_err("公开编译期函数与 .s.ct 正文签名不匹配")
+                    return token.err_tok("公开编译期函数与 .s.ct 正文签名不匹配")
                 }
             }
             let ii int = 0
@@ -1219,21 +1219,21 @@ fn parse_comptime_call(res *gen.Res) int {
             }
         }
         if (signature_sym < 0 || signature_sym >= support.ms().sym_n
-            || support.ms().syms[signature_sym].kind != gen.SYM_FN) {
-            return gen.sem_err("$ 调用目标必须是编译期函数")
+            || support.ms().syms[signature_sym].kind != support.SYM_FN) {
+            return token.err_tok("$ 调用目标必须是编译期函数")
         }
-        if ((support.ms().syms[signature_sym].flags & gen.F_COMPTIME) == 0) {
-            return gen.sem_err("$ 调用目标缺少 @[comptime] 属性")
+        if ((support.ms().syms[signature_sym].flags & support.F_COMPTIME) == 0) {
+            return token.err_tok("$ 调用目标缺少 @[comptime] 属性")
         }
-        if (sym < 0) { return gen.sem_err("公开编译期函数缺少正文") }
+        if (sym < 0) { return token.err_tok("公开编译期函数缺少正文") }
         sig = support.ms().types[support.ms().syms[signature_sym].type_id].sub
         np = support.ms().sig_np[sig]
     }
     p_adv()
     if (p_expect(token.TK_LPAREN, "编译期调用期望 '('") != 0) { return -1 }
-    let args [64]gen.Res
+    let args [64]support.Res
     let arg_n int = 0
-    let defer_eval int = ((support.fc().c_fn_flags & gen.F_COMPTIME) != 0).to_type(int)
+    let defer_eval int = ((support.fc().c_fn_flags & support.F_COMPTIME) != 0).to_type(int)
     if (p_cur() != token.TK_RPAREN) {
         for 1 {
             if (arg_n >= 64) { return token.err_tok("编译期调用实参过多") }
@@ -1247,12 +1247,12 @@ fn parse_comptime_call(res *gen.Res) int {
             // 顶层或普通函数里的编译期调用实参必须在 pass1 折叠成常量；聚合字面量
             // 做不到，这里给出可读诊断，替代内部的「结构体/数组字面量不是编译期常量」。
             let folded int = 0
-            if ((support.fc().c_fn_flags & gen.F_COMPTIME) == 0 && sig >= 0 && arg_n < np) {
+            if ((support.fc().c_fn_flags & support.F_COMPTIME) == 0 && sig >= 0 && arg_n < np) {
                 let ptid2 int = support.ms().sig_params[support.ms().sig_first[sig] + arg_n]
                 let pk int = support.ms().types[ptid2].kind
                 let agg_param int = 0
-                if (pk == gen.TY_STRUCT || pk == gen.TY_ARRAY) { agg_param = 1 }
-                if (pk == gen.TY_SLICE || pk == gen.TY_UNION) { agg_param = 1 }
+                if (pk == support.TY_STRUCT || pk == support.TY_ARRAY) { agg_param = 1 }
+                if (pk == support.TY_SLICE || pk == support.TY_UNION) { agg_param = 1 }
                 let agg_lit int = 0
                 if (p_cur() == token.TK_LBRACKET) { agg_lit = 1 }
                 if (p_cur() == token.TOK_IDENT && token.ctx().pos + 1 < token.ctx().count
@@ -1260,15 +1260,15 @@ fn parse_comptime_call(res *gen.Res) int {
                 if (agg_param != 0 && agg_lit != 0) {
                     // 结构体字面量且有对应形参类型时，先尝试在编译期临时构造区折出
                     // 聚合对象（顶层没有 CT 帧，这是唯一能在 pass1 拿到聚合值的路径）。
-                    if (pk == gen.TY_STRUCT) {
+                    if (pk == support.TY_STRUCT) {
                         let fold int = p_ct_arg_struct_literal(&args[arg_n], ptid2)
                         if (fold < 0) { return -1 }
                         if (fold == 0) { agg_lit = 0; folded = 1 }
-                    } else if (pk == gen.TY_ARRAY) {
+                    } else if (pk == support.TY_ARRAY) {
                         let fold2 int = p_ct_arg_array_literal(&args[arg_n], ptid2)
                         if (fold2 < 0) { return -1 }
                         if (fold2 == 0) { agg_lit = 0; folded = 1 }
-                    } else if (pk == gen.TY_SLICE) {
+                    } else if (pk == support.TY_SLICE) {
                         // 切片字面量：backing 聚合按元素个数创建（与全局切片常量的
                         // 模型同一形状），实参是切片类型 + 对象指针，见 p_ct_arg_slice_literal。
                         let fold3 int = p_ct_arg_slice_literal(&args[arg_n], ptid2)
@@ -1276,7 +1276,7 @@ fn parse_comptime_call(res *gen.Res) int {
                         if (fold3 == 0) { agg_lit = 0; folded = 1 }
                     }
                     if (agg_lit != 0) {
-                        return gen.sem_err("编译期调用实参里的聚合值暂时只支持结构体、数组与切片字面量（字段/元素可递归嵌套标量、结构体、数组）；联合体仍需在 @[comptime] 函数体内构造")
+                        return token.err_tok("编译期调用实参里的聚合值暂时只支持结构体、数组与切片字面量（字段/元素可递归嵌套标量、结构体、数组）；联合体仍需在 @[comptime] 函数体内构造")
                     }
                 }
                 // 命名的全局聚合常量实参：前端在语义阶段已把字面量元素值建成编译期
@@ -1289,11 +1289,11 @@ fn parse_comptime_call(res *gen.Res) int {
                     let astart int = token.ctx().tokens[token.ctx().pos].start
                     let alen int = token.ctx().tokens[token.ctx().pos].len
                     let asym int = support.sym_lookup(astart, alen)
-                    if (asym < 0) { return gen.sem_err("引用了未声明的名字") }
-                    if (support.ms().syms[asym].kind == gen.SYM_CONST) {
+                    if (asym < 0) { return token.err_tok("引用了未声明的名字") }
+                    if (support.ms().syms[asym].kind == support.SYM_CONST) {
                         let model i64 = comptime.ct_global_agg_lookup(asym)
                         if (model == 0) {
-                            return gen.sem_err("编译期实参里的全局聚合常量尚未在编译期建模（只支持标量元素的定长数组与标量字段结构体）")
+                            return token.err_tok("编译期实参里的全局聚合常量尚未在编译期建模（只支持标量元素的定长数组与标量字段结构体）")
                         }
                         check.sem_res_reset(&args[arg_n], support.ms().syms[asym].type_id)
                         args[arg_n].is_const = 1
@@ -1339,13 +1339,13 @@ fn parse_comptime_call(res *gen.Res) int {
                         let asym int = args[arg_n].sym
                         let local_addr int = 0
                         if (asym >= 0 && asym < support.ms().sym_n
-                            && support.ms().syms[asym].kind == gen.SYM_CONST
-                            && (support.ms().syms[asym].flags & gen.F_ADDR) != 0
+                            && support.ms().syms[asym].kind == support.SYM_CONST
+                            && (support.ms().syms[asym].flags & support.F_ADDR) != 0
                             && args[arg_n].is_const != 0) {
                             local_addr = 1
                         }
                         if (local_addr == 0) {
-                            return gen.sem_err("编译期调用的单字节指针形参（char/u8/i8）只接受直接字符串字面量实参，或导入模块里以字符串字面量初始化的 pub const 指针常量")
+                            return token.err_tok("编译期调用的单字节指针形参（char/u8/i8）只接受直接字符串字面量实参，或导入模块里以字符串字面量初始化的 pub const 指针常量")
                         }
                     }
                 }
@@ -1360,8 +1360,8 @@ fn parse_comptime_call(res *gen.Res) int {
         check.sem_res_reset(res, 0)
         return 0
     }
-    if ((support.fc().c_fn_flags & gen.F_COMPTIME) != 0) {
-        if (arg_n != np) { return gen.sem_err("编译期调用实参数量与函数签名不符") }
+    if ((support.fc().c_fn_flags & support.F_COMPTIME) != 0) {
+        if (arg_n != np) { return token.err_tok("编译期调用实参数量与函数签名不符") }
         let ai int = 0
         for ai < arg_n {
             let tid int = support.ms().sig_params[support.ms().sig_first[sig] + ai]
@@ -1399,8 +1399,8 @@ fn parse_comptime_call(res *gen.Res) int {
 // p_ct_arg_array_literal：把数组字面量折进编译期临时构造区。元素按源码顺序填位，
 // 标量元素用 c_fold 折成常量，嵌套数组与结构体元素递归折叠。成功返回 0 并把 res 写成
 // 「聚合对象指针常量」；不支持的形态返回 1（调用方给出诊断）。
-fn p_ct_arg_array_literal(res *gen.Res, tid int) int {
-    let at gen.CType = support.ms().types[tid]
+fn p_ct_arg_array_literal(res *support.Res, tid int) int {
+    let at support.CType = support.ms().types[tid]
     if (p_cur() != token.TK_LBRACKET) { return 1 }
     if (at.len <= 0 || at.len > 64) { return 1 }
     let vals [64]i64
@@ -1410,25 +1410,25 @@ fn p_ct_arg_array_literal(res *gen.Res, tid int) int {
     for p_cur() != token.TK_RBRACKET {
         if (idx >= at.len) { return 1 }
         let ek int = support.ms().types[at.elem].kind
-        if (ek == gen.TY_ARRAY) {
-            let er gen.Res
+        if (ek == support.TY_ARRAY) {
+            let er support.Res
             let sub int = p_ct_arg_array_literal(&er, at.elem)
             if (sub < 0) { return -1 }
             if (sub != 0) { return 1 }
             vals[idx] = er.ival
-        } else if (ek == gen.TY_STRUCT) {
-            let sr gen.Res
+        } else if (ek == support.TY_STRUCT) {
+            let sr support.Res
             let sub2 int = p_ct_arg_struct_literal(&sr, at.elem)
             if (sub2 < 0) { return -1 }
             if (sub2 != 0) { return 1 }
             vals[idx] = sr.ival
-        } else if (ek == gen.TY_UNION || ek == gen.TY_SLICE) {
+        } else if (ek == support.TY_UNION || ek == support.TY_SLICE) {
             return 1
         } else {
             let save_exp int = support.fc().c_expect_tid
             support.fc().c_expect_tid = at.elem
             support.fc().c_fold += 1
-            let fr gen.Res
+            let fr support.Res
             let rr int = parse_expr_iso(&fr)
             support.fc().c_fold -= 1
             support.fc().c_expect_tid = save_exp
@@ -1459,9 +1459,9 @@ fn p_ct_arg_array_literal(res *gen.Res, tid int) int {
 // 切片分支按 ct_ir_slice_param_valid 校验后直接别名这个 backing，无需「地址+长度」
 // 的独立视图表示。元素形态与数组字面量一致（标量/结构体/定长数组递归折叠），
 // 空切片字面量 `[]` 合法；不支持返回 1（调用方给出诊断）。
-fn p_ct_arg_slice_literal(res *gen.Res, tid int) int {
-    let st gen.CType = support.ms().types[tid]
-    if (p_cur() != token.TK_LBRACKET || st.kind != gen.TY_SLICE) { return 1 }
+fn p_ct_arg_slice_literal(res *support.Res, tid int) int {
+    let st support.CType = support.ms().types[tid]
+    if (p_cur() != token.TK_LBRACKET || st.kind != support.TY_SLICE) { return 1 }
     let vals [64]i64
     let tys [64]int
     p_adv()
@@ -1469,25 +1469,25 @@ fn p_ct_arg_slice_literal(res *gen.Res, tid int) int {
     for p_cur() != token.TK_RBRACKET {
         if (idx >= 64) { return 1 }
         let ek int = support.ms().types[st.elem].kind
-        if (ek == gen.TY_ARRAY) {
-            let er gen.Res
+        if (ek == support.TY_ARRAY) {
+            let er support.Res
             let sub int = p_ct_arg_array_literal(&er, st.elem)
             if (sub < 0) { return -1 }
             if (sub != 0) { return 1 }
             vals[idx] = er.ival
-        } else if (ek == gen.TY_STRUCT) {
-            let sr gen.Res
+        } else if (ek == support.TY_STRUCT) {
+            let sr support.Res
             let sub2 int = p_ct_arg_struct_literal(&sr, st.elem)
             if (sub2 < 0) { return -1 }
             if (sub2 != 0) { return 1 }
             vals[idx] = sr.ival
-        } else if (ek == gen.TY_UNION || ek == gen.TY_SLICE) {
+        } else if (ek == support.TY_UNION || ek == support.TY_SLICE) {
             return 1
         } else {
             let save_exp int = support.fc().c_expect_tid
             support.fc().c_expect_tid = st.elem
             support.fc().c_fold += 1
-            let fr gen.Res
+            let fr support.Res
             let rr int = parse_expr_iso(&fr)
             support.fc().c_fold -= 1
             support.fc().c_expect_tid = save_exp
@@ -1514,8 +1514,8 @@ fn p_ct_arg_slice_literal(res *gen.Res, tid int) int {
 // p_ct_arg_struct_literal：把顶层编译期调用的结构体字面量实参折进编译期临时构造区，
 // 成功时把 res 写成「聚合对象指针常量」并返回 0；不支持的字面量返回 1（调用方给出诊断）。
 // 字段支持标量、嵌套结构体与数组（都递归折叠）；切片、联合体字段返回 1。
-fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
-    let st gen.CType = support.ms().types[tid]
+fn p_ct_arg_struct_literal(res *support.Res, tid int) int {
+    let st support.CType = support.ms().types[tid]
     if (gen.ty_lookup_name(token.ctx().tokens[token.ctx().pos].start,
             token.ctx().tokens[token.ctx().pos].len) != tid) {
         return 1
@@ -1535,7 +1535,7 @@ fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
         let fi int = -1
         let i int = 0
         for i < st.len {
-            let field gen.SField = support.ms().fields[st.sub + i]
+            let field support.SField = support.ms().fields[st.sub + i]
             if (field.name_len == nlen) {
                 let same int = 1
                 let j int = 0
@@ -1550,24 +1550,24 @@ fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
             }
             i += 1
         }
-        if (fi < 0) { return gen.sem_err("结构体没有这个字段") }
-        let field2 gen.SField = support.ms().fields[st.sub + fi]
+        if (fi < 0) { return token.err_tok("结构体没有这个字段") }
+        let field2 support.SField = support.ms().fields[st.sub + fi]
         let fk int = support.ms().types[field2.type_id].kind
-        if (fk == gen.TY_UNION || fk == gen.TY_SLICE) {
+        if (fk == support.TY_UNION || fk == support.TY_SLICE) {
             return 1
         }
         p_adv()
         if (p_expect(token.TK_COLON, "期望 ':'") != 0) { return -1 }
-        if (fk == gen.TY_ARRAY) {
+        if (fk == support.TY_ARRAY) {
             // 数组字段：递归折叠数组字面量。
-            let ar2 gen.Res
+            let ar2 support.Res
             let sub3 int = p_ct_arg_array_literal(&ar2, field2.type_id)
             if (sub3 < 0) { return -1 }
             if (sub3 != 0) { return 1 }
             vals[fi] = ar2.ival
-        } else if (fk == gen.TY_STRUCT) {
+        } else if (fk == support.TY_STRUCT) {
             // 嵌套结构体字段：递归折叠出子对象指针 —— 执行器对聚合字段存的也是对象指针。
-            let sr gen.Res
+            let sr support.Res
             let sub int = p_ct_arg_struct_literal(&sr, field2.type_id)
             if (sub < 0) { return -1 }
             if (sub != 0) { return 1 }
@@ -1576,7 +1576,7 @@ fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
             let save_exp int = support.fc().c_expect_tid
             support.fc().c_expect_tid = field2.type_id
             support.fc().c_fold += 1
-            let fr gen.Res
+            let fr support.Res
             let rr int = parse_expr_iso(&fr)
             support.fc().c_fold -= 1
             support.fc().c_expect_tid = save_exp
@@ -1602,7 +1602,7 @@ fn p_ct_arg_struct_literal(res *gen.Res, tid int) int {
 }
 
 // parse_primary_impl：解析基本表达式；外层统一记录源范围和类型。
-fn parse_primary_impl(res *gen.Res, first int) int {
+fn parse_primary_impl(res *support.Res, first int) int {
     support.fc().c_res_is_addr = 0
     let k int = p_cur()
     // 当前 token 的源区间（各字面量分支共用；stage0 同级块禁同名局部）
@@ -1659,13 +1659,13 @@ fn parse_primary_impl(res *gen.Res, first int) int {
         }
         // sizeof(expr)：发射层静默求型（表达式不求值、不发码），
         // 取结果类型的大小。同型名的场景类型优先。
-        let er gen.Res
+        let er support.Res
         let ererr int = parse_expr_iso(&er)
         if (ererr != 0) {
             return -1
         }
         if (er.ct_diag != 0) {
-            return gen.sem_err("编译期诊断只能作为独立语句")
+            return token.err_tok("编译期诊断只能作为独立语句")
         }
         if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
             return -1
@@ -1703,7 +1703,7 @@ fn parse_primary_impl(res *gen.Res, first int) int {
 
 // parse_ident_primary：标识符作为基本表达式（含结构体字面量决策与
 // 模块限定名分派）。
-fn parse_ident_primary(res *gen.Res) int {
+fn parse_ident_primary(res *support.Res) int {
     // 注意：stage0 中 if/while 体不开新词法作用域，同名局部必须提升到函数级
     let istart int = token.ctx().tokens[token.ctx().pos].start
     let ilen int = token.ctx().tokens[token.ctx().pos].len
@@ -1716,9 +1716,9 @@ fn parse_ident_primary(res *gen.Res) int {
     }
     if (support.session().compile != 0 && p_peek(1) != token.TK_LPAREN) {
         let direct_sym int = support.sym_lookup(istart, ilen)
-        if (direct_sym >= 0 && support.ms().syms[direct_sym].kind == gen.SYM_FN
-            && (support.ms().syms[direct_sym].flags & gen.F_COMPTIME) != 0) {
-            return gen.sem_err("编译期函数不能作为运行时函数值使用")
+        if (direct_sym >= 0 && support.ms().syms[direct_sym].kind == support.SYM_FN
+            && (support.ms().syms[direct_sym].flags & support.F_COMPTIME) != 0) {
+            return token.err_tok("编译期函数不能作为运行时函数值使用")
         }
     }
     // 枚举成员限定引用 `EnumName.member`：枚举类型名不是值，直接解析到成员常量。
@@ -1726,7 +1726,7 @@ fn parse_ident_primary(res *gen.Res) int {
     if (support.session().compile != 0 && p_peek(1) == token.TK_DOT && p_peek(2) == token.TOK_IDENT
         && support.sym_lookup(istart, ilen) < 0) {
         let etid int = gen.ty_lookup_name(istart, ilen)
-        if (etid >= 0 && support.ms().types[etid].kind == gen.TY_ENUM) {
+        if (etid >= 0 && support.ms().types[etid].kind == support.TY_ENUM) {
             let mlen2 int = token.ctx().tokens[token.ctx().pos + 2].len
             let mstart int = token.ctx().tokens[token.ctx().pos + 2].start
             let direct int = support.sym_lookup(mstart, mlen2)
@@ -1734,12 +1734,12 @@ fn parse_ident_primary(res *gen.Res) int {
             // 成员名被同名形参/局部变量遮蔽时，sym_lookup 命中的不是枚举成员；
             // 此时按名字在符号表里反查属于该枚举的成员符号（`.` 右侧总是成员名）。
             if (direct < 0
-                || (support.ms().syms[direct].flags & gen.F_ENUM_MEMBER) == 0) {
+                || (support.ms().syms[direct].flags & support.F_ENUM_MEMBER) == 0) {
                 msym = gen.sym_find_enum_member(etid, support.src_ctx().data, mstart, mlen2)
             }
             // 不检查 const_ready：延迟求值的枚举成员被引用时可能还没回填，
             // 交给 sem_ident_val 给出「常量尚未就绪」这类准确诊断。
-            if (msym >= 0 && (support.ms().syms[msym].flags & gen.F_ENUM_MEMBER) != 0
+            if (msym >= 0 && (support.ms().syms[msym].flags & support.F_ENUM_MEMBER) != 0
                 && support.ms().syms[msym].type_id == etid) {
                 p_adv()
                 p_adv()
@@ -1780,7 +1780,7 @@ fn parse_ident_primary(res *gen.Res) int {
 // parse_module_qualified：m.member 的模块成员访问（消费 m . member）。
 // 命名空间命中后按普通名字求值（跨模块符号已带后缀且为外部引用）；
 // 未使用的导入在此标记。want_type=0。
-fn parse_module_qualified(res *gen.Res, mi int, unused int) int {
+fn parse_module_qualified(res *support.Res, mi int, unused int) int {
     p_adv() // 绑定名
     p_adv() // '.'
     let mstart int = token.ctx().tokens[token.ctx().pos].start
@@ -1806,7 +1806,7 @@ fn parse_module_qualified(res *gen.Res, mi int, unused int) int {
 
 // parse_module_struct_lit：m.T { … } 限定结构体字面量（消费 m . T）。
 // tid 来自接口命名空间；构造检查与本地类型一致（跨模块私有字段拒绝）。
-fn parse_module_struct_lit(res *gen.Res, mi int) int {
+fn parse_module_struct_lit(res *support.Res, mi int) int {
     p_adv()
     p_adv()
     let tstart int = token.ctx().tokens[token.ctx().pos].start
@@ -1841,7 +1841,7 @@ fn try_struct_init() int {
     if (support.session().compile != 0) {
         support.fc().c_fold += 1
     }
-    let dummy gen.Res
+    let dummy support.Res
     let r int = parse_struct_init_forced(&dummy)
     let ok int = 0
     if (r == 0 && p_cur() == token.TK_LBRACE) {
@@ -1863,7 +1863,7 @@ fn try_struct_init() int {
 
 // parse_struct_init_forced：结构体字面量：IDENT '{' body '}'。
 // 编译模式：作为值使用统一拒绝（B5 只支持 let 直接初始化路径）。
-fn parse_struct_init_forced(res *gen.Res) int {
+fn parse_struct_init_forced(res *support.Res) int {
     // 结构体字面量：IDENT '{' body '}'
     // 语法模式只消费 token；编译模式在临时槽构造聚合值，地址留 x0。
     let start int = token.ctx().tokens[token.ctx().pos].start
@@ -1872,15 +1872,15 @@ fn parse_struct_init_forced(res *gen.Res) int {
     let tid int = 0
     if (support.session().compile != 0) {
         if (support.fc().c_fold != 0) {
-            return gen.sem_err("结构体字面量不是编译期常量")
+            return token.err_tok("结构体字面量不是编译期常量")
         }
         tid = gen.ty_lookup_name(start, nlen)
         if (tid < 0) {
-            return gen.sem_err("未知类型（结构体字面量）")
+            return token.err_tok("未知类型（结构体字面量）")
         }
         let tk int = support.ms().types[tid].kind
-        if (tk != gen.TY_STRUCT && tk != gen.TY_UNION) {
-            return gen.sem_err("结构体字面量需要一个 struct/union 类型名")
+        if (tk != support.TY_STRUCT && tk != support.TY_UNION) {
+            return token.err_tok("结构体字面量需要一个 struct/union 类型名")
         }
     }
     return parse_struct_init_tid(tid, res)
@@ -1888,7 +1888,7 @@ fn parse_struct_init_forced(res *gen.Res) int {
 
 // parse_struct_init_tid：按给定类型构造结构体字面量（'{ … }' 由本函数
 // 消费；本地路径与模块限定路径共用）。
-fn parse_struct_init_tid(tid int, res *gen.Res) int {
+fn parse_struct_init_tid(tid int, res *support.Res) int {
     let init_first int = token.ctx().pos
     if (p_expect(token.TK_LBRACE, "期望 '{'") != 0) {
         return -1
@@ -1930,7 +1930,7 @@ fn parse_struct_init_body(tid int, fields *int) int {
     if (is_member_name(p_cur()) != 0 && p_peek(1) == token.TK_COLON) {
         named = 1
     }
-    let fv gen.Res
+    let fv support.Res
     let fpos int = 0
     for 1 {
         let field_first int = token.ctx().pos
@@ -1944,7 +1944,7 @@ fn parse_struct_init_body(tid int, fields *int) int {
                 let fl int = token.ctx().tokens[token.ctx().pos].len
                 fidx = check.sem_lit_field_lookup(support.fc().c_lit_tid, fs, fl)
                 if (fidx < 0) {
-                    return gen.sem_err("结构体没有该字段")
+                    return token.err_tok("结构体没有该字段")
                 }
             }
             p_adv()
@@ -1963,7 +1963,7 @@ fn parse_struct_init_body(tid int, fields *int) int {
         } else {
             if (support.session().compile != 0 && support.fc().c_fold == 0) {
                 if (fpos >= support.ms().types[support.fc().c_lit_tid].len) {
-                    return gen.sem_err("位置式字面量字段过多")
+                    return token.err_tok("位置式字面量字段过多")
                 }
                 fidx = support.ms().types[support.fc().c_lit_tid].sub + fpos
                 fpos += 1

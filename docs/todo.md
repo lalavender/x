@@ -209,6 +209,13 @@ lex → parse(纯语法) → AST
   `support/symbols.yh`；`ast` 改用 `support.Res`/常量后**脱离 gen**。
   白名单 4→3，`import gen` 模块 7→**6**，gen pub fn 61→**57**，gen 行数
   2,009→**1,750**。
+- [x] **F2-1 去噪（2026-11-06 完成）**：`parse` 的 `gen.*` 代码引用 **718 → 93**
+  （75 → 27 符号）：常量/类型（`F_*`/`SYM_*`/`TY_*`/`Res`/`CType`… 约 430 处）
+  改 `support.*`，`gen.sem_err`（148 处）改 `token.err_tok`（实现完全相同）。
+  4 个文件（`iface`/`parse_module`/`iface_ct`/`iface_ct_map`）脱离 `import gen`。
+  新增 `PARSE_SYMBOLS_FOR_GEN` 白名单守卫（27，只减不增）+ 自测覆盖。
+- [ ] **F2**：`parse` 纯语法化（语法 AST 先行、语义搬 check）→ 方案见
+  `docs/02-plan/yh-F2-parse纯语法化方案-2026-11-06.md`
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

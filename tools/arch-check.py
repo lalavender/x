@@ -99,6 +99,22 @@ GEN_SYMBOLS_FOR_COMPTIME = {
     # 符号引用查询（待 F4-5 或镜像）
 }
 
+# F2：parse 允许依赖的 gen 符号白名单（只减不增）。
+# 目标：parse 只保留「必须带 token 位置诊断的语义动作」；常量/类型/诊断入口
+# 都必须走 support / token。注入新符号会被自测抓到。
+PARSE_SYMBOLS_FOR_GEN = {
+    # 带位置的类型/符号表写入（发 token 游标位置诊断，不能下沉 support）
+    "sym_push", "sym_push_pool", "sym_find_enum_member", "sym_declared_before",
+    "scope_push", "scope_pop",
+    "ty_push", "ty_ptr", "ty_array", "ty_slice", "ty_sig_param", "ty_fn_abi",
+    "ty_cabi_param", "ty_declare_name", "ty_add_name_attrs", "ty_lookup_name",
+    "ty_is_scalar", "ty_has_opaque_value", "sem_can_assign",
+    # 模块名字空间查询（接口加载期）
+    "mod_file_binding", "mod_ns_lookup", "mod_ns_lookup_pool", "mod_import_find",
+    # 语义内核表（字符串标签 / 枚举成员）
+    "data_str_add", "data_str_lookup", "em_add", "em_update_value",
+}
+
 # 已知未接线但暂不删除的符号（当前为空；保留位置以便记录豁免）。
 UNWIRED_EXEMPT = set()
 
@@ -262,6 +278,16 @@ def main():
             problems.append("comptime 新增 gen 依赖：" + ", ".join(extra))
         report["comptime_gen"] = len(used)
 
+    # F2 守卫：parse 的 gen 符号只减不增。
+    parse_used = set()
+    for f in (SRC / "parse").rglob("*.yh"):
+        for line in f.read_text().splitlines():
+            parse_used.update(re.findall(r"\bgen\.([A-Za-z_0-9]+)", line.split("//")[0]))
+    parse_extra = sorted(parse_used - PARSE_SYMBOLS_FOR_GEN)
+    if parse_extra:
+        problems.append("parse 新增 gen 依赖：" + ", ".join(parse_extra))
+    report["parse_gen"] = len(parse_used)
+
     budget("max_gen_pub_fns", gen_pub_fns, "gen")
     budget("max_gen_importers", len(gen_importers), "import gen")
     budget("max_taskctx_fields", taskctx_fields(), "TaskCtx")
@@ -300,6 +326,8 @@ def main():
     if "comptime_gen" in report:
         print(f"  comptime→gen 符号 {report['comptime_gen']}"
               f"（白名单 {len(GEN_SYMBOLS_FOR_COMPTIME)}）")
+        print(f"  parse→gen 符号 {report['parse_gen']}"
+              f"（白名单 {len(PARSE_SYMBOLS_FOR_GEN)}）")
 
     if problems:
         print("\n架构违规:")
