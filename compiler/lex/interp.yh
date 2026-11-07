@@ -2,7 +2,6 @@ module lex
 import support
 import token
 
-import gen
 
 // ============================================================================
 // interp.yh —— 字符串插值的词法后扩展
@@ -24,7 +23,6 @@ fn interp_copy_token(tok token.Tok) int {
 
 // interp_has_marker：判断字符串 token 内是否存在未被转义的 `${`。
 fn interp_has_marker(start int, tlen int) int {
-    let tk *gen.TaskCtx = gen.task()
     if (tlen < 3) {
         return 0
     }
@@ -53,15 +51,13 @@ fn interp_push_text(start int, end int) int {
     if (end <= start) {
         return 0
     }
-    let tk *gen.TaskCtx = gen.task()
-    let line int = tk.lx_line
-    let col int = start - tk.lx_lstart + 1
+    let line int = ctx().line
+    let col int = start - ctx().lstart + 1
     return token.push(token.TOK_INTERP_TEXT, start, end - start, line, col)
 }
 
 // interp_skip_char：跳过字符字面量（i 指向单引号）；成功返回闭引号之后。
 fn interp_skip_char(i int, end int) int {
-    let tk *gen.TaskCtx = gen.task()
     let j int = i + 1
     for j < end {
         let b u8 = support.src_ctx().data[j]
@@ -82,7 +78,6 @@ fn interp_skip_char(i int, end int) int {
 
 // interp_skip_space：跳过空白与注释；遇到换行报错。
 fn interp_skip_space(i int, end int) int {
-    let tk *gen.TaskCtx = gen.task()
     let at int = i
     for at < end {
         let b u8 = support.src_ctx().data[at]
@@ -124,7 +119,6 @@ fn interp_skip_space(i int, end int) int {
 
 // interp_lex_range：把表达式的源码区间按普通 token 规则写入当前 token 表。
 fn interp_lex_range(start int, end int) int {
-    let tk *gen.TaskCtx = gen.task()
     let i int = start
     for i < end {
         i = interp_skip_space(i, end)
@@ -157,7 +151,6 @@ fn interp_lex_range(start int, end int) int {
 // interp_find_close：从表达式起点找 `}`，同时定位顶层 spec 冒号。
 // 返回闭括号下标；spec_colon 为 -1 或冒号下标；失败返回 -1 并已报错。
 fn interp_find_close(start int, end int, spec_colon *int) int {
-    let tk *gen.TaskCtx = gen.task()
     let depth int = 0
     let i int = start
     for i < end {
@@ -223,10 +216,9 @@ fn interp_find_close(start int, end int, spec_colon *int) int {
 
 // interp_expand_string：把一个插值字符串 token 展开为内部 token 序列。
 fn interp_expand_string(start int, tlen int) int {
-    let tk *gen.TaskCtx = gen.task()
     let end int = start + tlen - 1
-    if (token.push(token.TOK_INTERP_BEGIN, start, 1, tk.lx_line,
-            start - tk.lx_lstart + 1) != 0) {
+    if (token.push(token.TOK_INTERP_BEGIN, start, 1, ctx().line,
+            start - ctx().lstart + 1) != 0) {
         return -1
     }
     let i int = start + 1
@@ -243,8 +235,8 @@ fn interp_expand_string(start int, tlen int) int {
         }
         if (b == '$' && i + 1 < end && support.src_ctx().data[i + 1] == '{') {
             if (interp_push_text(text_start, i) != 0) { return -1 }
-            if (token.push(token.TOK_INTERP_EXPR_BEGIN, i, 2, tk.lx_line,
-                    i - tk.lx_lstart + 1) != 0) {
+            if (token.push(token.TOK_INTERP_EXPR_BEGIN, i, 2, ctx().line,
+                    i - ctx().lstart + 1) != 0) {
                 return -1
             }
             let spec_colon int = -1
@@ -256,8 +248,8 @@ fn interp_expand_string(start int, tlen int) int {
                 return err_here(i + 2, "插值表达式不能为空")
             }
             if (interp_lex_range(i + 2, expr_end) != 0) { return -1 }
-            if (token.push(token.TOK_INTERP_EXPR_END, expr_end, 0, tk.lx_line,
-                    expr_end - tk.lx_lstart + 1) != 0) {
+            if (token.push(token.TOK_INTERP_EXPR_END, expr_end, 0, ctx().line,
+                    expr_end - ctx().lstart + 1) != 0) {
                 return -1
             }
             if (spec_colon >= 0) {
@@ -265,8 +257,8 @@ fn interp_expand_string(start int, tlen int) int {
                     return err_here(spec_colon, "插值格式说明符不能为空")
                 }
                 if (token.push(token.TOK_INTERP_SPEC, spec_colon + 1,
-                        close - spec_colon - 1, tk.lx_line,
-                        spec_colon - tk.lx_lstart + 2) != 0) {
+                        close - spec_colon - 1, ctx().line,
+                        spec_colon - ctx().lstart + 2) != 0) {
                     return -1
                 }
             }
@@ -277,14 +269,13 @@ fn interp_expand_string(start int, tlen int) int {
         i += 1
     }
     if (interp_push_text(text_start, end) != 0) { return -1 }
-    return token.push(token.TOK_INTERP_END, end, 1, tk.lx_line,
-        end - tk.lx_lstart + 1)
+    return token.push(token.TOK_INTERP_END, end, 1, ctx().line,
+        end - ctx().lstart + 1)
 }
 
 // interp_expand_all：扫描原 token 表，把所有插值字符串替换为内部序列。
 // 成功返回 0；失败返回 -1（诊断已输出）。
 pub fn interp_expand_all() int {
-    let tk *gen.TaskCtx = gen.task()
     let raw *token.Tok = token.ctx().tokens
     let raw_n int = token.ctx().count
     let capacity int = raw_n * 3 + 64
@@ -292,8 +283,8 @@ pub fn interp_expand_all() int {
     if (output == 0) {
         return support.fail("插值扩展分配失败")
     }
-    let saved_line int = tk.lx_line
-    let saved_lstart int = tk.lx_lstart
+    let saved_line int = ctx().line
+    let saved_lstart int = ctx().lstart
     token.ctx().tokens = output
     token.ctx().count = 0
     token.ctx().cap = capacity
@@ -307,8 +298,8 @@ pub fn interp_expand_all() int {
             for line_start > 0 && support.src_ctx().data[line_start - 1] != '\n' {
                 line_start -= 1
             }
-            tk.lx_lstart = line_start
-            tk.lx_line = tok.line
+            ctx().lstart = line_start
+            ctx().line = tok.line
             if (interp_expand_string(tok.start, tok.len) != 0) {
                 return -1
             }
@@ -317,8 +308,8 @@ pub fn interp_expand_all() int {
         }
         i += 1
     }
-    tk.lx_line = saved_line
-    tk.lx_lstart = saved_lstart
+    ctx().line = saved_line
+    ctx().lstart = saved_lstart
     free(raw.to_type(*void))
     return 0
 }

@@ -154,6 +154,10 @@ lex → parse(纯语法) → AST
   **链 A**（F4 → 语义模型迁 check）解锁 check/parse/builtin/ast/lower/comptime；
   **链 B**（GEN4 拆 TaskCtx）解锁 lex/link/proj/testkit/cache/build/cmd
   ——后者的 gen 依赖只有 `task`/`TaskCtx`，不涉及语义模型，可先做。
+- [x] **链 B 首片（2026-11-06 完成）**：`lex.LexCtx`（`line`/`lstart`）落地，
+  `TaskCtx` 150→148，`lex` 不再依赖 `gen.TaskCtx`；`lex.reset()` 并入会话
+  初始化（`cmd/common` 与四个前端 fixture）。用 codegraph 量化链路：
+  `gen.task()` 250 个调用点 / 306 个受影响符号（§6.3.2）。
 - [ ] **F4**：`comptime` 收窄为纯 CT IR 执行器 → 见
   [实施方案](02-plan/yh-F4-comptime纯执行器实施方案-2026-11-06.md)。
   方案已按实测修正：**零拷贝镜像**（`CtTypeRow`/`CtSymRow`/`CtStaticRow`

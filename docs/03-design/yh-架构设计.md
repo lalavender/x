@@ -575,6 +575,30 @@ TaskCtx 按所有者拆（SemaCtx→check / ParseCtx→parse / SourceCtx→suppo
 - 它们可以在 F4 之前就做：把用到的字段先移进各自上下文（如 `lex` 的
   `lx_line` 已可迁 `lex.LexCtx`）。
 
+### 6.3.2 codegraph 实测：`gen.task()` 的爆炸半径（2026-11-06）
+
+用 `codegraph` 索引全仓（1,136 文件 / 12,999 节点 / 38,129 边）后：
+
+| 查询 | 结果 |
+| --- | --- |
+| `codegraph callers gen.task` | **250 个调用点**，按模块：`parse` 150、`check` 66、`comptime` 10、`ast` 9、`gen` 5、`link` 4、`testkit` 2、`builtin` 2、`proj` 1、`cache` 1 |
+| `codegraph impact gen.task` | **306 个受影响符号**（跨 9 个模块） |
+| `codegraph callers sem_can_assign` | `check` / `comptime` / `gen` / `parse` |
+| `codegraph callers sem_fold_norm` / `sem_res_const` / `fp64_bits` | `check` / `comptime` / `gen`（`sem_res_const` 还有 `parse`） |
+
+结论（与 §6.3.1 一致，但量化了成本）：
+
+- **链 B 的规模就是 `gen.task()` 的 250 个调用点**，其中 `parse`(150)+`check`(66)
+  占 86%；`lex`/`link`/`proj`/`testkit`/`cache` 共 8 个点（已开始拆：
+  `lex.LexCtx` 已落地，`TaskCtx` 150→148）。
+- **链 A 的规模是值规则的 4 个消费方**（`check`/`comptime`/`gen`/`parse`）；
+  `comptime` 已是白名单内的 19 个符号，`check`/`parse` 迁完即完成。
+- 因此两条链的收尾都可以用「受影响符号数」当进度指标：
+  链 B 从 306 → 0（TaskCtx 消失），链 A 从 4 个消费方 → 1（只剩 `check`）。
+
+用 codegraph 复核（`codegraph impact <symbol>`）应作为后续每次拆分的前置检查；
+它比 `rg` 多给出「受影响的函数集合」，便于判断一次拆分要改多少处。
+
 **与 ADR 的对应**：链 A = F4 + F3 剩余；链 B = GEN4。两者都完成后 `gen`
 只剩 `model` 的别名与极薄兼容层，即可删除（模块数 19 → 18）。
 
