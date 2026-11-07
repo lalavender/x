@@ -83,6 +83,10 @@ BUDGETS = {
     "max_globals": 203,
     "max_g_call_sites": 0,     # B1-4 起 gen.G() 不再导出：任何新增调用都会被抓到
     "max_unchecked_malloc": 0,
+    # CT 镜像的行访问器按值返回；对 `ct_*_row(x).字段` 赋值会静默丢写
+    # （2026-11-06 的 CI 回归就是这么来的：布局写回全部失效）。
+    # 写表必须走 `ct_type_at/ct_sym_at/ct_field_at` 的指针视图。
+    "max_ct_row_field_writes": 0,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
     "min_cap_appends": 45,
@@ -285,6 +289,14 @@ def main():
     budget("max_gen_importers", len(gen_importers), "import gen")
     budget("max_taskctx_fields", taskctx_fields(), "TaskCtx")
     budget("max_unchecked_malloc", len(unchecked), ",".join(unchecked[:3]))
+    row_writes = []
+    for f in list(SRC.rglob("*.yh")):
+        if "tmp" in f.parts:
+            continue
+        for line in f.read_text(errors="ignore").splitlines():
+            if re.search(r"ct_(?:type|sym|field)_row\s*\([^)]*\)\s*\.[A-Za-z_0-9]+\s*=[^=]", line):
+                row_writes.append(f"{f.relative_to(SRC)}: {line.strip()[:60]}")
+    budget("max_ct_row_field_writes", len(row_writes), "; ".join(row_writes[:3]))
     unwired = [s for s in UNWIRED_EXEMPT if s]
     budget("max_unwired_pub", len(unwired))
     if cap_appends < BUDGETS["min_cap_appends"]:

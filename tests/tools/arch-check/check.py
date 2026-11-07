@@ -39,6 +39,9 @@ def largest_source(root):
     return max(root.rglob("*.yh"), key=lambda p: len(p.read_text(errors="ignore")))
 
 
+TOTAL = 7  # 自测用例数；新增用例必须同步这里
+
+
 def main():
     failed = 0
 
@@ -92,6 +95,20 @@ def main():
             print(r4.stdout[-800:], r4.stderr[-400:])
 
     with tempfile.TemporaryDirectory() as tmp:
+        root = copy_compiler(tmp, "ct-row-write")
+        victim = root / "compiler" / "comptime" / "ct_layout.yh"
+        victim.write_text(
+            victim.read_text(errors="ignore") +
+            "\nfn injected_row_write_probe() void { ct_type_row(0).size = -1 }\n",
+            encoding="utf-8")
+        r7 = run(root)
+        caught = r7.returncode != 0 and "max_ct_row_field_writes" in r7.stdout
+        print(("PASS" if caught else "FAIL") + " arch-check 抓镜像行按值写回")
+        if not caught:
+            failed += 1
+            print(r7.stdout[-800:], r7.stderr[-400:])
+
+    with tempfile.TemporaryDirectory() as tmp:
         # gen 已删除后，最重要的硬约束是「comptime 不得依赖 check」（会成环）。
         root = copy_compiler(tmp, "comptime-check")
         victim = root / "compiler" / "comptime" / "ct_facts.yh"
@@ -118,7 +135,7 @@ def main():
             failed += 1
             print(r3.stdout[-800:], r3.stderr[-400:])
 
-    print(f"arch-check 自测: 通过 {6 - failed}/6")
+    print(f"arch-check 自测: 通过 {TOTAL - failed}/{TOTAL}")
     return 1 if failed else 0
 
 
