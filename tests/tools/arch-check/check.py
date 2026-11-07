@@ -39,7 +39,7 @@ def largest_source(root):
     return max(root.rglob("*.yh"), key=lambda p: len(p.read_text(errors="ignore")))
 
 
-TOTAL = 7  # 自测用例数；新增用例必须同步这里
+TOTAL = 8  # 自测用例数；新增用例必须同步这里
 
 
 def main():
@@ -93,6 +93,25 @@ def main():
         if not caught:
             failed += 1
             print(r4.stdout[-800:], r4.stderr[-400:])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = copy_compiler(tmp, "ast-view-count")
+        victim = root / "compiler" / "check" / "checked_slice.yh"
+        victim.write_text(
+            victim.read_text(errors="ignore") +
+            "\nfn injected_view_count_probe() void { let v int = 0 }\n",
+            encoding="utf-8")
+        # 直接注入一行视图计数累加（模拟 2026-11-07 回归写法）。
+        victim.write_text(
+            victim.read_text(encoding="utf-8") +
+            "\nfn injected_view_probe(v int) void { v.stmt_count += 1 }\n",
+            encoding="utf-8")
+        r8 = run(root)
+        caught = r8.returncode != 0 and "max_ast_view_count_writes" in r8.stdout
+        print(("PASS" if caught else "FAIL") + " arch-check 抓 AST 视图计数就地累加")
+        if not caught:
+            failed += 1
+            print(r8.stdout[-600:], r8.stderr[-300:])
 
     with tempfile.TemporaryDirectory() as tmp:
         root = copy_compiler(tmp, "ct-row-write")

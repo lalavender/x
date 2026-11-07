@@ -87,6 +87,9 @@ BUDGETS = {
     # （2026-11-06 的 CI 回归就是这么来的：布局写回全部失效）。
     # 写表必须走 `ct_type_at/ct_sym_at/ct_field_at` 的指针视图。
     "max_ct_row_field_writes": 0,
+    # `ast.AstView` 是按值返回的只读视图：`v.stmt_count += n` 只改副本，
+    # 会造成切片导入后 arena 计数仍为 0（2026-11-07 的模块构建回归）。
+    "max_ast_view_count_writes": 0,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
     "min_cap_appends": 45,
@@ -297,6 +300,15 @@ def main():
             if re.search(r"ct_(?:type|sym|field)_row\s*\([^)]*\)\s*\.[A-Za-z_0-9]+\s*=[^=]", line):
                 row_writes.append(f"{f.relative_to(SRC)}: {line.strip()[:60]}")
     budget("max_ct_row_field_writes", len(row_writes), "; ".join(row_writes[:3]))
+    view_writes = []
+    for f in list(SRC.rglob("*.yh")):
+        if "tmp" in f.parts:
+            continue
+        for line in f.read_text(errors="ignore").splitlines():
+            code = line.split("//")[0]
+            if re.search(r"\bv\.(?:expr|stmt|stmt_expr|binding|function|decl)_count\s*\+=", code):
+                view_writes.append(f"{f.relative_to(SRC)}: {line.strip()[:60]}")
+    budget("max_ast_view_count_writes", len(view_writes), "; ".join(view_writes[:3]))
     unwired = [s for s in UNWIRED_EXEMPT if s]
     budget("max_unwired_pub", len(unwired))
     if cap_appends < BUDGETS["min_cap_appends"]:
