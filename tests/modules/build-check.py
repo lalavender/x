@@ -534,8 +534,11 @@ def copy_proj(src, dst):
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         shutil.copytree(ROOT / "libs" / "hash", core / "hash",
                         ignore=shutil.ignore_patterns(".build"))
+        (core / "hash" / "project.toml").write_text(
+            '[project]\nos = "host"\narch = "host"\nname = "hash"\nsource = "."\n')
         (core / "project.toml").write_text(
-            '[project]\nos = "host"\narch = "host"\nname = "gensplitcore"\nsource = "."\n')
+            '[project]\nos = "host"\narch = "host"\nname = "gensplitcore"\nsource = "."\n'
+            '[dependencies]\nhash = { path = "hash" }\n')
     if src.name == "ctfacts_disabled":
         # F4-0：验证 CT 零拷贝镜像与 gen 类型表逐行一致（含表扩容后重新绑定）。
         core = dst / "compiler"
@@ -546,8 +549,11 @@ def copy_proj(src, dst):
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         shutil.copytree(ROOT / "libs" / "hash", core / "hash",
                         ignore=shutil.ignore_patterns(".build"))
+        (core / "hash" / "project.toml").write_text(
+            '[project]\nos = "host"\narch = "host"\nname = "hash"\nsource = "."\n')
         (core / "project.toml").write_text(
-            '[project]\nos = "host"\narch = "host"\nname = "ctfactscore"\nsource = "."\n')
+            '[project]\nos = "host"\narch = "host"\nname = "ctfactscore"\nsource = "."\n'
+            '[dependencies]\nhash = { path = "hash" }\n')
     if src.name == "llvmchecked":
         # 快照 fixture 消费真实 AST/语义实现，并在模块内构造和释放原 arena。
         # backend 里的 llvm_bridge.yh 只声明内嵌桥的 C ABI，fixture 不链接桥，
