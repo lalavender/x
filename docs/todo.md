@@ -37,7 +37,11 @@
 - **DR2（已修复）清理临时 DBG 输出（P0）**：`compiler/ast/ast_stmt.yh:102`、
   `compiler/check/verify.yh:322/326`、`compiler/build/module_worker.yh:416`
   仍向 stdout 打印 `DBG ...`，污染 `yh check`/`yh build` 输出。DR1 修复后删除。
-- [ ] **DR3 全局缓存下的非确定失败（P1，待复现）**：一次 `just build`（`YH_CACHE`
+- [x] **本地构建环境已恢复（2026-11-08）**：`SDKROOT` 指向 Xcode 26.5 SDK
+  （避开 `arm64e.x1`）后 LLVM 21 宿主闭包准备成功；清出 ≥8 GiB 磁盘后
+  `just` 冷编 24s、`just test` 370/372 全部通过、`just selfhost-native`
+  固定点一致 + 自解析 178 文件 + project cases 129/129。详见 `docs/finish.md`。
+- **DR3（原始记录）全局缓存下的非确定失败（P1，待复现）**：一次 `just build`（`YH_CACHE`
   默认开）后 `cd libs && ../yh check` 报
   `sys/constants.linux.arm64.yh:8:24: 错误: 重复的顶层声明`；
   `YH_CACHE=off just build` 重建后同一命令通过，随后再跑一次 cache-on

@@ -935,3 +935,32 @@ CI run `42463040423` **四端全绿**（linux-x64 / linux-arm64 / windows-x64 / 
 经验：这类「按值视图/镜像写回」bug 本地 `yh check` 与 fixture 门禁都抓不到，
 必须靠 `tests/yh-run`（重建编译器）或 CI；因此新增的两条 arch-check 预算
 （`max_ct_row_field_writes`、`max_ast_view_count_writes`）用于静态拦截同一错法。
+
+## 2026-11-08：本地构建环境恢复（LLVM 21 宿主闭包）
+
+此前 `just` 全链路被两个环境问题卡住：
+
+1. **SDK 目标标签**：`xcrun` 默认指向 Command Line Tools 的 macOS 27 SDK，其
+   `usr/lib/libSystem.tbd` 含 `arm64e.x1`，固定 LLVM 21.1.8 的 lld 不认。
+   修法：`SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk`
+   （Xcode 26.5 SDK，无该标签）。注意 `justfile` 会用缓存记录里的 `sdk_root` 覆盖
+   `SDKROOT`，所以首次准备必须直接调 `tools/llvm-darwin-host.py prepare`。
+2. **磁盘门槛**：`tools/llvm-darwin-sdk.py` 在源码**未解包**时要求 8 GiB 空闲
+   （`MIN_FREE_BYTES`），解包后只需 5 GiB（`MIN_BUILD_FREE_BYTES`）。先清
+   `~/Library/Caches/yh`、`tmp/modcheck`、`tmp/fx-*`、`.codegraph`、`compiler/.build`
+   腾到 ≥8 GiB，即通过首轮检查；之后按 5 GiB 门槛继续。
+
+结果：`odd` 闭包就位（`tmp/llvm-migration/llvm-host-darwin-aarch64/libyh-llvm-bridge.a`
++ `lld_bridge.o` + `sdk-darwin-aarch64` + `host.json`，`sdk_version=26.5`）。
+
+本地门禁（此前完全无法运行）现已全绿：
+
+| 命令 | 结果 |
+| --- | --- |
+| `just fetch-seed`（需 `GITHUB_REPOSITORY=lalavender/x`） | 0.0.12 种子 → `bin/yh-darwin-arm64` |
+| `just`（冷编） | 24s，产出 `./yh` |
+| `just test` | **370/372（2 跳过），全部通过**；compiler-tests 8/8；arch-check 8/8 |
+| `just selfhost-native` | 模块固定点一致（54 产物）、cc4 自解析 178 文件 OK、**project cases 129/129** |
+
+至此「本地 `yh check`/fixture 抓不到按值写回类 bug」的盲区也消除：
+`tests/yh-run` 与两代固定点都能在本地跑。
