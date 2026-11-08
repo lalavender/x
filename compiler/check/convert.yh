@@ -1,0 +1,83 @@
+module check
+import ast
+import proj
+import support
+
+// ============================================================================
+// convert.yh —— 语句级隐式转换校验（S3a 首片）
+//
+// `parse` 在扫描到 `return expr;` 时会立刻做一次 `sem_can_assign(返回类型, expr)`。
+// 本文件把那一步搬到 `check` 的后置遍历：AST 已经记录了表达式节点的类型、字面量性
+// 与常量位型（parse 仍然填这些字段），因此校验结果与诊断文案完全一致。
+//
+// 位置复现：parse 期 `sem_can_assign` 用的是当时 token 游标，而 `ast_expr_finish`
+// 恰好把 `after = 当时游标` 写进节点，所以这里用 `tokens[expr.after]` 的行列即可
+// 逐字还原原诊断；文件路径按 `file_id` 临时切换，多文件模块也能报对文件名。
+//
+// 明确不做：不改 AST 结构、不做错误恢复、不一次报多个错误——首个错误即返回 -1，
+// 与 parse 期行为等价。
+// ============================================================================
+
+// diag_file_at：在指定文件的 (line,col) 报告一个值内核错误码，返回 -1。
+// 只临时切换 `src_ctx().path`（其余诊断状态不动），保证与 parse 期渲染一致。
+fn diag_file_at(file_id int, line int, col int, code int) int {
+    let saved *char = support.src_ctx().path
+    if (file_id >= 0 && file_id < proj.file_count()) {
+        let path *char = proj.pool_str(proj.ctx().files[file_id].path_off)
+        if (path != 0) { support.src_ctx().path = path }
+    }
+    let status int = support.err_lc(line, col, support.vk_msg(code))
+    support.src_ctx().path = saved
+    return status
+}
+
+// tok_line_at / tok_col_at：读指定文件第 index 个 token 的行/列；越界返回 0。
+// 不切换 token 表，直接按项目文件快照取值（多文件模块下 AST 节点可能属于别的文件）。
+fn tok_line_at(file_id int, index int) int {
+    if (file_id < 0 || file_id >= proj.file_count()) { return 0 }
+    let n int = proj.ctx().files[file_id].token_n
+    if (index < 0 || index >= n) { return 0 }
+    return proj.ctx().files[file_id].tokens[index].line
+}
+
+fn tok_col_at(file_id int, index int) int {
+    if (file_id < 0 || file_id >= proj.file_count()) { return 0 }
+    let n int = proj.ctx().files[file_id].token_n
+    if (index < 0 || index >= n) { return 0 }
+    return proj.ctx().files[file_id].tokens[index].col
+}
+
+// convert_returns：校验每个 `return expr` 的表达式能否赋给当前函数返回类型。
+// 成功返回 0；失败已写诊断并返回 -1（首个错误即停，与 parse 期一致）。
+pub fn convert_returns(view *ast.AstView) int {
+    let fi int = 0
+    for fi < view.function_count {
+        let fn_ctx ast.AstFunctionContext = view.function_nodes[fi]
+        if (fn_ctx.decl_row < 0 || fn_ctx.decl_row >= view.decl_count) { fi += 1; continue }
+        let decl ast.AstDecl = view.decl_nodes[fn_ctx.decl_row]
+        if (decl.type_id < 0 || decl.type_id >= support.ms().type_n) { fi += 1; continue }
+        let ret_tid int = support.ms().types[decl.type_id].elem
+        let s int = fn_ctx.stmt_first
+        for s < fn_ctx.stmt_after {
+            if (view.stmt_nodes[s].kind == ast.AST_STMT_RETURN) {
+                let edge int = view.stmt_nodes[s].first_expr
+                if (edge >= 0 && edge < view.stmt_expr_count) {
+                    let expr_id int = view.stmt_exprs[edge].expr_id
+                    if (expr_id >= 0 && expr_id < view.expr_count) {
+                        let value ast.AstExpr = view.expr_nodes[expr_id]
+                        let code int = support.vk_can_assign(ret_tid, value.type_id,
+                            value.is_lit, value.const_bits, value.lit_big)
+                        if (code != 0) {
+                            return diag_file_at(value.file_id,
+                                tok_line_at(value.file_id, value.after),
+                                tok_col_at(value.file_id, value.after), code)
+                        }
+                    }
+                }
+            }
+            s += 1
+        }
+        fi += 1
+    }
+    return 0
+}

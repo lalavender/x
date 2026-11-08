@@ -1111,3 +1111,27 @@ S2 原计划「把 `parse_ct_layout` 迁 `check`」在实施时被证伪：该�
 独立 checked IR（S4）。S3 全部完成的收益是 `parse` 不再 import `check`，从而解锁
 S2b（布局调度整体下沉）。待用户决策：是否接受诊断顺序变化、是否加
 `max_parse_check_calls` 预算。
+
+## 2026-11-08：S3a 首片——`return` 隐式转换校验后移
+
+按 S3 spike 的「首个错误即停、诊断逐字一致」方案落地第一片：
+
+- 新增 `check/convert.yh`：
+  - `convert_returns(view)` 遍历每个函数的语句区间，对 `AST_STMT_RETURN` 取表达式边
+    → 表达式节点，用 `support.vk_can_assign(返回类型, …)` 判定；
+  - `diag_file_at(file_id, line, col, code)`：按 `file_id` 切 `src_ctx().path` 后
+    调 `support.err_lc`，多文件模块也报对文件名；
+  - 位置取 `AstExpr.after` —— `ast_expr_finish` 写的是「解析结束时的游标」，
+    正是 parse 期 `sem_can_assign` 使用的位置，因此诊断**逐字一致**。
+- `parse/parse_stmt.yh` 的 `return` 分支不再调 `check.sem_can_assign`
+  （聚合返回值规则 `sem_return_value` 仍留在 parse：它要就地修改 `Res`）。
+- `build/module_worker.yh` 与 `build/llvm_emit.yh`（单文件路径）在
+  `check.verify_module` 之前调用 `check.convert_returns`。
+
+等价性验证：两个探针（`u8` 返回 300、`*char` 返回 1）在改动前后输出**逐字相同**
+（`4:15: 字面量超出目标类型可表示范围`、`4:13: 不能把非指针值赋给指针`）。
+新增 `tests/yh-run/fail/169-return-conversion.yh`。
+
+门禁：`just` 通过；`just test` **371/373（2 跳过）**、fail 139/139、pass 10/10、
+compiler-tests 8/8、arch-check 8/8；`just selfhost-native` 固定点一致 + 自解析
+178 文件 + project cases 129/129。`max_parse_check_calls` 142 → **141**。

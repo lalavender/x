@@ -104,7 +104,16 @@
   `check` 写入，`parse` 只填语法字段；`lower` 不动（布局不变）。spike 结论：
   **全量纯语法仍不可行**（`type_id`/`sym`/`is_lit` 是语法决策输入），但可切三刀：
   S3a 隐式转换校验后移（16 处，最安全）、S3b CT 诊断延迟消费（8 处）、
-  S3c 纯值折叠后移（11 处，风险最高）。详见
+  S3c 纯值折叠后移（11 处，风险最高）。
+- [x] **S3a 首片：return 转换校验后移（2026-11-08 完成）**：新增
+  `check/convert.yh`（`convert_returns` + 按 file_id 报告的 `diag_file_at`），
+  parse 的 `return` 处不再做 `sem_can_assign`（保留聚合返回规则
+  `sem_return_value`）；`build/module_worker` 与 `build/llvm_emit`（单文件）
+  在 `verify_module` 前调用。位置用 `AstExpr.after`（= 解析结束游标，
+  与 parse 期完全同位置）复现，多文件按 `file_id` 切路径。
+  验证：两个探针用例诊断与改动前**逐字一致**；新增 fail 用例
+  `169-return-conversion`；`just test` 371/373、`just selfhost-native` 全绿；
+  `max_parse_check_calls` 142 → **141**。详见
   [`02-plan/yh-S3-语义字段外置spike-2026-11-08.md`](02-plan/yh-S3-语义字段外置spike-2026-11-08.md)。
   已落地：`arch-check` 新增 `max_parse_check_calls: 142`（只减不增），作为 S3 进度度量。
   待决策：是否接受诊断顺序变化（S3a）。
