@@ -29,6 +29,8 @@ def main():
     build_spec = sdk["build_spec"]
     verify_archive = sdk["verify_archive"]
     package_sdk = sdk["package_sdk"]
+    verify_artifacts = sdk["verify_artifacts"]
+    digest = sdk["digest"]
 
     require(select_host("Darwin", "arm64") == "darwin-aarch64",
             "Darwin/ARM64 宿主键错误")
@@ -126,6 +128,27 @@ def main():
         require((prefix / "bin/ld64.lld").is_file(),
                 "Darwin SDK 没有打包 Mach-O lld 驱动")
 
+    # 构建器源码变了、但配方与产物都没变时只重写身份记录（不再重编译）：
+    # verify_artifacts 对齐全产物必须为真，对任一被替换/缺失的产物必须为假。
+    with tempfile.TemporaryDirectory(dir=WORK) as temporary:
+        prefix = Path(temporary) / "record-prefix"
+        record = {"archives": {}, "tools": {}, "licenses": {}}
+        for key, directory, name, content in (
+                ("archives", "lib", "libLLVMCore.a", b"archive"),
+                ("tools", "bin", "llvm-config", b"config-tool"),
+                ("licenses", "", "LICENSE.TXT", b"license")):
+            item = prefix / directory / name
+            item.parent.mkdir(parents=True, exist_ok=True)
+            item.write_bytes(content)
+            record[key][name] = digest(item)
+        require(verify_artifacts(record, prefix), "完整产物的身份校验被判失败")
+        (prefix / "lib/libLLVMCore.a").write_bytes(b"replaced")
+        require(not verify_artifacts(record, prefix),
+                "被替换的静态归档没有让身份校验失败")
+        (prefix / "lib/libLLVMCore.a").unlink()
+        require(not verify_artifacts(record, prefix),
+                "缺失的静态归档没有让身份校验失败")
+
     lock = source_spec()
     require(lock["sha256"] ==
             "4633a23617fa31a3ea51242586ea7fb1da7140e426bd62fc164261fe036aa142",
@@ -139,7 +162,8 @@ def main():
     actual_package = Path(sdk["source_archive_path"]())
     if actual_package.is_file():
         verify_archive(actual_package, lock)
-    print("PASS Darwin LLVM SDK 配置门：宿主 1/1、部署版本 2/8、SDK/SDKROOT 通过、坏包拒绝")
+    print("PASS Darwin LLVM SDK 配置门：宿主 1/1、部署版本 2/8、SDK/SDKROOT 通过、坏包拒绝、"
+          "产物改写校验 3/3")
 
 
 if __name__ == "__main__":

@@ -47,10 +47,20 @@
   `YH_CACHE=off just build` 重建后同一命令通过，随后再跑一次 cache-on
   `just build` 也通过。未稳定复现，暂不判缺陷；复现时记录 `yh cache info`、
   ActionID 与 `YH_CACHE_DEBUG=1` 的 miss 原因。
-- [ ] **DR4 gen 删除日期不一致（P2，待确认）**：`docs/todo.md` 写「F4 收尾：
+- [x] **DR4 已解决（2026-11-08）**：统一以**提交时间**为准——删除 `gen` 的提交
+  `01cec48` 时间戳是 2026-11-07 23:41，故 `docs/finish.md` 里 F4 收尾条目改为
+  「2026-11-07」。原文保留在下方。
+- **DR4（已解决）gen 删除日期不一致（P2，待确认）**：`docs/todo.md` 写「F4 收尾：
   gen 消失（2026-11-06 完成）」，而删除提交 `01cec48` 的时间是
   2026-11-07 23:41。需作者确认是「实现日期 vs 提交日期」还是笔误。
-- [ ] **DR5 固定 LLVM 闭包准备不自动选 SDK（P2）**：本机 Command Line Tools
+- [x] **DR5 已修复（2026-11-08）**：`tools/llvm-darwin-sdk.py` 的
+  `resolve_sdk_root` 增加自动回退——显式 `SDKROOT` → `xcrun` 默认 SDK →
+  `/Applications/Xcode*.app/.../MacOSX*.sdk`（从新到旧）。候选逐个跑
+  `load_sdk_version` + `reject_incompatible_sdk`，选中后在 stderr 说明实际使用的
+  SDK。实测：不设 `SDKROOT` 时自动选中 Xcode 26.5 SDK 并给出原因；
+  `just llvm-host` 变为 0.6s 复用（`reused: true`）。同时把 `tools/py`
+  （≥3.10 解释器选择）与 SDK 复用/产物校验逻辑一并入库。
+- **DR5（已修复）固定 LLVM 闭包准备不自动选 SDK（P2）**：本机 Command Line Tools
   默认 SDK 27 的 `libSystem.tbd` 含 `arm64e.x1`，固定 LLVM 21.1.8 的 lld 拒绝
   解析，使 `just llvm-host` 失败；2026-11-08 用
   `SDKROOT=<Xcode>/MacOSX26.5.sdk` 重建通过（3,368 步）。待决策：是否让

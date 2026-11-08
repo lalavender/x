@@ -53,7 +53,10 @@ cpu := arch()
 
 # Python 解释器命令。Windows 上 `python3` 常是 Microsoft Store 的占位符
 # （执行即返回 49，无输出），因此 Windows 宿主默认用 `python`；PY 仍可显式覆盖。
-py_default := if host_os == "windows" { "python" } else { "python3" }
+# 其他平台统一走 tools/py：它挑第一个 ≥3.10 的解释器（macOS 自带 /usr/bin/python3
+# 可能是 3.9，读不了 tools/*.py 里的 `X | None`）。反引号表达式不能插值 just 变量，
+# 所以反引号里也直接写 `tools/py`（反引号以 justfile 所在目录为 cwd）。
+py_default := if host_os == "windows" { "python" } else { quote(root + "/tools/py") }
 # 导出给反引号表达式与配方里的子 shell 使用（just 变量不能直接写进 `...`）。
 export PY := env_var_or_default("PY", py_default)
 py := if PY == "" { py_default } else { PY }
@@ -168,7 +171,7 @@ llvm_host_flags := if llvm_host == "" { "" } else { "--llvm-host " + llvm_host +
 # LLVM 闭包缓存根：显式 YH_LLVM_CACHE 优先，否则仓库 tmp/llvm-migration，
 # 再否则复用同一 Git 仓库主 worktree 的缓存（见 tools/llvm_cache.py）。
 cache_env := env_var_or_default("YH_LLVM_CACHE", "")
-cache_root := if cache_env == "" { if host_os == "windows" { `python tools/llvm_cache.py 2>/dev/null || echo tmp/llvm-migration` } else { `python3 tools/llvm_cache.py 2>/dev/null || echo tmp/llvm-migration` } } else { cache_env }
+cache_root := if cache_env == "" { if host_os == "windows" { `python tools/llvm_cache.py 2>/dev/null || echo tmp/llvm-migration` } else { `tools/py tools/llvm_cache.py 2>/dev/null || echo tmp/llvm-migration` } } else { cache_env }
 export YH_LLVM_CACHE := cache_root
 
 # Windows 导入库（kernel32.lib + yh_chkstk.obj）：.lib 不入库，按需生成到闭包
@@ -190,7 +193,7 @@ antlr := if ANTLR == "" { if host_os == "windows" { "0" } else { "1" } } else { 
 # 固定 SDK 一旦准备好，就用它记录里的 SDKROOT：自举闭包末尾的 -lc++ 只能由
 # 宿主真实 SDK 解析（bundled stub 不含 libc++）。SDKROOT 为空串时编译器按
 # 「未设置」处理（compiler/build/darwin_link.yh 的 root_len == 0 分支）。
-sdkroot := if host_os == "macos" { `python3 -c 'import json,os,subprocess,sys
+sdkroot := if host_os == "macos" { `tools/py -c 'import json,os,subprocess,sys
 cache = subprocess.check_output([sys.executable, "tools/llvm_cache.py"], text=True).strip()
 record = os.path.join(cache, "darwin-sdk", "sdk-darwin-aarch64", "host.json")
 print(json.load(open(record))["sdk_root"] if os.path.isfile(record) else "")' 2>/dev/null || true` } else { "" }
@@ -507,7 +510,7 @@ _ensure_built:
       # compiler/tmp（测试生成物）与 compiler/.build（构建产物），否则每次
       # 都会被自己刚写出的文件判成过期、反复冷编。
       for p in "{{ seed_abs }}" compiler/project.toml compiler/llvm vendor/llvm/sdk.lock.json \
-               tools/seed-build.py tools/llvm-host.py tools/llvm-darwin-host.py tools/llvm-darwin-sdk.py; do
+               tools/seed-build.py tools/llvm-host.py tools/llvm-darwin-host.py tools/llvm-darwin-sdk.py; do  
         [ -e "$p" ] || continue
         if [ "$p" -nt "$target" ]; then need=1; break; fi
         if [ -d "$p" ] && [ -n "$(find "$p" -type f -newer "$target" -print -quit)" ]; then need=1; break; fi

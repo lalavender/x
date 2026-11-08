@@ -938,6 +938,8 @@ CI run `42463040423` **四端全绿**（linux-x64 / linux-arm64 / windows-x64 / 
 
 ## 2026-11-08：本地构建环境恢复（LLVM 21 宿主闭包）
 
+> 日期口径：以**提交时间**为准（`gen` 删除提交 `01cec48` 为 2026-11-07 23:41）。
+
 此前 `just` 全链路被两个环境问题卡住：
 
 1. **SDK 目标标签**：`xcrun` 默认指向 Command Line Tools 的 macOS 27 SDK，其
@@ -964,3 +966,17 @@ CI run `42463040423` **四端全绿**（linux-x64 / linux-arm64 / windows-x64 / 
 
 至此「本地 `yh check`/fixture 抓不到按值写回类 bug」的盲区也消除：
 `tests/yh-run` 与两代固定点都能在本地跑。
+
+补充（同日）：把「SDK 自动回退」做进工具，`just` 不再需要手工 `SDKROOT`。
+
+- `tools/llvm-darwin-sdk.py::resolve_sdk_root`：显式 `SDKROOT` → `xcrun` 默认 SDK
+  → `/Applications/Xcode*.app/**/MacOSX*.sdk`（新→旧），逐个 `load_sdk_version`
+  + `reject_incompatible_sdk`；回退时在 stderr 说明原因与实际 SDK。
+- `tools/py`：统一挑 ≥3.10 的 Python（macOS 自带 `python3` 可能是 3.9，读不了
+  `X | None`），`justfile` 的反引号与配方共用。
+- `tools/llvm-darwin-sdk.py` 增加「构建器源码变了但配方/产物没变」时只重写身份记录
+  （`verify_artifacts`），`tests/selfhost/llvm-darwin-sdk.py` 同步补齐自测。
+
+验证：`python3 tests/selfhost/llvm-darwin-sdk.py --self-test` → PASS（含产物改写
+校验 3/3）；`just llvm-host` → 0.6s `reused: true`；`just` 冷编通过；
+`arch-check` 8/8。

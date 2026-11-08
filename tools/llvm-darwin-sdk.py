@@ -126,25 +126,66 @@ def reject_incompatible_sdk(root):
                 "请把 SDKROOT 指向 26.x SDK（例如 MacOSX26.5.sdk）")
 
 
+def _accept_sdk(root):
+    """校验候选 SDK：版本可读且不含固定 lld 解析不了的目标标签。"""
+    load_sdk_version(root)
+    reject_incompatible_sdk(root)
+
+
+def xcode_sdk_candidates():
+    """按版本从新到旧列出 Xcode 自带的 macOS SDK（26.x 等）。
+
+    Command Line Tools 通常只有最新一个 SDK；当它与固定 LLVM 21.1.8 的 lld
+    不兼容（例如 27 的 `arm64e.x1`）时，需要回退到 Xcode 里的旧 SDK。
+    这里只做「列出候选」，是否可用仍由 _accept_sdk 判定。
+    """
+    pattern = "Xcode*.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk"
+    found = sorted(Path("/Applications").glob(pattern))
+    if not found:
+        return []
+    def version_key(path):
+        match = re.search(r"MacOSX([0-9]+)(?:\.([0-9]+))?", path.name)
+        if not match:
+            return (0, 0)
+        return (int(match.group(1)), int(match.group(2) or 0))
+    return sorted(found, key=version_key, reverse=True)
+
+
 def resolve_sdk_root(environment=None, system=None, machine=None, run=None):
-    """优先解析显式 SDKROOT；仅 Darwin/ARM64 可用 xcrun 自动发现。"""
+    """解析可用的 macOS SDK。
+
+    顺序：显式 SDKROOT → xcrun 默认 -sdk → Xcode 自带 SDK（从新到旧）。
+    默认 SDK 不兼容固定 lld（`arm64e.x1` 等）时自动回退，并在 stderr 说明
+    实际使用的 SDK，避免使用者手工设置 SDKROOT。
+    """
     environment = os.environ if environment is None else environment
     explicit = environment.get("SDKROOT", "").strip()
     if explicit:
         root = Path(explicit).expanduser().resolve()
-        load_sdk_version(root)
-        reject_incompatible_sdk(root)
+        _accept_sdk(root)
         return root
     select_host(system, machine)
     run = subprocess.run if run is None else run
     result = run(["xcrun", "--sdk", "macosx", "--show-sdk-path"],
                  capture_output=True, text=True, check=False)
-    if result.returncode != 0 or not result.stdout.strip():
-        raise RuntimeError("未找到 macOS SDK；设置 SDKROOT 或安装 Xcode Command Line Tools")
-    root = Path(result.stdout.strip()).resolve()
-    load_sdk_version(root)
-    reject_incompatible_sdk(root)
-    return root
+    if result.returncode == 0 and result.stdout.strip():
+        root = Path(result.stdout.strip()).resolve()
+        try:
+            _accept_sdk(root)
+            return root
+        except RuntimeError as error:
+            default_error = error
+    else:
+        default_error = RuntimeError("未找到 macOS SDK；设置 SDKROOT 或安装 Xcode Command Line Tools")
+    for candidate in xcode_sdk_candidates():
+        try:
+            _accept_sdk(candidate)
+        except RuntimeError:
+            continue
+        print(f"提示：默认 SDK 不适用于固定 LLVM（{default_error}）；改用 {candidate}",
+              file=sys.stderr)
+        return candidate.resolve()
+    raise default_error
 
 
 def source_archive_path():
@@ -212,6 +253,20 @@ def sdk_toolchain():
     return paths
 
 
+def verify_artifacts(record, prefix):
+    """逐个校验身份记录里的静态归档、固定工具与许可证摘要。"""
+    for directory, key in (("lib", "archives"), ("bin", "tools")):
+        for name, expected in record.get(key, {}).items():
+            item = prefix / directory / name
+            if not item.is_file() or digest(item) != expected:
+                return False
+    for name, expected in record.get("licenses", {}).items():
+        item = prefix / name
+        if not item.is_file() or digest(item) != expected:
+            return False
+    return True
+
+
 def build_sdk(min_os, jobs):
     """从固定完整源码构建 X86/AArch64 LLVM、clang oracle 与 ELF/Mach-O/COFF lld。"""
     host = select_host()
@@ -241,29 +296,21 @@ def build_sdk(min_os, jobs):
                 or record.get("sdk_root") != str(sdk_root)
                 or record.get("sdk_version") != sdk_version):
             raise RuntimeError(f"已有 Darwin SDK 的源码/目标/Apple SDK 不同，保留现场：{prefix}")
-        exact = (record.get("manifest_sha256") == digest(MANIFEST)
-                 and record.get("sdk_settings_sha256") == digest(sdk_root / "SDKSettings.json")
-                 and record.get("builder_sha256") == digest(Path(__file__))
-                 and record.get("toolchain") == toolchain)
-        if exact:
-            for name, expected in record.get("archives", {}).items():
-                archive = prefix / "lib" / name
-                exact = archive.is_file() and digest(archive) == expected
-                if not exact:
-                    break
-        if exact:
-            for name, expected in record.get("tools", {}).items():
-                executable = prefix / "bin" / name
-                exact = executable.is_file() and digest(executable) == expected
-                if not exact:
-                    break
-        if exact:
-            for name, expected in record.get("licenses", {}).items():
-                license_file = prefix / name
-                exact = license_file.is_file() and digest(license_file) == expected
-                if not exact:
-                    break
-        if exact:
+        # 配方（怎么编译）与产物（编译结果）分开校验：recipe 覆盖 sdk.lock 清单、
+        # Apple SDK 设置和工具链；builder_sha256 只是构建器源码摘要。
+        recipe = (record.get("manifest_sha256") == digest(MANIFEST)
+                  and record.get("sdk_settings_sha256") == digest(sdk_root / "SDKSettings.json")
+                  and record.get("toolchain") == toolchain)
+        artifacts_ok = recipe and verify_artifacts(record, prefix)
+        if artifacts_ok and record.get("builder_sha256") == digest(Path(__file__)):
+            return prefix
+        if artifacts_ok:
+            # 构建器源码改过、但配方与全部产物摘要逐一致：只重写身份记录。
+            # 旧逻辑在这里会重新 configure 并重跑整棵 LLVM 的增量编译——重写生成
+            # 头文件会让 2748 个目标全部重编（实测约 30 分钟、需要数 GiB 磁盘），
+            # 对「只改 SDK 解析顺序 / 诊断文案」这类构建器改动得不偿失；
+            # 而配方与产物都已逐个校验，锁文件仍然钉住版本与构建配置。
+            write_host_record(host, min_os, sdk_root, sdk_version, toolchain, package, prefix)
             return prefix
 
     usage = shutil.disk_usage(ROOT)
