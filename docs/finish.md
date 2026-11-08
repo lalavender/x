@@ -8,6 +8,40 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-08 memory 标准库设计第三版：M0–M6 收敛为 T1–T3
+
+**结果**：重写 `docs/03-design/yh-memory标准库设计.md` 为第三版，未改业务代码。
+第二版（2026-10-23）把范围切成 M0–M6 六阶段，自设计至 2026-11-08 **零切片
+落地**，判定为范围过大并收敛：
+
+- 必做三片：**T1 `reallocate`**（`data=0` 等价 `alloc`、`new_size=0` 释放、
+  按 `min(old,new)` 复制后释放旧块、失败保旧块）、**T2 `FixedBuffer`**
+  （调用方缓冲、零系统调用、LIFO resize/free/reset/owns）、**T3 `Arena`**
+  （块几何增长 1.5 倍、`reset(free_all/retain)`、`capacity`）。
+- 降为按需：`FixedPool`（P4）与 `Allocator` vtable（P5）；两者当前都无消费者
+  （`toml`/`cli` 各有私有池，`string`/`toml`/`json` 都不接受分配器参数）。
+- 撤掉伪约束：第二版用 `10_`/`20_` 文件名「保证编译顺序」；同模块按两遍解析
+  （pass1 签名 / pass2 正文），顺序无关，`libs/string` 的 8 文件无编号即为反证。
+  文件布局改为 `memory.yh`/`base.yh`/`fixed_buffer.yh`/`arena.yh`/`memory.test.yh`。
+- 新增 §12「如何使用」：三档场景（现在可用的单对象分配、T1 后的重分配、
+  T2/T3 后的临时缓冲与批量对象）+ 选择判据表 + 五条配对硬规则。
+
+**设计期实测**（写入文档 §11 验证记录，非实施验收）：
+`malloc(0)` 返回非空且 16 字节对齐、超长请求返回 0、`free(0)` 无操作；
+同地址二次 `free` 直接 SIGSEGV（退出码 139）；20 万次 64 字节往返 0.87 s
+（同规模基线 0.31 s）；`pub struct`/`pub enum`/枚举形参/结构体按值返回/
+函数指针字段/栈数组取址在同一 fixture 中编译并运行通过。
+
+**验证**：`python3 tools/arch-check.py` 通过（18 模块 / 78 边 / 未判空 malloc 0）。
+文档里每个示例在 `/tmp` fixture 中 `yh build` + 运行验证过语法，并借此修掉三处
+错误写法：`while` 不是 yh 语法（循环只有 `for`）、`&expr.to_type(*T)` 不可编译
+（右值取址）、`import` 未使用是编译错误。本次只改文档，`just build`/`just test`
+未重跑（无代码变更）；T1 落地时才需要 `just test-libs`。
+
+**遗留**：T1–T3 待实施；第二版的
+`docs/02-plan/yh-memory标准库实施方案-2026-10-23.md` 仍按 M0–M6 编号，与第三版
+不一致，待 T1 落地时同步改写或归档（已记入 `docs/todo.md`）。
+
 ## 2026-11-08 文档刷新：架构/模块职责对齐实测，测试红灯入账
 
 **结果**：按 2026-11-08 的代码与实测刷新文档，未改业务代码。
@@ -880,3 +914,24 @@ suffixes、`windows_link.yh` prefixes）、justfile 5 处、tools 2 个、selfho
 - **未完成**：F2（`parse` 纯语法）与 F4 其余步（`comptime` 纯 CT IR 执行器）未做，
   因此 `CType/CSym/ty_*/sym_*/static_data/value_rules` 仍留 `gen`——`comptime`
   仍直接依赖这些规则，先迁会成 `check ↔ comptime` 环。
+
+## 2026-11-08：CI 全绿修复（GEN/F4 批次遗留回归收口）
+
+背景：GEN0–GEN4 与 F2/F4 大批重构后 CI 连续红灯（在 4 端均复现），本轮用
+`gh run view --log` + 临时 printf 诊断定位到 **四个独立根因**，全部修复后
+CI run `42463040423` **四端全绿**（linux-x64 / linux-arm64 / windows-x64 / darwin-arm64）。
+
+| # | 根因 | 影响 | 修法 |
+| --- | --- | --- | --- |
+| 1 | CT 镜像行访问器按值返回，`ct_type_row(tid).size = …` 只改副本 | 编译期数组长度/结构体布局永远无法完成 → 21 例 `run/9x~18x` + 2 例 `fail/` 失败与段错误 | 新增 `ct_type_at`/`ct_sym_at`/`ct_field_at` 指针视图，10 处写回改写；`arch-check` 加 `max_ct_row_field_writes: 0` |
+| 2 | `ct_tables_bind` 的 data-str/em 八个槽传的是**数组基址**，读侧按 `**int` 解引用 | 编译期字符串字面量实参必崩（`run/141/145/156/158`） | 槽类型改为直接基址指针（`*int`/`*i64`），`ct_data_str_lookup` 等去掉 `[0]`；类型收紧后错法直接编译失败 |
+| 3 | `checked_slice` 切片导入把行数写成 `v.expr_count += n`（`AstView` 是副本） | 函数级 IR 缓存命中的模块构建 `verify_module` 报「函数声明 AST 缺少函数体根」；`llvm-global-cache` 预热失败 | 新增 `ast.ast_view_append_expr/stmt/edge/binding/function`，由 ast 提交回 arena 计数；`arch-check` 加 `max_ast_view_count_writes: 0` |
+| 4 | `checked_decl_restore` 在 arena 复位**之前**取视图，复位后仍用旧视图写声明字段 | `check-slice` 往返（`llvmlower` 的 `checkcache.yh`）段错误 | 视图改为复位 + `ast_decl_add_file` 之后重新取 |
+| 5 | Windows 侧：`vendor/windows-sdk` 的 kernel32 导出缺 `SetConsoleOutputCP`/`SetConsoleCP`；且引入 `check` 的 fixture 在零 CRT 下缺 VC 运行时（`strtod`） | windows 4 个 fixture 链接失败 | 补 def + manifest（重算 `def_sha256`）；fixture 仅在引入 `check` 时追加编译器自身的 `[link-windows-x64] support` 清单（避免与 yh 自有 `memcpy` 冲突） |
+
+同时把 4 端 project cases 从 88/128 提升到 **140/140（linux）、135/135（windows）、129/129（darwin）**，
+`tests/yh-run` 语料 367/372~370/372（其余为平台跳过）。
+
+经验：这类「按值视图/镜像写回」bug 本地 `yh check` 与 fixture 门禁都抓不到，
+必须靠 `tests/yh-run`（重建编译器）或 CI；因此新增的两条 arch-check 预算
+（`max_ct_row_field_writes`、`max_ast_view_count_writes`）用于静态拦截同一错法。

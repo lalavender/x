@@ -18,7 +18,13 @@
 按 2026-11-08 的代码与实测刷新架构/模块职责/finish 时发现的问题。全部为实测复现，
 尚未修复；不改变业务代码。
 
-- [ ] **DR1 `just test` 红灯：函数缓存预热路径 AST 校验失败（P0）**：
+- [x] **DR1 已修复（2026-11-08，提交 `304177d`/`9923623`）**：``just test`` 红灯的根因是
+  `check/checked_slice.yh` 的切片导入把新增行数写成 `v.stmt_count += n`——`ast.AstView`
+  是按值返回的只读视图，累加只改副本，arena 计数仍为 0，于是函数缓存命中的模块在
+  `check.verify_module` 看到「有声明、无语句」。已改为 `ast.ast_view_append_*` 提交回
+  arena 全局计数，并加 `arch-check` 预算 `max_ast_view_count_writes: 0`（自测 8/8）。
+  原始记录保留在下方供追溯：
+- **DR1（已修复）`just test` 红灯：函数缓存预热路径 AST 校验失败（P0）**：
   `tests/selfhost/llvm-global-cache.py --compiler-path ./yh` 的 `primed` 构建返回
   1，stderr 为 `yh: 内部错误：函数声明 AST 缺少函数体根` 与
   `顶层声明 AST 校验失败`（`compiler/check/verify.yh:333`、
@@ -26,7 +32,9 @@
   输出。复现：`just test`（最后一门）。当前 HEAD 已带两笔诊断提交
   （`39a62fa`、`f0c9323`），修复未收口。待确认：是否与 `804dc54` 的 CT 镜像
   改直接基址相关；CI 是否同样红。
-- [ ] **DR2 清理临时 DBG 输出（P0）**：`compiler/ast/ast_stmt.yh:102`、
+- [x] **DR2 已修复（2026-11-08）**：临时 DBG 输出与 `dbg_tag` 字段、`ast_stmt_reset`
+  打印、`verify`/`module_worker` 诊断全部删除。
+- **DR2（已修复）清理临时 DBG 输出（P0）**：`compiler/ast/ast_stmt.yh:102`、
   `compiler/check/verify.yh:322/326`、`compiler/build/module_worker.yh:416`
   仍向 stdout 打印 `DBG ...`，污染 `yh check`/`yh build` 输出。DR1 修复后删除。
 - [ ] **DR3 全局缓存下的非确定失败（P1，待复现）**：一次 `just build`（`YH_CACHE`
@@ -680,36 +688,36 @@ Linux 生效；`read`/`write` 与 prelude 重名，net 用 `read_some`/`write_so
   可选 `libs/curl` 互操作模块（HTTP/2、代理、cookie、压缩场景），不得进入
   `libs/http` 依赖图。
 
-### MEM 内存管理标准库（2026-10-23 设计第二版；M0–M6 待实施）
+### MEM 内存管理标准库（2026-11-08 设计第三版；T1–T3 待实施）
 
-[设计](03-design/yh-memory标准库设计.md)与
-[方案](02-plan/yh-memory标准库实施方案-2026-10-23.md)已按 Zig
-`std.mem.Allocator`/`std.heap` 的能力分层整理。保持现有
-`alloc`/`release`/`copy` 签名；新增 `reallocate`（调用方显式提供 `old_size`）、
-`FixedBuffer`（调用方缓冲区、LIFO resize/free）、增强 Arena（几何增长、
-reset 模式、LIFO 回收、capacity）与基于 Arena + 空闲链的 FixedPool。
-统一 `Allocator`（函数指针 vtable）列为 M5 可选；Debug/ThreadSafe/Page/
-StackFallback 后置。块统一取自 prelude 堆，不新增 `sys` 依赖，不改
-`string`/`toml`/编译器，也不替代 `libc` 的 C ABI 分配器。
+[设计](03-design/yh-memory标准库设计.md)已改为第三版：第二版（2026-10-23）的
+M0–M6 六个阶段自设计至 2026-11-08 **零切片落地**，判定为范围过大；
+第三版收敛为 **T1–T3 三个必做切片**，`FixedPool`/`Allocator` 降为「有消费者
+才做」的按需层（P4/P5）。保持 `alloc`/`release`/`copy` 签名不变；块统一取自
+prelude 堆，不新增 `sys` 依赖，不改 `string`/`toml`/编译器，不替代 `libc`。
 
-- [ ] **M0 基线固化**：`memoryheap` fixture 覆盖零长度、16 字节对齐、超长请求
-  返回 0、`release(0)`；不改源码，确认现状与设计一致。
-- [ ] **M1 `reallocate` 与文档**：增长/缩小/失败保留旧块/`new_size=0` 释放；
-  README 与 `old_size`、重叠、对齐边界；`libsbase` 不回退。
-- [ ] **M2 FixedBuffer**：绝对地址对齐、空间不足返回 0、最近分配
-  resize/free、非最近缩小 resize=1 但不回收、reset/owns/容量；新增
-  `tests/memory/run.py`、`make test-memory(-o2)` 与 build-check 登记。
-- [ ] **M3 Arena**：单块/跨块、几何增长（1.5 倍）、64/256 对齐、非法对齐/
-  溢出返回 0、LIFO resize/free、`reset(free_all/retain)`、capacity、
-  `MEMORY_TEST_FAIL_AFTER` 注入。
-- [ ] **M4 FixedPool**：内部 Arena + 空闲链、`reserve`、复用、reset/release、
-  block_size/alignment 校验、映射失败注入；以 `toml`/`cli` 池迁移为可选消费者。
-- [ ] **M5 `Allocator` 统一接口（按需）**：函数指针 vtable、heap/arena/
-  fixed_buffer/pool/failing 适配器、`allocator_reallocate` 组合；触发条件为
-  多容器共享接口、Arena 用 FixedBuffer 作 child 或 StackFallback。
-- [ ] **M6 后置候选**：堆对齐分配、简化 DebugAllocator、StackFallback、
-  PageAllocator 适配器、统计/上限、ThreadSafe（J4）；无消费者不做。
+- [ ] **T1 `reallocate` + 模块文档**：`memory.yh` 追加 `reallocate`（`data=0`
+  等价 `alloc`；`new_size=0` 释放；按 `min(old,new)` 复制后释放旧块；失败保留
+  旧块）；新增 `libs/memory/{README.md,doc.yh,memory.test.yh}`，断言覆盖
+  `alloc(0)` 非空、16 字节对齐、超长请求返回 0、`release(0)`、增长/缩小/
+  `data=0`/`new_size=0`/失败保旧块。验收 `just test-libs`（O0+O2）。
+- [ ] **T2 FixedBuffer**：新增 `libs/memory/{base.yh,fixed_buffer.yh}`；
+  绝对地址对齐（16/64/256）、空间不足返回 0、最近分配 resize/free、
+  非最近缩小 resize=1 但不回收、`reset`/`owns`/`capacity`/`used`、0 长度。
+  验收 `just test-libs`。
+- [ ] **T3 Arena**：新增 `libs/memory/arena.yh`（`Arena` + `ArenaResetMode`
+  + 块映射）；单块/跨块、几何增长（1.5 倍）、64/256 对齐、非法对齐与溢出返回 0、
+  最近分配 resize/free、`reset(free_all/retain)`、`capacity`、
+  `MEMORY_TEST_FAIL_AFTER` 注入（失败保留旧内容）。验收 `just test-libs`。
+- [ ] **P4 FixedPool（按需）**：触发条件为出现固定块大小高频申请/归还的消费者；
+  当前 `toml`/`cli` 各有私有池，本设计不迁移。
+- [ ] **P5 `Allocator` vtable（按需）**：触发条件为多容器共享接口、
+  Arena 用 FixedBuffer 作 child；函数指针字段可用（`libs/cli` 有先例）。
 - [ ] **E4 配对**：libc 分配器与 prelude 的配对（见 E4），不得跨入口释放。
+
+注：第二版的 [实施方案](02-plan/yh-memory标准库实施方案-2026-10-23.md) 按 M0–M6
+编号，与第三版的 T1–T3 不一致——以设计文档第三版为准，方案文档待 T1 落地时
+同步改写或归档。
 
 ### IO 字节流标准库（2026-10-24 设计；IO0–IO4 已完成）
 
