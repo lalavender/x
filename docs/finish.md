@@ -985,3 +985,23 @@ CI run `42463040423` **四端全绿**（linux-x64 / linux-arm64 / windows-x64 / 
 `"{{ py }}"`（自带双引号），重复引号让 shell 把带引号的字符串当命令名，
 `test-windows-sdk` 在 linux-arm64 上以 127 失败。改为相对路径 `tools/py` 后
 CI 四端全绿（run 42486762530）。
+
+## 2026-11-08：前端两遍化重新分析（结论：不再全量重写，改 S1–S4）
+
+用实测数据复核 2026-11-06 的 F0–F7：
+
+- `parse` 9,626 行 / 21 `pub fn`；`check.*` 190 次、`comptime.*` 118 次调用；
+  `Res` 字段读取 **370 处，其中 167 处直接决定语法分支**（`type_id` 52、`ival` 37、
+  `is_const` 21、`is_lit` 20、`lit_big` 18…）→ 「纯语法 parse」仍需 AST schema 改造。
+- **最大的新发现**：`AstExpr` 22 字段里 11 个是语义字段，而 `lower` 直接读它们
+  **257 处**（`comptime` 486、`check` 322 之外）。今天的「AST」就是受检表示，
+  纯语法化等于**换掉 lower 的输入契约**，原计划低估了这一项。
+- 依赖方向约束更明确：`parse → check` 已成事实，因此任何「搬进 check 但仍要
+  重新解析源码」的逻辑都会成环 → `parse_ct_layout`(501 行) 与
+  `iface_load`/`iface_ct_load`(392 行) **不能**迁；而**接口发射侧**
+  (≈1,900 行，只读 `ms()`/CT registry/AST 区间) 可以。
+
+据此把 F0–F7 换成 S1–S4（详见 `docs/02-plan/yh-前端两遍化-重新分析-2026-11-08.md`）：
+S1 接口发射下沉 `check`（≈1,900 行，零环风险）、S2 解析器窄口后迁布局调度、
+S3 语义字段改由 `check` 写入（真两遍化核心）、S4 纯语法 AST + 独立 checked IR（一般不做）。
+`docs/todo.md` 的 F0–F7 条目已按此替换，并列出 3 个待用户决策的问题。
