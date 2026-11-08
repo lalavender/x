@@ -506,7 +506,9 @@ def copy_proj(src, dst):
         # 必须把这两层一起带上，否则会在模块解析阶段报 cache/hash 不存在。
         shutil.copytree(ROOT / "libs" / "hash", dst / "hash",
                         ignore=shutil.ignore_patterns(".build"))
-    link_section = windows_support_link()
+    # 只有引入 check（内部用 strtod 等 C 运行时符号）的 fixture 需要 VC 运行时；
+    # 其余 fixture 加上会与 yh 自有 memcpy/malloc 运行时入口冲突（duplicate symbol）。
+    link_section = windows_support_link() if src.name in ("ctfacts", "gen-split", "llvmfront") else ""
     if link_section:
         host_manifest = dst / "project.toml"
         if host_manifest.is_file():
