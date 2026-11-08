@@ -90,6 +90,9 @@ BUDGETS = {
     # `ast.AstView` 是按值返回的只读视图：`v.stmt_count += n` 只改副本，
     # 会造成切片导入后 arena 计数仍为 0（2026-11-07 的模块构建回归）。
     "max_ast_view_count_writes": 0,
+    # S3（语义字段外置）进度指标：`parse` 里对 `check.sem_*` 的调用行数，只减不增。
+    # 每搬走一组语义校验就下调整数（见 docs/02-plan/yh-S3-语义字段外置spike-2026-11-08.md）。
+    "max_parse_check_calls": 142,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
     "min_cap_appends": 45,
@@ -309,6 +312,13 @@ def main():
             if re.search(r"\bv\.(?:expr|stmt|stmt_expr|binding|function|decl)_count\s*\+=", code):
                 view_writes.append(f"{f.relative_to(SRC)}: {line.strip()[:60]}")
     budget("max_ast_view_count_writes", len(view_writes), "; ".join(view_writes[:3]))
+    parse_sem_calls = 0
+    for f in (SRC / "parse").rglob("*.yh"):
+        for line in f.read_text(errors="ignore").splitlines():
+            code = line.split("//")[0]
+            if re.search(r"\bcheck\.sem_[a-z_0-9]+\s*\(", code):
+                parse_sem_calls += 1
+    budget("max_parse_check_calls", parse_sem_calls, "parse → check.sem_*")
     unwired = [s for s in UNWIRED_EXEMPT if s]
     budget("max_unwired_pub", len(unwired))
     if cap_appends < BUDGETS["min_cap_appends"]:
