@@ -56,7 +56,7 @@ cpu := arch()
 # 其他平台统一走 tools/py：它挑第一个 ≥3.10 的解释器（macOS 自带 /usr/bin/python3
 # 可能是 3.9，读不了 tools/*.py 里的 `X | None`）。反引号表达式不能插值 just 变量，
 # 所以反引号里也直接写 `tools/py`（反引号以 justfile 所在目录为 cwd）。
-py_default := if host_os == "windows" { "python" } else { quote(root + "/tools/py") }
+py_default := if host_os == "windows" { "python" } else { "tools/py" }
 # 导出给反引号表达式与配方里的子 shell 使用（just 变量不能直接写进 `...`）。
 export PY := env_var_or_default("PY", py_default)
 py := if PY == "" { py_default } else { PY }
