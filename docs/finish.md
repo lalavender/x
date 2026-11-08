@@ -1064,3 +1064,23 @@ arch-check 8/8；`just selfhost-native` 固定点一致（54 产物）、cc4 自
 project cases 129/129。**等价性**：`comptimecross` 的 8 个 `.s.i`/`.s.ct` 与迁移前
 逐字节一致（`cmp` 全通过）。编译器自身 `.s.i` 有差异属预期（`iface_emit` 等符号
 从 `parse` 接口移到 `check` 接口），符合 ADR「跨模块搬家不要求编译器自身接口一致」。
+
+## 2026-11-08：S2a 解析器窄口 + 布局策略下沉（并修正 S2 方向）
+
+S2 原计划「把 `parse_ct_layout` 迁 `check`」在实施时被证伪：该文件核心要**重入解析器**
+（`parse_expr`），搬进 `check` 会与既有的 `parse → check` 形成双向环。
+`parse.eval_token_range` 窄口只能收敛「重入」，不能消除方向约束，因此只执行可行的一半：
+
+- 新增 `parse.eval_token_range(first, after, out *support.Res)`：自管 token 游标、
+  AST 捕获开关与 `c_fold`，替换 `parse_ct_layout` 内两处重复样板（数组长度表达式、
+  延迟枚举判别值），失败时游标与捕获状态一律恢复。
+- 新增 `comptime/ct_layout_sched.yh`：`ct_layout_expr_runnable`（const / CT 函数 /
+  `sizeof` 依赖判定）与 `ct_layout_expr_register`（依赖边登记）。二者只读 token 表与
+  `support.ms()`、只写 comptime 自己的依赖图，**不重入解析器**，因此下沉合法，且与
+  布局请求数据同处一个模块。
+- S2b（调度整体下沉 `check`）并入 S3 前置条件：必须先让 `parse` 不再 import `check`。
+
+指标：`parse` 7,640 → **7,580 行**，`comptime` 5,956 → 6,076 行（含新文件头）。
+验收：`just` 通过；`just test` 370/372 + compiler-tests 8/8 + arch-check 8/8；
+`just selfhost-native` 固定点一致、cc4 自解析 178 文件、project cases 129/129；
+`comptimecross` 的 8 个 `.s.i`/`.s.ct` 与 S1 后**逐字节一致**。

@@ -67,91 +67,7 @@ fn p_ct_layout_expr_defer_now(first int, after int) int {
     return 0
 }
 
-// p_ct_layout_expr_runnable：等待常量和 CT 函数中的 pending sizeof 类型布局就绪。
-fn p_ct_layout_expr_runnable(first int, after int) int {
-    let i int = first
-    for i < after {
-        let kind int = token.ctx().tokens[i].kind
-        if (kind == token.TOK_IDENT
-            && (i == first || (token.ctx().tokens[i - 1].kind != token.TK_DOT
-                && token.ctx().tokens[i - 1].kind != token.TK_DOLLAR))) {
-            let sym int = support.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
-            if (sym >= 0 && sym < support.ms().sym_n
-                && support.ms().syms[sym].kind == support.SYM_CONST
-                && support.ms().syms[sym].const_ready == 0) { return 0 }
-        }
-        if (kind == token.TK_DOLLAR && i + 1 < after
-            && token.ctx().tokens[i + 1].kind == token.TOK_IDENT) {
-            let sym int = support.sym_lookup(token.ctx().tokens[i + 1].start,
-                token.ctx().tokens[i + 1].len)
-            if (sym >= 0 && comptime.ct_layout_function_sym_pending(sym) != 0) {
-                return 0
-            }
-        }
-        if (kind == token.TK_SIZEOF && i + 3 < after
-            && token.ctx().tokens[i + 1].kind == token.TK_LPAREN
-            && token.ctx().tokens[i + 2].kind == token.TOK_IDENT) {
-            let tid int = support.ty_lookup_name(token.ctx().tokens[i + 2].start,
-                token.ctx().tokens[i + 2].len)
-            if (tid >= 0 && comptime.ct_layout_type_pending(tid) != 0) { return 0 }
-        }
-        i += 1
-    }
-    return 1
-}
 
-// p_ct_layout_expr_register：记录数组长度表达式直接依赖的值、类型和 CT 函数闭包。
-fn p_ct_layout_expr_register(row int) int {
-    let first int = comptime.ct_layout_expr_first(row)
-    let after int = comptime.ct_layout_expr_after(row)
-    let i int = first
-    for i < after {
-        let kind int = token.ctx().tokens[i].kind
-        if (kind == token.TOK_IDENT
-            && (i == first || (token.ctx().tokens[i - 1].kind != token.TK_DOT
-                && token.ctx().tokens[i - 1].kind != token.TK_DOLLAR))) {
-            let sym int = support.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
-            if (sym >= 0 && sym < support.ms().sym_n
-                && support.ms().syms[sym].kind == support.SYM_CONST) {
-                if (comptime.ct_layout_expr_value_dependency_add(row, sym) != 0) {
-                    return -1
-                }
-                // 长度表达式引用的普通整数常量也要在布局期求出值：
-                // `const N int = 3;` 原本只在全局子遍就绪，而全局/字段/形参
-                // 位置的 `[N]int` 在布局子遍就要定长。仅限声明在前的常量，
-                // 前向引用保持既有「编译期常量尚未就绪」诊断。
-                if (support.ms().syms[sym].const_ready == 0
-                    && check.sym_declared_before(sym, token.ctx().tokens[first].line,
-                        token.ctx().tokens[first].col) != 0
-                    && comptime.ct_value_request_add(sym, support.ms().syms[sym].def_line,
-                        support.ms().syms[sym].def_col) != 0) {
-                    return -1
-                }
-            }
-        }
-        if (kind == token.TK_SIZEOF && i + 3 < after
-            && token.ctx().tokens[i + 1].kind == token.TK_LPAREN
-            && token.ctx().tokens[i + 2].kind == token.TOK_IDENT) {
-            let tid int = support.ty_lookup_name(token.ctx().tokens[i + 2].start,
-                token.ctx().tokens[i + 2].len)
-            if (tid >= 0
-                && comptime.ct_layout_expr_type_dependency_add(row, tid) != 0) {
-                return -1
-            }
-        }
-        if (kind == token.TK_DOLLAR && i + 1 < after
-            && token.ctx().tokens[i + 1].kind == token.TOK_IDENT) {
-            let sym int = support.sym_lookup(token.ctx().tokens[i + 1].start,
-                token.ctx().tokens[i + 1].len)
-            if (sym >= 0
-                && comptime.ct_layout_expr_function_dependency_add(row, sym) != 0) {
-                return -1
-            }
-        }
-        i += 1
-    }
-    return 0
-}
 
 // p_decl_ct_layout_eval_runnable：检查布局常量所依赖的值和 CT 函数是否可用。
 fn p_decl_ct_layout_eval_runnable(start int) int {
@@ -174,7 +90,7 @@ fn p_decl_ct_layout_eval_runnable(start int) int {
             || kind == token.TK_RBRACE) { depth -= 1 }
         after += 1
     }
-    return p_ct_layout_expr_runnable(first, after)
+    return comptime.ct_layout_expr_runnable(first, after)
 }
 
 // p_decl_ct_layout_const_unready：选择需要在布局期求值的未就绪整数 const。
@@ -312,7 +228,7 @@ pub fn parse_source_ct_layout_register() int {
     for row < comptime.ct_layout_request_count() {
         if (comptime.ct_layout_expr_pending(row) != 0
             && comptime.ct_layout_expr_file(row) == support.session().active_file
-            && p_ct_layout_expr_register(row) != 0) { return -1 }
+            && comptime.ct_layout_expr_register(row) != 0) { return -1 }
         row += 1
     }
     if (ast.store().file_indexed != 0) {
@@ -395,18 +311,13 @@ pub fn parse_source_ct_layout_exprs() int {
             token.ctx().pos = saved_pos
             return support.fail("内部错误：数组长度表达式 token 范围无效")
         }
-        if (p_ct_layout_expr_runnable(first, after) != 0) {
-            token.ctx().pos = first
-            support.fc().c_fold += 1
+        if (comptime.ct_layout_expr_runnable(first, after) != 0) {
             let result support.Res
-            let status int = parse_expr(&result)
-            support.fc().c_fold -= 1
-            if (status != 0 || token.ctx().pos != after) {
+            let status int = eval_token_range(first, after, &result)
+            if (status != 0) {
                 support.session().ast_capture = saved_capture
                 token.ctx().pos = saved_pos
-                if (status != 0) { return -1 }
-                return support.err_lc(token.ctx().tokens[first].line,
-                    token.ctx().tokens[first].col, "数组长度表达式解析范围不匹配")
+                return -1
             }
             if (result.is_const == 0 || result.layout_type_id >= 0) {
                 support.session().ast_capture = saved_capture
@@ -471,17 +382,14 @@ pub fn ct_enum_pending_run() int {
                 token.ctx().pos = saved_pos
                 return support.fail("内部错误：延迟枚举判别值 token 范围无效")
             }
-            token.ctx().pos = first
-            support.fc().c_fold += 1
             let result support.Res
-            let status int = parse_expr(&result)
-            support.fc().c_fold -= 1
+            let status int = eval_token_range(first, after, &result)
             if (status != 0) {
                 support.session().ast_capture = saved_capture
                 token.ctx().pos = saved_pos
                 return -1
             }
-            if (token.ctx().pos != after || result.is_const == 0) {
+            if (result.is_const == 0) {
                 support.session().ast_capture = saved_capture
                 token.ctx().pos = saved_pos
                 return support.err_lc(token.ctx().tokens[first].line, token.ctx().tokens[first].col,

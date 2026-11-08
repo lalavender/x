@@ -91,8 +91,15 @@
   （`yh-link.s.ct.session-<pid>` 打不开），未能得到稳定构建结论；避免在同一
   工作区并发跑构建。状态：未达验收。下一步：接线调用点 → 补 arch-check
   边界测试 → 单会话跑全门。
-- [ ] **S2 解析器窄口**：新增 `parse.eval_token_range`，把 `parse_ct_layout`（501 行、
-  26 次 `comptime` 调用）迁 `check`。
+- [x] **S2a 解析器窄口 + 策略下沉（2026-11-08 完成）**：新增
+  `parse.eval_token_range(first, after, *Res)` 窄口（自管 pos/ast_capture/c_fold），
+  替换 parse 内两处重复求值样板；把「可运行判定/依赖登记」
+  （`ct_layout_expr_runnable`/`ct_layout_expr_register`）下沉
+  `comptime/ct_layout_sched.yh`（只读 token/`ms()`，不重入解析器）。
+  `parse` 7,640 → **7,580 行**，产物逐字节一致。
+- [ ] **S2b 调度下沉 `check`（已并入 S3 前置）**：原计划把 `parse_ct_layout` 整体迁
+  `check`，实测**不可行**——它要重入 `parse_expr`，搬走会让 `check → parse` 与
+  `parse → check` 成环。只有在 `parse` 不再 import `check`（= S3 的产物）之后才能做。
 - [ ] **S3 语义字段外置**（按收益决定）：`AstExpr` 语义字段改由 `check` 写入，
   `parse` 只填语法字段；`lower` 不动（布局不变）。这是「真两遍化」的核心。
 - [ ] **S4 契约切换**（一般不做）：纯语法 AST + 独立 checked IR，代价见重估表。
