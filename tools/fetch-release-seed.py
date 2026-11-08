@@ -21,6 +21,8 @@ import hashlib
 import http.client
 import json
 import os
+import re
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -160,6 +162,28 @@ def install_seed(destination, tag, asset, token):
     print(f"Release 种子：{tag} -> {destination} sha256={digest}")
 
 
+def infer_repo_from_git() -> str:
+    """从 `git remote get-url origin` 推断 owner/repo；失败返回空串。
+
+    本地开发常常没有 GITHUB_REPOSITORY（那是 Actions 注入的），但仓库一定有
+    origin 远端；这样 `just fetch-seed` 在开发者机器上无需任何环境变量。
+    """
+    try:
+        result = subprocess.run(["git", "remote", "get-url", "origin"],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    url = result.stdout.strip()
+    if not url:
+        return ""
+    match = re.search(r"github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$", url)
+    if not match:
+        return ""
+    return f"{match.group(1)}/{match.group(2)}"
+
+
 def main(argv):
     """解析参数并执行一次种子获取。"""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -186,7 +210,9 @@ def main(argv):
                 fallback = None
     try:
         if not args.repo:
-            raise FetchError("缺少 GITHUB_REPOSITORY")
+            args.repo = infer_repo_from_git()
+        if not args.repo:
+            raise FetchError("缺少 GITHUB_REPOSITORY（且无法从 git remote 推断）")
         found = find_asset(args.repo, args.token, args.platform, args.exclude_tag)
         if found is None:
             raise FetchError(

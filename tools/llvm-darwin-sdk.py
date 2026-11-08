@@ -21,6 +21,11 @@ MIN_FREE_BYTES = 8 * 1024**3
 MIN_BUILD_FREE_BYTES = 5 * 1024**3
 MIN_REPACK_FREE_BYTES = 2 * 1024**3
 
+# 空间不足时给出的清理建议（只列仓库内可安全删除的构建缓存）。
+CLEANUP_HINT = ("可清理：~/Library/Caches/yh（YH_CACHE 全局缓存）、"
+                "tmp/modcheck、tmp/fx-*、compiler/.build、.codegraph；"
+                "或用 YH_LLVM_CACHE 把闭包缓存指到别的磁盘")
+
 
 def select_host(system=None, machine=None):
     """只接受当前首期可原生运行桥的 Darwin/ARM64 宿主。"""
@@ -318,7 +323,8 @@ def build_sdk(min_os, jobs):
                     MIN_BUILD_FREE_BYTES if extracted_source else MIN_FREE_BYTES)
     if usage.free < minimum_free:
         raise RuntimeError(f"磁盘剩余空间不足：需要至少 {minimum_free // 1024**3} GiB，"
-                           f"当前 {usage.free // 1024**3} GiB；未解包或修改已有目录")
+                           f"当前 {usage.free // 1024**3} GiB；未解包或修改已有目录。"
+                           + CLEANUP_HINT)
 
     if source.exists() and (not marker.is_file() or marker.read_text().strip() != source_spec()["sha256"]):
         raise RuntimeError(f"源码目录已存在但身份不匹配，保留现场并另选 tmp 路径：{source}")
@@ -332,7 +338,8 @@ def build_sdk(min_os, jobs):
     usage = shutil.disk_usage(ROOT)
     if usage.free < minimum_free:
         raise RuntimeError(f"准备构建/重打包后剩余空间不足：需要至少 {minimum_free // 1024**3} GiB "
-                           f"用于构建与归档，当前 {usage.free // 1024**3} GiB；源码保留在 {source}")
+                           f"用于构建与归档，当前 {usage.free // 1024**3} GiB；源码保留在 {source}。"
+                           + CLEANUP_HINT)
 
     config = build_spec()
     configure = [toolchain["cmake"], "-S", str(source / "llvm"), "-B", str(build), "-G", "Ninja",

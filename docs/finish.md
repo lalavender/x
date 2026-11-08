@@ -1014,6 +1014,17 @@ CI run `42463040423` **四端全绿**（linux-x64 / linux-arm64 / windows-x64 / 
 校验 3/3）；`just llvm-host` → 0.6s `reused: true`；`just` 冷编通过；
 `arch-check` 8/8；`just test` 370/372 全部通过。
 
+后续 DX 修补（同日）：
+
+- `tools/fetch-release-seed.py`：`--repo` 缺省时从 `git remote get-url origin`
+  推断 `owner/repo`，本地 `just fetch-seed` 不再需要 `GITHUB_REPOSITORY`。
+- `tools/llvm-darwin-sdk.py`：磁盘不足的错误信息追加清理建议（`~/Library/Caches/yh`、
+  `tmp/modcheck`、`tmp/fx-*`、`compiler/.build`、`.codegraph`，或 `YH_LLVM_CACHE`
+  改到别的盘）。
+- 复验：`just llvm-host` 0.6–5.5s（`reused: true`，改工具源码也只重写身份记录，
+  不重编 LLVM）；`just` 冷编 26s；`just test` 370/372 全部通过；`just selfhost-native`
+  固定点一致 + 自解析 178 文件 + project cases 129/129。
+
 踩坑记录：`py_default` 一开始写成 `quote(root + "/tools/py")`，而配方里本来就是
 `"{{ py }}"`（自带双引号），重复引号让 shell 把带引号的字符串当命令名，
 `test-windows-sdk` 在 linux-arm64 上以 127 失败。改为相对路径 `tools/py` 后
