@@ -979,4 +979,9 @@ CI run `42463040423` **四端全绿**（linux-x64 / linux-arm64 / windows-x64 / 
 
 验证：`python3 tests/selfhost/llvm-darwin-sdk.py --self-test` → PASS（含产物改写
 校验 3/3）；`just llvm-host` → 0.6s `reused: true`；`just` 冷编通过；
-`arch-check` 8/8。
+`arch-check` 8/8；`just test` 370/372 全部通过。
+
+踩坑记录：`py_default` 一开始写成 `quote(root + "/tools/py")`，而配方里本来就是
+`"{{ py }}"`（自带双引号），重复引号让 shell 把带引号的字符串当命令名，
+`test-windows-sdk` 在 linux-arm64 上以 127 失败。改为相对路径 `tools/py` 后
+CI 四端全绿（run 42486762530）。
