@@ -46,6 +46,37 @@ COMPILER_TARGET = None
 COMPILER_OPT_LEVEL = None
 
 
+
+def windows_support_link(project_root=None):
+    """返回编译器 [link-windows-x64] 的 support 库清单（TOML 片段）。
+
+    Windows 上零 CRT 链接只带 kernel32 与栈探测桩；用到 C 运行时的 fixture
+    （引入 check 的 strtod/malloc 等）必须显式带 VC 运行时，否则 lld-link
+    报 undefined symbol: strtod。这里直接复用编译器自身清单，避免两处漂移。
+    """
+    if COMPILER_TARGET is None or "windows" not in COMPILER_TARGET:
+        return ""
+    source = (project_root or ROOT) / "compiler" / "project.toml"
+    text = source.read_text(encoding="utf-8")
+    marker = "[link-windows-x64]"
+    if marker not in text:
+        return ""
+    segment = text[text.index(marker):]
+    match = re.search(r"\nsupport = \[(.*?)\]", segment, re.S)
+    if not match:
+        return ""
+    lines = []
+    for item in match.group(1).split(","):
+        item = item.strip().strip('"')
+        if not item:
+            continue
+        resolved = (Path(source).parent / item).resolve()
+        lines.append('  "' + str(resolved).replace(chr(92), "/") + '",')
+    if not lines:
+        return ""
+    return "[link-windows-x64]\nsupport = [\n" + "\n".join(lines) + "\n]\n"
+
+
 def artifact_root(project):
     """返回当前后端与目标配置的项目产物根目录。"""
     root = Path(project) / ".build"
@@ -475,6 +506,11 @@ def copy_proj(src, dst):
         # 必须把这两层一起带上，否则会在模块解析阶段报 cache/hash 不存在。
         shutil.copytree(ROOT / "libs" / "hash", dst / "hash",
                         ignore=shutil.ignore_patterns(".build"))
+    link_section = windows_support_link()
+    if link_section:
+        host_manifest = dst / "project.toml"
+        if host_manifest.is_file():
+            host_manifest.write_text(host_manifest.read_text() + "\n" + link_section)
     if src.name in ("irfront", "llvmmodule"):
         # ir 现为编译器根项目普通模块（不带清单）；fixture 仍以路径依赖
         # 方式复用其源码测跨项目解析，拷入后补最小清单使其可被发现。
@@ -544,6 +580,7 @@ def copy_proj(src, dst):
         (core / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "gensplitcore"\nsource = "."\n'
             '[dependencies]\nhash = { path = "hash" }\n')
+        fixture_link = windows_support_link()
     if src.name == "ctfacts_disabled":
         # F4-0：验证 CT 零拷贝镜像与 gen 类型表逐行一致（含表扩容后重新绑定）。
         core = dst / "compiler"
