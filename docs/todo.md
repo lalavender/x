@@ -100,8 +100,13 @@
 - [ ] **S2b 调度下沉 `check`（已并入 S3 前置）**：原计划把 `parse_ct_layout` 整体迁
   `check`，实测**不可行**——它要重入 `parse_expr`，搬走会让 `check → parse` 与
   `parse → check` 成环。只有在 `parse` 不再 import `check`（= S3 的产物）之后才能做。
-- [ ] **S3 语义字段外置**（按收益决定）：`AstExpr` 语义字段改由 `check` 写入，
-  `parse` 只填语法字段；`lower` 不动（布局不变）。这是「真两遍化」的核心。
+- [ ] **S3 语义字段外置**（按收益决定，spike 已完成）：`AstExpr` 语义字段改由
+  `check` 写入，`parse` 只填语法字段；`lower` 不动（布局不变）。spike 结论：
+  **全量纯语法仍不可行**（`type_id`/`sym`/`is_lit` 是语法决策输入），但可切三刀：
+  S3a 隐式转换校验后移（16 处，最安全）、S3b CT 诊断延迟消费（8 处）、
+  S3c 纯值折叠后移（11 处，风险最高）。详见
+  [`02-plan/yh-S3-语义字段外置spike-2026-11-08.md`](02-plan/yh-S3-语义字段外置spike-2026-11-08.md)。
+  待决策：是否接受诊断顺序变化（S3a）、是否新增 `max_parse_check_calls` 预算。
 - [ ] **S4 契约切换**（一般不做）：纯语法 AST + 独立 checked IR，代价见重估表。
 
 原 F0–F7 条目已删除，历史论证见
