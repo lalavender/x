@@ -6,13 +6,20 @@
 期间的架构分析、目标设计、代码复核、差距分析与迁移方案；被合并文件的清单见
 [附录 A](#附录-a已合并文档)。历史版本仍可从 git 历史取回。
 基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1–GEN4 + F4），`compiler/` 18 个 yh 模块 /
-178 个 `.yh` / 60,737 行 / 78 条依赖边（`python3 tools/arch-check.py` 2026-11-08
-实测，全绿；60,737 含临时诊断提交的 16 行，清理后为 60,721，见 `docs/todo.md` DR2）。
+178 个 `.yh` / 60,717 行 / 78 条依赖边（`python3 tools/arch-check.py` 2026-11-08
+实测，全绿；临时诊断提交已清理，`DR2` 关闭）。
 
 > **阅读约定（2026-11-08）**：`compiler/gen/` 已于 2026-11-07 删除（模块 19→18，
 > `import gen` 归零）。文中凡以现在时描述 `gen` 的段落（§0.2、§4.1、§5.2、
 > §6.3.1–§6.3.2）都是该日期之前的**历史快照**，只解释当时的拆分动因；现行约束
 > 以 §3.1 允许边与 §6.3 矩阵为准——它们与 `tools/arch-check.py` 的 `ALLOWED` 逐条一致。
+>
+> 前端两遍化的 **F0–F7 已于 2026-11-08 重估为 S1–S4**，实测依据见
+> [`02-plan/yh-前端两遍化-重新分析-2026-11-08.md`](../02-plan/yh-前端两遍化-重新分析-2026-11-08.md)：
+> `parse` 9,626 行、`check.*` 190 次调用、`Res` 读取 370 处中 167 处决定语法分支、
+> `lower` 直读 AST 语义字段 257 处；结论是**不再全量重写**。本文其余 F0–F7 引用
+> （§6.11、§8–§10）是 2026-11-06 的计划快照；现行切片与验收以
+> `docs/todo.md` 的 S1–S4 为准。
 
 > **文档边界**：本文只回答“系统怎么分层、模块负责什么、阶段契约是什么、下一步
 > 怎么改”。语言语义、标准库 API、平台 ABI、编码规范、测试语法仍是独立领域文档，
@@ -37,12 +44,12 @@
    - 契约版本是六处独立常量，没有统一入口。
 3. **前端两遍化已决定（2026-11-06）**：`parse` 只出语法 AST，语义分析统一收进
    `check`（`check.resolve → check.expand → check.full`），CT 语法在 resolve 之后
-   展开；`lower` 只消费受检结果。这是高成本重构，按 `docs/todo.md` 的 F0–F7
-   分阶段迁移；目录/缓存/`proj` 整形仍可先行。
+   展开；`lower` 只消费受检结果。这是高成本重构，2026-11-08 已重估为
+   `docs/todo.md` 的 S1–S4 切片（不再全量重写）；目录/缓存/`proj` 整形仍可先行。
 4. **不要现在做查询系统/LSP/线程池**：fork/COW 进程模型仍是正式执行器；
    线程池的前置是 AST/CT/诊断/缓存全部显式上下文化。当前没有证据证明收益大于成本。
 5. **Zig 对齐草案（待评审）**：§6.11 提出在 `parse` 与 `check` 之间增加
-   AstGen/UIR，并把 `check` 做成真正的 Sema；未批准前 F0–F7 仍是执行基线。
+   AstGen/UIR，并把 `check` 做成真正的 Sema；未批准前 S1–S4 仍是执行基线。
 
 ---
 
@@ -138,7 +145,7 @@ bin/yh-<平台>-<架构>（Release 种子）
 
 **逐模块职责、规模、依赖与内部拆分的唯一清单已迁到
 [`yh-模块职责-当前实现.md`](yh-模块职责-当前实现.md)**（2026-11-08 实测：
-18 个模块 / 178 个文件 / 60,737 行 / 78 条依赖边）。
+18 个模块 / 178 个文件 / 60,717 行 / 78 条依赖边）。
 
 本节只保留分层意图：`support`/`ir` 是无依赖底座，`token`/`cache`/`lex`/`proj`/`ast`/
 `comptime` 依次叠到语义层，`check` 是语义中心，`parse` 是前端装配，
@@ -277,11 +284,11 @@ testkit   cmd               ← 测试 runner / CLI 分派
 `parse`/`check`/`build`。
 
 **2026-11-06 决定**：目标为 `parse(纯语法) → AST → check.resolve → check.expand
-→ check.full`；CT 语法在 resolve 之后展开，语义分析统一归 `check`。迁移见
-`docs/todo.md` 的 F0–F7；当前代码仍是语义动作解析器。
+→ check.full`；CT 语法在 resolve 之后展开，语义分析统一归 `check`。2026-11-08
+重估后按 `docs/todo.md` 的 S1–S4 切片推进；当前代码仍是语义动作解析器。
 
 > **草案补充（待评审）**：§6.11 拟在 AST 与 check 之间增加 AstGen/UIR，并把
-> `check.expand` 从 AST→AST 改为 UIR→UIR；批准前本表按现状/F0–F7 执行。
+> `check.expand` 从 AST→AST 改为 UIR→UIR；批准前本表按现状 / S1–S4 执行。
 
 ### 4.2 关键产物与契约
 
@@ -802,19 +809,19 @@ check.resolve（先建声明/类型/常量环境）
 而不是把 expand 放在 check 之前。若坚持“expand 必须在任何 check 之前”，只能
 保留纯字面量 CT，现有 `$for values/fields` 与 `@[comptime]` 无法保留；不建议。
 
-**迁移方式**：按 `docs/todo.md` 的 F0–F7 分阶段；F0 先做 ADR + 3 点 spike
-（聚合字面量、`$for values/fields`、字符串插值），验证纯语法 AST 可表示，再动
-`parse`。每阶段保持固定点；旧语义动作路径保留用于差分，逐特性切换后删除。
+**迁移方式**：原 F0–F7 已于 2026-11-08 重估为 S1–S4（先做 S1 接口发射下沉，
+按切片各自验收）；不再按 F0 做全量 ADR + spike。每阶段保持固定点；旧语义动作
+路径保留用于差分，逐特性切换后删除。
 
 > **与 §6.11 草案的关系**：若 §6.11 批准，本节的目标链路改为
 > `parse → AST → AstGen → UIR → check.resolve → check.expand(UIR) →
-> check.full → HIR → lower`，并在 F2/F3 之间插入 F2b；否则按原文 F0–F7 执行。
+> check.full → HIR → lower`，并在 F2/F3 之间插入 F2b；否则按 S1–S4 执行。
 
 ---
 
 ### 6.11 Zig 对齐：AstGen/UIR/Sema（草案，待评审）
 
-状态：**草案，未批准**。当前实现与 F0–F7 不变；本节只用于评审“是否在
+状态：**草案，未批准**。当前实现与 S1–S4 计划不变；本节只用于评审“是否在
 `parse` 与 `check` 之间增加 AstGen/UIR，并把 `check` 做成真正的 Sema”。
 若批准，本节成为阶段 B 的目标流程，并在 F2/F3 之间插入 **F2b**；§6.10 的
 “`check.expand` AST→AST”相应改为“UIR→UIR”。本轮已确认两点：**CT 展开放
@@ -965,7 +972,7 @@ F7  删除旧语义动作路径、固定点、滚种子
 | 自举方式 | 滚动自举，无 C stage0；种子是上一代二进制；固定点 + 语料保证正确性 | 生效 | ADR-0006/0007 |
 | 代码生成 | LLVM 是唯一后端；旧机器发射退役；lld 内嵌 | 生效 | ADR-0014、LL12 |
 | 优化架构 | Nanopass 只保留 NP3（受检契约与 lowering 解耦）；NP0/1/2/4/5 关闭；通用优化交给 LLVM | 生效 | ADR-0011 |
-| `check` 定位 | 目标：语义分析入口（resolve/expand/full）；当前仍是只读 verifier；迁移见 todo F0–F7 | 目标/待迁移 | 2026-11-06 决定 |
+| `check` 定位 | 目标：语义分析入口（resolve/expand/full）；当前仍是只读 verifier；迁移见 todo S1–S4（原 F0–F7 已重估） | 目标/待迁移 | 2026-11-06 决定；2026-11-08 重估 |
 | Zig 对齐前端 | 草案 §6.11：AstGen/UIR/Sema/HIR；是否引入 UIR 待评审 | 草案 | 2026-11-06 讨论 |
 | 模块私有类型 | `struct`/`union`/`enum` 的 `pub` 可选；私有类型不进 `.s.i` | 生效 | ADR-0013 |
 | 模块导出面 | 只导出别的模块真的使用的声明；`pub` 同时决定 `.s.i` 与 `.globl` | 生效 | ADR-0007、导出面收缩 |
@@ -974,7 +981,7 @@ F7  删除旧语义动作路径、固定点、滚种子
 | 扩展点 | 静态注册表，不做动态插件/常驻守护进程/查询数据库 | 生效 | 10-24 系统架构 |
 | 并发 | fork/COW 进程 worker；lld 一次性子进程；线程池待上下文隔离 | 生效 | 10-25/LA5 |
 | 对象粒度 | 模块级唯一；文件级不做，函数级 `.o` 暂缓（ADR-0020） | 生效 | ADR-0020、LA3 |
-| 前端阶段 | 两遍化：`parse` 纯语法 → AST → `check`（resolve/expand/full）→ lower；当前仍是语义动作解析器 | **已决定，待迁移** | §6.10、todo F0–F7 |
+| 前端阶段 | 两遍化：`parse` 纯语法 → AST → `check`（resolve/expand/full）→ lower；当前仍是语义动作解析器 | **已决定，待迁移（S1–S4）** | §6.10、todo S1–S4 |
 | CT 展开位置 | `check.resolve` 之后、`check.full` 之前；AST→AST；`comptime` 只做求值 | 已决定 | §6.10 |
 | `gen` 拆分 | 目标只新增 `support`/`token`；语义分析全部归 `check`；`diag`/`target` 并入 `support`；复用 `lex`/`comptime`/`proj`/`builtin`；GEN0–GEN4 分阶段 | 目标 | ADR-0021 |
 | 平台顺序 | Linux 优先；Windows/x64 已接入；Darwin 默认 LLVM | 生效 | AGENTS.md |

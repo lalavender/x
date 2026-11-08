@@ -15,8 +15,8 @@
 
 ## 2026-11-08 文档刷新发现（待处理）
 
-按 2026-11-08 的代码与实测刷新架构/模块职责/finish 时发现的问题。全部为实测复现，
-尚未修复；不改变业务代码。
+按 2026-11-08 的代码与实测刷新架构/模块职责/finish 时发现的问题。全部为实测复现；
+修复状态见各条目标记（`[x]` 表示已修复/已解决），原始记录保留供追溯。
 
 - [x] **DR1 已修复（2026-11-08，提交 `304177d`/`9923623`）**：``just test`` 红灯的根因是
   `check/checked_slice.yh` 的切片导入把新增行数写成 `v.stmt_count += n`——`ast.AstView`
@@ -73,9 +73,24 @@
 `lower` 直接读 AST 语义字段 257 处）。详见
 [`02-plan/yh-前端两遍化-重新分析-2026-11-08.md`](02-plan/yh-前端两遍化-重新分析-2026-11-08.md)。
 
-- [ ] **S1 接口发射下沉**（推荐先做）：`iface_emit`/`iface_ct_emit`/列映射发射段
-  ≈1,900 行迁 `check`；`iface_load`/`iface_ct_load` 留 `parse`（它们要重新解析，
-  迁走会成环）。验收：`just` + `just test` + `just selfhost-native` + 产物逐字节等价。
+- [x] **S1 接口发射下沉（2026-11-08 完成）**：新建 `check/iface_emit.yh`（2,069 行），
+  把 `parse/iface.yh` 的发射段、`parse/iface_ct.yh` 的发射段与整个
+  `parse/iface_ct_map.yh`（列映射）迁入；`iface_load`/`iface_ct_load`/头部校验
+  留在 `parse`（它们要重新解析，迁走会成环），跨模块复用的文本/头部工具在
+  `check` 里声明为 `pub`。结果：`parse` **9,626 → 7,640 行（−20.6%）/ 14 → 13 文件**，
+  `parse → comptime` **118 → 85**；`check` 6,038 → 8,138 行 / 15 → 16 文件。
+  验收：`just` + `just test`（370/372）+ `just selfhost-native`（固定点一致、
+  自解析 178 文件、project cases 129/129）+ 用户项目 `.s.i`/`.s.ct`
+  **逐字节等价**（`comptimecross` 8 个产物 cmp 一致）。
+  **现状（2026-11-08 23:36，工作区未提交）**：已新增
+  `compiler/check/iface_emit.yh`，删除 `parse/iface_ct_map.yh`，改动
+  `parse/iface.yh`、`parse/iface_ct.yh`、`parse/parse_decl.yh`、
+  `build/module_build.yh`、`build/module_worker.yh`。23:36 的 `just build` 报
+  `check/iface_emit.yh` 6 处「函数未使用」（未接线），`just test` 因
+  `_ensure_built` 失败无法启动。23:52 重跑时与另一并发构建冲突
+  （`yh-link.s.ct.session-<pid>` 打不开），未能得到稳定构建结论；避免在同一
+  工作区并发跑构建。状态：未达验收。下一步：接线调用点 → 补 arch-check
+  边界测试 → 单会话跑全门。
 - [ ] **S2 解析器窄口**：新增 `parse.eval_token_range`，把 `parse_ct_layout`（501 行、
   26 次 `comptime` 调用）迁 `check`。
 - [ ] **S3 语义字段外置**（按收益决定）：`AstExpr` 语义字段改由 `check` 写入，

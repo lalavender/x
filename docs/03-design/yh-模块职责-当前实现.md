@@ -1,9 +1,9 @@
 # yh 编译器模块职责（当前实现）
 
 基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1–GEN4 + F4），**18 个模块 / 178 个文件 /
-60,737 行**，依赖边 78 条（不含标准库 `hash`/`libs`/`os`）。
-实测：2026-11-08（`just code-stats` + `arch-check`）。60,737 含两笔临时诊断提交
-（`39a62fa`、`f0c9323`）的 16 行 DBG 输出；清理后为 60,721（todo DR2）。
+60,717 行**，依赖边 78 条（不含标准库 `hash`/`libs`/`os`）。
+实测：2026-11-08（HEAD `532d2c2`，`just code-stats` + `arch-check`；临时诊断
+提交已清理）。
 
 本文是「每个模块干什么」的唯一清单；分层理由与历史决策见
 `docs/03-design/yh-架构设计.md`，拆分动因见 `docs/adr/0021-yh-gen职责拆分.md`。
@@ -29,7 +29,7 @@ L0  support  token  ir  cache  lex
 
 | 模块 | 规模 | 依赖 | 职责与关键入口 |
 | --- | --- | --- | --- |
-| **support** | 28 / 3,152 | — | 叶子内核。①基础设施：源缓冲 `src_ctx`、名字池 `pool_ctx`、诊断 `fail`/`err_lc`/`fail_path`、`append_*`/`alloc`、会话开关 `session()`、目标身份 `TargetInfo`/`cfg()`、ABI 常量。②**跨层共享数据层**（GEN4/F2 下沉）：`ModelStore`(`ms()`，类型/签名/具名类型/符号/作用域表)、`FileScope`(`fs()`，模块归属+导入表)、`FrontCtx`(`fc()`，前端瞬时态 85 字段)、`tables`(字符串标签/枚举成员)、`symbols`(纯查询)、`value_rules`(纯值规则)、`value_kernel`(错误码式值内核)、`layout`、`static_data`、`abi_model`、`front_stage`。③平台变体 `argv/clock/console.*` |
+| **support** | 28 / 3,151 | — | 叶子内核。①基础设施：源缓冲 `src_ctx`、名字池 `pool_ctx`、诊断 `fail`/`err_lc`/`fail_path`、`append_*`/`alloc`、会话开关 `session()`、目标身份 `TargetInfo`/`cfg()`、ABI 常量。②**跨层共享数据层**（GEN4/F2 下沉）：`ModelStore`(`ms()`，类型/签名/具名类型/符号/作用域表)、`FileScope`(`fs()`，模块归属+导入表)、`FrontCtx`(`fc()`，前端瞬时态 85 字段)、`tables`(字符串标签/枚举成员)、`symbols`(纯查询)、`value_rules`(纯值规则)、`value_kernel`(错误码式值内核)、`layout`、`static_data`、`abi_model`、`front_stage`。③平台变体 `argv/clock/console.*` |
 | **token** | 3 / 268 | support | 词法/语法共享词汇：`TK_*`/`TOK_*`/`ATTR_*` 常量、`Tok`、`PDecl`、token 数组与游标 `ctx()`、`err_tok`（唯一带位置诊断入口）、`is_assign_op` |
 | **ir** | 10 / 5,385 | — | 后端无关 SSA IR：`IRModule`/`IRFunction`/`IRInst`/类型与值模型、构建器、verifier、序列化（`ssa_module_*`）。不依赖任何模块 |
 | **cache** | 7 / 1,047 | support, token | 内容寻址缓存原语：ActionID/OutputID、缓存键 schema、全局 store（C4）、跨平台文件锁（C6）。位于 check/lower 之下，避免二者为共享键原语互相 import |
@@ -41,9 +41,9 @@ L0  support  token  ir  cache  lex
 | 模块 | 规模 | 依赖 | 职责与关键入口 |
 | --- | --- | --- | --- |
 | **proj** | 4 / 1,457 | support, token | 项目模型：`project.toml` 解析、模块/文件表、三层名字解析（本项目 → 标准库 → 依赖）、产物与 `[link]` 配置。前端与构建层共用的数据层 |
-| **ast** | 6 / 1,342 | comptime, proj, support, token | 语法树 arena + 只读视图：声明索引、语句/表达式节点、函数上下文、绑定、捕获开关。**纯语法，不 import check**（check 依赖它） |
+| **ast** | 6 / 1,351 | comptime, proj, support, token | 语法树 arena + 只读视图：声明索引、语句/表达式节点、函数上下文、绑定、捕获开关。**纯语法，不 import check**（check 依赖它） |
 | **comptime** | 14 / 5,978 | support, token | 编译期执行器：CT IR 模型与求值、布局图、静态数据、函数注册表、枚举/浮点、CT 诊断。语义事实经**零拷贝镜像** `ct_facts` 读（槽绑定，`check.ct_facts_sync` 填入），不 import check。F4 收尾后不再依赖 `proj`（文件表窄口改由 `parse` 传入） |
-| **check** | 15 / 6,062 | ast, cache, comptime, ir, proj, support, token | **语义中心**：①类型/符号表操作 `symbols.yh`（F2-K2 自 gen 迁入的 25 个语义动作）②语法→语义两遍（`sem_*`）③C ABI 分类 `abi_c` ④受检快照 `CheckedModule`：捕获/校验/切片/键/视图 ⑤CT 镜像绑定点 `ct_bind` ⑥值内核诊断适配 `value_kernel.yh` |
+| **check** | 15 / 6,040 | ast, cache, comptime, ir, proj, support, token | **语义中心**：①类型/符号表操作 `symbols.yh`（F2-K2 自 gen 迁入的 25 个语义动作）②语法→语义两遍（`sem_*`）③C ABI 分类 `abi_c` ④受检快照 `CheckedModule`：捕获/校验/切片/键/视图 ⑤CT 镜像绑定点 `ct_bind` ⑥值内核诊断适配 `value_kernel.yh` |
 
 ### L2/L3 前端装配与降低
 
@@ -64,7 +64,7 @@ L0  support  token  ir  cache  lex
 | 模块 | 规模 | 依赖 | 职责与关键入口 |
 | --- | --- | --- | --- |
 | **link** | 7 / 4,296 | backend, proj, support | 链接驱动：Darwin（内嵌 lld / 系统 `ld`）、Windows（`lld-link`）、进程调用与输出捕获、链接键与链接缓存。位于 build 之下（不得 import build） |
-| **build** | 22 / 7,998 | ast, backend, builtin, cache, check, comptime, ir, lex, link, lower, parse, proj, support, token | 构建编排：会话初始化、模块图与调度（含 fork worker）、函数级 IR 缓存、LLVM 流水线与产物发布、全局缓存管理（`yh cache` 实现） |
+| **build** | 22 / 7,992 | ast, backend, builtin, cache, check, comptime, ir, lex, link, lower, parse, proj, support, token | 构建编排：会话初始化、模块图与调度（含 fork worker）、函数级 IR 缓存、LLVM 流水线与产物发布、全局缓存管理（`yh cache` 实现） |
 | **testkit** | 1 / 1,606 | ast, build, link, parse, proj, support, token | `yh test` 的发现 / 构建 / 逐例执行 / 报告 |
 | **cmd** | 11 / 497 | build, check, cmdline, lex, link, parse, proj, support, testkit | CLI 分派：`build`/`run`/`test`/`cache`/`list`/单文件编译…；只做「请求 → 调 build/check」，不实现业务 |
 
@@ -126,13 +126,13 @@ L0  support  token  ir  cache  lex
 
 | 模块 | 文件 | 行数 | 模块 | 文件 | 行数 |
 | --- | ---: | ---: | --- | ---: | ---: |
-| parse | 14 | 9,626 | support | 28 | 3,152 |
-| build | 22 | 7,998 | testkit | 1 | 1,606 |
-| check | 15 | 6,062 | proj | 4 | 1,457 |
-| lower | 16 | 5,991 | ast | 6 | 1,342 |
+| parse | 14 | 9,626 | support | 28 | 3,151 |
+| build | 22 | 7,992 | testkit | 1 | 1,606 |
+| check | 15 | 6,040 | proj | 4 | 1,457 |
+| lower | 16 | 5,991 | ast | 6 | 1,351 |
 | comptime | 14 | 5,978 | lex | 4 | 1,051 |
 | ir | 10 | 5,385 | cache | 7 | 1,047 |
 | link | 7 | 4,296 | cmdline | 1 | 661 |
 | backend | 14 | 4,149 | cmd | 11 | 497 |
 | token | 3 | 268 | builtin | 1 | 171 |
-| **合计** | **178** | **60,737** |
+| **合计** | **178** | **60,717** |

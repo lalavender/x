@@ -8,6 +8,38 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-08 二次文档刷新：设计文档改指 S1–S4，实测口径对齐 HEAD
+
+**结果**：按 HEAD `532d2c2` 与已提交的重新分析（`dc4f3bd`/`532d2c2`）刷新设计文档，
+未改业务代码。
+
+- `docs/03-design/yh-架构设计.md`：基线改为 18 模块 / 178 文件 / 60,717 行 /
+  78 边；「阅读约定」新增前端计划重估段：F0–F7 于 2026-11-08 重估为 S1–S4，
+  其余 F0–F7 引用为历史计划快照。§0.3、§0.5、§4.1、§6.10、§6.11、§7 的
+  「执行基线 / 迁移方式 / 决策表」改指 S1–S4。
+- `docs/03-design/yh-模块职责-当前实现.md`：头部与 §2/§6 的规模按 HEAD 重测
+  （60,717 行；`support` 3,151、`ast` 1,351、`check` 6,040、`build` 7,992）。
+- `docs/03-design/yh-编译流程-当前实现.md`：用途段改指 S1–S4（附重新分析链接）；
+  §12 标题改为「原 F0–F7 / GEN0–GEN4 的历史对照」并加说明。
+- `docs/todo.md`：S1 条目补「现状（未提交、`just build` 报 6 处函数未使用）」；
+  原 DR1–DR5 状态保持不动。
+- `docs/finish.md`：本条目。
+
+**验证**：在独立 worktree `tmp/head-measure`（HEAD `532d2c2`）实测：
+`python3 tools/arch-check.py` 通过（18 模块 / 178 文件 / 78 边 / 203 模块级 `let`）；
+`python3 tools/yh-code-stats.py` 178 文件 / 60,717 行。
+**本轮未在 HEAD 复跑** `just build`/`just test`/`just selfhost-native`：主工作区
+有未提交的 S1 施工（23:36 时 `just build` 报 `check/iface_emit.yh` 6 处
+「函数未使用」，`just test` 因 `_ensure_built` 失败未启动）；23:52 重跑又与另一
+并发构建冲突（`yh-link.s.ct.session-<pid>` 打不开），无稳定结论。
+此前同一台机器在 `5fd2e45` 附近记录：冷编通过、`just test` 370/372 全部通过、
+`selfhost-native` project cases 129/129、CI 四端全绿（run `42486762530`）；
+本条只引用该记录，不当作本次复跑结果。
+
+**影响**：设计文档不再把 F0–F7 当成现行计划；数字与 HEAD 一致。
+
+**遗留**：S1 施工中（见 `docs/todo.md`）；DR3（全局缓存非确定失败）仍未复现。
+
 ## 2026-11-08 memory 标准库设计第三版：M0–M6 收敛为 T1–T3
 
 **结果**：重写 `docs/03-design/yh-memory标准库设计.md` 为第三版，未改业务代码。
@@ -63,7 +95,8 @@
 203 模块级可变 `let` / `import gen` 0 / `gen pub fn` 0）；
 `python3 tools/yh-code-stats.py` 178 文件 / 60,737 行（含临时诊断 16 行）；
 `just build` 通过
-（含一次 `YH_CACHE=off`）。`just test` 在最后一门
+（含一次 `YH_CACHE=off`）。**后记（同日）**：DR2 清理与 AST 切片修复落地后，
+同一口径实测为 60,717 行（见本条上方的新条目）。`just test` 在最后一门
 `tests/selfhost/llvm-global-cache.py` 红（DR1），其前各层通过：语法正例
 82/82、反例 49/49，运行语料通过 370/372（跳过 2），modules 与 build-cache、
 opt-level 4/4，libs 140，compiler-tests 8/8，fmt 10/10。
@@ -1005,3 +1038,29 @@ CI 四端全绿（run 42486762530）。
 S1 接口发射下沉 `check`（≈1,900 行，零环风险）、S2 解析器窄口后迁布局调度、
 S3 语义字段改由 `check` 写入（真两遍化核心）、S4 纯语法 AST + 独立 checked IR（一般不做）。
 `docs/todo.md` 的 F0–F7 条目已按此替换，并列出 3 个待用户决策的问题。
+
+## 2026-11-08：S1 接口发射下沉（parse 9,626 → 7,640 行）
+
+按 `docs/02-plan/yh-前端两遍化-重新分析-2026-11-08.md` 的 S1 执行：
+
+- 新建 `compiler/check/iface_emit.yh`（2,069 行）：`if_put*` + 接口文本缓冲、
+  `if_emit_type`/`iface_emit`/`iface_emit_pub_agg_src`、`iface_ct_emit*` 全套、
+  列映射（`IfaceCtColMap`/`iface_ct_col_*`）、`iface_ct_origin_begin/end`、
+  `sym_mangle`/`tname_mangle`、头部前缀与 `IFACE_VERSION_*`/`CTIFACE_VERSION`。
+- `parse` 只留**加载**侧：`iface_load`、`iface_ct_load`、`iface_ct_header_valid`、
+  `iface_ct_export_name`、`mod_ns_add`；`parse/iface_ct_map.yh` 删除。
+- 跨模块复用点（14 个文本/头部工具）在 `check` 里 `pub`，`parse` 以 `check.` 前缀调用；
+  `build` 的调用点改为 `check.iface_emit` / `check.iface_ct_emit`，
+  `IFACE_VERSION_*`/`CTIFACE_VERSION` 改从 `check` 取。
+- 为什么必须这样切：`parse → check` 已成事实，`iface_load`/`iface_ct_load` 要
+  `parse_source` 重新解析，搬进 `check` 会形成 `check → parse` 环；发射侧只序列化
+  受检事实（不重新解析），因此可以下沉。
+
+指标：`parse` **9,626 → 7,640 行（−20.6%）**，文件 14 → 13，`pub fn` 21 → 19，
+`parse → comptime` 调用 **118 → 85**；`check` 6,038 → 8,138 行（15 → 16 文件）。
+
+验收（本地全绿）：`just` 冷编通过；`just test` 370/372（2 跳过）+ compiler-tests 8/8 +
+arch-check 8/8；`just selfhost-native` 固定点一致（54 产物）、cc4 自解析 178 文件、
+project cases 129/129。**等价性**：`comptimecross` 的 8 个 `.s.i`/`.s.ct` 与迁移前
+逐字节一致（`cmp` 全通过）。编译器自身 `.s.i` 有差异属预期（`iface_emit` 等符号
+从 `parse` 接口移到 `check` 接口），符合 ADR「跨模块搬家不要求编译器自身接口一致」。
