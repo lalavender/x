@@ -66,50 +66,24 @@
   `SDKROOT=<Xcode>/MacOSX26.5.sdk` 重建通过（3,368 步）。待决策：是否让
   `tools/llvm-darwin-host.py` 自动在可用 SDK 中回退到 26.x。
 
-## 2026-11-06 前端两遍化：parse 纯语法 + check 语义分析（P0，待 ADR）
+## 前端两遍化（已重估，见 2026-11-08 重新分析）
 
-方向已定（用户 2026-11-06）：语义分析统一收进 `check`；`parse` 只做语法并产出
-AST；comptime 语法在 parse 之后展开；`lower` 只消费受检结果。目标管线：
+2026-11-06 的 F0–F7 全量重写方案已**重估为 S1–S4 切片**，依据是 2026-11-08 的实测
+（`parse` 9,626 行 / `check.*` 190 次调用 / `Res` 读取 370 处其中 167 处是控制流决策 /
+`lower` 直接读 AST 语义字段 257 处）。详见
+[`02-plan/yh-前端两遍化-重新分析-2026-11-08.md`](02-plan/yh-前端两遍化-重新分析-2026-11-08.md)。
 
-```text
-lex → parse(纯语法) → AST
-    → check.resolve（导入/声明/类型/枚举成员/字段/常量，供 CT）
-    → check.expand（comptime AST→AST：$if/$for/$field/$compile_*/插值）
-    → check.full（名字/类型/可见性/初始化/控制流）→ CheckedModule/HIR
-    → lower → IR
-```
+- [ ] **S1 接口发射下沉**（推荐先做）：`iface_emit`/`iface_ct_emit`/列映射发射段
+  ≈1,900 行迁 `check`；`iface_load`/`iface_ct_load` 留 `parse`（它们要重新解析，
+  迁走会成环）。验收：`just` + `just test` + `just selfhost-native` + 产物逐字节等价。
+- [ ] **S2 解析器窄口**：新增 `parse.eval_token_range`，把 `parse_ct_layout`（501 行、
+  26 次 `comptime` 调用）迁 `check`。
+- [ ] **S3 语义字段外置**（按收益决定）：`AstExpr` 语义字段改由 `check` 写入，
+  `parse` 只填语法字段；`lower` 不动（布局不变）。这是「真两遍化」的核心。
+- [ ] **S4 契约切换**（一般不做）：纯语法 AST + 独立 checked IR，代价见重估表。
 
-关键约束：**CT 展开不能严格早于所有语义分析**。`$for values/fields`、`$field`、
-`@[comptime]`、插值 spec 都需要声明/类型环境；因此 `check` 内部是
-`resolve → expand → full` 三段，而不是 `parse → expand → check` 三个独立模块。
-若坚持 expand 在任何 check 之前，只能支持纯字面量 CT，现有 `$for values/fields`
-与 `@[comptime]` 无法保留；不建议。`@[comptime]` 还要求先检查/捕获其正文才能
-执行，因此 `check` 内部实际是 `resolve → 检查 CT 函数 → expand → full`；expand
-可能迭代（生成的新声明重新 resolve），需要展开预算/上限。
-
-- [ ] **F0 ADR + spike**：定义 AST/HIR/`CheckedModule` 契约；选聚合字面量、
-  `$for values/fields`、字符串插值 3 个语法点验证“纯语法 AST 可表示”；确定
-  `iface`/`.s.ct`/CT 布局从 `parse` 迁到 `check` 的边界。
-- [ ] **F1 语法 AST**：`ast` 回归纯语法（kind/op/span/children）；CT 语法节点归
-  `ast`；`CheckedModule`/快照/HIR 迁到 `check`（不新建 `hir`）；移除
-  `ast -> comptime` 边。
-- [ ] **F2 parse 纯语法**：移除 `gen.sem_*`、`ast_expr_set_semantics`、`proj`
-  依赖；`parse_decl` 的 pass1/pass2、声明索引、test/entry 选择上移 build/check；
-  `iface`/`iface_ct`/`parse_ct_layout` 移出 parse。
-- [ ] **F3 check.resolve**：导入、声明、类型、枚举成员、结构体字段、常量值环境；
-  供 CT 展开与后续 full check 使用。
-- [ ] **F4 check.expand**：comptime AST→AST；`$if/$for values/fields/$field/
-  $compile_error/warn`、插值 spec；`@[comptime]` 函数由 check 类型检查、
-  comptime 执行；展开产生的新声明重新进入 resolve。
-- [ ] **F5 check.full**：名字/类型/转换/可见性/初始化/控制流检查；产出
-  `CheckedModule`/HIR；现有 `check.verify` 降为结构 verifier 子阶段。
-- [ ] **F6 lower 切换**：只消费新 `CheckedModule`/HIR；旧语义动作路径保留用于
-  差分，逐特性对比 AST/诊断/IR，再删旧路径。
-- [ ] **F7 收口**：固定点、全语料、`arch-check` 边更新、文档/ADR、滚种子。
-
-验收：每阶段 `just` + `just test` + `just selfhost-native`；纯移动/契约阶段
-产物逐字节一致；行为变更单独切片；最终固定点 + 全量语料 + 模块验收。
-风险：自举种子、CT 需要类型环境、诊断/错误恢复、lower 契约、ast/comptime 循环。
+原 F0–F7 条目已删除，历史论证见
+[`01-finished/yh-F2-核收缩与parse纯语法化结论-2026-11-06.md`](01-finished/yh-F2-核收缩与parse纯语法化结论-2026-11-06.md)。
 
 ## 2026-11-06 gen 职责拆分：只新增 support/token，语义全归 check（P0，ADR-0021）
 
