@@ -72,7 +72,7 @@ just seed               # 滚种子（仅在 test 与 selfhost-native 全绿后�
 python3 tests/yh-run/check.py --compiler $PWD/../yh
 ```
 
-`just selfhost-native` 由 `tests/selfhost/native-selfhost.py` 执行本机全套
+`just selfhost-native` 由 `tests/selfhost/bootstrap/native-selfhost.py` 执行本机全套
 自举门（滚动自举，无 stage0；种子 = `just fetch-seed` 取得的 `bin/yh-<平台>-<架构>`）：
 
     bin/yh-<平台>-<架构> build compiler/  → cc2（冷编）
@@ -84,7 +84,7 @@ compiler/ 全部源文件；③cc4 语法语料（`tests/yh` 正例全过、反�
 ④cc4 运行语料（`tests/yh-run` 全量 run/fail/pass，2026-10-25 实测 360 个
 `.yh` 用例文件）；⑤模块语料（`tests/modules/check.py`）；⑥项目验收
 （`tests/modules/build-check.py`，2026-10-24 记录 126 例），以及
-`tests/selfhost/llvm-function-cache.py` 的函数级缓存矩阵。滚种子前必须全绿。
+`tests/selfhost/cache/llvm-function-cache.py` 的函数级缓存矩阵。滚种子前必须全绿。
 
 ## 内建测试
 

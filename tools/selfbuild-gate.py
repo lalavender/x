@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from selfhost_snapshot_gate import default_seed, expected_artifacts, save_snapshot
 from selfhost_snapshot_gate import self_test, snapshot_errors, verify_seed
 
-PROBE = ROOT / "tests" / "selfhost" / "fixedpoint-probe.yh"
+PROBE = ROOT / "tests" / "selfhost" / "probes" / "fixedpoint-probe.yh"
 
 
 def run(cmd, cwd=None):

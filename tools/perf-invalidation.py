@@ -136,7 +136,7 @@ def prime(project: Path, compiler: Path, timeout: int) -> tuple[dict, dict, str]
 
     PC3 之后冷编不写函数缓存；而「无改动再编一次」根本不会启动 worker，
     同样写不出缓存。只有删掉 manifest 与对象逼出 worker 才会落盘，
-    这与 tests/selfhost/llvm-function-cache.py 的 priming 方式一致。
+    这与 tests/selfhost/cache/llvm-function-cache.py 的 priming 方式一致。
     """
     # 只删对象：**不能**删 manifest 目录下的 link.manifest，它是「本轮可写函数
     # 缓存」的开关（见 build_scheduler 的 c_firc_write_off），删了会让 priming

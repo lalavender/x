@@ -99,7 +99,7 @@ just seed               # 滚种子（仅在全绿后；拒绝带构建机路径
 损坏/版本不符按 miss。C6：同项目构建锁 + 全局写锁（POSIX flock）、
 `yh cache info|clean|trim|verify`、按大小/年龄 trim、`YH_CACHE_DEBUG=1`
 输出 ActionID 与 miss 原因；Windows 锁后置。测试门禁默认 `YH_CACHE=off`，
-C4/C6 专项 `tests/selfhost/llvm-global-cache.py` 使用显式临时目录。
+C4/C6 专项 `tests/selfhost/cache/llvm-global-cache.py` 使用显式临时目录。
 
 
 

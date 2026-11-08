@@ -3,7 +3,7 @@
 
 编译侧（WSL/Linux/macOS）先跑：
 
-    python3 tests/selfhost/llvm-windows-target.py --manifest-out tmp/windows-target/manifest.json
+    python3 tests/selfhost/windows/llvm-windows-target.py --manifest-out tmp/windows-target/manifest.json
 
 产物与清单都在仓库 `tmp/` 下，Windows 侧同一工作树直接可见（`\\\\wsl$\\...` 或挂载盘符），
 然后：

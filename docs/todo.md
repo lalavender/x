@@ -48,7 +48,7 @@ darwin 9m39s、windows 17m37s）；最新 Release `0.0.12`，HEAD 距该 tag **8
   arena 全局计数，并加 `arch-check` 预算 `max_ast_view_count_writes: 0`（自测 8/8）。
   原始记录保留在下方供追溯：
 - **DR1（已修复）`just test` 红灯：函数缓存预热路径 AST 校验失败（P0）**：
-  `tests/selfhost/llvm-global-cache.py --compiler-path ./yh` 的 `primed` 构建返回
+  `tests/selfhost/cache/llvm-global-cache.py --compiler-path ./yh` 的 `primed` 构建返回
   1，stderr 为 `yh: 内部错误：函数声明 AST 缺少函数体根` 与
   `顶层声明 AST 校验失败`（`compiler/check/verify.yh:333`、
   `compiler/build/module_worker.yh:419`）；stdout 带临时 `DBG decl/module verify`
@@ -89,64 +89,18 @@ darwin 9m39s、windows 17m37s）；最新 Release `0.0.12`，HEAD 距该 tag **8
   `SDKROOT=<Xcode>/MacOSX26.5.sdk` 重建通过（3,368 步）。待决策：是否让
   `tools/llvm-darwin-host.py` 自动在可用 SDK 中回退到 26.x。
 
-## 前端两遍化（已重估，见 2026-11-08 重新分析）
+## 前端两遍化（2026-11-08 收束，等架构重设计）
 
-2026-11-06 的 F0–F7 全量重写方案已**重估为 S1–S4 切片**，依据是 2026-11-08 的实测
-（`parse` 9,626 行 / `check.*` 190 次调用 / `Res` 读取 370 处其中 167 处是控制流决策 /
-`lower` 直接读 AST 语义字段 257 处）。详见
-[`02-plan/yh-前端两遍化-重新分析-2026-11-08.md`](02-plan/yh-前端两遍化-重新分析-2026-11-08.md)。
+S1（接口发射下沉）与 S2a（解析器窄口 + 布局策略下沉）已完成并进入发布；S3 做完了
+`return` / 赋值两片。**架构将重新设计，这条任务线到此收束**，不再按原切片推进。
+证据与结论归档在：
 
-- [x] **S1 接口发射下沉（2026-11-08 完成）**：新建 `check/iface_emit.yh`（2,069 行），
-  把 `parse/iface.yh` 的发射段、`parse/iface_ct.yh` 的发射段与整个
-  `parse/iface_ct_map.yh`（列映射）迁入；`iface_load`/`iface_ct_load`/头部校验
-  留在 `parse`（它们要重新解析，迁走会成环），跨模块复用的文本/头部工具在
-  `check` 里声明为 `pub`。结果：`parse` **9,626 → 7,640 行（−20.6%）/ 14 → 13 文件**，
-  `parse → comptime` **118 → 85**；`check` 6,038 → 8,138 行 / 15 → 16 文件。
-  验收：`just` + `just test`（370/372）+ `just selfhost-native`（固定点一致、
-  自解析 178 文件、project cases 129/129）+ 用户项目 `.s.i`/`.s.ct`
-  **逐字节等价**（`comptimecross` 8 个产物 cmp 一致）。
-  **现状（2026-11-08 23:36，工作区未提交）**：已新增
-  `compiler/check/iface_emit.yh`，删除 `parse/iface_ct_map.yh`，改动
-  `parse/iface.yh`、`parse/iface_ct.yh`、`parse/parse_decl.yh`、
-  `build/module_build.yh`、`build/module_worker.yh`。23:36 的 `just build` 报
-  `check/iface_emit.yh` 6 处「函数未使用」（未接线），`just test` 因
-  `_ensure_built` 失败无法启动。23:52 重跑时与另一并发构建冲突
-  （`yh-link.s.ct.session-<pid>` 打不开），未能得到稳定构建结论；避免在同一
-  工作区并发跑构建。状态：未达验收。下一步：接线调用点 → 补 arch-check
-  边界测试 → 单会话跑全门。
-- [x] **S2a 解析器窄口 + 策略下沉（2026-11-08 完成）**：新增
-  `parse.eval_token_range(first, after, *Res)` 窄口（自管 pos/ast_capture/c_fold），
-  替换 parse 内两处重复求值样板；把「可运行判定/依赖登记」
-  （`ct_layout_expr_runnable`/`ct_layout_expr_register`）下沉
-  `comptime/ct_layout_sched.yh`（只读 token/`ms()`，不重入解析器）。
-  `parse` 7,640 → **7,580 行**，产物逐字节一致。
-- [ ] **S2b 调度下沉 `check`（已并入 S3 前置）**：原计划把 `parse_ct_layout` 整体迁
-  `check`，实测**不可行**——它要重入 `parse_expr`，搬走会让 `check → parse` 与
-  `parse → check` 成环。只有在 `parse` 不再 import `check`（= S3 的产物）之后才能做。
-- [ ] **S3 语义字段外置**（按收益决定，spike 已完成）：`AstExpr` 语义字段改由
-  `check` 写入，`parse` 只填语法字段；`lower` 不动（布局不变）。spike 结论：
-  **全量纯语法仍不可行**（`type_id`/`sym`/`is_lit` 是语法决策输入），但可切三刀：
-  S3a 隐式转换校验后移（16 处，最安全）、S3b CT 诊断延迟消费（8 处）、
-  S3c 纯值折叠后移（11 处，风险最高）。
-- [x] **S3a 首片：return 转换校验后移（2026-11-08 完成）**：新增
-  `check/convert.yh`（`convert_returns` + 按 file_id 报告的 `diag_file_at`），
-  parse 的 `return` 处不再做 `sem_can_assign`（保留聚合返回规则
-  `sem_return_value`）；`build/module_worker` 与 `build/llvm_emit`（单文件）
-  在 `verify_module` 前调用。位置用 `AstExpr.after`（= 解析结束游标，
-  与 parse 期完全同位置）复现，多文件按 `file_id` 切路径。
-  验证：两个探针用例诊断与改动前**逐字一致**；新增 fail 用例
-  `169-return-conversion`；`just test` 371/373、`just selfhost-native` 全绿；
-  `max_parse_check_calls` 142 → **141**。随后同法把**赋值语句**后移
-  （`check.convert_assigns`，取 ASSIGN 语句表达式链第 1/2 条边），四例探针诊断逐字
-  一致，新增 `169`/`170` 两个 fail 用例，预算 141 → **140**；
-  `just test` 372/374、fail 140/140。详见
-  [`02-plan/yh-S3-语义字段外置spike-2026-11-08.md`](02-plan/yh-S3-语义字段外置spike-2026-11-08.md)。
-  已落地：`arch-check` 新增 `max_parse_check_calls: 142`（只减不增），作为 S3 进度度量。
-  待决策：是否接受诊断顺序变化（S3a）。
-- [ ] **S4 契约切换**（一般不做）：纯语法 AST + 独立 checked IR，代价见重估表。
+- [`01-finished/yh-前端两遍化-重新分析-2026-11-08.md`](01-finished/yh-前端两遍化-重新分析-2026-11-08.md)
+- [`01-finished/yh-S3-语义字段外置spike-2026-11-08.md`](01-finished/yh-S3-语义字段外置spike-2026-11-08.md)
 
-原 F0–F7 条目已删除，历史论证见
-[`01-finished/yh-F2-核收缩与parse纯语法化结论-2026-11-06.md`](01-finished/yh-F2-核收缩与parse纯语法化结论-2026-11-06.md)。
+重设计时可直接沿用的事实：`parse` 9,626 → 7,577 行；`parse → check.sem_*` 142 → 140
+（`arch-check` 预算仍生效）；`parse → check` 依赖方向未变，所以「调度下沉 check」类
+改动必须等 `parse` 不再 import `check`。
 
 ## 2026-11-06 gen 职责拆分：只新增 support/token，语义全归 check（P0，ADR-0021）
 
@@ -622,7 +576,7 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
   `ir/ssa_module_00_model.yh:173` 的 key=4、`libSystem.tbd` 的 `targets` 含
   `x86_64-macos`），缺的是接线：`[link-darwin-x64]` 链接组（`compiler/project.toml`
   只有 `link-darwin-arm64`）、x64 Darwin 闭包（`tools/llvm-darwin-host.py` 的
-  `HOST`/`SDK_PREFIX` 写死 aarch64）、`tests/selfhost/llvm-darwin-*.py` 的 arm64 断言
+  `HOST`/`SDK_PREFIX` 写死 aarch64）、`tests/selfhost/darwin/llvm-darwin-*.py` 的 arm64 断言
   参数化、种子与取种（`justfile:78` 与 `tools/fetch-release-seed.py` 的 `PLATFORMS`）、
   Intel Mac runner job（`macos-13`，需确认支持窗口）。验收必须在 Intel Mac 原生跑
   + 原生自举，交叉产物不算数。

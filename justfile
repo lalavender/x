@@ -213,12 +213,12 @@ prefix_root := destdir + prefix
 # 每平台专项门的命令：变量替旧 Makefile 里的条件赋值。
 # 编译器路径一律经 quote()：Windows 的绝对路径带反斜杠与盘符，裸拼进 shell 会被
 # bash 吃掉反斜杠（`C:\Users\...` → `C:Users...`），门禁报 FileNotFoundError。
-runtime_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-runtime.py --compiler-path " + quote(yh_run) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + quote(yh_run) + " --llvm-x64" } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-linux-arm64.py --compiler-path " + quote(yh_run) } else { py + " " + quote(root) + "/tests/selfhost/runtime-memory.py --compiler-path " + quote(yh_run) }
-cache_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-cache.py --compiler-path " + quote(yh) + " --target aarch64-unknown-linux-gnu" } else { py + " " + quote(root) + "/tests/selfhost/link-cache.py --compiler-path " + quote(yh) }
+runtime_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin/llvm-darwin-runtime.py --compiler-path " + quote(yh_run) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/gates/runtime-memory.py --compiler-path " + quote(yh_run) + " --llvm-x64" } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/linux-arm64/llvm-linux-arm64.py --compiler-path " + quote(yh_run) } else { py + " " + quote(root) + "/tests/selfhost/gates/runtime-memory.py --compiler-path " + quote(yh_run) }
+cache_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin/llvm-darwin-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/cache/llvm-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/cache/llvm-cache.py --compiler-path " + quote(yh) + " --target aarch64-unknown-linux-gnu" } else { py + " " + quote(root) + "/tests/selfhost/cache/link-cache.py --compiler-path " + quote(yh) }
 modcheck_flags := if llvm_host == "" { "" } else { "--backend llvm" }
-selfhost_flags_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/llvm-darwin-selfhost-flags.py --compiler-path " + quote(yh_run) } else { "true" }
+selfhost_flags_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin/llvm-darwin-selfhost-flags.py --compiler-path " + quote(yh_run) } else { "true" }
 # 链接死代码回收门（J6-L1）：Darwin 缺省 -dead_strip 生效、可回退、进链接键。
-dead_strip_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin-dead-strip.py --compiler-path " + quote(yh_run) } else { "true" }
+dead_strip_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin/darwin-dead-strip.py --compiler-path " + quote(yh_run) } else { "true" }
 
 # 默认目标：源比 yh 新时冷编，否则什么都不做（等价旧 make 默认目标）。
 default: _ensure_built
@@ -331,7 +331,7 @@ test: stage-yh
     @cd "{{ root }}/libs" && YH_CACHE=off "{{ yh_run }}" test --timeout 60
     YH_CACHE=off {{ py }} "{{ root }}/tools/compiler-tests.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ py }} "{{ root }}/tests/fmt/interp.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/fmt-interp"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-global-cache.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/cache/llvm-global-cache.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ py }} "{{ root }}/tests/tools/yh-code-stats/check.py"
     YH_CACHE=off {{ py }} "{{ root }}/tests/tools/arch-check/check.py"
     YH_CACHE=off {{ py }} "{{ root }}/tools/arch-check.py"
@@ -374,18 +374,18 @@ test-libs: stage-yh
 # 仓库根 yh，不能用暂存副本。
 selfhost-native: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/tools/selfhost_snapshot_gate.py" --verify-seed "{{ seed_abs }}"
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/native-selfhost.py" --seed "{{ seed_abs }}" {{ selfhost_work_flag }} {{ corpus_flag }} {{ selfhost_keep_flag }}
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/scratch-isolation.py" --compiler-path "{{ yh_run }}" --jobs 4
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/lex-stats.py" --compiler-path "{{ yh_run }}"
+    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/bootstrap/native-selfhost.py" --seed "{{ seed_abs }}" {{ selfhost_work_flag }} {{ corpus_flag }} {{ selfhost_keep_flag }}
+    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/bootstrap/scratch-isolation.py" --compiler-path "{{ yh_run }}" --jobs 4
+    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/gates/lex-stats.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ runtime_test }}
     YH_CACHE=off {{ selfhost_flags_test }}
     YH_CACHE=off {{ dead_strip_test }}
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/check-command.py" --compiler-path "{{ yh_run }}"
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/llvm-architecture.py" --compiler-path "{{ yh_run }}"
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/llvm-function-cache.py" --compiler-path "{{ yh_run }}"
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/llvm-path-cache.py" --compiler-path "{{ yh_run }}"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-global-cache.py" --compiler-path "{{ yh_run }}"
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/foreign-fs-build.py" --compiler-path "{{ yh_run }}"
+    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/gates/check-command.py" --compiler-path "{{ yh_run }}"
+    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/gates/llvm-architecture.py" --compiler-path "{{ yh_run }}"
+    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/cache/llvm-function-cache.py" --compiler-path "{{ yh_run }}"
+    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/cache/llvm-path-cache.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/cache/llvm-global-cache.py" --compiler-path "{{ yh_run }}"
+    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/gates/foreign-fs-build.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ cache_test }}
     YH_CACHE=off {{ py }} "{{ root }}/tests/modules/check.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ py }} "{{ root }}/tests/modules/test-check.py" --compiler-path "{{ yh_run }}"
@@ -403,7 +403,7 @@ full: test
 test-llvm: stage-yh
     @test "{{ host_os }}" = "linux" || { echo "错误: test-llvm 首期要求 Linux/x86_64"; exit 1; }
     @test "{{ cpu }}" = "x86_64" -o "{{ cpu }}" = "amd64" || { echo "错误: test-llvm 首期要求 Linux/x86_64"; exit 1; }
-    {{ py }} "{{ root }}/tests/selfhost/llvm-selfhost.py" --self-test
+    {{ py }} "{{ root }}/tests/selfhost/bootstrap/llvm-selfhost.py" --self-test
     {{ py }} "{{ root }}/tests/yh/check.py" --compiler --compiler-path "{{ yh_run }}" --quiet
     {{ py }} "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" {{ llvm_run_flags }} --opt-level 0 --quiet --jobs {{ llvm_jobs }} --workdir "{{ root }}/tmp/llvm-test/yh-run-O0"
     {{ py }} "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" {{ llvm_run_flags }} --opt-level 2 --quiet --jobs {{ llvm_jobs }} --workdir "{{ root }}/tmp/llvm-test/yh-run-O2"
@@ -411,33 +411,33 @@ test-llvm: stage-yh
     {{ py }} "{{ root }}/tests/modules/check.py" --compiler-path "{{ yh_run }}" {{ llvm_run_flags }} --opt-level 2 --quiet --jobs {{ llvm_jobs }}
     {{ py }} "{{ root }}/tests/modules/build-check.py" --compiler-path "{{ yh_run }}" {{ llvm_run_flags }} --opt-level 0 --jobs {{ llvm_jobs }} --workdir "{{ root }}/tmp/llvm-test/modcheck-O0"
     {{ py }} "{{ root }}/tests/modules/build-check.py" --compiler-path "{{ yh_run }}" {{ llvm_run_flags }} --opt-level 2 --jobs {{ llvm_jobs }} --workdir "{{ root }}/tmp/llvm-test/modcheck-O2"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-driver.py" --compiler-path "{{ yh_run }}"
-    {{ py }} "{{ root }}/tests/selfhost/runtime-memory.py" --compiler-path "{{ yh_run }}" --llvm-x64
-    {{ py }} "{{ root }}/tests/selfhost/llvm-lld.py"
+    {{ py }} "{{ root }}/tests/selfhost/bootstrap/llvm-driver.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/gates/runtime-memory.py" --compiler-path "{{ yh_run }}" --llvm-x64
+    {{ py }} "{{ root }}/tests/selfhost/host/llvm-lld.py"
 
 # test-llvm-linux-arm64：F1 Linux/AArch64 LLVM 运行时、C ABI、对象架构与 O0/O2。
 # 只在 arm64 Linux 容器内原生运行；x64 宿主不预跑本门。
 test-llvm-linux-arm64: stage-yh
     @test "{{ host_os }}" = "linux" || { echo "错误: test-llvm-linux-arm64 要求 Linux/aarch64"; exit 1; }
     @test "{{ cpu }}" = "aarch64" -o "{{ cpu }}" = "arm64" || { echo "错误: test-llvm-linux-arm64 要求 Linux/aarch64"; exit 1; }
-    {{ py }} "{{ root }}/tests/selfhost/llvm-linux-arm64.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/linux-arm64/llvm-linux-arm64.py" --compiler-path "{{ yh_run }}"
 
 # test-llvm-darwin：Darwin/ARM64 静态 SDK、弱桩兼容、LLVM 对象与 Apple ABI 探针。
 test-llvm-darwin: stage-yh
     @test "{{ host_os }}" = "macos" -a "{{ seed_arch }}" = "arm64" || { echo "错误: test-llvm-darwin 要求 Darwin/ARM64"; exit 1; }
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-sdk.py"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-host.py"
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-sdk.py"
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-host.py"
     {{ py }} "{{ root }}/tools/link-closure.py" check --host darwin-aarch64
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-bridge.py" --compiler-path "{{ yh_run }}" --require-embedded
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-object.py" --compiler-path "{{ yh_run }}"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-abi.py" --suite full --compiler-path "{{ yh_run }}"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-cache.py" --compiler-path "{{ yh_run }}"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-default.py" --compiler-path "{{ yh_run }}"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-bundled-sdk.py" --compiler-path "{{ yh }}"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-selfhost.py" --self-test
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-runtime.py" --compiler-path "{{ yh_run }}"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-selfhost-flags.py" --compiler-path "{{ yh_run }}"
-    {{ py }} "{{ root }}/tests/selfhost/llvm-darwin-link.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-bridge.py" --compiler-path "{{ yh_run }}" --require-embedded
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-object.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-abi.py" --suite full --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-cache.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-default.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-bundled-sdk.py" --compiler-path "{{ yh }}"
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-selfhost.py" --self-test
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-runtime.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-selfhost-flags.py" --compiler-path "{{ yh_run }}"
+    {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-link.py" --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tools/llvm-darwin-host.py" status --host darwin-aarch64
 
 # —— Windows 目标（W1-4）：导入库 stub ——
@@ -450,18 +450,18 @@ windows-sdk:
 
 # test-windows-sdk：W1-4 门禁——def 与清单一致、生成确定性、导入面只含 KERNEL32。
 test-windows-sdk:
-    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-sdk.py"
+    "{{ py }}" "{{ root }}/tests/selfhost/windows/llvm-windows-sdk.py"
 
 # test-windows-abi：W1-2b 门禁——Win64 按值聚合与 clang 编出的 C 桩互操作（4/8/12 字节 + 纯浮点）。
 test-windows-abi: stage-yh windows-sdk
-    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-abi.py" --compiler-path "{{ yh_run }}" --sdk-root "{{ windows_sdk }}" --workdir "{{ root }}/tmp/llvm-windows-abi" --manifest-out "{{ root }}/tmp/windows-abi/manifest.json"
+    "{{ py }}" "{{ root }}/tests/selfhost/windows/llvm-windows-abi.py" --compiler-path "{{ yh_run }}" --sdk-root "{{ windows_sdk }}" --workdir "{{ root }}/tmp/llvm-windows-abi" --manifest-out "{{ root }}/tmp/windows-abi/manifest.json"
 
 # test-windows-target：W1 目标门——交叉出 COFF/PE、零 CRT 运行时、导入面、可复现性、负例。
 # **编译侧目标**：在 WSL/Linux/macOS（能跑现有种子）执行；运行侧另跑 run-exe.py。
 # 同时写出运行清单（tmp/windows-target/manifest.json），供 Windows 侧跑：
 #   python3 tests/windows/run-exe.py --manifest tmp/windows-target/manifest.json
 test-windows-target: stage-yh windows-sdk
-    "{{ py }}" "{{ root }}/tests/selfhost/llvm-windows-target.py" --compiler-path "{{ yh_run }}" --manifest-out "{{ root }}/tmp/windows-target/manifest.json" --workdir "{{ root }}/tmp/windows-target"
+    "{{ py }}" "{{ root }}/tests/selfhost/windows/llvm-windows-target.py" --compiler-path "{{ yh_run }}" --manifest-out "{{ root }}/tmp/windows-target/manifest.json" --workdir "{{ root }}/tmp/windows-target"
 
 # test-windows-corpus：整份运行语料按 Windows 目标交叉编译并写清单（编译侧，W1-7）。
 # 编译侧只需 LLVM 闭包 + 导入库；运行交给 run-windows-corpus（真 Windows）。

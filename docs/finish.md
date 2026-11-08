@@ -8,6 +8,28 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-09 tests/selfhost 清理与分域
+
+**结果**：`tests/selfhost` 从 91 个平铺文件整理为 54 个（8 个分组目录 + `fixtures/`）：
+`bootstrap/`（自举固定点与驱动）、`cache/`（内容寻址/函数/路径/链接缓存）、
+`gates/`（check 命令、词法统计、跨文件系统、架构、运行时内存）、`host/`（LLVM 宿主闭包与 lld）、
+`darwin/`、`windows/`、`linux-arm64/` 平台专项（脚本与 `.yh`/`.c` 探针同目录）、
+`probes/`（共享固定点探针）。删除 37 个已无入口的 LL 时代门（`llvm-abi`、`llvm-baseline`、
+`llvm-checked`、`llvm-front-*`、`llvm-ir`、`llvm-module*`、`llvm-runtime`、`llvm-semantics`、
+`llvm-embedded*`、`llvm-isolation` 及只被它们引用的探针）；入口以 justfile/CI 与 `tools/` 引用为准。
+迁移脚本 `ROOT` 统一由 `parents[2]` 改为 `parents[3]`；justfile、`tools/`、AGENTS、`compiler/README.md`、
+`docs/todo.md` 的路径同步。
+
+**验证**：`just dev` 构建通过；`just test` rc=0；`test-llvm-darwin` 的 Darwin 门逐条实跑通过
+（sdk/host/bridge/object/abi/cache/default/bundled-sdk/runtime/link/selfhost-flags 与 selfhost `--self-test`）；
+`cache/llvm-global-cache.py`、`gates/check-command.py`、`gates/llvm-architecture.py`、
+`cache/llvm-function-cache.py`、`cache/llvm-path-cache.py` 通过；全仓 `tests/selfhost/**` 引用存在性
+与 Python 编译检查 0 缺失。未跑 `just selfhost-native`（两代自举主门，交 CI）。
+
+**遗留**：`gates/lex-stats.py` 在当前 `./yh`（0.0.12）上失败，HEAD 原脚本同样失败
+（POSIX 下 totals=(109,9,107,4,4,4,2) ≠ fork 复用期望），与本次迁移无关，需单独查 worker 复用行为；
+`docs/01-finished/` 等历史文档仍引用旧路径，未改动。
+
 ## 2026-11-09 CI 日常门、滚种子与自举规划
 
 **结果**：新增
@@ -1161,3 +1183,11 @@ compiler-tests 8/8、arch-check 8/8；`just selfhost-native` 固定点一致 + �
 在改动前后诊断**逐字一致**；新增 `tests/yh-run/fail/170-assign-conversion.yh`；
 `just test` **372/374**、fail 140/140；`just selfhost-native` 全绿；
 `max_parse_check_calls` 141 → **140**。
+
+## 2026-11-08：前端两遍化任务线收束（转入 0.0.13-rc.1 发布）
+
+按用户决定：架构将重新设计，**当前两遍化任务线到此收束**。已完成并随 0.0.13-rc.1
+发布的部分：S1 接口发射下沉（`check/iface_emit.yh`）、S2a 解析器窄口
+（`parse.eval_token_range`）与布局策略下沉（`comptime/ct_layout_sched.yh`）、
+S3a 的 `return` / 赋值两片（`check/convert.yh`）。未完成的 S3b/S3c 与 S3a 剩余 15 个
+站点不再推进，分析归档到 `docs/01-finished/`。

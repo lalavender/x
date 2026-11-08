@@ -200,7 +200,7 @@ def generate_object(clang_bin: str, source: Path, out_path: Path) -> None:
     if result.returncode != 0 or not out_path.is_file():
         raise SdkError(f"编译 {source.name} 失败：\n{result.stdout}{result.stderr}")
     # COFF 头 4..7 是 TimeDateStamp：clang 写当前时间，同一份源码两次生成会字节
-    # 不同（tests/selfhost/llvm-windows-sdk.py 的确定性门）。归零即可复现。
+    # 不同（tests/selfhost/windows/llvm-windows-sdk.py 的确定性门）。归零即可复现。
     data = bytearray(out_path.read_bytes())
     if len(data) >= 8 and data[0:2] == b"\x64\x86":
         data[4:8] = b"\x00\x00\x00\x00"

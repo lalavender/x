@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tools/llvm-host.py —— 内嵌静态 LLVM 宿主的薄驱动（供 Makefile/seed-build.py 调用）。
 
-真正的构建与验收都在 tests/selfhost/llvm-host.py；本文件只做四件事：
+真正的构建与验收都在 tests/selfhost/host/llvm-host.py；本文件只做四件事：
 
     prepare  构建宿主可执行文件与身份记录（首次需要 SDK 包，可能联网下载）
     status   离线校验已准备的宿主是否仍然有效，输出身份 JSON（失效时退出码 3）
@@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from llvm_cache import cache_root  # noqa: E402
 WORK_ROOT = cache_root()
 SDK_TOOL = ROOT / "tools/llvm-sdk.py"
-BUILDER = ROOT / "tests/selfhost/llvm-host.py"
+BUILDER = ROOT / "tests/selfhost/host/llvm-host.py"
 MANIFEST = ROOT / "vendor/llvm/sdk.lock.json"
 BRIDGE_SOURCE = ROOT / "compiler/llvm/bridge.c"
 BRIDGE_HEADER = ROOT / "compiler/llvm/bridge.h"
