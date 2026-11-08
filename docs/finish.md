@@ -1191,3 +1191,26 @@ compiler-tests 8/8、arch-check 8/8；`just selfhost-native` 固定点一致 + �
 （`parse.eval_token_range`）与布局策略下沉（`comptime/ct_layout_sched.yh`）、
 S3a 的 `return` / 赋值两片（`check/convert.yh`）。未完成的 S3b/S3c 与 S3a 剩余 15 个
 站点不再推进，分析归档到 `docs/01-finished/`。
+
+### LLVM 闭包身份：改用「配方摘要」，不再因工具脚本改动重编
+
+`just llvm-host` 之所以动辄 30–40 分钟，是因为身份记录曾包含**构建器脚本自身的文件
+摘要**（`tools/llvm-darwin-sdk.py` / `tools/llvm-darwin-host.py`）与**整份锁文件摘要**：
+这轮环境修复里只要改一行注释/提示，`host.json` 立刻判为过期，`ensure()` 就走全量
+LLVM 重建（3,368 个 ninja 步骤，默认 `--jobs 2`）。此外部署的桥归档确实比当前
+`compiler/llvm/bridge.c` 旧（重建后摘要由 `d133e2a5` 变为 `bdb7d4aa`），所以那次等待
+并不全是白等。
+
+修法：
+
+- 新增 `tools/llvm_recipe.py`：
+  - `sdk_recipe_digest()` = 锁文件里的 `darwin_source.sha256` + `darwin_build` 规格；
+  - `host_recipe_digest()` = `bridge.c`/`bridge.h`/`lld_bridge.cpp` 摘要 + 锁文件摘要 +
+    `deployment_target` + `sdk_recipe_digest()`。
+  两个工具（SDK/宿主）在写入与比较身份时都用这两个摘要，**不再哈希脚本自身**。
+- `check()` 的 `manifest_sha256` 比较保留（锁文件变更仍会触发重建——那是真正的配方变化）。
+- 结果：`just llvm-host` 由 30+ 分钟降到 **1.0s**（`reused: true`）；桥归档与当前
+  `bridge.c` 对齐后，`just` 冷编 65s（含全量重新链接）。
+
+经验：**身份要绑定「决定产物的输入」，不要绑定「产生输入的程序」**；否则任何工具
+改动都会让增量缓存失效。

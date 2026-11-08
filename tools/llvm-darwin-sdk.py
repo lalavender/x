@@ -12,6 +12,7 @@ import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+from llvm_recipe import sdk_recipe_digest  # noqa: E402  固定闭包配方摘要
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "tmp/llvm-migration/darwin-sdk"
@@ -307,7 +308,7 @@ def build_sdk(min_os, jobs):
                   and record.get("sdk_settings_sha256") == digest(sdk_root / "SDKSettings.json")
                   and record.get("toolchain") == toolchain)
         artifacts_ok = recipe and verify_artifacts(record, prefix)
-        if artifacts_ok and record.get("builder_sha256") == digest(Path(__file__)):
+        if artifacts_ok and record.get("builder_sha256") == sdk_recipe_digest():
             return prefix
         if artifacts_ok:
             # 构建器源码改过、但配方与全部产物摘要逐一致：只重写身份记录。
@@ -456,7 +457,7 @@ def write_host_record(host, min_os, sdk_root, sdk_version, toolchain, package, p
               "source_sha256": source_spec()["sha256"], "sdk_version": sdk_version,
               "sdk_settings_sha256": digest(Path(sdk_root) / "SDKSettings.json"),
               "sdk_root": str(sdk_root), "min_os": min_os, "toolchain": toolchain,
-              "builder_sha256": digest(Path(__file__)),
+              "builder_sha256": sdk_recipe_digest(),
               "build_configuration": build_spec(),
               "tool_versions": tool_versions,
               "tools": {name: digest(prefix / "bin" / name) for name in required_tools},

@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from llvm_cache import cache_root  # noqa: E402
+from llvm_recipe import host_recipe_digest, sdk_recipe_digest  # noqa: E402
 WORK = cache_root()
 HOST = "darwin-aarch64"
 SDK_BUILDER = ROOT / "tools/llvm-darwin-sdk.py"
@@ -191,7 +192,7 @@ def load_sdk_record():
         raise NotReady(f"Darwin LLVM SDK 尚未构建：{error}") from error
     if record.get("host") != HOST or record.get("manifest_sha256") != digest(MANIFEST):
         raise NotReady("Darwin LLVM SDK host 或锁文件身份已变化")
-    if record.get("builder_sha256") != digest(SDK_BUILDER):
+    if record.get("builder_sha256") != sdk_recipe_digest():
         raise NotReady("Darwin LLVM SDK 构建器已变化")
     for name, expected in record.get("archives", {}).items():
         archive = SDK_PREFIX / "lib" / name
@@ -435,8 +436,8 @@ def build_host(jobs):
     record = {
         "host": HOST, "llvm_version": "21.1.8", "bridge_abi": 2,
         "sdk_host_sha256": digest(SDK_RECORD), "manifest_sha256": digest(MANIFEST),
-        "host_builder_sha256": digest(HOST_BUILDER),
-        "sdk_builder_sha256": digest(SDK_BUILDER),
+        "host_builder_sha256": host_recipe_digest(),
+        "sdk_builder_sha256": sdk_recipe_digest(),
         "bridge_source_sha256": digest(BRIDGE), "bridge_header_sha256": digest(BRIDGE_HEADER),
         "lld_bridge_source_sha256": digest(LLD_BRIDGE), "bridge_sha256": digest(archive),
         "bridge_archive": describe(archive),
@@ -471,9 +472,9 @@ def check(full=True):
     problems = []
     if record.get("host") != HOST or record.get("manifest_sha256") != digest(MANIFEST):
         problems.append("host 键或 SDK 锁文件已变化")
-    if record.get("host_builder_sha256") != digest(HOST_BUILDER):
+    if record.get("host_builder_sha256") != host_recipe_digest():
         problems.append("Darwin LLVM host 构建器已变化")
-    if record.get("sdk_builder_sha256") != digest(SDK_BUILDER):
+    if record.get("sdk_builder_sha256") != sdk_recipe_digest():
         problems.append("Darwin LLVM SDK 构建器已变化")
     if record.get("sdk_host_sha256") != digest(SDK_RECORD):
         problems.append("固定 Darwin SDK 身份已变化")
@@ -512,7 +513,7 @@ def check(full=True):
             problems.append(f"Darwin LLVM SDK 工具缺失或摘要错误：{name}")
     if sdk.get("source_sha256") != "4633a23617fa31a3ea51242586ea7fb1da7140e426bd62fc164261fe036aa142":
         problems.append("Darwin SDK 源码不是锁定的 LLVM 21.1.8")
-    if sdk.get("builder_sha256") != digest(SDK_BUILDER):
+    if sdk.get("builder_sha256") != sdk_recipe_digest():
         problems.append("Darwin LLVM SDK 构建器身份已变化")
     return problems
 
