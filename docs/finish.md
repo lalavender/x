@@ -8,6 +8,25 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-09 CI 日常门、滚种子与自举规划
+
+**结果**：新增
+[02-plan/yh-CI日常门与滚种子自举规划-2026-11-09.md](02-plan/yh-CI日常门与滚种子自举规划-2026-11-09.md)，
+只做规划与取舍，未改代码/workflow。要点：日常按「`just dev` → `just quick` →
+`just build`+`just test` → `just selfhost-native` → 等 CI」分层；CI 不新增 nightly
+全量门，门禁统一到 `YH_ANTLR=0 just test`；可分发种子只由 tag Release 产生，本地
+`just seed` 只影响本机；自举链已成立，缺 `just bootstrap` 取种与合入门槛两个决定；
+建议每完成一个切片发 rc（当前 `0.0.12` 落后 83 个提交）。
+
+**实测依据**：CI run `42507415505`（HEAD `6614864`）四端全绿、总 17m42s；
+`gh api .../branches/llvm/protection` 返回 404（未保护）；`just --dry-run bootstrap`
+确认顺序是「llvm-host → _ensure_built」，新机无种子会先建闭包再失败。
+
+**验证**：只改文档（规划文档、`docs/todo.md`、本条目），未跑构建/测试——工作区当时
+有另一会话的 S3a 后续切片未提交改动，避免并发构建冲突。
+
+**遗留**：P0/P1/P2 见 `docs/todo.md` 同名段；合入门槛与 rc 节奏待用户决策。
+
 ## 2026-11-08 二次文档刷新：设计文档改指 S1–S4，实测口径对齐 HEAD
 
 **结果**：按 HEAD `532d2c2` 与已提交的重新分析（`dc4f3bd`/`532d2c2`）刷新设计文档，
@@ -1135,3 +1154,10 @@ S2b（布局调度整体下沉）。待用户决策：是否接受诊断顺序�
 门禁：`just` 通过；`just test` **371/373（2 跳过）**、fail 139/139、pass 10/10、
 compiler-tests 8/8、arch-check 8/8；`just selfhost-native` 固定点一致 + 自解析
 178 文件 + project cases 129/129。`max_parse_check_calls` 142 → **141**。
+
+随后把**赋值语句**一并后移（同日）：`check.convert_assigns(view)` 取 ASSIGN 语句
+表达式链上的第 1、2 条边（先左值后右值），判定 `vk_can_assign(lhs.type_id, rhs…)`，
+位置同样用 `rhs.after`。四例探针（return 窄化 / return 指针 / 赋值窄化 / 赋值指针）
+在改动前后诊断**逐字一致**；新增 `tests/yh-run/fail/170-assign-conversion.yh`；
+`just test` **372/374**、fail 140/140；`just selfhost-native` 全绿；
+`max_parse_check_calls` 141 → **140**。

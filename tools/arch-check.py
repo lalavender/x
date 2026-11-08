@@ -92,7 +92,7 @@ BUDGETS = {
     "max_ast_view_count_writes": 0,
     # S3（语义字段外置）进度指标：`parse` 里对 `check.sem_*` 的调用行数，只减不增。
     # 每搬走一组语义校验就下调整数（见 docs/02-plan/yh-S3-语义字段外置spike-2026-11-08.md）。
-    "max_parse_check_calls": 141,
+    "max_parse_check_calls": 140,
     "max_unwired_pub": 0,
     # 容量安全的下界指标：`append_*_cap` 调用点只增不减（A0c2 进度）。
     "min_cap_appends": 45,

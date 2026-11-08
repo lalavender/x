@@ -13,6 +13,29 @@
 - 添加错误，当前错误提示功能太简陋
 - project.toml 添加[env]
 
+## 2026-11-09 CI 日常门、滚种子与自举规划
+
+依据 [02-plan/yh-CI日常门与滚种子自举规划-2026-11-09.md](02-plan/yh-CI日常门与滚种子自举规划-2026-11-09.md)。
+实测口径：CI run `42507415505` 四端全绿 17m42s（linux-x64 11m56s、linux-arm64 10m52s、
+darwin 9m39s、windows 17m37s）；最新 Release `0.0.12`，HEAD 距该 tag **83 个提交**；
+`llvm` 无分支保护（REST 404）；`perf.yml` 最近两次实跑均未验收；`just bootstrap`
+先建闭包再 `verify-seed`，新机「一条命令」不成立。取舍与验收细节见规划文档。
+
+- [ ] **P0 `perf.yml` 复跑拿绿**：见本文「2026-11-03 CI 迁移」段的同名条目，不重复登记。
+- [ ] **P0 `just bootstrap` 补取种**：种子缺失或哈希不符时才 `fetch-seed`，已有则跳过；
+      验收：空 `bin/` 一次成功、第二次不发网络请求、AGENTS/README 的「一条命令」口径成真。
+- [ ] **P1 CI 门禁统一**：四端改 `YH_ANTLR=0 just test` + 平台专项 + `SKIP_CORPUS=1 selfhost-native`，
+      消除 Linux/Darwin 手工步骤与 `just test` 的漂移；估计各多 2–4 分钟。
+      验收：四端绿；分支上故意改坏 `tests/yh-run` 一例，四端全红后回滚。
+- [ ] **P1 发 `0.0.13-rc.1`**：重置种子代际（当前 83 提交）。版本号两处 + 发布说明。
+      验收：release.yml 四端成功，且用发布种子走完 AGENTS 的
+      「`rm -rf bin` → `fetch-seed` → `just` → `just test` → `just selfhost-native`」。
+- [ ] **P1 合入门槛定案（❓待决策）**：默认 A（直推 + 「CI 红不发 tag、不滚种子」纪律）；
+      B 为分支保护，若开先只 required `linux-x64`。定案后写进 README/AGENTS。
+- [ ] **P2 每周 linux-x64 bootstrap 冒烟（可选）**：空 `bin/` → `just bootstrap` → `just quick`。
+- [ ] **P2 actions 升级 Node24 版本**：checkout / setup-just / cache 不再出弃用注解。
+- [ ] **P2 Windows 闭包 CMake 生成器动态检测**：`windows-latest` 能选到已装 VS。
+
 ## 2026-11-08 文档刷新发现（待处理）
 
 按 2026-11-08 的代码与实测刷新架构/模块职责/finish 时发现的问题。全部为实测复现；
@@ -113,7 +136,10 @@
   与 parse 期完全同位置）复现，多文件按 `file_id` 切路径。
   验证：两个探针用例诊断与改动前**逐字一致**；新增 fail 用例
   `169-return-conversion`；`just test` 371/373、`just selfhost-native` 全绿；
-  `max_parse_check_calls` 142 → **141**。详见
+  `max_parse_check_calls` 142 → **141**。随后同法把**赋值语句**后移
+  （`check.convert_assigns`，取 ASSIGN 语句表达式链第 1/2 条边），四例探针诊断逐字
+  一致，新增 `169`/`170` 两个 fail 用例，预算 141 → **140**；
+  `just test` 372/374、fail 140/140。详见
   [`02-plan/yh-S3-语义字段外置spike-2026-11-08.md`](02-plan/yh-S3-语义字段外置spike-2026-11-08.md)。
   已落地：`arch-check` 新增 `max_parse_check_calls: 142`（只减不增），作为 S3 进度度量。
   待决策：是否接受诊断顺序变化（S3a）。
