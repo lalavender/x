@@ -8,6 +8,23 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-09：修复 `yh test` 在非 compiler 项目上的回归（testkit 无条件 import proj）
+
+**问题**：`c7ca83d` 让生成的测试入口无条件输出 `import proj; proj.ctx().envp = envp`，
+而 `proj` 只是编译器自己的模块：任何用户项目（含 `libs/`）执行 `yh test` 都报
+`模块不存在: proj`。`tests/modules/test-check.py` 的 `default-check`、
+`execute-fail-early-exit-and-crash` 与 `just test` 里的 `cd libs && yh test` 因此全红。
+
+**结果**：`compiler/testkit/test_cmd.yh:tc_gen_runner` 先在被测项目里查 `proj`
+模块，命中才生成 `import proj`、`envp **char` 参数与赋值；普通项目回到原来的
+两参数 `main`。编译器自测仍保留环境接线（`proj.env_fetch` 依赖它）。
+
+**验证**：
+- `cd libs && YH_CACHE=off yh test --timeout 60` → 140 passed / 0 failed
+- `tests/modules/test-check.py` → 38 PASS / 0 FAIL（原 2 条 FAIL 转绿）
+- `tools/compiler-tests.py` → 8/8
+- `env YH_CACHE=off just build` → 冷编通过
+
 ## 2026-11-09：同名模块不再合并 + 路径导入（import a.cache）
 
 **问题**：模块按「(项目, 模块名)」查找/创建，`src/a/cache` 与 `src/b/cache`（都声明
