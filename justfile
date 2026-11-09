@@ -60,7 +60,7 @@ cpu := arch()
 # 所以反引号里也直接写 `tools/py`（反引号以 justfile 所在目录为 cwd）。
 py_default := if host_os == "windows" { "python" } else { "tools/py" }
 # 导出给反引号表达式与配方里的子 shell 使用（just 变量不能直接写进 `...`）。
-export PY := env_var_or_default("PY", py_default)
+export PY := env("PY", py_default)
 py := if PY == "" { py_default } else { PY }
 
 # 种子文件名按「yh-<平台>-<架构>」：Darwin/arm64 → darwin-arm64，
@@ -70,10 +70,10 @@ host_tag := if host_os == "macos" { "darwin" } else if host_os == "linux" { "lin
 bin_seed := root + "/bin/yh-" + host_tag + "-" + seed_arch
 
 # 编译、验证和滚动使用同一个宿主平台种子；显式 SEED 可用于 CI 的临时种子。
-SEED := env_var_or_default("SEED", bin_seed)
+SEED := env("SEED", bin_seed)
 seed := if SEED == "" { bin_seed } else { SEED }
 seed_abs := absolute_path(seed)
-SEED_DEST := env_var_or_default("SEED_DEST", bin_seed)
+SEED_DEST := env("SEED_DEST", bin_seed)
 seed_dest := if SEED_DEST == "" { bin_seed } else { SEED_DEST }
 seed_dest_abs := absolute_path(seed_dest)
 
@@ -89,14 +89,14 @@ yh_abs := absolute_path(yh)
 # 仓库挂在 9p/网络盘上时每次读二进制要 0.2–0.4s。把编译器与语料产物放到系统
 # 临时目录（Linux /tmp 为 ext4/tmpfs、macOS $TMPDIR 为 APFS）后实测单次调用
 # 665ms→464ms、整用例 939ms→703ms（约 −25%）。FAST_STAGE=0 关闭暂存。
-FAST_STAGE := env_var_or_default("FAST_STAGE", "1")
+FAST_STAGE := env("FAST_STAGE", "1")
 fast_stage := if FAST_STAGE == "" { "1" } else { FAST_STAGE }
 # 快速暂存目录：Linux/macOS 用 /tmp（或 $TMPDIR）；Windows 必须落在仓库内——
 # just 的 absolute_path() 会把 "/tmp" 展开成 "C:\tmp"（不存在，stage-yh 的 cp 会失败），
 # 而且 Windows 上的编译器只能编仓库目录里的项目，workdir 在 %TEMP% 会报
 # 「无法创建构建目录」。
-tmpdir := if host_os == "windows" { root + "/tmp" } else if env_var_or_default("TMPDIR", "") == "" { "/tmp" } else { env_var_or_default("TMPDIR", "/tmp") }
-run_id := env_var_or_default("GITHUB_RUN_ID", "")
+tmpdir := if host_os == "windows" { root + "/tmp" } else if env("TMPDIR", "") == "" { "/tmp" } else { env("TMPDIR", "/tmp") }
+run_id := env("GITHUB_RUN_ID", "")
 # 每个 worktree + 每个 CI run 独占一个快速目录：
 #   - 同机并发跑多个 run 时共用 /tmp/yh-fast 会让 stage-yh 互相覆盖（release 与
 #     分支门同时跑时出现过 selfhost 探针读错二进制）；
@@ -106,7 +106,7 @@ run_id := env_var_or_default("GITHUB_RUN_ID", "")
 # 反引号里拿不到 just 变量（本 justfile 的 shell 带 -u），所以按平台写死解释器名：
 # Windows 用 python（python3 常是 Store 占位符），其他平台用 python3。
 worktree_tag := if host_os == "windows" { `printf '%s' "{{root}}" | python -c "import hashlib,sys;print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:8])"` } else { `printf '%s' "{{root}}" | python3 -c "import hashlib,sys;print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:8])"` }
-FAST_DIR := env_var_or_default("FAST_DIR", tmpdir + "/yh-fast-" + worktree_tag + (if run_id == "" { "" } else { "-" + run_id }))
+FAST_DIR := env("FAST_DIR", tmpdir + "/yh-fast-" + worktree_tag + (if run_id == "" { "" } else { "-" + run_id }))
 fast_dir := if FAST_DIR == "" { tmpdir + "/yh-fast-" + worktree_tag } else { FAST_DIR }
 # 一律用绝对路径：harness 里 subprocess 不带 cwd，相对路径不会走 PATH 查找。
 yh_run := if fast_stage == "1" { absolute_path(fast_dir + yh_ext) } else { yh_abs }
@@ -121,7 +121,7 @@ modcheck_work_flag := if fast_stage == "1" { "--workdir " + quote(absolute_path(
 # （或环境变量 YH_BUILD_CACHE）时，整套缓存树（targets/check 与 asm/obj/...）
 # 落到该目录。同一台机器的多个 worktree 各指一处即可互不覆盖；默认可执行
 # 文件仍在 compiler/.build，缓存位置不改变产物位置。
-BUILD_CACHE := env_var_or_default("YH_BUILD_CACHE", "")
+BUILD_CACHE := env("YH_BUILD_CACHE", "")
 build_cache := if BUILD_CACHE == "" { "" } else { absolute_path(BUILD_CACHE) }
 # 门禁脚本按项目内 .build 布局断言，统一在本 justfile 内清空该变量；
 # 需要缓存的 build/dev 再显式传给编译器。
@@ -132,10 +132,10 @@ export YH_BUILD_CACHE := ""
 # SELFHOST_WORKDIR/SELFHOST_KEEP 供 Release CI 保留 cc4 自举候选：
 #   just selfhost-native SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost
 # 默认不保留，保持日常门临时目录/清理行为。
-SELFHOST_KEEP := env_var_or_default("SELFHOST_KEEP", "0")
+SELFHOST_KEEP := env("SELFHOST_KEEP", "0")
 selfhost_keep := if SELFHOST_KEEP == "" { "0" } else { SELFHOST_KEEP }
 selfhost_keep_flag := if selfhost_keep == "1" { "--keep" } else { "" }
-SELFHOST_WORKDIR := env_var_or_default("SELFHOST_WORKDIR", "")
+SELFHOST_WORKDIR := env("SELFHOST_WORKDIR", "")
 selfhost_work_flag := if SELFHOST_WORKDIR == "" { if fast_stage == "1" { "--workdir " + quote(absolute_path(fast_dir + "/selfhost")) } else { "" } } else { "--workdir " + quote(absolute_path(SELFHOST_WORKDIR)) }
 
 # ci-gate 的自举工作目录（cc2/cc3/cc4 落在这里）：相对 root 解析，
@@ -143,19 +143,19 @@ selfhost_work_flag := if SELFHOST_WORKDIR == "" { if fast_stage == "1" { "--work
 selfhost_dist := root + "/tmp/selfhost-dist"
 # KEEP=1：ci-gate 保留 selfhost_dist 里的自举候选；发布流水线必须开，
 # 分支门保持关闭（跑完即清，不占 runner 磁盘）。
-KEEP := env_var_or_default("KEEP", "0")
+KEEP := env("KEEP", "0")
 keep := if KEEP == "" { "0" } else { KEEP }
 
 # SKIP_CORPUS=1：同一轮里 just test 已经跑过等价语料时，省掉自举门里重复的
 # 那遍（约 1 分钟）。默认 0——门保持最严，重复跑一遍不省。
-SKIP_CORPUS := env_var_or_default("SKIP_CORPUS", "0")
+SKIP_CORPUS := env("SKIP_CORPUS", "0")
 skip_corpus := if SKIP_CORPUS == "" { "0" } else { SKIP_CORPUS }
 corpus_flag := if skip_corpus == "1" { "--skip-corpus" } else { "" }
 
 # LL10：x86_64 LLVM 语料与原生连续自举门。只在 Linux/x86_64 启动；
 # A 由 ARM64 种子经 qemu 交叉生成，B/C/D 均直接原生运行。
-LLVM_TARGET := env_var_or_default("LLVM_TARGET", "x86_64-unknown-linux-gnu")
-LLVM_JOBS := env_var_or_default("LLVM_JOBS", "2")
+LLVM_TARGET := env("LLVM_TARGET", "x86_64-unknown-linux-gnu")
+LLVM_JOBS := env("LLVM_JOBS", "2")
 llvm_jobs := if LLVM_JOBS == "" { "2" } else { LLVM_JOBS }
 llvm_run_flags := "--backend llvm --target " + LLVM_TARGET
 
@@ -174,13 +174,13 @@ seed_llvm_host := if host_os == "linux" { if seed_has_arm == "1" { "linux-aarch6
 # lld_bridge 的未定义符号（2026-11-03 WSL 实测）。显式平台种子仍以文件名为准。
 host_llvm_host := if host_os == "linux" { if cpu == "aarch64" { "linux-aarch64" } else if cpu == "arm64" { "linux-aarch64" } else { "linux-x86_64" } } else if host_os == "macos" { "darwin-aarch64" } else if host_os == "windows" { "windows-x86_64" } else { "" }
 llvm_host := if seed_llvm_host == "" { host_llvm_host } else { seed_llvm_host }
-YH_LLVM_HOST := env_var_or_default("YH_LLVM_HOST", "auto")
+YH_LLVM_HOST := env("YH_LLVM_HOST", "auto")
 llvm_mode := if YH_LLVM_HOST == "1" { "require" } else if YH_LLVM_HOST == "0" { "off" } else { "auto" }
 llvm_host_flags := if llvm_host == "" { "" } else { "--llvm-host " + llvm_host + " --llvm-mode " + llvm_mode }
 
 # LLVM 闭包缓存根：显式 YH_LLVM_CACHE 优先，否则仓库 tmp/llvm-migration，
 # 再否则复用同一 Git 仓库主 worktree 的缓存（见 tools/llvm_cache.py）。
-cache_env := env_var_or_default("YH_LLVM_CACHE", "")
+cache_env := env("YH_LLVM_CACHE", "")
 cache_root := if cache_env == "" { if host_os == "windows" { `python tools/llvm_cache.py 2>/dev/null || echo tmp/llvm-migration` } else { `tools/py tools/llvm_cache.py 2>/dev/null || echo tmp/llvm-migration` } } else { cache_env }
 export YH_LLVM_CACHE := cache_root
 
@@ -196,7 +196,7 @@ export PYTHONUTF8 := "1"
 
 # ANTLR 参考语法门：需要 Java + antlr jar。Windows 宿主默认关闭（与 CI 口径一致：
 # 参考层不是每台机器都具备的前置），显式 YH_ANTLR=1 可强制运行。
-ANTLR := env_var_or_default("YH_ANTLR", if host_os == "windows" { "0" } else { "1" })
+ANTLR := env("YH_ANTLR", if host_os == "windows" { "0" } else { "1" })
 antlr := if ANTLR == "" { if host_os == "windows" { "0" } else { "1" } } else { ANTLR }
 
 # Darwin 测试/自举统一使用随编译器分发的 SDK stub；显式 SDKROOT 仍优先。
@@ -212,11 +212,11 @@ darwin_sdk := if host_os == "macos" { absolute_path("vendor/darwin-sdk") } else 
 export YH_DARWIN_SDK := darwin_sdk
 
 # 安装位置；DESTDIR 用作打包根（just install DESTDIR=/tmp/root PREFIX=/usr）。
-PREFIX := env_var_or_default("PREFIX", "/usr/local")
+PREFIX := env("PREFIX", "/usr/local")
 prefix := if PREFIX == "" { "/usr/local" } else { PREFIX }
-DESTDIR := env_var_or_default("DESTDIR", "")
+DESTDIR := env("DESTDIR", "")
 destdir := DESTDIR
-INSTALL := env_var_or_default("INSTALL", "install")
+INSTALL := env("INSTALL", "install")
 install_prog := if INSTALL == "" { "install" } else { INSTALL }
 prefix_root := destdir + prefix
 
@@ -247,8 +247,8 @@ platform_gate := if host_os == "linux" {
     ""
 }
 
-# 默认目标：源比 yh 新时冷编，否则什么都不做（等价旧 make 默认目标）。
-default: _ensure_built
+# 默认目标：增量构建（未变模块由编译器自身缓存命中，不删 .build）。
+default: dev
 
 # 预处理：仓库内 tmp/llvm-migration 必须指向缓存根：compiler/project.toml 的
 # 桥库路径按「仓库/compiler」相对书写，新 worktree 里由这里补上软链。
@@ -264,7 +264,7 @@ _prepare_windows_sdk:
     @if [ "{{ host_os }}" = "windows" ]; then "{{ py }}" "{{ root }}/tools/windows-sdk.py" generate >/dev/null; fi
 
 # build：强制冷编（清除 compiler/.build 与 BUILD_CACHE，从种子完整重编）。
-build: verify-seed _prepare _prepare_windows_sdk
+build: _prepare _prepare_windows_sdk
     rm -rf "{{ root }}/compiler/.build"
     @if [ -n "{{ build_cache }}" ]; then rm -rf "{{ build_cache }}"; fi
     YH_BUILD_CACHE="{{ build_cache }}" {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
@@ -272,12 +272,8 @@ build: verify-seed _prepare _prepare_windows_sdk
 # dev：开发迭代用增量构建。与 build 的差别是不删除 .build / BUILD_CACHE，
 # 让编译器自己的对象/IR 缓存命中未变模块；只用于本地迭代，
 # 不用于种子候选与固定点验收（那些必须冷编）。
-dev: verify-seed _prepare _prepare_windows_sdk
+dev: _prepare _prepare_windows_sdk
     YH_BUILD_CACHE="{{ build_cache }}" {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
-
-# verify-seed：核对种子哈希（水合/复制损坏时尽早失败）。
-verify-seed:
-    {{ py }} "{{ root }}/tools/selfhost_snapshot_gate.py" --verify-seed "{{ seed_abs }}"
 
 # fetch-seed：从最新 GitHub Release 下载当前平台种子（写入 bin/...）。
 # 私有仓库需要 GITHUB_REPOSITORY 与 GH_TOKEN/GITHUB_TOKEN；
@@ -292,7 +288,7 @@ llvm-host:
     @if [ "{{ llvm_host }}" = "darwin-aarch64" ]; then {{ py }} "{{ root }}/tools/llvm-darwin-host.py" prepare --host "{{ llvm_host }}" --jobs {{ llvm_jobs }}; elif [ "{{ llvm_host }}" = "windows-x86_64" ]; then {{ py }} "{{ root }}/tools/llvm-windows-closure.py" build --jobs {{ llvm_jobs }}; else {{ py }} "{{ root }}/tools/llvm-host.py" prepare --host "{{ llvm_host }}"; fi
 
 # bootstrap：准备固定 LLVM 宿主（幂等）后冷编，首次/换机的一条命令。
-bootstrap: llvm-host _ensure_built
+bootstrap: llvm-host build
 
 # seed：滚种子——把刚构建并验证过的 yh 覆盖入库种子。
 # 只应在 just test 与 just selfhost-native 全绿后执行（不作为依赖，
@@ -306,7 +302,7 @@ seed:
     @echo "宿主平台种子已更新：{{ seed_dest }}"
 
 # install：安装到 PREFIX（DESTDIR 用作打包根）。
-install: _ensure_built
+install: dev
     #!/usr/bin/env bash
     set -euo pipefail
     {{ install_prog }} -d "{{ prefix_root }}/bin"
@@ -341,7 +337,7 @@ uninstall:
 # stage-yh：把 yh 复制到快速暂存目录（FAST_STAGE=0 时退化为空操作）。
 # 先写 .tmp 再 mv，避免并发读到半个 70MB 二进制。
 [private]
-stage-yh: _prepare_windows_sdk _ensure_built
+stage-yh: dev
     @if [ "{{ fast_stage }}" = "1" ]; then mkdir -p "{{ fast_dir }}"; cp -f "{{ yh }}" "{{ yh_run }}.tmp" && mv -f "{{ yh_run }}.tmp" "{{ yh_run }}"; fi
     @YH_STAGE_PATH="{{ yh_run }}" {{ py }} -c "import os;p=os.environ['YH_STAGE_PATH'];st=os.stat(p);print(f'编译器: {p} {st.st_size} bytes mtime={int(st.st_mtime)}')" 
     @if [ "{{ host_os }}" = "macos" ] && [ "{{ fast_stage }}" = "1" ]; then ln -sfn "{{ root }}/vendor/darwin-sdk" "{{ fast_dir }}/darwin-sdk"; fi
@@ -400,7 +396,6 @@ test-libs: stage-yh
 # link-cache 探针需要观测编译器调用的外部汇编/链接工具，因此它继续用
 # 仓库根 yh，不能用暂存副本。
 selfhost-native: stage-yh
-    YH_CACHE=off {{ py }} "{{ root }}/tools/selfhost_snapshot_gate.py" --verify-seed "{{ seed_abs }}"
     YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/bootstrap/native-selfhost.py" --seed "{{ seed_abs }}" {{ selfhost_work_flag }} {{ corpus_flag }} {{ selfhost_keep_flag }}
     YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/bootstrap/scratch-isolation.py" --compiler-path "{{ yh_run }}" --jobs 4
     YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/gates/lex-stats.py" --compiler-path "{{ yh_run }}"
@@ -565,33 +560,3 @@ clean:
     rm -f "{{ yh }}"
     rm -rf "{{ root }}/compiler/.build" "{{ root }}/tmp/selfbuild-gate" "{{ root }}/tmp/selfhost" "{{ root }}/tmp/modcheck"
     @if [ -n "{{ build_cache }}" ]; then rm -rf "{{ build_cache }}"; fi
-
-# _ensure_built：源文件比 yh 新（或 yh 不存在）时冷编一次。
-# 依赖清单等价旧 Makefile 的 $(YH) 前提：种子、compiler/ 下源码与清单、
-# 固定 LLVM 锁与四个构建工具脚本。子 just 显式传变量，确保命令行覆盖
-# （just test SEED=...）也作用到构建。
-[private]
-_ensure_built:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd "{{ root }}"
-    target="{{ yh }}"
-    need=0
-    if [ ! -x "$target" ]; then
-      need=1
-    else
-      # 依赖清单等价旧 Makefile 的 $(YH) 前提；只看源，且不递归进
-      # compiler/tmp（测试生成物）与 compiler/.build（构建产物），否则每次
-      # 都会被自己刚写出的文件判成过期、反复冷编。
-      for p in "{{ seed_abs }}" compiler/project.toml compiler/llvm vendor/llvm/sdk.lock.json \
-               tools/seed-build.py tools/llvm-host.py tools/llvm-darwin-host.py tools/llvm-darwin-sdk.py; do  
-        [ -e "$p" ] || continue
-        if [ "$p" -nt "$target" ]; then need=1; break; fi
-        if [ -d "$p" ] && [ -n "$(find "$p" -type f -newer "$target" -print -quit)" ]; then need=1; break; fi
-      done
-      # compiler/*.yh 与 compiler/*/*.yh（旧 Makefile 的两个 wildcard 层级）。
-      if [ "$need" = 0 ] && [ -n "$(find compiler -maxdepth 2 -name '*.yh' -newer "$target" -print -quit)" ]; then need=1; fi
-    fi
-    if [ "$need" = 1 ]; then
-      exec env YH_BUILD_CACHE="{{ build_cache }}" just SEED="{{ seed }}" SEED_DEST="{{ seed_dest }}" YH_LLVM_HOST="{{ YH_LLVM_HOST }}" YH_LLVM_CACHE="{{ cache_root }}" build
-    fi

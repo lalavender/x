@@ -134,7 +134,8 @@ api_build(req)
    - `os`/`arch` 目标配置；
    - `version`/`author`。
 5. 装载 `[dependencies]`：递归 `pj_load_project()`，检测环与重复。
-6. 装载 `[link]` / `[link-<os>-<arch>]` / `[c]`。
+6. 装载 `[link]` / `[link-<os>-<arch>]` / `[c]` / `[env]`（都在 `[dependencies]`
+   递归之前快照，子项目会重置 TOML 解析区）。
 7. `pj_scan_source()`：扫描源码根：
    - 跳过 `.build`/`tmp`/隐藏目录等；
    - 按目标过滤平台文件；

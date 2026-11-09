@@ -2,43 +2,20 @@ module main
 import support
 import build
 import proj
-import cmdline
 
-// ============================================================================
-// driver.yh —— 命令行入口：只做 argv → 请求的映射与分派（P1，2026-11-05）。
-//
-// 输出接口（docs/02-plan/yh-自举实施方案-v2.md §3）：
-//     yh --syntax-check <file.yh>   纯语法检查：合法静默退出 0，
-//                                   非法输出诊断并以非零码退出
-//     yh --emit-asm <file.yh>       发射当前目标汇编到标准输出
-//                                   （经 LLVM 后端；GNU 语法，按目标汇编器处理）
-//     yh -o <out> <file.yh>         编译并链接为可执行文件
-//     yh build|check|run|test|list|version [...]
-//
-// 一命令一文件（docs/03-design/yh-架构设计.md §6.4）：
-// 执行委托 cmd_*.yh（build/run/test/list/version/single/emit_module/
-// lld_link），共享前奏与形态常量在 common.yh。本文件不直接调用前端、
-// 后端或构建实现，只负责：
-//     1) 会话前奏与内部子进程协议识别（豁免 cli，私有 ABI）；
-//     2) 选项落状态（backend/target/opt/emit/stats/legacy-system）；
-//     3) 按命令分派（每分支一行调用）。
-// CLI-R（2026-10-27）：argv 的声明与解析在 cmdline 模块（libs/cli）。
-// 退出码：0 成功；1 源文件语法/语义错误或读入失败；2 用法错误。
-// ============================================================================
 
-// main：解析命令行并交给各 cmd_*.yh 执行。
-// 形态（全局选项在子命令前后都能写，由 cli 的 inherit 保证）：
-//   yh build|check|run|test|list|version [...]
-//   yh --syntax-check <file.yh> / --emit-asm <file.yh> / [-o <out>] <file.yh>
-pub fn main(argc int, argv **char, envp **char) int {
+fn init(){
     // 控制台 UTF-8（VENC）：Windows 下切 65001 码页，诊断/帮助的中文才
     // 不乱码；其他平台为空实现。必须在任何输出之前。
     support.console_utf8_init()
-    // argv UTF-8（VENC-2，2026-11-05）：自举编译器链 libcmt，入口是 CRT 的
-    // mainCRTStartup，argv 经 GetCommandLineA 按 ACP 取得——英文 runner（1252）
-    // 上中文参数在源头变 '?'，testkit --filter 中文由此永不匹配。Windows 下
-    // 用宽命令行原地重建 UTF-8 argc/argv（零 CRT 入口之后是幂等直通）；
-    // 其他平台为空实现。必须在任何 argv 消费（含内部子进程协议识别）之前。
+
+}
+
+fn main(argc int, argv **char, envp **char) int {
+
+    // 初始化
+    init()
+    
     let rargc int = argc
     let rargv **char = argv
     support.argv_utf8_rebuild(&rargc, &rargv)
@@ -60,28 +37,28 @@ pub fn main(argc int, argv **char, envp **char) int {
         return api_lld_link(rargv[2])
     }
 
-    // 裸 yh：完整帮助 + 当前项目版本，退出 2（保持旧契约）。
+    
     if (rargc <= 1) {
-        cmdline.print_bare_help(2)
+        print_bare_help(2)
         build.mb_print_version(1)
-        return 2
+        return 0
     }
 
-    let req cmdline.CliRequest
+    let req CliRequest
     let message [1024]char
-    let status int = cmdline.parse_request(rargc, rargv, &req, &message[0], 1024)
+    let status int = parse_request(rargc, rargv, &req, &message[0], 1024)
     if (status != 0) {
         if (message[0] != 0) {
             support.fail(&message[0])
         }
-        cmdline.print_usage(&req, 2)
-        cmdline.release_request(&req)
+        print_usage(&req, 2)
+        release_request(&req)
         return status
     }
     // help/version 控制请求：正文写 stdout，退出 0。
-    if (req.command == cmdline.CLI_CONTROL) {
-        cmdline.print_control(&req, 1)
-        cmdline.release_request(&req)
+    if (req.command == CLI_CONTROL) {
+        print_control(&req, 1)
+        release_request(&req)
         return 0
     }
 
@@ -89,24 +66,24 @@ pub fn main(argc int, argv **char, envp **char) int {
     if (req.backend != 0) {
         if (support.cstr_eq(req.backend, "legacy") != 0) {
             support.fail("legacy 后端已在 LL12 退役；LLVM 是唯一代码生成后端")
-            cmdline.release_request(&req)
+            release_request(&req)
             return 2
         }
         if (support.cstr_eq(req.backend, "llvm") == 0) {
             support.fail("不支持的后端（只接受 llvm）")
-            cmdline.release_request(&req)
+            release_request(&req)
             return 2
         }
     }
     if (req.target != 0) {
-        if (cmdline.is_removed_target_alias(req.target) != 0) {
+        if (is_removed_target_alias(req.target) != 0) {
             support.fail("-target 需要完整三元组（如 aarch64-apple-darwin）；linux/darwin 等简写别名已随 LL12 移除")
-            cmdline.release_request(&req)
+            release_request(&req)
             return 2
         }
         if (support.target_select(req.target) != 0) {
             support.fail("不支持的目标 triple")
-            cmdline.release_request(&req)
+            release_request(&req)
             return 2
         }
         proj.cfg().target_explicit = 1
@@ -128,28 +105,28 @@ pub fn main(argc int, argv **char, envp **char) int {
 
     // —— 按命令分派（一命令一文件；req 生命周期归 driver，统一释放）——
     let rc int = 0
-    if (req.command == cmdline.CLI_FILE) {
+    if (req.command == CLI_FILE) {
         rc = api_single_file_request(&req)
-    } else if (req.command == cmdline.CLI_CHECK && req.has_src != 0
-        && cmdline.is_yh_source(req.src) != 0) {
+    } else if (req.command == CLI_CHECK && req.has_src != 0
+        && is_yh_source(req.src) != 0) {
         // yh check <file.yh>：源文件形态，走单文件检查。
         rc = api_check_source(req.src)
-    } else if (req.command == cmdline.CLI_CHECK) {
+    } else if (req.command == CLI_CHECK) {
         // yh check [module]：项目态检查。
         rc = api_check_project(&req)
-    } else if (req.command == cmdline.CLI_BUILD) {
+    } else if (req.command == CLI_BUILD) {
         rc = api_build(&req)
-    } else if (req.command == cmdline.CLI_RUN) {
+    } else if (req.command == CLI_RUN) {
         rc = api_run(&req)
-    } else if (req.command == cmdline.CLI_TEST) {
+    } else if (req.command == CLI_TEST) {
         rc = api_test(&req)
-    } else if (req.command == cmdline.CLI_LIST) {
+    } else if (req.command == CLI_LIST) {
         rc = api_list(&req)
-    } else if (req.command == cmdline.CLI_CACHE) {
+    } else if (req.command == CLI_CACHE) {
         rc = api_cache(&req)
     } else {
         rc = api_version(&req)
     }
-    cmdline.release_request(&req)
+    release_request(&req)
     return rc
 }

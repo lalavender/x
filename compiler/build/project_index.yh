@@ -319,6 +319,8 @@ pub fn pj_load_project(root_off int, root_len int) int {
     }
     if (pj_load_c_config(me, toml_find_sec("c")) != 0) { return -1 }
     if (pl_load_link_config(me, is_root) != 0) { return -1 }
+    // [env] 必须在 [dependencies] 递归装载之前快照：子项目会重置 toml_secs。
+    if (pj_load_env_config(me, toml_find_sec("env")) != 0) { return -1 }
     if (is_root != 0 && pl_apply_project_target(me) != 0) { return -1 }
     // [dependencies]：先整表快照——递归装载会重置 toml_secs（全局解析区）
     let dsec int = toml_find_sec("dependencies")
@@ -407,6 +409,79 @@ pub fn pj_load_project(root_off int, root_len int) int {
     }
     proj.ctx().state[me] = 2
     return me
+}
+
+// pj_env_diag：拼「前缀 + 键名」诊断并输出到清单行；失败 -1。
+fn pj_env_diag(root_off int, line int, msg *char, key_off int, key_len int) int {
+    let buf [256]u8
+    let n int = 0
+    n = support.append_str(buf, n, msg)
+    let k int = 0
+    for k < key_len && n < 200 {
+        buf[n] = support.pool_ctx().data[key_off + k]
+        n += 1
+        k += 1
+    }
+    let mo int = support.tml_intern_str(buf, 0, n)
+    if (mo < 0) { return -1 }
+    return proj.diag(root_off, line, support.np_cstr(mo))
+}
+
+// pj_load_env_config：[env] 节 → 项目快照（环境变量默认值）。
+//
+// 只接受字符串值；键名必须是合法变量名（字母或下划线开头，其后仅字母、数字、
+// 下划线）。值原样保存、不做路径规范化，也不递归展开——它只参与清单里
+// `${NAME}` 的展开（见 link.li_expand_vars），由引用处决定绝对/相对语义。
+// 进程环境优先于 [env]，所以每台构建机可以不改清单就换掉某条路径。
+fn pj_load_env_config(pj int, sec int) int {
+    if (sec < 0) { return 0 }
+    let root_off int = proj.ctx().projs[pj].root_off
+    let i int = 0
+    for i < toml_secs[sec].val_n {
+        let v *TomlVal = &toml_secs[sec].vals[i]
+        let key_off int = v.key_off
+        let key_len int = v.key_len
+        let name_ok int = key_len > 0 ? 1 : 0
+        let k int = 0
+        for k < key_len {
+            let c u8 = support.pool_ctx().data[key_off + k]
+            let is_alpha int = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') ? 1 : 0
+            let is_digit int = (c >= '0' && c <= '9') ? 1 : 0
+            if (is_alpha == 0 && (is_digit == 0 || k == 0)) { name_ok = 0 }
+            k += 1
+        }
+        if (name_ok == 0) {
+            return pj_env_diag(root_off, v.line, "env 变量名非法: ", key_off, key_len)
+        }
+        if (v.kind != 1) {
+            return pj_env_diag(root_off, v.line, "env 值必须是字符串: ", key_off, key_len)
+        }
+        if (proj.ctx().projs[pj].env_n == proj.ctx().projs[pj].env_cap) {
+            let ncap int = proj.ctx().projs[pj].env_cap * 2
+            if (ncap == 0) { ncap = 8 }
+            let ne *proj.PEnv = malloc(
+                (ncap * sizeof(proj.PEnv)).to_type(u64)).to_type(*proj.PEnv)
+            if (ne == 0) { return support.fail("内存分配失败") }
+            if (proj.ctx().projs[pj].env_n > 0) {
+                memcpy(ne, proj.ctx().projs[pj].envs,
+                    (proj.ctx().projs[pj].env_n * sizeof(proj.PEnv)).to_type(u64))
+            }
+            if (proj.ctx().projs[pj].envs != 0) {
+                free(proj.ctx().projs[pj].envs.to_type(*void))
+            }
+            proj.ctx().projs[pj].envs = ne
+            proj.ctx().projs[pj].env_cap = ncap
+        }
+        let at int = proj.ctx().projs[pj].env_n
+        proj.ctx().projs[pj].envs[at].name_off = key_off
+        proj.ctx().projs[pj].envs[at].name_len = key_len
+        proj.ctx().projs[pj].envs[at].val_off = v.sval_off
+        proj.ctx().projs[pj].envs[at].val_len = v.sval_len
+        proj.ctx().projs[pj].envs[at].line = v.line
+        proj.ctx().projs[pj].env_n += 1
+        i += 1
+    }
+    return 0
 }
 
 fn pj_scan_source(dir_off int, dir_len int, pj int) int {
@@ -987,7 +1062,3 @@ fn pj_classify_test_imports(pj int) int {
     }
     return 0
 }
-
-// TCase：一条已发现的测试。name_* 是名字池中的显示名（字符串去引号）。
-
-// tc_reset：清空一次 yh test 会话的发现结果。

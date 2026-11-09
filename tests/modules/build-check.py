@@ -391,6 +391,9 @@ case("link-shared-group", "linkshared", "linkshared", ".", 0)
 case("link-bad-section", "fail", "linkbad", ".", msg="非法的链接节名")
 case("link-missing-target", "fail", "linkmissingtarget", ".", msg="project.os 必填")
 case("link-bad-suffix", "fail", "linkbadsuffix", ".", msg="后缀不符合当前目标")
+case("link-env-manifest", "linkenv", "linkenv", ".", 71)
+case("link-env-bad-value", "fail", "envbad", ".", msg="env 值必须是字符串")
+case("link-env-bad-name", "fail", "envbadname", ".", msg="env 变量名非法")
 # —— MOD-U2：清单与三层解析 ——
 case("u2-toml-syntax", "fail", "tomlbad", ".", msg="project.toml")
 case("u2-toml-unknown-field", "fail", "tomlunknown", ".", msg="未知字段")
@@ -864,6 +867,42 @@ def main():
             checked = sh([compiler, "check"], cwd=dst)
             report(checked.returncode == 0, c["name"] + ":check-no-files",
                    f"check 不应检查库文件: rc={checked.returncode}\n{checked.stderr[-400:]}")
+            return out
+        if c["kind"] == "linkenv":
+            cc = "clang" if sys.platform == "darwin" else "gcc"
+
+            def make_archive(src_name, lib_name):
+                obj = dst / Path(lib_name).parent / (Path(src_name).stem + ".o")
+                lib = dst / lib_name
+                lib.parent.mkdir(parents=True, exist_ok=True)
+                r = sh([cc, "-c", src_name, "-o", str(obj)], cwd=dst)
+                if r.returncode != 0:
+                    return r
+                return sh(["ar", "rcs", str(lib), str(obj)], cwd=dst)
+
+            # 清单 [env] 的默认值：不设进程环境时必须照常链接。
+            prepared = make_archive("c/probe.c", "lib/libprobe.a")
+            if prepared.returncode != 0:
+                report(False, c["name"], f"\u51c6\u5907\u5f52\u6863\u5931\u8d25: {prepared.stderr[-400:]}")
+                return out
+            first = sh([compiler, "build"], cwd=dst)
+            program = dst / ".build" / "linkenv"
+            run = sh([str(program)], cwd=dst) if program.exists() else None
+            report(first.returncode == 0 and run is not None and run.returncode == 71,
+                   c["name"] + ":manifest-default",
+                   f"清单 [env] 默认值未生效: build={first.returncode}, "
+                   f"run={run.returncode if run else None}\n{first.stderr[-400:]}")
+            # 进程环境同名变量优先：改指另一份归档必须换链接结果。
+            prepared = make_archive("c/override.c", "override/libprobe.a")
+            second = sh([compiler, "build"], cwd=dst,
+                        env={"LINK_ENV_ROOT": "override"})
+            run2 = sh([str(program)], cwd=dst) if program.exists() else None
+            report(prepared.returncode == 0 and second.returncode == 0
+                   and run2 is not None and run2.returncode == 72,
+                   c["name"] + ":process-env-wins",
+                   f"进程环境未覆盖清单 [env]: prepared={prepared.returncode}, "
+                   f"build={second.returncode}, "
+                   f"run={run2.returncode if run2 else None}\n{second.stderr[-400:]}")
             return out
         if c["kind"] == "linkshared":
             cc = "clang" if sys.platform == "darwin" else "gcc"
