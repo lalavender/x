@@ -473,6 +473,11 @@ def copy_proj(src, dst):
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
+    if src.name == "cinterop":
+        # fixture 只提交 prebuilt.c（*.o 不入库），而清单引用 vendor/prebuilt.o；
+        # 在把 fixture 交给编译器前按需编译，保证干净 checkout 上也能构建。
+        cc = "clang" if sys.platform == "darwin" else "gcc"
+        sh([cc, "-c", "vendor/prebuilt.c", "-o", "vendor/prebuilt.o"], cwd=dst)
     if src.name == "astcheck":
         # 探针直接使用当前编译器的 AST arena 与 check 实现。
         for module in ("proj", "support", "token", "lex", "comptime", "ir", "backend", "ast", "check", "cache"):
