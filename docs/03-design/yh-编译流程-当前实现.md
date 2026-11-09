@@ -18,8 +18,8 @@ GEN0–GEN4（`gen` 拆分，已完成）。原 F0–F7 计划已于 2026-11-08 
 
 ```text
 yh build
-  → cmd/driver.yh                 argv → CliRequest → 分派
-  → cmd/cmd_build.yh              yh build / yh check
+  → cmd/yh/yh.yh                  argv → CliRequest → 分派（module main）
+  → cmd/yh/cmd_build.yh           yh build / yh check
   → build.mb_cmd_build
       → mb_load_stdlib            加载标准库项目（若存在）
       → pj_find_root              向上找 project.toml
@@ -48,9 +48,9 @@ yh build
 
 | 阶段 | 入口 | 关键产物 |
 | --- | --- | --- |
-| CLI | `cmd/driver.yh::main` | `cmdline.CliRequest` |
-| 命令 | `cmd/cmd_build.yh::api_build` | `build.mb_cmd_build(...)` 调用 |
-| 会话 | `cmd/common.yh::cmd_session_init` | `GenState`/`proj`/target/argv0/envp |
+| CLI | `cmd/yh/yh.yh::main` | `main.CliRequest`（`cmd/yh/cmd_base.yh`） |
+| 命令 | `cmd/yh/cmd_build.yh::api_build` | `build.mb_cmd_build(...)` 调用 |
+| 会话 | `cmd/yh/common.yh::cmd_session_init` | `support.session()`/`proj`/target/argv0/envp |
 | 项目 | `build/module_build.yh::mb_cmd_build` | `proj.ProjectCtx` 表 |
 | 装载 | `build/project_index.yh::pj_load_project` | 项目/模块/文件/依赖 |
 | 导入 | `build/project_resolve.yh::pj_bind_imports` | `imp_mod[]` 绑定 |
@@ -66,7 +66,7 @@ yh build
 
 ## 2. 入口与会话
 
-### 2.1 `cmd/driver.yh`
+### 2.1 `cmd/yh/yh.yh`（module main）
 
 `main(argc, argv, envp)`：
 
@@ -81,7 +81,7 @@ yh build
 4. 内部子进程协议：
    - `--emit-module`：无 fork 宿主的模块 worker；
    - `--lld-link`：Windows COFF 链接 worker。
-5. `cmdline.parse_request()`：`argv → CliRequest`。
+5. `main.parse_request()`（`cmd/yh/cmd_base.yh`）：`argv → CliRequest`。
 6. 全局选项落状态：
    - `--target` → `support.target_select()`，并置 `target_explicit`；
    - `--opt` → `proj.cfg().opt_level`；
@@ -93,7 +93,7 @@ yh build
 7. 按命令分派：`build` → `api_build()`，`check` → `api_check_project()`，
    `cache` → `api_cache()`（`info/clean/trim/verify`）。
 
-### 2.2 `cmd/cmd_build.yh`
+### 2.2 `cmd/yh/cmd_build.yh`
 
 ```text
 api_build(req)
@@ -639,7 +639,7 @@ cc3 build compiler/ → cc4
 
 | 内容 | 文件 |
 | --- | --- |
-| CLI/分派 | `compiler/cmd/driver.yh`、`cmd_build.yh`、`common.yh`、`cmdline/` |
+| CLI/分派 | `compiler/cmd/yh/`（`yh.yh`、`cmd_base.yh`、`cmd_build.yh`、`common.yh`） |
 | 项目装载 | `compiler/build/project_index.yh`、`project_resolve.yh`、`toml.yh`、`proj/` |
 | 调度 | `compiler/build/build_scheduler.yh` |
 | 模块构建 | `compiler/build/module_build.yh`、`module_emit.yh`、`module_worker.yh` |

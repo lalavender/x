@@ -8,6 +8,26 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：文档刷新（模块归组 + 统计删除 + DR 归档）
+
+**结果**：
+- 模块结构：`compiler/README.md`、`yh-架构设计.md`、`yh-模块职责-当前实现.md`、
+  `yh-编译流程-当前实现.md`、`yh-编译流程图.md`、`README.md` 统一为
+  **17 模块 / 179 文件 / 60,970 行 / 76 条依赖边**（2026-11-10 实测）；
+  `cmdline` → `main`（`cmd/yh/`）、`cache` → `build/cache/`、`cmd/driver.yh` →
+  `cmd/yh/yh.yh`、`proj/proj_0X_*.yh` → `proj/{model,table,path,art}.yh`。
+- 统计删除：设计/缓存文档里 `--stats`、`stats_print`、`support.stats()` 的用法说明改为
+  “已删除”，并在缓存设计里写明“命中只能靠产物字节/时间差间接判断”。
+- DR1–DR5：DR1/DR2/DR4/DR5 已处理、DR3 仍未复现；原始记录归档到
+  [`01-finished/yh-DR1-DR5-文档刷新发现-2026-11-08.md`](01-finished/yh-DR1-DR5-文档刷新发现-2026-11-08.md)，
+  `docs/todo.md` 只留 DR3 一条开放项；`finish.md` 里「遗留 DR1/DR2…待作者确认(DR4)」
+  的过时句已改。
+- `yh-project.toml-清单设计.md` 的 `proj_00_model.yh` → `proj/model.yh`。
+
+**验证**：README / compiler README / 03-design / todo / finish 里 `cmdline`、
+`cmd/driver.yh`、`compiler/cache/`、`proj_0X_*.yh`、`stats_print`、`support.stats()`
+均无“当前态”残留（历史章节与日期标注保留）；todo/finish 的 markdown 链接目标全部存在。
+
 ## 2026-11-10：删除统计机制（support.stats / stats_print / yh-stats / 相关门禁）
 
 **结果**：
@@ -342,8 +362,9 @@ opt-level 4/4，libs 140，compiler-tests 8/8，fmt 10/10。
 **影响**：模块数 19→18，所有 `import gen` 归零；`tools/arch-check.py` 的
 `ALLOWED` 删除 `gen` 项。
 
-**遗留**：DR1/DR2；`docs/todo.md` 记的「2026-11-06 完成」与删除提交日期
-（2026-11-07 23:41）不一致，待作者确认（DR4）。
+**遗留（2026-11-10 复核）**：DR1/DR2 已修、DR4 已按提交时间定案（本标题即
+2026-11-07）；DR3 仍未复现。详见
+[`01-finished/yh-DR1-DR5-文档刷新发现-2026-11-08.md`](01-finished/yh-DR1-DR5-文档刷新发现-2026-11-08.md)。
 
 ## 2026-11-08 comptime 镜像两修：写回指针视图 + 标签表直接基址
 

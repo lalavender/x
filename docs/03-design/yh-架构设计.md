@@ -5,9 +5,9 @@
 状态：**现行唯一的系统/编译器架构文档**。本文合并并取代 2026-09-30 至 2026-11-05
 期间的架构分析、目标设计、代码复核、差距分析与迁移方案；被合并文件的清单见
 [附录 A](#附录-a已合并文档)。历史版本仍可从 git 历史取回。
-基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1–GEN4 + F4），`compiler/` 18 个 yh 模块 /
-178 个 `.yh` / 60,717 行 / 78 条依赖边（`python3 tools/arch-check.py` 2026-11-08
-实测，全绿；临时诊断提交已清理，`DR2` 关闭）。
+基线：`llvm` 分支（0.0.12 + C0–C6 + GEN1–GEN4 + F4 + 模块归组），`compiler/`
+**17 个 yh 模块 / 179 个 `.yh` / 60,970 行 / 76 条依赖边**（2026-11-10 实测；原
+`arch-check` 已于 2026-11-09 删除，数字由 `just code-stats` + 手工汇总得到）。
 
 > **阅读约定（2026-11-08）**：`compiler/gen/` 已于 2026-11-07 删除（模块 19→18，
 > `import gen` 归零）。文中凡以现在时描述 `gen` 的段落（§0.2、§4.1、§5.2、
@@ -34,7 +34,7 @@
 
 ## 0. 结论摘要
 
-1. **分层方向是对的**：18 个模块的显式 import 图无环，`support` 与 `ir` 是依赖根
+1. **分层方向是对的**：17 个模块的显式 import 图无环，`support` 与 `ir` 是依赖根
    （`gen` 已于 2026-11-07 删除），
    `proj` 是项目数据层，`build` 是总装层，`cmd` 只做参数映射与分派。依赖矩阵见 §3.1
    （评审基准；2026-11-09 起无自动门禁）。
@@ -82,9 +82,9 @@ LSP/IDE 只能经子进程协议接入。
 
 ```text
 argv
- └─ cmd/driver.yh（module main；只做 argv → 请求映射与分派）
-     └─ cmdline（libs/cli 声明与解析）
-         └─ cmd/cmd_*.yh（一命令一文件；调用 build/testkit）
+ └─ cmd/yh/yh.yh（module main；只做 argv → 请求映射与分派）
+     └─ cmd/yh/cmd_base.yh（module main；libs/cli 声明与解析）
+         └─ cmd/yh/cmd_*.yh（module main；一命令一文件；调用 build/testkit）
              └─ build：项目发现 → 扫描源根 → 模块索引 → TOML → 三层来源解析
                        → 导入绑定 → 拓扑排序 → 有界调度
                  └─ fork worker（上限 4，COW 继承只读项目快照）
@@ -149,12 +149,12 @@ bin/yh-<平台>-<架构>（Release 种子）
 ### 2.1 目录表
 
 **逐模块职责、规模、依赖与内部拆分的唯一清单已迁到
-[`yh-模块职责-当前实现.md`](yh-模块职责-当前实现.md)**（2026-11-08 实测：
-18 个模块 / 178 个文件 / 60,717 行 / 78 条依赖边）。
+[`yh-模块职责-当前实现.md`](yh-模块职责-当前实现.md)**（2026-11-10 实测：
+17 个模块 / 179 个文件 / 60,970 行 / 76 条依赖边；`cmdline` 已并入 `main`）。
 
 本节只保留分层意图：`support`/`ir` 是无依赖底座，`token`/`cache`/`lex`/`proj`/`ast`/
 `comptime` 依次叠到语义层，`check` 是语义中心，`parse` 是前端装配，
-`lower`→`backend`→`link`→`build` 是后端与构建链，`cmd`/`testkit`/`cmdline` 是入口。
+`lower`→`backend`→`link`→`build` 是后端与构建链，`main`（`cmd/yh`）/`testkit` 是入口。
 任何模块的新增依赖都必须同时更新 §3.1 允许边与那份清单。
 
 ### 2.2 一句话记忆
@@ -186,7 +186,6 @@ ir         → （无）
 token      → support
 cache      → support, token, hash
 lex        → support, token
-cmdline    → support, libs
 proj       → support, token
 ast        → support, token, proj, comptime
 comptime   → support, token
@@ -198,7 +197,7 @@ backend    → support, ir
 link       → support, proj, backend, hash
 build      → support, ir, token, cache, lex, proj, ast, comptime, check, builtin, parse, lower, backend, link, hash, libs
 testkit    → support, token, proj, ast, parse, link, build
-main       → support, ir, lex, cmdline, proj, ast, comptime, check, builtin, parse, lower, backend, link, build, testkit
+main       → support, ir, lex, proj, ast, comptime, check, builtin, parse, lower, backend, link, build, testkit, libs
 ```
 
 新增边必须同时改本文与 §6.3 矩阵，并人工核对环数为 0。
@@ -208,7 +207,7 @@ main       → support, ir, lex, cmdline, proj, ast, comptime, check, builtin, p
 ```text
 support  ir                 ← 零依赖底座
    ↑
-token  cache  lex  cmdline  ← 词汇/原语（cmdline 唯一可依赖 libs/cli）
+token  cache  lex          ← 词汇/原语
    ↑
 proj                        ← 项目/模块/文件表 + 目标配置
    ↑
@@ -226,7 +225,7 @@ link → backend, proj        ← 内嵌 lld / 平台链接
    ↑
 build                       ← 构建编排（依赖全部下层）
    ↑
-testkit   cmd               ← 测试 runner / CLI 分派
+testkit   main（cmd/yh）     ← 测试 runner / CLI 分派（main 唯一可依赖 libs/cli）
 ```
 
 - `support` 必须是叶子：任何反向依赖都会成环（`token` 也只能到 `support`）。
@@ -235,8 +234,8 @@ testkit   cmd               ← 测试 runner / CLI 分派
 - `ir` 不得 import 任何前端模块；`backend` 不得 import `ast`/`parse`/`comptime`/`check`；
   `lower` 不得 import `parse`/`build`，只消费 `check` 的 `CheckedModule` 契约；
   `ast` 不得反向 import `lower`/`check`。
-- 任何模块不得 import `cmd`；`cmd` 只做参数映射与调用面。
-- `cmdline` 是唯一允许依赖标准库 `libs/cli` 的编译器模块。
+- 任何模块不得 import `main`；`main` 只做参数映射与调用面。
+- `main` 是唯一允许依赖标准库 `libs/cli` 的编译器模块（2026-11-09 起 `cmdline` 并入它）。
 - `link` 必须位于 `build` 之下；`build` 不得被 `link` 反向 import。
 
 ### 3.3 模块可见性与 `pub` 规则
@@ -329,7 +328,7 @@ testkit   cmd               ← 测试 runner / CLI 分派
 | 编译期接口 | `CTIFACE_VERSION` | 1 | `parse/iface.yh` |
 | SSA 函数编码 | `IR_SERIAL_VERSION` | 9 | `ir/ssa_serialize.yh` |
 | 模块 IR 编码 | `IR_MODULE_SERIAL_VERSION` | 3 | `ir/ssa_module_30_serialize.yh` |
-| 缓存键 schema | `CACHE_SCHEMA_VERSION` | 3 | `cache/cache_key.yh` |
+| 缓存键 schema | `CACHE_SCHEMA_VERSION` | 3 | `build/cache/cache_key.yh` |
 | 函数缓存 | `IR_FUNCTION_CACHE_VERSION` | 3 | `ir/ssa_module_40_function_cache.yh` |
 
 读取端各自校验、各自拒绝；升级一处不会提示其余四处。这是“契约没有统一入口”，
@@ -410,7 +409,7 @@ testkit   cmd               ← 测试 runner / CLI 分派
 | `link`（B2） | 汇编/链接/lld/进程/时钟独立；`mb_link` 阶段化，最大函数从 674 降到 351 |
 | `lower`（B3） | `CheckedModule → IRModule` 从 `ast` 拆出；`ast` 回到 3,438 行 |
 | `check`（2026-10-20） | AST/快照只读校验独立；`parse` 不依赖 `check` |
-| `cmdline`（CLI-R） | CLI 声明/解析交给 `libs/cli`；`cmd` 只做参数映射 |
+| `cmdline`（CLI-R；2026-11-09 并入 `cmd/yh`） | CLI 声明/解析交给 `libs/cli`；`main` 只做参数映射 |
 | `cmd` 一命令一文件（P1） | `driver` + `common` + 8 个 `cmd_*.yh`；导出面只有 `main` |
 | `gen.G()` 归零（B1-4） | 跨模块状态改走 `gen.task()`/`gen.stats()`/`proj.ctx()` |
 | LLVM 单后端（LL12） | 旧机器发射退役；LLVM 是唯一代码生成后端 |
@@ -512,8 +511,7 @@ L0 支撑     support（含诊断/目标身份）  token
 | link | support, proj, backend, hash |
 | build | support, ir, token, cache, lex, proj, ast, comptime, check, builtin, parse, lower, backend, link, hash, libs |
 | testkit | support, token, proj, ast, parse, link, build |
-| cmdline | support, libs/cli |
-| main（cmd） | 全部（入口唯一例外） |
+| main（cmd/yh） | 全部（入口唯一例外；唯一允许 libs/cli 的模块） |
 
 ### 6.3.1 历史快照：依赖实测与两条解锁链（2026-11-06；`gen` 已于 2026-11-07 删除）
 
@@ -588,7 +586,8 @@ TaskCtx 按所有者拆（SemaCtx→check / ParseCtx→parse / SourceCtx→suppo
 它比 `rg` 多给出「受影响的函数集合」，便于判断一次拆分要改多少处。
 
 **与 ADR 的对应**：链 A = F4 + F3 剩余；链 B = GEN4。两者均已完成（2026-11-07），
-`gen` 已删除（模块数 19 → 18），当前 78 条依赖边。
+`gen` 已删除（模块数 19 → 18）；2026-11-09 `cmdline` 并入 `main` 后为 17，
+当前 76 条依赖边。
 
 现有 `import gen` 的边按符号实际归属 1:1 改写为 `import support`/`token`/
 `check`；除表中列出的边外不得新增。过渡期临时边
@@ -605,8 +604,9 @@ F0 ADR 只冻结 AST/HIR/`CheckedModule` 契约。
 ### 6.4 `cmd/`：一命令一文件（已完成）
 
 ```text
-cmd/
-  driver.yh         main：argv → 请求映射 + 子进程协议识别 + 分派（无业务）
+cmd/yh/                  ← module main（2026-11-09 cmdline 并入）
+  yh.yh             入口：argv → 请求映射 + 子进程协议识别 + 分派（无业务）
+  cmd_base.yh       libs/cli 声明与解析、中文帮助、YH_VERSION_TEXT
   common.yh         命令共享前奏、API_* 形态常量、退出码契约
   cmd_build.yh      yh build / yh check
   cmd_run.yh        yh run
@@ -619,17 +619,15 @@ cmd/
   cmd_lld_link.yh     内部子进程协议 --lld-link（委托 link.mb_coff_link_child）
 ```
 
-规则：`driver` 每个分支不超过一行函数调用；no-fork 子进程协议（`--emit-module`
-上界 23 项参数、`--lld-link`）的识别仍在 driver；退出码契约不变：0 成功、
+规则：`yh.yh` 每个分支不超过一行函数调用；no-fork 子进程协议（`--emit-module`
+上界 23 项参数、`--lld-link`）的识别仍在它里面；退出码契约不变：0 成功、
 1 源/语义错误、2 用法错误、-1 内部或桥失败。新增命令 = 新增一个 `cmd_<命令>.yh`
-+ driver 一行分派 + cmdline 声明。
++ `yh.yh` 一行分派 + `cmd_base.yh` 里的 `libs/cli` 声明。
 
 ### 6.5 `build/` + `cache/`
 
 ```text
-cache/                  ← 前端与构建层共享的键实现（C0 已建）
-  cache_key.yh          统一 schema、ActionID/OutputID、公共键前缀/token/长度分帧
-build/
+build/                 ← 构建编排（cache/ 自 2026-11-09 起是其子目录）
   build_ctx.yh          会话级构建上下文
   build_scheduler.yh    模块调度（fork / no-fork worker，PC3 冷构建判定）
   module_build.yh       单模块构建驱动
@@ -637,15 +635,15 @@ build/
   module_emit.yh        模块产物发射
   llvm_pipeline.yh      LLVM 流水线
   llvm_emit.yh          单文件 LLVM 发射
-  stats_print.yh        统计输出
   unused_function.yh    未用函数裁剪
   cache_global.yh       YH_CACHE 初始化、模块发布/物化、全局 miss 回退
   module_cache.yh       模块 iface/产物缓存
   function_ir_cache.yh  函数 check/IR 缓存 I/O
   link_cache.yh         链接缓存键/manifest（不含 lld 驱动）
 cache/
-  cache_key.yh          统一 schema/ActionID/OutputID/公共键原语
-  cache_store.yh        全局 content store：actions/outputs/tmp/lock、atomic put/get
+  cache/                ← 前端与构建层共享的键实现（C0）
+    cache_key.yh        统一 schema/ActionID/OutputID/公共键原语
+    cache_store.yh      全局 content store：actions/outputs/tmp/lock、atomic put/get
 ```
 
 缓存规则见 §4.4。`link_cache.yh` 是唯一跨模块搬家：`link` 模块职责收窄为

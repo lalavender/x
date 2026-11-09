@@ -503,7 +503,7 @@ prepare → objects → key → args → libs → exec
 
 | 问题 | 证据 | 目标方向 |
 | --- | --- | --- |
-| 三套缓存各自实现 | `module_cache`、`function_ir_cache`、`link_cache` | C4 已抽 `cache/cache_store` + `build/cache_global`；link 待 C6 |
+| 三套缓存各自实现 | `module_cache`、`function_ir_cache`、`link_cache` | C4 已抽 `build/cache/cache_store` + `build/cache_global`；link 待 C6 |
 | `link_cache` 混了链接驱动 | 1,647 行，含 `mb_link` 六段 | 缓存键/manifest 与 lld 调用分离 |
 | 函数缓存不减少 LLVM 代码生成 | `lower` 命中后 `backend.llvm_emit_module` 仍整模块 | 不做文件/函数级对象；接受整模块发射（ADR-0020） |
 | 模块对象是模块级 | `obj/<tag>.o` | 最终粒度；单函数改动重发模块对象是接受的成本 |
@@ -540,7 +540,7 @@ build/
 | 项 | 当前值 | 位置 |
 | --- | ---: | --- |
 | 模块缓存 tag | `"yh-iface-cache-5-ct"` | `build/module_emit.yh` |
-| 缓存键 schema | `CACHE_SCHEMA_VERSION = 3` | `cache/cache_key.yh` |
+| 缓存键 schema | `CACHE_SCHEMA_VERSION = 3` | `build/cache/cache_key.yh` |
 | check 切片 | `CHECKED_SLICE_VERSION = 5` | `ast/module_snapshot_check_slice.yh` |
 | 函数 IR 缓存 | `IR_FUNCTION_CACHE_VERSION = 3` | `ir/ssa_module_40_function_cache.yh` |
 | 函数缓存记录头 | 40 字节 | `ir/ssa_module_40_function_cache.yh` |
@@ -557,8 +557,8 @@ build/
 
 | 内容 | 文件 |
 | --- | --- |
-| 缓存键 schema/ActionID | `compiler/cache/cache_key.yh` |
-| 全局 content store | `compiler/cache/cache_store.yh` |
+| 缓存键 schema/ActionID | `compiler/build/cache/cache_key.yh` |
+| 全局 content store | `compiler/build/cache/cache_store.yh` |
 | 全局缓存接线 | `compiler/build/cache_global.yh` |
 | 模块缓存键/依赖/manifest | `compiler/build/module_cache.yh` |
 | 模块缓存命中判断 | `compiler/build/module_emit.yh::mb_compile_start` |

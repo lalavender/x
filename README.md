@@ -295,11 +295,10 @@ just selfhost-native    # 自举主门
   - `backend`：LLVM 发射
   - `build`：构建引擎
   - `proj`：项目模型与产物路径
-  - `cache`：缓存键 schema 与 ActionID/OutputID
+  - `cache`（目录 `build/cache/`）：缓存键 schema 与 ActionID/OutputID
   - `link`：汇编、链接与进程
   - `testkit`：语言内测试执行器
-  - `cmdline`：CLI 声明与解析
-  - `main`（目录 `cmd/`）：参数映射与分派
+  - `main`（目录 `cmd/yh/`）：CLI 声明/解析（`libs/cli`）、参数映射与分派
 - `libs/`：标准库
 - `tests/`：语法、运行、模块、自举与专项语料
 - `tools/`：门禁脚本与 `yh-explorer`

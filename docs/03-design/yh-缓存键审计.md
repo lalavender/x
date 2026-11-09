@@ -28,7 +28,7 @@ OutputID = SHA-256(输出字节)
 - 所有文本/字节输入先混入 `u64` 长度，再混入内容；整数按小端八字节。
 - 键只含可复现事实：源内容/词法 token、依赖接口、目标/ABI、优化级别、
   工具身份、显式环境白名单。瞬时 arena 下标、进程地址、调度顺序不进入键。
-- 代码入口：`compiler/cache/cache_key.yh`（`Key`、`key_init*`、`key_mix_*`、
+- 代码入口：`compiler/build/cache/cache_key.yh`（`Key`、`key_init*`、`key_mix_*`、
   `key_finish_hex`）；SHA-256 在 `libs/hash/sha256.yh`。
 
 C2（2026-11-06）：编译器身份由 `BuildCtx.compiler_identity[32]` 保存，每进程

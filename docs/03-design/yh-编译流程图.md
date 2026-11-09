@@ -10,9 +10,9 @@
 
 ```mermaid
 flowchart TD
-    A["yh build ..."] --> B["cmdline.parse_request<br/>argv → CliRequest"]
-    B --> C["cmd/driver: cmd_session_init<br/>GenState / proj / target / argv0"]
-    C --> D["cmd/cmd_build → build.mb_cmd_build"]
+    A["yh build ..."] --> B["cmd/yh/cmd_base: main.parse_request<br/>argv → CliRequest"]
+    B --> C["cmd/yh/yh.yh: main.cmd_session_init<br/>cfg / proj / target / argv0"]
+    C --> D["cmd/yh/cmd_build → build.mb_cmd_build"]
     D --> E["mb_load_stdlib<br/>加载标准库项目"]
     E --> F["pj_find_root / pj_load_project<br/>project.toml + 依赖 + 源码扫描 + 模块索引"]
     F --> G["pj_bind_imports<br/>KEY.MOD → 本项目 → 标准库 → 直接依赖"]

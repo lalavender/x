@@ -15,58 +15,16 @@
 
 
 
-## 2026-11-08 文档刷新发现（待处理）
+## 2026-11-08 文档刷新发现（DR1–DR5）
 
-按 2026-11-08 的代码与实测刷新架构/模块职责/finish 时发现的问题。全部为实测复现；
-修复状态见各条目标记（`[x]` 表示已修复/已解决），原始记录保留供追溯。
+DR1/DR2/DR4/DR5 已处理并归档：
+[`01-finished/yh-DR1-DR5-文档刷新发现-2026-11-08.md`](01-finished/yh-DR1-DR5-文档刷新发现-2026-11-08.md)。
+唯一开放项：
 
-- [x] **DR1 已修复（2026-11-08，提交 `304177d`/`9923623`）**：``just test`` 红灯的根因是
-  `check/checked_slice.yh` 的切片导入把新增行数写成 `v.stmt_count += n`——`ast.AstView`
-  是按值返回的只读视图，累加只改副本，arena 计数仍为 0，于是函数缓存命中的模块在
-  `check.verify_module` 看到「有声明、无语句」。已改为 `ast.ast_view_append_*` 提交回
-  arena 全局计数，并加 `arch-check` 预算 `max_ast_view_count_writes: 0`（自测 8/8）。
-  原始记录保留在下方供追溯：
-- **DR1（已修复）`just test` 红灯：函数缓存预热路径 AST 校验失败（P0）**：
-  `tests/selfhost/cache/llvm-global-cache.py --compiler-path ./yh` 的 `primed` 构建返回
-  1，stderr 为 `yh: 内部错误：函数声明 AST 缺少函数体根` 与
-  `顶层声明 AST 校验失败`（`compiler/check/verify.yh:333`、
-  `compiler/build/module_worker.yh:419`）；stdout 带临时 `DBG decl/module verify`
-  输出。复现：`just test`（最后一门）。当前 HEAD 已带两笔诊断提交
-  （`39a62fa`、`f0c9323`），修复未收口。待确认：是否与 `804dc54` 的 CT 镜像
-  改直接基址相关；CI 是否同样红。
-- [x] **DR2 已修复（2026-11-08）**：临时 DBG 输出与 `dbg_tag` 字段、`ast_stmt_reset`
-  打印、`verify`/`module_worker` 诊断全部删除。
-- **DR2（已修复）清理临时 DBG 输出（P0）**：`compiler/ast/ast_stmt.yh:102`、
-  `compiler/check/verify.yh:322/326`、`compiler/build/module_worker.yh:416`
-  仍向 stdout 打印 `DBG ...`，污染 `yh check`/`yh build` 输出。DR1 修复后删除。
-- [x] **本地构建环境已恢复（2026-11-08）**：`SDKROOT` 指向 Xcode 26.5 SDK
-  （避开 `arm64e.x1`）后 LLVM 21 宿主闭包准备成功；清出 ≥8 GiB 磁盘后
-  `just` 冷编 24s、`just test` 370/372 全部通过、`just selfhost-native`
-  固定点一致 + 自解析 178 文件 + project cases 129/129。详见 `docs/finish.md`。
-- **DR3（原始记录）全局缓存下的非确定失败（P1，待复现）**：一次 `just build`（`YH_CACHE`
-  默认开）后 `cd libs && ../yh check` 报
-  `sys/constants.linux.arm64.yh:8:24: 错误: 重复的顶层声明`；
-  `YH_CACHE=off just build` 重建后同一命令通过，随后再跑一次 cache-on
-  `just build` 也通过。未稳定复现，暂不判缺陷；复现时记录 `yh cache info`、
-  ActionID 与 `YH_CACHE_DEBUG=1` 的 miss 原因。
-- [x] **DR4 已解决（2026-11-08）**：统一以**提交时间**为准——删除 `gen` 的提交
-  `01cec48` 时间戳是 2026-11-07 23:41，故 `docs/finish.md` 里 F4 收尾条目改为
-  「2026-11-07」。原文保留在下方。
-- **DR4（已解决）gen 删除日期不一致（P2，待确认）**：`docs/todo.md` 写「F4 收尾：
-  gen 消失（2026-11-06 完成）」，而删除提交 `01cec48` 的时间是
-  2026-11-07 23:41。需作者确认是「实现日期 vs 提交日期」还是笔误。
-- [x] **DR5 已修复（2026-11-08）**：`tools/llvm-darwin-sdk.py` 的
-  `resolve_sdk_root` 增加自动回退——显式 `SDKROOT` → `xcrun` 默认 SDK →
-  `/Applications/Xcode*.app/.../MacOSX*.sdk`（从新到旧）。候选逐个跑
-  `load_sdk_version` + `reject_incompatible_sdk`，选中后在 stderr 说明实际使用的
-  SDK。实测：不设 `SDKROOT` 时自动选中 Xcode 26.5 SDK 并给出原因；
-  `just llvm-host` 变为 0.6s 复用（`reused: true`）。同时把 `tools/py`
-  （≥3.10 解释器选择）与 SDK 复用/产物校验逻辑一并入库。
-- **DR5（已修复）固定 LLVM 闭包准备不自动选 SDK（P2）**：本机 Command Line Tools
-  默认 SDK 27 的 `libSystem.tbd` 含 `arm64e.x1`，固定 LLVM 21.1.8 的 lld 拒绝
-  解析，使 `just llvm-host` 失败；2026-11-08 用
-  `SDKROOT=<Xcode>/MacOSX26.5.sdk` 重建通过（3,368 步）。待决策：是否让
-  `tools/llvm-darwin-host.py` 自动在可用 SDK 中回退到 26.x。
+- [ ] **DR3（P1，待复现）全局缓存下的非确定失败**：一次 `just build`（`YH_CACHE` 默认开）
+  后 `cd libs && ../yh check` 报 `sys/constants.linux.arm64.yh:8:24: 错误: 重复的顶层声明`；
+  `YH_CACHE=off` 重建后通过。2026-11-10 连跑 2 轮未复现。复现时记录
+  `yh cache info`、ActionID 与 `YH_CACHE_DEBUG=1` 的 miss 原因。
 
 ## 前端两遍化（2026-11-08 收束，等架构重设计）
 
@@ -77,8 +35,9 @@ S1（接口发射下沉）与 S2a（解析器窄口 + 布局策略下沉）已�
 - [`01-finished/yh-前端两遍化-重新分析-2026-11-08.md`](01-finished/yh-前端两遍化-重新分析-2026-11-08.md)
 - [`01-finished/yh-S3-语义字段外置spike-2026-11-08.md`](01-finished/yh-S3-语义字段外置spike-2026-11-08.md)
 
-重设计时可直接沿用的事实：`parse` 9,626 → 7,577 行；`parse → check.sem_*` 142 → 140
-（`arch-check` 预算仍生效）；`parse → check` 依赖方向未变，所以「调度下沉 check」类
+重设计时可直接沿用的事实：`parse` 9,626 → 7,585 行（2026-11-10）；`parse → check.sem_*`
+142 → 140（原先由 `arch-check` 预算守住，该工具 2026-11-09 已删除，现靠评审）；
+`parse → check` 依赖方向未变，所以「调度下沉 check」类
 改动必须等 `parse` 不再 import `check`。
 
 ## 2026-11-05 VENC-2 遗留：Windows CRT 层文件路径仍按 ACP（P1，CI 已条件跳过）
@@ -140,7 +99,7 @@ UF1 已生效（`build/unused_function.yh`，见 [finish.md](finish.md) 与
 argv 形态与旧调用面逐字节等价。只剩下面一条观察项。
 
 - [ ] **CLI-R1d lowering 聚合初始化（常见但不复现，降级观察）**：CLI-R1 期间
-  `compiler/cmdline` 的声明代码曾报「首片不支持此聚合初始化形态」（
+  `compiler/cmdline/`（2026-11-09 并入 `cmd/yh/`）的声明代码曾报「首片不支持此聚合初始化形态」（
   `lower/module_snapshot_lower_place.yh` 的 `checked_lower_aggregate_store` 返回非 0），
   当时靠把 `Value`/`Default` 先 hoist 到局部绕过。2026-10-27 复查：用
   `let spec cli.Argument = cli.option(...)` + `spec.default_value =
@@ -243,7 +202,7 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
 两处（`compiler/README.md`、`tools/compiler-performance.py`）已改为读清单。
 
 - [ ] **V2 版本号单一真源（P2）**：`compiler/project.toml` 与
-  `compiler/cmdline/cmdline.yh` 的 `YH_VERSION_TEXT` 仍是两处手写（发布前由 CI 校验
+  `compiler/cmd/yh/cmd_base.yh` 的 `YH_VERSION_TEXT` 仍是两处手写（发布前由 CI 校验
   一致）。可选：构建期从 project.toml 生成常量，或反过来让 `--version` 读清单。
 - [ ] **V3 release.yml 首跑（P0）**：8 处 `just bootstrap-bridge` → `just build` 的
   替换只在 `ci.yml` 验证过，release 侧四端 job 尚未实跑；用新增的

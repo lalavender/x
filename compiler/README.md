@@ -9,15 +9,14 @@
 
 用 yh 语言写成的 yh 编译器。源码是 `project.toml` 项目（name = `yh`，
 source = `.`；版本号以 [project.toml](project.toml) 的 `version` 与
-`cmdline/cmdline.yh` 的 `YH_VERSION_TEXT` 为准，两处必须与发布 tag 一致），按
-**support / token / gen / builtin / lex / parse / ast / check / comptime /
-lower / ir / backend / link / build / proj / cache / testkit / cmdline / cmd** 组织。
-**2026-11-06 GEN1+F1/F3 实测（`python3 tools/arch-check.py`）：十九个模块、
-171 个 `.yh`、60,545 行、93 条依赖边**：`parse` 9,776 · `build` 8,062 ·
-`lower` 5,998 · `comptime` 5,550 · `ir` 5,385 · `check` 5,224 · `link` 4,329 ·
-`backend` 4,149 · `gen` 2,550 · `testkit` 1,619 · `proj` 1,467 · `ast` 1,368 ·
-`support` 1,185 · `lex` 1,046 · `cache` 1,032 · `cmdline` 661 · `cmd` 502 ·
-`token` 265 · `builtin` 173。
+`cmd/yh/cmd_base.yh` 的 `YH_VERSION_TEXT` 为准，两处必须与发布 tag 一致），按
+**support / token / builtin / lex / parse / ast / check / comptime / lower /
+ir / backend / link / build（含 cache 子目录）/ proj / testkit / main（cmd/yh）** 组织。
+**2026-11-10 实测（`just code-stats` + 手工汇总）：十七个模块、179 个 `.yh`、
+60,970 行、76 条依赖边**：`check` 8,249 · `build` 7,826 · `parse` 7,585 ·
+`comptime` 6,076 · `lower` 5,991 · `ir` 5,385 · `link` 4,390 · `backend` 4,149 ·
+`support` 3,118 · `testkit` 1,627 · `proj` 1,590 · `ast` 1,339 · `main` 1,101 ·
+`lex` 1,048 · `cache` 1,047 · `token` 268 · `builtin` 181。
 
 各层来历：`support/` 与 `token/` 是 2026-11-06 GEN1 自 `gen` 拆出的基础层
 （缓冲/统计与 token 词汇/游标），`ast/` 是 2026-10-12 自 parse 拆出的 AST 阶段，`check/` 承担
@@ -134,9 +133,9 @@ python3 tools/compiler-tests.py --compiler-path ./yh
 
 | 文件 | 职责 |
 | --- | --- |
-| `cache/cache_key.yh` | 统一 schema、SHA-256 键前缀、token/整数/文本混入、ActionID 十六进制 |
-| `cache/cache_store.yh` | 全局 content store：actions/outputs/tmp、原子 put/get、OutputID 校验 |
-| `cache/lock.{darwin,linux,windows}.yh` | 同项目/全局写锁的 flock 平台封装（Windows 后置） |
+| `build/cache/cache_key.yh` | 统一 schema、SHA-256 键前缀、token/整数/文本混入、ActionID 十六进制 |
+| `build/cache/cache_store.yh` | 全局 content store：actions/outputs/tmp、原子 put/get、OutputID 校验 |
+| `build/cache/lock.{darwin,linux,windows}.yh` | 同项目/全局写锁的 flock 平台封装（Windows 后置） |
 | `cache/*.test.yh` | 键长度/稳定性/action 隔离与 store 参数测试 |
 
 **ast** —— 纯语法 AST arena（快照已于 GEN1/F1 迁 check）
@@ -331,10 +330,10 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 
 | 文件 | 职责 |
 | --- | --- |
-| `proj/proj_00_model.yh` | 项目/模块/文件三张表与扫描游标 |
-| `proj/proj_10_table.yh` | 表访问与写者登记 |
-| `proj/proj_20_path.yh` | 路径/模块标记 |
-| `proj/proj_40_art.yh` | 产物路径、缓存键与哈希原语 |
+| `proj/model.yh` | 项目/模块/文件三张表与扫描游标 |
+| `proj/table.yh` | 表访问与写者登记 |
+| `proj/path.yh` | 路径/模块标记 |
+| `proj/art.yh` | 产物路径、缓存键与哈希原语 |
 
 **testkit** —— 语言内测试执行器（`yh test` 的实现）
 
@@ -350,17 +349,17 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 
 | 文件 | 职责 |
 | --- | --- |
-| `cmd/driver.yh` | `main(argc, argv, envp)`、内部子进程协议识别与分派，不做实际执行 |
-| `cmd/common.yh` | 命令共享前奏、`API_*` 形态常量、退出码契约 |
-| `cmd/cmd_build.yh` | `yh build` / `yh check` |
-| `cmd/cmd_run.yh` | `yh run` |
-| `cmd/cmd_test.yh` | `yh test`（含 `--timeout` 校验） |
-| `cmd/cmd_cache.yh` | `yh cache info/clean/trim/verify`（C6） |
-| `cmd/cmd_list.yh` | `yh list [--resolve]` |
-| `cmd/cmd_version.yh` | `yh version` / `--contracts` |
-| `cmd/cmd_single.yh` | 单文件五形态：`--syntax-check` / `--emit-asm` / `--emit-llvm` / `-o` / check-with-src |
-| `cmd/cmd_emit_module.yh` | 内部子进程协议 `--emit-module` |
-| `cmd/cmd_lld_link.yh` | 内部子进程协议 `--lld-link` |
+| `cmd/yh/yh.yh` | `main(argc, argv, envp)`、内部子进程协议识别与分派，不做实际执行 |
+| `cmd/yh/common.yh` | 命令共享前奏、`API_*` 形态常量、退出码契约 |
+| `cmd/yh/cmd_build.yh` | `yh build` / `yh check` |
+| `cmd/yh/cmd_run.yh` | `yh run` |
+| `cmd/yh/cmd_test.yh` | `yh test`（含 `--timeout` 校验） |
+| `cmd/yh/cmd_cache.yh` | `yh cache info/clean/trim/verify`（C6） |
+| `cmd/yh/cmd_list.yh` | `yh list [--resolve]` |
+| `cmd/yh/cmd_version.yh` | `yh version` / `--contracts` |
+| `cmd/yh/cmd_single.yh` | 单文件五形态：`--syntax-check` / `--emit-asm` / `--emit-llvm` / `-o` / check-with-src |
+| `cmd/yh/cmd_emit_module.yh` | 内部子进程协议 `--emit-module` |
+| `cmd/yh/cmd_lld_link.yh` | 内部子进程协议 `--lld-link` |
 
 普通配置默认不登记 `system(cmd)`；`--legacy-system` 为迁移期显式兼容开关。
 自举构建使用默认配置。编译器入口接收 `envp`，直接读取 `PATH` 与

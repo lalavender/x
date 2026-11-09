@@ -432,8 +432,8 @@ flowchart LR
 
 0.0.3 起仓库已无 C 版 stage0（`src/core/` 已删除），只有自举侧实现：
 词法 `compiler/lex/lexer.yh`、语法 `compiler/parse/parse_*.yh`、
-语义与符号 `compiler/gen/symbols.yh` 与 `compiler/gen/sem_*.yh`、
-入口 `compiler/cmd/driver.yh`。换 C 后端的接入点已随删除终结。
+语义与符号 `compiler/check/*`（`gen` 已于 2026-11-07 删除）、
+入口 `compiler/cmd/yh/yh.yh`。换 C 后端的接入点已随删除终结。
 
 现有 pub 的机器链接绑定不能代替语言权限检查。限定名 m.T、m.f 和
 m.value 都要查询已绑定的模块接口；模块名字不是运行时对象。
