@@ -473,9 +473,10 @@ def copy_proj(src, dst):
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
-    if src.name == "cinterop":
+    if src.name == "cinterop" and not sys.platform.startswith("win"):
         # fixture 只提交 prebuilt.c（*.o 不入库），而清单引用 vendor/prebuilt.o；
         # 在把 fixture 交给编译器前按需编译，保证干净 checkout 上也能构建。
+        # Windows 没有 gcc/clang，u3-c-* 用例由 WINDOWS_SKIP_PREFIX 跳过。
         cc = "clang" if sys.platform == "darwin" else "gcc"
         sh([cc, "-c", "vendor/prebuilt.c", "-o", "vendor/prebuilt.o"], cwd=dst)
     if src.name == "astcheck":

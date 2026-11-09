@@ -46,7 +46,8 @@ release 工作流的版本常量路径失效）。种子链：0.0.13 → 0.0.14-
   `Status` 区分 invalid_argument/overflow/out_of_memory/bounds。
 - 10 个 `pub` 函数：`make`/`release`/`clear`/`reserve`/`element_at`/`push`/
   `push_all`/`pop`/`insert`/`remove_at`；扩容 = `memory.alloc` + 复制 + 释放，
-  起步 16 槽、容量翻倍；插入/删除复用 `libc.memmove`。
+  起步 16 槽、容量翻倍；插入/删除用模块内重叠安全复制（Windows 零 CRT 上
+  `libc` 的 `@[extern] memset/memmove` 与 prelude 重复符号，故不依赖 `libc`）。
 - 11 个语言内用例；`just test-libs` 的 O0/O2 均通过。
 
 **5. 工具与构建**
@@ -76,6 +77,15 @@ release 工作流的版本常量路径失效）。种子链：0.0.13 → 0.0.14-
 3. **build-check 的 cinterop fixture 依赖未入库生成物**：`vendor/prebuilt.o` 被
    `.gitignore` 的 `*.o` 排除，干净 checkout 上 `[c] objects` 必然报路径不存在。
    修复：`copy_proj` 把 fixture 交给编译器前按需编译 `vendor/prebuilt.c`。
+4. **首轮 CI 暴露的三处环境/依赖问题**（本地 `test-llvm-darwin` 与 Windows 日志定位）：
+   - `tools/link-closure.py check` 仍读仓库内 `tmp/llvm-migration`，闭包移到项目外后
+     报「缺少宿主记录」；改为跟随 `host_record_path`（缓存根）。
+   - `llvm-darwin-default.py` 的 `print` 仍引用已删除的统计变量（`checked`/
+     `emitted`/`fallback`），NameError；改为产物/汇编断言描述。
+   - `libs/list` 同时 `import memory` 与 `import libc`，Windows 零 CRT 上 libc 的
+     `@[extern] memset/memmove` 与 prelude 运行时符号重复（lld-link duplicate
+     symbol）；按设计 §12 回退方案改为模块内 `list_copy_overlap`，list 只依赖
+     `memory`。
 
 ## 验收
 

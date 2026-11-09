@@ -28,6 +28,15 @@
 - 本次门禁前清理了本机 868 MB 全局缓存：旧缓存条目会让冷编
   `link/context.yh` 报 `LLVM lowering set_argv0`，`YH_CACHE=off` 不复现；
   `yh cache verify` 显示无损坏，属缓存键/产物语义层面的待排查项。
+- 首轮 tag 的 CI（run 42709901928）：linux 两端成功，darwin/windows 失败，
+  publish 跳过。修复后重推同 tag（rc.1 未生成 Release）：
+  1. `tools/link-closure.py check` 在闭包移到项目外后仍读仓库内路径，改为
+     `host_record_path`（缓存根）；本地 `just test-llvm-darwin` 全绿。
+  2. `llvm-darwin-default.py` 的 print 引用已删除的统计变量（NameError），
+     改为产物/汇编断言描述。
+  3. `libs/list` 同时 import memory+libc，Windows 零 CRT 上
+     `@[extern] memset/memmove` 与 prelude 重复符号；改为模块内
+     `list_copy_overlap`，list 只依赖 memory。
 
 **验证**：
 - `just test` 全绿（含 372/374 run、libs 151、compiler-tests 8/8、C4/C6）

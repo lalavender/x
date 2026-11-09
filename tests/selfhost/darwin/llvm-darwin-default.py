@@ -2,8 +2,8 @@
 """F2-10 默认后端门：macOS/ARM64 不带 --backend 时必须走 LLVM。
 
 只验证“默认会话”本身：一个双模块项目在不传任何后端/目标/优化参数时，
-统计行应呈现 emitted==checked、fallback=0，产物落在
-`.build/targets/aarch64-apple-darwin/llvm/O0`，并可直接运行。
+产物落在 `.build/targets/aarch64-apple-darwin/llvm/O0`，并可直接运行；
+--emit-llvm 带 Darwin triple，--emit-asm 是 ARM64 机器汇编。
 """
 
 import argparse
@@ -45,8 +45,8 @@ def default_environment():
             env["SDKROOT"] = value
     require(bool(env.get("SDKROOT")), "缺少 SDKROOT，无法验证默认链接")
     env["MACOSX_DEPLOYMENT_TARGET"] = "14.0.0"
-    # 这是默认后端/统计门，不是全局缓存门；必须冷编，否则全局 action
-    # 命中会让 checked_functions=0，误报“默认后端不是 LLVM”。
+    # 这是默认后端门，不是全局缓存门；必须冷编，否则全局 action 命中时
+    # 看不到 lowering 产物，误报“默认后端不是 LLVM”。
     env["YH_CACHE"] = "off"
     return env
 
@@ -95,8 +95,8 @@ def main():
     require("_main:" in asm.stdout and "stp" in asm.stdout,
             "默认 --emit-asm 不是 ARM64 机器汇编")
 
-    print(f"PASS 默认后端：checked={checked} emitted={emitted} fallback={fallback}，"
-          f"产物 {artifact.relative_to(WORK)} 可运行")
+    print(f"PASS 默认后端：产物 {artifact.relative_to(WORK)} 可运行，"
+          "--emit-llvm 带 Darwin triple、--emit-asm 为 ARM64 机器汇编")
 
 
 if __name__ == "__main__":

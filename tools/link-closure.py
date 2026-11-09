@@ -174,9 +174,9 @@ def check(host: str) -> int:
     link = manifest.get(f"link-{tag}")
     if not isinstance(link, dict):
         raise SystemExit(f"清单缺少 [link-{tag}]")
-    record_path = ROOT / rel_record
+    record_path = host_record_path(host)
     if not record_path.is_file():
-        raise SystemExit(f"缺少宿主记录 {rel_record}")
+        raise SystemExit(f"缺少宿主记录 {record_path}；先运行 just llvm-host")
     record = json.loads(record_path.read_text(encoding="utf-8"))
     expected = archive_paths(record)
     for name in ("bridge", "lld", "llvm", "support"):
