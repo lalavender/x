@@ -12,9 +12,12 @@ import subprocess
 import sys
 import urllib.request
 from pathlib import Path
-from llvm_recipe import sdk_recipe_digest  # noqa: E402  固定闭包配方摘要
 
 ROOT = Path(__file__).resolve().parents[1]
+# 本文件既可直接运行，也会被 runpy.run_path（自举门禁）加载；两种方式下都要
+# 先把 tools/ 放进 sys.path，才能 import 同目录的 llvm_recipe。
+sys.path.insert(0, str(ROOT / "tools"))
+from llvm_recipe import sdk_recipe_digest  # noqa: E402  固定闭包配方摘要
 WORK = ROOT / "tmp/llvm-migration/darwin-sdk"
 MANIFEST = ROOT / "vendor/llvm/sdk.lock.json"
 DEFAULT_MIN_OS = "14.0.0"
