@@ -47,7 +47,7 @@
 | `sizeof(T)` 是按类型对齐补齐的字节宽度（`{u8, i64}` = 16，`{u8, u8}` = 2） | 步长取 `sizeof(T)` 时，`malloc` 的 16 字节对齐 + 补齐后的步长保证每个元素对齐 | 实测 `tmp/sizeof-probe.yh`；布局补齐见 [`symbols.yh`](../../compiler/check/symbols.yh) 的 `rpad` |
 | `malloc` 结果 ≥16 字节对齐、`alloc(0)` 非空、`free(0)` 无操作 | 容量为 0 的列表不分配，释放后清零可重复释放 | [memory 设计](yh-memory标准库设计.md) §2 |
 | `memory` 只有 `alloc`/`release`/`copy`，无 `realloc`；`memory.reallocate` 仍是设计（T1，未实施） | 扩容 = 新分配 + 复制 + 释放，不依赖未实施 API | [`memory.yh`](../../libs/memory/memory.yh) |
-| `libc.memmove` 是 `@[extern]` 的 C ABI 函数，可跨模块 `import libc` 使用，已覆盖重叠搬移 | 插入/删除的移位直接复用，不重复实现搬移 | [`libc/memory.yh`](../../libs/libc/memory.yh)、[`libc/test/main.yh`](../../libs/libc/test/main.yh) |
+| `libc.memmove` 是 `@[extern]` 的 C ABI 函数，但在 Windows 零 CRT 上与 prelude 的运行时符号重复定义 | 插入/删除的移位改为模块内 `list_copy_overlap`（约 20 行，按方向逐字节） | 实测 lld-link `duplicate symbol: memmove/memset`（list 同时 import memory 与 libc） |
 | 区间 `for i in 0..count` 接受 `u64` 上界 | 元素个数与下标统一 `u64`，与 `string` 的长度口径一致 | 实测 `tmp/range-probe.yh` |
 
 结论：**「同类能力中唯一成立」的实现是「连续字节块 + 运行期元素宽度 +
@@ -62,7 +62,7 @@
 | D3 | 不提供切片视图；`element_at` 返回 `*void`，越界返回 `0` | 语言禁止从裸指针起步的切片（§3），没有无 UB 的替代 | 返回 `[]T`（编译期被拒）；返回 {data,count} 自造视图（用户无法当 `[]T` 用，徒增概念） |
 | D4 | list 不调用元素析构、不追踪元素所有权 | 无泛型即无析构函数注入点；与 C/`libc` 一致 | `drop` 回调字段（无消费者，且回调拿不到元素类型外的上下文） |
 | D5 | 扩容：起步 16 个槽位，容量翻倍；上限 `LIST_MAX_BYTES / element_size` | 与 `string` 的 16 字节起点、几何增长同构；均摊 O(1) | 每次 +1（O(n²)）；固定上限（cli 路线，不满足动态需求） |
-| D6 | 搬移用 `libc.memmove`（重叠安全），增长复制用 `memory.copy`（不重叠） | 复用已测 C ABI 原语，不复制 40 行重叠复制逻辑 | 在 list 内重写 `string_copy_overlap`（重复实现）；给 `memory` 加 `copy_overlap`（第三份重叠逻辑，且 string 仍留旧的） |
+| D6 | 搬移用模块内 `list_copy_overlap`（重叠安全），增长复制用 `memory.copy`（不重叠） | Windows 零 CRT 上 libc 的 `@[extern] memset/memmove` 与 prelude 重复符号；内置复制让 list 只依赖 memory，接口不变 | 依赖 `libc.memmove`（CI 实测 lld-link duplicate symbol）；给 `memory` 加 `copy_overlap`（第三份重叠逻辑，且 string 仍留旧的） |
 | D7 | 失败原子性：`reserve`/`push`/`push_all`/`insert` 失败时 count、capacity、内容都不变 | 先扩容成功再搬移/写入；失败路径不留半成品 | 先改 count 再扩容（失败后状态不一致） |
 | D8 | 无分配器参数；`element_size == 0` 视为无效列表 | 语言无 vtable 消费者（memory 设计 P5 无泛型容器）；无效列表让所有操作返回 `status_invalid_argument`，避免除零 | 每函数传分配器函数指针（无消费者） |
 
@@ -161,9 +161,9 @@ fn list_element(value *List, index u64) *void
 
 搬移与写入：
 
-- `insert`：`list_ensure(count + 1)` → `libc.memmove(element_at(index+1),
+- `insert`：`list_ensure(count + 1)` → `list_copy_overlap(element_at(index+1),
   element_at(index), (count - index) * element_size)` → 写元素 → `count += 1`；
-- `remove_at`：复制到 `out` → `libc.memmove(element_at(index),
+- `remove_at`：复制到 `out` → `list_copy_overlap(element_at(index),
   element_at(index+1), (count - index - 1) * element_size)` → `count -= 1`；
 - `push`：`list_ensure(count + 1)` 后 `memory.copy(element_at(count), element,
   element_size)`；`count + 1` 的 u64 回绕由 `list_next_capacity` 的 `max` 检查挡住
@@ -287,7 +287,7 @@ L0 就能交付「可增长 + 可访问」的最小可用切片；L1 的搬移�
 | --- | --- | --- |
 | 无类型容器的类型误用（`to_type` 到错误类型） | 运行期错读，静态无法发现 | README 与文件头写死「element_size 必须来自 sizeof(T)」；结构体步长用例挡偏；上层可按需加薄包装函数（类型在包装层固定） |
 | 指针失效与别名（§8.2、§8.3） | 扩容后旧指针读到旧块 | 契约硬规则 + 函数注释逐条标注；不在测试里依赖 UB |
-| 依赖 `libc.memmove` | 目标必须带 C 运行时的 `memmove`（yh 已链接 CRT/libSystem）；无 C 运行时的目标不可用 | 真有该目标时改为 list 内部按方向逐字节复制（约 20 行），接口不变；Windows CRT 提供 `memmove`（未在本机实测） |
+| 搬移实现 | 模块内逐字节复制，元素搬移为 O(count) 且无 SIMD 优化 | 已按 §12 回退方案实现；接口不变，未来可换 `memory.copy_overlap`（若落地） |
 | `memory.reallocate`（T1）将来落地 | 与内部「分配+复制+释放」重复 | 只替换 `list_ensure` 的复制段，API 与语义不变 |
 | 与将来泛型容器的重复 | 两套容器并存 | 泛型落地后作为本模块之上的类型化封装，本模块的线性内存契约不变；两者不互相迁移 |
 | 整体回退 | 无其他模块依赖 list | 删除 `libs/list/` 与 `[lib]` 登记、文档条目即可，不触及编译器与既有模块 |

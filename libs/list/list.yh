@@ -1,7 +1,6 @@
 module list
 
 import memory
-import libc
 
 // ============================================================================
 // list.yh —— 运行期元素宽度的连续存储动态列表（ArrayList）
@@ -11,7 +10,7 @@ import libc
 // 本模块只拥有存储块，不拥有元素内部资源，也不调用任何析构函数。
 //
 // 明确不提供：[]T 视图（语言禁止从裸指针构造切片）、元素析构、线程安全。
-// 扩容 = 新分配 + 复制 + 释放旧块；插入/删除的移位复用 libc.memmove。
+// 扩容 = 新分配 + 复制 + 释放旧块；插入/删除的移位用模块内重叠安全复制。
 // 完整契约与误用边界见 docs/03-design/yh-list标准库设计.md。
 //
 // 硬规则：
@@ -124,6 +123,31 @@ fn list_ensure(value *List, needed u64) Status {
 fn list_element(value *List, index u64) *void {
     let offset u64 = index * value.element_size
     return (value.data + offset).to_type(*void)
+}
+
+// list_copy_overlap 把 source 起的 count 字节复制到 destination，允许重叠。
+// 按地址先后选择前向/后向复制；destination == source 或 count == 0 直接返回。
+// 模块内实现而非 libc.memmove：Windows 零 CRT 上 libc 的 @[extern]
+// memset/memmove 会与 prelude 的运行时符号重复定义（lld-link duplicate symbol）。
+fn list_copy_overlap(destination *void, source *void, count u64) void {
+    if (count == 0 || destination == source) {
+        return
+    }
+    let dst *u8 = destination.to_type(*u8)
+    let src *u8 = source.to_type(*u8)
+    if (destination.to_type(u64) < source.to_type(u64)) {
+        let index u64 = 0
+        for index < count {
+            dst[index] = src[index]
+            index += 1
+        }
+        return
+    }
+    let index u64 = count
+    for index > 0 {
+        index -= 1
+        dst[index] = src[index]
+    }
 }
 
 // make 构造空列表：data/count/capacity 全 0，element_size 原样保存，不分配。
@@ -255,7 +279,7 @@ pub fn insert(value *List, index u64, element *void) Status {
     }
     let moved u64 = value.count - index
     if (moved > 0) {
-        libc.memmove(list_element(value, index + 1),
+        list_copy_overlap(list_element(value, index + 1),
             list_element(value, index), moved * value.element_size)
     }
     memory.copy(list_element(value, index), element, value.element_size)
@@ -275,7 +299,7 @@ pub fn remove_at(value *List, index u64, out *void) bool {
     }
     let moved u64 = value.count - index - 1
     if (moved > 0) {
-        libc.memmove(list_element(value, index),
+        list_copy_overlap(list_element(value, index),
             list_element(value, index + 1), moved * value.element_size)
     }
     value.count -= 1
