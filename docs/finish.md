@@ -55,11 +55,13 @@ build-check 的 `u8-dup-module-*` 三条用例（路径导入 + as 运行 rc=30 
 （含 ANTLR 层）；`tests/modules/test-check.py` 通过（2 条 FAIL 为既有问题）；
 `tests/build-cache/check.py` 全通过；`tools/compiler-tests.py` 8/8。
 
-**既有问题（未随本次修）**：`tests/modules/build-check.py` 在 HEAD 上已有 35 条
-失败（`u4-basic-run` 等，可用 HEAD 二进制复现）；`yh test` 在**非 compiler 项目**
-上失败——生成的测试入口无条件 `import proj`（`c7ca83d` 引入），
-`tests/modules/test-check.py` 的 `default-check`/`execute-fail-early-exit-and-crash`
-即因此红。
+**既有问题（未随本次修）**：`tests/modules/build-check.py` 的成败与「二进制位置 →
+默认标准库发现」强相关（`mb_load_default_stdlib` 找 `<exe_dir>/libs`）。用仓库根的
+`./yh` 跑时，标准库会盖住 fixture 依赖项目的同名模块（`basic` 的 `json` 被
+`libs/json` 盖住；把 `libs/json` 移走后该用例 255 通过）；用 CI 式暂存二进制则
+没有标准库层。CI 式条件下当前 32 条失败，抽查 `u1-attribute-iface-v2`、
+`r2a-ssa-direct-call-abi` 在改动前的 `f9bf6e8` 上同样失败，与模块改造无关。
+（该段 2026-11-09 修正：此前“HEAD 35 条”的说法把调用方式差异当成了版本差异。）
 
 ## 2026-11-09：删除架构守护 tools/arch-check.py
 
