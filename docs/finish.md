@@ -37,6 +37,10 @@
   3. `libs/list` 同时 import memory+libc，Windows 零 CRT 上
      `@[extern] memset/memmove` 与 prelude 重复符号；改为模块内
      `list_copy_overlap`，list 只依赖 memory。
+  4. `[env]` 相关构建在 Windows 上 0xC0000005（`link-env-manifest`
+     与 `compiler-tests` 的 `--emit-module` 子进程）：`[env]` 快照移到
+     `[link]` 之前（`${NAME}` 的默认值来源），`pj_load_env_config`/
+     `li_expand_vars` 补节下标、池偏移与长度边界检查。
 
 **验证**：
 - `just test` 全绿（含 372/374 run、libs 151、compiler-tests 8/8、C4/C6）

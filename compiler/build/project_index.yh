@@ -318,9 +318,10 @@ pub fn pj_load_project(root_off int, root_len int) int {
         vi += 1
     }
     if (pj_load_c_config(me, toml_find_sec("c")) != 0) { return -1 }
-    if (pl_load_link_config(me, is_root) != 0) { return -1 }
-    // [env] 必须在 [dependencies] 递归装载之前快照：子项目会重置 toml_secs。
+    // [env] 是 [link] 里 ${NAME} 的默认值来源，必须先于链接配置快照；
+    // 同时必须在 [dependencies] 递归装载之前：子项目会重置 toml_secs。
     if (pj_load_env_config(me, toml_find_sec("env")) != 0) { return -1 }
+    if (pl_load_link_config(me, is_root) != 0) { return -1 }
     if (is_root != 0 && pl_apply_project_target(me) != 0) { return -1 }
     // [dependencies]：先整表快照——递归装载会重置 toml_secs（全局解析区）
     let dsec int = toml_find_sec("dependencies")
@@ -417,7 +418,7 @@ fn pj_env_diag(root_off int, line int, msg *char, key_off int, key_len int) int 
     let n int = 0
     n = support.append_str(buf, n, msg)
     let k int = 0
-    for k < key_len && n < 200 {
+    for k < key_len && n < 200 && key_off >= 0 {
         buf[n] = support.pool_ctx().data[key_off + k]
         n += 1
         k += 1
@@ -434,13 +435,16 @@ fn pj_env_diag(root_off int, line int, msg *char, key_off int, key_len int) int 
 // `${NAME}` 的展开（见 link.li_expand_vars），由引用处决定绝对/相对语义。
 // 进程环境优先于 [env]，所以每台构建机可以不改清单就换掉某条路径。
 fn pj_load_env_config(pj int, sec int) int {
-    if (sec < 0) { return 0 }
+    if (sec < 0 || sec >= toml_sec_n) { return 0 }
     let root_off int = proj.ctx().projs[pj].root_off
     let i int = 0
     for i < toml_secs[sec].val_n {
         let v *TomlVal = &toml_secs[sec].vals[i]
         let key_off int = v.key_off
         let key_len int = v.key_len
+        if (key_off < 0 || key_len <= 0) {
+            return proj.diag(root_off, v.line, "env 键无法解析")
+        }
         let name_ok int = key_len > 0 ? 1 : 0
         let k int = 0
         for k < key_len {
@@ -455,6 +459,9 @@ fn pj_load_env_config(pj int, sec int) int {
         }
         if (v.kind != 1) {
             return pj_env_diag(root_off, v.line, "env 值必须是字符串: ", key_off, key_len)
+        }
+        if (v.sval_off < 0 || v.sval_len < 0) {
+            return proj.diag(root_off, v.line, "env 值无法解析")
         }
         if (proj.ctx().projs[pj].env_n == proj.ctx().projs[pj].env_cap) {
             let ncap int = proj.ctx().projs[pj].env_cap * 2

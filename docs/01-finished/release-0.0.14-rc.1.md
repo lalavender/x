@@ -86,6 +86,10 @@ release 工作流的版本常量路径失效）。种子链：0.0.13 → 0.0.14-
      `@[extern] memset/memmove` 与 prelude 运行时符号重复（lld-link duplicate
      symbol）；按设计 §12 回退方案改为模块内 `list_copy_overlap`，list 只依赖
      `memory`。
+   - `[env]` 相关构建在 Windows 上 0xC0000005（`link-env-manifest` 与后续
+     `compiler-tests` 子进程）：`[env]` 快照移到 `[link]` 之前（`${NAME}` 展开
+     的默认值来源），并给 `pj_load_env_config`/`li_expand_vars` 补节下标、
+     键/值池偏移与长度边界检查。
 
 ## 验收
 
