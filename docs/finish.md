@@ -8,6 +8,63 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：0.0.14-rc.1 发布准备（版本号、门禁与两个阻塞修复）
+
+**结果**：
+- 版本号两处改为 `0.0.14-rc.1`（`compiler/project.toml` 与
+  `compiler/cmd/yh/cmd_base.yh` 的 `YH_VERSION_TEXT`），新增
+  [release-0.0.14-rc.1](01-finished/release-0.0.14-rc.1.md)。
+- 修复跨模块 CT 正文别名解析回归：`0e4f59b` 给 `support.ImportEnt` 增加
+  `path_off/path_len` 后，`comptime.CtImportRow` 零拷贝镜像仍为 8 字段，
+  `alias_off/alias_len` 读取错位，`@[comptime]` 正文里的 `alias.Type` 报
+  「点号左侧不是导入的模块名」。补齐镜像字段，并在 `ct_type_layout_ok` 增加
+  `sizeof(ImportEnt) == sizeof(CtImportRow)` 守卫。
+- 修复 release 工作流：`c7ca83d` 归组后 `release.yml` prepare 仍读
+  `compiler/cmdline/cmdline.yh`，改为 `compiler/cmd/yh/cmd_base.yh`，AGENTS.md
+  同步。
+- 修复 build-check：`cinterop` fixture 的 `vendor/prebuilt.o` 被 `.gitignore`
+  排除，`copy_proj` 现按需编译 `prebuilt.c`，干净 checkout 不再因 `[c] objects`
+  缺失而红。
+- 本次门禁前清理了本机 868 MB 全局缓存：旧缓存条目会让冷编
+  `link/context.yh` 报 `LLVM lowering set_argv0`，`YH_CACHE=off` 不复现；
+  `yh cache verify` 显示无损坏，属缓存键/产物语义层面的待排查项。
+
+**验证**：
+- `just test` 全绿（含 372/374 run、libs 151、compiler-tests 8/8、C4/C6）
+- `just selfhost-native` 全绿：固定点一致（51 产物）、cc4 自解析 180 文件、
+  project cases **125/125**、LA0 O0/O2
+- `just test-libs` O0/O2 全绿；`tmp/list-consumer` 跨模块消费者退出码 0
+
+## 2026-11-10：list 标准库 L0–L2（动态列表）
+
+**结果**：
+- 新增 `libs/list/list.yh`（283 行）：无泛型动态列表 `List`（data/count/
+  capacity/element_size，字段顺序即 ABI）与 `Status`（ok/invalid_argument/
+  overflow/out_of_memory/bounds），10 个 `pub` 函数 `make`/`release`/`clear`/
+  `reserve`/`element_at`/`push`/`push_all`/`pop`/`insert`/`remove_at`；私有
+  `list_max_count`/`list_next_capacity`/`list_ensure`/`list_element`。
+- 扩容 = `memory.alloc` + 复制 + `memory.release`，起步 16 槽、容量翻倍，上限
+  `LIST_MAX_BYTES / element_size`；`insert`/`remove_at` 复用 `libc.memmove`
+  （重叠安全）；失败时 count/capacity/内容不变。
+- 新增 `libs/list/list.test.yh` 11 个语言内用例（空列表/无效步长、跨 16 槽
+  扩容保留旧值、element_at 越界、release 幂等、reserve 上界 overflow 原子性、
+  `{u8,i64}` 结构体步长 16、insert 头中尾、remove_at 头中尾、pop、clear、
+  push_all）与 `README.md`（含 6 条硬规则）；登记 `libs/project.toml`；
+  `yh-标准库设计.md` 增补 list 小节；编码规范动词表补 `pop`/`insert`/`remove`。
+- 设计文档状态改为「L0–L2 已实施」，完成记录见
+  [yh-list标准库-L0至L2](01-finished/yh-list标准库-L0至L2-2026-11-10.md)，
+  `docs/todo.md` 删除本条。
+
+**验证**：
+- `cd libs && YH_CACHE=off ../yh test --filter list` → 11 passed / 0 failed（O0）
+- `YH_CACHE=off ../../yh -O2 test --filter list`（`tmp/libs-o2`）→ 11 passed / 0 failed
+- `just test-libs` 全绿（toml 681/681、string/num/fmt 专项与安装验收）
+- `YH_CACHE=off just build` → 构建完成；跨模块消费者 `tmp/list-consumer`
+  （`import list` + `list.status_ok` + qsort）退出码 0
+- 观察（未修）：不设 `YH_CACHE=off` 的 `just build` 在本机失败于
+  `link/context.yh:22 LLVM lowering set_argv0`，疑似全局缓存命中不可用模块
+  产物，与本切片无关。
+
 ## 2026-11-10：LLVM 闭包缓存移到项目外 + 构建前只检测一次
 
 **结果**：

@@ -177,10 +177,6 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
 - [ ] **V2 版本号单一真源（P2）**：`compiler/project.toml` 与
   `compiler/cmd/yh/cmd_base.yh` 的 `YH_VERSION_TEXT` 仍是两处手写（发布前由 CI 校验
   一致）。可选：构建期从 project.toml 生成常量，或反过来让 `--version` 读清单。
-- [ ] **V3 release.yml 首跑（P0）**：8 处 `just bootstrap-bridge` → `just build` 的
-  替换只在 `ci.yml` 验证过，release 侧四端 job 尚未实跑；用新增的
-  `workflow_dispatch` + `dry_run=true` 对 `0.0.12` 演练一次（四端构建 + artifact，
-  不写 Release）。
 - [ ] **V4 分支与保护（P1）**：`<ver>-rc`/`<ver>-release` 已删除（2026-11-06），远端
   仍留遗留分支 `arm64`、`main`、`ci/github-actions`（都不是主线，推送仍触发分支门）；
   GitHub 分支保护是否要求 ci status（默认分支已是 `llvm`）未在仓库设置里确认。
