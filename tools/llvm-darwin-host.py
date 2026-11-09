@@ -16,7 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from llvm_cache import cache_root  # noqa: E402
-from llvm_recipe import host_recipe_digest, sdk_recipe_digest  # noqa: E402
+from llvm_recipe import (host_recipe_digest, sdk_recipe_digest,  # noqa: E402
+                         closure_stamp_ok, closure_stamp_write)
 WORK = cache_root()
 HOST = "darwin-aarch64"
 SDK_BUILDER = ROOT / "tools/llvm-darwin-sdk.py"
@@ -85,6 +86,11 @@ def run(command, label, timeout=None):
 def workdir():
     """返回 Darwin 静态桥、自举探针与 host.json 的固定临时目录。"""
     return WORK / f"llvm-host-{HOST}"
+
+
+def shim_path(directory=None):
+    """链接包装器（clang）路径；标记检查用它判断 shim 是否可用。"""
+    return (directory or workdir()) / "shim" / "clang"
 
 
 def selfhost_flags_path(directory=None):
@@ -519,14 +525,28 @@ def check(full=True):
 
 
 def ensure(mode):
-    """准备 host；auto 仅复用本地固定源码包，不会触发网络下载。"""
+    """准备 host；auto 仅复用本地固定源码包，不会触发网络下载。
+
+    第一步只读 `.sealed-<host>.json` 标记：命中就直接返回记录，不再校验归档、
+    也不改写缓存（构建一次之后其余构建都是只读快路径）。
+    """
+    record_path = workdir() / "host.json"
+    sealed = closure_stamp_ok(HOST, record_path,
+                             [shim_path(), selfhost_flags_path(),
+                              selfhost_runtime_path()])
+    if sealed is not None:
+        return sealed
     problems = check(full=False)
     if not problems:
-        return json.loads((workdir() / "host.json").read_text(encoding="utf-8"))
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        closure_stamp_write(HOST, record_path)
+        return record
     source = runpy.run_path(str(SDK_BUILDER))["source_archive_path"]()
     if mode == "auto" and not Path(source).is_file():
         raise NotReady("；".join(problems) + "；本地缺少固定源码包，auto 模式不联网下载")
-    return build_host(int(os.environ.get("LLVM_JOBS", "2")))
+    record = build_host(int(os.environ.get("LLVM_JOBS", "2")))
+    closure_stamp_write(HOST, record_path)
+    return record
 
 
 def write_shim(record):
@@ -602,17 +622,29 @@ def main(argv):
     if args.command == "prepare":
         if args.jobs < 1:
             raise RuntimeError("LLVM 并行构建数必须大于零")
-        # 幂等：记录与磁盘一致就直接复用（AGENTS：just bootstrap = 幂等
-        # just llvm-host + 冷编）。只有记录缺失或身份不符才真正重建。
+        # 幂等：先看“已封装”标记（第一步检测）。命中就直接复用，不再校验归档、
+        # 也不改写缓存；只有标记缺失/配方变化时才做一次全量校验。
+        record_path = workdir() / "host.json"
+        sealed = closure_stamp_ok(HOST, record_path,
+                                 [shim_path(), selfhost_flags_path(),
+                                  selfhost_runtime_path()])
+        if sealed is not None:
+            print(json.dumps({"host": HOST, "reused": True,
+                              "bridge_sha256": sealed["bridge_sha256"],
+                              "sdk_host_sha256": sealed["sdk_host_sha256"],
+                              "probe": sealed["bridge_probe"]}, ensure_ascii=False))
+            return 0
         problems = check(full=True)
         if not problems:
-            record = json.loads((workdir() / "host.json").read_text(encoding="utf-8"))
+            closure_stamp_write(HOST, record_path)
+            record = json.loads(record_path.read_text(encoding="utf-8"))
             print(json.dumps({"host": HOST, "reused": True,
                               "bridge_sha256": record["bridge_sha256"],
                               "sdk_host_sha256": record["sdk_host_sha256"],
                               "probe": record["bridge_probe"]}, ensure_ascii=False))
             return 0
         record = build_host(args.jobs)
+        closure_stamp_write(HOST, record_path)
         print(json.dumps({"host": HOST, "bridge_sha256": record["bridge_sha256"],
                           "sdk_host_sha256": record["sdk_host_sha256"],
                           "probe": record["bridge_probe"]}, ensure_ascii=False))

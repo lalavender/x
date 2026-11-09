@@ -3,10 +3,10 @@
 
 解析顺序：
   1. 显式 `YH_LLVM_CACHE`（CI / 容器 / 换机器）；
-  2. 当前仓库的 `tmp/llvm-migration`；
-  3. 同一 Git 仓库的主 worktree 的 `tmp/llvm-migration`
+  2. 项目外的用户缓存目录（macOS `~/Library/Caches/yh/llvm-migration`）；
+  3. 旧布局：当前仓库 / 主 worktree 的 `tmp/llvm-migration`（迁移期兼容）
      （`git rev-parse --git-common-dir` 的父目录，新 worktree 自动复用）；
-  4. 兜底返回当前仓库的 `tmp/llvm-migration`（尚未准备，由 just llvm-host 创建）。
+  4. 兜底返回项目外默认路径（尚未准备，由 just llvm-host 创建）。
 
 用法：
     python3 tools/llvm-cache.py          # 打印缓存根
@@ -19,7 +19,24 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT = ROOT / "tmp/llvm-migration"
+
+
+def default_cache_root() -> Path:
+    """闭包缓存默认位置：**项目外**的用户缓存目录。
+
+    macOS: ~/Library/Caches/yh/llvm-migration
+    其它：  $XDG_CACHE_HOME/yh/llvm-migration（缺省 ~/.cache/yh/llvm-migration）
+
+    用 `YH_LLVM_CACHE` 可以整体改到别的盘/别的机器；仓库内不再生成缓存目录。
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library/Caches/yh/llvm-migration"
+    base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    return base / "yh/llvm-migration"
+
+
+DEFAULT = default_cache_root()
+LEGACY = ROOT / "tmp/llvm-migration"  # 旧布局，迁移期只读兼容
 
 
 def _main_worktree_cache(repo: Path) -> Path | None:
@@ -40,11 +57,17 @@ def _main_worktree_cache(repo: Path) -> Path | None:
 
 
 def cache_root() -> Path:
+    """解析缓存根：显式环境变量 → 项目外默认 → 旧仓库布局 → 主 worktree 旧布局。
+
+    旧布局只作迁移期兼容（已有闭包的机器不用重编）；新机器一律落在项目外。
+    """
     env = os.environ.get("YH_LLVM_CACHE")
     if env:
         return Path(env).expanduser().resolve()
     if DEFAULT.is_dir():
         return DEFAULT.resolve()
+    if LEGACY.is_dir():
+        return LEGACY.resolve()
     shared = _main_worktree_cache(ROOT)
     if shared is not None:
         return shared.resolve()

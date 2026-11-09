@@ -230,7 +230,7 @@ Windows 目标上，用到 C 运行时的项目还要在 `[link-windows-x64]`/`[
 
 ```toml
 [env]
-YH_LLVM_ROOT = "tmp/llvm-migration"
+YH_LLVM_ROOT = "~/Library/Caches/yh/llvm-migration"
 
 [link]
 bridge = ["${YH_LLVM_ROOT}/llvm-host-darwin-aarch64/libyh-llvm-bridge.a"]

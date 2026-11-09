@@ -240,7 +240,7 @@ extra = ["vendor/lib/linux-arm64/libextra.a"]
 
 ```toml
 [env]
-YH_LLVM_ROOT = "tmp/llvm-migration"
+YH_LLVM_ROOT = "~/Library/Caches/yh/llvm-migration"
 
 [link]
 bridge = ["${YH_LLVM_ROOT}/llvm-host-darwin-aarch64/libyh-llvm-bridge.a"]

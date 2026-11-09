@@ -52,6 +52,14 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 root := justfile_directory()
 host_os := os()
 cpu := arch()
+# 平台约定（2026-11-10）：平台专属的命令一律写成带平台属性的同名目标，而不是在
+# 配方里跑 `if [ host_os = ... ]`：
+#   * 三个平台各一份实现 → `[private, macos]` / `[private, linux]` / `[private, windows]`
+#     （不同准备器、不同安装物）；
+#   * 只 Windows 有、其它平台是空操作 → `[private, windows]` + `[private, unix]`
+#     （unix 覆盖 macos/linux；同名目标不能同时有 `[unix]` 与具体平台版本）。
+# 这样非目标平台既不执行、也不解析该分支，缺失的目标由变量层（platform_gate）
+# 只在该平台引用。
 
 # Python 解释器命令。Windows 上 `python3` 常是 Microsoft Store 的占位符
 # （执行即返回 49，无输出），因此 Windows 宿主默认用 `python`；PY 仍可显式覆盖。
@@ -178,10 +186,14 @@ YH_LLVM_HOST := env("YH_LLVM_HOST", "auto")
 llvm_mode := if YH_LLVM_HOST == "1" { "require" } else if YH_LLVM_HOST == "0" { "off" } else { "auto" }
 llvm_host_flags := if llvm_host == "" { "" } else { "--llvm-host " + llvm_host + " --llvm-mode " + llvm_mode }
 
-# LLVM 闭包缓存根：显式 YH_LLVM_CACHE 优先，否则仓库 tmp/llvm-migration，
+# LLVM 闭包缓存根：显式 YH_LLVM_CACHE 优先，否则项目外的用户缓存
+# （macOS ~/Library/Caches/yh/llvm-migration；由 tools/llvm_cache.py 解析），
 # 再否则复用同一 Git 仓库主 worktree 的缓存（见 tools/llvm_cache.py）。
 cache_env := env("YH_LLVM_CACHE", "")
-cache_root := if cache_env == "" { if host_os == "windows" { `python tools/llvm_cache.py 2>/dev/null || echo tmp/llvm-migration` } else { `tools/py tools/llvm_cache.py 2>/dev/null || echo tmp/llvm-migration` } } else { cache_env }
+cache_root := if cache_env == "" { if host_os == "windows" { `python tools/llvm_cache.py 2>/dev/null || echo %LOCALAPPDATA%/yh/llvm-migration` } else { `tools/py tools/llvm_cache.py 2>/dev/null || echo "$HOME/Library/Caches/yh/llvm-migration"` } } else { cache_env }
+# 闭包根同时导出给清单的 ${YH_LLVM_ROOT} 展开：不再靠 tmp 软链，
+# 新 worktree / 换缓存目录都只改这一个环境变量。
+export YH_LLVM_ROOT := cache_root
 export YH_LLVM_CACHE := cache_root
 
 # Windows 导入库（kernel32.lib + yh_chkstk.obj）：.lib 不入库，按需生成到闭包
@@ -251,21 +263,18 @@ platform_gate := if host_os == "linux" {
 # 默认目标：增量构建（未变模块由编译器自身缓存命中，不删 .build）。
 default: dev
 
-# 预处理：仓库内 tmp/llvm-migration 必须指向缓存根：compiler/project.toml 的
-# 桥库路径按「仓库/compiler」相对书写，新 worktree 里由这里补上软链。
-[private]
-_prepare:
-    @mkdir -p "{{ root }}/tmp"
-    @a=$(cd "{{ root }}/tmp/llvm-migration" 2>/dev/null && pwd -P); b=$(cd "{{ cache_root }}" 2>/dev/null && pwd -P); if [ "$a" != "$b" ]; then ln -sfn "{{ cache_root }}" "{{ root }}/tmp/llvm-migration"; fi
-
 # _prepare_windows_sdk：Windows 宿主构建/测试前保证导入库已生成（否则种子链接
-# yh.exe 与用户程序都会报找不到 kernel32.lib）。非 Windows 宿主不做任何事。
-[private]
+# yh.exe 与用户程序都会报找不到 kernel32.lib）。平台专属目标：非 Windows 是空
+# 实现，不再每次构建都跑一条 shell 判断。
+[private, windows]
 _prepare_windows_sdk:
-    @if [ "{{ host_os }}" = "windows" ]; then "{{ py }}" "{{ root }}/tools/windows-sdk.py" generate >/dev/null; fi
+    "{{ py }}" "{{ root }}/tools/windows-sdk.py" generate >/dev/null
+
+[private, unix]
+_prepare_windows_sdk:
 
 # build：强制冷编（清除 compiler/.build 与 BUILD_CACHE，从种子完整重编）。
-build: _prepare _prepare_windows_sdk
+build: _prepare_windows_sdk
     rm -rf "{{ root }}/compiler/.build"
     @if [ -n "{{ build_cache }}" ]; then rm -rf "{{ build_cache }}"; fi
     YH_BUILD_CACHE="{{ build_cache }}" {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
@@ -273,7 +282,7 @@ build: _prepare _prepare_windows_sdk
 # dev：开发迭代用增量构建。与 build 的差别是不删除 .build / BUILD_CACHE，
 # 让编译器自己的对象/IR 缓存命中未变模块；只用于本地迭代，
 # 不用于种子候选与固定点验收（那些必须冷编）。
-dev: _prepare _prepare_windows_sdk
+dev: _prepare_windows_sdk
     YH_BUILD_CACHE="{{ build_cache }}" {{ py }} "{{ root }}/tools/seed-build.py" --compiler "{{ seed_abs }}" --project "{{ root }}/compiler" --output "{{ yh }}" {{ llvm_host_flags }}
 
 # fetch-seed：从最新 GitHub Release 下载当前平台种子（写入 bin/...）。
@@ -282,28 +291,87 @@ dev: _prepare _prepare_windows_sdk
 fetch-seed:
     {{ py }} "{{ root }}/tools/fetch-release-seed.py" --platform {{ seed_platform }}
 
+# _llvm_host_guard：种子必须带本平台固定 LLVM 宿主，否则后面无从准备。
+[private]
+_llvm_host_guard:
+    @test -n "{{ llvm_host }}" || { echo "错误: 当前种子 {{ seed }} 没有对应的固定 LLVM SDK"; exit 1; }
+
+# _llvm_host_prepare：按宿主平台选准备器（Darwin / Linux / Windows 各一份实现）。
+[private, macos]
+_llvm_host_prepare:
+    {{ py }} "{{ root }}/tools/llvm-darwin-host.py" prepare --host "{{ llvm_host }}" --jobs {{ llvm_jobs }}
+
+[private, linux]
+_llvm_host_prepare:
+    {{ py }} "{{ root }}/tools/llvm-host.py" prepare --host "{{ llvm_host }}"
+
+[private, windows]
+_llvm_host_prepare:
+    {{ py }} "{{ root }}/tools/llvm-windows-closure.py" build --jobs {{ llvm_jobs }}
+
 # llvm-host：准备内嵌静态 LLVM 宿主（桥归档 + 宿主可执行文件 + 身份记录）。
 # 首次需要联网取固定 SDK；之后只用缓存包，可离线重跑。
-llvm-host:
-    @test -n "{{ llvm_host }}" || { echo "错误: 当前种子 {{ seed }} 没有对应的固定 LLVM SDK"; exit 1; }
-    @if [ "{{ llvm_host }}" = "darwin-aarch64" ]; then {{ py }} "{{ root }}/tools/llvm-darwin-host.py" prepare --host "{{ llvm_host }}" --jobs {{ llvm_jobs }}; elif [ "{{ llvm_host }}" = "windows-x86_64" ]; then {{ py }} "{{ root }}/tools/llvm-windows-closure.py" build --jobs {{ llvm_jobs }}; else {{ py }} "{{ root }}/tools/llvm-host.py" prepare --host "{{ llvm_host }}"; fi
+llvm-host: _llvm_host_guard _llvm_host_prepare
 
 # bootstrap：准备固定 LLVM 宿主（幂等）后冷编，首次/换机的一条命令。
 bootstrap: llvm-host build
 
-# seed：滚种子——把刚构建并验证过的 yh 覆盖入库种子。
-# 只应在 just test 与 just selfhost-native 全绿后执行（不作为依赖，
-# 防止未验证产物污染种子）。
-seed:
+# _seed_copy：把刚构建的 yh 原子覆盖入库种子（先写 .tmp 再 mv）。
+[private]
+_seed_copy:
     @cp -f "{{ yh }}" "{{ seed_dest_abs }}.tmp"
     @mv -f "{{ seed_dest_abs }}.tmp" "{{ seed_dest_abs }}"
-    @if [ "{{ host_os }}" = "macos" ]; then codesign -s - -f "{{ seed_dest_abs }}" 2>/dev/null || true; fi
+
+# _seed_sign：macOS 重新 ad-hoc 签名；Linux 与 Windows 是空实现。
+[private, macos]
+_seed_sign:
+    @codesign -s - -f "{{ seed_dest_abs }}" 2>/dev/null || true
+
+[private, linux]
+_seed_sign:
+
+[private, windows]
+_seed_sign:
+
+# _seed_hash：写种子同名 SHA-256 记录（各平台一致）。
+[private]
+_seed_hash:
     @{{ py }} "{{ root }}/tools/selfhost_snapshot_gate.py" --write-seed-hash "{{ seed_dest_abs }}"
-    @if [ "{{ host_os }}" = "windows" ]; then rm -rf "{{ root }}/bin/windows-sdk"; cp -R "{{ windows_sdk }}" "{{ root }}/bin/windows-sdk"; fi
+
+# _seed_windows_sdk：Windows 导入库随种子一起分发；其它平台是空实现。
+[private, windows]
+_seed_windows_sdk:
+    @rm -rf "{{ root }}/bin/windows-sdk"
+    @cp -R "{{ windows_sdk }}" "{{ root }}/bin/windows-sdk"
+
+[private, unix]
+_seed_windows_sdk:
+
+# seed：滚种子——把刚构建并验证过的 yh 覆盖入库种子。
+# 只应在 just test 与 just selfhost-native 全绿后执行（不作为依赖，
+# 防止未验证产物污染种子）。平台专属步骤按依赖顺序排：拷贝 → 签名 → 哈希 → 分发。
+seed: _seed_copy _seed_sign _seed_hash _seed_windows_sdk
     @echo "宿主平台种子已更新：{{ seed_dest }}"
 
-# install：安装到 PREFIX（DESTDIR 用作打包根）。
-install: dev
+# _install_platform：平台专属安装物。Darwin 装静态 SDK，Windows 装导入库
+# （编译器按 <exe>/windows-sdk/lib 查找），Linux 没有额外文件。
+[private, macos]
+_install_platform:
+    {{ install_prog }} -d "{{ prefix_root }}/share/yh/darwin-sdk/usr/lib"
+    {{ install_prog }} -m644 vendor/darwin-sdk/usr/lib/libSystem.tbd "{{ prefix_root }}/share/yh/darwin-sdk/usr/lib/"
+    {{ install_prog }} -m644 vendor/darwin-sdk/SDKSettings.json vendor/darwin-sdk/manifest.json vendor/darwin-sdk/README.md "{{ prefix_root }}/share/yh/darwin-sdk/"
+
+[private, windows]
+_install_platform:
+    rm -rf "{{ prefix_root }}/bin/windows-sdk"
+    mkdir -p "{{ prefix_root }}/bin/windows-sdk"
+    cp -R "{{ windows_sdk }}/." "{{ prefix_root }}/bin/windows-sdk/"
+
+[private, linux]
+_install_platform:
+
+# install：安装到 PREFIX（DESTDIR 用作打包根）。平台专属文件由 _install_platform 负责。
+install: dev _install_platform
     #!/usr/bin/env bash
     set -euo pipefail
     {{ install_prog }} -d "{{ prefix_root }}/bin"
@@ -317,31 +385,41 @@ install: dev
         {{ install_prog }} -m644 "$f" "$d"
       done
     )
-    if [[ "$(uname -s)" == Darwin ]]; then
-      {{ install_prog }} -d "{{ prefix_root }}/share/yh/darwin-sdk/usr/lib"
-      {{ install_prog }} -m644 vendor/darwin-sdk/usr/lib/libSystem.tbd "{{ prefix_root }}/share/yh/darwin-sdk/usr/lib/"
-      {{ install_prog }} -m644 vendor/darwin-sdk/SDKSettings.json vendor/darwin-sdk/manifest.json vendor/darwin-sdk/README.md "{{ prefix_root }}/share/yh/darwin-sdk/"
-    fi
-    # Windows：导入库随可执行文件分发（编译器按 <exe>/windows-sdk/lib 查找）。
-    if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
-      rm -rf "{{ prefix_root }}/bin/windows-sdk"
-      mkdir -p "{{ prefix_root }}/bin/windows-sdk"
-      cp -R "{{ windows_sdk }}/." "{{ prefix_root }}/bin/windows-sdk/"
-    fi
+
+# _uninstall_platform：删除平台专属安装物（与 _install_platform 对称）。
+[private, macos]
+_uninstall_platform:
+    rm -rf "{{ prefix_root }}/share/yh/darwin-sdk"
+
+[private, windows]
+_uninstall_platform:
+    rm -rf "{{ prefix_root }}/bin/windows-sdk"
+
+[private, linux]
+_uninstall_platform:
 
 # uninstall：卸载（与 install 对称）。
-uninstall:
+uninstall: _uninstall_platform
     rm -f "{{ prefix_root }}/bin/yh"
-    rm -rf "{{ prefix_root }}/share/yh/libs" "{{ prefix_root }}/bin/windows-sdk"
-    @if [ "{{ host_os }}" = "macos" ]; then rm -rf "{{ prefix_root }}/share/yh/darwin-sdk"; fi
+    rm -rf "{{ prefix_root }}/share/yh/libs"
+
+# _stage_darwin_sdk：快速暂存目录里补 Darwin SDK 软链（其它平台为空实现）。
+[private, macos]
+_stage_darwin_sdk:
+    @if [ "{{ fast_stage }}" = "1" ]; then mkdir -p "{{ fast_dir }}"; ln -sfn "{{ root }}/vendor/darwin-sdk" "{{ fast_dir }}/darwin-sdk"; fi
+
+[private, linux]
+_stage_darwin_sdk:
+
+[private, windows]
+_stage_darwin_sdk:
 
 # stage-yh：把 yh 复制到快速暂存目录（FAST_STAGE=0 时退化为空操作）。
 # 先写 .tmp 再 mv，避免并发读到半个 70MB 二进制。
 [private]
-stage-yh: dev
+stage-yh: dev _stage_darwin_sdk
     @if [ "{{ fast_stage }}" = "1" ]; then mkdir -p "{{ fast_dir }}"; cp -f "{{ yh }}" "{{ yh_run }}.tmp" && mv -f "{{ yh_run }}.tmp" "{{ yh_run }}"; fi
     @YH_STAGE_PATH="{{ yh_run }}" {{ py }} -c "import os;p=os.environ['YH_STAGE_PATH'];st=os.stat(p);print(f'编译器: {p} {st.st_size} bytes mtime={int(st.st_mtime)}')" 
-    @if [ "{{ host_os }}" = "macos" ] && [ "{{ fast_stage }}" = "1" ]; then ln -sfn "{{ root }}/vendor/darwin-sdk" "{{ fast_dir }}/darwin-sdk"; fi
 
 # test：三层回归——ANTLR 参考语法 + 编译器语法模式 + 运行语义语料。
 # 语料门的编译器一律用暂存副本 yh_run；ANTLR 层在单进程内解析，不需要编译器。
@@ -465,9 +543,9 @@ release-asset tag asset:
     ls -l "{{ root }}/dist/$name.tar.gz" "{{ root }}/dist/$name.sha256"
 
 # test-llvm：LLVM x64 O0/O2 全量语法/运行/模块/项目语料、统计覆盖与专项门。
-# 只认 Linux/x86_64；其他宿主明确拒绝而不是降级运行。
+# 平台专属（[linux]）：其它宿主上这个目标不存在，而不是运行后报错退出。
+[linux]
 test-llvm: stage-yh
-    @test "{{ host_os }}" = "linux" || { echo "错误: test-llvm 首期要求 Linux/x86_64"; exit 1; }
     @test "{{ cpu }}" = "x86_64" -o "{{ cpu }}" = "amd64" || { echo "错误: test-llvm 首期要求 Linux/x86_64"; exit 1; }
     {{ py }} "{{ root }}/tests/selfhost/bootstrap/llvm-selfhost.py" --self-test
     {{ py }} "{{ root }}/tests/yh/check.py" --compiler --compiler-path "{{ yh_run }}" --quiet
@@ -482,15 +560,17 @@ test-llvm: stage-yh
     {{ py }} "{{ root }}/tests/selfhost/host/llvm-lld.py"
 
 # test-llvm-linux-arm64：F1 Linux/AArch64 LLVM 运行时、C ABI、对象架构与 O0/O2。
-# 只在 arm64 Linux 容器内原生运行；x64 宿主不预跑本门。
+# 平台专属（[linux]）；只在 arm64 容器内原生运行，x64 宿主上明确拒绝。
+[linux]
 test-llvm-linux-arm64: stage-yh
-    @test "{{ host_os }}" = "linux" || { echo "错误: test-llvm-linux-arm64 要求 Linux/aarch64"; exit 1; }
     @test "{{ cpu }}" = "aarch64" -o "{{ cpu }}" = "arm64" || { echo "错误: test-llvm-linux-arm64 要求 Linux/aarch64"; exit 1; }
     {{ py }} "{{ root }}/tests/selfhost/linux-arm64/llvm-linux-arm64.py" --compiler-path "{{ yh_run }}"
 
 # test-llvm-darwin：Darwin/ARM64 静态 SDK、弱桩兼容、LLVM 对象与 Apple ABI 探针。
+# 平台专属（[macos]）；只支持 ARM64 种子。
+[macos]
 test-llvm-darwin: stage-yh
-    @test "{{ host_os }}" = "macos" -a "{{ seed_arch }}" = "arm64" || { echo "错误: test-llvm-darwin 要求 Darwin/ARM64"; exit 1; }
+    @test "{{ seed_arch }}" = "arm64" || { echo "错误: test-llvm-darwin 要求 Darwin/ARM64"; exit 1; }
     {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-sdk.py"
     {{ py }} "{{ root }}/tests/selfhost/darwin/llvm-darwin-host.py"
     {{ py }} "{{ root }}/tools/link-closure.py" check --host darwin-aarch64
@@ -535,8 +615,9 @@ test-windows-corpus: stage-yh windows-sdk
     YH_WINDOWS_SDK="{{ windows_sdk }}" "{{ py }}" "{{ root }}/tests/yh-run/check.py" --compiler "{{ yh_run }}" --target x86_64-pc-windows-msvc --run-platform windows-x64 --emit-manifest "{{ root }}/tmp/windows-corpus/manifest.json" --workdir "{{ root }}/tmp/windows-corpus" --jobs {{ llvm_jobs }} --quiet
 
 # run-windows-corpus：在真实 Windows 上执行上一步的清单（运行侧）。
-# 只在 Windows 侧跑（WSL 里跨解释器调用会撞 UNC cwd 限制）：清单是仓库相对路径，
+# 平台专属（[windows]）：WSL 里跨解释器调用会撞 UNC cwd 限制，清单是仓库相对路径，
 # 跨机器/跨挂载点都能用；WSL 侧只负责 test-windows-corpus。
+[windows]
 run-windows-corpus:
     "{{ py }}" "{{ root }}/tests/windows/run-exe.py" --manifest "{{ root }}/tmp/windows-corpus/manifest.json"
 

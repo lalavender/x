@@ -20,12 +20,37 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from llvm_cache import cache_root  # noqa: E402  闭包根唯一定义处（项目外）
 HOST_DRIVERS = {
     "darwin-aarch64": ROOT / "tools/llvm-darwin-host.py",
     "linux-x86_64": ROOT / "tools/llvm-host.py",
     "linux-aarch64": ROOT / "tools/llvm-host.py",
     "windows-x86_64": ROOT / "tools/llvm-windows-host.py",
 }
+
+
+def ensure_closure_path() -> None:
+    """把仓库内的兼容路径桥到项目外缓存；已就绪时**什么都不做**。
+
+    0.0.13 种子还不支持清单里的 `${...}` 展开，所以 `compiler/project.toml` 仍写
+    `../tmp/llvm-migration/...`。这里只在缺失时建软链，缓存数据本身位于项目外
+    （`tools/llvm_cache.py` 的默认位置），仓库里只留一个指针。
+    """
+    target = cache_root()
+    link = ROOT / "tmp/llvm-migration"
+    if link.is_symlink():
+        try:
+            if link.resolve() == target:
+                return
+        except OSError:
+            pass
+    if link.exists() and not link.is_symlink():
+        return  # 旧布局的真实目录：迁移期直接复用，不做改动
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink():
+        link.unlink()
+    link.symlink_to(target, target_is_directory=True)
 
 
 def prepare_llvm_host(host: str, mode: str) -> dict | None:
@@ -101,6 +126,7 @@ def main() -> int:
     if is_compiler and not manifest_mode:
         environment["YH_LLVM_SELFHOST"] = "1"
     if args.llvm_host:
+        ensure_closure_path()
         record = prepare_llvm_host(args.llvm_host, args.llvm_mode)
         if record:
             if not manifest_mode:

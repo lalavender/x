@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # 先把 tools/ 放进 sys.path，才能 import 同目录的 llvm_recipe。
 sys.path.insert(0, str(ROOT / "tools"))
 from llvm_recipe import sdk_recipe_digest  # noqa: E402  固定闭包配方摘要
-WORK = ROOT / "tmp/llvm-migration/darwin-sdk"
+from llvm_cache import cache_root  # noqa: E402  闭包根唯一来源（项目外）
+WORK = cache_root() / "darwin-sdk"
 MANIFEST = ROOT / "vendor/llvm/sdk.lock.json"
 DEFAULT_MIN_OS = "14.0.0"
 MIN_FREE_BYTES = 8 * 1024**3

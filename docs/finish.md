@@ -8,6 +8,30 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：LLVM 闭包缓存移到项目外 + 构建前只检测一次
+
+**结果**：
+- 默认缓存根从 `<repo>/tmp/llvm-migration` 改为**项目外**：macOS
+  `~/Library/Caches/yh/llvm-migration`，其它平台 `$XDG_CACHE_HOME|~/.cache/yh/llvm-migration`；
+  `YH_LLVM_CACHE` 仍可覆盖（`tools/llvm_cache.py` 是唯一解析处）。本机 3.7 GB 闭包已
+  `mv` 到新位置，仓库内不再存放缓存数据。
+- 删掉 justfile 的 `_prepare`；`just build/dev` 不再每次建软链/校验。`tools/seed-build.py`
+  改为“只在缺失时”把仓库 `tmp/llvm-migration` 桥到项目外缓存——当前种子 0.0.13 尚不
+  支持清单里的 `${...}` 展开，所以清单仍写仓库相对路径；等种子滚过该特性后再切
+  `${YH_LLVM_ROOT}`。
+- 新增“已封装”标记 `<cache>/.sealed-<host>.json`（`tools/llvm_recipe.py`）：
+  `just llvm-host` 与 seed-build 的 shim 先读标记（键 = SDK 配方 + 宿主配方 + 缓存根，
+  值 = `host.json` 摘要），命中即复用、不再校验 68 个归档、也不改写任何记录；只有标记
+  缺失/配方变化才做一次全量校验并重新封装。
+- `tools/llvm-darwin-sdk.py` 的 WORK 跟随 `cache_root()`（原来写死仓库路径）；
+  `tools/link-closure.py` 的宿主记录从缓存根读取，并能把缓存根内的绝对归档路径归一化。
+- `compiler/link/link_inputs.yh` 注释里的 2 个真实 NUL 字节改为文本（rg/git 不再当二进制）。
+
+**验证**：
+- `env YH_CACHE=off just build` → 冷编 14.8s；缓存记录 mtime 不变；仓库内只有软链
+- `just llvm-host`：首次全量 4.7s，之后 0.32s；`just dev` 1.9s，缓存文件未被修改
+- `just test` → 全绿
+
 ## 2026-11-10：新增代码流程图生成工具（`just codeflow`）
 
 **结果**：`tools/yh-codeflow.py` 扫描当前 `compiler/`，生成自包含 HTML
