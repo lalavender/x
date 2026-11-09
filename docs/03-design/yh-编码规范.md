@@ -113,6 +113,8 @@ let size int = gen.TG_INT_SIZE
 `verify`(24)、`init`(24)、`copy`(23)、`build`(23)、`scan`(22)、`close`(20)、
 `open`(18)、`link`(18)、`reset`(17)、`release`(17)、`grow`(17)、`new`(15)、
 `lookup`(15)、`load`(15)、`bind`(14)、`alloc`(14)、`fail`(13)。
+容器惯用动词 `pop`、`insert`、`remove`（用于 `remove_at`）于 2026-11-10 随
+list 标准库补入。
 不造 `do_*`、`handle_*`、`process_*` 这类动词。
 
 **[强制] 谓词名只用 `is_*` 或 `*_ok` 两种形态，返回值类型跟随所在模块**：

@@ -1,0 +1,283 @@
+module list
+
+import memory
+import libc
+
+// ============================================================================
+// list.yh —— 运行期元素宽度的连续存储动态列表（ArrayList）
+//
+// 无泛型约束下的唯一可行形态：元素以运行期字节宽度连续存放，宽度必须来自
+// 调用方的 sizeof(T)；元素地址以 *void 暴露，调用方用 to_type(*T) 定型。
+// 本模块只拥有存储块，不拥有元素内部资源，也不调用任何析构函数。
+//
+// 明确不提供：[]T 视图（语言禁止从裸指针构造切片）、元素析构、线程安全。
+// 扩容 = 新分配 + 复制 + 释放旧块；插入/删除的移位复用 libc.memmove。
+// 完整契约与误用边界见 docs/03-design/yh-list标准库设计.md。
+//
+// 硬规则：
+//   1. element_size 必须来自 sizeof(T)；其它宽度不保证元素对齐。
+//   2. 传给 push/push_all/insert 的元素不得指向本列表的存储：
+//      扩容会释放旧块，插入/删除的移位会移动源区域。
+//   3. reserve/push/push_all/insert/clear/release 之后，此前取得的元素
+//      指针与缓存的 data 指针全部失效。
+//   4. [count, capacity) 的槽位未初始化，读取它们是未定义行为。
+// ============================================================================
+
+// LIST_MIN_CAPACITY 是首次分配的起步槽位数；容量为 0 的列表不分配存储。
+const LIST_MIN_CAPACITY u64 = 16
+
+// LIST_MAX_BYTES 是单块存储的字节上界；与 string 的长度上界同量级，只用于
+// 拒绝明显越界的容量请求，不宣称这么大的内存可以实际分配。
+const LIST_MAX_BYTES u64 = 9223372036854775800
+
+// Status 是 list 操作的稳定结果分类；调用方按成员比较，不依赖文本。
+pub enum Status {
+    status_ok
+    status_invalid_argument // 空指针参数，或 element_size == 0 的无效列表
+    status_overflow         // 容量或字节数越过 LIST_MAX_BYTES 上界
+    status_out_of_memory    // 分配失败
+    status_bounds           // index > count（insert）
+}
+
+// List 是连续存储的动态列表描述符；字段顺序是 ABI，不许重排。
+//
+// data 指向本次独占分配的存储块（capacity == 0 时为 0），count 是已用元素
+// 个数，capacity 是可容纳元素个数，element_size 是单个元素的字节宽度。
+// 结构体赋值不复制存储块，也不增加所有者：复制后的两个描述符共用 data，
+// 只能 release 其中一个，或先 reserve 出独立存储再复制内容。
+pub struct List {
+    data *u8
+    count u64
+    capacity u64
+    element_size u64
+}
+
+// list_max_count 返回当前步长下允许的最大元素个数；0 表示步长无效或
+// 连一个元素都放不下（element_size > LIST_MAX_BYTES）。
+// 不修改列表，也不分配。
+fn list_max_count(value *List) u64 {
+    if (value == 0 || value.element_size == 0) {
+        return 0
+    }
+    return LIST_MAX_BYTES / value.element_size
+}
+
+// list_next_capacity 计算不小于 needed 的新容量；0 表示无法在上界内满足。
+// 起点取 max(capacity, LIST_MIN_CAPACITY)，不足时几何翻倍，翻倍仍不足或
+// 已越过半程时直接取 needed。不修改列表，也不分配。
+fn list_next_capacity(value *List, needed u64) u64 {
+    let maximum u64 = list_max_count(value)
+    if (maximum == 0) {
+        return 0
+    }
+    let next u64 = value.capacity
+    if (next < LIST_MIN_CAPACITY) {
+        next = LIST_MIN_CAPACITY
+    }
+    if (next < needed) {
+        if (next > maximum / 2) {
+            next = needed
+        } else {
+            next = next * 2
+            if (next < needed) {
+                next = needed
+            }
+        }
+    }
+    if (next < needed || next > maximum) {
+        return 0
+    }
+    return next
+}
+
+// list_ensure 把容量保证到至少 needed 个元素；成功后换新块并释放旧块。
+// 返回 status_ok 表示容量已足够；invalid_argument/overflow/out_of_memory
+// 表示失败，失败时 data、capacity、count 与内容都不变（D7 失败原子性）。
+// 成功扩容会搬移元素，此前派生的指针全部失效。
+fn list_ensure(value *List, needed u64) Status {
+    if (value == 0 || value.element_size == 0) {
+        return Status.status_invalid_argument
+    }
+    if (needed <= value.capacity) {
+        return Status.status_ok
+    }
+    let next u64 = list_next_capacity(value, needed)
+    if (next == 0) {
+        return Status.status_overflow
+    }
+    let data *u8 = memory.alloc(next * value.element_size).to_type(*u8)
+    if (data == 0) {
+        return Status.status_out_of_memory
+    }
+    if (value.count > 0) {
+        memory.copy(data.to_type(*void), value.data.to_type(*void),
+            value.count * value.element_size)
+    }
+    memory.release(value.data.to_type(*void))
+    value.data = data
+    value.capacity = next
+    return Status.status_ok
+}
+
+// list_element 返回第 index 个元素的地址；不做边界检查，调用方负责保证
+// value != 0、data != 0 且 index <= capacity（内部写入路径允许 index == count）。
+fn list_element(value *List, index u64) *void {
+    let offset u64 = index * value.element_size
+    return (value.data + offset).to_type(*void)
+}
+
+// make 构造空列表：data/count/capacity 全 0，element_size 原样保存，不分配。
+// element_size == 0 得到无效列表，后续操作返回 status_invalid_argument；
+// 有效步长必须来自 sizeof(T)。
+pub fn make(element_size u64) List {
+    let value List
+    value.data = 0
+    value.count = 0
+    value.capacity = 0
+    value.element_size = element_size
+    return value
+}
+
+// release 释放存储块并把 4 个字段清零；value == 0 或零列表时无操作。
+// 可重复调用；释放后列表变为无效列表（element_size == 0），再次使用前须
+// 重新 make。不析构元素内部资源。
+pub fn release(value *List) void {
+    if (value == 0) {
+        return
+    }
+    memory.release(value.data.to_type(*void))
+    value.data = 0
+    value.count = 0
+    value.capacity = 0
+    value.element_size = 0
+}
+
+// clear 把 count 置 0，保留 data 与 capacity；value == 0 时无操作。
+// 不改写字节，也不析构元素；原 [0, count) 的内容不再属于列表。
+pub fn clear(value *List) void {
+    if (value == 0) {
+        return
+    }
+    value.count = 0
+}
+
+// reserve 保证容量至少为 capacity 个元素，不改变 count 与已存内容。
+// 返回 status_ok/invalid_argument/overflow/out_of_memory；失败时列表不变。
+// 成功扩容会搬移元素，此前派生的指针全部失效。
+pub fn reserve(value *List, capacity u64) Status {
+    return list_ensure(value, capacity)
+}
+
+// element_at 返回第 index 个元素的地址；value == 0、data == 0 或越界
+// （index >= count）时返回 0。返回的是可变地址，调用方可原地读写元素；
+// reserve/push/push_all/insert/clear/release 之后该指针失效。
+pub fn element_at(value *List, index u64) *void {
+    if (value == 0 || value.data == 0 || index >= value.count) {
+        return 0
+    }
+    return list_element(value, index)
+}
+
+// push 把 element 指向的 element_size 字节复制到尾部，count 加一。
+// 返回 status_ok 或 invalid_argument/overflow/out_of_memory；失败时
+// count、capacity 与内容都不变。可能触发扩容并搬移元素。
+// element 不得指向本列表的存储（扩容会先释放旧块）。
+pub fn push(value *List, element *void) Status {
+    if (value == 0 || element == 0 || value.element_size == 0) {
+        return Status.status_invalid_argument
+    }
+    let status Status = list_ensure(value, value.count + 1)
+    if (status != Status.status_ok) {
+        return status
+    }
+    memory.copy(list_element(value, value.count), element, value.element_size)
+    value.count += 1
+    return Status.status_ok
+}
+
+// push_all 把 elements 起的 count 个元素一次复制到尾部，count 增加 count。
+// count == 0 时返回 status_ok（此时不看 elements）；count > 0 且 elements == 0
+// 或列表无效时为 invalid_argument；越过字节上界为 overflow；分配失败为
+// out_of_memory。失败时列表不变；只预留一次，不做逐元素检查。
+// elements 不得指向本列表的存储（扩容会先释放旧块）。
+pub fn push_all(value *List, elements *void, count u64) Status {
+    if (value == 0 || value.element_size == 0) {
+        return Status.status_invalid_argument
+    }
+    if (count == 0) {
+        return Status.status_ok
+    }
+    if (elements == 0) {
+        return Status.status_invalid_argument
+    }
+    let maximum u64 = list_max_count(value)
+    if (count > maximum || value.count > maximum - count) {
+        return Status.status_overflow
+    }
+    let status Status = list_ensure(value, value.count + count)
+    if (status != Status.status_ok) {
+        return status
+    }
+    memory.copy(list_element(value, value.count), elements,
+        count * value.element_size)
+    value.count += count
+    return Status.status_ok
+}
+
+// pop 把尾元素复制到 out 并移除它（count 减一）；out == 0 表示只丢弃。
+// 空列表或 value == 0 返回 false 且不改列表，成功返回 true。
+// out 不得指向本列表的存储；弹出一个元素不搬移其余元素。
+pub fn pop(value *List, out *void) bool {
+    if (value == 0 || value.count == 0) {
+        return false
+    }
+    value.count -= 1
+    if (out != 0) {
+        memory.copy(out, list_element(value, value.count), value.element_size)
+    }
+    return true
+}
+
+// insert 在 index 处插入 element，原 [index, count) 后移一个元素。
+// index > count 返回 status_bounds；index == count 等价 push。
+// 返回 status_ok 或 invalid_argument/overflow/out_of_memory；失败时列表不变。
+// 可能触发扩容并搬移元素；element 不得指向本列表的存储。
+pub fn insert(value *List, index u64, element *void) Status {
+    if (value == 0 || element == 0 || value.element_size == 0) {
+        return Status.status_invalid_argument
+    }
+    if (index > value.count) {
+        return Status.status_bounds
+    }
+    let status Status = list_ensure(value, value.count + 1)
+    if (status != Status.status_ok) {
+        return status
+    }
+    let moved u64 = value.count - index
+    if (moved > 0) {
+        libc.memmove(list_element(value, index + 1),
+            list_element(value, index), moved * value.element_size)
+    }
+    memory.copy(list_element(value, index), element, value.element_size)
+    value.count += 1
+    return Status.status_ok
+}
+
+// remove_at 把第 index 个元素复制到 out 后移除，原 [index+1, count)
+// 前移一个元素；out == 0 表示只丢弃。越界（index >= count）或 value == 0
+// 返回 false 且列表不变，成功返回 true。out 不得指向本列表的存储。
+pub fn remove_at(value *List, index u64, out *void) bool {
+    if (value == 0 || index >= value.count) {
+        return false
+    }
+    if (out != 0) {
+        memory.copy(out, list_element(value, index), value.element_size)
+    }
+    let moved u64 = value.count - index - 1
+    if (moved > 0) {
+        libc.memmove(list_element(value, index),
+            list_element(value, index + 1), moved * value.element_size)
+    }
+    value.count -= 1
+    return true
+}

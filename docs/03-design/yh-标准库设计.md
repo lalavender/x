@@ -83,6 +83,32 @@ resize/free）、增强 Arena（几何增长、reset 模式、LIFO 回收、capa
 只有上表三个 API；块来源统一为 prelude 堆，不新增 `sys` 依赖，也不替换
 `libc` 的 C ABI 分配器。
 
+### `list`（2026-11-10 首期完成）
+
+无泛型约束下的动态列表：连续字节块 + 运行期元素宽度（必须来自 `sizeof(T)`），
+元素地址以 `*void` 暴露，取用时 `to_type(*T)` 定型。`List` 的 4 个公开字段
+即描述符（`data`/`count`/`capacity`/`element_size`）；`Status` 区分
+`status_invalid_argument`/`status_overflow`/`status_out_of_memory`/`status_bounds`。
+公开面 10 个函数：
+
+| 组 | API |
+| --- | --- |
+| 生命周期 | `make`、`release`、`clear` |
+| 容量与访问 | `reserve`、`element_at` |
+| 追加 | `push`、`push_all` |
+| 搬移 | `pop`、`insert`、`remove_at` |
+
+扩容 = `memory.alloc` + 复制 + `memory.release`，起步 16 槽、容量翻倍，上限
+`LIST_MAX_BYTES / element_size`；插入/删除的移位复用 `libc.memmove`。空指针、
+越界、溢出与分配失败都返回可判别结果，且失败时 `count`/`capacity`/内容不变。
+list 不析构元素、不追踪元素所有权、不提供 `[]T` 视图（语言禁止从裸指针构造
+切片）。步长必须来自 `sizeof(T)`，传给 push 系列的元素不得指向列表自身存储，
+成功的可变操作使此前取得的元素指针与缓存的 `data` 失效。
+
+设计见 [list 标准库设计](yh-list标准库设计.md)，实施方案见
+[实施方案](../02-plan/yh-list标准库实施方案-2026-11-10.md)，用法与硬规则见
+[`libs/list/README.md`](../../libs/list/README.md)。
+
 ### `string`（2026-10-23 首期完成）
 
 旧接口保持原签名、返回值与 NUL 截止语义：

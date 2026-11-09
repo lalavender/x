@@ -1,0 +1,249 @@
+module list
+
+// ============================================================================
+// list.test.yh —— list 标准库的 yh 内建测试
+//
+// 只在 `yh test list` 中执行；生产构建不登记测试符号、不发射测试体。
+// 覆盖空列表、扩容、元素访问、预留、释放、结构体步长、插入/删除/弹出与
+// 批量追加。断言不依赖未定义行为（不读 count 之后的槽位）。
+// ============================================================================
+
+// Pair 是 {u8, i64} 布局的测试元素：sizeof 为 16（按 i64 对齐补齐），
+// 用来验证「步长取 sizeof(T) 时第二个元素仍按正确偏移寻址」。
+struct Pair {
+    flag u8
+    value i64
+}
+
+// push_i64 把 item 追加到 i64 列表；返回 push 的状态。
+// 源是局部变量，满足「元素来源不得指向本列表存储」的契约。
+fn push_i64(value_list *List, item i64) Status {
+    let scratch i64 = item
+    return push(value_list, (&scratch).to_type(*void))
+}
+
+test "make 产生空列表并记录元素步长" {
+    let zero List = make(0)
+    $assert(zero.data == 0, "空列表 data 应为 0")
+    $assert(zero.count == 0, "空列表 count 应为 0")
+    $assert(zero.capacity == 0, "空列表 capacity 应为 0")
+    $assert(zero.element_size == 0, "步长 0 原样保留")
+    let item i64 = 1
+    $assert(push(&zero, (&item).to_type(*void)) == Status.status_invalid_argument,
+        "无效列表 push 应返回 invalid_argument")
+    $assert(reserve(&zero, 4) == Status.status_invalid_argument,
+        "无效列表 reserve 应返回 invalid_argument")
+    $assert(element_at(&zero, 0) == 0, "无效列表 element_at 应返回 0")
+
+    let valid List = make(sizeof(i64).to_type(u64))
+    $assert(valid.data == 0, "有效空列表不分配存储")
+    $assert(valid.count == 0, "有效空列表 count 应为 0")
+    $assert(valid.capacity == 0, "有效空列表 capacity 应为 0")
+    $assert(valid.element_size == 8, "i64 步长应为 8")
+}
+
+test "push 跨过起步容量时扩容并保留旧元素" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    let index int = 0
+    for index < 17 {
+        $assert(push_i64(&numbers, index.to_type(i64)) == Status.status_ok,
+            "容量内的 push 应成功")
+        index += 1
+    }
+    $assert(numbers.count == 17, "17 次 push 后 count 应为 17")
+    $assert(numbers.capacity > LIST_MIN_CAPACITY, "第 17 个元素应触发扩容")
+    $assert(numbers.capacity >= 17, "容量应至少容纳 17 个元素")
+    let items *i64 = numbers.data.to_type(*i64)
+    let cursor u64 = 0
+    for cursor < numbers.count {
+        $assert(items[cursor] == cursor.to_type(i64), "扩容应保留全部旧元素")
+        cursor += 1
+    }
+    release(&numbers)
+}
+
+test "element_at 命中与越界返回空指针" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(element_at(&numbers, 0) == 0, "空列表任何下标都返回 0")
+    $assert(push_i64(&numbers, 11) == Status.status_ok, "第一次 push 应成功")
+    $assert(push_i64(&numbers, 22) == Status.status_ok, "第二次 push 应成功")
+    let first *i64 = element_at(&numbers, 0).to_type(*i64)
+    $assert(first[0] == 11, "第 0 个元素应为 11")
+    let second *i64 = element_at(&numbers, 1).to_type(*i64)
+    $assert(second[0] == 22, "第 1 个元素应为 22")
+    $assert(element_at(&numbers, 2) == 0, "index == count 应返回 0")
+    $assert(element_at(&numbers, numbers.count) == 0, "index == count 应返回 0")
+    $assert(element_at(0, 0) == 0, "空指针列表应返回 0")
+    release(&numbers)
+}
+
+test "release 清零且可重复调用" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 5) == Status.status_ok, "push 应成功")
+    $assert(numbers.data != 0, "已分配列表 data 应非 0")
+    release(&numbers)
+    $assert(numbers.data == 0, "release 后 data 应为 0")
+    $assert(numbers.count == 0, "release 后 count 应为 0")
+    $assert(numbers.capacity == 0, "release 后 capacity 应为 0")
+    $assert(numbers.element_size == 0, "release 后 element_size 应为 0")
+    release(&numbers)
+    release(0)
+}
+
+test "reserve 扩容不改 count，越界请求返回 overflow" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 7) == Status.status_ok, "push 应成功")
+    let old_data *u8 = numbers.data
+    $assert(reserve(&numbers, 64) == Status.status_ok, "reserve 64 应成功")
+    $assert(numbers.capacity == 64, "容量应扩到 64")
+    $assert(numbers.count == 1, "reserve 不改 count")
+    $assert(numbers.data != old_data, "扩容应换新块")
+    let kept *i64 = numbers.data.to_type(*i64)
+    $assert(kept[0] == 7, "reserve 应保留元素")
+
+    $assert(reserve(&numbers, LIST_MAX_BYTES) == Status.status_overflow,
+        "超过字节上界应返回 overflow")
+    $assert(numbers.capacity == 64, "overflow 后 capacity 不变")
+    $assert(numbers.count == 1, "overflow 后 count 不变")
+    $assert(kept[0] == 7, "overflow 后内容不变")
+    release(&numbers)
+}
+
+test "结构体元素按 sizeof 步长寻址" {
+    let numbers List = make(sizeof(Pair).to_type(u64))
+    $assert(numbers.element_size == 16, "Pair 步长按 i64 对齐应为 16")
+    let first Pair
+    first.flag = 1
+    first.value = 100
+    $assert(push(&numbers, (&first).to_type(*void)) == Status.status_ok, "push 应成功")
+    let second Pair
+    second.flag = 2
+    second.value = 200
+    $assert(push(&numbers, (&second).to_type(*void)) == Status.status_ok, "push 应成功")
+    let items *Pair = numbers.data.to_type(*Pair)
+    $assert(items[0].flag == 1, "首个元素 flag 应为 1")
+    $assert(items[0].value == 100, "首个元素 value 应为 100")
+    $assert(items[1].flag == 2, "第二个元素 flag 应为 2")
+    $assert(items[1].value == 200, "第二个元素 value 应为 200")
+    items[1].value = 201
+    let slot *Pair = element_at(&numbers, 1).to_type(*Pair)
+    $assert(slot[0].value == 201, "element_at 返回的地址应可原地写")
+    release(&numbers)
+}
+
+// insert_i64 在 index 处插入 item；返回 insert 的状态。
+// 源是局部变量，满足「元素来源不得指向本列表存储」的契约。
+fn insert_i64(value_list *List, index u64, item i64) Status {
+    let scratch i64 = item
+    return insert(value_list, index, (&scratch).to_type(*void))
+}
+
+test "insert 在头中尾插入并保持顺序" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 3) == Status.status_ok, "push 3 应成功")
+    $assert(insert_i64(&numbers, 0, 0) == Status.status_ok, "头插应成功")
+    $assert(insert_i64(&numbers, 2, 2) == Status.status_ok, "中插应成功")
+    $assert(insert_i64(&numbers, numbers.count, 4) == Status.status_ok, "尾插应成功")
+    $assert(numbers.count == 5, "插入后 count 应为 5")
+    let items *i64 = numbers.data.to_type(*i64)
+    let index u64 = 0
+    for index < numbers.count {
+        $assert(items[index] == index.to_type(i64), "插入后元素应按下标有序")
+        index += 1
+    }
+    $assert(insert_i64(&numbers, numbers.count + 1, 9) == Status.status_bounds,
+        "index > count 应返回 status_bounds")
+    $assert(numbers.count == 5, "status_bounds 不应改变 count")
+    let item i64 = 1
+    $assert(insert(0, 0, (&item).to_type(*void)) == Status.status_invalid_argument,
+        "空指针列表 insert 应返回 invalid_argument")
+    release(&numbers)
+}
+
+test "remove_at 删除头中尾并前移后续元素" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    let index int = 0
+    for index < 5 {
+        $assert(push_i64(&numbers, index.to_type(i64)) == Status.status_ok, "push 应成功")
+        index += 1
+    }
+    let out i64 = 0
+    $assert(remove_at(&numbers, 0, (&out).to_type(*void)), "头部删除应成功")
+    $assert(out == 0, "out 应是头部元素 0")
+    $assert(numbers.count == 4, "头部删除后 count 应为 4")
+    $assert(remove_at(&numbers, 1, (&out).to_type(*void)), "中部删除应成功")
+    $assert(out == 2, "out 应是中部元素 2")
+    $assert(remove_at(&numbers, 2, (&out).to_type(*void)), "尾部删除应成功")
+    $assert(out == 4, "out 应是尾部元素 4")
+    $assert(numbers.count == 2, "三次删除后 count 应为 2")
+    let items *i64 = numbers.data.to_type(*i64)
+    $assert(items[0] == 1, "删除后首个元素应为 1")
+    $assert(items[1] == 3, "删除后第二个元素应为 3")
+    $assert(remove_at(&numbers, 2, 0) == false, "越界删除应返回 false")
+    $assert(numbers.count == 2, "越界删除不应改变 count")
+    $assert(remove_at(&numbers, 0, 0), "out == 0 应只丢弃")
+    $assert(numbers.count == 1, "丢弃删除后 count 应为 1")
+    $assert(items[0] == 3, "丢弃删除后剩余元素应为 3")
+    release(&numbers)
+}
+
+test "pop 空列表返回 false，非空取尾元素" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    let out i64 = 0
+    $assert(pop(&numbers, (&out).to_type(*void)) == false, "空列表 pop 应返回 false")
+    $assert(numbers.count == 0, "pop 失败不应改变 count")
+    $assert(push_i64(&numbers, 10) == Status.status_ok, "push 10 应成功")
+    $assert(push_i64(&numbers, 20) == Status.status_ok, "push 20 应成功")
+    $assert(pop(&numbers, (&out).to_type(*void)), "非空 pop 应成功")
+    $assert(out == 20, "out 应是尾元素 20")
+    $assert(numbers.count == 1, "pop 后 count 应减一")
+    $assert(pop(&numbers, 0), "out == 0 应只丢弃")
+    $assert(numbers.count == 0, "丢弃尾元素后 count 应为 0")
+    $assert(pop(&numbers, 0) == false, "已空列表再次 pop 应返回 false")
+    release(&numbers)
+}
+
+test "clear 清空 count 但保留容量" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    let capacity u64 = numbers.capacity
+    let data *u8 = numbers.data
+    clear(&numbers)
+    $assert(numbers.count == 0, "clear 后 count 应为 0")
+    $assert(numbers.capacity == capacity, "clear 应保留 capacity")
+    $assert(numbers.data == data, "clear 应保留 data")
+    $assert(element_at(&numbers, 0) == 0, "clear 后没有可访问元素")
+    $assert(push_i64(&numbers, 3) == Status.status_ok, "clear 后可继续 push")
+    let items *i64 = numbers.data.to_type(*i64)
+    $assert(items[0] == 3, "clear 后首个元素应为新值 3")
+    release(&numbers)
+}
+
+test "push_all 一次追加多个元素" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    let source [3]i64
+    source[0] = 4
+    source[1] = 5
+    source[2] = 6
+    $assert(push_all(&numbers, (&source[0]).to_type(*void), 3) == Status.status_ok,
+        "push_all 应成功")
+    $assert(numbers.count == 5, "push_all 后 count 应为 5")
+    let items *i64 = numbers.data.to_type(*i64)
+    $assert(items[0] == 1, "第 0 个元素应为 1")
+    $assert(items[1] == 2, "第 1 个元素应为 2")
+    $assert(items[2] == 4, "第 2 个元素应为 4")
+    $assert(items[3] == 5, "第 3 个元素应为 5")
+    $assert(items[4] == 6, "第 4 个元素应为 6")
+    $assert(push_all(&numbers, 0, 0) == Status.status_ok, "count == 0 应返回 ok")
+    $assert(numbers.count == 5, "count == 0 不应改变列表")
+    $assert(push_all(&numbers, 0, 2) == Status.status_invalid_argument,
+        "elements == 0 且 count > 0 应返回 invalid_argument")
+    $assert(numbers.count == 5, "失败不应改变 count")
+    $assert(push_all(0, (&source[0]).to_type(*void), 1) == Status.status_invalid_argument,
+        "空指针列表应返回 invalid_argument")
+    release(&numbers)
+}
