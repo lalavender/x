@@ -12,7 +12,12 @@
 > **阅读约定（2026-11-08）**：`compiler/gen/` 已于 2026-11-07 删除（模块 19→18，
 > `import gen` 归零）。文中凡以现在时描述 `gen` 的段落（§0.2、§4.1、§5.2、
 > §6.3.1–§6.3.2）都是该日期之前的**历史快照**，只解释当时的拆分动因；现行约束
-> 以 §3.1 允许边与 §6.3 矩阵为准——它们与 `tools/arch-check.py` 的 `ALLOWED` 逐条一致。
+> 以 §3.1 允许边与 §6.3 矩阵为准。
+>
+> **门禁变更（2026-11-09）**：`tools/arch-check.py` 与它的自测已删除，依赖边和
+> 状态/资源预算不再有机器校验（`just test` 里的这一层也移除了）。§3.1 的允许边、
+> §6 的实测数字、§10.1 的预算基线现在都只是**评审基准**，违例靠 code review 发现，
+> 数字也会随代码漂移。
 >
 > 前端两遍化的 **F0–F7 已于 2026-11-08 重估为 S1–S4**，实测依据见
 > [`02-plan/yh-前端两遍化-重新分析-2026-11-08.md`](../02-plan/yh-前端两遍化-重新分析-2026-11-08.md)：
@@ -31,8 +36,8 @@
 
 1. **分层方向是对的**：18 个模块的显式 import 图无环，`support` 与 `ir` 是依赖根
    （`gen` 已于 2026-11-07 删除），
-   `proj` 是项目数据层，`build` 是总装层，`cmd` 只做参数映射与分派。依赖矩阵由
-   `tools/arch-check.py` 强制。
+   `proj` 是项目数据层，`build` 是总装层，`cmd` 只做参数映射与分派。依赖矩阵见 §3.1
+   （评审基准；2026-11-09 起无自动门禁）。
 2. **真正的乱不在依赖环，而在“名字、所有权、契约”三件事**：
    - （历史）`gen` 曾是基础设施、语义模型、语义分析、C ABI 与平台层，15/17 个模块
      依赖它、183 个 `pub fn`；拆分决定见 [ADR-0021](../adr/0021-yh-gen职责拆分.md)，
@@ -65,7 +70,7 @@ yh 不是“一个编译器源码目录”，而是 **语言 + 前端 + 语言 I
 | 编译器本体 | `compiler/` | 单个 yh 项目；一个 `yh` 二进制内含前端、IR、LLVM 发射、构建引擎与链接驱动 |
 | 标准库 | `libs/` | 独立 `project.toml` 项目，经三层来源解析接入；不是编译器内部模块 |
 | 测试语料 | `tests/` | 与编译器同语言的运行/语法/模块/自举/性能语料 |
-| 工具与门禁 | `tools/` | `arch-check.py`、`link-closure.py`、性能/发布/种子脚本 |
+| 工具与门禁 | `tools/` | `link-closure.py`、性能/发布/种子脚本（架构守护 `arch-check.py` 已于 2026-11-09 删除） |
 | 固定 LLVM/lld 闭包 | `vendor/`、`tmp/llvm-migration/` | 由 `just llvm-host`/`just bootstrap` 准备；种子不烘焙构建机路径 |
 | 种子 | `bin/yh-<平台>-<架构>` | 上一代编译器二进制，不入库；`just fetch-seed` 从 Release 下载并核对哈希 |
 
@@ -150,7 +155,7 @@ bin/yh-<平台>-<架构>（Release 种子）
 本节只保留分层意图：`support`/`ir` 是无依赖底座，`token`/`cache`/`lex`/`proj`/`ast`/
 `comptime` 依次叠到语义层，`check` 是语义中心，`parse` 是前端装配，
 `lower`→`backend`→`link`→`build` 是后端与构建链，`cmd`/`testkit`/`cmdline` 是入口。
-任何模块的新增依赖都必须同时更新 `tools/arch-check.py` 的 `ALLOWED` 与那份清单。
+任何模块的新增依赖都必须同时更新 §3.1 允许边与那份清单。
 
 ### 2.2 一句话记忆
 
@@ -164,15 +169,16 @@ bin/yh-<平台>-<架构>（Release 种子）
 
 ### 2.3 耦合读数
 
-出度/入度、模块级 `let` 与 `pub fn` 的实测值随代码演进，统一由
-`tools/arch-check.py` 输出（`just` 与 CI 都跑它），逐模块快照见
+出度/入度、模块级 `let` 与 `pub fn` 的实测值随代码演进，原本由
+`tools/arch-check.py` 输出（该工具 2026-11-09 已删除，重测需另写脚本），当时的
+逐模块快照见
 [`yh-模块职责-当前实现.md`](yh-模块职责-当前实现.md) §3 与 §6。
 
 ---
 
 ## 3. 依赖规则
 
-### 3.1 允许的依赖边（`arch-check` 强制）
+### 3.1 允许的依赖边（评审基准）
 
 ```text
 support    → （无）
@@ -195,7 +201,7 @@ testkit    → support, token, proj, ast, parse, link, build
 main       → support, ir, lex, cmdline, proj, ast, comptime, check, builtin, parse, lower, backend, link, build, testkit
 ```
 
-新增边必须同时改 `tools/arch-check.py` 的 `ALLOWED` 与本文；环数必须为 0。
+新增边必须同时改本文与 §6.3 矩阵，并人工核对环数为 0。
 
 ### 3.2 分层与根
 
@@ -420,7 +426,7 @@ testkit   cmd               ← 测试 runner / CLI 分派
 | S3 | 产物契约未版本化 | 六处独立常量；`.s.i` 已支持区间，IR/缓存各自相等判定 | 部分 |
 | A1 | `build` 仍过载 | 6,990 行；project*/toml/cache 可下沉 | 未解决 |
 | A3 | `gen` 无内部分层 | 183 `pub fn`、14 入度、基础设施+语义+ABI+平台混居 | 已解决（2026-11-07 `gen` 删除） |
-| A4 | 文档与代码漂移 | 2026-11-06 已把 `compiler/README.md` 模块表改为实测 17/158/59,815；README 断言尚未加入 `arch-check` | 部分 |
+| A4 | 文档与代码漂移 | 2026-11-06 已把 `compiler/README.md` 模块表改为实测 17/158/59,815；曾计划把 README 断言纳入 `arch-check`，该工具已于 2026-11-09 删除 | 部分 |
 | A6 | `testkit → build` 泄漏 | 15 处（8 个符号）`mb_*`/`cmd_*` 直接引用 | 未解决 |
 | A7 | 平台适配靠文件复制 | `clock`/`project_dir`/`argv`/`console`/`llvm_bind`/`*_runtime` 各 4 份 | 未解决 |
 | A8 | 增量粒度 | 函数 check/IR 缓存已用；对象粒度固定模块级（ADR-0020）；`module_worker` 废参数链仍在 | 部分 |
@@ -431,7 +437,7 @@ testkit   cmd               ← 测试 runner / CLI 分派
 | --- | --- | ---: | --- |
 | N1 | `link` 模块行数 | 4,272 | 当前最大模块；下一次 Windows 链接功能前建议先拆分 |
 | N2 | `parse/parse_expr.yh` 文件行数 | 2,042 | 当前最大文件；表达式语法扩展前建议先拆文件 |
-| N3 | `compiler/README.md` 模块表 | 已同步 | 仍建议把模块表纳入 `arch-check` 断言，防止复发 |
+| N3 | `compiler/README.md` 模块表 | 已同步 | 原建议把模块表纳入 `arch-check` 断言；该工具已删除，改为随代码演进人工重测 |
 | N4 | `ir` 增长速度 | 5,384 行 | 函数缓存/序列化扩展快；契约版本升级成本落在该模块 |
 
 ### 5.4 其他未解决项
@@ -463,7 +469,7 @@ testkit   cmd               ← 测试 runner / CLI 分派
 
 | 编号 | 原则 | 可检验判据 |
 | --- | --- | --- |
-| P1 | 单向依赖，内核不依赖驱动 | 依赖矩阵由 `arch-check` 强制，环数 = 0 |
+| P1 | 单向依赖，内核不依赖驱动 | 依赖矩阵见 §3.1（人工评审）；环数 = 0 |
 | P2 | 数据与变换分离 | `ast` 只存，`lower` 只变 |
 | P3 | 状态显式 | 新增模块级可变 `let` 需 ADR；每任务态进上下文 |
 | P4 | 契约版本化 | 每个产物有 magic + 版本 + 兼容策略 |
@@ -487,7 +493,7 @@ L1 后端     backend（LLVM 描述）  link（工具链调用，缓存移出）
 L0 支撑     support（含诊断/目标身份）  token
 ```
 
-### 6.3 允许依赖矩阵（2026-11-08，与 `tools/arch-check.py` 的 `ALLOWED` 逐条一致）
+### 6.3 允许依赖矩阵（2026-11-08 快照，已无机器校验）
 
 | 模块 | 允许依赖 |
 | --- | --- |
@@ -1067,7 +1073,7 @@ F7  删除旧语义动作路径、固定点、滚种子
 
 1. `parse_expr.yh` 文件级拆分（primary/postfix/binary），降低当前最大文件规模；
 2. `link` 文件级拆分（platform/link_driver/coff），降低当前最大模块规模；
-3. `compiler/README.md` 模块表改为实测数据，并纳入 `arch-check` 断言；
+3. `compiler/README.md` 模块表改为实测数据，并随代码演进人工重测（原计划纳入 `arch-check` 断言，该工具已删除）；
 4. `testkit` 的 15 处（8 个符号）`mb_*`/`cmd_*` 引用改走 `proj`/`link` 窄口；
 5. 契约版本统一入口（至少 `yh version --contracts` 列出六处版本）。
 
@@ -1081,7 +1087,7 @@ F7  删除旧语义动作路径、固定点、滚种子
 | 拆分导出面 | 跨模块搬家导致 `.s.i` 身份变化 | 同模块搬家比字节；跨模块改用固定点 + 全量语料等价，不把编译器自身 `.s.i` 当基准 |
 | 增量正确性 | 偶发陈旧对象 | 保守失效面 + 依赖矩阵测试 + 负例 |
 | 平台扩张 | 某平台只有“能编译”没有“能自举” | 每平台四格验收（构建/运行/自举/性能） |
-| 文档漂移 | README/注释与实现不符 | `arch-check` 断言 + 随切片更新 |
+| 文档漂移 | README/注释与实现不符 | 随切片更新 + 评审（原 `arch-check` 断言已随工具删除） |
 
 ### 9.7 项目布局与依赖查找（候选，未实施）
 
@@ -1103,24 +1109,24 @@ F7  删除旧语义动作路径、固定点、滚种子
 
 ## 10. 架构守护
 
-### 10.1 现有 `arch-check`
+### 10.1 原有 `arch-check`（已删除）
 
-`python3 tools/arch-check.py` 检查：
+`tools/arch-check.py` 曾在 `just test` 里检查三件事：
 
 1. **依赖矩阵**：模块间 import 必须在 `ALLOWED` 内，且无环；
 2. **状态/资源预算**：模块级可变全局、`gen.G()` 读点、未判空 `malloc`、未接线
    `pub fn`、容量安全追加点，只减不增；
 3. **报告**：依赖边与状态读数一览，便于 release 记录跟踪趋势。
 
-代码行数不在 `arch-check` 里检查：规模统计由 `just code-stats` 单独报告，
-`arch-check` 只守依赖方向与状态/资源纪律。预算上调必须改
-`tools/arch-check.py` 的 `BUDGETS` 并说明理由——刻意摩擦，防止“改一行就放宽”。
+代码行数从来不在它里检查（规模由 `just code-stats` 单独报告）。**2026-11-09 删除**：
+上述约束不再自动校验，本节保留作为评审清单；要恢复机器校验需重新实现并把自测
+（原 `tests/tools/arch-check/check.py`）一起接回 `just test`。
 
 ### 10.2 建议新增的断言
 
 | 断言 | 目的 |
 | --- | --- |
-| `compiler/README.md` 模块表与 `arch-check` 实测一致 | 终结 README 漂移（N3） |
+| `compiler/README.md` 模块表与实测一致（原 `arch-check` 已删除） | 终结 README 漂移（N3） |
 | 目录职责表与 `compiler/` 实际模块集合一致 | 新增/删除模块必须同步本文 |
 | 缓存键在 `cache/`、提交在 `build/` | 防止第四套缓存出现 |
 | `testkit` 不得新增对 `build` 内部符号的引用 | 守住 A6 |
@@ -1134,7 +1140,7 @@ F7  删除旧语义动作路径、固定点、滚种子
 
 | 指标 | 采集方式 | 期望 |
 | --- | --- | --- |
-| 依赖环数 / 越界边数 | `arch-check` | 0 / 0 |
+| 依赖环数 / 越界边数 | `rg '^import '` 人工核对（原 `arch-check`） | 0 / 0 |
 | 模块/文件规模、单文件/函数最大行数 | `just code-stats`（仅报告，不作门禁） | 趋势可追踪 |
 | 单模块 `pub fn` 数 | `grep -c '^pub fn '` | 稳定；新增需说明消费者 |
 | 模块级可变 `let` 数 / `G()` 点 | `grep` | 下降 |
@@ -1228,8 +1234,8 @@ F7  删除旧语义动作路径、固定点、滚种子
 ## 附录 B：测量与复现
 
 ```bash
-# 模块/文件/依赖边/状态预算（行数见 just code-stats）
-python3 tools/arch-check.py
+# 模块/文件/依赖边（行数见 just code-stats）；原 `python3 tools/arch-check.py`
+# 已于 2026-11-09 删除，依赖边用下面两条人工核对
 
 # 模块规模
 just code-stats

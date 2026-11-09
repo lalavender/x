@@ -172,7 +172,7 @@ python3 tools/compiler-tests.py --compiler-path ./yh
 | `lower/module_snapshot_lower_selftest.yh` | check 切片与 lowering 的离线等价性探针（唯一调用方是测试项目） |
 
 `lower` 只 import `check`/`ast`/`ir`/`support`，**不得 import parse/build**；`ast` 也不得
-反向 import `lower`/`check`（由 `arch-check` 的 `ALLOWED` 强制）。F1 把快照迁出后
+反向 import `lower`/`check`（2026-11-09 起靠评审：`arch-check` 已删除）。F1 把快照迁出后
 `ast` 只剩 1,347 行纯 AST arena。
 
 **check** —— 语义入口与受检契约（F1 起拥有 `CheckedModule` 快照）
@@ -420,7 +420,8 @@ testkit ─▶ build（复用调度与产物路径，执行测试体）
 逐阶段当前流程见[编译流程-当前实现](../docs/03-design/yh-编译流程-当前实现.md)。
 缓存层次与键/manifest 见[缓存设计](../docs/03-design/yh-缓存设计.md)。
 
-依赖方向由 `just arch-check` 强制（`tools/arch-check.py` 的 `ALLOWED`）：
+依赖方向见[架构设计 §3.1](../docs/03-design/yh-架构设计.md)（原由 `just arch-check`
+强制，该工具 2026-11-09 已删除，现靠评审）：
 `gen`/`ir` 是依赖根，`parse`/`ast`/`check`/`comptime`/`lower`/`backend` 在其上，
 `proj`/`build` 装配下层，`cmd` 在最顶。当前 17 模块 61 条边、无环；目录职责、
 依赖矩阵与结构性问题见[架构设计](../docs/03-design/yh-架构设计.md)。

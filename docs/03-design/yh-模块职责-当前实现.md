@@ -20,8 +20,9 @@ L1  check（语义中心）      comptime（CT 执行器） ast（语法树）  
 L0  support  token  ir  cache  lex
 ```
 
-依赖只能**向下**（箭头指向被依赖方），由 `tools/arch-check.py` 的 `ALLOWED` 表强制；
-越界即红灯。`support` 与 `ir` 无依赖，是所有模块的公共底座。
+依赖只能**向下**（箭头指向被依赖方），以本文表格与
+[架构设计 §3.1](yh-架构设计.md) 为准；`tools/arch-check.py` 已于 2026-11-09 删除，
+不再有自动门禁，越界靠 code review 发现。`support` 与 `ir` 无依赖，是所有模块的公共底座。
 
 ## 2. 逐模块职责
 

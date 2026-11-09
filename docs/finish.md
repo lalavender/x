@@ -8,6 +8,19 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-09：删除架构守护 tools/arch-check.py
+
+**结果**：按用户决定移除架构守护，`tools/arch-check.py` 与自测
+`tests/tools/arch-check/check.py` 删除；`just test` 里对应的两层与 `just arch-check` 配方
+一并去掉。依赖方向、状态/资源预算、版本常量一致性从此**不再有机器校验**：
+`docs/03-design/yh-架构设计.md` §3.1 / §6.3 / §10.1 改为“评审基准”，
+`yh-模块职责-当前实现.md`、`yh-编译流程-当前实现.md`、`compiler/README.md` 里
+“由 arch-check 强制”的措辞同步改写；`compiler/build/stats_print.yh` 注释里对
+文件预算的引用一并清理。
+
+**验证**：`env YH_CACHE=off just build` 冷编通过；`just --dry-run test` 配方可展开；
+`rg -n 'arch-check' justfile .github tools tests` 为空。
+
 ## 2026-11-09：arch-check 版本常量改按内容定位 + 删除休眠的性能脚本
 
 **结果**：

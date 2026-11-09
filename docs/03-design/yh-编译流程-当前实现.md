@@ -567,7 +567,7 @@ C4 起 `YH_CACHE` 指向全局 content store（默认平台缓存目录，`off` 
 | 前端阶段 | `parse` 边解析边做语义动作并写 AST | `parse_*`、`check.sem_*`（原 `gen.sem_*`）、`ast.ast_expr_set_semantics` |
 | `check` | 只读结构 verifier | `check/verify.yh`、`mb_emit_indexed_module` 的 verify 段 |
 | CT 展开 | 在 parse 文件子遍中完成 | `parse_comptime`、`parse_ct_layout`、`mb_pass2_file` mode 2–4 |
-| `gen` 耦合 | 已消除（2026-11-07 `gen` 删除）：token/类型/状态/基础设施/target 分散到 `support`/`check`，越界由 `arch-check` 防守 | `support/*`、`check/symbols`、`check/ct_bind` |
+| `gen` 耦合 | 已消除（2026-11-07 `gen` 删除）：token/类型/状态/基础设施/target 分散到 `support`/`check`；越界靠评审（`arch-check` 2026-11-09 已删除） | `support/*`、`check/symbols`、`check/ct_bind` |
 | 状态 | `TaskCtx` 字段 0；会话状态集中在 `support.session()`（`SessionCtx`），模块级可变 `let` 203 | `support/base.yh`、`state_init`、worker 初始化 |
 | 接口 | `.s.i`/`.s.ct` 读写仍在 `parse` | `parse/iface*`、`mb_*_emit` |
 | 项目模型 | `proj` 只读；`build` 负责装载/扫描 | `build/project_index`、`proj_*` |
@@ -630,7 +630,8 @@ cc3 build compiler/ → cc4
 8. 每个行为变更补 `tests/yh-run/` 或 `tests/modules/` 用例。
 9. 每阶段 `just` + `just test` + `just selfhost-native`；纯移动阶段要求
    `.s`/`.s.i` 逐字节一致。
-10. 改 `ALLOWED`/`BUDGETS` 必须同步 `tools/arch-check.py` 与架构文档。
+10. 新增/变更模块依赖必须同步更新 `docs/03-design/yh-架构设计.md` §3.1 的允许边
+   （原 `ALLOWED` 表随 `tools/arch-check.py` 于 2026-11-09 删除）。
 
 ---
 
