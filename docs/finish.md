@@ -8,6 +8,25 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-09：arch-check 版本常量改按内容定位 + 删除休眠的性能脚本
+
+**结果**：
+
+- `tools/arch-check.py` 的 VCONST 检查不再写死 `compiler/cmdline/cmdline.yh`——`cmdline`
+  模块已并入 `cmd/yh/`（module main），写死路径让守护在挪文件后直接抛
+  `FileNotFoundError`（`just test` 因此自测 0/8）。现在在源码树里按内容搜索
+  `YH_VERSION_TEXT` 声明，要求恰好一处，并报出相对路径；`project.toml` 也从被测
+  源码根读，使 `--root` 自测与被测树一致。
+- 依赖矩阵随之修正：删掉失效的 `cmdline` 条目，`main` 允许依赖 `libs`
+  （`libs/cli` 的参数声明与解析现在在 `cmd/yh/cmd_base.yh`）。
+- 删除 `tools/compiler-performance.py`：没有 justfile/CI 引用，编译耗时口径已由
+  `tools/perf-baseline.py`（`perf.yml` 在用）承担；且它的冻结语料校验自 `2976a3d`
+  起恒失败（给 `tests/perf/corpus-r0/compiler/project.toml` 补了 `os`/`arch` 两行，
+  却没重生成 `SHA256SUMS`）。`corpus-r0` 保留为历史快照并在 README 标注不可校验。
+
+**验证**：`python3 tools/arch-check.py` → 架构检查通过（17 模块 / 180 文件 / 76 条依赖边）；
+`python3 tests/tools/arch-check/check.py` → 9/9（新增「删掉版本常量必须红灯」，TOTAL 8→9）。
+
 ## 2026-11-09：CI 去重——门禁与打包收进 justfile
 
 **结果**：`ci.yml`（232 行）与 `release.yml`（545 行）各写一套四端构建，`perf.yml` 再抄一份

@@ -68,12 +68,11 @@ ALLOWED = {
     # testkit：语言内测试执行器（yh test 子命令的实现），位于 build 之上。
     # 模块名不能叫 test——`test "..." {}` 是语言关键字。
     "testkit": {"parse", "build", "proj", "link", "token", "support", "ast"},
-    # cmdline：命令行声明与解析（CLI-R）。唯一允许依赖标准库 libs/cli 的模块，
-    # 这样 `cmd`（module main）自身保持「参数映射 + 调用面」，不直接引标准库。
-    "cmdline": {"libs", "support"},
+    # main：CLI 声明/解析（libs/cli）+ 子命令分派。2026-11-09 起 cmdline 并入
+    # `cmd/yh/`（module main），`libs` 因此由 main 直接依赖；不再有独立 cmdline 模块。
     "main": {"lex", "comptime", "ast", "check", "parse", "ir",
              "backend", "builtin", "build", "testkit", "lower", "proj", "link",
-             "cmdline", "support"},}
+             "libs", "support"},}
 
 # —— 状态/资源预算（现状即上限，只减不增；不含代码行数）——
 # 代码规模由 `just code-stats` 单独报告，本工具不按行数阻断。
@@ -138,6 +137,19 @@ def module_files():
 
 def read(p):
     return p.read_text(errors="ignore")
+
+
+def version_constants():
+    """收集声明 YH_VERSION_TEXT 的源文件与版本号。
+
+    位置不写死：模块目录会重组（cmdline 已并入 cmd/yh），写死路径会在挪文件后
+    直接抛 FileNotFoundError，把"守卫崩溃"伪装成"检查失败"。按源码树搜索，
+    并要求恰好一处声明。"""
+    found = []
+    for f in source_files():
+        for m in re.finditer(r'YH_VERSION_TEXT \*char = "yh ([^"]+)"', read(f)):
+            found.append((f, m.group(1)))
+    return found
 
 
 def imports_of(path):
@@ -325,19 +337,23 @@ def main():
         problems.append(
             f"min_cap_appends 低于基线：{cap_appends} < {BUDGETS['min_cap_appends']}")
 
-    # —— 版本一致性（VCONST，2026-11-05）：cmdline 的 YH_VERSION_TEXT
-    # 编码进二进制供 `yh --version` 使用，必须与 compiler/project.toml 的
-    # project.version 一致，防止滚版本时只改一处。
-    toml_text = (ROOT / "compiler" / "project.toml").read_text(encoding="utf-8")
+    # —— 版本一致性（VCONST，2026-11-05）：YH_VERSION_TEXT 编码进二进制供
+    # `yh --version` 使用，必须与 project.toml 的 project.version 一致，防止
+    # 滚版本时只改一处。清单与常量都从被测源码根取（--root 自测时一致）。
+    toml_text = (SRC / "project.toml").read_text(encoding="utf-8")
     mtoml = re.search(r'^version\s*=\s*"([^"]+)"', toml_text, re.M)
-    mconst = re.search(r'YH_VERSION_TEXT \*char = "yh ([^"]+)"',
-                       (SRC / "cmdline" / "cmdline.yh").read_text(encoding="utf-8"))
-    if not mtoml or not mconst:
-        problems.append("版本一致性：找不到 project.toml version 或 YH_VERSION_TEXT 常量")
-    elif mtoml.group(1) != mconst.group(1):
+    constants = version_constants()
+    if not mtoml:
+        problems.append("版本一致性：project.toml 缺少 project.version")
+    elif not constants:
+        problems.append("版本一致性：源码里找不到 YH_VERSION_TEXT 常量")
+    elif len(constants) > 1:
+        where = ", ".join(str(f.relative_to(SRC)) for f, _ in constants)
+        problems.append(f"版本一致性：YH_VERSION_TEXT 重复声明（{where}）")
+    elif constants[0][1] != mtoml.group(1):
         problems.append(
             f"版本不一致：project.toml={mtoml.group(1)} "
-            f"cmdline.YH_VERSION_TEXT={mconst.group(1)}")
+            f"{constants[0][0].relative_to(SRC)}={constants[0][1]}")
 
     # —— 3. 报告（代码规模见 `just code-stats`）——
     print(f"模块 {len(mods)} 个，文件 {len(modname)} 个")

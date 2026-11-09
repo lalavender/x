@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """arch-check 自测：确认守护既能通过，也能真的抓到违规。
 
-失败模式是"永远通过"（正则腐烂、路径写错），所以六条路径都要测：
+失败模式是"永远通过"（正则腐烂、路径写错），所以九条路径都要测：
   1. 真实仓库树 → 0；
   2. 注入越界 import 的副本 → 非 0，且报出"越界依赖"；
   3. 子目录里的源码 → 仍被递归扫描并抓到越界；
-  4. gen 的 `pub fn` 预算越界 → 非 0；
-  5. comptime 新增 gen 依赖 → 非 0；
-  6. 追加大量空行的副本 → 仍 0（arch-check 不再检查代码行数）。
+  4. gen 模块（已删除）被塞回且 `pub fn` 超预算 → 非 0；
+  5. AST 视图计数就地累加 → 非 0；
+  6. 镜像行按值写回 → 非 0；
+  7. comptime → check 越界 → 非 0；
+  8. 追加大量空行的副本 → 仍 0（arch-check 不再检查代码行数）；
+  9. 删掉 YH_VERSION_TEXT 声明 → 非 0（版本常量按内容搜索，不写死路径）。
 """
 
 import re
@@ -39,7 +42,7 @@ def largest_source(root):
     return max(root.rglob("*.yh"), key=lambda p: len(p.read_text(errors="ignore")))
 
 
-TOTAL = 8  # 自测用例数；新增用例必须同步这里
+TOTAL = 9  # 自测用例数；新增用例必须同步这里
 
 
 def main():
@@ -153,6 +156,27 @@ def main():
         if not ok:
             failed += 1
             print(r3.stdout[-800:], r3.stderr[-400:])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # 版本常量按内容搜索定位（不写死文件路径）：删掉声明必须红灯。
+        # 这条防的是"挪了文件后路径写死"与"正则腐烂导致恒过"两种失效。
+        root = copy_compiler(tmp, "no-version-const")
+        victim = None
+        for f in sorted((root / "compiler").rglob("*.yh")):
+            text = f.read_text(errors="ignore")
+            if "YH_VERSION_TEXT *char" not in text:
+                continue
+            kept = [line for line in text.splitlines(True)
+                    if "YH_VERSION_TEXT *char" not in line]
+            f.write_text("".join(kept), encoding="utf-8")
+            victim = f
+            break
+        r9 = run(root)
+        caught = victim is not None and r9.returncode != 0 and "YH_VERSION_TEXT" in r9.stdout
+        print(("PASS" if caught else "FAIL") + " arch-check 抓缺失的版本常量")
+        if not caught:
+            failed += 1
+            print(r9.stdout[-800:], r9.stderr[-400:])
 
     print(f"arch-check 自测: 通过 {TOTAL - failed}/{TOTAL}")
     return 1 if failed else 0

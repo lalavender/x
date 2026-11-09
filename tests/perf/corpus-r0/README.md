@@ -6,7 +6,7 @@
 `SHA256SUMS`。后续编译器迁移不得覆盖此目录；如需比较迁移后的项目，
 另建版本化语料并分别报告规模。
 
-`tools/compiler-performance.py` 在 `tmp/` 下复制此项目，测量缓存不变的
-热构建、真实函数体变化和清空 `.build` 后的构建。所有计时包含编译器
-启动、当前流程分析、汇编与链接；函数体负载还运行产物，确认行为确实
-随源码变化。冷构建先预热 OS 文件缓存，因此不代表首次磁盘冷读。
+**现状（2026-11-09）**：原先消费本语料的 `tools/compiler-performance.py` 已删除（无
+justfile/CI 引用，它已被 `tools/perf-baseline.py` 取代，后者在 `.github/workflows/perf.yml`
+里运行）。本目录仅作历史快照保留；注意 `SHA256SUMS` 自 `2976a3d` 起与文件不再一致
+（那次给 `project.toml` 补了 `os`/`arch` 两行却未重生成清单），不要再把它当可校验基线。
