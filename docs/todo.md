@@ -13,33 +13,6 @@
 - 添加错误，当前错误提示功能太简陋
 - project.toml 添加[env]
 
-
-
-## 2026-11-08 文档刷新发现（DR1–DR5）
-
-DR1/DR2/DR4/DR5 已处理并归档：
-[`01-finished/yh-DR1-DR5-文档刷新发现-2026-11-08.md`](01-finished/yh-DR1-DR5-文档刷新发现-2026-11-08.md)。
-唯一开放项：
-
-- [ ] **DR3（P1，待复现）全局缓存下的非确定失败**：一次 `just build`（`YH_CACHE` 默认开）
-  后 `cd libs && ../yh check` 报 `sys/constants.linux.arm64.yh:8:24: 错误: 重复的顶层声明`；
-  `YH_CACHE=off` 重建后通过。2026-11-10 连跑 2 轮未复现。复现时记录
-  `yh cache info`、ActionID 与 `YH_CACHE_DEBUG=1` 的 miss 原因。
-
-## 前端两遍化（2026-11-08 收束，等架构重设计）
-
-S1（接口发射下沉）与 S2a（解析器窄口 + 布局策略下沉）已完成并进入发布；S3 做完了
-`return` / 赋值两片。**架构将重新设计，这条任务线到此收束**，不再按原切片推进。
-证据与结论归档在：
-
-- [`01-finished/yh-前端两遍化-重新分析-2026-11-08.md`](01-finished/yh-前端两遍化-重新分析-2026-11-08.md)
-- [`01-finished/yh-S3-语义字段外置spike-2026-11-08.md`](01-finished/yh-S3-语义字段外置spike-2026-11-08.md)
-
-重设计时可直接沿用的事实：`parse` 9,626 → 7,585 行（2026-11-10）；`parse → check.sem_*`
-142 → 140（原先由 `arch-check` 预算守住，该工具 2026-11-09 已删除，现靠评审）；
-`parse → check` 依赖方向未变，所以「调度下沉 check」类
-改动必须等 `parse` 不再 import `check`。
-
 ## 2026-11-05 VENC-2 遗留：Windows CRT 层文件路径仍按 ACP（P1，CI 已条件跳过）
 
 > 已完成部分见 [yh-VENC2-Windows-CRT入口argv修复](01-finished/yh-VENC2-Windows-CRT入口argv修复-2026-11-05.md)。

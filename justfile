@@ -357,6 +357,7 @@ test: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/tests/fmt/interp.py" --compiler "{{ yh_run }}" --stdlib "{{ root }}/libs" --workdir "{{ root }}/tmp/fmt-interp"
     {{ py }} "{{ root }}/tests/selfhost/cache/llvm-global-cache.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ py }} "{{ root }}/tests/tools/yh-code-stats/check.py"
+    YH_CACHE=off {{ py }} "{{ root }}/tests/tools/yh-codeflow/check.py"
 
 # quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
 # 秒级到十几秒；运行语义与自举门留给 test/full。
@@ -546,6 +547,10 @@ explorer:
 # code-stats：统计 compiler/ 下 yh 源码规模；独立运行，不依赖编译器构建。
 code-stats:
     {{ py }} "{{ root }}/tools/yh-code-stats.py"
+
+# codeflow：扫描当前 compiler/ 生成自包含 HTML 代码流程图（tmp/codeflow/index.html）。
+codeflow:
+    {{ py }} "{{ root }}/tools/yh-codeflow.py"
 
 # clean：删除 yh 与编译器缓存（含 BUILD_CACHE；保留 tmp 下的 LLVM 闭包缓存）。
 clean:

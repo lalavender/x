@@ -278,6 +278,8 @@ just selfhost-native    # 自举主门
 ## 工具
 
 - `just code-stats`：统计 `compiler/` 下 yh 源码的行数与目录分布。
+- `just codeflow`：扫描 `compiler/` 生成自包含 HTML 代码流程图
+  （`tmp/codeflow/index.html`，模块依赖 / 模块调用 / 模块内文件调用三视图）。
 - `just explorer`：启动本地 Compiler Explorer。
 
 ## 目录结构
