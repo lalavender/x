@@ -27,6 +27,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
+
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "llvmfunctioncache"
 WORK_ROOT = ROOT / "tmp" / "llvm-function-cache"
@@ -122,7 +125,7 @@ def parse_stats(proc):
 
 def build(project, compiler, opt):
     """带 --emit-llvm 构建并运行；返回 (统计, 对象路径, LLVM 文本路径)。"""
-    proc = run([compiler, f"-O{opt}", "build", "--emit-llvm", "--stats"], project)
+    proc = run([compiler, f"-O{opt}", "build", "--emit-llvm"], project)
     require(proc.returncode == 0, f"O{opt} 项目构建失败", proc)
     binary = project / ".build" / BINARY
     require(binary.exists(), "构建未生成默认程序", proc)

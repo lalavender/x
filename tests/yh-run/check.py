@@ -453,7 +453,8 @@ def main():
     if args.opt_level:
         COMPILER_FLAGS += [f"-O{args.opt_level}"]
     if args.backend == "llvm":
-        COMPILER_FLAGS.append("--stats")
+        # --stats 已从 CLI 移除（2026-11-10）：统计由环境变量开启，子进程继承。
+        os.environ.setdefault("YH_STATS", "1")
     jobs = max(1, args.jobs)
     filters = [f for f in args.filter.split(",") if f]
 

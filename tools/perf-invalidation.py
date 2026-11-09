@@ -32,6 +32,9 @@ import sys
 import time
 from pathlib import Path
 
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
+
 ROOT = Path(__file__).resolve().parents[1]
 WORK_ROOT = ROOT / "tmp" / "perf"
 
@@ -121,7 +124,7 @@ def objects_of(project: Path) -> dict[str, str]:
 
 def build(project: Path, compiler: Path, timeout: int) -> tuple[dict, dict, str]:
     """构建一次，返回 (计数汇总, 对象摘要, 程序输出)。"""
-    proc = subprocess.run([str(compiler), "build", "--stats"], cwd=project,
+    proc = subprocess.run([str(compiler), "build"], cwd=project,
                           capture_output=True, text=True, timeout=timeout)
     output = proc.stdout + proc.stderr
     if proc.returncode != 0:

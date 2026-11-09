@@ -185,7 +185,7 @@ def build(compiler, project, env, args=("build",), stats=False, background=False
     """执行一次项目构建；background 时返回 Popen 供并发用例使用。"""
     command = [str(compiler), "--backend", "llvm", "--target", TRIPLE, f"-{OPT}"]
     if stats:
-        command.append("--stats")
+        os.environ.setdefault("YH_STATS", "1")
     command += list(args)
     if background:
         return subprocess.Popen(command, cwd=project.root, env=env,

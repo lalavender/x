@@ -18,6 +18,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
+
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "llvmfunctioncache"
 WORK_ROOT = ROOT / "tmp" / "llvm-path-cache"
@@ -133,7 +136,7 @@ def one_level(compiler, opt):
         require(primed.returncode == 0, "目录 A 预热构建失败", primed)
         shutil.copytree(a, b)
         force_worker(b)
-        moved = build(compiler, b, [f"-O{opt}", "--stats"])
+        moved = build(compiler, b, [f"-O{opt}"])
         require(moved.returncode == 0, "目录 B 构建失败", moved)
         counts = stats(moved)
         require(counts["check_hits"] == 4 and counts["check_misses"] == 0,
@@ -181,11 +184,11 @@ def one_level(compiler, opt):
 
         # 白名单环境变化（Darwin 的 strip 开关）必须让链接键失效并重新链接。
         if sys.platform == "darwin":
-            plain_link = build(compiler, a, [f"-O{opt}", "--stats"])
+            plain_link = build(compiler, a, [f"-O{opt}"])
             require(plain_link.returncode == 0, "默认链接键构建失败", plain_link)
             require(link_count(plain_link) == 0,
                     "未改白名单环境时链接缓存未命中", plain_link)
-            stripped = build(compiler, a, [f"-O{opt}", "--stats"],
+            stripped = build(compiler, a, [f"-O{opt}"],
                              env={"YH_LINK_STRIP": "1"})
             require(stripped.returncode == 0, "YH_LINK_STRIP 构建失败", stripped)
             require(link_count(stripped) >= 1,

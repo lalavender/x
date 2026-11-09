@@ -13,6 +13,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
+
 ROOT = Path(__file__).resolve().parents[3]
 WORK = ROOT / "tmp" / "llvm-migration" / "darwin-default"
 FIXTURE = ROOT / "tests/modules/projects/llvmdarwincache"
@@ -75,7 +78,7 @@ def main():
     WORK.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(FIXTURE, WORK)
 
-    built = run([str(compiler), "--stats", "build"], WORK, env)
+    built = run([str(compiler), "build"], WORK, env)
     require(built.returncode == 0,
             f"默认构建失败：{built.stdout[-2000:]}\n{built.stderr[-2000:]}")
     rows = stats_rows(built.stdout + built.stderr)

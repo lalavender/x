@@ -27,6 +27,9 @@ import sys
 import time
 from pathlib import Path
 
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
+
 ROOT = Path(__file__).resolve().parents[1]
 WORK_ROOT = ROOT / "tmp" / "perf" / "scaling"
 PHASE_RE = re.compile(
@@ -136,7 +139,7 @@ def run_build(compiler: Path, project: Path, timeout: int) -> dict:
     """一次冷编：返回墙钟、阶段、四段归因、IR 计数与产物大小。"""
     load = os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
     started = time.perf_counter()
-    proc = subprocess.run([str(compiler), "build", "--stats"], cwd=project,
+    proc = subprocess.run([str(compiler), "build"], cwd=project,
                           capture_output=True, text=True, timeout=timeout)
     elapsed = (time.perf_counter() - started) * 1000
     output = proc.stdout + proc.stderr

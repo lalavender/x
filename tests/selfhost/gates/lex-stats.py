@@ -2,12 +2,16 @@
 """验证项目 worker 复用文件 token，且构建统计准确。"""
 
 import argparse
+import os
 import re
 import shutil
 import sys
 import subprocess
 import tempfile
 from pathlib import Path
+
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "tokenreplay"
@@ -38,7 +42,7 @@ def main() -> int:
         shutil.copytree(FIXTURE, project)
         output = Path(temp) / "app"
         result = subprocess.run(
-            [str(compiler), "build", "--stats", "-o", str(output)],
+            [str(compiler), "build", "-o", str(output)],
             cwd=project, capture_output=True, text=True, timeout=120,
         )
         output_text = result.stdout + result.stderr
@@ -89,7 +93,7 @@ def main() -> int:
             print(f"token replay 程序退出码 {run.returncode}，期望 42")
             return 1
         warm = subprocess.run(
-            [str(compiler), "build", "--stats", "-o", str(output)],
+            [str(compiler), "build", "-o", str(output)],
             cwd=project, capture_output=True, text=True, timeout=120,
         )
         warm_rows = [tuple(int(value) for value in match)

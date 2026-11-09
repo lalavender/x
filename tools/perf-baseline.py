@@ -32,6 +32,9 @@ import sys
 import time
 from pathlib import Path
 
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
+
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "compiler"
 WORK_ROOT = ROOT / "tmp" / "perf"
@@ -241,7 +244,7 @@ def tree_rss_mb(root_pid: int) -> float:
 def build_args(opt: str | None) -> list[str]:
     """构建参数：`--opt 2` 时插 `-O2`（优化级别是被测负载，不是工具自身）。"""
     args = [f"-O{opt}"] if opt else []
-    return args + ["build", "--stats"]
+    return args + ["build"]
 
 
 def run_build(compiler: Path, project: Path, timeout: int,

@@ -151,6 +151,12 @@ def sh(cmd, cwd, env=None):
                 build_at = -1
             if build_at >= 0:
                 cmd[build_at + 1:build_at + 1] = COMPILER_BUILD_FLAGS
+    # --stats 已从 CLI 移除（2026-11-10）：用例仍写 "--stats"，这里翻译成
+    # YH_STATS=1 环境变量，避免逐条改几十处调用。
+    if "--stats" in cmd:
+        cmd = [c for c in cmd if c != "--stats"]
+        env = dict(env or {})
+        env.setdefault("YH_STATS", "1")
     e = dict(__import__("os").environ)
     e.setdefault("YH_CACHE", "off")
     if env:

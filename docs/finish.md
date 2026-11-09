@@ -8,6 +8,36 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：删除 CLI 参数 `--stats`，统计改由 `YH_STATS=1` 开启
+
+**结果**：
+- `compiler/cmd/yh/cmd_base.yh`：删除 `--stats` 选项与其全局扫描分支；`CliRequest.stats`
+  改由 `proj.env_fetch("YH_STATS")` 赋值（非空且非 `"0"` 即为开）。
+- `compiler/cmd/yh/cmd_emit_module.yh`：worker 不再解析 argv 里的 `--stats`，改为读同一
+  环境变量；`build/build_scheduler.yh` 不再往 worker argv 塞该开关（fork 与
+  `--emit-module` 子进程都按环境继承）。
+- 工具与门禁同步：`tests/modules/build-check.py` 的 `sh()` 把用例里的 `"--stats"`
+  翻译成 `YH_STATS=1`（20+ 处调用不用改）；`tests/yh-run/check.py`、
+  `tests/selfhost/*`（bootstrap/cache/darwin/gates）、`tools/{perf-baseline,
+  perf-invalidation,perf-scaling,seed-build,cli-golden}.py` 改为环境变量；
+  `cli-golden` 的 `build-stats` 用例删除（旧/新二进制对参数的支持不同，无法对齐）。
+- 文档：`README.md`、`compiler/README.md`、`yh-编译流程-当前实现.md`、`yh-缓存设计.md`、
+  `yh-Windows-LLVM后端设计.md` 里的用法改为 `YH_STATS=1`。
+
+**验证**：
+- `yh build --stats` → `yh: 未知选项`；`YH_STATS=1 yh build` → 输出 2 行 `yh-stats`；
+  不设变量 → 0 行。
+- CI 式暂存二进制下 `tests/modules/build-check.py` → 103/135，**失败集合与改动前逐条一致**
+  （`u5-hot-cache-hits` 等 stats 相关用例仍 OK）。
+- `tests/yh-run/check.py` → 372/374（2 跳过），rc=0。
+- `tests/selfhost/gates/lex-stats.py`（暂存二进制）→ 通过；`check-command.py` → 通过。
+- `env YH_CACHE=off just build` → 冷编通过。
+
+**既有问题（未随本次修）**：`tools/perf-baseline.py:344` 仍读已删除的
+`compiler/gen/state.yh`（F4 删 gen 后失效），`perf.yml` 这条工作流当前跑不起来；
+`lex-stats.py` 等门禁用仓库根 `./yh` 跑会因默认标准库（`<exe_dir>/libs`）污染计数，
+必须用 `just stage-yh` 的暂存二进制。
+
 ## 2026-11-09：修复 `yh test` 在非 compiler 项目上的回归（testkit 无条件 import proj）
 
 **问题**：`c7ca83d` 让生成的测试入口无条件输出 `import proj; proj.ctx().envp = envp`，

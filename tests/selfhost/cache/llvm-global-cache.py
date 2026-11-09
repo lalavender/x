@@ -21,6 +21,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
+
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "llvmfunctioncache"
 WORK_ROOT = ROOT / "tmp" / "llvm-global-cache"
@@ -208,7 +211,7 @@ def one_run(compiler, work):
     shutil.rmtree(artifacts(function_work) / "firc", ignore_errors=True)
     action_id = index_id(prime)
     (cache / "v1" / "actions" / action_id).unlink(missing_ok=True)
-    function_build = build(compiler, function_work, cache, ["--stats"])
+    function_build = build(compiler, function_work, cache, [])
     require(function_build.returncode == 0, "函数全局缓存构建失败", function_build)
     counts = stats(function_build)
     require(counts["check_hits"] == 4 and counts["ir_hits"] == 4,

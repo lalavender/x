@@ -8,7 +8,7 @@
 设计（见 docs/02-plan/yh-CLI用cli标准库重写实施方案-2026-10-27.md §7）：
 - 每个用例在独立的 fixture 副本里运行，保证两个二进制看到相同的冷缓存状态；
 - 严格等价：退出码 + 归一化后的 stdout/stderr；
-- 归一化：仓库根/工作目录/binary 路径替换为占位符，`--stats` 的 time_*=Ns 置零，
+- 归一化：仓库根/工作目录/binary 路径替换为占位符，`yh-stats` 行整行折叠，
   `[编译]/[缓存]/[检查]/[链接]` 进度行按多重集合比较（并行 worker 顺序不稳定）；
 - `strict=False` 的用例只比较退出码与 stdout（已在报告里注明原因）。
 """
@@ -77,7 +77,6 @@ CASES = [
     ("check-project", "proj", ["check"], True, ""),
     ("check-file", "proj", ["check", "good.yh"], True, ""),
     ("build", "proj", ["build"], True, ""),
-    ("build-stats", "proj", ["--stats", "build"], True, ""),
     ("run", "proj", ["run"], True, ""),
     ("target-before", "proj", ["--target", "aarch64-apple-darwin", "build"], True, ""),
     ("target-after", "proj", ["build", "--target", "aarch64-apple-darwin"], True, ""),

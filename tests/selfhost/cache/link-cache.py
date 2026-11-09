@@ -10,6 +10,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
+
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "tokenreplay"
 STATS_RE = re.compile(r"yh-stats .* asm=(\d+) link=(\d+) compiler_hashes=(\d+)")
@@ -18,7 +21,7 @@ STATS_RE = re.compile(r"yh-stats .* asm=(\d+) link=(\d+) compiler_hashes=(\d+)")
 def run_build(compiler: Path, project: Path, output: Path, env: dict) -> subprocess.CompletedProcess:
     """在 fixture 项目目录构建指定程序。"""
     return subprocess.run(
-        [str(compiler), "build", "--stats", "-o", str(output)], cwd=project, env=env,
+        [str(compiler), "build", "-o", str(output)], cwd=project, env=env,
         capture_output=True, text=True, timeout=120,
     )
 

@@ -10,6 +10,9 @@ import struct
 import subprocess
 from pathlib import Path
 
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
+
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tests/modules/projects/llvmcache"
 TARGET = "x86_64-unknown-linux-gnu"
@@ -34,7 +37,7 @@ def build(compiler, project, output, env, target=None, level=0):
     """用显式后端参数构建测试项目到指定输出路径。"""
     target = target or TARGET
     return run([str(compiler), "--backend", "llvm", "--target", target,
-                f"-O{level}", "build", "--stats", "-o", str(output)],
+                f"-O{level}", "build", "-o", str(output)],
                cwd=project, env=env)
 
 

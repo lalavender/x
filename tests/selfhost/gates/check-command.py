@@ -61,6 +61,8 @@ def main() -> int:
         env = dict(os.environ)
         env["PATH"] = str(wrappers) + os.pathsep + env.get("PATH", "")
         env["YH_CHECK_TOOL_LOG"] = str(log)
+        # --stats 已从 CLI 移除（2026-11-10）：统计由环境变量开启。
+        env["YH_STATS"] = "1"
         for label, fixture, want_ok in (
             ("valid", VALID, True),
             ("invalid", INVALID, False),
@@ -68,7 +70,7 @@ def main() -> int:
             project = work / label
             shutil.copytree(fixture, project)
             result = subprocess.run(
-                [str(compiler), "check"] + (["--stats"] if want_ok else []),
+                [str(compiler), "check"],
                 cwd=project, env=env,
                 capture_output=True, text=True, timeout=120,
             )

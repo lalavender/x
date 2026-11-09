@@ -14,6 +14,9 @@ import sys
 import time
 from pathlib import Path
 
+# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
+os.environ.setdefault("YH_STATS", "1")
+
 ROOT = Path(__file__).resolve().parents[3]
 COMPILER = ROOT / "compiler"
 SEED = ROOT / "bin/yh-linux-arm64"
@@ -184,10 +187,10 @@ def build_candidate(compiler: Path, label: str, level: str, work: Path,
                    "--compiler", str(compiler), "--project", str(COMPILER),
                    "--output", str(output), "--llvm-host", "linux-x86_64",
                    "--llvm-mode", "require", "--backend", "llvm", "--target",
-                   TRIPLE, "--opt-level", level, "--emit-llvm", "--stats"]
+                   TRIPLE, "--opt-level", level, "--emit-llvm"]
     else:
         command = [str(compiler), "--backend", "llvm", "--target", TRIPLE,
-                   f"-O{level}", "--stats", "build", "--emit-llvm", "-o",
+                   f"-O{level}", "build", "--emit-llvm", "-o",
                    str(output)]
     result = run(command, cwd=COMPILER, env=env)
     log_result(work, f"{label}-O{level}-build", result)

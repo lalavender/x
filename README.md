@@ -103,7 +103,7 @@ source = "src"
 | `--target TRIPLE` | 选择完整输出目标 |
 | `-O0` / `-O2` | 优化级别，默认 `-O0` |
 | `--emit-llvm` | 只写 LLVM 文本，每模块一个 `.ll` |
-| `--stats` | 打印构建统计 |
+| `YH_STATS=1`（环境变量） | 打印构建统计；2026-11-10 起不再是 CLI 参数 |
 | `--legacy-system` | 启用兼容 `system(cmd)` 接口 |
 | `--backend llvm` | 代码生成后端，只接受 `llvm` |
 
