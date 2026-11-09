@@ -1,0 +1,146 @@
+module main
+import support
+import link
+import proj
+
+// ============================================================================
+// cmd_init.yh —— `yh init [dir]`：生成默认项目骨架（P1 一命令一文件）。
+//
+// 规则（用户规划）：
+//   * 不传 dir 时在当前目录执行；传了就先建目录（已存在无妨）。
+//   * 分别检测 project.toml 与 main.yh：缺哪个补哪个，已存在的绝不覆盖。
+//   * project.name 取目录名并清洗成合法标识符（字母/数字/下划线，首字符非数字）。
+//
+// 输出写 stdout：每个文件一行「已生成: <路径>」或「已存在，跳过: <路径>」。
+// 失败（建目录/写文件）返回 1；全部跳过也返回 0（幂等）。
+// ============================================================================
+
+// ci_exists：路径是否已存在。用只读 open 探测，避免依赖项目上下文。
+fn ci_exists(path *char) int {
+    let fd int = open(path, 0)
+    if (fd < 0) { return 0 }
+    close(fd)
+    return 1
+}
+
+// ci_write：覆盖写一个文本文件；0 成功，-1 失败（诊断带路径）。
+fn ci_write(path *char, text *char) int {
+    let fd int = proj.open_out(path)
+    if (fd < 0) {
+        return support.fail_path("无法创建文件: ", path)
+    }
+    let n int = 0
+    for text[n] != 0 { n += 1 }
+    let wr int = support.write_all(fd, text.to_type(*u8), n)
+    let cl int = close(fd)
+    if (wr != 0 || cl != 0) {
+        return support.fail_path("写入文件失败: ", path)
+    }
+    return 0
+}
+
+// ci_project_name：目录名 → project.name。
+// 取最后一个 '/' 之后的部分；非 [A-Za-z0-9_] 换成 '_'，首字符是数字时前置 '_'。
+// 空名回退 "app"。返回写入 out 的长度（不含 NUL）。
+fn ci_project_name(dir *char, out *u8, capacity int) int {
+    let n int = 0
+    for dir[n] != 0 { n += 1 }
+    for n > 0 && dir[n - 1] == '/' { n -= 1 }
+    let base int = 0
+    let i int = 0
+    for i < n {
+        if (dir[i] == '/') { base = i + 1 }
+        i += 1
+    }
+    let m int = 0
+    i = base
+    for i < n && m < capacity - 2 {
+        let c u8 = dir[i].to_type(u8)
+        let ok int = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9') || c == '_') ? 1 : 0
+        out[m] = (ok != 0) ? c : '_'.to_type(u8)
+        m += 1
+        i += 1
+    }
+    if (m == 0) {
+        let fallback *char = "app"
+        m = 0
+        for fallback[m] != 0 && m < capacity - 2 {
+            out[m] = fallback[m].to_type(u8)
+            m += 1
+        }
+    }
+    if (out[0] >= 48 && out[0] <= 57) {
+        let k int = m
+        for k > 0 {
+            out[k] = out[k - 1]
+            k -= 1
+        }
+        out[0] = '_'.to_type(u8)
+        m += 1
+    }
+    out[m] = 0
+    return m
+}
+
+// ci_print_file：输出「已生成 / 已存在」一行（fd=1）。
+fn ci_print_file(prefix *char, path *char) int {
+    let buf [1200]u8
+    let n int = 0
+    n = support.append_str(buf, n, prefix)
+    n = support.append_str(buf, n, path)
+    n = support.append_byte(buf, n, '\n')
+    return support.write_all(1, buf, n)
+}
+
+// api_init：`yh init [dir]` 的实现。
+fn api_init(req *CliRequest) int {
+    let dir *char = req.src
+    if (dir == 0) { dir = "." }
+    if (link.cmd_mkdirs(dir) != 0) {
+        return support.fail_path("无法创建目录: ", dir)
+    }
+    let name [200]u8
+    ci_project_name(dir, &name[0], 200)
+
+    // 默认清单：os/arch = host，源码根 = 当前目录。
+    let manifest [900]u8
+    let mn int = 0
+    mn = support.append_str(manifest, mn, "[project]\nos = \"host\"\narch = \"host\"\nname = \"")
+    let ni int = 0
+    for name[ni] != 0 {
+        manifest[mn] = name[ni]
+        mn += 1
+        ni += 1
+    }
+    mn = support.append_str(manifest, mn, "\"\nversion = \"0.1.0\"\nsource = \".\"\n")
+    manifest[mn] = 0
+
+    // 默认入口：不依赖标准库，保证 `yh run` 立即可跑。
+    let main_src *char = "module main\n\n// 由 `yh init` 生成：`yh run` 构建并运行。\nfn main() int {\n    return 0\n}\n"
+
+    let ppath [1200]u8
+    let pn int = support.append_str(ppath, 0, dir)
+    pn = support.append_str(ppath, pn, "/project.toml")
+    ppath[pn] = 0
+    let mpath [1200]u8
+    let mpathn int = support.append_str(mpath, 0, dir)
+    mpathn = support.append_str(mpath, mpathn, "/main.yh")
+    mpath[mpathn] = 0
+
+    if (ci_exists(support.arr_cstr(&ppath[0])) != 0) {
+        if (ci_print_file("已存在，跳过: ", support.arr_cstr(&ppath[0])) != 0) { return 1 }
+    } else {
+        if (ci_write(support.arr_cstr(&ppath[0]), support.arr_cstr(&manifest[0])) != 0) {
+            return 1
+        }
+        if (ci_print_file("已生成: ", support.arr_cstr(&ppath[0])) != 0) { return 1 }
+    }
+    if (ci_exists(support.arr_cstr(&mpath[0])) != 0) {
+        if (ci_print_file("已存在，跳过: ", support.arr_cstr(&mpath[0])) != 0) { return 1 }
+    } else {
+        if (ci_write(support.arr_cstr(&mpath[0]), main_src) != 0) { return 1 }
+        if (ci_print_file("已生成: ", support.arr_cstr(&mpath[0])) != 0) { return 1 }
+    }
+    return 0
+}
