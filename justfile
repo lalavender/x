@@ -15,6 +15,8 @@
 #   just test-libs       全部标准库测试（test 块 + 外部 runner + 专项/安装）
 #   just selfhost-native 本机全套门（候选两代固定点 + 全量语料，无需容器）
 #   just full            滚种子前的全量门（= test + selfhost-native）
+#   just ci-gate         分支门与 tag 发布共用的唯一四端门禁（CI 调这一条）
+#   just release-asset   把 ci-gate KEEP=1 留下的 cc4 冒烟并打包成发布资产
 #   just install         安装到 PREFIX（默认 /usr/local；DESTDIR 用作打包根）
 #   just uninstall       卸载
 #   just explorer        启动 yh Compiler Explorer（本地浏览器图形界面）
@@ -136,6 +138,14 @@ selfhost_keep_flag := if selfhost_keep == "1" { "--keep" } else { "" }
 SELFHOST_WORKDIR := env_var_or_default("SELFHOST_WORKDIR", "")
 selfhost_work_flag := if SELFHOST_WORKDIR == "" { if fast_stage == "1" { "--workdir " + quote(absolute_path(fast_dir + "/selfhost")) } else { "" } } else { "--workdir " + quote(absolute_path(SELFHOST_WORKDIR)) }
 
+# ci-gate 的自举工作目录（cc2/cc3/cc4 落在这里）：相对 root 解析，
+# --workdir 需要绝对路径。release-asset 从这里取 cc4 打包。
+selfhost_dist := root + "/tmp/selfhost-dist"
+# KEEP=1：ci-gate 保留 selfhost_dist 里的自举候选；发布流水线必须开，
+# 分支门保持关闭（跑完即清，不占 runner 磁盘）。
+KEEP := env_var_or_default("KEEP", "0")
+keep := if KEEP == "" { "0" } else { KEEP }
+
 # SKIP_CORPUS=1：同一轮里 just test 已经跑过等价语料时，省掉自举门里重复的
 # 那遍（约 1 分钟）。默认 0——门保持最严，重复跑一遍不省。
 SKIP_CORPUS := env_var_or_default("SKIP_CORPUS", "0")
@@ -219,6 +229,23 @@ modcheck_flags := if llvm_host == "" { "" } else { "--backend llvm" }
 selfhost_flags_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin/llvm-darwin-selfhost-flags.py --compiler-path " + quote(yh_run) } else { "true" }
 # 链接死代码回收门（J6-L1）：Darwin 缺省 -dead_strip 生效、可回退、进链接键。
 dead_strip_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin/darwin-dead-strip.py --compiler-path " + quote(yh_run) } else { "true" }
+
+# CI 门禁的平台专项门（ci-gate 用）：只列 test/selfhost-native 没覆盖到的平台门。
+#   Linux/x86_64  → test-llvm（LLVM O0/O2 全门）
+#   Linux/AArch64 → Windows 目标编译侧（需要 CI 装的 clang/llvm-18）
+#   Darwin/ARM64  → test-llvm-darwin
+#   Windows/x64   → 语料交叉编译 + 本机执行
+# linux-aarch64 的 test-llvm-linux-arm64 与 selfhost-native 的 runtime_test 是
+# 同一脚本同一参数，不在这里重复列。
+platform_gate := if host_os == "linux" {
+    if seed_arch == "x64" { "test-llvm" } else { "test-windows-sdk test-windows-target test-windows-abi test-windows-corpus" }
+} else if host_os == "macos" {
+    "test-llvm-darwin"
+} else if host_os == "windows" {
+    "test-windows-corpus run-windows-corpus"
+} else {
+    ""
+}
 
 # 默认目标：源比 yh 新时冷编，否则什么都不做（等价旧 make 默认目标）。
 default: _ensure_built
@@ -397,6 +424,53 @@ selfhost-native: stage-yh
 # 一遍语料，selfhost-native 里重复的那遍用 SKIP_CORPUS=1 省掉（约 1 分钟）。
 full: test
     @SKIP_CORPUS=1 SEED="{{ seed_abs }}" SEED_DEST="{{ seed_dest_abs }}" just selfhost-native
+
+# ci-gate：分支门（ci.yml）与 tag 发布（release.yml）共用的唯一门禁定义。
+# 顺序：三层回归 test（含 libs 与工具门）→ 平台专项门 → 自举两代固定点。
+# 语料只留 test 那一遍（自举门的用 SKIP_CORPUS=1 关掉），与 just full 口径一致。
+# CI 里必须配 YH_ANTLR=0（参考语法层要 Java + antlr venv，runner 没有）；
+# 本机直接跑则按缺省执行 ANTLR 层，比 CI 更严。
+# KEEP=1 保留 tmp/selfhost-dist 里的 cc4，供 release-asset 打包。
+# 新增测试或改门禁只改这里——两个 workflow 都只调这一条。
+ci-gate: test
+    @if [ -n "{{ platform_gate }}" ]; then just -d "{{ root }}" {{ platform_gate }}; fi
+    @just -d "{{ root }}" SEED="{{ seed_abs }}" SKIP_CORPUS=1 SELFHOST_KEEP="{{ keep }}" SELFHOST_WORKDIR="{{ selfhost_dist }}" selfhost-native
+
+# release-asset：把 ci-gate KEEP=1 留下的自举候选（cc4）冒烟并打包成发布资产。
+# 资产名与成员约定：yh-<tag>-<平台>.tar.gz，包内只有一个名为 yh 的成员
+# （fetch-release-seed.py 的 extract_yh 只认这个名字），旁边同名校验和。
+# sha256 命令按平台归一：sha256sum（Git Bash 会写成 "<hash> *<name>"，去掉 `*`）
+# / shasum（macOS 自带）。
+release-asset tag asset:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cc4=""
+    for cand in "{{ selfhost_dist }}/cc4" "{{ selfhost_dist }}/cc4.exe"; do
+      if [ -f "$cand" ]; then cc4="$cand"; break; fi
+    done
+    if [ -z "$cc4" ]; then
+      echo "FAIL 没有自举候选：先用 KEEP=1 just ci-gate（{{ selfhost_dist }}）" >&2
+      ls -la "{{ selfhost_dist }}" >&2 || true
+      exit 1
+    fi
+    echo "自举候选：$cc4"
+    cp "$cc4" "{{ yh }}"
+    rm -rf "{{ selfhost_dist }}"
+    # 打包自检：产物必须支持换行终结（rc.4 曾打包出不含该特性的旧二进制）。
+    "{{ yh }}" --syntax-check "{{ root }}/tests/yh/02-basic/04_newline_terminator.yh"
+    name="yh-{{ tag }}-{{ asset }}"
+    stage="{{ root }}/dist/.stage-{{ asset }}"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    cp "{{ yh }}" "$stage/yh"
+    tar -czf "{{ root }}/dist/$name.tar.gz" -C "$stage" yh
+    rm -rf "$stage"
+    if command -v sha256sum >/dev/null 2>&1; then
+      ( cd "{{ root }}/dist" && sha256sum "$name.tar.gz" | sed 's/ \*/  /' > "$name.sha256" )
+    else
+      ( cd "{{ root }}/dist" && shasum -a 256 "$name.tar.gz" > "$name.sha256" )
+    fi
+    ls -l "{{ root }}/dist/$name.tar.gz" "{{ root }}/dist/$name.sha256"
 
 # test-llvm：LLVM x64 O0/O2 全量语法/运行/模块/项目语料、统计覆盖与专项门。
 # 只认 Linux/x86_64；其他宿主明确拒绝而不是降级运行。

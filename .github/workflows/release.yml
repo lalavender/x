@@ -1,8 +1,12 @@
 name: release
 # 版本 tag 发布（GitHub Actions，四平台原生托管 runner）。
 #
-# 结构：prepare 校验 tag → 四个平台 job 并行「取种 → 闭包 → 平台门 → 自举门 →
-# 打包 artifact」→ publish 汇总发布 GitHub Release。
+# 结构：prepare 校验 tag → 四个平台 job 并行「取种 → 闭包 → 门禁 → 打包资产」
+# → publish 汇总发布 GitHub Release。
+#
+# 门禁与分支门是同一份定义：`KEEP=1 just ci-gate`（test 三层 → 平台专项门 →
+# 自举两代固定点，并保留 cc4），打包用 `just release-asset`。两边都只调 justfile，
+# YAML 只管 runner、系统依赖、窗口与缓存；新增测试/改门禁改 justfile。
 #
 # 只认 x.y.z 与 x.y.z-rc.N；其他 tag（如 seed-*）由 prepare 判定后整体跳过。
 # 种子一律取「最新带该平台资产的 Release（排除当前 tag）」：rc.N 用 rc.N-1、
@@ -12,7 +16,7 @@ name: release
 # （= publish-release.py 与 fetch-release-seed.py 的 PLATFORMS 键），因此
 # linux-x64 这个 job 产出的资产叫 yh-<tag>-linux-x86_64.tar.gz，不要改名。
 #
-# 动作版本、runner 版本与闭包缓存 key/restore-keys 与 `.github/workflows/ci.yml`
+# 动作版本、runner pin、闭包缓存 key/restore-keys 与 `.github/workflows/ci.yml`
 # 保持一致：缓存条目是同一个存储，key 相同才能两边互相命中。
 on:
   push:
@@ -38,6 +42,8 @@ env:
   # Windows 上 Python 默认 GBK，门禁脚本都用 text=True 读编译器输出。
   PYTHONUTF8: "1"
   PYTHONIOENCODING: utf-8
+  # 与 ci.yml 同口径：参考语法层要 Java + antlr venv，runner 没有。
+  YH_ANTLR: "0"
 
 jobs:
   prepare:
@@ -121,9 +127,9 @@ jobs:
           echo "版本 tag：$tag（dry_run=$dry）"
 
   # ------------------------------------------------------------------------
-  # 四端构建：各 job 自取种子、准备本机 LLVM 闭包、跑平台门、冷编并自举，
-  # 最后把 cc4（自举门最终候选）打成 yh-<tag>-<platform>.tar.gz（成员名必须是
-  # 无扩展名的 yh，fetch-release-seed.py 的 extract_yh 只认这个名字）。
+  # 四端构建：各 job 自取种子、准备本机 LLVM 闭包、跑与分支门同一份 ci-gate
+  # （KEEP=1 保留 cc4），再用 release-asset 打成 yh-<tag>-<平台>.tar.gz
+  # （成员名必须是 yh，fetch-release-seed.py 的 extract_yh 只认这个名字）。
   #
   # 种子取「最新带该平台资产的 Release」：0.0.12 起四端资产齐备，种子已认识
   # `windows` 标记、`*.windows.*.yh` 变体与 `.test.yh` 排序，故直接 `just build`。
@@ -132,7 +138,7 @@ jobs:
   linux-x64:
     needs: prepare
     if: needs.prepare.outputs.ok == '1'
-    # 固定 24.04：ubuntu-latest 已滚到 26.04（libxml2 SONAME 变了，种子跑不起来）。
+    # 固定 24.04，与 ci.yml 同一个 pin（理由见 ci.yml 的平台矩阵说明）。
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
@@ -160,50 +166,19 @@ jobs:
 
       - name: 准备闭包
         run: just llvm-host
-      - name: 冷编
-        run: just build
 
-      - name: Linux/x86_64 LLVM 全门
-        # AGENTS 约定：linux-x86_64 的 LLVM 全门只在 tag 发布时跑，就落在这里。
-        # test-llvm 已含语法语料、运行语料 O0/O2、模块/项目 O0/O2 与专项门。
-        run: just test-llvm
+      - name: 门禁（与分支门同一份 ci-gate，保留自举候选）
+        run: KEEP=1 just ci-gate
 
-      - name: 自举门 → 取出 cc4 → 打包资产
-        run: |
-          set -euo pipefail
-          just SEED="$PWD/bin/yh-linux-x64" SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost selfhost-native
-          # cc4 是自举门最终候选。这里不静默假设产物名：先找无扩展名，再找
-          # .exe（Windows 链接器可能补扩展名），都没有就显式失败。
-          cc4=""
-          for cand in dist/selfhost/cc4 dist/selfhost/cc4.exe; do
-            if [ -f "$cand" ]; then cc4="$cand"; break; fi
-          done
-          if [ -z "$cc4" ]; then
-            echo "FAIL 自举门未产出 cc4（dist/selfhost 下没有 cc4 或 cc4.exe）" >&2
-            ls -la dist/selfhost >&2 || true
-            exit 1
-          fi
-          echo "自举候选：$cc4"
-          cp "$cc4" yh
-          rm -rf dist/selfhost
-          # 打包自检：产物必须支持换行终结（rc.4 曾打包出不含该特性的旧二进制）。
-          ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
-          name="yh-$TAG-linux-x86_64"
-          stage="dist/.stage-linux-x86_64"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          cp yh "$stage/yh"
-          tar -czf "dist/$name.tar.gz" -C "$stage" yh
-          rm -rf "$stage"
-          ( cd dist && sha256sum "$name.tar.gz" > "$name.sha256" )
-          ls -l "dist/$name.tar.gz" "dist/$name.sha256"
+      - name: 打包发布资产
+        run: just release-asset "$TAG" linux-x86_64
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux-x64
           path: |
-            dist/yh-${{ github.ref_name }}-linux-x86_64.tar.gz
-            dist/yh-${{ github.ref_name }}-linux-x86_64.sha256
+            dist/yh-${{ needs.prepare.outputs.tag }}-linux-x86_64.tar.gz
+            dist/yh-${{ needs.prepare.outputs.tag }}-linux-x86_64.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -211,7 +186,7 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.ok == '1'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 180
+    timeout-minutes: 240
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -222,13 +197,16 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
       - uses: extractions/setup-just@v2
 
-      - name: 安装构建依赖
-        # libxml2/zlib/zstd：种子与内嵌宿主按动态库链接，缺 runtime 会 127。
+      - name: 安装构建依赖（含 Windows 目标门所需的 llvm-18 工具）
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            build-essential binutils libxml2-dev zlib1g-dev libzstd-dev
+            build-essential binutils clang llvm-18 lld-18 \
+            libxml2-dev zlib1g-dev libzstd-dev
+          for tool in llvm-dlltool llvm-readobj llvm-nm llvm-ar llvm-lib lld-link; do
+            if [ -x "/usr/bin/$tool-18" ]; then sudo ln -sf "/usr/bin/$tool-18" "/usr/local/bin/$tool"; fi
+          done
 
       - name: 取上一版种子
         run: |
@@ -237,51 +215,19 @@ jobs:
 
       - name: 准备闭包
         run: just llvm-host
-      - name: 冷编
-        run: just build
 
-      - name: Linux/AArch64 平台门
-        run: |
-          set -euo pipefail
-          just test-llvm-linux-arm64
-          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
-          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
+      - name: 门禁（与分支门同一份 ci-gate，保留自举候选）
+        run: KEEP=1 just ci-gate
 
-      - name: 自举门 → 取出 cc4 → 打包资产
-        run: |
-          set -euo pipefail
-          just SEED="$PWD/bin/yh-linux-arm64" SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost selfhost-native
-          # cc4 是自举门最终候选。这里不静默假设产物名：先找无扩展名，再找
-          # .exe（Windows 链接器可能补扩展名），都没有就显式失败。
-          cc4=""
-          for cand in dist/selfhost/cc4 dist/selfhost/cc4.exe; do
-            if [ -f "$cand" ]; then cc4="$cand"; break; fi
-          done
-          if [ -z "$cc4" ]; then
-            echo "FAIL 自举门未产出 cc4（dist/selfhost 下没有 cc4 或 cc4.exe）" >&2
-            ls -la dist/selfhost >&2 || true
-            exit 1
-          fi
-          echo "自举候选：$cc4"
-          cp "$cc4" yh
-          rm -rf dist/selfhost
-          ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
-          name="yh-$TAG-linux-arm64"
-          stage="dist/.stage-linux-arm64"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          cp yh "$stage/yh"
-          tar -czf "dist/$name.tar.gz" -C "$stage" yh
-          rm -rf "$stage"
-          ( cd dist && sha256sum "$name.tar.gz" > "$name.sha256" )
-          ls -l "dist/$name.tar.gz" "dist/$name.sha256"
+      - name: 打包发布资产
+        run: just release-asset "$TAG" linux-arm64
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux-arm64
           path: |
-            dist/yh-${{ github.ref_name }}-linux-arm64.tar.gz
-            dist/yh-${{ github.ref_name }}-linux-arm64.sha256
+            dist/yh-${{ needs.prepare.outputs.tag }}-linux-arm64.tar.gz
+            dist/yh-${{ needs.prepare.outputs.tag }}-linux-arm64.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -326,58 +272,27 @@ jobs:
           path: tmp/llvm-migration
           key: ${{ steps.closure-cache.outputs.cache-primary-key }}
 
-      - name: 冷编
-        run: just build
+      - name: 门禁（与分支门同一份 ci-gate，保留自举候选）
+        run: KEEP=1 just ci-gate
 
-      - name: Darwin/arm64 平台门
-        run: |
-          set -euo pipefail
-          just test-llvm-darwin
-          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
-          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(sysctl -n hw.ncpu)"
-
-      - name: 自举门 → 取出 cc4 → 打包资产
-        run: |
-          set -euo pipefail
-          just SEED="$PWD/bin/yh-darwin-arm64" SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost selfhost-native
-          # cc4 是自举门最终候选。这里不静默假设产物名：先找无扩展名，再找
-          # .exe（Windows 链接器可能补扩展名），都没有就显式失败。
-          cc4=""
-          for cand in dist/selfhost/cc4 dist/selfhost/cc4.exe; do
-            if [ -f "$cand" ]; then cc4="$cand"; break; fi
-          done
-          if [ -z "$cc4" ]; then
-            echo "FAIL 自举门未产出 cc4（dist/selfhost 下没有 cc4 或 cc4.exe）" >&2
-            ls -la dist/selfhost >&2 || true
-            exit 1
-          fi
-          echo "自举候选：$cc4"
-          cp "$cc4" yh
-          rm -rf dist/selfhost
-          ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
-          name="yh-$TAG-darwin-arm64"
-          stage="dist/.stage-darwin-arm64"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          cp yh "$stage/yh"
-          tar -czf "dist/$name.tar.gz" -C "$stage" yh
-          rm -rf "$stage"
-          ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.sha256" )
-          ls -l "dist/$name.tar.gz" "dist/$name.sha256"
+      - name: 打包发布资产
+        run: just release-asset "$TAG" darwin-arm64
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-darwin-arm64
           path: |
-            dist/yh-${{ github.ref_name }}-darwin-arm64.tar.gz
-            dist/yh-${{ github.ref_name }}-darwin-arm64.sha256
+            dist/yh-${{ needs.prepare.outputs.tag }}-darwin-arm64.tar.gz
+            dist/yh-${{ needs.prepare.outputs.tag }}-darwin-arm64.sha256
           if-no-files-found: error
           retention-days: 7
 
   windows-x64:
     needs: prepare
     if: needs.prepare.outputs.ok == '1'
-    runs-on: windows-latest
+    # pin 2022，与 ci.yml 一致：windows-latest（VS 18）下闭包 CMake 生成器写死的
+    # 「Visual Studio 17 2022」找不到实例，缓存 miss 时闭包会建不起来。
+    runs-on: windows-2022
     timeout-minutes: 360
     defaults:
       run:
@@ -426,54 +341,18 @@ jobs:
             tmp/llvm-migration/windows-sdk
           key: ${{ steps.closure-cache.outputs.cache-primary-key }}
 
-      - name: 冷编
-        run: just build
+      - name: 门禁（与分支门同一份 ci-gate，保留自举候选）
+        run: KEEP=1 just ci-gate
 
-      - name: Windows/x64 平台门
-        # Windows 上 ANTLR 层默认关闭（YH_ANTLR=0），test 的其余层照跑。
-        run: just test
-
-      - name: 自举门 → 取出 cc4 → 打包资产
-        run: |
-          set -euo pipefail
-          just SKIP_CORPUS=1 SELFHOST_KEEP=1 SELFHOST_WORKDIR=dist/selfhost selfhost-native
-          # cc4 是自举门最终候选。这里不静默假设产物名：先找无扩展名，再找
-          # .exe（Windows 链接器可能补扩展名），都没有就显式失败。
-          cc4=""
-          for cand in dist/selfhost/cc4 dist/selfhost/cc4.exe; do
-            if [ -f "$cand" ]; then cc4="$cand"; break; fi
-          done
-          if [ -z "$cc4" ]; then
-            echo "FAIL 自举门未产出 cc4（dist/selfhost 下没有 cc4 或 cc4.exe）" >&2
-            ls -la dist/selfhost >&2 || true
-            exit 1
-          fi
-          echo "自举候选：$cc4"
-          cp "$cc4" yh
-          rm -rf dist/selfhost
-          # 打包自检：产物必须支持换行终结（rc.4 曾打包出不含该特性的旧二进制）。
-          ./yh --syntax-check tests/yh/02-basic/04_newline_terminator.yh
-          name="yh-$TAG-windows-x64"
-          stage="dist/.stage-windows-x64"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          # tar 内成员名必须是 yh（无扩展名）：fetch-release-seed.py 的 extract_yh
-          # 只认名为 yh 的成员；Windows 的 yh.exe 在这里统一改名为 yh 再打包。
-          # 打包源是上面复制到仓库根的 yh：$cc4 指向的候选目录已被删除，不能再引用。
-          cp yh "$stage/yh"
-          tar -czf "dist/$name.tar.gz" -C "$stage" yh
-          rm -rf "$stage"
-          # Git Bash 的 coreutils 默认按 binary 模式写成 "<hash> *<name>"；这里统一
-          # 成仓库约定的 "<hash>  <name>"（与 fetch-release-seed.py 写种子哈希一致）。
-          ( cd dist && sha256sum "$name.tar.gz" | sed 's/ \*/  /' > "$name.sha256" )
-          ls -l "dist/$name.tar.gz" "dist/$name.sha256"
+      - name: 打包发布资产
+        run: just release-asset "$TAG" windows-x64
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-windows-x64
           path: |
-            dist/yh-${{ github.ref_name }}-windows-x64.tar.gz
-            dist/yh-${{ github.ref_name }}-windows-x64.sha256
+            dist/yh-${{ needs.prepare.outputs.tag }}-windows-x64.tar.gz
+            dist/yh-${{ needs.prepare.outputs.tag }}-windows-x64.sha256
           if-no-files-found: error
           retention-days: 7
 

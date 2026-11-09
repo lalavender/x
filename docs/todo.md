@@ -319,6 +319,11 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
 
 ### D. CI 与本地环境
 
+- [ ] **D2 CI 去重后的四端实跑（P1）**：门禁与打包已收进 justfile（`just ci-gate` /
+  `just release-asset`，本机 darwin-arm64 已验：全门绿 + 资产可解包执行）。待真 runner 确认：
+  下一次 push 到 `llvm` 的 ci 四端全绿；`release.yml` 用 `workflow_dispatch` +
+  `dry_run=true` 演练一轮（linux-x64 的 `test-llvm`、linux-arm64 的 Windows 目标门、
+  windows-2022 pin、artifact 路径改用 prepare 输出的 tag，这四处只有真 runner 能验）。
 - [ ] **D1 本机 ANTLR jar**：`make test` 第 1 层需要本地
   `antlr4-*-complete.jar`；WSL 已配置，macOS 按同一方式补齐或文档化安装。
 

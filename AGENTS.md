@@ -70,6 +70,8 @@
 just test               # 三层回归：ANTLR 语法 + 编译器语法模式 + 运行语义
 just bootstrap          # 首次/换机：准备固定 LLVM 闭包后冷编（一条命令，幂等）
 just selfhost-native    # 主门：两代固定点 + 自解析 + 全量语料 + 模块/项目验收
+just ci-gate            # CI 的唯一门禁（test + 平台专项 + 自举；分支门与 tag 发布共用）
+just release-asset      # 打包发布资产（需先 KEEP=1 just ci-gate；参数：tag 资产平台名）
 just llvm-host          # 只准备本机固定 LLVM 闭包（不编编译器）
 just fetch-seed         # 从最新 GitHub Release 取本机平台种子（x64 首次构建前）
 just code-stats         # 统计 compiler/ 下 yh 源码规模

@@ -8,6 +8,33 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-09：CI 去重——门禁与打包收进 justfile
+
+**结果**：`ci.yml`（232 行）与 `release.yml`（545 行）各写一套四端构建，`perf.yml` 再抄一份
+Darwin 前置：同一份「种子 → 闭包 → 冷编 → 门禁 → 自举」写了 9 遍，而且已经漂移——release 的
+Windows runner 是 `windows-latest`（VS 18 下闭包 CMake 生成器找不到实例），release 的
+Linux/Darwin 不跑 `test-libs`，release 的 artifact 路径用 `github.ref_name`（dispatch 演练
+上传必然找不到文件）。现在收成两条配方：
+
+- `just ci-gate`：`test`（三层回归 + libs + 工具门）→ `platform_gate`（按宿主分派：
+  Linux/x64 → `test-llvm`、Linux/AArch64 → Windows 目标编译侧、Darwin → `test-llvm-darwin`、
+  Windows → 语料交叉编译 + 本机执行）→ 自举 `SKIP_CORPUS=1`；`KEEP=1` 保留 cc4。
+- `just release-asset <tag> <资产平台名>`：找 cc4 → `--syntax-check` 冒烟 → tar（单成员 `yh`）
+  → 校验和（`sha256sum` / `shasum` / Git Bash 的 `*` 归一）。
+
+两个 workflow 的 8 个平台 job 都只调这两条配方：232+545 → 186+424 行，门禁清单与四份
+约 29 行的打包脚本各只剩一份；Windows runner pin 与门禁集合不再分叉。
+
+**验证**（本机 darwin-arm64）：`KEEP=1 just ci-gate` 全绿——test 三层、`test-llvm-darwin`、
+自举固定点一致、cc4 自解析 180 文件、project cases 129/129；
+`just release-asset 0.0.14-test darwin-arm64` 产出 `dist/yh-0.0.14-test-darwin-arm64.tar.gz`
+（单成员 `yh`，`shasum -a 256 -c` 通过，解包后 `./yh --version` = `yh 0.0.13`）。
+两个 workflow 用 Ruby YAML 解析器校验结构（jobs 齐全）。
+
+**遗留**：四端真 runner 上的行为未验（本机只能验 darwin-arm64），已登记
+[todo.md](todo.md) D2：下一次 push 到 `llvm` 的 ci 四端全绿 + `release.yml` 的
+`workflow_dispatch` `dry_run=true` 演练。
+
 ## 2026-11-09 tests/selfhost 清理与分域
 
 **结果**：`tests/selfhost` 从 91 个平铺文件整理为 54 个（8 个分组目录 + `fixtures/`）：
@@ -1230,3 +1257,20 @@ LLVM 重建（3,368 个 ninja 步骤，默认 `--jobs 2`）。此外部署的桥
   → `just test`：run 372/374（2 跳过）、fail 140/140、pass 10/10、compiler-tests 8/8、
   arch-check 8/8 → `just selfhost-native`：固定点一致、自解析 178 文件、
   project cases 129/129。
+
+### 0.0.13 正式版发布与发布二进制验收（2026-11-09）
+
+- 首轮 tag `0.0.13` 失败：`tests/selfhost/fixtures/llvmcachelib` 在上一次提交里被误
+  记成了 `tests/selfhost/darwin/llvmcachelib`（重命名），linux-x64 的
+  `llvm-cache.py` 找不到 fixture（`FileNotFoundError`），release 的
+  linux-arm64「自举门」同样失败 → 未生成 Release（允许重推 tag）。
+- 修法：`git mv` 回 `tests/selfhost/fixtures/llvmcachelib`（`b451bc9`）；顺带清掉
+  `compiler/link/link_cache.yh` 注释里两个 NUL 字节（git 因此把该文件当二进制，
+  `git grep/diff` 看不到内容，`392ec56`）。
+- 重推 tag → release run `42610237484`：prepare / 四端 / publish **全成功**；
+  Release `0.0.13` **正式版**（`prerelease=false`），8 个资产。
+- **发布二进制验收**：`rm -rf bin && just fetch-seed` 取到 `0.0.13`
+  （sha256 `299ad509…`）→ `just` → `./yh --version` = `yh 0.0.13` →
+  `just test`：run 372/374（2 跳过）、fail 140/140、pass 10/10、compiler-tests 8/8、
+  arch-check 8/8 → `just selfhost-native`：固定点一致、自解析 178 文件、
+  project cases 129/129、LA3 O0/O2 与 C4/C6 全通过。

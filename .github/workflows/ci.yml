@@ -1,11 +1,16 @@
 name: ci
-# 分支门（GitHub Actions 托管 runner，原生三端 + Linux 双架构，无容器）。
+# 分支门（GitHub Actions 托管 runner，原生四端 + Linux 双架构，无容器）。
 #
 # 平台矩阵（2026-11-03 迁移）：
-#   linux-x64    ubuntu-latest       Linux/x86_64 原生
-#   linux-arm64  ubuntu-24.04-arm    Linux/AArch64 原生（含 Windows 目标编译侧门）
-#   darwin-arm64 macos-15            Darwin/ARM64 原生
-#   windows-x64  windows-latest      Windows/x86_64 原生
+#   linux-x64    ubuntu-24.04       Linux/x86_64 原生
+#   linux-arm64  ubuntu-24.04-arm   Linux/AArch64 原生（含 Windows 目标编译侧门）
+#   darwin-arm64 macos-15           Darwin/ARM64 原生
+#   windows-x64  windows-2022       Windows/x86_64 原生
+#
+# 门禁只有一份定义：`just ci-gate`（test 三层 → 平台专项门 → 自举两代固定点）。
+# 本文件只做平台编排：runner、系统依赖、种子、闭包缓存；release.yml 的四个平台
+# job 调同一个 ci-gate 再打包，因此两个 workflow 不会再各维护一套门禁清单。
+# 新增测试或调整门禁 → 改 justfile 的 ci-gate / platform_gate，不要改 YAML。
 #
 # 闭包策略（用户决定：闭包不上传 Release，由 CI 机器自行准备）：
 #   Linux   从 vendor/llvm/sdk.lock.json 的 Ubuntu deb 取静态 LLVM/lld（分钟级）；
@@ -18,7 +23,8 @@ name: ci
 # 触发：push 到 llvm/main/arm64 分支；PR；手动。
 # 版本分支（<ver>-rc/<ver>-release）已于 2026-11-06 随单主线切换删除。
 # tag 发布见 release.yml。
-# ANTLR 参考语法门只在本地跑（just test / just quick），CI 用编译器 --syntax-check。
+# ANTLR 参考语法门只在本机跑（just test / just quick）：它要 Java + 本机 antlr
+# 运行时，runner 没有，所以这里显式 YH_ANTLR=0。
 on:
   push:
     branches:
@@ -47,6 +53,8 @@ env:
   PYTHONUTF8: "1"
   PYTHONIOENCODING: utf-8
   LLVM_JOBS: "2"
+  # 参考语法层需要 Java + antlr venv；CI 用编译器的 --syntax-check 覆盖语法面。
+  YH_ANTLR: "0"
 
 jobs:
   linux-x64:
@@ -54,7 +62,7 @@ jobs:
     # 26.04 的 gcc15/gnu23 还会把 C 侧 strtol 重定向到 glibc 的 C23 变体，libs 的
     # C ABI 用例会红——所以不要改用 ubuntu-latest）。
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       LLVM_JOBS: "4"
@@ -72,19 +80,8 @@ jobs:
         run: python3 tools/fetch-release-seed.py --platform linux-x86_64
       - name: 准备闭包
         run: just llvm-host
-      - name: 冷编
-        run: just build
-      - name: 语法与运行语料
-        run: |
-          set -euo pipefail
-          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
-          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
-      - name: 模块项目语料
-        run: python3 tests/modules/check.py --compiler-path "$PWD/yh" --quiet
-      - name: 标准库测试（独立阶段）
-        run: just test-libs
-      - name: 自举主门（语料已单独跑）
-        run: just SEED="$PWD/bin/yh-linux-x64" SKIP_CORPUS=1 selfhost-native
+      - name: 门禁（test + test-llvm + 自举固定点）
+        run: just ci-gate
 
   linux-arm64:
     runs-on: ubuntu-24.04-arm
@@ -111,28 +108,8 @@ jobs:
         run: python3 tools/fetch-release-seed.py --platform linux-arm64
       - name: 准备闭包
         run: just llvm-host
-      - name: 冷编
-        run: just build
-      - name: Linux/AArch64 LLVM 运行时与 C ABI 门
-        run: just test-llvm-linux-arm64
-      - name: 语法与运行语料
-        run: |
-          set -euo pipefail
-          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
-          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(nproc)"
-      - name: 标准库测试（独立阶段）
-        run: just test-libs
-      - name: Windows 目标（编译侧）
-        # 运行侧在真 Windows 上由 windows-x64 job 的 run-windows-corpus 覆盖：
-        # 导入库 stub、COFF/PE 目标门、C 按值聚合互操作（与 clang 桩对照）、整份语料交叉编译。
-        run: |
-          set -euo pipefail
-          just test-windows-sdk
-          just test-windows-target
-          just test-windows-abi
-          just test-windows-corpus
-      - name: 自举主门（语料已单独跑）
-        run: just SEED="$PWD/bin/yh-linux-arm64" SKIP_CORPUS=1 selfhost-native
+      - name: 门禁（test + Windows 目标编译侧 + 自举固定点）
+        run: just ci-gate
 
   darwin-arm64:
     runs-on: macos-15
@@ -163,23 +140,13 @@ jobs:
         with:
           path: tmp/llvm-migration
           key: ${{ steps.closure-cache.outputs.cache-primary-key }}
-      - name: 冷编
-        run: just build
-      - name: Darwin 专项门
-        run: just test-llvm-darwin
-      - name: 语法与运行语料
-        run: |
-          set -euo pipefail
-          python3 tests/yh/check.py --compiler --compiler-path "$PWD/yh" --quiet
-          python3 tests/yh-run/check.py --compiler "$PWD/yh" --quiet --jobs "$(sysctl -n hw.ncpu)"
-      - name: 标准库测试（独立阶段）
-        run: just test-libs
-      - name: 自举主门（语料已单独跑）
-        run: just SEED="$PWD/bin/yh-darwin-arm64" SKIP_CORPUS=1 selfhost-native
+      - name: 门禁（test + test-llvm-darwin + 自举固定点）
+        run: just ci-gate
 
   windows-x64:
     # pin 2022：windows-latest 已滚到 VS 18 镜像，闭包 CMake 生成器写死的
     # 「Visual Studio 17 2022」找不到匹配实例（长期方案：生成器动态检测）。
+    # release.yml 用同一个 pin，两边必须一致。
     runs-on: windows-2022
     timeout-minutes: 360
     defaults:
@@ -215,18 +182,5 @@ jobs:
             tmp/llvm-migration/llvm-host-windows-x86_64
             tmp/llvm-migration/windows-sdk
           key: ${{ steps.closure-cache.outputs.cache-primary-key }}
-      - name: 冷编
-        run: just build
-      - name: 全量回归（语法 + 运行语料 + 模块 + libs + arch-check）
-        run: just test
-      - name: 自举主门（语料已单独跑）
-        run: just SKIP_CORPUS=1 selfhost-native
-      - name: Windows 目标编译侧门
-        # `test-windows-target` 不在这里跑：它含 `--emit-asm` stdout 路径，Windows
-        # 零 CRT 下暂不支持（设计 §6.9 已登记，W2-9 遗留），归在 linux-arm64 job
-        # 的交叉编译侧门；Windows 这里只验证整份语料交叉编译 + 本机执行。
-        run: |
-          set -euo pipefail
-          just test-windows-corpus
-      - name: Windows 运行侧（执行上一步清单）
-        run: just run-windows-corpus
+      - name: 门禁（test + Windows 语料交叉编译/执行 + 自举固定点）
+        run: just ci-gate
