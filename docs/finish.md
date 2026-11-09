@@ -1214,3 +1214,19 @@ LLVM 重建（3,368 个 ninja 步骤，默认 `--jobs 2`）。此外部署的桥
 
 经验：**身份要绑定「决定产物的输入」，不要绑定「产生输入的程序」**；否则任何工具
 改动都会让增量缓存失效。
+
+### 0.0.13-rc.1 发布与发布二进制验收（2026-11-09）
+
+- tag `0.0.13-rc.1` → release 工作流 run `42599758790`：prepare / linux-x64 / linux-arm64 /
+  darwin-arm64 / windows-x64 / publish **全部成功**；Release 标记为 prerelease，
+  8 个资产（四端 tar.gz + sha256），远端大小校验一致。
+- 首轮 release 失败过一次：`tests/selfhost/darwin/llvm-darwin-sdk.py` 用
+  `runpy.run_path` 加载 `tools/llvm-darwin-sdk.py`，而该文件在定义 `ROOT`/补
+  `sys.path` 之前就 `from llvm_recipe import ...` → `ModuleNotFoundError`。
+  修法：把 `sys.path.insert` 提到 import 之前（提交 `a95148e`），本地两个 SDK 门禁
+  复跑 PASS；随后删除并重推 tag（未生成 Release，允许）。
+- **用发布出去的二进制验收**：`rm -rf bin && just fetch-seed` 取到
+  `0.0.13-rc.1`（sha256 `8f40a72b…`）→ `just` 冷编 → `./yh --version` = `yh 0.0.13-rc.1`
+  → `just test`：run 372/374（2 跳过）、fail 140/140、pass 10/10、compiler-tests 8/8、
+  arch-check 8/8 → `just selfhost-native`：固定点一致、自解析 178 文件、
+  project cases 129/129。
