@@ -88,8 +88,9 @@ release 工作流的版本常量路径失效）。种子链：0.0.13 → 0.0.14-
      `memory`。
    - `[env]` 相关构建在 Windows 上 0xC0000005（`link-env-manifest` 与后续
      `compiler-tests` 子进程）：`[env]` 快照移到 `[link]` 之前（`${NAME}` 展开
-     的默认值来源），并给 `pj_load_env_config`/`li_expand_vars` 补节下标、
-     键/值池偏移与长度边界检查。
+     的默认值来源），给 `pj_load_env_config`/`li_expand_vars` 补节下标、
+     键/值池偏移与长度边界检查，并把 `compiler/project.toml` 的 `[env]` 值改为
+     字面量（原 `${YH_ROOT}/...` 嵌套展开在 Windows 上触发解析崩溃）。
 
 ## 验收
 

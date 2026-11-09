@@ -40,7 +40,8 @@
   4. `[env]` 相关构建在 Windows 上 0xC0000005（`link-env-manifest`
      与 `compiler-tests` 的 `--emit-module` 子进程）：`[env]` 快照移到
      `[link]` 之前（`${NAME}` 的默认值来源），`pj_load_env_config`/
-     `li_expand_vars` 补节下标、池偏移与长度边界检查。
+     `li_expand_vars` 补节下标、池偏移与长度边界检查，`compiler/project.toml`
+     的 `[env]` 值去掉嵌套 `${YH_ROOT}`（改字面量）。
 
 **验证**：
 - `just test` 全绿（含 372/374 run、libs 151、compiler-tests 8/8、C4/C6）
