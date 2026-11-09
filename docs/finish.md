@@ -29,7 +29,11 @@
   `link/context.yh` 报 `LLVM lowering set_argv0`，`YH_CACHE=off` 不复现；
   `yh cache verify` 显示无损坏，属缓存键/产物语义层面的待排查项。
 - 首轮 tag 的 CI（run 42709901928）：linux 两端成功，darwin/windows 失败，
-  publish 跳过。修复后重推同 tag（rc.1 未生成 Release）：
+  publish 跳过。重推 tag 三次（rc.1 未生成 Release）；darwin 已修复，
+  **Windows 仍未解决**：`compiler-tests` 的 `--emit-module support` 子进程
+  0xC0000005（`6469c32` 起、0.0.13 之后的既有回归；`7089690` 的 Windows
+  compiler-tests 仍 8/8，`6469c32` 开始 0/8）。`[env]` 顺序/边界/字面量
+  三处加固无效，需在 Windows runner 上抓 dump 定位。修复记录：
   1. `tools/link-closure.py check` 在闭包移到项目外后仍读仓库内路径，改为
      `host_record_path`（缓存根）；本地 `just test-llvm-darwin` 全绿。
   2. `llvm-darwin-default.py` 的 print 引用已删除的统计变量（NameError），
@@ -48,6 +52,10 @@
 - `just selfhost-native` 全绿：固定点一致（51 产物）、cc4 自解析 180 文件、
   project cases **125/125**、LA0 O0/O2
 - `just test-libs` O0/O2 全绿；`tmp/list-consumer` 跨模块消费者退出码 0
+- 四端 CI：linux-x64/linux-arm64 成功；darwin-arm64 修复后待本轮结果；
+  Windows 仍失败（`compiler-tests` 0xC0000005），Release 未发布
+- 本地种子已滚：`bin/yh-darwin-arm64` = `yh 0.0.14-rc.1`，
+  sha256 `54a5cf1bff3f86d7617719373a07c31c6456e48e84de7d9aaa0662689e7b097b`
 
 ## 2026-11-10：list 标准库 L0–L2（动态列表）
 

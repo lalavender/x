@@ -103,3 +103,7 @@ release 工作流的版本常量路径失效）。种子链：0.0.13 → 0.0.14-
   安装验收）。
 - 跨模块消费者 `tmp/list-consumer`（`import list` + `list.status_ok` + `libc.qsort`）
   退出码 0。
+- 四端 CI：linux-x64 / linux-arm64 成功；darwin-arm64 修复后通过；Windows 的
+  `compiler-tests --emit-module support` 仍 0xC0000005（0.0.13 之后的既有回归，
+  `6469c32` 起出现）。本 RC 因此未生成 Release 资产，tag 保留在 llvm 上；
+  修复 Windows 后重推或发 rc.2。
