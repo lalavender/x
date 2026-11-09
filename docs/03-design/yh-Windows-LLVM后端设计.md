@@ -399,4 +399,4 @@ Windows 目标按方案 D2 走**零 CRT**：用户程序只链 `kernel32.lib` + 
 **门禁的实现约定**（写新用例时照做）：`build-check.py` 的 `WINDOWS_SKIP` /
 `WINDOWS_SKIP_PREFIX` 是唯一开关，`report()` 与 `run_case()` 都会查它；
 断言退出码一律用 `exit_code()` 归一化到 POSIX 的 8 位语义；`link-cache.py` 这类
-“外部工具计数”门在 Windows 上没有意义，改为用 `YH_STATS=1` 的 link 计数与对象字节身份。
+“外部工具计数”门在 Windows 上没有意义；统计机制已于 2026-11-10 删除，该门改看对象字节身份。

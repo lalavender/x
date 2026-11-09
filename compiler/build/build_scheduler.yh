@@ -1,5 +1,4 @@
 module build
-import parse
 import support
 import proj
 import link
@@ -42,56 +41,6 @@ fn mb_sched_worker_limit() int {
 // yh_win_spawn_wait：Windows 侧 CreateProcessA 包装（compiler/llvm/windows_shim.c）。
 // 仅无 fork 宿主使用；其余平台不引用，符号不会进入链接。
 @[extern] fn yh_win_spawn_wait(argv **char, argc int) int
-
-// mb_sched_reset_worker_stats：子进程继承项目快照，但阶段计数只记录模块自身。
-fn mb_sched_reset_worker_stats() void {
-    bc().build_start_ns = 0
-    bc().project_ns = 0
-    bc().schedule_ns = 0
-    bc().front_ns = 0
-    bc().lower_ns = 0
-    bc().irbuild_ns = 0
-    bc().bridge_ns = 0
-    link.reset_timings()
-    support.stats().lex = 0
-    support.stats().syntax = 0
-    support.stats().index = 0
-    support.stats().pass1 = 0
-    support.stats().globals = 0
-    support.stats().functions = 0
-    support.stats().ir_functions = 0
-    support.stats().ir_cache_hits = 0
-    support.stats().ir_cache_misses = 0
-    support.stats().ir_lowered = 0
-    support.stats().check_cache_hits = 0
-    support.stats().check_cache_misses = 0
-    support.stats().check_cache_skipped = 0
-    support.stats().checked_functions = 0
-    support.stats().backend_emitted = 0
-    support.stats().ir_rejected = 0
-    support.stats().backend_rejected = 0
-    support.stats().lower_prep_ns = 0
-    support.stats().lower_decl_ns = 0
-    support.stats().lower_build_ns = 0
-    support.stats().lower_verify_ns = 0
-    support.stats().lower_lookup_ns = 0
-    support.stats().lower_cache_ns = 0
-    support.stats().lower_fn_ns = 0
-    support.stats().lower_capture_ns = 0
-    parse.ctx().ir_reject_reason = 0
-    support.stats().workers = 0
-    support.stats().asm = 0
-    support.stats().link = 0
-    support.stats().compiler_hashes = 0
-    support.session().stats_ast_nodes = 0
-    support.session().stats_ast_refs = 0
-    support.session().stats_stmt_nodes = 0
-    support.session().stats_ast_bindings = 0
-    support.session().stats_ast_functions = 0
-    support.session().stats_decl_nodes = 0
-    bc().sched_peak = 0
-    bc().sched_iface_early = 0
-}
 
 // mb_spawn_module_child：无 fork 宿主（Windows）把模块编译放进一次性子进程。
 // 子进程重走 --emit-module 协议（重新索引项目，前端状态天然干净），父进程
@@ -155,7 +104,7 @@ fn mb_spawn_module_child(module_idx int, root_off int, root_len int,
     // （c_firc_write_off = 链接清单不存在）。无 fork 宿主的模块编译在独立子进程，
     // 必须把该判定显式带过去，否则子进程会把冷编的缓存记录写下来——下一轮
     // 清空 .build 后那些记录永远不会被读，且“首轮重编应全部 miss”的期望会反转。
-    if (support.stats().firc_write_off != 0) { args[ai] = "--no-firc"; ai += 1 }
+    if (support.ctl().firc_write_off != 0) { args[ai] = "--no-firc"; ai += 1 }
     // 单文件测试（yh test <项目外文件>）的扫描过滤要在子进程重建：子进程自己
     // 重新装载项目，不传就会把相邻 .yh 也装进来（Windows 无 fork 的 re-exec 路径）。
     let scan_buf [1100]u8
@@ -212,7 +161,6 @@ fn mb_spawn_indexed_module(module_idx int, root_off int, root_len int,
     }
     if (child == 0) {
         mb_worker_parent_set()
-        mb_sched_reset_worker_stats()
         let result int = mb_emit_indexed_module(module_idx, root_off, root_len,
             out_dir, ir_cache_salt)
         if (result == 0) {
@@ -475,8 +423,6 @@ pub fn mb_schedule_modules(count int, root_off int, root_len int,
 fn mb_schedule_modules_locked(count int, root_off int, root_len int,
     build_off int, build_len int) int {
     if (count <= 0) {
-        bc().sched_peak = 0
-        bc().sched_iface_early = 0
         return 0
     }
     mb_cache_init()
@@ -489,7 +435,7 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
     let lmn int = support.append_str(&link_manifest[0], 0, proj.pool_str(build_off))
     lmn = support.append_str(&link_manifest[0], lmn, "/manifest/link.manifest")
     link_manifest[lmn] = 0
-    support.stats().firc_write_off = proj.file_exists(support.arr_cstr(&link_manifest[0])) == 0 ? 1 : 0
+    support.ctl().firc_write_off = proj.file_exists(support.arr_cstr(&link_manifest[0])) == 0 ? 1 : 0
     let states *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
     let pids *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
     let keys *u8 = malloc((count * cache.CACHE_ID_SIZE).to_type(u64)).to_type(*u8)
@@ -508,8 +454,6 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
     let completed int = 0
     let active int = 0
     let failed int = 0
-    bc().sched_peak = 0
-    bc().sched_iface_early = 0
     for completed < count && failed == 0 {
         let progress int = 0
         if (mb_sched_refresh_interfaces(states, count, build_off, build_len) != 0) {
@@ -596,12 +540,6 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
                         states[i] = 1
                         pids[i] = pid
                         active += 1
-                        if (active > bc().sched_peak) {
-                            bc().sched_peak = active
-                        }
-                        if (early != 0) {
-                            bc().sched_iface_early += 1
-                        }
                     }
                 }
             }

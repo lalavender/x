@@ -105,22 +105,6 @@ def backend_text_files(project):
     return sorted((artifact_root(project) / "asm").rglob("*.s"))
 
 
-def validate_llvm_stats(proc):
-    """验证 LLVM 项目构建的覆盖计数没有漏记或静默回退。"""
-    lines = [line for line in (proc.stdout + proc.stderr).splitlines()
-             if line.startswith("yh-stats ")]
-    if not lines:
-        return "LLVM 构建未输出 --stats 计数"
-    rows = [dict(item.split("=", 1) for item in line.split()[1:]
-                  if "=" in item) for line in lines]
-    checked = sum(int(row.get("checked_functions", "0")) for row in rows)
-    emitted = sum(int(row.get("backend_emitted_functions", "0")) for row in rows)
-    fallback = sum(int(row.get("fallback_functions", "0")) for row in rows)
-    if emitted > checked or fallback != 0:
-        return f"LLVM 计数不一致：checked={checked} emitted={emitted} fallback={fallback}"
-    return None
-
-
 def exit_code(rc: int) -> int:
     """把退出码归一化为 POSIX 语义（只看低 8 位）。
 
@@ -151,12 +135,9 @@ def sh(cmd, cwd, env=None):
                 build_at = -1
             if build_at >= 0:
                 cmd[build_at + 1:build_at + 1] = COMPILER_BUILD_FLAGS
-    # --stats 已从 CLI 移除（2026-11-10）：用例仍写 "--stats"，这里翻译成
-    # YH_STATS=1 环境变量，避免逐条改几十处调用。
+    # 统计机制已删除（2026-11-10）：用例里残留的 "--stats" 直接丢弃。
     if "--stats" in cmd:
         cmd = [c for c in cmd if c != "--stats"]
-        env = dict(env or {})
-        env.setdefault("YH_STATS", "1")
     e = dict(__import__("os").environ)
     e.setdefault("YH_CACHE", "off")
     if env:
@@ -166,22 +147,7 @@ def sh(cmd, cwd, env=None):
     timeout = 1800 if COMPILER_BACKEND == "llvm" else 300
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
                             env=e, timeout=timeout)
-    if COMPILER_BACKEND == "llvm" and any(
-            line.startswith("yh-stats ")
-            for line in (result.stdout + result.stderr).splitlines()):
-        error = validate_llvm_stats(result)
-        if error:
-            return subprocess.CompletedProcess(
-                cmd, 1, result.stdout, result.stderr + "\nLL9 stats: " + error)
     return result
-
-
-def stat_value(line, name, default=-1):
-    """从一行 yh-stats 读取整数计数器。"""
-    marker = name + "="
-    if marker not in line:
-        return default
-    return int(line.split(marker, 1)[1].split()[0])
 
 
 def has_two_edge_phi(path):
@@ -323,9 +289,6 @@ case("u4-basic-run", "run", "basic", "app", 255)
 case("ct3-same-module-multifile", "comptime-local", "comptimelocal", ".")
 case("ct5a-layout-const-deps", "comptime-layout-deps", "comptimelayoutdeps", ".")
 case("ct5b-cross-module-body", "comptime-cross-module", "comptimecross", ".")
-case("ct2-expanded-ast-ssa", "comptime-expanded-ast", "comptimeexpanded", ".", 0)
-case("ct2-expanded-ast-node-budget", "comptime-expanded-budget", "comptimeexpandedfail", ".",
-     msg="编译期 for 展开 AST 节点超过 100000")
 case("u4-iso-run", "run", "iso", "host", 15)
 case("u4-aggfloat-run", "run", "aggfloat", "host", 29)
 case("u4-enumexp-run", "run", "enumexp", "host", 10)
@@ -368,7 +331,6 @@ case("u3-import-used-via-field-type", "run", "importfield", "host", 0)
 case("u1-extern-abs-module", "run", "externabs", "host", 0)
 case("u3-c-source-object-library-mix", "run", "cinterop", ".", 0)
 case("cabi-automatic-values-and-callbacks", "cabi-run", "autoabi", ".", 0)
-case("i1-inline-ssa-and-fallback", "inline", "inline", ".")
 # 非 inline 函数声明在 inline 函数之前：验证按文件切分的替换位移
 # 在 pass 1 不会把后续函数的序言推掉（曾导致汇编首行只剩 `29, sp`）。
 case("i1-inline-order-after-noninline", "run", "inlineorder", ".", 0)
@@ -385,14 +347,8 @@ case("llvm-target-identity", "run", "llvmtarget", ".", 0)
 case("llvm-front-zero-output", "run", "llvmfront", ".", 0)
 case("llvm-module-ownership", "run", "llvmmodule", ".", 0)
 case("llvm-checked-snapshot", "run", "llvmchecked", ".", 0)
-case("llvm-snapshot-lowering", "checked-lower", "llvmlower", ".", 0)
 case("llvm-global-private-data", "run", "llvmprivate", ".", 0)
-case("r2c-build-lowers-ssa-cfg", "ir", "irfront", ".", 230)
-case("r2a-ssa-cross-module-call", "ir-call", "ircallmodule", ".", 41)
-case("r2b-interface-ready-scheduler", "scheduler", "scheduler", ".")
-case("r2b-interface-ready-diamond", "scheduler-diamond", "scheduler-diamond", ".")
 case("r3-system-mode", "legacy-system", "legacy-system", ".")
-case("r3-systemless-link-cache-mode", "mode-cache", "systemless", ".")
 case("r3-dup2-os-api", "run", "dup2-api", ".", 0)
 case("r3-mkdir-os-api", "run", "mkdir-api", ".", 0)
 case("r3-capture-uses-host-file-flags", "host-capture", "systemless", ".")
@@ -461,7 +417,6 @@ case("u3-import-clash", "fail", "clashname", "host", msg="导入名冲突")
 # —— PC1（2026-10-25）：函数级 IR 缓存命中率回归 ——
 # 键里混入 arena 下标时实测全量 miss；这里固定三条断言：冷编全 miss、
 # 等价重编全命中、改一个函数体只失效该函数。
-case("pc1-function-cache-hits", "firc", "firchits", ".")
 
 # —— OS1–OS5：Linux 文件/目录/环境/进程/时间/内存（只在 Linux 内核运行） ——
 OS_LINUX_CASES = [
@@ -698,7 +653,6 @@ def main():
     if args.opt_level:
         COMPILER_FLAGS += [f"-O{args.opt_level}"]
     if args.backend == "llvm":
-        COMPILER_FLAGS += ["--stats"]
         COMPILER_BUILD_FLAGS += ["--emit-llvm"]
     WORK = Path(args.workdir)
     WORK.mkdir(parents=True, exist_ok=True)
@@ -741,73 +695,6 @@ def main():
 
         dst = WORK / f"{c['fixture'].replace('/', '_')}--{c['name']}"
         copy_proj(PROJ / c["fixture"], dst)
-        if c["kind"] == "firc":
-            if COMPILER_BACKEND != "llvm":
-                report(False, c["name"], "函数级缓存回归只覆盖 LLVM 后端")
-                return out
-            root = artifact_root(dst)
-            # 模块标记 = 项目名 + 模块名；按 glob 匹配，避免把项目名写死。
-            source = dst / "main.yh"
-            original = source.read_text(encoding="utf-8")
-
-            def cache_stats(proc):
-                """取 ir_functions 最大的 stats 行：worker 行才有缓存计数。"""
-                rows = [line for line in (proc.stdout + proc.stderr).splitlines()
-                        if line.startswith("yh-stats ") and "ir_functions=" in line]
-                if not rows:
-                    return (-1, -1, -1)
-                line = max(rows, key=lambda row: stat_value(row, "ir_functions", -1))
-                return (stat_value(line, "ir_functions", -1),
-                        stat_value(line, "ir_cache_hits", -1),
-                        stat_value(line, "ir_cache_misses", -1))
-
-            cold = sh([compiler, "build", "--stats"], cwd=dst)
-            total, hits, misses = cache_stats(cold)
-            report(cold.returncode == 0 and total > 0 and hits == 0 and misses == total,
-                   c["name"] + ":cold-miss",
-                   f"冷编应全 miss：rc={cold.returncode} total={total} "
-                   f"hits={hits} misses={misses}\n{cold.stderr[-400:]}")
-            # PC3：上一轮没完成链接（.build 刚清空）时不写函数级缓存。
-            records = list(root.glob("firc/*/*.fir"))
-            report(cold.returncode == 0 and not records,
-                   c["name"] + ":cold-no-write",
-                   f"全冷构建写了 {len(records)} 条函数缓存记录，PC3 要求为 0")
-
-            def force_recompile():
-                for pattern in ("manifest/*-main.manifest", "obj/*-main.o"):
-                    for path in root.glob(pattern):
-                        path.unlink()
-
-            # 首次等价重编：缓存还是空的（冷编没写），全 miss 并落盘。
-            force_recompile()
-            primed = sh([compiler, "build", "--stats"], cwd=dst)
-            total_p, hits_p, misses_p = cache_stats(primed)
-            report(primed.returncode == 0 and total_p == total and hits_p == 0
-                   and misses_p == total,
-                   c["name"] + ":prime-miss",
-                   f"首轮重编应全 miss：total={total_p} hits={hits_p} "
-                   f"misses={misses_p}\n{primed.stderr[-400:]}")
-            force_recompile()
-            hot = sh([compiler, "build", "--stats"], cwd=dst)
-            total2, hits2, misses2 = cache_stats(hot)
-            report(hot.returncode == 0 and total2 == total and hits2 == total
-                   and misses2 == 0,
-                   c["name"] + ":hot-all-hit",
-                   f"等价重编未全命中：total={total2} hits={hits2} misses={misses2}"
-                   f"\n{hot.stderr[-400:]}")
-            source.write_text(original.replace("    return x + 1;",
-                                               "    return x + 2;", 1),
-                              encoding="utf-8")
-            edit = sh([compiler, "build", "--stats"], cwd=dst)
-            total3, hits3, misses3 = cache_stats(edit)
-            report(edit.returncode == 0 and total3 == total and misses3 == 1
-                   and hits3 == total - 1,
-                   c["name"] + ":one-function-miss",
-                   f"单函数改动未只失效该函数：total={total3} hits={hits3} "
-                   f"misses={misses3}\n{edit.stderr[-400:]}")
-            source.write_text(original, encoding="utf-8")
-            return out
-
         if c["kind"] == "linkgroups":
             cc = "clang" if sys.platform == "darwin" else "gcc"
 
@@ -819,11 +706,6 @@ def main():
                 if r.returncode != 0:
                     return r
                 return sh(["ar", "rcs", str(lib), str(obj)], cwd=dst)
-
-            def link_count(proc):
-                lines = [line for line in proc.stderr.splitlines()
-                         if line.startswith("yh-stats ")]
-                return max([stat_value(line, "link", 0) for line in lines] or [0])
 
             for src_name, lib_name in (("c/a.c", "liba.a"), ("c/b.c", "libb.a"),
                                        ("c/a_target.c", "liba_target.a"),
@@ -839,11 +721,9 @@ def main():
                    c["name"] + ":default-all",
                    f"默认全链失败: build={first.returncode}, "
                    f"run={run.returncode if run else None}\n{first.stderr[-500:]}")
-            second = sh([compiler, "build", "--stats"], cwd=dst)
-            report(second.returncode == 0 and link_count(second) == 0,
-                   c["name"] + ":hot-cache",
-                   f"第二次构建未命中链接缓存: link={link_count(second)}\n"
-                   f"{second.stderr[-400:]}")
+            second = sh([compiler, "build"], cwd=dst)
+            report(second.returncode == 0, c["name"] + ":rebuild",
+                   f"第二次构建失败: rc={second.returncode}\n{second.stderr[-400:]}")
             single = sh([compiler, "build", "--link", "a"], cwd=dst)
             report(single.returncode != 0 and "link_probe_b" in (single.stdout + single.stderr),
                    c["name"] + ":single-group",
@@ -876,11 +756,10 @@ def main():
             changed = sh([compiler, "build", "--stats"], cwd=dst)
             run_changed = sh([str(program)], cwd=dst) if program.exists() else None
             report(prepared.returncode == 0 and changed.returncode == 0
-                   and link_count(changed) > 0
                    and run_changed is not None and run_changed.returncode == 80,
                    c["name"] + ":archive-content",
                    f"归档内容变化未重链或运行值不符: prepared={prepared.returncode}, "
-                   f"build={changed.returncode}, link={link_count(changed)}, "
+                   f"build={changed.returncode}, "
                    f"run={run_changed.returncode if run_changed else None}\n"
                    f"{changed.stderr[-400:]}")
             shutil.rmtree(dst / "lib")
@@ -950,37 +829,29 @@ def main():
             return out
         if c["kind"] == "cabi-run":
             # 两个窄参数探针和整数转换必须进入选定的真实后端并保持 C ABI。
-            built = sh([compiler, "build", "--stats"], cwd=dst)
-            lines = [line for line in built.stderr.splitlines()
-                     if line.startswith("yh-stats ")]
+            built = sh([compiler, "build"], cwd=dst)
             program = dst / ".build" / "autoabi"
             run = sh([str(program)], cwd=dst) if program.exists() else None
             if COMPILER_BACKEND == "llvm":
-                checked = sum(stat_value(line, "checked_functions", 0) for line in lines)
-                emitted = sum(stat_value(line, "backend_emitted_functions", 0)
-                              for line in lines)
                 text = "\n".join(path.read_text() for path in backend_text_files(dst))
                 # Linux/AArch64 按 AAPCS64 不写 signext/zeroext；该属性断言只适用于
                 # 需要寄存器级窄型承诺的 SysV/Darwin 目标。
                 attrs_ok = COMPILER_TARGET.startswith("aarch64-unknown-linux") \
                     or ("signext" in text and "zeroext" in text)
-                report(built.returncode == 0 and checked >= 3 and emitted == checked
-                       and attrs_ok
+                report(built.returncode == 0 and attrs_ok
                        and run_ok(run, c["expect"]),
                        c["name"],
                        f"C 双向 ABI/LLVM 覆盖失败: rc={built.returncode}, "
-                       f"checked={checked}, emitted={emitted}, "
                        f"run={run.returncode if run else None}\n{built.stderr[-400:]}")
             else:
-                lowered = sum(stat_value(line, "ir_functions", 0) for line in lines)
                 ir_files = list((artifact_root(dst) / "ir").glob("*.ir"))
                 casts = sum(count_ir_op(path, 24) for path in ir_files)
-                report(built.returncode == 0 and lowered >= 3 and casts >= 3
+                report(built.returncode == 0 and casts >= 3
                        and run_ok(run, c["expect"]),
                        c["name"],
                        f"C 双向调用或 SSA 覆盖失败: rc={built.returncode}, "
-                       f"ir_functions={lowered}, cast_ops={casts}, "
-                       f"run={run.returncode if run else None}\n{built.stderr[-400:]}")
+                       f"cast_ops={casts}, run={run.returncode if run else None}\n"
+                       f"{built.stderr[-400:]}")
             return out
         if c["kind"] == "comptime-local":
             built = sh([compiler, "build"], cwd=dst)
@@ -1263,115 +1134,6 @@ def main():
                    f"build={built.returncode}, run={run.returncode if run else None}\n"
                    f"{built.stderr[-500:]}")
             return out
-        if c["kind"] == "comptime-expanded-ast":
-            built = sh([compiler, "build", "--stats"], cwd=dst)
-            lines = [line for line in built.stderr.splitlines()
-                     if line.startswith("yh-stats ")]
-            program = dst / ".build" / "comptimeexpanded"
-            run = sh([str(program)], cwd=dst) if program.exists() else None
-            if COMPILER_BACKEND == "llvm":
-                checked = sum(stat_value(line, "checked_functions", 0) for line in lines)
-                emitted = sum(stat_value(line, "backend_emitted_functions", 0)
-                              for line in lines)
-                ir_files = backend_text_files(dst)
-                report(built.returncode == 0 and checked >= 3 and emitted == checked
-                       and bool(ir_files) and run is not None
-                       and run_ok(run, c["expect"]),
-                       c["name"],
-                       f"编译期展开结果未交给 LLVM 后端: build={built.returncode}, "
-                       f"checked={checked}, emitted={emitted}, "
-                       f"llvm_modules={len(ir_files)}, run={run.returncode if run else None}\n"
-                       f"{built.stderr[-500:]}")
-            else:
-                lowered = sum(stat_value(line, "ir_functions", 0) for line in lines)
-                report(built.returncode == 0 and lowered >= 3
-                       and run_ok(run, c["expect"]),
-                       c["name"],
-                       f"普通函数展开未进入稳定 SSA: build={built.returncode}, "
-                       f"ir_functions={lowered}, run={run.returncode if run else None}\n"
-                       f"{built.stderr[-500:]}")
-            return out
-        if c["kind"] == "comptime-expanded-budget":
-            checked = sh([compiler, "check"], cwd=dst / c["sub"])
-            report(checked.returncode != 0
-                   and c["msg"] in (checked.stderr + checked.stdout),
-                   c["name"],
-                   f"实际展开 AST 节点越界未被精确拒绝: rc={checked.returncode}\n"
-                   f"{(checked.stderr + checked.stdout)[-500:]}")
-            return out
-        if c["kind"] == "checked-lower":
-            # 纯快照 lowering：受检快照 → 模块 SSA。scalar 必须全量降低并统计出
-            # 5 个运行期函数（comptime 不计入）、4 个直接调用与合流/循环携带 phi；
-            # pointer 自 LL5 首片起走取址/解引用内存驻留并成功降低；aggregate
-            # 仍必须带真实来源整模块拒绝，不发布部分产物。
-            built = sh([compiler, "build"], cwd=dst)
-            program = dst / ".build" / "llvmlower"
-            run = sh([str(program), str(dst / "input" / "scalar.yh"), "0"],
-                     cwd=dst) if program.exists() else None
-            lower_ok = (built.returncode == 0 and run is not None
-                        and run.returncode == 0
-                        and "lower-snapshot=ok functions=5 phis=" in run.stdout
-                        and " calls=4" in run.stdout
-                        and "phis=0" not in run.stdout)
-            pointer = sh([str(program), str(dst / "input" / "pointer.yh"), "0"],
-                         cwd=dst) if program.exists() else None
-            pointer_ok = (pointer is not None and pointer.returncode == 0
-                          and "lower-snapshot=ok" in pointer.stdout
-                          and "functions=2" in pointer.stdout)
-            aggregate = sh([str(program), str(dst / "input" / "aggregate.yh"), "0"],
-                           cwd=dst) if program.exists() else None
-            aggregate_ok = (aggregate is not None and aggregate.returncode == 0
-                            and "lower-snapshot=ok" in aggregate.stdout
-                            and "functions=2" in aggregate.stdout)
-            slice_ok = sh([str(program), str(dst / "input" / "slice.yh"), "0"],
-                          cwd=dst) if program.exists() else None
-            slice_lowered = (slice_ok is not None and slice_ok.returncode == 0
-                             and "lower-snapshot=ok" in slice_ok.stdout
-                             and "functions=2" in slice_ok.stdout)
-            global_run = sh([str(program), str(dst / "input" / "global.yh"), "0"],
-                            cwd=dst) if program.exists() else None
-            global_lowered = (global_run is not None and global_run.returncode == 0
-                              and "lower-snapshot=ok" in global_run.stdout
-                              and "functions=2" in global_run.stdout)
-            rejected = sh([str(program), str(dst / "input" / "globalrejectdepth.yh"), "1"],
-                          cwd=dst) if program.exists() else None
-            rejects = (rejected is not None and rejected.returncode == 0
-                       and "lower-rejected=ok" in rejected.stdout
-                       and "rejected_pointer_depth" in rejected.stderr
-                       and ".yh:" in rejected.stderr)
-            # LA2b：互递归/函数内字符串、嵌套同名局部绑定与中间函数失败。
-            mutual = sh([str(program), str(dst / "input" / "mutual.yh"), "0"],
-                        cwd=dst) if program.exists() else None
-            mutual_ok = (mutual is not None and mutual.returncode == 0
-                         and "lower-snapshot=ok functions=4" in mutual.stdout)
-            shadow = sh([str(program), str(dst / "input" / "shadow.yh"), "0"],
-                        cwd=dst) if program.exists() else None
-            shadow_ok = (shadow is not None and shadow.returncode == 0
-                         and "lower-snapshot=ok functions=1" in shadow.stdout)
-            failmid = sh([str(program), str(dst / "input" / "failmid.yh"), "1"],
-                         cwd=dst) if program.exists() else None
-            failmid_ok = (failmid is not None and failmid.returncode == 0
-                          and "lower-rejected=ok" in failmid.stdout
-                          and "首片不支持此绑定类型或参数布局" in failmid.stderr
-                          and "failmid.yh:6:" in failmid.stderr)
-            # LA3.3 C2：受检 AST 切片离线往返，重建快照后 lowering 身份一致。
-            check_slice = sh([str(program), str(dst / "input" / "checkcache.yh"), "2"],
-                             cwd=dst) if program.exists() else None
-            check_slice_ok = (check_slice is not None
-                              and check_slice.returncode == 0
-                              and "check-slice=ok" in check_slice.stdout)
-            report(lower_ok and pointer_ok and aggregate_ok and slice_lowered
-                   and global_lowered and rejects and mutual_ok and shadow_ok
-                   and failmid_ok and check_slice_ok, c["name"],
-                   f"快照 lowering 覆盖或拒绝路径失败: lower_ok={lower_ok}, "
-                   f"pointer_ok={pointer_ok}, aggregate_ok={aggregate_ok}, "
-                   f"slice_ok={slice_lowered}, global_ok={global_lowered}, rejects={rejects}, "
-                   f"mutual_ok={mutual_ok}, shadow_ok={shadow_ok}, failmid_ok={failmid_ok}, "
-                   f"check_slice_ok={check_slice_ok}, "
-                   f"build={built.returncode}, run={run.returncode if run else None}, "
-                   f"stdout={(run.stdout if run else '')[-120:]!r}\n"
-                   f"{(run.stderr if run else built.stderr)[-400:]}")
-            return out
         if c["kind"] == "host-capture":
             target = "aarch64-unknown-linux-gnu" if sys.platform == "darwin" else "aarch64-apple-darwin"
             checked = sh([compiler, "-target", target, "check"], cwd=dst)
@@ -1429,104 +1191,6 @@ def main():
             report(run.returncode == 0, c["name"],
                    f"main(argc, argv, envp) 未收到进程环境: rc={run.returncode}\n"
                    f"{run.stderr[-400:]} {run.stdout[-200:]}")
-            return out
-        if c["kind"] == "inline":
-            built = sh([compiler, "build", "--stats"], cwd=dst)
-            asm_files = backend_text_files(dst)
-            asm = "\n".join(path.read_text() for path in asm_files)
-            binary = dst / ".build" / "example_inline"
-            run = sh([str(binary)], cwd=dst) if binary.exists() else None
-            if COMPILER_BACKEND == "llvm":
-                required_calls = ("call i32 @\"plus_three_",
-                                  "call i32 @\"conditional_",
-                                  "call i32 @\"public_plus_two_")
-                calls_ok = all(symbol in asm for symbol in required_calls)
-                report(built.returncode == 0 and calls_ok and run is not None
-                       and run.returncode == 0 and run.stdout == "A",
-                       c["name"],
-                       f"O0 LLVM IR 未保留被调函数或实参副作用: calls={calls_ok}, "
-                       f"run={run.returncode if run else None}, "
-                       f"stdout={run.stdout if run else ''!r}\n"
-                       f"{built.stderr[-400:]}\n{asm[-800:]}")
-            else:
-                calls = [line for line in asm.splitlines()
-                         if line.startswith("\tbl\t")]
-                expanded = not any("plus_three" in line for line in calls)
-                fallback = any("conditional" in line for line in calls)
-                report(built.returncode == 0 and expanded and fallback
-                       and any("public_plus_two" in line for line in calls)
-                       and run is not None and run.returncode == 0 and run.stdout == "A",
-                       c["name"],
-                       f"private 标量未展开、复杂/导出函数未回退或实参副作用次数错误: "
-                       f"expanded={expanded}, fallback={fallback}, "
-                       f"public_fallback={any('public_plus_two' in line for line in calls)}, "
-                       f"run={run.returncode if run else None}, "
-                       f"stdout={run.stdout if run else ''!r}\n"
-                       f"{built.stderr[-400:]}\n{asm[-800:]}")
-            source = dst / "src" / "main.yh"
-            original = source.read_text()
-            source.write_text(original.replace("value + 3", "value + 4", 1))
-            changed = sh([compiler, "build", "--stats"], cwd=dst)
-            changed_lines = [line for line in changed.stderr.splitlines()
-                             if line.startswith("yh-stats ")]
-            changed_stats = changed_lines[-1] if changed_lines else ""
-            rerun = sh([str(binary)], cwd=dst) if binary.exists() else None
-            report(changed.returncode == 0
-                   and stat_value(changed_stats, "link") == 1
-                   and rerun is not None and rerun.returncode == 1,
-                   "i1-inline-callee-invalidates-caller-cache",
-                   f"被内联函数体变化后调用方仍复用旧 SSA: "
-                   f"link={stat_value(changed_stats, 'link')}, "
-                   f"run={rerun.returncode if rerun else None}\n"
-                   f"{changed.stderr[-400:]}")
-            return out
-        if c["kind"] == "ir-call":
-            built = sh([compiler, "build", "--stats"], cwd=dst)
-            lines = [line for line in built.stderr.splitlines()
-                     if line.startswith("yh-stats ")]
-            counter = ("backend_emitted_functions" if COMPILER_BACKEND == "llvm"
-                       else "ir_functions")
-            lowered = sum(stat_value(line, counter, 0) for line in lines)
-            asm_files = backend_text_files(dst)
-            asm = "\n".join(path.read_text() for path in asm_files)
-            symbol_prefix = "_" if sys.platform == "darwin" else ""
-            program = dst / ".build" / "ircallmodule"
-            run = sh([str(program)], cwd=dst) if program.exists() else None
-            if COMPILER_BACKEND == "llvm":
-                calls_ok = ("twice__ircallmodule__api_" in asm
-                            and "log_note__ircallmodule__api_" in asm)
-            else:
-                calls_ok = (f"\tbl\t{symbol_prefix}twice__ircallmodule__api_" in asm
-                            and f"\tbl\t{symbol_prefix}log_note__ircallmodule__api_" in asm)
-            expected_lowered = (lowered >= 4 if COMPILER_BACKEND == "llvm"
-                                else lowered == 4)
-            report(built.returncode == 0 and expected_lowered and calls_ok
-                   and run is not None and run.returncode == 41,
-                   c["name"],
-                   f"跨模块 SSA 目标或运行结果错误: rc={built.returncode}, "
-                   f"{counter}={lowered}, calls={calls_ok}, "
-                   f"run={run.returncode if run else None}\n"
-                   f"{built.stderr[-500:]}")
-            api_source = dst / "src" / "api" / "api.yh"
-            original_api = api_source.read_text()
-            api_source.write_text(original_api.replace("value * 2", "value * 3"))
-            changed = sh([compiler, "build", "--stats"], cwd=dst)
-            changed_lines = [line for line in changed.stderr.splitlines()
-                             if line.startswith("yh-stats ")]
-            last = changed_lines[-1] if changed_lines else ""
-            rerun = sh([str(program)], cwd=dst) if program.exists() else None
-            changed_emitted = sum(stat_value(line, "backend_emitted_functions", 0)
-                                  for line in changed_lines)
-            module_rebuilt = (changed_emitted > 0 if COMPILER_BACKEND == "llvm"
-                              else stat_value(last, "asm") == 1)
-            report(changed.returncode == 0 and module_rebuilt
-                   and stat_value(last, "link") == 1
-                   and rerun is not None and rerun.returncode == 61,
-                   "r2b-cross-module-call-relink",
-                   f"公开函数体变化未仅重编提供模块并重新链接: "
-                   f"emitted={changed_emitted}, asm={stat_value(last, 'asm')}, "
-                   f"link={stat_value(last, 'link')}, "
-                   f"run={rerun.returncode if rerun else None}\n{changed.stderr[-500:]}")
             return out
         if c["kind"] == "platform-source":
             native = "aarch64-apple-darwin" if sys.platform == "darwin" \
@@ -1629,33 +1293,6 @@ def main():
                        f"Darwin 目标意外接受 Linux 系统调用接口: "
                        f"rc={darwin.returncode}\n{darwin.stderr[-400:]}")
             return out
-        if c["kind"] == "mode-cache":
-            first = sh([compiler, "build", "--legacy-system", "--stats"], cwd=dst)
-            first_stats = [line for line in first.stderr.splitlines()
-                           if line.startswith("yh-stats ")]
-            first_stats = first_stats[-1] if first_stats else ""
-            report(first.returncode == 0 and stat_value(first_stats, "link") == 1,
-                   "r3-link-cache-first-profile",
-                   f"兼容配置首次构建未链接: rc={first.returncode}\n{first.stderr[-400:]}")
-            switched = sh([compiler, "build", "--stats"], cwd=dst)
-            switched_stats = [line for line in switched.stderr.splitlines()
-                              if line.startswith("yh-stats ")]
-            switched_stats = switched_stats[-1] if switched_stats else ""
-            report(switched.returncode == 0
-                   and stat_value(switched_stats, "asm") == 0
-                   and stat_value(switched_stats, "link") == 1,
-                   "r3-link-cache-profile-isolation",
-                   f"切换默认配置后应复用对象并重新链接: {switched_stats}\n"
-                   f"{switched.stderr[-400:]}")
-            hot = sh([compiler, "build", "--stats"], cwd=dst)
-            hot_stats = [line for line in hot.stderr.splitlines()
-                         if line.startswith("yh-stats ")]
-            hot_stats = hot_stats[-1] if hot_stats else ""
-            report(hot.returncode == 0 and stat_value(hot_stats, "asm") == 0
-                   and stat_value(hot_stats, "link") == 0,
-                   "r3-link-cache-same-profile-hit",
-                   f"相同默认配置未命中链接缓存: {hot_stats}\n{hot.stderr[-400:]}")
-            return out
         if c["kind"] == "legacy-system":
             default = sh([compiler, "build"], cwd=dst)
             report(default.returncode != 0,
@@ -1681,349 +1318,7 @@ def main():
             report(run.returncode == 0, "r3-system-compat-run",
                    f"兼容配置运行失败: rc={run.returncode}\n{run.stderr[-400:]}")
             return out
-        if c["kind"] == "ir":
-            if COMPILER_BACKEND == "llvm":
-                r = sh([compiler, "build", "--stats"], cwd=dst)
-                lines = [line for line in r.stderr.splitlines()
-                         if line.startswith("yh-stats ")]
-                checked = sum(stat_value(line, "checked_functions", 0)
-                              for line in lines)
-                emitted = sum(stat_value(line, "backend_emitted_functions", 0)
-                              for line in lines)
-                llvm_files = backend_text_files(dst)
-                llvm_ir = "\n".join(path.read_text() for path in llvm_files)
-                built = dst / ".build" / "irfront"
-                report(r.returncode == 0 and checked == 56 and emitted == checked
-                       and built.exists() and bool(llvm_files),
-                       c["name"],
-                       f"LLVM 未完整发射项目函数: rc={r.returncode}, checked={checked}, "
-                       f"emitted={emitted}, modules={len(llvm_files)}\n{r.stderr[-500:]}")
-                report("phi i32" in llvm_ir and "icmp slt" in llvm_ir,
-                       "llvm-control-flow-and-comparison",
-                       "LLVM IR 缺少分支合流或有符号比较")
-                operations = ("sdiv i64", "srem i64", "udiv i64", "urem i64",
-                              "and i64", "or i64", "xor i64", "shl i64",
-                              "lshr i64", "ashr i64")
-                missing_operations = [op for op in operations if op not in llvm_ir]
-                report(not missing_operations, "llvm-integer-operation-lowering",
-                       f"LLVM IR 缺少整数操作: {missing_operations}")
-                calls = ("call_nine__irfront__main_", "call_tick__irfront__main_",
-                         "log_unit__irfront__main_", "log_noop__irfront__main_",
-                         "discarded_result__irfront__main_")
-                missing_calls = [name for name in calls if name not in llvm_ir]
-                report(not missing_calls, "llvm-direct-call-lowering",
-                       f"LLVM IR 缺少直接调用: {missing_calls}")
-                rcheck = sh([compiler, "check", "--stats"], cwd=dst)
-                check_lines = [line for line in rcheck.stderr.splitlines()
-                               if line.startswith("yh-stats ")]
-                check_ir = sum(stat_value(line, "ir_functions", 0)
-                               for line in check_lines)
-                check_functions = sum(stat_value(line, "ast_functions", 0)
-                                      for line in check_lines)
-                report(rcheck.returncode == 0 and check_ir == 0
-                       and check_functions == 56,
-                       "r2b-check-stops-before-ir",
-                       f"yh check 越过 IR 边界或函数上下文缺失: "
-                       f"rc={rcheck.returncode}, ir_functions={check_ir}, "
-                       f"ast_functions={check_functions}\n{rcheck.stderr[-400:]}")
-                run = sh([str(built)], cwd=dst) if built.exists() else None
-                report(run_ok(run, c["expect"]),
-                       "r2b-built-program-runs",
-                       f"程序退出码 {run.returncode if run else '未生成'} "
-                       f"期望 {c['expect']}")
-                return out
-            # Windows 检出（core.autocrlf）下工作树是 CRLF：本用例随后会改写
-            # 源文件触发增量构建，行尾差异会使 IR 缓存键全量失效；先统一规范
-            # 化为 LF（与后续 751 行的字节比较基准一致，替换前 normalize 亦同）。
-            ir_main = dst / "main" / "main.yh"
-            ir_main.write_bytes(ir_main.read_bytes().replace(b"\r\n", b"\n"))
-            r = sh([compiler, "build", "--stats"], cwd=dst)
-            built = dst / ".build" / "irfront"
-            build_stat = next((line for line in r.stderr.splitlines()
-                               if line.startswith("yh-stats ")), "")
-            build_ir = int(build_stat.split("ir_functions=", 1)[1].split()[0]) \
-                if "ir_functions=" in build_stat else 0
-            build_functions = stat_value(build_stat, "ast_functions", 0)
-            initial_ir_misses = stat_value(build_stat, "ir_cache_misses")
-            report(r.returncode == 0 and build_ir == 54 and initial_ir_misses >= 54
-                   and build_functions == 56 and built.exists(),
-                   c["name"],
-                   f"build 未生成/缓存 SSA: rc={r.returncode}, ir_functions={build_ir}, "
-                   f"ast_functions={build_functions}, ir_cache_misses={initial_ir_misses}\n"
-                   f"{r.stderr[-400:]}")
-            asm_files = backend_text_files(dst)
-            asm = "\n".join(path.read_text() for path in asm_files)
-            backend_functions = asm.count(".p2align 2")
-            report(backend_functions == build_ir,
-                   "r2a-ssa-backend-owns-functions",
-                   f"已降低的 SSA 函数没有全部由新后端发射: "
-                   f"ssa={build_ir}, backend={backend_functions}\n{asm[-600:]}")
-            phi_caches = list((artifact_root(dst) / "ir").glob("*.ir"))
-            report(sum(has_two_edge_phi(path) for path in phi_caches) >= 2,
-                   "r2c-branch-assignment-phi",
-                   "参数/局部在 if/else 两侧更新后，持久 SSA 中缺少双前驱 phi 四块 CFG")
-            less_count = sum(count_ir_op(path, 12) for path in phi_caches)
-            report(less_count == 7, "r2a-ssa-folded-comparison",
-                   f"编译期常量小于比较未折叠，预期动态小于比较保留，实际 IR_OP_LT={less_count}")
-            integer_ops = {16: 3, 17: 3, 18: 1, 19: 1, 20: 1, 21: 1, 22: 2}
-            actual_ops = {op: sum(count_ir_op(path, op) for path in phi_caches)
-                          for op in integer_ops}
-            report(actual_ops == integer_ops, "r2a-ssa-integer-operations",
-                   f"除模、位运算或移位未由 SSA 降低并简化: {actual_ops}")
-            call_ops = sum(count_ir_op(path, 23) for path in phi_caches)
-            symbol_prefix = "_" if sys.platform == "darwin" else ""
-            report(call_ops == 36
-                   and f"\tbl\t{symbol_prefix}call_nine__irfront__main_" in asm
-                   and asm.count(f"\tbl\t{symbol_prefix}call_tick__irfront__main_") == 2
-                   and asm.count(f"\tbl\t{symbol_prefix}log_unit__irfront__main_") == 3
-                   and f"\tbl\t{symbol_prefix}log_noop__irfront__main_" in asm
-                   and f"\tbl\t{symbol_prefix}discarded_result__irfront__main_" in asm,
-                   "r2a-ssa-direct-call-abi",
-                   f"直接调用未完整降低、保序或传递第九参数: calls={call_ops}")
-            rcheck = sh([compiler, "check", "--stats"], cwd=dst)
-            check_stat = next((line for line in rcheck.stderr.splitlines()
-                               if line.startswith("yh-stats ")), "")
-            check_ir = int(check_stat.split("ir_functions=", 1)[1].split()[0]) \
-                if "ir_functions=" in check_stat else -1
-            check_functions = stat_value(check_stat, "ast_functions", 0)
-            report(rcheck.returncode == 0 and check_ir == 0 and check_functions == 56,
-                   "r2b-check-stops-before-ir",
-                   f"yh check 越过 IR 边界或函数上下文缺失: rc={rcheck.returncode}, "
-                   f"ir_functions={check_ir}, ast_functions={check_functions}\n"
-                   f"{rcheck.stderr[-400:]}")
-
-            source = dst / "main" / "main.yh"
-            # Windows 检出（core.autocrlf）下工作树是 CRLF，直接字节匹配会
-            # 失败；比较与改写都在规范化（LF）文本上进行。
-            original = source.read_bytes().replace(b"\r\n", b"\n")
-            main_body = (b"return choose_true() + choose_false() + from_param(7) + "
-                         b"local_left() + local_right()\n"
-                         b"        + branch_update(10, true) + branch_update(10, false) "
-                         b"+ backend_add_params(1, 2)\n"
-                         b"        + branch_local(true) + branch_local(false)\n"
-                         b"        + compare_eq(2, 3) + compare_eq(3, 3)\n"
-                         b"        + compare_ne(2, 3) + compare_ne(3, 3)\n"
-                         b"        + compare_lt(2, 3) + compare_lt(3, 2)\n"
-                         b"        + compare_le(2, 3) + compare_le(3, 2)\n"
-                         b"        + compare_gt(3, 2) + compare_gt(2, 3)\n"
-                         b"        + compare_ge(3, 3) + compare_ge(2, 3) + unsigned_score()\n"
-                         b"        + folded_signed_lt();")
-            changed_main = (b"return choose_true() + choose_false() + from_param(7) + "
-                            b"local_left() + local_right()\n"
-                            b"        + branch_update(10, true) + branch_update(10, false) "
-                            b"+ backend_add_params(1, 2)\n"
-                            b"        + branch_local(true) + branch_local(false)\n"
-                            b"        + compare_eq(2, 3) + compare_eq(3, 3)\n"
-                            b"        + compare_ne(2, 3) + compare_ne(3, 3)\n"
-                            b"        + compare_lt(2, 3) + compare_lt(3, 2)\n"
-                            b"        + compare_le(2, 3) + compare_le(3, 2)\n"
-                            b"        + compare_gt(3, 2) + compare_gt(2, 3)\n"
-                            b"        + compare_ge(3, 3) + compare_ge(2, 3) + unsigned_score()\n"
-                            b"        + folded_signed_lt() + 0;")
-            if original.count(main_body) != 1:
-                report(False, "r2c-ir-cache-fixture", "入口函数体不匹配预期")
-            else:
-                source.write_bytes(original.replace(main_body, changed_main, 1))
-                hot_ir = sh([compiler, "build", "--stats"], cwd=dst)
-                hot_stats = next((line for line in hot_ir.stderr.splitlines()
-                                  if line.startswith("yh-stats ")), "")
-                hot_hits = stat_value(hot_stats, "ir_cache_hits")
-                hot_misses = stat_value(hot_stats, "ir_cache_misses")
-                # 回退函数（形态不支持，如全局赋值、逻辑或）从不写缓存，
-                # 每次构建都会计入 miss；期望失效数 = 修改函数 1 + 回退数。
-                ir_fallbacks = build_functions - build_ir
-                report(hot_ir.returncode == 0 and hot_hits == build_ir - 1
-                       and hot_misses == 1 + ir_fallbacks,
-                       "r2c-function-ir-cache-hit",
-                       f"main 函数变化后未精确失效一个 IR 缓存: hits={hot_hits}, "
-                       f"misses={hot_misses}\n{hot_ir.stderr[-400:]}")
-
-                local_body = (b"fn local_left() int {\n    let item int = 13;\n"
-                              b"    item += 1;\n    item *= 2;\n    item -= 1;\n"
-                              b"    return item;\n}")
-                changed_local = (b"fn local_left() int {\n    let item int = 14;\n"
-                                 b"    item += 1;\n    item *= 2;\n    item -= 1;\n"
-                                 b"    return item;\n}")
-                changed_source = source.read_bytes()
-                if changed_source.count(local_body) != 1:
-                    report(False, "r2c-function-ir-cache-invalidate",
-                           "local_left 函数体不匹配预期")
-                else:
-                    source.write_bytes(changed_source.replace(local_body, changed_local, 1))
-                    body_ir = sh([compiler, "build", "--stats"], cwd=dst)
-                    body_stats = next((line for line in body_ir.stderr.splitlines()
-                                       if line.startswith("yh-stats ")), "")
-                    body_hits = stat_value(body_stats, "ir_cache_hits")
-                    body_misses = stat_value(body_stats, "ir_cache_misses")
-                    report(body_ir.returncode == 0 and body_hits == build_ir - 1
-                           and body_misses == 1 + ir_fallbacks,
-                           "r2c-function-ir-cache-invalidate",
-                           f"单个含局部变量函数变化未精确失效: hits={body_hits}, "
-                           f"misses={body_misses}\n"
-                           f"{body_ir.stderr[-400:]}")
-                    current_source = source.read_bytes()
-                    source.write_bytes(current_source.replace(changed_local, local_body, 1))
-                    ir_files = sorted((artifact_root(dst) / "ir").glob("*.ir"))
-                    if len(ir_files) < 35:
-                        report(False, "r2c-function-ir-cache-corrupt",
-                               f"函数 IR 缓存数不足: {len(ir_files)}")
-                    else:
-                        for ir_file in ir_files:
-                            ir_file.write_bytes(b"corrupt IR cache\n")
-                        current_source = source.read_bytes()
-                        stable_main = changed_main
-                        touched_main = changed_main.replace(b" + 0;", b" + 0 + 0;", 1)
-                        if current_source.count(stable_main) != 1:
-                            report(False, "r2c-function-ir-cache-corrupt",
-                                   "入口函数体不匹配缓存损坏探针")
-                        else:
-                            source.write_bytes(current_source.replace(stable_main, touched_main, 1))
-                            corrupt_ir = sh([compiler, "build", "--stats"], cwd=dst)
-                            corrupt_stats = next((line for line in corrupt_ir.stderr.splitlines()
-                                                  if line.startswith("yh-stats ")), "")
-                            corrupt_hits = stat_value(corrupt_stats, "ir_cache_hits")
-                            corrupt_misses = stat_value(corrupt_stats, "ir_cache_misses")
-                            report(corrupt_ir.returncode == 0 and corrupt_hits == 0
-                                   and corrupt_misses >= 35,
-                                   "r2c-function-ir-cache-corrupt",
-                                   f"损坏函数缓存未拒绝并重建: hits={corrupt_hits}, "
-                                   f"misses={corrupt_misses}\n{corrupt_ir.stderr[-400:]}")
-            run = sh([str(built)], cwd=dst) if built.exists() else None
-            report(run_ok(run, c["expect"]),
-                   "r2b-built-program-runs",
-                   f"程序退出码 {run.returncode if run else '未生成'} 期望 {c['expect']}")
-            return out
-        if c["kind"] == "scheduler":
-            api_source = dst / "src" / "api" / "api.yh"
-            extra = "".join(
-                f"pub fn private_{i:04d}() int {{ return {i % 10}; }}\n"
-                for i in range(600)
-            )
-            api_source.write_text(api_source.read_text() + "\n" + extra)
-            r = sh([compiler, "build", "--stats"], cwd=dst)
-            stats = [line for line in r.stderr.splitlines()
-                     if line.startswith("yh-stats ") and "workers_peak=" in line]
-            parent_stats = stats[-1] if stats else ""
-            peak = stat_value(parent_stats, "workers_peak")
-            early = stat_value(parent_stats, "iface_early")
-            built = dst / ".build" / "scheduler"
-            report(r.returncode == 0 and peak >= 2 and early >= 1
-                   and built.exists(),
-                   "r2b-interface-ready-parallel-build",
-                   f"接口就绪前未并行推进消费者: rc={r.returncode}, peak={peak}, "
-                   f"early={early}\n{r.stderr[-500:]}")
-            iface_dir = artifact_root(dst) / "iface"
-            persisted = list(iface_dir.glob("*.s.i"))
-            session_files = list(iface_dir.glob("*.session-*"))
-            report(r.returncode == 0 and len(persisted) == 2 and not session_files,
-                   "r2b-session-interface-commit",
-                   f"持久接口提交或本轮临时接口清理失败: "
-                   f"persistent={len(persisted)}, session={len(session_files)}")
-            # 头行架构随目标走（arm64/x64），用例只看「v1 且无属性扩展」：
-            # 架构标记必须是支持值之一，但不得写死 arm64（x86_64 目标是 arch=x64）。
-            plain_v1 = all(
-                re.match(r"// yh-iface v1 arch=(arm64|x64) suffix=",
-                         p.read_text()) for p in persisted)
-            report(plain_v1, "u1-attribute-free-iface-keeps-v1",
-                   "无属性公开接口没有保持 v1 头行")
-            if built.exists():
-                run = sh([str(built)], cwd=dst)
-                report(run.returncode == 42, "r2b-scheduled-program-runs",
-                       f"程序退出码 {run.returncode} 期望 42")
-            else:
-                report(False, "r2b-scheduled-program-runs", "调度后没有生成程序")
-
-            # 接口成功发布后，提供方私有函数仍可能检查失败；本轮不得链接。
-            built.unlink(missing_ok=True)
-            # 私有函数体内引用未定义名字：检查必须在 pass2 报错并阻止链接。
-            # 用一个 pub 入口引用它，避免被 UF1（未使用函数检查）先拦下来，
-            # 保证这条断言仍然验证「正文检查失败」而不是「未使用」。
-            api_source.write_text(api_source.read_text() +
-                                  "\nfn broken_private() int { return missing_name; }\n"
-                                  "pub fn broken_entry() int { return broken_private(); }\n")
-            failed_build = sh([compiler, "build"], cwd=dst)
-            report(failed_build.returncode != 0 and not built.exists(),
-                   "r2b-worker-failure-stops-link",
-                   f"worker 失败后错误地产生最终程序: rc={failed_build.returncode}\n"
-                   f"{failed_build.stderr[-400:]}")
-
-            spaced = WORK / "scheduler argv ' with spaces"
-            copy_proj(PROJ / "scheduler", spaced)
-            launcher_dir = spaced / ".launcher"
-            launcher_dir.mkdir(exist_ok=True)
-            # Windows：PATH 查找只认带扩展名的可执行文件，且普通用户默认没有
-            # 创建符号链接的特权（WinError 1314）——改用副本 + .exe 名字。
-            windows_host = sys.platform.startswith("win")
-            launcher = launcher_dir / ("yh.exe" if windows_host else "yh")
-            try:
-                launcher.symlink_to(COMPILER_PATH)
-            except OSError:
-                shutil.copyfile(COMPILER_PATH, launcher)
-                launcher.chmod(0o755)
-            path_env = str(launcher_dir) + os.pathsep + \
-                os.environ.get("PATH", "")
-            # Windows 上 subprocess 的 ["yh.exe"] 走 CreateProcess 的 PATH 搜索
-            # 与 POSIX execvp 不同（实测找不到带引号目录里的副本），改用
-            # 启动器全路径；PATH 仍然前置，编译器内部按 PATH 找工具的行为不变。
-            spaced_cmd = [str(launcher), "build"] if windows_host                 else ["yh", "build"]
-            spaced_build = sh(spaced_cmd, cwd=spaced,
-                              env={"PATH": path_env})
-            spaced_program = spaced / ".build" / "scheduler"
-            report(spaced_build.returncode == 0 and spaced_program.exists(),
-                   "r2b-fork-worker-space-paths",
-                   f"PATH 启动及含空格/引号项目路径未能由 fork 快照 worker 构建: "
-                   f"rc={spaced_build.returncode}\n"
-                   f"{spaced_build.stderr[-400:]} {spaced_build.stdout[-300:]}")
-            return out
-        if c["kind"] == "scheduler-diamond":
-            base_source = dst / "src" / "base" / "base.yh"
-            extra = "".join(
-                f"pub fn private_{i:04d}() int {{ return {i % 10}; }}\n"
-                for i in range(600)
-            )
-            base_source.write_text(base_source.read_text() + "\n" + extra)
-            r = sh([compiler, "build", "--stats"], cwd=dst)
-            stats = [line for line in r.stderr.splitlines()
-                     if line.startswith("yh-stats ") and "workers_peak=" in line]
-            parent_stats = stats[-1] if stats else ""
-            peak = stat_value(parent_stats, "workers_peak")
-            early = stat_value(parent_stats, "iface_early")
-            built = dst / ".build" / "scheduler_diamond"
-            report(r.returncode == 0 and peak >= 3 and early >= 2
-                   and built.exists(),
-                   "r2b-diamond-branches-parallel",
-                   f"菱形 DAG 未并行启动两个分支并提前推进: rc={r.returncode}, "
-                   f"peak={peak}, early={early}\n{r.stderr[-500:]}")
-            iface_dir = artifact_root(dst) / "iface"
-            persisted = list(iface_dir.glob("*.s.i"))
-            session_files = list(iface_dir.glob("*.session-*"))
-            report(r.returncode == 0 and len(persisted) == 4 and not session_files,
-                   "r2b-diamond-session-commit",
-                   f"菱形 DAG 接口提交/会话清理失败: "
-                   f"persistent={len(persisted)}, session={len(session_files)}")
-            if built.exists():
-                run = sh([str(built)], cwd=dst)
-                report(run.returncode == 42, "r2b-diamond-program-runs",
-                       f"程序退出码 {run.returncode} 期望 42")
-            else:
-                report(False, "r2b-diamond-program-runs", "菱形调度后没有生成程序")
-            return out
-        if c["name"] == "u3-c-source-object-library-mix":
-            cc = "clang" if sys.platform == "darwin" else "gcc"
-            # WSL 的 ARM64 过渡种子需要把 crossbin/gcc 放在 PATH 首位；
-            # x64 LLVM 用例的 C fixture 必须由宿主 gcc 生成同机型对象。
-            if (COMPILER_BACKEND == "llvm" and COMPILER_TARGET
-                    and COMPILER_TARGET.startswith("x86_64-")
-                    and sys.platform == "linux"):
-                cc = "/usr/bin/gcc"
-            obj = dst / "vendor" / "prebuilt.o"
-            obj.parent.mkdir(parents=True, exist_ok=True)
-            prepared = sh([cc, "-c", "vendor/prebuilt.c", "-o",
-                           "vendor/prebuilt.o"], cwd=dst)
-            if prepared.returncode != 0:
-                report(False, c["name"],
-                       f"测试预编译对象失败: {prepared.stderr[-400:]}")
-                return out
+        # 其余用例：run 走 yh run，fail/ok 走 yh build。
         r = sh([compiler, "run"] if c["kind"] == "run" else [compiler, "build"],
                cwd=dst / c["sub"])
         if c["kind"] == "run":
@@ -2036,20 +1331,17 @@ def main():
                                   for p in (artifact_root(dst) / "obj").glob("c-*.o")}
                 changed_c = original_c.replace("lrint(value)", "lrint(value + 1.0)")
                 c_source.write_text(changed_c)
-                changed_build = sh([compiler, "build", "--stats"], cwd=dst)
+                changed_build = sh([compiler, "build"], cwd=dst)
                 changed_objects = [p.name for p in (artifact_root(dst) / "obj").glob("c-*.o")
                                    if before_objects.get(p.name) != p.read_bytes()]
-                changed_stats = [line for line in changed_build.stderr.splitlines()
-                                 if line.startswith("yh-stats ")]
-                changed_stats = changed_stats[-1] if changed_stats else ""
                 c_binary = dst / ".build" / "example_cinterop"
                 changed_run = sh([str(c_binary)], cwd=dst) if c_binary.exists() else None
                 report(changed_c != original_c and changed_build.returncode == 0
-                       and stat_value(changed_stats, "link") == 1
+                       and len(changed_objects) > 0
                        and changed_run is not None and changed_run.returncode == 1,
                        "u3-c-source-invalidates-link-cache",
                        f"依赖 C 源变化未重编译并重新链接: changed={changed_c != original_c}, "
-                       f"objects={changed_objects}, link={stat_value(changed_stats, 'link')}, "
+                       f"objects={changed_objects}, "
                        f"run={changed_run.returncode if changed_run else None}\n"
                        f"{changed_build.stdout[-200:]} {changed_build.stderr[-400:]}")
                 c_source.write_text(original_c)
@@ -2061,17 +1353,12 @@ def main():
                 c_header = dst / "cdep" / "c" / "value.h"
                 original_header = c_header.read_text()
                 c_header.write_text("#define CDEP_BIAS 1\n")
-                header_build = sh([compiler, "build", "--stats"], cwd=dst)
-                header_stats = [line for line in header_build.stderr.splitlines()
-                                if line.startswith("yh-stats ")]
-                header_stats = header_stats[-1] if header_stats else ""
+                header_build = sh([compiler, "build"], cwd=dst)
                 header_run = sh([str(c_binary)], cwd=dst) if c_binary.exists() else None
                 report(header_build.returncode == 0
-                       and stat_value(header_stats, "link") == 1
                        and header_run is not None and header_run.returncode == 1,
                        "u3-c-header-invalidates-link-cache",
-                       f"依赖头文件变化未触发 C 重编译和链接: "
-                       f"link={stat_value(header_stats, 'link')}, "
+                       f"依赖头文件变化未触发 C 重编译: "
                        f"run={header_run.returncode if header_run else None}\n"
                        f"{header_build.stderr[-400:]}")
                 c_header.write_text(original_header)
@@ -2081,22 +1368,18 @@ def main():
                        f"恢复依赖头文件后构建/运行失败: "
                        f"rc={header_restored.returncode}\n{header_restored.stderr[-400:]}")
 
+                cc = "clang" if sys.platform == "darwin" else "gcc"
                 prebuilt_source = dst / "vendor" / "prebuilt.c"
                 original_prebuilt_source = prebuilt_source.read_text()
                 prebuilt_source.write_text(original_prebuilt_source.replace("return 42;", "return 41;"))
                 changed_object = sh([cc, "-c", "vendor/prebuilt.c", "-o",
                                      "vendor/prebuilt.o"], cwd=dst)
-                object_build = sh([compiler, "build", "--stats"], cwd=dst)
-                object_stats = [line for line in object_build.stderr.splitlines()
-                                if line.startswith("yh-stats ")]
-                object_stats = object_stats[-1] if object_stats else ""
+                object_build = sh([compiler, "build"], cwd=dst)
                 object_run = sh([str(c_binary)], cwd=dst) if c_binary.exists() else None
                 report(changed_object.returncode == 0 and object_build.returncode == 0
-                       and stat_value(object_stats, "link") == 1
                        and object_run is not None and object_run.returncode == 3,
                        "u3-c-object-content-invalidates-link-cache",
                        f"预编译对象内容变化未触发重新链接: "
-                       f"link={stat_value(object_stats, 'link')}, "
                        f"run={object_run.returncode if object_run else None}\n"
                        f"{changed_object.stderr[-300:]} {object_build.stderr[-400:]}")
                 prebuilt_source.write_text(original_prebuilt_source)

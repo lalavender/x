@@ -314,7 +314,6 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | `build/function_ir_cache.yh` | 函数级 check 切片与 IR 缓存的命令侧 I/O |
 | `build/llvm_pipeline.yh` | 已验证快照 → IRModule → LLVM 文本/对象/汇编的共用驱动 |
 | `build/llvm_emit.yh` | 单文件受检前端与 LLVM 发射 |
-| `build/stats_print.yh` | `YH_STATS=1` 统计输出 |
 | `build/unused_function.yh` | 未用函数裁剪（UF1） |
 | `build/project*.yh`、`build/toml.yh`、`build/project_dir.*.yh` | 项目扫描/清单/目录枚举；目标态迁入 `proj/` |
 

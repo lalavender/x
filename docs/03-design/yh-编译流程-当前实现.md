@@ -88,8 +88,7 @@ yh build
    - `--emit-llvm` → `proj.cfg().emit_kind = 1`（仅 build；额外保留 `.ll`）；
    - `--emit-asm` → `proj.cfg().emit_asm = 1`（仅 build；额外保留 `.s`）；
    - `--trimpath` → `proj.cfg().trimpath = 1`（IR/CT 来源使用项目相对路径）；
-   - `YH_STATS=1`（环境变量，2026-11-10 起取代 `--stats`）→
-     `support.stats().enabled = 1`；worker 子进程按同一变量继承；
+   - 统计输出已于 2026-11-10 删除（`support.stats()`/`--stats` 均不存在）；
    - `--backend legacy` 直接拒绝（LL12 后 LLVM 唯一）。
 7. 按命令分派：`build` → `api_build()`，`check` → `api_check_project()`，
    `cache` → `api_cache()`（`info/clean/trim/verify`）。

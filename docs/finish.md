@@ -8,6 +8,41 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：删除统计机制（support.stats / stats_print / yh-stats / 相关门禁）
+
+**结果**：
+- `support/base.yh`：删除 `CompileStats`（42 字段）与 `stats()` 窄口；只保留三个与统计
+  无关的功能位，收进新的 `BuildCtl`（`support.ctl()`）：`front_cache`（worker 源/token
+  快照）、`firc_write_off`（冷构建不写函数 IR 缓存）、`ir_cache_salt`。
+- 删除 `build/stats_print.yh` 与全部调用点；清掉各模块的计数语句、`enabled` 守卫、
+  lowering/链接/前端计时字段（`BuildCtx.*_ns`、`link` 的 `lk_*_ns`/`reset_timings`、
+  `sched_peak`/`sched_iface_early`、`SessionCtx.stats_ast_*`）。
+- CLI：`--stats` 参数与上一轮引入的 `YH_STATS` 环境变量一并删除（先删参数、再删机制，
+  两次提交）。
+- 工具与门禁：
+  - 删除只服务统计的 `tools/{perf-baseline,perf-invalidation,perf-scaling}.py`、
+    `.github/workflows/perf.yml`、`tests/selfhost/gates/lex-stats.py`、
+    `tests/selfhost/cache/{llvm-function-cache,llvm-path-cache,link-cache}.py` 及 justfile 接线。
+  - `tests/modules/build-check.py` 删除 10 个以统计为唯一判据的用例（firc、checked-lower、
+    inline、ir、ir-call、scheduler、scheduler-diamond、mode-cache、comptime-expanded-*），
+    其余用例里以统计计数的断言改为产物/运行值判定（如 C 源变化用对象字节 + 运行码）。
+  - `tests/yh-run/check.py`、`tests/selfhost/{bootstrap,darwin,gates}` 同步去掉统计断言。
+- 顺带修复 `c7ca83d` 引入的 CLI 回归：裸调用 `yh` 由 `return 0` 改回 `return 2`
+  （`selfhost-native` 的 CLI 冒烟门依赖它，0.0.13 及之前都是 2）。
+
+**代价（明确记录）**：SSA 降低覆盖、check/IR/链接缓存命中、阶段耗时、worker 并发等
+观测全部消失；`build-check` 从 135 例降到 125 例，其中 10 个纯统计用例被删，
+另有若干断言降级为“构建成功 + 运行值正确”。
+
+**验证**：
+- `env YH_CACHE=off just build` 冷编通过；`yh`（裸调用）rc=2；`YH_STATS=1 yh build`
+  不再输出任何 `yh-stats`。
+- `just test` → **全绿**（ANTLR 83/83 + 反例 49/49、yh-run 372/374、test-check 38/38、
+  build-cache、libs 140、compiler-tests 8/8、C4/C6 全局缓存门、code-stats 6/6）。
+- `just selfhost-native` → cc4 自解析与固定点、语法/运行语料、check-command、缓存门
+  全过；尾段受 1s 超时用例在满载下的抖动影响，且 `build-check` 仍有 18 条既有失败
+  （与本次无关，u3-c-*/ct5b 等，见下条记录）。
+
 ## 2026-11-10：删除 CLI 参数 `--stats`，统计改由 `YH_STATS=1` 开启
 
 **结果**：

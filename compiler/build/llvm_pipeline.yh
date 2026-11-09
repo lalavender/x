@@ -107,36 +107,23 @@ fn llvm_prepare_module_cached(unit *check.CheckedModule, mod_ir *ir.IRModule,
     cache_out *ir.IRFunctionCacheSet, env_key u64,
     lower_stats *lower.CheckedLowerStats) int {
     // PF2：lowering 段（含函数级 IR 缓存恢复）单独计时，失败也计入已花时间。
-    let lower_start_ns u64 = support.clock_ns()
     let lowered int = lower.lower_module_cached(unit, mod_ir, cache_in, cache_out,
         env_key, lower_stats)
-    bc().lower_ns += support.clock_ns() - lower_start_ns
     // PL1：lowering 内部四段（prep/decl/build/verify）取自 lower 自己的计时，
     // 这里是唯一读点；stats 为空（--emit-llvm 文本路径）时不计。
     if (lower_stats != 0) {
-        support.stats().lower_prep_ns += lower_stats.prep_ns
-        support.stats().lower_decl_ns += lower_stats.decl_ns
-        support.stats().lower_build_ns += lower_stats.build_ns
-        support.stats().lower_verify_ns += lower_stats.verify_ns
-        support.stats().lower_lookup_ns += lower_stats.lookup_ns
-        support.stats().lower_cache_ns += lower_stats.cache_ns
-        support.stats().lower_fn_ns += lower_stats.fn_ns
-        support.stats().lower_capture_ns += lower_stats.capture_ns
     }
     if (lowered != 0) {
         // lower_module 已按首片契约写好带来源的拒绝诊断，这里不再重复。
         return lowered
     }
-    support.stats().checked_functions += mod_ir.function_count
     // PF2：yh 侧构造 LLVM IR 文本单独计时（不含内嵌桥的解析/优化/发射）。
-    let irbuild_start_ns u64 = support.clock_ns()
     let built int = backend.llvm_emit_module(mod_ir, &proj.cfg().target, output)
     if (built != 0) {
         ir.ir_module_release(mod_ir)
         return -1
     }
     let meta int = llvm_emit_add_deployment_metadata(output)
-    bc().irbuild_ns += support.clock_ns() - irbuild_start_ns
     if (meta != 0) {
         backend.llvm_output_release(output)
         ir.ir_module_release(mod_ir)
@@ -195,11 +182,9 @@ fn llvm_emit_publish(output *backend.LLVMOutput, kind int, out_path *char,
     }
     unlink(support.arr_cstr(&temporary[0]))
     // PF2：内嵌桥段（LLVM 解析 / 优化 / 目标码生成 / 写对象）单独计时。
-    let bridge_start_ns u64 = support.clock_ns()
     let bridged int = llvm_emit_with_target(output.text.to_type(*char),
         output.length, proj.cfg().target.triple, opt_level, kind,
         support.arr_cstr(&temporary[0]), reason)
-    bc().bridge_ns += support.clock_ns() - bridge_start_ns
     if (bridged != 0) {
         unlink(support.arr_cstr(&temporary[0]))
         return 1
@@ -282,7 +267,6 @@ fn llvm_emit_module_to_cached(unit *check.CheckedModule, kind int, out_path *cha
         stats.emitted = output.emitted
         stats.text_length = output.length
     }
-    support.stats().backend_emitted += output.emitted
     backend.llvm_output_release(&output)
     ir.ir_module_release(&mod_ir)
     return 0
@@ -302,7 +286,6 @@ fn llvm_emit_text_only(unit *check.CheckedModule, text_path *char,
         stats.emitted = output.emitted
         stats.text_length = output.length
     }
-    support.stats().backend_emitted += output.emitted
     backend.llvm_output_release(&output)
     ir.ir_module_release(&mod_ir)
     return status

@@ -7,6 +7,5 @@
 另建版本化语料并分别报告规模。
 
 **现状（2026-11-09）**：原先消费本语料的 `tools/compiler-performance.py` 已删除（无
-justfile/CI 引用，它已被 `tools/perf-baseline.py` 取代，后者在 `.github/workflows/perf.yml`
-里运行）。本目录仅作历史快照保留；注意 `SHA256SUMS` 自 `2976a3d` 起与文件不再一致
+justfile/CI 引用；编译器编译耗时工具与统计机制已于 2026-11-10 一并移除）。本目录仅作历史快照保留；注意 `SHA256SUMS` 自 `2976a3d` 起与文件不再一致
 （那次给 `project.toml` 补了 `os`/`arch` 两行却未重生成清单），不要再把它当可校验基线。

@@ -14,8 +14,6 @@ import sys
 import time
 from pathlib import Path
 
-# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
-os.environ.setdefault("YH_STATS", "1")
 
 ROOT = Path(__file__).resolve().parents[3]
 COMPILER = ROOT / "compiler"
@@ -93,23 +91,6 @@ def verify_embedded_lld_identity(path: Path):
     if identity.encode("ascii") not in path.read_bytes():
         raise RuntimeError(f"候选未嵌入固定 lld 链接身份：{path}")
     print(f"{path.name} 内嵌 lld {expected_version}，身份 SHA-256={identity}")
-
-
-def check_build_stats(output: str, label: str):
-    """检查编译器项目的每个 stats 行均无后端回退且覆盖数相符。"""
-    rows = []
-    for line in output.splitlines():
-        if line.startswith("yh-stats "):
-            rows.append(dict(item.split("=", 1) for item in line.split()[1:]
-                             if "=" in item))
-    if not rows:
-        raise RuntimeError(f"{label} 未输出 LLVM yh-stats")
-    checked = sum(int(row.get("checked_functions", "0")) for row in rows)
-    emitted = sum(int(row.get("backend_emitted_functions", "0")) for row in rows)
-    fallback = sum(int(row.get("fallback_functions", "0")) for row in rows)
-    if checked <= 0 or emitted != checked or fallback != 0:
-        raise RuntimeError(
-            f"{label} LLVM 覆盖门失败：checked={checked} emitted={emitted} fallback={fallback}")
 
 
 def generation_errors(rows, expected_labels):
@@ -198,7 +179,6 @@ def build_candidate(compiler: Path, label: str, level: str, work: Path,
         raise RuntimeError(
             f"构建 {label}-O{level} 失败（rc={result.returncode}）：\n"
             f"{result.stdout[-5000:]}\n{result.stderr[-5000:]}")
-    check_build_stats(result.stdout + result.stderr, f"{label}-O{level}")
     verify_x64_candidate(output)
 
     build_dir = COMPILER / ".build" / "targets" / TRIPLE / "llvm" / f"O{level}"

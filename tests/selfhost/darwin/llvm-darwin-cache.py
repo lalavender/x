@@ -181,11 +181,9 @@ class Project:
         return snap
 
 
-def build(compiler, project, env, args=("build",), stats=False, background=False):
+def build(compiler, project, env, args=("build",), background=False):
     """执行一次项目构建；background 时返回 Popen 供并发用例使用。"""
     command = [str(compiler), "--backend", "llvm", "--target", TRIPLE, f"-{OPT}"]
-    if stats:
-        os.environ.setdefault("YH_STATS", "1")
     command += list(args)
     if background:
         return subprocess.Popen(command, cwd=project.root, env=env,
@@ -258,7 +256,7 @@ def run_suite(args, compiler, sdk_root, environment):
     original_main = main_source.read_text(encoding="utf-8")
     main_source.write_text(original_main.replace("helper.add(40) != 42",
                                                  "helper.add(41) != 43", 1), encoding="utf-8")
-    changed = build(compiler, first, env_a, stats=True)
+    changed = build(compiler, first, env_a)
     require(changed.returncode == 0, f"源变化构建失败：{changed.stderr[-2000:]}")
     after = first.state()
     require(after["llvmdarwincache-main.manifest"] != base["llvmdarwincache-main.manifest"],
@@ -419,7 +417,7 @@ def run_suite(args, compiler, sdk_root, environment):
     results = [proc.communicate(timeout=300) + (proc.returncode,) for proc in procs]
     for stdout, stderr, code in results:
         require(code == 0, f"并发构建失败 rc={code}：\n{stdout}\n{stderr[-1500:]}")
-    settle = build(compiler, concurrent, env_a, stats=True)
+    settle = build(compiler, concurrent, env_a)
     require(settle.returncode == 0, f"并发后热构建失败：{settle.stderr[-1000:]}")
     settled = concurrent.state()
     # 跨目录只比较与路径无关的对象键；链接键含输出路径与输出摘要，

@@ -7,8 +7,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
-os.environ.setdefault("YH_STATS", "1")
 
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = ROOT / "tests/yh-run/run/llvm-project-cache.yh"
@@ -66,14 +64,6 @@ def main():
     built = run([str(compiler), "--backend", "llvm", "--target", TARGET,
                  "-O2", "build"], cwd=project)
     assert built.returncode == 0, built.stdout + built.stderr
-    stats = [dict(item.split("=", 1) for item in line.split()[1:])
-             for line in built.stderr.splitlines() if line.startswith("yh-stats ")]
-    assert stats, "LLVM build 未报告受检/发射计数"
-    checked = sum(int(row["checked_functions"]) for row in stats)
-    emitted = sum(int(row["backend_emitted_functions"]) for row in stats)
-    fallback = sum(int(row["fallback_functions"]) for row in stats)
-    assert checked == emitted == 1 and fallback == 0, \
-        f"LLVM 覆盖计数不符：checked={checked} emitted={emitted} fallback={fallback}"
     executed = run([str(compiler), "--backend", "llvm", "--target", TARGET,
                     "-O2", "run"], cwd=project)
     assert executed.returncode == 42, executed.stdout + executed.stderr

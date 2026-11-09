@@ -133,9 +133,6 @@ def main() -> int:
         command += ["--target", args.target]
     if args.opt_level:
         command += [f"-O{args.opt_level}"]
-    if args.stats:
-        # --stats 已从 CLI 移除（2026-11-10）：改由环境变量开启。
-        environment["YH_STATS"] = "1"
     command += ["build"]
     if args.emit_llvm:
         command.append("--emit-llvm")

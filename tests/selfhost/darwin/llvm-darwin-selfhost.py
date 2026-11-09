@@ -22,8 +22,6 @@ import sys
 import time
 from pathlib import Path
 
-# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
-os.environ.setdefault("YH_STATS", "1")
 
 ROOT = Path(__file__).resolve().parents[3]
 COMPILER = ROOT / "compiler"
@@ -112,34 +110,6 @@ def log_result(work: Path, label: str, result):
     logs.mkdir(parents=True, exist_ok=True)
     (logs / f"{label}.stdout.log").write_text(result.stdout, encoding="utf-8")
     (logs / f"{label}.stderr.log").write_text(result.stderr, encoding="utf-8")
-
-
-def parse_stats(output: str):
-    """抽取 yh-stats 行并按计数器求和。"""
-    rows = []
-    for line in output.splitlines():
-        if line.startswith("yh-stats "):
-            rows.append(dict(item.split("=", 1) for item in line.split()[1:]
-                             if "=" in item))
-    return rows
-
-
-def check_build_stats(output: str, label: str):
-    """要求 LLVM 构建无后端回退且覆盖数与受检数一致。"""
-    rows = parse_stats(output)
-    if not rows:
-        raise RuntimeError(f"{label} 未输出 LLVM yh-stats")
-    checked = sum(int(row.get("checked_functions", "0")) for row in rows)
-    emitted = sum(int(row.get("backend_emitted_functions", "0")) for row in rows)
-    rejected = sum(int(row.get("rejected_functions", "0")) for row in rows)
-    backend_rejected = sum(int(row.get("backend_rejected_functions", "0")) for row in rows)
-    fallback = sum(int(row.get("fallback_functions", "0")) for row in rows)
-    if checked <= 0 or emitted != checked or fallback != 0:
-        raise RuntimeError(f"{label} LLVM 覆盖门失败：checked={checked} "
-                           f"emitted={emitted} rejected={rejected} "
-                           f"backend_rejected={backend_rejected} fallback={fallback}")
-    return {"checked": checked, "emitted": emitted, "rejected": rejected,
-            "backend_rejected": backend_rejected, "fallback": fallback}
 
 
 def generation_errors(rows, expected_labels):

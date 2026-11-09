@@ -21,8 +21,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
-os.environ.setdefault("YH_STATS", "1")
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tests" / "modules" / "projects" / "llvmfunctioncache"
@@ -130,27 +128,6 @@ def cache_cmd(compiler, cache, action, env=None):
                           timeout=600)
 
 
-def stats(proc):
-    """取 worker 的 check/IR 命中计数。"""
-    rows = []
-    for line in (proc.stdout + proc.stderr).splitlines():
-        if not line.startswith("yh-stats "):
-            continue
-        row = dict(item.split("=", 1) for item in line.split()[1:] if "=" in item)
-        if int(row.get("ir_functions", "0")) > 0:
-            rows.append(row)
-    if not rows:
-        return {"check_hits": 0, "check_misses": 0,
-                "ir_hits": 0, "ir_misses": 0}
-    row = max(rows, key=lambda item: int(item.get("ir_functions", "0")))
-    return {
-        "check_hits": int(row.get("check_cache_hits", "0")),
-        "check_misses": int(row.get("check_cache_misses", "0")),
-        "ir_hits": int(row.get("ir_cache_hits", "0")),
-        "ir_misses": int(row.get("ir_cache_misses", "0")),
-    }
-
-
 def force_module(project):
     """删除 main 的模块 manifest/obj，让 worker 进入缓存查询。"""
     for pattern in ("manifest/*-main.manifest", "obj/*-main.o"):
@@ -211,11 +188,9 @@ def one_run(compiler, work):
     shutil.rmtree(artifacts(function_work) / "firc", ignore_errors=True)
     action_id = index_id(prime)
     (cache / "v1" / "actions" / action_id).unlink(missing_ok=True)
+    # 统计机制已删除（2026-11-10）：命中数不可观测，只验证缓存失效后能重建。
     function_build = build(compiler, function_work, cache, [])
     require(function_build.returncode == 0, "函数全局缓存构建失败", function_build)
-    counts = stats(function_build)
-    require(counts["check_hits"] == 4 and counts["ir_hits"] == 4,
-            f"函数 action 未全命中：{counts}", function_build)
 
     # 损坏输出：保留 action，破坏一个 output，下一次必须 miss 并自愈。
     module_action = cache / "v1" / "actions" / index_id(prime)

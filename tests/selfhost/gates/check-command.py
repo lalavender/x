@@ -61,8 +61,6 @@ def main() -> int:
         env = dict(os.environ)
         env["PATH"] = str(wrappers) + os.pathsep + env.get("PATH", "")
         env["YH_CHECK_TOOL_LOG"] = str(log)
-        # --stats 已从 CLI 移除（2026-11-10）：统计由环境变量开启。
-        env["YH_STATS"] = "1"
         for label, fixture, want_ok in (
             ("valid", VALID, True),
             ("invalid", INVALID, False),
@@ -78,24 +76,8 @@ def main() -> int:
             passed = (result.returncode == 0) if want_ok else result.returncode != 0
             if want_ok and "检查通过" not in result.stdout:
                 passed = False
-            if want_ok and not any(int(count) > 0
-                                   for count in re.findall(r"ast_nodes=(\d+)", output)):
-                passed = False
-            if want_ok and not any(int(count) > 0
-                                   for count in re.findall(r"stmt_nodes=(\d+)", output)):
-                passed = False
-            if want_ok and not any(int(count) > 0
-                                   for count in re.findall(r"decl_nodes=(\d+)", output)):
-                passed = False
-            if want_ok and not any(int(count) > 0
-                                   for count in re.findall(r"ast_refs=(\d+)", output)):
-                passed = False
-            if want_ok and not any(int(count) > 0
-                                   for count in re.findall(r"ast_bindings=(\d+)", output)):
-                passed = False
-            if want_ok and sum(int(count) for count in
-                               re.findall(r"ast_bindings=(\d+)", output)) < 18:
-                passed = False
+            # 统计机制已删除（2026-11-10）：不再核对 ast_*/stmt_* 计数，
+            # 只保留「检查通过 + 退出码 + 不产出后端产物」。
             if not want_ok and "错误:" not in output:
                 passed = False
             if not passed:

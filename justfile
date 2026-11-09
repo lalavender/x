@@ -224,7 +224,8 @@ prefix_root := destdir + prefix
 # 编译器路径一律经 quote()：Windows 的绝对路径带反斜杠与盘符，裸拼进 shell 会被
 # bash 吃掉反斜杠（`C:\Users\...` → `C:Users...`），门禁报 FileNotFoundError。
 runtime_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin/llvm-darwin-runtime.py --compiler-path " + quote(yh_run) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/gates/runtime-memory.py --compiler-path " + quote(yh_run) + " --llvm-x64" } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/linux-arm64/llvm-linux-arm64.py --compiler-path " + quote(yh_run) } else { py + " " + quote(root) + "/tests/selfhost/gates/runtime-memory.py --compiler-path " + quote(yh_run) }
-cache_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin/llvm-darwin-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-x86_64" { py + " " + quote(root) + "/tests/selfhost/cache/llvm-cache.py --compiler-path " + quote(yh) } else if llvm_host == "linux-aarch64" { py + " " + quote(root) + "/tests/selfhost/cache/llvm-cache.py --compiler-path " + quote(yh) + " --target aarch64-unknown-linux-gnu" } else { py + " " + quote(root) + "/tests/selfhost/cache/link-cache.py --compiler-path " + quote(yh) }
+# link-cache 探针依赖 yh-stats 的 asm/link 计数，随统计机制一并移除（2026-11-10）。
+cache_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin/llvm-darwin-cache.py --compiler-path " + quote(yh) } else if host_os == "windows" { "true" } else { py + " " + quote(root) + "/tests/selfhost/cache/llvm-cache.py --compiler-path " + quote(yh) + (if llvm_host == "linux-aarch64" { " --target aarch64-unknown-linux-gnu" } else { "" }) }
 modcheck_flags := if llvm_host == "" { "" } else { "--backend llvm" }
 selfhost_flags_test := if llvm_host == "darwin-aarch64" { py + " " + quote(root) + "/tests/selfhost/darwin/llvm-darwin-selfhost-flags.py --compiler-path " + quote(yh_run) } else { "true" }
 # 链接死代码回收门（J6-L1）：Darwin 缺省 -dead_strip 生效、可回退、进链接键。
@@ -396,14 +397,11 @@ test-libs: stage-yh
 selfhost-native: stage-yh
     YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/bootstrap/native-selfhost.py" --seed "{{ seed_abs }}" {{ selfhost_work_flag }} {{ corpus_flag }} {{ selfhost_keep_flag }}
     YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/bootstrap/scratch-isolation.py" --compiler-path "{{ yh_run }}" --jobs 4
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/gates/lex-stats.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ runtime_test }}
     YH_CACHE=off {{ selfhost_flags_test }}
     YH_CACHE=off {{ dead_strip_test }}
     YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/gates/check-command.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/gates/llvm-architecture.py" --compiler-path "{{ yh_run }}"
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/cache/llvm-function-cache.py" --compiler-path "{{ yh_run }}"
-    YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/cache/llvm-path-cache.py" --compiler-path "{{ yh_run }}"
     {{ py }} "{{ root }}/tests/selfhost/cache/llvm-global-cache.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ py }} "{{ root }}/tests/selfhost/gates/foreign-fs-build.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ cache_test }}

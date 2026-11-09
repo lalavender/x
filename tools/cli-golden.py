@@ -8,7 +8,7 @@
 设计（见 docs/02-plan/yh-CLI用cli标准库重写实施方案-2026-10-27.md §7）：
 - 每个用例在独立的 fixture 副本里运行，保证两个二进制看到相同的冷缓存状态；
 - 严格等价：退出码 + 归一化后的 stdout/stderr；
-- 归一化：仓库根/工作目录/binary 路径替换为占位符，`yh-stats` 行整行折叠，
+- 归一化：仓库根/工作目录/binary 路径替换为占位符，
   `[编译]/[缓存]/[检查]/[链接]` 进度行按多重集合比较（并行 worker 顺序不稳定）；
 - `strict=False` 的用例只比较退出码与 stdout（已在报告里注明原因）。
 """
@@ -113,7 +113,6 @@ def normalize(text: str, root: Path, work: Path, binary: Path) -> str:
     text = text.replace(str(root), "<root>")
     text = TIME_FIELD.sub(lambda m: m.group(0).split("=")[0] + "=0", text)
     # 编译器自身模块数/哈希随实现变化，统计行只保留前缀。
-    text = re.sub(r"(?m)^yh-stats .*$", "yh-stats <values-omitted>", text)
     progress = []
     others = []
     for line in text.splitlines():

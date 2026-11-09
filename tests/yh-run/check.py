@@ -123,29 +123,6 @@ def compile_src(src, out, cross=False, compiler=None):
         return None, True
 
 
-def validate_llvm_stats(proc, require_emission):
-    """核对 LLVM 单文件门的受检/发射计数和零回退约束。"""
-    if not COMPILER_FLAGS or "llvm" not in COMPILER_FLAGS:
-        return None
-    rows = []
-    for line in (proc.stdout or "").splitlines() + (proc.stderr or "").splitlines():
-        if not line.startswith("yh-stats "):
-            continue
-        fields = dict(item.split("=", 1) for item in line.split()[1:]
-                      if "=" in item)
-        rows.append(fields)
-    if not rows:
-        return "LLVM 编译未输出 --stats 计数"
-    checked = sum(int(row.get("checked_functions", "0")) for row in rows)
-    emitted = sum(int(row.get("backend_emitted_functions", "0")) for row in rows)
-    fallback = sum(int(row.get("fallback_functions", "0")) for row in rows)
-    if emitted > checked or fallback != 0:
-        return f"LLVM 计数不一致：checked={checked} emitted={emitted} fallback={fallback}"
-    if require_emission and emitted <= 0:
-        return f"LLVM 没有发射入口函数：checked={checked} emitted={emitted}"
-    return None
-
-
 def parse_expectations(path):
     """解析 run/ 用例的期望注释，返回 (输出行列表, 退出码, 问题列表)。"""
     expect_lines = []
@@ -296,9 +273,6 @@ def check_run_case(path, cross, out):
         return "FAIL", why + "\n    " + "\n    ".join(diag_tail(proc))
     if not out.exists():
         return "FAIL", f"编译器未产出 {out.name}"
-    stats_error = validate_llvm_stats(proc, require_emission=True)
-    if stats_error:
-        return "FAIL", stats_error
 
     expect_lines, exit_code, problems = parse_expectations(path)
     if problems:
@@ -404,9 +378,6 @@ def check_pass_case(path, cross, out):
     if proc.returncode != 0:
         return "FAIL", f"编译失败（退出码 {proc.returncode}）\n    " \
             + "\n    ".join(diag_tail(proc))
-    stats_error = validate_llvm_stats(proc, require_emission=False)
-    if stats_error:
-        return "FAIL", stats_error
     return "PASS", ""
 
 
@@ -452,9 +423,6 @@ def main():
         COMPILER_FLAGS += ["--target", args.target]
     if args.opt_level:
         COMPILER_FLAGS += [f"-O{args.opt_level}"]
-    if args.backend == "llvm":
-        # --stats 已从 CLI 移除（2026-11-10）：统计由环境变量开启，子进程继承。
-        os.environ.setdefault("YH_STATS", "1")
     jobs = max(1, args.jobs)
     filters = [f for f in args.filter.split(",") if f]
 

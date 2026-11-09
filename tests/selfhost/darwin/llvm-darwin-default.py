@@ -13,8 +13,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-# --stats 已从 CLI 移除（2026-11-10）：统计输出改由 YH_STATS=1 开启。
-os.environ.setdefault("YH_STATS", "1")
 
 ROOT = Path(__file__).resolve().parents[3]
 WORK = ROOT / "tmp" / "llvm-migration" / "darwin-default"
@@ -33,17 +31,6 @@ def run(command, cwd, env):
     """执行命令并完整捕获输出。"""
     return subprocess.run(command, cwd=cwd, env=env, capture_output=True,
                           text=True, timeout=300)
-
-
-def stats_rows(output):
-    """抽取全部 yh-stats 行。"""
-    return [dict(item.split("=", 1) for item in line.split()[1:] if "=" in item)
-            for line in output.splitlines() if line.startswith("yh-stats ")]
-
-
-def stat_sum(rows, name):
-    """按计数器求和；子进程与父进程的行都要计入。"""
-    return sum(int(row.get(name, "0")) for row in rows)
 
 
 def default_environment():
@@ -81,13 +68,6 @@ def main():
     built = run([str(compiler), "build"], WORK, env)
     require(built.returncode == 0,
             f"默认构建失败：{built.stdout[-2000:]}\n{built.stderr[-2000:]}")
-    rows = stats_rows(built.stdout + built.stderr)
-    checked = stat_sum(rows, "checked_functions")
-    emitted = stat_sum(rows, "backend_emitted_functions")
-    fallback = stat_sum(rows, "fallback_functions")
-    require(rows, "默认构建没有输出 yh-stats，无法确认后端")
-    require(checked > 0 and emitted == checked and fallback == 0,
-            f"{DEFAULT_HINT}：checked={checked} emitted={emitted} fallback={fallback}")
 
     artifact = WORK / ".build" / "targets" / TRIPLE / "llvm" / "O0"
     require((artifact / "manifest/link.manifest").is_file()

@@ -39,7 +39,8 @@ content store 与接口就绪机制；链接驱动分离等剩余目标见
 6. **check/test 隔离**：`yh check` 不读写正式构建缓存；`yh test` 用
    `tmp/yh-test`，不装载/提交函数缓存。
 7. **版本可拒绝**：格式变化必须换版本/键，旧记录按 miss 处理。
-8. **命中/未命中可观测**：`YH_STATS=1` 输出 check/IR 缓存命中、编译器指纹计算等。
+8. **命中/未命中可观测**：统计输出已于 2026-11-10 随 `support.stats()` 一并删除；
+   现在只能从产物字节/时间差间接判断缓存行为。
 
 ---
 
@@ -452,7 +453,7 @@ prepare → objects → key → args → libs → exec
 `mb_schedule_modules`：
 
 - 若 `<build>/manifest/link.manifest` 不存在（刚清空 `.build` / 冷构建）：
-  - `gen.stats().firc_write_off = 1`；
+  - `support.ctl().firc_write_off = 1`；
   - worker 不写 `.fchk` / `.fir`；
   - 原因：capture 占冷编约四成时间，写下的记录在下一轮清空后不会被读。
 
