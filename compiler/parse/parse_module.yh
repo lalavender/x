@@ -9,9 +9,11 @@ import support
 //   * module IDENT;（项目模式强制首声明；旧单文件 CLI 不要求）
 //   * import NAME;                  同项目/标准库/三层解析，绑定名 NAME
 //   * import NAME as ALIAS;         同上，绑定名 ALIAS
-//   * import KEY.MOD;               跨项目：依赖键 KEY 项目的 MOD 模块，
-//                                   绑定名 MOD（不走三层搜索）
-//   * import KEY.MOD as ALIAS;      同上，绑定名 ALIAS
+//   * import A.B;                   两段：先试依赖键 A（跨项目），未命中再按
+//                                   本项目目录 A/B 找模块
+//   * import A.B.C;                 三段及以上：一律按本项目目录路径 A/B/C
+//                                   找模块（跨项目导入不提供三段）
+//   * import A.B as ALIAS;          绑定名 = 末段（可改）
 // 记录文件归属（module 名）与本文件导入表（ImportEnt：查找名/别名/
 // 依赖键）。重复绑定名解析期报错；未使用导入在文件编译完后检查；
 // 纯语法检查不解析 project.toml、不搜索依赖：未知模块不是语法错误。
@@ -54,12 +56,13 @@ fn mod_import_find(start int, n int) int {
 }
 
 // mod_import_push：向本文件导入表追加一条（名字 intern 进名字池）。
-// name=查找名（模块名，点分导入取 MOD 段），alias=绑定名，
-// proj_key=跨项目依赖键（同项目传 -1/0）。
+// name=查找名（模块名，点分导入取末段），alias=绑定名，
+// proj_key=跨项目依赖键（仅两段点分且首段是依赖键时有效；否则 -1/0），
+// path=完整点分原文（如 a.b.c；单段时与 name 相同）。
 // 平行的绑定/使用数组随表一起扩容（cmd 侧绑定 / 未使用检查用）。
 // 返回 0 成功；内存分配失败输出诊断并返回 -1。
 fn mod_import_push(start int, n int, astart int, alen int,
-    kstart int, klen int, line int, col int) int {
+    kstart int, klen int, pstart int, plen int, line int, col int) int {
     if (support.fs().import_n == support.fs().import_cap) {
         let ncap int = support.fs().import_cap * 2
         if (ncap == 0) {
@@ -102,8 +105,14 @@ fn mod_import_push(start int, n int, astart int, alen int,
     if (aoff < 0) {
         return -1
     }
+    let poff int = support.name_intern(pstart, plen)
+    if (poff < 0) {
+        return -1
+    }
     support.fs().imports[support.fs().import_n].name_off = off
     support.fs().imports[support.fs().import_n].name_len = n
+    support.fs().imports[support.fs().import_n].path_off = poff
+    support.fs().imports[support.fs().import_n].path_len = plen
     if (klen > 0) {
         let koff int = support.name_intern(kstart, klen)
         if (koff < 0) {
@@ -190,30 +199,34 @@ pub fn mod_parse_head() int {
         if (mod_valid_name() == 0) {
             return token.err_tok("此处需要一个导入模块名（单个标识符，_ 除外）")
         }
-        // 第一段：NAME 或 KEY（点分导入的项目键）
+        // 点分导入：任意段数的目录路径（a.b.c → 目录 a/b/c，查找名 = 末段）。
+        // 两段时首段兼作跨项目依赖键：解析期先试依赖键，未命中再按本项目路径。
         let s1 int = token.ctx().tokens[token.ctx().pos].start
         let l1 int = token.ctx().tokens[token.ctx().pos].len
         let iline int = token.ctx().tokens[token.ctx().pos].line
         let icol int = token.ctx().tokens[token.ctx().pos].col
-        p_adv()
-        // 点分：KEY.MOD（仅两段；查找名 = MOD，依赖键 = KEY）
+        let pstart int = s1
         let tstart int = s1
         let tlen int = l1
-        let kstart int = -1
-        let klen int = 0
-        if (p_cur() == token.TK_DOT) {
+        p_adv()
+        let segs int = 1
+        for p_cur() == token.TK_DOT {
             p_adv()
             if (mod_valid_name() == 0) {
                 return token.err_tok("'.' 后需要一个模块名")
             }
-            if (p_peek(1) == token.TK_DOT) {
-                return token.err_tok("跨项目导入只支持两段（依赖键.模块名）")
-            }
-            kstart = s1
-            klen = l1
             tstart = token.ctx().tokens[token.ctx().pos].start
             tlen = token.ctx().tokens[token.ctx().pos].len
+            segs += 1
             p_adv()
+        }
+        let plen int = tstart + tlen - pstart
+        // 依赖键只对两段导入有意义：三段及以上一律按目录路径解析。
+        let kstart int = -1
+        let klen int = 0
+        if (segs == 2) {
+            kstart = s1
+            klen = l1
         }
         // 别名
         let astart int = 0
@@ -226,7 +239,7 @@ pub fn mod_parse_head() int {
             return support.err_lc(iline, icol, "重复的导入绑定名（同模块不同来源请用 as 区分）")
         }
         if (mod_import_push(tstart, tlen, astart, alen, kstart, klen,
-            iline, icol) != 0) {
+            pstart, plen, iline, icol) != 0) {
             return -1
         }
         if (p_expect(token.TK_SEMI, "期望 import 声明结尾 ';'") != 0) {

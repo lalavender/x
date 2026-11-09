@@ -37,7 +37,31 @@ tokens { IMPLICIT }
 
 // 源文件：模块头（可选）+ 顶层声明列表 + EOF。test 声明是顶层声明的一种。
 sourceFile
-    : topLevelDecl* EOF
+    : moduleHead? topLevelDecl* EOF
+    ;
+
+// 模块头：module 声明在前，import 声明随后（项目模式下 module 必须有）。
+// 点分导入 A.B.C 的语义（无歧义版）：
+//   * 单段 import M：三层查找（本项目 → 标准库 → 直接依赖）；
+//   * 两段 import A.B：先试首段 A 作依赖键（跨项目），未命中再按本项目
+//     目录路径 A/B 解析；
+//   * 三段及以上：只在**本项目**按目录路径 A/B/C 解析；
+//   * 所有点分导入的末段必须是目标模块的声明名（module X 的 X）；
+//   * 绑定名 = 末段，可用 `as` 改；同一绑定名重复导入是错误。
+moduleHead
+    : moduleDecl importDecl*
+    ;
+
+moduleDecl
+    : 'module' IDENT ';'
+    ;
+
+importDecl
+    : 'import' modulePath ('as' IDENT)? ';'
+    ;
+
+modulePath
+    : IDENT ('.' IDENT)*
     ;
 
 // 顶层声明：`pub` 导出标记。struct/union/enum 的 pub 可选（2026-10-12）：

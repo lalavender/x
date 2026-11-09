@@ -799,38 +799,7 @@ pub fn pj_index_file(path *char, pj int) int {
         support.write_all(2, buf, n)
         return -1
     }
-    // 查找/创建模块
-    let mod int = -1
-    let mi int = 0
-    for mi < proj.ctx().mod_n {
-        if (proj.ctx().mods[mi].proj == pj && proj.ctx().mods[mi].name_len == support.fs().name_len
-            && support.pool_ctx().data[proj.ctx().mods[mi].name_off] == support.pool_ctx().data[support.fs().name_off]) {
-            let match int = 1
-            let j int = 1
-            for j < support.fs().name_len {
-                if (support.pool_ctx().data[proj.ctx().mods[mi].name_off + j] != support.pool_ctx().data[support.fs().name_off + j]) {
-                    match = 0
-                    break
-                }
-                j += 1
-            }
-            if (match != 0) {
-                mod = mi
-                break
-            }
-        }
-        mi += 1
-    }
-    if (mod < 0) {
-        mod = proj.add_module(support.fs().name_off, support.fs().name_len, pj)
-        if (mod < 0) {
-            return -1
-        }
-        if (proj.add_project_module(pj, mod) != 0) {
-            return -1
-        }
-    }
-    // 登记文件（路径 intern）
+    // 路径先 intern：模块身份键要目录（(项目, 名字, 目录) 三元组）。
     let plen int = 0
     for path[plen] != 0 {
         plen += 1
@@ -838,6 +807,34 @@ pub fn pj_index_file(path *char, pj int) int {
     let poff int = support.tml_intern_str(path.to_type(*u8), 0, plen)
     if (poff < 0) {
         return -1
+    }
+    let dlen int = pj_dir_prefix_len(poff, plen)
+    // 目录字节先拷到栈缓冲再 intern：tml_intern_str 扩容时会 free 旧池，
+    // 直接传池内指针会读到已释放内存。
+    if (dlen >= 900) {
+        return support.fail("源文件目录路径过长")
+    }
+    let dbuf [900]u8
+    let dci int = 0
+    for dci < dlen {
+        dbuf[dci] = support.pool_ctx().data[poff + dci]
+        dci += 1
+    }
+    let dir_off int = support.tml_intern_str(&dbuf[0], 0, dlen)
+    if (dir_off < 0) {
+        return -1
+    }
+    // 查找/创建模块：同名不同目录是两个模块（不再静默合并）
+    let mod int = proj.module_at_dir(pj, support.fs().name_off, support.fs().name_len,
+        dir_off, dlen)
+    if (mod < 0) {
+        mod = proj.add_module(support.fs().name_off, support.fs().name_len, pj, dir_off, dlen)
+        if (mod < 0) {
+            return -1
+        }
+        if (proj.add_project_module(pj, mod) != 0) {
+            return -1
+        }
     }
     let fidx int = proj.add_file(poff, plen, mod)
     if (fidx < 0) {
@@ -891,6 +888,7 @@ pub fn pj_index_file(path *char, pj int) int {
     for ii < support.fs().import_n {
         if (proj.add_import(fidx, support.fs().imports[ii].name_off, support.fs().imports[ii].name_len,
             support.fs().imports[ii].proj_key_off, support.fs().imports[ii].proj_key_len,
+            support.fs().imports[ii].path_off, support.fs().imports[ii].path_len,
             support.fs().imports[ii].alias_off, support.fs().imports[ii].alias_len,
             support.fs().imports[ii].line, support.fs().imports[ii].col) != 0) {
             return -1

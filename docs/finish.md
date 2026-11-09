@@ -8,6 +8,42 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-09：同名模块不再合并 + 路径导入（import a.cache）
+
+**问题**：模块按「(项目, 模块名)」查找/创建，`src/a/cache` 与 `src/b/cache`（都声明
+`module cache`）被静默合并成一个模块，与 `PMod` 注释「一个模块（一个目录一份源文件集）」
+矛盾，也让「用 as 区分两个同名模块」无从表达。
+
+**结果**：
+- 模块身份改为 `(项目, 名字, 目录)`（`proj/model.yh` 的 `PMod.dir_off/len`、
+  `proj/table.yh:module_at_dir`）；`build/project_index.yh` 用它查找/创建模块。
+- 裸名导入在本项目内命中多个同名模块 → 报「模块名歧义」，提示改用路径导入；
+  两段导入仍是「依赖键优先，未命中再按目录」；三段及以上只按目录。
+- 路径导入 `import a.cache` 解析到 `<source>/a/cache` 里声明为 `cache` 的模块
+  （`pj_import_dir` 用 `proj.canon` 拼源码根，`module_at_dir` 按字节比目录）；
+  末段与声明名不符报「路径导入与目录不匹配」。
+- 重名模块的产物标签/符号后缀追加目录指纹（`proj/art.yh:mod_tag`、
+  `build/project_resolve.yh:pj_mod_suffix`，FNV-1a 低 32 位 → 8 位十六进制）；
+  模块 ActionID 混入模块目录。无重名的项目命名与之前逐字节一致。
+- 解析器放宽 import 段数为任意（`parse/parse_module.yh`），`ImportEnt` 记完整
+  点分原文；`docs/yh.g4` 补 `moduleHead/moduleDecl/importDecl/modulePath` 并纳入
+  `sourceFile`，新增语料 `tests/yh/01-toplevel/05_module_head.yh`。
+
+**测试**：新增 `tests/modules/projects/{dupmodseg,dupbarenames,dupmisname}` 与
+build-check 的 `u8-dup-module-*` 三条用例（路径导入 + as 运行 rc=30 / 裸名歧义 /
+目录与声明名不符）。`tests/modules/build-check.py` 拷真实编译器模块改用
+`core_src()` 名字映射（cache 已下沉 build/cache）。
+
+**验证**：`env YH_CACHE=off just build` 冷编通过；`tests/yh/check.py` 83/83 + 49/49
+（含 ANTLR 层）；`tests/modules/test-check.py` 通过（2 条 FAIL 为既有问题）；
+`tests/build-cache/check.py` 全通过；`tools/compiler-tests.py` 8/8。
+
+**既有问题（未随本次修）**：`tests/modules/build-check.py` 在 HEAD 上已有 35 条
+失败（`u4-basic-run` 等，可用 HEAD 二进制复现）；`yh test` 在**非 compiler 项目**
+上失败——生成的测试入口无条件 `import proj`（`c7ca83d` 引入），
+`tests/modules/test-check.py` 的 `default-check`/`execute-fail-early-exit-and-crash`
+即因此红。
+
 ## 2026-11-09：删除架构守护 tools/arch-check.py
 
 **结果**：按用户决定移除架构守护，`tools/arch-check.py` 与自测

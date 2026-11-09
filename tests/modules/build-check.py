@@ -38,6 +38,15 @@ WORK = ROOT / "tmp" / "modcheck"
 # 并发用例数缺省上限：一个用例就是若干次完整项目构建（每次还会 fork 模块
 # worker），上限 4 兼顾核数不多的机器与并发构建的内存占用。
 DEFAULT_JOBS = max(1, min(4, os.cpu_count() or 1))
+
+# 模块名 → 编译器源码目录（相对 compiler/）。模块身份由 module 声明决定，
+# 目录只是物理组织：2026-11-09 起 cache 下沉到 build/cache，这里按名字映射。
+CORE_DIRS = {"cache": "build/cache"}
+
+
+def core_src(module):
+    """返回 module 的源码目录（供 fixture 拷贝真实编译器模块）。"""
+    return ROOT / "compiler" / CORE_DIRS.get(module, module)
 COMPILER_PATH = None
 COMPILER_FLAGS = []
 COMPILER_BUILD_FLAGS = []
@@ -405,6 +414,11 @@ case("u2-ambiguous-deps", "fail", "ambiguity", "host", msg="歧义")
 # 标记与派生路径写进 512/600/700 字节定长缓冲，超限必须在源头拒绝，
 # 不能依赖 gen.append_str 的隐式 NUL 终止。
 case("u7-module-name-too-long", "fail", "longname", ".", msg="模块名过长")
+# —— 同名模块（2026-11-09）：身份 = (项目, 名字, 目录)，不再静默合并 ——
+# 不同目录的同名模块是两个模块；裸名导入多候选即歧义，要用路径导入 + as 区分。
+case("u8-dup-module-path-import", "run", "dupmodseg", "app", 30)
+case("u8-dup-module-bare-ambiguous", "fail", "dupbarenames", "app", msg="模块名歧义")
+case("u8-dup-module-dir-mismatch", "fail", "dupmisname", "app", msg="路径导入与目录不匹配")
 # —— MOD-U3：模块语义 ——
 # 2026-10-02 pub struct 一等化：字段一律公开，跨模块字段访问与位置式构造
 # 由 fail 用例转为 run 正向用例；符号级可见性（非 pub fn）仍被拒绝。
@@ -501,7 +515,7 @@ def copy_proj(src, dst):
     if src.name == "astcheck":
         # 探针直接使用当前编译器的 AST arena 与 check 实现。
         for module in ("proj", "support", "token", "lex", "comptime", "ir", "backend", "ast", "check", "cache"):
-            source = ROOT / "compiler" / module
+            source = core_src(module)
             if source.is_dir():
                 ignore = shutil.ignore_patterns("llvm_bridge.yh") if module == "backend" else None
                 shutil.copytree(source, dst / module, ignore=ignore)
@@ -553,7 +567,7 @@ def copy_proj(src, dst):
         # 需要连 check 及其依赖（ast/comptime）一起拷贝，否则 import check 解析失败。
         for mod, deps in (("ir", ""), ("cache", "support token hash"), ("comptime", "support token proj"), ("ast", "support token proj comptime"),
                           ("check", "support token proj ast comptime ir cache hash")):
-            shutil.copytree(ROOT / "compiler" / mod, dst / mod)
+            shutil.copytree(core_src(mod), dst / mod)
             lines = [f'[project]', 'os = "host"', 'arch = "host"', f'name = "{mod}"', 'source = "."', '', '[dependencies]']
             for dep in deps.split():
                 lines.append(f'{dep} = {{ path = "../{dep}" }}')
@@ -576,7 +590,7 @@ def copy_proj(src, dst):
         core.mkdir()
         for module in ("proj", "support", "token", "lex", "comptime", "ir", "backend",
                        "ast", "check", "cache"):
-            shutil.copytree(ROOT / "compiler" / module, core / module,
+            shutil.copytree(core_src(module), core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         shutil.copytree(ROOT / "libs" / "hash", core / "hash",
                         ignore=shutil.ignore_patterns(".build"))
@@ -592,7 +606,7 @@ def copy_proj(src, dst):
         core.mkdir()
         for module in ("proj", "support", "token", "lex", "comptime", "ir", "backend",
                        "ast", "check", "cache"):
-            shutil.copytree(ROOT / "compiler" / module, core / module,
+            shutil.copytree(core_src(module), core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         shutil.copytree(ROOT / "libs" / "hash", core / "hash",
                         ignore=shutil.ignore_patterns(".build"))
@@ -608,7 +622,7 @@ def copy_proj(src, dst):
         core = dst / "compiler"
         core.mkdir()
         for module in ("proj", "support", "token", "lex", "ast", "comptime", "ir", "backend", "check", "cache"):
-            shutil.copytree(ROOT / "compiler" / module, core / module,
+            shutil.copytree(core_src(module), core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         shutil.copytree(ROOT / "libs" / "hash", core / "hash",
                         ignore=shutil.ignore_patterns(".build"))
@@ -622,7 +636,7 @@ def copy_proj(src, dst):
         core = dst / "compiler"
         core.mkdir()
         for module in ("proj", "support", "token", "lex", "ast", "parse", "comptime", "ir", "backend", "builtin", "check", "lower", "cache"):
-            shutil.copytree(ROOT / "compiler" / module, core / module,
+            shutil.copytree(core_src(module), core / module,
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         shutil.copytree(ROOT / "libs" / "hash", core / "hash",
                         ignore=shutil.ignore_patterns(".build"))

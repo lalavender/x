@@ -125,41 +125,39 @@ import os;
 import libs.os as l;
 ```
 
-简单语句沿用 yh 的分号规则。import 形式（2026-09-30 已实施）：
+简单语句沿用 yh 的分号规则。import 形式（2026-11-09 起支持目录路径导入）：
 
 | 形式 | 查找 | 绑定名 |
 | --- | --- | --- |
 | `import os;` | 三层搜索（本项目→标准库→直接依赖） | os |
 | `import os as os1;` | 三层搜索 | os1 |
-| `import libs.os;` | 直接解析到依赖键 libs 的项目的 os 模块 | os |
-| `import libs.os as l;` | 同上 | l |
+| `import libs.os;` | 首段是依赖键 libs → 该项目里的 os 模块 | os |
+| `import a.cache;` | 首段不是依赖键 → 本项目目录 `a/cache` 的模块 | cache |
+| `import a.b.c;` | 三段及以上只按本项目目录 `a/b/c` 解析 | c |
+| `import a.cache as ac;` | 同上 | ac |
 
-第一段为 [dependencies] 依赖键时走跨项目直解析（不走三层，键缺失或
-依赖无可导入模块显式报错）；绑定名重复报错（这正是 as 的用途）。
-导入只允许出现在文件头，不允许出现在函数体或业务声明之后。
+解析规则（实现：`build/project_resolve.yh` 的 `pj_bind_imports`）：
 
-拟议 grammar 增量如下，不直接改写当前 `docs/yh.g4`：
+1. **单段**：三层查找；本项目内命中多个同名模块时直接报「模块名歧义」，
+   提示改用路径导入（2026-11-09 之前是静默取第一个）。
+2. **两段**：首段是 `[dependencies]` 键 → 跨项目直解析（键存在但依赖项目
+   没有该模块仍报错）；否则按本项目目录路径解析。
+3. **三段及以上**：只按本项目目录路径解析（跨项目导入不提供三段）。
+4. 路径导入的末段必须等于目标目录里 `module` 声明的名字，否则报
+   「路径导入与目录不匹配」；目录内仍只允许一个模块。
+5. 绑定名 = 末段，`as` 可改；同一绑定名重复导入报错（这正是 `as` 的用途）。
+
+语法（`docs/yh.g4` 的 `moduleHead`/`moduleDecl`/`importDecl`/`modulePath`）：
 
 ```antlr
-// 保留旧单文件入口，项目模式要求模块文件。
-sourceFile
-    : moduleSource EOF
-    | topLevelDecl* EOF
-    ;
-
-// 模块文件先声明归属，再声明本文件依赖。
-moduleSource
-    : moduleClause importDecl* topLevelDecl*
-    ;
-
-moduleClause
-    : 'module' IDENT ';'
-    ;
-
-importDecl
-    : 'import' IDENT ';'
-    ;
+sourceFile : moduleHead? topLevelDecl* EOF ;
+moduleHead : moduleDecl importDecl* ;
+moduleDecl : 'module' IDENT ';' ;
+importDecl : 'import' modulePath ('as' IDENT)? ';' ;
+modulePath : IDENT ('.' IDENT)* ;
 ```
+
+导入只允许出现在文件头，不允许出现在函数体或业务声明之后。
 
 module/import 加入关键字时须同步检查已有的保留字成员名规则。
 import 的绑定属于文件，不能被同模块其他文件借用。重复导入和未使用
@@ -337,9 +335,15 @@ B；app 要直接 import B 提供的模块，必须在自己的 dependencies 中
 
 | 来源 | 同名示例 | 实际身份 |
 | --- | --- | --- |
-| 本地 | module os | 当前项目身份 + os |
-| 标准库 | module os | 工具链标准库身份 + os |
-| 第三方 | module os | 依赖项目身份 + os |
+| 本地（目录 a/） | module os | 当前项目身份 + (os, a) |
+| 本地（目录 b/） | module os | 当前项目身份 + (os, b) |
+| 标准库 | module os | 工具链标准库身份 + (os, 目录) |
+| 第三方 | module os | 依赖项目身份 + (os, 目录) |
+
+同一项目内不同目录的同名模块是**两个**模块，不再静默合并（2026-11-09 修）：
+裸名导入命中多个即报歧义，必须用路径导入 + `as` 区分。仅当同一项目里出现
+同名模块时，产物标签与符号后缀才追加目录指纹（`proj/art.yh:mod_tag`、
+`build/project_resolve.yh:pj_mod_suffix`）；没有重名的项目命名与之前逐字节相同。
 
 具名类型身份包含模块归属，机器符号编码包含提供方项目与模块；不能
 只把函数链接成 os_open。导入名和文件路径变化不应创造另一个类型。

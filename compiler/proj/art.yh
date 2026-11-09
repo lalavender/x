@@ -38,6 +38,37 @@ pub fn fnv(h *u64, b u8) void {
     h[0] = h[0] * 1099511628211
 }
 
+// mod_dir_dup：该模块的名字是否在同一项目内被多个目录使用（≥2）。是返回 1。
+// 重名时产物标签与符号后缀必须带目录指纹，否则两个模块撞同一文件名/符号名。
+pub fn mod_dir_dup(m int) int {
+    if (module_count_in_project(ctx().mods[m].proj, ctx().mods[m].name_off,
+            ctx().mods[m].name_len) > 1) {
+        return 1
+    }
+    return 0
+}
+
+// append_dir_fp：把模块目录指纹（FNV-1a 低 32 位）写成 8 位小写十六进制，
+// 返回新长度。只用于区分重名模块的产物名与符号后缀，不参与语言语义。
+pub fn append_dir_fp(buf *u8, n int, m int) int {
+    let h u64 = hash_init()
+    let i int = 0
+    for i < ctx().mods[m].dir_len {
+        fnv(&h, support.pool_ctx().data[ctx().mods[m].dir_off + i])
+        i += 1
+    }
+    let v u64 = h & 4294967295
+    i = 0
+    for i < 8 {
+        let shift u64 = (28 - i * 4).to_type(u64)
+        let d u64 = (v >> shift) & 15
+        buf[n] = (d < 10 ? 48 + d : 87 + d).to_type(u8)
+        n += 1
+        i += 1
+    }
+    return n
+}
+
 // hash_file：按对齐的 64 位读取混入文件内容，尾部不足八字节按字节处理。
 // read_source 使用 malloc 对齐缓冲；支持的 Darwin/Linux arm64 与 x64 主机均为小端。
 // 读取失败返回 -1。
@@ -194,6 +225,15 @@ pub fn mod_tag(m int, off *int, olen *int) int {
         tmp[n] = b2
         n += 1
         i += 1
+    }
+    // 同名不同目录（同一项目）：追加目录指纹，避免两个模块共用产物名。
+    if (mod_dir_dup(m) != 0) {
+        if (proj_len + mod_len + 10 > MB_TAG_MAX) {
+            return support.fail("模块名过长：项目名、模块名与目录指纹合计超过 120 字节")
+        }
+        tmp[n] = '-'
+        n += 1
+        n = append_dir_fp(&tmp[0], n, m)
     }
     tmp[n] = 0
     off[0] = support.tml_intern_str(tmp, 0, n)

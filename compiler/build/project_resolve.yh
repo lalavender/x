@@ -36,60 +36,60 @@ pub fn pj_bind_imports() int {
         }
         let off int = proj.ctx().imp_off[i]
         let olen int = proj.ctx().imp_len[i]
-        // 跨项目限定导入 KEY.MOD：直接解析到依赖键对应项目，不走三层
-        if (proj.ctx().imp_key_off[i] >= 0) {
+        let path_off int = proj.ctx().imp_path_off[i]
+        let path_len int = proj.ctx().imp_path_len[i]
+        // 点分导入（path 比末段长）：两段先试跨项目依赖键，未命中再按本项目
+        // 目录路径解析（A.B.C → 目录 <source>/A/B/C，末段是模块名）。
+        if (path_len > olen) {
             let koff int = proj.ctx().imp_key_off[i]
             let klen int = proj.ctx().imp_key_len[i]
             let dk int = -1
             let di int = 0
-            for di < proj.ctx().projs[pj].dep_n {
-                if (pj_same_np(proj.ctx().projs[pj].deps[di].key_off,
-                    proj.ctx().projs[pj].deps[di].key_len, koff, klen) != 0) {
-                    dk = proj.ctx().projs[pj].deps[di].proj
-                    break
+            if (koff >= 0) {
+                for di < proj.ctx().projs[pj].dep_n {
+                    if (pj_same_np(proj.ctx().projs[pj].deps[di].key_off,
+                        proj.ctx().projs[pj].deps[di].key_len, koff, klen) != 0) {
+                        dk = proj.ctx().projs[pj].deps[di].proj
+                        break
+                    }
+                    di += 1
                 }
-                di += 1
             }
-            if (dk < 0) {
-                let kbuf [128]u8
-                let kn int = 0
-                kn = support.append_str(kbuf, kn, "依赖键不存在: ")
-                kn = support.append_np(kbuf, kn, koff, klen)
-                let kmo int = support.tml_intern_str(kbuf, 0, kn)
-                if (kmo < 0) {
-                    return -1
+            if (dk >= 0) {
+                let km int = proj.module_in_project(dk, off, olen)
+                if (km < 0 || proj.ctx().mods[km].is_entry != 0) {
+                    return imp_msg(i, "依赖项目没有可导入的该模块: ", off, olen)
                 }
-                return imp_diag(i, support.np_cstr(kmo))
+                proj.ctx().imp_mod[i] = km
+                i += 1
+                continue
             }
-            let km int = proj.module_in_project(dk, off, olen)
-            if (km < 0 || proj.ctx().mods[km].is_entry != 0) {
-                let kbuf2 [160]u8
-                let kn2 int = 0
-                kn2 = support.append_str(kbuf2, kn2, "依赖项目没有可导入的该模块: ")
-                kn2 = support.append_np(kbuf2, kn2, off, olen)
-                let kmo2 int = support.tml_intern_str(kbuf2, 0, kn2)
-                if (kmo2 < 0) {
-                    return -1
-                }
-                return imp_diag(i, support.np_cstr(kmo2))
+            let dir_off int = -1
+            let dir_len int = 0
+            if (pj_import_dir(pj, path_off, path_len, &dir_off, &dir_len) != 0) {
+                return -1
             }
-            proj.ctx().imp_mod[i] = km
+            let dm int = proj.module_at_dir(pj, off, olen, dir_off, dir_len)
+            if (dm < 0) {
+                return imp_msg(i, "模块不存在（路径导入与目录不匹配）: ", path_off, path_len)
+            }
+            if (proj.ctx().mods[dm].is_entry != 0) {
+                return imp_msg(i, "入口模块不可作为库导入: ", off, olen)
+            }
+            proj.ctx().imp_mod[i] = dm
             i += 1
             continue
+        }
+        // 单段：本项目按名字查；同一项目内多个目录同名 = 歧义（要改用路径导入）。
+        let cnt int = proj.module_count_in_project(pj, off, olen)
+        if (cnt > 1) {
+            return imp_msg(i, "模块名歧义（本项目多个目录声明同名模块，请用路径导入区分）: ", off, olen)
         }
         // 第 1 层：本项目
         let m int = proj.module_in_project(pj, off, olen)
         if (m >= 0) {
             if (proj.ctx().mods[m].is_entry != 0) {
-                let buf [128]u8
-                let n int = 0
-                n = support.append_str_cap(buf, 128, n, "入口模块不可作为库导入: ")
-                n = support.append_np_cap(buf, 128, n, off, olen)
-                let mo int = support.tml_intern_str(buf, 0, n)
-                if (mo < 0) {
-                    return -1
-                }
-                return imp_diag(i, support.np_cstr(mo))
+                return imp_msg(i, "入口模块不可作为库导入: ", off, olen)
             }
             proj.ctx().imp_mod[i] = m
             i += 1
@@ -145,6 +145,40 @@ pub fn pj_bind_imports() int {
         return imp_diag(i, support.np_cstr(mo2))
     }
     return 0
+}
+
+// pj_import_dir：点分导入 A.B.C → 相对路径 A/B/C，再拼到源码根并归一化。
+// 用 proj.canon（源码根可能是 "." 或 "src"，相对路径要按同一规则解析）。
+// 出参 off/len 指向名字池里的目录串；返回 0；失败 -1。
+fn pj_import_dir(pj int, path_off int, path_len int, off *int, len *int) int {
+    if (path_len + 1 >= 900) {
+        return support.fail("导入路径过长")
+    }
+    let rel [900]u8
+    let n int = 0
+    let i int = 0
+    for i < path_len {
+        let c u8 = support.pool_ctx().data[path_off + i]
+        rel[n] = (c == '.' ? '/'.to_type(u8) : c)
+        n += 1
+        i += 1
+    }
+    rel[n] = 0
+    return proj.canon(proj.ctx().projs[pj].src_off, proj.ctx().projs[pj].src_len,
+        support.arr_cstr(&rel[0]), off, len)
+}
+
+// imp_msg：拼「前缀 + 名字池区间」诊断并输出；总是返回 -1。
+fn imp_msg(i int, prefix *char, off int, olen int) int {
+    let buf [256]u8
+    let n int = 0
+    n = support.append_str_cap(buf, 256, n, prefix)
+    n = support.append_np_cap(buf, 256, n, off, olen)
+    let mo int = support.tml_intern_str(buf, 0, n)
+    if (mo < 0) {
+        return -1
+    }
+    return imp_diag(i, support.np_cstr(mo))
 }
 
 fn imp_diag(i int, msg *char) int {
@@ -339,6 +373,11 @@ pub fn pj_mod_suffix(pj int, mod int, off *int, olen *int) int {
         tmp[n] = b2
         n += 1
         i += 1
+    }
+    // 同名模块（同项目多个目录）：追加目录指纹，避免两个模块的符号名相撞。
+    if (proj.mod_dir_dup(mod) != 0) {
+        n = support.append_byte(tmp, n, '_')
+        n = proj.append_dir_fp(&tmp[0], n, mod)
     }
     // 再加一个 '_' 结尾：符号形如 name__proj__mod_
     n = support.append_byte(tmp, n, '_')

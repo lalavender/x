@@ -89,7 +89,9 @@ pub fn find_project_root(root_off int, root_len int) int {
 }
 
 // add_module：登记一个模块，返回其在 mods 中的下标；内存不足返回 -1。
-pub fn add_module(name_off int, name_len int, proj int) int {
+// 模块身份是 (项目, 名字, 目录)：不同目录的同名模块是**两个**模块，不合并。
+pub fn add_module(name_off int, name_len int, proj int,
+    dir_off int, dir_len int) int {
     if (g_proj.mod_n == g_proj.mod_cap) {
         let ncap int = g_proj.mod_cap * 2
         if (ncap == 0) {
@@ -109,6 +111,8 @@ pub fn add_module(name_off int, name_len int, proj int) int {
     }
     g_proj.mods[g_proj.mod_n].name_off = name_off
     g_proj.mods[g_proj.mod_n].name_len = name_len
+    g_proj.mods[g_proj.mod_n].dir_off = dir_off
+    g_proj.mods[g_proj.mod_n].dir_len = dir_len
     g_proj.mods[g_proj.mod_n].proj = proj
     g_proj.mods[g_proj.mod_n].files = 0
     g_proj.mods[g_proj.mod_n].file_n = 0
@@ -199,10 +203,11 @@ pub fn add_file(path_off int, path_len int, mod int) int {
 }
 
 // add_import：登记一条文件导入（绑定期解析）。
-// name=查找名（模块名，点分导入取 MOD 段），key=跨项目依赖键（-1/0 同项目），
-// alias=绑定名。11 条平行数组按块同步扩容。
+// name=查找名（模块名，点分导入取末段），path=完整点分原文（a.b.c），
+// key=跨项目依赖键（-1/0 表示不适用），alias=绑定名。
+// 13 条平行数组按块同步扩容。
 pub fn add_import(file int, off int, olen int, koff int, klen int,
-    aoff int, alen int, line int, col int) int {
+    poff int, plen int, aoff int, alen int, line int, col int) int {
     if (g_proj.imp_n == g_proj.imp_cap) {
         let ncap int = g_proj.imp_cap * 2
         if (ncap == 0) {
@@ -252,6 +257,14 @@ pub fn add_import(file int, off int, olen int, koff int, klen int,
         if (nd10 == 0) {
             return support.fail("内存分配失败")
         }
+        let nd11 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd11 == 0) {
+            return support.fail("内存分配失败")
+        }
+        let nd12 *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nd12 == 0) {
+            return support.fail("内存分配失败")
+        }
         if (g_proj.imp_n > 0) {
             let cnt u64 = (g_proj.imp_n * sizeof(int)).to_type(u64)
             memcpy(nd0, g_proj.imp_file, cnt)
@@ -265,6 +278,8 @@ pub fn add_import(file int, off int, olen int, koff int, klen int,
             memcpy(nd8, g_proj.imp_col, cnt)
             memcpy(nd9, g_proj.imp_mod, cnt)
             memcpy(nd10, g_proj.imp_test_only, cnt)
+            memcpy(nd11, g_proj.imp_path_off, cnt)
+            memcpy(nd12, g_proj.imp_path_len, cnt)
         }
         free(g_proj.imp_file); g_proj.imp_file = nd0
         free(g_proj.imp_off); g_proj.imp_off = nd1
@@ -277,11 +292,15 @@ pub fn add_import(file int, off int, olen int, koff int, klen int,
         free(g_proj.imp_col); g_proj.imp_col = nd8
         free(g_proj.imp_mod); g_proj.imp_mod = nd9
         free(g_proj.imp_test_only); g_proj.imp_test_only = nd10
+        free(g_proj.imp_path_off); g_proj.imp_path_off = nd11
+        free(g_proj.imp_path_len); g_proj.imp_path_len = nd12
         g_proj.imp_cap = ncap
     }
     g_proj.imp_file[g_proj.imp_n] = file
     g_proj.imp_off[g_proj.imp_n] = off
     g_proj.imp_len[g_proj.imp_n] = olen
+    g_proj.imp_path_off[g_proj.imp_n] = poff
+    g_proj.imp_path_len[g_proj.imp_n] = plen
     g_proj.imp_key_off[g_proj.imp_n] = koff
     g_proj.imp_key_len[g_proj.imp_n] = klen
     g_proj.imp_alias_off[g_proj.imp_n] = aoff
@@ -292,6 +311,64 @@ pub fn add_import(file int, off int, olen int, koff int, klen int,
     g_proj.imp_test_only[g_proj.imp_n] = 0
     g_proj.imp_n += 1
     return 0
+}
+
+// mod_name_eq：模块 m 的名字是否等于池区间 [off, off+olen)。
+fn mod_name_eq(m int, off int, olen int) int {
+    if (g_proj.mods[m].name_len != olen) { return 0 }
+    let j int = 0
+    for j < olen {
+        if (support.pool_ctx().data[g_proj.mods[m].name_off + j]
+            != support.pool_ctx().data[off + j]) {
+            return 0
+        }
+        j += 1
+    }
+    return 1
+}
+
+// module_count_in_project：项目内声明该名字的模块个数。
+// 目录不同的同名模块各算一个：导入绑定时 >1 就是“模块名歧义”。
+pub fn module_count_in_project(proj int, off int, olen int) int {
+    let i int = 0
+    let count int = 0
+    for i < g_proj.projs[proj].mod_n {
+        if (mod_name_eq(g_proj.projs[proj].mods[i], off, olen) != 0) {
+            count += 1
+        }
+        i += 1
+    }
+    return count
+}
+
+// mod_dir_eq：模块 m 的目录是否等于池区间 [off, off+len)。
+// 注意：tml_intern_str 不去重（每次追加），所以只能按字节比，不能比池偏移。
+fn mod_dir_eq(m int, off int, len int) int {
+    if (g_proj.mods[m].dir_len != len) { return 0 }
+    let j int = 0
+    for j < len {
+        if (support.pool_ctx().data[g_proj.mods[m].dir_off + j]
+            != support.pool_ctx().data[off + j]) {
+            return 0
+        }
+        j += 1
+    }
+    return 1
+}
+
+// module_at_dir：按 (项目, 名字, 目录) 精确查模块，找不到返回 -1。
+pub fn module_at_dir(proj int, name_off int, name_len int,
+    dir_off int, dir_len int) int {
+    let i int = 0
+    for i < g_proj.projs[proj].mod_n {
+        let m int = g_proj.projs[proj].mods[i]
+        if (mod_dir_eq(m, dir_off, dir_len) != 0
+            && mod_name_eq(m, name_off, name_len) != 0) {
+            return m
+        }
+        i += 1
+    }
+    return -1
 }
 
 // module_in_project：在项目自己的模块表里按名字查模块，找不到返回 -1。
