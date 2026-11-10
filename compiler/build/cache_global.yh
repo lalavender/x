@@ -4,7 +4,6 @@ import support
 import proj
 import link
 import cache
-import hash
 
 // ============================================================================
 // cache_global.yh —— 全局 content store 的构建侧接线（C4）
@@ -84,14 +83,6 @@ fn mb_cache_default_root(out *u8, capacity int) int {
     return mb_cache_join(out, capacity, support.arr_cstr(&home_cache[0]), "yh")
 }
 
-// mb_cache_debug_action：YH_CACHE_DEBUG 下输出标签 + ActionID（64 hex）。
-pub fn mb_cache_debug_action(label *char, action_id *u8) void {
-    if (bc().cache_debug == 0 || action_id == 0) { return }
-    let hex [cache.CACHE_ID_TEXT]u8
-    if (hash.sha256_hex(action_id, &hex[0]) != 0) { return }
-    printf("[cache] %s %s\n", label, support.arr_cstr(&hex[0]))
-}
-
 // mb_project_lock：同项目构建锁。锁文件在 <root>/.build/yh-build.lock，
 // 与 YH_BUILD_CACHE 无关；失败返回 -1（Windows 后置时返回 -1/no-op）。
 fn mb_project_lock(root_off int, root_len int) int {
@@ -124,96 +115,6 @@ fn mb_project_unlock(fd int) void {
     if (fd < 0) { return }
     cache.cache_unlock_file(fd)
     close(fd)
-}
-
-// mb_cache_init：初始化全局缓存根；失败或 off 只关闭缓存，不影响构建。
-// 生产 build 在调度开始时调用一次；check/test 模式直接关闭。
-pub fn mb_cache_init() void {
-    let store *cache.CacheStore = &bc().cache_store
-    cache.store_bind((&bc().cache_store).to_type(*void))
-    let debug_off int = -1
-    let debug_len int = 0
-    if (proj.env_fetch("YH_CACHE_DEBUG", &debug_off, &debug_len) == 0
-        && debug_len > 0) {
-        let first char = proj.pool_str(debug_off)[0]
-        if (first != '0' && first != 'n' && first != 'N'
-            && first != 'f' && first != 'F') {
-            bc().cache_debug = 1
-        }
-    }
-    if (support.session().check_only != 0 || support.session().test_mode != 0) {
-        cache.store_disable(store)
-        return
-    }
-    let root [cache.CACHE_ROOT_MAX]u8
-    let off int = -1
-    let olen int = 0
-    if (proj.env_fetch("YH_CACHE", &off, &olen) != 0) {
-        cache.store_disable(store)
-        return
-    }
-    let enabled int = 1
-    if (olen > 0) {
-        let value *char = proj.pool_str(off)
-        if (support.cstr_eq(value, "off") != 0) {
-            cache.store_disable(store)
-            return
-        }
-        if (olen + 1 > cache.CACHE_ROOT_MAX) {
-            cache.store_disable(store)
-            return
-        }
-        let i int = 0
-        for i < olen {
-            root[i] = support.pool_ctx().data[off + i]
-            i += 1
-        }
-        root[olen] = 0
-    } else if (mb_cache_default_root(&root[0], cache.CACHE_ROOT_MAX) != 0) {
-        cache.store_disable(store)
-        return
-    }
-    let max_size u64 = CACHE_DEFAULT_MAX
-    let max_off int = -1
-    let max_len int = 0
-    if (proj.env_fetch("YH_CACHE_MAX_SIZE", &max_off, &max_len) == 0
-        && max_len > 0) {
-        let parsed u64 = 0
-        if (cache.store_parse_size(proj.pool_str(max_off), &parsed) == 0) {
-            max_size = parsed
-        }
-    }
-    if (cache.store_init(store, support.arr_cstr(&root[0]), enabled, max_size) != 0) {
-        cache.store_disable(store)
-        return
-    }
-    // 目录必须存在；任何一步失败都关闭缓存，保持“miss 安全”。
-    if (link.cmd_mkdirs(support.arr_cstr(&root[0])) != 0) {
-        cache.store_disable(store)
-        return
-    }
-    let dirs [4]*char
-    dirs[0] = "v1"
-    dirs[1] = "v1/actions"
-    dirs[2] = "v1/outputs"
-    dirs[3] = "v1/tmp"
-    let i int = 0
-    for i < 4 {
-        let path [cache.CACHE_ROOT_MAX + 64]u8
-        if (mb_cache_join(&path[0], cache.CACHE_ROOT_MAX + 64,
-                support.arr_cstr(&root[0]), dirs[i]) != 0
-            || link.cmd_mkdirs(support.arr_cstr(&path[0])) != 0) {
-            cache.store_disable(store)
-            return
-        }
-        i += 1
-    }
-    let lock_path [cache.CACHE_ROOT_MAX + 64]u8
-    if (mb_cache_join(&lock_path[0], cache.CACHE_ROOT_MAX + 64,
-            support.arr_cstr(&root[0]), "v1/lock") == 0) {
-        let fd int = proj.open_out(support.arr_cstr(&lock_path[0]))
-        if (fd >= 0) { close(fd) }
-    }
 }
 
 // mb_module_path：构造本地模块产物路径 <build>/<sub>/<tag><suffix>。
@@ -261,105 +162,3 @@ fn mb_module_path(m int, build_off int, build_len int, sub *char,
     return 0
 }
 
-// mb_cache_publish_module：把模块三个产物发布到全局 outputs/actions。
-// 失败只记 miss；调用方不把缓存写失败当成构建失败。
-pub fn mb_cache_publish_module(m int, build_off int, build_len int,
-    action_id *u8, object_id *u8, iface_id *u8, ct_id *u8) int {
-    let store *cache.CacheStore = &bc().cache_store
-    if (cache.store_enabled(store) == 0) { return 0 }
-    let entries [3]cache.CacheEntry
-    let object_path [1200]u8
-    let iface_path [1200]u8
-    let ct_path [1200]u8
-    if (mb_module_path(m, build_off, build_len, "obj", ".o",
-            &object_path[0], 1200) != 0
-        || mb_module_path(m, build_off, build_len, "iface", ".s.i",
-            &iface_path[0], 1200) != 0
-        || mb_module_path(m, build_off, build_len, "iface", ".s.ct",
-            &ct_path[0], 1200) != 0) { return -1 }
-    entries[0].role = cache.OUTPUT_OBJECT
-    entries[1].role = cache.OUTPUT_IFACE
-    entries[2].role = cache.OUTPUT_CT_IFACE
-    let sizes [3]u64
-    if (cache.store_put_file(store, support.arr_cstr(&object_path[0]),
-            &entries[0].id[0], &sizes[0]) != 0
-        || cache.store_put_file(store, support.arr_cstr(&iface_path[0]),
-            &entries[1].id[0], &sizes[1]) != 0
-        || cache.store_put_file(store, support.arr_cstr(&ct_path[0]),
-            &entries[2].id[0], &sizes[2]) != 0) {
-        return -1
-    }
-    entries[0].size = sizes[0]
-    entries[1].size = sizes[1]
-    entries[2].size = sizes[2]
-    // 公布的 OutputID 必须与本地 manifest 记录的一致；不一致说明产物在
-    // 提交窗口内被替换，宁可放弃本次全局写入，也不留下错配的 action。
-    let i int = 0
-    for i < cache.CACHE_ID_SIZE {
-        if (entries[0].id[i] != object_id[i]
-            || entries[1].id[i] != iface_id[i]
-            || entries[2].id[i] != ct_id[i]) { return -1 }
-        i += 1
-    }
-    return cache.store_action_put(store, action_id, &entries[0], 3)
-}
-
-// mb_cache_lookup_module：按模块 ActionID 查全局 action，命中则物化输出并
-// 补写本地 manifest。1 = 命中，0 = miss/已禁用，-1 = 本地写失败。
-pub fn mb_cache_lookup_module(m int, build_off int, build_len int,
-    action_id *u8) int {
-    let store *cache.CacheStore = &bc().cache_store
-    if (cache.store_enabled(store) == 0) {
-        mb_cache_debug_action("module global disabled", action_id)
-        return 0
-    }
-    // 显式请求 .ll/.s 时必须让 worker 补审阅产物，不能直接全局命中。
-    if (proj.cfg().emit_kind != 0 || proj.cfg().emit_asm != 0) {
-        mb_cache_debug_action("module global skip (emit artifacts)", action_id)
-        return 0
-    }
-    let entries [8]cache.CacheEntry
-    let count int = 0
-    if (cache.store_action_get(store, action_id, &entries[0], 8, &count) != 1) {
-        mb_cache_debug_action("module global miss (action absent/corrupt)", action_id)
-        return 0
-    }
-    let object_i int = -1
-    let iface_i int = -1
-    let ct_i int = -1
-    let i int = 0
-    for i < count {
-        if (entries[i].role == cache.OUTPUT_OBJECT) { object_i = i }
-        if (entries[i].role == cache.OUTPUT_IFACE) { iface_i = i }
-        if (entries[i].role == cache.OUTPUT_CT_IFACE) { ct_i = i }
-        i += 1
-    }
-    if (object_i < 0 || iface_i < 0 || ct_i < 0) {
-        mb_cache_debug_action("module global miss (role missing)", action_id)
-        return 0
-    }
-    let object_path [1200]u8
-    let iface_path [1200]u8
-    let ct_path [1200]u8
-    if (mb_module_path(m, build_off, build_len, "obj", ".o",
-            &object_path[0], 1200) != 0
-        || mb_module_path(m, build_off, build_len, "iface", ".s.i",
-            &iface_path[0], 1200) != 0
-        || mb_module_path(m, build_off, build_len, "iface", ".s.ct",
-            &ct_path[0], 1200) != 0) { return 0 }
-    if (cache.store_get_file(store, &entries[object_i].id[0],
-            support.arr_cstr(&object_path[0])) != 1
-        || cache.store_get_file(store, &entries[iface_i].id[0],
-            support.arr_cstr(&iface_path[0])) != 1
-        || cache.store_get_file(store, &entries[ct_i].id[0],
-            support.arr_cstr(&ct_path[0])) != 1) {
-        mb_cache_debug_action("module global miss (output corrupt/missing)", action_id)
-        return 0
-    }
-    if (mb_manifest_write(m, build_off, build_len, action_id,
-            &entries[object_i].id[0], &entries[iface_i].id[0],
-            &entries[ct_i].id[0]) != 0) {
-        return -1
-    }
-    return 1
-}

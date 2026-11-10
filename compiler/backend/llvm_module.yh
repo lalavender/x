@@ -2,15 +2,6 @@ module backend
 import support
 import ir
 
-// llvm_output_release：释放输出独占的两个缓冲并归零，允许空指针及重复释放。
-pub fn llvm_output_release(out *LLVMOutput) void {
-    if (out == 0) { return }
-    if (out.text != 0) { free(out.text) }
-    if (out.maps != 0) { free(out.maps) }
-    let empty LLVMOutput
-    out[0] = empty
-}
-
 // llvm_byte：复用通用缓冲扩容，逐字节维护真实 LLVM 行号与结尾 NUL。
 fn llvm_byte(out *LLVMOutput, byte u8) void {
     if (out.failed != 0) { return }
@@ -30,19 +21,6 @@ fn llvm_byte(out *LLVMOutput, byte u8) void {
 fn llvm_text(out *LLVMOutput, text *char) void {
     let i int = 0
     for text[i] != 0 { llvm_byte(out, text[i].to_type(u8)); i += 1 }
-}
-
-// llvm_output_add_macos_min_os：在完整模块末尾写入规范化部署版本注释，供缓存审计与差分检查。
-// 注释不改变 LLVM 目标身份或机器码；调用方仅对 Darwin 输出调用本函数。
-pub fn llvm_output_add_macos_min_os(out *LLVMOutput, min_os *char) int {
-    if (out == 0 || out.text == 0 || min_os == 0 || min_os[0] == 0) {
-        return support.fail("Darwin LLVM 部署版本元数据无效")
-    }
-    llvm_text(out, "; yh-macos-min-os = ")
-    llvm_text(out, min_os)
-    llvm_byte(out, '\n')
-    if (out.failed != 0) { return support.fail("Darwin LLVM 部署版本元数据缓冲失败") }
-    return 0
 }
 
 // llvm_number：用无符号除法写完整 64 位十进制位型，覆盖 INT64_MIN 与 U64_MAX。
@@ -466,73 +444,3 @@ fn llvm_globals(unit *ir.IRModule, out *LLVMOutput, live *u8) void {
     }
 }
 
-// llvm_emit_module：只消费经过 verifier 的封闭模块；全量预检后用私有临时输出构建。
-// 成功释放旧输出并一次性转移所有权；失败保持调用方 out 原值，绝不调用旧 ARM 后端。
-pub fn llvm_emit_module(unit *ir.IRModule, target *support.TargetInfo, out *LLVMOutput) int {
-    // PL1d2：这里原本再跑一次完整 ir_module_verify。但每个模块到达后端之前都已由
-    // 生产者验证过（lowering 提交前 verifies / ir_module_deserialize 的装载路径），
-    // 同一份 IR 在一个构建里被完整 verify **两次**——实测函数体校验累计 5.33 s，而
-    // lowering 侧只记到 2.72 s。这里只留廉价的结构前置检查；语义校验由生产者负责，
-    // 发射前的 llvm_preflight / llvm_target_same 仍会拒绝结构不完整的模块。
-    if (out == 0 || ir.ir_module_sealed(unit) == 0) {
-        return support.fail("LLVM 模块未通过 IR verifier")
-    }
-    if (llvm_target_same(unit, target) == 0) { return llvm_reject(unit, 0, 0, "完整目标身份不一致或平台尚不支持") }
-    if (llvm_preflight(unit) != 0) { return -1 }
-    let temporary LLVMOutput
-    temporary.line = 1
-    let header int = llvm_map(&temporary, 0, 0, -1)
-    llvm_text(&temporary, "source_filename = ")
-    llvm_string(&temporary, unit.source_count > 0 ? unit.sources[0].path : "yh-module.yh")
-    llvm_text(&temporary, "\ntarget datalayout = "); llvm_string(&temporary, target.data_layout)
-    llvm_text(&temporary, "\ntarget triple = "); llvm_string(&temporary, target.triple)
-    llvm_text(&temporary, "\n\n"); llvm_map_end(&temporary, header)
-    let live_size int = unit.symbol_count > 0 ? unit.symbol_count : 1
-    let live *u8 = malloc(live_size.to_type(u64)).to_type(*u8)
-    if (live == 0) {
-        llvm_output_release(&temporary)
-        return support.fail("LLVM 全局可达性缓冲分配失败")
-    }
-    llvm_mark_global_usage(unit, live)
-    llvm_globals(unit, &temporary, live)
-    free(live.to_type(*void))
-    // MSVC ABI：x86 后端在 COFF 对象里引用 _fltused（CRT 的浮点使用标记）。
-    // 零 CRT 下没有 CRT 定义它，lld-link 会报 undefined symbol: _fltused；
-    // 自举时静态 CRT 也提供它。这里发 linkonce_odr + comdat：多模块只保留一份，
-    // 且静态 CRT 的 fltused 成员不会被拉入（避免 duplicate symbol）。
-    // 同时登记到 llvm.compiler.used：linkonce_odr 是可丢弃定义，-O2 的 GlobalDCE
-    // 会在“本对象没引用 _fltused”时删掉它，而引用方常常是**另一个**对象
-    // （含浮点的模块），lld-link 随即报 undefined symbol（O0 不复现）。
-    if (support.cstr_eq(unit.target.abi, "win64-msvc") != 0) {
-        llvm_text(&temporary, "$_fltused = comdat any\n@_fltused = linkonce_odr global i32 0, comdat($_fltused)\n@llvm.compiler.used = appending global [1 x ptr] [ptr @_fltused], section \"llvm.metadata\"\n")
-    }
-    // 聚合副本的源/目标可能别名；独立于用户 memcpy 的不重叠运行时契约。
-    llvm_text(&temporary, "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)\n")
-    llvm_text(&temporary, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n")
-    llvm_text(&temporary, "declare void @llvm.trap()\n")
-    // 浮点转整数先饱和到完整 64 位域，再按源类型宽度截断，避免 LLVM poison。
-    llvm_text(&temporary, "declare i64 @llvm.fptosi.sat.i64.f32(float)\n")
-    llvm_text(&temporary, "declare i64 @llvm.fptosi.sat.i64.f64(double)\n")
-    llvm_text(&temporary, "declare i64 @llvm.fptoui.sat.i64.f32(float)\n")
-    llvm_text(&temporary, "declare i64 @llvm.fptoui.sat.i64.f64(double)\n")
-    let i int = 0
-    for i < unit.symbol_count {
-        let symbol ir.IRModuleSymbol = unit.symbols[i]
-        if (symbol.kind == ir.IR_MODULE_SYMBOL_FUNCTION && symbol.defined == 0
-            && llvm_runtime_supplies_symbol(unit, symbol.name) == 0) {
-            let map int = llvm_map(&temporary, symbol.source, symbol.offset, i)
-            llvm_text(&temporary, "declare "); llvm_signature(unit, &symbol, &temporary, 0)
-            llvm_byte(&temporary, '\n'); llvm_map_end(&temporary, map)
-        }
-        i += 1
-    }
-    llvm_byte(&temporary, '\n')
-    i = 0
-    for i < unit.function_count { llvm_function(unit, &unit.functions[i], &temporary); i += 1 }
-    // LL8a：内存运行时入口（weak 定义 + llvm.used）；模块已有同名符号时让位。
-    llvm_runtime_memory_text(unit, &temporary)
-    if (temporary.failed != 0) { llvm_output_release(&temporary); return support.fail("LLVM 文本或来源映射缓冲分配失败/过大") }
-    llvm_output_release(out)
-    out[0] = temporary
-    return 0
-}

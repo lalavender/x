@@ -32,17 +32,6 @@ fn add_group_internal(state *parser_state, title *char, description *char,
     return row.id
 }
 
-// add_group 登记一个展示组；返回正数组 ID 或 -1。组不改变匹配顺序。
-pub fn add_group(p *Parser, config Group) int {
-    let state *parser_state = parser_state_of(p)
-    if (state == 0) {
-        return -1
-    }
-    return add_group_internal(state, config.title, config.description,
-        config.argument_default.mode.to_type(int), config.argument_default.value,
-        config.conflict.to_type(int))
-}
-
 // add_mutex_internal 登记一个互斥组；返回组 ID 或 -1。
 fn add_mutex_internal(state *parser_state, required bool, group int) int {
     if (state.failed != 0 || state.frozen != 0) {
@@ -62,38 +51,6 @@ fn add_mutex_internal(state *parser_state, required bool, group int) int {
     state.mutexes[state.mutex_count] = row
     state.mutex_count += 1
     return row.id
-}
-
-// add_mutex 登记一个互斥组；返回正数组 ID 或 -1。
-pub fn add_mutex(p *Parser, required bool, group int) int {
-    let state *parser_state = parser_state_of(p)
-    if (state == 0) {
-        return -1
-    }
-    return add_mutex_internal(state, required, group)
-}
-
-// add_subparsers 登记子命令槽；返回正数槽 ID 或 -1。每个 parser 最多一个槽。
-pub fn add_subparsers(p *Parser, spec Subparsers) int {
-    let state *parser_state = parser_state_of(p)
-    if (state == 0 || state.failed != 0 || state.frozen != 0) {
-        return -1
-    }
-    if (state.slot_used != 0) {
-        return set_config_error(state, CODE_CONFIG, "每个 parser 最多一个子命令槽")
-    }
-    state.slot_used = 1
-    state.slot_id = state.next_id
-    state.next_id += 1
-    state.slot_dest = pool_dup(&state.mem, spec.dest)
-    state.slot_title = pool_dup(&state.mem, spec.title)
-    state.slot_description = pool_dup(&state.mem, spec.description)
-    state.slot_metavar = pool_dup(&state.mem, spec.metavar)
-    state.slot_required = spec.required.to_type(int)
-    if (state.mem.failed != 0) {
-        return set_config_error(state, CODE_RESOURCE, "登记子命令槽时内存不足")
-    }
-    return state.slot_id
 }
 
 // build_sub_prog 按「父展示名 + 空格 + 命令名」生成子命令展示名。
@@ -121,80 +78,6 @@ fn build_sub_prog(buffer *char, parent_prog *char, name *char) int {
     }
     buffer[at] = 0
     return at
-}
-
-// add_parser 为子命令槽创建子 parser；返回归父 parser 所有的句柄或空指针。
-pub fn add_parser(p *Parser, slot int, spec Command) *Parser {
-    let state *parser_state = parser_state_of(p)
-    if (state == 0 || state.failed != 0 || state.frozen != 0) {
-        return 0
-    }
-    if (state.slot_used == 0 || state.slot_id != slot) {
-        return 0
-    }
-    if (spec.name == 0 || spec.name[0] == 0) {
-        return 0
-    }
-    if (state.child_count >= MAX_CHILDREN) {
-        return 0
-    }
-    if (find_child(state, spec.name) >= 0) {
-        return 0
-    }
-    let alias_count int = len(spec.aliases)
-    let a int = 0
-    for a < alias_count {
-        if (a >= MAX_ALIASES) {
-            break
-        }
-        if (spec.aliases[a] == 0 || spec.aliases[a][0] == 0) {
-            break
-        }
-        if (find_child(state, spec.aliases[a]) >= 0) {
-            return 0
-        }
-        a += 1
-    }
-    let config ParserConfig = spec.config
-    if (config.prog == 0 || cstr_equal(config.prog, spec.name) != 0) {
-        let prog_buffer [MAX_TEXT]char
-        if (build_sub_prog(&prog_buffer[0], state.prog, spec.name) < 0) {
-            return 0
-        }
-        config.prog = &prog_buffer[0]
-    }
-    let child *parser_state = new_state(config, state)
-    if (child == 0) {
-        return 0
-    }
-    let row child_row
-    row.used = 1
-    row.name = pool_dup(&state.mem, spec.name)
-    row.alias_count = 0
-    let i int = 0
-    for i < alias_count {
-        if (i >= MAX_ALIASES) {
-            break
-        }
-        if (spec.aliases[i] == 0 || spec.aliases[i][0] == 0) {
-            break
-        }
-        row.aliases[row.alias_count] = pool_dup(&state.mem, spec.aliases[i])
-        row.alias_count += 1
-        i += 1
-    }
-    row.help = pool_dup(&state.mem, spec.help)
-    row.deprecated = spec.deprecated.to_type(int)
-    row.state = child.to_type(*void)
-    row.handle.handle = child.to_type(*void)
-    if (state.mem.failed != 0) {
-        destroy_state(child)
-        set_config_error(state, CODE_RESOURCE, "登记子命令时内存不足")
-        return 0
-    }
-    state.children[state.child_count] = row
-    state.child_count += 1
-    return &state.children[state.child_count - 1].handle
 }
 
 // argument_from_row 把已登记行还原成声明，供 inherit 深复制使用。
@@ -225,94 +108,3 @@ fn argument_from_row(row *arg_row) Argument {
     return spec
 }
 
-// inherit 深复制 parent 的参数、默认值与组；0 成功、-1 失败。
-// 不复制 parent 的 prog、输出策略或子命令树，也不允许自继承。
-pub fn inherit(p *Parser, parent *Parser) int {
-    let state *parser_state = parser_state_of(p)
-    let source *parser_state = parser_state_of(parent)
-    if (state == 0 || source == 0 || state == source) {
-        return -1
-    }
-    if (state.failed != 0 || state.frozen != 0) {
-        return -1
-    }
-    // 展示组：按旧 ID 建立「旧 → 新」映射。
-    let group_map [MAX_GROUPS + 1]int
-    let i int = 0
-    for i <= MAX_GROUPS {
-        group_map[i] = 0
-        i += 1
-    }
-    i = 0
-    for i < source.group_count {
-        let row group_row = source.groups[i]
-        if (row.used != 0) {
-            let mapped int = add_group_internal(state, row.title, row.description,
-                row.default_mode, row.default_value, row.conflict)
-            if (mapped < 0) {
-                return -1
-            }
-            group_map[row.id] = mapped
-        }
-        i += 1
-    }
-    let mutex_map [MAX_MUTEX + 1]int
-    i = 0
-    for i <= MAX_MUTEX {
-        mutex_map[i] = 0
-        i += 1
-    }
-    i = 0
-    for i < source.mutex_count {
-        let row mutex_row = source.mutexes[i]
-        if (row.used != 0) {
-            let mapped_group int = 0
-            if (row.group != 0 && row.group <= MAX_GROUPS) {
-                mapped_group = group_map[row.group]
-            }
-            let mapped int = add_mutex_internal(state, (row.required != 0), mapped_group)
-            if (mapped < 0) {
-                return -1
-            }
-            mutex_map[row.id] = mapped
-        }
-        i += 1
-    }
-    // 参数声明：按源顺序复制，额外名称用 add_alias 补上。
-    i = 0
-    for i < source.row_count {
-        let row *arg_row = &source.rows[i]
-        if (row.used != 0) {
-            let spec Argument = argument_from_row(row)
-            if (spec.group != 0 && spec.group <= MAX_GROUPS) {
-                spec.group = group_map[spec.group]
-            }
-            if (spec.mutex != 0 && spec.mutex <= MAX_MUTEX) {
-                spec.mutex = mutex_map[spec.mutex]
-            }
-            let id int = add_argument_internal(state, spec)
-            if (id < 0) {
-                return -1
-            }
-            let j int = 2
-            for j < row.name_count {
-                if (add_alias(p, id, row.names[j]) != 0) {
-                    return -1
-                }
-                j += 1
-            }
-        }
-        i += 1
-    }
-    // set_default 覆盖值同样复制（深复制进接收方池）。
-    i = 0
-    for i < source.override_count {
-        if (source.overrides[i].used != 0) {
-            if (set_default(p, source.overrides[i].dest, source.overrides[i].value) != 0) {
-                return -1
-            }
-        }
-        i += 1
-    }
-    return 0
-}

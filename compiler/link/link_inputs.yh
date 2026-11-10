@@ -1,13 +1,6 @@
 module link
 import support
 import proj
-import hash
-
-// POSIX 文件/环境接口：直接声明 C ABI，避免把宿主路径语义塞进 prelude。
-@[extern] pub fn realpath(path *char, resolved *char) *char
-@[extern] fn stat(path *char, buf *u64) int
-@[extern] fn setenv(name *char, value *char, overwrite int) int
-@[extern] fn getenv(name *char) *char
 
 // ============================================================================
 // link_inputs.yh —— [link] 库输入的解析、校验、内容摘要与链接 argv 素材
@@ -55,52 +48,6 @@ let li_rt_off *int = 0
 let li_rt_len *int = 0
 let li_rt_n int = 0
 let li_rt_cap int = 0
-
-// li_select_reset：命令开始时清空 --link 选择。
-pub fn li_select_reset() void {
-    li_select_n = 0
-}
-
-// li_select_add：追加一个组名；重复名称按首次出现去重。
-pub fn li_select_add(off int, plen int) int {
-    let i int = 0
-    for i < li_select_n {
-        if (li_select_len[i] == plen) {
-            let same int = 1
-            let k int = 0
-            for k < plen {
-                if (support.pool_ctx().data[li_select_off[i] + k]
-                    != support.pool_ctx().data[off + k]) { same = 0; break }
-                k += 1
-            }
-            if (same != 0) { return 0 }
-        }
-        i += 1
-    }
-    if (li_select_n == li_select_cap) {
-        let ncap int = li_select_cap * 2
-        if (ncap == 0) { ncap = 4 }
-        let no *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
-        let nl *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
-        if (no == 0 || nl == 0) { return support.fail("--link 选择表内存分配失败") }
-        if (li_select_n > 0) {
-            memcpy(no, li_select_off, (li_select_n * sizeof(int)).to_type(u64))
-            memcpy(nl, li_select_len, (li_select_n * sizeof(int)).to_type(u64))
-            free(li_select_off.to_type(*void))
-            free(li_select_len.to_type(*void))
-        }
-        li_select_off = no
-        li_select_len = nl
-        li_select_cap = ncap
-    }
-    li_select_off[li_select_n] = off
-    li_select_len[li_select_n] = plen
-    li_select_n += 1
-    return 0
-}
-
-// li_select_count：显式 --link 的组数；0 表示默认全部组。
-pub fn li_select_count() int { return li_select_n }
 
 // li_name_eq：比较两个池内字符串。
 fn li_name_eq(aoff int, alen int, boff int, blen int) int {
@@ -589,30 +536,6 @@ fn li_stat_file(path *char, sec *u64, nsec *u64, size *u64) int {
     return 0
 }
 
-// mb_file_stat：读取文件 size/mtime\(ns\)；C6 trim/verify 使用。
-// 成功返回 0，读不到返回 -1。
-pub fn mb_file_stat(path *char, size *u64, mtime *u64) int {
-    let sec u64 = 0
-    let nsec u64 = 0
-    if (li_stat_file(path, &sec, &nsec, size) != 0) { return -1 }
-    mtime[0] = sec * 1000000000 + nsec
-    return 0
-}
-
-// mb_mix_file_identity：把文件内容的 SHA-256 混入缓存身份（C2）。
-// touch、复制或换 mtime 不改变身份；内容变一个字节就会换键。调用方负责决定
-// 缓存粒度（编译器每构建一次，工具身份每链接一次），本函数不缓存结果。
-pub fn mb_mix_file_identity(out_hash *u64, path *char) int {
-    let digest [32]u8
-    if (hash.sha256_file(path, &digest[0]) != 0) { return -1 }
-    let i int = 0
-    for i < 32 {
-        proj.fnv(out_hash, digest[i])
-        i += 1
-    }
-    return 0
-}
-
 // li_digest_file：对库文件内容计算 FNV-1a 摘要。
 fn li_digest_file(path *char, digest *u64) int {
     let h u64 = proj.hash_init()
@@ -1057,33 +980,3 @@ fn li_runtime_path() *char {
     return proj.pool_str(o)
 }
 
-// li_apply_runtime_env：yh run 临时追加共享库目录到宿主加载器变量。
-pub fn li_apply_runtime_env() int {
-    let dirs *char = li_runtime_path()
-    if (dirs == 0 || dirs[0] == 0) { return 0 }
-    let name *char = support.tg_host_darwin() != 0 ?
-        "DYLD_LIBRARY_PATH" : "LD_LIBRARY_PATH"
-    let old *char = getenv(name)
-    let buf [16384]u8
-    let n int = 0
-    if (old != 0) {
-        let i int = 0
-        for old[i] != 0 && n < 16000 {
-            buf[n] = old[i].to_type(u8)
-            n += 1
-            i += 1
-        }
-        if (n > 0) { buf[n] = ':'; n += 1 }
-    }
-    let k int = 0
-    for dirs[k] != 0 && n < 16380 {
-        buf[n] = dirs[k].to_type(u8)
-        n += 1
-        k += 1
-    }
-    buf[n] = 0
-    if (setenv(name, support.arr_cstr(&buf[0]), 1) != 0) {
-        return support.fail("无法设置运行时共享库搜索路径")
-    }
-    return 0
-}

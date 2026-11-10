@@ -134,15 +134,6 @@ fn mod_import_push(start int, n int, astart int, alen int,
     return 0
 }
 
-// mod_reset_file：开始解析一个新源文件前重置文件级模块状态。
-pub fn mod_reset_file() void {
-    support.fs().import_n = 0
-    support.fs().has_module = 0
-    support.fs().name_off = -1
-    support.fs().name_len = 0
-}
-
-
 // mod_parse_alias：解析可选的 `as ALIAS`（无别名时绑定名 = 查找名）。
 // 输入查找名源码区间 [dstart,dstart+dlen)；出参别名区间。
 // 消费 `as IDENT`（若有）。返回 0；别名非法或重复报错返回 -1。
@@ -159,93 +150,6 @@ fn mod_parse_alias(dstart int, dlen int, astart *int, alen *int) int {
     astart[0] = token.ctx().tokens[token.ctx().pos].start
     alen[0] = token.ctx().tokens[token.ctx().pos].len
     p_adv()
-    return 0
-}
-
-// mod_parse_head：解析文件头（module 声明 → import 声明）。
-// 由 parse_source 开头调用（语法模式与编译 pass 1 共用），消费到的
-// token 之后交给业务声明主循环。规则：
-//   * module 声明必须是文件第一个 token；import 只能出现在 module 之后；
-//   * 模块名为单个标识符（"_" 除外）；import 目标为 NAME 或 KEY.MOD；
-//   * 同一文件重复绑定名报错（同模块用不同别名导入合法）。
-// 返回 0 成功；失败 -1（诊断已输出）。
-pub fn mod_parse_head() int {
-    if (p_cur() != token.TK_MODULE) {
-        // 旧单文件形态：无模块头；import 不允许脱离 module 出现
-        if (p_cur() == token.TK_IMPORT) {
-            return token.err_tok("import 声明前必须有 module 声明")
-        }
-        return 0
-    }
-    p_adv()
-    if (mod_valid_name() == 0) {
-        return token.err_tok("此处需要一个模块名（单个标识符，_ 除外）")
-    }
-    let nstart int = token.ctx().tokens[token.ctx().pos].start
-    let nlen int = token.ctx().tokens[token.ctx().pos].len
-    p_adv()
-    if (p_expect(token.TK_SEMI, "期望 module 声明结尾 ';'") != 0) {
-        return -1
-    }
-    let off int = support.name_intern(nstart, nlen)
-    if (off < 0) {
-        return -1
-    }
-    support.fs().has_module = 1
-    support.fs().name_off = off
-    support.fs().name_len = nlen
-    for p_cur() == token.TK_IMPORT {
-        p_adv()
-        if (mod_valid_name() == 0) {
-            return token.err_tok("此处需要一个导入模块名（单个标识符，_ 除外）")
-        }
-        // 点分导入：任意段数的目录路径（a.b.c → 目录 a/b/c，查找名 = 末段）。
-        // 两段时首段兼作跨项目依赖键：解析期先试依赖键，未命中再按本项目路径。
-        let s1 int = token.ctx().tokens[token.ctx().pos].start
-        let l1 int = token.ctx().tokens[token.ctx().pos].len
-        let iline int = token.ctx().tokens[token.ctx().pos].line
-        let icol int = token.ctx().tokens[token.ctx().pos].col
-        let pstart int = s1
-        let tstart int = s1
-        let tlen int = l1
-        p_adv()
-        let segs int = 1
-        for p_cur() == token.TK_DOT {
-            p_adv()
-            if (mod_valid_name() == 0) {
-                return token.err_tok("'.' 后需要一个模块名")
-            }
-            tstart = token.ctx().tokens[token.ctx().pos].start
-            tlen = token.ctx().tokens[token.ctx().pos].len
-            segs += 1
-            p_adv()
-        }
-        let plen int = tstart + tlen - pstart
-        // 依赖键只对两段导入有意义：三段及以上一律按目录路径解析。
-        let kstart int = -1
-        let klen int = 0
-        if (segs == 2) {
-            kstart = s1
-            klen = l1
-        }
-        // 别名
-        let astart int = 0
-        let alen int = 0
-        if (mod_parse_alias(tstart, tlen, &astart, &alen) != 0) {
-            return -1
-        }
-        // 同绑定名重复检查（不同查找名的同别名也冲突）
-        if (mod_import_find(astart, alen) >= 0) {
-            return support.err_lc(iline, icol, "重复的导入绑定名（同模块不同来源请用 as 区分）")
-        }
-        if (mod_import_push(tstart, tlen, astart, alen, kstart, klen,
-            pstart, plen, iline, icol) != 0) {
-            return -1
-        }
-        if (p_expect(token.TK_SEMI, "期望 import 声明结尾 ';'") != 0) {
-            return -1
-        }
-    }
     return 0
 }
 

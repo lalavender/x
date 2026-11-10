@@ -15,26 +15,6 @@ import sys
 //   * 没有信号：被杀死的子进程表现为非零退出码，state 记为 wait_exited。
 
 // WaitState 区分正常退出、信号退出与等待失败。
-// Windows 没有可报告的终止信号，wait_signaled 不会被本平台产生。
-pub enum WaitState {
-    wait_exited
-    wait_signaled
-    wait_error
-}
-
-// PidResult 是 spawn 的结果：成功 pid 为正子进程号，失败 pid 为 -1。
-pub struct PidResult {
-    pid int
-    error Error
-}
-
-// WaitResult 是 wait 的结果：state 为 wait_exited 时 exit_code 有效。
-pub struct WaitResult {
-    state WaitState
-    exit_code int
-    signal int
-    error Error
-}
 
 // 子进程表：pid 与句柄成对保存，句柄为 0 表示槽位空。
 // 只服务 os.spawn 创建的子进程；进程退出后 wait 关闭句柄并释放槽位。
@@ -53,19 +33,6 @@ const PROCESS_SYNCHRONIZE u32 = 0x00100000
 const PROCESS_QUERY_LIMITED u32 = 0x1000
 // WaitForSingleObject 的无限等待。
 const INFINITE_WAIT u32 = 0xffffffff
-
-@[extern] fn CreateProcessA(application *char, command_line *char,
-    process_attrs *void, thread_attrs *void, inherit_handles i32,
-    flags u32, environment *void, current_dir *char, startup *u8,
-    info *u8) i32
-@[extern] fn WaitForSingleObject(handle *void, milliseconds u32) u32
-@[extern] fn GetExitCodeProcess(handle *void, code *u32) i32
-@[extern] fn OpenProcess(access u32, inherit i32, pid u32) *void
-// 关闭内核句柄走 SDK 支撑对象（compiler/windows-sdk/chkstk.c 的 __yh_close_handle）：
-// 运行时已经声明过 `CloseHandle`，yh 的 extern 声明会与它重定义。
-@[extern] fn __yh_close_handle(handle *void) i32
-// GetLastError：CreateProcessA/OpenProcess/WaitForSingleObject 失败后的唯一诊断来源。
-@[extern] fn GetLastError() u32
 
 // pid_ok 构造成功的 spawn 结果。
 fn pid_ok(pid int) PidResult {
@@ -247,7 +214,7 @@ fn read_pid(info *u8) int {
 // spawn 用精确路径启动进程；argv 为 NUL 结尾指针数组，envp 为空指针表示继承环境。
 // 成功返回子 pid 并把句柄存入进程表，失败返回 from_native 错误。
 // 标准句柄随父进程继承（bInheritHandles = TRUE，STARTUPINFOA 不指定句柄）。
-pub fn spawn(path *char, argv **char, envp **char) PidResult {
+fn spawn_impl(path *char, argv **char, envp **char) PidResult {
     if (path == 0 || argv == 0 || argv[0] == 0) {
         return pid_error(error_invalid_argument, 0)
     }
@@ -328,7 +295,7 @@ fn errno_native() int {
 // wait 阻塞等待指定子进程并返回退出码。
 // pid 必须是本进程 spawn 出来的（进程表里能找到句柄）；找不到时用 OpenProcess
 // 尝试打开，仍失败则返回 wait_error。
-pub fn wait(pid int) WaitResult {
+fn wait_impl(pid int) WaitResult {
     let handle i64 = child_take(pid)
     if (handle == 0) {
         let opened *void = OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED,
@@ -358,6 +325,6 @@ pub fn wait(pid int) WaitResult {
 }
 
 // exit_now 立即以指定状态结束进程；不刷新缓冲、不执行语言清理。
-pub fn exit_now(code int) void {
+fn exit_now_impl(code int) void {
     sys.exit_process(code)
 }

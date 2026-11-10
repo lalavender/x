@@ -281,7 +281,7 @@ def run_cli_probe(cc):
     r = run([cc])
     # 帮助必须完整（用法行 + 命令列表），防止输出被截断；信号死亡时返回负值。
     if r.returncode != 2 or "用法: yh" not in r.stderr \
-            or "build" not in r.stderr or "list" not in r.stderr:
+            or "build" not in r.stderr or "cache" not in r.stderr:
         print(f"FAIL cli 裸调用：rc={r.returncode}, stderr 尾部：{r.stderr[-120:]}")
         ok = False
     r = run([cc, "--bogus-flag", "x.yh"])

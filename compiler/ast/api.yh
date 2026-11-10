@@ -1,0 +1,1208 @@
+module ast
+
+import token
+import support
+import proj
+import comptime
+// ============================================================================
+// api.yh —— ast 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// AstStore：当前文件的只读声明索引与遍历游标（worker 持有）。
+// 索引由项目扫描/worker 建立，parse 遍历、ast 绑定、check 切片都从这里读。
+pub struct AstStore {
+    file_decls *token.PDecl // 当前文件顶层声明索引（借自 proj.PFile）
+    file_decl_n int // 索引条目数
+    file_decl_i int // 当前正解析的声明下标；-1 表示不在声明内
+    file_indexed int // 1 = token 表带项目扫描期声明索引
+}
+
+// AstDecl：一个文件级声明的语法范围及函数体链接。
+pub struct AstDecl {
+    kind int            // gen.TK_* 顶层声明类别
+    first int           // 声明 token 范围起点，含可选 pub
+    after int           // 声明 token 范围终点
+    token_count int     // 所属文件 token 数
+    file_id int         // 项目文件编号
+    decl_index int      // 该文件 PDecl 索引
+    line int            // 首 token 行号
+    col int             // 首 token 列号
+    name_token int      // 首个声明名字 token；不适用时为 -1
+    is_pub int           // 1 表示声明前带 pub
+    body_stmt int        // 函数体根语句节点；非函数为 -1
+    sym_id int           // pass1 后绑定的模块级符号编号
+    type_id int          // pass1 后绑定的函数签名类型编号
+    init_expr int        // 全局 let/const 初始化式根表达式；无初始化或 $ CT 形态为 -1
+}
+
+// 表达式 AST 节点种类。
+pub const AST_EXPR_PRIMARY int = 1
+
+pub const AST_EXPR_UNARY int = 2
+
+pub const AST_EXPR_BINARY int = 3
+
+pub const AST_EXPR_TERNARY int = 4
+
+pub const AST_EXPR_CALL int = 5
+
+pub const AST_EXPR_ARG_LIST int = 6
+
+pub const AST_EXPR_INDEX int = 7
+
+pub const AST_EXPR_SLICE int = 8
+
+pub const AST_EXPR_MEMBER int = 9
+
+pub const AST_EXPR_CAST int = 10
+
+pub const AST_EXPR_ARRAY int = 11
+
+pub const AST_EXPR_STRUCT_FIELD int = 12
+
+pub const AST_EXPR_STRUCT_INIT int = 13
+
+pub const AST_EXPR_CTIF int = 14 // 编译期表达式选择 `$if (cond) e1 $else e2`
+
+pub const AST_EXPR_CTFIELD int = 15 // 编译期按名取字段 `$field(x, "name")`（op = 字段下标）
+
+// AstExpr：单个带类型表达式及其子节点索引。
+pub struct AstExpr {
+    kind int           // AST_EXPR_* 语法结构
+    op int             // 运算符/基本 token 种类；无运算符时为 0
+    first int          // 源文件 token 半开区间起点
+    after int          // 源文件 token 半开区间终点
+    token_count int    // 解析该节点时所在文件的 token 数
+    file_id int        // 项目 SourceStore 文件编号
+    type_id int        // 语义阶段得到的类型；参数列表节点为 -1
+    owner_decl int     // 所属文件级声明索引；局部符号 ID 仅在此上下文内有效
+    sym_id int         // 解析时的符号表索引；与 file_id/owner_decl 共同标识绑定
+    sym_name_off int   // 解析时的名字池字节偏移；函数调用不依赖后续可复用的符号槽
+    sym_name_len int   // 解析时的符号名长度
+    binding_row int    // 局部/参数绑定表行；区分作用域弹出后复用的符号槽
+    sym_type_id int    // 捕获时符号类型表索引，避免作用域弹出后引用旧符号槽
+    sym_kind int       // 捕获时 SYM_VAR/SYM_CONST/SYM_FN；无引用时为 -1
+    sym_flags int      // 捕获时 F_* 属性，供后续 IR lowering 使用
+    sym_offset int     // 捕获时局部槽偏移或全局 BSS 序号
+    is_const int       // 1 表示旧语义遍历已确认编译期常量
+    const_bits i64     // 整数/指针常量位型；字符串/数据标签沿用 Res.ival
+    is_lit int         // 1 表示源整数文字量，供窄化规则和 lowering 使用
+    lit_big int        // 1 表示正整数文字量超出 i64 正数域
+    fval_bits i64      // 浮点常量 IEEE754 位型；非浮点常量为 0
+    layout_type_id int // sizeof 的布局依赖类型；普通表达式为 -1
+    child0 int         // 左操作数、基础表达式或前一段参数列表
+    child1 int         // 右操作数或当前参数表达式
+    child2 int         // 三元表达式第三支；其他节点为 -1
+}
+
+// AstFunctionContext：已检查函数的只读 arena 切片，也是后续函数级任务的稳定输入。
+pub struct AstFunctionContext {
+    file_id int              // SourceStore 文件编号
+    owner_decl int           // 文件内 PDecl 编号
+    decl_row int             // AstDecl 行号
+    token_first int          // 函数声明在文件 token 表中的起点
+    token_after int          // 函数声明 token 半开区间终点
+    expr_first int           // 本函数表达式 arena 起点
+    expr_after int           // 本函数表达式 arena 半开区间终点
+    stmt_first int           // 本函数语句 arena 起点
+    stmt_after int           // 本函数语句 arena 半开区间终点
+    edge_first int           // 本函数语句表达式边起点
+    edge_after int           // 本函数语句表达式边半开区间终点
+    binding_first int        // 本函数参数和局部绑定起点
+    binding_after int        // 本函数绑定 arena 半开区间终点
+    body_stmt int            // 函数体根语句节点
+    asm_first int            // 旧发射器为该函数写入 .text 的起点
+    asm_after int             // 旧发射器为该函数写入 .text 的终点
+}
+
+// 语句 AST 节点类别。
+pub const AST_STMT_BLOCK int = 1
+
+pub const AST_STMT_DECL int = 2
+
+pub const AST_STMT_TYPE int = 3
+
+pub const AST_STMT_IF int = 4
+
+pub const AST_STMT_FOR int = 5
+
+pub const AST_STMT_SWITCH int = 6
+
+pub const AST_STMT_RETURN int = 7
+
+pub const AST_STMT_BREAK int = 8
+
+pub const AST_STMT_CONTINUE int = 9
+
+pub const AST_STMT_GOTO int = 10
+
+pub const AST_STMT_LABEL int = 11
+
+pub const AST_STMT_ASSIGN int = 12
+
+pub const AST_STMT_EXPR int = 13
+
+pub const AST_STMT_CASE int = 14
+
+pub const AST_STMT_COMPTIME int = 15
+
+// AstStmt：token 范围节点及其语句/表达式边。
+pub struct AstStmt {
+    kind int            // AST_STMT_* 节点类别
+    op int              // 源语法 token，例如 let、if 或赋值符
+    first int           // 当前文件 token 半开区间起点
+    after int           // 解析结束后的 token 游标
+    token_count int     // 创建节点时的文件 token 数
+    file_id int         // 项目源码文件编号
+    parent int          // 父语句节点；顶层函数体为 -1
+    first_child int     // 第一个直接语句子节点
+    last_child int      // 最后一个直接语句子节点
+    next_sibling int    // 同一父节点下的下一个语句
+    root_next int       // 无父节点语句根的下一个根
+    first_expr int      // 首个关联表达式边
+    last_expr int       // 最后一个关联表达式边
+    first_binding int   // 首个声明绑定表行
+    last_binding int    // 最后一个声明绑定表行
+}
+
+// AstStmtExpr：将一条语句引用到其直接解析的完整表达式根。
+pub struct AstStmtExpr {
+    expr_id int         // compiler/parse 的表达式节点编号
+    next int            // 同一语句的下一条表达式边
+}
+
+// AstBinding：函数参数或局部声明的稳定语义身份与符号布局快照。
+pub struct AstBinding {
+    id int              // 函数内稳定编号，作为后续 IR 局部值键
+    sym_id int          // 解析时符号槽，仅作诊断，不作持久身份
+    sym_type_id int     // 声明时类型表编号
+    sym_kind int        // SYM_VAR 或 SYM_CONST
+    sym_flags int       // 参数等声明属性
+    sym_offset int      // 旧后端局部槽偏移，便于迁移对照
+    file_id int         // 所属 SourceStore 文件
+    owner_decl int      // 所属函数在文件内的声明索引
+    stmt_id int         // 声明语句节点；参数为 -1
+    name_token int      // 声明名字 token 索引
+    is_param int        // 1 表示参数，0 表示函数体内声明
+    next int            // 同一语句关联的下一行；参数不入语句链
+}
+
+// AstComptimeFor：普通函数 `$for` 的单份语句模板及其静态展开边界。
+pub struct AstComptimeFor {
+    stmt_id int         // AST_STMT_COMPTIME wrapper
+    binding_row int     // 只读迭代变量的稳定绑定行
+    binding_after int   // 模板内声明绑定范围终点
+    body_stmt int       // 唯一模板 block
+    low i64             // 半开区间起点
+    high i64            // 半开区间终点
+    node_cost int       // 每份模板实例的语句、表达式和绑定节点数
+}
+
+// AstView：只读借用 AST arena 的校验视图，不拥有其中的任何内存。
+// 调用方只能在捕获完成后、AST 修改或 reset 前使用；读取期间由 ast 保持 arena 有效。
+pub struct AstView {
+    expr_nodes *AstExpr                   // 表达式节点 arena
+    expr_count int                        // 表达式节点数
+    expr_parse_depth int                  // 表达式解析深度
+    expr_cap int                          // 表达式 arena 容量
+    stmt_nodes *AstStmt                   // 语句节点 arena
+    stmt_count int                        // 语句节点数
+    stmt_exprs *AstStmtExpr               // 语句到表达式的边 arena
+    stmt_expr_count int                   // 语句表达式边数
+    stmt_expr_cap int                     // 语句表达式边 arena 容量
+    stmt_current int                      // 当前尚未封存的语句节点
+    stmt_root_first int                   // 首个语句根节点
+    stmt_root_last int                    // 最后一个语句根节点
+    bindings *AstBinding                  // 参数和局部绑定 arena
+    binding_count int                     // 绑定行数
+    binding_cap int                       // 绑定 arena 容量
+    comptime_fors *AstComptimeFor         // 编译期 `$for` 模板 arena
+    comptime_for_count int                // 编译期 `$for` 模板数
+    decl_nodes *AstDecl                   // 文件级声明 arena
+    decl_count int                        // 声明节点数
+    decl_file_first *int                  // 每个文件的声明行起点
+    decl_file_cap int                     // 文件声明索引容量
+    function_nodes *AstFunctionContext   // 函数上下文 arena
+    function_count int                   // 已封存函数上下文数
+    function_cap int                     // 函数上下文 arena 容量
+    function_active int                  // 当前函数是否仍在捕获
+}
+
+// store：声明索引窄口；返回当前任务的 AstStore 指针。
+pub fn store() *AstStore {
+    return &g_store
+}
+
+// ast_decl_reset：释放本模块 worker 的声明节点并清零计数。
+pub fn ast_decl_reset() void {
+    if (ast_decl_nodes != 0) {
+        free(ast_decl_nodes.to_type(*void))
+    }
+    ast_decl_nodes = 0
+    ast_decl_count = 0
+    ast_decl_cap = 0
+    if (ast_decl_file_first != 0) {
+        free(ast_decl_file_first.to_type(*void))
+    }
+    ast_decl_file_first = 0
+    ast_decl_file_cap = 0
+}
+
+// ast_decl_add_file：把该文件现成的 PDecl 范围映射为只读声明节点。
+pub fn ast_decl_add_file(fi int) int {
+    if (support.session().ast_capture == 0) {
+        return 0
+    }
+    if (fi < 0 || fi >= proj.file_count() || support.session().active_file != fi
+        || store().file_decls != proj.file(fi).decls) {
+        return support.fail("内部错误：文件声明 AST 缺少对应的 PDecl 索引")
+    }
+    if (fi >= ast_decl_file_cap) {
+        let ncap int = ast_decl_file_cap * 2
+        if (ncap == 0) { ncap = 32 }
+        for ncap <= fi { ncap = ncap * 2 }
+        let next *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (next == 0) { return support.fail("文件声明 AST 索引分配失败") }
+        let old int = 0
+        for old < ast_decl_file_cap {
+            next[old] = ast_decl_file_first[old]
+            old += 1
+        }
+        for old < ncap {
+            next[old] = -1
+            old += 1
+        }
+        if (ast_decl_file_first != 0) {
+            free(ast_decl_file_first.to_type(*void))
+        }
+        ast_decl_file_first = next
+        ast_decl_file_cap = ncap
+    }
+    if (ast_decl_file_first[fi] >= 0) {
+        return support.fail("内部错误：同一文件重复加入声明 AST")
+    }
+    ast_decl_file_first[fi] = ast_decl_count
+    let i int = 0
+    for i < store().file_decl_n {
+        let src token.PDecl = store().file_decls[i]
+        if (ast_decl_count == ast_decl_cap) {
+            let ncap int = ast_decl_cap * 2
+            if (ncap == 0) { ncap = 32 }
+            let next *AstDecl = malloc((ncap * sizeof(AstDecl)).to_type(u64)).to_type(*AstDecl)
+            if (next == 0) {
+                return support.fail("声明 AST 内存分配失败")
+            }
+            if (ast_decl_count > 0) {
+                memcpy(next, ast_decl_nodes,
+                    (ast_decl_count * sizeof(AstDecl)).to_type(u64))
+            }
+            if (ast_decl_nodes != 0) {
+                free(ast_decl_nodes.to_type(*void))
+            }
+            ast_decl_nodes = next
+            ast_decl_cap = ncap
+        }
+        let keyword int = src.keyword
+        let is_pub int = 0
+        let scan int = src.start
+        for scan < keyword {
+            if (token.ctx().tokens[scan].kind == token.TK_PUB) { is_pub = 1 }
+            scan += 1
+        }
+        let name_token int = keyword + 1
+        if (name_token >= src.end || token.ctx().tokens[name_token].kind != token.TOK_IDENT) {
+            name_token = -1
+        }
+        let id int = ast_decl_count
+        ast_decl_nodes[id].kind = src.kind
+        ast_decl_nodes[id].first = src.start
+        ast_decl_nodes[id].after = src.end
+        ast_decl_nodes[id].token_count = token.ctx().count
+        ast_decl_nodes[id].file_id = fi
+        ast_decl_nodes[id].decl_index = i
+        ast_decl_nodes[id].line = src.line
+        ast_decl_nodes[id].col = src.col
+        ast_decl_nodes[id].name_token = name_token
+        ast_decl_nodes[id].is_pub = is_pub
+        ast_decl_nodes[id].body_stmt = -1
+        ast_decl_nodes[id].sym_id = -1
+        ast_decl_nodes[id].type_id = -1
+        ast_decl_nodes[id].init_expr = -1
+        ast_decl_count += 1
+        i += 1
+    }
+    return 0
+}
+
+// ast_decl_bind_file：声明登记完成后绑定函数符号与签名类型，供 IR 降低读取。
+// 全局 let/const 同时绑定模块级符号（type_id 保持 -1：对象类型经符号表读取）。
+pub fn ast_decl_bind_file(fi int) int {
+    if (support.session().ast_capture == 0) { return 0 }
+    if (fi < 0 || fi >= proj.file_count() || support.session().active_file != fi
+        || token.ctx().tokens == 0 || store().file_decls != proj.file(fi).decls) {
+        return support.fail("内部错误：函数声明绑定缺少当前文件 token 快照")
+    }
+    let i int = 0
+    for i < ast_decl_count {
+        let node *AstDecl = &ast_decl_nodes[i]
+        if (node.file_id == fi && node.kind == token.TK_FN) {
+            if (node.name_token < 0 || node.name_token >= token.ctx().count
+                || node.decl_index < 0 || node.decl_index >= store().file_decl_n) {
+                return support.fail("内部错误：函数声明绑定名字范围无效")
+            }
+            let tok token.Tok = token.ctx().tokens[node.name_token]
+            let sym int = support.sym_lookup(tok.start, tok.len)
+            if (sym < 0 || support.ms().syms[sym].kind != support.SYM_FN) {
+                return support.fail("内部错误：函数声明未绑定到函数符号")
+            }
+            node.sym_id = sym
+            node.type_id = support.ms().syms[sym].type_id
+        }
+        if (node.file_id == fi && node.kind == token.TK_TEST
+            && ast_decl_test_active(fi) != 0) {
+            // test 体符号名是编译器生成的 __yh_test_<file>_<decl>，
+            // 不能按源码里的字符串/标识符名字反查，改用 pass1 写在 PDecl 的符号。
+            if (node.decl_index < 0 || node.decl_index >= store().file_decl_n) {
+                return support.fail("内部错误：test 声明缺少 PDecl 身份")
+            }
+            let sym int = store().file_decls[node.decl_index].test_sym
+            if (sym < 0 || sym >= support.ms().sym_n
+                || support.ms().syms[sym].kind != support.SYM_FN) {
+                return support.fail("内部错误：test 声明未绑定到测试函数符号")
+            }
+            node.sym_id = sym
+            node.type_id = support.ms().syms[sym].type_id
+        }
+        if (node.file_id == fi && (node.kind == token.TK_LET || node.kind == token.TK_CONST)) {
+            if (node.name_token < 0 || node.name_token >= token.ctx().count) {
+                return support.fail("内部错误：全局声明绑定名字范围无效")
+            }
+            let gtok token.Tok = token.ctx().tokens[node.name_token]
+            let gsym int = support.sym_lookup(gtok.start, gtok.len)
+            if (gsym < 0 || (support.ms().syms[gsym].kind != support.SYM_VAR
+                && support.ms().syms[gsym].kind != support.SYM_CONST)
+                || (support.ms().syms[gsym].flags & support.F_GLOBAL) == 0) {
+                return support.fail("内部错误：全局声明未绑定到模块级符号")
+            }
+            node.sym_id = gsym
+        }
+        i += 1
+    }
+    return 0
+}
+
+// ast_decl_attach_body：将刚解析的函数体根连接到其文件级函数声明。
+pub fn ast_decl_attach_body(fi int, decl_index int, stmt_id int) int {
+    if (support.session().ast_capture == 0) {
+        return 0
+    }
+    let i int = 0
+    for i < ast_decl_count {
+        if (ast_decl_nodes[i].file_id == fi && ast_decl_nodes[i].decl_index == decl_index) {
+            if ((ast_decl_nodes[i].kind != token.TK_FN
+                    && ast_decl_nodes[i].kind != token.TK_TEST)
+                || ast_decl_nodes[i].body_stmt >= 0
+                || stmt_id < 0 || stmt_id >= ast_stmt_count
+                || ast_stmt_nodes[stmt_id].kind != AST_STMT_BLOCK
+                || ast_stmt_nodes[stmt_id].file_id != fi) {
+                return support.fail("内部错误：函数声明与 AST 函数体不匹配")
+            }
+            ast_decl_nodes[i].body_stmt = stmt_id
+            return 0
+        }
+        i += 1
+    }
+    return support.fail("内部错误：找不到函数 AST 声明节点")
+}
+
+// ast_decl_attach_init：将全局 let/const 的初始化式根表达式挂到其文件级声明。
+// 仅捕获开启且当前文件已索引（c_file_decl_i >= 0）时生效；其余形态静默跳过
+// （旧单文件路径在全局子遍保持 capture=0，不进入本函数）。
+pub fn ast_decl_attach_init(fi int, decl_index int, expr_id int) int {
+    if (support.session().ast_capture == 0 || decl_index < 0) {
+        return 0
+    }
+    if (expr_id < 0 || expr_id >= ast_expr_count) {
+        return support.fail("内部错误：全局初始化式 AST 根无效")
+    }
+    let i int = 0
+    for i < ast_decl_count {
+        if (ast_decl_nodes[i].file_id == fi && ast_decl_nodes[i].decl_index == decl_index) {
+            if ((ast_decl_nodes[i].kind != token.TK_LET && ast_decl_nodes[i].kind != token.TK_CONST)
+                || ast_decl_nodes[i].init_expr >= 0
+                || ast_expr_nodes[expr_id].file_id != fi
+                || ast_expr_nodes[expr_id].first < ast_decl_nodes[i].first
+                || ast_expr_nodes[expr_id].after > ast_decl_nodes[i].after) {
+                return support.fail("内部错误：全局声明与初始化式 AST 不匹配")
+            }
+            ast_decl_nodes[i].init_expr = expr_id
+            return 0
+        }
+        i += 1
+    }
+    return support.fail("内部错误：找不到全局 AST 声明节点")
+}
+
+// ast_expr_reset：开始一个 check worker 的表达式树收集。
+pub fn ast_expr_reset() void {
+    if (ast_expr_nodes != 0) {
+        free(ast_expr_nodes.to_type(*void))
+    }
+    ast_expr_nodes = 0
+    ast_expr_count = 0
+    ast_expr_cap = 0
+    ast_expr_parse_depth = 0
+}
+
+// ast_expr_start：读取已有表达式节点的 token 起点；空节点返回当前游标。
+pub fn ast_expr_start(id int) int {
+    if (id < 0 || id >= ast_expr_count) {
+        return token.ctx().pos
+    }
+    return ast_expr_nodes[id].first
+}
+
+// ast_expr_end：读取已有表达式节点的 token 终点（半开）；越界返回当前游标。
+pub fn ast_expr_end(id int) int {
+    if (id < 0 || id >= ast_expr_count) {
+        return token.ctx().pos
+    }
+    return ast_expr_nodes[id].after
+}
+
+// ast_expr_add：追加一个表达式节点，子节点必须已先完成构造。
+pub fn ast_expr_add(kind int, op int, first int, after int, type_id int,
+    child0 int, child1 int, child2 int) int {
+    if (support.session().ast_capture == 0) {
+        return -1
+    }
+    if (comptime.ct_charge_expansion_ast_node() != 0) { return -1 }
+    if (support.session().active_file < 0 || first < 0 || after < first || after > token.ctx().count
+        || kind < AST_EXPR_PRIMARY || kind > AST_EXPR_CTFIELD) {
+        let buf [192]u8
+        let n int = 0
+        n = support.append_str(buf, n, "内部错误：表达式 AST 范围无效 file=")
+        n = support.append_int(buf, n, support.session().active_file)
+        n = support.append_str(buf, n, " first=")
+        n = support.append_int(buf, n, first)
+        n = support.append_str(buf, n, " after=")
+        n = support.append_int(buf, n, after)
+        n = support.append_str(buf, n, " tokens=")
+        n = support.append_int(buf, n, token.ctx().count)
+        n = support.append_str(buf, n, " kind=")
+        n = support.append_int(buf, n, kind)
+        let mo int = support.tml_intern_str(buf, 0, n)
+        if (mo < 0) { return -1 }
+        return support.fail(support.np_cstr(mo))
+    }
+    if (kind == AST_EXPR_ARG_LIST || kind == AST_EXPR_STRUCT_FIELD) {
+        if (type_id != -1) { return -1 }
+    } else if (type_id < 0) {
+        return support.fail("内部错误：表达式 AST 缺少语义类型")
+    }
+    let i int = 0
+    for i < 3 {
+        let child int = -1
+        if (i == 0) { child = child0 }
+        if (i == 1) { child = child1 }
+        if (i == 2) { child = child2 }
+        if (child < -1 || child >= ast_expr_count) {
+            return support.fail("内部错误：表达式 AST 子节点编号无效")
+        }
+        if (child >= 0 && ast_expr_nodes[child].file_id != support.session().active_file) {
+            return support.fail("内部错误：表达式 AST 子节点跨文件")
+        }
+        if (child >= 0 && (ast_expr_nodes[child].first < first || ast_expr_nodes[child].after > after)) {
+            return support.fail("内部错误：表达式 AST 子节点超出父节点范围")
+        }
+        i += 1
+    }
+    if (ast_expr_count == ast_expr_cap) {
+        let ncap int = ast_expr_cap * 2
+        if (ncap == 0) { ncap = 64 }
+        let next *AstExpr = malloc((ncap * sizeof(AstExpr)).to_type(u64)).to_type(*AstExpr)
+        if (next == 0) {
+            return support.fail("表达式 AST 内存分配失败")
+        }
+        if (ast_expr_count > 0) {
+            memcpy(next, ast_expr_nodes, (ast_expr_count * sizeof(AstExpr)).to_type(u64))
+        }
+        if (ast_expr_nodes != 0) {
+            free(ast_expr_nodes.to_type(*void))
+        }
+        ast_expr_nodes = next
+        ast_expr_cap = ncap
+    }
+    let id int = ast_expr_count
+    ast_expr_nodes[id].kind = kind
+    ast_expr_nodes[id].op = op
+    ast_expr_nodes[id].first = first
+    ast_expr_nodes[id].after = after
+    ast_expr_nodes[id].token_count = token.ctx().count
+    ast_expr_nodes[id].file_id = support.session().active_file
+    ast_expr_nodes[id].type_id = type_id
+    ast_expr_nodes[id].owner_decl = store().file_decl_i
+    ast_expr_nodes[id].sym_id = -1
+    ast_expr_nodes[id].sym_name_off = -1
+    ast_expr_nodes[id].sym_name_len = 0
+    ast_expr_nodes[id].binding_row = -1
+    ast_expr_nodes[id].sym_type_id = -1
+    ast_expr_nodes[id].sym_kind = -1
+    ast_expr_nodes[id].sym_flags = 0
+    ast_expr_nodes[id].sym_offset = 0
+    ast_expr_nodes[id].is_const = 0
+    ast_expr_nodes[id].const_bits = 0
+    ast_expr_nodes[id].is_lit = 0
+    ast_expr_nodes[id].lit_big = 0
+    ast_expr_nodes[id].fval_bits = 0
+    ast_expr_nodes[id].layout_type_id = -1
+    ast_expr_nodes[id].child0 = child0
+    ast_expr_nodes[id].child1 = child1
+    ast_expr_nodes[id].child2 = child2
+    ast_expr_count += 1
+    return id
+}
+
+// ast_expr_set_semantics：复制本次解析的绑定和常量事实，供后续阶段直接消费。
+pub fn ast_expr_set_semantics(id int, res *support.Res) int {
+    if (id < 0 || id >= ast_expr_count || res.type_id != ast_expr_nodes[id].type_id
+        || res.sym < -1 || res.sym >= support.ms().sym_n
+        || res.sym >= 0 && support.ms().syms == 0
+        || (res.is_const != 0 && res.is_const != 1)
+        || (res.is_lit != 0 && res.is_lit != 1)
+        || (res.lit_big != 0 && res.lit_big != 1)) {
+        return support.fail("内部错误：表达式 AST 语义事实无效")
+    }
+    ast_expr_nodes[id].sym_id = res.sym
+    if (res.sym >= 0) {
+        ast_expr_nodes[id].sym_name_off = support.ms().syms[res.sym].name_off
+        ast_expr_nodes[id].sym_name_len = support.ms().syms[res.sym].name_len
+        ast_expr_nodes[id].binding_row = support.ms().syms[res.sym].ast_binding_row
+        ast_expr_nodes[id].sym_type_id = support.ms().syms[res.sym].type_id
+        ast_expr_nodes[id].sym_kind = support.ms().syms[res.sym].kind
+        ast_expr_nodes[id].sym_flags = support.ms().syms[res.sym].flags
+        ast_expr_nodes[id].sym_offset = support.ms().syms[res.sym].offset
+    }
+    ast_expr_nodes[id].is_const = res.is_const
+    ast_expr_nodes[id].const_bits = res.ival
+    ast_expr_nodes[id].is_lit = res.is_lit
+    ast_expr_nodes[id].lit_big = res.lit_big
+    ast_expr_nodes[id].fval_bits = res.fval_bits
+    ast_expr_nodes[id].layout_type_id = -1
+    if (ast_expr_nodes[id].kind == AST_EXPR_PRIMARY
+        && ast_expr_nodes[id].op == token.TK_SIZEOF
+        && res.layout_type_id >= 0) {
+        if (res.layout_type_id >= support.ms().type_n) {
+            return support.fail("内部错误：sizeof 目标类型编号无效")
+        }
+        ast_expr_nodes[id].layout_type_id = res.layout_type_id
+    }
+    if (res.sym >= 0) {
+    }
+    return 0
+}
+
+// ast_expr_finish：用当前语义结果与子节点完成一个表达式节点。
+pub fn ast_expr_finish(res *support.Res, kind int, op int, first int,
+    child0 int, child1 int, child2 int) int {
+    if (support.session().ast_capture == 0) {
+        return 0
+    }
+    let id int = ast_expr_add(kind, op, first, token.ctx().pos, res.type_id,
+        child0, child1, child2)
+    if (id < 0) {
+        return -1
+    }
+    if (ast_expr_set_semantics(id, res) != 0) {
+        return -1
+    }
+    res.ast_id = id
+    return 0
+}
+
+// ast_expr_args_append：以持久化单链表记录实参，保留源码顺序与范围。
+pub fn ast_expr_args_append(list *int, arg int) int {
+    if (support.session().ast_capture == 0) {
+        return 0
+    }
+    if (arg < 0 || arg >= ast_expr_count) {
+        return -1
+    }
+    let first int = ast_expr_start(arg)
+    if (list[0] >= 0) {
+        first = ast_expr_start(list[0])
+    }
+    let id int = ast_expr_add(AST_EXPR_ARG_LIST, token.TK_COMMA, first,
+        ast_expr_nodes[arg].after, -1, list[0], arg, -1)
+    if (id < 0) {
+        return -1
+    }
+    list[0] = id
+    return 0
+}
+
+// ast_expr_assert_args_add：为测试断言调用构造固定跨度的实参链。
+// 四个实参按源码顺序串成 ARG_LIST；所有链节点共用同一个 token 范围，
+// 避免编译器生成的实参（行号/列号/空消息）与源码实参范围互不包含。
+pub fn ast_expr_assert_args_add(list *int, arg0 int, arg1 int, arg2 int,
+    arg3 int, first int, after int) int {
+    if (support.session().ast_capture == 0) { return 0 }
+    let chain int = -1
+    let id0 int = ast_expr_add(AST_EXPR_ARG_LIST, token.TK_COMMA, first, after,
+        -1, -1, arg0, -1)
+    if (id0 < 0) { return -1 }
+    let id1 int = ast_expr_add(AST_EXPR_ARG_LIST, token.TK_COMMA, first, after,
+        -1, id0, arg1, -1)
+    if (id1 < 0) { return -1 }
+    let id2 int = ast_expr_add(AST_EXPR_ARG_LIST, token.TK_COMMA, first, after,
+        -1, id1, arg2, -1)
+    if (id2 < 0) { return -1 }
+    chain = ast_expr_add(AST_EXPR_ARG_LIST, token.TK_COMMA, first, after,
+        -1, id2, arg3, -1)
+    if (chain < 0) { return -1 }
+    list[0] = chain
+    return 0
+}
+
+// ast_expr_count_now：表达式 arena 当前节点数（模板区间测量用）。
+pub fn ast_expr_count_now() int {
+    return ast_expr_count
+}
+
+// ast_expr_depth_add：调整表达式解析深度（`$if` 表达式的 capture 语义门）。
+pub fn ast_expr_depth_add(delta int) void {
+    ast_expr_parse_depth += delta
+}
+
+// ast_expr_depth_now：当前表达式解析深度。
+pub fn ast_expr_depth_now() int {
+    return ast_expr_parse_depth
+}
+
+// ast_expr_op_set：写入表达式节点的运算符元数据槽（`$field` 存字段下标）。
+pub fn ast_expr_op_set(id int, op int) void {
+    ast_expr_nodes[id].op = op
+}
+
+// ast_expr_first_of：取表达式节点的 token 起点（结构体字面量字段对齐用）。
+pub fn ast_expr_first_of(id int) int {
+    return ast_expr_nodes[id].first
+}
+
+// ast_function_reset：释放当前模块收集的函数上下文并清除未完成捕获状态。
+pub fn ast_function_reset() void {
+    if (ast_function_nodes != 0) {
+        free(ast_function_nodes.to_type(*void))
+    }
+    ast_function_nodes = 0
+    ast_function_count = 0
+    ast_function_cap = 0
+    ast_function_active = 0
+    ast_function_file = -1
+    ast_function_owner = -1
+    ast_function_expr_first = 0
+    ast_function_stmt_first = 0
+    ast_function_edge_first = 0
+    ast_function_binding_first = 0
+    ast_function_asm_first = 0
+}
+
+// ast_function_begin：在函数语义遍历前记录各 arena 的私有起点。
+pub fn ast_function_begin(file_id int, owner_decl int) int {
+    if (support.session().ast_capture == 0) { return 0 }
+    if (ast_function_active != 0 || file_id != support.session().active_file
+        || owner_decl != store().file_decl_i) {
+        return support.fail("内部错误：函数 AST 上下文嵌套或归属错误")
+    }
+    let decl_row int = ast_function_find_decl(file_id, owner_decl)
+    if (decl_row < 0 && support.fc().c_ct_prepare_active != 0
+        && store().file_indexed == 0) {
+        // 单文件编译没有项目级 AstDecl；编译期准备过程用合成文件/声明身份。
+    } else if (decl_row < 0
+        || (ast_decl_nodes[decl_row].kind != token.TK_FN
+            && ast_decl_nodes[decl_row].kind != token.TK_TEST)
+        || ast_decl_nodes[decl_row].body_stmt >= 0) {
+        return support.fail("内部错误：函数 AST 上下文没有待解析的函数声明")
+    }
+    ast_function_active = 1
+    ast_function_file = file_id
+    ast_function_owner = owner_decl
+    ast_function_expr_first = ast_expr_count
+    ast_function_stmt_first = ast_stmt_count
+    ast_function_edge_first = ast_stmt_expr_count
+    ast_function_binding_first = ast_binding_count
+    ast_function_asm_first = 0
+    return 0
+}
+
+// ast_function_end：在函数通过语义遍历后封存只读 arena 范围。
+pub fn ast_function_end() int {
+    if (support.session().ast_capture == 0) { return 0 }
+    if (ast_function_active == 0 || ast_function_file != support.session().active_file
+        || ast_function_owner != store().file_decl_i) {
+        return support.fail("内部错误：函数 AST 上下文结束位置错误")
+    }
+    let decl_row int = ast_function_find_decl(ast_function_file, ast_function_owner)
+    let synthetic int = (decl_row < 0 && support.fc().c_ct_prepare_active != 0
+        && store().file_indexed == 0).to_type(int)
+    if (synthetic == 0 && (decl_row < 0
+        || ast_decl_nodes[decl_row].body_stmt < ast_function_stmt_first
+        || ast_decl_nodes[decl_row].body_stmt >= ast_stmt_count)) {
+        return support.fail("内部错误：函数 AST 上下文缺少函数体根")
+    }
+    if (synthetic != 0 && (ast_function_stmt_first >= ast_stmt_count
+        || ast_stmt_nodes[ast_function_stmt_first].kind != AST_STMT_BLOCK)) {
+        return support.fail("内部错误：单文件编译期 AST 缺少函数体根")
+    }
+    if (ast_function_count == ast_function_cap) {
+        let ncap int = ast_function_cap * 2
+        if (ncap == 0) { ncap = 32 }
+        let next *AstFunctionContext = malloc(
+            (ncap * sizeof(AstFunctionContext)).to_type(u64)).to_type(*AstFunctionContext)
+        if (next == 0) { return support.fail("函数 AST 上下文分配失败") }
+        if (ast_function_count > 0) {
+            memcpy(next, ast_function_nodes,
+                (ast_function_count * sizeof(AstFunctionContext)).to_type(u64))
+        }
+        if (ast_function_nodes != 0) {
+            free(ast_function_nodes.to_type(*void))
+        }
+        ast_function_nodes = next
+        ast_function_cap = ncap
+    }
+    let row int = ast_function_count
+    ast_function_nodes[row].file_id = ast_function_file
+    ast_function_nodes[row].owner_decl = ast_function_owner
+    ast_function_nodes[row].decl_row = decl_row
+    ast_function_nodes[row].token_first = synthetic != 0 ?
+        support.fc().c_ct_prepare_first : ast_decl_nodes[decl_row].first
+    ast_function_nodes[row].token_after = synthetic != 0 ?
+        token.ctx().pos : ast_decl_nodes[decl_row].after
+    ast_function_nodes[row].expr_first = ast_function_expr_first
+    ast_function_nodes[row].expr_after = ast_expr_count
+    ast_function_nodes[row].stmt_first = ast_function_stmt_first
+    ast_function_nodes[row].stmt_after = ast_stmt_count
+    ast_function_nodes[row].edge_first = ast_function_edge_first
+    ast_function_nodes[row].edge_after = ast_stmt_expr_count
+    ast_function_nodes[row].binding_first = ast_function_binding_first
+    ast_function_nodes[row].binding_after = ast_binding_count
+    ast_function_nodes[row].body_stmt = synthetic != 0 ?
+        ast_function_stmt_first : ast_decl_nodes[decl_row].body_stmt
+    ast_function_nodes[row].asm_first = ast_function_asm_first
+    ast_function_nodes[row].asm_after = 0
+    ast_function_count += 1
+    ast_function_active = 0
+    ast_function_file = -1
+    ast_function_owner = -1
+    return 0
+}
+
+// ast_function_ct_export：把刚封存的编译期函数 AST 切片导入 comptime 私有 arena。
+pub fn ast_function_ct_export(sym_id int) int {
+    if (ast_function_count <= 0) {
+        return support.fail("内部错误：编译期函数 AST 上下文缺失")
+    }
+    if (sizeof(AstExpr) != sizeof(comptime.CtExpr)
+        || sizeof(AstStmt) != sizeof(comptime.CtStmt)
+        || sizeof(AstStmtExpr) != sizeof(comptime.CtEdge)
+        || sizeof(AstBinding) != sizeof(comptime.CtBinding)) {
+        return support.fail("内部错误：编译期 IR 与前端 AST 布局不一致")
+    }
+    let ctx AstFunctionContext = ast_function_nodes[ast_function_count - 1]
+    return comptime.ct_ir_import(sym_id,
+        ast_expr_nodes.to_type(*comptime.CtExpr), ctx.expr_first,
+        ctx.expr_after - ctx.expr_first,
+        ast_stmt_nodes.to_type(*comptime.CtStmt), ctx.stmt_first,
+        ctx.stmt_after - ctx.stmt_first,
+        ast_stmt_exprs.to_type(*comptime.CtEdge), ctx.edge_first,
+        ctx.edge_after - ctx.edge_first,
+        ast_bindings.to_type(*comptime.CtBinding), ctx.binding_first,
+        ctx.binding_after - ctx.binding_first, ctx.body_stmt)
+}
+
+// ast_stmt_reset：清空当前 worker 的语句节点、表达式边与解析游标。
+pub fn ast_stmt_reset() void {
+    if (ast_stmt_nodes != 0) {
+        free(ast_stmt_nodes.to_type(*void))
+    }
+    if (ast_stmt_exprs != 0) {
+        free(ast_stmt_exprs.to_type(*void))
+    }
+    if (ast_bindings != 0) {
+        free(ast_bindings.to_type(*void))
+    }
+    if (ast_comptime_fors != 0) {
+        free(ast_comptime_fors.to_type(*void))
+    }
+    ast_stmt_nodes = 0
+    ast_stmt_count = 0
+    ast_stmt_cap = 0
+    ast_stmt_exprs = 0
+    ast_stmt_expr_count = 0
+    ast_stmt_expr_cap = 0
+    ast_bindings = 0
+    ast_binding_count = 0
+    ast_binding_cap = 0
+    ast_comptime_fors = 0
+    ast_comptime_for_count = 0
+    ast_comptime_for_cap = 0
+    ast_binding_local_next = 0
+    ast_stmt_current = -1
+    ast_stmt_root_first = -1
+    ast_stmt_root_last = -1
+}
+
+// ast_comptime_for_add：登记普通 `$for` 的一份 AST 模板并标记 wrapper。
+pub fn ast_comptime_for_add(stmt_id int, binding_row int, binding_after int,
+    body_stmt int, low i64, high i64, node_cost int) int {
+    if (stmt_id < 0 || stmt_id >= ast_stmt_count || binding_row < 0
+        || binding_row >= ast_binding_count || binding_after <= binding_row
+        || binding_after > ast_binding_count || body_stmt < 0
+        || body_stmt >= ast_stmt_count || low >= high || node_cost <= 0
+        || ast_stmt_nodes[stmt_id].kind != AST_STMT_COMPTIME
+        || ast_stmt_nodes[body_stmt].kind != AST_STMT_BLOCK
+        || ast_stmt_nodes[body_stmt].parent != stmt_id
+        || ast_bindings[binding_row].stmt_id != stmt_id
+        || ast_bindings[binding_row].sym_kind != support.SYM_CONST
+        || ast_bindings[binding_row].sym_type_id < 0
+        || ast_bindings[binding_row].sym_type_id >= support.ms().type_n
+        || support.ms().types[ast_bindings[binding_row].sym_type_id].kind != support.TY_I32) {
+        return support.fail("内部错误：编译期 `$for` 模板元数据无效")
+    }
+    if (ast_comptime_for_find_stmt(stmt_id) >= 0) {
+        return support.fail("内部错误：编译期 `$for` 模板重复登记")
+    }
+    if (ast_comptime_for_count == ast_comptime_for_cap) {
+        let ncap int = ast_comptime_for_cap * 2
+        if (ncap == 0) { ncap = 16 }
+        let next *AstComptimeFor = malloc(
+            (ncap * sizeof(AstComptimeFor)).to_type(u64)).to_type(*AstComptimeFor)
+        if (next == 0) { return support.fail("编译期 AST 模板目录分配失败") }
+        if (ast_comptime_for_count > 0) {
+            memcpy(next, ast_comptime_fors,
+                (ast_comptime_for_count * sizeof(AstComptimeFor)).to_type(u64))
+        }
+        if (ast_comptime_fors != 0) { free(ast_comptime_fors.to_type(*void)) }
+        ast_comptime_fors = next
+        ast_comptime_for_cap = ncap
+    }
+    let row int = ast_comptime_for_count
+    ast_comptime_fors[row].stmt_id = stmt_id
+    ast_comptime_fors[row].binding_row = binding_row
+    ast_comptime_fors[row].binding_after = binding_after
+    ast_comptime_fors[row].body_stmt = body_stmt
+    ast_comptime_fors[row].low = low
+    ast_comptime_fors[row].high = high
+    ast_comptime_fors[row].node_cost = node_cost
+    ast_comptime_for_count += 1
+    ast_stmt_nodes[stmt_id].op = token.TK_FOR
+    return row
+}
+
+// ast_binding_begin_function：重置函数内编号，保证相同函数语料获得稳定局部键。
+pub fn ast_binding_begin_function() void {
+    ast_binding_local_next = 0
+}
+
+// ast_binding_add：捕获参数或局部声明，并建立稳定的函数内绑定编号。
+pub fn ast_binding_add(sym_id int, name_token int, is_param int) int {
+    if (support.session().ast_capture == 0) {
+        return 0
+    }
+    if (comptime.ct_charge_expansion_ast_node() != 0) { return -1 }
+    if (sym_id < 0 || sym_id >= support.ms().sym_n || name_token < 0
+        || name_token >= token.ctx().count || token.ctx().tokens[name_token].kind != token.TOK_IDENT
+        || (is_param != 0 && is_param != 1) || store().file_decl_i < 0
+        || support.session().active_file < 0 || (ast_stmt_current < 0 && is_param == 0)) {
+        return support.fail("内部错误：局部绑定声明上下文无效")
+    }
+    if (ast_binding_count == ast_binding_cap) {
+        let ncap int = ast_binding_cap * 2
+        if (ncap == 0) { ncap = 64 }
+        let next *AstBinding = malloc((ncap * sizeof(AstBinding)).to_type(u64)).to_type(*AstBinding)
+        if (next == 0) {
+            return support.fail("局部绑定 AST 内存分配失败")
+        }
+        if (ast_binding_count > 0) {
+            memcpy(next, ast_bindings, (ast_binding_count * sizeof(AstBinding)).to_type(u64))
+        }
+        if (ast_bindings != 0) {
+            free(ast_bindings.to_type(*void))
+        }
+        ast_bindings = next
+        ast_binding_cap = ncap
+    }
+    let row int = ast_binding_count
+    ast_bindings[row].id = ast_binding_local_next
+    ast_bindings[row].sym_id = sym_id
+    ast_bindings[row].sym_type_id = support.ms().syms[sym_id].type_id
+    ast_bindings[row].sym_kind = support.ms().syms[sym_id].kind
+    ast_bindings[row].sym_flags = support.ms().syms[sym_id].flags
+    ast_bindings[row].sym_offset = support.ms().syms[sym_id].offset
+    ast_bindings[row].file_id = support.session().active_file
+    ast_bindings[row].owner_decl = store().file_decl_i
+    ast_bindings[row].stmt_id = -1
+    ast_bindings[row].name_token = name_token
+    ast_bindings[row].is_param = is_param
+    ast_bindings[row].next = -1
+    if (is_param == 0) {
+        let stmt int = ast_stmt_current
+        ast_bindings[row].stmt_id = stmt
+        if (ast_stmt_nodes[stmt].last_binding < 0) {
+            ast_stmt_nodes[stmt].first_binding = row
+        } else {
+            ast_bindings[ast_stmt_nodes[stmt].last_binding].next = row
+        }
+        ast_stmt_nodes[stmt].last_binding = row
+    }
+    ast_binding_local_next += 1
+    ast_binding_count += 1
+    support.ms().syms[sym_id].ast_binding_row = row
+    return 0
+}
+
+// ast_stmt_begin：预留语句节点，并接到当前父节点或函数体根链。
+pub fn ast_stmt_begin(kind int, op int, first int) int {
+    if (support.session().ast_capture == 0) {
+        return -1
+    }
+    if (support.session().active_file < 0 || first < 0 || first >= token.ctx().count
+        || kind < AST_STMT_BLOCK || kind > AST_STMT_COMPTIME) {
+        return support.fail("内部错误：语句 AST 起点、文件或类别无效")
+    }
+    if (comptime.ct_charge_expansion_ast_node() != 0) { return -1 }
+    if (ast_stmt_count == ast_stmt_cap && ast_stmt_grow_nodes() != 0) {
+        return -1
+    }
+    let id int = ast_stmt_count
+    let parent int = ast_stmt_current
+    ast_stmt_nodes[id].kind = kind
+    ast_stmt_nodes[id].op = op
+    ast_stmt_nodes[id].first = first
+    ast_stmt_nodes[id].after = first
+    ast_stmt_nodes[id].token_count = token.ctx().count
+    ast_stmt_nodes[id].file_id = support.session().active_file
+    ast_stmt_nodes[id].parent = parent
+    ast_stmt_nodes[id].first_child = -1
+    ast_stmt_nodes[id].last_child = -1
+    ast_stmt_nodes[id].next_sibling = -1
+    ast_stmt_nodes[id].root_next = -1
+    ast_stmt_nodes[id].first_expr = -1
+    ast_stmt_nodes[id].last_expr = -1
+    ast_stmt_nodes[id].first_binding = -1
+    ast_stmt_nodes[id].last_binding = -1
+    ast_stmt_count += 1
+    if (parent >= 0) {
+        if (ast_stmt_nodes[parent].last_child < 0) {
+            ast_stmt_nodes[parent].first_child = id
+        } else {
+            ast_stmt_nodes[ast_stmt_nodes[parent].last_child].next_sibling = id
+        }
+        ast_stmt_nodes[parent].last_child = id
+    } else if (ast_stmt_root_last < 0) {
+        ast_stmt_root_first = id
+        ast_stmt_root_last = id
+    } else {
+        ast_stmt_nodes[ast_stmt_root_last].root_next = id
+        ast_stmt_root_last = id
+    }
+    ast_stmt_current = id
+    return id
+}
+
+// ast_stmt_end：补齐语句 token 终点并恢复父节点为当前解析上下文。
+pub fn ast_stmt_end(id int, after int) int {
+    if (support.session().ast_capture == 0) {
+        return 0
+    }
+    if (id < 0 || id != ast_stmt_current || after < ast_stmt_nodes[id].first
+        || after > token.ctx().count || ast_stmt_nodes[id].file_id != support.session().active_file) {
+        return support.fail("内部错误：语句 AST 结束位置或嵌套次序无效")
+    }
+    ast_stmt_nodes[id].after = after
+    ast_stmt_current = ast_stmt_nodes[id].parent
+    return 0
+}
+
+// ast_stmt_add_expr：把 parse_expr 的完整根挂到当前语句，忽略模块级表达式。
+pub fn ast_stmt_add_expr(expr_id int) int {
+    if (support.session().ast_capture == 0 || ast_stmt_current < 0) {
+        return 0
+    }
+    if (expr_id < 0 || expr_id >= ast_expr_count
+        || ast_expr_nodes[expr_id].file_id != support.session().active_file) {
+        return support.fail("内部错误：语句 AST 引用了无效表达式根")
+    }
+    if (ast_stmt_expr_count == ast_stmt_expr_cap && ast_stmt_grow_exprs() != 0) {
+        return -1
+    }
+    let edge int = ast_stmt_expr_count
+    ast_stmt_exprs[edge].expr_id = expr_id
+    ast_stmt_exprs[edge].next = -1
+    ast_stmt_expr_count += 1
+    if (ast_stmt_nodes[ast_stmt_current].last_expr < 0) {
+        ast_stmt_nodes[ast_stmt_current].first_expr = edge
+    } else {
+        ast_stmt_exprs[ast_stmt_nodes[ast_stmt_current].last_expr].next = edge
+    }
+    ast_stmt_nodes[ast_stmt_current].last_expr = edge
+    return 0
+}
+
+// ast_stmt_count_now：语句 arena 当前节点数（模板区间测量用）。
+pub fn ast_stmt_count_now() int {
+    return ast_stmt_count
+}
+
+// ast_binding_count_now：绑定 arena 当前行数（模板区间测量用）。
+pub fn ast_binding_count_now() int {
+    return ast_binding_count
+}
+
+// ast_stmt_current_now：当前正在构建的语句节点（-1 表示不在语句内）。
+pub fn ast_stmt_current_now() int {
+    return ast_stmt_current
+}
+
+// ast_stmt_node_kind_of：语句节点类别。
+pub fn ast_stmt_node_kind_of(id int) int {
+    return ast_stmt_nodes[id].kind
+}
+
+// ast_stmt_node_first_of：语句节点 token 起点。
+pub fn ast_stmt_node_first_of(id int) int {
+    return ast_stmt_nodes[id].first
+}
+
+// ast_stmt_node_op_of：语句节点运算符槽。
+pub fn ast_stmt_node_op_of(id int) int {
+    return ast_stmt_nodes[id].op
+}
+
+// ast_stmt_node_op_set：写入语句节点运算符槽（诊断/typed `$if`/`$for` 标记）。
+pub fn ast_stmt_node_op_set(id int, op int) void {
+    ast_stmt_nodes[id].op = op
+}
+
+// ast_stmt_node_first_child_of：语句节点首子（typed 模板函数体取用）。
+pub fn ast_stmt_node_first_child_of(id int) int {
+    return ast_stmt_nodes[id].first_child
+}
+
+// ast_arena_grow_expr：保证表达式 arena 至少还能追加 need 行；0 成功。
+pub fn ast_arena_grow_expr(need int) int {
+    if (ast_expr_count + need <= ast_expr_cap) { return 0 }
+    let cap int = ast_expr_count + need
+    let next *AstExpr = malloc((cap * sizeof(AstExpr)).to_type(u64)).to_type(*AstExpr)
+    if (next == 0) { return -1 }
+    if (ast_expr_count > 0) {
+        memcpy(next, ast_expr_nodes, (ast_expr_count * sizeof(AstExpr)).to_type(u64))
+    }
+    if (ast_expr_nodes != 0) { free(ast_expr_nodes.to_type(*void)) }
+    ast_expr_nodes = next; ast_expr_cap = cap
+    return 0
+}
+
+// ast_arena_grow_stmt：保证语句 arena 至少还能追加 need 行；0 成功。
+pub fn ast_arena_grow_stmt(need int) int {
+    if (ast_stmt_count + need <= ast_stmt_cap) { return 0 }
+    let cap int = ast_stmt_count + need
+    let next *AstStmt = malloc((cap * sizeof(AstStmt)).to_type(u64)).to_type(*AstStmt)
+    if (next == 0) { return -1 }
+    if (ast_stmt_count > 0) {
+        memcpy(next, ast_stmt_nodes, (ast_stmt_count * sizeof(AstStmt)).to_type(u64))
+    }
+    if (ast_stmt_nodes != 0) { free(ast_stmt_nodes.to_type(*void)) }
+    ast_stmt_nodes = next; ast_stmt_cap = cap
+    return 0
+}
+
+// ast_arena_grow_edge：保证语句-表达式边 arena 至少还能追加 need 行；0 成功。
+pub fn ast_arena_grow_edge(need int) int {
+    if (ast_stmt_expr_count + need <= ast_stmt_expr_cap) { return 0 }
+    let cap int = ast_stmt_expr_count + need
+    let next *AstStmtExpr = malloc((cap * sizeof(AstStmtExpr)).to_type(u64)).to_type(*AstStmtExpr)
+    if (next == 0) { return -1 }
+    if (ast_stmt_expr_count > 0) {
+        memcpy(next, ast_stmt_exprs, (ast_stmt_expr_count * sizeof(AstStmtExpr)).to_type(u64))
+    }
+    if (ast_stmt_exprs != 0) { free(ast_stmt_exprs.to_type(*void)) }
+    ast_stmt_exprs = next; ast_stmt_expr_cap = cap
+    return 0
+}
+
+// ast_arena_grow_binding：保证绑定 arena 至少还能追加 need 行；0 成功。
+pub fn ast_arena_grow_binding(need int) int {
+    if (ast_binding_count + need <= ast_binding_cap) { return 0 }
+    let cap int = ast_binding_count + need
+    let next *AstBinding = malloc((cap * sizeof(AstBinding)).to_type(u64)).to_type(*AstBinding)
+    if (next == 0) { return -1 }
+    if (ast_binding_count > 0) {
+        memcpy(next, ast_bindings, (ast_binding_count * sizeof(AstBinding)).to_type(u64))
+    }
+    if (ast_bindings != 0) { free(ast_bindings.to_type(*void)) }
+    ast_bindings = next; ast_binding_cap = cap
+    return 0
+}
+
+// ast_arena_grow_function：保证函数上下文 arena 至少还能追加 need 行；0 成功。
+pub fn ast_arena_grow_function(need int) int {
+    if (ast_function_count + need <= ast_function_cap) { return 0 }
+    let cap int = ast_function_count + need
+    let next *AstFunctionContext = malloc(
+        (cap * sizeof(AstFunctionContext)).to_type(u64)).to_type(*AstFunctionContext)
+    if (next == 0) { return -1 }
+    if (ast_function_count > 0) {
+        memcpy(next, ast_function_nodes,
+            (ast_function_count * sizeof(AstFunctionContext)).to_type(u64))
+    }
+    if (ast_function_nodes != 0) { free(ast_function_nodes.to_type(*void)) }
+    ast_function_nodes = next; ast_function_cap = cap
+    return 0
+}
+
+// ast_view：向调用方提供当前 AST arena 的借用视图，不分配、复制或转移所有权。
+// 视图只适用于捕获完成后的只读检查，并在下一次修改/reset 前失效。
+pub fn ast_view(out *AstView) void {
+    out.expr_nodes = ast_expr_nodes
+    out.expr_count = ast_expr_count
+    out.expr_parse_depth = ast_expr_parse_depth
+    out.expr_cap = ast_expr_cap
+    out.stmt_nodes = ast_stmt_nodes
+    out.stmt_count = ast_stmt_count
+    out.stmt_exprs = ast_stmt_exprs
+    out.stmt_expr_count = ast_stmt_expr_count
+    out.stmt_expr_cap = ast_stmt_expr_cap
+    out.stmt_current = ast_stmt_current
+    out.stmt_root_first = ast_stmt_root_first
+    out.stmt_root_last = ast_stmt_root_last
+    out.bindings = ast_bindings
+    out.binding_count = ast_binding_count
+    out.binding_cap = ast_binding_cap
+    out.comptime_fors = ast_comptime_fors
+    out.comptime_for_count = ast_comptime_for_count
+    out.decl_nodes = ast_decl_nodes
+    out.decl_count = ast_decl_count
+    out.decl_file_first = ast_decl_file_first
+    out.decl_file_cap = ast_decl_file_cap
+    out.function_nodes = ast_function_nodes
+    out.function_count = ast_function_count
+    out.function_cap = ast_function_cap
+    out.function_active = ast_function_active
+}
+
+// ast_view_append_expr/stmt/edge/binding/function：切片导入时把新增行数提交回 arena。
+// 直接写 `v.expr_count += n` 只改视图副本不生效，必须走 arena 全局计数。
+pub fn ast_view_append_expr(n int) void { ast_expr_count += n }
+
+pub fn ast_view_append_stmt(n int) void { ast_stmt_count += n }
+
+pub fn ast_view_append_edge(n int) void { ast_stmt_expr_count += n }
+
+pub fn ast_view_append_binding(n int) void { ast_binding_count += n }
+
+pub fn ast_view_append_function() void { ast_function_count += 1 }

@@ -69,7 +69,7 @@ VENDOR_ROOT = "vendor"
 
 ### 3.1 向上查找
 
-`build`/`run`/`test`/`list`/`version` 从**当前工作目录**开始，逐级向上找最近的
+`build`/`run`/`test`/`version` 从**当前工作目录**开始，逐级向上找最近的
 `project.toml`，最多 32 层；找不到就报
 `未找到 project.toml（自当前目录向上 32 层）`（`--quiet` 时只返回失败）。
 
@@ -140,8 +140,6 @@ util = { path = "../libs/util" }
 - 依赖项目的 `[link]`、`[env]` 只对**它自己**生效，不会渗到根项目的链接参数里；
   依赖项目也不能作为入口。
 
-`yh list` 可查看模块归属，`yh list --resolve <名字>` 显示某个名字落在哪一层。
-
 ## 7. `[link]` 与 `[link-<os>-<arch>]`
 
 只写**具体库文件**，不写 `-l` 库名（系统库名走 `[c].libs`）。
@@ -174,7 +172,7 @@ extra = ["vendor/lib/darwin-arm64/libextra.a"]
 
 - 默认链接全部有效组；`build`/`run` 的 `--link <组名>` 可重复，只选点名组，未知组报
   `未知的 --link 组: <名>（可用组: ...）`。
-- `check`/`list` 只校验 schema，不检查库文件是否存在；`build` 只检查**选中**的组，
+- `check` 只校验 schema，不检查库文件是否存在；`build` 只检查**选中**的组，
   于是「未选组的库缺失」不会误报。
 - 链接顺序：对象 → `[link]` 库 → `[c].libs` → 系统库；ELF 把选中库放进同一个
   `--start-group`，Darwin 按声明顺序。
@@ -264,7 +262,7 @@ bridge = ["${YH_LLVM_ROOT}/llvm-host-darwin-aarch64/libyh-llvm-bridge.a"]
 
 ## 12. 装载顺序与校验时机
 
-`pj_load_project()` 的步骤固定（顺序本身是契约）：
+`load_project()` 的步骤固定（顺序本身是契约）：
 
 1. 规范化项目根、依赖环与重复装载检查；
 2. 读 `project.toml`，解析 TOML 子集；

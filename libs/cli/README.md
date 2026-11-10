@@ -697,7 +697,8 @@ cli.destroy(&parser);      // 再释放声明树（递归释放子命令 parser�
 
 | 文件 | 职责 |
 | --- | --- |
-| `cli.yh` | 公开数据模型、容量常量、构造函数、模块私有分配池与状态 |
+| `api.yh` | 公开面：公开类型、常量、全部 pub 函数与 @[extern] 声明 |
+| `cli.yh` | 模块私有分配池与状态（公开模型已迁到 `api.yh`） |
 | `schema.yh` | `init`/`add_argument`/`add_alias`/`freeze`/`last_error`/`destroy`、声明校验 |
 | `values.yh` | 命名空间、值深复制、`contains`/`provided`/`occurrences` 与类型化 getter |
 | `parse.yh` | token 匹配、数量分配、默认值层级、必需项与互斥检查 |
@@ -708,7 +709,6 @@ cli.destroy(&parser);      // 再释放声明树（递归释放子命令 parser�
 | `extensions.yh` | converter/validator/custom action 与命名注册表 |
 | `files.yh` | 参数文件 `@file` 展开 |
 | `help.yh` | usage/help 生成、格式配置、颜色、建议与输出 API |
-| `entry.yh` | `argc`/`argv` 适配与 0/1/2 退出契约 |
 
 ## 公开 API
 

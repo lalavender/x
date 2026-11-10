@@ -70,8 +70,6 @@ CASES = [
     # (名字, cwd 占位, argv, strict, 说明)
     ("version", "libs", ["version"], True, ""),
     ("version-contracts", "libs", ["version", "--contracts"], True, ""),
-    ("list", "libs", ["list"], True, ""),
-    ("list-resolve", "libs", ["list", "--resolve", "string"], True, ""),
     ("test-list", "libs", ["test", "--list"], True, ""),
     ("test-no-run", "libs", ["test", "--no-run", "--filter", "cli0"], True, ""),
     ("check-project", "proj", ["check"], True, ""),
@@ -99,7 +97,6 @@ CASES = [
     ("target-alias", "proj", ["--target", "linux", "build"], True, ""),
     ("target-unknown", "proj", ["--target", "mips-unknown", "build"], True, ""),
     ("check-two-files", "proj", ["check", "a.yh", "b.yh"], False, "新实现补一条诊断行（旧只有 usage）"),
-    ("list-link", "libs", ["list", "--link", "x"], False, "新实现按未知选项报错并给候选"),
     ("syntax-check-missing", "proj", ["--syntax-check"], False, "新实现补一条诊断行（旧只有 usage）"),
     ("o-missing-file", "proj", ["-o", "out3"], False, "新实现补一条诊断行（旧只有 usage）"),
     ("opt-both", "proj", ["-O0", "-O2", "build"], True, ""),

@@ -196,7 +196,7 @@ pub fn main(argc int, argv **char, envp **char) int {
 - Darwin 的 `sys.open_at` 只支持 `AT_FDCWD`（os 的唯一调用形式）；其他目录
   fd 返回 `-ENOSYS`（见 [sys README](../sys/README.md) 的平台限制）。
 
-旧 `os.yh` 宿主接口在两平台继续保留，缺少的新符号在编译期报错，不提供
+旧宿主接口（现位于 `api.yh`）在两平台继续保留，缺少的新符号在编译期报错，不提供
 成功空桩。
 
 ## 自带验收（Darwin 契约）
@@ -227,7 +227,8 @@ remove_file/rename_file/is_terminal/process_id/terminate/platform/arch`
 
 ```text
 libs/os/
-  base.yh             Error/FdResult/IoResult/OpenOptions/DirEntry 等
+  api.yh              公开面（Error/FdResult/IoResult/OpenOptions/DirEntry 等
+                      公开类型、跨平台 API 与 @[extern] 声明）
   errors.yh           私有错误归一化与切片地址帮助（跨平台）
   file.yh             文件 API（经 sys，跨平台）
   directory.linux.yh  DirReader/cwd（getdents64 记录）
@@ -235,7 +236,5 @@ libs/os/
   process.linux.yh    spawn/wait/exit_now（fork + 错误管道）
   process.darwin.yh   spawn/wait/exit_now（posix_spawn）
   environment.yh      envp 查询（跨平台）
-  sleep.yh            旧 sleep_us（经 sys.sleep_time，跨平台）
-  os.yh               旧接口兼容
   doc.yh              仅注释的完整 API 参考
 ```

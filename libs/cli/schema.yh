@@ -304,19 +304,6 @@ fn new_state(config ParserConfig, parent *parser_state) *parser_state {
     return state
 }
 
-// init 初始化 parser；0 成功、-1 失败。要求句柄为零值或已 destroy。
-pub fn init(p *Parser, config ParserConfig) int {
-    if (p == 0 || p.handle != 0) {
-        return -1
-    }
-    let state *parser_state = new_state(config, 0)
-    if (state == 0) {
-        return -1
-    }
-    p.handle = state.to_type(*void)
-    return 0
-}
-
 // add_argument_internal 在已初始化的状态上登记一条声明；返回参数 ID 或 -1。
 fn add_argument_internal(state *parser_state, spec Argument) int {
     if (state.failed != 0 || state.frozen != 0) {
@@ -452,60 +439,6 @@ fn add_argument_internal(state *parser_state, spec Argument) int {
     return row.id
 }
 
-// add_argument 登记一条参数声明；返回正数参数 ID，失败返回 -1。
-pub fn add_argument(p *Parser, spec Argument) int {
-    let state *parser_state = parser_state_of(p)
-    if (state == 0) {
-        return -1
-    }
-    return add_argument_internal(state, spec)
-}
-
-// add_alias 给已有参数增加一个名称；0 成功、-1 失败。
-pub fn add_alias(p *Parser, argument int, name *char) int {
-    let state *parser_state = parser_state_of(p)
-    if (state == 0 || state.failed != 0 || state.frozen != 0) {
-        return -1
-    }
-    let index int = row_of_id(state, argument)
-    if (index < 0) {
-        return -1
-    }
-    if (name == 0 || name[0] == 0) {
-        return set_config_error(state, CODE_CONFIG, "别名不能为空")
-    }
-    if (is_option_name(state.prefix_chars, name) == 0) {
-        return set_config_error(state, CODE_CONFIG, "别名必须以注册前缀开头，且不能只由前缀组成")
-    }
-    if (state.rows[index].name_count >= MAX_NAMES) {
-        return set_config_error(state, CODE_CONFIG, "参数名称个数超过本版本上限")
-    }
-    if (name_is_taken(state, name) >= 0) {
-        return set_config_error(state, CODE_CONFIG, "别名与已登记名称冲突")
-    }
-    state.rows[index].names[state.rows[index].name_count] = pool_dup(&state.mem, name)
-    state.rows[index].name_count += 1
-    return 0
-}
-
-// freeze 检查整棵声明并冻结；0 成功、-1 失败，重复冻结是无操作。
-pub fn freeze(p *Parser) int {
-    let state *parser_state = parser_state_of(p)
-    if (state == 0) {
-        return -1
-    }
-    if (state.failed != 0) {
-        return -1
-    }
-    if (state.frozen != 0) {
-        return 0
-    }
-    if (freeze_tree(state) != 0) {
-        return -1
-    }
-    return 0
-}
-
 // freeze_tree 递归冻结一棵 parser 树：绑定扩展、校验声明与常量、做能力检查。
 // 子命令 parser 归父所有，因此在根 freeze 时一并冻结。
 fn freeze_tree(state *parser_state) int {
@@ -538,17 +471,6 @@ fn freeze_tree(state *parser_state) int {
     return 0
 }
 
-// last_error 返回最近配置错误的借用视图；没有错误时 code 为空指针。
-pub fn last_error(p *Parser) Diagnostic {
-    let state *parser_state = parser_state_of(p)
-    let empty Diagnostic
-    clear_diagnostic(&empty)
-    if (state == 0) {
-        return empty
-    }
-    return state.error
-}
-
 // destroy_state 递归释放一个 parser 状态及其全部子命令状态。
 fn destroy_state(state *parser_state) void {
     let i int = 0
@@ -563,19 +485,6 @@ fn destroy_state(state *parser_state) void {
     }
     pool_free_all(&state.mem)
     free(state.to_type(*void))
-}
-
-// destroy 释放 parser 全树（含子命令 parser）并归零；零值可安全调用。
-pub fn destroy(p *Parser) void {
-    let state *parser_state = parser_state_of(p)
-    if (state == 0) {
-        if (p != 0) {
-            p.handle = 0
-        }
-        return
-    }
-    destroy_state(state)
-    p.handle = 0
 }
 
 // copy_choices 把候选值深复制到 parser 池，返回池内切片；失败返回空切片。
@@ -644,69 +553,6 @@ fn override_of(state *parser_state, dest *char) int {
     for i < state.override_count {
         if (state.overrides[i].used != 0 && cstr_equal(state.overrides[i].dest, dest) != 0) {
             return i
-        }
-        i += 1
-    }
-    return -1
-}
-
-// set_default 覆盖 dest 的静态默认值；0 成功、-1 失败。默认值深复制进 parser 池。
-pub fn set_default(p *Parser, dest *char, value Value) int {
-    let state *parser_state = parser_state_of(p)
-    if (state == 0 || dest == 0 || dest[0] == 0 || state.failed != 0 || state.frozen != 0) {
-        return -1
-    }
-    let index int = override_of(state, dest)
-    if (index < 0) {
-        if (state.override_count >= MAX_ENTRIES) {
-            return set_config_error(state, CODE_CONFIG, "set_default 的键个数超过本版本上限")
-        }
-        index = state.override_count
-        state.overrides[index].used = 1
-        state.overrides[index].dest = pool_dup(&state.mem, dest)
-        state.overrides[index].provided = 0
-        state.overrides[index].occurrences = 0
-        state.override_count += 1
-    }
-    state.overrides[index].value = value_clone(&state.mem, value)
-    if (state.mem.failed != 0) {
-        return set_config_error(state, CODE_RESOURCE, "set_default 复制默认值时内存不足")
-    }
-    return 0
-}
-
-// get_default 查询 parser 的静态有效默认值：先看 set_default 覆盖，
-// 再看参数声明的显式默认值，最后是 action 固有缺省。0 成功、-1 失败。
-pub fn get_default(p *Parser, dest *char, out *Value) int {
-    let state *parser_state = parser_state_of(p)
-    if (state == 0 || dest == 0 || out == 0) {
-        return -1
-    }
-    let index int = override_of(state, dest)
-    if (index >= 0) {
-        *out = state.overrides[index].value
-        return 0
-    }
-    let i int = 0
-    for i < state.row_count {
-        let row *arg_row = &state.rows[i]
-        if (row.used != 0 && cstr_equal(row.dest, dest) != 0) {
-            if (row.default_mode == DefaultMode.default_explicit.to_type(int)) {
-                *out = row.default_value
-                return 0
-            }
-            if (row.default_mode == DefaultMode.default_suppress.to_type(int)) {
-                return -1
-            }
-        }
-        i += 1
-    }
-    i = 0
-    for i < state.row_count {
-        let row *arg_row = &state.rows[i]
-        if (row.used != 0 && cstr_equal(row.dest, dest) != 0) {
-            *out = action_implicit_default(row)
-            return 0
         }
         i += 1
     }
@@ -985,7 +831,6 @@ fn check_freeze(state *parser_state) int {
     }
     return check_shared_dest(state)
 }
-
 
 // group_of 按 ID 查找展示组；找不到返回 -1。
 fn group_of(state *parser_state, id int) int {

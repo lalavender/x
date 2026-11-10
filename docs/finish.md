@@ -8,6 +8,125 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：编译器 18 个模块公开面迁移到 api.yh
+
+**结果**：
+- `compiler/` 18 个模块（ast、backend、build、build/cache、build/proj、builtin、
+  check、comptime、errors、ir、lex、link、lower、main、parse、support、
+  testkit、token）各自新增 `<模块目录>/api.yh`：模块的 pub 声明（fn/struct/
+  union/enum/type/const）与全部 `@[extern]` 声明集中到该文件；其余主题文件只留
+  私有实现。`api.yh` 按文件名字节序排在模块最前，公开实现可以调用后续文件的
+  私有函数、引用后续私有类型与全局（类型在模块内统一登记）。
+- 平台分文件按与标准库相同的办法处理：`backend/llvm_bind.*`、`support/
+  {clock,argv,console}.*`、`build/cache/lock.*` 的 pub 函数改成私有
+  `<name>_impl`，由 `api.yh` 薄包装转发；平台相关的 extern（LLVM 绑定、
+  Find*/flock、Windows 控制台）以共享声明进 `api.yh`（同名同签名合一，
+  `yh_llvm_version` 等三平台一致的声明只留一份）。
+- 被搬空后删除的源文件 23 个（`ast_store`、`ast_view`、`llvm_abi_model`、
+  `llvm_bridge`、`cache_key`、`checked_view`、`ct_bind`、`sem_call_literal`、
+  `sem_expr`、`ct_enum`、`ct_layout_sched`、`module_snapshot_lower_selftest`、
+  `support/{abi_model,buffer,front_stage,layout,pool,source,symbols,target,
+  value_rules}`、`token/{base,op}`）；其中 `support/buffer.yh` 与
+  `token/op.yh` 原有的 yh test 块迁到同名 `.test.yh`，测试发现不丢。
+- 已知例外：`support/tables.yh` 的 `pub const DATA_STR_CAP` 保留在原文件。
+  把它移到 `api.yh` 后，`tables.yh` 里的 `let c_data_str_* [DATA_STR_CAP]int`
+  全局长数组会触发「编译期常量尚未就绪」（CT 值调度按声明文件做全局初始化，
+  跨文件的数组长度常量请求无法就绪）。
+- 文档：`docs/todo.md` 增加编译器模块设计文档文件清单刷新项；编码规范 §7 的
+  建议性约定（pub 集中 `api.yh`）同样适用本次迁移。
+
+**验证**：
+- `just build`：种子冷编通过（默认全局缓存，含编译器全部模块）。
+- `just test`：通过——ANTLR 语法层、编译器语法模式、run corpus、modules
+  test-check、build-cache、opt-level、libs 171 例、compiler-tests 8/8、
+  fmt 插值、code-stats 6/6、codeflow 自洽。
+- `cd compiler && ../yh check --target <triple>`：aarch64-apple-darwin、
+  x86_64/aarch64-unknown-linux-gnu、x86_64-pc-windows-msvc 四目标全部通过。
+- 本环境 `tests/modules/build-check.py` 仍被在建的 `compiler/proj →
+  compiler/build/proj` 迁移挡住（`copy_proj` 引用 `compiler/proj`），未作为
+  本轮验收；`just selfhost-native` 未在本机跑（按仓库约定交 CI）。
+
+## 2026-11-10：标准库公开面迁移到各模块 api.yh
+
+**结果**：
+- `libs/` 18 个模块全部新增 `<模块>/api.yh`：模块的 pub 声明（fn/struct/
+  union/enum/type/const）与全部 `@[extern]` 声明集中到这里；其余主题文件只
+  保留私有实现与辅助。模块内 `api.yh` 按文件名字节序排最前，公开实现可调用
+  后续文件的私有函数、引用后续私有类型与全局（pass1 统一登记）。
+- 被搬空后删除的文件：`memory/memory.yh`、`math/math.yh`、`libc/memory.yh`、
+  `io/io.yh`、`io/write.yh`、`fmt/interp.yh`、`cli/entry.yh`、`os/base.yh`、
+  `os/os.yh`、`os/sleep.yh`、`sys/base.yh`、`string/string.yh`、
+  `string/transform.yh`；公开面由各模块 `api.yh` 承担。
+- 平台分文件模块（json/net/os/sys/time/toml）：平台无关公开面进 `api.yh`，
+  平台差异保留在 `*.<平台>.yh`，并把原 pub 函数改名为私有 `<name>_impl`，
+  由 `api.yh` 的薄包装转发（签名在三个平台上逐一对齐后生成）。
+- 已知例外（语言能力限制，保留平台文件）：`os.DirReader`/`os.DirReaderResult`
+  各平台定义不同；`os.open_dir`/`next_entry`/`close_dir`、
+  `sys.spawn_process`/`raw6`/`read_dir_entries`/`getdents64`/`find_first`/
+  `find_next`/`find_close`/`fcntl_fd` 只在部分平台存在；`sys/constants.*`、
+  `sys/errno.*` 的 pub const 平台取值不同。
+- 文档：`yh-标准库设计.md` 新增迁移说明并修正 io/sys/cli/toml/fmt 文件清单；
+  `libs/{cli,os,libc}/README.md` 文件表同步；`docs/todo.md` 记录例外收敛与
+  各模块设计文档文件清单两项后续。
+
+**验证**：
+- `cd libs && ../compiler/.build/yh check`：通过；`--target` 四目标
+  （aarch64-apple-darwin、x86_64/aarch64-unknown-linux-gnu、
+  x86_64-pc-windows-msvc）全部通过。
+- `yh test`（libs）：171 passed（O0）；`tmp/libs-o2` 的 `-O2 test`：171 passed。
+- `cd compiler && ../yh build`：构建完成（编译器以 `libs` 为依赖）。
+- 环境限制（与本轮无关）：`just build`/`just dev` 的种子对
+  `libs/hash/sha256.yh` 报 `LLVM lowering sha256_rotr` 首片不支持；
+  `tests/modules/build-check.py` 被在建的 `compiler/proj → compiler/build/proj`
+  迁移挡住（`copy_proj` 仍引用 `compiler/proj`）。
+
+## 2026-11-10：记录 api.yh 布局约定（仅文档）
+
+**结果**：在 [编码规范 §7](03-design/yh-编码规范.md) 记录建议性约定——模块的
+pub 声明建议集中到 `api.yh`。编译器不检查、不告警；未改代码与测试
+（曾实现的检查/警告已按用户要求回退）。
+
+## 2026-11-10：list 标准库按 V 内建数组方法集补齐（L3）
+
+**结果**：
+- `libs/list/list.yh` 新增 `ListResult` 与 26 个方法：首尾访问
+  （`first`/`last`）、插入/删除（`prepend`/`pop_left`/`delete_last`/
+  `delete_many`）、截断与丢弃（`trim`/`drop`/`reset`）、容量
+  （`grow_cap`/`grow_len`）、新列表（`clone`/`repeat`/`slice`/`reverse`/
+  `sorted`/`filter`/`map`）、原地变换（`reverse_in_place`/`sort`）与查询
+  （`contains`/`index`/`last_index`/`any`/`all`/`count`）；公开面 10 → 36 个
+  函数，私有辅助新增 `list_result_ok`/`list_result_error`/`list_swap`/
+  `list_zero`/`list_build`。
+- 需要元素语义的方法收回调：比较 `fn(*void,*void) int`、谓词
+  `fn(*void) bool`、变换 `fn(*void,*void) void`（`map` 回调写满结果槽位）。
+  回调是普通 yh 函数、必须非空（语言不支持函数指针与 `0` 比较）。
+- 方法名按 V 对齐并作为记录在案的命名例外（编码规范 §2.1 动词表不改）；
+  已有 10 个方法签名与语义不变。无法对齐的 `pointers`/`str`/`hex`/`wait`/
+  深度复制在 README 映射表逐条说明原因。
+- 文档：`libs/list/README.md` 增加完整 API 表、V 映射表与新硬规则；list 设计
+  文档刷新状态/目标/D9–D10/§6 契约表/§7 实现要点/§8 规则/§9 用法/§10 用例/
+  §11 L3/§12 风险；`yh-标准库设计.md` 的 list 小节同步为 36 函数并修正过期
+  描述（移位实际用模块内 `list_copy_overlap`，不是 `libc.memmove`）。
+
+**验证**：
+- `cd libs && ../yh test --filter list`：31 passed / 0 failed（O0）。
+- `tmp/libs-o2` 的 `-O2 test --filter list`：31 passed / 0 failed。
+- `just test-libs`：全库 O0+O2、外部 runner 与专项/安装门全绿（exit 0）。
+- 未改 `compiler/`、`docs/yh.g4`、prelude 与 justfile。
+
+## 2026-11-10：移除 `yh list` 命令
+
+**结果**：`yh list` 整条命令删除——`compiler/cmd/yh/cmd_list.yh` 文件、`CLI_LIST`
+常量、`cli` 子命令声明与 `cli_is_command` 判定、请求分派分支、`mb_cmd_list`
+与 `pj_cmd_list` 一并清除；裸 `yh` 用法只剩
+`{build,check,run,test,cache,init,version}`。文档同步 README.md、AGENTS.md、
+compiler/README.md 与四份 03-design；`tools/cli-golden.py` 删除 `list` 与
+`list-link` 用例；`tests/selfhost/bootstrap/native-selfhost.py` 的用法完整性
+断言改用 `cache`。
+
+**验证**：`cd compiler && ../yh build` 通过；`yh --help` 不再列出 list，
+`yh list` 以用法错误码 2 退出；`just test` 通过。
+
 ## 2026-11-10：0.0.14-rc.1 发布准备（版本号、门禁与两个阻塞修复）
 
 **结果**：

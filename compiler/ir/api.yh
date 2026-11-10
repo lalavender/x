@@ -1,0 +1,1932 @@
+module ir
+
+// ============================================================================
+// api.yh —— ir 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// IR 数据类型种类。type_id 是函数私有 types 表中的索引，不是目标寄存器。
+pub const IR_TY_VOID int = 0
+
+pub const IR_TY_BOOL int = 1
+
+pub const IR_TY_I8 int = 2
+
+pub const IR_TY_I16 int = 3
+
+pub const IR_TY_I32 int = 4
+
+pub const IR_TY_I64 int = 5
+
+pub const IR_TY_U8 int = 6
+
+pub const IR_TY_U16 int = 7
+
+pub const IR_TY_U32 int = 8
+
+pub const IR_TY_U64 int = 9
+
+pub const IR_TY_F32 int = 10
+
+pub const IR_TY_F64 int = 11
+
+pub const IR_TY_PTR int = 12
+
+// 指针类型按所指元素编码：canonical 下标 = IR_TY_PTR + 元素 kind，
+// elem 必须等于下标减 IR_TY_PTR；IR_TY_PTR（12）即 *void。
+// 指针区间同时容纳受检源指针和其存储地址类型，支持最多四层源指针的寻址。
+pub const IR_TY_PTR_LAST int = 72
+
+// 函数值在 SSA 中也是 opaque ptr，但单独编号以便类型映射不混淆数据指针。
+pub const IR_TY_FN_PTR int = 73
+
+pub const IR_TY_LAST int = 73
+
+// 指令种类。参数由入口块前导 PARAM 定义；控制流只放在 IRBlock 的终结字段中。
+pub const IR_OP_CONST int = 1
+
+pub const IR_OP_ADD int = 2
+
+pub const IR_OP_SUB int = 3
+
+pub const IR_OP_MUL int = 4
+
+pub const IR_OP_EQ int = 5
+
+pub const IR_OP_PHI int = 6
+
+pub const IR_OP_LOAD int = 7
+
+pub const IR_OP_STORE int = 8
+
+pub const IR_OP_COPY int = 9
+
+pub const IR_OP_PARAM int = 10
+
+pub const IR_OP_NE int = 11
+
+pub const IR_OP_LT int = 12
+
+pub const IR_OP_LE int = 13
+
+pub const IR_OP_GT int = 14
+
+pub const IR_OP_GE int = 15
+
+pub const IR_OP_DIV int = 16
+
+pub const IR_OP_REM int = 17
+
+pub const IR_OP_BAND int = 18
+
+pub const IR_OP_BOR int = 19
+
+pub const IR_OP_BXOR int = 20
+
+pub const IR_OP_SHL int = 21
+
+pub const IR_OP_SHR int = 22
+
+pub const IR_OP_CALL int = 23
+
+pub const IR_OP_CAST int = 24
+
+// 局部存储取址：imm 是函数内稳定绑定 ID，结果是指向绑定类型的 canonical 指针。
+// 每个绑定在入口块只发一条；LLVM 后端把它降为 alloca。
+pub const IR_OP_ADDR int = 25
+
+// ALLOCA：按字节分配局部存储（imm=字节数，aux=对齐，均必须为正）；结果是指针。
+// 语义是「本函数调用内可复用的常量大小临时槽」：后端把全函数的 ALLOCA 统一
+// 提到入口块只发一次，因此 lowering 不得用它表达按迭代/按分支增长的存储。
+pub const IR_OP_ALLOCA int = 26
+
+// GEP：基址加字节偏移（a=基指针；b=动态偏移 u64 值，b<0 时用常量 imm）；结果是指针。
+pub const IR_OP_GEP int = 27
+
+// MEMCPY：编译器聚合副本，按字节复制并允许重叠（memmove 语义）；
+// a=目的指针，b=源指针，imm=字节数，无结果；区别于用户显式 memcpy。
+pub const IR_OP_MEMCPY int = 28
+
+// GLOB_ADDR：模块全局对象取址（imm=模块符号下标，函数私有 verifier 只查非负，
+// 符号种类/定义状态由模块 verifier 封闭）；结果是指针。
+pub const IR_OP_GLOB_ADDR int = 29
+
+// FN_ADDR：模块函数取址（imm=模块符号下标，aux=其完整函数类型模块下标）。
+pub const IR_OP_FN_ADDR int = 30
+
+// FNEG：按 IEEE 位级符号翻转浮点值，必须保留正负零和 NaN payload。
+pub const IR_OP_FNEG int = 31
+
+// MEMSET：默认初始化的局部存储按字节清零；a=目的指针，imm=正字节数。
+pub const IR_OP_MEMSET int = 32
+
+// 基本块终结种类。每个块恰有一个终结操作。
+pub const IR_TERM_BR int = 1
+
+pub const IR_TERM_COND_BR int = 2
+
+pub const IR_TERM_RET int = 3
+
+pub const IR_TERM_UNREACHABLE int = 4
+
+// SSA 类型定义，ptr 的 elem 是所指元素的类型索引，其余类型 elem 必须为 -1。
+pub struct IRType {
+    kind int       // IR_TY_* 类型种类
+    elem int       // 指针指向类型；非指针类型为 -1
+    bits int       // 有效位宽，供目标数据模型解释
+}
+
+// 普通 SSA 指令。结果指令给 result_id/result_type，store 使用 -1 表示无结果。
+pub struct IRInst {
+    op int             // IR_OP_* 指令种类
+    result_id int      // 定义的 SSA 值编号；无结果时为 -1
+    result_type int    // 结果类型索引；无结果时为 -1
+    a int              // 第一输入值编号；该指令不使用时为 -1
+    b int              // 第二输入值编号；该指令不使用时为 -1
+    imm i64            // CONST 位型、PARAM 序号、ALLOCA/GEP/MEMCPY/MEMSET 的大小或偏移
+    aux int            // PHI 的输入表索引或 CALL 的调用表索引；其他指令为 -1
+}
+
+// phi 的一条边输入，以前驱块和值编号组成。
+pub struct IRPhiInput {
+    pred int           // 提供该值的 CFG 前驱块
+    value int          // 在前驱边上取得的 SSA 值编号
+}
+
+// phi 输入片段。每个 phi 独占一段连续输入。
+pub struct IRPhi {
+    first int          // inputs 表的起始下标
+    count int          // 前驱输入数
+}
+
+// 直接调用的稳定目标与变长实参片段；符号名已包含目标平台前缀和模块限定。
+pub struct IRCall {
+    abi int            // 0=yh、1=C；固定参数调用约定必须显式保存
+    callee_value int   // -1 表示直接符号调用，否则是间接调用的函数值 SSA 编号
+    signature_type int // 间接调用的模块 FUNCTION 类型下标；直接调用为 -1
+    symbol_first int   // IRFunction.call_symbols 的起始字节
+    symbol_len int     // 完整汇编符号名长度，不含结尾零字节
+    arg_first int      // IRFunction.call_args 的起始下标
+    arg_count int      // 实参数量，源码顺序与 ABI 传参顺序一致
+}
+
+// 调用实参的 SSA 值和已检查类型；verifier 同时检查定义与类型一致。
+pub struct IRCallArg {
+    value int          // 调用点之前定义的 SSA 值
+    type_id int        // 该调用点要求的参数类型
+}
+
+// CFG 基本块，普通指令在 function.insts 中按块连续存放。
+pub struct IRBlock {
+    id int                 // 块编号，必须与 blocks 下标相同
+    first_inst int         // 普通指令首下标
+    inst_count int         // 普通指令数
+    term int               // IR_TERM_* 终结种类
+    term_value int         // 条件/返回值编号；不使用时为 -1
+    succ0 int              // 第一后继；无后继时为 -1
+    succ1 int              // 条件分支第二后继，否则为 -1
+}
+
+// 一个函数的完整 SSA 容器；target_id 参与缓存隔离，禁止跨目标误复用。
+pub struct IRFunction {
+    abi int                // 函数入口调用约定，随 IR 与缓存保存
+    target_id int          // 目标数据模型/ABI 的稳定编号
+    ret_type int           // 返回类型索引
+    types *IRType          // 函数私有类型表
+    type_count int         // 类型表长度
+    insts *IRInst          // 按基本块排列的指令表
+    inst_count int         // 指令表长度
+    phis *IRPhi            // phi 输入片段表
+    phi_count int          // phi 输入片段数量
+    phi_inputs *IRPhiInput // 所有 phi 的前驱输入
+    phi_input_count int    // phi 输入总数
+    calls *IRCall          // 按 CALL 指令顺序排列的直接调用表
+    call_count int         // 调用表长度
+    call_args *IRCallArg   // 所有调用的变长实参
+    call_arg_count int     // 实参总数
+    call_symbols *u8      // 各调用的稳定目标符号名，连续字节
+    call_symbol_size int   // 符号名字节总数
+    blocks *IRBlock        // 函数 CFG，blocks[0] 为入口
+    block_count int        // CFG 基本块数量
+    value_count int        // 值编号上界；void CALL/STORE 不定义值，编号可稀疏
+}
+
+// 模块类型扩展复用 IR_TY_* 标量编码；所有 elem/field/type_id 都是模块 types 表下标。
+pub const IR_MODULE_TY_STRUCT int = 13
+
+pub const IR_MODULE_TY_UNION int = 14
+
+pub const IR_MODULE_TY_ARRAY int = 15
+
+pub const IR_MODULE_TY_SLICE int = 16
+
+pub const IR_MODULE_TY_FUNCTION int = 17
+
+pub const IR_MODULE_SYMBOL_FUNCTION int = 1
+
+pub const IR_MODULE_SYMBOL_GLOBAL int = 2
+
+pub const IR_MODULE_LINK_PRIVATE int = 0
+
+pub const IR_MODULE_LINK_EXTERNAL int = 1
+
+// LLVM 首版 yh 内部调用约定；不同 ABI 版本不能合并到同一模块符号。
+pub const IR_ABI_YH_LLVM_V1 int = 2
+
+// IRModuleTarget：模块独占完整目标字符串；key 只校验函数表一致性，不能替代完整身份。
+// key 固定为 Linux arm64=1、Linux x64=2、Darwin arm64=3、Darwin x64=4。
+pub struct IRModuleTarget {
+    triple *char
+    data_layout *char
+    abi *char
+    pointer_bits int
+    little_endian int
+    layout_version int
+    key int
+}
+
+// IRModuleSource：独占路径与源码字节，位置使用 [0,length] 内的字节偏移，允许文件末尾。
+pub struct IRModuleSource {
+    path *char
+    text *u8
+    length int
+}
+
+// IRModuleLoc：指向模块自有来源表；不保存 lexer/token/GenState 的临时指针。
+pub struct IRModuleLoc {
+    source int
+    offset int
+}
+
+// IRModuleField：聚合字段的模块类型身份和字节偏移；函数类型的参数字段 offset 必须为零。
+pub struct IRModuleField {
+    type_id int
+    offset int
+}
+
+// IRModuleType：独占名义类型名和字段表；布局来自受检语义，verifier 核对大小、对齐和引用。
+// ARRAY 的 count 是元素数，SLICE 的 elem 是元素类型；FUNCTION 的 elem 是返回类型，
+// fields 是参数类型，abi/variadic 保存签名；指针允许引用尚未加入的聚合，最终统一检查。
+pub struct IRModuleType {
+    name *char
+    kind int
+    bits int
+    size int
+    align int
+    elem int
+    count int
+    fields *IRModuleField
+    field_count int
+    abi int
+    variadic int
+}
+
+// IRModuleSymbol：独占逻辑名称及参数类型表；不包含 Darwin 汇编前缀。
+// FUNCTION 的 type_id 是返回类型，GLOBAL 的 type_id 是对象类型；defined 必须对应一个实体。
+// source/offset 是声明或定义位置；C ABI=1、yh ABI=0，variadic 表示固定参数之后的实参。
+pub struct IRModuleSymbol {
+    name *char
+    kind int
+    type_id int
+    params *int
+    param_count int
+    abi int
+    variadic int
+    no_return int
+    linkage int
+    defined int
+    mutable int
+    source int
+    offset int
+}
+
+// IRModuleReloc：初始化中的有类型指针槽；symbol 引用逻辑符号表，addend 是符号地址加数。
+// width 是字节数，必须等于目标指针大小；对应原始数据槽必须为零，不能混入旧汇编文本。
+pub struct IRModuleReloc {
+    offset int
+    width int
+    symbol int
+    addend i64
+}
+
+// IRModuleGlobal：独占完整初始化字节与重定位表；size/align 和符号对象类型须一致。
+pub struct IRModuleGlobal {
+    symbol int
+    data *u8
+    size int
+    align int
+    relocs *IRModuleReloc
+    reloc_count int
+}
+
+// IRModuleFunction：独占函数 IR 及显式类型映射；body 仍使用函数私有类型下标。
+// type_map 将每个私有类型映射到模块 types；locs 为每条指令保存模块来源位置。
+pub struct IRModuleFunction {
+    symbol int
+    body IRFunction
+    type_map *int
+    type_map_count int
+    locs *IRModuleLoc
+    loc_count int
+}
+
+// IRModule：完整、可独立消费的模块容器；所有指针均独占，自有子表由 release 递归释放。
+// 只能通过增建接口创建；容量字段属于所有权边界，增建不借用前端表或进程全局状态。
+pub struct IRModule {
+    version int
+    target IRModuleTarget
+    sources *IRModuleSource
+    source_count int
+    source_capacity int
+    types *IRModuleType
+    type_count int
+    type_capacity int
+    symbols *IRModuleSymbol
+    symbol_count int
+    symbol_capacity int
+    globals *IRModuleGlobal
+    global_count int
+    global_capacity int
+    functions *IRModuleFunction
+    function_count int
+    function_capacity int
+}
+
+// 模块序列化格式版本：字节布局任何变化都必须递增，反序列化按严格相等拒绝。
+pub const IR_MODULE_SERIAL_VERSION int = 3
+
+// 身份摘要长度：32 个十六进制字符 + 结尾零。
+pub const IR_MODULE_IDENTITY_HEX int = 32
+
+pub const IR_MODULE_IDENTITY_SIZE int = 33
+
+// 缓存格式版本：外层头或迷你模块语义变化时递增。
+// v2（PL1f）：外层头增加 payload 的 FNV-1a 校验和（32 → 40 字节），命中装载时
+// 用它判断记录是否完整，从而跳过对迷你模块的整段语义 verify（结构与规模仍校验）。
+// v3（C0/C1）：函数键迁移到 SHA-256 64 位十六进制，旧记录不再命中。
+pub const IR_FUNCTION_CACHE_VERSION int = 3
+
+// 缓存键长度：64 个十六进制字符 + 结尾零。
+pub const IR_FUNCTION_CACHE_KEY_HEX int = 64
+
+pub const IR_FUNCTION_CACHE_KEY_SIZE int = 65
+
+// IRFunctionCacheEntry：一个键对应的缓存记录；data 由集合独占，size=0 表示只登记键。
+pub struct IRFunctionCacheEntry {
+    key *char
+    data *u8
+    size int
+}
+
+// IRFunctionCacheSet：命令侧装载/回收、lowering 侧查询/追加的记录集合。
+pub struct IRFunctionCacheSet {
+    entries *IRFunctionCacheEntry
+    count int
+    capacity int
+}
+
+// IR 序列化格式版本。格式只写逻辑字段，不依赖宿主结构体布局或指针。
+pub const IR_SERIAL_VERSION int = 9
+
+// ir_find_value_type：查找 SSA 值的有效定义，未定义、重定义或坏类型返回 -1。
+pub fn ir_find_value_type(f *IRFunction, value int) int {
+    if (f == 0 || value < 0 || f.inst_count < 0 || f.inst_count > 0 && f.insts == 0 || f.types == 0) {
+        return -1
+    }
+    let found int = -1
+    let i int = 0
+    for i < f.inst_count {
+        if (f.insts[i].result_id == value) {
+            if (found >= 0) {
+                return -1
+            }
+            let tid int = f.insts[i].result_type
+            if (tid < 0 || tid >= f.type_count || f.types[tid].kind == IR_TY_VOID) {
+                return -1
+            }
+            found = tid
+        }
+        i += 1
+    }
+    return found
+}
+
+// ir_verify：校验 SSA 容器的结构、值唯一性、操作数支配/类型与 phi 前驱完整性。
+// 返回 0 表示通过，-1 表示结构或类型不合法；输入所有数组均由调用方持有。
+pub fn ir_verify(f *IRFunction) int {
+    if (f == 0 || f.abi < 0 || f.abi > IR_ABI_YH_LLVM_V1 || f.target_id < 0 || f.block_count <= 0 || f.blocks == 0 || f.inst_count < 0
+        || f.value_count < 0 || f.type_count <= 0 || f.types == 0 || f.phi_count < 0
+        || f.phi_input_count < 0 || f.call_count < 0 || f.call_arg_count < 0
+        || f.call_symbol_size < 0 || f.ret_type < 0 || f.ret_type >= f.type_count
+        || ir_type_ok(f, f.ret_type) == 0) {
+        return -1
+    }
+    if (f.inst_count > 0 && f.insts == 0 || f.phi_count > 0 && f.phis == 0
+        || f.call_count > 0 && f.calls == 0 || f.call_arg_count > 0 && f.call_args == 0
+        || f.call_symbol_size > 0 && f.call_symbols == 0) {
+        return -1
+    }
+    if (ir_verify_call_table(f) != 0) { return -1 }
+    // 参数由入口块前导 PARAM 指令声明，编号从零连续递增；这让函数
+    // 签名随 IR 一起序列化，同时不另加一份并行的参数表。
+    let entry IRBlock = f.blocks[0]
+    if (entry.id != 0 || entry.first_inst != 0 || entry.inst_count < 0
+        || entry.inst_count > f.inst_count) {
+        return -1
+    }
+    let param_start int = 0
+    for param_start < entry.inst_count &&
+        f.insts[entry.first_inst + param_start].op == IR_OP_PHI {
+        param_start += 1
+    }
+    let param_count int = 0
+    for param_start + param_count < entry.inst_count &&
+        f.insts[entry.first_inst + param_start + param_count].op == IR_OP_PARAM {
+        if (f.insts[entry.first_inst + param_start + param_count].imm != param_count) {
+            return -1
+        }
+        param_count += 1
+    }
+    let t int = 0
+    for t < f.type_count {
+        if (ir_type_ok(f, t) == 0) {
+            return -1
+        }
+        t += 1
+    }
+    let used int = 0
+    let call_index int = 0
+    let b int = 0
+    // 块的指令区间允许与编号顺序不同（构造器按需创建合流块），
+    // 但必须互不重叠且恰好覆盖 [0, inst_count)；用覆盖标记逐块校验。
+    let covered *u8 = malloc((f.inst_count + 1).to_type(u64)).to_type(*u8)
+    if (covered == 0) { return -1 }
+    // 值编号唯一性用位图检查：块区间允许乱序，前缀扫描会把当前指令
+    // 误判为重复；位图对任意布局都正确且是 O(n)。
+    let seen_ids *u8 = malloc((f.value_count + 1).to_type(u64)).to_type(*u8)
+    if (seen_ids == 0) { free(covered); return -1 }
+    let cover_i int = 0
+    for cover_i <= f.inst_count {
+        covered[cover_i] = 0
+        cover_i += 1
+    }
+    let seen_i int = 0
+    for seen_i <= f.value_count {
+        seen_ids[seen_i] = 0
+        seen_i += 1
+    }
+    let cover_ok int = 1
+    for b < f.block_count {
+        let block IRBlock = f.blocks[b]
+        if (block.id != b || block.first_inst < 0 || block.inst_count < 0
+            || block.first_inst + block.inst_count > f.inst_count
+            || ir_verify_term(f, &block) != 0) {
+            cover_ok = 0
+        }
+        if (cover_ok != 0) {
+            let cover_j int = 0
+            for cover_j < block.inst_count {
+                if (covered[block.first_inst + cover_j] != 0) { cover_ok = 0; break }
+                covered[block.first_inst + cover_j] = 1
+                cover_j += 1
+            }
+        }
+        if (cover_ok == 0) { free(covered); free(seen_ids); return -1 }
+        let j int = 0
+        let saw_non_phi int = 0
+        for j < block.inst_count {
+            let inst *IRInst = &f.insts[block.first_inst + j]
+            if (inst.op == IR_OP_PARAM
+                && (b != 0 || j < param_start || j >= param_start + param_count
+                    || inst.imm != j - param_start)) {
+                free(covered)
+                free(seen_ids)
+                return -1
+            }
+            if (inst.op != IR_OP_PHI) {
+                saw_non_phi = 1
+            }
+            if (ir_verify_inst(f, inst, saw_non_phi) != 0) {
+                free(covered)
+                free(seen_ids)
+                return -1
+            }
+            if (inst.op == IR_OP_PHI && ir_verify_phi(f, b, inst) != 0) {
+                free(covered)
+                free(seen_ids)
+                return -1
+            }
+            if (inst.result_id >= 0) {
+                if (seen_ids[inst.result_id] != 0) {
+                    free(covered)
+                    free(seen_ids)
+                    return -1
+                }
+                seen_ids[inst.result_id] = 1
+            }
+            j += 1
+        }
+        used += block.inst_count
+        b += 1
+    }
+    free(covered)
+    free(seen_ids)
+    if (used != f.inst_count) {
+        return -1
+    }
+    // 无结果指令（void CALL、STORE）不定义值，值编号允许稀疏；
+    // value_count 只须覆盖每个已定义值的编号上界。
+    let defs int = 0
+    let i int = 0
+    for i < f.inst_count {
+        // 调用表按线性指令数组追加。块编号允许与指令范围乱序，不能据其枚举顺序验调用编号。
+        if (f.insts[i].op == IR_OP_CALL) {
+            if (f.insts[i].aux != call_index) { return -1 }
+            call_index += 1
+        }
+        if (f.insts[i].result_id >= 0) {
+            defs += 1
+        }
+        i += 1
+    }
+    if (defs > f.value_count || call_index != f.call_count) {
+        return -1
+    }
+    let dom_result int = ir_verify_dominance(f)
+    if (dom_result != 0) { }
+    return dom_result
+}
+
+// ir_integer_type：判断类型是否能按定宽整数规则参与默认常量折叠。
+pub fn ir_integer_type(kind int) int {
+    return kind >= IR_TY_I8 && kind <= IR_TY_U64 ? 1 : 0
+}
+
+// ir_float_type：判断类型是否为受支持的 IEEE 单精度或双精度标量。
+pub fn ir_float_type(kind int) int {
+    return kind == IR_TY_F32 || kind == IR_TY_F64 ? 1 : 0
+}
+
+// ir_const_type：整数与布尔常量可以安全参与本阶段的位型简化。
+pub fn ir_const_type(kind int) int {
+    return ir_integer_type(kind) != 0 || kind == IR_TY_BOOL ? 1 : 0
+}
+
+// ir_scalar_type：标量值可参与显式数值转换；bool 保留源级一字节语义。
+pub fn ir_scalar_type(kind int) int {
+    return ir_const_type(kind) != 0 || ir_float_type(kind) != 0 ? 1 : 0
+}
+
+// 直接调用符号只能使用两平台汇编器可直接接受的稳定名称字节。
+pub fn ir_call_symbol_byte_ok(value u8) int {
+    if (value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
+        || value >= '0' && value <= '9' || value == '_' || value == '.'
+        || value == '$') { return 1 }
+    return 0
+}
+
+// ir_target_key：把完整 triple 映射为模块目标 key；未知目标返回 -1。
+// 前端函数键只借用这个稳定编号，不复制目标表。
+pub fn ir_target_key(triple *char) int {
+    let expected IRModuleTarget
+    if (ir_module_target_expected(triple, &expected) != 0) { return -1 }
+    return expected.key
+}
+
+// ir_module_init：out 必须为零初始化或已 release；输入字符串全部复制，key 从完整 triple 推导。
+// 失败清理部分分配；成功产生可增建的空模块，不要求 LLVM、gen 或平台探测。
+pub fn ir_module_init(out *IRModule, target *IRModuleTarget) int {
+    if (out == 0 || target == 0 || out.version != 0 || out.sources != 0 || out.types != 0
+        || out.symbols != 0 || out.globals != 0 || out.functions != 0 || out.target.triple != 0
+        || out.target.data_layout != 0 || out.target.abi != 0) { return -1 }
+    let expected IRModuleTarget
+    if (ir_module_target_expected(target.triple, &expected) != 0) { return -1 }
+    let checked IRModuleTarget = target[0]
+    checked.key = expected.key
+    if (ir_module_target_ok(&checked) == 0) { return -1 }
+    out.target = checked
+    out.target.triple = ir_module_copy_str(target.triple)
+    out.target.data_layout = ir_module_copy_str(target.data_layout)
+    out.target.abi = ir_module_copy_str(target.abi)
+    if (out.target.triple == 0 || out.target.data_layout == 0 || out.target.abi == 0) {
+        ir_module_release(out); return -1
+    }
+    out.version = IR_MODULE_VERSION
+    return 0
+}
+
+// ir_module_add_source：深拷贝路径和源码，返回新来源下标或 -1；调用者可立即释放输入。
+pub fn ir_module_add_source(unit *IRModule, path *char, text *u8, length int) int {
+    if (unit == 0 || unit.version != IR_MODULE_VERSION || ir_module_str_len(path) <= 0
+        || length < 0 || length > IR_SERIAL_MAX_BYTES || length > 0 && text == 0) { return -1 }
+    let item IRModuleSource
+    item.path = ir_module_copy_str(path)
+    item.text = ir_module_copy(text.to_type(*void), length).to_type(*u8)
+    item.length = length
+    if (item.path == 0 || length > 0 && item.text == 0) {
+        if (item.path != 0) { free(item.path) }
+        if (item.text != 0) { free(item.text) }
+        return -1
+    }
+    let next *IRModuleSource = ir_module_reserve(unit.sources.to_type(*void), unit.source_count,
+        &unit.source_capacity, sizeof(IRModuleSource)).to_type(*IRModuleSource)
+    if (next == 0) { free(item.path); if (item.text != 0) { free(item.text) } return -1 }
+    unit.sources = next; unit.sources[unit.source_count] = item
+    unit.source_count += 1
+    return unit.source_count - 1
+}
+
+// ir_module_add_type：复制布局描述、名义名称和字段；允许前向类型引用，最终由 verifier 封闭。
+// 同内容（名字 + 布局 + 字段）已存在时直接返回既有编号，不再追加。
+pub fn ir_module_add_type(unit *IRModule, name *char, value *IRModuleType,
+    fields *IRModuleField, count int) int {
+    if (unit == 0 || unit.version != IR_MODULE_VERSION || value == 0
+        || count < 0 || count > IR_SERIAL_MAX_BYTES / sizeof(IRModuleField)
+        || count > 0 && fields == 0) { return -1 }
+    let existing int = 0
+    for existing < unit.type_count {
+        if (ir_module_type_same(&unit.types[existing], value) != 0
+            && ir_module_str_eq(unit.types[existing].name, name) != 0) {
+            return existing
+        }
+        existing += 1
+    }
+    let item IRModuleType = value[0]
+    item.name = ir_module_copy_str(name)
+    item.fields = ir_module_copy(fields.to_type(*void), count * sizeof(IRModuleField)).to_type(*IRModuleField)
+    item.field_count = count
+    if (item.name == 0 || count > 0 && item.fields == 0) {
+        if (item.name != 0) { free(item.name) }
+        if (item.fields != 0) { free(item.fields) }
+        return -1
+    }
+    let next *IRModuleType = ir_module_reserve(unit.types.to_type(*void), unit.type_count,
+        &unit.type_capacity, sizeof(IRModuleType)).to_type(*IRModuleType)
+    if (next == 0) { free(item.name); if (item.fields != 0) { free(item.fields) } return -1 }
+    unit.types = next; unit.types[unit.type_count] = item; unit.type_count += 1
+    return unit.type_count - 1
+}
+
+// ir_module_add_symbol：复制逻辑名和参数类型；一致声明可合并，声明→定义更新来源，双重定义拒绝。
+// 返回唯一逻辑符号下标；不写汇编名字、不保存前端绑定号。
+pub fn ir_module_add_symbol(unit *IRModule, name *char, value *IRModuleSymbol,
+    params *int, count int) int {
+    if (unit == 0 || unit.version != IR_MODULE_VERSION || value == 0 || ir_module_str_len(name) <= 0
+        || count < 0 || count > IR_SERIAL_MAX_BYTES / sizeof(int) || count > 0 && params == 0) { return -1 }
+    let i int = 0
+    for i < unit.symbol_count {
+        if (ir_module_str_eq(unit.symbols[i].name, name) != 0) {
+            if (ir_module_symbol_same(&unit.symbols[i], value, params, count) == 0
+                || unit.symbols[i].defined != 0 && value.defined != 0) { return -1 }
+            if (value.defined != 0) {
+                unit.symbols[i].defined = value.defined
+                unit.symbols[i].source = value.source; unit.symbols[i].offset = value.offset
+            }
+            return i
+        }
+        i += 1
+    }
+    let item IRModuleSymbol = value[0]
+    item.name = ir_module_copy_str(name)
+    item.params = ir_module_copy(params.to_type(*void), count * sizeof(int)).to_type(*int)
+    item.param_count = count
+    if (item.name == 0 || count > 0 && item.params == 0) {
+        if (item.name != 0) { free(item.name) }
+        if (item.params != 0) { free(item.params) }
+        return -1
+    }
+    let next *IRModuleSymbol = ir_module_reserve(unit.symbols.to_type(*void), unit.symbol_count,
+        &unit.symbol_capacity, sizeof(IRModuleSymbol)).to_type(*IRModuleSymbol)
+    if (next == 0) { free(item.name); if (item.params != 0) { free(item.params) } return -1 }
+    unit.symbols = next; unit.symbols[unit.symbol_count] = item; unit.symbol_count += 1
+    return unit.symbol_count - 1
+}
+
+// ir_module_add_global：复制完整初始化与指针重定位，返回数据实体下标；类型一致性由 verifier 检查。
+pub fn ir_module_add_global(unit *IRModule, symbol int, data *u8, size int, align int,
+    relocs *IRModuleReloc, count int) int {
+    if (unit == 0 || unit.version != IR_MODULE_VERSION || size < 0 || size > IR_SERIAL_MAX_BYTES
+        || size > 0 && data == 0 || count < 0 || count > IR_SERIAL_MAX_BYTES / sizeof(IRModuleReloc)
+        || count > 0 && relocs == 0) { return -1 }
+    let item IRModuleGlobal
+    item.symbol = symbol; item.size = size; item.align = align; item.reloc_count = count
+    item.data = ir_module_copy(data.to_type(*void), size).to_type(*u8)
+    item.relocs = ir_module_copy(relocs.to_type(*void), count * sizeof(IRModuleReloc)).to_type(*IRModuleReloc)
+    if (size > 0 && item.data == 0 || count > 0 && item.relocs == 0) {
+        if (item.data != 0) { free(item.data) } if (item.relocs != 0) { free(item.relocs) } return -1
+    }
+    let next *IRModuleGlobal = ir_module_reserve(unit.globals.to_type(*void), unit.global_count,
+        &unit.global_capacity, sizeof(IRModuleGlobal)).to_type(*IRModuleGlobal)
+    if (next == 0) {
+        if (item.data != 0) { free(item.data) } if (item.relocs != 0) { free(item.relocs) } return -1
+    }
+    unit.globals = next; unit.globals[unit.global_count] = item; unit.global_count += 1
+    return unit.global_count - 1
+}
+
+// ir_module_add_function：用既有稳定编码深拷贝全部 SSA 表，复制私有→模块类型映射与指令来源。
+// locs 为空时以逻辑符号的来源填充每条指令；输入不转移所有权，失败释放部分副本。
+pub fn ir_module_add_function(unit *IRModule, symbol int, body *IRFunction,
+    type_map *int, locs *IRModuleLoc) int {
+    if (unit == 0 || unit.version != IR_MODULE_VERSION || body == 0 || type_map == 0
+        || symbol < 0 || symbol >= unit.symbol_count || body.target_id != unit.target.key) { return -1 }
+    let size int = ir_serialized_size(body)
+    if (size < 0) { return -1 }
+    let data *u8 = malloc(size.to_type(u64)).to_type(*u8)
+    if (data == 0) { return -1 }
+    let item IRModuleFunction
+    item.symbol = symbol
+    let ok int = ir_serialize(body, data, size)
+    if (ok == size) { ok = ir_deserialize(&item.body, data, size, unit.target.key) }
+    else { ok = -1 }
+    free(data)
+    if (ok != 0) { return -1 }
+    item.type_map_count = body.type_count
+    item.type_map = ir_module_copy(type_map.to_type(*void), body.type_count * sizeof(int)).to_type(*int)
+    item.loc_count = body.inst_count
+    if (body.inst_count > 0) {
+        item.locs = malloc((body.inst_count * sizeof(IRModuleLoc)).to_type(u64)).to_type(*IRModuleLoc)
+    }
+    if (item.type_map == 0 || body.inst_count > 0 && item.locs == 0) {
+        ir_function_release(&item.body)
+        if (item.type_map != 0) { free(item.type_map) } if (item.locs != 0) { free(item.locs) } return -1
+    }
+    let i int = 0
+    for i < body.inst_count {
+        if (locs != 0) { item.locs[i] = locs[i] }
+        else { item.locs[i].source = unit.symbols[symbol].source; item.locs[i].offset = unit.symbols[symbol].offset }
+        i += 1
+    }
+    let next *IRModuleFunction = ir_module_reserve(unit.functions.to_type(*void), unit.function_count,
+        &unit.function_capacity, sizeof(IRModuleFunction)).to_type(*IRModuleFunction)
+    if (next == 0) {
+        ir_function_release(&item.body); free(item.type_map); if (item.locs != 0) { free(item.locs) } return -1
+    }
+    unit.functions = next; unit.functions[unit.function_count] = item; unit.function_count += 1
+    return unit.function_count - 1
+}
+
+// ir_module_release：仅释放增建接口产生的独占表；清空全部指针/计数/身份，重复调用安全。
+pub fn ir_module_release(unit *IRModule) void {
+    if (unit == 0) { return }
+    let i int = 0
+    for i < unit.source_count {
+        free(unit.sources[i].path); if (unit.sources[i].text != 0) { free(unit.sources[i].text) } i += 1
+    }
+    i = 0
+    for i < unit.type_count {
+        free(unit.types[i].name); if (unit.types[i].fields != 0) { free(unit.types[i].fields) } i += 1
+    }
+    i = 0
+    for i < unit.symbol_count {
+        free(unit.symbols[i].name); if (unit.symbols[i].params != 0) { free(unit.symbols[i].params) } i += 1
+    }
+    i = 0
+    for i < unit.global_count {
+        if (unit.globals[i].data != 0) { free(unit.globals[i].data) }
+        if (unit.globals[i].relocs != 0) { free(unit.globals[i].relocs) } i += 1
+    }
+    i = 0
+    for i < unit.function_count {
+        ir_function_release(&unit.functions[i].body); free(unit.functions[i].type_map)
+        if (unit.functions[i].locs != 0) { free(unit.functions[i].locs) } i += 1
+    }
+    if (unit.sources != 0) { free(unit.sources) } if (unit.types != 0) { free(unit.types) }
+    if (unit.symbols != 0) { free(unit.symbols) } if (unit.globals != 0) { free(unit.globals) }
+    if (unit.functions != 0) { free(unit.functions) }
+    if (unit.target.triple != 0) { free(unit.target.triple) }
+    if (unit.target.data_layout != 0) { free(unit.target.data_layout) }
+    if (unit.target.abi != 0) { free(unit.target.abi) }
+    unit.version = 0; unit.target.triple = 0; unit.target.data_layout = 0; unit.target.abi = 0
+    unit.target.pointer_bits = 0; unit.target.little_endian = 0; unit.target.layout_version = 0; unit.target.key = 0
+    unit.sources = 0; unit.source_count = 0; unit.source_capacity = 0
+    unit.types = 0; unit.type_count = 0; unit.type_capacity = 0
+    unit.symbols = 0; unit.symbol_count = 0; unit.symbol_capacity = 0
+    unit.globals = 0; unit.global_count = 0; unit.global_capacity = 0
+    unit.functions = 0; unit.function_count = 0; unit.function_capacity = 0
+}
+
+// ir_module_sealed：只检查模块头结构（非空、版本匹配），不做任何遍历。
+// 给「生产者已完整 verify、消费方只需拒绝半初始化模块」的路径用（如后端发射）。
+pub fn ir_module_sealed(unit *IRModule) int {
+    if (unit == 0 || unit.version != IR_MODULE_VERSION) { return 0 }
+    return 1
+}
+
+pub fn ir_module_verify(unit *IRModule) int {
+    if (unit == 0 || unit.version != IR_MODULE_VERSION || ir_module_target_ok(&unit.target) == 0
+        || ir_module_table_ok(unit.sources.to_type(*void), unit.source_count, unit.source_capacity, sizeof(IRModuleSource)) == 0
+        || ir_module_table_ok(unit.types.to_type(*void), unit.type_count, unit.type_capacity, sizeof(IRModuleType)) == 0
+        || ir_module_table_ok(unit.symbols.to_type(*void), unit.symbol_count, unit.symbol_capacity, sizeof(IRModuleSymbol)) == 0
+        || ir_module_table_ok(unit.globals.to_type(*void), unit.global_count, unit.global_capacity, sizeof(IRModuleGlobal)) == 0
+        || ir_module_table_ok(unit.functions.to_type(*void), unit.function_count, unit.function_capacity, sizeof(IRModuleFunction)) == 0) { return -1 }
+    let i int = 0
+    for i < unit.source_count {
+        let source IRModuleSource = unit.sources[i]
+        if (ir_module_str_len(source.path) <= 0 || source.length < 0 || source.length > IR_SERIAL_MAX_BYTES
+            || source.length > 0 && source.text == 0 || source.length == 0 && source.text != 0) { return -1 }
+        i += 1
+    }
+    i = 0
+    for i < unit.type_count { if (ir_module_verify_type(unit, &unit.types[i]) != 0) { return -1 } i += 1 }
+    let colors *u8 = 0
+    if (unit.type_count > 0) {
+        colors = malloc(unit.type_count.to_type(u64)).to_type(*u8)
+        if (colors == 0) { return -1 }
+    }
+    i = 0
+    for i < unit.type_count { colors[i] = 0; i += 1 }
+    i = 0
+    for i < unit.type_count {
+        if (ir_module_layout_visit(unit, i, colors, 0) != 0) { free(colors); return -1 }
+        i += 1
+    }
+    if (colors != 0) { free(colors) }
+    i = 0
+    for i < unit.symbol_count {
+        if (ir_module_verify_symbol(unit, &unit.symbols[i]) != 0) { return -1 }
+        i += 1
+    }
+    // PL1d：符号名唯一性改用哈希表。原来的两两比较是 O(n²) 次字符串比较，
+    // 真实模块有几百到上千个符号（含依赖），verify 因此成为 lowering 里的大项
+    // （冷编 18.8%），且「每函数成本」随模块变大而涨（PL2 的超线性来源之一）。
+    if (ir_module_verify_symbol_names(unit) != 0) { return -1 }
+    i = 0
+    for i < unit.global_count { if (ir_module_verify_global(unit, &unit.globals[i]) != 0) { return -1 } i += 1 }
+    i = 0
+    for i < unit.function_count { if (ir_module_verify_function(unit, &unit.functions[i]) != 0) { return -1 } i += 1 }
+    // 每个定义恰有一个实体，每个声明没有实体；同时排除重复 body/global 绑定。
+    // PL1d：按符号下标一次计数（O(符号+全局+函数)），不再对每个符号各扫一遍全局与函数。
+    let entity *int = 0
+    if (unit.symbol_count > 0) {
+        entity = malloc((unit.symbol_count * sizeof(int)).to_type(u64)).to_type(*int)
+        if (entity == 0) { return -1 }
+        i = 0
+        for i < unit.symbol_count { entity[i] = 0; i += 1 }
+    }
+    i = 0
+    for i < unit.global_count {
+        let owner int = unit.globals[i].symbol
+        if (owner < 0 || owner >= unit.symbol_count) {
+            free(entity.to_type(*void)); return -1
+        }
+        entity[owner] += 1
+        i += 1
+    }
+    i = 0
+    for i < unit.function_count {
+        let owner int = unit.functions[i].symbol
+        if (owner < 0 || owner >= unit.symbol_count) {
+            free(entity.to_type(*void)); return -1
+        }
+        entity[owner] += 1
+        i += 1
+    }
+    i = 0
+    for i < unit.symbol_count {
+        let ok int = entity[i] == unit.symbols[i].defined
+        i += 1
+        if (ok == 0) { free(entity.to_type(*void)); return -1 }
+    }
+    free(entity.to_type(*void))
+    return 0
+}
+
+// ir_module_serialized_size：返回合法模块的完整编码长度，或 -1。
+// 不合法（ir_module_verify 失败）或规模超限的模块不可序列化。
+pub fn ir_module_serialized_size(unit *IRModule) int {
+    let plan IRModulePlan
+    if (ir_module_prepare(unit, &plan) != 0) { return -1 }
+    return plan.total_bytes
+}
+
+// ir_module_serialize：把合法模块写进调用方缓冲区，返回写入字节数或 -1。
+// 先按 plan 算长度并检查容量：容量不足（含 data 为空）直接返回 -1，
+// 一个字节都不写；成功时恰好写 total_bytes 字节且内容确定。
+pub fn ir_module_serialize(unit *IRModule, data *u8, capacity int) int {
+    let plan IRModulePlan
+    if (ir_module_prepare(unit, &plan) != 0 || data == 0 || capacity < plan.total_bytes) { return -1 }
+    let cursor int = 0
+    if (ir_module_write_fixed(unit, &plan, data, &cursor) != 0
+        || ir_module_write_blobs(unit, data, &cursor) != 0) { return -1 }
+    return cursor == plan.total_bytes ? cursor : -1
+}
+
+// ir_module_serialize_alloc：一次 prepare（verify + plan）后直接分配并写出完整编码。
+// 供函数级缓存使用：原「serialized_size + serialize」两步会把 verify 与 plan 各跑
+// 两次，而这两步都是 O(模块规模) 的全量扫描（PL1e 实测占 capture 的大头）。
+// 成功返回 0 并交出 out_data 所有权；任何失败都不写出参。
+pub fn ir_module_serialize_alloc(unit *IRModule, out_data **u8, out_size *int) int {
+    return ir_module_serialize_alloc_mode(unit, 1, out_data, out_size)
+}
+
+// ir_module_serialize_alloc_trusted：跳过 ir_module_verify，只做规模检查后编码。
+// **只给函数级缓存用**：那里的 mini 模块是本进程从已验证模块忠实重编号出来的，
+// 而且记录只在整模块 verify + emit 成功后才由 firc_commit 落盘——坏记录不会写盘，
+// 即使写了，装载侧 ir_module_deserialize 仍会完整校验并当作 miss。
+// 省下的是每条记录一次 O(模块规模) 的 verify（PL1e 实测占 capture 约三成）。
+pub fn ir_module_serialize_alloc_trusted(unit *IRModule, out_data **u8,
+    out_size *int) int {
+    return ir_module_serialize_alloc_mode(unit, 0, out_data, out_size)
+}
+
+// ir_module_deserialize：从稳定字节流重建完整模块。0 成功，-1 失败。
+// 复用 ir_module_verify 做完整语义校验（目标身份、布局闭合、符号唯一性、
+// 重定位与函数体、定义与实体一一对应）；任何失败都释放全部部分分配并把
+// out 恢复为零初始化。out 进入时必须已是零初始化，且不得被并发使用。
+pub fn ir_module_deserialize(out *IRModule, data *u8, size int) int {
+    return ir_module_deserialize_mode(out, data, size, 1)
+}
+
+// ir_module_deserialize_trusted：不跑语义 verify 的反序列化。
+// **只给函数级缓存装载用**：调用方已用记录头里的 FNV 校验过 payload 完整性，
+// 且记录只在本进程整模块 verify + emit 成功后落盘。结构、规模、规范编码
+// （ir_module_canonical）仍全部校验，合并后的整模块在 lower 结束时会完整 verify。
+pub fn ir_module_deserialize_trusted(out *IRModule, data *u8, size int) int {
+    return ir_module_deserialize_mode(out, data, size, 0)
+}
+
+// ir_module_identity：写 32 个十六进制字符 + 结尾零，返回 32 或 -1。
+// 前半 = FNV-1a(身份头字段)，后半 = FNV-1a(整段序列化字节，用不同种子避免
+// 两段同源)；同一模块内容在任何进程、任何地址布局下都得到同一摘要，
+// 内容（含某个函数常量）变化必然改变摘要。capacity 必须 >= 33。
+pub fn ir_module_identity(unit *IRModule, out *u8, capacity int) int {
+    if (out == 0 || capacity < IR_MODULE_IDENTITY_SIZE) { return -1 }
+    let size int = ir_module_serialized_size(unit)
+    if (size <= 0) { return -1 }
+    let buffer *u8 = ir_module_alloc_zero(size).to_type(*u8)
+    if (buffer == 0) { return -1 }
+    if (ir_module_serialize(unit, buffer, size) != size) { free(buffer); return -1 }
+    let head u64 = 0
+    let seed u64 = ir_module_fnv_u64(IR_MODULE_FNV_BASIS, 2)
+    if (ir_module_identity_head(unit, &head) != 0) { free(buffer); return -1 }
+    let content u64 = ir_module_fnv_bytes(seed, buffer, size)
+    free(buffer)
+    ir_module_hex_digits(head, out)
+    ir_module_hex_digits(content, &out[16])
+    out[IR_MODULE_IDENTITY_HEX] = 0
+    return IR_MODULE_IDENTITY_HEX
+}
+
+// ir_fc_key_ok：缓存键必须是 64 个十六进制字符并以零结尾。
+pub fn ir_fc_key_ok(key *char) int {
+    if (key == 0) { return 0 }
+    let i int = 0
+    for i < IR_FUNCTION_CACHE_KEY_HEX {
+        let c u8 = key[i].to_type(u8)
+        let digit int = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+        if (digit == 0) { return 0 }
+        i += 1
+    }
+    return key[IR_FUNCTION_CACHE_KEY_HEX] == 0 ? 1 : 0
+}
+
+// ir_function_cache_set_find：按键查找记录；未找到返回空指针。
+pub fn ir_function_cache_set_find(set *IRFunctionCacheSet, key *char) *IRFunctionCacheEntry {
+    if (set == 0 || set.entries == 0 || ir_fc_key_ok(key) == 0) { return 0 }
+    let i int = 0
+    for i < set.count {
+        if (ir_module_str_eq(set.entries[i].key, key) != 0) { return &set.entries[i] }
+        i += 1
+    }
+    return 0
+}
+
+// ir_function_cache_set_add：复制键并接管 data 所有权；data 为空时只登记键。
+// 同一键已存在时释放新 data 并保留旧记录，返回 0（调用方仍负责自己的释放）。
+pub fn ir_function_cache_set_add(set *IRFunctionCacheSet, key *char, data *u8,
+    size int) int {
+    if (set == 0 || ir_fc_key_ok(key) == 0 || size < 0 || (data == 0) != (size == 0)) {
+        return -1
+    }
+    if (ir_function_cache_set_find(set, key) != 0) {
+        if (data != 0) { free(data.to_type(*void)) }
+        return 0
+    }
+    if (set.count == set.capacity) {
+        let capacity int = set.capacity == 0 ? 8 : set.capacity * 2
+        if (capacity <= set.capacity) { return -1 }
+        let next *IRFunctionCacheEntry = malloc(
+            (capacity * sizeof(IRFunctionCacheEntry)).to_type(u64)).to_type(*IRFunctionCacheEntry)
+        if (next == 0) { return -1 }
+        let i int = 0
+        for i < set.count { next[i] = set.entries[i]; i += 1 }
+        if (set.entries != 0) { free(set.entries.to_type(*void)) }
+        set.entries = next; set.capacity = capacity
+    }
+    let entry *IRFunctionCacheEntry = &set.entries[set.count]
+    entry.key = malloc(IR_FUNCTION_CACHE_KEY_SIZE.to_type(u64)).to_type(*char)
+    if (entry.key == 0) { return -1 }
+    let i int = 0
+    for i < IR_FUNCTION_CACHE_KEY_SIZE { entry.key[i] = key[i]; i += 1 }
+    entry.data = data; entry.size = size
+    set.count += 1
+    return 0
+}
+
+// ir_function_cache_set_release：释放全部键与记录；允许空集合和重复调用。
+pub fn ir_function_cache_set_release(set *IRFunctionCacheSet) void {
+    if (set == 0) { return }
+    let i int = 0
+    for i < set.count {
+        if (set.entries[i].key != 0) { free(set.entries[i].key.to_type(*void)) }
+        if (set.entries[i].data != 0) { free(set.entries[i].data.to_type(*void)) }
+        i += 1
+    }
+    if (set.entries != 0) { free(set.entries.to_type(*void)) }
+    set.entries = 0; set.count = 0; set.capacity = 0
+}
+
+// ir_function_cache_capture：把 module 的 function_index 打包成自包含缓存记录。
+// 成功返回 0 并交出 out_data/out_size 所有权；闭包暂不支持返回 1（跳过缓存）；
+// 内部错误返回 -1。记录外层含 env_key，合并时必须匹配。
+pub fn ir_function_cache_capture(unit *IRModule, function_index int, env_key u64,
+    out_data **u8, out_size *int) int {
+    if (unit == 0 || function_index < 0 || function_index >= unit.function_count
+        || out_data == 0 || out_size == 0) { return -1 }
+    out_data[0] = 0; out_size[0] = 0
+    let function IRModuleFunction = unit.functions[function_index]
+    // PC4（2026-10-25）：不在这里逐函数跑 ir_verify。受检快照的模块级
+    // ir_module_verify 在 capture 之后、提交之前统一验证；记录只在整模块构建
+    // 成功后才落盘，重复校验纯属成本（实测这部分占 capture 的可见时间）。
+    if (function.symbol < 0 || function.symbol >= unit.symbol_count
+        || unit.symbols[function.symbol].kind != IR_MODULE_SYMBOL_FUNCTION) { return -1 }
+    let symbol_used *u8 = malloc(unit.symbol_count.to_type(u64)).to_type(*u8)
+    let global_used *u8 = malloc(unit.global_count.to_type(u64)).to_type(*u8)
+    let type_used *u8 = malloc(unit.type_count.to_type(u64)).to_type(*u8)
+    let type_state *u8 = malloc(unit.type_count.to_type(u64)).to_type(*u8)
+    let type_order *int = malloc((unit.type_count * sizeof(int)).to_type(u64)).to_type(*int)
+    let type_map *int = malloc((unit.type_count * sizeof(int)).to_type(u64)).to_type(*int)
+    let symbol_map *int = malloc((unit.symbol_count * sizeof(int)).to_type(u64)).to_type(*int)
+    let result int = -1
+    if (symbol_used == 0 || global_used == 0 || type_used == 0
+        || type_state == 0 || type_order == 0 || type_map == 0
+        || symbol_map == 0) { result = -1 } else {
+        ir_fc_zero(symbol_used, unit.symbol_count)
+        ir_fc_zero(global_used, unit.global_count)
+        ir_fc_zero(type_used, unit.type_count)
+        ir_fc_zero(type_state, unit.type_count)
+        let i int = 0
+        for i < unit.type_count { type_map[i] = -1; i += 1 }
+        i = 0
+        for i < unit.symbol_count { symbol_map[i] = -1; i += 1 }
+        result = 0
+        if (ir_fc_mark_symbol(unit, symbol_used, global_used, function.symbol) != 0) {
+            result = -1
+        }
+        i = 0
+        for i < function.body.inst_count && result == 0 {
+            let inst IRInst = function.body.insts[i]
+            if (inst.op == IR_OP_GLOB_ADDR || inst.op == IR_OP_FN_ADDR) {
+                if (ir_fc_mark_symbol(unit, symbol_used, global_used,
+                        inst.imm.to_type(int)) != 0) { result = -1 }
+            }
+            if (inst.op == IR_OP_CALL) {
+                let call IRCall = function.body.calls[inst.aux]
+                if (call.callee_value < 0) {
+                    let called int = ir_fc_find_symbol(unit,
+                        function.body.call_symbols + call.symbol_first, call.symbol_len)
+                    if (called < 0 || ir_fc_mark_symbol(unit, symbol_used,
+                            global_used, called) != 0) { result = -1 }
+                }
+            }
+            i += 1
+        }
+        if (result == 0 && ir_fc_mark_relocs(unit, symbol_used, global_used) != 0) {
+            result = -1
+        }
+        // 类型闭包：函数映射、FN_ADDR 签名、间接调用签名与符号签名。
+        if (result == 0) {
+            i = 0
+            for i < function.type_map_count {
+                if (ir_fc_mark_type(unit, type_used, function.type_map[i]) != 0) {
+                    result = -1; break
+                }
+                i += 1
+            }
+        }
+        i = 0
+        for i < function.body.inst_count && result == 0 {
+            let inst IRInst = function.body.insts[i]
+            if (inst.op == IR_OP_FN_ADDR
+                && ir_fc_mark_type(unit, type_used, inst.aux) != 0) { result = -1 }
+            if (inst.op == IR_OP_CALL) {
+                let call IRCall = function.body.calls[inst.aux]
+                if (call.callee_value >= 0
+                    && ir_fc_mark_type(unit, type_used, call.signature_type) != 0) {
+                    result = -1
+                }
+            }
+            i += 1
+        }
+        i = 0
+        for i < unit.symbol_count && result == 0 {
+            if (symbol_used[i] != 0) {
+                if (ir_fc_mark_type(unit, type_used, unit.symbols[i].type_id) != 0) {
+                    result = -1; break
+                }
+                let pi int = 0
+                for pi < unit.symbols[i].param_count {
+                    if (ir_fc_mark_type(unit, type_used,
+                            unit.symbols[i].params[pi]) != 0) { result = -1; break }
+                    pi += 1
+                }
+            }
+            i += 1
+        }
+        let type_order_count int = 0
+        i = 0
+        for i < unit.type_count && result == 0 {
+            if (type_used[i] != 0
+                && ir_fc_visit_type(unit, i, type_state, type_order,
+                    &type_order_count) != 0) { result = 1 }
+            i += 1
+        }
+        if (result == 0) {
+            let mini IRModule
+            if (ir_module_init(&mini, &unit.target) != 0) {
+                result = -1
+            } else {
+                // 迷你模块只保留一个空正文来源：函数/符号 locs 在命中时按当前
+                // 函数符号重建，不需要把整份源码复制进每条缓存记录。
+                let fn_symbol IRModuleSymbol = unit.symbols[function.symbol]
+                if (fn_symbol.source < 0 || fn_symbol.source >= unit.source_count) {
+                    result = 1
+                } else if (ir_module_add_source(&mini,
+                        unit.sources[fn_symbol.source].path, 0, 0) < 0) {
+                    result = -1
+                }
+                // 类型按依赖后序加入；字段与 elem 使用已建立的映射。
+                i = 0
+                for i < type_order_count && result == 0 {
+                    let original int = type_order[i]
+                    let ty IRModuleType = unit.types[original]
+                    let elem int = ty.elem
+                    if (elem >= 0) {
+                        if (type_map[elem] < 0) { result = 1; break }
+                        ty.elem = type_map[elem]
+                    }
+                    let fields *IRModuleField = 0
+                    if (ty.field_count > 0) {
+                        fields = malloc((ty.field_count * sizeof(IRModuleField)).to_type(u64)).to_type(*IRModuleField)
+                        if (fields == 0) { result = -1; break }
+                        let fi int = 0
+                        for fi < ty.field_count {
+                            fields[fi].offset = ty.fields[fi].offset
+                            let field_type int = ty.fields[fi].type_id
+                            if (field_type < 0 || type_map[field_type] < 0) {
+                                result = 1; break
+                            }
+                            fields[fi].type_id = type_map[field_type]
+                            fi += 1
+                        }
+                    }
+                    if (result == 0) {
+                        let added int = ir_module_add_type(&mini, ty.name, &ty,
+                            fields, ty.field_count)
+                        if (added < 0) { result = -1 } else { type_map[original] = added }
+                    }
+                    if (fields != 0) { free(fields.to_type(*void)) }
+                    i += 1
+                }
+                // 符号：函数自身保留定义；其他函数/声明一律降为外部声明。
+                i = 0
+                for i < unit.symbol_count && result == 0 {
+                    if (symbol_used[i] == 0) { i += 1; continue }
+                    let sym IRModuleSymbol = unit.symbols[i]
+                    if (sym.type_id < 0 || type_map[sym.type_id] < 0) { result = 1; break }
+                    sym.type_id = type_map[sym.type_id]
+                    let params *int = 0
+                    if (sym.param_count > 0) {
+                        params = malloc((sym.param_count * sizeof(int)).to_type(u64)).to_type(*int)
+                        if (params == 0) { result = -1; break }
+                        let pi int = 0
+                        for pi < sym.param_count {
+                            if (sym.params[pi] < 0 || type_map[sym.params[pi]] < 0) {
+                                result = 1; break
+                            }
+                            params[pi] = type_map[sym.params[pi]]
+                            pi += 1
+                        }
+                    }
+                    if (result == 0) {
+                        if (i != function.symbol) {
+                            if (sym.kind == IR_MODULE_SYMBOL_FUNCTION) {
+                                sym.defined = 0; sym.linkage = IR_MODULE_LINK_EXTERNAL
+                            } else if (sym.defined == 0) {
+                                sym.linkage = IR_MODULE_LINK_EXTERNAL
+                            }
+                        }
+                        // 迷你模块统一使用空正文来源；命中时新符号取当前函数声明位置。
+                        sym.source = 0; sym.offset = 0
+                        let added int = ir_module_add_symbol(&mini, sym.name,
+                            &sym, params, sym.param_count)
+                        if (added < 0) { result = -1 } else { symbol_map[i] = added }
+                    }
+                    if (params != 0) { free(params.to_type(*void)) }
+                    i += 1
+                }
+                // 全局实体：只复制闭包内已定义的全局符号。
+                i = 0
+                for i < unit.global_count && result == 0 {
+                    if (global_used[i] == 0) { i += 1; continue }
+                    let global IRModuleGlobal = unit.globals[i]
+                    let mapped_symbol int = symbol_map[global.symbol]
+                    if (mapped_symbol < 0) { result = 1; break }
+                    let relocs *IRModuleReloc = 0
+                    if (global.reloc_count > 0) {
+                        relocs = malloc((global.reloc_count * sizeof(IRModuleReloc)).to_type(u64)).to_type(*IRModuleReloc)
+                        if (relocs == 0) { result = -1; break }
+                        let ri int = 0
+                        for ri < global.reloc_count {
+                            relocs[ri] = global.relocs[ri]
+                            let target int = global.relocs[ri].symbol
+                            if (target < 0 || symbol_map[target] < 0) { result = 1; break }
+                            relocs[ri].symbol = symbol_map[target]
+                            ri += 1
+                        }
+                    }
+                    if (result == 0
+                        && ir_module_add_global(&mini, mapped_symbol, global.data,
+                            global.size, global.align, relocs,
+                            global.reloc_count) < 0) { result = -1 }
+                    if (relocs != 0) { free(relocs.to_type(*void)) }
+                    i += 1
+                }
+                // 函数体：复制后把模块下标改成 mini 下标，再交给模块增建接口。
+                if (result == 0) {
+                    let body IRFunction
+                    if (ir_fc_copy_function(&function.body, &body) != 0) {
+                        result = -1
+                    } else {
+                        let patched int = 1
+                        let ii int = 0
+                        for ii < body.inst_count {
+                            let inst *IRInst = &body.insts[ii]
+                            if (inst.op == IR_OP_GLOB_ADDR || inst.op == IR_OP_FN_ADDR) {
+                                let mapped int = symbol_map[inst.imm.to_type(int)]
+                                if (mapped < 0) { patched = 0; break }
+                                inst.imm = mapped.to_type(i64)
+                            }
+                            if (inst.op == IR_OP_FN_ADDR) {
+                                let mapped_type int = type_map[inst.aux]
+                                if (mapped_type < 0) { patched = 0; break }
+                                inst.aux = mapped_type
+                            }
+                            if (inst.op == IR_OP_CALL) {
+                                let call *IRCall = &body.calls[inst.aux]
+                                if (call.callee_value >= 0) {
+                                    let mapped_type int = type_map[call.signature_type]
+                                    if (mapped_type < 0) { patched = 0; break }
+                                    call.signature_type = mapped_type
+                                }
+                            }
+                            ii += 1
+                        }
+                        let mini_type_map *int = 0
+                        let mini_locs *IRModuleLoc = 0
+                        if (patched != 0) {
+                            mini_type_map = malloc((function.type_map_count * sizeof(int)).to_type(u64)).to_type(*int)
+                            if (mini_type_map == 0) { patched = 0 }
+                        }
+                        if (patched != 0) {
+                            ii = 0
+                            for ii < function.type_map_count {
+                                let mapped int = type_map[function.type_map[ii]]
+                                if (mapped < 0) { patched = 0; break }
+                                mini_type_map[ii] = mapped
+                                ii += 1
+                            }
+                        }
+                        if (patched != 0 && function.loc_count > 0) {
+                            mini_locs = malloc((function.loc_count * sizeof(IRModuleLoc)).to_type(u64)).to_type(*IRModuleLoc)
+                            if (mini_locs == 0) { patched = 0 }
+                        }
+                        if (patched != 0) {
+                            ii = 0
+                            for ii < function.loc_count {
+                                mini_locs[ii].source = 0
+                                mini_locs[ii].offset = 0
+                                ii += 1
+                            }
+                        }
+                        if (patched != 0
+                            && ir_module_add_function(&mini, symbol_map[function.symbol],
+                                &body, mini_type_map, mini_locs) < 0) { patched = 0 }
+                        if (mini_type_map != 0) { free(mini_type_map.to_type(*void)) }
+                        if (mini_locs != 0) { free(mini_locs.to_type(*void)) }
+                        ir_fc_free_function(&body)
+                        if (patched == 0) { result = 1 }
+                    }
+                }
+                // 迷你模块同理：合并后的模块由 lower 的 ir_module_verify 统一验证，
+                // 损坏记录在反序列化/合并阶段就会被拒绝，这里不再逐条校验。
+                if (result == 0) {
+                    // PL1e：一次 prepare（verify + plan）拿到完整编码，不再
+                    // 「serialized_size + serialize」各跑一遍 verify/plan。
+                    let payload *u8 = 0
+                    let payload_size int = 0
+                    if (ir_module_serialize_alloc_trusted(&mini, &payload,
+                            &payload_size) != 0
+                        || payload_size <= 0) {
+                        result = -1
+                    } else if (payload_size > IR_MODULE_SERIAL_MAX_TOTAL - IR_FUNCTION_CACHE_HEAD) {
+                        free(payload.to_type(*void))
+                        result = -1
+                    } else {
+                        let total int = IR_FUNCTION_CACHE_HEAD + payload_size
+                        let data *u8 = malloc(total.to_type(u64)).to_type(*u8)
+                        if (data == 0) {
+                            free(payload.to_type(*void)); result = -1
+                        } else {
+                            let cursor int = 0
+                            ir_fc_put_u64(data, &cursor, IR_FUNCTION_CACHE_MAGIC)
+                            ir_fc_put_u64(data, &cursor, IR_FUNCTION_CACHE_VERSION.to_type(u64))
+                            ir_fc_put_u64(data, &cursor, env_key)
+                            ir_fc_put_u64(data, &cursor, payload_size.to_type(u64))
+                            ir_fc_put_u64(data, &cursor,
+                                ir_module_fnv_bytes(IR_MODULE_FNV_BASIS, payload,
+                                    payload_size))
+                            memcpy(data + IR_FUNCTION_CACHE_HEAD,
+                                payload.to_type(*void), payload_size.to_type(u64))
+                            free(payload.to_type(*void))
+                            out_data[0] = data; out_size[0] = total
+                        }
+                    }
+                }
+                ir_module_release(&mini)
+            }
+        }
+    }
+    if (symbol_used != 0) { free(symbol_used.to_type(*void)) }
+    if (global_used != 0) { free(global_used.to_type(*void)) }
+    if (type_used != 0) { free(type_used.to_type(*void)) }
+    if (type_state != 0) { free(type_state.to_type(*void)) }
+    if (type_order != 0) { free(type_order.to_type(*void)) }
+    if (type_map != 0) { free(type_map.to_type(*void)) }
+    if (symbol_map != 0) { free(symbol_map.to_type(*void)) }
+    return result
+}
+
+// ir_function_cache_merge：把一条缓存记录合并进 unit，返回 0/1/-1（见文件头）。
+pub fn ir_function_cache_merge(unit *IRModule, data *u8, size int, env_key u64,
+    expected_name *char, expected_symbol int) int {
+    if (unit == 0 || data == 0 || size < IR_FUNCTION_CACHE_HEAD
+        || expected_name == 0 || expected_symbol < 0
+        || expected_symbol >= unit.symbol_count) { return 1 }
+    let cursor int = 0
+    let magic u64 = ir_fc_get_u64(data, &cursor)
+    let version u64 = ir_fc_get_u64(data, &cursor)
+    let record_env u64 = ir_fc_get_u64(data, &cursor)
+    let payload_raw u64 = ir_fc_get_u64(data, &cursor)
+    let payload_fnv u64 = ir_fc_get_u64(data, &cursor)
+    if (magic != IR_FUNCTION_CACHE_MAGIC
+        || version != IR_FUNCTION_CACHE_VERSION.to_type(u64)
+        || record_env != env_key || payload_raw > 0x7FFFFFFFFFFFFFFF) { return 1 }
+    let payload_size int = payload_raw.to_type(int)
+    if (payload_size != size - IR_FUNCTION_CACHE_HEAD) { return 1 }
+    // PL1f：先按 FNV 校验 payload 完整性。校验和由本进程写出、覆盖全部字节，
+    // 因此通过后可以跳过迷你模块的整段语义 verify（结构/规模/规范编码仍校验）；
+    // 合并后的整模块在 lower 结束时仍会 ir_module_verify，坏记录不会静默通过。
+    if (ir_module_fnv_bytes(IR_MODULE_FNV_BASIS, data + IR_FUNCTION_CACHE_HEAD,
+            payload_size) != payload_fnv) { return 1 }
+    let mini IRModule
+    if (ir_module_deserialize_trusted(&mini, data + IR_FUNCTION_CACHE_HEAD,
+            payload_size) != 0) { return 1 }
+    let result int = 1
+    if (ir_fc_target_same(&unit.target, &mini.target) == 0
+        || mini.function_count != 1
+        || ir_module_str_eq(unit.symbols[expected_symbol].name, expected_name) == 0
+        || unit.symbols[expected_symbol].kind != IR_MODULE_SYMBOL_FUNCTION
+        || unit.symbols[expected_symbol].defined != 1) {
+        result = 1
+    } else {
+        let mini_function IRModuleFunction = mini.functions[0]
+        let mini_symbol int = mini_function.symbol
+        if (mini_symbol < 0 || mini_symbol >= mini.symbol_count
+            || ir_module_str_eq(mini.symbols[mini_symbol].name, expected_name) == 0) {
+            result = 1
+        } else {
+            // PL1f2：为本条记录建一次目标模块索引（规模小则内部关闭、退化为线性）。
+            let index IRMergeIndex
+            if (ir_merge_index_open(&index, unit) != 0) {
+                ir_merge_index_close(&index)
+                return -1
+            }
+            // 来源先映射，符号与函数位置才能引用当前模块。
+            let type_map *int = malloc((mini.type_count * sizeof(int)).to_type(u64)).to_type(*int)
+            let symbol_map *int = malloc((mini.symbol_count * sizeof(int)).to_type(u64)).to_type(*int)
+            if (type_map == 0 || symbol_map == 0) {
+                result = -1
+            } else {
+                let i int = 0
+                for i < mini.type_count { type_map[i] = -1; i += 1 }
+                i = 0
+                for i < mini.symbol_count { symbol_map[i] = -1; i += 1 }
+                result = 0
+                // 类型：迷你模块按依赖后序保存，遇到前向引用即视为不兼容。
+                i = 0
+                for i < mini.type_count && result == 0 {
+                    let ty IRModuleType = mini.types[i]
+                    if (ty.elem >= 0) {
+                        if (ty.elem >= i || type_map[ty.elem] < 0) { result = 1; break }
+                        ty.elem = type_map[ty.elem]
+                    }
+                    let fields *IRModuleField = 0
+                    if (ty.field_count > 0) {
+                        fields = malloc((ty.field_count * sizeof(IRModuleField)).to_type(u64)).to_type(*IRModuleField)
+                        if (fields == 0) { result = -1; break }
+                        let fi int = 0
+                        for fi < ty.field_count {
+                            let field_type int = ty.fields[fi].type_id
+                            if (field_type >= i || type_map[field_type] < 0) {
+                                result = 1; break
+                            }
+                            fields[fi].type_id = type_map[field_type]
+                            fields[fi].offset = ty.fields[fi].offset
+                            fi += 1
+                        }
+                    }
+                    if (result == 0) {
+                        let found int = ir_fc_index_find_type(&index, unit, &mini,
+                            i, type_map)
+                        if (found >= 0) {
+                            type_map[i] = found
+                        } else {
+                            let added int = ir_module_add_type(unit, ty.name, &ty,
+                                fields, ty.field_count)
+                            if (added < 0) { result = -1 } else { type_map[i] = added }
+                        }
+                    }
+                    if (fields != 0) { free(fields.to_type(*void)) }
+                    i += 1
+                }
+                // 符号：同名复用；缺失的声明补为外部声明，缺失的全局补实体。
+                i = 0
+                for i < mini.symbol_count && result == 0 {
+                    let sym IRModuleSymbol = mini.symbols[i]
+                    if (sym.type_id < 0 || sym.type_id >= mini.type_count
+                        || type_map[sym.type_id] < 0) { result = 1; break }
+                    let params *int = 0
+                    if (sym.param_count > 0) {
+                        params = malloc((sym.param_count * sizeof(int)).to_type(u64)).to_type(*int)
+                        if (params == 0) { result = -1; break }
+                        let pi int = 0
+                        for pi < sym.param_count {
+                            if (sym.params[pi] < 0 || sym.params[pi] >= mini.type_count
+                                || type_map[sym.params[pi]] < 0) { result = 1; break }
+                            params[pi] = type_map[sym.params[pi]]
+                            pi += 1
+                        }
+                    }
+                    if (result == 0) {
+                        let found int = ir_fc_index_find_symbol(&index, unit,
+                            sym.name)
+                        if (found >= 0) {
+                            if (ir_fc_symbol_compatible(unit, found, &mini, i,
+                                    type_map) == 0) { result = 1 }
+                            else { symbol_map[i] = found }
+                        } else if (sym.defined != 0
+                            && sym.kind == IR_MODULE_SYMBOL_FUNCTION) {
+                            // 当前模块没有该函数定义，不能凭缓存补出半成品。
+                            result = 1
+                        } else {
+                            let added_symbol IRModuleSymbol = sym
+                            if (added_symbol.defined == 0) {
+                                added_symbol.linkage = IR_MODULE_LINK_EXTERNAL
+                            }
+                            // 缓存记录不携带旧源码偏移；新符号使用当前函数声明位置。
+                            added_symbol.type_id = type_map[sym.type_id]
+                            added_symbol.source = unit.symbols[expected_symbol].source
+                            added_symbol.offset = unit.symbols[expected_symbol].offset
+                            let added int = ir_module_add_symbol(unit,
+                                added_symbol.name, &added_symbol, params,
+                                added_symbol.param_count)
+                            if (added < 0) { result = -1 } else { symbol_map[i] = added }
+                        }
+                    }
+                    if (params != 0) { free(params.to_type(*void)) }
+                    i += 1
+                }
+                // 全局实体：已有实体必须内容一致；缺失时补建。
+                i = 0
+                for i < mini.global_count && result == 0 {
+                    let global IRModuleGlobal = mini.globals[i]
+                    let mapped_symbol int = symbol_map[global.symbol]
+                    if (mapped_symbol < 0) { result = 1; break }
+                    let existing int = ir_fc_find_global(unit, mapped_symbol)
+                    if (existing >= 0) {
+                        if (ir_fc_global_equiv(unit, existing, &mini, i,
+                                symbol_map) == 0) { result = 1 }
+                    } else {
+                        let relocs *IRModuleReloc = 0
+                        if (global.reloc_count > 0) {
+                            relocs = malloc((global.reloc_count * sizeof(IRModuleReloc)).to_type(u64)).to_type(*IRModuleReloc)
+                            if (relocs == 0) { result = -1; break }
+                            let ri int = 0
+                            for ri < global.reloc_count {
+                                relocs[ri] = global.relocs[ri]
+                                let target int = global.relocs[ri].symbol
+                                if (target < 0 || target >= mini.symbol_count
+                                    || symbol_map[target] < 0) { result = 1; break }
+                                relocs[ri].symbol = symbol_map[target]
+                                ri += 1
+                            }
+                        }
+                        if (result == 0
+                            && ir_module_add_global(unit, mapped_symbol, global.data,
+                                global.size, global.align, relocs,
+                                global.reloc_count) < 0) { result = -1 }
+                        if (relocs != 0) { free(relocs.to_type(*void)) }
+                    }
+                    i += 1
+                }
+                // 函数体：重绑模块下标、类型映射与来源位置。
+                if (result == 0) {
+                    let body IRFunction
+                    if (ir_fc_copy_function(&mini_function.body, &body) != 0) {
+                        result = -1
+                    } else {
+                        let ii int = 0
+                        for ii < body.inst_count && result == 0 {
+                            let inst *IRInst = &body.insts[ii]
+                            if (inst.op == IR_OP_GLOB_ADDR || inst.op == IR_OP_FN_ADDR) {
+                                let mapped int = symbol_map[inst.imm.to_type(int)]
+                                if (mapped < 0) { result = 1; break }
+                                inst.imm = mapped.to_type(i64)
+                            }
+                            if (inst.op == IR_OP_FN_ADDR) {
+                                if (inst.aux < 0 || inst.aux >= mini.type_count
+                                    || type_map[inst.aux] < 0) { result = 1; break }
+                                inst.aux = type_map[inst.aux]
+                            }
+                            if (inst.op == IR_OP_CALL) {
+                                let call *IRCall = &body.calls[inst.aux]
+                                if (call.callee_value >= 0) {
+                                    if (call.signature_type < 0
+                                        || call.signature_type >= mini.type_count
+                                        || type_map[call.signature_type] < 0) {
+                                        result = 1; break
+                                    }
+                                    call.signature_type = type_map[call.signature_type]
+                                }
+                            }
+                            ii += 1
+                        }
+                        let current_type_map *int = 0
+                        let current_locs *IRModuleLoc = 0
+                        if (result == 0) {
+                            current_type_map = malloc((mini_function.type_map_count * sizeof(int)).to_type(u64)).to_type(*int)
+                            if (current_type_map == 0) { result = -1 }
+                        }
+                        if (result == 0) {
+                            ii = 0
+                            for ii < mini_function.type_map_count {
+                                let mapped int = type_map[mini_function.type_map[ii]]
+                                if (mapped < 0) { result = 1; break }
+                                current_type_map[ii] = mapped
+                                ii += 1
+                            }
+                        }
+                        if (result == 0 && mini_function.loc_count > 0) {
+                            current_locs = malloc((mini_function.loc_count * sizeof(IRModuleLoc)).to_type(u64)).to_type(*IRModuleLoc)
+                            if (current_locs == 0) { result = -1 }
+                        }
+                        if (result == 0) {
+                            // 当前 lowering 把整条函数的 locs 都填成函数符号的声明位置；
+                            // 命中时按当前符号重建，不能复用旧源码字节偏移（注释/空行
+                            // 或前置声明会移动偏移，旧偏移会指向错误位置）。
+                            let symbol_loc IRModuleSymbol = unit.symbols[expected_symbol]
+                            ii = 0
+                            for ii < mini_function.loc_count {
+                                current_locs[ii].source = symbol_loc.source
+                                current_locs[ii].offset = symbol_loc.offset
+                                ii += 1
+                            }
+                        }
+                        if (result == 0
+                            && ir_module_add_function(unit, expected_symbol, &body,
+                                current_type_map, current_locs) < 0) { result = -1 }
+                        if (current_type_map != 0) { free(current_type_map.to_type(*void)) }
+                        if (current_locs != 0) { free(current_locs.to_type(*void)) }
+                        ir_fc_free_function(&body)
+                    }
+                }
+            }
+            ir_merge_index_close(&index)
+            if (type_map != 0) { free(type_map.to_type(*void)) }
+            if (symbol_map != 0) { free(symbol_map.to_type(*void)) }
+        }
+    }
+    ir_module_release(&mini)
+    return result
+}
+
+// 返回有效函数的稳定编码长度；无效 IR 或超限输入返回 -1。
+pub fn ir_serialized_size(f *IRFunction) int {
+    if (f == 0 || f.target_id < 0) {
+        return -1
+    }
+    let size int = ir_serial_size_counts(f.type_count, f.inst_count, f.phi_count,
+        f.phi_input_count, f.call_count, f.call_arg_count,
+        f.call_symbol_size, f.block_count, f.value_count)
+    if (size < 0 || ir_verify(f) != 0) { return -1 }
+    return size
+}
+
+// 将通过 verifier 的函数写入调用方缓冲区，返回实际长度或 -1。
+pub fn ir_serialize(f *IRFunction, out *u8, capacity int) int {
+    let size int = ir_serialized_size(f)
+    if (size < 0 || out == 0 || capacity < size) { return -1 }
+    let cursor int = 0
+    ir_serial_put_u64(out, &cursor, IR_SERIAL_MAGIC)
+    ir_serial_put_u64(out, &cursor, IR_SERIAL_VERSION.to_type(u64))
+    ir_serial_put_int(out, &cursor, f.target_id)
+    ir_serial_put_int(out, &cursor, f.ret_type)
+    ir_serial_put_int(out, &cursor, f.type_count)
+    ir_serial_put_int(out, &cursor, f.inst_count)
+    ir_serial_put_int(out, &cursor, f.phi_count)
+    ir_serial_put_int(out, &cursor, f.phi_input_count)
+    ir_serial_put_int(out, &cursor, f.call_count)
+    ir_serial_put_int(out, &cursor, f.call_arg_count)
+    ir_serial_put_int(out, &cursor, f.call_symbol_size)
+    ir_serial_put_int(out, &cursor, f.block_count)
+    ir_serial_put_int(out, &cursor, f.value_count)
+    ir_serial_put_int(out, &cursor, f.abi)
+
+    let i int = 0
+    for i < f.type_count {
+        ir_serial_put_int(out, &cursor, f.types[i].kind)
+        ir_serial_put_int(out, &cursor, f.types[i].elem)
+        ir_serial_put_int(out, &cursor, f.types[i].bits)
+        i += 1
+    }
+    i = 0
+    for i < f.inst_count {
+        let inst IRInst = f.insts[i]
+        ir_serial_put_int(out, &cursor, inst.op)
+        ir_serial_put_int(out, &cursor, inst.result_id)
+        ir_serial_put_int(out, &cursor, inst.result_type)
+        ir_serial_put_int(out, &cursor, inst.a)
+        ir_serial_put_int(out, &cursor, inst.b)
+        ir_serial_put_u64(out, &cursor, inst.imm.to_type(u64))
+        ir_serial_put_int(out, &cursor, inst.aux)
+        i += 1
+    }
+    i = 0
+    for i < f.phi_count {
+        ir_serial_put_int(out, &cursor, f.phis[i].first)
+        ir_serial_put_int(out, &cursor, f.phis[i].count)
+        i += 1
+    }
+    i = 0
+    for i < f.phi_input_count {
+        ir_serial_put_int(out, &cursor, f.phi_inputs[i].pred)
+        ir_serial_put_int(out, &cursor, f.phi_inputs[i].value)
+        i += 1
+    }
+    i = 0
+    for i < f.call_count {
+        ir_serial_put_int(out, &cursor, f.calls[i].symbol_first)
+        ir_serial_put_int(out, &cursor, f.calls[i].symbol_len)
+        ir_serial_put_int(out, &cursor, f.calls[i].arg_first)
+        ir_serial_put_int(out, &cursor, f.calls[i].arg_count)
+        ir_serial_put_int(out, &cursor, f.calls[i].abi)
+        ir_serial_put_int(out, &cursor, f.calls[i].callee_value)
+        ir_serial_put_int(out, &cursor, f.calls[i].signature_type)
+        i += 1
+    }
+    i = 0
+    for i < f.call_arg_count {
+        ir_serial_put_int(out, &cursor, f.call_args[i].value)
+        ir_serial_put_int(out, &cursor, f.call_args[i].type_id)
+        i += 1
+    }
+    i = 0
+    for i < f.call_symbol_size {
+        out[cursor] = f.call_symbols[i]
+        cursor += 1
+        i += 1
+    }
+    for cursor % 8 != 0 {
+        out[cursor] = 0
+        cursor += 1
+    }
+    i = 0
+    for i < f.block_count {
+        let block IRBlock = f.blocks[i]
+        ir_serial_put_int(out, &cursor, block.id)
+        ir_serial_put_int(out, &cursor, block.first_inst)
+        ir_serial_put_int(out, &cursor, block.inst_count)
+        ir_serial_put_int(out, &cursor, block.term)
+        ir_serial_put_int(out, &cursor, block.term_value)
+        ir_serial_put_int(out, &cursor, block.succ0)
+        ir_serial_put_int(out, &cursor, block.succ1)
+        i += 1
+    }
+    return cursor == size ? cursor : -1
+}
+
+// 释放 ir_deserialize 所拥有的数组，并将函数重置为空状态。
+pub fn ir_function_release(f *IRFunction) void {
+    if (f == 0) { return }
+    if (f.types != 0) { free(f.types) }
+    if (f.insts != 0) { free(f.insts) }
+    if (f.phis != 0) { free(f.phis) }
+    if (f.phi_inputs != 0) { free(f.phi_inputs) }
+    if (f.calls != 0) { free(f.calls) }
+    if (f.call_args != 0) { free(f.call_args) }
+    if (f.call_symbols != 0) { free(f.call_symbols) }
+    if (f.blocks != 0) { free(f.blocks) }
+    f.abi = 0
+    f.target_id = -1
+    f.ret_type = -1
+    f.types = 0
+    f.type_count = 0
+    f.insts = 0
+    f.inst_count = 0
+    f.phis = 0
+    f.phi_count = 0
+    f.phi_inputs = 0
+    f.phi_input_count = 0
+    f.calls = 0
+    f.call_count = 0
+    f.call_args = 0
+    f.call_arg_count = 0
+    f.call_symbols = 0
+    f.call_symbol_size = 0
+    f.blocks = 0
+    f.block_count = 0
+    f.value_count = 0
+}
+
+// 从指定目标的稳定字节流创建 IR；失败时释放部分分配并重置 out。
+// out 的指针字段必须为零；成功后由 ir_function_release 释放。
+pub fn ir_deserialize(out *IRFunction, data *u8, length int, expected_target int) int {
+    if (out == 0 || data == 0 || length < 112 || expected_target < 0
+        || out.types != 0 || out.insts != 0 || out.phis != 0
+        || out.phi_inputs != 0 || out.calls != 0 || out.call_args != 0
+        || out.call_symbols != 0 || out.blocks != 0) {
+        return -1
+    }
+    ir_function_release(out)
+    let cursor int = 0
+    if (ir_serial_get_u64(data, &cursor) != IR_SERIAL_MAGIC
+        || ir_serial_get_u64(data, &cursor) != IR_SERIAL_VERSION.to_type(u64)) {
+        return -1
+    }
+    let target_raw u64 = ir_serial_get_u64(data, &cursor)
+    let ret_raw u64 = ir_serial_get_u64(data, &cursor)
+    let types_raw u64 = ir_serial_get_u64(data, &cursor)
+    let insts_raw u64 = ir_serial_get_u64(data, &cursor)
+    let phis_raw u64 = ir_serial_get_u64(data, &cursor)
+    let inputs_raw u64 = ir_serial_get_u64(data, &cursor)
+    let calls_raw u64 = ir_serial_get_u64(data, &cursor)
+    let args_raw u64 = ir_serial_get_u64(data, &cursor)
+    let symbols_raw u64 = ir_serial_get_u64(data, &cursor)
+    let blocks_raw u64 = ir_serial_get_u64(data, &cursor)
+    let values_raw u64 = ir_serial_get_u64(data, &cursor)
+    let abi_raw u64 = ir_serial_get_u64(data, &cursor)
+    if (abi_raw > IR_ABI_YH_LLVM_V1) { return -1 }
+    if (ir_serial_header_int_ok(target_raw) == 0 || ir_serial_header_int_ok(ret_raw) == 0
+        || ir_serial_header_int_ok(types_raw) == 0 || ir_serial_header_int_ok(insts_raw) == 0
+        || ir_serial_header_int_ok(phis_raw) == 0 || ir_serial_header_int_ok(inputs_raw) == 0
+        || ir_serial_header_int_ok(calls_raw) == 0 || ir_serial_header_int_ok(args_raw) == 0
+        || ir_serial_header_int_ok(symbols_raw) == 0
+        || ir_serial_header_int_ok(blocks_raw) == 0 || ir_serial_header_int_ok(values_raw) == 0) {
+        return -1
+    }
+    let target int = target_raw.to_type(int)
+    let ret_type int = ret_raw.to_type(int)
+    let type_count int = types_raw.to_type(int)
+    let inst_count int = insts_raw.to_type(int)
+    let phi_count int = phis_raw.to_type(int)
+    let phi_input_count int = inputs_raw.to_type(int)
+    let call_count int = calls_raw.to_type(int)
+    let call_arg_count int = args_raw.to_type(int)
+    let call_symbol_size int = symbols_raw.to_type(int)
+    let block_count int = blocks_raw.to_type(int)
+    let value_count int = values_raw.to_type(int)
+    let size int = ir_serial_size_counts(type_count, inst_count, phi_count,
+        phi_input_count, call_count, call_arg_count, call_symbol_size,
+        block_count, value_count)
+    if (target != expected_target || size != length) { return -1 }
+
+    out.abi = abi_raw.to_type(int)
+    out.target_id = target
+    out.ret_type = ret_type
+    out.type_count = type_count
+    out.inst_count = inst_count
+    out.phi_count = phi_count
+    out.phi_input_count = phi_input_count
+    out.call_count = call_count
+    out.call_arg_count = call_arg_count
+    out.call_symbol_size = call_symbol_size
+    out.block_count = block_count
+    out.value_count = value_count
+    out.types = malloc((type_count * sizeof(IRType)).to_type(u64)).to_type(*IRType)
+    if (out.types == 0) { ir_function_release(out); return -1 }
+    if (inst_count > 0) {
+        out.insts = malloc((inst_count * sizeof(IRInst)).to_type(u64)).to_type(*IRInst)
+        if (out.insts == 0) { ir_function_release(out); return -1 }
+    }
+    if (phi_count > 0) {
+        out.phis = malloc((phi_count * sizeof(IRPhi)).to_type(u64)).to_type(*IRPhi)
+        if (out.phis == 0) { ir_function_release(out); return -1 }
+    }
+    if (phi_input_count > 0) {
+        out.phi_inputs = malloc((phi_input_count * sizeof(IRPhiInput)).to_type(u64)).to_type(*IRPhiInput)
+        if (out.phi_inputs == 0) { ir_function_release(out); return -1 }
+    }
+    if (call_count > 0) {
+        out.calls = malloc((call_count * sizeof(IRCall)).to_type(u64)).to_type(*IRCall)
+        if (out.calls == 0) { ir_function_release(out); return -1 }
+    }
+    if (call_arg_count > 0) {
+        out.call_args = malloc((call_arg_count * sizeof(IRCallArg)).to_type(u64)).to_type(*IRCallArg)
+        if (out.call_args == 0) { ir_function_release(out); return -1 }
+    }
+    if (call_symbol_size > 0) {
+        out.call_symbols = malloc(call_symbol_size.to_type(u64)).to_type(*u8)
+        if (out.call_symbols == 0) { ir_function_release(out); return -1 }
+    }
+    out.blocks = malloc((block_count * sizeof(IRBlock)).to_type(u64)).to_type(*IRBlock)
+    if (out.blocks == 0) { ir_function_release(out); return -1 }
+
+    let i int = 0
+    for i < type_count {
+        out.types[i].kind = ir_serial_get_int(data, &cursor)
+        out.types[i].elem = ir_serial_get_int(data, &cursor)
+        out.types[i].bits = ir_serial_get_int(data, &cursor)
+        i += 1
+    }
+    i = 0
+    for i < inst_count {
+        out.insts[i].op = ir_serial_get_int(data, &cursor)
+        out.insts[i].result_id = ir_serial_get_int(data, &cursor)
+        out.insts[i].result_type = ir_serial_get_int(data, &cursor)
+        out.insts[i].a = ir_serial_get_int(data, &cursor)
+        out.insts[i].b = ir_serial_get_int(data, &cursor)
+        out.insts[i].imm = ir_serial_get_u64(data, &cursor).to_type(i64)
+        out.insts[i].aux = ir_serial_get_int(data, &cursor)
+        i += 1
+    }
+    i = 0
+    for i < phi_count {
+        out.phis[i].first = ir_serial_get_int(data, &cursor)
+        out.phis[i].count = ir_serial_get_int(data, &cursor)
+        i += 1
+    }
+    i = 0
+    for i < phi_input_count {
+        out.phi_inputs[i].pred = ir_serial_get_int(data, &cursor)
+        out.phi_inputs[i].value = ir_serial_get_int(data, &cursor)
+        i += 1
+    }
+    i = 0
+    for i < call_count {
+        out.calls[i].symbol_first = ir_serial_get_int(data, &cursor)
+        out.calls[i].symbol_len = ir_serial_get_int(data, &cursor)
+        out.calls[i].arg_first = ir_serial_get_int(data, &cursor)
+        out.calls[i].arg_count = ir_serial_get_int(data, &cursor)
+        out.calls[i].abi = ir_serial_get_int(data, &cursor)
+        out.calls[i].callee_value = ir_serial_get_int(data, &cursor)
+        out.calls[i].signature_type = ir_serial_get_int(data, &cursor)
+        i += 1
+    }
+    i = 0
+    for i < call_arg_count {
+        out.call_args[i].value = ir_serial_get_int(data, &cursor)
+        out.call_args[i].type_id = ir_serial_get_int(data, &cursor)
+        i += 1
+    }
+    i = 0
+    for i < call_symbol_size {
+        out.call_symbols[i] = data[cursor]
+        cursor += 1
+        i += 1
+    }
+    for cursor % 8 != 0 {
+        if (data[cursor] != 0) { ir_function_release(out); return -1 }
+        cursor += 1
+    }
+    i = 0
+    for i < block_count {
+        out.blocks[i].id = ir_serial_get_int(data, &cursor)
+        out.blocks[i].first_inst = ir_serial_get_int(data, &cursor)
+        out.blocks[i].inst_count = ir_serial_get_int(data, &cursor)
+        out.blocks[i].term = ir_serial_get_int(data, &cursor)
+        out.blocks[i].term_value = ir_serial_get_int(data, &cursor)
+        out.blocks[i].succ0 = ir_serial_get_int(data, &cursor)
+        out.blocks[i].succ1 = ir_serial_get_int(data, &cursor)
+        i += 1
+    }
+    if (cursor != length || ir_verify(out) != 0) {
+        ir_function_release(out)
+        return -1
+    }
+    return 0
+}

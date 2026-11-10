@@ -40,8 +40,9 @@ WORK = ROOT / "tmp" / "modcheck"
 DEFAULT_JOBS = max(1, min(4, os.cpu_count() or 1))
 
 # 模块名 → 编译器源码目录（相对 compiler/）。模块身份由 module 声明决定，
-# 目录只是物理组织：2026-11-09 起 cache 下沉到 build/cache，这里按名字映射。
-CORE_DIRS = {"cache": "build/cache"}
+# 目录只是物理组织：2026-11-09 起 cache 下沉到 build/cache，2026-11-10 起
+# proj 迁到 build/proj，这里按名字映射，fixture 只认模块名不认目录。
+CORE_DIRS = {"cache": "build/cache", "proj": "build/proj"}
 
 
 def core_src(module):
@@ -525,7 +526,7 @@ def copy_proj(src, dst):
             '[project]\nos = "host"\narch = "host"\nname = "token"\nsource = "."\n'
             '[dependencies]\nsupport = { path = "../support" }\n')
         # F4 收尾：gen 模块已删除，fixture 不再需要它的子项目。
-        shutil.copytree(ROOT / "compiler" / "proj", dst / "proj")
+        shutil.copytree(core_src("proj"), dst / "proj")
         (dst / "proj" / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "proj"\nsource = "."\n'
             '[dependencies]\nsupport = { path = "../support" }\n'

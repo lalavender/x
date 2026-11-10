@@ -69,11 +69,12 @@ runner 在工作目录构建 `libs/libc/test/main.yh`，再取模块对象链接
 
 ```text
 libs/libc/
-  memory.yh   memmove/memset/memcmp/memchr
+  api.yh      全部 @[extern] 声明（memmove/memset/memcmp/memchr、字符串族、
+                 atoi/strtol 族、qsort/bsearch）
+  string.yh   字符串族的私有辅助
   string.yh   strcmp/strncmp/strcpy/strncpy/strcat/strncat/
                  strchr/strrchr/strstr/strnlen/strspn/strcspn/strpbrk/
                  strcasecmp/strncasecmp/strlcpy/strlcat
-  convert.yh  atoi/atol/atoll/strtol/strtoul/abs/labs/llabs
   sort.yh     qsort/bsearch（C ABI 比较回调）
   doc.yh      仅注释的完整 API 参考
 ```

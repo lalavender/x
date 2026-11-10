@@ -49,7 +49,6 @@
 ./yh run                   # 构建并运行 main 模块
 ./yh version               # 项目名与版本
 ./yh --version             # 编译器版本（编码进二进制，不读 project.toml）
-./yh list [--resolve name] # 列出模块/解释导入绑定
 ./yh test --list           # 只列出测试身份与文档目标
 ./yh test                  # 发现、构建并逐例执行测试
 ./yh test --no-run         # 只构建测试对象与入口，不链接/不执行

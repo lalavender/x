@@ -1,6 +1,4 @@
 module parse
-import support
-import token
 
 // ============================================================================
 // base.yh —— 解析器私有的每任务状态
@@ -10,48 +8,6 @@ import token
 // 本文件不持有任何跨阶段事实。
 // ============================================================================
 
-// ParseCtx：解析阶段的每任务状态（模块级单例，worker 进程内一份）。
-pub struct ParseCtx {
-    test_body int // 1 = 当前正在解析 test 声明体
-    ct_meta_bare int // >0：允许裸元信息绑定作类型谓词实参（$is_type(f, T)）
-    ctx_block int // 表达式块上下文：1 = 该表达式后可能紧跟 {
-    ir_reject_reason int // 最近函数的拒绝阶段：1上下文…7落底（构建统计用）
-}
-
 // g_parse：解析阶段状态单例（零初始化）。
 let g_parse ParseCtx
 
-// ctx：解析阶段状态窄口；返回单例指针。
-pub fn ctx() *ParseCtx {
-    return &g_parse
-}
-
-// eval_token_range：在给定 token 区间内求值一个表达式，返回 0 成功并写出 *out。
-//
-// 供「解析之外但仍需重入解析器」的调用方使用（当前是布局长度表达式与
-// 延迟枚举判别值）。本函数自管三件事，调用方不必重复：
-//   * 保存/恢复 token 游标（失败也恢复）
-//   * 关闭 AST 捕获（这些求值不产生持久 AST）
-//   * 置位折叠开关，使常量折叠按编译期语义进行
-// 失败时已写诊断并返回 -1；成功但游标未停在区间末尾视为内部错误。
-pub fn eval_token_range(first int, after int, out *support.Res) int {
-    if (out == 0 || first < 0 || after <= first || after > token.ctx().count) {
-        return support.fail("内部错误：表达式 token 范围无效")
-    }
-    let saved_pos int = token.ctx().pos
-    let saved_capture int = support.session().ast_capture
-    support.session().ast_capture = 0
-    token.ctx().pos = first
-    support.fc().c_fold += 1
-    let status int = parse_expr(out)
-    support.fc().c_fold -= 1
-    let landed int = token.ctx().pos
-    support.session().ast_capture = saved_capture
-    token.ctx().pos = saved_pos
-    if (status != 0) { return -1 }
-    if (landed != after) {
-        return support.err_lc(token.ctx().tokens[first].line,
-            token.ctx().tokens[first].col, "表达式 token 范围不匹配")
-    }
-    return 0
-}

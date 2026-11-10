@@ -83,7 +83,6 @@ source = "src"
 | `./yh check` | 只做语义检查，不产出后端产物 |
 | `./yh run` | 构建后运行入口模块 |
 | `./yh test` | 发现、构建并运行测试 |
-| `./yh list` | 列出模块。`--resolve NAME` 显示绑定来源 |
 | `./yh version` | 显示项目名与版本 |
 | `./yh --version` | 显示编译器版本 |
 

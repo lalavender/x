@@ -175,60 +175,6 @@ fn ct_ir_rebase(expr_first int, expr_n int, stmt_first int, stmt_n int,
     }
 }
 
-// ct_ir_import：将刚完成语义检查的函数 AST 切片复制进 comptime 自有 arena。
-pub fn ct_ir_import(sym_id int, expr_src *CtExpr, expr_first int, expr_n int,
-    stmt_src *CtStmt, stmt_first int, stmt_n int, edge_src *CtEdge, edge_first int,
-    edge_n int, binding_src *CtBinding, binding_first int, binding_n int,
-    body_stmt int) int {
-    let row int = ct_find(sym_id)
-    if (row < 0 || ct_functions[row].ir_ready != 0
-        || expr_first < 0 || stmt_first < 0 || edge_first < 0
-        || binding_first < 0 || expr_n < 0 || stmt_n <= 0
-        || edge_n < 0 || binding_n < 0
-        || body_stmt < stmt_first || body_stmt >= stmt_first + stmt_n) {
-        return support.fail("内部错误：编译期 typed IR 切片不连续")
-    }
-    let expr_dst int = ct_ir_expr_n
-    let stmt_dst int = ct_ir_stmt_n
-    let edge_dst int = ct_ir_edge_n
-    let binding_dst int = ct_ir_binding_n
-    if (ct_ir_grow(1, expr_dst + expr_n) != 0
-        || ct_ir_grow(5, expr_dst + expr_n) != 0
-        || ct_ir_grow(2, stmt_dst + stmt_n) != 0
-        || ct_ir_grow(3, edge_dst + edge_n) != 0
-        || ct_ir_grow(4, binding_dst + binding_n) != 0) { return -1 }
-    if (expr_n > 0 && ct_ir_copy_slice(&ct_ir_exprs[expr_dst].kind,
-            &expr_src[expr_first].kind, expr_n, sizeof(CtExpr)) != 0) { return -1 }
-    if (ct_ir_register_string_pool(expr_dst, expr_n) != 0) { return -1 }
-    if (stmt_n > 0 && ct_ir_copy_slice(&ct_ir_stmts[stmt_dst].kind,
-            &stmt_src[stmt_first].kind, stmt_n, sizeof(CtStmt)) != 0) { return -1 }
-    if (edge_n > 0 && ct_ir_copy_slice(&ct_ir_edges[edge_dst].expr_id,
-            &edge_src[edge_first].expr_id, edge_n, sizeof(CtEdge)) != 0) { return -1 }
-    if (binding_n > 0 && ct_ir_copy_slice(&ct_ir_bindings[binding_dst].id,
-            &binding_src[binding_first].id, binding_n, sizeof(CtBinding)) != 0) { return -1 }
-    ct_ir_rebase(expr_first, expr_n, stmt_first, stmt_n, edge_first, edge_n,
-        binding_first, binding_n, expr_dst, stmt_dst, edge_dst, binding_dst)
-    ct_ir_expr_n = expr_dst + expr_n
-    ct_ir_stmt_n = stmt_dst + stmt_n
-    ct_ir_edge_n = edge_dst + edge_n
-    ct_ir_binding_n = binding_dst + binding_n
-    ct_functions[row].ir_expr_first = expr_dst
-    ct_functions[row].ir_expr_after = expr_dst + expr_n
-    ct_functions[row].ir_stmt_first = stmt_dst
-    ct_functions[row].ir_stmt_after = stmt_dst + stmt_n
-    ct_functions[row].ir_edge_first = edge_dst
-    ct_functions[row].ir_edge_after = edge_dst + edge_n
-    ct_functions[row].ir_binding_first = binding_dst
-    ct_functions[row].ir_binding_after = binding_dst + binding_n
-    ct_functions[row].ir_body_stmt = body_stmt + stmt_dst - stmt_first
-    let support int = ct_ir_support_code(stmt_dst, stmt_dst + stmt_n,
-        expr_dst, expr_dst + expr_n)
-    ct_functions[row].ir_supported = (support == 0).to_type(int)
-    ct_functions[row].ir_unsupported = support
-    ct_functions[row].ir_ready = 1
-    return 0
-}
-
 // ct_ir_tick：共享限制当前调用树执行总量，避免循环或递归拖垮编译器。
 fn ct_ir_tick() int {
     ct_ir_steps += 1
@@ -1558,15 +1504,6 @@ fn ct_pool_reset() void {
     ct_ir_expr_pool_cap = 0
 }
 
-// ct_pool_elem_of：指针类型指向单字节元素（char/u8/i8）时返回元素类型，否则 -1。
-pub fn ct_pool_elem_of(type_id int) int {
-    if (type_id < 0 || type_id >= ct_types_bound()) { return -1 }
-    if (ct_type_row(type_id).kind != CT_TY_PTR) { return -1 }
-    let elem int = ct_type_row(type_id).elem
-    if (elem == CT_TY_CHAR || elem == CT_TY_U8 || elem == CT_TY_I8) { return elem }
-    return -1
-}
-
 // ct_pool_adopt_label：把值仍是数据标签号的字符串指针常量实参换成只读池地址。
 // 顶层或普通函数里的编译期调用实参由前端直接求值，不经过 typed IR 捕获，
 // 只能按标签号在常量表里反查原样字节并登记池；查不到时保持原值不动。
@@ -1602,12 +1539,6 @@ fn ct_pool_adopt_label(value *CtValue) int {
     return 0
 }
 
-// ct_pool_register_src：按当前源文件的字节区间登记只读池（参数全为标量，供 parse
-// 侧在实参位置直接登记字面量，避免跨模块传递 *u8 参数）。
-pub fn ct_pool_register_src(start int, slen int, elem int) i64 {
-    return ct_pool_register(support.src_ctx().data, start, slen, elem, start.to_type(i64))
-}
-
 // 顶层聚合实参的临时构造区：顶层编译期调用没有 CT 帧，前端折叠「标量字段结构体
 // 字面量」实参时在这里构造对象，对象指针作为常量实参交给 ct_call —— ct_call 与执行器
 // 本来就把聚合实参的 value 当对象指针使用，因此这里不需要改调用协议。
@@ -1615,21 +1546,3 @@ pub fn ct_pool_register_src(start int, slen int, elem int) i64 {
 // ct_ir_aggregate_new 的 100000 元素上限兜住。
 let ct_arg_pool CtFrame
 
-// ct_arg_pool_agg：在临时构造区建一个聚合对象，按源码顺序填入 n 个元素/字段值，
-// 返回对象指针（0 表示失败，诊断已给出）。elem_type 对结构体是它自身类型，对数组是
-// **元素**类型（与 ct_ir_aggregate_new 的约定一致）。
-// 参数用扁平标量数组（值 + 各自类型）而不是 CtValue 数组：调用方在 parse 侧，
-// 拿不到 comptime 私有类型 CtValue 的构造能力。
-pub fn ct_arg_pool_agg(elem_type int, vals *i64, tys *int, n int) i64 {
-    let aggregate *CtAggregate = ct_ir_aggregate_new(&ct_arg_pool, elem_type, n)
-    if (aggregate == 0) { return 0 }
-    let i int = 0
-    for i < n {
-        aggregate.values[i].type_id = tys[i]
-        aggregate.values[i].value = vals[i]
-        aggregate.values[i].is_lit = 0
-        aggregate.values[i].lit_big = 0
-        i += 1
-    }
-    return aggregate.to_type(u64).to_type(i64)
-}

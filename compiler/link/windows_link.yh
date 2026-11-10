@@ -3,10 +3,6 @@ import support
 import proj
 import backend
 
-// yh_win_spawn_link：Windows 侧「跑一次 lld 链接子进程」的包装
-// （compiler/llvm/windows_shim.c）。stdout 固定接 NUL、stderr 写 stderr_path。
-@[extern] fn yh_win_spawn_link(argv **char, argc int, stderr_path *char) int
-
 // ============================================================================
 // windows_link.yh —— Windows/x64（PE/COFF）链接：内嵌 lld 的 WinLink 驱动（W1-5）
 //
@@ -118,17 +114,6 @@ fn mb_windows_link_inputs(import_lib *u8, lib_cap int, chkstk_obj *u8, obj_cap i
     return mb_windows_sdk_file("yh_chkstk.obj", chkstk_obj, obj_cap)
 }
 
-// mb_lld_windows_enabled：Windows/x64 目标且当前 yh 内嵌 lld 时启用进程内 COFF 链接。
-pub fn mb_lld_windows_enabled() int {
-    if (proj.cfg().target.os != support.TARGET_OS_WINDOWS
-        || proj.cfg().target.arch != support.TARGET_ARCH_X64) {
-        return 0
-    }
-    let identity *char = backend.llvm_lld_identity()
-    if (identity == 0 || identity[0] == 0) { return 0 }
-    return 1
-}
-
 // mb_coff_link_prefix：写入固定前缀（lld-link 驱动、可复现、零 CRT、console 子系统），
 // 返回下一个空位。入口固定为 mainCRTStartup：闭包里有静态 CRT 时由 libcmt 提供
 // （负责 C++ 静态构造、argv/envp、stdio 与退出码）；零 CRT 用户程序则由
@@ -200,77 +185,6 @@ fn mb_hash_coff_identity(hash *u64, import_lib *char, chkstk_obj *char) int {
         return support.fail_path("无法读取 Windows 栈探测桩: ", chkstk_obj)
     }
     return 0
-}
-
-// mb_coff_link_child：--lld-link 子进程入口。响应文件每行一个 argv（路径不含换行），
-// 子进程只做一次 lld 链接并退出；父进程等退出后再读/改名产物，句柄已随进程关闭。
-// 这样 Windows 也能沿用「临时产物 → 验机 → rename → 链接缓存」的通用流程。
-pub fn mb_coff_link_child(path *char) int {
-    // 读响应文件失败必须出声：父进程只会看到「链接失败」，子进程静默退 1 会让
-    // 定位变成猜谜。
-    if (support.read_source(path) != 0) {
-        return support.fail_path("无法读取 COFF 链接响应文件: ", path)
-    }
-    let n int = support.src_ctx().length
-    if (n <= 0) { return support.fail("COFF 链接响应文件为空") }
-    let cap int = n / 2 + 4
-    let args **char = support.alloc((cap * sizeof(*char)).to_type(u64)).to_type(**char)
-    if (args == 0) { return support.fail("COFF 链接参数分配失败") }
-    let count int = 0
-    let start int = 0
-    let i int = 0
-    for i < n {
-        if (support.src_ctx().data[i] == '\n') {
-            support.src_ctx().data[i] = 0
-            if (i > start) {
-                args[count] = (support.src_ctx().data + start).to_type(*char)
-                count += 1
-            }
-            start = i + 1
-        }
-        i += 1
-    }
-    if (count <= 0) { return support.fail("COFF 链接响应文件没有参数") }
-    let diag [backend.LLVM_LLD_DIAG]u8
-    let rc int = backend.llvm_lld_link_argv(&args[0], count,
-        (&diag[0]).to_type(*char))
-    if (rc != 0) {
-        if (diag[0] != 0) {
-            support.write_all(2, &diag[0], strlen((&diag[0]).to_type(*char)).to_type(int))
-            support.write_all(2, "\n".to_type(*u8), 1)
-        } else {
-            // 空诊断会让链接失败完全静默；至少报出 lld 返回码，便于定位。
-            let msg [96]u8
-            let mn int = support.append_str(&msg[0], 0, "内嵌 lld 链接失败（返回码 ")
-            mn = support.append_int(&msg[0], mn, rc)
-            mn = support.append_str(&msg[0], mn, "）\n")
-            support.write_all(2, &msg[0], mn)
-        }
-        return 1
-    }
-    return 0
-}
-
-// mb_coff_link_single：单文件链接的 COFF 入口（`yh file.yh -o out`）。
-// 装配固定前缀 + 一个对象后交给链接 worker；build 模块只调用这一个窄口，
-// 不直接拼 lld argv（前缀/导入库/栈桩属 link 的实现细节）。
-pub fn mb_coff_link_single(object *char, out_path *char) int {
-    let import_lib [1200]u8
-    let chkstk_obj [1200]u8
-    if (mb_windows_link_inputs(&import_lib[0], 1200, &chkstk_obj[0], 1200) != 0) {
-        return -1
-    }
-    let out_arg [900]u8
-    let oan int = support.append_str(&out_arg[0], 0, "/out:")
-    oan = support.append_str(&out_arg[0], oan, out_path)
-    out_arg[oan] = 0
-    let coff_argv [24]*char
-    let cn int = mb_coff_link_prefix(&coff_argv[0], support.arr_cstr(&out_arg[0]),
-        support.arr_cstr(&import_lib[0]), support.arr_cstr(&chkstk_obj[0]))
-    if (cn < 0) { return -1 }
-    coff_argv[cn] = object
-    cn += 1
-    return mb_coff_link_worker(&coff_argv[0], cn, out_path)
 }
 
 // mb_coff_write_rsp：把 lld argv 写成响应文件（每行一个参数，末尾也留换行）。

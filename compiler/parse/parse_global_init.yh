@@ -3,14 +3,12 @@ import token
 import check
 import support
 import comptime
-import lex
 import ast
 
 // ============================================================================
 // parse_global_init.yh —— 绑定与全局初始化
 // 自 parse_decl.yh 按完整函数边界拆分（ADR-0007 P4）；行为不变。
 // ============================================================================
-
 
 // ---- 绑定与初始化 ----
 
@@ -422,45 +420,6 @@ fn pub_agg_deferred_add(idx int, first int) int {
     item.path_off = poff
     item.path_len = plen
     support.fc().c_pub_agg_dep_n += 1
-    return 0
-}
-
-// pub_agg_deferred_run：在 .s.ct 接口闭包加载完成后执行全部延迟项。
-// 调用目标（闭包隐藏符号）此时已登记；对每个延迟项重新读 .s.i 源、
-// 词法化后按登记的 token 起点解析初始化式并执行（建模 + 本地物化，
-// 与提供方 parse_global_comptime_aggregate 同一路径）。
-pub fn pub_agg_deferred_run() int {
-    let i int = 0
-    for i < support.fc().c_pub_agg_dep_n {
-        let item support.PubAggDeferred = support.fc().c_pub_agg_dep[i]
-        if (item.sym < 0) { i += 1; continue }
-        if (item.first < 0 || item.sym >= support.ms().sym_n
-            || item.path_off <= 0 || item.path_len <= 0) {
-            return support.fail("内部错误：pub 聚合常量延迟项无效")
-        }
-        let path *char = (support.pool_ctx().data + item.path_off).to_type(*char)
-        if (support.read_source(path) != 0) { return -1 }
-        token.ctx().count = 0
-        token.ctx().pos = 0
-        support.session().iface_load = 1
-        // 延迟解析只求值、不参与 AST 收集（此刻没有有效的前端文件身份）。
-        let saved_capture int = support.session().ast_capture
-        support.session().ast_capture = 0
-        if (lex.lex_all() != 0) {
-            support.session().ast_capture = saved_capture
-            support.session().iface_load = 0
-            return -1
-        }
-        token.ctx().pos = item.first
-        let tid int = support.ms().syms[item.sym].type_id
-        let status int = parse_global_comptime_aggregate(item.sym, tid)
-        support.session().ast_capture = saved_capture
-        support.session().iface_load = 0
-        if (status != 0) { return -1 }
-        support.ms().syms[item.sym].const_ready = 1
-        support.fc().c_pub_agg_dep[i].sym = -1
-        i += 1
-    }
     return 0
 }
 

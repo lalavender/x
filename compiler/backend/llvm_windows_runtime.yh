@@ -1,5 +1,4 @@
 module backend
-import ir
 
 // ============================================================================
 // llvm_windows_runtime.yh —— Windows/x64（win64-msvc，零 CRT）运行时发射（W1-3）
@@ -86,10 +85,6 @@ fn llvm_windows_runtime_write_printf_write(out *LLVMOutput) void {
     llvm_text(out, "  %next = add i64 %written, %wrote64\n  %complete = icmp uge i64 %next, %len\n")
     llvm_text(out, "  br i1 %complete, label %done, label %loop\ndone:\n  ret i64 %len\nerror:\n  ret i64 -1\n}\n\n")
 }
-
-
-
-
 
 // llvm_windows_runtime_write_entry：argv 支持（W1-3b）。
 // Win64 入口不传参数，所以发射零 CRT 入口桩 __yh_zero_crt_start：GetCommandLineA → 一个极简
@@ -558,44 +553,3 @@ fn llvm_windows_runtime_write_files(out *LLVMOutput) void {
     llvm_text(out, "}\n")
 }
 
-// llvm_windows_runtime_write_support：补上模块引用但自身未定义的平台入口。
-// emit_* 由 llvm_runtime_memory_text 预先判定（同名强定义优先，不重复发射）。
-// write/exit 在断言运行时也会用到，故 emit_test_assert 时一并补齐。
-pub fn llvm_windows_runtime_write_support(unit *ir.IRModule, out *LLVMOutput,
-    emit_malloc int, emit_free int, emit_printf int, emit_test_assert int) void {
-    // 先算齐「模块引用但自身未定义」的平台入口（同名强定义优先，不重复发射）。
-    let emit_io int = 0
-    let emit_files int = 0
-    if (llvm_runtime_named(unit, "write") != 0 && llvm_runtime_defined(unit, "write") == 0) { emit_io = 1 }
-    if (llvm_runtime_named(unit, "read") != 0 && llvm_runtime_defined(unit, "read") == 0) { emit_io = 1 }
-    if (llvm_runtime_named(unit, "open") != 0 && llvm_runtime_defined(unit, "open") == 0) { emit_files = 1 }
-    if (llvm_runtime_named(unit, "close") != 0 && llvm_runtime_defined(unit, "close") == 0) { emit_files = 1 }
-    if (llvm_runtime_named(unit, "mkdir") != 0 && llvm_runtime_defined(unit, "mkdir") == 0) { emit_files = 1 }
-    if (llvm_runtime_named(unit, "unlink") != 0 && llvm_runtime_defined(unit, "unlink") == 0) { emit_files = 1 }
-    if (llvm_runtime_named(unit, "rename") != 0 && llvm_runtime_defined(unit, "rename") == 0) { emit_files = 1 }
-    if (emit_test_assert != 0 && llvm_runtime_defined(unit, "write") == 0) { emit_io = 1 }
-    // read/write/open/close 共用同一张 fd 表与同一组内核入口，打包发射。
-    if (emit_io != 0) { emit_files = 1 }
-    // 声明必须在发射之前一次给全（读/写共用 GetStdHandle/WriteFile/ReadFile）。
-    llvm_windows_runtime_declare(out, emit_malloc, emit_free, emit_printf, emit_files)
-    if (emit_malloc != 0) { llvm_windows_runtime_write_malloc(out) }
-    if (emit_free != 0) { llvm_windows_runtime_write_free(out) }
-    if (emit_printf != 0) {
-        llvm_windows_runtime_write_printf_write(out)
-        llvm_runtime_write_printf_emit(out)
-    }
-    if (emit_files != 0) { llvm_windows_runtime_write_files(out) }
-    let emit_pids int = 0
-    if (llvm_runtime_named(unit, "getpid") != 0 && llvm_runtime_defined(unit, "getpid") == 0) {
-        emit_pids = 1
-    }
-    if (llvm_runtime_named(unit, "getppid") != 0 && llvm_runtime_defined(unit, "getppid") == 0) {
-        emit_pids = 1
-    }
-    if (emit_pids != 0) { llvm_windows_runtime_write_pids(out) }
-    // 本模块定义了 main（可执行入口）时补零 CRT 入口桩：Win64 入口不传参数，
-    // argv 由 GetCommandLineA 解析后转发（见 llvm_windows_runtime_write_entry）。
-    // 链接时 /entry:mainCRTStartup 优先指向静态 CRT 的启动代码；只有闭包里没有
-    // CRT（零 CRT 用户程序）时，/alternatename 才把它落到本桩。
-    if (llvm_runtime_defined(unit, "main") != 0) { llvm_windows_runtime_write_entry(out) }
-}

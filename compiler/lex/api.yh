@@ -1,0 +1,156 @@
+module lex
+
+import support
+import token
+// ============================================================================
+// api.yh —— lex 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// LexCtx：词法游标（模块级单例，worker 进程内一份）。
+pub struct LexCtx {
+    line int // 当前 1 基行号
+    lstart int // 当前行首字节下标
+}
+
+// ctx：词法游标窄口。
+pub fn ctx() *LexCtx {
+    return &g_lex
+}
+
+// reset：开始扫描新文件前把游标复位（行号 1、行首 0）。
+pub fn reset() void {
+    g_lex.line = 1
+    g_lex.lstart = 0
+}
+
+// interp_expand_all：扫描原 token 表，把所有插值字符串替换为内部序列。
+// 成功返回 0；失败返回 -1（诊断已输出）。
+pub fn interp_expand_all() int {
+    let raw *token.Tok = token.ctx().tokens
+    let raw_n int = token.ctx().count
+    let capacity int = raw_n * 3 + 64
+    let output *token.Tok = malloc((capacity * sizeof(token.Tok)).to_type(u64)).to_type(*token.Tok)
+    if (output == 0) {
+        return support.fail("插值扩展分配失败")
+    }
+    let saved_line int = ctx().line
+    let saved_lstart int = ctx().lstart
+    token.ctx().tokens = output
+    token.ctx().count = 0
+    token.ctx().cap = capacity
+    let i int = 0
+    for i < raw_n {
+        let tok token.Tok = raw[i]
+        if (tok.kind == token.TOK_STRING
+            && interp_has_marker(tok.start, tok.len) != 0) {
+            // 行号/行首按字符串起点定位；插值内禁止换行，后续 token 同处一行。
+            let line_start int = tok.start
+            for line_start > 0 && support.src_ctx().data[line_start - 1] != '\n' {
+                line_start -= 1
+            }
+            ctx().lstart = line_start
+            ctx().line = tok.line
+            if (interp_expand_string(tok.start, tok.len) != 0) {
+                return -1
+            }
+        } else {
+            if (interp_copy_token(tok) != 0) { return -1 }
+        }
+        i += 1
+    }
+    ctx().line = saved_line
+    ctx().lstart = saved_lstart
+    free(raw.to_type(*void))
+    return 0
+}
+
+// lex_all：主循环。逐字节跳过空白与注释（跨行时维护行号/行首下标），
+// 按首字符分发到各扫描器；最后补一个 EOF token（位置指向源尾）。
+// 成功返回 0；任何词法错误返回 -1（诊断已输出）。
+pub fn lex_all() int {
+    // 行号复位：一次进程可能多次词法（接口加载/多文件编译）
+    ctx().line = 1
+    ctx().lstart = 0
+    let i int = 0
+    for 1 {
+        // —— 空白与注释 ——
+        for i < support.src_ctx().length {
+            let b u8 = support.src_ctx().data[i]
+            // WS：空格、\t、\r、\f、\v（\f=12、\v=11）
+            if (b == ' ' || b == '\t' || b == '\r' || b == 12 || b == 11) {
+                i += 1
+                continue
+            }
+            if (b == '\n') {
+                i += 1
+                ctx().line += 1
+                ctx().lstart = i
+                continue
+            }
+            // 行注释：到行尾为止（不消费换行，交由上方分支统一处理）
+            if (b == '/' && i + 1 < support.src_ctx().length && support.src_ctx().data[i + 1] == '/') {
+                for i < support.src_ctx().length && support.src_ctx().data[i] != '\n' {
+                    i += 1
+                }
+                continue
+            }
+            // 块注释：非嵌套，扫描到 '*/'；内部换行维护行号
+            if (b == '/' && i + 1 < support.src_ctx().length && support.src_ctx().data[i + 1] == '*') {
+                i += 2
+                let closed int = 0
+                for i < support.src_ctx().length {
+                    if (support.src_ctx().data[i] == '\n') {
+                        i += 1
+                        ctx().line += 1
+                        ctx().lstart = i
+                        continue
+                    }
+                    if (support.src_ctx().data[i] == '*' && i + 1 < support.src_ctx().length && support.src_ctx().data[i + 1] == '/') {
+                        i += 2
+                        closed = 1
+                        break
+                    }
+                    i += 1
+                }
+                if (closed == 0) {
+                    return err_here(i, "块注释未终结")
+                }
+                continue
+            }
+            break
+        }
+        if (i >= support.src_ctx().length) {
+            break
+        }
+        // —— token 分发 ——
+        let b2 u8 = support.src_ctx().data[i]
+        if (is_ident_start(b2)) {
+            i = lex_ident(i)
+        } else if (is_digit(b2)) {
+            i = lex_number(i)
+        } else if (b2 == '"') {
+            i = lex_string(i)
+        } else if (b2 == '\'') {
+            i = lex_char(i)
+        } else {
+            i = lex_op(i)
+        }
+        if (i < 0) {
+            return -1
+        }
+    }
+    // 文件尾 EOF token：kind/位置固定，供解析器判定「消费到 EOF」
+    if (token.push(token.TOK_EOF, support.src_ctx().length, 0, ctx().line, support.src_ctx().length - ctx().lstart + 1) != 0) {
+        return -1
+    }
+    // 插值字符串先扩展为内部 token 序列，再由 lex_layout 归一化换行。
+    if (interp_expand_all() != 0) {
+        return -1
+    }
+    // 扫描完再归一化换行：隐式语句终结符统一由 lex_layout 补入。
+    return lex_layout()
+}

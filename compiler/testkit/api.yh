@@ -1,0 +1,220 @@
+module testkit
+
+import token
+import ast
+import support
+import build
+import parse
+import proj
+import link
+// ============================================================================
+// api.yh —— testkit 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// Windows 测试用例启动器（compiler/llvm/windows_shim.c）：stdout/stderr → 日志、
+// stdin = NUL、YH_TEST_RECORD → 断言记录；返回进程表索引（当 pid 用）。
+@[extern] fn yh_win_spawn_test(argv **char, argc int, record_path *char,
+    log_path *char) int
+
+// mb_run_test_command：按 cli 解析出的请求发现/检查/执行测试（CLI-R）。
+// selector_in 可空；filter_in 可空；timeout_ms 已由 driver 校验范围。
+pub fn mb_run_test_command(selector_in *char, has_selector int, filter_in *char,
+    timeout_ms int, list_mode int, no_run int) int {
+    let selector *char = 0
+    if (has_selector != 0) {
+        selector = selector_in
+    }
+    let filter_off int = -1
+    let filter_len int = 0
+    if (filter_in != 0 && filter_in[0] != 0) {
+        // Windows 的命令行是 ANSI（ACP）：`--filter 中文` 到进程里已不是 UTF-8，
+        // 先规整成 UTF-8 再与源码内文本比较（见 tc_filter_utf8）。
+        let fbuf [1024]u8
+        let fl int = tc_filter_utf8(filter_in, &fbuf[0], 1024)
+        if (fl < 0) { return support.fail("--filter 文本无法转换为 UTF-8") }
+        let fo int = support.tml_intern_str(&fbuf[0], 0, fl)
+        if (fo < 0) { return -1 }
+        filter_off = fo
+        filter_len = fl
+    }
+    if (build.mb_resolve_self_path() != 0) { return 1 }
+    support.src_ctx().path = "yh"
+    support.ctl().front_cache = 1
+    support.session().test_mode = 1
+    // YT2a：测试体降低为模块内 pub 无参 void 函数并发布对象；不链接、不执行。
+    support.session().check_only = 0
+    if (build.load_stdlib() != 0) { return 1 }
+    let single_file int = 0
+    let abs_file [1100]u8
+    abs_file[0] = 0
+    if (selector != 0 && tc_is_source_path(selector) != 0) {
+        // 项目外单文件：文件所在目录向上没有 project.toml 时按临时单模块处理，
+        // 只编译该文件并允许导入标准库；相邻文件不会被装入。
+        let resolved [4096]u8
+        if (link.realpath(selector, support.arr_cstr(&resolved[0])) == 0) {
+            return support.fail_path("无法解析测试文件路径: ", selector)
+        }
+        let alen int = 0
+        for resolved[alen] != 0 { alen += 1 }
+        let i2 int = 0
+        for i2 < alen {
+            abs_file[i2] = resolved[i2]
+            i2 += 1
+        }
+        abs_file[i2] = 0
+        if (alen > 0 && tc_file_has_project(support.arr_cstr(&abs_file[0])) == 0) {
+            single_file = 1
+        }
+    }
+    let root_off int = 0
+    let root_len int = 0
+    let pj int = -1
+    let mod_filter int = -1
+    let file_filter int = -1
+    if (single_file != 0) {
+        if (tc_single_file_project(support.arr_cstr(&abs_file[0]), &pj,
+                &root_off, &root_len) != 0) {
+            return 1
+        }
+    } else {
+        let root_len_v int = 0
+        let root int = build.pro_find_root(0, &root_len_v)
+        if (root < 0) { return 1 }
+        root_off = root
+        root_len = root_len_v
+        proj.set_root_project(root_off, root_len)
+        pj = build.load_project(root_off, root_len)
+        if (pj < 0) { return 1 }
+        if (selector != 0) {
+            if (tc_select(pj, selector, &mod_filter, &file_filter) != 0) {
+                return 1
+            }
+        }
+    }
+    let count int = tc_discover(pj, mod_filter, file_filter)
+    if (count < 0) { return 1 }
+    proj.ctx().test_key = tc_test_key(count)
+    // 发现阶段把 task token 指针停在最后一个项目文件的快照上；worker 随后
+    // 加载接口时会复用 token.ctx().cap 并可能 free(token.ctx().tokens)。这里清空，避免释放
+    // p_files 持有的只读 token 数组。
+    let dummy *token.Tok = malloc(sizeof(token.Tok).to_type(u64)).to_type(*token.Tok)
+    if (dummy == 0) { return support.fail("内存分配失败") }
+    dummy[0].kind = token.TOK_EOF
+    dummy[0].start = 0
+    dummy[0].len = 0
+    dummy[0].line = 1
+    dummy[0].col = 1
+    token.ctx().tokens = dummy
+    token.ctx().count = 0
+    token.ctx().cap = 0
+    support.src_ctx().data = 0.to_type(*u8)
+    support.src_ctx().length = 0
+    token.ctx().pos = 0
+    ast.store().file_indexed = 0
+    ast.store().file_decls = 0
+    ast.store().file_decl_n = 0
+    ast.store().file_decl_i = -1
+    support.session().active_file = -1
+    parse.mod_reset_file()
+    if (list_mode != 0) {
+        tc_print(filter_off, filter_len)
+        return 0
+    }
+    if (count == 0) {
+        support.fail("没有找到测试用例（yh test --list 可查看发现结果）")
+        return 1
+    }
+    // 同一项目的测试共享入口源码/二进制/日志/构建缓存；用锁文件串行化。
+    let lock_path [900]u8
+    if (tc_test_lock_path(root_off, root_len, &lock_path[0]) != 0) { return 1 }
+    if (tc_lock_acquire(support.arr_cstr(&lock_path[0])) == 0) {
+        support.fail("另一个 yh test 正在使用该项目的测试目录；请等待其结束或改用不同项目")
+        return 1
+    }
+    proj.ctx().test_project = pj
+    proj.ctx().test_mod_filter = mod_filter
+    proj.ctx().test_file_filter = file_filter
+    if (no_run != 0) {
+        // 只构建：发布被测模块的测试对象，不生成入口、不链接、不执行。
+        if (build.pj_bind_imports() != 0) { return 1 }
+        let nmods int = 0
+        if (mod_filter >= 0) {
+            nmods = build.pj_topo(mod_filter)
+        } else {
+            nmods = build.pj_topo_multi(pj)
+        }
+        if (nmods < 0) { return 1 }
+        let build_len int = 0
+        let build_off int = proj.build_dir(root_off, root_len, &build_len)
+        if (build_off < 0) { return 1 }
+        if (build.mb_mkdir(proj.pool_str(build_off)) != 0) { return 1 }
+        if (build.mb_schedule_modules(nmods, root_off, root_len, build_off, build_len) != 0) {
+            return 1
+        }
+        build.pj_out_s("测试构建通过: ")
+        let cb [32]u8
+        let cn int = support.append_int(&cb[0], 0, count)
+        support.write_all(1, &cb[0], cn)
+        build.pj_out_s(" 个用例（--no-run，未执行）\n")
+        unlink(support.arr_cstr(&lock_path[0]))
+        return 0
+    }
+    // 执行：先按 --filter 选择，再按模块分组、逐模块生成入口并链接，
+    // 最后逐例 fork/exec。
+    let order *int = malloc((count * sizeof(int)).to_type(u64)).to_type(*int)
+    if (order == 0) { return support.fail("内存分配失败") }
+    let selected int = 0
+    let si int = 0
+    for si < count {
+        let sel int = 1
+        if (filter_off >= 0) {
+            let idb [1024]u8
+            let idn int = tc_identity(tc_cases[si], &idb[0])
+            sel = tc_contains(&idb[0], idn, filter_off, filter_len)
+        }
+        tc_cases[si].sel = sel
+        if (sel != 0) {
+            order[selected] = si
+            selected += 1
+        }
+        si += 1
+    }
+    if (selected == 0) {
+        free(order.to_type(*void))
+        support.fail("没有匹配的测试用例（--filter 未命中）")
+        return 1
+    }
+    let passed int = 0
+    let skipped int = 0
+    let failed int = 0
+    let gi int = 0
+    for gi < selected {
+        let target int = tc_cases[order[gi]].mod
+        let glimit int = 1
+        for gi + glimit < selected && tc_cases[order[gi + glimit]].mod == target {
+            glimit += 1
+        }
+        if (tc_build_and_run(pj, target, order, gi, glimit, root_off, root_len,
+                timeout_ms, &passed, &skipped, &failed) != 0) {
+            free(order.to_type(*void))
+            return 1
+        }
+        gi += glimit
+    }
+    free(order.to_type(*void))
+    let sb [128]u8
+    let sn int = support.append_str(&sb[0], 0, "结果: ")
+    sn = support.append_int(&sb[0], sn, passed)
+    sn = support.append_str(&sb[0], sn, " passed; ")
+    sn = support.append_int(&sb[0], sn, skipped)
+    sn = support.append_str(&sb[0], sn, " skipped; ")
+    sn = support.append_int(&sb[0], sn, failed)
+    sn = support.append_str(&sb[0], sn, " failed\n")
+    support.write_all(1, &sb[0], sn)
+    unlink(support.arr_cstr(&lock_path[0]))
+    return failed == 0 ? 0 : 1
+}

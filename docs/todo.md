@@ -13,6 +13,40 @@
 - 添加错误，当前错误提示功能太简陋
 - project.toml 添加[env]
 
+## 2026-11-10 泛型 `$any` 类型参数与单态化（P0，规划中）
+
+方案：[yh-泛型any单态化实施方案](02-plan/yh-泛型any单态化实施方案-2026-11-10.md)。
+类型位置 `$IDENT` 即类型参数（同名同变量，`$any` 匿名），编译期按实参类型单态化。
+
+- [ ] 决策：`$any` 匿名语义、G2 实例归属、struct 级泛型口径；更新架构 §8.3/§8.2 并立 ADR。
+- [ ] G0 语法与类型变量地基：`yh.g4` 增 `'$' IDENT`、`TY_PARAM`、pass1 模板登记、
+      pass2 跳过模板体、误用诊断；门：`just test`。
+- [ ] G1 同模块单态化：调用点合一、实例符号/命名、合成 AST 函数身份、实例驱动、
+      实例缓存跳过；run/fail 用例；门：`just test` + `just selfhost-native` 后滚种子。
+- [ ] G2 跨模块与 `pub` 泛型：`.s.i` 模板条目 + 接口版本、复用 `.s.ct` 闭包、
+      实例归属；`tests/modules/projects/generic/` 双模块验收。
+- [ ] G3/G4 扩展与缓存：显式类型实参、fn 类型内类型参数、struct 级泛型、实例缓存键含绑定。
+
+## 2026-11-10 标准库 api.yh 迁移后续（P2）
+
+`libs/` 18 个模块的公开面已迁入各自 `api.yh`（见 finish 记录）；剩两项：
+
+- [ ] 平台例外收敛：`os.DirReader`/`os.DirReaderResult` 各平台字段不同，若要
+      进 `api.yh`，需要把平台专属状态藏到 `*void` 句柄后（设计任务，会改 API
+      可观察布局）；`os.open_dir`/`next_entry`/`close_dir` 依赖这两个类型，
+      随之才能移入。
+- [ ] 刷新各模块设计文档（string/JSON/TOML/cli/memory/io/net/os/sys/fmt）
+      的文件清单：pub 声明已迁 `api.yh`，旧清单只描述主题职责（文档任务）。
+
+## 2026-11-10 编译器 api.yh 迁移后续（P2）
+
+`compiler/` 18 个模块的公开面已迁入各自 `api.yh`（见 finish 记录）；剩两项：
+
+- [ ] 刷新编译器模块设计文档的文件清单：`yh-架构设计.md`、`yh-模块职责-当前实现.md`
+      等仍按旧文件布局描述（pub 声明已迁 `api.yh`，部分文件已删除）。
+- [ ] `support/tables.yh` 的 `pub const DATA_STR_CAP` 例外：若要让该常量也进
+      `api.yh`，需要让 CT 值调度支持跨文件的数组长度常量请求（编译期机制调整）。
+
 ## 2026-11-05 VENC-2 遗留：Windows CRT 层文件路径仍按 ACP（P1，CI 已条件跳过）
 
 > 已完成部分见 [yh-VENC2-Windows-CRT入口argv修复](01-finished/yh-VENC2-Windows-CRT入口argv修复-2026-11-05.md)。

@@ -611,7 +611,6 @@ cmd/yh/                  ← module main（2026-11-09 cmdline 并入）
   cmd_build.yh      yh build / yh check
   cmd_run.yh        yh run
   cmd_test.yh       yh test（含 --timeout 范围校验）
-  cmd_list.yh       yh list [--resolve]
   cmd_version.yh    yh version / --contracts
   cmd_single.yh     单文件五形态：--syntax-check / --emit-asm / --emit-llvm /
                     -o <out> <file.yh> / check-with-src
@@ -1094,7 +1093,7 @@ F7  删除旧语义动作路径、固定点、滚种子
 
 1. **依赖键 ↔ `project.name` 一致性校验**：键与项目名脱节时给出两侧名字；现有
    语料存在键≠名（`alias`/`keyimp`/`comptimecross`），属破坏性变更，先盘点语料。
-2. **解除 64 条依赖快照上限**：`pj_load_project` 用栈上定长数组静默截断；改为
+2. **解除 64 条依赖快照上限**：`load_project` 用栈上定长数组静默截断；改为
    堆快照，并补 >64 条依赖的生成式用例。
 3. **`path` 可省略**：`b = {}` 时按 `../<键>` → `<键>` 搜索兄弟目录；需改
    `build/toml.yh` 的空表诊断与 `project_index` 装载循环。

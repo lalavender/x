@@ -26,20 +26,11 @@ struct AttrList {
     fork u32
 }
 
-// 以下为 libSystem 入口，参数与 macOS SDK 的 POSIX 声明一致。
-@[extern] fn mkdirat(dir_fd int, path *char, mode u32) int
-@[extern] fn unlinkat(dir_fd int, path *char, flags int) int
-@[extern] fn renameat(old_dir_fd int, old_path *char,
-    new_dir_fd int, new_path *char) int
-@[extern] fn pipe(output *int) int
-@[extern] fn chdir(path *char) int
-@[extern] fn getcwd(buffer *char, capacity u64) *char
-
 // open_at 按 dir_fd 与 O_* 组合打开文件。
 // Darwin 的变参 openat 无法从固定参数 extern 安全传递 mode，因此本桥只
 // 提供 AT_FDCWD 形式（os 的唯一调用形式）；其他目录 fd 返回 -ENOSYS，
 // 不猜一个错误权限去创建文件。成功返回 fd，失败返回负 errno。
-pub fn open_at(dir_fd int, path *char, flags int, mode u32) i64 {
+fn open_at_impl(dir_fd int, path *char, flags int, mode u32) i64 {
     if (dir_fd != AT_FDCWD) {
         return (0 - ENOSYS).to_type(i64)
     }
@@ -49,21 +40,21 @@ pub fn open_at(dir_fd int, path *char, flags int, mode u32) i64 {
 
 // read_fd 从 fd 读取至多 count 字节到调用方缓冲区。
 // 返回实际读入字节数，0 表示 EOF；失败返回负 errno。允许短读，不重试。
-pub fn read_fd(fd int, buffer *void, count u64) i64 {
+fn read_fd_impl(fd int, buffer *void, count u64) i64 {
     let result i64 = read(fd, buffer, count)
     return errno_result(result)
 }
 
 // write_fd 向 fd 写入至多 count 字节，返回实际写入字节数。
 // 允许短写；失败返回负 errno。是否循环写入由上层决定。
-pub fn write_fd(fd int, buffer *void, count u64) i64 {
+fn write_fd_impl(fd int, buffer *void, count u64) i64 {
     let result i64 = write(fd, buffer, count)
     return errno_result(result)
 }
 
 // close_fd 关闭 fd 并返回 0 或负 errno。
 // 关闭失败后不自动重试；fd 可能已经释放，调用方不得继续使用。
-pub fn close_fd(fd int) i64 {
+fn close_fd_impl(fd int) i64 {
     let result int = close(fd)
     return errno_result(result.to_type(i64))
 }
@@ -71,21 +62,21 @@ pub fn close_fd(fd int) i64 {
 // create_dir_at 在 dir_fd 目录下创建单层目录。
 // mode 为权限位，由内核结合 umask 裁剪；不递归创建父目录。
 // mkdirat 不是变参入口，mode 固定传递，dir_fd 可以是任意目录 fd。
-pub fn create_dir_at(dir_fd int, path *char, mode u32) i64 {
+fn create_dir_at_impl(dir_fd int, path *char, mode u32) i64 {
     let result int = mkdirat(dir_fd, path, mode)
     return errno_result(result.to_type(i64))
 }
 
 // remove_at 在 dir_fd 目录下删除路径。
 // flags 为 0 时删除文件路径；AT_REMOVEDIR 只删除空目录，不递归删除。
-pub fn remove_at(dir_fd int, path *char, flags int) i64 {
+fn remove_at_impl(dir_fd int, path *char, flags int) i64 {
     let result int = unlinkat(dir_fd, path, flags)
     return errno_result(result.to_type(i64))
 }
 
 // rename_at 在两个目录 fd 之间重命名路径。
 // 语义等同 renameat：不复制、不回退、不递归；跨设备由内核报错。
-pub fn rename_at(old_dir_fd int, old_path *char,
+fn rename_at_impl(old_dir_fd int, old_path *char,
     new_dir_fd int, new_path *char) i64 {
     let result int = renameat(old_dir_fd, old_path, new_dir_fd, new_path)
     return errno_result(result.to_type(i64))
@@ -93,7 +84,7 @@ pub fn rename_at(old_dir_fd int, old_path *char,
 
 // get_cwd 把进程当前工作目录写入调用方缓冲区，成功时包含结尾 NUL。
 // 返回写入的总字节数（含 NUL）；空间不足返回 -ERANGE，不隐式扩容。
-pub fn get_cwd(buffer *char, capacity u64) i64 {
+fn get_cwd_impl(buffer *char, capacity u64) i64 {
     if (getcwd(buffer, capacity) == 0) {
         return (0 - errno_value()).to_type(i64)
     }
@@ -102,7 +93,7 @@ pub fn get_cwd(buffer *char, capacity u64) i64 {
 
 // change_dir 修改进程全局当前工作目录，成功返回 0，失败返回负 errno。
 // 路径为 NUL 结尾字节串；sys 不拼接、不解析、不创建目录。
-pub fn change_dir(path *char) i64 {
+fn change_dir_impl(path *char) i64 {
     let result int = chdir(path)
     return errno_result(result.to_type(i64))
 }
@@ -112,7 +103,7 @@ pub fn change_dir(path *char) i64 {
 // 传递第三个实参），所以本桥只支持 flags == 0；带 O_CLOEXEC/O_NONBLOCK
 // 的请求返回 -ENOSYS，不假装已经设置。os 的 spawn 在 Darwin 走
 // posix_spawn，不依赖本函数。
-pub fn create_pipe(output *int, flags int) i64 {
+fn create_pipe_impl(output *int, flags int) i64 {
     if (flags != 0) {
         return (0 - ENOSYS).to_type(i64)
     }

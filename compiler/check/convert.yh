@@ -1,5 +1,4 @@
 module check
-import ast
 import proj
 import support
 
@@ -47,70 +46,3 @@ fn tok_col_at(file_id int, index int) int {
     return proj.ctx().files[file_id].tokens[index].col
 }
 
-// convert_returns：校验每个 `return expr` 的表达式能否赋给当前函数返回类型。
-// 成功返回 0；失败已写诊断并返回 -1（首个错误即停，与 parse 期一致）。
-pub fn convert_returns(view *ast.AstView) int {
-    let fi int = 0
-    for fi < view.function_count {
-        let fn_ctx ast.AstFunctionContext = view.function_nodes[fi]
-        if (fn_ctx.decl_row < 0 || fn_ctx.decl_row >= view.decl_count) { fi += 1; continue }
-        let decl ast.AstDecl = view.decl_nodes[fn_ctx.decl_row]
-        if (decl.type_id < 0 || decl.type_id >= support.ms().type_n) { fi += 1; continue }
-        let ret_tid int = support.ms().types[decl.type_id].elem
-        let s int = fn_ctx.stmt_first
-        for s < fn_ctx.stmt_after {
-            if (view.stmt_nodes[s].kind == ast.AST_STMT_RETURN) {
-                let edge int = view.stmt_nodes[s].first_expr
-                if (edge >= 0 && edge < view.stmt_expr_count) {
-                    let expr_id int = view.stmt_exprs[edge].expr_id
-                    if (expr_id >= 0 && expr_id < view.expr_count) {
-                        let value ast.AstExpr = view.expr_nodes[expr_id]
-                        let code int = support.vk_can_assign(ret_tid, value.type_id,
-                            value.is_lit, value.const_bits, value.lit_big)
-                        if (code != 0) {
-                            return diag_file_at(value.file_id,
-                                tok_line_at(value.file_id, value.after),
-                                tok_col_at(value.file_id, value.after), code)
-                        }
-                    }
-                }
-            }
-            s += 1
-        }
-        fi += 1
-    }
-    return 0
-}
-
-// convert_assigns：校验单目标赋值 `lhs op= rhs` 的 rhs 能否赋给 lhs 类型。
-// AST 的 ASSIGN 语句按顺序挂两条表达式边（先左值、后右值），因此直接取链上
-// 第 1、2 条；位置同样用 rhs 的 `after`（= 解析结束游标）复现 parse 期诊断。
-pub fn convert_assigns(view *ast.AstView) int {
-    let s int = 0
-    for s < view.stmt_count {
-        if (view.stmt_nodes[s].kind == ast.AST_STMT_ASSIGN) {
-            let edge int = view.stmt_nodes[s].first_expr
-            if (edge >= 0 && edge < view.stmt_expr_count) {
-                let next_edge int = view.stmt_exprs[edge].next
-                let lhs_id int = view.stmt_exprs[edge].expr_id
-                if (next_edge >= 0 && next_edge < view.stmt_expr_count
-                    && lhs_id >= 0 && lhs_id < view.expr_count) {
-                    let rhs_id int = view.stmt_exprs[next_edge].expr_id
-                    if (rhs_id >= 0 && rhs_id < view.expr_count) {
-                        let lhs ast.AstExpr = view.expr_nodes[lhs_id]
-                        let rhs ast.AstExpr = view.expr_nodes[rhs_id]
-                        let code int = support.vk_can_assign(lhs.type_id, rhs.type_id,
-                            rhs.is_lit, rhs.const_bits, rhs.lit_big)
-                        if (code != 0) {
-                            return diag_file_at(rhs.file_id,
-                                tok_line_at(rhs.file_id, rhs.after),
-                                tok_col_at(rhs.file_id, rhs.after), code)
-                        }
-                    }
-                }
-            }
-        }
-        s += 1
-    }
-    return 0
-}

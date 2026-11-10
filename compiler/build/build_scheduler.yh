@@ -11,7 +11,6 @@ import cache
 // 调度器按接口原子发布推进依赖，不等待提供方完成私有函数与汇编。
 // ============================================================================
 
-
 // mb_sched_worker_limit：worker 上限，默认 4（合入 perf WIP 的 PF3 开关）。
 // `YH_WORKERS` 可在 1..32 内覆盖，供并发扩展性测量；非法/缺省值回落到 4，
 // 避免环境变量把构建打坏。父进程读一次后缓存在 BuildCtx 里。
@@ -37,10 +36,6 @@ fn mb_sched_worker_limit() int {
     if (value >= 1) { bc().sched_limit = value }
     return bc().sched_limit
 }
-
-// yh_win_spawn_wait：Windows 侧 CreateProcessA 包装（compiler/llvm/windows_shim.c）。
-// 仅无 fork 宿主使用；其余平台不引用，符号不会进入链接。
-@[extern] fn yh_win_spawn_wait(argv **char, argc int) int
 
 // mb_spawn_module_child：无 fork 宿主（Windows）把模块编译放进一次性子进程。
 // 子进程重走 --emit-module 协议（重新索引项目，前端状态天然干净），父进程
@@ -190,70 +185,6 @@ fn mb_sched_set_session() int {
     return 0
 }
 
-// mb_resolve_self_path：把 PATH 命令名解析为编译器指纹可读取的文件路径。
-pub fn mb_resolve_self_path() int {
-    if (bc().self_path != 0) {
-        return 0
-    }
-    let has_slash int = 0
-    let i int = 0
-    for bc().argv0[i] != 0 {
-        if (bc().argv0[i] == '/' || bc().argv0[i] == 92) {
-            has_slash = 1
-            break
-        }
-        i += 1
-    }
-    if (has_slash != 0) {
-        bc().self_path = bc().argv0
-        return 0
-    }
-    let path_off int = -1
-    let path_len int = 0
-    if (proj.env_fetch("PATH", &path_off, &path_len) != 0) {
-        return support.fail("无法解析编译器可执行路径")
-    }
-    let start int = 0
-    let end int = 0
-    let windows int = support.tg_host_windows()
-    let separator u8 = windows != 0 ? ';' : ':'
-    for end <= path_len {
-        if (end == path_len || support.pool_ctx().data[path_off + end] == separator) {
-            let candidate [1200]u8
-            let n int = 0
-            if (end == start) {
-                n = support.append_str(candidate, n, ".")
-            } else {
-                let k int = start
-                for k < end {
-                    candidate[n] = support.pool_ctx().data[path_off + k]
-                    n += 1
-                    k += 1
-                }
-            }
-            n = support.append_byte(candidate, n, '/')
-            n = support.append_str(candidate, n, bc().argv0)
-            candidate[n] = 0
-            if (proj.file_exists(support.arr_cstr(candidate)) != 0) {
-                bc().self_path = malloc((n + 1).to_type(u64)).to_type(*char)
-                if (bc().self_path == 0) {
-                    return -1
-                }
-                let j int = 0
-                for j < n {
-                    bc().self_path[j] = candidate[j].to_type(char)
-                    j += 1
-                }
-                bc().self_path[n] = 0.to_type(char)
-                return 0
-            }
-            start = end + 1
-        }
-        end += 1
-    }
-    return support.fail("PATH 中找不到当前 yh 可执行文件")
-}
-
 // mb_sched_order_index：在本轮拓扑序中查找模块位置；未找到返回 -1。
 fn mb_sched_order_index(module_idx int, count int) int {
     let i int = 0
@@ -380,8 +311,7 @@ fn mb_sched_publish_interface(module_idx int, build_off int,
 }
 
 // mb_sched_clear_interfaces：清除本轮临时接口，避免跨构建误读。
-fn mb_sched_clear_interfaces(count int, build_off int,
-    build_len int) void {
+fn mb_sched_clear_interfaces(count int, build_off int,build_len int) void {
     if (bc().iface_suffix == 0) {
         return
     }
@@ -401,21 +331,6 @@ fn mb_sched_clear_interfaces(count int, build_off int,
         }
         i += 1
     }
-}
-
-// mb_schedule_modules：同项目构建锁保护下的调度入口。
-// 锁只串行化同一项目；不同项目仍可并行。锁不可用时按原流程继续。
-pub fn mb_schedule_modules(count int, root_off int, root_len int,
-    build_off int, build_len int) int {
-    if (count <= 0 || support.session().check_only != 0) {
-        return mb_schedule_modules_locked(count, root_off, root_len,
-            build_off, build_len)
-    }
-    let lock_fd int = mb_project_lock(root_off, root_len)
-    let rc int = mb_schedule_modules_locked(count, root_off, root_len,
-        build_off, build_len)
-    mb_project_unlock(lock_fd)
-    return rc
 }
 
 // mb_schedule_modules_locked：最多并行四个 worker，接口 ready 后即可启动消费者。

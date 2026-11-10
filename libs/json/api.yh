@@ -1,0 +1,768 @@
+module json
+
+import num
+import string
+// ============================================================================
+// api.yh —— json 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// ValueKind 是 JSON 值的类型标签；invalid 只表示空视图。
+// JSON 只有一个 number 类型，不区分整数与浮点。
+pub enum ValueKind {
+    kind_invalid
+    kind_null
+    kind_boolean
+    kind_number
+    kind_string
+    kind_array
+    kind_object
+}
+
+// ParseStatus 是一次解析的最终状态。
+pub enum ParseStatus {
+    parse_ok
+    parse_syntax_error
+    parse_resource_error
+    parse_io_error
+    parse_argument_error
+}
+
+// QueryStatus 是查询/取值的结果分类；失败时不修改输出参数。
+pub enum QueryStatus {
+    query_ok
+    query_missing
+    query_type_error
+    query_range_error
+    query_bounds_error
+    query_argument_error
+}
+
+// WriteStatus 是一次写出的结果分类；write_state_error 表示 builder 误用。
+pub enum WriteStatus {
+    write_ok
+    write_state_error
+    write_number_range
+    write_invalid_utf8
+    write_resource_limit
+    write_argument_error
+    write_buffer_error
+    write_io_error
+}
+
+// ErrorCode 是稳定诊断分类；message 文字不是程序判断接口。
+pub enum ErrorCode {
+    error_none
+    error_utf8
+    error_bom
+    error_syntax
+    error_duplicate_key
+    error_surrogate
+    error_number_range
+    error_resource_limit
+    error_out_of_memory
+    error_io
+    error_argument
+}
+
+// Text 是 UTF-8 字节视图；长度不含额外终止字节，可以包含 NUL。
+// 视图借用所属 Document 的存储，文档释放后失效。
+pub struct Text {
+    data *u8
+    count u64
+}
+
+// Span 是来源位置：字节偏移零基，长度是字节数；行号和字节列号一基。
+pub struct Span {
+    offset u64
+    length u64
+    line u64
+    column u64
+}
+
+// Diagnostic 是结构化诊断；message 是静态中文文本，不归调用者释放。
+// related/has_related 用于重复键关联的第一次出现位置。
+pub struct Diagnostic {
+    code ErrorCode
+    message *char
+    span Span
+    related Span
+    has_related int
+    native_code int
+}
+
+// Document 独占一次成功解析的存储；句柄由模块管理，调用者不可改写。
+pub struct Document {
+    handle *void
+}
+
+// Value 是所属 Document 内节点的只读视图，不单独分配或释放。
+pub struct Value {
+    handle *void
+}
+
+// ParseResult 是解析入口的统一返回；失败时 document.handle 为 0。
+pub struct ParseResult {
+    status ParseStatus
+    document Document
+    error Diagnostic
+}
+
+// LookupResult 是一次查找的结果；失败时 value.handle 为 0。
+pub struct LookupResult {
+    status QueryStatus
+    value Value
+}
+
+// EntryResult 是按首次出现顺序遍历对象条目时的结果。
+pub struct EntryResult {
+    status QueryStatus
+    key Text
+    value Value
+    span Span
+}
+
+// WriteOptions 是写出选项。indent 为 0 表示紧凑输出；1..16 为每层空格数。
+// escape_non_ascii 为 1 时所有非 ASCII 标量写成 \uXXXX；sort_keys 为 1 时
+// 对象键按无符号字节序升序输出（只影响输出顺序，不改变文档）。
+pub struct WriteOptions {
+    indent int
+    escape_non_ascii int
+    sort_keys int
+}
+
+// Builder 是增量写出状态；字段私有，只能通过本模块函数推进。
+pub struct Builder {
+    out *string.String
+    options WriteOptions
+    depth int
+    fail_status WriteStatus
+    start u64
+    root_written int
+    pending_key int
+    kinds [256]u8
+    first [256]u8
+}
+
+// EncodeResult 是一次性写出的结果；成功时 text 由调用者 release。
+pub struct EncodeResult {
+    status WriteStatus
+    text string.String
+}
+
+// kind 返回值的类型；空视图返回 kind_invalid。
+pub fn kind(value Value) ValueKind {
+    let ptr *node = node_of(value)
+    if (ptr == 0) {
+        return ValueKind.kind_invalid
+    }
+    return ptr.kind
+}
+
+// value_span 返回值在输入中的位置；空视图返回零位置。
+pub fn value_span(value Value) Span {
+    let ptr *node = node_of(value)
+    if (ptr == 0) {
+        return span_zero()
+    }
+    return ptr.span
+}
+
+// object_get 按完整字节键查询对象；点号是键内容。
+pub fn object_get(object_value Value, key Text) LookupResult {
+    let ptr *node = node_of(object_value)
+    if (ptr == 0) {
+        return lookup_fail(QueryStatus.query_type_error)
+    }
+    if (ptr.kind != ValueKind.kind_object) {
+        return lookup_fail(QueryStatus.query_type_error)
+    }
+    let index int = object_find(ptr.obj, key)
+    if (index < 0) {
+        return lookup_fail(QueryStatus.query_missing)
+    }
+    let row *entry = object_at(ptr.obj, index)
+    if (row == 0) {
+        return lookup_fail(QueryStatus.query_missing)
+    }
+    return lookup_ok(row.value.to_type(*node))
+}
+
+// get 是 NUL 结尾键的便捷入口；空指针返回参数错误，空字符串是合法键。
+pub fn get(object_value Value, key *char) LookupResult {
+    if (key == 0) {
+        return lookup_fail(QueryStatus.query_argument_error)
+    }
+    return object_get(object_value, text_from_cstr(key))
+}
+
+// array_get 按零基下标取数组元素。
+pub fn array_get(array_value Value, index u64) LookupResult {
+    let ptr *node = node_of(array_value)
+    if (ptr == 0) {
+        return lookup_fail(QueryStatus.query_type_error)
+    }
+    if (ptr.kind != ValueKind.kind_array) {
+        return lookup_fail(QueryStatus.query_type_error)
+    }
+    if (index > 2147483647) {
+        return lookup_fail(QueryStatus.query_bounds_error)
+    }
+    let item *node = items_at(ptr.arr, index.to_type(int))
+    if (item == 0) {
+        return lookup_fail(QueryStatus.query_bounds_error)
+    }
+    return lookup_ok(item)
+}
+
+// count 写入数组元素数或对象条目数；标量报类型不符。
+pub fn count(container Value, out *u64) QueryStatus {
+    let ptr *node = node_of(container)
+    if (ptr == 0 || out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    if (ptr.kind == ValueKind.kind_array) {
+        out[0] = ptr.arr.count.to_type(u64)
+        return QueryStatus.query_ok
+    }
+    if (ptr.kind == ValueKind.kind_object) {
+        out[0] = ptr.obj.count.to_type(u64)
+        return QueryStatus.query_ok
+    }
+    return QueryStatus.query_type_error
+}
+
+// object_entry 按首次出现顺序返回键、值与该键的位置。
+pub fn object_entry(object_value Value, index u64) EntryResult {
+    let result EntryResult
+    let empty Value = value_of(0)
+    result.status = QueryStatus.query_type_error
+    result.key = text_empty()
+    result.value = empty
+    result.span = span_zero()
+    let ptr *node = node_of(object_value)
+    if (ptr == 0) {
+        return result
+    }
+    if (ptr.kind != ValueKind.kind_object) {
+        return result
+    }
+    if (index > 2147483647) {
+        result.status = QueryStatus.query_bounds_error
+        return result
+    }
+    let row *entry = object_at(ptr.obj, index.to_type(int))
+    if (row == 0) {
+        result.status = QueryStatus.query_bounds_error
+        return result
+    }
+    let found Value = value_of(row.value.to_type(*node))
+    result.status = QueryStatus.query_ok
+    result.key = row.key
+    result.value = found
+    result.span = row.span
+    return result
+}
+
+// as_text 只接受字符串。
+pub fn as_text(value Value, out *Text) QueryStatus {
+    let ptr *node = node_of(value)
+    if (ptr == 0 || out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    if (ptr.kind != ValueKind.kind_string) {
+        return QueryStatus.query_type_error
+    }
+    out[0] = ptr.text
+    return QueryStatus.query_ok
+}
+
+// as_bool 只接受布尔。
+pub fn as_bool(value Value, out *bool) QueryStatus {
+    let ptr *node = node_of(value)
+    if (ptr == 0 || out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    if (ptr.kind != ValueKind.kind_boolean) {
+        return QueryStatus.query_type_error
+    }
+    out[0] = ptr.boolean
+    return QueryStatus.query_ok
+}
+
+// number_text 返回数字的原始词素（不含前后空白）。
+pub fn number_text(value Value, out *Text) QueryStatus {
+    let ptr *node = node_of(value)
+    if (ptr == 0 || out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    if (ptr.kind != ValueKind.kind_number) {
+        return QueryStatus.query_type_error
+    }
+    out[0] = ptr.text
+    return QueryStatus.query_ok
+}
+
+// as_i64 只接受整数形式且在 i64 范围内的数字；不转换浮点或数字字符串。
+pub fn as_i64(value Value, out *i64) QueryStatus {
+    let ptr *node = node_of(value)
+    if (ptr == 0 || out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    if (ptr.kind != ValueKind.kind_number) {
+        return QueryStatus.query_type_error
+    }
+    let status int = json_number_i64(ptr.text, out)
+    if (status == 0) {
+        return QueryStatus.query_ok
+    }
+    if (status == 1) {
+        return QueryStatus.query_range_error
+    }
+    return QueryStatus.query_type_error
+}
+
+// as_f64 把词素精确转换为 binary64；上溢或有效位超限报范围错误，不返回 inf。
+pub fn as_f64(value Value, out *f64) QueryStatus {
+    let ptr *node = node_of(value)
+    if (ptr == 0 || out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    if (ptr.kind != ValueKind.kind_number) {
+        return QueryStatus.query_type_error
+    }
+    let status int = json_number_f64(ptr.text, out)
+    if (status == 0) {
+        return QueryStatus.query_ok
+    }
+    if (status == 1) {
+        return QueryStatus.query_range_error
+    }
+    return QueryStatus.query_type_error
+}
+
+// is_integer 判断数字是否可无损取为 i64；不是谓词式的「有没有小数点」。
+pub fn is_integer(value Value) int {
+    let ptr *node = node_of(value)
+    if (ptr == 0 || ptr.kind != ValueKind.kind_number) {
+        return 0
+    }
+    let parsed i64 = 0
+    if (json_number_i64(ptr.text, &parsed) != 0) {
+        return 0
+    }
+    return 1
+}
+
+// builder_make 初始化 builder；out 由调用者拥有并保持存活。
+// 选项非法时返回的 builder 处于失败态，首次操作即返回 write_argument_error。
+pub fn builder_make(out *string.String, options WriteOptions) Builder {
+    let b Builder
+    b.out = out
+    b.options = options
+    b.depth = 0
+    b.fail_status = WriteStatus.write_ok
+    b.start = 0
+    b.root_written = 0
+    b.pending_key = 0
+    let i int = 0
+    for i < W_MAX_DEPTH {
+        b.kinds[i] = W_NONE
+        b.first[i] = 0
+        i += 1
+    }
+    if (out == 0) {
+        b.fail_status = WriteStatus.write_argument_error
+        return b
+    }
+    if (options.indent < 0 || options.indent > JSON_MAX_INDENT) {
+        b.fail_status = WriteStatus.write_argument_error
+        return b
+    }
+    if (options.escape_non_ascii != 0 && options.escape_non_ascii != 1) {
+        b.fail_status = WriteStatus.write_argument_error
+        return b
+    }
+    if (options.sort_keys != 0 && options.sort_keys != 1) {
+        b.fail_status = WriteStatus.write_argument_error
+        return b
+    }
+    b.start = string.byte_length(out)
+    return b
+}
+
+// builder_status 返回当前状态；write_ok 表示尚未失败。
+pub fn builder_status(b *Builder) WriteStatus {
+    if (b == 0) {
+        return WriteStatus.write_argument_error
+    }
+    return b.fail_status
+}
+
+// begin_object 开始一个对象。
+pub fn begin_object(b *Builder) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    b.pending_key = 0
+    if (w_byte(b, 123) == 0) {
+        return builder_status(b)
+    }
+    if (w_push(b, W_OBJECT) == 0) {
+        return builder_status(b)
+    }
+    return WriteStatus.write_ok
+}
+
+// end_object 结束当前对象。
+pub fn end_object(b *Builder) WriteStatus {
+    if (w_pop(b, W_OBJECT) == 0) {
+        return builder_status(b)
+    }
+    if (b.first[b.depth] == 0) {
+        if (w_indent_to(b, b.depth) == 0) {
+            return builder_status(b)
+        }
+    }
+    if (w_byte(b, 125) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// begin_array 开始一个数组。
+pub fn begin_array(b *Builder) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    b.pending_key = 0
+    if (w_byte(b, 91) == 0) {
+        return builder_status(b)
+    }
+    if (w_push(b, W_ARRAY) == 0) {
+        return builder_status(b)
+    }
+    return WriteStatus.write_ok
+}
+
+// end_array 结束当前数组。
+pub fn end_array(b *Builder) WriteStatus {
+    if (w_pop(b, W_ARRAY) == 0) {
+        return builder_status(b)
+    }
+    if (b.first[b.depth] == 0) {
+        if (w_indent_to(b, b.depth) == 0) {
+            return builder_status(b)
+        }
+    }
+    if (w_byte(b, 93) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// key 写一个对象键；只能在对象内、且上一个键已有值时调用。
+pub fn key(b *Builder, text Text) WriteStatus {
+    if (b.fail_status != WriteStatus.write_ok) {
+        return builder_status(b)
+    }
+    if (b.depth == 0 || w_top(b) != W_OBJECT || b.pending_key != 0) {
+        w_fail(b, WriteStatus.write_state_error)
+        return builder_status(b)
+    }
+    if (b.first[b.depth - 1] == 0) {
+        if (w_byte(b, 44) == 0) {
+            return builder_status(b)
+        }
+    }
+    if (w_indent_to(b, b.depth) == 0) {
+        return builder_status(b)
+    }
+    b.first[b.depth - 1] = 0
+    if (w_string_body(b, text) == 0) {
+        return builder_status(b)
+    }
+    if (w_byte(b, 58) == 0) {
+        return builder_status(b)
+    }
+    if (b.options.indent > 0) {
+        if (w_byte(b, 32) == 0) {
+            return builder_status(b)
+        }
+    }
+    b.pending_key = 1
+    return WriteStatus.write_ok
+}
+
+// write_string 写一个字符串值。
+pub fn write_string(b *Builder, text Text) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    if (w_string_body(b, text) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// write_i64 写一个整数。
+pub fn write_i64(b *Builder, value i64) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    if (w_i64_body(b, value) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// write_f64 写一个浮点值；NaN/±Inf 在 JSON 无表示，返回 write_number_range。
+pub fn write_f64(b *Builder, value f64) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    let buf [40]u8
+    let count u64 = 0
+    let out *u8 = &buf[0]
+    let out_count *u64 = &count
+    let status num.NumStatus = num.format_f64(value, out, 40, out_count)
+    if (status != num.num_ok) {
+        w_fail(b, WriteStatus.write_number_range)
+        return builder_status(b)
+    }
+    if (w_put(b, out, count) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// write_bool 写布尔值。
+pub fn write_bool(b *Builder, value bool) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    if (value) {
+        if (w_put(b, "true".to_type(*u8), 4) == 0) {
+            return builder_status(b)
+        }
+    } else {
+        if (w_put(b, "false".to_type(*u8), 5) == 0) {
+            return builder_status(b)
+        }
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// write_null 写 null。
+pub fn write_null(b *Builder) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    if (w_put(b, "null".to_type(*u8), 4) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// write_number_text 原样写一个已校验的数字词素（保真输出）。
+pub fn write_number_text(b *Builder, text Text) WriteStatus {
+    if (w_prepare_value(b) == 0) {
+        return builder_status(b)
+    }
+    if (text.count == 0 || json_number_scan(text.data, text.count, 0) != text.count) {
+        w_fail(b, WriteStatus.write_argument_error)
+        return builder_status(b)
+    }
+    if (w_put(b, text.data, text.count) == 0) {
+        return builder_status(b)
+    }
+    w_finish_value(b)
+    return WriteStatus.write_ok
+}
+
+// builder_finish 结束写出；必须已有一个根值且容器栈为空。
+pub fn builder_finish(b *Builder) WriteStatus {
+    if (b.fail_status != WriteStatus.write_ok) {
+        return b.fail_status
+    }
+    if (b.depth != 0 || b.root_written == 0) {
+        w_fail(b, WriteStatus.write_state_error)
+    }
+    return b.fail_status
+}
+
+// encode 把值树写进调用方提供的缓冲；失败时缓冲回滚到调用前内容。
+pub fn encode(value Value, out *string.String, options WriteOptions) WriteStatus {
+    if (out == 0) {
+        return WriteStatus.write_argument_error
+    }
+    let b Builder = builder_make(out, options)
+    if (builder_status(&b) != WriteStatus.write_ok) {
+        return builder_status(&b)
+    }
+    let status WriteStatus = w_value(&b, value)
+    if (status != WriteStatus.write_ok) {
+        return status
+    }
+    return builder_finish(&b)
+}
+
+// encode_owned 返回独占输出缓冲；失败时 text 为零句柄，无需清理。
+pub fn encode_owned(value Value, options WriteOptions) EncodeResult {
+    let result EncodeResult
+    let fresh string.String = string.make()
+    result.text = fresh
+    result.status = WriteStatus.write_ok
+    let status WriteStatus = encode(value, &result.text, options)
+    result.status = status
+    if (status != WriteStatus.write_ok) {
+        string.release(&result.text)
+        let reset string.String = string.make()
+        result.text = reset
+    }
+    return result
+}
+
+// parse 解析显式长度的字节。空输入是语法错误（JSON 文档必须是一个值）。
+pub fn parse(data *u8, count u64) ParseResult {
+    if (count > 0 && data == 0) {
+        return parse_failure(ParseStatus.parse_argument_error,
+            ErrorCode.error_argument, "输入指针为空", span_zero(), 0)
+    }
+    if (count > JSON_MAX_INPUT) {
+        return parse_failure(ParseStatus.parse_resource_error,
+            ErrorCode.error_resource_limit, "输入超过 JSON_MAX_INPUT",
+            span_zero(), 0)
+    }
+    if (count == 0) {
+        return parse_failure(ParseStatus.parse_syntax_error,
+            ErrorCode.error_syntax, "输入为空", span_zero(), 0)
+    }
+    if (count >= 3 && data[0] == 239 && data[1] == 187 && data[2] == 191) {
+        let span Span
+        span.offset = 0
+        span.length = 3
+        span.line = 1
+        span.column = 1
+        return parse_failure(ParseStatus.parse_syntax_error,
+            ErrorCode.error_bom, "输入以 UTF-8 BOM 开头", span, 0)
+    }
+    let bad_off u64 = 0
+    let bad_len u64 = 0
+    if (utf8_validate(data, count, &bad_off, &bad_len) != 0) {
+        let line u64 = 0
+        let column u64 = 0
+        p_offset_position(data, count, bad_off, &line, &column)
+        let span Span
+        span.offset = bad_off
+        span.length = bad_len
+        span.line = line
+        span.column = column
+        return parse_failure(ParseStatus.parse_syntax_error,
+            ErrorCode.error_utf8, "输入不是合法 UTF-8", span, 0)
+    }
+    let state *doc_state = doc_new()
+    if (state == 0) {
+        return parse_failure(ParseStatus.parse_resource_error,
+            ErrorCode.error_out_of_memory, "创建文档状态失败", span_zero(), 0)
+    }
+    let p parser
+    p.data = data
+    p.count = count
+    p.pos = 0
+    p.line = 1
+    p.column = 1
+    p.pending_lf = 0
+    p.state = state
+    p.fail_code = ErrorCode.error_none
+    p.fail_message = ""
+    p.fail_span = span_zero()
+    p.related = span_zero()
+    p.has_related = 0
+    p.depth = 0
+    let ok int = p_parse_document(&p)
+    if (ok == 0 || state.mem.status != 0) {
+        let status ParseStatus = ParseStatus.parse_syntax_error
+        let code ErrorCode = p.fail_code
+        let message *char = p.fail_message
+        let span Span = p.fail_span
+        if (state.mem.status == 2) {
+            // 累计分配预算超限统一报 error_resource_limit；下游某个分配点
+            // 可能先报 out_of_memory，这里按池状态纠正分类。
+            status = ParseStatus.parse_resource_error
+            code = ErrorCode.error_resource_limit
+            message = "文档存储超过实现预算"
+        } else if (state.mem.status == 1) {
+            status = ParseStatus.parse_resource_error
+            if (code == ErrorCode.error_none) {
+                code = ErrorCode.error_out_of_memory
+                message = "文档存储内存不足"
+            }
+        } else if (code == ErrorCode.error_resource_limit
+            || code == ErrorCode.error_out_of_memory) {
+            status = ParseStatus.parse_resource_error
+        }
+        if (code == ErrorCode.error_none) {
+            code = ErrorCode.error_syntax
+            message = "解析失败"
+        }
+        let result ParseResult
+        result.status = status
+        result.document.handle = 0
+        let diag Diagnostic = diagnostic_make(code, message, span, 0)
+        result.error = diag
+        result.error.related = p.related
+        result.error.has_related = p.has_related
+        doc_free(state)
+        return result
+    }
+    return parse_ok_result(state)
+}
+
+// parse_text 解析 NUL 结尾文本；空指针是参数错误。
+pub fn parse_text(text *char) ParseResult {
+    if (text == 0) {
+        return parse_failure(ParseStatus.parse_argument_error,
+            ErrorCode.error_argument, "文本指针为空", span_zero(), 0)
+    }
+    return parse(text.to_type(*u8), strlen(text))
+}
+
+// root 返回成功文档的根值；空句柄返回空视图。
+pub fn root(doc *Document) Value {
+    if (doc == 0 || doc.handle == 0) {
+        return value_of(0)
+    }
+    let state *doc_state = doc.handle.to_type(*doc_state)
+    return value_of(state.root)
+}
+
+// release 释放文档全部存储并清零；同一个已清零句柄可再次释放。
+pub fn release(doc *Document) void {
+    if (doc == 0 || doc.handle == 0) {
+        return
+    }
+    let state *doc_state = doc.handle.to_type(*doc_state)
+    doc_free(state)
+    doc.handle = 0
+}
+
+// read_file：平台无关入口；实现见 stream.<平台>.yh 的 read_file_impl。
+pub fn read_file(path *char) ParseResult {
+    return read_file_impl(path)
+}
+
+// write_file：平台无关入口；实现见 stream.<平台>.yh 的 write_file_impl。
+pub fn write_file(path *char, value Value, options WriteOptions) WriteStatus {
+    return write_file_impl(path, value, options)
+}

@@ -20,6 +20,28 @@ YH_STDLIB=/path/to/yh/libs yh run
 尚未确定，属于后续交付工作。应用按普通模块语法导入库模块，例如 `import io;`；
 本地同名模块仍按既定搜索顺序遮蔽标准库模块。
 
+## 2026-11-10：公开面迁移到各模块 `api.yh`
+
+自本日起，`libs/` 每个模块都有 `<模块目录>/api.yh`，集中该模块的全部 pub
+声明（函数、结构体/联合、枚举、类型别名、常量）与全部 `@[extern]` 声明；
+其余主题文件只保留私有实现与辅助。模块内按文件名字节序处理，`api.yh` 排在
+最前；函数可前向调用、类型在模块内统一登记，所以公开实现可以调用后续文件的
+私有辅助、引用后续文件的私有类型与全局。
+
+平台分文件模块（json/net/os/sys/time/toml）把平台无关的公开面放进 `api.yh`，
+平台差异仍按 `*.<平台>.yh` 分文件。以下三类按语言能力保留在平台文件，记为
+已知例外：
+
+- 平台定义不一致的公开结构体：`os.DirReader`、`os.DirReaderResult`；
+- 只在部分平台存在的公开函数：`os.open_dir`/`next_entry`/`close_dir`，
+  `sys.spawn_process`/`raw6`/`read_dir_entries`/`getdents64`/
+  `find_first`/`find_next`/`find_close`/`fcntl_fd`；
+- 平台取值不同的公开常量：`sys/constants.*.yh`、`sys/errno.*.yh`。
+
+下面的模块小节与各模块设计文档里的历史文件清单仍描述主题职责；**pub 声明
+所在的文件一律以 `api.yh` 为准**。验收：`yh test`（O0/O2 各 171 例）通过、
+编译器以 `libs` 为依赖构建通过、`yh check --target` 四种 triple 通过。
+
 ## 基础模块
 
 本批模块围绕编译器现有运行时和 Darwin 主机接口，提供小而明确的 yh API。
@@ -38,7 +60,7 @@ YH_STDLIB=/path/to/yh/libs yh run
 | `print(text *char) int` | 将 NUL 结尾字符串写到标准输出，不追加换行；成功返回 0，失败返回 -1 |
 | `println(text *char) int` | 写字符串并追加一个换行；成功返回 0，失败返回 -1 |
 
-IO0–IO4 新增（`base.yh`/`read.yh`/`write.yh`）：
+IO0–IO4 新增（`api.yh`/`model.yh`/`read.yh`）：
 
 | 组 | API |
 | --- | --- |
@@ -83,30 +105,40 @@ resize/free）、增强 Arena（几何增长、reset 模式、LIFO 回收、capa
 只有上表三个 API；块来源统一为 prelude 堆，不新增 `sys` 依赖，也不替换
 `libc` 的 C ABI 分配器。
 
-### `list`（2026-11-10 首期完成）
+### `list`（2026-11-10 首期完成；同日按 V 内建数组方法集补齐）
 
 无泛型约束下的动态列表：连续字节块 + 运行期元素宽度（必须来自 `sizeof(T)`），
 元素地址以 `*void` 暴露，取用时 `to_type(*T)` 定型。`List` 的 4 个公开字段
 即描述符（`data`/`count`/`capacity`/`element_size`）；`Status` 区分
-`status_invalid_argument`/`status_overflow`/`status_out_of_memory`/`status_bounds`。
-公开面 10 个函数：
+`status_invalid_argument`/`status_overflow`/`status_out_of_memory`/`status_bounds`；
+返回新列表的方法统一用 `ListResult`。公开面按 V 内建数组方法集对齐，共 36 个
+函数：
 
 | 组 | API |
 | --- | --- |
 | 生命周期 | `make`、`release`、`clear` |
-| 容量与访问 | `reserve`、`element_at` |
-| 追加 | `push`、`push_all` |
-| 搬移 | `pop`、`insert`、`remove_at` |
+| 容量与截断 | `reserve`、`grow_cap`、`grow_len`、`trim` |
+| 追加与插入 | `push`、`push_all`、`prepend`、`insert` |
+| 删除与丢弃 | `pop`、`pop_left`、`remove_at`、`delete_last`、`delete_many`、`drop` |
+| 访问与查询 | `element_at`、`first`、`last`、`contains`、`index`、`last_index`、`any`、`all`、`count` |
+| 返回新列表 | `clone`、`repeat`、`slice`、`reverse`、`sorted`、`filter`、`map` |
+| 原地变换 | `reverse_in_place`、`sort`、`reset` |
+
+需要元素语义的方法收回调：比较 `fn(*void, *void) int`（`contains`/`index`/
+`last_index`/`sort`/`sorted`）、谓词 `fn(*void) bool`（`any`/`all`/`count`/
+`filter`）、变换 `fn(*void, *void) void`（`map`，回调写满结果槽位）。回调是
+普通 yh 函数、必须非空（语言不支持函数指针与 `0` 比较）。
 
 扩容 = `memory.alloc` + 复制 + `memory.release`，起步 16 槽、容量翻倍，上限
-`LIST_MAX_BYTES / element_size`；插入/删除的移位复用 `libc.memmove`。空指针、
-越界、溢出与分配失败都返回可判别结果，且失败时 `count`/`capacity`/内容不变。
-list 不析构元素、不追踪元素所有权、不提供 `[]T` 视图（语言禁止从裸指针构造
-切片）。步长必须来自 `sizeof(T)`，传给 push 系列的元素不得指向列表自身存储，
+`LIST_MAX_BYTES / element_size`；插入/删除等重叠搬移用模块内
+`list_copy_overlap`（**不依赖 `libc.memmove`**：Windows 零 CRT 上 `libc` 的
+`@[extern]` 符号会与 prelude 运行时重复定义）。空指针、越界、溢出与分配失败
+都返回可判别结果，且失败时 `count`/`capacity`/内容不变。list 不析构元素、
+不追踪元素所有权、不提供 `[]T` 视图（语言禁止从裸指针构造切片，`slice` 返回
+副本）。步长必须来自 `sizeof(T)`，传给 push 系列的元素不得指向列表自身存储，
 成功的可变操作使此前取得的元素指针与缓存的 `data` 失效。
 
-设计见 [list 标准库设计](yh-list标准库设计.md)，实施方案见
-[实施方案](../02-plan/yh-list标准库实施方案-2026-11-10.md)，用法与硬规则见
+设计见 [list 标准库设计](yh-list标准库设计.md)，用法、V 方法映射与硬规则见
 [`libs/list/README.md`](../../libs/list/README.md)。
 
 ### `string`（2026-10-23 首期完成）
@@ -194,7 +226,7 @@ Linux/x64 与 Linux/arm64 按现有后端分别复用 `linux_syscall6`，提供 
 采用显式项目依赖。不把静态 ELF/编译器独立验收作为文件 API 可用的前置。
 macOS/arm64 后续适配审核的系统 OS API，披露 dyld/libSystem 依赖。
 
-当前已实现 `base.yh`、Linux 两种 ISA 的常量、`raw.linux.yh`、文件/目录/
+当前已实现 `api.yh`（公开面）、Linux 两种 ISA 的常量、`raw.linux.yh`、文件/目录/
 cwd/pipe（`file`）、内存（`memory`）、时间（`time`）与进程
 （`process`）原语；Darwin 桥仍待实施。未迁移本文已有 API。静态 ELF、
 启动入口和连续自编须与自有工具链共同验收。
@@ -212,12 +244,12 @@ cwd/pipe（`file`）、内存（`memory`）、时间（`time`）与进程
 [实施方案](../02-plan/yh-cli标准库实施方案.md)，API 与状态见
 [libs/cli/README.md](../../libs/cli/README.md)。
 
-已注册模块并在 `libs/project.toml` 登记；公开面分文件为
-`cli.yh`（模型与分配池）、`schema.yh`（注册与冻结）、`values.yh`（命名空间）、
-`parse.yh`（解析与数量）、`convert.yh`（类型转换）、`write.yh`（结果写入）、
-`commands.yh`（子命令/继承/组）、`layer.yh`（分层解析与模式）、
-`extensions.yh`（回调与注册表）、`files.yh`（参数文件）、
-`help.yh`（帮助/诊断/输出）、`entry.yh`（argc/argv 与退出码）。
+已注册模块并在 `libs/project.toml` 登记。2026-11-10 起公开面集中在
+`api.yh`；私有实现按主题保留在 `cli.yh`（模型与分配池）、`schema.yh`
+（注册与冻结）、`values.yh`（命名空间）、`parse.yh`（解析与数量）、
+`convert.yh`（类型转换）、`write.yh`（结果写入）、`commands.yh`（子命令/
+继承/组）、`layer.yh`（分层解析与模式）、`extensions.yh`（回调与注册表）、
+`files.yh`（参数文件）、`help.yh`（帮助/诊断/输出）。
 分配点按 API 契约显式声明，不改变现有基础模块的所有权约定；
 `os` 增加了 `is_terminal` 以支持帮助的自动颜色策略。
 
@@ -227,11 +259,11 @@ cwd/pipe（`file`）、内存（`memory`）、时间（`time`）与进程
 `Document` 独占文档存储、`Value` 只读句柄、按字节长度的 `Text`、类型化查询
 和结构化诊断；不依赖 compiler/gen，不修改 yh 语法。写入后置。
 
-已注册模块并在 `libs/project.toml` 登记。实际文件按编译顺序：
-`base.yh`（公开类型/预算）、`document.yh`（私有池/节点/容器）、
-`encoding.yh`、`numbers.yh`（整数与精确 binary64）、`datetime.yh`、
-`lexer.yh`、`strings.yh`、`parse.yh`（文档/键/表语义）、
-`query.yh`、`file.linux.yh`/`file.darwin.yh`、`surface.yh`。
+已注册模块并在 `libs/project.toml` 登记。公开面集中在 `api.yh`（公开类型、
+预算常量、查询与文件接口）；私有实现按主题保留在 `document.yh`（私有池/
+节点/容器）、`encoding.yh`、`numbers.yh`（整数与精确 binary64）、
+`datetime.yh`、`lexer.yh`、`strings.yh`、`parse.yh`（文档/键/表语义）、
+`query.yh`、`surface.yh`、`file.<平台>.yh`。
 
 固定 toml-test v2.2.0 的 1.1 decoder 清单通过 681/681（有效 214、非法 467），
 六组 `.yh` API/所有权/资源/文件用例与 `make test`/`make selfhost-native`
@@ -279,7 +311,7 @@ Go 的 `%` 格式串与 `Printf` 族。语言没有 `any`/接口/反射，插值
 [字符串插值设计](yh-字符串插值设计.md)；运行时 API 见
 [fmt 标准库设计](yh-fmt标准库设计.md)；R0–R3/I0–I5 分期见
 [实施方案](../02-plan/yh-fmt标准库实施方案-2026-10-23.md)。当前状态：
-`libs/fmt/` 7 个源文件与语言层插值均已落地（R0–R3、I0–I4），O0/O2、
+`libs/fmt/` 源文件（`api.yh` + 主题文件）与语言层插值均已落地（R0–R3、I0–I4），O0/O2、
 `--syntax-check` 语法模式与仓库外安装导入均通过；I5 可选扩展未做。
 
 ## net 与 http（2026-10-24 设计定稿；未实施）

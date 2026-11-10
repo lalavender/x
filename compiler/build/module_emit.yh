@@ -1,6 +1,5 @@
 module build
 import token
-import ast
 import support
 import proj
 import parse
@@ -20,35 +19,6 @@ import hash
 // 目录/路径的纯计算在 proj（proj_40_art），工具链调用在 link；本文件只负责
 // 「按什么顺序做、失败怎么收尾」。
 // ============================================================================
-
-// mb_mkdir：确保构建目录存在。
-pub fn mb_mkdir(dir *char) int {
-    // 建 .build 七子目录（asm/obj/iface/manifest/ir/llvm/index）
-    let subs [7]*char
-    subs[0] = "asm"
-    subs[1] = "obj"
-    subs[2] = "iface"
-    subs[3] = "manifest"
-    subs[4] = "ir"
-    subs[5] = "llvm"
-    subs[6] = "index"
-    if (link.cmd_mkdirs(dir) != 0) {
-        return support.fail_path("无法创建构建目录: ", dir)
-    }
-    let k int = 0
-    for k < 7 {
-        let path [1100]u8
-        let n int = support.append_str(path, 0, dir)
-        n = support.append_byte(path, n, '/')
-        n = support.append_str(path, n, subs[k])
-        path[n] = 0
-        if (link.cmd_mkdirs(support.arr_cstr(path)) != 0) {
-            return support.fail_path("无法创建构建目录: ", dir)
-        }
-        k += 1
-    }
-    return 0
-}
 
 // mb_check_clear_ifaces：删除本轮 check 生成的临时模块接口。
 // check 使用独立构建目录，不覆盖正式构建缓存；依赖接口保留到全部模块检查结束。
@@ -520,31 +490,6 @@ fn mb_pass1_file(path *char, fi int) int {
     return parse.parse_indexed_decls(0)
 }
 
-// mb_restore_front_file：将当前解析器切换到项目索引时保存的只读快照。
-pub fn mb_restore_front_file(path *char, fi int) int {
-    if (support.ctl().front_cache == 0 || proj.ctx().files[fi].source == 0
-        || proj.ctx().files[fi].tokens == 0) {
-        return support.fail("内部错误：模块 worker 缺少前端文件快照")
-    }
-    support.src_ctx().data = proj.ctx().files[fi].source
-    support.src_ctx().length = proj.ctx().files[fi].source_len
-    token.ctx().tokens = proj.ctx().files[fi].tokens
-    token.ctx().count = proj.ctx().files[fi].token_n
-    token.ctx().cap = proj.ctx().files[fi].token_n
-    ast.store().file_decls = proj.ctx().files[fi].decls
-    ast.store().file_decl_n = proj.ctx().files[fi].decl_n
-    ast.store().file_decl_i = -1
-    ast.store().file_indexed = 1
-    support.session().active_file = fi
-    token.ctx().pos = 0
-    if (support.set_source_path(path) != 0) {
-        return -1
-    }
-    support.diag().spec = 0
-    parse.ctx().ctx_block = 0
-    return 0
-}
-
 // mb_pass2_file：复用模块文件快照执行全局、CT 捕获/布局常量子遍或函数子遍。
 // 1 全局初始化，2 CT 正文捕获，3 布局请求登记，4 布局 const 求值，0 普通函数。
 fn mb_pass2_file(path *char, fi int, is_globals int) int {
@@ -631,66 +576,5 @@ fn mb_check_binding_clash(m int) int {
         fi += 1
     }
     return 0
-}
-
-// mb_emit_module：子进程入口——编译一个模块为按文件汇编 + 接口；check-only
-// 复用语义遍历并只写本轮依赖需要的临时接口。
-// prov_root：模块提供方项目根（在其中查找模块）；main_root：主项目根
-// （构建目录基准，接口路径与父进程一致）；out_dir：按文件汇编目录
-// <build>/asm/<tag>（RS3b）。
-pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
-    main_off int, main_len int, out_dir *char, ir_cache_salt u64,
-    extra *char) int {
-    support.ctl().front_cache = 1
-    support.session().ast_capture = 0
-    support.ctl().ir_cache_salt = ir_cache_salt
-    if (mb_load_stdlib() != 0) {
-        return -1
-    }
-    let pj int = pj_load_project(prov_off, prov_len)
-    if (pj < 0) {
-        return -1
-    }
-    // --emit-module 的独立子进程（无 fork 宿主）必须自己装载主项目并重建拓扑序：
-    // 依赖排序与接口路径都按主项目的 order/构建目录算；fork 路径继承父进程快照，
-    // 这两步是 Windows 的 re-exec 路径独有的。
-    let main_proj int = pj_load_project(main_off, main_len)
-    if (main_proj < 0) {
-        return -1
-    }
-    if (support.session().test_mode != 0) {
-        // 测试模式：测试项目就是主项目；父进程已清掉入口标记，子进程同样要清，
-        // 否则 runner 的 main 会被加模块后缀。
-        let ctx *proj.ProjectCtx = proj.ctx()
-        ctx.test_project = main_proj
-        let ci int = 0
-        for ci < ctx.projs[main_proj].mod_n {
-            ctx.mods[ctx.projs[main_proj].mods[ci]].is_entry = 0
-            ci += 1
-        }
-    }
-    if (extra != 0) {
-        // 测试 runner 由 testkit 生成在项目 tmp/ 下（不在 source 根扫描范围），
-        // 独立子进程必须显式把它加进索引，否则「模块不在索引中」。
-        if (pj_index_file(extra, pj) != 0) { return -1 }
-    }
-    if (pj_bind_imports() != 0) {
-        return -1
-    }
-    let rootmod int = pj_entry_mod(main_proj)
-    let order_n int = rootmod >= 0 ? pj_topo(rootmod) : pj_topo_multi(main_proj)
-    if (order_n < 0) {
-        return -1
-    }
-    let m int = proj.module_in_project(pj, mod_off, mod_len)
-    if (m < 0) {
-        return support.fail("内部错误：模块不在索引中")
-    }
-    // 测试 runner 是入口模块：testkit 在父进程里置 is_entry=1，独立子进程重新
-    // 装载索引后必须做同样标记，否则零 CRT 入口桩不发射。
-    if (extra != 0 && support.session().test_mode != 0) {
-        proj.ctx().mods[m].is_entry = 1
-    }
-    return mb_emit_indexed_module(m, main_off, main_len, out_dir, ir_cache_salt)
 }
 

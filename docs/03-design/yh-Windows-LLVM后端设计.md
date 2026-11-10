@@ -323,7 +323,7 @@ Windows 没有等价的静态包，所以只有两条路：
 构建出的 `.lib`。清单里的 `LLVM-C.lib` 是 DLL 导入库（会拉 `LLVM-C.dll`），必须移除。
 
 **进程模型**：Windows 无 fork，模块编译改为 `CreateProcessA` 重入 `--emit-module`
-（`mb_spawn_module_child`）。子进程自己 `pj_load_project` 主项目并 `pj_topo` 重建拓扑序
+（`mb_spawn_module_child`）。子进程自己 `load_project` 主项目并 `pj_topo` 重建拓扑序
 （不重建时依赖 rank 会报「依赖模块不在拓扑序中」）；父进程等退出后按 pid=0 走完成分支。
 `compiler/llvm/windows_shim.c` 提供 `yh_win_spawn_wait`（Windows 命令行 quoting +
 `CreateProcessA` + `WaitForSingleObject`）以及 stat/realpath/setenv/usleep/fork/waitpid/kill 垫片。

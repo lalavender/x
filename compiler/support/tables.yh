@@ -10,38 +10,12 @@ module support
 // 所以必须待在 support。写入不带诊断（表满返回 -1，由调用方报错）。
 // ============================================================================
 
-// 字符串字面量的数据标签 → 原样字节（intern 池）映射：顶层或普通函数里的编译期
-// 调用实参由前端直接求值，只剩数据标签号，编译期过程据此反查字面量字节。
-// 独立全局表而非 GenState 字段：GenState 已大到让后端单条 add 的字段偏移越界。
-// 每个编译单元最多登记 4096 项，表满时由调用方报告错误，不漏掉快照数据。
-pub const DATA_STR_CAP int = 4096
 let c_data_str_n int = 0
+pub const DATA_STR_CAP int = 4096
 let c_data_str_lbl [DATA_STR_CAP]int
 let c_data_str_off [DATA_STR_CAP]int
 let c_data_str_len [DATA_STR_CAP]int
 let c_data_str_quoted [DATA_STR_CAP]int
-
-// data_str_add：登记字符串字面量的数据标签与原样字节，返回非零表示表满或分配失败。
-// 字节 intern 进名字池（np_data），消费侧（ct_pool_adopt_label）按同一个池取字节。
-pub fn data_str_add(lbl int, start int, slen int) int {
-    if (c_data_str_n >= DATA_STR_CAP) { return -1 }
-    let off int = name_intern(start, slen)
-    if (off < 0) { return -1 }
-    return data_str_add_entry(lbl, off, slen, 1)
-}
-
-// data_str_add_pool：直接登记已经位于名字池中的字节，不把池偏移误当源文件偏移。
-pub fn data_str_add_pool(lbl int, off int, slen int) int {
-    return data_str_add_entry(lbl, off, slen, 0)
-}
-
-// data_str_add_body：登记不含首尾引号的字符串体；quoted=2 让解码器仍处理
-// 转义，但不剥引号。插值字面文本/说明符使用该模式直接引用源码区间。
-pub fn data_str_add_body(lbl int, start int, slen int) int {
-    let off int = name_intern(start, slen)
-    if (off < 0) { return -1 }
-    return data_str_add_entry(lbl, off, slen, 2)
-}
 
 // data_str_add_entry：登记池内字节，并标记其是否含有源码字符串引号与转义。
 fn data_str_add_entry(lbl int, off int, slen int, quoted int) int {
@@ -55,48 +29,6 @@ fn data_str_add_entry(lbl int, off int, slen int, quoted int) int {
     return 0
 }
 
-// ty_count：当前编译单元已登记的类型数（check 切片 v3 用它判断本函数是否新建类型）。
-pub fn ty_count() int { return ms().type_n }
-
-// data_str_count / data_str_row：字符串登记表规模与逐行读取（check 切片 v3 携带用）。
-pub fn data_str_count() int { return c_data_str_n }
-
-pub fn data_str_row(row int, lbl *int, off *int, slen *int, quoted *int) int {
-    if (row < 0 || row >= c_data_str_n) { return -1 }
-    lbl[0] = c_data_str_lbl[row]; off[0] = c_data_str_off[row]
-    slen[0] = c_data_str_len[row]; quoted[0] = c_data_str_quoted[row]
-    return 0
-}
-
-// data_str_restore：按记录里的既有标签恢复字符串登记（check 切片 v3）。
-// 被跳过的函数不再分配标签，这里把 c_data_n 推到该标签之后，保证后续分配不撞号。
-pub fn data_str_restore(lbl int, off int, slen int, quoted int) int {
-    let have_off int = 0
-    let have_len int = 0
-    let have_quoted int = 0
-    if (data_str_lookup(lbl, &have_off, &have_len, &have_quoted) == 0) {
-        if (data_str_add_entry(lbl, off, slen, quoted) != 0) { return -1 }
-    }
-    if (data_label() <= lbl) { data_label_set(lbl + 1) }
-    return 0
-}
-
-// data_str_lookup：按数据标签号查登记项；**命中返回非零**并写出名字池偏移与字节长度，
-// 未命中返回 0（调用方 `if (data_str_lookup(...) != 0)` 以非零为命中）。
-pub fn data_str_lookup(lbl int, off *int, slen *int, quoted *int) int {
-    let i int = 0
-    for i < c_data_str_n {
-        if (c_data_str_lbl[i] == lbl) {
-            *off = c_data_str_off[i]
-            *slen = c_data_str_len[i]
-            *quoted = c_data_str_quoted[i]
-            return 1
-        }
-        i += 1
-    }
-    return 0
-}
-
 // 枚举成员登记表：模块 worker 会二次解析编译期正文，那时名字表里可能查不到枚举成员
 // 符号（实测）。登记时快照名字池偏移与值，反查不经过符号表，绕开符号可见性问题。
 // 独立全局数组（与 c_data_str_* 同理，避免撑大 GenState 字段偏移）。
@@ -105,29 +37,6 @@ let em_name_off [512]int
 let em_name_len [512]int
 let em_val [512]i64
 let em_ready [512]int
-
-// em_add：登记一个枚举成员（必须在成员的值与就绪位写完之后调用，否则快照到 0）。
-pub fn em_add(sym int) int {
-    if (em_n >= 512) { return -1 }
-    em_name_off[em_n] = ms().syms[sym].name_off
-    em_name_len[em_n] = ms().syms[sym].name_len
-    em_val[em_n] = ms().syms[sym].cval
-    em_ready[em_n] = ms().syms[sym].const_ready
-    em_n += 1
-    return 0
-}
-
-// em_update_value：延迟回填枚举成员值时同步表内快照（按名字池偏移匹配，不依赖符号下标）。
-pub fn em_update_value(name_off int, val i64) void {
-    let i int = 0
-    for i < em_n {
-        if (em_name_off[i] == name_off) {
-            em_val[i] = val
-            em_ready[i] = 1
-        }
-        i += 1
-    }
-}
 
 // em_name_eq：比较登记项名字（名字池字节）与源码缓冲字节 [start,start+n)。
 fn em_name_eq(idx int, src *u8, start int, n int) int {
@@ -143,109 +52,5 @@ fn em_name_eq(idx int, src *u8, start int, n int) int {
     return 1
 }
 
-// em_find_src：按给定源码缓冲的名字字节反查登记项下标，找不到返回 -1。
-// 编译期目标另有一份源码缓冲（frame.target.src），与前端 c_src 不一定同一个。
-pub fn em_find_src(src *u8, start int, n int) int {
-    let i int = 0
-    for i < em_n {
-        if (em_name_eq(i, src, start, n) != 0) { return i }
-        i += 1
-    }
-    return -1
-}
-
-// em_find：按前端当前源文件（c_src）的名字字节反查登记项下标。
-pub fn em_find(start int, n int) int {
-    return em_find_src(src_ctx().data, start, n)
-}
-
-// sym_find_enum_member：在符号表里按名字找属于枚举类型 etid 的成员符号。
-// 用于「成员名被同名形参/局部变量遮蔽」时仍能解析 `EnumName.member`：
-// 词法作用域里的同名声明优先用于普通标识符，但 `.` 右侧的成员名总是枚举成员。
-pub fn sym_find_enum_member(etid int, src *u8, start int, n int) int {
-    let i int = 0
-    for i < ms().sym_n {
-        let candidate CSym = ms().syms[i]
-        if ((candidate.flags & F_ENUM_MEMBER) != 0 && candidate.type_id == etid
-            && candidate.name_len == n) {
-            let off int = candidate.name_off
-            let j int = 0
-            for j < n {
-                if (pool_ctx().data[off + j].to_type(int)
-                    != src[start + j].to_type(int)) {
-                    break
-                }
-                j += 1
-            }
-            if (j == n) {
-                return i
-            }
-        }
-        i += 1
-    }
-    return -1
-}
-
-// em_get_val / em_get_ready：读取登记项的值与就绪位。
-pub fn em_get_val(idx int) i64 {
-    return em_val[idx]
-}
-
-pub fn em_get_ready(idx int) int {
-    return em_ready[idx]
-}
-
-// state_init：恢复非零初始值（原 pub let 声明初始化器迁移而来）。
-// 在每次编译会话开始（driver 入口与 worker 初始化）调用。
-pub fn state_init() void {
-    static_data_reset()
-    session().active_file = -1
-    fc().c_expect_tid = -1
-    data_label_reset()
-    c_data_str_n = 0
-    em_n = 0
-    fc().c_ct_target_ctx = 0
-    fc().c_ct_diag_stmt = 0
-    fs().name_off = -1
-    fs().sym_sfx_off = -1
-}
-
 // —— 只读表槽：供 check 把指针交给 CT 执行器的镜像（不复制、不转移所有权）——
 
-// data_str_slots：字符串标签表四列的地址（CT 镜像用；行数走 data_str_n_slot）。
-pub fn data_str_slots(lbl **int, off **int, slen **int, quoted **int) void {
-    lbl[0] = &c_data_str_lbl[0]
-    off[0] = &c_data_str_off[0]
-    slen[0] = &c_data_str_len[0]
-    quoted[0] = &c_data_str_quoted[0]
-}
-
-// data_str_n_slot：字符串标签表行数的地址（表增长后 CT 镜像自动跟随）。
-pub fn data_str_n_slot() *int { return &c_data_str_n }
-
-// em_slots：枚举成员登记表的列与行数（`n` 是活行数，由 CT 每次重读）。
-pub fn em_slots(off **int, slen **int, val **i64, ready **int) void {
-    off[0] = &em_name_off[0]
-    slen[0] = &em_name_len[0]
-    val[0] = &em_val[0]
-    ready[0] = &em_ready[0]
-}
-
-// em_n_slot：枚举成员登记行数的地址（表增长后 CT 镜像自动跟随）。
-pub fn em_n_slot() *int { return &em_n }
-
-// session_reset：编译会话的非零初值复位（原 gen.state_init）。
-// 次序 = 「表计数清零 → 会话游标复位 → 前端瞬时态复位」，调用方在每次
-// 进入编译前调用一次；不释放堆缓冲（各推送路径自行扩容/替换）。
-pub fn session_reset() void {
-    static_data_reset()
-    session().active_file = -1
-    fc().c_expect_tid = -1
-    data_label_reset()
-    c_data_str_n = 0
-    em_n = 0
-    fc().c_ct_target_ctx = 0
-    fc().c_ct_diag_stmt = 0
-    fs().name_off = -1
-    fs().sym_sfx_off = -1
-}

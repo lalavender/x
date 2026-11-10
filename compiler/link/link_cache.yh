@@ -3,7 +3,6 @@ import support
 import backend
 import proj
 
-
 // mb_write_manifest：写缓存键；写失败时不保留可被误认的旧键。
 fn mb_write_manifest(path *char, data *u8, data_len int) int {
     let tmp [800]u8
@@ -27,54 +26,6 @@ fn mb_write_manifest(path *char, data *u8, data_len int) int {
     if (rename((&tmp[0]).to_type(*char), path) != 0) {
         unlink((&tmp[0]).to_type(*char))
         return support.fail_path("无法提交缓存 manifest: ", path)
-    }
-    return 0
-}
-
-// mb_object_machine_matches：校验对象或程序头与当前目标的文件格式和 machine 一致。
-// Linux 只接受 ELF64 little-endian，Darwin 只接受 Mach-O 64 little-endian。
-pub fn mb_object_machine_matches(path *char) int {
-    if (support.read_source(path) != 0 || support.src_ctx().length < 20) { return 0 }
-    if (proj.cfg().target.os == support.TARGET_OS_LINUX) {
-        if (support.src_ctx().data[0] != 127 || support.src_ctx().data[1] != 'E' || support.src_ctx().data[2] != 'L'
-            || support.src_ctx().data[3] != 'F' || support.src_ctx().data[4] != 2 || support.src_ctx().data[5] != 1) {
-            return 0
-        }
-        let machine int = support.src_ctx().data[18].to_type(int) |
-            (support.src_ctx().data[19].to_type(int) << 8)
-        if (proj.cfg().target.arch == support.TARGET_ARCH_X64) { return machine == 62 ? 1 : 0 }
-        if (proj.cfg().target.arch == support.TARGET_ARCH_ARM64) { return machine == 183 ? 1 : 0 }
-        return 0
-    }
-    // COFF 对象：Machine 就是前两个字节（0x8664 = x64），没有 MZ/PE 头。
-    if (proj.cfg().target.os == support.TARGET_OS_WINDOWS && support.src_ctx().length >= 20
-        && support.src_ctx().data[0] == 0x64 && support.src_ctx().data[1] == 0x86) {
-        return proj.cfg().target.arch == support.TARGET_ARCH_X64 ? 1 : 0
-    }
-    // COFF/PE：`MZ` + e_lfanew 处的 `PE 00 00`，Machine 在 COFF 头偏移 4（0x8664 = x64）。
-    if (proj.cfg().target.os == support.TARGET_OS_WINDOWS && support.src_ctx().length >= 0x40
-        && support.src_ctx().data[0] == 77 && support.src_ctx().data[1] == 90) {
-        let lfanew int = support.src_ctx().data[60].to_type(int) |
-            (support.src_ctx().data[61].to_type(int) << 8) |
-            (support.src_ctx().data[62].to_type(int) << 16) |
-            (support.src_ctx().data[63].to_type(int) << 24)
-        if (lfanew <= 0 || lfanew + 6 > support.src_ctx().length) { return 0 }
-        if (support.src_ctx().data[lfanew] != 80 || support.src_ctx().data[lfanew + 1] != 69
-            || support.src_ctx().data[lfanew + 2] != 0 || support.src_ctx().data[lfanew + 3] != 0) { return 0 }
-        let machine int = support.src_ctx().data[lfanew + 4].to_type(int) |
-            (support.src_ctx().data[lfanew + 5].to_type(int) << 8)
-        if (proj.cfg().target.arch == support.TARGET_ARCH_X64) { return machine == 34404 ? 1 : 0 }
-        return 0
-    }
-    if (proj.cfg().target.os == support.TARGET_OS_DARWIN && support.src_ctx().length >= 8
-        && support.src_ctx().data[0] == 207 && support.src_ctx().data[1] == 250
-        && support.src_ctx().data[2] == 237 && support.src_ctx().data[3] == 254) {
-        let cpu int = support.src_ctx().data[4].to_type(int) |
-            (support.src_ctx().data[5].to_type(int) << 8) |
-            (support.src_ctx().data[6].to_type(int) << 16) |
-            (support.src_ctx().data[7].to_type(int) << 24)
-        if (proj.cfg().target.arch == support.TARGET_ARCH_X64) { return cpu == 16777223 ? 1 : 0 }
-        if (proj.cfg().target.arch == support.TARGET_ARCH_ARM64) { return cpu == 16777228 ? 1 : 0 }
     }
     return 0
 }
@@ -320,20 +271,6 @@ fn mb_hash_tool_identity(hash *u64, command *char) int {
     return 0
 }
 
-// mb_lld_linux_enabled：Linux x64/AArch64 target 且当前 yh 内嵌 lld 时启用进程内链接。
-// 目标 ELF 的启动文件、动态加载器与默认库由固定宿主 GCC 的 -### 配置生成；
-// 两架构各自在对应宿主构建，不共享架构专用模板。
-pub fn mb_lld_linux_enabled() int {
-    if (proj.cfg().target.os != support.TARGET_OS_LINUX
-        || (proj.cfg().target.arch != support.TARGET_ARCH_X64
-            && proj.cfg().target.arch != support.TARGET_ARCH_ARM64)) {
-        return 0
-    }
-    let identity *char = backend.llvm_lld_identity()
-    if (identity == 0 || identity[0] == 0) { return 0 }
-    return 1
-}
-
 // mb_hash_lld_library：混入库名与 lld 实际会解析到的库文件内容。
 // required=1 用于固定模板库；项目库缺失时留给 lld 产生标准链接诊断。
 fn mb_hash_lld_library(hash *u64, name *char, required int) int {
@@ -438,33 +375,6 @@ fn mb_hash_lld_identity(hash *u64, projects *int, project_count int) int {
         pi += 1
     }
     return 0
-}
-
-// mb_lld_link_worker：在一次性子进程中执行静态内嵌 lld，避免复用不可重入状态。
-// 子进程只负责写临时输出并立即退出；父进程依据返回码决定是否发布。
-pub fn mb_lld_link_worker(objects **char, object_count int, extra_args **char,
-    extra_count int, output *char) int {
-    let child int = fork()
-    if (child < 0) { return support.fail("无法启动内嵌 lld worker") }
-    if (child == 0) {
-        let diagnostic [backend.LLVM_LLD_DIAG]u8
-        let status int = backend.llvm_lld_link_driver(output, objects,
-            object_count, extra_args, extra_count,
-            (&diagnostic[0]).to_type(*char))
-        if (status != 0) {
-            if (diagnostic[0] != 0) {
-                support.write_all(2, &diagnostic[0],
-                    strlen((&diagnostic[0]).to_type(*char)).to_type(int))
-                support.write_all(2, "\n".to_type(*u8), 1)
-            }
-            if (status == -2) { exit(253) }
-            exit(1)
-        }
-        exit(0)
-    }
-    let status int = cmd_process_status(child)
-    if (status == 253) { return -2 }
-    return status == 0 ? 0 : -1
 }
 
 // mb_link_query_identity：哈希驱动器实际报告的搜索路径、工具、启动文件和库文件。
@@ -738,34 +648,6 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
     }
     free(output.to_type(*void))
     return 0
-}
-
-// mb_select_linker：按输出目标选择链接驱动；YH_CC 可显式覆盖，Linux x64 默认
-// 使用原生绝对路径，避免 PATH 前置的 ARM64 crossbin/gcc 包装器劫持。
-pub fn mb_select_linker(out *u8) *char {
-    let selected *char = "gcc"
-    if (support.tg_darwin() != 0) { selected = "clang" }
-    // Windows 目标：[c].sources 用 clang 编（LLVM 自带 COFF 后端；Windows 宿主上
-    // clang 默认就是 x86_64-pc-windows-msvc）。msvcrt 环境没有 gcc。
-    if (proj.cfg().target.os == support.TARGET_OS_WINDOWS) { selected = "clang" }
-    if (proj.cfg().target.os == support.TARGET_OS_LINUX
-        && proj.cfg().target.arch == support.TARGET_ARCH_X64) {
-        selected = "/usr/bin/gcc"
-    }
-    let env_off int = -1
-        let env_len int = 0
-        if (proj.env_fetch("YH_CC", &env_off, &env_len) == 0 && env_len > 0) {
-            if (env_len >= 1200) { support.fail("YH_CC 路径过长"); return 0.to_type(*char) }
-            let i int = 0
-            for i < env_len { out[i] = support.pool_ctx().data[env_off + i]; i += 1 }
-            out[i] = 0
-            if (proj.file_exists(support.arr_cstr(out)) == 0) {
-                support.fail_path("YH_CC 工具不存在: ", support.arr_cstr(out))
-                return 0.to_type(*char)
-            }
-            return support.arr_cstr(out)
-        }
-    return selected
 }
 
 // mb_darwin_selfhost_enabled：编译器自举链接时是否追加固定静态闭包。
@@ -1567,45 +1449,3 @@ fn mb_link_exec(p *LinkPlan) int {
     return 0
 }
 
-// mb_link：链接一次构建的全部对象。五个阶段各返回 0/-1，失败时统一释放。
-pub fn mb_link(out_path *char, build_off int, build_len int,
-    count int, root_proj int) int {
-    let p LinkPlan
-    p.out_path = out_path
-    p.build_off = build_off
-    p.build_len = build_len
-    p.count = count
-    p.root_proj = root_proj
-    p.llvm_objects = 1
-    if (mb_link_prepare(&p) != 0) {
-        mb_link_release(&p)
-        return -1
-    }
-    if (mb_link_objects(&p) != 0) {
-        mb_link_release(&p)
-        return -1
-    }
-    let hit int = mb_link_key(&p)
-    if (hit < 0) {
-        mb_link_release(&p)
-        return -1
-    }
-    if (hit != 0) {
-        mb_link_release(&p)
-        return 0
-    }
-    if (mb_link_args(&p) != 0) {
-        mb_link_release(&p)
-        return -1
-    }
-    if (mb_link_libs(&p) != 0) {
-        mb_link_release(&p)
-        return -1
-    }
-    if (mb_link_exec(&p) != 0) {
-        mb_link_release(&p)
-        return -1
-    }
-    mb_link_release(&p)
-    return 0
-}

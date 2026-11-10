@@ -20,10 +20,10 @@ GEN0–GEN4（`gen` 拆分，已完成）。原 F0–F7 计划已于 2026-11-08 
 yh build
   → cmd/yh/yh.yh                  argv → CliRequest → 分派（module main）
   → cmd/yh/cmd_build.yh           yh build / yh check
-  → build.mb_cmd_build
-      → mb_load_stdlib            加载标准库项目（若存在）
-      → pj_find_root              向上找 project.toml
-      → pj_load_project           清单 + 依赖 + 源码扫描 + 模块索引
+  → build.cmd_build
+      → load_stdlib            加载标准库项目（若存在）
+      → pro_find_root              向上找 project.toml
+      → load_project           清单 + 依赖 + 源码扫描 + 模块索引
       → pj_bind_imports           本项目 → 标准库 → 直接依赖
       → pj_entry_mod / pj_topo    根模块与依赖序
       → proj.build_dir            构建目录
@@ -49,10 +49,10 @@ yh build
 | 阶段 | 入口 | 关键产物 |
 | --- | --- | --- |
 | CLI | `cmd/yh/yh.yh::main` | `main.CliRequest`（`cmd/yh/cmd_base.yh`） |
-| 命令 | `cmd/yh/cmd_build.yh::api_build` | `build.mb_cmd_build(...)` 调用 |
+| 命令 | `cmd/yh/cmd_build.yh::api_build` | `build.cmd_build(...)` 调用 |
 | 会话 | `cmd/yh/common.yh::cmd_session_init` | `support.session()`/`proj`/target/argv0/envp |
-| 项目 | `build/module_build.yh::mb_cmd_build` | `proj.ProjectCtx` 表 |
-| 装载 | `build/project_index.yh::pj_load_project` | 项目/模块/文件/依赖 |
+| 项目 | `build/module_build.yh::cmd_build` | `proj.ProjectCtx` 表 |
+| 装载 | `build/project_index.yh::load_project` | 项目/模块/文件/依赖 |
 | 导入 | `build/project_resolve.yh::pj_bind_imports` | `imp_mod[]` 绑定 |
 | 拓扑 | `pj_topo` / `pj_topo_multi` | `proj.ctx().order[]` |
 | 调度 | `build/build_scheduler.yh::mb_schedule_modules` | worker 状态/接口就绪 |
@@ -97,7 +97,7 @@ yh build
 
 ```text
 api_build(req)
-  → build.mb_cmd_build(req.out, req.src, req.has_src, req.links[0..])
+  → build.cmd_build(req.out, req.src, req.has_src, req.links[0..])
 ```
 
 `yh check` 走同一函数，只把 `gs.c_check_only = 1`。
@@ -106,22 +106,22 @@ api_build(req)
 
 ## 3. 项目装载
 
-### 3.1 `mb_cmd_build` 的前半段
+### 3.1 `cmd_build` 的前半段
 
 `compiler/build/module_build.yh`：
 
 1. `mb_resolve_self_path()`：定位自身可执行文件，供编译器指纹使用。
 2. `link.li_select_reset()` + `mb_select_links(links)`：登记 `--link` 组名。
 3. `yh check` 不允许 `--link`。
-4. `mb_load_stdlib()`：按可执行文件附近布局加载标准库：
+4. `load_stdlib()`：按可执行文件附近布局加载标准库：
    - `<exe_dir>/libs`；
    - `<exe_dir>/../libs`；
    - `<exe_dir>/../share/yh/libs`。
-5. `pj_find_root(0, &len)`：从当前目录向上找 `project.toml`。
+5. `pro_find_root(0, &len)`：从当前目录向上找 `project.toml`。
 6. `proj.set_root_project(root, len)`。
-7. `pj_load_project(root, len)`：递归装载项目。
+7. `load_project(root, len)`：递归装载项目。
 
-### 3.2 `pj_load_project`
+### 3.2 `load_project`
 
 `compiler/build/project_index.yh`：
 
@@ -133,7 +133,7 @@ api_build(req)
    - `source` 默认 `src`；
    - `os`/`arch` 目标配置；
    - `version`/`author`。
-5. 装载 `[dependencies]`：递归 `pj_load_project()`，检测环与重复。
+5. 装载 `[dependencies]`：递归 `load_project()`，检测环与重复。
 6. 装载 `[link]` / `[link-<os>-<arch>]` / `[c]` / `[env]`（都在 `[dependencies]`
    递归之前快照，子项目会重置 TOML 解析区）。
 7. `pj_scan_source()`：扫描源码根：

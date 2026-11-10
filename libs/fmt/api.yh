@@ -1,0 +1,291 @@
+module fmt
+
+import string
+import os
+// ============================================================================
+// api.yh —— fmt 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// Kind 是 Value 的载荷分类；kind_invalid 是零值，渲染为 <nil>。
+pub enum Kind {
+    kind_invalid
+    kind_int
+    kind_uint
+    kind_f64
+    kind_bool
+    kind_str
+}
+
+// Value 是一次格式化的实参；text 借用源字节，不复制。
+pub struct Value {
+    kind Kind
+    integer i64
+    number u64
+    real f64
+    truth bool
+    text string.View
+}
+
+// Status 是渲染/追加的失败分类；status_unsupported 表示该类型尚未实现
+// 默认渲染（当前仅 f64，R2 接通后不再出现）。
+pub enum Status {
+    status_ok
+    status_out_of_memory
+    status_overflow
+    status_invalid_spec
+    status_unsupported
+    status_other
+}
+
+// TextResult 返回独占字符串；失败时 value 为零句柄，无需清理半成品。
+pub struct TextResult {
+    status Status
+    value string.String
+}
+
+// text 新建一个只含文本的 String；NULL 视为空串。
+pub fn text(value *char) string.String {
+    let result string.String = string.make()
+    if (value != 0) {
+        let view string.ViewResult = string.view_cstr(value)
+        if (view.status == string.status_ok) {
+            if (append_text(&result, view.value) != Status.status_ok) {
+                string.release(&result)
+                return string.make()
+            }
+        }
+    }
+    return result
+}
+
+// value 以默认格式新建一个 String；失败返回零句柄。
+pub fn value(item Value) string.String {
+    let empty string.ViewResult = string.view_bytes(0, 0)
+    let result TextResult = render(item, empty.value)
+    if (result.status != Status.status_ok) {
+        return string.make()
+    }
+    return result.value
+}
+
+// value_spec 以给定 V spec 新建一个 String；失败返回零句柄。
+pub fn value_spec(item Value, spec *char) string.String {
+    let view string.ViewResult = string.view_cstr(spec)
+    if (view.status != string.status_ok) {
+        return string.make()
+    }
+    let result TextResult = render(item, view.value)
+    if (result.status != Status.status_ok) {
+        return string.make()
+    }
+    return result.value
+}
+
+// concat 消费两个 String 并返回拼接结果；任一侧失败/为零句柄时退化为另一侧。
+pub fn concat(left string.String, right string.String) string.String {
+    if (left.handle == 0) {
+        return right
+    }
+    if (right.handle == 0) {
+        return left
+    }
+    let right_view string.View = string.as_view(&right)
+    let status string.Status = string.append(&left, right_view)
+    if (status != string.status_ok) {
+        string.release(&left)
+        string.release(&right)
+        return string.make()
+    }
+    string.release(&right)
+    return left
+}
+
+// fprint 渲染值列表并写入 fd，不追加换行。
+pub fn fprint(fd int, values []Value) os.IoResult {
+    return output_values(fd, values, 0)
+}
+
+// fprintln 渲染值列表、追加换行并写入 fd。
+pub fn fprintln(fd int, values []Value) os.IoResult {
+    return output_values(fd, values, 1)
+}
+
+// print 把值列表写到标准输出，不追加换行。
+pub fn print(values []Value) os.IoResult {
+    return output_values(1, values, 0)
+}
+
+// println 把值列表写到标准输出并追加换行。
+pub fn println(values []Value) os.IoResult {
+    return output_values(1, values, 1)
+}
+
+// sprint 返回值列表的拼接字符串，不追加换行。
+pub fn sprint(values []Value) TextResult {
+    let buffer string.String = string.make()
+    let status Status = render_values(&buffer, values)
+    if (status != Status.status_ok) {
+        string.release(&buffer)
+        return text_error(status)
+    }
+    let result TextResult
+    result.status = Status.status_ok
+    result.value = buffer
+    return result
+}
+
+// sprintln 返回值列表的拼接字符串并追加换行。
+pub fn sprintln(values []Value) TextResult {
+    let buffer string.String = string.make()
+    let status Status = render_values(&buffer, values)
+    if (status == Status.status_ok) {
+        status = append_text(&buffer, view_of("\n"))
+    }
+    if (status != Status.status_ok) {
+        string.release(&buffer)
+        return text_error(status)
+    }
+    let result TextResult
+    result.status = Status.status_ok
+    result.value = buffer
+    return result
+}
+
+// render 按给定 spec 渲染单个值；失败时释放半成品并返回零句柄。
+pub fn render(value Value, spec string.View) TextResult {
+    let buffer string.String = string.make()
+    let status Status = append_value(&buffer, value, spec)
+    if (status != Status.status_ok) {
+        string.release(&buffer)
+        return text_error(status)
+    }
+    let result TextResult
+    result.status = Status.status_ok
+    result.value = buffer
+    return result
+}
+
+// append_text 把借用视图追加到目标 String；空文本不分配。
+pub fn append_text(target *string.String, text string.View) Status {
+    return map_status(string.append(target, text))
+}
+
+// append_value 解析 spec 并按 Value 分类追加渲染结果。
+pub fn append_value(target *string.String, value Value, spec string.View) Status {
+    let parsed spec_result = parse_spec(spec)
+    if (parsed.status != Status.status_ok) {
+        return Status.status_invalid_spec
+    }
+    if (value.kind == Kind.kind_invalid) {
+        return append_text(target, view_of("<nil>"))
+    }
+    if (spec_valid_for(value.kind, parsed.spec) == 0) {
+        return Status.status_invalid_spec
+    }
+    if (value.kind == Kind.kind_int) {
+        let magnitude u64 = value.integer.to_type(u64)
+        let negative int = 0
+        if (value.integer < 0) {
+            negative = 1
+            magnitude = 0 - magnitude
+        }
+        return append_number(target, magnitude, negative, Kind.kind_int,
+            parsed.spec)
+    }
+    if (value.kind == Kind.kind_uint) {
+        return append_number(target, value.number, 0, Kind.kind_uint,
+            parsed.spec)
+    }
+    if (value.kind == Kind.kind_bool) {
+        return append_bool_value(target, value.truth, parsed.spec)
+    }
+    if (value.kind == Kind.kind_str) {
+        return append_text_value(target, value.text, parsed.spec)
+    }
+    if (value.kind == Kind.kind_f64) {
+        return append_float(target, value.real, parsed.spec)
+    }
+    return Status.status_other
+}
+
+// of_int 以有符号 64 位存储 int 实参。
+pub fn of_int(value int) Value {
+    let result Value
+    result.kind = Kind.kind_int
+    result.integer = value.to_type(i64)
+    return result
+}
+
+// of_i64 以有符号 64 位存储 i64 实参。
+pub fn of_i64(value i64) Value {
+    let result Value
+    result.kind = Kind.kind_int
+    result.integer = value
+    return result
+}
+
+// of_u64 以无符号 64 位存储实参；u8/u16/u32 由调用方先转换。
+pub fn of_u64(value u64) Value {
+    let result Value
+    result.kind = Kind.kind_uint
+    result.number = value
+    return result
+}
+
+// of_f64 存储 IEEE binary64 实参；默认渲染在 R2 接通。
+pub fn of_f64(value f64) Value {
+    let result Value
+    result.kind = Kind.kind_f64
+    result.real = value
+    return result
+}
+
+// of_bool 存储 bool 实参。
+pub fn of_bool(value bool) Value {
+    let result Value
+    result.kind = Kind.kind_bool
+    result.truth = value
+    return result
+}
+
+// of_str 借用字符串视图；不复制，调用期间源必须存活。
+pub fn of_str(text string.View) Value {
+    let result Value
+    result.kind = Kind.kind_str
+    result.text = text
+    return result
+}
+
+// of_cstr 借用 NUL 结尾字符串；NULL 视为空串，不崩溃。
+pub fn of_cstr(text *char) Value {
+    let result Value
+    result.kind = Kind.kind_str
+    if (text == 0) {
+        result.text = empty_view()
+        return result
+    }
+    let viewed string.ViewResult = string.view_cstr(text)
+    if (viewed.status != string.status_ok) {
+        result.text = empty_view()
+        return result
+    }
+    result.text = viewed.value
+    return result
+}
+
+// of_string 借用独占字符串的只读视图；不复制，调用期间源必须存活。
+pub fn of_string(text *string.String) Value {
+    let result Value
+    result.kind = Kind.kind_str
+    result.text = string.as_view(text)
+    return result
+}
+
+// kind_of 返回 Value 的分类；零值返回 kind_invalid。
+pub fn kind_of(value Value) Kind {
+    return value.kind
+}

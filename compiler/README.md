@@ -355,7 +355,6 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 | `cmd/yh/cmd_run.yh` | `yh run` |
 | `cmd/yh/cmd_test.yh` | `yh test`（含 `--timeout` 校验） |
 | `cmd/yh/cmd_cache.yh` | `yh cache info/clean/trim/verify`（C6） |
-| `cmd/yh/cmd_list.yh` | `yh list [--resolve]` |
 | `cmd/yh/cmd_version.yh` | `yh version` / `--contracts` |
 | `cmd/yh/cmd_single.yh` | 单文件五形态：`--syntax-check` / `--emit-asm` / `--emit-llvm` / `-o` / check-with-src |
 | `cmd/yh/cmd_emit_module.yh` | 内部子进程协议 `--emit-module` |

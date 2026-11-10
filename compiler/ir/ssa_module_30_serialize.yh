@@ -58,8 +58,6 @@ module ir
 // 稳定编码的一部分出现，且经 type_map 显式映射到模块类型下标；序列化不写进程地址。
 // ============================================================================
 
-// 模块序列化格式版本：字节布局任何变化都必须递增，反序列化按严格相等拒绝。
-pub const IR_MODULE_SERIAL_VERSION int = 3
 // 固定头字数（含 magic 与两个版本字）。
 const IR_MODULE_SERIAL_HEAD_WORDS int = 26
 // 头的数组部分字数（key 到 function_body_bytes）。
@@ -81,9 +79,6 @@ const IR_MODULE_BODY_MIN int = 112
 const IR_MODULE_SERIAL_MAX_TOTAL int = 268435456
 // magic：小端写出后即 "YHIRMOD1"，与函数级 "YHIRSSA1" 互不混淆。
 const IR_MODULE_SERIAL_MAGIC u64 = 0x31444F4D52494859
-// 身份摘要长度：32 个十六进制字符 + 结尾零。
-pub const IR_MODULE_IDENTITY_HEX int = 32
-pub const IR_MODULE_IDENTITY_SIZE int = 33
 // FNV-1a 64 的 offset basis 与 prime，十进制写全，便于与参考实现逐位核对。
 const IR_MODULE_FNV_BASIS u64 = 14695981039346656037
 const IR_MODULE_FNV_PRIME u64 = 1099511628211
@@ -474,44 +469,6 @@ fn ir_module_write_blobs(unit *IRModule, out *u8, cursor *int) int {
     return 0
 }
 
-// ir_module_serialized_size：返回合法模块的完整编码长度，或 -1。
-// 不合法（ir_module_verify 失败）或规模超限的模块不可序列化。
-pub fn ir_module_serialized_size(unit *IRModule) int {
-    let plan IRModulePlan
-    if (ir_module_prepare(unit, &plan) != 0) { return -1 }
-    return plan.total_bytes
-}
-
-// ir_module_serialize：把合法模块写进调用方缓冲区，返回写入字节数或 -1。
-// 先按 plan 算长度并检查容量：容量不足（含 data 为空）直接返回 -1，
-// 一个字节都不写；成功时恰好写 total_bytes 字节且内容确定。
-pub fn ir_module_serialize(unit *IRModule, data *u8, capacity int) int {
-    let plan IRModulePlan
-    if (ir_module_prepare(unit, &plan) != 0 || data == 0 || capacity < plan.total_bytes) { return -1 }
-    let cursor int = 0
-    if (ir_module_write_fixed(unit, &plan, data, &cursor) != 0
-        || ir_module_write_blobs(unit, data, &cursor) != 0) { return -1 }
-    return cursor == plan.total_bytes ? cursor : -1
-}
-
-// ir_module_serialize_alloc：一次 prepare（verify + plan）后直接分配并写出完整编码。
-// 供函数级缓存使用：原「serialized_size + serialize」两步会把 verify 与 plan 各跑
-// 两次，而这两步都是 O(模块规模) 的全量扫描（PL1e 实测占 capture 的大头）。
-// 成功返回 0 并交出 out_data 所有权；任何失败都不写出参。
-pub fn ir_module_serialize_alloc(unit *IRModule, out_data **u8, out_size *int) int {
-    return ir_module_serialize_alloc_mode(unit, 1, out_data, out_size)
-}
-
-// ir_module_serialize_alloc_trusted：跳过 ir_module_verify，只做规模检查后编码。
-// **只给函数级缓存用**：那里的 mini 模块是本进程从已验证模块忠实重编号出来的，
-// 而且记录只在整模块 verify + emit 成功后才由 firc_commit 落盘——坏记录不会写盘，
-// 即使写了，装载侧 ir_module_deserialize 仍会完整校验并当作 miss。
-// 省下的是每条记录一次 O(模块规模) 的 verify（PL1e 实测占 capture 约三成）。
-pub fn ir_module_serialize_alloc_trusted(unit *IRModule, out_data **u8,
-    out_size *int) int {
-    return ir_module_serialize_alloc_mode(unit, 0, out_data, out_size)
-}
-
 // ir_module_serialize_alloc_mode：verify=1 走 prepare（先校后算），
 // verify=0 只算布局；两条路径的编码字节完全一致。
 fn ir_module_serialize_alloc_mode(unit *IRModule, verify int,
@@ -883,22 +840,6 @@ fn ir_module_canonical(unit *IRModule, size int) int {
     return content.total_bytes == size ? 0 : -1
 }
 
-// ir_module_deserialize：从稳定字节流重建完整模块。0 成功，-1 失败。
-// 复用 ir_module_verify 做完整语义校验（目标身份、布局闭合、符号唯一性、
-// 重定位与函数体、定义与实体一一对应）；任何失败都释放全部部分分配并把
-// out 恢复为零初始化。out 进入时必须已是零初始化，且不得被并发使用。
-pub fn ir_module_deserialize(out *IRModule, data *u8, size int) int {
-    return ir_module_deserialize_mode(out, data, size, 1)
-}
-
-// ir_module_deserialize_trusted：不跑语义 verify 的反序列化。
-// **只给函数级缓存装载用**：调用方已用记录头里的 FNV 校验过 payload 完整性，
-// 且记录只在本进程整模块 verify + emit 成功后落盘。结构、规模、规范编码
-// （ir_module_canonical）仍全部校验，合并后的整模块在 lower 结束时会完整 verify。
-pub fn ir_module_deserialize_trusted(out *IRModule, data *u8, size int) int {
-    return ir_module_deserialize_mode(out, data, size, 0)
-}
-
 // ir_module_deserialize_mode：verify=1 时在结构校验后再跑语义 verify。
 fn ir_module_deserialize_mode(out *IRModule, data *u8, size int, verify int) int {
     if (out == 0 || data == 0 || size < IR_MODULE_SERIAL_HEAD_WORDS * 8) { return -1 }
@@ -1034,24 +975,3 @@ fn ir_module_hex_digits(value u64, out *u8) void {
     }
 }
 
-// ir_module_identity：写 32 个十六进制字符 + 结尾零，返回 32 或 -1。
-// 前半 = FNV-1a(身份头字段)，后半 = FNV-1a(整段序列化字节，用不同种子避免
-// 两段同源)；同一模块内容在任何进程、任何地址布局下都得到同一摘要，
-// 内容（含某个函数常量）变化必然改变摘要。capacity 必须 >= 33。
-pub fn ir_module_identity(unit *IRModule, out *u8, capacity int) int {
-    if (out == 0 || capacity < IR_MODULE_IDENTITY_SIZE) { return -1 }
-    let size int = ir_module_serialized_size(unit)
-    if (size <= 0) { return -1 }
-    let buffer *u8 = ir_module_alloc_zero(size).to_type(*u8)
-    if (buffer == 0) { return -1 }
-    if (ir_module_serialize(unit, buffer, size) != size) { free(buffer); return -1 }
-    let head u64 = 0
-    let seed u64 = ir_module_fnv_u64(IR_MODULE_FNV_BASIS, 2)
-    if (ir_module_identity_head(unit, &head) != 0) { free(buffer); return -1 }
-    let content u64 = ir_module_fnv_bytes(seed, buffer, size)
-    free(buffer)
-    ir_module_hex_digits(head, out)
-    ir_module_hex_digits(content, &out[16])
-    out[IR_MODULE_IDENTITY_HEX] = 0
-    return IR_MODULE_IDENTITY_HEX
-}

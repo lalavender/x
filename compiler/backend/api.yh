@@ -1,0 +1,435 @@
+module backend
+
+import support
+import ir
+// ============================================================================
+// api.yh —— backend 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// LLVMSourceMap：LLVM 文本行区间对应模块自有来源位置；数字索引没有借用指针。
+pub struct LLVMSourceMap {
+    line int
+    end_line int
+    source int
+    offset int
+    symbol int
+}
+
+// LLVMOutput：独占 NUL 结尾文本及映射数组；成功后由调用方 release，失败不改变出参。
+pub struct LLVMOutput {
+    text *u8
+    length int
+    capacity int
+    maps *LLVMSourceMap
+    map_count int
+    map_capacity int
+    emitted int
+    line int
+    failed int
+}
+
+// LLVM_BRIDGE_DIAG：桥诊断缓冲约定大小；bridge.c 在该容量内保证 NUL 结尾。
+pub const LLVM_BRIDGE_DIAG int = 1024
+
+pub const LLVM_LLD_DIAG int = 4096
+
+// llvm_apple_runtime_write_support：按实际需要声明 libSystem OS 入口并发射 Darwin runtime 包装器。
+pub fn llvm_apple_runtime_write_support(unit *ir.IRModule, out *LLVMOutput,
+    emit_malloc int, emit_free int, emit_printf int) void {
+    if (emit_malloc != 0 || emit_free != 0) {
+        if (llvm_runtime_named(unit, "mmap") == 0) {
+            llvm_text(out, "declare ptr @mmap(ptr, i64, i32, i32, i32, i64)\n")
+        }
+        if (llvm_runtime_named(unit, "munmap") == 0) {
+            llvm_text(out, "declare i32 @munmap(ptr, i64)\n")
+        }
+    }
+    if (emit_printf != 0 && llvm_runtime_named(unit, "write") == 0) {
+        llvm_text(out, "declare i64 @write(i32, ptr, i64)\n")
+    }
+    if (emit_malloc != 0) { llvm_apple_runtime_write_malloc(out) }
+    if (emit_free != 0) { llvm_apple_runtime_write_free(out) }
+    if (emit_printf != 0) { llvm_apple_runtime_write_printf_support(out) }
+}
+
+// llvm_bridge_version：内置 LLVM 版本；桥未链接时链接期就会失败（这是有意的）。
+pub fn llvm_bridge_version() *char {
+    return yh_llvm_version()
+}
+
+// llvm_bridge_emit：把 LLVM 文本交给内嵌桥，在 path 原子发布目标文件或汇编。
+// 返回 0 成功、-1 失败；失败时 path 不被创建/替换，reason 缓冲带桥的原始诊断。
+// reason 必须指向至少 LLVM_BRIDGE_DIAG 字节的调用方缓冲；不做旧汇编回退。
+pub fn llvm_bridge_emit(text *char, length int, triple *char, opt_level int,
+    kind int, path *char, reason *char) int {
+    if (text == 0 || length <= 0 || triple == 0 || path == 0 || reason == 0
+        || (opt_level != 0 && opt_level != 2) || (kind != 0 && kind != 1)) {
+        return support.fail("LLVM 桥调用参数无效")
+    }
+    reason[0] = 0
+    let status int = yh_llvm_emit(text, length.to_type(u64), triple, opt_level, kind,
+        path, reason, LLVM_BRIDGE_DIAG.to_type(u64))
+    if (status != 0) { return -1 }
+    return 0
+}
+
+// llvm_bridge_emit_v2：携带最低 macOS 版本调用新桥；实际配置由 cmd 每次会话校验。
+pub fn llvm_bridge_emit_v2(text *char, length int, triple *char, min_os *char,
+    opt_level int, kind int, path *char, reason *char) int {
+    if (text == 0 || length <= 0 || triple == 0 || path == 0 || reason == 0
+        || (opt_level != 0 && opt_level != 2) || (kind != 0 && kind != 1)) {
+        return support.fail("LLVM 桥 v2 调用参数无效")
+    }
+    reason[0] = 0
+    let status int = yh_llvm_emit_v2(text, length.to_type(u64), triple, min_os,
+        opt_level, kind, path, reason, LLVM_BRIDGE_DIAG.to_type(u64))
+    if (status != 0) { return -1 }
+    return 0
+}
+
+// llvm_lld_link_argv：将完整 lld argv 传给 C ABI，供 Darwin Mach-O 驱动使用。
+pub fn llvm_lld_link_argv(argv **char, argc int, diagnostic *char) int {
+    if (argv == 0 || argc <= 0 || diagnostic == 0) { return -1 }
+    diagnostic[0] = 0
+    return yh_lld_link(argv, argc, diagnostic, LLVM_LLD_DIAG.to_type(u64))
+}
+
+// llvm_lld_identity：返回固定 SDK、shim 与宿主 GNU 链接配置的 SHA-256；空串表示无 lld。
+pub fn llvm_lld_identity() *char {
+    return yh_lld_link_identity()
+}
+
+// llvm_lld_default_file_count：返回默认 CRT/动态加载器文件项数，供最终链接缓存签名。
+pub fn llvm_lld_default_file_count() int {
+    return yh_lld_default_file_count()
+}
+
+// llvm_lld_default_file：读取固定宿主链接模板中的一个启动文件路径。
+pub fn llvm_lld_default_file(index int) *char {
+    return yh_lld_default_file(index)
+}
+
+// llvm_lld_default_library_count：返回固定 GNU 链接模板中的默认 -l 项数。
+pub fn llvm_lld_default_library_count() int {
+    return yh_lld_default_library_count()
+}
+
+// llvm_lld_default_library：读取固定 GNU 链接模板中的一个默认库名。
+pub fn llvm_lld_default_library(index int) *char {
+    return yh_lld_default_library(index)
+}
+
+// llvm_lld_selfhost_flag_count：返回自举链接追加参数数量。
+// Darwin 的 raw ld64.lld argv 在 yh 侧拼装，需要这些 force_load 闭包参数。
+pub fn llvm_lld_selfhost_flag_count() int {
+    return yh_lld_selfhost_flag_count()
+}
+
+// llvm_lld_selfhost_flag：按序读取一个自举链接追加参数。
+pub fn llvm_lld_selfhost_flag(index int) *char {
+    return yh_lld_selfhost_flag(index)
+}
+
+// llvm_lld_resolve_library：按内嵌 lld 使用的 LIBRARY_PATH/默认 -L 顺序解析库文件。
+pub fn llvm_lld_resolve_library(name *char, path *char) int {
+    if (name == 0 || path == 0) { return -1 }
+    return yh_lld_resolve_library(name, path, 1200.to_type(u64))
+}
+
+// llvm_lld_link_driver：用内嵌 GCC/ELF 模板加默认启动文件完成链接，不 fork 外部驱动。
+// extra_args 只传配置的 -l 库；调用方应把输出设为临时路径，成功后自行原子发布。
+pub fn llvm_lld_link_driver(output *char, objects **char, object_count int,
+    extra_args **char, extra_count int, diagnostic *char) int {
+    if (output == 0 || objects == 0 || object_count <= 0 || diagnostic == 0
+        || (extra_count > 0 && extra_args == 0)) {
+        return -1
+    }
+    diagnostic[0] = 0
+    return yh_lld_link_driver(output, objects, object_count, extra_args,
+        extra_count, diagnostic, LLVM_LLD_DIAG.to_type(u64))
+}
+
+// llvm_output_release：释放输出独占的两个缓冲并归零，允许空指针及重复释放。
+pub fn llvm_output_release(out *LLVMOutput) void {
+    if (out == 0) { return }
+    if (out.text != 0) { free(out.text) }
+    if (out.maps != 0) { free(out.maps) }
+    let empty LLVMOutput
+    out[0] = empty
+}
+
+// llvm_output_add_macos_min_os：在完整模块末尾写入规范化部署版本注释，供缓存审计与差分检查。
+// 注释不改变 LLVM 目标身份或机器码；调用方仅对 Darwin 输出调用本函数。
+pub fn llvm_output_add_macos_min_os(out *LLVMOutput, min_os *char) int {
+    if (out == 0 || out.text == 0 || min_os == 0 || min_os[0] == 0) {
+        return support.fail("Darwin LLVM 部署版本元数据无效")
+    }
+    llvm_text(out, "; yh-macos-min-os = ")
+    llvm_text(out, min_os)
+    llvm_byte(out, '\n')
+    if (out.failed != 0) { return support.fail("Darwin LLVM 部署版本元数据缓冲失败") }
+    return 0
+}
+
+// llvm_emit_module：只消费经过 verifier 的封闭模块；全量预检后用私有临时输出构建。
+// 成功释放旧输出并一次性转移所有权；失败保持调用方 out 原值，绝不调用旧 ARM 后端。
+pub fn llvm_emit_module(unit *ir.IRModule, target *support.TargetInfo, out *LLVMOutput) int {
+    // PL1d2：这里原本再跑一次完整 ir_module_verify。但每个模块到达后端之前都已由
+    // 生产者验证过（lowering 提交前 verifies / ir_module_deserialize 的装载路径），
+    // 同一份 IR 在一个构建里被完整 verify **两次**——实测函数体校验累计 5.33 s，而
+    // lowering 侧只记到 2.72 s。这里只留廉价的结构前置检查；语义校验由生产者负责，
+    // 发射前的 llvm_preflight / llvm_target_same 仍会拒绝结构不完整的模块。
+    if (out == 0 || ir.ir_module_sealed(unit) == 0) {
+        return support.fail("LLVM 模块未通过 IR verifier")
+    }
+    if (llvm_target_same(unit, target) == 0) { return llvm_reject(unit, 0, 0, "完整目标身份不一致或平台尚不支持") }
+    if (llvm_preflight(unit) != 0) { return -1 }
+    let temporary LLVMOutput
+    temporary.line = 1
+    let header int = llvm_map(&temporary, 0, 0, -1)
+    llvm_text(&temporary, "source_filename = ")
+    llvm_string(&temporary, unit.source_count > 0 ? unit.sources[0].path : "yh-module.yh")
+    llvm_text(&temporary, "\ntarget datalayout = "); llvm_string(&temporary, target.data_layout)
+    llvm_text(&temporary, "\ntarget triple = "); llvm_string(&temporary, target.triple)
+    llvm_text(&temporary, "\n\n"); llvm_map_end(&temporary, header)
+    let live_size int = unit.symbol_count > 0 ? unit.symbol_count : 1
+    let live *u8 = malloc(live_size.to_type(u64)).to_type(*u8)
+    if (live == 0) {
+        llvm_output_release(&temporary)
+        return support.fail("LLVM 全局可达性缓冲分配失败")
+    }
+    llvm_mark_global_usage(unit, live)
+    llvm_globals(unit, &temporary, live)
+    free(live.to_type(*void))
+    // MSVC ABI：x86 后端在 COFF 对象里引用 _fltused（CRT 的浮点使用标记）。
+    // 零 CRT 下没有 CRT 定义它，lld-link 会报 undefined symbol: _fltused；
+    // 自举时静态 CRT 也提供它。这里发 linkonce_odr + comdat：多模块只保留一份，
+    // 且静态 CRT 的 fltused 成员不会被拉入（避免 duplicate symbol）。
+    // 同时登记到 llvm.compiler.used：linkonce_odr 是可丢弃定义，-O2 的 GlobalDCE
+    // 会在“本对象没引用 _fltused”时删掉它，而引用方常常是**另一个**对象
+    // （含浮点的模块），lld-link 随即报 undefined symbol（O0 不复现）。
+    if (support.cstr_eq(unit.target.abi, "win64-msvc") != 0) {
+        llvm_text(&temporary, "$_fltused = comdat any\n@_fltused = linkonce_odr global i32 0, comdat($_fltused)\n@llvm.compiler.used = appending global [1 x ptr] [ptr @_fltused], section \"llvm.metadata\"\n")
+    }
+    // 聚合副本的源/目标可能别名；独立于用户 memcpy 的不重叠运行时契约。
+    llvm_text(&temporary, "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)\n")
+    llvm_text(&temporary, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n")
+    llvm_text(&temporary, "declare void @llvm.trap()\n")
+    // 浮点转整数先饱和到完整 64 位域，再按源类型宽度截断，避免 LLVM poison。
+    llvm_text(&temporary, "declare i64 @llvm.fptosi.sat.i64.f32(float)\n")
+    llvm_text(&temporary, "declare i64 @llvm.fptosi.sat.i64.f64(double)\n")
+    llvm_text(&temporary, "declare i64 @llvm.fptoui.sat.i64.f32(float)\n")
+    llvm_text(&temporary, "declare i64 @llvm.fptoui.sat.i64.f64(double)\n")
+    let i int = 0
+    for i < unit.symbol_count {
+        let symbol ir.IRModuleSymbol = unit.symbols[i]
+        if (symbol.kind == ir.IR_MODULE_SYMBOL_FUNCTION && symbol.defined == 0
+            && llvm_runtime_supplies_symbol(unit, symbol.name) == 0) {
+            let map int = llvm_map(&temporary, symbol.source, symbol.offset, i)
+            llvm_text(&temporary, "declare "); llvm_signature(unit, &symbol, &temporary, 0)
+            llvm_byte(&temporary, '\n'); llvm_map_end(&temporary, map)
+        }
+        i += 1
+    }
+    llvm_byte(&temporary, '\n')
+    i = 0
+    for i < unit.function_count { llvm_function(unit, &unit.functions[i], &temporary); i += 1 }
+    // LL8a：内存运行时入口（weak 定义 + llvm.used）；模块已有同名符号时让位。
+    llvm_runtime_memory_text(unit, &temporary)
+    if (temporary.failed != 0) { llvm_output_release(&temporary); return support.fail("LLVM 文本或来源映射缓冲分配失败/过大") }
+    llvm_output_release(out)
+    out[0] = temporary
+    return 0
+}
+
+// llvm_runtime_supplies_symbol：声明循环需跳过即将由本模块 helper 满足的裸符号。
+pub fn llvm_runtime_supplies_symbol(unit *ir.IRModule, name *char) int {
+    if (llvm_runtime_defined(unit, name) != 0) { return 0 }
+    if (support.cstr_eq(name, "memcpy") != 0 || support.cstr_eq(name, "memset") != 0
+        || support.cstr_eq(name, "strlen") != 0) { return 1 }
+    if (support.cstr_eq(name, "memmove") != 0) { return llvm_runtime_aggregate_copy(unit) }
+    if (support.cstr_eq(name, "__yh_runtime_malloc") != 0
+        || support.cstr_eq(name, "__yh_runtime_free") != 0
+        || support.cstr_eq(name, "printf") != 0 || support.cstr_eq(name, "linux_syscall6") != 0) {
+        return 1
+    }
+    // Windows/x64 零 CRT：write/read/exit/_Exit 也由本模块的 Windows 运行时定义，
+    // 声明阶段必须跳过它们——LLVM 不允许同名 declare + define（2026-10-27 W1-3b）。
+    if (support.cstr_eq(unit.target.abi, "win64-msvc") != 0) {
+        // 只列「运行时真的给出定义」的名字：LLVM 不允许同名 declare + define。
+        // exit/_Exit 由链接期 /alternatename 解析到 ExitProcess，因此仍按普通
+        // 外部符号声明（否则调用点会缺声明）。
+        if (support.cstr_eq(name, "write") != 0 || support.cstr_eq(name, "read") != 0
+            || support.cstr_eq(name, "open") != 0 || support.cstr_eq(name, "close") != 0
+            || support.cstr_eq(name, "mkdir") != 0 || support.cstr_eq(name, "unlink") != 0
+            || support.cstr_eq(name, "rename") != 0
+            || support.cstr_eq(name, "getpid") != 0 || support.cstr_eq(name, "getppid") != 0) {
+            return 1
+        }
+    }
+    // yh test 断言运行时：由本模块发射弱定义（见 llvm_runtime_write_test_assert）。
+    if (support.cstr_eq(name, "__yh_test_assert") != 0) { return 1 }
+    return 0
+}
+
+// llvm_runtime_memory_text：补齐模块引用的运行时入口并保留 LL8a 内存 helper。
+// 只有模块未定义的标准入口才生成弱定义；llvm.used 阻止 O2 删除未直接引用的 helper。
+pub fn llvm_runtime_memory_text(unit *ir.IRModule, out *LLVMOutput) void {
+    let darwin int = support.cstr_eq(unit.target.abi, "darwin-aapcs64") != 0 ? 1 : 0
+    let arm64 int = support.cstr_eq(unit.target.abi, "aapcs64") != 0 ? 1 : 0
+    // Windows/x64 不走 syscall：malloc/printf/write 全部经 Win32 API（W1-3）。
+    let win64 int = support.cstr_eq(unit.target.abi, "win64-msvc") != 0 ? 1 : 0
+    let emit_memcpy int = (llvm_runtime_defined(unit, "memcpy") == 0).to_type(int)
+    let emit_memset int = (llvm_runtime_defined(unit, "memset") == 0).to_type(int)
+    let emit_strlen int = (llvm_runtime_defined(unit, "strlen") == 0).to_type(int)
+    let emit_move int = llvm_runtime_defined(unit, "memmove") == 0 ?
+        llvm_runtime_aggregate_copy(unit) : 0
+    let emit_malloc int = (llvm_runtime_named(unit, "__yh_runtime_malloc") != 0
+        && llvm_runtime_defined(unit, "__yh_runtime_malloc") == 0).to_type(int)
+    let emit_free int = (llvm_runtime_named(unit, "__yh_runtime_free") != 0
+        && llvm_runtime_defined(unit, "__yh_runtime_free") == 0).to_type(int)
+    let emit_printf int = (llvm_runtime_named(unit, "printf") != 0
+        && llvm_runtime_defined(unit, "printf") == 0).to_type(int)
+    let needs_syscall int = darwin == 0 && win64 == 0 && (emit_malloc != 0 || emit_free != 0
+        || emit_printf != 0 || llvm_runtime_named(unit, "linux_syscall6") != 0) ? 1 : 0
+    let emit_syscall int = (needs_syscall != 0
+        && llvm_runtime_defined(unit, "linux_syscall6") == 0).to_type(int)
+    let emit_test_assert int = (llvm_runtime_named(unit, "__yh_test_assert") != 0
+        && llvm_runtime_defined(unit, "__yh_test_assert") == 0).to_type(int)
+    let emitted int = emit_syscall + emit_malloc + emit_free + emit_printf +
+        emit_memcpy + emit_memset + emit_strlen + emit_move + emit_test_assert
+    if (emitted == 0) { return }
+    llvm_byte(out, '\n')
+    if (darwin != 0) {
+        llvm_apple_runtime_write_support(unit, out, emit_malloc, emit_free, emit_printf)
+    } else if (win64 != 0) {
+        // W1-3：HeapAlloc/WriteFile 版运行时；同时按需补 write/exit 薄层，
+        // 让 yh test 的断言记录（fd 3 → 标准错误）不需要另写一套发射。
+        llvm_windows_runtime_write_support(unit, out, emit_malloc, emit_free,
+            emit_printf, emit_test_assert)
+    } else {
+        if (emit_syscall != 0) { llvm_runtime_write_syscall(out, arm64) }
+        if (emit_malloc != 0) { llvm_runtime_write_malloc(out, arm64) }
+        if (emit_free != 0) { llvm_runtime_write_free(out, arm64) }
+        if (emit_printf != 0) { llvm_runtime_write_printf_support(out, arm64) }
+    }
+    if (emit_printf != 0) { llvm_runtime_write_printf(out, darwin, arm64, win64) }
+    if (emit_memcpy != 0) { llvm_runtime_write_memcpy(out, darwin, win64) }
+    if (emit_memset != 0) { llvm_runtime_write_memset(out, darwin, win64) }
+    if (emit_strlen != 0) { llvm_runtime_write_strlen(out, darwin, win64) }
+    if (emit_move != 0) { llvm_runtime_write_memmove(out, darwin, win64) }
+    if (emit_test_assert != 0) { llvm_runtime_write_test_assert(unit, out, win64) }
+    llvm_text(out, "\n@llvm.used = appending global [")
+    llvm_number(out, emitted.to_type(u64))
+    llvm_text(out, " x ptr] [")
+    let first int = 1
+    if (emit_syscall != 0) { llvm_text(out, "ptr @linux_syscall6"); first = 0 }
+    if (emit_malloc != 0) {
+        if (first == 0) { llvm_text(out, ", ") }
+        llvm_text(out, "ptr @__yh_runtime_malloc"); first = 0
+    }
+    if (emit_free != 0) {
+        if (first == 0) { llvm_text(out, ", ") }
+        llvm_text(out, "ptr @__yh_runtime_free"); first = 0
+    }
+    if (emit_printf != 0) {
+        if (first == 0) { llvm_text(out, ", ") }
+        llvm_text(out, "ptr @printf"); first = 0
+    }
+    if (emit_move != 0) {
+        if (first == 0) { llvm_text(out, ", ") }
+        llvm_text(out, "ptr @memmove"); first = 0
+    }
+    if (emit_memcpy != 0) {
+        if (first == 0) { llvm_text(out, ", ") }
+        llvm_text(out, "ptr @memcpy"); first = 0
+    }
+    if (emit_memset != 0) {
+        if (first == 0) { llvm_text(out, ", ") }
+        llvm_text(out, "ptr @memset"); first = 0
+    }
+    if (emit_test_assert != 0) {
+        if (first == 0) { llvm_text(out, ", ") }
+        llvm_text(out, "ptr @__yh_test_assert"); first = 0
+    }
+    if (emit_strlen != 0) {
+        if (first == 0) { llvm_text(out, ", ") }
+        llvm_text(out, "ptr @strlen")
+    }
+    llvm_text(out, "], section \"llvm.metadata\"\n")
+}
+
+// llvm_windows_runtime_write_support：补上模块引用但自身未定义的平台入口。
+// emit_* 由 llvm_runtime_memory_text 预先判定（同名强定义优先，不重复发射）。
+// write/exit 在断言运行时也会用到，故 emit_test_assert 时一并补齐。
+pub fn llvm_windows_runtime_write_support(unit *ir.IRModule, out *LLVMOutput,
+    emit_malloc int, emit_free int, emit_printf int, emit_test_assert int) void {
+    // 先算齐「模块引用但自身未定义」的平台入口（同名强定义优先，不重复发射）。
+    let emit_io int = 0
+    let emit_files int = 0
+    if (llvm_runtime_named(unit, "write") != 0 && llvm_runtime_defined(unit, "write") == 0) { emit_io = 1 }
+    if (llvm_runtime_named(unit, "read") != 0 && llvm_runtime_defined(unit, "read") == 0) { emit_io = 1 }
+    if (llvm_runtime_named(unit, "open") != 0 && llvm_runtime_defined(unit, "open") == 0) { emit_files = 1 }
+    if (llvm_runtime_named(unit, "close") != 0 && llvm_runtime_defined(unit, "close") == 0) { emit_files = 1 }
+    if (llvm_runtime_named(unit, "mkdir") != 0 && llvm_runtime_defined(unit, "mkdir") == 0) { emit_files = 1 }
+    if (llvm_runtime_named(unit, "unlink") != 0 && llvm_runtime_defined(unit, "unlink") == 0) { emit_files = 1 }
+    if (llvm_runtime_named(unit, "rename") != 0 && llvm_runtime_defined(unit, "rename") == 0) { emit_files = 1 }
+    if (emit_test_assert != 0 && llvm_runtime_defined(unit, "write") == 0) { emit_io = 1 }
+    // read/write/open/close 共用同一张 fd 表与同一组内核入口，打包发射。
+    if (emit_io != 0) { emit_files = 1 }
+    // 声明必须在发射之前一次给全（读/写共用 GetStdHandle/WriteFile/ReadFile）。
+    llvm_windows_runtime_declare(out, emit_malloc, emit_free, emit_printf, emit_files)
+    if (emit_malloc != 0) { llvm_windows_runtime_write_malloc(out) }
+    if (emit_free != 0) { llvm_windows_runtime_write_free(out) }
+    if (emit_printf != 0) {
+        llvm_windows_runtime_write_printf_write(out)
+        llvm_runtime_write_printf_emit(out)
+    }
+    if (emit_files != 0) { llvm_windows_runtime_write_files(out) }
+    let emit_pids int = 0
+    if (llvm_runtime_named(unit, "getpid") != 0 && llvm_runtime_defined(unit, "getpid") == 0) {
+        emit_pids = 1
+    }
+    if (llvm_runtime_named(unit, "getppid") != 0 && llvm_runtime_defined(unit, "getppid") == 0) {
+        emit_pids = 1
+    }
+    if (emit_pids != 0) { llvm_windows_runtime_write_pids(out) }
+    // 本模块定义了 main（可执行入口）时补零 CRT 入口桩：Win64 入口不传参数，
+    // argv 由 GetCommandLineA 解析后转发（见 llvm_windows_runtime_write_entry）。
+    // 链接时 /entry:mainCRTStartup 优先指向静态 CRT 的启动代码；只有闭包里没有
+    // CRT（零 CRT 用户程序）时，/alternatename 才把它落到本桩。
+    if (llvm_runtime_defined(unit, "main") != 0) { llvm_windows_runtime_write_entry(out) }
+}
+
+@[extern] fn yh_llvm_emit(text *char, length u64, triple *char, opt_level int, kind int,
+    output *char, diagnostic *char, capacity u64) int
+
+@[extern] fn yh_llvm_emit_v2(text *char, length u64, triple *char, min_os *char,
+    opt_level int, kind int, output *char, diagnostic *char, capacity u64) int
+
+@[extern] fn yh_lld_link(argv **char, argc int, diagnostic *char, capacity u64) int
+
+@[extern] fn yh_lld_link_driver(output *char, objects **char, object_count int,
+    extra_args **char, extra_count int, diagnostic *char, capacity u64) int
+
+@[extern] fn yh_lld_link_identity() *char
+
+@[extern] fn yh_lld_default_file_count() int
+
+@[extern] fn yh_lld_default_file(index int) *char
+
+@[extern] fn yh_lld_default_library_count() int
+
+@[extern] fn yh_lld_default_library(index int) *char
+
+@[extern] fn yh_lld_selfhost_flag_count() int
+
+@[extern] fn yh_lld_selfhost_flag(index int) *char
+
+@[extern] fn yh_lld_resolve_library(name *char, path *char, capacity u64) int
+
+@[extern] fn yh_llvm_version() *char

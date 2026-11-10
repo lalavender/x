@@ -1,0 +1,556 @@
+module libc
+
+// ============================================================================
+// api.yh —— libc 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// strtol 按 base 解析开头的整数，返回 i64 并按 C 契约回填 endptr。
+// base 为 0 时按前缀推断：0x 十六进制、前导 0 八进制、其余十进制；
+// base 为 16 时也接受 0x 前缀。endptr 为 NULL 时忽略。
+// 无数字时不转换，endptr 回填 text 本身；溢出饱和到 i64 两端。
+@[extern] pub fn strtol(text *char, end **char, base int) i64 {
+    if (base != 0 && (base < 2 || base > 36)) {
+        if (end != 0) {
+            end[0] = text
+        }
+        return 0
+    }
+    let scan ScanResult = scan_integer(text.to_type(*u8), base, 1)
+    if (end != 0) {
+        end[0] = end_of_scan(text, scan)
+    }
+    if (scan.digits == 0) {
+        return 0
+    }
+    let magnitude_limit u64 = 9223372036854775807
+    if (scan.negative != 0) {
+        if (scan.overflow != 0 || scan.magnitude > magnitude_limit) {
+            let minimum i64 = 0 - magnitude_limit.to_type(i64) - 1
+            return minimum
+        }
+        return (0 - scan.magnitude).to_type(i64)
+    }
+    return scan.magnitude.to_type(i64)
+}
+
+// strtoul 按 base 解析开头的整数，返回 u64 并按 C 契约回填 endptr。
+// 允许前导 '-'：结果按 C 规则对 2^64 取模（"-1" → 18446744073709551615）。
+// 溢出饱和到 u64 最大值；无数字返回 0 且 endptr 回填 text 本身。
+@[extern] pub fn strtoul(text *char, end **char, base int) u64 {
+    if (base != 0 && (base < 2 || base > 36)) {
+        if (end != 0) {
+            end[0] = text
+        }
+        return 0
+    }
+    let scan ScanResult = scan_integer(text.to_type(*u8), base, 0)
+    if (end != 0) {
+        end[0] = end_of_scan(text, scan)
+    }
+    if (scan.digits == 0) {
+        return 0
+    }
+    if (scan.negative != 0) {
+        return 0 - scan.magnitude
+    }
+    return scan.magnitude
+}
+
+// atol 按十进制解析为 i64；溢出饱和到 i64 两端，不设置 errno。
+@[extern] pub fn atol(text *char) i64 {
+    return strtol(text, 0, 10)
+}
+
+// atoll 与 atol 相同：LP64 下 long 与 long long 都是 64 位。
+@[extern] pub fn atoll(text *char) i64 {
+    return strtol(text, 0, 10)
+}
+
+// atoi 按十进制解析为 int；溢出饱和到 i32 两端，不设置 errno。
+// 无数字返回 0；跳过前导 ASCII 空白与一个可选 '+'/'-'。
+@[extern] pub fn atoi(text *char) int {
+    let value i64 = strtol(text, 0, 10)
+    // i32 边界同样先落到 i64 变量，避免字面量在表达式里按 i32 截断。
+    let high i64 = 2147483647
+    let low i64 = 0 - high - 1
+    if (value > high) {
+        return high.to_type(int)
+    }
+    if (value < low) {
+        return low.to_type(int)
+    }
+    return value.to_type(int)
+}
+
+// abs 返回 int 的绝对值；INT_MIN 的绝对值不可表示（C 未定义）。
+@[extern] pub fn abs(value int) int {
+    if (value < 0) {
+        return 0 - value
+    }
+    return value
+}
+
+// labs 返回 i64 的绝对值；LONG_MIN 的绝对值不可表示（C 未定义）。
+@[extern] pub fn labs(value i64) i64 {
+    if (value < 0) {
+        return 0 - value
+    }
+    return value
+}
+
+// llabs 与 labs 相同：LP64 下 long 与 long long 都是 64 位。
+@[extern] pub fn llabs(value i64) i64 {
+    if (value < 0) {
+        return 0 - value
+    }
+    return value
+}
+
+// memmove 复制 count 字节到 destination，允许源与目标重叠。
+// 按地址先后选择前向或后向拷贝；count 为 0 或同一地址直接返回。
+// 成功返回 destination；不检查空指针（与 C 一致）。
+@[extern] pub fn memmove(destination *void, source *void,
+    count u64) *void {
+    let dest *u8 = destination.to_type(*u8)
+    let from *u8 = source.to_type(*u8)
+    if (count == 0 || dest == from) {
+        return destination
+    }
+    if (destination.to_type(u64) < source.to_type(u64)) {
+        let index u64 = 0
+        for index < count {
+            dest[index.to_type(int)] = from[index.to_type(int)]
+            index += 1
+        }
+        return destination
+    }
+    let index u64 = count
+    for index > 0 {
+        index -= 1
+        dest[index.to_type(int)] = from[index.to_type(int)]
+    }
+    return destination
+}
+
+// memset 把 destination 起的 count 个字节写成 (value & 0xff)。
+// 返回 destination；不做分配、不检查空指针。
+@[extern] pub fn memset(destination *void, value int, count u64) *void {
+    let dest *u8 = destination.to_type(*u8)
+    let byte u8 = (value & 0xff).to_type(u8)
+    let index u64 = 0
+    for index < count {
+        dest[index.to_type(int)] = byte
+        index += 1
+    }
+    return destination
+}
+
+// memcmp 按无符号字节比较前 count 个字节。
+// 相等返回 0；否则返回首个不同字节的差（left - right），符号与 C 一致。
+// 不把返回值当作绝对值使用。
+@[extern] pub fn memcmp(left *void, right *void, count u64) int {
+    let a *u8 = left.to_type(*u8)
+    let b *u8 = right.to_type(*u8)
+    let index u64 = 0
+    for index < count {
+        let la u8 = a[index.to_type(int)]
+        let lb u8 = b[index.to_type(int)]
+        if (la != lb) {
+            return la.to_type(int) - lb.to_type(int)
+        }
+        index += 1
+    }
+    return 0
+}
+
+// memchr 在 buffer 的前 count 字节里找第一个等于 (value & 0xff) 的字节。
+// 找到返回该字节地址；没找到返回 NULL。count 为 0 时返回 NULL。
+@[extern] pub fn memchr(buffer *void, value int, count u64) *void {
+    let bytes *u8 = buffer.to_type(*u8)
+    let target u8 = (value & 0xff).to_type(u8)
+    let index u64 = 0
+    for index < count {
+        if (bytes[index.to_type(int)] == target) {
+            return (bytes + index.to_type(int)).to_type(*void)
+        }
+        index += 1
+    }
+    return 0
+}
+
+// qsort 就地把 count 个 width 字节的元素按 compare 升序排序。
+// count < 2 或 width == 0 时不做任何事；compare 必须非空。
+@[extern] pub fn qsort(base *void, count u64, width u64,
+    compare fn(*void, *void) int) void {
+    if (base == 0 || count < 2 || width == 0) {
+        return
+    }
+    let bytes *u8 = base.to_type(*u8)
+    let index u64 = 1
+    for index < count {
+        let cursor u64 = index
+        for cursor > 0 {
+            let current *void = element_at(bytes, cursor, width)
+            let previous *void = element_at(bytes, cursor - 1, width)
+            if (compare(previous, current) <= 0) {
+                break
+            }
+            swap_bytes(previous, current, width)
+            cursor -= 1
+        }
+        index += 1
+    }
+}
+
+// bsearch 在已排序的 base 中二分查找等于 key 的元素，返回元素地址或 NULL。
+// count == 0 或 width == 0 返回 NULL；compare 必须非空且与 qsort 一致。
+@[extern] pub fn bsearch(key *void, base *void, count u64, width u64,
+    compare fn(*void, *void) int) *void {
+    if (key == 0 || base == 0 || count == 0 || width == 0) {
+        return 0
+    }
+    let bytes *u8 = base.to_type(*u8)
+    let low u64 = 0
+    let high u64 = count
+    for low < high {
+        let middle u64 = low + (high - low) / 2
+        let slot *void = element_at(bytes, middle, width)
+        let order int = compare(key, slot)
+        if (order == 0) {
+            return slot
+        }
+        if (order < 0) {
+            high = middle
+        } else {
+            low = middle + 1
+        }
+    }
+    return 0
+}
+
+// strcmp 按无符号字节比较两个 NUL 结尾字符串。
+// 相等返回 0；否则返回首个不同字节的差（left - right），符号与 C 一致。
+@[extern] pub fn strcmp(left *char, right *char) int {
+    let a *u8 = left.to_type(*u8)
+    let b *u8 = right.to_type(*u8)
+    let index int = 0
+    for 1 == 1 {
+        let la u8 = a[index]
+        let lb u8 = b[index]
+        if (la != lb) {
+            return la.to_type(int) - lb.to_type(int)
+        }
+        if (la == 0) {
+            return 0
+        }
+        index += 1
+    }
+    return 0
+}
+
+// strncmp 最多比较 count 个字节；遇到 NUL 提前结束。
+// 相等或前 count 字节相同返回 0；否则返回首个不同字节的差。
+@[extern] pub fn strncmp(left *char, right *char, count u64) int {
+    let a *u8 = left.to_type(*u8)
+    let b *u8 = right.to_type(*u8)
+    let index u64 = 0
+    for index < count {
+        let la u8 = a[index.to_type(int)]
+        let lb u8 = b[index.to_type(int)]
+        if (la != lb) {
+            return la.to_type(int) - lb.to_type(int)
+        }
+        if (la == 0) {
+            return 0
+        }
+        index += 1
+    }
+    return 0
+}
+
+// strcpy 把 source 连同结尾 NUL 复制到 destination，返回 destination。
+// 不检查缓冲区大小；重叠内存请用 memmove。
+@[extern] pub fn strcpy(destination *char, source *char) *char {
+    let dest *u8 = destination.to_type(*u8)
+    let from *u8 = source.to_type(*u8)
+    let index u64 = 0
+    for 1 == 1 {
+        let byte u8 = from[index.to_type(int)]
+        dest[index.to_type(int)] = byte
+        if (byte == 0) {
+            return destination
+        }
+        index += 1
+    }
+    return destination
+}
+
+// strncpy 最多复制 count 字节；source 不足 count 时用零补满。
+// 源长度达到 count 时结果不保证 NUL 结尾（与 C 一致）。
+@[extern] pub fn strncpy(destination *char, source *char, count u64) *char {
+    let dest *u8 = destination.to_type(*u8)
+    let from *u8 = source.to_type(*u8)
+    let index u64 = 0
+    for index < count && from[index.to_type(int)] != 0 {
+        dest[index.to_type(int)] = from[index.to_type(int)]
+        index += 1
+    }
+    for index < count {
+        dest[index.to_type(int)] = 0
+        index += 1
+    }
+    return destination
+}
+
+// strcat 把 source 追加到 NUL 结尾的 destination 之后，返回 destination。
+// destination 必须可写且以 NUL 结尾；不检查容量，重叠时行为未定义。
+@[extern] pub fn strcat(destination *char, source *char) *char {
+    let dest *u8 = destination.to_type(*u8)
+    let from *u8 = source.to_type(*u8)
+    let base u64 = byte_len(dest)
+    let index u64 = 0
+    for 1 == 1 {
+        let byte u8 = from[index.to_type(int)]
+        dest[(base + index).to_type(int)] = byte
+        if (byte == 0) {
+            return destination
+        }
+        index += 1
+    }
+    return destination
+}
+
+// strncat 在 destination 末尾最多追加 count 字节，并总是补结尾 NUL。
+// destination 必须以 NUL 结尾；返回 destination。
+@[extern] pub fn strncat(destination *char, source *char, count u64) *char {
+    let dest *u8 = destination.to_type(*u8)
+    let from *u8 = source.to_type(*u8)
+    let base u64 = byte_len(dest)
+    let index u64 = 0
+    for index < count && from[index.to_type(int)] != 0 {
+        dest[(base + index).to_type(int)] = from[index.to_type(int)]
+        index += 1
+    }
+    dest[(base + index).to_type(int)] = 0
+    return destination
+}
+
+// strchr 返回 text 中第一个等于 (character & 0xff) 的字节地址。
+// 结尾 NUL 也算匹配；没有匹配返回 NULL。
+@[extern] pub fn strchr(text *char, character int) *char {
+    let bytes *u8 = text.to_type(*u8)
+    let target u8 = (character & 0xff).to_type(u8)
+    let index int = 0
+    for 1 == 1 {
+        let byte u8 = bytes[index]
+        if (byte == target) {
+            return (bytes + index).to_type(*char)
+        }
+        if (byte == 0) {
+            return 0
+        }
+        index += 1
+    }
+    return 0
+}
+
+// strrchr 返回 text 中最后一个匹配字节的地址；没有匹配返回 NULL。
+// 结尾 NUL 也参与匹配，因此总能命中空串的结尾。
+@[extern] pub fn strrchr(text *char, character int) *char {
+    let bytes *u8 = text.to_type(*u8)
+    let target u8 = (character & 0xff).to_type(u8)
+    let found *u8 = 0
+    let index int = 0
+    for 1 == 1 {
+        let byte u8 = bytes[index]
+        if (byte == target) {
+            found = bytes + index
+        }
+        if (byte == 0) {
+            break
+        }
+        index += 1
+    }
+    if (found == 0) {
+        return 0
+    }
+    return found.to_type(*char)
+}
+
+// strstr 返回 haystack 中第一个出现 needle 的地址；没有返回 NULL。
+// needle 为空串时返回 haystack（与 C 一致）。朴素匹配，最坏 O(n*m)。
+@[extern] pub fn strstr(haystack *char, needle *char) *char {
+    let hay *u8 = haystack.to_type(*u8)
+    let pin *u8 = needle.to_type(*u8)
+    let needle_len u64 = byte_len(pin)
+    if (needle_len == 0) {
+        return haystack
+    }
+    let hay_len u64 = byte_len(hay)
+    if (needle_len > hay_len) {
+        return 0
+    }
+    let limit u64 = hay_len - needle_len
+    let start u64 = 0
+    for start <= limit {
+        let index u64 = 0
+        for index < needle_len {
+            if (hay[(start + index).to_type(int)]
+                != pin[index.to_type(int)]) {
+                break
+            }
+            index += 1
+        }
+        if (index == needle_len) {
+            return (hay + start.to_type(int)).to_type(*char)
+        }
+        start += 1
+    }
+    return 0
+}
+
+// strnlen 返回 NUL 结尾字符串的长度，但最多检查 max 个字节。
+// 与 POSIX 一致：max 内没有 NUL 时返回 max。
+@[extern] pub fn strnlen(text *char, max u64) u64 {
+    let bytes *u8 = text.to_type(*u8)
+    let index u64 = 0
+    for index < max && bytes[index.to_type(int)] != 0 {
+        index += 1
+    }
+    return index
+}
+
+// strspn 返回 text 开头连续属于 accept 集合的字节数。
+// accept 为空集合时返回 0；遇到不在集合里的字节或 NUL 停止。
+@[extern] pub fn strspn(text *char, accept *char) u64 {
+    let bytes *u8 = text.to_type(*u8)
+    let set *u8 = accept.to_type(*u8)
+    let index u64 = 0
+    for 1 == 1 {
+        let byte u8 = bytes[index.to_type(int)]
+        if (byte == 0 || byte_in_set(byte, set) == false) {
+            break
+        }
+        index += 1
+    }
+    return index
+}
+
+// strcspn 返回 text 开头连续不属于 reject 集合的字节数。
+// reject 为空集合时返回完整长度（与 C 的字符串长度一致）。
+@[extern] pub fn strcspn(text *char, reject *char) u64 {
+    let bytes *u8 = text.to_type(*u8)
+    let set *u8 = reject.to_type(*u8)
+    let index u64 = 0
+    for 1 == 1 {
+        let byte u8 = bytes[index.to_type(int)]
+        if (byte == 0 || byte_in_set(byte, set)) {
+            break
+        }
+        index += 1
+    }
+    return index
+}
+
+// strpbrk 返回 text 中第一个属于 accept 集合的字节地址；没有返回 NULL。
+// 不匹配结尾 NUL（与 C 一致）。
+@[extern] pub fn strpbrk(text *char, accept *char) *char {
+    let bytes *u8 = text.to_type(*u8)
+    let set *u8 = accept.to_type(*u8)
+    let index int = 0
+    for bytes[index] != 0 {
+        if (byte_in_set(bytes[index], set)) {
+            return (bytes + index).to_type(*char)
+        }
+        index += 1
+    }
+    return 0
+}
+
+// strcasecmp 按 ASCII 大小写不敏感比较两个 NUL 结尾字符串。
+// 相等返回 0；否则返回小写化后首个不同字节的差；不处理 locale。
+@[extern] pub fn strcasecmp(left *char, right *char) int {
+    let a *u8 = left.to_type(*u8)
+    let b *u8 = right.to_type(*u8)
+    let index int = 0
+    for 1 == 1 {
+        let la u8 = lower_byte(a[index])
+        let lb u8 = lower_byte(b[index])
+        if (la != lb) {
+            return la.to_type(int) - lb.to_type(int)
+        }
+        if (la == 0) {
+            return 0
+        }
+        index += 1
+    }
+    return 0
+}
+
+// strncasecmp 最多比较 count 个字节（ASCII 大小写不敏感）。
+// 相等或前 count 字节相同返回 0；否则返回小写化后首个不同字节的差。
+@[extern] pub fn strncasecmp(left *char, right *char, count u64) int {
+    let a *u8 = left.to_type(*u8)
+    let b *u8 = right.to_type(*u8)
+    let index u64 = 0
+    for index < count {
+        let la u8 = lower_byte(a[index.to_type(int)])
+        let lb u8 = lower_byte(b[index.to_type(int)])
+        if (la != lb) {
+            return la.to_type(int) - lb.to_type(int)
+        }
+        if (la == 0) {
+            return 0
+        }
+        index += 1
+    }
+    return 0
+}
+
+// strlcpy 把 source 最多 size-1 字节复制到 destination 并总是补 NUL（size > 0 时）。
+// 返回 source 的完整长度（不含 NUL），因此返回值 >= size 表示发生了截断。
+// size 为 0 时不写任何字节，只返回 source 长度。
+@[extern] pub fn strlcpy(destination *char, source *char, size u64) u64 {
+    let dest *u8 = destination.to_type(*u8)
+    let from *u8 = source.to_type(*u8)
+    let total u64 = byte_len(from)
+    if (size == 0) {
+        return total
+    }
+    let limit u64 = size - 1
+    let index u64 = 0
+    for index < limit && from[index.to_type(int)] != 0 {
+        dest[index.to_type(int)] = from[index.to_type(int)]
+        index += 1
+    }
+    dest[index.to_type(int)] = 0
+    return total
+}
+
+// strlcat 把 source 追加到 NUL 结尾的 destination，总长最多 size-1 字节并补 NUL。
+// 返回“原 destination 长度 + source 长度”（不含 NUL），大于等于 size 表示截断。
+// size 不大于原 destination 长度时不再追加，只返回该总长度。
+@[extern] pub fn strlcat(destination *char, source *char, size u64) u64 {
+    let dest *u8 = destination.to_type(*u8)
+    let from *u8 = source.to_type(*u8)
+    let base u64 = byte_len(dest)
+    let added u64 = byte_len(from)
+    if (size == 0) {
+        return base + added
+    }
+    if (base >= size) {
+        return base + added
+    }
+    let room u64 = size - 1 - base
+    let index u64 = 0
+    for index < room && from[index.to_type(int)] != 0 {
+        dest[(base + index).to_type(int)] = from[index.to_type(int)]
+        index += 1
+    }
+    dest[(base + index).to_type(int)] = 0
+    return base + added
+}

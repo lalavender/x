@@ -1,0 +1,247 @@
+module main
+
+import libs.cli
+
+import support
+// ============================================================================
+// api.yh —— main 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// CliCommand 是顶层动作；取值与 driver 的分派一一对应。
+pub const CLI_BARE int = 0
+
+pub const CLI_BUILD int = 1
+
+pub const CLI_CHECK int = 2
+
+pub const CLI_RUN int = 3
+
+pub const CLI_TEST int = 4
+
+pub const CLI_VERSION int = 5
+
+pub const CLI_FILE int = 6
+
+pub const CLI_CONTROL int = 7
+
+pub const CLI_CACHE int = 8
+
+pub const CLI_INIT int = 9
+
+pub const YH_VERSION_TEXT *char = "yh 0.0.14-rc.2"
+
+// 单文件形态的模式位（与 API_SYNTAX/API_ASM/API_EXE 语义一致）。
+pub const CLIFILE_NONE int = 0
+
+pub const CLIFILE_SYNTAX int = 1
+
+pub const CLIFILE_ASM int = 2
+
+pub const CLIFILE_EXE int = 3
+
+// CliRequest 是解析结果；文本指针借用 result 的池，必须与 result 同寿。
+pub struct CliRequest {
+    command int
+    file_mode int
+    result cli.Result      // 持有解析结果（文本借用其池）
+    src *char              // 单文件源 / build 模块 / check 目标 / test 选择器
+    has_src int
+    out *char              // -o/--output 输出路径
+    target *char           // --target（0 表示未提供）
+    backend *char          // --backend（0 表示未提供）
+    opt_level int          // -O0/-O2，最后出现者生效
+    emit_llvm int
+    emit_asm int
+    trimpath int
+    legacy_system int
+    link_count int
+    links [16]*char        // --link 组名（借用 argv）
+    list_mode int
+    no_run int
+    filter *char
+    timeout_secs int
+    contracts int
+    usage cli.TextResult    // 解析失败时的 usage 文本（随请求释放）
+    has_usage int
+}
+
+// parse_request 解析 argv 并填请求。
+// 返回 0 成功、2 用法错误、1 配置/资源错误；错误文本写入 message（可为 0 长度）。
+pub fn parse_request(argc int, argv **char, req *CliRequest,
+    message *char, message_capacity int) int {
+    let fresh cli.Result
+    req.result = fresh
+    req.command = CLI_BARE
+    req.file_mode = CLIFILE_NONE
+    req.has_src = 0
+    req.link_count = 0
+    req.timeout_secs = 15
+    message[0] = 0
+    if (argc <= 1) {
+        return 0
+    }
+    let first int = cli_first_token(argc, argv)
+    let wants_help int = (first >= 0 && (support.cstr_eq(argv[first], "-h") != 0
+        || support.cstr_eq(argv[first], "--help") != 0)) ? 1 : 0
+    let chained int = (wants_help != 0
+        || (first >= 0 && cli_is_command(argv[first]) != 0)) ? 1 : 0
+    let parser cli.Parser
+    let built int = 0
+    if (chained != 0) {
+        built = cli_build_project(&parser)
+    } else {
+        built = cli_build_file(&parser)
+    }
+    if (built != 0) {
+        cli.destroy(&parser)
+        return 1
+    }
+    req.result = cli.parse_main(&parser, argc, argv)
+    if (req.result.status == cli.help_requested
+        || req.result.status == cli.version_requested) {
+        req.command = CLI_CONTROL
+        cli.destroy(&parser)
+        return 0
+    }
+    if (req.result.status != cli.ok) {
+        cli_copy_message(&req.result, message, message_capacity)
+        req.usage = cli.format_usage(&parser)
+        req.has_usage = 1
+        let failed_usage int = (req.result.status == cli.usage_error) ? 2 : 1
+        cli.destroy(&parser)
+        return failed_usage
+    }
+    cli_take_globals(req)
+    req.out = cli_read_text(req, "output")
+    if (chained != 0) {
+        let token *char = (first >= 0) ? argv[first] : 0
+        if (token == 0) {
+            return 0
+        }
+        if (support.cstr_eq(token, "build") != 0) {
+            req.command = CLI_BUILD
+            req.src = cli_read_text(req, "module")
+        } else if (support.cstr_eq(token, "check") != 0) {
+            req.command = CLI_CHECK
+            req.src = cli_read_text(req, "check_target")
+        } else if (support.cstr_eq(token, "run") != 0) {
+            req.command = CLI_RUN
+        } else if (support.cstr_eq(token, "test") != 0) {
+            req.command = CLI_TEST
+            req.src = cli_read_text(req, "selector")
+            req.list_mode = cli_read_flag(req, "list_mode")
+            req.no_run = cli_read_flag(req, "no_run")
+            req.filter = cli_read_text(req, "filter")
+            req.timeout_secs = cli_read_i64(req, "timeout", 15).to_type(int)
+        } else if (support.cstr_eq(token, "cache") != 0) {
+            req.command = CLI_CACHE
+            req.src = cli_read_text(req, "cache_action")
+        } else if (support.cstr_eq(token, "init") != 0) {
+            req.command = CLI_INIT
+            req.src = cli_read_text(req, "init_dir")
+        } else {
+            req.command = CLI_VERSION
+            req.contracts = cli_read_flag(req, "contracts")
+        }
+        req.has_src = (req.src != 0) ? 1 : 0
+        cli.destroy(&parser)
+        if (cli_read_links(req) != 0) {
+            return 1
+        }
+        return 0
+    }
+    // 单文件形态
+    req.src = cli_read_text(req, "file")
+    req.has_src = (req.src != 0) ? 1 : 0
+    let syntax int = cli_read_flag(req, "syntax_check")
+    let asm int = cli_read_flag(req, "emit_asm")
+    if (syntax != 0 && asm != 0) {
+        req.usage = cli.format_usage(&parser)
+        req.has_usage = 1
+        cli.destroy(&parser)
+        return 2
+    }
+    if (syntax != 0) {
+        req.file_mode = CLIFILE_SYNTAX
+    } else if (asm != 0) {
+        req.file_mode = CLIFILE_ASM
+    } else if (req.out != 0) {
+        req.file_mode = CLIFILE_EXE
+    }
+    if (req.file_mode == CLIFILE_NONE
+        || (req.file_mode != CLIFILE_EXE && req.out != 0)
+        || (req.file_mode == CLIFILE_EXE && req.out == 0)) {
+        // 只有源文件没有模式、模式与 -o 不搭配、-o 缺文件：都按用法错误处理
+        // （对应旧实现 `n != 2` / `n == 3` 的边界）。
+        req.usage = cli.format_usage(&parser)
+        req.has_usage = 1
+        cli.destroy(&parser)
+        return 2
+    }
+    req.command = CLI_FILE
+    cli.destroy(&parser)
+    return 0
+}
+
+// release_request 释放请求持有的解析结果。
+pub fn release_request(req *CliRequest) void {
+    if (req.has_usage != 0) {
+        cli.release_text(&req.usage)
+    }
+    cli.release(&req.result)
+}
+
+// print_usage 把请求里保存的 usage 文本写到 fd；没有文本返回 -1。
+pub fn print_usage(req *CliRequest, fd int) int {
+    if (req.has_usage == 0) {
+        return -1
+    }
+    return cli.render_text(&req.usage, fd)
+}
+
+// print_control 把 help/version 控制文本写到 fd；没有控制文本返回 -1。
+pub fn print_control(req *CliRequest, fd int) int {
+    if (req.result.control_text == 0) {
+        return -1
+    }
+    let length int = strlen(req.result.control_text).to_type(int)
+    return support.write_all(fd, req.result.control_text.to_type(*u8), length)
+}
+
+// print_bare_help 为裸 `yh` 打印完整帮助（fd 2）：顶层帮助含全部子命令与单文件形态。
+pub fn print_bare_help(fd int) void {
+    let parser cli.Parser
+    if (cli_build_project(&parser) != 0) {
+        return
+    }
+    let help cli.TextResult = cli.format_help(&parser)
+    if (help.status == cli.ok) {
+        cli.render_text(&help, fd)
+    }
+    cli.release_text(&help)
+    cli.destroy(&parser)
+}
+
+// is_yh_source：判断路径是否以用户源文件后缀 .yh 结尾。
+pub fn is_yh_source(path *char) int {
+    if (path == 0) { return 0 }
+    let n int = 0
+    for path[n] != 0 { n += 1 }
+    return n >= 3 && path[n - 3] == '.' &&
+        path[n - 2] == 'y' && path[n - 1] == 'h' ? 1 : 0
+}
+
+// is_removed_target_alias：判断是否是 LL12 已移除的目标简写别名。
+// 保留旧诊断文本，避免把「简写不支持」误报成「未知 triple」。
+pub fn is_removed_target_alias(target *char) int {
+    if (support.cstr_eq(target, "linux") != 0 || support.cstr_eq(target, "gnu") != 0
+        || support.cstr_eq(target, "elf") != 0 || support.cstr_eq(target, "darwin") != 0
+        || support.cstr_eq(target, "macho") != 0 || support.cstr_eq(target, "macos") != 0) {
+        return 1
+    }
+    return 0
+}

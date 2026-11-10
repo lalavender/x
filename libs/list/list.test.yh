@@ -4,8 +4,11 @@ module list
 // list.test.yh —— list 标准库的 yh 内建测试
 //
 // 只在 `yh test list` 中执行；生产构建不登记测试符号、不发射测试体。
-// 覆盖空列表、扩容、元素访问、预留、释放、结构体步长、插入/删除/弹出与
-// 批量追加。断言不依赖未定义行为（不读 count 之后的槽位）。
+// 覆盖空列表、扩容、元素访问、预留、释放、结构体步长、插入/删除/弹出、
+// 批量追加，以及按 V 数组方法集补齐的接口（首尾访问、prepend/pop_left/
+// delete_last/delete_many、trim/drop/reset、grow_cap/grow_len、clone/
+// repeat/slice、reverse/sort/sorted、contains/index/last_index、
+// any/all/count/filter/map）。断言不依赖未定义行为（不读 count 之后的槽位）。
 // ============================================================================
 
 // Pair 是 {u8, i64} 布局的测试元素：sizeof 为 16（按 i64 对齐补齐），
@@ -20,6 +23,52 @@ struct Pair {
 fn push_i64(value_list *List, item i64) Status {
     let scratch i64 = item
     return push(value_list, (&scratch).to_type(*void))
+}
+
+// compare_i64 是 i64 元素的比较回调：与 libc.qsort 语义一致，返回 -1/0/1。
+fn compare_i64(left *void, right *void) int {
+    let a *i64 = left.to_type(*i64)
+    let b *i64 = right.to_type(*i64)
+    if (a[0] < b[0]) {
+        return -1
+    }
+    if (a[0] > b[0]) {
+        return 1
+    }
+    return 0
+}
+
+// compare_pair_value 只比较 Pair.value，用来验证排序的稳定性。
+fn compare_pair_value(left *void, right *void) int {
+    let a *Pair = left.to_type(*Pair)
+    let b *Pair = right.to_type(*Pair)
+    if (a[0].value < b[0].value) {
+        return -1
+    }
+    if (a[0].value > b[0].value) {
+        return 1
+    }
+    return 0
+}
+
+// is_even_i64 判断 i64 元素是否为偶数（谓词回调）。
+fn is_even_i64(item *void) bool {
+    let number *i64 = item.to_type(*i64)
+    return (number[0] % 2 == 0)
+}
+
+// double_i64 是 i64 -> i64 的映射回调：把结果写进 out 槽位。
+fn double_i64(source *void, out *void) void {
+    let number *i64 = source.to_type(*i64)
+    let target *i64 = out.to_type(*i64)
+    target[0] = number[0] * 2
+}
+
+// half_f64 是 i64 -> f64 的映射回调：验证 map 支持改变元素宽度。
+fn half_f64(source *void, out *void) void {
+    let number *i64 = source.to_type(*i64)
+    let target *f64 = out.to_type(*f64)
+    target[0] = number[0].to_type(f64) / 2.0
 }
 
 test "make 产生空列表并记录元素步长" {
@@ -246,4 +295,385 @@ test "push_all 一次追加多个元素" {
     $assert(push_all(0, (&source[0]).to_type(*void), 1) == Status.status_invalid_argument,
         "空指针列表应返回 invalid_argument")
     release(&numbers)
+}
+
+test "first 与 last 返回首尾元素地址" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(first(&numbers) == 0, "空列表 first 应返回 0")
+    $assert(last(&numbers) == 0, "空列表 last 应返回 0")
+    $assert(push_i64(&numbers, 3) == Status.status_ok, "第一次 push 应成功")
+    $assert(push_i64(&numbers, 5) == Status.status_ok, "第二次 push 应成功")
+    let head *i64 = first(&numbers).to_type(*i64)
+    let tail *i64 = last(&numbers).to_type(*i64)
+    $assert(head[0] == 3, "first 应指向第 0 个元素")
+    $assert(tail[0] == 5, "last 应指向尾元素")
+    $assert(first(0) == 0, "空指针列表 first 应返回 0")
+    $assert(last(0) == 0, "空指针列表 last 应返回 0")
+    release(&numbers)
+}
+
+test "prepend 在头部插入并保持顺序" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    $assert(push_i64(&numbers, 3) == Status.status_ok, "push 3 应成功")
+    let head i64 = 1
+    $assert(prepend(&numbers, (&head).to_type(*void)) == Status.status_ok,
+        "prepend 应成功")
+    $assert(numbers.count == 3, "prepend 后 count 应为 3")
+    let items *i64 = numbers.data.to_type(*i64)
+    $assert(items[0] == 1, "第 0 个元素应为 1")
+    $assert(items[1] == 2, "第 1 个元素应为 2")
+    $assert(items[2] == 3, "第 2 个元素应为 3")
+    $assert(prepend(&numbers, 0) == Status.status_invalid_argument,
+        "空元素指针应返回 invalid_argument")
+    release(&numbers)
+}
+
+test "pop_left 取走首元素并前移后续元素" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    let out i64 = 0
+    $assert(pop_left(&numbers, (&out).to_type(*void)) == false,
+        "空列表 pop_left 应返回 false")
+    $assert(push_i64(&numbers, 7) == Status.status_ok, "push 7 应成功")
+    $assert(push_i64(&numbers, 8) == Status.status_ok, "push 8 应成功")
+    $assert(push_i64(&numbers, 9) == Status.status_ok, "push 9 应成功")
+    $assert(pop_left(&numbers, (&out).to_type(*void)), "非空列表 pop_left 应成功")
+    $assert(out == 7, "pop_left 应取走首元素 7")
+    let items *i64 = numbers.data.to_type(*i64)
+    $assert(items[0] == 8, "首元素应前移为 8")
+    $assert(items[1] == 9, "次元素应前移为 9")
+    $assert(pop_left(&numbers, 0), "out == 0 也应成功")
+    $assert(numbers.count == 1, "丢弃式 pop_left 应减少 count")
+    release(&numbers)
+}
+
+test "delete_last 移除尾元素，空列表返回 false" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(delete_last(&numbers) == false, "空列表 delete_last 应返回 false")
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    $assert(delete_last(&numbers), "非空列表 delete_last 应成功")
+    $assert(numbers.count == 1, "delete_last 后 count 应为 1")
+    let tail *i64 = last(&numbers).to_type(*i64)
+    $assert(tail[0] == 1, "delete_last 应移除尾元素 2")
+    $assert(delete_last(&numbers), "再次 delete_last 应成功")
+    $assert(delete_last(&numbers) == false, "空列表再删除应返回 false")
+    release(&numbers)
+}
+
+test "delete_many 删除连续区间并前移后续元素" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    let index int = 0
+    for index < 6 {
+        $assert(push_i64(&numbers, index.to_type(i64)) == Status.status_ok,
+            "push 应成功")
+        index += 1
+    }
+    $assert(delete_many(&numbers, 1, 2), "删除 [1, 3) 应成功")
+    $assert(numbers.count == 4, "删除 2 个后 count 应为 4")
+    let items *i64 = numbers.data.to_type(*i64)
+    $assert(items[0] == 0, "第 0 个元素应为 0")
+    $assert(items[1] == 3, "第 1 个元素应为 3")
+    $assert(items[2] == 4, "第 2 个元素应为 4")
+    $assert(items[3] == 5, "第 3 个元素应为 5")
+    $assert(delete_many(&numbers, 3, 2) == false, "越过尾部应返回 false")
+    $assert(delete_many(&numbers, 4, 0), "count == 0 应返回 true")
+    $assert(numbers.count == 4, "空删除不改 count")
+    release(&numbers)
+}
+
+test "trim 截断到指定长度，超出时不变" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    $assert(push_i64(&numbers, 3) == Status.status_ok, "push 3 应成功")
+    let capacity_before u64 = numbers.capacity
+    trim(&numbers, 5)
+    $assert(numbers.count == 3, "trim 到更大值不应改变 count")
+    trim(&numbers, 2)
+    $assert(numbers.count == 2, "trim 到 2 后 count 应为 2")
+    $assert(numbers.capacity == capacity_before, "trim 不改容量")
+    let tail *i64 = last(&numbers).to_type(*i64)
+    $assert(tail[0] == 2, "trim 后尾元素应为 2")
+    release(&numbers)
+}
+
+test "drop 丢弃前 n 个元素" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    $assert(push_i64(&numbers, 3) == Status.status_ok, "push 3 应成功")
+    $assert(push_i64(&numbers, 4) == Status.status_ok, "push 4 应成功")
+    drop(&numbers, 1)
+    $assert(numbers.count == 3, "drop 1 后 count 应为 3")
+    let items *i64 = numbers.data.to_type(*i64)
+    $assert(items[0] == 2, "drop 后首元素应为 2")
+    $assert(items[2] == 4, "drop 后尾元素应为 4")
+    drop(&numbers, 9)
+    $assert(numbers.count == 0, "drop 超过元素个数应清空列表")
+    release(&numbers)
+}
+
+test "reset 清零已用元素字节并保留 count" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 11) == Status.status_ok, "push 11 应成功")
+    $assert(push_i64(&numbers, 22) == Status.status_ok, "push 22 应成功")
+    reset(&numbers)
+    $assert(numbers.count == 2, "reset 不改 count")
+    let items *i64 = numbers.data.to_type(*i64)
+    $assert(items[0] == 0, "reset 后第 0 个元素应为 0")
+    $assert(items[1] == 0, "reset 后第 1 个元素应为 0")
+    release(&numbers)
+}
+
+test "grow_cap 增加容量不改 count，越过上界返回 overflow" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 应成功")
+    let capacity_before u64 = numbers.capacity
+    $assert(grow_cap(&numbers, 20) == Status.status_ok, "grow_cap 应成功")
+    $assert(numbers.capacity >= capacity_before + 20, "容量应至少增加 20")
+    $assert(numbers.count == 1, "grow_cap 不改 count")
+    $assert(grow_cap(&numbers, 0) == Status.status_ok, "grow_cap(0) 应成功")
+    $assert(grow_cap(&numbers, LIST_MAX_BYTES) == Status.status_overflow,
+        "越过上界的 grow_cap 应返回 overflow")
+    $assert(grow_cap(0, 4) == Status.status_invalid_argument,
+        "空指针列表 grow_cap 应返回 invalid_argument")
+    release(&numbers)
+}
+
+test "grow_len 增加 count 且保留旧内容" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 42) == Status.status_ok, "push 应成功")
+    $assert(grow_len(&numbers, 2) == Status.status_ok, "grow_len 应成功")
+    $assert(numbers.count == 3, "grow_len 2 后 count 应为 3")
+    let items *i64 = numbers.data.to_type(*i64)
+    $assert(items[0] == 42, "grow_len 应保留旧内容")
+    $assert(grow_len(&numbers, 0) == Status.status_ok, "grow_len(0) 应成功")
+    $assert(grow_len(&numbers, LIST_MAX_BYTES) == Status.status_overflow,
+        "越过上界的 grow_len 应返回 overflow")
+    release(&numbers)
+}
+
+test "clone 深复制且与源相互独立" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 4) == Status.status_ok, "push 4 应成功")
+    $assert(push_i64(&numbers, 5) == Status.status_ok, "push 5 应成功")
+    let copy ListResult = clone(&numbers)
+    $assert(copy.status == Status.status_ok, "clone 应成功")
+    $assert(copy.value.count == numbers.count, "副本元素个数应与源相同")
+    $assert(copy.value.element_size == numbers.element_size, "副本步长应与源相同")
+    $assert(copy.value.data != numbers.data, "clone 必须分配独立存储")
+    let copy_items *i64 = copy.value.data.to_type(*i64)
+    $assert(copy_items[0] == 4, "副本第 0 个元素应为 4")
+    copy_items[0] = 9
+    let source_items *i64 = numbers.data.to_type(*i64)
+    $assert(source_items[0] == 4, "改副本不应影响源")
+    release(&copy.value)
+    release(&numbers)
+    let empty List = make(sizeof(i64).to_type(u64))
+    let empty_copy ListResult = clone(&empty)
+    $assert(empty_copy.status == Status.status_ok, "空列表 clone 应成功")
+    $assert(empty_copy.value.count == 0, "空列表副本 count 应为 0")
+    $assert(empty_copy.value.data == 0, "空列表副本不分配存储")
+    let invalid List = make(0)
+    let invalid_copy ListResult = clone(&invalid)
+    $assert(invalid_copy.status == Status.status_invalid_argument,
+        "无效列表 clone 应返回 invalid_argument")
+    release(&invalid)
+    release(&empty)
+}
+
+test "repeat 按次数重复内容" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    let repeated ListResult = repeat(&numbers, 3)
+    $assert(repeated.status == Status.status_ok, "repeat 应成功")
+    $assert(repeated.value.count == 6, "重复 3 次后应为 6 个元素")
+    let items *i64 = repeated.value.data.to_type(*i64)
+    $assert(items[0] == 1, "第 0 个元素应为 1")
+    $assert(items[1] == 2, "第 1 个元素应为 2")
+    $assert(items[2] == 1, "第 2 个元素应为 1")
+    $assert(items[5] == 2, "尾元素应为 2")
+    let zero ListResult = repeat(&numbers, 0)
+    $assert(zero.status == Status.status_ok, "repeat(0) 应成功")
+    $assert(zero.value.count == 0, "repeat(0) 应得到空列表")
+    release(&zero.value)
+    release(&repeated.value)
+    release(&numbers)
+}
+
+test "reverse 返回倒序副本，reverse_in_place 原地倒序" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    $assert(push_i64(&numbers, 3) == Status.status_ok, "push 3 应成功")
+    let flipped ListResult = reverse(&numbers)
+    $assert(flipped.status == Status.status_ok, "reverse 应成功")
+    let flipped_items *i64 = flipped.value.data.to_type(*i64)
+    $assert(flipped_items[0] == 3, "倒序副本第 0 个元素应为 3")
+    $assert(flipped_items[2] == 1, "倒序副本尾元素应为 1")
+    let source_items *i64 = numbers.data.to_type(*i64)
+    $assert(source_items[0] == 1, "reverse 不应修改源")
+    reverse_in_place(&numbers)
+    $assert(source_items[0] == 3, "原地倒序后第 0 个元素应为 3")
+    $assert(source_items[2] == 1, "原地倒序后尾元素应为 1")
+    release(&flipped.value)
+    release(&numbers)
+}
+
+test "slice 复制区间，越界返回 bounds" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    $assert(push_i64(&numbers, 3) == Status.status_ok, "push 3 应成功")
+    $assert(push_i64(&numbers, 4) == Status.status_ok, "push 4 应成功")
+    let middle ListResult = slice(&numbers, 1, 3)
+    $assert(middle.status == Status.status_ok, "slice 应成功")
+    $assert(middle.value.count == 2, "区间长度应为 2")
+    let middle_items *i64 = middle.value.data.to_type(*i64)
+    $assert(middle_items[0] == 2, "区间首元素应为 2")
+    $assert(middle_items[1] == 3, "区间次元素应为 3")
+    let empty ListResult = slice(&numbers, 2, 2)
+    $assert(empty.status == Status.status_ok, "空区间 slice 应成功")
+    $assert(empty.value.count == 0, "空区间应得到空列表")
+    $assert(slice(&numbers, 2, 1).status == Status.status_bounds,
+        "start > end 应返回 bounds")
+    $assert(slice(&numbers, 0, 9).status == Status.status_bounds,
+        "end > count 应返回 bounds")
+    release(&empty.value)
+    release(&middle.value)
+    release(&numbers)
+}
+
+test "contains/index/last_index 用比较回调查找" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 5) == Status.status_ok, "push 5 应成功")
+    $assert(push_i64(&numbers, 7) == Status.status_ok, "push 7 应成功")
+    $assert(push_i64(&numbers, 7) == Status.status_ok, "再 push 7 应成功")
+    $assert(push_i64(&numbers, 9) == Status.status_ok, "push 9 应成功")
+    let key i64 = 7
+    $assert(contains(&numbers, (&key).to_type(*void), compare_i64), "应包含 7")
+    $assert(index(&numbers, (&key).to_type(*void), compare_i64) == 1,
+        "第一个 7 的下标应为 1")
+    $assert(last_index(&numbers, (&key).to_type(*void), compare_i64) == 2,
+        "最后一个 7 的下标应为 2")
+    let missing i64 = 8
+    $assert(contains(&numbers, (&missing).to_type(*void), compare_i64) == false,
+        "不应包含 8")
+    $assert(index(&numbers, (&missing).to_type(*void), compare_i64) == -1,
+        "缺失值应返回 -1")
+    $assert(index(&numbers, 0, compare_i64) == -1, "key == 0 应返回 -1")
+    release(&numbers)
+}
+
+test "any/all/count 用谓词统计" {
+    let evens List = make(sizeof(i64).to_type(u64))
+    $assert(any(&evens, is_even_i64) == false, "空列表 any 应为 false")
+    $assert(all(&evens, is_even_i64), "空列表 all 应为 true")
+    $assert(count(&evens, is_even_i64) == 0, "空列表 count 应为 0")
+    $assert(push_i64(&evens, 2) == Status.status_ok, "push 2 应成功")
+    $assert(push_i64(&evens, 4) == Status.status_ok, "push 4 应成功")
+    $assert(push_i64(&evens, 6) == Status.status_ok, "push 6 应成功")
+    $assert(any(&evens, is_even_i64), "应存在偶数")
+    $assert(all(&evens, is_even_i64), "应全为偶数")
+    $assert(count(&evens, is_even_i64) == 3, "偶数个数应为 3")
+    $assert(push_i64(&evens, 7) == Status.status_ok, "push 7 应成功")
+    $assert(any(&evens, is_even_i64), "仍应存在偶数")
+    $assert(all(&evens, is_even_i64) == false, "7 不是偶数，all 应为 false")
+    $assert(count(&evens, is_even_i64) == 3, "偶数个数仍应为 3")
+    release(&evens)
+}
+
+test "filter 只保留满足谓词的元素" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    $assert(push_i64(&numbers, 3) == Status.status_ok, "push 3 应成功")
+    $assert(push_i64(&numbers, 4) == Status.status_ok, "push 4 应成功")
+    let evens ListResult = filter(&numbers, is_even_i64)
+    $assert(evens.status == Status.status_ok, "filter 应成功")
+    $assert(evens.value.count == 2, "应保留 2 个偶数")
+    let evens_items *i64 = evens.value.data.to_type(*i64)
+    $assert(evens_items[0] == 2, "第 0 个偶数应为 2")
+    $assert(evens_items[1] == 4, "第 1 个偶数应为 4")
+    $assert(numbers.count == 4, "filter 不应修改源")
+    let empty List = make(sizeof(i64).to_type(u64))
+    let none ListResult = filter(&empty, is_even_i64)
+    $assert(none.status == Status.status_ok, "空列表 filter 应成功")
+    $assert(none.value.count == 0, "空列表过滤后仍为空")
+    let invalid List = make(0)
+    $assert(filter(&invalid, is_even_i64).status == Status.status_invalid_argument,
+        "无效列表 filter 应返回 invalid_argument")
+    release(&invalid)
+    release(&none.value)
+    release(&empty)
+    release(&evens.value)
+    release(&numbers)
+}
+
+test "map 生成新列表并支持改变元素宽度" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    let doubled ListResult = map(&numbers, double_i64, sizeof(i64).to_type(u64))
+    $assert(doubled.status == Status.status_ok, "map 应成功")
+    $assert(doubled.value.count == 2, "map 后元素个数不变")
+    $assert(doubled.value.element_size == 8, "结果步长应为 8")
+    let doubled_items *i64 = doubled.value.data.to_type(*i64)
+    $assert(doubled_items[0] == 2, "第 0 个元素应翻倍为 2")
+    $assert(doubled_items[1] == 4, "第 1 个元素应翻倍为 4")
+    let halves ListResult = map(&numbers, half_f64, sizeof(f64).to_type(u64))
+    $assert(halves.status == Status.status_ok, "i64 -> f64 的 map 应成功")
+    $assert(halves.value.element_size == 8, "f64 步长应为 8")
+    let half_items *f64 = halves.value.data.to_type(*f64)
+    $assert(half_items[0] == 0.5, "1 的一半应为 0.5")
+    $assert(half_items[1] == 1.0, "2 的一半应为 1.0")
+    $assert(map(&numbers, double_i64, 0).status == Status.status_invalid_argument,
+        "步长为 0 的 map 应返回 invalid_argument")
+    release(&halves.value)
+    release(&doubled.value)
+    release(&numbers)
+}
+
+test "sort 原地排序且稳定，sorted 返回新列表" {
+    let numbers List = make(sizeof(i64).to_type(u64))
+    $assert(push_i64(&numbers, 3) == Status.status_ok, "push 3 应成功")
+    $assert(push_i64(&numbers, 1) == Status.status_ok, "push 1 应成功")
+    $assert(push_i64(&numbers, 2) == Status.status_ok, "push 2 应成功")
+    let ordered ListResult = sorted(&numbers, compare_i64)
+    $assert(ordered.status == Status.status_ok, "sorted 应成功")
+    let ordered_items *i64 = ordered.value.data.to_type(*i64)
+    $assert(ordered_items[0] == 1, "排序副本首元素应为 1")
+    $assert(ordered_items[1] == 2, "排序副本次元素应为 2")
+    $assert(ordered_items[2] == 3, "排序副本尾元素应为 3")
+    let source_items *i64 = numbers.data.to_type(*i64)
+    $assert(source_items[0] == 3, "sorted 不应修改源")
+    sort(&numbers, compare_i64)
+    $assert(source_items[0] == 1, "原地排序后首元素应为 1")
+    $assert(source_items[2] == 3, "原地排序后尾元素应为 3")
+    release(&ordered.value)
+    release(&numbers)
+}
+
+test "sort 相等元素的相对顺序保持不变（稳定）" {
+    let pairs List = make(sizeof(Pair).to_type(u64))
+    let first Pair
+    first.flag = 1
+    first.value = 5
+    let second Pair
+    second.flag = 2
+    second.value = 5
+    let third Pair
+    third.flag = 3
+    third.value = 1
+    $assert(push(&pairs, (&first).to_type(*void)) == Status.status_ok, "push 应成功")
+    $assert(push(&pairs, (&second).to_type(*void)) == Status.status_ok, "push 应成功")
+    $assert(push(&pairs, (&third).to_type(*void)) == Status.status_ok, "push 应成功")
+    sort(&pairs, compare_pair_value)
+    let items *Pair = pairs.data.to_type(*Pair)
+    $assert(items[0].flag == 3, "排序后首个元素应是 value 最小的第三个")
+    $assert(items[1].flag == 1, "相等元素应保持原有相对顺序（1 在前）")
+    $assert(items[2].flag == 2, "相等元素应保持原有相对顺序（2 在后）")
+    release(&pairs)
 }

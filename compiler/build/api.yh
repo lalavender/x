@@ -1,0 +1,2076 @@
+module build
+
+import cache
+import support
+import proj
+import link
+import hash
+import ir
+import token
+import lex
+import parse
+import ast
+import check
+import builtin
+// ============================================================================
+// api.yh —— build 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// BuildCtx：一次构建的进程级会话状态。
+pub struct BuildCtx {
+    argv0 *char // 编译器自身 argv[0]（子进程再入与指纹用）
+    iface_suffix *char // 本轮接口后缀（.s.i/.s.ct 之外的文件名尾缀）
+    compiler_identity [32]u8 // 编译器二进制 SHA-256（内容身份，参与模块键）
+    compiler_fingerprint u64 // compiler_identity 的 64 位摘要（worker 环境键）
+    compiler_fingerprint_ready int // 1 = 身份已算过
+    self_path *char // 自身路径（读取编译器指纹）
+    cache_store cache.CacheStore // 全局 content store（C4；off 时 enabled=0）
+    cache_debug int // 1 = YH_CACHE_DEBUG，输出 ActionID 与命中原因
+
+    sched_limit int         // worker 并发上限（YH_WORKERS，缺省 4）
+    sched_limit_ready int   // 1 = 已读环境变量
+
+    dep_bind *int           // 绑定名池偏移
+    dep_bindlen *int
+    dep_ifoff *int          // 依赖模块 .s.i 路径池偏移
+    dep_ctoff *int          // 依赖模块 .s.ct 路径池偏移
+    dep_mod *int            // 依赖模块下标
+    dep_mi *int             // 加载后的接口模块编号
+    dep_n int
+    dep_cap int
+    dep_base int            // 本模块接口加载前 c_mod_n 基线
+}
+
+pub struct LLVMEmitResult {
+    emitted int
+    text_length int
+}
+
+// —— 解析结果表（进程内一次构建共用，不释放） ——
+pub struct TomlVal {
+    key_off int        // 键名池偏移
+    key_len int
+    kind int           // 1=字符串 2=内联表 3=整数 4=字符串数组
+    sval_off int       // 字符串值池偏移（kind==1）
+    sval_len int
+    ival int           // 整数值（kind==3）
+    path_off int       // 内联表内 path 键的值池偏移（kind==2，-1 无）
+    path_len int
+    arr_first int      // 全局字符串数组元素表起点（kind==4）
+    arr_count int
+    line int           // 键所在行（1 基）
+}
+
+// bc：构建会话上下文的唯一入口。
+pub fn bc() *BuildCtx {
+    return &g_build_ctx
+}
+
+// yh_win_spawn_wait：Windows 侧 CreateProcessA 包装（compiler/llvm/windows_shim.c）。
+// 仅无 fork 宿主使用；其余平台不引用，符号不会进入链接。
+@[extern] fn yh_win_spawn_wait(argv **char, argc int) int
+
+// mb_resolve_self_path：把 PATH 命令名解析为编译器指纹可读取的文件路径。
+pub fn mb_resolve_self_path() int {
+    if (bc().self_path != 0) {
+        return 0
+    }
+    let has_slash int = 0
+    let i int = 0
+    for bc().argv0[i] != 0 {
+        if (bc().argv0[i] == '/' || bc().argv0[i] == 92) {
+            has_slash = 1
+            break
+        }
+        i += 1
+    }
+    if (has_slash != 0) {
+        bc().self_path = bc().argv0
+        return 0
+    }
+    let path_off int = -1
+    let path_len int = 0
+    if (proj.env_fetch("PATH", &path_off, &path_len) != 0) {
+        return support.fail("无法解析编译器可执行路径")
+    }
+    let start int = 0
+    let end int = 0
+    let windows int = support.tg_host_windows()
+    let separator u8 = windows != 0 ? ';' : ':'
+    for end <= path_len {
+        if (end == path_len || support.pool_ctx().data[path_off + end] == separator) {
+            let candidate [1200]u8
+            let n int = 0
+            if (end == start) {
+                n = support.append_str(candidate, n, ".")
+            } else {
+                let k int = start
+                for k < end {
+                    candidate[n] = support.pool_ctx().data[path_off + k]
+                    n += 1
+                    k += 1
+                }
+            }
+            n = support.append_byte(candidate, n, '/')
+            n = support.append_str(candidate, n, bc().argv0)
+            candidate[n] = 0
+            if (proj.file_exists(support.arr_cstr(candidate)) != 0) {
+                bc().self_path = malloc((n + 1).to_type(u64)).to_type(*char)
+                if (bc().self_path == 0) {
+                    return -1
+                }
+                let j int = 0
+                for j < n {
+                    bc().self_path[j] = candidate[j].to_type(char)
+                    j += 1
+                }
+                bc().self_path[n] = 0.to_type(char)
+                return 0
+            }
+            start = end + 1
+        }
+        end += 1
+    }
+    return support.fail("PATH 中找不到当前 yh 可执行文件")
+}
+
+// mb_schedule_modules：同项目构建锁保护下的调度入口。
+// 锁只串行化同一项目；不同项目仍可并行。锁不可用时按原流程继续。
+pub fn mb_schedule_modules(count int, root_off int, root_len int,
+    build_off int, build_len int) int {
+    if (count <= 0 || support.session().check_only != 0) {
+        return mb_schedule_modules_locked(count, root_off, root_len,
+            build_off, build_len)
+    }
+    let lock_fd int = mb_project_lock(root_off, root_len)
+    let rc int = mb_schedule_modules_locked(count, root_off, root_len,
+        build_off, build_len)
+    mb_project_unlock(lock_fd)
+    return rc
+}
+
+// mb_cache_info：打印根、开关、大小与条目数；0 = 成功。
+pub fn mb_cache_info() int {
+    mb_cache_init()
+    let store *cache.CacheStore = &bc().cache_store
+    let root *char = support.arr_cstr(&store.root[0])
+    if (cache.store_enabled(store) == 0) {
+        admin_out("YH_CACHE: disabled")
+        return 0
+    }
+    let actions *CacheFile = 0
+    let action_count int = 0
+    admin_list_dir(store, "v1/actions", &actions, &action_count)
+    let outs *CacheFile = 0
+    let out_count int = 0
+    admin_list_dir(store, "v1/outputs", &outs, &out_count)
+    let total u64 = admin_sum_size(outs, out_count) + admin_sum_size(actions, action_count)
+    let buf [cache.CACHE_ROOT_MAX + 512]u8
+    let n int = 0
+    n = support.append_str(&buf[0], n, "YH_CACHE: ")
+    n = support.append_str(&buf[0], n, root)
+    n = support.append_str(&buf[0], n, "\nactions: ")
+    n = support.append_int(&buf[0], n, action_count)
+    n = support.append_str(&buf[0], n, "\noutputs: ")
+    n = support.append_int(&buf[0], n, out_count)
+    n = support.append_str(&buf[0], n, "\nsize: ")
+    n = admin_byte_text(&buf[0], n, total)
+    n = support.append_str(&buf[0], n, "\nmax: ")
+    n = admin_byte_text(&buf[0], n, store.max_size)
+    buf[n] = 0
+    admin_out(support.arr_cstr(&buf[0]))
+    admin_release_files(actions)
+    admin_release_files(outs)
+    return 0
+}
+
+// mb_cache_clean：清空 actions/outputs/tmp，保留目录与 lock。
+pub fn mb_cache_clean() int {
+    mb_cache_init()
+    let store *cache.CacheStore = &bc().cache_store
+    if (cache.store_enabled(store) == 0) {
+        admin_out("YH_CACHE: disabled")
+        return 0
+    }
+    let lock_fd int = cache.store_begin_write(store)
+    if (lock_fd < 0) {
+        admin_out("YH_CACHE: 无法取得写锁")
+        return 1
+    }
+    admin_unlink_dir(store, "v1/actions")
+    admin_unlink_dir(store, "v1/outputs")
+    admin_unlink_dir(store, "v1/tmp")
+    cache.store_end_write(lock_fd)
+    admin_out("YH_CACHE: clean 完成")
+    return 0
+}
+
+// mb_cache_trim：按 mtime 从旧到新删除未被 action 引用的 output，直到 <= 上限。
+pub fn mb_cache_trim() int {
+    mb_cache_init()
+    let store *cache.CacheStore = &bc().cache_store
+    if (cache.store_enabled(store) == 0) {
+        admin_out("YH_CACHE: disabled")
+        return 0
+    }
+    let lock_fd int = cache.store_begin_write(store)
+    if (lock_fd < 0) {
+        admin_out("YH_CACHE: 无法取得写锁")
+        return 1
+    }
+    let outs *CacheFile = 0
+    let count int = 0
+    admin_list_dir(store, "v1/outputs", &outs, &count)
+    let total u64 = admin_sum_size(outs, count)
+    if (total <= store.max_size) {
+        let buf [512]u8
+        let n int = 0
+        n = support.append_str(&buf[0], n, "YH_CACHE: 已在上限内，")
+        n = admin_byte_text(&buf[0], n, total)
+        buf[n] = 0
+        admin_out(support.arr_cstr(&buf[0]))
+        admin_release_files(outs)
+        cache.store_end_write(lock_fd)
+        return 0
+    }
+    let refs IdSet
+    let probe_actions *CacheFile = 0
+    let probe_count int = 0
+    admin_list_dir(store, "v1/actions", &probe_actions, &probe_count)
+    admin_release_files(probe_actions)
+    if (idset_init(&refs, probe_count * 16) != 0
+        || admin_collect_refs(store, &refs) != 0) {
+        idset_release(&refs)
+        admin_release_files(outs)
+        cache.store_end_write(lock_fd)
+        admin_out("YH_CACHE: 引用集分配失败，放弃 trim")
+        return 1
+    }
+    // 按 mtime 插入排序（旧在前）；trim 是低频运维命令，不用引入排序库。
+    let i int = 1
+    for i < count {
+        let current CacheFile = outs[i]
+        let j int = i
+        for j > 0 && outs[j - 1].mtime > current.mtime {
+            outs[j] = outs[j - 1]
+            j -= 1
+        }
+        outs[j] = current
+        i += 1
+    }
+    let removed u64 = 0
+    let removed_count int = 0
+    i = 0
+    for i < count && total > store.max_size {
+        if (idset_has(&refs, &outs[i].name[0]) == 0) {
+            let path [cache.CACHE_ROOT_MAX + 256]u8
+            if (admin_join(support.arr_cstr(&store.root[0]), "v1/outputs",
+                    &outs[i].name[0], cache.CACHE_ID_HEX, &path[0],
+                    cache.CACHE_ROOT_MAX + 256) == 0) {
+                unlink(support.arr_cstr(&path[0]))
+                if (total >= outs[i].size) { total -= outs[i].size } else { total = 0 }
+                removed += outs[i].size
+                removed_count += 1
+            }
+        }
+        i += 1
+    }
+    let buf [512]u8
+    let n int = 0
+    n = support.append_str(&buf[0], n, "YH_CACHE: trim 删除 ")
+    n = support.append_int(&buf[0], n, removed_count)
+    n = support.append_str(&buf[0], n, " 个 output，")
+    n = admin_byte_text(&buf[0], n, removed)
+    n = support.append_str(&buf[0], n, "，剩余 ")
+    n = admin_byte_text(&buf[0], n, total)
+    buf[n] = 0
+    admin_out(support.arr_cstr(&buf[0]))
+    idset_release(&refs)
+    admin_release_files(outs)
+    cache.store_end_write(lock_fd)
+    return total > store.max_size ? 1 : 0
+}
+
+// mb_cache_verify：全量检查 action 编码、OutputID 内容与孤儿 output。
+pub fn mb_cache_verify() int {
+    mb_cache_init()
+    let store *cache.CacheStore = &bc().cache_store
+    if (cache.store_enabled(store) == 0) {
+        admin_out("YH_CACHE: disabled")
+        return 0
+    }
+    let actions *CacheFile = 0
+    let action_count int = 0
+    admin_list_dir(store, "v1/actions", &actions, &action_count)
+    let refs IdSet
+    if (idset_init(&refs, action_count * 16) != 0) {
+        admin_release_files(actions)
+        admin_out("YH_CACHE: verify 引用集分配失败")
+        return 1
+    }
+    let bad_actions int = 0
+    let missing int = 0
+    let corrupt int = 0
+    let checked int = 0
+    let i int = 0
+    for i < action_count {
+        let action_id [cache.CACHE_ID_SIZE]u8
+        if (cache.id_parse_hex(support.arr_cstr(&actions[i].name[0]),
+                &action_id[0]) != 0) {
+            bad_actions += 1
+            i += 1
+            continue
+        }
+        let entries [cache.CACHE_ACTION_MAX_ENTRIES]cache.CacheEntry
+        let count int = 0
+        if (cache.store_action_get(store, &action_id[0], &entries[0],
+                cache.CACHE_ACTION_MAX_ENTRIES, &count) != 1) {
+            bad_actions += 1
+            i += 1
+            continue
+        }
+        let j int = 0
+        for j < count {
+            if (idset_add(&refs, &entries[j].id[0]) != 0) {
+                bad_actions += 1
+            }
+            let path [cache.CACHE_ROOT_MAX + 256]u8
+            if (cache.store_output_path(store, &entries[j].id[0], &path[0],
+                    cache.CACHE_ROOT_MAX + 256) != 0) {
+                missing += 1
+            } else {
+                let digest [cache.CACHE_ID_SIZE]u8
+                if (hash.sha256_file(support.arr_cstr(&path[0]), &digest[0]) != 0) {
+                    missing += 1
+                } else {
+                    checked += 1
+                    let k int = 0
+                    let same int = 1
+                    for k < cache.CACHE_ID_SIZE {
+                        if (digest[k] != entries[j].id[k]) { same = 0 }
+                        k += 1
+                    }
+                    if (same == 0) { corrupt += 1 }
+                }
+            }
+            j += 1
+        }
+        i += 1
+    }
+    let outs *CacheFile = 0
+    let out_count int = 0
+    admin_list_dir(store, "v1/outputs", &outs, &out_count)
+    let orphan int = 0
+    i = 0
+    for i < out_count {
+        let id [cache.CACHE_ID_SIZE]u8
+        if (cache.id_parse_hex(support.arr_cstr(&outs[i].name[0]), &id[0]) == 0
+            && idset_has(&refs, &id[0]) == 0) {
+            orphan += 1
+        }
+        i += 1
+    }
+    let buf [512]u8
+    let n int = 0
+    n = support.append_str(&buf[0], n, "YH_CACHE: actions=")
+    n = support.append_int(&buf[0], n, action_count)
+    n = support.append_str(&buf[0], n, " bad=")
+    n = support.append_int(&buf[0], n, bad_actions)
+    n = support.append_str(&buf[0], n, " outputs=")
+    n = support.append_int(&buf[0], n, out_count)
+    n = support.append_str(&buf[0], n, " checked=")
+    n = support.append_int(&buf[0], n, checked)
+    n = support.append_str(&buf[0], n, " missing=")
+    n = support.append_int(&buf[0], n, missing)
+    n = support.append_str(&buf[0], n, " corrupt=")
+    n = support.append_int(&buf[0], n, corrupt)
+    n = support.append_str(&buf[0], n, " orphan=")
+    n = support.append_int(&buf[0], n, orphan)
+    buf[n] = 0
+    admin_out(support.arr_cstr(&buf[0]))
+    idset_release(&refs)
+    admin_release_files(actions)
+    admin_release_files(outs)
+    return (bad_actions + missing + corrupt + orphan) == 0 ? 0 : 1
+}
+
+// mb_cache_command：分派 yh cache <action>；缺省 info，未知动作返回 2。
+pub fn mb_cache_command(action *char) int {
+    if (action == 0 || action[0] == 0 || support.cstr_eq(action, "info") != 0) {
+        return mb_cache_info()
+    }
+    if (support.cstr_eq(action, "clean") != 0) { return mb_cache_clean() }
+    if (support.cstr_eq(action, "trim") != 0) { return mb_cache_trim() }
+    if (support.cstr_eq(action, "verify") != 0) { return mb_cache_verify() }
+    support.fail("未知 cache 动作（可用: info、clean、trim、verify）")
+    return 2
+}
+
+// mb_cache_debug_action：YH_CACHE_DEBUG 下输出标签 + ActionID（64 hex）。
+pub fn mb_cache_debug_action(label *char, action_id *u8) void {
+    if (bc().cache_debug == 0 || action_id == 0) { return }
+    let hex [cache.CACHE_ID_TEXT]u8
+    if (hash.sha256_hex(action_id, &hex[0]) != 0) { return }
+    printf("[cache] %s %s\n", label, support.arr_cstr(&hex[0]))
+}
+
+// mb_cache_init：初始化全局缓存根；失败或 off 只关闭缓存，不影响构建。
+// 生产 build 在调度开始时调用一次；check/test 模式直接关闭。
+pub fn mb_cache_init() void {
+    let store *cache.CacheStore = &bc().cache_store
+    cache.store_bind((&bc().cache_store).to_type(*void))
+    let debug_off int = -1
+    let debug_len int = 0
+    if (proj.env_fetch("YH_CACHE_DEBUG", &debug_off, &debug_len) == 0
+        && debug_len > 0) {
+        let first char = proj.pool_str(debug_off)[0]
+        if (first != '0' && first != 'n' && first != 'N'
+            && first != 'f' && first != 'F') {
+            bc().cache_debug = 1
+        }
+    }
+    if (support.session().check_only != 0 || support.session().test_mode != 0) {
+        cache.store_disable(store)
+        return
+    }
+    let root [cache.CACHE_ROOT_MAX]u8
+    let off int = -1
+    let olen int = 0
+    if (proj.env_fetch("YH_CACHE", &off, &olen) != 0) {
+        cache.store_disable(store)
+        return
+    }
+    let enabled int = 1
+    if (olen > 0) {
+        let value *char = proj.pool_str(off)
+        if (support.cstr_eq(value, "off") != 0) {
+            cache.store_disable(store)
+            return
+        }
+        if (olen + 1 > cache.CACHE_ROOT_MAX) {
+            cache.store_disable(store)
+            return
+        }
+        let i int = 0
+        for i < olen {
+            root[i] = support.pool_ctx().data[off + i]
+            i += 1
+        }
+        root[olen] = 0
+    } else if (mb_cache_default_root(&root[0], cache.CACHE_ROOT_MAX) != 0) {
+        cache.store_disable(store)
+        return
+    }
+    let max_size u64 = CACHE_DEFAULT_MAX
+    let max_off int = -1
+    let max_len int = 0
+    if (proj.env_fetch("YH_CACHE_MAX_SIZE", &max_off, &max_len) == 0
+        && max_len > 0) {
+        let parsed u64 = 0
+        if (cache.store_parse_size(proj.pool_str(max_off), &parsed) == 0) {
+            max_size = parsed
+        }
+    }
+    if (cache.store_init(store, support.arr_cstr(&root[0]), enabled, max_size) != 0) {
+        cache.store_disable(store)
+        return
+    }
+    // 目录必须存在；任何一步失败都关闭缓存，保持“miss 安全”。
+    if (link.cmd_mkdirs(support.arr_cstr(&root[0])) != 0) {
+        cache.store_disable(store)
+        return
+    }
+    let dirs [4]*char
+    dirs[0] = "v1"
+    dirs[1] = "v1/actions"
+    dirs[2] = "v1/outputs"
+    dirs[3] = "v1/tmp"
+    let i int = 0
+    for i < 4 {
+        let path [cache.CACHE_ROOT_MAX + 64]u8
+        if (mb_cache_join(&path[0], cache.CACHE_ROOT_MAX + 64,
+                support.arr_cstr(&root[0]), dirs[i]) != 0
+            || link.cmd_mkdirs(support.arr_cstr(&path[0])) != 0) {
+            cache.store_disable(store)
+            return
+        }
+        i += 1
+    }
+    let lock_path [cache.CACHE_ROOT_MAX + 64]u8
+    if (mb_cache_join(&lock_path[0], cache.CACHE_ROOT_MAX + 64,
+            support.arr_cstr(&root[0]), "v1/lock") == 0) {
+        let fd int = proj.open_out(support.arr_cstr(&lock_path[0]))
+        if (fd >= 0) { close(fd) }
+    }
+}
+
+// mb_cache_publish_module：把模块三个产物发布到全局 outputs/actions。
+// 失败只记 miss；调用方不把缓存写失败当成构建失败。
+pub fn mb_cache_publish_module(m int, build_off int, build_len int,
+    action_id *u8, object_id *u8, iface_id *u8, ct_id *u8) int {
+    let store *cache.CacheStore = &bc().cache_store
+    if (cache.store_enabled(store) == 0) { return 0 }
+    let entries [3]cache.CacheEntry
+    let object_path [1200]u8
+    let iface_path [1200]u8
+    let ct_path [1200]u8
+    if (mb_module_path(m, build_off, build_len, "obj", ".o",
+            &object_path[0], 1200) != 0
+        || mb_module_path(m, build_off, build_len, "iface", ".s.i",
+            &iface_path[0], 1200) != 0
+        || mb_module_path(m, build_off, build_len, "iface", ".s.ct",
+            &ct_path[0], 1200) != 0) { return -1 }
+    entries[0].role = cache.OUTPUT_OBJECT
+    entries[1].role = cache.OUTPUT_IFACE
+    entries[2].role = cache.OUTPUT_CT_IFACE
+    let sizes [3]u64
+    if (cache.store_put_file(store, support.arr_cstr(&object_path[0]),
+            &entries[0].id[0], &sizes[0]) != 0
+        || cache.store_put_file(store, support.arr_cstr(&iface_path[0]),
+            &entries[1].id[0], &sizes[1]) != 0
+        || cache.store_put_file(store, support.arr_cstr(&ct_path[0]),
+            &entries[2].id[0], &sizes[2]) != 0) {
+        return -1
+    }
+    entries[0].size = sizes[0]
+    entries[1].size = sizes[1]
+    entries[2].size = sizes[2]
+    // 公布的 OutputID 必须与本地 manifest 记录的一致；不一致说明产物在
+    // 提交窗口内被替换，宁可放弃本次全局写入，也不留下错配的 action。
+    let i int = 0
+    for i < cache.CACHE_ID_SIZE {
+        if (entries[0].id[i] != object_id[i]
+            || entries[1].id[i] != iface_id[i]
+            || entries[2].id[i] != ct_id[i]) { return -1 }
+        i += 1
+    }
+    return cache.store_action_put(store, action_id, &entries[0], 3)
+}
+
+// mb_cache_lookup_module：按模块 ActionID 查全局 action，命中则物化输出并
+// 补写本地 manifest。1 = 命中，0 = miss/已禁用，-1 = 本地写失败。
+pub fn mb_cache_lookup_module(m int, build_off int, build_len int,
+    action_id *u8) int {
+    let store *cache.CacheStore = &bc().cache_store
+    if (cache.store_enabled(store) == 0) {
+        mb_cache_debug_action("module global disabled", action_id)
+        return 0
+    }
+    // 显式请求 .ll/.s 时必须让 worker 补审阅产物，不能直接全局命中。
+    if (proj.cfg().emit_kind != 0 || proj.cfg().emit_asm != 0) {
+        mb_cache_debug_action("module global skip (emit artifacts)", action_id)
+        return 0
+    }
+    let entries [8]cache.CacheEntry
+    let count int = 0
+    if (cache.store_action_get(store, action_id, &entries[0], 8, &count) != 1) {
+        mb_cache_debug_action("module global miss (action absent/corrupt)", action_id)
+        return 0
+    }
+    let object_i int = -1
+    let iface_i int = -1
+    let ct_i int = -1
+    let i int = 0
+    for i < count {
+        if (entries[i].role == cache.OUTPUT_OBJECT) { object_i = i }
+        if (entries[i].role == cache.OUTPUT_IFACE) { iface_i = i }
+        if (entries[i].role == cache.OUTPUT_CT_IFACE) { ct_i = i }
+        i += 1
+    }
+    if (object_i < 0 || iface_i < 0 || ct_i < 0) {
+        mb_cache_debug_action("module global miss (role missing)", action_id)
+        return 0
+    }
+    let object_path [1200]u8
+    let iface_path [1200]u8
+    let ct_path [1200]u8
+    if (mb_module_path(m, build_off, build_len, "obj", ".o",
+            &object_path[0], 1200) != 0
+        || mb_module_path(m, build_off, build_len, "iface", ".s.i",
+            &iface_path[0], 1200) != 0
+        || mb_module_path(m, build_off, build_len, "iface", ".s.ct",
+            &ct_path[0], 1200) != 0) { return 0 }
+    if (cache.store_get_file(store, &entries[object_i].id[0],
+            support.arr_cstr(&object_path[0])) != 1
+        || cache.store_get_file(store, &entries[iface_i].id[0],
+            support.arr_cstr(&iface_path[0])) != 1
+        || cache.store_get_file(store, &entries[ct_i].id[0],
+            support.arr_cstr(&ct_path[0])) != 1) {
+        mb_cache_debug_action("module global miss (output corrupt/missing)", action_id)
+        return 0
+    }
+    if (mb_manifest_write(m, build_off, build_len, action_id,
+            &entries[object_i].id[0], &entries[iface_i].id[0],
+            &entries[ct_i].id[0]) != 0) {
+        return -1
+    }
+    return 1
+}
+
+// llvm_check_single_file：单文件受检前端共用入口（LA1b）。
+// 调用方必须先完成会话初始化、读源与 sem_init_tables；本函数负责词法、
+// 单文件 PFile/声明索引、两遍语义与 CheckedModule 捕获/校验。
+// require_main=0 用于库文件 check，=1 用于程序编译；helper 不 lowering、
+// 不调用 LLVM、不写正式缓存。成功交付独占快照（out 由调用方释放），
+// 失败不改 out 并保留前端诊断。
+pub fn llvm_check_single_file(source_path *char, require_main int,
+    out *check.CheckedModule) int {
+    if (out == 0) { return -1 }
+    if (support.front_checked_begin() != 0) { return 1 }
+    if (lex.lex_all() != 0) { return 1 }
+    if (mb_llvm_file_begin(source_path) != 0) { return 1 }
+    support.session().compile = 1
+    if (builtin.front_prepare() != 0) { return 1 }
+    if (mb_llvm_semantics(require_main) != 0) { return 1 }
+    if (support.front_checked_verify() != 0) { return 1 }
+    if (check.checked_module_capture(out) != 0) { return -1 }
+    let checked_status int = llvm_emit_verify_checked_snapshot(out)
+    if (checked_status != 0) {
+        check.checked_module_release(out)
+        return checked_status
+    }
+    if (support.front_checked_end() != 0) {
+        check.checked_module_release(out)
+        return 1
+    }
+    return 0
+}
+
+// llvm_emit_single_file：单文件入口（--emit-asm / -o）在 LLVM 模式下的实现。
+// 调用方必须已完成会话初始化（state_init + 读源 + 语义表）；
+// 受检前端由 llvm_check_single_file 建立，本函数只负责 CLI 形态与产物发布。
+// do_link 非 0：产物是**可执行文件**（对象与可执行文件先写临时文件，验机后发布）；
+// do_link 为 0：产物是**对象文件**（kind=0）或汇编文本（kind=1）。
+// text_path 非空时额外写出 LLVM 文本（"-" = 标准输出）。
+// 返回 0 成功、1 源/形态错误、-1 内部或桥失败。
+pub fn llvm_emit_single_file(source_path *char, out_path *char, kind int,
+    text_path *char, do_link int) int {
+    // 单文件 check 与编译共用同一条受检前端；调用方只做过读源与建表。
+    let checked check.CheckedModule
+    let checked_status int = llvm_check_single_file(source_path, 1, &checked)
+    if (checked_status != 0) { return checked_status }
+    // 链接形态先把对象写到 <out>.yh-tmp.o，避免与最终可执行文件同名。
+    let object [620]u8
+    let on int = 0
+    let emit_path *char = out_path
+    let link_tmp [720]u8
+    let link_tmp_path *char = 0.to_type(*char)
+    if (do_link != 0) {
+        on = support.append_str(&object[0], on, out_path)
+        on = support.append_str(&object[0], on, ".yh-tmp.o")
+        object[on] = 0
+        emit_path = support.arr_cstr(&object[0])
+        let link_len int = support.append_str(&link_tmp[0], 0, out_path)
+        link_len = support.append_str(&link_tmp[0], link_len, ".yh-link-tmp")
+        link_tmp[link_len] = 0
+        link_tmp_path = support.arr_cstr(&link_tmp[0])
+    }
+    // out_path 为空 = 只写 LLVM 文本（--emit-llvm 单文件形态），不调用桥。
+    if (emit_path == 0) {
+        let stats_only LLVMEmitResult
+        let text_rc int = llvm_emit_text_only(&checked, text_path, &stats_only)
+        check.checked_module_release(&checked)
+        return text_rc
+    }
+    let stats LLVMEmitResult
+    // "--emit-asm" 形态：桥只按路径发布，因此先写临时文件再回显到标准输出。
+    if (support.cstr_eq(out_path, "-") != 0) {
+        let temporary [512]u8
+        let tn int = 0
+        // 临时目录顺序（VENC，2026-11-05）：文件名带 pid 并发唯一，写完立即删除。
+        // Windows：先当前目录（仓库/项目目录始终可写；部分主机的安全策略拒绝
+        //   不受信任的新编译 exe 在 %TEMP% 创建文件——桥诊断 [mkstemp errno=13]），
+        //   失败再退 TEMP/TMP（经 proj 环境窄口，不引入 getenv 依赖）。
+        // 非 Windows：/tmp 优先（旧行为），失败再退当前目录。
+        if (support.tg_host_windows() != 0) {
+            tn = support.append_str(&temporary[0], 0, ".yh-llvm-asm-")
+        } else {
+            tn = support.append_str(&temporary[0], 0, "/tmp/yh-llvm-asm-")
+        }
+        tn = support.append_int(&temporary[0], tn, getpid())
+        tn = support.append_str(&temporary[0], tn, ".s")
+        temporary[tn] = 0
+        let asm int = llvm_emit_module_to(&checked, kind, support.arr_cstr(&temporary[0]),
+            text_path, 0.to_type(*char), &stats, proj.cfg().opt_level)
+        if (asm != 0) {
+            // 首选目录不可写：换兜底目录重试一次（诊断随失败路径打印，成功静默）。
+            unlink(support.arr_cstr(&temporary[0]))
+            if (support.tg_host_windows() != 0) {
+                let root_buf [512]u8
+                let rn int = mb_env_to_buf("TEMP", &root_buf[0], 512)
+                if (rn <= 0) { rn = mb_env_to_buf("TMP", &root_buf[0], 512) }
+                if (rn > 0) {
+                    tn = support.append_str(&temporary[0], 0, support.arr_cstr(&root_buf[0]))
+                    tn = support.append_str(&temporary[0], tn, "/yh-llvm-asm-")
+                } else {
+                    tn = support.append_str(&temporary[0], 0, ".yh-llvm-asm-")
+                }
+            } else {
+                tn = support.append_str(&temporary[0], 0, ".yh-llvm-asm-")
+            }
+            tn = support.append_int(&temporary[0], tn, getpid())
+            tn = support.append_str(&temporary[0], tn, ".s")
+            temporary[tn] = 0
+            asm = llvm_emit_module_to(&checked, kind, support.arr_cstr(&temporary[0]),
+                text_path, 0.to_type(*char), &stats, proj.cfg().opt_level)
+        }
+        check.checked_module_release(&checked)
+        if (asm != 0) {
+            unlink(support.arr_cstr(&temporary[0]))
+            return -1
+        }
+        let fd int = open(support.arr_cstr(&temporary[0]), 0x0, 0)
+        if (fd < 0) {
+            unlink(support.arr_cstr(&temporary[0]))
+            return support.fail("无法读回 LLVM 汇编产物")
+        }
+        let chunk [4096]u8
+        for 1 {
+            let got i64 = read(fd, (&chunk[0]).to_type(*u8), 4096)
+            if (got <= 0) { break }
+            if (support.write_all(1, (&chunk[0]).to_type(*u8), got.to_type(int)) != 0) {
+                close(fd)
+                unlink(support.arr_cstr(&temporary[0]))
+                return support.fail("写入 LLVM 汇编到标准输出失败")
+            }
+        }
+        close(fd)
+        unlink(support.arr_cstr(&temporary[0]))
+        return 0
+    }
+    let emitted int = llvm_emit_module_to(&checked, kind, emit_path, text_path,
+        0.to_type(*char), &stats, proj.cfg().opt_level)
+    check.checked_module_release(&checked)
+    if (emitted != 0) {
+        if (do_link != 0) { unlink(support.arr_cstr(&object[0])) }
+        else { unlink(out_path) }
+        return -1
+    }
+    if (do_link == 0) { return 0 }
+    // 单文件链接沿用项目路径的目标选择；Linux x64/AArch64 有内嵌 lld 时不 fork cc。
+    let link_rc int = -1
+    if (link.mb_lld_windows_enabled() != 0) {
+        // Windows/x64 单文件：COFF 前缀 + 内嵌 lld（零 CRT，只接 kernel32）。
+        link_rc = link.mb_coff_link_single(support.arr_cstr(&object[0]), link_tmp_path)
+    } else if (link.mb_lld_darwin_enabled() != 0) {
+        link_rc = link.mb_macho_link_single(support.arr_cstr(&object[0]), link_tmp_path)
+    } else if (link.mb_lld_linux_enabled() != 0) {
+        let objects [2]*char
+        objects[0] = support.arr_cstr(&object[0])
+        objects[1] = 0.to_type(*char)
+        let extra_args [3]*char
+        extra_args[0] = "-no-pie"
+        extra_args[1] = "-lm"
+        extra_args[2] = 0.to_type(*char)
+        link_rc = link.mb_lld_link_worker(&objects[0], 1, &extra_args[0], 2,
+            link_tmp_path)
+    } else {
+        let cc_storage [1200]u8
+        let cc *char = link.mb_select_linker(&cc_storage[0])
+        if (cc == 0) {
+            unlink(support.arr_cstr(&object[0]))
+            return -1
+        }
+        let args [8]*char
+        args[0] = cc
+        args[1] = "-no-pie"
+        args[2] = "-o"
+        args[3] = link_tmp_path
+        args[4] = support.arr_cstr(&object[0])
+        if (proj.cfg().target.os == support.TARGET_OS_LINUX) {
+            args[5] = "-lm"
+            args[6] = 0.to_type(*char)
+        } else {
+            args[5] = 0.to_type(*char)
+        }
+        link_rc = link.cmd_process_run(&args[0])
+    }
+    unlink(support.arr_cstr(&object[0]))
+    if (link_rc == -2) {
+        unlink(link_tmp_path)
+        return support.fail("内嵌 lld 链接 worker 已结束，未发布输出")
+    }
+    if (link_rc != 0) {
+        unlink(link_tmp_path)
+        return support.fail_path("LLVM 产物链接失败: ", out_path)
+    }
+    if (link.mb_object_machine_matches(link_tmp_path) == 0) {
+        unlink(link_tmp_path)
+        return support.fail_path("LLVM 链接产物架构与当前 target 不符: ", out_path)
+    }
+    if (link.mb_lld_darwin_enabled() != 0
+        && link.mb_darwin_executable_matches(link_tmp_path) == 0) {
+        unlink(link_tmp_path)
+        return support.fail_path("Darwin LLVM 链接产物版本或代码签名校验失败: ", out_path)
+    }
+    if (rename(link_tmp_path, out_path) != 0) {
+        unlink(link_tmp_path)
+        return support.fail_path("无法发布 LLVM 链接产物: ", out_path)
+    }
+    return 0
+}
+
+// mb_intern_arg：命令行参数字符串入名字池，返回偏移（长度出参）。
+pub fn mb_intern_arg(s *char, olen *int) int {
+    let sl int = 0
+    for s[sl] != 0 {
+        sl += 1
+    }
+    olen[0] = sl
+    return support.tml_intern_str(s.to_type(*u8), 0, sl)
+}
+
+// load_stdlib：装载 YH_STDLIB 指定的标准库项目。
+// YH_STDLIB 非空时优先且失败不回退；为空/未设置时按可执行文件附近布局
+// 查找默认标准库（仓库 <root>/libs、bin 种子相邻 libs 或安装 share/yh/libs）。
+pub fn load_stdlib() int {
+    let c_off int = 0
+    let c_len int = 0
+    if (proj.ctx().stdlib >= 0) {
+        return 0
+    }
+    let off int = -1
+    let olen int = 0
+    if (proj.env_fetch("YH_STDLIB", &off, &olen) < 0) {
+        return -1
+    }
+    if (olen == 0) {
+        return mb_load_default_stdlib()
+    }
+    if (proj.canon(0, 0, proj.pool_str(off), &c_off, &c_len) != 0) {
+        return -1
+    }
+    let s int = load_project(c_off, c_len)
+    if (s < 0) {
+        return -1
+    }
+    proj.ctx().stdlib = s
+    return 0
+}
+
+// pj_topo_multi：库模式——从项目每个模块出发收集依赖序。
+pub fn pj_topo_multi(pj int) int {
+    if (pj_topo(proj.ctx().projs[pj].mods[0]) < 0) {
+        return -1
+    }
+    let i int = 1
+    for i < proj.ctx().projs[pj].mod_n {
+        if (proj.ctx().mark[proj.ctx().projs[pj].mods[i]] != 2) {
+            if (pj_dfs(proj.ctx().projs[pj].mods[i]) != 0) {
+                return -1
+            }
+        }
+        i += 1
+    }
+    return proj.ctx().order_n
+}
+
+// mb_select_links：把 cli 解析出的 --link 组名登记进链接选择表。
+// 调用方已先 link.li_select_reset()；0 成功、2 组名非法、-1 内部失败。
+pub fn mb_select_links(links []*char) int {
+    let i int = 0
+    for i < len(links) {
+        let link_arg *char = links[i]
+        let ll int = 0
+        for link_arg[ll] != 0 { ll += 1 }
+        let lo int = support.tml_intern_str(link_arg.to_type(*u8), 0, ll)
+        if (lo < 0) { return -1 }
+        if (pl_group_name_ok(lo, ll) == 0) {
+            support.fail("--link 组名只能包含字母、数字、_、-")
+            return 2
+        }
+        if (link.li_select_add(lo, ll) != 0) { return -1 }
+        i += 1
+    }
+    return 0
+}
+
+// cmd_build：按 cli 解析出的请求构建项目。out_path 可空，
+// module 由 has_module 指示，links 是 --link 组名（借用 argv）。
+// 返回 0 成功、1 源码/语义错误、2 用法错误、-1 内部失败。
+pub fn cmd_build(out_path *char, module_arg *char, has_module int, links []*char) int {
+    if (mb_resolve_self_path() != 0) {
+        return 1
+    }
+    let out_arg *char = out_path
+    let mod_arg_off int = -1
+    let mod_arg_len int = 0
+    let mod_arg_n int = 0
+    link.li_select_reset()
+    let link_rc int = mb_select_links(links)
+    if (link_rc != 0) {
+        return link_rc
+    }
+    if (has_module != 0 && module_arg != 0) {
+        let sl int = 0
+        for module_arg[sl] != 0 { sl += 1 }
+        let mo int = support.tml_intern_str(module_arg.to_type(*u8), 0, sl)
+        if (mo < 0) { return -1 }
+        mod_arg_off = mo
+        mod_arg_len = sl
+        mod_arg_n = 1
+    }
+    if (support.session().check_only != 0 && link.li_select_count() > 0) {
+        support.fail("yh check 不支持 --link")
+        return 2
+    }
+    support.src_ctx().path = "yh"
+    // 父进程建立可继承的只读前端快照，fork worker 不再重扫项目源码。
+    support.ctl().front_cache = 1
+    if (load_stdlib() != 0) {
+        return 1
+    }
+    // 根路径长度由 pro_find_root 出参返回（不再依赖全局游标）。
+    let root_len int = 0
+    let root int = pro_find_root(0, &root_len)
+    if (root < 0) {
+        return 1
+    }
+    let root_off int = root
+    proj.set_root_project(root_off, root_len)
+    let pj int = load_project(root_off, root_len)
+    if (pj < 0) {
+        return 1
+    }
+    if (pj_bind_imports() != 0) {
+        return 1
+    }
+    // 构建根：显式模块参数 > 名为 main 的入口模块 > 库模式
+    let rootmod int = -1
+    if (mod_arg_off >= 0) {
+        rootmod = proj.module_in_project(pj, mod_arg_off, mod_arg_len)
+        if (rootmod < 0) {
+            let buf [128]u8
+            let n int = 0
+            n = support.append_str(buf, n, "本项目没有模块: ")
+            n = support.append_np(buf, n, mod_arg_off, mod_arg_len)
+            let mo4 int = support.tml_intern_str(buf, 0, n)
+            if (mo4 < 0) {
+                return -1
+            }
+            return support.fail(support.np_cstr(mo4))
+        }
+    } else {
+        rootmod = pj_entry_mod(pj)
+    }
+    if (rootmod < 0 && link.li_select_count() > 0) {
+        support.fail("库项目没有可链接产物，--link 不适用")
+        return 2
+    }
+    // topo（依赖序）
+    let count int = 0
+    if (rootmod >= 0) {
+        count = pj_topo(rootmod)
+        if (count < 0) {
+            return 1
+        }
+    } else {
+        count = pj_topo_multi(pj)
+        if (count < 0) {
+            return 1
+        }
+    }
+    // 构建目录
+    let build_len int = 0
+    let build_off int = proj.build_dir(root_off, root_len, &build_len)
+    if (build_off < 0) {
+        return 1
+    }
+    if (mb_mkdir(proj.pool_str(build_off)) != 0) {
+        return 1
+    }
+    if (mb_schedule_modules(count, root_off, root_len, build_off, build_len) != 0) {
+        if (support.session().check_only != 0) {
+            mb_check_clear_ifaces(build_off, build_len, count)
+        }
+        return 1
+    }
+    if (support.session().check_only != 0) {
+        mb_check_clear_ifaces(build_off, build_len, count)
+        pj_out_s("检查通过: ")
+        pj_out_np(proj.ctx().projs[pj].name_off, proj.ctx().projs[pj].name_len)
+        pj_out_s("\n")
+        return 0
+    }
+    // 链接（有入口时）
+    if (rootmod >= 0) {
+        let outbuf [620]u8
+        let on int = 0
+        if (out_arg != 0) {
+            on = support.append_str(outbuf, on, out_arg)
+        } else {
+            // 无 -o：产物名取清单 project.name
+            if (mb_ensure_binary_dir(root_off, root_len) != 0) { return 1 }
+            if (proj.default_binary_path(root_off, root_len, build_off,
+                    pj, &outbuf[0]) < 0) { return 1 }
+            on = 0
+            for outbuf[on] != 0 { on += 1 }
+        }
+        outbuf[on] = 0
+        if (link.mb_link(support.arr_cstr(outbuf), build_off, build_len, count, pj) != 0) {
+            return 1
+        }
+        pj_out_s("构建完成: ")
+        pj_out_s(support.arr_cstr(outbuf))
+        pj_out_s("\n")
+        return 0
+    }
+    pj_out_s("库构建完成（模块对象与接口在 ")
+    pj_out_np(build_off, build_len)
+    pj_out_s("）\n")
+    return 0
+}
+
+// cmd_run：按 cli 解析出的请求构建并运行 main 模块
+// links 是 --link 组名（借用 argv）；跨目标在本机运行前明确拒绝。
+pub fn cmd_run(links []*char) int {
+    if (mb_resolve_self_path() != 0) {
+        return 1
+    }
+    link.li_select_reset()
+    let link_rc int = mb_select_links(links)
+    if (link_rc != 0) {
+        return link_rc
+    }
+    support.src_ctx().path = "yh"
+    support.ctl().front_cache = 1
+    if (load_stdlib() != 0) {
+        return 1
+    }
+    let root_len int = 0
+    let root int = pro_find_root(0, &root_len)
+    if (root < 0) {
+        return 1
+    }
+    let root_off int = root
+    proj.set_root_project(root_off, root_len)
+    let pj int = load_project(root_off, root_len)
+    if (pj < 0) {
+        return 1
+    }
+    if (support.target_matches_host() == 0) {
+        return support.fail("yh run 的目标平台必须与宿主一致；跨目标请用 yh build")
+    }
+    if (pj_entry_mod(pj) < 0) {
+        return support.fail("库项目没有入口，无法 run（需要一个 module main;）")
+    }
+    if (pj_bind_imports() != 0) {
+        return 1
+    }
+    let rootmod int = pj_entry_mod(pj)
+    let count int = pj_topo(rootmod)
+    if (count < 0) {
+        return 1
+    }
+    let build_len int = 0
+    let build_off int = proj.build_dir(root_off, root_len, &build_len)
+    if (build_off < 0) {
+        return 1
+    }
+    if (mb_mkdir(proj.pool_str(build_off)) != 0) {
+        return 1
+    }
+    if (mb_schedule_modules(count, root_off, root_len, build_off, build_len) != 0) {
+        return 1
+    }
+    let binbuf [620]u8
+    if (mb_ensure_binary_dir(root_off, root_len) != 0) { return 1 }
+    let bn int = proj.default_binary_path(root_off, root_len, build_off,
+        pj, &binbuf[0])
+    if (bn < 0) { return 1 }
+    if (link.mb_link(support.arr_cstr(binbuf), build_off, build_len, count, pj) != 0) {
+        return 1
+    }
+    if (link.li_apply_runtime_env() != 0) { return 1 }
+    // 运行（继承 stdout/stderr；退出码由 waitpid 状态字解码）。
+    let args [2]*char
+    args[0] = support.arr_cstr(binbuf)
+    args[1] = 0.to_type(*char)
+    let rc int = link.cmd_process_run(&args[0])
+    return rc < 0 ? 1 : rc
+}
+
+// mb_print_version：打印当前项目的 name 与 version（清单 project.version
+// 缺省时标注未声明）。quiet=1 时找不到项目静默返回（usage 顺手显示）。
+// mb_print_contracts：输出本编译器认识的产物契约版本（key=value，稳定格式）。
+//
+// 供 CI 与外部工具（yh-explorer、VSCode 扩展）协商：它们读这里的版本，
+// 而不是去猜 `.s.i`/`.s.ct` 头行或 IR 序列化格式。版本常量单点定义在
+// parse（接口头行）与 ir（序列化）模块，这里只做展示，不另存副本。
+pub fn mb_print_contracts() int {
+    let buf [512]u8
+    let n int = 0
+    n = support.append_str(&buf[0], n, "iface-min=")
+    n = support.append_int(&buf[0], n, check.IFACE_VERSION_MIN)
+    n = support.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, "iface-max=")
+    n = support.append_int(&buf[0], n, check.IFACE_VERSION_MAX)
+    n = support.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, "ctiface=")
+    n = support.append_int(&buf[0], n, check.CTIFACE_VERSION)
+    n = support.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, "ir-function=")
+    n = support.append_int(&buf[0], n, ir.IR_SERIAL_VERSION)
+    n = support.append_byte(&buf[0], n, '\n')
+    n = support.append_str(&buf[0], n, "ir-module=")
+    n = support.append_int(&buf[0], n, ir.IR_MODULE_SERIAL_VERSION)
+    n = support.append_byte(&buf[0], n, '\n')
+    buf[n] = 0
+    pj_out_s(support.arr_cstr(&buf[0]))
+    return 0
+}
+
+pub fn mb_print_version(quiet int) int {
+    let root_len int = 0
+    let root int = pro_find_root(quiet, &root_len)
+    if (root < 0) {
+        return 1
+    }
+    let root_off int = root
+    let pj int = load_project(root_off, root_len)
+    if (pj < 0) {
+        return 1
+    }
+    pj_out_np(proj.ctx().projs[pj].name_off, proj.ctx().projs[pj].name_len)
+    if (proj.ctx().projs[pj].ver_off >= 0) {
+        pj_out_s(" ")
+        pj_out_np(proj.ctx().projs[pj].ver_off, proj.ctx().projs[pj].ver_len)
+    } else {
+        pj_out_s(" (未声明 version)")
+    }
+    pj_out_s("\n")
+    return 0
+}
+
+// mb_set_argv0 / mb_set_iface_suffix：两个跨模块只写全局的受控写入口。
+// 跨模块全局不能直接导出（yh 的 pub 只用于 fn/const/struct/union/enum），
+// 而这两个值分别由 CLI 入口（自身路径）与内部子进程协议（接口后缀）设置，
+// 因此各给一个 setter，避免为了两个赋值把整块状态外移。
+pub fn mb_set_argv0(p *char) void {
+    bc().argv0 = p
+    link.set_argv0(p)
+}
+
+pub fn mb_set_iface_suffix(p *char) void {
+    bc().iface_suffix = p
+}
+
+// mb_parse_hex：把恰好 16 位十六进制指纹解析为 u64；非法输入返回 -1。
+pub fn mb_parse_hex(text *char, value *u64) int {
+    let result u64 = 0
+    let i int = 0
+    for i < 16 {
+        let c u8 = text[i].to_type(u8)
+        let digit int = -1
+        if (c >= '0' && c <= '9') { digit = c - '0' }
+        if (c >= 'a' && c <= 'f') { digit = c - 'a' + 10 }
+        if (c >= 'A' && c <= 'F') { digit = c - 'A' + 10 }
+        if (digit < 0) { return -1 }
+        result = (result << 4) | digit.to_type(u64)
+        i += 1
+    }
+    if (text[16] != 0) { return -1 }
+    value[0] = result
+    return 0
+}
+
+// mb_mkdir：确保构建目录存在。
+pub fn mb_mkdir(dir *char) int {
+    // 建 .build 七子目录（asm/obj/iface/manifest/ir/llvm/index）
+    let subs [7]*char
+    subs[0] = "asm"
+    subs[1] = "obj"
+    subs[2] = "iface"
+    subs[3] = "manifest"
+    subs[4] = "ir"
+    subs[5] = "llvm"
+    subs[6] = "index"
+    if (link.cmd_mkdirs(dir) != 0) {
+        return support.fail_path("无法创建构建目录: ", dir)
+    }
+    let k int = 0
+    for k < 7 {
+        let path [1100]u8
+        let n int = support.append_str(path, 0, dir)
+        n = support.append_byte(path, n, '/')
+        n = support.append_str(path, n, subs[k])
+        path[n] = 0
+        if (link.cmd_mkdirs(support.arr_cstr(path)) != 0) {
+            return support.fail_path("无法创建构建目录: ", dir)
+        }
+        k += 1
+    }
+    return 0
+}
+
+// mb_restore_front_file：将当前解析器切换到项目索引时保存的只读快照。
+pub fn mb_restore_front_file(path *char, fi int) int {
+    if (support.ctl().front_cache == 0 || proj.ctx().files[fi].source == 0
+        || proj.ctx().files[fi].tokens == 0) {
+        return support.fail("内部错误：模块 worker 缺少前端文件快照")
+    }
+    support.src_ctx().data = proj.ctx().files[fi].source
+    support.src_ctx().length = proj.ctx().files[fi].source_len
+    token.ctx().tokens = proj.ctx().files[fi].tokens
+    token.ctx().count = proj.ctx().files[fi].token_n
+    token.ctx().cap = proj.ctx().files[fi].token_n
+    ast.store().file_decls = proj.ctx().files[fi].decls
+    ast.store().file_decl_n = proj.ctx().files[fi].decl_n
+    ast.store().file_decl_i = -1
+    ast.store().file_indexed = 1
+    support.session().active_file = fi
+    token.ctx().pos = 0
+    if (support.set_source_path(path) != 0) {
+        return -1
+    }
+    support.diag().spec = 0
+    parse.ctx().ctx_block = 0
+    return 0
+}
+
+// mb_emit_module：子进程入口——编译一个模块为按文件汇编 + 接口；check-only
+// 复用语义遍历并只写本轮依赖需要的临时接口。
+// prov_root：模块提供方项目根（在其中查找模块）；main_root：主项目根
+// （构建目录基准，接口路径与父进程一致）；out_dir：按文件汇编目录
+// <build>/asm/<tag>（RS3b）。
+pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
+    main_off int, main_len int, out_dir *char, ir_cache_salt u64,
+    extra *char) int {
+    support.ctl().front_cache = 1
+    support.session().ast_capture = 0
+    support.ctl().ir_cache_salt = ir_cache_salt
+    if (load_stdlib() != 0) {
+        return -1
+    }
+    let pj int = load_project(prov_off, prov_len)
+    if (pj < 0) {
+        return -1
+    }
+    // --emit-module 的独立子进程（无 fork 宿主）必须自己装载主项目并重建拓扑序：
+    // 依赖排序与接口路径都按主项目的 order/构建目录算；fork 路径继承父进程快照，
+    // 这两步是 Windows 的 re-exec 路径独有的。
+    let main_proj int = load_project(main_off, main_len)
+    if (main_proj < 0) {
+        return -1
+    }
+    if (support.session().test_mode != 0) {
+        // 测试模式：测试项目就是主项目；父进程已清掉入口标记，子进程同样要清，
+        // 否则 runner 的 main 会被加模块后缀。
+        let ctx *proj.ProjectCtx = proj.ctx()
+        ctx.test_project = main_proj
+        let ci int = 0
+        for ci < ctx.projs[main_proj].mod_n {
+            ctx.mods[ctx.projs[main_proj].mods[ci]].is_entry = 0
+            ci += 1
+        }
+    }
+    if (extra != 0) {
+        // 测试 runner 由 testkit 生成在项目 tmp/ 下（不在 source 根扫描范围），
+        // 独立子进程必须显式把它加进索引，否则「模块不在索引中」。
+        if (pj_index_file(extra, pj) != 0) { return -1 }
+    }
+    if (pj_bind_imports() != 0) {
+        return -1
+    }
+    let rootmod int = pj_entry_mod(main_proj)
+    let order_n int = rootmod >= 0 ? pj_topo(rootmod) : pj_topo_multi(main_proj)
+    if (order_n < 0) {
+        return -1
+    }
+    let m int = proj.module_in_project(pj, mod_off, mod_len)
+    if (m < 0) {
+        return support.fail("内部错误：模块不在索引中")
+    }
+    // 测试 runner 是入口模块：testkit 在父进程里置 is_entry=1，独立子进程重新
+    // 装载索引后必须做同样标记，否则零 CRT 入口桩不发射。
+    if (extra != 0 && support.session().test_mode != 0) {
+        proj.ctx().mods[m].is_entry = 1
+    }
+    return mb_emit_indexed_module(m, main_off, main_len, out_dir, ir_cache_salt)
+}
+
+@[extern] fn getppid() int
+
+// mb_worker_parent_set：子进程入口记录父 pid（fork 后、开始编译前调用一次）。
+pub fn mb_worker_parent_set() void { mb_worker_parent = getppid() }
+
+pub fn load_project(root_off int, root_len int) int {
+    let c_off int = 0
+    let c_len int = 0
+    // 依赖环 / 重复装载
+    let known int = proj.find_project_root(root_off, root_len)
+    if (known >= 0) {
+        if (proj.ctx().state[known] == 1) {
+            proj.diag(root_off, 0, "依赖环：项目正在装载中")
+            return -1
+        }
+        return known
+    }
+    let me int = proj.add_project(root_off, root_len)
+    if (me < 0) {
+        return -1
+    }
+    let is_root int = proj.is_root_project(root_off, root_len)
+    // p_state 平行扩容
+    let nst *int = malloc((proj.ctx().proj_cap * sizeof(int)).to_type(u64)).to_type(*int)
+    if (nst == 0) {
+        return support.fail("内存分配失败")
+    }
+    if (proj.ctx().proj_n > 0) {
+        memcpy(nst, proj.ctx().state, ((proj.ctx().proj_n - 1) * sizeof(int)).to_type(u64))
+    }
+    free(proj.ctx().state)
+    proj.ctx().state = nst
+    proj.ctx().state[me] = 1
+    // 读清单
+    let mpath [1024]u8
+    let mn int = 0
+    mn = support.append_str(mpath, mn, proj.pool_str(root_off))
+    mn = support.append_str(mpath, mn, "/project.toml")
+    mpath[mn] = 0
+    if (support.read_source(support.arr_cstr(mpath)) != 0) {
+        return -1
+    }
+    t_src = support.src_ctx().data
+    t_len = support.src_ctx().length
+    t_pos = 0
+    t_line = 1
+    t_file = support.arr_cstr(mpath)
+    toml_sec_n = 0
+    if (tml_parse() != 0) {
+        return -1
+    }
+    // schema：[project]
+    let sec int = toml_find_sec("project")
+    if (sec < 0) {
+        return proj.diag(root_off, 1, "缺少 [project] 节")
+    }
+    let so int = 0
+    let sl int = 0
+    let got int = toml_sec_str(sec, "name", &so, &sl)
+    if (got < 0) {
+        return -1
+    }
+    if (got == 0 || sl == 0) {
+        return proj.diag(root_off, toml_secs[sec].line, "project.name 必填且非空")
+    }
+    // name 必须是标识符：产物名与接口 tag 都由它派生，不允许分隔符
+    let nb0 u8 = support.pool_ctx().data[so]
+    if (!((nb0 >= 'a' && nb0 <= 'z') || (nb0 >= 'A' && nb0 <= 'Z') || nb0 == '_')) {
+        return proj.diag(root_off, toml_secs[sec].line,
+            "project.name 必须是标识符（字母或下划线开头）")
+    }
+    let nk int = 0
+    for nk < sl {
+        let cb u8 = support.pool_ctx().data[so + nk]
+        if (!((cb >= 'a' && cb <= 'z') || (cb >= 'A' && cb <= 'Z')
+            || (cb >= '0' && cb <= '9') || cb == '_')) {
+            return proj.diag(root_off, toml_secs[sec].line,
+                "project.name 只能是字母、数字与下划线")
+        }
+        nk += 1
+    }
+    proj.ctx().projs[me].name_off = so
+    proj.ctx().projs[me].name_len = sl
+    // source（默认 src）
+    got = toml_sec_str(sec, "source", &so, &sl)
+    if (got < 0) {
+        return -1
+    }
+    let srcname *char = "src"
+    if (got == 1) {
+        srcname = proj.pool_str(so)
+    }
+    if (proj.canon(root_off, root_len, srcname, &c_off, &c_len) != 0) {
+        return -1
+    }
+    proj.ctx().projs[me].src_off = c_off
+    proj.ctx().projs[me].src_len = c_len
+    // version（可选，仅供 yh version 展示）
+    got = toml_sec_str(sec, "version", &so, &sl)
+    if (got < 0) {
+        return -1
+    }
+    if (got == 1) {
+        proj.ctx().projs[me].ver_off = so
+        proj.ctx().projs[me].ver_len = sl
+    }
+    // [project].os/arch：必填；host 表示跟随编译器宿主平台。
+    if (pl_load_project_target(me, sec) != 0) { return -1 }
+    // [project] 未知字段检查
+    let vi int = 0
+    for vi < toml_secs[sec].val_n {
+        let vo int = toml_secs[sec].vals[vi].key_off
+        let vl int = toml_secs[sec].vals[vi].key_len
+        let okf int = 0
+        if (vl == 4 && support.pool_ctx().data[vo] == 'n' && support.pool_ctx().data[vo + 1] == 'a'
+            && support.pool_ctx().data[vo + 2] == 'm' && support.pool_ctx().data[vo + 3] == 'e') { okf = 1 }
+        if (vl == 7 && support.pool_ctx().data[vo] == 'v' && support.pool_ctx().data[vo + 1] == 'e'
+            && support.pool_ctx().data[vo + 2] == 'r' && support.pool_ctx().data[vo + 3] == 's'
+            && support.pool_ctx().data[vo + 4] == 'i' && support.pool_ctx().data[vo + 5] == 'o'
+            && support.pool_ctx().data[vo + 6] == 'n') { okf = 1 }
+        if (vl == 6 && support.pool_ctx().data[vo] == 's' && support.pool_ctx().data[vo + 1] == 'o'
+            && support.pool_ctx().data[vo + 2] == 'u' && support.pool_ctx().data[vo + 3] == 'r'
+            && support.pool_ctx().data[vo + 4] == 'c' && support.pool_ctx().data[vo + 5] == 'e') { okf = 1 }
+        if (vl == 6 && support.pool_ctx().data[vo] == 'a' && support.pool_ctx().data[vo + 1] == 'u'
+            && support.pool_ctx().data[vo + 2] == 't' && support.pool_ctx().data[vo + 3] == 'h'
+            && support.pool_ctx().data[vo + 4] == 'o' && support.pool_ctx().data[vo + 5] == 'r') { okf = 1 }
+        if (vl == 2 && support.pool_ctx().data[vo] == 'o'
+            && support.pool_ctx().data[vo + 1] == 's') { okf = 1 }
+        if (vl == 4 && support.pool_ctx().data[vo] == 'a'
+            && support.pool_ctx().data[vo + 1] == 'r'
+            && support.pool_ctx().data[vo + 2] == 'c'
+            && support.pool_ctx().data[vo + 3] == 'h') { okf = 1 }
+        if (okf == 0) {
+            let buf [64]u8
+            let bn int = 0
+            bn = support.append_str(buf, bn, "project 未知字段: ")
+            let k int = 0
+            for k < vl {
+                buf[bn] = support.pool_ctx().data[vo + k]
+                bn += 1
+                k += 1
+            }
+            let mo int = support.tml_intern_str(buf, 0, bn)
+            if (mo < 0) {
+                return -1
+            }
+            return proj.diag(root_off, toml_secs[sec].vals[vi].line, support.np_cstr(mo))
+        }
+        vi += 1
+    }
+    if (pj_load_c_config(me, toml_find_sec("c")) != 0) { return -1 }
+    // [env] 是 [link] 里 ${NAME} 的默认值来源，必须先于链接配置快照；
+    // 同时必须在 [dependencies] 递归装载之前：子项目会重置 toml_secs。
+    if (pj_load_env_config(me, toml_find_sec("env")) != 0) { return -1 }
+    if (pl_load_link_config(me, is_root) != 0) { return -1 }
+    if (is_root != 0 && pl_apply_project_target(me) != 0) { return -1 }
+    // [dependencies]：先整表快照——递归装载会重置 toml_secs（全局解析区）
+    let dsec int = toml_find_sec("dependencies")
+    let snap_key_off [64]int
+    let snap_key_len [64]int
+    let snap_path_off [64]int
+    let snap_line [64]int
+    let snap_n int = 0
+    if (dsec >= 0) {
+        for snap_n < toml_secs[dsec].val_n && snap_n < 64 {
+            snap_key_off[snap_n] = toml_secs[dsec].vals[snap_n].key_off
+            snap_key_len[snap_n] = toml_secs[dsec].vals[snap_n].key_len
+            snap_path_off[snap_n] = toml_secs[dsec].vals[snap_n].path_off
+            snap_line[snap_n] = toml_secs[dsec].vals[snap_n].line
+            snap_n += 1
+        }
+    }
+    if (dsec >= 0) {
+        let di int = 0
+            for di < snap_n {
+                    // 快照依赖条目：递归装载会重置 toml_secs（全局解析区）
+            let key_off int = snap_key_off[di]
+            let key_len int = snap_key_len[di]
+            let dep_line int = snap_line[di]
+            if (snap_path_off[di] < 0) {
+                return proj.diag(root_off, dep_line,
+                    "依赖必须是 { path = \"...\" } 表")
+            }
+            let path_off int = snap_path_off[di]
+            // 依赖项目根 = 规范化(root + path)
+            if (proj.canon(root_off, root_len, proj.pool_str(path_off), &c_off, &c_len) != 0) {
+                return -1
+            }
+            let dep int = load_project(c_off, c_len)
+            if (dep < 0) {
+                return -1
+            }
+            // 登记依赖
+            if (proj.ctx().projs[me].dep_n == proj.ctx().projs[me].dep_cap) {
+                let ncap int = proj.ctx().projs[me].dep_cap * 2
+                if (ncap == 0) {
+                    ncap = 8
+                }
+                let nd *proj.PDep = malloc((ncap * sizeof(proj.PDep)).to_type(u64)).to_type(*proj.PDep)
+                if (nd == 0) {
+                    return support.fail("内存分配失败")
+                }
+                if (proj.ctx().projs[me].dep_n > 0) {
+                    memcpy(nd, proj.ctx().projs[me].deps, (proj.ctx().projs[me].dep_n * sizeof(proj.PDep)).to_type(u64))
+                }
+                free(proj.ctx().projs[me].deps)
+                proj.ctx().projs[me].deps = nd
+                proj.ctx().projs[me].dep_cap = ncap
+            }
+            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].key_off = key_off
+            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].key_len = key_len
+            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].proj = dep
+            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].line = dep_line
+            proj.ctx().projs[me].dep_n += 1
+            di += 1
+        }
+    }
+    // 扫描源码根
+    if (pj_scan_source(proj.ctx().projs[me].src_off, proj.ctx().projs[me].src_len, me) != 0) {
+        return -1
+    }
+    // 测试专用导入分类：必须在 pj_bind_imports 之前完成，生产构建据此跳过
+    // 只在 test 体内使用的依赖；测试模式仍绑定全部导入。
+    if (pj_classify_test_imports(me) != 0) {
+        return -1
+    }
+    // 入口模块：模块名为 main 的那个（模块名与目录名无关；同名模块跨目录
+    // 合并为一个，故至多命中一次）
+    let mi int = 0
+    for mi < proj.ctx().projs[me].mod_n {
+        let um int = proj.ctx().projs[me].mods[mi]
+        if (proj.ctx().mods[um].name_len == 4
+            && support.pool_ctx().data[proj.ctx().mods[um].name_off] == 'm'
+            && support.pool_ctx().data[proj.ctx().mods[um].name_off + 1] == 'a'
+            && support.pool_ctx().data[proj.ctx().mods[um].name_off + 2] == 'i'
+            && support.pool_ctx().data[proj.ctx().mods[um].name_off + 3] == 'n') {
+            proj.ctx().mods[um].is_entry = 1
+            break
+        }
+        mi += 1
+    }
+    proj.ctx().state[me] = 2
+    return me
+}
+
+pub fn pj_index_file(path *char, pj int) int {
+    if (support.read_source(path) != 0) {
+        return -1
+    }
+    token.ctx().count = 0
+    token.ctx().pos = 0
+    support.diag().errors = 0
+    if (lex.lex_all() != 0) {
+        return -1
+    }
+    parse.mod_reset_file()
+    if (parse.mod_parse_head() != 0) {
+        return -1
+    }
+    if (support.fs().has_module == 0 && proj.ctx().scan_file_off >= 0
+        && pj_scan_is_target(path) != 0) {
+        // 单文件测试：文件可以省略 module 头，用文件名派生一个模块名。
+        if (pj_synth_module_name(path) != 0) { return -1 }
+    }
+    if (support.fs().has_module == 0) {
+        // 源码根内的文件必须声明模块（旧单文件形态不属于项目源码根）
+        support.diag().errors += 1
+        let buf [256]u8
+        let n int = 0
+        n = support.append_str(buf, n, support.src_ctx().path)
+        n = support.append_str(buf, n, ":1:1: 错误: 项目源码内的文件必须以 module 声明开头\n")
+        support.write_all(2, buf, n)
+        return -1
+    }
+    // 路径先 intern：模块身份键要目录（(项目, 名字, 目录) 三元组）。
+    let plen int = 0
+    for path[plen] != 0 {
+        plen += 1
+    }
+    let poff int = support.tml_intern_str(path.to_type(*u8), 0, plen)
+    if (poff < 0) {
+        return -1
+    }
+    let dlen int = pj_dir_prefix_len(poff, plen)
+    // 目录字节先拷到栈缓冲再 intern：tml_intern_str 扩容时会 free 旧池，
+    // 直接传池内指针会读到已释放内存。
+    if (dlen >= 900) {
+        return support.fail("源文件目录路径过长")
+    }
+    let dbuf [900]u8
+    let dci int = 0
+    for dci < dlen {
+        dbuf[dci] = support.pool_ctx().data[poff + dci]
+        dci += 1
+    }
+    let dir_off int = support.tml_intern_str(&dbuf[0], 0, dlen)
+    if (dir_off < 0) {
+        return -1
+    }
+    // 查找/创建模块：同名不同目录是两个模块（不再静默合并）
+    let mod int = proj.module_at_dir(pj, support.fs().name_off, support.fs().name_len,
+        dir_off, dlen)
+    if (mod < 0) {
+        mod = proj.add_module(support.fs().name_off, support.fs().name_len, pj, dir_off, dlen)
+        if (mod < 0) {
+            return -1
+        }
+        if (proj.add_project_module(pj, mod) != 0) {
+            return -1
+        }
+    }
+    let fidx int = proj.add_file(poff, plen, mod)
+    if (fidx < 0) {
+        return -1
+    }
+    if (support.ctl().front_cache != 0) {
+        let toks *token.Tok = malloc((token.ctx().count * sizeof(token.Tok)).to_type(u64)).to_type(*token.Tok)
+        if (toks == 0) {
+            return support.fail("内存分配失败")
+        }
+        memcpy(toks, token.ctx().tokens, (token.ctx().count * sizeof(token.Tok)).to_type(u64))
+        proj.ctx().files[fidx].source = support.src_ctx().data
+        proj.ctx().files[fidx].source_len = support.src_ctx().length
+        proj.ctx().files[fidx].tokens = toks
+        proj.ctx().files[fidx].token_n = token.ctx().count
+    }
+    if (proj.add_module_file(mod, fidx) != 0) {
+        return -1
+    }
+    // 目录唯一模块检查：同目录内只允许一个模块（用户规划）
+    let di int = 0
+    for di < proj.ctx().file_n {
+        let dn int = proj.ctx().files[di].path_len
+        let dl int = pj_dir_prefix_len(proj.ctx().files[di].path_off, dn)
+        let nl int = pj_dir_prefix_len(poff, plen)
+        if (dl == nl && pj_same_np(proj.ctx().files[di].path_off, dl, poff, dl)
+            && proj.ctx().files[di].mod != mod) {
+            let buf [512]u8
+            let bn int = 0
+            bn = support.append_str(buf, bn, "同目录存在另一个模块（每目录一个模块）: ")
+            bn = support.append_np(buf, bn, proj.ctx().mods[mod].name_off, proj.ctx().mods[mod].name_len)
+            bn = support.append_str(buf, bn, " 与 ")
+            bn = support.append_np(buf, bn, proj.ctx().mods[proj.ctx().files[di].mod].name_off,
+                proj.ctx().mods[proj.ctx().files[di].mod].name_len)
+            let mo int = support.tml_intern_str(buf, 0, bn)
+            if (mo < 0) {
+                return -1
+            }
+            support.diag().errors += 1
+            let out [600]u8
+            let on int = 0
+            on = support.append_str(out, on, support.np_cstr(mo))
+            on = support.append_byte(out, on, '\n')
+            support.write_all(2, out, on)
+            return -1
+        }
+        di += 1
+    }
+    // 导入记录
+    let ii int = 0
+    for ii < support.fs().import_n {
+        if (proj.add_import(fidx, support.fs().imports[ii].name_off, support.fs().imports[ii].name_len,
+            support.fs().imports[ii].proj_key_off, support.fs().imports[ii].proj_key_len,
+            support.fs().imports[ii].path_off, support.fs().imports[ii].path_len,
+            support.fs().imports[ii].alias_off, support.fs().imports[ii].alias_len,
+            support.fs().imports[ii].line, support.fs().imports[ii].col) != 0) {
+            return -1
+        }
+        ii += 1
+    }
+    return 0
+}
+
+// pl_group_name_ok：--link 组名与清单裸键使用同一字符集。
+pub fn pl_group_name_ok(off int, n int) int {
+    if (n <= 0 || n > 128) { return 0 }
+    let i int = 0
+    for i < n {
+        let b u8 = support.pool_ctx().data[off + i]
+        if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+            || (b >= '0' && b <= '9') || b == '_' || b == '-')) {
+            return 0
+        }
+        i += 1
+    }
+    return 1
+}
+
+// pj_entry_mod：项目的入口模块下标（模块名 main，load_project 已标记
+// is_entry 并保证至多一个）；无 main 模块即库项目，返回 -1。
+pub fn pj_entry_mod(pj int) int {
+    let i int = 0
+    for i < proj.ctx().projs[pj].mod_n {
+        let m int = proj.ctx().projs[pj].mods[i]
+        if (proj.ctx().mods[m].is_entry != 0) {
+            return m
+        }
+        i += 1
+    }
+    return -1
+}
+
+pub fn pj_bind_imports() int {
+    let i int = 0
+    for i < proj.ctx().imp_n {
+        let f int = proj.ctx().imp_file[i]
+        let pj int = proj.ctx().mods[proj.ctx().files[f].mod].proj
+        // 生产构建跳过 test 专用导入；测试模式只对目标项目绑定它们。
+        // 依赖/标准库的测试与测试专用依赖不进入本轮测试图。
+        if (proj.ctx().imp_test_only[i] != 0
+            && (support.session().test_mode == 0 || pj != proj.ctx().test_project)) {
+            i += 1
+            continue
+        }
+        let off int = proj.ctx().imp_off[i]
+        let olen int = proj.ctx().imp_len[i]
+        let path_off int = proj.ctx().imp_path_off[i]
+        let path_len int = proj.ctx().imp_path_len[i]
+        // 点分导入（path 比末段长）：两段先试跨项目依赖键，未命中再按本项目
+        // 目录路径解析（A.B.C → 目录 <source>/A/B/C，末段是模块名）。
+        if (path_len > olen) {
+            let koff int = proj.ctx().imp_key_off[i]
+            let klen int = proj.ctx().imp_key_len[i]
+            let dk int = -1
+            let di int = 0
+            if (koff >= 0) {
+                for di < proj.ctx().projs[pj].dep_n {
+                    if (pj_same_np(proj.ctx().projs[pj].deps[di].key_off,
+                        proj.ctx().projs[pj].deps[di].key_len, koff, klen) != 0) {
+                        dk = proj.ctx().projs[pj].deps[di].proj
+                        break
+                    }
+                    di += 1
+                }
+            }
+            if (dk >= 0) {
+                let km int = proj.module_in_project(dk, off, olen)
+                if (km < 0 || proj.ctx().mods[km].is_entry != 0) {
+                    return imp_msg(i, "依赖项目没有可导入的该模块: ", off, olen)
+                }
+                proj.ctx().imp_mod[i] = km
+                i += 1
+                continue
+            }
+            let dir_off int = -1
+            let dir_len int = 0
+            if (pj_import_dir(pj, path_off, path_len, &dir_off, &dir_len) != 0) {
+                return -1
+            }
+            let dm int = proj.module_at_dir(pj, off, olen, dir_off, dir_len)
+            if (dm < 0) {
+                return imp_msg(i, "模块不存在（路径导入与目录不匹配）: ", path_off, path_len)
+            }
+            if (proj.ctx().mods[dm].is_entry != 0) {
+                return imp_msg(i, "入口模块不可作为库导入: ", off, olen)
+            }
+            proj.ctx().imp_mod[i] = dm
+            i += 1
+            continue
+        }
+        // 单段：本项目按名字查；同一项目内多个目录同名 = 歧义（要改用路径导入）。
+        let cnt int = proj.module_count_in_project(pj, off, olen)
+        if (cnt > 1) {
+            return imp_msg(i, "模块名歧义（本项目多个目录声明同名模块，请用路径导入区分）: ", off, olen)
+        }
+        // 第 1 层：本项目
+        let m int = proj.module_in_project(pj, off, olen)
+        if (m >= 0) {
+            if (proj.ctx().mods[m].is_entry != 0) {
+                return imp_msg(i, "入口模块不可作为库导入: ", off, olen)
+            }
+            proj.ctx().imp_mod[i] = m
+            i += 1
+            continue
+        }
+        // 第 2 层：标准库
+        if (proj.ctx().stdlib >= 0) {
+            m = proj.module_in_project(proj.ctx().stdlib, off, olen)
+            if (m >= 0) {
+                proj.ctx().imp_mod[i] = m
+                i += 1
+                continue
+            }
+        }
+        // 第 3 层：直接依赖（排除其入口模块；多个候选 = 歧义）
+        let found int = -1
+        let count int = 0
+        let di int = 0
+        for di < proj.ctx().projs[pj].dep_n {
+            let dp int = proj.ctx().projs[pj].deps[di].proj
+            let cm int = proj.module_in_project(dp, off, olen)
+            if (cm >= 0 && proj.ctx().mods[cm].is_entry == 0) {
+                count += 1
+                found = cm
+            }
+            di += 1
+        }
+        if (count > 1) {
+            let buf3 [256]u8
+            let n3 int = 0
+            n3 = support.append_str(buf3, n3, "模块名歧义（多个直接依赖提供）: ")
+            n3 = support.append_np(buf3, n3, off, olen)
+            let mo3 int = support.tml_intern_str(buf3, 0, n3)
+            if (mo3 < 0) {
+                return -1
+            }
+            return imp_diag(i, support.np_cstr(mo3))
+        }
+        if (count == 1) {
+            proj.ctx().imp_mod[i] = found
+            i += 1
+            continue
+        }
+        let buf2 [192]u8
+        let n2 int = 0
+        n2 = support.append_str(buf2, n2, "模块不存在: ")
+        n2 = support.append_np(buf2, n2, off, olen)
+        n2 = support.append_str(buf2, n2, "（已搜索 本项目 → 标准库 → 直接依赖）")
+        let mo2 int = support.tml_intern_str(buf2, 0, n2)
+        if (mo2 < 0) {
+            return -1
+        }
+        return imp_diag(i, support.np_cstr(mo2))
+    }
+    return 0
+}
+
+pub fn pj_dfs(m int) int {
+    if (proj.ctx().mark[m] == 2) {
+        return 0
+    }
+    if (proj.ctx().mark[m] == 1) {
+        // 环：路径栈中从 m 开始的链
+        let buf [512]u8
+        let n int = 0
+        n = support.append_str(buf, n, "模块导入环: ")
+        let start int = 0
+        for start < pj_pathstk_n {
+            if (pj_pathstk[start] == m) {
+                break
+            }
+            start += 1
+        }
+        let k int = start
+        for k < pj_pathstk_n {
+            n = support.append_np(buf, n, proj.ctx().mods[pj_pathstk[k]].name_off, proj.ctx().mods[pj_pathstk[k]].name_len)
+            n = support.append_str(buf, n, " -> ")
+            k += 1
+        }
+        n = support.append_np(buf, n, proj.ctx().mods[m].name_off, proj.ctx().mods[m].name_len)
+        let mo int = support.tml_intern_str(buf, 0, n)
+        if (mo < 0) {
+            return -1
+        }
+        support.diag().errors += 1
+        let out [600]u8
+        let on int = 0
+        on = support.append_str(out, on, "yh: ")
+        on = support.append_np(out, on, mo, n)
+        on = support.append_byte(out, on, '\n')
+        support.write_all(2, out, on)
+        return -1
+    }
+    proj.ctx().mark[m] = 1
+    pj_pathstk[pj_pathstk_n] = m
+    pj_pathstk_n += 1
+    let e int = 0
+    for 1 {
+        let target int = pj_mod_edge(m, e)
+        if (target < 0) {
+            break
+        }
+        if (pj_dfs(target) != 0) {
+            return -1
+        }
+        e += 1
+    }
+    pj_pathstk_n -= 1
+    proj.ctx().mark[m] = 2
+    proj.ctx().order[proj.ctx().order_n] = m
+    proj.ctx().order_n += 1
+    return 0
+}
+
+pub fn pj_topo(root int) int {
+    // 标记数组按需扩容
+    if (proj.ctx().mod_n > 0) {
+        let nm *int = malloc((proj.ctx().mod_n * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nm == 0) {
+            support.fail("内存分配失败")
+            return -1
+        }
+        if (proj.ctx().mark != 0) {
+            free(proj.ctx().mark)
+        }
+        proj.ctx().mark = nm
+        let ord *int = malloc((proj.ctx().mod_n * sizeof(int)).to_type(u64)).to_type(*int)
+        if (ord == 0) {
+            return support.fail("内存分配失败")
+        }
+        if (proj.ctx().order != 0) {
+            free(proj.ctx().order)
+        }
+        proj.ctx().order = ord
+        let stk *int = malloc((proj.ctx().mod_n * sizeof(int)).to_type(u64)).to_type(*int)
+        if (stk == 0) {
+            return support.fail("内存分配失败")
+        }
+        if (pj_pathstk != 0) {
+            free(pj_pathstk)
+        }
+        pj_pathstk = stk
+    }
+    let i int = 0
+    for i < proj.ctx().mod_n {
+        proj.ctx().mark[i] = 0
+        i += 1
+    }
+    proj.ctx().order_n = 0
+    pj_pathstk_n = 0
+    if (pj_dfs(root) != 0) {
+        return -1
+    }
+    return proj.ctx().order_n
+}
+
+pub fn pj_mod_suffix(pj int, mod int, off *int, olen *int) int {
+    let tmp [512]u8
+    let n int = 0
+    n = support.append_byte(tmp, n, '_')
+    n = support.append_byte(tmp, n, '_')
+    let i int = 0
+    for i < proj.ctx().projs[pj].name_len {
+        let b u8 = support.pool_ctx().data[proj.ctx().projs[pj].name_off + i]
+        if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+            || (b >= '0' && b <= '9') || b == '_')) {
+            b = '_'
+        }
+        tmp[n] = b
+        n += 1
+        i += 1
+    }
+    n = support.append_byte(tmp, n, '_')
+    n = support.append_byte(tmp, n, '_')
+    i = 0
+    for i < proj.ctx().mods[mod].name_len {
+        let b2 u8 = support.pool_ctx().data[proj.ctx().mods[mod].name_off + i]
+        if (!((b2 >= 'a' && b2 <= 'z') || (b2 >= 'A' && b2 <= 'Z')
+            || (b2 >= '0' && b2 <= '9') || b2 == '_')) {
+            b2 = '_'
+        }
+        tmp[n] = b2
+        n += 1
+        i += 1
+    }
+    // 同名模块（同项目多个目录）：追加目录指纹，避免两个模块的符号名相撞。
+    if (proj.mod_dir_dup(mod) != 0) {
+        n = support.append_byte(tmp, n, '_')
+        n = proj.append_dir_fp(&tmp[0], n, mod)
+    }
+    // 再加一个 '_' 结尾：符号形如 name__proj__mod_
+    n = support.append_byte(tmp, n, '_')
+    tmp[n] = 0
+    off[0] = support.tml_intern_str(tmp, 0, n)
+    olen[0] = n
+    if (off[0] < 0) {
+        return -1
+    }
+    return 0
+}
+
+pub fn pj_out_np(off int, olen int) void {
+    support.write_all(1, support.pool_ctx().data + off, olen)
+}
+
+pub fn pj_out_s(s *char) void {
+    let n int = 0
+    for s[n] != 0 {
+        n += 1
+    }
+    support.write_all(1, s.to_type(*u8), n)
+}
+
+// pro_find_root：从当前目录向上最多 32 层找 project.toml，结果写入
+// out_len 写出根路径长度。quiet=1 时找不到不报诊断（usage 顺手显示版本用）。
+pub fn pro_find_root(quiet int, out_len *int) int {
+    let depth int = 0
+    for depth <= 32 {
+        // 组装候选路径：depth 个 "../" + "project.toml"
+        let cand [512]u8
+        let n int = 0
+        let rootb [512]u8
+        let rn int = 0
+        let k int = 0
+        for k < depth {
+            rootb[rn] = '.'
+            rootb[rn + 1] = '.'
+            rootb[rn + 2] = '/'
+            rn += 3
+            k += 1
+        }
+        if (rn == 0) {
+            rootb[0] = '.'
+            rn = 1
+        }
+        rootb[rn] = 0
+        n = support.append_str(cand, n, support.arr_cstr(rootb))
+        n = support.append_str(cand, n, "/project.toml")
+        cand[n] = 0
+        if (proj.file_exists(support.arr_cstr(cand)) != 0) {
+            // 根直接入池（相对前缀本身已规范）
+            let off int = support.tml_intern_str(rootb, 0, rn)
+            if (off < 0) {
+                return -1
+            }
+            out_len[0] = rn
+            return off
+        }
+        depth += 1
+    }
+    if (quiet == 0) {
+        support.fail("未找到 project.toml（自当前目录向上 32 层）")
+    }
+    return -1
+}
+
+// unused_function_report：检查给定文件集合里声明的私有函数是否被引用。
+// files 是模块的文件号数组；sym_base 是本模块 pass1 起点的符号下标
+// （单文件编译传 0）。有未使用函数时逐条报错并返回 -1，否则返回 0。
+pub fn unused_function_report(files *int, file_n int, sym_base int) int {
+    let room int = support.ms().sym_n - sym_base
+    if (files == 0 || file_n <= 0 || room <= 0) { return 0 }
+    let cands *UfCand = malloc((room * sizeof(UfCand)).to_type(u64)).to_type(*UfCand)
+    let used *u8 = malloc(room.to_type(u64)).to_type(*u8)
+    let mask *u8 = malloc(256.to_type(u64)).to_type(*u8)
+    if (cands == 0 || used == 0 || mask == 0) {
+        if (cands != 0) { free(cands.to_type(*void)) }
+        if (used != 0) { free(used.to_type(*void)) }
+        if (mask != 0) { free(mask.to_type(*void)) }
+        return support.fail("内存分配失败")
+    }
+    let mi int = 0
+    for mi < 256 {
+        mask[mi] = 0
+        mi += 1
+    }
+    let cand_n int = uf_collect(files, file_n, sym_base, cands, used, mask)
+    if (cand_n < 0) {
+        free(cands.to_type(*void)); free(used.to_type(*void))
+        free(mask.to_type(*void))
+        return -1
+    }
+    let remaining int = cand_n
+    let fi_i int = 0
+    for fi_i < file_n {
+        if (remaining == 0) { break }
+        remaining = uf_scan_file(files[fi_i], cands, used, mask, cand_n, remaining)
+        fi_i += 1
+    }
+    if (remaining != 0) {
+        let ri int = 0
+        for ri < cand_n {
+            if (used[ri] == 0) {
+                support.set_source_path(proj.pool_str(proj.ctx().files[cands[ri].file_id].path_off))
+                support.err_lc(cands[ri].line, cands[ri].col,
+                    "函数未使用（本模块没有任何引用；请删除或改为 pub）")
+            }
+            ri += 1
+        }
+    }
+    free(cands.to_type(*void))
+    free(used.to_type(*void))
+    free(mask.to_type(*void))
+    if (remaining != 0) { return -1 }
+    return 0
+}
+
+// Windows 目录枚举的 Win32 入口（仅 Windows 平台实现调用；声明共享）。
+@[extern] fn FindFirstFileA(pattern *char, data *u8) i64
+@[extern] fn FindNextFileA(handle i64, data *u8) i32
+@[extern] fn FindClose(handle i64) i32

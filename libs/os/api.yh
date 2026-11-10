@@ -1,0 +1,459 @@
+module os
+
+import sys
+// ============================================================================
+// api.yh —— os 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// ErrorKind 是 os 对外稳定的错误分类。
+// 成员名带 error_ 前缀，避免与同模块其他枚举成员冲突；跨模块引用形如
+// os.error_not_found。具体分类不随目标平台错误号变化。
+pub enum ErrorKind {
+    error_none
+    error_not_found
+    error_already_exists
+    error_permission_denied
+    error_interrupted
+    error_invalid_argument
+    error_unsupported
+    error_other
+    // 网络分类（2026-10-24，net 与 http 共用）。追加在末尾保持既有取值不变；
+    // 具体映射见 errors.yh 的 error_kind_for。
+    error_connection_refused
+    error_connection_reset
+    error_not_connected
+    error_timed_out
+    error_address_in_use
+    error_host_unreachable
+    error_network_unreachable
+}
+
+// Error 描述一次 os 操作的失败；kind 为稳定分类，native_code 为目标平台
+// 正错误号（无内核错误来源时为 0）。不得用 native_code == 0 判断成功，
+// 成功与失败必须由调用方查看操作结果或 kind 判断。
+pub struct Error {
+    kind ErrorKind
+    native_code int
+}
+
+// FdResult 是打开类操作的结果：成功时 fd >= 0 且 error 为 error_none，
+// 失败时 fd 固定为 -1；成功 fd 的所有权转移给调用方，必须由调用方关闭。
+pub struct FdResult {
+    fd int
+    error Error
+}
+
+// IoResult 是单次读写的结果：成功时 count 为实际字节数且 error 为
+// error_none；单次调用失败时 count 为 0。EOF 表现为 count == 0 且没有错误。
+pub struct IoResult {
+    count u64
+    error Error
+}
+
+// AccessKind 是打开文件时的访问模式。
+pub enum AccessKind {
+    access_read_only
+    access_write_only
+    access_read_write
+}
+
+// OpenOptions 是 os 自有打开选项，不使用宿主 open 标志数值。
+// access 选择读写模式；create/truncate/exclusive/append 对应各自语义；
+// mode 只在创建时使用，调用方应通过 read_options/write_options 初始化，
+// 不要依赖结构体零值猜测默认行为。
+pub struct OpenOptions {
+    access AccessKind
+    create bool
+    truncate bool
+    exclusive bool
+    append bool
+    mode u32
+}
+
+// DirKind 是目录条目的类型分类；dir_unknown 对应 DT_UNKNOWN 或本库尚不能
+// 确认的类型，调用方不得把它当作普通文件。
+pub enum DirKind {
+    dir_unknown
+    dir_file
+    dir_directory
+}
+
+// DirEntry 是目录条目视图：name 指向读取器缓冲区中的名称字节，name_len 为
+// 不含结尾 NUL 的长度。视图只保证到下一次 next_entry 或 close_dir；需要长期
+// 保存时由调用方复制 name_len 个字节。语言暂不支持从裸指针构造 []u8，因此
+// 这里使用指针 + 长度，而不是切片字段。
+pub struct DirEntry {
+    name *u8
+    name_len u64
+    kind DirKind
+}
+
+// EnvResult 是环境查询结果：found 为 1 时 value 指向第一个 '=' 后的字节串
+// （可能为空串），found 为 0 时 value 固定为空指针且 error 为 error_none；
+// 名字非法或 envp 为空指针时返回 error_invalid_argument。
+pub struct EnvResult {
+    found bool
+    value *char
+    error Error
+}
+
+// no_error 返回成功错误值：分类 error_none、native_code 为 0。
+pub fn no_error() Error {
+    return Error{ kind: error_none, native_code: 0 }
+}
+
+// make_error 按稳定分类和目标平台正错误号构造错误。
+// native_code 只用于诊断，不能跨平台比较；库内部发现的无效参数传 0。
+pub fn make_error(kind ErrorKind, native_code int) Error {
+    return Error{ kind: kind, native_code: native_code }
+}
+
+// fd_ok 构造成功的文件描述符结果；fd 必须是非负值，所有权交给调用方。
+pub fn fd_ok(fd int) FdResult {
+    return FdResult{ fd: fd, error: no_error() }
+}
+
+// fd_error 构造失败的文件描述符结果，fd 固定为 -1。
+pub fn fd_error(kind ErrorKind, native_code int) FdResult {
+    return FdResult{ fd: -1, error: make_error(kind, native_code) }
+}
+
+// io_ok 构造成功的读写结果；count 是本次实际读写的字节数。
+pub fn io_ok(count u64) IoResult {
+    return IoResult{ count: count, error: no_error() }
+}
+
+// io_error 构造失败的读写结果；单次调用失败时 count 固定为 0。
+pub fn io_error(kind ErrorKind, native_code int) IoResult {
+    return IoResult{ count: 0, error: make_error(kind, native_code) }
+}
+
+// read_options 返回只读打开选项：不创建、不截断、不追加，权限位为 0666。
+// mode 只在调用方随后把 create 置为 true 时才会被内核使用。
+pub fn read_options() OpenOptions {
+    return OpenOptions{
+        access: access_read_only,
+        create: false,
+        truncate: false,
+        exclusive: false,
+        append: false,
+        mode: 420
+    }
+}
+
+// write_options 返回只写打开选项：默认创建文件但不截断、不独占、不追加，
+// 权限位为 0666。需要覆盖写入时由调用方显式设置 truncate = true。
+pub fn write_options() OpenOptions {
+    return OpenOptions{
+        access: access_write_only,
+        create: true,
+        truncate: false,
+        exclusive: false,
+        append: false,
+        mode: 420
+    }
+}
+
+// make_dir_entry 由调用方切片构造目录条目视图；name 不复制。
+// 空切片得到空指针和零长度；非空切片指向首字节。生命周期由调用方保证。
+pub fn make_dir_entry(name []u8, kind DirKind) DirEntry {
+    if (len(name) == 0) {
+        return DirEntry{ name: 0, name_len: 0, kind: kind }
+    }
+    return DirEntry{ name: &name[0], name_len: len(name), kind: kind }
+}
+
+// get_env 在 NUL 结尾的 envp 指针数组中按完整键查找环境值。
+// name 不能为空、不能包含 '='；按完整的 '=' 前缀匹配，避免 "A" 命中 "AA"。
+// 缺失返回 found=0 且无错误；找到返回借用值指针，空值表现为指向空串。
+pub fn get_env(envp **char, name *char) EnvResult {
+    if (envp == 0 || name == 0 || name[0] == 0) {
+        return env_invalid()
+    }
+    let name_len int = 0
+    for name[name_len] != 0 {
+        if (name[name_len] == 61) {
+            return env_invalid()
+        }
+        name_len += 1
+    }
+    let row int = 0
+    for envp[row] != 0 {
+        let entry *char = envp[row]
+        let index int = 0
+        for name[index] != 0 && entry[index] == name[index] {
+            index += 1
+        }
+        // 名字完整匹配后必须紧跟 '='；无 '=' 的条目不是有效环境项，跳过。
+        if (name[index] == 0 && entry[index] == 61) {
+            return EnvResult{
+                found: true,
+                value: entry + index + 1,
+                error: no_error()
+            }
+        }
+        row += 1
+    }
+    return env_not_found()
+}
+
+// error_from_errno 把目标平台正错误号转换为 os.Error。
+// 供 net 等上层把 sys 的 -errno 归一化为同一套分类；code 为 0 时无错误。
+// 不把 EAGAIN 归为超时：普通非阻塞 I/O 与「套接字读超时」需要区分，
+// 后者由 net 显式改写分类。
+pub fn error_from_errno(code int) Error {
+    return make_error(error_kind_for(code), code)
+}
+
+// open_path 按 os 自有选项打开路径，成功转移 fd 所有权给调用方。
+// 失败时 fd 固定为 -1 并返回显式错误；创建时使用 options.mode 与当前 umask。
+pub fn open_path(path *char, options OpenOptions) FdResult {
+    let invalid Error = validate_options(options)
+    if (invalid.kind != error_none) {
+        return fd_error(invalid.kind, invalid.native_code)
+    }
+    let result i64 = sys.open_at(sys.AT_FDCWD, path, open_flags(options),
+        options.mode)
+    if (sys.is_error(result) != 0) {
+        let code int = sys.error_code(result)
+        return fd_error(error_kind_for(code), code)
+    }
+    return fd_ok(result.to_type(int))
+}
+
+// read_some 从 fd 读取至多 len(buffer) 字节到调用方切片。
+// 返回本次实际字节数与显式错误；0 字节且无错误表示 EOF，允许短读。
+pub fn read_some(fd int, buffer []u8) IoResult {
+    let result i64 = sys.read_fd(fd, slice_address(buffer), len(buffer))
+    return io_from_result(result)
+}
+
+// write_once 向 fd 单次写入至多 count 字节，供只有指针+长度的 io 层复用。
+// 返回实际字节数与显式错误；允许短写、遇 EINTR 返回 interrupted，不重试。
+pub fn write_once(fd int, buffer *void, count u64) IoResult {
+    return io_from_result(sys.write_fd(fd, buffer, count))
+}
+
+// write_some 向 fd 写入至多 len(data) 字节，返回本次实际字节数。
+// 允许短写；需要写满时由 io 层循环并保留进度。
+pub fn write_some(fd int, data []u8) IoResult {
+    return write_once(fd, slice_address(data), len(data))
+}
+
+// close_file 关闭 fd 并返回显式错误。
+// 只调用一次；失败后 fd 可能已经被释放，调用方不得重试或继续使用。
+pub fn close_file(fd int) Error {
+    return error_from_result(sys.close_fd(fd))
+}
+
+// make_dir 创建单层目录，mode 由内核结合当前 umask 裁剪。
+// 不递归创建父目录；已存在时返回 error_already_exists。
+pub fn make_dir(path *char, mode u32) Error {
+    return error_from_result(sys.create_dir_at(sys.AT_FDCWD, path, mode))
+}
+
+// remove_path 删除文件路径，不递归、不先探测再删除。
+// 删除空目录使用 remove_dir_path，本函数不会把目录当文件处理。
+pub fn remove_path(path *char) Error {
+    return error_from_result(sys.remove_at(sys.AT_FDCWD, path, 0))
+}
+
+// remove_dir_path 删除空目录，不递归删除其中的文件或子目录。
+// 目录非空时返回内核错误（通常为 error_other），调用方不得改为递归删除。
+pub fn remove_dir_path(path *char) Error {
+    return error_from_result(sys.remove_at(sys.AT_FDCWD, path,
+        sys.AT_REMOVEDIR))
+}
+
+// rename_path 把旧路径原子重命名为新路径。
+// 与底层 rename 语义一致：跨设备不自动复制，目标存在时由内核替换。
+pub fn rename_path(old_path *char, new_path *char) Error {
+    return error_from_result(sys.rename_at(sys.AT_FDCWD, old_path,
+        sys.AT_FDCWD, new_path))
+}
+
+@[extern] fn rmdir(path *char) int
+
+@[extern] fn isatty(fd int) int
+
+// open_file 以宿主 open 标志打开路径；未使用 O_CREAT 时调用此形式。
+pub fn open_file(path *char, flags int) int {
+    return open(path, flags)
+}
+
+// open_file_mode 在宿主 open 标志包含 O_CREAT 时同时传入权限位。
+pub fn open_file_mode(path *char, flags int, mode int) int {
+    return open(path, flags, mode)
+}
+
+// read_fd 从文件描述符读取至多 byte_count 字节，返回实际字节数或 -1。
+pub fn read_fd(fd int, buffer *void, byte_count u64) i64 {
+    return read(fd, buffer, byte_count)
+}
+
+// write_fd 向文件描述符写入至多 byte_count 字节，返回实际字节数或 -1。
+pub fn write_fd(fd int, buffer *void, byte_count u64) i64 {
+    return write(fd, buffer, byte_count)
+}
+
+// close_fd 关闭文件描述符，成功返回 0，失败返回 -1。
+pub fn close_fd(fd int) int {
+    return close(fd)
+}
+
+// create_dir 按宿主权限位创建单层目录，成功返回 0，失败返回 -1。
+pub fn create_dir(path *char, mode int) int {
+    return mkdir(path, mode)
+}
+
+// remove_dir 删除空目录，成功返回 0，失败返回 -1。
+pub fn remove_dir(path *char) int {
+    return rmdir(path)
+}
+
+// remove_file 删除文件系统路径，成功返回 0，失败返回 -1。
+pub fn remove_file(path *char) int {
+    return unlink(path)
+}
+
+// rename_file 将旧路径原子重命名为新路径，返回宿主 rename 的结果。
+pub fn rename_file(old_path *char, new_path *char) int {
+    return rename(old_path, new_path)
+}
+
+// is_terminal 判断文件描述符是否连接终端；失败返回 0。
+pub fn is_terminal(fd int) int {
+    return isatty(fd)
+}
+
+// process_id 返回当前进程的宿主进程号。
+pub fn process_id() int {
+    return getpid()
+}
+
+// terminate 以指定状态结束当前进程。
+pub fn terminate(code int) {
+    exit(code)
+}
+
+// platform 返回编译目标的平台名称。
+pub fn platform() *char {
+    $if (linux) {
+        return "linux"
+    }
+    $if (darwin) {
+        return "darwin"
+    }
+    $if (windows) {
+        return "windows"
+    }
+    return "unknown"
+}
+
+// arch 返回编译目标的架构名称。
+pub fn arch() *char {
+    $if (arm64) {
+        return "arm64"
+    }
+    $if (x64) {
+        return "x64"
+    }
+    return "unknown"
+}
+
+// 跨平台的旧 sleep_us 兼容实现：把微秒转换为 sys.Timespec 后调用
+// sys.sleep_time（Linux nanosleep 系统调用 / Darwin libSystem nanosleep）。
+// 负值仍返回 -1；成功返回 0；EINTR 或其他错误返回 -1，与旧 usleep 契约一致，
+// 不向调用方暴露剩余时间，也不在库内自动重试。
+pub fn sleep_us(duration int) int {
+    if (duration < 0) {
+        return -1
+    }
+    let micros i64 = duration.to_type(i64)
+    let request sys.Timespec
+    request.sec = micros / 1000000
+    request.nsec = (micros % 1000000) * 1000
+    if (sys.sleep_time(&request, 0) == 0) {
+        return 0
+    }
+    return -1
+}
+
+// DirEntryResult 是 next_entry 的结果：status 为 dir_entry_ok 时 entry 有效，
+// dir_entry_end 表示目录结束，dir_entry_error 时 error 有效。
+pub enum DirEntryStatus {
+    dir_entry_ok
+    dir_entry_end
+    dir_entry_error
+}
+
+pub struct DirEntryResult {
+    status DirEntryStatus
+    entry DirEntry
+    error Error
+}
+
+pub enum WaitState {
+    wait_exited
+    wait_signaled
+    wait_error
+}
+
+pub struct PidResult {
+    pid int
+    error Error
+}
+
+pub struct WaitResult {
+    state WaitState
+    exit_code int
+    signal int
+    error Error
+}
+
+// get_cwd：平台无关入口；实现见 directory.<平台>.yh 的 get_cwd_impl。
+pub fn get_cwd(buffer []u8) IoResult {
+    return get_cwd_impl(buffer)
+}
+
+// change_dir：平台无关入口；实现见 directory.<平台>.yh 的 change_dir_impl。
+pub fn change_dir(path *char) Error {
+    return change_dir_impl(path)
+}
+
+// spawn：平台无关入口；实现见 process.<平台>.yh 的 spawn_impl。
+pub fn spawn(path *char, argv **char, envp **char) PidResult {
+    return spawn_impl(path, argv, envp)
+}
+
+// wait：平台无关入口；实现见 process.<平台>.yh 的 wait_impl。
+pub fn wait(pid int) WaitResult {
+    return wait_impl(pid)
+}
+
+// exit_now：平台无关入口；实现见 process.<平台>.yh 的 exit_now_impl。
+pub fn exit_now(code int) void {
+    exit_now_impl(code)
+}
+
+@[extern] fn CreateProcessA(application *char, command_line *char,
+    process_attrs *void, thread_attrs *void, inherit_handles i32,
+    flags u32, environment *void, current_dir *char, startup *u8,
+    info *u8) i32
+
+@[extern] fn WaitForSingleObject(handle *void, milliseconds u32) u32
+
+@[extern] fn GetExitCodeProcess(handle *void, code *u32) i32
+
+@[extern] fn OpenProcess(access u32, inherit i32, pid u32) *void
+
+// 关闭内核句柄走 SDK 支撑对象（compiler/windows-sdk/chkstk.c 的 __yh_close_handle）：
+// 运行时已经声明过 `CloseHandle`，yh 的 extern 声明会与它重定义。
+@[extern] fn __yh_close_handle(handle *void) i32
+
+// GetLastError：CreateProcessA/OpenProcess/WaitForSingleObject 失败后的唯一诊断来源。
+@[extern] fn GetLastError() u32

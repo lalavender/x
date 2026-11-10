@@ -1,0 +1,900 @@
+module parse
+
+import support
+import token
+import check
+import lex
+import comptime
+import ast
+import ir
+import proj
+// ============================================================================
+// api.yh —— parse 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// ParseCtx：解析阶段的每任务状态（模块级单例，worker 进程内一份）。
+pub struct ParseCtx {
+    test_body int // 1 = 当前正在解析 test 声明体
+    ct_meta_bare int // >0：允许裸元信息绑定作类型谓词实参（$is_type(f, T)）
+    ctx_block int // 表达式块上下文：1 = 该表达式后可能紧跟 {
+    ir_reject_reason int // 最近函数的拒绝阶段：1上下文…7落底（构建统计用）
+}
+
+// ctx：解析阶段状态窄口；返回单例指针。
+pub fn ctx() *ParseCtx {
+    return &g_parse
+}
+
+// eval_token_range：在给定 token 区间内求值一个表达式，返回 0 成功并写出 *out。
+//
+// 供「解析之外但仍需重入解析器」的调用方使用（当前是布局长度表达式与
+// 延迟枚举判别值）。本函数自管三件事，调用方不必重复：
+//   * 保存/恢复 token 游标（失败也恢复）
+//   * 关闭 AST 捕获（这些求值不产生持久 AST）
+//   * 置位折叠开关，使常量折叠按编译期语义进行
+// 失败时已写诊断并返回 -1；成功但游标未停在区间末尾视为内部错误。
+pub fn eval_token_range(first int, after int, out *support.Res) int {
+    if (out == 0 || first < 0 || after <= first || after > token.ctx().count) {
+        return support.fail("内部错误：表达式 token 范围无效")
+    }
+    let saved_pos int = token.ctx().pos
+    let saved_capture int = support.session().ast_capture
+    support.session().ast_capture = 0
+    token.ctx().pos = first
+    support.fc().c_fold += 1
+    let status int = parse_expr(out)
+    support.fc().c_fold -= 1
+    let landed int = token.ctx().pos
+    support.session().ast_capture = saved_capture
+    token.ctx().pos = saved_pos
+    if (status != 0) { return -1 }
+    if (landed != after) {
+        return support.err_lc(token.ctx().tokens[first].line,
+            token.ctx().tokens[first].col, "表达式 token 范围不匹配")
+    }
+    return 0
+}
+
+pub fn iface_load(path *char, bind_off int, bind_len int) int {
+    if (support.read_source(path) != 0) {
+        return -1
+    }
+    let sfx_off int = -1
+    let sfx_len int = 0
+    if (check.iface_header_suffix(path, &sfx_off, &sfx_len) != 0) {
+        return -1
+    }
+    let home int = support.fs().mod_home_next
+    support.fs().mod_home_next += 1
+    // 登记 ModInfo（ns 随后填充）
+    if (support.fs().mod_n == support.fs().mod_cap) {
+        let ncap int = support.fs().mod_cap * 2
+        if (ncap == 0) {
+            ncap = 8
+        }
+        let nd *support.ModInfo = malloc((ncap * sizeof(support.ModInfo)).to_type(u64)).to_type(*support.ModInfo)
+        if (nd == 0) {
+            return support.fail("内存分配失败")
+        }
+        if (support.fs().mod_n > 0) {
+            memcpy(nd, support.fs().mods, (support.fs().mod_n * sizeof(support.ModInfo)).to_type(u64))
+        }
+        free(support.fs().mods)
+        support.fs().mods = nd
+        support.fs().mod_cap = ncap
+    }
+    let mi int = support.fs().mod_n
+    support.fs().mods[mi].bind_off = bind_off
+    support.fs().mods[mi].bind_len = bind_len
+    support.fs().mods[mi].prefix_off = sfx_off
+    support.fs().mods[mi].prefix_len = sfx_len
+    support.fs().mods[mi].home = home
+    support.fs().mods[mi].ns = 0
+    support.fs().mods[mi].ns_n = 0
+    support.fs().mods[mi].ns_cap = 0
+    support.fs().mod_n += 1
+    // 正文按 yh 源码登记：pass1 + pass2a（折叠常量；c_iface_load 抑制发射）
+    token.ctx().count = 0
+    token.ctx().pos = 0
+    support.session().compile = 1
+    support.session().pass = 1
+    support.session().iface_load = 1
+    let sym_base int = support.ms().sym_n
+    let tname_base int = support.ms().name_n
+    if (lex.lex_all() != 0) {
+        support.session().iface_load = 0
+        return -1
+    }
+    if (mod_parse_head() != 0) {
+        support.session().iface_load = 0
+        return -1
+    }
+    if (parse_source() != 0) {
+        support.session().iface_load = 0
+        return -1
+    }
+    if (support.diag().errors > 0) {
+        support.session().iface_load = 0
+        return -1
+    }
+    token.ctx().pos = 0
+    support.session().pass = 2
+    if (parse_source_globals() != 0) {
+        support.session().iface_load = 0
+        return -1
+    }
+    if (support.diag().errors > 0) {
+        support.session().iface_load = 0
+        return -1
+    }
+    support.session().iface_load = 0
+    // ns 登记 + 名字改写（短名 → 短名+后缀；类型名同样改写避免冲突）
+    let si int = sym_base
+    for si < support.ms().sym_n {
+        if ((support.ms().syms[si].flags & support.F_PUB) == 0) {
+            si += 1
+            continue
+        }
+        if (mod_ns_add(mi, support.ms().syms[si].name_off, support.ms().syms[si].name_len, si, -1) != 0) {
+            return -1
+        }
+        if ((support.ms().syms[si].flags & support.F_CABI) == 0
+            && check.sym_mangle(si, sfx_off, sfx_len) != 0) {
+            return -1
+        }
+        support.ms().syms[si].flags |= support.F_EXTERN
+        if ((support.ms().syms[si].flags & support.F_CABI) == 0) {
+            support.ms().syms[si].flags |= support.F_MODULE_IMPORT
+        }
+        si += 1
+    }
+    let ti int = tname_base
+    for ti < support.ms().name_n {
+        if (support.ms().home[support.ms().names[ti].type_id] < 0) {
+            support.ms().home[support.ms().names[ti].type_id] = home
+        }
+        if (mod_ns_add(mi, support.ms().names[ti].name_off, support.ms().names[ti].name_len, -1, support.ms().names[ti].type_id) != 0) {
+            return -1
+        }
+        if (check.tname_mangle(ti, sfx_off, sfx_len) != 0) {
+            return -1
+        }
+        ti += 1
+    }
+    // 恢复编译状态（调用方继续编译本模块源文件）
+    token.ctx().count = 0
+    token.ctx().pos = 0
+    return mi
+}
+
+// iface_ct_load：恢复一个依赖模块的 typed CT 闭包，不改变调用方解析状态。
+// path 由调用方给出，通常直接指向可扩容名字池（proj.pool_str）；本函数解析 .s.ct
+// 时会把隐藏正文名、形参名与新类型名 intern 进同一个池，池增长时 tml_intern_str
+// 会 free 旧块并换新块（gen/symbols.yh），调用方指针随即悬垂。故入口先把 path
+// 快照到本函数栈缓冲，之后一律只用快照——否则正文签名不匹配诊断读悬垂指针会
+// 直接 SIGSEGV（实测：正文被改成 i64 且接口缓存命中时 100% 崩溃）。
+pub fn iface_ct_load(path *char, mi int) int {
+    let path_buf [1200]u8
+    let path_n int = 0
+    for path[path_n] != 0 && path_n < 1199 {
+        path_buf[path_n] = path[path_n].to_type(u8)
+        path_n += 1
+    }
+    path_buf[path_n] = 0
+    let stable_path *char = support.arr_cstr(&path_buf[0])
+    let old_compile int = support.session().compile
+    let old_pass int = support.session().pass
+    let old_iface int = support.session().iface_load
+    let old_indexed int = ast.store().file_indexed
+    let old_file int = support.session().active_file
+    let old_decl int = ast.store().file_decl_i
+    let old_ct_iface int = support.session().ct_iface_mode
+    let old_data_count int = support.data_label()
+    if (mi < 0 || mi >= support.fs().mod_n || support.read_source(stable_path) != 0
+        || iface_ct_header_valid(stable_path, mi) != 0) { return -1 }
+    token.ctx().count = 0
+    token.ctx().pos = 0
+    support.session().compile = 1
+    support.session().pass = 1
+    support.session().iface_load = 0
+    ast.store().file_indexed = 0
+    support.session().active_file = 0
+    ast.store().file_decl_i = 0
+    support.session().ct_iface_mode = 1
+    if (lex.lex_all() != 0 || parse_source() != 0
+        || support.diag().errors > 0) {
+        support.session().ct_iface_mode = old_ct_iface
+        return -1
+    }
+    support.session().pass = 2
+    token.ctx().pos = 0
+    // .s.ct 中的隐藏常量先折叠并就绪；c_iface_load 仅抑制数据段发射，
+    // 随后恢复为普通前端状态以捕获 CT 函数正文。
+    support.session().iface_load = 1
+    if (parse_source_globals() != 0 || support.diag().errors > 0) {
+        support.session().iface_load = old_iface
+        support.session().ct_iface_mode = old_ct_iface
+        support.data_label_set(old_data_count)
+        return -1
+    }
+    support.session().iface_load = old_iface
+    // 闭包常量只供 typed 正文解析；字符串字面量不属于消费者运行期数据。
+    support.data_label_set(old_data_count)
+    // 全局 pass 已扫描至 EOF；函数 pass 必须从文件头重新遍历。
+    token.ctx().pos = 0
+    if (parse_source_ct_fns() != 0 || support.diag().errors > 0) {
+        support.session().ct_iface_mode = old_ct_iface
+        return -1
+    }
+    let ns int = 0
+    for ns < support.fs().mods[mi].ns_n {
+        let public_sym int = support.fs().mods[mi].ns[ns].sym
+        if (public_sym >= 0 && public_sym < support.ms().sym_n
+            && (support.ms().syms[public_sym].flags & support.F_COMPTIME) != 0) {
+            let hidden_off int = -1
+            let hidden_len int = 0
+            if (iface_ct_export_name(mi, ns, &hidden_off, &hidden_len) != 0) {
+                support.session().ct_iface_mode = old_ct_iface
+                return -1
+            }
+            let body_sym int = support.sym_lookup_off(hidden_off, hidden_len)
+            if (body_sym < 0 || comptime.ct_find(body_sym) < 0
+                || support.ms().syms[body_sym].type_id
+                    != support.ms().syms[public_sym].type_id) {
+                support.session().ct_iface_mode = old_ct_iface
+                return support.fail_path("公开 CT 函数与 .s.ct 正文签名不匹配: ",
+                    stable_path)
+            }
+        }
+        ns += 1
+    }
+    // CT IR 已复制到 comptime arena；清空临时 AST，避免其合成文件身份
+    // 混入当前模块的普通源码 AST 校验。
+    ast.ast_expr_reset()
+    ast.ast_stmt_reset()
+    ast.ast_decl_reset()
+    ast.ast_function_reset()
+    support.session().compile = old_compile
+    support.session().pass = old_pass
+    support.session().iface_load = old_iface
+    ast.store().file_indexed = old_indexed
+    support.session().active_file = old_file
+    ast.store().file_decl_i = old_decl
+    support.session().ct_iface_mode = old_ct_iface
+    return 0
+}
+
+// parse_source_ct_layout_register：先登记当前文件全部请求，使跨文件依赖边有稳定目标。
+pub fn parse_source_ct_layout_register() int {
+    if (comptime.ct_layout_request_count() == 0) { return 0 }
+    let row int = 0
+    for row < comptime.ct_layout_request_count() {
+        if (comptime.ct_layout_expr_pending(row) != 0
+            && comptime.ct_layout_expr_file(row) == support.session().active_file
+            && comptime.ct_layout_expr_register(row) != 0) { return -1 }
+        row += 1
+    }
+    if (ast.store().file_indexed != 0) {
+        let i int = 0
+        for i < ast.store().file_decl_n {
+            let node token.PDecl = ast.store().file_decls[i]
+            if (node.kind == token.TK_CONST
+                && p_decl_ct_layout_const_register(node.start) != 0) { return -1 }
+            i += 1
+        }
+        return 0
+    }
+    let saved int = token.ctx().pos
+    token.ctx().pos = 0
+    mod_skip_head()
+    for p_cur() != token.TOK_EOF {
+        let first int = token.ctx().pos
+        if (p_top_decl_kind() == token.TK_CONST
+            && p_decl_ct_layout_const_register(first) != 0) {
+            token.ctx().pos = saved
+            return -1
+        }
+        if (skip_top_decl() != 0) { token.ctx().pos = saved; return -1 }
+    }
+    token.ctx().pos = saved
+    return 0
+}
+
+// parse_source_ct_layout_consts：只执行依赖已 READY 的布局常量请求。
+pub fn parse_source_ct_layout_consts() int {
+    if (comptime.ct_layout_request_count() == 0) { return 0 }
+    let saved_pos int = token.ctx().pos
+    let saved_capture int = support.session().ast_capture
+    support.session().ast_capture = 0
+    if (ast.store().file_indexed != 0) {
+        let status int = parse_indexed_decls(4)
+        support.session().ast_capture = saved_capture
+        token.ctx().pos = saved_pos
+        return status
+    }
+    token.ctx().pos = 0
+    mod_skip_head()
+    for p_cur() != token.TOK_EOF {
+        let first int = token.ctx().pos
+        if (p_top_decl_kind() == token.TK_CONST
+            && p_decl_ct_layout_eval_runnable(first) != 0) {
+            if (parse_top_decl() != 0) {
+                support.session().ast_capture = saved_capture
+                token.ctx().pos = saved_pos
+                return -1
+            }
+        } else if (skip_top_decl() != 0) {
+            support.session().ast_capture = saved_capture
+            token.ctx().pos = saved_pos
+            return -1
+        }
+    }
+    support.session().ast_capture = saved_capture
+    token.ctx().pos = saved_pos
+    return 0
+}
+
+// parse_source_ct_layout_exprs：在所属文件上下文中执行已满足依赖的数组长度表达式。
+pub fn parse_source_ct_layout_exprs() int {
+    if (comptime.ct_layout_expr_pending_count() == 0) { return 0 }
+    let saved_pos int = token.ctx().pos
+    let saved_capture int = support.session().ast_capture
+    support.session().ast_capture = 0
+    let row int = 0
+    for row < comptime.ct_layout_request_count() {
+        if (comptime.ct_layout_expr_pending(row) == 0
+            || comptime.ct_layout_expr_file(row) != support.session().active_file) {
+            row += 1
+            continue
+        }
+        let first int = comptime.ct_layout_expr_first(row)
+        let after int = comptime.ct_layout_expr_after(row)
+        if (first < 0 || after <= first || after > token.ctx().count) {
+            support.session().ast_capture = saved_capture
+            token.ctx().pos = saved_pos
+            return support.fail("内部错误：数组长度表达式 token 范围无效")
+        }
+        if (comptime.ct_layout_expr_runnable(first, after) != 0) {
+            let result support.Res
+            let status int = eval_token_range(first, after, &result)
+            if (status != 0) {
+                support.session().ast_capture = saved_capture
+                token.ctx().pos = saved_pos
+                return -1
+            }
+            if (result.is_const == 0 || result.layout_type_id >= 0) {
+                support.session().ast_capture = saved_capture
+                token.ctx().pos = saved_pos
+                return support.err_lc(token.ctx().tokens[first].line,
+                    token.ctx().tokens[first].col, "数组长度必须是编译期常量")
+            }
+            if (comptime.ct_layout_expr_set_length(row, result.ival) != 0) {
+                support.session().ast_capture = saved_capture
+                token.ctx().pos = saved_pos
+                return -1
+            }
+        }
+        row += 1
+    }
+    support.session().ast_capture = saved_capture
+    token.ctx().pos = saved_pos
+    return 0
+}
+
+// ct_enum_pending_run：按登记顺序回填延迟的枚举成员常量。显式成员重解析表达式
+// （此时编译期函数正文已捕获），隐式成员取前一成员值 + 1。
+pub fn ct_enum_pending_run() int {
+    if (enump_n == 0) { return 0 }
+    let saved_pos int = token.ctx().pos
+    let saved_capture int = support.session().ast_capture
+    support.session().ast_capture = 0
+    let i int = 0
+    for i < enump_n {
+        let sym int = enump_sym[i]
+        let val i64 = 0
+        if (enump_first[i] < 0) {
+            let prev int = enump_prev[i]
+            if (prev >= 0) {
+                let pv int = support.ms().syms[prev].cval.to_type(int)
+                val = (pv + 1).to_type(i64)
+            }
+        } else {
+            let first int = enump_first[i]
+            let after int = enump_after[i]
+            if (after <= first || after > token.ctx().count) {
+                support.session().ast_capture = saved_capture
+                token.ctx().pos = saved_pos
+                return support.fail("内部错误：延迟枚举判别值 token 范围无效")
+            }
+            let result support.Res
+            let status int = eval_token_range(first, after, &result)
+            if (status != 0) {
+                support.session().ast_capture = saved_capture
+                token.ctx().pos = saved_pos
+                return -1
+            }
+            if (result.is_const == 0) {
+                support.session().ast_capture = saved_capture
+                token.ctx().pos = saved_pos
+                return support.err_lc(token.ctx().tokens[first].line, token.ctx().tokens[first].col,
+                    "枚举判别值必须是编译期常量")
+            }
+            val = result.ival
+        }
+        support.ms().syms[sym].cval = val
+        support.ms().syms[sym].const_ready = 1
+        // 同步枚举成员表里的值快照（按名字池偏移匹配）。
+        support.em_update_value(support.ms().syms[sym].name_off, val)
+        i += 1
+    }
+    support.session().ast_capture = saved_capture
+    token.ctx().pos = saved_pos
+    return 0
+}
+
+pub fn parse_source() int {
+    if (mod_parse_head() != 0) {
+        return -1
+    }
+    for p_cur() != token.TOK_EOF {
+        if (p_cur() == token.TK_MODULE) {
+            return token.err_tok("module 声明必须在文件头部且只能出现一次")
+        }
+        if (p_cur() == token.TK_IMPORT) {
+            return token.err_tok("import 声明必须在文件头部（module 之后、业务声明之前）")
+        }
+        let first int = token.ctx().pos
+        let kind int = p_top_decl_kind()
+        let mapped int = 0
+        if (kind == token.TK_FN && p_decl_is_comptime(first) != 0
+            && support.session().ct_iface_mode != 0) {
+            if (check.iface_ct_origin_begin(first) != 0) { return -1 }
+            mapped = 1
+        }
+        let status int = parse_top_decl()
+        if (mapped != 0) { check.iface_ct_origin_end() }
+        if (status != 0) {
+            return -1
+        }
+    }
+    return 0
+}
+
+// decl_index_file：根据已经词法分析的 token 为项目文件建立顶层声明范围表。
+// 该索引只记录声明种类和 token 范围，不构造表达式树，不执行名称/类型解析；
+// pass1 可用结束位置 O(1) 跳过函数体，后续 pass 只访问自己负责的声明。
+pub fn decl_index_file(fi int) int {
+    let head int = token.ctx().pos
+    let count int = 0
+    let cap int = 8
+    let nodes *token.PDecl = malloc((cap * sizeof(token.PDecl)).to_type(u64)).to_type(*token.PDecl)
+    if (nodes == 0) {
+        return support.fail("内存分配失败")
+    }
+    for p_cur() != token.TOK_EOF {
+        let start int = token.ctx().pos
+        let line int = token.ctx().tokens[start].line
+        let col int = token.ctx().tokens[start].col
+        let attrs int = 0
+        if (p_cur() == token.TK_AT && parse_attr_list(&attrs) != 0) {
+            free(nodes)
+            return -1
+        }
+        if (p_cur() == token.TK_PUB) {
+            p_adv()
+        }
+        let keyword int = token.ctx().pos
+        let kind int = p_cur()
+        if (p_cur() != token.TOK_EOF) {
+            p_adv()
+        }
+        if (skip_top_decl() != 0) {
+            free(nodes)
+            return -1
+        }
+        if (count == cap) {
+            let ncap int = cap * 2
+            let nd *token.PDecl = malloc((ncap * sizeof(token.PDecl)).to_type(u64)).to_type(*token.PDecl)
+            if (nd == 0) {
+                free(nodes)
+                return support.fail("内存分配失败")
+            }
+            memcpy(nd, nodes, (count * sizeof(token.PDecl)).to_type(u64))
+            free(nodes)
+            nodes = nd
+            cap = ncap
+        }
+        nodes[count].start = start
+        nodes[count].end = token.ctx().pos
+        nodes[count].kind = kind
+        nodes[count].keyword = keyword
+        nodes[count].line = line
+        nodes[count].col = col
+        nodes[count].test_sym = -1
+        count += 1
+    }
+    token.ctx().pos = head
+    proj.file(fi).decls = nodes
+    proj.file(fi).decl_n = count
+    return 0
+}
+
+// parse_indexed_decls：按文件声明索引执行 pass1/global/function 子遍。
+// mode=0 全部，1 全局 let/const，2 fn，3 comptime fn，4 可执行布局 const。
+pub fn parse_indexed_decls(mode int) int {
+    let i int = 0
+    for i < ast.store().file_decl_n {
+        let node token.PDecl = ast.store().file_decls[i]
+        let selected int = 0
+        if (mode == 0) {
+            selected = 1
+        }
+        if (mode == 1 && (node.kind == token.TK_LET || node.kind == token.TK_CONST)) {
+            selected = 1
+        }
+        if (mode == 2 && node.kind == token.TK_FN) {
+            selected = 1
+        }
+        if (mode == 5 && node.kind == token.TK_TEST) {
+            selected = 1
+        }
+        if (mode == 3 && node.kind == token.TK_FN
+            && p_decl_is_comptime(node.start) != 0) { selected = 1 }
+        if (mode == 4 && node.kind == token.TK_CONST
+            && p_decl_ct_layout_eval_runnable(node.start) != 0) { selected = 1 }
+        ast.store().file_decl_i = i
+        if (selected != 0) {
+            token.ctx().pos = node.start
+            // LA3.3 C3：pass2b 函数体可按键复用受检 AST 切片；命中时跳过
+            // 签名/body 的解析与语义检查，直接导入切片。
+            if (mode == 2 && node.kind == token.TK_FN
+                && p_decl_is_comptime(node.start) == 0
+                && check.checked_check_cache_active() != 0) {
+                let decl_row int = check.checked_pdecl_decl_row(support.session().active_file, i)
+                let key [ir.IR_FUNCTION_CACHE_KEY_SIZE]u8
+                if (decl_row >= 0
+                    && check.checked_gen_function_key(decl_row, &key[0]) == 0) {
+                    check.checked_check_store_key(decl_row, &key[0])
+                    let cache_data *u8 = 0
+                    let cache_size int = 0
+                    let lookup int = check.checked_check_cache_lookup(support.arr_cstr(&key[0]),
+                        &cache_data, &cache_size)
+                    if (lookup != 0) {
+                        let imported int = -1
+                        let import_rc int = check.checked_slice_import(cache_data,
+                            cache_size, decl_row, &imported)
+                        if (import_rc != 0) {
+                        }
+                        if (import_rc == 0) {
+                            token.ctx().pos = node.end
+                            i += 1
+                            continue
+                        }
+                    }
+                }
+            }
+            if (mode == 3) {
+                support.fc().c_ct_prepare_active = 1
+                support.fc().c_ct_prepare_first = node.start
+            }
+            if (parse_top_decl() != 0) {
+                support.fc().c_ct_prepare_active = 0
+                ast.store().file_decl_i = -1
+                return -1
+            }
+            support.fc().c_ct_prepare_active = 0
+            if (token.ctx().pos > node.end) {
+                // test 的 parse_block 会消费块后的隐式终结符，而 PDecl.end
+                // 停在该终结符上；只允许这一格的隐式终结符，显式分号仍报错。
+                let trailing_implicit int = (node.kind == token.TK_TEST
+                    && token.ctx().pos == node.end + 1
+                    && node.end >= 0 && node.end < token.ctx().count
+                    && token.ctx().tokens[node.end].kind == token.TK_SEMI
+                    && token.ctx().tokens[node.end].len == 0).to_type(int)
+                if (trailing_implicit != 0) {
+                    token.ctx().pos = node.end
+                } else {
+                    ast.store().file_decl_i = -1
+                    return support.err_lc(node.line, node.col, "内部错误：解析越过顶层声明范围")
+                }
+            }
+        }
+        token.ctx().pos = node.end
+        i += 1
+    }
+    ast.store().file_decl_i = -1
+    support.fc().c_decl_pub = 0
+    token.ctx().pos = token.ctx().count - 1
+    return 0
+}
+
+pub fn parse_source_globals() int {
+    if (ast.store().file_indexed != 0) {
+        return parse_indexed_decls(1)
+    }
+    mod_skip_head()
+    for p_cur() != token.TOK_EOF {
+        let kind int = p_top_decl_kind()
+        if (kind == token.TK_LET || kind == token.TK_CONST) {
+            if (parse_top_decl() != 0) { return -1 }
+            continue
+        }
+        if (skip_top_decl() != 0) {
+            return -1
+        }
+    }
+    return 0
+}
+
+// parse_source_tests：测试模式下按文件检查 test 声明体。
+// 与普通函数子遍分开：pass1 先登记全部符号，测试体才能前向/跨文件引用。
+pub fn parse_source_tests() int {
+    if (ast.store().file_indexed != 0) {
+        return parse_indexed_decls(5)
+    }
+    mod_skip_head()
+    for p_cur() != token.TOK_EOF {
+        let kind int = p_top_decl_kind()
+        if (kind == token.TK_TEST) {
+            if (parse_top_decl() != 0) { return -1 }
+            continue
+        }
+        if (skip_top_decl() != 0) {
+            return -1
+        }
+    }
+    return 0
+}
+
+pub fn parse_source_fns() int {
+    if (ast.store().file_indexed != 0) {
+        return parse_indexed_decls(2)
+    }
+    mod_skip_head()
+    for p_cur() != token.TOK_EOF {
+        let kind int = p_top_decl_kind()
+        if (kind == token.TK_FN) {
+            if (parse_top_decl() != 0) { return -1 }
+            continue
+        }
+        if (skip_top_decl() != 0) {
+            return -1
+        }
+    }
+    return 0
+}
+
+// parse_source_ct_fns：pass2a 前只解析、类型检查并捕获编译期函数正文。
+pub fn parse_source_ct_fns() int {
+    let saved_flags int = support.fc().c_fn_flags
+    if (ast.store().file_indexed != 0) {
+        let indexed_status int = parse_indexed_decls(3)
+        support.fc().c_fn_flags = saved_flags
+        return indexed_status
+    }
+    let saved_file int = support.session().active_file
+    let saved_decl int = ast.store().file_decl_i
+    support.session().active_file = 0
+    ast.store().file_decl_i = 0
+    mod_skip_head()
+    for p_cur() != token.TOK_EOF {
+        let first int = token.ctx().pos
+        let kind int = p_top_decl_kind()
+        if (kind == token.TK_FN && p_decl_is_comptime(first) != 0) {
+            if (support.session().ct_iface_mode != 0
+                && check.iface_ct_origin_begin(first) != 0) {
+                support.session().active_file = saved_file
+                ast.store().file_decl_i = saved_decl
+                support.fc().c_fn_flags = saved_flags
+                return -1
+            }
+            support.fc().c_ct_prepare_active = 1
+            support.fc().c_ct_prepare_first = first
+            if (parse_top_decl() != 0) {
+                support.fc().c_ct_prepare_active = 0
+                if (support.session().ct_iface_mode != 0) { check.iface_ct_origin_end() }
+                support.session().active_file = saved_file
+                ast.store().file_decl_i = saved_decl
+                support.fc().c_fn_flags = saved_flags
+                return -1
+            }
+            support.fc().c_ct_prepare_active = 0
+            if (support.session().ct_iface_mode != 0) { check.iface_ct_origin_end() }
+        } else if (skip_top_decl() != 0) {
+            support.session().active_file = saved_file
+            ast.store().file_decl_i = saved_decl
+            support.fc().c_fn_flags = saved_flags
+            return -1
+        }
+    }
+    support.session().active_file = saved_file
+    ast.store().file_decl_i = saved_decl
+    support.fc().c_fn_flags = saved_flags
+    return 0
+}
+
+// parse_top_decl：消费可选的单组属性、pub 与一条顶层声明，并清理属性状态。
+pub fn parse_top_decl() int {
+    let attr_pos int = token.ctx().pos
+    support.fc().c_decl_pub = 0
+    support.fc().c_decl_attrs = 0
+    if (p_cur() == token.TK_AT && parse_attr_list(&support.fc().c_decl_attrs) != 0) {
+        support.fc().c_decl_attrs = 0
+        return -1
+    }
+    if (p_cur() == token.TK_PUB) {
+        support.fc().c_decl_pub = 1
+        p_adv()
+    }
+    let kind int = p_cur()
+    if ((support.fc().c_decl_attrs & token.ATTR_COMPTIME) != 0
+        && (kind != token.TK_FN || support.fc().c_decl_attrs != token.ATTR_COMPTIME)) {
+        token.ctx().pos = attr_pos
+        support.fc().c_decl_pub = 0
+        support.fc().c_decl_attrs = 0
+        return token.err_tok("comptime 仅支持单独修饰 fn")
+    }
+    if (support.fc().c_decl_attrs != 0) {
+        if (kind == token.TK_STRUCT || kind == token.TK_UNION || kind == token.TK_ENUM) {
+            if ((support.fc().c_decl_attrs & (token.ATTR_INLINE | token.ATTR_NORETURN)) != 0) {
+                token.ctx().pos = attr_pos
+                support.fc().c_decl_pub = 0
+                support.fc().c_decl_attrs = 0
+                return token.err_tok("inline/noreturn 只能修饰函数")
+            }
+        } else if (kind != token.TK_FN) {
+            token.ctx().pos = attr_pos
+            support.fc().c_decl_pub = 0
+            support.fc().c_decl_attrs = 0
+            return token.err_tok("属性只适用于 fn/struct/union/enum，不适用于此声明")
+        }
+    }
+    let result int = parse_top_decl_body()
+    if (result == 0) { p_take_block_end() }
+    support.fc().c_decl_pub = 0
+    support.fc().c_decl_attrs = 0
+    return result
+}
+
+// pub_agg_deferred_run：在 .s.ct 接口闭包加载完成后执行全部延迟项。
+// 调用目标（闭包隐藏符号）此时已登记；对每个延迟项重新读 .s.i 源、
+// 词法化后按登记的 token 起点解析初始化式并执行（建模 + 本地物化，
+// 与提供方 parse_global_comptime_aggregate 同一路径）。
+pub fn pub_agg_deferred_run() int {
+    let i int = 0
+    for i < support.fc().c_pub_agg_dep_n {
+        let item support.PubAggDeferred = support.fc().c_pub_agg_dep[i]
+        if (item.sym < 0) { i += 1; continue }
+        if (item.first < 0 || item.sym >= support.ms().sym_n
+            || item.path_off <= 0 || item.path_len <= 0) {
+            return support.fail("内部错误：pub 聚合常量延迟项无效")
+        }
+        let path *char = (support.pool_ctx().data + item.path_off).to_type(*char)
+        if (support.read_source(path) != 0) { return -1 }
+        token.ctx().count = 0
+        token.ctx().pos = 0
+        support.session().iface_load = 1
+        // 延迟解析只求值、不参与 AST 收集（此刻没有有效的前端文件身份）。
+        let saved_capture int = support.session().ast_capture
+        support.session().ast_capture = 0
+        if (lex.lex_all() != 0) {
+            support.session().ast_capture = saved_capture
+            support.session().iface_load = 0
+            return -1
+        }
+        token.ctx().pos = item.first
+        let tid int = support.ms().syms[item.sym].type_id
+        let status int = parse_global_comptime_aggregate(item.sym, tid)
+        support.session().ast_capture = saved_capture
+        support.session().iface_load = 0
+        if (status != 0) { return -1 }
+        support.ms().syms[item.sym].const_ready = 1
+        support.fc().c_pub_agg_dep[i].sym = -1
+        i += 1
+    }
+    return 0
+}
+
+// mod_reset_file：开始解析一个新源文件前重置文件级模块状态。
+pub fn mod_reset_file() void {
+    support.fs().import_n = 0
+    support.fs().has_module = 0
+    support.fs().name_off = -1
+    support.fs().name_len = 0
+}
+
+// mod_parse_head：解析文件头（module 声明 → import 声明）。
+// 由 parse_source 开头调用（语法模式与编译 pass 1 共用），消费到的
+// token 之后交给业务声明主循环。规则：
+//   * module 声明必须是文件第一个 token；import 只能出现在 module 之后；
+//   * 模块名为单个标识符（"_" 除外）；import 目标为 NAME 或 KEY.MOD；
+//   * 同一文件重复绑定名报错（同模块用不同别名导入合法）。
+// 返回 0 成功；失败 -1（诊断已输出）。
+pub fn mod_parse_head() int {
+    if (p_cur() != token.TK_MODULE) {
+        // 旧单文件形态：无模块头；import 不允许脱离 module 出现
+        if (p_cur() == token.TK_IMPORT) {
+            return token.err_tok("import 声明前必须有 module 声明")
+        }
+        return 0
+    }
+    p_adv()
+    if (mod_valid_name() == 0) {
+        return token.err_tok("此处需要一个模块名（单个标识符，_ 除外）")
+    }
+    let nstart int = token.ctx().tokens[token.ctx().pos].start
+    let nlen int = token.ctx().tokens[token.ctx().pos].len
+    p_adv()
+    if (p_expect(token.TK_SEMI, "期望 module 声明结尾 ';'") != 0) {
+        return -1
+    }
+    let off int = support.name_intern(nstart, nlen)
+    if (off < 0) {
+        return -1
+    }
+    support.fs().has_module = 1
+    support.fs().name_off = off
+    support.fs().name_len = nlen
+    for p_cur() == token.TK_IMPORT {
+        p_adv()
+        if (mod_valid_name() == 0) {
+            return token.err_tok("此处需要一个导入模块名（单个标识符，_ 除外）")
+        }
+        // 点分导入：任意段数的目录路径（a.b.c → 目录 a/b/c，查找名 = 末段）。
+        // 两段时首段兼作跨项目依赖键：解析期先试依赖键，未命中再按本项目路径。
+        let s1 int = token.ctx().tokens[token.ctx().pos].start
+        let l1 int = token.ctx().tokens[token.ctx().pos].len
+        let iline int = token.ctx().tokens[token.ctx().pos].line
+        let icol int = token.ctx().tokens[token.ctx().pos].col
+        let pstart int = s1
+        let tstart int = s1
+        let tlen int = l1
+        p_adv()
+        let segs int = 1
+        for p_cur() == token.TK_DOT {
+            p_adv()
+            if (mod_valid_name() == 0) {
+                return token.err_tok("'.' 后需要一个模块名")
+            }
+            tstart = token.ctx().tokens[token.ctx().pos].start
+            tlen = token.ctx().tokens[token.ctx().pos].len
+            segs += 1
+            p_adv()
+        }
+        let plen int = tstart + tlen - pstart
+        // 依赖键只对两段导入有意义：三段及以上一律按目录路径解析。
+        let kstart int = -1
+        let klen int = 0
+        if (segs == 2) {
+            kstart = s1
+            klen = l1
+        }
+        // 别名
+        let astart int = 0
+        let alen int = 0
+        if (mod_parse_alias(tstart, tlen, &astart, &alen) != 0) {
+            return -1
+        }
+        // 同绑定名重复检查（不同查找名的同别名也冲突）
+        if (mod_import_find(astart, alen) >= 0) {
+            return support.err_lc(iline, icol, "重复的导入绑定名（同模块不同来源请用 as 区分）")
+        }
+        if (mod_import_push(tstart, tlen, astart, alen, kstart, klen,
+            pstart, plen, iline, icol) != 0) {
+            return -1
+        }
+        if (p_expect(token.TK_SEMI, "期望 import 声明结尾 ';'") != 0) {
+            return -1
+        }
+    }
+    return 0
+}
+
+// p_cur：当前 token 种类。
+pub fn p_cur() int {
+    return token.ctx().tokens[token.ctx().pos].kind
+}

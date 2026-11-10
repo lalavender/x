@@ -1,8 +1,5 @@
 module parse
-import check
-import token
 import support
-import lex
 
 // ============================================================================
 // iface.yh —— 模块接口的发射与加载（MOD-U4）
@@ -20,118 +17,6 @@ import lex
 // 引用其他模块的类型报错（类型闭包内联留待按需实现）；pub 指针常量
 // （字符串 const）暂不导出。
 // ============================================================================
-
-pub fn iface_load(path *char, bind_off int, bind_len int) int {
-    if (support.read_source(path) != 0) {
-        return -1
-    }
-    let sfx_off int = -1
-    let sfx_len int = 0
-    if (check.iface_header_suffix(path, &sfx_off, &sfx_len) != 0) {
-        return -1
-    }
-    let home int = support.fs().mod_home_next
-    support.fs().mod_home_next += 1
-    // 登记 ModInfo（ns 随后填充）
-    if (support.fs().mod_n == support.fs().mod_cap) {
-        let ncap int = support.fs().mod_cap * 2
-        if (ncap == 0) {
-            ncap = 8
-        }
-        let nd *support.ModInfo = malloc((ncap * sizeof(support.ModInfo)).to_type(u64)).to_type(*support.ModInfo)
-        if (nd == 0) {
-            return support.fail("内存分配失败")
-        }
-        if (support.fs().mod_n > 0) {
-            memcpy(nd, support.fs().mods, (support.fs().mod_n * sizeof(support.ModInfo)).to_type(u64))
-        }
-        free(support.fs().mods)
-        support.fs().mods = nd
-        support.fs().mod_cap = ncap
-    }
-    let mi int = support.fs().mod_n
-    support.fs().mods[mi].bind_off = bind_off
-    support.fs().mods[mi].bind_len = bind_len
-    support.fs().mods[mi].prefix_off = sfx_off
-    support.fs().mods[mi].prefix_len = sfx_len
-    support.fs().mods[mi].home = home
-    support.fs().mods[mi].ns = 0
-    support.fs().mods[mi].ns_n = 0
-    support.fs().mods[mi].ns_cap = 0
-    support.fs().mod_n += 1
-    // 正文按 yh 源码登记：pass1 + pass2a（折叠常量；c_iface_load 抑制发射）
-    token.ctx().count = 0
-    token.ctx().pos = 0
-    support.session().compile = 1
-    support.session().pass = 1
-    support.session().iface_load = 1
-    let sym_base int = support.ms().sym_n
-    let tname_base int = support.ms().name_n
-    if (lex.lex_all() != 0) {
-        support.session().iface_load = 0
-        return -1
-    }
-    if (mod_parse_head() != 0) {
-        support.session().iface_load = 0
-        return -1
-    }
-    if (parse_source() != 0) {
-        support.session().iface_load = 0
-        return -1
-    }
-    if (support.diag().errors > 0) {
-        support.session().iface_load = 0
-        return -1
-    }
-    token.ctx().pos = 0
-    support.session().pass = 2
-    if (parse_source_globals() != 0) {
-        support.session().iface_load = 0
-        return -1
-    }
-    if (support.diag().errors > 0) {
-        support.session().iface_load = 0
-        return -1
-    }
-    support.session().iface_load = 0
-    // ns 登记 + 名字改写（短名 → 短名+后缀；类型名同样改写避免冲突）
-    let si int = sym_base
-    for si < support.ms().sym_n {
-        if ((support.ms().syms[si].flags & support.F_PUB) == 0) {
-            si += 1
-            continue
-        }
-        if (mod_ns_add(mi, support.ms().syms[si].name_off, support.ms().syms[si].name_len, si, -1) != 0) {
-            return -1
-        }
-        if ((support.ms().syms[si].flags & support.F_CABI) == 0
-            && check.sym_mangle(si, sfx_off, sfx_len) != 0) {
-            return -1
-        }
-        support.ms().syms[si].flags |= support.F_EXTERN
-        if ((support.ms().syms[si].flags & support.F_CABI) == 0) {
-            support.ms().syms[si].flags |= support.F_MODULE_IMPORT
-        }
-        si += 1
-    }
-    let ti int = tname_base
-    for ti < support.ms().name_n {
-        if (support.ms().home[support.ms().names[ti].type_id] < 0) {
-            support.ms().home[support.ms().names[ti].type_id] = home
-        }
-        if (mod_ns_add(mi, support.ms().names[ti].name_off, support.ms().names[ti].name_len, -1, support.ms().names[ti].type_id) != 0) {
-            return -1
-        }
-        if (check.tname_mangle(ti, sfx_off, sfx_len) != 0) {
-            return -1
-        }
-        ti += 1
-    }
-    // 恢复编译状态（调用方继续编译本模块源文件）
-    token.ctx().count = 0
-    token.ctx().pos = 0
-    return mi
-}
 
 // mod_ns_add：向 ModInfo 追加导出名条目。
 fn mod_ns_add(mi int, name_off int, name_len int, sym int, tid int) int {

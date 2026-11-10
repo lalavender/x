@@ -1,0 +1,2034 @@
+module comptime
+
+import support
+import token
+// ============================================================================
+// api.yh —— comptime 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// CtToken：快照中保留求值所需的词法信息，避免持有前端可复用 token 表。
+pub struct CtToken {
+    kind int
+    start int
+    len int
+    line int
+    col int
+}
+
+// CtParam：编译期函数形参在源快照中的名字范围和已解析类型。
+pub struct CtParam {
+    name_start int
+    name_len int
+    type_id int
+}
+
+// CtImport：保存编译期函数定义文件中的导入别名及其已绑定模块编号。
+pub struct CtImport {
+    alias_off int // 导入别名在全局名字池中的偏移。
+    alias_len int // 导入别名字节长度。
+    module_id int // 已加载模块接口在 c_mods 中的编号。
+}
+
+// CtFunction：编译期函数的私有签名及其源/token 快照。
+pub struct CtFunction {
+    sym_id int
+    ret_type int
+    param_n int
+    params *CtParam
+    import_n int
+    imports *CtImport
+    src *u8
+    src_path *u8 // 定义源码路径副本；跨模块闭包转发时继续保留来源。
+    src_path_len int // 定义源码路径字节长度，不含结尾 NUL。
+    src_body_line int // 原始函数体左花括号的 1 基行号。
+    src_line_bias int // 当前快照行号转换为定义源码行号的偏移。
+    body *CtToken
+    body_n int
+    body_token_first int
+    ir_ready int
+    ir_supported int
+    ir_unsupported int // 正文不受支持时的原因码（CT_UNSUP_*），0 表示受支持。
+    ir_expr_first int
+    ir_expr_after int
+    ir_stmt_first int
+    ir_stmt_after int
+    ir_edge_first int
+    ir_edge_after int
+    ir_binding_first int
+    ir_binding_after int
+    ir_body_stmt int
+}
+
+// CtExpr：与前端 AstExpr 字段布局一致的编译期私有表达式节点快照。
+pub struct CtExpr {
+    kind int
+    op int
+    first int
+    after int
+    token_count int
+    file_id int
+    type_id int
+    owner_decl int
+    sym_id int
+    sym_name_off int
+    sym_name_len int
+    binding_row int
+    sym_type_id int
+    sym_kind int
+    sym_flags int
+    sym_offset int
+    is_const int
+    const_bits i64
+    is_lit int
+    lit_big int
+    fval_bits i64
+    layout_type_id int
+    child0 int
+    child1 int
+    child2 int
+}
+
+// CtStmt：与前端 AstStmt 字段布局一致的编译期私有语句节点快照。
+pub struct CtStmt {
+    kind int
+    op int
+    first int
+    after int
+    token_count int
+    file_id int
+    parent int
+    first_child int
+    last_child int
+    next_sibling int
+    root_next int
+    first_expr int
+    last_expr int
+    first_binding int
+    last_binding int
+}
+
+// CtEdge：表达式根边，布局与前端 AstStmtExpr 保持一致。
+pub struct CtEdge {
+    expr_id int
+    next int
+}
+
+// CtBinding：编译期局部槽快照，布局与前端 AstBinding 保持一致。
+pub struct CtBinding {
+    id int
+    sym_id int
+    sym_type_id int
+    sym_kind int
+    sym_flags int
+    sym_offset int
+    file_id int
+    owner_decl int
+    stmt_id int
+    name_token int
+    is_param int
+    next int
+}
+
+// CtValue：编译期整数求值结果，沿用前端常量赋值所需的类型与字面量信息。
+pub struct CtValue {
+    type_id int
+    value i64
+    is_lit int
+    lit_big int
+}
+
+// CtAggregate：调用帧的数组元素区、结构体字段值区，或指向数组元素区的非拥有视图。
+pub struct CtAggregate {
+    values *CtValue // 首个可见值；数组视图指向底层存储的偏移位置。
+    count int // 数组/切片视图长度或结构体字段数。
+    elem_type int // 数组元素类型；结构体字段区保存所属结构体类型。
+    owned int // 1 表示释放时释放 values；0 表示 values 由源聚合拥有。
+    next *CtAggregate // 调用帧创建链，返回或失败时统一释放聚合头与自有数据。
+}
+
+// CtPlace：编译期赋值目标，可指向局部值槽、聚合元素或当前帧内的直接值槽。
+pub struct CtPlace {
+    slot int // 局部绑定槽；聚合元素位置同时记录其所属基址槽。
+    aggregate *CtAggregate // 非空表示目标是聚合元素，空表示普通局部值。
+    index int // 聚合元素下标；普通局部值为 -1。
+    type_id int // 赋值目标的元素类型或局部变量类型。
+    direct *CtValue // 非空表示目标由受检查的局部指针直接寻址。
+}
+
+// CtPoolSpan：编译期字符串字面量的只读字节池区间（每字节一个 CtValue 槽）。
+pub struct CtPoolSpan {
+    addr i64 // 首字节槽的进程内地址。
+    count int // 槽数（含结尾 NUL 槽）。
+    elem int // 元素类型：TY_CHAR、TY_U8 或 TY_I8。
+    key i64 // 字节来源键：函数体字面量用源字节起点，全局常量用 -(intern 偏移 + 1)。
+}
+
+// CtLayoutRequest：等待编译期常量或元素布局就绪的数组/结构体布局项。
+pub struct CtLayoutRequest {
+    kind int // 1 = 数组，2 = struct/union。
+    type_id int
+    const_sym int // 数组长度来源；已知长度或结构体请求为 -1。
+    length int // 未求值的 const 长度为 -1。
+    is_union int
+    line int
+    col int
+    ready int
+    expr_file_id int // 长度表达式所在源文件；无延迟表达式时为 -1。
+    expr_first int // 长度表达式 token 起点；无延迟表达式时为 -1。
+    expr_after int // 长度表达式 token 终点；半开区间。
+    visit int // 混合依赖图 DFS 状态：0 未访问、1 活动、2 完成。
+}
+
+// CtValueRequest：布局阶段延迟执行的 typed CT 整数全局常量及其诊断位置。
+pub struct CtValueRequest {
+    sym_id int // 被求值的全局整数 const 符号。
+    line int // 初始化器声明位置，用于未就绪或依赖环诊断。
+    col int
+    visit int // 依赖环深度优先遍历状态：0 未访问、1 活动、2 完成。
+}
+
+// CtValueEdge：一个布局常量初始化器引用的未就绪全局 const。
+pub struct CtValueEdge {
+    owner_sym int
+    dep_sym int
+}
+
+// CtDependencyEdge：把编译期常量和值布局统一连接到值/布局依赖节点。
+pub struct CtDependencyEdge {
+    owner_kind int // 1 = 编译期常量，2 = 类型布局。
+    owner_id int // 值符号编号或类型编号。
+    dep_kind int // 1 = 编译期常量，2 = 类型布局。
+    dep_id int // 值符号编号或类型编号。
+}
+
+// CtDependencyNode：混合依赖环诊断 DFS 中的一个值或布局节点。
+pub struct CtDependencyNode {
+    kind int // 1 = 编译期常量，2 = 类型布局。
+    id int // 值符号编号或类型编号。
+}
+
+// CtFrame：一次 typed IR 执行帧的局部槽与函数绑定范围。
+pub struct CtFrame {
+    target CtFunction
+    locals *CtValue
+    local_n int
+    aggregates *CtAggregate
+    aggregate_element_count int
+    live_next *CtFrame // 存活调用帧链；用于校验编译期指针只指向存活的局部槽。
+}
+
+// ---- 类型种类镜像常量：数值必须与 gen/model.yh 的 TY_* 一致 ----
+// check.ct_type_layout_ok() 会逐项断言，漂移即编译/测试失败。
+pub const CT_TY_VOID int = 0
+
+pub const CT_TY_BOOL int = 1
+
+pub const CT_TY_CHAR int = 2
+
+pub const CT_TY_I8 int = 3
+
+pub const CT_TY_I16 int = 4
+
+pub const CT_TY_I32 int = 5
+
+pub const CT_TY_I64 int = 6
+
+pub const CT_TY_U8 int = 7
+
+pub const CT_TY_U16 int = 8
+
+pub const CT_TY_U32 int = 9
+
+pub const CT_TY_U64 int = 10
+
+pub const CT_TY_F32 int = 11
+
+pub const CT_TY_F64 int = 12
+
+pub const CT_TY_PTR int = 13
+
+pub const CT_TY_ARRAY int = 14
+
+pub const CT_TY_SLICE int = 15
+
+pub const CT_TY_STRUCT int = 16
+
+pub const CT_TY_UNION int = 17
+
+pub const CT_TY_ENUM int = 18
+
+pub const CT_TY_FN int = 19
+
+// CtTypeRow：gen.CType 的镜像。字段顺序与宽度必须与 gen.CType 完全一致。
+pub struct CtTypeRow {
+    kind int // TY_* 种类（与 gen 同值）
+    size int // 字节大小
+    align int // 字节对齐
+    elem int // PTR/ARRAY/SLICE 的元素类型；其余 -1
+    len int // ARRAY 长度 / STRUCT 字段数；其余 -1
+    sub int // STRUCT 字段表起点 / FN 签名号
+}
+
+// CtSymRow：gen.CSym 的镜像。字段顺序与宽度必须与 gen.CSym 完全一致。
+pub struct CtSymRow {
+    name_off int // 名字池偏移
+    name_len int
+    kind int // CT_SYM_*
+    type_id int
+    offset int // 局部/参数：距 fp 的字节距离；全局：bss 清单下标
+    flags int // CT_F_*
+    cval i64 // 常量值位型；指针常量存数据标签号
+    const_ready int // 1 = cval 已就绪，可参与编译期求值
+    const_expr_off int
+    const_expr_len int
+    const_expr_kind int
+    def_line int
+    def_col int
+    ast_binding_row int
+}
+
+// —— 符号种类/标志镜像常量：数值必须与 gen/model.yh 一致（check 断言） ——
+pub const CT_SYM_VAR int = 0
+
+pub const CT_SYM_CONST int = 1
+
+pub const CT_SYM_FN int = 2
+
+pub const CT_F_GLOBAL int = 1
+
+pub const CT_F_PARAM int = 2
+
+pub const CT_F_PUB int = 4
+
+pub const CT_F_EXTERN int = 8
+
+pub const CT_F_ADDR int = 16
+
+pub const CT_F_AGGPARAM int = 32
+
+pub const CT_F_CABI int = 16384
+
+pub const CT_F_COMPTIME int = 131072
+
+pub const CT_F_ENUM_MEMBER int = 262144
+
+pub const CT_F_ENUM_META int = 524288
+
+pub const CT_F_FIELD_META int = 1048576
+
+pub const CT_F_MODULE_IMPORT int = 2097152
+
+// CtFieldRow：gen.SField 的镜像（结构体/联合体字段表）。
+pub struct CtFieldRow {
+    name_off int
+    name_len int
+    type_id int
+    offset int // 相对结构体起始的字节偏移
+    is_pub int
+}
+
+// —— 编译期诊断种类镜像常量：数值必须与 gen/model.yh 一致 ——
+pub const CT_DIAG_ASSERT int = 1
+
+pub const CT_DIAG_ERROR int = 2
+
+pub const CT_DIAG_WARN int = 3
+
+// CtImportRow：ImportEnt 的镜像（文件导入表一行，10 个 int 字段同序同宽）。
+// 字段顺序必须与 support.ImportEnt 完全一致；ct_type_layout_ok 校验尺寸。
+pub struct CtImportRow {
+    name_off int // 查找名（模块名）名字池偏移
+    name_len int
+    path_off int // 完整点分原文（a.b.c）名字池偏移
+    path_len int
+    proj_key_off int // 跨项目导入的依赖键池偏移；同项目 -1
+    proj_key_len int
+    alias_off int // 绑定名池偏移
+    alias_len int
+    line int // 1 基行号
+    col int // 1 基列号
+}
+
+// CtStaticRow：support.StaticDataObject 的镜像（不含 relocs 内容，只带指针与行数）。
+pub struct CtStaticRow {
+    sym_id int
+    label int
+    type_id int
+    elem_type int
+    count int
+    size int
+    align int
+    data *u8
+    relocs *void // 指向 gen 的 StaticDataReloc 数组（只转发给 check 使用）
+    reloc_n int
+}
+
+// ct_diag_emit：从当前编译单元源码触发普通函数体中的诊断指令。
+pub fn ct_diag_emit(kind int, value i64, line int, col int,
+    msg_start int, msg_len int) int {
+    return ct_diag_emit_source(kind, value, line, col, support.src_ctx().data,
+        msg_start, msg_len, 0, 0)
+}
+
+// ct_can_assign：隐式转换判定（规则在 support.vk_can_assign）。
+pub fn ct_can_assign(dst int, src int, is_lit int, ival i64, big int) int {
+    return ct_report(support.vk_can_assign(dst, src, is_lit, ival, big))
+}
+
+// ct_fold_binop：常量二元折叠（规则在 support.vk_fold_binop）。
+pub fn ct_fold_binop(op int, tid int, left i64, right i64, result *i64) int {
+    return ct_report(support.vk_fold_binop(op, tid, left, right, result))
+}
+
+// ct_fold_unary：常量一元折叠（规则在 support.vk_fold_unary）。
+pub fn ct_fold_unary(op int, tid int, value i64, is_lit int, result *i64) int {
+    return ct_report(support.vk_fold_unary(op, tid, value, is_lit, result))
+}
+
+// ct_enum_member_count：统计枚举类型已登记的成员，保持符号表中的声明顺序。
+pub fn ct_enum_member_count(enum_type int) int {
+    if (enum_type < 0 || enum_type >= ct_types_bound()
+        || ct_type_row(enum_type).kind != CT_TY_ENUM) { return -1 }
+    let count int = 0
+    let i int = 0
+    for i < ct_syms_bound() {
+        if (ct_sym_row(i).kind == CT_SYM_CONST
+            && ct_sym_row(i).type_id == enum_type
+            && (ct_sym_row(i).flags & CT_F_ENUM_MEMBER) != 0
+            && ct_sym_row(i).const_ready != 0) {
+            count += 1
+        }
+        i += 1
+    }
+    return count
+}
+
+// ct_enum_member_at：按声明序号取枚举符号；无效序号返回 -1。
+pub fn ct_enum_member_at(enum_type int, ordinal int) int {
+    if (enum_type < 0 || enum_type >= ct_types_bound()
+        || ct_type_row(enum_type).kind != CT_TY_ENUM || ordinal < 0) { return -1 }
+    let seen int = 0
+    let i int = 0
+    for i < ct_syms_bound() {
+        if (ct_sym_row(i).kind == CT_SYM_CONST
+            && ct_sym_row(i).type_id == enum_type
+            && (ct_sym_row(i).flags & CT_F_ENUM_MEMBER) != 0
+            && ct_sym_row(i).const_ready != 0) {
+            if (seen == ordinal) { return i }
+            seen += 1
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ct_types_bind：绑定类型表的「槽」；rows_slot 是 `&TaskCtx.t_types`，
+// n_slot 是 `&TaskCtx.t_type_n`。绑定一次即对后续扩容免疫（每次读都解引用）。
+// 由 check.ct_types_sync() 在任务初始化时调用。
+pub fn ct_types_bind(rows_slot *void, n_slot *int) void {
+    ct_rows_slot = rows_slot
+    ct_n_slot = n_slot
+}
+
+// ct_types_bound：当前类型表行数；0 表示尚未绑定。
+pub fn ct_types_bound() int {
+    if (ct_n_slot == 0) { return 0 }
+    return ct_n_slot[0]
+}
+
+// ct_type_row：取第 tid 行镜像；调用方必须保证 0 <= tid < ct_types_bound()。
+pub fn ct_type_row(tid int) CtTypeRow {
+    let rows *CtTypeRow = ct_rows()
+    return rows[tid]
+}
+
+// ct_type_at：第 tid 行类型的**可写视图**。
+// 注意：`ct_type_row(tid)` 按值返回一行，对它字段赋值只改临时副本（静默丢失）；
+// 写表一律走本函数返回的指针。
+pub fn ct_type_at(tid int) *CtTypeRow {
+    let rows *CtTypeRow = ct_rows()
+    return &rows[tid]
+}
+
+// ct_ty_kind：类型种类（TY_*）。
+pub fn ct_ty_kind(tid int) int {
+    let rows *CtTypeRow = ct_rows()
+    return rows[tid].kind
+}
+
+// ct_ty_size：类型的字节大小。
+pub fn ct_ty_size(tid int) int {
+    let rows *CtTypeRow = ct_rows()
+    return rows[tid].size
+}
+
+// ct_ty_align：类型的字节对齐。
+pub fn ct_ty_align(tid int) int {
+    let rows *CtTypeRow = ct_rows()
+    return rows[tid].align
+}
+
+// ct_ty_elem：指针/数组/切片的元素类型；其余为 -1。
+pub fn ct_ty_elem(tid int) int {
+    let rows *CtTypeRow = ct_rows()
+    return rows[tid].elem
+}
+
+// ct_ty_len：数组长度或结构体字段数；其余为 -1。
+pub fn ct_ty_len(tid int) int {
+    let rows *CtTypeRow = ct_rows()
+    return rows[tid].len
+}
+
+// ct_ty_sub：结构体字段表起点或函数签名号。
+pub fn ct_ty_sub(tid int) int {
+    let rows *CtTypeRow = ct_rows()
+    return rows[tid].sub
+}
+
+// ct_ty_is_integer：整数类（bool..u64 与 enum），与 support.ty_is_integer 同定义。
+pub fn ct_ty_is_integer(tid int) int {
+    let k int = ct_ty_kind(tid)
+    if (k >= CT_TY_BOOL && k <= CT_TY_U64) { return 1 }
+    return (k == CT_TY_ENUM).to_type(int)
+}
+
+// ct_ty_is_signed：有符号整数类（char..i64 与 enum），与 support.ty_is_signed 同定义。
+pub fn ct_ty_is_signed(tid int) int {
+    let k int = ct_ty_kind(tid)
+    return ((k >= CT_TY_CHAR && k <= CT_TY_I64) || k == CT_TY_ENUM).to_type(int)
+}
+
+// ct_ty_is_float：f32/f64。
+pub fn ct_ty_is_float(tid int) int {
+    let k int = ct_ty_kind(tid)
+    return (k == CT_TY_F32 || k == CT_TY_F64).to_type(int)
+}
+
+// ct_syms_bind：绑定符号表的槽（`&TaskCtx.c_syms` / `&TaskCtx.c_sym_n`）。
+pub fn ct_syms_bind(rows_slot *void, n_slot *int) void {
+    ct_sym_slot = rows_slot
+    ct_sym_n_slot = n_slot
+}
+
+// ct_syms_bound：当前符号表行数；0 表示未绑定。
+pub fn ct_syms_bound() int {
+    if (ct_sym_n_slot == 0) { return 0 }
+    return ct_sym_n_slot[0]
+}
+
+// ct_sym_row：取第 idx 行符号镜像；未绑定或越界由调用方保证不发生。
+pub fn ct_sym_row(idx int) CtSymRow {
+    if (ct_sym_slot == 0) {
+        support.fail("内部错误：CT 符号表未绑定（缺 check.ct_facts_sync）")
+        exit(1)
+    }
+    let slot **CtSymRow = ct_sym_slot.to_type(**CtSymRow)
+    let rows *CtSymRow = slot[0]
+    return rows[idx]
+}
+
+// ct_sym_at：第 idx 行符号的可写视图（写表一律走指针，理由同 ct_type_at）。
+pub fn ct_sym_at(idx int) *CtSymRow {
+    if (ct_sym_slot == 0) {
+        support.fail("内部错误：CT 符号表未绑定（缺 check.ct_facts_sync）")
+        exit(1)
+    }
+    let slot **CtSymRow = ct_sym_slot.to_type(**CtSymRow)
+    let rows *CtSymRow = slot[0]
+    return &rows[idx]
+}
+
+// ct_sym_declared_before：符号声明位置是否早于 (line,col)（同一文件内）。
+// 从 check.sym_declared_before 搬到镜像侧（F4：纯读查询，执行器不再进 gen）。
+// 越界符号一律返回 0（与 gen 版一致：下标不可信时按「未声明在前」处理）。
+pub fn ct_sym_declared_before(sym int, line int, col int) int {
+    if (sym < 0 || sym >= ct_syms_bound()) { return 0 }
+    let row CtSymRow = ct_sym_row(sym)
+    if (row.def_line < line) { return 1 }
+    if (row.def_line == line && row.def_col < col) { return 1 }
+    return 0
+}
+
+// ct_field_at：第 idx 行字段的可写视图（写表一律走指针，理由同 ct_type_at）。
+pub fn ct_field_at(idx int) *CtFieldRow {
+    if (ct_field_slot == 0) {
+        support.fail("内部错误：CT 字段表未绑定（缺 check.ct_facts_sync）")
+        exit(1)
+    }
+    let slot **CtFieldRow = ct_field_slot.to_type(**CtFieldRow)
+    let rows *CtFieldRow = slot[0]
+    return &rows[idx]
+}
+
+// ct_fields_bind：绑定字段表的槽（`&TaskCtx.t_fields` / `&TaskCtx.t_field_n`）。
+pub fn ct_fields_bind(rows_slot *void, n_slot *int) void {
+    ct_field_slot = rows_slot
+    ct_field_n_slot = n_slot
+}
+
+// ct_fields_bound：当前字段表行数；0 表示未绑定。
+pub fn ct_fields_bound() int {
+    if (ct_field_n_slot == 0) { return 0 }
+    return ct_field_n_slot[0]
+}
+
+// ct_field_row：取第 idx 行字段镜像。
+pub fn ct_field_row(idx int) CtFieldRow {
+    if (ct_field_slot == 0) {
+        support.fail("内部错误：CT 字段表未绑定（缺 check.ct_facts_sync）")
+        exit(1)
+    }
+    let slot **CtFieldRow = ct_field_slot.to_type(**CtFieldRow)
+    let rows *CtFieldRow = slot[0]
+    return rows[idx]
+}
+
+// ct_imports_bind：绑定文件导入表（`&TaskCtx.mod_imports` / `&mod_import_n` /
+// `&mod_import_mod`）。只传槽，表扩容后镜像自动跟随；每任务一次。
+pub fn ct_imports_bind(rows_slot *void, n_slot *int, mod_slot *void) void {
+    ct_imp_slot = rows_slot
+    ct_imp_n_slot = n_slot
+    ct_imp_mod_slot = mod_slot
+}
+
+// ct_import_count：当前文件导入表行数；未绑定为 0。
+pub fn ct_import_count() int {
+    if (ct_imp_n_slot == 0) { return 0 }
+    return ct_imp_n_slot[0]
+}
+
+// ct_import_row：第 idx 行导入镜像；调用方保证下标有效且已绑定。
+pub fn ct_import_row(idx int) CtImportRow {
+    if (ct_imp_slot == 0) {
+        support.fail("内部错误：CT 导入表未绑定（缺 check.ct_facts_sync）")
+        exit(1)
+    }
+    let slot **CtImportRow = ct_imp_slot.to_type(**CtImportRow)
+    let rows *CtImportRow = slot[0]
+    return rows[idx]
+}
+
+// ct_import_module：第 idx 个导入绑定的模块编号（-1 = 未绑定模块）。
+pub fn ct_import_module(idx int) int {
+    if (ct_imp_mod_slot == 0) { return -1 }
+    let slot **int = ct_imp_mod_slot.to_type(**int)
+    return slot[0][idx]
+}
+
+// ct_mode_bind：绑定折叠开关与结果寻址位的槽；由 check.ct_facts_sync 调用。
+pub fn ct_mode_bind(fold_slot *void, addr_slot *void) void {
+    ct_fold_slot = fold_slot
+    ct_addr_slot = addr_slot
+}
+
+// ct_fold_mode：当前是否处于「只做常量折叠」模式；未绑定按 0 处理。
+pub fn ct_fold_mode() int {
+    if (ct_fold_slot == 0) { return 0 }
+    let slot *int = ct_fold_slot.to_type(*int)
+    return slot[0]
+}
+
+// ct_res_is_addr_set：把「刚求得的表达式在栈上留下地址」写回前端。
+// 未绑定时静默忽略（调用方一定在 ct_facts_sync 之后才进执行器）。
+pub fn ct_res_is_addr_set(v int) void {
+    if (ct_addr_slot == 0) { return }
+    let slot *int = ct_addr_slot.to_type(*int)
+    slot[0] = v
+}
+
+// ct_err：编译期诊断（带当前 token 位置），返回 -1 便于链式返回。
+// 与 gen.sem_err 同语义：位置取 token 游标；token 表缺失时退化为无位置诊断。
+// 放在 ct_facts 是为了让执行器不再依赖 gen 的诊断入口（F4-4）。
+pub fn ct_err(msg *char) int {
+    let tk *token.TokenCtx = token.ctx()
+    if (tk.tokens == 0 || tk.pos < 0 || tk.pos >= tk.count) {
+        return support.fail(msg)
+    }
+    return support.err_lc(tk.tokens[tk.pos].line, tk.tokens[tk.pos].col, msg)
+}
+
+// ct_tables_bind：绑定字符串标签、枚举成员、静态数据目录的槽。
+// 全部传「槽的地址」，表增长/搬迁后读时自动跟随。
+pub fn ct_tables_bind(ds_lbl *int, ds_off *int, ds_len *int, ds_q *int,
+    ds_n *int, em_off *int, em_len *int, em_val *i64, em_ready *int,
+    em_n *int, static_rows **CtStaticRow, static_n *int) void {
+    ct_ds_lbl_slot = ds_lbl
+    ct_ds_off_slot = ds_off
+    ct_ds_len_slot = ds_len
+    ct_ds_q_slot = ds_q
+    ct_ds_n_slot = ds_n
+    ct_em_off_slot = em_off
+    ct_em_len_slot = em_len
+    ct_em_val_slot = em_val
+    ct_em_ready_slot = em_ready
+    ct_em_n_slot = em_n
+    ct_static_rows_slot = static_rows
+    ct_static_n_slot = static_n
+}
+
+// ct_data_str_lookup：按数据标签查字符串字面式字节；1 命中、0 未命中。
+pub fn ct_data_str_lookup(lbl int, off *int, slen *int, quoted *int) int {
+    if (ct_ds_n_slot == 0) { return 0 }
+    let n int = ct_ds_n_slot[0]
+    let lbls *int = ct_ds_lbl_slot
+    let i int = 0
+    for i < n {
+        if (lbls[i] == lbl) {
+            off[0] = ct_ds_off_slot[i]
+            slen[0] = ct_ds_len_slot[i]
+            quoted[0] = ct_ds_q_slot[i]
+            return 1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// ct_em_count：枚举成员登记行数。
+pub fn ct_em_count() int {
+    if (ct_em_n_slot == 0) { return 0 }
+    return ct_em_n_slot[0]
+}
+
+// ct_em_val / ct_em_ready：枚举成员的值与就绪位。
+pub fn ct_em_val(idx int) i64 { return ct_em_val_slot[idx] }
+
+pub fn ct_em_ready(idx int) int { return ct_em_ready_slot[idx] }
+
+// ct_em_find_src：按源码字节 [start,start+n) 反查枚举成员登记行；-1 未命中。
+pub fn ct_em_find_src(src *u8, start int, n int) int {
+    let rows int = ct_em_count()
+    let offs *int = ct_em_off_slot
+    let lens *int = ct_em_len_slot
+    let i int = 0
+    for i < rows {
+        if (lens[i] == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_byte(offs[i] + j) != src[start + j]) { match = 0; break }
+                j += 1
+            }
+            if (match != 0) { return i }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ct_static_count：静态数据目录行数。
+pub fn ct_static_count() int {
+    if (ct_static_n_slot == 0) { return 0 }
+    return ct_static_n_slot[0]
+}
+
+// ct_static_at：取第 row 行静态数据镜像；越界返回 0/1 状态。
+pub fn ct_static_at(row int, out *CtStaticRow) int {
+    if (ct_static_rows_slot == 0 || row < 0 || row >= ct_static_count()) { return -1 }
+    let rows *CtStaticRow = ct_static_rows_slot[0]
+    out[0] = rows[row]
+    return 0
+}
+
+// ct_global_agg_modelable：判断类型能否在编译期建模。
+// 只接受整数/浮点标量、整数或浮点元素的定长数组，以及字段递归满足同一条件的
+// 结构体。指针（含字符串元素）、切片、联合体不建模：前端的全局初始化对它们
+// 要么拒绝，要么只能给出数据标签，建模会得到错误的元素值。
+pub fn ct_global_agg_modelable(type_id int, depth int) int {
+    if (depth >= 32 || type_id < 0 || type_id >= ct_types_bound()) { return 0 }
+    if (ct_ty_is_integer(type_id) != 0 || ct_ty_is_float(type_id) != 0) {
+        return 1
+    }
+    let kind int = ct_type_row(type_id).kind
+    if (kind == CT_TY_ARRAY) {
+        let elem int = ct_type_row(type_id).elem
+        return (ct_ty_is_integer(elem) != 0 || ct_ty_is_float(elem) != 0) .
+            to_type(int)
+    }
+    if (kind == CT_TY_STRUCT) {
+        let st CtTypeRow = ct_type_row(type_id)
+        let i int = 0
+        for i < st.len {
+            if (ct_global_agg_modelable(ct_field_row(st.sub + i).type_id,
+                    depth + 1) == 0) { return 0 }
+            i += 1
+        }
+        return 1
+    }
+    return 0
+}
+
+// ct_global_agg_new：在全局常量区建一个模型对象并预置零值，返回对象指针；
+// 0 表示失败（诊断已给出）。elem_type 约定同 ct_ir_aggregate_new：数组传元素
+// 类型、结构体传自身类型。结构体按字段类型逐个预置类型，命名式字面量漏写的
+// 字段因此得到正确的零值类型。
+pub fn ct_global_agg_new(elem_type int, count int) i64 {
+    let aggregate *CtAggregate = ct_ir_aggregate_new(&ct_global_pool,
+        elem_type, count)
+    if (aggregate == 0) { return 0 }
+    let struct_like int = (elem_type >= 0 && elem_type < ct_types_bound()
+        && ct_ty_kind(elem_type) == CT_TY_STRUCT).to_type(int)
+    let st CtTypeRow
+    if (struct_like != 0) { st = ct_type_row(elem_type) }
+    let i int = 0
+    for i < count {
+        let slot_type int = elem_type
+        if (struct_like != 0 && i < st.len) {
+            slot_type = ct_field_row(st.sub + i).type_id
+        }
+        aggregate.values[i].type_id = slot_type
+        aggregate.values[i].value = 0
+        aggregate.values[i].is_lit = 0
+        aggregate.values[i].lit_big = 0
+        i += 1
+    }
+    return aggregate.to_type(u64).to_type(i64)
+}
+
+// ct_global_agg_set：写入模型第 index 个元素/字段的标量值，按目标类型归一
+// （整数截断到宽度、浮点窄化）。返回 0 成功，-1 表示内部越界。
+pub fn ct_global_agg_set(obj i64, index int, type_id int, value i64) int {
+    let slot *CtValue = ct_global_agg_slot(obj, index)
+    if (slot == 0) {
+        return ct_err("内部错误：全局聚合常量模型写入越界")
+    }
+    slot.type_id = type_id
+    slot.value = ct_ir_norm_scalar(type_id, value)
+    slot.is_lit = 0
+    slot.lit_big = 0
+    return 0
+}
+
+// ct_global_agg_set_obj：写入模型第 index 个元素/字段的嵌套聚合对象指针。
+pub fn ct_global_agg_set_obj(obj i64, index int, type_id int,
+    child i64) int {
+    let slot *CtValue = ct_global_agg_slot(obj, index)
+    if (slot == 0 || child == 0) {
+        return ct_err("内部错误：全局聚合常量嵌套模型写入越界")
+    }
+    slot.type_id = type_id
+    slot.value = child
+    slot.is_lit = 0
+    slot.lit_big = 0
+    return 0
+}
+
+// ct_global_agg_register：登记符号的编译期模型；同一符号重复登记（多遍解析）
+// 时覆盖旧对象，保持「最后一个模型生效」。
+pub fn ct_global_agg_register(sym_id int, obj i64) int {
+    if (sym_id < 0 || obj == 0) {
+        return ct_err("内部错误：全局聚合常量模型登记参数无效")
+    }
+    let i int = 0
+    for i < ct_global_agg_n {
+        if (ct_global_aggs[i].sym_id == sym_id) {
+            ct_global_aggs[i].obj = obj
+            return 0
+        }
+        i += 1
+    }
+    if (ct_global_agg_n >= ct_global_agg_cap) {
+        return ct_err("全局聚合常量过多（编译期模型上限 1024 个）")
+    }
+    ct_global_aggs[ct_global_agg_n].sym_id = sym_id
+    ct_global_aggs[ct_global_agg_n].obj = obj
+    ct_global_agg_n += 1
+    return 0
+}
+
+// ct_global_agg_lookup：查符号的编译期模型对象指针；未登记返回 0。
+pub fn ct_global_agg_lookup(sym_id int) i64 {
+    let i int = 0
+    for i < ct_global_agg_n {
+        if (ct_global_aggs[i].sym_id == sym_id) { return ct_global_aggs[i].obj }
+        i += 1
+    }
+    return 0
+}
+
+// ct_ir_import：将刚完成语义检查的函数 AST 切片复制进 comptime 自有 arena。
+pub fn ct_ir_import(sym_id int, expr_src *CtExpr, expr_first int, expr_n int,
+    stmt_src *CtStmt, stmt_first int, stmt_n int, edge_src *CtEdge, edge_first int,
+    edge_n int, binding_src *CtBinding, binding_first int, binding_n int,
+    body_stmt int) int {
+    let row int = ct_find(sym_id)
+    if (row < 0 || ct_functions[row].ir_ready != 0
+        || expr_first < 0 || stmt_first < 0 || edge_first < 0
+        || binding_first < 0 || expr_n < 0 || stmt_n <= 0
+        || edge_n < 0 || binding_n < 0
+        || body_stmt < stmt_first || body_stmt >= stmt_first + stmt_n) {
+        return support.fail("内部错误：编译期 typed IR 切片不连续")
+    }
+    let expr_dst int = ct_ir_expr_n
+    let stmt_dst int = ct_ir_stmt_n
+    let edge_dst int = ct_ir_edge_n
+    let binding_dst int = ct_ir_binding_n
+    if (ct_ir_grow(1, expr_dst + expr_n) != 0
+        || ct_ir_grow(5, expr_dst + expr_n) != 0
+        || ct_ir_grow(2, stmt_dst + stmt_n) != 0
+        || ct_ir_grow(3, edge_dst + edge_n) != 0
+        || ct_ir_grow(4, binding_dst + binding_n) != 0) { return -1 }
+    if (expr_n > 0 && ct_ir_copy_slice(&ct_ir_exprs[expr_dst].kind,
+            &expr_src[expr_first].kind, expr_n, sizeof(CtExpr)) != 0) { return -1 }
+    if (ct_ir_register_string_pool(expr_dst, expr_n) != 0) { return -1 }
+    if (stmt_n > 0 && ct_ir_copy_slice(&ct_ir_stmts[stmt_dst].kind,
+            &stmt_src[stmt_first].kind, stmt_n, sizeof(CtStmt)) != 0) { return -1 }
+    if (edge_n > 0 && ct_ir_copy_slice(&ct_ir_edges[edge_dst].expr_id,
+            &edge_src[edge_first].expr_id, edge_n, sizeof(CtEdge)) != 0) { return -1 }
+    if (binding_n > 0 && ct_ir_copy_slice(&ct_ir_bindings[binding_dst].id,
+            &binding_src[binding_first].id, binding_n, sizeof(CtBinding)) != 0) { return -1 }
+    ct_ir_rebase(expr_first, expr_n, stmt_first, stmt_n, edge_first, edge_n,
+        binding_first, binding_n, expr_dst, stmt_dst, edge_dst, binding_dst)
+    ct_ir_expr_n = expr_dst + expr_n
+    ct_ir_stmt_n = stmt_dst + stmt_n
+    ct_ir_edge_n = edge_dst + edge_n
+    ct_ir_binding_n = binding_dst + binding_n
+    ct_functions[row].ir_expr_first = expr_dst
+    ct_functions[row].ir_expr_after = expr_dst + expr_n
+    ct_functions[row].ir_stmt_first = stmt_dst
+    ct_functions[row].ir_stmt_after = stmt_dst + stmt_n
+    ct_functions[row].ir_edge_first = edge_dst
+    ct_functions[row].ir_edge_after = edge_dst + edge_n
+    ct_functions[row].ir_binding_first = binding_dst
+    ct_functions[row].ir_binding_after = binding_dst + binding_n
+    ct_functions[row].ir_body_stmt = body_stmt + stmt_dst - stmt_first
+    let support int = ct_ir_support_code(stmt_dst, stmt_dst + stmt_n,
+        expr_dst, expr_dst + expr_n)
+    ct_functions[row].ir_supported = (support == 0).to_type(int)
+    ct_functions[row].ir_unsupported = support
+    ct_functions[row].ir_ready = 1
+    return 0
+}
+
+// ct_pool_elem_of：指针类型指向单字节元素（char/u8/i8）时返回元素类型，否则 -1。
+pub fn ct_pool_elem_of(type_id int) int {
+    if (type_id < 0 || type_id >= ct_types_bound()) { return -1 }
+    if (ct_type_row(type_id).kind != CT_TY_PTR) { return -1 }
+    let elem int = ct_type_row(type_id).elem
+    if (elem == CT_TY_CHAR || elem == CT_TY_U8 || elem == CT_TY_I8) { return elem }
+    return -1
+}
+
+// ct_pool_register_src：按当前源文件的字节区间登记只读池（参数全为标量，供 parse
+// 侧在实参位置直接登记字面量，避免跨模块传递 *u8 参数）。
+pub fn ct_pool_register_src(start int, slen int, elem int) i64 {
+    return ct_pool_register(support.src_ctx().data, start, slen, elem, start.to_type(i64))
+}
+
+// ct_arg_pool_agg：在临时构造区建一个聚合对象，按源码顺序填入 n 个元素/字段值，
+// 返回对象指针（0 表示失败，诊断已给出）。elem_type 对结构体是它自身类型，对数组是
+// **元素**类型（与 ct_ir_aggregate_new 的约定一致）。
+// 参数用扁平标量数组（值 + 各自类型）而不是 CtValue 数组：调用方在 parse 侧，
+// 拿不到 comptime 私有类型 CtValue 的构造能力。
+pub fn ct_arg_pool_agg(elem_type int, vals *i64, tys *int, n int) i64 {
+    let aggregate *CtAggregate = ct_ir_aggregate_new(&ct_arg_pool, elem_type, n)
+    if (aggregate == 0) { return 0 }
+    let i int = 0
+    for i < n {
+        aggregate.values[i].type_id = tys[i]
+        aggregate.values[i].value = vals[i]
+        aggregate.values[i].is_lit = 0
+        aggregate.values[i].lit_big = 0
+        i += 1
+    }
+    return aggregate.to_type(u64).to_type(i64)
+}
+
+// ct_ir_data_emit_global：把全局初始化中的 CT 聚合和 backing 写入目标数据区。
+pub fn ct_ir_data_emit_global(sym_id int, type_id int, value *CtValue) int {
+    if (sym_id < 0 || sym_id >= ct_syms_bound() || value == 0
+        || value.type_id != type_id || ct_ir_return_supported(type_id) == 0) {
+        return ct_err("全局编译期聚合初始化类型无效")
+    }
+    ct_ir_data_bind_iface_label(sym_id)
+    let label int = (ct_sym_row(sym_id).flags & CT_F_EXTERN) != 0 ?
+        ct_sym_row(sym_id).cval.to_type(int) : -1
+    if (ct_static_data_record(sym_id, label, type_id, value) != 0
+        || ct_ir_data_value(type_id, value, 0) != 0) { return -1 }
+    return 0
+}
+
+// ct_ir_param_supported：判断形参类型是否有稳定的编译期值与复制语义。
+pub fn ct_ir_param_supported(type_id int) int {
+    if (type_id < 0 || type_id >= ct_types_bound()) { return 0 }
+    let kind int = ct_type_row(type_id).kind
+    if (ct_ty_is_integer(type_id) != 0 || ct_ty_is_float(type_id) != 0) { return 1 }
+    // 指针形参只别名调用方帧的标量槽；指向指针或聚合的指针仍拒绝。
+    if (kind == CT_TY_PTR) {
+        return (ct_ty_is_integer(ct_type_row(type_id).elem) != 0
+            || ct_ty_is_float(ct_type_row(type_id).elem) != 0).to_type(int)
+    }
+    if (kind == CT_TY_ARRAY) { return ct_ir_array_supported(type_id, 0) }
+    if (kind == CT_TY_STRUCT || kind == CT_TY_UNION) {
+        return ct_ir_struct_supported(type_id, 0)
+    }
+    if (kind == CT_TY_SLICE) {
+        let elem int = ct_type_row(type_id).elem
+        return ct_ir_slice_elem_supported(elem, 0)
+    }
+    return 0
+}
+
+// ct_ir_return_supported：返回值限于标量整数/浮点、受支持聚合及整数切片。
+pub fn ct_ir_return_supported(type_id int) int {
+    if (type_id < 0 || type_id >= ct_types_bound()) { return 0 }
+    let kind int = ct_type_row(type_id).kind
+    if (ct_ty_is_integer(type_id) != 0 || ct_ty_is_float(type_id) != 0) { return 1 }
+    if (kind == CT_TY_ARRAY) { return ct_ir_array_supported(type_id, 0) }
+    if (kind == CT_TY_STRUCT || kind == CT_TY_UNION) {
+        return ct_ir_struct_supported(type_id, 0)
+    }
+    if (kind == CT_TY_SLICE) {
+        return ct_ir_slice_elem_supported(ct_type_row(type_id).elem, 0)
+    }
+    return 0
+}
+
+// ct_value_requested：该符号是否已登记为布局期值请求（供解析侧判断某个
+// 未就绪 const 需要在布局子遍求值）。
+pub fn ct_value_requested(sym_id int) int {
+    return (ct_value_find(sym_id) >= 0).to_type(int)
+}
+
+// ct_value_request_add：登记一个待执行的 typed CT 整数常量。
+pub fn ct_value_request_add(sym_id int, line int, col int) int {
+    if (ct_value_find(sym_id) >= 0) { return 0 }
+    if (ct_value_request_grow() != 0) { return -1 }
+    ct_value_requests[ct_value_request_n].sym_id = sym_id
+    ct_value_requests[ct_value_request_n].line = line
+    ct_value_requests[ct_value_request_n].col = col
+    ct_value_requests[ct_value_request_n].visit = 0
+    ct_value_request_n += 1
+    return 0
+}
+
+// ct_value_dependency_add：添加初始化器到未就绪常量的唯一依赖边。
+pub fn ct_value_dependency_add(owner_sym int, dep_sym int) int {
+    let i int = 0
+    for i < ct_value_edge_n {
+        if (ct_value_edges[i].owner_sym == owner_sym
+            && ct_value_edges[i].dep_sym == dep_sym) { return 0 }
+        i += 1
+    }
+    if (ct_value_edge_grow() != 0) { return -1 }
+    ct_value_edges[ct_value_edge_n].owner_sym = owner_sym
+    ct_value_edges[ct_value_edge_n].dep_sym = dep_sym
+    ct_value_edge_n += 1
+    return ct_dependency_add(CT_DEP_VALUE, owner_sym, CT_DEP_VALUE, dep_sym)
+}
+
+// ct_value_request_runnable：仅当请求引用的所有全局 const 均 READY 时才可解析。
+pub fn ct_value_request_runnable(sym_id int) int {
+    if (ct_value_find(sym_id) < 0) { return 0 }
+    let i int = 0
+    for i < ct_value_edge_n {
+        if (ct_value_edges[i].owner_sym == sym_id) {
+            let dep int = ct_value_edges[i].dep_sym
+            if (dep < 0 || dep >= ct_syms_bound()
+                || ct_sym_row(dep).const_ready == 0) { return 0 }
+        }
+        i += 1
+    }
+    return 1
+}
+
+// ct_value_pending_count：返回仍未 READY 的 typed CT 布局常量请求数。
+pub fn ct_value_pending_count() int {
+    let count int = 0
+    let i int = 0
+    for i < ct_value_request_n {
+        let sym int = ct_value_requests[i].sym_id
+        if (sym < 0 || sym >= ct_syms_bound() || ct_sym_row(sym).const_ready == 0) {
+            count += 1
+        }
+        i += 1
+    }
+    return count
+}
+
+// ct_value_stuck_diagnostic：无调度进展时报告常量依赖闭环或首个未就绪值。
+pub fn ct_value_stuck_diagnostic() int {
+    if (ct_value_cycle_diagnostic() != 0) { return -1 }
+    let k int = 0
+    for k < ct_value_request_n {
+        let sym int = ct_value_requests[k].sym_id
+        if (sym < 0 || sym >= ct_syms_bound() || ct_sym_row(sym).const_ready == 0) {
+            return support.err_lc(ct_value_requests[k].line,
+                ct_value_requests[k].col, "编译期常量尚未就绪")
+        }
+        k += 1
+    }
+    return 0
+}
+
+// ct_layout_array：创建显式 pending 数组类型，长度可来自未就绪 const 或已知值。
+pub fn ct_layout_array(elem int, length int, const_sym int,
+    line int, col int) int {
+    if (elem < 0 || elem >= ct_types_bound()
+        || (const_sym < 0 && length <= 0)) {
+        return ct_err("内部错误：编译期数组布局请求无效")
+    }
+    // 长度来自未就绪 const：声明在前的常量登记为布局期值请求，让布局循环
+    // 先求出它（普通 `const N int = 3;` 的值原本只在全局子遍就绪，导致
+    // `[N]int` 出现在全局/字段/形参/返回位置时误报「编译期常量尚未就绪」）。
+    // 前向引用（声明在后）仍不登记，保持既有声明顺序规则与诊断。
+    if (const_sym >= 0 && ct_sym_declared_before(const_sym, line, col) != 0
+        && ct_value_request_add(const_sym, line, col) != 0) {
+        return -1
+    }
+    let existing int = ct_layout_array_find(elem, length, const_sym, -1, -1, -1)
+    if (existing >= 0) {
+        return existing
+    }
+    let align int = ct_type_row(elem).align
+    if (align < 1) { align = 1 }
+    let tid int = support.model_type_push_agg(CT_TY_ARRAY, -1, align, elem, -2, -1)
+    if (tid < 0) { return -1 }
+    if (ct_layout_add(CT_LAYOUT_ARRAY, tid, const_sym, length,
+            0, line, col, -1, -1, -1) < 0
+        || ct_dependency_add(CT_DEP_LAYOUT, tid, CT_DEP_LAYOUT, elem) != 0) {
+        return -1
+    }
+    if (const_sym >= 0 && ct_dependency_add(CT_DEP_LAYOUT, tid,
+            CT_DEP_VALUE, const_sym) != 0) { return -1 }
+    return tid
+}
+
+// ct_layout_array_expr：保存尚不能执行的数组长度 token 区间并创建 pending 数组类型。
+pub fn ct_layout_array_expr(elem int, file_id int, file_n int, first int, after int,
+    line int, col int) int {
+    if (elem < 0 || elem >= ct_types_bound() || file_id < -1
+        || (file_id >= 0 && file_id >= file_n)
+        || first < 0 || after <= first || after > token.ctx().count) {
+        return ct_err("内部错误：编译期数组长度表达式范围无效")
+    }
+    let existing int = ct_layout_array_find(elem, -1, -1, file_id, first, after)
+    if (existing >= 0) {
+        return existing
+    }
+    let align int = ct_type_row(elem).align
+    if (align < 1) { align = 1 }
+    let tid int = support.model_type_push_agg(CT_TY_ARRAY, -1, align, elem, -2, -1)
+    if (tid < 0) { return -1 }
+    if (ct_layout_add(CT_LAYOUT_ARRAY, tid, -1, -1, 0,
+            line, col, file_id, first, after) < 0
+        || ct_dependency_add(CT_DEP_LAYOUT, tid, CT_DEP_LAYOUT, elem) != 0) {
+        return -1
+    }
+    return tid
+}
+
+// ct_layout_struct_pending：检查结构体是否直接包含尚未完成的字段类型。
+pub fn ct_layout_struct_pending(type_id int) int {
+    if (type_id < 0 || type_id >= ct_types_bound()) { return 0 }
+    let first int = ct_type_row(type_id).sub
+    let count int = ct_type_row(type_id).len
+    let i int = 0
+    for i < count {
+        let field_type int = ct_field_row(first + i).type_id
+        if (ct_type_row(field_type).size < 0
+            || ct_layout_type_pending(field_type) != 0) { return 1 }
+        i += 1
+    }
+    return 0
+}
+
+// ct_layout_defer_struct：延后包含 pending 字段的结构体/联合体布局。
+pub fn ct_layout_defer_struct(type_id int, is_union int, line int, col int) int {
+    let i int = 0
+    for i < ct_layout_request_n {
+        if (ct_layout_requests[i].kind == CT_LAYOUT_STRUCT
+            && ct_layout_requests[i].type_id == type_id) { return 0 }
+        i += 1
+    }
+    if (ct_layout_add(CT_LAYOUT_STRUCT, type_id, -1, -1,
+            is_union, line, col, -1, -1, -1) < 0) { return -1 }
+    ct_type_at(type_id)[0].size = -1
+    ct_type_at(type_id)[0].align = 1
+    let first int = ct_type_row(type_id).sub
+    let count int = ct_type_row(type_id).len
+    let field int = 0
+    for field < count {
+        if (ct_dependency_add(CT_DEP_LAYOUT, type_id, CT_DEP_LAYOUT,
+                ct_field_row(first + field).type_id) != 0) { return -1 }
+        field += 1
+    }
+    return 0
+}
+
+// ct_layout_request_count：返回当前单元待求解布局请求总数。
+pub fn ct_layout_request_count() int {
+    return ct_layout_request_n
+}
+
+// ct_layout_type_pending：查询指定类型是否仍由未完成布局请求控制。
+pub fn ct_layout_type_pending(type_id int) int {
+    let i int = 0
+    for i < ct_layout_request_n {
+        if (ct_layout_requests[i].type_id == type_id
+            && ct_layout_requests[i].ready == 0) { return 1 }
+        i += 1
+    }
+    return 0
+}
+
+// ct_layout_expr_pending_count：返回尚未解析出整数长度的表达式请求数量。
+pub fn ct_layout_expr_pending_count() int {
+    let count int = 0
+    let i int = 0
+    for i < ct_layout_request_n {
+        if (ct_layout_requests[i].kind == CT_LAYOUT_ARRAY
+            && ct_layout_requests[i].ready == 0
+            && ct_layout_requests[i].expr_first >= 0
+            && ct_layout_requests[i].length <= 0) { count += 1 }
+        i += 1
+    }
+    return count
+}
+
+// ct_layout_expr_pending：查询指定布局请求是否仍等待长度表达式求值。
+pub fn ct_layout_expr_pending(row int) int {
+    if (row < 0 || row >= ct_layout_request_n) { return 0 }
+    return (ct_layout_requests[row].kind == CT_LAYOUT_ARRAY
+        && ct_layout_requests[row].ready == 0
+        && ct_layout_requests[row].expr_first >= 0
+        && ct_layout_requests[row].length <= 0).to_type(int)
+}
+
+// ct_layout_expr_file：返回长度表达式所在文件；无表达式或编号越界返回 -1。
+pub fn ct_layout_expr_file(row int) int {
+    if (row < 0 || row >= ct_layout_request_n
+        || ct_layout_requests[row].expr_first < 0) { return -1 }
+    return ct_layout_requests[row].expr_file_id
+}
+
+// ct_layout_expr_first：返回长度表达式 token 起点；无表达式时返回 -1。
+pub fn ct_layout_expr_first(row int) int {
+    if (row < 0 || row >= ct_layout_request_n) { return -1 }
+    return ct_layout_requests[row].expr_first
+}
+
+// ct_layout_expr_after：返回长度表达式 token 半开终点；无表达式时返回 -1。
+pub fn ct_layout_expr_after(row int) int {
+    if (row < 0 || row >= ct_layout_request_n) { return -1 }
+    return ct_layout_requests[row].expr_after
+}
+
+// ct_layout_expr_set_length：校验并保存长度表达式的整数常量结果。
+pub fn ct_layout_expr_set_length(row int, length i64) int {
+    if (row < 0 || row >= ct_layout_request_n
+        || ct_layout_expr_pending(row) == 0) {
+        return support.fail("内部错误：编译期数组长度请求状态无效")
+    }
+    if (length <= 0) {
+        return support.err_lc(ct_layout_requests[row].line,
+            ct_layout_requests[row].col, "数组长度必须为正")
+    }
+    if (length > 2147483647) {
+        return support.err_lc(ct_layout_requests[row].line,
+            ct_layout_requests[row].col, "数组长度超出限制")
+    }
+    ct_layout_requests[row].length = length.to_type(int)
+    return 0
+}
+
+// ct_layout_pending_count：返回尚未完成数组或结构体布局的请求数量。
+pub fn ct_layout_pending_count() int {
+    let count int = 0
+    let i int = 0
+    for i < ct_layout_request_n {
+        if (ct_layout_requests[i].ready == 0) { count += 1 }
+        i += 1
+    }
+    return count
+}
+
+// ct_layout_function_sym_pending：按 CT 函数及其嵌套调用判断 pending 布局依赖。
+pub fn ct_layout_function_sym_pending(sym_id int) int {
+    let path [64]int
+    return ct_layout_function_pending_walk(sym_id, &path[0], 0)
+}
+
+// ct_layout_advance：应用已就绪长度并尽可能完成数组/结构体布局，不为 pending 项报错。
+pub fn ct_layout_advance() int {
+    let total_progress int = 0
+    let i int = 0
+    for i < ct_layout_request_n {
+        if (ct_layout_requests[i].kind == CT_LAYOUT_ARRAY
+            && ct_layout_requests[i].ready == 0
+            && ct_layout_requests[i].const_sym >= 0) {
+            let sym int = ct_layout_requests[i].const_sym
+            if (sym < 0 || sym >= ct_syms_bound()) { return support.fail("内部错误：布局常量符号无效") }
+            if (ct_sym_row(sym).const_ready == 0) { i += 1; continue }
+            let length i64 = ct_sym_row(sym).cval
+            if (length <= 0) {
+                return support.err_lc(ct_layout_requests[i].line,
+                    ct_layout_requests[i].col, "数组长度必须为正")
+            }
+            if (length > 2147483647) {
+                return support.err_lc(ct_layout_requests[i].line,
+                    ct_layout_requests[i].col, "数组长度超出限制")
+            }
+            ct_layout_requests[i].length = length.to_type(int)
+            let type_id int = ct_layout_requests[i].type_id
+            ct_type_at(type_id)[0].len = length.to_type(int)
+        }
+        i += 1
+    }
+    for 1 {
+        let progress int = 0
+        i = 0
+        for i < ct_layout_request_n {
+            if (ct_layout_requests[i].ready != 0) { i += 1; continue }
+            if (ct_layout_requests[i].kind == CT_LAYOUT_ARRAY) {
+                progress += ct_layout_array_finish(i)
+            } else {
+                let type_id int = ct_layout_requests[i].type_id
+                if (ct_layout_struct_pending(type_id) == 0) {
+                    let kind int = ct_type_row(type_id).kind
+                    if (kind != CT_TY_STRUCT && kind != CT_TY_UNION) {
+                        return support.fail("内部错误：pending 布局请求不是结构体")
+                    }
+                    if (support.sem_struct_finish(type_id,
+                            ct_layout_requests[i].is_union) != 0) { return -1 }
+                    ct_layout_requests[i].ready = 1
+                    progress += 1
+                }
+            }
+            i += 1
+        }
+        let unresolved int = 0
+        i = 0
+        for i < ct_layout_request_n {
+            if (ct_layout_requests[i].ready == 0) { unresolved += 1 }
+            i += 1
+        }
+        total_progress += progress
+        if (unresolved == 0 || progress == 0) { return total_progress }
+    }
+    return support.fail("内部错误：编译期布局推进意外结束")
+}
+
+// ct_layout_stuck_diagnostic：无调度进展且仍有布局时报告类型/值之间的依赖环。
+pub fn ct_layout_stuck_diagnostic() int {
+    if (ct_value_cycle_diagnostic() != 0) { return -1 }
+    if (ct_dependency_cycle_diagnostic() != 0) { return -1 }
+    let i int = 0
+    for i < ct_layout_request_n {
+        if (ct_layout_requests[i].ready == 0) {
+            let sym int = ct_layout_requests[i].const_sym
+            if (sym >= 0 && sym < ct_syms_bound()
+                && ct_sym_row(sym).const_ready == 0
+                && ct_value_find(sym) < 0) {
+                return support.err_lc(ct_layout_requests[i].line,
+                    ct_layout_requests[i].col, "编译期常量尚未就绪")
+            }
+        }
+        i += 1
+    }
+    if (ct_value_pending_count() > 0) {
+        // 先按值请求报告：阻塞在未就绪常量（含前向引用）时给出与旧行为一致的
+        // 「编译期常量尚未就绪」，只有确实是依赖环/布局未完成才报通用诊断。
+        if (ct_value_stuck_diagnostic() != 0) { return -1 }
+        i = 0
+        for i < ct_layout_request_n {
+            if (ct_layout_requests[i].ready == 0) {
+                return support.err_lc(ct_layout_requests[i].line,
+                    ct_layout_requests[i].col,
+                    "编译期布局依赖环或未完成依赖")
+            }
+            i += 1
+        }
+    }
+    i = 0
+    for i < ct_layout_request_n {
+        if (ct_layout_requests[i].ready == 0) {
+            return support.err_lc(ct_layout_requests[i].line,
+                ct_layout_requests[i].col,
+                "循环或未支持的编译期类型布局依赖")
+        }
+        i += 1
+    }
+    return ct_value_stuck_diagnostic()
+}
+
+// ct_layout_resolve：最终确认全部布局 READY；残留请求按其源码位置报告依赖环。
+pub fn ct_layout_resolve() int {
+    if (ct_layout_advance() < 0) { return -1 }
+    let i int = 0
+    for i < ct_layout_request_n {
+        if (ct_layout_requests[i].ready == 0) {
+            return support.err_lc(ct_layout_requests[i].line,
+                ct_layout_requests[i].col,
+                "循环或未支持的编译期类型布局依赖")
+        }
+        i += 1
+    }
+    if (ct_value_pending_count() != 0) {
+        return ct_value_stuck_diagnostic()
+    }
+    if (support.diag().errors > 0) { return -1 }
+    // 布局完成：同一 (元素, 长度) 的多个数组类型项归一到规范编号
+    return ct_layout_canonicalize()
+}
+
+// ct_value_function_dependency_add：把常量初始化器调用的 CT 函数闭包接到值节点。
+pub fn ct_value_function_dependency_add(owner_sym int, function_sym int) int {
+    let path [64]int
+    return ct_layout_function_dependencies_walk(CT_DEP_VALUE, owner_sym,
+        function_sym, &path[0], 0)
+}
+
+// ct_layout_expr_value_dependency_add：把数组长度中的全局常量接到数组布局节点。
+pub fn ct_layout_expr_value_dependency_add(row int, sym_id int) int {
+    if (row < 0 || row >= ct_layout_request_n) { return 0 }
+    return ct_dependency_add(CT_DEP_LAYOUT, ct_layout_requests[row].type_id,
+        CT_DEP_VALUE, sym_id)
+}
+
+// ct_layout_expr_type_dependency_add：把数组长度 sizeof 的目标类型接到数组布局节点。
+pub fn ct_layout_expr_type_dependency_add(row int, type_id int) int {
+    if (row < 0 || row >= ct_layout_request_n) { return 0 }
+    return ct_dependency_add(CT_DEP_LAYOUT, ct_layout_requests[row].type_id,
+        CT_DEP_LAYOUT, type_id)
+}
+
+// ct_layout_expr_function_dependency_add：把数组长度调用的 CT 闭包接到数组布局节点。
+pub fn ct_layout_expr_function_dependency_add(row int, function_sym int) int {
+    if (row < 0 || row >= ct_layout_request_n) { return 0 }
+    let path [64]int
+    return ct_layout_function_dependencies_walk(CT_DEP_LAYOUT,
+        ct_layout_requests[row].type_id, function_sym, &path[0], 0)
+}
+
+// p_ct_layout_expr_runnable：等待常量和 CT 函数中的 pending sizeof 类型布局就绪。
+pub fn ct_layout_expr_runnable(first int, after int) int {
+    let i int = first
+    for i < after {
+        let kind int = token.ctx().tokens[i].kind
+        if (kind == token.TOK_IDENT
+            && (i == first || (token.ctx().tokens[i - 1].kind != token.TK_DOT
+                && token.ctx().tokens[i - 1].kind != token.TK_DOLLAR))) {
+            let sym int = support.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
+            if (sym >= 0 && sym < support.ms().sym_n
+                && support.ms().syms[sym].kind == support.SYM_CONST
+                && support.ms().syms[sym].const_ready == 0) { return 0 }
+        }
+        if (kind == token.TK_DOLLAR && i + 1 < after
+            && token.ctx().tokens[i + 1].kind == token.TOK_IDENT) {
+            let sym int = support.sym_lookup(token.ctx().tokens[i + 1].start,
+                token.ctx().tokens[i + 1].len)
+            if (sym >= 0 && ct_layout_function_sym_pending(sym) != 0) {
+                return 0
+            }
+        }
+        if (kind == token.TK_SIZEOF && i + 3 < after
+            && token.ctx().tokens[i + 1].kind == token.TK_LPAREN
+            && token.ctx().tokens[i + 2].kind == token.TOK_IDENT) {
+            let tid int = support.ty_lookup_name(token.ctx().tokens[i + 2].start,
+                token.ctx().tokens[i + 2].len)
+            if (tid >= 0 && ct_layout_type_pending(tid) != 0) { return 0 }
+        }
+        i += 1
+    }
+    return 1
+}
+
+// p_ct_layout_expr_register：记录数组长度表达式直接依赖的值、类型和 CT 函数闭包。
+pub fn ct_layout_expr_register(row int) int {
+    let first int = ct_layout_expr_first(row)
+    let after int = ct_layout_expr_after(row)
+    let i int = first
+    for i < after {
+        let kind int = token.ctx().tokens[i].kind
+        if (kind == token.TOK_IDENT
+            && (i == first || (token.ctx().tokens[i - 1].kind != token.TK_DOT
+                && token.ctx().tokens[i - 1].kind != token.TK_DOLLAR))) {
+            let sym int = support.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
+            if (sym >= 0 && sym < support.ms().sym_n
+                && support.ms().syms[sym].kind == support.SYM_CONST) {
+                if (ct_layout_expr_value_dependency_add(row, sym) != 0) {
+                    return -1
+                }
+                // 长度表达式引用的普通整数常量也要在布局期求出值：
+                // `const N int = 3;` 原本只在全局子遍就绪，而全局/字段/形参
+                // 位置的 `[N]int` 在布局子遍就要定长。仅限声明在前的常量，
+                // 前向引用保持既有「编译期常量尚未就绪」诊断。
+                if (support.ms().syms[sym].const_ready == 0
+                    && ct_sym_declared_before(sym, token.ctx().tokens[first].line,
+                        token.ctx().tokens[first].col) != 0
+                    && ct_value_request_add(sym, support.ms().syms[sym].def_line,
+                        support.ms().syms[sym].def_col) != 0) {
+                    return -1
+                }
+            }
+        }
+        if (kind == token.TK_SIZEOF && i + 3 < after
+            && token.ctx().tokens[i + 1].kind == token.TK_LPAREN
+            && token.ctx().tokens[i + 2].kind == token.TOK_IDENT) {
+            let tid int = support.ty_lookup_name(token.ctx().tokens[i + 2].start,
+                token.ctx().tokens[i + 2].len)
+            if (tid >= 0
+                && ct_layout_expr_type_dependency_add(row, tid) != 0) {
+                return -1
+            }
+        }
+        if (kind == token.TK_DOLLAR && i + 1 < after
+            && token.ctx().tokens[i + 1].kind == token.TOK_IDENT) {
+            let sym int = support.sym_lookup(token.ctx().tokens[i + 1].start,
+                token.ctx().tokens[i + 1].len)
+            if (sym >= 0
+                && ct_layout_expr_function_dependency_add(row, sym) != 0) {
+                return -1
+            }
+        }
+        i += 1
+    }
+    return 0
+}
+
+// ct_reset：释放当前编译单元登记的函数体快照，防止模块 worker 交叉污染。
+pub fn ct_reset() void {
+    // 编译单元结束后不能把前一模块的静态对象带入下一次受检快照。
+    support.static_data_reset()
+    ct_layout_reset()
+    ct_ir_result_pool_clear()
+    ct_pool_reset()
+    ct_global_agg_reset()
+    ct_pub_agg_fn_n = 0
+    let i int = 0
+    for i < ct_function_n {
+        if (ct_functions[i].params != 0) { free(ct_functions[i].params.to_type(*void)) }
+        if (ct_functions[i].imports != 0) { free(ct_functions[i].imports.to_type(*void)) }
+        if (ct_functions[i].src != 0) { free(ct_functions[i].src.to_type(*void)) }
+        if (ct_functions[i].src_path != 0) { free(ct_functions[i].src_path.to_type(*void)) }
+        if (ct_functions[i].body != 0) { free(ct_functions[i].body.to_type(*void)) }
+        i += 1
+    }
+    if (ct_functions != 0) { free(ct_functions.to_type(*void)) }
+    if (ct_ir_exprs != 0) { free(ct_ir_exprs.to_type(*void)) }
+    if (ct_ir_stmts != 0) { free(ct_ir_stmts.to_type(*void)) }
+    if (ct_ir_edges != 0) { free(ct_ir_edges.to_type(*void)) }
+    if (ct_ir_bindings != 0) { free(ct_ir_bindings.to_type(*void)) }
+    ct_functions = 0
+    ct_function_n = 0
+    ct_function_cap = 0
+    ct_ir_exprs = 0
+    ct_ir_expr_n = 0
+    ct_ir_expr_cap = 0
+    ct_ir_stmts = 0
+    ct_ir_stmt_n = 0
+    ct_ir_stmt_cap = 0
+    ct_ir_edges = 0
+    ct_ir_edge_n = 0
+    ct_ir_edge_cap = 0
+    ct_ir_bindings = 0
+    ct_ir_binding_n = 0
+    ct_ir_binding_cap = 0
+    ct_ir_steps = 0
+    ct_expansion_count = 0
+    ct_expansion_size = 0
+    ct_expansion_ast_depth = 0
+    ct_eval_depth = 0
+    ct_control_depth = 0
+    ct_for_boundary_depth = 0
+    support.diag().ct_depth = 0
+}
+
+// ct_enter_control：进入一层编译期结构控制，并限制嵌套深度为 32。
+pub fn ct_enter_control() int {
+    ct_control_depth += 1
+    if (ct_control_depth > 32) {
+        ct_control_depth -= 1
+        return ct_err("编译期结构嵌套超过 32 层")
+    }
+    return 0
+}
+
+// ct_leave_control：退出一层编译期结构控制，供解析器在所有返回路径恢复深度。
+pub fn ct_leave_control() void {
+    if (ct_control_depth > 0) { ct_control_depth -= 1 }
+}
+
+// ct_for_boundary_enter：记录展开开始时的运行期循环深度，阻止跳转逃出展开体。
+pub fn ct_for_boundary_enter(loop_depth int) int {
+    if (ct_for_boundary_depth >= 32) {
+        return ct_err("编译期 for 嵌套超过 32 层")
+    }
+    ct_for_boundary_bases[ct_for_boundary_depth] = loop_depth
+    ct_for_trace_bases[ct_for_boundary_depth] = support.diag().ct_depth
+    ct_for_boundary_depth += 1
+    support.diag().ct_values[ct_for_boundary_depth - 1] = 0
+    return 0
+}
+
+// ct_for_boundary_value：记录当前展开层的迭代值，供诊断输出展开来源。
+pub fn ct_for_boundary_value(value i64) int {
+    if (ct_for_boundary_depth <= 0 || ct_for_boundary_depth > 32) {
+        return support.fail("内部错误：编译期 for 展开值没有对应边界")
+    }
+    support.diag().ct_values[ct_for_boundary_depth - 1] = value.to_type(int)
+    support.diag().ct_depth = ct_for_boundary_depth
+    return 0
+}
+
+// ct_for_boundary_leave：退出一层区间展开边界。
+pub fn ct_for_boundary_leave() void {
+    if (ct_for_boundary_depth > 0) {
+        support.diag().ct_depth = ct_for_trace_bases[ct_for_boundary_depth - 1]
+        ct_for_boundary_depth -= 1
+    }
+}
+
+// ct_validate_loop_exit：保证 break/continue 不跳出最内层编译期展开体。
+pub fn ct_validate_loop_exit(loop_depth int, kind int) int {
+    if (ct_for_boundary_depth == 0
+        || loop_depth > ct_for_boundary_bases[ct_for_boundary_depth - 1]) { return 0 }
+    if (kind == token.TK_BREAK) {
+        return ct_err("编译期 $for 不能跨出展开边界执行 break")
+    }
+    return ct_err("编译期 $for 不能跨出展开边界执行 continue")
+}
+
+// ct_expansion_capture_enter：标记所选普通函数展开体正在生成稳定 AST 节点。
+pub fn ct_expansion_capture_enter() void {
+    ct_expansion_ast_depth += 1
+}
+
+// ct_expansion_capture_leave：恢复嵌套展开捕获深度，避免影响后续普通语句。
+pub fn ct_expansion_capture_leave() void {
+    if (ct_expansion_ast_depth > 0) { ct_expansion_ast_depth -= 1 }
+}
+
+// ct_charge_expansion_ast_node：按实际捕获的表达式、语句和绑定节点收费。
+pub fn ct_charge_expansion_ast_node() int {
+    if (ct_expansion_ast_depth <= 0) { return 0 }
+    if (ct_expansion_size >= 100000) {
+        return ct_err("编译期 for 展开 AST 节点超过 100000")
+    }
+    ct_expansion_size += 1
+    return 0
+}
+
+// ct_charge_expansion_ast_nodes：按已捕获模板的逻辑实例数批量计入 AST 预算。
+pub fn ct_charge_expansion_ast_nodes(count int) int {
+    if (count < 0) { return support.fail("内部错误：编译期 AST 模板节点数无效") }
+    if (count > 100000 - ct_expansion_size) {
+        return ct_err("编译期 for 展开 AST 节点超过 100000")
+    }
+    ct_expansion_size += count
+    return 0
+}
+
+// ct_charge_expansion：限制展开轮数；无 AST 捕获时兼用保守 token 规模预算。
+pub fn ct_charge_expansion(body_token_count int) int {
+    if (support.session().ast_capture == 0
+        && (body_token_count < 0 || body_token_count > 100000)) {
+        return ct_err("编译期 for 展开语法规模超过 100000")
+    }
+    ct_expansion_count += 1
+    if (ct_expansion_count > 100000) {
+        return ct_err("编译期 for 总展开次数超过 100000")
+    }
+    if (support.session().ast_capture == 0 && body_token_count > 100000 - ct_expansion_size) {
+        return ct_err("编译期 for 展开语法规模超过 100000")
+    }
+    if (support.session().ast_capture == 0) { ct_expansion_size += body_token_count }
+    return 0
+}
+
+// ct_register：登记函数签名并复制正文源/token，供后续常量初始化稳定求值。
+pub fn ct_register(sym_id int, names *int, name_lens *int, types *int,
+    param_n int, ret_type int, body_first int, body_after int,
+    locs_path *char, locs_len int) int {
+    if (sym_id < 0 || sym_id >= ct_syms_bound() || param_n < 0 || param_n > 64
+        || body_first < 0 || body_after <= body_first || body_after > token.ctx().count) {
+        return support.fail("内部错误：编译期函数登记范围无效")
+    }
+    if (ct_function_n == ct_function_cap && ct_grow() != 0) { return -1 }
+    let row int = ct_function_n
+    let nbytes int = support.src_ctx().length + 1
+    let src *u8 = malloc(nbytes.to_type(u64)).to_type(*u8)
+    let body_n int = body_after - body_first
+    let body *CtToken = malloc((body_n * sizeof(CtToken)).to_type(u64)).to_type(*CtToken)
+    // 来源路径：默认保留绝对路径供诊断；`--trimpath` 时用项目相对路径，
+    // 让 .s.ct / CT 诊断不随项目搬迁变化。
+    // 路径由调用方算好传入（locs_path/locs_len）：执行器不认识项目文件表，
+    // 否则 comptime 就得依赖 proj，破坏「CT 执行器只依赖 support/token」。
+    let path_len int = locs_len
+    let use_loc int = (locs_len > 0).to_type(int)
+    if (locs_path == 0) { path_len = 0; use_loc = 0 }
+    if (path_len <= 0 && support.src_ctx().path != 0) {
+        for support.src_ctx().path[path_len] != 0 { path_len += 1 }
+    }
+    let src_path *u8 = 0
+    if (path_len > 0) {
+        src_path = malloc((path_len + 1).to_type(u64)).to_type(*u8)
+    }
+    let params *CtParam = 0
+    let imports *CtImport = 0
+    if (param_n > 0) {
+        params = malloc((param_n * sizeof(CtParam)).to_type(u64)).to_type(*CtParam)
+    }
+    let import_n int = 0
+    let ii int = 0
+    for ii < ct_import_count() {
+        if (ct_import_module(ii) >= 0) { import_n += 1 }
+        ii += 1
+    }
+    if (import_n > 0) {
+        imports = malloc((import_n * sizeof(CtImport)).to_type(u64)).to_type(*CtImport)
+    }
+    if (src == 0 || body == 0 || (path_len > 0 && src_path == 0)
+        || (param_n > 0 && params == 0)
+        || (import_n > 0 && imports == 0)) {
+        if (src != 0) { free(src.to_type(*void)) }
+        if (body != 0) { free(body.to_type(*void)) }
+        if (src_path != 0) { free(src_path.to_type(*void)) }
+        if (params != 0) { free(params.to_type(*void)) }
+        if (imports != 0) { free(imports.to_type(*void)) }
+        return support.fail("编译期函数快照分配失败")
+    }
+    memcpy(src, support.src_ctx().data, support.src_ctx().length.to_type(u64))
+    src[support.src_ctx().length] = 0
+    let path_i int = 0
+    for path_i < path_len {
+        if (use_loc != 0) {
+            src_path[path_i] = locs_path[path_i].to_type(u8)
+        } else {
+            src_path[path_i] = support.src_ctx().path[path_i].to_type(u8)
+        }
+        path_i += 1
+    }
+    if (src_path != 0) { src_path[path_len] = 0 }
+    let ti int = 0
+    for ti < body_n {
+        let tok token.Tok = token.ctx().tokens[body_first + ti]
+        body[ti].kind = tok.kind
+        body[ti].start = tok.start
+        body[ti].len = tok.len
+        body[ti].line = tok.line
+        body[ti].col = tok.col
+        ti += 1
+    }
+    let i int = 0
+    for i < param_n {
+        params[i].name_start = names[i]
+        params[i].name_len = name_lens[i]
+        params[i].type_id = types[i]
+        i += 1
+    }
+    ii = 0
+    let import_row int = 0
+    for ii < ct_import_count() {
+        let module_id int = ct_import_module(ii)
+        if (module_id >= 0) {
+            let imp CtImportRow = ct_import_row(ii)
+            imports[import_row].alias_off = imp.alias_off
+            imports[import_row].alias_len = imp.alias_len
+            imports[import_row].module_id = module_id
+            import_row += 1
+        }
+        ii += 1
+    }
+    ct_functions[row].sym_id = sym_id
+    ct_functions[row].ret_type = ret_type
+    ct_functions[row].param_n = param_n
+    ct_functions[row].params = params
+    ct_functions[row].import_n = import_n
+    ct_functions[row].imports = imports
+    ct_functions[row].src = src
+    ct_functions[row].src_path = src_path
+    ct_functions[row].src_path_len = path_len
+    ct_functions[row].src_body_line = token.ctx().tokens[body_first].line
+    if (support.session().ct_origin_active != 0) {
+        ct_functions[row].src_body_line = support.session().ct_origin_line
+    }
+    ct_functions[row].src_line_bias = support.diag().line_bias
+    ct_functions[row].body = body
+    ct_functions[row].body_n = body_n
+    ct_functions[row].body_token_first = body_first
+    ct_functions[row].ir_ready = 0
+    ct_functions[row].ir_supported = 0
+    ct_functions[row].ir_unsupported = 0
+    ct_functions[row].ir_expr_first = 0
+    ct_functions[row].ir_expr_after = 0
+    ct_functions[row].ir_stmt_first = 0
+    ct_functions[row].ir_stmt_after = 0
+    ct_functions[row].ir_edge_first = 0
+    ct_functions[row].ir_edge_after = 0
+    ct_functions[row].ir_binding_first = 0
+    ct_functions[row].ir_binding_after = 0
+    ct_functions[row].ir_body_stmt = -1
+    ct_function_n += 1
+    return 0
+}
+
+// ct_find：按模块符号编号查找编译期函数登记项。
+pub fn ct_find(sym_id int) int {
+    let i int = 0
+    for i < ct_function_n {
+        if (ct_functions[i].sym_id == sym_id) { return i }
+        i += 1
+    }
+    return -1
+}
+
+// ct_iface_count：返回当前编译单元已登记的 CT 函数数量，供接口闭包导出使用。
+pub fn ct_iface_count() int {
+    return ct_function_n
+}
+
+// ct_iface_function：返回一条 CT 函数的只读快照；越界返回零初始化记录。
+pub fn ct_iface_function(row int) CtFunction {
+    let empty CtFunction
+    empty.sym_id = -1
+    if (row < 0 || row >= ct_function_n) { return empty }
+    return ct_functions[row]
+}
+
+// ct_iface_call_target：读取一个函数体内指定调用 token 对应的显式 CT 目标。
+// token_index 是原始 token 表编号，未命中返回 -1。
+pub fn ct_iface_call_target(row int, token_index int) int {
+    if (row < 0 || row >= ct_function_n) { return -1 }
+    let item CtFunction = ct_functions[row]
+    let i int = item.ir_expr_first
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i]
+        if (expr.kind == 5 && expr.op == token.TK_DOLLAR
+            && expr.first == token_index) {
+            return expr.sym_id
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ct_iface_const_target：查找函数体指定 token 对应的模块级常量符号。
+// 局部 const 已有函数绑定行，不能作为跨模块闭包常量重复导出。
+pub fn ct_iface_const_target(row int, token_index int) int {
+    if (row < 0 || row >= ct_function_n) { return -1 }
+    let item CtFunction = ct_functions[row]
+    let i int = item.ir_expr_first
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i]
+        if (expr.kind == 1 && expr.sym_kind == CT_SYM_CONST
+            && expr.sym_id >= 0 && expr.first == token_index
+            && (expr.binding_row < item.ir_binding_first
+                || expr.binding_row >= item.ir_binding_after)) {
+            return expr.sym_id
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ct_iface_const_count：统计函数 typed IR 中的模块级常量引用。
+pub fn ct_iface_const_count(row int) int {
+    if (row < 0 || row >= ct_function_n) { return 0 }
+    let item CtFunction = ct_functions[row]
+    let count int = 0
+    let i int = item.ir_expr_first
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i]
+        if (expr.kind == 1 && expr.sym_kind == CT_SYM_CONST
+            && expr.sym_id >= 0
+            && (expr.binding_row < item.ir_binding_first
+                || expr.binding_row >= item.ir_binding_after)) {
+            count += 1
+        }
+        i += 1
+    }
+    return count
+}
+
+// ct_iface_const_at：返回函数第 ordinal 个模块级常量引用的符号编号。
+pub fn ct_iface_const_at(row int, ordinal int) int {
+    if (row < 0 || row >= ct_function_n || ordinal < 0) { return -1 }
+    let item CtFunction = ct_functions[row]
+    let seen int = 0
+    let i int = item.ir_expr_first
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i]
+        if (expr.kind == 1 && expr.sym_kind == CT_SYM_CONST
+            && expr.sym_id >= 0
+            && (expr.binding_row < item.ir_binding_first
+                || expr.binding_row >= item.ir_binding_after)) {
+            if (seen == ordinal) { return expr.sym_id }
+            seen += 1
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ct_iface_local_type_target：返回局部声明类型 token 对应的语义类型编号。
+pub fn ct_iface_local_type_target(row int, token_index int) int {
+    if (row < 0 || row >= ct_function_n) { return -1 }
+    let item CtFunction = ct_functions[row]
+    let i int = item.ir_binding_first
+    for i < item.ir_binding_after {
+        let binding CtBinding = ct_ir_bindings[i]
+        if (binding.is_param == 0 && binding.name_token + 1 == token_index) {
+            // for-in 元素/下标绑定后跟 `in` 或 `,`，不是「名字 <类型> =」声明：
+            // 局部类型改写只针对声明形态，循环绑定在改写后的正文里保持原样
+            // （否则闭包发射会在这里找不到初始化等号而报「无法确定类型范围」）。
+            // token_index 是绝对 token 下标；body[] 以函数体左花括号为 0 基。
+            let rel int = token_index - item.body_token_first
+            if (rel >= 0 && rel < item.body_n
+                && (item.body[rel].kind == token.TK_IN
+                    || item.body[rel].kind == token.TK_COMMA)) {
+                return -1
+            }
+            return binding.sym_type_id
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ct_iface_call_count：返回已捕获正文中显式 CT 调用的数量。
+pub fn ct_iface_call_count(row int) int {
+    if (row < 0 || row >= ct_function_n) { return 0 }
+    let item CtFunction = ct_functions[row]
+    let count int = 0
+    let i int = item.ir_expr_first
+    for i < item.ir_expr_after {
+        if (ct_ir_exprs[i].kind == 5 && ct_ir_exprs[i].op == token.TK_DOLLAR) {
+            count += 1
+        }
+        i += 1
+    }
+    return count
+}
+
+// ct_iface_call_at：返回正文第 ordinal 个显式 CT 调用的目标符号编号。
+pub fn ct_iface_call_at(row int, ordinal int) int {
+    if (row < 0 || row >= ct_function_n || ordinal < 0) { return -1 }
+    let item CtFunction = ct_functions[row]
+    let seen int = 0
+    let i int = item.ir_expr_first
+    for i < item.ir_expr_after {
+        let expr CtExpr = ct_ir_exprs[i]
+        if (expr.kind == 5 && expr.op == token.TK_DOLLAR) {
+            if (seen == ordinal) { return expr.sym_id }
+            seen += 1
+        }
+        i += 1
+    }
+    return -1
+}
+
+// ct_is_prepared：查询函数是否已有 pass2a 前捕获的 typed IR 正文。
+pub fn ct_is_prepared(sym_id int) int {
+    let row int = ct_find(sym_id)
+    if (row < 0) { return 0 }
+    return ct_functions[row].ir_ready
+}
+
+// ct_call：校验常量实参并执行 CT 函数，将最外层聚合结果保留或物化。
+pub fn ct_call(sym_id int, args *support.Res, arg_n int, out *support.Res) int {
+    let values [64]CtValue
+    if (arg_n < 0 || arg_n > 64) { return ct_err("编译期调用实参数量无效") }
+    let i int = 0
+    for i < arg_n {
+        if (args[i].is_const == 0) { return ct_err("编译期调用的实参必须是常量") }
+        values[i].type_id = args[i].type_id
+        values[i].value = args[i].ival
+        values[i].is_lit = args[i].is_lit
+        values[i].lit_big = args[i].lit_big
+        i += 1
+    }
+    let value CtValue
+    let result_frame CtFrame
+    result_frame.aggregates = 0
+    result_frame.aggregate_element_count = 0
+    ct_eval_depth = 0
+    ct_ir_steps = 0
+    if (ct_invoke_in_frame(&result_frame, sym_id, &values[0], arg_n,
+            &value) != 0) {
+        ct_ir_aggregate_free_all(&result_frame)
+        return -1
+    }
+    let result_kind int = ct_type_row(value.type_id).kind
+    if (result_kind == CT_TY_ARRAY || result_kind == CT_TY_STRUCT
+        || result_kind == CT_TY_SLICE || result_kind == CT_TY_UNION) {
+        ct_ir_result_pool_keep(&result_frame)
+        if (ct_fold_mode() != 0) {
+            support.sem_res_const(out, value.type_id, value.value)
+            ct_res_is_addr_set(1)
+            return 0
+        }
+        let label int = ct_ir_data_emit_temp(value.type_id, &value)
+        if (label < 0) { return -1 }
+        support.sem_res_const(out, value.type_id, label.to_type(i64))
+        ct_res_is_addr_set(1)
+        return 0
+    }
+    ct_ir_aggregate_free_all(&result_frame)
+    support.sem_res_const(out, value.type_id, value.value)
+    if (ct_ty_is_float(value.type_id) != 0) {
+        // 浮点常量以 IEEE754 位模式同时写入 ival 与 fval_bits。
+        out.fval_bits = value.value
+        ct_res_is_addr_set(0)
+        return 0
+    }
+    ct_res_is_addr_set(0)
+    return 0
+}
+
+// ct_pub_agg_fn_add：登记一个 pub 聚合常量初始化式调用的编译期函数。
+pub fn ct_pub_agg_fn_add(sym_id int) int {
+    if (sym_id < 0 || ct_pub_agg_fn_n >= 64) {
+        return ct_err("pub 聚合常量的编译期调用目标超过 64 个")
+    }
+    let i int = 0
+    for i < ct_pub_agg_fn_n {
+        if (ct_pub_agg_fn[i] == sym_id) { return 0 }
+        i += 1
+    }
+    ct_pub_agg_fn[ct_pub_agg_fn_n] = sym_id
+    ct_pub_agg_fn_n += 1
+    return 0
+}
+
+// ct_pub_agg_fn_count：登记的 pub 聚合常量调用目标数量。
+pub fn ct_pub_agg_fn_count() int {
+    return ct_pub_agg_fn_n
+}
+
+// ct_pub_agg_fn_at：第 ordinal 个 pub 聚合常量调用目标符号编号。
+pub fn ct_pub_agg_fn_at(ordinal int) int {
+    if (ordinal < 0 || ordinal >= ct_pub_agg_fn_n) { return -1 }
+    return ct_pub_agg_fn[ordinal]
+}
+
+// ct_target_symbol：仅在 $if 条件中把目标系统/架构名解析为不可遮蔽的布尔常量。
+// `windows` 于 W0-2a 追加：先让**种子**学会识别这个标记名，新一代源码才允许写
+// `$if (windows)`（顺序约束见 docs/02-plan/yh-Windows-x86_64-LLVM后端接入实施方案
+// §4.1；在旧种子上直接使用新标记会编译失败，等于锁死种子）。
+pub fn ct_target_symbol(start int, n int, out *support.Res) int {
+    let recognized int = 1
+    let value i64 = 0
+    if (ct_target_name_is(start, n, "linux", 5) != 0) {
+        value = (support.cfg().target.os == support.TARGET_OS_LINUX).to_type(i64)
+    } else if (ct_target_name_is(start, n, "darwin", 6) != 0) {
+        value = (support.cfg().target.os == support.TARGET_OS_DARWIN).to_type(i64)
+    } else if (ct_target_name_is(start, n, "windows", 7) != 0) {
+        value = (support.cfg().target.os == support.TARGET_OS_WINDOWS).to_type(i64)
+    } else if (ct_target_name_is(start, n, "arm64", 5) != 0) {
+        value = (support.cfg().target.arch == support.TARGET_ARCH_ARM64).to_type(i64)
+    } else if (ct_target_name_is(start, n, "x64", 3) != 0) {
+        value = (support.cfg().target.arch == support.TARGET_ARCH_X64).to_type(i64)
+    } else {
+        recognized = 0
+    }
+    if (recognized == 0) { return 0 }
+    support.sem_res_const(out, CT_TY_BOOL, value)
+    return 1
+}

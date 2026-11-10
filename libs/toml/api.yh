@@ -1,0 +1,408 @@
+module toml
+
+// ============================================================================
+// api.yh —— toml 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// ValueKind 是 TOML 值的类型标签；invalid 只表示空视图，数据本身没有 null。
+pub enum ValueKind {
+    kind_invalid
+    kind_string
+    kind_integer
+    kind_float
+    kind_boolean
+    kind_array
+    kind_table
+    kind_offset_datetime
+    kind_local_datetime
+    kind_local_date
+    kind_local_time
+}
+
+// ParseStatus 是一次解析的最终状态。
+pub enum ParseStatus {
+    parse_ok
+    parse_syntax_error
+    parse_resource_error
+    parse_io_error
+    parse_argument_error
+}
+
+// QueryStatus 是查询/取值的结果分类；失败时不修改输出参数。
+pub enum QueryStatus {
+    query_ok
+    query_missing
+    query_type_error
+    query_bounds_error
+    query_argument_error
+}
+
+// ErrorCode 是稳定诊断分类；message 文字不是程序判断接口。
+pub enum ErrorCode {
+    error_none
+    error_utf8
+    error_syntax
+    error_duplicate_key
+    error_table_conflict
+    error_integer_range
+    error_float_range
+    error_datetime_value
+    error_resource_limit
+    error_out_of_memory
+    error_io
+    error_argument
+}
+
+// Text 是 UTF-8 字节视图；长度不含额外终止字节，可以包含 NUL。
+// 视图借用所属 Document 的存储，文档释放后失效。
+pub struct Text {
+    data *u8
+    count u64
+}
+
+// Span 是来源位置：字节偏移零基，长度是字节数；行号和字节列号一基。
+pub struct Span {
+    offset u64
+    length u64
+    line u64
+    column u64
+}
+
+// Diagnostic 是结构化诊断；message 是静态中文文本，不归调用者释放。
+// related/has_related 用于重复定义关联的第一处位置。
+pub struct Diagnostic {
+    code ErrorCode
+    message *char
+    span Span
+    related Span
+    has_related int
+    native_code int
+}
+
+// Document 独占一次成功解析的存储；句柄由模块管理，调用者不可改写。
+pub struct Document {
+    handle *void
+}
+
+// Value 是所属 Document 内节点的只读视图，不单独分配或释放。
+pub struct Value {
+    handle *void
+}
+
+// ParseResult 是解析入口的统一返回；失败时 document.handle 为 0。
+pub struct ParseResult {
+    status ParseStatus
+    document Document
+    error Diagnostic
+}
+
+// LookupResult 是一次查找的结果；失败时 value.handle 为 0。
+pub struct LookupResult {
+    status QueryStatus
+    value Value
+}
+
+// EntryResult 是按首次引入顺序遍历表条目时的结果。
+pub struct EntryResult {
+    status QueryStatus
+    key Text
+    value Value
+    span Span
+}
+
+// kind 返回值的类型；空视图返回 kind_invalid。
+pub fn kind(value Value) ValueKind {
+    let ptr *node = node_of(value)
+    if (ptr == 0) {
+        return ValueKind.kind_invalid
+    }
+    return ptr.kind
+}
+
+// span_of_value 返回值、表头或隐式表创建来源的位置；空视图返回零位置。
+pub fn value_span(value Value) Span {
+    let ptr *node = node_of(value)
+    if (ptr == 0) {
+        return span_zero()
+    }
+    return ptr.span
+}
+
+// table_get 按完整字节键查询表；点号是键内容。
+pub fn table_get(table_value Value, key Text) LookupResult {
+    let result LookupResult
+    result.status = QueryStatus.query_type_error
+    result.value = value_of(0)
+    let ptr *node = node_of(table_value)
+    if (ptr == 0 || ptr.kind != ValueKind.kind_table) {
+        return result
+    }
+    let idx int = table_find(ptr.data.tbl, key)
+    if (idx < 0) {
+        result.status = QueryStatus.query_missing
+        return result
+    }
+    let entry_ptr *entry = table_entry_of(ptr.data.tbl, idx)
+    result.status = QueryStatus.query_ok
+    result.value = value_of(entry_ptr.value.to_type(*node))
+    return result
+}
+
+// get 是 NUL 结尾键的便捷入口；空指针返回参数错误，空字符串是合法键。
+pub fn get(table_value Value, key *char) LookupResult {
+    let result LookupResult
+    result.status = QueryStatus.query_argument_error
+    result.value = value_of(0)
+    if (key == 0) {
+        return result
+    }
+    return table_get(table_value, text_from_cstr(key))
+}
+
+// array_get 按零基下标取数组元素。
+pub fn array_get(array_value Value, index u64) LookupResult {
+    let result LookupResult
+    result.status = QueryStatus.query_type_error
+    result.value = value_of(0)
+    let ptr *node = node_of(array_value)
+    if (ptr == 0 || ptr.kind != ValueKind.kind_array) {
+        return result
+    }
+    if (index >= ptr.data.array.count.to_type(u64)) {
+        result.status = QueryStatus.query_bounds_error
+        return result
+    }
+    result.status = QueryStatus.query_ok
+    result.value = value_of(items_get(ptr.data.array, index.to_type(int)))
+    return result
+}
+
+// count 返回数组元素数或表条目数；标量返回类型错误。
+pub fn count(container Value, out *u64) QueryStatus {
+    if (out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    let ptr *node = node_of(container)
+    if (ptr == 0) {
+        return QueryStatus.query_type_error
+    }
+    if (ptr.kind == ValueKind.kind_array) {
+        out[0] = ptr.data.array.count.to_type(u64)
+        return QueryStatus.query_ok
+    }
+    if (ptr.kind == ValueKind.kind_table) {
+        out[0] = ptr.data.tbl.count.to_type(u64)
+        return QueryStatus.query_ok
+    }
+    return QueryStatus.query_type_error
+}
+
+// table_entry 按首次引入顺序返回表条目；越界返回 bounds_error。
+pub fn table_entry(table_value Value, index u64) EntryResult {
+    let result EntryResult
+    result.status = QueryStatus.query_type_error
+    result.key = text_empty()
+    result.value = value_of(0)
+    result.span = span_zero()
+    let ptr *node = node_of(table_value)
+    if (ptr == 0 || ptr.kind != ValueKind.kind_table) {
+        return result
+    }
+    if (index >= ptr.data.tbl.count.to_type(u64)) {
+        result.status = QueryStatus.query_bounds_error
+        return result
+    }
+    let entry_ptr *entry = table_entry_of(ptr.data.tbl, index.to_type(int))
+    result.status = QueryStatus.query_ok
+    result.key = entry_ptr.key
+    result.value = value_of(entry_ptr.value.to_type(*node))
+    result.span = entry_ptr.span
+    return result
+}
+
+// as_text 只接受字符串；成功时写入借用视图。
+pub fn as_text(value Value, out *Text) QueryStatus {
+    if (out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    let ptr *node = node_of(value)
+    if (ptr == 0 || ptr.kind != ValueKind.kind_string) {
+        return QueryStatus.query_type_error
+    }
+    out[0] = ptr.data.text
+    return QueryStatus.query_ok
+}
+
+// as_i64 只接受整数，不转换浮点或数字字符串。
+pub fn as_i64(value Value, out *i64) QueryStatus {
+    if (out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    let ptr *node = node_of(value)
+    if (ptr == 0 || ptr.kind != ValueKind.kind_integer) {
+        return QueryStatus.query_type_error
+    }
+    out[0] = ptr.data.integer
+    return QueryStatus.query_ok
+}
+
+// as_f64 只接受浮点，不隐式提升整数。
+pub fn as_f64(value Value, out *f64) QueryStatus {
+    if (out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    let ptr *node = node_of(value)
+    if (ptr == 0 || ptr.kind != ValueKind.kind_float) {
+        return QueryStatus.query_type_error
+    }
+    out[0] = ptr.data.real
+    return QueryStatus.query_ok
+}
+
+// as_bool 只接受布尔。
+pub fn as_bool(value Value, out *bool) QueryStatus {
+    if (out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    let ptr *node = node_of(value)
+    if (ptr == 0 || ptr.kind != ValueKind.kind_boolean) {
+        return QueryStatus.query_type_error
+    }
+    out[0] = ptr.data.boolean
+    return QueryStatus.query_ok
+}
+
+// as_temporal 只接受四种日期时间类型，返回已验证的原始文本。
+pub fn as_temporal(value Value, out *Text) QueryStatus {
+    if (out == 0) {
+        return QueryStatus.query_argument_error
+    }
+    let ptr *node = node_of(value)
+    if (ptr == 0) {
+        return QueryStatus.query_type_error
+    }
+    if (ptr.kind == ValueKind.kind_offset_datetime
+        || ptr.kind == ValueKind.kind_local_datetime
+        || ptr.kind == ValueKind.kind_local_date
+        || ptr.kind == ValueKind.kind_local_time) {
+        out[0] = ptr.data.text
+        return QueryStatus.query_ok
+    }
+    return QueryStatus.query_type_error
+}
+
+// parse 解析显式长度的字节；parse(0, 0) 是合法空文档。
+pub fn parse(data *u8, count u64) ParseResult {
+    if (count > 0 && data == 0) {
+        return parse_failure(ParseStatus.parse_argument_error,
+            ErrorCode.error_argument, "输入指针为空", span_zero(), 0)
+    }
+    if (count > TOML_MAX_INPUT) {
+        return parse_failure(ParseStatus.parse_resource_error,
+            ErrorCode.error_resource_limit, "输入超过 TOML_MAX_INPUT", span_zero(), 0)
+    }
+    let bad_off u64 = 0
+    let bad_len u64 = 0
+    if (utf8_validate(data, count, &bad_off, &bad_len) != 0) {
+        let line u64 = 0
+        let column u64 = 0
+        p_offset_position(data, count, bad_off, &line, &column)
+        let span Span
+        span.offset = bad_off
+        span.length = bad_len
+        span.line = line
+        span.column = column
+        return parse_failure(ParseStatus.parse_syntax_error,
+            ErrorCode.error_utf8, "输入不是合法 UTF-8", span, 0)
+    }
+    let state *doc_state = doc_new()
+    if (state == 0) {
+        return parse_failure(ParseStatus.parse_resource_error,
+            ErrorCode.error_out_of_memory, "创建文档状态失败", span_zero(), 0)
+    }
+    let p parser
+    p.data = data
+    p.count = count
+    p.pos = 0
+    p.line = 1
+    p.column = 1
+    p.state = state
+    p.table = state.root
+    p.fail_code = ErrorCode.error_none
+    p.fail_message = ""
+    p.fail_span = span_zero()
+    p.related = span_zero()
+    p.has_related = 0
+    p.depth = 0
+    p.str_data = 0
+    p.str_count = 0
+    let ok int = p_parse_document(&p)
+    if (ok == 0 || state.mem.status != 0) {
+        let status ParseStatus = ParseStatus.parse_syntax_error
+        let code ErrorCode = p.fail_code
+        let message *char = p.fail_message
+        let span Span = p.fail_span
+        if (state.mem.status == 2) {
+            // 累计分配预算超限统一报 error_resource_limit；下游某个分配点
+            // 可能先报 out_of_memory，这里按池状态纠正分类。
+            status = ParseStatus.parse_resource_error
+            code = ErrorCode.error_resource_limit
+            message = "文档存储超过实现预算"
+        } else if (state.mem.status == 1) {
+            status = ParseStatus.parse_resource_error
+            if (code == ErrorCode.error_none) {
+                code = ErrorCode.error_out_of_memory
+                message = "文档存储内存不足"
+            }
+        } else if (code == ErrorCode.error_resource_limit
+            || code == ErrorCode.error_out_of_memory) {
+            status = ParseStatus.parse_resource_error
+        }
+        let result ParseResult
+        result.status = status
+        result.document.handle = 0
+        result.error = diagnostic_make(code, message, span, 0)
+        result.error.related = p.related
+        result.error.has_related = p.has_related
+        doc_free(state)
+        return result
+    }
+    return parse_ok_result(state)
+}
+
+// parse_text 解析 NUL 结尾文本；空指针是参数错误。
+pub fn parse_text(text *char) ParseResult {
+    if (text == 0) {
+        return parse_failure(ParseStatus.parse_argument_error,
+            ErrorCode.error_argument, "文本指针为空", span_zero(), 0)
+    }
+    return parse(text.to_type(*u8), strlen(text))
+}
+
+// root 返回成功文档的根表；空句柄返回空视图。
+pub fn root(doc *Document) Value {
+    if (doc == 0 || doc.handle == 0) {
+        return value_of(0)
+    }
+    let state *doc_state = doc.handle.to_type(*doc_state)
+    return value_of(state.root)
+}
+
+// release 释放文档全部存储并清零；同一个已清零句柄可再次释放。
+pub fn release(doc *Document) void {
+    if (doc == 0 || doc.handle == 0) {
+        return
+    }
+    let state *doc_state = doc.handle.to_type(*doc_state)
+    doc_free(state)
+    doc.handle = 0
+}
+
+// read_file：平台无关入口；实现见 file.<平台>.yh 的 read_file_impl。
+pub fn read_file(path *char) ParseResult {
+    return read_file_impl(path)
+}

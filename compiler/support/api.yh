@@ -1,0 +1,2712 @@
+module support
+
+// ============================================================================
+// api.yh —— support 模块公开面（pub 函数/结构体与 @[extern] 声明）
+//
+// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
+// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
+// 因此实现细节仍可留在后续文件。
+// ============================================================================
+
+// ABIValue 描述已完成 C 布局的值。fp_count=1 表示浮点标量；聚合非零时
+// 表示 HFA，fp_size 为同构元素宽度。普通聚合的 fp_count 必须为零。
+pub struct ABIValue {
+    size int
+    align int
+    aggregate int
+    fp_size int
+    fp_count int
+}
+
+// ABICursor 保存一份签名分配到当前参数前的状态。Darwin 的栈参数使用
+// 自然大小与对齐，Linux 的每个槽至少八字节；最终调用区统一十六字节对齐。
+pub struct ABICursor {
+    gpr int
+    fpr int
+    stack int
+    darwin int
+}
+
+// ABIArg 是单个逻辑参数/返回值的位置计划。寄存器片连续；stack 是调用时
+// SP 起的字节偏移；indirect 表示按调用方副本地址传参或按 x8 返回。
+pub struct ABIArg {
+    kind int
+    reg int
+    count int
+    stack int
+    indirect int
+    size int
+    fp_size int
+}
+
+// SourceCtx：当前任务的源文件字节与路径快照。
+// data/length 由 source.read 分配并持有到任务结束；path 指向 path_buf 内部，
+// path_buf 扩容后必须重新取 path（set_source_path 负责）。
+pub struct SourceCtx {
+    data *u8 // 源文件字节（malloc；任务生命期持有）
+    length int // 源字节长度（不含额外 NUL）
+    path *char // 当前源路径（指向 path_buf，不单独分配）
+    path_buf *u8 // 路径快照缓冲（堆分配倍增扩容）
+    path_buf_cap int // 路径快照容量
+}
+
+// PoolCtx：通用名字/字符串 intern 池。符号名、类型名、模块名、路径都放这里；
+// 表内只存池偏移与长度。池内字节带 NUL 结尾，便于调试与 np_cstr。
+pub struct PoolCtx {
+    data *u8 // intern 池（malloc；倍增扩容）
+    length int // 已用字节数（含每个名字的结尾 NUL）
+    cap int // 已分配容量
+}
+
+// DiagCtx：诊断的进程级开关与计数。
+// spec>0 表示推测解析，诊断静默且不计数；errors 是已报告错误数；
+// line_bias 是 .s.ct 来源映射的行号偏移；ct_* 是编译期 for 展开轨迹。
+pub struct DiagCtx {
+    spec int // 推测解析深度（>0 静默）
+    errors int // 已报告错误数
+    line_bias int // 诊断行号映射偏移
+    ct_depth int // 当前编译期 for 展开深度
+    ct_values [32]int // 外层到内层的展开值
+}
+
+// TargetInfo：完整代码生成目标身份；字符串借用编译器静态常量，不拥有堆内存。
+pub struct TargetInfo {
+    triple *char
+    data_layout *char
+    os int
+    arch int
+    abi *char
+    pointer_bits int
+    little_endian int
+    layout_version int
+}
+
+// TargetCfg：目标/编译期配置；实体存储在 proj.ProjectCtx.cfg，support 只持指针。
+// 字段顺序是 ABI/缓存键的一部分，不重排。
+pub struct TargetCfg {
+    target TargetInfo
+    host_target TargetInfo
+    target_explicit int
+    dialect int
+    opt_level int
+    trimpath int
+    emit_kind int
+    emit_asm int
+    emit_text_path *char
+    module_mode int
+    is_entry_mod int
+}
+
+// SessionCtx：一次编译/构建的会话开关与模式位。
+// 这些开关由 driver/worker 设置、前端与构建层只读；不随函数重置。
+pub struct SessionCtx {
+    compile int // 0 = 纯语法模式（--syntax-check）；1 = 编译模式
+    pass int // 1 = 顶层扫描登记；2 = 函数体编译与全局初始化
+    check_only int // 1 = 项目 check 模式，只做语义检查，不生成后端产物
+    test_mode int // 1 = yh test 模式；解析测试体语义并跳过生产缓存
+    legacy_system int // 1 = 兼容配置显式开放 system
+    ast_capture int // 1 = worker 同遍历记录表达式、语句和声明 AST
+    active_file int // 当前前端快照文件编号，AST 源映射使用
+    data_label int // 匿名数据标签计数（字符串字面量）；0 保留为 NULL
+    front_checked int // 1：受检前端阶段（front_stage.yh 唯一读写点）
+    iface_load int // 1：正在加载接口文件（登记不发射、不进 bss）
+    ct_iface_mode int // 1：正在读取 .s.ct（识别生成的来源映射注释）
+    ct_origin_active int // 1：当前声明从 .s.ct 来源映射切换到定义源码
+    ct_origin_line int // 当前 CT 函数定义源码体起始行
+}
+
+// BuildCtl：构建/发射的控制位（与统计无关的开关与身份）。
+// front_cache：worker 保存项目源与 token 快照；firc_write_off：本轮不写函数级
+// IR 缓存（全冷构建）；ir_cache_salt：父构建器传入的编译器二进制指纹。
+pub struct BuildCtl {
+    front_cache int
+    firc_write_off int
+    ir_cache_salt u64
+}
+
+// SupportCtx：support 的单例。把统计/源/名字池收在一个结构里，
+// 避免每类状态各占一个模块级 `let`；新增基础状态加到本结构。
+pub struct SupportCtx {
+    ctl BuildCtl
+    src SourceCtx
+    pool PoolCtx
+    diag DiagCtx
+    session SessionCtx
+    cfg *TargetCfg
+    fallback TargetCfg
+}
+
+pub struct ImportEnt {
+    name_off int       // 查找名（模块名）名字池偏移；点分导入时为末段
+    name_len int
+    path_off int       // 完整点分原文（a.b.c）名字池偏移；用于目录路径解析
+    path_len int
+    proj_key_off int   // 跨项目导入首段的依赖键池偏移；不适用时 -1
+    proj_key_len int
+    alias_off int      // 绑定名（限定调用用的标识符）池偏移
+    alias_len int
+    line int           // 1 基行号（诊断用）
+    col int            // 1 基列号
+}
+
+// ModNsEnt：已加载接口的一个导出名字条目。
+// sym/type_id 恰有一个 >= 0：值/函数/常量走 sym，纯类型名走 type_id。
+pub struct ModNsEnt {
+    name_off int       // 短名（源码名）名字池偏移
+    name_len int
+    sym int            // 值/函数/常量符号下标；纯类型名为 -1
+    tid int            // 类型编号（类型名条目）；值条目 -1
+}
+
+// ModInfo：一个已绑定导入模块（每份接口一条，含导出名字表）。
+pub struct ModInfo {
+    bind_off int       // 绑定名（=模块名）池偏移
+    bind_len int
+    prefix_off int     // 接口头宣布的符号后缀（__proj__mod）池偏移
+    prefix_len int
+    home int           // 模块编号（ms().home 归属标记用）
+    ns *ModNsEnt       // 导出名字表（堆分配）
+    ns_n int
+    ns_cap int
+}
+
+// FileScope：单文件的模块归属 + 导入表 + 已加载接口集合。
+// 生命周期 = 一个编译单元（换文件时 fscope_reset），堆缓冲由导入推送路径扩容。
+pub struct FileScope {
+    has_module int // 1 = 文件带 module 归属声明（模块模式）
+    name_off int // 模块名名字池偏移（has_module 时有效）
+    name_len int
+    imports *ImportEnt // 本文件导入表（堆分配，import_push 扩容）
+    import_n int
+    import_cap int
+    import_mod *int // 与 imports 平行：导入绑定的 ModInfo 下标
+    import_used *int // 与 imports 平行：本文件是否用到该导入
+    mods *ModInfo // 当前编译单元已加载的导入模块
+    mod_n int
+    mod_cap int
+    mod_home_next int // 下一个模块编号（home 分配计数）
+    sym_sfx_off int // 本模块符号后缀（__proj__mod）池偏移；单文件 -1
+    sym_sfx_len int
+}
+
+// Res：一次表达式求值的结果描述符（类型、常量性、字面量与编译期诊断）。
+// 语义动作边解析边求值，每个表达式节点通过 *Res 出参返回。
+// 约定：is_const=1 时 ival 有效（按 i64 位型；指针常量存数据标签号）。
+pub struct Res {
+    type_id int        // 类型表编号（<0 不出现；错误走函数返回值）
+    is_const int       // 1 = 编译期常量
+    ival i64           // 常量位型值；字符串/指针常量存数据标签号
+    sym int            // 裸名字引用时的符号表下标，否则 -1（直接调用优化用）
+    is_lit int         // 1 = 文本字面量（参与隐式窄化范围检查）
+    lit_big int        // 1 = 字面量超出 i64 正数域（仅 u64 目标可接受）
+    fval_bits i64      // 浮点常量位型（IEEE754，f64 为 64 位）
+    ast_id int         // 本次 check 生成的表达式 AST 节点编号；未记录为 -1
+    layout_type_id int // 延迟 sizeof 的目标类型；普通表达式为 -1
+    ct_diag int        // 非零表示该表达式是待语句位置消费的编译期诊断
+    ct_diag_expr int   // $assert 的已解析条件表达式 AST 编号；其他诊断为 -1
+    ct_diag_line int   // 诊断调用起始行
+    ct_diag_col int    // 诊断调用起始列
+    ct_diag_msg_start int // 消息字符串 token 在源文件中的起点；-1 表示默认消息
+    ct_diag_msg_len int // 消息字符串 token 长度
+}
+
+// CType：类型表的一行。内建类型占固定编号 0..12（TY_VOID..TY_F64），
+// 其后按需增长并按内容去重。
+pub struct CType {
+    kind int           // TY_* 种类
+    size int           // 字节大小
+    align int          // 字节对齐
+    elem int           // PTR：目标类型；ARRAY/SLICE：元素类型
+    len int            // ARRAY：长度；STRUCT/UNION：字段数；其余 -1
+    sub int            // STRUCT/UNION：字段表起始下标；FN：签名号
+}
+
+// SField：结构体/联合体字段表的一行。
+pub struct SField {
+    name_off int       // 名字池偏移
+    name_len int
+    type_id int
+    offset int         // 相对结构体起始的字节偏移
+    is_pub int         // 恒 1（pub struct 字段一律公开）；保留以稳定 .s.i 接口格式
+}
+
+// CSym：值符号表（全局/局部/参数/函数）的一行。
+pub struct CSym {
+    name_off int       // 名字池偏移
+    name_len int
+    kind int           // SYM_*
+    type_id int
+    offset int         // 局部/参数：距 fp 的字节距离（地址 = fp - offset）；
+                        // 全局：bss 清单下标（数据见 flags）
+    flags int          // F_*
+    cval i64           // 常量值位型；指针常量存数据标签号
+    const_ready int    // 1 = cval 已由声明初始化，可参与编译期求值
+    const_expr_off int // 可重放的直接常量字面式在名字池中的偏移；其他常量为 -1。
+    const_expr_len int // 可重放常量字面式字节长度。
+    const_expr_kind int // 0=无 1=浮点数字面式 2=字符串字面式。
+    def_line int       // 声明点行号（模块模式重复声明诊断用）
+    def_col int        // 声明点列号
+    ast_binding_row int // check AST 中对应的函数内绑定行；普通构建或全局为 -1
+}
+
+// TName：类型名字空间的一行（struct/union/enum/type 别名，仅顶层声明）。
+// 与 CType 平行：名字池偏移 + 类型编号 + 后端再发射所需的形态/属性/声明点。
+pub struct TName {
+    name_off int       // 名字池偏移
+    name_len int
+    type_id int
+    is_pub int         // 1 = pub 类型（接口导出）
+    form int           // 0=type 别名 1=struct 2=union 3=enum（接口再发射用）
+    attrs int          // ATTR_*：具名类型属性（别名目标属性由类型本身保留）
+    def_line int       // 声明点行号（重定义诊断用）
+    def_col int
+}
+
+// PubAggDeferred：导入侧延迟执行的 pub 聚合常量（$ 调用初始化）登记项。
+// .s.i 先于 .s.ct 加载，调用目标（隐藏符号）在 .s.ct 里才可见，因此把
+// 初始化式执行推迟到接口闭包加载完成之后；path 存 .s.i 路径，执行时
+// 重新读源与词法化后按 token 区间解析。
+pub struct PubAggDeferred {
+    sym int            // 常量符号编号
+    first int          // 初始化式 token 区间起点
+    after int          // 初始化式 token 区间终点（半开）
+    path_off int       // 接口文件路径（pool 偏移），0 表示无
+    path_len int
+}
+
+// —— goto 标签表（每函数重置） ——
+pub struct GLabel {
+    name_off int       // 名字池偏移
+    name_len int
+    lbl int            // 汇编标签号
+    defined int        // 1 = 已见定义点
+}
+
+// ModelStore：前端语义表的全部存储。
+// 生命周期 = 一个编译任务（state_init 时整体清零，释放旧缓冲）。
+pub struct ModelStore {
+    // —— 类型表（TY_*；内建类型占 0..12）——
+    types *CType
+    type_n int
+    type_cap int
+    // —— 结构体/联合体字段表 ——
+    fields *SField
+    field_n int
+    field_cap int
+    // —— 函数签名表（FN 类型通过 sub 引用签名号）——
+    sig_abi *int // 调用约定，参与函数类型判等
+    sig_acap int // ABI 表容量
+    type_abi int // 当前解析的函数类型默认 ABI，签名结束后恢复
+    sig_ret *int // 返回类型
+    sig_np *int // 固定参数个数
+    sig_vararg *int // 1 = 末尾裸变参（仅 prelude）
+    sig_first *int // 参数类型池起始下标
+    sig_params *int // 参数类型池
+    sig_n int
+    sig_rcap int
+    sig_ncap int
+    sig_vcap int
+    sig_fcap int
+    sigparam_n int
+    sigparam_cap int
+    // —— 类型名字空间（struct/union/enum/type 别名）——
+    names *TName
+    name_n int
+    name_cap int
+    // —— 聚合类型登记上限计数（方案 §4）——
+    aggtype_n int
+    // —— 正在解析的类型（parse/check 共享的「当前位置」）——
+    cur_enum int // 正在解析的 enum 类型编号
+    cur_struct int // 正在解析的 struct/union 类型编号
+    name_form int // 当前类型登记形态：0=type 别名 1=struct 2=union 3=enum
+    // —— 类型归属（跨模块 pub 字段检查；与 types 平行）——
+    home *int
+    home_cap int
+    // —— 符号表与作用域栈 ——
+    syms *CSym
+    sym_n int
+    sym_cap int
+    scope_start *int // 每层作用域进入时的符号表下标（64 层）
+    scope_n int
+}
+
+// StaticDataReloc：独占数据中的一个 64 位指针槽；目标是前端符号或数据标签。
+// target_sym/target_label 恰有一个有效，addend 按目标布局计字节；槽内始终为零。
+pub struct StaticDataReloc {
+    offset int
+    width int
+    target_sym int
+    target_label int
+    addend i64
+}
+
+// StaticDataObject：编译单元独占的已物化字节和重定位，不含 CT 执行器地址。
+// type_id>=0 表示受检对象；-1 表示以 elem_type/count 描述的匿名 backing。
+// 导入副本可同时保留 sym_id 和 label；访问器返回的指针只借用到替换或 reset。
+pub struct StaticDataObject {
+    sym_id int
+    label int
+    type_id int
+    elem_type int
+    count int
+    size int
+    align int
+    data *u8
+    relocs *StaticDataReloc
+    reloc_n int
+}
+
+// FrontCtx：前端每任务瞬时状态。字段语义见各自行尾注释。
+pub struct FrontCtx {
+    c_ct_origin_buf *u8 // [任务私有] .s.ct 来源映射解码路径（堆分配倍增扩容），独立于 sidecar 路径
+    c_ct_origin_buf_cap int // 来源映射路径缓冲容量；同样任务生命期持有
+    c_fold int // >0：表达式只做常量折叠，不发射代码
+    c_ct_target_ctx int // >0：当前正解析 $if 条件，目标标记按内建常量解析
+    c_ct_diag_stmt int // >0：当前完整表达式语句可消费编译期诊断结果
+    c_ct_prepare_active int // >0：当前正在 pass2a 前捕获 comptime 函数 typed IR
+    c_ct_prepare_first int // 当前待捕获编译期函数在文件 token 表中的起点
+    c_pub_agg_dep *PubAggDeferred // 导入侧延迟执行的 pub $ 聚合常量登记表
+    c_pub_agg_dep_n int
+    c_pub_agg_dep_cap int
+    c_expect_tid int // 数组/切片字面量的目标类型（let 初始化/赋值上下文）
+    c_bss_syms *int // 零初始化全局符号的 sym 下标清单（.bss）
+    c_bss_n int
+    c_fn_ret int // 当前函数返回类型
+    c_fn_flags int // 当前函数声明属性；旧发射与控制流检查共享
+    c_fn_falls int // 当前解析路径仍可能顺序落底
+    c_expr_noreturn int // 当前语句表达式中是否已执行 noreturn 调用
+    c_fn_sym int // 当前函数的符号下标（prologue 用名字）
+    c_fp_off int // 当前栈帧已分配字节数（局部/参数/临时累计）
+    c_temp_off int // 通用临时槽的 fp 距离（0 = 未分配）
+    c_loop_brk int // 当前循环 break 目标标签号
+    c_loop_cnt int // 当前循环 continue 目标标签号
+    c_loop_depth int // 循环嵌套深度（栈顶 = c_loop_brk/cnt）
+    c_loop_break_seen *int // 各循环是否含有 break，用于 noreturn 无限循环检查
+    c_spill_reg *int // 参数溢出记录（寄存器号），堆分配 16 项
+    c_spill_off *int // 参数溢出记录（槽偏移），堆分配 16 项
+    c_spill_n int
+    c_spill_size *int // 溢出槽的类型（浮点判定；0 = 整型/指针）
+    c_fp_argn int // 浮点参数计数（独立于整型寄存器序）
+    c_lvalue int // >0：解析赋值目标，地址型钩子发地址不发值
+    c_res_is_addr int // 刚解析的表达式在 x0 中留下的是地址（可赋值）
+    c_call_abi *int // 每层调用约定，聚合在求值时生成独立 C 副本
+    c_call_direct *int // 每层调用是否直接调用（callee 是裸函数名），堆分配 64 项
+    c_enum_next int // enum 成员的自动判别值
+    c_args *Res // 当前调用的实参 Res（堆分配 256 项，嵌套共享）
+    c_argtys *int // 当前调用的实参类型（堆分配 256 项）
+    c_arg_n int // 已收集的实参总数（嵌套调用以基线区分）
+    c_call_base *int // 每层调用的实参起始下标（堆分配 64 项）
+    c_call_depth int // 当前调用嵌套深度
+    c_arg_agg *int // 每个实参是否为聚合（堆分配 256 项）
+    c_ret_agg int // 当前函数返回聚合（x8 隐藏指针）
+    c_ret_ptr_off int // 当前函数保存 x8 入参指针的槽（0 = 未用）
+    c_ret_agg_val int // 1 = 本函数已为聚合返回准备好 x0
+    c_fp_tmp_off int // 浮点复合赋值的右值临时槽  // 调用聚合返回函数时的调用方缓冲槽
+    c_lit_off int // 结构体字面量临时槽（fp 距离）
+    c_lit_tid int // 结构体字面量目标类型
+    c_lit_last_type int // 字面量字段最近一次求值的类型/字面量性
+    c_lit_last_lit int
+    c_lit_last_ival i64
+    c_lit_depth int // 字面量嵌套深度
+    c_lit_save_off *int // 外层字面量槽（堆分配 32 项）
+    c_lit_save_tid *int // 外层字面量类型（堆分配 32 项）
+    c_aggparam_indirect *int // 1 表示源槽保存指针，0 表示源是栈内聚合
+    c_cabi_cursor ABICursor // 当前 C 函数入口的参数分类游标
+    c_aggparam_n int // 聚合参数入口拷贝任务数
+    c_aggparam_src *int // 指针槽（堆分配 64 项）
+    c_aggparam_dst *int // 体型槽（堆分配 64 项）
+    c_aggparam_size *int // 字节数（堆分配 64 项）
+    c_decl_pub int // 当前顶层声明是否带 pub
+    c_decl_attrs int // 当前顶层声明属性位（ATTR_*）
+    c_fold_ival i64 // 最近一次数字字面量的位型值
+    c_fold_big int // 1 = 字面量超出 i64 正数域
+    sc_lbl_false int
+    sc_lbl_end int
+    sc_sc_false_stk *int // 嵌套短路标签或折叠左值保存栈（堆分配 64 项）
+    sc_sc_end_stk *int
+    sc_sc_depth int
+    tn_lbl_else int
+    tn_lbl_end int
+    tn_else_stk *int // 嵌套三元标签保存栈（堆分配 64 项）
+    tn_end_stk *int
+    tn_depth int
+    c_glabels *GLabel // goto 标签表（堆分配 128 项）
+    c_glabel_n int
+    c_fi_kind *int // 0=数组/切片（按元素地址），1=区间（按下标）
+    c_fi_cnt_off *int // 循环计数槽（fp 距离）
+    c_fi_len_off *int // 长度槽（fp 距离）
+    c_fi_data_off *int // 数据/区间起点槽（fp 距离）
+    c_fi_step_off *int // 区间步长槽（+1/-1）
+    c_fi_elem_off *int // 元素/下标绑定槽（fp 距离，-1 未绑定）
+    c_fi_idx_off *int // 下标绑定槽（fp 距离，-1 未绑定）
+    c_fi_depth int
+    c_end_tmp_off int // 区间终点临时槽（for-in 区间用）
+    c_brk_stk *int
+    c_cnt_stk *int
+}
+
+// ctl：构建控制位窄口；返回单例中的 ctl 指针。
+pub fn ctl() *BuildCtl {
+    return &g_support.ctl
+}
+
+// src_ctx：源文件上下文窄口；返回单例中的 src 指针。
+pub fn src_ctx() *SourceCtx {
+    return &g_support.src
+}
+
+// pool_ctx：名字池上下文窄口；返回单例中的 pool 指针。
+pub fn pool_ctx() *PoolCtx {
+    return &g_support.pool
+}
+
+// session：会话开关窄口；返回单例中的 session 指针。
+pub fn session() *SessionCtx {
+    return &g_support.session
+}
+
+// diag：诊断上下文窄口；返回单例中的 diag 指针。
+pub fn diag() *DiagCtx {
+    return &g_support.diag
+}
+
+// data_label：当前可用的下一个标签号。
+pub fn data_label() int {
+    return g_support.session.data_label
+}
+
+// data_label_advance：取当前标签号并推进一位（返回分配到的标签）。
+pub fn data_label_advance() int {
+    let lbl int = g_support.session.data_label
+    g_support.session.data_label += 1
+    return lbl
+}
+
+// data_label_set：把计数器设到 v（跳号/回滚用）。
+pub fn data_label_set(v int) void {
+    g_support.session.data_label = v
+}
+
+// data_label_reset：会话开始复位（0 保留给 NULL）。
+pub fn data_label_reset() void {
+    g_support.session.data_label = 1
+}
+
+// append_byte：向 buf 的 n 处写入一个字节，返回新的写入位置。
+// 仅用于栈上小缓冲（诊断消息拼装），不做容量检查——调用方保证空间。
+pub fn append_byte(buf *u8, n int, b u8) int {
+    buf[n] = b
+    return n + 1
+}
+
+// append_str：向 buf 追加一个 NUL 结尾字符串（不含结尾 NUL），返回新位置。
+// 不做容量检查；调用方必须保证 buf 至少还有 cstr_len(s) 字节。
+pub fn append_str(buf *u8, n int, s *char) int {
+    let i int = 0
+    for s[i] != 0 {
+        buf[n] = s[i].to_type(u8)
+        n += 1
+        i += 1
+    }
+    return n
+}
+
+// cstr_len：C 字符串长度（不含结尾 NUL）。
+// 接口头行等固定前缀用它代替手写字节数常量，避免字面量与长度常量漂移。
+pub fn cstr_len(s *char) int {
+    let i int = 0
+    for s[i] != 0 {
+        i += 1
+    }
+    return i
+}
+
+// append_str_limit：向 buf 追加字符串，最多写到 limit 之前，返回新位置。
+// 用于包含源代码消息的诊断拼装，避免长输入写出固定缓冲区边界。
+pub fn append_str_limit(buf *u8, n int, limit int, s *char) int {
+    let i int = 0
+    for s[i] != 0 && n < limit {
+        buf[n] = s[i].to_type(u8)
+        n += 1
+        i += 1
+    }
+    return n
+}
+
+// append_int：向 buf 追加十进制整数（含负号），返回新位置。
+// 行号/列号规模远小于 2^31，不处理 INT_MIN 取负溢出。
+pub fn append_int(buf *u8, n int, v int) int {
+    if (v < 0) {
+        buf[n] = '-'
+        n += 1
+        v = -v
+    }
+    // 逆序取位到 tmp，再反向拷入 buf
+    let tmp [12]u8
+    let k int = 0
+    if (v == 0) {
+        tmp[0] = '0'
+        k = 1
+    }
+    for v > 0 {
+        tmp[k] = ((v % 10) + 48).to_type(u8)
+        k += 1
+        v = v / 10
+    }
+    for k > 0 {
+        k -= 1
+        buf[n] = tmp[k]
+        n += 1
+    }
+    return n
+}
+
+// append_i64：向 buf 追加十进制 64 位整数（含负号），返回新位置。
+// append_int 的实参是 32 位 int，超过 2^31 的值会被静默截断——构建统计里的
+// 纳秒计时正好跨在这条线上（2.147 s 以上就翻负），故 64 位量一律走这里。
+// 与 append_int 一样不处理 INT64_MIN 取负溢出。
+pub fn append_i64(buf *u8, n int, v i64) int {
+    if (v < 0) {
+        buf[n] = '-'
+        n += 1
+        v = -v
+    }
+    // 逆序取位到 tmp，再反向拷入 buf（i64 最长 19 位数字 + 符号）
+    let tmp [24]u8
+    let k int = 0
+    if (v == 0) {
+        tmp[0] = '0'
+        k = 1
+    }
+    for v > 0 {
+        tmp[k] = ((v % 10) + 48).to_type(u8)
+        k += 1
+        v = v / 10
+    }
+    for k > 0 {
+        k -= 1
+        buf[n] = tmp[k]
+        n += 1
+    }
+    return n
+}
+
+// write_all：把 buf 前 n 个字节全部写到 fd。
+// write 可能短写（返回实际写出字节数），循环推进直到写完；负返回视为错误。
+// 返回 0 成功、-1 表示 write 失败（不重试 EINTR，调用方按编译失败处理）。
+pub fn write_all(fd int, buf *u8, n int) int {
+    let done int = 0
+    for done < n {
+        let w i64 = write(fd, buf + done, (n - done).to_type(u64))
+        if (w <= 0) {
+            return -1
+        }
+        done += w.to_type(int)
+    }
+    return 0
+}
+
+// alloc：统一分配入口（A0d）。
+//
+// 编译器在内存耗尽后无法继续：与其让调用方解引用空指针、在任意深处
+// 无声崩溃，不如在这里写一条确定诊断并终止。这是编译器里**唯一**的
+// 进程级退出点；新增分配一律走这里，不再逐点重复判空。
+// 返回非 0 指针，调用方按需 `.to_type(*T)` 转换。
+pub fn alloc(size u64) *u8 {
+    let p *u8 = malloc(size).to_type(*u8)
+    if (p == 0) {
+        let msg *char = "yh: 内存不足，无法继续\n"
+        write_all(2, msg.to_type(*u8), 32)
+        exit(1)
+    }
+    return p
+}
+
+// task_buf_reserve：任务私有缓冲的统一倍增扩容（RS1b）。
+// 任务生命期持有、不在任务内释放；扩容后旧块不复用，需要跨扩容稳定的指针
+// 必须整体重写后重新取。返回 0 表示分配失败；need 按字节总数（含 NUL）传入。
+pub fn task_buf_reserve(buf **u8, cap *int, need int) *u8 {
+    if (*buf != 0 && *cap >= need) {
+        return *buf
+    }
+    let ncap int = *cap * 2
+    if (ncap < need) {
+        ncap = need
+    }
+    if (ncap < 256) {
+        ncap = 256
+    }
+    let nd *u8 = malloc(ncap.to_type(u64)).to_type(*u8)
+    if (nd == 0) {
+        return 0
+    }
+    *buf = nd
+    *cap = ncap
+    return nd
+}
+
+// append_str_cap：容量受限追加字符串，返回新的长度（写满即止）。
+pub fn append_str_cap(buf *u8, cap int, n int, s *char) int {
+    let i int = 0
+    for n < cap - 1 && s[i] != 0 {
+        buf[n] = s[i].to_type(u8)
+        n += 1
+        i += 1
+    }
+    buf[n] = 0
+    return n
+}
+
+// append_byte_cap：容量受限追加单字节，返回新的长度（写满即止）。
+pub fn append_byte_cap(buf *u8, cap int, n int, b u8) int {
+    if (n >= cap - 1) { return n }
+    buf[n] = b
+    n += 1
+    buf[n] = 0
+    return n
+}
+
+// append_int_cap：容量受限追加十进制整数，返回新的长度（写满即止）。
+pub fn append_int_cap(buf *u8, cap int, n int, v int) int {
+    let tmp [24]u8
+    let m int = 0
+    let x int = v
+    if (x < 0) {
+        n = append_byte_cap(buf, cap, n, '-')
+        x = -x
+    }
+    if (x == 0) { return append_byte_cap(buf, cap, n, '0') }
+    for x > 0 && m < 24 {
+        tmp[m] = (x % 10 + 48).to_type(u8)
+        m += 1
+        x = x / 10
+    }
+    for m > 0 {
+        m -= 1
+        n = append_byte_cap(buf, cap, n, tmp[m])
+    }
+    return n
+}
+
+// fail：报告一条不带位置的编译器级错误（打开失败、内存不足等），返回 -1。
+// 写 stderr；不分配、不检查 msg 非空（调用方保证是静态/池内 NUL 串）。
+pub fn fail(msg *char) int {
+    let buf [512]u8
+    let n int = 0
+    n = append_str_cap(buf, 512, n, "yh: ")
+    n = append_str_cap(buf, 512, n, msg)
+    n = append_byte_cap(buf, 512, n, '\n')
+    write_all(2, buf, n)
+    return -1
+}
+
+// fail_path：报告与源文件路径相关的错误（如无法打开），返回 -1。
+// 写 stderr；不分配、不检查 path 非空（调用方保证是 NUL 串）。
+pub fn fail_path(msg *char, path *char) int {
+    let buf [512]u8
+    let n int = 0
+    n = append_str_cap(buf, 512, n, "yh: ")
+    n = append_str_cap(buf, 512, n, msg)
+    n = append_str_cap(buf, 512, n, path)
+    n = append_byte_cap(buf, 512, n, '\n')
+    write_all(2, buf, n)
+    return -1
+}
+
+// cstr_eq：按字节比较两个 NUL 结尾字符串，相等返回 1、不等返回 0。
+// prelude 没有 strcmp，这里手写；仅用于命令行参数/模块名比对。
+pub fn cstr_eq(a *char, b *char) int {
+    let i int = 0
+    for 1 {
+        if (a[i] != b[i]) {
+            return 0
+        }
+        if (a[i] == 0) {
+            return 1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// arr_cstr：把字节缓冲当作 NUL 结尾 C 字符串取 *char。
+// 注意：数组局部不可直接 `.to_type(*char)`（接收者语义不同），必须先
+// 作参数传递完成退化（本函数的 buf 参数），再对指针做类型转换。
+pub fn arr_cstr(buf *u8) *char {
+    return buf.to_type(*char)
+}
+
+// out_grow：把 data/cap 指向的缓冲扩容到至少能容纳 need 字节。
+// 成功返回 0，分配失败输出诊断并返回 -1；成功后 *data/*cap 已更新。
+pub fn out_grow(data **u8, n int, cap *int, need int) int {
+    if (n < *cap) {
+        return 0
+    }
+    let ncap int = *cap * 2
+    if (ncap == 0) {
+        ncap = 65536
+    }
+    if (ncap < need) {
+        ncap = need
+    }
+    let nd *u8 = malloc(ncap.to_type(u64)).to_type(*u8)
+    if (nd == 0) {
+        return fail("内存分配失败")
+    }
+    if (n > 0) {
+        memcpy(nd, *data, n.to_type(u64))
+    }
+    free(*data)
+    *data = nd
+    *cap = ncap
+    return 0
+}
+
+// hexval：十六进制字符转数值（0-9/a-f/A-F）；调用方保证输入在此集合内。
+pub fn hexval(b u8) int {
+    if (b >= '0' && b <= '9') {
+        return (b - '0').to_type(int)
+    }
+    if (b >= 'a' && b <= 'f') {
+        return ((b - 'a') + 10).to_type(int)
+    }
+    return ((b - 'A') + 10).to_type(int)
+}
+
+// err_lc：报告一条带位置的错误（1 基行列），计一次错误并返回 -1。
+// 推测解析期间静默：不打印、不计数，仅以返回值示意失败。
+pub fn err_lc(line int, col int, msg *char) int {
+    if (diag().spec > 0) {
+        return -1
+    }
+    diag().errors += 1
+    let buf [2048]u8
+    let limit int = 2047
+    let n int = 0
+    n = append_str_limit(buf, n, limit, src_ctx().path)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, line + diag().line_bias)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, col)
+    n = append_str_limit(buf, n, limit, ": 错误: ")
+    n = append_str_limit(buf, n, limit, msg)
+    n = append_ct_expand_trace(buf, n, limit)
+    if (n < limit) { n = append_byte(buf, n, '\n') }
+    else { buf[limit] = '\n'; n = limit + 1 }
+    write_all(2, buf, n)
+    return -1
+}
+
+// warn_lc：报告一条带位置的警告，不增加错误数；推测解析期间保持静默。
+pub fn warn_lc(line int, col int, msg *char) int {
+    if (diag().spec > 0) { return 0 }
+    let buf [2048]u8
+    let limit int = 2047
+    let n int = 0
+    n = append_str_limit(buf, n, limit, src_ctx().path)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, line + diag().line_bias)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, col)
+    n = append_str_limit(buf, n, limit, ": 警告: ")
+    n = append_str_limit(buf, n, limit, msg)
+    n = append_ct_expand_trace(buf, n, limit)
+    if (n < limit) { n = append_byte(buf, n, '\n') }
+    else { buf[limit] = '\n'; n = limit + 1 }
+    return write_all(2, &buf[0], n)
+}
+
+// fs：文件作用域窄口。
+pub fn fs() *FileScope {
+    return &g_fscope
+}
+
+// fscope_reset：把归属与导入表清零（state_init 调用；旧缓冲由持有方先释放）。
+pub fn fscope_reset() void {
+    g_fscope.has_module = 0
+    g_fscope.name_off = -1
+    g_fscope.name_len = 0
+    g_fscope.imports = 0
+    g_fscope.import_n = 0
+    g_fscope.import_cap = 0
+    g_fscope.import_mod = 0
+    g_fscope.import_used = 0
+    g_fscope.mods = 0
+    g_fscope.mod_n = 0
+    g_fscope.mod_cap = 0
+    g_fscope.mod_home_next = 0
+    g_fscope.sym_sfx_off = -1
+    g_fscope.sym_sfx_len = 0
+}
+
+// front_checked_begin：进入受检前端；重复进入报内部错误。
+pub fn front_checked_begin() int {
+    if (g_support.session.front_checked != 0) {
+        return fail("内部错误：受检前端阶段重复进入")
+    }
+    g_support.session.front_checked = 1
+    return 0
+}
+
+// front_checked_verify：核对阶段仍在受检模式；0 = 仍在受检阶段。
+pub fn front_checked_verify() int {
+    if (g_support.session.front_checked == 0) {
+        return fail("内部错误：不在受检阶段")
+    }
+    return 0
+}
+
+// front_checked_end：成功检验后退出阶段；失败保留禁发状态。
+pub fn front_checked_end() int {
+    if (front_checked_verify() != 0) { return -1 }
+    g_support.session.front_checked = 0
+    return 0
+}
+
+pub fn model_layout_struct(first int, n int, is_union int,
+    out_size *int, out_align *int) int {
+    let off int = 0
+    let maxal int = 1
+    let maxsz int = 0
+    let i int = 0
+    for i < n {
+        let ftid int = ms().fields[first + i].type_id
+        let fsz int = ms().types[ftid].size
+        let fal int = ms().types[ftid].align
+        if (fal > maxal) {
+            maxal = fal
+        }
+        if (is_union != 0) {
+            ms().fields[first + i].offset = 0
+        } else {
+            // 向上取整到字段对齐
+            let pad int = (0 - off) % fal
+            if (pad < 0) {
+                pad += fal
+            }
+            off += pad
+            ms().fields[first + i].offset = off
+            off += fsz
+        }
+        if (fsz > maxsz) {
+            maxsz = fsz
+        }
+        i += 1
+    }
+    let size int = 0
+    if (is_union != 0) {
+        size = maxsz
+    } else {
+        size = off
+    }
+    // 结构体大小向上取整到自身对齐
+    let rpad int = (0 - size) % maxal
+    if (rpad < 0) {
+        rpad += maxal
+    }
+    size += rpad
+    out_size[0] = size
+    out_align[0] = maxal
+    return 0
+}
+
+// ms：语义表存储窄口。
+pub fn ms() *ModelStore {
+    return &g_model
+}
+
+// mstore_reset：把存储整体清零（state_init 调用；旧缓冲由既有代码先释放）。
+pub fn mstore_reset() void {
+    g_model.types = 0
+    g_model.type_n = 0
+    g_model.type_cap = 0
+    g_model.fields = 0
+    g_model.field_n = 0
+    g_model.field_cap = 0
+    g_model.sig_abi = 0
+    g_model.sig_acap = 0
+    g_model.type_abi = 0
+    g_model.sig_ret = 0
+    g_model.sig_np = 0
+    g_model.sig_vararg = 0
+    g_model.sig_first = 0
+    g_model.sig_params = 0
+    g_model.sig_n = 0
+    g_model.sig_rcap = 0
+    g_model.sig_ncap = 0
+    g_model.sig_vcap = 0
+    g_model.sig_fcap = 0
+    g_model.sigparam_n = 0
+    g_model.sigparam_cap = 0
+    g_model.names = 0
+    g_model.name_n = 0
+    g_model.name_cap = 0
+    g_model.aggtype_n = 0
+    g_model.cur_enum = -1
+    g_model.cur_struct = -1
+    g_model.name_form = 0
+    g_model.home = 0
+    g_model.home_cap = 0
+    g_model.syms = 0
+    g_model.sym_n = 0
+    g_model.sym_cap = 0
+    g_model.scope_start = 0
+    g_model.scope_n = 0
+}
+
+// model_type_push：追加一行类型（必要时扩容类型表与归属表），返回新行号。
+// 只做存储：按内容去重、内建类型登记等语义规则仍在 gen/check。
+// 扩容时类型表与 home 表同步翻倍，新增归属填 -1（本地）。
+pub fn model_type_push(kind int, size int, align int, elem int, n int, sub int) int {
+    let m *ModelStore = ms()
+    if (m.type_n == m.type_cap) {
+        let ncap int = m.type_cap * 2
+        if (ncap == 0) { ncap = 64 }
+        let nd *CType = malloc((ncap * sizeof(CType)).to_type(u64)).to_type(*CType)
+        if (nd == 0) { return fail("内存分配失败") }
+        if (m.type_n > 0) {
+            memcpy(nd, m.types, (m.type_n * sizeof(CType)).to_type(u64))
+        }
+        free(m.types)
+        m.types = nd
+        let nh *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+        if (nh == 0) { return fail("内存分配失败") }
+        if (m.home_cap > 0) {
+            memcpy(nh, m.home, (m.home_cap * sizeof(int)).to_type(u64))
+        }
+        if (m.home_cap > 0) { free(m.home) }
+        m.home = nh
+        let hi int = m.home_cap
+        for hi < ncap {
+            m.home[hi] = -1
+            hi += 1
+        }
+        m.home_cap = ncap
+        m.type_cap = ncap
+    }
+    m.types[m.type_n].kind = kind
+    m.types[m.type_n].size = size
+    m.types[m.type_n].align = align
+    m.types[m.type_n].elem = elem
+    m.types[m.type_n].len = n
+    m.types[m.type_n].sub = sub
+    m.type_n += 1
+    return m.type_n - 1
+}
+
+// model_type_push_agg：追加聚合类型并检查登记上限；超限返回 -1。
+pub fn model_type_push_agg(kind int, size int, align int, elem int, n int, sub int) int {
+    if (ms().aggtype_n >= AGGTYPE_LIMIT) {
+        return fail("聚合类型登记过多（上限 512）")
+    }
+    ms().aggtype_n += 1
+    return model_type_push(kind, size, align, elem, n, sub)
+}
+
+// np_cstr：名字池内偏移转 NUL 结尾 C 字符串（池内字节本就带 NUL）。
+pub fn np_cstr(off int) *char {
+    return (pool_ctx().data + off).to_type(*char)
+}
+
+// name_intern：把源码 [start,len) 复制进名字池，返回池内偏移。
+// 池里字节带 NUL 结尾；分配失败输出诊断并返回 -1。
+pub fn name_intern(start int, n int) int {
+    let need int = pool_ctx().length + n + 1
+    if (need > pool_ctx().cap) {
+        let ncap int = pool_ctx().cap * 2
+        if (ncap < need) {
+            ncap = need
+        }
+        let nd *u8 = malloc(ncap.to_type(u64)).to_type(*u8)
+        if (nd == 0) {
+            fail("内存分配失败")
+            return -1
+        }
+        if (pool_ctx().length > 0) {
+            memcpy(nd, pool_ctx().data, pool_ctx().length.to_type(u64))
+        }
+        free(pool_ctx().data)
+        pool_ctx().data = nd
+        pool_ctx().cap = ncap
+    }
+    let off int = pool_ctx().length
+    let i int = 0
+    for i < n {
+        pool_ctx().data[pool_ctx().length] = src_ctx().data[start + i]
+        pool_ctx().length += 1
+        i += 1
+    }
+    pool_ctx().data[pool_ctx().length] = 0
+    pool_ctx().length += 1
+    return off
+}
+
+// name_intern_lit：登记编译器内置名字（如 prelude 符号名），返回池偏移。
+// 与 name_intern 共用同一池；分配失败返回 -1。
+pub fn name_intern_lit(s *char) int {
+    let n int = 0
+    for s[n] != 0 {
+        n += 1
+    }
+    let need int = pool_ctx().length + n + 1
+    if (need > pool_ctx().cap) {
+        let ncap int = pool_ctx().cap * 2
+        if (ncap < need) {
+            ncap = need
+        }
+        let nd *u8 = malloc(ncap.to_type(u64)).to_type(*u8)
+        if (nd == 0) {
+            fail("内存分配失败")
+            return -1
+        }
+        if (pool_ctx().length > 0) {
+            memcpy(nd, pool_ctx().data, pool_ctx().length.to_type(u64))
+        }
+        free(pool_ctx().data)
+        pool_ctx().data = nd
+        pool_ctx().cap = ncap
+    }
+    let off2 int = pool_ctx().length
+    let i int = 0
+    for i < n {
+        pool_ctx().data[pool_ctx().length] = s[i].to_type(u8)
+        pool_ctx().length += 1
+        i += 1
+    }
+    pool_ctx().data[pool_ctx().length] = 0
+    pool_ctx().length += 1
+    return off2
+}
+
+// tml_intern_str：把任意缓冲字节 intern 进名字池（路径/模块名/诊断消息）。
+pub fn tml_intern_str(buf *u8, start int, n int) int {
+    let need int = pool_ctx().length + n + 1
+    if (need > pool_ctx().cap) {
+        let ncap int = pool_ctx().cap * 2
+        if (ncap < need) {
+            ncap = need
+        }
+        let nd *u8 = malloc(ncap.to_type(u64)).to_type(*u8)
+        if (nd == 0) {
+            fail("内存分配失败")
+            return -1
+        }
+        if (pool_ctx().length > 0) {
+            memcpy(nd, pool_ctx().data, pool_ctx().length.to_type(u64))
+        }
+        free(pool_ctx().data)
+        pool_ctx().data = nd
+        pool_ctx().cap = ncap
+    }
+    let off int = pool_ctx().length
+    let i int = 0
+    for i < n {
+        pool_ctx().data[pool_ctx().length] = buf[start + i]
+        pool_ctx().length += 1
+        i += 1
+    }
+    pool_ctx().data[pool_ctx().length] = 0
+    pool_ctx().length += 1
+    return off
+}
+
+// append_np_cap：容量受限追加名字池片段（偏移 + 长度），返回新位置。
+pub fn append_np_cap(buf *u8, cap int, n int, off int, olen int) int {
+    let i int = 0
+    for i < olen && n < cap - 1 {
+        buf[n] = pool_ctx().data[off + i]
+        n += 1
+        i += 1
+    }
+    buf[n] = 0
+    return n
+}
+
+// append_np：不设上界的名字池字节追加（调用方自行保证缓冲够大）。
+pub fn append_np(buf *u8, n int, off int, olen int) int {
+    return append_np_cap(buf, 2147483647, n, off, olen)
+}
+
+// set_source_path：把当前文件路径复制进任务私有可扩容缓冲，避免可扩容
+// 字符串池搬迁后 path 悬空。成功返回 0；路径为空/分配失败返回 -1。
+pub fn set_source_path(path *char) int {
+    if (path == 0) {
+        return fail("源文件路径为空")
+    }
+    let n int = 0
+    for path[n] != 0 {
+        n += 1
+    }
+    let buf *u8 = task_buf_reserve(&src_ctx().path_buf, &src_ctx().path_buf_cap, n + 1)
+    if (buf == 0) {
+        return fail("路径快照缓冲分配失败")
+    }
+    let i int = 0
+    for i < n {
+        buf[i] = path[i].to_type(u8)
+        i += 1
+    }
+    buf[n] = 0
+    src_ctx().path = buf.to_type(*char)
+    return 0
+}
+
+// read_source：读取完整源文件到 SourceCtx.data/length。
+// 流程：open（O_RDONLY=0）→ 循环 read 到倍增缓冲（0 即 EOF，负数错误）→
+// close。缓冲初始 64 KiB，每次翻倍并整体拷贝；NUL 字节按普通字节保留。
+// 成功返回 0；任何一步失败释放资源、输出诊断并返回 -1。
+pub fn read_source(path *char) int {
+    let fd int = open(path, 0)
+    if (fd < 0) {
+        return fail_path("无法打开文件: ", path)
+    }
+    let cap int = 65536
+    let data *u8 = malloc(cap.to_type(u64)).to_type(*u8)
+    if (data == 0) {
+        close(fd)
+        return fail("内存分配失败")
+    }
+    let blen int = 0
+    for 1 {
+        // 保证至少 64 KiB 余量再读（read 一次最多取 64 KiB）
+        if (cap - blen < 65536) {
+            let ncap int = cap * 2
+            let nd *u8 = malloc(ncap.to_type(u64)).to_type(*u8)
+            if (nd == 0) {
+                free(data)
+                close(fd)
+                return fail("内存分配失败")
+            }
+            memcpy(nd, data, blen.to_type(u64))
+            free(data)
+            data = nd
+            cap = ncap
+        }
+        let n i64 = read(fd, data + blen, (cap - blen).to_type(u64))
+        if (n < 0) {
+            free(data)
+            close(fd)
+            return fail_path("读取失败: ", path)
+        }
+        if (n == 0) {
+            break
+        }
+        blen += n.to_type(int)
+    }
+    close(fd)
+    src_ctx().data = data
+    src_ctx().length = blen
+    return 0
+}
+
+// static_data_add：创建预清零对象；同符号或同标签重复登记时替换原行并清空重定位。
+// 先分配再替换，失败不破坏已有对象；返回稳定行号或 -1，允许空 backing。
+pub fn static_data_add(sym_id int, label int, type_id int, elem_type int,
+    count int, size int, align int) int {
+    if (sym_id < -1 || label < -1 || label == 0 || (sym_id < 0 && label < 1)
+        || type_id < -1 || elem_type < -1 || count < 0 || size < 0 || size > STATIC_DATA_LIMIT
+        || align <= 0 || align > STATIC_DATA_LIMIT || (align & (align - 1)) != 0
+        || (type_id < 0 && elem_type < 0)) {
+        return fail("静态数据对象的身份或布局无效")
+    }
+    let row int = -1; let i int = 0
+    for i < static_object_n {
+        let current StaticDataObject = static_objects[i]
+        if ((sym_id >= 0 && current.sym_id == sym_id)
+            || (label >= 1 && current.label == label)) {
+            if (row >= 0 && row != i) { return fail("静态数据符号与标签身份冲突") }
+            row = i
+        }
+        i += 1
+    }
+    let object StaticDataObject
+    object.sym_id = sym_id; object.label = label; object.type_id = type_id
+    object.elem_type = elem_type; object.count = count; object.size = size; object.align = align
+    if (size > 0) {
+        object.data = malloc(size.to_type(u64)).to_type(*u8)
+        if (object.data == 0) { return fail("静态数据字节分配失败") }
+        i = 0
+        for i < size { object.data[i] = 0; i += 1 }
+    }
+    if (row < 0 && static_object_n == static_object_cap) {
+        let capacity int = static_object_cap == 0 ? 16 : static_object_cap * 2
+        if (capacity > STATIC_DATA_LIMIT / sizeof(StaticDataObject)) {
+            static_data_drop(&object); return fail("静态数据目录过大")
+        }
+        let next *StaticDataObject = malloc((capacity * sizeof(StaticDataObject)).to_type(u64)) .
+            to_type(*StaticDataObject)
+        if (next == 0) { static_data_drop(&object); return fail("静态数据目录分配失败") }
+        if (static_object_n > 0) {
+            memcpy(next, static_objects, (static_object_n * sizeof(StaticDataObject)).to_type(u64))
+        }
+        free(static_objects.to_type(*void)); static_objects = next; static_object_cap = capacity
+    }
+    if (row < 0) { row = static_object_n; static_object_n += 1 }
+    else { static_data_drop(&static_objects[row]) }
+    static_objects[row] = object
+    return row
+}
+
+// static_data_scalar：按小端写入完整低位，不允许越界或覆盖已有指针重定位槽。
+// bits 仅表示目标标量位型，绝不按宿主地址解引用；成功返回 0。
+pub fn static_data_scalar(row int, offset int, width int, bits i64) int {
+    if (row < 0 || row >= static_object_n || offset < 0 || width < 1 || width > 8
+        || offset > static_objects[row].size || width > static_objects[row].size - offset) {
+        return fail("静态数据标量写入范围无效")
+    }
+    let object *StaticDataObject = &static_objects[row]
+    let i int = 0
+    for i < object.reloc_n {
+        let reloc StaticDataReloc = object.relocs[i]
+        if (offset < reloc.offset + reloc.width && reloc.offset < offset + width) {
+            return fail("静态数据标量与指针重定位重叠")
+        }
+        i += 1
+    }
+    i = 0
+    for i < width { object.data[offset + i] = (bits.to_type(u64) >> (i * 8)).to_type(u8); i += 1 }
+    return 0
+}
+
+// static_data_reloc：登记一个未重叠的 8 字节指针槽；目标必须为符号或正标签。
+// 源槽只接受零占位，目标尚未登记也可引用，最终闭包由受检模块与 IR verifier 校验。
+// ponytail: 单对象重定位按追加复制；大量指针槽成为实测瓶颈时再增加私有容量表。
+pub fn static_data_reloc(row int, offset int, target_sym int, target_label int, addend i64) int {
+    if (row < 0 || row >= static_object_n || offset < 0
+        || offset > static_objects[row].size || 8 > static_objects[row].size - offset
+        || target_sym < -1 || target_label < -1 || target_label == 0
+        || (target_sym < 0 && target_label < 1) || (target_sym >= 0 && target_label >= 1)) {
+        return fail("静态数据指针重定位无效")
+    }
+    let object *StaticDataObject = &static_objects[row]
+    let i int = 0
+    for i < 8 {
+        if (object.data[offset + i] != 0) { return fail("静态数据指针槽必须使用零占位") }
+        i += 1
+    }
+    i = 0
+    for i < object.reloc_n {
+        if (offset < object.relocs[i].offset + 8 && object.relocs[i].offset < offset + 8) {
+            return fail("静态数据指针重定位重叠")
+        }
+        i += 1
+    }
+    if (object.reloc_n >= STATIC_DATA_LIMIT / sizeof(StaticDataReloc)) {
+        return fail("静态数据重定位过多")
+    }
+    let next *StaticDataReloc = malloc(((object.reloc_n + 1) * sizeof(StaticDataReloc)).to_type(u64)) .
+        to_type(*StaticDataReloc)
+    if (next == 0) { return fail("静态数据重定位分配失败") }
+    if (object.reloc_n > 0) {
+        memcpy(next, object.relocs, (object.reloc_n * sizeof(StaticDataReloc)).to_type(u64))
+    }
+    next[object.reloc_n].offset = offset; next[object.reloc_n].width = 8
+    next[object.reloc_n].target_sym = target_sym; next[object.reloc_n].target_label = target_label
+    next[object.reloc_n].addend = addend
+    free(object.relocs.to_type(*void)); object.relocs = next; object.reloc_n += 1
+    return 0
+}
+
+// static_data_count：返回当前编译单元已封存的对象数，不暴露可变目录表。
+pub fn static_data_count() int { return static_object_n }
+
+// static_data_at：复制一行描述符，内部缓冲只读借用；消费者封存时须深拷贝。
+// 越界或空出参返回 -1，不改出参；同一行替换或目录 reset 后借用失效。
+pub fn static_data_at(row int, out *StaticDataObject) int {
+    if (row < 0 || row >= static_object_n || out == 0) { return -1 }
+    out[0] = static_objects[row]
+    return 0
+}
+
+// static_data_reset：释放本编译单元全部目录与子缓冲；允许空目录和重复调用。
+pub fn static_data_reset() void {
+    let i int = 0
+    for i < static_object_n { static_data_drop(&static_objects[i]); i += 1 }
+    free(static_objects.to_type(*void)); static_objects = 0; static_object_n = 0; static_object_cap = 0
+}
+
+// static_data_rows_slot：静态数据目录首址的槽（CT 镜像用，不复制）。
+pub fn static_data_rows_slot() **StaticDataObject { return &static_objects }
+
+// static_data_n_slot：静态数据目录行数的槽。
+pub fn static_data_n_slot() *int { return &static_object_n }
+
+pub fn sym_lookup_off(off int, n int) int {
+    let i int = ms().sym_n - 1
+    for i >= 0 {
+        if (ms().syms[i].name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[ms().syms[i].name_off + j] != pool_ctx().data[off + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return i
+            }
+        }
+        i -= 1
+    }
+    return -1
+}
+
+// sym_lookup：当前作用域链内查找（符号按名字池比较）。找不到返回 -1。
+pub fn sym_lookup(start int, n int) int {
+    let i int = ms().sym_n - 1
+    for i >= 0 {
+        if (ms().syms[i].name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[ms().syms[i].name_off + j] != src_ctx().data[start + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return i
+            }
+        }
+        i -= 1
+    }
+    return -1
+}
+
+// sym_lookup_off：按名字池偏移查符号（池对池比较，供构建器诊断用）。
+// 只查全局层（ms().scope_start[0] 以下）。找不到返回 -1。
+// sym_ct_lit_text：把「字符串指针常量」沿引用链追到最终的字面式初始化文本。引用式
+// （`const A *char = B;`，kind 3）逐跳跟进，直到找到 kind 2 的字面式 —— 消费者看不到提供方的
+// 私有常量名，重放引用本身会在导入侧解析失败。跳数上限 16 兼作环与超深链的兜底
+// （`A -> B -> A` 这类环不会死循环）。成功填 out_off/out_len 返回 0，否则返回 1。
+pub fn sym_ct_lit_text(sym_id int, out_off *int, out_len *int) int {
+    if (sym_id < 0 || sym_id >= ms().sym_n) { return 1 }
+    let cur int = sym_id
+    let hops int = 0
+    for hops < 16 {
+        let kind int = ms().syms[cur].const_expr_kind
+        if (kind == 2) {
+            *out_off = ms().syms[cur].const_expr_off
+            *out_len = ms().syms[cur].const_expr_len
+            return 0
+        }
+        if (kind != 3) { return 1 }
+        let nxt int = sym_lookup_off(ms().syms[cur].const_expr_off,
+            ms().syms[cur].const_expr_len)
+        if (nxt < 0 || nxt >= ms().sym_n || nxt == cur) { return 1 }
+        if (ms().syms[nxt].kind != SYM_CONST
+            || (ms().syms[nxt].flags & F_ADDR) == 0) {
+            return 1
+        }
+        cur = nxt
+        hops += 1
+    }
+    return 1
+}
+
+// ty_name_attrs：合并同一底层类型的具名别名属性，保留 C/opaque 类型身份。
+pub fn ty_name_attrs(tid int) int {
+    let attrs int = 0
+    let i int = 0
+    for i < ms().name_n {
+        if (ms().names[i].type_id == tid) {
+            attrs |= ms().names[i].attrs
+        }
+        i += 1
+    }
+    return attrs
+}
+
+// ty_is_opaque：判断底层类型是否由 extern 空 struct/union 声明为不透明类型。
+pub fn ty_is_opaque(tid int) int {
+    return ((ty_name_attrs(tid) & ATTR_OPAQUE) != 0).to_type(int)
+}
+
+// ty_is_scalar：可放进寄存器的标量（整数/浮点/指针/fn）。
+pub fn ty_is_scalar(tid int) int {
+    let k int = ms().types[tid].kind
+    if (k == TY_PTR || k == TY_FN) {
+        return 1
+    }
+    if (k == TY_STRUCT || k == TY_UNION || k == TY_ARRAY || k == TY_SLICE || k == TY_VOID) {
+        return 0
+    }
+    return 1
+}
+
+// ty_has_opaque_value：数组/切片等复合值不得把不透明 C 对象按值存储。
+pub fn ty_has_opaque_value(tid int) int {
+    if (ty_is_opaque(tid) != 0) { return 1 }
+    let kind int = ms().types[tid].kind
+    if (kind == TY_ARRAY || kind == TY_SLICE) {
+        return ty_has_opaque_value(ms().types[tid].elem)
+    }
+    return 0
+}
+
+// ty_lookup_name：按名字查类型。找不到返回 -1。
+pub fn ty_lookup_name(start int, n int) int {
+    let i int = ms().name_n - 1
+    for i >= 0 {
+        if (ms().names[i].name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[ms().names[i].name_off + j] != src_ctx().data[start + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return ms().names[i].type_id
+            }
+        }
+        i -= 1
+    }
+    return -1
+}
+
+// mod_file_binding：当前文件导入表中查绑定名，返回 ModInfo 下标；无 -1。
+pub fn mod_file_binding(start int, n int) int {
+    if (fs().import_mod == 0) {
+        return -1
+    }
+    // 按绑定名（别名）匹配：限定调用的第一段标识符是别名
+    let i int = 0
+    for i < fs().import_n {
+        if (fs().import_mod[i] >= 0 && fs().imports[i].alias_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[fs().imports[i].alias_off + j] != src_ctx().data[start + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return fs().import_mod[i]
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// mod_ns_lookup：模块命名空间查条目下标。want_type=1 查类型名，否则查值。
+pub fn mod_ns_lookup(mi int, start int, n int, want_type int) int {
+    let i int = 0
+    for i < fs().mods[mi].ns_n {
+        if (fs().mods[mi].ns[i].name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[fs().mods[mi].ns[i].name_off + j] != src_ctx().data[start + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                if (want_type != 0) {
+                    if (fs().mods[mi].ns[i].tid >= 0) {
+                        return i
+                    }
+                    return -1
+                }
+                if (fs().mods[mi].ns[i].sym >= 0) {
+                    return i
+                }
+                return -1
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// mod_ns_lookup_pool：按名字池中的名字查模块导出；语义同 mod_ns_lookup。
+// 供编译器合成的 fmt 调用使用（名字不来自源码 token）。
+pub fn mod_ns_lookup_pool(mi int, off int, n int, want_type int) int {
+    if (mi < 0 || mi >= fs().mod_n) {
+        return -1
+    }
+    let i int = 0
+    for i < fs().mods[mi].ns_n {
+        let ent ModNsEnt = fs().mods[mi].ns[i]
+        if (ent.name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[ent.name_off + j] != pool_ctx().data[off + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                if (want_type != 0) {
+                    return ent.tid >= 0 ? i : -1
+                }
+                return ent.sym >= 0 ? i : -1
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// mod_import_find：按绑定名（别名）在文件导入表里查找模块；找不到返回 -1。
+// 供插值降级定位 fmt 的导入绑定，不依赖源码中的 token 位置。
+pub fn mod_import_find(name *char, n int) int {
+    if (fs().import_mod == 0) {
+        return -1
+    }
+    let i int = 0
+    for i < fs().import_n {
+        let ent ImportEnt = fs().imports[i]
+        if (fs().import_mod[i] >= 0 && ent.alias_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[ent.alias_off + j] != name[j].to_type(u8)) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return fs().import_mod[i]
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// sem_lit_fits：字面量位型值是否落在整数类型可表示范围内。
+// ast 的 SSA 降低用它做**字面量适配**（与 sem_binop 同判据），故为 pub。
+pub fn sem_lit_fits(tid int, v i64) int {
+    let k int = ms().types[tid].kind
+    if (k == TY_U8) { return ((v >= 0) && (v <= 255)).to_type(int) }
+    if (k == TY_U16) { return ((v >= 0) && (v <= 65535)).to_type(int) }
+    if (k == TY_U32) { return ((v >= 0) && (v <= 4294967295)).to_type(int) }
+    if (k == TY_U64) { return 1 }
+    if (k == TY_I8) { return ((v >= -128) && (v <= 127)).to_type(int) }
+    if (k == TY_I16) { return ((v >= -32768) && (v <= 32767)).to_type(int) }
+    if (k == TY_I32 || k == TY_ENUM) {
+        return ((v >= -2147483648) && (v <= 2147483647)).to_type(int)
+    }
+    if (k == TY_I64) { return 1 }
+    if (k == TY_CHAR) { return ((v >= 0) && (v <= 255)).to_type(int) }
+    if (k == TY_BOOL) { return ((v == 0) || (v == 1)).to_type(int) }
+    return 1
+}
+
+// data_str_add：登记字符串字面量的数据标签与原样字节，返回非零表示表满或分配失败。
+// 字节 intern 进名字池（np_data），消费侧（ct_pool_adopt_label）按同一个池取字节。
+pub fn data_str_add(lbl int, start int, slen int) int {
+    if (c_data_str_n >= DATA_STR_CAP) { return -1 }
+    let off int = name_intern(start, slen)
+    if (off < 0) { return -1 }
+    return data_str_add_entry(lbl, off, slen, 1)
+}
+
+// data_str_add_pool：直接登记已经位于名字池中的字节，不把池偏移误当源文件偏移。
+pub fn data_str_add_pool(lbl int, off int, slen int) int {
+    return data_str_add_entry(lbl, off, slen, 0)
+}
+
+// data_str_add_body：登记不含首尾引号的字符串体；quoted=2 让解码器仍处理
+// 转义，但不剥引号。插值字面文本/说明符使用该模式直接引用源码区间。
+pub fn data_str_add_body(lbl int, start int, slen int) int {
+    let off int = name_intern(start, slen)
+    if (off < 0) { return -1 }
+    return data_str_add_entry(lbl, off, slen, 2)
+}
+
+// ty_count：当前编译单元已登记的类型数（check 切片 v3 用它判断本函数是否新建类型）。
+pub fn ty_count() int { return ms().type_n }
+
+// data_str_count / data_str_row：字符串登记表规模与逐行读取（check 切片 v3 携带用）。
+pub fn data_str_count() int { return c_data_str_n }
+
+pub fn data_str_row(row int, lbl *int, off *int, slen *int, quoted *int) int {
+    if (row < 0 || row >= c_data_str_n) { return -1 }
+    lbl[0] = c_data_str_lbl[row]; off[0] = c_data_str_off[row]
+    slen[0] = c_data_str_len[row]; quoted[0] = c_data_str_quoted[row]
+    return 0
+}
+
+// data_str_restore：按记录里的既有标签恢复字符串登记（check 切片 v3）。
+// 被跳过的函数不再分配标签，这里把 c_data_n 推到该标签之后，保证后续分配不撞号。
+pub fn data_str_restore(lbl int, off int, slen int, quoted int) int {
+    let have_off int = 0
+    let have_len int = 0
+    let have_quoted int = 0
+    if (data_str_lookup(lbl, &have_off, &have_len, &have_quoted) == 0) {
+        if (data_str_add_entry(lbl, off, slen, quoted) != 0) { return -1 }
+    }
+    if (data_label() <= lbl) { data_label_set(lbl + 1) }
+    return 0
+}
+
+// data_str_lookup：按数据标签号查登记项；**命中返回非零**并写出名字池偏移与字节长度，
+// 未命中返回 0（调用方 `if (data_str_lookup(...) != 0)` 以非零为命中）。
+pub fn data_str_lookup(lbl int, off *int, slen *int, quoted *int) int {
+    let i int = 0
+    for i < c_data_str_n {
+        if (c_data_str_lbl[i] == lbl) {
+            *off = c_data_str_off[i]
+            *slen = c_data_str_len[i]
+            *quoted = c_data_str_quoted[i]
+            return 1
+        }
+        i += 1
+    }
+    return 0
+}
+
+// em_add：登记一个枚举成员（必须在成员的值与就绪位写完之后调用，否则快照到 0）。
+pub fn em_add(sym int) int {
+    if (em_n >= 512) { return -1 }
+    em_name_off[em_n] = ms().syms[sym].name_off
+    em_name_len[em_n] = ms().syms[sym].name_len
+    em_val[em_n] = ms().syms[sym].cval
+    em_ready[em_n] = ms().syms[sym].const_ready
+    em_n += 1
+    return 0
+}
+
+// em_update_value：延迟回填枚举成员值时同步表内快照（按名字池偏移匹配，不依赖符号下标）。
+pub fn em_update_value(name_off int, val i64) void {
+    let i int = 0
+    for i < em_n {
+        if (em_name_off[i] == name_off) {
+            em_val[i] = val
+            em_ready[i] = 1
+        }
+        i += 1
+    }
+}
+
+// em_find_src：按给定源码缓冲的名字字节反查登记项下标，找不到返回 -1。
+// 编译期目标另有一份源码缓冲（frame.target.src），与前端 c_src 不一定同一个。
+pub fn em_find_src(src *u8, start int, n int) int {
+    let i int = 0
+    for i < em_n {
+        if (em_name_eq(i, src, start, n) != 0) { return i }
+        i += 1
+    }
+    return -1
+}
+
+// em_find：按前端当前源文件（c_src）的名字字节反查登记项下标。
+pub fn em_find(start int, n int) int {
+    return em_find_src(src_ctx().data, start, n)
+}
+
+// sym_find_enum_member：在符号表里按名字找属于枚举类型 etid 的成员符号。
+// 用于「成员名被同名形参/局部变量遮蔽」时仍能解析 `EnumName.member`：
+// 词法作用域里的同名声明优先用于普通标识符，但 `.` 右侧的成员名总是枚举成员。
+pub fn sym_find_enum_member(etid int, src *u8, start int, n int) int {
+    let i int = 0
+    for i < ms().sym_n {
+        let candidate CSym = ms().syms[i]
+        if ((candidate.flags & F_ENUM_MEMBER) != 0 && candidate.type_id == etid
+            && candidate.name_len == n) {
+            let off int = candidate.name_off
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[off + j].to_type(int)
+                    != src[start + j].to_type(int)) {
+                    break
+                }
+                j += 1
+            }
+            if (j == n) {
+                return i
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// em_get_val / em_get_ready：读取登记项的值与就绪位。
+pub fn em_get_val(idx int) i64 {
+    return em_val[idx]
+}
+
+pub fn em_get_ready(idx int) int {
+    return em_ready[idx]
+}
+
+// state_init：恢复非零初始值（原 pub let 声明初始化器迁移而来）。
+// 在每次编译会话开始（driver 入口与 worker 初始化）调用。
+pub fn state_init() void {
+    static_data_reset()
+    session().active_file = -1
+    fc().c_expect_tid = -1
+    data_label_reset()
+    c_data_str_n = 0
+    em_n = 0
+    fc().c_ct_target_ctx = 0
+    fc().c_ct_diag_stmt = 0
+    fs().name_off = -1
+    fs().sym_sfx_off = -1
+}
+
+// data_str_slots：字符串标签表四列的地址（CT 镜像用；行数走 data_str_n_slot）。
+pub fn data_str_slots(lbl **int, off **int, slen **int, quoted **int) void {
+    lbl[0] = &c_data_str_lbl[0]
+    off[0] = &c_data_str_off[0]
+    slen[0] = &c_data_str_len[0]
+    quoted[0] = &c_data_str_quoted[0]
+}
+
+// data_str_n_slot：字符串标签表行数的地址（表增长后 CT 镜像自动跟随）。
+pub fn data_str_n_slot() *int { return &c_data_str_n }
+
+// em_slots：枚举成员登记表的列与行数（`n` 是活行数，由 CT 每次重读）。
+pub fn em_slots(off **int, slen **int, val **i64, ready **int) void {
+    off[0] = &em_name_off[0]
+    slen[0] = &em_name_len[0]
+    val[0] = &em_val[0]
+    ready[0] = &em_ready[0]
+}
+
+// em_n_slot：枚举成员登记行数的地址（表增长后 CT 镜像自动跟随）。
+pub fn em_n_slot() *int { return &em_n }
+
+// session_reset：编译会话的非零初值复位（原 gen.state_init）。
+// 次序 = 「表计数清零 → 会话游标复位 → 前端瞬时态复位」，调用方在每次
+// 进入编译前调用一次；不释放堆缓冲（各推送路径自行扩容/替换）。
+pub fn session_reset() void {
+    static_data_reset()
+    session().active_file = -1
+    fc().c_expect_tid = -1
+    data_label_reset()
+    c_data_str_n = 0
+    em_n = 0
+    fc().c_ct_target_ctx = 0
+    fc().c_ct_diag_stmt = 0
+    fs().name_off = -1
+    fs().sym_sfx_off = -1
+}
+
+// cfg：目标/配置读写口；已绑定时用 proj 的存储，否则用宿主默认实例。
+pub fn cfg() *TargetCfg {
+    if (g_support.cfg == 0) {
+        // 单模块嵌入没有 proj.init：首次读目标时给 fallback 宿主默认值。
+        if (g_support.fallback.target.triple == 0) {
+            target_cfg_defaults(&g_support.fallback)
+        }
+        return &g_support.fallback
+    }
+    return g_support.cfg
+}
+
+// bind_cfg：把目标/配置存储（proj.ProjectCtx.cfg）绑定到 support。
+// 必须在任何需要目标的代码之前调用（driver 在 proj.init() 之后）。
+pub fn bind_cfg(pointer *TargetCfg) void {
+    g_support.cfg = pointer
+}
+
+// target_cfg_defaults：把一份目标/配置重置为「宿主身份 + CLI 默认值」。
+pub fn target_cfg_defaults(out *TargetCfg) void {
+    out.target_explicit = 0
+    out.opt_level = 0
+    out.trimpath = 0
+    out.emit_kind = 0
+    out.emit_asm = 0
+    out.emit_text_path = 0
+    out.module_mode = 0
+    out.is_entry_mod = 0
+    out.dialect = TG_DIALECT_GNU
+    target_host_info(&out.host_target)
+    out.target = out.host_target
+    if (out.target.os == TARGET_OS_DARWIN) { out.dialect = TG_DIALECT_DARWIN }
+}
+
+// module_mode / is_entry_mod：构建模式窄口（供前端查询）。
+pub fn module_mode() int {
+    return cfg().module_mode
+}
+
+pub fn is_entry_mod() int {
+    return cfg().is_entry_mod
+}
+
+// tg_darwin：是否 Darwin 方言（符号加 `_`、取址用 @PAGE、外部走 GOT）。
+pub fn tg_darwin() int {
+    return (cfg().dialect == TG_DIALECT_DARWIN).to_type(int)
+}
+
+// target_arch_token：接口头行里的架构标记，与 project.arch 的写法一致。
+// 头行架构必须随目标变化：此前两处写入端把它硬编码成 arm64，一旦接入
+// x64 目标，头行会"说谎"，读取端又只比对字面量，等于失去目标校验。
+pub fn target_arch_token() *char {
+    if (cfg().target.arch == TARGET_ARCH_X64) {
+        return "x64"
+    }
+    return "arm64"
+}
+
+// tg_host_darwin：**宿主**平台探测（进程实际运行的操作系统）——macOS 独有的
+// 系统 plist（Linux 无此路径）。与 tg_darwin（输出目标方言）区分：
+// open 旗标、目录类宿主文件操作按**宿主内核**语义取值，交叉目标
+// （-target darwin）不得改变宿主文件操作（Linux 内核不认 Darwin 的
+// O_CREAT 位值，0x601 在 Linux 上是 O_APPEND 组合）。
+pub fn tg_host_darwin() int {
+    let fd int = open("/System/Library/CoreServices/SystemVersion.plist", 0)
+    if (fd >= 0) {
+        close(fd)
+        return 1
+    }
+    return 0
+}
+
+// tg_host_windows：**宿主**操作系统是否为 Windows。与 tg_windows（输出目标
+// 方言）区分：本函数用于 PATH 分隔符、路径分隔符等**运行在本机的编译器自身**
+// 的文件操作。构建时目标就是产物将来的宿主（自举交叉编译），所以用 $if
+// 编译期选择即可；运行时不受 --target 影响。
+pub fn tg_host_windows() int {
+    $if (windows) { return 1 }
+    $else { return 0 }
+}
+
+// target_resolve：严格解析当前支持的完整 triple，成功填出参，失败保持出参原值。
+// LLVM 21.1.8 的布局已用固定版本 oracle 核对；这里查静态数据，check 不初始化 LLVM。
+// Windows/x64 的 data_layout 是 2026-10-27 用本机 clang 21.1.8
+// （`clang --target=x86_64-pc-windows-msvc -S -emit-llvm`）实测值，不要手抄别处。
+pub fn target_resolve(triple *char, out *TargetInfo) int {
+    let target TargetInfo
+    target.pointer_bits = 64
+    target.little_endian = 1
+    target.layout_version = 1
+    if (cstr_eq(triple, "x86_64-unknown-linux-gnu") != 0) {
+        target.triple = "x86_64-unknown-linux-gnu"
+        target.os = TARGET_OS_LINUX
+        target.arch = TARGET_ARCH_X64
+        target.abi = "sysv-amd64"
+        target.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+    } else if (cstr_eq(triple, "aarch64-unknown-linux-gnu") != 0) {
+        target.triple = "aarch64-unknown-linux-gnu"
+        target.os = TARGET_OS_LINUX
+        target.arch = TARGET_ARCH_ARM64
+        target.abi = "aapcs64"
+        target.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"
+    } else if (cstr_eq(triple, "x86_64-apple-darwin") != 0) {
+        target.triple = "x86_64-apple-darwin"
+        target.os = TARGET_OS_DARWIN
+        target.arch = TARGET_ARCH_X64
+        target.abi = "darwin-amd64"
+        target.data_layout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+    } else if (cstr_eq(triple, "aarch64-apple-darwin") != 0) {
+        target.triple = "aarch64-apple-darwin"
+        target.os = TARGET_OS_DARWIN
+        target.arch = TARGET_ARCH_ARM64
+        target.abi = "darwin-aapcs64"
+        target.data_layout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+    } else if (cstr_eq(triple, "x86_64-pc-windows-msvc") != 0) {
+        // 首版 Windows 只接 x64 + MSVC ABI（零 CRT 路线，见方案 §3 D1/D2）。
+        target.triple = "x86_64-pc-windows-msvc"
+        target.os = TARGET_OS_WINDOWS
+        target.arch = TARGET_ARCH_X64
+        target.abi = "win64-msvc"
+        target.data_layout = "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+    } else { return -1 }
+    out[0] = target
+    return 0
+}
+
+// target_host_info：构建编译器时选择并固化进程身份，运行时输出 --target 不改变这些分支。
+// 启动种子只需认识已有 arm64/darwin 标记；生成原生 x64 编译器时自动选择其 $else。
+pub fn target_host_info(out *TargetInfo) int {
+    $if (darwin) {
+        $if (arm64) { return target_resolve("aarch64-apple-darwin", out) }
+        $else { return target_resolve("x86_64-apple-darwin", out) }
+    } $else $if (windows) {
+        // Windows 宿主（W2-1）：首版只接 x64；arm64 宿主留给矩阵收尾阶段。
+        $if (arm64) { return -1 }
+        $else { return target_resolve("x86_64-pc-windows-msvc", out) }
+    } $else {
+        $if (arm64) { return target_resolve("aarch64-unknown-linux-gnu", out) }
+        $else { return target_resolve("x86_64-unknown-linux-gnu", out) }
+    }
+}
+
+// target_select：只更新输出目标及过渡期旧汇编方言，不能写宿主身份。
+pub fn target_select(triple *char) int {
+    let target TargetInfo
+    if (target_resolve(triple, &target) != 0) { return -1 }
+    cfg().target = target
+    cfg().dialect = target.os == TARGET_OS_DARWIN ? TG_DIALECT_DARWIN : TG_DIALECT_GNU
+    return 0
+}
+
+// target_select_os_arch：按项目清单的 os/arch 选择目标；0 表示使用宿主身份。
+// 只允许已支持的 Linux/Darwin × ARM64/x64 与 Windows × x64 组合。
+pub fn target_select_os_arch(os int, arch int) int {
+    if (os == 0) { os = cfg().host_target.os }
+    if (arch == 0) { arch = cfg().host_target.arch }
+    if (os == TARGET_OS_LINUX) {
+        if (arch == TARGET_ARCH_ARM64) { return target_select("aarch64-unknown-linux-gnu") }
+        if (arch == TARGET_ARCH_X64) { return target_select("x86_64-unknown-linux-gnu") }
+        return -1
+    }
+    if (os == TARGET_OS_DARWIN) {
+        if (arch == TARGET_ARCH_ARM64) { return target_select("aarch64-apple-darwin") }
+        if (arch == TARGET_ARCH_X64) { return target_select("x86_64-apple-darwin") }
+        return -1
+    }
+    // Windows：首版只有 x64；ARM64 留给矩阵收尾阶段（方案 §8 W3）。
+    if (os == TARGET_OS_WINDOWS) {
+        if (arch == TARGET_ARCH_X64) { return target_select("x86_64-pc-windows-msvc") }
+        return -1
+    }
+    return -1
+}
+
+// target_matches_host：当前输出目标是否与编译器宿主平台一致。
+pub fn target_matches_host() int {
+    if (cfg().target.os != cfg().host_target.os) { return 0 }
+    if (cfg().target.arch != cfg().host_target.arch) { return 0 }
+    return 1
+}
+
+// fc：前端瞬时状态窄口。
+pub fn fc() *FrontCtx {
+    return &g_front
+}
+
+// vk_msg：错误码 → 诊断文案；未知码返回通用文案（不应发生）。
+pub fn vk_msg(code int) *char {
+    if (code == VK_INT_OVERFLOW) { return "编译期整数运算溢出" }
+    if (code == VK_DIV_ZERO) { return "编译期除数不能为零" }
+    if (code == VK_UNSUPPORTED_INT_OP) { return "编译期不支持该整数运算" }
+    if (code == VK_LIT_OUT_OF_RANGE) { return "字面量超出目标类型可表示范围" }
+    if (code == VK_FP_UNSUPPORTED_OP) { return "浮点不支持该运算" }
+    if (code == VK_ARITH_NEEDS_INT) { return "编译期算术运算要求整数" }
+    if (code == VK_SHIFT_OUT_OF_WIDTH) { return "编译期移位超出位宽" }
+    if (code == VK_UNARY_FP_OP) { return "浮点只支持一元 +/-" }
+    if (code == VK_UNARY_NEEDS_INT) { return "编译期一元运算要求整数" }
+    if (code == VK_AGG_MISMATCH) { return "聚合类型不匹配（长度或元素类型不同）" }
+    if (code == VK_PTR_MISMATCH) { return "指针类型不匹配（需要 .to_type 显式转换）" }
+    if (code == VK_NON_PTR_TO_PTR) { return "不能把非指针值赋给指针" }
+    if (code == VK_PTR_TO_NON_PTR) { return "不能把指针赋给非指针（用 .to_type）" }
+    if (code == VK_FN_SIG_MISMATCH) { return "函数签名不匹配" }
+    if (code == VK_FN_VALUE_MISMATCH) { return "fn 值只能赋给同签名类型或 *void" }
+    if (code == VK_FP_NEEDS_CAST) { return "浮点与整数之间需要 .to_type 显式转换" }
+    if (code == VK_INT_TO_BOOL) { return "整数不能隐式转为 bool（用 .to_type(bool)）" }
+    if (code == VK_BOOL_TO_TYPE) { return "bool 不能隐式转为该类型" }
+    if (code == VK_TYPE_MISMATCH) { return "类型不匹配" }
+    if (code == VK_SAME_WIDTH_NEEDS_CAST) { return "同宽整数之间需要 .to_type 显式转换" }
+    if (code == VK_IMPLICIT_NARROW) { return "不允许的隐式窄化（用 .to_type）" }
+    if (code == VK_CONST_DIV_ZERO) { return "常量除以零" }
+    if (code == VK_CONST_MOD_ZERO) { return "常量模零" }
+    return "编译期值运算失败"
+}
+
+// sem_fold_const_binop：按 yh 整数类型执行有边界的常量二元运算。
+pub fn vk_fold_binop(op int, tid int, left i64, right i64, result *i64) int {
+    if (ty_is_float(tid) != 0) {
+        return vk_fold_float_binop(op, tid, left, right, result)
+    }
+    if (ty_is_integer(tid) == 0) { return VK_ARITH_NEEDS_INT }
+    let bits int = ms().types[tid].size * 8
+    let is_signed_ty int = ty_is_signed(tid)
+    let a i64 = sem_fold_norm(tid, left)
+    let b i64 = sem_fold_norm(tid, right)
+    let is_cmp int = (op == TK_EQEQ || op == TK_NEQ || op == TK_LT || op == TK_LEQ
+        || op == TK_GT || op == TK_GEQ).to_type(int)
+    if (is_cmp != 0) {
+        let yes int = 0
+        if (op == TK_EQEQ) { yes = (a == b).to_type(int) }
+        else if (op == TK_NEQ) { yes = (a != b).to_type(int) }
+        else if (is_signed_ty != 0 && op == TK_LT) { yes = (a < b).to_type(int) }
+        else if (is_signed_ty != 0 && op == TK_LEQ) { yes = (a <= b).to_type(int) }
+        else if (is_signed_ty != 0 && op == TK_GT) { yes = (a > b).to_type(int) }
+        else if (is_signed_ty != 0 && op == TK_GEQ) { yes = (a >= b).to_type(int) }
+        else {
+            let ua u64 = a.to_type(u64)
+            let ub u64 = b.to_type(u64)
+            if (op == TK_LT) { yes = (ua < ub).to_type(int) }
+            else if (op == TK_LEQ) { yes = (ua <= ub).to_type(int) }
+            else if (op == TK_GT) { yes = (ua > ub).to_type(int) }
+            else if (op == TK_GEQ) { yes = (ua >= ub).to_type(int) }
+        }
+        *result = yes.to_type(i64)
+        return 0
+    }
+    if (op == TK_LSHIFT || op == TK_RSHIFT) {
+        if (right < 0 || right >= bits.to_type(i64)) {
+            return VK_SHIFT_OUT_OF_WIDTH
+        }
+        let count int = right.to_type(int)
+        if (op == TK_RSHIFT) {
+            if (is_signed_ty != 0) { *result = a >> count }
+            else { *result = (a.to_type(u64) >> count).to_type(i64) }
+            return 0
+        }
+        if (is_signed_ty != 0) {
+            if (a < 0) { return VK_INT_OVERFLOW }
+            let max_s i64 = 9223372036854775807
+            if (bits == 8) { max_s = 127 }
+            else if (bits == 16) { max_s = 32767 }
+            else if (bits == 32) { max_s = 2147483647 }
+            if (a > (max_s >> count)) { return VK_INT_OVERFLOW }
+            *result = a << count
+            return 0
+        }
+        let max_u u64 = (-1).to_type(u64)
+        if (bits == 8) { max_u = 255 }
+        else if (bits == 16) { max_u = 65535 }
+        else if (bits == 32) { max_u = 4294967295 }
+        let ua u64 = a.to_type(u64)
+        if (ua > (max_u >> count)) { return VK_INT_OVERFLOW }
+        *result = sem_fold_norm(tid, (ua << count).to_type(i64))
+        return 0
+    }
+    if (op == TK_AMP || op == TK_PIPE || op == TK_CARET) {
+        let raw i64 = 0
+        let rc int = fold_binop(op, a, b, &raw)
+        if (rc != 0) { return rc }
+        *result = sem_fold_norm(tid, raw)
+        return 0
+    }
+    if (is_signed_ty != 0) {
+        let max_s i64 = 9223372036854775807
+        if (bits == 8) { max_s = 127 }
+        else if (bits == 16) { max_s = 32767 }
+        else if (bits == 32) { max_s = 2147483647 }
+        let min_s i64 = 0 - max_s - 1
+        if (op == TK_PLUS) {
+            if ((b > 0 && a > max_s - b) || (b < 0 && a < min_s - b)) {
+                return VK_INT_OVERFLOW
+            }
+            *result = a + b
+        } else if (op == TK_MINUS) {
+            if ((b < 0 && a > max_s + b) || (b > 0 && a < min_s + b)) {
+                return VK_INT_OVERFLOW
+            }
+            *result = a - b
+        } else if (op == TK_STAR) {
+            if (a > 0 && ((b > 0 && a > max_s / b) || (b < 0 && b < min_s / a))) {
+                return VK_INT_OVERFLOW
+            }
+            if (a < 0 && ((b > 0 && a < min_s / b) || (b < 0 && a < max_s / b))) {
+                return VK_INT_OVERFLOW
+            }
+            *result = a * b
+        } else if (op == TK_SLASH || op == TK_PERCENT) {
+            if (b == 0) { return VK_DIV_ZERO }
+            if (a == min_s && b == -1) { return VK_INT_OVERFLOW }
+            if (op == TK_SLASH) { *result = a / b }
+            else { *result = a % b }
+        } else {
+            return VK_UNSUPPORTED_INT_OP
+        }
+        return 0
+    }
+    let max_u u64 = (-1).to_type(u64)
+    if (bits == 8) { max_u = 255 }
+    else if (bits == 16) { max_u = 65535 }
+    else if (bits == 32) { max_u = 4294967295 }
+    let ua u64 = a.to_type(u64)
+    let ub u64 = b.to_type(u64)
+    if (op == TK_PLUS) {
+        if (ua > max_u - ub) { return VK_INT_OVERFLOW }
+        *result = sem_fold_norm(tid, (ua + ub).to_type(i64))
+    } else if (op == TK_MINUS) {
+        if (ua < ub) { return VK_INT_OVERFLOW }
+        *result = sem_fold_norm(tid, (ua - ub).to_type(i64))
+    } else if (op == TK_STAR) {
+        if (ub != 0 && ua > max_u / ub) { return VK_INT_OVERFLOW }
+        *result = sem_fold_norm(tid, (ua * ub).to_type(i64))
+    } else if (op == TK_SLASH || op == TK_PERCENT) {
+        if (ub == 0) { return VK_DIV_ZERO }
+        if (op == TK_SLASH) { *result = (ua / ub).to_type(i64) }
+        else { *result = (ua % ub).to_type(i64) }
+    } else {
+        return VK_UNSUPPORTED_INT_OP
+    }
+    return 0
+}
+
+// sem_fold_const_unary：按目标类型执行常量一元运算，并允许最小值的直接负数字面量。
+// 浮点取负走符号位翻转，避免生成冻结子集之外的 fneg。
+pub fn vk_fold_unary(op int, tid int, value i64, is_lit int, result *i64) int {
+    if (ty_is_float(tid) != 0) {
+        if (op == TK_MINUS) {
+            *result = value ^ (1.to_type(i64) << 63)
+            return 0
+        }
+        if (op == TK_PLUS) { *result = value; return 0 }
+        return VK_UNARY_FP_OP
+    }
+    if (ty_is_integer(tid) == 0) { return VK_UNARY_NEEDS_INT }
+    let bits int = ms().types[tid].size * 8
+    let is_signed_ty int = ty_is_signed(tid)
+    let a i64 = sem_fold_norm(tid, value)
+    if (op == TK_MINUS) {
+        if (is_signed_ty != 0) {
+            let max_s i64 = 9223372036854775807
+            if (bits == 8) { max_s = 127 }
+            else if (bits == 16) { max_s = 32767 }
+            else if (bits == 32) { max_s = 2147483647 }
+            let min_s i64 = 0 - max_s - 1
+            if (a == min_s) {
+                if (is_lit != 0 && bits < 64 && value == max_s + 1) {
+                    *result = min_s
+                    return 0
+                }
+                return VK_INT_OVERFLOW
+            }
+            *result = 0 - a
+            return 0
+        }
+        if (a != 0) { return VK_INT_OVERFLOW }
+        *result = 0
+        return 0
+    }
+    if (op == TK_PLUS) { *result = a; return 0 }
+    if (op == TK_TILDE) { *result = sem_fold_norm(tid, ~a); return 0 }
+    if (op == TK_BANG) { *result = (a == 0).to_type(i64); return 0 }
+    *result = a
+    return 0
+}
+
+// sem_can_assign：检查 src 能否赋给 dst。通过返回 0，拒绝返回 -1（已报错）。
+// is_lit/ival/big 描述右值字面量性（非字面量传 0）：允许同型；整数字面量
+// 可表示时的隐式窄化；值保持的整数加宽；字面量 0 → 指针；T* → *void；
+// fn 值 → 同签名 fn 类型 / *void。
+pub fn vk_can_assign(dst int, src int, is_lit int, ival i64, big int) int {
+    if (dst == src) {
+        return 0
+    }
+    let dk int = ms().types[dst].kind
+    let sk int = ms().types[src].kind
+    // 聚合：同型已在上面通过；不同类型（含长度不同）一律拒绝
+    if ((dk == TY_STRUCT || dk == TY_UNION || dk == TY_ARRAY || dk == TY_SLICE)
+        && (sk == TY_STRUCT || sk == TY_UNION || sk == TY_ARRAY || sk == TY_SLICE)) {
+        // 数组是结构化类型：编译期布局会为延迟长度表达式建立独立类型项，
+        // 与同元素类型、同长度的既有数组项完全等价，按内容放行。
+        if (dk == TY_ARRAY && sk == TY_ARRAY
+            && ms().types[dst].elem == ms().types[src].elem
+            && ms().types[dst].len == ms().types[src].len) {
+            return 0
+        }
+        return VK_AGG_MISMATCH
+    }
+    if (dk == TY_PTR) {
+        // 字面量 0 = 空指针（最宽匹配，先判）
+        if (is_lit != 0 && ival == 0) {
+            return 0
+        }
+        if (sk == TY_PTR) {
+            if (ms().types[dst].elem == TY_VOID || ms().types[src].elem == TY_VOID) {
+                return 0
+            }
+            return VK_PTR_MISMATCH
+        }
+        if (sk == TY_FN && ms().types[dst].elem == TY_VOID) {
+            return 0
+        }
+        return VK_NON_PTR_TO_PTR
+    }
+    if (sk == TY_PTR) {
+        return VK_PTR_TO_NON_PTR
+    }
+    if (dk == TY_FN || sk == TY_FN) {
+        if (dk == TY_FN && sk == TY_FN) {
+            return VK_FN_SIG_MISMATCH
+        }
+        return VK_FN_VALUE_MISMATCH
+    }
+    if (ty_is_float(dst) != 0 || ty_is_float(src) != 0) {
+        if (dk == sk) {
+            return 0
+        }
+        return VK_FP_NEEDS_CAST
+    }
+    if (dk == TY_BOOL && sk != TY_BOOL) {
+        return VK_INT_TO_BOOL
+    }
+    if (sk == TY_BOOL && ty_is_integer(dst) == 0 && dk != TY_BOOL) {
+        return VK_BOOL_TO_TYPE
+    }
+    if (ty_is_integer(dst) == 0 || ty_is_integer(src) == 0) {
+        return VK_TYPE_MISMATCH
+    }
+    let dsz int = ms().types[dst].size
+    let ssz int = ms().types[src].size
+    if (is_lit != 0) {
+        if (big != 0 && dk != TY_U64) {
+            return VK_LIT_OUT_OF_RANGE
+        }
+        if (sem_lit_fits(dst, ival) != 0) {
+            return 0
+        }
+        return VK_LIT_OUT_OF_RANGE
+    }
+    if (dsz > ssz) {
+        return 0
+    }
+    if (dsz == ssz) {
+        if (dk == sk) {
+            return 0
+        }
+        if (dk == TY_ENUM || sk == TY_ENUM) {
+            return 0
+        }
+        return VK_SAME_WIDTH_NEEDS_CAST
+    }
+    return VK_IMPLICIT_NARROW
+}
+
+// ty_is_integer：整数类（bool..u64 与 enum）。
+pub fn ty_is_integer(tid int) int {
+    let k int = ms().types[tid].kind
+    if (k >= TY_BOOL && k <= TY_U64) { return 1 }
+    return (k == TY_ENUM).to_type(int)
+}
+
+// ty_is_signed：有符号整数类（char..i64 与 enum）。
+pub fn ty_is_signed(tid int) int {
+    let k int = ms().types[tid].kind
+    return ((k >= TY_CHAR && k <= TY_I64) || k == TY_ENUM).to_type(int)
+}
+
+// ty_is_float：f32/f64。
+pub fn ty_is_float(tid int) int {
+    let k int = ms().types[tid].kind
+    return (k == TY_F32 || k == TY_F64).to_type(int)
+}
+
+// sem_fold_norm：把常量按目标整数类型截断，并对有符号值做符号扩展。
+pub fn sem_fold_norm(tid int, value i64) i64 {
+    let bits int = ms().types[tid].size * 8
+    if (bits >= 64) { return value }
+    let mask u64 = (1.to_type(u64) << bits) - 1.to_type(u64)
+    let raw u64 = value.to_type(u64) & mask
+    if (ty_is_signed(tid) != 0) {
+        let sign u64 = 1.to_type(u64) << (bits - 1)
+        if ((raw & sign) != 0) { return (raw | ~mask).to_type(i64) }
+    }
+    return raw.to_type(i64)
+}
+
+// sem_fold_fp_to_int：按目标符号性向零转换到完整 64 位值域，再按源级目标宽度截断。
+// 常量折叠和 typed CT 共用，避免无符号高位先经过 i64 饱和而丢失；NaN/越界沿用宿主饱和规则。
+pub fn sem_fold_fp_to_int(tid int, value f64) i64 {
+    if (ty_is_signed(tid) != 0) { return sem_fold_norm(tid, value.to_type(i64)) }
+    return sem_fold_norm(tid, value.to_type(u64).to_type(i64))
+}
+
+// sem_fold_float_convert：常量浮点转换（整数↔浮点、浮点↔浮点），结果写位模式。
+pub fn sem_fold_float_convert(src_tid int, dst_tid int, bits i64) i64 {
+    let src_fp int = ty_is_float(src_tid)
+    let dst_fp int = ty_is_float(dst_tid)
+    if (src_fp != 0) {
+        let source f64 = fp64_from_bits(bits)
+        if (dst_fp != 0) { return fp64_norm_bits(dst_tid, source) }
+        return sem_fold_fp_to_int(dst_tid, source)
+    }
+    if (dst_fp == 0) { return bits }
+    let widened f64 = 0.0
+    if (ty_is_signed(src_tid) != 0) {
+        widened = bits.to_type(f64)
+    } else {
+        widened = bits.to_type(u64).to_type(f64)
+    }
+    return fp64_norm_bits(dst_tid, widened)
+}
+
+pub fn fp64_bits(v f64) i64 {
+    let holder *f64 = alloc(8).to_type(*f64)
+    holder[0] = v
+    let pb *i64 = holder.to_type(*i64)
+    let r i64 = pb[0]
+    free(holder.to_type(*void))
+    return r
+}
+
+// fp64_from_bits：把 IEEE754 位模式还原为宿主 f64，供常量折叠使用。
+pub fn fp64_from_bits(bits i64) f64 {
+    let holder *i64 = alloc(8).to_type(*i64)
+    holder[0] = bits
+    let view *f64 = holder.to_type(*f64)
+    let value f64 = view[0]
+    free(holder.to_type(*void))
+    return value
+}
+
+// fp32_bits：把 IEEE754 双精度位模式窄化为单精度 32 位模式（低位对齐）。
+// 编译期浮点值统一以双精度位模式保存（见 fp64_norm_bits），而 f32 对象的
+// 初始化字节只有 4 字节；直接截低 4 字节会丢掉指数位，必须真正转一次 f32。
+// 低层静态数据与 lowering 的全局初始化共用本函数，避免两份窄化实现漂移。
+pub fn fp32_bits(bits i64) i64 {
+    let holder *f32 = alloc(4).to_type(*f32)
+    if (holder == 0) { return 0 }
+    holder[0] = fp64_from_bits(bits).to_type(f32)
+    let view *i32 = holder.to_type(*i32)
+    let result i64 = view[0].to_type(i64)
+    free(holder.to_type(*void))
+    return result
+}
+
+// fp64_norm_bits：按目标浮点类型规范化位模式；f32 经一次往返窄化到单精度。
+pub fn fp64_norm_bits(tid int, value f64) i64 {
+    if (ms().types[tid].kind == TY_F32) {
+        return fp64_bits(value.to_type(f32).to_type(f64))
+    }
+    return fp64_bits(value)
+}
+
+pub fn sem_res_const(r *Res, tid int, v i64) int {
+    r.type_id = tid
+    r.is_const = 1
+    r.ival = v
+    r.sym = -1
+    r.is_lit = 0
+    r.lit_big = 0
+    r.ast_id = -1
+    r.layout_type_id = -1
+    r.ct_diag = 0
+    r.ct_diag_expr = -1
+    r.ct_diag_line = 0
+    r.ct_diag_col = 0
+    r.ct_diag_msg_start = -1
+    r.ct_diag_msg_len = 0
+    return 0
+}
+
+// sem_struct_finish：结构体/联合体字段登记完成后结算布局，写回类型行。
+// 布局算法在 support/model 的 layout.yh；本函数只做「读字段表 → 算 → 写回」。
+pub fn sem_struct_finish(stid int, is_union int) int {
+    let sub int = ms().types[stid].sub
+    let n int = ms().types[stid].len
+    let size int = 0
+    let align int = 0
+    if (model_layout_struct(sub, n, is_union, &size, &align) != 0) { return -1 }
+    ms().types[stid].size = size
+    ms().types[stid].align = align
+    return 0
+}
+
+// argv_utf8_rebuild：平台无关入口；实现见 argv.<平台>.yh 的 argv_utf8_rebuild_impl。
+pub fn argv_utf8_rebuild(argc_out *int, argv_out ***char) {
+    argv_utf8_rebuild_impl(argc_out, argv_out)
+}
+
+// clock_ns：平台无关入口；实现见 clock.<平台>.yh 的 clock_ns_impl。
+pub fn clock_ns() u64 {
+    return clock_ns_impl()
+}
+
+// console_utf8_init：平台无关入口；实现见 console.<平台>.yh 的 console_utf8_init_impl。
+pub fn console_utf8_init() {
+    console_utf8_init_impl()
+}
+
+// clock_ns：Windows/x64 宿主的单调时钟（W2-3a；与 clock.<os>.yh 同位置）。
+//
+// 用 QueryPerformanceCounter（内核提供的单调计数器）与 QueryPerformanceFrequency
+// 换算纳秒；不用 GetTickCount64（毫秒精度不够看构建阶段耗时）。
+//
+// 换算顺序很重要：先做 秒=计数/频率、余=计数%频率，再算 ns，
+// 避免 counter*1e9 在长时间运行后溢出 u64（10 MHz 计数器约 30 分钟就会溢出）。
+@[extern] fn QueryPerformanceCounter(counter *i64) i32
+
+@[extern] fn QueryPerformanceFrequency(frequency *i64) i32
+
+@[extern] fn SetConsoleOutputCP(code u32) i32
+
+@[extern] fn SetConsoleCP(code u32) i32
+
+@[extern] fn GetCommandLineW() *i16
+
+@[extern] fn WideCharToMultiByte(code_page u32, flags u32, wide *i16, wide_len int, out *u8, out_cap int, default_char *void, used_default *void) int
+
+// C ABI 位置分类种类；算法在 check/abi_c.yh 里消费这些常量。
+pub const CABI_GPR int = 0
+
+pub const CABI_FPR int = 1
+
+pub const CABI_STACK int = 2
+
+pub const CABI_VOID int = 3
+
+// —— 目标身份与数据模型（换平台第一步） ——
+pub const TARGET_OS_LINUX int = 1
+
+pub const TARGET_OS_DARWIN int = 2
+
+pub const TARGET_OS_WINDOWS int = 3
+
+pub const TARGET_ARCH_ARM64 int = 1
+
+pub const TARGET_ARCH_X64 int = 2
+
+// —— 标量数据模型/调用约定/方言（字节与 ABI 量化约束） ——
+pub const TG_PTR_SIZE int = 8
+
+pub const TG_INT_SIZE int = 4
+
+pub const TG_CHAR_SIZE int = 1
+
+pub const TG_SHORT_SIZE int = 2
+
+pub const TG_LONG_SIZE int = 8
+
+pub const TG_ENUM_SIZE int = 4
+
+pub const TG_STACK_ALIGN int = 16
+
+pub const TG_ARG_REGS int = 8
+
+pub const TG_VALUE_SLOT int = 16
+
+pub const TG_DIALECT_GNU int = 0
+
+pub const TG_DIALECT_DARWIN int = 1
+
+pub const ABI_YH int = 0
+
+pub const ABI_C int = 1
+
+// —— 具名类型属性位（ATTR_*）——
+// 源头在 support（support 是叶子，不能 import token）；token 侧写成转发别名，
+// 因此 token.ATTR_* 与 support.ATTR_* 恒等。数值改动必须同步 .s.i 接口测试。
+pub const ATTR_EXTERN int = 1
+
+pub const ATTR_INLINE int = 2
+
+pub const ATTR_NORETURN int = 4
+
+pub const ATTR_OPAQUE int = 8 // 仅编译器内部标记 extern 空 struct/union
+
+pub const ATTR_COMPTIME int = 16 // @[comptime]：函数体可在编译期显式求值
+
+// —— 运算符 token 码（源头在 support；token 侧只是转发别名）——
+// 与 token/base.yh 的历史编号必须一致：.s.i/.s.ct 与缓存键都按这些数编码。
+pub const TK_PLUS int = 64
+
+pub const TK_MINUS int = 65
+
+pub const TK_STAR int = 66
+
+pub const TK_SLASH int = 67
+
+pub const TK_PERCENT int = 68
+
+pub const TK_AMP int = 69
+
+pub const TK_PIPE int = 70
+
+pub const TK_CARET int = 71
+
+pub const TK_TILDE int = 72
+
+pub const TK_BANG int = 73
+
+pub const TK_LT int = 74
+
+pub const TK_GT int = 75
+
+pub const TK_EQEQ int = 76
+
+pub const TK_NEQ int = 77
+
+pub const TK_LEQ int = 78
+
+pub const TK_GEQ int = 79
+
+pub const TK_ANDAND int = 80
+
+pub const TK_OROR int = 81
+
+pub const TK_LSHIFT int = 82
+
+pub const TK_RSHIFT int = 83
+
+pub const TK_ASSIGN int = 84
+
+pub const TK_PLUSEQ int = 85
+
+pub const TK_MINUSEQ int = 86
+
+pub const TK_STAREQ int = 87
+
+pub const TK_SLASHEQ int = 88
+
+pub const TK_PERCENTEQ int = 89
+
+pub const TK_AMPEQ int = 90
+
+pub const TK_PIPEEQ int = 91
+
+pub const TK_CARETEQ int = 92
+
+pub const TK_LSHIFTEQ int = 93
+
+pub const TK_RSHIFTEQ int = 94
+
+pub const TK_RANGE int = 95
+
+pub const TK_ELLIPSIS int = 96
+
+// —— 类型种类 ——
+pub const TY_VOID int = 0
+
+pub const TY_BOOL int = 1
+
+pub const TY_CHAR int = 2
+
+pub const TY_I8 int = 3
+
+pub const TY_I16 int = 4
+
+pub const TY_I32 int = 5
+
+pub const TY_I64 int = 6
+
+pub const TY_U8 int = 7
+
+pub const TY_U16 int = 8
+
+pub const TY_U32 int = 9
+
+pub const TY_U64 int = 10
+
+pub const TY_F32 int = 11
+
+pub const TY_F64 int = 12
+
+pub const TY_PTR int = 13
+
+pub const TY_ARRAY int = 14
+
+pub const TY_SLICE int = 15
+
+pub const TY_STRUCT int = 16
+
+pub const TY_UNION int = 17
+
+pub const TY_ENUM int = 18
+
+pub const TY_FN int = 19
+
+// —— 符号种类与标志 ——
+pub const SYM_VAR int = 0      // 变量（全局或局部）
+
+pub const SYM_CONST int = 1    // 编译期常量绑定
+
+pub const SYM_FN int = 2       // 函数
+
+pub const F_GLOBAL int = 1     // 全局（否则局部/参数）
+
+pub const F_PARAM int = 2      // 函数参数
+
+pub const F_PUB int = 4        // pub（GLOBAL 绑定）
+
+pub const F_EXTERN int = 8     // prelude 外部符号
+
+pub const F_ADDR int = 16      // 常量的值是数据标签号（cval）
+
+pub const F_AGGPARAM int = 32  // 聚合参数：槽内是指向调用方副本的指针
+
+pub const F_INTRINSIC int = 64 // 由目标后端直接发射的内建调用
+
+pub const F_LINUX_SYSCALL int = 128 // Linux AArch64 svc 内建
+
+pub const F_RUNTIME_MEMCPY int = 256 // 本地字节复制运行时入口
+
+pub const F_RUNTIME_STRLEN int = 512 // 本地 C 字符串长度运行时入口
+
+pub const F_RUNTIME_MALLOC int = 1024 // 本地 OS 映射分配运行时入口
+
+pub const F_RUNTIME_FREE int = 2048 // 本地 OS 映射释放运行时入口
+
+pub const F_RUNTIME_PRINTF int = 4096 // 本地格式化输出运行时入口
+
+pub const F_CABI int = 16384 // 用户声明的 C ABI 函数或外部类型
+
+pub const F_NORETURN int = 32768 // 正常控制流不返回
+
+pub const F_INLINE int = 65536 // 函数内联提示
+
+pub const F_COMPTIME int = 131072 // 编译期函数；调用必须使用 $ 函数形式
+
+pub const F_ENUM_MEMBER int = 262144 // enum 声明登记的成员常量
+
+pub const F_ENUM_META int = 524288 // $for enum.values 的只读迭代元信息绑定
+
+pub const F_FIELD_META int = 1048576 // $for T.fields 的只读迭代元信息绑定
+
+pub const F_MODULE_IMPORT int = 2097152 // 从模块接口加载的符号
+
+// —— 编译期诊断种类（$assert/$compile_error/$compile_warn） ——
+pub const CT_DIAG_ASSERT int = 1 // $assert 编译期指令
+
+pub const CT_DIAG_ERROR int = 2 // $compile_error 编译期指令
+
+pub const CT_DIAG_WARN int = 3 // $compile_warn 编译期指令
+
+// 字符串字面量的数据标签 → 原样字节（intern 池）映射：顶层或普通函数里的编译期
+// 调用实参由前端直接求值，只剩数据标签号，编译期过程据此反查字面量字节。
+// 独立全局表而非 GenState 字段：GenState 已大到让后端单条 add 的字段偏移越界。
+// 每个编译单元最多登记 4096 项，表满时由调用方报告错误，不漏掉快照数据。
+
+// —— 错误码（0 = 成功；>0 = 具体失败原因）——
+pub const VK_INT_OVERFLOW int = 1 // 编译期整数运算溢出
+
+pub const VK_DIV_ZERO int = 2 // 编译期除数不能为零
+
+pub const VK_UNSUPPORTED_INT_OP int = 3 // 编译期不支持该整数运算
+
+pub const VK_LIT_OUT_OF_RANGE int = 4 // 字面量超出目标类型可表示范围
+
+pub const VK_FP_UNSUPPORTED_OP int = 5 // 浮点不支持该运算
+
+pub const VK_ARITH_NEEDS_INT int = 6 // 编译期算术运算要求整数
+
+pub const VK_SHIFT_OUT_OF_WIDTH int = 7 // 编译期移位超出位宽
+
+pub const VK_UNARY_FP_OP int = 8 // 浮点只支持一元 +/-
+
+pub const VK_UNARY_NEEDS_INT int = 9 // 编译期一元运算要求整数
+
+pub const VK_AGG_MISMATCH int = 10 // 聚合类型不匹配（长度或元素类型不同）
+
+pub const VK_PTR_MISMATCH int = 11 // 指针类型不匹配（需要 .to_type 显式转换）
+
+pub const VK_NON_PTR_TO_PTR int = 12 // 不能把非指针值赋给指针
+
+pub const VK_PTR_TO_NON_PTR int = 13 // 不能把指针赋给非指针（用 .to_type）
+
+pub const VK_FN_SIG_MISMATCH int = 14 // 函数签名不匹配
+
+pub const VK_FN_VALUE_MISMATCH int = 15 // fn 值只能赋给同签名类型或 *void
+
+pub const VK_FP_NEEDS_CAST int = 16 // 浮点与整数之间需要 .to_type 显式转换
+
+pub const VK_INT_TO_BOOL int = 17 // 整数不能隐式转为 bool（用 .to_type(bool)）
+
+pub const VK_BOOL_TO_TYPE int = 18 // bool 不能隐式转为该类型
+
+pub const VK_TYPE_MISMATCH int = 19 // 类型不匹配
+
+pub const VK_SAME_WIDTH_NEEDS_CAST int = 20 // 同宽整数之间需要 .to_type 显式转换
+
+pub const VK_IMPLICIT_NARROW int = 21 // 不允许的隐式窄化（用 .to_type）
+
+pub const VK_CONST_DIV_ZERO int = 22 // 常量除以零
+
+pub const VK_CONST_MOD_ZERO int = 23 // 常量模零
