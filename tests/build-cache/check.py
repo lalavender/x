@@ -51,6 +51,62 @@ def objects(cache: Path):
     return sorted(cache.glob("targets/*/llvm/O*/obj/*.o"))
 
 
+LITERAL_A = '''module main
+
+// tag：与 b.yh 共享字面量 "dup"（共享标签；后续文件按此后的标签编号引用）。
+pub fn tag() *char {
+    return "dup"
+}
+'''
+
+LITERAL_B = '''module main
+
+// pick：先复用 "dup"，再引用 "struct"；切片复用时标签漂移会串位。
+pub fn pick(i int) *char {
+    if (i == 2) {
+        return "dup"
+    }
+    if (i == 1) {
+        return "struct"
+    }
+    return "zzz"
+}
+'''
+
+LITERAL_MAIN = '''module main
+
+// main：pick(1) 必须仍然是 "struct"（首字符 s）。
+fn main() int {
+    let p *char = pick(1)
+    if (p[0] != 's') {
+        return 1
+    }
+    return 0
+}
+'''
+
+
+def write_literal_project(dst: Path) -> None:
+    """写一个两文件同模块项目：b.yh 的字面量排在 a.yh 之后。"""
+    dst.mkdir(parents=True)
+    (dst / "project.toml").write_text(
+        '[project]\nos = "host"\narch = "host"\nname = "litlab"\nsource = "."\n')
+    (dst / "a.yh").write_text(LITERAL_A)
+    (dst / "b.yh").write_text(LITERAL_B)
+    (dst / "main.yh").write_text(LITERAL_MAIN)
+
+
+def run_binary(compiler: Path, project: Path):
+    """运行项目产物（.build/<project.name>）；缺失返回 None。"""
+    binary = project / ".build" / "litlab"
+    if not binary.exists():
+        return None
+    env = dict(os.environ)
+    env.setdefault("YH_STDLIB", str(ROOT / "libs"))
+    return subprocess.run([str(binary)], cwd=project, capture_output=True,
+                          text=True, env=env, timeout=60)
+
+
 def main() -> int:
     """跑三个用例，逐个打印 PASS/FAIL，失败任一返回 1。"""
     ap = argparse.ArgumentParser()
@@ -92,8 +148,32 @@ def main() -> int:
     plain = run_build(compiler, default, None)
     check("cache-default-layout",
           plain.returncode == 0
-          and bool(list((default / ".build").glob("targets/*/llvm/O*/obj/*.o"))),
+          and bool(list((default / ".build").glob("targets/*/llvm/O*"))),
           f"退出码 {plain.returncode}，stderr={plain.stderr[-400:]!r}")
+
+    # 4：字面量布局改动后的增量复用（P1：函数/检查切片按数据标签引用字面量）。
+    # 冷编 → 同步热编写入函数级记录 → 在 b.yh 之前插入新字面量（后续标签整体漂移）
+    # → 第三次构建必须仍产出含 "struct" 的对象，且二进制返回 0。
+    literal = WORK / "literal-edit"
+    literal_cache = WORK / "literal-cache"
+    shutil.rmtree(literal, ignore_errors=True)
+    shutil.rmtree(literal_cache, ignore_errors=True)
+    write_literal_project(literal)
+    first_lit = run_build(compiler, literal, literal_cache)
+    run_build(compiler, literal, literal_cache)
+    (literal / "a.yh").write_text(
+        LITERAL_A + '\n// probe：新增字面量让 b.yh 的标签整体后移。\n'
+        'pub fn probe() *char {\n    return "probe-literal"\n}\n')
+    rebuilt = run_build(compiler, literal, literal_cache)
+    run = run_binary(compiler, literal)
+    objects_ok = any(b"struct\x00" in p.read_bytes()
+                     for p in literal_cache.glob("targets/*/llvm/O*/obj/*.o"))
+    check("cache-literal-edit-incremental",
+          first_lit.returncode == 0 and rebuilt.returncode == 0
+          and run is not None and run.returncode == 0 and objects_ok,
+          f"首次 {first_lit.returncode}，改后 {rebuilt.returncode}，"
+          f"运行 {None if run is None else run.returncode}，struct 对象 {objects_ok}，"
+          f"stderr={rebuilt.stderr[-400:]!r}")
 
     if failed:
         print(f"总计：失败 {failed}")

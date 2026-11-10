@@ -8,6 +8,37 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：函数/检查缓存按数据标签漂移失效（P1 修复）
+
+**结果**：
+- 根因不在编译器身份：`mb_compiler_identity_ensure` 已在模块 ActionID
+  （`mb_mix_compiler_identity`）与 worker 环境键（`bc().compiler_fingerprint`
+  → `--ir-key`/`ir_cache_salt`）两条路径上执行，check-only 路径本身不读写
+  函数级缓存。真正的缺陷是**数据标签漂移**：字符串/静态数据的标签是模块级
+  绝对计数，函数/检查切片按标签号引用字面量，但两类函数键都不覆盖标签布局。
+  本模块增删或改写字面量后，旧切片仍被接受，把旧标签映射到别的字面量。
+- 复现（临时快照树，种子 0.0.14）：`just build` → `just dev` →
+  只改 `compiler/lex/api.yh` 一处文案 → `just dev`，`yh-lex.o` 的
+  `__DATA,__data` 丢掉 `"struct"`（`strings` 可验），产出的编译器把
+  `struct` 当标识符。A/B：删掉该模块 `.fchk` 即恢复正常，删 `.fir` 无效
+  → 元凶是检查切片；换成带修复的编译器作 builder 后同样步骤不再丢字面量。
+- 修复：
+  1. `check.checked_gen_function_key` 与 lower 的 `checked_function_key`
+     把 `support.data_label()`（当前标签总数）混入函数键：字面量布局一变，
+     本模块全部 check/IR 函数记录保守失效。
+  2. `check.checked_slice_import` 恢复字符串时改为逐一校验当前会话表：
+     标签缺失、长度/引号形态或字节不等一律按不兼容返回 1（重查该函数），
+     不再把旧标签「补登记」回当前表。
+- 回归：`tests/build-cache/check.py` 新增 `cache-literal-edit-incremental`
+  （冷编→热编写记录→在后续文件之前插入新字面量→三编后对象仍含 `struct`
+  且产物返回 0）。注意：该小规模场景在修复前也不复现（缺陷需要编译器模块
+  规模的字面量分布），真正的前后对照证据是上面的快照树 A/B。
+
+**验证**（`tmp/p1-tree`：HEAD + 本次三处改动，种子构建）：
+- 冷编 `just build` 通过；`just test` 全绿（modules、libs、C4/C6、
+  build-cache 全部通过，codeflow：模块 18 / 文件 177 / 函数 1846 / import 边 90）。
+- `just selfhost-native`（`SKIP_CORPUS=1`）两代固定点通过。
+
 ## 2026-11-10：errors 诊断基座模块（叶子基座，修复 CI 四端红）
 
 **结果**：

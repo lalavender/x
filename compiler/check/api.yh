@@ -283,6 +283,11 @@ pub fn checked_gen_function_key(decl_row int, out *u8) int {
     if (checked_gen_layout(&key) != 0) { return -1 }
     if (checked_gen_symbol_facts(&key) != 0) { return -1 }
     if (checked_gen_decl_facts(&key) != 0) { return -1 }
+    // 数据标签（字符串/静态数据）是模块级绝对计数，受检切片按标签号引用它们。
+    // 本模块增删或改写任何字面量都会让后续标签漂移，旧切片再被接受就会把
+    // 标签映射到别的字面量/静态对象（表现为丢字面量或模块校验失败）。
+    // 键里混入当前标签总数：布局一变，本模块全部函数切片保守失效。
+    if (cache.key_mix_int(&key, support.data_label()) != 0) { return -1 }
     if (checked_gen_mix_decl_tokens(decl, &key) != 0) { return -1 }
     return cache.key_finish_hex(&key, out)
 }
@@ -793,14 +798,31 @@ pub fn checked_slice_import(data *u8, size int, decl_row_override int,
         si += 1
     }
     // v3：先按记录恢复字符串标签与字节，lowering 命中时才查得到「受检字节」。
+    // 标签是解析期的绝对计数：本模块只要增删或改写任何字面量，后续标签整体漂移。
+    // 记录里的标签因此必须与当前会话表逐一相同（含字节/引号形态）；缺失或不等
+    // 说明布局已漂移，整条切片按 miss 处理（返回 1 重查本函数），不允许把旧标签
+    // 映射成别的字面量——那会让复用的检查结果引用错误的字符串。
     let st int = 0
     for st < slice.string_n {
         let item *CheckedSliceString = &slice.strings[st]
-        let pool_off int = support.tml_intern_str(item.name, 0, item.len)
-        if (pool_off < 0
-            || support.data_str_restore(item.label, pool_off, item.len,
-                item.quoted) != 0) {
-            checked_slice_release(&slice); return -1
+        let have_off int = 0
+        let have_len int = 0
+        let have_quoted int = 0
+        let same int = support.data_str_lookup(item.label, &have_off,
+            &have_len, &have_quoted)
+        if (same != 0 && (have_len != item.len || have_quoted != item.quoted)) {
+            same = 0
+        }
+        if (same != 0) {
+            let have *char = support.np_cstr(have_off)
+            let bi int = 0
+            for bi < item.len {
+                if (have[bi] != item.name[bi]) { same = 0; break }
+                bi += 1
+            }
+        }
+        if (same == 0) {
+            checked_slice_release(&slice); return 1
         }
         st += 1
     }
