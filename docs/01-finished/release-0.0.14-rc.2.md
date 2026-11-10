@@ -34,6 +34,12 @@ macOS/Linux 的堆恰好为零页，掩盖了该缺陷。
 的 `[env]` 保留（加载顺序已改为先于 `[link]` 快照），`link-env-manifest`
 覆盖默认值与进程环境覆盖两条路径。
 
+另修复同一路径暴露的第二个问题：无编译期正文的模块不产出 `.s.ct`，
+父调度器 `mb_sched_publish_interface` 原先把缺失当失败；Windows 的
+`u8-dup-module-path-import` 因此报「无法打开文件 ...s.ct.session-*」。
+现在缺失时跳过 CT 提交（与 `mb_iface_ct_same` 的缺失语义一致），`.s.i`
+仍必须存在。
+
 **4. build-check 的 cinterop 生成物**
 
 `vendor/prebuilt.o` 被 `.gitignore` 的 `*.o` 排除，干净 checkout 上
