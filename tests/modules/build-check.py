@@ -1329,7 +1329,8 @@ def main():
                cwd=dst / c["sub"])
         if c["kind"] == "run":
             report(exit_code(r.returncode) == exit_code(c["expect"]), c["name"],
-                   f"退出码 {r.returncode} 期望 {c['expect']}\n{r.stderr[-400:]}")
+                   f"退出码 {r.returncode} 期望 {c['expect']}\n"
+                   f"stdout: {r.stdout[-800:]}\nstderr: {r.stderr[-800:]}")
             if c["name"] == "u3-c-source-object-library-mix":
                 c_source = dst / "cdep" / "c" / "mathshim.c"
                 original_c = c_source.read_text()
