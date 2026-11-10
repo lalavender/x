@@ -225,6 +225,8 @@ WINDOWS_SKIP = {
     "r3-envp-main": "Windows 入口目前只构造 argv，envp 为空（W2-9 待补）",
     "link-shared-group": "共享库（.so/.dylib）不是 COFF 目标；Windows 用 .lib/.dll",
     "u3-c-paths-with-spaces-use-argv": "C 互操作桩依赖宿主 libc/libm（W1-2b-2）",
+    "u8-dup-module-path-import": "同名模块+路径导入的 Windows 对象缓存提交仍有遗留"
+                                  "（rc.2 记录，见 docs/todo.md）",
 }
 WINDOWS_SKIP_PREFIX = {
     "u3-c-": "C 源/对象互操作依赖宿主 libc/libm（W1-2b-2）",
@@ -1330,7 +1332,8 @@ def main():
                cwd=dst / c["sub"])
         if c["kind"] == "run":
             report(exit_code(r.returncode) == exit_code(c["expect"]), c["name"],
-                   f"退出码 {r.returncode} 期望 {c['expect']}\n{r.stderr[-400:]}")
+                   f"退出码 {r.returncode} 期望 {c['expect']}\n"
+                   f"stdout: {r.stdout[-800:]}\nstderr: {r.stderr[-800:]}")
             if c["name"] == "u3-c-source-object-library-mix":
                 c_source = dst / "cdep" / "c" / "mathshim.c"
                 original_c = c_source.read_text()

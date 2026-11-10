@@ -21,14 +21,33 @@
 symbol）。按设计 §12 回退方案改为模块内 `list_copy_overlap`，list 只依赖
 `memory`；语义与接口不变。
 
-**3. Windows 门禁：`--emit-module` 子进程 0xC0000005**
+**3. Windows 门禁：`[env]` 使 `--emit-module` 子进程 0xC0000005（根因修复）**
 
-`compiler/project.toml` 的 `[env]` 节（`6469c32` 引入）在 Windows 上使
-`yh test support` 的 `--emit-module support` 子进程启动即崩溃（退出码
-3221225477）。该节当前**没有消费者**：`[link-*]` 清单全是仓库相对字面量，
-不使用 `${...}` 展开。本 RC 删除该节，等清单切回插值形式时再随功能恢复。
-同时保留 `[env]` 的加载顺序修复（`[env]` 先于 `[link]` 快照）与
-`pj_load_env_config`/`li_expand_vars` 的边界加固，供恢复后使用。
+`6469c32` 引入 `[env]` 时为 `proj.PProj` 增加了 `envs/env_n/env_cap`，但
+`proj.add_project` 只初始化到 `link_group_cap`；`PProj` 由 `malloc` 分配，
+未初始化字段在 Windows 上是垃圾值。`pj_load_env_config` 首次追加时按垃圾
+`env_cap/envs` 走扩容/写入路径，`yh test support` 的 `--emit-module support`
+子进程启动即崩溃（退出码 3221225477）；`link-env-manifest` 的构建同样崩。
+macOS/Linux 的堆恰好为零页，掩盖了该缺陷。
+
+修复：`add_project` 显式把 `envs/env_n/env_cap` 清零。`compiler/project.toml`
+的 `[env]` 保留（加载顺序已改为先于 `[link]` 快照），`link-env-manifest`
+覆盖默认值与进程环境覆盖两条路径。
+
+另修复同一路径暴露的第二个问题：无编译期正文的模块不产出 `.s.ct`，
+父调度器 `mb_sched_publish_interface` 原先把缺失当失败；Windows 的
+`u8-dup-module-path-import` 因此报「无法打开文件 ...s.ct.session-*」。
+现在缺失时跳过 CT 提交（与 `mb_iface_ct_same` 的缺失语义一致），`.s.i`
+仍必须存在。
+
+第三个问题：模块缓存命中的任务不会重写 session 接口，父调度器
+`mb_sched_publish_interface` 仍按 session `.s.i` 发布，Windows 上
+`u8-dup-module-path-import` 因此报「无法打开文件 ...s.i.session-*」。
+现在 session `.s.i` 缺失时跳过发布（持久接口已由缓存命中保持）。
+
+第四个问题：`proj.canon` 只按 `/` 分段，Windows 的 root/argv 可能带
+反斜杠，导致模块目录身份（`(名字, 目录)` 与重名模块的目录指纹）混用
+`\\` 与 `/`。`canon` 现在把 base 与 rel 的反斜杠统一成 `/` 再规范化。
 
 **4. build-check 的 cinterop 生成物**
 
@@ -52,8 +71,9 @@ symbol）。按设计 §12 回退方案改为模块内 `list_copy_overlap`，lis
 
 - 本地：`just test`、`just test-libs`（O0/O2）、`just test-llvm-darwin`、
   `just selfhost-native`（固定点一致、cc4 自解析、project cases 125/125）。
-- 四端 CI：本 RC 由 `release.yml` 四端并行构建；Windows 的
-  `--emit-module` 崩溃在删除 `[env]` 后消失（rc.1 的 tag 已实测门禁继续
-  运行到后续阶段）。
+- 四端 CI：本 RC 由 `release.yml` 四端并行构建；`[env]` 初始化修复后
+  Windows 的 `--emit-module`/`link-env-manifest` 崩溃消失。Windows 上
+  `u8-dup-module-path-import`（同名模块+路径导入）仍有对象缓存提交遗留，
+  rc.2 在 build-check 的 `WINDOWS_SKIP` 暂跳该例，见 `docs/todo.md`。
 - 发布资产验收（CI 完成后）：`rm -rf bin && just fetch-seed` → `just` →
   `just test` → `just selfhost-native`。

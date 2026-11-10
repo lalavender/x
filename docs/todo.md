@@ -13,19 +13,51 @@
 - 添加错误，当前错误提示功能太简陋
 - project.toml 添加[env]
 
-## 2026-11-10 泛型 `$any` 类型参数与单态化（P0，规划中）
+## 2026-11-10 函数 IR 缓存缺编译器身份（P1，合并后暴露）
+
+合并 0.0.14 后，**冷 `.build` + 旧全局缓存**跑 `just build` 会在
+`libs/hash/api.yh:23:1` 报 `LLVM lowering sha256_init: 首片不支持此语句或表达式`
+（首次复现时报在 `build/proj/api.yh:193:1` 的 `hash_init`）。实测边界：
+
+- `YH_CACHE=off` 通过；`yh cache clean` 后默认缓存通过；新缓存目录
+  两连跑（第二次冷编复用首轮写下的记录）也通过。
+- 只删掉全局 outputs 里 8 个含 `sha256_init` 的 `HYFNC1` 记录后，
+  报错顺延到 `sha256_update`：旧记录被 `ir_function_cache_merge` 接受后
+  污染了模块，后续函数 lowering 才失败（错误信息把缓存问题误报成
+  lowering 能力不足）。
+
+根因假设（待确认）：环境键里的编译器身份来自
+`support.ctl().ir_cache_salt` ← `bc().compiler_fingerprint`，若某条产出
+IR 记录的路径上指纹未算（恒 0），不同编译器写的记录就会撞键。
+
+- [ ] 环境键稳定混入编译器身份：确认 `mb_compiler_identity_ensure` 在所有
+      产出/查找函数记录的路径上都已执行，必要时在 `mb_emit_module` 入口补。
+- [ ] `ir_function_cache_merge` 把「记录不兼容」与内部失败分开：不兼容按
+      miss 重 lower，且报告不要复用「首片不支持此语句或表达式」。
+- [ ] 回归门：`just build` 后 `rm -rf compiler/.build` 再 `just build`
+      （热全局缓存、冷项目缓存）。
+
+## 2026-11-10 泛型 `$any` 类型变量与单态化（P0，规划中）
 
 方案：[yh-泛型any单态化实施方案](02-plan/yh-泛型any单态化实施方案-2026-11-10.md)。
-类型位置 `$IDENT` 即类型参数（同名同变量，`$any` 匿名），编译期按实参类型单态化。
+只支持 `$any`：一个函数内所有 `$any` 是同一类型，由实参推断，编译期展开为具体类型。
 
-- [ ] 决策：`$any` 匿名语义、G2 实例归属、struct 级泛型口径；更新架构 §8.3/§8.2 并立 ADR。
-- [ ] G0 语法与类型变量地基：`yh.g4` 增 `'$' IDENT`、`TY_PARAM`、pass1 模板登记、
-      pass2 跳过模板体、误用诊断；门：`just test`。
-- [ ] G1 同模块单态化：调用点合一、实例符号/命名、合成 AST 函数身份、实例驱动、
-      实例缓存跳过；run/fail 用例；门：`just test` + `just selfhost-native` 后滚种子。
+- [ ] 决策确认：单变量语义、「展开」= 生成具体函数（非内联）、G2 实例归属、
+      struct 级泛型口径；更新架构 §8.3/§8.2 并立 ADR。
+- [ ] G0 语法与类型变量地基：`yh.g4` 增 `'$' IDENT`（语义限定 `$any`）、`TY_PARAM`、
+      pass1 模板登记、pass2 跳过模板体、误用诊断；门：`just test`。
+- [ ] G1 同模块单态化：实参推断与一致性检查、实例符号/命名、合成 AST 函数身份、
+      实例驱动、实例缓存跳过；run/fail 用例；门：`just test` + `just selfhost-native` 后滚种子。
 - [ ] G2 跨模块与 `pub` 泛型：`.s.i` 模板条目 + 接口版本、复用 `.s.ct` 闭包、
       实例归属；`tests/modules/projects/generic/` 双模块验收。
-- [ ] G3/G4 扩展与缓存：显式类型实参、fn 类型内类型参数、struct 级泛型、实例缓存键含绑定。
+- [ ] G3/G4 扩展与缓存：显式类型实参、`$any` 绑定 fn 类型、struct 级泛型、实例缓存键含绑定。
+
+## 2026-11-10 Windows 同名模块 + 路径导入（P1，rc.2 暂跳）
+
+`tests/modules/projects/dupmodseg` 的 `u8-dup-module-path-import` 在 Windows
+上构建失败（`[编译] cache` 只调度一次，另一个同名模块的对象/接口缓存提交
+缺失；macOS/Linux 通过）。rc.2 在 build-check 的 `WINDOWS_SKIP` 暂跳该例，
+发布后需在 Windows runner 抓调度/产物日志修复，再移除跳过。
 
 ## 2026-11-10 标准库 api.yh 迁移后续（P2）
 

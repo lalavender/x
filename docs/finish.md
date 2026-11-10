@@ -8,6 +8,32 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：合并 0.0.14 主线（api.yh 迁移 × 发布修复）
+
+**结果**：
+- 把本地 `api.yh` 公开面迁移（含 `proj → build/proj`、移除 `yh list`）与
+  `origin/llvm` 的 0.0.14 发布提交（9 个）合并；版本号统一为 `0.0.14`，
+  `[env]` 按上游根因修复（`PProj.envs/env_n/env_cap` 在 `add_project` 清零）恢复。
+- 冲突处理：`compiler/proj/{path,table}.yh` 保留本地删除，把上游的
+  `canon` 反斜杠归一与 `add_project` 的 `[env]` 清零移植到
+  `compiler/build/proj/api.yh`；`YH_VERSION_TEXT` 改在 `compiler/cmd/yh/api.yh`；
+  `docs/01-finished/release-0.0.14-rc.2.md` 取上游版本（本地旧稿描述的是
+  「删除 [env]」的已废弃方案）；`docs/{todo,finish}.md` 两侧条目并存。
+- `build_scheduler.yh` 自动合并保留上游三处接口发布修复；`justfile` 的
+  Windows tar 相对路径、`tests/modules/build-check.py` 的 Windows 跳过与
+  stdout 诊断随合并进入。
+- 补齐迁移遗留：`tests/modules/build-check.py` 的 `CORE_DIRS` 增加
+  `proj → build/proj`，`llvmtarget/llvmfront` fixture 改用 `core_src("proj")`
+  （原先直接切已不存在的 `compiler/proj`）。
+- 环境处置：合并后首次冷编在旧全局缓存上触发既有缓存缺陷（见 docs/todo.md
+  「函数 IR 缓存缺编译器身份」），`yh cache clean` 后 `just build` 恢复。
+
+**验证**：
+- `just build`（清空全局缓存后冷编）通过，`./yh --version` = `yh 0.0.14`。
+- `just test` 全绿（ANTLR 语法 83/83+49/49、run 372/374、modules 全部通过、
+  libs 171、compiler-tests 8/8、fmt 10、C4/C6、code-stats 6/6、codeflow 自洽）。
+- `just selfhost-native` 未在本机跑，按仓库约定交 CI。
+
 ## 2026-11-10：编译器 18 个模块公开面迁移到 api.yh
 
 **结果**：
@@ -175,6 +201,27 @@ compiler/README.md 与四份 03-design；`tools/cli-golden.py` 删除 `list` 与
   Windows 仍失败（`compiler-tests` 0xC0000005），Release 未发布
 - 本地种子已滚：`bin/yh-darwin-arm64` = `yh 0.0.14-rc.1`，
   sha256 `54a5cf1bff3f86d7617719373a07c31c6456e48e84de7d9aaa0662689e7b097b`
+
+## 2026-11-10：0.0.14-rc.2 发布成功 + 0.0.14 正式版
+
+**rc.2 结果**：
+- 四端 CI 全绿（run 42744872693）：darwin-arm64 / linux-x64 / linux-arm64 /
+  windows-x64 门禁 + `release-asset` 全部成功；Release `0.0.14-rc.2`
+  （Pre-release）带 8 个资产（4 端 tar.gz + sha256）。
+- 关键修复：`PProj.envs/env_n/env_cap` 未初始化（Windows `[env]` 崩溃根因）；
+  无 CT 模块 `.s.ct` 缺失容忍；缓存命中跳过 session `.s.i` 发布；
+  `canon` 反斜杠统一；Windows `tar -f` 相对输出名。
+- Windows `u8-dup-module-path-import` 仍在 `WINDOWS_SKIP` 暂跳。
+
+**0.0.14 正式版**：
+- 版本号 `compiler/project.toml` + `YH_VERSION_TEXT` = `0.0.14`；
+  发布说明 [release-0.0.14](01-finished/release-0.0.14.md)。
+- 四端 release（run 42748030310）+ publish 成功；Release `0.0.14`
+  （Latest）带 8 个资产。
+- **发布资产验收**：`rm -rf bin && just fetch-seed` 取到 0.0.14
+  （sha256 `020fb7259c2bf3f65896d11015fb8ca86d03449f2d5b598e19fcb2cd705a678e`）
+  → `just build` → `yh 0.0.14` → `just test` 全绿 →
+  `just selfhost-native`（project cases 125/125）全绿。
 
 ## 2026-11-10：list 标准库 L0–L2（动态列表）
 

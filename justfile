@@ -533,7 +533,9 @@ release-asset tag asset:
     rm -rf "$stage"
     mkdir -p "$stage"
     cp "{{ yh }}" "$stage/yh"
-    tar -czf "{{ root }}/dist/$name.tar.gz" -C "$stage" yh
+    # 在 dist 内用相对输出名：Windows 的 GNU tar 会把 -f 里的 `D:` 当远程主机，
+    # 绝对路径必须避开（--force-local 在 macOS bsdtar 上不可用）。
+    ( cd "{{ root }}/dist" && tar -czf "$name.tar.gz" -C "$stage" yh )
     rm -rf "$stage"
     if command -v sha256sum >/dev/null 2>&1; then
       ( cd "{{ root }}/dist" && sha256sum "$name.tar.gz" | sed 's/ \*/  /' > "$name.sha256" )
