@@ -21,9 +21,10 @@
 → cc2 缺产物。方案已经用户决策（叶子基座）：
 [yh-errors模块诊断基座实施方案-2026-11-10](02-plan/yh-errors模块诊断基座实施方案-2026-11-10.md)。
 
-- [ ] Task 1：errors 叶子落地（DiagCtx + 四诊断入口迁入）+ support 委托，
-      修复 CI；`just selfhost-native` 验证
-- [ ] Task 2-5：前端/后端/构建/驱动共 ~550 处调用点分模块迁往 errors
+- [x] Task 1：errors 叶子落地（DiagCtx + 四诊断入口迁入）+ support 委托，
+      修复 CI；`just selfhost-native` 验证（build-check fixture 接线一并完成）
+- [x] Task 2：前端（token/lex/parse/ast/check/comptime 32 文件）迁移
+- [ ] Task 3-5：后端/构建/驱动共 ~550 处调用点分模块迁往 errors
 - [ ] Task 6：删 support 委托层、文档归口、finish 记录
 - [ ] 后续：诊断直写 stderr 旁路收编（link/build/testkit 约 20 处）
 
@@ -50,6 +51,13 @@ IR 记录的路径上指纹未算（恒 0），不同编译器写的记录就会
       miss 重 lower，且报告不要复用「首片不支持此语句或表达式」。
 - [ ] 回归门：`just build` 后 `rm -rf compiler/.build` 再 `just build`
       （热全局缓存、冷项目缓存）。
+- [ ] 表现二（errors 迁移排查中发现，同一「旧函数记录被接受」家族）：热全局缓存
+      下只改 `compiler/lex/api.yh` 一处字符串文案，增量 `just dev` 产出的
+      `yh-lex.o` 的 `__DATA,__data` 丢掉 `"struct"` 字面量（`otool -s __DATA
+      __data` 可验），新编译器随即把 `struct` 当标识符，所有含 struct 的源文件
+      报「此处需要一个顶层声明」。`rm -rf compiler/.build` 并换新 `YH_CACHE`
+      目录后同源码恢复正常，说明模块 ActionID 是对的、被复用的是函数级记录/
+      检查切片。与 errors 迁移无关（HEAD 上做中性文案改动同样复现）。
 
 ## 2026-11-10 泛型 `$any` 类型变量与单态化（P0，规划中）
 

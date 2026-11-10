@@ -536,7 +536,8 @@ def copy_proj(src, dst):
         shutil.copytree(ROOT / "compiler" / "token", dst / "token")
         (dst / "token" / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "token"\nsource = "."\n'
-            '[dependencies]\nsupport = { path = "../support" }\n')
+            '[dependencies]\nsupport = { path = "../support" }\n'
+            'errors = { path = "../errors" }\n')
         # F4 收尾：gen 模块已删除，fixture 不再需要它的子项目。
         shutil.copytree(core_src("proj"), dst / "proj")
         (dst / "proj" / "project.toml").write_text(
@@ -545,8 +546,8 @@ def copy_proj(src, dst):
             'token = { path = "../token" }\n')
         # F2-K2：语义动作（ty_*/sym_*/scope_*）已从 gen 迁到 check，前端 fixture
         # 需要连 check 及其依赖（ast/comptime）一起拷贝，否则 import check 解析失败。
-        for mod, deps in (("ir", ""), ("cache", "support token hash"), ("comptime", "support token proj"), ("ast", "support token proj comptime"),
-                          ("check", "support token proj ast comptime ir cache hash")):
+        for mod, deps in (("ir", ""), ("cache", "support token hash"), ("comptime", "support errors token proj"), ("ast", "support errors token proj comptime"),
+                          ("check", "support errors token proj ast comptime ir cache hash")):
             shutil.copytree(core_src(mod), dst / mod)
             lines = [f'[project]', 'os = "host"', 'arch = "host"', f'name = "{mod}"', 'source = "."', '', '[dependencies]']
             for dep in deps.split():
@@ -562,7 +563,8 @@ def copy_proj(src, dst):
         (dst / "lex" / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "lex"\nsource = "."\n'
             '[dependencies]\nsupport = { path = "../support" }\n'
-            'token = { path = "../token" }\n')
+            'token = { path = "../token" }\n'
+            'errors = { path = "../errors" }\n')
     if src.name in ("ctfacts", "gen-split"):
         # GEN3：拆分后的公开面回归——直接 import support/token/check，
         # 需要与 ctfacts 同一套真实模块（check 的传递依赖一并拷入）。
