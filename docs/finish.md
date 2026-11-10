@@ -38,6 +38,9 @@
 - 冷编 `just build` 通过；`just test` 全绿（modules、libs、C4/C6、
   build-cache 全部通过，codeflow：模块 18 / 文件 177 / 函数 1846 / import 边 90）。
 - `just selfhost-native`（`SKIP_CORPUS=1`）两代固定点通过。
+- 缓存回归门：同一全局缓存下 `just build` → `rm -rf compiler/.build` →
+  `just build` 两轮均通过，产物 `yh-lex.o` 仍含 `struct` 字面量
+  （热全局缓存 + 冷项目缓存）。
 
 ## 2026-11-10：errors 诊断基座模块（叶子基座，修复 CI 四端红）
 
