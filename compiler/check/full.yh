@@ -115,8 +115,14 @@ fn full_expr(id int, out *support.Res) int {
             if (op != token.TK_LPAREN) { return -2 }
             return full_expr(child, out)
         }
-        if (op != token.TOK_NUMBER) { return -2 }
-        return full_literal(id, out)
+        if (op == token.TOK_NUMBER) { return full_literal(id, out) }
+        if (op == token.TK_TRUE) { return sem_bool(1, out) }
+        if (op == token.TK_FALSE) { return sem_bool(0, out) }
+        if (op == token.TK_CHAR || op == token.TOK_CHAR) { return full_char(id, out) }
+        if (op == token.TOK_IDENT) { return full_name(id, out) }
+        // 字符串/`$`调用/sizeof/数组字面量等：常量值来自登记过的标签或聚合，
+        // 重算会有副作用或无从复现，本片不判定。
+        return -2
     }
     if (kind == ast.AST_EXPR_UNARY) {
         if (op != token.TK_MINUS && op != token.TK_PLUS
@@ -147,6 +153,38 @@ fn full_literal(id int, out *support.Res) int {
     if (sem_parse_number(t.start, t.len) != 0) { return -1 }
     out.ival = support.fc().c_fold_ival
     out.lit_big = support.fc().c_fold_big
+    return 0
+}
+
+// full_char：字符字面量——复用 sem_char 的解码（同一内核，同一结果）。
+fn full_char(id int, out *support.Res) int {
+    let file int = -1
+    let first int = ast.ast_expr_span_of(id, &file)
+    if (first < 0 || first >= token.ctx().count) { return -2 }
+    let t token.Tok = token.ctx().tokens[first]
+    if (t.kind != token.TOK_CHAR && t.kind != token.TK_CHAR) { return -2 }
+    if (sem_char(t.start, t.len, out) != 0) { return -1 }
+    return 0
+}
+
+// full_name：就绪的标量整型 const 引用（数组长度、常量初始化式里最常见）。
+// 语义与 sem_ident 的取值分支同源；只判定 `SYM_CONST` 且非地址常量——
+// 地址常量的常量值是本次登记的字面量标签号，重算会重新登记，编号不可比。
+fn full_name(id int, out *support.Res) int {
+    if (ast.ast_expr_sym_kind_of(id) != support.SYM_CONST) { return -2 }
+    if ((ast.ast_expr_sym_flags_of(id) & support.F_ADDR) != 0) { return -2 }
+    let file int = -1
+    let first int = ast.ast_expr_span_of(id, &file)
+    if (first < 0 || first >= token.ctx().count) { return -2 }
+    let t token.Tok = token.ctx().tokens[first]
+    if (t.kind != token.TOK_IDENT) { return -2 }
+    // 名字要能重新解析到**同一个**符号才判定：局部 const/形参在影子门运行时
+    // 作用域已弹出，重新查名可能落到外层同名符号（实测 libs/string 即此类），
+    // 那已不是同一次绑定，比对无意义。ponytail: 绑定重放留到 S4-2c/d（绑定
+    // arena 就位后按 binding_row 精确重放），本片只判定全局 const 名字。
+    let sym int = support.sym_lookup(t.start, t.len)
+    if (sym < 0 || sym != ast.ast_expr_sym_of(id)) { return -2 }
+    if (sem_ident(t.start, t.len, out) != 0) { return -1 }
     return 0
 }
 

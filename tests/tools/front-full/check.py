@@ -29,6 +29,12 @@ const SCALED int = BASE * 2
 
 const MASKED int = (0xF0 >> 4) | 1
 
+const NAMED int = BASE + 1
+
+const CYCLED int = NAMED * 2 - MASKED
+
+type Row = [NAMED]int
+
 struct Packet {
     items [BASE + 1]int;
     tag int;
@@ -36,11 +42,14 @@ struct Packet {
 
 fn main() int {
     let a [SCALED]int = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    let b int = ~0 + 1
+    let k [NAMED]int = [1, 2, 3, 4, 5, 6]
+    let r Row
+    let b int = ~0 + 1 + 'A' - 64
     let c int = -(-(BASE))
     let d int = (1 == 2) + 1
-    let e int = 7 % 4 + MASKED
-    printf("%d\\n", a[0] + b + c + d + e + sizeof(Packet))
+    let e int = 7 % 4 + MASKED + NAMED
+    let f int = len(r)
+    printf("%d\\n", a[0] + b + c + d + e + f + sizeof(Packet))
     return 0
 }
 """
