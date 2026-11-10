@@ -231,15 +231,21 @@ typed IR 是唯一执行器，正文不在支持子集内的编译期函数直�
 是唯一被导出的原语），运行时函数体在 `backend/llvm_runtime.yh` /
 `backend/llvm_apple_runtime.yh` 按需发射。
 
-**support** —— L0 基础内核：缓冲/源/池/统计/诊断/目标
+**errors** —— L0 诊断基座（叶子模块，不 import 任何模块）
 
 | 文件 | 职责 |
 | --- | --- |
-| `support/base.yh` | `SourceCtx`/`PoolCtx`/`DiagCtx`/`SessionCtx`/`CompileStats`/`TargetInfo`/`TargetCfg` 与单例 |
-| `support/buffer.yh` | `append_*`/`write_all`/`alloc`/`out_grow`/`fail`/`fail_path`/`hexval`/路径缓冲 |
+| `errors/api.yh` | `DiagCtx` 单例与统一诊断入口 `diag`/`fail`/`fail_path`/`err_lc`/`warn_lc` |
+| `errors/render.yh` | 私有渲染辅助（`yh: ` 前缀、位置、CT 展开轨迹），仅供 api.yh |
+
+**support** —— L0 基础内核：缓冲/源/池/统计/目标
+
+| 文件 | 职责 |
+| --- | --- |
+| `support/base.yh` | `SourceCtx`/`PoolCtx`/`SessionCtx`/`CompileStats`/`TargetInfo`/`TargetCfg` 与单例 |
+| `support/buffer.yh` | `append_*`/`write_all`/`alloc`/`out_grow`/`hexval`/路径缓冲 |
 | `support/pool.yh` | 名字池 intern、`np_cstr`、`append_np*` |
 | `support/source.yh` | `read_source`/`set_source_path` |
-| `support/diag.yh` | `err_lc`/`warn_lc` 与 CT 展开轨迹 |
 | `support/target.yh` | `TargetInfo`/`TargetCfg` 解析、`tg_*`、`bind_cfg`、`ABI_*` |
 
 `support` 不是流水线阶段：会话初始化绑定目标/源/统计/诊断，读源前、词法/语法/

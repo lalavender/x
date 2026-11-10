@@ -8,6 +8,41 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：errors 诊断基座模块（叶子基座，修复 CI 四端红）
+
+**结果**：
+- CI run 42756269175 四端同挂的根因是 `8a398d0` 新增的 `compiler/errors/api.yh`
+  无人 import（孤儿模块 → 按需编译不产出），而 `tools/selfhost_snapshot_gate.py`
+  按源码树扫描全部 module 声明计算预期产物 → cc2 缺 `iface/yh-errors.s.{i,ct}`
+  与 `llvm/yh-errors.ll`。修复方式按用户决策落成**叶子基座**：`errors` 不 import
+  任何模块，持有 `DiagCtx` 单例与 `diag`/`fail`/`fail_path`/`err_lc`/`warn_lc`
+  五个诊断入口（渲染逻辑自 support 原样搬迁，输出逐字节不变），全编译器一律
+  `import errors` 报错；`support` 退位为通用工具层，迁移期五个临时委托已在
+  Task 6 删除，不留双入口。
+- 路径槽位用「字段地址」而非路径快照：`state_init`/`session_reset` 调
+  `errors.set_path_slot(&g_support.src.path)`，`err_lc`/`warn_lc` 调用时刻读
+  `*g_path_slot`，14 处直写 `src_ctx().path` 的换源点自动可见。
+- 迁移范围：token/lex/parse/ast/check/comptime（32 文件）→ backend/link（7）→
+  build（19，含 proj/project_dir）→ testkit/cmd（6），合计 64 文件；fixture
+  `gen-split`、`llvmlower` 的诊断探针同步改走 `errors`。
+- 文档归口：`compiler/README.md` 新增 errors 模块表、support 表去掉
+  `DiagCtx`/`fail`/`support/diag.yh`；`docs/03-design/yh-编码规范.md` 的
+  `gen.fail`/`gen.sem_err` 历史名改为 `errors.fail`/`errors.err_lc`/
+  `token.err_tok`。
+
+**验证**（主树当时被并发会话的 `compiler/build` list 重构占用、不可构建，
+门禁在 `tmp/task6-tree` 快照树执行：HEAD + 本任务改动，并剔除 `96f252c`
+误带入的两行未使用 `import libs.list`）：
+- 冷编 `just build` 通过（新 `YH_CACHE`、清空 `.build`）。
+- `just test` 全绿（ANTLR 83/83+49/49、run 372/374 跳过 2、modules 全部通过、
+  libs、compiler-tests 9/9、fmt、C4/C6、code-stats 6/6、codeflow：模块 18 /
+  文件 177 / 函数 1846 / import 边 90）。
+- `just selfhost-native`（`SKIP_CORPUS=1`）两代固定点通过。
+
+**附**：迁移排查中发现既有 C4/C5 缓存一致性问题（热全局缓存下改模块内字符串
+字面量后，函数级记录/检查切片被错误复用），已在 `docs/todo.md` 记为 P1，
+与本次迁移无关。
+
 ## 2026-11-10：合并 0.0.14 主线（api.yh 迁移 × 发布修复）
 
 **结果**：

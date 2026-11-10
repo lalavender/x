@@ -11,27 +11,8 @@
 - 添加类型推导
 - 添加接口功能
 - 添加错误，当前错误提示功能太简陋
+- 诊断直写 stderr 旁路收编（link/build/testkit 约 20 处 `write_all(2, ...)`）
 - project.toml 添加[env]
-
-## 2026-11-10 errors 诊断基座模块（P0，CI 四端红）
-
-合并 `13d3bd4` 后 CI run 42756269175 四端同挂：`8a398d0` 新增的
-`compiler/errors/api.yh` 是孤儿模块（无人 import → 按需编译不产出），
-自举快照门按源码树预期 `iface/yh-errors.s.{i,ct}` + `llvm/yh-errors.ll`
-→ cc2 缺产物。方案已经用户决策（叶子基座）：
-[yh-errors模块诊断基座实施方案-2026-11-10](02-plan/yh-errors模块诊断基座实施方案-2026-11-10.md)。
-
-- [x] Task 1：errors 叶子落地（DiagCtx + 四诊断入口迁入）+ support 委托，
-      修复 CI；`just selfhost-native` 验证（build-check fixture 接线一并完成）
-- [x] Task 2：前端（token/lex/parse/ast/check/comptime 32 文件）迁移
-- [x] Task 3：后端与链接（backend/link 7 文件）迁移
-- [x] Task 4：构建系统（build 19 文件，含 proj/project_dir）迁移
-- [x] Task 5：驱动层（testkit/cmd 6 文件）迁移；因并发会话正在改
-      `compiler/build`（list 重构未提交、主树不可构建），门禁在 `tmp/task5-tree`
-      快照树（HEAD + 本任务 6 文件）中验证：`just dev` exit=0、模块检查全部通过、
-      `just test` exit=0（import 边 88 → 90）
-- [ ] Task 6：删 support 委托层、文档归口、finish 记录
-- [ ] 后续：诊断直写 stderr 旁路收编（link/build/testkit 约 20 处）
 
 ## 2026-11-10 函数 IR 缓存缺编译器身份（P1，合并后暴露）
 

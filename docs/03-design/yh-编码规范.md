@@ -125,7 +125,7 @@ int，如 `ir_type_ok`、`radix_ok`），`libs/` 与新写的库代码用 `bool`
 写 `0 = 成功`。
 
 **[强制] 错误配对名**：`xxx_result_ok` / `xxx_result_error`（libs 风格）、
-`xxx_result(value, status)`；编译器诊断用 `gen.fail` / `gen.err_*` / `gen.sem_err`。
+`xxx_result(value, status)`；编译器诊断统一走叶子模块 `errors`：`errors.fail` / `errors.err_lc`（token 侧包装为 `token.err_tok`）。
 同一模块内不要混用两套。
 
 ### 2.2 变量与参数
@@ -341,7 +341,7 @@ pub fn buf_write(b *Buf, text *char) int {
 
 | 场景 | 形状 | 例 |
 | --- | --- | --- |
-| 编译器内部 | 返回 `int`：0 成功 / -1 失败，失败即诊断 | `gen.fail` / `gen.err_tok` / `gen.sem_err` |
+| 编译器内部 | 返回 `int`：0 成功 / -1 失败，失败即诊断 | `errors.fail` / `token.err_tok` / `errors.err_lc` |
 | 标准库 / 库代码 | 返回 `XxxResult`，`xxx_result_ok` / `xxx_result_error` 构造 | `libs/string/view.yh`（存量命名） |
 
 - **[强制] 不吞错。** 失败要么就地诊断（中文、指明文件名:行号或参数名），要么
@@ -366,7 +366,7 @@ pub fn buf_write(b *Buf, text *char) int {
   `import fmt`（标准库提供，只在项目模式下可用；单文件模式会报「字符串插值需要
   import fmt」）。限制：单行；内部不允许裸双引号、花括号、顶层三元。现状：唯一
   使用者是 `tests/modules/projects/fmtinterp/`；`compiler/` 的诊断拼接沿用既有
-  `gen.fail` 形态，不要为了用插值给编译器引入 `fmt` 依赖。
+  `errors.fail` 形态，不要为了用插值给编译器引入 `fmt` 依赖。
 - **[强制] 插值不用于拼协议、存储格式或 SQL/命令行。** 机器可解析的数据用显式
   缓冲 + 长度校验 + 显式转义。
 - **[强制] 转义只用已知集合**：`\n \r \t \0 \a \b \f \v \' \" \\ \$` 与 `\xNN`。
