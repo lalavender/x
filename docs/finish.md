@@ -57,6 +57,22 @@
 - 本地种子已滚：`bin/yh-darwin-arm64` = `yh 0.0.14-rc.1`，
   sha256 `54a5cf1bff3f86d7617719373a07c31c6456e48e84de7d9aaa0662689e7b097b`
 
+## 2026-11-10：0.0.14-rc.2 发布成功 + 0.0.14 正式版
+
+**rc.2 结果**：
+- 四端 CI 全绿（run 42744872693）：darwin-arm64 / linux-x64 / linux-arm64 /
+  windows-x64 门禁 + `release-asset` 全部成功；Release `0.0.14-rc.2`
+  （Pre-release）带 8 个资产（4 端 tar.gz + sha256）。
+- 关键修复：`PProj.envs/env_n/env_cap` 未初始化（Windows `[env]` 崩溃根因）；
+  无 CT 模块 `.s.ct` 缺失容忍；缓存命中跳过 session `.s.i` 发布；
+  `canon` 反斜杠统一；Windows `tar -f` 相对输出名。
+- Windows `u8-dup-module-path-import` 仍在 `WINDOWS_SKIP` 暂跳。
+
+**0.0.14 正式版**：
+- 版本号 `compiler/project.toml` + `YH_VERSION_TEXT` = `0.0.14`；
+  发布说明 [release-0.0.14](01-finished/release-0.0.14.md)。
+- 本地 `just test`、`just selfhost-native`（project cases 125/125）全绿。
+
 ## 2026-11-10：list 标准库 L0–L2（动态列表）
 
 **结果**：
