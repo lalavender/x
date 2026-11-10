@@ -40,10 +40,14 @@ macOS/Linux 的堆恰好为零页，掩盖了该缺陷。
 现在缺失时跳过 CT 提交（与 `mb_iface_ct_same` 的缺失语义一致），`.s.i`
 仍必须存在。
 
-第三个问题：`proj.canon` 只按 `/` 分段，Windows 的 root/argv 可能带
+第三个问题：模块缓存命中的任务不会重写 session 接口，父调度器
+`mb_sched_publish_interface` 仍按 session `.s.i` 发布，Windows 上
+`u8-dup-module-path-import` 因此报「无法打开文件 ...s.i.session-*」。
+现在 session `.s.i` 缺失时跳过发布（持久接口已由缓存命中保持）。
+
+第四个问题：`proj.canon` 只按 `/` 分段，Windows 的 root/argv 可能带
 反斜杠，导致模块目录身份（`(名字, 目录)` 与重名模块的目录指纹）混用
-`\\` 与 `/`，两个同名 `cache` 模块的目录指纹相同、session 接口互相
-覆盖。`canon` 现在把 base 与 rel 的反斜杠统一成 `/` 再规范化。
+`\\` 与 `/`。`canon` 现在把 base 与 rel 的反斜杠统一成 `/` 再规范化。
 
 **4. build-check 的 cinterop 生成物**
 
