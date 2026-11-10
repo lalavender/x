@@ -26,7 +26,10 @@
 - [x] Task 2：前端（token/lex/parse/ast/check/comptime 32 文件）迁移
 - [x] Task 3：后端与链接（backend/link 7 文件）迁移
 - [x] Task 4：构建系统（build 19 文件，含 proj/project_dir）迁移
-- [ ] Task 5：驱动层（testkit/cmd 6 文件）迁移
+- [x] Task 5：驱动层（testkit/cmd 6 文件）迁移；因并发会话正在改
+      `compiler/build`（list 重构未提交、主树不可构建），门禁在 `tmp/task5-tree`
+      快照树（HEAD + 本任务 6 文件）中验证：`just dev` exit=0、模块检查全部通过、
+      `just test` exit=0（import 边 88 → 90）
 - [ ] Task 6：删 support 委托层、文档归口、finish 记录
 - [ ] 后续：诊断直写 stderr 旁路收编（link/build/testkit 约 20 处）
 
