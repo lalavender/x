@@ -8,6 +8,29 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：前端 S4 片——纯数据层外置与死调用删除（parse→check 194 → 150）
+
+**结果**：
+- 纯 `Res` 操作上移 `support`：新增 `support.res_copy`（与既有 `support.res_reset`
+  同层）；`check.sem_res_reset`/`sem_res_copy` 变转发。parse 侧 19 处调用改走
+  `support`——复制/清零一个语义结果不需要反向依赖 check。
+- 符号表与类型表的纯表操作上移 `support`：`scope_push`/`scope_pop`（词法作用域
+  开合，纯 `ms()` 栈操作）与 `ty_push`（类型表登记）迁出 check，parse 与 builtin
+  的调用点改走 `support`。（`support` 不能 `import token`，所以带
+  `token.err_tok` 诊断的簿记函数（`sym_push`、`sem_loop_push`）仍留在 check。）
+- 删除死调用：`check.sem_push_value` 的实现已是恒 `return 0` 的空转函数，
+  parse 的 11 处调用点与函数本体一并删除（删代码而不是搬家）。
+- `tests/tools/front-coupling/check.py` 基线随之下调 194 → **150**（只减不增）。
+
+**验证**（2026-11-10，darwin-arm64）：
+- `YH_CACHE=off just build`；`just test` 377/379 全通过（含 front-coupling 150/77、
+  front-syntax、front-full 影子门）。
+- 与种子 `bin/yh-darwin-arm64` 差分：8 个类型/长度/CT 密集用例 `--emit-asm`
+  产物逐字节相同。
+
+**遗留**：`sym_push`/`sem_loop_push` 等带诊断的簿记、`sem_can_assign`（17）等
+真语义调用仍在 parse→check 上，属 S4-2c/e 范围（binding arena 与读点切换）。
+
 ## 2026-11-10：前端 S4-2b——影子门扩覆盖（char/bool/const 名字）
 
 **结果**：

@@ -18,8 +18,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 COMPILER = ROOT / "compiler"
 
-# 2026-11-10 两片（类型语法外置 + sizeof 判定外置）后的代码引用数。
-PARSE_CHECK_BUDGET = 194
+# 2026-11-10 五片（类型语法/sizeof/纯语法 AST/数组长度/S4-2a-b 影子门）+
+# 纯 Res 操作外置（res_reset/res_copy 归 support）后的代码引用数。
+PARSE_CHECK_BUDGET = 161
 PARSE_COMPTIME_BUDGET = 77
 
 TYPE_TABLE_LOOKUPS = (
