@@ -1,0 +1,93 @@
+ module proj
+// ============================================================================
+// api.test.yh —— proj 表存储（标准库 list）测试
+//
+// 只由 `cd compiler && ../yh test proj` 执行。验证：
+//   * 项目/模块/文件/导入四张表追加超过 list 最小容量 16 后仍按下标读回；
+//   * 项目子表（依赖/C 输入/链接组/环境变量）各自独立扩容；
+//   * 状态表与项目表一一对应。
+// ============================================================================
+
+test "项目表：追加 40 个项目后按下标读回" {
+    init()
+    let i int = 0
+    for i < 40 {
+        let p int = add_project(i, 2)
+        $assert(p == i, "项目下标按追加序")
+        i += 1
+    }
+    $assert(proj_count() == 40, "项目数")
+    $assert(proj_at(0).root_off == 0, "首项根偏移")
+    $assert(proj_at(39).root_off == 39, "末项根偏移（扩容后）")
+    $assert(project_state(39) == 0, "新项目状态为未装载")
+    set_project_state(39, 2)
+    $assert(project_state(39) == 2, "状态写入后读回")
+}
+
+test "模块/文件/导入表：归属关系与模块内文件序" {
+    init()
+    let p int = add_project(0, 1)
+    $assert(p == 0, "登记项目")
+    let m int = add_module(10, 3, p, 20, 4)
+    $assert(m == 0, "登记模块")
+    $assert(add_project_module(p, m) == 0, "模块挂到项目")
+    $assert(pproj_mod_count(p) == 1, "项目模块数")
+    $assert(pproj_mod_at(p, 0) == m, "项目模块下标")
+    let fi int = 0
+    for fi < 20 {
+        let f int = add_file(fi, 5, m)
+        $assert(f == fi, "文件下标按追加序")
+        $assert(add_module_file(m, f) == 0, "文件挂到模块")
+        fi += 1
+    }
+    $assert(file_count() == 20, "文件数")
+    $assert(mod_file_count(m) == 20, "模块文件数（超过 list 最小容量）")
+    $assert(mod_file_at(m, 19) == 19, "模块末文件下标")
+    $assert(file(19).mod == m, "文件归属模块")
+    let imp int = 0
+    for imp < 18 {
+        add_import(imp, 100, 2, -1, 0, 100, 2, 100, 2, imp + 1, 3)
+        imp += 1
+    }
+    $assert(import_count() == 18, "导入数")
+    $assert(import_at(17).file == 17, "导入所属文件")
+    $assert(import_at(17).line == 18, "导入行号")
+    $assert(import_at(17).mod == -1, "导入模块待绑定")
+}
+
+test "项目子表：依赖/C 输入/链接组/环境变量独立扩容" {
+    init()
+    let p int = add_project(0, 1)
+    $assert(p == 0, "登记项目")
+    let i int = 0
+    for i < 20 {
+        $assert(pproj_dep_push(p, i, 2, i + 1, i + 1) == 0, "追加依赖")
+        $assert(pproj_csource_push(p, i, 3) == 0, "追加 C 源")
+        $assert(pproj_cobject_push(p, i, 4) == 0, "追加对象")
+        $assert(pproj_clib_push(p, i, 5) == 0, "追加系统库")
+        $assert(pproj_env_push(p, i, 6, i, 17, i + 1) == 0, "追加环境变量")
+        i += 1
+    }
+    $assert(pproj_dep_count(p) == 20, "依赖数")
+    $assert(pproj_dep_at(p, 19).proj == 20, "末依赖项目下标")
+    $assert(pproj_csource_count(p) == 20, "C 源数")
+    $assert(pproj_cobject_at(p, 19).path_len == 4, "末对象路径长")
+    $assert(pproj_clib_count(p) == 20, "系统库数")
+    $assert(pproj_env_count(p) == 20, "环境变量数")
+    $assert(pproj_env_at(p, 19).name_len == 6, "末环境变量名长")
+    let g int = 0
+    for g < 20 {
+        let gi int = pproj_link_group_push(p)
+        $assert(gi == g, "链接组下标按追加序")
+        let group *PLinkGroup = pproj_link_group_at(p, gi)
+        group.name_off = g
+        group.name_len = 1
+        $assert(plink_group_item_push(group, g, 2, g + 1) == 0, "追加库文件声明")
+        g += 1
+    }
+    $assert(pproj_link_group_count(p) == 20, "链接组数")
+    let last *PLinkGroup = pproj_link_group_at(p, 19)
+    $assert(last.name_off == 19, "末链接组名偏移")
+    $assert(plink_group_item_count(last) == 1, "末链接组库文件数")
+    $assert(plink_group_item_at(last, 0).orig_off == 19, "末链接组库文件偏移")
+}

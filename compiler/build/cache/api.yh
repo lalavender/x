@@ -3,6 +3,7 @@ module cache
 import token
 import hash
 import support
+import libs.list
 // ============================================================================
 // api.yh —— cache 模块公开面（pub 函数/结构体与 @[extern] 声明）
 //
@@ -285,7 +286,15 @@ pub fn store_lookup(store *CacheStore, action_hex *char, role int,
     let i int = 0
     for i < count {
         if (entries[i].role == role) {
-            return store_get_bytes(store, &entries[i].id[0], out_data, out_size)
+            let bytes list.List
+            if (store_get_bytes(store, &entries[i].id[0], &bytes) != 1) {
+                return 0
+            }
+            // 对外仍按 malloc 缓冲契约交出所有权（check/lower 用 free 回收）；
+            // list 的存储本身来自 memory.alloc，可直接转交。
+            out_data[0] = bytes.data
+            out_size[0] = bytes.count.to_type(int)
+            return 1
         }
         i += 1
     }
@@ -548,32 +557,26 @@ pub fn store_get_file(store *CacheStore, id *u8, dest *char) int {
     return 1
 }
 
-// store_get_bytes：读取 OutputID 到 malloc 缓冲并校验摘要。
-// 1 = 成功（调用方 free），0 = 缺失/损坏/超限。
-pub fn store_get_bytes(store *CacheStore, id *u8, out_data **u8,
-    out_size *int) int {
-    if (store_enabled(store) == 0 || id == 0 || out_data == 0
-        || out_size == 0) { return 0 }
+// store_get_bytes：读取 OutputID 到 list<u8> 并校验摘要。
+// 1 = 成功（调用方 list.release），0 = 缺失/损坏/超限。
+pub fn store_get_bytes(store *CacheStore, id *u8, out *list.List) int {
+    if (store_enabled(store) == 0 || id == 0 || out == 0) { return 0 }
     let path [CACHE_ROOT_MAX + 128]u8
     if (store_output_path(store, id, &path[0], CACHE_ROOT_MAX + 128) != 0) {
         return 0
     }
-    if (cs_read_file(support.arr_cstr(&path[0]), out_data, out_size) == 0) {
+    if (cs_read_file(support.arr_cstr(&path[0]), out) == 0) {
         return 0
     }
     let digest [CACHE_ID_SIZE]u8
-    if (hash.sha256_digest(out_data[0], out_size[0].to_type(u64), &digest[0]) != 0) {
-        free(out_data[0].to_type(*void))
-        out_data[0] = 0
-        out_size[0] = 0
+    if (hash.sha256_digest(out[0].data, out[0].count, &digest[0]) != 0) {
+        list.release(out)
         return 0
     }
     let i int = 0
     for i < CACHE_ID_SIZE {
         if (digest[i] != id[i]) {
-            free(out_data[0].to_type(*void))
-            out_data[0] = 0
-            out_size[0] = 0
+            list.release(out)
             return 0
         }
         i += 1
@@ -643,39 +646,40 @@ pub fn store_action_get(store *CacheStore, action_id *u8,
     if (store_action_path(store, action_id, &path[0], CACHE_ROOT_MAX + 128) != 0) {
         return 0
     }
-    let data *u8 = 0
-    let size int = 0
-    if (cs_read_file(support.arr_cstr(&path[0]), &data, &size) == 0) { return 0 }
+    let data list.List
+    if (cs_read_file(support.arr_cstr(&path[0]), &data) == 0) { return 0 }
+    let size int = data.count.to_type(int)
+    let bytes *u8 = data.data
     let cursor int = 0
     if (size < CACHE_ACTION_HEAD_BYTES
-        || cs_get_u64(data, &cursor) != CACHE_ACTION_MAGIC
-        || cs_get_u64(data, &cursor) != CACHE_ACTION_VERSION) {
-        free(data.to_type(*void))
+        || cs_get_u64(bytes, &cursor) != CACHE_ACTION_MAGIC
+        || cs_get_u64(bytes, &cursor) != CACHE_ACTION_VERSION) {
+        list.release(&data)
         return 0
     }
-    let count u64 = cs_get_u64(data, &cursor)
+    let count u64 = cs_get_u64(bytes, &cursor)
     if (count == 0 || count > CACHE_ACTION_MAX_ENTRIES.to_type(u64)
         || count > capacity.to_type(u64)
         || size != CACHE_ACTION_HEAD_BYTES
             + count.to_type(int) * CACHE_ACTION_ENTRY_BYTES) {
-        free(data.to_type(*void))
+        list.release(&data)
         return 0
     }
     let i int = 0
     for i < count.to_type(int) {
-        let role u64 = cs_get_u64(data, &cursor)
-        if (role > 0x7FFFFFFF) { free(data.to_type(*void)); return 0 }
+        let role u64 = cs_get_u64(bytes, &cursor)
+        if (role > 0x7FFFFFFF) { list.release(&data); return 0 }
         entries[i].role = role.to_type(int)
-        entries[i].size = cs_get_u64(data, &cursor)
+        entries[i].size = cs_get_u64(bytes, &cursor)
         let j int = 0
         for j < CACHE_ID_SIZE {
-            entries[i].id[j] = data[cursor]
+            entries[i].id[j] = bytes[cursor]
             cursor += 1
             j += 1
         }
         i += 1
     }
-    free(data.to_type(*void))
+    list.release(&data)
     out_count[0] = count.to_type(int)
     return 1
 }

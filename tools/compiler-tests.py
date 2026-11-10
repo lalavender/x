@@ -27,7 +27,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPILER = ROOT / "compiler"
-DEFAULT_MODULES = ["errors", "support", "token", "check", "lex", "parse", "ir", "cache", "link"]
+DEFAULT_MODULES = ["errors", "support", "token", "check", "lex", "parse", "ir", "cache", "link", "proj"]
 
 HOST_DRIVERS = {
     "darwin-aarch64": "llvm-darwin-host.py",

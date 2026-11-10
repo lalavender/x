@@ -13,6 +13,7 @@ import parse
 import ast
 import check
 import builtin
+import libs.list
 // ============================================================================
 // api.yh —— build 模块公开面（pub 函数/结构体与 @[extern] 声明）
 //
@@ -20,6 +21,17 @@ import builtin
 // 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
 // 因此实现细节仍可留在后续文件。
 // ============================================================================
+
+// BDep：单模块编译前的一条依赖接口记录。
+// 同一模块的绑定名、接口路径与模块身份必须一起排序，因此合并成一条记录。
+struct BDep {
+    bind_off int            // 绑定名池偏移
+    bind_len int
+    ifoff int               // 依赖模块 .s.i 路径池偏移
+    ctoff int               // 依赖模块 .s.ct 路径池偏移
+    mod int                 // 依赖模块下标
+    mi int                  // 加载后的接口模块编号（-1 = 未加载）
+}
 
 // BuildCtx：一次构建的进程级会话状态。
 pub struct BuildCtx {
@@ -35,14 +47,7 @@ pub struct BuildCtx {
     sched_limit int         // worker 并发上限（YH_WORKERS，缺省 4）
     sched_limit_ready int   // 1 = 已读环境变量
 
-    dep_bind *int           // 绑定名池偏移
-    dep_bindlen *int
-    dep_ifoff *int          // 依赖模块 .s.i 路径池偏移
-    dep_ctoff *int          // 依赖模块 .s.ct 路径池偏移
-    dep_mod *int            // 依赖模块下标
-    dep_mi *int             // 加载后的接口模块编号
-    dep_n int
-    dep_cap int
+    dep list.List           // 依赖接口记录（元素类型 BDep）
     dep_base int            // 本模块接口加载前 c_mod_n 基线
 }
 
@@ -69,6 +74,17 @@ pub struct TomlVal {
 // bc：构建会话上下文的唯一入口。
 pub fn bc() *BuildCtx {
     return &g_build_ctx
+}
+
+// bdep_count：当前模块的依赖接口记录数。
+fn bdep_count() int {
+    return bc().dep.count.to_type(int)
+}
+
+// bdep_at：第 i 条依赖接口记录；调用方保证 0 <= i < bdep_count()。
+fn bdep_at(i int) *BDep {
+    let base *BDep = list.first(&bc().dep).to_type(*BDep)
+    return &base[i]
 }
 
 // yh_win_spawn_wait：Windows 侧 CreateProcessA 包装（compiler/llvm/windows_shim.c）。
@@ -163,13 +179,13 @@ pub fn mb_cache_info() int {
         admin_out("YH_CACHE: disabled")
         return 0
     }
-    let actions *CacheFile = 0
-    let action_count int = 0
-    admin_list_dir(store, "v1/actions", &actions, &action_count)
-    let outs *CacheFile = 0
-    let out_count int = 0
-    admin_list_dir(store, "v1/outputs", &outs, &out_count)
-    let total u64 = admin_sum_size(outs, out_count) + admin_sum_size(actions, action_count)
+    let actions list.List = list.make(sizeof(CacheFile).to_type(u64))
+    admin_list_dir(store, "v1/actions", &actions)
+    let outs list.List = list.make(sizeof(CacheFile).to_type(u64))
+    admin_list_dir(store, "v1/outputs", &outs)
+    let action_count int = actions.count.to_type(int)
+    let out_count int = outs.count.to_type(int)
+    let total u64 = admin_sum_size(&outs) + admin_sum_size(&actions)
     let buf [cache.CACHE_ROOT_MAX + 512]u8
     let n int = 0
     n = support.append_str(&buf[0], n, "YH_CACHE: ")
@@ -184,8 +200,8 @@ pub fn mb_cache_info() int {
     n = admin_byte_text(&buf[0], n, store.max_size)
     buf[n] = 0
     admin_out(support.arr_cstr(&buf[0]))
-    admin_release_files(actions)
-    admin_release_files(outs)
+    list.release(&actions)
+    list.release(&outs)
     return 0
 }
 
@@ -223,10 +239,11 @@ pub fn mb_cache_trim() int {
         admin_out("YH_CACHE: 无法取得写锁")
         return 1
     }
-    let outs *CacheFile = 0
-    let count int = 0
-    admin_list_dir(store, "v1/outputs", &outs, &count)
-    let total u64 = admin_sum_size(outs, count)
+    let outs list.List = list.make(sizeof(CacheFile).to_type(u64))
+    admin_list_dir(store, "v1/outputs", &outs)
+    let count int = outs.count.to_type(int)
+    let outs_base *CacheFile = list.first(&outs).to_type(*CacheFile)
+    let total u64 = admin_sum_size(&outs)
     if (total <= store.max_size) {
         let buf [512]u8
         let n int = 0
@@ -234,19 +251,19 @@ pub fn mb_cache_trim() int {
         n = admin_byte_text(&buf[0], n, total)
         buf[n] = 0
         admin_out(support.arr_cstr(&buf[0]))
-        admin_release_files(outs)
+        list.release(&outs)
         cache.store_end_write(lock_fd)
         return 0
     }
     let refs IdSet
-    let probe_actions *CacheFile = 0
-    let probe_count int = 0
-    admin_list_dir(store, "v1/actions", &probe_actions, &probe_count)
-    admin_release_files(probe_actions)
+    let probe_actions list.List = list.make(sizeof(CacheFile).to_type(u64))
+    admin_list_dir(store, "v1/actions", &probe_actions)
+    let probe_count int = probe_actions.count.to_type(int)
+    list.release(&probe_actions)
     if (idset_init(&refs, probe_count * 16) != 0
         || admin_collect_refs(store, &refs) != 0) {
         idset_release(&refs)
-        admin_release_files(outs)
+        list.release(&outs)
         cache.store_end_write(lock_fd)
         admin_out("YH_CACHE: 引用集分配失败，放弃 trim")
         return 1
@@ -254,27 +271,31 @@ pub fn mb_cache_trim() int {
     // 按 mtime 插入排序（旧在前）；trim 是低频运维命令，不用引入排序库。
     let i int = 1
     for i < count {
-        let current CacheFile = outs[i]
+        let current CacheFile = outs_base[i]
         let j int = i
-        for j > 0 && outs[j - 1].mtime > current.mtime {
-            outs[j] = outs[j - 1]
+        for j > 0 && outs_base[j - 1].mtime > current.mtime {
+            outs_base[j] = outs_base[j - 1]
             j -= 1
         }
-        outs[j] = current
+        outs_base[j] = current
         i += 1
     }
     let removed u64 = 0
     let removed_count int = 0
     i = 0
     for i < count && total > store.max_size {
-        if (idset_has(&refs, &outs[i].name[0]) == 0) {
+        if (idset_has(&refs, &outs_base[i].name[0]) == 0) {
             let path [cache.CACHE_ROOT_MAX + 256]u8
             if (admin_join(support.arr_cstr(&store.root[0]), "v1/outputs",
-                    &outs[i].name[0], cache.CACHE_ID_HEX, &path[0],
+                    &outs_base[i].name[0], cache.CACHE_ID_HEX, &path[0],
                     cache.CACHE_ROOT_MAX + 256) == 0) {
                 unlink(support.arr_cstr(&path[0]))
-                if (total >= outs[i].size) { total -= outs[i].size } else { total = 0 }
-                removed += outs[i].size
+                if (total >= outs_base[i].size) {
+                    total -= outs_base[i].size
+                } else {
+                    total = 0
+                }
+                removed += outs_base[i].size
                 removed_count += 1
             }
         }
@@ -291,7 +312,7 @@ pub fn mb_cache_trim() int {
     buf[n] = 0
     admin_out(support.arr_cstr(&buf[0]))
     idset_release(&refs)
-    admin_release_files(outs)
+    list.release(&outs)
     cache.store_end_write(lock_fd)
     return total > store.max_size ? 1 : 0
 }
@@ -304,12 +325,13 @@ pub fn mb_cache_verify() int {
         admin_out("YH_CACHE: disabled")
         return 0
     }
-    let actions *CacheFile = 0
-    let action_count int = 0
-    admin_list_dir(store, "v1/actions", &actions, &action_count)
+    let actions list.List = list.make(sizeof(CacheFile).to_type(u64))
+    admin_list_dir(store, "v1/actions", &actions)
+    let action_count int = actions.count.to_type(int)
+    let actions_base *CacheFile = list.first(&actions).to_type(*CacheFile)
     let refs IdSet
     if (idset_init(&refs, action_count * 16) != 0) {
-        admin_release_files(actions)
+        list.release(&actions)
         admin_out("YH_CACHE: verify 引用集分配失败")
         return 1
     }
@@ -320,7 +342,7 @@ pub fn mb_cache_verify() int {
     let i int = 0
     for i < action_count {
         let action_id [cache.CACHE_ID_SIZE]u8
-        if (cache.id_parse_hex(support.arr_cstr(&actions[i].name[0]),
+        if (cache.id_parse_hex(support.arr_cstr(&actions_base[i].name[0]),
                 &action_id[0]) != 0) {
             bad_actions += 1
             i += 1
@@ -362,14 +384,15 @@ pub fn mb_cache_verify() int {
         }
         i += 1
     }
-    let outs *CacheFile = 0
-    let out_count int = 0
-    admin_list_dir(store, "v1/outputs", &outs, &out_count)
+    let outs list.List = list.make(sizeof(CacheFile).to_type(u64))
+    admin_list_dir(store, "v1/outputs", &outs)
+    let out_count int = outs.count.to_type(int)
+    let outs_base *CacheFile = list.first(&outs).to_type(*CacheFile)
     let orphan int = 0
     i = 0
     for i < out_count {
         let id [cache.CACHE_ID_SIZE]u8
-        if (cache.id_parse_hex(support.arr_cstr(&outs[i].name[0]), &id[0]) == 0
+        if (cache.id_parse_hex(support.arr_cstr(&outs_base[i].name[0]), &id[0]) == 0
             && idset_has(&refs, &id[0]) == 0) {
             orphan += 1
         }
@@ -394,8 +417,8 @@ pub fn mb_cache_verify() int {
     buf[n] = 0
     admin_out(support.arr_cstr(&buf[0]))
     idset_release(&refs)
-    admin_release_files(actions)
-    admin_release_files(outs)
+    list.release(&actions)
+    list.release(&outs)
     return (bad_actions + missing + corrupt + orphan) == 0 ? 0 : 1
 }
 
@@ -855,19 +878,19 @@ pub fn load_stdlib() int {
 
 // pj_topo_multi：库模式——从项目每个模块出发收集依赖序。
 pub fn pj_topo_multi(pj int) int {
-    if (pj_topo(proj.ctx().projs[pj].mods[0]) < 0) {
+    if (pj_topo(proj.pproj_mod_at(pj, 0)) < 0) {
         return -1
     }
     let i int = 1
-    for i < proj.ctx().projs[pj].mod_n {
-        if (proj.ctx().mark[proj.ctx().projs[pj].mods[i]] != 2) {
-            if (pj_dfs(proj.ctx().projs[pj].mods[i]) != 0) {
+    for i < proj.pproj_mod_count(pj) {
+        if (proj.mark_at(proj.pproj_mod_at(pj, i)) != 2) {
+            if (pj_dfs(proj.pproj_mod_at(pj, i)) != 0) {
                 return -1
             }
         }
         i += 1
     }
-    return proj.ctx().order_n
+    return proj.order_count()
 }
 
 // mb_select_links：把 cli 解析出的 --link 组名登记进链接选择表。
@@ -993,7 +1016,7 @@ pub fn cmd_build(out_path *char, module_arg *char, has_module int, links []*char
     if (support.session().check_only != 0) {
         mb_check_clear_ifaces(build_off, build_len, count)
         pj_out_s("检查通过: ")
-        pj_out_np(proj.ctx().projs[pj].name_off, proj.ctx().projs[pj].name_len)
+        pj_out_np(proj.proj_at(pj).name_off, proj.proj_at(pj).name_len)
         pj_out_s("\n")
         return 0
     }
@@ -1136,10 +1159,10 @@ pub fn mb_print_version(quiet int) int {
     if (pj < 0) {
         return 1
     }
-    pj_out_np(proj.ctx().projs[pj].name_off, proj.ctx().projs[pj].name_len)
-    if (proj.ctx().projs[pj].ver_off >= 0) {
+    pj_out_np(proj.proj_at(pj).name_off, proj.proj_at(pj).name_len)
+    if (proj.proj_at(pj).ver_off >= 0) {
         pj_out_s(" ")
-        pj_out_np(proj.ctx().projs[pj].ver_off, proj.ctx().projs[pj].ver_len)
+        pj_out_np(proj.proj_at(pj).ver_off, proj.proj_at(pj).ver_len)
     } else {
         pj_out_s(" (未声明 version)")
     }
@@ -1210,17 +1233,17 @@ pub fn mb_mkdir(dir *char) int {
 
 // mb_restore_front_file：将当前解析器切换到项目索引时保存的只读快照。
 pub fn mb_restore_front_file(path *char, fi int) int {
-    if (support.ctl().front_cache == 0 || proj.ctx().files[fi].source == 0
-        || proj.ctx().files[fi].tokens == 0) {
+    if (support.ctl().front_cache == 0 || proj.file(fi).source == 0
+        || proj.file(fi).tokens == 0) {
         return errors.fail("内部错误：模块 worker 缺少前端文件快照")
     }
-    support.src_ctx().data = proj.ctx().files[fi].source
-    support.src_ctx().length = proj.ctx().files[fi].source_len
-    token.ctx().tokens = proj.ctx().files[fi].tokens
-    token.ctx().count = proj.ctx().files[fi].token_n
-    token.ctx().cap = proj.ctx().files[fi].token_n
-    ast.store().file_decls = proj.ctx().files[fi].decls
-    ast.store().file_decl_n = proj.ctx().files[fi].decl_n
+    support.src_ctx().data = proj.file(fi).source
+    support.src_ctx().length = proj.file(fi).source_len
+    token.ctx().tokens = proj.file(fi).tokens
+    token.ctx().count = proj.file(fi).token_n
+    token.ctx().cap = proj.file(fi).token_n
+    ast.store().file_decls = proj.file(fi).decls
+    ast.store().file_decl_n = proj.file(fi).decl_n
     ast.store().file_decl_i = -1
     ast.store().file_indexed = 1
     support.session().active_file = fi
@@ -1264,8 +1287,8 @@ pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
         let ctx *proj.ProjectCtx = proj.ctx()
         ctx.test_project = main_proj
         let ci int = 0
-        for ci < ctx.projs[main_proj].mod_n {
-            ctx.mods[ctx.projs[main_proj].mods[ci]].is_entry = 0
+        for ci < proj.pproj_mod_count(main_proj) {
+            proj.mod_at(proj.pproj_mod_at(main_proj, ci)).is_entry = 0
             ci += 1
         }
     }
@@ -1289,7 +1312,7 @@ pub fn mb_emit_module(mod_off int, mod_len int, prov_off int, prov_len int,
     // 测试 runner 是入口模块：testkit 在父进程里置 is_entry=1，独立子进程重新
     // 装载索引后必须做同样标记，否则零 CRT 入口桩不发射。
     if (extra != 0 && support.session().test_mode != 0) {
-        proj.ctx().mods[m].is_entry = 1
+        proj.mod_at(m).is_entry = 1
     }
     return mb_emit_indexed_module(m, main_off, main_len, out_dir, ir_cache_salt)
 }
@@ -1305,7 +1328,7 @@ pub fn load_project(root_off int, root_len int) int {
     // 依赖环 / 重复装载
     let known int = proj.find_project_root(root_off, root_len)
     if (known >= 0) {
-        if (proj.ctx().state[known] == 1) {
+        if (proj.project_state(known) == 1) {
             proj.diag(root_off, 0, "依赖环：项目正在装载中")
             return -1
         }
@@ -1316,17 +1339,7 @@ pub fn load_project(root_off int, root_len int) int {
         return -1
     }
     let is_root int = proj.is_root_project(root_off, root_len)
-    // p_state 平行扩容
-    let nst *int = malloc((proj.ctx().proj_cap * sizeof(int)).to_type(u64)).to_type(*int)
-    if (nst == 0) {
-        return errors.fail("内存分配失败")
-    }
-    if (proj.ctx().proj_n > 0) {
-        memcpy(nst, proj.ctx().state, ((proj.ctx().proj_n - 1) * sizeof(int)).to_type(u64))
-    }
-    free(proj.ctx().state)
-    proj.ctx().state = nst
-    proj.ctx().state[me] = 1
+    proj.set_project_state(me, 1)
     // 读清单
     let mpath [1024]u8
     let mn int = 0
@@ -1341,7 +1354,6 @@ pub fn load_project(root_off int, root_len int) int {
     t_pos = 0
     t_line = 1
     t_file = support.arr_cstr(mpath)
-    toml_sec_n = 0
     if (tml_parse() != 0) {
         return -1
     }
@@ -1357,12 +1369,12 @@ pub fn load_project(root_off int, root_len int) int {
         return -1
     }
     if (got == 0 || sl == 0) {
-        return proj.diag(root_off, toml_secs[sec].line, "project.name 必填且非空")
+        return proj.diag(root_off, tml_sec_at(sec).line, "project.name 必填且非空")
     }
     // name 必须是标识符：产物名与接口 tag 都由它派生，不允许分隔符
     let nb0 u8 = support.pool_ctx().data[so]
     if (!((nb0 >= 'a' && nb0 <= 'z') || (nb0 >= 'A' && nb0 <= 'Z') || nb0 == '_')) {
-        return proj.diag(root_off, toml_secs[sec].line,
+        return proj.diag(root_off, tml_sec_at(sec).line,
             "project.name 必须是标识符（字母或下划线开头）")
     }
     let nk int = 0
@@ -1370,13 +1382,13 @@ pub fn load_project(root_off int, root_len int) int {
         let cb u8 = support.pool_ctx().data[so + nk]
         if (!((cb >= 'a' && cb <= 'z') || (cb >= 'A' && cb <= 'Z')
             || (cb >= '0' && cb <= '9') || cb == '_')) {
-            return proj.diag(root_off, toml_secs[sec].line,
+            return proj.diag(root_off, tml_sec_at(sec).line,
                 "project.name 只能是字母、数字与下划线")
         }
         nk += 1
     }
-    proj.ctx().projs[me].name_off = so
-    proj.ctx().projs[me].name_len = sl
+    proj.proj_at(me).name_off = so
+    proj.proj_at(me).name_len = sl
     // source（默认 src）
     got = toml_sec_str(sec, "source", &so, &sl)
     if (got < 0) {
@@ -1389,24 +1401,26 @@ pub fn load_project(root_off int, root_len int) int {
     if (proj.canon(root_off, root_len, srcname, &c_off, &c_len) != 0) {
         return -1
     }
-    proj.ctx().projs[me].src_off = c_off
-    proj.ctx().projs[me].src_len = c_len
+    proj.proj_at(me).src_off = c_off
+    proj.proj_at(me).src_len = c_len
     // version（可选，仅供 yh version 展示）
     got = toml_sec_str(sec, "version", &so, &sl)
     if (got < 0) {
         return -1
     }
     if (got == 1) {
-        proj.ctx().projs[me].ver_off = so
-        proj.ctx().projs[me].ver_len = sl
+        proj.proj_at(me).ver_off = so
+        proj.proj_at(me).ver_len = sl
     }
     // [project].os/arch：必填；host 表示跟随编译器宿主平台。
     if (pl_load_project_target(me, sec) != 0) { return -1 }
     // [project] 未知字段检查
+    let val_n int = tml_val_count(sec)
     let vi int = 0
-    for vi < toml_secs[sec].val_n {
-        let vo int = toml_secs[sec].vals[vi].key_off
-        let vl int = toml_secs[sec].vals[vi].key_len
+    for vi < val_n {
+        let vp *TomlVal = tml_val_at(sec, vi)
+        let vo int = vp.key_off
+        let vl int = vp.key_len
         let okf int = 0
         if (vl == 4 && support.pool_ctx().data[vo] == 'n' && support.pool_ctx().data[vo + 1] == 'a'
             && support.pool_ctx().data[vo + 2] == 'm' && support.pool_ctx().data[vo + 3] == 'e') { okf = 1 }
@@ -1440,7 +1454,7 @@ pub fn load_project(root_off int, root_len int) int {
             if (mo < 0) {
                 return -1
             }
-            return proj.diag(root_off, toml_secs[sec].vals[vi].line, support.np_cstr(mo))
+            return proj.diag(root_off, vp.line, support.np_cstr(mo))
         }
         vi += 1
     }
@@ -1458,11 +1472,13 @@ pub fn load_project(root_off int, root_len int) int {
     let snap_line [64]int
     let snap_n int = 0
     if (dsec >= 0) {
-        for snap_n < toml_secs[dsec].val_n && snap_n < 64 {
-            snap_key_off[snap_n] = toml_secs[dsec].vals[snap_n].key_off
-            snap_key_len[snap_n] = toml_secs[dsec].vals[snap_n].key_len
-            snap_path_off[snap_n] = toml_secs[dsec].vals[snap_n].path_off
-            snap_line[snap_n] = toml_secs[dsec].vals[snap_n].line
+        let dsec_val_n int = tml_val_count(dsec)
+        for snap_n < dsec_val_n && snap_n < 64 {
+            let dv *TomlVal = tml_val_at(dsec, snap_n)
+            snap_key_off[snap_n] = dv.key_off
+            snap_key_len[snap_n] = dv.key_len
+            snap_path_off[snap_n] = dv.path_off
+            snap_line[snap_n] = dv.line
             snap_n += 1
         }
     }
@@ -1487,32 +1503,14 @@ pub fn load_project(root_off int, root_len int) int {
                 return -1
             }
             // 登记依赖
-            if (proj.ctx().projs[me].dep_n == proj.ctx().projs[me].dep_cap) {
-                let ncap int = proj.ctx().projs[me].dep_cap * 2
-                if (ncap == 0) {
-                    ncap = 8
-                }
-                let nd *proj.PDep = malloc((ncap * sizeof(proj.PDep)).to_type(u64)).to_type(*proj.PDep)
-                if (nd == 0) {
-                    return errors.fail("内存分配失败")
-                }
-                if (proj.ctx().projs[me].dep_n > 0) {
-                    memcpy(nd, proj.ctx().projs[me].deps, (proj.ctx().projs[me].dep_n * sizeof(proj.PDep)).to_type(u64))
-                }
-                free(proj.ctx().projs[me].deps)
-                proj.ctx().projs[me].deps = nd
-                proj.ctx().projs[me].dep_cap = ncap
+            if (proj.pproj_dep_push(me, key_off, key_len, dep, dep_line) != 0) {
+                return -1
             }
-            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].key_off = key_off
-            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].key_len = key_len
-            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].proj = dep
-            proj.ctx().projs[me].deps[proj.ctx().projs[me].dep_n].line = dep_line
-            proj.ctx().projs[me].dep_n += 1
             di += 1
         }
     }
     // 扫描源码根
-    if (pj_scan_source(proj.ctx().projs[me].src_off, proj.ctx().projs[me].src_len, me) != 0) {
+    if (pj_scan_source(proj.proj_at(me).src_off, proj.proj_at(me).src_len, me) != 0) {
         return -1
     }
     // 测试专用导入分类：必须在 pj_bind_imports 之前完成，生产构建据此跳过
@@ -1523,19 +1521,19 @@ pub fn load_project(root_off int, root_len int) int {
     // 入口模块：模块名为 main 的那个（模块名与目录名无关；同名模块跨目录
     // 合并为一个，故至多命中一次）
     let mi int = 0
-    for mi < proj.ctx().projs[me].mod_n {
-        let um int = proj.ctx().projs[me].mods[mi]
-        if (proj.ctx().mods[um].name_len == 4
-            && support.pool_ctx().data[proj.ctx().mods[um].name_off] == 'm'
-            && support.pool_ctx().data[proj.ctx().mods[um].name_off + 1] == 'a'
-            && support.pool_ctx().data[proj.ctx().mods[um].name_off + 2] == 'i'
-            && support.pool_ctx().data[proj.ctx().mods[um].name_off + 3] == 'n') {
-            proj.ctx().mods[um].is_entry = 1
+    for mi < proj.pproj_mod_count(me) {
+        let um int = proj.pproj_mod_at(me, mi)
+        if (proj.mod_at(um).name_len == 4
+            && support.pool_ctx().data[proj.mod_at(um).name_off] == 'm'
+            && support.pool_ctx().data[proj.mod_at(um).name_off + 1] == 'a'
+            && support.pool_ctx().data[proj.mod_at(um).name_off + 2] == 'i'
+            && support.pool_ctx().data[proj.mod_at(um).name_off + 3] == 'n') {
+            proj.mod_at(um).is_entry = 1
             break
         }
         mi += 1
     }
-    proj.ctx().state[me] = 2
+    proj.set_project_state(me, 2)
     return me
 }
 
@@ -1615,29 +1613,29 @@ pub fn pj_index_file(path *char, pj int) int {
             return errors.fail("内存分配失败")
         }
         memcpy(toks, token.ctx().tokens, (token.ctx().count * sizeof(token.Tok)).to_type(u64))
-        proj.ctx().files[fidx].source = support.src_ctx().data
-        proj.ctx().files[fidx].source_len = support.src_ctx().length
-        proj.ctx().files[fidx].tokens = toks
-        proj.ctx().files[fidx].token_n = token.ctx().count
+        proj.file(fidx).source = support.src_ctx().data
+        proj.file(fidx).source_len = support.src_ctx().length
+        proj.file(fidx).tokens = toks
+        proj.file(fidx).token_n = token.ctx().count
     }
     if (proj.add_module_file(mod, fidx) != 0) {
         return -1
     }
     // 目录唯一模块检查：同目录内只允许一个模块（用户规划）
     let di int = 0
-    for di < proj.ctx().file_n {
-        let dn int = proj.ctx().files[di].path_len
-        let dl int = pj_dir_prefix_len(proj.ctx().files[di].path_off, dn)
+    for di < proj.file_count() {
+        let dn int = proj.file(di).path_len
+        let dl int = pj_dir_prefix_len(proj.file(di).path_off, dn)
         let nl int = pj_dir_prefix_len(poff, plen)
-        if (dl == nl && pj_same_np(proj.ctx().files[di].path_off, dl, poff, dl)
-            && proj.ctx().files[di].mod != mod) {
+        if (dl == nl && pj_same_np(proj.file(di).path_off, dl, poff, dl)
+            && proj.file(di).mod != mod) {
             let buf [512]u8
             let bn int = 0
             bn = support.append_str(buf, bn, "同目录存在另一个模块（每目录一个模块）: ")
-            bn = support.append_np(buf, bn, proj.ctx().mods[mod].name_off, proj.ctx().mods[mod].name_len)
+            bn = support.append_np(buf, bn, proj.mod_at(mod).name_off, proj.mod_at(mod).name_len)
             bn = support.append_str(buf, bn, " 与 ")
-            bn = support.append_np(buf, bn, proj.ctx().mods[proj.ctx().files[di].mod].name_off,
-                proj.ctx().mods[proj.ctx().files[di].mod].name_len)
+            bn = support.append_np(buf, bn, proj.mod_at(proj.file(di).mod).name_off,
+                proj.mod_at(proj.file(di).mod).name_len)
             let mo int = support.tml_intern_str(buf, 0, bn)
             if (mo < 0) {
                 return -1
@@ -1686,9 +1684,9 @@ pub fn pl_group_name_ok(off int, n int) int {
 // is_entry 并保证至多一个）；无 main 模块即库项目，返回 -1。
 pub fn pj_entry_mod(pj int) int {
     let i int = 0
-    for i < proj.ctx().projs[pj].mod_n {
-        let m int = proj.ctx().projs[pj].mods[i]
-        if (proj.ctx().mods[m].is_entry != 0) {
+    for i < proj.pproj_mod_count(pj) {
+        let m int = proj.pproj_mod_at(pj, i)
+        if (proj.mod_at(m).is_entry != 0) {
             return m
         }
         i += 1
@@ -1698,32 +1696,32 @@ pub fn pj_entry_mod(pj int) int {
 
 pub fn pj_bind_imports() int {
     let i int = 0
-    for i < proj.ctx().imp_n {
-        let f int = proj.ctx().imp_file[i]
-        let pj int = proj.ctx().mods[proj.ctx().files[f].mod].proj
+    for i < proj.import_count() {
+        let f int = proj.import_at(i).file
+        let pj int = proj.mod_at(proj.file(f).mod).proj
         // 生产构建跳过 test 专用导入；测试模式只对目标项目绑定它们。
         // 依赖/标准库的测试与测试专用依赖不进入本轮测试图。
-        if (proj.ctx().imp_test_only[i] != 0
+        if (proj.import_at(i).test_only != 0
             && (support.session().test_mode == 0 || pj != proj.ctx().test_project)) {
             i += 1
             continue
         }
-        let off int = proj.ctx().imp_off[i]
-        let olen int = proj.ctx().imp_len[i]
-        let path_off int = proj.ctx().imp_path_off[i]
-        let path_len int = proj.ctx().imp_path_len[i]
+        let off int = proj.import_at(i).off
+        let olen int = proj.import_at(i).len
+        let path_off int = proj.import_at(i).path_off
+        let path_len int = proj.import_at(i).path_len
         // 点分导入（path 比末段长）：两段先试跨项目依赖键，未命中再按本项目
         // 目录路径解析（A.B.C → 目录 <source>/A/B/C，末段是模块名）。
         if (path_len > olen) {
-            let koff int = proj.ctx().imp_key_off[i]
-            let klen int = proj.ctx().imp_key_len[i]
+            let koff int = proj.import_at(i).key_off
+            let klen int = proj.import_at(i).key_len
             let dk int = -1
             let di int = 0
             if (koff >= 0) {
-                for di < proj.ctx().projs[pj].dep_n {
-                    if (pj_same_np(proj.ctx().projs[pj].deps[di].key_off,
-                        proj.ctx().projs[pj].deps[di].key_len, koff, klen) != 0) {
-                        dk = proj.ctx().projs[pj].deps[di].proj
+                for di < proj.pproj_dep_count(pj) {
+                    if (pj_same_np(proj.pproj_dep_at(pj, di).key_off,
+                        proj.pproj_dep_at(pj, di).key_len, koff, klen) != 0) {
+                        dk = proj.pproj_dep_at(pj, di).proj
                         break
                     }
                     di += 1
@@ -1731,10 +1729,10 @@ pub fn pj_bind_imports() int {
             }
             if (dk >= 0) {
                 let km int = proj.module_in_project(dk, off, olen)
-                if (km < 0 || proj.ctx().mods[km].is_entry != 0) {
+                if (km < 0 || proj.mod_at(km).is_entry != 0) {
                     return imp_msg(i, "依赖项目没有可导入的该模块: ", off, olen)
                 }
-                proj.ctx().imp_mod[i] = km
+                proj.import_at(i).mod = km
                 i += 1
                 continue
             }
@@ -1747,10 +1745,10 @@ pub fn pj_bind_imports() int {
             if (dm < 0) {
                 return imp_msg(i, "模块不存在（路径导入与目录不匹配）: ", path_off, path_len)
             }
-            if (proj.ctx().mods[dm].is_entry != 0) {
+            if (proj.mod_at(dm).is_entry != 0) {
                 return imp_msg(i, "入口模块不可作为库导入: ", off, olen)
             }
-            proj.ctx().imp_mod[i] = dm
+            proj.import_at(i).mod = dm
             i += 1
             continue
         }
@@ -1762,10 +1760,10 @@ pub fn pj_bind_imports() int {
         // 第 1 层：本项目
         let m int = proj.module_in_project(pj, off, olen)
         if (m >= 0) {
-            if (proj.ctx().mods[m].is_entry != 0) {
+            if (proj.mod_at(m).is_entry != 0) {
                 return imp_msg(i, "入口模块不可作为库导入: ", off, olen)
             }
-            proj.ctx().imp_mod[i] = m
+            proj.import_at(i).mod = m
             i += 1
             continue
         }
@@ -1773,7 +1771,7 @@ pub fn pj_bind_imports() int {
         if (proj.ctx().stdlib >= 0) {
             m = proj.module_in_project(proj.ctx().stdlib, off, olen)
             if (m >= 0) {
-                proj.ctx().imp_mod[i] = m
+                proj.import_at(i).mod = m
                 i += 1
                 continue
             }
@@ -1782,10 +1780,10 @@ pub fn pj_bind_imports() int {
         let found int = -1
         let count int = 0
         let di int = 0
-        for di < proj.ctx().projs[pj].dep_n {
-            let dp int = proj.ctx().projs[pj].deps[di].proj
+        for di < proj.pproj_dep_count(pj) {
+            let dp int = proj.pproj_dep_at(pj, di).proj
             let cm int = proj.module_in_project(dp, off, olen)
-            if (cm >= 0 && proj.ctx().mods[cm].is_entry == 0) {
+            if (cm >= 0 && proj.mod_at(cm).is_entry == 0) {
                 count += 1
                 found = cm
             }
@@ -1803,7 +1801,7 @@ pub fn pj_bind_imports() int {
             return imp_diag(i, support.np_cstr(mo3))
         }
         if (count == 1) {
-            proj.ctx().imp_mod[i] = found
+            proj.import_at(i).mod = found
             i += 1
             continue
         }
@@ -1822,10 +1820,10 @@ pub fn pj_bind_imports() int {
 }
 
 pub fn pj_dfs(m int) int {
-    if (proj.ctx().mark[m] == 2) {
+    if (proj.mark_at(m) == 2) {
         return 0
     }
-    if (proj.ctx().mark[m] == 1) {
+    if (proj.mark_at(m) == 1) {
         // 环：路径栈中从 m 开始的链
         let buf [512]u8
         let n int = 0
@@ -1839,11 +1837,11 @@ pub fn pj_dfs(m int) int {
         }
         let k int = start
         for k < pj_pathstk_n {
-            n = support.append_np(buf, n, proj.ctx().mods[pj_pathstk[k]].name_off, proj.ctx().mods[pj_pathstk[k]].name_len)
+            n = support.append_np(buf, n, proj.mod_at(pj_pathstk[k]).name_off, proj.mod_at(pj_pathstk[k]).name_len)
             n = support.append_str(buf, n, " -> ")
             k += 1
         }
-        n = support.append_np(buf, n, proj.ctx().mods[m].name_off, proj.ctx().mods[m].name_len)
+        n = support.append_np(buf, n, proj.mod_at(m).name_off, proj.mod_at(m).name_len)
         let mo int = support.tml_intern_str(buf, 0, n)
         if (mo < 0) {
             return -1
@@ -1857,7 +1855,7 @@ pub fn pj_dfs(m int) int {
         support.write_all(2, out, on)
         return -1
     }
-    proj.ctx().mark[m] = 1
+    proj.mark_set(m, 1)
     pj_pathstk[pj_pathstk_n] = m
     pj_pathstk_n += 1
     let e int = 0
@@ -1872,33 +1870,20 @@ pub fn pj_dfs(m int) int {
         e += 1
     }
     pj_pathstk_n -= 1
-    proj.ctx().mark[m] = 2
-    proj.ctx().order[proj.ctx().order_n] = m
-    proj.ctx().order_n += 1
+    proj.mark_set(m, 2)
+    if (proj.order_push(m) != 0) {
+        return -1
+    }
     return 0
 }
 
 pub fn pj_topo(root int) int {
-    // 标记数组按需扩容
-    if (proj.ctx().mod_n > 0) {
-        let nm *int = malloc((proj.ctx().mod_n * sizeof(int)).to_type(u64)).to_type(*int)
-        if (nm == 0) {
-            errors.fail("内存分配失败")
+    // 标记表按模块数重建；路径栈按需扩容
+    if (proj.mod_count() > 0) {
+        if (proj.mark_reset(proj.mod_count()) != 0) {
             return -1
         }
-        if (proj.ctx().mark != 0) {
-            free(proj.ctx().mark)
-        }
-        proj.ctx().mark = nm
-        let ord *int = malloc((proj.ctx().mod_n * sizeof(int)).to_type(u64)).to_type(*int)
-        if (ord == 0) {
-            return errors.fail("内存分配失败")
-        }
-        if (proj.ctx().order != 0) {
-            free(proj.ctx().order)
-        }
-        proj.ctx().order = ord
-        let stk *int = malloc((proj.ctx().mod_n * sizeof(int)).to_type(u64)).to_type(*int)
+        let stk *int = malloc((proj.mod_count() * sizeof(int)).to_type(u64)).to_type(*int)
         if (stk == 0) {
             return errors.fail("内存分配失败")
         }
@@ -1907,17 +1892,12 @@ pub fn pj_topo(root int) int {
         }
         pj_pathstk = stk
     }
-    let i int = 0
-    for i < proj.ctx().mod_n {
-        proj.ctx().mark[i] = 0
-        i += 1
-    }
-    proj.ctx().order_n = 0
+    proj.order_reset()
     pj_pathstk_n = 0
     if (pj_dfs(root) != 0) {
         return -1
     }
-    return proj.ctx().order_n
+    return proj.order_count()
 }
 
 pub fn pj_mod_suffix(pj int, mod int, off *int, olen *int) int {
@@ -1926,8 +1906,8 @@ pub fn pj_mod_suffix(pj int, mod int, off *int, olen *int) int {
     n = support.append_byte(tmp, n, '_')
     n = support.append_byte(tmp, n, '_')
     let i int = 0
-    for i < proj.ctx().projs[pj].name_len {
-        let b u8 = support.pool_ctx().data[proj.ctx().projs[pj].name_off + i]
+    for i < proj.proj_at(pj).name_len {
+        let b u8 = support.pool_ctx().data[proj.proj_at(pj).name_off + i]
         if (!((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
             || (b >= '0' && b <= '9') || b == '_')) {
             b = '_'
@@ -1939,8 +1919,8 @@ pub fn pj_mod_suffix(pj int, mod int, off *int, olen *int) int {
     n = support.append_byte(tmp, n, '_')
     n = support.append_byte(tmp, n, '_')
     i = 0
-    for i < proj.ctx().mods[mod].name_len {
-        let b2 u8 = support.pool_ctx().data[proj.ctx().mods[mod].name_off + i]
+    for i < proj.mod_at(mod).name_len {
+        let b2 u8 = support.pool_ctx().data[proj.mod_at(mod).name_off + i]
         if (!((b2 >= 'a' && b2 <= 'z') || (b2 >= 'A' && b2 <= 'Z')
             || (b2 >= '0' && b2 <= '9') || b2 == '_')) {
             b2 = '_'
@@ -2057,7 +2037,7 @@ pub fn unused_function_report(files *int, file_n int, sym_base int) int {
         let ri int = 0
         for ri < cand_n {
             if (used[ri] == 0) {
-                support.set_source_path(proj.pool_str(proj.ctx().files[cands[ri].file_id].path_off))
+                support.set_source_path(proj.pool_str(proj.file(cands[ri].file_id).path_off))
                 errors.err_lc(cands[ri].line, cands[ri].col,
                     "函数未使用（本模块没有任何引用；请删除或改为 pub）")
             }

@@ -33,7 +33,7 @@ fn mb_write_manifest(path *char, data *u8, data_len int) int {
 
 // mb_c_project_order：前序收集根项目及其本地依赖，去重并保持清单顺序。
 fn mb_c_project_order(pj int, projects *int, count *int, capacity int) int {
-    if (pj < 0 || pj >= proj.ctx().proj_n) { return -1 }
+    if (pj < 0 || pj >= proj.proj_count()) { return -1 }
     let i int = 0
     for i < count[0] {
         if (projects[i] == pj) { return 0 }
@@ -43,8 +43,8 @@ fn mb_c_project_order(pj int, projects *int, count *int, capacity int) int {
     projects[count[0]] = pj
     count[0] += 1
     let dep int = 0
-    for dep < proj.ctx().projs[pj].dep_n {
-        let child int = proj.ctx().projs[pj].deps[dep].proj
+    for dep < proj.pproj_dep_count(pj) {
+        let child int = proj.pproj_dep_at(pj, dep).proj
         if (mb_c_project_order(child, projects, count, capacity) != 0) { return -1 }
         dep += 1
     }
@@ -71,14 +71,14 @@ fn mb_c_compile_sources(projects *int, project_count int,
     for pi < project_count {
         let pj int = projects[pi]
         let si int = 0
-        for si < proj.ctx().projs[pj].c_source_n {
+        for si < proj.pproj_csource_count(pj) {
             let out [700]u8
             mb_c_obj_path(build_off, pj, si, out)
             unlink(support.arr_cstr(out))
             let args [6]*char
             args[0] = cc
             args[1] = "-c"
-            args[2] = proj.pool_str(proj.ctx().projs[pj].c_sources[si].path_off)
+            args[2] = proj.pool_str(proj.pproj_csource_at(pj, si).path_off)
             args[3] = "-o"
             args[4] = support.arr_cstr(out)
             args[5] = 0.to_type(*char)
@@ -105,7 +105,7 @@ fn mb_c_input_hash(hash *u64, projects *int, project_count int,
     for pi < project_count {
         let pj int = projects[pi]
         let si int = 0
-        for si < proj.ctx().projs[pj].c_source_n {
+        for si < proj.pproj_csource_count(pj) {
             let object [700]u8
             mb_c_obj_path(build_off, pj, si, object)
             if (mb_object_machine_matches(support.arr_cstr(object)) == 0) {
@@ -113,16 +113,16 @@ fn mb_c_input_hash(hash *u64, projects *int, project_count int,
                     support.arr_cstr(object))
             }
             if (proj.hash_file(hash, support.arr_cstr(object)) != 0) { return -1 }
-            let path_off int = proj.ctx().projs[pj].c_sources[si].path_off
-            let path_len int = proj.ctx().projs[pj].c_sources[si].path_len
+            let path_off int = proj.pproj_csource_at(pj, si).path_off
+            let path_len int = proj.pproj_csource_at(pj, si).path_len
             let j int = 0
             for j < path_len { proj.fnv(hash, support.pool_ctx().data[path_off + j]); j += 1 }
             proj.fnv(hash, 0)
             si += 1
         }
         let oi int = 0
-        for oi < proj.ctx().projs[pj].c_object_n {
-            let input proj.PInput = proj.ctx().projs[pj].c_objects[oi]
+        for oi < proj.pproj_cobject_count(pj) {
+            let input proj.PInput = proj.pproj_cobject_at(pj, oi)[0]
             if (mb_object_machine_matches(proj.pool_str(input.path_off)) == 0) {
                 return errors.fail_path("C 目标文件架构与当前 target 不符: ",
                     proj.pool_str(input.path_off))
@@ -134,8 +134,8 @@ fn mb_c_input_hash(hash *u64, projects *int, project_count int,
             oi += 1
         }
         let li int = 0
-        for li < proj.ctx().projs[pj].c_lib_n {
-            let lib proj.PInput = proj.ctx().projs[pj].c_libs[li]
+        for li < proj.pproj_clib_count(pj) {
+            let lib proj.PInput = proj.pproj_clib_at(pj, li)[0]
             let j3 int = 0
             for j3 < lib.path_len { proj.fnv(hash, support.pool_ctx().data[lib.path_off + j3]); j3 += 1 }
             proj.fnv(hash, 255)
@@ -365,8 +365,8 @@ fn mb_hash_lld_identity(hash *u64, projects *int, project_count int) int {
     for pi < project_count {
         let pj int = projects[pi]
         let li int = 0
-        for li < proj.ctx().projs[pj].c_lib_n {
-            let lib proj.PInput = proj.ctx().projs[pj].c_libs[li]
+        for li < proj.pproj_clib_count(pj) {
+            let lib proj.PInput = proj.pproj_clib_at(pj, li)[0]
             let name [128]u8
             let n int = support.append_np(&name[0], 0, lib.path_off, lib.path_len)
             name[n] = 0
@@ -547,8 +547,8 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
     for pi < project_count {
         let pj int = projects[pi]
         let li int = 0
-        for li < proj.ctx().projs[pj].c_lib_n {
-            let lib proj.PInput = proj.ctx().projs[pj].c_libs[li]
+        for li < proj.pproj_clib_count(pj) {
+            let lib proj.PInput = proj.pproj_clib_at(pj, li)[0]
             let suffixes **char = malloc((4 * sizeof(*char)).to_type(u64)).to_type(**char)
             if (suffixes == 0) {
                 free(output.to_type(*void))
@@ -776,7 +776,7 @@ fn mb_link_prepare(p *LinkPlan) int {
     // 两步链接（用户规划：.build/asm → .build/obj → 链接）
     p.cc = mb_select_linker(&p.cc_storage[0])
     if (p.cc == 0) { return -1 }
-    let project_capacity int = proj.ctx().proj_n > 0 ? proj.ctx().proj_n : 1
+    let project_capacity int = proj.proj_count() > 0 ? proj.proj_count() : 1
     // LLVM 后端：worker 已用内嵌桥把每个模块直接发成目标命名空间的 obj/<tag>.o，
     // 没有 .s 中间产物，因此跳过「汇编 → 目标」步，链接参数直接收这些对象。
     p.llvm_objects = 1
@@ -791,8 +791,8 @@ fn mb_link_prepare(p *LinkPlan) int {
     let cpi int = 0
     for cpi < p.c_project_n {
         let cproj int = p.c_projects[cpi]
-        p.c_object_n += proj.ctx().projs[cproj].c_source_n + proj.ctx().projs[cproj].c_object_n
-        p.c_lib_n += proj.ctx().projs[cproj].c_lib_n
+        p.c_object_n += proj.pproj_csource_count(cproj) + proj.pproj_cobject_count(cproj)
+        p.c_lib_n += proj.pproj_clib_count(cproj)
         cpi += 1
     }
     if (li_prepare(p.root_proj, p.build_off, p.build_len) != 0) {
@@ -811,7 +811,7 @@ fn mb_link_objects(p *LinkPlan) int {
     // 运行时桩；文件对象键只含本文件 .s 内容，兄弟文件 private 变更不影响）
     let i int = 0
     for i < p.count {
-        let m int = proj.ctx().order[i]
+        let m int = proj.order_at(i)
         if (proj.mod_tag(m, &p.c_off, &p.c_len) != 0) {
             return -1
         }
@@ -830,7 +830,7 @@ fn mb_link_objects(p *LinkPlan) int {
             return errors.fail_path("无法创建对象目录: ", support.arr_cstr(&objdir[0]))
         }
         let rowk int = 0
-        for rowk <= proj.ctx().mods[m].file_n {
+        for rowk <= proj.mod_file_count(m) {
             let spath [900]u8
             let opath [900]u8
             let obj_manifest [950]u8
@@ -1022,7 +1022,7 @@ fn mb_link_key(p *LinkPlan) int {
     }
     let i int = 0
     for i < p.count {
-        let m int = proj.ctx().order[i]
+        let m int = proj.order_at(i)
         if (p.llvm_objects != 0) {
             if (proj.mod_tag(m, &p.c_off, &p.c_len) != 0) {
                 return -1
@@ -1053,7 +1053,7 @@ fn mb_link_key(p *LinkPlan) int {
         }
         // 旧后端（RS3b）：每模块 N+1 个对象，路径即顺序标识
         let rowk int = 0
-        for rowk <= proj.ctx().mods[m].file_n {
+        for rowk <= proj.mod_file_count(m) {
             let opath [900]u8
             if (proj.module_obj_row(m, p.build_off, p.build_len, rowk, 0,
                     &opath[0], 0) != 0) {
@@ -1133,11 +1133,11 @@ fn mb_link_args(p *LinkPlan) int {
     p.total_rows = 0
     let i int = 0
     for i < p.count {
-        let m0 int = proj.ctx().order[i]
+        let m0 int = proj.order_at(i)
         if (p.llvm_objects != 0) {
             p.total_rows += 1
         } else {
-            p.total_rows += proj.ctx().mods[m0].file_n + 1
+            p.total_rows += proj.mod_file_count(m0) + 1
         }
         i += 1
     }
@@ -1243,7 +1243,7 @@ fn mb_link_args(p *LinkPlan) int {
     p.row_fill = 0
     i = 0
     for i < p.count {
-        let m int = proj.ctx().order[i]
+        let m int = proj.order_at(i)
         if (p.llvm_objects != 0) {
             if (proj.mod_tag(m, &p.c_off, &p.c_len) != 0) {
                 return -1
@@ -1262,7 +1262,7 @@ fn mb_link_args(p *LinkPlan) int {
             continue
         }
         let rowk int = 0
-        for rowk <= proj.ctx().mods[m].file_n {
+        for rowk <= proj.mod_file_count(m) {
             let row *u8 = p.paths + (p.row_fill * 900)
             if (proj.module_obj_row(m, p.build_off, p.build_len, rowk, 0, row, 0) != 0) {
                 return -1
@@ -1279,7 +1279,7 @@ fn mb_link_args(p *LinkPlan) int {
     for cp < p.c_project_n {
         let cproj int = p.c_projects[cp]
         let si2 int = 0
-        for si2 < proj.ctx().projs[cproj].c_source_n {
+        for si2 < proj.pproj_csource_count(cproj) {
             let row2 *u8 = p.cpaths + (cpath_i * 700)
             mb_c_obj_path(p.build_off, cproj, si2, row2)
             p.args[p.next_arg] = row2.to_type(*char)
@@ -1288,8 +1288,8 @@ fn mb_link_args(p *LinkPlan) int {
             si2 += 1
         }
         let oi2 int = 0
-        for oi2 < proj.ctx().projs[cproj].c_object_n {
-            p.args[p.next_arg] = proj.pool_str(proj.ctx().projs[cproj].c_objects[oi2].path_off)
+        for oi2 < proj.pproj_cobject_count(cproj) {
+            p.args[p.next_arg] = proj.pool_str(proj.pproj_cobject_at(cproj, oi2).path_off)
             p.next_arg += 1
             oi2 += 1
         }
@@ -1353,8 +1353,8 @@ fn mb_link_libs(p *LinkPlan) int {
     for cp < p.c_project_n {
         let cproj2 int = p.c_projects[cp]
         let li2 int = 0
-        for li2 < proj.ctx().projs[cproj2].c_lib_n {
-            let lib proj.PInput = proj.ctx().projs[cproj2].c_libs[li2]
+        for li2 < proj.pproj_clib_count(cproj2) {
+            let lib proj.PInput = proj.pproj_clib_at(cproj2, li2)[0]
             let row3 *u8 = p.libpaths + (libpath_i * 128)
             let ln int = support.append_str(row3, 0, "-l")
             ln = support.append_np(row3, ln, lib.path_off, lib.path_len)

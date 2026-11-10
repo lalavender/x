@@ -44,23 +44,23 @@ fn mb_sched_worker_limit() int {
 fn mb_spawn_module_child(module_idx int, root_off int, root_len int,
     out_dir *char, ir_cache_salt u64) int {
     let mod int = module_idx
-    if (mod < 0 || mod >= proj.ctx().mod_n) { return -1 }
+    if (mod < 0 || mod >= proj.mod_count()) { return -1 }
     let name_buf [160]u8
-    let nn int = proj.ctx().mods[mod].name_len
+    let nn int = proj.mod_at(mod).name_len
     if (nn <= 0 || nn >= 160) { return -1 }
     let ni int = 0
     for ni < nn {
-        name_buf[ni] = support.pool_ctx().data[proj.ctx().mods[mod].name_off + ni]
+        name_buf[ni] = support.pool_ctx().data[proj.mod_at(mod).name_off + ni]
         ni += 1
     }
     name_buf[nn] = 0
-    let prov int = proj.ctx().mods[mod].proj
+    let prov int = proj.mod_at(mod).proj
     let args [32]*char
     let ai int = 0
     args[ai] = 0.to_type(*char); ai += 1
     args[ai] = "--emit-module"; ai += 1
     args[ai] = (&name_buf[0]).to_type(*char); ai += 1
-    args[ai] = proj.pool_str(proj.ctx().projs[prov].root_off); ai += 1
+    args[ai] = proj.pool_str(proj.proj_at(prov).root_off); ai += 1
     args[ai] = proj.pool_str(root_off); ai += 1
     args[ai] = "-o"; ai += 1
     args[ai] = out_dir; ai += 1
@@ -85,14 +85,14 @@ fn mb_spawn_module_child(module_idx int, root_off int, root_len int,
     if (support.session().test_mode != 0) {
         args[ai] = "--test-mode"; ai += 1
         // testkit 生成的 runner 在项目 tmp/ 下，子进程重新扫描时看不到它。
-        if (proj.ctx().mods[mod].file_n > 0 && proj.ctx().mods[mod].name_len >= 8) {
-            let name *char = proj.pool_str(proj.ctx().mods[mod].name_off)
+        if (proj.mod_file_count(mod) > 0 && proj.mod_at(mod).name_len >= 8) {
+            let name *char = proj.pool_str(proj.mod_at(mod).name_off)
             if (name[0] == 'y' && name[1] == 'h' && name[2] == '_'
                 && name[3] == 't' && name[4] == 'e' && name[5] == 's'
                 && name[6] == 't' && name[7] == '_') {
-                let first int = proj.ctx().mods[mod].files[0]
+                let first int = proj.mod_file_at(mod, 0)
                 args[ai] = "--extra-file"; ai += 1
-                args[ai] = proj.pool_str(proj.ctx().files[first].path_off); ai += 1
+                args[ai] = proj.pool_str(proj.file(first).path_off); ai += 1
             }
         }
     }
@@ -190,7 +190,7 @@ fn mb_sched_set_session() int {
 fn mb_sched_order_index(module_idx int, count int) int {
     let i int = 0
     for i < count {
-        if (proj.ctx().order[i] == module_idx) {
+        if (proj.order_at(i) == module_idx) {
             return i
         }
         i += 1
@@ -205,7 +205,7 @@ fn mb_sched_refresh_interfaces(states *int, count int,
     for i < count {
         if (states[i] == 1) {
             let path [700]u8
-            if (mb_module_ready_path(proj.ctx().order[i], build_off, build_len, &path[0]) != 0) {
+            if (mb_module_ready_path(proj.order_at(i), build_off, build_len, &path[0]) != 0) {
                 return -1
             }
             if (proj.file_exists(support.arr_cstr(&path[0])) != 0) {
@@ -226,14 +226,15 @@ fn mb_sched_deps_ready(module_idx int, states *int, count int,
         return -1
     }
     let di int = 0
-    for di < bc().dep_n {
-        let oi int = mb_sched_order_index(bc().dep_mod[di], count)
+    for di < bdep_count() {
+        let dep_mod int = bdep_at(di).mod
+        let oi int = mb_sched_order_index(dep_mod, count)
         if (oi < 0) {
             return errors.fail("内部错误：依赖模块不在当前构建序列")
         }
         if (states[oi] == 1) {
             let path [700]u8
-            if (mb_module_ready_path(bc().dep_mod[di], build_off, build_len, &path[0]) != 0) {
+            if (mb_module_ready_path(dep_mod, build_off, build_len, &path[0]) != 0) {
                 return -1
             }
             if (proj.file_exists(support.arr_cstr(&path[0])) != 0) {
@@ -246,15 +247,15 @@ fn mb_sched_deps_ready(module_idx int, states *int, count int,
         if (states[oi] == 2) {
             // 早期启动只允许 CT 接口没有变化的依赖；CT 变了就等完整提交，
             // 避免消费者用旧 .s.ct 计算全局编译期常量。
-            if (mb_iface_ct_same(bc().dep_mod[di], build_off, build_len) == 0) {
+            if (mb_iface_ct_same(dep_mod, build_off, build_len) == 0) {
                 return 0
             }
             early_out[0] = 1
         }
-        if (proj.file_exists(proj.pool_str(bc().dep_ifoff[di])) == 0) {
+        if (proj.file_exists(proj.pool_str(bdep_at(di).ifoff)) == 0) {
             return 0
         }
-        if (proj.file_exists(proj.pool_str(bc().dep_ctoff[di])) == 0) {
+        if (proj.file_exists(proj.pool_str(bdep_at(di).ctoff)) == 0) {
             return 0
         }
         di += 1
@@ -328,15 +329,15 @@ fn mb_sched_clear_interfaces(count int, build_off int,build_len int) void {
     let i int = 0
     for i < count {
         let path [700]u8
-        if (proj.module_iface_path(proj.ctx().order[i], build_off, build_len, bc().iface_suffix, path) == 0) {
+        if (proj.module_iface_path(proj.order_at(i), build_off, build_len, bc().iface_suffix, path) == 0) {
             unlink(support.arr_cstr(path))
         }
-        if (proj.module_ctiface_path(proj.ctx().order[i], build_off, build_len, bc().iface_suffix,
+        if (proj.module_ctiface_path(proj.order_at(i), build_off, build_len, bc().iface_suffix,
             path) == 0) {
             unlink(support.arr_cstr(path))
         }
         let ready [700]u8
-        if (mb_module_ready_path(proj.ctx().order[i], build_off, build_len, &ready[0]) == 0) {
+        if (mb_module_ready_path(proj.order_at(i), build_off, build_len, &ready[0]) == 0) {
             unlink(support.arr_cstr(&ready[0]))
         }
         i += 1
@@ -405,20 +406,20 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
                     if (support.session().check_only != 0) {
                         pj_out_s("  [检查] ")
                     } else {
-                        if (mb_sched_publish_interface(proj.ctx().order[i], build_off,
+                        if (mb_sched_publish_interface(proj.order_at(i), build_off,
                                 build_len) != 0) {
                             failed = 1
                             break
                         }
-                        if (mb_manifest_commit(proj.ctx().order[i], build_off, build_len,
+                        if (mb_manifest_commit(proj.order_at(i), build_off, build_len,
                                 keys + (i * cache.CACHE_ID_SIZE)) != 0) {
                             failed = 1
                             break
                         }
                         pj_out_s("  [编译] ")
                     }
-                    pj_out_np(proj.ctx().mods[proj.ctx().order[i]].name_off,
-                        proj.ctx().mods[proj.ctx().order[i]].name_len)
+                    pj_out_np(proj.mod_at(proj.order_at(i)).name_off,
+                        proj.mod_at(proj.order_at(i)).name_len)
                     pj_out_s("\n")
                 } else if (waited < 0) {
                     kill(pids[i], 15)
@@ -442,7 +443,7 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
         for i < count && active < mb_sched_worker_limit() {
             if (states[i] == 0) {
                 let early int = 0
-                let ready int = mb_sched_deps_ready(proj.ctx().order[i], states, count,
+                let ready int = mb_sched_deps_ready(proj.order_at(i), states, count,
                     build_off, build_len, &early)
                 if (ready < 0) {
                     failed = 1
@@ -450,7 +451,7 @@ fn mb_schedule_modules_locked(count int, root_off int, root_len int,
                 }
                 if (ready != 0) {
                     let pid int = 0
-                    let started int = mb_compile_start(proj.ctx().order[i], root_off,
+                    let started int = mb_compile_start(proj.order_at(i), root_off,
                         root_len, build_off, build_len, &pid,
                         keys + (i * cache.CACHE_ID_SIZE))
                     if (started < 0) {

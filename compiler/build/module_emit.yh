@@ -26,7 +26,7 @@ import hash
 fn mb_check_clear_ifaces(build_off int, build_len int, count int) void {
     let ci int = 0
     for ci < count {
-        let m int = proj.ctx().order[ci]
+        let m int = proj.order_at(ci)
         let path [700]u8
         if (proj.module_iface_path(m, build_off, build_len, bc().iface_suffix, path) == 0) {
             unlink(support.arr_cstr(path))
@@ -55,10 +55,10 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     let c_len int = 0
     let sfx_off int = -1
     let sfx_len int = 0
-    if (pj_mod_suffix(proj.ctx().mods[m].proj, m, &sfx_off, &sfx_len) != 0) {
+    if (pj_mod_suffix(proj.mod_at(m).proj, m, &sfx_off, &sfx_len) != 0) {
         return -1
     }
-    let is_entry int = proj.ctx().mods[m].is_entry
+    let is_entry int = proj.mod_at(m).is_entry
     // 产物目录 = .build/asm/<tag>/（tag 含项目，防同名冲突；RS3b 起每模块
     // 一个目录，内含每文件 .s 与 <tag>.stub.s 运行时桩对象）
     if (proj.mod_tag(m, &c_off, &c_len) != 0) {
@@ -142,7 +142,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     if (cache.key_mix_text(&ckey, proj.pool_str(sfx_off)) != 0) { return -1 }
     // 模块目录：同名不同目录的两个模块必须得到不同 ActionID（产物名已用目录
     // 指纹区分，键里也显式混入，避免改命名规则时误命中）。
-    if (cache.key_mix_text(&ckey, proj.pool_str(proj.ctx().mods[m].dir_off)) != 0) { return -1 }
+    if (cache.key_mix_text(&ckey, proj.pool_str(proj.mod_at(m).dir_off)) != 0) { return -1 }
     if (cache.key_mix_int(&ckey, is_entry) != 0) { return -1 }
     if (cache.key_mix_int(&ckey, support.session().legacy_system) != 0) { return -1 }
     // yh test：测试对象还取决于「本轮选中了哪些测试」，把选择摘要与协议版本
@@ -167,9 +167,9 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
         if (cache.key_mix_text(&ckey, "PIC") != 0) { return -1 }
     }
     let fi int = 0
-    for fi < proj.ctx().mods[m].file_n {
+    for fi < proj.mod_file_count(m) {
         if (cache.key_mix_file(&ckey,
-                proj.pool_str(proj.ctx().files[proj.ctx().mods[m].files[fi]].path_off)) != 0) {
+                proj.pool_str(proj.file(proj.mod_file_at(m, fi)).path_off)) != 0) {
             return -1
         }
         fi += 1
@@ -178,23 +178,22 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     if (mb_module_iface_deps(m, build_off, build_len) < 0) {
         return -1
     }
+    let deps_ok int = 1
     let di int = 0
-    for di < bc().dep_n {
-        if (proj.file_exists(proj.pool_str(bc().dep_ifoff[di])) == 0
-            || proj.file_exists(proj.pool_str(bc().dep_ctoff[di])) == 0) {
+    for di < bdep_count() {
+        let ifoff int = bdep_at(di).ifoff
+        let ctoff int = bdep_at(di).ctoff
+        if (proj.file_exists(proj.pool_str(ifoff)) == 0
+            || proj.file_exists(proj.pool_str(ctoff)) == 0) {
             // 依赖接口缺失：视为需要重编译
-            di = bc().dep_n + 1
+            deps_ok = 0
             break
         }
-        if (cache.key_mix_file(&ckey, proj.pool_str(bc().dep_ifoff[di])) != 0
-            || cache.key_mix_file(&ckey, proj.pool_str(bc().dep_ctoff[di])) != 0) {
+        if (cache.key_mix_file(&ckey, proj.pool_str(ifoff)) != 0
+            || cache.key_mix_file(&ckey, proj.pool_str(ctoff)) != 0) {
             return -1
         }
         di += 1
-    }
-    let deps_ok int = 1
-    if (di == bc().dep_n + 1) {
-        deps_ok = 0
     }
     // 编译器身份：每进程只读一次二进制，混入完整 32 字节内容身份。
     if (mb_mix_compiler_identity(&ckey) != 0) {
@@ -279,7 +278,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
             if (same != 0) {
                 mb_cache_debug_action("module local hit", &action_id[0])
                 pj_out_s("  [缓存] ")
-                pj_out_np(proj.ctx().mods[m].name_off, proj.ctx().mods[m].name_len)
+                pj_out_np(proj.mod_at(m).name_off, proj.mod_at(m).name_len)
                 pj_out_s("\n")
                 return 1
             }
@@ -291,7 +290,7 @@ fn mb_compile_start(m int, root_off int, root_len int, build_off int,
     if (mb_cache_lookup_module(m, build_off, build_len, &action_id[0]) == 1) {
         mb_cache_debug_action("module global hit", &action_id[0])
         pj_out_s("  [缓存] ")
-        pj_out_np(proj.ctx().mods[m].name_off, proj.ctx().mods[m].name_len)
+        pj_out_np(proj.mod_at(m).name_off, proj.mod_at(m).name_len)
         pj_out_s("\n")
         return 1
     }
@@ -413,10 +412,10 @@ fn mb_file_head_bind(fi int) int {
     for i < support.fs().import_n {
         let found int = -1
         let ii int = 0
-        for ii < proj.ctx().imp_n {
-            if (proj.ctx().imp_file[ii] == fi
-                && proj.ctx().imp_line[ii] == support.fs().imports[i].line
-                && proj.ctx().imp_col[ii] == support.fs().imports[i].col) {
+        for ii < proj.import_count() {
+            if (proj.import_at(ii).file == fi
+                && proj.import_at(ii).line == support.fs().imports[i].line
+                && proj.import_at(ii).col == support.fs().imports[i].col) {
                 found = ii
                 break
             }
@@ -426,8 +425,8 @@ fn mb_file_head_bind(fi int) int {
             return errors.err_lc(support.fs().imports[i].line, support.fs().imports[i].col,
                 "内部错误：导入与扫描记录不对应")
         }
-        let imp_proj int = proj.ctx().mods[proj.ctx().files[fi].mod].proj
-        if (proj.ctx().imp_test_only[found] != 0
+        let imp_proj int = proj.mod_at(proj.file(fi).mod).proj
+        if (proj.import_at(found).test_only != 0
             && (support.session().test_mode == 0 || imp_proj != proj.ctx().test_project)) {
             // 生产构建/非目标项目不绑定 test 专用导入；标记 used 以免报未使用。
             support.fs().import_mod[i] = -1
@@ -435,11 +434,11 @@ fn mb_file_head_bind(fi int) int {
             i += 1
             continue
         }
-        let target int = proj.ctx().imp_mod[found]
+        let target int = proj.import_at(found).mod
         let mi int = -1
         let di int = 0
-        for di < bc().dep_n {
-            if (bc().dep_mod[di] == target) {
+        for di < bdep_count() {
+            if (bdep_at(di).mod == target) {
                 mi = bc().dep_base + di
                 break
             }
@@ -533,21 +532,21 @@ fn mb_pass2_file(path *char, fi int, is_globals int) int {
 // 遍历模块全部文件的导入，逐个查全局符号表。
 fn mb_check_binding_clash(m int) int {
     let fi int = 0
-    for fi < proj.ctx().mods[m].file_n {
-        let f int = proj.ctx().mods[m].files[fi]
+    for fi < proj.mod_file_count(m) {
+        let f int = proj.mod_file_at(m, fi)
         let ii int = 0
-        for ii < proj.ctx().imp_n {
-            if (proj.ctx().imp_file[ii] != f) {
+        for ii < proj.import_count() {
+            if (proj.import_at(ii).file != f) {
                 ii += 1
                 continue
             }
-            let imp_proj int = proj.ctx().mods[proj.ctx().files[f].mod].proj
-            if (proj.ctx().imp_test_only[ii] != 0
+            let imp_proj int = proj.mod_at(proj.file(f).mod).proj
+            if (proj.import_at(ii).test_only != 0
                 && (support.session().test_mode == 0 || imp_proj != proj.ctx().test_project)) {
                 ii += 1
                 continue
             }
-            let idx int = support.sym_lookup_off(proj.ctx().imp_off[ii], proj.ctx().imp_len[ii])
+            let idx int = support.sym_lookup_off(proj.import_at(ii).off, proj.import_at(ii).len)
             if (idx >= 0 && (support.ms().syms[idx].flags & support.F_GLOBAL) != 0
                 && (support.ms().syms[idx].flags & support.F_EXTERN) == 0) {
                 let buf [192]u8
@@ -556,7 +555,7 @@ fn mb_check_binding_clash(m int) int {
                 n = support.append_byte_cap(buf, 192, n, ':')
                 n = support.append_int_cap(buf, 192, n, support.ms().syms[idx].def_col)
                 n = support.append_str_cap(buf, 192, n, ": 顶层声明与导入名冲突（导入名 ")
-                n = support.append_np_cap(buf, 192, n, proj.ctx().imp_off[ii], proj.ctx().imp_len[ii])
+                n = support.append_np_cap(buf, 192, n, proj.import_at(ii).off, proj.import_at(ii).len)
                 n = support.append_str_cap(buf, 192, n, "）")
                 let mo int = support.tml_intern_str(buf, 0, n)
                 if (mo < 0) {
@@ -565,7 +564,7 @@ fn mb_check_binding_clash(m int) int {
                 errors.diag().errors += 1
                 let out [256]u8
                 let on int = 0
-                on = support.append_str(out, on, proj.pool_str(proj.ctx().files[f].path_off))
+                on = support.append_str(out, on, proj.pool_str(proj.file(f).path_off))
                 on = support.append_byte(out, on, ':')
                 on = support.append_np(out, on, mo, n)
                 on = support.append_byte(out, on, '\n')

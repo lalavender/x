@@ -6,6 +6,7 @@ import backend
 import proj
 import link
 import cache
+import libs.list
 
 
 // firc_dir_path：算出模块的函数缓存目录 <build>/firc/<tag>。
@@ -34,33 +35,34 @@ fn firc_path(out *u8, dir *char, key *char, suffix *char) int {
 }
 
 // firc_read：读入整个缓存文件；缺失或读取失败返回 0（按 miss 处理）。
-// 成功返回 1 并交出 out_data/out_size 所有权；超过缓存上限时拒绝。
-fn firc_read(path *char, out_data **u8, out_size *int) int {
-    out_data[0] = 0; out_size[0] = 0
+// 成功返回 1 并把文件字节放进 out（list<u8>，调用方用 list.release 回收）；
+// 超过缓存上限时拒绝。
+fn firc_read(path *char, out *list.List) int {
+    out[0] = list.make(sizeof(u8).to_type(u64))
     let fd int = open(path, 0)
     if (fd < 0) { return 0 }
     let limit int = 268435488
-    let capacity int = 65536
-    let data *u8 = malloc(capacity.to_type(u64)).to_type(*u8)
-    if (data == 0) { close(fd); return 0 }
-    let length int = 0
+    if (list.reserve(out, 65536.to_type(u64)) != list.status_ok) {
+        close(fd)
+        return 0
+    }
     for 1 {
+        let length int = out.count.to_type(int)
+        let capacity int = out.capacity.to_type(int)
         if (length == capacity) {
             let next_capacity int = capacity * 2
-            if (next_capacity > limit) { free(data.to_type(*void)); close(fd); return 0 }
-            let next *u8 = malloc(next_capacity.to_type(u64)).to_type(*u8)
-            if (next == 0) { free(data.to_type(*void)); close(fd); return 0 }
-            memcpy(next, data, length.to_type(u64))
-            free(data.to_type(*void))
-            data = next; capacity = next_capacity
+            if (next_capacity > limit) { list.release(out); close(fd); return 0 }
+            if (list.reserve(out, next_capacity.to_type(u64)) != list.status_ok) {
+                list.release(out); close(fd); return 0
+            }
         }
-        let got i64 = read(fd, data + length, (capacity - length).to_type(u64))
-        if (got < 0) { free(data.to_type(*void)); close(fd); return 0 }
+        let got i64 = read(fd, out.data + length,
+            (out.capacity.to_type(int) - length).to_type(u64))
+        if (got < 0) { list.release(out); close(fd); return 0 }
         if (got == 0) { break }
-        length += got.to_type(int)
+        out.count += got.to_type(u64)
     }
     close(fd)
-    out_data[0] = data; out_size[0] = length
     return 1
 }
 
@@ -75,9 +77,8 @@ fn firc_role(suffix *char) int {
 }
 
 // firc_global_load：按函数 ActionID 从全局 action 读取记录内容并校验 OutputID。
-// 1 = 命中，0 = miss/缓存关闭/损坏。
-fn firc_global_load(key *char, role int, out_data **u8,
-    out_size *int) int {
+// 1 = 命中，0 = miss/缓存关闭/损坏；命中时 out 为 list<u8>。
+fn firc_global_load(key *char, role int, out *list.List) int {
     let store *cache.CacheStore = &bc().cache_store
     if (cache.store_enabled(store) == 0) { return 0 }
     let action_id [cache.CACHE_ID_SIZE]u8
@@ -94,8 +95,7 @@ fn firc_global_load(key *char, role int, out_data **u8,
     let i int = 0
     for i < count {
         if (entries[i].role == role) {
-            let hit int = cache.store_get_bytes(store, &entries[i].id[0],
-                out_data, out_size)
+            let hit int = cache.store_get_bytes(store, &entries[i].id[0], out)
             if (bc().cache_debug != 0) {
                 printf("[cache] function %s global %s\n", key,
                     hit == 1 ? "hit" : "corrupt")
@@ -128,16 +128,17 @@ fn firc_load_kind(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
     index_name *char) int {
     let index_path [720]u8
     if (firc_path(&index_path[0], dir, index_name, "") != 0) { return 0 }
-    let data *u8 = 0
-    let size int = 0
-    if (firc_read(support.arr_cstr(&index_path[0]), &data, &size) == 0) { return 0 }
+    let data list.List
+    if (firc_read(support.arr_cstr(&index_path[0]), &data) == 0) { return 0 }
+    let size int = data.count.to_type(int)
+    let bytes *u8 = data.data
     let loaded_total int = 0
     let cursor int = 0
     for 1 {
         if (cursor >= size) { break }
         let line_end int = cursor
         for 1 {
-            if (line_end >= size || data[line_end] == '\n') { break }
+            if (line_end >= size || bytes[line_end] == '\n') { break }
             line_end += 1
         }
         let line_len int = line_end - cursor
@@ -145,34 +146,38 @@ fn firc_load_kind(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
             let key [ir.IR_FUNCTION_CACHE_KEY_SIZE]u8
             let i int = 0
             for i < ir.IR_FUNCTION_CACHE_KEY_HEX {
-                key[i] = data[cursor + i]
+                key[i] = bytes[cursor + i]
                 i += 1
             }
             key[ir.IR_FUNCTION_CACHE_KEY_HEX] = 0
             if (ir.ir_fc_key_ok(support.arr_cstr(&key[0])) != 0) {
                 let record_path [760]u8
                 if (firc_path(&record_path[0], dir, support.arr_cstr(&key[0]), suffix) == 0) {
-                    let record *u8 = 0
-                    let record_size int = 0
-                    if (firc_read(support.arr_cstr(&record_path[0]), &record,
-                            &record_size) == 0) {
+                    let record list.List
+                    let have int = firc_read(support.arr_cstr(&record_path[0]), &record)
+                    if (have == 0) {
                         // 本地记录缺失时查全局 content store；读出内容经
                         // OutputID 校验后再物化回本地，后续加载直接走本地。
                         if (firc_global_load(support.arr_cstr(&key[0]),
-                                firc_role(suffix), &record, &record_size) == 1) {
+                                firc_role(suffix), &record) == 1) {
                             firc_write_atomic(support.arr_cstr(&record_path[0]),
-                                record, record_size)
+                                record.data, record.count.to_type(int))
+                            have = 1
                         }
                     }
-                    if (record != 0) {
+                    if (have != 0) {
+                        let record_size int = record.count.to_type(int)
                         // 旧的 16 MiB 总额会让大模块稳定丢掉约三成记录。
                         if (record_size > FIRC_RECORD_LIMIT
                             || loaded_total + record_size > FIRC_SET_LIMIT) {
-                            free(record.to_type(*void))
-                        } else if (ir.ir_function_cache_set_add(set, support.arr_cstr(&key[0]),
-                                record, record_size) != 0) {
-                            free(record.to_type(*void))
+                            list.release(&record)
+                        } else if (ir.ir_function_cache_set_add(set,
+                                support.arr_cstr(&key[0]), record.data,
+                                record_size) != 0) {
+                            list.release(&record)
                         } else {
+                            // set_add 成功即接管存储；清 data 以免描述符二次释放。
+                            record.data = 0
                             loaded_total += record_size
                         }
                     }
@@ -181,7 +186,7 @@ fn firc_load_kind(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
         }
         cursor = line_end + 1
     }
-    free(data.to_type(*void))
+    list.release(&data)
     return 0
 }
 
@@ -221,14 +226,15 @@ fn firc_recycle_old(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
     index_name *char) void {
     let path [760]u8
     if (firc_path(&path[0], dir, index_name, "") != 0) { return }
-    let data *u8 = 0
-    let size int = 0
-    if (firc_read(support.arr_cstr(&path[0]), &data, &size) == 0) { return }
+    let data list.List
+    if (firc_read(support.arr_cstr(&path[0]), &data) == 0) { return }
+    let size int = data.count.to_type(int)
+    let bytes *u8 = data.data
     let cursor int = 0
     for cursor + ir.IR_FUNCTION_CACHE_KEY_HEX <= size {
         let key [ir.IR_FUNCTION_CACHE_KEY_SIZE]u8
         let i int = 0
-        for i < ir.IR_FUNCTION_CACHE_KEY_HEX { key[i] = data[cursor + i]; i += 1 }
+        for i < ir.IR_FUNCTION_CACHE_KEY_HEX { key[i] = bytes[cursor + i]; i += 1 }
         key[ir.IR_FUNCTION_CACHE_KEY_HEX] = 0
         if (ir.ir_fc_key_ok(support.arr_cstr(&key[0])) != 0
             && ir.ir_function_cache_set_find(set, support.arr_cstr(&key[0])) == 0
@@ -237,7 +243,7 @@ fn firc_recycle_old(dir *char, set *ir.IRFunctionCacheSet, suffix *char,
         }
         cursor += ir.IR_FUNCTION_CACHE_KEY_HEX + 1
     }
-    free(data.to_type(*void))
+    list.release(&data)
 }
 
 // firc_commit_kind：成功构建后提交记录与索引；写失败只警告，不改变构建结果。
@@ -345,9 +351,10 @@ fn firc_env_key_common(m int, build_off int, build_len int, out *u64,
     }
     // 依赖接口由父进程在本轮 worker 启动前装载；直接复用其路径表。
     let di int = 0
-    for di < bc().dep_n {
-        if (proj.hash_file(&h, proj.pool_str(bc().dep_ifoff[di])) != 0
-            || proj.hash_file(&h, proj.pool_str(bc().dep_ctoff[di])) != 0) { return -1 }        di += 1
+    for di < bdep_count() {
+        if (proj.hash_file(&h, proj.pool_str(bdep_at(di).ifoff)) != 0
+            || proj.hash_file(&h, proj.pool_str(bdep_at(di).ctoff)) != 0) { return -1 }
+        di += 1
     }
     out[0] = h
     return 0

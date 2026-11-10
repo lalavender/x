@@ -1,5 +1,4 @@
 module build
-import errors
 import support
 import proj
 
@@ -98,57 +97,21 @@ fn pl_target_code_from_section(off int, n int) int {
 // pl_group_push：向项目快照追加一个空组，返回组下标。
 fn pl_group_push(pj int, name_off int, name_len int, target int,
     line int) int {
-    if (proj.ctx().projs[pj].link_group_n == proj.ctx().projs[pj].link_group_cap) {
-        let ncap int = proj.ctx().projs[pj].link_group_cap * 2
-        if (ncap == 0) { ncap = 8 }
-        let next *proj.PLinkGroup = malloc(
-            (ncap * sizeof(proj.PLinkGroup)).to_type(u64)).to_type(*proj.PLinkGroup)
-        if (next == 0) { return errors.fail("项目链接组表内存分配失败") }
-        if (proj.ctx().projs[pj].link_group_n > 0) {
-            memcpy(next, proj.ctx().projs[pj].link_groups,
-                (proj.ctx().projs[pj].link_group_n * sizeof(proj.PLinkGroup)).to_type(u64))
-        }
-        if (proj.ctx().projs[pj].link_groups != 0) {
-            free(proj.ctx().projs[pj].link_groups.to_type(*void))
-        }
-        proj.ctx().projs[pj].link_groups = next
-        proj.ctx().projs[pj].link_group_cap = ncap
-    }
-    let idx int = proj.ctx().projs[pj].link_group_n
-    let g *proj.PLinkGroup = &proj.ctx().projs[pj].link_groups[idx]
+    let idx int = proj.pproj_link_group_push(pj)
+    if (idx < 0) { return idx }
+    let g *proj.PLinkGroup = proj.pproj_link_group_at(pj, idx)
     g.name_off = name_off
     g.name_len = name_len
     g.target = target
     g.whole = 0
     g.line = line
-    g.items = 0
-    g.item_n = 0
-    g.item_cap = 0
-    proj.ctx().projs[pj].link_group_n += 1
     return idx
 }
 
 // pl_item_push：向组追加一个库文件声明路径。
 fn pl_item_push(pj int, group int, orig_off int, orig_len int, line int) int {
-    let g *proj.PLinkGroup = &proj.ctx().projs[pj].link_groups[group]
-    if (g.item_n == g.item_cap) {
-        let ncap int = g.item_cap * 2
-        if (ncap == 0) { ncap = 8 }
-        let next *proj.PLinkItem = malloc(
-            (ncap * sizeof(proj.PLinkItem)).to_type(u64)).to_type(*proj.PLinkItem)
-        if (next == 0) { return errors.fail("链接库项内存分配失败") }
-        if (g.item_n > 0) {
-            memcpy(next, g.items, (g.item_n * sizeof(proj.PLinkItem)).to_type(u64))
-        }
-        if (g.items != 0) { free(g.items.to_type(*void)) }
-        g.items = next
-        g.item_cap = ncap
-    }
-    g.items[g.item_n].orig_off = orig_off
-    g.items[g.item_n].orig_len = orig_len
-    g.items[g.item_n].line = line
-    g.item_n += 1
-    return 0
+    let g *proj.PLinkGroup = proj.pproj_link_group_at(pj, group)
+    return proj.plink_group_item_push(g, orig_off, orig_len, line)
 }
 
 // pl_name_eq：比较池内组名。
@@ -165,8 +128,8 @@ fn pl_name_eq(aoff int, alen int, boff int, blen int) int {
 // pl_find_group：在指定目标编码内按组名查找；没有返回 -1。
 fn pl_find_group(pj int, target int, name_off int, name_len int) int {
     let i int = 0
-    for i < proj.ctx().projs[pj].link_group_n {
-        let g proj.PLinkGroup = proj.ctx().projs[pj].link_groups[i]
+    for i < proj.pproj_link_group_count(pj) {
+        let g *proj.PLinkGroup = proj.pproj_link_group_at(pj, i)
         if (g.target == target
             && pl_name_eq(g.name_off, g.name_len, name_off, name_len) != 0) {
             return i
@@ -183,36 +146,36 @@ fn pl_load_project_target(pj int, sec int) int {
     let got int = toml_sec_str(sec, "os", &off, &plen)
     if (got < 0) { return -1 }
     if (got == 0 || plen == 0) {
-        return proj.diag(proj.ctx().projs[pj].root_off, toml_secs[sec].line,
+        return proj.diag(proj.proj_at(pj).root_off, tml_sec_at(sec).line,
             "project.os 必填（linux|darwin|host）")
     }
     let os_code int = pl_os_from_name(off, plen)
     if (os_code < 0) {
-        return proj.diag(proj.ctx().projs[pj].root_off, toml_secs[sec].line,
+        return proj.diag(proj.proj_at(pj).root_off, tml_sec_at(sec).line,
             "project.os 只能是 linux、darwin 或 host")
     }
     got = toml_sec_str(sec, "arch", &off, &plen)
     if (got < 0) { return -1 }
     if (got == 0 || plen == 0) {
-        return proj.diag(proj.ctx().projs[pj].root_off, toml_secs[sec].line,
+        return proj.diag(proj.proj_at(pj).root_off, tml_sec_at(sec).line,
             "project.arch 必填（arm64|x64|host）")
     }
     let arch_code int = pl_arch_from_name(off, plen)
     if (arch_code < 0) {
-        return proj.diag(proj.ctx().projs[pj].root_off, toml_secs[sec].line,
+        return proj.diag(proj.proj_at(pj).root_off, tml_sec_at(sec).line,
             "project.arch 只能是 arm64、x64 或 host")
     }
-    proj.ctx().projs[pj].os_code = os_code
-    proj.ctx().projs[pj].arch_code = arch_code
+    proj.proj_at(pj).os_code = os_code
+    proj.proj_at(pj).arch_code = arch_code
     return 0
 }
 
 // pl_apply_project_target：未显式 --target 时，用项目 os/arch 作为默认目标。
 fn pl_apply_project_target(pj int) int {
     if (proj.cfg().target_explicit != 0) { return 0 }
-    if (support.target_select_os_arch(proj.ctx().projs[pj].os_code,
-        proj.ctx().projs[pj].arch_code) != 0) {
-        return proj.diag(proj.ctx().projs[pj].root_off, 1,
+    if (support.target_select_os_arch(proj.proj_at(pj).os_code,
+        proj.proj_at(pj).arch_code) != 0) {
+        return proj.diag(proj.proj_at(pj).root_off, 1,
             "project.os/arch 组合不受支持")
     }
     return 0
@@ -238,10 +201,12 @@ fn pl_options_code_from_section(off int, n int) int {
 // 依赖项目的 [link] 按约定忽略；这里不读取，也不报 schema 错。
 fn pl_load_link_config(pj int, is_root int) int {
     if (is_root == 0) { return 0 }
+    let sec_total int = tml_sec_count()
     let si int = 0
-    for si < toml_sec_n {
-        let name_off int = toml_secs[si].name_off
-        let name_len int = toml_secs[si].name_len
+    for si < sec_total {
+        let section *TomlSec = tml_sec_at(si)
+        let name_off int = section.name_off
+        let name_len int = section.name_len
         let opt_target int = pl_options_code_from_section(name_off, name_len)
         if (opt_target != -2) {
             si += 1
@@ -264,23 +229,24 @@ fn pl_load_link_config(pj int, is_root int) int {
             }
             let mo int = support.tml_intern_str(buf, 0, n)
             if (mo < 0) { return -1 }
-            return proj.diag(proj.ctx().projs[pj].root_off, toml_secs[si].line,
+            return proj.diag(proj.proj_at(pj).root_off, section.line,
                 support.np_cstr(mo))
         }
+        let val_n int = tml_val_count(si)
         let vi int = 0
-        for vi < toml_secs[si].val_n {
-            let val TomlVal = toml_secs[si].vals[vi]
+        for vi < val_n {
+            let val TomlVal = tml_val_at(si, vi)[0]
             if (val.key_len <= 0 || val.key_len > 128) {
-                return proj.diag(proj.ctx().projs[pj].root_off, val.line,
+                return proj.diag(proj.proj_at(pj).root_off, val.line,
                     "[link] 组名长度必须在 1..128 之间")
             }
             if (pl_find_group(pj, target, val.key_off, val.key_len) >= 0) {
-                return proj.diag(proj.ctx().projs[pj].root_off, val.line,
+                return proj.diag(proj.proj_at(pj).root_off, val.line,
                     "[link] 重复的组名")
             }
             if (val.kind != 4 || val.arr_count < 0 || val.arr_first < 0
-                || val.arr_first + val.arr_count > toml_array_n) {
-                return proj.diag(proj.ctx().projs[pj].root_off, val.line,
+                || val.arr_first + val.arr_count > tml_array_count()) {
+                return proj.diag(proj.proj_at(pj).root_off, val.line,
                     "[link] 组值必须是字符串数组")
             }
             let group int = pl_group_push(pj, val.key_off, val.key_len,
@@ -288,9 +254,9 @@ fn pl_load_link_config(pj int, is_root int) int {
             if (group < 0) { return -1 }
             let ai int = 0
             for ai < val.arr_count {
-                let item TomlArrayItem = toml_array_items[val.arr_first + ai]
+                let item TomlArrayItem = tml_array_at(val.arr_first + ai)[0]
                 if (item.sval_len <= 0 || item.sval_len >= 1024) {
-                    return proj.diag(proj.ctx().projs[pj].root_off, val.line,
+                    return proj.diag(proj.proj_at(pj).root_off, val.line,
                         "[link] 库文件路径必须非空且小于 1024 字节")
                 }
                 if (pl_item_push(pj, group, item.sval_off,
@@ -303,42 +269,44 @@ fn pl_load_link_config(pj int, is_root int) int {
     }
     // 第二遍：解析 [link-options] / [link-options-<os>-<arch>] 的 whole。
     si = 0
-    for si < toml_sec_n {
-        let name_off int = toml_secs[si].name_off
-        let name_len int = toml_secs[si].name_len
+    for si < sec_total {
+        let section2 *TomlSec = tml_sec_at(si)
+        let name_off int = section2.name_off
+        let name_len int = section2.name_len
         let opt_target int = pl_options_code_from_section(name_off, name_len)
         if (opt_target == -2) { si += 1; continue }
         if (opt_target < 0) {
-            return proj.diag(proj.ctx().projs[pj].root_off, toml_secs[si].line,
+            return proj.diag(proj.proj_at(pj).root_off, section2.line,
                 "非法的链接选项节名")
         }
+        let val_n2 int = tml_val_count(si)
         let vi2 int = 0
-        for vi2 < toml_secs[si].val_n {
-            let val TomlVal = toml_secs[si].vals[vi2]
+        for vi2 < val_n2 {
+            let val TomlVal = tml_val_at(si, vi2)[0]
             if (!(val.key_len == 5 && support.pool_ctx().data[val.key_off] == 'w'
                 && support.pool_ctx().data[val.key_off + 1] == 'h'
                 && support.pool_ctx().data[val.key_off + 2] == 'o'
                 && support.pool_ctx().data[val.key_off + 3] == 'l'
                 && support.pool_ctx().data[val.key_off + 4] == 'e')) {
-                return proj.diag(proj.ctx().projs[pj].root_off, val.line,
+                return proj.diag(proj.proj_at(pj).root_off, val.line,
                     "[link-options] 只支持 whole 字段")
             }
             if (val.kind != 4 || val.arr_first < 0 || val.arr_count < 0
-                || val.arr_first + val.arr_count > toml_array_n) {
-                return proj.diag(proj.ctx().projs[pj].root_off, val.line,
+                || val.arr_first + val.arr_count > tml_array_count()) {
+                return proj.diag(proj.proj_at(pj).root_off, val.line,
                     "[link-options].whole 必须是字符串数组")
             }
             let ai2 int = 0
             for ai2 < val.arr_count {
-                let item TomlArrayItem = toml_array_items[val.arr_first + ai2]
+                let item TomlArrayItem = tml_array_at(val.arr_first + ai2)[0]
                 if (pl_group_name_ok(item.sval_off, item.sval_len) == 0) {
-                    return proj.diag(proj.ctx().projs[pj].root_off, val.line,
+                    return proj.diag(proj.proj_at(pj).root_off, val.line,
                         "[link-options].whole 组名非法")
                 }
                 let matched int = 0
                 let gi int = 0
-                for gi < proj.ctx().projs[pj].link_group_n {
-                    let g *proj.PLinkGroup = &proj.ctx().projs[pj].link_groups[gi]
+                for gi < proj.pproj_link_group_count(pj) {
+                    let g *proj.PLinkGroup = proj.pproj_link_group_at(pj, gi)
                     if (pl_name_eq(g.name_off, g.name_len,
                         item.sval_off, item.sval_len) != 0
                         && (opt_target == 0 || g.target == 0 || g.target == opt_target)) {
@@ -348,7 +316,7 @@ fn pl_load_link_config(pj int, is_root int) int {
                     gi += 1
                 }
                 if (matched == 0) {
-                    return proj.diag(proj.ctx().projs[pj].root_off, val.line,
+                    return proj.diag(proj.proj_at(pj).root_off, val.line,
                         "[link-options].whole 引用了不存在的组")
                 }
                 ai2 += 1

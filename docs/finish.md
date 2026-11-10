@@ -8,6 +8,36 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：build 模块迁移到标准库 list（含 proj 模型）
+
+**结果**：
+- `proj` 项目模型全部改为 `libs.list`：`PProj` 的 deps/mods/c_sources/
+  c_objects/c_libs/link_groups/envs、`PMod.files`、`PLinkGroup.items`、
+  `ProjectCtx` 的 projs/mods/files/imports/state/order/mark。旧 `*_n` + 定长
+  数组访问改为访问器（`proj_count/proj_at/mod_file_count/...`；结构体表返回
+  list 存储内指针，标量表按值返回）。全局符号名字池
+  `support.pool_ctx()`/`tml_intern_str` 仍用 int 偏移，本次不动。
+- 字节读取缓冲改 `list<u8>`：`cache.cs_read_file` 与
+  `firc_read`/`firc_global_load` 交出 `list.List`；写侧
+  `ir.ir_function_cache_set_add` 成功后清零描述符，避免与列表存储二次释放。
+- 写入侧（project_index/project_link/build.api）与读取侧（build、link、
+  testkit、parse、check）同步迁移；`pj_topo` 路径栈仍按模块数分配；
+  `unused_function_report` 借新增的 `proj.mod_files_base` 保持原签名。
+- 新增 `compiler/build/proj/api.test.yh`（3 例）：项目/模块/文件/导入表、
+  依赖与 C 清单、链接组与环境变量的推入、计数与末尾元素校验。
+- testkit 生成 runner 时增加「被测模块就是 proj」判断，避免重复 import。
+
+**验证**：
+- `just dev` 与 `YH_CACHE=off just build` 冷编通过；`just test` 全绿：
+  run 372/374（2 跳过）、fail 140/140、pass 10/10、compiler-tests 10/10
+  （proj 3/3）、C4/C6 通过。
+- 在含旧函数级记录的全局缓存上跑 `just build`（种子）会在
+  `lower/api.yh:53` 报 `LLVM lowering lower_module: 首片不支持此语句或表达式`。
+  归因为种子侧已知的函数/检查切片数据标签漂移（见同日「函数/检查缓存按数据
+  标签漂移失效」条目，修复尚未随种子生效），与本次迁移无关：只保留全局缓存
+  的模块级 action（删掉全部函数级记录）后同一冷编通过；两套缓存中 26 个模块
+  的 ActionID 与输出摘要完全一致；`YH_CACHE=off` 全量冷编通过。
+
 ## 2026-11-10：函数/检查缓存按数据标签漂移失效（P1 修复）
 
 **结果**：

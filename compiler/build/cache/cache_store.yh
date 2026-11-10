@@ -2,6 +2,7 @@ module cache
 import support
 
 import hash
+import libs.list
 
 // ============================================================================
 // cache_store.yh —— 全局内容寻址缓存（C4）
@@ -91,48 +92,43 @@ fn cs_write_atomic(tmp *char, path *char, data *u8, size int) int {
 }
 
 // cs_read_file：读取整个文件；超过 limit 或打开失败返回 0（按 miss）。
-// 成功返回 1 并交出 malloc 缓冲所有权。
-fn cs_read_file(path *char, out_data **u8, out_size *int) int {
-    out_data[0] = 0
-    out_size[0] = 0
+// 成功返回 1，字节放进 out（list<u8>，调用方用 list.release 回收）。
+fn cs_read_file(path *char, out *list.List) int {
+    out[0] = list.make(sizeof(u8).to_type(u64))
     let fd int = open(path, 0)
     if (fd < 0) { return 0 }
-    let capacity int = 65536
-    let data *u8 = malloc(capacity.to_type(u64)).to_type(*u8)
-    if (data == 0) { close(fd); return 0 }
-    let length int = 0
+    if (list.reserve(out, 65536.to_type(u64)) != list.status_ok) {
+        close(fd)
+        return 0
+    }
     for 1 {
+        let length int = out.count.to_type(int)
+        let capacity int = out.capacity.to_type(int)
         if (length == capacity) {
             if (capacity >= CACHE_READ_LIMIT) {
-                free(data.to_type(*void))
+                list.release(out)
                 close(fd)
                 return 0
             }
             let next_capacity int = capacity * 2
             if (next_capacity > CACHE_READ_LIMIT) { next_capacity = CACHE_READ_LIMIT }
-            let next *u8 = malloc(next_capacity.to_type(u64)).to_type(*u8)
-            if (next == 0) {
-                free(data.to_type(*void))
+            if (list.reserve(out, next_capacity.to_type(u64)) != list.status_ok) {
+                list.release(out)
                 close(fd)
                 return 0
             }
-            memcpy(next, data, length.to_type(u64))
-            free(data.to_type(*void))
-            data = next
-            capacity = next_capacity
         }
-        let got i64 = read(fd, data + length, (capacity - length).to_type(u64))
+        let got i64 = read(fd, out.data + length,
+            (out.capacity.to_type(int) - length).to_type(u64))
         if (got < 0) {
-            free(data.to_type(*void))
+            list.release(out)
             close(fd)
             return 0
         }
         if (got == 0) { break }
-        length += got.to_type(int)
+        out.count += got.to_type(u64)
     }
     close(fd)
-    out_data[0] = data
-    out_size[0] = length
     return 1
 }
 

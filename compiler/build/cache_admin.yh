@@ -4,6 +4,7 @@ import support
 import link
 import cache
 import libs.os
+import libs.list
 
 // ============================================================================
 // cache_admin.yh —— C6：全局缓存的 info/clean/trim/verify
@@ -74,11 +75,9 @@ fn admin_join(root *char, sub *char, name *u8, name_len int,
 }
 
 // admin_list_dir：列出 <root>/v1/<sub> 下 64 hex 的普通文件并读取 size/mtime。
-// 成功返回 1（空目录也算成功）；目录打不开返回 0。调用方 free 输出数组。
-fn admin_list_dir(store *cache.CacheStore, sub *char,
-    out_files **CacheFile, out_count *int) int {
-    out_files[0] = 0
-    out_count[0] = 0
+// files 由调用方用 list.make(sizeof(CacheFile)) 初始化，函数只追加条目。
+// 成功返回 1（空目录也算成功）；目录打不开返回 0。
+fn admin_list_dir(store *cache.CacheStore, sub *char, files *list.List) int {
     if (store == 0) { return 0 }
     let dir [cache.CACHE_ROOT_MAX + 128]u8
     if (admin_join(support.arr_cstr(&store.root[0]), sub, 0, 0,
@@ -87,27 +86,12 @@ fn admin_list_dir(store *cache.CacheStore, sub *char,
     let opened os.DirReaderResult = os.open_dir(support.arr_cstr(&dir[0]),
         buffer[0..16384])
     if (opened.reader.active == 0) { return 0 }
-    let files *CacheFile = 0
-    let count int = 0
-    let capacity int = 0
     for 1 {
         let result os.DirEntryResult = os.next_entry(&opened.reader)
         if (result.status == os.dir_entry_end) { break }
         if (result.status == os.dir_entry_error) { break }
         let name_len int = result.entry.name_len.to_type(int)
         if (name_len != cache.CACHE_ID_HEX) { continue }
-        if (count == capacity) {
-            let next_capacity int = capacity == 0 ? 16 : capacity * 2
-            let next *CacheFile = malloc(
-                (next_capacity * sizeof(CacheFile)).to_type(u64)).to_type(*CacheFile)
-            if (next == 0) { break }
-            if (count > 0) {
-                memcpy(next, files, (count * sizeof(CacheFile)).to_type(u64))
-            }
-            if (files != 0) { free(files.to_type(*void)) }
-            files = next
-            capacity = next_capacity
-        }
         let path [cache.CACHE_ROOT_MAX + 256]u8
         if (admin_join(support.arr_cstr(&store.root[0]), sub,
                 result.entry.name, name_len, &path[0],
@@ -117,33 +101,32 @@ fn admin_list_dir(store *cache.CacheStore, sub *char,
         if (link.mb_file_stat(support.arr_cstr(&path[0]), &size, &mtime) != 0) {
             continue
         }
+        let entry CacheFile
         let i int = 0
         for i < name_len {
-            files[count].name[i] = result.entry.name[i]
+            entry.name[i] = result.entry.name[i]
             i += 1
         }
-        files[count].name[name_len] = 0
-        files[count].size = size
-        files[count].mtime = mtime
-        count += 1
+        entry.name[name_len] = 0
+        entry.size = size
+        entry.mtime = mtime
+        if (list.push(files, (&entry).to_type(*void)) != list.status_ok) {
+            break
+        }
     }
     os.close_dir(&opened.reader)
-    out_files[0] = files
-    out_count[0] = count
     return 1
 }
 
-// admin_release_files：释放 admin_list_dir 的结果。
-fn admin_release_files(files *CacheFile) void {
-    if (files != 0) { free(files.to_type(*void)) }
-}
-
-// admin_sum_size：统计文件数组总字节数。
-fn admin_sum_size(files *CacheFile, count int) u64 {
+// admin_sum_size：统计列表中文件条目的总字节数。
+fn admin_sum_size(files *list.List) u64 {
     let total u64 = 0
+    let count int = files.count.to_type(int)
+    if (count == 0) { return 0 }
+    let base *CacheFile = list.first(files).to_type(*CacheFile)
     let i int = 0
     for i < count {
-        total += files[i].size
+        total += base[i].size
         i += 1
     }
     return total
@@ -272,15 +255,16 @@ fn idset_release(set *IdSet) void {
 // admin_collect_refs：把所有 action entry 的 OutputID 收进引用集。
 // action 文件损坏时跳过；0 = 成功。
 fn admin_collect_refs(store *cache.CacheStore, set *IdSet) int {
-    let actions *CacheFile = 0
-    let action_count int = 0
-    if (admin_list_dir(store, "v1/actions", &actions, &action_count) == 0) {
+    let actions list.List = list.make(sizeof(CacheFile).to_type(u64))
+    if (admin_list_dir(store, "v1/actions", &actions) == 0) {
         return 0
     }
+    let action_count int = actions.count.to_type(int)
+    let actions_base *CacheFile = list.first(&actions).to_type(*CacheFile)
     let i int = 0
     for i < action_count {
         let action_id [cache.CACHE_ID_SIZE]u8
-        if (cache.id_parse_hex(support.arr_cstr(&actions[i].name[0]),
+        if (cache.id_parse_hex(support.arr_cstr(&actions_base[i].name[0]),
                 &action_id[0]) == 0) {
             let entries [cache.CACHE_ACTION_MAX_ENTRIES]cache.CacheEntry
             let count int = 0
@@ -289,7 +273,7 @@ fn admin_collect_refs(store *cache.CacheStore, set *IdSet) int {
                 let j int = 0
                 for j < count {
                     if (idset_add(set, &entries[j].id[0]) != 0) {
-                        admin_release_files(actions)
+                        list.release(&actions)
                         return -1
                     }
                     j += 1
@@ -298,7 +282,7 @@ fn admin_collect_refs(store *cache.CacheStore, set *IdSet) int {
         }
         i += 1
     }
-    admin_release_files(actions)
+    list.release(&actions)
     return 0
 }
 

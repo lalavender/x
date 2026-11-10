@@ -1,6 +1,7 @@
 module build
 import errors
 import support
+import libs.list
 
 // ============================================================================
 // toml.yh —— project.toml 最小 TOML 解析器（MOD-U2）
@@ -25,17 +26,56 @@ struct TomlArrayItem {
 struct TomlSec {
     name_off int       // 节名池偏移
     name_len int
-    vals *TomlVal      // 键值表（堆分配）
-    val_n int
-    val_cap int
+    vals list.List     // 键值表（元素类型 TomlVal）
     line int           // 节头行
 }
-let toml_secs *TomlSec = 0
-let toml_sec_n int = 0
-let toml_sec_cap int = 0
-let toml_array_items *TomlArrayItem = 0
-let toml_array_n int = 0
-let toml_array_cap int = 0
+// 解析结果是进程级解析区：递归装载子项目会清空复用（tml_reset）。
+let toml_secs list.List
+let toml_array_items list.List
+
+// tml_reset：清空本次解析的节表与字符串数组，保留已分配容量。
+// 首次调用时按元素类型初始化两个列表。
+fn tml_reset() void {
+    if (toml_secs.element_size == 0) {
+        toml_secs = list.make(sizeof(TomlSec).to_type(u64))
+    }
+    if (toml_array_items.element_size == 0) {
+        toml_array_items = list.make(sizeof(TomlArrayItem).to_type(u64))
+    }
+    toml_secs.count = 0
+    toml_array_items.count = 0
+}
+
+// tml_sec_count：当前解析的节数。
+fn tml_sec_count() int { return toml_secs.count.to_type(int) }
+
+// tml_sec_at：第 sec 个节的地址；调用方保证 0 <= sec < tml_sec_count()。
+fn tml_sec_at(sec int) *TomlSec {
+    let base *TomlSec = list.first(&toml_secs).to_type(*TomlSec)
+    return &base[sec]
+}
+
+// tml_val_count：第 sec 个节的键值数。
+fn tml_val_count(sec int) int {
+    let s *TomlSec = tml_sec_at(sec)
+    return s.vals.count.to_type(int)
+}
+
+// tml_val_at：第 sec 个节第 i 个键值的地址。
+fn tml_val_at(sec int, i int) *TomlVal {
+    let s *TomlSec = tml_sec_at(sec)
+    let base *TomlVal = list.first(&s.vals).to_type(*TomlVal)
+    return &base[i]
+}
+
+// tml_array_count：本次解析保存的字符串数组元素数。
+fn tml_array_count() int { return toml_array_items.count.to_type(int) }
+
+// tml_array_at：第 index 个字符串数组元素的地址。
+fn tml_array_at(index int) *TomlArrayItem {
+    let base *TomlArrayItem = list.first(&toml_array_items).to_type(*TomlArrayItem)
+    return &base[index]
+}
 
 // —— 解析游标与诊断上下文 ——
 let t_src *u8 = 0          // project.toml 字节
@@ -125,15 +165,17 @@ fn tml_is_bare(b u8) int {
 
 // tml_sec_find：按名查节；没有返回 -1。
 fn tml_sec_find(name_off int, name_len int) int {
+    let total int = tml_sec_count()
     let i int = 0
-    for i < toml_sec_n {
-        if (toml_secs[i].name_len == name_len
-            && support.pool_ctx().data[toml_secs[i].name_off] == support.pool_ctx().data[name_off]) {
+    for i < total {
+        let s *TomlSec = tml_sec_at(i)
+        if (s.name_len == name_len
+            && support.pool_ctx().data[s.name_off] == support.pool_ctx().data[name_off]) {
             // 节名较短，逐字节比较
             let match int = 1
             let j int = 1
             for j < name_len {
-                if (support.pool_ctx().data[toml_secs[i].name_off + j] != support.pool_ctx().data[name_off + j]) {
+                if (support.pool_ctx().data[s.name_off + j] != support.pool_ctx().data[name_off + j]) {
                     match = 0
                     break
                 }
@@ -157,63 +199,23 @@ fn tml_sec_push(name_start int, name_len int) int {
     if (tml_sec_find(off, name_len) >= 0) {
         return tml_err(t_line, "重复的节")
     }
-    if (toml_sec_n == toml_sec_cap) {
-        let ncap int = toml_sec_cap * 2
-        if (ncap == 0) {
-            ncap = 8
-        }
-        let nd *TomlSec = malloc((ncap * sizeof(TomlSec)).to_type(u64)).to_type(*TomlSec)
-        if (nd == 0) {
-            return errors.fail("内存分配失败")
-        }
-        if (toml_sec_n > 0) {
-            memcpy(nd, toml_secs, (toml_sec_n * sizeof(TomlSec)).to_type(u64))
-        }
-        free(toml_secs)
-        toml_secs = nd
-        toml_sec_cap = ncap
+    let section TomlSec
+    section.name_off = off
+    section.name_len = name_len
+    section.vals = list.make(sizeof(TomlVal).to_type(u64))
+    section.line = t_line
+    if (list.push(&toml_secs, (&section).to_type(*void)) != list.status_ok) {
+        return errors.fail("内存分配失败")
     }
-    toml_secs[toml_sec_n].name_off = off
-    toml_secs[toml_sec_n].name_len = name_len
-    toml_secs[toml_sec_n].vals = 0
-    toml_secs[toml_sec_n].val_n = 0
-    toml_secs[toml_sec_n].val_cap = 0
-    toml_secs[toml_sec_n].line = t_line
-    toml_sec_n += 1
-    return toml_sec_n - 1
+    return tml_sec_count() - 1
 }
 
-// tml_val_push：向节追加键值。
+// tml_val_push：向节追加键值（复制 v 指向的整条记录）。
 fn tml_val_push(sec int, v *TomlVal) int {
-    if (toml_secs[sec].val_n == toml_secs[sec].val_cap) {
-        let ncap int = toml_secs[sec].val_cap * 2
-        if (ncap == 0) {
-            ncap = 8
-        }
-        let nd *TomlVal = malloc((ncap * sizeof(TomlVal)).to_type(u64)).to_type(*TomlVal)
-        if (nd == 0) {
-            return errors.fail("内存分配失败")
-        }
-        if (toml_secs[sec].val_n > 0) {
-            memcpy(nd, toml_secs[sec].vals, (toml_secs[sec].val_n * sizeof(TomlVal)).to_type(u64))
-        }
-        free(toml_secs[sec].vals)
-        toml_secs[sec].vals = nd
-        toml_secs[sec].val_cap = ncap
+    let s *TomlSec = tml_sec_at(sec)
+    if (list.push(&s.vals, v.to_type(*void)) != list.status_ok) {
+        return errors.fail("内存分配失败")
     }
-    let dst int = toml_secs[sec].val_n
-    toml_secs[sec].vals[dst].key_off = v.key_off
-    toml_secs[sec].vals[dst].key_len = v.key_len
-    toml_secs[sec].vals[dst].kind = v.kind
-    toml_secs[sec].vals[dst].sval_off = v.sval_off
-    toml_secs[sec].vals[dst].sval_len = v.sval_len
-    toml_secs[sec].vals[dst].ival = v.ival
-    toml_secs[sec].vals[dst].path_off = v.path_off
-    toml_secs[sec].vals[dst].path_len = v.path_len
-    toml_secs[sec].vals[dst].arr_first = v.arr_first
-    toml_secs[sec].vals[dst].arr_count = v.arr_count
-    toml_secs[sec].vals[dst].line = v.line
-    toml_secs[sec].val_n += 1
     return 0
 }
 
@@ -337,23 +339,12 @@ fn tml_inline_table(v *TomlVal) int {
 
 // tml_array_push：保存一个字符串数组元素，索引在当前清单解析期内稳定。
 fn tml_array_push(off int, n int) int {
-    if (toml_array_n == toml_array_cap) {
-        let ncap int = toml_array_cap * 2
-        if (ncap == 0) { ncap = 16 }
-        let next *TomlArrayItem = malloc(
-            (ncap * sizeof(TomlArrayItem)).to_type(u64)).to_type(*TomlArrayItem)
-        if (next == 0) { return errors.fail("TOML 字符串数组内存分配失败") }
-        if (toml_array_n > 0) {
-            memcpy(next, toml_array_items,
-                (toml_array_n * sizeof(TomlArrayItem)).to_type(u64))
-        }
-        if (toml_array_items != 0) { free(toml_array_items.to_type(*void)) }
-        toml_array_items = next
-        toml_array_cap = ncap
+    let item TomlArrayItem
+    item.sval_off = off
+    item.sval_len = n
+    if (list.push(&toml_array_items, (&item).to_type(*void)) != list.status_ok) {
+        return errors.fail("TOML 字符串数组内存分配失败")
     }
-    toml_array_items[toml_array_n].sval_off = off
-    toml_array_items[toml_array_n].sval_len = n
-    toml_array_n += 1
     return 0
 }
 
@@ -361,7 +352,7 @@ fn tml_array_push(off int, n int) int {
 fn tml_array(v *TomlVal) int {
     t_pos += 1
     v.kind = 4
-    v.arr_first = toml_array_n
+    v.arr_first = tml_array_count()
     v.arr_count = 0
     tml_ws()
     if (t_pos < t_len && t_src[t_pos] == ']') {
@@ -436,7 +427,7 @@ fn tml_value(v *TomlVal) int {
 // t_src/t_len/t_file 由调用方设置。
 fn tml_parse() int {
     let cur int = -1
-    toml_array_n = 0
+    tml_reset()
     for 1 {
         tml_ws()
         if (t_pos >= t_len) {
@@ -521,13 +512,15 @@ fn toml_find_sec(name *char) int {
     for name[n] != 0 {
         n += 1
     }
+    let total int = tml_sec_count()
     let i int = 0
-    for i < toml_sec_n {
-        if (toml_secs[i].name_len == n) {
+    for i < total {
+        let s *TomlSec = tml_sec_at(i)
+        if (s.name_len == n) {
             let match int = 1
             let j int = 0
             for j < n {
-                if (support.pool_ctx().data[toml_secs[i].name_off + j] != name[j].to_type(u8)) {
+                if (support.pool_ctx().data[s.name_off + j] != name[j].to_type(u8)) {
                     match = 0
                     break
                 }
@@ -552,20 +545,22 @@ fn toml_sec_str(sec int, key *char, off *int, olen *int) int {
     for key[n] != 0 {
         n += 1
     }
+    let val_n int = tml_val_count(sec)
     let i int = 0
-    for i < toml_secs[sec].val_n {
-        if (toml_secs[sec].vals[i].key_len == n) {
+    for i < val_n {
+        let v *TomlVal = tml_val_at(sec, i)
+        if (v.key_len == n) {
             let match int = 1
             let j int = 0
             for j < n {
-                if (support.pool_ctx().data[toml_secs[sec].vals[i].key_off + j] != key[j].to_type(u8)) {
+                if (support.pool_ctx().data[v.key_off + j] != key[j].to_type(u8)) {
                     match = 0
                     break
                 }
                 j += 1
             }
             if (match != 0) {
-                if (toml_secs[sec].vals[i].kind != 1) {
+                if (v.kind != 1) {
                     let buf [64]u8
                     let m int = 0
                     m = support.append_str(buf, m, "字段必须是字符串: ")
@@ -574,10 +569,10 @@ fn toml_sec_str(sec int, key *char, off *int, olen *int) int {
                     if (mo < 0) {
                         return -1
                     }
-                    return tml_err(toml_secs[sec].vals[i].line, support.np_cstr(mo))
+                    return tml_err(v.line, support.np_cstr(mo))
                 }
-                off[0] = toml_secs[sec].vals[i].sval_off
-                olen[0] = toml_secs[sec].vals[i].sval_len
+                off[0] = v.sval_off
+                olen[0] = v.sval_len
                 return 1
             }
         }

@@ -5,6 +5,7 @@ import proj
 import link
 import hash
 import cache
+import libs.list
 
 // ============================================================================
 // module_cache.yh —— 模块缓存键、依赖表与接口就绪（B2-4，2026-10-26 拆出）
@@ -47,90 +48,42 @@ fn mb_mix_compiler_identity(key *cache.Key) int {
     return cache.key_mix_bytes(key, &bc().compiler_identity[0], 32)
 }
 
+// mb_dep_reset：清空本轮模块的依赖记录（保留列表容量）。
+fn mb_dep_reset() void {
+    if (bc().dep.element_size == 0) {
+        bc().dep = list.make(sizeof(BDep).to_type(u64))
+    }
+    bc().dep.count = 0
+}
+
 // mb_dep_push：按解析结果模块下标去重后追加一条依赖接口记录。
 // 返回 1 = 新追加，0 = 已存在，-1 = 内存失败。
 fn mb_dep_push(target int, bind_off int, bind_len int) int {
     let k int = 0
-    for k < bc().dep_n {
-        if (bc().dep_mod[k] == target) {
+    for k < bdep_count() {
+        if (bdep_at(k).mod == target) {
             return 0
         }
         k += 1
     }
-    if (bc().dep_n == bc().dep_cap) {
-        let ncap int = bc().dep_cap * 2
-        if (ncap == 0) {
-            ncap = 8
-        }
-        let na *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
-        if (na == 0) {
-            return errors.fail("内存分配失败")
-        }
-        if (bc().dep_n > 0) {
-            memcpy(na, bc().dep_bind, (bc().dep_n * sizeof(int)).to_type(u64))
-        }
-        free(bc().dep_bind)
-        bc().dep_bind = na
-        let nb *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
-        if (nb == 0) {
-            return errors.fail("内存分配失败")
-        }
-        if (bc().dep_n > 0) {
-            memcpy(nb, bc().dep_bindlen, (bc().dep_n * sizeof(int)).to_type(u64))
-        }
-        free(bc().dep_bindlen)
-        bc().dep_bindlen = nb
-        let nc *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
-        if (nc == 0) {
-            return errors.fail("内存分配失败")
-        }
-        if (bc().dep_n > 0) {
-            memcpy(nc, bc().dep_ifoff, (bc().dep_n * sizeof(int)).to_type(u64))
-        }
-        free(bc().dep_ifoff)
-        bc().dep_ifoff = nc
-        let nct *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
-        if (nct == 0) { return errors.fail("内存分配失败") }
-        if (bc().dep_n > 0) {
-            memcpy(nct, bc().dep_ctoff, (bc().dep_n * sizeof(int)).to_type(u64))
-        }
-        free(bc().dep_ctoff)
-        bc().dep_ctoff = nct
-        let ndm *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
-        if (ndm == 0) {
-            return errors.fail("内存分配失败")
-        }
-        if (bc().dep_n > 0) {
-            memcpy(ndm, bc().dep_mod, (bc().dep_n * sizeof(int)).to_type(u64))
-        }
-        free(bc().dep_mod)
-        bc().dep_mod = ndm
-        let ndi *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
-        if (ndi == 0) {
-            return errors.fail("内存分配失败")
-        }
-        if (bc().dep_n > 0) {
-            memcpy(ndi, bc().dep_mi, (bc().dep_n * sizeof(int)).to_type(u64))
-        }
-        free(bc().dep_mi)
-        bc().dep_mi = ndi
-        bc().dep_cap = ncap
+    let entry BDep
+    entry.bind_off = bind_off
+    entry.bind_len = bind_len
+    entry.ifoff = -1
+    entry.ctoff = -1
+    entry.mod = target
+    entry.mi = -1
+    if (list.push(&bc().dep, (&entry).to_type(*void)) != list.status_ok) {
+        return errors.fail("内存分配失败")
     }
-    bc().dep_bind[bc().dep_n] = bind_off
-    bc().dep_bindlen[bc().dep_n] = bind_len
-    bc().dep_mod[bc().dep_n] = target
-    bc().dep_mi[bc().dep_n] = -1
-    bc().dep_ifoff[bc().dep_n] = -1
-    bc().dep_ctoff[bc().dep_n] = -1
-    bc().dep_n += 1
     return 1
 }
 
-// mb_dep_order_rank：模块在本轮拓扑序 proj.ctx().order 中的位置；不在则 -1。
+// mb_dep_order_rank：模块在本轮拓扑序 proj.order 中的位置；不在则 -1。
 fn mb_dep_order_rank(m int) int {
     let i int = 0
-    for i < proj.ctx().order_n {
-        if (proj.ctx().order[i] == m) {
+    for i < proj.order_count() {
+        if (proj.order_at(i) == m) {
             return i
         }
         i += 1
@@ -150,18 +103,18 @@ fn mb_dep_order_rank(m int) int {
 fn mb_module_iface_deps(m int, build_off int, build_len int) int {
     let c_off int = 0
     let c_len int = 0
-    bc().dep_n = 0
+    mb_dep_reset()
     let fi int = 0
-    for fi < proj.ctx().mods[m].file_n {
-        let f int = proj.ctx().mods[m].files[fi]
+    for fi < proj.mod_file_count(m) {
+        let f int = proj.mod_file_at(m, fi)
         let ii int = 0
-        for ii < proj.ctx().imp_n {
-            if (proj.ctx().imp_file[ii] != f || proj.ctx().imp_mod[ii] < 0) {
+        for ii < proj.import_count() {
+            if (proj.import_at(ii).file != f || proj.import_at(ii).mod < 0) {
                 ii += 1
                 continue
             }
-            if (mb_dep_push(proj.ctx().imp_mod[ii], proj.ctx().imp_off[ii],
-                    proj.ctx().imp_len[ii]) < 0) {
+            if (mb_dep_push(proj.import_at(ii).mod, proj.import_at(ii).off,
+                    proj.import_at(ii).len) < 0) {
                 return -1
             }
             ii += 1
@@ -172,24 +125,24 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
     for changed != 0 {
         changed = 0
         let ei int = 0
-        for ei < bc().dep_n {
-            let em int = bc().dep_mod[ei]
+        for ei < bdep_count() {
+            let em int = bdep_at(ei).mod
             let efi int = 0
-            for efi < proj.ctx().mods[em].file_n {
-                let ef int = proj.ctx().mods[em].files[efi]
+            for efi < proj.mod_file_count(em) {
+                let ef int = proj.mod_file_at(em, efi)
                 let eii int = 0
-                for eii < proj.ctx().imp_n {
-                    if (proj.ctx().imp_file[eii] != ef || proj.ctx().imp_mod[eii] < 0) {
+                for eii < proj.import_count() {
+                    if (proj.import_at(eii).file != ef || proj.import_at(eii).mod < 0) {
                         eii += 1
                         continue
                     }
                     let so int = -1
                     let sl int = 0
-                    if (pj_mod_suffix(proj.ctx().mods[proj.ctx().imp_mod[eii]].proj,
-                            proj.ctx().imp_mod[eii], &so, &sl) != 0) {
+                    if (pj_mod_suffix(proj.mod_at(proj.import_at(eii).mod).proj,
+                            proj.import_at(eii).mod, &so, &sl) != 0) {
                         return -1
                     }
-                    let pr int = mb_dep_push(proj.ctx().imp_mod[eii], so, sl)
+                    let pr int = mb_dep_push(proj.import_at(eii).mod, so, sl)
                     if (pr < 0) {
                         return -1
                     }
@@ -204,15 +157,15 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
         }
     }
     let si int = 0
-    for si < bc().dep_n {
+    for si < bdep_count() {
         let best int = si
-        let bv int = mb_dep_order_rank(bc().dep_mod[si])
+        let bv int = mb_dep_order_rank(bdep_at(si).mod)
         if (bv < 0) {
             return errors.fail("内部错误：依赖模块不在拓扑序中")
         }
         let sj int = si + 1
-        for sj < bc().dep_n {
-            let rv int = mb_dep_order_rank(bc().dep_mod[sj])
+        for sj < bdep_count() {
+            let rv int = mb_dep_order_rank(bdep_at(sj).mod)
             if (rv < 0) {
                 return errors.fail("内部错误：依赖模块不在拓扑序中")
             }
@@ -223,30 +176,15 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
             sj += 1
         }
         if (best != si) {
-            let t1 int = bc().dep_bind[si]
-            bc().dep_bind[si] = bc().dep_bind[best]
-            bc().dep_bind[best] = t1
-            let t2 int = bc().dep_bindlen[si]
-            bc().dep_bindlen[si] = bc().dep_bindlen[best]
-            bc().dep_bindlen[best] = t2
-            let t3 int = bc().dep_ifoff[si]
-            bc().dep_ifoff[si] = bc().dep_ifoff[best]
-            bc().dep_ifoff[best] = t3
-            let tct int = bc().dep_ctoff[si]
-            bc().dep_ctoff[si] = bc().dep_ctoff[best]
-            bc().dep_ctoff[best] = tct
-            let t4 int = bc().dep_mod[si]
-            bc().dep_mod[si] = bc().dep_mod[best]
-            bc().dep_mod[best] = t4
-            let t5 int = bc().dep_mi[si]
-            bc().dep_mi[si] = bc().dep_mi[best]
-            bc().dep_mi[best] = t5
+            let held BDep = bdep_at(si)[0]
+            bdep_at(si)[0] = bdep_at(best)[0]
+            bdep_at(best)[0] = held
         }
         si += 1
     }
     let di int = 0
-    for di < bc().dep_n {
-        if (proj.mod_tag(bc().dep_mod[di], &c_off, &c_len) != 0) {
+    for di < bdep_count() {
+        if (proj.mod_tag(bdep_at(di).mod, &c_off, &c_len) != 0) {
             return -1
         }
         let pbuf [760]u8
@@ -284,9 +222,9 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
         if (po < 0) {
             return -1
         }
-        bc().dep_ifoff[di] = po
+        bdep_at(di).ifoff = po
         let ctpath [1000]u8
-        if (proj.module_ctiface_plain_path(bc().dep_mod[di], build_off,
+        if (proj.module_ctiface_plain_path(bdep_at(di).mod, build_off,
                 build_len, ctpath) != 0) { return -1 }
         let ctn int = strlen(support.arr_cstr(ctpath)).to_type(int)
         if (bc().iface_suffix != 0 && iface_session != 0) {
@@ -304,10 +242,10 @@ fn mb_module_iface_deps(m int, build_off int, build_len int) int {
         }
         let cto int = support.tml_intern_str(ctpath, 0, ctn)
         if (cto < 0) { return -1 }
-        bc().dep_ctoff[di] = cto
+        bdep_at(di).ctoff = cto
         di += 1
     }
-    return bc().dep_n
+    return bdep_count()
 }
 
 // mb_write_blob：临时文件写完再 rename 到 path；0 = 成功。
