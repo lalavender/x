@@ -71,7 +71,12 @@
 **0.0.14 正式版**：
 - 版本号 `compiler/project.toml` + `YH_VERSION_TEXT` = `0.0.14`；
   发布说明 [release-0.0.14](01-finished/release-0.0.14.md)。
-- 本地 `just test`、`just selfhost-native`（project cases 125/125）全绿。
+- 四端 release（run 42748030310）+ publish 成功；Release `0.0.14`
+  （Latest）带 8 个资产。
+- **发布资产验收**：`rm -rf bin && just fetch-seed` 取到 0.0.14
+  （sha256 `020fb7259c2bf3f65896d11015fb8ca86d03449f2d5b598e19fcb2cd705a678e`）
+  → `just build` → `yh 0.0.14` → `just test` 全绿 →
+  `just selfhost-native`（project cases 125/125）全绿。
 
 ## 2026-11-10：list 标准库 L0–L2（动态列表）
 
