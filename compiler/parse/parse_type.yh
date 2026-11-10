@@ -1,20 +1,20 @@
 module parse
+import ast
 import check
-import proj
 import token
-import errors
 import support
-import comptime
 
 // ============================================================================
-// parse_type.yh —— 自举编译器：类型引用解析与解析器共用工具
+// parse_type.yh —— 类型引用的纯语法解析（S4 垂直切片）
 //
 // 覆盖 docs/yh.g4 的 typeRef / fnType / typeRefList / builtinType。
-// 语法模式（c_compile == 0）只消费 token 并返回 0（G1 行为不变）；
-// 编译模式返回类型表编号（≥0，错误 -1），并按需构建/去重类型条目。
+// 本文件只消费 token 并构造 ast.AstType 语法节点：名字 intern 进名字池，
+// 不读类型/符号表；类型表编号、数组长度布局与 C ABI 校验由
+// check.type_resolve 完成。编译模式保持原返回契约（类型表编号，错误 -1），
+// 语法模式返回 0。
 //
-// fn 类型的参数类型先收集到本帧局部数组再统一入池——嵌套 fn 类型
-//（fn(fn(int) int) int）各自入池互不串扰。
+// fn 类型的参数先收集到本帧数组，解析完后一次性追加到类型语法参数表，
+// 保证外层参数区间连续（嵌套 fn 类型的参数不会插进外层区间）。
 // ============================================================================
 
 // p_peek：向前看第 k 个 token 的种类；越过表尾按 EOF 处理。
@@ -86,11 +86,35 @@ fn is_type_start(k int) int {
     return (k >= token.TK_INT && k <= token.TK_VOID).to_type(int)
 }
 
-// sizeof_starts_type：sizeof('(' 后当前 token 是否为「类型」形态。
-// 用于区分 sizeof(T) 与 sizeof(expr)：内建类型、[、fn 直接判定；
-// 连续 * 后跟已登记类型名判为指针类型（如 sizeof(*P)）；IDENT 仅当
-// 已登记为类型名才走类型路径（否则是表达式，如 sizeof(x)、sizeof(*p)）。
-fn sizeof_starts_type() int {
+// p_line_at / p_col_at：读取指定 token 的行列；越界返回 0。
+fn p_line_at(pos int) int {
+    if (pos < 0 || pos >= token.ctx().count) { return 0 }
+    return token.ctx().tokens[pos].line
+}
+
+fn p_col_at(pos int) int {
+    if (pos < 0 || pos >= token.ctx().count) { return 0 }
+    return token.ctx().tokens[pos].col
+}
+
+// p_err_line / p_err_col：解析结束游标处的行列，用于在 check 侧复现
+// 旧 parse_type 的 token.err_tok 诊断位置。
+fn p_err_line() int {
+    let pos int = token.ctx().pos
+    if (pos >= token.ctx().count) { pos = token.ctx().count - 1 }
+    return p_line_at(pos)
+}
+
+fn p_err_col() int {
+    let pos int = token.ctx().pos
+    if (pos >= token.ctx().count) { pos = token.ctx().count - 1 }
+    return p_col_at(pos)
+}
+
+// sizeof_type_start_syntax：sizeof('(' 后是否是无歧义的类型起始：
+// 内建类型、`[`、`fn`、`@`，以及它们前面的 `*` 链。名字路径（可能既是类型
+// 又是值）不在这里判定，交给 check.sizeof_type_path 查表。
+fn sizeof_type_start_syntax() int {
     let k int = p_cur()
     let off int = 0
     for k == token.TK_STAR {
@@ -103,51 +127,59 @@ fn sizeof_starts_type() int {
     if (k >= token.TK_INT && k <= token.TK_VOID) {
         return 1
     }
-    if (k == token.TOK_IDENT) {
-        // 跳过的星号是当前形态前缀；类型名字位于 token.pos + off。
-        let type_pos int = token.ctx().pos + off
-        let tid int = support.ty_lookup_name(token.ctx().tokens[type_pos].start,
-            token.ctx().tokens[type_pos].len)
-        if (tid >= 0) {
-            return 1
-        }
-        // 模块限定类型 m.T（P3）：绑定名在导入表且命名空间导出该类型名
-        if (p_peek(off + 1) == token.TK_DOT
-            && p_peek(off + 2) == token.TOK_IDENT) {
-            let qb int = support.mod_file_binding(token.ctx().tokens[type_pos].start,
-                token.ctx().tokens[type_pos].len)
-            if (qb >= 0 && support.mod_ns_lookup(qb,
-                token.ctx().tokens[type_pos + 2].start,
-                token.ctx().tokens[type_pos + 2].len, 1) >= 0) {
-                return 1
-            }
-        }
-    }
     return 0
 }
 
-// tk_to_builtin：内建类型 token → 类型编号（编译模式）。
-fn tk_to_builtin(k int) int {
-    if (k == token.TK_INT) { return support.TY_I32 }
-    if (k == token.TK_I8) { return support.TY_I8 }
-    if (k == token.TK_I16) { return support.TY_I16 }
-    if (k == token.TK_I32) { return support.TY_I32 }
-    if (k == token.TK_I64) { return support.TY_I64 }
-    if (k == token.TK_U8) { return support.TY_U8 }
-    if (k == token.TK_U16) { return support.TY_U16 }
-    if (k == token.TK_U32) { return support.TY_U32 }
-    if (k == token.TK_U64) { return support.TY_U64 }
-    if (k == token.TK_F32) { return support.TY_F32 }
-    if (k == token.TK_F64) { return support.TY_F64 }
-    if (k == token.TK_BOOL) { return support.TY_BOOL }
-    if (k == token.TK_CHAR) { return support.TY_CHAR }
-    return support.TY_VOID
+// sizeof_operand_end：从 first 起扫描到与 sizeof '(' 配对的 ')' 下标；
+// 只做括号深度统计，不解析表达式。失败返回 -1。
+fn sizeof_operand_end(first int) int {
+    let depth int = 0
+    let i int = first
+    for i < token.ctx().count {
+        let k int = token.ctx().tokens[i].kind
+        if (k == token.TOK_EOF) { return -1 }
+        if (k == token.TK_LPAREN || k == token.TK_LBRACKET || k == token.TK_LBRACE) {
+            depth += 1
+        } else if (k == token.TK_RPAREN || k == token.TK_RBRACKET || k == token.TK_RBRACE) {
+            if (depth == 0) {
+                return k == token.TK_RPAREN ? i : -1
+            }
+            depth -= 1
+        }
+        i += 1
+    }
+    return -1
 }
 
-// parse_type_ref：类型引用。返回类型编号（语法模式返回 0），错误 -1。
+// sizeof_path_shape：操作数区间是否恰为「`*` 链 + IDENT (. IDENT)?」。
+// 只判定形态；是否类型由 check 查表决定。
+fn sizeof_path_shape(first int, after int) int {
+    let i int = first
+    for i < after && token.ctx().tokens[i].kind == token.TK_STAR {
+        i += 1
+    }
+    if (i >= after || token.ctx().tokens[i].kind != token.TOK_IDENT) {
+        return 0
+    }
+    i += 1
+    if (i < after && token.ctx().tokens[i].kind == token.TK_DOT) {
+        i += 1
+        if (i >= after || token.ctx().tokens[i].kind != token.TOK_IDENT) {
+            return 0
+        }
+        i += 1
+    }
+    return (i == after).to_type(int)
+}
+
+// parse_type_syntax：类型引用的纯语法节点。返回节点编号，错误 -1。
 //   '*' typeRef | '[' expr? ']' typeRef | 'fn' '(' typeRefList? ')' typeRef?
-//   | '@' '[' 'extern' ']' fnType | builtinType | IDENT
-fn parse_type_ref() int {
+//   | '@' '[' 'extern' ']' fnType | builtinType | IDENT ('.' IDENT)?
+// abi 为当前声明的默认调用约定；@[extern] 强制整棵函数类型子树使用 C ABI。
+fn parse_type_syntax(abi int) int {
+    let first int = token.ctx().pos
+    let start_line int = p_line_at(first)
+    let start_col int = p_col_at(first)
     // 类型属性只有精确的 @[extern] fn 分支，作用范围限定为该函数类型。
     if (p_cur() == token.TK_AT) {
         p_adv()
@@ -156,28 +188,38 @@ fn parse_type_ref() int {
         p_adv()
         if (p_expect(token.TK_RBRACKET, "C 函数类型属性只允许单个 extern") != 0) { return -1 }
         if (p_cur() != token.TK_FN) { return token.err_tok("类型属性只能修饰 fn 类型") }
-        let saved int = support.ms().type_abi
-        support.ms().type_abi = support.ABI_C
-        let result int = parse_type_ref()
-        support.ms().type_abi = saved
-        return result
+        let id int = parse_type_syntax(support.ABI_C)
+        if (id < 0) {
+            return -1
+        }
+        if (ast.ast_type_set_span(id, first, token.ctx().pos, start_line, start_col,
+                p_err_line(), p_err_col()) != 0) {
+            return -1
+        }
+        return id
     }
     let k int = p_cur()
     if (k == token.TK_STAR) {
         p_adv()
-        let e int = parse_type_ref()
-        if (e < 0) {
+        let child int = parse_type_syntax(abi)
+        if (child < 0) {
             return -1
         }
-        if (support.session().compile == 0) {
-            return 0
+        let id int = ast.ast_type_add(ast.AST_TYPE_PTR, 0, first, token.ctx().pos,
+            start_line, start_col, p_err_line(), p_err_col())
+        if (id < 0) {
+            return -1
         }
-        return check.ty_ptr(e)
+        if (ast.ast_type_set_child(id, child) != 0) {
+            return -1
+        }
+        return id
     }
     if (k == token.TK_LBRACKET) {
-        let array_line int = token.ctx().tokens[token.ctx().pos].line
-        let array_col int = token.ctx().tokens[token.ctx().pos].col
+        let array_line int = start_line
+        let array_col int = start_col
         p_adv()
+        let is_slice int = (p_cur() == token.TK_RBRACKET).to_type(int)
         let alen int = -1
         let deferred_sym int = -1
         let deferred_line int = 0
@@ -185,57 +227,64 @@ fn parse_type_ref() int {
         let deferred_expr int = 0
         let deferred_expr_first int = -1
         let deferred_expr_after int = -1
-        if (p_cur() != token.TK_RBRACKET) {
+        if (is_slice == 0) {
             let r support.Res
             if (support.session().compile != 0) {
-                // 简单的前向 const 保持符号请求；一般表达式保存 token 范围，
-                // 待 typed CT 函数与其全局常量依赖登记完成后再求值。
-                // 不限 pass1：同一处声明会在 CT 捕获/布局/全局/函数子遍重复
-                // 解析，而长度常量此时可能仍未就绪；布局请求按长度来源去重
+                // 长度语义由 check 的求值窄口统一判定（check.type_array_length），
+                // parse 只按模式记录语法：单个未就绪 const 记符号，布局期再求值；
+                // 当前遍求不出的表达式记 token 区间，布局子遍求值；纯常量算术
+                // 直接拿立即值。窄口不覆盖的形式仍由表达式解析器兜底，诊断与
+                // 语义动作搬迁前逐字节一致。不限 pass：同一处声明会在 CT 捕获/
+                // 布局/全局/函数子遍重复解析，布局请求按长度来源去重
                 // （见 ct_layout_array_find），重复解析复用同一 type_id。
-                if (p_cur() == token.TOK_IDENT
-                    && p_peek(1) == token.TK_RBRACKET) {
-                    let tok_pos int = token.ctx().pos
-                    let sym int = support.sym_lookup(token.ctx().tokens[tok_pos].start,
-                        token.ctx().tokens[tok_pos].len)
-                    if (sym >= 0 && support.ms().syms[sym].kind == support.SYM_CONST
-                        && support.ms().syms[sym].const_ready == 0
-                        && support.ty_is_integer(support.ms().syms[sym].type_id) != 0) {
-                        deferred_sym = sym
+                let close int = p_ct_layout_array_close(token.ctx().pos)
+                if (close > token.ctx().pos) {
+                    let len_val i64 = 0
+                    // 模式码（协议见 check/const_eval.yh 的 type_array_length）：
+                    // 1=立即值、2=延迟 token 区间、3=延迟符号、0=表达式兜底、
+                    // -1=已报错（窄口已给出诊断，直接终止，不能再兜底重解析）。
+                    let mode int = check.type_array_length(token.ctx().pos, close,
+                        &len_val, &deferred_sym)
+                    if (mode == 3) {
+                        let tok_pos int = token.ctx().pos
                         deferred_line = token.ctx().tokens[tok_pos].line
                         deferred_col = token.ctx().tokens[tok_pos].col
-                        p_adv()
-                    }
-                }
-                if (deferred_sym < 0) {
-                    let close int = p_ct_layout_array_close(token.ctx().pos)
-                    if (close > token.ctx().pos
-                        && p_ct_layout_expr_defer_now(token.ctx().pos, close) != 0) {
+                        token.ctx().pos = close
+                    } else if (mode == 2) {
                         deferred_expr = 1
                         deferred_expr_first = token.ctx().pos
                         deferred_expr_after = close
                         token.ctx().pos = close
-                    }
-                }
-                if (deferred_sym < 0) {
-                    if (deferred_expr == 0) {
-                        support.fc().c_fold += 1
-                        let rr int = parse_expr(&r)
-                        support.fc().c_fold -= 1
-                        if (rr != 0) {
-                            return -1
-                        }
-                        if (r.is_const == 0) {
-                            return token.err_tok("数组长度必须是编译期常量")
-                        }
-                        if (r.ival <= 0) {
+                    } else if (mode == 1) {
+                        token.ctx().pos = close
+                        if (len_val <= 0) {
                             return token.err_tok("数组长度必须为正")
                         }
-                        if (r.ival > 2147483647) {
+                        if (len_val > 2147483647) {
                             return token.err_tok("数组长度超出限制")
                         }
-                        alen = r.ival.to_type(int)
+                        alen = len_val.to_type(int)
+                    } else if (mode < 0) {
+                        return -1
                     }
+                }
+                if (deferred_sym < 0 && deferred_expr == 0 && alen < 0) {
+                    support.fc().c_fold += 1
+                    let rr int = parse_expr(&r)
+                    support.fc().c_fold -= 1
+                    if (rr != 0) {
+                        return -1
+                    }
+                    if (r.is_const == 0) {
+                        return token.err_tok("数组长度必须是编译期常量")
+                    }
+                    if (r.ival <= 0) {
+                        return token.err_tok("数组长度必须为正")
+                    }
+                    if (r.ival > 2147483647) {
+                        return token.err_tok("数组长度超出限制")
+                    }
+                    alen = r.ival.to_type(int)
                 }
             } else {
                 if (parse_expr(&r) != 0) {
@@ -246,52 +295,49 @@ fn parse_type_ref() int {
         if (p_expect(token.TK_RBRACKET, "期望 ']'") != 0) {
             return -1
         }
-        let e2 int = parse_type_ref()
-        if (e2 < 0) {
+        let elem int = parse_type_syntax(abi)
+        if (elem < 0) {
             return -1
         }
-        if (support.session().compile == 0) {
-            return 0
+        let kind int = is_slice != 0 ? ast.AST_TYPE_SLICE : ast.AST_TYPE_ARRAY
+        let id int = ast.ast_type_add(kind, 0, first, token.ctx().pos,
+            array_line, array_col, p_err_line(), p_err_col())
+        if (id < 0) {
+            return -1
         }
-        if (alen < 0) {
-            if (deferred_expr != 0) {
-                return comptime.ct_layout_array_expr(e2, support.session().active_file,
-                    proj.file_count(), deferred_expr_first, deferred_expr_after,
-                    array_line, array_col)
+        if (kind == ast.AST_TYPE_SLICE) {
+            if (ast.ast_type_set_child(id, elem) != 0) {
+                return -1
             }
-            if (deferred_sym >= 0) {
-                return comptime.ct_layout_array(e2, -1, deferred_sym,
-                    deferred_line, deferred_col)
-            }
-            return check.ty_slice(e2)
+        } else if (ast.ast_type_set_array(id, elem, alen, deferred_sym,
+                deferred_line, deferred_col, deferred_expr,
+                deferred_expr_first, deferred_expr_after) != 0) {
+            return -1
         }
-        if (support.ms().types[e2].size < 0) {
-            return comptime.ct_layout_array(e2, alen, -1,
-                array_line, array_col)
-        }
-        return check.ty_array(e2, alen)
+        return id
     }
     if (k == token.TK_FN) {
         p_adv()
         if (p_expect(token.TK_LPAREN, "期望 '('") != 0) {
             return -1
         }
-        // 参数类型收集到本帧数组（递归安全），全部解析后统一入池
-        let pts [32]int
+        // 参数先收在本帧数组；嵌套 fn 类型的参数不会插进外层区间。
+        let pts [64]int
         let np int = 0
         if (p_cur() != token.TK_RPAREN) {
             for 1 {
-                let pt int = parse_type_ref()
+                let pt int = parse_type_syntax(abi)
                 if (pt < 0) {
                     return -1
                 }
-                if (support.session().compile != 0) {
-                    if (np >= 32) {
-                        return token.err_tok("fn 类型参数过多")
-                    }
-                    pts[np] = pt
-                    np += 1
+                if (support.session().compile != 0 && np >= 32) {
+                    return token.err_tok("fn 类型参数过多")
                 }
+                if (np >= 64) {
+                    return token.err_tok("fn 类型参数过多")
+                }
+                pts[np] = pt
+                np += 1
                 if (p_cur() == token.TK_COMMA) {
                     p_adv()
                     continue
@@ -302,43 +348,54 @@ fn parse_type_ref() int {
         if (p_expect(token.TK_RPAREN, "期望 ')'") != 0) {
             return -1
         }
-        let ret int = support.TY_VOID
+        let ret int = -1
         if (is_type_start(p_cur()) != 0) {
-            let rt int = parse_type_ref()
-            if (rt < 0) {
+            ret = parse_type_syntax(abi)
+            if (ret < 0) {
                 return -1
             }
-            ret = rt
         }
-        if (support.session().compile == 0) {
-            return 0
-        }
-        let first int = support.ms().sigparam_n
+        let param_first int = -1
         let i int = 0
         for i < np {
-            check.ty_sig_param(pts[i])
+            let idx int = ast.ast_type_param_add(pts[i])
+            if (idx < 0) {
+                return -1
+            }
+            if (i == 0) { param_first = idx }
             i += 1
         }
-        let ftid int = check.ty_fn_abi(ret, first, np, 0, support.ms().type_abi)
-        // 显式 C 类型、别名与字段同样检查签名，不能绕过 extern 声明检查。
-        if (ftid >= 0 && support.ms().type_abi == support.ABI_C && check.ty_cabi_param(ftid) == 0) {
-            return token.err_tok("C ABI 不支持该函数类型")
+        let id int = ast.ast_type_add(ast.AST_TYPE_FN, 0, first, token.ctx().pos,
+            start_line, start_col, p_err_line(), p_err_col())
+        if (id < 0) {
+            return -1
         }
-        return ftid
+        if (ast.ast_type_set_fn(id, ret, param_first, np, abi) != 0) {
+            return -1
+        }
+        return id
     }
     if (k >= token.TK_INT && k <= token.TK_VOID) {
         p_adv()
-        if (support.session().compile == 0) {
-            return 0
+        let id int = ast.ast_type_add(ast.AST_TYPE_BUILTIN, k, first,
+            token.ctx().pos, start_line, start_col, p_err_line(), p_err_col())
+        if (id < 0) {
+            return -1
         }
-        return tk_to_builtin(k)
+        return id
     }
     if (k == token.TOK_IDENT) {
         let start int = token.ctx().tokens[token.ctx().pos].start
         let n int = token.ctx().tokens[token.ctx().pos].len
         p_adv()
+        let qual_off int = -1
+        let qual_len int = 0
+        let name_off int = -1
+        let name_len int = 0
+        let name_line int = start_line
+        let name_col int = start_col
         // 限定类型 m.T（U3/U4）：编译模式查导入绑定的模块命名空间；
-        // 单段点链（更长链不支持，干净拒绝）；语法模式仅消费。
+        // 单段点链（更长链不支持，干净拒绝）；语法模式同样消费结构。
         if (p_cur() == token.TK_DOT) {
             p_adv()
             if (p_cur() != token.TOK_IDENT) {
@@ -346,46 +403,54 @@ fn parse_type_ref() int {
             }
             let tstart int = token.ctx().tokens[token.ctx().pos].start
             let tlen int = token.ctx().tokens[token.ctx().pos].len
-            let tline int = token.ctx().tokens[token.ctx().pos].line
-            let tcol int = token.ctx().tokens[token.ctx().pos].col
+            name_line = token.ctx().tokens[token.ctx().pos].line
+            name_col = token.ctx().tokens[token.ctx().pos].col
             p_adv()
             if (p_cur() == token.TK_DOT) {
                 return token.err_tok("限定类型只支持一层（m.T）")
             }
-            if (support.session().compile == 0) {
-                return 0
+            qual_off = support.name_intern(start, n)
+            if (qual_off < 0) {
+                return -1
             }
-            if (support.module_mode() == 0) {
-                return token.err_tok("限定类型只在模块模式可用")
+            qual_len = n
+            name_off = support.name_intern(tstart, tlen)
+            if (name_off < 0) {
+                return -1
             }
-            let qb int = support.mod_file_binding(start, n)
-            if (qb < 0) {
-                return errors.err_lc(tline, tcol, "点号左侧不是导入的模块名")
+            name_len = tlen
+        } else {
+            name_off = support.name_intern(start, n)
+            if (name_off < 0) {
+                return -1
             }
-            let qe int = support.mod_ns_lookup(qb, tstart, tlen, 1)
-            if (qe < 0) {
-                return errors.err_lc(tline, tcol, "模块没有导出该类型")
-            }
-            let qi int = 0
-            for qi < support.fs().import_n {
-                if (support.fs().import_mod[qi] == qb) {
-                    support.fs().import_used[qi] = 1
-                    break
-                }
-                qi += 1
-            }
-            return support.fs().mods[qb].ns[qe].tid
+            name_len = n
         }
-        if (support.session().compile == 0) {
-            return 0
+        let id int = ast.ast_type_add(ast.AST_TYPE_NAMED, 0, first,
+            token.ctx().pos, name_line, name_col, p_err_line(), p_err_col())
+        if (id < 0) {
+            return -1
         }
-        let tid int = support.ty_lookup_name(start, n)
-        if (tid < 0) {
-            return token.err_tok("未知类型（类型必须先定义）")
+        if (ast.ast_type_set_named(id, name_off, name_len, qual_off, qual_len) != 0) {
+            return -1
         }
-        return tid
+        return id
     }
     return token.err_tok("此处需要一个类型")
+}
+
+// parse_type_ref：类型引用。返回类型编号（语法模式返回 0），错误 -1。
+// 语法解析在 parse，类型表/布局/ABI 解析在 check；仍紧随本次类型解析调用，
+// 因此调用方的 token 游标与诊断时机不变。
+fn parse_type_ref() int {
+    let root int = parse_type_syntax(ctx().type_abi)
+    if (root < 0) {
+        return -1
+    }
+    if (support.session().compile == 0) {
+        return 0
+    }
+    return check.type_resolve(root)
 }
 
 // yh test 内建测试：成员名与类型起始判定。

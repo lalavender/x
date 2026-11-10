@@ -14,6 +14,27 @@
 - 诊断直写 stderr 旁路收编（link/build/testkit 约 20 处 `write_all(2, ...)`）
 - project.toml 添加[env]
 
+## 2026-11-10 前端 S4：parse 纯化后续（P0，进行中）
+
+已完成四片：类型语法外置（`parse/parse_type.yh` 只构造 `ast.AstType`，
+`check/type_syntax.yh` 接管类型表、数组长度布局、函数 ABI 与 C ABI 校验）；
+`sizeof` 歧义判定外置（parse 只判无歧义类型起始与 `*`链+名字路径形态，
+`check.sizeof_type_path` 查表，非类型回退表达式）；S4-2 地基（纯语法 AST
+解析模式：`YH_SYNTAX_AST` 门控，`build/module_worker.yh` 在项目上下文全链路
+跑一次纯语法 parse，`front-syntax` 门用例覆盖类型/字面量/控制流；
+`Res` 纯字段清零上移 `support.res_reset`，`check.sem_res_reset` 转发）；
+数组长度求值外置（`check/const_eval.yh` 的 `type_array_length` 按模式码
+判定「立即折叠 / 延迟符号 / 延迟区间 / 表达式兜底」，parse 只记录语法与游标）。
+`AstExpr`/lower/快照契约不变。剩余：
+
+- [ ] S4-2 表达式/语句语义外置：`parse_expr`/`parse_stmt` 只产语法节点，
+      `check.full` 后序回填 `type_id`/`sym`/常量；先做字面量与二元表达式。
+      当前 `syntax_ast` 只上游未铺满（数组/结构体字面量与 primary 有语法分支，
+      语义路径仍走旧函数），铺满后才允许把 `check.full` 后序接进来。
+- [ ] S4-3 CT 展开下沉：`$if`/`$for` 结构节点 + `check.expand`；删 `parse→comptime`。
+- [ ] S4-4 收口：删 `parse→check`（当前只剩 `parse_type.yh` 的 `type_resolve`
+      转发），补模块依赖守卫。
+
 ## 2026-11-10 泛型 `$any` 类型变量与单态化（P0，规划中）
 
 方案：[yh-泛型any单态化实施方案](02-plan/yh-泛型any单态化实施方案-2026-11-10.md)。
@@ -83,18 +104,6 @@ API（`open`/`CreateFileA` 等）仍按进程 ACP 解释路径字节：
   `*W` 版本，改动面与风险都超出「修 CI filter 用例」的范围；
 - [ ] 待立项：嵌入 UTF-8 activeCodePage 清单（或等价的 CRT 层方案），补齐
       中文源码路径、`-o` 输出路径与诊断路径的 Windows 端到端验收用例。
-
-## 2026-11-06 标准库去数字前缀（已落地，剩 CI 提示）
-
-`libs/` 全部模块的源文件已改成语义名并保持「文件名字节序 = 编译顺序」：共享类型
-文件统一叫 `base.yh`，其余按职责命名（json/fmt/io/toml/sys/os/net/string/libc）。
-验收：`cd libs && yh test` 134 例全绿；`yh check --target` 四种 triple 通过；
-`cd compiler && yh check` 通过。改名映射与证据见 [finish.md](finish.md)。
-
-- [ ] **命名顺序错误的报错不可读（P2）**：顺序写错时只在用到未定义类型时报
-      「未知类型（类型必须先定义）」，且位置落在使用方文件上，容易误判成无关回归。
-      需要在 `parse/parse_type.yh` 的该诊断里补一句「模块按文件名字节序编译，
-      被依赖类型应放在字节序更早的文件」。
 
 ## 2026-10-27 未使用函数检查（UF1）后续
 
@@ -237,6 +246,10 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
 > macOS→Linux 方向均不可用；细节见
 > [Darwin 交叉遗留边界](03-design/yh-Darwin交叉编译遗留边界.md)
 > 与[架构设计 §8.2](03-design/yh-架构设计.md)。
+>
+> **2026-11-10 Windows 平台设计整体搁置（用户决定）**：B1a 只记录分层决策、
+> 不落地实现；B1b/B1c/B1d/B2b 标 ⏸。恢复时按 B1a 的「编译器接 UCRT、
+> 用户程序默认零 CRT」执行。
 
 ### B. 平台矩阵（原 F3/F4）
 
@@ -244,22 +257,23 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
 种子随 Release 发布）；Darwin/x64 与 Windows/ARM64 未接入。交叉编译任务已撤下
 （见本节前说明），因此 B2a 只在**原生 runner** 上验收。
 
-- [ ] **B1a 零 CRT vs UCRT 决策（P0）**：用户程序现在只链 kernel32，
-  `strtod/abs/cos/pow/lrint/dup2/system` 等 C 符号不存在 → `libs/math`
-  （sqrt/sin/cos/pow）不可用，`tests/modules/build-check.py:189-211` 有 22 例
-  `WINDOWS_SKIP`。两条路：(a) 保持零 CRT，用 yh 或 SDK 支撑对象逐个补（math 昂贵）；
-  (b) 接 UCRT 导入库 `ucrtbase.dll`，一次解决但违反方案 D2（用户程序依赖 UCRT）。
-  决策后删 `WINDOWS_SKIP`。
-- [ ] **B1b Winsock 接线（P0，当前未登记）**：`libs/sys/socket.windows.yh` 与
+- [ ] **B1a 零 CRT vs UCRT 决策（P0，⏸ 已决策、随 Windows 搁置实现）**：
+  **2026-11-10 决策：分层**。编译器工具链链接 UCRT，解决 `strtod`（浮点字面量
+  解析，见 `check/api.yh:3838`）与 `malloc/free` 等宿主依赖；**用户程序默认仍
+  零 CRT**（只链 kernel32），需要 `libs/math`/网络时按链接组显式 opt-in
+  `ucrtbase`/`ws2_32`。`WINDOWS_SKIP` 中 5 例 `strtod` fixture 随编译器接 UCRT
+  解除；math/socket/system/dup2 类留到用户程序 opt-in 落地后逐个删。
+  注意：Windows 零 CRT 下带浮点字面量的程序目前**编不过**，不只是 math 不可用。
+- [ ] **B1b Winsock 接线（P0，⏸ 2026-11-10 搁置）**：`libs/sys/socket.windows.yh` 与
   `libs/net/tcp.windows.yh` 一律返回 `-ENOSYS`，Windows 上 `net`/`http` 不可用。
   需要 WSAStartup、SOCKET 进 fd 表、`SO_*` 换 Winsock 取值、`ioctlsocket` 的非阻塞
   语义，并补 `// platform: windows` 的 loopback 用例（`net0`/`net1` 现被跳过）。
-- [ ] **B1c COFF 整库加载 + Win32 导出面扩展（P2）**：
+- [ ] **B1c COFF 整库加载 + Win32 导出面扩展（P2，⏸ 2026-11-10 搁置）**：
   `[link-options-windows-x64].whole` 被 lld-link 忽略（未实现 `/wholearchive`），
   当前靠「桥入口均被直接引用」绕过，裁剪清单会静默少符号；
   `vendor/windows-sdk/manifest.json` 只覆盖 KERNEL32 的 38 条导出，扩面需改 `.def`
   → 同步 `exports`/`def_sha256` → 重新生成 `.lib`，目前无成文流程条目。
-- [ ] **B1d Windows 工程债（P1/P2）**：① windows job 补跑 `test-windows-target`
+- [ ] **B1d Windows 工程债（P1/P2，⏸ 2026-11-10 搁置）**：① windows job 补跑 `test-windows-target`
   （原排除理由是「`--emit-asm` stdout 在零 CRT 下不支持」，实测已可用，PE 目标门
   目前只有 linux-arm64 交叉侧覆盖）；② 补 Windows 性能基线（`perf.yml` 只有
   macos-15 一端）；③ `windows-2022` pin 的长期方案（闭包 CMake 生成器写死
@@ -272,7 +286,7 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
   参数化、种子与取种（`justfile:78` 与 `tools/fetch-release-seed.py` 的 `PLATFORMS`）、
   Intel Mac runner job（`macos-13`，需确认支持窗口）。验收必须在 Intel Mac 原生跑
   + 原生自举，交叉产物不算数。
-- [ ] **B2b Windows/ARM64 可行性立项（P2，先证明再动手）**：① 目标身份
+- [ ] **B2b Windows/ARM64 可行性立项（P2，⏸ 2026-11-10 搁置，先证明再动手）**：① 目标身份
   （`aarch64-pc-windows-msvc` 未登记：`target_resolve` 只认 x64、`target_host_info`
   的 windows+arm64 直接 `return -1`、IR 第二份目标表无 key=6）；② ABI（现有 win64
   分类按 x64 规则写死「1/2/4/8 字节→INTEGER，其余 MEMORY」，ARM64 的 HFA/寄存器
@@ -283,20 +297,11 @@ rc tag 发 prerelease 并带四端种子，正式 tag 必须落在 `llvm` 上。
 
 ### C. 分发与工具链体验
 
-- [ ] **C3 SDK 27 兼容**：内嵌 lld 21 解析不了 `arm64e.x1` TAPI；升级固定 LLVM
-  或按实际 SDK 裁剪目标列表。
-- [ ] **C4 `make dev` 增量**：归档身份目前按路径计，SDK 原地重建需清缓存或补
-  内容哈希。
-
-### D. CI 与本地环境
-
-- [ ] **D2 CI 去重后的四端实跑（P1）**：门禁与打包已收进 justfile（`just ci-gate` /
-  `just release-asset`，本机 darwin-arm64 已验：全门绿 + 资产可解包执行）。待真 runner 确认：
-  下一次 push 到 `llvm` 的 ci 四端全绿；`release.yml` 用 `workflow_dispatch` +
-  `dry_run=true` 演练一轮（linux-x64 的 `test-llvm`、linux-arm64 的 Windows 目标门、
-  windows-2022 pin、artifact 路径改用 prepare 输出的 tag，这四处只有真 runner 能验）。
-- [ ] **D1 本机 ANTLR jar**：`make test` 第 1 层需要本地
-  `antlr4-*-complete.jar`；WSL 已配置，macOS 按同一方式补齐或文档化安装。
+- [ ] **C3 SDK 27 兼容（P1，识别/回退已落地）**：固定 lld 21.1.8 的 TextAPI
+  不认识 SDK 27 的 `arm64e.x1` 目标（上游 PR #222721，LLVM 23.1.3+ 才支持）。
+  2026-11-10 已在选 SDK 时检测并自动改用兼容的 26.x SDK（显式 SDKROOT 也回退
+  并告警；找不到兼容 SDK 时给出可操作诊断）。**剩余真支持**：回移上游补丁到
+  21.1.8 闭包，或升级固定 LLVM 到 23.1.3+。
 
 ## P1 标准库与工具链
 

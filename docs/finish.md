@@ -8,6 +8,187 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：前端 S4 片——数组长度求值外置（parse → check）
+
+**结果**：
+- 新增 `check/const_eval.yh`：`type_array_length(first, after, *len, *sym)` 是 `[N]T`
+  长度的唯一入口，返回模式码 `0=表达式兜底 / 1=立即值 / 2=延迟 token 区间 /
+  3=延迟符号 / -1=已报错`。判定顺序与旧 parse 一致：单名字未就绪 const 先记符号；
+  含 `$`/sizeof（仅 pass1）或未就绪 const 的表达式记区间；其余交给内置的
+  常量求值器按 parse_expr 优先级链折叠，立即得值。
+- 求值器只收窄口径：整数字面量、括号、一元 `+ - ! ~`、二元
+  `+ - * / % & | ^ == != < <= > >= << >>`、就绪标量 const 名字；运算与诊断全部
+  复用现有内核（`sem_num_is_float`/`sem_parse_number`/`sem_lit_fits`/`sem_promote`/
+  `sem_fold_const_binop`/`sem_fold_const_unary`/`sem_res_const`），因而除零、移位
+  越界、溢出、字面量适配与比较结果类型都与旧路径逐字节一致。不覆盖的形式
+  （`$`调用、sizeof、浮点、字符串、`&&`/`||`、三目、调用/下标后缀、模块限定名、
+  含变量表达式、区间内有多余 token）一律回落 `parse_expr` 原路径。
+- `parse/parse_type.yh` 数组分支改为「找 `]` → 一次调用 → 按模式记语法或取值」；
+  删除 parse 侧孤儿 `p_ct_layout_expr_needs_defer`/`p_ct_layout_expr_defer_now`
+  （判定搬进 check）与 `check.type_length_sym` 转发器（调用点归零后消失）。
+  parse→check 预算仍为 194、parse→comptime 77（净变化 0）。
+
+**验证**（2026-11-10，darwin-arm64）：
+- `YH_CACHE=off just build`、`just test` 全绿（377/379，2 跳过；front-coupling
+  194/77、front-syntax、fail 140/140）。
+- `just selfhost-native`：cc3→cc4 模块固定点一致（54 产物）、cc4 自解析 181 文件
+  与固定点探针 OK、project cases 125/125。
+- 与种子 `bin/yh-darwin-arm64` 差分：20 个数组长度相关用例 `--emit-asm` 产物与
+  诊断逐字节相同；另抽查一元负号长度、`1<<40`、`2147483647+1`、`2147483648`
+  均与种子报同一诊断同一位置。
+- 新增用例：`run/214-array-length-literal-arithmetic.yh`（字面量算术/括号/进制/
+  移位/修饰名 const/比较结果作为长度）、`fail/214`（含变量回退原诊断）、
+  `fail/215`（立即值正数校验）、`fail/216`（立即值 int 上限校验）。
+
+**遗留**：S4-2 全量（`parse_expr`/`parse_stmt` 语法节点 + `check.full` 后序回填）
+见 todo；`parse→check` 只剩 `parse_type.yh` 的 `type_resolve` 转发，留 S4-4。
+
+## 2026-11-10：前端 S4-2 地基——纯语法 AST 解析模式（内部开关）
+
+**结果**：
+- `build/module_worker.yh`：`YH_SYNTAX_AST` 门控——项目上下文齐全时对整模块文件
+  跑一次纯语法 parse（`compile=0` + `ast_capture=1` + `syntax_ast=1`），要求产出
+  表达式/语句节点后提前返回；正常编译路径不经此分支。
+- `parse/parse_expr.yh`：`primary`/数组字面量/结构体字面量在 `syntax_ast` 下只产
+  语法 AST 节点；`support.SessionCtx` 增 `syntax_ast` 字段。
+- `Res` 纯字段清零上移 `support.res_reset`（与 `Res` 同层）；`check.sem_res_reset`
+  只转发。parse 侧 `syntax_ast` 分支用 `support.res_reset`，消除该模式对
+  `check` 的 3 处仅重置引用，`front-coupling` 预算回到 194/77。
+- 新增 `tests/tools/front-coupling/check.py`（parse→check/comptime 只减不增、
+  parse_type 无类型表直查、ast/support/comptime/lower 依赖方向）与
+  `tests/tools/front-syntax/check.py`（`YH_SYNTAX_AST` 全链路用例：类型、
+  sizeof、结构体/数组字面量、控制流），接入 `just test`。
+
+**验证**（2026-11-10，darwin-arm64）：
+- `YH_CACHE=off just build` + `just test` 全绿（含 front-coupling 194/77、
+  front-syntax 用例、171 库测、compiler-tests 10/10）。
+- `just selfhost-native`：cc3→cc4 模块固定点一致（54 产物）、cc4 自解析 OK、
+  语法 49/49、运行 373/375、project cases 125/125。
+
+**遗留**：`syntax_ast` 只覆盖 primary/数组/结构体字面量的语法分支；S4-2 全量
+（表达式/语句语义外置）见 todo。
+
+## 2026-11-10：前端 S4 垂直切片——类型语法外置
+
+**结果**：
+- 新增 `ast.AstType` 语法 arena：只存 token 区间、名字池偏移与结构关系，不存 `type_id`。
+- 新增 `check/type_syntax.yh`：名字/类型表解析、数组长度布局、函数签名与 C ABI 校验从
+  `parse/parse_type.yh` 原样迁入；`parse` 不再直接读 `support.ms()` 的类型/符号表。
+- `parse/parse_type.yh` 只构造语法节点；`@[extern]` ABI 改由节点携带，
+  `ModelStore.type_abi` 删除，默认 ABI 归 `ParseCtx.type_abi`。
+- `sizeof` 的类型名/限定类型判定改由 `check.type_name_exists`/
+  `qualified_type_exists` 承担；数组长度未就绪常量查表改由 `check.type_length_sym`。
+- 保持 `AstExpr` 字段、lower 读点、`CheckedModule` 快照与 `.s.ct` 编码不变。
+
+**验证**（2026-11-10，darwin-arm64）：
+- `just dev`、`just test` 全绿（171 库测、compiler-tests 10/10、运行/模块/缓存/工具）。
+- 新旧编译器差分：6 个类型密集用例 `--emit-asm` 逐字节相同；3 个错误用例诊断逐字节相同。
+- `just selfhost-native`：cc3→cc4 模块固定点一致、cc4 自解析 OK、语法 49/49、
+  运行 373/375、modules 19/19、project cases 125/125。
+- 新增用例 `tests/yh-run/run/type-syntax-nodes.yh`。
+
+### 追加切片：`sizeof` 歧义判定外置
+
+- `parse` 不再为 `sizeof` 查类型表：无歧义类型起始（内建/`[`/`fn`/`@` 及其
+  `*` 链）走类型语法；`*`链+名字路径由 `check.sizeof_type_path` 查表判定，
+  非类型返回 -2 并回退表达式解析，未知名字/成员访问的诊断沿用原表达式路径。
+- `parse` 只保留 `sizeof_operand_end`/`sizeof_path_shape` 两个纯语法判定。
+- 验证：`just test` 全绿；`sizeof` 值/类型/解引用用例新旧编译器
+  `--emit-asm` 与错误诊断逐字节相同；`just selfhost-native` 复跑通过
+  （cc3→cc4 固定点一致、自解析 OK、语法 49/49、运行 373/375、
+  modules 19/19、project cases 125/125）。
+- `tests/yh-run/run/type-syntax-nodes.yh` 增补 `sizeof(值)`/`sizeof(*值)`/
+  `sizeof(函数名)` 断言。
+
+**遗留**：表达式/语句语义与 CT 展开仍在 parse；剩余 S4 切片见 todo。
+
+## 2026-11-10：修复自举 fixture 的 libs.list 接线（CI 三端红）
+
+**结果**：
+- 现象：run [42772202264](https://github.com/lalavender/x/actions/runs/42772202264)
+  的 linux-arm64 / linux-x64 / darwin-arm64 全部红在 `selfhost-native` 的
+  build-check 段，同一批 6 例：
+  `r2b-ast-check-module`、`gen3-split-narrow-ports`、`f4-ct-facts-mirror`、
+  `llvm-target-identity`、`llvm-front-zero-output`、`llvm-checked-snapshot`，
+  stderr 均为 `模块不存在（路径导入与目录不匹配）: libs.list`。
+- 原因：`compiler/build/cache/api.yh` 与 `compiler/build/proj/api.yh` 新增
+  `import libs.list` 后，`tests/modules/build-check.py` 里拷贝真实编译器模块的
+  fixture 没有带上 `libs/list`（只补了 `libs/hash`），点分导入回退到
+  `<source>/libs/list` 时落空。
+- 修法：新增 `copy_std_list()`，把 `libs/list` 与 `libs/memory` 拷进需要它的
+  项目树（astcheck 根、gen-split/ctfacts/llvmchecked/llvmlower 的 core/、
+  llvmtarget/llvmfront 的 proj/ 与 cache/）。
+- 同批修正被第一条错误掩盖的 fixture 编译问题：`ProjectCtx.files/file_n/file_cap`
+  已换成 `list.List`，astcheck、llvmchecked、llvmlower 三个手工构造文件表的
+  fixture 改走 `list.make`/`list.push`/`proj.file()`；llvmchecked 的析构改
+  `list.release`。
+
+**验证**（本机 darwin-arm64，门禁同款暂存编译器 + darwin-sdk 软链）：
+- 6 个目标用例全部 OK；llvmlower fixture `yh build` 通过（该 fixture 当前无用例）。
+- 全量 build-check：115/125。其余 10 例为既有本机环境问题
+  （系统 macOS SDK `libSystem.tbd` 报 arm64e 未知架构、`-lm` 找不到），
+  CI darwin 同一提交是通过的；与本次改动无关。
+- `just dev`、`just test` 全绿。
+
+## 2026-11-10：SDK 27 `arm64e.x1` 识别与回退（C3 第一片）
+
+**结果**：
+- 根因：固定 LLVM 21.1.8 的 TextAPI 解析 `libSystem.tbd` 的 `targets:` 时对
+  `arm64e.x1-macos` 报 `unknown architecture`，随后 libSystem 符号全变成未定义。
+  上游修复为 LLVM PR #222721（commit `b8007a8`，12 文件 +73/−1），随 LLVM
+  23.1.3+ 发布；当前锁版 21.1.8 不含该补丁。
+- 编译器侧（`compiler/link/darwin_link.yh`）：选 SDK 后检查
+  `usr/lib/libSystem.tbd` 与 `libc++.tbd` 是否含该标签（64 KiB 分块扫描，
+  保留尾部字节保证跨块命中）；命中时按 `xcode-select -p` 的 Xcode SDK 与
+  `/Library/Developer/CommandLineTools/SDKs` 找版本最高、不含该标签且版本
+  不低于 `MACOSX_DEPLOYMENT_TARGET` 的 SDK 替换本次会话的 SDK 根，并告警。
+  显式 SDKROOT 同样回退（保留告警）；找不到兼容 SDK 时提前给出可操作诊断，
+  不再落到 lld 的 `malformed file` + 未定义符号。
+- 回归：新增 `compiler/link/darwin_sdk.test.yh`（3 例：跨块标签命中、目录名
+  版本解析、SDK 兼容性判定）。
+
+**验证**（本机 darwin-arm64）：
+- `SDKROOT=<MacOSX27.sdk> ./yh probe.yh`：告警后链接成功，产物运行输出 `ok`；
+- 把 `./yh` 复制到无自带 stub 的目录（模拟 xcrun 回退到 SDK 27）：同样告警 + 成功；
+- 仓库内默认路径（`vendor/darwin-sdk` stub）无告警，行为不变；
+- `../yh test link` 5/5；`just test` 全绿：run 372/374（2 跳过）、fail 140/140、
+  pass 10/10、compiler-tests 10/10（link 5/5）。
+
+**未做**（真支持 SDK 27 仍需其一，见 `docs/todo.md` C3）：回移上游补丁到
+21.1.8 Darwin 闭包，或升级固定 LLVM 到 23.1.3+。
+
+## 2026-11-10：release.yml dry_run 四端演练通过（D2 收口）
+
+**结果**：
+- `gh workflow run release.yml -f tag=0.0.14 -f dry_run=true` →
+  run [42773920696](https://github.com/lalavender/x/actions/runs/42773920696)：
+  `prepare`、`linux-x64`、`linux-arm64`、`darwin-arm64`、`windows-x64` 全部
+  success，`publish` 按 dry_run 跳过。prepare 的三道校验（tag 形态、版本号两处
+  一致、tag 在 `llvm` 主线上）在该 tag 上通过。
+- 覆盖了此前只有真 runner 能验的四处：linux-x64 的 `test-llvm`、linux-arm64 的
+  Windows 目标门、windows-2022 pin、artifact 路径取 prepare 解析的 tag。
+- 观察项（不阻塞）：GitHub 提示 actions/checkout@v4 仍以 Node 20 为目标，被强制
+  跑在 Node 24；后续随依赖升级处理。
+
+## 2026-11-10：封存戳补闭包归档指纹（C4 收口）
+
+**结果**：
+- 原 `.sealed-<host>.json` 只校验键、`host.json` 摘要与几个附加文件是否存在；
+  SDK 静态归档**原地重建**（路径不变、内容变化）不会让标记失效，`ensure`
+  会在 `check(full=False)` 后直接复封装，复用与当前归档不一致的旧记录。
+- 修法：标记新增 `guarded` 字段，记录桥归档、LLVM 组件与 lld 共 73 个文件的
+  `(size, mtime_ns)`；`closure_stamp_ok` 逐个 stat 比对，`mtimes` 变即失效。
+  无 `guarded` 的旧标记按失效处理（一次性重封）。
+- `ensure` 在标记失效时改用 `check(full=True)`（重算归档摘要）而不是
+  `check(full=False)`，内容真的变了才会触发重建，而不是把旧记录重新封装。
+- 只读快路径不变：命中时仍不读归档内容，只多 73 次 stat。
+
+**验证**（本机 darwin-arm64）：
+- `just llvm-host`：旧标记失效 → 全量校验并重封（1.1s）→ 二次 0.37s 命中。
+- `touch libLLVMLibDriver.a` 模拟原地重建 → 标记失效，全量摘要校验通过后重封
+  （0.67s，新指纹 `[49024, 1794294716272829000]`）。
+- `just dev` 通过（1.8s，走标记快路径）；`python -m py_compile` 两个脚本通过。
+
 ## 2026-11-10：build 模块迁移到标准库 list（含 proj 模型）
 
 **结果**：

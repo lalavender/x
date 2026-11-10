@@ -436,6 +436,8 @@ test: stage-yh
     {{ py }} "{{ root }}/tests/selfhost/cache/llvm-global-cache.py" --compiler-path "{{ yh_run }}"
     YH_CACHE=off {{ py }} "{{ root }}/tests/tools/yh-code-stats/check.py"
     YH_CACHE=off {{ py }} "{{ root }}/tests/tools/yh-codeflow/check.py"
+    {{ py }} "{{ root }}/tests/tools/front-coupling/check.py"
+    YH_CACHE=off {{ py }} "{{ root }}/tests/tools/front-syntax/check.py" --compiler "{{ yh_run }}"
 
 # quick：日常迭代门。只跑不依赖后端的语法语料（ANTLR + 编译器 --syntax-check），
 # 秒级到十几秒；运行语义与自举门留给 test/full。

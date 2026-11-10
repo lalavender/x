@@ -48,6 +48,20 @@ CORE_DIRS = {"cache": "build/cache", "proj": "build/proj"}
 def core_src(module):
     """返回 module 的源码目录（供 fixture 拷贝真实编译器模块）。"""
     return ROOT / "compiler" / CORE_DIRS.get(module, module)
+
+
+def copy_std_list(dest):
+    """把标准库 list 及其 memory 依赖拷进 dest/libs。
+
+    cache/proj 引用 libs.list 后，拷贝真实模块的 fixture 必须让点分导入
+    libs.list 落到 <source>/libs/list；list 再按同项目裸名导入 memory，
+    因此两者放在同一项目树内。
+    """
+    for module in ("list", "memory"):
+        shutil.copytree(ROOT / "libs" / module, dest / "libs" / module,
+                        ignore=shutil.ignore_patterns(".build"))
+
+
 COMPILER_PATH = None
 COMPILER_FLAGS = []
 COMPILER_BUILD_FLAGS = []
@@ -493,6 +507,7 @@ def copy_proj(src, dst):
         # 必须把这两层一起带上，否则会在模块解析阶段报 cache/hash 不存在。
         shutil.copytree(ROOT / "libs" / "hash", dst / "hash",
                         ignore=shutil.ignore_patterns(".build"))
+        copy_std_list(dst)
     # 只有引入 check（内部用 strtod 等 C 运行时符号）的 fixture 需要 VC 运行时；
     # 其余 fixture 加上会与 yh 自有 memcpy/malloc 运行时入口冲突（duplicate symbol）。
     link_section = windows_support_link() if src.name in ("ctfacts", "gen-split", "llvmfront") else ""
@@ -559,6 +574,9 @@ def copy_proj(src, dst):
                         ignore=shutil.ignore_patterns(".build"))
         (dst / "hash" / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "hash"\nsource = "."\n')
+        # proj/cache 引用标准库 list：两个子项目各自需要 <source>/libs/list。
+        for mod in ("proj", "cache"):
+            copy_std_list(dst / mod)
         # 链 B：lex 自带 LexCtx（词法游标），front_stage 初始化时会复位它。
         shutil.copytree(ROOT / "compiler" / "lex", dst / "lex")
         (dst / "lex" / "project.toml").write_text(
@@ -579,6 +597,7 @@ def copy_proj(src, dst):
                         ignore=shutil.ignore_patterns(".build"))
         (core / "hash" / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "hash"\nsource = "."\n')
+        copy_std_list(core)
         (core / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "gensplitcore"\nsource = "."\n'
             '[dependencies]\nhash = { path = "hash" }\n')
@@ -595,6 +614,7 @@ def copy_proj(src, dst):
                         ignore=shutil.ignore_patterns(".build"))
         (core / "hash" / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "hash"\nsource = "."\n')
+        copy_std_list(core)
         (core / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "ctfactscore"\nsource = "."\n'
             '[dependencies]\nhash = { path = "hash" }\n')
@@ -609,6 +629,7 @@ def copy_proj(src, dst):
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         shutil.copytree(ROOT / "libs" / "hash", core / "hash",
                         ignore=shutil.ignore_patterns(".build"))
+        copy_std_list(core)
         (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "checkedcore"\nsource = "."\n')
         # 快照 fixture 现在属于 check 模块；文件名排在 checked_model.yh 之后，
         # 保证 CheckedModule 等类型先声明。
@@ -623,6 +644,7 @@ def copy_proj(src, dst):
                             ignore=shutil.ignore_patterns("llvm_bridge.yh"))
         shutil.copytree(ROOT / "libs" / "hash", core / "hash",
                         ignore=shutil.ignore_patterns(".build"))
+        copy_std_list(core)
         (core / "project.toml").write_text('[project]\nos = "host"\narch = "host"\nname = "lowercore"\nsource = "."\n')
         shutil.copyfile(src / "fixture.yh", dst / "main" / "fixture.yh")
 

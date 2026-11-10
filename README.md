@@ -227,6 +227,10 @@ just selfhost-native    # 自举主门
   1. `tests/yh/check.py`：ANTLR 参考语法语料。正例接受，反例拒绝。
   2. 同一批语料走编译器 `--syntax-check`。
   3. `tests/yh-run/check.py`：运行语义语料，含 run、fail、pass 三类。
+- 第 1 层需要 Java 17+、`antlr4` 命令与 Python 运行时：`pip install antlr4-tools`
+  （首次运行会下载 `antlr4-<版本>-complete.jar` 到 `~/.m2/repository/org/antlr/antlr4`）
+  与 `pip install antlr4-python3-runtime==4.13.2`（装给运行门禁的 `python3`）。
+  没有这些前置时用 `YH_ANTLR=0 just test` 跳过该层（CI 即此口径，Windows 宿主默认跳过）。
 - `just selfhost-native` 覆盖两代固定点、自解析、全量语料、模块与项目验收。
 - `just test-libs` 运行全部标准库测试：`libs/` 的 test 块（O0/O2）、cli/os/libc 外部 runner，以及 TOML/string/num/fmt 专项与安装后仓库外导入。
 

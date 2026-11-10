@@ -100,6 +100,51 @@ pub struct AstExpr {
     child2 int         // 三元表达式第三支；其他节点为 -1
 }
 
+// 类型引用的语法节点类别（S4 切片：parse 只产语法，check 负责解析）。
+pub const AST_TYPE_BUILTIN int = 1
+
+pub const AST_TYPE_NAMED int = 2
+
+pub const AST_TYPE_PTR int = 3
+
+pub const AST_TYPE_ARRAY int = 4
+
+pub const AST_TYPE_SLICE int = 5
+
+pub const AST_TYPE_FN int = 6
+
+// AstType：类型引用的纯语法节点。
+// 只记录 token 区间、名字池偏移与结构关系，不保存 type_id；类型表解析、
+// 数组长度布局与 C ABI 校验由 check.type_resolve 完成。节点按构造顺序连续
+// 存放，子节点编号总小于父节点编号。
+pub struct AstType {
+    kind int              // AST_TYPE_* 语法结构
+    op int                // 内建类型 token 种类；非内建为 0
+    first int             // 当前文件 token 半开区间起点
+    after int             // 当前文件 token 半开区间终点
+    token_count int       // 创建节点时的文件 token 数
+    file_id int           // 项目 SourceStore 文件编号
+    line int              // 节点起始行（具名类型为类型名 token）
+    col int               // 节点起始列
+    err_line int          // 解析结束时游标所在 token 的行（诊断复现）
+    err_col int           // 解析结束时游标所在 token 的列
+    child int             // 元素/返回类型节点；无则为 -1
+    len int               // 数组长度；未求值为 -1
+    deferred_sym int      // 延迟长度常量符号；无则为 -1
+    deferred_line int     // 延迟长度诊断行
+    deferred_col int      // 延迟长度诊断列
+    deferred_expr int     // 1 = 长度按 token 区间延迟求值
+    deferred_first int    // 延迟长度表达式 token 起点
+    deferred_after int    // 延迟长度表达式 token 终点
+    name_off int          // 具名类型的名字池偏移
+    name_len int          // 具名类型名长度
+    qual_off int          // 限定类型的模块名池偏移；无则为 -1
+    qual_len int          // 限定模块名长度
+    param_first int       // fn 参数在参数表中的起点
+    param_n int           // fn 参数个数
+    abi int               // fn 类型调用约定（ABI_YH/ABI_C）
+}
+
 // AstFunctionContext：已检查函数的只读 arena 切片，也是后续函数级任务的稳定输入。
 pub struct AstFunctionContext {
     file_id int              // SourceStore 文件编号
@@ -446,6 +491,198 @@ pub fn ast_decl_attach_init(fi int, decl_index int, expr_id int) int {
         i += 1
     }
     return errors.fail("内部错误：找不到全局 AST 声明节点")
+}
+
+// ============================================================================
+// 类型语法 arena（AstType）：parse 生成，check.type_resolve 消费。
+// 节点只在当前 worker 内有效；reset 与表达式/语句 arena 同步。
+// ============================================================================
+
+let ast_type_nodes *AstType = 0
+let ast_type_count int = 0
+let ast_type_cap int = 0
+let ast_type_params *int = 0
+let ast_type_param_count int = 0
+let ast_type_param_cap int = 0
+
+// ast_type_grow：扩容类型节点连续表并保留节点编号。
+fn ast_type_grow() int {
+    let ncap int = ast_type_cap * 2
+    if (ncap == 0) { ncap = 32 }
+    let next *AstType = malloc((ncap * sizeof(AstType)).to_type(u64)).to_type(*AstType)
+    if (next == 0) { return errors.fail("类型语法 AST 内存分配失败") }
+    if (ast_type_count > 0) {
+        memcpy(next, ast_type_nodes, (ast_type_count * sizeof(AstType)).to_type(u64))
+    }
+    if (ast_type_nodes != 0) { free(ast_type_nodes.to_type(*void)) }
+    ast_type_nodes = next
+    ast_type_cap = ncap
+    return 0
+}
+
+// ast_type_param_grow：扩容 fn 参数类型编号表并保留下标。
+fn ast_type_param_grow() int {
+    let ncap int = ast_type_param_cap * 2
+    if (ncap == 0) { ncap = 16 }
+    let next *int = malloc((ncap * sizeof(int)).to_type(u64)).to_type(*int)
+    if (next == 0) { return errors.fail("类型语法参数表内存分配失败") }
+    if (ast_type_param_count > 0) {
+        memcpy(next, ast_type_params, (ast_type_param_count * sizeof(int)).to_type(u64))
+    }
+    if (ast_type_params != 0) { free(ast_type_params.to_type(*void)) }
+    ast_type_params = next
+    ast_type_param_cap = ncap
+    return 0
+}
+
+// ast_type_add：追加一个类型语法节点；只校验 token 范围与节点类别。
+pub fn ast_type_add(kind int, op int, first int, after int,
+    line int, col int, err_line int, err_col int) int {
+    if (kind < AST_TYPE_BUILTIN || kind > AST_TYPE_FN
+        || first < 0 || after < first || after > token.ctx().count) {
+        return errors.fail("内部错误：类型语法节点范围无效")
+    }
+    if (ast_type_count == ast_type_cap && ast_type_grow() != 0) { return -1 }
+    let id int = ast_type_count
+    ast_type_nodes[id].kind = kind
+    ast_type_nodes[id].op = op
+    ast_type_nodes[id].first = first
+    ast_type_nodes[id].after = after
+    ast_type_nodes[id].token_count = token.ctx().count
+    ast_type_nodes[id].file_id = support.session().active_file
+    ast_type_nodes[id].line = line
+    ast_type_nodes[id].col = col
+    ast_type_nodes[id].err_line = err_line
+    ast_type_nodes[id].err_col = err_col
+    ast_type_nodes[id].child = -1
+    ast_type_nodes[id].len = -1
+    ast_type_nodes[id].deferred_sym = -1
+    ast_type_nodes[id].deferred_line = 0
+    ast_type_nodes[id].deferred_col = 0
+    ast_type_nodes[id].deferred_expr = 0
+    ast_type_nodes[id].deferred_first = -1
+    ast_type_nodes[id].deferred_after = -1
+    ast_type_nodes[id].name_off = -1
+    ast_type_nodes[id].name_len = 0
+    ast_type_nodes[id].qual_off = -1
+    ast_type_nodes[id].qual_len = 0
+    ast_type_nodes[id].param_first = -1
+    ast_type_nodes[id].param_n = 0
+    ast_type_nodes[id].abi = 0
+    ast_type_count += 1
+    return id
+}
+
+// ast_type_set_span：覆盖节点 token 范围（`@[extern]` 前缀需要包含属性）。
+pub fn ast_type_set_span(id int, first int, after int, line int, col int,
+    err_line int, err_col int) int {
+    if (id < 0 || id >= ast_type_count || first < 0 || after < first
+        || after > ast_type_nodes[id].token_count) {
+        return errors.fail("内部错误：类型语法节点范围无效")
+    }
+    ast_type_nodes[id].first = first
+    ast_type_nodes[id].after = after
+    ast_type_nodes[id].line = line
+    ast_type_nodes[id].col = col
+    ast_type_nodes[id].err_line = err_line
+    ast_type_nodes[id].err_col = err_col
+    return 0
+}
+
+// ast_type_set_child：写入元素类型或函数返回类型节点。
+pub fn ast_type_set_child(id int, child int) int {
+    if (id < 0 || id >= ast_type_count || child < -1 || child >= ast_type_count) {
+        return errors.fail("内部错误：类型语法子节点编号无效")
+    }
+    ast_type_nodes[id].child = child
+    return 0
+}
+
+// ast_type_set_named：写入具名类型的内联名字与可选限定模块名。
+pub fn ast_type_set_named(id int, name_off int, name_len int,
+    qual_off int, qual_len int) int {
+    if (id < 0 || id >= ast_type_count || name_off < 0 || name_len < 0
+        || qual_off < -1 || qual_len < 0) {
+        return errors.fail("内部错误：类型语法名字无效")
+    }
+    ast_type_nodes[id].name_off = name_off
+    ast_type_nodes[id].name_len = name_len
+    ast_type_nodes[id].qual_off = qual_off
+    ast_type_nodes[id].qual_len = qual_len
+    return 0
+}
+
+// ast_type_set_array：写入数组元素、已求值长度与延迟长度信息。
+pub fn ast_type_set_array(id int, child int, len int, dsym int,
+    dline int, dcol int, dexpr int, dfirst int, dafter int) int {
+    if (id < 0 || id >= ast_type_count || child < 0 || child >= ast_type_count
+        || len < -1 || dsym < -1 || dline < 0 || dcol < 0
+        || (dexpr != 0 && dexpr != 1)) {
+        return errors.fail("内部错误：数组类型语法节点无效")
+    }
+    ast_type_nodes[id].child = child
+    ast_type_nodes[id].len = len
+    ast_type_nodes[id].deferred_sym = dsym
+    ast_type_nodes[id].deferred_line = dline
+    ast_type_nodes[id].deferred_col = dcol
+    ast_type_nodes[id].deferred_expr = dexpr
+    ast_type_nodes[id].deferred_first = dfirst
+    ast_type_nodes[id].deferred_after = dafter
+    return 0
+}
+
+// ast_type_set_fn：写入函数返回类型、参数区间与调用约定。
+pub fn ast_type_set_fn(id int, child int, param_first int, param_n int, abi int) int {
+    if (id < 0 || id >= ast_type_count || child < -1 || child >= ast_type_count
+        || param_first < -1 || param_n < 0 || abi < 0) {
+        return errors.fail("内部错误：函数类型语法节点无效")
+    }
+    ast_type_nodes[id].child = child
+    ast_type_nodes[id].param_first = param_first
+    ast_type_nodes[id].param_n = param_n
+    ast_type_nodes[id].abi = abi
+    return 0
+}
+
+// ast_type_get：按编号读取类型语法节点；越界返回零节点（kind=0）。
+pub fn ast_type_get(id int) AstType {
+    if (id < 0 || id >= ast_type_count) {
+        let empty AstType
+        return empty
+    }
+    return ast_type_nodes[id]
+}
+
+// ast_type_param_add：追加一个 fn 参数类型节点编号，返回参数表下标。
+pub fn ast_type_param_add(tid int) int {
+    if (tid < 0 || tid >= ast_type_count) {
+        return errors.fail("内部错误：函数类型参数节点无效")
+    }
+    if (ast_type_param_count == ast_type_param_cap && ast_type_param_grow() != 0) {
+        return -1
+    }
+    let idx int = ast_type_param_count
+    ast_type_params[idx] = tid
+    ast_type_param_count += 1
+    return idx
+}
+
+// ast_type_param_get：读取 fn 参数表中的一个节点编号。
+pub fn ast_type_param_get(index int) int {
+    if (index < 0 || index >= ast_type_param_count) { return -1 }
+    return ast_type_params[index]
+}
+
+// ast_type_reset：释放类型语法 arena 与参数表。
+pub fn ast_type_reset() void {
+    if (ast_type_nodes != 0) { free(ast_type_nodes.to_type(*void)) }
+    if (ast_type_params != 0) { free(ast_type_params.to_type(*void)) }
+    ast_type_nodes = 0
+    ast_type_count = 0
+    ast_type_cap = 0
+    ast_type_params = 0
+    ast_type_param_count = 0
+    ast_type_param_cap = 0
 }
 
 // ast_expr_reset：开始一个 check worker 的表达式树收集。

@@ -1,0 +1,361 @@
+module check
+import support
+import token
+
+// ============================================================================
+// check/const_eval.yh —— 数组长度表达式的 check 侧求值窄口
+//
+// 职责：把 `[...]T` 数组长度从 parse 的内联语义动作里解耦出来。parse 只把
+// 长度 token 区间交给本模块，由这里判定四种处理模式：
+//   ① DEFER_SYM：单个尚未就绪的整数 const 名字——延迟到布局期按符号求值；
+//   ② DEFER_EXPR：当前遍无法立即求值（pass1 的 `$`/sizeof、未就绪 const）——
+//      登记到布局 pending，由布局子遍按 token 区间求值；
+//   ③ VALUE：纯常量算术（字面量/就绪 const/一元/二元/括号）——立即折叠；
+//   ④ EXPR：求值窄口不覆盖的形式——交回表达式解析器原路径兜底。
+//
+// 折叠语义复用现有内核：字面量解析走 sem_parse_number，一元/二元走
+// sem_fold_const_unary/binop（support.vk_fold_*），字面量适配与比较结果
+// 类型与 sem_binop 的折叠分支逐项一致。窄口不覆盖或扫描中途发现不认识的
+// 形式时一律返回 EXPR 回退，不产生任何新诊断，保证产物与诊断逐字节不变。
+// ============================================================================
+
+// 返回模式码（parse 侧按数值判分支，故此处不出具名常量以免成对维护）：
+//   0 = 交给表达式解析器兜底（游标不动）
+//   1 = 已折叠求值，*out_len 有效
+//   2 = 登记布局 pending（token 区间）
+//   3 = 登记布局 pending（未就绪 const 符号）
+//   -1 = 已报错
+
+// type_array_length：数组长度 token 区间 [first, after) 的统一入口。
+// 返回模式码；返回 -1 表示已报错（调用方直接终止）。
+// 约定：不覆盖任何形式时游标保持原位（EXPR 兜底要求从 first 重新解析）；
+// 已报错时游标停在出错位置，与旧表达式路径的诊断位置一致。
+pub fn type_array_length(first int, after int, out_len *i64, out_sym *int) int {
+    // ① 单个名字且是尚未就绪的整数常量：延迟到布局期按符号求值。
+    //    （type_syntax_length_sym 只对 SYM_CONST && !const_ready 的整数类型返回符号。）
+    if (after - first == 1 && token.ctx().tokens[first].kind == token.TOK_IDENT) {
+        let sym int = type_syntax_length_sym(token.ctx().tokens[first].start,
+            token.ctx().tokens[first].len)
+        if (sym >= 0) {
+            *out_sym = sym
+            return 3  // 延迟符号
+        }
+    }
+    // ② 当前遍无法立即求值：pass1 的 `$`/sizeof（CT 正文 pass2 才捕获）与
+    //    任何遍的未就绪 const（值在全局子遍才就绪，而长度在布局子遍就要用）。
+    if (len_defer_needed(first, after) != 0) { return 2 }  // 延迟区间
+    // ③ 纯常量算术：立即折叠求值。
+    let saved int = token.ctx().pos
+    let r support.Res
+    let st int = len_eval(first, after, &r)
+    if (st == -1) { return -1 }
+    if (st == 0 && r.is_const != 0) {
+        *out_len = r.ival
+        token.ctx().pos = saved
+        return 1  // 立即值
+    }
+    // ④ 求值窄口不覆盖（`$`调用、sizeof、浮点、字符串、&&/||、三目、调用/
+    //    下标后缀、模块限定名等）：交回表达式解析器原路径兜底。
+    token.ctx().pos = saved
+    return 0  // 表达式兜底
+}
+
+// len_defer_needed：当前遍下必须延迟到布局期求值的长度表达式判定。
+// ① 含 `$` CT 调用或 `sizeof`：仅 pass1 延迟——CT 正文在 pass2 捕获，
+//    之后的 pass 直接折叠（否则后续 pass 会重新拿回长度仍为 -2 的 pending
+//    类型项，数组字面量个数检查会误报）。
+// ② 引用未就绪 const：任何遍都延迟——普通 `const N int = 3;` 的值原本只在
+//    全局子遍就绪，而 `[N]int` 在布局子遍就定长。
+fn len_defer_needed(first int, after int) int {
+    let pass1 int = (support.session().pass == 1).to_type(int)
+    let i int = first
+    for i < after {
+        let kind int = token.ctx().tokens[i].kind
+        if (kind == token.TK_DOLLAR || kind == token.TK_SIZEOF) {
+            if (pass1 != 0) { return 1 }
+        } else if (kind == token.TOK_IDENT
+            && (i == first || (token.ctx().tokens[i - 1].kind != token.TK_DOT
+                && token.ctx().tokens[i - 1].kind != token.TK_DOLLAR))) {
+            if (len_ident_unready(i) != 0) { return 1 }
+        }
+        i += 1
+    }
+    return 0
+}
+
+// len_ident_unready：位置 i 的标识符是否为尚未就绪的编译期常量。
+// 成员/模块限定名（前一个是 .）与 `$` 后的名字不是独立引用，不算。
+fn len_ident_unready(i int) int {
+    let sym int = support.sym_lookup(token.ctx().tokens[i].start, token.ctx().tokens[i].len)
+    if (sym >= 0 && sym < support.ms().sym_n
+        && support.ms().syms[sym].kind == support.SYM_CONST
+        && support.ms().syms[sym].const_ready == 0) { return 1 }
+    return 0
+}
+
+// len_eval：按表达式优先级链折叠整个长度区间。扫描下标的推进与旧表达式
+// 解析器的游标一一对应，折叠点报错位置因此与旧路径逐字节一致。
+// 返回 0 成功；-1 已报错；-2 窄口不覆盖（调用方回退表达式解析）。
+fn len_eval(first int, after int, r *support.Res) int {
+    let i int = first
+    let st int = len_bor(&i, after, r)
+    if (st != 0) { return st }
+    if (i != after) { return -2 }  // 区间内还有未消费 token（杂散/不识别）：回退
+    return 0
+}
+
+// len_bor：a | b（优先级链最外层，与 parse_expr 的 parse_bit_or 对应）。
+// `||`/`&&`/三目不进窄口：留在区间里由顶层 i != after 回退。
+fn len_bor(i *int, after int, r *support.Res) int {
+    let st int = len_bxor(i, after, r)
+    if (st != 0) { return st }
+    for *i < after {
+        let k int = token.ctx().tokens[*i].kind
+        if (k != token.TK_PIPE) { return 0 }
+        *i += 1
+        let rhs support.Res
+        let st2 int = len_bxor(i, after, &rhs)
+        if (st2 != 0) { return st2 }
+        if (len_fold_binop(token.TK_PIPE, r, &rhs, *i) != 0) { return -1 }
+    }
+    return 0
+}
+
+// len_bxor：a ^ b。
+fn len_bxor(i *int, after int, r *support.Res) int {
+    let st int = len_band(i, after, r)
+    if (st != 0) { return st }
+    for *i < after {
+        let k int = token.ctx().tokens[*i].kind
+        if (k != token.TK_CARET) { return 0 }
+        *i += 1
+        let rhs support.Res
+        let st2 int = len_band(i, after, &rhs)
+        if (st2 != 0) { return st2 }
+        if (len_fold_binop(token.TK_CARET, r, &rhs, *i) != 0) { return -1 }
+    }
+    return 0
+}
+
+// len_band：a & b。
+fn len_band(i *int, after int, r *support.Res) int {
+    let st int = len_eq(i, after, r)
+    if (st != 0) { return st }
+    for *i < after {
+        let k int = token.ctx().tokens[*i].kind
+        if (k != token.TK_AMP) { return 0 }
+        *i += 1
+        let rhs support.Res
+        let st2 int = len_eq(i, after, &rhs)
+        if (st2 != 0) { return st2 }
+        if (len_fold_binop(token.TK_AMP, r, &rhs, *i) != 0) { return -1 }
+    }
+    return 0
+}
+
+// len_eq：a == b、a != b。
+fn len_eq(i *int, after int, r *support.Res) int {
+    let st int = len_rel(i, after, r)
+    if (st != 0) { return st }
+    for *i < after {
+        let k int = token.ctx().tokens[*i].kind
+        if (k != token.TK_EQEQ && k != token.TK_NEQ) { return 0 }
+        let op int = k
+        *i += 1
+        let rhs support.Res
+        let st2 int = len_rel(i, after, &rhs)
+        if (st2 != 0) { return st2 }
+        if (len_fold_binop(op, r, &rhs, *i) != 0) { return -1 }
+    }
+    return 0
+}
+
+// len_rel：a < b、a <= b、a > b、a >= b。
+fn len_rel(i *int, after int, r *support.Res) int {
+    let st int = len_shift(i, after, r)
+    if (st != 0) { return st }
+    for *i < after {
+        let k int = token.ctx().tokens[*i].kind
+        if (k != token.TK_LT && k != token.TK_LEQ && k != token.TK_GT && k != token.TK_GEQ) { return 0 }
+        let op int = k
+        *i += 1
+        let rhs support.Res
+        let st2 int = len_shift(i, after, &rhs)
+        if (st2 != 0) { return st2 }
+        if (len_fold_binop(op, r, &rhs, *i) != 0) { return -1 }
+    }
+    return 0
+}
+
+// len_shift：a << b、a >> b。
+fn len_shift(i *int, after int, r *support.Res) int {
+    let st int = len_add(i, after, r)
+    if (st != 0) { return st }
+    for *i < after {
+        let k int = token.ctx().tokens[*i].kind
+        if (k != token.TK_LSHIFT && k != token.TK_RSHIFT) { return 0 }
+        let op int = k
+        *i += 1
+        let rhs support.Res
+        let st2 int = len_add(i, after, &rhs)
+        if (st2 != 0) { return st2 }
+        if (len_fold_binop(op, r, &rhs, *i) != 0) { return -1 }
+    }
+    return 0
+}
+
+// len_add：a + b、a - b。
+fn len_add(i *int, after int, r *support.Res) int {
+    let st int = len_mul(i, after, r)
+    if (st != 0) { return st }
+    for *i < after {
+        let k int = token.ctx().tokens[*i].kind
+        if (k != token.TK_PLUS && k != token.TK_MINUS) { return 0 }
+        let op int = k
+        *i += 1
+        let rhs support.Res
+        let st2 int = len_mul(i, after, &rhs)
+        if (st2 != 0) { return st2 }
+        if (len_fold_binop(op, r, &rhs, *i) != 0) { return -1 }
+    }
+    return 0
+}
+
+// len_mul：a * b、a / b、a % b。
+fn len_mul(i *int, after int, r *support.Res) int {
+    let st int = len_unary(i, after, r)
+    if (st != 0) { return st }
+    for *i < after {
+        let k int = token.ctx().tokens[*i].kind
+        if (k != token.TK_STAR && k != token.TK_SLASH && k != token.TK_PERCENT) { return 0 }
+        let op int = k
+        *i += 1
+        let rhs support.Res
+        let st2 int = len_unary(i, after, &rhs)
+        if (st2 != 0) { return st2 }
+        if (len_fold_binop(op, r, &rhs, *i) != 0) { return -1 }
+    }
+    return 0
+}
+
+// len_fold_binop：常量二元折叠。字面量适配与提升类型同 sem_binop 折叠分支；
+// 求值内核与错误诊断走 sem_fold_const_binop（support.vk_fold_binop），除零、
+// 移位越界、类型宽度等语义逐字节一致。比较结果保持 BOOL，其余用提升后类型。
+fn len_fold_binop(op int, lhs *support.Res, rhs *support.Res, pos_now int) int {
+    // 字面量适配：一侧是字面量时借用另一侧整数类型
+    if (rhs.is_lit != 0 && support.ty_is_scalar(lhs.type_id) != 0
+        && support.ty_is_integer(lhs.type_id) != 0 && support.ty_is_integer(rhs.type_id) != 0) {
+        if (support.sem_lit_fits(lhs.type_id, rhs.ival) != 0) {
+            rhs.type_id = lhs.type_id
+        }
+    }
+    if (lhs.is_lit != 0 && support.ty_is_scalar(rhs.type_id) != 0
+        && support.ty_is_integer(lhs.type_id) != 0 && support.ty_is_integer(rhs.type_id) != 0) {
+        if (support.sem_lit_fits(rhs.type_id, lhs.ival) != 0) {
+            lhs.type_id = rhs.type_id
+        }
+    }
+    let tid int = sem_promote(lhs.type_id, rhs.type_id)
+    // 求值窄口只收整数叶子；浮点/指针已在源头回退，这里不再分支。
+    let value i64 = 0
+    let saved int = token.ctx().pos
+    token.ctx().pos = pos_now
+    let st int = sem_fold_const_binop(op, tid, lhs.ival, rhs.ival, &value)
+    token.ctx().pos = saved
+    if (st != 0) { return -1 }
+    let is_cmp int = 0
+    if (op == token.TK_EQEQ || op == token.TK_NEQ || op == token.TK_LT
+        || op == token.TK_LEQ || op == token.TK_GT || op == token.TK_GEQ) { is_cmp = 1 }
+    if (is_cmp != 0) {
+        support.sem_res_const(lhs, support.TY_BOOL, value)
+    } else {
+        support.sem_res_const(lhs, tid, value)
+    }
+    return 0
+}
+
+// len_unary：一元 + - ! ~（与 parse_unary 的折叠运算集一致）；* 解引用、
+// & 取地址不进窄口，回退原路径。操作数折叠语义与 sem_unary 常量整数分支
+// 逐项一致：BOOL 升为 int、负字面量超宽先升 i64，结果保留字面量性。
+fn len_unary(i *int, after int, r *support.Res) int {
+    if (*i >= after) { return -2 }
+    let k int = token.ctx().tokens[*i].kind
+    if (k == token.TK_MINUS || k == token.TK_PLUS || k == token.TK_BANG || k == token.TK_TILDE) {
+        *i += 1
+        let st int = len_unary(i, after, r)
+        if (st != 0) { return st }
+        // 常量折叠分支：浮点叶子已在源头排除，非整数（BOOL 等）回退。
+        if (support.ty_is_integer(r.type_id) == 0) { return -2 }
+        let unary_type int = r.type_id
+        if (support.ms().types[unary_type].kind == support.TY_BOOL) { unary_type = support.TY_I32 }
+        if (k == token.TK_MINUS && r.is_lit != 0 && r.ival >= 0) {
+            // 超出当前整数宽度的负数字面量先提升为 i64，保留完整值供适配。
+            let negative i64 = 0 - r.ival
+            if (support.sem_lit_fits(unary_type, negative) == 0
+                && support.sem_lit_fits(support.TY_I64, negative) != 0) {
+                unary_type = support.TY_I64
+            }
+        }
+        let value i64 = 0
+        let saved int = token.ctx().pos
+        token.ctx().pos = *i
+        let st2 int = sem_fold_const_unary(k, unary_type, r.ival, r.is_lit, &value)
+        token.ctx().pos = saved
+        if (st2 != 0) { return -1 }
+        r.ival = value
+        r.type_id = unary_type
+        r.sym = -1
+        return 0
+    }
+    return len_primary(i, after, r)
+}
+
+// len_primary：初等表达式——整数字面量、括号、就绪标量 const 名字。
+// 其余（字符串/字符/浮点/bool/`$`/sizeof/成员与模块限定/调用后缀）一律 -2
+// 回退，由表达式解析器给出与旧路径一致的诊断。
+fn len_primary(i *int, after int, r *support.Res) int {
+    if (*i >= after) { return -2 }
+    let t token.Tok = token.ctx().tokens[*i]
+    if (t.kind == token.TK_INT) {
+        // 整数字面量：复用 sem_number 的解析内核；浮点形态与大字面量回退。
+        if (sem_num_is_float(t.start, t.len) != 0) { return -2 }
+        if (sem_parse_number(t.start, t.len) != 0) { return -2 }
+        if (support.fc().c_fold_big != 0) { return -2 }
+        r.is_lit = 1
+        r.is_const = 1
+        r.type_id = support.TY_I32
+        r.ival = support.fc().c_fold_ival
+        *i += 1
+        return 0
+    }
+    if (t.kind == token.TK_LPAREN) {
+        *i += 1
+        let st int = len_bor(i, after, r)
+        if (st != 0) { return st }
+        if (*i >= after || token.ctx().tokens[*i].kind != token.TK_RPAREN) { return -2 }
+        *i += 1
+        return 0
+    }
+    if (t.kind == token.TOK_IDENT) {
+        // 模块限定名/成员访问不在窄口内（前看 . 决定），交给原路径。
+        if (*i + 1 < after && token.ctx().tokens[*i + 1].kind == token.TK_DOT) { return -2 }
+        let sym int = support.sym_lookup(t.start, t.len)
+        if (sym < 0 || sym >= support.ms().sym_n) { return -2 }
+        // 只收有标量值的就绪 const：与 sem_ident_val 的取值分支字段一致。
+        if (support.ms().syms[sym].kind != support.SYM_CONST) { return -2 }
+        let ck int = support.ms().types[support.ms().syms[sym].type_id].kind
+        if (ck == support.TY_STRUCT || ck == support.TY_ARRAY
+            || ck == support.TY_SLICE || ck == support.TY_UNION) { return -2 }
+        if ((support.ms().syms[sym].flags & (support.F_ENUM_META | support.F_FIELD_META)) != 0) { return -2 }
+        if (support.ms().syms[sym].const_ready == 0) { return -2 }  // 防御：入口 defer 已拦
+        if ((support.ms().syms[sym].flags & support.F_ADDR) != 0) { return -2 }
+        if (support.ty_is_float(support.ms().syms[sym].type_id) != 0) { return -2 }
+        r.sym = sym
+        r.type_id = support.ms().syms[sym].type_id
+        r.is_const = 1
+        r.ival = support.ms().syms[sym].cval
+        *i += 1
+        return 0
+    }
+    return -2
+}

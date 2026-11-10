@@ -97,6 +97,7 @@ pub struct SessionCtx {
     test_mode int // 1 = yh test 模式；解析测试体语义并跳过生产缓存
     legacy_system int // 1 = 兼容配置显式开放 system
     ast_capture int // 1 = worker 同遍历记录表达式、语句和声明 AST
+    syntax_ast int // 1 = 纯语法 AST 解析模式（S4-2 地基，内部开关）
     active_file int // 当前前端快照文件编号，AST 源映射使用
     data_label int // 匿名数据标签计数（字符串字面量）；0 保留为 NULL
     front_checked int // 1：受检前端阶段（front_stage.yh 唯一读写点）
@@ -286,7 +287,6 @@ pub struct ModelStore {
     // —— 函数签名表（FN 类型通过 sub 引用签名号）——
     sig_abi *int // 调用约定，参与函数类型判等
     sig_acap int // ABI 表容量
-    type_abi int // 当前解析的函数类型默认 ABI，签名结束后恢复
     sig_ret *int // 返回类型
     sig_np *int // 固定参数个数
     sig_vararg *int // 1 = 末尾裸变参（仅 prelude）
@@ -433,6 +433,28 @@ pub struct FrontCtx {
     c_end_tmp_off int // 区间终点临时槽（for-in 区间用）
     c_brk_stk *int
     c_cnt_stk *int
+}
+
+// res_reset：Res 的纯字段清零（type_id 置为 tid，其余回到"未记录"初值）。
+// 与 Res 同层定义，check.sem_res_reset 委托到此处；parse 的纯语法模式
+// （syntax_ast）也用它清结果，避免 parse 对 check 的仅重置引用。
+pub fn res_reset(r *Res, tid int) int {
+    r.type_id = tid
+    r.is_const = 0
+    r.ival = 0
+    r.sym = -1
+    r.is_lit = 0
+    r.lit_big = 0
+    r.fval_bits = 0
+    r.ast_id = -1
+    r.layout_type_id = -1
+    r.ct_diag = 0
+    r.ct_diag_expr = -1
+    r.ct_diag_line = 0
+    r.ct_diag_col = 0
+    r.ct_diag_msg_start = -1
+    r.ct_diag_msg_len = 0
+    return 0
 }
 
 // ctl：构建控制位窄口；返回单例中的 ctl 指针。
@@ -841,7 +863,6 @@ pub fn mstore_reset() void {
     g_model.field_cap = 0
     g_model.sig_abi = 0
     g_model.sig_acap = 0
-    g_model.type_abi = 0
     g_model.sig_ret = 0
     g_model.sig_np = 0
     g_model.sig_vararg = 0
@@ -1386,6 +1407,30 @@ pub fn ty_lookup_name(start int, n int) int {
     return -1
 }
 
+// ty_lookup_name_pool：按名字池偏移查类型；语义同 ty_lookup_name。
+// 供 check 解析已 intern 的类型语法节点，不依赖当前源文件偏移。
+pub fn ty_lookup_name_pool(off int, n int) int {
+    let i int = ms().name_n - 1
+    for i >= 0 {
+        if (ms().names[i].name_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[ms().names[i].name_off + j] != pool_ctx().data[off + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return ms().names[i].type_id
+            }
+        }
+        i -= 1
+    }
+    return -1
+}
+
 // mod_file_binding：当前文件导入表中查绑定名，返回 ModInfo 下标；无 -1。
 pub fn mod_file_binding(start int, n int) int {
     if (fs().import_mod == 0) {
@@ -1399,6 +1444,33 @@ pub fn mod_file_binding(start int, n int) int {
             let j int = 0
             for j < n {
                 if (pool_ctx().data[fs().imports[i].alias_off + j] != src_ctx().data[start + j]) {
+                    match = 0
+                    break
+                }
+                j += 1
+            }
+            if (match != 0) {
+                return fs().import_mod[i]
+            }
+        }
+        i += 1
+    }
+    return -1
+}
+
+// mod_file_binding_pool：按名字池偏移查当前文件导入绑定；语义同 mod_file_binding。
+pub fn mod_file_binding_pool(off int, n int) int {
+    if (fs().import_mod == 0) {
+        return -1
+    }
+    let i int = 0
+    for i < fs().import_n {
+        let ent ImportEnt = fs().imports[i]
+        if (fs().import_mod[i] >= 0 && ent.alias_len == n) {
+            let match int = 1
+            let j int = 0
+            for j < n {
+                if (pool_ctx().data[ent.alias_off + j] != pool_ctx().data[off + j]) {
                     match = 0
                     break
                 }

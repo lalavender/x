@@ -1,0 +1,246 @@
+module check
+import ast
+import comptime
+import errors
+import proj
+import support
+import token
+
+// ============================================================================
+// type_syntax.yh —— 类型引用语法节点的解析（S4 垂直切片）
+//
+// parse 只把 typeRef 的 token 结构写成 ast.AstType（名字 intern 进名字池），
+// 这里负责所有语义解析：建类型表编号、数组长度布局、函数调用约定与 C ABI
+// 校验。实现从 parse/parse_type.yh 原样搬入，解析时机仍紧随该次类型解析，
+// 因此诊断位置用节点里记录的行列复现，产物与搬迁前等价。
+//
+// 明确不做：不遍历表达式 AST、不改 lower 契约、不做错误恢复。
+// ============================================================================
+
+// type_syntax_builtin：内建类型 token → 类型表编号。
+fn type_syntax_builtin(k int) int {
+    if (k == token.TK_INT) { return support.TY_I32 }
+    if (k == token.TK_I8) { return support.TY_I8 }
+    if (k == token.TK_I16) { return support.TY_I16 }
+    if (k == token.TK_I32) { return support.TY_I32 }
+    if (k == token.TK_I64) { return support.TY_I64 }
+    if (k == token.TK_U8) { return support.TY_U8 }
+    if (k == token.TK_U16) { return support.TY_U16 }
+    if (k == token.TK_U32) { return support.TY_U32 }
+    if (k == token.TK_U64) { return support.TY_U64 }
+    if (k == token.TK_F32) { return support.TY_F32 }
+    if (k == token.TK_F64) { return support.TY_F64 }
+    if (k == token.TK_BOOL) { return support.TY_BOOL }
+    if (k == token.TK_CHAR) { return support.TY_CHAR }
+    return support.TY_VOID
+}
+
+// type_syntax_named：解析单段或模块限定（m.T）类型名。
+// 诊断位置与旧 parse 逐字一致：限定错误报类型名 token，未知类型报解析结束 token。
+fn type_syntax_named(t ast.AstType) int {
+    if (t.qual_off >= 0) {
+        if (support.module_mode() == 0) {
+            return errors.err_lc(t.err_line, t.err_col, "限定类型只在模块模式可用")
+        }
+        let qb int = support.mod_file_binding_pool(t.qual_off, t.qual_len)
+        if (qb < 0) {
+            return errors.err_lc(t.line, t.col, "点号左侧不是导入的模块名")
+        }
+        let qe int = support.mod_ns_lookup_pool(qb, t.name_off, t.name_len, 1)
+        if (qe < 0) {
+            return errors.err_lc(t.line, t.col, "模块没有导出该类型")
+        }
+        let qi int = 0
+        for qi < support.fs().import_n {
+            if (support.fs().import_mod[qi] == qb) {
+                support.fs().import_used[qi] = 1
+                break
+            }
+            qi += 1
+        }
+        return support.fs().mods[qb].ns[qe].tid
+    }
+    let tid int = support.ty_lookup_name_pool(t.name_off, t.name_len)
+    if (tid < 0) {
+        return errors.err_lc(t.err_line, t.err_col, "未知类型（类型必须先定义）")
+    }
+    return tid
+}
+
+// type_syntax_array：解析数组元素类型后按长度来源建 array/slice 类型。
+// 长度求值仍发生在上游 parse（表达式语义尚未外置），这里只做类型构造与
+// 延迟布局请求的提交。
+fn type_syntax_array(t ast.AstType) int {
+    let elem int = type_syntax_resolve(t.child)
+    if (elem < 0) {
+        return -1
+    }
+    if (t.deferred_expr != 0) {
+        return comptime.ct_layout_array_expr(elem, t.file_id, proj.file_count(),
+            t.deferred_first, t.deferred_after, t.deferred_line, t.deferred_col)
+    }
+    if (t.deferred_sym >= 0) {
+        return comptime.ct_layout_array(elem, -1, t.deferred_sym,
+            t.deferred_line, t.deferred_col)
+    }
+    if (t.len < 0) {
+        return errors.fail("内部错误：数组类型缺少长度")
+    }
+    if (support.ms().types[elem].size < 0) {
+        return comptime.ct_layout_array(elem, t.len, -1, t.line, t.col)
+    }
+    return ty_array(elem, t.len)
+}
+
+// type_syntax_fn：解析参数/返回类型并构造函数类型；C ABI 形态在此校验。
+// 先解析完全部参数与返回类型，再取参数池起点并统一追加——嵌套 fn 类型
+// 在这期间追加的内层参数不能落进外层参数区间（与旧 parse 顺序一致）。
+fn type_syntax_fn(t ast.AstType) int {
+    if (t.param_n > 32) {
+        return errors.fail("内部错误：函数类型参数过多")
+    }
+    let pts [32]int
+    let i int = 0
+    for i < t.param_n {
+        let pt int = type_syntax_resolve(ast.ast_type_param_get(t.param_first + i))
+        if (pt < 0) {
+            return -1
+        }
+        pts[i] = pt
+        i += 1
+    }
+    let ret int = support.TY_VOID
+    if (t.child >= 0) {
+        ret = type_syntax_resolve(t.child)
+        if (ret < 0) {
+            return -1
+        }
+    }
+    let first int = support.ms().sigparam_n
+    i = 0
+    for i < t.param_n {
+        if (ty_sig_param(pts[i]) != 0) {
+            return -1
+        }
+        i += 1
+    }
+    let ftid int = ty_fn_abi(ret, first, t.param_n, 0, t.abi)
+    if (ftid >= 0 && t.abi == support.ABI_C && ty_cabi_param(ftid) == 0) {
+        return errors.err_lc(t.err_line, t.err_col, "C ABI 不支持该函数类型")
+    }
+    return ftid
+}
+
+// type_syntax_resolve：按节点类别解析一个类型语法节点，返回类型表编号。
+fn type_syntax_resolve(id int) int {
+    let t ast.AstType = ast.ast_type_get(id)
+    if (id < 0 || t.kind == 0) {
+        return errors.fail("内部错误：类型语法节点无效")
+    }
+    if (t.kind == ast.AST_TYPE_BUILTIN) {
+        return type_syntax_builtin(t.op)
+    }
+    if (t.kind == ast.AST_TYPE_NAMED) {
+        return type_syntax_named(t)
+    }
+    if (t.kind == ast.AST_TYPE_PTR) {
+        let elem int = type_syntax_resolve(t.child)
+        if (elem < 0) {
+            return -1
+        }
+        return ty_ptr(elem)
+    }
+    if (t.kind == ast.AST_TYPE_SLICE) {
+        let elem int = type_syntax_resolve(t.child)
+        if (elem < 0) {
+            return -1
+        }
+        return ty_slice(elem)
+    }
+    if (t.kind == ast.AST_TYPE_ARRAY) {
+        return type_syntax_array(t)
+    }
+    if (t.kind == ast.AST_TYPE_FN) {
+        return type_syntax_fn(t)
+    }
+    return errors.fail("内部错误：未知类型语法节点")
+}
+
+// type_syntax_length_sym：数组长度写成单个标识符时，若是尚未就绪的整数
+// 常量则返回符号，供 parse 登记延迟布局请求；否则 -1。
+fn type_syntax_length_sym(start int, n int) int {
+    let sym int = support.sym_lookup(start, n)
+    if (sym >= 0 && sym < support.ms().sym_n
+        && support.ms().syms[sym].kind == support.SYM_CONST
+        && support.ms().syms[sym].const_ready == 0
+        && support.ty_is_integer(support.ms().syms[sym].type_id) != 0) {
+        return sym
+    }
+    return -1
+}
+
+// type_syntax_sizeof_path：sizeof 操作数是 `*`链 + 名字路径时，判断它是否
+// 指向类型并返回类型编号；不是类型路径返回 -2（调用方回退表达式解析）。
+// 这里只查类型名（类型优先），值名字/成员访问仍留给表达式路径，避免复制
+// 表达式语义与诊断。
+fn type_syntax_sizeof_path(first int, after int) int {
+    if (first < 0 || after <= first || after > token.ctx().count) {
+        return -2
+    }
+    let i int = first
+    let stars int = 0
+    for i < after && token.ctx().tokens[i].kind == token.TK_STAR {
+        stars += 1
+        i += 1
+    }
+    if (i >= after || token.ctx().tokens[i].kind != token.TOK_IDENT) {
+        return -2
+    }
+    let name_start int = token.ctx().tokens[i].start
+    let name_len int = token.ctx().tokens[i].len
+    i += 1
+    let tid int = -1
+    if (i < after && token.ctx().tokens[i].kind == token.TK_DOT) {
+        i += 1
+        if (i >= after || token.ctx().tokens[i].kind != token.TOK_IDENT) {
+            return -2
+        }
+        let tstart int = token.ctx().tokens[i].start
+        let tlen int = token.ctx().tokens[i].len
+        i += 1
+        if (i != after) {
+            return -2
+        }
+        let qb int = support.mod_file_binding(name_start, name_len)
+        if (qb < 0) {
+            return -2
+        }
+        let qe int = support.mod_ns_lookup(qb, tstart, tlen, 1)
+        if (qe < 0) {
+            return -2
+        }
+        let qi int = 0
+        for qi < support.fs().import_n {
+            if (support.fs().import_mod[qi] == qb) {
+                support.fs().import_used[qi] = 1
+                break
+            }
+            qi += 1
+        }
+        tid = support.fs().mods[qb].ns[qe].tid
+    } else {
+        if (i != after) {
+            return -2
+        }
+        tid = support.ty_lookup_name(name_start, name_len)
+        if (tid < 0) {
+            return -2
+        }
+    }
+    let s int = 0
+    for s < stars {
+        tid = ty_ptr(tid)
+        s += 1
+    }
+    return tid
+}
