@@ -1,5 +1,7 @@
 module support
 
+import errors
+
 // ============================================================================
 // api.yh —— support 模块公开面（pub 函数/结构体与 @[extern] 声明）
 //
@@ -56,17 +58,6 @@ pub struct PoolCtx {
     data *u8 // intern 池（malloc；倍增扩容）
     length int // 已用字节数（含每个名字的结尾 NUL）
     cap int // 已分配容量
-}
-
-// DiagCtx：诊断的进程级开关与计数。
-// spec>0 表示推测解析，诊断静默且不计数；errors 是已报告错误数；
-// line_bias 是 .s.ct 来源映射的行号偏移；ct_* 是编译期 for 展开轨迹。
-pub struct DiagCtx {
-    spec int // 推测解析深度（>0 静默）
-    errors int // 已报告错误数
-    line_bias int // 诊断行号映射偏移
-    ct_depth int // 当前编译期 for 展开深度
-    ct_values [32]int // 外层到内层的展开值
 }
 
 // TargetInfo：完整代码生成目标身份；字符串借用编译器静态常量，不拥有堆内存。
@@ -130,7 +121,6 @@ pub struct SupportCtx {
     ctl BuildCtl
     src SourceCtx
     pool PoolCtx
-    diag DiagCtx
     session SessionCtx
     cfg *TargetCfg
     fallback TargetCfg
@@ -465,9 +455,9 @@ pub fn session() *SessionCtx {
     return &g_support.session
 }
 
-// diag：诊断上下文窄口；返回单例中的 diag 指针。
-pub fn diag() *DiagCtx {
-    return &g_support.diag
+// diag：诊断上下文窄口（委托 errors；调用点迁完后删除本委托）。
+pub fn diag() *errors.DiagCtx {
+    return errors.diag()
 }
 
 // data_label：当前可用的下一个标签号。
@@ -615,8 +605,7 @@ pub fn write_all(fd int, buf *u8, n int) int {
 pub fn alloc(size u64) *u8 {
     let p *u8 = malloc(size).to_type(*u8)
     if (p == 0) {
-        let msg *char = "yh: 内存不足，无法继续\n"
-        write_all(2, msg.to_type(*u8), 32)
+        errors.fail("内存不足，无法继续")
         exit(1)
     }
     return p
@@ -688,29 +677,14 @@ pub fn append_int_cap(buf *u8, cap int, n int, v int) int {
     return n
 }
 
-// fail：报告一条不带位置的编译器级错误（打开失败、内存不足等），返回 -1。
-// 写 stderr；不分配、不检查 msg 非空（调用方保证是静态/池内 NUL 串）。
+// fail：不带位置错误诊断（委托 errors；调用点迁完后删除本委托）。
 pub fn fail(msg *char) int {
-    let buf [512]u8
-    let n int = 0
-    n = append_str_cap(buf, 512, n, "yh: ")
-    n = append_str_cap(buf, 512, n, msg)
-    n = append_byte_cap(buf, 512, n, '\n')
-    write_all(2, buf, n)
-    return -1
+    return errors.fail(msg)
 }
 
-// fail_path：报告与源文件路径相关的错误（如无法打开），返回 -1。
-// 写 stderr；不分配、不检查 path 非空（调用方保证是 NUL 串）。
+// fail_path：带路径错误诊断（委托 errors；调用点迁完后删除本委托）。
 pub fn fail_path(msg *char, path *char) int {
-    let buf [512]u8
-    let n int = 0
-    n = append_str_cap(buf, 512, n, "yh: ")
-    n = append_str_cap(buf, 512, n, msg)
-    n = append_str_cap(buf, 512, n, path)
-    n = append_byte_cap(buf, 512, n, '\n')
-    write_all(2, buf, n)
-    return -1
+    return errors.fail_path(msg, path)
 }
 
 // cstr_eq：按字节比较两个 NUL 结尾字符串，相等返回 1、不等返回 0。
@@ -773,47 +747,14 @@ pub fn hexval(b u8) int {
     return ((b - 'A') + 10).to_type(int)
 }
 
-// err_lc：报告一条带位置的错误（1 基行列），计一次错误并返回 -1。
-// 推测解析期间静默：不打印、不计数，仅以返回值示意失败。
+// err_lc：带位置错误诊断（委托 errors；调用点迁完后删除本委托）。
 pub fn err_lc(line int, col int, msg *char) int {
-    if (diag().spec > 0) {
-        return -1
-    }
-    diag().errors += 1
-    let buf [2048]u8
-    let limit int = 2047
-    let n int = 0
-    n = append_str_limit(buf, n, limit, src_ctx().path)
-    n = append_byte(buf, n, ':')
-    n = append_int(buf, n, line + diag().line_bias)
-    n = append_byte(buf, n, ':')
-    n = append_int(buf, n, col)
-    n = append_str_limit(buf, n, limit, ": 错误: ")
-    n = append_str_limit(buf, n, limit, msg)
-    n = append_ct_expand_trace(buf, n, limit)
-    if (n < limit) { n = append_byte(buf, n, '\n') }
-    else { buf[limit] = '\n'; n = limit + 1 }
-    write_all(2, buf, n)
-    return -1
+    return errors.err_lc(line, col, msg)
 }
 
-// warn_lc：报告一条带位置的警告，不增加错误数；推测解析期间保持静默。
+// warn_lc：带位置警告诊断（委托 errors；调用点迁完后删除本委托）。
 pub fn warn_lc(line int, col int, msg *char) int {
-    if (diag().spec > 0) { return 0 }
-    let buf [2048]u8
-    let limit int = 2047
-    let n int = 0
-    n = append_str_limit(buf, n, limit, src_ctx().path)
-    n = append_byte(buf, n, ':')
-    n = append_int(buf, n, line + diag().line_bias)
-    n = append_byte(buf, n, ':')
-    n = append_int(buf, n, col)
-    n = append_str_limit(buf, n, limit, ": 警告: ")
-    n = append_str_limit(buf, n, limit, msg)
-    n = append_ct_expand_trace(buf, n, limit)
-    if (n < limit) { n = append_byte(buf, n, '\n') }
-    else { buf[limit] = '\n'; n = limit + 1 }
-    return write_all(2, &buf[0], n)
+    return errors.warn_lc(line, col, msg)
 }
 
 // fs：文件作用域窄口。
@@ -1750,6 +1691,8 @@ pub fn em_get_ready(idx int) int {
 // 在每次编译会话开始（driver 入口与 worker 初始化）调用。
 pub fn state_init() void {
     static_data_reset()
+    // 诊断路径槽位登记一次：errors 在调用时刻读本字段，直写换源也可见。
+    errors.set_path_slot(&g_support.src.path)
     session().active_file = -1
     fc().c_expect_tid = -1
     data_label_reset()
@@ -1788,6 +1731,8 @@ pub fn em_n_slot() *int { return &em_n }
 // 进入编译前调用一次；不释放堆缓冲（各推送路径自行扩容/替换）。
 pub fn session_reset() void {
     static_data_reset()
+    // 诊断路径槽位登记一次：errors 在调用时刻读本字段，直写换源也可见。
+    errors.set_path_slot(&g_support.src.path)
     session().active_file = -1
     fc().c_expect_tid = -1
     data_label_reset()

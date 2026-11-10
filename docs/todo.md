@@ -13,6 +13,20 @@
 - 添加错误，当前错误提示功能太简陋
 - project.toml 添加[env]
 
+## 2026-11-10 errors 诊断基座模块（P0，CI 四端红）
+
+合并 `13d3bd4` 后 CI run 42756269175 四端同挂：`8a398d0` 新增的
+`compiler/errors/api.yh` 是孤儿模块（无人 import → 按需编译不产出），
+自举快照门按源码树预期 `iface/yh-errors.s.{i,ct}` + `llvm/yh-errors.ll`
+→ cc2 缺产物。方案已经用户决策（叶子基座）：
+[yh-errors模块诊断基座实施方案-2026-11-10](02-plan/yh-errors模块诊断基座实施方案-2026-11-10.md)。
+
+- [ ] Task 1：errors 叶子落地（DiagCtx + 四诊断入口迁入）+ support 委托，
+      修复 CI；`just selfhost-native` 验证
+- [ ] Task 2-5：前端/后端/构建/驱动共 ~550 处调用点分模块迁往 errors
+- [ ] Task 6：删 support 委托层、文档归口、finish 记录
+- [ ] 后续：诊断直写 stderr 旁路收编（link/build/testkit 约 20 处）
+
 ## 2026-11-10 函数 IR 缓存缺编译器身份（P1，合并后暴露）
 
 合并 0.0.14 后，**冷 `.build` + 旧全局缓存**跑 `just build` 会在

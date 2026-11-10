@@ -1,34 +1,113 @@
 module errors
 
 // ============================================================================
-// api.yh —— errors 模块公开面（pub 函数/结构体与 @[extern] 声明）
+// api.yh —— errors 模块公开面：编译器统一错误输出基座
 //
-// 公开声明的实现集中在本文件；私有辅助留在各自主题文件。模块内按文件名
-// 字节序处理、本文件排在最前，函数可前向调用、类型在模块内统一登记，
-// 因此实现细节仍可留在后续文件。
+// 本模块是编译器最底层（不 import 任何模块）：DiagCtx 状态、带位置的
+// err_lc/warn_lc 与不带位置的 fail/fail_path 统一收在这里，其他模块一律
+// import errors 报错。明确不做：不分配、不格式化语义错误码、不提供 Result
+// 风格错误值（编译器内部约定 int 返回码 + 就地诊断，见编码规范 §8）。
 // ============================================================================
 
-pub enum Status{
-    ok int
-    fail int
-    error int
+// DiagCtx：诊断的进程级开关与计数。
+// spec>0 表示推测解析，诊断静默且不计数；errors 是已报告错误数；
+// line_bias 是 .s.ct 来源映射的行号偏移；ct_* 是编译期 for 展开轨迹。
+pub struct DiagCtx {
+    spec int // 推测解析深度（>0 静默）
+    errors int // 已报告错误数
+    line_bias int // 诊断行号映射偏移
+    ct_depth int // 当前编译期 for 展开深度
+    ct_values [32]int // 外层到内层的展开值
 }
 
-pub struct Error{
-    status int
-    msg *char
+// g_diag：进程内唯一诊断状态（零初始化即全部默认值）。
+let g_diag DiagCtx
 
+// g_path_slot：当前源文件路径字段的地址（槽位，借用不拥有）。
+// 登记一次后，err_lc/warn_lc 在调用时刻读 *g_path_slot：无论持有方经
+// set_source_path 还是直写路径字段（comptime 展开换源等），都自动可见，
+// 避免快照在字段改写/缓冲搬迁后过期或悬空。
+let g_path_slot **char
 
+// diag：诊断上下文窄口；返回进程单例指针。
+pub fn diag() *DiagCtx {
+    return &g_diag
 }
 
-pub fn ok(){
-
+// set_path_slot：登记存放当前源文件路径的字段地址（如 &ctx.path）。
+// slot 必须是进程内稳定存储（单例字段），在首次带位置诊断前由会话初始化
+// 登记一次；本函数不判空、不分配，不拷贝路径本身。
+pub fn set_path_slot(slot **char) void {
+    g_path_slot = slot
 }
 
-pub fn error(){
-
+// fail：报告一条不带位置的编译器级错误（打开失败、内存不足等），返回 -1。
+// 写 stderr；不分配、不检查 msg 非空（调用方保证是静态/池内 NUL 串）。
+pub fn fail(msg *char) int {
+    let buf [512]u8
+    let n int = 0
+    n = append_str_cap(buf, 512, n, "yh: ")
+    n = append_str_cap(buf, 512, n, msg)
+    n = append_byte_cap(buf, 512, n, '\n')
+    write_all(2, buf, n)
+    return -1
 }
 
-pub fn fail(){
+// fail_path：报告与源文件路径相关的错误（如无法打开），返回 -1。
+// 写 stderr；不分配、不检查 path 非空（调用方保证是 NUL 串）。
+pub fn fail_path(msg *char, path *char) int {
+    let buf [512]u8
+    let n int = 0
+    n = append_str_cap(buf, 512, n, "yh: ")
+    n = append_str_cap(buf, 512, n, msg)
+    n = append_str_cap(buf, 512, n, path)
+    n = append_byte_cap(buf, 512, n, '\n')
+    write_all(2, buf, n)
+    return -1
+}
 
+// err_lc：报告一条带位置的错误（1 基行列），计一次错误并返回 -1。
+// 推测解析期间静默：不打印、不计数，仅以返回值示意失败。
+// 路径取调用时刻的 *g_path_slot（须先经 set_path_slot 登记）；
+// 行号叠加 diag().line_bias。
+pub fn err_lc(line int, col int, msg *char) int {
+    if (diag().spec > 0) {
+        return -1
+    }
+    diag().errors += 1
+    let buf [2048]u8
+    let limit int = 2047
+    let n int = 0
+    n = append_str_limit(buf, n, limit, *g_path_slot)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, line + diag().line_bias)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, col)
+    n = append_str_limit(buf, n, limit, ": 错误: ")
+    n = append_str_limit(buf, n, limit, msg)
+    n = append_ct_expand_trace(buf, n, limit)
+    if (n < limit) { n = append_byte(buf, n, '\n') }
+    else { buf[limit] = '\n'; n = limit + 1 }
+    write_all(2, buf, n)
+    return -1
+}
+
+// warn_lc：报告一条带位置的警告，不增加错误数；推测解析期间保持静默。
+// 返回 0 成功、-1 表示写 stderr 失败；路径取调用时刻的 *g_path_slot。
+pub fn warn_lc(line int, col int, msg *char) int {
+    if (diag().spec > 0) { return 0 }
+    let buf [2048]u8
+    let limit int = 2047
+    let n int = 0
+    n = append_str_limit(buf, n, limit, *g_path_slot)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, line + diag().line_bias)
+    n = append_byte(buf, n, ':')
+    n = append_int(buf, n, col)
+    n = append_str_limit(buf, n, limit, ": 警告: ")
+    n = append_str_limit(buf, n, limit, msg)
+    n = append_ct_expand_trace(buf, n, limit)
+    if (n < limit) { n = append_byte(buf, n, '\n') }
+    else { buf[limit] = '\n'; n = limit + 1 }
+    return write_all(2, &buf[0], n)
 }
