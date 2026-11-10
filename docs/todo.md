@@ -28,9 +28,12 @@
 `AstExpr`/lower/快照契约不变。剩余：
 
 - [ ] S4-2 表达式/语句语义外置：`parse_expr`/`parse_stmt` 只产语法节点，
-      `check.full` 后序回填 `type_id`/`sym`/常量；先做字面量与二元表达式。
-      当前 `syntax_ast` 只上游未铺满（数组/结构体字面量与 primary 有语法分支，
-      语义路径仍走旧函数），铺满后才允许把 `check.full` 后序接进来。
+      `check.full` 后序回填 `type_id`/`sym`/常量。方案见
+      [S4-2 实施方案](02-plan/yh-S4-2-表达式语义外置方案-2026-11-10.md)。
+      **S4-2a 已落地**（影子门）：`ast` 节点读面 + `check/full.yh` 对字面量/
+      一元/二元常量链从节点重算，`YH_AST_FULL_CHECK=1` 下与 parse 注解逐字段
+      比对，`just test` 全语料 0 不一致。下一步 S4-2b：扩到名字/字符串/char/
+      bool/浮点、cast/member/index/slice/call。
 - [ ] S4-3 CT 展开下沉：`$if`/`$for` 结构节点 + `check.expand`；删 `parse→comptime`。
 - [ ] S4-4 收口：删 `parse→check`（当前只剩 `parse_type.yh` 的 `type_resolve`
       转发），补模块依赖守卫。

@@ -1,0 +1,243 @@
+module check
+import ast
+import support
+import token
+import errors
+
+// ============================================================================
+// check/full.yh —— S4-2 影子门：从语法节点重算表达式语义
+//
+// S4-2 的目标是「parse 只造语法节点，语义由 check 从节点算」。迁移期间两者
+// 双跑：parse 仍按旧路径当场算出 `Res` 并写进节点注解，本模块再从节点重算
+// 一份，逐字段比对。不一致即视为迁移有偏差，构建直接失败。
+//
+// 本片（S4-2a）只覆盖常量折叠链：整数字面量、括号、一元 `+ - ! ~`、二元
+// `+ - * / % & ^ | << >> == != < <= > >=`。运算与诊断复用同一套内核
+// （sem_num_is_float / sem_parse_number / sem_fold_const_unary /
+// sem_fold_const_binop / sem_lit_fits / sem_promote / sem_res_const），
+// 因此重算的值必须与旧路径逐位相同。未覆盖的节点种类返回「不判定」，
+// 其父节点随之不判定——影子门只会越扩越宽，不会放宽比较。
+//
+// 只在 YH_AST_FULL_CHECK=1 门禁下运行；生产构建不进入本文件。
+// ============================================================================
+
+// 影子门的首个不一致节点与其差异位（供驱动层打印定位）。
+let full_bad_id int = -1
+let full_bad_mask int = 0
+// 本次模块被判定（重算并比对）的节点数：驱动层用它确认门禁非空转。
+let full_checked int = 0
+
+// full_verify_file：对指定文件内的表达式节点重算语义并与注解比对。
+// 返回不一致节点数；-1 表示重算自身报错（诊断已由内核给出）。
+// 调用前该文件的 token 表与源文本必须是当前活动上下文（驱动层负责恢复）。
+pub fn full_verify_file(file_id int) int {
+    let bad int = 0
+    let i int = 0
+    let n int = ast.ast_expr_count_now()
+    for i < n {
+        let node_file int = -1
+        ast.ast_expr_span_of(i, &node_file)
+        if (node_file == file_id) {
+            let st int = full_verify_node(i)
+            if (st < 0) {
+                full_fail_node("S4-2 影子门：重算报错，节点=", i)
+                return -1
+            }
+            if (st > 0) {
+                bad += 1
+                if (bad == 1) {
+                    full_bad_id = i
+                    full_bad_mask = st
+                }
+            }
+        }
+        i += 1
+    }
+    return bad
+}
+
+// full_bad_node：影子门首个不一致节点编号；无不一致时为 -1。
+pub fn full_bad_node() int {
+    return full_bad_id
+}
+
+// full_bad_fields：首个不一致节点的差异位（见 full_compare 的位定义）。
+pub fn full_bad_fields() int {
+    return full_bad_mask
+}
+
+// full_checked_count：本次模块被判定过的节点数（0 说明覆盖为空，门禁空转）。
+pub fn full_checked_count() int {
+    return full_checked
+}
+
+// full_verify_node：单个节点重算并比对。返回 0 一致或不判定、正数为差异位、
+// -1 重算报错。
+fn full_verify_node(id int) int {
+    // 本片只判定旧路径**已折叠**的常量链：旧路径仅在 c_fold 上下文（const
+    // 初始化式、数组长度等）折叠表达式，非折叠上下文的节点不记录常量，
+    // 重算无从对齐，跳过（覆盖扩展到非折叠上下文见后续分片）。
+    let seen support.Res
+    ast.ast_expr_semantics_to(id, &seen)
+    if (seen.is_const == 0) { return 0 }
+    let r support.Res
+    let st int = full_expr(id, &r)
+    if (st == -2) { return 0 }   // 本片不判定：跳过，不计不一致
+    if (st != 0) { return -1 }   // 重算自身报错（诊断由内核给出）
+    full_checked += 1
+    let old support.Res
+    ast.ast_expr_semantics_to(id, &old)
+    return full_compare(&r, &old)
+}
+
+// full_compare：逐字段比对重算值与注解；返回差异位掩码（0 表示一致）。
+// 位：1=类型、2=常量性、4=常量值、8=字面量性、16=超宽字面量、32=浮点位型。
+fn full_compare(now_ *support.Res, old *support.Res) int {
+    let mask int = 0
+    if (now_.type_id != old.type_id) { mask += 1 }
+    if (now_.is_const != old.is_const) { mask += 2 }
+    if (now_.is_const != 0 && now_.ival != old.ival) { mask += 4 }
+    if (now_.is_lit != old.is_lit) { mask += 8 }
+    if (now_.lit_big != old.lit_big) { mask += 16 }
+    if (now_.fval_bits != old.fval_bits) { mask += 32 }
+    return mask
+}
+
+// full_expr：按节点种类重算语义。返回 0 已覆盖、-2 本片不判定、-1 报错。
+fn full_expr(id int, out *support.Res) int {
+    if (id < 0 || id >= ast.ast_expr_count_now()) { return -2 }
+    let kind int = ast.ast_expr_kind(id)
+    let op int = ast.ast_expr_op(id)
+    if (kind == ast.AST_EXPR_PRIMARY) {
+        let child int = ast.ast_expr_child_of(id, 0)
+        if (child >= 0) {
+            // 括号等包裹节点只透传内层结果（parse 用同一节点记录括号表达式）。
+            if (op != token.TK_LPAREN) { return -2 }
+            return full_expr(child, out)
+        }
+        if (op != token.TOK_NUMBER) { return -2 }
+        return full_literal(id, out)
+    }
+    if (kind == ast.AST_EXPR_UNARY) {
+        if (op != token.TK_MINUS && op != token.TK_PLUS
+            && op != token.TK_BANG && op != token.TK_TILDE) { return -2 }
+        return full_unary(id, op, out)
+    }
+    if (kind == ast.AST_EXPR_BINARY) { return full_binary(id, op, out) }
+    return -2
+}
+
+// full_literal：整数字面量节点——复用 sem_number 的解析内核。
+fn full_literal(id int, out *support.Res) int {
+    let file int = -1
+    let first int = ast.ast_expr_span_of(id, &file)
+    if (first < 0 || first >= token.ctx().count) { return -2 }
+    let t token.Tok = token.ctx().tokens[first]
+    if (t.kind != token.TOK_NUMBER) { return -2 }
+    support.res_reset(out, support.TY_I32)
+    out.is_lit = 1
+    out.is_const = 1
+    if (sem_num_is_float(t.start, t.len) != 0) {
+        out.type_id = support.TY_F64
+        let bits i64 = sem_parse_float_bits(t.start, t.len)
+        out.ival = bits
+        out.fval_bits = bits
+        return 0
+    }
+    if (sem_parse_number(t.start, t.len) != 0) { return -1 }
+    out.ival = support.fc().c_fold_ival
+    out.lit_big = support.fc().c_fold_big
+    return 0
+}
+
+// full_unary：一元常量折叠，与 sem_unary 的整数折叠分支逐项一致：
+// BOOL 升为 int、负字面量超宽先升 i64，结果保留字面量性。
+fn full_unary(id int, op int, out *support.Res) int {
+    let child int = ast.ast_expr_child_of(id, 0)
+    if (child < 0) { return -2 }
+    let st int = full_expr(child, out)
+    if (st != 0) { return st }
+    if (support.ty_is_integer(out.type_id) == 0) { return -2 }
+    let unary_type int = out.type_id
+    if (support.ms().types[unary_type].kind == support.TY_BOOL) { unary_type = support.TY_I32 }
+    if (op == token.TK_MINUS && out.is_lit != 0 && out.ival >= 0) {
+        let negative i64 = 0 - out.ival
+        if (support.sem_lit_fits(unary_type, negative) == 0
+            && support.sem_lit_fits(support.TY_I64, negative) != 0) {
+            unary_type = support.TY_I64
+        }
+    }
+    let value i64 = 0
+    if (sem_fold_const_unary(op, unary_type, out.ival, out.is_lit, &value) != 0) {
+        return -1
+    }
+    out.ival = value
+    out.type_id = unary_type
+    out.sym = -1
+    return 0
+}
+
+// full_binary：二元常量折叠，复用 const_eval 的折叠内核（字面量适配 +
+// 提升类型 + 比较结果 BOOL 与 sem_binop 折叠分支同一套语义）。
+fn full_binary(id int, op int, out *support.Res) int {
+    let set int = 0
+    if (op == token.TK_PLUS || op == token.TK_MINUS || op == token.TK_STAR
+        || op == token.TK_SLASH || op == token.TK_PERCENT || op == token.TK_AMP
+        || op == token.TK_PIPE || op == token.TK_CARET || op == token.TK_LSHIFT
+        || op == token.TK_RSHIFT || op == token.TK_EQEQ || op == token.TK_NEQ
+        || op == token.TK_LT || op == token.TK_LEQ || op == token.TK_GT
+        || op == token.TK_GEQ) { set = 1 }
+    if (set == 0) { return -2 }
+    let left int = ast.ast_expr_child_of(id, 0)
+    let right int = ast.ast_expr_child_of(id, 1)
+    if (left < 0 || right < 0) { return -2 }
+    let rhs support.Res
+    let st int = full_expr(left, out)
+    if (st != 0) { return st }
+    let st2 int = full_expr(right, &rhs)
+    if (st2 != 0) { return st2 }
+    if (out.is_const == 0 || rhs.is_const == 0) { return -2 }
+    // 折叠点诊断位置沿用节点右端：内核报错时指向该二元表达式的结束 token。
+    let saved int = token.ctx().pos
+    let file int = -1
+    let after int = ast.ast_expr_after_of(id)
+    ast.ast_expr_span_of(id, &file)
+    if (after > 0 && after <= token.ctx().count) { token.ctx().pos = after - 1 }
+    let fold int = len_fold_binop(op, out, &rhs, token.ctx().pos)
+    token.ctx().pos = saved
+    if (fold != 0) { return -1 }
+    return 0
+}
+
+// full_fail_report：影子门不一致报告——输出首个不一致节点的编号、差异位、
+// 种类与运算符，并让构建失败。返回 -1（供驱动层直接 return）。
+pub fn full_fail_report() int {
+    let buf [192]u8
+    let n int = 0
+    n = support.append_str(buf, 0, "S4-2 影子门：表达式语义重算与 parse 注解不一致 节点=")
+    n = support.append_int(buf, n, full_bad_id)
+    n = support.append_str(buf, n, " 差异位=")
+    n = support.append_int(buf, n, full_bad_mask)
+    n = support.append_str(buf, n, " kind=")
+    n = support.append_int(buf, n, ast.ast_expr_kind(full_bad_id))
+    n = support.append_str(buf, n, " op=")
+    n = support.append_int(buf, n, ast.ast_expr_op(full_bad_id))
+    let mo int = support.tml_intern_str(buf, 0, n)
+    if (mo < 0) { return -1 }
+    return errors.fail(support.np_cstr(mo))
+}
+
+// full_fail_node：带节点种类与运算符的失败诊断。
+fn full_fail_node(msg *char, id int) int {
+    let buf [192]u8
+    let n int = 0
+    n = support.append_str(buf, 0, msg)
+    n = support.append_int(buf, n, id)
+    n = support.append_str(buf, n, " kind=")
+    n = support.append_int(buf, n, ast.ast_expr_kind(id))
+    n = support.append_str(buf, n, " op=")
+    n = support.append_int(buf, n, ast.ast_expr_op(id))
+    let mo int = support.tml_intern_str(buf, 0, n)
+    if (mo < 0) { return -1 }
+    return errors.fail(support.np_cstr(mo))
+}

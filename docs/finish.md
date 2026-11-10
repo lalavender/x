@@ -8,6 +8,37 @@
 （2026-10-24 首次归档只复制未从 finish.md 删除），已删除；并补齐 2026-10-22 残留与
 2026-10-26 ～ 2026-11-03 批次的迁移，见归档文件的「2026-11-06 迁入」段。
 
+## 2026-11-10：前端 S4-2a——check 从语法节点重算常量链（影子门）
+
+**结果**：
+- `ast` 新增节点只读面：`ast_expr_kind/op/type_of/child_of/span_of/after_of/
+  semantics_to`，check 无需直读私有 `ast_expr_nodes` 即可从语法节点重算语义。
+- 新增 `check/full.yh`：`full_verify_file` 按文件重算常量折叠链（`PRIMARY`
+  整数字面量、括号、一元 `+ - ! ~`、二元 `+ - * / % & | ^ << >> == != < <= >
+  >==`），与 parse 写入节点的注解逐字段比对（类型/常量性/常量值/字面量性/
+  超宽/浮点位型），不一致即构建失败并打印首个不一致节点与差异位。
+  折叠复用同一套内核（`sem_parse_number`/`sem_fold_const_binop|unary`/
+  `sem_lit_fits`/`sem_promote`/`sem_res_const`），与 `const_eval.yh` 同源。
+- `build/module_worker.yh`：`YH_AST_FULL_CHECK=1` 时在**函数体全部解析完**
+  之后逐文件恢复前端快照并跑影子门（挂在 CT 捕获子遍之后会得到空 arena）。
+- 新增 `tests/tools/front-full/check.py` 并接入 `just test`：夹具覆盖 const
+  初始化式、数组长度、一元/二元/括号/进制/移位，普通 check 与影子门都要过。
+
+**判定口径**（关键）：旧 parse 只在 `c_fold` 上下文折叠，普通函数体里的
+`1 + 2` 注解就是 `is_const = 0`；影子门只判定 `is_const != 0` 的节点，否则会把
+「旧路径本来就不折」误判成不一致（实测节点 6 即此类）。
+
+**验证**（2026-11-10，darwin-arm64）：
+- `just test` 377/379 全通过（含新的 front-full 门）；`YH_AST_FULL_CHECK=1`
+  再跑一遍全语料：同样全通过，即全语料常量链重算与旧路径 0 不一致。
+- `just selfhost-native`：模块固定点一致（54 产物）、自解析 182 文件、project
+  cases 125/125。
+- 反证：把 `full_compare` 强制返回不一致位，门禁确实失败（已复位）。
+- 未改任何既有语义路径，产物与诊断不变（影子门只在门禁 env 下运行）。
+
+**遗留**：`S4-2b` 扩覆盖（名字/字符串/char/bool/浮点、cast/member/index/
+slice/call）；`S4-2e` 才切 lower 读点、`S4-2f` 删 parse 的 (A) 类语义调用。
+
 ## 2026-11-10：前端 S4 片——数组长度求值外置（parse → check）
 
 **结果**：
