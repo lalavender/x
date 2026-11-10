@@ -543,7 +543,8 @@ def copy_proj(src, dst):
         (dst / "proj" / "project.toml").write_text(
             '[project]\nos = "host"\narch = "host"\nname = "proj"\nsource = "."\n'
             '[dependencies]\nsupport = { path = "../support" }\n'
-            'token = { path = "../token" }\n')
+            'token = { path = "../token" }\n'
+            'errors = { path = "../errors" }\n')
         # F2-K2：语义动作（ty_*/sym_*/scope_*）已从 gen 迁到 check，前端 fixture
         # 需要连 check 及其依赖（ast/comptime）一起拷贝，否则 import check 解析失败。
         for mod, deps in (("ir", ""), ("cache", "support token hash"), ("comptime", "support errors token proj"), ("ast", "support errors token proj comptime"),

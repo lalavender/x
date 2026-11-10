@@ -1,12 +1,14 @@
 module build
+import errors
 import support
+import libs.list
 
 // ============================================================================
 // project.yh —— 项目扫描原语（平台无关部分）
 //
 // 只保留目录枚举的数据类型与登记helper：平台目录枚举（project_dir.*.yh）
-// 负责把 OS 目录项读出来，这里负责过滤隐藏项、把名字 intern 进名字池并按需
-// 扩容扫描私有的条目向量。项目表本身（唯一写者/窄口读）在 pj 模块。
+// 负责把 OS 目录项读出来，这里负责过滤隐藏项、把名字 intern 进名字池并把
+// 条目追加进本次扫描私有的 list.List。项目表本身（唯一写者/窄口读）在 pj 模块。
 // ============================================================================
 
 // PJDirEntry：目录项名称的名字池位置和类型，用于平台无关的项目扫描。
@@ -16,8 +18,10 @@ struct PJDirEntry {
     is_dir int
 }
 
-// pj_dir_add：把非隐藏目录项加入本次扫描的私有向量，并立即复制名称。
-fn pj_dir_add(entries **PJDirEntry, n *int, cap *int,name *u8, name_len int, is_dir int) int {
+// pj_dir_add：把非隐藏目录项追加到本次扫描的列表（元素类型 PJDirEntry），
+// 表达式立即把名称复制进名字池。返回 0 表示成功（含隐藏项跳过），
+// -1 表示名字池或列表分配失败（经 errors.fail 报告）。
+fn pj_dir_add(entries *list.List, name *u8, name_len int, is_dir int) int {
     if (name_len <= 0 || name[0] == '.') {
         return 0
     }
@@ -25,25 +29,13 @@ fn pj_dir_add(entries **PJDirEntry, n *int, cap *int,name *u8, name_len int, is_
     if (name_off < 0) {
         return -1
     }
-    if (n[0] == cap[0]) {
-        let ncap int = cap[0] * 2
-        if (ncap == 0) {
-            ncap = 64
-        }
-        let next *PJDirEntry = malloc((ncap * sizeof(PJDirEntry)).to_type(u64)).to_type(*PJDirEntry)
-        if (next == 0) {
-            return support.fail("内存分配失败")
-        }
-        if (n[0] > 0) {
-            memcpy(next, entries[0], (n[0] * sizeof(PJDirEntry)).to_type(u64))
-            free(entries[0].to_type(*void))
-        }
-        entries[0] = next
-        cap[0] = ncap
+    let entry PJDirEntry
+    entry.name_off = name_off
+    entry.name_len = name_len
+    entry.is_dir = is_dir
+    let status list.Status = list.push(entries, (&entry).to_type(*void))
+    if (status != list.status_ok) {
+        return errors.fail("内存分配失败")
     }
-    entries[0][n[0]].name_off = name_off
-    entries[0][n[0]].name_len = name_len
-    entries[0][n[0]].is_dir = is_dir
-    n[0] += 1
     return 0
 }

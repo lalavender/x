@@ -1,7 +1,9 @@
 module build
 import token
+import errors
 import support
 import proj
+import libs.list
 
 // ============================================================================
 // project_index.yh —— 项目发现/索引/解析
@@ -16,7 +18,7 @@ fn pj_input_push(items **proj.PInput, count *int, capacity *int,
         if (ncap == 0) { ncap = 8 }
         let next *proj.PInput = malloc(
             (ncap * sizeof(proj.PInput)).to_type(u64)).to_type(*proj.PInput)
-        if (next == 0) { return support.fail("C 项目输入表内存分配失败") }
+        if (next == 0) { return errors.fail("C 项目输入表内存分配失败") }
         if (count[0] > 0) {
             memcpy(next, items[0], (count[0] * sizeof(proj.PInput)).to_type(u64))
         }
@@ -226,7 +228,7 @@ fn pj_load_env_config(pj int, sec int) int {
             if (ncap == 0) { ncap = 8 }
             let ne *proj.PEnv = malloc(
                 (ncap * sizeof(proj.PEnv)).to_type(u64)).to_type(*proj.PEnv)
-            if (ne == 0) { return support.fail("内存分配失败") }
+            if (ne == 0) { return errors.fail("内存分配失败") }
             if (proj.ctx().projs[pj].env_n > 0) {
                 memcpy(ne, proj.ctx().projs[pj].envs,
                     (proj.ctx().projs[pj].env_n * sizeof(proj.PEnv)).to_type(u64))
@@ -250,24 +252,24 @@ fn pj_load_env_config(pj int, sec int) int {
 }
 
 fn pj_scan_source(dir_off int, dir_len int, pj int) int {
-    let entries *PJDirEntry = 0.to_type(*PJDirEntry)
-    let es_n int = 0
-    let es_cap int = 0
-    if (pj_os_dir_list(proj.pool_str(dir_off), &entries, &es_n, &es_cap) != 0) {
-        if (entries != 0) { free(entries.to_type(*void)) }
+    let entries list.List = list.make(sizeof(PJDirEntry).to_type(u64))
+    if (pj_os_dir_list(proj.pool_str(dir_off), &entries) != 0) {
+        list.release(&entries)
         return -1
     }
-    pj_dir_sort(entries, es_n)
+    pj_dir_sort(&entries)
+    let total int = entries.count.to_type(int)
     let e int = 0
-    for e < es_n {
-        if (pj_scan_entry(dir_off, dir_len, entries[e].name_off,
-            entries[e].name_len, entries[e].is_dir, pj) != 0) {
-            free(entries.to_type(*void))
+    for e < total {
+        let item *PJDirEntry = list.element_at(&entries, e.to_type(u64)).to_type(*PJDirEntry)
+        if (pj_scan_entry(dir_off, dir_len, item.name_off,
+            item.name_len, item.is_dir, pj) != 0) {
+            list.release(&entries)
             return -1
         }
         e += 1
     }
-    if (entries != 0) { free(entries.to_type(*void)) }
+    list.release(&entries)
     return 0
 }
 
@@ -309,16 +311,22 @@ fn pj_dir_less(a PJDirEntry, b PJDirEntry) int {
 }
 
 // pj_dir_sort：按小目录常见情况原地插入排序，不另申请排序缓冲。
-fn pj_dir_sort(entries *PJDirEntry, n int) int {
+// 列表元素类型固定为 PJDirEntry；原地交换通过 first() 得到的基地址完成。
+fn pj_dir_sort(entries *list.List) int {
+    let n int = entries.count.to_type(int)
+    if (n < 2) {
+        return 0
+    }
+    let base *PJDirEntry = list.first(entries).to_type(*PJDirEntry)
     let i int = 1
     for i < n {
-        let item PJDirEntry = entries[i]
+        let item PJDirEntry = base[i]
         let j int = i
-        for j > 0 && pj_dir_less(item, entries[j - 1]) != 0 {
-            entries[j] = entries[j - 1]
+        for j > 0 && pj_dir_less(item, base[j - 1]) != 0 {
+            base[j] = base[j - 1]
             j -= 1
         }
-        entries[j] = item
+        base[j] = item
         i += 1
     }
     return 0
@@ -498,7 +506,7 @@ fn pj_synth_module_name(path *char) int {
         && path[end - 1] == 'h') {
         end -= 3
     }
-    if (end <= base) { return support.fail("单文件测试无法从文件名派生模块名") }
+    if (end <= base) { return errors.fail("单文件测试无法从文件名派生模块名") }
     let tmp [160]u8
     let n int = 0
     let k int = base
@@ -657,7 +665,7 @@ fn pj_classify_test_imports(pj int) int {
             let f int = proj.ctx().mods[m].files[fi]
             let marks *u8 = pj_mark_test_tokens(f)
             if (marks == 0) {
-                if (proj.ctx().files[f].token_n > 0) { return support.fail("内存分配失败") }
+                if (proj.ctx().files[f].token_n > 0) { return errors.fail("内存分配失败") }
                 fi += 1
                 continue
             }
