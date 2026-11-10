@@ -24,7 +24,8 @@
 - [x] Task 1：errors 叶子落地（DiagCtx + 四诊断入口迁入）+ support 委托，
       修复 CI；`just selfhost-native` 验证（build-check fixture 接线一并完成）
 - [x] Task 2：前端（token/lex/parse/ast/check/comptime 32 文件）迁移
-- [ ] Task 3-5：后端/构建/驱动共 ~550 处调用点分模块迁往 errors
+- [x] Task 3：后端与链接（backend/link 7 文件）迁移
+- [ ] Task 4-5：构建/驱动调用点分模块迁往 errors
 - [ ] Task 6：删 support 委托层、文档归口、finish 记录
 - [ ] 后续：诊断直写 stderr 旁路收编（link/build/testkit 约 20 处）
 

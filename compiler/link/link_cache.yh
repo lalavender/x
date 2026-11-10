@@ -1,4 +1,5 @@
 module link
+import errors
 import support
 import backend
 import proj
@@ -12,7 +13,7 @@ fn mb_write_manifest(path *char, data *u8, data_len int) int {
     tmp[n] = 0
     let fd int = proj.open_out((&tmp[0]).to_type(*char))
     if (fd < 0) {
-        return support.fail_path("无法写缓存 manifest: ", path)
+        return errors.fail_path("无法写缓存 manifest: ", path)
     }
     if (support.write_all(fd, data, data_len) != 0) {
         close(fd)
@@ -21,11 +22,11 @@ fn mb_write_manifest(path *char, data *u8, data_len int) int {
     }
     if (close(fd) != 0) {
         unlink((&tmp[0]).to_type(*char))
-        return support.fail_path("关闭缓存 manifest 失败: ", path)
+        return errors.fail_path("关闭缓存 manifest 失败: ", path)
     }
     if (rename((&tmp[0]).to_type(*char), path) != 0) {
         unlink((&tmp[0]).to_type(*char))
-        return support.fail_path("无法提交缓存 manifest: ", path)
+        return errors.fail_path("无法提交缓存 manifest: ", path)
     }
     return 0
 }
@@ -38,7 +39,7 @@ fn mb_c_project_order(pj int, projects *int, count *int, capacity int) int {
         if (projects[i] == pj) { return 0 }
         i += 1
     }
-    if (count[0] >= capacity) { return support.fail("C 项目依赖数量超出限制") }
+    if (count[0] >= capacity) { return errors.fail("C 项目依赖数量超出限制") }
     projects[count[0]] = pj
     count[0] += 1
     let dep int = 0
@@ -82,12 +83,12 @@ fn mb_c_compile_sources(projects *int, project_count int,
             args[4] = support.arr_cstr(out)
             args[5] = 0.to_type(*char)
             if (cmd_process_run(&args[0]) != 0) {
-                return support.fail_path("C 源文件编译失败: ", args[2])
+                return errors.fail_path("C 源文件编译失败: ", args[2])
             }
             let object [700]u8
             mb_c_obj_path(build_off, pj, si, &object[0])
             if (mb_object_machine_matches(support.arr_cstr(&object[0])) == 0) {
-                return support.fail_path("C 目标文件架构与当前 target 不符: ",
+                return errors.fail_path("C 目标文件架构与当前 target 不符: ",
                     support.arr_cstr(&object[0]))
             }
             si += 1
@@ -108,7 +109,7 @@ fn mb_c_input_hash(hash *u64, projects *int, project_count int,
             let object [700]u8
             mb_c_obj_path(build_off, pj, si, object)
             if (mb_object_machine_matches(support.arr_cstr(object)) == 0) {
-                return support.fail_path("C 目标文件架构与当前 target 不符: ",
+                return errors.fail_path("C 目标文件架构与当前 target 不符: ",
                     support.arr_cstr(object))
             }
             if (proj.hash_file(hash, support.arr_cstr(object)) != 0) { return -1 }
@@ -123,7 +124,7 @@ fn mb_c_input_hash(hash *u64, projects *int, project_count int,
         for oi < proj.ctx().projs[pj].c_object_n {
             let input proj.PInput = proj.ctx().projs[pj].c_objects[oi]
             if (mb_object_machine_matches(proj.pool_str(input.path_off)) == 0) {
-                return support.fail_path("C 目标文件架构与当前 target 不符: ",
+                return errors.fail_path("C 目标文件架构与当前 target 不符: ",
                     proj.pool_str(input.path_off))
             }
             if (proj.hash_file(hash, proj.pool_str(input.path_off)) != 0) { return -1 }
@@ -259,14 +260,14 @@ fn mb_hash_tool_identity(hash *u64, command *char) int {
         for command[i] != 0 { resolved[i] = command[i].to_type(u8); i += 1 }
         resolved[i] = 0
     } else if (mb_path_find(command, &resolved[0]) == 0) {
-        return support.fail_path("找不到工具: ", command)
+        return errors.fail_path("找不到工具: ", command)
     }
     i = 0
     for resolved[i] != 0 { proj.fnv(hash, resolved[i]); i += 1 }
     proj.fnv(hash, 0)
     // C2：工具身份按内容 SHA-256；touch/复制不换键，替换内容必换键。
     if (mb_mix_file_identity(hash, (&resolved[0]).to_type(*char)) != 0) {
-        return support.fail_path("无法读取工具状态: ", (&resolved[0]).to_type(*char))
+        return errors.fail_path("无法读取工具状态: ", (&resolved[0]).to_type(*char))
     }
     return 0
 }
@@ -274,7 +275,7 @@ fn mb_hash_tool_identity(hash *u64, command *char) int {
 // mb_hash_lld_library：混入库名与 lld 实际会解析到的库文件内容。
 // required=1 用于固定模板库；项目库缺失时留给 lld 产生标准链接诊断。
 fn mb_hash_lld_library(hash *u64, name *char, required int) int {
-    if (name == 0) { return support.fail("lld 链接库名为空") }
+    if (name == 0) { return errors.fail("lld 链接库名为空") }
     let i int = 0
     for name[i] != 0 {
         proj.fnv(hash, name[i].to_type(u8))
@@ -293,9 +294,9 @@ fn mb_hash_lld_library(hash *u64, name *char, required int) int {
         proj.fnv(hash, 255)
         return proj.hash_file(hash, support.arr_cstr(path))
     }
-    if (resolved < 0) { return support.fail_path("无法解析 lld 链接库: ", name) }
+    if (resolved < 0) { return errors.fail_path("无法解析 lld 链接库: ", name) }
     proj.fnv(hash, 254)
-    if (required != 0) { return support.fail_path("找不到 lld 默认链接库: ", name) }
+    if (required != 0) { return errors.fail_path("找不到 lld 默认链接库: ", name) }
     return 0
 }
 
@@ -303,7 +304,7 @@ fn mb_hash_lld_library(hash *u64, name *char, required int) int {
 fn mb_hash_lld_identity(hash *u64, projects *int, project_count int) int {
     let identity *char = backend.llvm_lld_identity()
     if (identity == 0 || identity[0] == 0) {
-        return support.fail("当前 yh 未内嵌可用的 Linux lld 驱动")
+        return errors.fail("当前 yh 未内嵌可用的 Linux lld 驱动")
     }
     let i int = 0
     for identity[i] != 0 {
@@ -340,7 +341,7 @@ fn mb_hash_lld_identity(hash *u64, projects *int, project_count int) int {
     i = 0
     for i < file_count {
         let path *char = backend.llvm_lld_default_file(i)
-        if (path == 0) { return support.fail("lld 默认启动文件清单损坏") }
+        if (path == 0) { return errors.fail("lld 默认启动文件清单损坏") }
         let j int = 0
         for path[j] != 0 {
             proj.fnv(hash, path[j].to_type(u8))
@@ -388,12 +389,12 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
     pn = support.append_int(&capture_path[0], pn, getpid())
     capture_path[pn] = 0
     let output *u8 = malloc(65536).to_type(*u8)
-    if (output == 0) { return support.fail("链接器查询缓冲分配失败") }
+    if (output == 0) { return errors.fail("链接器查询缓冲分配失败") }
 
     let env_names **char = malloc((9 * sizeof(*char)).to_type(u64)).to_type(**char)
     if (env_names == 0) {
         free(output.to_type(*void))
-        return support.fail("链接器环境清单分配失败")
+        return errors.fail("链接器环境清单分配失败")
     }
     env_names[0] = "PATH"
     env_names[1] = "LIBRARY_PATH"
@@ -432,7 +433,7 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
     let fixed_queries **char = malloc((10 * sizeof(*char)).to_type(u64)).to_type(**char)
     if (fixed_queries == 0) {
         free(output.to_type(*void))
-        return support.fail("链接器查询清单分配失败")
+        return errors.fail("链接器查询清单分配失败")
     }
     fixed_queries[0] = "-print-search-dirs"
     fixed_queries[1] = "-print-sysroot"
@@ -459,7 +460,7 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
         if (n < 0) {
             free(fixed_queries.to_type(*void))
             free(output.to_type(*void))
-            return support.fail("无法读取链接驱动信息")
+            return errors.fail("无法读取链接驱动信息")
         }
         let q int = 0
         for fixed_queries[qi][q] != 0 {
@@ -489,7 +490,7 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
     let fixed_files **char = malloc((13 * sizeof(*char)).to_type(u64)).to_type(**char)
     if (fixed_files == 0) {
         free(output.to_type(*void))
-        return support.fail("链接启动文件清单分配失败")
+        return errors.fail("链接启动文件清单分配失败")
     }
     fixed_files[0] = "crt1.o"
     fixed_files[1] = "Scrt1.o"
@@ -519,7 +520,7 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
         if (n < 0) {
             free(fixed_files.to_type(*void))
             free(output.to_type(*void))
-            return support.fail("无法解析链接输入")
+            return errors.fail("无法解析链接输入")
         }
         let oi int = 0
         for oi < n { proj.fnv(hash, output[oi]); oi += 1 }
@@ -551,7 +552,7 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
             let suffixes **char = malloc((4 * sizeof(*char)).to_type(u64)).to_type(**char)
             if (suffixes == 0) {
                 free(output.to_type(*void))
-                return support.fail("系统库后缀清单分配失败")
+                return errors.fail("系统库后缀清单分配失败")
             }
             suffixes[0] = ".so"
             suffixes[1] = ".a"
@@ -573,7 +574,7 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
                 if (n < 0) {
                     free(suffixes.to_type(*void))
                     free(output.to_type(*void))
-                    return support.fail("无法解析配置的系统库")
+                    return errors.fail("无法解析配置的系统库")
                 }
                 let oi int = 0
                 for oi < n { proj.fnv(hash, output[oi]); oi += 1 }
@@ -603,7 +604,7 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
         let suffixes **char = malloc((3 * sizeof(*char)).to_type(u64)).to_type(**char)
         if (suffixes == 0) {
             free(output.to_type(*void))
-            return support.fail("libm 后缀清单分配失败")
+            return errors.fail("libm 后缀清单分配失败")
         }
         suffixes[0] = ".so"
         suffixes[1] = ".a"
@@ -623,7 +624,7 @@ fn mb_link_query_identity(hash *u64, cc *char, projects *int,
             if (n < 0) {
                 free(suffixes.to_type(*void))
                 free(output.to_type(*void))
-                return support.fail("无法解析 libm")
+                return errors.fail("无法解析 libm")
             }
             let oi int = 0
             for oi < n { proj.fnv(hash, output[oi]); oi += 1 }
@@ -766,10 +767,10 @@ fn mb_link_prepare(p *LinkPlan) int {
     if ((p.use_macho != 0 || p.use_lld != 0) && p.selfhost_on != 0) {
         p.selfhost_flag_n = backend.llvm_lld_selfhost_flag_count()
         if (p.selfhost_flag_n < 0) {
-            return support.fail("自举链接闭包文件不可读：检查 YH_LLVM_SELFHOST_FLAGS（每行一个链接参数）")
+            return errors.fail("自举链接闭包文件不可读：检查 YH_LLVM_SELFHOST_FLAGS（每行一个链接参数）")
         }
         if (p.selfhost_flag_n == 0) {
-            return support.fail("自举链接缺少 LLVM 闭包：先运行 make llvm-host，或用 YH_LLVM_SELFHOST_FLAGS 指定闭包文件")
+            return errors.fail("自举链接缺少 LLVM 闭包：先运行 make llvm-host，或用 YH_LLVM_SELFHOST_FLAGS 指定闭包文件")
         }
     }
     // 两步链接（用户规划：.build/asm → .build/obj → 链接）
@@ -781,7 +782,7 @@ fn mb_link_prepare(p *LinkPlan) int {
     p.llvm_objects = 1
     p.c_projects = malloc((project_capacity * sizeof(int)).to_type(u64)) .
         to_type(*int)
-    if (p.c_projects == 0) { return support.fail("C 项目顺序表内存分配失败") }
+    if (p.c_projects == 0) { return errors.fail("C 项目顺序表内存分配失败") }
     p.c_project_n = 0
     if (mb_c_project_order(p.root_proj, p.c_projects, &p.c_project_n,
         project_capacity) != 0) { return -1 }
@@ -826,7 +827,7 @@ fn mb_link_objects(p *LinkPlan) int {
         odn = support.append_str(objdir, odn, proj.pool_str(p.c_off))
         objdir[odn] = 0
         if (cmd_mkdirs(support.arr_cstr(&objdir[0])) != 0) {
-            return support.fail_path("无法创建对象目录: ", support.arr_cstr(&objdir[0]))
+            return errors.fail_path("无法创建对象目录: ", support.arr_cstr(&objdir[0]))
         }
         let rowk int = 0
         for rowk <= proj.ctx().mods[m].file_n {
@@ -942,7 +943,7 @@ fn mb_link_objects(p *LinkPlan) int {
                     asm_args[5] = 0.to_type(*char)
                 }
                 if (cmd_process_run(&asm_args[0]) != 0) {
-                    return support.fail_path("汇编失败: ", support.arr_cstr(spath))
+                    return errors.fail_path("汇编失败: ", support.arr_cstr(spath))
                 }
                 let object_hash u64 = proj.hash_init()
                 if (proj.hash_file(&object_hash, support.arr_cstr(opath)) != 0) {
@@ -1041,7 +1042,7 @@ fn mb_link_key(p *LinkPlan) int {
             on3 = support.append_str(opath, on3, ".o")
             opath[on3] = 0
             if (mb_object_machine_matches(support.arr_cstr(opath)) == 0) {
-                return support.fail_path("目标文件架构与当前 target 不符: ",
+                return errors.fail_path("目标文件架构与当前 target 不符: ",
                     support.arr_cstr(opath))
             }
             if (proj.hash_file(&p.hlink, support.arr_cstr(opath)) != 0) {
@@ -1065,7 +1066,7 @@ fn mb_link_key(p *LinkPlan) int {
             }
             proj.fnv(&p.hlink, 0)
             if (mb_object_machine_matches(support.arr_cstr(opath)) == 0) {
-                return support.fail_path("目标文件架构与当前 target 不符: ",
+                return errors.fail_path("目标文件架构与当前 target 不符: ",
                     support.arr_cstr(opath))
             }
             if (proj.hash_file(&p.hlink, support.arr_cstr(opath)) != 0) {
@@ -1149,7 +1150,7 @@ fn mb_link_args(p *LinkPlan) int {
             return -1
         }
         if (p.library_search_len >= 4095) {
-            return support.fail("LIBRARY_PATH 超过 Darwin 链接路径限制")
+            return errors.fail("LIBRARY_PATH 超过 Darwin 链接路径限制")
         }
         if (p.library_search_len > 0) {
             p.library_search_count = 1
@@ -1186,7 +1187,7 @@ fn mb_link_args(p *LinkPlan) int {
     p.cpaths = malloc(((p.c_object_n > 0 ? p.c_object_n : 1) * 700).to_type(u64)).to_type(*u8)
     p.libpaths = malloc(((p.c_lib_n > 0 ? p.c_lib_n : 1) * 128).to_type(u64)).to_type(*u8)
     if (p.args == 0 || p.paths == 0 || p.cpaths == 0 || p.libpaths == 0) {
-        return support.fail("链接 argv 缓冲分配失败")
+        return errors.fail("链接 argv 缓冲分配失败")
     }
     // Mach-O 的暂存路径已由上面的 mb_macho_link_stage 给出（RB5：identifier 只取
     // basename，不能带 pid）；这里只为 ELF 生成 `<out>.yh-tmp.<pid>`。此前这段是
@@ -1381,13 +1382,13 @@ fn mb_link_libs(p *LinkPlan) int {
         // LLVM/lld 静态闭包以 force_load 形式追加；普通程序不注入。
         if (p.selfhost_on != 0) {
             if (p.next_arg + p.selfhost_flag_n > p.argc) {
-                return support.fail("Darwin 自举链接参数超出 argv 容量")
+                return errors.fail("Darwin 自举链接参数超出 argv 容量")
             }
             let fi int = 0
             for fi < p.selfhost_flag_n {
                 let flag *char = backend.llvm_lld_selfhost_flag(fi)
                 if (flag == 0 || flag[0] == 0) {
-                    return support.fail("Darwin 自举链接参数无效")
+                    return errors.fail("Darwin 自举链接参数无效")
                 }
                 p.args[p.next_arg] = flag
                 p.next_arg += 1
@@ -1416,24 +1417,24 @@ fn mb_link_exec(p *LinkPlan) int {
             cmd_process_run(&p.args[0])
     if (link_rc == -2) {
         unlink((&p.link_tmp[0]).to_type(*char))
-        return support.fail("lld 不可重入：链接 worker 已结束，未发布输出")
+        return errors.fail("lld 不可重入：链接 worker 已结束，未发布输出")
     }
     if (link_rc != 0) {
         unlink((&p.link_tmp[0]).to_type(*char))
-        return support.fail_path("链接失败: ", p.out_path)
+        return errors.fail_path("链接失败: ", p.out_path)
     }
     if (mb_object_machine_matches((&p.link_tmp[0]).to_type(*char)) == 0) {
         unlink((&p.link_tmp[0]).to_type(*char))
-        return support.fail_path("链接产物架构与当前 target 不符: ", p.out_path)
+        return errors.fail_path("链接产物架构与当前 target 不符: ", p.out_path)
     }
     if (p.use_macho != 0
         && mb_darwin_executable_matches((&p.link_tmp[0]).to_type(*char)) == 0) {
         unlink((&p.link_tmp[0]).to_type(*char))
-        return support.fail_path("Darwin 链接产物版本或代码签名校验失败: ", p.out_path)
+        return errors.fail_path("Darwin 链接产物版本或代码签名校验失败: ", p.out_path)
     }
     if (rename((&p.link_tmp[0]).to_type(*char), p.out_path) != 0) {
         unlink((&p.link_tmp[0]).to_type(*char))
-        return support.fail_path("无法发布链接产物: ", p.out_path)
+        return errors.fail_path("无法发布链接产物: ", p.out_path)
     }
     let final_hash u64 = proj.hash_init()
     if (proj.hash_file(&final_hash, p.out_path) != 0) {
