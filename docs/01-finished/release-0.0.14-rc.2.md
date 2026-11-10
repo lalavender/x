@@ -72,7 +72,8 @@ macOS/Linux 的堆恰好为零页，掩盖了该缺陷。
 - 本地：`just test`、`just test-libs`（O0/O2）、`just test-llvm-darwin`、
   `just selfhost-native`（固定点一致、cc4 自解析、project cases 125/125）。
 - 四端 CI：本 RC 由 `release.yml` 四端并行构建；`[env]` 初始化修复后
-  Windows 的 `--emit-module`/`link-env-manifest` 崩溃应消失，仍需观察
-  `u8-dup-module-path-import`（rc.1 的实验 tag 在 Windows 上唯一剩余失败）。
+  Windows 的 `--emit-module`/`link-env-manifest` 崩溃消失。Windows 上
+  `u8-dup-module-path-import`（同名模块+路径导入）仍有对象缓存提交遗留，
+  rc.2 在 build-check 的 `WINDOWS_SKIP` 暂跳该例，见 `docs/todo.md`。
 - 发布资产验收（CI 完成后）：`rm -rf bin && just fetch-seed` → `just` →
   `just test` → `just selfhost-native`。

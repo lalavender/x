@@ -13,6 +13,13 @@
 - 添加错误，当前错误提示功能太简陋
 - project.toml 添加[env]
 
+## 2026-11-10 Windows 同名模块 + 路径导入（P1，rc.2 暂跳）
+
+`tests/modules/projects/dupmodseg` 的 `u8-dup-module-path-import` 在 Windows
+上构建失败（`[编译] cache` 只调度一次，另一个同名模块的对象/接口缓存提交
+缺失；macOS/Linux 通过）。rc.2 在 build-check 的 `WINDOWS_SKIP` 暂跳该例，
+发布后需在 Windows runner 抓调度/产物日志修复，再移除跳过。
+
 ## 2026-11-05 VENC-2 遗留：Windows CRT 层文件路径仍按 ACP（P1，CI 已条件跳过）
 
 > 已完成部分见 [yh-VENC2-Windows-CRT入口argv修复](01-finished/yh-VENC2-Windows-CRT入口argv修复-2026-11-05.md)。
